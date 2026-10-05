@@ -278,3 +278,97 @@ fn zlib_header_hints() {
         assert!(meta.len() < 100, "{enc}: {} decisions", meta.len());
     }
 }
+
+/// A large input that zlib compresses without long repeats across windows.
+fn large_input() -> Vec<u8> {
+    let srcs: [&[u8]; 4] = [
+        include_bytes!("../src/predict.rs"),
+        include_bytes!("../src/zlib.rs"),
+        include_bytes!("../src/detect.rs"),
+        include_bytes!("../src/deflate.rs"),
+    ];
+    let mut lcg = 3u32;
+    let mut out = vec![];
+    for k in 0..40u8 {
+        // A different rendering of the text each time.
+        out.extend(srcs[k as usize % 4].iter().map(|&b| {
+            if b.is_ascii_lowercase() {
+                b'a' + (b - b'a' + k) % 26
+            } else {
+                b
+            }
+        }));
+        out.extend((0..2_000 * (k as usize % 3)).map(|_| {
+            lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (lcg >> 24) as u8
+        }));
+    }
+    out
+}
+
+/// Long zlib streams carry checkpoints, are rebuilt the same with any number of threads, and
+/// a damaged checkpoint is an error rather than a wrong stream.
+#[test]
+fn zlib_checkpoints_reconstruct_in_parallel() {
+    use flate_recons::coder::Player;
+    use flate_recons::ctx::Channel;
+    let input = large_input();
+    assert!(input.len() > 1 << 20, "{}", input.len());
+    for (level, wbits) in [(6, 15), (9, 12), (4, 10)] {
+        let enc = flate_zoo::Encoder::new(flate_zoo::backend("zlib").unwrap())
+            .set("level", level)
+            .unwrap()
+            .set("wbits", wbits)
+            .unwrap();
+        let raw = enc.compress(&input).unwrap();
+        let (data, meta) = deconstruct(&raw).unwrap();
+        let coded = flate_recons::predict::code_stream(
+            &mut Player::new(&meta),
+            &data,
+            None,
+            None,
+            &mut None,
+            1,
+        )
+        .unwrap();
+        assert!(coded.config.zlib.is_some(), "{enc}");
+        assert_eq!(coded.exact_blocks, coded.stream.blocks.len(), "{enc}");
+        assert!(
+            coded.checkpoints >= 3,
+            "{enc}: {} checkpoints",
+            coded.checkpoints
+        );
+        for threads in [1, 3, 8] {
+            let mut p = Player::new(&meta);
+            assert_eq!(
+                flate_recons::reconstruct_with_threads(&data, &mut p, threads).unwrap(),
+                raw,
+                "{enc}"
+            );
+            assert!(p.exhausted());
+        }
+        let priors = Priors::builtin();
+        let packed = model::pack(&meta, priors);
+        assert_eq!(
+            model::unpack_with_threads(&data, &packed, priors, 4).unwrap(),
+            raw
+        );
+
+        // The checkpoints are the block channel's bypass bits after the configuration.
+        let block = &meta.channels[Channel::Block as usize];
+        let cp_bits: Vec<usize> = (0..block.len())
+            .filter(|&i| block[i].ctx.is_bypass())
+            .skip(22)
+            .collect();
+        assert!(cp_bits.len() > 50, "{}", cp_bits.len());
+        for &i in cp_bits.iter().step_by(cp_bits.len() / 12) {
+            let mut bad = meta.clone();
+            bad.channels[Channel::Block as usize][i].bit ^= true;
+            for threads in [1, 4] {
+                let r =
+                    flate_recons::reconstruct_with_threads(&data, &mut Player::new(&bad), threads);
+                assert!(r.is_err(), "{enc}: bit {i} flipped, {threads} threads");
+            }
+        }
+    }
+}

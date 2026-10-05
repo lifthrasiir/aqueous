@@ -116,7 +116,9 @@ pub fn bypass<C: Coder>(c: &mut C, ch: Channel, n: u32, v: u32) -> u32 {
 /// Order-0 Exp-Golomb code of `v`: the unary prefix is context coded (prefix position `i`
 /// uses `grp.at(min(i, size - 1))`), the suffix is bypass coded.
 pub fn exp_golomb<C: Coder>(c: &mut C, grp: Grp, v: u32) -> u32 {
-    let nb = 31 - (v + 1).leading_zeros();
+    // In u64: when reconstructing, `v` is a placeholder that may be u32::MAX.
+    let v1 = v as u64 + 1;
+    let nb = 63 - v1.leading_zeros();
     let mut k = 0;
     loop {
         let more = c.bit(grp.at((k as usize).min(grp.size as usize - 1)), k < nb);
@@ -129,7 +131,7 @@ pub fn exp_golomb<C: Coder>(c: &mut C, grp: Grp, v: u32) -> u32 {
             return 0;
         }
     }
-    let suffix = bypass(c, grp.channel, k, (v + 1).wrapping_sub(1 << k));
+    let suffix = bypass(c, grp.channel, k, v1.wrapping_sub(1 << k) as u32);
     ((1u64 << k) + suffix as u64 - 1) as u32
 }
 

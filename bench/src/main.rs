@@ -129,8 +129,14 @@ impl Tool {
     fn join(self, plain: &[u8], diff: &[u8]) -> Result<Vec<u8>, String> {
         match self {
             Tool::Recons => {
-                flate_recons::model::unpack(plain, diff, flate_recons::Priors::builtin())
-                    .map_err(|e| e.to_string())
+                // One thread: times are the calling thread's CPU time.
+                flate_recons::model::unpack_with_threads(
+                    plain,
+                    diff,
+                    flate_recons::Priors::builtin(),
+                    1,
+                )
+                .map_err(|e| e.to_string())
             }
             Tool::Preflate => unsafe {
                 let (mut r, mut rn) = (std::ptr::null_mut(), 0);
@@ -276,7 +282,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             (
                 i,
-                tools.iter().map(|&t| run(t, &s.raw, &expect, h, use_zlib)).collect(),
+                tools
+                    .iter()
+                    .map(|&t| run(t, &s.raw, &expect, h, use_zlib))
+                    .collect(),
             )
         })
         .collect();
@@ -410,7 +419,11 @@ fn phases(samples: &[Sample], zlib: bool) {
             let (parsed, t0) = timed(|| flate_recons::Parsed::new(&s.raw).unwrap());
             t[0] = t0;
             t[1] = timed(|| Matcher::new(&parsed.data)).1;
-            let ((_, log), t2) = timed(|| parsed.best(configs, priors, zlib.then_some(&Hints::default())).unwrap());
+            let ((_, log), t2) = timed(|| {
+                parsed
+                    .best(configs, priors, zlib.then_some(&Hints::default()))
+                    .unwrap()
+            });
             t[2] = t2;
             let (rec, t3) = timed(|| {
                 let mut rec = Recorder::default();
@@ -422,7 +435,8 @@ fn phases(samples: &[Sample], zlib: bool) {
             t[3] = t3;
             let (packed, t4) = timed(|| model::pack(&rec.meta, priors));
             t[4] = t4;
-            t[5] = timed(|| model::unpack(&parsed.data, &packed, priors).unwrap()).1;
+            t[5] =
+                timed(|| model::unpack_with_threads(&parsed.data, &packed, priors, 1).unwrap()).1;
             t[6] = t.iter().sum();
             t
         })

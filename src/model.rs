@@ -325,7 +325,7 @@ impl<'a> ArithDecoder<'a> {
 }
 
 /// Format version, the first byte of packed metadata.
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 
 fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
@@ -429,5 +429,15 @@ impl Coder for Unpacker<'_> {
 
 /// Reconstructs the original DEFLATE stream from the data and [`pack`]ed metadata.
 pub fn unpack(data: &[u8], packed: &[u8], priors: &Priors) -> Result<Vec<u8>> {
-    crate::reconstruct_with(data, &mut Unpacker::new(packed, priors)?)
+    unpack_with_threads(data, packed, priors, crate::default_threads())
+}
+
+/// Like [`unpack`], on up to `threads` threads (see [`crate::reconstruct_with_threads`]).
+pub fn unpack_with_threads(
+    data: &[u8],
+    packed: &[u8],
+    priors: &Priors,
+    threads: usize,
+) -> Result<Vec<u8>> {
+    crate::reconstruct_with_threads(data, &mut Unpacker::new(packed, priors)?, threads)
 }

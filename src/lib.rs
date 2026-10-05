@@ -120,7 +120,7 @@ impl Parsed {
     /// [`Parsed::code`], returning whether zlib emulation reproduced every block.
     fn code_exact<C: Coder>(&self, c: &mut C, cfg: Config) -> Result<bool> {
         let mut m = self.matcher.lock().unwrap();
-        let coded = predict::code_stream(c, &self.data, Some(&self.stream), Some(cfg), &mut m)?;
+        let coded = predict::code_stream(c, &self.data, Some(&self.stream), Some(cfg), &mut m, 1)?;
         if coded.stream != self.stream {
             return Err(Error::Inconsistent);
         }
@@ -382,6 +382,22 @@ pub fn reconstruct(data: &[u8], meta: &Metadata) -> Result<Vec<u8>> {
 
 /// Like [`reconstruct`], pulling decisions from `c` (e.g. an arithmetic decoder).
 pub fn reconstruct_with<C: Coder>(data: &[u8], c: &mut C) -> Result<Vec<u8>> {
-    let stream = predict::code_stream(c, data, None, None, &mut None)?.stream;
-    deflate::write(&stream, data).map_err(|_| Error::Corrupt)
+    reconstruct_with_threads(data, c, default_threads())
+}
+
+/// Like [`reconstruct_with`], on up to `threads` threads. Long streams that zlib emulation
+/// reproduces carry checkpoints, from which their blocks are regenerated in parallel; the
+/// result does not depend on `threads`.
+pub fn reconstruct_with_threads<C: Coder>(
+    data: &[u8],
+    c: &mut C,
+    threads: usize,
+) -> Result<Vec<u8>> {
+    let stream = predict::code_stream(c, data, None, None, &mut None, threads)?.stream;
+    deflate::write_threads(&stream, data, threads).map_err(|_| Error::Corrupt)
+}
+
+/// The number of threads reconstruction uses by default: the available parallelism.
+pub fn default_threads() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }

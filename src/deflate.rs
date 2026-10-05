@@ -224,9 +224,87 @@ fn parse_tokens(
 
 /// Serializes `stream`; `data` supplies the contents of stored blocks.
 pub fn write(stream: &Stream, data: &[u8]) -> Result<Vec<u8>> {
-    let mut w = BitWriter::new();
+    write_threads(stream, data, 1)
+}
+
+/// Long streams are written in parallel chunks of at least this many bytes of data.
+const MIN_CHUNK: usize = 1 << 20;
+
+/// Like [`write`], on up to `threads` threads: the blocks are split in chunks that are
+/// written separately and joined bit by bit. Chunks with stored blocks, whose padding
+/// depends on where they start, are written in place instead.
+pub fn write_threads(stream: &Stream, data: &[u8], threads: usize) -> Result<Vec<u8>> {
+    let blocks = &stream.blocks;
+    let mut starts = Vec::with_capacity(blocks.len() + 1);
     let mut pos = 0usize;
-    for b in &stream.blocks {
+    for b in blocks {
+        starts.push(pos);
+        pos += match &b.body {
+            Body::Stored { len, .. } => *len as usize,
+            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {
+                tokens.iter().map(|t| t.span()).sum()
+            }
+        };
+    }
+    starts.push(pos);
+    // Chunks of about equal data, at block boundaries.
+    let nchunks = threads.min(pos / MIN_CHUNK).max(1);
+    let mut cuts = vec![0];
+    for i in 1..nchunks {
+        let b = starts.partition_point(|&p| p < pos * i / nchunks);
+        if b > *cuts.last().unwrap() && b < blocks.len() {
+            cuts.push(b);
+        }
+    }
+    cuts.push(blocks.len());
+    let chunks: Vec<(usize, usize)> = cuts.windows(2).map(|c| (c[0], c[1])).collect();
+    let stored = |&(a, b): &(usize, usize)| {
+        blocks[a..b]
+            .iter()
+            .any(|b| matches!(b.body, Body::Stored { .. }))
+    };
+    let parallel = chunks.len() > 1;
+    let parts: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = chunks
+            .iter()
+            .map(|c| {
+                (parallel && !stored(c)).then(|| {
+                    s.spawn(|| -> Result<_> {
+                        let mut w = BitWriter::new();
+                        let mut pos = starts[c.0];
+                        write_blocks(&mut w, &blocks[c.0..c.1], data, &mut pos)?;
+                        Ok(w.into_parts())
+                    })
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.map(|h| h.join().unwrap()))
+            .collect()
+    });
+    let mut w = BitWriter::new();
+    for (c, part) in chunks.iter().zip(parts) {
+        match part {
+            Some(p) => {
+                let (out, acc, nacc) = p?;
+                w.append(&out, acc, nacc);
+            }
+            None => {
+                let mut pos = starts[c.0];
+                write_blocks(&mut w, &blocks[c.0..c.1], data, &mut pos)?;
+            }
+        }
+    }
+    w.bits(w.pad_len(), stream.tail_pad as u32);
+    let mut out = w.finish();
+    out.extend_from_slice(&stream.trailing);
+    Ok(out)
+}
+
+/// Writes `blocks`, the first of which starts at `pos` in `data`.
+fn write_blocks(w: &mut BitWriter, blocks: &[Block], data: &[u8], pos: &mut usize) -> Result<()> {
+    for b in blocks {
         w.bits(1, b.last as u32);
         w.bits(2, b.body.btype() as u32);
         match &b.body {
@@ -234,16 +312,16 @@ pub fn write(stream: &Stream, data: &[u8]) -> Result<Vec<u8>> {
                 w.bits(w.pad_len(), *pad as u32);
                 w.bits(16, *len as u32);
                 w.bits(16, !*len as u32);
-                let end = pos + *len as usize;
+                let end = *pos + *len as usize;
                 w.bytes(
-                    data.get(pos..end)
+                    data.get(*pos..end)
                         .ok_or(Error::Invalid("stored block past end"))?,
                 );
-                pos = end;
+                *pos = end;
             }
             Body::Fixed { tokens } => {
                 let ll = huffman::fixed_lit_lens();
-                write_tokens(&mut w, tokens, &ll, &huffman::FIXED_DIST_LENS, &mut pos)?;
+                write_tokens(w, tokens, &ll, &huffman::FIXED_DIST_LENS, pos)?;
             }
             Body::Dynamic { header: h, tokens } => {
                 w.bits(5, h.hlit as u32 - 257);
@@ -261,14 +339,11 @@ pub fn write(stream: &Stream, data: &[u8]) -> Result<Vec<u8>> {
                     w.bits(l as u32, clc[op.sym as usize] as u32);
                     w.bits(RleOp::extra_bits(op.sym), op.extra as u32);
                 }
-                write_tokens(&mut w, tokens, h.lit_lens(), h.dist_lens(), &mut pos)?;
+                write_tokens(w, tokens, h.lit_lens(), h.dist_lens(), pos)?;
             }
         }
     }
-    w.bits(w.pad_len(), stream.tail_pad as u32);
-    let mut out = w.finish();
-    out.extend_from_slice(&stream.trailing);
-    Ok(out)
+    Ok(())
 }
 
 fn write_tokens(
@@ -302,4 +377,70 @@ fn write_tokens(
         *pos += t.span();
     }
     put(w, ll, &lc, 256)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Writing in parallel chunks gives the same bits, stored blocks (whose padding depends on
+    /// the bit position) included.
+    #[test]
+    fn parallel_write_is_identical() {
+        let mut lcg = 5u32;
+        let mut rnd = |n: u32| {
+            lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (lcg >> 8) % n
+        };
+        let mut data = vec![];
+        let mut blocks = vec![];
+        while data.len() < 3 << 20 {
+            // Stored blocks only in the first chunk, so that the others are written apart.
+            let body = match rnd(4) {
+                0 if data.len() < 1 << 20 => {
+                    let len = rnd(3000) as u16;
+                    data.extend((0..len).map(|_| rnd(256) as u8));
+                    Body::Stored { pad: 0, len }
+                }
+                _ => {
+                    let n = 1 + rnd(40_000) as usize;
+                    let tokens: Vec<Token> = (0..n)
+                        .map(|_| {
+                            if data.len() > 300 && rnd(4) == 0 {
+                                let (len, dist) = (3 + rnd(256) as u16, 1 + rnd(300) as u16);
+                                for _ in 0..len {
+                                    data.push(data[data.len() - dist as usize]);
+                                }
+                                Token::Match {
+                                    len,
+                                    dist,
+                                    alt258: false,
+                                }
+                            } else {
+                                let b = rnd(256) as u8;
+                                data.push(b);
+                                Token::Lit(b)
+                            }
+                        })
+                        .collect();
+                    Body::Fixed { tokens }
+                }
+            };
+            blocks.push(Block { last: false, body });
+        }
+        blocks.last_mut().unwrap().last = true;
+        let stream = Stream {
+            blocks,
+            tail_pad: 0,
+            trailing: vec![1, 2, 3],
+        };
+        let one = write(&stream, &data).unwrap();
+        assert_eq!(parse(&one).unwrap(), (stream.clone(), data.clone()));
+        for threads in 2..=9 {
+            assert!(
+                write_threads(&stream, &data, threads).unwrap() == one,
+                "{threads} threads"
+            );
+        }
+    }
 }

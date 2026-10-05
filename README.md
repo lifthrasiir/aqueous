@@ -67,6 +67,15 @@ raw ─ deflate::parse ─► Stream (every encoder choice explicit) ─┐
   output from start to end costs a few bytes in total. After the first divergence each
   token costs one "as zlib would" decision, with the generic predictor coding the misses. Block
   sizes, stored lengths and fixed versus dynamic are also predicted from zlib.
+  Streams of 1 MiB or more also carry **checkpoints** in their exact blocks (at most 32,
+  at least 256 KiB apart; about 7 B each): the lazy levels (4-9) insert every position, so
+  apart from a few counters (`zlib::Checkpoint`) the emulator's state follows from the data,
+  and `Emulator::resume` rebuilds it from the last window. Reconstruction regenerates the
+  segments between checkpoints in parallel (`reconstruct_with_threads`, the available
+  parallelism by default; the output does not depend on it), checks that each ends in the
+  state the next one starts from, and writes the bitstream in parallel chunks. On 32 MB
+  of mixed data with 10 threads (4 performance cores), zlib streams cost about 230 B and
+  reconstruct 5.3× (level 4), 5.6× (level 6) and 6.6× (level 9) faster than on one thread.
 - **`detect`**: a cheap check of whether a stream can come from zlib, after preflate's
   estimator. It checks that every dynamic header is exactly zlib's, that full blocks hold
   `2^(mem+6) - 1` tokens (which gives memLevel), the maximum distance (which bounds windowBits),
@@ -148,7 +157,8 @@ chromium 22.8 → 9.1 KB, zlib-ng 20.4 → 12.1 KB, at 2-4× the time on those s
 
 Reconstruction time goes mostly to match searching, which is bound by the latency of
 following chain links. The arithmetic decoder takes about 10% of it. zlib-mode streams
-reconstruct at zlib's own speed for their level (about 20 MB/s on average here), and generic
+reconstruct at zlib's own speed for their level on one thread (about 20 MB/s on average here;
+long ones in parallel from checkpoints, see `zlib`), and generic
 ones about 1.3× slower than preflate-rs. The extra time mostly comes from the next-position
 lookahead, which preflate-rs does not have and which is worth 12.8% of the metadata.
 
@@ -177,6 +187,8 @@ lookahead, which preflate-rs does not have and which is worth 12.8% of the metad
   stb. The zlib emulation already shows the gain.
 - Cheaper zlib detection (preflate-style chain-depth elimination before emulating, or
   emulating the candidates in lockstep).
+- Parallel deconstruction of long zlib streams: checking the exact blocks still runs at
+  zlib's speed, although the actual tokens give every segment's starting state.
 - More Huffman builders (libdeflate, zopfli, 7-zip, miniz) as candidates before the per-symbol
   fallback.
 - Richer contexts or mixing for tokens; Huffman code lengths as features for optimal parsers

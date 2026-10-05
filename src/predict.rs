@@ -13,7 +13,7 @@
 //! "the closest longest match" costs almost nothing whatever hash the encoder used.
 
 use crate::coder::{Coder, bypass, exp_golomb, tree_bits};
-use crate::ctx::{self, Channel, LB, len_bucket};
+use crate::ctx::{self, Channel, Ctx, LB, len_bucket};
 use crate::deflate::{Block, Body, DynHeader, Stream, Token};
 use crate::huffman::{self, CL_ORDER, RleOp};
 use crate::matchfind::{MAX_MATCH, Matcher};
@@ -100,6 +100,8 @@ pub struct Coded {
     pub config: Config,
     /// Leading blocks reproduced exactly by zlib emulation (zlib mode only).
     pub exact_blocks: usize,
+    /// Checkpoints within those blocks, from which they are regenerated in parallel.
+    pub checkpoints: usize,
 }
 
 /// Codes `actual` (when deconstructing) or rebuilds the stream from decisions (when
@@ -107,13 +109,15 @@ pub struct Coded {
 /// and the configuration used.
 ///
 /// `matcher` may carry match searches over from earlier passes over the same `data`; it is
-/// only built when the generic predictor is needed.
+/// only built when the generic predictor is needed. Reconstruction regenerates the blocks
+/// zlib reproduces exactly on up to `threads` threads.
 pub fn code_stream<C: Coder>(
     c: &mut C,
     data: &[u8],
     actual: Option<&Stream>,
     cfg: Option<Config>,
     matcher: &mut Option<Matcher>,
+    threads: usize,
 ) -> Result<Coded> {
     let cfg0 = cfg.unwrap_or(Config {
         depth: 0,
@@ -162,24 +166,38 @@ pub fn code_stream<C: Coder>(
     };
     let mut blocks = Vec::new();
     let mut exact_blocks = 0;
-    if let Some(e) = &mut p.emu {
-        // The leading blocks that zlib reproduces exactly cost nothing but their number.
+    let mut checkpoints = 0;
+    if let Some(mut e) = p.emu.take() {
+        // The leading blocks that zlib reproduces exactly cost nothing but their number, plus
+        // checkpoints in long streams so that they can be regenerated in parallel.
         let mut generated = vec![];
+        let mut cps = vec![];
         let mut pos = 0;
         if let Some(s) = actual {
+            let spacing = checkpoint_spacing(data.len());
+            let mut next = spacing.unwrap_or(usize::MAX);
             for b in &s.blocks {
                 let snapshot = e.clone();
-                match zlib_block(e, pos) {
+                match zlib_block(&mut e, pos) {
                     Some(g) if g == *b => {
                         pos += block_span(&g);
                         generated.push(g);
+                        if let Some(spacing) = spacing
+                            && pos >= next
+                            && let Some(cp) = e.checkpoint()
+                        {
+                            cps.push((generated.len(), cp));
+                            next = pos + spacing;
+                        }
                     }
                     _ => {
-                        *e = snapshot;
+                        e = snapshot;
                         break;
                     }
                 }
             }
+            // One right before the first block zlib gets wrong would start an empty segment.
+            cps.retain(|&(i, _)| i < generated.len());
         }
         let k = generated.len() as u32;
         let all = actual.is_some_and(|s| generated.len() == s.blocks.len());
@@ -188,30 +206,21 @@ pub fn code_stream<C: Coder>(
         } else {
             Some(exp_golomb(c, ctx::Z_EXACT_EG, k) as usize)
         };
+        let cps = code_checkpoints(c, data.len(), e.params().wbits, &cps)?;
         if actual.is_none() {
-            loop {
-                if k.is_some_and(|k| generated.len() >= k) || c.failed() {
-                    break;
-                }
-                let g = zlib_block(e, pos).ok_or(Error::Corrupt)?;
-                pos += block_span(&g);
-                let last = g.last;
-                generated.push(g);
-                if last {
-                    break;
-                }
-            }
-            if k.is_some_and(|k| generated.len() != k)
-                || (k.is_none() && !generated.last().is_some_and(|b| b.last))
-            {
+            if c.failed() {
                 return Err(Error::Corrupt);
             }
+            (generated, e) = regenerate_exact(data, e, k, &cps, threads)?;
+            pos = generated.iter().map(block_span).sum();
         }
+        p.emu = Some(e);
         p.pos = pos;
         if let Some(b) = generated.last() {
             st.prev_btype = b.body.btype() as usize;
         }
         exact_blocks = generated.len();
+        checkpoints = cps.len();
         blocks = generated;
     }
     while !blocks.last().is_some_and(|b: &Block| b.last) {
@@ -265,6 +274,7 @@ pub fn code_stream<C: Coder>(
         },
         config: cfg,
         exact_blocks,
+        checkpoints,
     })
 }
 
@@ -945,6 +955,206 @@ pub fn zlib_block(e: &mut zlib::Emulator, start: usize) -> Option<Block> {
         Body::Dynamic { header, tokens }
     };
     Some(Block { last, body })
+}
+
+/// Checkpoints of the exact blocks are at least this far apart (bytes of data)...
+const CHECKPOINT_SPACING: usize = 256 << 10;
+/// ...and about this many at most.
+const MAX_CHECKPOINTS: usize = 32;
+
+/// How far apart checkpoints are for `n` bytes of data, or `None` if there are none.
+fn checkpoint_spacing(n: usize) -> Option<usize> {
+    (n >= 4 * CHECKPOINT_SPACING).then(|| (n / MAX_CHECKPOINTS).max(CHECKPOINT_SPACING))
+}
+
+/// Elias gamma code of `v` in bypass bits of the block channel.
+fn gamma<C: Coder>(c: &mut C, v: u64) -> Result<u64> {
+    let v1 = v + 1;
+    let nb = 63 - v1.leading_zeros();
+    let mut k = 0;
+    while c.bit(Ctx::bypass(Channel::Block), k < nb) {
+        k += 1;
+        if k > 48 {
+            return Err(Error::Corrupt);
+        }
+    }
+    let mut x = 1u64;
+    for i in (0..k).rev() {
+        x = x << 1 | c.bit(Ctx::bypass(Channel::Block), v1 >> i & 1 != 0) as u64;
+    }
+    Ok(x - 1)
+}
+
+/// Codes the checkpoints of the exact blocks (for streams long enough to have them): the
+/// index of the block each is taken before, and the emulator's state there. Every field is
+/// coded relative to what it normally is.
+fn code_checkpoints<C: Coder>(
+    c: &mut C,
+    n: usize,
+    wbits: u8,
+    actual: &[(usize, zlib::Checkpoint)],
+) -> Result<Vec<(usize, zlib::Checkpoint)>> {
+    if checkpoint_spacing(n).is_none() {
+        return Ok(vec![]);
+    }
+    let count = gamma(c, actual.len() as u64)? as usize;
+    if count > n / CHECKPOINT_SPACING {
+        return Err(Error::Corrupt);
+    }
+    let w = 1u64 << wbits;
+    let mut out = Vec::with_capacity(count);
+    let (mut idx, mut strstart) = (0u64, 0u64);
+    for i in 0..count {
+        // The coded values, when deconstructing.
+        let v = actual.get(i).map_or([0; 7], |&(j, cp)| {
+            let (s, b) = (cp.strstart as u64, cp.base as u64);
+            [
+                (j as u64).wrapping_sub(idx + 1),
+                s.wrapping_sub(strstart),
+                (s / w).wrapping_sub(b / w),
+                (b + 2 * w).wrapping_sub(cp.read as u64),
+                (2 * w).wrapping_sub(cp.high_water as u64),
+                (cp.match_length as u64).wrapping_sub(2),
+                s.wrapping_sub(cp.match_start as u64),
+            ]
+        });
+        idx += 1 + gamma(c, v[0])?;
+        strstart += gamma(c, v[1])?;
+        let base = (strstart / w)
+            .checked_sub(gamma(c, v[2])?)
+            .ok_or(Error::Corrupt)?
+            * w;
+        let read = (base + 2 * w)
+            .checked_sub(gamma(c, v[3])?)
+            .ok_or(Error::Corrupt)?;
+        let high_water = (2 * w).checked_sub(gamma(c, v[4])?).ok_or(Error::Corrupt)?;
+        let match_available = c.bit(
+            Ctx::bypass(Channel::Block),
+            actual.get(i).is_some_and(|(_, cp)| cp.match_available),
+        );
+        let match_length = 2 + gamma(c, v[5])?;
+        let match_start = if match_length > 2 {
+            strstart
+                .checked_sub(gamma(c, v[6])?)
+                .ok_or(Error::Corrupt)?
+        } else {
+            0
+        };
+        let usz = |x: u64| usize::try_from(x).map_err(|_| Error::Corrupt);
+        let cp = zlib::Checkpoint {
+            strstart: usz(strstart)?,
+            base: usz(base)?,
+            read: usz(read)?,
+            high_water: usz(high_water)?,
+            match_available,
+            match_length: usz(match_length)?,
+            match_start: usz(match_start)?,
+        };
+        if actual
+            .get(i)
+            .is_some_and(|&(j, acp)| j as u64 != idx || acp != cp)
+        {
+            return Err(Error::Inconsistent);
+        }
+        out.push((usz(idx)?, cp));
+    }
+    Ok(out)
+}
+
+/// The blocks zlib reproduces exactly at the start of the stream (`k` of them, or up to the
+/// last one), generated by `e`, and the emulator after them. With checkpoints, the segments
+/// between them are generated on up to `threads` threads, each checked to end in the state
+/// the next one starts from.
+fn regenerate_exact<'a>(
+    data: &'a [u8],
+    e: zlib::Emulator<'a>,
+    k: Option<usize>,
+    cps: &[(usize, zlib::Checkpoint)],
+    threads: usize,
+) -> Result<(Vec<Block>, zlib::Emulator<'a>)> {
+    if cps.is_empty() || threads <= 1 {
+        // One pass, checking the checkpoints on the way.
+        return exact_segment(e, 0, 0, k, cps);
+    }
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let params = e.params();
+    let n = cps.len() + 1;
+    let first = Mutex::new(Some(e));
+    let results: Vec<_> = (0..n).map(|_| Mutex::new(None)).collect();
+    let next = AtomicUsize::new(0);
+    std::thread::scope(|s| {
+        for _ in 0..threads.min(n) {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let r = (|| {
+                        let (e, idx, pos) = match i.checked_sub(1).map(|j| cps[j]) {
+                            None => (first.lock().unwrap().take().unwrap(), 0, 0),
+                            Some((j, cp)) => (
+                                zlib::Emulator::resume(data, params, &cp).ok_or(Error::Corrupt)?,
+                                j,
+                                cp.strstart - cp.match_available as usize,
+                            ),
+                        };
+                        let end = cps.get(i).map(|&(j, _)| j).or(k);
+                        exact_segment(e, idx, pos, end, &cps[i.min(n - 1)..(i + 1).min(n - 1)])
+                    })();
+                    *results[i].lock().unwrap() = Some(r);
+                }
+            });
+        }
+    });
+    let mut blocks = vec![];
+    let mut last = None;
+    for r in results {
+        let (b, e) = r.into_inner().unwrap().expect("every segment runs")?;
+        blocks.extend(b);
+        last = Some(e);
+    }
+    Ok((blocks, last.expect("at least one segment")))
+}
+
+/// Generates exact blocks with `e` from block `idx` at data position `pos`, up to block `end`
+/// (or the last one), checking that `e` is in the state of each of `cps` when it gets there.
+fn exact_segment<'a>(
+    mut e: zlib::Emulator<'a>,
+    mut idx: usize,
+    mut pos: usize,
+    end: Option<usize>,
+    cps: &[(usize, zlib::Checkpoint)],
+) -> Result<(Vec<Block>, zlib::Emulator<'a>)> {
+    let mut cps = cps.iter().peekable();
+    let mut blocks = vec![];
+    loop {
+        if let Some(&&(j, cp)) = cps.peek()
+            && j == idx
+        {
+            if e.checkpoint() != Some(cp) {
+                return Err(Error::Corrupt);
+            }
+            cps.next();
+        }
+        if end.is_some_and(|end| idx >= end) {
+            break;
+        }
+        let g = zlib_block(&mut e, pos).ok_or(Error::Corrupt)?;
+        pos += block_span(&g);
+        idx += 1;
+        let last = g.last;
+        blocks.push(g);
+        if last {
+            break;
+        }
+    }
+    // A checkpoint past the end, or the stream ending before the segment does.
+    if cps.next().is_some() || end.is_some_and(|end| idx != end) {
+        return Err(Error::Corrupt);
+    }
+    Ok((blocks, e))
 }
 
 /// Bytes of data a block covers.

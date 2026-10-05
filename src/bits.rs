@@ -90,13 +90,31 @@ impl BitWriter {
     }
 
     pub fn pad_len(&self) -> u32 {
-        (8 - self.nacc) & 7
+        (8 - self.nacc % 8) % 8
     }
 
     pub fn bytes(&mut self, b: &[u8]) {
         self.flush_bytes();
         debug_assert!(self.nacc == 0);
         self.out.extend_from_slice(b);
+    }
+
+    /// The bytes written so far and the pending bits (`nacc` of them in `acc`), unpadded.
+    pub fn into_parts(self) -> (Vec<u8>, u64, u32) {
+        (self.out, self.acc, self.nacc)
+    }
+
+    /// Appends what another writer produced (see [`BitWriter::into_parts`]) at the current
+    /// bit position.
+    pub fn append(&mut self, out: &[u8], acc: u64, nacc: u32) {
+        let mut words = out.chunks_exact(4);
+        for c in &mut words {
+            self.bits(32, u32::from_le_bytes(c.try_into().unwrap()));
+        }
+        for &b in words.remainder() {
+            self.bits(8, b as u32);
+        }
+        self.bits(nacc, acc as u32);
     }
 
     pub fn finish(mut self) -> Vec<u8> {

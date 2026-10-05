@@ -131,6 +131,23 @@ enum Point {
     Lit,
 }
 
+/// What a deflate_slow [`Emulator`] at a token boundary knows beyond its input, enough to
+/// resume it there with [`Emulator::resume`] (positions are absolute).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub strstart: usize,
+    /// Start of the window; a multiple of its size.
+    pub base: usize,
+    /// End of the input read into the window.
+    pub read: usize,
+    pub high_water: usize,
+    pub match_available: bool,
+    /// The search result at `strstart - 1`'s successor, compared at the next position.
+    pub match_length: usize,
+    /// Where that match is; 0 when `match_length` is not a match.
+    pub match_start: usize,
+}
+
 #[derive(Clone)]
 pub struct Emulator<'a> {
     params: Params,
@@ -212,6 +229,101 @@ impl<'a> Emulator<'a> {
             pending: None,
             done: false,
         }
+    }
+
+    /// The state at this token boundary, or `None` where resuming is not supported: only
+    /// deflate_slow, while input remains to be read (so that every position before strstart
+    /// has been inserted).
+    pub fn checkpoint(&self) -> Option<Checkpoint> {
+        if self.algo != Algo::Slow
+            || self.pending.is_some()
+            || self.done
+            || self.read == self.input.len()
+            || self.match_length < MIN_MATCH - 1
+        {
+            return None;
+        }
+        let strstart = self.base + self.strstart;
+        let match_start = if self.match_length >= MIN_MATCH {
+            let m = self.base.wrapping_add(self.match_start);
+            if m < self.base || m >= strstart {
+                return None;
+            }
+            m
+        } else {
+            // Not a match: overwritten by the next search before it is used.
+            0
+        };
+        Some(Checkpoint {
+            strstart,
+            base: self.base,
+            read: self.read,
+            high_water: self.high_water,
+            match_available: self.match_available,
+            match_length: self.match_length,
+            match_start,
+        })
+    }
+
+    /// An emulator in the state of [`Emulator::checkpoint`], rebuilt from the input alone:
+    /// the window holds the input (and what zlib leaves past it), the hash chains get every
+    /// position of the last window inserted again. `None` if `cp` cannot come from `p` and
+    /// `input`.
+    pub fn resume(input: &'a [u8], p: Params, cp: &Checkpoint) -> Option<Self> {
+        if !p.valid() || p.level < 4 || matches!(p.strategy, Strategy::HuffmanOnly | Strategy::Rle)
+        {
+            return None;
+        }
+        let mut e = Emulator::new(input, p);
+        let w = e.w_size;
+        let ml = cp.match_length;
+        let valid = cp.base.is_multiple_of(w)
+            && cp.base <= cp.strstart
+            && cp.strstart <= cp.read
+            && cp.read < input.len()
+            && cp.read - cp.base <= 2 * w
+            && cp.high_water <= 2 * w
+            && (!cp.match_available || cp.strstart > cp.base)
+            && (MIN_MATCH - 1..=MAX_MATCH).contains(&ml)
+            && if ml >= MIN_MATCH {
+                cp.base <= cp.match_start
+                    && cp.match_start < cp.strstart
+                    && cp.strstart - cp.match_start <= w
+            } else {
+                cp.match_start == 0
+            };
+        if !valid {
+            return None;
+        }
+        e.base = cp.base;
+        e.read = cp.read;
+        e.high_water = cp.high_water;
+        e.strstart = cp.strstart - cp.base;
+        e.lookahead = cp.read - cp.strstart;
+        e.match_available = cp.match_available;
+        e.match_length = ml;
+        e.match_start = if ml >= MIN_MATCH {
+            cp.match_start - cp.base
+        } else {
+            0
+        };
+        for (i, b) in e.window.iter_mut().enumerate() {
+            let a = cp.base + i;
+            *b = if a < cp.read {
+                input[a]
+            } else if i >= cp.high_water {
+                0
+            } else {
+                // Past the input read so far: what the window held before its last slide.
+                a.checked_sub(w).map_or(0, |x| input[x])
+            };
+        }
+        for a in cp.base.max(cp.strstart.saturating_sub(w))..cp.strstart {
+            if a + MIN_MATCH <= cp.read {
+                e.insert(a - cp.base);
+            }
+        }
+        Some(e)
     }
 
     pub fn params(&self) -> Params {
@@ -408,7 +520,9 @@ impl<'a> Emulator<'a> {
             }
             if self.prev_length >= MIN_MATCH && self.match_length <= self.prev_length {
                 let q = self.strstart - 1;
-                let (p, t) = self.mat(q, self.prev_length, q - self.prev_match);
+                // match_start wraps like zlib's unsigned one when a slide leaves it just below the
+                // window, so the distance does too.
+                let (p, t) = self.mat(q, self.prev_length, q.wrapping_sub(self.prev_match));
                 return Some((Point::SlowMatch, p, t));
             } else if self.match_available {
                 let (p, t) = self.lit(self.strstart - 1);
@@ -871,7 +985,7 @@ impl<'a> MultiSlow<'a> {
                         if l.prev_length >= MIN_MATCH && l.match_length <= l.prev_length {
                             Token::Match {
                                 len: l.prev_length as u16,
-                                dist: (q - l.prev_match) as u16,
+                                dist: q.wrapping_sub(l.prev_match) as u16,
                                 alt258: false,
                             }
                         } else {
@@ -1016,5 +1130,117 @@ mod tests {
                 assert_eq!(out, data, "{p}");
             }
         }
+    }
+
+    fn test_data() -> Vec<u8> {
+        let mut lcg = 1u32;
+        let mut data = [
+            &include_bytes!("predict.rs")[..],
+            include_bytes!("zlib.rs"),
+            include_bytes!("detect.rs"),
+        ]
+        .concat();
+        data.extend((0..20_000).map(|_| {
+            lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (lcg >> 24) as u8
+        }));
+        data.extend(include_bytes!("huffman.rs"));
+        data
+    }
+
+    /// An emulator resumed from a checkpoint continues exactly as the original, also when
+    /// both are made to follow tokens other than their own.
+    #[test]
+    fn resume_continues_exactly() {
+        let data = test_data();
+        // Every `perturb`-th match is replaced by a literal (0: never).
+        let drive = |perturb: usize, n: usize, pos: usize, t: Token| match t {
+            Token::Match { .. } if perturb > 0 && n.is_multiple_of(perturb) => {
+                Token::Lit(data[pos])
+            }
+            t => t,
+        };
+        for level in 4..=9 {
+            for strategy in [Strategy::Default, Strategy::Filtered] {
+                for wbits in [9, 12, 15] {
+                    for perturb in [0, 7] {
+                        let p = Params {
+                            level,
+                            strategy,
+                            wbits,
+                            mem: 8,
+                        };
+                        let mut e = Emulator::new(&data, p);
+                        let (mut n, mut checked) = (0, 0);
+                        loop {
+                            if n % 997 == 0
+                                && let Some(cp) = e.checkpoint()
+                            {
+                                let mut r = Emulator::resume(&data, p, &cp)
+                                    .unwrap_or_else(|| panic!("{p}: {cp:?}"));
+                                let mut a = e.clone();
+                                for i in n..n + 2000 {
+                                    let pa = a.predict();
+                                    assert_eq!(pa, r.predict(), "{p} perturb {perturb} {cp:?}");
+                                    let Some((pos, t)) = pa else { break };
+                                    let t = drive(perturb, i, pos, t);
+                                    assert!(a.commit(t) && r.commit(t));
+                                }
+                                assert_eq!(a.checkpoint(), r.checkpoint());
+                                checked += 1;
+                            }
+                            let Some((pos, t)) = e.predict() else { break };
+                            assert!(e.commit(drive(perturb, n, pos, t)));
+                            n += 1;
+                        }
+                        assert!(checked > 10, "{p}: {checked} checkpoints");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Checkpoints from corrupt metadata are refused or give an emulator that runs to the end
+    /// without panicking.
+    #[test]
+    fn resume_never_panics() {
+        let data = test_data();
+        let mut lcg = 99u64;
+        let mut rnd = |n: usize| {
+            lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            (lcg >> 33) as usize % n
+        };
+        let p = Params {
+            wbits: 9,
+            ..Params::default()
+        };
+        let w = 1 << p.wbits;
+        let mut resumed = 0;
+        for _ in 0..20_000 {
+            let base = rnd(data.len() / w + 2) * w + [0, 0, 0, 1][rnd(4)];
+            let near =
+                |x: usize, r: &mut dyn FnMut(usize) -> usize| (x + r(4 * w)).saturating_sub(2 * w);
+            let strstart = near(base, &mut rnd);
+            let cp = Checkpoint {
+                strstart,
+                base,
+                read: near(base + 2 * w, &mut rnd),
+                high_water: near(2 * w, &mut rnd),
+                match_available: rnd(2) == 1,
+                match_length: rnd(300),
+                match_start: near(strstart, &mut rnd),
+            };
+            let Some(mut e) = Emulator::resume(&data, p, &cp) else {
+                continue;
+            };
+            resumed += 1;
+            for _ in 0..2000 {
+                let Some((_, t)) = e.predict() else { break };
+                if !e.commit(t) {
+                    break;
+                }
+            }
+        }
+        assert!(resumed > 100, "{resumed}");
     }
 }
