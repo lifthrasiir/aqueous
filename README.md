@@ -75,11 +75,52 @@ Current held-out result (924 streams, 45 MB of DEFLATE): metadata ≈ **0.92%** 
 DEFLATE size. zlib/zlib-ng ≈ 0.5%; stb, uzlib, ect, zopfli are the worst (2–5.5%).
 Most of it is in the token (41%), length (27%) and distance (20%) channels.
 
+## Benchmark
+
+`bench/` compares the size of the reconstruction data with
+[preflate](https://github.com/deus-libri/preflate) (C++, v0.3.5) and
+[preflate-rs](https://github.com/microsoft/preflate-rs) (0.7.6), with every output
+verified by a round trip:
+
+```
+bench/fetch.sh                                   # pinned checkouts into third_party/
+cd bench && cargo run --release                  # held-out split; per-stream rows in cache/bench.tsv
+```
+
+Held-out split, 924 streams. Sizes are over the 807 streams all three round-tripped:
+
+| | total | median | p90 | max | failures | split / join CPU |
+|---|---|---|---|---|---|---|
+| flate-recons | 358,867 B (0.88%) | 185 B | 1,218 B | 3,026 B | 0 | 9.1 s / 3.5 s |
+| preflate | 965,499 B (2.38%) | 521 B | 3,184 B | 23,048 B | 15 | 5.8 s / 4.6 s |
+| preflate-rs | 316,814 B (0.78%) | 180 B | 1,021 B | 2,704 B | 117 | 2.8 s / 1.2 s |
+
+- Where an encoder matches a tool's built-in model exactly, that tool wins by a wide margin:
+  preflate on zlib (often 3 B, against our 55–2,358 B for `zlib` at levels 1–9 on one
+  file), and preflate-rs on zlib-ng, cloudflare, miniz-oxide and stb. Our generic
+  predictor is weakest on zlib's greedy levels 1–3 and on stb/uzlib/miniz-oxide.
+- Elsewhere flate-recons is smallest (7-zip, zopfli, ect, libflate, fflate, uzip, libdeflate...).
+- preflate is cheap on its best cases but explodes on others. preflate-rs refuses 13% of the
+  streams (`NoCompressionCandidates`, `InvalidDeflate`).
+- Picking the best of the three per stream would give 208,066 B, so exact encoder models
+  and our generic fallback complement each other.
+- `model::pack` spends about 30 B of fixed overhead per stream (header, channel sizes,
+  4 flush bytes × 5 channels). It dominates on tiny or stored streams (p10: 40 B against
+  preflate's 14 B).
+- CPU times are over all 924 streams (85 MB of plain text): flate-recons splits at about
+  9 MB/s and joins at about 24 MB/s. `cargo run --release -- --phases` breaks this down.
+  Most of the split time is the depth-4096 catalog configuration walking long candidate
+  chains. That configuration is the best one for 30% of the streams, so it can only go faster by
+  changing the model (e.g. a zlib-like `good_length` cutoff) or by choosing the configuration
+  from part of the stream.
+
 ## Next steps
 
 - Encoder-specific predictors behind the same decisions: exact zlib/libdeflate match finder
   emulation (hash, chain limits, lazy rules, block splitting), which should push the main
-  families to near zero.
+  families to near zero (preflate and preflate-rs show what is possible there).
+- Less fixed overhead in the packed format (one arithmetic coded stream, or byte-aligned
+  channel ends), and cheaper config selection (on a prefix, or a smaller head table).
 - More Huffman builders (libdeflate, zopfli, 7-zip, miniz) as candidates before the per-symbol
   fallback, and predicting the block type from cost.
 - Richer contexts or mixing for tokens; Huffman code lengths as features for optimal parsers

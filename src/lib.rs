@@ -81,10 +81,12 @@ impl Default for Options<'static> {
     }
 }
 
-/// A parsed stream ready to be coded under different configurations.
+/// A parsed stream ready to be coded under different configurations. Match searches are
+/// cached across calls.
 pub struct Parsed {
     pub stream: deflate::Stream,
     pub data: Vec<u8>,
+    matcher: std::sync::Mutex<Option<matchfind::Matcher>>,
 }
 
 impl Parsed {
@@ -94,12 +96,19 @@ impl Parsed {
         if deflate::write(&stream, &data)? != raw {
             return Err(Error::Inconsistent);
         }
-        Ok(Parsed { stream, data })
+        Ok(Parsed {
+            stream,
+            data,
+            matcher: Default::default(),
+        })
     }
 
     /// Codes the stream into `c` under `cfg`.
     pub fn code<C: Coder>(&self, c: &mut C, cfg: Config) -> Result<()> {
-        let (coded, _) = predict::code_stream(c, &self.data, Some(&self.stream), Some(cfg))?;
+        let mut m = self.matcher.lock().unwrap();
+        let m = m.get_or_insert_with(|| matchfind::Matcher::new(&self.data));
+        let (coded, _) =
+            predict::code_stream(c, &self.data, Some(&self.stream), Some(cfg), Some(m))?;
         if coded != self.stream {
             return Err(Error::Inconsistent);
         }
@@ -108,9 +117,20 @@ impl Parsed {
 
     /// Estimated metadata size in bits under `cfg`.
     pub fn cost(&self, cfg: Config, priors: &Priors) -> Result<f64> {
+        Ok(self
+            .cost_within(cfg, priors, f64::INFINITY)?
+            .unwrap_or(f64::INFINITY))
+    }
+
+    /// Like [`Parsed::cost`], but gives up with `None` once the cost exceeds `budget`.
+    pub fn cost_within(&self, cfg: Config, priors: &Priors, budget: f64) -> Result<Option<f64>> {
         let mut c = model::CostCoder::new(priors);
-        self.code(&mut c, cfg)?;
-        Ok(c.total())
+        c.budget = budget;
+        match self.code(&mut c, cfg) {
+            Err(Error::Corrupt) if c.failed() => Ok(None),
+            Err(e) => Err(e),
+            Ok(()) => Ok(Some(c.total())),
+        }
     }
 
     /// The cheapest of `configs`.
@@ -118,10 +138,14 @@ impl Parsed {
         if configs.len() == 1 {
             return Ok(configs[0]);
         }
-        let mut best = None;
+        // Costs only grow while coding, so a configuration can be abandoned as soon as it
+        // exceeds the best one so far without changing the outcome.
+        let mut best: Option<(f64, Config)> = None;
         for &cfg in configs {
-            let cost = self.cost(cfg, priors)?;
-            if best.is_none_or(|(c, _)| cost < c) {
+            let budget = best.map_or(f64::INFINITY, |(c, _)| c);
+            if let Some(cost) = self.cost_within(cfg, priors, budget)?
+                && best.is_none_or(|(c, _)| cost < c)
+            {
                 best = Some((cost, cfg));
             }
         }
@@ -161,6 +185,6 @@ pub fn reconstruct(data: &[u8], meta: &Metadata) -> Result<Vec<u8>> {
 
 /// Like [`reconstruct`], pulling decisions from `c` (e.g. an arithmetic decoder).
 pub fn reconstruct_with<C: Coder>(data: &[u8], c: &mut C) -> Result<Vec<u8>> {
-    let (stream, _) = predict::code_stream(c, data, None, None)?;
+    let (stream, _) = predict::code_stream(c, data, None, None, None)?;
     deflate::write(&stream, data).map_err(|_| Error::Corrupt)
 }

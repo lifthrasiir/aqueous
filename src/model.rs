@@ -166,9 +166,14 @@ impl ContextModel {
     /// Cost in bits of coding `bit` now.
     #[inline]
     pub fn cost(&self, ctx: Ctx, bit: bool) -> f64 {
+        static COST: OnceLock<Vec<f32>> = OnceLock::new();
+        let t = COST.get_or_init(|| {
+            (0..=PROB_ONE)
+                .map(|p| -(p.max(1) as f64 / PROB_ONE as f64).log2() as f32)
+                .collect()
+        });
         let p = self.p1(ctx);
-        let p = if bit { p } else { PROB_ONE - p };
-        -(p as f64 / PROB_ONE as f64).log2()
+        t[if bit { p } else { PROB_ONE - p } as usize] as f64
     }
 }
 
@@ -178,6 +183,9 @@ pub struct CostCoder {
     pub model: ContextModel,
     pub bits: [f64; Channel::COUNT],
     pub count: [u64; Channel::COUNT],
+    total: f64,
+    /// Coding is abandoned ([`Coder::failed`]) once the total exceeds this.
+    pub budget: f64,
 }
 
 impl CostCoder {
@@ -186,21 +194,29 @@ impl CostCoder {
             model: ContextModel::new(priors),
             bits: [0.0; Channel::COUNT],
             count: [0; Channel::COUNT],
+            total: 0.0,
+            budget: f64::INFINITY,
         }
     }
 
     pub fn total(&self) -> f64 {
-        self.bits.iter().sum()
+        self.total
     }
 }
 
 impl Coder for CostCoder {
     fn bit(&mut self, ctx: Ctx, bit: bool) -> bool {
         let ch = ctx.channel() as usize;
-        self.bits[ch] += self.model.cost(ctx, bit);
+        let cost = self.model.cost(ctx, bit);
+        self.bits[ch] += cost;
+        self.total += cost;
         self.count[ch] += 1;
         self.model.update(ctx, bit);
         bit
+    }
+
+    fn failed(&self) -> bool {
+        self.total > self.budget
     }
 }
 

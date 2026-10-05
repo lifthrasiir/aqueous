@@ -7,7 +7,7 @@
 //!    the Huffman header predicted from the token statistics, then the final flag;
 //! 3. tail padding and trailing bytes.
 //!
-//! Tokens are predicted with an exact match finder ([`Chains`]) limited by the configured
+//! Tokens are predicted with an exact match finder ([`Matcher`]) limited by the configured
 //! search depth and nice length. A match length is coded relative to the predicted length,
 //! and a distance as its rank among the closer candidates matching at least that length, so
 //! "the closest longest match" costs almost nothing whatever hash the encoder used.
@@ -16,7 +16,7 @@ use crate::coder::{Coder, bypass, exp_golomb, tree_bits};
 use crate::ctx::{self, Channel, LB, len_bucket};
 use crate::deflate::{Block, Body, DynHeader, Stream, Token};
 use crate::huffman::{self, CL_ORDER, RleOp};
-use crate::matchfind::{Chains, MAX_MATCH};
+use crate::matchfind::{MAX_MATCH, Matcher};
 use crate::{Error, Result};
 
 /// Search depths selectable by [`Config::depth`].
@@ -79,20 +79,32 @@ impl std::str::FromStr for Config {
 /// Codes `actual` (when deconstructing) or rebuilds the stream from decisions (when
 /// `actual` is `None`). `cfg` must be given when deconstructing. Returns the stream as coded
 /// and the configuration used.
+///
+/// `matcher` may carry match searches over from earlier passes over the same `data`;
+/// without one, a fresh one is used.
 pub fn code_stream<C: Coder>(
     c: &mut C,
     data: &[u8],
     actual: Option<&Stream>,
     cfg: Option<Config>,
+    matcher: Option<&mut Matcher>,
 ) -> Result<(Stream, Config)> {
     let cfg0 = cfg.unwrap_or(Config { depth: 0, nice: 0 });
     let cfg = Config {
         depth: bypass(c, Channel::Block, 4, cfg0.depth as u32) as u8,
         nice: bypass(c, Channel::Block, 3, cfg0.nice as u32) as u8,
     };
+    let mut own;
+    let m = match matcher {
+        Some(m) => m,
+        None => {
+            own = Matcher::new(data);
+            &mut own
+        }
+    };
     let mut p = Predictor {
         data,
-        chains: Chains::new(data),
+        m,
         depth: cfg.depth_value(),
         nice: cfg.nice_value(),
         pos: 0,
@@ -172,7 +184,7 @@ struct BlockState {
 
 struct Predictor<'a> {
     data: &'a [u8],
-    chains: Chains<'a>,
+    m: &'a mut Matcher,
     depth: usize,
     nice: usize,
     pos: usize,
@@ -272,7 +284,8 @@ impl Predictor<'_> {
                     Some(Body::Dynamic { header, .. }) => Some(header),
                     _ => None,
                 };
-                let header = code_header(c, &tokens, ah)?;
+                let pred = self.m.trees(start, &tokens);
+                let header = code_header(c, &pred, ah)?;
                 Body::Dynamic { header, tokens }
             }
         };
@@ -282,12 +295,11 @@ impl Predictor<'_> {
     }
 
     fn code_token<C: Coder>(&mut self, c: &mut C, a: Option<Token>) -> Result<Token> {
-        let (p, n) = (self.pos, self.data.len());
-        let ch = &self.chains;
-        let f = ch.longest(p, self.depth, self.nice);
+        let (p, n, d) = (self.pos, self.data.len(), self.data);
+        let f = self.m.longest(d, p, self.depth, self.nice);
         let lp = f.len;
         let lnext = if lp >= 3 && p + 1 < n {
-            ch.longest(p + 1, self.depth, self.nice).len
+            self.m.longest(d, p + 1, self.depth, self.nice).len
         } else {
             0
         };
@@ -331,7 +343,7 @@ impl Predictor<'_> {
         let alt258 = len == 258 && c.bit(ctx::ALT258.at(0), aalt);
 
         let arank = if a.is_some() {
-            ch.rank(p, len, adist, RANK_LIMIT)
+            self.m.rank(d, p, len, adist, RANK_LIMIT)
         } else {
             None
         };
@@ -343,13 +355,20 @@ impl Predictor<'_> {
             } else {
                 1 + exp_golomb(c, ctx::RANK_EG.sub(k, 16), ar.wrapping_sub(1)) as usize
             };
-            ch.select(p, len, r, RANK_LIMIT).ok_or(Error::Corrupt)?
+            if a.is_some() {
+                // select(rank(dist)) == dist; no need to walk again.
+                adist
+            } else {
+                self.m
+                    .select(d, p, len, r, RANK_LIMIT)
+                    .ok_or(Error::Corrupt)?
+            }
         } else {
-            let d = 1 + bypass(c, Channel::Distance, 15, adist.wrapping_sub(1) as u32) as usize;
-            if !ch.valid(p, len, d) {
+            let dd = 1 + bypass(c, Channel::Distance, 15, adist.wrapping_sub(1) as u32) as usize;
+            if !Matcher::valid(self.data, p, len, dd) {
                 return Err(Error::Corrupt);
             }
-            d
+            dd
         };
         self.pos += len;
         Ok(Token::Match {
@@ -395,8 +414,9 @@ fn code_lens<C: Coder>(
         .collect()
 }
 
-fn code_header<C: Coder>(c: &mut C, tokens: &[Token], a: Option<&DynHeader>) -> Result<DynHeader> {
-    // Prediction: zlib's trees over this block's symbol statistics.
+/// Predicted literal/length (288) and distance (32) code lengths: zlib's trees over the
+/// block's symbol statistics.
+pub(crate) fn predict_trees(tokens: &[Token]) -> (Vec<u8>, Vec<u8>) {
     let mut lf = [0u32; 286];
     let mut df = [0u32; 30];
     lf[256] = 1;
@@ -413,14 +433,21 @@ fn code_header<C: Coder>(c: &mut C, tokens: &[Token], a: Option<&DynHeader>) -> 
     pl.resize(288, 0);
     let mut pd = huffman::zlib_lens(&df, 15);
     pd.resize(32, 0);
+    (pl, pd)
+}
 
-    let pred_hlit = last_nonzero(&pl).max(257) as u16;
+fn code_header<C: Coder>(
+    c: &mut C,
+    (pl, pd): &(Vec<u8>, Vec<u8>),
+    a: Option<&DynHeader>,
+) -> Result<DynHeader> {
+    let pred_hlit = last_nonzero(pl).max(257) as u16;
     let hlit = if c.bit(ctx::HLIT_EQ.at(0), a.is_none_or(|h| h.hlit == pred_hlit)) {
         pred_hlit
     } else {
         257 + bypass(c, Channel::Tree, 5, a.map_or(0, |h| h.hlit as u32 - 257)) as u16
     };
-    let pred_hdist = last_nonzero(&pd).max(1) as u8;
+    let pred_hdist = last_nonzero(pd).max(1) as u8;
     let hdist = if c.bit(ctx::HDIST_EQ.at(0), a.is_none_or(|h| h.hdist == pred_hdist)) {
         pred_hdist
     } else {

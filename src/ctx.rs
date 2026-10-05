@@ -59,11 +59,9 @@ impl Ctx {
         (self.0 as usize) < Channel::COUNT
     }
 
+    #[inline]
     pub fn channel(self) -> Channel {
-        if self.is_bypass() {
-            return Channel::ALL[self.0 as usize];
-        }
-        GROUPS[self.group()].channel
+        CHANNEL_OF[self.0 as usize]
     }
 
     /// Index into [`GROUPS`]; panics on bypass contexts.
@@ -206,6 +204,25 @@ groups! {
 
 /// Total number of context ids, bypass ones included.
 pub const NUM_CTX: usize = GROUP_OFFSETS[NGROUPS - 1] as usize + GROUPS[NGROUPS - 1].size as usize;
+
+static CHANNEL_OF: [Channel; NUM_CTX] = {
+    let mut t = [Channel::Block; NUM_CTX];
+    let mut i = 0;
+    while i < Channel::COUNT {
+        t[i] = Channel::ALL[i];
+        i += 1;
+    }
+    let mut g = 0;
+    while g < NGROUPS {
+        let mut k = 0;
+        while k < GROUPS[g].size as usize {
+            t[GROUP_OFFSETS[g] as usize + k] = GROUPS[g].channel;
+            k += 1;
+        }
+        g += 1;
+    }
+    t
+};
 
 #[cfg(test)]
 mod tests {
