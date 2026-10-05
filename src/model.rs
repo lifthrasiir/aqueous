@@ -125,10 +125,19 @@ pub struct ContextModel {
     n: Vec<u8>,
 }
 
+#[inline]
 fn rate(n: u8) -> u32 {
-    static T: OnceLock<[u32; LIMIT as usize + 1]> = OnceLock::new();
-    T.get_or_init(|| std::array::from_fn(|n| (2.0 * 65536.0 / (2.0 * n as f64 + 3.0)) as u32))
-        [n as usize]
+    // 65536 / (n + 1.5), rounded down.
+    const T: [u32; LIMIT as usize + 1] = {
+        let mut t = [0; LIMIT as usize + 1];
+        let mut n = 0;
+        while n <= LIMIT as usize {
+            t[n] = 2 * 65536 / (2 * n as u32 + 3);
+            n += 1;
+        }
+        t
+    };
+    T[n as usize]
 }
 
 impl ContextModel {
@@ -226,6 +235,7 @@ struct ArithEncoder {
     x1: u32,
     x2: u32,
     out: Vec<u8>,
+    used: bool,
 }
 
 impl ArithEncoder {
@@ -234,10 +244,12 @@ impl ArithEncoder {
             x1: 0,
             x2: u32::MAX,
             out: vec![],
+            used: false,
         }
     }
 
     fn encode(&mut self, bit: bool, p1: u32) {
+        self.used = true;
         let xmid = self.x1 + (((self.x2 - self.x1) as u64 * p1 as u64) >> 16) as u32;
         if bit {
             self.x2 = xmid;
@@ -251,8 +263,13 @@ impl ArithEncoder {
         }
     }
 
+    /// Ends the stream with a single byte: any value in (x1, x2] decodes correctly, and the
+    /// decoder reads zeros past the end, so `(x1 >> 24) + 1` (which the normalization keeps
+    /// at most `x2 >> 24`) followed by zeros will do. An unused coder emits nothing.
     fn finish(mut self) -> Vec<u8> {
-        self.out.extend_from_slice(&self.x1.to_be_bytes());
+        if self.used {
+            self.out.push((self.x1 >> 24) as u8 + 1);
+        }
         self.out
     }
 }
@@ -307,7 +324,8 @@ impl<'a> ArithDecoder<'a> {
     }
 }
 
-const MAGIC: &[u8; 4] = b"FRm1";
+/// Format version, the first byte of packed metadata.
+const VERSION: u8 = 2;
 
 fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
@@ -334,8 +352,8 @@ fn get_varint(input: &[u8], pos: &mut usize) -> Result<u64> {
 /// per channel.
 pub fn pack(meta: &Metadata, priors: &Priors) -> Vec<u8> {
     let mut model = ContextModel::new(priors);
-    let mut out = MAGIC.to_vec();
-    out.extend_from_slice(&priors.id.to_le_bytes());
+    let mut out = vec![VERSION];
+    out.extend_from_slice(&(priors.id as u16).to_le_bytes());
     let streams: Vec<Vec<u8>> = meta
         .channels
         .iter()
@@ -365,15 +383,15 @@ pub struct Unpacker<'a> {
 
 impl<'a> Unpacker<'a> {
     pub fn new(packed: &'a [u8], priors: &Priors) -> Result<Self> {
-        if packed.len() < 8 || &packed[..4] != MAGIC {
+        if packed.len() < 3 || packed[0] != VERSION {
             return Err(Error::Corrupt);
         }
-        if packed[4..8] != priors.id.to_le_bytes() {
+        if packed[1..3] != (priors.id as u16).to_le_bytes() {
             return Err(Error::Param(
                 "metadata was packed with different priors".into(),
             ));
         }
-        let mut pos = 8;
+        let mut pos = 3;
         let mut lens = vec![];
         for _ in 0..Channel::COUNT - 1 {
             lens.push(get_varint(packed, &mut pos)? as usize);
@@ -393,8 +411,13 @@ impl<'a> Unpacker<'a> {
 }
 
 impl Coder for Unpacker<'_> {
+    #[inline]
     fn bit(&mut self, ctx: Ctx, _: bool) -> bool {
-        let b = self.decoders[ctx.channel() as usize].decode(self.model.p1(ctx));
+        let dec = &mut self.decoders[ctx.channel() as usize];
+        if ctx.is_bypass() {
+            return dec.decode(PROB_ONE / 2);
+        }
+        let b = dec.decode(self.model.p1(ctx));
         self.model.update(ctx, b);
         b
     }

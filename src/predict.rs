@@ -17,6 +17,7 @@ use crate::ctx::{self, Channel, LB, len_bucket};
 use crate::deflate::{Block, Body, DynHeader, Stream, Token};
 use crate::huffman::{self, CL_ORDER, RleOp};
 use crate::matchfind::{MAX_MATCH, Matcher};
+use crate::zlib;
 use crate::{Error, Result};
 
 /// Search depths selectable by [`Config::depth`].
@@ -29,18 +30,26 @@ pub const NICES: [u16; 8] = [8, 16, 24, 32, 64, 128, 192, 258];
 const RANK_LIMIT: usize = 8192;
 
 /// Parameters of the token predictor, chosen per stream and stored in the metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct Config {
     /// Index into [`DEPTHS`].
     pub depth: u8,
     /// Index into [`NICES`].
     pub nice: u8,
+    /// Predict tokens and block sizes by emulating zlib with these parameters first; the
+    /// generic predictor above only codes the tokens it gets wrong.
+    pub zlib: Option<zlib::Params>,
 }
 
 impl Config {
     pub fn all() -> impl Iterator<Item = Config> {
-        (0..DEPTHS.len() as u8)
-            .flat_map(|depth| (0..NICES.len() as u8).map(move |nice| Config { depth, nice }))
+        (0..DEPTHS.len() as u8).flat_map(|depth| {
+            (0..NICES.len() as u8).map(move |nice| Config {
+                depth,
+                nice,
+                zlib: None,
+            })
+        })
     }
 
     pub fn depth_value(self) -> usize {
@@ -54,14 +63,22 @@ impl Config {
 
 impl std::fmt::Display for Config {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "depth={},nice={}", self.depth_value(), self.nice_value())
+        write!(f, "depth={},nice={}", self.depth_value(), self.nice_value())?;
+        if let Some(z) = self.zlib {
+            write!(f, ";{z}")?;
+        }
+        Ok(())
     }
 }
 
 impl std::str::FromStr for Config {
     type Err = Error;
     fn from_str(s: &str) -> Result<Config> {
-        let mut cfg = Config { depth: 0, nice: 0 };
+        let mut cfg = Config {
+            depth: 0,
+            nice: 0,
+            zlib: None,
+        };
         let bad = || Error::Param(format!("bad predictor config {s:?}"));
         for kv in s.split(',') {
             let (k, v) = kv.split_once('=').ok_or_else(bad)?;
@@ -76,39 +93,66 @@ impl std::str::FromStr for Config {
     }
 }
 
+/// What [`code_stream`] coded.
+#[derive(Debug)]
+pub struct Coded {
+    pub stream: Stream,
+    pub config: Config,
+    /// Leading blocks reproduced exactly by zlib emulation (zlib mode only).
+    pub exact_blocks: usize,
+}
+
 /// Codes `actual` (when deconstructing) or rebuilds the stream from decisions (when
 /// `actual` is `None`). `cfg` must be given when deconstructing. Returns the stream as coded
 /// and the configuration used.
 ///
-/// `matcher` may carry match searches over from earlier passes over the same `data`;
-/// without one, a fresh one is used.
+/// `matcher` may carry match searches over from earlier passes over the same `data`; it is
+/// only built when the generic predictor is needed.
 pub fn code_stream<C: Coder>(
     c: &mut C,
     data: &[u8],
     actual: Option<&Stream>,
     cfg: Option<Config>,
-    matcher: Option<&mut Matcher>,
-) -> Result<(Stream, Config)> {
-    let cfg0 = cfg.unwrap_or(Config { depth: 0, nice: 0 });
-    let cfg = Config {
-        depth: bypass(c, Channel::Block, 4, cfg0.depth as u32) as u8,
-        nice: bypass(c, Channel::Block, 3, cfg0.nice as u32) as u8,
-    };
-    let mut own;
-    let m = match matcher {
-        Some(m) => m,
-        None => {
-            own = Matcher::new(data);
-            &mut own
+    matcher: &mut Option<Matcher>,
+) -> Result<Coded> {
+    let cfg0 = cfg.unwrap_or(Config {
+        depth: 0,
+        nice: 0,
+        zlib: None,
+    });
+    let depth = bypass(c, Channel::Block, 4, cfg0.depth as u32) as u8;
+    let nice = bypass(c, Channel::Block, 3, cfg0.nice as u32) as u8;
+    let z0 = cfg0.zlib.unwrap_or_default();
+    let zlib = if bypass(c, Channel::Block, 1, cfg0.zlib.is_some() as u32) == 1 {
+        let level = bypass(c, Channel::Block, 4, z0.level as u32) as u8;
+        let strategy = bypass(c, Channel::Block, 3, z0.strategy as u32) as usize;
+        let wbits = 9 + bypass(c, Channel::Block, 3, z0.wbits as u32 - 9) as u8;
+        let mem = bypass(c, Channel::Block, 4, z0.mem as u32) as u8;
+        let p = zlib::Params {
+            level,
+            strategy: *zlib::Strategy::ALL.get(strategy).ok_or(Error::Corrupt)?,
+            wbits,
+            mem,
+        };
+        if !(1..=9).contains(&level) || !(1..=9).contains(&mem) {
+            return Err(Error::Corrupt);
         }
+        Some(p)
+    } else {
+        None
     };
+    let cfg = Config { depth, nice, zlib };
     let mut p = Predictor {
         data,
-        m,
+        deconstructing: actual.is_some(),
+        m: matcher,
         depth: cfg.depth_value(),
         nice: cfg.nice_value(),
         pos: 0,
         prev_match: false,
+        emu: zlib.map(|p| zlib::Emulator::new(data, p)),
+        zmiss: false,
+        zrule: false,
     };
     let mut st = BlockState {
         prev_btype: 3,
@@ -117,19 +161,68 @@ pub fn code_stream<C: Coder>(
         prev_stored: None,
     };
     let mut blocks = Vec::new();
-    loop {
+    let mut exact_blocks = 0;
+    if let Some(e) = &mut p.emu {
+        // The leading blocks that zlib reproduces exactly cost nothing but their number.
+        let mut generated = vec![];
+        let mut pos = 0;
+        if let Some(s) = actual {
+            for b in &s.blocks {
+                let snapshot = e.clone();
+                match zlib_block(e, pos) {
+                    Some(g) if g == *b => {
+                        pos += block_span(&g);
+                        generated.push(g);
+                    }
+                    _ => {
+                        *e = snapshot;
+                        break;
+                    }
+                }
+            }
+        }
+        let k = generated.len() as u32;
+        let all = actual.is_some_and(|s| generated.len() == s.blocks.len());
+        let k = if c.bit(ctx::Z_ALL_EXACT.at(0), all) {
+            None
+        } else {
+            Some(exp_golomb(c, ctx::Z_EXACT_EG, k) as usize)
+        };
+        if actual.is_none() {
+            loop {
+                if k.is_some_and(|k| generated.len() >= k) || c.failed() {
+                    break;
+                }
+                let g = zlib_block(e, pos).ok_or(Error::Corrupt)?;
+                pos += block_span(&g);
+                let last = g.last;
+                generated.push(g);
+                if last {
+                    break;
+                }
+            }
+            if k.is_some_and(|k| generated.len() != k)
+                || (k.is_none() && !generated.last().is_some_and(|b| b.last))
+            {
+                return Err(Error::Corrupt);
+            }
+        }
+        p.pos = pos;
+        if let Some(b) = generated.last() {
+            st.prev_btype = b.body.btype() as usize;
+        }
+        exact_blocks = generated.len();
+        blocks = generated;
+    }
+    while !blocks.last().is_some_and(|b: &Block| b.last) {
         let a = match actual {
             Some(s) => Some(s.blocks.get(blocks.len()).ok_or(Error::Inconsistent)?),
             None => None,
         };
         let block = p.code_block(c, &mut st, a)?;
-        let last = block.last;
         blocks.push(block);
         if c.failed() {
             return Err(Error::Corrupt);
-        }
-        if last {
-            break;
         }
     }
 
@@ -164,14 +257,15 @@ pub fn code_stream<C: Coder>(
     if c.failed() {
         return Err(Error::Corrupt);
     }
-    Ok((
-        Stream {
+    Ok(Coded {
+        stream: Stream {
             blocks,
             tail_pad,
             trailing,
         },
-        cfg,
-    ))
+        config: cfg,
+        exact_blocks,
+    })
 }
 
 struct BlockState {
@@ -184,14 +278,35 @@ struct BlockState {
 
 struct Predictor<'a> {
     data: &'a [u8],
-    m: &'a mut Matcher,
+    deconstructing: bool,
+    m: &'a mut Option<Matcher>,
     depth: usize,
     nice: usize,
     pos: usize,
     prev_match: bool,
+    /// zlib emulation, dropped if it ever loses track of the stream.
+    emu: Option<zlib::Emulator<'a>>,
+    /// Whether the previous token was mispredicted by the emulation.
+    zmiss: bool,
+    /// Whether the previous block followed zlib's block size rule.
+    zrule: bool,
 }
 
 impl Predictor<'_> {
+    fn m(&mut self) -> &mut Matcher {
+        let data = self.data;
+        // Deconstruction codes the same data under several configurations, so searches are
+        // cached; reconstruction makes a single pass.
+        let cached = self.deconstructing;
+        self.m.get_or_insert_with(|| {
+            if cached {
+                Matcher::new(data)
+            } else {
+                Matcher::single(data)
+            }
+        })
+    }
+
     fn code_block<C: Coder>(
         &mut self,
         c: &mut C,
@@ -200,14 +315,22 @@ impl Predictor<'_> {
     ) -> Result<Block> {
         let n = self.data.len();
         let abt = a.map_or(0, |b| b.body.btype() as usize);
-        let bt = if c.bit(ctx::BTYPE.at(st.prev_btype * 2), abt == 2) {
+        // With zlib emulation, only "stored or not" is coded up front; fixed versus dynamic
+        // follows the tokens, predicted by zlib's own cost comparison.
+        let zl = self.emu.is_some();
+        let mut bt = if zl {
+            if c.bit(ctx::Z_STORED.at(st.prev_btype), abt == 0) {
+                0
+            } else {
+                2
+            }
+        } else if c.bit(ctx::BTYPE.at(st.prev_btype * 2), abt == 2) {
             2
         } else if c.bit(ctx::BTYPE.at(st.prev_btype * 2 + 1), abt == 1) {
             1
         } else {
             0
         };
-        st.prev_btype = bt;
 
         let body = if bt == 0 {
             let (apad, alen) = match a.map(|b| &b.body) {
@@ -219,8 +342,37 @@ impl Predictor<'_> {
             } else {
                 bypass(c, Channel::Block, 7, apad as u32) as u8
             };
+            // zlib stores what its next block of tokens covers: let a copy run ahead.
+            let ahead = self.emu.as_ref().map(|e| {
+                let mut e = e.clone();
+                let mut end = self.pos;
+                for _ in 0..e.params().block_tokens() {
+                    match e.predict() {
+                        Some((pp, t)) if e.commit(t) => end = pp + t.span(),
+                        _ => break,
+                    }
+                }
+                (e, end - self.pos)
+            });
             let full = (n - self.pos).min(65535) as u16;
-            let len = if c.bit(ctx::STORED_LEN_FULL.at(0), alen == full) {
+            let zlen = ahead.as_ref().map(|(_, l)| *l).filter(|&l| l <= 65535);
+            let len = if let Some(zlen) = zlen
+                && c.bit(ctx::Z_STORED_LEN.at(0), alen as usize == zlen)
+            {
+                self.emu = ahead.map(|(e, _)| e);
+                self.pos += zlen;
+                st.prev_stored = Some(zlen as u16);
+                return self.finish_block(
+                    c,
+                    st,
+                    a,
+                    0,
+                    Body::Stored {
+                        pad,
+                        len: zlen as u16,
+                    },
+                );
+            } else if c.bit(ctx::STORED_LEN_FULL.at(0), alen == full) {
                 full
             } else if st.prev_stored.is_some()
                 && c.bit(ctx::STORED_LEN_SAME.at(0), Some(alen) == st.prev_stored)
@@ -234,6 +386,11 @@ impl Predictor<'_> {
             }
             st.prev_stored = Some(len);
             self.pos += len as usize;
+            if let Some(e) = &mut self.emu
+                && !e.skip_to(self.pos)
+            {
+                self.emu = None;
+            }
             Body::Stored { pad, len }
         } else {
             let atokens = match a.map(|b| &b.body) {
@@ -243,17 +400,32 @@ impl Predictor<'_> {
             let start = self.pos;
             let a_eof =
                 atokens.is_none_or(|t| start + t.iter().map(|t| t.span()).sum::<usize>() == n);
-            let eof = c.bit(
-                ctx::COUNT_EOF.at((bt - 1) * 2 + st.prev_eof as usize),
-                a_eof,
-            );
+            // zlib flushes a block after lit_bufsize - 1 tokens, or at the end of the data.
+            let zlimit = self.emu.as_ref().map(|e| e.params().block_tokens());
+            let cbt = if zl { 2 } else { bt };
+            let rule = match zlimit {
+                Some(lim) => {
+                    let a_rule = atokens.is_none_or(|t| t.len() == lim || (t.len() < lim && a_eof));
+                    let r = c.bit(ctx::Z_COUNT.at(self.zrule as usize), a_rule);
+                    self.zrule = r;
+                    r
+                }
+                None => false,
+            };
+            let eof = !rule
+                && c.bit(
+                    ctx::COUNT_EOF.at((cbt - 1) * 2 + st.prev_eof as usize),
+                    a_eof,
+                );
             st.prev_eof = eof;
-            let count = if eof {
+            let count = if rule {
+                zlimit
+            } else if eof {
                 None
             } else {
                 let ac = atokens.map_or(0, |t| t.len() as u32);
                 let same = st.prev_count.is_some()
-                    && c.bit(ctx::COUNT_SAME.at(bt - 1), Some(ac) == st.prev_count);
+                    && c.bit(ctx::COUNT_SAME.at(cbt - 1), Some(ac) == st.prev_count);
                 let count = if same {
                     st.prev_count.unwrap()
                 } else {
@@ -265,6 +437,7 @@ impl Predictor<'_> {
             let mut tokens = Vec::new();
             loop {
                 let more = match count {
+                    Some(k) if rule => tokens.len() < k && self.pos < n,
                     Some(k) => tokens.len() < k,
                     None => self.pos < n,
                 };
@@ -277,6 +450,14 @@ impl Predictor<'_> {
                 let at = atokens.map(|t| t[tokens.len()]);
                 tokens.push(self.code_token(c, at)?);
             }
+            if zl {
+                let fixed = zlib_prefers_fixed(&tokens);
+                bt = if c.bit(ctx::Z_DYNAMIC.at(fixed as usize), abt == 2) {
+                    2
+                } else {
+                    1
+                };
+            }
             if bt == 1 {
                 Body::Fixed { tokens }
             } else {
@@ -284,22 +465,64 @@ impl Predictor<'_> {
                     Some(Body::Dynamic { header, .. }) => Some(header),
                     _ => None,
                 };
-                let pred = self.m.trees(start, &tokens);
+                let pred = self.m().trees(start, &tokens);
                 let header = code_header(c, &pred, ah)?;
                 Body::Dynamic { header, tokens }
             }
         };
 
-        let last = self.pos == n && c.bit(ctx::FINAL.at(bt), a.is_none_or(|b| b.last));
+        self.finish_block(c, st, a, bt, body)
+    }
+
+    fn finish_block<C: Coder>(
+        &mut self,
+        c: &mut C,
+        st: &mut BlockState,
+        a: Option<&Block>,
+        bt: usize,
+        body: Body,
+    ) -> Result<Block> {
+        st.prev_btype = bt;
+        let last =
+            self.pos == self.data.len() && c.bit(ctx::FINAL.at(bt), a.is_none_or(|b| b.last));
         Ok(Block { last, body })
     }
 
     fn code_token<C: Coder>(&mut self, c: &mut C, a: Option<Token>) -> Result<Token> {
+        let Some(mut e) = self.emu.take() else {
+            return self.code_token_generic(c, a);
+        };
+        let Some((pp, pt)) = e.predict().filter(|&(pp, _)| pp == self.pos) else {
+            // The emulation lost track; carry on without it.
+            return self.code_token_generic(c, a);
+        };
+        let (kind, plen) = match pt {
+            Token::Lit(_) => (0, 0),
+            Token::Match { len, .. } => (1, len as usize),
+        };
+        let zctx = (kind * 2 + self.zmiss as usize) * LB + len_bucket(plen);
+        let t = if c.bit(ctx::Z_HIT.at(zctx), a.is_none_or(|a| a == pt)) {
+            self.prev_match = kind == 1;
+            self.pos = pp + pt.span();
+            self.zmiss = false;
+            pt
+        } else {
+            self.zmiss = true;
+            self.code_token_generic(c, a)?
+        };
+        if e.commit(t) {
+            self.emu = Some(e);
+        }
+        Ok(t)
+    }
+
+    fn code_token_generic<C: Coder>(&mut self, c: &mut C, a: Option<Token>) -> Result<Token> {
         let (p, n, d) = (self.pos, self.data.len(), self.data);
-        let f = self.m.longest(d, p, self.depth, self.nice);
+        let (depth, nice) = (self.depth, self.nice);
+        let f = self.m().longest(d, p, depth, nice);
         let lp = f.len;
         let lnext = if lp >= 3 && p + 1 < n {
-            self.m.longest(d, p + 1, self.depth, self.nice).len
+            self.m().longest(d, p + 1, depth, nice).len
         } else {
             0
         };
@@ -343,7 +566,7 @@ impl Predictor<'_> {
         let alt258 = len == 258 && c.bit(ctx::ALT258.at(0), aalt);
 
         let arank = if a.is_some() {
-            self.m.rank(d, p, len, adist, RANK_LIMIT)
+            self.m().rank(d, p, len, adist, RANK_LIMIT)
         } else {
             None
         };
@@ -359,7 +582,7 @@ impl Predictor<'_> {
                 // select(rank(dist)) == dist; no need to walk again.
                 adist
             } else {
-                self.m
+                self.m()
                     .select(d, p, len, r, RANK_LIMIT)
                     .ok_or(Error::Corrupt)?
             }
@@ -416,7 +639,7 @@ fn code_lens<C: Coder>(
 
 /// Predicted literal/length (288) and distance (32) code lengths: zlib's trees over the
 /// block's symbol statistics.
-pub(crate) fn predict_trees(tokens: &[Token]) -> (Vec<u8>, Vec<u8>) {
+pub fn predict_trees(tokens: &[Token]) -> (Vec<u8>, Vec<u8>) {
     let mut lf = [0u32; 286];
     let mut df = [0u32; 30];
     lf[256] = 1;
@@ -598,4 +821,138 @@ fn code_ops<C: Coder>(
         prev_type = ty;
     }
     Ok(ops)
+}
+
+/// The dynamic block header zlib writes for `tokens`: every header decision taken as
+/// predicted.
+pub fn zlib_header(tokens: &[Token]) -> DynHeader {
+    struct Yes;
+    impl Coder for Yes {
+        fn bit(&mut self, _: crate::ctx::Ctx, _: bool) -> bool {
+            true
+        }
+    }
+    code_header(&mut Yes, &predict_trees(tokens), None).expect("zlib's own header is valid")
+}
+
+/// Whether zlib's `_tr_flush_block` would rather use fixed than dynamic codes for `tokens`
+/// (Z_FIXED aside): fixed when `static_lenb <= opt_lenb`.
+pub fn zlib_prefers_fixed(tokens: &[Token]) -> bool {
+    let (opt, stat) = zlib_lenb(tokens, &zlib_header(tokens));
+    stat <= opt
+}
+
+/// zlib's `opt_lenb` and `static_lenb`: the sizes in bytes of the block with dynamic and with
+/// fixed codes, as `_tr_flush_block` computes them.
+fn zlib_lenb(tokens: &[Token], h: &DynHeader) -> (i64, i64) {
+    let mut lf = [0u64; 288];
+    let mut df = [0u64; 32];
+    lf[256] = 1;
+    for &t in tokens {
+        match t {
+            Token::Lit(b) => lf[b as usize] += 1,
+            Token::Match { len, dist, alt258 } => {
+                lf[257 + if alt258 { 27 } else { huffman::len_code(len) }] += 1;
+                df[huffman::dist_code(dist)] += 1;
+            }
+        }
+    }
+    let fixed_lit = huffman::fixed_lit_lens();
+    let (mut opt, mut stat) = (0i64, 0i64);
+    // gen_bitlen's accounting; symbols zlib forced into a tree count with frequency 1 and
+    // get one bit (and their static length) taken off again.
+    let mut add = |freq: u64, len: u8, slen: Option<u8>, xbits: u8| {
+        if len == 0 {
+            return;
+        }
+        let f = freq.max(1) as i64;
+        opt += f * (len + xbits) as i64;
+        if let Some(sl) = slen {
+            stat += f * (sl + xbits) as i64;
+        }
+        if freq == 0 {
+            opt -= 1;
+            if let Some(sl) = slen {
+                stat -= sl as i64;
+            }
+        }
+    };
+    for (n, &l) in h.lit_lens().iter().enumerate() {
+        let x = if n >= 257 {
+            huffman::LEN_EXTRA.get(n - 257).copied().unwrap_or(0)
+        } else {
+            0
+        };
+        add(lf[n], l, Some(fixed_lit[n]), x);
+    }
+    for (n, &l) in h.dist_lens().iter().enumerate() {
+        add(
+            df[n],
+            l,
+            Some(5),
+            huffman::DIST_EXTRA.get(n).copied().unwrap_or(0),
+        );
+    }
+    let mut cf = [0u64; 19];
+    for op in &h.ops {
+        cf[op.sym as usize] += 1;
+    }
+    for (n, &l) in h.cl_lens.iter().enumerate() {
+        add(cf[n], l, None, RleOp::extra_bits(n as u8) as u8);
+    }
+    opt += 3 * h.hclen as i64 + 14;
+    ((opt + 3 + 7) >> 3, (stat + 3 + 7) >> 3)
+}
+
+/// The next block exactly as zlib writes it: its tokens by emulation (up to `lit_bufsize - 1`
+/// of them, starting at `start`), then `_tr_flush_block`'s choice between stored, fixed and
+/// dynamic. `None` if the emulation cannot continue.
+pub fn zlib_block(e: &mut zlib::Emulator, start: usize) -> Option<Block> {
+    let limit = e.params().block_tokens();
+    let mut tokens = vec![];
+    let mut end = start;
+    let last = loop {
+        if tokens.len() == limit {
+            break false;
+        }
+        match e.predict() {
+            None => break true,
+            Some((pos, t)) => {
+                if pos != end || !e.commit(t) {
+                    return None;
+                }
+                end += t.span();
+                tokens.push(t);
+            }
+        }
+    };
+    let header = zlib_header(&tokens);
+    let (opt_lenb, static_lenb) = zlib_lenb(&tokens, &header);
+    let mut opt = opt_lenb;
+    if static_lenb <= opt || e.params().strategy == zlib::Strategy::Fixed {
+        opt = static_lenb;
+    }
+    let stored_len = (end - start) as i64;
+    // The data must still be in zlib's window to be stored.
+    let body = if stored_len + 4 <= opt && start >= e.window_base() && stored_len <= 65535 {
+        Body::Stored {
+            pad: 0,
+            len: stored_len as u16,
+        }
+    } else if static_lenb == opt {
+        Body::Fixed { tokens }
+    } else {
+        Body::Dynamic { header, tokens }
+    };
+    Some(Block { last, body })
+}
+
+/// Bytes of data a block covers.
+fn block_span(b: &Block) -> usize {
+    match &b.body {
+        Body::Stored { len, .. } => *len as usize,
+        Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {
+            tokens.iter().map(|t| t.span()).sum()
+        }
+    }
 }

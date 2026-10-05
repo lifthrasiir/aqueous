@@ -72,6 +72,16 @@ impl BitWriter {
         debug_assert!(n <= 32 && (n == 32 || v >> n == 0));
         self.acc |= (v as u64) << self.nacc;
         self.nacc += n;
+        // Up to 31 bits stay pending; whole 32-bit words go out at once.
+        if self.nacc >= 32 {
+            self.out.extend_from_slice(&(self.acc as u32).to_le_bytes());
+            self.acc >>= 32;
+            self.nacc -= 32;
+        }
+    }
+
+    /// Writes out the pending whole bytes.
+    fn flush_bytes(&mut self) {
         while self.nacc >= 8 {
             self.out.push(self.acc as u8);
             self.acc >>= 8;
@@ -84,11 +94,13 @@ impl BitWriter {
     }
 
     pub fn bytes(&mut self, b: &[u8]) {
+        self.flush_bytes();
         debug_assert!(self.nacc == 0);
         self.out.extend_from_slice(b);
     }
 
-    pub fn finish(self) -> Vec<u8> {
+    pub fn finish(mut self) -> Vec<u8> {
+        self.flush_bytes();
         debug_assert!(self.nacc == 0, "unpadded trailing bits");
         self.out
     }

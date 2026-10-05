@@ -7,7 +7,7 @@
 //! ([`LAYOUT`]), which is what trained priors are keyed on.
 
 /// Bump whenever groups are added, removed, resized or reinterpreted.
-pub const LAYOUT: u32 = 1;
+pub const LAYOUT: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
@@ -200,6 +200,14 @@ groups! {
     RLE_CAND = "tree.rle_cand", Tree, 3;
     RLE_TYPE = "tree.rle_type", Tree, 16 * 3;
     RLE_MAXRUN = "tree.rle_maxrun", Tree, 3;
+    // zlib emulation: predicted kind x previous token missed x predicted length bucket
+    Z_HIT = "token.zlib_hit", Token, (2 * 2 * LB) as u16;
+    Z_COUNT = "block.zlib_count", Block, 2;
+    Z_STORED = "block.zlib_stored", Block, 4;
+    Z_STORED_LEN = "block.zlib_stored_len", Block, 1;
+    Z_DYNAMIC = "block.zlib_dynamic", Block, 2;
+    Z_ALL_EXACT = "block.zlib_all_exact", Block, 1;
+    Z_EXACT_EG = "block.zlib_exact_eg", Block, 24;
 }
 
 /// Total number of context ids, bypass ones included.
@@ -232,7 +240,7 @@ mod tests {
     fn layout() {
         assert_eq!(BTYPE.base as usize, Channel::COUNT);
         assert_eq!(Ctx(BTYPE.base).describe(), "block.btype[0]");
-        assert_eq!(RLE_MAXRUN.at(2).0 as usize, NUM_CTX - 1);
+        assert_eq!(Z_EXACT_EG.at(23).0 as usize, NUM_CTX - 1);
         assert_eq!(IS_MATCH.at(5).channel(), Channel::Token);
         assert_eq!(Ctx::bypass(Channel::Tree).channel(), Channel::Tree);
         assert_eq!(IS_MATCH.at(5).describe(), "token.is_match[5]");

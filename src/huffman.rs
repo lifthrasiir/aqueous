@@ -125,15 +125,18 @@ impl Decoder {
 /// overflow fixup. `freq` is indexed by symbol and has `elems` entries (286, 30 or 19).
 /// Unused symbols get length 0; at least two codes are always produced.
 pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
+    const MAX_NODES: usize = 2 * 286 + 1;
     let elems = freq.len();
+    assert!(elems <= 286);
     let nodes = 2 * elems + 1;
     let heap_size = nodes;
-    let mut f: Vec<u32> = freq.to_vec();
-    f.resize(nodes, 0);
-    let mut depth = vec![0u8; nodes];
-    let mut dad = vec![0usize; nodes];
-    let mut len = vec![0u8; nodes];
-    let mut heap = vec![0usize; heap_size + 1];
+    // Fixed-size scratch on the stack: this runs for every block of every pass.
+    let mut f = [0u32; MAX_NODES];
+    f[..elems].copy_from_slice(freq);
+    let mut depth = [0u8; MAX_NODES];
+    let mut dad = [0usize; MAX_NODES];
+    let mut len = [0u8; MAX_NODES];
+    let mut heap = [0usize; MAX_NODES + 1];
     let mut heap_len = 0usize;
     let mut heap_max = heap_size;
     let mut max_code: isize = -1;
@@ -160,17 +163,19 @@ pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
     }
     let max_code = max_code as usize;
 
-    let smaller = |f: &[u32], depth: &[u8], n: usize, m: usize| {
-        f[n] < f[m] || (f[n] == f[m] && depth[n] <= depth[m])
-    };
-    let downheap = |heap: &mut [usize], heap_len: usize, f: &[u32], depth: &[u8], mut k: usize| {
+    // zlib's `smaller`: by frequency, then by depth, i.e. by this key.
+    let mut key = [0u64; MAX_NODES];
+    for n in 0..elems {
+        key[n] = (f[n] as u64) << 8 | depth[n] as u64;
+    }
+    let downheap = |heap: &mut [usize], heap_len: usize, key: &[u64], mut k: usize| {
         let v = heap[k];
         let mut j = k << 1;
         while j <= heap_len {
-            if j < heap_len && smaller(f, depth, heap[j + 1], heap[j]) {
+            if j < heap_len && key[heap[j + 1]] <= key[heap[j]] {
                 j += 1;
             }
-            if smaller(f, depth, v, heap[j]) {
+            if key[v] <= key[heap[j]] {
                 break;
             }
             heap[k] = heap[j];
@@ -181,14 +186,14 @@ pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
     };
 
     for k in (1..=heap_len / 2).rev() {
-        downheap(&mut heap, heap_len, &f, &depth, k);
+        downheap(&mut heap, heap_len, &key, k);
     }
     let mut node = elems;
     loop {
         let n = heap[1];
         heap[1] = heap[heap_len];
         heap_len -= 1;
-        downheap(&mut heap, heap_len, &f, &depth, 1);
+        downheap(&mut heap, heap_len, &key, 1);
         let m = heap[1];
         heap_max -= 1;
         heap[heap_max] = n;
@@ -196,11 +201,12 @@ pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
         heap[heap_max] = m;
         f[node] = f[n] + f[m];
         depth[node] = depth[n].max(depth[m]) + 1;
+        key[node] = (f[node] as u64) << 8 | depth[node] as u64;
         dad[n] = node;
         dad[m] = node;
         heap[1] = node;
         node += 1;
-        downheap(&mut heap, heap_len, &f, &depth, 1);
+        downheap(&mut heap, heap_len, &key, 1);
         if heap_len < 2 {
             break;
         }

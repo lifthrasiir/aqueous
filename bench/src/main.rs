@@ -9,15 +9,18 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use flate_recons::Hints;
 use rayon::prelude::*;
 
 const USAGE: &str = "\
-usage: flate-recons-bench [-i DIR] [-s held|train|all] [-t TOOL,...] [-o TSV] [--phases]
+usage: flate-recons-bench [-i DIR] [-s held|train|all] [-t TOOL,...] [-o TSV] [--phases] [--hints] [--no-zlib]
   DIR   samples cached by flate-recons-train (default ../cache/samples)
   -s    which split to run (default held: every fifth input file, as in training)
   -t    tools (default recons,preflate,preflate-rs)
   -o    per-stream results (default ../cache/bench.tsv)
   --phases  instead, time the phases of flate-recons (CPU time summed over streams)
+  --hints   give flate-recons the zlib header the zlib-family encoders would have written
+  --no-zlib turn flate-recons' zlib emulation off
 ";
 
 mod ffi {
@@ -81,10 +84,16 @@ impl Tool {
     }
 
     /// Splits `raw` into (plain text, reconstruction data).
-    fn split(self, raw: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    fn split(self, raw: &[u8], hints: Hints, zlib: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
         match self {
             Tool::Recons => {
-                let (data, meta) = flate_recons::deconstruct(raw).map_err(|e| e.to_string())?;
+                let opts = flate_recons::Options {
+                    hints,
+                    zlib,
+                    ..Default::default()
+                };
+                let (data, meta) =
+                    flate_recons::deconstruct_with(raw, &opts).map_err(|e| e.to_string())?;
                 Ok((
                     data,
                     flate_recons::model::pack(&meta, flate_recons::Priors::builtin()),
@@ -157,8 +166,8 @@ struct Outcome {
     join: Duration,
 }
 
-fn run(tool: Tool, raw: &[u8], expect: &[u8]) -> Outcome {
-    let (r, split) = timed(|| tool.split(raw));
+fn run(tool: Tool, raw: &[u8], expect: &[u8], hints: Hints, zlib: bool) -> Outcome {
+    let (r, split) = timed(|| tool.split(raw, hints, zlib));
     let (plain, diff) = match r {
         Ok(x) => x,
         Err(e) => {
@@ -217,6 +226,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tools = vec![Tool::Recons, Tool::Preflate, Tool::PreflateRs];
     let mut tsv = PathBuf::from("../cache/bench.tsv");
     let mut phases_only = false;
+    let mut use_hints = false;
+    let mut use_zlib = true;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || {
@@ -228,6 +239,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "-s" => split = val()?,
             "-o" => tsv = val()?.into(),
             "--phases" => phases_only = true,
+            "--hints" => use_hints = true,
+            "--no-zlib" => use_zlib = false,
             "-t" => {
                 tools = val()?
                     .split(',')
@@ -245,7 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let samples = load(&dir, &split)?;
     eprintln!("{} streams", samples.len());
     if phases_only {
-        phases(&samples);
+        phases(&samples, use_zlib);
         return Ok(());
     }
 
@@ -256,7 +269,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let expect = flate_recons::deflate::parse(&s.raw)
                 .map(|(_, d)| d)
                 .unwrap_or_default();
-            (i, tools.iter().map(|&t| run(t, &s.raw, &expect)).collect())
+            let h = if use_hints {
+                hints_for(&s.specs)
+            } else {
+                Hints::default()
+            };
+            (
+                i,
+                tools.iter().map(|&t| run(t, &s.raw, &expect, h, use_zlib)).collect(),
+            )
         })
         .collect();
 
@@ -369,7 +390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// CPU time of each phase of flate-recons, summed over all streams.
-fn phases(samples: &[Sample]) {
+fn phases(samples: &[Sample], zlib: bool) {
     use flate_recons::{Priors, coder::Recorder, matchfind::Matcher, model};
     const NAMES: [&str; 7] = [
         "parse+check",
@@ -389,11 +410,13 @@ fn phases(samples: &[Sample]) {
             let (parsed, t0) = timed(|| flate_recons::Parsed::new(&s.raw).unwrap());
             t[0] = t0;
             t[1] = timed(|| Matcher::new(&parsed.data)).1;
-            let (cfg, t2) = timed(|| parsed.best_config(configs, priors).unwrap());
+            let ((_, log), t2) = timed(|| parsed.best(configs, priors, zlib.then_some(&Hints::default())).unwrap());
             t[2] = t2;
             let (rec, t3) = timed(|| {
                 let mut rec = Recorder::default();
-                parsed.code(&mut rec, cfg).unwrap();
+                for d in log {
+                    flate_recons::Coder::bit(&mut rec, d.ctx, d.bit);
+                }
                 rec
             });
             t[3] = t3;
@@ -421,4 +444,46 @@ fn phases(samples: &[Sample]) {
             plain as f64 / 1e6 / d.as_secs_f64()
         );
     }
+}
+
+/// The zlib header that the zlib-family library named by the first of `specs` would have
+/// written (deflate.c's level_flags), as hints; nothing for other encoders.
+fn hints_for(specs: &str) -> Hints {
+    let spec = specs.split(' ').next().unwrap_or("");
+    let (backend, params) = spec.split_once(':').unwrap_or((spec, ""));
+    let zlib_family = [
+        "zlib",
+        "zlib-ng",
+        "zlib-chromium",
+        "zlib-chromium-rk",
+        "zlib-cloudflare",
+        "zlib-cloudflare-generic",
+        "zlib-rs",
+        "pako",
+    ];
+    if !zlib_family.contains(&backend) {
+        return Hints::default();
+    }
+    let (mut level, mut strategy, mut wbits) = (6u16, "default", 15u16);
+    for kv in params.split(',').filter(|kv| !kv.is_empty()) {
+        match kv.split_once('=') {
+            Some(("level", v)) => level = v.parse().unwrap(),
+            Some(("strategy", v)) => strategy = v,
+            Some(("wbits", v)) => wbits = v.parse::<u16>().unwrap().max(9),
+            _ => {}
+        }
+    }
+    let special = matches!(strategy, "huffman" | "rle" | "fixed");
+    let flevel = if special || level < 2 {
+        0
+    } else if level < 6 {
+        1
+    } else if level == 6 {
+        2
+    } else {
+        3
+    };
+    let mut h: u16 = (0x08 | ((wbits - 8) << 4)) << 8 | flevel << 6;
+    h += 31 - (h % 31);
+    Hints::zlib_header(h.to_be_bytes())
 }

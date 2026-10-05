@@ -53,7 +53,10 @@ type Trees = std::sync::Arc<(Vec<u8>, Vec<u8>)>;
 pub struct Matcher {
     /// Previous position with the same three leading bytes.
     prev: Vec<u32>,
+    /// Search state per position, when searches are cached (empty otherwise).
     slots: Vec<Slot>,
+    /// Without a cache: the last two searches, (position, depth, nice, result).
+    memo: [(usize, usize, usize, Found); 2],
     recs: Vec<Rec>,
     /// Predicted Huffman trees by (block start, token count): when deconstructing, a block's
     /// tokens are the same in every pass.
@@ -62,38 +65,64 @@ pub struct Matcher {
 
 /// For every position, the previous position with the same three leading bytes.
 fn build_chain(data: &[u8]) -> Vec<u32> {
-    let k = 3;
     let n = data.len();
-    let mut prev = vec![NONE; n];
-    if n < k {
-        return prev;
+    if n < 3 {
+        return vec![NONE; n];
     }
     // Open addressing from keys to last positions, packed as key << 32 | position + 1 so that
     // a probe touches one word; 0 marks a free slot.
-    let bits = (2 * (n - k + 1))
-        .next_power_of_two()
-        .max(1024)
-        .trailing_zeros();
+    // At most a quarter full (fewer probes), unless that takes more than 4M slots (32 MiB);
+    // never more than half full.
+    let slots = (4 * (n - 2)).min(1 << 22).max(2 * (n - 2));
+    let bits = slots.next_power_of_two().max(1024).trailing_zeros();
     let mask = (1usize << bits) - 1;
     let mut table = vec![0u64; mask + 1];
-    let key = |i: usize| data[i] as u32 | (data[i + 1] as u32) << 8 | (data[i + 2] as u32) << 16;
-    for (i, p) in prev.iter_mut().enumerate().take(n - k + 1) {
-        let k = key(i);
+    let mut prev = Vec::with_capacity(n);
+    let mut insert = |i: usize, k: u32| {
         let mut h = (k.wrapping_mul(0x9e37_79b1) >> (32 - bits)) as usize;
-        loop {
+        let p = loop {
             let e = table[h];
             if e == 0 {
-                break;
+                break NONE;
             }
             if (e >> 32) as u32 == k {
-                *p = (e as u32) - 1;
-                break;
+                break e as u32 - 1;
             }
             h = (h + 1) & mask;
-        }
+        };
         table[h] = (k as u64) << 32 | (i as u64 + 1);
+        p
+    };
+    // Keys by 4-byte loads while they fit, the last one byte by byte.
+    for (i, w) in data.windows(4).enumerate() {
+        let k = u32::from_le_bytes(w.try_into().unwrap()) & 0xff_ffff;
+        prev.push(insert(i, k));
     }
+    let i = n - 3;
+    let k = data[i] as u32 | (data[i + 1] as u32) << 8 | (data[i + 2] as u32) << 16;
+    prev.push(insert(i, k));
+    prev.resize(n, NONE);
     prev
+}
+
+/// Length of the common prefix of `a` and `b`.
+#[inline]
+fn common_slices(a: &[u8], b: &[u8]) -> usize {
+    let max = a.len().min(b.len());
+    let (a, b) = (&a[..max], &b[..max]);
+    let mut l = 0;
+    for (x, y) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
+        let x = u64::from_le_bytes(x.try_into().unwrap());
+        let y = u64::from_le_bytes(y.try_into().unwrap());
+        if x != y {
+            return l + ((x ^ y).trailing_zeros() / 8) as usize;
+        }
+        l += 8;
+    }
+    while l < max && a[l] == b[l] {
+        l += 1;
+    }
+    l
 }
 
 /// Length of the common prefix of `d[a..]` and `d[p..]`, up to `max`.
@@ -115,10 +144,22 @@ fn common(d: &[u8], a: usize, p: usize, max: usize) -> usize {
 }
 
 impl Matcher {
+    /// A matcher caching every search, for several passes and configurations over `data`.
     pub fn new(data: &[u8]) -> Self {
         Matcher {
-            prev: build_chain(data),
             slots: vec![UNSEARCHED; data.len() + 1],
+            ..Self::single(data)
+        }
+    }
+
+    /// A matcher for a single pass with one configuration (reconstruction): searches walk
+    /// the chain directly, and only the last two are remembered (a literal's next position
+    /// is searched again as the next token's).
+    pub fn single(data: &[u8]) -> Self {
+        Matcher {
+            prev: build_chain(data),
+            slots: vec![],
+            memo: [(usize::MAX, 0, 0, Found::default()); 2],
             recs: vec![],
             trees: Default::default(),
         }
@@ -142,6 +183,9 @@ impl Matcher {
     /// The closest longest match among the first `depth` candidates of `data[p..]`, stopping
     /// early once a match reaches `nice`.
     pub fn longest(&mut self, d: &[u8], p: usize, depth: usize, nice: usize) -> Found {
+        if self.slots.is_empty() {
+            return self.longest_direct(d, p, depth, nice);
+        }
         let mut slot = self.slots[p];
         if slot.start == NONE {
             let max = (d.len() - p).min(MAX_MATCH);
@@ -229,15 +273,75 @@ impl Matcher {
     }
 
     /// [`crate::predict::predict_trees`] of the block of `tokens` starting at `start`, memoized.
-    pub(crate) fn trees(
-        &mut self,
-        start: usize,
-        tokens: &[crate::deflate::Token],
-    ) -> Trees {
+    pub(crate) fn trees(&mut self, start: usize, tokens: &[crate::deflate::Token]) -> Trees {
+        // A single pass never asks twice.
+        if self.slots.is_empty() {
+            return std::sync::Arc::new(crate::predict::predict_trees(tokens));
+        }
         self.trees
             .entry((start, tokens.len()))
             .or_insert_with(|| std::sync::Arc::new(crate::predict::predict_trees(tokens)))
             .clone()
+    }
+
+    /// The `q`-quantile (0..=1) of the chain indices of matches `(position, distance)`: how
+    /// many closer candidates each match's source had. O(1) per match, by numbering positions
+    /// within their chains.
+    pub fn depth_quantile(&self, matches: impl Iterator<Item = (usize, usize)>, q: f64) -> usize {
+        let mut seq = vec![0u32; self.prev.len()];
+        for i in 0..self.prev.len() {
+            if self.prev[i] != NONE {
+                seq[i] = seq[self.prev[i] as usize] + 1;
+            }
+        }
+        let mut depths: Vec<u32> = matches
+            .filter(|&(p, dist)| p < seq.len() && dist <= p)
+            .map(|(p, dist)| seq[p].saturating_sub(seq[p - dist] + 1))
+            .collect();
+        if depths.is_empty() {
+            return 0;
+        }
+        let k = ((depths.len() - 1) as f64 * q) as usize;
+        *depths.select_nth_unstable(k).1 as usize
+    }
+
+    fn longest_direct(&mut self, d: &[u8], p: usize, depth: usize, nice: usize) -> Found {
+        if let Some(m) = self
+            .memo
+            .iter()
+            .find(|m| (m.0, m.1, m.2) == (p, depth, nice))
+        {
+            return m.3;
+        }
+        let max = (d.len() - p).min(MAX_MATCH);
+        let mut best = Found::default();
+        if max >= 3 {
+            let dp = &d[p..p + max];
+            // A candidate can only do better if it agrees with p up to best.len included:
+            // checking its last two of those bytes first rejects most at once, as zlib does.
+            let mut end = [0u8; 2];
+            self.walk(p, depth, |c, _| {
+                let dc = &d[c..c + max];
+                if best.len > 0 && (dc[best.len] != end[1] || dc[best.len - 1] != end[0]) {
+                    return true;
+                }
+                let l = common_slices(dc, dp);
+                if l > best.len {
+                    best = Found {
+                        len: l,
+                        dist: p - c,
+                    };
+                    if l >= nice || l >= max {
+                        return false;
+                    }
+                    end = [dp[l - 1], dp[l]];
+                }
+                true
+            });
+        }
+        self.memo[1] = self.memo[0];
+        self.memo[0] = (p, depth, nice, best);
+        best
     }
 
     /// Rank of distance `dist` among the candidates of `p` matching at least `len` bytes,
@@ -267,8 +371,10 @@ impl Matcher {
         limit: usize,
     ) -> Option<usize> {
         let (mut r, mut found) = (0, None);
+        let dp = &d[p..p + len];
         self.walk(p, limit, |c, _| {
-            if common(d, c, p, len) >= len {
+            let dc = &d[c..c + len];
+            if dc[len - 1] == dp[len - 1] && common_slices(dc, dp) >= len {
                 if r == rank {
                     found = Some(p - c);
                     return false;
@@ -321,6 +427,7 @@ mod tests {
             })
             .collect();
         let mut m = Matcher::new(&data);
+        let mut single = Matcher::single(&data);
         for p in (0..data.len()).step_by(7) {
             for depth in [16, 1, 64, 2, 5, 4096] {
                 for nice in [3, 4, 8, 32, 258] {
@@ -346,6 +453,7 @@ mod tests {
                             }
                         }
                     }
+                    assert_eq!(single.longest(&data, p, depth, nice), best, "single p={p}");
                     assert_eq!(
                         m.longest(&data, p, depth, nice),
                         best,

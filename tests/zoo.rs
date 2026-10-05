@@ -82,3 +82,199 @@ fn zlib_headers_are_predicted() {
         assert!(wrong.is_empty(), "level {level}: {wrong:?}");
     }
 }
+
+fn zlib_params(enc: &flate_zoo::Encoder) -> Option<flate_recons::zlib::Params> {
+    use flate_recons::zlib::{Params, Strategy};
+    let level = enc.get("level")? as u8;
+    let strategy = Strategy::ALL[enc.get("strategy")? as usize];
+    let wbits = (enc.get("wbits")? as u8).max(9);
+    let mem = enc.get("mem")? as u8;
+    (level > 0).then_some(Params {
+        level,
+        strategy,
+        wbits,
+        mem,
+    })
+}
+
+fn zlib_inputs() -> Vec<Vec<u8>> {
+    let mut lcg = 7u32;
+    let mut mixed = include_bytes!("../src/predict.rs").repeat(6);
+    // Incompressible stretches make zlib emit stored blocks in between.
+    mixed.extend((0..40_000).map(|_| {
+        lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
+        (lcg >> 24) as u8
+    }));
+    mixed.extend(include_bytes!("../src/deflate.rs").repeat(4));
+    vec![
+        b"a".to_vec(),
+        b"abcabcabd".repeat(20_000),
+        vec![0; 100_000],
+        mixed,
+    ]
+}
+
+/// The emulation reproduces every token of real zlib output (all levels, strategies, window
+/// sizes and memory levels), and its block size rule holds.
+#[test]
+fn zlib_emulation_is_exact() {
+    use flate_recons::deflate::Body;
+    let mut failures = vec![];
+    for enc in presets_of(flate_zoo::backend("zlib").unwrap(), Sweep::OneAtATime) {
+        if enc.get("inbuf") != Some(0) || enc.get("outbuf") != Some(0) {
+            continue;
+        }
+        let Some(p) = zlib_params(&enc) else { continue };
+        for input in zlib_inputs() {
+            let raw = enc.compress(&input).unwrap();
+            let (stream, data) = flate_recons::deflate::parse(&raw).unwrap();
+            let d = flate_recons::detect::trial(&stream, &data, p, usize::MAX, usize::MAX);
+            let fixed_strategy = p.strategy == flate_recons::zlib::Strategy::Fixed;
+            let blocks_ok = stream.blocks.iter().all(|b| match &b.body {
+                Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {
+                    let fixed = matches!(b.body, Body::Fixed { .. });
+                    (tokens.len() == p.block_tokens() || b.last)
+                        && fixed
+                            == (fixed_strategy || flate_recons::predict::zlib_prefers_fixed(tokens))
+                }
+                Body::Stored { .. } => true,
+            });
+            // zlib alone regenerates the whole stream.
+            let mut e = flate_recons::zlib::Emulator::new(&data, p);
+            let mut generated = vec![];
+            let mut pos = 0;
+            while let Some(g) = flate_recons::predict::zlib_block(&mut e, pos) {
+                pos += match &g.body {
+                    Body::Stored { len, .. } => *len as usize,
+                    Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {
+                        tokens.iter().map(|t| t.span()).sum()
+                    }
+                };
+                let last = g.last;
+                generated.push(g);
+                if last {
+                    break;
+                }
+            }
+            let regenerated = generated == stream.blocks;
+            match d {
+                Some(d) if d.misses == 0 && blocks_ok && regenerated => {}
+                _ => failures.push(format!(
+                    "{enc} on {} bytes: {d:?}, blocks ok: {blocks_ok}, regenerated: {regenerated}",
+                    input.len()
+                )),
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// The SPMD emulation of several deflate_slow levels counts exactly the misses of separate
+/// emulations, on zlib's own output and on other encoders'.
+#[test]
+fn multi_slow_matches_single() {
+    use flate_recons::detect;
+    use flate_recons::zlib::{Params, Strategy};
+    let inputs = [
+        include_bytes!("../src/predict.rs").repeat(6),
+        b"abcabcabd".repeat(20_000),
+    ];
+    let specs = [
+        "zlib:level=4",
+        "zlib:level=6",
+        "zlib:level=9",
+        "zlib:level=2",
+        "zlib:strategy=filtered",
+        "zlib:wbits=10",
+        "zlib-ng:level=6",
+        "zlib-chromium:level=9",
+        "libdeflate:level=6",
+    ];
+    let lanes: Vec<Params> = (4..=9)
+        .flat_map(|level| {
+            [Strategy::Default, Strategy::Filtered].map(|strategy| Params {
+                level,
+                strategy,
+                ..Params::default()
+            })
+        })
+        .collect();
+    for input in &inputs {
+        for spec in specs {
+            let raw = spec
+                .parse::<flate_zoo::Encoder>()
+                .unwrap()
+                .compress(input)
+                .unwrap();
+            let (stream, data) = flate_recons::deflate::parse(&raw).unwrap();
+            for wbits in [15, 10] {
+                let lanes: Vec<Params> = lanes.iter().map(|&p| Params { wbits, ..p }).collect();
+                let multi = detect::multi_trial(&stream, &data, &lanes, usize::MAX, usize::MAX);
+                assert_eq!(multi.len(), lanes.len(), "{spec}");
+                for (m, &p) in multi.iter().zip(&lanes) {
+                    let single = detect::trial(&stream, &data, p, usize::MAX, usize::MAX).unwrap();
+                    assert_eq!(
+                        (m.params, m.tokens, m.misses),
+                        (p, single.tokens, single.misses),
+                        "{spec} {p}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The zlib header zlib itself writes for these parameters (deflate.c).
+fn zlib_header_for(p: flate_recons::zlib::Params) -> [u8; 2] {
+    use flate_recons::zlib::Strategy;
+    let special = matches!(
+        p.strategy,
+        Strategy::HuffmanOnly | Strategy::Rle | Strategy::Fixed
+    );
+    let flevel = if special || p.level < 2 {
+        0
+    } else if p.level < 6 {
+        1
+    } else if p.level == 6 {
+        2
+    } else {
+        3
+    };
+    let mut h: u16 = (0x08 | ((p.wbits as u16 - 8) << 4)) << 8 | flevel << 6;
+    h += 31 - (h % 31);
+    h.to_be_bytes()
+}
+
+#[test]
+fn zlib_header_hints() {
+    use flate_recons::Hints;
+    assert_eq!(Hints::zlib_header([0x78, 0x9c]).zlib_flevel, Some(2));
+    assert_eq!(Hints::zlib_header([0x78, 0x9c]).wbits, Some(15));
+    assert_eq!(Hints::zlib_header([0x78, 0x01]).zlib_flevel, Some(0));
+    assert_eq!(Hints::zlib_header([0x78, 0xda]).zlib_flevel, Some(3));
+    assert_eq!(Hints::zlib_header([0x78, 0x5e]).zlib_flevel, Some(1));
+    assert_eq!(Hints::zlib_header([0x78, 0x00]), Hints::default());
+
+    // With the hints of zlib's own header, every preset is still reproduced exactly.
+    let input = include_bytes!("../src/predict.rs").repeat(4);
+    for enc in presets_of(flate_zoo::backend("zlib").unwrap(), Sweep::OneAtATime) {
+        if enc.get("inbuf") != Some(0) || enc.get("outbuf") != Some(0) {
+            continue;
+        }
+        let Some(p) = zlib_params(&enc) else { continue };
+        let hints = Hints::zlib_header(zlib_header_for(p));
+        assert!(hints.allows(&p), "{enc}");
+        let raw = enc.compress(&input).unwrap();
+        let opts = flate_recons::Options {
+            hints,
+            ..Default::default()
+        };
+        let (data, meta) = flate_recons::deconstruct_with(&raw, &opts).unwrap();
+        assert_eq!(
+            flate_recons::reconstruct(&data, &meta).unwrap(),
+            raw,
+            "{enc}"
+        );
+        assert!(meta.len() < 100, "{enc}: {} decisions", meta.len());
+    }
+}
