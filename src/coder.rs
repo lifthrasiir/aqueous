@@ -46,6 +46,90 @@ impl Metadata {
     }
 }
 
+/// Decisions in coding order, two bytes each, in chunks (no reallocation, little slack).
+#[derive(Debug, Default)]
+pub struct Log {
+    /// Full chunks of `LOG_CHUNK`, then the current one.
+    chunks: Vec<Vec<u16>>,
+    cur: Vec<u16>,
+}
+
+/// The decision bit goes above the context id.
+const _: () = assert!(crate::ctx::NUM_CTX <= 1 << 15);
+
+const LOG_CHUNK: usize = 1 << 16;
+
+fn unpack_decision(v: u16) -> Decision {
+    Decision {
+        ctx: Ctx(v & 0x7fff),
+        bit: v >> 15 != 0,
+    }
+}
+
+impl Log {
+    #[inline]
+    pub fn push(&mut self, d: Decision) {
+        // The first chunk grows as usual, for the many short logs.
+        self.cur.push(d.ctx.0 | (d.bit as u16) << 15);
+        if self.cur.len() == LOG_CHUNK {
+            let full = std::mem::replace(&mut self.cur, Vec::with_capacity(LOG_CHUNK));
+            self.chunks.push(full);
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.chunks.len() * LOG_CHUNK + self.cur.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = Decision> + '_ {
+        self.chunks
+            .iter()
+            .chain([&self.cur])
+            .flatten()
+            .map(|&v| unpack_decision(v))
+    }
+}
+
+/// Consumes the log, freeing it chunk by chunk.
+impl IntoIterator for Log {
+    type Item = Decision;
+    type IntoIter = std::iter::Map<
+        std::iter::Flatten<
+            std::iter::Chain<std::vec::IntoIter<Vec<u16>>, std::iter::Once<Vec<u16>>>,
+        >,
+        fn(u16) -> Decision,
+    >;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.chunks
+            .into_iter()
+            .chain(std::iter::once(self.cur))
+            .flatten()
+            .map(unpack_decision)
+    }
+}
+
+/// Splits the log by channel, allocating each exactly.
+impl From<Log> for Metadata {
+    fn from(log: Log) -> Metadata {
+        let mut n = [0; Channel::COUNT];
+        for d in log.iter() {
+            n[d.ctx.channel() as usize] += 1;
+        }
+        let mut meta = Metadata {
+            channels: n.map(Vec::with_capacity),
+        };
+        for d in log {
+            meta.channels[d.ctx.channel() as usize].push(d);
+        }
+        meta
+    }
+}
+
 /// Records decisions while deconstructing.
 #[derive(Default)]
 pub struct Recorder {
@@ -170,5 +254,21 @@ mod tests {
             assert_eq!(bypass(&mut play, Channel::Block, 16, 0), v & 0xffff);
         }
         assert!(play.exhausted() && !play.error);
+    }
+
+    #[test]
+    fn log_round_trips() {
+        let mut log = Log::default();
+        let mut rec = Recorder::default();
+        for i in 0..3 * LOG_CHUNK + 5 {
+            let d = Decision {
+                ctx: Ctx((i * 7 % ctx::NUM_CTX) as u16),
+                bit: i % 3 == 0,
+            };
+            log.push(d);
+            rec.bit(d.ctx, d.bit);
+        }
+        assert_eq!(log.len(), 3 * LOG_CHUNK + 5);
+        assert_eq!(Metadata::from(log), rec.meta);
     }
 }

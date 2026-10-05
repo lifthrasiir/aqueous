@@ -32,7 +32,7 @@ pub mod zlib;
 
 use std::fmt;
 
-pub use coder::{Coder, Decision, Metadata};
+pub use coder::{Coder, Decision, Log, Metadata};
 pub use detect::Hints;
 pub use model::Priors;
 pub use predict::Config;
@@ -117,36 +117,59 @@ impl Parsed {
         self.code_exact(c, cfg).map(|_| ())
     }
 
+    /// The match finder, built on first use. Short streams are coded in full under every
+    /// configuration, so their searches are cached (about 23 B per byte of data); long ones
+    /// are ranked on a prefix and coded in full only a few times, so they walk the chains
+    /// directly.
+    fn matcher(&self) -> std::sync::MutexGuard<'_, Option<matchfind::Matcher>> {
+        let mut m = self.matcher.lock().unwrap();
+        if m.is_none() {
+            *m = Some(if self.data.len() < 2 * PREFIX_BYTES {
+                matchfind::Matcher::new(&self.data)
+            } else {
+                matchfind::Matcher::single(&self.data)
+            });
+        }
+        m
+    }
+
     /// [`Parsed::code`], returning whether zlib emulation reproduced every block.
     fn code_exact<C: Coder>(&self, c: &mut C, cfg: Config) -> Result<bool> {
-        let mut m = self.matcher.lock().unwrap();
+        let mut m = self.matcher();
+        // Checks every block against the stream.
         let coded = predict::code_stream(c, &self.data, Some(&self.stream), Some(cfg), &mut m, 1)?;
-        if coded.stream != self.stream {
-            return Err(Error::Inconsistent);
-        }
         Ok(cfg.zlib.is_some() && coded.exact_blocks == self.stream.blocks.len())
     }
 
     /// The `q`-quantile of how deep in the exact candidate chains the stream's matches are.
     fn depth_quantile(&self, q: f64) -> usize {
-        let mut m = self.matcher.lock().unwrap();
-        let m = m.get_or_insert_with(|| matchfind::Matcher::new(&self.data));
-        let mut pos = 0;
-        let mut matches = vec![];
-        for b in &self.stream.blocks {
-            match &b.body {
-                deflate::Body::Stored { len, .. } => pos += *len as usize,
-                deflate::Body::Fixed { tokens } | deflate::Body::Dynamic { tokens, .. } => {
-                    for &t in tokens {
-                        if let deflate::Token::Match { dist, .. } = t {
-                            matches.push((pos, dist as usize));
-                        }
+        // (position, distance) of every match.
+        let blocks = &self.stream.blocks;
+        let (mut bi, mut ti, mut pos) = (0, 0, 0);
+        let matches = std::iter::from_fn(move || {
+            loop {
+                match &blocks.get(bi)?.body {
+                    deflate::Body::Stored { len, .. } => {
+                        pos += *len as usize;
+                        bi += 1;
+                    }
+                    deflate::Body::Fixed { tokens } | deflate::Body::Dynamic { tokens, .. } => {
+                        let Some(&t) = tokens.get(ti) else {
+                            (bi, ti) = (bi + 1, 0);
+                            continue;
+                        };
+                        ti += 1;
+                        let p = pos;
                         pos += t.span();
+                        if let deflate::Token::Match { dist, .. } = t {
+                            return Some((p, dist as usize));
+                        }
                     }
                 }
             }
-        }
-        m.depth_quantile(matches.into_iter(), q)
+        });
+        let mut m = self.matcher();
+        m.as_mut().unwrap().depth_quantile(&self.data, matches, q)
     }
 
     /// The stream cut after (about) `bytes` of data, for ranking configurations cheaply: the
@@ -209,10 +232,10 @@ impl Parsed {
         cfg: Config,
         priors: &Priors,
         budget: f64,
-    ) -> Result<Option<(f64, Vec<Decision>, bool)>> {
+    ) -> Result<Option<(f64, Log, bool)>> {
         struct Tee {
             cost: model::CostCoder,
-            log: Vec<Decision>,
+            log: Log,
         }
         impl Coder for Tee {
             fn bit(&mut self, ctx: ctx::Ctx, bit: bool) -> bool {
@@ -225,7 +248,7 @@ impl Parsed {
         }
         let mut c = Tee {
             cost: model::CostCoder::new(priors),
-            log: vec![],
+            log: Log::default(),
         };
         c.cost.budget = budget;
         match self.code_exact(&mut c, cfg) {
@@ -249,13 +272,13 @@ impl Parsed {
         configs: &[Config],
         priors: &Priors,
         hints: Option<&Hints>,
-    ) -> Result<(Config, Vec<Decision>)> {
+    ) -> Result<(Config, Log)> {
         let generic = configs.first().copied().unwrap_or_default();
         let zcfg = |p| Config {
             zlib: Some(p),
             ..generic
         };
-        let mut best: Option<(f64, Config, Vec<Decision>)> = None;
+        let mut best: Option<(f64, Config, Log)> = None;
         let mut tried = None;
 
         // zlib, first with its usual settings only, guessed from the first tokens: if that
@@ -354,20 +377,27 @@ pub fn deconstruct(raw: &[u8]) -> Result<(Vec<u8>, Metadata)> {
 }
 
 pub fn deconstruct_with(raw: &[u8], opts: &Options) -> Result<(Vec<u8>, Metadata)> {
-    let mut rec = coder::Recorder::default();
-    let data = deconstruct_into(raw, opts, &mut rec)?;
-    Ok((data, rec.meta))
+    let (data, log) = deconstruct_log(raw, opts)?;
+    Ok((data, log.into()))
 }
 
-/// Like [`deconstruct_with`], but sends the decisions to `c` (e.g. an arithmetic encoder).
+/// Like [`deconstruct_with`], but sends the decisions to `c` (e.g. an arithmetic encoder,
+/// or [`model::Packer`]).
 pub fn deconstruct_into<C: Coder>(raw: &[u8], opts: &Options, c: &mut C) -> Result<Vec<u8>> {
-    let parsed = Parsed::new(raw)?;
-    let hints = opts.zlib.then_some(&opts.hints);
-    let (_, log) = parsed.best(&opts.configs, opts.priors, hints)?;
+    let (data, log) = deconstruct_log(raw, opts)?;
     for d in log {
         c.bit(d.ctx, d.bit);
     }
-    Ok(parsed.data)
+    Ok(data)
+}
+
+/// The data and the decisions in coding order, with nothing else kept.
+fn deconstruct_log(raw: &[u8], opts: &Options) -> Result<(Vec<u8>, Log)> {
+    let parsed = Parsed::new(raw)?;
+    let hints = opts.zlib.then_some(&opts.hints);
+    let (_, log) = parsed.best(&opts.configs, opts.priors, hints)?;
+    let Parsed { data, .. } = parsed;
+    Ok((data, log))
 }
 
 /// Rebuilds the exact DEFLATE stream from the decompressed data and the metadata.

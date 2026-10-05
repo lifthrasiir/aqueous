@@ -14,6 +14,7 @@ use rayon::prelude::*;
 
 const USAGE: &str = "\
 usage: flate-recons-bench [-i DIR] [-s held|train|all] [-t TOOL,...] [-o TSV] [--phases] [--hints] [--no-zlib]
+       flate-recons-bench -f RAW [-t TOOL,...] [-j THREADS] [--no-zlib]
   DIR   samples cached by flate-recons-train (default ../cache/samples)
   -s    which split to run (default held: every fifth input file, as in training)
   -t    tools (default recons,preflate,preflate-rs)
@@ -21,6 +22,10 @@ usage: flate-recons-bench [-i DIR] [-s held|train|all] [-t TOOL,...] [-o TSV] [-
   --phases  instead, time the phases of flate-recons (CPU time summed over streams)
   --hints   give flate-recons the zlib header the zlib-family encoders would have written
   --no-zlib turn flate-recons' zlib emulation off
+  -f    instead, run the tools on one (long) raw DEFLATE stream and report wall and process
+        CPU times; run one tool per process for its peak RSS
+  -j    threads for flate-recons' reconstruction in -f mode (default: available parallelism)
+  PREFLATE_RS_CHUNK  preflate-rs' plain text limit per chunk in -f mode (default 128 MiB)
 ";
 
 mod ffi {
@@ -61,6 +66,26 @@ fn thread_cpu() -> Duration {
     Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32)
 }
 
+/// CPU time of the whole process (all threads).
+fn process_cpu() -> Duration {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    let tv = |t: libc::timeval| Duration::new(t.tv_sec as u64, t.tv_usec as u32 * 1000);
+    tv(ru.ru_utime) + tv(ru.ru_stime)
+}
+
+/// Peak resident set size of the process, in bytes.
+fn peak_rss() -> u64 {
+    let mut ru: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) };
+    // Bytes on macOS, KiB elsewhere.
+    if cfg!(target_os = "macos") {
+        ru.ru_maxrss as u64
+    } else {
+        ru.ru_maxrss as u64 * 1024
+    }
+}
+
 fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
     let t = thread_cpu();
     let r = f();
@@ -92,12 +117,10 @@ impl Tool {
                     zlib,
                     ..Default::default()
                 };
-                let (data, meta) =
-                    flate_recons::deconstruct_with(raw, &opts).map_err(|e| e.to_string())?;
-                Ok((
-                    data,
-                    flate_recons::model::pack(&meta, flate_recons::Priors::builtin()),
-                ))
+                let mut packer = flate_recons::model::Packer::new(opts.priors);
+                let data = flate_recons::deconstruct_into(raw, &opts, &mut packer)
+                    .map_err(|e| e.to_string())?;
+                Ok((data, packer.finish()))
             }
             Tool::Preflate => unsafe {
                 let (mut p, mut pn, mut d, mut dn) =
@@ -234,6 +257,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut phases_only = false;
     let mut use_hints = false;
     let mut use_zlib = true;
+    let mut file = None;
+    let mut threads = flate_recons::default_threads();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         let mut val = || {
@@ -244,6 +269,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "-i" => dir = val()?.into(),
             "-s" => split = val()?,
             "-o" => tsv = val()?.into(),
+            "-f" => file = Some(PathBuf::from(val()?)),
+            "-j" => threads = val()?.parse()?,
             "--phases" => phases_only = true,
             "--hints" => use_hints = true,
             "--no-zlib" => use_zlib = false,
@@ -260,6 +287,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => return Err(USAGE.into()),
         }
+    }
+    if let Some(f) = file {
+        return run_file(&f, &tools, use_zlib, threads);
     }
     let samples = load(&dir, &split)?;
     eprintln!("{} streams", samples.len());
@@ -500,4 +530,128 @@ fn hints_for(specs: &str) -> Hints {
     let mut h: u16 = (0x08 | ((wbits - 8) << 4)) << 8 | flevel << 6;
     h += 31 - (h % 31);
     Hints::zlib_header(h.to_be_bytes())
+}
+
+/// preflate-rs' whole-stream API stops at `plain_text_limit` (128 MiB by default, or
+/// `$PREFLATE_RS_CHUNK`), so long streams go through its stream processor chunk by chunk, as
+/// its container does. The chunks'
+/// reconstruction data are concatenated, each after its own and its plain text's length.
+fn preflate_rs_split_chunked(raw: &[u8]) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let config = preflate_rs::PreflateConfig {
+        verify_compression: false,
+        plain_text_limit: std::env::var("PREFLATE_RS_CHUNK")
+            .map_or(128 << 20, |v| v.parse().unwrap()),
+        ..Default::default()
+    };
+    let mut state = preflate_rs::PreflateStreamProcessor::new(&config);
+    let (mut plain, mut diff, mut pos) = (vec![], vec![], 0);
+    while !state.is_done() {
+        let r = state
+            .decompress(&raw[pos..])
+            .map_err(|e| format!("{e:?}"))?;
+        pos += r.compressed_size;
+        let text = state.plain_text().text();
+        diff.extend((r.corrections.len() as u32).to_le_bytes());
+        diff.extend((text.len() as u32).to_le_bytes());
+        diff.extend(&r.corrections);
+        plain.extend_from_slice(text);
+        state.shrink_to_dictionary();
+    }
+    if pos != raw.len() {
+        return Err(format!("only {pos} of {} bytes processed", raw.len()));
+    }
+    Ok((plain, diff))
+}
+
+fn preflate_rs_join_chunked(plain: &[u8], mut diff: &[u8]) -> Result<Vec<u8>, String> {
+    let mut state = preflate_rs::RecreateStreamProcessor::new();
+    let (mut out, mut pos) = (vec![], 0);
+    while !diff.is_empty() {
+        let n = |d: &[u8]| u32::from_le_bytes(d[..4].try_into().unwrap()) as usize;
+        let (cn, pn) = (n(diff), n(&diff[4..]));
+        let chunk = &mut std::io::Cursor::new(&plain[pos..pos + pn]);
+        let (o, _) = state
+            .recompress(chunk, &diff[8..8 + cn])
+            .map_err(|e| format!("{e:?}"))?;
+        out.extend(o);
+        pos += pn;
+        diff = &diff[8 + cn..];
+    }
+    Ok(out)
+}
+
+/// Runs `tools` on one raw DEFLATE stream: size, and wall and process CPU times of each step.
+fn run_file(
+    path: &Path,
+    tools: &[Tool],
+    zlib: bool,
+    threads: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let raw = std::fs::read(path)?;
+    let measure = |f: &mut dyn FnMut() -> Result<Vec<u8>, String>| {
+        let (w, c) = (std::time::Instant::now(), process_cpu());
+        let r = f();
+        (r, w.elapsed(), process_cpu() - c)
+    };
+    println!(
+        "{}: {} B raw\n{:<12} {:>12} {:>8} {:>18} {:>18} {:>10}",
+        path.display(),
+        raw.len(),
+        "tool",
+        "size B",
+        "%",
+        "split wall/CPU s",
+        "join wall/CPU s",
+        "peak RSS"
+    );
+    for &tool in tools {
+        let mut plain = vec![];
+        let (diff, sw, sc) = measure(&mut || {
+            let (p, d) = match tool {
+                Tool::PreflateRs => preflate_rs_split_chunked(&raw)?,
+                _ => tool.split(&raw, Hints::default(), zlib)?,
+            };
+            plain = p;
+            Ok(d)
+        });
+        let diff = match diff {
+            Ok(d) => d,
+            Err(e) => {
+                println!(
+                    "{:<12} split failed after {:.1} s: {e}",
+                    tool.name(),
+                    sw.as_secs_f64()
+                );
+                continue;
+            }
+        };
+        let (back, jw, jc) = measure(&mut || match tool {
+            Tool::Recons => flate_recons::model::unpack_with_threads(
+                &plain,
+                &diff,
+                flate_recons::Priors::builtin(),
+                threads,
+            )
+            .map_err(|e| e.to_string()),
+            Tool::PreflateRs => preflate_rs_join_chunked(&plain, &diff),
+            _ => tool.join(&plain, &diff),
+        });
+        let status = match back {
+            Ok(b) if b == raw => String::new(),
+            Ok(_) => "  RECONSTRUCTION DIFFERS".into(),
+            Err(e) => format!("  join failed: {e}"),
+        };
+        println!(
+            "{:<12} {:>12} {:>7.4}% {:>8.1} / {:>7.1} {:>8.1} / {:>7.1} {:>7.0} MB{status}",
+            tool.name(),
+            diff.len(),
+            diff.len() as f64 * 100.0 / raw.len() as f64,
+            sw.as_secs_f64(),
+            sc.as_secs_f64(),
+            jw.as_secs_f64(),
+            jc.as_secs_f64(),
+            peak_rss() as f64 / 1e6
+        );
+    }
+    Ok(())
 }

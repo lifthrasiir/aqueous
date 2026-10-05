@@ -44,7 +44,9 @@ raw ─ deflate::parse ─► Stream (every encoder choice explicit) ─┐
     `build_tree` emulated bit-exactly. The RLE ops are picked from known generators (zlib
     per-tree, zlib concatenated, libdeflate), falling back to coding them op by op.
 - **`matchfind`**: exact match candidates (chains of all earlier positions with the same
-  three bytes, within 32 KiB), so they don't depend on any implementation's hash.
+  three bytes, within 32 KiB), so they don't depend on any implementation's hash. Short
+  streams cache every search across passes. A single pass (reconstruction, or a long
+  stream) keeps the chains only for the window behind the search.
 - **`ctx`**: context ids in named groups. Each group belongs to a **channel** (`block`,
   `token`, `length`, `distance`, `tree`), so related decisions are stored together and
   can be modelled or stored separately. `LAYOUT` versions the id assignment.
@@ -180,6 +182,81 @@ lookahead, which preflate-rs does not have and which is worth 12.8% of the metad
   Every candidate configuration is recorded while its cost is measured, so the winner is
   never coded a second time.
 
+### One long stream
+
+The held-out samples are short (93 KB of plain text on average), so they say little about a
+single long stream. `-f RAW` runs the tools on one raw stream instead, reporting wall and
+process CPU times and the peak RSS (one tool per process). preflate-rs goes through its stream
+processor in 128 MiB chunks (`$PREFLATE_RS_CHUNK`), as its own container does. Its
+whole-stream API refuses more than that.
+
+```
+curl -O https://mattmahoney.net/dc/enwik9.zip && unzip enwik9.zip
+../flate-zoo/target/release/flate-zoo compress zlib:level=6 enwik9 enwik9.zlib6.raw
+cd bench && cargo run --release -- -f ../enwik9.zlib6.raw -t recons    # also -j 1
+```
+
+enwik9 (1 GB of text) deflated to about 323 MB, on an M4 (10 cores, 32 GB). The peak RSS
+includes about 1.65 GB of the harness' own buffers (raw, plain text and the reconstruction):
+
+| stream | tool | size | split | join | peak RSS |
+|---|---|---|---|---|---|
+| zlib -6, 323.9 MB | flate-recons | 318 B | 33.3 s | 23.0 s; 4.3 s on 10 threads | 2.8 GB; 3.5 GB |
+| | preflate | 3,209 B | 30.6 s | 23.8 s | 9.0 GB |
+| | preflate-rs | 378,216 B (0.117%) | 20.9 s | 17.6 s | 2.2 GB |
+| zlib -9, 322.8 MB | flate-recons | 333 B | 39.1 s | 27.4 s; 5.2 s on 10 threads | 2.8 GB; 3.6 GB |
+| | preflate | 2,000 B | 34.3 s | 27.8 s | 9.0 GB |
+| | preflate-rs | 5,770 B | 24.1 s | 20.5 s | 2.2 GB |
+| libdeflate -6, 323.9 MB | flate-recons | 7,383,814 B (2.28%) | 38.4 s | 25.8 s | 4.7 GB |
+| | preflate | 10,986,341 B (3.39%) | 40.0 s | 33.0 s | 9.2 GB |
+| | preflate-rs | fails in 128 MiB chunks; one chunk: 9,711,758 B (3.00%) | 25.9 s | 15.3 s | 5.3 GB |
+| zlib-ng -6, 326.4 MB | flate-recons | 2,227,014 B (0.68%) | 59.1 s | 27.7 s | 4.5 GB |
+| | preflate | 14,001,299 B (4.29%) | 37.8 s | 30.8 s | 8.9 GB |
+| | preflate-rs | 8,501,612 B (2.60%) | 16.6 s | 13.7 s | 2.4 GB |
+
+The same encoders on the first 256 MB of enwik9 (about 93 MB of DEFLATE):
+
+| stream | tool | size | split | join | peak RSS |
+|---|---|---|---|---|---|
+| libdeflate -6, 92.9 MB | flate-recons | 2,192,283 B (2.36%) | 11.3 s | 7.7 s | 1.4 GB |
+| | preflate | 3,100,326 B (3.34%) | 11.5 s | 9.5 s | 2.5 GB |
+| | preflate-rs | fails in 128 MiB chunks; one chunk: 2,649,475 B (2.85%) | 8.3 s | 4.4 s | 1.4 GB |
+| zlib-ng -6, 93.7 MB | flate-recons | 625,453 B (0.67%) | 16.7 s | 8.3 s | 1.6 GB |
+| | preflate | 3,936,727 B (4.20%) | 10.9 s | 8.9 s | 2.4 GB |
+| | preflate-rs | 2,444,022 B (2.61%) | 5.6 s | 4.0 s | 1.1 GB |
+
+- **Size.** The ranking is that of the short streams. A zlib stream costs a constant few
+  hundred bytes (0.0001%), against 2-3 KB for preflate. preflate-rs is exact on zlib -9 but
+  loses its model on zlib -6 (0.117%, about 1,200× flate-recons). On the near-zlib zlib-ng,
+  zlib emulation gives 0.68%, about a quarter of preflate-rs'. The generic predictor gives
+  2.28% on libdeflate, 24% less than preflate-rs in one chunk. Its ratio barely moves from
+  32 MB to 1 GB of plain text (2.34%, 2.35%, 2.36%, 2.28%).
+- **Speed.** flate-recons is the slowest to split zlib streams (about 30 MB/s of plain text:
+  parsing, detection and one emulated compression), 1.6× preflate-rs' time. Joining a zlib
+  stream runs at zlib's own speed: 1.3× preflate-rs' time, on par with preflate. The
+  checkpoints bring it down to 4-5 s on 10 threads (5.3×, for 1.5× the CPU time), the only
+  parallel step of the three tools here. A generic stream joins on one thread at 31-39 MB/s,
+  1.7-2.1× preflate-rs' time. Its split runs at 15-26 MB/s, 1.4-3.6× preflate-rs' time: it
+  ranks several configurations, and for zlib-ng the zlib candidates too.
+- **Memory.** Beyond the harness' buffers, flate-recons needs about 1.2 B per byte of plain
+  text for a zlib stream (1.9 B when joining on 10 threads) and 3-4.5 B for a generic one,
+  against about 7.5 B for preflate and 0.6 B for preflate-rs (3.6 B in one chunk). What
+  remains is the parsed tokens (6 B each, about 1.3 B per byte) and, for a generic stream,
+  the decision log (2 B per decision, about 1.2 B per byte); the data itself is in the
+  harness' share. It used to be 40-55 B per byte for a generic stream, so that 1 GB did not
+  fit in 32 GB. The search cache (20 B per position plus the records) is now kept only for
+  short streams, which are coded in full under every configuration. Long ones keep the
+  chains for the window behind the search only, in a sliding buffer of links relative to its
+  base, so a step along a chain is still a single load. Their candidates' decisions are
+  logged in 2 B each, in chunks. Nothing else is kept while the winner's decisions are
+  replayed, and the coded blocks are checked one by one rather than collected. Long generic
+  streams also split and join 7-12% faster. On the short held-out streams, sizes are
+  unchanged and splitting is about 3% slower.
+- **Robustness.** preflate-rs' chunking breaks on libdeflate's output: the next chunk fails
+  (`PredictionFailure`, "Didnt find a match") with 64 MiB and 128 MiB chunks, but the
+  whole stream in one chunk round-trips. Its own container uses 128 MiB chunks, and stops
+  after 512 MiB of plain text in total, so it would not process any of these streams whole.
+
 ## Next steps
 
 - More emulated encoders behind the same scheme (exact prefix, then hit/miss): zlib-ng
@@ -187,6 +264,8 @@ lookahead, which preflate-rs does not have and which is worth 12.8% of the metad
   stb. The zlib emulation already shows the gain.
 - Cheaper zlib detection (preflate-style chain-depth elimination before emulating, or
   emulating the candidates in lockstep).
+- Memory for long streams: the parsed tokens and the decision log are kept whole (about
+  2.5 B per byte of plain text). Parsing and coding segment by segment would bound them.
 - Parallel deconstruction of long zlib streams: checking the exact blocks still runs at
   zlib's speed, although the actual tokens give every segment's starting state.
 - More Huffman builders (libdeflate, zopfli, 7-zip, miniz) as candidates before the per-symbol

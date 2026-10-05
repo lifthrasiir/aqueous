@@ -351,28 +351,54 @@ fn get_varint(input: &[u8], pos: &mut usize) -> Result<u64> {
 /// Entropy codes `meta` with the given priors: a header, then one arithmetic coded stream
 /// per channel.
 pub fn pack(meta: &Metadata, priors: &Priors) -> Vec<u8> {
-    let mut model = ContextModel::new(priors);
-    let mut out = vec![VERSION];
-    out.extend_from_slice(&(priors.id as u16).to_le_bytes());
-    let streams: Vec<Vec<u8>> = meta
-        .channels
-        .iter()
-        .map(|ch| {
-            let mut e = ArithEncoder::new();
-            for d in ch {
-                e.encode(d.bit, model.p1(d.ctx));
-                model.update(d.ctx, d.bit);
-            }
-            e.finish()
-        })
-        .collect();
-    for s in &streams[..streams.len() - 1] {
-        put_varint(&mut out, s.len() as u64);
+    let mut p = Packer::new(priors);
+    for ch in &meta.channels {
+        for d in ch {
+            p.bit(d.ctx, d.bit);
+        }
     }
-    for s in &streams {
-        out.extend_from_slice(s);
+    p.finish()
+}
+
+/// A streaming [`pack`], usable with [`crate::deconstruct_into`]: no [`Metadata`] is kept.
+/// Contexts belong to one channel each, so coding the channels interleaved gives the same
+/// streams as coding them one after another.
+pub struct Packer {
+    model: ContextModel,
+    id: u16,
+    encoders: [ArithEncoder; Channel::COUNT],
+}
+
+impl Packer {
+    pub fn new(priors: &Priors) -> Self {
+        Packer {
+            model: ContextModel::new(priors),
+            id: priors.id as u16,
+            encoders: std::array::from_fn(|_| ArithEncoder::new()),
+        }
     }
-    out
+
+    pub fn finish(self) -> Vec<u8> {
+        let mut out = vec![VERSION];
+        out.extend_from_slice(&self.id.to_le_bytes());
+        let streams = self.encoders.map(ArithEncoder::finish);
+        for s in &streams[..streams.len() - 1] {
+            put_varint(&mut out, s.len() as u64);
+        }
+        for s in &streams {
+            out.extend_from_slice(s);
+        }
+        out
+    }
+}
+
+impl Coder for Packer {
+    #[inline]
+    fn bit(&mut self, ctx: Ctx, bit: bool) -> bool {
+        self.encoders[ctx.channel() as usize].encode(bit, self.model.p1(ctx));
+        self.model.update(ctx, bit);
+        bit
+    }
 }
 
 /// A pull decoder over packed metadata, usable with [`crate::reconstruct_with`].

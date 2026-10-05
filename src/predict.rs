@@ -106,7 +106,9 @@ pub struct Coded {
 
 /// Codes `actual` (when deconstructing) or rebuilds the stream from decisions (when
 /// `actual` is `None`). `cfg` must be given when deconstructing. Returns the stream as coded
-/// and the configuration used.
+/// and the configuration used. When deconstructing, every block is checked against `actual`
+/// as soon as it is coded ([`Error::Inconsistent`] if they differ) and not kept: the stream
+/// returned has no blocks.
 ///
 /// `matcher` may carry match searches over from earlier passes over the same `data`; it is
 /// only built when the generic predictor is needed. Reconstruction regenerates the blocks
@@ -164,13 +166,15 @@ pub fn code_stream<C: Coder>(
         prev_eof: false,
         prev_stored: None,
     };
+    // The blocks coded so far, kept only when reconstructing.
     let mut blocks = Vec::new();
+    let mut n_blocks = 0;
+    let mut done = false;
     let mut exact_blocks = 0;
     let mut checkpoints = 0;
     if let Some(mut e) = p.emu.take() {
         // The leading blocks that zlib reproduces exactly cost nothing but their number, plus
         // checkpoints in long streams so that they can be regenerated in parallel.
-        let mut generated = vec![];
         let mut cps = vec![];
         let mut pos = 0;
         if let Some(s) = actual {
@@ -181,12 +185,12 @@ pub fn code_stream<C: Coder>(
                 match zlib_block(&mut e, pos) {
                     Some(g) if g == *b => {
                         pos += block_span(&g);
-                        generated.push(g);
+                        n_blocks += 1;
                         if let Some(spacing) = spacing
                             && pos >= next
                             && let Some(cp) = e.checkpoint()
                         {
-                            cps.push((generated.len(), cp));
+                            cps.push((n_blocks, cp));
                             next = pos + spacing;
                         }
                     }
@@ -197,10 +201,10 @@ pub fn code_stream<C: Coder>(
                 }
             }
             // One right before the first block zlib gets wrong would start an empty segment.
-            cps.retain(|&(i, _)| i < generated.len());
+            cps.retain(|&(i, _)| i < n_blocks);
         }
-        let k = generated.len() as u32;
-        let all = actual.is_some_and(|s| generated.len() == s.blocks.len());
+        let k = n_blocks as u32;
+        let all = actual.is_some_and(|s| n_blocks == s.blocks.len());
         let k = if c.bit(ctx::Z_ALL_EXACT.at(0), all) {
             None
         } else {
@@ -211,25 +215,32 @@ pub fn code_stream<C: Coder>(
             if c.failed() {
                 return Err(Error::Corrupt);
             }
-            (generated, e) = regenerate_exact(data, e, k, &cps, threads)?;
-            pos = generated.iter().map(block_span).sum();
+            (blocks, e) = regenerate_exact(data, e, k, &cps, threads)?;
+            pos = blocks.iter().map(block_span).sum();
+            n_blocks = blocks.len();
         }
         p.emu = Some(e);
         p.pos = pos;
-        if let Some(b) = generated.last() {
+        if let Some(b) = actual.map_or(&blocks[..], |s| &s.blocks[..n_blocks]).last() {
             st.prev_btype = b.body.btype() as usize;
+            done = b.last;
         }
-        exact_blocks = generated.len();
+        exact_blocks = n_blocks;
         checkpoints = cps.len();
-        blocks = generated;
     }
-    while !blocks.last().is_some_and(|b: &Block| b.last) {
+    while !done {
         let a = match actual {
-            Some(s) => Some(s.blocks.get(blocks.len()).ok_or(Error::Inconsistent)?),
+            Some(s) => Some(s.blocks.get(n_blocks).ok_or(Error::Inconsistent)?),
             None => None,
         };
         let block = p.code_block(c, &mut st, a)?;
-        blocks.push(block);
+        done = block.last;
+        match a {
+            Some(a) if block != *a => return Err(Error::Inconsistent),
+            Some(_) => {}
+            None => blocks.push(block),
+        }
+        n_blocks += 1;
         if c.failed() {
             return Err(Error::Corrupt);
         }
@@ -265,6 +276,11 @@ pub fn code_stream<C: Coder>(
         .collect();
     if c.failed() {
         return Err(Error::Corrupt);
+    }
+    if let Some(s) = actual
+        && (n_blocks != s.blocks.len() || tail_pad != s.tail_pad || trailing != s.trailing)
+    {
+        return Err(Error::Inconsistent);
     }
     Ok(Coded {
         stream: Stream {
