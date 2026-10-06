@@ -93,6 +93,11 @@ impl BitWriter {
         (8 - self.nacc % 8) % 8
     }
 
+    /// Number of bits written so far.
+    pub fn bit_len(&self) -> usize {
+        self.out.len() * 8 + self.nacc as usize
+    }
+
     pub fn bytes(&mut self, b: &[u8]) {
         self.flush_bytes();
         debug_assert!(self.nacc == 0);

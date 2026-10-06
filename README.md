@@ -257,6 +257,81 @@ The same encoders on the first 256 MB of enwik9 (about 93 MB of DEFLATE):
   whole stream in one chunk round-trips. Its own container uses 128 MiB chunks, and stops
   after 512 MiB of plain text in total, so it would not process any of these streams whole.
 
+## Fast representation (`fast`)
+
+`flate_recons::fast` is an alternative built for speed: at least 100 MB/s of plain text on
+one core, both ways (parallel segments are a bonus, not a requirement). It uses no context
+modelling and no encoder emulation, so splitting costs about what joining does:
+
+```rust
+let (data, meta) = flate_recons::fast::deconstruct(&raw)?;
+assert_eq!(flate_recons::fast::reconstruct(&data, &meta)?, raw);
+```
+
+- **Rules.** A `Rule` predicts every token from the data alone, with a small hash table of
+  recent positions. Its parameters are the key (3 or 4 bytes) and ways per bucket (1-8), plus
+  an optional one-entry table keyed by 5-8 bytes. Every position is inserted, or only token
+  starts and short matches' insides. Parsing is greedy or one step lazy, with a minimum
+  length, zlib-style TOO_FAR and a window. The rules are derived empirically from flate-zoo's
+  encoders (the oracle). `flate-recons-fast rules` fits the best rule of each preset class by
+  coordinate descent, then a greedy set cover picks a catalog of 32
+  (`model/rules.txt`). Each stream's fingerprint maps to one or two of them; the fingerprint
+  covers the common shortest match, farthest distance, far short matches, full-block token
+  count, block types and how the first Huffman header was built. Two candidates, or an
+  unknown fingerprint, are settled by a trial on a 4 KB prefix.
+- **Corrections.** Only mispredicted tokens are stored, as a sparse list per class (whether
+  the table offered a candidate). Each miss records the gap since the previous one, its kind,
+  its length (fresh, or relative to the prediction), and its distance. The distance is coded
+  as an entry of the bucket, as its rank among earlier positions matching as long (walking a
+  hash chain at the misses only), or verbatim. Fields are coded with static per-stream
+  frequencies and rANS (bucketed values plus raw bits). Each field uses a trained default
+  model (`model/fast-models.txt`) or the stream's own, whichever is smaller. Nothing adapts.
+- **Headers.** Dynamic Huffman headers are coded against candidate builders, chosen per
+  stream and carried from block to block: zlib's heap, and package-merge (zopfli, ECT,
+  plain) at limits 15-9. Run-length coders cover zlib, libdeflate and zopfli/ECT. An exact
+  block costs one bit.
+- **Speed.** Tokens are cut into ~1 MiB segments that are coded independently. The parser
+  gathers the statistics everything else needs (symbol frequencies, fingerprint, segment
+  cuts) as it decodes. Candidate matches are measured on 8 bytes without branching. Exact
+  zlib trees use a bottom-up heap with packed keys. Package-merge is computed as Huffman's
+  two-queue algorithm whenever the limit does not bite; tests check that it matches zopfli
+  bit for bit.
+
+Every rule's cost includes a speed penalty: λ bits per KB of plain text for every ns/B it
+takes, by `Rule::ns_per_byte` (measured with `flate-recons-fast speed`). Each λ gives its
+own catalog (`rules -l λ`, about 2.5 minutes). Held-out split, 924 streams (45.2 MB of
+DEFLATE, 85.1 MB of plain text), single-threaded on an M4. The default models are those
+fitted for the λ = 5 catalog. All round-trip.
+
+| λ | metadata | split | join |
+|---|---|---|---|
+| 0 | 607,711 B (1.343%) | 0.88 s (97 MB/s) | 0.78 s (109 MB/s) |
+| 2 | 618,864 B (1.368%) | 0.83 s (103 MB/s) | 0.74 s (115 MB/s) |
+| **5 (built in)** | **649,249 B (1.435%)** | **0.81 s (105 MB/s)** | **0.71 s (120 MB/s)** |
+| 10 | 679,812 B (1.502%) | 0.78 s (109 MB/s) | 0.68 s (125 MB/s) |
+| 20 | 783,402 B (1.731%) | 0.69 s (123 MB/s) | 0.59 s (144 MB/s) |
+| 30 | 855,261 B (1.890%) | 0.64 s (133 MB/s) | 0.55 s (155 MB/s) |
+| 50 | 1,118,565 B (2.472%) | 0.60 s (142 MB/s) | 0.51 s (167 MB/s) |
+| 100 | 1,312,634 B (2.901%) | 0.56 s (152 MB/s) | 0.49 s (174 MB/s) |
+
+```
+RAYON_NUM_THREADS=1 cargo run --release --features train --bin flate-recons-fast -- eval \
+    -r cache/rules-l5.txt                        # after: rules -l 5 -o cache/rules-l5.txt
+```
+
+- Split time at λ = 5 breaks down to parsing 0.14 s, rule choice 0.04 s, token coding
+  0.53 s, headers 0.07 s and the rest 0.03 s. Only token coding depends on λ. Joining spends
+  0.08 s on headers and 0.09 s on writing.
+- Speed costs little ratio below λ = 10: dropping the penalty altogether (λ = 0) gains only
+  0.09 points over λ = 5, and misses 100 MB/s. A higher λ first drops the 8-way tables
+  (17 of the 32 rules at λ = 5, 4 at λ = 20, none at λ = 100), then ranked distances and
+  the second table.
+- Against the main representation (0.92% on this split, splitting at about 6 MB/s and
+  joining at about 19 MB/s, see above): 1.56× the metadata, splitting 17× and joining 6×
+  faster.
+- Gaps and kinds (where the misses are and what they are) make 70% of the corrections at
+  λ = 5. Lengths and distances make the rest.
+
 ## Next steps
 
 - More emulated encoders behind the same scheme (exact prefix, then hit/miss): zlib-ng

@@ -17,14 +17,14 @@ usage: flate-recons-bench [-i DIR] [-s held|train|all] [-t TOOL,...] [-o TSV] [-
        flate-recons-bench -f RAW [-t TOOL,...] [-j THREADS] [--no-zlib]
   DIR   samples cached by flate-recons-train (default ../cache/samples)
   -s    which split to run (default held: every fifth input file, as in training)
-  -t    tools (default recons,preflate,preflate-rs)
+  -t    tools (default recons,preflate,preflate-rs; also fast)
   -o    per-stream results (default ../cache/bench.tsv)
   --phases  instead, time the phases of flate-recons (CPU time summed over streams)
   --hints   give flate-recons the zlib header the zlib-family encoders would have written
   --no-zlib turn flate-recons' zlib emulation off
   -f    instead, run the tools on one (long) raw DEFLATE stream and report wall and process
         CPU times; run one tool per process for its peak RSS
-  -j    threads for flate-recons' reconstruction in -f mode (default: available parallelism)
+  -j    threads for flate-recons' reconstruction (and fast's split) in -f mode (default: available parallelism)
   PREFLATE_RS_CHUNK  preflate-rs' plain text limit per chunk in -f mode (default 128 MiB)
 ";
 
@@ -95,6 +95,8 @@ fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Tool {
     Recons,
+    /// flate-recons' rule-based representation (`flate_recons::fast`).
+    Fast,
     Preflate,
     PreflateRs,
 }
@@ -103,6 +105,7 @@ impl Tool {
     fn name(self) -> &'static str {
         match self {
             Tool::Recons => "recons",
+            Tool::Fast => "fast",
             Tool::Preflate => "preflate",
             Tool::PreflateRs => "preflate-rs",
         }
@@ -122,6 +125,7 @@ impl Tool {
                     .map_err(|e| e.to_string())?;
                 Ok((data, packer.finish()))
             }
+            Tool::Fast => fast_split(raw, 1),
             Tool::Preflate => unsafe {
                 let (mut p, mut pn, mut d, mut dn) =
                     (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
@@ -161,6 +165,8 @@ impl Tool {
                 )
                 .map_err(|e| e.to_string())
             }
+            Tool::Fast => flate_recons::fast::reconstruct_with_threads(plain, diff, 1)
+                .map_err(|e| e.to_string()),
             Tool::Preflate => unsafe {
                 let (mut r, mut rn) = (std::ptr::null_mut(), 0);
                 if ffi::pf_reencode(
@@ -279,6 +285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .split(',')
                     .map(|t| match t {
                         "recons" => Ok(Tool::Recons),
+                        "fast" => Ok(Tool::Fast),
                         "preflate" => Ok(Tool::Preflate),
                         "preflate-rs" => Ok(Tool::PreflateRs),
                         _ => Err(format!("unknown tool {t}")),
@@ -426,6 +433,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+fn fast_split(raw: &[u8], threads: usize) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let opts = flate_recons::fast::Options {
+        threads,
+        ..Default::default()
+    };
+    flate_recons::fast::deconstruct_with(raw, &opts).map_err(|e| e.to_string())
 }
 
 /// CPU time of each phase of flate-recons, summed over all streams.
@@ -609,6 +624,7 @@ fn run_file(
         let (diff, sw, sc) = measure(&mut || {
             let (p, d) = match tool {
                 Tool::PreflateRs => preflate_rs_split_chunked(&raw)?,
+                Tool::Fast => fast_split(&raw, threads)?,
                 _ => tool.split(&raw, Hints::default(), zlib)?,
             };
             plain = p;
@@ -634,6 +650,8 @@ fn run_file(
             )
             .map_err(|e| e.to_string()),
             Tool::PreflateRs => preflate_rs_join_chunked(&plain, &diff),
+            Tool::Fast => flate_recons::fast::reconstruct_with_threads(&plain, &diff, threads)
+                .map_err(|e| e.to_string()),
             _ => tool.join(&plain, &diff),
         });
         let status = match back {

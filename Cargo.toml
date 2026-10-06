@@ -21,5 +21,10 @@ name = "flate-recons-train"
 path = "src/bin/train.rs"
 required-features = ["train"]
 
+[[bin]]
+name = "flate-recons-fast"
+path = "src/bin/fast.rs"
+required-features = ["train"]
+
 [profile.release]
 debug = 1

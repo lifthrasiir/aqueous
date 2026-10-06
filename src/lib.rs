@@ -24,6 +24,7 @@ pub mod coder;
 pub mod ctx;
 pub mod deflate;
 pub mod detect;
+pub mod fast;
 pub mod huffman;
 pub mod matchfind;
 pub mod model;
