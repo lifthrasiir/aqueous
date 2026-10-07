@@ -6,7 +6,8 @@
 //! which is what libjpeg, libjpeg-turbo and mozjpeg produce. Encoders that decide differently
 //! are detected at compression time by re-encoding every scan and comparing with the original.
 
-use crate::jpeg::{self, err, extend, size_bits, Bits, Clean, Coefs, EncTable, Error, HuffSpec, Jpeg, Scan, ScanInfo, DC_LIMIT, PAD};
+use crate::jpeg::{self, err, extend, size_bits, Bits, Clean, Coefs, CompPtr, EncTable, Error, HuffSpec, Jpeg, Scan, ScanInfo, DC_LIMIT, PAD};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Canonical Huffman decoder for arbitrary symbols (progressive scans use (r, 0) symbols as EOB
 /// runs, which the sequential fast tables reject). 9-bit lookahead + canonical slow path.
@@ -176,7 +177,44 @@ struct Canon {
 /// - (refinement) a run never continues past a block after which more than 937 correction bits
 ///   are buffered;
 /// - a ZRL is always followed by a nonzero coefficient in the same block.
-fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<Canon, Error> {
+/// Row-level synchronisation of scans decoded concurrently: `progress[scan][component]` = block
+/// rows of the component the scan has finished (usize::MAX once the scan has ended, also on
+/// failure). A scan only touches a block row once every earlier scan of the same component
+/// has finished it, so each block is accessed by one scan at a time, in scan order.
+struct ScanSync<'a> {
+    progress: &'a [[AtomicUsize; 4]],
+    scan: usize,
+}
+impl ScanSync<'_> {
+    /// Wait until the earlier scans touching `layout`'s components have finished their rows
+    /// below MCU row `my + 1`.
+    fn wait(&self, j: &Jpeg, layout: &[(usize, usize, usize)], my: usize) {
+        for &(ci, _, cv) in layout {
+            let need = (my + 1) * cv;
+            for (k, p) in self.progress[..self.scan].iter().enumerate() {
+                if j.scans[k].comps.iter().any(|sc| sc.ci == ci) {
+                    while p[ci].load(Ordering::Acquire) < need {
+                        std::thread::yield_now();
+                    }
+                }
+            }
+        }
+    }
+    fn publish(&self, layout: &[(usize, usize, usize)], rows_of_mcus: usize) {
+        for &(ci, _, cv) in layout {
+            self.progress[self.scan][ci].store(rows_of_mcus * cv, Ordering::Release);
+        }
+    }
+}
+impl Drop for ScanSync<'_> {
+    fn drop(&mut self) {
+        for p in &self.progress[self.scan] {
+            p.store(usize::MAX, Ordering::Release);
+        }
+    }
+}
+
+fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &[CompPtr], sync: Option<&ScanSync>) -> Result<Canon, Error> {
     let kind = kind(s)?;
     let mut dec = Vec::new();
     for sc in &s.comps {
@@ -250,8 +288,12 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<C
             prev_end = None;
         }
         let (mx, my) = (m % s.mcux, m / s.mcux);
+        if let (0, Some(sy)) = (mx, sync) {
+            sy.publish(&layout, my);
+            sy.wait(j, &layout, my);
+        }
         for (si, &(ci, ch, cv)) in layout.iter().enumerate() {
-            let o = &mut out[ci];
+            let o = out[ci];
             for v in 0..cv {
                 for h in 0..ch {
                     let (bx, by) = (mx * ch + h, my * cv + v);
@@ -259,8 +301,9 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<C
                         return err("block outside the component");
                     }
                     let bi = by * o.bw + bx;
-                    let blk = &mut o.blocks[bi];
-                    let mask = &mut o.masks[bi]; // nonzero history (AC bits kept up to date)
+                    // SAFETY: within the component; concurrent scans are kept off this block
+                    // row by `ScanSync`
+                    let (blk, mask) = unsafe { (&mut *o.blocks.add(bi), &mut *o.masks.add(bi)) }; // mask: nonzero history (AC bits kept up to date)
                     b.refill();
                     match kind {
                         Kind::DcFirst => {
@@ -822,19 +865,52 @@ fn encode_blocks(
 ///
 /// With JRC_VERIFY_PROGRESSIVE set, every scan is also re-encoded and the inline verdict is
 /// checked against the outcome (a scan judged reproducible that is not panics: test oracle).
+/// Number of leading scans that form a valid scan script: every coefficient bit is coded once,
+/// by a first scan (ah = 0) of a not yet coded position, then by refinements continuing exactly
+/// where the previous scan stopped (ah = previous al). Re-emitting a scan from the final
+/// coefficients relies on this; later scans are not decoded (stored raw).
+fn valid_script_len(j: &Jpeg) -> usize {
+    let mut bits = vec![[-1i32; 64]; j.comps.len()]; // per position: al of the last scan, -1 = none
+    for (k, s) in j.scans.iter().enumerate() {
+        if kind(s).is_err() {
+            return k;
+        }
+        for sc in &s.comps {
+            let b = &mut bits[sc.ci][s.ss as usize..=s.se as usize];
+            let expect = if s.ah == 0 { -1 } else { s.ah as i32 };
+            if b.iter().any(|&x| x != expect) {
+                return k;
+            }
+            b.fill(s.al as i32);
+        }
+    }
+    j.scans.len()
+}
+
 pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Vec<ScanInfo>, Error> {
-    jpeg::alloc_coefs(j, out, true);
-    let mut infos = Vec::with_capacity(j.scans.len());
+    let n = valid_script_len(j);
+    let mut res: Vec<Option<(Canon, u32)>> = Vec::new();
+    if rayon::current_num_threads() > 1 && n > 1 {
+        res = decode_concurrent(j, n, d, out);
+        // a failed scan: the outcome must be that of decoding in order up to the failure,
+        // which the concurrent decoding may have overwritten
+        if res.iter().any(|r| r.is_none()) {
+            res.clear();
+        }
+    }
+    if res.is_empty() {
+        jpeg::alloc_coefs(j, out, true);
+        let comps: Vec<CompPtr> = out.iter_mut().map(CompPtr::of).collect();
+        for s in &j.scans[..n] {
+            jpeg::destuff(&d[s.start..s.end], clean);
+            let Ok(c) = decode_scan(j, s, clean, &comps, None) else { break };
+            res.push(Some((c, trailing_rst(s, clean))));
+        }
+    }
+    let mut infos = Vec::with_capacity(n);
     let mut whys = Vec::new();
-    for s in &j.scans {
-        jpeg::destuff(&d[s.start..s.end], clean);
-        let Ok(c) = decode_scan(j, s, clean, out) else { break };
+    for (c, trailing_rst) in res.into_iter().map_while(|r| r) {
         whys.push(c.why);
-        let nmcu = s.mcux * s.mcuy;
-        let nseg = nmcu.div_ceil(if s.ri > 0 { s.ri } else { nmcu });
-        let data_len = clean.data.len() - PAD;
-        let extra = clean.segments.len().saturating_sub(nseg);
-        let trailing_rst = if extra > 0 && clean.segments[nseg..].iter().all(|&p| p == data_len) { extra as u32 } else { 0 };
         infos.push(ScanInfo { standard: c.standard, trailing_rst, pad_zero: c.pad_zero, truncated: None, raw: !c.standard });
     }
     // scans after the first undecodable one stay raw
@@ -856,7 +932,12 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
             }
             let same = encode_scan(j, s, info, out, &mut buf).is_ok() && buf == d[s.start..s.end];
             if info.standard && !same {
-                panic!("progressive scan {i}: judged reproducible but re-encodes differently");
+                let orig = &d[s.start..s.end];
+                let at = buf.iter().zip(orig).position(|(a, b)| a != b).unwrap_or(buf.len().min(orig.len()));
+                panic!(
+                    "progressive scan {i} (ss={} se={} ah={} al={} ri={}): judged reproducible but re-encodes differently: {} vs {} bytes, first difference at {at}",
+                    s.ss, s.se, s.ah, s.al, s.ri, buf.len(), orig.len()
+                );
             }
             if !info.raw || !same {
                 continue;
@@ -867,6 +948,50 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
         }
     }
     Ok(infos)
+}
+
+/// Number of RST markers after the last MCU of scan `s` (destuffed into `clean`).
+fn trailing_rst(s: &Scan, clean: &Clean) -> u32 {
+    let nmcu = s.mcux * s.mcuy;
+    let nseg = nmcu.div_ceil(if s.ri > 0 { s.ri } else { nmcu });
+    let data_len = clean.data.len() - PAD;
+    let extra = clean.segments.len().saturating_sub(nseg);
+    if extra > 0 && clean.segments[nseg..].iter().all(|&p| p == data_len) { extra as u32 } else { 0 }
+}
+
+thread_local! {
+    static CLEAN: std::cell::RefCell<Clean> = std::cell::RefCell::new(Clean::default());
+}
+
+/// All scans decoded concurrently, pipelined by block rows (see `ScanSync`): each worker
+/// takes the next scan in order, so a scan only ever waits for scans already being decoded.
+/// Per scan: None if it failed to decode.
+fn decode_concurrent(j: &Jpeg, n: usize, d: &[u8], out: &mut Vec<Coefs>) -> Vec<Option<(Canon, u32)>> {
+    jpeg::alloc_coefs(j, out, true);
+    let comps: Vec<CompPtr> = out.iter_mut().map(CompPtr::of).collect();
+    let progress: Vec<[AtomicUsize; 4]> = (0..n).map(|_| Default::default()).collect();
+    let next = AtomicUsize::new(0);
+    let res: Vec<std::sync::Mutex<Option<(Canon, u32)>>> = (0..n).map(|_| Default::default()).collect();
+    rayon::scope(|sc| {
+        for _ in 0..rayon::current_num_threads().min(n) {
+            sc.spawn(|_| loop {
+                let k = next.fetch_add(1, Ordering::Relaxed);
+                if k >= n {
+                    break;
+                }
+                let s = &j.scans[k];
+                let sync = ScanSync { progress: &progress, scan: k };
+                let r = CLEAN.with(|c| {
+                    let clean = &mut *c.borrow_mut();
+                    jpeg::destuff(&d[s.start..s.end], clean);
+                    decode_scan(j, s, clean, &comps, Some(&sync)).ok().map(|c| (c, trailing_rst(s, clean)))
+                });
+                drop(sync);
+                *res[k].lock().unwrap() = r;
+            });
+        }
+    });
+    res.into_iter().map(|m| m.into_inner().unwrap()).collect()
 }
 
 /// Per-scan timing (profiling aid): (description, decode seconds, encode seconds, scan bytes).
@@ -891,7 +1016,8 @@ pub fn scan_times(j: &Jpeg, d: &[u8], iters: usize) -> Result<Vec<(String, f64, 
         jpeg::alloc_coefs(j, &mut tmp, true);
         for (i, s) in j.scans.iter().enumerate() {
             let t0 = std::time::Instant::now();
-            decode_scan(j, s, &cleans[i], &mut tmp)?;
+            let comps: Vec<CompPtr> = tmp.iter_mut().map(CompPtr::of).collect();
+            decode_scan(j, s, &cleans[i], &comps, None)?;
             td[i] += t0.elapsed().as_secs_f64();
         }
         for (i, (s, info)) in j.scans.iter().zip(&infos).enumerate() {

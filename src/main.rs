@@ -156,7 +156,13 @@ fn fuzz(files: &[String], rounds: usize, seed: u64) {
                 coded += 1;
                 *reasons.entry("(coded, some raw scans)".into()).or_default() += 1
             }
-            Some(w) => *reasons.entry(w.split(':').next().unwrap().to_string()).or_default() += 1,
+            Some(w) => {
+                if w == "internal panic" {
+                    std::fs::write(format!("fuzz_panic_{round}.jpg"), &m).ok();
+                    eprintln!("round {round} ({name}): internal panic, input saved to fuzz_panic_{round}.jpg");
+                }
+                *reasons.entry(w.split(':').next().unwrap().to_string()).or_default() += 1
+            }
         }
     }
     println!("fuzz: {total} inputs, all roundtrips exact; coded {coded}, stored {}", total - coded);

@@ -663,11 +663,16 @@ pub(crate) fn scan_layout(j: &Jpeg, s: &Scan) -> Vec<(usize, usize, usize)> {
 /// Raw view of one component's coefficient arrays: chunks of a scan decoded in parallel write
 /// disjoint blocks.
 #[derive(Clone, Copy)]
-struct CompPtr {
-    blocks: *mut [i16; 64],
-    masks: *mut u64,
-    bw: usize,
-    bh: usize,
+pub(crate) struct CompPtr {
+    pub(crate) blocks: *mut [i16; 64],
+    pub(crate) masks: *mut u64,
+    pub(crate) bw: usize,
+    pub(crate) bh: usize,
+}
+impl CompPtr {
+    pub(crate) fn of(o: &mut Coefs) -> CompPtr {
+        CompPtr { blocks: o.blocks.as_mut_ptr(), masks: o.masks.as_mut_ptr(), bw: o.bw, bh: o.bh }
+    }
 }
 // SAFETY: only used to write blocks of disjoint MCUs from different threads
 unsafe impl Send for CompPtr {}
@@ -984,7 +989,7 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
     let ri = if s.ri > 0 { s.ri } else { nmcu };
     let nseg = nmcu.div_ceil(ri);
     let data_len = clean.data.len() - PAD;
-    let comps = out.iter_mut().map(|o| CompPtr { blocks: o.blocks.as_mut_ptr(), masks: o.masks.as_mut_ptr(), bw: o.bw, bh: o.bh }).collect();
+    let comps = out.iter_mut().map(CompPtr::of).collect();
     let ctx = Ctx { dct, act, layout, comps, data: &clean.data, data_len, segments: &clean.segments, ri, nmcu, mcux: s.mcux };
     let mut info = ScanInfo { standard: clean.markers_ok, ..Default::default() };
     // segments beyond the expected ones must be empty (RSTs after the last MCU)
@@ -1019,7 +1024,7 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
     if r.is_some() && std::env::var_os("JRC_VERIFY_PARALLEL").is_some() {
         // test oracle: the parallel outcome must equal the serial one
         let par: Vec<(Vec<[i16; 64]>, Vec<u64>)> = out.iter().map(|o| (o.blocks.clone(), o.masks.clone())).collect();
-        let ctx2 = Ctx { comps: out.iter_mut().map(|o| CompPtr { blocks: o.blocks.as_mut_ptr(), masks: o.masks.as_mut_ptr(), bw: o.bw, bh: o.bh }).collect(), ..ctx };
+        let ctx2 = Ctx { comps: out.iter_mut().map(CompPtr::of).collect(), ..ctx };
         let ser = serial(&ctx2);
         let p = r.as_ref().unwrap();
         let same_res = match (p, &ser) {

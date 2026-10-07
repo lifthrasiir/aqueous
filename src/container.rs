@@ -295,26 +295,37 @@ fn decompress_core(blob: &[u8], c: &[u8], mut p: usize, t: &mut Timing, coefs: &
     let t1 = Instant::now();
     fast::decode_into(&j, &e, coefs)?;
     let t2 = Instant::now();
-    let mut out = Vec::with_capacity(blob.len() + e.size() * 2);
-    let mut scan = Vec::new();
+    // scans are re-emitted independently of each other (in parallel; sequential scans are also
+    // split internally, see `jpeg::encode_scan`)
+    use rayon::prelude::*;
+    let coefs = &*coefs;
+    let scans: Vec<Option<Vec<u8>>> = j
+        .scans
+        .par_iter()
+        .zip(&infos)
+        .zip(&raws)
+        .map(|((s, info), raw)| -> Result<Option<Vec<u8>>, Error> {
+            if s.end != s.start {
+                return Err(Error("blob contains entropy-coded data".into()));
+            }
+            if raw.is_some() {
+                return Ok(None);
+            }
+            let mut scan = Vec::new();
+            if j.progressive {
+                progressive::encode_scan(&j, s, info, coefs, &mut scan)?;
+            } else {
+                jpeg::encode_scan(&j, s, info, coefs, &mut scan)?;
+            }
+            Ok(Some(scan))
+        })
+        .collect::<Result<_, _>>()?;
+    let total: usize = scans.iter().flatten().map(|v| v.len()).sum::<usize>() + raws.iter().flatten().map(|r| r.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(blob.len() + total);
     let mut q = 0;
-    for ((s, info), raw) in j.scans.iter().zip(&infos).zip(&raws) {
-        if s.end != s.start {
-            return Err(Error("blob contains entropy-coded data".into()));
-        }
-        if let Some(r) = raw {
-            out.extend_from_slice(&blob[q..s.start]);
-            out.extend_from_slice(r);
-            q = s.start;
-            continue;
-        }
-        if j.progressive {
-            progressive::encode_scan(&j, s, info, coefs, &mut scan)?;
-        } else {
-            jpeg::encode_scan(&j, s, info, coefs, &mut scan)?;
-        }
+    for ((s, scan), raw) in j.scans.iter().zip(&scans).zip(&raws) {
         out.extend_from_slice(&blob[q..s.start]);
-        out.extend_from_slice(&scan);
+        out.extend_from_slice(scan.as_deref().or(*raw).unwrap());
         q = s.start;
     }
     out.extend_from_slice(&blob[q..]);
