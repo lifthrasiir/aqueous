@@ -35,7 +35,22 @@ pub const NPOS: usize = 4;
 /// neighbourhood in the previous granule (scaled to the current step sizes) and in the
 /// other channel, so the contexts of a granule depend on nothing decoded in it.
 pub const PAIR_BASE: usize = 0;
-pub const PAIR_PER_TABLE: usize = NBX * NPOS;
+pub const PAIR_PER_TABLE: usize = NBX * NPOS * NCUR;
+/// Classes of the magnitude of the pair `LAG` pairs back in the same granule.
+pub const NCUR: usize = 1;
+const LAG: usize = 2;
+
+#[inline(always)]
+fn cur_class(cur: &[u16; 576], line: usize) -> usize {
+    if line < 2 * LAG {
+        return 0;
+    }
+    if NCUR == 1 {
+        return 0;
+    }
+    let s = cur[line - 2 * LAG] as u32 + cur[line - 2 * LAG + 1] as u32;
+    (s > 0) as usize + (s > 2) as usize
+}
 pub const LIN_BASE: usize = PAIR_BASE + 32 * PAIR_PER_TABLE;
 /// Escape bit length contexts: (table_select - 16, magnitude bucket capped at 15).
 pub const LIN_ALPHA: usize = 14;
@@ -95,14 +110,23 @@ pub fn code_scalefactors<C: Coder>(c: &mut C, st: &mut State, lay: &crate::frame
     }
 }
 
-/// About two buckets per octave.
-#[inline(always)]
-fn lb_calc(v: u32) -> u32 {
+/// Buckets per octave of the magnitude buckets (2 or 4).
+const BPO: u32 = 2;
+
+/// Logarithmic magnitude bucket: v itself below 4, then `BPO` per octave, capped.
+const fn bucket_of(v: u32) -> u32 {
     if v < 4 {
         return v;
     }
     let l = 31 - v.leading_zeros();
-    (2 * l + ((v >> (l - 1)) & 1)).min(NB as u32 - 1)
+    let frac = (v >> (l - 2)) & 3;
+    let b = BPO * l + (frac >> (2 - BPO.trailing_zeros())) - (2 * BPO - 4);
+    if b > NB as u32 - 1 { NB as u32 - 1 } else { b }
+}
+
+#[inline(always)]
+fn lb_calc(v: u32) -> u32 {
+    bucket_of(v)
 }
 
 const LB_N: usize = 4096;
@@ -110,13 +134,7 @@ static LB: [u8; LB_N] = {
     let mut t = [0u8; LB_N];
     let mut v = 0;
     while v < LB_N {
-        t[v] = if v < 4 {
-            v as u8
-        } else {
-            let l = 31 - (v as u32).leading_zeros();
-            let b = 2 * l + ((v as u32 >> (l - 1)) & 1);
-            (if b > NB as u32 - 1 { NB as u32 - 1 } else { b }) as u8
-        };
+        t[v] = bucket_of(v as u32) as u8;
         v += 1;
     }
     t
@@ -303,7 +321,7 @@ pub fn code_granule<C: Coder>(
         for _ in 0..n {
             let i = line / 2;
             let bv = bucket[i] as usize;
-            let ctx = base + bv * NPOS + pos_class(line);
+            let ctx = base + (bv * NPOS + pos_class(line)) * NCUR + cur_class(&cur, line);
             let (a, b) = (coefs[line], coefs[line + 1]);
             let (x, y) = (a.unsigned_abs().min(15) as usize, b.unsigned_abs().min(15) as usize);
             let sym = c.sym(ctx, (x * dim + y) as u32);
@@ -457,7 +475,7 @@ pub fn encode_granule<C: Coder>(
             for _ in 0..n {
                 bb.refill();
                 let w = bb.acc;
-                let ctx = base + prep.bucket[line / 2] as usize * NPOS + pos_class(line);
+                let ctx = base + (prep.bucket[line / 2] as usize * NPOS + pos_class(line)) * NCUR + cur_class(&cur, line);
                 let e = fast[(w >> (64 - FL)) as usize] as u32;
                 let (x, y, len, signs) = if e & 0x8000 != 0 {
                     let (x, y) = (e >> 6 & 15, e >> 2 & 15);
@@ -480,7 +498,7 @@ pub fn encode_granule<C: Coder>(
                 bb.refill();
                 let w = bb.acc;
                 let bv = prep.bucket[line / 2] as usize;
-                let ctx = base + bv * NPOS + pos_class(line);
+                let ctx = base + (bv * NPOS + pos_class(line)) * NCUR + cur_class(&cur, line);
                 let e = fast[(w >> (64 - FL)) as usize] as u32;
                 let (len, sym) = if e & 0x8000 != 0 { (e >> 10 & 31, e >> 2 & 0xff) } else { dec.decode(w) };
                 let (x, y) = (sym >> 4, sym & 15);

@@ -52,6 +52,11 @@ pub fn freqs_to_bytes(f: &[Vec<u16>]) -> Vec<u8> {
     zstd::bulk::compress(&raw, 19).unwrap()
 }
 
+/// The built-in frequency tables, if any match the layout (for tools).
+pub fn builtin_freqs_pub() -> Option<Vec<Vec<u16>>> {
+    builtin_freqs()
+}
+
 fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
     if BUILTIN.is_empty() {
         return None;
