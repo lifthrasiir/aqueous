@@ -132,21 +132,24 @@ pub trait Io {
 
 pub struct Recorder {
     pub syms: Vec<(u16, u16)>,
-    /// Per table, 256 counts.
-    pub counts: Vec<u32>,
+
     pub raw: BitW,
 }
 
 impl Recorder {
     pub fn new(cap: usize) -> Recorder {
-        Recorder { syms: Vec::with_capacity(cap), counts: vec![0; TABLES * 256], raw: BitW::default() }
+        Recorder { syms: Vec::with_capacity(cap), raw: BitW::default() }
     }
 
     /// Tables, then the rANS stream, then the raw bits.
     pub fn finish(self, out: &mut Vec<u8>) {
         let mut w = BitW::default();
         // A bitmap of the tables in use, then their levels.
-        let counts: Vec<&[u32]> = (0..TABLES).map(|t| &self.counts[t * 256..t * 256 + alphabet(t)]).collect();
+        let mut h = vec![0u32; TABLES * 256];
+        for &(t, v) in &self.syms {
+            h[t as usize * 256 + v as usize] += 1;
+        }
+        let counts: Vec<&[u32]> = (0..TABLES).map(|t| &h[t * 256..t * 256 + alphabet(t)]).collect();
         let used: Vec<bool> = counts.iter().map(|c| c.iter().any(|&x| x > 0)).collect();
         for &u in &used {
             w.bits(1, u as u32);
@@ -170,7 +173,6 @@ impl Io for Recorder {
     #[inline(always)]
     fn sym(&mut self, t: usize, v: u32) -> u32 {
         self.syms.push((t as u16, v as u16));
-        self.counts[t * 256 + v as usize] += 1;
         v
     }
     #[inline(always)]
@@ -639,13 +641,291 @@ const MAX_MATCH: usize = 258;
 
 /// Parses and models the raw DEFLATE stream `deflate` of an image with geometry `g`.
 pub fn encode(kind: Kind, g: &Geometry, deflate: &[u8]) -> crate::Result<Encoded> {
-    match (kind, g.bpp) {
-        (Kind::Image, 1) => encode_bpp::<1, true>(g, deflate),
-        (Kind::Image, 2) => encode_bpp::<2, true>(g, deflate),
-        (Kind::Image, 3) => encode_bpp::<3, true>(g, deflate),
-        (Kind::Image, 4) => encode_bpp::<4, true>(g, deflate),
-        (Kind::Image, _) => Err(crate::Error::Unsupported("pixel size")),
-        (Kind::Bytes, _) => encode_bpp::<0, false>(g, deflate),
+    // Streams that expand a lot are mostly long matches: modelling only the literals as
+    // they come costs less than computing every pixel's symbol up front.
+    let sparse = g.len > ROWS_MAX_EXPANSION * deflate.len();
+    match (kind, g.bpp, sparse) {
+        (Kind::Image, 1, false) => encode_image::<1>(g, deflate),
+        (Kind::Image, 2, false) => encode_image::<2>(g, deflate),
+        (Kind::Image, 3, false) => encode_image::<3>(g, deflate),
+        (Kind::Image, 4, false) => encode_image::<4>(g, deflate),
+        (Kind::Image, 1, true) => encode_bpp::<1, true>(g, deflate),
+        (Kind::Image, 2, true) => encode_bpp::<2, true>(g, deflate),
+        (Kind::Image, 3, true) => encode_bpp::<3, true>(g, deflate),
+        (Kind::Image, 4, true) => encode_bpp::<4, true>(g, deflate),
+        (Kind::Image, ..) => Err(crate::Error::Unsupported("pixel size")),
+        (Kind::Bytes, ..) => encode_bpp::<0, false>(g, deflate),
+    }
+}
+
+/// Above this ratio of image data to DEFLATE stream, literals are modelled as they come
+/// (see [`encode`]).
+const ROWS_MAX_EXPANSION: usize = 4;
+
+/// The compressor's side for images: every literal's context depends on the data only,
+/// which the compressor has in full. So the stream is parsed, the image unfiltered, the
+/// symbols of all pixel bytes computed row by row (no dependency between them), and then
+/// the tokens walked.
+fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result<Encoded> {
+    let t0 = std::time::Instant::now();
+    let f = inflate::parse(deflate)?;
+    let t1 = std::time::Instant::now();
+    let n = f.data.len();
+    let mut buf = vec![0u8; g.pad + n];
+    buf[g.pad..].copy_from_slice(&f.data);
+    drop(f.data);
+    let mut raw = vec![0u8; g.raw_len];
+    let mut syms = RowSyms { s: vec![0; n], t: vec![NOT_PIXEL; n], act: vec![0; n] };
+    for ps in &g.passes {
+        for row in 0..ps.rows {
+            let rstart = ps.start + row * ps.rs;
+            if rstart >= n {
+                break;
+            }
+            let w = (ps.rs - 1).min(n - rstart - 1);
+            let q = ps.base2 + (row + 1) * ps.rs2 + BPP;
+            let at = g.pad + rstart + 1;
+            let d = &buf[at..at + w];
+            unfilter_part::<BPP>(buf[g.pad + rstart], d, &mut raw, q, ps.rs2, 0, w, BPP);
+            row_syms::<BPP>(&raw, &buf, q, at, w, ps.rs, ps.rs2, &mut syms, rstart + 1);
+        }
+    }
+    let t2 = std::time::Instant::now();
+    let mut rec = Recorder::new(0);
+    // At most four symbols per token (a match) and one per stored byte.
+    let stored: usize = f.skips.iter().map(|s| s.1).sum();
+    rec.syms.reserve(4 * f.tokens.len() + stored + 16);
+    let mut out = Syms { ptr: rec.syms.as_mut_ptr(), n: 0, cap: rec.syms.capacity(), raw: &mut rec.raw };
+    let (mut p, mut ti, mut after) = (0usize, 0usize, 0usize);
+    let filter_sym = |p: usize| zigzag(buf[g.pad + p]);
+    for (i, b) in f.stream.blocks.iter().enumerate() {
+        if let flate_recons::deflate::Body::Stored { len, .. } = b.body {
+            for _ in 0..len {
+                let e = syms.t[p];
+                if e == NOT_PIXEL {
+                    out.sym(T_FILTER, filter_sym(p));
+                } else {
+                    out.sym(T_LIT + e as usize, syms.s[p] as u32);
+                }
+                p += 1;
+            }
+            continue;
+        }
+        let end = f.starts[i + 1];
+        while ti < end {
+            let e = syms.t[p];
+            let (t, act) = if e == NOT_PIXEL { (T_FILTER, ACT) } else { (T_LIT + after + e as usize, syms.act[p] as usize) };
+            match f.tokens[ti] {
+                Token::Lit(_) => {
+                    let s = if e == NOT_PIXEL { filter_sym(p) } else { syms.s[p] as u32 };
+                    out.sym(t, s);
+                    if s == ESC {
+                        out.bit(T_ESC, 0);
+                    }
+                    p += 1;
+                    after = 0;
+                }
+                Token::Match { len, dist, .. } => {
+                    out.sym(t, ESC);
+                    out.bit(T_ESC, 1);
+                    code_match(&mut out, act, len as u32, dist as u32);
+                    p += len as usize;
+                    after = 4 * ACT;
+                }
+            }
+            ti += 1;
+        }
+    }
+    let n_syms = out.n;
+    // SAFETY: `Syms` wrote the first `n_syms` entries (within the capacity it checked).
+    unsafe { rec.syms.set_len(n_syms) };
+    let alts = f
+        .tokens
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| matches!(t, Token::Match { alt258: true, .. }))
+        .map(|(i, _)| i)
+        .collect();
+    let t3 = std::time::Instant::now();
+    if std::env::var_os("PNGR_TIMES").is_some() {
+        eprintln!("parse {:.4} rows {:.4} walk {:.4}", (t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), (t3 - t2).as_secs_f64());
+    }
+    let layout = inflate::Layout { stream: f.stream, starts: f.starts, skips: f.skips, stats: f.stats, len: n };
+    Ok(Encoded { rec, layout, len: n, alts })
+}
+
+/// Symbols written into reserved room (the compressor's token walk).
+struct Syms<'a> {
+    ptr: *mut (u16, u16),
+    n: usize,
+    cap: usize,
+    raw: &'a mut BitW,
+}
+
+impl Io for Syms<'_> {
+    #[inline(always)]
+    fn sym(&mut self, t: usize, v: u32) -> u32 {
+        assert!(self.n < self.cap);
+        // SAFETY: within the capacity (checked just above).
+        unsafe { self.ptr.add(self.n).write((t as u16, v as u16)) };
+        self.n += 1;
+        v
+    }
+    #[inline(always)]
+    fn bit(&mut self, t: usize, v: u32) -> u32 {
+        self.sym(t, v)
+    }
+    #[inline(always)]
+    fn raw(&mut self, k: u32, v: u32) -> u32 {
+        self.raw.bits(k, v);
+        v
+    }
+}
+
+/// Per pixel byte (indexed by data position) its symbol, its literal table before the
+/// after-match offset (`NOT_PIXEL` at filter bytes and past the image) and the bucket of its
+/// activity.
+struct RowSyms {
+    s: Vec<u8>,
+    t: Vec<u8>,
+    act: Vec<u8>,
+}
+
+const NOT_PIXEL: u8 = u8::MAX;
+
+/// The symbols of a row's pixel bytes `x0..w` (raw offset `q`, data offset `at`), all
+/// unfiltered, into `out` at data position `d` (byte 0's).
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn row_syms_scalar<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize, x0: usize, w: usize, rs: usize, rs2: usize, out: &mut RowSyms, d: usize) {
+    for x in x0..w {
+        let m = pixel::<BPP>(raw, buf, q + x, at + x, x % BPP, rs, rs2);
+        out.s[d + x] = zigzag(get(raw, q + x).wrapping_sub(m.pred)) as u8;
+        out.t[d + x] = (m.t - T_LIT) as u8;
+        out.act[d + x] = bucket(m.act) as u8;
+    }
+}
+
+/// [`row_syms_scalar`] for a whole row, 16 bytes at a time with NEON where available.
+#[allow(clippy::too_many_arguments)]
+fn row_syms<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize, w: usize, rs: usize, rs2: usize, out: &mut RowSyms, d: usize) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let done = neon::row_syms::<BPP>(raw, buf, q, at, w, rs, rs2, out, d);
+        row_syms_scalar::<BPP>(raw, buf, q, at, done, w, rs, rs2, out, d);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    row_syms_scalar::<BPP>(raw, buf, q, at, 0, w, rs, rs2, out, d);
+}
+
+#[cfg(target_arch = "aarch64")]
+mod neon {
+    use super::{ACT, RowSyms};
+    use std::arch::aarch64::*;
+
+    /// Bit lengths of `v` capped at `ACT - 1` (the `bucket` of 16-bit lanes).
+    #[inline(always)]
+    unsafe fn bucket16(v: uint16x8_t) -> uint16x8_t {
+        unsafe { vminq_u16(vsubq_u16(vdupq_n_u16(16), vclzq_u16(v)), vdupq_n_u16(ACT as u16 - 1)) }
+    }
+
+    /// MED of 8 lanes (widened).
+    #[inline(always)]
+    unsafe fn med16(a: int16x8_t, b: int16x8_t, c: int16x8_t) -> int16x8_t {
+        unsafe { vminq_s16(vmaxq_s16(vsubq_s16(vaddq_s16(a, b), c), vminq_s16(a, b)), vmaxq_s16(a, b)) }
+    }
+
+    #[inline(always)]
+    unsafe fn lo(v: uint8x16_t) -> int16x8_t {
+        unsafe { vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(v))) }
+    }
+
+    #[inline(always)]
+    unsafe fn hi(v: uint8x16_t) -> int16x8_t {
+        unsafe { vreinterpretq_s16_u16(vmovl_high_u8(v)) }
+    }
+
+    /// The prediction of 16 bytes (MED, with the previous channel's residual added where
+    /// `dec` is set).
+    #[inline(always)]
+    unsafe fn pred(a: uint8x16_t, b: uint8x16_t, c: uint8x16_t, v1: uint8x16_t, a1: uint8x16_t, b1: uint8x16_t, c1: uint8x16_t, dec: uint8x16_t) -> uint8x16_t {
+        unsafe {
+            let m_lo = med16(lo(a), lo(b), lo(c));
+            let m_hi = med16(hi(a), hi(b), hi(c));
+            let n_lo = vsubq_s16(vaddq_s16(m_lo, lo(v1)), med16(lo(a1), lo(b1), lo(c1)));
+            let n_hi = vsubq_s16(vaddq_s16(m_hi, hi(v1)), med16(hi(a1), hi(b1), hi(c1)));
+            let m = vcombine_u8(vqmovun_s16(m_lo), vqmovun_s16(m_hi));
+            let n = vcombine_u8(vqmovun_s16(n_lo), vqmovun_s16(n_hi));
+            vbslq_u8(dec, n, m)
+        }
+    }
+
+    /// Returns how many bytes it did (whole 16-byte chunks).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn row_syms<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize, w: usize, rs: usize, rs2: usize, out: &mut RowSyms, d: usize) -> usize {
+        let chunks = w / 16;
+        if chunks == 0 {
+            return 0;
+        }
+        // Every read below is of the row, the row above, their left padding, the byte
+        // before (the raw margin) or the data's padding: within the buffers.
+        assert!(q >= rs2 + BPP + 1 && q + w <= raw.len() && at >= rs && at + w <= buf.len());
+        assert!(d + w <= out.s.len() && d + w <= out.t.len() && d + w <= out.act.len());
+        // Per phase of the channel pattern: the lanes to decorrelate (channels 1 and 2 of
+        // three or more) and the table offsets (`min(ch, 3) * ACT`).
+        let mut dec = [[0u8; 16]; 4];
+        let mut toff = [[0u8; 16]; 4];
+        for ph in 0..BPP.min(4) {
+            for i in 0..16 {
+                let ch = (ph + i) % BPP;
+                dec[ph][i] = if BPP >= 3 && (ch == 1 || ch == 2) { 0xff } else { 0 };
+                toff[ph][i] = (ch.min(3) * ACT) as u8;
+            }
+        }
+        unsafe {
+            let r = raw.as_ptr();
+            let f = buf.as_ptr();
+            for k in 0..chunks {
+                let x = k * 16;
+                let ph = x % BPP;
+                let ld = |p: *const u8| vld1q_u8(p);
+                let v = ld(r.add(q + x));
+                let a = ld(r.add(q + x - BPP));
+                let b = ld(r.add(q + x - rs2));
+                let c = ld(r.add(q + x - rs2 - BPP));
+                let p = if BPP >= 3 {
+                    let v1 = ld(r.add(q + x - 1));
+                    let a1 = ld(r.add(q + x - 1 - BPP));
+                    let b1 = ld(r.add(q + x - 1 - rs2));
+                    let c1 = ld(r.add(q + x - 1 - rs2 - BPP));
+                    pred(a, b, c, v1, a1, b1, c1, vld1q_u8(dec[ph].as_ptr()))
+                } else {
+                    let m_lo = med16(lo(a), lo(b), lo(c));
+                    let m_hi = med16(hi(a), hi(b), hi(c));
+                    vcombine_u8(vqmovun_s16(m_lo), vqmovun_s16(m_hi))
+                };
+                // Zigzag of the residual.
+                let e = vsubq_u8(v, p);
+                let z = veorq_u8(vshlq_n_u8(e, 1), vreinterpretq_u8_s8(vshrq_n_s8(vreinterpretq_s8_u8(e), 7)));
+                vst1q_u8(out.s.as_mut_ptr().add(d + x), z);
+                // Activity |a - c| + |b - c|, and with the filtered neighbours' magnitudes.
+                let ac = vabdq_u8(a, c);
+                let bc = vabdq_u8(b, c);
+                let act_lo = vaddl_u8(vget_low_u8(ac), vget_low_u8(bc));
+                let act_hi = vaddl_high_u8(ac, bc);
+                let fl = vreinterpretq_u8_s8(vabsq_s8(vreinterpretq_s8_u8(ld(f.add(at + x - BPP)))));
+                let fu = vreinterpretq_u8_s8(vabsq_s8(vreinterpretq_s8_u8(ld(f.add(at + x - rs)))));
+                let ff_lo = vaddl_u8(vget_low_u8(fl), vget_low_u8(fu));
+                let ff_hi = vaddl_high_u8(fl, fu);
+                let t_lo = bucket16(vaddq_u16(act_lo, ff_lo));
+                let t_hi = bucket16(vaddq_u16(act_hi, ff_hi));
+                let t = vaddq_u8(vcombine_u8(vmovn_u16(t_lo), vmovn_u16(t_hi)), vld1q_u8(toff[ph].as_ptr()));
+                vst1q_u8(out.t.as_mut_ptr().add(d + x), t);
+                let ab = vcombine_u8(vmovn_u16(bucket16(act_lo)), vmovn_u16(bucket16(act_hi)));
+                vst1q_u8(out.act.as_mut_ptr().add(d + x), ab);
+            }
+        }
+        chunks * 16
     }
 }
 
@@ -825,6 +1105,55 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
     Ok(())
 }
 
+/// The model of a pixel byte (raw offset `q`, data offset `at`, channel `ch`): its table
+/// (before the after-match offset), prediction and activity, and the raw neighbours.
+#[derive(Clone, Copy)]
+struct Pixel {
+    t: usize,
+    pred: u8,
+    act: u32,
+    a: u8,
+    b: u8,
+    c: u8,
+}
+
+impl Pixel {
+    /// The prediction of filter `ft`.
+    #[inline(always)]
+    fn fp(&self, ft: u8) -> u8 {
+        match ft {
+            1 => self.a,
+            2 => self.b,
+            3 => ((self.a as u16 + self.b as u16) >> 1) as u8,
+            4 => filter::paeth(self.a, self.b, self.c),
+            _ => 0,
+        }
+    }
+}
+
+#[inline(always)]
+fn pixel<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize, ch: usize, rs: usize, rs2: usize) -> Pixel {
+    let fl = mag(get(buf, at - BPP));
+    let fu = mag(get(buf, at - rs));
+    let up = q - rs2;
+    let (a, b, c) = (get(raw, q - BPP) as i32, get(raw, up) as i32, get(raw, up - BPP) as i32);
+    let mut pred = med(a, b, c);
+    if BPP >= 3 && (ch == 1 || ch == 2) {
+        // Green and blue add the previous channel's residual.
+        let (a1, b1, c1) = (get(raw, q - 1 - BPP) as i32, get(raw, up - 1) as i32, get(raw, up - 1 - BPP) as i32);
+        pred = (pred + get(raw, q - 1) as i32 - med(a1, b1, c1)).clamp(0, 255);
+    }
+    let act = ((a - c).abs() + (b - c).abs()) as u32;
+    Pixel {
+        t: T_LIT + ch.min(3) * ACT + bucket(act + fl + fu),
+        pred: pred as u8,
+        act,
+        a: a as u8,
+        b: b as u8,
+        c: c as u8,
+    }
+}
+
 /// Decodes up to `run` literals from the position (byte `x > 0` of its row, filter `FT`),
 /// stopping at a match: returns the literals decoded and, if a match follows (its escape
 /// decoded), the activity there. `run` keeps within the row, the block and the data.
@@ -850,30 +1179,13 @@ fn lit_run<I: Io, const BPP: usize, const FT: u8>(
         return Err(crate::corrupt());
     }
     for i in 0..run {
-        let fl = mag(get(buf, at - BPP));
-        let fu = mag(get(buf, at - rs));
-        let up = q - rs2;
-        let (a, b, c) = (get(raw, q - BPP) as i32, get(raw, up) as i32, get(raw, up - BPP) as i32);
-        let mut pred = med(a, b, c);
-        if BPP >= 3 && (ch == 1 || ch == 2) {
-            let (a1, b1, c1) = (get(raw, q - 1 - BPP) as i32, get(raw, up - 1) as i32, get(raw, up - 1 - BPP) as i32);
-            pred = (pred + get(raw, q - 1) as i32 - med(a1, b1, c1)).clamp(0, 255);
-        }
-        let act = ((a - c).abs() + (b - c).abs()) as u32;
-        let t = T_LIT + after + ch.min(3) * ACT + bucket(act + fl + fu);
-        let s = io.sym(t, 0);
+        let m = pixel::<BPP>(raw, buf, q, at, ch, rs, rs2);
+        let s = io.sym(m.t + after, 0);
         if s == ESC && io.bit(T_ESC, 0) == 1 {
-            return Ok((i, Some(act)));
+            return Ok((i, Some(m.act)));
         }
-        let v = (pred as u8).wrapping_add(unzigzag(s));
-        let fp = match FT {
-            1 => a as u8,
-            2 => b as u8,
-            3 => ((a + b) >> 1) as u8,
-            4 => filter::paeth(a as u8, b as u8, c as u8),
-            _ => 0,
-        };
-        let f = v.wrapping_sub(fp);
+        let v = m.pred.wrapping_add(unzigzag(s));
+        let f = v.wrapping_sub(m.fp(FT));
         put(raw, q, v);
         put(buf, at, f);
         // SAFETY: `ti + run <= tokens.len()`, checked above.
@@ -999,29 +1311,13 @@ fn prepare<const BPP: usize, const IMAGE: bool>(g: &Geometry, cur: &Cursor, raw:
     // and the raw neighbours within the raw buffer.
     let x = x - 1;
     let at = g.pad + p;
-    let fl = mag(get(buf, at - bpp));
-    let fu = mag(get(buf, at - cur.rs));
     if IMAGE {
         let q = cur.q0 + x;
-        let up = q - cur.rs2;
-        let (a, b, c) = (get(raw, q - BPP) as i32, get(raw, up) as i32, get(raw, up - BPP) as i32);
-        let ch = x % BPP;
-        let mut pred = med(a, b, c);
-        if BPP >= 3 && (ch == 1 || ch == 2) {
-            // Green and blue add the previous channel's residual.
-            let (a1, b1, c1) = (get(raw, q - 1 - BPP) as i32, get(raw, up - 1) as i32, get(raw, up - 1 - BPP) as i32);
-            pred = (pred + get(raw, q - 1) as i32 - med(a1, b1, c1)).clamp(0, 255);
-        }
-        let act = ((a - c).abs() + (b - c).abs()) as u32;
+        let m = pixel::<BPP>(raw, buf, q, at, x % BPP, cur.rs, cur.rs2);
         let ft = get(buf, g.pad + cur.rstart);
-        Lit {
-            t: T_LIT + ch.min(3) * ACT + bucket(act + fl + fu),
-            act,
-            pred: pred as u8,
-            fp: filter::predict(ft, a as u8, b as u8, c as u8),
-            q,
-        }
+        Lit { t: m.t, act: m.act, pred: m.pred, fp: m.fp(ft), q }
     } else {
+        let (fl, fu) = (mag(get(buf, at - bpp)), mag(get(buf, at - cur.rs)));
         Lit { t: T_LIT + (x % bpp & 3) * ACT + bucket(fl + fu), act: fl + fu, pred: 0, fp: 0, q: usize::MAX }
     }
 }
