@@ -209,6 +209,16 @@ fn main() {
                 }
             }
         }
+        "pscan" => {
+            for path in &args {
+                let d = std::fs::read(path).unwrap();
+                let j = jpeg_recons::jpeg::parse(&d).unwrap();
+                println!("{path}:");
+                for (desc, td, te, bytes) in jpeg_recons::progressive::scan_times(&j, &d, n.unwrap_or(5)).unwrap() {
+                    println!("  {desc:<34} {bytes:9} B  decode {:7.2} ms  encode {:7.2} ms", td * 1e3, te * 1e3);
+                }
+            }
+        }
         "c" | "d" => {
             let d = std::fs::read(&args[0]).unwrap();
             let out = if cmd == "c" { container::compress(&d) } else { container::decompress(&d).unwrap() };

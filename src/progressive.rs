@@ -6,7 +6,7 @@
 //! which is what libjpeg, libjpeg-turbo and mozjpeg produce. Encoders that decide differently
 //! are detected at compression time by re-encoding every scan and comparing with the original.
 
-use crate::jpeg::{self, err, extend, size_bits, BitOut, Bits, Clean, Coefs, EncTable, Error, HuffSpec, Jpeg, Scan, ScanInfo, DC_LIMIT, PAD};
+use crate::jpeg::{self, err, extend, size_bits, Bits, Clean, Coefs, EncTable, Error, HuffSpec, Jpeg, Scan, ScanInfo, DC_LIMIT, PAD};
 
 /// Canonical Huffman decoder for arbitrary symbols (progressive scans use (r, 0) symbols as EOB
 /// runs, which the sequential fast tables reject). 9-bit lookahead + canonical slow path.
@@ -73,6 +73,60 @@ impl SymDec {
     }
 }
 
+/// Positions below `k` (k <= 64) as a mask.
+#[inline(always)]
+fn below(k: usize) -> u64 {
+    if k >= 64 { u64::MAX } else { (1u64 << k) - 1 }
+}
+
+/// Combined lookup for AC refinement scans, indexed by the next RBITS bits: one entry decodes
+/// a whole symbol including its sign bit / EOB-run bits when they fit.
+const RBITS: u32 = 12;
+#[derive(Clone, Copy, Default)]
+struct REntry {
+    /// bits to consume (0 = not in the table: use the generic path)
+    len: u8,
+    /// 1 = new coefficient (run r, `val` = sign), 2 = EOB run (`val` = run length), 3 = ZRL
+    kind: u8,
+    r: u8,
+    val: u16,
+}
+fn refine_table(spec: &HuffSpec) -> Box<[REntry; 1 << RBITS]> {
+    let mut t = Box::new([REntry::default(); 1 << RBITS]);
+    let (mut code, mut k) = (0u32, 0usize);
+    for l in 1..=16u32 {
+        for _ in 0..spec.counts[l as usize - 1] {
+            let sym = spec.vals[k];
+            let (r, sz) = ((sym >> 4) as u32, (sym & 15) as u32);
+            // extra bits after the code: sign (s = 1), r bits (EOB run), none (ZRL)
+            let extra = match (sz, r) {
+                (1, _) => Some(1),
+                (0, 15) => Some(0),
+                (0, _) => Some(r),
+                _ => None, // invalid in refinement scans: generic path reports it
+            };
+            if let Some(x) = extra {
+                if l + x <= RBITS {
+                    let rem = RBITS - l;
+                    let base = (code << rem) as usize;
+                    for idx in base..base + (1 << rem) {
+                        let ebits = ((idx as u32) >> (rem - x)) & ((1 << x) - 1);
+                        t[idx] = match (sz, r) {
+                            (1, _) => REntry { len: (l + 1) as u8, kind: 1, r: r as u8, val: ebits as u16 },
+                            (0, 15) => REntry { len: l as u8, kind: 3, r: 15, val: 0 },
+                            _ => REntry { len: (l + x) as u8, kind: 2, r: r as u8, val: ((1 << r) + ebits) as u16 },
+                        };
+                    }
+                }
+            }
+            code += 1;
+            k += 1;
+        }
+        code <<= 1;
+    }
+    t
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind {
     DcFirst,
@@ -116,6 +170,10 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
             None => return err("missing Huffman table"),
         });
     }
+    let rtab = match kind {
+        Kind::AcRefine => Some(refine_table(s.comps[0].ac.as_ref().unwrap())),
+        _ => None,
+    };
     let layout = jpeg::scan_layout(j, s);
     let nmcu = s.mcux * s.mcuy;
     let ri = if s.ri > 0 { s.ri } else { nmcu };
@@ -123,6 +181,7 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
     let mut b = Bits { buf: 0, cnt: 0, pos: 0, data };
     let (al, ss, se) = (s.al as u32, s.ss as usize, s.se as usize);
     let (p1, m1) = (1i32 << al, -1i32 << al);
+    let band = if ss > 0 { (u64::MAX >> (63 - se)) & (u64::MAX << ss) } else { 0 };
     let mut pred = [0i32; 4];
     let mut eobrun = 0u32;
     let mut seg = 0;
@@ -143,7 +202,9 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                     if bx >= o.bw || by >= o.bh {
                         return err("block outside the component");
                     }
-                    let blk = &mut o.blocks[by * o.bw + bx];
+                    let bi = by * o.bw + bx;
+                    let blk = &mut o.blocks[bi];
+                    let mask = &mut o.masks[bi]; // nonzero history (AC bits kept up to date)
                     b.refill();
                     match kind {
                         Kind::DcFirst => {
@@ -181,6 +242,7 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                                     }
                                     b.refill();
                                     blk[k] = store(extend(b.get(sz), sz) * p1)?;
+                                    *mask |= 1 << k;
                                 } else if r == 15 {
                                     k += 15;
                                 } else {
@@ -192,60 +254,114 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                             }
                         }
                         Kind::AcRefine => {
+                            // Coefficients that were nonzero before this scan ("history") each
+                            // take one correction bit when passed; a symbol (r, s) skips r
+                            // zero-history positions and, for s = 1, sets a new coefficient at the
+                            // next one. The history positions are taken from the mask, and their
+                            // correction bits are read in bulk.
                             let d = dec[si].as_ref().unwrap();
+                            let hist = *mask & band;
+                            // correction bits are collected in order (one per history position
+                            // passed) and applied once at the end of the block
+                            let mut corr = [0u64; 2]; // up to 63 bits, MSB first, across two words
+                            let mut ncorr = 0u32;
+                            macro_rules! collect {
+                                ($m:expr) => {{
+                                    let mut c = ($m).count_ones();
+                                    while c > 0 {
+                                        let take = c.min(24);
+                                        b.refill();
+                                        let v = b.get(take) as u64;
+                                        // shift into the 128-bit accumulator
+                                        corr[0] = corr[0] << take | corr[1] >> (64 - take);
+                                        corr[1] = corr[1] << take | v;
+                                        ncorr += take;
+                                        c -= take;
+                                    }
+                                }};
+                            }
                             let mut k = ss;
+                            let mut covered = 0u64; // history positions whose bits were read
                             if eobrun == 0 {
+                                let rt = rtab.as_deref().unwrap();
                                 while k <= se {
                                     b.refill();
-                                    let sym = d.decode(&mut b)?;
-                                    let (mut r, sz) = ((sym >> 4) as i32, sym & 15);
-                                    let mut val = 0i32;
-                                    if sz != 0 {
-                                        if sz != 1 {
-                                            return err("bad refinement symbol");
+                                    let e = rt[b.peek(RBITS) as usize];
+                                    let (r, val) = match e.kind {
+                                        1 => {
+                                            b.consume(e.len as u32);
+                                            (e.r as u32, if e.val != 0 { p1 } else { m1 })
                                         }
-                                        val = if b.get(1) != 0 { p1 } else { m1 };
-                                    } else if r != 15 {
-                                        eobrun = (1 << r) + b.get(r as u32);
-                                        break;
-                                    }
-                                    // skip r zero-history coefficients, refining nonzero ones
-                                    while k <= se {
-                                        let c = blk[k] as i32;
-                                        if c != 0 {
+                                        2 => {
+                                            b.consume(e.len as u32);
+                                            eobrun = e.val as u32;
+                                            break;
+                                        }
+                                        3 => {
+                                            b.consume(e.len as u32);
+                                            (15, 0)
+                                        }
+                                        _ => {
+                                            let sym = d.decode(&mut b)?;
+                                            let (r, sz) = (sym >> 4, sym & 15);
+                                            if sz > 1 {
+                                                return err("bad refinement symbol");
+                                            }
                                             b.refill();
-                                            if b.get(1) != 0 && c & p1 == 0 {
-                                                blk[k] = store(c + if c >= 0 { p1 } else { m1 })?;
-                                            }
-                                        } else {
-                                            r -= 1;
-                                            if r < 0 {
+                                            if sz == 1 {
+                                                (r, if b.get(1) != 0 { p1 } else { m1 })
+                                            } else if r != 15 {
+                                                eobrun = (1 << r) + b.get(r);
                                                 break;
+                                            } else {
+                                                (15, 0)
                                             }
                                         }
-                                        k += 1;
+                                    };
+                                    // target: the (r+1)-th zero-history position >= k (r is
+                                    // usually small; a branch-free select measured slower)
+                                    let mut z = !hist & band & (u64::MAX << k);
+                                    for _ in 0..r {
+                                        z &= z.wrapping_sub(1);
                                     }
+                                    let target = if z == 0 { se + 1 } else { z.trailing_zeros() as usize };
+                                    let m = hist & (u64::MAX << k) & below(target);
+                                    collect!(m);
+                                    covered |= m;
                                     if val != 0 {
-                                        if k > se {
+                                        if target > se {
                                             return err("coefficient index overflow");
                                         }
-                                        blk[k] = val as i16;
+                                        blk[target] = val as i16;
+                                        *mask |= 1 << target;
                                     }
-                                    k += 1;
+                                    k = target + 1;
                                 }
                             }
                             if eobrun > 0 {
-                                while k <= se {
-                                    let c = blk[k] as i32;
-                                    if c != 0 {
-                                        b.refill();
-                                        if b.get(1) != 0 && c & p1 == 0 {
-                                            blk[k] = store(c + if c >= 0 { p1 } else { m1 })?;
-                                        }
-                                    }
-                                    k += 1;
+                                if k <= se {
+                                    let m = hist & (u64::MAX << k);
+                                    collect!(m);
+                                    covered |= m;
                                 }
                                 eobrun -= 1;
+                            }
+                            // apply: the i-th covered position (ascending) gets bit ncorr-1-i
+                            let mut bad = false;
+                            let mut i = ncorr;
+                            while covered != 0 {
+                                let pos = covered.trailing_zeros() as usize;
+                                covered &= covered - 1;
+                                i -= 1;
+                                let bit = if i >= 64 { corr[0] >> (i - 64) } else { corr[1] >> i } & 1;
+                                let c = blk[pos] as i32;
+                                let upd = bit as i32 & (c & p1 == 0) as i32;
+                                let nc = c + upd * if c >= 0 { p1 } else { -p1 };
+                                bad |= nc.abs() > 32767;
+                                blk[pos] = nc as i16;
+                            }
+                            if bad {
+                                return err("coefficient out of range");
                             }
                         }
                     }
@@ -278,70 +394,20 @@ impl BitList {
     }
 }
 
-struct Enc<'a> {
-    w: BitOut,
-    t: &'a [u32; 256], // AC (or DC) table of the current component
-    eobrun: u32,
-    be: Vec<BitList>, // correction bits of the blocks in the pending EOB run
-    be_n: usize,
-}
-
-/// Bytes a block can produce at most (64 symbols + extra/correction bits), see `Enc::reserve`.
-const BLOCK_BYTES: usize = 64 * 4 + 16;
-
-impl Enc<'_> {
-    /// The puts below do not reserve: `encode_blocks` reserves BLOCK_BYTES per block and
-    /// `emit_eobrun` reserves for the buffered correction bits.
-    #[inline(always)]
-    fn symbol(&mut self, sym: u32) -> Result<(), Error> {
-        let e = self.t[sym as usize];
-        if e == 0 {
-            return err("symbol without Huffman code");
-        }
-        self.w.put(e & 255, e >> 8);
-        Ok(())
-    }
-    #[inline(always)]
-    fn bits(&mut self, n: u32, v: u32) {
-        if n > 0 {
-            self.w.put(n, v & ((1 << n) - 1));
-        }
-    }
-    #[inline(always)]
-    fn emit_list(&mut self, b: BitList) {
-        let mut n = b.n;
-        while n > 0 {
-            let take = n.min(24);
-            self.w.put(take, ((b.v >> (n - take)) & ((1 << take) - 1)) as u32);
-            n -= take;
-        }
-    }
-    fn emit_eobrun(&mut self) -> Result<(), Error> {
-        if self.eobrun > 0 {
-            let nbits = 31 - self.eobrun.leading_zeros();
-            if nbits > 14 {
-                return err("EOB run too long");
-            }
-            self.w.reserve(8 + self.be_n / 8 + 8);
-            self.symbol(nbits << 4)?;
-            let r = self.eobrun;
-            self.bits(nbits, r);
-            self.eobrun = 0;
-            for i in 0..self.be.len() {
-                let b = self.be[i];
-                self.emit_list(b);
-            }
-            self.be.clear();
-            self.be_n = 0;
-        }
-        Ok(())
-    }
-}
+/// Bytes a block can produce at most: 64 symbols with extra / correction bits, plus one flush
+/// of the pending EOB run's correction bits (< MAX_CORR_BITS). `encode_scan` reserves this per
+/// block for a whole MCU row at a time, so the puts never need to check.
+const BLOCK_BYTES: usize = 64 * 4 + MAX_CORR_BITS / 8 + 32;
 
 /// Coefficient positions ss..=se as a zigzag bit mask.
 #[inline(always)]
 fn band_mask(ss: usize, se: usize) -> u64 {
     (u64::MAX >> (63 - se)) & (u64::MAX << ss)
+}
+
+thread_local! {
+    /// correction bits of the blocks in a pending EOB run (at most 0x7FFF blocks)
+    static BE: std::cell::RefCell<Vec<BitList>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Re-emit progressive scan `s` from final zigzag-ordered coefficients.
@@ -362,41 +428,124 @@ pub fn encode_scan(j: &Jpeg, s: &Scan, info: &ScanInfo, coefs: &[Coefs], out: &m
         });
     }
     let layout = jpeg::scan_layout(j, s);
-    let mut e = Enc { w: BitOut { acc: 0, n: 0, buf: jpeg::take_scratch(), pos: 0 }, t: &tabs[0], eobrun: 0, be: Vec::new(), be_n: 0 };
-    let r = encode_blocks(s, info, coefs, out, kind, &layout, &tabs, &mut e);
-    jpeg::put_scratch(std::mem::take(&mut e.w.buf));
+    let mut buf = jpeg::take_scratch();
+    let mut be = BE.with(|b| std::mem::take(&mut *b.borrow_mut()));
+    be.resize(0x8000, BitList::default());
+    let r = encode_blocks(s, info, coefs, kind, &layout, &tabs, &mut buf, &mut be, out);
+    BE.with(|b| *b.borrow_mut() = be);
+    jpeg::put_scratch(buf);
     r
 }
 
+/// The encoder proper. All hot state (bit buffer, EOB run) is in locals and the loop makes no
+/// calls except the per-row buffer growth, so it stays in registers.
 #[allow(clippy::too_many_arguments)]
-fn encode_blocks<'a>(
+fn encode_blocks(
     s: &Scan,
     info: &ScanInfo,
     coefs: &[Coefs],
-    out: &mut Vec<u8>,
     kind: Kind,
     layout: &[(usize, usize, usize)],
-    tabs: &'a [[u32; 256]],
-    e: &mut Enc<'a>,
+    tabs: &[[u32; 256]],
+    buf: &mut Vec<u8>,
+    be: &mut [BitList],
+    out: &mut Vec<u8>,
 ) -> Result<(), Error> {
     let nmcu = s.mcux * s.mcuy;
     let ri = if s.ri > 0 { s.ri } else { nmcu };
     let (al, ss, se) = (s.al as u32, s.ss as usize, s.se as usize);
+    let band = if ss > 0 { band_mask(ss, se) } else { 0 };
+    let row_bytes = BLOCK_BYTES * s.mcux * layout.iter().map(|&(_, h, v)| h * v).sum::<usize>();
     let mut seg_ends = Vec::new();
     let mut pred = [0i32; 4];
-    let band = if ss > 0 { band_mask(ss, se) } else { 0 };
+    // MSB-first bit writer: `n` (< 8) pending bits in the low end of `acc`
+    let (mut acc, mut n, mut pos) = (0u64, 0u32, 0usize);
+    let mut ptr = buf.as_mut_ptr();
+    let mut eobrun = 0u32;
+    let mut be_len = 0usize; // blocks with buffered correction bits
+    let mut be_bits = 0usize;
+    macro_rules! put {
+        ($len:expr, $bits:expr) => {{
+            let (l, v) = ($len, $bits);
+            acc = (acc << l) | v as u64;
+            n += l;
+            // SAFETY: >= BLOCK_BYTES are reserved per remaining block of the current MCU row
+            unsafe { (ptr.add(pos) as *mut u64).write_unaligned((acc << (64 - n)).to_be()) };
+            pos += (n >> 3) as usize;
+            n &= 7;
+        }};
+    }
+    macro_rules! symbol {
+        ($t:expr, $sym:expr) => {{
+            let e = $t[$sym as usize];
+            if e == 0 {
+                return err("symbol without Huffman code");
+            }
+            put!(e & 255, e >> 8);
+        }};
+    }
+    macro_rules! bits {
+        ($nb:expr, $v:expr) => {{
+            let nb: u32 = $nb;
+            if nb > 0 {
+                put!(nb, ($v as u32) & ((1u32 << nb) - 1));
+            }
+        }};
+    }
+    macro_rules! emit_list {
+        ($b:expr) => {{
+            let b: BitList = $b;
+            let mut k = b.n;
+            while k > 0 {
+                let take = k.min(24);
+                put!(take, ((b.v >> (k - take)) & ((1 << take) - 1)) as u32);
+                k -= take;
+            }
+        }};
+    }
+    macro_rules! emit_eobrun {
+        ($t:expr) => {{
+            if eobrun > 0 {
+                let nbits = 31 - eobrun.leading_zeros();
+                if nbits > 14 {
+                    return err("EOB run too long");
+                }
+                symbol!($t, nbits << 4);
+                bits!(nbits, eobrun);
+                eobrun = 0;
+                for i in 0..be_len {
+                    emit_list!(be[i]);
+                }
+                be_len = 0;
+                be_bits = 0;
+            }
+        }};
+    }
+    macro_rules! pad {
+        () => {{
+            if n > 0 {
+                let p = 8 - n;
+                put!(p, if info.pad_zero { 0 } else { (1u32 << p) - 1 });
+            }
+        }};
+    }
     for m in 0..nmcu {
+        if m % s.mcux == 0 {
+            if buf.len() < pos + row_bytes + 16 {
+                buf.resize((buf.len() * 2).max(pos + row_bytes + 16), 0);
+                ptr = buf.as_mut_ptr();
+            }
+        }
         if m > 0 && m % ri == 0 {
-            e.emit_eobrun()?;
-            e.w.reserve(16);
-            e.w.pad(info.pad_zero);
-            seg_ends.push(e.w.pos);
+            emit_eobrun!(&tabs[0]);
+            pad!();
+            seg_ends.push(pos);
             pred = [0; 4];
         }
         let (mx, my) = (m % s.mcux, m / s.mcux);
         for (si, &(ci, ch, cv)) in layout.iter().enumerate() {
             let o = &coefs[ci];
-            e.t = &tabs[si];
+            let t = &tabs[si];
             for v in 0..cv {
                 for h in 0..ch {
                     let (bx, by) = (mx * ch + h, my * cv + v);
@@ -405,30 +554,15 @@ fn encode_blocks<'a>(
                     }
                     let bi = by * o.bw + bx;
                     let blk = &o.blocks[bi];
-                    e.w.reserve(BLOCK_BYTES);
                     match kind {
                         Kind::DcFirst => {
-                            let t = (blk[0] as i32) >> al;
-                            let (sz, bits) = size_bits(t - pred[si]);
-                            pred[si] = t;
-                            e.symbol(sz)?;
-                            e.bits(sz, bits);
+                            let d = (blk[0] as i32) >> al;
+                            let (sz, b) = size_bits(d - pred[si]);
+                            pred[si] = d;
+                            symbol!(t, sz);
+                            bits!(sz, b);
                         }
-                        Kind::DcRefine => e.bits(1, ((blk[0] as i32) >> al) as u32 & 1),
-                        Kind::AcFirst if o.masks[bi] & band == 0 => {
-                            // empty band: just extends the EOB run
-                            e.eobrun += 1;
-                            if e.eobrun == 0x7FFF {
-                                e.emit_eobrun()?;
-                            }
-                        }
-                        Kind::AcRefine if o.masks[bi] & band == 0 => {
-                            // empty band, no correction bits
-                            e.eobrun += 1;
-                            if e.eobrun == 0x7FFF {
-                                e.emit_eobrun()?;
-                            }
-                        }
+                        Kind::DcRefine => put!(1, ((blk[0] as i32) >> al) as u32 & 1),
                         Kind::AcFirst => {
                             // nonzero (after the shift) coefficients in the band, via the mask
                             let mut mk = o.masks[bi] & band;
@@ -437,79 +571,122 @@ fn encode_blocks<'a>(
                                 let k = mk.trailing_zeros() as usize;
                                 mk &= mk - 1;
                                 let c = blk[k] as i32;
-                                let t = c.abs() >> al;
-                                if t == 0 {
+                                let a = c.abs() >> al;
+                                if a == 0 {
                                     continue;
                                 }
                                 let mut r = (k - last - 1) as u32;
-                                e.emit_eobrun()?;
+                                emit_eobrun!(t);
                                 while r > 15 {
-                                    e.symbol(0xF0)?;
+                                    symbol!(t, 0xF0);
                                     r -= 16;
                                 }
-                                let nbits = 32 - t.leading_zeros();
-                                e.symbol(r << 4 | nbits)?;
-                                e.bits(nbits, if c < 0 { !t as u32 } else { t as u32 });
+                                let nbits = 32 - a.leading_zeros();
+                                symbol!(t, r << 4 | nbits);
+                                bits!(nbits, if c < 0 { !a as u32 } else { a as u32 });
                                 last = k;
                             }
                             if last < se {
-                                e.eobrun += 1;
-                                if e.eobrun == 0x7FFF {
-                                    e.emit_eobrun()?;
+                                eobrun += 1;
+                                if eobrun == 0x7FFF {
+                                    emit_eobrun!(t);
                                 }
                             }
                         }
                         Kind::AcRefine => {
                             // Positions with |c| >> al == 0 count as zeros (r); == 1 are newly
-                            // nonzero; > 1 contribute a correction bit and do not reset r.
+                            // nonzero (a symbol each); > 1 ("history") contribute a correction
+                            // bit and do not reset r. Classify the block once into masks, then
+                            // walk only the newly nonzero positions; the history positions of a
+                            // gap are handled in bulk unless the gap needs a ZRL (> 15 zeros).
                             let mk = o.masks[bi] & band;
-                            let mut eob = 0;
+                            let (mut hist, mut newm) = (0u64, 0u64);
+                            let mut cbits = 0u64; // correction bits of the history positions, in order
                             let mut mm = mk;
                             while mm != 0 {
-                                let k = mm.trailing_zeros() as usize;
+                                let k = mm.trailing_zeros();
                                 mm &= mm - 1;
-                                if (blk[k] as i32).abs() >> al == 1 {
-                                    eob = k;
-                                }
+                                let a = (blk[k as usize] as i32).abs() >> al;
+                                hist |= ((a > 1) as u64) << k;
+                                newm |= ((a == 1) as u64) << k;
+                                cbits = (cbits << (a > 1) as u32) | ((a > 1) & (a & 1 != 0)) as u64;
+                            }
+                            let zeros = band & !hist & !newm;
+                            let eob = if newm == 0 { 0 } else { 63 - newm.leading_zeros() as usize };
+                            let mut cleft = hist.count_ones(); // correction bits not yet taken
+                            // the next c correction bits, MSB first
+                            macro_rules! take_bits {
+                                ($c:expr) => {{
+                                    let c: u32 = $c;
+                                    cleft -= c;
+                                    BitList { v: if c == 0 { 0 } else { (cbits >> cleft) & (u64::MAX >> (64 - c)) }, n: c }
+                                }};
                             }
                             let mut r = 0u32;
                             let mut br = BitList::default();
                             let mut prev = ss - 1;
-                            let mut mm = mk;
-                            while mm != 0 {
-                                let k = mm.trailing_zeros() as usize;
-                                mm &= mm - 1;
-                                let t = (blk[k] as i32).abs() >> al;
-                                if t == 0 {
-                                    continue;
+                            let mut nm = newm;
+                            while nm != 0 {
+                                let pnew = nm.trailing_zeros() as usize;
+                                nm &= nm - 1;
+                                let range = below(pnew) & !below(prev + 1);
+                                let z = (zeros & range).count_ones();
+                                if z <= 15 {
+                                    // no ZRL: the gap's correction bits go out after the symbol
+                                    br = take_bits!((hist & range).count_ones());
+                                    r = z;
+                                } else {
+                                    // exact per-position walk (rare)
+                                    r = 0;
+                                    let mut q = prev;
+                                    let mut hm = hist & range;
+                                    while hm != 0 {
+                                        let k = hm.trailing_zeros() as usize;
+                                        hm &= hm - 1;
+                                        r += (zeros & below(k) & !below(q + 1)).count_ones();
+                                        q = k;
+                                        while r > 15 && k <= eob {
+                                            emit_eobrun!(t);
+                                            symbol!(t, 0xF0);
+                                            r -= 16;
+                                            emit_list!(br);
+                                            br = BitList::default();
+                                        }
+                                        br.push(take_bits!(1).v as u32);
+                                    }
+                                    r += (zeros & range & !below(q + 1)).count_ones();
+                                    while r > 15 {
+                                        emit_eobrun!(t);
+                                        symbol!(t, 0xF0);
+                                        r -= 16;
+                                        emit_list!(br);
+                                        br = BitList::default();
+                                    }
                                 }
-                                r += (k - prev - 1) as u32;
-                                prev = k;
-                                while r > 15 && k <= eob {
-                                    e.emit_eobrun()?;
-                                    e.symbol(0xF0)?;
-                                    r -= 16;
-                                    e.emit_list(br);
-                                    br = BitList::default();
-                                }
-                                if t > 1 {
-                                    br.push((t & 1) as u32);
-                                    continue;
-                                }
-                                e.emit_eobrun()?;
-                                e.symbol(r << 4 | 1)?;
-                                e.bits(1, (blk[k] >= 0) as u32);
-                                e.emit_list(br);
+                                emit_eobrun!(t);
+                                symbol!(t, r << 4 | 1);
+                                put!(1, (blk[pnew] >= 0) as u32);
+                                emit_list!(br);
                                 br = BitList::default();
                                 r = 0;
+                                prev = pnew;
                             }
-                            r += (se - prev) as u32;
+                            // after the last newly nonzero position: zeros and correction bits
+                            // go to the EOB run (no ZRLs past `eob`)
+                            let range = band & !below(prev + 1);
+                            r += (zeros & range).count_ones();
+                            let rest = take_bits!((hist & range).count_ones());
+                            br = BitList { v: rest.v, n: rest.n };
+                            let _ = cleft;
                             if r > 0 || br.n > 0 {
-                                e.eobrun += 1;
-                                e.be.push(br);
-                                e.be_n += br.n as usize;
-                                if e.eobrun == 0x7FFF || e.be_n > MAX_CORR_BITS - 64 + 1 {
-                                    e.emit_eobrun()?;
+                                eobrun += 1;
+                                if br.n > 0 {
+                                    be[be_len] = br;
+                                    be_len += 1;
+                                    be_bits += br.n as usize;
+                                }
+                                if eobrun == 0x7FFF || be_bits > MAX_CORR_BITS - 64 + 1 {
+                                    emit_eobrun!(t);
                                 }
                             }
                         }
@@ -518,21 +695,24 @@ fn encode_blocks<'a>(
             }
         }
     }
-    e.emit_eobrun()?;
-    e.w.reserve(16);
-    e.w.pad(info.pad_zero);
-    for _ in 0..info.trailing_rst {
-        seg_ends.push(e.w.pos);
+    if buf.len() < pos + 1024 {
+        buf.resize(pos + 1024, 0);
+        ptr = buf.as_mut_ptr();
     }
-    let w = &e.w;
-    out.reserve(w.pos + w.pos / 64 + seg_ends.len() * 2 + 16);
+    emit_eobrun!(&tabs[0]);
+    pad!();
+    let _ = (ptr, n, eobrun, be_len, be_bits);
+    for _ in 0..info.trailing_rst {
+        seg_ends.push(pos);
+    }
+    out.reserve(pos + pos / 64 + seg_ends.len() * 2 + 16);
     let mut start = 0;
     for (r, &end) in seg_ends.iter().enumerate() {
-        jpeg::stuff_into(&w.buf[start..end], out);
+        jpeg::stuff_into(&buf[start..end], out);
         out.extend_from_slice(&[0xFF, 0xD0 + (r as u8 & 7)]);
         start = end;
     }
-    jpeg::stuff_into(&w.buf[start..w.pos], out);
+    jpeg::stuff_into(&buf[start..pos], out);
     Ok(())
 }
 
@@ -554,9 +734,10 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
         let extra = clean.segments.len().saturating_sub(nseg);
         trailing.push(if extra > 0 && clean.segments[nseg..].iter().all(|&p| p == data_len) { extra as u32 } else { 0 });
     }
+    // AC mask bits were maintained while decoding; set the DC bit
     for o in out.iter_mut() {
         for (blk, mask) in o.blocks.iter().zip(o.masks.iter_mut()) {
-            *mask = blk.iter().enumerate().fold(0u64, |m, (k, &v)| m | ((v != 0) as u64) << k);
+            *mask = (*mask & !1) | (blk[0] != 0) as u64;
             if (blk[0] as i32).abs() > DC_LIMIT {
                 return err("DC out of range");
             }
@@ -583,4 +764,52 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
         infos.push(info);
     }
     Ok(infos)
+}
+
+/// Per-scan timing (profiling aid): (description, decode seconds, encode seconds, scan bytes).
+pub fn scan_times(j: &Jpeg, d: &[u8], iters: usize) -> Result<Vec<(String, f64, f64, usize)>, Error> {
+    let mut coefs = Vec::new();
+    let mut clean = Clean::default();
+    let infos = decode_all(j, d, &mut coefs, &mut clean)?;
+    let cleans: Vec<Clean> = j
+        .scans
+        .iter()
+        .map(|s| {
+            let mut c = Clean::default();
+            jpeg::destuff(&d[s.start..s.end], &mut c);
+            c
+        })
+        .collect();
+    let mut td = vec![0f64; j.scans.len()];
+    let mut te = vec![0f64; j.scans.len()];
+    let mut tmp = Vec::new();
+    let mut out = Vec::new();
+    for _ in 0..iters {
+        jpeg::alloc_coefs(j, &mut tmp, true);
+        for (i, s) in j.scans.iter().enumerate() {
+            let t0 = std::time::Instant::now();
+            decode_scan(j, s, &cleans[i], &mut tmp)?;
+            td[i] += t0.elapsed().as_secs_f64();
+        }
+        for (i, (s, info)) in j.scans.iter().zip(&infos).enumerate() {
+            let t0 = std::time::Instant::now();
+            encode_scan(j, s, info, &coefs, &mut out)?;
+            te[i] += t0.elapsed().as_secs_f64();
+        }
+    }
+    Ok(j.scans
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let k = match kind(s) {
+                Ok(Kind::DcFirst) => "DC1",
+                Ok(Kind::DcRefine) => "DCr",
+                Ok(Kind::AcFirst) => "AC1",
+                Ok(Kind::AcRefine) => "ACr",
+                Err(_) => "?",
+            };
+            let desc = format!("{k} comps={} ss={} se={} ah={} al={}", s.comps.len(), s.ss, s.se, s.ah, s.al);
+            (desc, td[i] / iters as f64, te[i] / iters as f64, s.end - s.start)
+        })
+        .collect())
 }
