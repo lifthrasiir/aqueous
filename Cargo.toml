@@ -1,0 +1,13 @@
+[package]
+name = "psd-recons"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless PSD/PSB recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[dependencies]
+
+[profile.release]
+debug = 1
+lto = "fat"
+codegen-units = 1
