@@ -758,9 +758,42 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
             Span::Tokens(count) => {
                 let (mut lf, mut df) = ([0u32; 288], [0u32; 32]);
                 lf[256] = 1;
-                for _ in 0..count {
+                let end = st.tokens + count;
+                while st.tokens < end {
                     if st.p >= n {
                         return Err(crate::corrupt());
+                    }
+                    st.cur.seek(g, st.p);
+                    let x = st.p - st.cur.rstart;
+                    if IMAGE && x > 0 && st.cur.rs != usize::MAX {
+                        // A run of literals within the row, with the row's filter fixed.
+                        let run = (st.cur.rend - st.p).min(end - st.tokens).min(n - st.p);
+                        let ft = get(buf, g.pad + st.cur.rstart);
+                        let (done, act) = match ft {
+                            0 => lit_run::<I, BPP, 0>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
+                            1 => lit_run::<I, BPP, 1>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
+                            2 => lit_run::<I, BPP, 2>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
+                            3 => lit_run::<I, BPP, 3>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
+                            4 => lit_run::<I, BPP, 4>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
+                            _ => lit_run::<I, BPP, 5>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
+                        };
+                        st.p += done;
+                        st.tokens += done;
+                        if done > 0 {
+                            st.after = 0;
+                        }
+                        if let Some(act) = act {
+                            // The run stopped at a match (its escape is decoded).
+                            let (len, dist) = code_match(io, bucket(act), 0, 0).ok_or_else(crate::corrupt)?;
+                            if dist > st.p || len > n - st.p {
+                                return Err(crate::corrupt());
+                            }
+                            tokens[st.tokens] = Token::Match { len: len as u16, dist: dist as u16, alt258: false };
+                            lf[257 + len_code(len as u32) as usize] += 1;
+                            df[dist_code(dist as u32) as usize] += 1;
+                            st.copy::<BPP, IMAGE>(raw, buf, len, dist);
+                        }
+                        continue;
                     }
                     let l = st.prep::<BPP, IMAGE>(raw, buf, true);
                     let s = io.sym(l.t, 0);
@@ -790,6 +823,68 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
         return Err(crate::corrupt());
     }
     Ok(())
+}
+
+/// Decodes up to `run` literals from the position (byte `x > 0` of its row, filter `FT`),
+/// stopping at a match: returns the literals decoded and, if a match follows (its escape
+/// decoded), the activity there. `run` keeps within the row, the block and the data.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn lit_run<I: Io, const BPP: usize, const FT: u8>(
+    io: &mut I,
+    st: &St,
+    x: usize,
+    run: usize,
+    raw: &mut [u8],
+    buf: &mut [u8],
+    tokens: &mut [Token],
+    lf: &mut [u32; 288],
+) -> crate::Result<(usize, Option<u32>)> {
+    let (rs, rs2) = (st.cur.rs, st.cur.rs2);
+    let mut q = st.cur.q0 + x - 1;
+    let mut at = st.g.pad + st.p;
+    let mut ch = (x - 1) % BPP;
+    let mut after = st.after;
+    let ti = st.tokens;
+    if ti + run > tokens.len() {
+        return Err(crate::corrupt());
+    }
+    for i in 0..run {
+        let fl = mag(get(buf, at - BPP));
+        let fu = mag(get(buf, at - rs));
+        let up = q - rs2;
+        let (a, b, c) = (get(raw, q - BPP) as i32, get(raw, up) as i32, get(raw, up - BPP) as i32);
+        let mut pred = med(a, b, c);
+        if BPP >= 3 && (ch == 1 || ch == 2) {
+            let (a1, b1, c1) = (get(raw, q - 1 - BPP) as i32, get(raw, up - 1) as i32, get(raw, up - 1 - BPP) as i32);
+            pred = (pred + get(raw, q - 1) as i32 - med(a1, b1, c1)).clamp(0, 255);
+        }
+        let act = ((a - c).abs() + (b - c).abs()) as u32;
+        let t = T_LIT + after + ch.min(3) * ACT + bucket(act + fl + fu);
+        let s = io.sym(t, 0);
+        if s == ESC && io.bit(T_ESC, 0) == 1 {
+            return Ok((i, Some(act)));
+        }
+        let v = (pred as u8).wrapping_add(unzigzag(s));
+        let fp = match FT {
+            1 => a as u8,
+            2 => b as u8,
+            3 => ((a + b) >> 1) as u8,
+            4 => filter::paeth(a as u8, b as u8, c as u8),
+            _ => 0,
+        };
+        let f = v.wrapping_sub(fp);
+        put(raw, q, v);
+        put(buf, at, f);
+        // SAFETY: `ti + run <= tokens.len()`, checked above.
+        unsafe { *tokens.get_unchecked_mut(ti + i) = Token::Lit(f) };
+        lf[f as usize] += 1;
+        q += 1;
+        at += 1;
+        ch = if ch + 1 == BPP { 0 } else { ch + 1 };
+        after = 0;
+    }
+    Ok((run, None))
 }
 
 /// Length code (0-based) of every match length.
