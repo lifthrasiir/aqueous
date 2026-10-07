@@ -500,14 +500,13 @@ impl<'g> St<'g> {
 #[inline(always)]
 fn copy_match(buf: &mut [u8], d: usize, dist: usize, len: usize) {
     let s = d - dist;
-    if dist >= len {
-        if len <= 16 {
-            for i in 0..len {
-                buf[d + i] = buf[s + i];
-            }
-        } else {
-            buf.copy_within(s..s + len, d);
+    if len <= 16 {
+        // Short: byte by byte, forward (right for overlapping copies too).
+        for i in 0..len {
+            buf[d + i] = buf[s + i];
         }
+    } else if dist >= len {
+        buf.copy_within(s..s + len, d);
     } else if dist == 1 {
         let b = buf[s];
         buf[d..d + len].fill(b);
@@ -675,13 +674,20 @@ fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result
     buf[g.pad..].copy_from_slice(&f.data);
     drop(f.data);
     let mut raw = vec![0u8; g.raw_len];
-    let mut syms = RowSyms { s: vec![0; n], t: vec![NOT_PIXEL; n], act: vec![0; n] };
+    // Every position's table (relative to T_LIT; T_FILTER's at filter bytes and past the
+    // image), symbol and activity bucket.
+    const F: u8 = (T_FILTER - T_LIT) as u8;
+    let mut syms = RowSyms { s: vec![0; n], t: vec![F; n], act: vec![ACT as u8; n] };
+    for p in g.len.min(n)..n {
+        syms.s[p] = zigzag(buf[g.pad + p]) as u8;
+    }
     for ps in &g.passes {
         for row in 0..ps.rows {
             let rstart = ps.start + row * ps.rs;
             if rstart >= n {
                 break;
             }
+            syms.s[rstart] = zigzag(buf[g.pad + rstart]) as u8;
             let w = (ps.rs - 1).min(n - rstart - 1);
             let q = ps.base2 + (row + 1) * ps.rs2 + BPP;
             let at = g.pad + rstart + 1;
@@ -697,27 +703,24 @@ fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result
     rec.syms.reserve(4 * f.tokens.len() + stored + 16);
     let mut out = Syms { ptr: rec.syms.as_mut_ptr(), n: 0, cap: rec.syms.capacity(), raw: &mut rec.raw };
     let (mut p, mut ti, mut after) = (0usize, 0usize, 0usize);
-    let filter_sym = |p: usize| zigzag(buf[g.pad + p]);
     for (i, b) in f.stream.blocks.iter().enumerate() {
         if let flate_recons::deflate::Body::Stored { len, .. } = b.body {
             for _ in 0..len {
-                let e = syms.t[p];
-                if e == NOT_PIXEL {
-                    out.sym(T_FILTER, filter_sym(p));
-                } else {
-                    out.sym(T_LIT + e as usize, syms.s[p] as u32);
-                }
+                out.sym(T_LIT + syms.t[p] as usize, syms.s[p] as u32);
                 p += 1;
             }
             continue;
         }
         let end = f.starts[i + 1];
-        while ti < end {
-            let e = syms.t[p];
-            let (t, act) = if e == NOT_PIXEL { (T_FILTER, ACT) } else { (T_LIT + after + e as usize, syms.act[p] as usize) };
-            match f.tokens[ti] {
+        let (st, ss, sa) = (&syms.t[..], &syms.s[..], &syms.act[..]);
+        for tok in &f.tokens[ti..end] {
+            let e = st[p] as usize;
+            // The after-match offset applies to the literal tables only.
+            let mask = ((e < F as usize) as usize).wrapping_neg();
+            let t = T_LIT + e + (after & mask);
+            match *tok {
                 Token::Lit(_) => {
-                    let s = if e == NOT_PIXEL { filter_sym(p) } else { syms.s[p] as u32 };
+                    let s = ss[p] as u32;
                     out.sym(t, s);
                     if s == ESC {
                         out.bit(T_ESC, 0);
@@ -728,13 +731,13 @@ fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result
                 Token::Match { len, dist, .. } => {
                     out.sym(t, ESC);
                     out.bit(T_ESC, 1);
-                    code_match(&mut out, act, len as u32, dist as u32);
+                    code_match(&mut out, sa[p] as usize, len as u32, dist as u32);
                     p += len as usize;
                     after = 4 * ACT;
                 }
             }
-            ti += 1;
         }
+        ti = end;
     }
     let n_syms = out.n;
     // SAFETY: `Syms` wrote the first `n_syms` entries (within the capacity it checked).
@@ -765,8 +768,9 @@ struct Syms<'a> {
 impl Io for Syms<'_> {
     #[inline(always)]
     fn sym(&mut self, t: usize, v: u32) -> u32 {
-        assert!(self.n < self.cap);
-        // SAFETY: within the capacity (checked just above).
+        debug_assert!(self.n < self.cap);
+        // SAFETY: the room reserved covers four symbols per token and one per stored byte,
+        // the most the token walk writes.
         unsafe { self.ptr.add(self.n).write((t as u16, v as u16)) };
         self.n += 1;
         v
@@ -782,16 +786,13 @@ impl Io for Syms<'_> {
     }
 }
 
-/// Per pixel byte (indexed by data position) its symbol, its literal table before the
-/// after-match offset (`NOT_PIXEL` at filter bytes and past the image) and the bucket of its
-/// activity.
+/// Per position its symbol, its table relative to `T_LIT` (before the after-match offset)
+/// and the bucket of its activity.
 struct RowSyms {
     s: Vec<u8>,
     t: Vec<u8>,
     act: Vec<u8>,
 }
-
-const NOT_PIXEL: u8 = u8::MAX;
 
 /// The symbols of a row's pixel bytes `x0..w` (raw offset `q`, data offset `at`), all
 /// unfiltered, into `out` at data position `d` (byte 0's).
@@ -1178,14 +1179,31 @@ fn lit_run<I: Io, const BPP: usize, const FT: u8>(
     if ti + run > tokens.len() {
         return Err(crate::corrupt());
     }
+    // The previous byte's MED and raw value, carried along for the decorrelation.
+    let (mut pmed, mut pv) = if BPP >= 3 && q > 0 {
+        let (a1, b1, c1) = (get(raw, q - 1 - BPP) as i32, get(raw, q - 1 - rs2) as i32, get(raw, q - 1 - rs2 - BPP) as i32);
+        (med(a1, b1, c1), get(raw, q - 1) as i32)
+    } else {
+        (0, 0)
+    };
     for i in 0..run {
-        let m = pixel::<BPP>(raw, buf, q, at, ch, rs, rs2);
-        let s = io.sym(m.t + after, 0);
+        let fl = mag(get(buf, at - BPP));
+        let fu = mag(get(buf, at - rs));
+        let up = q - rs2;
+        let (a, b, c) = (get(raw, q - BPP) as i32, get(raw, up) as i32, get(raw, up - BPP) as i32);
+        let md = med(a, b, c);
+        let pred = if BPP >= 3 && (ch == 1 || ch == 2) { (md + pv - pmed).clamp(0, 255) } else { md };
+        let act = ((a - c).abs() + (b - c).abs()) as u32;
+        let t = T_LIT + ch.min(3) * ACT + bucket(act + fl + fu);
+        let s = io.sym(t + after, 0);
         if s == ESC && io.bit(T_ESC, 0) == 1 {
-            return Ok((i, Some(m.act)));
+            return Ok((i, Some(act)));
         }
-        let v = m.pred.wrapping_add(unzigzag(s));
+        let v = (pred as u8).wrapping_add(unzigzag(s));
+        let m = Pixel { t, pred: pred as u8, act, a: a as u8, b: b as u8, c: c as u8 };
         let f = v.wrapping_sub(m.fp(FT));
+        pmed = md;
+        pv = v as i32;
         put(raw, q, v);
         put(buf, at, f);
         // SAFETY: `ti + run <= tokens.len()`, checked above.
