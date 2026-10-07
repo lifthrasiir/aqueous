@@ -1,9 +1,11 @@
 //! Container format and the top-level compress / decompress entry points.
 //!
 //! ```text
-//! "JRC" version(u8=2) mode(u8)
+//! "JRC" version(u8=3) mode(u8)
 //! mode 0 (stored): the input verbatim
 //! mode 1 (coded):
+//!   u64 LE xxh3 of the original input (checked after decompression: a reconstruction that
+//!   differs is reported as an error instead of being returned)
 //!   varint n_embedded, per embedded JPEG (ascending positions in the blob):
 //!       varint gap (bytes of blob before it, after the previous one), varint length,
 //!       u8 kind: 0 = varint len + a nested JRC stream, 1 = varint index of an identical
@@ -31,7 +33,7 @@ use crate::progressive;
 use std::time::Instant;
 
 const MAGIC: &[u8; 3] = b"JRC";
-const VERSION: u8 = 2;
+const VERSION: u8 = 3;
 const MODE_STORED: u8 = 0;
 const MODE_CODED: u8 = 1;
 /// nesting limit for embedded JPEGs (main image = depth 0)
@@ -191,6 +193,7 @@ fn try_compress(input: &[u8], t: &mut Timing, depth: u32) -> Result<(Vec<u8>, us
     let mut out = Vec::with_capacity(core.blob.len() + core.scans.len() + 64);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&[VERSION, MODE_CODED]);
+    out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(input).to_le_bytes());
     // embedded JPEGs in the blob, compressed recursively (only where it pays off)
     let mut taken: Vec<(usize, usize)> = Vec::new();
     let mut entries = Vec::new();
@@ -328,8 +331,9 @@ fn try_decompress(c: &[u8], t: &mut Timing, depth: u32) -> Result<Vec<u8>, Error
         MODE_CODED => {}
         _ => return Err(Error("unknown mode".into())),
     }
+    let hash = u64::from_le_bytes(c.get(5..13).ok_or(Error("truncated".into()))?.try_into().unwrap());
     // embedded JPEGs first (recursively), then the blob is restored around them
-    let mut p = 5;
+    let mut p = 13;
     let n = get_varint(c, &mut p)?;
     let mut emb: Vec<(usize, Vec<u8>)> = Vec::new(); // (gap, bytes)
     for _ in 0..n {
@@ -365,7 +369,11 @@ fn try_decompress(c: &[u8], t: &mut Timing, depth: u32) -> Result<Vec<u8>, Error
         q += gap;
     }
     blob.extend_from_slice(&cut[q..]);
-    with_bufs(|coefs, _| decompress_core(&blob, c, p, t, coefs))
+    let out = with_bufs(|coefs, _| decompress_core(&blob, c, p, t, coefs))?;
+    if xxhash_rust::xxh3::xxh3_64(&out) != hash {
+        return Err(Error("checksum mismatch: reconstruction differs from the original".into()));
+    }
+    Ok(out)
 }
 
 pub fn decompress_with(c: &[u8], t: &mut Timing) -> Result<Vec<u8>, Error> {
