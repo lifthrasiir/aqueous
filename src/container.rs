@@ -393,37 +393,44 @@ fn rebuild_stream(g: &Geometry, layout: &[u8], headers: &[u8], src: &[u8], at: &
     let mut buf = vec![0u8; g.pad + n];
     let mut raw = if kind == Kind::Image { vec![0u8; g.raw_len] } else { vec![] };
     let ntok: usize = spans.iter().map(|s| if let Span::Tokens(c) = s { *c } else { 0 }).sum();
-    let mut tokens = Vec::with_capacity(ntok.min(n + 1));
+    if ntok > n {
+        return Err(crate::corrupt());
+    }
+    let mut tokens = vec![Token::Lit(0); ntok];
     let t = std::time::Instant::now();
     let player = model::Player::new(src, at)?;
     let t = dec_time(0, t);
-    let (player, res) = model::decode(player, kind, g, &spans, &mut tokens, &mut buf, &mut raw);
-    res?;
-    if !player.finished() {
-        return Err(crate::corrupt());
+    let mut freqs = Vec::with_capacity(spans.len());
+    model::decode(&player, kind, g, &spans, &mut tokens, &mut freqs, &mut buf, &mut raw)?;
+    let mut starts = Vec::with_capacity(blocks.len() + 1);
+    let mut ti = 0;
+    for s in &spans {
+        starts.push(ti);
+        if let Span::Tokens(c) = *s {
+            ti += c;
+        }
     }
+    starts.push(ti);
     for &i in &alts {
         match tokens.get_mut(i) {
             Some(Token::Match { len: 258, alt258, .. }) => *alt258 = true,
             _ => return Err(crate::corrupt()),
         }
+        // Symbol 284 rather than 285, in the block of token `i`.
+        let b = starts.partition_point(|&s| s <= i) - 1;
+        let lf = &mut freqs[b].0;
+        lf[285] -= 1;
+        lf[284] += 1;
     }
 
-    let mut starts = Vec::with_capacity(blocks.len() + 1);
-    let mut ti = 0;
     let mut hr = BitReader::new(headers);
     let mut recipe = header::Recipe::default();
     let t = dec_time(1, t);
-    for (b, s) in blocks.iter_mut().zip(&spans) {
-        starts.push(ti);
-        if let Span::Tokens(c) = *s {
-            if let Body::Dynamic { header: h, .. } = &mut b.body {
-                *h = header::read(&mut hr, &tokens[ti..ti + c], &mut recipe)?;
-            }
-            ti += c;
+    for (b, f) in blocks.iter_mut().zip(&freqs) {
+        if let Body::Dynamic { header: h, .. } = &mut b.body {
+            *h = header::read_freqs(&mut hr, &f.0, &f.1, &mut recipe)?;
         }
     }
-    starts.push(ti);
     let t = dec_time(2, t);
     let stream = Stream { blocks, tail_pad, trailing };
     let out = flate_recons::fast::write::write(&stream, &starts, &tokens, &buf[g.pad..])?;

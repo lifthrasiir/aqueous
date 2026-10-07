@@ -62,7 +62,9 @@ impl Geometry {
             &[(0, 0, 1, 1)]
         };
         let mut passes = vec![];
-        let (mut at, mut at2, mut pad) = (0usize, 0usize, 0usize);
+        // The raw buffer starts with a margin: the channel decorrelation reads the byte
+        // before the first pixel's neighbours.
+        let (mut at, mut at2, mut pad) = (0usize, 8usize, 0usize);
         for &(x0, y0, dx, dy) in list {
             let pw = if w > x0 { (w - x0).div_ceil(dx) } else { 0 };
             let ph = if h > y0 { (h - y0).div_ceil(dy) } else { 0 };
@@ -212,24 +214,6 @@ impl<'a> Player<'a> {
         Ok(Player { tables: Tables::new(&freqs), dec: Decoder::new(st), raw: BitR::new(raw) })
     }
 
-    pub fn finished(&self) -> bool {
-        self.dec.finished() && !self.raw.overrun()
-    }
-}
-
-impl Io for Player<'_> {
-    #[inline(always)]
-    fn sym(&mut self, t: usize, _: u32) -> u32 {
-        self.dec.get(&self.tables, t)
-    }
-    #[inline(always)]
-    fn bit(&mut self, t: usize, _: u32) -> u32 {
-        self.dec.bit(&self.tables, t)
-    }
-    #[inline(always)]
-    fn raw(&mut self, k: u32, _: u32) -> u32 {
-        self.raw.bits(k)
-    }
 }
 
 /// The blocks as the token coder sees them: stored bytes or a number of tokens.
@@ -351,31 +335,90 @@ fn unfilter_range(g: &Geometry, buf: &[u8], raw: &mut [u8], from: usize, to: usi
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn unfilter_part<const BPP: usize>(ft: u8, d: &[u8], raw: &mut [u8], q: usize, rs2: usize, x0: usize, x1: usize, bpp: usize) {
-    let bpp = if BPP > 0 { BPP } else { bpp };
+    if BPP == 0 {
+        return unfilter_bytes(ft, d, raw, q, rs2, x0, x1, bpp);
+    }
+    if x0 >= x1 {
+        return;
+    }
+    // The row with its left padding, and the row above with its own (adjacent in `raw`):
+    // byte `x` is at `BPP + x` in both.
+    let (head, tail) = raw.split_at_mut(q - BPP);
+    let w = rs2 - BPP;
+    let up = &head[q - rs2 - BPP..q - BPP];
+    let row = &mut tail[..BPP + w];
     match ft {
-        1 => {
-            for x in x0..x1 {
-                raw[q + x] = d[x].wrapping_add(raw[q + x - bpp]);
-            }
-        }
         2 => {
-            for x in x0..x1 {
-                raw[q + x] = d[x].wrapping_add(raw[q + x - rs2]);
+            for ((o, &f), &u) in row[BPP + x0..BPP + x1].iter_mut().zip(&d[x0..x1]).zip(&up[BPP + x0..BPP + x1]) {
+                *o = f.wrapping_add(u);
+            }
+            return;
+        }
+        1 | 3 | 4 => {}
+        _ => {
+            row[BPP + x0..BPP + x1].copy_from_slice(&d[x0..x1]);
+            return;
+        }
+    }
+    // Byte by byte up to a pixel boundary, then pixel by pixel with the left (and above
+    // left) pixel kept in registers, then the bytes left.
+    let byte = |row: &mut [u8], x: usize| {
+        let (a, b, c) = (row[x], up[BPP + x], up[x]);
+        row[BPP + x] = d[x].wrapping_add(filter::predict(ft, a, b, c));
+    };
+    let mut x = x0;
+    while x < x1 && x % BPP != 0 {
+        byte(row, x);
+        x += 1;
+    }
+    let px = (x1 - x) / BPP;
+    if px > 0 {
+        let mut a: [u8; BPP] = row[x..x + BPP].try_into().unwrap();
+        let mut c: [u8; BPP] = up[x..x + BPP].try_into().unwrap();
+        let rows = row[BPP + x..BPP + x + px * BPP].chunks_exact_mut(BPP);
+        let ds = d[x..x + px * BPP].chunks_exact(BPP);
+        let ups = up[BPP + x..BPP + x + px * BPP].chunks_exact(BPP);
+        match ft {
+            1 => {
+                for (o, f) in rows.zip(ds) {
+                    for k in 0..BPP {
+                        a[k] = f[k].wrapping_add(a[k]);
+                        o[k] = a[k];
+                    }
+                }
+            }
+            3 => {
+                for ((o, f), u) in rows.zip(ds).zip(ups) {
+                    for k in 0..BPP {
+                        a[k] = f[k].wrapping_add(((a[k] as u16 + u[k] as u16) >> 1) as u8);
+                        o[k] = a[k];
+                    }
+                }
+            }
+            _ => {
+                for ((o, f), u) in rows.zip(ds).zip(ups) {
+                    for k in 0..BPP {
+                        a[k] = f[k].wrapping_add(filter::paeth(a[k], u[k], c[k]));
+                        c[k] = u[k];
+                        o[k] = a[k];
+                    }
+                }
             }
         }
-        3 => {
-            for x in x0..x1 {
-                let (a, b) = (raw[q + x - bpp] as u16, raw[q + x - rs2] as u16);
-                raw[q + x] = d[x].wrapping_add(((a + b) >> 1) as u8);
-            }
-        }
-        4 => {
-            for x in x0..x1 {
-                let (a, b, c) = (raw[q + x - bpp], raw[q + x - rs2], raw[q + x - rs2 - bpp]);
-                raw[q + x] = d[x].wrapping_add(filter::paeth(a, b, c));
-            }
-        }
-        _ => raw[q + x0..q + x1].copy_from_slice(&d[x0..x1]),
+        x += px * BPP;
+    }
+    while x < x1 {
+        byte(row, x);
+        x += 1;
+    }
+}
+
+/// [`unfilter_part`] for any pixel size.
+#[allow(clippy::too_many_arguments)]
+fn unfilter_bytes(ft: u8, d: &[u8], raw: &mut [u8], q: usize, rs2: usize, x0: usize, x1: usize, bpp: usize) {
+    for x in x0..x1 {
+        let (a, b, c) = (raw[q + x - bpp], raw[q + x - rs2], raw[q + x - rs2 - bpp]);
+        raw[q + x] = d[x].wrapping_add(filter::predict(ft, a, b, c));
     }
 }
 
@@ -441,20 +484,41 @@ impl<'g> St<'g> {
     /// Copies a match in the data (and unfilters it).
     #[inline(always)]
     fn copy<const BPP: usize, const IMAGE: bool>(&mut self, raw: &mut [u8], buf: &mut [u8], len: usize, dist: usize) {
-        let (s, d) = (self.g.pad + self.p - dist, self.g.pad + self.p);
-        if dist >= len {
-            buf.copy_within(s..s + len, d);
-        } else {
-            for i in 0..len {
-                buf[d + i] = buf[s + i];
-            }
-        }
+        copy_match(buf, self.g.pad + self.p, dist, len);
         if IMAGE {
             unfilter_span::<BPP>(self.g, &self.cur, buf, raw, self.p, len);
         }
         self.p += len;
         self.after = 4 * ACT;
         self.tokens += 1;
+    }
+}
+
+/// Writes the `len` bytes `dist` back at `d` (an LZ77 copy, overlapping if `dist < len`).
+#[inline(always)]
+fn copy_match(buf: &mut [u8], d: usize, dist: usize, len: usize) {
+    let s = d - dist;
+    if dist >= len {
+        if len <= 16 {
+            for i in 0..len {
+                buf[d + i] = buf[s + i];
+            }
+        } else {
+            buf.copy_within(s..s + len, d);
+        }
+    } else if dist == 1 {
+        let b = buf[s];
+        buf[d..d + len].fill(b);
+    } else {
+        // A pattern of period `dist`: copy it, then double what is written (always a
+        // multiple of the period).
+        buf.copy_within(s..d, d);
+        let mut done = dist;
+        while done < len {
+            let k = done.min(len - done);
+            buf.copy_within(d..d + k, d + done);
+            done += k;
+        }
     }
 }
 
@@ -547,7 +611,7 @@ impl<const BPP: usize, const IMAGE: bool> Sink for Enc<'_, BPP, IMAGE> {
         let l = self.st.prep::<BPP, IMAGE>(&self.raw, &self.buf, true);
         self.io.sym(l.t, ESC);
         self.io.bit(T_ESC, 1);
-        code_match(&mut self.io, l.act, len as u32, dist as u32);
+        code_match(&mut self.io, l.len_ctx(), len as u32, dist as u32);
         if alt258 {
             self.alts.push(self.st.tokens);
         }
@@ -599,37 +663,70 @@ fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, deflate: &[u8])
 
 /// Rebuilds the data and tokens of `spans` (the decompressor's side); `buf` is the padded
 /// data, `raw` `g.raw_len` zeros (for `Kind::Image`).
-pub fn decode<I: Io>(
-    io: I,
+/// Symbol frequencies of a Huffman block as `flate_recons::fast::header` counts them.
+pub type Freqs = ([u32; 288], [u32; 32]);
+
+/// Rebuilds the data and tokens of `spans`, and per span the symbol frequencies (zeros for
+/// stored blocks; matches of length 258 counted as symbol 285).
+#[allow(clippy::too_many_arguments)]
+pub fn decode(
+    player: &Player,
     kind: Kind,
     g: &Geometry,
     spans: &[Span],
-    tokens: &mut Vec<Token>,
+    tokens: &mut [Token],
+    freqs: &mut Vec<Freqs>,
     buf: &mut [u8],
     raw: &mut [u8],
-) -> (I, crate::Result<()>) {
+) -> crate::Result<()> {
     match (kind, g.bpp) {
-        (Kind::Image, 1) => decode_bpp::<I, 1, true>(io, g, spans, tokens, buf, raw),
-        (Kind::Image, 2) => decode_bpp::<I, 2, true>(io, g, spans, tokens, buf, raw),
-        (Kind::Image, 3) => decode_bpp::<I, 3, true>(io, g, spans, tokens, buf, raw),
-        (Kind::Image, 4) => decode_bpp::<I, 4, true>(io, g, spans, tokens, buf, raw),
-        (Kind::Image, _) => (io, Err(crate::corrupt())),
-        (Kind::Bytes, _) => decode_bpp::<I, 0, false>(io, g, spans, tokens, buf, raw),
+        (Kind::Image, 1) => decode_bpp::<1, true>(player, g, spans, tokens, freqs, buf, raw),
+        (Kind::Image, 2) => decode_bpp::<2, true>(player, g, spans, tokens, freqs, buf, raw),
+        (Kind::Image, 3) => decode_bpp::<3, true>(player, g, spans, tokens, freqs, buf, raw),
+        (Kind::Image, 4) => decode_bpp::<4, true>(player, g, spans, tokens, freqs, buf, raw),
+        (Kind::Image, _) => Err(crate::corrupt()),
+        (Kind::Bytes, _) => decode_bpp::<0, false>(player, g, spans, tokens, freqs, buf, raw),
     }
 }
 
-/// Takes the coder by value, so that its state (the rANS states above all) can live in
-/// registers.
-fn decode_bpp<I: Io, const BPP: usize, const IMAGE: bool>(
-    mut io: I,
+/// The decoder's moving parts as a local value (the tables are only borrowed), so that the
+/// rANS states and stream positions can live in registers.
+struct Live<'a> {
+    tables: &'a Tables,
+    dec: Decoder<'a>,
+    raw: BitR<'a>,
+}
+
+impl Io for Live<'_> {
+    #[inline(always)]
+    fn sym(&mut self, t: usize, _: u32) -> u32 {
+        self.dec.get(self.tables, t)
+    }
+    #[inline(always)]
+    fn bit(&mut self, t: usize, _: u32) -> u32 {
+        self.dec.bit(self.tables, t)
+    }
+    #[inline(always)]
+    fn raw(&mut self, k: u32, _: u32) -> u32 {
+        self.raw.bits(k)
+    }
+}
+
+fn decode_bpp<const BPP: usize, const IMAGE: bool>(
+    player: &Player,
     g: &Geometry,
     spans: &[Span],
-    tokens: &mut Vec<Token>,
+    tokens: &mut [Token],
+    freqs: &mut Vec<Freqs>,
     buf: &mut [u8],
     raw: &mut [u8],
-) -> (I, crate::Result<()>) {
-    let r = decode_loop::<I, BPP, IMAGE>(&mut io, g, spans, tokens, buf, raw);
-    (io, r)
+) -> crate::Result<()> {
+    let mut live = Live { tables: &player.tables, dec: player.dec, raw: player.raw };
+    decode_loop::<Live, BPP, IMAGE>(&mut live, g, spans, tokens, freqs, buf, raw)?;
+    if !live.dec.finished() || live.raw.overrun() {
+        return Err(crate::corrupt());
+    }
+    Ok(())
 }
 
 #[inline(always)]
@@ -637,7 +734,8 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
     io: &mut I,
     g: &Geometry,
     spans: &[Span],
-    tokens: &mut Vec<Token>,
+    tokens: &mut [Token],
+    freqs: &mut Vec<Freqs>,
     buf: &mut [u8],
     raw: &mut [u8],
 ) -> crate::Result<()> {
@@ -646,6 +744,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
     for &span in spans {
         match span {
             Span::Stored(len) => {
+                freqs.push(([0; 288], [0; 32]));
                 if len > n - st.p {
                     return Err(crate::corrupt());
                 }
@@ -657,6 +756,8 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
                 }
             }
             Span::Tokens(count) => {
+                let (mut lf, mut df) = ([0u32; 288], [0u32; 32]);
+                lf[256] = 1;
                 for _ in 0..count {
                     if st.p >= n {
                         return Err(crate::corrupt());
@@ -665,19 +766,23 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
                     let s = io.sym(l.t, 0);
                     if s != ESC || io.bit(T_ESC, 0) == 0 {
                         let v = l.finish::<true>(s, raw, buf, g.pad + st.p);
-                        tokens.push(Token::Lit(v));
+                        *tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)? = Token::Lit(v);
+                        lf[v as usize] += 1;
                         st.p += 1;
                         st.after = 0;
                         st.tokens += 1;
                     } else {
-                        let (len, dist) = code_match(io, l.act, 0, 0).ok_or_else(crate::corrupt)?;
+                        let (len, dist) = code_match(io, l.len_ctx(), 0, 0).ok_or_else(crate::corrupt)?;
                         if dist > st.p || len > n - st.p {
                             return Err(crate::corrupt());
                         }
-                        tokens.push(Token::Match { len: len as u16, dist: dist as u16, alt258: false });
+                        *tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)? = Token::Match { len: len as u16, dist: dist as u16, alt258: false };
+                        lf[257 + len_code(len as u32) as usize] += 1;
+                        df[dist_code(dist as u32) as usize] += 1;
                         st.copy::<BPP, IMAGE>(raw, buf, len, dist);
                     }
                 }
+                freqs.push((lf, df));
             }
         }
     }
@@ -738,8 +843,9 @@ fn dist_code(d: u32) -> u32 {
 #[derive(Clone, Copy)]
 struct Lit {
     t: usize,
-    /// The activity bucket (`ACT` at filter bytes and past the image), for match lengths.
-    act: usize,
+    /// The local activity (`u32::MAX` at filter bytes and past the image), for match
+    /// lengths.
+    act: u32,
     /// The prediction of the raw byte, and the row filter's prediction of it.
     pred: u8,
     fp: u8,
@@ -747,58 +853,151 @@ struct Lit {
     q: usize,
 }
 
+/// `s[i]` without a bounds check, for the offsets the geometry keeps in bounds (see the
+/// callers): the data has `Geometry::pad` bytes in front, the raw buffer its margin, zero
+/// row and padding.
+#[inline(always)]
+fn get(s: &[u8], i: usize) -> u8 {
+    debug_assert!(i < s.len());
+    // SAFETY: see above; checked in debug builds.
+    unsafe { *s.get_unchecked(i) }
+}
+
+#[inline(always)]
+fn put(s: &mut [u8], i: usize, v: u8) {
+    debug_assert!(i < s.len());
+    // SAFETY: as in `get`.
+    unsafe { *s.get_unchecked_mut(i) = v }
+}
+
 impl Lit {
-    /// Applies symbol `s`: stores the bytes (decoder) and returns the filtered byte.
+    /// The bucket of match lengths' context.
+    #[inline(always)]
+    fn len_ctx(&self) -> usize {
+        if self.act == u32::MAX { ACT } else { bucket(self.act) }
+    }
+
+    /// Applies symbol `s`: stores the bytes (decoder) and returns the filtered byte. `at`
+    /// is the position's offset in the padded data (below its length).
     #[inline(always)]
     fn finish<const DEC: bool>(&self, s: u32, raw: &mut [u8], buf: &mut [u8], at: usize) -> u8 {
         let v = self.pred.wrapping_add(unzigzag(s));
         let f = v.wrapping_sub(self.fp);
         if DEC {
             if self.q != usize::MAX {
-                raw[self.q] = v;
+                put(raw, self.q, v);
             }
-            buf[at] = f;
+            put(buf, at, f);
         }
         f
     }
 }
 
+/// The coding of position `p` (below the data's length), where the cursor is.
 #[inline(always)]
 fn prepare<const BPP: usize, const IMAGE: bool>(g: &Geometry, cur: &Cursor, raw: &[u8], buf: &[u8], p: usize, bpp: usize) -> Lit {
     let x = p - cur.rstart;
     if x == 0 || cur.rs == usize::MAX {
-        return Lit { t: T_FILTER, act: ACT, pred: 0, fp: 0, q: usize::MAX };
+        return Lit { t: T_FILTER, act: u32::MAX, pred: 0, fp: 0, q: usize::MAX };
     }
+    // A pixel byte: the bytes a row up and a pixel left are within the data's padding,
+    // and the raw neighbours within the raw buffer.
     let x = x - 1;
     let at = g.pad + p;
-    let fl = mag(buf[at - bpp]);
-    let fu = mag(buf[at - cur.rs]);
+    let fl = mag(get(buf, at - bpp));
+    let fu = mag(get(buf, at - cur.rs));
     if IMAGE {
         let q = cur.q0 + x;
-        let (a, b, c) = (raw[q - BPP] as i32, raw[q - cur.rs2] as i32, raw[q - cur.rs2 - BPP] as i32);
+        let up = q - cur.rs2;
+        let (a, b, c) = (get(raw, q - BPP) as i32, get(raw, up) as i32, get(raw, up - BPP) as i32);
         let ch = x % BPP;
         let mut pred = med(a, b, c);
         if BPP >= 3 && (ch == 1 || ch == 2) {
-            let (a1, b1, c1) = (raw[q - 1 - BPP] as i32, raw[q - 1 - cur.rs2] as i32, raw[q - 1 - cur.rs2 - BPP] as i32);
-            pred = (pred + raw[q - 1] as i32 - med(a1, b1, c1)).clamp(0, 255);
+            // Green and blue add the previous channel's residual.
+            let (a1, b1, c1) = (get(raw, q - 1 - BPP) as i32, get(raw, up - 1) as i32, get(raw, up - 1 - BPP) as i32);
+            pred = (pred + get(raw, q - 1) as i32 - med(a1, b1, c1)).clamp(0, 255);
         }
         let act = ((a - c).abs() + (b - c).abs()) as u32;
-        let ft = buf[g.pad + cur.rstart];
+        let ft = get(buf, g.pad + cur.rstart);
         Lit {
             t: T_LIT + ch.min(3) * ACT + bucket(act + fl + fu),
-            act: bucket(act),
+            act,
             pred: pred as u8,
             fp: filter::predict(ft, a as u8, b as u8, c as u8),
             q,
         }
     } else {
-        let a = bucket(fl + fu);
-        Lit { t: T_LIT + (x % bpp & 3) * ACT + a, act: a, pred: 0, fp: 0, q: usize::MAX }
+        Lit { t: T_LIT + (x % bpp & 3) * ACT + bucket(fl + fu), act: fl + fu, pred: 0, fp: 0, q: usize::MAX }
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Unfiltering in pieces (as matches do) and whole gives what the reference does, for
+    /// every filter and pixel size.
+    #[test]
+    fn unfilter_pieces() {
+        let mut seed = 7u32;
+        let mut rnd = || {
+            seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
+            (seed >> 16) as u8
+        };
+        for (color, ch) in [(0u8, 1usize), (4, 2), (2, 3), (6, 4)] {
+            let ih = crate::png::Ihdr { width: 37, height: 9, depth: 8, color, compression: 0, filter: 0, interlace: 0 };
+            let g = Geometry::new(&ih).unwrap();
+            let rs = g.passes[0].rs;
+            let mut data: Vec<u8> = (0..g.len).map(|_| rnd()).collect();
+            for r in 0..9 {
+                data[r * rs] = (r % 5) as u8;
+            }
+            let mut want = vec![];
+            assert!(filter::unfilter(&data, rs - 1, ch, &mut want));
+            let mut buf = vec![0u8; g.pad];
+            buf.extend_from_slice(&data);
+            for piece in [1usize, 2, 3, 5, 7, 64, 1000] {
+                let mut raw = vec![0u8; g.raw_len];
+                let cur0 = Cursor::new(&g);
+                let mut cur = cur0.clone();
+                let mut p = 0;
+                while p < g.len {
+                    cur.seek(&g, p);
+                    let len = piece.min(g.len - p);
+                    match ch {
+                        1 => unfilter_span::<1>(&g, &cur, &buf, &mut raw, p, len),
+                        2 => unfilter_span::<2>(&g, &cur, &buf, &mut raw, p, len),
+                        3 => unfilter_span::<3>(&g, &cur, &buf, &mut raw, p, len),
+                        _ => unfilter_span::<4>(&g, &cur, &buf, &mut raw, p, len),
+                    }
+                    p += len;
+                }
+                for r in 0..9 {
+                    let q = g.passes[0].base2 + (r + 1) * g.passes[0].rs2 + ch;
+                    assert_eq!(&raw[q..q + rs - 1], &want[r * (rs - 1)..(r + 1) * (rs - 1)], "ch {ch} piece {piece} row {r}");
+                }
+                let mut whole = vec![0u8; g.raw_len];
+                unfilter_all(&g, &buf, &mut whole);
+                assert_eq!(whole, raw);
+            }
+        }
+    }
+
+    #[test]
+    fn copies() {
+        for dist in 1..40 {
+            for len in [3, 4, 15, 16, 17, 31, 100, 258] {
+                let mut a: Vec<u8> = (0..400u32).map(|i| (i * 37 % 251) as u8).collect();
+                let mut b = a.clone();
+                copy_match(&mut a, 50, dist, len);
+                for i in 50..50 + len {
+                    b[i] = b[i - dist];
+                }
+                assert_eq!(a, b, "dist {dist} len {len}");
+            }
+        }
+    }
+
     #[test]
     fn code_tables() {
         for l in 3..=258u16 {

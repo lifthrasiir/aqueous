@@ -235,6 +235,7 @@ pub fn encode(syms: &[(u16, u16)], freqs: &[Vec<u32>]) -> Vec<u8> {
 
 /// The decoder: reads the stream forward. Reading past the end yields zeros (the caller
 /// checks consistency at the end with [`Decoder::finished`]).
+#[derive(Clone, Copy)]
 pub struct Decoder<'a> {
     /// The state of the next symbol first.
     st: [u32; 4],
@@ -353,6 +354,7 @@ impl BitW {
 }
 
 /// LSB-first bit reader; past the end it reads zeros and records the overrun.
+#[derive(Clone, Copy)]
 pub struct BitR<'a> {
     data: &'a [u8],
     pos: usize,
