@@ -13,7 +13,7 @@
 //! mode 1 (coded):
 //!   u64 LE xxh3 of the original (checked after decompression)
 //!   varint length + zstd(skeleton)   -- the chunks without image data, CRC exceptions, trailer
-//!   per image: varint length + record
+//!   per image: u32 LE length + record
 //! record:
 //!   0, payload                       -- kept as it is
 //!   1, varint length + layout        -- streams, blocks, exceptions, model kind
@@ -192,7 +192,8 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
     ph.parse += t0.elapsed().as_secs_f64();
 
     let z = zstd::bulk::compress(&sk, 19).expect("zstd");
-    let mut out = Vec::with_capacity(file.len() / 2 + z.len() + 64);
+    // Records are kept only if smaller than their payload: the output stays within this.
+    let mut out = Vec::with_capacity(file.len() + z.len() + 64);
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
     out.push(1);
@@ -201,25 +202,30 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
     out.extend_from_slice(&z);
     for (range, ih) in images(&classes, |i| chunks[i].data, |i| chunks[i].kind) {
         let skip = if classes[range.start] == FDAT { 4 } else { 0 };
-        let payload: Vec<u8> = chunks[range.clone()].iter().flat_map(|c| c.data[skip..].iter().copied()).collect();
-        let rec = ih.and_then(|ih| image_record(&ih, &payload, ph).ok()).filter(|r| r.len() <= payload.len());
-        let rec = rec.unwrap_or_else(|| {
-            let mut r = Vec::with_capacity(payload.len() + 1);
-            r.push(0);
-            r.extend_from_slice(&payload);
-            r
-        });
-        if std::env::var_os("PNGR_DEBUG").is_some() {
-            eprintln!("image {} payload {} -> record {} ({})", classes[range.start], payload.len(), rec.len(), if rec[0] == 1 { "coded" } else { "kept" });
+        let mut payload = Vec::with_capacity(chunks[range.clone()].iter().map(|c| c.data.len()).sum());
+        for c in &chunks[range.clone()] {
+            payload.extend_from_slice(&c.data[skip..]);
         }
-        put_varint(&mut out, rec.len() as u64);
-        out.extend_from_slice(&rec);
+        // The record goes straight into the output, after its length.
+        let at = out.len();
+        out.extend_from_slice(&[0; 4]);
+        let coded = ih.is_some_and(|ih| image_record(&ih, &payload, ph, &mut out).is_ok()) && out.len() - at - 4 <= payload.len();
+        if !coded {
+            out.truncate(at + 4);
+            out.push(0);
+            out.extend_from_slice(&payload);
+        }
+        let len = (out.len() - at - 4) as u32;
+        out[at..at + 4].copy_from_slice(&len.to_le_bytes());
+        if std::env::var_os("PNGR_DEBUG").is_some() {
+            eprintln!("image {} payload {} -> record {len} ({})", classes[range.start], payload.len(), if coded { "coded" } else { "kept" });
+        }
     }
     Ok(out)
 }
 
-/// The record of a coded image.
-fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
+/// Appends the record of a coded image to `rec`.
+fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases, rec: &mut Vec<u8>) -> Result<()> {
     let g = Geometry::new(ih).ok_or(Error::Unsupported("bad image header"))?;
     let kind = if ih.depth == 8 && matches!(ih.color, 0 | 2 | 4 | 6) { Kind::Image } else { Kind::Bytes };
     let t1 = std::time::Instant::now();
@@ -295,18 +301,17 @@ fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
     let layout = lw.finish();
 
     let t3 = std::time::Instant::now();
-    let mut rec = Vec::with_capacity(payload.len() * 3 / 4);
     rec.push(1);
     for part in [&layout, &headers] {
-        put_varint(&mut rec, part.len() as u64);
+        put_varint(rec, part.len() as u64);
         rec.extend_from_slice(part);
     }
-    enc.rec.finish(&mut rec);
+    enc.rec.finish(rec);
     let t4 = std::time::Instant::now();
     ph.model += (t2 - t1).as_secs_f64();
     ph.layout += (t3 - t2).as_secs_f64();
     ph.entropy += (t4 - t3).as_secs_f64();
-    Ok(rec)
+    Ok(())
 }
 
 thread_local! {
@@ -379,7 +384,8 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     for (range, ih) in &imgs {
         let skip = if classes[range.start] == FDAT { 4 } else { 0 };
         let len: usize = cs[range.clone()].iter().map(|c| c.len - skip).sum();
-        let rec = part(&mut at)?;
+        let n = u32::from_le_bytes(get_bytes(src, &mut at, 4)?.try_into().unwrap()) as usize;
+        let rec = get_bytes(src, &mut at, n)?;
         let payload = match rec.first() {
             Some(0) if rec.len() == len + 1 => rec[1..].to_vec(),
             Some(1) => {

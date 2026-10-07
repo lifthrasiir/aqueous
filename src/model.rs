@@ -717,15 +717,20 @@ fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result
     let t1 = std::time::Instant::now();
     let n: usize = flats.iter().map(|f| f.1.data.len()).sum();
     let mut buf = vec![0u8; g.pad + n];
-    let mut tokens = Vec::with_capacity(flats.iter().map(|f| f.1.tokens.len()).sum());
+    let single = flats.len() == 1;
+    let mut tokens = if single { vec![] } else { Vec::with_capacity(flats.iter().map(|f| f.1.tokens.len()).sum()) };
     let mut streams = vec![];
     let mut stored = 0;
     let mut at = g.pad;
-    for (o, f) in flats {
+    for (o, mut f) in flats {
         buf[at..at + f.data.len()].copy_from_slice(&f.data);
         at += f.data.len();
         let base = tokens.len();
-        tokens.extend_from_slice(&f.tokens);
+        if single {
+            tokens = std::mem::take(&mut f.tokens);
+        } else {
+            tokens.extend_from_slice(&f.tokens);
+        }
         stored += f.skips.iter().map(|s| s.1).sum::<usize>();
         streams.push(Coded {
             zhdr: [payload[o], payload[o + 1]],
@@ -773,31 +778,7 @@ fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result
             continue;
         }
         let end = se[1];
-        let (st, ss, sa) = (&syms.t[..], &syms.s[..], &syms.act[..]);
-        for tok in &tokens[ti..end] {
-            let e = st[p] as usize;
-            // The after-match offset applies to the literal tables only.
-            let mask = ((e < F as usize) as usize).wrapping_neg();
-            let t = T_LIT + e + (after & mask);
-            match *tok {
-                Token::Lit(_) => {
-                    let s = ss[p] as u32;
-                    out.sym(t, s);
-                    if s == ESC {
-                        out.bit(T_ESC, 0);
-                    }
-                    p += 1;
-                    after = 0;
-                }
-                Token::Match { len, dist, .. } => {
-                    out.sym(t, ESC);
-                    out.bit(T_ESC, 1);
-                    code_match(&mut out, sa[p] as usize, len as u32, dist as u32);
-                    p += len as usize;
-                    after = 4 * ACT;
-                }
-            }
-        }
+        (p, after) = walk(&mut out, &syms, &tokens[ti..end], p, after);
         ti = end;
     }
     let n_syms = out.n;
@@ -814,6 +795,39 @@ fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result
         eprintln!("parse {:.4} rows {:.4} walk {:.4}", (t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), (t3 - t2).as_secs_f64());
     }
     Ok(Encoded { rec, streams, len: n, alts })
+}
+
+/// Records the symbols of a block's tokens from position `p` (`after`: the offset of the
+/// literal tables after a match); returns the position and offset after them.
+#[inline(never)]
+fn walk(out: &mut Syms, syms: &RowSyms, tokens: &[Token], mut p: usize, mut after: usize) -> (usize, usize) {
+    const F: usize = T_FILTER - T_LIT;
+    let (st, ss, sa) = (&syms.t[..], &syms.s[..], &syms.act[..]);
+    for tok in tokens {
+        let e = st[p] as usize;
+        // The after-match offset applies to the literal tables only.
+        let mask = ((e < F) as usize).wrapping_neg();
+        let t = T_LIT + e + (after & mask);
+        match *tok {
+            Token::Lit(_) => {
+                let s = ss[p] as u32;
+                out.sym(t, s);
+                if s == ESC {
+                    out.bit(T_ESC, 0);
+                }
+                p += 1;
+                after = 0;
+            }
+            Token::Match { len, dist, .. } => {
+                out.sym(t, ESC);
+                out.bit(T_ESC, 1);
+                code_match(out, sa[p] as usize, len as u32, dist as u32);
+                p += len as usize;
+                after = 4 * ACT;
+            }
+        }
+    }
+    (p, after)
 }
 
 /// Symbols written into reserved room (the compressor's token walk).
