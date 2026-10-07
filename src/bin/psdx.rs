@@ -3,6 +3,10 @@
 //! `psdx check FILE...` decodes every layer channel and the composite image, reporting
 //! failures.
 //!
+//! `psdx predict FILE...` renders the layers of 8-bit RGB files and compares the result with
+//! the stored composite: share of exact and near pixels, and order-0 entropy of the residual,
+//! of a left-neighbor prediction of the composite alone, and of a mix of the two.
+//!
 //! `psdx dump OUTDIR FILE...` writes the 8-bit RGB layers (RGBA when they have transparency),
 //! user masks and composite of each file as PAM images under `OUTDIR/<file stem>/`, and
 //! prints one TSV line per image: source file, image path, bytes the image takes in the PSD
@@ -12,7 +16,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-use psd_recons::pixels;
+use psd_recons::{composite, pixels};
 use psd_recons::psd::Psd;
 
 fn check(psd: &Psd, d: &[u8]) -> Vec<String> {
@@ -28,6 +32,73 @@ fn check(psd: &Psd, d: &[u8]) -> Vec<String> {
         errs.push(format!("composite: {e}"));
     }
     errs
+}
+
+/// Order-0 entropy in bytes of each plane of `planes`, summed.
+fn entropy(planes: &[Vec<u8>]) -> f64 {
+    let mut bits = 0.0;
+    for p in planes {
+        let mut h = [0u64; 256];
+        for &b in p {
+            h[b as usize] += 1;
+        }
+        let n = p.len() as f64;
+        bits += h.iter().filter(|&&c| c > 0).map(|&c| -(c as f64) * (c as f64 / n).log2()).sum::<f64>();
+    }
+    bits / 8.0
+}
+
+fn predict(psd: &Psd, d: &[u8], f: &str) -> Result<(), String> {
+    if psd.depth != 8 || psd.mode != 3 || psd.layer_info.layers.is_empty() {
+        return Err(format!("skipped: depth {} mode {} layers {}", psd.depth, psd.mode, psd.layer_info.layers.len()));
+    }
+    let comp = pixels::composite(psd, d).map_err(|e| e.to_string())?;
+    let n = (psd.width * psd.height) as usize;
+    let with_alpha = psd.channels >= 4 && psd.layer_info.merged_alpha;
+    let nc = if with_alpha { 4 } else { 3 };
+    let mut rep = composite::Report::default();
+    let r = composite::render(psd, d, with_alpha, &mut rep).map_err(|e| e.to_string())?;
+    let (mut exact, mut near) = (0usize, 0usize);
+    let mut resid = vec![Vec::with_capacity(n); nc];
+    let mut left = vec![Vec::with_capacity(n); nc];
+    // Hybrid: the residual where the left neighbor was predicted exactly, else the left
+    // difference; the two cases coded in separate contexts.
+    let mut hyb = vec![Vec::new(); 2 * nc];
+    let mut prev_exact = false;
+    let w = psd.width as usize;
+    for i in 0..n {
+        let mut maxd = 0;
+        for k in 0..nc {
+            let c = comp[k * n + i];
+            let p = r[i * nc + k];
+            maxd = maxd.max((c as i16 - p as i16).unsigned_abs());
+            resid[k].push(c.wrapping_sub(p));
+            left[k].push(c.wrapping_sub(if i % w > 0 { comp[k * n + i - 1] } else { 0 }));
+        }
+        for k in 0..nc {
+            let sym = if prev_exact { resid[k][i] } else { left[k][i] };
+            hyb[2 * k + prev_exact as usize].push(sym);
+        }
+        prev_exact = maxd == 0 && (i + 1) % w != 0;
+        exact += (maxd == 0) as usize;
+        near += (maxd <= 2) as usize;
+    }
+    let packed = psd.composite.len();
+    println!(
+        "{f}\t{}x{}\tlayers {}\texact {:.3}\tnear {:.3}\tpacked {packed}\tleft-H0 {:.0}\tresid-H0 {:.0}\thybrid-H0 {:.0}\tskipped {}\teffects {}\tfallback {:?}",
+        psd.width,
+        psd.height,
+        psd.layer_info.layers.len(),
+        exact as f64 / n as f64,
+        near as f64 / n as f64,
+        entropy(&left),
+        entropy(&resid),
+        entropy(&hyb),
+        rep.skipped,
+        rep.effects,
+        rep.blend_fallback,
+    );
+    Ok(())
 }
 
 fn write_pam(path: &Path, w: u64, h: u64, planes: &[&[u8]]) -> std::io::Result<()> {
@@ -102,12 +173,12 @@ fn main() -> ExitCode {
     let (cmd, rest) = match args.split_first() {
         Some((c, r)) => (c.as_str(), r),
         None => {
-            eprintln!("usage: psdx check FILE... | psdx dump OUTDIR FILE...");
+            eprintln!("usage: psdx check|predict FILE... | psdx dump OUTDIR FILE...");
             return ExitCode::FAILURE;
         }
     };
     let (outdir, files) = match cmd {
-        "check" => (None, rest),
+        "check" | "predict" => (None, rest),
         "dump" if !rest.is_empty() => (Some(Path::new(&rest[0])), &rest[1..]),
         _ => {
             eprintln!("unknown command {cmd}");
@@ -133,6 +204,12 @@ fn main() -> ExitCode {
             }
         };
         match outdir {
+            None if cmd == "predict" => {
+                if let Err(e) = predict(&psd, &d, f) {
+                    eprintln!("{f}: {e}");
+                    failed += 1;
+                }
+            }
             None => {
                 let errs = check(&psd, &d);
                 for e in &errs {
