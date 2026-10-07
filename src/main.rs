@@ -199,7 +199,7 @@ fn info(args: &[String]) {
     for path in files(args) {
         let d = read(&path);
         let c = mp3_recons::codec::encode(&d);
-        let frames = c.streams[2].len() / 4;
+        let frames = c.streams[2].len() / 4; // headers
         println!(
             "{path}: {} bytes, {frames} frames, junk {} B, tail {} bits, raw granules {} bits, gaps {} bits, {} rANS words, {} raw bits",
             d.len(),

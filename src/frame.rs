@@ -391,30 +391,3 @@ pub fn full_scalefactors(lay: &ScfLayout, coded: &[u8], gr0: &[u8; 39]) -> [u8; 
     }
     out
 }
-
-/// Quantizer step exponent of each line, in quarter powers of two (larger = coarser):
-/// global_gain - 2 or 4 × (scalefactor + pre-emphasis) - 8 × subblock gain.
-pub fn step_exponents(h: Header, g: &Granule, scf: &[u8; 39], out: &mut [i16; 576]) {
-    let widths = sfb_widths(h, g);
-    let mult = if g.scalefac_scale { 4 } else { 2 };
-    let nlong = if !g.short() { 22 } else if g.mixed { if h.lsf() { 6 } else { 8 } } else { 0 };
-    let mut line = 0usize;
-    for (i, &w) in widths.iter().enumerate() {
-        if w == 0 || line >= 576 {
-            break;
-        }
-        let mut sf = scf[i.min(38)] as i32;
-        let mut a = g.global_gain as i32;
-        if i < nlong {
-            if g.preflag && !g.short() {
-                sf += PRETAB[i] as i32;
-            }
-        } else {
-            a -= 8 * g.subblock_gain[(i - nlong) % 3] as i32;
-        }
-        a -= mult * sf;
-        let end = (line + w as usize).min(576);
-        out[line..end].fill(a as i16);
-        line = end;
-    }
-}

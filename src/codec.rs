@@ -9,6 +9,8 @@ use crate::frame::{Header, SideInfo, crc16, scf_layout};
 use crate::huff;
 use crate::model::{self, Coder, State};
 use crate::rans::{self, Tables};
+use crate::rc;
+use crate::side::SideModel;
 use crate::stream::{R_PAD, place, segment};
 use std::sync::OnceLock;
 
@@ -105,7 +107,7 @@ impl Coder for Enc<'_> {
 
 struct Dec<'a, 'b> {
     rans: rans::Decoder<'a>,
-    raw: BitReader<'b>,
+    raw: huff::BitBuf<'b>,
 }
 
 impl Coder for Dec<'_, '_> {
@@ -115,7 +117,11 @@ impl Coder for Dec<'_, '_> {
     }
     #[inline(always)]
     fn raw(&mut self, n: u32, _v: u32) -> u32 {
-        self.raw.get(n)
+        // At most 32 bits per call (in practice 13).
+        self.raw.refill();
+        let v = ((self.raw.acc >> 1) >> (63 - n)) as u32;
+        self.raw.consume(n);
+        v
     }
 }
 
@@ -124,26 +130,14 @@ const S_SEGS: usize = 0;
 const S_JUNK: usize = 1;
 const S_HDR: usize = 2;
 const S_CRC: usize = 3;
-const S_FRAME: usize = 4; // private bits, scfsi, placed flag
-const S_MDB: usize = 5;
-const S_FLAGS: usize = 6;
-const S_TS: usize = 7;
-const S_REG: usize = 8;
-const S_SFC: usize = 9;
-const S_GG: usize = 10;
-const S_BV: usize = 11;
-const S_P23: usize = 12;
-const S_NQ: usize = 13;
-const S_TAIL: usize = 14; // tail lengths
-const S_SCF: usize = 15;
-const S_TAILBITS: usize = 16;
-const S_RAWGR: usize = 17;
-const S_GAPS: usize = 18;
-const N_BYTE_STREAMS: usize = 19;
-pub const STREAM_NAMES: [&str; N_BYTE_STREAMS + 2] = [
-    "segs", "junk", "headers", "crc", "frame", "mdb", "gr flags", "tables", "regions", "sfc", "gain", "bigvalues",
-    "p23", "nquads", "tail len", "scf", "tail bits", "raw gr", "gaps", "rans", "raw bits",
-];
+const S_TAILBITS: usize = 4;
+const S_RAWGR: usize = 5;
+const S_GAPS: usize = 6;
+/// Range coded side information and scalefactors.
+const S_SIDE: usize = 7;
+const N_BYTE_STREAMS: usize = 8;
+pub const STREAM_NAMES: [&str; N_BYTE_STREAMS + 2] =
+    ["segs", "junk", "headers", "crc", "tail bits", "raw gr", "gaps", "side", "rans", "raw bits"];
 
 fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
@@ -168,9 +162,6 @@ impl<'a> Rd<'a> {
         self.p += 1;
         Ok(v)
     }
-    fn u16(&mut self) -> Result<u16, Error> {
-        Ok(self.u8()? as u16 | (self.u8()? as u16) << 8)
-    }
     fn bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
         let s = self.d.get(self.p..self.p + n).ok_or(Error("stream exhausted"))?;
         self.p += n;
@@ -187,73 +178,6 @@ impl<'a> Rd<'a> {
         }
         Err(Error("bad varint"))
     }
-}
-
-fn zigzag(v: i32) -> u64 {
-    ((v << 1) ^ (v >> 31)) as u32 as u64
-}
-
-fn unzigzag(v: u64) -> i32 {
-    ((v >> 1) as i32) ^ -((v & 1) as i32)
-}
-
-/// Writes the granule fields that are always stored.
-fn put_granule_fields(b: &mut [Vec<u8>], h: Header, g: &crate::frame::Granule, raw: bool, prev_gg: &mut u8, prev_bv: &mut u16) {
-    b[S_FLAGS].push(
-        g.window_switching as u8
-            | g.block_type << 1
-            | (g.mixed as u8) << 3
-            | (g.preflag as u8 & !h.lsf() as u8) << 4
-            | (g.scalefac_scale as u8) << 5
-            | (g.count1table as u8) << 6
-            | (raw as u8) << 7,
-    );
-    if g.window_switching {
-        b[S_TS].extend_from_slice(&g.table_select[..2]);
-        b[S_REG].push(g.subblock_gain[0] | g.subblock_gain[1] << 3);
-        b[S_REG].push(g.subblock_gain[2]);
-    } else {
-        b[S_TS].extend_from_slice(&g.table_select);
-        b[S_REG].push(g.region0_count | g.region1_count << 4);
-    }
-    if h.lsf() {
-        b[S_SFC].extend_from_slice(&g.scalefac_compress.to_le_bytes());
-    } else {
-        b[S_SFC].push(g.scalefac_compress as u8);
-    }
-    b[S_GG].push(g.global_gain.wrapping_sub(*prev_gg));
-    *prev_gg = g.global_gain;
-    b[S_BV].extend_from_slice(&g.big_values.wrapping_sub(*prev_bv).to_le_bytes());
-    *prev_bv = g.big_values;
-}
-
-fn get_granule_fields(r: &mut [Rd], h: Header, g: &mut crate::frame::Granule, prev_gg: &mut u8, prev_bv: &mut u16) -> Result<bool, Error> {
-    let f = r[S_FLAGS].u8()?;
-    g.window_switching = f & 1 != 0;
-    g.block_type = f >> 1 & 3;
-    g.mixed = f & 8 != 0;
-    g.scalefac_scale = f & 32 != 0;
-    g.count1table = f & 64 != 0;
-    if g.window_switching {
-        let t = r[S_TS].bytes(2)?;
-        g.table_select = [t[0], t[1], 0];
-        let a = r[S_REG].u8()?;
-        let b = r[S_REG].u8()?;
-        g.subblock_gain = [a & 7, a >> 3, b];
-    } else {
-        let t = r[S_TS].bytes(3)?;
-        g.table_select = [t[0], t[1], t[2]];
-        let a = r[S_REG].u8()?;
-        g.region0_count = a & 15;
-        g.region1_count = a >> 4;
-    }
-    g.scalefac_compress = if h.lsf() { r[S_SFC].u16()? } else { r[S_SFC].u8()? as u16 };
-    g.preflag = if h.lsf() { g.scalefac_compress >= 500 } else { f & 16 != 0 };
-    g.global_gain = prev_gg.wrapping_add(r[S_GG].u8()?);
-    *prev_gg = g.global_gain;
-    g.big_values = prev_bv.wrapping_add(r[S_BV].u16()?);
-    *prev_bv = g.big_values;
-    Ok(f & 128 != 0)
 }
 
 /// Compressed representation: byte streams (before zstd), rANS words and raw bits.
@@ -328,33 +252,32 @@ fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
     let r_len = r_buf.len();
     r_buf.resize(r_len + R_PAD, 0);
 
+    let mut rc = rc::Encoder::default();
+    let mut side = SideModel::new();
     let mut tail = BitWriter::new();
     let mut raw_gr = BitWriter::new();
     let mut gaps = BitWriter::new();
     let mut st = State::new();
     let mut coefs = [0i32; 576];
-    let (mut prev_gg, mut prev_bv) = ([0u8; 2], [0u16; 2]);
+    let mut scf = [0u8; 39];
     let mut end = 0usize;
     for (h, si, pay, len) in &frames {
         let (h, pay, len) = (*h, *pay, *len);
-        let placed = place(si, h, pay, len, end);
-        b[S_FRAME].push(si.private_bits | (placed.is_some() as u8) << 5);
-        if !h.lsf() {
-            b[S_FRAME].push(si.scfsi[0] | si.scfsi[1] << 4);
-        }
-        let Some(start) = placed else {
-            b[S_MDB].extend_from_slice(&si.main_data_begin.to_le_bytes());
+        let start = place(si, h, pay, len, end);
+        let mut placed = start.is_some();
+        let pred = pay as i64 - end.div_ceil(8) as i64;
+        let mut resid = (si.main_data_begin as i64 - pred) as i32;
+        let mut si_c = *si;
+        side.frame(&mut rc, h, &mut si_c, &mut placed, &mut resid);
+        let Some(start) = start else {
             for gr in 0..h.granules() {
                 for ch in 0..h.channels() {
-                    let g = &si.gr[gr][ch];
-                    put_granule_fields(&mut b, h, g, true, &mut prev_gg[ch], &mut prev_bv[ch]);
-                    b[S_P23].extend_from_slice(&g.part2_3_length.to_le_bytes());
+                    let mut raw = true;
+                    side.granule(&mut rc, h, &mut si_c.gr[gr][ch], ch, false, &mut raw);
                 }
             }
             continue;
         };
-        let pred = pay as i64 - end.div_ceil(8) as i64;
-        put_varint(&mut b[S_MDB], zigzag((si.main_data_begin as i64 - pred) as i32));
         gaps.copy(&mut BitReader::new(&r_buf, end), start - end);
         let mut r = BitReader::new(&r_buf, start);
         for gr in 0..h.granules() {
@@ -363,43 +286,43 @@ fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
                 let gr_start = r.pos;
                 let gr_end = gr_start + g.part2_3_length as usize;
                 let lay = scf_layout(h, si, gr, ch);
-                let scf_at = b[S_SCF].len();
+                let mut nscf = 0;
                 let mut part3 = None;
-                let mut coded = false;
                 if lay.bits() as usize <= g.part2_3_length as usize {
                     for k in 0..4 {
                         if !lay.copy[k] {
                             for _ in 0..lay.count[k] {
-                                b[S_SCF].push(r.get(lay.size[k] as u32) as u8);
+                                scf[nscf] = r.get(lay.size[k] as u32) as u8;
+                                nscf += 1;
                             }
                         }
                     }
                     if C::ROLLBACK {
-                        let saved = c.save();
-                        part3 = model::encode_granule(c, &mut st, h, si, gr, ch, &b[S_SCF][scf_at..], &mut r, gr_end);
+                        let saved = (c.save(), st.scf_prev[ch]);
+                        c.reserve(39, 0);
+                        model::code_scalefactors(c, &mut st, &lay, ch, &mut scf[..nscf]);
+                        part3 = model::encode_granule(c, &mut st, h, si, gr, ch, &scf[..nscf], &mut r, gr_end);
                         if part3.is_none() {
-                            c.restore(saved);
+                            c.restore(saved.0);
+                            st.scf_prev[ch] = saved.1;
                         }
-                        coded = true;
                     } else {
                         part3 = huff::decode_coefs(h, g, &mut r, gr_end, &mut coefs);
-                    }
-                }
-                let raw = part3.is_none();
-                put_granule_fields(&mut b, h, g, raw, &mut prev_gg[ch], &mut prev_bv[ch]);
-                match part3 {
-                    Some(p3) => {
-                        b[S_NQ].push(p3.quads as u8);
-                        put_varint(&mut b[S_TAIL], p3.tail as u64);
-                        tail.copy(&mut r, p3.tail);
-                        if !coded {
-                            let scf = b[S_SCF][scf_at..].to_vec();
-                            model::code_granule(c, &mut st, h, si, gr, ch, &scf, p3.quads, &mut coefs);
+                        if let Some(p3) = &part3 {
+                            model::code_scalefactors(c, &mut st, &lay, ch, &mut scf[..nscf]);
+                            model::code_granule(c, &mut st, h, si, gr, ch, &scf[..nscf], p3.quads, &mut coefs);
                         }
                     }
+                }
+                let mut raw = part3.is_none();
+                side.granule(&mut rc, h, &mut si_c.gr[gr][ch], ch, true, &mut raw);
+                match part3 {
+                    Some(p3) => {
+                        let (mut nq, mut tl) = (p3.quads, p3.tail);
+                        side.part3(&mut rc, ch, &mut nq, &mut tl);
+                        tail.copy(&mut r, p3.tail);
+                    }
                     None => {
-                        b[S_SCF].truncate(scf_at);
-                        b[S_P23].extend_from_slice(&g.part2_3_length.to_le_bytes());
                         raw_gr.copy(&mut BitReader::new(&r_buf, gr_start), g.part2_3_length as usize);
                     }
                 }
@@ -413,6 +336,7 @@ fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
     b[S_TAILBITS] = tail.finish();
     b[S_RAWGR] = raw_gr.finish();
     b[S_GAPS] = gaps.finish();
+    b[S_SIDE] = rc.finish();
     (b, bit_lens)
 }
 
@@ -423,7 +347,7 @@ pub fn decode(c: &Coded) -> Result<Vec<u8>, Error> {
         p.resize(c.raw.len() + R_PAD, 0);
         p
     };
-    let mut dc = Dec { rans: rans::Decoder::new(t, &c.words), raw: BitReader::new(&raw_buf, 0) };
+    let mut dc = Dec { rans: rans::Decoder::new(t, &c.words), raw: huff::BitBuf::new(&BitReader::new(&raw_buf, 0)) };
     let out = decode_with(c, &mut dc)?;
     if !dc.rans.in_bounds() {
         return Err(Error("rans stream exhausted"));
@@ -433,6 +357,9 @@ pub fn decode(c: &Coded) -> Result<Vec<u8>, Error> {
 
 /// [`decode`] with the model's symbols and raw bits taken from `dc`.
 pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
+    if c.streams.len() != N_BYTE_STREAMS {
+        return Err(Error("stream count"));
+    }
     let mut r: Vec<Rd> = c.streams.iter().map(|s| Rd { d: s, p: 0 }).collect();
     let mut segs = Vec::new();
     while r[S_SEGS].p < r[S_SEGS].d.len() {
@@ -450,6 +377,8 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
     let gaps_buf = pad(&c.streams[S_GAPS]);
     let (mut tail, mut raw_gr, mut gaps) =
         (BitReader::new(&tail_buf, 0), BitReader::new(&raw_gr_buf, 0), BitReader::new(&gaps_buf, 0));
+    let mut rc = rc::Decoder::new(&c.streams[S_SIDE]);
+    let mut side = SideModel::new();
 
     let mut frames: Vec<(Header, SideInfo, usize, usize)> = Vec::with_capacity(nframes);
     let mut r_len = 0usize;
@@ -469,25 +398,18 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
     let mut w = FastWriter::with_capacity(r_len + 8);
     let mut st = State::new();
     let mut coefs = [0i32; 576];
-    let (mut prev_gg, mut prev_bv) = ([0u8; 2], [0u16; 2]);
     let mut end = 0usize;
-    let mut scf = Vec::with_capacity(40);
+    let mut scf = [0u8; 39];
     for (h, si, pay, len) in frames.iter_mut() {
         let (h, pay, len) = (*h, *pay, *len);
-        let fb = r[S_FRAME].u8()?;
-        si.private_bits = fb & 0x1f;
-        let placed = fb & 0x20 != 0;
-        if !h.lsf() {
-            let x = r[S_FRAME].u8()?;
-            si.scfsi = [x & 15, x >> 4];
-        }
+        let mut placed = false;
+        let mut resid = 0;
+        side.frame(&mut rc, h, si, &mut placed, &mut resid);
         if !placed {
-            si.main_data_begin = r[S_MDB].u16()?;
             for gr in 0..h.granules() {
                 for ch in 0..h.channels() {
-                    let g = &mut si.gr[gr][ch];
-                    get_granule_fields(&mut r, h, g, &mut prev_gg[ch], &mut prev_bv[ch])?;
-                    g.part2_3_length = r[S_P23].u16()?;
+                    let mut raw = true;
+                    side.granule(&mut rc, h, &mut si.gr[gr][ch], ch, false, &mut raw);
                 }
             }
             if place(si, h, pay, len, end).is_some() {
@@ -496,8 +418,9 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
             continue;
         }
         let pred = pay as i64 - end.div_ceil(8) as i64;
-        let mdb = pred + unzigzag(r[S_MDB].varint()?) as i64;
-        if !(0..512).contains(&mdb) || mdb > pay as i64 || (pay - mdb as usize) * 8 < end {
+        let mdb = pred + resid as i64;
+        let max_mdb = if h.lsf() { 255 } else { 511 };
+        if !(0..=max_mdb).contains(&mdb) || mdb > pay as i64 || (pay - mdb as usize) * 8 < end {
             return Err(Error("main_data_begin"));
         }
         si.main_data_begin = mdb as u16;
@@ -505,38 +428,40 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
         w.copy(&mut gaps, start - end);
         for gr in 0..h.granules() {
             for ch in 0..h.channels() {
-                let mut g = si.gr[gr][ch];
-                let raw = get_granule_fields(&mut r, h, &mut g, &mut prev_gg[ch], &mut prev_bv[ch])?;
-                si.gr[gr][ch] = g;
+                let mut raw = false;
+                side.granule(&mut rc, h, &mut si.gr[gr][ch], ch, true, &mut raw);
+                let g = si.gr[gr][ch];
                 if raw {
-                    let p23 = r[S_P23].u16()?;
-                    si.gr[gr][ch].part2_3_length = p23;
-                    w.copy(&mut raw_gr, p23 as usize);
+                    w.copy(&mut raw_gr, g.part2_3_length as usize);
                     continue;
                 }
                 let gr_start = w.len();
                 let lay = scf_layout(h, si, gr, ch);
-                scf.clear();
-                for k in 0..4 {
-                    if !lay.copy[k] {
-                        for _ in 0..lay.count[k] {
-                            let v = r[S_SCF].u8()?;
-                            w.reserve(8);
-                            w.put(v as u64 & ((1 << lay.size[k]) - 1), lay.size[k] as u32);
-                            scf.push(v);
+                let nscf: usize = (0..4).filter(|&k| !lay.copy[k]).map(|k| lay.count[k] as usize).sum();
+                let (mut nq, mut tl) = (0, 0);
+                side.part3(&mut rc, ch, &mut nq, &mut tl);
+                model::code_scalefactors(dc, &mut st, &lay, ch, &mut scf[..nscf]);
+                let mut k = 0;
+                w.reserve(64);
+                for g4 in 0..4 {
+                    if !lay.copy[g4] {
+                        for _ in 0..lay.count[g4] {
+                            w.put(scf[k] as u64 & ((1 << lay.size[g4]) - 1), lay.size[g4] as u32);
+                            k += 1;
                         }
                     }
                 }
-                let nq = r[S_NQ].u8()? as usize;
                 if g.big_values > 288 || g.big_values as usize * 2 + nq * 4 > 576 {
                     return Err(Error("granule size"));
                 }
                 if g.table_select.iter().any(|&t| t == 4 || t == 14) {
                     return Err(Error("table"));
                 }
-                model::code_granule(dc, &mut st, h, si, gr, ch, &scf, nq, &mut coefs);
+                model::code_granule(dc, &mut st, h, si, gr, ch, &scf[..nscf], nq, &mut coefs);
                 huff::encode_coefs(h, &g, &coefs, nq, &mut w);
-                let tl = r[S_TAIL].varint()? as usize;
+                if tl > 4095 {
+                    return Err(Error("tail"));
+                }
                 w.copy(&mut tail, tl);
                 let p23 = w.len() - gr_start;
                 if p23 > 4095 {
@@ -549,6 +474,9 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
         if end > (pay + len) * 8 {
             return Err(Error("main data overflow"));
         }
+    }
+    if !rc.in_bounds() {
+        return Err(Error("side stream exhausted"));
     }
     w.copy(&mut gaps, r_len * 8 - end);
     let r_out = w.finish();

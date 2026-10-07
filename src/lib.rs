@@ -8,6 +8,8 @@ pub mod huff;
 pub mod huff_tables;
 pub mod model;
 pub mod rans;
+pub mod rc;
+pub mod side;
 pub mod stream;
 
 pub use container::{compress, decompress};

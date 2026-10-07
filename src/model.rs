@@ -1,7 +1,7 @@
 //! The coefficient model. One code path serves both directions: `c.sym(ctx, s)` codes `s`
 //! when compressing and returns the decoded symbol when decompressing.
 
-use crate::frame::{Header, SideInfo, full_scalefactors, scf_layout, step_exponents};
+use crate::frame::{Granule, Header, PRETAB, SFB_LONG, SideInfo, full_scalefactors, scf_layout};
 use crate::huff;
 use crate::huff_tables::{DIM, LINBITS};
 
@@ -43,7 +43,11 @@ pub const QUAD_BASE: usize = LIN_BASE + 16 * 16;
 /// Quadruple contexts: (count1 table, nonzero values at the same lines of the previous
 /// granule 0..=4 or 5 if none, position class).
 pub const QUAD_PER_TABLE: usize = 6 * NPOS;
-pub const N_CTX: usize = QUAD_BASE + 2 * QUAD_PER_TABLE;
+/// Scalefactor contexts: (size in bits 1..=5, previous scalefactor of the granule capped
+/// at 15 or 16 if none, same scalefactor of the previous coded granule of the channel
+/// capped at 15 or 16 if none).
+pub const SCF_BASE: usize = QUAD_BASE + 2 * QUAD_PER_TABLE;
+pub const N_CTX: usize = SCF_BASE + 5 * 17 * 17;
 
 /// Alphabet size of each context.
 pub fn alphabet(ctx: usize) -> usize {
@@ -53,8 +57,41 @@ pub fn alphabet(ctx: usize) -> usize {
         (d * d).max(1)
     } else if ctx < QUAD_BASE {
         LIN_ALPHA
-    } else {
+    } else if ctx < SCF_BASE {
         16
+    } else {
+        1 << ((ctx - SCF_BASE) / (17 * 17) + 1)
+    }
+}
+
+/// Codes the coded scalefactors of a granule (`vals`, bitstream order).
+pub fn code_scalefactors<C: Coder>(c: &mut C, st: &mut State, lay: &crate::frame::ScfLayout, ch: usize, vals: &mut [u8]) {
+    let p = &mut st.scf_prev[ch];
+    let (mut i, mut k) = (0usize, 0usize);
+    let mut left = 16usize;
+    for g in 0..4 {
+        let (n, size) = (lay.count[g] as usize, lay.size[g] as usize);
+        if lay.copy[g] {
+            i += n;
+            continue;
+        }
+        if size == 0 {
+            vals[k..k + n].fill(0);
+            i += n;
+            k += n;
+            continue;
+        }
+        debug_assert!(size <= 5);
+        let base = SCF_BASE + (size - 1) * 17 * 17;
+        for _ in 0..n {
+            let ix = i.min(38);
+            let v = c.sym(base + left * 17 + p[ix] as usize, vals[k] as u32) & ((1 << size) - 1);
+            vals[k] = v as u8;
+            p[ix] = v.min(15) as u8;
+            left = v.min(15) as usize;
+            i += 1;
+            k += 1;
+        }
     }
 }
 
@@ -120,18 +157,20 @@ static XY: [[u8; 256]; 17] = {
 
 pub struct State {
     gr0_scf: [[u8; 39]; 2],
-    exp: [[i16; 576]; 2],
+    exp: [[i16; 22]; 2],
     /// Magnitudes of the previous granule per channel, from index 1 (index 0 and the
     /// end are zero padding).
     prev: [[u16; 580]; 2],
     prev_ok: [bool; 2],
     /// Magnitudes of channel 0 of the current granule.
     cur0: [u16; 576],
+    /// Last coded value of each scalefactor index per channel (capped at 15; 16 = none).
+    pub scf_prev: [[u8; 39]; 2],
 }
 
 impl State {
     pub fn new() -> Box<State> {
-        Box::new(State { gr0_scf: [[0; 39]; 2], exp: [[0; 576]; 2], prev: [[0; 580]; 2], prev_ok: [false; 2], cur0: [0; 576] })
+        Box::new(State { gr0_scf: [[0; 39]; 2], exp: [[0; 22]; 2], prev: [[0; 580]; 2], prev_ok: [false; 2], cur0: [0; 576], scf_prev: [[16; 39]; 2] })
     }
 }
 
@@ -140,11 +179,24 @@ fn pos_class(line: usize) -> usize {
     (line >> 6).min(NPOS - 1)
 }
 
+/// Quantizer step exponents of the long bands of a long-block granule, in quarter powers of
+/// two (larger = coarser): global_gain - 2 or 4 × (scalefactor + pre-emphasis).
+fn band_exponents(g: &Granule, scf: &[u8; 39]) -> [i16; 22] {
+    let mult = if g.scalefac_scale { 4 } else { 2 };
+    let mut e = [0i16; 22];
+    for b in 0..22 {
+        let sf = scf[b] as i32 + if g.preflag { PRETAB[b] as i32 } else { 0 };
+        e[b] = (g.global_gain as i32 - mult * sf) as i16;
+    }
+    e
+}
+
 /// Contexts of a granule, computed before coding it; the state is updated by [`commit`].
 struct Prep {
     /// Magnitude bucket per pair (NB: none).
     bucket: [u8; 288],
-    exp: [i16; 576],
+    /// Step exponents of the long bands (see [`band_exponents`]).
+    exp: [i16; 22],
     full: [u8; 39],
     use_prev: bool,
     short: bool,
@@ -162,17 +214,20 @@ fn prepare(st: &State, h: Header, si: &SideInfo, gr: usize, ch: usize, scf: &[u8
     let mut nbh = [0u32; 288];
     let lay = scf_layout(h, si, gr, ch);
     let full = full_scalefactors(&lay, scf, &st.gr0_scf[ch]);
-    let mut exp = [0i16; 576];
-    step_exponents(h, g, &full, &mut exp);
+    let exp = if short { [0; 22] } else { band_exponents(g, &full) };
     if use_prev {
         let p = &st.prev[ch];
         let pe = &st.exp[ch];
-        let mut i = 0;
-        while i < npairs {
-            // Step exponents are constant within a band: one factor per run.
-            let (e0, pe0) = (exp[2 * i], pe[2 * i]);
-            let f = step_factor((e0 - pe0) as i32);
-            while i < npairs && exp[2 * i] == e0 && pe[2 * i] == pe0 {
+        let widths = &SFB_LONG[h.sfb_row()];
+        let (mut line, mut i) = (0usize, 0usize);
+        for b in 0..22 {
+            if i >= npairs {
+                break;
+            }
+            let f = step_factor((exp[b] - pe[b]) as i32);
+            line += widths[b] as usize;
+            let stop = (line / 2).min(npairs);
+            while i < stop {
                 let k = 2 * i;
                 let (pm, p0, p1, p2) = (p[k] as u64, p[k + 1] as u64, p[k + 2] as u64, p[k + 3] as u64);
                 nbh[i] = (((2 * (p0 + p1) + pm + p2) * f) >> 8).min(1 << 24) as u32;
