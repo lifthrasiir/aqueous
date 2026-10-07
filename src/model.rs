@@ -2,14 +2,19 @@
 //!
 //! The parse is kept as it is (so rebuilding the stream needs no match search), but every
 //! symbol is coded with static per-file tables chosen by image context:
-//! - whether the token is a match, by the previous two token kinds and the local activity;
-//! - literals as the residual of the raw (unfiltered) pixel against a MED prediction with
-//!   inter-channel decorrelation, by channel and activity. The PNG filter of the row is
-//!   reapplied to give the literal byte;
-//! - match lengths by activity, distances by length.
+//! - a literal is the residual of the raw (unfiltered) byte against a MED prediction, with
+//!   the previous channel's residual added for green and blue; its table is chosen by
+//!   channel, local activity (raw gradients and the filtered neighbours' magnitudes) and
+//!   whether a match came just before. The row's PNG filter is reapplied to give the
+//!   literal byte. Filter bytes have a table of their own;
+//! - a match starts as the literal escape symbol (255, then a binary decision against a
+//!   literal residual of 255), and has its length coded by activity and its distance by
+//!   length, with the extra bits raw.
 //!
-//! The same function runs both ways (`Io::sym` records a symbol when encoding and returns
-//! the decoded one when decoding), so the two sides cannot drift apart.
+//! Decoding runs the model byte by byte. Encoding sees the whole data up front: images
+//! whose stream expands little (mostly literals) get every pixel byte's symbol computed
+//! row by row (with NEON where available), then the tokens walked; the others are modelled
+//! as the parser hands over the tokens.
 //!
 //! Buffers: the filtered data has `Geometry::pad` zero bytes in front, so that the bytes
 //! one row up and one pixel left are always in bounds. The raw (unfiltered) image is kept
@@ -369,7 +374,7 @@ fn unfilter_part<const BPP: usize>(ft: u8, d: &[u8], raw: &mut [u8], q: usize, r
         row[BPP + x] = d[x].wrapping_add(filter::predict(ft, a, b, c));
     };
     let mut x = x0;
-    while x < x1 && x % BPP != 0 {
+    while x < x1 && !x.is_multiple_of(BPP) {
         byte(row, x);
         x += 1;
     }
@@ -656,7 +661,7 @@ const MAX_MATCH: usize = 258;
 
 /// Whether `b` starts with a zlib header (deflate, no preset dictionary).
 fn zlib_header(b: &[u8]) -> bool {
-    b.len() >= 2 && b[0] & 0x0f == 8 && b[0] >> 4 <= 7 && b[1] & 0x20 == 0 && (b[0] as u16 * 256 + b[1] as u16) % 31 == 0
+    b.len() >= 2 && b[0] & 0x0f == 8 && b[0] >> 4 <= 7 && b[1] & 0x20 == 0 && (b[0] as u16 * 256 + b[1] as u16).is_multiple_of(31)
 }
 
 /// Where the next zlib stream would start after a stream ending at `end` (past its
@@ -698,7 +703,6 @@ const ROWS_MAX_EXPANSION: usize = 4;
 /// symbols of all pixel bytes computed row by row (no dependency between them), and then
 /// the tokens walked.
 fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
-    let t0 = std::time::Instant::now();
     // The streams, then their data and tokens as one.
     let mut flats = vec![];
     let mut o = 0;
@@ -714,7 +718,6 @@ fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result
             _ => break,
         }
     }
-    let t1 = std::time::Instant::now();
     let n: usize = flats.iter().map(|f| f.1.data.len()).sum();
     let mut buf = vec![0u8; g.pad + n];
     let single = flats.len() == 1;
@@ -762,7 +765,6 @@ fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result
             row_syms::<BPP>(&raw, &buf, q, at, w, ps.rs, ps.rs2, &mut syms, rstart + 1);
         }
     }
-    let t2 = std::time::Instant::now();
     let mut rec = Recorder::new(0);
     // At most four symbols per token (a match) and one per stored byte.
     rec.syms.reserve(4 * tokens.len() + stored + 16);
@@ -790,10 +792,6 @@ fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result
         .filter(|(_, t)| matches!(t, Token::Match { alt258: true, .. }))
         .map(|(i, _)| i)
         .collect();
-    let t3 = std::time::Instant::now();
-    if std::env::var_os("PNGR_TIMES").is_some() {
-        eprintln!("parse {:.4} rows {:.4} walk {:.4}", (t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), (t3 - t2).as_secs_f64());
-    }
     Ok(Encoded { rec, streams, len: n, alts })
 }
 
@@ -922,6 +920,7 @@ mod neon {
     /// The prediction of 16 bytes (MED, with the previous channel's residual added where
     /// `dec` is set).
     #[inline(always)]
+    #[allow(clippy::too_many_arguments)]
     unsafe fn pred(a: uint8x16_t, b: uint8x16_t, c: uint8x16_t, v1: uint8x16_t, a1: uint8x16_t, b1: uint8x16_t, c1: uint8x16_t, dec: uint8x16_t) -> uint8x16_t {
         unsafe {
             let m_lo = med16(lo(a), lo(b), lo(c));
@@ -943,7 +942,7 @@ mod neon {
         }
         // Every read below is of the row, the row above, their left padding, the byte
         // before (the raw margin) or the data's padding: within the buffers.
-        assert!(q >= rs2 + BPP + 1 && q + w <= raw.len() && at >= rs && at + w <= buf.len());
+        assert!(q > rs2 + BPP && q + w <= raw.len() && at >= rs && at + w <= buf.len());
         assert!(d + w <= out.s.len() && d + w <= out.t.len() && d + w <= out.act.len());
         // Per phase of the channel pattern: the lanes to decorrelate (channels 1 and 2 of
         // three or more) and the table offsets (`min(ch, 3) * ACT`).
@@ -1253,6 +1252,7 @@ fn pixel<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize, ch: usiz
 /// decoded), the activity there. `run` keeps within the row, the block and the data.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::explicit_counter_loop)]
 fn lit_run<I: Io, const BPP: usize, const FT: u8>(
     io: &mut I,
     st: &St,
@@ -1429,7 +1429,7 @@ fn prepare<const BPP: usize, const IMAGE: bool>(g: &Geometry, cur: &Cursor, raw:
         Lit { t: m.t, act: m.act, pred: m.pred, fp: m.fp(ft), q }
     } else {
         let (fl, fu) = (mag(get(buf, at - bpp)), mag(get(buf, at - cur.rs)));
-        Lit { t: T_LIT + (x % bpp & 3) * ACT + bucket(fl + fu), act: fl + fu, pred: 0, fp: 0, q: usize::MAX }
+        Lit { t: T_LIT + ((x % bpp) & 3) * ACT + bucket(fl + fu), act: fl + fu, pred: 0, fp: 0, q: usize::MAX }
     }
 }
 

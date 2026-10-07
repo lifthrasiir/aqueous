@@ -181,7 +181,7 @@ fn enc_sym(start: u32, freq: u32) -> u64 {
         while freq > 1 << shift {
             shift += 1;
         }
-        ((((1u64 << (shift + 31)) + freq as u64 - 1) / freq as u64) as u32, shift - 1, start)
+        ((1u64 << (shift + 31)).div_ceil(freq as u64) as u32, shift - 1, start)
     };
     rcp as u64 | (bias as u64) << 32 | (freq as u64) << 45 | (shift as u64) << 58
 }
@@ -223,7 +223,7 @@ pub fn encode(syms: &[(u16, u16)], freqs: &[Vec<u32>]) -> Vec<u8> {
     let mut x = [RANS_L; 4];
     let e = |(t, s): (u16, u16)| enc[t as usize * 256 + s as usize];
     let mut i = syms.len();
-    while i % 4 != 0 {
+    while !i.is_multiple_of(4) {
         i -= 1;
         put(&mut x[i & 3], e(syms[i]), &mut out, &mut pos);
     }
@@ -259,8 +259,8 @@ impl<'a> Decoder<'a> {
     pub fn new(data: &'a [u8]) -> Decoder<'a> {
         let mut d = Decoder { st: [0; 4], data, pos: 0 };
         for k in 0..4 {
-            let hi = d.word() as u32;
-            let lo = d.word() as u32;
+            let hi = d.word();
+            let lo = d.word();
             d.st[k] = hi << 16 | lo;
         }
         d
