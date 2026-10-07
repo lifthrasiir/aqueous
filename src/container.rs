@@ -1,14 +1,24 @@
 //! The file format, and compression / decompression of whole files.
 //!
+//! A PNG file's pixel data comes in *images*: the run of IDAT chunks (the default image),
+//! and in an APNG every run of fdAT chunks (a frame, whose size its fcTL gives; each fdAT
+//! starts with a sequence number). An image's *payload* is the concatenation of its chunks'
+//! data (past the sequence numbers): one or more zlib streams (several in Apple's iDOT
+//! files). Every image is coded on its own, or kept as it is if coding does not make it
+//! smaller.
+//!
 //! ```text
 //! "PNGR" version(u8) mode(u8)
-//! mode 0 (stored): the input verbatim
+//! mode 0 (stored): the input verbatim (when coding does not make it smaller)
 //! mode 1 (coded):
 //!   u64 LE xxh3 of the original (checked after decompression)
-//!   varint length + zstd(skeleton)   -- chunks without IDAT data, CRC exceptions, trailer
-//!   varint length + layout           -- DEFLATE blocks, exceptions, model kind
-//!   varint length + headers          -- dynamic Huffman headers (flate-recons' header coder)
-//!   model payload                    -- see model::Recorder::finish
+//!   varint length + zstd(skeleton)   -- the chunks without image data, CRC exceptions, trailer
+//!   per image: varint length + record
+//! record:
+//!   0, payload                       -- kept as it is
+//!   1, varint length + layout        -- streams, blocks, exceptions, model kind
+//!      varint length + headers       -- dynamic Huffman headers (flate-recons' header coder)
+//!      model payload                 -- see model::Recorder::finish
 //! ```
 
 use crate::model::{self, Geometry, Kind, Span};
@@ -20,7 +30,7 @@ use flate_recons::deflate::{Block, Body, Stream, Token};
 use flate_recons::fast::header;
 
 const MAGIC: &[u8; 4] = b"PNGR";
-const VERSION: u8 = 1;
+const VERSION: u8 = 2;
 
 pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
     while v >= 0x80 {
@@ -33,7 +43,7 @@ pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
 pub fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
     let mut v = 0u64;
     for shift in (0..64).step_by(7) {
-        let b = *src.get(*at).ok_or_else(|| crate::corrupt())?;
+        let b = *src.get(*at).ok_or_else(crate::corrupt)?;
         *at += 1;
         v |= ((b & 0x7f) as u64) << shift;
         if b < 0x80 {
@@ -44,7 +54,7 @@ pub fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
 }
 
 fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
-    let s = src.get(*at..at.checked_add(n).ok_or_else(|| crate::corrupt())?).ok_or_else(|| crate::corrupt())?;
+    let s = src.get(*at..at.checked_add(n).ok_or_else(crate::corrupt)?).ok_or_else(crate::corrupt)?;
     *at += n;
     Ok(s)
 }
@@ -61,7 +71,7 @@ fn chunk_crc(kind: &[u8; 4], data: &[u8]) -> u32 {
 pub struct Phases {
     /// The chunk layer (skeleton).
     pub parse: f64,
-    /// Parsing and modelling the DEFLATE stream.
+    /// Parsing and modelling the DEFLATE streams.
     pub model: f64,
     /// The block layout and Huffman headers.
     pub layout: f64,
@@ -80,10 +90,20 @@ pub fn compress_timed(file: &[u8], ph: &mut Phases) -> Vec<u8> {
         let r = coded(file, &mut ph2);
         (r, ph2)
     }) {
-        Ok((Ok(v), p)) => {
+        // Coding must save something over storing.
+        Ok((Ok(v), p)) if v.len() < file.len() + 6 => {
             *ph = p;
             v
         }
+        _ => stored(file),
+    }
+}
+
+/// [`compress`] without the guard against panics (for tests: a panic is a bug even where
+/// storing the file would hide it).
+pub fn try_compress(file: &[u8]) -> Vec<u8> {
+    match coded(file, &mut Phases::default()) {
+        Ok(v) if v.len() < file.len() + 6 => v,
         _ => stored(file),
     }
 }
@@ -97,89 +117,159 @@ fn stored(file: &[u8]) -> Vec<u8> {
     out
 }
 
+/// How a chunk's data is kept in the skeleton.
+const PLAIN: u8 = 0;
+/// IDAT: all of the data is image payload.
+const IDAT: u8 = 1;
+/// fdAT: a sequence number (in the skeleton), then image payload.
+const FDAT: u8 = 2;
+
+/// The images of a chunk list: runs of chunks of the same image class, with the geometry
+/// their payload has (the IHDR's, or the frame's from the last fcTL), if valid.
+fn images<'a>(classes: &[u8], data: impl Fn(usize) -> &'a [u8], kinds: impl Fn(usize) -> [u8; 4]) -> Vec<(std::ops::Range<usize>, Option<Ihdr>)> {
+    let ihdr = if classes.first() == Some(&PLAIN) && &kinds(0) == b"IHDR" { Ihdr::parse(data(0)) } else { None };
+    let mut frame: Option<Ihdr> = None;
+    let mut out = vec![];
+    let mut i = 0;
+    while i < classes.len() {
+        let c = classes[i];
+        if c == PLAIN {
+            if &kinds(i) == b"fcTL" {
+                let d = data(i);
+                frame = match (ihdr, d.len()) {
+                    (Some(h), 26) => Some(Ihdr {
+                        width: u32::from_be_bytes(d[4..8].try_into().unwrap()),
+                        height: u32::from_be_bytes(d[8..12].try_into().unwrap()),
+                        ..h
+                    }),
+                    _ => None,
+                };
+            }
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < classes.len() && classes[i] == c {
+            i += 1;
+        }
+        out.push((start..i, if c == IDAT { ihdr } else { frame }));
+    }
+    out
+}
+
 fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
     let t0 = std::time::Instant::now();
     let (chunks, trailer) = png::chunks(file).ok_or(Error::Unsupported("not a PNG file"))?;
-    let ihdr = chunks
-        .first()
-        .filter(|c| &c.kind == b"IHDR")
-        .and_then(|c| Ihdr::parse(c.data))
-        .ok_or(Error::Unsupported("no IHDR"))?;
-    let g = Geometry::new(&ihdr).ok_or(Error::Unsupported("bad IHDR"))?;
+    let classes: Vec<u8> = chunks
+        .iter()
+        .map(|c| match &c.kind {
+            b"IDAT" => IDAT,
+            b"fdAT" if c.data.len() >= 4 => FDAT,
+            _ => PLAIN,
+        })
+        .collect();
 
-    // Skeleton: everything but the IDAT payload.
+    // Skeleton: everything but the image payloads.
     let mut sk = vec![];
     put_varint(&mut sk, chunks.len() as u64);
-    let mut idat = Vec::new();
-    for c in &chunks {
+    for (c, &class) in chunks.iter().zip(&classes) {
         sk.extend_from_slice(&c.kind);
         put_varint(&mut sk, c.data.len() as u64);
         if chunk_crc(&c.kind, c.data) == c.crc {
-            sk.push(0);
+            sk.push(class);
         } else {
-            sk.push(1);
+            sk.push(class | 0x80);
             sk.extend_from_slice(&c.crc.to_be_bytes());
         }
-        if &c.kind == b"IDAT" {
-            idat.extend_from_slice(c.data);
-        } else {
-            sk.extend_from_slice(c.data);
+        match class {
+            PLAIN => sk.extend_from_slice(c.data),
+            FDAT => sk.extend_from_slice(&c.data[..4]),
+            _ => {}
         }
     }
     put_varint(&mut sk, trailer.len() as u64);
     sk.extend_from_slice(trailer);
+    ph.parse += t0.elapsed().as_secs_f64();
 
-    let kind = if ihdr.depth == 8 && matches!(ihdr.color, 0 | 2 | 4 | 6) { Kind::Image } else { Kind::Bytes };
+    let z = zstd::bulk::compress(&sk, 19).expect("zstd");
+    let mut out = Vec::with_capacity(file.len() / 2 + z.len() + 64);
+    out.extend_from_slice(MAGIC);
+    out.push(VERSION);
+    out.push(1);
+    out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
+    put_varint(&mut out, z.len() as u64);
+    out.extend_from_slice(&z);
+    for (range, ih) in images(&classes, |i| chunks[i].data, |i| chunks[i].kind) {
+        let skip = if classes[range.start] == FDAT { 4 } else { 0 };
+        let payload: Vec<u8> = chunks[range.clone()].iter().flat_map(|c| c.data[skip..].iter().copied()).collect();
+        let rec = ih.and_then(|ih| image_record(&ih, &payload, ph).ok()).filter(|r| r.len() <= payload.len());
+        let rec = rec.unwrap_or_else(|| {
+            let mut r = Vec::with_capacity(payload.len() + 1);
+            r.push(0);
+            r.extend_from_slice(&payload);
+            r
+        });
+        if std::env::var_os("PNGR_DEBUG").is_some() {
+            eprintln!("image {} payload {} -> record {} ({})", classes[range.start], payload.len(), rec.len(), if rec[0] == 1 { "coded" } else { "kept" });
+        }
+        put_varint(&mut out, rec.len() as u64);
+        out.extend_from_slice(&rec);
+    }
+    Ok(out)
+}
+
+/// The record of a coded image.
+fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
+    let g = Geometry::new(ih).ok_or(Error::Unsupported("bad image header"))?;
+    let kind = if ih.depth == 8 && matches!(ih.color, 0 | 2 | 4 | 6) { Kind::Image } else { Kind::Bytes };
     let t1 = std::time::Instant::now();
-    let enc = if idat.len() >= 2 { model::encode(kind, &g, &idat[2..]).ok() } else { None };
-    let Some(enc) = enc else {
-        // Not a DEFLATE stream we can parse: the IDAT payload goes into the skeleton.
-        sk.push(0);
-        sk.extend_from_slice(&idat);
-        return Ok(finish(file, &sk, &[], &[], &[]));
-    };
-    sk.push(1);
-    sk.extend_from_slice(&idat[..2]);
+    let enc = model::encode(kind, &g, payload)?;
+    if std::env::var_os("PNGR_DEBUG").is_some() {
+        eprintln!("  {} zlib streams, {} bytes of data", enc.streams.len(), enc.len);
+    }
     let t2 = std::time::Instant::now();
-    let f = &enc.layout;
-    let n = enc.len;
 
     // Layout.
     let mut lw = BitW::default();
     lw.bits(1, (kind == Kind::Bytes) as u32);
-    lw.gamma(n as u32);
-    let blocks = &f.stream.blocks;
-    lw.gamma(blocks.len() as u32);
-    let std_last = blocks.iter().enumerate().all(|(i, b)| b.last == (i + 1 == blocks.len()));
-    lw.bits(1, std_last as u32);
-    let mut prev_count = 0usize;
-    for (i, b) in blocks.iter().enumerate() {
-        if !std_last {
-            lw.bits(1, b.last as u32);
-        }
-        lw.bits(2, b.body.btype() as u32);
-        match &b.body {
-            Body::Stored { pad, len } => {
-                lw.bits(8, *pad as u32);
-                lw.bits(16, *len as u32);
+    lw.gamma(enc.len as u32);
+    lw.gamma(enc.streams.len() as u32 - 1);
+    for c in &enc.streams {
+        lw.bits(8, c.zhdr[0] as u32);
+        lw.bits(8, c.zhdr[1] as u32);
+        let blocks = &c.stream.blocks;
+        lw.gamma(blocks.len() as u32);
+        let std_last = blocks.iter().enumerate().all(|(i, b)| b.last == (i + 1 == blocks.len()));
+        lw.bits(1, std_last as u32);
+        let mut prev_count = 0usize;
+        for (i, b) in blocks.iter().enumerate() {
+            if !std_last {
+                lw.bits(1, b.last as u32);
             }
-            _ => {
-                let count = f.starts[i + 1] - f.starts[i];
-                // The same count as the previous block is common (encoders' buffers).
-                if count == prev_count {
-                    lw.bits(1, 1);
-                } else {
-                    lw.bits(1, 0);
-                    lw.gamma(count as u32);
+            lw.bits(2, b.body.btype() as u32);
+            match b.body {
+                Body::Stored { pad, len } => {
+                    lw.bits(8, pad as u32);
+                    lw.bits(16, len as u32);
                 }
-                prev_count = count;
+                _ => {
+                    let count = c.starts[i + 1] - c.starts[i];
+                    // The same count as the previous block is common (encoders' buffers).
+                    if count == prev_count {
+                        lw.bits(1, 1);
+                    } else {
+                        lw.bits(1, 0);
+                        lw.gamma(count as u32);
+                    }
+                    prev_count = count;
+                }
             }
         }
-    }
-    lw.bits(8, f.stream.tail_pad as u32);
-    lw.gamma(f.stream.trailing.len() as u32);
-    for &b in &f.stream.trailing {
-        lw.bits(8, b as u32);
+        lw.bits(8, c.stream.tail_pad as u32);
+        lw.gamma(c.stream.trailing.len() as u32);
+        for &b in &c.stream.trailing {
+            lw.bits(8, b as u32);
+        }
     }
     // Matches of length 258 sent as 284 + 31.
     lw.gamma(enc.alts.len() as u32);
@@ -192,43 +282,31 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
     // Headers.
     let mut hw = BitWriter::new();
     let mut recipe = header::Recipe::default();
-    for (i, b) in blocks.iter().enumerate() {
-        if let Body::Dynamic { header: h, .. } = &b.body {
-            let (lf, df) = &f.stats.freqs[i];
-            header::write(&mut hw, lf, df, h, &mut recipe);
+    for c in &enc.streams {
+        for (b, (lf, df)) in c.stream.blocks.iter().zip(&c.freqs) {
+            if let Body::Dynamic { header: h, .. } = &b.body {
+                header::write(&mut hw, lf, df, h, &mut recipe);
+            }
         }
     }
     let pad = hw.pad_len();
     hw.bits(pad, 0);
     let headers = hw.finish();
+    let layout = lw.finish();
 
     let t3 = std::time::Instant::now();
-    let mut payload = vec![];
-    enc.rec.finish(&mut payload);
-    let t4 = std::time::Instant::now();
-    let out = finish(file, &sk, &lw.finish(), &headers, &payload);
-    let t5 = std::time::Instant::now();
-    ph.parse += (t1 - t0).as_secs_f64();
-    ph.layout += (t3 - t2).as_secs_f64();
-    ph.model += (t2 - t1).as_secs_f64();
-    ph.entropy += (t4 - t3).as_secs_f64();
-    ph.write += (t5 - t4).as_secs_f64();
-    Ok(out)
-}
-
-fn finish(file: &[u8], sk: &[u8], layout: &[u8], headers: &[u8], payload: &[u8]) -> Vec<u8> {
-    let z = zstd::bulk::compress(sk, 19).expect("zstd");
-    let mut out = Vec::with_capacity(z.len() + layout.len() + headers.len() + payload.len() + 32);
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.push(1);
-    out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
-    for part in [&z[..], layout, headers] {
-        put_varint(&mut out, part.len() as u64);
-        out.extend_from_slice(part);
+    let mut rec = Vec::with_capacity(payload.len() * 3 / 4);
+    rec.push(1);
+    for part in [&layout, &headers] {
+        put_varint(&mut rec, part.len() as u64);
+        rec.extend_from_slice(part);
     }
-    out.extend_from_slice(payload);
-    out
+    enc.rec.finish(&mut rec);
+    let t4 = std::time::Instant::now();
+    ph.model += (t2 - t1).as_secs_f64();
+    ph.layout += (t3 - t2).as_secs_f64();
+    ph.entropy += (t4 - t3).as_secs_f64();
+    Ok(rec)
 }
 
 thread_local! {
@@ -262,10 +340,7 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
         let n = get_varint(src, at)? as usize;
         get_bytes(src, at, n)
     };
-    let z = part(&mut at)?;
-    let layout = part(&mut at)?;
-    let headers = part(&mut at)?;
-    let sk = zstd::bulk::decompress(z, 1 << 30).map_err(|_| crate::corrupt())?;
+    let sk = zstd::bulk::decompress(part(&mut at)?, 1 << 30).map_err(|_| crate::corrupt())?;
 
     // Skeleton.
     let mut k = 0;
@@ -274,65 +349,79 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
         kind: [u8; 4],
         len: usize,
         crc: Option<u32>,
+        /// The whole data (plain chunks) or the sequence number (fdAT).
         data: &'a [u8],
     }
     let mut cs = Vec::with_capacity(nchunks.min(1 << 16));
-    let mut idat_len = 0usize;
+    let mut classes = Vec::with_capacity(nchunks.min(1 << 16));
     for _ in 0..nchunks {
         let kind: [u8; 4] = get_bytes(&sk, &mut k, 4)?.try_into().unwrap();
         let len = get_varint(&sk, &mut k)? as usize;
-        let crc = match *sk.get(k).ok_or_else(|| crate::corrupt())? {
-            0 => None,
-            _ => Some(u32::from_be_bytes(get_bytes(&sk, &mut { k + 1 }, 4)?.try_into().unwrap())),
-        };
-        k += if crc.is_some() { 5 } else { 1 };
-        let data = if &kind == b"IDAT" {
-            idat_len += len;
-            &[][..]
-        } else {
-            get_bytes(&sk, &mut k, len)?
+        let flags = *sk.get(k).ok_or_else(crate::corrupt)?;
+        k += 1;
+        let crc = if flags & 0x80 != 0 { Some(u32::from_be_bytes(get_bytes(&sk, &mut k, 4)?.try_into().unwrap())) } else { None };
+        let class = flags & 0x7f;
+        let data = match class {
+            PLAIN => get_bytes(&sk, &mut k, len)?,
+            FDAT if len >= 4 => get_bytes(&sk, &mut k, 4)?,
+            IDAT => &[][..],
+            _ => return Err(crate::corrupt()),
         };
         cs.push(C { kind, len, crc, data });
+        classes.push(class);
     }
     let tlen = get_varint(&sk, &mut k)? as usize;
     let trailer = get_bytes(&sk, &mut k, tlen)?;
-    let has_stream = *sk.get(k).ok_or_else(|| crate::corrupt())?;
-    k += 1;
-    let idat: Vec<u8> = if has_stream == 0 {
-        get_bytes(&sk, &mut k, idat_len)?.to_vec()
-    } else {
-        let zh = get_bytes(&sk, &mut k, 2)?;
-        let ihdr = cs
-            .first()
-            .filter(|c| &c.kind == b"IHDR")
-            .and_then(|c| Ihdr::parse(c.data))
-            .ok_or_else(|| crate::corrupt())?;
-        let g = Geometry::new(&ihdr).ok_or_else(|| crate::corrupt())?;
-        let mut v = Vec::with_capacity(idat_len);
-        v.extend_from_slice(zh);
-        v.extend_from_slice(&rebuild_stream(&g, layout, headers, src, &mut at)?);
-        v
-    };
-    if idat.len() != idat_len {
-        return Err(crate::corrupt());
+
+    // Images.
+    let mut payloads: Vec<Vec<u8>> = vec![];
+    let imgs = images(&classes, |i| cs[i].data, |i| cs[i].kind);
+    for (range, ih) in &imgs {
+        let skip = if classes[range.start] == FDAT { 4 } else { 0 };
+        let len: usize = cs[range.clone()].iter().map(|c| c.len - skip).sum();
+        let rec = part(&mut at)?;
+        let payload = match rec.first() {
+            Some(0) if rec.len() == len + 1 => rec[1..].to_vec(),
+            Some(1) => {
+                let ih = ih.as_ref().ok_or_else(crate::corrupt)?;
+                let g = Geometry::new(ih).ok_or_else(crate::corrupt)?;
+                rebuild(&g, &rec[1..])?
+            }
+            _ => return Err(crate::corrupt()),
+        };
+        if payload.len() != len {
+            return Err(crate::corrupt());
+        }
+        payloads.push(payload);
     }
 
     // Reassemble the file.
-    let mut out = Vec::with_capacity(idat_len + sk.len() + 64);
+    let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + trailer.len();
+    let mut out = Vec::with_capacity(total);
     out.extend_from_slice(&png::SIGNATURE);
-    let mut ia = 0;
-    for c in &cs {
+    let mut img = 0;
+    let mut pa = 0;
+    for (i, c) in cs.iter().enumerate() {
         out.extend_from_slice(&(c.len as u32).to_be_bytes());
         out.extend_from_slice(&c.kind);
-        let data = if &c.kind == b"IDAT" {
-            let d = &idat[ia..ia + c.len];
-            ia += c.len;
-            d
-        } else {
-            c.data
-        };
-        out.extend_from_slice(data);
-        let crc = c.crc.unwrap_or_else(|| chunk_crc(&c.kind, data));
+        let start = out.len();
+        match classes[i] {
+            PLAIN => out.extend_from_slice(c.data),
+            class => {
+                while img < imgs.len() && imgs[img].0.end <= i {
+                    img += 1;
+                    pa = 0;
+                }
+                if class == FDAT {
+                    out.extend_from_slice(c.data);
+                }
+                let n = c.len - if class == FDAT { 4 } else { 0 };
+                let p = payloads.get(img).ok_or_else(crate::corrupt)?;
+                out.extend_from_slice(p.get(pa..pa + n).ok_or_else(crate::corrupt)?);
+                pa += n;
+            }
+        }
+        let crc = c.crc.unwrap_or_else(|| chunk_crc(&c.kind, &out[start..]));
         out.extend_from_slice(&crc.to_be_bytes());
     }
     out.extend_from_slice(trailer);
@@ -342,49 +431,80 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn rebuild_stream(g: &Geometry, layout: &[u8], headers: &[u8], src: &[u8], at: &mut usize) -> Result<Vec<u8>> {
+/// One stream's structure as the layout gives it.
+struct StreamLayout {
+    zhdr: [u8; 2],
+    blocks: Vec<Block>,
+    tail_pad: u8,
+    trailing: Vec<u8>,
+}
+
+/// Rebuilds a coded image's payload from its record (past the mode byte).
+fn rebuild(g: &Geometry, rec: &[u8]) -> Result<Vec<u8>> {
+    let mut at = 0;
+    let part = |at: &mut usize| -> Result<&[u8]> {
+        let n = get_varint(rec, at)? as usize;
+        get_bytes(rec, at, n)
+    };
+    let layout = part(&mut at)?;
+    let headers = part(&mut at)?;
     let mut r = BitR::new(layout);
     let kind = if r.bits(1) == 1 { Kind::Bytes } else { Kind::Image };
     let n = r.gamma()? as usize;
-    let nblocks = r.gamma()? as usize;
-    let std_last = r.bits(1) == 1;
-    let mut blocks = Vec::with_capacity(nblocks.min(1 << 20));
-    let mut spans = Vec::with_capacity(nblocks.min(1 << 20));
-    let mut prev_count = 0usize;
-    for i in 0..nblocks {
-        let last = if std_last { i + 1 == nblocks } else { r.bits(1) == 1 };
-        let body = match r.bits(2) {
-            0 => {
-                let pad = r.bits(8) as u8;
-                let len = r.bits(16) as u16;
-                spans.push(Span::Stored(len as usize));
-                Body::Stored { pad, len }
-            }
-            t @ (1 | 2) => {
-                let count = if r.bits(1) == 1 { prev_count } else { r.gamma()? as usize };
-                prev_count = count;
-                spans.push(Span::Tokens(count));
-                if t == 1 {
-                    Body::Fixed { tokens: vec![] }
-                } else {
-                    Body::Dynamic { header: Default::default(), tokens: vec![] }
-                }
-            }
-            _ => return Err(crate::corrupt()),
-        };
-        blocks.push(Block { last, body });
-        if r.overrun() {
-            return Err(crate::corrupt());
-        }
-    }
-    let tail_pad = r.bits(8) as u8;
-    let ntrail = r.gamma()? as usize;
-    if ntrail > layout.len() * 8 {
+    let nstreams = r.gamma()? as usize + 1;
+    if nstreams > layout.len() {
         return Err(crate::corrupt());
     }
-    let trailing: Vec<u8> = (0..ntrail).map(|_| r.bits(8) as u8).collect();
+    let mut streams = Vec::with_capacity(nstreams);
+    let mut spans = vec![];
+    for _ in 0..nstreams {
+        let zhdr = [r.bits(8) as u8, r.bits(8) as u8];
+        let nblocks = r.gamma()? as usize;
+        if nblocks > layout.len() * 8 {
+            return Err(crate::corrupt());
+        }
+        let std_last = r.bits(1) == 1;
+        let mut blocks = Vec::with_capacity(nblocks);
+        let mut prev_count = 0usize;
+        for i in 0..nblocks {
+            let last = if std_last { i + 1 == nblocks } else { r.bits(1) == 1 };
+            let body = match r.bits(2) {
+                0 => {
+                    let pad = r.bits(8) as u8;
+                    let len = r.bits(16) as u16;
+                    spans.push(Span::Stored(len as usize));
+                    Body::Stored { pad, len }
+                }
+                t @ (1 | 2) => {
+                    let count = if r.bits(1) == 1 { prev_count } else { r.gamma()? as usize };
+                    prev_count = count;
+                    spans.push(Span::Tokens(count));
+                    if t == 1 {
+                        Body::Fixed { tokens: vec![] }
+                    } else {
+                        Body::Dynamic { header: Default::default(), tokens: vec![] }
+                    }
+                }
+                _ => return Err(crate::corrupt()),
+            };
+            blocks.push(Block { last, body });
+            if r.overrun() {
+                return Err(crate::corrupt());
+            }
+        }
+        let tail_pad = r.bits(8) as u8;
+        let ntrail = r.gamma()? as usize;
+        if ntrail > layout.len() * 8 {
+            return Err(crate::corrupt());
+        }
+        let trailing: Vec<u8> = (0..ntrail).map(|_| r.bits(8) as u8).collect();
+        streams.push(StreamLayout { zhdr, blocks, tail_pad, trailing });
+    }
     let nalts = r.gamma()? as usize;
-    let mut alts = Vec::with_capacity(nalts.min(1 << 20));
+    if nalts > layout.len() * 8 {
+        return Err(crate::corrupt());
+    }
+    let mut alts = Vec::with_capacity(nalts);
     let mut last = 0usize;
     for _ in 0..nalts {
         last += r.gamma()? as usize;
@@ -402,11 +522,11 @@ fn rebuild_stream(g: &Geometry, layout: &[u8], headers: &[u8], src: &[u8], at: &
     }
     let mut tokens = vec![Token::Lit(0); ntok];
     let t = std::time::Instant::now();
-    let player = model::Player::new(src, at)?;
+    let player = model::Player::new(rec, &mut at)?;
     let t = dec_time(0, t);
     let mut freqs = Vec::with_capacity(spans.len());
     model::decode(&player, kind, g, &spans, &mut tokens, &mut freqs, &mut buf, &mut raw)?;
-    let mut starts = Vec::with_capacity(blocks.len() + 1);
+    let mut starts = Vec::with_capacity(spans.len() + 1);
     let mut ti = 0;
     for s in &spans {
         starts.push(ti);
@@ -430,14 +550,42 @@ fn rebuild_stream(g: &Geometry, layout: &[u8], headers: &[u8], src: &[u8], at: &
     let mut hr = BitReader::new(headers);
     let mut recipe = header::Recipe::default();
     let t = dec_time(1, t);
-    for (b, f) in blocks.iter_mut().zip(&freqs) {
-        if let Body::Dynamic { header: h, .. } = &mut b.body {
-            *h = header::read_freqs(&mut hr, &f.0, &f.1, &mut recipe)?;
+    let mut bi = 0;
+    for s in &mut streams {
+        for b in &mut s.blocks {
+            if let Body::Dynamic { header: h, .. } = &mut b.body {
+                *h = header::read_freqs(&mut hr, &freqs[bi].0, &freqs[bi].1, &mut recipe)?;
+            }
+            bi += 1;
         }
     }
     let t = dec_time(2, t);
-    let stream = Stream { blocks, tail_pad, trailing };
-    let out = flate_recons::fast::write::write(&stream, &starts, &tokens, &buf[g.pad..])?;
+
+    // Each stream with its blocks' tokens and its part of the data.
+    let data = &buf[g.pad..];
+    let mut out = Vec::with_capacity(n / 2);
+    let (mut b0, mut pos) = (0, 0);
+    let single = streams.len() == 1;
+    for s in streams {
+        let nb = s.blocks.len();
+        let (t0, t1) = (starts[b0], starts[b0 + nb]);
+        let local: Vec<usize> = starts[b0..=b0 + nb].iter().map(|&x| x - t0).collect();
+        let bytes = if single {
+            n
+        } else {
+            let stored: usize = s.blocks.iter().map(|b| if let Body::Stored { len, .. } = b.body { len as usize } else { 0 }).sum();
+            stored + tokens[t0..t1].iter().map(|t| t.span()).sum::<usize>()
+        };
+        let d = data.get(pos..pos + bytes).ok_or_else(crate::corrupt)?;
+        out.extend_from_slice(&s.zhdr);
+        let stream = Stream { blocks: s.blocks, tail_pad: s.tail_pad, trailing: s.trailing };
+        out.extend_from_slice(&flate_recons::fast::write::write(&stream, &local, &tokens[t0..t1], d)?);
+        b0 += nb;
+        pos += bytes;
+    }
+    if pos != n {
+        return Err(crate::corrupt());
+    }
     dec_time(3, t);
     Ok(out)
 }

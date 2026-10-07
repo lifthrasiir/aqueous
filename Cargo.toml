@@ -11,6 +11,9 @@ crc32fast = "1.5"
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+[dev-dependencies]
+flate-zoo = { path = "../flate-zoo" }
+
 [profile.release]
 debug = 1
 lto = "fat"

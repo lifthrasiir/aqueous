@@ -19,7 +19,7 @@
 use crate::filter;
 use crate::rans::{self, BitR, BitW, Decoder, Tables};
 use flate_recons::deflate::Token;
-use flate_recons::fast::inflate::{self, Layout, Sink};
+use flate_recons::fast::inflate::{self, Sink};
 use flate_recons::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
 
 #[derive(Debug, Clone, Copy)]
@@ -427,13 +427,17 @@ fn unfilter_bytes(ft: u8, d: &[u8], raw: &mut [u8], q: usize, rs2: usize, x0: us
 /// Unfilters the `len` bytes at `p`, where the cursor is.
 #[inline(always)]
 fn unfilter_span<const BPP: usize>(g: &Geometry, cur: &Cursor, buf: &[u8], raw: &mut [u8], p: usize, len: usize) {
+    // Past the image there is nothing to unfilter; the data may end before the image.
     let end = (p + len).min(g.len);
+    if p >= end {
+        return;
+    }
     let x = p - cur.rstart;
     if x > 0 && end <= cur.rend {
         // Within the row (the usual case).
-        let d = &buf[g.pad + cur.rstart + 1..g.pad + cur.rend];
+        let d = &buf[g.pad + cur.rstart + 1..g.pad + end];
         unfilter_part::<BPP>(buf[g.pad + cur.rstart], d, raw, cur.q0, cur.rs2, x - 1, end - cur.rstart - 1, g.bpp);
-    } else if p < end {
+    } else {
         let mut c = cur.clone();
         let mut i = p;
         while i < end {
@@ -443,7 +447,7 @@ fn unfilter_span<const BPP: usize>(g: &Geometry, cur: &Cursor, buf: &[u8], raw: 
                 continue;
             }
             let x1 = end.min(c.rend) - c.rstart - 1;
-            let d = &buf[g.pad + c.rstart + 1..g.pad + c.rend];
+            let d = &buf[g.pad + c.rstart + 1..g.pad + c.rstart + 1 + x1];
             unfilter_part::<BPP>(buf[g.pad + c.rstart], d, raw, c.q0, c.rs2, i - c.rstart - 1, x1, g.bpp);
             i = c.rstart + 1 + x1;
         }
@@ -627,33 +631,61 @@ impl<const BPP: usize, const IMAGE: bool> Sink for Enc<'_, BPP, IMAGE> {
     }
 }
 
-/// What the compressor gets: the symbols, the stream's structure, the data size and the
+/// One zlib stream of an image's payload, as parsed: its header, its blocks (without their
+/// tokens) and trailing bytes (the Adler-32 checksum, and anything after the last stream),
+/// per block its first token (counted over the whole payload) then the end, and per block
+/// its symbol frequencies.
+pub struct Coded {
+    pub zhdr: [u8; 2],
+    pub stream: flate_recons::deflate::Stream,
+    pub starts: Vec<usize>,
+    pub freqs: Vec<Freqs>,
+}
+
+/// What the compressor gets: the symbols, the streams' structure, the data size and the
 /// exceptions.
 pub struct Encoded {
     pub rec: Recorder,
-    pub layout: Layout,
+    pub streams: Vec<Coded>,
     pub len: usize,
+    /// Token indices of matches of length 258 sent as 284 + 31.
     pub alts: Vec<usize>,
 }
 
 const MAX_MATCH: usize = 258;
 
-/// Parses and models the raw DEFLATE stream `deflate` of an image with geometry `g`.
-pub fn encode(kind: Kind, g: &Geometry, deflate: &[u8]) -> crate::Result<Encoded> {
+/// Whether `b` starts with a zlib header (deflate, no preset dictionary).
+fn zlib_header(b: &[u8]) -> bool {
+    b.len() >= 2 && b[0] & 0x0f == 8 && b[0] >> 4 <= 7 && b[1] & 0x20 == 0 && (b[0] as u16 * 256 + b[1] as u16) % 31 == 0
+}
+
+/// Where the next zlib stream would start after a stream ending at `end` (past its
+/// checksum), if one plausibly does.
+fn next_stream(payload: &[u8], end: usize) -> Option<usize> {
+    let next = end + 4;
+    (next + 2 < payload.len() && zlib_header(&payload[next..])).then_some(next)
+}
+
+/// Parses and models the payload `payload` (one or more zlib streams, as in Apple's
+/// split IDAT) of an image with geometry `g`.
+pub fn encode(kind: Kind, g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
+    if payload.len() < 2 {
+        return Err(crate::Error::Unsupported("no zlib stream"));
+    }
     // Streams that expand a lot are mostly long matches: modelling only the literals as
     // they come costs less than computing every pixel's symbol up front.
-    let sparse = g.len > ROWS_MAX_EXPANSION * deflate.len();
+    let sparse = g.len > ROWS_MAX_EXPANSION * payload.len();
     match (kind, g.bpp, sparse) {
-        (Kind::Image, 1, false) => encode_image::<1>(g, deflate),
-        (Kind::Image, 2, false) => encode_image::<2>(g, deflate),
-        (Kind::Image, 3, false) => encode_image::<3>(g, deflate),
-        (Kind::Image, 4, false) => encode_image::<4>(g, deflate),
-        (Kind::Image, 1, true) => encode_bpp::<1, true>(g, deflate),
-        (Kind::Image, 2, true) => encode_bpp::<2, true>(g, deflate),
-        (Kind::Image, 3, true) => encode_bpp::<3, true>(g, deflate),
-        (Kind::Image, 4, true) => encode_bpp::<4, true>(g, deflate),
+        (Kind::Image, 1, false) => encode_image::<1>(g, payload),
+        (Kind::Image, 2, false) => encode_image::<2>(g, payload),
+        (Kind::Image, 3, false) => encode_image::<3>(g, payload),
+        (Kind::Image, 4, false) => encode_image::<4>(g, payload),
+        (Kind::Image, 1, true) => encode_bpp::<1, true>(g, payload),
+        (Kind::Image, 2, true) => encode_bpp::<2, true>(g, payload),
+        (Kind::Image, 3, true) => encode_bpp::<3, true>(g, payload),
+        (Kind::Image, 4, true) => encode_bpp::<4, true>(g, payload),
         (Kind::Image, ..) => Err(crate::Error::Unsupported("pixel size")),
-        (Kind::Bytes, ..) => encode_bpp::<0, false>(g, deflate),
+        (Kind::Bytes, ..) => encode_bpp::<0, false>(g, payload),
     }
 }
 
@@ -665,14 +697,43 @@ const ROWS_MAX_EXPANSION: usize = 4;
 /// which the compressor has in full. So the stream is parsed, the image unfiltered, the
 /// symbols of all pixel bytes computed row by row (no dependency between them), and then
 /// the tokens walked.
-fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result<Encoded> {
+fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
     let t0 = std::time::Instant::now();
-    let f = inflate::parse(deflate)?;
+    // The streams, then their data and tokens as one.
+    let mut flats = vec![];
+    let mut o = 0;
+    loop {
+        let f = inflate::parse(&payload[o + 2..])?;
+        let end = payload.len() - f.stream.trailing.len();
+        flats.push((o, f));
+        match next_stream(payload, end) {
+            Some(next) if inflate::parse(&payload[next + 2..]).is_ok() => {
+                flats.last_mut().unwrap().1.stream.trailing.truncate(4);
+                o = next;
+            }
+            _ => break,
+        }
+    }
     let t1 = std::time::Instant::now();
-    let n = f.data.len();
+    let n: usize = flats.iter().map(|f| f.1.data.len()).sum();
     let mut buf = vec![0u8; g.pad + n];
-    buf[g.pad..].copy_from_slice(&f.data);
-    drop(f.data);
+    let mut tokens = Vec::with_capacity(flats.iter().map(|f| f.1.tokens.len()).sum());
+    let mut streams = vec![];
+    let mut stored = 0;
+    let mut at = g.pad;
+    for (o, f) in flats {
+        buf[at..at + f.data.len()].copy_from_slice(&f.data);
+        at += f.data.len();
+        let base = tokens.len();
+        tokens.extend_from_slice(&f.tokens);
+        stored += f.skips.iter().map(|s| s.1).sum::<usize>();
+        streams.push(Coded {
+            zhdr: [payload[o], payload[o + 1]],
+            starts: f.starts.iter().map(|&s| s + base).collect(),
+            freqs: f.stats.freqs,
+            stream: f.stream,
+        });
+    }
     let mut raw = vec![0u8; g.raw_len];
     // Every position's table (relative to T_LIT; T_FILTER's at filter bytes and past the
     // image), symbol and activity bucket.
@@ -699,11 +760,11 @@ fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result
     let t2 = std::time::Instant::now();
     let mut rec = Recorder::new(0);
     // At most four symbols per token (a match) and one per stored byte.
-    let stored: usize = f.skips.iter().map(|s| s.1).sum();
-    rec.syms.reserve(4 * f.tokens.len() + stored + 16);
+    rec.syms.reserve(4 * tokens.len() + stored + 16);
     let mut out = Syms { ptr: rec.syms.as_mut_ptr(), n: 0, cap: rec.syms.capacity(), raw: &mut rec.raw };
     let (mut p, mut ti, mut after) = (0usize, 0usize, 0usize);
-    for (i, b) in f.stream.blocks.iter().enumerate() {
+    let blocks = streams.iter().flat_map(|c| c.stream.blocks.iter().zip(c.starts.windows(2)));
+    for (b, se) in blocks {
         if let flate_recons::deflate::Body::Stored { len, .. } = b.body {
             for _ in 0..len {
                 out.sym(T_LIT + syms.t[p] as usize, syms.s[p] as u32);
@@ -711,9 +772,9 @@ fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result
             }
             continue;
         }
-        let end = f.starts[i + 1];
+        let end = se[1];
         let (st, ss, sa) = (&syms.t[..], &syms.s[..], &syms.act[..]);
-        for tok in &f.tokens[ti..end] {
+        for tok in &tokens[ti..end] {
             let e = st[p] as usize;
             // The after-match offset applies to the literal tables only.
             let mask = ((e < F as usize) as usize).wrapping_neg();
@@ -742,8 +803,7 @@ fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result
     let n_syms = out.n;
     // SAFETY: `Syms` wrote the first `n_syms` entries (within the capacity it checked).
     unsafe { rec.syms.set_len(n_syms) };
-    let alts = f
-        .tokens
+    let alts = tokens
         .iter()
         .enumerate()
         .filter(|(_, t)| matches!(t, Token::Match { alt258: true, .. }))
@@ -753,8 +813,7 @@ fn encode_image<const BPP: usize>(g: &Geometry, deflate: &[u8]) -> crate::Result
     if std::env::var_os("PNGR_TIMES").is_some() {
         eprintln!("parse {:.4} rows {:.4} walk {:.4}", (t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), (t3 - t2).as_secs_f64());
     }
-    let layout = inflate::Layout { stream: f.stream, starts: f.starts, skips: f.skips, stats: f.stats, len: n };
-    Ok(Encoded { rec, layout, len: n, alts })
+    Ok(Encoded { rec, streams, len: n, alts })
 }
 
 /// Symbols written into reserved room (the compressor's token walk).
@@ -930,7 +989,7 @@ mod neon {
     }
 }
 
-fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, deflate: &[u8]) -> crate::Result<Encoded> {
+fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
     let mut e = Enc::<BPP, IMAGE> {
         io: Recorder::new(g.len / 2 + 1024),
         st: St::new(g),
@@ -938,8 +997,28 @@ fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, deflate: &[u8])
         raw: if IMAGE { vec![0u8; g.raw_len] } else { vec![] },
         alts: vec![],
     };
-    let layout = inflate::parse_into(deflate, usize::MAX, &mut e)?;
-    Ok(Encoded { rec: e.io, layout, len: e.st.p, alts: e.alts })
+    let mut streams: Vec<Coded> = vec![];
+    let mut o = 0;
+    loop {
+        let base = e.st.tokens;
+        let l = inflate::parse_into(&payload[o + 2..], usize::MAX, &mut e)?;
+        let end = payload.len() - l.stream.trailing.len();
+        streams.push(Coded {
+            zhdr: [payload[o], payload[o + 1]],
+            starts: l.starts.iter().map(|&s| s + base).collect(),
+            freqs: l.stats.freqs,
+            stream: l.stream,
+        });
+        // Another stream follows if it parses (checked apart, before it feeds the model).
+        match next_stream(payload, end) {
+            Some(next) if inflate::parse(&payload[next + 2..]).is_ok() => {
+                streams.last_mut().unwrap().stream.trailing.truncate(4);
+                o = next;
+            }
+            _ => break,
+        }
+    }
+    Ok(Encoded { rec: e.io, streams, len: e.st.p, alts: e.alts })
 }
 
 /// Rebuilds the data and tokens of `spans` (the decompressor's side); `buf` is the padded
