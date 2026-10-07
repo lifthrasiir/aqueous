@@ -4,7 +4,7 @@
 //! stream and one raw bit stream (signs, escape mantissas). Everything else (file structure,
 //! side information, scalefactors, gaps) goes into small byte streams compressed with zstd.
 
-use crate::bits::{BitReader, BitWriter, FastWriter};
+use crate::bits::{BitReader, BitWriter, FastWriter, WordWriter};
 use crate::frame::{Header, SideInfo, crc16, scf_layout};
 use crate::huff;
 use crate::model::{self, Coder, State, Sym};
@@ -80,7 +80,7 @@ fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
 struct Enc<'a> {
     t: &'a Tables,
     rans: rans::Encoder,
-    raw: FastWriter,
+    raw: WordWriter,
 }
 
 impl Coder for Enc<'_> {
@@ -112,7 +112,7 @@ impl Coder for Enc<'_> {
 
 struct EncLocal {
     rans: rans::EncLocal,
-    raw: crate::bits::FastBits,
+    raw: crate::bits::WordBits,
 }
 
 impl Sym for EncLocal {
@@ -233,7 +233,7 @@ pub struct Coded {
 
 pub fn encode(d: &[u8]) -> Coded {
     let t = tables();
-    let mut c = Enc { t, rans: rans::Encoder::with_capacity(d.len() * 5 / 4 + model::MAX_GRANULE_SYMS), raw: FastWriter::with_capacity(d.len() / 4) };
+    let mut c = Enc { t, rans: rans::Encoder::with_capacity(d.len() * 5 / 4 + model::MAX_GRANULE_SYMS), raw: WordWriter::with_capacity(d.len() / 4) };
     let (streams, bit_lens) = encode_with(d, &mut c);
     let words = c.rans.finish(t);
     let raw_bits = c.raw.len() as u64;

@@ -133,14 +133,13 @@ impl BitCoder for Encoder {
     #[inline]
     fn bit(&mut self, p: &mut Prob, b: u32) -> u32 {
         let bound = (self.range >> PROB_BITS) * *p as u32;
-        if b == 0 {
-            self.range = bound;
-            *p += (ONE - *p) >> MOVE;
-        } else {
-            self.low += bound as u64;
-            self.range -= bound;
-            *p -= *p >> MOVE;
-        }
+        let one = b != 0;
+        self.low += if one { bound as u64 } else { 0 };
+        self.range = std::hint::select_unpredictable(one, self.range - bound, bound);
+        // p += (ONE - p) >> MOVE for 0, p -= p >> MOVE for 1.
+        let up = (ONE - *p) >> MOVE;
+        let down = *p >> MOVE;
+        *p = std::hint::select_unpredictable(one, *p - down, *p + up);
         while self.range < TOP {
             self.range <<= 8;
             self.shift_low();
@@ -182,21 +181,17 @@ impl BitCoder for Decoder<'_> {
     #[inline]
     fn bit(&mut self, p: &mut Prob, _b: u32) -> u32 {
         let bound = (self.range >> PROB_BITS) * *p as u32;
-        let b = if self.code < bound {
-            self.range = bound;
-            *p += (ONE - *p) >> MOVE;
-            0
-        } else {
-            self.code -= bound;
-            self.range -= bound;
-            *p -= *p >> MOVE;
-            1
-        };
+        let one = self.code >= bound;
+        self.code -= if one { bound } else { 0 };
+        self.range = std::hint::select_unpredictable(one, self.range - bound, bound);
+        let up = (ONE - *p) >> MOVE;
+        let down = *p >> MOVE;
+        *p = std::hint::select_unpredictable(one, *p - down, *p + up);
         while self.range < TOP {
             self.range <<= 8;
             self.code = self.code << 8 | self.next() as u32;
         }
-        b
+        one as u32
     }
 }
 

@@ -182,7 +182,7 @@ pub struct FastWriter {
     buf: Vec<u8>,
     /// Bytes completed.
     pos: usize,
-    /// Pending bits, left aligned; `n < 8` of them.
+    /// Pending bits in the low `n < 8` bits (higher bits are stale).
     acc: u64,
     n: u32,
 }
@@ -209,17 +209,9 @@ impl FastWriter {
     /// Writes the low `n` bits of `v` (n <= 56).
     #[inline(always)]
     pub fn put(&mut self, v: u64, n: u32) {
-        debug_assert!(n <= 56 && (n == 0 || v >> n == 0));
-        debug_assert!(self.pos + 8 <= self.buf.len());
-        let total = self.n + n;
-        // v << (64 - total) with n == 0 must not shift by 64.
-        self.acc |= (v << (63 - total)) << 1;
-        // SAFETY: `reserve` keeps at least 16 bytes past `pos`.
-        unsafe { (self.buf.as_mut_ptr().add(self.pos) as *mut u64).write_unaligned(self.acc.to_be()) };
-        let adv = total >> 3;
-        self.pos += adv as usize;
-        self.acc = if adv == 8 { 0 } else { self.acc << (adv * 8) };
-        self.n = total & 7;
+        let mut l = self.local();
+        l.put(v, n);
+        self.put_back(l);
     }
 
     /// Number of bits written so far.
@@ -283,13 +275,115 @@ impl FastBits {
     pub fn put(&mut self, v: u64, n: u32) {
         debug_assert!(n <= 56 && (n == 0 || v >> n == 0));
         assert!(self.pos + 8 <= self.end);
+        // Separate dependency chains: acc (shift, or) and the bit count (add, and).
+        self.acc = (self.acc << n) | v;
         let total = self.n + n;
-        self.acc |= (v << (63 - total)) << 1;
+        let out = (self.acc << (63 - total)) << 1;
         // SAFETY: pos + 8 <= end, the buffer's length.
-        unsafe { (self.buf.add(self.pos) as *mut u64).write_unaligned(self.acc.to_be()) };
-        let adv = total >> 3;
-        self.pos += adv as usize;
-        self.acc <<= adv * 8;
+        unsafe { (self.buf.add(self.pos) as *mut u64).write_unaligned(out.to_be()) };
+        self.pos += (total >> 3) as usize;
         self.n = total & 7;
+    }
+}
+
+/// MSB-first writer that stores whole 32-bit words, for many short writes (where the
+/// occasional branch is cheaper than [`FastWriter`]'s store per write).
+pub struct WordWriter {
+    buf: Vec<u8>,
+    /// Bytes completed (a multiple of 4).
+    pos: usize,
+    /// Pending bits in the low `n < 32` bits of acc (higher bits are stale).
+    acc: u64,
+    n: u32,
+}
+
+impl WordWriter {
+    pub fn with_capacity(bytes: usize) -> Self {
+        WordWriter { buf: vec![0; bytes + 16], pos: 0, acc: 0, n: 0 }
+    }
+
+    /// Makes room for `bytes` more bytes.
+    #[inline(always)]
+    pub fn reserve(&mut self, bytes: usize) {
+        if self.pos + bytes + 16 > self.buf.len() {
+            self.grow(bytes);
+        }
+    }
+
+    #[inline(never)]
+    fn grow(&mut self, bytes: usize) {
+        let want = (self.buf.len() * 2).max(self.pos + bytes + 16);
+        self.buf.resize(want, 0);
+    }
+
+    #[inline(always)]
+    pub fn local(&mut self) -> WordBits {
+        WordBits { buf: self.buf.as_mut_ptr(), end: self.buf.len(), pos: self.pos, acc: self.acc, n: self.n }
+    }
+
+    #[inline(always)]
+    pub fn put_back(&mut self, l: WordBits) {
+        (self.pos, self.acc, self.n) = (l.pos, l.acc, l.n);
+    }
+
+    pub fn len(&self) -> usize {
+        self.pos * 8 + self.n as usize
+    }
+
+    pub fn mark(&self) -> (usize, u64, u32) {
+        (self.pos, self.acc, self.n)
+    }
+
+    pub fn rollback(&mut self, m: (usize, u64, u32)) {
+        (self.pos, self.acc, self.n) = m;
+    }
+
+    /// Pads with zero bits to a byte boundary and returns the bytes.
+    pub fn finish(mut self) -> Vec<u8> {
+        let k = self.n as usize;
+        let w = (self.acc << (64 - self.n.max(1))).to_be_bytes();
+        let nb = k.div_ceil(8);
+        self.buf[self.pos..self.pos + nb].copy_from_slice(&w[..nb]);
+        self.buf.truncate(self.pos + nb);
+        self.buf
+    }
+}
+
+/// [`WordWriter`] state by value.
+#[derive(Clone, Copy)]
+pub struct WordBits {
+    buf: *mut u8,
+    end: usize,
+    pos: usize,
+    acc: u64,
+    n: u32,
+}
+
+impl WordBits {
+    /// Writes the low `n` bits of `v` (n <= 56).
+    #[inline(always)]
+    pub fn put(&mut self, v: u64, n: u32) {
+        if n > 32 {
+            self.put32(v >> 32, n - 32);
+            self.put32(v & 0xffff_ffff, 32);
+        } else {
+            self.put32(v, n);
+        }
+    }
+
+    /// Writes the low `n` bits of `v` (n <= 32).
+    #[inline(always)]
+    pub fn put32(&mut self, v: u64, n: u32) {
+        debug_assert!(n <= 32 && (n == 0 || v >> n == 0));
+        self.acc = (self.acc << n) | v;
+        self.n += n;
+        if self.n >= 32 {
+            assert!(self.pos + 8 <= self.end);
+            self.n -= 32;
+            let w = (self.acc >> self.n) as u32;
+            // SAFETY: pos + 4 <= end, the buffer's length.
+            unsafe { (self.buf.add(self.pos) as *mut u32).write_unaligned(w.to_be()) };
+            self.pos += 4;
+        }
     }
 }
