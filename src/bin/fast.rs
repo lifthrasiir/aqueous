@@ -33,6 +33,9 @@ usage:
       Metadata size per backend and per section, with the catalog RULES (default: built in)
       compared on the first PREFIX bytes of each stream; CPU times of splitting and joining
       on one thread.
+  flate-recons-fast parse [-i DIR] [-s held|train|all] | parse --png FILE...
+      Parsing speed on one thread (fast::inflate::parse_segments, best of 7 runs): of the
+      cached samples (default the held-out split), or of PNG files' IDAT streams.
 ";
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -44,6 +47,7 @@ fn main() -> ExitCode {
         Some("rules") => rules(&args[1..]),
         Some("models") => models(&args[1..]),
         Some("speed") => speed(&args[1..]),
+        Some("parse") => parse(&args[1..]),
         Some("compress") => compress(&args[1..]),
         Some("decompress") => decompress(&args[1..]),
         _ => {
@@ -95,6 +99,63 @@ impl Sample {
     fn backend(&self) -> &str {
         self.specs.split([':', ' ']).next().unwrap()
     }
+}
+
+/// The zlib stream in the IDAT chunks of a PNG file.
+fn png_idat(file: &[u8]) -> Res<Vec<u8>> {
+    if file.get(..8) != Some(b"\x89PNG\r\n\x1a\n") {
+        return Err("not a PNG file".into());
+    }
+    let (mut v, mut at) = (vec![], 8);
+    while at + 12 <= file.len() {
+        let n = u32::from_be_bytes(file[at..at + 4].try_into()?) as usize;
+        let body = file.get(at + 8..at + 8 + n).ok_or("truncated chunk")?;
+        if &file[at + 4..at + 8] == b"IDAT" {
+            v.extend_from_slice(body);
+        }
+        at += 12 + n;
+    }
+    Ok(v)
+}
+
+fn parse(args: &[String]) -> Res<()> {
+    // Inputs: raw DEFLATE streams, with the files' sizes.
+    let (streams, inputs): (Vec<Vec<u8>>, f64) = if args.first().map(String::as_str) == Some("--png") {
+        let mut v = vec![];
+        let mut total = 0.0;
+        for f in &args[1..] {
+            let file = std::fs::read(f)?;
+            let z = png_idat(&file).map_err(|e| format!("{f}: {e}"))?;
+            v.push(z.get(2..).ok_or("empty IDAT")?.to_vec());
+            total += file.len() as f64;
+        }
+        (v, total)
+    } else {
+        let o = opts(args, &["-i", "-s"])?;
+        let samples = load(Path::new(one(&o, "-i", "cache/samples")), one(&o, "-s", "held"))?;
+        let v: Vec<Vec<u8>> = samples.into_iter().map(|s| s.raw).collect();
+        let total = v.iter().map(|s| s.len() as f64).sum();
+        (v, total)
+    };
+    let mut best = f64::MAX;
+    let mut data = 0;
+    for _ in 0..7 {
+        let t = Instant::now();
+        data = 0;
+        for s in &streams {
+            data += fast::inflate::parse_segments(s, 1 << 20)?.data.len();
+        }
+        best = best.min(t.elapsed().as_secs_f64());
+    }
+    println!(
+        "{} streams, {:.0} input bytes, {data} bytes of data: {:.4} s, {:.0} MB/s of input, {:.0} MB/s of data",
+        streams.len(),
+        inputs,
+        best,
+        inputs / best / 1e6,
+        data as f64 / best / 1e6
+    );
+    Ok(())
 }
 
 /// The cached samples of a split (every fifth input file is held out, as in training).

@@ -24,7 +24,7 @@ pub mod code;
 pub mod inflate;
 #[doc(hidden)]
 pub mod table;
-mod write;
+pub mod write;
 pub mod header;
 pub mod tokens;
 #[doc(hidden)]

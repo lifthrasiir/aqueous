@@ -291,8 +291,8 @@ assert_eq!(flate_recons::fast::reconstruct(&data, &meta)?, raw);
   plain) at limits 15-9. Run-length coders cover zlib, libdeflate and zopfli/ECT. An exact
   block costs one bit.
 - **Speed.** Tokens are cut into ~1 MiB segments that are coded independently. The parser
-  gathers the statistics everything else needs (symbol frequencies, fingerprint, segment
-  cuts) as it decodes. Candidate matches are measured on 8 bytes without branching. Exact
+  (see [below](#parser-fastinflate)) gathers the statistics everything else needs (symbol
+  frequencies, fingerprint, segment cuts) as it decodes. Candidate matches are measured on 8 bytes without branching. Exact
   zlib trees use a bottom-up heap with packed keys. Package-merge is computed as Huffman's
   two-queue algorithm whenever the limit does not bite; tests check that it matches zopfli
   bit for bit.
@@ -343,6 +343,48 @@ flate-recons decompress [-o OUT] in.deflate.zst+fr                # -> in.deflat
 flate-recons-fast compress [-z LEVEL] [-c] [-o OUT] in.deflate    # -> in.deflate.zst+frf
 flate-recons-fast decompress [-o OUT] in.deflate.zst+frf          # -> in.deflate
 ```
+
+### Parser (`fast::inflate`)
+
+`fast::inflate::parse` gives what `deflate::parse` gives, with the tokens in one list and
+the per-block statistics gathered on the way. `parse_into` hands the data and tokens to a
+`Sink` (`lit`, `mat`, `stored`) instead, for callers that process tokens as they are decoded
+(png-recons models them in the same pass); `parse` is `parse_into` with a collecting sink.
+
+```rust
+struct Count(usize);
+impl flate_recons::fast::inflate::Sink for Count {
+    fn lit(&mut self, _: u8) { self.0 += 1 }
+    fn mat(&mut self, len: u16, _dist: u16, _alt258: bool) { self.0 += len as usize }
+    fn stored(&mut self, b: &[u8]) { self.0 += b.len() }
+}
+let layout = flate_recons::fast::inflate::parse_into(&raw, usize::MAX, &mut Count(0))?;
+```
+
+- Decoding tables are two-level: 11 bits (literal/length) and 8 bits (distance) up front,
+  subtables for longer codes, so they stay in L1. Single-level tables as long as the
+  longest code took up to 128 KB with the 15-bit literal codes common in image data.
+- Up to three literals per refill, the last two straight from the primary table.
+- Matches closer than 8 bytes copy their first period byte by byte and the rest in 8-byte
+  chunks from a multiple of the distance (a distance of 4, an RGBA pixel, used to go byte
+  by byte for the whole match).
+- The collecting sink keeps its vectors as raw parts grown by value, so that their lengths
+  stay in registers in the token loop.
+
+One thread, best of 7 runs (`flate-recons-fast parse` on the held-out samples; `parse --png
+FILE...` on PNG files' IDAT streams, from [codec-corpus](https://github.com/imazen/codec-corpus)).
+Speeds are of the decompressed data; the input is the DEFLATE stream (held-out samples) or
+the PNG file.
+
+| input | data | before | after |
+|---|---|---|---|
+| held-out samples (924 streams, 45.2 MB) | 85.1 MB | 630 MB/s | 625 MB/s |
+| kadid10k (81 photos, 25.9 MB, zlib -6) | 47.8 MB | 451 MB/s | 463 MB/s |
+| clic2025 final-test (30 photos, 121.2 MB, zlib -9) | 258.8 MB | 408 MB/s | 528 MB/s |
+| qoi-benchmark screenshot_web (14 files, 40.3 MB) | 455.1 MB | 1,600 MB/s | 2,457 MB/s |
+| gb82-sc (10 screenshots, 3.0 MB) | 92.7 MB | 1,785 MB/s | 3,184 MB/s |
+
+Metadata sizes and the `eval` figures above are unchanged (parsing 0.14 s either way).
 
 ## Next steps
 
