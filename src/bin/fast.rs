@@ -1,5 +1,6 @@
 //! Evaluation and rule derivation for the rule-based representation (`flate_recons::fast`),
-//! over the samples that `flate-recons-train samples` cached from flate-zoo's encoders.
+//! over the samples that `flate-recons-train samples` cached from flate-zoo's encoders, and a
+//! recompression demo with the speed-unpenalized (lambda = 0) catalog.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,9 @@ use std::time::Instant;
 
 use flate_recons::fast::{self, Options, Report, Rule};
 use rayon::prelude::*;
+
+#[path = "common/zst.rs"]
+mod zst;
 
 const USAGE: &str = "\
 usage:
@@ -40,8 +44,13 @@ fn main() -> ExitCode {
         Some("rules") => rules(&args[1..]),
         Some("models") => models(&args[1..]),
         Some("speed") => speed(&args[1..]),
+        Some("compress") => compress(&args[1..]),
+        Some("decompress") => decompress(&args[1..]),
         _ => {
-            eprint!("{USAGE}");
+            eprint!(
+                "{USAGE}{}",
+                zst::usage("flate-recons-fast", EXT, "with the lambda = 0 catalog")
+            );
             return ExitCode::from(2);
         }
     };
@@ -619,6 +628,27 @@ fn speed(args: &[String]) -> Res<()> {
         );
     }
     Ok(())
+}
+
+/// The extension of recompressed files.
+const EXT: &str = ".zst+frf";
+
+/// The catalog fitted without a speed penalty (`rules -l 0`).
+const RULES_L0: &str = include_str!("../../model/rules-l0.txt");
+
+fn compress(args: &[String]) -> Res<()> {
+    let mut opts = Options::default();
+    (opts.rules, opts.map) = fast::parse_catalog(RULES_L0)?;
+    zst::compress(
+        args,
+        EXT,
+        |raw| Ok(fast::deconstruct_with(raw, &opts)?),
+        |data, meta| Ok(fast::reconstruct(data, meta)?),
+    )
+}
+
+fn decompress(args: &[String]) -> Res<()> {
+    zst::decompress(args, EXT, |data, meta| Ok(fast::reconstruct(data, meta)?))
 }
 
 /// CPU time of the calling thread, in seconds.

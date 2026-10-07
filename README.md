@@ -332,6 +332,18 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin flate-recons-fast
 - Gaps and kinds (where the misses are and what they are) make 70% of the corrections at
   λ = 5. Lengths and distances make the rest.
 
+Recompression demos (feature `demo`, also part of `train`) store a raw DEFLATE stream as the
+metadata size (u32, little endian), the metadata, then the data compressed by zstd (level 19
+by default). `flate-recons` uses the main representation with packed metadata (`.zst+fr`),
+`flate-recons-fast` the λ = 0 catalog (`model/rules-l0.txt`, `.zst+frf`):
+
+```
+flate-recons compress [-z LEVEL] [-c] [-o OUT] in.deflate         # -> in.deflate.zst+fr
+flate-recons decompress [-o OUT] in.deflate.zst+fr                # -> in.deflate
+flate-recons-fast compress [-z LEVEL] [-c] [-o OUT] in.deflate    # -> in.deflate.zst+frf
+flate-recons-fast decompress [-o OUT] in.deflate.zst+frf          # -> in.deflate
+```
+
 ## Next steps
 
 - More emulated encoders behind the same scheme (exact prefix, then hit/miss): zlib-ng
