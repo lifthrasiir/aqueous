@@ -155,7 +155,28 @@ fn store(v: i32) -> Result<i16, Error> {
     Ok(v as i16)
 }
 
-fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(), Error> {
+/// Result of decoding a scan: whether `encode_scan` reproduces it, judged inline from the
+/// decisions a libjpeg-style encoder makes (see `decode_scan`), and the padding used.
+#[derive(Clone, Copy, Debug, Default)]
+struct Canon {
+    standard: bool,
+    pad_zero: bool,
+    /// first reason the scan was judged non-canonical
+    why: Option<&'static str>,
+}
+
+/// Decode one scan into `out`, checking on the way that it is exactly what `encode_scan` (i.e.
+/// libjpeg's jcphuff) produces for the resulting coefficients:
+/// - padding before markers is all 1-bits or all 0-bits (consistently), segments are consumed
+///   exactly, markers are numbered in order (only RSTs may follow the last MCU);
+/// - EOB runs never cross a restart boundary or the end of the scan;
+/// - a run is only cut short where libjpeg cuts it: the next block does not start with another
+///   EOB run unless the run reached 0x7FFF blocks or (refinement) more than 937 buffered
+///   correction bits;
+/// - (refinement) a run never continues past a block after which more than 937 correction bits
+///   are buffered;
+/// - a ZRL is always followed by a nonzero coefficient in the same block.
+fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<Canon, Error> {
     let kind = kind(s)?;
     let mut dec = Vec::new();
     for sc in &s.comps {
@@ -185,13 +206,48 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
     let mut pred = [0i32; 4];
     let mut eobrun = 0u32;
     let mut seg = 0;
+    // --- canonical-encoding checks
+    let data_len = data.len() - PAD;
+    let nseg = nmcu.div_ceil(ri);
+    let mut why: Option<&'static str> = None;
+    macro_rules! flag {
+        ($c:expr, $w:expr) => {{
+            if $c && why.is_none() {
+                why = Some($w);
+            }
+        }};
+    }
+    flag!(!clean.markers_ok, "markers");
+    flag!(clean.segments.len() > nseg && !clean.segments[nseg..].iter().all(|&p| p == data_len), "segments");
+    let (mut pad_ones, mut pad_zeros) = (false, false);
+    let seg_end = |seg: usize| if seg + 1 < clean.segments.len() { clean.segments[seg + 1] } else { data_len };
+    macro_rules! check_segment_end {
+        ($seg:expr) => {{
+            let used = b.pos * 8 - b.cnt as usize;
+            let pad = ((8 - used % 8) % 8) as u32;
+            flag!(used.div_ceil(8) != seg_end($seg), "segment not consumed exactly");
+            flag!(eobrun != 0, "EOB run crosses segment end");
+            if pad > 0 {
+                b.refill();
+                let bits = b.peek(pad);
+                pad_ones |= bits == (1 << pad) - 1;
+                pad_zeros |= bits == 0;
+                flag!(bits != 0 && bits != (1 << pad) - 1, "padding");
+            }
+        }};
+    }
+    let mut run_len = 0u32; // length of the current / last EOB run
+    let mut run_be = 0usize; // correction bits buffered with the current EOB run
+    let mut prev_end: Option<bool> = None; // previous block ended an EOB run: Some(forced)
     for m in 0..nmcu {
         if m > 0 && m % ri == 0 {
+            check_segment_end!(seg);
             seg += 1;
             let p = *clean.segments.get(seg).ok_or(Error("missing RST".into()))?;
             b = Bits { buf: 0, cnt: 0, pos: p, data };
             pred = [0; 4];
             eobrun = 0;
+            prev_end = None;
         }
         let (mx, my) = (m % s.mcux, m / s.mcux);
         for (si, &(ci, ch, cv)) in layout.iter().enumerate() {
@@ -227,10 +283,12 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                         Kind::AcFirst => {
                             if eobrun > 0 {
                                 eobrun -= 1;
+                                prev_end = (eobrun == 0).then_some(run_len == 0x7FFF);
                                 continue;
                             }
                             let d = dec[si].as_ref().unwrap();
                             let mut k = ss;
+                            let (mut first, mut zrl, mut ended) = (true, false, false);
                             while k <= se {
                                 b.refill();
                                 let sym = d.decode(&mut b)?;
@@ -243,14 +301,28 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                                     b.refill();
                                     blk[k] = store(extend(b.get(sz), sz) * p1)?;
                                     *mask |= 1 << k;
+                                    zrl = false;
                                 } else if r == 15 {
                                     k += 15;
+                                    zrl = true;
                                 } else {
+                                    // EOB run: canonical only if not right after a ZRL and not
+                                    // continuing a run that libjpeg would not have cut
+                                    flag!(zrl, "AC1 ZRL before EOB");
+                                    flag!(first && prev_end == Some(false), "AC1 run split");
                                     b.refill();
-                                    eobrun = (1 << r) + b.get(r) - 1;
+                                    run_len = (1 << r) + b.get(r);
+                                    eobrun = run_len - 1;
+                                    prev_end = (eobrun == 0).then_some(run_len == 0x7FFF);
+                                    ended = true;
                                     break;
                                 }
+                                first = false;
                                 k += 1;
+                            }
+                            if !ended {
+                                flag!(zrl, "AC1 ZRL at band end");
+                                prev_end = None;
                             }
                         }
                         Kind::AcRefine => {
@@ -284,6 +356,7 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                             let mut covered = 0u64; // history positions whose bits were read
                             if eobrun == 0 {
                                 let rt = rtab.as_deref().unwrap();
+                                let (mut first, mut zrl, mut started) = (true, false, false);
                                 while k <= se {
                                     b.refill();
                                     let e = rt[b.peek(RBITS) as usize];
@@ -295,6 +368,7 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                                         2 => {
                                             b.consume(e.len as u32);
                                             eobrun = e.val as u32;
+                                            started = true;
                                             break;
                                         }
                                         3 => {
@@ -312,12 +386,15 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                                                 (r, if b.get(1) != 0 { p1 } else { m1 })
                                             } else if r != 15 {
                                                 eobrun = (1 << r) + b.get(r);
+                                                started = true;
                                                 break;
                                             } else {
                                                 (15, 0)
                                             }
                                         }
                                     };
+                                    zrl = val == 0;
+                                    first = false;
                                     // target: the (r+1)-th zero-history position >= k (r is
                                     // usually small; a branch-free select measured slower)
                                     let mut z = !hist & band & (u64::MAX << k);
@@ -337,14 +414,32 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
                                     }
                                     k = target + 1;
                                 }
+                                if started {
+                                    flag!(zrl, "ACr ZRL before EOB");
+                                    flag!(first && prev_end == Some(false), "ACr run split");
+                                    run_len = eobrun;
+                                    run_be = 0;
+                                } else {
+                                    flag!(zrl, "ACr ZRL at band end");
+                                    prev_end = None;
+                                }
                             }
                             if eobrun > 0 {
                                 if k <= se {
                                     let m = hist & (u64::MAX << k);
+                                    run_be += m.count_ones() as usize;
                                     collect!(m);
                                     covered |= m;
                                 }
                                 eobrun -= 1;
+                                let full = run_len == 0x7FFF || run_be > MAX_CORR_BITS - 64 + 1;
+                                if eobrun == 0 {
+                                    prev_end = Some(full);
+                                } else {
+                                    // libjpeg flushes as soon as too many bits are buffered
+                                    flag!(run_be > MAX_CORR_BITS - 64 + 1, "ACr run too long");
+                                    prev_end = None;
+                                }
                             }
                             // apply: the i-th covered position (ascending) gets bit ncorr-1-i
                             let mut bad = false;
@@ -372,8 +467,12 @@ fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Coefs]) -> Result<(
             }
         }
     }
-    let _ = PAD;
-    Ok(())
+    check_segment_end!(seg);
+    flag!(pad_ones && pad_zeros, "mixed padding");
+    if let (Some(w), true) = (why, std::env::var_os("JRC_DEBUG_CANON").is_some()) {
+        eprintln!("canon: scan ss={} se={} ah={} al={}: {w}", s.ss, s.se, s.ah, s.al);
+    }
+    Ok(Canon { standard: why.is_none(), pad_zero: pad_zeros && !pad_ones, why })
 }
 
 // ---------------------------------------------------------------- encoding (jcphuff.c)
@@ -717,23 +816,29 @@ fn encode_blocks(
 }
 
 /// Decode all scans of a progressive JPEG `d` into zigzag-ordered coefficients with masks, and
-/// determine for each scan whether `encode_scan` reproduces it (by re-encoding it). The first
-/// scan that fails to decode and all later ones (which may depend on it) are marked `raw`, as
-/// are scans that do not re-encode identically.
+/// determine for each scan whether `encode_scan` reproduces it (inline, see `decode_scan`). The
+/// first scan that fails to decode and all later ones (which may depend on it) are marked `raw`,
+/// as are scans not encoded the way `encode_scan` would.
+///
+/// With JRC_VERIFY_PROGRESSIVE set, every scan is also re-encoded and the inline verdict is
+/// checked against the outcome (a scan judged reproducible that is not panics: test oracle).
 pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Vec<ScanInfo>, Error> {
     jpeg::alloc_coefs(j, out, true);
-    let mut trailing = Vec::with_capacity(j.scans.len());
+    let mut infos = Vec::with_capacity(j.scans.len());
+    let mut whys = Vec::new();
     for s in &j.scans {
         jpeg::destuff(&d[s.start..s.end], clean);
-        if decode_scan(j, s, clean, out).is_err() {
-            break;
-        }
+        let Ok(c) = decode_scan(j, s, clean, out) else { break };
+        whys.push(c.why);
         let nmcu = s.mcux * s.mcuy;
         let nseg = nmcu.div_ceil(if s.ri > 0 { s.ri } else { nmcu });
         let data_len = clean.data.len() - PAD;
         let extra = clean.segments.len().saturating_sub(nseg);
-        trailing.push(if extra > 0 && clean.segments[nseg..].iter().all(|&p| p == data_len) { extra as u32 } else { 0 });
+        let trailing_rst = if extra > 0 && clean.segments[nseg..].iter().all(|&p| p == data_len) { extra as u32 } else { 0 };
+        infos.push(ScanInfo { standard: c.standard, trailing_rst, pad_zero: c.pad_zero, truncated: None, raw: !c.standard });
     }
+    // scans after the first undecodable one stay raw
+    infos.resize(j.scans.len(), ScanInfo { raw: true, ..Default::default() });
     // AC mask bits were maintained while decoding; set the DC bit
     for o in out.iter_mut() {
         for (blk, mask) in o.blocks.iter().zip(o.masks.iter_mut()) {
@@ -743,25 +848,23 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
             }
         }
     }
-    // verify: re-encode every decoded scan (with 1- or 0-padding) and compare
-    let mut infos = Vec::with_capacity(j.scans.len());
-    let mut buf = Vec::new();
-    for (i, s) in j.scans.iter().enumerate() {
-        let Some(&t) = trailing.get(i) else {
-            infos.push(ScanInfo { raw: true, ..Default::default() });
-            continue;
-        };
-        let orig = &d[s.start..s.end];
-        let mut info = ScanInfo { standard: false, trailing_rst: t, pad_zero: false, truncated: None, raw: false };
-        for pad_zero in [false, true] {
-            info.pad_zero = pad_zero;
-            if encode_scan(j, s, &info, out, &mut buf).is_ok() && buf == orig {
-                info.standard = true;
-                break;
+    if std::env::var_os("JRC_VERIFY_PROGRESSIVE").is_some() {
+        let mut buf = Vec::new();
+        for (i, (s, info)) in j.scans.iter().zip(&infos).enumerate() {
+            if info.raw && info.standard {
+                continue;
             }
+            let same = encode_scan(j, s, info, out, &mut buf).is_ok() && buf == d[s.start..s.end];
+            if info.standard && !same {
+                panic!("progressive scan {i}: judged reproducible but re-encodes differently");
+            }
+            if !info.raw || !same {
+                continue;
+            }
+            // reproducible but judged otherwise: a missed opportunity, not an error
+            eprintln!("note: progressive scan {i} re-encodes identically but was judged non-canonical: {:?}", whys.get(i));
+
         }
-        info.raw = !info.standard;
-        infos.push(info);
     }
     Ok(infos)
 }
