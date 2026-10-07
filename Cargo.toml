@@ -13,3 +13,5 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [profile.release]
 debug = 1
+lto = "fat"
+codegen-units = 1
