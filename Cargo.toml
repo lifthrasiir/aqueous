@@ -7,6 +7,9 @@ publish = false
 
 [dependencies]
 flate-recons = { path = "../flate-recons" }
+png-recons = { path = "../png-recons" }
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [profile.release]
 debug = 1

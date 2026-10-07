@@ -451,3 +451,63 @@ pub fn parse(d: &[u8]) -> Result<Psd> {
         composite: rd.p..d.len(),
     })
 }
+
+/// A file embedded in a smart object (`lnk2`, `lnkD` or `lnk3` block).
+#[derive(Debug, Clone)]
+pub struct Linked {
+    pub file_type: [u8; 4],
+    pub data: Span,
+}
+
+/// Leading bytes of the embedded file types whose data can be found.
+fn file_magic(ft: &[u8; 4]) -> Option<&'static [u8]> {
+    match ft {
+        b"8BPB" | b"8BPS" => Some(b"8BPS"),
+        b"JPEG" => Some(&[0xff, 0xd8, 0xff]),
+        b"png " | b"PNGf" => Some(&[0x89, b'P', b'N', b'G']),
+        _ => None,
+    }
+}
+
+/// Embedded files of the smart objects, with known file types, in file order. The data is
+/// found by its leading bytes after the entry's header (past an optional descriptor that is
+/// not parsed).
+pub fn linked(psd: &Psd, d: &[u8]) -> Vec<Linked> {
+    let mut out = Vec::new();
+    for t in psd.global_tags.iter().filter(|t| matches!(&t.key, b"lnk2" | b"lnkD" | b"lnk3")) {
+        let mut p = t.data.start;
+        while t.data.end - p >= 8 {
+            let n = u64::from_be_bytes(d[p..p + 8].try_into().unwrap());
+            let Some(end) = usize::try_from(n).ok().and_then(|n| (p + 8).checked_add(n)).filter(|&e| e <= t.data.end) else {
+                break;
+            };
+            let mut rd = Rd { d, base: p + 8, p: p + 8, end };
+            let head = (|| -> Result<([u8; 4], usize)> {
+                rd.skip(8)?; // kind, version
+                let idl = rd.u8()? as usize;
+                rd.skip(idl)?;
+                let nl = rd.u32()? as usize;
+                rd.skip(nl.checked_mul(2).ok_or(Error("name".into()))?)?;
+                let ft = rd.key()?;
+                rd.skip(4)?;
+                let dl = rd.u64()?;
+                Ok((ft, usize::try_from(dl).map_err(|_| Error("length".into()))?))
+            })();
+            if let Ok((ft, dl)) = head {
+                if let Some(magic) = file_magic(&ft) {
+                    let from = rd.p;
+                    let found = d[from..end]
+                        .windows(magic.len())
+                        .position(|w| w == magic)
+                        .map(|k| from + k)
+                        .filter(|&s| s + dl <= end && dl > 0);
+                    if let Some(s) = found {
+                        out.push(Linked { file_type: ft, data: s..s + dl });
+                    }
+                }
+            }
+            p = (end - t.data.start).next_multiple_of(4) + t.data.start;
+        }
+    }
+    out
+}
