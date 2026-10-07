@@ -206,7 +206,7 @@ impl<'a> Player<'a> {
         let used: Vec<bool> = (0..TABLES).map(|_| r.bits(1) == 1).collect();
         let mut freqs = Vec::with_capacity(TABLES);
         for (t, &u) in used.iter().enumerate() {
-            freqs.push(if u { rans::read_table(&mut r, alphabet(t))? } else { vec![rans::PROB_SCALE] });
+            freqs.push(if u { rans::read_table(&mut r, alphabet(t))? } else { vec![] });
         }
         if r.overrun() {
             return Err(crate::corrupt());

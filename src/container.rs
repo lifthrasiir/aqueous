@@ -59,8 +59,12 @@ fn chunk_crc(kind: &[u8; 4], data: &[u8]) -> u32 {
 /// Times of the compression steps, for benchmarking.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Phases {
+    /// The chunk layer (skeleton).
     pub parse: f64,
+    /// Parsing and modelling the DEFLATE stream.
     pub model: f64,
+    /// The block layout and Huffman headers.
+    pub layout: f64,
     pub entropy: f64,
     pub write: f64,
 }
@@ -204,8 +208,8 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
     let t4 = std::time::Instant::now();
     let out = finish(file, &sk, &lw.finish(), &headers, &payload);
     let t5 = std::time::Instant::now();
-    // Parsing the DEFLATE stream and modelling it are one pass ("model").
-    ph.parse += (t1 - t0).as_secs_f64() + (t3 - t2).as_secs_f64();
+    ph.parse += (t1 - t0).as_secs_f64();
+    ph.layout += (t3 - t2).as_secs_f64();
     ph.model += (t2 - t1).as_secs_f64();
     ph.entropy += (t4 - t3).as_secs_f64();
     ph.write += (t5 - t4).as_secs_f64();

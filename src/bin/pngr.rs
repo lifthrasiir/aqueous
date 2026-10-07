@@ -74,6 +74,7 @@ fn bench(args: &[String]) {
         }
         ph.parse += p1.parse;
         ph.model += p1.model;
+        ph.layout += p1.layout;
         ph.entropy += p1.entropy;
         ph.write += p1.write;
         tin += src.len() as f64;
@@ -102,8 +103,8 @@ fn bench(args: &[String]) {
         tin / td / 1e6
     );
     println!(
-        "compress phases: parse {:.3}s model {:.3}s entropy {:.3}s write {:.3}s",
-        ph.parse, ph.model, ph.entropy, ph.write
+        "compress phases: chunks {:.3}s model {:.3}s layout {:.3}s entropy {:.3}s write {:.3}s",
+        ph.parse, ph.model, ph.layout, ph.entropy, ph.write
     );
     let d = png_recons::container::DEC_TIMES.with(|c| c.get());
     let k = iters as f64;
