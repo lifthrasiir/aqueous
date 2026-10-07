@@ -68,6 +68,21 @@ impl Header {
             && self.sr_index() != 3
     }
 
+    /// Like [`Header::valid`], but also accepts free format (bitrate index 0).
+    pub fn valid_any(self) -> bool {
+        self.0 >> 21 == 0x7ff && self.version() != 1 && self.layer() == 1 && self.bitrate_index() != 15 && self.sr_index() != 3
+    }
+
+    pub fn free_format(self) -> bool {
+        self.bitrate_index() == 0
+    }
+
+    /// Frame length; `free` is the length without padding of free format frames in the
+    /// stream (ignored otherwise).
+    pub fn frame_len_free(self, free: usize) -> usize {
+        if self.free_format() { free + self.padding() as usize } else { self.frame_len() }
+    }
+
     pub fn sample_rate(self) -> u32 {
         SAMPLE_RATE[self.sr_index() as usize] >> (3 - self.version()).min(2)
     }

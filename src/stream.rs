@@ -14,38 +14,84 @@ use crate::frame::{Header, SideInfo};
 /// Zero bytes after `R`, enough for any over-read of a granule's big values.
 pub(crate) const R_PAD: usize = 4096;
 
-fn is_frame(d: &[u8], p: usize) -> Option<Header> {
+/// Longest free format frame searched for (640 kbps at 32 kHz is 2881 bytes).
+const MAX_FREE: usize = 4096;
+
+/// A frame of the stream with free format length `free` (0: not free format) at `p`.
+fn is_frame(d: &[u8], p: usize, free: usize) -> Option<(Header, usize)> {
     if p + 4 > d.len() || d[p] != 0xff {
         return None;
     }
     let h = Header::from_bytes(&d[p..]);
-    (h.valid() && p + h.frame_len() <= d.len()).then_some(h)
+    if !h.valid_any() || h.free_format() != (free > 0) {
+        return None;
+    }
+    let len = h.frame_len_free(free);
+    (len >= h.prefix_len() && p + len <= d.len()).then_some((h, len))
 }
 
 fn compatible(a: Header, b: Header) -> bool {
     a.version() == b.version() && a.sr_index() == b.sr_index()
 }
 
-/// A run of frames may start at `p` if two more compatible frames follow, or the file ends
-/// after fewer.
-fn run_starts(d: &[u8], p: usize) -> bool {
-    let Some(h) = is_frame(d, p) else { return false };
-    let mut q = p + h.frame_len();
+/// Whether a run of frames with free format length `free` may start at `p`: two more
+/// compatible frames follow, or the file ends after fewer.
+fn run_starts_with(d: &[u8], p: usize, free: usize) -> bool {
+    let Some((h, len)) = is_frame(d, p, free) else { return false };
+    let mut q = p + len;
     for _ in 0..2 {
         if q == d.len() {
             return true;
         }
-        match is_frame(d, q) {
-            Some(h2) if compatible(h, h2) => q += h2.frame_len(),
+        match is_frame(d, q, free) {
+            Some((h2, len2)) if compatible(h, h2) => q += len2,
             _ => return false,
         }
     }
     true
 }
 
-/// Splits `d` into junk and frame runs: returns alternating lengths, and frame offsets.
-pub(crate) fn segment(d: &[u8]) -> (Vec<u32>, Vec<usize>) {
-    let mut segs = Vec::new();
+/// The free format length (0 if not free format) of a run that may start at `p`.
+fn run_starts(d: &[u8], p: usize) -> Option<usize> {
+    if p + 4 > d.len() || d[p] != 0xff {
+        return None;
+    }
+    let h = Header::from_bytes(&d[p..]);
+    if !h.valid_any() {
+        return None;
+    }
+    if !h.free_format() {
+        return run_starts_with(d, p, 0).then_some(0);
+    }
+    // Free format: the distance to the next matching header gives the length.
+    let pad = h.padding() as usize;
+    let mut q = p + h.prefix_len();
+    while q + 4 <= d.len() && q < p + MAX_FREE {
+        q = match memchr::memchr(0xff, &d[q..(p + MAX_FREE).min(d.len())]) {
+            Some(i) => q + i,
+            None => return None,
+        };
+        if q + 4 > d.len() {
+            return None;
+        }
+        let h2 = Header::from_bytes(&d[q..]);
+        if h2.valid_any() && h2.free_format() && compatible(h, h2) {
+            let free = q - p - pad;
+            if free >= h.prefix_len() && run_starts_with(d, p, free) {
+                return Some(free);
+            }
+        }
+        q += 1;
+    }
+    None
+}
+
+/// Splits `d` into junk and frame runs. Returns alternating junk lengths and frame runs
+/// (as (count, free format length)), starting and ending with junk, and the frames
+/// (offset, length).
+pub(crate) fn segment(d: &[u8]) -> (Vec<u32>, Vec<(u32, u32)>, Vec<(usize, usize)>) {
+    let mut junk = Vec::new();
+    let mut runs = Vec::new();
     let mut frames = Vec::new();
     let mut p = 0;
     let mut junk_start = 0;
@@ -56,29 +102,29 @@ pub(crate) fn segment(d: &[u8]) -> (Vec<u32>, Vec<usize>) {
         p = (10 + size + footer).min(d.len());
     }
     while p < d.len() {
-        if !run_starts(d, p) {
+        let Some(free) = run_starts(d, p) else {
             p = match memchr::memchr(0xff, &d[p + 1..]) {
                 Some(i) => p + 1 + i,
                 None => d.len(),
             };
             continue;
-        }
-        segs.push((p - junk_start) as u32);
+        };
+        junk.push((p - junk_start) as u32);
         let first = Header::from_bytes(&d[p..]);
         let mut n = 0u32;
-        while let Some(h) = is_frame(d, p) {
+        while let Some((h, len)) = is_frame(d, p, free) {
             if !compatible(first, h) {
                 break;
             }
-            frames.push(p);
-            p += h.frame_len();
+            frames.push((p, len));
+            p += len;
             n += 1;
         }
-        segs.push(n);
+        runs.push((n, free as u32));
         junk_start = p;
     }
-    segs.push((d.len() - junk_start) as u32);
-    (segs, frames)
+    junk.push((d.len() - junk_start) as u32);
+    (junk, runs, frames)
 }
 
 /// Where the main data of a frame lies in `R`, in bits, if the frame is placed.
@@ -94,6 +140,6 @@ pub(crate) fn place(si: &SideInfo, h: Header, payload: usize, len: usize, end: u
 }
 
 /// [`segment`], for benchmarks.
-pub fn segment_pub(d: &[u8]) -> (Vec<u32>, Vec<usize>) {
+pub fn segment_pub(d: &[u8]) -> (Vec<u32>, Vec<(u32, u32)>, Vec<(usize, usize)>) {
     segment(d)
 }

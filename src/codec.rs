@@ -246,21 +246,27 @@ pub fn count<C: Coder>(d: &[u8], c: &mut C) {
 }
 
 fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
-    let (segs, offsets) = segment(d);
+    let (junk, runs, offsets) = segment(d);
     let mut b: Vec<Vec<u8>> = vec![Vec::new(); N_BYTE_STREAMS];
-    for &n in &segs {
-        put_varint(&mut b[S_SEGS], n as u64);
+    // Junk lengths and frame runs (count, free format length), alternating.
+    for (i, &j) in junk.iter().enumerate() {
+        put_varint(&mut b[S_SEGS], j as u64);
+        if let Some(&(n, free)) = runs.get(i) {
+            put_varint(&mut b[S_SEGS], n as u64);
+            put_varint(&mut b[S_SEGS], free as u64);
+        }
     }
     {
         let (mut p, mut fi) = (0usize, 0usize);
-        for (i, &n) in segs.iter().enumerate() {
-            if i % 2 == 0 {
-                b[S_JUNK].extend_from_slice(&d[p..p + n as usize]);
-                p += n as usize;
-            } else if n > 0 {
+        for (i, &j) in junk.iter().enumerate() {
+            b[S_JUNK].extend_from_slice(&d[p..p + j as usize]);
+            p += j as usize;
+            if let Some(&(n, _)) = runs.get(i) {
                 fi += n as usize;
-                let last = offsets[fi - 1];
-                p = last + Header::from_bytes(&d[last..]).frame_len();
+                if n > 0 {
+                    let (last, len) = offsets[fi - 1];
+                    p = last + len;
+                }
             }
         }
     }
@@ -269,7 +275,7 @@ fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
     let mut r_buf = Vec::with_capacity(d.len() + R_PAD);
     let mut frames: Vec<(Header, SideInfo, usize, usize)> = Vec::with_capacity(offsets.len());
     let mut prev_h = 0u32;
-    for &p in &offsets {
+    for &(p, flen) in &offsets {
         let h = Header::from_bytes(&d[p..]);
         b[S_HDR].extend_from_slice(&(h.0 ^ prev_h).to_be_bytes());
         prev_h = h.0;
@@ -287,9 +293,9 @@ fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
                 b[S_CRC].extend_from_slice(&crc.to_be_bytes());
             }
         }
-        let len = h.frame_len() - h.prefix_len();
+        let len = flen - h.prefix_len();
         frames.push((h, si, r_buf.len(), len));
-        r_buf.extend_from_slice(&d[p + h.prefix_len()..p + h.frame_len()]);
+        r_buf.extend_from_slice(&d[p + h.prefix_len()..p + flen]);
     }
     let r_len = r_buf.len();
     r_buf.resize(r_len + R_PAD, 0);
@@ -403,11 +409,22 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
         return Err(Error("stream count"));
     }
     let mut r: Vec<Rd> = c.streams.iter().map(|s| Rd { d: s, p: 0 }).collect();
-    let mut segs = Vec::new();
-    while r[S_SEGS].p < r[S_SEGS].d.len() {
-        segs.push(r[S_SEGS].varint()? as usize);
+    // Junk lengths and frame runs (count, free format length), alternating.
+    let mut junk = Vec::new();
+    let mut runs = Vec::new();
+    loop {
+        junk.push(r[S_SEGS].varint()? as usize);
+        if r[S_SEGS].p == r[S_SEGS].d.len() {
+            break;
+        }
+        let n = r[S_SEGS].varint()? as usize;
+        let free = r[S_SEGS].varint()? as usize;
+        if free > 1 << 16 {
+            return Err(Error("free format length"));
+        }
+        runs.push((n, free));
     }
-    let nframes: usize = segs.iter().skip(1).step_by(2).sum();
+    let nframes: usize = runs.iter().map(|r| r.0).sum();
 
     let pad = |v: &[u8]| {
         let mut p = v.to_vec();
@@ -423,18 +440,26 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
     let mut side = SideModel::new();
 
     let mut frames: Vec<(Header, SideInfo, usize, usize)> = Vec::with_capacity(nframes);
+    let mut flens = Vec::with_capacity(nframes);
     let mut r_len = 0usize;
     let mut prev_h = 0u32;
-    for _ in 0..nframes {
-        let x = r[S_HDR].bytes(4)?;
-        let h = Header(u32::from_be_bytes([x[0], x[1], x[2], x[3]]) ^ prev_h);
-        prev_h = h.0;
-        if !h.valid() {
-            return Err(Error("bad header"));
+    for &(n, free) in &runs {
+        for _ in 0..n {
+            let x = r[S_HDR].bytes(4)?;
+            let h = Header(u32::from_be_bytes([x[0], x[1], x[2], x[3]]) ^ prev_h);
+            prev_h = h.0;
+            if !h.valid_any() || h.free_format() != (free > 0) {
+                return Err(Error("bad header"));
+            }
+            let flen = h.frame_len_free(free);
+            if flen < h.prefix_len() {
+                return Err(Error("frame length"));
+            }
+            let len = flen - h.prefix_len();
+            frames.push((h, SideInfo::default(), r_len, len));
+            flens.push(flen);
+            r_len += len;
         }
-        let len = h.frame_len() - h.prefix_len();
-        frames.push((h, SideInfo::default(), r_len, len));
-        r_len += len;
     }
 
     let mut w = FastWriter::with_capacity(r_len + 8);
@@ -521,15 +546,13 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
     w.copy(&mut gaps, r_len * 8 - end);
     let r_out = w.finish();
 
-    let total = c.streams[S_JUNK].len() + frames.iter().map(|f| f.0.frame_len()).sum::<usize>();
+    let total = c.streams[S_JUNK].len() + flens.iter().sum::<usize>();
     let mut out = Vec::with_capacity(total);
     let (mut fi, mut jp) = (0usize, 0usize);
-    for (k, &n) in segs.iter().enumerate() {
-        if k % 2 == 0 {
-            out.extend_from_slice(c.streams[S_JUNK].get(jp..jp + n).ok_or(Error("junk"))?);
-            jp += n;
-            continue;
-        }
+    for (k, &j) in junk.iter().enumerate() {
+        out.extend_from_slice(c.streams[S_JUNK].get(jp..jp + j).ok_or(Error("junk"))?);
+        jp += j;
+        let Some(&(n, _)) = runs.get(k) else { break };
         for _ in 0..n {
             let (h, si, pay, len) = &frames[fi];
             let hb = h.0.to_be_bytes();
