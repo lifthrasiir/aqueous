@@ -402,7 +402,6 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
 
     let mut w = FastWriter::with_capacity(r_len + 8);
     let mut st = State::new();
-    let mut coefs = [0i32; 576];
     let mut end = 0usize;
     let mut scf = [0u8; 39];
     for (h, si, pay, len) in frames.iter_mut() {
@@ -462,8 +461,7 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
                 if g.table_select.iter().any(|&t| t == 4 || t == 14) {
                     return Err(Error("table"));
                 }
-                model::code_granule(dc, &mut st, h, si, gr, ch, &scf[..nscf], nq, &mut coefs);
-                huff::encode_coefs(h, &g, &coefs, nq, &mut w);
+                model::decode_granule(dc, &mut st, h, si, gr, ch, &scf[..nscf], nq, &mut w);
                 if tl > 4095 {
                     return Err(Error("tail"));
                 }

@@ -422,6 +422,114 @@ pub fn code_granule<C: Coder>(
     commit(st, &prep, gr, ch, &cur);
 }
 
+/// Decompressing only: decodes the values of a granule as [`code_granule`] would and writes
+/// their Huffman coding (part 3 without the tail) to `w` directly.
+#[inline(never)]
+pub fn decode_granule<C: Coder>(
+    c: &mut C,
+    st: &mut State,
+    h: Header,
+    si: &SideInfo,
+    gr: usize,
+    ch: usize,
+    scf: &[u8],
+    quads: usize,
+    w: &mut crate::bits::FastWriter,
+) {
+    use crate::huff_tables::{COUNT1A, COUNT1B, PAIR};
+    c.reserve(MAX_GRANULE_SYMS, MAX_GRANULE_RAW_BITS);
+    // At most 47 bits per pair, 10 per quadruple.
+    w.reserve(288 * 6 + 144 * 2 + 16);
+    let g = &si.gr[gr][ch];
+    let prep = prepare(st, h, si, gr, ch, scf);
+    let mut cur = [0u16; 576];
+    let reg = huff::regions(h, g);
+    let mut line = 0usize;
+    for t in 0..3 {
+        let ts = g.table_select[t] as usize;
+        let n = reg[t];
+        if ts == 0 {
+            line += 2 * n;
+            continue;
+        }
+        let dim = DIM[ts] as usize;
+        let xy = &XY[dim];
+        let codes = PAIR[ts].unwrap();
+        let lin = LINBITS[ts] as u32;
+        let base = PAIR_BASE + ts * PAIR_PER_TABLE;
+        for _ in 0..n {
+            let bv = prep.bucket[line / 2] as usize;
+            let ctx = base + (bv * NPOS + pos_class(line)) * NCUR + cur_class(&cur, line);
+            let sym = c.sym(ctx, 0);
+            let xy = xy[sym as usize & 255] as u32;
+            let (x, y) = (xy >> 4, xy & 15);
+            let e = codes[(xy & 0xff) as usize];
+            let nz = (x != 0) as u32 + (y != 0) as u32;
+            if lin > 0 && (x == 15 || y == 15) {
+                let lctx = LIN_BASE + (ts - 16) * 16 + (bv / NOC).min(15);
+                let mut ext = [0u32; 2];
+                for (j, &m) in [x, y].iter().enumerate() {
+                    if m == 15 {
+                        let s = c.sym(lctx, 0);
+                        let (bl, top) = (s >> 1, s & 1);
+                        ext[j] = match bl {
+                            0 => 0,
+                            1 => 1,
+                            _ => ((1u32 << (bl - 1)) | top << (bl - 2) | c.raw(bl - 2, 0)) & ((1 << lin) - 1),
+                        };
+                    }
+                }
+                let signs = c.raw(nz, 0);
+                // Code, then per value: escape (if 15) and sign (if nonzero).
+                let mut bits = (e >> 5) as u64;
+                let mut nb = e & 31;
+                let mut k = nz;
+                for (j, &m) in [x, y].iter().enumerate() {
+                    if m == 15 {
+                        bits = bits << lin | ext[j] as u64;
+                        nb += lin;
+                    }
+                    if m != 0 {
+                        k -= 1;
+                        bits = bits << 1 | (signs >> k & 1) as u64;
+                        nb += 1;
+                    }
+                }
+                w.put(bits, nb);
+                cur[line] = (x + ext[0]).min(u16::MAX as u32) as u16;
+                cur[line + 1] = (y + ext[1]).min(u16::MAX as u32) as u16;
+            } else {
+                // The signs follow the code directly, in the same order.
+                let signs = c.raw(nz, 0);
+                w.put(((e >> 5) as u64) << nz | signs as u64, (e & 31) + nz);
+                cur[line] = x as u16;
+                cur[line + 1] = y as u16;
+            }
+            line += 2;
+        }
+    }
+    let qbase = QUAD_BASE + if g.count1table { QUAD_PER_TABLE } else { 0 };
+    let tab = if g.count1table { &COUNT1B } else { &COUNT1A };
+    let p = &st.prev[ch];
+    for _ in 0..quads {
+        let pg = if prep.use_prev {
+            (p[line + 1] != 0) as usize + (p[line + 2] != 0) as usize + (p[line + 3] != 0) as usize + (p[line + 4] != 0) as usize
+        } else {
+            5
+        };
+        let sym = c.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), 0) & 15;
+        let ns = sym.count_ones();
+        let signs = c.raw(ns, 0);
+        let e = tab[sym as usize];
+        w.put(((e >> 5) as u64) << ns | signs as u64, (e & 31) + ns);
+        for j in 0..4 {
+            cur[line + j] = (sym >> (3 - j) & 1) as u16;
+        }
+        line += 4;
+    }
+    commit(st, &prep, gr, ch, &cur);
+}
+
 /// The bits of `v` at the set bits of the 4-bit mask `m`, packed (highest first).
 #[inline(always)]
 fn pext4(v: u32, m: u32) -> u32 {
