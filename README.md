@@ -291,7 +291,7 @@ assert_eq!(flate_recons::fast::reconstruct(&data, &meta)?, raw);
   plain) at limits 15-9. Run-length coders cover zlib, libdeflate and zopfli/ECT. An exact
   block costs one bit.
 - **Speed.** Tokens are cut into ~1 MiB segments that are coded independently. The parser
-  (see [below](#parser-fastinflate)) gathers the statistics everything else needs (symbol
+  (see [below](#parser-and-writer-fastinflate-fastwrite)) gathers the statistics everything else needs (symbol
   frequencies, fingerprint, segment cuts) as it decodes. Candidate matches are measured on 8 bytes without branching. Exact
   zlib trees use a bottom-up heap with packed keys. Package-merge is computed as Huffman's
   two-queue algorithm whenever the limit does not bite; tests check that it matches zopfli
@@ -307,7 +307,7 @@ fitted for the λ = 5 catalog. All round-trip.
 |---|---|---|---|
 | 0 | 607,711 B (1.343%) | 0.88 s (97 MB/s) | 0.78 s (109 MB/s) |
 | 2 | 618,864 B (1.368%) | 0.83 s (103 MB/s) | 0.74 s (115 MB/s) |
-| **5 (built in)** | **649,249 B (1.435%)** | **0.81 s (105 MB/s)** | **0.71 s (120 MB/s)** |
+| **5 (built in)** | **649,249 B (1.435%)** | **0.81 s (105 MB/s)** | **0.68 s (125 MB/s)** |
 | 10 | 679,812 B (1.502%) | 0.78 s (109 MB/s) | 0.68 s (125 MB/s) |
 | 20 | 783,402 B (1.731%) | 0.69 s (123 MB/s) | 0.59 s (144 MB/s) |
 | 30 | 855,261 B (1.890%) | 0.64 s (133 MB/s) | 0.55 s (155 MB/s) |
@@ -321,7 +321,7 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin flate-recons-fast
 
 - Split time at λ = 5 breaks down to parsing 0.14 s, rule choice 0.04 s, token coding
   0.53 s, headers 0.07 s and the rest 0.03 s. Only token coding depends on λ. Joining spends
-  0.08 s on headers and 0.09 s on writing.
+  0.08 s on headers and 0.05 s on writing (0.09 s before the branch-free writer).
 - Speed costs little ratio below λ = 10: dropping the penalty altogether (λ = 0) gains only
   0.09 points over λ = 5, and misses 100 MB/s. A higher λ first drops the 8-way tables
   (17 of the 32 rules at λ = 5, 4 at λ = 20, none at λ = 100), then ranked distances and
@@ -344,7 +344,7 @@ flate-recons-fast compress [-z LEVEL] [-c] [-o OUT] in.deflate    # -> in.deflat
 flate-recons-fast decompress [-o OUT] in.deflate.zst+frf          # -> in.deflate
 ```
 
-### Parser (`fast::inflate`)
+### Parser and writer (`fast::inflate`, `fast::write`)
 
 `fast::inflate::parse` gives what `deflate::parse` gives, with the tokens in one list and
 the per-block statistics gathered on the way. `parse_into` hands the data and tokens to a
@@ -370,21 +370,27 @@ let layout = flate_recons::fast::inflate::parse_into(&raw, usize::MAX, &mut Coun
   by byte for the whole match).
 - The collecting sink keeps its vectors as raw parts grown by value, so that their lengths
   stay in registers in the token loop.
+- The writer flushes its 64-bit buffer once per token without a branch: the 8 bytes go to
+  the end of the output (capacity is reserved per block) and the output grows by the whole
+  bytes among them.
+- `header::read_freqs` reads a header against frequencies the caller counted itself (as
+  png-recons does while decoding), sparing `header::read`'s pass over the tokens.
 
 One thread, best of 7 runs (`flate-recons-fast parse` on the held-out samples; `parse --png
 FILE...` on PNG files' IDAT streams, from [codec-corpus](https://github.com/imazen/codec-corpus)).
-Speeds are of the decompressed data; the input is the DEFLATE stream (held-out samples) or
-the PNG file.
+Speeds are of the decompressed data.
 
-| input | data | before | after |
-|---|---|---|---|
-| held-out samples (924 streams, 45.2 MB) | 85.1 MB | 630 MB/s | 625 MB/s |
-| kadid10k (81 photos, 25.9 MB, zlib -6) | 47.8 MB | 451 MB/s | 463 MB/s |
-| clic2025 final-test (30 photos, 121.2 MB, zlib -9) | 258.8 MB | 408 MB/s | 528 MB/s |
-| qoi-benchmark screenshot_web (14 files, 40.3 MB) | 455.1 MB | 1,600 MB/s | 2,457 MB/s |
-| gb82-sc (10 screenshots, 3.0 MB) | 92.7 MB | 1,785 MB/s | 3,184 MB/s |
+| input | data | parse before | parse after | write before | write after |
+|---|---|---|---|---|---|
+| held-out samples (924 streams, 45.2 MB) | 85.1 MB | 630 MB/s | 627 MB/s | 1,042 MB/s | 1,720 MB/s |
+| kadid10k (81 photos, 25.9 MB, zlib -6) | 47.8 MB | 451 MB/s | 461 MB/s | 719 MB/s | 1,278 MB/s |
+| clic2025 final-test (30 photos, 121.2 MB, zlib -9) | 258.8 MB | 408 MB/s | 524 MB/s | 825 MB/s | 1,385 MB/s |
+| qoi-benchmark screenshot_web (14 files, 40.3 MB) | 455.1 MB | 1,600 MB/s | 2,441 MB/s | 4,982 MB/s | 8,138 MB/s |
+| gb82-sc (10 screenshots, 3.0 MB) | 92.7 MB | 1,785 MB/s | 3,141 MB/s | 8,238 MB/s | 12,427 MB/s |
 
-Metadata sizes and the `eval` figures above are unchanged (parsing 0.14 s either way).
+Metadata sizes are unchanged. In `eval`, parsing takes 0.14 s either way and joining 0.68 s
+instead of 0.71 s (the built-in row of the λ table above; the other rows were measured with
+the old writer and would gain about as much).
 
 ## Next steps
 

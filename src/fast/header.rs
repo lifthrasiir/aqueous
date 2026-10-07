@@ -332,6 +332,13 @@ pub fn write(w: &mut BitWriter, lf: &[u32; 288], df: &[u32; 32], h: &DynHeader, 
 /// Reads a header written by [`write`] for a block of `tokens`.
 pub fn read(r: &mut BitReader, tokens: &[Token], recipe: &mut Recipe) -> Result<DynHeader> {
     let (lf, df) = freqs(tokens);
+    read_freqs(r, &lf, &df, recipe)
+}
+
+/// Reads a header written by [`write`] for a block whose symbol frequencies (see [`freqs`])
+/// the caller counted.
+pub fn read_freqs(r: &mut BitReader, lf: &[u32; 288], df: &[u32; 32], recipe: &mut Recipe) -> Result<DynHeader> {
+    let (lf, df) = (*lf, *df);
     if r.bits(1)? == 1 {
         return build(*recipe, &lf, &df).ok_or(Error::Corrupt);
     }

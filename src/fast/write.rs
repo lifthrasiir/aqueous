@@ -167,7 +167,25 @@ pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -
 }
 
 /// Writes a block's tokens and its end; returns the bytes they cover.
+///
+/// The bit buffer is flushed once per token, branch-free: its 8 bytes are stored at the end
+/// of the output (in capacity reserved for the whole block) and the output grows by the
+/// whole bytes among them. A token takes at most 15 + 5 + 15 + 13 = 48 bits, so with
+/// fewer than 8 pending the buffer never overflows.
 fn write_tokens(w: &mut Bits, toks: &[Token], lt: &[(u32, u32)], dt: &[(u32, u32)]) -> Result<usize> {
+    // Up to 6 bytes per token and the end of block, and the 8 of the last store.
+    w.out.reserve(toks.len() * 6 + 16);
+    let base = w.out.as_mut_ptr();
+    let mut len = w.out.len();
+    let (mut acc, mut n) = (w.acc, w.n);
+    // Whole bytes out first, so that fewer than 8 bits are pending.
+    while n >= 8 {
+        // SAFETY: within the capacity reserved above.
+        unsafe { *base.add(len) = acc as u8 };
+        len += 1;
+        acc >>= 8;
+        n -= 8;
+    }
     let mut span = 0;
     let mut ok = true;
     for &t in toks {
@@ -175,24 +193,39 @@ fn write_tokens(w: &mut Bits, toks: &[Token], lt: &[(u32, u32)], dt: &[(u32, u32
             Token::Lit(b) => {
                 let (c, l) = lt[b as usize];
                 ok &= l > 0;
-                w.put(l, c);
+                acc |= (c as u64) << n;
+                n += l;
                 span += 1;
             }
-            Token::Match { len, dist, alt258 } => {
-                let lc = if alt258 { 27 } else { LEN_CODE[len as usize] as usize };
+            Token::Match { len: ml, dist, alt258 } => {
+                let lc = if alt258 { 27 } else { LEN_CODE[ml as usize] as usize };
                 let (c, l) = lt[257 + lc];
                 ok &= l > 0;
-                w.put(l, c);
-                w.put(LEN_EXTRA[lc] as u32, (len - LEN_BASE[lc]) as u32);
+                acc |= (c as u64) << n;
+                n += l;
+                acc |= ((ml - LEN_BASE[lc]) as u64) << n;
+                n += LEN_EXTRA[lc] as u32;
                 let dc = dist_code(dist as usize);
                 let (c, l) = dt[dc];
                 ok &= l > 0;
-                w.put(l, c);
-                w.put(DIST_EXTRA[dc] as u32, (dist - DIST_BASE[dc]) as u32);
-                span += len as usize;
+                acc |= (c as u64) << n;
+                n += l;
+                acc |= ((dist - DIST_BASE[dc]) as u64) << n;
+                n += DIST_EXTRA[dc] as u32;
+                span += ml as usize;
             }
         }
+        // SAFETY: `len` grows by at most 6 per token, and the capacity covers 6 per token
+        // and 8 more.
+        unsafe { (base.add(len) as *mut u64).write_unaligned(acc.to_le()) };
+        let k = n >> 3;
+        len += k as usize;
+        acc >>= k * 8;
+        n &= 7;
     }
+    // SAFETY: the bytes up to `len` are written.
+    unsafe { w.out.set_len(len) };
+    (w.acc, w.n) = (acc, n);
     let (c, l) = lt[256];
     if !ok || l == 0 {
         return Err(Error::Invalid("symbol without a code"));

@@ -34,8 +34,9 @@ usage:
       compared on the first PREFIX bytes of each stream; CPU times of splitting and joining
       on one thread.
   flate-recons-fast parse [-i DIR] [-s held|train|all] | parse --png FILE...
-      Parsing speed on one thread (fast::inflate::parse_segments, best of 7 runs): of the
-      cached samples (default the held-out split), or of PNG files' IDAT streams.
+      Parsing and writing speed on one thread (fast::inflate::parse_segments and
+      fast::write::write, best of 7 runs): of the cached samples (default the held-out
+      split), or of PNG files' IDAT streams.
 ";
 
 type Res<T> = Result<T, Box<dyn std::error::Error>>;
@@ -147,13 +148,36 @@ fn parse(args: &[String]) -> Res<()> {
         }
         best = best.min(t.elapsed().as_secs_f64());
     }
+    // Writing back what was parsed (and checking it).
+    let flats = streams
+        .iter()
+        .map(|s| fast::inflate::parse_segments(s, 1 << 20))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut best_w = f64::MAX;
+    for _ in 0..7 {
+        let t = Instant::now();
+        for (f, s) in flats.iter().zip(&streams) {
+            let w = fast::write::write(&f.stream, &f.starts, &f.tokens, &f.data)?;
+            if w.len() != s.len() {
+                return Err("written stream differs".into());
+            }
+        }
+        best_w = best_w.min(t.elapsed().as_secs_f64());
+    }
+    for (f, s) in flats.iter().zip(&streams) {
+        if fast::write::write(&f.stream, &f.starts, &f.tokens, &f.data)? != *s {
+            return Err("written stream differs".into());
+        }
+    }
     println!(
-        "{} streams, {:.0} input bytes, {data} bytes of data: {:.4} s, {:.0} MB/s of input, {:.0} MB/s of data",
+        "{} streams, {:.0} input bytes, {data} bytes of data: parse {:.4} s ({:.0} MB/s of input, {:.0} MB/s of data), write {:.4} s ({:.0} MB/s of data)",
         streams.len(),
         inputs,
         best,
         inputs / best / 1e6,
-        data as f64 / best / 1e6
+        data as f64 / best / 1e6,
+        best_w,
+        data as f64 / best_w / 1e6
     );
     Ok(())
 }
