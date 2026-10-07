@@ -228,6 +228,18 @@ impl FastWriter {
         self.pos * 8 + self.n as usize
     }
 
+    /// The hot state; [`FastWriter::reserve`] must have made room for what is written
+    /// through it before [`FastWriter::put_back`].
+    #[inline(always)]
+    pub fn local(&mut self) -> FastBits {
+        FastBits { buf: self.buf.as_mut_ptr(), end: self.buf.len(), pos: self.pos, acc: self.acc, n: self.n }
+    }
+
+    #[inline(always)]
+    pub fn put_back(&mut self, l: FastBits) {
+        (self.pos, self.acc, self.n) = (l.pos, l.acc, l.n);
+    }
+
     /// A position to return to with [`FastWriter::rollback`].
     pub fn mark(&self) -> (usize, u64, u32) {
         (self.pos, self.acc, self.n)
@@ -252,5 +264,32 @@ impl FastWriter {
         let len = self.pos + (self.n > 0) as usize;
         self.buf.truncate(len);
         self.buf
+    }
+}
+
+/// [`FastWriter`] state by value, so that it stays in registers.
+#[derive(Clone, Copy)]
+pub struct FastBits {
+    buf: *mut u8,
+    end: usize,
+    pos: usize,
+    acc: u64,
+    n: u32,
+}
+
+impl FastBits {
+    /// Writes the low `n` bits of `v` (n <= 56).
+    #[inline(always)]
+    pub fn put(&mut self, v: u64, n: u32) {
+        debug_assert!(n <= 56 && (n == 0 || v >> n == 0));
+        assert!(self.pos + 8 <= self.end);
+        let total = self.n + n;
+        self.acc |= (v << (63 - total)) << 1;
+        // SAFETY: pos + 8 <= end, the buffer's length.
+        unsafe { (self.buf.add(self.pos) as *mut u64).write_unaligned(self.acc.to_be()) };
+        let adv = total >> 3;
+        self.pos += adv as usize;
+        self.acc <<= adv * 8;
+        self.n = total & 7;
     }
 }

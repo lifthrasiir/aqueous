@@ -1,6 +1,9 @@
 //! Multi-symbol rANS with static per-context frequency tables: 64-bit state, 32-bit
 //! renormalisation, four interleaved states (symbol j uses state j % 4).
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+
 pub const PROB_BITS: u32 = 12;
 pub const PROB_SCALE: u32 = 1 << PROB_BITS;
 const RANS_L: u64 = 1 << 31;
@@ -8,25 +11,208 @@ const RANS_L: u64 = 1 << 31;
 const LANES: usize = 8;
 const _: () = assert!(PROB_BITS == 12, "alias entries hold 12-bit frequencies and ranks");
 
-/// Frequency tables of all contexts, as alias tables (one bucket per symbol of the
-/// alphabet rounded up to a power of two, at least 4): bucket `i` covers `B` slots, the
-/// first `cutoff` of them belong to symbol `i`, the rest to its alias. Within a symbol,
-/// ranks count its own bucket's slots first, then its alias slots in bucket order.
+/// Frequency tables of all contexts. The decoder uses alias tables (one bucket per symbol
+/// of the alphabet rounded up to a power of two, at least 4): bucket `i` covers `B` slots,
+/// the first `cutoff` of them belong to symbol `i`, the rest to its alias. Within a symbol,
+/// ranks count its own bucket's slots first, then its alias slots in bucket order. The
+/// encoder maps ranks back to slots with `inv`, built per context on first use.
 pub struct Tables {
-    /// Context `c` has alphabet `n[c]`, its symbols at `off[c]..off[c] + n[c]` of `enc`.
+    /// Context `c` has alphabet `n[c]`, its symbols at `off[c]..off[c] + n[c]`.
     pub off: Vec<u32>,
     pub n: Vec<u16>,
-    /// Per context: first bucket in `alias` << 4 | log2 of the bucket size.
-    meta: Vec<u32>,
-    /// `cutoff | (f_own - 1) << 11 | alias << 23 | (f_alias - 1) << 31 | (rank_start - cutoff) << 43`
-    /// (12-bit fields wrap).
-    alias: Vec<u64>,
+    freqs: Vec<u16>,
+    /// The first context with the same frequencies; contexts share tables with it.
+    canon: Vec<u32>,
+    dec: OnceLock<DecTables>,
     /// Encoder, by symbol: `freq | rcp_shift << 13 | slot_base << 17`, the symbol's slots
     /// by rank at `inv[slot_base..slot_base + freq]`.
     enc: Vec<u64>,
     /// Reciprocals (see [`reciprocal`]) by frequency.
     rcp: Vec<u64>,
-    inv: Vec<u16>,
+    /// `PROB_SCALE` entries per canonical context, filled by `ensure_inv` under `inv_lock`
+    /// before `inv_ready` is set; never reallocated.
+    inv: std::cell::UnsafeCell<Vec<u16>>,
+    inv_ready: Vec<AtomicBool>,
+    inv_lock: Mutex<()>,
+}
+
+// SAFETY: `inv` is only written under `inv_lock` for contexts whose `inv_ready` flag is not
+// yet set, and only read for contexts whose flag is set (with acquire/release ordering).
+unsafe impl Sync for Tables {}
+
+struct DecTables {
+    /// Per context: first bucket in `alias` << 4 | log2 of the bucket size.
+    meta: Vec<u32>,
+    /// `cutoff | (f_own - 1) << 11 | alias << 23 | (f_alias - 1) << 31 | (rank_start - cutoff) << 43`
+    /// (12-bit fields wrap).
+    alias: Vec<u64>,
+}
+
+/// Alias table of one context: per bucket, the cutoff, the alias, and where the alias's
+/// ranks in this bucket start.
+struct Alias {
+    a: usize,
+    bs: usize,
+    cutoff: [u16; 256],
+    alias: [u8; 256],
+    rank_start: [u16; 256],
+}
+
+fn build_alias(f: &[u16]) -> Alias {
+    let a = f.len().next_power_of_two().max(4);
+    let bs = PROB_SCALE as usize / a;
+    let mut rem = [0u32; 256];
+    for (r, &x) in rem.iter_mut().zip(f) {
+        *r = x as u32;
+    }
+    let mut al = Alias { a, bs, cutoff: [bs as u16; 256], alias: [0; 256], rank_start: [0; 256] };
+    // Vose's construction.
+    let (mut small, mut large) = ([0u16; 256], [0u16; 256]);
+    let (mut ns, mut nl) = (0, 0);
+    for i in 0..a {
+        if (rem[i] as usize) < bs {
+            small[ns] = i as u16;
+            ns += 1;
+        } else if (rem[i] as usize) > bs {
+            large[nl] = i as u16;
+            nl += 1;
+        }
+    }
+    while ns > 0 && nl > 0 {
+        ns -= 1;
+        let s = small[ns] as usize;
+        let l = large[nl - 1] as usize;
+        al.cutoff[s] = rem[s] as u16;
+        al.alias[s] = l as u8;
+        rem[l] -= (bs as u32) - rem[s];
+        if (rem[l] as usize) < bs {
+            nl -= 1;
+            small[ns] = l as u16;
+            ns += 1;
+        } else if rem[l] as usize == bs {
+            nl -= 1;
+        }
+    }
+    // Ranks: own slots first, then alias slots in bucket order.
+    let mut next = [0u16; 256];
+    for i in 0..a {
+        next[i] = al.cutoff[i];
+    }
+    for i in 0..a {
+        if (al.cutoff[i] as usize) < bs {
+            let l = al.alias[i] as usize;
+            al.rank_start[i] = next[l];
+            next[l] += (bs - al.cutoff[i] as usize) as u16;
+        }
+    }
+    al
+}
+
+impl Tables {
+    /// `freqs[c]` must sum to `PROB_SCALE` for each context, with every symbol at least 1.
+    pub fn new(freqs: &[Vec<u16>]) -> Tables {
+        let total: usize = freqs.iter().map(|f| f.len()).sum();
+        let mut off = Vec::with_capacity(freqs.len());
+        let mut n = Vec::with_capacity(freqs.len());
+        let mut flat = Vec::with_capacity(total);
+        let mut canon = Vec::with_capacity(freqs.len());
+        let mut seen: std::collections::HashMap<&[u16], u32> = Default::default();
+        let mut enc = vec![0u64; total];
+        for (c, f) in freqs.iter().enumerate() {
+            assert!(!f.is_empty() && f.len() <= 256);
+            assert_eq!(f.iter().map(|&x| x as u32).sum::<u32>(), PROB_SCALE);
+            let o = flat.len();
+            off.push(o as u32);
+            n.push(f.len() as u16);
+            flat.extend_from_slice(f);
+            let k = *seen.entry(&f[..]).or_insert(c as u32);
+            canon.push(k);
+            let mut cum = 0u64;
+            for (i, &fr) in f.iter().enumerate() {
+                assert!(fr >= 1);
+                let (_, sh) = reciprocal(fr as u64);
+                enc[o + i] = fr as u64 | (sh as u64) << 13 | (k as u64 * PROB_SCALE as u64 + cum) << 17;
+                cum += fr as u64;
+            }
+        }
+        let rcp: Vec<u64> = (0..=PROB_SCALE as u64).map(|f| reciprocal(f).0).collect();
+        // Zeroed allocation: pages are only touched for the contexts used.
+        let inv = std::cell::UnsafeCell::new(vec![0u16; freqs.len() * PROB_SCALE as usize]);
+        let inv_ready = (0..freqs.len()).map(|_| AtomicBool::new(false)).collect();
+        Tables { off, n, freqs: flat, canon, dec: OnceLock::new(), enc, rcp, inv, inv_ready, inv_lock: Mutex::new(()) }
+    }
+
+    fn freqs(&self, c: usize) -> &[u16] {
+        let o = self.off[c] as usize;
+        &self.freqs[o..o + self.n[c] as usize]
+    }
+
+    fn dec(&self) -> &DecTables {
+        self.dec.get_or_init(|| {
+            let mut meta = vec![0u32; self.n.len()];
+            let mut alias = Vec::new();
+            for c in 0..self.n.len() {
+                let k = self.canon[c] as usize;
+                if k != c {
+                    meta[c] = meta[k];
+                    continue;
+                }
+                let f = self.freqs(c);
+                let al = build_alias(f);
+                meta[c] = (alias.len() as u32) << 4 | al.bs.trailing_zeros();
+                let fr = |i: usize| f.get(i).map_or(0, |&x| x as u64);
+                for i in 0..al.a {
+                    let cu = al.cutoff[i] as u64;
+                    let has = (cu as usize) < al.bs;
+                    let l = al.alias[i] as usize;
+                    let f_own = fr(i).wrapping_sub(1) & 0xfff;
+                    let f_al = if has { (fr(l) - 1) & 0xfff } else { 0 };
+                    let roff = if has { (al.rank_start[i] as u64).wrapping_sub(cu) & 0xfff } else { 0 };
+                    alias.push(cu | f_own << 11 | (if has { l as u64 } else { 0 }) << 23 | f_al << 31 | roff << 43);
+                }
+            }
+            DecTables { meta, alias }
+        })
+    }
+
+    /// Makes `inv` available for context `c`.
+    fn ensure_inv(&self, c: usize) {
+        let k = self.canon[c] as usize;
+        if self.inv_ready[k].load(Ordering::Acquire) {
+            return;
+        }
+        let _g = self.inv_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if self.inv_ready[k].load(Ordering::Relaxed) {
+            return;
+        }
+        let f = self.freqs(k);
+        let al = build_alias(f);
+        let mut base = [0usize; 256];
+        let mut cum = 0;
+        for i in 0..f.len() {
+            base[i] = k * PROB_SCALE as usize + cum;
+            cum += f[i] as usize;
+        }
+        // SAFETY: entries of context k are written only here, under the lock, before the
+        // flag is released.
+        let p = unsafe { (*self.inv.get()).as_mut_ptr() };
+        let put = |i: usize, v: usize| unsafe { *p.add(i) = v as u16 };
+        for i in 0..al.a {
+            let cu = al.cutoff[i] as usize;
+            if i < f.len() {
+                for j in 0..cu {
+                    put(base[i] + j, i * al.bs + j);
+                }
+            }
+            if cu < al.bs {
+                let l = al.alias[i] as usize;
+                for j in 0..al.bs - cu {
+                    put(base[l] + al.rank_start[i] as usize + j, i * al.bs + cu + j);
+                }
+            }
+        }
+        self.inv_ready[k].store(true, Ordering::Release);
+    }
 }
 
 /// Scales `counts` to frequencies summing to `PROB_SCALE`, each at least 1.
@@ -57,86 +243,6 @@ pub fn normalize(counts: &[u64], out: &mut [u16]) {
     }
 }
 
-impl Tables {
-    /// `freqs[c]` must sum to `PROB_SCALE` for each context, with every symbol at least 1.
-    pub fn new(freqs: &[Vec<u16>]) -> Tables {
-        let total: usize = freqs.iter().map(|f| f.len()).sum();
-        let mut off = Vec::with_capacity(freqs.len());
-        let mut n = Vec::with_capacity(freqs.len());
-        let mut meta = Vec::with_capacity(freqs.len());
-        let mut alias = Vec::new();
-        let mut enc = vec![0u64; total];
-        let rcp: Vec<u64> = (0..=PROB_SCALE as u64).map(|f| reciprocal(f).0).collect();
-        let mut inv = vec![0u16; freqs.len() * PROB_SCALE as usize];
-        let mut o = 0usize;
-        for (c, f) in freqs.iter().enumerate() {
-            assert!(f.len() <= 256);
-            off.push(o as u32);
-            n.push(f.len() as u16);
-            let a = f.len().next_power_of_two().max(4);
-            let bs = PROB_SCALE as usize / a;
-            meta.push((alias.len() as u32) << 4 | bs.trailing_zeros());
-            // Vose's construction.
-            let mut rem: Vec<usize> = (0..a).map(|i| f.get(i).map_or(0, |&x| x as usize)).collect();
-            assert_eq!(rem.iter().sum::<usize>(), PROB_SCALE as usize);
-            let mut cutoff = vec![bs; a];
-            let mut al = vec![0usize; a];
-            let mut small: Vec<usize> = (0..a).filter(|&i| rem[i] < bs).collect();
-            let mut large: Vec<usize> = (0..a).filter(|&i| rem[i] > bs).collect();
-            while let (Some(&s), Some(&l)) = (small.last(), large.last()) {
-                small.pop();
-                cutoff[s] = rem[s];
-                al[s] = l;
-                rem[l] -= bs - rem[s];
-                if rem[l] < bs {
-                    large.pop();
-                    small.push(l);
-                } else if rem[l] == bs {
-                    large.pop();
-                }
-            }
-            // Ranks: own slots first, then alias slots in bucket order.
-            let mut next_rank: Vec<usize> = (0..a).map(|i| cutoff[i]).collect();
-            let fr = |i: usize| f.get(i).map_or(0, |&x| x as usize);
-            let mut cum = 0usize;
-            let mut base = vec![0usize; a];
-            for i in 0..a {
-                base[i] = cum;
-                cum += fr(i);
-            }
-            let ib = c * PROB_SCALE as usize;
-            for i in 0..a {
-                for j in 0..cutoff[i] {
-                    inv[ib + base[i] + j] = (i * bs + j) as u16;
-                }
-            }
-            for i in 0..a {
-                let (cu, l) = (cutoff[i], al[i]);
-                let rank_start = if cu < bs { next_rank[l] } else { 0 };
-                if cu < bs {
-                    for j in 0..bs - cu {
-                        inv[ib + base[l] + rank_start + j] = (i * bs + cu + j) as u16;
-                    }
-                    next_rank[l] += bs - cu;
-                }
-                let f_own = (fr(i) as u64).wrapping_sub(1) & 0xfff;
-                let f_al = if cu < bs { (fr(l) as u64 - 1) & 0xfff } else { 0 };
-                let roff = (rank_start as u64).wrapping_sub(cu as u64) & 0xfff;
-                alias.push(cu as u64 | f_own << 11 | (if cu < bs { l as u64 } else { 0 }) << 23 | f_al << 31 | roff << 43);
-            }
-            for i in 0..a {
-                if i < f.len() {
-                    debug_assert_eq!(next_rank[i], fr(i));
-                    let (_, sh) = reciprocal(fr(i) as u64);
-                    enc[o + i] = fr(i) as u64 | (sh as u64) << 13 | ((ib + base[i]) as u64) << 17;
-                }
-            }
-            o += f.len();
-        }
-        Tables { off, n, meta, alias, enc, rcp, inv }
-    }
-}
-
 /// Reciprocal of `freq` for division of rANS states (x < 2^63) by multiplication, as in
 /// ryg_rans' rans64: `x / freq == mulhi(x, rcp) >> shift`. For `freq == 1` the result is 0
 /// and the caller divides by 1 itself.
@@ -164,11 +270,13 @@ fn div_rcp(x: u64, freq: u64, rcp: u64, shift: u32) -> u64 {
 #[derive(Default)]
 pub struct Encoder {
     syms: Vec<u32>,
+    /// Contexts used, one bit each.
+    used: Vec<u64>,
 }
 
 impl Encoder {
     pub fn with_capacity(n: usize) -> Self {
-        Encoder { syms: Vec::with_capacity(n) }
+        Encoder { syms: Vec::with_capacity(n), used: Vec::new() }
     }
 
     /// Makes room for `n` more symbols.
@@ -177,18 +285,37 @@ impl Encoder {
         self.syms.reserve(n);
     }
 
-    /// Adds a symbol; [`Encoder::reserve`] must have made room for it.
+    /// The hot state; [`Encoder::reserve`] must have made room for the symbols added
+    /// through it before [`Encoder::put_back`].
     #[inline(always)]
-    pub fn put(&mut self, t: &Tables, ctx: usize, sym: u32) {
-        debug_assert!(ctx < t.n.len());
-        debug_assert!(sym < t.n[ctx] as u32);
-        assert!(self.syms.len() < self.syms.capacity());
-        // SAFETY: ctx < number of contexts (checked in debug builds); room was reserved.
-        unsafe {
-            let n = self.syms.len();
-            *self.syms.as_mut_ptr().add(n) = *t.off.get_unchecked(ctx) + sym;
-            self.syms.set_len(n + 1);
+    pub fn local(&mut self, t: &Tables) -> EncLocal {
+        if self.used.is_empty() {
+            self.used = vec![0; t.n.len().div_ceil(64)];
         }
+        EncLocal {
+            used: self.used.as_mut_ptr(),
+            syms: self.syms.as_mut_ptr(),
+            len: self.syms.len(),
+            room: self.syms.capacity() - self.syms.len(),
+            off: t.off.as_ptr(),
+            #[cfg(debug_assertions)]
+            n_ctx: t.n.len(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn put_back(&mut self, l: EncLocal) {
+        assert!(l.len <= self.syms.capacity());
+        // SAFETY: the symbols up to l.len were written through `l`.
+        unsafe { self.syms.set_len(l.len) };
+    }
+
+    /// Adds a symbol.
+    pub fn put(&mut self, t: &Tables, ctx: usize, sym: u32) {
+        self.reserve(1);
+        let mut l = self.local(t);
+        l.put(ctx, sym);
+        self.put_back(l);
     }
 
     pub fn len(&self) -> usize {
@@ -202,6 +329,13 @@ impl Encoder {
     /// Encodes all symbols; the words come out in decoding order.
     #[inline(never)]
     pub fn finish(&self, t: &Tables) -> Vec<u32> {
+        for (w, &bits) in self.used.iter().enumerate() {
+            let mut b = bits;
+            while b != 0 {
+                t.ensure_inv(w * 64 + b.trailing_zeros() as usize);
+                b &= b - 1;
+            }
+        }
         let n = self.syms.len();
         let cap = n + 2 * LANES;
         let mut out = vec![0u32; cap];
@@ -209,7 +343,8 @@ impl Encoder {
         let mut x = [RANS_L; LANES];
         let o = out.as_mut_ptr();
         let enc = t.enc.as_ptr();
-        let inv = t.inv.as_ptr();
+        // SAFETY: the contexts used are ready (above) and no longer written.
+        let inv = unsafe { (*t.inv.get()).as_ptr() };
         let rcp = t.rcp.as_ptr();
         // SAFETY: symbol indices come from `put` (below the table size), slots of a symbol
         // lie within `inv`, and each symbol writes at most one word, so `w` stays >= 2 * LANES.
@@ -254,6 +389,34 @@ impl Encoder {
     }
 }
 
+/// Encoder state by value, so that it stays in registers.
+#[derive(Clone, Copy)]
+pub struct EncLocal {
+    used: *mut u64,
+    syms: *mut u32,
+    len: usize,
+    room: usize,
+    off: *const u32,
+    #[cfg(debug_assertions)]
+    n_ctx: usize,
+}
+
+impl EncLocal {
+    #[inline(always)]
+    pub fn put(&mut self, ctx: usize, sym: u32) {
+        #[cfg(debug_assertions)]
+        assert!(ctx < self.n_ctx);
+        assert!(self.room > 0);
+        // SAFETY: room was reserved; ctx < number of contexts, and `used` has a bit for each.
+        unsafe {
+            *self.syms.add(self.len) = *self.off.add(ctx) + sym;
+            *self.used.add(ctx >> 6) |= 1 << (ctx & 63);
+        }
+        self.len += 1;
+        self.room -= 1;
+    }
+}
+
 /// Words of zero padding the decoder may read past the end.
 pub const SRC_PAD: usize = 64;
 
@@ -285,31 +448,80 @@ impl<'a> Decoder<'a> {
         self.pos <= self.real_len
     }
 
+    /// The hot state, to be used in a loop and returned with [`Decoder::put_back`].
+    #[inline(always)]
+    pub fn local(&self) -> DecLocal {
+        DecLocal {
+            x: self.x,
+            src: self.src.as_ptr(),
+            pos: self.pos,
+            src_max: self.src_max,
+            meta: self.t.dec().meta.as_ptr(),
+            alias: self.t.dec().alias.as_ptr(),
+            #[cfg(debug_assertions)]
+            n_ctx: self.t.n.len(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn put_back(&mut self, l: DecLocal) {
+        self.x = l.x;
+        self.pos = l.pos;
+    }
+
+    /// Decodes a symbol in context `ctx` (below the number of contexts).
+    #[inline(always)]
+    pub fn get(&mut self, ctx: usize) -> u32 {
+        let mut l = self.local();
+        let s = l.get(ctx);
+        self.put_back(l);
+        s
+    }
+}
+
+/// Decoder state by value, so that it stays in registers. Valid while its decoder lives
+/// and is not used otherwise.
+#[derive(Clone, Copy)]
+pub struct DecLocal {
+    x: [u64; LANES],
+    src: *const u32,
+    pos: usize,
+    src_max: usize,
+    meta: *const u32,
+    alias: *const u64,
+    #[cfg(debug_assertions)]
+    n_ctx: usize,
+}
+
+impl DecLocal {
     /// Decodes a symbol in context `ctx`, which must be below the number of contexts.
     #[inline(always)]
     pub fn get(&mut self, ctx: usize) -> u32 {
         let x = self.x[0];
         let slot = (x & (PROB_SCALE as u64 - 1)) as u32;
-        debug_assert!(ctx < self.t.n.len());
-        // SAFETY: ctx < number of contexts; slot >> sh is below the context's bucket count.
-        let m = unsafe { *self.t.meta.get_unchecked(ctx) };
-        let sh = m & 15;
-        let i = slot >> sh;
-        let pos = slot & ((1 << sh) - 1);
-        let e = unsafe { *self.t.alias.get_unchecked((m >> 4) as usize + i as usize) };
-        let own = pos < (e & 0x7ff) as u32;
-        let sym = std::hint::select_unpredictable(own, i, (e >> 23) as u32 & 0xff);
-        let f = std::hint::select_unpredictable(own, e >> 11, e >> 31) & 0xfff;
-        let j = std::hint::select_unpredictable(own, pos as u64, (pos as u64 + (e >> 43)) & 0xfff);
-        let x = (f + 1) * (x >> PROB_BITS) + j;
-        // SAFETY: the position is clamped to the buffer.
-        let next = unsafe { *self.src.get_unchecked(self.pos.min(self.src_max)) } as u64;
-        let low = x < RANS_L;
-        let x = std::hint::select_unpredictable(low, (x << 32) | next, x);
-        self.pos += low as usize;
-        self.x.rotate_left(1);
-        self.x[LANES - 1] = x;
-        sym
+        #[cfg(debug_assertions)]
+        assert!(ctx < self.n_ctx);
+        // SAFETY: ctx < number of contexts; slot >> sh is below the context's bucket count;
+        // the source position is clamped to the buffer.
+        unsafe {
+            let m = *self.meta.add(ctx);
+            let sh = m & 15;
+            let i = slot >> sh;
+            let pos = slot & ((1 << sh) - 1);
+            let e = *self.alias.add((m >> 4) as usize + i as usize);
+            let own = pos < (e & 0x7ff) as u32;
+            let sym = std::hint::select_unpredictable(own, i, (e >> 23) as u32 & 0xff);
+            let f = std::hint::select_unpredictable(own, e >> 11, e >> 31) & 0xfff;
+            let j = std::hint::select_unpredictable(own, pos as u64, (pos as u64 + (e >> 43)) & 0xfff);
+            let x = (f + 1) * (x >> PROB_BITS) + j;
+            let next = *self.src.add(self.pos.min(self.src_max)) as u64;
+            let low = x < RANS_L;
+            let x = std::hint::select_unpredictable(low, (x << 32) | next, x);
+            self.pos += low as usize;
+            self.x.rotate_left(1);
+            self.x[LANES - 1] = x;
+            sym
+        }
     }
 }
 

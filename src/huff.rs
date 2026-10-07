@@ -374,6 +374,7 @@ pub fn encode_coefs(h: Header, g: &Granule, coefs: &[i32; 576], quads: usize, w:
 
 /// MSB-first bit buffer over a padded byte slice, kept in registers: at least 56 bits are
 /// valid after [`BitBuf::refill`].
+#[derive(Clone, Copy)]
 pub(crate) struct BitBuf<'a> {
     data: &'a [u8],
     /// Next byte to load.

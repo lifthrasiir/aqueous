@@ -7,7 +7,7 @@
 use crate::bits::{BitReader, BitWriter, FastWriter};
 use crate::frame::{Header, SideInfo, crc16, scf_layout};
 use crate::huff;
-use crate::model::{self, Coder, State};
+use crate::model::{self, Coder, State, Sym};
 use crate::rans::{self, Tables};
 use crate::rc;
 use crate::side::SideModel;
@@ -61,7 +61,8 @@ fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
     if BUILTIN.is_empty() {
         return None;
     }
-    let raw = zstd::stream::decode_all(BUILTIN).ok()?;
+    let size = zstd::bulk::Decompressor::upper_bound(BUILTIN).unwrap_or(1 << 24);
+    let raw = zstd::bulk::decompress(BUILTIN, size).ok()?;
     if raw.len() < 4 || u32::from_le_bytes(raw[0..4].try_into().unwrap()) != layout_id() {
         return None;
     }
@@ -83,16 +84,15 @@ struct Enc<'a> {
 }
 
 impl Coder for Enc<'_> {
+    type L = EncLocal;
     #[inline(always)]
-    fn sym(&mut self, ctx: usize, s: u32) -> u32 {
-        self.rans.put(self.t, ctx, s);
-        s
+    fn local(&mut self) -> EncLocal {
+        EncLocal { rans: self.rans.local(self.t), raw: self.raw.local() }
     }
     #[inline(always)]
-    fn raw(&mut self, n: u32, v: u32) -> u32 {
-        let v = if n == 0 { 0 } else { v & (u32::MAX >> (32 - n)) };
-        self.raw.put(v as u64, n);
-        v
+    fn put_back(&mut self, l: EncLocal) {
+        self.rans.put_back(l.rans);
+        self.raw.put_back(l.raw);
     }
     #[inline(always)]
     fn reserve(&mut self, syms: usize, raw_bits: usize) {
@@ -110,12 +110,49 @@ impl Coder for Enc<'_> {
     }
 }
 
+struct EncLocal {
+    rans: rans::EncLocal,
+    raw: crate::bits::FastBits,
+}
+
+impl Sym for EncLocal {
+    #[inline(always)]
+    fn sym(&mut self, ctx: usize, s: u32) -> u32 {
+        self.rans.put(ctx, s);
+        s
+    }
+    #[inline(always)]
+    fn raw(&mut self, n: u32, v: u32) -> u32 {
+        let v = if n == 0 { 0 } else { v & (u32::MAX >> (32 - n)) };
+        self.raw.put(v as u64, n);
+        v
+    }
+}
+
 struct Dec<'a, 'b> {
     rans: rans::Decoder<'a>,
     raw: huff::BitBuf<'b>,
 }
 
-impl Coder for Dec<'_, '_> {
+impl<'b> Coder for Dec<'_, 'b> {
+    type L = DecLocal<'b>;
+    #[inline(always)]
+    fn local(&mut self) -> DecLocal<'b> {
+        DecLocal { rans: self.rans.local(), raw: self.raw }
+    }
+    #[inline(always)]
+    fn put_back(&mut self, l: DecLocal<'b>) {
+        self.rans.put_back(l.rans);
+        self.raw = l.raw;
+    }
+}
+
+struct DecLocal<'b> {
+    rans: rans::DecLocal,
+    raw: huff::BitBuf<'b>,
+}
+
+impl Sym for DecLocal<'_> {
     #[inline(always)]
     fn sym(&mut self, ctx: usize, _s: u32) -> u32 {
         self.rans.get(ctx)

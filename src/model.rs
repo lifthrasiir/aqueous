@@ -5,11 +5,21 @@ use crate::frame::{Granule, Header, PRETAB, SFB_LONG, SideInfo, full_scalefactor
 use crate::huff;
 use crate::huff_tables::{DIM, LINBITS};
 
-pub trait Coder {
+/// Codes symbols and raw bits. One code path serves both directions: `sym(ctx, s)` codes
+/// `s` when compressing and returns the decoded symbol when decompressing.
+pub trait Sym {
     /// Codes symbol `s` in context `ctx` (compressing), or decodes one (decompressing).
     fn sym(&mut self, ctx: usize, s: u32) -> u32;
     /// Codes the low `n` bits of `v` verbatim (n <= 32).
     fn raw(&mut self, n: u32, v: u32) -> u32;
+}
+
+/// A coder. Granules are coded through its [`Coder::local`] state, a value that the
+/// compiler can keep in registers, which is handed back with [`Coder::put_back`].
+pub trait Coder {
+    type L: Sym;
+    fn local(&mut self) -> Self::L;
+    fn put_back(&mut self, l: Self::L);
     /// Called before a granule with bounds on what it will code.
     #[inline(always)]
     fn reserve(&mut self, _syms: usize, _raw_bits: usize) {}
@@ -99,6 +109,7 @@ pub fn family(ctx: usize) -> usize {
 
 /// Codes the coded scalefactors of a granule (`vals`, bitstream order).
 pub fn code_scalefactors<C: Coder>(c: &mut C, st: &mut State, lay: &crate::frame::ScfLayout, ch: usize, vals: &mut [u8]) {
+    let mut l = c.local();
     let p = &mut st.scf_prev[ch];
     let (mut i, mut k) = (0usize, 0usize);
     let mut left = 16usize;
@@ -118,14 +129,14 @@ pub fn code_scalefactors<C: Coder>(c: &mut C, st: &mut State, lay: &crate::frame
         let base = SCF_BASE + (size - 1) * 17 * 17;
         for _ in 0..n {
             let ix = i.min(38);
-            let v = c.sym(base + left * 17 + p[ix] as usize, vals[k] as u32) & ((1 << size) - 1);
+            let v = l.sym(base + left * 17 + p[ix] as usize, vals[k] as u32) & ((1 << size) - 1);
             vals[k] = v as u8;
             p[ix] = v.min(15) as u8;
             left = v.min(15) as usize;
             i += 1;
             k += 1;
         }
-    }
+    }    c.put_back(l);
 }
 
 /// Buckets per octave of the magnitude buckets (2 or 4).
@@ -332,6 +343,7 @@ pub fn code_granule<C: Coder>(
     coefs: &mut [i32; 576],
 ) {
     c.reserve(MAX_GRANULE_SYMS, MAX_GRANULE_RAW_BITS);
+    let mut l = c.local();
     let g = &si.gr[gr][ch];
     let prep = prepare(st, h, si, gr, ch, scf);
     let use_prev = prep.use_prev;
@@ -359,7 +371,7 @@ pub fn code_granule<C: Coder>(
             let ctx = base + (bv * NPOS + pos_class(line)) * NCUR + cur_class(&cur, line);
             let (a, b) = (coefs[line], coefs[line + 1]);
             let (x, y) = (a.unsigned_abs().min(15) as usize, b.unsigned_abs().min(15) as usize);
-            let sym = c.sym(ctx, (x * dim + y) as u32);
+            let sym = l.sym(ctx, (x * dim + y) as u32);
             let xy = xy[sym as usize & 255] as u32;
             let (mut x, mut y) = (xy >> 4, xy & 15);
             if lin > 0 && (x == 15 || y == 15) {
@@ -369,12 +381,12 @@ pub fn code_granule<C: Coder>(
                         let e = v0.unsigned_abs().wrapping_sub(15);
                         let bl = 32 - e.leading_zeros();
                         let top = if bl >= 2 { e >> (bl - 2) & 1 } else { 0 };
-                        let s = c.sym(lctx, bl << 1 | top);
+                        let s = l.sym(lctx, bl << 1 | top);
                         let (bl, top) = (s >> 1, s & 1);
                         let e = match bl {
                             0 => 0,
                             1 => 1,
-                            _ => ((1u32 << (bl - 1)) | top << (bl - 2) | c.raw(bl - 2, e)) & ((1 << lin) - 1),
+                            _ => ((1u32 << (bl - 1)) | top << (bl - 2) | l.raw(bl - 2, e)) & ((1 << lin) - 1),
                         };
                         *m = 15 + e;
                     }
@@ -383,7 +395,7 @@ pub fn code_granule<C: Coder>(
             // Signs of the nonzero values, in one go.
             let nz = (x != 0) as u32 + (y != 0) as u32;
             let sbits = (((a < 0) as u32) << (y != 0) as u32 & ((x != 0) as u32) << (y != 0) as u32) | (y != 0 && b < 0) as u32;
-            let sbits = c.raw(nz, sbits);
+            let sbits = l.raw(nz, sbits);
             let sy = y != 0 && sbits & 1 != 0;
             let sx = x != 0 && (sbits >> (nz - (x != 0) as u32)) & 1 != 0;
             coefs[line] = if sx { -(x as i32) } else { x as i32 };
@@ -404,10 +416,10 @@ pub fn code_granule<C: Coder>(
         let q = &coefs[line..line + 4];
         let sym = (q[0] != 0) as u32 * 8 + (q[1] != 0) as u32 * 4 + (q[2] != 0) as u32 * 2 + (q[3] != 0) as u32;
         let neg = (q[0] < 0) as u32 * 8 + (q[1] < 0) as u32 * 4 + (q[2] < 0) as u32 * 2 + (q[3] < 0) as u32;
-        let sym = c.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), sym) & 15;
+        let sym = l.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), sym) & 15;
         // Sign bits of the nonzero values, first value in the highest bit.
         let ns = sym.count_ones();
-        let packed = c.raw(ns, pext4(neg, sym));
+        let packed = l.raw(ns, pext4(neg, sym));
         let neg = pdep4(packed, sym);
         for j in 0..4 {
             let nz = (sym >> (3 - j)) & 1;
@@ -419,6 +431,7 @@ pub fn code_granule<C: Coder>(
     }
     coefs[line..].fill(0);
     cur[line..].fill(0);
+    c.put_back(l);
     commit(st, &prep, gr, ch, &cur);
 }
 
@@ -438,8 +451,10 @@ pub fn decode_granule<C: Coder>(
 ) {
     use crate::huff_tables::{COUNT1A, COUNT1B, PAIR};
     c.reserve(MAX_GRANULE_SYMS, MAX_GRANULE_RAW_BITS);
+    let mut l = c.local();
     // At most 47 bits per pair, 10 per quadruple.
     w.reserve(288 * 6 + 144 * 2 + 16);
+    let mut wl = w.local();
     let g = &si.gr[gr][ch];
     let prep = prepare(st, h, si, gr, ch, scf);
     let mut cur = [0u16; 576];
@@ -460,7 +475,7 @@ pub fn decode_granule<C: Coder>(
         for _ in 0..n {
             let bv = prep.bucket[line / 2] as usize;
             let ctx = base + (bv * NPOS + pos_class(line)) * NCUR + cur_class(&cur, line);
-            let sym = c.sym(ctx, 0);
+            let sym = l.sym(ctx, 0);
             let xy = xy[sym as usize & 255] as u32;
             let (x, y) = (xy >> 4, xy & 15);
             let e = codes[(xy & 0xff) as usize];
@@ -470,16 +485,16 @@ pub fn decode_granule<C: Coder>(
                 let mut ext = [0u32; 2];
                 for (j, &m) in [x, y].iter().enumerate() {
                     if m == 15 {
-                        let s = c.sym(lctx, 0);
+                        let s = l.sym(lctx, 0);
                         let (bl, top) = (s >> 1, s & 1);
                         ext[j] = match bl {
                             0 => 0,
                             1 => 1,
-                            _ => ((1u32 << (bl - 1)) | top << (bl - 2) | c.raw(bl - 2, 0)) & ((1 << lin) - 1),
+                            _ => ((1u32 << (bl - 1)) | top << (bl - 2) | l.raw(bl - 2, 0)) & ((1 << lin) - 1),
                         };
                     }
                 }
-                let signs = c.raw(nz, 0);
+                let signs = l.raw(nz, 0);
                 // Code, then per value: escape (if 15) and sign (if nonzero).
                 let mut bits = (e >> 5) as u64;
                 let mut nb = e & 31;
@@ -495,13 +510,13 @@ pub fn decode_granule<C: Coder>(
                         nb += 1;
                     }
                 }
-                w.put(bits, nb);
+                wl.put(bits, nb);
                 cur[line] = (x + ext[0]).min(u16::MAX as u32) as u16;
                 cur[line + 1] = (y + ext[1]).min(u16::MAX as u32) as u16;
             } else {
                 // The signs follow the code directly, in the same order.
-                let signs = c.raw(nz, 0);
-                w.put(((e >> 5) as u64) << nz | signs as u64, (e & 31) + nz);
+                let signs = l.raw(nz, 0);
+                wl.put(((e >> 5) as u64) << nz | signs as u64, (e & 31) + nz);
                 cur[line] = x as u16;
                 cur[line + 1] = y as u16;
             }
@@ -517,16 +532,18 @@ pub fn decode_granule<C: Coder>(
         } else {
             5
         };
-        let sym = c.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), 0) & 15;
+        let sym = l.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), 0) & 15;
         let ns = sym.count_ones();
-        let signs = c.raw(ns, 0);
+        let signs = l.raw(ns, 0);
         let e = tab[sym as usize];
-        w.put(((e >> 5) as u64) << ns | signs as u64, (e & 31) + ns);
+        wl.put(((e >> 5) as u64) << ns | signs as u64, (e & 31) + ns);
         for j in 0..4 {
             cur[line + j] = (sym >> (3 - j) & 1) as u16;
         }
         line += 4;
     }
+    c.put_back(l);
+    w.put_back(wl);
     commit(st, &prep, gr, ch, &cur);
 }
 
@@ -603,6 +620,7 @@ pub fn encode_granule<C: Coder>(
         return None;
     }
     c.reserve(MAX_GRANULE_SYMS, MAX_GRANULE_RAW_BITS);
+    let mut l = c.local();
     let d = decoders();
     let prep = prepare(st, h, si, gr, ch, scf);
     let mut cur = [0u16; 576];
@@ -636,8 +654,8 @@ pub fn encode_granule<C: Coder>(
                     let ns = (x != 0) as u32 + (y != 0) as u32;
                     (x, y, len + ns, ((w << len) >> 1 >> (63 - ns)) as u32)
                 };
-                c.sym(ctx, x * dim + y);
-                c.raw((x != 0) as u32 + (y != 0) as u32, signs);
+                l.sym(ctx, x * dim + y);
+                l.raw((x != 0) as u32 + (y != 0) as u32, signs);
                 bb.consume(len);
                 cur[line] = x as u16;
                 cur[line + 1] = y as u16;
@@ -652,7 +670,7 @@ pub fn encode_granule<C: Coder>(
                 let e = fast[(w >> (64 - FL)) as usize] as u32;
                 let (len, sym) = if e & 0x8000 != 0 { (e >> 10 & 31, e >> 2 & 0xff) } else { dec.decode(w) };
                 let (x, y) = (sym >> 4, sym & 15);
-                c.sym(ctx, x * dim + y);
+                l.sym(ctx, x * dim + y);
                 let lctx = LIN_BASE + (ts - 16) * 16 + (bv / NOC).min(15);
                 let mut rest = w << len;
                 let mut used = len;
@@ -665,9 +683,9 @@ pub fn encode_granule<C: Coder>(
                         used += lin;
                         let bl = 32 - ext.leading_zeros();
                         let top = if bl >= 2 { ext >> (bl - 2) & 1 } else { 0 };
-                        c.sym(lctx, bl << 1 | top);
+                        l.sym(lctx, bl << 1 | top);
                         if bl > 2 {
-                            c.raw(bl - 2, ext);
+                            l.raw(bl - 2, ext);
                         }
                         m = 15 + ext;
                     }
@@ -677,7 +695,7 @@ pub fn encode_granule<C: Coder>(
                     used += s;
                     cur[line + j] = m.min(u16::MAX as u32) as u16;
                 }
-                c.raw((x != 0) as u32 + (y != 0) as u32, signs);
+                l.raw((x != 0) as u32 + (y != 0) as u32, signs);
                 bb.consume(used);
                 line += 2;
             }
@@ -708,8 +726,8 @@ pub fn encode_granule<C: Coder>(
         } else {
             5
         };
-        c.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), sym);
-        c.raw(ns, ((bb.acc << len) >> 1 >> (63 - ns)) as u32);
+        l.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), sym);
+        l.raw(ns, ((bb.acc << len) >> 1 >> (63 - ns)) as u32);
         bb.consume(len + ns);
         for j in 0..4 {
             cur[line + j] = (sym >> (3 - j) & 1) as u16;
@@ -718,6 +736,7 @@ pub fn encode_granule<C: Coder>(
         nq += 1;
     }
     r.pos = bb.pos();
+    c.put_back(l);
     commit(st, &prep, gr, ch, &cur);
     Some(huff::Part3 { quads: nq, tail: end - r.pos })
 }
@@ -734,8 +753,20 @@ impl Counter {
 }
 
 impl Coder for Counter {
+    type L = CounterLocal;
+    fn local(&mut self) -> CounterLocal {
+        CounterLocal(self.counts.as_mut_ptr())
+    }
+    fn put_back(&mut self, _l: CounterLocal) {}
+}
+
+pub struct CounterLocal(*mut Vec<u64>);
+
+impl Sym for CounterLocal {
     fn sym(&mut self, ctx: usize, s: u32) -> u32 {
-        self.counts[ctx][s as usize] += 1;
+        assert!(ctx < N_CTX);
+        // SAFETY: ctx < N_CTX, the length of the counts; valid while the counter lives.
+        unsafe { (&mut *self.0.add(ctx))[s as usize] += 1 };
         s
     }
     fn raw(&mut self, _n: u32, v: u32) -> u32 {

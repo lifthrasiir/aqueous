@@ -1,17 +1,6 @@
 //! Estimates the gain of per-file frequency tables over the built-in ones: for each
 //! context, the static cost against the empirical entropy plus a table cost.
-use mp3_recons::model::{self, Coder};
-
-struct Rec(Vec<Vec<u64>>);
-impl Coder for Rec {
-    fn sym(&mut self, ctx: usize, s: u32) -> u32 {
-        self.0[ctx][s as usize] += 1;
-        s
-    }
-    fn raw(&mut self, _n: u32, v: u32) -> u32 {
-        v
-    }
-}
+use mp3_recons::model::Counter;
 
 fn main() {
     let t = mp3_recons::codec::tables();
@@ -23,15 +12,16 @@ fn main() {
         for e in std::fs::read_dir(&a).unwrap().flatten() {
             let d = std::fs::read(e.path()).unwrap();
             tin += d.len();
-            let mut r = Rec((0..model::N_CTX).map(|c| vec![0; model::alphabet(c)]).collect());
+            let mut r = Counter::new();
             mp3_recons::codec::count(&d, &mut r);
-            let mut order: Vec<usize> = (0..r.0.len()).collect();
-            order.sort_by_key(|&c| std::cmp::Reverse(r.0[c].iter().sum::<u64>()));
-            let mut rank = vec![0usize; r.0.len()];
+            let counts = &r.counts;
+            let mut order: Vec<usize> = (0..counts.len()).collect();
+            order.sort_by_key(|&c| std::cmp::Reverse(counts[c].iter().sum::<u64>()));
+            let mut rank = vec![0usize; counts.len()];
             for (i, &c) in order.iter().enumerate() {
                 rank[c] = i;
             }
-            for (c, cnt) in r.0.iter().enumerate() {
+            for (c, cnt) in counts.iter().enumerate() {
                 let tot: u64 = cnt.iter().sum();
                 if tot == 0 {
                     continue;
