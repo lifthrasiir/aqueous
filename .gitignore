@@ -1,0 +1,6 @@
+/target/
+/corpus/
+/cache/
+/third_party/
+.DS_Store
+fuzz_failure_*.mp3
