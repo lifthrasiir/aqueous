@@ -185,25 +185,26 @@ fn analyze_span(d: &[u8], start: usize, end: usize, planes: usize, w: usize, h: 
                     return None;
                 }
             }
-            // One encoder per plane would fit better; one per span is what the format has.
-            let (encoder, _) = packbits::identify(&enc_rows);
-            let mut exceptions = Vec::new();
-            let mut buf = Vec::new();
-            for (i, r) in enc_rows.iter().enumerate() {
-                buf.clear();
-                packbits::encode(encoder, &data[i * w..(i + 1) * w], &mut buf);
-                if buf != *r {
-                    exceptions.push((i, r.to_vec()));
-                }
+            // The counts must be what rebuilding writes: the rows' lengths, and no slack.
+            let used = rows * cb + enc_rows.iter().map(|r| r.len()).sum::<usize>();
+            if used != src.len() || enc_rows.iter().any(|r| r.len() >> (8 * cb).min(63) != 0) {
+                return None;
             }
+            let decoded: Vec<&[u8]> = data.chunks(w).collect();
+            // One encoder per plane would fit better; one per span is what the format has.
+            let (encoder, bad) = packbits::identify_rows(&enc_rows, &decoded);
+            let exceptions = bad.into_iter().map(|i| (i, enc_rows[i].to_vec())).collect();
             (Coding::Rle { count_bytes: cb, encoder, exceptions }, data)
         }
         _ => return None,
     };
     let span = Span { start, end, gap: 0, planes, w, h, coding };
-    let mut back = Vec::with_capacity(src.len());
-    rebuild(&span, &data, &mut back).ok()?;
-    (back == src).then_some((span, data))
+    if cfg!(debug_assertions) {
+        let mut back = Vec::with_capacity(src.len());
+        rebuild(&span, &data, &mut back).ok()?;
+        assert!(back == src, "span at {start} does not rebuild");
+    }
+    Some((span, data))
 }
 
 /// Spans and groups of a parsed file, with the decoded planes of each span.
@@ -454,8 +455,10 @@ fn skeleton_level(n: usize) -> i32 {
 }
 
 fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
+    let t0 = std::time::Instant::now();
     let psd = psd::parse(file).ok()?;
     let (mut spans, datas, groups) = plan(&psd, file, depth);
+    let t_plan = t0.elapsed().as_secs_f64();
     if spans.is_empty() {
         return None;
     }
@@ -471,11 +474,14 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
         prev = s.end;
     }
     sk.extend_from_slice(&file[prev..]);
+    let t0 = std::time::Instant::now();
     let mut rec = model::Recorder::default();
     for g in &groups {
         let mut grp = group_of(g, &spans, Some(&datas)).ok()?;
         model::walk(&mut rec, &mut grp);
     }
+    let t_walk = t0.elapsed().as_secs_f64();
+    let t0 = std::time::Instant::now();
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&[VERSION, 1]);
@@ -489,12 +495,13 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     let model = rec.finish();
     if std::env::var_os("PSDR_STATS").is_some() {
         eprintln!(
-            "skeleton {} -> {}, layout {}, pixels {} -> {}",
+            "skeleton {} -> {}, layout {}, pixels {} -> {}; plan {t_plan:.3}s walk {t_walk:.3}s zstd+rans {:.3}s",
             sk.len(),
             z.len(),
             layout.len(),
             datas.iter().map(|d| d.len()).sum::<usize>(),
-            model.len()
+            model.len(),
+            t0.elapsed().as_secs_f64()
         );
     }
     out.extend_from_slice(&model);

@@ -1,8 +1,10 @@
 //! The pixel model: 8-bit planes coded with static per-file tables and rANS.
 //!
 //! Planes come in *groups*: a layer's color planes with its transparency, or a single plane.
-//! Within a group the alpha plane (if any) is coded first, then the color planes. Every
-//! sample is predicted by MED from its neighbors; for a visible pixel, neighbors that are
+//! Within a group the alpha plane (if any) is coded first, then the color planes. Where the
+//! left neighbor equals a long stretch of the row above, a run of samples equal to it is
+//! coded by its length (JPEG-LS style). Otherwise a sample is predicted by MED from its
+//! neighbors; for a visible pixel, neighbors that are
 //! fully transparent are replaced by a visible one, since their color is arbitrary. Color
 //! planes after the first code their residual relative to the first plane's. The table is
 //! chosen by plane kind, transparency of the pixel, local activity and (after the first
@@ -21,7 +23,12 @@ const CROSS: usize = 4;
 const CTX: usize = ACT * CROSS;
 /// Plane kinds: first color plane, other color planes, alpha, lone plane.
 const KINDS: usize = 4;
-pub const TABLES: usize = KINDS * 2 * CTX;
+/// Run mode needs more than this many equal samples above, from the upper left on (shorter
+/// runs cost more than they save).
+const RUN_LOOK: usize = 32;
+/// Run length tables, by plane kind and transparency.
+const RUN_BASE: usize = KINDS * 2 * CTX;
+pub const TABLES: usize = RUN_BASE + KINDS * 2;
 
 fn corrupt() -> Error {
     Error("corrupt pixel data".into())
@@ -81,9 +88,46 @@ fn walk_plane<C: Coder>(
         (&mut g.planes[..], None)
     };
     let p = &mut planes[k];
+    let run_t = RUN_BASE + kind * 2;
+    // For the row above: how many equal samples follow each position (itself included).
+    let mut up_run = vec![0u32; w + 1];
     for y in 0..h {
-        for x in 0..w {
-            let i = y * w + x;
+        let row = y * w;
+        if y > 0 {
+            let up = &p[row - w..row];
+            up_run[w] = 0;
+            for x in (0..w).rev() {
+                up_run[x] = if x + 1 < w && up[x + 1] == up[x] { up_run[x + 1] + 1 } else { 1 };
+            }
+        }
+        let mut x = 0;
+        let mut after_run = false;
+        while x < w {
+            let i = row + x;
+            // Run mode: in a flat neighborhood, the number of following samples equal to the
+            // left one, in chunks of up to 254 (255 continues).
+            if !after_run && y > 0 && x > 0 && up_run[x - 1] as usize > RUN_LOOK {
+                let v = p[i - 1];
+                if p[i - w - 1] == v {
+                    let t = run_t + alpha.is_some_and(|al| al[i] == 0) as usize;
+                    let mut n = 0;
+                    loop {
+                        let avail = (p[i + n..row + w].iter().take(255).take_while(|&&b| b == v).count()).min(255);
+                        let s = c.code(t, avail as u8) as usize;
+                        let s = s.min(row + w - i - n);
+                        p[i + n..i + n + s].fill(v);
+                        n += s;
+                        if s < 255 {
+                            break;
+                        }
+                    }
+                    res[i..i + n].fill(0);
+                    x += n;
+                    after_run = true;
+                    continue;
+                }
+            }
+            after_run = false;
             let mut a = if x > 0 { p[i - 1] } else if y > 0 { p[i - w] } else { 0 };
             let mut b = if y > 0 { p[i - w] } else { a };
             let mut cc = if x > 0 && y > 0 { p[i - w - 1] } else { b };
@@ -119,6 +163,7 @@ fn walk_plane<C: Coder>(
             let r = s.wrapping_add(off);
             res[i] = r;
             p[i] = pred.wrapping_add(r);
+            x += 1;
         }
     }
 }

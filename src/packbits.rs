@@ -173,32 +173,52 @@ pub fn candidates(encoded: &[&[u8]]) -> Vec<Encoder> {
 /// The encoder reproducing most of `encoded` rows, and how many it reproduces. Rows that do
 /// not decode count as not reproduced.
 pub fn identify(encoded: &[&[u8]]) -> (Encoder, usize) {
-    let decoded: Vec<Option<Vec<u8>>> = encoded
-        .iter()
-        .map(|r| {
-            let mut v = Vec::new();
-            unpackbits(r, &mut v).then_some(v)
-        })
-        .collect();
-    let mut best = (NO_TILES, 0);
+    let mut data = Vec::new();
+    let mut lens = Vec::with_capacity(encoded.len());
+    for r in encoded {
+        let before = data.len();
+        if !unpackbits(r, &mut data) {
+            data.truncate(before);
+        }
+        lens.push(data.len() - before);
+    }
+    let mut starts = Vec::with_capacity(lens.len() + 1);
+    starts.push(0);
+    for l in &lens {
+        starts.push(starts.last().unwrap() + l);
+    }
+    let rows: Vec<&[u8]> = (0..encoded.len()).map(|i| &data[starts[i]..starts[i + 1]]).collect();
+    let (enc, bad) = identify_rows(encoded, &rows);
+    (enc, encoded.len() - bad.len())
+}
+
+/// The encoder reproducing most of `encoded` rows from their decoded `rows`, and the rows
+/// it does not reproduce.
+pub fn identify_rows(encoded: &[&[u8]], rows: &[&[u8]]) -> (Encoder, Vec<usize>) {
+    let mut best: Option<(Encoder, Vec<usize>)> = None;
     let mut buf = Vec::new();
     for enc in candidates(encoded) {
-        let mut n = 0;
-        for (r, d) in encoded.iter().zip(&decoded) {
-            if let Some(d) = d {
-                buf.clear();
-                encode(enc, d, &mut buf);
-                n += (buf == *r) as usize;
+        let limit = best.as_ref().map_or(usize::MAX, |b| b.1.len());
+        let mut bad = Vec::new();
+        for (i, (r, d)) in encoded.iter().zip(rows).enumerate() {
+            buf.clear();
+            encode(enc, d, &mut buf);
+            if buf != *r {
+                bad.push(i);
+                if bad.len() >= limit {
+                    break;
+                }
             }
         }
-        if n > best.1 {
-            best = (enc, n);
-        }
-        if n == encoded.len() {
-            break;
+        if bad.len() < limit {
+            let done = bad.is_empty();
+            best = Some((enc, bad));
+            if done {
+                break;
+            }
         }
     }
-    best
+    best.unwrap()
 }
 
 #[cfg(test)]

@@ -21,12 +21,37 @@ pub struct Report {
     pub effects: usize,
 }
 
-/// Premultiplied RGBA canvas in 0..1.
+/// Premultiplied RGBA canvas in 0..1, with the bounding box of what was drawn on it.
 #[derive(Clone)]
 struct Canvas {
     w: usize,
     h: usize,
     px: Vec<[f32; 4]>,
+    bbox: Option<Bounds>,
+}
+
+/// A pixel rectangle `[x0, x1) x [y0, y1)` within the canvas.
+#[derive(Clone, Copy, Debug)]
+struct Bounds {
+    x0: usize,
+    y0: usize,
+    x1: usize,
+    y1: usize,
+}
+
+impl Bounds {
+    /// `r` clipped to a `w` x `h` canvas; None if empty.
+    fn of(r: &Rect, w: usize, h: usize) -> Option<Bounds> {
+        let c = |v: i32, m: usize| (v.max(0) as usize).min(m);
+        let b = Bounds { x0: c(r.left, w), y0: c(r.top, h), x1: c(r.right, w), y1: c(r.bottom, h) };
+        (b.x0 < b.x1 && b.y0 < b.y1).then_some(b)
+    }
+    fn union(a: Option<Bounds>, b: Bounds) -> Bounds {
+        match a {
+            None => b,
+            Some(a) => Bounds { x0: a.x0.min(b.x0), y0: a.y0.min(b.y0), x1: a.x1.max(b.x1), y1: a.y1.max(b.y1) },
+        }
+    }
 }
 
 /// Rounds a premultiplied pixel to straight 8-bit color and alpha, as Photoshop keeps them.
@@ -45,14 +70,20 @@ fn quantize(p: &mut [f32; 4]) {
 
 impl Canvas {
     fn new(w: usize, h: usize) -> Self {
-        Canvas { w, h, px: vec![[0.0; 4]; w * h] }
+        Canvas { w, h, px: vec![[0.0; 4]; w * h], bbox: None }
     }
     fn over(&mut self, src: &Canvas, opacity: f32, mode: &[u8; 4]) {
-        for (d, s) in self.px.iter_mut().zip(&src.px) {
-            if s[3] > 0.0 {
-                composite_px(d, [s[0] / s[3], s[1] / s[3], s[2] / s[3]], s[3] * opacity, mode);
+        let Some(b) = src.bbox else { return };
+        for y in b.y0..b.y1 {
+            for x in b.x0..b.x1 {
+                let o = y * self.w + x;
+                let s = src.px[o];
+                if s[3] > 0.0 {
+                    composite_px(&mut self.px[o], [s[0] / s[3], s[1] / s[3], s[2] / s[3]], s[3] * opacity, mode);
+                }
             }
         }
+        self.bbox = Some(Bounds::union(self.bbox, b));
     }
 }
 
@@ -175,73 +206,82 @@ fn has_effects(l: &Layer) -> bool {
     l.tag(b"lfx2").is_some() || l.tag(b"lmfx").is_some()
 }
 
-/// Layer pixels on the document canvas: straight color and coverage (alpha times mask).
+/// Layer pixels within their bounds on the canvas: straight color and coverage (alpha times
+/// mask), row-major over the bounds.
 struct LayerPixels {
+    b: Bounds,
     rgb: [Vec<u8>; 3],
     alpha: Vec<f32>,
 }
 
-fn layer_pixels(psd: &Psd, d: &[u8], i: usize) -> Result<Option<LayerPixels>> {
+impl LayerPixels {
+    fn at(&self, x: usize, y: usize) -> Option<usize> {
+        let b = &self.b;
+        (x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1).then(|| (y - b.y0) * (b.x1 - b.x0) + x - b.x0)
+    }
+}
+
+/// Channel `j` of layer `i`, decoded.
+pub type Channels<'a> = dyn Fn(usize, usize) -> Result<Vec<u8>> + 'a;
+
+fn layer_pixels(psd: &Psd, chan: &Channels, i: usize) -> Result<Option<LayerPixels>> {
     let l = &psd.layer_info.layers[i];
     let (cw, ch) = (psd.width as usize, psd.height as usize);
     let find = |id: i16| l.channels.iter().position(|c| c.id == id);
     let (Some(r), Some(g), Some(b)) = (find(0), find(1), find(2)) else { return Ok(None) };
-    let (lw, lh) = (l.rect.width() as usize, l.rect.height() as usize);
-    let mut rgb = [vec![255u8; cw * ch], vec![255u8; cw * ch], vec![255u8; cw * ch]];
-    let mut alpha = vec![0f32; cw * ch];
-    if lw == 0 || lh == 0 {
-        return Ok(Some(LayerPixels { rgb, alpha }));
-    }
-    let planes = [r, g, b].map(|j| pixels::layer_channel(psd, d, i, j));
-    let a = find(-1).map(|j| pixels::layer_channel(psd, d, i, j)).transpose()?;
-    let blit = |rect: &Rect, x: usize, y: usize| -> Option<usize> {
-        let cx = rect.left as i64 + x as i64;
-        let cy = rect.top as i64 + y as i64;
-        (cx >= 0 && cy >= 0 && (cx as usize) < cw && (cy as usize) < ch).then(|| cy as usize * cw + cx as usize)
+    let Some(bb) = Bounds::of(&l.rect, cw, ch) else {
+        return Ok(Some(LayerPixels { b: Bounds { x0: 0, y0: 0, x1: 0, y1: 0 }, rgb: Default::default(), alpha: Vec::new() }));
     };
-    let [pr, pg, pb] = planes;
-    let (pr, pg, pb) = (pr?, pg?, pb?);
-    for y in 0..lh {
-        for x in 0..lw {
-            if let Some(o) = blit(&l.rect, x, y) {
-                let s = y * lw + x;
-                rgb[0][o] = pr[s];
-                rgb[1][o] = pg[s];
-                rgb[2][o] = pb[s];
-                alpha[o] = a.as_ref().map_or(1.0, |a| a[s] as f32 / 255.0);
+    let lw = l.rect.width() as usize;
+    let (bw, bh) = (bb.x1 - bb.x0, bb.y1 - bb.y0);
+    let planes = [chan(i, r)?, chan(i, g)?, chan(i, b)?];
+    let a = find(-1).map(|j| chan(i, j)).transpose()?;
+    let mut rgb = [vec![0u8; bw * bh], vec![0u8; bw * bh], vec![0u8; bw * bh]];
+    let mut alpha = vec![1f32; bw * bh];
+    let (ox, oy) = ((bb.x0 as i64 - l.rect.left as i64) as usize, (bb.y0 as i64 - l.rect.top as i64) as usize);
+    for y in 0..bh {
+        let src = (oy + y) * lw + ox;
+        for k in 0..3 {
+            rgb[k][y * bw..(y + 1) * bw].copy_from_slice(&planes[k][src..src + bw]);
+        }
+        if let Some(a) = &a {
+            for x in 0..bw {
+                alpha[y * bw + x] = a[src + x] as f32 / 255.0;
             }
         }
     }
-    // User mask, unless disabled.
+    // User mask, unless disabled; outside its rectangle, its default color.
     if let (Some(mk), Some(j)) = (&l.mask, find(-2)) {
         if mk.flags & 2 == 0 {
             let c = &l.channels[j];
-            let m = pixels::layer_channel(psd, d, i, j)?;
+            let m = chan(i, j)?;
             let def = mk.default_color as f32 / 255.0;
-            let mut cov = vec![def; cw * ch];
-            let (mw, mh) = (c.width as usize, c.height as usize);
-            for y in 0..mh {
-                for x in 0..mw {
-                    if let Some(o) = blit(&mk.rect, x, y) {
-                        cov[o] = m[y * mw + x] as f32 / 255.0;
-                    }
+            let (mw, mh) = (c.width as i64, c.height as i64);
+            for y in 0..bh {
+                for x in 0..bw {
+                    let mx = (bb.x0 + x) as i64 - mk.rect.left as i64;
+                    let my = (bb.y0 + y) as i64 - mk.rect.top as i64;
+                    let v = if mx >= 0 && my >= 0 && mx < mw && my < mh { m[(my * mw + mx) as usize] as f32 / 255.0 } else { def };
+                    alpha[y * bw + x] *= v;
                 }
-            }
-            for (a, c) in alpha.iter_mut().zip(&cov) {
-                *a *= c;
             }
         }
     }
-    Ok(Some(LayerPixels { rgb, alpha }))
+    Ok(Some(LayerPixels { b: bb, rgb, alpha }))
 }
 
 fn fill_opacity(l: &Layer, d: &[u8]) -> f32 {
     l.tag(b"iOpa").and_then(|t| d.get(t.data.start)).map_or(1.0, |&b| b as f32 / 255.0)
 }
 
-/// Renders the layers; returns interleaved 8-bit RGB matted on white, plus alpha when
-/// `with_alpha`.
+/// Renders the layers of `psd` (whose bytes are `d`); returns interleaved 8-bit RGB matted on
+/// white, plus alpha when `with_alpha`.
 pub fn render(psd: &Psd, d: &[u8], with_alpha: bool, rep: &mut Report) -> Result<Vec<u8>> {
+    render_with(psd, d, &|i, j| pixels::layer_channel(psd, d, i, j), with_alpha, rep)
+}
+
+/// As [`render`], with the layers' channels from `chan`.
+pub fn render_with(psd: &Psd, d: &[u8], chan: &Channels, with_alpha: bool, rep: &mut Report) -> Result<Vec<u8>> {
     let (w, h) = (psd.width as usize, psd.height as usize);
     let layers = &psd.layer_info.layers;
     // Layers are stored bottom to top: a group's divider record (section type 3) first, its
@@ -264,7 +304,7 @@ pub fn render(psd: &Psd, d: &[u8], with_alpha: bool, rep: &mut Report) -> Result
     let direct = |f: usize| f != usize::MAX && !layers[f].hidden() && &layers[f].blend == b"pass" && layers[f].opacity == 255;
     let mut stack: Vec<Canvas> = vec![Canvas::new(w, h)];
     let mut skip_folder = vec![false; layers.len()];
-    let mut clip_base: Option<Vec<f32>> = None;
+    let mut clip_base: Option<LayerPixels> = None;
     for (i, l) in layers.iter().enumerate() {
         match section(l, d) {
             3 => {
@@ -293,21 +333,24 @@ pub fn render(psd: &Psd, d: &[u8], with_alpha: bool, rep: &mut Report) -> Result
             }
             _ => {}
         }
-        let Some(px) = layer_pixels(psd, d, i)? else {
+        let Some(px) = layer_pixels(psd, chan, i)? else {
             rep.skipped += 1;
             continue;
         };
         let mut alpha = px.alpha;
         if l.clipping != 0 {
             if let Some(base) = &clip_base {
-                for (a, b) in alpha.iter_mut().zip(base) {
-                    *a *= b;
+                let bw = px.b.x1 - px.b.x0;
+                for y in px.b.y0..px.b.y1 {
+                    for x in px.b.x0..px.b.x1 {
+                        alpha[(y - px.b.y0) * bw + x - px.b.x0] *= base.at(x, y).map_or(0.0, |q| base.alpha[q]);
+                    }
                 }
             }
         } else {
-            clip_base = Some(alpha.clone());
+            clip_base = Some(LayerPixels { b: px.b, rgb: Default::default(), alpha: alpha.clone() });
         }
-        if l.hidden() {
+        if l.hidden() || px.b.x0 == px.b.x1 {
             continue;
         }
         if blend(&l.blend, [0.0; 3], [0.0; 3]).is_none() {
@@ -318,14 +361,19 @@ pub fn render(psd: &Psd, d: &[u8], with_alpha: bool, rep: &mut Report) -> Result
         }
         let op = l.opacity as f32 / 255.0 * fill_opacity(l, d);
         let top = stack.last_mut().unwrap();
-        for (o, dst) in top.px.iter_mut().enumerate() {
-            let a = alpha[o] * op;
-            if a == 0.0 {
-                continue;
+        let bw = px.b.x1 - px.b.x0;
+        for y in px.b.y0..px.b.y1 {
+            for x in px.b.x0..px.b.x1 {
+                let q = (y - px.b.y0) * bw + x - px.b.x0;
+                let a = alpha[q] * op;
+                if a == 0.0 {
+                    continue;
+                }
+                let s = [0, 1, 2].map(|k| px.rgb[k][q] as f32 / 255.0);
+                composite_px(&mut top.px[y * w + x], s, a, &l.blend);
             }
-            let s = [0, 1, 2].map(|k| px.rgb[k][o] as f32 / 255.0);
-            composite_px(dst, s, a, &l.blend);
         }
+        top.bbox = Some(Bounds::union(top.bbox, px.b));
     }
     while stack.len() > 1 {
         let g = stack.pop().unwrap();
