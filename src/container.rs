@@ -120,6 +120,10 @@ pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
         let n = (v >> 1) as usize;
         if v & 1 != 0 {
             let raw = get_varint(c, &mut p)? as usize;
+            // No stream is larger than the original plus a little.
+            if raw as u64 > len + (1 << 20) {
+                return Err(Error("stream size".into()));
+            }
             let z = take(c, &mut p, n)?;
             streams.push(zstd::bulk::decompress(z, raw).map_err(|e| Error(e.to_string()))?);
         } else {
@@ -135,7 +139,7 @@ pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
     let words: Vec<u32> =
         take(c, &mut p, nwords.checked_mul(4).ok_or(Error("size".into()))?)?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
     let raw = c[p..].to_vec();
-    let coded = Coded { streams, words, raw, raw_bits, bit_lens };
+    let coded = Coded { len, streams, words, raw, raw_bits, bit_lens };
     let out = codec::decode(&coded).map_err(|e| Error(format!("corrupt: {}", e.0)))?;
     if out.len() as u64 != len || xxh3_64(&out) != hash {
         return Err(Error("checksum mismatch".into()));

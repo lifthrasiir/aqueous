@@ -224,6 +224,8 @@ impl<'a> Rd<'a> {
 
 /// Compressed representation: byte streams (before zstd), rANS words and raw bits.
 pub struct Coded {
+    /// Length of the original file.
+    pub len: u64,
     pub streams: Vec<Vec<u8>>,
     pub words: Vec<u32>,
     pub raw: Vec<u8>,
@@ -237,7 +239,7 @@ pub fn encode(d: &[u8]) -> Coded {
     let (streams, bit_lens) = encode_with(d, &mut c);
     let words = c.rans.finish(t);
     let raw_bits = c.raw.len() as u64;
-    Coded { streams, words, raw: c.raw.finish(), raw_bits, bit_lens }
+    Coded { len: d.len() as u64, streams, words, raw: c.raw.finish(), raw_bits, bit_lens }
 }
 
 /// Runs the model over `d` with a counting coder (for training).
@@ -425,6 +427,9 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
         runs.push((n, free));
     }
     let nframes: usize = runs.iter().map(|r| r.0).sum();
+    if nframes > c.streams[S_HDR].len() / 4 {
+        return Err(Error("frame count"));
+    }
 
     let pad = |v: &[u8]| {
         let mut p = v.to_vec();
@@ -452,7 +457,7 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
                 return Err(Error("bad header"));
             }
             let flen = h.frame_len_free(free);
-            if flen < h.prefix_len() {
+            if flen < h.prefix_len() || (r_len + flen) as u64 > c.len {
                 return Err(Error("frame length"));
             }
             let len = flen - h.prefix_len();
