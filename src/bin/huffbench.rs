@@ -12,7 +12,7 @@ fn main() {
     let mut clean = Clean::default();
     let mut coefs = Vec::new();
     jpeg::decode_all(&j, &data, jpeg::Order::Natural, &mut coefs, &mut clean).unwrap();
-    let slow = jpeg::SLOW_CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    let slow = jpeg::SLOW_CALLS.with(|c| c.get());
 
     if let Some(p) = args.get(2).filter(|s| !s.is_empty()) {
         let b = std::fs::read(p).unwrap();

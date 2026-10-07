@@ -1,5 +1,5 @@
 //! Loop the fast model decoder or the Huffman re-encoder only (for profiling).
-//! usage: decbench file.jpg iters [huff]
+//! usage: decbench file.jpg iters [huff|enc]   (RAYON_NUM_THREADS limits the workers)
 use jpeg_recons::{fast, jpeg};
 
 fn main() {
@@ -23,6 +23,19 @@ fn main() {
         }
         let s = t.elapsed().as_secs_f64() / iters as f64;
         println!("huffman encode {:.1} MB/s", data.len() as f64 / s / 1e6);
+        return;
+    }
+    if args.get(3).map(String::as_str) == Some("enc") {
+        let (mut w, mut n, mut r) = (0f64, 0f64, 0f64);
+        let t = std::time::Instant::now();
+        for _ in 0..iters {
+            let (e, ph) = fast::encode(&j, &coefs);
+            std::hint::black_box(&e);
+            (w, n, r) = (w + ph.walk, n + ph.norm, r + ph.rans);
+        }
+        let s = t.elapsed().as_secs_f64() / iters as f64;
+        let k = iters as f64 * 1e-3;
+        println!("model encode {:.1} MB/s: walk {:.2} ms, tables {:.2} ms, rans {:.2} ms", data.len() as f64 / s / 1e6, w / k, n / k, r / k);
         return;
     }
     let t = std::time::Instant::now();

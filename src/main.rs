@@ -1,5 +1,6 @@
 //! jrc: JPEG recompressor driver.
 //!
+//!   (every command takes -j threads; default: all cores)
 //!   jrc bench [-n iters] file...     roundtrip-verify, ratio and throughput per file
 //!   jrc fuzz [-n rounds] [-s seed] file...   mutate inputs; roundtrip must stay exact, no panics
 //!   jrc c in out | jrc d in out      compress / decompress a file
@@ -216,15 +217,18 @@ fn main() {
         std::process::exit(2);
     }
     let cmd = args.remove(0);
-    let (mut n, mut seed) = (None, 1u64);
+    let (mut n, mut seed, mut threads) = (None, 1u64, 0usize);
     while args.len() >= 2 && args[0].starts_with('-') {
         match args[0].as_str() {
             "-n" => n = Some(args[1].parse().unwrap()),
             "-s" => seed = args[1].parse().unwrap(),
+            "-j" => threads = args[1].parse().unwrap(),
             o => panic!("unknown option {o}"),
         }
         args.drain(..2);
     }
+    // 0 = one worker per core
+    rayon::ThreadPoolBuilder::new().num_threads(threads).build_global().unwrap();
     match cmd.as_str() {
         "bench" => bench(&args, n.unwrap_or(5)),
         "fuzz" => fuzz(&args, n.unwrap_or(1000), seed),
@@ -246,7 +250,9 @@ fn main() {
                     Ok(infos) => {
                         if !j.progressive {
                             let (e, _) = jpeg_recons::fast::encode(&j, &coefs);
-                            println!("  model: tables {}B rans {}B raw {}B", e.tables.len(), e.rans.len() * 4, e.raw.len());
+                            let rans: usize = e.stripes.iter().map(|s| s.rans.len() * 4).sum();
+                            let raw: usize = e.stripes.iter().map(|s| s.raw.len()).sum();
+                            println!("  model: tables {}B rans {}B raw {}B stripes {}", e.tables.len(), rans, raw, e.stripes.len());
                         }
                         for (s, i) in j.scans.iter().zip(infos) {
                             let t = i.truncated.map(|t| format!("truncated at MCU {} bit {} tail {}B boundary={}", t.mcus, t.bits, t.tail.len(), t.boundary));

@@ -1,7 +1,7 @@
 //! Container format and the top-level compress / decompress entry points.
 //!
 //! ```text
-//! "JRC" version(u8=3) mode(u8)
+//! "JRC" version(u8=4) mode(u8)
 //! mode 0 (stored): the input verbatim
 //! mode 1 (coded):
 //!   u64 LE xxh3 of the original input (checked after decompression: a reconstruction that
@@ -16,7 +16,7 @@
 //!       [if raw: varint length, the scan's entropy-coded data verbatim]
 //!       [else: varint trailing RST count, [if truncated: varint MCUs, varint bit
 //!       position, varint tail length, tail bytes]]
-//!   fast-model payload (tables, rANS words, raw bits)
+//!   fast-model payload (tables, then per stripe: rANS words, raw bits)
 //! ```
 //! The blob is the input with every scan's entropy-coded data removed (headers, inter-scan
 //! markers, trailer); it parses as a JPEG whose scans are empty. JPEGs embedded in it (Exif and
@@ -33,7 +33,7 @@ use crate::progressive;
 use std::time::Instant;
 
 const MAGIC: &[u8; 3] = b"JRC";
-const VERSION: u8 = 3;
+const VERSION: u8 = 4;
 const MODE_STORED: u8 = 0;
 const MODE_CODED: u8 = 1;
 /// nesting limit for embedded JPEGs (main image = depth 0)
