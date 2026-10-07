@@ -1,0 +1,18 @@
+[package]
+name = "jpeg-recons"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+memchr = "2"
+zstd = "0.13"
+
+[profile.release]
+debug = true
+lto = true
+codegen-units = 1
+panic = "unwind"
+
+[[bin]]
+name = "jrc"
+path = "src/main.rs"

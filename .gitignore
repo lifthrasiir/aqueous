@@ -1,0 +1,5 @@
+/target/
+/.venv/
+# personal test photos (contain GPS/Exif data); kept out of version control
+/samples/
+fuzz_failure.jpg
