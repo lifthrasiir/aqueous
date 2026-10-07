@@ -1,11 +1,13 @@
 //! Byte breakdown of PSD/PSB files by section, to see where the bytes go.
 //!
 //! `psdstat [-v] FILE...` prints, over all files, the bytes of each category and (for pixel
-//! data) the decoded size. `-v` adds one line per file. Bytes not covered by any parsed
-//! structure are counted as `unparsed`, so every file sums to its size.
+//! data) the decoded size. `-v` adds one line per file. Bytes outside every parsed structure
+//! are counted as `other` (padding, or junk), so every file sums to its size.
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
+
+use psd_recons::psd::{Channel, Compression, LayerInfo, Psd, Tag};
 
 #[derive(Default, Clone, Copy)]
 struct Cell {
@@ -37,322 +39,96 @@ impl Stats {
     fn total(&self) -> u64 {
         self.cells.values().map(|c| c.bytes).sum()
     }
-}
-
-struct Fail(String);
-type R<T> = Result<T, Fail>;
-fn err<T>(s: impl Into<String>) -> R<T> {
-    Err(Fail(s.into()))
-}
-
-struct Rd<'a> {
-    d: &'a [u8],
-    p: usize,
-}
-
-impl<'a> Rd<'a> {
-    fn new(d: &'a [u8]) -> Self {
-        Rd { d, p: 0 }
+    fn sum(&self, f: impl Fn(&str) -> bool) -> u64 {
+        self.cells.iter().filter(|(k, _)| f(k)).map(|(_, c)| c.bytes).sum()
     }
-    fn left(&self) -> usize {
-        self.d.len() - self.p
-    }
-    fn bytes(&mut self, n: usize) -> R<&'a [u8]> {
-        if n > self.left() {
-            return err(format!("truncated at {} (+{n})", self.p));
-        }
-        let s = &self.d[self.p..self.p + n];
-        self.p += n;
-        Ok(s)
-    }
-    fn u8(&mut self) -> R<u8> {
-        Ok(self.bytes(1)?[0])
-    }
-    fn u16(&mut self) -> R<u16> {
-        Ok(u16::from_be_bytes(self.bytes(2)?.try_into().unwrap()))
-    }
-    fn u32(&mut self) -> R<u32> {
-        Ok(u32::from_be_bytes(self.bytes(4)?.try_into().unwrap()))
-    }
-    fn i32(&mut self) -> R<i32> {
-        Ok(self.u32()? as i32)
-    }
-    fn u64(&mut self) -> R<u64> {
-        Ok(u64::from_be_bytes(self.bytes(8)?.try_into().unwrap()))
-    }
-    /// u32 in PSD, u64 in PSB.
-    fn len(&mut self, psb: bool) -> R<usize> {
-        let n = if psb { self.u64()? } else { self.u32()? as u64 };
-        usize::try_from(n).or_else(|_| err("length overflow"))
-    }
-    fn sub(&mut self, n: usize) -> R<Rd<'a>> {
-        Ok(Rd::new(self.bytes(n)?))
-    }
-}
-
-struct Doc {
-    psb: bool,
-    channels: u16,
-    width: u64,
-    height: u64,
-    depth: u16,
-}
-
-impl Doc {
-    fn row_bytes(&self, w: u64) -> u64 {
-        (w * self.depth as u64).div_ceil(8)
-    }
-}
-
-const COMPRESSION: [&str; 4] = ["raw", "rle", "zip", "zippred"];
-
-fn comp_name(c: u16) -> String {
-    COMPRESSION.get(c as usize).map_or_else(|| format!("comp{c}"), |s| s.to_string())
-}
-
-/// Decoded length of PackBits data, or None if it is malformed.
-fn packbits_len(mut d: &[u8]) -> Option<u64> {
-    let mut n = 0u64;
-    while let [h, rest @ ..] = d {
-        let h = *h as i8;
-        if h >= 0 {
-            let k = h as usize + 1;
-            if rest.len() < k {
-                return None;
-            }
-            n += k as u64;
-            d = &rest[k..];
-        } else if h != -128 {
-            if rest.is_empty() {
-                return None;
-            }
-            n += (1 - h as i64) as u64;
-            d = &rest[1..];
-        } else {
-            d = rest;
-        }
-    }
-    Some(n)
-}
-
-/// Keys whose length is 64-bit in PSB.
-fn long_key(k: &[u8]) -> bool {
-    matches!(
-        k,
-        b"LMsk" | b"Lr16" | b"Lr32" | b"Layr" | b"Mt16" | b"Mt32" | b"Mtrn" | b"Alph" | b"FMsk"
-            | b"lnk2" | b"FEid" | b"FXid" | b"PxSD"
-    )
 }
 
 fn key_str(k: &[u8]) -> String {
     k.iter().map(|&b| if b.is_ascii_graphic() || b == b' ' { b as char } else { '?' }).collect()
 }
 
-fn is_sig(d: &[u8]) -> bool {
-    d.len() >= 4 && (&d[..4] == b"8BIM" || &d[..4] == b"8B64")
+fn be_u32(d: &[u8], p: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(d.get(p..p + 4)?.try_into().unwrap()))
 }
 
-/// Tagged blocks (additional layer information) until the reader is exhausted. Padding
-/// between blocks is inconsistent among writers, so the next block is looked for at the
-/// unpadded, 2-aligned and 4-aligned positions.
-fn tagged_blocks(rd: &mut Rd, doc: &Doc, prefix: &str, st: &mut Stats) -> R<()> {
-    loop {
-        // Find the next signature.
-        let start = rd.p;
-        let mut found = false;
-        for align in [1, 2, 4] {
-            let q = start.next_multiple_of(align);
-            if q <= rd.d.len() && is_sig(&rd.d[q..]) {
-                if q > start {
-                    st.add(format!("{prefix}/pad"), (q - start) as u64, 0);
-                }
-                rd.p = q;
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            if rd.left() > 0 {
-                let rest = rd.left();
-                if rd.d[rd.p..].iter().all(|&b| b == 0) && rest < 4 {
-                    st.add(format!("{prefix}/pad"), rest as u64, 0);
-                } else {
-                    st.add(format!("{prefix}/unparsed"), rest as u64, 0);
-                }
-                rd.p = rd.d.len();
-            }
-            return Ok(());
-        }
-        let hstart = rd.p;
-        rd.bytes(4)?;
-        let key = rd.bytes(4)?;
-        let n = if doc.psb && long_key(key) { rd.u64()? as usize } else { rd.u32()? as usize };
-        let mut body = rd.sub(n)?;
-        let head = (rd.p - hstart - n) as u64;
-        let k = key_str(key);
-        st.add(format!("{prefix}/tag-hdr"), head, 0);
-        match key {
-            b"Lr16" | b"Lr32" | b"Layr" => layer_info(&mut body, doc, st)?,
-            b"lnk2" | b"lnkD" | b"lnk3" => linked_files(&mut body, doc, prefix, st)?,
-            _ => st.add(format!("{prefix}/tag/{k}"), n as u64, 0),
-        }
-    }
+fn be_u64(d: &[u8], p: usize) -> Option<u64> {
+    Some(u64::from_be_bytes(d.get(p..p + 8)?.try_into().unwrap()))
 }
 
-/// Embedded (smart object) files, categorized by declared file type.
-fn linked_files(rd: &mut Rd, _doc: &Doc, prefix: &str, st: &mut Stats) -> R<()> {
-    while rd.left() >= 8 {
-        let start = rd.p;
-        let n = rd.u64()? as usize;
-        let mut e = rd.sub(n)?;
-        let ty = |e: &mut Rd| -> R<(String, u64)> {
-            let _kind = e.bytes(4)?;
-            let _ver = e.u32()?;
-            let idl = e.u8()? as usize;
-            e.bytes(idl)?;
-            let nl = e.u32()? as usize;
-            e.bytes(nl * 2)?;
-            let ft = key_str(e.bytes(4)?);
-            e.bytes(4)?;
-            let dl = e.u64()?;
-            Ok((ft, dl))
+/// Embedded (smart object) files of a `lnk2`/`lnkD`/`lnk3` block, by declared file type.
+fn linked_files(d: &[u8], prefix: &str, st: &mut Stats) {
+    let mut p = 0;
+    while d.len() - p >= 8 {
+        let n = be_u64(d, p).unwrap() as usize;
+        let end = (p + 8).saturating_add(n).min(d.len());
+        let e = &d[p + 8..end];
+        // kind, version, Pascal unique id, Unicode name, file type, creator, data length
+        let ty = (|| {
+            let q = 8 + 1 + *e.get(8)? as usize;
+            let q = q + 4 + 2 * be_u32(e, q)? as usize;
+            Some((key_str(e.get(q..q + 4)?), be_u64(e, q + 8)?))
+        })();
+        let (ft, dl) = ty.unwrap_or(("?".into(), 0));
+        let ft = match ft.trim() {
+            "" => "none".into(),
+            t => t.to_string(),
         };
-        let (ft, dl) = ty(&mut e).unwrap_or(("?".into(), 0));
-        let ft = ft.trim().to_string();
-        let ft = if ft.is_empty() { "none".into() } else { ft };
-        let total = (rd.p - start) as u64;
+        let total = (end - p) as u64;
         let dl = dl.min(total);
         st.add(format!("{prefix}/lnk/{ft}"), dl, 0);
         st.add(format!("{prefix}/lnk/meta"), total - dl, 0);
-        // Entries are padded to 4.
-        let pad = (rd.p.next_multiple_of(4) - rd.p).min(rd.left());
-        if pad > 0 {
-            rd.bytes(pad)?;
-            st.add(format!("{prefix}/lnk/meta"), pad as u64, 0);
+        p = end.next_multiple_of(4).min(d.len());
+    }
+}
+
+fn tags(psd: &Psd, d: &[u8], tags: &[Tag], prefix: &str, st: &mut Stats) {
+    for t in tags {
+        st.add(format!("{prefix}/tag-hdr"), (t.span.len() - t.data.len()) as u64, 0);
+        match &t.key {
+            // Counted by layer_info().
+            b"Layr" | b"Lr16" | b"Lr32" if psd.layer_info.span.start == t.data.start => {}
+            b"lnk2" | b"lnkD" | b"lnk3" => linked_files(&d[t.data.clone()], prefix, st),
+            k => st.add(format!("{prefix}/tag/{}", key_str(k)), t.data.len() as u64, 0),
         }
     }
-    if rd.left() > 0 {
-        st.add(format!("{prefix}/lnk/meta"), rd.left() as u64, 0);
-    }
-    Ok(())
 }
 
-struct ChanRef {
-    id: i16,
-    len: usize,
-    w: u64,
-    h: u64,
+fn channel(psd: &Psd, d: &[u8], c: &Channel, st: &mut Stats) {
+    let kind = match c.id {
+        -1 => "alpha",
+        -2 | -3 => "mask",
+        _ => "color",
+    };
+    let Some(comp) = c.compression(d) else {
+        st.add("layer/chan/empty", c.span.len() as u64, 0);
+        return;
+    };
+    let raw = psd.row_bytes(c.width) * c.height;
+    let cat = format!("layer/chan/{kind}/{}", comp.name());
+    if comp == Compression::Rle {
+        let counts = (c.height as usize * if psd.psb { 4 } else { 2 }).min(c.span.len() - 2);
+        st.add(format!("layer/chan/{kind}/rle-counts"), 2 + counts as u64, 0);
+        st.add(cat, (c.span.len() - 2 - counts) as u64, raw);
+    } else {
+        st.add(cat, c.span.len() as u64, raw);
+    }
 }
 
-/// Layer info: layer records followed by channel image data.
-fn layer_info(rd: &mut Rd, doc: &Doc, st: &mut Stats) -> R<()> {
-    if rd.left() == 0 {
-        return Ok(());
+fn layer_info(psd: &Psd, d: &[u8], li: &LayerInfo, st: &mut Stats) {
+    if li.span.is_empty() {
+        return;
     }
-    let count = (rd.u16()? as i16).unsigned_abs() as usize;
     st.add("layer/records", 2, 0);
-    st.add("layer/count", 0, count as u64);
-    let mut chans: Vec<ChanRef> = Vec::new();
-    for _ in 0..count {
-        let s = rd.p;
-        let top = rd.i32()?;
-        let left = rd.i32()?;
-        let bottom = rd.i32()?;
-        let right = rd.i32()?;
-        let lw = (right as i64 - left as i64).max(0) as u64;
-        let lh = (bottom as i64 - top as i64).max(0) as u64;
-        let nc = rd.u16()? as usize;
-        let first = chans.len();
-        for _ in 0..nc {
-            let id = rd.u16()? as i16;
-            let len = rd.len(doc.psb)?;
-            chans.push(ChanRef { id, len, w: lw, h: lh });
-        }
-        rd.bytes(4 + 4 + 4)?; // sig, blend key, opacity/clip/flags/filler
-        let el = rd.u32()? as usize;
-        let mut ex = rd.sub(el)?;
-        // Mask data.
-        let ml = ex.u32()? as usize;
-        let mut m = ex.sub(ml)?;
-        if ml >= 16 {
-            let t = m.i32()? as i64;
-            let l = m.i32()? as i64;
-            let b = m.i32()? as i64;
-            let r = m.i32()? as i64;
-            let (mw, mh) = ((r - l).max(0) as u64, (b - t).max(0) as u64);
-            // The real user mask (-3) rectangle comes later, after flags; approximate it.
-            let mut real = (mw, mh);
-            if ml >= 36 {
-                m.bytes(1)?; // default color
-                let flags = m.u8()?;
-                if flags & 0x10 != 0 {
-                    let pf = m.u8()?;
-                    for bit in [1u8, 2, 4, 8] {
-                        if pf & bit != 0 {
-                            m.bytes(if bit & 5 != 0 { 1 } else { 8 })?;
-                        }
-                    }
-                }
-                if m.left() >= 18 {
-                    m.bytes(2)?;
-                    let t = m.i32()? as i64;
-                    let l = m.i32()? as i64;
-                    let b = m.i32()? as i64;
-                    let r = m.i32()? as i64;
-                    real = ((r - l).max(0) as u64, (b - t).max(0) as u64);
-                }
-            }
-            for c in &mut chans[first..] {
-                match c.id {
-                    -2 => (c.w, c.h) = (mw, mh),
-                    -3 => (c.w, c.h) = real,
-                    _ => {}
-                }
-            }
-        }
-        let bl = ex.u32()? as usize;
-        ex.bytes(bl)?;
-        let nl = ex.u8()? as usize;
-        ex.bytes(nl)?;
-        let np = (1 + nl).next_multiple_of(4) - 1 - nl;
-        ex.bytes(np.min(ex.left()))?;
-        st.add("layer/records", (ex.p + (rd.p - s - el)) as u64, 0);
-        tagged_blocks(&mut ex, doc, "layer", st)?;
-    }
-    for c in &chans {
-        let kind = match c.id {
-            -1 => "alpha",
-            -2 | -3 => "mask",
-            _ => "color",
-        };
-        let mut d = rd.sub(c.len)?;
-        if c.len < 2 {
-            st.add("layer/chan/empty", c.len as u64, 0);
-            continue;
-        }
-        let comp = d.u16()?;
-        let raw = doc.row_bytes(c.w) * c.h;
-        let cat = format!("layer/chan/{kind}/{}", comp_name(comp));
-        if comp == 1 {
-            let cb = if doc.psb { 4 } else { 2 };
-            let counts = (c.h as usize * cb).min(d.left());
-            d.bytes(counts)?;
-            st.add(format!("layer/chan/{kind}/rle-counts"), (2 + counts) as u64, 0);
-            if packbits_len(&d.d[d.p..]) != Some(raw) {
-                st.add("layer/chan/rle-mismatch", 0, 1);
-            }
-            st.add(cat, d.left() as u64, raw);
-        } else {
-            st.add(cat, c.len as u64, raw);
+    st.add("layer/count", 0, li.layers.len() as u64);
+    for l in &li.layers {
+        let tag_bytes: usize = l.tags.iter().map(|t| t.span.len()).sum();
+        st.add("layer/records", (l.record.len() - tag_bytes) as u64, 0);
+        tags(psd, d, &l.tags, "layer", st);
+        for c in &l.channels {
+            channel(psd, d, c, st);
         }
     }
-    let rest = rd.left();
-    if rest > 0 {
-        let cat = if rd.d[rd.p..].iter().all(|&b| b == 0) { "layer/pad" } else { "layer/unparsed" };
-        st.add(cat, rest as u64, 0);
-        rd.p = rd.d.len();
-    }
-    Ok(())
 }
 
 fn resource_cat(id: u16) -> &'static str {
@@ -370,88 +146,39 @@ fn resource_cat(id: u16) -> &'static str {
     }
 }
 
-fn analyze(d: &[u8], st: &mut Stats) -> R<Doc> {
-    let mut rd = Rd::new(d);
-    if rd.bytes(4)? != b"8BPS" {
-        return err("not 8BPS");
-    }
-    let ver = rd.u16()?;
-    if ver != 1 && ver != 2 {
-        return err(format!("version {ver}"));
-    }
-    rd.bytes(6)?;
-    let channels = rd.u16()?;
-    let height = rd.u32()? as u64;
-    let width = rd.u32()? as u64;
-    let depth = rd.u16()?;
-    let mode = rd.u16()?;
-    let doc = Doc { psb: ver == 2, channels, width, height, depth };
+fn analyze(psd: &Psd, d: &[u8], st: &mut Stats) {
     st.add("header", 26, 0);
-    st.add(format!("meta/depth{depth}"), 0, 1);
-    st.add(format!("meta/mode{mode}"), 0, 1);
+    st.add(format!("meta/depth{}", psd.depth), 0, 1);
+    st.add(format!("meta/mode{}", psd.mode), 0, 1);
+    st.add("colormode", 4 + psd.color_mode.len() as u64, 0);
 
-    let n = rd.u32()? as usize;
-    rd.bytes(n)?;
-    st.add("colormode", 4 + n as u64, 0);
-
-    let n = rd.u32()? as usize;
     st.add("res/hdr", 4, 0);
-    let mut res = rd.sub(n)?;
-    while res.left() >= 12 {
-        let s = res.p;
-        res.bytes(4)?;
-        let id = res.u16()?;
-        let nl = res.u8()? as usize;
-        res.bytes(nl + (nl + 1) % 2)?;
-        let dl = res.u32()? as usize;
-        let h = res.p - s;
-        let pad = dl % 2;
-        // Some writers get the length slightly wrong; trust the next signature within 2 bytes.
-        let next = res.p + dl + pad;
-        let end = [0isize, -1, -2, 1, 2]
-            .iter()
-            .map(|&o| next.wrapping_add_signed(o))
-            .find(|&q| q >= res.p && (q == res.d.len() || res.d.get(q..q + 4) == Some(b"8BIM")))
-            .unwrap_or(next);
-        if end != next {
-            st.add("res/misaligned", 0, 1);
-        }
-        res.bytes(end - res.p)?;
-        st.add("res/hdr", (h + pad) as u64, 0);
-        st.add(resource_cat(id), (end - s - h - pad) as u64, 0);
-    }
-    if res.left() > 0 {
-        st.add("res/unparsed", res.left() as u64, 0);
+    for r in &psd.resources {
+        st.add("res/hdr", (r.span.len() - r.data.len()) as u64, 0);
+        st.add(resource_cat(r.id), r.data.len() as u64, 0);
     }
 
-    let n = rd.len(doc.psb)?;
-    let mut lm = rd.sub(n)?;
-    st.add("layer/hdr", if doc.psb { 8 } else { 4 }, 0);
-    if n > 0 {
-        let ln = lm.len(doc.psb)?;
-        st.add("layer/hdr", if doc.psb { 8 } else { 4 }, 0);
-        let mut li = lm.sub(ln)?;
-        layer_info(&mut li, &doc, st)?;
-        if lm.left() >= 4 {
-            let gl = lm.u32()? as usize;
-            lm.bytes(gl.min(lm.left()))?;
-            st.add("gmask", 4 + gl as u64, 0);
-        }
-        tagged_blocks(&mut lm, &doc, "global", st)?;
+    let lf = if psd.psb { 8 } else { 4 };
+    st.add("layer/hdr", lf, 0);
+    if psd.layer_section.len() > lf as usize {
+        st.add("layer/hdr", lf, 0);
     }
+    layer_info(psd, d, &psd.layer_info, st);
+    if let Some(g) = &psd.global_mask {
+        st.add("gmask", g.len() as u64, 0);
+    }
+    tags(psd, d, &psd.global_tags, "global", st);
 
-    // Composite image.
-    let comp = rd.u16()?;
-    let raw = doc.row_bytes(width) * height * channels as u64;
-    let rest = rd.left() as u64;
-    if comp == 1 {
-        let counts = height * channels as u64 * if doc.psb { 4 } else { 2 };
-        st.add("composite/rle-counts", 2 + counts.min(rest), 0);
-        st.add("composite/rle", rest.saturating_sub(counts), raw);
+    let comp = psd.composite_compression(d);
+    let raw = psd.row_bytes(psd.width) * psd.height * psd.channels as u64;
+    let n = psd.composite.len() as u64;
+    if comp == Compression::Rle {
+        let counts = (psd.height * psd.channels as u64 * if psd.psb { 4 } else { 2 }).min(n - 2);
+        st.add("composite/rle-counts", 2 + counts, 0);
+        st.add("composite/rle", n - 2 - counts, raw);
     } else {
-        st.add(format!("composite/{}", comp_name(comp)), 2 + rest, raw);
+        st.add(format!("composite/{}", comp.name()), n, raw);
     }
-    Ok(doc)
 }
 
 fn main() -> ExitCode {
@@ -475,38 +202,36 @@ fn main() -> ExitCode {
             }
         };
         let mut st = Stats::default();
-        let res = analyze(&d, &mut st);
-        let covered = st.total();
-        if covered < d.len() as u64 {
-            st.add("unparsed", d.len() as u64 - covered, 0);
-        }
-        match res {
-            Ok(doc) => {
+        match psd_recons::parse(&d) {
+            Ok(psd) => {
+                analyze(&psd, &d, &mut st);
+                let covered = st.total();
+                if covered < d.len() as u64 {
+                    st.add("other", d.len() as u64 - covered, 0);
+                }
+                assert_eq!(st.total(), d.len() as u64, "{f}: overcounted");
                 if verbose {
-                    let pick = |p: &str| -> u64 {
-                        st.cells.iter().filter(|(k, _)| k.starts_with(p)).map(|(_, c)| c.bytes).sum()
-                    };
                     let size = d.len() as f64;
                     println!(
-                        "{f}\t{}x{}x{}@{}\t{}\tlayers {:.3}\tcomposite {:.3}\tres {:.3}\tlnk {:.3}\tunparsed {:.3}",
-                        doc.width,
-                        doc.height,
-                        doc.channels,
-                        doc.depth,
+                        "{f}\t{}x{}x{}@{}\t{}\tlayers {:.3}\tcomposite {:.3}\tres {:.3}\tlnk {:.3}\tother {:.3}",
+                        psd.width,
+                        psd.height,
+                        psd.channels,
+                        psd.depth,
                         d.len(),
-                        pick("layer/chan") as f64 / size,
-                        pick("composite") as f64 / size,
-                        pick("res/") as f64 / size,
-                        st.cells.iter().filter(|(k, _)| k.contains("/lnk/")).map(|(_, c)| c.bytes).sum::<u64>() as f64
-                            / size,
-                        pick("unparsed") as f64 / size + pick("layer/unparsed") as f64 / size,
+                        st.sum(|k| k.starts_with("layer/chan")) as f64 / size,
+                        st.sum(|k| k.starts_with("composite")) as f64 / size,
+                        st.sum(|k| k.starts_with("res/")) as f64 / size,
+                        st.sum(|k| k.contains("/lnk/")) as f64 / size,
+                        st.sum(|k| k == "other") as f64 / size,
                     );
                 }
                 all.add("files", 0, 1);
             }
-            Err(Fail(e)) => {
+            Err(e) => {
                 eprintln!("{f}: {e}");
                 failed += 1;
+                st.add("unparsed", d.len() as u64, 0);
                 all.add("files-failed", 0, 1);
             }
         }

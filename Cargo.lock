@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "flate-recons"
+version = "0.1.0"
+
+[[package]]
 name = "psd-recons"
 version = "0.1.0"
+dependencies = [
+ "flate-recons",
+]
