@@ -7,6 +7,9 @@
 //! the stored composite: share of exact and near pixels, and order-0 entropy of the residual,
 //! of a left-neighbor prediction of the composite alone, and of a mix of the two.
 //!
+//! `psdx rle FILE...` identifies the PackBits encoder of every RLE channel and of the
+//! composite, and prints per file how many rows it reproduces, by encoder.
+//!
 //! `psdx dump OUTDIR FILE...` writes the 8-bit RGB layers (RGBA when they have transparency),
 //! user masks and composite of each file as PAM images under `OUTDIR/<file stem>/`, and
 //! prints one TSV line per image: source file, image path, bytes the image takes in the PSD
@@ -16,6 +19,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
+use psd_recons::packbits::{self, Encoder};
+use psd_recons::psd::Compression;
 use psd_recons::{composite, pixels};
 use psd_recons::psd::Psd;
 
@@ -101,6 +106,58 @@ fn predict(psd: &Psd, d: &[u8], f: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn rle(psd: &Psd, d: &[u8], f: &str) {
+    let cb = if psd.psb { 4 } else { 2 };
+    let mut planes: Vec<(&[u8], usize)> = Vec::new();
+    for l in &psd.layer_info.layers {
+        for c in &l.channels {
+            if c.compression(d) == Some(Compression::Rle) {
+                planes.push((&d[c.span.start + 2..c.span.end], c.height as usize));
+            }
+        }
+    }
+    let comp_rows = (psd.height * psd.channels as u64) as usize;
+    if psd.composite_compression(d) == Compression::Rle {
+        // Each composite plane is encoded on its own.
+        let data = &d[psd.composite.start + 2..];
+        if let Some(rows) = packbits::rows(data, comp_rows, cb) {
+            let h = psd.height as usize;
+            for k in 0..psd.channels as usize {
+                let r = &rows[k * h..(k + 1) * h];
+                let (enc, n) = packbits::identify(r);
+                print_kind(enc, n, h, true);
+            }
+        }
+    }
+    let (mut rows_all, mut ok) = (0, 0);
+    let mut kinds: std::collections::BTreeMap<String, (usize, usize)> = Default::default();
+    for (data, h) in planes {
+        let Some(rows) = packbits::rows(data, h, cb) else { continue };
+        let (enc, n) = packbits::identify(&rows);
+        let k = kinds.entry(kind(enc)).or_default();
+        k.0 += h;
+        k.1 += n;
+        rows_all += h;
+        ok += n;
+    }
+    println!("{f}\trows {rows_all}\treproduced {:.5}\t{kinds:?}", ok as f64 / rows_all.max(1) as f64);
+}
+
+fn kind(enc: Encoder) -> String {
+    match enc {
+        Encoder::Photoshop { period: usize::MAX, .. } => "ps".into(),
+        Encoder::Photoshop { period, .. } if period >= 4096 => "ps-1tile".into(),
+        Encoder::Photoshop { period, .. } => format!("ps-{period}"),
+        Encoder::Greedy { min_run, split_rest } => format!("greedy{min_run}{}", if split_rest { "s" } else { "" }),
+    }
+}
+
+fn print_kind(enc: Encoder, n: usize, h: usize, composite: bool) {
+    if n < h {
+        println!("  {}: {} {n}/{h}", if composite { "composite plane" } else { "plane" }, kind(enc));
+    }
+}
+
 fn write_pam(path: &Path, w: u64, h: u64, planes: &[&[u8]]) -> std::io::Result<()> {
     let tuple = match planes.len() {
         1 => "GRAYSCALE",
@@ -173,12 +230,12 @@ fn main() -> ExitCode {
     let (cmd, rest) = match args.split_first() {
         Some((c, r)) => (c.as_str(), r),
         None => {
-            eprintln!("usage: psdx check|predict FILE... | psdx dump OUTDIR FILE...");
+            eprintln!("usage: psdx check|predict|rle FILE... | psdx dump OUTDIR FILE...");
             return ExitCode::FAILURE;
         }
     };
     let (outdir, files) = match cmd {
-        "check" | "predict" => (None, rest),
+        "check" | "predict" | "rle" => (None, rest),
         "dump" if !rest.is_empty() => (Some(Path::new(&rest[0])), &rest[1..]),
         _ => {
             eprintln!("unknown command {cmd}");
@@ -204,6 +261,7 @@ fn main() -> ExitCode {
             }
         };
         match outdir {
+            None if cmd == "rle" => rle(&psd, &d, f),
             None if cmd == "predict" => {
                 if let Err(e) = predict(&psd, &d, f) {
                     eprintln!("{f}: {e}");

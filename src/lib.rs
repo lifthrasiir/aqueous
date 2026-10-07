@@ -1,6 +1,7 @@
 //! Lossless PSD/PSB recompression (in progress): structure parsing and pixel decoding.
 
 pub mod composite;
+pub mod packbits;
 pub mod pixels;
 pub mod psd;
 
