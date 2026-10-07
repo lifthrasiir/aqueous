@@ -4,8 +4,10 @@
 //! compression field) or the composite image's (all planes). 8-bit spans that are RLE
 //! (PackBits) or raw are taken out of the file and their planes coded by the pixel model;
 //! RLE is rebuilt by the encoder identified for the span ([`packbits`]), with the rows it
-//! does not reproduce stored verbatim. What remains of the file, the *skeleton*, is
-//! compressed with zstd.
+//! does not reproduce stored verbatim. Files embedded in smart objects are spans too, coded
+//! by the recompressor of their format (this one for PSD/PSB, png-recons, jpeg-recons) when
+//! that makes them smaller. What remains of the file, the *skeleton*, is compressed with
+//! zstd.
 //!
 //! ```text
 //! "PSDR" version(u8) mode(u8)
@@ -75,10 +77,39 @@ fn get_opt(src: &[u8], at: &mut usize) -> Result<usize> {
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Codec {
+    Psd,
+    Png,
+    Jpeg,
+}
+
 #[derive(Debug, Clone)]
 enum Coding {
     Raw,
     Rle { count_bytes: usize, encoder: Encoder, exceptions: Vec<(usize, Vec<u8>)> },
+    /// An embedded file, compressed by `codec`.
+    Nested { codec: Codec, packed: Vec<u8> },
+}
+
+/// How deep embedded PSDs are recompressed.
+const MAX_DEPTH: usize = 3;
+
+fn nested_compress(codec: Codec, data: &[u8], depth: usize) -> Option<Vec<u8>> {
+    let packed = match codec {
+        Codec::Psd => try_compress(data, depth + 1)?,
+        Codec::Png => png_recons::compress(data),
+        Codec::Jpeg => jpeg_recons::container::compress(data),
+    };
+    (packed.len() < data.len()).then_some(packed)
+}
+
+fn nested_decompress(codec: Codec, packed: &[u8]) -> Result<Vec<u8>> {
+    match codec {
+        Codec::Psd => decompress(packed),
+        Codec::Png => png_recons::decompress(packed).map_err(|_| corrupt()),
+        Codec::Jpeg => jpeg_recons::container::decompress(packed).map_err(|_| corrupt()),
+    }
 }
 
 /// A span of pixel data taken out of the file: `planes` planes of `h` rows of `w` bytes.
@@ -104,9 +135,10 @@ struct GroupDef {
 }
 
 /// Rebuilds a span's bytes from its decoded planes (planar, `planes * h * w` bytes).
-fn rebuild(s: &Span, data: &[u8], out: &mut Vec<u8>) {
+fn rebuild(s: &Span, data: &[u8], out: &mut Vec<u8>) -> Result<()> {
     match &s.coding {
         Coding::Raw => out.extend_from_slice(data),
+        Coding::Nested { codec, packed } => out.extend_from_slice(&nested_decompress(*codec, packed)?),
         Coding::Rle { count_bytes, encoder, exceptions } => {
             let rows = s.planes * s.h;
             let counts_at = out.len();
@@ -129,6 +161,7 @@ fn rebuild(s: &Span, data: &[u8], out: &mut Vec<u8>) {
             }
         }
     }
+    Ok(())
 }
 
 /// Decodes a candidate span and works out how to rebuild it, or None if it cannot be.
@@ -169,20 +202,18 @@ fn analyze_span(d: &[u8], start: usize, end: usize, planes: usize, w: usize, h: 
     };
     let span = Span { start, end, gap: 0, planes, w, h, coding };
     let mut back = Vec::with_capacity(src.len());
-    rebuild(&span, &data, &mut back);
+    rebuild(&span, &data, &mut back).ok()?;
     (back == src).then_some((span, data))
 }
 
 /// Spans and groups of a parsed file, with the decoded planes of each span.
-fn plan(psd: &Psd, d: &[u8]) -> (Vec<Span>, Vec<Vec<u8>>, Vec<GroupDef>) {
+fn plan(psd: &Psd, d: &[u8], depth: usize) -> (Vec<Span>, Vec<Vec<u8>>, Vec<GroupDef>) {
     let mut spans = Vec::new();
     let mut datas = Vec::new();
     let mut groups = Vec::new();
-    if psd.depth != 8 {
-        return (spans, datas, groups);
-    }
+    let pixels = psd.depth == 8;
     let rgb = psd.mode == 3;
-    for l in &psd.layer_info.layers {
+    for l in psd.layer_info.layers.iter().filter(|_| pixels) {
         let mut refs: Vec<(i16, PlaneRef)> = Vec::new();
         for c in &l.channels {
             let (w, h) = (c.width as usize, c.height as usize);
@@ -215,10 +246,29 @@ fn plan(psd: &Psd, d: &[u8]) -> (Vec<Span>, Vec<Vec<u8>>, Vec<GroupDef>) {
             }
         }
     }
+    // Embedded files, which come after the layers' pixel data.
+    if depth < MAX_DEPTH {
+        for f in psd::linked(psd, d) {
+            if spans.last().is_some_and(|s: &Span| s.end > f.data.start) {
+                continue;
+            }
+            let codec = match &f.file_type {
+                b"8BPB" | b"8BPS" => Codec::Psd,
+                b"png " | b"PNGf" => Codec::Png,
+                b"JPEG" => Codec::Jpeg,
+                _ => continue,
+            };
+            if let Some(packed) = nested_compress(codec, &d[f.data.clone()], depth) {
+                let coding = Coding::Nested { codec, packed };
+                spans.push(Span { start: f.data.start, end: f.data.end, gap: 0, planes: 0, w: 0, h: 0, coding });
+                datas.push(Vec::new());
+            }
+        }
+    }
     // Composite.
     let (w, h, n) = (psd.width as usize, psd.height as usize, psd.channels as usize);
     let comp = psd.composite_compression(d);
-    if w > 0 && h > 0 && n > 0 {
+    if pixels && w > 0 && h > 0 && n > 0 {
         if let Some((s, data)) = analyze_span(d, psd.composite.start + 2, psd.composite.end, n, w, h, comp, psd.psb) {
             let si = spans.len();
             spans.push(s);
@@ -278,6 +328,11 @@ fn put_layout(spans: &[Span], groups: &[GroupDef]) -> Vec<u8> {
         put_varint(&mut o, s.h as u64);
         match &s.coding {
             Coding::Raw => o.push(0),
+            Coding::Nested { codec, packed } => {
+                o.push(16 + *codec as u8);
+                put_varint(&mut o, packed.len() as u64);
+                o.extend_from_slice(packed);
+            }
             Coding::Rle { count_bytes, encoder, exceptions } => {
                 o.push(*count_bytes as u8);
                 put_encoder(&mut o, *encoder);
@@ -328,6 +383,11 @@ fn get_layout(src: &[u8]) -> Result<(Vec<Span>, Vec<GroupDef>)> {
                 }
                 Coding::Rle { count_bytes: cb, encoder, exceptions }
             }
+            16..=18 => {
+                let codec = [Codec::Psd, Codec::Png, Codec::Jpeg][cb - 16];
+                let len = get_usize(src, &mut at)?;
+                Coding::Nested { codec, packed: get_bytes(src, &mut at, len)?.to_vec() }
+            }
             _ => return Err(corrupt()),
         };
         // Positions are only known once rebuilt.
@@ -377,7 +437,7 @@ fn group_of(def: &GroupDef, spans: &[Span], datas: Option<&[Vec<u8>]>) -> Result
 
 /// Compresses a file; never fails (a file that cannot be coded is stored).
 pub fn compress(file: &[u8]) -> Vec<u8> {
-    match try_compress(file) {
+    match try_compress(file, 0) {
         Some(out) => out,
         None => {
             let mut out = Vec::with_capacity(6 + file.len() / 2);
@@ -393,9 +453,9 @@ fn skeleton_level(n: usize) -> i32 {
     if n < 16 << 20 { 19 } else { 9 }
 }
 
-fn try_compress(file: &[u8]) -> Option<Vec<u8>> {
+fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     let psd = psd::parse(file).ok()?;
-    let (mut spans, datas, groups) = plan(&psd, file);
+    let (mut spans, datas, groups) = plan(&psd, file, depth);
     if spans.is_empty() {
         return None;
     }
@@ -484,7 +544,7 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
         let piece = sk.get(k..k.checked_add(s.gap).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
         out.extend_from_slice(piece);
         k += s.gap;
-        rebuild(s, data, &mut out);
+        rebuild(s, data, &mut out)?;
     }
     out.extend_from_slice(sk.get(k..).ok_or_else(corrupt)?);
     if xxhash_rust::xxh3::xxh3_64(&out) != hash {

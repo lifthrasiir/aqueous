@@ -8,6 +8,7 @@ publish = false
 [dependencies]
 flate-recons = { path = "../flate-recons" }
 png-recons = { path = "../png-recons" }
+jpeg-recons = { path = "../jpeg-recons" }
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
