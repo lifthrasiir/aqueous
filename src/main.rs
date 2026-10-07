@@ -4,6 +4,8 @@
 //!   jrc fuzz [-n rounds] [-s seed] file...   mutate inputs; roundtrip must stay exact, no panics
 //!   jrc c in out | jrc d in out      compress / decompress a file
 //!   jrc info file...                 parse and decode, print per-scan information
+//!   jrc mutenc [-n rounds] [-s seed] file...   re-encode inputs with valid non-canonical
+//!                                    choices; roundtrip must stay exact
 
 use jpeg_recons::container::{self, Timing};
 use std::time::Instant;
@@ -162,6 +164,51 @@ fn fuzz(files: &[String], rounds: usize, seed: u64) {
     }
 }
 
+fn mutenc(files: &[String], rounds: usize, seed: u64) {
+    use jpeg_recons::variant;
+    let mut r = variant::Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    let inputs: Vec<(String, Vec<u8>, Vec<jpeg_recons::jpeg::Coefs>)> = files
+        .iter()
+        .filter_map(|p| {
+            let d = std::fs::read(p).ok()?;
+            let c = variant::coefficients(&d)?;
+            Some((p.clone(), d, c))
+        })
+        .collect();
+    assert!(!inputs.is_empty(), "no decodable inputs");
+    let (mut identical, mut coded, mut partial, mut stored, mut ungenerated) = (0, 0, 0, 0, 0);
+    for round in 0..rounds {
+        let (name, d, c0) = &inputs[r.below(inputs.len() as u64) as usize];
+        let Some((v, desc)) = variant::reencode(d, &mut r) else {
+            ungenerated += 1;
+            continue;
+        };
+        // the generator must only change the coding, never the coefficients
+        let c1 = variant::coefficients(&v).unwrap_or_else(|| panic!("round {round} ({name}): variant does not decode: {desc}"));
+        assert!(c0.iter().zip(&c1).all(|(a, b)| a.blocks == b.blocks), "round {round} ({name}): variant changed coefficients: {desc}");
+        if v == *d {
+            identical += 1;
+        }
+        let (cmp, why) = container::compress_with(&v, &mut Timing::default());
+        let back = container::decompress(&cmp).unwrap_or_else(|e| {
+            std::fs::write("mutenc_failure.jpg", &v).ok();
+            panic!("round {round} ({name}): decompress failed: {e} (variant saved to mutenc_failure.jpg): {desc}")
+        });
+        if back != v {
+            std::fs::write("mutenc_failure.jpg", &v).ok();
+            panic!("round {round} ({name}): ROUNDTRIP MISMATCH (variant saved to mutenc_failure.jpg): {desc}");
+        }
+        match why.as_deref() {
+            None => coded += 1,
+            Some(w) if w.starts_with("partial") => partial += 1,
+            Some(_) => stored += 1,
+        }
+    }
+    println!(
+        "mutenc: {rounds} rounds, all roundtrips exact; not generated {ungenerated}, identical to original {identical}, fully coded {coded}, some scans raw {partial}, stored {stored}"
+    );
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -181,6 +228,7 @@ fn main() {
     match cmd.as_str() {
         "bench" => bench(&args, n.unwrap_or(5)),
         "fuzz" => fuzz(&args, n.unwrap_or(1000), seed),
+        "mutenc" => mutenc(&args, n.unwrap_or(200), seed),
         "info" => {
             for path in &args {
                 let d = std::fs::read(path).unwrap();
