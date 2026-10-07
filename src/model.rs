@@ -30,12 +30,14 @@ pub const MAX_GRANULE_RAW_BITS: usize = 288 * 2 * 13 + 576;
 pub const NB: usize = 24;
 pub const NBX: usize = NB + 1;
 /// Position classes of the pair context (64 lines each, the last one open).
-pub const NPOS: usize = 4;
+pub const NPOS: usize = 1;
 /// Pair contexts: (table_select, magnitude bucket, position class). The magnitude is the
 /// neighbourhood in the previous granule (scaled to the current step sizes) and in the
 /// other channel, so the contexts of a granule depend on nothing decoded in it.
 pub const PAIR_BASE: usize = 0;
-pub const PAIR_PER_TABLE: usize = NBX * NPOS * NCUR;
+pub const PAIR_PER_TABLE: usize = NBX * NOC * NPOS * NCUR;
+/// Classes of the other channel's magnitude at the same lines (0: none).
+pub const NOC: usize = 6;
 /// Classes of the magnitude of the pair `LAG` pairs back in the same granule.
 pub const NCUR: usize = 1;
 const LAG: usize = 2;
@@ -52,12 +54,13 @@ fn cur_class(cur: &[u16; 576], line: usize) -> usize {
     (s > 0) as usize + (s > 2) as usize
 }
 pub const LIN_BASE: usize = PAIR_BASE + 32 * PAIR_PER_TABLE;
-/// Escape bit length contexts: (table_select - 16, magnitude bucket capped at 15).
-pub const LIN_ALPHA: usize = 14;
+/// Escape contexts: (table_select - 16, magnitude bucket capped at 15). The symbol is
+/// `bit length << 1 | the bit below the top one` (0 for lengths below 2).
+pub const LIN_ALPHA: usize = 28;
 pub const QUAD_BASE: usize = LIN_BASE + 16 * 16;
 /// Quadruple contexts: (count1 table, nonzero values at the same lines of the previous
 /// granule 0..=4 or 5 if none, position class).
-pub const QUAD_PER_TABLE: usize = 6 * NPOS;
+pub const QUAD_PER_TABLE: usize = 6 * 3 * NPOS;
 /// Scalefactor contexts: (size in bits 1..=5, previous scalefactor of the granule capped
 /// at 15 or 16 if none, same scalefactor of the previous coded granule of the channel
 /// capped at 15 or 16 if none).
@@ -76,6 +79,21 @@ pub fn alphabet(ctx: usize) -> usize {
         16
     } else {
         1 << ((ctx - SCF_BASE) / (17 * 17) + 1)
+    }
+}
+
+/// Contexts of the same family share an alphabet and serve as each other's prior when
+/// training (pairs and escapes: same table; quadruples: same count1 table; scalefactors:
+/// same size).
+pub fn family(ctx: usize) -> usize {
+    if ctx < LIN_BASE {
+        (ctx - PAIR_BASE) / PAIR_PER_TABLE
+    } else if ctx < QUAD_BASE {
+        32 + (ctx - LIN_BASE) / 16
+    } else if ctx < SCF_BASE {
+        48 + (ctx - QUAD_BASE) / QUAD_PER_TABLE
+    } else {
+        50 + (ctx - SCF_BASE) / (17 * 17)
     }
 }
 
@@ -194,7 +212,7 @@ impl State {
 
 #[inline(always)]
 fn pos_class(line: usize) -> usize {
-    (line >> 6).min(NPOS - 1)
+    (line >> 7).min(NPOS - 1)
 }
 
 /// Quantizer step exponents of the long bands of a long-block granule, in quarter powers of
@@ -218,6 +236,7 @@ struct Prep {
     full: [u8; 39],
     use_prev: bool,
     short: bool,
+    other: bool,
 }
 
 fn prepare(st: &State, h: Header, si: &SideInfo, gr: usize, ch: usize, scf: &[u8]) -> Prep {
@@ -248,17 +267,20 @@ fn prepare(st: &State, h: Header, si: &SideInfo, gr: usize, ch: usize, scf: &[u8
             while i < stop {
                 let k = 2 * i;
                 let (pm, p0, p1, p2) = (p[k] as u64, p[k + 1] as u64, p[k + 2] as u64, p[k + 3] as u64);
-                nbh[i] = (((2 * (p0 + p1) + pm + p2) * f) >> 8).min(1 << 24) as u32;
+                let wide = if k >= 1 { p[k - 1] as u64 } else { 0 } + p[(k + 4).min(579)] as u64;
+                nbh[i] = (((4 * (p0 + p1) + 2 * (pm + p2) + wide) * f) >> 9).min(1 << 24) as u32;
                 i += 1;
             }
         }
     }
+    let mut oc = [0u8; 288];
     if other {
         for i in 0..npairs {
-            nbh[i] += 3 * (st.cur0[2 * i] as u32 + st.cur0[2 * i + 1] as u32);
+            let o = st.cur0[2 * i] as u32 + st.cur0[2 * i + 1] as u32;
+            oc[i] = 1 + (o > 0) as u8 + (o > 2) as u8 + (o > 6) as u8 + (o > 14) as u8;
         }
     }
-    let w = if use_prev { 6 } else { 0 } + if other { 6 } else { 0 };
+    let w = if use_prev { 7 } else { 0 };
     let mut bucket = [NB as u8; 288];
     if w > 0 {
         let recip = ((16u64 << 16) + w as u64 - 1) / w as u64;
@@ -266,7 +288,20 @@ fn prepare(st: &State, h: Header, si: &SideInfo, gr: usize, ch: usize, scf: &[u8
             bucket[i] = lb(((nbh[i] as u64 * recip) >> 16) as u32) as u8;
         }
     }
-    Prep { bucket, exp, full, use_prev, short }
+    for i in 0..npairs {
+        bucket[i] = bucket[i] * NOC as u8 + oc[i];
+    }
+    Prep { bucket, exp, full, use_prev, short, other }
+}
+
+/// Quadruple context from the other channel: 0 none, 1 all zero, 2 some nonzero.
+#[inline(always)]
+fn quad_other(p: &Prep, st: &State, line: usize) -> usize {
+    if !p.other {
+        return 0;
+    }
+    let o = &st.cur0[line..line + 4];
+    1 + (o[0] | o[1] | o[2] | o[3] != 0) as usize
 }
 
 /// Updates the state after a granule with magnitudes `cur`.
@@ -328,12 +363,19 @@ pub fn code_granule<C: Coder>(
             let xy = xy[sym as usize & 255] as u32;
             let (mut x, mut y) = (xy >> 4, xy & 15);
             if lin > 0 && (x == 15 || y == 15) {
-                let lctx = LIN_BASE + (ts - 16) * 16 + bv.min(15);
+                let lctx = LIN_BASE + (ts - 16) * 16 + (bv / NOC).min(15);
                 for (m, v0) in [(&mut x, a), (&mut y, b)] {
                     if *m == 15 {
                         let e = v0.unsigned_abs().wrapping_sub(15);
-                        let bl = c.sym(lctx, 32 - e.leading_zeros());
-                        let e = if bl == 0 { 0 } else { ((1u32 << (bl - 1)) | c.raw(bl - 1, e)) & ((1 << lin) - 1) };
+                        let bl = 32 - e.leading_zeros();
+                        let top = if bl >= 2 { e >> (bl - 2) & 1 } else { 0 };
+                        let s = c.sym(lctx, bl << 1 | top);
+                        let (bl, top) = (s >> 1, s & 1);
+                        let e = match bl {
+                            0 => 0,
+                            1 => 1,
+                            _ => ((1u32 << (bl - 1)) | top << (bl - 2) | c.raw(bl - 2, e)) & ((1 << lin) - 1),
+                        };
                         *m = 15 + e;
                     }
                 }
@@ -362,7 +404,7 @@ pub fn code_granule<C: Coder>(
         let q = &coefs[line..line + 4];
         let sym = (q[0] != 0) as u32 * 8 + (q[1] != 0) as u32 * 4 + (q[2] != 0) as u32 * 2 + (q[3] != 0) as u32;
         let neg = (q[0] < 0) as u32 * 8 + (q[1] < 0) as u32 * 4 + (q[2] < 0) as u32 * 2 + (q[3] < 0) as u32;
-        let sym = c.sym(qbase + pg * NPOS + pos_class(line), sym) & 15;
+        let sym = c.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), sym) & 15;
         // Sign bits of the nonzero values, first value in the highest bit.
         let ns = sym.count_ones();
         let packed = c.raw(ns, pext4(neg, sym));
@@ -503,7 +545,7 @@ pub fn encode_granule<C: Coder>(
                 let (len, sym) = if e & 0x8000 != 0 { (e >> 10 & 31, e >> 2 & 0xff) } else { dec.decode(w) };
                 let (x, y) = (sym >> 4, sym & 15);
                 c.sym(ctx, x * dim + y);
-                let lctx = LIN_BASE + (ts - 16) * 16 + bv.min(15);
+                let lctx = LIN_BASE + (ts - 16) * 16 + (bv / NOC).min(15);
                 let mut rest = w << len;
                 let mut used = len;
                 let mut signs = 0;
@@ -514,9 +556,10 @@ pub fn encode_granule<C: Coder>(
                         rest <<= lin;
                         used += lin;
                         let bl = 32 - ext.leading_zeros();
-                        c.sym(lctx, bl);
-                        if bl > 1 {
-                            c.raw(bl - 1, ext);
+                        let top = if bl >= 2 { ext >> (bl - 2) & 1 } else { 0 };
+                        c.sym(lctx, bl << 1 | top);
+                        if bl > 2 {
+                            c.raw(bl - 2, ext);
                         }
                         m = 15 + ext;
                     }
@@ -557,7 +600,7 @@ pub fn encode_granule<C: Coder>(
         } else {
             5
         };
-        c.sym(qbase + pg * NPOS + pos_class(line), sym);
+        c.sym(qbase + (pg * 3 + quad_other(&prep, st, line)) * NPOS + pos_class(line), sym);
         c.raw(ns, ((bb.acc << len) >> 1 >> (63 - ns)) as u32);
         bb.consume(len + ns);
         for j in 0..4 {

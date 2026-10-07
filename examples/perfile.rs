@@ -17,13 +17,20 @@ fn main() {
     let t = mp3_recons::codec::tables();
     let _ = t;
     let freqs = mp3_recons::codec::builtin_freqs_pub().unwrap();
-    let (mut tin, mut stat, mut best) = (0usize, 0f64, 0f64);
+    let ks = [8usize, 16, 32, 64, 128, 100000];
+    let (mut tin, mut stat, mut best) = (0usize, 0f64, vec![0f64; ks.len()]);
     for a in std::env::args().skip(1) {
         for e in std::fs::read_dir(&a).unwrap().flatten() {
             let d = std::fs::read(e.path()).unwrap();
             tin += d.len();
             let mut r = Rec((0..model::N_CTX).map(|c| vec![0; model::alphabet(c)]).collect());
             mp3_recons::codec::count(&d, &mut r);
+            let mut order: Vec<usize> = (0..r.0.len()).collect();
+            order.sort_by_key(|&c| std::cmp::Reverse(r.0[c].iter().sum::<u64>()));
+            let mut rank = vec![0usize; r.0.len()];
+            for (i, &c) in order.iter().enumerate() {
+                rank[c] = i;
+            }
             for (c, cnt) in r.0.iter().enumerate() {
                 let tot: u64 = cnt.iter().sum();
                 if tot == 0 {
@@ -34,9 +41,13 @@ fn main() {
                 let own: f64 = cnt.iter().filter(|&&n| n > 0).map(|&n| n as f64 * (tot as f64 / n as f64).log2()).sum::<f64>()
                     + nz as f64 * 8.0 + 16.0;
                 stat += s;
-                best += s.min(own);
+                for (i, &k) in ks.iter().enumerate() {
+                    best[i] += if rank[c] < k { s.min(own) } else { s };
+                }
             }
         }
     }
-    println!("static {:.3}% of input, with per-file tables where better {:.3}% (gain {:.3}%)", stat / 8.0 / tin as f64 * 100.0, best / 8.0 / tin as f64 * 100.0, (stat - best) / 8.0 / tin as f64 * 100.0);
+    for (i, &k) in ks.iter().enumerate() {
+        println!("top {k:6} contexts: gain {:.3}% of input", (stat - best[i]) / 8.0 / tin as f64 * 100.0);
+    }
 }
