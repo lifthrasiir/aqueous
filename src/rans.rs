@@ -170,67 +170,79 @@ impl Tables {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-struct EncSym {
-    x_max: u64,
-    rcp: u32,
-    shift: u32,
-    bias: u32,
-    cmpl: u32,
+/// A symbol's encoding parameters, packed: the reciprocal of its frequency (after
+/// ryg_rans, division by a multiplication), the bias, the frequency and the shift.
+#[inline(always)]
+fn enc_sym(start: u32, freq: u32) -> u64 {
+    let (rcp, shift, bias) = if freq < 2 {
+        (!0u32, 0u32, start + PROB_SCALE - 1)
+    } else {
+        let mut shift = 0;
+        while freq > 1 << shift {
+            shift += 1;
+        }
+        ((((1u64 << (shift + 31)) + freq as u64 - 1) / freq as u64) as u32, shift - 1, start)
+    };
+    rcp as u64 | (bias as u64) << 32 | (freq as u64) << 45 | (shift as u64) << 58
 }
 
-impl EncSym {
-    /// After ryg_rans: division by the frequency as a multiplication by its reciprocal.
-    fn new(start: u32, freq: u32) -> EncSym {
-        let x_max = (((RANS_L >> PROB_BITS) as u64) << 16) * freq as u64;
-        let cmpl = PROB_SCALE - freq;
-        if freq < 2 {
-            EncSym { x_max, rcp: !0, shift: 0, bias: start + PROB_SCALE - 1, cmpl }
-        } else {
-            let mut shift = 0;
-            while freq > 1 << shift {
-                shift += 1;
-            }
-            let rcp = (((1u64 << (shift + 31)) + freq as u64 - 1) / freq as u64) as u32;
-            EncSym { x_max, rcp, shift: shift - 1, bias: start, cmpl }
-        }
-    }
+/// Encodes one symbol into state `x`, writing a renormalisation word below `pos` in `out`
+/// (branch-free: the word is stored either way).
+#[inline(always)]
+fn put(x: &mut u32, e: u64, out: &mut [u8], pos: &mut usize) {
+    let freq = ((e >> 45) & 0x1fff) as u32;
+    let bias = ((e >> 32) & 0x1fff) as u32;
+    let shift = (e >> 58) as u32;
+    let rcp = e as u32;
+    // States stay below 2^31; one 16-bit renormalisation step is always enough.
+    let renorm = *x >= freq << (31 - PROB_BITS);
+    out[*pos - 2..*pos].copy_from_slice(&(*x as u16).to_le_bytes());
+    *pos -= 2 * renorm as usize;
+    let y = if renorm { *x >> 16 } else { *x };
+    let q = ((y as u64 * rcp as u64) >> 32) as u32 >> shift;
+    *x = y.wrapping_add(bias).wrapping_add(q.wrapping_mul(PROB_SCALE - freq));
 }
 
 /// Encodes `syms` (table index, symbol), in order, with interleaved states; returns the
 /// byte stream the decoder reads forward. `freqs` are the tables' frequencies.
 pub fn encode(syms: &[(u16, u16)], freqs: &[Vec<u32>]) -> Vec<u8> {
-    let mut enc = vec![EncSym::default(); freqs.len() * 256];
+    let mut enc = vec![0u64; freqs.len() * 256];
     for (t, f) in freqs.iter().enumerate() {
         let mut acc = 0;
         for (s, &fs) in f.iter().enumerate() {
             if fs > 0 {
-                enc[t * 256 + s] = EncSym::new(acc, fs);
+                enc[t * 256 + s] = enc_sym(acc, fs);
             }
             acc += fs;
         }
     }
-    let mut out: Vec<u16> = Vec::with_capacity(syms.len() / 2 + 16);
-    let mut st = [RANS_L; 4];
-    for (i, &(t, s)) in syms.iter().enumerate().rev() {
-        let e = enc[t as usize * 256 + s as usize];
-        let x = &mut st[i & 3];
-        if *x as u64 >= e.x_max {
-            out.push(*x as u16);
-            *x >>= 16;
-        }
-        let q = ((*x as u64 * e.rcp as u64) >> 32) as u32 >> e.shift;
-        *x = x.wrapping_add(e.bias).wrapping_add(q.wrapping_mul(e.cmpl));
+    // Written backwards from the end: at most one word per symbol, the final states, and
+    // the slack of the branch-free store.
+    let mut out = vec![0u8; 2 * syms.len() + 32];
+    let mut pos = out.len();
+    let mut x = [RANS_L; 4];
+    let e = |(t, s): (u16, u16)| enc[t as usize * 256 + s as usize];
+    let mut i = syms.len();
+    while i % 4 != 0 {
+        i -= 1;
+        put(&mut x[i & 3], e(syms[i]), &mut out, &mut pos);
     }
-    for x in st.iter().rev() {
-        out.push(*x as u16);
-        out.push((*x >> 16) as u16);
+    let [mut x0, mut x1, mut x2, mut x3] = x;
+    while i > 0 {
+        i -= 4;
+        put(&mut x3, e(syms[i + 3]), &mut out, &mut pos);
+        put(&mut x2, e(syms[i + 2]), &mut out, &mut pos);
+        put(&mut x1, e(syms[i + 1]), &mut out, &mut pos);
+        put(&mut x0, e(syms[i]), &mut out, &mut pos);
     }
-    let mut bytes = Vec::with_capacity(out.len() * 2);
-    for w in out.iter().rev() {
-        bytes.extend_from_slice(&w.to_le_bytes());
+    // The decoder reads the states first, high half first.
+    for x in [x3, x2, x1, x0] {
+        pos -= 4;
+        out[pos..pos + 2].copy_from_slice(&((x >> 16) as u16).to_le_bytes());
+        out[pos + 2..pos + 4].copy_from_slice(&(x as u16).to_le_bytes());
     }
-    bytes
+    out.drain(..pos);
+    out
 }
 
 /// The decoder: reads the stream forward. Reading past the end yields zeros (the caller
