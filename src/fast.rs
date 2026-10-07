@@ -4,11 +4,11 @@
 //! - number of nonzero AC coefficients, context = average of the above/left counts;
 //! - for every AC position up to the last nonzero one: cat = bit length of |x|, context =
 //!   (luma/chroma, position, bucket of remaining nonzeros); sign + extra bits raw;
-//! - DC: residual of the MED predictor over the DC grid, context = neighbour residual sizes and
-//!   the block's AC count.
+//! - DC: residual of a boundary-continuity prediction from the blocks above / to the left (see
+//!   `DcBound`), context = neighbour residual sizes and the disagreement of the two predictions.
 //!
-//! Static per-file histograms (two pass), 4-way interleaved 64-bit rANS with 32-bit IO.
-//! Contexts are trivially cheap so the decoder is bound by the rANS / raw-bit chains.
+//! Static per-file histograms (two pass; see `normalize` for how the tables are kept small),
+//! 4-way interleaved 64-bit rANS with 32-bit IO.
 
 use crate::jpeg::{Coefs, Error, Jpeg};
 use std::time::Instant;
@@ -21,7 +21,12 @@ const RANS_L: u64 = 1 << 31;
 const N_NZ: usize = 2 * 64; // alphabet 64
 const NREM: usize = 11; // remaining-nonzero classes, see `rem_class`
 const N_AC: usize = 2 * 63 * NREM; // alphabet 16
-const N_DC: usize = 2 * 9 * 6; // alphabet 16
+/// DC prediction: boundary continuity with neighbour blocks (true) or MED over the DC grid
+const DC_BOUNDARY: bool = true;
+/// DC sub-contexts per (component class, neighbour residual bucket): prediction uncertainty
+/// (boundary) or AC count bucket (MED)
+const DC_SUB: usize = if DC_BOUNDARY { 8 } else { 6 };
+const N_DC: usize = 2 * 9 * DC_SUB; // alphabet 16
 const NZ_BASE: usize = 0;
 const AC_BASE: usize = NZ_BASE + N_NZ * 64;
 const DC_BASE: usize = AC_BASE + N_AC * 16;
@@ -97,8 +102,90 @@ fn nz_ctx(cc: usize, nza: u32, nzl: u32, has_a: bool, has_l: bool) -> usize {
     NZ_BASE + (cc * 64 + p.min(63) as usize) * 64
 }
 #[inline(always)]
-fn dc_ctx(cc: usize, cat_sum: u32, nz: u32) -> usize {
-    DC_BASE + ((cc * 9 + DCN_B[cat_sum.min(63) as usize] as usize) * 6 + NZ_B[nz as usize] as usize) * 16
+fn dc_ctx(cc: usize, cat_sum: u32, sub: usize) -> usize {
+    DC_BASE + ((cc * 9 + DCN_B[cat_sum.min(63) as usize] as usize) * DC_SUB + sub) * 16
+}
+static UNC_B: [u8; 128] = {
+    let mut t = [0u8; 128];
+    let mut i = 0;
+    while i < 128 {
+        t[i] = bucket(i as u32, &[1, 2, 4, 8, 16, 32, 64]) as u8;
+        i += 1;
+    }
+    t
+};
+
+/// natural index -> zigzag index
+const ZI: [usize; 64] = {
+    let mut t = [0usize; 64];
+    let mut z = 0;
+    while z < 64 {
+        t[crate::jpeg::ZIGZAG[z]] = z;
+        z += 1;
+    }
+    t
+};
+
+/// DC prediction from boundary continuity (Lakhani-style, coefficient domain): the mean of the
+/// block's top row / left column must match the bottom row / right column of the neighbour
+/// above / to the left. Only column 0 / row 0 coefficients are involved, in fixed point
+/// (wrapping i32), so it is exact and platform independent.
+struct DcBound {
+    wa: [i32; 8], // cv[v] q[v][0], v >= 1: this block's column 0 (DC from above)
+    wl: [i32; 8], // cv[u] q[0][u], u >= 1: this block's row 0 (DC from left)
+    wb: [i32; 8], // cv[v] (-1)^v q[v][0]: bottom boundary (u = 0 term)
+    wr: [i32; 8], // cv[u] (-1)^u q[0][u]: right boundary (v = 0 term)
+    inv: f32,     // 1 / (cv[0] q[0][0] 2^S)
+}
+impl DcBound {
+    fn new(q: &[u16; 64]) -> Self {
+        // q in zigzag order
+        let cv = |v: usize| (v as f64 * std::f64::consts::PI / 16.0).cos() * if v == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
+        let sg = |v: usize| if v % 2 == 0 { 1.0 } else { -1.0 };
+        let sc = 1024.0;
+        let (qc, qr) = (|v: usize| q[ZI[v * 8]] as f64, |u: usize| q[ZI[u]] as f64);
+        let mut b = DcBound { wa: [0; 8], wl: [0; 8], wb: [0; 8], wr: [0; 8], inv: 0.0 };
+        for v in 0..8 {
+            if v > 0 {
+                b.wa[v] = (cv(v) * qc(v) * sc).round() as i32;
+                b.wl[v] = (cv(v) * qr(v) * sc).round() as i32;
+            }
+            b.wb[v] = (cv(v) * sg(v) * qc(v) * sc).round() as i32;
+            b.wr[v] = (cv(v) * sg(v) * qr(v) * sc).round() as i32;
+        }
+        b.inv = (1.0 / (cv(0) * q[0].max(1) as f64 * sc)) as f32;
+        b
+    }
+    /// (prediction, uncertainty bucket) for a block whose AC coefficients are known
+    #[inline(always)]
+    fn pred(&self, b: &[i16; 64], bot_above: i32, rgt_left: i32, has_a: bool, has_l: bool) -> (i32, usize) {
+        let (mut sa, mut sl) = (0i32, 0i32);
+        for k in 1..8 {
+            sa = sa.wrapping_add(self.wa[k].wrapping_mul(b[ZI[k * 8]] as i32));
+            sl = sl.wrapping_add(self.wl[k].wrapping_mul(b[ZI[k]] as i32));
+        }
+        let dca = bot_above.wrapping_sub(sa) as f32 * self.inv;
+        let dcl = rgt_left.wrapping_sub(sl) as f32 * self.inv;
+        let (pf, unc) = match (has_a, has_l) {
+            (true, true) => ((dca + dcl) * 0.5, (dca - dcl).abs()),
+            (true, false) => (dca, 0.0),
+            (false, true) => (dcl, 0.0),
+            _ => (0.0, 0.0),
+        };
+        // keep residuals within 16 bits (|DC| <= DC_LIMIT)
+        let lim = crate::jpeg::DC_LIMIT as f32;
+        (pf.round().clamp(-lim, lim) as i32, UNC_B[(unc as u32).min(127) as usize] as usize)
+    }
+    /// (bottom boundary, right boundary) terms of a complete block, for its neighbours
+    #[inline(always)]
+    fn bounds(&self, b: &[i16; 64]) -> (i32, i32) {
+        let (mut bot, mut rgt) = (0i32, 0i32);
+        for k in 0..8 {
+            bot = bot.wrapping_add(self.wb[k].wrapping_mul(b[ZI[k * 8]] as i32));
+            rgt = rgt.wrapping_add(self.wr[k].wrapping_mul(b[ZI[k]] as i32));
+        }
+        (bot, rgt)
+    }
 }
 #[inline(always)]
 fn med(a: i32, b: i32, c: i32) -> i32 {
@@ -199,10 +286,12 @@ impl Sink {
 }
 
 #[inline(never)]
-fn walk_enc(s: &mut Sink, c: &Coefs, cc: usize) {
+fn walk_enc(s: &mut Sink, c: &Coefs, cc: usize, dcb: &DcBound) {
     let (bw, bh) = (c.bw, c.bh);
     let mut nzs = vec![0u8; bw * bh];
     let mut dcc = vec![0u8; bw * bh];
+    let mut bottom = vec![0i32; bw];
+    let mut right = 0i32;
     let ac_idx = &AC_IDX[cc];
     for by in 0..bh {
         for bx in 0..bw {
@@ -227,12 +316,19 @@ fn walk_enc(s: &mut Sink, c: &Coefs, cc: usize) {
                     rem -= (x != 0) as usize;
                 }
             }
-            let pred = dc_pred(&c.blocks, i, bw, bx, by);
+            let (pred, sub) = if DC_BOUNDARY {
+                dcb.pred(b, bottom[bx], right, has_a, has_l)
+            } else {
+                (dc_pred(&c.blocks, i, bw, bx, by), NZ_B[nz as usize] as usize)
+            };
             let (cat, payload) = split_value(b[0] as i32 - pred);
             let cs = if has_a { dcc[i - bw] as u32 } else { 0 } + if has_l { dcc[i - 1] as u32 } else { 0 };
-            s.sym(dc_ctx(cc, cs, nz) + cat as usize);
+            s.sym(dc_ctx(cc, cs, sub) + cat as usize);
             s.raw.put(cat, payload);
             dcc[i] = cat as u8;
+            if DC_BOUNDARY {
+                (bottom[bx], right) = dcb.bounds(b);
+            }
         }
     }
 }
@@ -342,7 +438,7 @@ fn parent_of(lo: usize) -> usize {
     } else if lo < DC_BASE {
         P_AC + (lo - AC_BASE) / 16 / NREM * 16
     } else {
-        P_DC + (lo - DC_BASE) / 16 / 6 * 16
+        P_DC + (lo - DC_BASE) / 16 / DC_SUB * 16
     }
 }
 fn parent_groups() -> impl Iterator<Item = (usize, usize)> {
@@ -828,9 +924,11 @@ impl<'a> Dec<'a> {
 }
 
 #[inline(never)]
-fn walk_dec(d: &mut Dec, blocks: &mut [[i16; 64]], masks: &mut [u64], bw: usize, bh: usize, cc: usize) -> Result<(), Error> {
+fn walk_dec(d: &mut Dec, blocks: &mut [[i16; 64]], masks: &mut [u64], bw: usize, bh: usize, cc: usize, dcb: &DcBound) -> Result<(), Error> {
     let mut nzs = vec![0u8; bw * bh];
     let mut dcc = vec![0u8; bw * bh];
+    let mut bottom = vec![0i32; bw];
+    let mut right = 0i32;
     let ac_idx = &AC_IDX[cc];
     for by in 0..bh {
         for bx in 0..bw {
@@ -858,12 +956,19 @@ fn walk_dec(d: &mut Dec, blocks: &mut [[i16; 64]], masks: &mut [u64], bw: usize,
                 base = if nzv { dec } else { keep };
                 k += 1;
             }
-            let pred = dc_pred(blocks, i, bw, bx, by);
+            let (pred, sub) = if DC_BOUNDARY {
+                dcb.pred(&blocks[i], bottom[bx], right, has_a, has_l)
+            } else {
+                (dc_pred(blocks, i, bw, bx, by), NZ_B[nz as usize] as usize)
+            };
             let cs = if has_a { dcc[i - bw] as u32 } else { 0 } + if has_l { dcc[i - 1] as u32 } else { 0 };
-            let cat = d.sym(dc_ctx(cc, cs, nz));
+            let cat = d.sym(dc_ctx(cc, cs, sub));
             let w = d.raw(cat);
             let dc = pred + join_value(cat, w);
             blocks[i][0] = dc as i16;
+            if DC_BOUNDARY {
+                (bottom[bx], right) = dcb.bounds(&blocks[i]);
+            }
             masks[i] = mask | (dc != 0) as u64;
             dcc[i] = cat as u8;
             if d.bp > d.raw_bits || d.pos > d.src_len {
@@ -963,7 +1068,7 @@ thread_local! {
 }
 
 /// `coefs` must be in zigzag order (`jpeg::Order::Zigzag`), with nonzero masks.
-pub fn encode(_j: &Jpeg, coefs: &[Coefs]) -> (Encoded, Phases) {
+pub fn encode(j: &Jpeg, coefs: &[Coefs]) -> (Encoded, Phases) {
     let nblk: usize = coefs.iter().map(|c| c.blocks.len()).sum();
     let (mut syms, mut hist) = BUFS.with(|b| std::mem::take(&mut *b.borrow_mut()));
     if syms.len() < nblk * 16 + 66 {
@@ -974,7 +1079,7 @@ pub fn encode(_j: &Jpeg, coefs: &[Coefs]) -> (Encoded, Phases) {
     let mut s = Sink { syms, n: 0, hist, raw: BitWriter::with_capacity(nblk * 8) };
     let t0 = Instant::now();
     for (ci, c) in coefs.iter().enumerate() {
-        walk_enc(&mut s, c, ci.min(1));
+        walk_enc(&mut s, c, ci.min(1), &DcBound::new(&j.qt[j.comps[ci].tq]));
     }
     let t1 = Instant::now();
     let (freq, plan) = normalize(&s.hist);
@@ -1015,7 +1120,7 @@ pub fn decode_into(j: &Jpeg, e: &Encoded, out: &mut Vec<Coefs>) -> Result<(), Er
         o.bh = c.bh;
         o.blocks.resize(c.bw * c.bh, [0; 64]);
         o.masks.resize(c.bw * c.bh, 0);
-        walk_dec(&mut d, &mut o.blocks, &mut o.masks, c.bw, c.bh, ci.min(1))?;
+        walk_dec(&mut d, &mut o.blocks, &mut o.masks, c.bw, c.bh, ci.min(1), &DcBound::new(&j.qt[c.tq]))?;
     }
     Ok(())
 }
