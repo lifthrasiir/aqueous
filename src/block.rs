@@ -351,6 +351,23 @@ fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
     }
 }
 
+/// A token with an exponent in another style than its line's kind: `%e` with the
+/// precision of its digits, or a shortest form. Returns the value, scale, mode and flags.
+#[cold]
+fn exp_fallback(t: &[u8], ps: i32, tmp: &mut Vec<u8>) -> Option<(i64, i32, u8, u8)> {
+    let e = t.iter().position(|&c| c == b'e')?;
+    let p = t[..e].iter().filter(|c| c.is_ascii_digit()).count().clamp(1, 19) as u8;
+    let exp3 = t.len() - e == 5;
+    let modes = [
+        (dec::mode(dec::R_SCI, dec::SRC_DEC), p),
+        (dec::mode(dec::R_SCI, dec::SRC_F64), p),
+        (dec::mode(dec::R_SCI, dec::SRC_F32), p),
+        (dec::mode(dec::R_PY, dec::SRC_DEC), 0),
+        (dec::mode(dec::R_JS, dec::SRC_DEC), 0),
+    ];
+    modes.into_iter().find_map(|(m, p)| dec::encode(t, m, p, exp3, ps, tmp).map(|(v, s, f)| (v, s, m, f)))
+}
+
 pub struct Encoder {
     pub st: State,
     style: [Style; 4],
@@ -458,6 +475,8 @@ impl Encoder {
                     (v, (f & num::F_FRAC) as i32, M_FIX, f)
                 } else if let Some((v, sc, f)) = num::parse_gen(t, style.p.clamp(6, 17), ps, style.exp3, &mut self.tmp) {
                     (v, sc, M_GEN, f)
+                } else if let Some(r) = exp_fallback(t, ps, &mut self.tmp) {
+                    r
                 } else {
                     return false;
                 };

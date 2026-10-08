@@ -15,7 +15,8 @@
 use crate::block::{self, NSTREAMS};
 use crate::varint::{Rd, put_uv};
 use crate::{Error, Result, corrupt};
-use xxhash_rust::xxh3::xxh3_64;
+use std::io::Write;
+use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
 const MAGIC: &[u8; 4] = b"OBJR";
 const VERSION: u8 = 1;
@@ -55,7 +56,15 @@ pub fn compress(src: &[u8]) -> Vec<u8> {
 }
 
 pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
-    let mut out = Vec::with_capacity(src.len() / 4 + 64);
+    let mut out = Vec::new();
+    compress_to(src, opt, st, &mut out).expect("writing to a Vec");
+    out
+}
+
+/// Compresses `src` into `w`, a block at a time: memory besides the input stays bounded
+/// by the block size.
+pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) -> std::io::Result<()> {
+    let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
     put_uv(&mut out, src.len() as u64);
@@ -69,6 +78,8 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     let mut cz = zstd::bulk::Compressor::new(opt.level).expect("zstd");
     let mut p = 0;
     while p < src.len() {
+        w.write_all(&out)?;
+        out.clear();
         let mut e = (p + bsize).min(src.len());
         if e < src.len() {
             if let Some(i) = memchr::memrchr(b'\n', &src[p..e]) {
@@ -124,10 +135,21 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
         }
         st.zstd_s += t.elapsed().as_secs_f64();
     }
-    out
+    w.write_all(&out)
 }
 
 pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
+    let mut r = Rd::new(src);
+    let len = if r.bytes(5).is_some() { r.uv() as usize } else { 0 };
+    // The output is the caller's; reserve it only up to what the input can plausibly hold.
+    let mut out = Vec::with_capacity(len.min(src.len().saturating_mul(64)));
+    decompress_to(src, &mut out)?;
+    Ok(out)
+}
+
+/// Decompresses `src` into `w`, a block at a time; returns the length. On an error, what
+/// was written is not the original.
+pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
     let mut r = Rd::new(src);
     if r.bytes(4) != Some(MAGIC) || r.u8() != VERSION {
         return Err(Error("not an OBJR file"));
@@ -137,15 +159,17 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     if r.overrun() {
         return Err(corrupt());
     }
-    // The output is the caller's; reserve it only up to what the input can plausibly hold.
-    let mut out = Vec::with_capacity(len.min(src.len().saturating_mul(64)));
+    let mut out = Vec::new();
+    let mut done = 0;
+    let mut h = Xxh3::new();
     let mut dec = block::Decoder::default();
     let mut dz = zstd::bulk::Decompressor::new().map_err(|_| corrupt())?;
     let mut streams: [Vec<u8>; NSTREAMS] = Default::default();
-    while out.len() < len {
+    while done < len {
+        out.clear();
         let mode = r.u8();
         let n = r.uv() as usize;
-        if r.overrun() || n == 0 || n > MAX_BLOCK || n > len - out.len() {
+        if r.overrun() || n == 0 || n > MAX_BLOCK || n > len - done {
             return Err(corrupt());
         }
         match mode {
@@ -191,9 +215,12 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
             }
             _ => return Err(corrupt()),
         }
+        h.update(&out);
+        w.write_all(&out).map_err(|_| Error("write error"))?;
+        done += n;
     }
-    if !r.done() || xxh3_64(&out) != hash {
+    if !r.done() || h.digest() != hash {
         return Err(Error("checksum mismatch"));
     }
-    Ok(out)
+    Ok(len)
 }
