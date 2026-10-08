@@ -310,11 +310,11 @@ impl<'a> RowRenderer<'a> {
             }
             let ch = |j: usize| PlaneRows::channel(psd, d, i, j);
             let mut mask = None;
-            if let (Some(mk), Some(j)) = (&l.mask, find(-2)) {
-                if mk.flags & 2 == 0 {
-                    let c = &l.channels[j];
-                    mask = Some((ch(j)?, mk.rect.top as i64, mk.rect.left as i64, c.width as usize, c.height as usize, mk.default_color));
-                }
+            if let (Some(mk), Some(j)) = (&l.mask, find(-2))
+                && mk.flags & 2 == 0
+            {
+                let c = &l.channels[j];
+                mask = Some((ch(j)?, mk.rect.top as i64, mk.rect.left as i64, c.width as usize, c.height as usize, mk.default_color));
             }
             if !l.hidden() {
                 if blend_fn(&l.blend).is_none() {

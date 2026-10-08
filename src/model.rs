@@ -714,7 +714,7 @@ impl GroupCoder {
                 let is_alpha = self.has_alpha && k == colors;
                 let kind = if lone { 3 } else if is_alpha { 2 } else if k == 0 { 0 } else { 1 };
                 // Planes not coded are walked only for the first color plane's residuals.
-                if !self.coded(k) && !(kind == 0 && colors > 1) {
+                if !(self.coded(k) || kind == 0 && colors > 1) {
                     continue;
                 }
                 self.code_plane(c, rows, hint.as_deref(), k, kind);

@@ -227,10 +227,10 @@ pub fn forced_splits(src: &[u8], out: &mut Vec<usize>) {
     while t + 1 < src.len() {
         let h = src[t] as i8;
         let (lit, len) = if h >= 0 { (true, h as usize + 1) } else { (false, (1 - h as i32) as usize) };
-        if let Some((plit, pv, pl)) = prev {
-            if pl < 128 && (!plit && pv == src[t + 1] || plit && (lit || len == 2)) {
-                out.push(pos);
-            }
+        if let Some((plit, pv, pl)) = prev
+            && pl < 128 && (!plit && pv == src[t + 1] || plit && (lit || len == 2))
+        {
+            out.push(pos);
         }
         prev = Some((lit, src[t + 1], len));
         pos += len;
@@ -252,7 +252,7 @@ pub fn infer_tiles_from(mut splits: Vec<usize>) -> Encoder {
     splits.sort_unstable();
     splits.dedup();
     let explained = |phase: usize, period: usize| {
-        splits.iter().filter(|&&s| if s < phase { s % 128 == 0 } else { (s - phase) % period % 128 == 0 }).count()
+        splits.iter().filter(|&&s| if s < phase { s % 128 == 0 } else { ((s - phase) % period).is_multiple_of(128) }).count()
     };
     let Some(&s0) = splits.iter().find(|&&s| s % 128 != 0) else { return NO_TILES };
     let (mut phase, mut period) = (usize::MAX, usize::MAX);

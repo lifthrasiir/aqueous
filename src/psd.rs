@@ -423,11 +423,11 @@ pub fn parse(d: &[u8]) -> Result<Psd> {
             global_mask = Some(s..lm.p);
         }
         global_tags = tags(&mut lm, psb)?;
-        if info.layers.is_empty() {
-            if let Some(t) = global_tags.iter().find(|t| matches!(&t.key, b"Layr" | b"Lr16" | b"Lr32")) {
-                let mut r = Rd { d, base: t.data.start, p: t.data.start, end: t.data.end };
-                info = layer_info(&mut r, psb)?;
-            }
+        if info.layers.is_empty()
+            && let Some(t) = global_tags.iter().find(|t| matches!(&t.key, b"Layr" | b"Lr16" | b"Lr32"))
+        {
+            let mut r = Rd { d, base: t.data.start, p: t.data.start, end: t.data.end };
+            info = layer_info(&mut r, psb)?;
         }
     }
     let layer_section = ls_start..rd.p;
@@ -493,17 +493,17 @@ pub fn linked(psd: &Psd, d: &[u8]) -> Vec<Linked> {
                 let dl = rd.u64()?;
                 Ok((ft, usize::try_from(dl).map_err(|_| Error("length".into()))?))
             })();
-            if let Ok((ft, dl)) = head {
-                if let Some(magic) = file_magic(&ft) {
-                    let from = rd.p;
-                    let found = d[from..end]
-                        .windows(magic.len())
-                        .position(|w| w == magic)
-                        .map(|k| from + k)
-                        .filter(|&s| s + dl <= end && dl > 0);
-                    if let Some(s) = found {
-                        out.push(Linked { file_type: ft, data: s..s + dl });
-                    }
+            if let Ok((ft, dl)) = head
+                && let Some(magic) = file_magic(&ft)
+            {
+                let from = rd.p;
+                let found = d[from..end]
+                    .windows(magic.len())
+                    .position(|w| w == magic)
+                    .map(|k| from + k)
+                    .filter(|&s| s + dl <= end && dl > 0);
+                if let Some(s) = found {
+                    out.push(Linked { file_type: ft, data: s..s + dl });
                 }
             }
             p = (end - t.data.start).next_multiple_of(4) + t.data.start;

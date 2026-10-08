@@ -363,19 +363,19 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<Grou
         }
         let pick = |id: i16| refs.iter().find(|r| r.0 == id).map(|r| r.1);
         let mut grouped = Vec::new();
-        if rgb {
-            if let (Some(r), Some(g), Some(b)) = (pick(0), pick(1), pick(2)) {
-                let dims = |p: PlaneRef| (spans[p.0].span.w, spans[p.0].span.h);
-                if dims(g) == dims(r) && dims(b) == dims(r) {
-                    let mut planes = vec![r, g, b];
-                    let alpha = pick(-1).filter(|&a| dims(a) == dims(r));
-                    if let Some(a) = alpha {
-                        planes.push(a);
-                    }
-                    grouped.extend(&planes);
-                    let n = planes.len();
-                    groups.push(GroupDef { planes, has_alpha: alpha.is_some(), hinted: false, same_as: vec![None; n] });
+        if rgb
+            && let (Some(r), Some(g), Some(b)) = (pick(0), pick(1), pick(2))
+        {
+            let dims = |p: PlaneRef| (spans[p.0].span.w, spans[p.0].span.h);
+            if dims(g) == dims(r) && dims(b) == dims(r) {
+                let mut planes = vec![r, g, b];
+                let alpha = pick(-1).filter(|&a| dims(a) == dims(r));
+                if let Some(a) = alpha {
+                    planes.push(a);
                 }
+                grouped.extend(&planes);
+                let n = planes.len();
+                groups.push(GroupDef { planes, has_alpha: alpha.is_some(), hinted: false, same_as: vec![None; n] });
             }
         }
         for (_, p) in refs {
@@ -407,28 +407,28 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<Grou
     // Composite.
     let (w, h, n) = (psd.width as usize, psd.height as usize, psd.channels as usize);
     let comp = psd.composite_compression(d);
-    if pixels && w > 0 && h > 0 && n > 0 {
-        if let Some(mut p) = plan_span(d, psd.composite.start + 2, psd.composite.end, n, w, h, comp, psd.psb) {
-            p.same = None;
-            let si = spans.len();
-            spans.push(p);
-            let mut rest = 0;
-            if rgb && n >= 3 {
-                let has_alpha = n >= 4 && psd.layer_info.merged_alpha;
-                let k = 3 + has_alpha as usize;
-                let t0 = std::time::Instant::now();
-                let hinted = !psd.layer_info.layers.is_empty() && hint_pays(psd, d, &spans[si].span, k);
-                PLAN_TIMES.with(|c| {
-                    let mut v = c.get();
-                    v[3] += t0.elapsed().as_secs_f64();
-                    c.set(v);
-                });
-                groups.push(GroupDef { planes: (0..k).map(|p| (si, p)).collect(), has_alpha, hinted, same_as: vec![None; k] });
-                rest = k;
-            }
-            for p in rest..n {
-                groups.push(GroupDef { planes: vec![(si, p)], has_alpha: false, hinted: false, same_as: vec![None] });
-            }
+    if pixels && w > 0 && h > 0 && n > 0
+        && let Some(mut p) = plan_span(d, psd.composite.start + 2, psd.composite.end, n, w, h, comp, psd.psb)
+    {
+        p.same = None;
+        let si = spans.len();
+        spans.push(p);
+        let mut rest = 0;
+        if rgb && n >= 3 {
+            let has_alpha = n >= 4 && psd.layer_info.merged_alpha;
+            let k = 3 + has_alpha as usize;
+            let t0 = std::time::Instant::now();
+            let hinted = !psd.layer_info.layers.is_empty() && hint_pays(psd, d, &spans[si].span, k);
+            PLAN_TIMES.with(|c| {
+                let mut v = c.get();
+                v[3] += t0.elapsed().as_secs_f64();
+                c.set(v);
+            });
+            groups.push(GroupDef { planes: (0..k).map(|p| (si, p)).collect(), has_alpha, hinted, same_as: vec![None; k] });
+            rest = k;
+        }
+        for p in rest..n {
+            groups.push(GroupDef { planes: vec![(si, p)], has_alpha: false, hinted: false, same_as: vec![None] });
         }
     }
     // Repeated single-plane spans become copies when their source is coded before them: in
@@ -734,15 +734,15 @@ fn encode_group(rec: &mut model::Recorder, psd: &Psd, d: &[u8], spans: &[Span], 
         for k in 0..n {
             let Some(r) = &mut readers[k] else { continue };
             let enc = r.encoded();
-            if let (Some(e), Some((pe, miss))) = (enc, prev[k]) {
-                if e == pe {
-                    r.skip().ok()?;
-                    rows[k].copy_from_slice(gc.last(k));
-                    if miss {
-                        misses[k].push(y);
-                    }
-                    continue;
+            if let (Some(e), Some((pe, miss))) = (enc, prev[k])
+                && e == pe
+            {
+                r.skip().ok()?;
+                rows[k].copy_from_slice(gc.last(k));
+                if miss {
+                    misses[k].push(y);
                 }
+                continue;
             }
             r.next(&mut rows[k]).ok()?;
             lap(0, &mut t);
@@ -941,18 +941,17 @@ impl RowSink<'_> {
     fn put(&mut self, out: &mut [u8], row: &[u8], buf: &mut Vec<u8>) -> Result<()> {
         let exception = self.count_bytes > 0 && self.exceptions.first().is_some_and(|e| e.0 == self.row);
         // A row equal to the previous one encodes the same.
-        if self.count_bytes > 0 && !exception {
-            if let Some((at, n)) = self.prev_at {
-                if self.prev == row {
-                    if self.data_at + n > out.len() {
-                        return Err(corrupt());
-                    }
-                    out.copy_within(at..at + n, self.data_at);
-                    self.prev_at = Some((self.data_at, n));
-                    self.data_at += n;
-                    return self.count(out, n);
-                }
+        if self.count_bytes > 0 && !exception
+            && let Some((at, n)) = self.prev_at
+            && self.prev == row
+        {
+            if self.data_at + n > out.len() {
+                return Err(corrupt());
             }
+            out.copy_within(at..at + n, self.data_at);
+            self.prev_at = Some((self.data_at, n));
+            self.data_at += n;
+            return self.count(out, n);
         }
         let bytes: &[u8] = if self.count_bytes == 0 {
             row
@@ -1086,8 +1085,8 @@ fn decode_group(player: &mut model::Player, out: &mut [u8], split: usize, spans:
             return Err(corrupt());
         }
         lap(2, &mut t);
-        for k in 0..n {
-            if let Some(s) = &mut sinks[k] {
+        for (k, sink) in sinks.iter_mut().enumerate() {
+            if let Some(s) = sink {
                 s.put(right, gc.last(k), &mut buf)?;
             }
         }
@@ -1158,11 +1157,11 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     }
     let copy_ready = |out: &mut Vec<u8>, done: &mut [bool]| {
         for (i, s) in spans.iter().enumerate() {
-            if let Coding::Copy { of } = s.coding {
-                if !done[i] && done[of] {
-                    out.copy_within(spans[of].start..spans[of].end, s.start);
-                    done[i] = true;
-                }
+            if let Coding::Copy { of } = s.coding
+                && !done[i] && done[of]
+            {
+                out.copy_within(spans[of].start..spans[of].end, s.start);
+                done[i] = true;
             }
         }
     };
@@ -1177,10 +1176,10 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
             .unwrap_or(total);
         // Known planes (copies of earlier groups) are read from their source.
         for (k, &(s, _)) in g.planes.iter().enumerate() {
-            if let Coding::Copy { of } = spans[s].coding {
-                if g.same_as[k].is_none() && (!done[of] || spans[of].end > split) {
-                    return Err(corrupt());
-                }
+            if let Coding::Copy { of } = spans[s].coding
+                && g.same_as[k].is_none() && (!done[of] || spans[of].end > split)
+            {
+                return Err(corrupt());
             }
         }
         if g.hinted && done[..g.planes[0].0].iter().any(|&d| !d) {
