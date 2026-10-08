@@ -367,16 +367,23 @@ impl GroupEnc {
     }
 
     /// Appends the group's streams, and its directory entry.
-    pub fn finish(&self, dir: &mut Vec<u8>, s: &mut [Vec<u8>; 8]) {
+    /// Hands the group's streams over as pieces (moved, not copied), and writes its
+    /// directory entry.
+    pub fn finish(self, dir: &mut Vec<u8>, s: &mut [Vec<Vec<u8>>; 8]) {
         let [rec, rowid, rawpay, tag, int, real, len, bytes] = s;
+        let give = |to: &mut Vec<Vec<u8>>, v: Vec<u8>| {
+            if !v.is_empty() {
+                to.push(v);
+            }
+        };
         put_uv(dir, self.rec.len() as u64);
         put_uv(dir, self.rowid.len() as u64);
         put_uv(dir, self.rawpay.len() as u64);
         put_uv(dir, self.cols.len() as u64);
-        rec.extend_from_slice(&self.rec);
-        rowid.extend_from_slice(&self.rowid);
-        rawpay.extend_from_slice(&self.rawpay);
-        for c in &self.cols {
+        give(rec, self.rec);
+        give(rowid, self.rowid);
+        give(rawpay, self.rawpay);
+        for c in self.cols {
             // The integers with their exponents, decoded as needed (not held as i64s).
             let each = |f: &mut dyn FnMut(i64, u8)| {
                 let mut r = Rd::new(&c.ints);
@@ -422,23 +429,26 @@ impl GroupEnc {
             put_uv(dir, c.tag.len() as u64);
             put_uv(dir, mode as u64 + 3 * if scaled { top as u64 + 1 } else { 0 });
             put_uv(dir, best.0 as u64);
-            if mode == 2 {
-                int.extend_from_slice(&c.hres);
+            let ints = if mode == 2 {
+                c.hres
             } else {
+                let mut out = Vec::with_capacity(best.0);
                 let mut prev = 0i64;
                 each(&mut |v, e| {
                     let v = if scaled { scale(v, e).unwrap() } else { v };
-                    put_sv(int, v.wrapping_sub([0, prev][mode]));
+                    put_sv(&mut out, v.wrapping_sub([0, prev][mode]));
                     prev = v;
                 });
-            }
+                out
+            };
+            give(int, ints);
             put_uv(dir, c.real.len() as u64);
             put_uv(dir, c.len.len() as u64);
             put_uv(dir, c.bytes.len() as u64);
-            tag.extend_from_slice(&c.tag);
-            real.extend_from_slice(&c.real);
-            len.extend_from_slice(&c.len);
-            bytes.extend_from_slice(&c.bytes);
+            give(tag, c.tag);
+            give(real, c.real);
+            give(len, c.len);
+            give(bytes, c.bytes);
         }
     }
 }

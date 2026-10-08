@@ -78,6 +78,18 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
         st.whole = true;
         return whole(src, opt.level);
     };
+    if opt.verify {
+        // zstd is trusted: rebuild the file from the streams (before compressing them, so
+        // that the streams can go as they are compressed).
+        let t = std::time::Instant::now();
+        let ok = transform::verify(&enc.geom, src, &enc.streams);
+        st.verify_s += t.elapsed().as_secs_f64();
+        crate::mem::mark("verify");
+        if !ok {
+            st.whole = true;
+            return whole(src, opt.level);
+        }
+    }
     let t = std::time::Instant::now();
     let mut out = Vec::new();
     header(&mut out, 1, src);
@@ -97,11 +109,16 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     };
     let mut cz = mk(opt.level);
     let mut czb = mk(opt.level_bytes);
-    for (i, s) in enc.streams.iter().enumerate() {
+    let mut z = Vec::new();
+    for (i, s) in enc.streams.into_iter().enumerate() {
         put_uv(&mut out, s.len() as u64);
         st.raw[i] += s.len() as u64;
         let c = if i == transform::S_BYTES { &mut czb } else { &mut cz };
-        let z = if s.len() > 64 { c.compress(s).expect("zstd") } else { Vec::new() };
+        z.clear();
+        if s.len() > 64 {
+            z.reserve(zstd::zstd_safe::compress_bound(s.len()));
+            c.compress_to_buffer(&s, &mut z).expect("zstd");
+        }
         if !z.is_empty() && z.len() < s.len() {
             out.push(1);
             put_uv(&mut out, z.len() as u64);
@@ -110,23 +127,12 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
         } else {
             out.push(0);
             put_uv(&mut out, s.len() as u64);
-            out.extend_from_slice(s);
+            out.extend_from_slice(&s);
             st.coded[i] += s.len() as u64;
         }
     }
     st.zstd_s += t.elapsed().as_secs_f64();
     crate::mem::mark("zstd");
-    if opt.verify {
-        // zstd is trusted: rebuild the file from the streams.
-        let t = std::time::Instant::now();
-        let ok = transform::verify(&g, src, &enc.streams);
-        st.verify_s += t.elapsed().as_secs_f64();
-        crate::mem::mark("verify");
-        if !ok {
-            st.whole = true;
-            return whole(src, opt.level);
-        }
-    }
     out
 }
 

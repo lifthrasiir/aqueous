@@ -72,9 +72,37 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
 struct GroupRecs<'a> {
     table: bool,
     first: usize,
-    /// Payloads: on their page, or put together from overflow pages.
+    /// Payloads on their page; empty for those with overflow, which are put together in
+    /// `arena`: (record, start, length) in `fix`.
     pays: Vec<&'a [u8]>,
+    arena: Vec<u8>,
+    fix: Vec<(u32, usize, usize)>,
     rowids: Vec<i64>,
+}
+
+impl<'a> GroupRecs<'a> {
+    /// All payloads (a copy of the list only if some have overflow).
+    fn view(&self) -> std::borrow::Cow<'_, [&[u8]]> {
+        if self.fix.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.pays);
+        }
+        let mut v: Vec<&[u8]> = self.pays.clone();
+        for &(j, start, len) in &self.fix {
+            v[j as usize] = &self.arena[start..start + len];
+        }
+        std::borrow::Cow::Owned(v)
+    }
+
+    fn len(&self) -> usize {
+        self.pays.len()
+    }
+
+    fn free(&mut self) {
+        self.pays = Vec::new();
+        self.arena = Vec::new();
+        self.fix = Vec::new();
+        self.rowids = Vec::new();
+    }
 }
 
 /// Splits a database file into streams. `None` if it is not one we can code.
@@ -165,9 +193,6 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
     // A group per tree and kind of record (table rows, index entries).
     let mut gid_t = vec![u32::MAX; n + 1];
     let mut gid_i = vec![u32::MAX; n + 1];
-    // Payloads with overflow, put together: (group, record, start, length) in the arena.
-    let mut arena = Vec::new();
-    let mut gathered: Vec<(u32, u32, usize, usize)> = Vec::new();
     let mut groups: Vec<GroupRecs> = Vec::new();
 
     let mut s: Vec<Vec<u8>> = (0..NSTREAMS).map(|_| Vec::new()).collect();
@@ -187,7 +212,6 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         let h = hdr_off(p);
         let base = (p - 1) * ps;
         let mut grp = None;
-        let mut gi = 0;
         if k != 5 {
             let root = find(&mut parent, p as u32) as usize;
             let gid = if k == 13 { &mut gid_t[root] } else { &mut gid_i[root] };
@@ -196,7 +220,6 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 groups.push(GroupRecs { table: k == 13, first: p, ..Default::default() });
             }
             put_uv(&mut s[S_GRP], *gid as u64);
-            gi = *gid;
             grp = Some(&mut groups[*gid as usize]);
         }
         parse_page(&g, pg, h, &mut cells, &mut iv);
@@ -225,21 +248,21 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 continue;
             }
             // Put the payload together, code the chain.
-            let start = arena.len();
-            arena.extend_from_slice(&pg[c.pay..c.pay + c.local]);
+            let start = grp.arena.len();
+            grp.arena.extend_from_slice(&pg[c.pay..c.pay + c.local]);
             let mut left = c.plen as usize - c.local;
             let mut q = c.ovf as usize;
             while left > 0 {
                 let op = page(q);
                 let take = left.min(g.usable - 4);
-                arena.extend_from_slice(&op[4..4 + take]);
+                grp.arena.extend_from_slice(&op[4..4 + take]);
                 s[S_FILL].extend_from_slice(&op[4 + take..]);
                 put_sv(&mut s[S_OVF], q as i64 - (last_ovf + 1));
                 last_ovf = q as i64;
                 left -= take;
                 q = be32(op, 0) as usize;
             }
-            gathered.push((gi, grp.pays.len() as u32, start, c.plen as usize));
+            grp.fix.push((grp.pays.len() as u32, start, c.plen as usize));
             grp.pays.push(&[]);
         }
         if k == 2 || k == 5 {
@@ -262,12 +285,6 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
     s[S_RAW].extend_from_slice(&file[n * ps..]);
     crate::mem::mark("enc: pages");
 
-    for &(gi, j, start, len) in &gathered {
-        groups[gi as usize].pays[j as usize] = &arena[start..start + len];
-    }
-    drop(gathered);
-    let mut pays: Vec<Vec<&[u8]>> = groups.iter_mut().map(|gr| std::mem::take(&mut gr.pays)).collect();
-    crate::mem::mark("enc: payloads");
 
     // Indexes predicted from their tables: (table group, columns) per index group.
     let mut refs: Vec<Option<(usize, index::Key)>> = (0..groups.len()).map(|_| None).collect();
@@ -276,7 +293,8 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         let sg = gid_t[schema_root];
         if sg != u32::MAX {
             let enc = u32::from_be_bytes(file[56..60].try_into().unwrap());
-            for (ir, tr) in index::schema_indexes(&pays[sg as usize], enc) {
+            let schema = groups[sg as usize].view();
+            for (ir, tr) in index::schema_indexes(&schema, enc) {
                 let (ir, tr) = (ir as usize, tr as usize);
                 if ir > n || tr > n || !is_btree(kind[ir]) || !is_btree(kind[tr]) {
                     continue;
@@ -288,9 +306,8 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 }
                 let t = &groups[gt as usize];
                 let row_of = row_lookup(&t.rowids);
-                if let Some(key) =
-                    index::discover_key(&pays[gi as usize], &pays[gt as usize], &t.rowids, &row_of)
-                {
+                let (vi, vt) = (groups[gi as usize].view(), t.view());
+                if let Some(key) = index::discover_key(&vi, &vt, &t.rowids, &row_of) {
                     refs[gi as usize] = Some((gt as usize, key));
                 }
             }
@@ -312,10 +329,11 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
     }
     let mut cols = Vec::new();
     let mut pred = Vec::new();
-    let mut gs: [Vec<u8>; 8] = Default::default();
+    let mut gs: [Vec<Vec<u8>>; 8] = Default::default();
     put_uv(&mut s[S_DIR], groups.len() as u64);
     for i in 0..groups.len() {
         let gr = &groups[i];
+        let pays_i = gr.view();
         let mut ge = GroupEnc::default();
         let d = &mut s[S_DIR];
         d.push(gr.table as u8);
@@ -335,7 +353,8 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         }
         if let Some((t, key)) = &refs[i] {
             let tg = &groups[*t];
-            let keys = index::Keys::over(&key.cols, &pays[*t], &tg.rowids, &mut cols);
+            let pays_t = tg.view();
+            let keys = index::Keys::over(&key.cols, &pays_t, &tg.rowids, &mut cols);
             let perm = index::order(&keys, key);
             let mut rank = vec![0u32; perm.len()];
             for (k, &r) in perm.iter().enumerate() {
@@ -343,7 +362,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
             }
             drop(perm);
             let row_of = row_lookup(&tg.rowids);
-            for &e in &pays[i] {
+            for &e in pays_i.iter() {
                 // The entry's rowid, its row, and the entry the row predicts.
                 let r = crate::record::parse(e, &mut cols)
                     .then(|| cols.last().copied())
@@ -362,7 +381,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 ge.record(e, g.fmt4, &mut cols);
             }
         } else {
-            for &e in &pays[i] {
+            for &e in pays_i.iter() {
                 ge.record(e, g.fmt4, &mut cols);
             }
         }
@@ -371,21 +390,30 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 "G {i} first={} table={} recs={} ref={:?} {}",
                 gr.first,
                 gr.table,
-                pays[i].len(),
+                gr.len(),
                 refs[i].as_ref().map(|r| (r.0, &r.1)),
                 ge.stats()
             );
         }
         ge.finish(&mut s[S_DIR], &mut gs);
-        drop(ge);
+        drop(pays_i);
         for &x in &free_at[i] {
-            pays[x] = Vec::new();
-            groups[x].rowids = Vec::new();
+            groups[x].free();
         }
     }
+    drop(groups);
     crate::mem::mark("enc: groups");
-    for (j, v) in gs.into_iter().enumerate() {
-        s[S_REC + j] = v;
+    // The pieces put together (exactly sized, each freed once copied).
+    for (j, pieces) in gs.into_iter().enumerate() {
+        s[S_REC + j] = if pieces.len() == 1 {
+            pieces.into_iter().next().unwrap()
+        } else {
+            let mut v = Vec::with_capacity(pieces.iter().map(|p| p.len()).sum());
+            for p in pieces {
+                v.extend_from_slice(&p);
+            }
+            v
+        };
     }
     Some(Encoded { geom: g, streams: s })
 }
