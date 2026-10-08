@@ -367,7 +367,12 @@ fn fuzz(args: &[String]) {
                 Ok(true) => {}
                 Ok(false) => {
                     bad += 1;
-                    eprintln!("MISMATCH {f} seed {seed} iter {i}");
+                    eprintln!("MISMATCH {f} seed {seed} iter {i} (block {})", opt.block);
+                    if let Ok(dir) = std::env::var("FUZZ_SAVE") {
+                        let name = format!("{dir}/{}-{seed}-{i}", f.replace('/', "_"));
+                        std::fs::write(&name, &m).expect("write");
+                        std::fs::write(name + ".opt", format!("{} {:x}", opt.block, opt.force_whole)).expect("write");
+                    }
                 }
                 Err(e) => {
                     bad += 1;

@@ -264,11 +264,15 @@ impl Encoder {
         Mark { st: self.st, ntpl: self.keys.len() }
     }
 
-    /// Undoes the block coded since `m`, which is then stored whole. The corner table is
-    /// cleared: the decoder never learns what the block would have taught it.
+    /// Undoes the block coded since `m`, which is then stored whole. The corner table and
+    /// the recent lines are cleared: the decoder never learns what the block would have
+    /// taught it, and the encoder must only use what the decoder knows.
     pub fn reset(&mut self, m: &Mark) {
         self.st = m.st;
         self.corners.clear();
+        for r in &mut self.recent {
+            r.clear();
+        }
         for k in self.keys.drain(m.ntpl..) {
             self.bytes -= k.len();
             self.map.remove(&k);

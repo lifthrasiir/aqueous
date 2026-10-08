@@ -37,8 +37,9 @@ impl Entry {
 }
 
 /// The recent lines of a kind, by line number; for the encoder also a table from values to
-/// the last line with them. Entries carry their line number, so that ones written by a
-/// block that was undone are not taken for older lines.
+/// the last line with them. Entries carry their line number (a slot holds one line in
+/// RECENT). The encoder clears all after undoing a block, so that it only refers to lines
+/// the decoder has.
 pub(crate) struct Recent {
     ring: Vec<Entry>,
     table: Vec<u64>,
@@ -64,6 +65,13 @@ impl Recent {
             self.ring.resize(i + 1, Entry { tag: 0, v: [0; 3], s: [0; 3] });
         }
         self.ring[i] = e;
+    }
+
+    /// Forgets everything (the encoder, after undoing a block: an entry of the undone block
+    /// could carry the number of a later line that is never recorded).
+    pub(crate) fn clear(&mut self) {
+        self.ring.clear();
+        self.table.fill(0);
     }
 
     /// The distance back from `line` to the last line equal to `e` (0 if none), and

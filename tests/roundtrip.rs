@@ -162,6 +162,35 @@ fn unit_normals() {
     rt(s.as_bytes());
 }
 
+/// Repeated vertices among lines of more than three numbers (not kept for references),
+/// with blocks stored whole: a line number the encoder saw in an undone block must not
+/// stand for another line.
+#[test]
+fn equal_lines_and_undone_blocks() {
+    let mut s = String::new();
+    let mut r = 3u64;
+    for i in 0..30000 {
+        r ^= r << 13;
+        r ^= r >> 7;
+        r ^= r << 17;
+        let k = r % 50;
+        if i % 3 == 0 {
+            s += &format!("v {k}.5 {}.25 {}.75 1.0\n", k * 3, k * 7);
+        } else {
+            s += &format!("v {k}.5 {}.25 {}.75\n", k * 3, k * 7);
+        }
+        if i % 5 == 0 {
+            s += &format!("vt 0.{k} 0.{}\n", (k * 7) % 10);
+        }
+    }
+    for mask in [0x5A5A_1234_8421_0F0Fu64, 0xAAAA_AAAA_AAAA_AAAA, 0x8888_4444_2222_1111] {
+        for block in [1 << 10, 4 << 10] {
+            let opt = Options { block, verify: false, force_whole: mask, ..Default::default() };
+            assert_eq!(decompress(&compress_with(s.as_bytes(), &opt, &mut Stats::default())).unwrap(), s.as_bytes());
+        }
+    }
+}
+
 #[test]
 fn binary_junk() {
     let mut r = 0x1234567u64;
