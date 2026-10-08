@@ -86,7 +86,8 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     out.push(g.fmt4 as u8);
     let mk = |level| {
         let mut cz = zstd::bulk::Compressor::new(level).expect("zstd");
-        if opt.ldm {
+        // Long-distance matching for what lies beyond the window.
+        if opt.ldm && src.len() > 2 << 20 {
             use zstd::zstd_safe::CParameter as P;
             cz.set_parameter(P::EnableLongDistanceMatching(true)).expect("zstd");
             cz.set_parameter(P::WindowLog(27)).expect("zstd");
@@ -114,8 +115,9 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     }
     st.zstd_s += t.elapsed().as_secs_f64();
     if opt.verify {
+        // zstd is trusted: rebuild the file from the streams.
         let t = std::time::Instant::now();
-        let ok = matches!(decompress(&out), Ok(d) if d == src);
+        let ok = matches!(transform::decode(&g, src.len(), &enc.streams), Ok(d) if d == src);
         st.verify_s += t.elapsed().as_secs_f64();
         if !ok {
             st.whole = true;

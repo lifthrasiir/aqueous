@@ -4,7 +4,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: sqlr c IN OUT | sqlr d IN OUT\n       sqlr bench [-n ITERS] [-l LEVEL] [-b LEVEL] [-V] [-L] [-c|-d] [-v] FILE...\n       sqlr fuzz [-n N] [-s SEED] FILE..."
+        "usage: sqlr c IN OUT | sqlr d IN OUT\n       sqlr bench [-n ITERS] [-l LEVEL] [-b LEVEL] [-x] [-L] [-c|-d] [-v] FILE...\n       sqlr fuzz [-n N] [-s SEED] FILE..."
     );
     std::process::exit(2);
 }
@@ -36,7 +36,7 @@ fn bench(args: &[String]) {
     let mut iters = 1;
     let mut files = vec![];
     let mut verbose = false;
-    let mut opt = Options { verify: false, ..Default::default() };
+    let mut opt = Options::default();
     // Repeat only one side (for profiling): 'c' or 'd'.
     let mut only = ' ';
     let mut it = args.iter();
@@ -47,7 +47,7 @@ fn bench(args: &[String]) {
                 opt.level = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage());
                 opt.level_bytes = opt.level;
             }
-            "-V" => opt.verify = true,
+            "-x" => opt.verify = false,
             "-b" => opt.level_bytes = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-L" => opt.ldm = false,
             "-c" => only = 'c',
