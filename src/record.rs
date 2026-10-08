@@ -10,6 +10,9 @@
 use crate::index::ROWID;
 use crate::varint::{Rd, get_sqlite, put_sqlite, put_sv, put_uv, sqlite_len, uv_len, zz};
 use crate::{Result, corrupt};
+use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+use xxhash_rust::xxh3::xxh3_64;
 
 /// Integer content size by serial type 0..=9.
 pub const INT_SIZE: [usize; 10] = [0, 1, 2, 3, 4, 6, 8, 8, 0, 0];
@@ -141,8 +144,41 @@ const T_INT: u8 = 1;
 const T_REAL: u8 = 2;
 const T_TEXT: u8 = 3;
 const T_BLOB: u8 = 4;
+/// A real that is a float exactly (4 bytes in `real`).
+const T_F32: u8 = 5;
+/// Text or blob equal to an earlier one of the column (its id in `len`).
+const T_TEXT_REP: u8 = 6;
+const T_BLOB_REP: u8 = 7;
 /// 16 + serial type: an integer with a serial type SQLite would not pick.
 const T_ODD_INT: u8 = 16;
+/// 32 + e: a real that is m / 10^e (m in the integers).
+const T_DEC: u8 = 32;
+const MAX_E: usize = 22;
+
+const P10: [f64; MAX_E + 1] = [
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
+    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+];
+
+/// A real as m / 10^e with the smallest e, if there is one (m below 2^53, so the division
+/// is exact up to its one rounding).
+#[inline]
+fn decimal(bits: u64) -> Option<(i64, u8)> {
+    let v = f64::from_bits(bits);
+    if !v.is_finite() {
+        return None;
+    }
+    for (e, &p) in P10.iter().enumerate() {
+        let m = (v * p).round();
+        if m.abs() >= 9007199254740992.0 {
+            return None;
+        }
+        if (m / p).to_bits() == bits {
+            return Some((m as i64, e as u8));
+        }
+    }
+    None
+}
 
 // Record codes.
 const R_RAW: u64 = 0;
@@ -156,7 +192,30 @@ pub struct ColEnc {
     pub real: Vec<u8>,
     pub len: Vec<u8>,
     pub bytes: Vec<u8>,
+    /// Distinct text/blob values so far: hash -> id, and (offset in `bytes`, length).
+    seen: HashMap<u64, u32, BuildHasherDefault<IdHasher>>,
+    distinct: Vec<(u32, u32)>,
 }
+
+/// For keys that are hashes already.
+#[derive(Default)]
+struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, _: &[u8]) {
+        unreachable!()
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = v;
+    }
+}
+
+/// Text and blob values this long or longer that appeared before in their column are
+/// coded as the id of the earlier value.
+const MIN_REP: usize = 2;
 
 #[derive(Default)]
 pub struct GroupEnc {
@@ -198,8 +257,18 @@ impl GroupEnc {
             match st {
                 0 => c.tag.push(T_NULL),
                 7 => {
-                    c.tag.push(T_REAL);
-                    c.real.extend_from_slice(b);
+                    let bits = u64::from_be_bytes(b.try_into().unwrap());
+                    let f = f64::from_bits(bits) as f32;
+                    if let Some((m, e)) = decimal(bits) {
+                        c.tag.push(T_DEC + e);
+                        c.ints.push(m);
+                    } else if (f as f64).to_bits() == bits {
+                        c.tag.push(T_F32);
+                        c.real.extend_from_slice(&f.to_bits().to_be_bytes());
+                    } else {
+                        c.tag.push(T_REAL);
+                        c.real.extend_from_slice(b);
+                    }
                 }
                 1..=9 => {
                     let v = int_value(st, b);
@@ -207,7 +276,27 @@ impl GroupEnc {
                     c.ints.push(v);
                 }
                 _ => {
-                    c.tag.push(if st & 1 == 1 { T_TEXT } else { T_BLOB });
+                    let text = st & 1 == 1;
+                    if b.len() >= MIN_REP && b.len() <= u32::MAX as usize {
+                        let h = xxh3_64(b);
+                        match c.seen.get(&h) {
+                            Some(&id)
+                                if {
+                                    let (o, l) = c.distinct[id as usize];
+                                    &c.bytes[o as usize..(o + l) as usize] == b
+                                } =>
+                            {
+                                c.tag.push(if text { T_TEXT_REP } else { T_BLOB_REP });
+                                put_uv(&mut c.len, (c.distinct.len() - 1 - id as usize) as u64);
+                                continue;
+                            }
+                            _ => {
+                                c.seen.insert(h, c.distinct.len() as u32);
+                                c.distinct.push((c.bytes.len() as u32, b.len() as u32));
+                            }
+                        }
+                    }
+                    c.tag.push(if text { T_TEXT } else { T_BLOB });
                     put_uv(&mut c.len, b.len() as u64);
                     c.bytes.extend_from_slice(b);
                 }
@@ -291,6 +380,7 @@ pub struct ColDec<'a> {
     real: Rd<'a>,
     len: Rd<'a>,
     bytes: Rd<'a>,
+    distinct: Vec<(u32, u32)>,
 }
 
 impl ColDec<'_> {
@@ -358,7 +448,7 @@ impl<'a> GroupDec<'a> {
             let real = real.sub(dir.usize()?)?;
             let len = len.sub(dir.usize()?)?;
             let bytes = bytes.sub(dir.usize()?)?;
-            cols.push(ColDec { tag, int, delta, prev: 0, real, len, bytes });
+            cols.push(ColDec { tag, int, delta, prev: 0, real, len, bytes, distinct: Vec::new() });
         }
         Ok(GroupDec { rec, rowid, rawpay, cols })
     }
@@ -419,13 +509,27 @@ impl<'a> GroupDec<'a> {
                     let v = c.next_int()?;
                     (canon_st(v, fmt4), v)
                 }
-                T_REAL => (7, 0),
+                T_REAL => (7, i64::from_be_bytes(c.real.bytes(8)?.try_into().unwrap())),
+                T_F32 => {
+                    let f = f32::from_bits(u32::from_be_bytes(c.real.bytes(4)?.try_into().unwrap()));
+                    (7, (f as f64).to_bits() as i64)
+                }
+                T_DEC..=54 => {
+                    let m = c.next_int()?;
+                    (7, (m as f64 / P10[(t - T_DEC) as usize]).to_bits() as i64)
+                }
                 T_TEXT | T_BLOB => {
                     let n = c.len.uv()?;
                     if n > u32::MAX as u64 {
                         return Err(corrupt());
                     }
-                    (12 + 2 * n + (t == T_TEXT) as u64, 0)
+                    (12 + 2 * n + (t == T_TEXT) as u64, -1)
+                }
+                T_TEXT_REP | T_BLOB_REP => {
+                    let d = c.len.usize()?;
+                    let id = c.distinct.len().checked_sub(d + 1).ok_or_else(corrupt)?;
+                    let &(_, n) = c.distinct.get(id).ok_or_else(corrupt)?;
+                    (12 + 2 * n as u64 + (t == T_TEXT_REP) as u64, id as i64)
                 }
                 17..=25 => ((t - T_ODD_INT) as u64, c.next_int()?),
                 _ => return Err(corrupt()),
@@ -444,8 +548,18 @@ impl<'a> GroupDec<'a> {
             match st {
                 0 | 8 | 9 => {}
                 1..=6 => out.extend_from_slice(&v.to_be_bytes()[8 - INT_SIZE[st as usize]..]),
-                7 => out.extend_from_slice(c.real.bytes(8)?),
-                _ => out.extend_from_slice(c.bytes.bytes(st_size(st))?),
+                7 => out.extend_from_slice(&v.to_be_bytes()),
+                _ if v >= 0 => {
+                    let (o, n) = c.distinct[v as usize];
+                    out.extend_from_slice(&c.bytes.b[o as usize..(o + n) as usize]);
+                }
+                _ => {
+                    let n = st_size(st);
+                    if n >= MIN_REP && n <= u32::MAX as usize {
+                        c.distinct.push((c.bytes.p as u32, n as u32));
+                    }
+                    out.extend_from_slice(c.bytes.bytes(n)?);
+                }
             }
         }
         Ok(())

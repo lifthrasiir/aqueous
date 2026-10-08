@@ -45,6 +45,7 @@ pub const S_RAW: usize = 8;
 pub const S_DIR: usize = 9;
 /// The group streams (see `record`), in this order.
 pub const S_REC: usize = 10;
+pub const S_BYTES: usize = 17;
 pub const NSTREAMS: usize = 18;
 
 pub const STREAM_NAMES: [&str; NSTREAMS] = [

@@ -20,6 +20,8 @@ const VERSION: u8 = 1;
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub level: i32,
+    /// Level of the text/blob stream (most of the output).
+    pub level_bytes: i32,
     /// Decode the result and compare (falls back to mode 0 on a mismatch).
     pub verify: bool,
     pub ldm: bool,
@@ -27,7 +29,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { level: 3, verify: true, ldm: true }
+        Options { level: 3, level_bytes: 3, verify: true, ldm: true }
     }
 }
 
@@ -76,16 +78,22 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     put_uv(&mut out, g.psize as u64);
     put_uv(&mut out, g.usable as u64);
     out.push(g.fmt4 as u8);
-    let mut cz = zstd::bulk::Compressor::new(opt.level).expect("zstd");
-    if opt.ldm {
-        use zstd::zstd_safe::CParameter as P;
-        cz.set_parameter(P::EnableLongDistanceMatching(true)).expect("zstd");
-        cz.set_parameter(P::WindowLog(27)).expect("zstd");
-    }
+    let mk = |level| {
+        let mut cz = zstd::bulk::Compressor::new(level).expect("zstd");
+        if opt.ldm {
+            use zstd::zstd_safe::CParameter as P;
+            cz.set_parameter(P::EnableLongDistanceMatching(true)).expect("zstd");
+            cz.set_parameter(P::WindowLog(27)).expect("zstd");
+        }
+        cz
+    };
+    let mut cz = mk(opt.level);
+    let mut czb = mk(opt.level_bytes);
     for (i, s) in enc.streams.iter().enumerate() {
         put_uv(&mut out, s.len() as u64);
         st.raw[i] += s.len() as u64;
-        let z = if s.len() > 64 { cz.compress(s).expect("zstd") } else { Vec::new() };
+        let c = if i == transform::S_BYTES { &mut czb } else { &mut cz };
+        let z = if s.len() > 64 { c.compress(s).expect("zstd") } else { Vec::new() };
         if !z.is_empty() && z.len() < s.len() {
             out.push(1);
             put_uv(&mut out, z.len() as u64);

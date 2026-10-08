@@ -8,7 +8,6 @@ mkdir -p "$OUT"
 MAXFILE=$((50*1024*1024))
 CAP=$((150*1024*1024))
 total=$(find "$OUT" -type f -exec stat -f %z {} + 2>/dev/null | awk '{s+=$1} END{print s+0}')
-n=0
 
 roots=(/System/Library /Library /usr/share /opt/homebrew)
 for app in /Applications/*.app; do [ -d "$app" ] && roots+=("$app"); done
@@ -31,7 +30,8 @@ done | while IFS= read -r -d '' f; do
   # flattened unique name: path with / -> __, plus short hash of the full path
   flat=$(printf '%s' "${f#/}" | tr '/ ' '__' | sed 's/_\{3,\}/__/g')
   h=$(printf '%s' "$f" | shasum | cut -c1-6)
-  base=$(basename "$f"); dest="$OUT/${h}__${flat: -90}"
+  [ ${#flat} -gt 90 ] && flat=${flat:$((${#flat}-90))}
+  dest="$OUT/${h}__${flat}"
   [ -e "$dest" ] && { echo "skip $f"; continue; }
   if [ $((total + size)) -gt "$CAP" ]; then echo "cap reached, skipping $f"; continue; fi
   if cp -X "$f" "$dest" 2>/dev/null && [ "$(stat -f %z "$dest")" = "$size" ]; then

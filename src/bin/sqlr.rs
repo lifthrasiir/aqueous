@@ -42,8 +42,12 @@ fn bench(args: &[String]) {
     while let Some(a) = it.next() {
         match a.as_str() {
             "-n" => iters = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
-            "-l" => opt.level = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-l" => {
+                opt.level = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage());
+                opt.level_bytes = opt.level;
+            }
             "-V" => opt.verify = true,
+            "-b" => opt.level_bytes = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-L" => opt.ldm = false,
             "-c" => only = 'c',
             "-d" => only = 'd',
