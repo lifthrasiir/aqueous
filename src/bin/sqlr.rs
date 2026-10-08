@@ -1,6 +1,25 @@
 use sqlite_recons::container::{Options, Stats, compress_with};
 use sqlite_recons::transform::{NSTREAMS, STREAM_NAMES};
-use std::time::Instant;
+#[repr(C)]
+struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+unsafe extern "C" {
+    fn clock_gettime(clk: u32, tp: *mut Timespec) -> i32;
+}
+
+/// CPU time of this thread, in seconds (wall time is skewed by other load).
+fn cpu() -> f64 {
+    #[cfg(target_os = "macos")]
+    const CLOCK_THREAD_CPUTIME_ID: u32 = 16;
+    #[cfg(not(target_os = "macos"))]
+    const CLOCK_THREAD_CPUTIME_ID: u32 = 3;
+    let mut t = Timespec { sec: 0, nsec: 0 };
+    unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut t) };
+    t.sec as f64 + t.nsec as f64 * 1e-9
+}
 
 fn usage() -> ! {
     eprintln!(
@@ -67,16 +86,16 @@ fn bench(args: &[String]) {
         let mut st = Stats::default();
         for _ in 0..if only == 'd' { 1 } else { iters } {
             st = Stats::default();
-            let t = Instant::now();
+            let t = cpu();
             c = compress_with(&src, &opt, &mut st);
-            bc = bc.min(t.elapsed().as_secs_f64());
+            bc = bc.min(cpu() - t);
         }
         let mut bd = f64::MAX;
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
-            let t = Instant::now();
+            let t = cpu();
             let d = sqlite_recons::decompress(&c);
-            bd = bd.min(t.elapsed().as_secs_f64());
+            bd = bd.min(cpu() - t);
             ok &= matches!(d, Ok(ref d) if *d == src);
         }
         if !ok {
