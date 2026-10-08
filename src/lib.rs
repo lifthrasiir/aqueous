@@ -14,6 +14,7 @@ pub mod model;
 pub mod packbits;
 pub mod pixels;
 pub mod psd;
+pub mod rans;
 pub mod rows;
 
 pub use container::{compress, decompress};

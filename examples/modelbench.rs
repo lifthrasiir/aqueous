@@ -3,6 +3,30 @@ use psd_recons::model::{GroupCoder, Player, Recorder};
 use psd_recons::rows::PlaneRows;
 use std::time::Instant;
 
+/// Decodes by replaying recorded symbols: the model's own cost on the decoding side.
+struct Replay {
+    syms: Vec<u8>,
+    i: usize,
+}
+impl psd_recons::model::Coder for Replay {
+    const DECODES: bool = true;
+    fn code(&mut self, _t: usize, _sym: u8) -> u8 {
+        let s = self.syms[self.i];
+        self.i += 1;
+        s
+    }
+}
+
+/// Records symbols only.
+struct Tape(Vec<u8>);
+impl psd_recons::model::Coder for Tape {
+    const DECODES: bool = false;
+    fn code(&mut self, _t: usize, sym: u8) -> u8 {
+        self.0.push(sym);
+        sym
+    }
+}
+
 struct Null;
 impl psd_recons::model::Coder for Null {
     const DECODES: bool = false;
@@ -59,10 +83,17 @@ fn main() {
         let mut p = Player::new(&out);
         once(&mut |gc, r| gc.code_row(&mut p, r, None))
     });
+    let mut tape = Tape(Vec::new());
+    once(&mut |gc, r| gc.code_row(&mut tape, r, None));
+    let tr = best(&mut || {
+        let mut p = Replay { syms: tape.0.clone(), i: 0 };
+        once(&mut |gc, r| gc.code_row(&mut p, r, None))
+    });
     println!(
-        "{samples} samples, {syms} symbols: model {:.2} ns/sym, encode {:.2}, decode {:.2} (incl. row clones)",
+        "{samples} samples, {syms} symbols: model {:.2} ns/sym, encode {:.2}, decode {:.2}, replay {:.2} (incl. row clones)",
         tm * 1e9 / syms as f64,
         te * 1e9 / syms as f64,
-        td * 1e9 / syms as f64
+        td * 1e9 / syms as f64,
+        tr * 1e9 / syms as f64
     );
 }

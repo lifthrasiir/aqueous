@@ -103,6 +103,15 @@ enum Codec {
 const MAX_DEPTH: usize = 3;
 
 fn nested_compress(codec: Codec, data: &[u8], depth: usize) -> Option<Vec<u8>> {
+    let t0 = std::time::Instant::now();
+    let r = nested_compress_(codec, data, depth);
+    if std::env::var_os("PSDR_STATS").is_some() {
+        eprintln!("nested {codec:?} {} -> {:?} in {:.3}s", data.len(), r.as_ref().map(|v| v.len()), t0.elapsed().as_secs_f64());
+    }
+    r
+}
+
+fn nested_compress_(codec: Codec, data: &[u8], depth: usize) -> Option<Vec<u8>> {
     let packed = match codec {
         Codec::Psd => try_compress(data, depth + 1)?,
         Codec::Png => png_recons::compress(data),
@@ -184,6 +193,38 @@ fn check_rle(src: &[u8], planes: usize, w: usize, h: usize, cb: usize) -> Option
     (pos == src.len()).then_some((lens, splits))
 }
 
+/// Orders candidate encoders by how many of a sample of rows they reproduce (stable, so the
+/// inferred tile cut stays first on ties).
+fn rank_candidates(mut cands: Vec<Encoder>, src: &[u8], planes: usize, w: usize, h: usize, cb: usize) -> Vec<Encoder> {
+    const SAMPLE: usize = 32;
+    let rows = planes * h;
+    let step = rows.div_ceil(SAMPLE).max(1);
+    let mut starts = vec![0usize; rows + 1];
+    starts[0] = rows * cb;
+    for r in 0..rows {
+        starts[r + 1] = starts[r] + rows::count(src, cb, r);
+    }
+    let mut row = vec![0u8; w];
+    let mut buf = Vec::new();
+    let mut hits = vec![0usize; cands.len()];
+    for r in (0..rows).step_by(step) {
+        let enc = &src[starts[r]..starts[r + 1]];
+        if !rows::unpackbits_into(enc, &mut row) {
+            continue;
+        }
+        for (k, &c) in cands.iter().enumerate() {
+            buf.clear();
+            packbits::encode(c, &row, &mut buf);
+            hits[k] += (buf == enc) as usize;
+        }
+    }
+    let mut order: Vec<usize> = (0..cands.len()).collect();
+    order.sort_by_key(|&k| std::cmp::Reverse(hits[k]));
+    let ranked = order.iter().map(|&k| cands[k]).collect();
+    cands.clear();
+    ranked
+}
+
 /// A planned span with what is known before coding.
 struct Planned<'a> {
     span: Span<'a>,
@@ -207,7 +248,7 @@ fn plan_span<'a>(d: &[u8], start: usize, end: usize, planes: usize, w: usize, h:
         Compression::Rle => {
             let cb = if psb { 4 } else { 2 };
             let (plane_lens, splits) = check_rle(src, planes, w, h, cb)?;
-            let candidates = packbits::candidates_after(packbits::infer_tiles_from(splits));
+            let candidates = rank_candidates(packbits::candidates_after(packbits::infer_tiles_from(splits)), src, planes, w, h, cb);
             (Coding::Rle { count_bytes: cb, encoder: candidates[0], plane_lens, exceptions: Vec::new() }, candidates)
         }
         _ => return None,

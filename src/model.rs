@@ -20,7 +20,7 @@
 //! static per chunk of [`CHUNK`] symbols: counted, written, then the chunk coded with rANS,
 //! which bounds the encoder's buffer.
 
-use png_recons::rans::{self, BitR, BitW, Decoder, Tables};
+use crate::rans::{self, BitR, BitW, Decoder, Tables};
 
 use crate::psd::{Error, Result};
 
@@ -166,6 +166,7 @@ fn code_sample<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool,
     res: &mut [u8],
     x: usize,
     f: u8,
+    vis: u8,
 ) {
     debug_assert!(x < p.len() && (!LEFT || x > 0) && (!RIGHT || x + 1 < p.len()));
     // SAFETY: as documented; LEFT means x >= 1 and RIGHT means x + 1 < w.
@@ -176,11 +177,9 @@ fn code_sample<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool,
         let mut b = if !TOP { g(up, x) } else { a };
         let mut cc = if LEFT && !TOP { g(up, x - 1) } else { b };
         let d = if !TOP && RIGHT { g(up, x + 1) } else { b };
-        let mut transparent = false;
+        let transparent = ALPHA && vis & 1 != 0;
         if ALPHA {
-            if g(q.al, x) == 0 {
-                transparent = true;
-            } else if (LEFT && g(q.al, x - 1) == 0) || (!TOP && (g(q.alp, x) == 0 || LEFT && g(q.alp, x - 1) == 0)) {
+            if vis & 2 != 0 {
                 // Transparent neighbors are replaced by a visible one: their color is arbitrary.
                 let jw = (LEFT && g(q.al, x - 1) > 0).then(|| g(p, x - 1));
                 let jn = (!TOP && g(q.alp, x) > 0).then(|| g(up, x));
@@ -215,6 +214,22 @@ fn code_sample<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool,
     }
 }
 
+/// Visibility of pixel `x` for the color planes, from the alpha rows: 1 if transparent, 2 if
+/// visible with a transparent neighbor (whose color is then not used).
+#[inline(always)]
+fn visibility<const ALPHA: bool, const TOP: bool, const LEFT: bool>(q: &Rows, x: usize) -> u8 {
+    if !ALPHA {
+        return 0;
+    }
+    if q.al[x] == 0 {
+        1
+    } else if (LEFT && q.al[x - 1] == 0) || (!TOP && (q.alp[x] == 0 || LEFT && q.alp[x - 1] == 0)) {
+        2
+    } else {
+        0
+    }
+}
+
 /// Codes one row `p` of a plane, writing its residuals to `res`. The flags say which of the
 /// optional rows of `r` are there (alpha, first plane's residuals, hint), and whether this is
 /// the first row.
@@ -246,10 +261,10 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
     };
     let run_t = RUN_BASE + r.kind * 2 * RUN_CTX;
     if w == 1 {
-        code_sample::<C, ALPHA, FIRST, HINT, TOP, false, false>(c, &q, p, res, 0, fx(0));
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, false, false>(c, &q, p, res, 0, fx(0), visibility::<ALPHA, TOP, false>(&q, 0));
         return;
     }
-    code_sample::<C, ALPHA, FIRST, HINT, TOP, false, true>(c, &q, p, res, 0, fx(0));
+    code_sample::<C, ALPHA, FIRST, HINT, TOP, false, true>(c, &q, p, res, 0, fx(0), visibility::<ALPHA, TOP, false>(&q, 0));
     let mut x = 1;
     let mut after_run = false;
     while x + 1 < w {
@@ -278,11 +293,11 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
             }
         }
         after_run = false;
-        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, true>(c, &q, p, res, x, fx(x));
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, true>(c, &q, p, res, x, fx(x), visibility::<ALPHA, TOP, true>(&q, x));
         x += 1;
     }
     if x + 1 == w {
-        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, false>(c, &q, p, res, x, fx(x));
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, false>(c, &q, p, res, x, fx(x), visibility::<ALPHA, TOP, true>(&q, x));
     }
 }
 
@@ -307,13 +322,14 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
     let [q0, q1, q2] = &k.q;
     let how = k.how;
     let pixel = |c: &mut C, p0: &mut [u8], p1: &mut [u8], p2: &mut [u8], r0: &mut [u8], r1: &mut [u8], r2: &mut [u8], x: usize, left: bool, right: bool| {
+        let vis = if left { visibility::<ALPHA, TOP, true>(q0, x) } else { visibility::<ALPHA, TOP, false>(q0, x) };
         macro_rules! one {
             ($c:expr, $cc:ty, $q:expr, $p:expr, $r:expr, $first:literal, $f:expr) => {
                 match (left, right) {
-                    (true, true) => code_sample::<$cc, ALPHA, $first, HINT, TOP, true, true>($c, $q, $p, $r, x, $f),
-                    (false, true) => code_sample::<$cc, ALPHA, $first, HINT, TOP, false, true>($c, $q, $p, $r, x, $f),
-                    (true, false) => code_sample::<$cc, ALPHA, $first, HINT, TOP, true, false>($c, $q, $p, $r, x, $f),
-                    (false, false) => code_sample::<$cc, ALPHA, $first, HINT, TOP, false, false>($c, $q, $p, $r, x, $f),
+                    (true, true) => code_sample::<$cc, ALPHA, $first, HINT, TOP, true, true>($c, $q, $p, $r, x, $f, vis),
+                    (false, true) => code_sample::<$cc, ALPHA, $first, HINT, TOP, false, true>($c, $q, $p, $r, x, $f, vis),
+                    (true, false) => code_sample::<$cc, ALPHA, $first, HINT, TOP, true, false>($c, $q, $p, $r, x, $f, vis),
+                    (false, false) => code_sample::<$cc, ALPHA, $first, HINT, TOP, false, false>($c, $q, $p, $r, x, $f, vis),
                 }
             };
         }
@@ -712,7 +728,9 @@ fn unused() -> Vec<u32> {
 pub struct Player<'a> {
     src: &'a [u8],
     at: usize,
+    /// The chunk's used tables, compacted, and the index of every model table among them.
     tables: Tables,
+    map: Vec<u16>,
     dec: Decoder<'a>,
     left: usize,
     /// Set when the stream turns out corrupt; decoding then yields zeros.
@@ -722,7 +740,7 @@ pub struct Player<'a> {
 
 impl<'a> Player<'a> {
     pub fn new(src: &'a [u8]) -> Player<'a> {
-        let mut p = Player { src, at: 0, tables: Tables::new(&[]), dec: Decoder::new(&[]), left: 0, failed: false, ended: false };
+        let mut p = Player { src, at: 0, tables: Tables::new(&[]), map: vec![0; TABLES], dec: Decoder::new(&[]), left: 0, failed: false, ended: false };
         p.next_chunk();
         p
     }
@@ -739,9 +757,15 @@ impl<'a> Player<'a> {
             let head = src.get(self.at..self.at.checked_add(hl).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
             self.at += hl;
             let mut r = BitR::new(head);
-            let mut freqs = Vec::with_capacity(TABLES);
-            for _ in 0..TABLES {
-                freqs.push(if r.bits(1) == 1 { rans::read_table(&mut r, 256).map_err(|_| corrupt())? } else { unused() });
+            // Table 0 stands for every unused one.
+            let mut freqs = vec![unused()];
+            for t in 0..TABLES {
+                if r.bits(1) == 1 {
+                    self.map[t] = freqs.len() as u16;
+                    freqs.push(rans::read_table(&mut r, 256).map_err(|_| corrupt())?);
+                } else {
+                    self.map[t] = 0;
+                }
             }
             if r.overrun() {
                 return Err(corrupt());
@@ -790,6 +814,8 @@ impl Coder for Player<'_> {
             }
         }
         self.left -= 1;
+        // SAFETY: t is a table of the model, below TABLES.
+        let t = unsafe { *self.map.get_unchecked(t) } as usize;
         self.dec.get(&self.tables, t) as u8
     }
 }
