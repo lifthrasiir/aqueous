@@ -11,12 +11,19 @@
 //!
 //! Blocks end at a line end where there is one; coded blocks carry state over (previous
 //! values, templates), so they are decoded in order.
+//!
+//! With more than one thread, the line transform of blocks stays on the calling thread, in
+//! order; verification (a decoder of its own) and the stream coding of each block run on
+//! other threads, and decompression decodes the streams of the blocks ahead on other
+//! threads. The output is the same whatever the number of threads.
 
-use crate::block::{self, NSTREAMS};
 use crate::ans;
+use crate::block::{self, NSTREAMS};
 use crate::varint::{Rd, put_uv};
 use crate::{Error, Result, corrupt};
+use std::collections::VecDeque;
 use std::io::Write;
+use std::sync::{Arc, Mutex, mpsc};
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
 const MAGIC: &[u8; 4] = b"OBJR";
@@ -41,6 +48,12 @@ const AC_STREAMS: [bool; NSTREAMS] = {
     t
 };
 
+type Streams = [Vec<u8>; NSTREAMS];
+
+fn new_streams() -> Streams {
+    std::array::from_fn(|_| Vec::new())
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
     pub level: i32,
@@ -50,11 +63,13 @@ pub struct Options {
     pub verify: bool,
     /// For tests: blocks (index mod 64) stored whole as if verification failed.
     pub force_whole: u64,
+    /// Threads (1: all on the calling thread).
+    pub threads: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { level: 3, block: 4 << 20, verify: true, force_whole: 0 }
+        Options { level: 3, block: 4 << 20, verify: true, force_whole: 0, threads: 1 }
     }
 }
 
@@ -68,6 +83,7 @@ pub struct Stats {
     /// Blocks rANS coded, per stream.
     pub rc: [u64; NSTREAMS],
     pub whole_coded: u64,
+    /// Seconds per phase (summed over threads).
     pub transform_s: f64,
     pub zstd_s: f64,
     pub verify_s: f64,
@@ -88,6 +104,21 @@ impl Default for Stats {
     }
 }
 
+impl Stats {
+    fn add(&mut self, o: &Stats) {
+        for i in 0..NSTREAMS {
+            self.raw[i] += o.raw[i];
+            self.coded[i] += o.coded[i];
+            self.rc[i] += o.rc[i];
+        }
+        self.whole += o.whole;
+        self.whole_coded += o.whole_coded;
+        self.transform_s += o.transform_s;
+        self.zstd_s += o.zstd_s;
+        self.verify_s += o.verify_s;
+    }
+}
+
 pub fn compress(src: &[u8]) -> Vec<u8> {
     compress_with(src, &Options::default(), &mut Stats::default())
 }
@@ -98,32 +129,107 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     out
 }
 
-/// Compresses `src` into `w`, a block at a time: memory besides the input stays bounded
-/// by the block size.
-pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) -> std::io::Result<()> {
+/// The end of the block starting at `p`: at most `bsize` bytes, at a line end if there is
+/// one.
+fn block_end(src: &[u8], p: usize, bsize: usize) -> usize {
+    let e = (p + bsize).min(src.len());
+    if e < src.len()
+        && let Some(i) = memchr::memrchr(b'\n', &src[p..e])
+    {
+        return p + i + 1;
+    }
+    e
+}
+
+/// Scratch space and the zstd context for coding blocks.
+struct Coder {
+    cz: zstd::bulk::Compressor<'static>,
+    z: Vec<u8>,
+    ac: Vec<u8>,
+}
+
+impl Coder {
+    fn new(level: i32) -> Self {
+        Coder { cz: zstd::bulk::Compressor::new(level).expect("zstd"), z: Vec::new(), ac: Vec::new() }
+    }
+
+    /// Appends block `b` stored whole.
+    fn whole(&mut self, b: &[u8], out: &mut Vec<u8>, st: &mut Stats) {
+        out.push(0);
+        put_uv(out, b.len() as u64);
+        self.z.clear();
+        self.z.reserve(zstd::zstd_safe::compress_bound(b.len()));
+        self.cz.compress_to_buffer(b, &mut self.z).expect("zstd");
+        put_uv(out, self.z.len() as u64);
+        out.extend_from_slice(&self.z);
+        st.whole += b.len() as u64;
+        st.whole_coded += self.z.len() as u64;
+    }
+
+    /// Appends a coded block of `n` bytes from its streams.
+    fn coded(&mut self, n: usize, streams: &Streams, out: &mut Vec<u8>, st: &mut Stats) {
+        out.push(1);
+        put_uv(out, n as u64);
+        let (z, ac) = (&mut self.z, &mut self.ac);
+        for (i, s) in streams.iter().enumerate() {
+            put_uv(out, s.len() as u64);
+            st.raw[i] += s.len() as u64;
+            if s.is_empty() {
+                continue;
+            }
+            // Both zstd and rANS for streams that may take either.
+            let try_ans = AC_STREAMS[i] && s.len() > 64;
+            z.clear();
+            if s.len() > 64 {
+                z.reserve(zstd::zstd_safe::compress_bound(s.len()));
+                self.cz.compress_to_buffer(s, &mut *z).expect("zstd");
+            }
+            let (mut m, mut d): (u8, &[u8]) = if !z.is_empty() && z.len() < s.len() { (M_ZSTD, &z[..]) } else { (M_STORED, &s[..]) };
+            if try_ans {
+                // rANS coded, if smaller. (Verification covers the transform; rANS, like
+                // zstd, is trusted: tests and fuzzing cover it.)
+                ac.clear();
+                if ans::encode(s, ac).is_some() && ac.len() < d.len() {
+                    (m, d) = (M_ANS, &ac[..]);
+                    st.rc[i] += 1;
+                }
+            }
+            out.push(m);
+            put_uv(out, d.len() as u64);
+            out.extend_from_slice(d);
+            st.coded[i] += d.len() as u64;
+        }
+    }
+}
+
+fn header(src: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
     put_uv(&mut out, src.len() as u64);
     out.extend_from_slice(&xxh3_64(src).to_le_bytes());
+    out
+}
+
+/// Compresses `src` into `w`, a block at a time: memory besides the input stays bounded
+/// by the block size (and the threads).
+pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) -> std::io::Result<()> {
+    if opt.threads > 1 {
+        return compress_par(src, opt, st, w);
+    }
+    let mut out = header(src);
     let bsize = opt.block.clamp(1 << 10, MAX_BLOCK);
     let mut enc = block::Encoder::default();
     let mut dec = block::Decoder::default();
-    let mut streams: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
+    let mut streams = new_streams();
     let mut check = Vec::new();
-    let mut z = Vec::new();
-    let mut ac = Vec::new();
-    let mut cz = zstd::bulk::Compressor::new(opt.level).expect("zstd");
+    let mut coder = Coder::new(opt.level);
     let mut p = 0;
     let mut nblock = 0;
     while p < src.len() {
         w.write_all(&out)?;
         out.clear();
-        let mut e = (p + bsize).min(src.len());
-        if e < src.len()
-            && let Some(i) = memchr::memrchr(b'\n', &src[p..e]) {
-                e = p + i + 1;
-            }
+        let e = block_end(src, p, bsize);
         let b = &src[p..e];
         p = e;
         let t = std::time::Instant::now();
@@ -142,66 +248,268 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
         if !ok {
             enc.reset(&em);
             dec.reset(&dm);
-            out.push(0);
-            put_uv(&mut out, b.len() as u64);
-            z.clear();
-            z.reserve(zstd::zstd_safe::compress_bound(b.len()));
-            cz.compress_to_buffer(b, &mut z).expect("zstd");
-            put_uv(&mut out, z.len() as u64);
-            out.extend_from_slice(&z);
-            st.whole += b.len() as u64;
-            st.whole_coded += z.len() as u64;
+            coder.whole(b, &mut out, st);
         } else {
-            out.push(1);
-            put_uv(&mut out, b.len() as u64);
-            for (i, s) in streams.iter().enumerate() {
-                put_uv(&mut out, s.len() as u64);
-                st.raw[i] += s.len() as u64;
-                if s.is_empty() {
-                    continue;
-                }
-                // Both zstd and rANS for streams that may take either.
-                let try_ans = AC_STREAMS[i] && s.len() > 64;
-                z.clear();
-                if s.len() > 64 {
-                    z.reserve(zstd::zstd_safe::compress_bound(s.len()));
-                    cz.compress_to_buffer(s, &mut z).expect("zstd");
-                }
-                let (mut m, mut d) = if !z.is_empty() && z.len() < s.len() { (M_ZSTD, &z) } else { (M_STORED, s) };
-                if try_ans {
-                    // rANS coded, if smaller. (Verification covers the transform; rANS, like
-                    // zstd, is trusted: tests and fuzzing cover it.)
-                    ac.clear();
-                    let ok = ans::encode(s, &mut ac).is_some() && ac.len() < d.len();
-                    if ok {
-                        (m, d) = (M_ANS, &ac);
-                        st.rc[i] += 1;
-                    }
-                }
-                out.push(m);
-                put_uv(&mut out, d.len() as u64);
-                out.extend_from_slice(d);
-                st.coded[i] += d.len() as u64;
-            }
+            coder.coded(b.len(), &streams, &mut out, st);
         }
         st.zstd_s += t.elapsed().as_secs_f64();
     }
     w.write_all(&out)
 }
 
+/// What the other threads report about a block of generation `generation` (blocks after
+/// one stored whole are coded again, in a new generation).
+enum Report {
+    Verified { generation: u64, idx: usize, ok: bool, secs: f64 },
+    Coded { generation: u64, idx: usize, out: Vec<u8>, st: Stats },
+}
+
+struct VerifyJob {
+    generation: u64,
+    idx: usize,
+    range: std::ops::Range<usize>,
+    streams: Arc<Streams>,
+    /// Stored whole whatever (`Options::force_whole`).
+    forced: bool,
+}
+
+struct CodeJob {
+    generation: u64,
+    idx: usize,
+    n: usize,
+    streams: Arc<Streams>,
+}
+
+/// A block in flight.
+struct Pending {
+    idx: usize,
+    range: std::ops::Range<usize>,
+    mark: block::Mark,
+    verified: Option<bool>,
+    coded: Option<(Vec<u8>, Stats)>,
+}
+
+fn compress_par<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) -> std::io::Result<()> {
+    w.write_all(&header(src))?;
+    let bsize = opt.block.clamp(1 << 10, MAX_BLOCK);
+    // Blocks in flight: enough to keep the coders busy, few enough to bound memory.
+    let limit = 2 * opt.threads + 2;
+    std::thread::scope(|sc| {
+        let (rtx, rrx) = mpsc::channel::<Report>();
+        let (vtx, vrx) = mpsc::channel::<VerifyJob>();
+        let (ctx, crx) = mpsc::channel::<CodeJob>();
+        if opt.verify {
+            let rtx = rtx.clone();
+            sc.spawn(move || {
+                // The decoder the file will have: a block that fails stays undone, and the
+                // rest of its generation is skipped (the encoder codes it again).
+                let mut dec = block::Decoder::default();
+                let mut check = Vec::new();
+                let mut dead = None;
+                for j in vrx {
+                    if dead == Some(j.generation) {
+                        continue;
+                    }
+                    let t = std::time::Instant::now();
+                    let ok = !j.forced && {
+                        let dm = dec.mark();
+                        check.clear();
+                        let ok = dec.decode(&j.streams, &mut check) && check == src[j.range];
+                        if !ok {
+                            dec.reset(&dm);
+                        }
+                        ok
+                    };
+                    if !ok {
+                        dead = Some(j.generation);
+                    }
+                    let secs = t.elapsed().as_secs_f64();
+                    if rtx.send(Report::Verified { generation: j.generation, idx: j.idx, ok, secs }).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        let crx = Arc::new(Mutex::new(crx));
+        for _ in 0..opt.threads.saturating_sub(2).max(1) {
+            let (rtx, crx) = (rtx.clone(), crx.clone());
+            sc.spawn(move || {
+                let mut coder = Coder::new(opt.level);
+                loop {
+                    let Ok(j) = crx.lock().expect("coder queue").recv() else { break };
+                    let t = std::time::Instant::now();
+                    let mut out = Vec::new();
+                    let mut st = Stats::default();
+                    coder.coded(j.n, &j.streams, &mut out, &mut st);
+                    st.zstd_s = t.elapsed().as_secs_f64();
+                    if rtx.send(Report::Coded { generation: j.generation, idx: j.idx, out, st }).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(rtx);
+        let mut enc = block::Encoder::default();
+        let mut coder = Coder::new(opt.level);
+        let mut pending: VecDeque<Pending> = VecDeque::new();
+        let (mut generation, mut p, mut idx) = (0u64, 0usize, 0usize);
+        let mut out = Vec::new();
+        loop {
+            while pending.len() < limit && p < src.len() {
+                let e = block_end(src, p, bsize);
+                let t = std::time::Instant::now();
+                let mark = enc.mark();
+                let mut streams = new_streams();
+                enc.encode(&src[p..e], &mut streams);
+                st.transform_s += t.elapsed().as_secs_f64();
+                let forced = opt.force_whole >> (idx % 64) & 1 == 1;
+                let streams = Arc::new(streams);
+                if opt.verify {
+                    let j = VerifyJob { generation, idx, range: p..e, streams: streams.clone(), forced };
+                    vtx.send(j).expect("verifier");
+                }
+                if !forced {
+                    ctx.send(CodeJob { generation, idx, n: e - p, streams }).expect("coders");
+                }
+                let verified = if opt.verify { None } else { Some(!forced) };
+                pending.push_back(Pending { idx, range: p..e, mark, verified, coded: None });
+                (p, idx) = (e, idx + 1);
+            }
+            let Some(front) = pending.front() else { break };
+            let base = front.idx;
+            // Wait for the oldest block: verified, and coded unless it failed.
+            while !matches!(pending[0], Pending { verified: Some(false), .. } | Pending { verified: Some(true), coded: Some(_), .. }) {
+                match rrx.recv().expect("worker threads") {
+                    Report::Verified { generation: g, idx: i, ok, secs } if g == generation => {
+                        pending[i - base].verified = Some(ok);
+                        st.verify_s += secs;
+                    }
+                    Report::Coded { generation: g, idx: i, out, st: s } if g == generation => {
+                        pending[i - base].coded = Some((out, s));
+                    }
+                    _ => {}
+                }
+            }
+            let f = pending.pop_front().expect("front");
+            out.clear();
+            if let Some((o, s)) = f.coded.filter(|_| f.verified == Some(true)) {
+                st.add(&s);
+                w.write_all(&o)?;
+                continue;
+            }
+            // Undo it and the blocks after it, store it whole, code the rest again.
+            enc.reset(&f.mark);
+            let t = std::time::Instant::now();
+            coder.whole(&src[f.range.clone()], &mut out, st);
+            st.zstd_s += t.elapsed().as_secs_f64();
+            w.write_all(&out)?;
+            (generation, p, idx) = (generation + 1, f.range.end, f.idx + 1);
+            pending.clear();
+        }
+        Ok(())
+    })
+}
+
 pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
+    decompress_threads(src, 1)
+}
+
+/// `decompress` with `threads` threads.
+pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     let mut r = Rd::new(src);
     let len = if r.bytes(5).is_some() { r.uv() as usize } else { 0 };
     // The output is the caller's; reserve it only up to what the input can plausibly hold.
     let mut out = Vec::with_capacity(len.min(src.len().saturating_mul(64)));
-    decompress_to(src, &mut out)?;
+    decompress_to_threads(src, &mut out, threads)?;
     Ok(out)
 }
 
-/// Decompresses `src` into `w`, a block at a time; returns the length. On an error, what
-/// was written is not the original.
-pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
-    let mut r = Rd::new(src);
+/// A block as stored: whole, or its streams (raw length, how, data).
+enum Stored<'a> {
+    Whole(&'a [u8]),
+    Coded([(usize, u8, &'a [u8]); NSTREAMS]),
+}
+
+/// Reads the next block's description (`left`: bytes of the file still to come).
+fn read_block<'a>(r: &mut Rd<'a>, left: usize) -> Result<(usize, Stored<'a>)> {
+    let mode = r.u8();
+    let n = r.uv() as usize;
+    if r.overrun() || n == 0 || n > MAX_BLOCK || n > left {
+        return Err(corrupt());
+    }
+    let b = match mode {
+        0 => {
+            let c = r.uv() as usize;
+            Stored::Whole(r.bytes(c).ok_or_else(corrupt)?)
+        }
+        1 => {
+            let mut s = [(0, 0, &[][..]); NSTREAMS];
+            for (i, e) in s.iter_mut().enumerate() {
+                let raw = r.uv() as usize;
+                if raw == 0 {
+                    continue;
+                }
+                let m = r.u8();
+                let c = r.uv() as usize;
+                let ok = match m {
+                    M_STORED => c == raw,
+                    M_ZSTD => true,
+                    M_ANS => AC_STREAMS[i],
+                    _ => false,
+                };
+                if raw > 8 * n + 64 || !ok {
+                    return Err(corrupt());
+                }
+                *e = (raw, m, r.bytes(c).ok_or_else(corrupt)?);
+            }
+            Stored::Coded(s)
+        }
+        _ => return Err(corrupt()),
+    };
+    Ok((n, b))
+}
+
+/// Decodes the streams of a coded block into `streams`, or a whole block (of `n` bytes)
+/// into `out`.
+fn unpack(b: &Stored, n: usize, dz: &mut zstd::bulk::Decompressor, streams: &mut Streams, out: &mut Vec<u8>) -> Result<()> {
+    match b {
+        Stored::Whole(d) => {
+            let s = out.len();
+            out.reserve(n);
+            dz.decompress_to_buffer(*d, out).map_err(|_| corrupt())?;
+            if out.len() - s != n {
+                return Err(corrupt());
+            }
+        }
+        Stored::Coded(desc) => {
+            for (s, &(raw, m, d)) in streams.iter_mut().zip(desc) {
+                s.clear();
+                if raw == 0 {
+                    continue;
+                }
+                match m {
+                    M_STORED => s.extend_from_slice(d),
+                    M_ANS => {
+                        if !ans::decode(d, raw, s) {
+                            return Err(corrupt());
+                        }
+                    }
+                    _ => {
+                        s.reserve(raw);
+                        dz.decompress_to_buffer(d, s).map_err(|_| corrupt())?;
+                        if s.len() != raw {
+                            return Err(corrupt());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reads the file header: the length and the hash.
+fn read_header(r: &mut Rd) -> Result<(usize, u64)> {
     if r.bytes(4) != Some(MAGIC) || r.u8() != VERSION {
         return Err(Error("not an OBJR file"));
     }
@@ -210,66 +518,34 @@ pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
     if r.overrun() {
         return Err(corrupt());
     }
+    Ok((len, hash))
+}
+
+/// Decompresses `src` into `w`, a block at a time; returns the length. On an error, what
+/// was written is not the original.
+pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
+    decompress_to_threads(src, w, 1)
+}
+
+/// `decompress_to` with `threads` threads.
+pub fn decompress_to_threads<W: Write>(src: &[u8], w: &mut W, threads: usize) -> Result<usize> {
+    let mut r = Rd::new(src);
+    let (len, hash) = read_header(&mut r)?;
+    if threads > 1 {
+        return decompress_par(r, len, hash, w, threads);
+    }
     let mut out = Vec::new();
     let mut done = 0;
     let mut h = Xxh3::new();
     let mut dec = block::Decoder::default();
     let mut dz = zstd::bulk::Decompressor::new().map_err(|_| corrupt())?;
-    let mut streams: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
+    let mut streams = new_streams();
     while done < len {
         out.clear();
-        let mode = r.u8();
-        let n = r.uv() as usize;
-        if r.overrun() || n == 0 || n > MAX_BLOCK || n > len - done {
+        let (n, b) = read_block(&mut r, len - done)?;
+        unpack(&b, n, &mut dz, &mut streams, &mut out)?;
+        if matches!(b, Stored::Coded(_)) && (!dec.decode(&streams, &mut out) || out.len() != n) {
             return Err(corrupt());
-        }
-        match mode {
-            0 => {
-                let c = r.uv() as usize;
-                let d = r.bytes(c).ok_or_else(corrupt)?;
-                let s = out.len();
-                out.reserve(n);
-                dz.decompress_to_buffer(d, &mut out).map_err(|_| corrupt())?;
-                if out.len() - s != n {
-                    return Err(corrupt());
-                }
-            }
-            1 => {
-                for (i, s) in streams.iter_mut().enumerate() {
-                    s.clear();
-                    let raw = r.uv() as usize;
-                    if raw == 0 {
-                        continue;
-                    }
-                    let m = r.u8();
-                    let c = r.uv() as usize;
-                    if raw > 8 * n + 64 {
-                        return Err(corrupt());
-                    }
-                    let d = r.bytes(c).ok_or_else(corrupt)?;
-                    match m {
-                        M_STORED if c == raw => s.extend_from_slice(d),
-                        M_ANS if AC_STREAMS[i] => {
-                            if !ans::decode(d, raw, s) {
-                                return Err(corrupt());
-                            }
-                        }
-                        M_ZSTD => {
-                            s.reserve(raw);
-                            dz.decompress_to_buffer(d, s).map_err(|_| corrupt())?;
-                            if s.len() != raw {
-                                return Err(corrupt());
-                            }
-                        }
-                        _ => return Err(corrupt()),
-                    }
-                }
-                let s = out.len();
-                if !dec.decode(&streams, &mut out) || out.len() - s != n {
-                    return Err(corrupt());
-                }
-            }
-            _ => return Err(corrupt()),
         }
         h.update(&out);
         w.write_all(&out).map_err(|_| Error("write error"))?;
@@ -279,4 +555,72 @@ pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
         return Err(Error("checksum mismatch"));
     }
     Ok(len)
+}
+
+/// A block whose streams (or whole contents) the other threads have decoded.
+type Unpacked = Result<(Box<Streams>, Vec<u8>)>;
+
+fn decompress_par<W: Write>(mut r: Rd, len: usize, hash: u64, w: &mut W, threads: usize) -> Result<usize> {
+    let limit = 2 * threads + 2;
+    std::thread::scope(|sc| {
+        let (rtx, rrx) = mpsc::channel::<(usize, Unpacked)>();
+        let (jtx, jrx) = mpsc::channel::<(usize, usize, Stored)>();
+        let jrx = Arc::new(Mutex::new(jrx));
+        for _ in 0..threads.saturating_sub(1).max(1) {
+            let (rtx, jrx) = (rtx.clone(), jrx.clone());
+            sc.spawn(move || {
+                let Ok(mut dz) = zstd::bulk::Decompressor::new() else { return };
+                loop {
+                    let Ok((idx, n, b)) = jrx.lock().expect("job queue").recv() else { break };
+                    let mut streams = Box::new(new_streams());
+                    let mut out = Vec::new();
+                    let res = unpack(&b, n, &mut dz, &mut streams, &mut out).map(|_| (streams, out));
+                    if rtx.send((idx, res)).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+        drop(rtx);
+        let mut dec = block::Decoder::default();
+        let mut h = Xxh3::new();
+        // Blocks read and sent, by index: their length and kind; results as they come.
+        let mut sent: VecDeque<(usize, bool)> = VecDeque::new();
+        let mut ready: VecDeque<Option<Unpacked>> = VecDeque::new();
+        let (mut read, mut done, mut next) = (0usize, 0usize, 0usize);
+        let mut out = Vec::new();
+        while done < len {
+            while sent.len() < limit && read < len {
+                let (n, b) = read_block(&mut r, len - read)?;
+                sent.push_back((n, matches!(b, Stored::Coded(_))));
+                ready.push_back(None);
+                jtx.send((next + sent.len() - 1, n, b)).expect("workers");
+                read += n;
+            }
+            while ready[0].is_none() {
+                let (i, res) = rrx.recv().expect("workers");
+                ready[i - next] = Some(res);
+            }
+            let (n, coded) = sent.pop_front().expect("block");
+            let (streams, whole) = ready.pop_front().flatten().expect("result")?;
+            next += 1;
+            if coded {
+                out.clear();
+                if !dec.decode(&streams, &mut out) || out.len() != n {
+                    return Err(corrupt());
+                }
+                h.update(&out);
+                w.write_all(&out).map_err(|_| Error("write error"))?;
+            } else {
+                h.update(&whole);
+                w.write_all(&whole).map_err(|_| Error("write error"))?;
+            }
+            done += n;
+        }
+        drop(jtx);
+        if !r.done() || h.digest() != hash {
+            return Err(Error("checksum mismatch"));
+        }
+        Ok(len)
+    })
 }

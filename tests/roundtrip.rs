@@ -14,7 +14,18 @@ fn rt(src: &[u8]) {
     // Blocks stored whole in between (verification off, or it would hide a mismatch): the
     // encoder must not use what it learnt from them.
     let opt = Options { block: 1 << 10, verify: false, force_whole: 0x5A5A_1234_8421_0F0F, ..Default::default() };
-    assert_eq!(decompress(&compress_with(src, &opt, &mut Stats::default())).unwrap(), src);
+    let c = compress_with(src, &opt, &mut Stats::default());
+    assert_eq!(decompress(&c).unwrap(), src);
+    // Threads: the same bytes, whole blocks or not, and the same file back.
+    for (threads, force_whole) in [(2, 0), (3, 0x5A5A_1234_8421_0F0F), (5, u64::MAX), (4, 1)] {
+        for verify in [false, true] {
+            let opt = Options { block: 1 << 10, verify, force_whole, threads, ..Default::default() };
+            let seq = Options { threads: 1, ..opt };
+            let c = compress_with(src, &opt, &mut Stats::default());
+            assert_eq!(c, compress_with(src, &seq, &mut Stats::default()), "threads {threads}");
+            assert_eq!(obj_recons::container::decompress_threads(&c, threads).unwrap(), src);
+        }
+    }
     assert_eq!(decompress(&compress(src)).unwrap(), src);
 }
 

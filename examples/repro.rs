@@ -4,7 +4,7 @@ use obj_recons::container::{Options, Stats, compress_with};
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let src = std::fs::read(&a[0]).unwrap();
-    let opt = Options { verify: false, block: a[1].parse().unwrap(), level: 1, force_whole: u64::from_str_radix(&a[2], 16).unwrap() };
+    let opt = Options { verify: false, block: a[1].parse().unwrap(), level: 1, force_whole: u64::from_str_radix(&a[2], 16).unwrap(), threads: 1 };
     let c = compress_with(&src, &opt, &mut Stats::default());
     match obj_recons::decompress(&c) {
         Ok(d) => {

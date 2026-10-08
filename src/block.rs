@@ -252,6 +252,11 @@ impl Default for Encoder {
 pub struct Mark {
     st: State,
     ntpl: usize,
+    // The encoder's own choices carried from block to block, so that undoing blocks gives
+    // the same output whenever it happens (a block at a time, or several at once).
+    style: [Style; 4],
+    unit: bool,
+    last_vp: [usize; 3],
 }
 
 impl Encoder {
@@ -261,7 +266,7 @@ impl Encoder {
     }
 
     pub fn mark(&self) -> Mark {
-        Mark { st: self.st, ntpl: self.keys.len() }
+        Mark { st: self.st, ntpl: self.keys.len(), style: self.style, unit: self.unit, last_vp: self.last_vp }
     }
 
     /// Undoes the block coded since `m`, which is then stored whole. The corner table and
@@ -269,6 +274,7 @@ impl Encoder {
     /// taught it, and the encoder must only use what the decoder knows.
     pub fn reset(&mut self, m: &Mark) {
         self.st = m.st;
+        (self.style, self.unit, self.last_vp) = (m.style, m.unit, m.last_vp);
         self.corners.clear();
         for r in &mut self.recent {
             r.clear();

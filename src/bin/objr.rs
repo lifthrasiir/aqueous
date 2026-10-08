@@ -30,7 +30,7 @@ fn cpu() -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: objr c [-l LEVEL] [-B BLOCK] [-x] IN OUT | objr d IN OUT\n       objr bench [-n ITERS] [-l LEVEL] [-B BLOCK] [-x] [-c|-d] [-m] [-v] FILE...\n       objr stats FILE... | objr fuzz [-n N] [-s SEED] FILE..."
+        "usage: objr c [-l LEVEL] [-B BLOCK] [-x] [-t THREADS] IN OUT | objr d [-t THREADS] IN OUT\n       objr bench [-n ITERS] [-l LEVEL] [-B BLOCK] [-x] [-t THREADS] [-c|-d] [-m] [-v] FILE...\n       objr stats FILE... | objr fuzz [-n N] [-s SEED] FILE...\n(-t: c and d default to the available cores, bench to 1)"
     );
     std::process::exit(2);
 }
@@ -42,16 +42,32 @@ fn opt_arg<'a>(a: &str, it: &mut impl Iterator<Item = &'a String>, opt: &mut Opt
         "-l" => opt.level = num() as i32,
         "-B" => opt.block = num(),
         "-x" => opt.verify = false,
+        "-t" => opt.threads = num().max(1),
         _ => return false,
     }
     true
+}
+
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Seconds: the thread's CPU time with one thread, wall time with more.
+fn clock(threads: usize) -> f64 {
+    if threads > 1 { wall() } else { cpu() }
+}
+
+fn wall() -> f64 {
+    use std::sync::OnceLock;
+    static T0: OnceLock<std::time::Instant> = OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("c") if args.len() >= 3 => {
-            let mut opt = Options::default();
+            let mut opt = Options { threads: cores(), ..Default::default() };
             let n = args.len();
             let mut it = args[1..n - 2].iter();
             while let Some(a) = it.next() {
@@ -64,15 +80,25 @@ fn main() {
             obj_recons::container::compress_to(&src, &opt, &mut Stats::default(), &mut w).expect("write");
             w.flush().expect("write");
         }
-        Some("d") if args.len() == 3 => {
-            let src = std::fs::read(&args[1]).expect("read");
-            let mut w = std::io::BufWriter::new(std::fs::File::create(&args[2]).expect("create"));
-            match obj_recons::container::decompress_to(&src, &mut w).and_then(|_| w.flush().map_err(|_| obj_recons::Error("write error"))) {
+        Some("d") if args.len() >= 3 => {
+            let mut opt = Options { threads: cores(), ..Default::default() };
+            let n = args.len();
+            let mut it = args[1..n - 2].iter();
+            while let Some(a) = it.next() {
+                if a != "-t" || !opt_arg(a, &mut it, &mut opt) {
+                    usage();
+                }
+            }
+            let (inp, outp) = (&args[n - 2], &args[n - 1]);
+            let src = std::fs::read(inp).expect("read");
+            let mut w = std::io::BufWriter::new(std::fs::File::create(outp).expect("create"));
+            let res = obj_recons::container::decompress_to_threads(&src, &mut w, opt.threads);
+            match res.and_then(|_| w.flush().map_err(|_| obj_recons::Error("write error"))) {
                 Ok(()) => {}
                 Err(e) => {
                     drop(w);
-                    let _ = std::fs::remove_file(&args[2]);
-                    eprintln!("{}: {e}", args[1]);
+                    let _ = std::fs::remove_file(outp);
+                    eprintln!("{inp}: {e}");
                     std::process::exit(1);
                 }
             }
@@ -117,16 +143,16 @@ fn bench(args: &[String]) {
         let mut st = Stats::default();
         for _ in 0..if only == 'd' { 1 } else { iters } {
             st = Stats::default();
-            let t = cpu();
+            let t = clock(opt.threads);
             c = compress_with(&src, &opt, &mut st);
-            bc = bc.min(cpu() - t);
+            bc = bc.min(clock(opt.threads) - t);
         }
         let mut bd = f64::MAX;
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
-            let t = cpu();
-            let d = obj_recons::decompress(&c);
-            bd = bd.min(cpu() - t);
+            let t = clock(opt.threads);
+            let d = obj_recons::container::decompress_threads(&c, opt.threads);
+            bd = bd.min(clock(opt.threads) - t);
             ok &= matches!(d, Ok(ref d) if *d == src);
         }
         if mem {
@@ -340,11 +366,16 @@ fn fuzz(args: &[String]) {
                 block: [1 << 10, 64 << 10, 4 << 20][i % 3],
                 level: 1,
                 force_whole: if i % 2 == 1 { r.next() } else { 0 },
+                threads: 1,
             };
             runs += 1;
             let res = std::panic::catch_unwind(|| {
                 let c = compress_with(&m, &opt, &mut Stats::default());
-                let d = obj_recons::decompress(&c);
+                // Threads: the same bytes, and the same file back.
+                let threads = [2, 3, 4][i % 3];
+                let opt_t = Options { threads, verify: i % 4 == 0, ..opt };
+                let same = opt_t.verify || compress_with(&m, &opt_t, &mut Stats::default()) == c;
+                let d = obj_recons::container::decompress_threads(&c, threads);
                 for k in 0..4 {
                     let mut cc = c.clone();
                     let mut r2 = Rng(i as u64 * 31 + k + 7);
@@ -361,7 +392,7 @@ fn fuzz(args: &[String]) {
                         assert!(d2 == m, "corrupted container decoded to something else");
                     }
                 }
-                matches!(d, Ok(ref d) if *d == m)
+                same && matches!(d, Ok(ref d) if *d == m)
             });
             match res {
                 Ok(true) => {}
