@@ -37,13 +37,14 @@ pub(crate) struct Corner {
 pub(crate) struct Corners(Vec<Corner>);
 
 impl Corners {
+    /// The table grows as vertices come (small files never fill it).
     pub(crate) fn new() -> Self {
-        Corners(vec![Corner { v: 0, before: 0, after: 0, t: 0, n: 0 }; CORNERS])
+        Corners(vec![])
     }
 
     #[inline]
     pub(crate) fn get(&self, v: i64) -> Option<&Corner> {
-        let c = &self.0[v as usize % CORNERS];
+        let c = self.0.get(v as usize % CORNERS)?;
         (c.v == v).then_some(c)
     }
 
@@ -53,13 +54,17 @@ impl Corners {
         let n = f.len();
         for (j, &(v, t, nn)) in f.iter().enumerate() {
             let c = Corner { v, before: f[(j + n - 1) % n].0, after: f[(j + 1) % n].0, t, n: nn };
-            self.0[v as usize % CORNERS] = c;
+            let i = v as usize % CORNERS;
+            if i >= self.0.len() {
+                self.0.resize(i + 1, Corner { v: 0, before: 0, after: 0, t: 0, n: 0 });
+            }
+            self.0[i] = c;
         }
     }
 
-    /// Forgets everything (after a block stored whole, on both sides).
+    /// Forgets everything (the encoder, after undoing a block).
     pub(crate) fn clear(&mut self) {
-        self.0.fill(Corner { v: 0, before: 0, after: 0, t: 0, n: 0 });
+        self.0.clear();
     }
 
     /// Candidates for corner attribute `k` with v index `v`, after a corner with v index

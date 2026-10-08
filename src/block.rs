@@ -224,6 +224,8 @@ pub struct Encoder {
     corners: Corners,
     /// The last predictor per kind (v, vt, vn).
     last_vp: [usize; 3],
+    /// Corners of the current face line.
+    fbuf: Vec<(i64, i64, i64)>,
 }
 
 impl Default for Encoder {
@@ -241,6 +243,7 @@ impl Default for Encoder {
             recent: [Recent::new(true), Recent::new(true), Recent::new(true)],
             corners: Corners::new(),
             last_vp: [0; 3],
+            fbuf: vec![],
         }
     }
 }
@@ -396,54 +399,67 @@ impl Encoder {
                 self.st.count[k] += 1;
             }
         } else {
-            let mut corners = [(0i64, 0i64, 0i64); MAX_CORNERS];
-            loop {
-                let ws = i;
-                while i < l.len() && is_ws(l[i]) {
-                    i += 1;
-                }
-                let te = tok_end(l, i);
-                if te == i || i == ws {
-                    i = ws;
-                    break;
-                }
-                if n == MAX_CORNERS || i - ws > 255 {
-                    return false;
-                }
-                let Some((c, pat)) = self.corner(&l[i..te]) else { return false };
-                corners[n] = c;
-                n += 1;
-                self.key.extend_from_slice(&[pat, 0, (i - ws) as u8]);
-                self.key.extend_from_slice(&l[ws..i]);
-                i = te;
+            // A buffer kept between lines (not an array zeroed for each).
+            let mut corners = std::mem::take(&mut self.fbuf);
+            corners.clear();
+            let ok = self.face_line(l, i, s, &mut corners);
+            self.fbuf = corners;
+            return ok;
+        }
+        true
+    }
+
+    /// Codes the corners of a face or polyline line from position `i` (after the keyword),
+    /// into `corners` (scratch); false if it does not parse (nothing written).
+    #[inline]
+    fn face_line(&mut self, l: &[u8], mut i: usize, s: &mut [Vec<u8>; NSTREAMS], corners: &mut Vec<(i64, i64, i64)>) -> bool {
+        let mut n = 0;
+        loop {
+            let ws = i;
+            while i < l.len() && is_ws(l[i]) {
+                i += 1;
             }
-            if n == 0 || !self.tail(&l[i..]) {
+            let te = tok_end(l, i);
+            if te == i || i == ws {
+                i = ws;
+                break;
+            }
+            if n == MAX_CORNERS || i - ws > 255 {
                 return false;
             }
-            self.key[1] = n as u8;
-            let Some(id) = self.template(s) else { return false };
-            put_uv(&mut s[S_OPS], id);
-            let mut k = 2;
-            let mut pv = None;
-            for c in corners[..n].iter_mut() {
-                let (v, t, nn) = *c;
-                let pat = self.key[k];
-                k += 3 + self.key[k + 2] as usize;
-                self.index(s, 0, v, v, pv);
-                if pat & C_T != 0 {
-                    self.index(s, 1, t, v, pv);
-                } else {
-                    c.1 = 0;
-                }
-                if pat & C_N != 0 {
-                    self.index(s, 2, nn, v, pv);
-                } else {
-                    c.2 = 0;
-                }
-                pv = Some(v);
-            }
-            self.corners.face(&corners[..n]);
+            let Some((c, pat)) = self.corner(&l[i..te]) else { return false };
+            corners.push(c);
+            n += 1;
+            self.key.extend_from_slice(&[pat, 0, (i - ws) as u8]);
+            self.key.extend_from_slice(&l[ws..i]);
+            i = te;
         }
+        if n == 0 || !self.tail(&l[i..]) {
+            return false;
+        }
+        self.key[1] = n as u8;
+        let Some(id) = self.template(s) else { return false };
+        put_uv(&mut s[S_OPS], id);
+        let mut k = 2;
+        let mut pv = None;
+        for c in corners.iter_mut() {
+            let (v, t, nn) = *c;
+            let pat = self.key[k];
+            k += 3 + self.key[k + 2] as usize;
+            self.index(s, 0, v, v, pv);
+            if pat & C_T != 0 {
+                self.index(s, 1, t, v, pv);
+            } else {
+                c.1 = 0;
+            }
+            if pat & C_N != 0 {
+                self.index(s, 2, nn, v, pv);
+            } else {
+                c.2 = 0;
+            }
+            pv = Some(v);
+        }
+        self.corners.face(corners);
         true
     }
 
@@ -640,6 +656,8 @@ pub struct Decoder {
     arena: Vec<u8>,
     recent: [Recent; 3],
     corners: Corners,
+    /// Corners of the current face line.
+    fbuf: Vec<(i64, i64, i64)>,
 }
 
 impl Default for Decoder {
@@ -650,6 +668,7 @@ impl Default for Decoder {
             arena: vec![],
             recent: [Recent::new(false), Recent::new(false), Recent::new(false)],
             corners: Corners::new(),
+            fbuf: vec![],
         }
     }
 }
@@ -785,8 +804,10 @@ impl Decoder {
                     self.st.count[kind as usize] += 1;
                 }
             } else {
-                let mut face = [(0i64, 0i64, 0i64); MAX_CORNERS];
                 let n = k[1] as usize;
+                let mut face = std::mem::take(&mut self.fbuf);
+                face.clear();
+                face.resize(n, (0, 0, 0));
                 let mut pv = None;
                 for c in face[..n].iter_mut() {
                     let (pat, sl) = (k[i], k[i + 2] as usize);
@@ -810,7 +831,8 @@ impl Decoder {
                     }
                     pv = Some(v);
                 }
-                self.corners.face(&face[..n]);
+                self.corners.face(&face);
+                self.fbuf = face;
             }
             out.extend_from_slice(&k[i + 1..]);
         }

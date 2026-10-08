@@ -45,21 +45,25 @@ pub(crate) struct Recent {
 }
 
 impl Recent {
+    /// The ring grows as lines come (small files never fill it).
     pub(crate) fn new(table: bool) -> Self {
-        let e = Entry { tag: 0, v: [0; 3], s: [0; 3] };
-        Recent { ring: vec![e; RECENT], table: if table { vec![0; RECENT] } else { vec![] } }
+        Recent { ring: vec![], table: if table { vec![0; RECENT] } else { vec![] } }
     }
 
     #[inline]
     pub(crate) fn get(&self, line: u64) -> Option<&Entry> {
-        let e = &self.ring[line as usize % RECENT];
+        let e = self.ring.get(line as usize % RECENT)?;
         (e.tag == line + 1).then_some(e)
     }
 
     #[inline]
     pub(crate) fn put(&mut self, line: u64, mut e: Entry) {
         e.tag = line + 1;
-        self.ring[line as usize % RECENT] = e;
+        let i = line as usize % RECENT;
+        if i >= self.ring.len() {
+            self.ring.resize(i + 1, Entry { tag: 0, v: [0; 3], s: [0; 3] });
+        }
+        self.ring[i] = e;
     }
 
     /// The distance back from `line` to the last line equal to `e` (0 if none), and
