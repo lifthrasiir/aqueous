@@ -697,18 +697,33 @@ fn encode_group(rec: &mut model::Recorder, psd: &Psd, d: &[u8], spans: &[Span], 
             clock = now;
         }
     };
+    // Per plane, the previous row's encoded bytes and whether the encoder missed it: a row
+    // encoded the same is the same row, with the same outcome.
+    let mut prev: Vec<Option<(&[u8], bool)>> = vec![None; n];
     for y in 0..h {
         for k in 0..n {
             let Some(r) = &mut readers[k] else { continue };
             let enc = r.encoded();
+            if let (Some(e), Some((pe, miss))) = (enc, prev[k]) {
+                if e == pe {
+                    r.skip().ok()?;
+                    rows[k].copy_from_slice(gc.last(k));
+                    if miss {
+                        misses[k].push(y);
+                    }
+                    continue;
+                }
+            }
             r.next(&mut rows[k]).ok()?;
             lap(0, &mut t);
             if let (Some(enc), Coding::Rle { encoder, .. }) = (enc, &spans[g.planes[k].0].coding) {
                 buf.clear();
                 packbits::encode(*encoder, &rows[k], &mut buf);
-                if buf != enc {
+                let miss = buf != enc;
+                if miss {
                     misses[k].push(y);
                 }
+                prev[k] = Some((enc, miss));
             }
             lap(1, &mut t);
         }
@@ -884,30 +899,54 @@ struct RowSink<'s> {
     exceptions: &'s [(usize, &'s [u8])],
     /// Row index within the span (plane * h + row).
     row: usize,
+    /// The previous row, and where its bytes (from the encoder, not an exception) went.
+    prev: Vec<u8>,
+    prev_at: Option<(usize, usize)>,
 }
 
 impl RowSink<'_> {
     fn put(&mut self, out: &mut [u8], row: &[u8], buf: &mut Vec<u8>) -> Result<()> {
-        let bytes: &[u8] = if self.count_bytes == 0 {
-            row
-        } else {
-            match self.exceptions.first() {
-                Some((r, b)) if *r == self.row => {
-                    self.exceptions = &self.exceptions[1..];
-                    b
-                }
-                _ => {
-                    buf.clear();
-                    packbits::encode(self.encoder, row, buf);
-                    buf
+        let exception = self.count_bytes > 0 && self.exceptions.first().is_some_and(|e| e.0 == self.row);
+        // A row equal to the previous one encodes the same.
+        if self.count_bytes > 0 && !exception {
+            if let Some((at, n)) = self.prev_at {
+                if self.prev == row {
+                    if self.data_at + n > out.len() {
+                        return Err(corrupt());
+                    }
+                    out.copy_within(at..at + n, self.data_at);
+                    self.prev_at = Some((self.data_at, n));
+                    self.data_at += n;
+                    return self.count(out, n);
                 }
             }
+        }
+        let bytes: &[u8] = if self.count_bytes == 0 {
+            row
+        } else if exception {
+            let b = self.exceptions[0].1;
+            self.exceptions = &self.exceptions[1..];
+            b
+        } else {
+            buf.clear();
+            packbits::encode(self.encoder, row, buf);
+            buf
         };
+        if self.count_bytes > 0 {
+            self.prev_at = (!exception).then_some((self.data_at, bytes.len()));
+            self.prev.clear();
+            self.prev.extend_from_slice(row);
+        }
         let dst = out.get_mut(self.data_at..self.data_at + bytes.len()).ok_or_else(corrupt)?;
         dst.copy_from_slice(bytes);
         self.data_at += bytes.len();
+        let n = bytes.len();
+        self.count(out, n)
+    }
+
+    /// Writes the count of the row of `n` bytes just written, and moves to the next row.
+    fn count(&mut self, out: &mut [u8], n: usize) -> Result<()> {
         if self.count_bytes > 0 {
-            let n = bytes.len();
             if n >> (8 * self.count_bytes).min(63) != 0 {
                 return Err(corrupt());
             }
@@ -951,7 +990,7 @@ fn decode_group(player: &mut model::Player, out: &mut [u8], split: usize, spans:
             Coding::Copy { .. } => {}
             Coding::Raw => {
                 let at = sp.start.checked_sub(split).ok_or_else(corrupt)? + p * w * h;
-                sink = Some(RowSink { count_at: 0, data_at: at, count_bytes: 0, encoder: packbits::NO_TILES, exceptions: &[], row: 0 });
+                sink = Some(RowSink { count_at: 0, data_at: at, count_bytes: 0, encoder: packbits::NO_TILES, exceptions: &[], row: 0, prev: Vec::new(), prev_at: None });
             }
             Coding::Rle { count_bytes, encoder, plane_lens, exceptions } => {
                 let base = sp.start.checked_sub(split).ok_or_else(corrupt)?;
@@ -965,6 +1004,8 @@ fn decode_group(player: &mut model::Player, out: &mut [u8], split: usize, spans:
                     encoder: *encoder,
                     exceptions: &exceptions[first..],
                     row: p * h,
+                    prev: Vec::with_capacity(w),
+                    prev_at: None,
                 });
             }
             Coding::Nested { .. } => return Err(corrupt()),

@@ -263,3 +263,14 @@ fn masks_anywhere() {
     }
     check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
 }
+
+#[test]
+fn repeated_rows_with_exceptions() {
+    // Identical rows, every third written as literals only (an exception): repeated rows must
+    // not reuse an exception's bytes, nor skip one.
+    let (w, h) = (300, 24);
+    let row: Vec<u8> = (0..w).map(|x| if x < 100 { 7 } else { (x * 13 % 256) as u8 }).collect();
+    let plane: Vec<u8> = row.iter().copied().cycle().take(w * h).collect();
+    let l = Layer { top: 0, left: 0, w, h, channels: vec![(0, plane.clone()), (1, plane.clone()), (2, plane)], mask: None };
+    check(&psd(w, h, &[l], packbits::NO_TILES, true, &[]));
+}
