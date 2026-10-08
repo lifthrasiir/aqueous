@@ -34,9 +34,12 @@ pub const S_FESC: usize = 11;
 pub const S_HDR: usize = 14;
 /// The predicted component of unit normals, and its sign.
 pub const S_NSEL: usize = 15;
-pub const NSTREAMS: usize = 16;
+/// Per v, vt, vn line: the distance back to an equal line of its kind, or 0.
+pub const S_DUP: usize = 16;
+pub const NSTREAMS: usize = 19;
 pub const STREAM_NAMES: [&str; NSTREAMS] = [
     "ops", "tpl", "text", "v", "vt", "vn", "vp", "scale", "fv", "ft", "fn", "fv-esc", "ft-esc", "fn-esc", "hdr", "nsel",
+    "v-dup", "vt-dup", "vn-dup",
 ];
 
 /// Block flag: normals (`vn` lines of three numbers) are coded as unit vectors.
@@ -104,6 +107,83 @@ impl Indices {
         self.max = self.max.max(a);
         self.last = a;
         self.off = a.wrapping_sub(v);
+    }
+}
+
+/// Lines of a kind (v, vt, vn) kept for references to equal lines: the last RECENT.
+const RECENT: usize = 1 << 16;
+
+/// The values of a line of up to three numbers; absent ones are a value no number has.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Entry {
+    /// Line number + 1 (0: empty).
+    tag: u64,
+    v: [i64; 3],
+    s: [i8; 3],
+}
+
+impl Entry {
+    fn new(vals: &[(i64, i32)]) -> Entry {
+        let mut e = Entry { tag: 0, v: [i64::MIN; 3], s: [i8::MIN; 3] };
+        for (j, &(v, s)) in vals.iter().enumerate() {
+            e.v[j] = v;
+            e.s[j] = s as i8;
+        }
+        e
+    }
+
+    #[inline]
+    fn hash(&self) -> usize {
+        let h = (self.v[0] as u64).wrapping_mul(0x9E3779B97F4A7C15)
+            ^ (self.v[1] as u64).wrapping_mul(0xC2B2AE3D27D4EB4F).rotate_left(21)
+            ^ (self.v[2] as u64).wrapping_mul(0x165667B19E3779F9).rotate_left(42)
+            ^ (self.s[0] as u8 as u64) << 8
+            ^ (self.s[1] as u8 as u64) << 16
+            ^ (self.s[2] as u8 as u64) << 24;
+        (h.wrapping_mul(0x9E3779B97F4A7C15) >> 48) as usize
+    }
+}
+
+/// The recent lines of a kind, by line number; for the encoder also a table from values to
+/// the last line with them. Entries carry their line number, so that ones written by a
+/// block that was undone are not taken for older lines.
+struct Recent {
+    ring: Vec<Entry>,
+    table: Vec<u64>,
+}
+
+impl Recent {
+    fn new(table: bool) -> Self {
+        let e = Entry { tag: 0, v: [0; 3], s: [0; 3] };
+        Recent { ring: vec![e; RECENT], table: if table { vec![0; RECENT] } else { vec![] } }
+    }
+
+    #[inline]
+    fn get(&self, line: u64) -> Option<&Entry> {
+        let e = &self.ring[line as usize % RECENT];
+        (e.tag == line + 1).then_some(e)
+    }
+
+    #[inline]
+    fn put(&mut self, line: u64, mut e: Entry) {
+        e.tag = line + 1;
+        self.ring[line as usize % RECENT] = e;
+    }
+
+    /// The distance back from `line` to the last line equal to `e` (0 if none), and
+    /// records `line`.
+    #[inline]
+    fn find_put(&mut self, line: u64, e: Entry) -> u64 {
+        let h = e.hash();
+        let c = self.table[h];
+        let d = if c != 0 && c <= line && line + 1 - c <= RECENT as u64 && self.get(c - 1).is_some_and(|x| x.v == e.v && x.s == e.s) {
+            line + 1 - c
+        } else {
+            0
+        };
+        self.table[h] = line + 1;
+        self.put(line, e);
+        d
     }
 }
 
@@ -378,6 +458,7 @@ pub struct Encoder {
     bytes: usize,
     key: Vec<u8>,
     tmp: Vec<u8>,
+    recent: [Recent; 3],
 }
 
 impl Default for Encoder {
@@ -391,6 +472,7 @@ impl Default for Encoder {
             bytes: 0,
             key: vec![],
             tmp: Vec::with_capacity(64),
+            recent: [Recent::new(true), Recent::new(true), Recent::new(true)],
         }
     }
 }
@@ -493,6 +575,17 @@ impl Encoder {
             let Some(id) = self.template(s) else { return false };
             put_uv(&mut s[S_OPS], id);
             let prev = &mut self.st.prev[k];
+            if k < 3 && n <= 3 {
+                let line = self.st.count[k] as u64;
+                let vs: [(i64, i32); 3] = [(vals[0].0, vals[0].1), (vals[1].0, vals[1].1), (vals[2].0, vals[2].1)];
+                let d = self.recent[k].find_put(line, Entry::new(&vs[..n]));
+                put_uv(&mut s[S_DUP + k], d);
+                if d > 0 {
+                    prev[..n].copy_from_slice(&vs[..n]);
+                    self.st.count[k] += 1;
+                    return true;
+                }
+            }
             let mut sel = None;
             if self.unit && kind == 2 && n == 3 {
                 let x = vals.map(|(v, sc, _)| to_f64(v, sc));
@@ -670,11 +763,17 @@ pub struct Decoder {
     /// Template keys, by offset and length into `arena`.
     tpls: Vec<(u32, u32)>,
     arena: Vec<u8>,
+    recent: [Recent; 3],
 }
 
 impl Default for Decoder {
     fn default() -> Self {
-        Decoder { st: State::default(), tpls: vec![], arena: vec![] }
+        Decoder {
+            st: State::default(),
+            tpls: vec![],
+            arena: vec![],
+            recent: [Recent::new(false), Recent::new(false), Recent::new(false)],
+        }
     }
 }
 
@@ -707,6 +806,7 @@ impl Decoder {
         let mut fsym = [Rd::new(&s[S_FSYM]), Rd::new(&s[S_FSYM + 1]), Rd::new(&s[S_FSYM + 2])];
         let mut fesc = [Rd::new(&s[S_FESC]), Rd::new(&s[S_FESC + 1]), Rd::new(&s[S_FESC + 2])];
         let mut nsel = Rd::new(&s[S_NSEL]);
+        let mut dup = [Rd::new(&s[S_DUP]), Rd::new(&s[S_DUP + 1]), Rd::new(&s[S_DUP + 2])];
         let mut hdr = Rd::new(&s[S_HDR]);
         let unit = hdr.u8() & H_UNIT != 0;
         while !ops.done() {
@@ -747,15 +847,27 @@ impl Decoder {
                     *it = i;
                     i += 3 + k[i + 2] as usize;
                 }
+                let kk = kind as usize;
+                let mut d = 0;
+                if kk < 3 && n <= 3 {
+                    d = dup[kk].uv();
+                    if d > 0 {
+                        let line = self.st.count[kk] as u64;
+                        let Some(e) = line.checked_sub(d).and_then(|l| self.recent[kk].get(l)) else { return false };
+                        for (j, p) in prev[..n].iter_mut().enumerate() {
+                            *p = (e.v[j], e.s[j] as i32);
+                        }
+                    }
+                }
                 let mut sel = None;
                 let mut neg = false;
-                if unit && kind == 2 && n == 3 {
+                if d == 0 && unit && kind == 2 && n == 3 {
                     let c = nsel.u8();
                     sel = Some(((c & 3) as usize).min(2));
                     neg = c & 4 != 0;
                 }
                 let (o, _) = order(n, sel);
-                for &j in &o[..n] {
+                for &j in &o[..if d == 0 { n } else { 0 }] {
                     let (m, f) = (k[items[j]], k[items[j] + 1]);
                     let (pv, ps) = prev[j];
                     let sc = if m != M_FIX {
@@ -770,6 +882,9 @@ impl Decoder {
                         num::rescale(pv, ps, sc)
                     };
                     prev[j] = (pred.wrapping_add(r.sv()), sc);
+                }
+                if kk < 3 && n <= 3 {
+                    self.recent[kk].put(self.st.count[kk] as u64, Entry::new(&prev[..n]));
                 }
                 for (j, &it) in items[..n].iter().enumerate() {
                     let (m, f, sl) = (k[it], k[it + 1], k[it + 2] as usize);
@@ -803,7 +918,7 @@ impl Decoder {
             out.extend_from_slice(&k[i + 1..]);
         }
         let all = [&ops, &tpl, &vs[0], &vs[1], &vs[2], &vs[3], &scale, &nsel, &hdr];
-        tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).all(|r| r.done())
+        tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).all(|r| r.done())
     }
 
 }
