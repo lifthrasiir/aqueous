@@ -59,7 +59,7 @@ impl Default for Options {
 }
 
 /// Raw and coded sizes per stream, for analysis.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Stats {
     pub raw: [u64; NSTREAMS],
     pub coded: [u64; NSTREAMS],
@@ -71,6 +71,21 @@ pub struct Stats {
     pub transform_s: f64,
     pub zstd_s: f64,
     pub verify_s: f64,
+}
+
+impl Default for Stats {
+    fn default() -> Self {
+        Stats {
+            raw: [0; NSTREAMS],
+            coded: [0; NSTREAMS],
+            whole: 0,
+            rc: [0; NSTREAMS],
+            whole_coded: 0,
+            transform_s: 0.0,
+            zstd_s: 0.0,
+            verify_s: 0.0,
+        }
+    }
 }
 
 pub fn compress(src: &[u8]) -> Vec<u8> {
@@ -94,7 +109,7 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
     let bsize = opt.block.clamp(1 << 10, MAX_BLOCK);
     let mut enc = block::Encoder::default();
     let mut dec = block::Decoder::default();
-    let mut streams: [Vec<u8>; NSTREAMS] = Default::default();
+    let mut streams: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
     let mut check = Vec::new();
     let mut z = Vec::new();
     let mut ac = Vec::new();
@@ -202,7 +217,7 @@ pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
     let mut h = Xxh3::new();
     let mut dec = block::Decoder::default();
     let mut dz = zstd::bulk::Decompressor::new().map_err(|_| corrupt())?;
-    let mut streams: [Vec<u8>; NSTREAMS] = Default::default();
+    let mut streams: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
     while done < len {
         out.clear();
         let mode = r.u8();

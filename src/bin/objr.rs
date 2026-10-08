@@ -213,7 +213,7 @@ fn stats(files: &[String]) {
     for f in files {
         let src = std::fs::read(f).expect("read");
         let mut enc = obj_recons::block::Encoder::default();
-        let mut s: [Vec<u8>; NSTREAMS] = Default::default();
+        let mut s: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
         let mut uses: Vec<u64> = vec![];
         let mut raw: std::collections::HashMap<Vec<u8>, (u64, Vec<u8>)> = Default::default();
         for b in src.chunks(4 << 20) {

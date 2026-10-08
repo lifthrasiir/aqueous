@@ -65,7 +65,7 @@ fn main() {
     for f in &args[2..] {
         let src = std::fs::read(f).unwrap();
         let mut enc = Encoder::default();
-        let mut s: [Vec<u8>; NSTREAMS] = Default::default();
+        let mut s: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
         println!("== {f}");
         let mut tot = [[0f64; 4]; NSTREAMS];
         let mut models: Vec<(Model, Model, [usize; 8])> = (0..NSTREAMS).map(|_| (Model::new(16 * 8), Model::new(8), [0; 8])).collect();
