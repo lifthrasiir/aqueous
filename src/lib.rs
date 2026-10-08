@@ -8,6 +8,9 @@
 //! ```
 
 pub mod container;
+pub mod index;
+pub mod page;
+pub mod record;
 pub mod transform;
 pub mod varint;
 

@@ -8,7 +8,8 @@
 //!                   varint(raw length) u8(0 stored | 1 zstd) varint(coded length) data
 //! ```
 
-use crate::transform::{self, Geom, NSTREAMS};
+use crate::page::Geom;
+use crate::transform::{self, NSTREAMS};
 use crate::varint::{Rd, put_uv};
 use crate::{Result, corrupt};
 use xxhash_rust::xxh3::xxh3_64;

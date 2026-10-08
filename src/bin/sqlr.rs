@@ -36,6 +36,8 @@ fn bench(args: &[String]) {
     let mut files = vec![];
     let mut verbose = false;
     let mut opt = Options { verify: false, ..Default::default() };
+    // Repeat only one side (for profiling): 'c' or 'd'.
+    let mut only = ' ';
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -43,6 +45,8 @@ fn bench(args: &[String]) {
             "-l" => opt.level = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-V" => opt.verify = true,
             "-L" => opt.ldm = false,
+            "-c" => only = 'c',
+            "-d" => only = 'd',
             "-v" => verbose = true,
             _ => files.push(a.clone()),
         }
@@ -56,7 +60,7 @@ fn bench(args: &[String]) {
         let mut c = vec![];
         let mut bc = f64::MAX;
         let mut st = Stats::default();
-        for _ in 0..iters {
+        for _ in 0..if only == 'd' { 1 } else { iters } {
             st = Stats::default();
             let t = Instant::now();
             c = compress_with(&src, &opt, &mut st);
@@ -64,7 +68,7 @@ fn bench(args: &[String]) {
         }
         let mut bd = f64::MAX;
         let mut ok = true;
-        for _ in 0..iters {
+        for _ in 0..if only == 'c' { 1 } else { iters } {
             let t = Instant::now();
             let d = sqlite_recons::decompress(&c);
             bd = bd.min(t.elapsed().as_secs_f64());
