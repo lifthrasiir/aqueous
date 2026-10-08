@@ -10,9 +10,12 @@
 pub mod ans;
 pub mod block;
 pub mod container;
+mod corner;
 pub mod dec;
 pub mod mem;
 pub mod num;
+mod recent;
+mod style;
 pub mod varint;
 
 pub use container::{compress, decompress};

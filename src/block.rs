@@ -14,6 +14,9 @@
 //! State (previous values, templates) carries over from block to block, so that blocks are
 //! coded in order, but its size does not depend on the input size.
 
+use crate::corner::{C_N, C_NEG, C_T, CACHE, Corners, Indices, SYM_ESC, SYM_NEW, SYM_X1, SYM_X2, parse_index, put_index};
+use crate::recent::{Entry, NPRED, Recent, WIN, window_pred};
+use crate::style::{Style, choose_styles, exp_fallback};
 use crate::{dec, num};
 use crate::varint::{Rd, put_sv, put_uv};
 use std::collections::HashMap;
@@ -74,25 +77,6 @@ pub const STREAM_NAMES: [&str; NSTREAMS] = [
     "vp3+", "vn-unit", "v-pred", "vt-pred", "vn-pred",
 ];
 
-/// Predictors of v, vt, vn lines: 0 the previous numbers of each position; 1..WIN the line
-/// p+1 back; WIN.. the parallelograms x[-1] + x[-k] - x[-k-1], k = p-WIN+1.
-const WIN: usize = 16;
-const NPRED: usize = 2 * WIN;
-
-/// Predictor `p` (> 0) of position `j` at scale `sc` for line `line`, from the recent
-/// lines; None if one it needs is not there.
-#[inline]
-fn window_pred(rec: &Recent, line: u64, p: usize, j: usize, sc: i32) -> Option<i64> {
-    let e = |k: u64| rec.get(line.checked_sub(k)?);
-    let at = |e: &Entry| num::rescale(e.v[j], e.s[j] as i32, sc);
-    if p < WIN {
-        Some(at(e(p as u64 + 1)?))
-    } else {
-        let k = (p - WIN + 1) as u64;
-        Some(at(e(1)?).wrapping_add(at(e(k)?)).wrapping_sub(at(e(k + 1)?)))
-    }
-}
-
 /// The residual stream of position `j` of numeric kind `k`.
 #[inline]
 pub fn s_val(k: usize, j: usize) -> usize {
@@ -104,16 +88,16 @@ const H_UNIT: u8 = 1;
 
 /// Template kinds (the numeric ones first).
 const K_VP: u8 = 3;
-const K_F: u8 = 4;
+pub(crate) const K_F: u8 = 4;
 const K_L: u8 = 5;
 const KEYWORDS: [&[u8]; 6] = [b"v", b"vt", b"vn", b"vp", b"f", b"l"];
 
 /// Number formats (first byte of a numeric item; the second is the format's flags).
-const M_FIX: u8 = 0;
+pub(crate) const M_FIX: u8 = 0;
 const M_GEN: u8 = 1;
 
 /// Numbers per numeric line, corners per face line.
-const MAX_NUMS: usize = 8;
+pub(crate) const MAX_NUMS: usize = 8;
 const MAX_CORNERS: usize = 64;
 const MAX_TEMPLATES: usize = 1 << 16;
 const MAX_TEMPLATE_BYTES: usize = 4 << 20;
@@ -121,186 +105,6 @@ const MAX_TEMPLATE_BYTES: usize = 4 << 20;
 const OP_RAW: u64 = 0;
 const OP_RAW_OPEN: u64 = 1;
 const FIRST_TPL: u64 = 2;
-
-/// Corner patterns: "a", "a/b", "a//c", "a/b/c"; bits 2-4 mark negative (relative) indices.
-const C_T: u8 = 1;
-const C_N: u8 = 2;
-const C_NEG: u8 = 4;
-
-/// Corner index symbols: a position in the cache of recent indices, or one of these.
-const CACHE: usize = 32;
-/// One more than the largest index so far.
-const SYM_NEW: u8 = CACHE as u8;
-/// Coded as the difference from the previous index.
-const SYM_ESC: u8 = SYM_NEW + 1;
-/// The first and second candidate. For v: the vertices before and after the previous
-/// corner's in the last face that had it (a shared edge). For vt, vn: the corner's v index
-/// plus the previous corner's offset from it, and the index last paired with this v.
-const SYM_X1: u8 = SYM_NEW + 2;
-const SYM_X2: u8 = SYM_NEW + 3;
-
-/// Per v index (direct mapped), its neighbours and vt, vn in the last face that had it.
-const CORNERS: usize = 1 << 16;
-
-#[derive(Clone, Copy)]
-struct Corner {
-    v: i64,
-    before: i64,
-    after: i64,
-    t: i64,
-    n: i64,
-}
-
-struct Corners(Vec<Corner>);
-
-impl Corners {
-    fn new() -> Self {
-        Corners(vec![Corner { v: 0, before: 0, after: 0, t: 0, n: 0 }; CORNERS])
-    }
-
-    #[inline]
-    fn get(&self, v: i64) -> Option<&Corner> {
-        let c = &self.0[v as usize % CORNERS];
-        (c.v == v).then_some(c)
-    }
-
-    /// Records a face's corners (v, vt, vn; 0 for absent ones).
-    #[inline]
-    fn face(&mut self, f: &[(i64, i64, i64)]) {
-        let n = f.len();
-        for (j, &(v, t, nn)) in f.iter().enumerate() {
-            let c = Corner { v, before: f[(j + n - 1) % n].0, after: f[(j + 1) % n].0, t, n: nn };
-            self.0[v as usize % CORNERS] = c;
-        }
-    }
-
-    /// Forgets everything (after a block stored whole, on both sides).
-    fn clear(&mut self) {
-        self.0.fill(Corner { v: 0, before: 0, after: 0, t: 0, n: 0 });
-    }
-
-    /// Candidates for corner attribute `k` with v index `v`, after a corner with v index
-    /// `pv` (None for the first), `off` the attribute's last offset from v.
-    #[inline]
-    fn cands(&self, k: usize, v: i64, pv: Option<i64>, off: i64) -> [Option<i64>; 2] {
-        if k == 0 {
-            match pv.and_then(|p| self.get(p)) {
-                Some(c) => [Some(c.before), Some(c.after)],
-                None => [None, None],
-            }
-        } else {
-            [Some(v.wrapping_add(off)), self.get(v).map(|c| if k == 1 { c.t } else { c.n })]
-        }
-    }
-}
-
-/// Recent indices of one attribute, most recent first.
-#[derive(Clone, Copy)]
-struct Indices {
-    cache: [i64; CACHE],
-    max: i64,
-    last: i64,
-    /// Previous index minus its corner's v index.
-    off: i64,
-}
-
-impl Indices {
-    #[inline]
-    fn find(&self, a: i64) -> Option<usize> {
-        self.cache.iter().position(|&x| x == a)
-    }
-
-    /// Records `a` (found at `p` in the cache, if it is there).
-    #[inline]
-    fn update(&mut self, a: i64, p: Option<usize>, v: i64) {
-        let p = p.unwrap_or(CACHE - 1);
-        // A loop: copy_within calls memmove, slow for these few bytes.
-        for i in (0..p).rev() {
-            self.cache[i + 1] = self.cache[i];
-        }
-        self.cache[0] = a;
-        self.max = self.max.max(a);
-        self.last = a;
-        self.off = a.wrapping_sub(v);
-    }
-}
-
-/// Lines of a kind (v, vt, vn) kept for references to equal lines: the last RECENT.
-const RECENT: usize = 1 << 16;
-
-/// The values of a line of up to three numbers; absent ones are a value no number has.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Entry {
-    /// Line number + 1 (0: empty).
-    tag: u64,
-    v: [i64; 3],
-    s: [i8; 3],
-}
-
-impl Entry {
-    fn new(vals: &[(i64, i32)]) -> Entry {
-        let mut e = Entry { tag: 0, v: [i64::MIN; 3], s: [i8::MIN; 3] };
-        for (j, &(v, s)) in vals.iter().enumerate() {
-            e.v[j] = v;
-            e.s[j] = s as i8;
-        }
-        e
-    }
-
-    #[inline]
-    fn hash(&self) -> usize {
-        let h = (self.v[0] as u64).wrapping_mul(0x9E3779B97F4A7C15)
-            ^ (self.v[1] as u64).wrapping_mul(0xC2B2AE3D27D4EB4F).rotate_left(21)
-            ^ (self.v[2] as u64).wrapping_mul(0x165667B19E3779F9).rotate_left(42)
-            ^ (self.s[0] as u8 as u64) << 8
-            ^ (self.s[1] as u8 as u64) << 16
-            ^ (self.s[2] as u8 as u64) << 24;
-        (h.wrapping_mul(0x9E3779B97F4A7C15) >> 48) as usize
-    }
-}
-
-/// The recent lines of a kind, by line number; for the encoder also a table from values to
-/// the last line with them. Entries carry their line number, so that ones written by a
-/// block that was undone are not taken for older lines.
-struct Recent {
-    ring: Vec<Entry>,
-    table: Vec<u64>,
-}
-
-impl Recent {
-    fn new(table: bool) -> Self {
-        let e = Entry { tag: 0, v: [0; 3], s: [0; 3] };
-        Recent { ring: vec![e; RECENT], table: if table { vec![0; RECENT] } else { vec![] } }
-    }
-
-    #[inline]
-    fn get(&self, line: u64) -> Option<&Entry> {
-        let e = &self.ring[line as usize % RECENT];
-        (e.tag == line + 1).then_some(e)
-    }
-
-    #[inline]
-    fn put(&mut self, line: u64, mut e: Entry) {
-        e.tag = line + 1;
-        self.ring[line as usize % RECENT] = e;
-    }
-
-    /// The distance back from `line` to the last line equal to `e` (0 if none), and
-    /// records `line`.
-    #[inline]
-    fn find_put(&mut self, line: u64, e: Entry) -> u64 {
-        let h = e.hash();
-        let c = self.table[h];
-        let d = if c != 0 && c <= line && line + 1 - c <= RECENT as u64 && self.get(c - 1).is_some_and(|x| x.v == e.v && x.s == e.s) {
-            line + 1 - c
-        } else {
-            0
-        };
-        self.table[h] = line + 1;
-        self.put(line, e);
-        d
-    }
-}
 
 /// Prediction state, the same on both sides.
 #[derive(Clone, Copy)]
@@ -343,28 +147,9 @@ fn valid_tail(t: &[u8]) -> bool {
     matches!(&t[i..], b"" | b"\n" | b"\r\n")
 }
 
-/// An index token: `[-]digits`, no leading zero, not zero.
-#[inline]
-fn parse_index(t: &[u8]) -> Option<(i64, bool)> {
-    let neg = t.first() == Some(&b'-');
-    let d = &t[neg as usize..];
-    if d.is_empty() || d.len() > 18 || d[0] == b'0' {
-        return None;
-    }
-    let mut v = 0i64;
-    for &c in d {
-        let x = c.wrapping_sub(b'0');
-        if x > 9 {
-            return None;
-        }
-        v = v * 10 + x as i64;
-    }
-    Some((v, neg))
-}
-
 /// The keyword kind of a line, and the keyword's length.
 #[inline]
-fn kind_of(l: &[u8]) -> Option<(u8, usize)> {
+pub(crate) fn kind_of(l: &[u8]) -> Option<(u8, usize)> {
     let kw = tok_end(l, 0);
     let k = match &l[..kw] {
         b"v" => 0,
@@ -421,146 +206,6 @@ fn order(n: usize, sel: Option<usize>) -> ([usize; MAX_NUMS], usize) {
         o[m] = j;
     }
     (o, n)
-}
-
-/// How the encoder writes the numbers of a kind first: a mode (`dec`), the precision for
-/// `%g` and `%e`, and the exponent width of `%g` tokens without an exponent.
-#[derive(Clone, Copy, Default)]
-struct Style {
-    mode: u8,
-    p: u8,
-    exp3: bool,
-}
-
-/// Rough cost of coding `t` in `st`: digits of the integer, plus a scale change from the
-/// previous number in its position (`prev`, updated), or a penalty. `dom` is the usual
-/// number of digits after the point of fixed numbers (others cost a template change).
-fn style_cost(t: &[u8], st: Style, dom: u8, prev: &mut i32, tmp: &mut Vec<u8>) -> usize {
-    let nd = |v: i64| v.unsigned_abs().checked_ilog10().unwrap_or(0) as usize + 1;
-    if st.mode == M_FIX {
-        return num::parse(t).map_or(25, |(v, f)| nd(v) + if f & num::F_FRAC != dom { 3 } else { 0 });
-    }
-    dec::encode(t, st.mode, st.p, st.exp3, *prev, tmp).map_or(25, |(v, s, _)| {
-        let c = nd(v) + if s != *prev { 2 } else { 0 };
-        *prev = s;
-        c
-    })
-}
-
-/// Chooses the styles from lines spread over a block: `%.Pg` when most numbers of a kind
-/// are that and their fixed formats vary; unit normals when most normals have length 1. A
-/// kind not seen keeps its style (`st`, `unit`: those of the previous block).
-fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
-    const PARTS: usize = 16;
-    const PART: usize = 2 << 10;
-    // Tokens with their position in the line.
-    let mut toks: [Vec<(usize, &[u8])>; 4] = Default::default();
-    for i in 0..PARTS {
-        let a = src.len() / PARTS * i;
-        let sample = &src[a..(a + PART).min(src.len())];
-        // Whole lines only: from the first line start.
-        let b = if a == 0 { 0 } else { memchr::memchr(b'\n', sample).map_or(sample.len(), |p| p + 1) };
-        let mut lines = sample[b..].split(|&c| c == b'\n');
-        lines.next_back();
-        for l in lines {
-            let Some((k, kw)) = kind_of(l) else { continue };
-            if k >= K_F {
-                continue;
-            }
-            for (j, t) in l[kw..].split(|&c| matches!(c, b' ' | b'\t' | b'\r')).filter(|t| !t.is_empty()).enumerate() {
-                toks[k as usize].push((j.min(MAX_NUMS - 1), t));
-            }
-        }
-    }
-    for k in 0..4 {
-        let ts = &toks[k];
-        if ts.is_empty() {
-            continue;
-        }
-        st[k] = Style::default();
-        let mut hist = [0usize; 19];
-        let mut maxsig = 1u8;
-        let mut sci_p = 1u8;
-        let mut exp3 = false;
-        for &(_, t) in ts {
-            if let Some((_, f)) = num::parse(t) {
-                hist[(f & num::F_FRAC) as usize] += 1;
-            }
-            let e = t.iter().position(|&c| c == b'e' || c == b'E');
-            exp3 |= e.is_some_and(|e| t.len() - e == 5);
-            let e = e.unwrap_or(t.len());
-            let digits: Vec<u8> = t[..e].iter().copied().filter(u8::is_ascii_digit).collect();
-            let a = digits.iter().position(|&c| c != b'0').unwrap_or(digits.len());
-            let b = digits.iter().rposition(|&c| c != b'0').map_or(a, |i| i + 1);
-            maxsig = maxsig.max((b - a).min(17) as u8);
-            if e < t.len() {
-                sci_p = sci_p.max(digits.len().min(19) as u8);
-            }
-        }
-        let dom = (0..19).max_by_key(|&i| hist[i]).unwrap() as u8;
-        let s = |r, src, p| Style { mode: dec::mode(r, src), p, exp3 };
-        let cands = [
-            Style::default(),
-            s(dec::R_GEN, dec::SRC_DEC, maxsig),
-            s(dec::R_SCI, dec::SRC_DEC, sci_p),
-            s(dec::R_PY, dec::SRC_DEC, 0),
-            s(dec::R_JS, dec::SRC_DEC, 0),
-            s(dec::R_POS, dec::SRC_DEC, 0),
-            s(dec::R_GEN, dec::SRC_F32, maxsig),
-            s(dec::R_GEN, dec::SRC_F64, maxsig),
-            s(dec::R_SCI, dec::SRC_F32, sci_p),
-            s(dec::R_SCI, dec::SRC_F64, sci_p),
-            s(dec::R_PY, dec::SRC_F32, 0),
-            s(dec::R_JS, dec::SRC_F32, 0),
-        ];
-        // Whole lines (consecutive tokens), up to about 512 numbers.
-        let ts = &ts[..ts.len().min(512)];
-        let mut best = (usize::MAX, Style::default());
-        let mut tmp = Vec::with_capacity(64);
-        for c in cands {
-            let mut cost = 0;
-            let mut prev = [0i32; MAX_NUMS];
-            for &(j, t) in ts {
-                cost += style_cost(t, c, dom, &mut prev[j], &mut tmp);
-                if cost >= best.0 {
-                    break;
-                }
-            }
-            if cost < best.0 {
-                best = (cost, c);
-            }
-        }
-        st[k] = best.1;
-    }
-    // Normals of length 1 within rounding.
-    let (mut nvn, mut nunit) = (0, 0);
-    for t in toks[2].chunks_exact(3) {
-        let x: Vec<f64> = t.iter().filter_map(|t| std::str::from_utf8(t.1).ok()?.parse().ok()).collect();
-        if x.len() == 3 {
-            nvn += 1;
-            nunit += ((x[0] * x[0] + x[1] * x[1] + x[2] * x[2] - 1.0).abs() < 1e-3) as usize;
-        }
-    }
-    if nvn > 0 {
-        *unit = nunit * 10 >= nvn * 8;
-    }
-}
-
-/// A token with an exponent in another style than its line's kind: `%e` with the
-/// precision of its digits, or a shortest form. Returns the value, scale, mode and flags.
-#[cold]
-fn exp_fallback(t: &[u8], ps: i32, tmp: &mut Vec<u8>) -> Option<(i64, i32, u8, u8)> {
-    let e = t.iter().position(|&c| c == b'e')?;
-    let p = t[..e].iter().filter(|c| c.is_ascii_digit()).count().clamp(1, 19) as u8;
-    let exp3 = t.len() - e == 5;
-    let modes = [
-        (dec::mode(dec::R_SCI, dec::SRC_DEC), p),
-        (dec::mode(dec::R_SCI, dec::SRC_F64), p),
-        (dec::mode(dec::R_SCI, dec::SRC_F32), p),
-        (dec::mode(dec::R_PY, dec::SRC_DEC), 0),
-        (dec::mode(dec::R_JS, dec::SRC_DEC), 0),
-    ];
-    modes.into_iter().find_map(|(m, p)| dec::encode(t, m, p, exp3, ps, tmp).map(|(v, s, f)| (v, s, m, f)))
 }
 
 pub struct Encoder {
@@ -1164,40 +809,6 @@ impl Decoder {
         tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).chain(&vs).chain(&lpred).all(|r| r.done())
     }
 
-}
-
-impl Indices {
-    /// Decodes an index of a corner whose v index is `v`, given the candidates.
-    #[inline]
-    fn decode(&mut self, sym: &mut Rd, esc: &mut Rd, v: i64, cands: [Option<i64>; 2]) -> i64 {
-        let x = self;
-        let c = sym.u8();
-        let (a, p) = match c {
-            SYM_X1 | SYM_X2 => {
-                let a = cands[(c - SYM_X1) as usize].unwrap_or(0);
-                (a, x.find(a))
-            }
-            SYM_NEW => (x.max.wrapping_add(1), None),
-            SYM_ESC => (x.last.wrapping_add(esc.sv()), None),
-            _ => {
-                let p = (c as usize).min(CACHE - 1);
-                (x.cache[p], Some(p))
-            }
-        };
-        x.update(a, p, v);
-        a
-    }
-}
-
-/// Writes index `a`, relative to `count` (the lines of its kind so far) if `neg`.
-#[inline]
-fn put_index(out: &mut Vec<u8>, a: i64, neg: bool, count: i64) {
-    if neg {
-        out.push(b'-');
-        num::put(out, (count + 1).wrapping_sub(a), 0);
-    } else {
-        num::put(out, a, 0);
-    }
 }
 
 /// A readable form of a template key, for analysis: fixed numbers by their digits after the
