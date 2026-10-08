@@ -168,7 +168,7 @@ struct Weights {
 
 impl Weights {
     fn new(q: &[f32; 64]) -> Self {
-        let cv = |v: usize| (v as f64 * std::f64::consts::PI / 16.0).cos() * if v == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
+        let cv = |v: usize| crate::fast::CV[v];
         let sg = |v: usize| if v % 2 == 0 { 1.0 } else { -1.0 };
         let s = (1i32 << WSHIFT) as f64;
         let r = |x: f64| x.round() as i32;

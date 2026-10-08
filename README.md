@@ -103,8 +103,9 @@ Blocks are processed in raster order per component, coefficients in zigzag order
   - Sign and remaining bits are stored as raw bits.
 - **DC**: predicted from boundary continuity with the blocks above and to the left
   (Lakhani-style, coefficient domain).
-  - Only row 0 and column 0 coefficients are involved, in fixed-point i32 arithmetic, so the
-    prediction is exact and platform independent.
+  - Only row 0 and column 0 coefficients are involved. The sums are fixed-point i32, the
+    final scaling and rounding basic f32 operations, and the DCT basis a constant table (no
+    libm), so the prediction is exact and platform independent.
   - Context: neighbour residual sizes and a bucket of the disagreement (uncertainty) between
     the two predictions.
 - **Tables**: static per-file histograms (two pass).

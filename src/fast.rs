@@ -126,10 +126,25 @@ const ZI: [usize; 64] = {
     t
 };
 
+/// DCT basis scale c(v) = cos(v pi / 16), times 1/sqrt(2) for v = 0, rounded to nearest. A table
+/// rather than `f64::cos`, whose result depends on the platform's libm (the weights below are
+/// part of the format, and must come out the same in native and Wasm builds).
+pub(crate) const CV: [f64; 8] = [
+    0.7071067811865476,
+    0.9807852804032304,
+    0.9238795325112867,
+    0.8314696123025452,
+    0.7071067811865476,
+    0.5555702330196023,
+    0.38268343236508984,
+    0.19509032201612833,
+];
+
 /// DC prediction from boundary continuity (Lakhani-style, coefficient domain): the mean of the
 /// block's top row / left column must match the bottom row / right column of the neighbour
-/// above / to the left. Only column 0 / row 0 coefficients are involved, in fixed point
-/// (wrapping i32), so it is exact and platform independent.
+/// above / to the left. Only column 0 / row 0 coefficients are involved. The sums are in fixed
+/// point (wrapping i32); the final scaling, mean and rounding use only basic f32 operations on
+/// finite values (no libm), which IEEE 754 makes exact and platform independent.
 struct DcBound {
     wa: [i32; 8], // cv[v] q[v][0], v >= 1: this block's column 0 (DC from above)
     wl: [i32; 8], // cv[u] q[0][u], u >= 1: this block's row 0 (DC from left)
@@ -140,7 +155,7 @@ struct DcBound {
 impl DcBound {
     fn new(q: &[u16; 64]) -> Self {
         // q in zigzag order
-        let cv = |v: usize| (v as f64 * std::f64::consts::PI / 16.0).cos() * if v == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
+        let cv = |v: usize| CV[v];
         let sg = |v: usize| if v % 2 == 0 { 1.0 } else { -1.0 };
         let sc = 1024.0;
         let (qc, qr) = (|v: usize| q[ZI[v * 8]] as f64, |u: usize| q[ZI[u]] as f64);
@@ -1229,4 +1244,18 @@ pub fn decode_into(j: &Jpeg, e: &Encoded, out: &mut Vec<Coefs>) -> Result<(), Er
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CV;
+
+    #[test]
+    fn cv_table_is_the_dct_basis() {
+        for (v, &c) in CV.iter().enumerate() {
+            let x = (v as f64 * std::f64::consts::PI / 16.0).cos() * if v == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
+            // within an ulp of this platform's libm (the table holds the correctly rounded values)
+            assert!(c.to_bits().abs_diff(x.to_bits()) <= 1, "c({v}) = {c} vs {x}");
+        }
+    }
 }
