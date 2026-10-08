@@ -220,7 +220,6 @@ fn rank_candidates(mut cands: Vec<Encoder>, src: &[u8], planes: usize, w: usize,
         starts[r + 1] = starts[r] + rows::count(src, cb, r);
     }
     let mut row = vec![0u8; w];
-    let mut buf = Vec::new();
     let mut hits = vec![0usize; cands.len()];
     for r in (0..rows).step_by(step) {
         let enc = &src[starts[r]..starts[r + 1]];
@@ -228,9 +227,7 @@ fn rank_candidates(mut cands: Vec<Encoder>, src: &[u8], planes: usize, w: usize,
             continue;
         }
         for (k, &c) in cands.iter().enumerate() {
-            buf.clear();
-            packbits::encode(c, &row, &mut buf);
-            hits[k] += (buf == enc) as usize;
+            hits[k] += packbits::reproduces(c, &row, enc) as usize;
         }
     }
     let mut order: Vec<usize> = (0..cands.len()).collect();
@@ -720,7 +717,6 @@ fn encode_group(rec: &mut model::Recorder, psd: &Psd, d: &[u8], spans: &[Span], 
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
     let mut rows = vec![vec![0u8; w]; n];
     let mut misses = vec![Vec::new(); n];
-    let mut buf = Vec::with_capacity(w + w / 64 + 8);
     let timing = std::env::var_os("PSDR_STATS").is_some();
     let mut t = [0f64; 4];
     let mut clock = std::time::Instant::now();
@@ -751,9 +747,7 @@ fn encode_group(rec: &mut model::Recorder, psd: &Psd, d: &[u8], spans: &[Span], 
             r.next(&mut rows[k]).ok()?;
             lap(0, &mut t);
             if let (Some(enc), Coding::Rle { encoder, .. }) = (enc, &spans[g.planes[k].0].coding) {
-                buf.clear();
-                packbits::encode(*encoder, &rows[k], &mut buf);
-                let miss = buf != enc;
+                let miss = !packbits::reproduces(*encoder, &rows[k], enc);
                 if miss {
                     misses[k].push(y);
                 }
@@ -793,7 +787,6 @@ fn settle_encoder<'a>(sp: &mut Span<'a>, d: &'a [u8], psb: bool, candidates: &[E
     // row (rather than a sample).
     if best.1.len() > total / 32 + 4 {
         let mut row = vec![0u8; w];
-        let mut buf = Vec::new();
         let cb = if psb { 4 } else { 2 };
         let full = packbits::infer_tiles_from(all_splits(src, total, cb));
         for &cand in candidates[1..].iter().chain([full].iter().filter(|&&f| !candidates.contains(&f))) {
@@ -803,9 +796,7 @@ fn settle_encoder<'a>(sp: &mut Span<'a>, d: &'a [u8], psb: bool, candidates: &[E
                 for y in 0..h {
                     let enc = r.encoded()?;
                     r.next(&mut row).ok()?;
-                    buf.clear();
-                    packbits::encode(cand, &row, &mut buf);
-                    if buf != enc {
+                    if !packbits::reproduces(cand, &row, enc) {
                         miss.push(p * h + y);
                         if miss.len() >= best.1.len() {
                             break 'planes;

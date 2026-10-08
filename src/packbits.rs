@@ -64,28 +64,76 @@ fn next_run(row: &[u8], mut i: usize, end: usize, k: usize) -> usize {
     end
 }
 
+/// Where tokens go: written out, or checked against an encoded row.
+trait Sink {
+    /// A run of `k` (2..=128) bytes `v`; false to stop.
+    fn run(&mut self, k: usize, v: u8) -> bool;
+    /// A literal; false to stop.
+    fn literal(&mut self, s: &[u8]) -> bool;
+}
+
+impl Sink for Vec<u8> {
+    #[inline(always)]
+    fn run(&mut self, k: usize, v: u8) -> bool {
+        self.extend_from_slice(&[(1 - k as i32) as u8, v]);
+        true
+    }
+    #[inline(always)]
+    fn literal(&mut self, s: &[u8]) -> bool {
+        self.push((s.len() - 1) as u8);
+        self.extend_from_slice(s);
+        true
+    }
+}
+
+/// Checks tokens against an encoded row, by their headers only: the row being its decoding,
+/// tokens of the same kinds and lengths are the same bytes.
+struct Verify<'a> {
+    src: &'a [u8],
+    pos: usize,
+}
+
+impl Sink for Verify<'_> {
+    #[inline(always)]
+    fn run(&mut self, k: usize, _v: u8) -> bool {
+        let ok = self.src.get(self.pos) == Some(&((1 - k as i32) as u8));
+        self.pos += 2;
+        ok
+    }
+    #[inline(always)]
+    fn literal(&mut self, s: &[u8]) -> bool {
+        let ok = self.src.get(self.pos) == Some(&((s.len() - 1) as u8));
+        self.pos += 1 + s.len();
+        ok
+    }
+}
+
 /// Encodes one chunk (at most 128 bytes) the way Photoshop does.
 #[inline]
-fn encode_chunk(row: &[u8], out: &mut Vec<u8>) {
+fn encode_chunk<S: Sink>(row: &[u8], out: &mut S) -> bool {
     let n = row.len();
     let mut i = 0;
     while i < n {
         let v = row[i];
         let r = 1 + count_equal(&row[i + 1..], v);
         if r >= 2 {
-            out.extend_from_slice(&[(1 - r as i32) as u8, v]);
+            if !out.run(r, v) {
+                return false;
+            }
             i += r;
         } else {
             // A literal, up to a run of 3 (2 equal bytes do not end it).
             let s = i;
             i = next_run(row, i + 1, n, 3);
-            out.push((i - s - 1) as u8);
-            out.extend_from_slice(&row[s..i]);
+            if !out.literal(&row[s..i]) {
+                return false;
+            }
         }
     }
+    true
 }
 
-fn encode_greedy(row: &[u8], min_run: usize, split_rest: bool, out: &mut Vec<u8>) {
+fn encode_greedy<S: Sink>(row: &[u8], min_run: usize, split_rest: bool, out: &mut S) -> bool {
     let n = row.len();
     // Whether a run of at least min_run starts at i.
     let starts_run = |i: usize| i + min_run <= n && row[i + 1..i + min_run].iter().all(|&b| b == row[i]);
@@ -101,7 +149,10 @@ fn encode_greedy(row: &[u8], min_run: usize, split_rest: bool, out: &mut Vec<u8>
             // literal of its own.
             while r > 0 {
                 let k = r.min(128);
-                out.extend_from_slice(&[if k == 1 { 0 } else { (1 - k as i32) as u8 }, v]);
+                let ok = if k == 1 { out.literal(&row[i..i + 1]) } else { out.run(k, v) };
+                if !ok {
+                    return false;
+                }
                 i += k;
                 r -= k;
             }
@@ -113,14 +164,15 @@ fn encode_greedy(row: &[u8], min_run: usize, split_rest: bool, out: &mut Vec<u8>
                     i += 1;
                 }
             }
-            out.push((i - s - 1) as u8);
-            out.extend_from_slice(&row[s..i]);
+            if !out.literal(&row[s..i]) {
+                return false;
+            }
         }
     }
+    true
 }
 
-/// Appends the encoding of `row` to `out`.
-pub fn encode(enc: Encoder, row: &[u8], out: &mut Vec<u8>) {
+fn encode_into<S: Sink>(enc: Encoder, row: &[u8], out: &mut S) -> bool {
     match enc {
         Encoder::Photoshop { phase, period } => {
             let mut a = 0;
@@ -128,14 +180,29 @@ pub fn encode(enc: Encoder, row: &[u8], out: &mut Vec<u8>) {
             while a < row.len() {
                 let b = end.min(row.len());
                 for chunk in row[a..b].chunks(128) {
-                    encode_chunk(chunk, out);
+                    if !encode_chunk(chunk, out) {
+                        return false;
+                    }
                 }
                 a = b;
                 end = end.saturating_add(period);
             }
+            true
         }
         Encoder::Greedy { min_run, split_rest } => encode_greedy(row, min_run, split_rest, out),
     }
+}
+
+/// Appends the encoding of `row` to `out`.
+pub fn encode(enc: Encoder, row: &[u8], out: &mut Vec<u8>) {
+    encode_into(enc, row, out);
+}
+
+/// Whether `enc` encodes `row` as `encoded`, given that `row` is the decoding of `encoded`
+/// (faster than encoding and comparing: nothing is written).
+pub fn reproduces(enc: Encoder, row: &[u8], encoded: &[u8]) -> bool {
+    let mut v = Verify { src: encoded, pos: 0 };
+    encode_into(enc, row, &mut v) && v.pos == encoded.len()
 }
 
 /// Splits `data` (row byte counts, then rows) of `rows` rows into the encoded rows.
@@ -368,6 +435,7 @@ mod tests {
             encode_chunk(&row, &mut a);
             reference_chunk(&row, &mut b);
             assert_eq!(a, b, "{row:?}");
+            assert!(reproduces(NO_TILES, &row, &a) || row.len() > 128);
         }
     }
 
@@ -421,6 +489,13 @@ mod tests {
                 encode_greedy(&row, min_run, split_rest, &mut a);
                 reference_greedy(&row, min_run, split_rest, &mut b);
                 assert_eq!(a, b, "{min_run} {split_rest} {row:?}");
+                let enc = Encoder::Greedy { min_run, split_rest };
+                assert!(reproduces(enc, &row, &a));
+                // Another encoder's output is told apart.
+                let other = Encoder::Greedy { min_run: 5 - min_run, split_rest };
+                let mut c = Vec::new();
+                encode(other, &row, &mut c);
+                assert_eq!(reproduces(enc, &row, &c), c == a);
             }
         }
     }

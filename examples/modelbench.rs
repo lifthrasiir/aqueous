@@ -17,12 +17,13 @@ impl psd_recons::model::Coder for Replay {
     }
 }
 
-/// Records symbols only.
-struct Tape(Vec<u8>);
+/// Records symbols and their tables.
+struct Tape(Vec<u8>, Vec<usize>);
 impl psd_recons::model::Coder for Tape {
     const DECODES: bool = false;
-    fn code(&mut self, _t: usize, sym: u8) -> u8 {
+    fn code(&mut self, t: usize, sym: u8) -> u8 {
         self.0.push(sym);
+        self.1.push(t);
         sym
     }
 }
@@ -83,12 +84,49 @@ fn main() {
         let mut p = Player::new(&out);
         once(&mut |gc, r| gc.code_row(&mut p, r, None))
     });
-    let mut tape = Tape(Vec::new());
+    let mut tape = Tape(Vec::new(), Vec::new());
     once(&mut |gc, r| gc.code_row(&mut tape, r, None));
     let tr = best(&mut || {
         let mut p = Replay { syms: tape.0.clone(), i: 0 };
         once(&mut |gc, r| gc.code_row(&mut p, r, None))
     });
+    // The entropy decoder alone, on the same symbols with their tables known in advance.
+    let tt = best(&mut || {
+        let mut p = Player::new(&out);
+        let t = Instant::now();
+        let mut acc = 0u32;
+        for &tab in &tape.1 {
+            acc = acc.wrapping_add(psd_recons::model::Coder::code(&mut p, tab, 0) as u32);
+        }
+        std::hint::black_box(acc);
+        t.elapsed().as_secs_f64()
+    });
+    println!("entropy decoding alone: {:.2} ns/sym", tt * 1e9 / syms as f64);
+    // The bare rANS decoder on the same symbols, one table set (no chunks, no remapping).
+    {
+        use psd_recons::rans::{self, BitW, Decoder, Tables};
+        let nt = psd_recons::model::TABLES;
+        let mut counts = vec![vec![0u32; 256]; nt];
+        let syms: Vec<(u16, u16)> = tape.1.iter().zip(&tape.0).map(|(&t, &s)| (t as u16, s as u16)).collect();
+        for &(t, s) in &syms {
+            counts[t as usize][s as usize] += 1;
+        }
+        let mut w = BitW::default();
+        let freqs: Vec<Vec<u32>> = counts.iter().map(|c| if c.iter().any(|&x| x > 0) { rans::write_table(&mut w, c) } else { let mut f = vec![0; 256]; f[0] = rans::PROB_SCALE; f }).collect();
+        let bytes = rans::encode(&syms, &freqs);
+        let tables = Tables::new(&freqs);
+        let tb = best(&mut || {
+            let t = Instant::now();
+            let mut d = Decoder::new(&bytes);
+            let mut acc = 0u32;
+            for &(tab, _) in &syms {
+                acc = acc.wrapping_add(d.get(&tables, tab as usize));
+            }
+            std::hint::black_box(acc);
+            t.elapsed().as_secs_f64()
+        });
+        println!("bare rANS decoding: {:.2} ns/sym", tb * 1e9 / syms.len() as f64);
+    }
     println!(
         "{samples} samples, {syms} symbols: model {:.2} ns/sym, encode {:.2}, decode {:.2}, replay {:.2} (incl. row clones)",
         tm * 1e9 / syms as f64,
