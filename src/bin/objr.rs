@@ -177,6 +177,7 @@ fn bench(args: &[String]) {
         println!("heap beyond input and output, largest: compress {mpeak_c}, decompress {mpeak_d}");
     }
     println!("streams (raw -> coded, share of output):");
+    #[allow(clippy::needless_range_loop)]
     for i in 0..NSTREAMS {
         if total.raw[i] > 0 {
             println!(
@@ -235,12 +236,12 @@ fn stats(files: &[String]) {
         }
         println!("== {f}: {} templates, {} raw lines", enc.keys().len(), uses.iter().take(2).sum::<u64>());
         let mut t: Vec<(u64, String)> = enc.keys().iter().enumerate().map(|(i, k)| (uses.get(i + 2).copied().unwrap_or(0), obj_recons::block::describe(k))).collect();
-        t.sort_by(|a, b| b.0.cmp(&a.0));
+        t.sort_by_key(|x| std::cmp::Reverse(x.0));
         for (n, d) in t.iter().take(12) {
             println!("  {n:>10} {d}");
         }
         let mut r: Vec<_> = raw.into_iter().collect();
-        r.sort_by(|a, b| b.1.0.cmp(&a.1.0));
+        r.sort_by_key(|x| std::cmp::Reverse(x.1.0));
         for (w, (n, ex)) in r.iter().take(8) {
             println!("  raw {n:>8} {:<12} e.g. {}", String::from_utf8_lossy(w), String::from_utf8_lossy(ex).trim_end());
         }

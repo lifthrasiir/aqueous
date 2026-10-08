@@ -164,7 +164,7 @@ pub fn parse_gen(t: &[u8], p: u8, prev_scale: i32, exp3: bool, tmp: &mut Vec<u8>
     let (v, s) = if m == 0 {
         (0, prev_scale)
     } else {
-        while m % 10 == 0 {
+        while m.is_multiple_of(10) {
             m /= 10;
             e10 += 1;
         }
@@ -201,7 +201,7 @@ pub fn put_gen(out: &mut Vec<u8>, v: i64, s: i32, f: u8) {
         return;
     }
     let mut s = s;
-    while m % 10 == 0 {
+    while m.is_multiple_of(10) {
         m /= 10;
         s -= 1;
     }

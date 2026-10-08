@@ -35,7 +35,7 @@ impl Cache {
         if self.tot[slot] > 1 << 16 {
             self.tot[slot] = 0;
             for c in self.cnt[slot].iter_mut() {
-                *c = (*c + 1) / 2;
+                *c = (*c).div_ceil(2);
                 self.tot[slot] += *c;
             }
         }

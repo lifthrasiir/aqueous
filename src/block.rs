@@ -835,11 +835,11 @@ impl Encoder {
         for j in 0..3 {
             w[0][j] = num::rescale(prev[j].0, prev[j].1, vals[j].1);
         }
-        for k in 1..WIN + 2 {
+        for (k, wk) in w.iter_mut().enumerate().skip(1) {
             let Some(e) = line.checked_sub(k as u64).and_then(|l| rec.get(l)) else { break };
             for j in 0..3 {
                 let sc = vals[j].1;
-                w[k][j] = if e.s[j] as i32 == sc { e.v[j] } else { num::rescale(e.v[j], e.s[j] as i32, sc) };
+                wk[j] = if e.s[j] as i32 == sc { e.v[j] } else { num::rescale(e.v[j], e.s[j] as i32, sc) };
             }
             have = k + 1;
         }
@@ -898,11 +898,11 @@ impl Encoder {
         let mut pat = (a.1 as u8) * C_NEG;
         let (mut tv, mut nv) = (0, 0);
         if let Some(b) = b {
-            pat |= C_T | (b.1 as u8) * (C_NEG << 1);
+            pat |= C_T | ((b.1 as u8) * (C_NEG << 1));
             tv = abs(b, 1);
         }
         if let Some(c) = c {
-            pat |= C_N | (c.1 as u8) * (C_NEG << 2);
+            pat |= C_N | ((c.1 as u8) * (C_NEG << 2));
             nv = abs(c, 2);
         }
         Some(((abs(a, 0), tv, nv), pat))

@@ -121,10 +121,10 @@ pub fn encode(src: &[u8], out: &mut Vec<u8>) -> Option<()> {
     }
     put_uv(out, used);
     let mut last = -1i64;
-    for s in 0..NSYM {
-        if f[s] > 0 {
+    for (s, &fr) in f.iter().enumerate() {
+        if fr > 0 {
             put_uv(out, (s as i64 - last - 1) as u64);
-            put_uv(out, f[s] as u64 - 1);
+            put_uv(out, fr as u64 - 1);
             last = s as i64;
         }
     }
@@ -139,7 +139,7 @@ pub fn encode(src: &[u8], out: &mut Vec<u8>) -> Option<()> {
             rev.push(*xs as u8);
             *xs >>= 8;
         }
-        *xs = (*xs / fr << PROB_BITS) + *xs % fr + cu;
+        *xs = ((*xs / fr) << PROB_BITS) + *xs % fr + cu;
     }
     // Read back most significant byte first: state 0, then 1.
     for xs in [x[1], x[0]] {

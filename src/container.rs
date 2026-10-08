@@ -120,11 +120,10 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
         w.write_all(&out)?;
         out.clear();
         let mut e = (p + bsize).min(src.len());
-        if e < src.len() {
-            if let Some(i) = memchr::memrchr(b'\n', &src[p..e]) {
+        if e < src.len()
+            && let Some(i) = memchr::memrchr(b'\n', &src[p..e]) {
                 e = p + i + 1;
             }
-        }
         let b = &src[p..e];
         p = e;
         let t = std::time::Instant::now();

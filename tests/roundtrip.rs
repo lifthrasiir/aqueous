@@ -125,7 +125,7 @@ fn mesh_corners() {
             r ^= r << 13;
             r ^= r >> 7;
             r ^= r << 17;
-            let (x, y) = if r % 3 == 0 { ((r >> 8) as usize % (w - 1), (r >> 20) as usize % (h - 1)) } else { (x, y) };
+            let (x, y) = if r.is_multiple_of(3) { ((r >> 8) as usize % (w - 1), (r >> 20) as usize % (h - 1)) } else { (x, y) };
             let a = y * w + x + 1;
             let (b, c, d) = (a + 1, a + w + 1, a + w);
             // The vt paired with a vertex changes over time (as at seams).
@@ -176,7 +176,7 @@ fn corrupt_containers() {
                 r ^= r >> 7;
                 r ^= r << 17;
                 let j = r as usize % cc.len();
-                cc[j] ^= 1 << (r >> 40) % 8;
+                cc[j] ^= 1 << ((r >> 40) % 8);
             }
         }
         if let Ok(d) = decompress(&cc) {

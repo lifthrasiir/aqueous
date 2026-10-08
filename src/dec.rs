@@ -80,7 +80,7 @@ impl Dec {
         if m == 0 {
             return Dec { neg, m: 0, e: 0 };
         }
-        while m % 10 == 0 {
+        while m.is_multiple_of(10) {
             m /= 10;
             e += 1;
         }

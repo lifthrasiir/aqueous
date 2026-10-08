@@ -34,7 +34,7 @@ impl Model {
         if self.tot[ctx] > 1 << 16 {
             self.tot[ctx] = 0;
             for c in self.cnt[ctx].iter_mut() {
-                *c = (*c + 1) / 2;
+                *c = (*c).div_ceil(2);
                 self.tot[ctx] += *c;
             }
         }
