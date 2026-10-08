@@ -37,18 +37,23 @@ Output size / input size over whole sets (every file round-trips):
 
 | set | files | size | psdr | zstd -3 | zstd -19 | xz -9 |
 |---|---|---|---|---|---|---|
-| tori29umai (illustrations) | 32 | 379 MB | **0.229** | 0.433 | 0.358 | 0.327 |
-| GenPoster (poster templates) | 52 | 2.0 GB | 0.335 | 0.564 | 0.439 | **0.322** |
-| OpenGameArt (game art) | 828 | 3.8 GB | **0.331** | 0.502 | 0.394 | 0.336 |
-| fixtures (parser tests) | 651 | 205 MB | 0.266 | 0.297 | 0.251 | **0.219** |
+| tori29umai (illustrations) | 32 | 379 MB | **0.227** | 0.433 | 0.358 | 0.327 |
+| GenPoster (poster templates) | 52 | 2.0 GB | 0.332 | 0.564 | 0.439 | **0.322** |
+| OpenGameArt (game art) | 828 | 3.8 GB | **0.328** | 0.502 | 0.394 | 0.336 |
+| fixtures (parser tests) | 651 | 205 MB | 0.265 | 0.297 | 0.251 | **0.219** |
 
-One thread on an Apple M4, ~110-120 MB subsets (zstd and xz on the subset concatenated):
+One thread on an Apple M4, ~110-120 MB subsets. psdr's speeds are its cycles (from
+`/usr/bin/time -l`, summed over one process per file and direction) at 4.4 GHz, which other
+load on the machine hardly affects; zstd and xz were timed (on the subset concatenated):
 
 | subset | psdr | c / d MB/s | zstd -3 | c / d | zstd -19 | c / d | xz -9 | c / d |
 |---|---|---|---|---|---|---|---|---|
-| tori29umai | 0.246 | 84 / 94 | 0.435 | 329 / 1202 | 0.361 | 9.5 / 1044 | 0.326 | 4.5 / 90 |
-| GenPoster | 0.205 | 76 / 95 | 0.424 | 461 / 1556 | 0.279 | 10.2 / 1309 | 0.231 | 6.9 / 128 |
-| OpenGameArt | 0.200 | 117 / 140 | 0.573 | 336 / 1250 | 0.483 | 5.2 / 784 | 0.292 | 4.4 / 100 |
+| tori29umai | 0.243 | 89 / 105 | 0.435 | 329 / 1202 | 0.361 | 9.5 / 1044 | 0.326 | 4.5 / 90 |
+| GenPoster | 0.203 | 83 / 103 | 0.424 | 461 / 1556 | 0.279 | 10.2 / 1309 | 0.231 | 6.9 / 128 |
+| OpenGameArt | 0.200 | 123 / 142 | 0.573 | 336 / 1250 | 0.483 | 5.2 / 784 | 0.292 | 4.4 / 100 |
+
+Decoding runs at about 4.3 instructions per cycle: it is bound by the work per pixel, not by
+latency.
 
 Memory (peak RSS less input and output), largest files:
 
