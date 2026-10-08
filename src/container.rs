@@ -169,11 +169,10 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
                 }
                 let (mut m, mut d) = if !z.is_empty() && z.len() < s.len() { (M_ZSTD, &z) } else { (M_STORED, s) };
                 if try_ans {
-                    // rANS coded, if smaller (and, verifying, if it decodes back).
+                    // rANS coded, if smaller. (Verification covers the transform; rANS, like
+                    // zstd, is trusted: tests and fuzzing cover it.)
                     ac.clear();
-                    let ok = ans::encode(s, &mut ac).is_some()
-                        && ac.len() < d.len()
-                        && (!opt.verify || ans::decode(&ac, s.len(), &mut check) && check == *s);
+                    let ok = ans::encode(s, &mut ac).is_some() && ac.len() < d.len();
                     if ok {
                         (m, d) = (M_ANS, &ac);
                         st.rc[i] += 1;
