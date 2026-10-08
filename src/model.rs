@@ -657,6 +657,8 @@ impl GroupCoder {
 /// Records symbols, and codes them a chunk at a time into `out`.
 pub struct Recorder<'o> {
     syms: Vec<(u16, u16)>,
+    /// Symbol counts of the chunk, per table.
+    counts: Vec<[u32; 256]>,
     out: &'o mut Vec<u8>,
     pub chunks: usize,
     /// Symbols coded so far.
@@ -665,7 +667,7 @@ pub struct Recorder<'o> {
 
 impl<'o> Recorder<'o> {
     pub fn new(out: &'o mut Vec<u8>) -> Self {
-        Recorder { syms: Vec::with_capacity(CHUNK), out, chunks: 0, total: 0 }
+        Recorder { syms: Vec::with_capacity(CHUNK), counts: vec![[0; 256]; TABLES], out, chunks: 0, total: 0 }
     }
 
     /// Writes the recorded symbols as a chunk: symbol count, tables, rANS stream.
@@ -673,18 +675,16 @@ impl<'o> Recorder<'o> {
         if self.syms.is_empty() {
             return;
         }
-        let mut counts = vec![[0u32; 256]; TABLES];
-        for &(t, s) in &self.syms {
-            counts[t as usize][s as usize] += 1;
-        }
+        let counts = &mut self.counts;
         let mut w = BitW::default();
         let mut freqs = Vec::with_capacity(TABLES);
-        for c in &counts {
+        for c in counts.iter() {
             let used = c.iter().any(|&n| n > 0);
             w.bits(1, used as u32);
             freqs.push(if used { rans::write_table(&mut w, c) } else { unused() });
         }
         let head = w.finish();
+        counts.iter_mut().for_each(|c| *c = [0; 256]);
         let body = rans::encode(&self.syms, &freqs);
         let o = &mut *self.out;
         crate::container::put_varint(o, self.syms.len() as u64);
@@ -714,6 +714,8 @@ impl Coder for Recorder<'_> {
             self.flush();
         }
         self.syms.push((t as u16, sym as u16));
+        // SAFETY: t is a table of the model, below TABLES.
+        unsafe { self.counts.get_unchecked_mut(t)[sym as usize] += 1 };
         sym
     }
 }

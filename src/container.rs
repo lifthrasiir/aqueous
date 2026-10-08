@@ -688,6 +688,7 @@ pub fn compress(file: &[u8]) -> Vec<u8> {
             out.extend_from_slice(MAGIC);
             out.extend_from_slice(&[VERSION, 0]);
             let mut z = zstd::stream::Encoder::new(&mut out, skeleton_level(file.len(), file.len())).expect("zstd");
+            z.set_pledged_src_size(Some(file.len() as u64)).expect("zstd");
             z.write_all(file).expect("zstd");
             z.finish().expect("zstd");
             out
@@ -859,6 +860,9 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     let before = out.len();
     {
         let mut z = zstd::stream::Encoder::new(&mut out, skeleton_level(sk_len, file.len())).ok()?;
+        // With the size known, zstd fits its window and tables (memory) to it.
+        z.set_pledged_src_size(Some(sk_len as u64)).ok()?;
+        z.include_contentsize(false).ok()?;
         let mut prev = 0;
         for s in &mut spans {
             // Spans come in file order.
