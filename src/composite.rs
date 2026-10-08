@@ -214,6 +214,8 @@ struct LayerRows<'a> {
     /// The user mask: rows, rectangle (top, left, width, height), default value.
     mask: Option<(PlaneRows<'a>, i64, i64, usize, usize, u8)>,
     clip: bool,
+    /// Whether clipped layers follow (this one's coverage clips them).
+    base: bool,
     hidden: bool,
     mode: Option<BlendFn>,
     /// Opacity times fill opacity, 0..255.
@@ -332,6 +334,7 @@ impl<'a> RowRenderer<'a> {
                 alpha: find(-1).map(ch).transpose()?,
                 mask,
                 clip: l.clipping != 0,
+                base: false,
                 hidden: l.hidden(),
                 mode,
                 opacity: (l.opacity as f32 * fill_opacity(l, d)).round() as u32,
@@ -341,6 +344,34 @@ impl<'a> RowRenderer<'a> {
         for _ in 0..depth {
             ops.push(Op::Pop { opacity: 255, mode: None, hidden: false });
         }
+        // Clipping bases; layers clipped to a hidden base are hidden too, as in Photoshop.
+        let mut base: Option<usize> = None;
+        for op in &ops {
+            match *op {
+                Op::Layer(i) => {
+                    let clip = rows[i].as_ref().unwrap().clip;
+                    if clip {
+                        if let Some(b) = base {
+                            rows[b].as_mut().unwrap().base = true;
+                            if rows[b].as_ref().unwrap().hidden {
+                                rows[i].as_mut().unwrap().hidden = true;
+                            }
+                        }
+                    } else {
+                        base = Some(i);
+                    }
+                }
+                _ => base = None,
+            }
+        }
+        // Hidden layers that clip nothing have nothing to do.
+        ops.retain(|op| match *op {
+            Op::Layer(i) => {
+                let l = rows[i].as_ref().unwrap();
+                !l.hidden || l.base
+            }
+            _ => true,
+        });
         let row = || Row { px: vec![[0; 4]; w], x0: w, x1: 0 };
         Ok(RowRenderer {
             w,
@@ -450,11 +481,27 @@ impl<'a> RowRenderer<'a> {
                             decode(m, mb, *mh, my as usize, *mw)?;
                         }
                         if seen {
-                            for x in x0..x1 {
-                                let lx = (x as i64 - l.left) as usize;
-                                let mx = x as i64 - *ml;
-                                let v = if inside && mx >= 0 && mx < *mw as i64 { mb[mx as usize] } else { *def } as u32;
-                                ab[lx] = ((ab[lx] as u32 * v + 127) / 255) as u8;
+                            // The mask's columns within the layer's, and the default outside.
+                            let (m0, m1) = if inside {
+                                let a = (*ml).clamp(x0 as i64, x1 as i64) as usize;
+                                (a, (*ml + *mw as i64).clamp(a as i64, x1 as i64) as usize)
+                            } else {
+                                (x0, x0)
+                            };
+                            let mul = |a: &mut u8, v: u8| *a = ((*a as u32 * v as u32 + 127) / 255) as u8;
+                            let d = *def;
+                            if d != 255 {
+                                for x in (x0..m0).chain(m1..x1) {
+                                    mul(&mut ab[x + lx0 - x0], d);
+                                }
+                            }
+                            if m0 < m1 {
+                                let (la, ma) = (m0 + lx0 - x0, (m0 as i64 - *ml) as usize);
+                                for (a, &v) in ab[la..la + (m1 - m0)].iter_mut().zip(&mb[ma..ma + (m1 - m0)]) {
+                                    if v != 255 {
+                                        mul(a, v);
+                                    }
+                                }
                             }
                         }
                     }
@@ -462,18 +509,18 @@ impl<'a> RowRenderer<'a> {
                         if seen {
                             let (c0, c1) = self.clip_range;
                             for x in x0..x1 {
-                                let lx = (x as i64 - l.left) as usize;
+                                let lx = x + lx0 - x0;
                                 let v = if x >= c0 && x < c1 { self.clip[x] as u32 } else { 0 };
                                 ab[lx] = ((ab[lx] as u32 * v + 127) / 255) as u8;
                             }
                         }
-                    } else if seen {
-                        for x in x0..x1 {
-                            self.clip[x] = ab[(x as i64 - l.left) as usize];
+                    } else if l.base {
+                        if seen {
+                            self.clip[x0..x1].copy_from_slice(&ab[lx0..lx1]);
+                            self.clip_range = (x0, x1);
+                        } else {
+                            self.clip_range = (0, 0);
                         }
-                        self.clip_range = (x0, x1);
-                    } else {
-                        self.clip_range = (0, 0);
                     }
                     seen = seen && !l.hidden && ab[lx0..lx1].iter().any(|&v| v != 0);
                     let [pr, pg, pb] = &mut l.rgb;
@@ -512,7 +559,11 @@ impl<'a> RowRenderer<'a> {
             let p = base.px[x];
             let a = p[3] as u32;
             for k in 0..3 {
-                out[k][x] = ((p[k] as u32 * a + 255 * (255 - a) + 127) / 255) as u8;
+                out[k][x] = match a {
+                    255 => p[k],
+                    0 => 255,
+                    _ => ((p[k] as u32 * a + 255 * (255 - a) + 127) / 255) as u8,
+                };
             }
             if out.len() > 3 {
                 out[3][x] = p[3];

@@ -7,7 +7,7 @@ fn main() {
         let d = std::fs::read(&f).unwrap();
         let psd = psd_recons::parse(&d).unwrap();
         let (w, h) = (psd.width as usize, psd.height as usize);
-        let comp = psd_recons::pixels::composite(&psd, &d).ok();
+        let comp = if std::env::var_os("NOCMP").is_some() { None } else { psd_recons::pixels::composite(&psd, &d).ok() };
         let mut best = f64::MAX;
         let mut exact = 0usize;
         for _ in 0..3 {

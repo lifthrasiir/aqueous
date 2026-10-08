@@ -2,13 +2,15 @@
 
 use psd_recons::packbits::{self, Encoder};
 
-/// A layer: rectangle, channels (id, planar data), compression of the channels.
+/// A layer: rectangle, channels (id, planar data; a -2 channel is the user mask, of
+/// `mask`'s rectangle: top, left, width, height, default value).
 struct Layer {
     top: i32,
     left: i32,
     w: usize,
     h: usize,
     channels: Vec<(i16, Vec<u8>)>,
+    mask: Option<(i32, i32, usize, usize, u8)>,
 }
 
 fn be16(o: &mut Vec<u8>, v: u16) {
@@ -94,12 +96,13 @@ fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: bool
         be16(&mut li, l.channels.len() as u16);
         for (id, data) in &l.channels {
             let mut c = Vec::new();
+            let cw = if *id == -2 { l.mask.unwrap().2 } else { l.w };
             if raw.contains(&k) {
                 be16(&mut c, 0);
                 c.extend_from_slice(data);
             } else {
                 be16(&mut c, 1);
-                c.extend_from_slice(&rle(data, l.w, enc, mangle));
+                c.extend_from_slice(&rle(data, cw, enc, mangle));
             }
             be16(&mut li, *id as u16);
             be32(&mut li, c.len() as u32);
@@ -108,12 +111,21 @@ fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: bool
         li.extend_from_slice(b"8BIMnorm");
         li.extend_from_slice(&[255, 0, 8, 0]);
         let mut extra = Vec::new();
-        be32(&mut extra, 0); // mask
+        match l.mask {
+            Some((top, left, mw, mh, def)) => {
+                be32(&mut extra, 20);
+                for v in [top, left, top + mh as i32, left + mw as i32] {
+                    be32(&mut extra, v as u32);
+                }
+                extra.extend_from_slice(&[def, 0, 0, 0]);
+            }
+            None => be32(&mut extra, 0),
+        }
         be32(&mut extra, 0); // blending ranges
         let name = format!("Layer {k}");
         extra.push(name.len() as u8);
         extra.extend_from_slice(name.as_bytes());
-        while (extra.len() - 8) % 4 != 0 {
+        while (extra.len() - 8 - if l.mask.is_some() { 20 } else { 0 }) % 4 != 0 {
             extra.push(0);
         }
         extra.extend_from_slice(b"8BIMluni");
@@ -152,7 +164,7 @@ fn layers(w: usize, h: usize, alpha: bool) -> Vec<Layer> {
             let a: Vec<u8> = image(w, h, k + 30).iter().map(|&b| if b < 90 { 0 } else { b }).collect();
             channels.insert(0, (-1, a));
         }
-        v.push(Layer { top: k as i32 * 3, left: -(k as i32) * 5, w, h, channels });
+        v.push(Layer { top: k as i32 * 3, left: -(k as i32) * 5, w, h, channels, mask: None });
     }
     v
 }
@@ -206,11 +218,11 @@ fn duplicate_layers_and_gray_layer() {
     let (w, h) = (200, 30);
     let mut ls = layers(w, h, true);
     // A copy of the first layer, moved; and a gray layer (equal color planes).
-    let mut copy = Layer { top: 7, left: 2, w, h, channels: ls[0].channels.clone() };
+    let mut copy = Layer { top: 7, left: 2, w, h, channels: ls[0].channels.clone(), mask: None };
     copy.channels.swap(1, 2);
     ls.push(copy);
     let g = image(w, h, 99);
-    ls.push(Layer { top: 0, left: 0, w, h, channels: vec![(0, g.clone()), (1, g.clone()), (2, g)] });
+    ls.push(Layer { top: 0, left: 0, w, h, channels: vec![(0, g.clone()), (1, g.clone()), (2, g)], mask: None });
     let file = psd(w, h, &ls, packbits::NO_TILES, false, &[]);
     check(&file);
     // Copies cost next to nothing.
@@ -223,7 +235,7 @@ fn duplicate_layers_and_gray_layer() {
 fn same_bytes_other_size_is_no_copy() {
     // Raw channels with equal bytes but different sizes (100 x 2 and 50 x 4).
     let data = image(100, 2, 5);
-    let l = |w, h| Layer { top: 0, left: 0, w, h, channels: vec![(0, data.clone()), (1, data.clone()), (2, data.clone())] };
+    let l = |w, h| Layer { top: 0, left: 0, w, h, channels: vec![(0, data.clone()), (1, data.clone()), (2, data.clone())], mask: None };
     check(&psd(100, 4, &[l(100, 2), l(50, 4)], packbits::NO_TILES, false, &[0, 1]));
 }
 
@@ -233,8 +245,21 @@ fn layer_outside_the_canvas() {
     let (w, h) = (120, 20);
     let mut ls = layers(w, h, true);
     for (k, (top, left)) in [(0, 500), (300, 0), (0, -400)].into_iter().enumerate() {
-        ls.push(Layer { top, left, w: 50, h: 10, channels: ls[k % 2].channels.iter().map(|(id, d)| (*id, d[..500].to_vec())).collect() });
+        ls.push(Layer { top, left, w: 50, h: 10, channels: ls[k % 2].channels.iter().map(|(id, d)| (*id, d[..500].to_vec())).collect(), mask: None });
     }
     // A composite the renderer predicts: the hint is used.
+    check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
+}
+
+#[test]
+fn masks_anywhere() {
+    // User masks left of, right of, inside and around their layers.
+    let (w, h) = (100, 16);
+    let mut ls = layers(w, h, true);
+    for (k, (mtop, mleft, mw, mh, def)) in [(0, -300, 40, 8, 0), (2, 500, 30, 4, 255), (3, 10, 20, 6, 0), (-5, -5, 200, 40, 255)].into_iter().enumerate() {
+        let mut channels = ls[k % 2].channels.clone();
+        channels.push((-2, image(mw, mh, 50 + k as u32)));
+        ls.push(Layer { top: k as i32, left: 3, w, h, channels, mask: Some((mtop, mleft, mw, mh, def)) });
+    }
     check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
 }
