@@ -203,7 +203,9 @@ const R_COLS: u64 = 2;
 #[derive(Default)]
 pub struct ColEnc {
     pub tag: Vec<u8>,
-    pub ints: Vec<i64>,
+    /// The integers (zigzag LEB128, as they are): smaller than i64 until coded.
+    pub ints: Vec<u8>,
+    pub nints: usize,
     /// The integers against the one before each in its record (the previous column's,
     /// unscaled), coded as they come.
     hres: Vec<u8>,
@@ -283,7 +285,8 @@ impl GroupEnc {
                     let f = f64::from_bits(bits) as f32;
                     if let Some((m, e)) = decimal(bits) {
                         c.tag.push(T_DEC + e);
-                        c.ints.push(m);
+                        put_sv(&mut c.ints, m);
+                        c.nints += 1;
                         c.iexp.push(e);
                         put_sv(&mut c.hres, m.wrapping_sub(last));
                         last = m;
@@ -298,7 +301,8 @@ impl GroupEnc {
                 1..=9 => {
                     let v = int_value(st, b);
                     c.tag.push(if canon_st(v, fmt4) == st { T_INT } else { T_ODD_INT + st as u8 });
-                    c.ints.push(v);
+                    put_sv(&mut c.ints, v);
+                    c.nints += 1;
                     c.iexp.push(0);
                     put_sv(&mut c.hres, v.wrapping_sub(last));
                     last = v;
@@ -347,7 +351,7 @@ impl GroupEnc {
                 h[2],
                 h[3],
                 h[4],
-                c.ints.len() * 8,
+                c.nints * 8,
                 c.real.len(),
                 c.len.len(),
                 c.bytes.len()
@@ -366,12 +370,16 @@ impl GroupEnc {
         rec.extend_from_slice(&self.rec);
         rowid.extend_from_slice(&self.rowid);
         rawpay.extend_from_slice(&self.rawpay);
+        let mut vals: Vec<i64> = Vec::new();
         for c in &self.cols {
+            vals.clear();
+            let mut r = Rd::new(&c.ints);
+            vals.extend((0..c.nints).map(|_| r.sv().unwrap()));
             // Scale to the largest exponent if nothing overflows.
             let top = c.iexp.iter().copied().max().unwrap_or(0);
             let scaled: Option<Vec<i64>> = (top > 0)
                 .then(|| {
-                    c.ints
+                    vals
                         .iter()
                         .zip(&c.iexp)
                         .map(|(&v, &e)| P10I.get((top - e) as usize).and_then(|&p| v.checked_mul(p)))
@@ -390,7 +398,7 @@ impl GroupEnc {
                 }
                 (0..2).map(|m| (cost[m], m)).min().unwrap()
             };
-            let mut best = cost(&c.ints);
+            let mut best = cost(&vals);
             let mut scaled = scaled;
             if let Some(sc) = &scaled {
                 let k = cost(sc);
@@ -405,7 +413,7 @@ impl GroupEnc {
                 scaled = None;
             }
             let mode = best.1;
-            let ints = scaled.as_deref().unwrap_or(&c.ints);
+            let ints = scaled.as_deref().unwrap_or(&vals);
             tmp.clear();
             if mode == 2 {
                 tmp.extend_from_slice(&c.hres);

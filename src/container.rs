@@ -73,6 +73,7 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
         transform::encode(src)
     };
     st.transform_s += t.elapsed().as_secs_f64();
+    crate::mem::mark("encode");
     let Some(enc) = enc else {
         st.whole = true;
         return whole(src, opt.level);
@@ -114,11 +115,13 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
         }
     }
     st.zstd_s += t.elapsed().as_secs_f64();
+    crate::mem::mark("zstd");
     if opt.verify {
         // zstd is trusted: rebuild the file from the streams.
         let t = std::time::Instant::now();
-        let ok = matches!(transform::decode(&g, src.len(), &enc.streams), Ok(d) if d == src);
+        let ok = transform::verify(&g, src, &enc.streams);
         st.verify_s += t.elapsed().as_secs_f64();
+        crate::mem::mark("verify");
         if !ok {
             st.whole = true;
             return whole(src, opt.level);
@@ -173,6 +176,7 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
                     _ => return Err(corrupt()),
                 });
             }
+            crate::mem::mark("dec: streams");
             transform::decode(&g, len, &streams)?
         }
         _ => return Err(corrupt()),

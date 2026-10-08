@@ -69,11 +69,11 @@ fn find(parent: &mut [u32], mut x: u32) -> u32 {
 
 /// The records of a group, as the encoder collects them.
 #[derive(Default)]
-struct GroupRecs {
+struct GroupRecs<'a> {
     table: bool,
     first: usize,
-    /// (offset, length, in the arena rather than the file)
-    recs: Vec<(usize, usize, bool)>,
+    /// Payloads: on their page, or put together from overflow pages.
+    pays: Vec<&'a [u8]>,
     rowids: Vec<i64>,
 }
 
@@ -142,6 +142,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
             kind[p] = K_OVF;
         }
     }
+    crate::mem::mark("enc: classify");
 
     // Group b-tree pages into trees by their child pointers.
     let mut parent: Vec<u32> = (0..=n as u32).collect();
@@ -164,11 +165,13 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
     // A group per tree and kind of record (table rows, index entries).
     let mut gid_t = vec![u32::MAX; n + 1];
     let mut gid_i = vec![u32::MAX; n + 1];
+    // Payloads with overflow, put together: (group, record, start, length) in the arena.
+    let mut arena = Vec::new();
+    let mut gathered: Vec<(u32, u32, usize, usize)> = Vec::new();
     let mut groups: Vec<GroupRecs> = Vec::new();
 
     let mut s: Vec<Vec<u8>> = (0..NSTREAMS).map(|_| Vec::new()).collect();
     s[S_KIND].reserve(n);
-    let mut arena = Vec::new();
     let (mut prev_child, mut prev_ikey, mut last_ovf) = (0i64, 0i64, 0i64);
     for p in 1..=n {
         let k = kind[p];
@@ -184,6 +187,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         let h = hdr_off(p);
         let base = (p - 1) * ps;
         let mut grp = None;
+        let mut gi = 0;
         if k != 5 {
             let root = find(&mut parent, p as u32) as usize;
             let gid = if k == 13 { &mut gid_t[root] } else { &mut gid_i[root] };
@@ -192,6 +196,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 groups.push(GroupRecs { table: k == 13, first: p, ..Default::default() });
             }
             put_uv(&mut s[S_GRP], *gid as u64);
+            gi = *gid;
             grp = Some(&mut groups[*gid as usize]);
         }
         parse_page(&g, pg, h, &mut cells, &mut iv);
@@ -216,7 +221,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 grp.rowids.push(c.key as i64);
             }
             if c.local as u64 == c.plen {
-                grp.recs.push((base + c.pay, c.local, false));
+                grp.pays.push(&file[base + c.pay..base + c.pay + c.local]);
                 continue;
             }
             // Put the payload together, code the chain.
@@ -234,7 +239,8 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 left -= take;
                 q = be32(op, 0) as usize;
             }
-            grp.recs.push((start, c.plen as usize, true));
+            gathered.push((gi, grp.pays.len() as u32, start, c.plen as usize));
+            grp.pays.push(&[]);
         }
         if k == 2 || k == 5 {
             let rc = be32(pg, h + 8) as i64;
@@ -254,19 +260,14 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         s[S_FILL].extend_from_slice(&pg[cur..]);
     }
     s[S_RAW].extend_from_slice(&file[n * ps..]);
+    crate::mem::mark("enc: pages");
 
-    let pays: Vec<Vec<&[u8]>> = groups
-        .iter()
-        .map(|gr| {
-            gr.recs
-                .iter()
-                .map(|&(o, l, a)| if a { &arena[o..o + l] } else { &file[o..o + l] })
-                .collect()
-        })
-        .collect();
-    for gr in &mut groups {
-        gr.recs = Vec::new();
+    for &(gi, j, start, len) in &gathered {
+        groups[gi as usize].pays[j as usize] = &arena[start..start + len];
     }
+    drop(gathered);
+    let pays: Vec<&[&[u8]]> = groups.iter().map(|gr| &gr.pays[..]).collect();
+    crate::mem::mark("enc: payloads");
 
     // Indexes predicted from their tables: (table group, columns) per index group.
     let mut refs: Vec<Option<(usize, index::Key)>> = (0..groups.len()).map(|_| None).collect();
@@ -275,7 +276,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         let sg = gid_t[schema_root];
         if sg != u32::MAX {
             let enc = u32::from_be_bytes(file[56..60].try_into().unwrap());
-            for (ir, tr) in index::schema_indexes(&pays[sg as usize], enc) {
+            for (ir, tr) in index::schema_indexes(pays[sg as usize], enc) {
                 let (ir, tr) = (ir as usize, tr as usize);
                 if ir > n || tr > n || !is_btree(kind[ir]) || !is_btree(kind[tr]) {
                     continue;
@@ -288,7 +289,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 let t = &groups[gt as usize];
                 let row_of = row_lookup(&t.rowids);
                 if let Some(key) =
-                    index::discover_key(&pays[gi as usize], &pays[gt as usize], &t.rowids, &row_of)
+                    index::discover_key(pays[gi as usize], pays[gt as usize], &t.rowids, &row_of)
                 {
                     refs[gi as usize] = Some((gt as usize, key));
                 }
@@ -296,6 +297,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         }
     }
 
+    crate::mem::mark("enc: index keys");
     // Code the groups.
     let mut cols = Vec::new();
     let mut tmp = Vec::new();
@@ -323,14 +325,14 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         if let Some((t, key)) = &refs[i] {
             let map = &key.cols;
             let tg = &groups[*t];
-            let order = index::order(&pays[*t][..], &tg.rowids, key);
+            let order = index::order(pays[*t], &tg.rowids, key);
             let mut rank = vec![0u32; order.perm.len()];
             for (k, &r) in order.perm.iter().enumerate() {
                 rank[r as usize] = k as u32;
             }
             let row_of = row_lookup(&tg.rowids);
             let m = map.len();
-            for &e in &pays[i] {
+            for &e in pays[i] {
                 // The entry's rowid, its row, and the entry the row predicts.
                 let r = crate::record::parse(e, &mut cols)
                     .then(|| cols.last().copied())
@@ -350,7 +352,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 ge.record(e, g.fmt4, &mut cols);
             }
         } else {
-            for &e in &pays[i] {
+            for &e in pays[i] {
                 ge.record(e, g.fmt4, &mut cols);
             }
         }
@@ -366,6 +368,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         }
         ge.finish(&mut s[S_DIR], &mut gs, &mut tmp);
     }
+    crate::mem::mark("enc: groups");
     for (j, v) in gs.into_iter().enumerate() {
         s[S_REC + j] = v;
     }
@@ -389,8 +392,81 @@ fn row_lookup(rowids: &[i64]) -> impl Fn(i64) -> Option<usize> + '_ {
     }
 }
 
+/// Where rebuilt pages go: every page (and the tail) exactly once, in no particular order.
+trait Sink {
+    fn put(&mut self, at: usize, b: &[u8]);
+    /// An all-zero page.
+    fn zeros(&mut self, at: usize, n: usize);
+}
+
+/// Into the output (zeroed when allocated).
+struct Writer(Vec<u8>);
+
+impl Sink for Writer {
+    #[inline]
+    fn put(&mut self, at: usize, b: &[u8]) {
+        self.0[at..at + b.len()].copy_from_slice(b);
+    }
+    fn zeros(&mut self, _: usize, _: usize) {}
+}
+
+/// Compares with the original instead, and checks that every page comes exactly once.
+struct Checker<'a> {
+    src: &'a [u8],
+    psize: usize,
+    seen: Vec<bool>,
+    ok: bool,
+}
+
+impl Checker<'_> {
+    #[inline]
+    fn see(&mut self, at: usize, n: usize) -> Option<&[u8]> {
+        let p = at / self.psize;
+        if at % self.psize != 0 || self.seen.get(p) != Some(&false) {
+            self.ok = false;
+            return None;
+        }
+        self.seen[p] = true;
+        let s = self.src.get(at..at + n);
+        if s.is_none() {
+            self.ok = false;
+        }
+        s
+    }
+}
+
+impl Sink for Checker<'_> {
+    #[inline]
+    fn put(&mut self, at: usize, b: &[u8]) {
+        if self.see(at, b.len()).is_some_and(|s| s != b) {
+            self.ok = false;
+        }
+    }
+    fn zeros(&mut self, at: usize, n: usize) {
+        if self.see(at, n).is_some_and(|s| s.iter().any(|&x| x != 0)) {
+            self.ok = false;
+        }
+    }
+}
+
 /// Rebuilds the file from its streams. `len` is the original length.
 pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
+    let mut w = Writer(vec![0u8; len]);
+    rebuild(g, len, s, &mut w)?;
+    Ok(w.0)
+}
+
+/// Whether the streams rebuild `src` exactly, without allocating a copy of it.
+pub fn verify(g: &Geom, src: &[u8], s: &[Vec<u8>]) -> bool {
+    let np = g.npages;
+    let mut c = Checker { src, psize: g.psize, seen: vec![false; np + 1], ok: true };
+    if src.len() == np * g.psize {
+        c.seen[np] = true;
+    }
+    rebuild(g, src.len(), s, &mut c).is_ok() && c.ok && c.seen.iter().all(|&x| x)
+}
+
+fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S) -> Result<()> {
     let (ps, np) = (g.psize, g.npages);
     if s.len() != NSTREAMS || np == 0 || np.checked_mul(ps) != Some(len - len % ps) {
         return Err(corrupt());
@@ -447,8 +523,10 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
         })
         .collect();
     let mut scratch = Vec::new();
+    crate::mem::mark("dec: tables, index orders");
 
-    let mut out = vec![0u8; len];
+    let mut pg = vec![0u8; ps];
+    let mut op = vec![0u8; ps];
     let [kind, grp, phdr, cptr, child, ikey, ovf, fill, raw, ..] = &mut rd[..] else {
         unreachable!()
     };
@@ -464,10 +542,14 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
         let base = (p - 1) * ps;
         match k {
             K_RAW => {
-                out[base..base + ps].copy_from_slice(raw.bytes(ps)?);
+                out.put(base, raw.bytes(ps)?);
                 continue;
             }
-            K_ZERO | K_OVF => continue,
+            K_ZERO => {
+                out.zeros(base, ps);
+                continue;
+            }
+            K_OVF => continue,
             2 | 5 | 10 | 13 => {}
             _ => return Err(corrupt()),
         }
@@ -494,7 +576,6 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
             return Err(corrupt());
         }
         {
-            let pg = &mut out[base..base + ps];
             pg[h] = k;
             pg[h + 1..h + 3].copy_from_slice(&(fb as u16).to_be_bytes());
             pg[h + 3..h + 5].copy_from_slice(&(nc as u16).to_be_bytes());
@@ -565,9 +646,8 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
             if off < ptr_end || off + size > u {
                 return Err(corrupt());
             }
-            out[base + off..base + off + size].copy_from_slice(&cell);
-            out[base + h + hl + 2 * i..base + h + hl + 2 * i + 2]
-                .copy_from_slice(&(off as u16).to_be_bytes());
+            pg[off..off + size].copy_from_slice(&cell);
+            pg[h + hl + 2 * i..h + hl + 2 * i + 2].copy_from_slice(&(off as u16).to_be_bytes());
             iv.push((off, off + size));
             minoff = minoff.min(off);
             // Overflow pages.
@@ -576,14 +656,13 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
                 let ob = (q - 1) * ps;
                 let next = chain.get(j + 1).copied().unwrap_or(0) as u32;
                 let take = (pay.len() - at).min(u - 4);
-                let op = &mut out[ob..ob + ps];
                 op[..4].copy_from_slice(&next.to_be_bytes());
                 op[4..4 + take].copy_from_slice(&pay[at..at + take]);
                 op[4 + take..].copy_from_slice(fill.bytes(ps - 4 - take)?);
+                out.put(ob, &op);
                 at += take;
             }
         }
-        let pg = &mut out[base..base + ps];
         if interior {
             let c = prev_child + 1 + child.sv()?;
             if !(0..=u32::MAX as i64).contains(&c) {
@@ -607,8 +686,12 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
             at = b;
         }
         pg[at..].copy_from_slice(fill.bytes(ps - at)?);
+        out.put(base, &pg);
     }
+    crate::mem::mark("dec: pages");
     let tail = len - np * ps;
-    out[np * ps..].copy_from_slice(raw.bytes(tail)?);
-    Ok(out)
+    if tail > 0 {
+        out.put(np * ps, raw.bytes(tail)?);
+    }
+    Ok(())
 }

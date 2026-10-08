@@ -1,5 +1,11 @@
 use sqlite_recons::container::{Options, Stats, compress_with};
 use sqlite_recons::transform::{NSTREAMS, STREAM_NAMES};
+use sqlite_recons::mem::{Counting, PEAK, peak_reset};
+
+#[global_allocator]
+static ALLOC: Counting = Counting;
+use std::sync::atomic::Ordering::Relaxed;
+
 #[repr(C)]
 struct Timespec {
     sec: i64,
@@ -23,7 +29,7 @@ fn cpu() -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: sqlr c IN OUT | sqlr d IN OUT\n       sqlr bench [-n ITERS] [-l LEVEL] [-b LEVEL] [-x] [-L] [-c|-d] [-v] FILE...\n       sqlr fuzz [-n N] [-s SEED] FILE..."
+        "usage: sqlr c [-l LEVEL] [-b LEVEL] [-x] [-L] IN OUT | sqlr d IN OUT\n       sqlr bench [-n ITERS] [-l LEVEL] [-b LEVEL] [-x] [-L] [-c|-d] [-v] FILE...\n       sqlr fuzz [-n N] [-s SEED] FILE..."
     );
     std::process::exit(2);
 }
@@ -31,9 +37,21 @@ fn usage() -> ! {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("c") if args.len() == 3 => {
-            let src = std::fs::read(&args[1]).expect("read");
-            std::fs::write(&args[2], sqlite_recons::compress(&src)).expect("write");
+        Some("c") if args.len() >= 3 => {
+            let mut opt = Options::default();
+            let mut it = args[1..args.len() - 2].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "-l" => opt.level = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+                    "-b" => opt.level_bytes = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+                    "-x" => opt.verify = false,
+                    "-L" => opt.ldm = false,
+                    _ => usage(),
+                }
+            }
+            let n = args.len();
+            let src = std::fs::read(&args[n - 2]).expect("read");
+            std::fs::write(&args[n - 1], compress_with(&src, &opt, &mut Stats::default())).expect("write");
         }
         Some("d") if args.len() == 3 => {
             let src = std::fs::read(&args[1]).expect("read");
@@ -56,6 +74,7 @@ fn bench(args: &[String]) {
     let mut files = vec![];
     let mut verbose = false;
     let mut opt = Options::default();
+    let mut mem = false;
     // Repeat only one side (for profiling): 'c' or 'd'.
     let mut only = ' ';
     let mut it = args.iter();
@@ -67,6 +86,7 @@ fn bench(args: &[String]) {
                 opt.level_bytes = opt.level;
             }
             "-x" => opt.verify = false,
+            "-m" => mem = true,
             "-b" => opt.level_bytes = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-L" => opt.ldm = false,
             "-c" => only = 'c',
@@ -78,6 +98,7 @@ fn bench(args: &[String]) {
     let (mut tin, mut tout, mut tc, mut td) = (0f64, 0f64, 0f64, 0f64);
     let mut total = Stats::default();
     let mut fails = 0;
+    let (mut mpeak_c, mut mpeak_d) = (0f64, 0f64);
     let mut wholes = 0;
     for f in &files {
         let src = std::fs::read(f).expect("read");
@@ -97,6 +118,20 @@ fn bench(args: &[String]) {
             let d = sqlite_recons::decompress(&c);
             bd = bd.min(cpu() - t);
             ok &= matches!(d, Ok(ref d) if *d == src);
+        }
+        if mem {
+            let base = peak_reset();
+            let c2 = compress_with(&src, &opt, &mut Stats::default());
+            let pc = PEAK.load(Relaxed) - base - c2.len();
+            drop(c2);
+            let base = peak_reset();
+            let d2 = sqlite_recons::decompress(&c);
+            let pd = PEAK.load(Relaxed) - base - d2.as_ref().map_or(0, |d| d.len());
+            drop(d2);
+            let n = src.len() as f64;
+            println!("mem {:>11} c {:>11} ({:5.2}x) d {:>11} ({:5.2}x) {f}", src.len(), pc, pc as f64 / n, pd, pd as f64 / n);
+            mpeak_c = mpeak_c.max(pc as f64 / n);
+            mpeak_d = mpeak_d.max(pd as f64 / n);
         }
         if !ok {
             fails += 1;
@@ -125,6 +160,9 @@ fn bench(args: &[String]) {
                 f
             );
         }
+    }
+    if mem {
+        println!("heap beyond input and output, worst ratio: compress {mpeak_c:.2}x, decompress {mpeak_d:.2}x");
     }
     println!("streams (raw -> coded):");
     for i in 0..NSTREAMS {

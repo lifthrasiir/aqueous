@@ -9,6 +9,10 @@ publish = false
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+[features]
+# Heap use at phase marks, to stderr.
+memprof = []
+
 [profile.release]
 debug = 1
 lto = "fat"

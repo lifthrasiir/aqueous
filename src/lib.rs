@@ -9,6 +9,7 @@
 
 pub mod container;
 pub mod index;
+pub mod mem;
 pub mod page;
 pub mod record;
 pub mod transform;
