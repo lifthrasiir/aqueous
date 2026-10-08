@@ -6,13 +6,14 @@
 //!   u8 mode, varint(raw length)
 //!   mode 0 (whole): varint(coded length) zstd(block)
 //!   mode 1 (coded): per stream (block::NSTREAMS):
-//!                     varint(raw length) [u8(0 stored | 1 zstd) varint(coded length) data]
+//!                     varint(raw length) [u8(0 stored | 1 zstd | 2 rANS) varint(coded length) data]
 //! ```
 //!
 //! Blocks end at a line end where there is one; coded blocks carry state over (previous
 //! values, templates), so they are decoded in order.
 
 use crate::block::{self, NSTREAMS};
+use crate::ans;
 use crate::varint::{Rd, put_uv};
 use crate::{Error, Result, corrupt};
 use std::io::Write;
@@ -22,6 +23,23 @@ const MAGIC: &[u8; 4] = b"OBJR";
 const VERSION: u8 = 1;
 /// Largest block the decoder accepts (bounds its memory).
 const MAX_BLOCK: usize = 64 << 20;
+
+/// How a stream is stored.
+const M_STORED: u8 = 0;
+const M_ZSTD: u8 = 1;
+/// rANS coded (`ans`).
+const M_ANS: u8 = 2;
+
+/// Streams of LEB128 values, which may be rANS coded.
+const AC_STREAMS: [bool; NSTREAMS] = {
+    let mut t = [false; NSTREAMS];
+    let mut i = 0;
+    while i < NSTREAMS {
+        t[i] = i == block::S_SCALE || (i >= block::S_FESC && i < block::S_FESC + 3) || (i >= block::S_DUP && i < block::S_DUP + 3) || i >= block::S_VAL;
+        i += 1;
+    }
+    t
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -47,6 +65,8 @@ pub struct Stats {
     pub coded: [u64; NSTREAMS],
     /// Blocks stored whole, and their coded size.
     pub whole: u64,
+    /// Blocks rANS coded, per stream.
+    pub rc: [u64; NSTREAMS],
     pub whole_coded: u64,
     pub transform_s: f64,
     pub zstd_s: f64,
@@ -77,6 +97,9 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
     let mut streams: [Vec<u8>; NSTREAMS] = Default::default();
     let mut check = Vec::new();
     let mut z = Vec::new();
+    let mut ac = Vec::new();
+    // Per stream: the way that won clearly on the last block (M_STORED: none).
+    let mut winner = [M_STORED; NSTREAMS];
     let mut cz = zstd::bulk::Compressor::new(opt.level).expect("zstd");
     let mut p = 0;
     let mut nblock = 0;
@@ -125,12 +148,33 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
                 if s.is_empty() {
                     continue;
                 }
+                // Both zstd and rANS for streams that may take either, unless one has won
+                // clearly on the last block (tried again every few blocks).
+                let recheck = nblock % 8 == 0;
+                let try_ans = AC_STREAMS[i] && s.len() > 64 && (winner[i] != M_ZSTD || recheck);
+                let try_zstd = s.len() > 64 && (winner[i] != M_ANS || recheck || !try_ans);
                 z.clear();
-                if s.len() > 64 {
+                if try_zstd {
                     z.reserve(zstd::zstd_safe::compress_bound(s.len()));
                     cz.compress_to_buffer(s, &mut z).expect("zstd");
                 }
-                let (m, d) = if !z.is_empty() && z.len() < s.len() { (1, &z) } else { (0, s) };
+                let (mut m, mut d) = if !z.is_empty() && z.len() < s.len() { (M_ZSTD, &z) } else { (M_STORED, s) };
+                let mut margin = M_STORED;
+                if try_ans {
+                    // rANS coded, if smaller (and, verifying, if it decodes back).
+                    ac.clear();
+                    let ok = ans::encode(s, &mut ac).is_some()
+                        && ac.len() < d.len()
+                        && (!opt.verify || ans::decode(&ac, s.len(), &mut check) && check == *s);
+                    if ok {
+                        margin = if !try_zstd || ac.len() * 100 < d.len() * 97 { M_ANS } else { M_STORED };
+                        (m, d) = (M_ANS, &ac);
+                        st.rc[i] += 1;
+                    } else if m == M_ZSTD && ac.len() * 100 > z.len() * 110 {
+                        margin = M_ZSTD;
+                    }
+                }
+                winner[i] = margin;
                 out.push(m);
                 put_uv(&mut out, d.len() as u64);
                 out.extend_from_slice(d);
@@ -188,7 +232,7 @@ pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
                 }
             }
             1 => {
-                for s in streams.iter_mut() {
+                for (i, s) in streams.iter_mut().enumerate() {
                     s.clear();
                     let raw = r.uv() as usize;
                     if raw == 0 {
@@ -201,8 +245,13 @@ pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
                     }
                     let d = r.bytes(c).ok_or_else(corrupt)?;
                     match m {
-                        0 if c == raw => s.extend_from_slice(d),
-                        1 => {
+                        M_STORED if c == raw => s.extend_from_slice(d),
+                        M_ANS if AC_STREAMS[i] => {
+                            if !ans::decode(d, raw, s) {
+                                return Err(corrupt());
+                            }
+                        }
+                        M_ZSTD => {
                             s.reserve(raw);
                             dz.decompress_to_buffer(d, s).map_err(|_| corrupt())?;
                             if s.len() != raw {

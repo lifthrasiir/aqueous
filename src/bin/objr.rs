@@ -149,6 +149,7 @@ fn bench(args: &[String]) {
         for i in 0..NSTREAMS {
             total.raw[i] += st.raw[i];
             total.coded[i] += st.coded[i];
+            total.rc[i] += st.rc[i];
         }
         total.whole += st.whole;
         total.whole_coded += st.whole_coded;
@@ -179,11 +180,12 @@ fn bench(args: &[String]) {
     for i in 0..NSTREAMS {
         if total.raw[i] > 0 {
             println!(
-                "  {:>5} {:>12} -> {:>11} ({:5.1}%)",
+                "  {:>7} {:>12} -> {:>11} ({:5.1}%){}",
                 STREAM_NAMES[i],
                 total.raw[i],
                 total.coded[i],
-                100.0 * total.coded[i] as f64 / tout
+                100.0 * total.coded[i] as f64 / tout,
+                if total.rc[i] > 0 { format!(" rc in {} blocks", total.rc[i]) } else { String::new() }
             );
         }
     }

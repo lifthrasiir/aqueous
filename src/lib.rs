@@ -7,6 +7,7 @@
 //! assert_eq!(obj_recons::decompress(&packed).unwrap(), obj);
 //! ```
 
+pub mod ans;
 pub mod block;
 pub mod container;
 pub mod dec;
