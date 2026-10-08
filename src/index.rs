@@ -294,13 +294,13 @@ pub fn discover_key(
 ) -> Option<Key> {
     let mut ec = Vec::new();
     let mut tc = Vec::new();
-    // Candidates per indexed column: table columns, then the rowid.
-    let mut cand: Vec<Vec<bool>> = Vec::new();
-    let mut seen = 0;
-    for e in entries {
-        if seen == 32 {
-            break;
-        }
+    // Matches per indexed column: table columns, and the rowid; over entries spread across
+    // the index (its first entries have the smallest keys, which coincide more often).
+    let mut hits: Vec<Vec<u32>> = Vec::new();
+    let mut rowid_hits: Vec<u32> = Vec::new();
+    let mut seen = 0u32;
+    let step = (entries.len() / 64).max(1);
+    for e in entries.iter().step_by(step) {
         if !parse(e, &mut ec) || ec.is_empty() {
             continue;
         }
@@ -315,35 +315,38 @@ pub fn discover_key(
         }
         let k = ec.len() - 1;
         if seen == 0 {
-            cand = vec![vec![true; tc.len() + 1]; k];
-        } else if cand.len() != k {
+            hits = vec![Vec::new(); k];
+            rowid_hits = vec![0; k];
+        } else if hits.len() != k {
             continue;
         }
         seen += 1;
-        for (j, cj) in cand.iter_mut().enumerate() {
-            let (est, eoff) = ec[j];
-            let ev = &e[eoff as usize..eoff as usize + st_size(est)];
-            let nt = cj.len() - 1;
-            for (c, ok) in cj.iter_mut().enumerate() {
-                if *ok {
-                    *ok = if c == nt {
-                        is_int(est) && int_value(est, ev) == rowids[r]
-                    } else {
-                        tc.get(c).is_some_and(|&(st, off)| {
-                            st == est && &rows[r][off as usize..off as usize + st_size(st)] == ev
-                        })
-                    };
+        for (j, hj) in hits.iter_mut().enumerate() {
+            let (est, ev) = col(e, &ec, j);
+            if is_int(est) && int_value(est, ev) == rowids[r] {
+                rowid_hits[j] += 1;
+            }
+            if hj.len() < tc.len() {
+                hj.resize(tc.len(), 0);
+            }
+            for (c, &(st, off)) in tc.iter().enumerate() {
+                if st == est && &rows[r][off as usize..off as usize + st_size(st)] == ev {
+                    hj[c] += 1;
                 }
             }
         }
     }
-    if seen == 0 {
-        return None;
-    }
-    let cols = cand
+    let cols = hits
         .iter()
-        .map(|cj| {
-            cj.iter().position(|&b| b).map(|c| if c == cj.len() - 1 { ROWID } else { c as u32 })
+        .zip(&rowid_hits)
+        .map(|(hj, &rh)| {
+            let (best, c) = hj
+                .iter()
+                .enumerate()
+                .map(|(c, &h)| (h, c as u32))
+                .chain(std::iter::once((rh, ROWID)))
+                .max_by_key(|&(h, c)| (h, std::cmp::Reverse(c)))?;
+            (best * 2 > seen).then_some(c)
         })
         .collect::<Option<Vec<u32>>>()?;
     let flags = discover_flags(entries, cols.len());
