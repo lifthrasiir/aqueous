@@ -226,3 +226,15 @@ fn same_bytes_other_size_is_no_copy() {
     let l = |w, h| Layer { top: 0, left: 0, w, h, channels: vec![(0, data.clone()), (1, data.clone()), (2, data.clone())] };
     check(&psd(100, 4, &[l(100, 2), l(50, 4)], packbits::NO_TILES, false, &[0, 1]));
 }
+
+#[test]
+fn layer_outside_the_canvas() {
+    // Layers right of, below and left of the canvas; the composite is rendered as hint.
+    let (w, h) = (120, 20);
+    let mut ls = layers(w, h, true);
+    for (k, (top, left)) in [(0, 500), (300, 0), (0, -400)].into_iter().enumerate() {
+        ls.push(Layer { top, left, w: 50, h: 10, channels: ls[k % 2].channels.iter().map(|(id, d)| (*id, d[..500].to_vec())).collect() });
+    }
+    // A composite the renderer predicts: the hint is used.
+    check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
+}

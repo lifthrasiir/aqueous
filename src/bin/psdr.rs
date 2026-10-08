@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 fn usage() -> ! {
-    eprintln!("usage: psdr c IN OUT | psdr d IN OUT | psdr bench [-n ITERS] [-v] FILE...");
+    eprintln!("usage: psdr c IN OUT | psdr d IN OUT | psdr bench [-n ITERS] [-v] [-c|-d] FILE...");
     std::process::exit(2);
 }
 
@@ -31,11 +31,15 @@ fn bench(args: &[String]) {
     let mut iters = 1;
     let mut files = vec![];
     let mut verbose = false;
+    // Repeat only one side (for profiling): 'c' or 'd'.
+    let mut only = ' ';
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-n" => iters = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-v" => verbose = true,
+            "-c" => only = 'c',
+            "-d" => only = 'd',
             _ => files.push(a.clone()),
         }
     }
@@ -46,14 +50,14 @@ fn bench(args: &[String]) {
         let src = std::fs::read(f).expect("read");
         let mut c = vec![];
         let mut bc = f64::MAX;
-        for _ in 0..iters {
+        for _ in 0..if only == 'd' { 1 } else { iters } {
             let t = Instant::now();
             c = psd_recons::compress(&src);
             bc = bc.min(t.elapsed().as_secs_f64());
         }
         let mut bd = f64::MAX;
         let mut ok = true;
-        for _ in 0..iters {
+        for _ in 0..if only == 'c' { 1 } else { iters } {
             let t = Instant::now();
             let d = psd_recons::decompress(&c);
             bd = bd.min(t.elapsed().as_secs_f64());
@@ -83,6 +87,11 @@ fn bench(args: &[String]) {
                 if is_stored { "\tSTORED" } else { "" }
             );
         }
+    }
+    if std::env::var_os("PSDR_STATS").is_some() {
+        let t = psd_recons::container::DEC_TIMES.with(|c| c.get());
+        let k = iters as f64;
+        eprintln!("decompress per iteration: known rows {:.3}s render {:.3}s model {:.3}s rows out {:.3}s", t[0] / k, t[1] / k, t[2] / k, t[3] / k);
     }
     println!(
         "{} files, {:.0} -> {:.0} bytes, ratio {:.4}, compress {:.1} MB/s, decompress {:.1} MB/s, stored {stored}, failures {fails}",

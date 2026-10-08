@@ -22,27 +22,37 @@ pub enum Encoder {
 /// No tile boundary within any row.
 pub const NO_TILES: Encoder = Encoder::Photoshop { phase: usize::MAX, period: usize::MAX };
 
-/// Encodes one chunk (at most 128 bytes for Photoshop) the way Photoshop does.
+/// How many bytes of `p` equal `v` from the start, compared 8 at a time.
+#[inline(always)]
+pub fn count_equal(p: &[u8], v: u8) -> usize {
+    let pat = u64::from_ne_bytes([v; 8]);
+    let mut n = 0;
+    while n + 8 <= p.len() {
+        let x = u64::from_ne_bytes(p[n..n + 8].try_into().unwrap()) ^ pat;
+        if x != 0 {
+            return n + (if cfg!(target_endian = "little") { x.trailing_zeros() } else { x.leading_zeros() } / 8) as usize;
+        }
+        n += 8;
+    }
+    n + p[n..].iter().take_while(|&&b| b == v).count()
+}
+
+/// Encodes one chunk (at most 128 bytes) the way Photoshop does.
+#[inline]
 fn encode_chunk(row: &[u8], out: &mut Vec<u8>) {
     let n = row.len();
-    let run_at = |j: usize| {
-        let mut k = j + 1;
-        while k < n && row[k] == row[j] && k - j < 128 {
-            k += 1;
-        }
-        k - j
-    };
     let mut i = 0;
     while i < n {
-        let r = run_at(i);
+        let v = row[i];
+        let r = 1 + count_equal(&row[i + 1..], v);
         if r >= 2 {
-            out.push((1 - r as i32) as u8);
-            out.push(row[i]);
+            out.extend_from_slice(&[(1 - r as i32) as u8, v]);
             i += r;
         } else {
+            // A literal, up to a run of 3 (2 equal bytes do not end it).
             let s = i;
             i += 1;
-            while i < n && i - s < 128 && run_at(i) < 3 {
+            while i < n && !(i + 2 < n && row[i] == row[i + 1] && row[i] == row[i + 2]) {
                 i += 1;
             }
             out.push((i - s - 1) as u8);
@@ -53,27 +63,28 @@ fn encode_chunk(row: &[u8], out: &mut Vec<u8>) {
 
 fn encode_greedy(row: &[u8], min_run: usize, split_rest: bool, out: &mut Vec<u8>) {
     let n = row.len();
-    let cap = if split_rest { usize::MAX } else { 128 };
-    let run_at = |j: usize| row[j..].iter().take(cap).take_while(|&&b| b == row[j]).count();
+    // Whether a run of at least min_run starts at i.
+    let starts_run = |i: usize| i + min_run <= n && row[i + 1..i + min_run].iter().all(|&b| b == row[i]);
     let mut i = 0;
     while i < n {
-        let mut r = run_at(i);
-        if r >= min_run {
+        if starts_run(i) {
+            let v = row[i];
+            let mut r = 1 + count_equal(&row[i + 1..], v);
+            if !split_rest {
+                r = r.min(128);
+            }
             // A long run is cut into runs of 128; what is left is a run even of 2, or a
             // literal of its own.
             while r > 0 {
                 let k = r.min(128);
-                if k == 1 {
-                    out.extend_from_slice(&[0, row[i]]);
-                } else {
-                    out.extend_from_slice(&[(1 - k as i32) as u8, row[i]]);
-                }
+                out.extend_from_slice(&[if k == 1 { 0 } else { (1 - k as i32) as u8 }, v]);
                 i += k;
                 r -= k;
             }
         } else {
             let s = i;
-            while i < n && i - s < 128 && (i == s || run_at(i) < min_run) {
+            i += 1;
+            while i < n && i - s < 128 && !starts_run(i) {
                 i += 1;
             }
             out.push((i - s - 1) as u8);
@@ -279,6 +290,112 @@ mod tests {
             roundtrip(enc, &row);
             roundtrip(enc, &[]);
             roundtrip(enc, &[1]);
+        }
+    }
+
+    /// The first, plain implementation of Photoshop's chunk encoder.
+    fn reference_chunk(row: &[u8], out: &mut Vec<u8>) {
+        let n = row.len();
+        let run_at = |j: usize| {
+            let mut k = j + 1;
+            while k < n && row[k] == row[j] && k - j < 128 {
+                k += 1;
+            }
+            k - j
+        };
+        let mut i = 0;
+        while i < n {
+            let r = run_at(i);
+            if r >= 2 {
+                out.push((1 - r as i32) as u8);
+                out.push(row[i]);
+                i += r;
+            } else {
+                let s = i;
+                i += 1;
+                while i < n && i - s < 128 && run_at(i) < 3 {
+                    i += 1;
+                }
+                out.push((i - s - 1) as u8);
+                out.extend_from_slice(&row[s..i]);
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_encoder_matches_reference() {
+        // Rows mixing runs of every length and literals, from a small LCG.
+        let mut x = 12345u32;
+        let mut next = || {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            x >> 16
+        };
+        for _ in 0..20000 {
+            let n = 1 + next() as usize % 128;
+            let mut row = Vec::with_capacity(n);
+            while row.len() < n {
+                let v = (next() % 4) as u8;
+                let len = match next() % 4 { 0 => 1, 1 => 2, 2 => 3, _ => 1 + next() as usize % 140 };
+                row.extend(std::iter::repeat_n(v, len.min(n - row.len())));
+            }
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            encode_chunk(&row, &mut a);
+            reference_chunk(&row, &mut b);
+            assert_eq!(a, b, "{row:?}");
+        }
+    }
+
+    /// The first, plain implementation of the greedy encoders.
+    fn reference_greedy(row: &[u8], min_run: usize, split_rest: bool, out: &mut Vec<u8>) {
+        let n = row.len();
+        let cap = if split_rest { usize::MAX } else { 128 };
+        let run_at = |j: usize| row[j..].iter().take(cap).take_while(|&&b| b == row[j]).count();
+        let mut i = 0;
+        while i < n {
+            let mut r = run_at(i);
+            if r >= min_run {
+                while r > 0 {
+                    let k = r.min(128);
+                    if k == 1 {
+                        out.extend_from_slice(&[0, row[i]]);
+                    } else {
+                        out.extend_from_slice(&[(1 - k as i32) as u8, row[i]]);
+                    }
+                    i += k;
+                    r -= k;
+                }
+            } else {
+                let s = i;
+                while i < n && i - s < 128 && (i == s || run_at(i) < min_run) {
+                    i += 1;
+                }
+                out.push((i - s - 1) as u8);
+                out.extend_from_slice(&row[s..i]);
+            }
+        }
+    }
+
+    #[test]
+    fn greedy_encoders_match_reference() {
+        let mut x = 777u32;
+        let mut next = || {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            x >> 16
+        };
+        for _ in 0..5000 {
+            let n = 1 + next() as usize % 700;
+            let mut row = Vec::with_capacity(n);
+            while row.len() < n {
+                let v = (next() % 4) as u8;
+                let len = match next() % 4 { 0 => 1, 1 => 2, 2 => 3, _ => 1 + next() as usize % 400 };
+                row.extend(std::iter::repeat_n(v, len.min(n - row.len())));
+            }
+            for (min_run, split_rest) in [(2, false), (2, true), (3, false), (3, true)] {
+                let (mut a, mut b) = (Vec::new(), Vec::new());
+                encode_greedy(&row, min_run, split_rest, &mut a);
+                reference_greedy(&row, min_run, split_rest, &mut b);
+                assert_eq!(a, b, "{min_run} {split_rest} {row:?}");
+            }
         }
     }
 

@@ -73,77 +73,95 @@ fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
     out
 }
 
-/// Blend function B(backdrop, source) of a mode, on straight colors; None if unsupported.
-fn blend(mode: &[u8; 4], b: [f32; 3], s: [f32; 3]) -> Option<[f32; 3]> {
-    let sep = |f: fn(f32, f32) -> f32| Some([f(b[0], s[0]), f(b[1], s[1]), f(b[2], s[2])]);
-    match mode {
-        b"norm" | b"pass" => Some(s),
-        b"dark" => sep(|b, s| b.min(s)),
-        b"lite" => sep(|b, s| b.max(s)),
-        b"mul " => sep(|b, s| b * s),
-        b"scrn" => sep(|b, s| b + s - b * s),
-        b"over" => sep(|b, s| if b <= 0.5 { 2.0 * b * s } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - s) }),
-        b"hLit" => sep(|b, s| if s <= 0.5 { 2.0 * b * s } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - s) }),
-        b"sLit" => sep(|b, s| {
-            if s <= 0.5 { 2.0 * b * s + b * b * (1.0 - 2.0 * s) } else { 2.0 * b * (1.0 - s) + b.sqrt() * (2.0 * s - 1.0) }
-        }),
-        b"div " => sep(|b, s| if b == 0.0 { 0.0 } else if s >= 1.0 { 1.0 } else { (b / (1.0 - s)).min(1.0) }),
-        b"idiv" => sep(|b, s| if b >= 1.0 { 1.0 } else if s <= 0.0 { 0.0 } else { 1.0 - ((1.0 - b) / s).min(1.0) }),
-        b"lddg" => sep(|b, s| (b + s).min(1.0)),
-        b"lbrn" => sep(|b, s| (b + s - 1.0).max(0.0)),
-        b"diff" => sep(|b, s| (b - s).abs()),
-        b"smud" => sep(|b, s| b + s - 2.0 * b * s),
-        b"fsub" => sep(|b, s| (b - s).max(0.0)),
-        b"fdiv" => sep(|b, s| if s <= 0.0 { if b > 0.0 { 1.0 } else { 0.0 } } else { (b / s).min(1.0) }),
-        b"lLit" => sep(|b, s| (b + 2.0 * s - 1.0).clamp(0.0, 1.0)),
-        b"vLit" => sep(|b, s| {
-            if s <= 0.5 {
-                if s <= 0.0 { 0.0 } else { 1.0 - ((1.0 - b) / (2.0 * s)).min(1.0) }
-            } else if s >= 1.0 {
-                1.0
-            } else {
-                (b / (2.0 * (1.0 - s))).min(1.0)
-            }
-        }),
-        b"pLit" => sep(|b, s| if s <= 0.5 { b.min(2.0 * s) } else { b.max(2.0 * s - 1.0) }),
-        b"hMix" => sep(|b, s| if b + s >= 1.0 { 1.0 } else { 0.0 }),
-        b"dkCl" => Some(if lum(s) < lum(b) { s } else { b }),
-        b"lgCl" => Some(if lum(s) > lum(b) { s } else { b }),
-        b"hue " => Some(set_lum(set_sat(s, sat(b)), lum(b))),
-        b"sat " => Some(set_lum(set_sat(b, sat(s)), lum(b))),
-        b"colr" => Some(set_lum(s, lum(b))),
-        b"lum " => Some(set_lum(b, lum(s))),
-        _ => None,
-    }
+/// A blend function B(backdrop, source) on straight colors.
+type BlendFn = fn([f32; 3], [f32; 3]) -> [f32; 3];
+
+#[inline(always)]
+fn sep(b: [f32; 3], s: [f32; 3], f: impl Fn(f32, f32) -> f32) -> [f32; 3] {
+    [f(b[0], s[0]), f(b[1], s[1]), f(b[2], s[2])]
 }
 
-/// Composites straight color `s` with coverage `a` (0..255) onto straight `dst` with `mode`.
-#[inline]
-fn composite_px(dst: &mut [u8; 4], s: [u8; 3], a: u32, mode: &[u8; 4]) {
+/// The blend function of a mode; None if unsupported, `Some(None)` for normal.
+fn blend_fn(mode: &[u8; 4]) -> Option<Option<BlendFn>> {
+    Some(Some(match mode {
+        b"norm" | b"pass" => return Some(None),
+        b"dark" => |b, s| sep(b, s, f32::min),
+        b"lite" => |b, s| sep(b, s, f32::max),
+        b"mul " => |b, s| sep(b, s, |b, s| b * s),
+        b"scrn" => |b, s| sep(b, s, |b, s| b + s - b * s),
+        b"over" => |b, s| sep(b, s, |b, s| if b <= 0.5 { 2.0 * b * s } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - s) }),
+        b"hLit" => |b, s| sep(b, s, |b, s| if s <= 0.5 { 2.0 * b * s } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - s) }),
+        b"sLit" => |b, s| {
+            sep(b, s, |b, s| if s <= 0.5 { 2.0 * b * s + b * b * (1.0 - 2.0 * s) } else { 2.0 * b * (1.0 - s) + b.sqrt() * (2.0 * s - 1.0) })
+        },
+        b"div " => |b, s| sep(b, s, |b, s| if b == 0.0 { 0.0 } else if s >= 1.0 { 1.0 } else { (b / (1.0 - s)).min(1.0) }),
+        b"idiv" => |b, s| sep(b, s, |b, s| if b >= 1.0 { 1.0 } else if s <= 0.0 { 0.0 } else { 1.0 - ((1.0 - b) / s).min(1.0) }),
+        b"lddg" => |b, s| sep(b, s, |b, s| (b + s).min(1.0)),
+        b"lbrn" => |b, s| sep(b, s, |b, s| (b + s - 1.0).max(0.0)),
+        b"diff" => |b, s| sep(b, s, |b, s| (b - s).abs()),
+        b"smud" => |b, s| sep(b, s, |b, s| b + s - 2.0 * b * s),
+        b"fsub" => |b, s| sep(b, s, |b, s| (b - s).max(0.0)),
+        b"fdiv" => |b, s| sep(b, s, |b, s| if s <= 0.0 { if b > 0.0 { 1.0 } else { 0.0 } } else { (b / s).min(1.0) }),
+        b"lLit" => |b, s| sep(b, s, |b, s| (b + 2.0 * s - 1.0).clamp(0.0, 1.0)),
+        b"vLit" => |b, s| {
+            sep(b, s, |b, s| {
+                if s <= 0.5 {
+                    if s <= 0.0 { 0.0 } else { 1.0 - ((1.0 - b) / (2.0 * s)).min(1.0) }
+                } else if s >= 1.0 {
+                    1.0
+                } else {
+                    (b / (2.0 * (1.0 - s))).min(1.0)
+                }
+            })
+        },
+        b"pLit" => |b, s| sep(b, s, |b, s| if s <= 0.5 { b.min(2.0 * s) } else { b.max(2.0 * s - 1.0) }),
+        b"hMix" => |b, s| sep(b, s, |b, s| if b + s >= 1.0 { 1.0 } else { 0.0 }),
+        b"dkCl" => |b, s| if lum(s) < lum(b) { s } else { b },
+        b"lgCl" => |b, s| if lum(s) > lum(b) { s } else { b },
+        b"hue " => |b, s| set_lum(set_sat(s, sat(b)), lum(b)),
+        b"sat " => |b, s| set_lum(set_sat(b, sat(s)), lum(b)),
+        b"colr" => |b, s| set_lum(s, lum(b)),
+        b"lum " => |b, s| set_lum(b, lum(s)),
+        _ => return None,
+    }))
+}
+
+/// Composites straight color `s` with coverage `a` (0..255) onto straight `dst` with blend
+/// function `mode` (None: normal).
+#[inline(always)]
+fn composite_px(dst: &mut [u8; 4], s: [u8; 3], a: u32, mode: Option<BlendFn>) {
     if a == 0 {
         return;
     }
     let da = dst[3] as u32;
-    if mode == b"norm" || da == 0 {
-        // Weights a and da (1 - a), both scaled by 255.
-        let ws = a * 255;
-        let wd = da * (255 - a);
-        let tot = ws + wd;
-        let oa = (tot + 127) / 255;
-        if oa == 0 {
-            *dst = [0; 4];
-            return;
-        }
-        for k in 0..3 {
-            dst[k] = ((s[k] as u32 * ws + dst[k] as u32 * wd + tot / 2) / tot) as u8;
-        }
-        dst[3] = oa as u8;
+    if (mode.is_none() && a == 255) || da == 0 {
+        *dst = [s[0], s[1], s[2], a as u8];
         return;
     }
-    let ab = da as f32 / 255.0;
+    if let Some(f) = mode {
+        return composite_mode(dst, s, a, f);
+    }
+    // Weights a and da (1 - a), both scaled by 255.
+    let ws = a * 255;
+    let wd = da * (255 - a);
+    let tot = ws + wd;
+    let oa = (tot + 127) / 255;
+    if oa == 0 {
+        *dst = [0; 4];
+        return;
+    }
+    for k in 0..3 {
+        dst[k] = ((s[k] as u32 * ws + dst[k] as u32 * wd + tot / 2) / tot) as u8;
+    }
+    dst[3] = oa as u8;
+}
+
+/// [`composite_px`] for the other blend modes, in floating point.
+fn composite_mode(dst: &mut [u8; 4], s: [u8; 3], a: u32, f: BlendFn) {
+    let ab = dst[3] as f32 / 255.0;
     let cb = [0, 1, 2].map(|k| dst[k] as f32 / 255.0);
     let sf = s.map(|v| v as f32 / 255.0);
-    let m = blend(mode, cb, sf).unwrap_or(sf);
+    let m = f(cb, sf);
     let sm = [0, 1, 2].map(|k| (1.0 - ab) * sf[k] + ab * m[k]);
     let af = a as f32 / 255.0;
     let oa = af + ab * (1.0 - af);
@@ -178,7 +196,7 @@ enum Op {
     /// Start an isolated group: draw on a new canvas.
     Push,
     /// End it: composite its canvas onto the one below.
-    Pop { opacity: u32, mode: [u8; 4], hidden: bool },
+    Pop { opacity: u32, mode: Option<BlendFn>, hidden: bool },
     /// Forget the clipping base.
     ClearClip,
     /// Draw a layer (or only take its coverage as clipping base, when hidden).
@@ -197,7 +215,7 @@ struct LayerRows<'a> {
     mask: Option<(PlaneRows<'a>, i64, i64, usize, usize, u8)>,
     clip: bool,
     hidden: bool,
-    mode: [u8; 4],
+    mode: Option<BlendFn>,
     /// Opacity times fill opacity, 0..255.
     opacity: u32,
 }
@@ -270,11 +288,11 @@ impl<'a> RowRenderer<'a> {
                         continue;
                     }
                     depth -= 1;
-                    let mode = if &l.blend == b"pass" { *b"norm" } else { l.blend };
-                    if !l.hidden() && blend(&mode, [0.0; 3], [0.0; 3]).is_none() {
+                    let mode = blend_fn(&l.blend);
+                    if !l.hidden() && mode.is_none() {
                         *rep.blend_fallback.entry(String::from_utf8_lossy(&l.blend).into()).or_default() += 1;
                     }
-                    ops.push(Op::Pop { opacity: l.opacity as u32, mode, hidden: l.hidden() });
+                    ops.push(Op::Pop { opacity: l.opacity as u32, mode: mode.flatten(), hidden: l.hidden() });
                     continue;
                 }
                 _ => {}
@@ -297,14 +315,14 @@ impl<'a> RowRenderer<'a> {
                 }
             }
             if !l.hidden() {
-                if blend(&l.blend, [0.0; 3], [0.0; 3]).is_none() {
+                if blend_fn(&l.blend).is_none() {
                     *rep.blend_fallback.entry(String::from_utf8_lossy(&l.blend).into()).or_default() += 1;
                 }
                 if has_effects(l) {
                     rep.effects += 1;
                 }
             }
-            let mode = if blend(&l.blend, [0.0; 3], [0.0; 3]).is_some() { l.blend } else { *b"norm" };
+            let mode = blend_fn(&l.blend).flatten();
             rows[i] = Some(LayerRows {
                 top: l.rect.top as i64,
                 left: l.rect.left as i64,
@@ -321,7 +339,7 @@ impl<'a> RowRenderer<'a> {
             ops.push(Op::Layer(i));
         }
         for _ in 0..depth {
-            ops.push(Op::Pop { opacity: 255, mode: *b"norm", hidden: false });
+            ops.push(Op::Pop { opacity: 255, mode: None, hidden: false });
         }
         let row = || Row { px: vec![[0; 4]; w], x0: w, x1: 0 };
         Ok(RowRenderer {
@@ -335,6 +353,11 @@ impl<'a> RowRenderer<'a> {
             clip: vec![0; w],
             clip_range: (0, 0),
         })
+    }
+
+    /// Skips the next row (cheaply: the layers' rows are skipped when the next one is drawn).
+    pub fn skip_row(&mut self) {
+        self.y += 1;
     }
 
     /// Renders the next row into planar `out` rows: R, G, B matted on white, and alpha if
@@ -373,7 +396,7 @@ impl<'a> RowRenderer<'a> {
                     for x in src.x0..src.x1 {
                         let s = src.px[x];
                         let a = (s[3] as u32 * opacity + 127) / 255;
-                        composite_px(&mut dst.px[x], [s[0], s[1], s[2]], a, &mode);
+                        composite_px(&mut dst.px[x], [s[0], s[1], s[2]], a, mode);
                     }
                     dst.x0 = dst.x0.min(src.x0);
                     dst.x1 = dst.x1.max(src.x1);
@@ -399,10 +422,12 @@ impl<'a> RowRenderer<'a> {
                         }
                         p.next(&mut out[..n])
                     };
-                    let [pr, pg, pb] = &mut l.rgb;
-                    decode(pr, rb, l.h, ly, l.w)?;
-                    decode(pg, gb, l.h, ly, l.w)?;
-                    decode(pb, bb, l.h, ly, l.w)?;
+                    // The layer's columns on the canvas (possibly none).
+                    let x0 = l.left.clamp(0, w as i64) as usize;
+                    let x1 = (l.left + l.w as i64).clamp(x0 as i64, w as i64) as usize;
+                    let lx0 = (x0 as i64 - l.left) as usize;
+                    let lx1 = (x1 as i64 - l.left) as usize;
+                    // Coverage first (alpha), to skip the color rows where it is nil.
                     match &mut l.alpha {
                         Some(a) => decode(a, ab, l.h, ly, l.w)?,
                         None => {
@@ -410,8 +435,13 @@ impl<'a> RowRenderer<'a> {
                             ab[..l.w].fill(255);
                         }
                     }
-                    let x0 = l.left.max(0) as usize;
-                    let x1 = ((l.left + l.w as i64).min(w as i64)).max(0) as usize;
+                    if l.clip {
+                        let (c0, c1) = self.clip_range;
+                        if c0.max(x0) >= c1.min(x1) {
+                            ab[lx0..lx1].fill(0);
+                        }
+                    }
+                    let mut seen = lx0 < lx1 && ab[lx0..lx1].iter().any(|&v| v != 0);
                     // Coverage: alpha times mask, into the alpha buffer (layer coordinates).
                     if let Some((m, mt, ml, mw, mh, def)) = &mut l.mask {
                         let my = y as i64 - *mt;
@@ -419,35 +449,57 @@ impl<'a> RowRenderer<'a> {
                         if inside {
                             decode(m, mb, *mh, my as usize, *mw)?;
                         }
-                        for x in x0..x1 {
-                            let lx = (x as i64 - l.left) as usize;
-                            let mx = x as i64 - *ml;
-                            let v = if inside && mx >= 0 && mx < *mw as i64 { mb[mx as usize] } else { *def } as u32;
-                            ab[lx] = ((ab[lx] as u32 * v + 127) / 255) as u8;
+                        if seen {
+                            for x in x0..x1 {
+                                let lx = (x as i64 - l.left) as usize;
+                                let mx = x as i64 - *ml;
+                                let v = if inside && mx >= 0 && mx < *mw as i64 { mb[mx as usize] } else { *def } as u32;
+                                ab[lx] = ((ab[lx] as u32 * v + 127) / 255) as u8;
+                            }
                         }
                     }
                     if l.clip {
-                        let (c0, c1) = self.clip_range;
-                        for x in x0..x1 {
-                            let lx = (x as i64 - l.left) as usize;
-                            let v = if x >= c0 && x < c1 { self.clip[x] as u32 } else { 0 };
-                            ab[lx] = ((ab[lx] as u32 * v + 127) / 255) as u8;
+                        if seen {
+                            let (c0, c1) = self.clip_range;
+                            for x in x0..x1 {
+                                let lx = (x as i64 - l.left) as usize;
+                                let v = if x >= c0 && x < c1 { self.clip[x] as u32 } else { 0 };
+                                ab[lx] = ((ab[lx] as u32 * v + 127) / 255) as u8;
+                            }
                         }
-                    } else {
+                    } else if seen {
                         for x in x0..x1 {
                             self.clip[x] = ab[(x as i64 - l.left) as usize];
                         }
                         self.clip_range = (x0, x1);
+                    } else {
+                        self.clip_range = (0, 0);
                     }
-                    if l.hidden || x0 >= x1 {
+                    seen = seen && !l.hidden && ab[lx0..lx1].iter().any(|&v| v != 0);
+                    let [pr, pg, pb] = &mut l.rgb;
+                    if !seen {
+                        // Nothing to draw on this row: the color rows are skipped, not decoded.
+                        for p in [pr, pg, pb] {
+                            while p.rows_left() > l.h - ly {
+                                p.skip()?;
+                            }
+                        }
                         continue;
                     }
+                    decode(pr, rb, l.h, ly, l.w)?;
+                    decode(pg, gb, l.h, ly, l.w)?;
+                    decode(pb, bb, l.h, ly, l.w)?;
                     let dst = &mut self.stack[level];
                     let op = l.opacity;
+                    let mode = l.mode;
                     for x in x0..x1 {
-                        let lx = (x as i64 - l.left) as usize;
-                        let a = (ab[lx] as u32 * op + 127) / 255;
-                        composite_px(&mut dst.px[x], [rb[lx], gb[lx], bb[lx]], a, &l.mode);
+                        let lx = x + lx0 - x0;
+                        let a = ab[lx] as u32;
+                        if a == 0 {
+                            continue;
+                        }
+                        let a = if op == 255 { a } else { (a * op + 127) / 255 };
+                        composite_px(&mut dst.px[x], [rb[lx], gb[lx], bb[lx]], a, mode);
                     }
                     dst.x0 = dst.x0.min(x0);
                     dst.x1 = dst.x1.max(x1);

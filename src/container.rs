@@ -215,6 +215,55 @@ fn plan_span<'a>(d: &[u8], start: usize, end: usize, planes: usize, w: usize, h:
     Some(Planned { span: Span { start, end, gap: 0, planes, w, h, coding }, candidates, same: None })
 }
 
+/// Whether rendering the layers predicts the composite (span `sp`, first `planes` planes) well
+/// enough to be worth its time: on a sample of rows, the share of pixels predicted exactly.
+fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
+    const EVERY: usize = 16;
+    const SHARE: f64 = 0.5;
+    let (w, h) = (sp.w, sp.h);
+    let comp = if matches!(sp.coding, Coding::Raw) { Compression::Raw } else { Compression::Rle };
+    let src = &d[sp.start..sp.end];
+    let Ok(mut r) = RowRenderer::new(psd, d, &mut composite::Report::default()) else { return false };
+    let Ok(mut stored) = (0..planes).map(|p| PlaneRows::new(psd.psb, comp, src, w, h, p, sp.planes)).collect::<Result<Vec<_>>>() else {
+        return false;
+    };
+    let mut rendered = vec![vec![0u8; w]; planes];
+    let mut row = vec![0u8; w];
+    let mut same = vec![true; w];
+    let (mut hits, mut total) = (0usize, 0usize);
+    for y in 0..h {
+        let sample = y % EVERY == EVERY / 2;
+        if sample {
+            let mut refs: Vec<&mut [u8]> = rendered.iter_mut().map(|v| v.as_mut_slice()).collect();
+            if r.next_row(&mut refs).is_err() {
+                return false;
+            }
+            same.fill(true);
+        } else {
+            r.skip_row();
+        }
+        for (k, p) in stored.iter_mut().enumerate() {
+            if !sample {
+                if p.skip().is_err() {
+                    return false;
+                }
+                continue;
+            }
+            if p.next(&mut row).is_err() {
+                return false;
+            }
+            for x in 0..w {
+                same[x] &= row[x] == rendered[k][x];
+            }
+        }
+        if sample {
+            hits += same.iter().filter(|&&s| s).count();
+            total += w;
+        }
+    }
+    total > 0 && hits as f64 >= SHARE * total as f64
+}
+
 /// Spans, groups and coded embedded files of a parsed file.
 fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<GroupDef>, Vec<Vec<u8>>) {
     let mut spans: Vec<Planned> = Vec::new();
@@ -302,7 +351,7 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<Grou
             if rgb && n >= 3 {
                 let has_alpha = n >= 4 && psd.layer_info.merged_alpha;
                 let k = 3 + has_alpha as usize;
-                let hinted = !psd.layer_info.layers.is_empty();
+                let hinted = !psd.layer_info.layers.is_empty() && hint_pays(psd, d, &spans[si].span, k);
                 groups.push(GroupDef { planes: (0..k).map(|p| (si, p)).collect(), has_alpha, hinted, same_as: vec![None; k] });
                 rest = k;
             }
@@ -614,7 +663,7 @@ fn encode_group(rec: &mut model::Recorder, psd: &Psd, d: &[u8], spans: &[Span], 
             let mut refs: Vec<&mut [u8]> = hint_rows.iter_mut().map(|v| v.as_mut_slice()).collect();
             r.next_row(&mut refs).ok()?;
         }
-        gc.code_row(rec, &mut rows, hint.as_ref().map(|_| &hint_rows[..]));
+        gc.code_row(rec, &mut rows, hint.as_ref().map(|_| &mut hint_rows[..]));
     }
     Some(misses)
 }
@@ -718,6 +767,7 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     let t0 = std::time::Instant::now();
     let model_at = out.len();
     let mut misses: Vec<Option<Vec<usize>>> = vec![None; spans.len()];
+    let symbols;
     {
         let mut rec = model::Recorder::new(&mut out);
         for g in &groups {
@@ -728,7 +778,7 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
                 }
             }
         }
-        rec.finish();
+        symbols = rec.finish();
     }
     for (i, m) in misses.into_iter().enumerate() {
         if let Some(mut m) = m {
@@ -743,9 +793,17 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     let layout_len = out.len() - layout_at;
     out.extend_from_slice(&(layout_len as u64).to_le_bytes());
     if std::env::var_os("PSDR_STATS").is_some() {
-        eprintln!("skeleton {sk_len} -> {skeleton}, layout {layout_len}, model {model_len}; plan {t_plan:.3}s skeleton {t_skel:.3}s pixels {t_model:.3}s");
+        let samples: usize = groups.iter().map(|g| g.planes.len() * spans[g.planes[0].0].w * spans[g.planes[0].0].h).sum();
+        eprintln!(
+            "skeleton {sk_len} -> {skeleton}, layout {layout_len}, model {model_len} ({samples} samples, {symbols} symbols); plan {t_plan:.3}s skeleton {t_skel:.3}s pixels {t_model:.3}s"
+        );
     }
     Some(out)
+}
+
+thread_local! {
+    /// Decoding time (with `PSDR_STATS`): known rows, rendering, model, writing rows.
+    pub static DEC_TIMES: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
 }
 
 /// Writes the rows of a plane of an RLE or raw span as they are decoded.
@@ -860,25 +918,48 @@ fn decode_group(player: &mut model::Player, out: &mut [u8], split: usize, spans:
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
     let mut rows = vec![vec![0u8; w]; n];
     let mut buf = Vec::with_capacity(w + w / 64 + 8);
+    let timing = std::env::var_os("PSDR_STATS").is_some();
+    let mut t = [0f64; 4];
+    let mut clock = std::time::Instant::now();
+    let mut lap = |i: usize, t: &mut [f64; 4]| {
+        if timing {
+            let now = std::time::Instant::now();
+            t[i] += (now - clock).as_secs_f64();
+            clock = now;
+        }
+    };
     for _ in 0..h {
         for k in 0..n {
             if let Some(r) = &mut readers[k] {
                 r.next(&mut rows[k])?;
             }
         }
+        lap(0, &mut t);
         if let Some(r) = &mut hint {
             let mut refs: Vec<&mut [u8]> = hint_rows.iter_mut().map(|v| v.as_mut_slice()).collect();
             r.next_row(&mut refs)?;
         }
-        gc.code_row(player, &mut rows, hint.as_ref().map(|_| &hint_rows[..]));
+        lap(1, &mut t);
+        gc.code_row(player, &mut rows, hint.as_ref().map(|_| &mut hint_rows[..]));
         if player.failed {
             return Err(corrupt());
         }
+        lap(2, &mut t);
         for k in 0..n {
             if let Some(s) = &mut sinks[k] {
-                s.put(right, &rows[k], &mut buf)?;
+                s.put(right, gc.last(k), &mut buf)?;
             }
         }
+        lap(3, &mut t);
+    }
+    if timing {
+        DEC_TIMES.with(|c| {
+            let mut v = c.get();
+            for i in 0..4 {
+                v[i] += t[i];
+            }
+            c.set(v);
+        });
     }
     Ok(())
 }

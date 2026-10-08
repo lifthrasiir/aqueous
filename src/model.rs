@@ -29,9 +29,6 @@ const CROSS: usize = 4;
 const CTX: usize = ACT * CROSS;
 /// Plane kinds: first color plane, other color planes, alpha, lone plane.
 const KINDS: usize = 4;
-/// Run mode needs more than this many equal samples above, from the upper left on (shorter
-/// runs cost more than they save).
-const RUN_LOOK: u32 = 32;
 /// Run length tables, by plane kind and transparency.
 const RUN_BASE: usize = KINDS * 2 * CTX;
 /// Tables of the difference to the hint where the left and upper samples matched it, by
@@ -46,6 +43,8 @@ fn corrupt() -> Error {
 }
 
 pub trait Coder {
+    /// Whether symbols come from the coder (decoding) rather than from the samples.
+    const DECODES: bool;
     /// The residual symbol of the current sample in table `t`; `sym` is the encoder's.
     fn code(&mut self, t: usize, sym: u8) -> u8;
 }
@@ -54,6 +53,7 @@ pub trait Coder {
 struct Passthrough;
 
 impl Coder for Passthrough {
+    const DECODES: bool = false;
     #[inline(always)]
     fn code(&mut self, _t: usize, sym: u8) -> u8 {
         sym
@@ -97,32 +97,139 @@ struct RowCtx<'a> {
     hint: Option<(&'a [u8], &'a [u8])>,
 }
 
-/// Codes one row `p` of a plane, writing its residuals to `res`.
-fn code_row<C: Coder>(c: &mut C, r: &RowCtx, p: &mut [u8], res: &mut [u8], up_run: &mut [u32]) {
-    let w = p.len();
-    let (kind, top, up) = (r.kind, r.top, r.prev);
-    let run_t = RUN_BASE + kind * 2;
-    // For the row above: how many equal samples follow each position (itself included).
-    if !top {
-        up_run[w - 1] = 1;
-        for x in (0..w - 1).rev() {
-            up_run[x] = if up[x + 1] == up[x] { up_run[x + 1] + 1 } else { 1 };
+/// Whether the 32 samples of `up` from `x` on all equal `v`.
+#[inline(always)]
+fn flat_above(up: &[u8], x: usize, v: u8) -> bool {
+    let Some(s) = up.get(x..x + 32) else { return false };
+    let pat = u64::from_ne_bytes([v; 8]);
+    let word = |k: usize| u64::from_ne_bytes(s[8 * k..8 * k + 8].try_into().unwrap());
+    word(0) == pat && word(1) == pat && word(2) == pat && word(3) == pat
+}
+
+/// The rows a sample is coded with, cut to the row width.
+struct Rows<'a> {
+    up: &'a [u8],
+    res_prev: &'a [u8],
+    al: &'a [u8],
+    alp: &'a [u8],
+    hc: &'a [u8],
+    hp: &'a [u8],
+    base: usize,
+    match_t: usize,
+}
+
+/// Codes sample `x` of row `p` (not in a run); `f` is the first color plane's residual at `x`
+/// (with `FIRST`). `TOP`: first row; `LEFT`/`RIGHT`: whether there are samples to the
+/// left/right. Indices are in bounds: `x < w`, every row has `w` samples (but the optional
+/// ones, which are only read under their flags).
+#[inline(always)]
+fn code_sample<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, const TOP: bool, const LEFT: bool, const RIGHT: bool>(
+    c: &mut C,
+    q: &Rows,
+    p: &mut [u8],
+    res: &mut [u8],
+    x: usize,
+    f: u8,
+) {
+    debug_assert!(x < p.len() && (!LEFT || x > 0) && (!RIGHT || x + 1 < p.len()));
+    // SAFETY: as documented; LEFT means x >= 1 and RIGHT means x + 1 < w.
+    unsafe {
+        let g = |s: &[u8], i: usize| *s.get_unchecked(i);
+        let up = q.up;
+        let mut a = if LEFT { g(p, x - 1) } else if !TOP { g(up, x) } else { 0 };
+        let mut b = if !TOP { g(up, x) } else { a };
+        let mut cc = if LEFT && !TOP { g(up, x - 1) } else { b };
+        let d = if !TOP && RIGHT { g(up, x + 1) } else { b };
+        let mut transparent = false;
+        if ALPHA {
+            if g(q.al, x) == 0 {
+                transparent = true;
+            } else if (LEFT && g(q.al, x - 1) == 0) || (!TOP && (g(q.alp, x) == 0 || LEFT && g(q.alp, x - 1) == 0)) {
+                // Transparent neighbors are replaced by a visible one: their color is arbitrary.
+                let jw = (LEFT && g(q.al, x - 1) > 0).then(|| g(p, x - 1));
+                let jn = (!TOP && g(q.alp, x) > 0).then(|| g(up, x));
+                let jnw = (LEFT && !TOP && g(q.alp, x - 1) > 0).then(|| g(up, x - 1));
+                if let Some(fb) = jw.or(jn).or(jnw) {
+                    a = jw.unwrap_or(fb);
+                    b = jn.unwrap_or(fb);
+                    cc = jnw.unwrap_or(fb);
+                }
+            }
         }
+        let pred = med(a, b, cc);
+        if HINT && LEFT && !TOP && g(p, x - 1) == g(q.hc, x - 1) && g(up, x) == g(q.hp, x) {
+            let m = (g(up, x - 1) == g(q.hp, x - 1)) as usize + 2 * (RIGHT && g(up, x + 1) == g(q.hp, x + 1)) as usize;
+            let s = c.code(q.match_t + m, g(p, x).wrapping_sub(g(q.hc, x)));
+            let v = g(q.hc, x).wrapping_add(s);
+            *p.get_unchecked_mut(x) = v;
+            *res.get_unchecked_mut(x) = v.wrapping_sub(pred);
+            return;
+        }
+        let rw = if LEFT { mag(g(res, x - 1)) } else { 0 };
+        let rn = if !TOP { mag(g(q.res_prev, x)) } else { 0 };
+        let act = a.abs_diff(cc) as u32 + b.abs_diff(cc) as u32 + b.abs_diff(d) as u32;
+        let (off, cross) = if FIRST { (f, bucket(mag(f), CROSS)) } else { (0, 0) };
+        let ctx = bucket(act + 2 * (rw + rn), ACT) * CROSS + cross;
+        let t = q.base + transparent as usize * CTX + ctx;
+        let rr = g(p, x).wrapping_sub(pred);
+        let s = c.code(t, rr.wrapping_sub(off));
+        let rr = s.wrapping_add(off);
+        *res.get_unchecked_mut(x) = rr;
+        *p.get_unchecked_mut(x) = pred.wrapping_add(rr);
     }
-    let mut x = 0;
+}
+
+/// Codes one row `p` of a plane, writing its residuals to `res`. The flags say which of the
+/// optional rows of `r` are there (alpha, first plane's residuals, hint), and whether this is
+/// the first row.
+fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, const TOP: bool>(c: &mut C, r: &RowCtx, p: &mut [u8], res: &mut [u8]) {
+    let w = p.len();
+    let res = &mut res[..w];
+    let (al, alp) = match r.alpha {
+        Some((a, b)) if ALPHA => (&a[..w], &b[..w]),
+        _ => (&[][..], &[][..]),
+    };
+    let (hc, hp) = match r.hint {
+        Some((a, b)) if HINT => (&a[..w], &b[..w]),
+        _ => (&[][..], &[][..]),
+    };
+    let first = match r.first {
+        Some(f) if FIRST => &f[..w],
+        _ => &[][..],
+    };
+    let fx = |x: usize| if FIRST { first[x] } else { 0 };
+    let q = Rows {
+        up: &r.prev[..w],
+        res_prev: &r.res_prev[..w],
+        al,
+        alp,
+        hc,
+        hp,
+        base: r.kind * 2 * CTX,
+        match_t: MATCH_BASE + r.kind * 4,
+    };
+    let run_t = RUN_BASE + r.kind * 2;
+    if w == 1 {
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, false, false>(c, &q, p, res, 0, fx(0));
+        return;
+    }
+    code_sample::<C, ALPHA, FIRST, HINT, TOP, false, true>(c, &q, p, res, 0, fx(0));
+    let mut x = 1;
     let mut after_run = false;
-    while x < w {
-        // Run mode: in a flat neighborhood, the number of following samples equal to the left
-        // one, in chunks of up to 254 (255 continues).
-        if !after_run && !top && x > 0 && up_run[x - 1] > RUN_LOOK {
+    while x + 1 < w {
+        // Run mode: where the left sample equals the 33 above from the upper left on, the
+        // number of following samples equal to it, in chunks of up to 254 (255 continues).
+        if !TOP && !after_run {
             let v = p[x - 1];
-            if up[x - 1] == v {
-                let t = run_t + r.alpha.is_some_and(|(al, _)| al[x] == 0) as usize;
+            if q.up[x - 1] == v && flat_above(q.up, x, v) {
+                let t = run_t + (ALPHA && al[x] == 0) as usize;
                 let mut n = 0;
                 loop {
-                    let avail = p[x + n..].iter().take(255).take_while(|&&b| b == v).count();
+                    let avail = if C::DECODES { 0 } else { crate::packbits::count_equal(&p[x + n..(x + n + 255).min(w)], v) };
                     let s = (c.code(t, avail as u8) as usize).min(w - x - n);
-                    p[x + n..x + n + s].fill(v);
+                    if C::DECODES {
+                        p[x + n..x + n + s].fill(v);
+                    }
                     n += s;
                     if s < 255 {
                         break;
@@ -135,51 +242,144 @@ fn code_row<C: Coder>(c: &mut C, r: &RowCtx, p: &mut [u8], res: &mut [u8], up_ru
             }
         }
         after_run = false;
-        let mut a = if x > 0 { p[x - 1] } else if !top { up[x] } else { 0 };
-        let mut b = if !top { up[x] } else { a };
-        let mut cc = if x > 0 && !top { up[x - 1] } else { b };
-        let d = if !top && x + 1 < w { up[x + 1] } else { b };
-        let mut transparent = false;
-        if let Some((al, alp)) = r.alpha {
-            if al[x] == 0 {
-                transparent = true;
-            } else {
-                let jw = (x > 0 && al[x - 1] > 0).then(|| p[x - 1]);
-                let jn = (!top && alp[x] > 0).then(|| up[x]);
-                let jnw = (x > 0 && !top && alp[x - 1] > 0).then(|| up[x - 1]);
-                if let Some(fb) = jw.or(jn).or(jnw) {
-                    a = jw.unwrap_or(fb);
-                    b = jn.unwrap_or(fb);
-                    cc = jnw.unwrap_or(fb);
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, true>(c, &q, p, res, x, fx(x));
+        x += 1;
+    }
+    if x + 1 == w {
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, false>(c, &q, p, res, x, fx(x));
+    }
+}
+
+/// The three color planes of a row, coded pixel by pixel (R, G, B at x, then x + 1): the
+/// planes are independent chains of dependencies, which the CPU can overlap. Plane 0 is coded
+/// if `how[0] == 1`, walked for its residuals if 2; planes 1 and 2 are coded if their `how`
+/// is 1, given (known) if 2, and absent (copied after the row) if 0. A run is where every
+/// plane there equals its left sample over the 33 above (from the upper left), as many pixels
+/// as they all equal it.
+struct Colors<'a, 'b> {
+    p: [&'b mut [u8]; 3],
+    res: [&'b mut [u8]; 3],
+    q: [Rows<'a>; 3],
+    how: [u8; 3],
+    run_t: usize,
+}
+
+fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c: &mut C, k: &mut Colors) {
+    let w = k.p[0].len();
+    let [p0, p1, p2] = &mut k.p;
+    let [r0, r1, r2] = &mut k.res;
+    let [q0, q1, q2] = &k.q;
+    let how = k.how;
+    let pixel = |c: &mut C, p0: &mut [u8], p1: &mut [u8], p2: &mut [u8], r0: &mut [u8], r1: &mut [u8], r2: &mut [u8], x: usize, left: bool, right: bool| {
+        macro_rules! one {
+            ($c:expr, $cc:ty, $q:expr, $p:expr, $r:expr, $first:literal, $f:expr) => {
+                match (left, right) {
+                    (true, true) => code_sample::<$cc, ALPHA, $first, HINT, TOP, true, true>($c, $q, $p, $r, x, $f),
+                    (false, true) => code_sample::<$cc, ALPHA, $first, HINT, TOP, false, true>($c, $q, $p, $r, x, $f),
+                    (true, false) => code_sample::<$cc, ALPHA, $first, HINT, TOP, true, false>($c, $q, $p, $r, x, $f),
+                    (false, false) => code_sample::<$cc, ALPHA, $first, HINT, TOP, false, false>($c, $q, $p, $r, x, $f),
                 }
-            }
+            };
         }
-        let pred = med(a, b, cc);
-        if let Some((hc, hp)) = r.hint {
-            if x > 0 && !top && p[x - 1] == hc[x - 1] && up[x] == hp[x] {
-                let m = (up[x - 1] == hp[x - 1]) as usize + 2 * (x + 1 < w && up[x + 1] == hp[x + 1]) as usize;
-                let s = c.code(MATCH_BASE + kind * 4 + m, p[x].wrapping_sub(hc[x]));
-                p[x] = hc[x].wrapping_add(s);
-                res[x] = p[x].wrapping_sub(pred);
-                x += 1;
+        match how[0] {
+            1 => one!(c, C, q0, p0, r0, false, 0),
+            _ => one!(&mut Passthrough, Passthrough, q0, p0, r0, false, 0),
+        }
+        let f = r0[x];
+        if how[1] == 1 {
+            one!(c, C, q1, p1, r1, true, f);
+        }
+        if how[2] == 1 {
+            one!(c, C, q2, p2, r2, true, f);
+        }
+    };
+    pixel(c, p0, p1, p2, r0, r1, r2, 0, false, w > 1);
+    let mut x = 1;
+    let mut after_run = false;
+    while x + 1 < w {
+        if !TOP && !after_run {
+            let v = [p0[x - 1], p1[x - 1], p2[x - 1]];
+            let flat = |p: usize, q: &Rows| q.up[x - 1] == v[p] && flat_above(q.up, x, v[p]);
+            if flat(0, q0) && (how[1] == 0 || flat(1, q1)) && (how[2] == 0 || flat(2, q2)) {
+                let t = k.run_t + (ALPHA && q0.al[x] == 0) as usize;
+                let mut n = 0;
+                loop {
+                    let avail = if C::DECODES {
+                        0
+                    } else {
+                        let end = (x + n + 255).min(w);
+                        let mut a = crate::packbits::count_equal(&p0[x + n..end], v[0]);
+                        if how[1] != 0 {
+                            a = a.min(crate::packbits::count_equal(&p1[x + n..end], v[1]));
+                        }
+                        if how[2] != 0 {
+                            a = a.min(crate::packbits::count_equal(&p2[x + n..end], v[2]));
+                        }
+                        a
+                    };
+                    let s = (c.code(t, avail as u8) as usize).min(w - x - n);
+                    if C::DECODES {
+                        if how[0] == 1 {
+                            p0[x + n..x + n + s].fill(v[0]);
+                        }
+                        if how[1] == 1 {
+                            p1[x + n..x + n + s].fill(v[1]);
+                        }
+                        if how[2] == 1 {
+                            p2[x + n..x + n + s].fill(v[2]);
+                        }
+                    }
+                    n += s;
+                    if s < 255 {
+                        break;
+                    }
+                }
+                for r in [&mut **r0, &mut **r1, &mut **r2] {
+                    r[x..x + n].fill(0);
+                }
+                x += n;
+                after_run = true;
                 continue;
             }
         }
-        let rw = if x > 0 { mag(res[x - 1]) } else { 0 };
-        let rn = if !top { mag(r.res_prev[x]) } else { 0 };
-        let act = a.abs_diff(cc) as u32 + b.abs_diff(cc) as u32 + b.abs_diff(d) as u32;
-        let (off, cross) = match r.first {
-            Some(f) => (f[x], bucket(mag(f[x]), CROSS)),
-            None => (0, 0),
-        };
-        let ctx = bucket(act + 2 * (rw + rn), ACT) * CROSS + cross;
-        let t = (kind * 2 + transparent as usize) * CTX + ctx;
-        let rr = p[x].wrapping_sub(pred);
-        let s = c.code(t, rr.wrapping_sub(off));
-        let rr = s.wrapping_add(off);
-        res[x] = rr;
-        p[x] = pred.wrapping_add(rr);
+        after_run = false;
+        pixel(c, p0, p1, p2, r0, r1, r2, x, true, true);
         x += 1;
+    }
+    if x + 1 == w {
+        pixel(c, p0, p1, p2, r0, r1, r2, x, true, false);
+    }
+}
+
+fn code_colors_any<C: Coder>(c: &mut C, k: &mut Colors, alpha: bool, hint: bool, top: bool) {
+    match (alpha, hint, top) {
+        (false, false, false) => code_colors::<C, false, false, false>(c, k),
+        (false, false, true) => code_colors::<C, false, false, true>(c, k),
+        (false, true, false) => code_colors::<C, false, true, false>(c, k),
+        (false, true, true) => code_colors::<C, false, true, true>(c, k),
+        (true, false, false) => code_colors::<C, true, false, false>(c, k),
+        (true, false, true) => code_colors::<C, true, false, true>(c, k),
+        (true, true, false) => code_colors::<C, true, true, false>(c, k),
+        (true, true, true) => code_colors::<C, true, true, true>(c, k),
+    }
+}
+
+/// [`code_row`] for the rows `r` has.
+fn code_row_any<C: Coder>(c: &mut C, r: &RowCtx, p: &mut [u8], res: &mut [u8]) {
+    macro_rules! go {
+        ($a:literal, $f:literal, $h:literal) => {
+            if r.top { code_row::<C, $a, $f, $h, true>(c, r, p, res) } else { code_row::<C, $a, $f, $h, false>(c, r, p, res) }
+        };
+    }
+    match (r.alpha.is_some(), r.first.is_some(), r.hint.is_some()) {
+        (false, false, false) => go!(false, false, false),
+        (true, false, false) => go!(true, false, false),
+        (false, true, false) => go!(false, true, false),
+        (true, true, false) => go!(true, true, false),
+        (false, false, true) => go!(false, false, true),
+        (true, false, true) => go!(true, false, true),
+        (false, true, true) => go!(false, true, true),
+        (true, true, true) => go!(true, true, true),
     }
 }
 
@@ -196,7 +396,6 @@ pub struct GroupCoder {
     res_prev: Vec<Vec<u8>>,
     res: Vec<Vec<u8>>,
     hint_prev: Vec<Vec<u8>>,
-    up_run: Vec<u32>,
 }
 
 impl GroupCoder {
@@ -211,7 +410,6 @@ impl GroupCoder {
             res_prev: vec![vec![0; w]; planes],
             res: vec![vec![0; w]; planes],
             hint_prev: vec![vec![0; w]; planes],
-            up_run: vec![0; w],
         }
     }
 
@@ -226,62 +424,132 @@ impl GroupCoder {
         o
     }
 
+    /// Codes row `k` of `rows` on its own, as a plane of `kind`.
+    fn code_plane<C: Coder>(&mut self, c: &mut C, rows: &mut [Vec<u8>], hint: Option<&[Vec<u8>]>, k: usize, kind: usize) {
+        let coded = self.coded(k);
+        let n = rows.len();
+        let colors = n - self.has_alpha as usize;
+        let is_alpha = self.has_alpha && k == colors;
+        let (alpha, rest) = if self.has_alpha && !is_alpha {
+            let (r, a) = rows.split_at_mut(colors);
+            (Some((&a[0][..], &self.prev[colors][..])), r)
+        } else {
+            (None, &mut rows[..])
+        };
+        let (res_k, first) = if kind == 1 {
+            let (f, r) = self.res.split_at_mut(k);
+            (&mut r[0], Some(&f[0][..]))
+        } else {
+            (&mut self.res[k], None)
+        };
+        let ctx = RowCtx {
+            kind,
+            top: self.top,
+            prev: &self.prev[k],
+            alpha,
+            res_prev: &self.res_prev[k],
+            first,
+            hint: hint.map(|h| (&h[k][..], &self.hint_prev[k][..])),
+        };
+        let p = &mut rest[k][..self.w];
+        if coded {
+            code_row_any(c, &ctx, p, res_k);
+        } else {
+            code_row_any(&mut Passthrough, &ctx, p, res_k);
+        }
+    }
+
+    /// The last row coded of plane `k`.
+    pub fn last(&self, k: usize) -> &[u8] {
+        &self.prev[k]
+    }
+
     /// Whether plane `k` is coded (rather than known or a copy of another).
     pub fn coded(&self, k: usize) -> bool {
         !self.known[k] && self.same_as[k].is_none()
     }
 
     /// Codes the next row: `rows` holds one row per plane (the encoder's samples, or for the
-    /// decoder the known planes' and room for the others), `hint` the hint's rows.
-    pub fn code_row<C: Coder>(&mut self, c: &mut C, rows: &mut [Vec<u8>], hint: Option<&[Vec<u8>]>) {
+    /// decoder the known planes' and room for the others), `hint` the hint's rows. Afterwards
+    /// the rows of the planes are in [`GroupCoder::last`], and `rows` and `hint` hold
+    /// buffers of the right size with arbitrary contents.
+    pub fn code_row<C: Coder>(&mut self, c: &mut C, rows: &mut [Vec<u8>], mut hint: Option<&mut [Vec<u8>]>) {
         let n = rows.len();
         let colors = n - self.has_alpha as usize;
         let lone = colors == 1 && !self.has_alpha;
-        for k in Self::order(n, self.has_alpha) {
-            if let Some(j) = self.same_as[k] {
-                let (a, b) = if j < k { let (a, b) = rows.split_at_mut(k); (&a[j], &mut b[0]) } else { let (a, b) = rows.split_at_mut(j); (&b[0], &mut a[k]) };
-                b.copy_from_slice(a);
+        let copy = |rows: &mut [Vec<u8>], k: usize, j: usize| {
+            let (a, b) = if j < k {
+                let (a, b) = rows.split_at_mut(k);
+                (&a[j], &mut b[0])
+            } else {
+                let (a, b) = rows.split_at_mut(j);
+                (&b[0], &mut a[k])
+            };
+            b.copy_from_slice(a);
+        };
+        if colors == 3 {
+            if self.has_alpha {
+                self.code_plane(c, rows, hint.as_deref(), colors, 2);
             }
-            let is_alpha = self.has_alpha && k == colors;
-            let kind = if lone { 3 } else if is_alpha { 2 } else if k == 0 { 0 } else { 1 };
-            let coded = self.coded(k);
-            // Planes not coded are walked only for the first color plane's residuals.
-            if !coded && !(kind == 0 && colors > 1) {
-                continue;
+            // Plane 0 is needed during the row; the others equal to a plane are copied after.
+            if let Some(j) = self.same_as[0] {
+                copy(rows, 0, j);
             }
-            let (alpha, rest) = if self.has_alpha && !is_alpha {
-                let (r, a) = rows.split_at_mut(colors);
-                (Some((&a[0][..], &self.prev[colors][..])), r)
-            } else {
-                (None, &mut rows[..])
+            let w = self.w;
+            let how: [u8; 3] = std::array::from_fn(|k| if self.coded(k) { 1 } else if k == 0 || self.same_as[k].is_none() { 2 } else { 0 });
+            let (cr, ar) = rows.split_at_mut(3);
+            let (al, alp) = if self.has_alpha { (&ar[0][..w], &self.prev[3][..w]) } else { (&[][..], &[][..]) };
+            let hint_rows = hint.as_deref();
+            let q: [Rows; 3] = std::array::from_fn(|k| Rows {
+                up: &self.prev[k][..w],
+                res_prev: &self.res_prev[k][..w],
+                al,
+                alp,
+                hc: hint_rows.map_or(&[][..], |h| &h[k][..w]),
+                hp: if hint_rows.is_some() { &self.hint_prev[k][..w] } else { &[][..] },
+                base: (if k == 0 { 0 } else { 1 }) * 2 * CTX,
+                match_t: MATCH_BASE + (if k == 0 { 0 } else { 1 }) * 4,
+            });
+            let [c0, c1, c2] = cr else { unreachable!() };
+            let [e0, e1, e2] = &mut self.res[..3] else { unreachable!() };
+            let mut k = Colors {
+                p: [&mut c0[..w], &mut c1[..w], &mut c2[..w]],
+                res: [&mut e0[..w], &mut e1[..w], &mut e2[..w]],
+                q,
+                how,
+                run_t: RUN_BASE,
             };
-            let (res_k, first) = if kind == 1 {
-                let (f, r) = self.res.split_at_mut(k);
-                (&mut r[0], Some(&f[0][..]))
+            let (alpha, hinted, top) = (self.has_alpha, hint_rows.is_some(), self.top);
+            if how[0] == 1 || how[1] == 1 || how[2] == 1 {
+                code_colors_any(c, &mut k, alpha, hinted, top);
             } else {
-                (&mut self.res[k], None)
-            };
-            let ctx = RowCtx {
-                kind,
-                top: self.top,
-                prev: &self.prev[k],
-                alpha,
-                res_prev: &self.res_prev[k],
-                first,
-                hint: hint.map(|h| (&h[k][..], &self.hint_prev[k][..])),
-            };
-            let p = &mut rest[k][..self.w];
-            if coded {
-                code_row(c, &ctx, p, res_k, &mut self.up_run);
-            } else {
-                code_row(&mut Passthrough, &ctx, p, res_k, &mut self.up_run);
+                code_colors_any(&mut Passthrough, &mut k, alpha, hinted, top);
+            }
+            for k in 1..3 {
+                if let Some(j) = self.same_as[k] {
+                    copy(rows, k, j);
+                }
+            }
+        } else {
+            for k in Self::order(n, self.has_alpha) {
+                if let Some(j) = self.same_as[k] {
+                    copy(rows, k, j);
+                }
+                let is_alpha = self.has_alpha && k == colors;
+                let kind = if lone { 3 } else if is_alpha { 2 } else if k == 0 { 0 } else { 1 };
+                // Planes not coded are walked only for the first color plane's residuals.
+                if !self.coded(k) && !(kind == 0 && colors > 1) {
+                    continue;
+                }
+                self.code_plane(c, rows, hint.as_deref(), k, kind);
             }
         }
+        // The callers fill every row anew: the buffers are swapped rather than copied.
         for k in 0..n {
-            self.prev[k].copy_from_slice(&rows[k][..self.w]);
+            std::mem::swap(&mut self.prev[k], &mut rows[k]);
             std::mem::swap(&mut self.res_prev[k], &mut self.res[k]);
-            if let Some(h) = hint {
-                self.hint_prev[k].copy_from_slice(&h[k][..self.w]);
+            if let Some(h) = hint.as_deref_mut() {
+                std::mem::swap(&mut self.hint_prev[k], &mut h[k]);
             }
         }
         self.top = false;
@@ -293,11 +561,13 @@ pub struct Recorder<'o> {
     syms: Vec<(u16, u16)>,
     out: &'o mut Vec<u8>,
     pub chunks: usize,
+    /// Symbols coded so far.
+    pub total: usize,
 }
 
 impl<'o> Recorder<'o> {
     pub fn new(out: &'o mut Vec<u8>) -> Self {
-        Recorder { syms: Vec::with_capacity(CHUNK), out, chunks: 0 }
+        Recorder { syms: Vec::with_capacity(CHUNK), out, chunks: 0, total: 0 }
     }
 
     /// Writes the recorded symbols as a chunk: symbol count, tables, rANS stream.
@@ -324,18 +594,22 @@ impl<'o> Recorder<'o> {
         o.extend_from_slice(&head);
         crate::container::put_varint(o, body.len() as u64);
         o.extend_from_slice(&body);
+        self.total += self.syms.len();
         self.syms.clear();
         self.chunks += 1;
     }
 
-    /// Writes what is left; the stream ends with a chunk of no symbols.
-    pub fn finish(mut self) {
+    /// Writes what is left; the stream ends with a chunk of no symbols. Returns the number
+    /// of symbols.
+    pub fn finish(mut self) -> usize {
         self.flush();
         crate::container::put_varint(self.out, 0);
+        self.total
     }
 }
 
 impl Coder for Recorder<'_> {
+    const DECODES: bool = false;
     #[inline(always)]
     fn code(&mut self, t: usize, sym: u8) -> u8 {
         if self.syms.len() == CHUNK {
@@ -419,6 +693,7 @@ impl<'a> Player<'a> {
 }
 
 impl Coder for Player<'_> {
+    const DECODES: bool = true;
     #[inline(always)]
     fn code(&mut self, t: usize, _sym: u8) -> u8 {
         if self.left == 0 {
