@@ -30,11 +30,13 @@ pub struct Options {
     pub block: usize,
     /// Decode every block and compare (stored whole on a mismatch).
     pub verify: bool,
+    /// For tests: blocks (index mod 64) stored whole as if verification failed.
+    pub force_whole: u64,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { level: 3, block: 4 << 20, verify: true }
+        Options { level: 3, block: 4 << 20, verify: true, force_whole: 0 }
     }
 }
 
@@ -77,6 +79,7 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
     let mut z = Vec::new();
     let mut cz = zstd::bulk::Compressor::new(opt.level).expect("zstd");
     let mut p = 0;
+    let mut nblock = 0;
     while p < src.len() {
         w.write_all(&out)?;
         out.clear();
@@ -92,8 +95,9 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
         let (em, dm) = (enc.mark(), dec.mark());
         enc.encode(b, &mut streams);
         st.transform_s += t.elapsed().as_secs_f64();
-        let mut ok = true;
-        if opt.verify {
+        let mut ok = opt.force_whole >> (nblock % 64) & 1 == 0;
+        nblock += 1;
+        if ok && opt.verify {
             let t = std::time::Instant::now();
             check.clear();
             ok = dec.decode(&streams, &mut check) && check == b;

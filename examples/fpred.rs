@@ -6,26 +6,28 @@ fn lg(d: i64) -> f64 {
 }
 
 struct Cache {
+    size: usize,
     c: Vec<i64>,
     max: i64,
     last: i64,
-    cnt: [[u32; 34]; 3],
+    cnt: Vec<Vec<u32>>,
     tot: [u32; 3],
     bits: f64,
 }
 impl Cache {
     fn new() -> Self {
-        Cache { c: vec![], max: 0, last: 0, cnt: [[1; 34]; 3], tot: [34; 3], bits: 0.0 }
+        let size: usize = std::env::var("CACHE").ok().and_then(|s| s.parse().ok()).unwrap_or(32);
+        Cache { size, c: vec![], max: 0, last: 0, cnt: vec![vec![1; size + 2]; 3], tot: [(size + 2) as u32; 3], bits: 0.0 }
     }
     fn code(&mut self, slot: usize, a: i64) {
         let sym = if let Some(p) = self.c.iter().position(|&x| x == a) {
             self.c.remove(p);
             p
         } else if a == self.max + 1 {
-            32
+            self.size
         } else {
             self.bits += lg(a - self.last);
-            33
+            self.size + 1
         };
         self.bits += -((self.cnt[slot][sym] as f64) / self.tot[slot] as f64).log2();
         self.cnt[slot][sym] += 32;
@@ -38,7 +40,7 @@ impl Cache {
             }
         }
         self.c.insert(0, a);
-        self.c.truncate(32);
+        self.c.truncate(self.size);
         self.max = self.max.max(a);
         self.last = a;
     }

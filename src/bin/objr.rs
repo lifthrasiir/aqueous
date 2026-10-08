@@ -332,7 +332,12 @@ fn fuzz(args: &[String]) {
         for i in 0..n {
             let mut r = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) ^ (i as u64 + 1) ^ (src.len() as u64) << 20);
             let m = mutate(&mut r, &src);
-            let opt = Options { verify: false, block: [1 << 10, 64 << 10, 4 << 20][i % 3], level: 1 };
+            let opt = Options {
+                verify: false,
+                block: [1 << 10, 64 << 10, 4 << 20][i % 3],
+                level: 1,
+                force_whole: if i % 2 == 1 { r.next() } else { 0 },
+            };
             runs += 1;
             let res = std::panic::catch_unwind(|| {
                 let c = compress_with(&m, &opt, &mut Stats::default());

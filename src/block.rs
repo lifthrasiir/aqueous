@@ -76,8 +76,66 @@ const CACHE: usize = 32;
 const SYM_NEW: u8 = CACHE as u8;
 /// Coded as the difference from the previous index.
 const SYM_ESC: u8 = SYM_NEW + 1;
-/// (vt, vn) The corner's v index plus the previous corner's offset from it.
-const SYM_OFF: u8 = SYM_NEW + 2;
+/// The first and second candidate. For v: the vertices before and after the previous
+/// corner's in the last face that had it (a shared edge). For vt, vn: the corner's v index
+/// plus the previous corner's offset from it, and the index last paired with this v.
+const SYM_X1: u8 = SYM_NEW + 2;
+const SYM_X2: u8 = SYM_NEW + 3;
+
+/// Per v index (direct mapped), its neighbours and vt, vn in the last face that had it.
+const CORNERS: usize = 1 << 16;
+
+#[derive(Clone, Copy)]
+struct Corner {
+    v: i64,
+    before: i64,
+    after: i64,
+    t: i64,
+    n: i64,
+}
+
+struct Corners(Vec<Corner>);
+
+impl Corners {
+    fn new() -> Self {
+        Corners(vec![Corner { v: 0, before: 0, after: 0, t: 0, n: 0 }; CORNERS])
+    }
+
+    #[inline]
+    fn get(&self, v: i64) -> Option<&Corner> {
+        let c = &self.0[v as usize % CORNERS];
+        (c.v == v).then_some(c)
+    }
+
+    /// Records a face's corners (v, vt, vn; 0 for absent ones).
+    #[inline]
+    fn face(&mut self, f: &[(i64, i64, i64)]) {
+        let n = f.len();
+        for (j, &(v, t, nn)) in f.iter().enumerate() {
+            let c = Corner { v, before: f[(j + n - 1) % n].0, after: f[(j + 1) % n].0, t, n: nn };
+            self.0[v as usize % CORNERS] = c;
+        }
+    }
+
+    /// Forgets everything (after a block stored whole, on both sides).
+    fn clear(&mut self) {
+        self.0.fill(Corner { v: 0, before: 0, after: 0, t: 0, n: 0 });
+    }
+
+    /// Candidates for corner attribute `k` with v index `v`, after a corner with v index
+    /// `pv` (None for the first), `off` the attribute's last offset from v.
+    #[inline]
+    fn cands(&self, k: usize, v: i64, pv: Option<i64>, off: i64) -> [Option<i64>; 2] {
+        if k == 0 {
+            match pv.and_then(|p| self.get(p)) {
+                Some(c) => [Some(c.before), Some(c.after)],
+                None => [None, None],
+            }
+        } else {
+            [Some(v.wrapping_add(off)), self.get(v).map(|c| if k == 1 { c.t } else { c.n })]
+        }
+    }
+}
 
 /// Recent indices of one attribute, most recent first.
 #[derive(Clone, Copy)]
@@ -459,6 +517,7 @@ pub struct Encoder {
     key: Vec<u8>,
     tmp: Vec<u8>,
     recent: [Recent; 3],
+    corners: Corners,
 }
 
 impl Default for Encoder {
@@ -473,6 +532,7 @@ impl Default for Encoder {
             key: vec![],
             tmp: Vec::with_capacity(64),
             recent: [Recent::new(true), Recent::new(true), Recent::new(true)],
+            corners: Corners::new(),
         }
     }
 }
@@ -493,8 +553,11 @@ impl Encoder {
         Mark { st: self.st, ntpl: self.keys.len() }
     }
 
+    /// Undoes the block coded since `m`, which is then stored whole. The corner table is
+    /// cleared: the decoder never learns what the block would have taught it.
     pub fn reset(&mut self, m: &Mark) {
         self.st = m.st;
+        self.corners.clear();
         for k in self.keys.drain(m.ntpl..) {
             self.bytes -= k.len();
             self.map.remove(&k);
@@ -641,28 +704,40 @@ impl Encoder {
             let Some(id) = self.template(s) else { return false };
             put_uv(&mut s[S_OPS], id);
             let mut k = 2;
-            for &(v, t, nn) in &corners[..n] {
+            let mut pv = None;
+            for c in corners[..n].iter_mut() {
+                let (v, t, nn) = *c;
                 let pat = self.key[k];
                 k += 3 + self.key[k + 2] as usize;
-                self.index(s, 0, v, v);
+                self.index(s, 0, v, v, pv);
                 if pat & C_T != 0 {
-                    self.index(s, 1, t, v);
+                    self.index(s, 1, t, v, pv);
+                } else {
+                    c.1 = 0;
                 }
                 if pat & C_N != 0 {
-                    self.index(s, 2, nn, v);
+                    self.index(s, 2, nn, v, pv);
+                } else {
+                    c.2 = 0;
                 }
+                pv = Some(v);
             }
+            self.corners.face(&corners[..n]);
         }
         true
     }
 
-    /// Codes index `a` of attribute `k` of a corner whose v index is `v`.
+    /// Codes index `a` of attribute `k` of a corner whose v index is `v`, after a corner
+    /// with v index `pv`.
     #[inline]
-    fn index(&mut self, s: &mut [Vec<u8>; NSTREAMS], k: usize, a: i64, v: i64) {
+    fn index(&mut self, s: &mut [Vec<u8>; NSTREAMS], k: usize, a: i64, v: i64, pv: Option<i64>) {
         let x = &mut self.st.idx[k];
+        let cands = self.corners.cands(k, v, pv, x.off);
         let p = x.find(a);
-        let sym = if k > 0 && a == v.wrapping_add(x.off) {
-            SYM_OFF
+        let sym = if cands[0] == Some(a) {
+            SYM_X1
+        } else if cands[1] == Some(a) {
+            SYM_X2
         } else if let Some(p) = p {
             p as u8
         } else if a == x.max.wrapping_add(1) {
@@ -764,6 +839,7 @@ pub struct Decoder {
     tpls: Vec<(u32, u32)>,
     arena: Vec<u8>,
     recent: [Recent; 3],
+    corners: Corners,
 }
 
 impl Default for Decoder {
@@ -773,6 +849,7 @@ impl Default for Decoder {
             tpls: vec![],
             arena: vec![],
             recent: [Recent::new(false), Recent::new(false), Recent::new(false)],
+            corners: Corners::new(),
         }
     }
 }
@@ -788,6 +865,9 @@ impl Decoder {
         DecMark { st: self.st, ntpl: self.tpls.len(), narena: self.arena.len() }
     }
 
+    /// Undoes the block decoded since `m`, which is then stored whole. What the block taught
+    /// the corner table stays, as it does in a decoder that never saw the block: the
+    /// encoder forgets all of it instead, so it never picks a candidate the decoder lacks.
     pub fn reset(&mut self, m: &DecMark) {
         self.st = m.st;
         self.tpls.truncate(m.ntpl);
@@ -896,24 +976,32 @@ impl Decoder {
                     self.st.count[kind as usize] += 1;
                 }
             } else {
-                for _ in 0..k[1] {
+                let mut face = [(0i64, 0i64, 0i64); MAX_CORNERS];
+                let n = k[1] as usize;
+                let mut pv = None;
+                for c in face[..n].iter_mut() {
                     let (pat, sl) = (k[i], k[i + 2] as usize);
                     out.extend_from_slice(&k[i + 3..i + 3 + sl]);
                     i += 3 + sl;
-                    let (idx, count) = (&mut self.st.idx, self.st.count);
-                    let v = idx[0].decode(&mut fsym[0], &mut fesc[0], 0);
+                    let (idx, count, cs) = (&mut self.st.idx, self.st.count, &self.corners);
+                    let v = idx[0].decode(&mut fsym[0], &mut fesc[0], 0, cs.cands(0, 0, pv, 0));
+                    c.0 = v;
                     put_index(out, v, pat & C_NEG != 0, count[0]);
                     if pat & C_T != 0 {
-                        let a = idx[1].decode(&mut fsym[1], &mut fesc[1], v);
+                        let a = idx[1].decode(&mut fsym[1], &mut fesc[1], v, cs.cands(1, v, pv, idx[1].off));
+                        c.1 = a;
                         out.push(b'/');
                         put_index(out, a, pat & (C_NEG << 1) != 0, count[1]);
                     }
                     if pat & C_N != 0 {
-                        let a = idx[2].decode(&mut fsym[2], &mut fesc[2], v);
+                        let a = idx[2].decode(&mut fsym[2], &mut fesc[2], v, cs.cands(2, v, pv, idx[2].off));
+                        c.2 = a;
                         out.extend_from_slice(if pat & C_T != 0 { b"/" } else { b"//" });
                         put_index(out, a, pat & (C_NEG << 2) != 0, count[2]);
                     }
+                    pv = Some(v);
                 }
+                self.corners.face(&face[..n]);
             }
             out.extend_from_slice(&k[i + 1..]);
         }
@@ -924,14 +1012,14 @@ impl Decoder {
 }
 
 impl Indices {
-    /// Decodes an index of a corner whose v index is `v`.
+    /// Decodes an index of a corner whose v index is `v`, given the candidates.
     #[inline]
-    fn decode(&mut self, sym: &mut Rd, esc: &mut Rd, v: i64) -> i64 {
+    fn decode(&mut self, sym: &mut Rd, esc: &mut Rd, v: i64, cands: [Option<i64>; 2]) -> i64 {
         let x = self;
         let c = sym.u8();
         let (a, p) = match c {
-            SYM_OFF => {
-                let a = v.wrapping_add(x.off);
+            SYM_X1 | SYM_X2 => {
+                let a = cands[(c - SYM_X1) as usize].unwrap_or(0);
                 (a, x.find(a))
             }
             SYM_NEW => (x.max.wrapping_add(1), None),

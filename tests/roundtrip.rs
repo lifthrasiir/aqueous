@@ -11,6 +11,10 @@ fn rt(src: &[u8]) {
         assert_eq!(decompress(&c).unwrap(), src, "block {block}: {:?}", String::from_utf8_lossy(&src[..src.len().min(200)]));
         assert_eq!(st.whole, 0, "a block failed to code");
     }
+    // Blocks stored whole in between (verification off, or it would hide a mismatch): the
+    // encoder must not use what it learnt from them.
+    let opt = Options { block: 1 << 10, verify: false, force_whole: 0x5A5A_1234_8421_0F0F, ..Default::default() };
+    assert_eq!(decompress(&compress_with(src, &opt, &mut Stats::default())).unwrap(), src);
     assert_eq!(decompress(&compress(src)).unwrap(), src);
 }
 
@@ -100,6 +104,34 @@ fn many_templates() {
     for i in 0..70000 {
         let sep = " ".repeat(1 + i % 7);
         s += &format!("v{sep}{}{}{}\n", i % 100, " ".repeat(1 + i / 7 % 11), "0.".to_string() + &"0".repeat(i / 77 % 15) + "1");
+    }
+    rt(s.as_bytes());
+}
+
+/// A mesh with shared vertices, faces in an irregular order, and separate vt and vn
+/// numbering: every corner symbol is used. Blocks stored whole in between.
+#[test]
+fn mesh_corners() {
+    let mut s = String::new();
+    let (w, h) = (60, 60);
+    for y in 0..h {
+        for x in 0..w {
+            s += &format!("v {x}.0 {y}.0 {}\nvt 0.{x:02} 0.{y:02}\nvn 0 0 1\n", (x * y) % 7);
+        }
+    }
+    let mut r = 5u64;
+    for y in 0..h - 1 {
+        for x in 0..w - 1 {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            let (x, y) = if r % 3 == 0 { ((r >> 8) as usize % (w - 1), (r >> 20) as usize % (h - 1)) } else { (x, y) };
+            let a = y * w + x + 1;
+            let (b, c, d) = (a + 1, a + w + 1, a + w);
+            // The vt paired with a vertex changes over time (as at seams).
+            let t = |i: usize| (i * 7 + (r >> 40) as usize % 3) % (w * h) + 1;
+            s += &format!("f {a}/{}/{a} {b}/{}/{b} {c}/{}/{c}\nf {a}/{}/{} {c}/{}/{} {d}/{}/{}\n", t(a), t(b), t(c), t(a), w * h - a + 1, t(c), w * h - c + 1, t(d), w * h - d + 1);
+        }
     }
     rt(s.as_bytes());
 }
