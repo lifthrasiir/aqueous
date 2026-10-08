@@ -27,11 +27,12 @@ pub const S_VN: usize = 5;
 pub const S_VP: usize = 6;
 /// Scale changes of `%g` numbers.
 pub const S_SCALE: usize = 7;
-pub const S_FV: usize = 8;
-pub const S_FT: usize = 9;
-pub const S_FN: usize = 10;
-pub const NSTREAMS: usize = 11;
-pub const STREAM_NAMES: [&str; NSTREAMS] = ["ops", "tpl", "text", "v", "vt", "vn", "vp", "scale", "fv", "ft", "fn"];
+/// Corner index symbols per attribute (v, vt, vn), then their escapes.
+pub const S_FSYM: usize = 8;
+pub const S_FESC: usize = 11;
+pub const NSTREAMS: usize = 14;
+pub const STREAM_NAMES: [&str; NSTREAMS] =
+    ["ops", "tpl", "text", "v", "vt", "vn", "vp", "scale", "fv", "ft", "fn", "fv-esc", "ft-esc", "fn-esc"];
 
 /// Template kinds; the numeric ones index their value stream from S_V.
 const K_VP: u8 = 3;
@@ -58,6 +59,43 @@ const C_T: u8 = 1;
 const C_N: u8 = 2;
 const C_NEG: u8 = 4;
 
+/// Corner index symbols: a position in the cache of recent indices, or one of these.
+const CACHE: usize = 32;
+/// One more than the largest index so far.
+const SYM_NEW: u8 = CACHE as u8;
+/// Coded as the difference from the previous index.
+const SYM_ESC: u8 = SYM_NEW + 1;
+/// (vt, vn) The corner's v index plus the previous corner's offset from it.
+const SYM_OFF: u8 = SYM_NEW + 2;
+
+/// Recent indices of one attribute, most recent first.
+#[derive(Clone, Copy)]
+struct Indices {
+    cache: [i64; CACHE],
+    max: i64,
+    last: i64,
+    /// Previous index minus its corner's v index.
+    off: i64,
+}
+
+impl Indices {
+    #[inline]
+    fn find(&self, a: i64) -> Option<usize> {
+        self.cache.iter().position(|&x| x == a)
+    }
+
+    /// Records `a` (found at `p` in the cache, if it is there).
+    #[inline]
+    fn update(&mut self, a: i64, p: Option<usize>, v: i64) {
+        let p = p.unwrap_or(CACHE - 1);
+        self.cache.copy_within(0..p, 1);
+        self.cache[0] = a;
+        self.max = self.max.max(a);
+        self.last = a;
+        self.off = a.wrapping_sub(v);
+    }
+}
+
 /// Prediction state, the same on both sides.
 #[derive(Clone, Copy)]
 pub struct State {
@@ -65,14 +103,13 @@ pub struct State {
     prev: [[(i64, i32); MAX_NUMS]; 4],
     /// Lines coded per kind v, vt, vn (for relative indices).
     count: [i64; 3],
-    last_v: i64,
-    last_dt: i64,
-    last_dn: i64,
+    idx: [Indices; 3],
 }
 
 impl Default for State {
     fn default() -> Self {
-        State { prev: [[(0, 0); MAX_NUMS]; 4], count: [0; 3], last_v: 0, last_dt: 0, last_dn: 0 }
+        let idx = Indices { cache: [0; CACHE], max: 0, last: 0, off: 0 };
+        State { prev: [[(0, 0); MAX_NUMS]; 4], count: [0; 3], idx: [idx; 3] }
     }
 }
 
@@ -346,21 +383,35 @@ impl Encoder {
             for &(v, t, nn) in &corners[..n] {
                 let pat = self.key[k];
                 k += 3 + self.key[k + 2] as usize;
-                put_sv(&mut s[S_FV], v.wrapping_sub(self.st.last_v));
-                self.st.last_v = v;
+                self.index(s, 0, v, v);
                 if pat & C_T != 0 {
-                    let d = t.wrapping_sub(v);
-                    put_sv(&mut s[S_FT], d.wrapping_sub(self.st.last_dt));
-                    self.st.last_dt = d;
+                    self.index(s, 1, t, v);
                 }
                 if pat & C_N != 0 {
-                    let d = nn.wrapping_sub(v);
-                    put_sv(&mut s[S_FN], d.wrapping_sub(self.st.last_dn));
-                    self.st.last_dn = d;
+                    self.index(s, 2, nn, v);
                 }
             }
         }
         true
+    }
+
+    /// Codes index `a` of attribute `k` of a corner whose v index is `v`.
+    #[inline]
+    fn index(&mut self, s: &mut [Vec<u8>; NSTREAMS], k: usize, a: i64, v: i64) {
+        let x = &mut self.st.idx[k];
+        let p = x.find(a);
+        let sym = if k > 0 && a == v.wrapping_add(x.off) {
+            SYM_OFF
+        } else if let Some(p) = p {
+            p as u8
+        } else if a == x.max.wrapping_add(1) {
+            SYM_NEW
+        } else {
+            put_sv(&mut s[S_FESC + k], a.wrapping_sub(x.last));
+            SYM_ESC
+        };
+        s[S_FSYM + k].push(sym);
+        x.update(a, p, v);
     }
 
     /// A corner token: absolute indices (relative ones resolved) and its pattern.
@@ -489,9 +540,8 @@ impl Decoder {
         let mut tp = 0;
         let mut vs = [Rd::new(&s[S_V]), Rd::new(&s[S_VT]), Rd::new(&s[S_VN]), Rd::new(&s[S_VP])];
         let mut scale = Rd::new(&s[S_SCALE]);
-        let mut fv = Rd::new(&s[S_FV]);
-        let mut ft = Rd::new(&s[S_FT]);
-        let mut fnn = Rd::new(&s[S_FN]);
+        let mut fsym = [Rd::new(&s[S_FSYM]), Rd::new(&s[S_FSYM + 1]), Rd::new(&s[S_FSYM + 2])];
+        let mut fesc = [Rd::new(&s[S_FESC]), Rd::new(&s[S_FESC + 1]), Rd::new(&s[S_FESC + 2])];
         while !ops.done() {
             let op = ops.uv();
             if op == OP_RAW {
@@ -548,37 +598,60 @@ impl Decoder {
                     let (pat, sl) = (k[i], k[i + 2] as usize);
                     out.extend_from_slice(&k[i + 3..i + 3 + sl]);
                     i += 3 + sl;
-                    let v = self.st.last_v.wrapping_add(fv.sv());
-                    self.st.last_v = v;
-                    self.index(out, v, pat & C_NEG != 0, 0);
+                    let (idx, count) = (&mut self.st.idx, self.st.count);
+                    let v = idx[0].decode(&mut fsym[0], &mut fesc[0], 0);
+                    put_index(out, v, pat & C_NEG != 0, count[0]);
                     if pat & C_T != 0 {
-                        let d = self.st.last_dt.wrapping_add(ft.sv());
-                        self.st.last_dt = d;
+                        let a = idx[1].decode(&mut fsym[1], &mut fesc[1], v);
                         out.push(b'/');
-                        self.index(out, v.wrapping_add(d), pat & (C_NEG << 1) != 0, 1);
+                        put_index(out, a, pat & (C_NEG << 1) != 0, count[1]);
                     }
                     if pat & C_N != 0 {
-                        let d = self.st.last_dn.wrapping_add(fnn.sv());
-                        self.st.last_dn = d;
+                        let a = idx[2].decode(&mut fsym[2], &mut fesc[2], v);
                         out.extend_from_slice(if pat & C_T != 0 { b"/" } else { b"//" });
-                        self.index(out, v.wrapping_add(d), pat & (C_NEG << 2) != 0, 2);
+                        put_index(out, a, pat & (C_NEG << 2) != 0, count[2]);
                     }
                 }
             }
             out.extend_from_slice(&k[i + 1..]);
         }
-        let all = [&ops, &tpl, &vs[0], &vs[1], &vs[2], &vs[3], &scale, &fv, &ft, &fnn];
-        tp == text.len() && all.iter().all(|r| r.done())
+        let all = [&ops, &tpl, &vs[0], &vs[1], &vs[2], &vs[3], &scale];
+        tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).all(|r| r.done())
     }
 
+}
+
+impl Indices {
+    /// Decodes an index of a corner whose v index is `v`.
     #[inline]
-    fn index(&self, out: &mut Vec<u8>, a: i64, neg: bool, k: usize) {
-        if neg {
-            out.push(b'-');
-            num::put(out, (self.st.count[k] + 1).wrapping_sub(a), 0);
-        } else {
-            num::put(out, a, 0);
-        }
+    fn decode(&mut self, sym: &mut Rd, esc: &mut Rd, v: i64) -> i64 {
+        let x = self;
+        let c = sym.u8();
+        let (a, p) = match c {
+            SYM_OFF => {
+                let a = v.wrapping_add(x.off);
+                (a, x.find(a))
+            }
+            SYM_NEW => (x.max.wrapping_add(1), None),
+            SYM_ESC => (x.last.wrapping_add(esc.sv()), None),
+            _ => {
+                let p = (c as usize).min(CACHE - 1);
+                (x.cache[p], Some(p))
+            }
+        };
+        x.update(a, p, v);
+        a
+    }
+}
+
+/// Writes index `a`, relative to `count` (the lines of its kind so far) if `neg`.
+#[inline]
+fn put_index(out: &mut Vec<u8>, a: i64, neg: bool, count: i64) {
+    if neg {
+        out.push(b'-');
+        num::put(out, (count + 1).wrapping_sub(a), 0);
+    } else {
+        num::put(out, a, 0);
     }
 }
 
