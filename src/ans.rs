@@ -264,4 +264,29 @@ mod tests {
         }
         assert!(encode(&[0x80, 0x00], &mut vec![]).is_none());
     }
+
+    /// Short streams, one symbol only, and every symbol (rare ones at frequency 1).
+    #[test]
+    fn edges() {
+        let check = |vals: &[u64]| {
+            let mut src = vec![];
+            for &v in vals {
+                put_uv(&mut src, v);
+            }
+            let mut c = vec![];
+            encode(&src, &mut c).unwrap();
+            let mut d = vec![];
+            assert!(decode(&c, src.len(), &mut d));
+            assert_eq!(d, src);
+        };
+        for n in 1..300 {
+            check(&vec![5; n]);
+            check(&(0..n as u64).collect::<Vec<_>>());
+        }
+        // All 65 bit lengths with all top bits, most once, one very often.
+        let mut v: Vec<u64> = (0..64).flat_map(|b| (0..4u64).map(move |t| ((4 | t) << b) >> 2)).collect();
+        v.extend(std::iter::repeat_n(3, 100000));
+        v.push(u64::MAX);
+        check(&v);
+    }
 }
