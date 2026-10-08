@@ -7,7 +7,7 @@
 //! value, integers, reals, text/blob lengths and bytes. A group decodes on its own (or with
 //! its table), before any page is rebuilt.
 
-use crate::index::ROWID;
+use crate::index::{Keys, ROWID};
 use crate::varint::{Rd, get_sqlite, put_sqlite, put_sv, put_uv, sqlite_len, uv_len, zz};
 use crate::{Result, corrupt};
 use std::collections::HashMap;
@@ -99,32 +99,32 @@ pub fn parse(pay: &[u8], cols: &mut Vec<(u64, u32)>) -> bool {
     header_len((hl - n) as u64) == hl as u64 && b == pay.len()
 }
 
-/// Appends the index entry SQLite builds from a table row (payload `row`): the indexed
-/// columns (`map`, with their serial types and offsets `cv` as `index::order` found them),
-/// then the rowid.
-pub fn predict(row: &[u8], rowid: i64, map: &[u32], cv: &[(u32, u32)], fmt4: bool, out: &mut Vec<u8>) {
+/// Appends the index entry SQLite builds from row `r` of a table: its indexed columns
+/// (`keys` has them), then the rowid.
+pub fn predict(keys: &Keys, r: usize, fmt4: bool, out: &mut Vec<u8>) {
+    let rowid = keys.rowids[r];
     let rst = canon_st(rowid, fmt4);
-    let st_of = |j: usize| if map[j] == ROWID { rst } else { cv[j].0 as u64 };
+    let m = keys.map.len();
+    let st_of = |j: usize| if keys.map[j] == ROWID { rst } else { keys.value(r, j).0 };
     let mut s = sqlite_len(rst) as u64;
-    for j in 0..map.len() {
+    for j in 0..m {
         s += sqlite_len(st_of(j)) as u64;
     }
     let mut vb = [0u8; 9];
     let n = put_sqlite(&mut vb, header_len(s));
     out.extend_from_slice(&vb[..n]);
-    for j in 0..map.len() {
+    for j in 0..m {
         let n = put_sqlite(&mut vb, st_of(j));
         out.extend_from_slice(&vb[..n]);
     }
     let n = put_sqlite(&mut vb, rst);
     out.extend_from_slice(&vb[..n]);
     let rb = rowid.to_be_bytes();
-    for j in 0..map.len() {
-        if map[j] == ROWID {
+    for j in 0..m {
+        if keys.map[j] == ROWID {
             out.extend_from_slice(&rb[8 - INT_SIZE[rst as usize]..]);
         } else {
-            let (st, off) = cv[j];
-            out.extend_from_slice(&row[off as usize..off as usize + st_size(st as u64)]);
+            out.extend_from_slice(keys.value(r, j).1);
         }
     }
     out.extend_from_slice(&rb[8 - INT_SIZE[rst as usize]..]);
@@ -209,8 +209,9 @@ pub struct ColEnc {
     /// The integers against the one before each in its record (the previous column's,
     /// unscaled), coded as they come.
     hres: Vec<u8>,
-    /// The decimal exponent of each (0 for integers): a column's decimals and integers are
-    /// scaled to its largest exponent, so that deltas compare like with like.
+    /// The decimal exponent of each (0 for integers; empty until the first decimal): a
+    /// column's decimals and integers are scaled to its largest exponent, so that deltas
+    /// compare like with like.
     iexp: Vec<u8>,
     pub real: Vec<u8>,
     pub len: Vec<u8>,
@@ -287,6 +288,9 @@ impl GroupEnc {
                         c.tag.push(T_DEC + e);
                         put_sv(&mut c.ints, m);
                         c.nints += 1;
+                        if c.iexp.is_empty() {
+                            c.iexp.resize(c.nints - 1, 0);
+                        }
                         c.iexp.push(e);
                         put_sv(&mut c.hres, m.wrapping_sub(last));
                         last = m;
@@ -303,7 +307,9 @@ impl GroupEnc {
                     c.tag.push(if canon_st(v, fmt4) == st { T_INT } else { T_ODD_INT + st as u8 });
                     put_sv(&mut c.ints, v);
                     c.nints += 1;
-                    c.iexp.push(0);
+                    if !c.iexp.is_empty() {
+                        c.iexp.push(0);
+                    }
                     put_sv(&mut c.hres, v.wrapping_sub(last));
                     last = v;
                 }
@@ -361,7 +367,7 @@ impl GroupEnc {
     }
 
     /// Appends the group's streams, and its directory entry.
-    pub fn finish(&self, dir: &mut Vec<u8>, s: &mut [Vec<u8>; 8], tmp: &mut Vec<u8>) {
+    pub fn finish(&self, dir: &mut Vec<u8>, s: &mut [Vec<u8>; 8]) {
         let [rec, rowid, rawpay, tag, int, real, len, bytes] = s;
         put_uv(dir, self.rec.len() as u64);
         put_uv(dir, self.rowid.len() as u64);
@@ -370,68 +376,66 @@ impl GroupEnc {
         rec.extend_from_slice(&self.rec);
         rowid.extend_from_slice(&self.rowid);
         rawpay.extend_from_slice(&self.rawpay);
-        let mut vals: Vec<i64> = Vec::new();
         for c in &self.cols {
-            vals.clear();
-            let mut r = Rd::new(&c.ints);
-            vals.extend((0..c.nints).map(|_| r.sv().unwrap()));
+            // The integers with their exponents, decoded as needed (not held as i64s).
+            let each = |f: &mut dyn FnMut(i64, u8)| {
+                let mut r = Rd::new(&c.ints);
+                for k in 0..c.nints {
+                    f(r.sv().unwrap(), c.iexp.get(k).copied().unwrap_or(0));
+                }
+            };
             // Scale to the largest exponent if nothing overflows.
             let top = c.iexp.iter().copied().max().unwrap_or(0);
-            let scaled: Option<Vec<i64>> = (top > 0)
-                .then(|| {
-                    vals
-                        .iter()
-                        .zip(&c.iexp)
-                        .map(|(&v, &e)| P10I.get((top - e) as usize).and_then(|&p| v.checked_mul(p)))
-                        .collect()
-                })
-                .flatten();
+            let scale = |v: i64, e: u8| P10I.get((top - e) as usize).and_then(|&p| v.checked_mul(p));
+            let mut fits = top > 0;
+            if fits {
+                each(&mut |v, e| fits &= scale(v, e).is_some());
+            }
             // Integers as they are or against the column's previous one (scaled or not), or
-            // against the previous integer of the record: whichever takes the fewest bytes.
-            let cost = |ints: &[i64]| {
+            // against the previous integer of the record: whichever takes the fewest bytes
+            // (the cost is the coded length).
+            let cost = |scaled: bool| {
                 let mut cost = [0usize; 2];
                 let mut prev = 0i64;
-                for &v in ints {
+                each(&mut |v, e| {
+                    let v = if scaled { scale(v, e).unwrap() } else { v };
                     cost[0] += uv_len(zz(v));
                     cost[1] += uv_len(zz(v.wrapping_sub(prev)));
                     prev = v;
-                }
+                });
                 (0..2).map(|m| (cost[m], m)).min().unwrap()
             };
-            let mut best = cost(&vals);
-            let mut scaled = scaled;
-            if let Some(sc) = &scaled {
-                let k = cost(sc);
+            let mut best = cost(false);
+            let mut scaled = false;
+            if fits {
+                let k = cost(true);
                 if k.0 < best.0 {
                     best = k;
-                } else {
-                    scaled = None;
+                    scaled = true;
                 }
             }
             if c.hres.len() < best.0 {
                 best = (c.hres.len(), 2);
-                scaled = None;
+                scaled = false;
             }
             let mode = best.1;
-            let ints = scaled.as_deref().unwrap_or(&vals);
-            tmp.clear();
+            put_uv(dir, c.tag.len() as u64);
+            put_uv(dir, mode as u64 + 3 * if scaled { top as u64 + 1 } else { 0 });
+            put_uv(dir, best.0 as u64);
             if mode == 2 {
-                tmp.extend_from_slice(&c.hres);
+                int.extend_from_slice(&c.hres);
             } else {
                 let mut prev = 0i64;
-                for &v in ints {
-                    put_sv(tmp, v.wrapping_sub([0, prev][mode]));
+                each(&mut |v, e| {
+                    let v = if scaled { scale(v, e).unwrap() } else { v };
+                    put_sv(int, v.wrapping_sub([0, prev][mode]));
                     prev = v;
-                }
+                });
             }
-            put_uv(dir, c.tag.len() as u64);
-            put_uv(dir, mode as u64 + 3 * if scaled.is_some() { top as u64 + 1 } else { 0 });
-            put_uv(dir, tmp.len() as u64);
             put_uv(dir, c.real.len() as u64);
             put_uv(dir, c.len.len() as u64);
             put_uv(dir, c.bytes.len() as u64);
             tag.extend_from_slice(&c.tag);
-            int.extend_from_slice(tmp);
             real.extend_from_slice(&c.real);
             len.extend_from_slice(&c.len);
             bytes.extend_from_slice(&c.bytes);
@@ -439,6 +443,7 @@ impl GroupEnc {
     }
 }
 
+#[derive(Clone)]
 pub struct ColDec<'a> {
     tag: Rd<'a>,
     int: Rd<'a>,
@@ -473,6 +478,7 @@ impl ColDec<'_> {
     }
 }
 
+#[derive(Clone)]
 pub struct GroupDec<'a> {
     rec: Rd<'a>,
     rowid: Rd<'a>,
@@ -483,45 +489,11 @@ pub struct GroupDec<'a> {
     vals: Vec<(u64, i64)>,
 }
 
-/// The decoded records of a group, in order.
-#[derive(Default)]
-pub struct Recs {
-    pub buf: Vec<u8>,
-    pub ends: Vec<usize>,
-    pub rowids: Vec<i64>,
-}
-
-impl crate::index::Rows for Recs {
-    fn count(&self) -> usize {
-        self.len()
-    }
-    fn row(&self, i: usize) -> &[u8] {
-        self.get(i)
-    }
-}
-
-impl Recs {
-    #[inline]
-    pub fn get(&self, i: usize) -> &[u8] {
-        let s = if i == 0 { 0 } else { self.ends[i - 1] };
-        &self.buf[s..self.ends[i]]
-    }
-
-    pub fn len(&self) -> usize {
-        self.ends.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.ends.is_empty()
-    }
-}
-
-/// What a group's predicted records come from: its table's records, their order in the
-/// index, and the table columns of the index.
-pub struct RefCtx<'r> {
-    pub table: &'r Recs,
-    pub order: crate::index::Order,
-    pub map: &'r [u32],
+/// What a group's predicted records come from: the indexed columns of its table's rows,
+/// and their order in the index.
+pub struct RefCtx {
+    pub keys: Keys<'static>,
+    pub perm: Vec<u32>,
 }
 
 impl<'a> GroupDec<'a> {
@@ -550,18 +522,8 @@ impl<'a> GroupDec<'a> {
         Ok(GroupDec { rec, rowid, rawpay, cols, prev_rowid: 0, prev_rank: 0, vals: Vec::new() })
     }
 
-    /// Decodes all records (and rowids if `table`).
-    pub fn decode(&mut self, table: bool, fmt4: bool, rc: Option<&RefCtx>) -> Result<Recs> {
-        let mut r = Recs::default();
-        r.buf.reserve(self.rawpay.b.len() + self.cols.iter().map(|c| c.bytes.b.len()).sum::<usize>());
-        while !self.rec.at_end() {
-            let rowid = self.next(table, fmt4, rc, &mut r.buf)?;
-            if table {
-                r.rowids.push(rowid);
-            }
-            r.ends.push(r.buf.len());
-        }
-        Ok(r)
+    pub fn at_end(&self) -> bool {
+        self.rec.at_end()
     }
 
     /// Appends the next record to `out`, returns its rowid (if `table`).
@@ -581,14 +543,12 @@ impl<'a> GroupDec<'a> {
                 self.prev_rank = rank;
                 let row = *usize::try_from(rank)
                     .ok()
-                    .and_then(|i| rc.order.perm.get(i))
+                    .and_then(|i| rc.perm.get(i))
                     .ok_or_else(corrupt)? as usize;
-                if !rc.order.ok[row] {
+                if !rc.keys.ok[row] {
                     return Err(corrupt());
                 }
-                let m = rc.map.len();
-                let cv = &rc.order.vals[row * m..(row + 1) * m];
-                predict(rc.table.get(row), rc.table.rowids[row], rc.map, cv, fmt4, out);
+                predict(&rc.keys, row, fmt4, out);
             }
             _ => {
                 let mut vals = std::mem::take(&mut self.vals);
@@ -709,8 +669,9 @@ mod tests {
         // Non-minimal header length, wrong total length.
         assert!(!parse(&[0x80, 4, 2, 17, 0, 1, 44, b'a', b'b'], &mut cols));
         assert!(!parse(&rec[..7], &mut cols));
-        let cv = [(cols[1].0 as u32, cols[1].1), (cols[0].0 as u32, cols[0].1)];
-        predict(&rec, 5, &[1, 0], &cv, true, &mut out);
+        let mut keys = Keys::new(&[1, 0]);
+        assert!(keys.push(&rec, 5, &mut cols));
+        predict(&keys, 0, true, &mut out);
         assert_eq!(out, [4u8, 17, 2, 1, b'a', b'b', 1, 44, 5]);
     }
 }

@@ -28,7 +28,7 @@
 
 use crate::index;
 use crate::page::{Cell, Ends, Geom, K_OVF, K_RAW, K_ZERO, be16, be32, hdr_off, is_btree, parse_page};
-use crate::record::{GroupDec, GroupEnc, RefCtx, Recs, int_value, is_int, predict, st_size};
+use crate::record::{GroupDec, GroupEnc, RefCtx, int_value, is_int, predict, st_size};
 use crate::varint::{Rd, put_sqlite, put_sv, put_uv};
 use crate::{Result, corrupt};
 
@@ -266,7 +266,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         groups[gi as usize].pays[j as usize] = &arena[start..start + len];
     }
     drop(gathered);
-    let pays: Vec<&[&[u8]]> = groups.iter().map(|gr| &gr.pays[..]).collect();
+    let mut pays: Vec<Vec<&[u8]>> = groups.iter_mut().map(|gr| std::mem::take(&mut gr.pays)).collect();
     crate::mem::mark("enc: payloads");
 
     // Indexes predicted from their tables: (table group, columns) per index group.
@@ -276,7 +276,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         let sg = gid_t[schema_root];
         if sg != u32::MAX {
             let enc = u32::from_be_bytes(file[56..60].try_into().unwrap());
-            for (ir, tr) in index::schema_indexes(pays[sg as usize], enc) {
+            for (ir, tr) in index::schema_indexes(&pays[sg as usize], enc) {
                 let (ir, tr) = (ir as usize, tr as usize);
                 if ir > n || tr > n || !is_btree(kind[ir]) || !is_btree(kind[tr]) {
                     continue;
@@ -289,7 +289,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 let t = &groups[gt as usize];
                 let row_of = row_lookup(&t.rowids);
                 if let Some(key) =
-                    index::discover_key(pays[gi as usize], pays[gt as usize], &t.rowids, &row_of)
+                    index::discover_key(&pays[gi as usize], &pays[gt as usize], &t.rowids, &row_of)
                 {
                     refs[gi as usize] = Some((gt as usize, key));
                 }
@@ -298,13 +298,24 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
     }
 
     crate::mem::mark("enc: index keys");
-    // Code the groups.
+    // Code the groups, freeing their payloads (and rowids) after their last use: a table's
+    // with its last index.
+    let mut last_use: Vec<usize> = (0..groups.len()).collect();
+    for (i, r) in refs.iter().enumerate() {
+        if let Some((t, _)) = r {
+            last_use[*t] = last_use[*t].max(i);
+        }
+    }
+    let mut free_at: Vec<Vec<usize>> = vec![Vec::new(); groups.len()];
+    for (x, &i) in last_use.iter().enumerate() {
+        free_at[i].push(x);
+    }
     let mut cols = Vec::new();
-    let mut tmp = Vec::new();
     let mut pred = Vec::new();
     let mut gs: [Vec<u8>; 8] = Default::default();
     put_uv(&mut s[S_DIR], groups.len() as u64);
-    for (i, gr) in groups.iter().enumerate() {
+    for i in 0..groups.len() {
+        let gr = &groups[i];
         let mut ge = GroupEnc::default();
         let d = &mut s[S_DIR];
         d.push(gr.table as u8);
@@ -323,27 +334,26 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
             ge.rowid(r);
         }
         if let Some((t, key)) = &refs[i] {
-            let map = &key.cols;
             let tg = &groups[*t];
-            let order = index::order(pays[*t], &tg.rowids, key);
-            let mut rank = vec![0u32; order.perm.len()];
-            for (k, &r) in order.perm.iter().enumerate() {
+            let keys = index::Keys::over(&key.cols, &pays[*t], &tg.rowids, &mut cols);
+            let perm = index::order(&keys, key);
+            let mut rank = vec![0u32; perm.len()];
+            for (k, &r) in perm.iter().enumerate() {
                 rank[r as usize] = k as u32;
             }
+            drop(perm);
             let row_of = row_lookup(&tg.rowids);
-            let m = map.len();
-            for &e in pays[i] {
+            for &e in &pays[i] {
                 // The entry's rowid, its row, and the entry the row predicts.
                 let r = crate::record::parse(e, &mut cols)
                     .then(|| cols.last().copied())
                     .flatten()
                     .filter(|&(st, _)| is_int(st))
                     .and_then(|(st, off)| row_of(int_value(st, &e[off as usize..off as usize + st_size(st)])))
-                    .filter(|&r| order.ok[r]);
+                    .filter(|&r| keys.ok[r]);
                 if let Some(r) = r {
                     pred.clear();
-                    let cv = &order.vals[r * m..(r + 1) * m];
-                    predict(pays[*t][r], tg.rowids[r], map, cv, g.fmt4, &mut pred);
+                    predict(&keys, r, g.fmt4, &mut pred);
                     if pred == e {
                         ge.reference(rank[r] as i64);
                         continue;
@@ -352,7 +362,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 ge.record(e, g.fmt4, &mut cols);
             }
         } else {
-            for &e in pays[i] {
+            for &e in &pays[i] {
                 ge.record(e, g.fmt4, &mut cols);
             }
         }
@@ -366,7 +376,12 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 ge.stats()
             );
         }
-        ge.finish(&mut s[S_DIR], &mut gs, &mut tmp);
+        ge.finish(&mut s[S_DIR], &mut gs);
+        drop(ge);
+        for &x in &free_at[i] {
+            pays[x] = Vec::new();
+            groups[x].rowids = Vec::new();
+        }
     }
     crate::mem::mark("enc: groups");
     for (j, v) in gs.into_iter().enumerate() {
@@ -499,30 +514,45 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S) -> Result<
         meta.push((table, r));
         gds.push(GroupDec::new(&mut dir, &mut gstreams)?);
     }
-    // Tables indexes are predicted from are decoded first, whole; the other groups record
-    // by record as the pages need them.
-    let mut tables: Vec<Option<Recs>> = (0..ng).map(|_| None).collect();
-    for i in 0..ng {
-        if let Some((t, _)) = &meta[i].1 {
-            let t = *t;
-            if t >= ng || meta[t].1.is_some() || !meta[t].0 {
-                return Err(corrupt());
-            }
-            if tables[t].is_none() {
-                tables[t] = Some(gds[t].decode(true, g.fmt4, None)?);
-            }
+    // The indexed columns of the tables indexes are predicted from: a first pass over each
+    // such table (on a copy of its cursors), for all its indexes at once. Then every group
+    // decodes record by record as the pages need them.
+    let mut ctxs: Vec<Option<RefCtx>> = (0..ng).map(|_| None).collect();
+    let mut scratch = Vec::new();
+    let mut cols = Vec::new();
+    if meta.iter().any(|(_, r)| matches!(r, Some((t, _)) if *t >= ng)) {
+        return Err(corrupt());
+    }
+    let mut by_table: Vec<Vec<usize>> = vec![Vec::new(); ng];
+    for (i, (_, r)) in meta.iter().enumerate() {
+        if let Some((t, _)) = r {
+            by_table[*t].push(i);
         }
     }
-    let ctxs: Vec<Option<RefCtx>> = meta
-        .iter()
-        .map(|(_, r)| {
-            r.as_ref().map(|(t, key)| {
-                let tr = tables[*t].as_ref().unwrap();
-                RefCtx { table: tr, order: index::order(tr, &tr.rowids, key), map: &key.cols }
-            })
-        })
-        .collect();
-    let mut scratch = Vec::new();
+    for (t, idx) in by_table.iter().enumerate() {
+        if idx.is_empty() {
+            continue;
+        }
+        if meta[t].1.is_some() || !meta[t].0 {
+            return Err(corrupt());
+        }
+        let mut keys: Vec<index::Keys> =
+            idx.iter().map(|&i| index::Keys::new(&meta[i].1.as_ref().unwrap().1.cols)).collect();
+        let mut gd = gds[t].clone();
+        while !gd.at_end() {
+            scratch.clear();
+            let rowid = gd.next(true, g.fmt4, None, &mut scratch)?;
+            for k in &mut keys {
+                if !k.push(&scratch, rowid, &mut cols) {
+                    return Err(corrupt());
+                }
+            }
+        }
+        for (&i, keys) in idx.iter().zip(keys) {
+            let perm = index::order(&keys, &meta[i].1.as_ref().unwrap().1);
+            ctxs[i] = Some(RefCtx { keys, perm });
+        }
+    }
     crate::mem::mark("dec: tables, index orders");
 
     let mut pg = vec![0u8; ps];
@@ -530,7 +560,6 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S) -> Result<
     let [kind, grp, phdr, cptr, child, ikey, ovf, fill, raw, ..] = &mut rd[..] else {
         unreachable!()
     };
-    let mut cur = vec![0usize; ng];
     let mut cell = Vec::new();
     let mut iv: Vec<(usize, usize)> = Vec::new();
     let mut chain: Vec<usize> = Vec::new();
@@ -604,21 +633,9 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S) -> Result<
                 let n = put_sqlite(&mut vb, key as u64);
                 cell.extend_from_slice(&vb[..n]);
             } else {
-                let (p, rowid) = match &tables[gi] {
-                    Some(r) => {
-                        let j = cur[gi];
-                        if j >= r.len() {
-                            return Err(corrupt());
-                        }
-                        cur[gi] += 1;
-                        (r.get(j), if k == 13 { r.rowids[j] } else { 0 })
-                    }
-                    None => {
-                        scratch.clear();
-                        let rowid = gds[gi].next(k == 13, g.fmt4, ctxs[gi].as_ref(), &mut scratch)?;
-                        (&scratch[..], rowid)
-                    }
-                };
+                scratch.clear();
+                let rowid = gds[gi].next(k == 13, g.fmt4, ctxs[gi].as_ref(), &mut scratch)?;
+                let p = &scratch[..];
                 pay = p;
                 let plen = pay.len() as u64;
                 let n = put_sqlite(&mut vb, plen);
