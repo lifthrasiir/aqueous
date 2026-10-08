@@ -92,6 +92,8 @@ fn bench(args: &[String]) {
         let t = psd_recons::container::DEC_TIMES.with(|c| c.get());
         let k = iters as f64;
         eprintln!("decompress per iteration: known rows {:.3}s render {:.3}s model {:.3}s rows out {:.3}s", t[0] / k, t[1] / k, t[2] / k, t[3] / k);
+        let t = psd_recons::container::PLAN_TIMES.with(|c| c.get());
+        eprintln!("plan per iteration: RLE checks {:.3}s tiles {:.3}s ranking {:.3}s hint sampling {:.3}s", t[0] / k, t[1] / k, t[2] / k, t[3] / k);
         let t = psd_recons::container::ENC_TIMES.with(|c| c.get());
         eprintln!("compress per iteration: rows in {:.3}s encoder check {:.3}s render {:.3}s model {:.3}s", t[0] / k, t[1] / k, t[2] / k, t[3] / k);
     }

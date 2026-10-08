@@ -172,9 +172,10 @@ struct GroupDef {
     same_as: Vec<Option<usize>>,
 }
 
-/// Checks the rows of RLE data: counts, and every row decoding to `w` bytes. Returns the
-/// bytes of each plane's rows and the token breaks for encoder identification.
-fn check_rle(src: &[u8], planes: usize, w: usize, h: usize, cb: usize) -> Option<(Vec<usize>, Vec<usize>)> {
+/// Checks the row counts of RLE data against its length, and a sample of rows (every
+/// `every`th) decoding to `w` bytes; other rows are checked as they are decoded. Returns the
+/// bytes of each plane's rows and the token breaks of the sample, for encoder identification.
+fn check_rle(src: &[u8], planes: usize, w: usize, h: usize, cb: usize, every: usize) -> Option<(Vec<usize>, Vec<usize>)> {
     let rows = planes * h;
     let counts = src.get(..rows * cb)?;
     let mut pos = rows * cb;
@@ -182,15 +183,29 @@ fn check_rle(src: &[u8], planes: usize, w: usize, h: usize, cb: usize) -> Option
     let mut splits = Vec::new();
     for r in 0..rows {
         let n = rows::count(counts, cb, r);
-        let row = src.get(pos..pos + n)?;
-        if packbits::decoded_len(row)? != w {
-            return None;
+        if r % every == 0 {
+            let row = src.get(pos..pos + n)?;
+            if packbits::decoded_len(row)? != w {
+                return None;
+            }
+            packbits::forced_splits(row, &mut splits);
         }
-        packbits::forced_splits(row, &mut splits);
         lens[r / h] += n;
         pos += n;
     }
     (pos == src.len()).then_some((lens, splits))
+}
+
+/// The token breaks of all rows of RLE data (for a second look at the encoder).
+fn all_splits(src: &[u8], rows: usize, cb: usize) -> Vec<usize> {
+    let mut pos = rows * cb;
+    let mut splits = Vec::new();
+    for r in 0..rows {
+        let n = rows::count(src, cb, r);
+        packbits::forced_splits(&src[pos..pos + n], &mut splits);
+        pos += n;
+    }
+    splits
 }
 
 /// Orders candidate encoders by how many of a sample of rows they reproduce (stable, so the
@@ -247,8 +262,19 @@ fn plan_span<'a>(d: &[u8], start: usize, end: usize, planes: usize, w: usize, h:
         }
         Compression::Rle => {
             let cb = if psb { 4 } else { 2 };
-            let (plane_lens, splits) = check_rle(src, planes, w, h, cb)?;
-            let candidates = rank_candidates(packbits::candidates_after(packbits::infer_tiles_from(splits)), src, planes, w, h, cb);
+            let t0 = std::time::Instant::now();
+            let (plane_lens, splits) = check_rle(src, planes, w, h, cb, 8)?;
+            let t1 = std::time::Instant::now();
+            let candidates = packbits::candidates_after(packbits::infer_tiles_from(splits));
+            let t2 = std::time::Instant::now();
+            let candidates = rank_candidates(candidates, src, planes, w, h, cb);
+            PLAN_TIMES.with(|c| {
+                let mut v = c.get();
+                v[0] += (t1 - t0).as_secs_f64();
+                v[1] += (t2 - t1).as_secs_f64();
+                v[2] += t2.elapsed().as_secs_f64();
+                c.set(v);
+            });
             (Coding::Rle { count_bytes: cb, encoder: candidates[0], plane_lens, exceptions: Vec::new() }, candidates)
         }
         _ => return None,
@@ -312,15 +338,16 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<Grou
     let mut nested = Vec::new();
     let pixels = psd.depth == 8;
     let rgb = psd.mode == 3;
-    let mut seen: std::collections::HashMap<(&[u8], usize, usize), usize> = Default::default();
+    // Spans by a hash of their bytes and size; equal ones are confirmed byte for byte.
+    let mut seen: std::collections::HashMap<(u64, usize, usize), Vec<usize>> = Default::default();
     let mut add = |spans: &mut Vec<Planned<'a>>, mut p: Planned<'a>| -> usize {
         let i = spans.len();
-        let key = (&d[p.span.start..p.span.end], p.span.w, p.span.h);
-        match seen.get(&key) {
-            Some(&j) => p.same = Some(j),
-            None => {
-                seen.insert(key, i);
-            }
+        let bytes = &d[p.span.start..p.span.end];
+        let key = (xxhash_rust::xxh3::xxh3_64(bytes), p.span.w, p.span.h);
+        let same = seen.entry(key).or_default();
+        match same.iter().copied().find(|&j| &d[spans[j].span.start..spans[j].span.end] == bytes) {
+            Some(j) => p.same = Some(j),
+            None => same.push(i),
         }
         spans.push(p);
         i
@@ -392,7 +419,13 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<Grou
             if rgb && n >= 3 {
                 let has_alpha = n >= 4 && psd.layer_info.merged_alpha;
                 let k = 3 + has_alpha as usize;
+                let t0 = std::time::Instant::now();
                 let hinted = !psd.layer_info.layers.is_empty() && hint_pays(psd, d, &spans[si].span, k);
+                PLAN_TIMES.with(|c| {
+                    let mut v = c.get();
+                    v[3] += t0.elapsed().as_secs_f64();
+                    c.set(v);
+                });
                 groups.push(GroupDef { planes: (0..k).map(|p| (si, p)).collect(), has_alpha, hinted, same_as: vec![None; k] });
                 rest = k;
             }
@@ -755,11 +788,14 @@ fn settle_encoder<'a>(sp: &mut Span<'a>, d: &'a [u8], psb: bool, candidates: &[E
     let src = &d[start..end];
     let total = planes * h;
     let mut best = (candidates[0], first_misses);
-    // A poor first guess: try the others over every row.
+    // A poor first guess: try the others over every row, and the tile cut inferred from every
+    // row (rather than a sample).
     if best.1.len() > total / 32 + 4 {
         let mut row = vec![0u8; w];
         let mut buf = Vec::new();
-        for &cand in &candidates[1..] {
+        let cb = if psb { 4 } else { 2 };
+        let full = packbits::infer_tiles_from(all_splits(src, total, cb));
+        for &cand in candidates[1..].iter().chain([full].iter().filter(|&&f| !candidates.contains(&f))) {
             let mut miss = Vec::new();
             'planes: for p in 0..planes {
                 let mut r = PlaneRows::new(psb, Compression::Rle, src, w, h, p, planes).ok()?;
@@ -881,6 +917,8 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
 }
 
 thread_local! {
+    /// Planning time: RLE checks, tile inference, candidate ranking, hint sampling.
+    pub static PLAN_TIMES: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
     /// Encoding time (with `PSDR_STATS`): reading rows, checking them against the encoder,
     /// rendering, model.
     pub static ENC_TIMES: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };

@@ -37,6 +37,33 @@ pub fn count_equal(p: &[u8], v: u8) -> usize {
     n + p[n..].iter().take_while(|&&b| b == v).count()
 }
 
+/// The first position from `i` (below `end`, at most `n - k`) where `k` (2 or 3) equal bytes
+/// start, or `end`; 8 positions at a time.
+#[inline(always)]
+fn next_run(row: &[u8], mut i: usize, end: usize, k: usize) -> usize {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let n = row.len();
+    let word = |j: usize| u64::from_le_bytes(row[j..j + 8].try_into().unwrap());
+    while i + 8 + k <= n && i < end {
+        let (x, y) = (word(i), word(i + 1));
+        let m = if k == 2 { x ^ y } else { (x ^ y) | (y ^ word(i + 2)) };
+        // Zero bytes of m: positions where the run starts.
+        let z = m.wrapping_sub(LO) & !m & HI;
+        if z != 0 {
+            return (i + z.trailing_zeros() as usize / 8).min(end);
+        }
+        i += 8;
+    }
+    while i < end && i + k <= n {
+        if row[i + 1..i + k].iter().all(|&b| b == row[i]) {
+            return i;
+        }
+        i += 1;
+    }
+    end
+}
+
 /// Encodes one chunk (at most 128 bytes) the way Photoshop does.
 #[inline]
 fn encode_chunk(row: &[u8], out: &mut Vec<u8>) {
@@ -51,10 +78,7 @@ fn encode_chunk(row: &[u8], out: &mut Vec<u8>) {
         } else {
             // A literal, up to a run of 3 (2 equal bytes do not end it).
             let s = i;
-            i += 1;
-            while i < n && !(i + 2 < n && row[i] == row[i + 1] && row[i] == row[i + 2]) {
-                i += 1;
-            }
+            i = next_run(row, i + 1, n, 3);
             out.push((i - s - 1) as u8);
             out.extend_from_slice(&row[s..i]);
         }
@@ -83,9 +107,11 @@ fn encode_greedy(row: &[u8], min_run: usize, split_rest: bool, out: &mut Vec<u8>
             }
         } else {
             let s = i;
-            i += 1;
-            while i < n && i - s < 128 && !starts_run(i) {
-                i += 1;
+            i = if min_run <= 1 { i + 1 } else { next_run(row, i + 1, (s + 128).min(n), min_run.min(3)) };
+            if min_run > 3 {
+                while i < n && i - s < 128 && !starts_run(i) {
+                    i += 1;
+                }
             }
             out.push((i - s - 1) as u8);
             out.extend_from_slice(&row[s..i]);
