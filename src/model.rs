@@ -42,7 +42,12 @@ const MATCH_BASE: usize = RUN_BASE + KINDS * 2 * RUN_CTX;
 /// Tables of the length of a run of pixels equal to the hint, by whether the pixel above the
 /// next one matched it.
 const HRUN_BASE: usize = MATCH_BASE + KINDS * 4;
-pub const TABLES: usize = HRUN_BASE + 2;
+/// Tables of the joint symbol of the second and third color planes (both residuals relative
+/// to the first plane's within ±2, or an escape), by transparency and context.
+const JOINT_BASE: usize = HRUN_BASE + 2;
+pub const TABLES: usize = JOINT_BASE + 2 * CTX;
+/// Joint symbols: 5 x 5 pairs of residuals in -2..=2, then the escape.
+const JOINT_ESCAPE: u8 = 25;
 /// Symbols per chunk of the entropy coded stream.
 pub const CHUNK: usize = 1 << 22;
 
@@ -154,6 +159,35 @@ struct Rows<'a> {
     match_t: usize,
 }
 
+/// The MED prediction of sample `x` of row `p`, and the neighbors (a, b, c, d) it and the
+/// context are made of, with transparent neighbors replaced (see [`code_sample`] for the
+/// flags and bounds).
+#[inline(always)]
+fn predict<const ALPHA: bool, const TOP: bool, const LEFT: bool, const RIGHT: bool>(q: &Rows, p: &[u8], x: usize, vis: u8) -> (u8, [u8; 4]) {
+    debug_assert!(x < p.len() && (!LEFT || x > 0) && (!RIGHT || x + 1 < p.len()));
+    // SAFETY: as in code_sample.
+    unsafe {
+        let g = |s: &[u8], i: usize| *s.get_unchecked(i);
+        let up = q.up;
+        let mut a = if LEFT { g(p, x - 1) } else if !TOP { g(up, x) } else { 0 };
+        let mut b = if !TOP { g(up, x) } else { a };
+        let mut cc = if LEFT && !TOP { g(up, x - 1) } else { b };
+        let d = if !TOP && RIGHT { g(up, x + 1) } else { b };
+        if ALPHA && vis & 2 != 0 {
+            // Transparent neighbors are replaced by a visible one: their color is arbitrary.
+            let jw = (LEFT && g(q.al, x - 1) > 0).then(|| g(p, x - 1));
+            let jn = (!TOP && g(q.alp, x) > 0).then(|| g(up, x));
+            let jnw = (LEFT && !TOP && g(q.alp, x - 1) > 0).then(|| g(up, x - 1));
+            if let Some(fb) = jw.or(jn).or(jnw) {
+                a = jw.unwrap_or(fb);
+                b = jn.unwrap_or(fb);
+                cc = jnw.unwrap_or(fb);
+            }
+        }
+        (med(a, b, cc), [a, b, cc, d])
+    }
+}
+
 /// Codes sample `x` of row `p` (not in a run); `f` is the first color plane's residual at `x`
 /// (with `FIRST`). `TOP`: first row; `LEFT`/`RIGHT`: whether there are samples to the
 /// left/right. Indices are in bounds: `x < w`, every row has `w` samples (but the optional
@@ -173,25 +207,8 @@ fn code_sample<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool,
     unsafe {
         let g = |s: &[u8], i: usize| *s.get_unchecked(i);
         let up = q.up;
-        let mut a = if LEFT { g(p, x - 1) } else if !TOP { g(up, x) } else { 0 };
-        let mut b = if !TOP { g(up, x) } else { a };
-        let mut cc = if LEFT && !TOP { g(up, x - 1) } else { b };
-        let d = if !TOP && RIGHT { g(up, x + 1) } else { b };
         let transparent = ALPHA && vis & 1 != 0;
-        if ALPHA {
-            if vis & 2 != 0 {
-                // Transparent neighbors are replaced by a visible one: their color is arbitrary.
-                let jw = (LEFT && g(q.al, x - 1) > 0).then(|| g(p, x - 1));
-                let jn = (!TOP && g(q.alp, x) > 0).then(|| g(up, x));
-                let jnw = (LEFT && !TOP && g(q.alp, x - 1) > 0).then(|| g(up, x - 1));
-                if let Some(fb) = jw.or(jn).or(jnw) {
-                    a = jw.unwrap_or(fb);
-                    b = jn.unwrap_or(fb);
-                    cc = jnw.unwrap_or(fb);
-                }
-            }
-        }
-        let pred = med(a, b, cc);
+        let (pred, [a, b, cc, d]) = predict::<ALPHA, TOP, LEFT, RIGHT>(q, p, x, vis);
         if HINT && LEFT && !TOP && g(p, x - 1) == g(q.hc, x - 1) && g(up, x) == g(q.hp, x) {
             let m = (g(up, x - 1) == g(q.hp, x - 1)) as usize + 2 * (RIGHT && g(up, x + 1) == g(q.hp, x + 1)) as usize;
             let s = c.code(q.match_t + m, g(p, x).wrapping_sub(g(q.hc, x)));
@@ -212,6 +229,52 @@ fn code_sample<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool,
         *res.get_unchecked_mut(x) = rr;
         *p.get_unchecked_mut(x) = pred.wrapping_add(rr);
     }
+}
+
+/// Codes samples `x` of the second and third color planes together; `f` is the first plane's
+/// residual at `x`. Where both residuals (relative to `f`) are within ±2, one joint symbol;
+/// otherwise an escape, then each in its plane's tables as [`code_sample`] does.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn code_pair<C: Coder, const ALPHA: bool, const TOP: bool, const LEFT: bool, const RIGHT: bool>(
+    c: &mut C,
+    q: [&Rows; 2],
+    p: [&mut [u8]; 2],
+    res: [&mut [u8]; 2],
+    x: usize,
+    f: u8,
+    vis: u8,
+) {
+    let [p1, p2] = p;
+    let [r1, r2] = res;
+    let transparent = ALPHA && vis & 1 != 0;
+    let cross = bucket(mag(f), CROSS);
+    // Each plane's prediction and table, as code_sample would choose it.
+    let side = |q: &Rows, p: &[u8], r: &[u8]| {
+        let (pred, [a, b, cc, d]) = predict::<ALPHA, TOP, LEFT, RIGHT>(q, p, x, vis);
+        let rw = if LEFT { mag(r[x - 1]) } else { 0 };
+        let rn = if !TOP { mag(q.res_prev[x]) } else { 0 };
+        let act = a.abs_diff(cc) as u32 + b.abs_diff(cc) as u32 + b.abs_diff(d) as u32;
+        (pred, act + 2 * (rw + rn))
+    };
+    let (pred1, e1) = side(q[0], p1, r1);
+    let (pred2, e2) = side(q[1], p2, r2);
+    let t1 = q[0].base + transparent as usize * CTX + bucket(e1, ACT) * CROSS + cross;
+    let t2 = q[1].base + transparent as usize * CTX + bucket(e2, ACT) * CROSS + cross;
+    let tj = JOINT_BASE + transparent as usize * CTX + bucket((e1 + e2) / 2, ACT) * CROSS + cross;
+    let s1 = p1[x].wrapping_sub(pred1).wrapping_sub(f);
+    let s2 = p2[x].wrapping_sub(pred2).wrapping_sub(f);
+    let small = |s: u8| (s as i8 + 2) as u8;
+    let j = if small(s1) < 5 && small(s2) < 5 { small(s1) * 5 + small(s2) } else { JOINT_ESCAPE };
+    let j = c.code(tj, j);
+    let (s1, s2) = if j < JOINT_ESCAPE {
+        ((j / 5).wrapping_sub(2), (j % 5).wrapping_sub(2))
+    } else {
+        (c.code(t1, s1), c.code(t2, s2))
+    };
+    let (rr1, rr2) = (s1.wrapping_add(f), s2.wrapping_add(f));
+    (r1[x], r2[x]) = (rr1, rr2);
+    (p1[x], p2[x]) = (pred1.wrapping_add(rr1), pred2.wrapping_add(rr2));
 }
 
 /// Visibility of pixel `x` for the color planes, from the alpha rows: 1 if transparent, 2 if
@@ -338,6 +401,16 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
             _ => one!(&mut Passthrough, Passthrough, q0, p0, r0, false, 0),
         }
         let f = r0[x];
+        if !HINT && how[1] == 1 && how[2] == 1 {
+            let (q, p, r) = ([q1, q2], [&mut *p1, &mut *p2], [&mut *r1, &mut *r2]);
+            match (left, right) {
+                (true, true) => code_pair::<C, ALPHA, TOP, true, true>(c, q, p, r, x, f, vis),
+                (false, true) => code_pair::<C, ALPHA, TOP, false, true>(c, q, p, r, x, f, vis),
+                (true, false) => code_pair::<C, ALPHA, TOP, true, false>(c, q, p, r, x, f, vis),
+                (false, false) => code_pair::<C, ALPHA, TOP, false, false>(c, q, p, r, x, f, vis),
+            }
+            return;
+        }
         if how[1] == 1 {
             one!(c, C, q1, p1, r1, true, f);
         }
