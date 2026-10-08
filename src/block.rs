@@ -17,7 +17,8 @@
 use crate::corner::{C_N, C_NEG, C_T, CACHE, Corners, Indices, SYM_ESC, SYM_NEW, SYM_X1, SYM_X2, parse_index, put_index};
 use crate::recent::{Entry, NPRED, Recent, WIN, window_pred};
 pub use crate::style::Styles;
-use crate::style::{exp_fallback, next_styles};
+pub use crate::style::next_styles;
+use crate::style::exp_fallback;
 use crate::{dec, num};
 use crate::varint::{Rd, put_sv, put_uv};
 use std::collections::HashMap;
@@ -520,9 +521,9 @@ impl Encoder {
         self.fbuf = corners;
     }
 
-    /// The styles for the next block, `src` (from the encoder's current ones).
-    pub fn next_styles(&self, src: &[u8]) -> Styles {
-        next_styles(&self.styles, src)
+    /// The styles of the last block (those the next block's start from).
+    pub fn styles(&self) -> Styles {
+        self.styles
     }
 
     fn begin(&mut self, s: &mut [Vec<u8>; NSTREAMS]) {

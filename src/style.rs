@@ -23,7 +23,7 @@ pub struct Styles {
 
 /// The styles for block `src` after a block with `prev` (kinds absent from `src`'s sample
 /// keep theirs).
-pub(crate) fn next_styles(prev: &Styles, src: &[u8]) -> Styles {
+pub fn next_styles(prev: &Styles, src: &[u8]) -> Styles {
     let mut st = *prev;
     choose_styles(src, &mut st.kinds, &mut st.unit);
     st

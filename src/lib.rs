@@ -15,7 +15,7 @@ pub mod dec;
 pub mod mem;
 pub mod num;
 mod recent;
-mod style;
+pub mod style;
 pub mod varint;
 
 pub use container::{compress, decompress};

@@ -260,8 +260,15 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
 /// What the other threads report about a block of generation `generation` (blocks after
 /// one stored whole are coded again, in a new generation).
 enum Report {
+    Parsed { generation: u64, idx: usize, block: Box<block::ParsedBlock>, secs: f64 },
     Verified { generation: u64, idx: usize, ok: bool, secs: f64 },
     Coded { generation: u64, idx: usize, out: Vec<u8>, st: Box<Stats> },
+}
+
+/// Work for the pool: parsing a block's lines, or coding its streams.
+enum Job {
+    Parse { generation: u64, idx: usize, range: std::ops::Range<usize>, styles: block::Styles },
+    Code { generation: u64, idx: usize, n: usize, streams: Arc<Streams> },
 }
 
 struct VerifyJob {
@@ -273,14 +280,15 @@ struct VerifyJob {
     forced: bool,
 }
 
-struct CodeJob {
-    generation: u64,
+/// A block sent for parsing.
+struct Parsing {
     idx: usize,
-    n: usize,
-    streams: Arc<Streams>,
+    range: std::ops::Range<usize>,
+    styles: block::Styles,
+    parsed: Option<Box<block::ParsedBlock>>,
 }
 
-/// A block in flight.
+/// A block coded, in flight.
 struct Pending {
     idx: usize,
     range: std::ops::Range<usize>,
@@ -289,15 +297,22 @@ struct Pending {
     coded: Option<(Vec<u8>, Box<Stats>)>,
 }
 
+impl Pending {
+    fn done(&self) -> bool {
+        matches!(self, Pending { verified: Some(false), .. } | Pending { verified: Some(true), coded: Some(_), .. })
+    }
+}
+
 fn compress_par<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) -> std::io::Result<()> {
     w.write_all(&header(src))?;
     let bsize = opt.block.clamp(1 << 10, MAX_BLOCK);
-    // Blocks in flight: enough to keep the coders busy, few enough to bound memory.
-    let limit = 2 * opt.threads + 2;
+    // Blocks in flight at each stage: enough to keep the threads busy, few enough to bound
+    // memory.
+    let limit = opt.threads + 1;
     std::thread::scope(|sc| {
         let (rtx, rrx) = mpsc::channel::<Report>();
         let (vtx, vrx) = mpsc::channel::<VerifyJob>();
-        let (ctx, crx) = mpsc::channel::<CodeJob>();
+        let (jtx, jrx) = mpsc::channel::<Job>();
         if opt.verify {
             let rtx = rtx.clone();
             sc.spawn(move || {
@@ -330,19 +345,28 @@ fn compress_par<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) 
                 }
             });
         }
-        let crx = Arc::new(Mutex::new(crx));
+        let jrx = Arc::new(Mutex::new(jrx));
         for _ in 0..opt.threads.saturating_sub(2).max(1) {
-            let (rtx, crx) = (rtx.clone(), crx.clone());
+            let (rtx, jrx) = (rtx.clone(), jrx.clone());
             sc.spawn(move || {
                 let mut coder = Coder::new(opt.level);
                 loop {
-                    let Ok(j) = crx.lock().expect("coder queue").recv() else { break };
+                    let Ok(j) = jrx.lock().expect("job queue").recv() else { break };
                     let t = std::time::Instant::now();
-                    let mut out = Vec::new();
-                    let mut st = Stats::default();
-                    coder.coded(j.n, &j.streams, &mut out, &mut st);
-                    st.zstd_s = t.elapsed().as_secs_f64();
-                    if rtx.send(Report::Coded { generation: j.generation, idx: j.idx, out, st: Box::new(st) }).is_err() {
+                    let r = match j {
+                        Job::Parse { generation, idx, range, styles } => {
+                            let block = Box::new(block::parse_block(&styles, &src[range]));
+                            Report::Parsed { generation, idx, block, secs: t.elapsed().as_secs_f64() }
+                        }
+                        Job::Code { generation, idx, n, streams } => {
+                            let mut out = Vec::new();
+                            let mut st = Stats::default();
+                            coder.coded(n, &streams, &mut out, &mut st);
+                            st.zstd_s = t.elapsed().as_secs_f64();
+                            Report::Coded { generation, idx, out, st: Box::new(st) }
+                        }
+                    };
+                    if rtx.send(r).is_err() {
                         break;
                     }
                 }
@@ -351,60 +375,80 @@ fn compress_par<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) 
         drop(rtx);
         let mut enc = block::Encoder::default();
         let mut coder = Coder::new(opt.level);
+        let mut streams = new_streams();
+        let mut parsing: VecDeque<Parsing> = VecDeque::new();
         let mut pending: VecDeque<Pending> = VecDeque::new();
-        let (mut generation, mut p, mut idx) = (0u64, 0usize, 0usize);
+        let mut generation = 0u64;
+        // Next block to send for parsing, its index, and the styles before it.
+        let (mut dp, mut didx, mut chain) = (0usize, 0usize, enc.styles());
         let mut out = Vec::new();
         loop {
-            while pending.len() < limit && p < src.len() {
-                let e = block_end(src, p, bsize);
+            while parsing.len() < limit && dp < src.len() {
+                let e = block_end(src, dp, bsize);
+                chain = block::next_styles(&chain, &src[dp..e]);
+                jtx.send(Job::Parse { generation, idx: didx, range: dp..e, styles: chain }).expect("pool");
+                parsing.push_back(Parsing { idx: didx, range: dp..e, styles: chain, parsed: None });
+                (dp, didx) = (e, didx + 1);
+            }
+            if pending.front().is_some_and(Pending::done) {
+                let f = pending.pop_front().expect("front");
+                if let Some((o, s)) = f.coded.filter(|_| f.verified == Some(true)) {
+                    st.add(&s);
+                    w.write_all(&o)?;
+                    continue;
+                }
+                // Undo it and the blocks after it, store it whole, code the rest again.
+                enc.reset(&f.mark);
+                let t = std::time::Instant::now();
+                out.clear();
+                coder.whole(&src[f.range.clone()], &mut out, st);
+                st.zstd_s += t.elapsed().as_secs_f64();
+                w.write_all(&out)?;
+                (generation, dp, didx, chain) = (generation + 1, f.range.end, f.idx + 1, enc.styles());
+                pending.clear();
+                parsing.clear();
+                continue;
+            }
+            if pending.len() < limit && parsing.front().is_some_and(|p| p.parsed.is_some()) {
+                let p = parsing.pop_front().expect("front");
+                let (idx, range) = (p.idx, p.range);
                 let t = std::time::Instant::now();
                 let mark = enc.mark();
-                let mut streams = new_streams();
-                enc.encode(&src[p..e], &mut streams);
+                enc.encode_parsed(&p.styles, &src[range.clone()], p.parsed.as_deref().expect("parsed"), &mut streams);
+                let streams = Arc::new(std::mem::replace(&mut streams, new_streams()));
                 st.transform_s += t.elapsed().as_secs_f64();
                 let forced = opt.force_whole >> (idx % 64) & 1 == 1;
-                let streams = Arc::new(streams);
                 if opt.verify {
-                    let j = VerifyJob { generation, idx, range: p..e, streams: streams.clone(), forced };
+                    let j = VerifyJob { generation, idx, range: range.clone(), streams: streams.clone(), forced };
                     vtx.send(j).expect("verifier");
                 }
                 if !forced {
-                    ctx.send(CodeJob { generation, idx, n: e - p, streams }).expect("coders");
+                    jtx.send(Job::Code { generation, idx, n: range.len(), streams }).expect("pool");
                 }
                 let verified = if opt.verify { None } else { Some(!forced) };
-                pending.push_back(Pending { idx, range: p..e, mark, verified, coded: None });
-                (p, idx) = (e, idx + 1);
-            }
-            let Some(front) = pending.front() else { break };
-            let base = front.idx;
-            // Wait for the oldest block: verified, and coded unless it failed.
-            while !matches!(pending[0], Pending { verified: Some(false), .. } | Pending { verified: Some(true), coded: Some(_), .. }) {
-                match rrx.recv().expect("worker threads") {
-                    Report::Verified { generation: g, idx: i, ok, secs } if g == generation => {
-                        pending[i - base].verified = Some(ok);
-                        st.verify_s += secs;
-                    }
-                    Report::Coded { generation: g, idx: i, out, st: s } if g == generation => {
-                        pending[i - base].coded = Some((out, s));
-                    }
-                    _ => {}
-                }
-            }
-            let f = pending.pop_front().expect("front");
-            out.clear();
-            if let Some((o, s)) = f.coded.filter(|_| f.verified == Some(true)) {
-                st.add(&s);
-                w.write_all(&o)?;
+                pending.push_back(Pending { idx, range, mark, verified, coded: None });
                 continue;
             }
-            // Undo it and the blocks after it, store it whole, code the rest again.
-            enc.reset(&f.mark);
-            let t = std::time::Instant::now();
-            coder.whole(&src[f.range.clone()], &mut out, st);
-            st.zstd_s += t.elapsed().as_secs_f64();
-            w.write_all(&out)?;
-            (generation, p, idx) = (generation + 1, f.range.end, f.idx + 1);
-            pending.clear();
+            if pending.is_empty() && parsing.is_empty() {
+                break;
+            }
+            match rrx.recv().expect("worker threads") {
+                Report::Parsed { generation: g, idx: i, block, secs } if g == generation => {
+                    let base = parsing.front().expect("parsing").idx;
+                    parsing[i - base].parsed = Some(block);
+                    st.transform_s += secs;
+                }
+                Report::Verified { generation: g, idx: i, ok, secs } if g == generation => {
+                    let base = pending.front().expect("pending").idx;
+                    pending[i - base].verified = Some(ok);
+                    st.verify_s += secs;
+                }
+                Report::Coded { generation: g, idx: i, out, st: s } if g == generation => {
+                    let base = pending.front().expect("pending").idx;
+                    pending[i - base].coded = Some((out, s));
+                }
+                _ => {}
+            }
         }
         Ok(())
     })
