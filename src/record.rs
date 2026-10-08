@@ -147,6 +147,28 @@ const T_ODD_INT: u8 = 16;
 const T_DEC: u8 = 32;
 const MAX_E: usize = 22;
 
+const P10I: [i64; 19] = [
+    1,
+    10,
+    100,
+    1_000,
+    10_000,
+    100_000,
+    1_000_000,
+    10_000_000,
+    100_000_000,
+    1_000_000_000,
+    10_000_000_000,
+    100_000_000_000,
+    1_000_000_000_000,
+    10_000_000_000_000,
+    100_000_000_000_000,
+    1_000_000_000_000_000,
+    10_000_000_000_000_000,
+    100_000_000_000_000_000,
+    1_000_000_000_000_000_000,
+];
+
 const P10: [f64; MAX_E + 1] = [
     1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
     1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
@@ -185,6 +207,9 @@ pub struct ColEnc {
     /// The integer before each in its record (the previous column's), for the horizontal
     /// prediction.
     hpred: Vec<i64>,
+    /// The decimal exponent of each (0 for integers): a column's decimals and integers are
+    /// scaled to its largest exponent, so that deltas compare like with like.
+    iexp: Vec<u8>,
     pub real: Vec<u8>,
     pub len: Vec<u8>,
     pub bytes: Vec<u8>,
@@ -259,6 +284,7 @@ impl GroupEnc {
                     if let Some((m, e)) = decimal(bits) {
                         c.tag.push(T_DEC + e);
                         c.ints.push(m);
+                        c.iexp.push(e);
                         c.hpred.push(last);
                         last = m;
                     } else if (f as f64).to_bits() == bits {
@@ -273,6 +299,7 @@ impl GroupEnc {
                     let v = int_value(st, b);
                     c.tag.push(if canon_st(v, fmt4) == st { T_INT } else { T_ODD_INT + st as u8 });
                     c.ints.push(v);
+                    c.iexp.push(0);
                     c.hpred.push(last);
                     last = v;
                 }
@@ -340,25 +367,49 @@ impl GroupEnc {
         rowid.extend_from_slice(&self.rowid);
         rawpay.extend_from_slice(&self.rawpay);
         for c in &self.cols {
+            // Scale to the largest exponent if nothing overflows.
+            let top = c.iexp.iter().copied().max().unwrap_or(0);
+            let scaled: Option<Vec<i64>> = (top > 0)
+                .then(|| {
+                    c.ints
+                        .iter()
+                        .zip(&c.iexp)
+                        .map(|(&v, &e)| P10I.get((top - e) as usize).and_then(|&p| v.checked_mul(p)))
+                        .collect()
+                })
+                .flatten();
             // Integers as they are, against the column's previous one, or against the
-            // previous integer of the record: whichever takes the fewest bytes.
-            let mut cost = [0usize; 3];
-            let mut prev = 0i64;
-            for (&v, &h) in c.ints.iter().zip(&c.hpred) {
-                cost[0] += uv_len(zz(v));
-                cost[1] += uv_len(zz(v.wrapping_sub(prev)));
-                cost[2] += uv_len(zz(v.wrapping_sub(h)));
-                prev = v;
+            // previous integer of the record, scaled or not: whichever takes the fewest bytes.
+            let cost = |ints: &[i64]| {
+                let mut cost = [0usize; 3];
+                let mut prev = 0i64;
+                for (&v, &h) in ints.iter().zip(&c.hpred) {
+                    cost[0] += uv_len(zz(v));
+                    cost[1] += uv_len(zz(v.wrapping_sub(prev)));
+                    cost[2] += uv_len(zz(v.wrapping_sub(h)));
+                    prev = v;
+                }
+                (0..3).map(|m| (cost[m], m)).min().unwrap()
+            };
+            let (plain, mut mode) = cost(&c.ints);
+            let mut scaled = scaled;
+            if let Some(sc) = &scaled {
+                let (k, m) = cost(sc);
+                if k < plain {
+                    mode = m;
+                } else {
+                    scaled = None;
+                }
             }
-            let mode = (0..3).min_by_key(|&m| (cost[m], m)).unwrap();
+            let ints = scaled.as_deref().unwrap_or(&c.ints);
             tmp.clear();
             let mut prev = 0i64;
-            for (&v, &h) in c.ints.iter().zip(&c.hpred) {
+            for (&v, &h) in ints.iter().zip(&c.hpred) {
                 put_sv(tmp, v.wrapping_sub([0, prev, h][mode]));
                 prev = v;
             }
             put_uv(dir, c.tag.len() as u64);
-            put_uv(dir, mode as u64);
+            put_uv(dir, mode as u64 + 3 * if scaled.is_some() { top as u64 + 1 } else { 0 });
             put_uv(dir, tmp.len() as u64);
             put_uv(dir, c.real.len() as u64);
             put_uv(dir, c.len.len() as u64);
@@ -376,6 +427,8 @@ pub struct ColDec<'a> {
     tag: Rd<'a>,
     int: Rd<'a>,
     mode: u8,
+    /// The column's largest decimal exponent if scaled, else 0.
+    scale: u8,
     prev: i64,
     real: Rd<'a>,
     len: Rd<'a>,
@@ -385,7 +438,7 @@ pub struct ColDec<'a> {
 
 impl ColDec<'_> {
     #[inline]
-    fn next_int(&mut self, last: i64) -> Result<i64> {
+    fn next_int(&mut self, last: i64, e: u8) -> Result<i64> {
         let d = self.int.sv()?;
         let v = d.wrapping_add(match self.mode {
             0 => 0,
@@ -393,7 +446,14 @@ impl ColDec<'_> {
             _ => last,
         });
         self.prev = v;
-        Ok(v)
+        if self.scale == 0 {
+            return Ok(v);
+        }
+        let p = *self.scale.checked_sub(e).and_then(|k| P10I.get(k as usize)).ok_or_else(corrupt)?;
+        if v % p != 0 {
+            return Err(corrupt());
+        }
+        Ok(v / p)
     }
 }
 
@@ -448,15 +508,16 @@ impl<'a> GroupDec<'a> {
         for _ in 0..nc {
             let tag = tag.sub(dir.usize()?)?;
             let mode = dir.uv()?;
-            if mode > 2 {
+            if mode >= 3 * 24 {
                 return Err(corrupt());
             }
-            let mode = mode as u8;
+            let scale = (mode / 3).saturating_sub(1) as u8;
+            let mode = (mode % 3) as u8;
             let int = int.sub(dir.usize()?)?;
             let real = real.sub(dir.usize()?)?;
             let len = len.sub(dir.usize()?)?;
             let bytes = bytes.sub(dir.usize()?)?;
-            cols.push(ColDec { tag, int, mode, prev: 0, real, len, bytes, distinct: Vec::new() });
+            cols.push(ColDec { tag, int, mode, scale, prev: 0, real, len, bytes, distinct: Vec::new() });
         }
         Ok(GroupDec { rec, rowid, rawpay, cols })
     }
@@ -516,7 +577,7 @@ impl<'a> GroupDec<'a> {
             let (st, v) = match t {
                 T_NULL => (0, 0),
                 T_INT => {
-                    let v = c.next_int(last)?;
+                    let v = c.next_int(last, 0)?;
                     last = v;
                     (canon_st(v, fmt4), v)
                 }
@@ -526,7 +587,7 @@ impl<'a> GroupDec<'a> {
                     (7, (f as f64).to_bits() as i64)
                 }
                 T_DEC..=54 => {
-                    let m = c.next_int(last)?;
+                    let m = c.next_int(last, t - T_DEC)?;
                     last = m;
                     (7, (m as f64 / P10[(t - T_DEC) as usize]).to_bits() as i64)
                 }
@@ -544,7 +605,7 @@ impl<'a> GroupDec<'a> {
                     (12 + 2 * n as u64 + (t == T_TEXT_REP) as u64, id as i64)
                 }
                 17..=25 => {
-                    let v = c.next_int(last)?;
+                    let v = c.next_int(last, 0)?;
                     last = v;
                     ((t - T_ODD_INT) as u64, v)
                 }
