@@ -114,8 +114,9 @@ pub fn valid_gen(f: u8) -> bool {
 
 /// Parses `t` as C's `%.Pg` of a decimal: the value as an integer at scale P-1-E (E the
 /// decimal exponent) and that scale. `prev_scale` is the scale given to zero; `exp3`
-/// the exponent width when `t` has no exponent. Returns the integer, scale and flags.
-pub fn parse_gen(t: &[u8], p: u8, prev_scale: i32, exp3: bool) -> Option<(i64, i32, u8)> {
+/// the exponent width when `t` has no exponent; `tmp` scratch space. Returns the integer,
+/// scale and flags.
+pub fn parse_gen(t: &[u8], p: u8, prev_scale: i32, exp3: bool, tmp: &mut Vec<u8>) -> Option<(i64, i32, u8)> {
     let neg = t.first() == Some(&b'-');
     let mut i = neg as usize;
     let mut m = 0u64;
@@ -179,9 +180,9 @@ pub fn parse_gen(t: &[u8], p: u8, prev_scale: i32, exp3: bool) -> Option<(i64, i
         let v = m as i64 * POW10[(s + e10) as usize];
         (if neg { -v } else { v }, s)
     };
-    let mut buf = Vec::with_capacity(32);
-    put_gen(&mut buf, v, s, f);
-    (buf == t).then_some((v, s, f))
+    tmp.clear();
+    put_gen(tmp, v, s, f);
+    (tmp[..] == *t).then_some((v, s, f))
 }
 
 #[inline]
@@ -314,7 +315,7 @@ mod tests {
             if t.len() > 24 {
                 continue;
             }
-            let (v, s, f) = parse_gen(t, p, 0, false).unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(t)));
+            let (v, s, f) = parse_gen(t, p, 0, false, &mut vec![]).unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(t)));
             assert!(valid_gen(f));
             let mut o = vec![];
             put_gen(&mut o, v, s, f);
@@ -322,10 +323,10 @@ mod tests {
         }
         for t in ["1.64901e-008", "-0", "0", "1e+50", "123456", "0.0001", "1e-05"] {
             let p = 6;
-            assert!(parse_gen(t.as_bytes(), p, 0, false).is_some(), "{t}");
+            assert!(parse_gen(t.as_bytes(), p, 0, false, &mut vec![]).is_some(), "{t}");
         }
         for t in ["1.0", "0.10", "1234567", "1e5", "1e-5", "1.5e+02", "00.1"] {
-            assert!(parse_gen(t.as_bytes(), 6, 0, false).is_none(), "{t}");
+            assert!(parse_gen(t.as_bytes(), 6, 0, false, &mut vec![]).is_none(), "{t}");
         }
     }
 }

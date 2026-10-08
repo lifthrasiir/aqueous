@@ -113,7 +113,52 @@ impl Dec {
 
 /// Parses `[-]digits[.digits][(e|E)[+|-]digits]`: at least one digit, at most 19 significant
 /// ones, an exponent of at most 4 digits.
+#[inline]
 pub fn parse_dec(t: &[u8]) -> Option<Dec> {
+    // Fast path: at most 19 digits in all.
+    let neg = t.first() == Some(&b'-');
+    let mut i = neg as usize;
+    let mut m = 0u64;
+    let s = i;
+    while i < t.len() && t[i].is_ascii_digit() {
+        m = m.wrapping_mul(10).wrapping_add((t[i] - b'0') as u64);
+        i += 1;
+    }
+    let mut nd = i - s;
+    let mut e = 0i32;
+    if i < t.len() && t[i] == b'.' {
+        i += 1;
+        let f = i;
+        while i < t.len() && t[i].is_ascii_digit() {
+            m = m.wrapping_mul(10).wrapping_add((t[i] - b'0') as u64);
+            i += 1;
+        }
+        nd += i - f;
+        e = -((i - f) as i32);
+    }
+    if nd == 0 || nd > 19 {
+        return parse_dec_slow(t);
+    }
+    if i < t.len() {
+        if !matches!(t[i], b'e' | b'E') {
+            return None;
+        }
+        i += 1;
+        let en = t.get(i) == Some(&b'-');
+        i += matches!(t.get(i), Some(b'-' | b'+')) as usize;
+        let d = &t[i..];
+        if d.is_empty() || d.len() > 4 || !d.iter().all(u8::is_ascii_digit) {
+            return None;
+        }
+        let x = d.iter().fold(0i32, |a, &c| a * 10 + (c - b'0') as i32);
+        e += if en { -x } else { x };
+    }
+    Some(Dec::new(neg, m, e))
+}
+
+/// `parse_dec` for more than 19 digits (leading and trailing zeros not counted).
+#[cold]
+fn parse_dec_slow(t: &[u8]) -> Option<Dec> {
     let neg = t.first() == Some(&b'-');
     let mut i = neg as usize;
     let (mut m, mut nd, mut e) = (0u64, 0, 0i32);
@@ -246,6 +291,13 @@ fn scaled_round(mant: u64, q: i32, k: i32) -> Option<u128> {
         if -t >= 128 || den.leading_zeros() <= (-t) as u32 {
             return None;
         }
+        if den == 1 {
+            // A power of two: shifts, not a 128-bit division.
+            let sh = -t as u32;
+            let (n, r) = (num >> sh, num & ((1 << sh) - 1));
+            let half = 1u128 << (sh - 1);
+            return Some(if r > half || (r == half && n & 1 == 1) { n + 1 } else { n });
+        }
         den <<= -t;
     }
     let (n, r) = (num / den, num % den);
@@ -253,17 +305,31 @@ fn scaled_round(mant: u64, q: i32, k: i32) -> Option<u128> {
     Some(if r > half || (r == half && n & 1 == 1) { n + 1 } else { n })
 }
 
+static PAIRS: [[u8; 2]; 100] = {
+    let mut t = [[0u8; 2]; 100];
+    let mut i = 0;
+    while i < 100 {
+        t[i] = [b'0' + (i / 10) as u8, b'0' + (i % 10) as u8];
+        i += 1;
+    }
+    t
+};
+
 /// Digits of `m` into the end of `buf`; returns them.
 #[inline]
-fn digits(mut m: u64, buf: &mut [u8; 20]) -> &[u8] {
+pub fn digits(mut m: u64, buf: &mut [u8; 20]) -> &[u8] {
     let mut i = 20;
-    loop {
+    while m >= 100 {
+        i -= 2;
+        buf[i..i + 2].copy_from_slice(&PAIRS[(m % 100) as usize]);
+        m /= 100;
+    }
+    if m >= 10 {
+        i -= 2;
+        buf[i..i + 2].copy_from_slice(&PAIRS[m as usize]);
+    } else {
         i -= 1;
-        buf[i] = b'0' + (m % 10) as u8;
-        m /= 10;
-        if m == 0 {
-            break;
-        }
+        buf[i] = b'0' + m as u8;
     }
     &buf[i..]
 }
@@ -419,11 +485,12 @@ pub fn put(out: &mut Vec<u8>, v: i64, s: i32, mode: u8, f: u8) {
 
 /// Codes token `t` in `mode` (not fixed) with precision `p` (for `%g`, `%e`): the integer,
 /// its scale, and flags; None if the token is not printed that way. `prev_scale` is the
-/// scale given to zero; `exp3` the exponent width for tokens without an exponent.
-pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32) -> Option<(i64, i32, u8)> {
+/// scale given to zero; `exp3` the exponent width for tokens without an exponent. `tmp` is
+/// scratch space.
+pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32, tmp: &mut Vec<u8>) -> Option<(i64, i32, u8)> {
     let (r, src) = (render_of(mode), src_of(mode));
     if r == R_GEN && src == SRC_DEC {
-        return num::parse_gen(t, p, prev_scale, exp3);
+        return num::parse_gen(t, p, prev_scale, exp3, tmp);
     }
     let ex = t.iter().position(|&c| c == b'e' || c == b'E');
     let ex3 = ex.map_or(exp3, |i| t.len() - i - 2 == 3 && matches!(t[i + 1], b'+' | b'-'));
@@ -434,10 +501,11 @@ pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32) -> Option<
     let d = match src {
         SRC_DEC => parse_dec(t)?,
         _ => {
-            let s = std::str::from_utf8(t).ok()?;
-            if !s.bytes().all(|c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E')) {
+            if !t.iter().all(|&c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E')) {
                 return None;
             }
+            // SAFETY: ASCII, checked above.
+            let s = unsafe { std::str::from_utf8_unchecked(t) };
             if src == SRC_F32 {
                 let x: f32 = s.parse().ok()?;
                 if !x.is_finite() {
@@ -469,9 +537,9 @@ pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32) -> Option<
         return None;
     }
     let v = d.scaled(s)?;
-    let mut o = Vec::with_capacity(32);
-    put(&mut o, v, s, mode, f);
-    (o == t).then_some((v, s, f))
+    tmp.clear();
+    put(tmp, v, s, mode, f);
+    (tmp[..] == *t).then_some((v, s, f))
 }
 
 #[cfg(test)]
@@ -479,7 +547,7 @@ mod tests {
     use super::*;
 
     fn rt(t: &str, mode: u8, p: u8) {
-        let (v, s, f) = encode(t.as_bytes(), mode, p, false, 0).unwrap_or_else(|| panic!("{t} mode {mode:#x} p {p}"));
+        let (v, s, f) = encode(t.as_bytes(), mode, p, false, 0, &mut vec![]).unwrap_or_else(|| panic!("{t} mode {mode:#x} p {p}"));
         assert!(valid(mode, f), "{t}");
         let mut o = vec![];
         put(&mut o, v, s, mode, f);
@@ -518,7 +586,7 @@ mod tests {
         for t in ["0.1", "1e-05", "1.0", "1e+16", "123.456", "-0.0"] {
             rt(t, mode(R_PY, SRC_DEC), 0);
         }
-        assert!(encode(b"0.1", f32m(R_PY), 0, false, 0).is_none());
+        assert!(encode(b"0.1", f32m(R_PY), 0, false, 0, &mut vec![]).is_none());
     }
 
     #[test]

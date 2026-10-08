@@ -96,7 +96,10 @@ impl Indices {
     #[inline]
     fn update(&mut self, a: i64, p: Option<usize>, v: i64) {
         let p = p.unwrap_or(CACHE - 1);
-        self.cache.copy_within(0..p, 1);
+        // A loop: copy_within calls memmove, slow for these few bytes.
+        for i in (0..p).rev() {
+            self.cache[i + 1] = self.cache[i];
+        }
         self.cache[0] = a;
         self.max = self.max.max(a);
         self.last = a;
@@ -237,12 +240,12 @@ struct Style {
 /// Rough cost of coding `t` in `st`: digits of the integer, plus a scale change from the
 /// previous number in its position (`prev`, updated), or a penalty. `dom` is the usual
 /// number of digits after the point of fixed numbers (others cost a template change).
-fn style_cost(t: &[u8], st: Style, dom: u8, prev: &mut i32) -> usize {
+fn style_cost(t: &[u8], st: Style, dom: u8, prev: &mut i32, tmp: &mut Vec<u8>) -> usize {
     let nd = |v: i64| v.unsigned_abs().checked_ilog10().unwrap_or(0) as usize + 1;
     if st.mode == M_FIX {
         return num::parse(t).map_or(25, |(v, f)| nd(v) + if f & num::F_FRAC != dom { 3 } else { 0 });
     }
-    dec::encode(t, st.mode, st.p, st.exp3, *prev).map_or(25, |(v, s, _)| {
+    dec::encode(t, st.mode, st.p, st.exp3, *prev, tmp).map_or(25, |(v, s, _)| {
         let c = nd(v) + if s != *prev { 2 } else { 0 };
         *prev = s;
         c
@@ -318,11 +321,12 @@ fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
         // Whole lines (consecutive tokens), up to about 512 numbers.
         let ts = &ts[..ts.len().min(512)];
         let mut best = (usize::MAX, Style::default());
+        let mut tmp = Vec::with_capacity(64);
         for c in cands {
             let mut cost = 0;
             let mut prev = [0i32; MAX_NUMS];
             for &(j, t) in ts {
-                cost += style_cost(t, c, dom, &mut prev[j]);
+                cost += style_cost(t, c, dom, &mut prev[j], &mut tmp);
                 if cost >= best.0 {
                     break;
                 }
@@ -356,6 +360,7 @@ pub struct Encoder {
     /// Bytes in `keys`.
     bytes: usize,
     key: Vec<u8>,
+    tmp: Vec<u8>,
 }
 
 impl Default for Encoder {
@@ -368,6 +373,7 @@ impl Default for Encoder {
             keys: vec![],
             bytes: 0,
             key: vec![],
+            tmp: Vec::with_capacity(64),
         }
     }
 }
@@ -445,12 +451,12 @@ impl Encoder {
                 let t = &l[i..te];
                 let ps = self.st.prev[k][n].1;
                 let (v, sc, mode, f) = if style.mode != M_FIX
-                    && let Some((v, sc, f)) = dec::encode(t, style.mode, style.p, style.exp3, ps)
+                    && let Some((v, sc, f)) = dec::encode(t, style.mode, style.p, style.exp3, ps, &mut self.tmp)
                 {
                     (v, sc, style.mode, f)
                 } else if let Some((v, f)) = num::parse(t) {
                     (v, (f & num::F_FRAC) as i32, M_FIX, f)
-                } else if let Some((v, sc, f)) = num::parse_gen(t, style.p.clamp(6, 17), ps, style.exp3) {
+                } else if let Some((v, sc, f)) = num::parse_gen(t, style.p.clamp(6, 17), ps, style.exp3, &mut self.tmp) {
                     (v, sc, M_GEN, f)
                 } else {
                     return false;
