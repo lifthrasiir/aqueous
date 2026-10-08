@@ -6,10 +6,11 @@ fn main() {
         let src = std::fs::read(&f).unwrap();
         let mut enc = Encoder::default();
         let mut s: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
+        let k: usize = std::env::var("KIND").ok().and_then(|s| s.parse().ok()).unwrap_or(0);
         let mut h = [0u64; 32];
         for b in src.chunks(4 << 20) {
             enc.encode(b, &mut s);
-            for &c in &s[S_VPRED] {
+            for &c in &s[S_PRED + k] {
                 h[c as usize] += 1;
             }
         }

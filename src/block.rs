@@ -64,17 +64,18 @@ pub const S_DUP: usize = 12;
 pub const S_VAL: usize = 15;
 /// Residuals of the predicted components of unit normals.
 pub const S_UNIT: usize = 31;
-/// Per v line of three numbers (not a reference to an equal line): its predictor.
-pub const S_VPRED: usize = 32;
-pub const NSTREAMS: usize = 33;
+/// Per v, vt, vn line of two or three numbers (not a reference to an equal line): its
+/// predictor.
+pub const S_PRED: usize = 32;
+pub const NSTREAMS: usize = 35;
 pub const STREAM_NAMES: [&str; NSTREAMS] = [
     "ops", "tpl", "text", "hdr", "scale", "nsel", "fv", "ft", "fn", "fv-esc", "ft-esc", "fn-esc", "v-dup", "vt-dup",
     "vn-dup", "v0", "v1", "v2", "v3+", "vt0", "vt1", "vt2", "vt3+", "vn0", "vn1", "vn2", "vn3+", "vp0", "vp1", "vp2",
-    "vp3+", "vn-unit", "v-pred",
+    "vp3+", "vn-unit", "v-pred", "vt-pred", "vn-pred",
 ];
 
-/// Vertex predictors: 0 the previous numbers of each position; 1..WIN the vertex p+1
-/// lines back; WIN.. the parallelograms v[-1] + v[-k] - v[-k-1], k = p-WIN+1.
+/// Predictors of v, vt, vn lines: 0 the previous numbers of each position; 1..WIN the line
+/// p+1 back; WIN.. the parallelograms x[-1] + x[-k] - x[-k-1], k = p-WIN+1.
 const WIN: usize = 16;
 const NPRED: usize = 2 * WIN;
 
@@ -576,8 +577,8 @@ pub struct Encoder {
     tmp: Vec<u8>,
     recent: [Recent; 3],
     corners: Corners,
-    /// The last vertex predictor.
-    last_vp: usize,
+    /// The last predictor per kind (v, vt, vn).
+    last_vp: [usize; 3],
 }
 
 impl Default for Encoder {
@@ -594,7 +595,7 @@ impl Default for Encoder {
             tmp: Vec::with_capacity(64),
             recent: [Recent::new(true), Recent::new(true), Recent::new(true)],
             corners: Corners::new(),
-            last_vp: 0,
+            last_vp: [0; 3],
         }
     }
 }
@@ -718,14 +719,14 @@ impl Encoder {
                 s[S_NSEL].push(j as u8 | ((vals[j].0 < 0) as u8) << 2);
                 sel = Some(j);
             }
-            // The vertex predictor that leaves the fewest residual bits, staying with the
-            // last one unless another saves a few.
-            let line = self.st.count[0] as u64;
+            // The predictor that leaves the fewest residual bits, staying with the last one
+            // unless another saves a few.
+            let line = self.st.count[k.min(2)] as u64;
             let mut vp = 0;
-            if kind == 0 && n == 3 {
-                vp = self.vertex_pred(&vals, line);
-                self.last_vp = vp;
-                s[S_VPRED].push(vp as u8);
+            if k < 3 && (2..=3).contains(&n) {
+                vp = self.line_pred(k, &vals, n, sel, line);
+                self.last_vp[k] = vp;
+                s[S_PRED + k].push(vp as u8);
             }
             let prev = &mut self.st.prev[k];
             let (o, _) = order(n, sel);
@@ -739,7 +740,7 @@ impl Encoder {
                     let (a, b) = ((j + 1) % 3, (j + 2) % 3);
                     unit_pred(to_f64(vals[a].0, vals[a].1), to_f64(vals[b].0, vals[b].1), sc, v < 0)
                 } else if vp > 0 {
-                    window_pred(&self.recent[0], line, vp, j, sc).expect("checked")
+                    window_pred(&self.recent[k], line, vp, j, sc).expect("checked")
                 } else {
                     num::rescale(pv, ps, sc)
                 };
@@ -824,27 +825,34 @@ impl Encoder {
         x.update(a, p, v);
     }
 
-    /// The predictor for vertex `line` with numbers `vals` (value, scale).
+    /// The predictor for line `line` of kind `kind` (v, vt, vn) with `n` numbers `vals`
+    /// (value, scale), position `sel` predicted otherwise.
     #[inline]
-    fn vertex_pred(&self, vals: &[(i64, i32, u8); MAX_NUMS], line: u64) -> usize {
-        // The window at the vertex's scales; p = 0 is the previous numbers.
-        let rec = &self.recent[0];
-        let prev = &self.st.prev[0];
+    fn line_pred(&self, kind: usize, vals: &[(i64, i32, u8); MAX_NUMS], n: usize, sel: Option<usize>, line: u64) -> usize {
+        // The window at the line's scales; p = 0 is the previous numbers.
+        let rec = &self.recent[kind];
+        let prev = &self.st.prev[kind];
         let mut w = [[0i64; 3]; WIN + 2];
         let mut have = 1usize;
-        for j in 0..3 {
+        for j in 0..n {
             w[0][j] = num::rescale(prev[j].0, prev[j].1, vals[j].1);
         }
         for (k, wk) in w.iter_mut().enumerate().skip(1) {
             let Some(e) = line.checked_sub(k as u64).and_then(|l| rec.get(l)) else { break };
-            for j in 0..3 {
+            for j in 0..n {
                 let sc = vals[j].1;
                 wk[j] = if e.s[j] as i32 == sc { e.v[j] } else { num::rescale(e.v[j], e.s[j] as i32, sc) };
             }
             have = k + 1;
         }
+        // Positions that count (as 0 or 1), so that the cost is a fixed loop.
+        let act: [u32; 3] = std::array::from_fn(|j| (j < n && Some(j) != sel) as u32);
         let cost = |pr: [i64; 3]| -> u32 {
-            (0..3).map(|j| 64 - crate::varint::zz(vals[j].0.wrapping_sub(pr[j])).leading_zeros()).sum()
+            let mut c = 0;
+            for j in 0..3 {
+                c += act[j] * (64 - crate::varint::zz(vals[j].0.wrapping_sub(pr[j])).leading_zeros());
+            }
+            c
         };
         let mut best = (cost(w[0]), 0);
         let mut try_p = |p: usize, pr: [i64; 3]| {
@@ -861,7 +869,7 @@ impl Encoder {
             try_p(WIN + k - 1, pr);
         }
         // The last predictor, if available, unless the best saves more than a few bits.
-        let lp = self.last_vp;
+        let lp = self.last_vp[kind];
         let avail = lp == 0 || (lp < WIN && lp + 1 < have) || (lp >= WIN && lp - WIN + 2 < have);
         if avail && lp != best.1 {
             let pr = if lp == 0 {
@@ -1025,7 +1033,7 @@ impl Decoder {
         let mut fesc = [Rd::new(&s[S_FESC]), Rd::new(&s[S_FESC + 1]), Rd::new(&s[S_FESC + 2])];
         let mut nsel = Rd::new(&s[S_NSEL]);
         let mut dup = [Rd::new(&s[S_DUP]), Rd::new(&s[S_DUP + 1]), Rd::new(&s[S_DUP + 2])];
-        let mut vpred = Rd::new(&s[S_VPRED]);
+        let mut lpred = [Rd::new(&s[S_PRED]), Rd::new(&s[S_PRED + 1]), Rd::new(&s[S_PRED + 2])];
         let mut hdr = Rd::new(&s[S_HDR]);
         let unit = hdr.u8() & H_UNIT != 0;
         while !ops.done() {
@@ -1084,10 +1092,10 @@ impl Decoder {
                     sel = Some(((c & 3) as usize).min(2));
                     neg = c & 4 != 0;
                 }
-                let line = self.st.count[0] as u64;
+                let line = self.st.count[kk.min(2)] as u64;
                 let mut vp = 0;
-                if d == 0 && kind == 0 && n == 3 {
-                    vp = (vpred.u8() as usize).min(NPRED - 1);
+                if d == 0 && kk < 3 && (2..=3).contains(&n) {
+                    vp = (lpred[kk].u8() as usize).min(NPRED - 1);
                 }
                 let (o, _) = order(n, sel);
                 for &j in &o[..if d == 0 { n } else { 0 }] {
@@ -1102,7 +1110,7 @@ impl Decoder {
                         let (a, b) = ((j + 1) % 3, (j + 2) % 3);
                         unit_pred(to_f64(prev[a].0, prev[a].1), to_f64(prev[b].0, prev[b].1), sc, neg)
                     } else if vp > 0 {
-                        let Some(x) = window_pred(&self.recent[0], line, vp, j, sc) else { return false };
+                        let Some(x) = window_pred(&self.recent[kk], line, vp, j, sc) else { return false };
                         x
                     } else {
                         num::rescale(pv, ps, sc)
@@ -1152,8 +1160,8 @@ impl Decoder {
             }
             out.extend_from_slice(&k[i + 1..]);
         }
-        let all = [&ops, &tpl, &scale, &nsel, &hdr, &vpred];
-        tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).chain(&vs).all(|r| r.done())
+        let all = [&ops, &tpl, &scale, &nsel, &hdr];
+        tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).chain(&vs).chain(&lpred).all(|r| r.done())
     }
 
 }
