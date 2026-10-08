@@ -118,7 +118,7 @@ pub struct State {
 
 impl Default for State {
     fn default() -> Self {
-        let idx = Indices { cache: [0; CACHE], max: 0, last: 0, off: 0 };
+        let idx = Indices { cache: [0; CACHE], max: 0, off: 0 };
         State { prev: [[(0, 0); MAX_NUMS]; 4], count: [0; 3], idx: [idx; 3] }
     }
 }
@@ -463,8 +463,17 @@ impl Encoder {
         } else if a == x.max.wrapping_add(1) {
             SYM_NEW
         } else {
-            put_sv(&mut s[S_FESC + k], a.wrapping_sub(x.last));
-            SYM_ESC
+            // The difference from the nearest cached index (in bits, a few more for a
+            // position other than the previous index's).
+            let mut best = (u32::MAX, 0);
+            for (q, &c) in x.cache.iter().enumerate() {
+                let b = 64 - crate::varint::zz(a.wrapping_sub(c)).leading_zeros() + if q > 0 { 2 } else { 0 };
+                if b < best.0 {
+                    best = (b, q);
+                }
+            }
+            put_sv(&mut s[S_FESC + k], a.wrapping_sub(x.cache[best.1]));
+            SYM_ESC + best.1 as u8
         };
         s[S_FSYM + k].push(sym);
         x.update(a, p, v);

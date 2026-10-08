@@ -13,13 +13,14 @@ pub(crate) const C_NEG: u8 = 4;
 pub(crate) const CACHE: usize = 32;
 /// One more than the largest index so far.
 pub(crate) const SYM_NEW: u8 = CACHE as u8;
-/// Coded as the difference from the previous index.
-pub(crate) const SYM_ESC: u8 = SYM_NEW + 1;
 /// The first and second candidate. For v: the vertices before and after the previous
 /// corner's in the last face that had it (a shared edge). For vt, vn: the corner's v index
 /// plus the previous corner's offset from it, and the index last paired with this v.
-pub(crate) const SYM_X1: u8 = SYM_NEW + 2;
-pub(crate) const SYM_X2: u8 = SYM_NEW + 3;
+pub(crate) const SYM_X1: u8 = SYM_NEW + 1;
+pub(crate) const SYM_X2: u8 = SYM_NEW + 2;
+/// SYM_ESC + q: coded as the difference from the index at position q of the cache (0 is
+/// the previous index).
+pub(crate) const SYM_ESC: u8 = SYM_NEW + 3;
 
 /// Per v index (direct mapped), its neighbours and vt, vn in the last face that had it.
 pub(crate) const CORNERS: usize = 1 << 16;
@@ -81,7 +82,6 @@ impl Corners {
 pub(crate) struct Indices {
     pub(crate) cache: [i64; CACHE],
     pub(crate) max: i64,
-    pub(crate) last: i64,
     /// Previous index minus its corner's v index.
     pub(crate) off: i64,
 }
@@ -102,7 +102,6 @@ impl Indices {
         }
         self.cache[0] = a;
         self.max = self.max.max(a);
-        self.last = a;
         self.off = a.wrapping_sub(v);
     }
 }
@@ -138,7 +137,10 @@ impl Indices {
                 (a, x.find(a))
             }
             SYM_NEW => (x.max.wrapping_add(1), None),
-            SYM_ESC => (x.last.wrapping_add(esc.sv()), None),
+            _ if c >= SYM_ESC => {
+                let q = ((c - SYM_ESC) as usize).min(CACHE - 1);
+                (x.cache[q].wrapping_add(esc.sv()), None)
+            }
             _ => {
                 let p = (c as usize).min(CACHE - 1);
                 (x.cache[p], Some(p))
