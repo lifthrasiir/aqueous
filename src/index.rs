@@ -94,16 +94,60 @@ fn key_cmp(f: u8, sa: u64, a: &[u8], sb: u64, b: &[u8]) -> Ordering {
 
 /// The rows of a table (payloads, rowids) in the order of an index with key `key`.
 /// Encoder and decoder must agree on it exactly, so ties fall back to the row number.
-pub fn order(rows: &[&[u8]], rowids: &[i64], key: &Key) -> Vec<u32> {
+/// A table's rows in index order, and their indexed columns.
+pub struct Order {
+    pub perm: Vec<u32>,
+    /// Per row and indexed column: (serial type, content offset); u32::MAX for the rowid.
+    pub vals: Vec<(u64, u32)>,
+    /// Whether the row has all indexed columns (else they read as NULL).
+    pub ok: Vec<bool>,
+}
+
+/// Sorts by key, then by position (`keys` come in position order): LSD radix sort over
+/// the bytes that vary.
+fn radix_sort(keys: &mut Vec<(u128, u32)>) {
+    let n = keys.len();
+    if n < 512 {
+        keys.sort_unstable();
+        return;
+    }
+    let k0 = keys[0].0;
+    let diff = keys.iter().fold(0u128, |a, k| a | (k.0 ^ k0));
+    let bytes: Vec<u32> = (0..16).filter(|b| (diff >> (8 * b)) as u8 != 0).collect();
+    if bytes.len() > 10 {
+        keys.sort_unstable();
+        return;
+    }
+    let mut tmp = keys.clone();
+    for &b in &bytes {
+        let mut cnt = [0usize; 257];
+        for k in keys.iter() {
+            cnt[(k.0 >> (8 * b)) as u8 as usize + 1] += 1;
+        }
+        for i in 0..256 {
+            cnt[i + 1] += cnt[i];
+        }
+        for k in keys.iter() {
+            let d = (k.0 >> (8 * b)) as u8 as usize;
+            tmp[cnt[d]] = *k;
+            cnt[d] += 1;
+        }
+        std::mem::swap(keys, &mut tmp);
+    }
+}
+
+pub fn order(rows: &[&[u8]], rowids: &[i64], key: &Key) -> Order {
     let m = key.cols.len();
     let n = rows.len();
     let rb: Vec<[u8; 8]> = rowids.iter().map(|r| r.to_be_bytes()).collect();
     // (serial type, content offset) of the indexed columns, row by row; NULL when missing,
     // an offset of u32::MAX for the rowid.
     let mut vals: Vec<(u64, u32)> = Vec::with_capacity(n * m);
+    let mut oks = Vec::with_capacity(n);
     let mut cols = Vec::new();
     for row in rows {
         let ok = parse(row, &mut cols);
+        oks.push(ok && key.cols.iter().all(|&c| c == ROWID || (c as usize) < cols.len()));
         vals.extend(key.cols.iter().map(|&c| match c {
             ROWID => (6, u32::MAX),
             _ if ok => cols.get(c as usize).copied().unwrap_or((0, 0)),
@@ -163,7 +207,7 @@ pub fn order(rows: &[&[u8]], rowids: &[i64], key: &Key) -> Vec<u32> {
         })
         .collect();
     // Sort by prefix, then runs of equal prefixes in full.
-    keys.sort_unstable();
+    radix_sort(&mut keys);
     let full = |x: &(u128, u32), y: &(u128, u32)| {
         let (a, b) = (x.1 as usize, y.1 as usize);
         for j in 0..m {
@@ -187,7 +231,9 @@ pub fn order(rows: &[&[u8]], rowids: &[i64], key: &Key) -> Vec<u32> {
         }
         i = j;
     }
-    keys.into_iter().map(|k| k.1).collect()
+    let perm = keys.into_iter().map(|k| k.1).collect();
+    drop((hi, lo));
+    Order { perm, vals, ok: oks }
 }
 
 /// Is `b` the ASCII string `s` in the database's text encoding (1 UTF-8, 2 UTF-16le,

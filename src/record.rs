@@ -99,43 +99,35 @@ pub fn parse(pay: &[u8], cols: &mut Vec<(u64, u32)>) -> bool {
     header_len((hl - n) as u64) == hl as u64 && b == pay.len()
 }
 
-/// Appends the index entry SQLite builds from a table row: columns `map` of the row
-/// (whose payload is `row`), then the rowid. False if the row has no such columns.
-pub fn predict(
-    row: &[u8],
-    rowid: i64,
-    map: &[u32],
-    fmt4: bool,
-    cols: &mut Vec<(u64, u32)>,
-    out: &mut Vec<u8>,
-) -> bool {
-    if !parse(row, cols) {
-        return false;
-    }
+/// Appends the index entry SQLite builds from a table row (payload `row`): the indexed
+/// columns (`map`, with their serial types and offsets `cv` as `index::order` found them),
+/// then the rowid.
+pub fn predict(row: &[u8], rowid: i64, map: &[u32], cv: &[(u64, u32)], fmt4: bool, out: &mut Vec<u8>) {
     let rst = canon_st(rowid, fmt4);
-    let st_of = |c: u32| if c == ROWID { Some(rst) } else { cols.get(c as usize).map(|x| x.0) };
+    let st_of = |j: usize| if map[j] == ROWID { rst } else { cv[j].0 };
     let mut s = sqlite_len(rst) as u64;
-    for &c in map {
-        let Some(st) = st_of(c) else { return false };
-        s += sqlite_len(st) as u64;
+    for j in 0..map.len() {
+        s += sqlite_len(st_of(j)) as u64;
     }
     let mut vb = [0u8; 9];
     let n = put_sqlite(&mut vb, header_len(s));
     out.extend_from_slice(&vb[..n]);
-    for &c in map.iter().chain(std::iter::once(&ROWID)) {
-        let n = put_sqlite(&mut vb, st_of(c).unwrap());
+    for j in 0..map.len() {
+        let n = put_sqlite(&mut vb, st_of(j));
         out.extend_from_slice(&vb[..n]);
     }
+    let n = put_sqlite(&mut vb, rst);
+    out.extend_from_slice(&vb[..n]);
     let rb = rowid.to_be_bytes();
-    for &c in map.iter().chain(std::iter::once(&ROWID)) {
-        if c == ROWID {
+    for j in 0..map.len() {
+        if map[j] == ROWID {
             out.extend_from_slice(&rb[8 - INT_SIZE[rst as usize]..]);
         } else {
-            let (st, off) = cols[c as usize];
+            let (st, off) = cv[j];
             out.extend_from_slice(&row[off as usize..off as usize + st_size(st)]);
         }
     }
-    true
+    out.extend_from_slice(&rb[8 - INT_SIZE[rst as usize]..]);
 }
 
 // Value tags.
@@ -440,7 +432,7 @@ impl Recs {
 /// index, and the table columns of the index.
 pub struct RefCtx<'r> {
     pub table: &'r Recs,
-    pub order: Vec<u32>,
+    pub order: crate::index::Order,
     pub map: &'r [u32],
 }
 
@@ -474,7 +466,6 @@ impl<'a> GroupDec<'a> {
         let mut r = Recs::default();
         r.buf.reserve(self.rawpay.b.len() + self.cols.iter().map(|c| c.bytes.b.len()).sum::<usize>());
         let mut vals: Vec<(u64, i64)> = Vec::new();
-        let mut tcols = Vec::new();
         let (mut prev_rowid, mut prev_rank) = (0i64, 0i64);
         while !self.rec.at_end() {
             if table {
@@ -493,12 +484,14 @@ impl<'a> GroupDec<'a> {
                     prev_rank = rank;
                     let row = *usize::try_from(rank)
                         .ok()
-                        .and_then(|i| rc.order.get(i))
+                        .and_then(|i| rc.order.perm.get(i))
                         .ok_or_else(corrupt)? as usize;
-                    let (row, rowid) = (rc.table.get(row), rc.table.rowids[row]);
-                    if !predict(row, rowid, rc.map, fmt4, &mut tcols, &mut r.buf) {
+                    if !rc.order.ok[row] {
                         return Err(corrupt());
                     }
+                    let m = rc.map.len();
+                    let cv = &rc.order.vals[row * m..(row + 1) * m];
+                    predict(rc.table.get(row), rc.table.rowids[row], rc.map, cv, fmt4, &mut r.buf);
                 }
                 _ => self.columns((code - R_COLS) as usize, fmt4, &mut vals, &mut r.buf)?,
             }
@@ -616,7 +609,8 @@ mod tests {
         // Non-minimal header length, wrong total length.
         assert!(!parse(&[0x80, 4, 2, 17, 0, 1, 44, b'a', b'b'], &mut cols));
         assert!(!parse(&rec[..7], &mut cols));
-        assert!(predict(&rec, 5, &[1, 0], true, &mut cols, &mut out));
+        let cv = [cols[1], cols[0]];
+        predict(&rec, 5, &[1, 0], &cv, true, &mut out);
         assert_eq!(out, [4u8, 17, 2, 1, b'a', b'b', 1, 44, 5]);
     }
 }

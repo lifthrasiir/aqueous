@@ -128,8 +128,8 @@ fn bench(args: &[String]) {
         tout,
         tout / tin,
         tin / tc / 1e6,
-        total.transform_s / iters as f64,
-        total.zstd_s / iters as f64,
+        total.transform_s,
+        total.zstd_s,
         tin / td / 1e6
     );
 }

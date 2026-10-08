@@ -321,23 +321,25 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
             let map = &key.cols;
             let tg = &groups[*t];
             let order = index::order(&pays[*t], &tg.rowids, key);
-            let mut rank = vec![0u32; order.len()];
-            for (k, &r) in order.iter().enumerate() {
+            let mut rank = vec![0u32; order.perm.len()];
+            for (k, &r) in order.perm.iter().enumerate() {
                 rank[r as usize] = k as u32;
             }
             let row_of = row_lookup(&tg.rowids);
+            let m = map.len();
             for &e in &pays[i] {
                 // The entry's rowid, its row, and the entry the row predicts.
                 let r = crate::record::parse(e, &mut cols)
                     .then(|| cols.last().copied())
                     .flatten()
                     .filter(|&(st, _)| is_int(st))
-                    .and_then(|(st, off)| row_of(int_value(st, &e[off as usize..off as usize + st_size(st)])));
+                    .and_then(|(st, off)| row_of(int_value(st, &e[off as usize..off as usize + st_size(st)])))
+                    .filter(|&r| order.ok[r]);
                 if let Some(r) = r {
                     pred.clear();
-                    if predict(pays[*t][r], tg.rowids[r], map, g.fmt4, &mut cols, &mut pred)
-                        && pred == e
-                    {
+                    let cv = &order.vals[r * m..(r + 1) * m];
+                    predict(pays[*t][r], tg.rowids[r], map, cv, g.fmt4, &mut pred);
+                    if pred == e {
                         ge.reference(rank[r] as i64);
                         continue;
                     }
