@@ -9,6 +9,7 @@
 
 pub mod block;
 pub mod container;
+pub mod dec;
 pub mod num;
 pub mod varint;
 

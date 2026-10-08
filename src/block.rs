@@ -14,7 +14,7 @@
 //! State (previous values, templates) carries over from block to block, so that blocks are
 //! coded in order, but its size does not depend on the input size.
 
-use crate::num;
+use crate::{dec, num};
 use crate::varint::{Rd, put_sv, put_uv};
 use std::collections::HashMap;
 
@@ -225,11 +225,28 @@ fn order(n: usize, sel: Option<usize>) -> ([usize; MAX_NUMS], usize) {
     (o, n)
 }
 
-/// How the encoder writes the numbers of a kind: `%g` with this precision, or fixed (0).
+/// How the encoder writes the numbers of a kind first: a mode (`dec`), the precision for
+/// `%g` and `%e`, and the exponent width of `%g` tokens without an exponent.
 #[derive(Clone, Copy, Default)]
 struct Style {
-    gen_p: u8,
+    mode: u8,
+    p: u8,
     exp3: bool,
+}
+
+/// Rough cost of coding `t` in `st`: digits of the integer, plus a scale change from the
+/// previous number in its position (`prev`, updated), or a penalty. `dom` is the usual
+/// number of digits after the point of fixed numbers (others cost a template change).
+fn style_cost(t: &[u8], st: Style, dom: u8, prev: &mut i32) -> usize {
+    let nd = |v: i64| v.unsigned_abs().checked_ilog10().unwrap_or(0) as usize + 1;
+    if st.mode == M_FIX {
+        return num::parse(t).map_or(25, |(v, f)| nd(v) + if f & num::F_FRAC != dom { 3 } else { 0 });
+    }
+    dec::encode(t, st.mode, st.p, st.exp3, *prev).map_or(25, |(v, s, _)| {
+        let c = nd(v) + if s != *prev { 2 } else { 0 };
+        *prev = s;
+        c
+    })
 }
 
 /// Chooses the styles from lines spread over a block: `%.Pg` when most numbers of a kind
@@ -238,7 +255,8 @@ struct Style {
 fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
     const PARTS: usize = 16;
     const PART: usize = 2 << 10;
-    let mut toks: [Vec<&[u8]>; 4] = Default::default();
+    // Tokens with their position in the line.
+    let mut toks: [Vec<(usize, &[u8])>; 4] = Default::default();
     for i in 0..PARTS {
         let a = src.len() / PARTS * i;
         let sample = &src[a..(a + PART).min(src.len())];
@@ -251,8 +269,8 @@ fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
             if k >= K_F {
                 continue;
             }
-            for t in l[kw..].split(|&c| matches!(c, b' ' | b'\t' | b'\r')).filter(|t| !t.is_empty()) {
-                toks[k as usize].push(t);
+            for (j, t) in l[kw..].split(|&c| matches!(c, b' ' | b'\t' | b'\r')).filter(|t| !t.is_empty()).enumerate() {
+                toks[k as usize].push((j.min(MAX_NUMS - 1), t));
             }
         }
     }
@@ -264,28 +282,61 @@ fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
         st[k] = Style::default();
         let mut hist = [0usize; 19];
         let mut maxsig = 1u8;
+        let mut sci_p = 1u8;
         let mut exp3 = false;
-        for t in ts {
+        for &(_, t) in ts {
             if let Some((_, f)) = num::parse(t) {
                 hist[(f & num::F_FRAC) as usize] += 1;
             }
-            let e = t.iter().position(|&c| c == b'e').unwrap_or(t.len());
-            exp3 |= t.len() - e == 5;
+            let e = t.iter().position(|&c| c == b'e' || c == b'E');
+            exp3 |= e.is_some_and(|e| t.len() - e == 5);
+            let e = e.unwrap_or(t.len());
             let digits: Vec<u8> = t[..e].iter().copied().filter(u8::is_ascii_digit).collect();
             let a = digits.iter().position(|&c| c != b'0').unwrap_or(digits.len());
             let b = digits.iter().rposition(|&c| c != b'0').map_or(a, |i| i + 1);
             maxsig = maxsig.max((b - a).min(17) as u8);
+            if e < t.len() {
+                sci_p = sci_p.max(digits.len().min(19) as u8);
+            }
         }
-        let fix = *hist.iter().max().unwrap();
-        let gen_ok = ts.iter().filter(|t| num::parse_gen(t, maxsig, 0, exp3).is_some()).count();
-        if fix * 10 < ts.len() * 9 && gen_ok * 10 >= ts.len() * 9 {
-            st[k] = Style { gen_p: maxsig, exp3 };
+        let dom = (0..19).max_by_key(|&i| hist[i]).unwrap() as u8;
+        let s = |r, src, p| Style { mode: dec::mode(r, src), p, exp3 };
+        let cands = [
+            Style::default(),
+            s(dec::R_GEN, dec::SRC_DEC, maxsig),
+            s(dec::R_SCI, dec::SRC_DEC, sci_p),
+            s(dec::R_PY, dec::SRC_DEC, 0),
+            s(dec::R_JS, dec::SRC_DEC, 0),
+            s(dec::R_POS, dec::SRC_DEC, 0),
+            s(dec::R_GEN, dec::SRC_F32, maxsig),
+            s(dec::R_GEN, dec::SRC_F64, maxsig),
+            s(dec::R_SCI, dec::SRC_F32, sci_p),
+            s(dec::R_SCI, dec::SRC_F64, sci_p),
+            s(dec::R_PY, dec::SRC_F32, 0),
+            s(dec::R_JS, dec::SRC_F32, 0),
+        ];
+        // Whole lines (consecutive tokens), up to about 512 numbers.
+        let ts = &ts[..ts.len().min(512)];
+        let mut best = (usize::MAX, Style::default());
+        for c in cands {
+            let mut cost = 0;
+            let mut prev = [0i32; MAX_NUMS];
+            for &(j, t) in ts {
+                cost += style_cost(t, c, dom, &mut prev[j]);
+                if cost >= best.0 {
+                    break;
+                }
+            }
+            if cost < best.0 {
+                best = (cost, c);
+            }
         }
+        st[k] = best.1;
     }
     // Normals of length 1 within rounding.
     let (mut nvn, mut nunit) = (0, 0);
     for t in toks[2].chunks_exact(3) {
-        let x: Vec<f64> = t.iter().filter_map(|t| std::str::from_utf8(t).ok()?.parse().ok()).collect();
+        let x: Vec<f64> = t.iter().filter_map(|t| std::str::from_utf8(t.1).ok()?.parse().ok()).collect();
         if x.len() == 3 {
             nvn += 1;
             nunit += ((x[0] * x[0] + x[1] * x[1] + x[2] * x[2] - 1.0).abs() < 1e-3) as usize;
@@ -393,13 +444,13 @@ impl Encoder {
                 }
                 let t = &l[i..te];
                 let ps = self.st.prev[k][n].1;
-                let (v, sc, mode, f) = if style.gen_p > 0
-                    && let Some((v, sc, f)) = num::parse_gen(t, style.gen_p, ps, style.exp3)
+                let (v, sc, mode, f) = if style.mode != M_FIX
+                    && let Some((v, sc, f)) = dec::encode(t, style.mode, style.p, style.exp3, ps)
                 {
-                    (v, sc, M_GEN, f)
+                    (v, sc, style.mode, f)
                 } else if let Some((v, f)) = num::parse(t) {
                     (v, (f & num::F_FRAC) as i32, M_FIX, f)
-                } else if let Some((v, sc, f)) = num::parse_gen(t, style.gen_p.max(6), ps, style.exp3) {
+                } else if let Some((v, sc, f)) = num::parse_gen(t, style.p.clamp(6, 17), ps, style.exp3) {
                     (v, sc, M_GEN, f)
                 } else {
                     return false;
@@ -428,7 +479,7 @@ impl Encoder {
             for &j in &o[..n] {
                 let (v, sc, mode) = vals[j];
                 let (pv, ps) = prev[j];
-                if mode == M_GEN {
+                if mode != M_FIX {
                     put_sv(&mut s[S_SCALE], (sc - ps) as i64);
                 }
                 let pred = if Some(j) == sel {
@@ -577,11 +628,7 @@ fn valid_key(k: &[u8]) -> bool {
     for _ in 0..n {
         let (Some(&m), Some(&f), Some(&sl)) = (k.get(i), k.get(i + 1), k.get(i + 2)) else { return false };
         let ok = if kind < K_F {
-            match m {
-                M_FIX => num::valid_fmt(f),
-                M_GEN => num::valid_gen(f),
-                _ => false,
-            }
+            dec::valid(m, f)
         } else {
             f == 0 && m < 32 && (m & C_T != 0 || m & (C_NEG << 1) == 0) && (m & C_N != 0 || m & (C_NEG << 2) == 0)
         };
@@ -686,7 +733,7 @@ impl Decoder {
                 for &j in &o[..n] {
                     let (m, f) = (k[items[j]], k[items[j] + 1]);
                     let (pv, ps) = prev[j];
-                    let sc = if m == M_GEN {
+                    let sc = if m != M_FIX {
                         (ps as i64).wrapping_add(scale.sv()).clamp(num::MIN_SCALE as i64, num::MAX_SCALE as i64) as i32
                     } else {
                         (f & num::F_FRAC) as i32
@@ -703,11 +750,7 @@ impl Decoder {
                     let (m, f, sl) = (k[it], k[it + 1], k[it + 2] as usize);
                     out.extend_from_slice(&k[it + 3..it + 3 + sl]);
                     let (v, sc) = prev[j];
-                    if m == M_GEN {
-                        num::put_gen(out, v, sc, f);
-                    } else {
-                        num::put(out, v, f);
-                    }
+                    dec::put(out, v, sc, m, f);
                 }
                 if kind < K_VP {
                     self.st.count[kind as usize] += 1;
@@ -801,8 +844,11 @@ pub fn describe(k: &[u8]) -> String {
             if m & 0x1c != 0 {
                 s += &format!("~{}", m >> 2);
             }
-        } else if m == M_GEN {
-            s += &format!("g{}{}{}", f & num::G_PREC, if f & num::G_EXP3 != 0 { "E" } else { "" }, if f & num::G_NEGZ != 0 { "-" } else { "" });
+        } else if m != M_FIX {
+            let src = ["", "f32:", "f64:"][(dec::src_of(m) as usize).min(2)];
+            let r = ["", "g", "e", "py", "js", "pos"][(dec::render_of(m) as usize).min(5)];
+            let p = if matches!(dec::render_of(m), dec::R_GEN | dec::R_SCI) { format!("{}", f & num::G_PREC) } else { String::new() };
+            s += &format!("{src}{r}{p}{}{}", if f & num::G_EXP3 != 0 { "E" } else { "" }, if f & num::G_NEGZ != 0 { "-" } else { "" });
         } else {
             if f & num::F_NEGZ != 0 {
                 s += "-";

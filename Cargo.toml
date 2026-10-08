@@ -9,6 +9,7 @@ publish = false
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memchr = "2"
+zmij = "1"
 
 [profile.release]
 debug = 1
