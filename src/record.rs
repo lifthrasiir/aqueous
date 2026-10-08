@@ -294,7 +294,8 @@ impl GroupEnc {
                         c.iexp.push(e);
                         put_sv(&mut c.hres, m.wrapping_sub(last));
                         last = m;
-                    } else if (f as f64).to_bits() == bits {
+                    } else if !f.is_nan() && (f as f64).to_bits() == bits {
+                        // (NaN payloads need not survive the decoder's f32 -> f64 in Wasm.)
                         c.tag.push(T_F32);
                         c.real.extend_from_slice(&f.to_bits().to_be_bytes());
                     } else {
@@ -683,5 +684,18 @@ mod tests {
         assert!(keys.push(&rec, 5, &mut cols));
         predict(&keys, 0, true, &mut out);
         assert_eq!(out, [4u8, 17, 2, 1, b'a', b'b', 1, 44, 5]);
+    }
+
+    #[test]
+    fn nan_reals_stay_doubles() {
+        // A NaN that survives f64 -> f32 -> f64 natively, but whose payload a Wasm decoder
+        // need not keep (the deterministic profile canonicalises it): it must not go as f32.
+        for bits in [0x7ff8_0000_2000_0000u64, 0xfff8_0000_0000_0000, 0x7ff8_0000_0000_0000] {
+            let mut pay = vec![2u8, 7];
+            pay.extend_from_slice(&bits.to_be_bytes());
+            let mut g = GroupEnc::default();
+            g.record(&pay, true, &mut vec![]);
+            assert_eq!(&g.cols[0].tag[..], [T_REAL], "{bits:#x}");
+        }
     }
 }
