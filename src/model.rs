@@ -35,6 +35,7 @@ const RUN_CTX: usize = 8;
 /// Run mode needs this many samples above, from above on, equal to the left one (and the
 /// upper left one). Short runs are cheap enough with the stretch above as context.
 const RUN_LOOK: usize = 4;
+const _: () = assert!(RUN_LOOK == 4, "run_above compares 4 samples");
 /// Tables of the difference to the hint where the left and upper samples matched it, by
 /// plane kind and whether the upper diagonal ones did.
 const MATCH_BASE: usize = RUN_BASE + KINDS * 2 * RUN_CTX;
@@ -104,19 +105,20 @@ struct RowCtx<'a> {
     hint: Option<(&'a [u8], &'a [u8])>,
 }
 
-/// How many samples of `up` from `x` on equal `v`, up to 128; 0 if fewer than the run look.
+/// Whether the left sample `v` starts a run: the upper left one and [`RUN_LOOK`] from above
+/// on equal it.
 #[inline(always)]
-fn flat_above(up: &[u8], x: usize, v: u8) -> usize {
-    let look = RUN_LOOK;
-    let Some(s) = up.get(x..x + look) else { return 0 };
-    if look >= 8 {
-        let pat = u64::from_ne_bytes([v; 8]);
-        if u64::from_ne_bytes(s[..8].try_into().unwrap()) != pat {
-            return 0;
-        }
+fn run_above(up: &[u8], x: usize, v: u8) -> bool {
+    match up.get(x - 1..x + RUN_LOOK) {
+        Some(s) => u32::from_ne_bytes(s[1..5].try_into().unwrap()) == u32::from_ne_bytes([v; 4]) && s[0] == v,
+        None => false,
     }
-    let n = crate::packbits::count_equal(&up[x..(x + 128).min(up.len())], v);
-    if n >= look { n } else { 0 }
+}
+
+/// How many samples of `up` from `x` on equal `v`, up to 128 (a run's context).
+#[inline(always)]
+fn stretch_above(up: &[u8], x: usize, v: u8) -> usize {
+    crate::packbits::count_equal(&up[x..(x + 128).min(up.len())], v)
 }
 
 /// How many samples of `a` and `b` are equal from the start, compared 8 at a time.
@@ -255,9 +257,8 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
         // number of following samples equal to it, in chunks of up to 254 (255 continues).
         if !TOP && !after_run {
             let v = p[x - 1];
-            let above = if q.up[x - 1] == v { flat_above(q.up, x, v) } else { 0 };
-            if above > 0 {
-                let t = run_t + (ALPHA && al[x] == 0) as usize * RUN_CTX + run_ctx(above);
+            if run_above(q.up, x, v) {
+                let t = run_t + (ALPHA && al[x] == 0) as usize * RUN_CTX + run_ctx(stretch_above(q.up, x, v));
                 let mut n = 0;
                 loop {
                     let avail = if C::DECODES { 0 } else { crate::packbits::count_equal(&p[x + n..(x + n + 255).min(w)], v) };
@@ -381,10 +382,8 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
         }
         if !TOP && !after_run {
             let v = [p0[x - 1], p1[x - 1], p2[x - 1]];
-            let flat = |p: usize, q: &Rows| if q.up[x - 1] == v[p] { flat_above(q.up, x, v[p]) } else { 0 };
-            let above = flat(0, q0);
-            if above > 0 && (how[1] == 0 || flat(1, q1) > 0) && (how[2] == 0 || flat(2, q2) > 0) {
-                let t = k.run_t + (ALPHA && q0.al[x] == 0) as usize * RUN_CTX + run_ctx(above);
+            if run_above(q0.up, x, v[0]) && (how[1] == 0 || run_above(q1.up, x, v[1])) && (how[2] == 0 || run_above(q2.up, x, v[2])) {
+                let t = k.run_t + (ALPHA && q0.al[x] == 0) as usize * RUN_CTX + run_ctx(stretch_above(q0.up, x, v[0]));
                 let mut n = 0;
                 loop {
                     let avail = if C::DECODES {
