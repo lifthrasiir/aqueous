@@ -261,7 +261,7 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
 /// one stored whole are coded again, in a new generation).
 enum Report {
     Verified { generation: u64, idx: usize, ok: bool, secs: f64 },
-    Coded { generation: u64, idx: usize, out: Vec<u8>, st: Stats },
+    Coded { generation: u64, idx: usize, out: Vec<u8>, st: Box<Stats> },
 }
 
 struct VerifyJob {
@@ -286,7 +286,7 @@ struct Pending {
     range: std::ops::Range<usize>,
     mark: block::Mark,
     verified: Option<bool>,
-    coded: Option<(Vec<u8>, Stats)>,
+    coded: Option<(Vec<u8>, Box<Stats>)>,
 }
 
 fn compress_par<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) -> std::io::Result<()> {
@@ -342,7 +342,7 @@ fn compress_par<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut W) 
                     let mut st = Stats::default();
                     coder.coded(j.n, &j.streams, &mut out, &mut st);
                     st.zstd_s = t.elapsed().as_secs_f64();
-                    if rtx.send(Report::Coded { generation: j.generation, idx: j.idx, out, st }).is_err() {
+                    if rtx.send(Report::Coded { generation: j.generation, idx: j.idx, out, st: Box::new(st) }).is_err() {
                         break;
                     }
                 }
@@ -427,7 +427,7 @@ pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
 /// A block as stored: whole, or its streams (raw length, how, data).
 enum Stored<'a> {
     Whole(&'a [u8]),
-    Coded([(usize, u8, &'a [u8]); NSTREAMS]),
+    Coded(Box<[(usize, u8, &'a [u8]); NSTREAMS]>),
 }
 
 /// Reads the next block's description (`left`: bytes of the file still to come).
@@ -443,7 +443,7 @@ fn read_block<'a>(r: &mut Rd<'a>, left: usize) -> Result<(usize, Stored<'a>)> {
             Stored::Whole(r.bytes(c).ok_or_else(corrupt)?)
         }
         1 => {
-            let mut s = [(0, 0, &[][..]); NSTREAMS];
+            let mut s = Box::new([(0, 0, &[][..]); NSTREAMS]);
             for (i, e) in s.iter_mut().enumerate() {
                 let raw = r.uv() as usize;
                 if raw == 0 {
@@ -476,13 +476,13 @@ fn unpack(b: &Stored, n: usize, dz: &mut zstd::bulk::Decompressor, streams: &mut
         Stored::Whole(d) => {
             let s = out.len();
             out.reserve(n);
-            dz.decompress_to_buffer(*d, out).map_err(|_| corrupt())?;
+            dz.decompress_to_buffer(d, out).map_err(|_| corrupt())?;
             if out.len() - s != n {
                 return Err(corrupt());
             }
         }
         Stored::Coded(desc) => {
-            for (s, &(raw, m, d)) in streams.iter_mut().zip(desc) {
+            for (s, &(raw, m, d)) in streams.iter_mut().zip(desc.iter()) {
                 s.clear();
                 if raw == 0 {
                     continue;
