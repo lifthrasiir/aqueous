@@ -136,6 +136,32 @@ fn mesh_corners() {
     rt(s.as_bytes());
 }
 
+/// Unit normals in every direction (the predicted component and its sign change), in
+/// fixed and `%g` formats, with vertices.
+#[test]
+fn unit_normals() {
+    let mut s = String::new();
+    let mut r = 77u64;
+    for i in 0..20000 {
+        let mut g = || {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            (r >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let (x, y, z) = (g(), g(), g());
+        let l = (x * x + y * y + z * z).sqrt().max(1e-9);
+        let (x, y, z) = (x / l, y / l, z / l);
+        s += &format!("v {:.6} {:.6} {:.6}\n", x * 3.0, y * 3.0, z * 3.0);
+        if i % 2 == 0 {
+            s += &format!("vn {x:.6} {y:.6} {z:.6}\n");
+        } else {
+            s += &format!("vn {} {} {}\n", c_fmt(c"%g", x), c_fmt(c"%g", y), c_fmt(c"%g", z));
+        }
+    }
+    rt(s.as_bytes());
+}
+
 #[test]
 fn binary_junk() {
     let mut r = 0x1234567u64;
