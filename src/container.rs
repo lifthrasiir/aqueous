@@ -28,6 +28,7 @@ use crate::psd::{self, Compression, Error, Psd, Result};
 const MAGIC: &[u8; 4] = b"PSDR";
 const VERSION: u8 = 1;
 
+#[track_caller]
 fn corrupt() -> Error {
     if std::env::var_os("PSDR_DEBUG").is_some() {
         eprintln!("corrupt at {}", std::panic::Location::caller());
@@ -91,6 +92,8 @@ enum Coding {
     Rle { count_bytes: usize, encoder: Encoder, exceptions: Vec<(usize, Vec<u8>)> },
     /// An embedded file, compressed by `codec`.
     Nested { codec: Codec, packed: Vec<u8> },
+    /// The same bytes as span `of` (of an earlier layer, not itself a copy).
+    Copy { of: usize },
 }
 
 /// How deep embedded PSDs are recompressed.
@@ -136,6 +139,8 @@ struct GroupDef {
     /// Coded with the composite rendered from the layers as hint (all planes in one span,
     /// which is the composite's).
     hinted: bool,
+    /// Per plane, the plane (index in the group) it equals, coded before it.
+    same_as: Vec<Option<usize>>,
 }
 
 /// Rebuilds a span's bytes from its decoded planes (planar, `planes * h * w` bytes).
@@ -143,6 +148,7 @@ fn rebuild(s: &Span, data: &[u8], out: &mut Vec<u8>) -> Result<()> {
     match &s.coding {
         Coding::Raw => out.extend_from_slice(data),
         Coding::Nested { codec, packed } => out.extend_from_slice(&nested_decompress(*codec, packed)?),
+        Coding::Copy { .. } => unreachable!("copies are rebuilt from their source"),
         Coding::Rle { count_bytes, encoder, exceptions } => {
             let rows = s.planes * s.h;
             let counts_at = out.len();
@@ -214,10 +220,12 @@ fn analyze_span(d: &[u8], start: usize, end: usize, planes: usize, w: usize, h: 
 /// Spans and groups of a parsed file, with the decoded planes of each span.
 fn plan(psd: &Psd, d: &[u8], depth: usize) -> (Vec<Span>, Vec<Vec<u8>>, Vec<GroupDef>) {
     let mut spans = Vec::new();
-    let mut datas = Vec::new();
+    let mut datas: Vec<Vec<u8>> = Vec::new();
     let mut groups = Vec::new();
     let pixels = psd.depth == 8;
     let rgb = psd.mode == 3;
+    // Channel data of earlier layers, to code repeats as copies.
+    let mut seen: std::collections::HashMap<(&[u8], usize, usize), usize> = Default::default();
     for l in psd.layer_info.layers.iter().filter(|_| pixels) {
         let mut refs: Vec<(i16, PlaneRef)> = Vec::new();
         for c in &l.channels {
@@ -226,10 +234,20 @@ fn plan(psd: &Psd, d: &[u8], depth: usize) -> (Vec<Span>, Vec<Vec<u8>>, Vec<Grou
             if w == 0 || h == 0 {
                 continue;
             }
-            if let Some((s, data)) = analyze_span(d, c.span.start + 2, c.span.end, 1, w, h, comp, psd.psb) {
+            let (start, end) = (c.span.start + 2, c.span.end);
+            if let Some(&of) = seen.get(&(&d[start..end], w, h)) {
+                refs.push((c.id, (spans.len(), 0)));
+                spans.push(Span { start, end, gap: 0, planes: 1, w, h, coding: Coding::Copy { of } });
+                datas.push(datas[of].clone());
+            } else if let Some((s, data)) = analyze_span(d, start, end, 1, w, h, comp, psd.psb) {
                 refs.push((c.id, (spans.len(), 0)));
                 spans.push(s);
                 datas.push(data);
+            }
+        }
+        for &(_, (si, _)) in &refs {
+            if !matches!(spans[si].coding, Coding::Copy { .. }) {
+                seen.entry((&d[spans[si].start..spans[si].end], spans[si].w, spans[si].h)).or_insert(si);
             }
         }
         let pick = |id: i16| refs.iter().find(|r| r.0 == id).map(|r| r.1);
@@ -242,12 +260,13 @@ fn plan(psd: &Psd, d: &[u8], depth: usize) -> (Vec<Span>, Vec<Vec<u8>>, Vec<Grou
                     planes.push(a);
                 }
                 grouped.extend(&planes);
-                groups.push(GroupDef { planes, has_alpha: alpha.is_some(), hinted: false });
+                groups.push(GroupDef { planes, has_alpha: alpha.is_some(), hinted: false, same_as: Vec::new() });
             }
         }
         for (_, p) in refs {
-            if !grouped.contains(&p) {
-                groups.push(GroupDef { planes: vec![p], has_alpha: false, hinted: false });
+            // A lone copy needs no coding at all.
+            if !grouped.contains(&p) && !matches!(spans[p.0].coding, Coding::Copy { .. }) {
+                groups.push(GroupDef { planes: vec![p], has_alpha: false, hinted: false, same_as: Vec::new() });
             }
         }
     }
@@ -283,11 +302,11 @@ fn plan(psd: &Psd, d: &[u8], depth: usize) -> (Vec<Span>, Vec<Vec<u8>>, Vec<Grou
                 let has_alpha = n >= 4 && psd.layer_info.merged_alpha;
                 let k = 3 + has_alpha as usize;
                 let hinted = !psd.layer_info.layers.is_empty();
-                groups.push(GroupDef { planes: (0..k).map(|p| (si, p)).collect(), has_alpha, hinted });
+                groups.push(GroupDef { planes: (0..k).map(|p| (si, p)).collect(), has_alpha, hinted, same_as: Vec::new() });
                 rest = k;
             }
             for p in rest..n {
-                groups.push(GroupDef { planes: vec![(si, p)], has_alpha: false, hinted: false });
+                groups.push(GroupDef { planes: vec![(si, p)], has_alpha: false, hinted: false, same_as: Vec::new() });
             }
         }
     }
@@ -339,6 +358,10 @@ fn put_layout(spans: &[Span], groups: &[GroupDef]) -> Vec<u8> {
                 put_varint(&mut o, packed.len() as u64);
                 o.extend_from_slice(packed);
             }
+            Coding::Copy { of } => {
+                o.push(32);
+                put_varint(&mut o, *of as u64);
+            }
             Coding::Rle { count_bytes, encoder, exceptions } => {
                 o.push(*count_bytes as u8);
                 put_encoder(&mut o, *encoder);
@@ -357,9 +380,10 @@ fn put_layout(spans: &[Span], groups: &[GroupDef]) -> Vec<u8> {
     for g in groups {
         put_varint(&mut o, g.planes.len() as u64);
         o.push(g.has_alpha as u8 | (g.hinted as u8) << 1);
-        for &(s, p) in &g.planes {
+        for (k, &(s, p)) in g.planes.iter().enumerate() {
             put_varint(&mut o, s as u64);
             put_varint(&mut o, p as u64);
+            put_opt(&mut o, g.same_as.get(k).copied().flatten().unwrap_or(usize::MAX));
         }
     }
     o
@@ -394,6 +418,17 @@ fn get_layout(src: &[u8]) -> Result<(Vec<Span>, Vec<GroupDef>)> {
                 let len = get_usize(src, &mut at)?;
                 Coding::Nested { codec, packed: get_bytes(src, &mut at, len)?.to_vec() }
             }
+            32 => {
+                let of = get_usize(src, &mut at)?;
+                // The source is an earlier span of one plane of the same size, not a copy.
+                let ok = spans.get(of).is_some_and(|s: &Span| {
+                    s.planes == 1 && s.w == w && s.h == h && !matches!(s.coding, Coding::Copy { .. } | Coding::Nested { .. })
+                });
+                if !ok || planes != 1 {
+                    return Err(corrupt());
+                }
+                Coding::Copy { of }
+            }
             _ => return Err(corrupt()),
         };
         // Positions are only known once rebuilt.
@@ -409,6 +444,7 @@ fn get_layout(src: &[u8]) -> Result<(Vec<Span>, Vec<GroupDef>)> {
             return Err(corrupt());
         }
         let mut planes = Vec::with_capacity(np.min(16));
+        let mut same_as = Vec::with_capacity(np.min(16));
         for _ in 0..np {
             let s = get_usize(src, &mut at)?;
             let p = get_usize(src, &mut at)?;
@@ -416,11 +452,21 @@ fn get_layout(src: &[u8]) -> Result<(Vec<Span>, Vec<GroupDef>)> {
                 return Err(corrupt());
             }
             planes.push((s, p));
+            same_as.push(match get_opt(src, &mut at)? {
+                usize::MAX => None,
+                j => Some(j),
+            });
         }
         if np == 0 || has_alpha && np < 2 || hinted && (np < 3 || planes.iter().any(|p| p.0 != planes[0].0)) {
             return Err(corrupt());
         }
-        groups.push(GroupDef { planes, has_alpha, hinted });
+        // A plane may only equal one coded before it: alpha first, then colors in order.
+        let colors = np - has_alpha as usize;
+        let rank = |k: usize| if has_alpha && k == colors { 0 } else { k + has_alpha as usize };
+        if same_as.iter().enumerate().any(|(k, j)| j.is_some_and(|j| j >= np || rank(j) >= rank(k))) {
+            return Err(corrupt());
+        }
+        groups.push(GroupDef { planes, has_alpha, hinted, same_as });
     }
     if at != src.len() {
         return Err(corrupt());
@@ -428,21 +474,34 @@ fn get_layout(src: &[u8]) -> Result<(Vec<Span>, Vec<GroupDef>)> {
     Ok((spans, groups))
 }
 
-fn group_of(def: &GroupDef, spans: &[Span], datas: Option<&[Vec<u8>]>) -> Result<Group> {
+/// The group of `def`; with `datas`, the planes are filled (for encoding), otherwise only
+/// the known ones (copies of earlier spans, for decoding).
+fn group_of(def: &GroupDef, spans: &[Span], datas: &[Vec<u8>], fill: bool) -> Result<Group> {
     let (s0, _) = def.planes[0];
     let (w, h) = (spans[s0].w, spans[s0].h);
+    let n = w.checked_mul(h).ok_or_else(corrupt)?;
     let mut planes = Vec::with_capacity(def.planes.len());
+    let mut known = Vec::with_capacity(def.planes.len());
     for &(s, p) in &def.planes {
         if spans[s].w != w || spans[s].h != h {
             return Err(corrupt());
         }
-        let n = w.checked_mul(h).ok_or_else(corrupt)?;
-        planes.push(match datas {
-            Some(ds) => ds[s][p * n..(p + 1) * n].to_vec(),
+        let src = match spans[s].coding {
+            Coding::Copy { of } => Some(of),
+            _ => fill.then_some(s),
+        };
+        known.push(matches!(spans[s].coding, Coding::Copy { .. }));
+        planes.push(match src {
+            Some(s) => datas[s][p * n..(p + 1) * n].to_vec(),
             None => vec![0u8; n],
         });
     }
-    Ok(Group { w, h, planes, has_alpha: def.has_alpha, hint: None })
+    let mut g = Group::new(w, h, planes, def.has_alpha);
+    g.known = known;
+    if !def.same_as.is_empty() {
+        g.same_as = def.same_as.clone();
+    }
+    Ok(g)
 }
 
 /// The composite of `d` (a whole file, or one up to its composite data) rendered from its
@@ -501,8 +560,11 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     sk.extend_from_slice(&file[prev..]);
     let t0 = std::time::Instant::now();
     let mut rec = model::Recorder::default();
-    for g in &groups {
-        let mut grp = group_of(g, &spans, Some(&datas)).ok()?;
+    let mut groups = groups;
+    for g in &mut groups {
+        let mut grp = group_of(g, &spans, &datas, true).ok()?;
+        grp.find_same();
+        g.same_as = grp.same_as.clone();
         if g.hinted {
             grp.hint = Some(hint(file, g).ok()?);
         }
@@ -563,7 +625,11 @@ impl Assembler<'_> {
     fn spans(&mut self, spans: &[Span], datas: &[Vec<u8>], upto: usize) -> Result<()> {
         while self.done < upto {
             self.gap(spans)?;
-            rebuild(&spans[self.done], &datas[self.done], &mut self.out)?;
+            let i = match spans[self.done].coding {
+                Coding::Copy { of } => of,
+                _ => self.done,
+            };
+            rebuild(&spans[i], &datas[i], &mut self.out)?;
             self.done += 1;
             self.gap_done = false;
         }
@@ -600,7 +666,7 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     // the file up to its span.
     let mut asm = Assembler { out: Vec::with_capacity(sk.len() * 2), sk: &sk, k: 0, done: 0, gap_done: false };
     for g in &groups {
-        let mut grp = group_of(g, &spans, None)?;
+        let mut grp = group_of(g, &spans, &datas, false)?;
         if g.hinted {
             let si = g.planes[0].0;
             asm.spans(&spans, &datas, si)?;

@@ -49,6 +49,49 @@ pub struct Group {
     pub has_alpha: bool,
     /// A prediction of every plane (the composite image rendered from the layers).
     pub hint: Option<Vec<Vec<u8>>>,
+    /// Planes whose data is already there (copies of planes coded before); not coded.
+    pub known: Vec<bool>,
+    /// Planes equal to another plane of the group coded before them; not coded.
+    pub same_as: Vec<Option<usize>>,
+}
+
+impl Group {
+    pub fn new(w: usize, h: usize, planes: Vec<Vec<u8>>, has_alpha: bool) -> Group {
+        let n = planes.len();
+        Group { w, h, planes, has_alpha, hint: None, known: vec![false; n], same_as: vec![None; n] }
+    }
+
+    /// Planes in coding order: alpha (if any), then the color planes.
+    pub fn order(&self) -> Vec<usize> {
+        let colors = self.planes.len() - self.has_alpha as usize;
+        let mut o: Vec<usize> = Vec::with_capacity(self.planes.len());
+        if self.has_alpha {
+            o.push(colors);
+        }
+        o.extend(0..colors);
+        o
+    }
+
+    /// Sets `same_as` for planes equal to one coded before them (and not known).
+    pub fn find_same(&mut self) {
+        let order = self.order();
+        for (a, &k) in order.iter().enumerate() {
+            if self.known[k] {
+                continue;
+            }
+            self.same_as[k] = order[..a].iter().copied().find(|&j| self.planes[j] == self.planes[k]);
+        }
+    }
+}
+
+/// Gives back the encoder's symbols: walks known planes for their residuals.
+struct Passthrough;
+
+impl Coder for Passthrough {
+    #[inline(always)]
+    fn code(&mut self, _t: usize, sym: u8) -> u8 {
+        sym
+    }
 }
 
 pub trait Coder {
@@ -188,23 +231,41 @@ fn walk_plane<C: Coder>(
     }
 }
 
-/// Codes all planes of `g` in model order.
+/// Codes all planes of `g` in model order, but known planes and planes equal to another.
 pub fn walk<C: Coder>(c: &mut C, g: &mut Group) {
     let n = g.w * g.h;
     let colors = g.planes.len() - g.has_alpha as usize;
     let mut res = vec![0u8; n];
-    if g.has_alpha {
+    // Whether plane k is to be coded; a copied or known plane needs walking only for the
+    // residuals of the first color plane, which the others use.
+    let coded = |g: &mut Group, k: usize| -> bool {
+        if let Some(j) = g.same_as[k] {
+            let src = std::mem::take(&mut g.planes[j]);
+            g.planes[k].copy_from_slice(&src);
+            g.planes[j] = src;
+            return false;
+        }
+        !g.known[k]
+    };
+    if g.has_alpha && coded(g, colors) {
         walk_plane(c, g, colors, 2, &mut res, None);
     }
     if colors == 1 && !g.has_alpha {
-        walk_plane(c, g, 0, 3, &mut res, None);
+        if coded(g, 0) {
+            walk_plane(c, g, 0, 3, &mut res, None);
+        }
         return;
     }
     let mut first = vec![0u8; n];
     for k in 0..colors {
+        let code = coded(g, k);
         if k == 0 {
-            walk_plane(c, g, 0, 0, &mut first, None);
-        } else {
+            if code {
+                walk_plane(c, g, 0, 0, &mut first, None);
+            } else if colors > 1 {
+                walk_plane(&mut Passthrough, g, 0, 0, &mut first, None);
+            }
+        } else if code {
             walk_plane(c, g, k, 1, &mut res, Some(&first));
         }
     }

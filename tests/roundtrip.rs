@@ -61,7 +61,8 @@ fn image(w: usize, h: usize, seed: u32) -> Vec<u8> {
         .collect()
 }
 
-fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: bool, raw_layer: bool) -> Vec<u8> {
+/// `raw`: which layers are stored raw (the others RLE).
+fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: bool, raw: &[usize]) -> Vec<u8> {
     let mut o = Vec::new();
     o.extend_from_slice(b"8BPS");
     be16(&mut o, 1);
@@ -93,7 +94,7 @@ fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: bool
         be16(&mut li, l.channels.len() as u16);
         for (id, data) in &l.channels {
             let mut c = Vec::new();
-            if raw_layer && k == 0 {
+            if raw.contains(&k) {
                 be16(&mut c, 0);
                 c.extend_from_slice(data);
             } else {
@@ -165,18 +166,18 @@ fn check(file: &[u8]) {
 
 #[test]
 fn photoshop_rle() {
-    check(&psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, false));
+    check(&psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]));
 }
 
 #[test]
 fn tiles_and_exceptions() {
     let enc = Encoder::Photoshop { phase: 77, period: 368 };
-    check(&psd(500, 30, &layers(500, 30, true), enc, true, false));
+    check(&psd(500, 30, &layers(500, 30, true), enc, true, &[]));
 }
 
 #[test]
 fn greedy_writer_and_raw_layer() {
-    check(&psd(260, 35, &layers(260, 35, false), Encoder::Greedy { min_run: 3, split_rest: true }, false, true));
+    check(&psd(260, 35, &layers(260, 35, false), Encoder::Greedy { min_run: 3, split_rest: true }, false, &[0]));
 }
 
 #[test]
@@ -189,7 +190,7 @@ fn not_a_psd_is_stored() {
 
 #[test]
 fn corrupt_input_is_an_error() {
-    let file = psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, false);
+    let file = psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]);
     let packed = psd_recons::compress(&file);
     for cut in [7, 20, packed.len() / 2, packed.len() - 1] {
         assert!(psd_recons::decompress(&packed[..cut]).is_err());
@@ -198,4 +199,30 @@ fn corrupt_input_is_an_error() {
     let k = flipped.len() - 10;
     flipped[k] ^= 0x40;
     assert!(psd_recons::decompress(&flipped).is_err());
+}
+
+#[test]
+fn duplicate_layers_and_gray_layer() {
+    let (w, h) = (200, 30);
+    let mut ls = layers(w, h, true);
+    // A copy of the first layer, moved; and a gray layer (equal color planes).
+    let mut copy = Layer { top: 7, left: 2, w, h, channels: ls[0].channels.clone() };
+    copy.channels.swap(1, 2);
+    ls.push(copy);
+    let g = image(w, h, 99);
+    ls.push(Layer { top: 0, left: 0, w, h, channels: vec![(0, g.clone()), (1, g.clone()), (2, g)] });
+    let file = psd(w, h, &ls, packbits::NO_TILES, false, &[]);
+    check(&file);
+    // Copies cost next to nothing.
+    let single = psd(w, h, &ls[..2], packbits::NO_TILES, false, &[]);
+    let (a, b) = (psd_recons::compress(&file).len(), psd_recons::compress(&single).len());
+    assert!(a < b + b / 4, "{a} vs {b}");
+}
+
+#[test]
+fn same_bytes_other_size_is_no_copy() {
+    // Raw channels with equal bytes but different sizes (100 x 2 and 50 x 4).
+    let data = image(100, 2, 5);
+    let l = |w, h| Layer { top: 0, left: 0, w, h, channels: vec![(0, data.clone()), (1, data.clone()), (2, data.clone())] };
+    check(&psd(100, 4, &[l(100, 2), l(50, 4)], packbits::NO_TILES, false, &[0, 1]));
 }
