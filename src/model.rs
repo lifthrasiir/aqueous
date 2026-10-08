@@ -10,6 +10,10 @@
 //! chosen by plane kind, transparency of the pixel, local activity and (after the first
 //! color plane) the first plane's residual.
 //!
+//! A group may come with a *hint*, a prediction of its planes (the composite image rendered
+//! from the layers): where the left and upper samples equal the hint's, the difference to the
+//! hint is coded instead, in tables of its own.
+//!
 //! Encoder and decoder share [`walk`], which predicts each sample and asks a [`Coder`] for
 //! its residual symbol: the encoder records the symbol of the known sample, the decoder
 //! decodes one and writes the sample.
@@ -28,7 +32,10 @@ const KINDS: usize = 4;
 const RUN_LOOK: usize = 32;
 /// Run length tables, by plane kind and transparency.
 const RUN_BASE: usize = KINDS * 2 * CTX;
-pub const TABLES: usize = RUN_BASE + KINDS * 2;
+/// Tables of the difference to the hint where the left and upper samples matched it, by
+/// plane kind and whether the upper diagonal ones did.
+const MATCH_BASE: usize = RUN_BASE + KINDS * 2;
+pub const TABLES: usize = MATCH_BASE + KINDS * 4;
 
 fn corrupt() -> Error {
     Error("corrupt pixel data".into())
@@ -40,6 +47,8 @@ pub struct Group {
     pub h: usize,
     pub planes: Vec<Vec<u8>>,
     pub has_alpha: bool,
+    /// A prediction of every plane (the composite image rendered from the layers).
+    pub hint: Option<Vec<Vec<u8>>>,
 }
 
 pub trait Coder {
@@ -80,6 +89,7 @@ fn walk_plane<C: Coder>(
     first: Option<&[u8]>,
 ) {
     let (w, h) = (g.w, g.h);
+    let hint = g.hint.as_ref().map(|hs| &hs[k][..]);
     let (planes, alpha) = if g.has_alpha && kind != 2 {
         let last = g.planes.len() - 1;
         let (p, a) = g.planes.split_at_mut(last);
@@ -156,6 +166,16 @@ fn walk_plane<C: Coder>(
                 Some(f) => (f[i], bucket(mag(f[i]), CROSS)),
                 None => (0, 0),
             };
+            if let Some(hp) = hint {
+                if x > 0 && y > 0 && p[i - 1] == hp[i - 1] && p[i - w] == hp[i - w] {
+                    let m = (p[i - w - 1] == hp[i - w - 1]) as usize + 2 * (x + 1 < w && p[i - w + 1] == hp[i - w + 1]) as usize;
+                    let s = c.code(MATCH_BASE + kind * 4 + m, p[i].wrapping_sub(hp[i]));
+                    p[i] = hp[i].wrapping_add(s);
+                    res[i] = p[i].wrapping_sub(pred);
+                    x += 1;
+                    continue;
+                }
+            }
             let ctx = bucket(act + 2 * (rw + rn), ACT) * CROSS + cross;
             let t = (kind * 2 + transparent as usize) * CTX + ctx;
             let r = p[i].wrapping_sub(pred);

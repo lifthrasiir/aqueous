@@ -19,6 +19,7 @@
 //!   model payload                   -- see model::Recorder::finish
 //! ```
 
+use crate::composite;
 use crate::model::{self, Group};
 use crate::packbits::{self, Encoder};
 use crate::pixels::unpackbits;
@@ -132,6 +133,9 @@ type PlaneRef = (usize, usize);
 struct GroupDef {
     planes: Vec<PlaneRef>,
     has_alpha: bool,
+    /// Coded with the composite rendered from the layers as hint (all planes in one span,
+    /// which is the composite's).
+    hinted: bool,
 }
 
 /// Rebuilds a span's bytes from its decoded planes (planar, `planes * h * w` bytes).
@@ -238,12 +242,12 @@ fn plan(psd: &Psd, d: &[u8], depth: usize) -> (Vec<Span>, Vec<Vec<u8>>, Vec<Grou
                     planes.push(a);
                 }
                 grouped.extend(&planes);
-                groups.push(GroupDef { planes, has_alpha: alpha.is_some() });
+                groups.push(GroupDef { planes, has_alpha: alpha.is_some(), hinted: false });
             }
         }
         for (_, p) in refs {
             if !grouped.contains(&p) {
-                groups.push(GroupDef { planes: vec![p], has_alpha: false });
+                groups.push(GroupDef { planes: vec![p], has_alpha: false, hinted: false });
             }
         }
     }
@@ -278,11 +282,12 @@ fn plan(psd: &Psd, d: &[u8], depth: usize) -> (Vec<Span>, Vec<Vec<u8>>, Vec<Grou
             if rgb && n >= 3 {
                 let has_alpha = n >= 4 && psd.layer_info.merged_alpha;
                 let k = 3 + has_alpha as usize;
-                groups.push(GroupDef { planes: (0..k).map(|p| (si, p)).collect(), has_alpha });
+                let hinted = !psd.layer_info.layers.is_empty();
+                groups.push(GroupDef { planes: (0..k).map(|p| (si, p)).collect(), has_alpha, hinted });
                 rest = k;
             }
             for p in rest..n {
-                groups.push(GroupDef { planes: vec![(si, p)], has_alpha: false });
+                groups.push(GroupDef { planes: vec![(si, p)], has_alpha: false, hinted: false });
             }
         }
     }
@@ -351,7 +356,7 @@ fn put_layout(spans: &[Span], groups: &[GroupDef]) -> Vec<u8> {
     put_varint(&mut o, groups.len() as u64);
     for g in groups {
         put_varint(&mut o, g.planes.len() as u64);
-        o.push(g.has_alpha as u8);
+        o.push(g.has_alpha as u8 | (g.hinted as u8) << 1);
         for &(s, p) in &g.planes {
             put_varint(&mut o, s as u64);
             put_varint(&mut o, p as u64);
@@ -398,7 +403,11 @@ fn get_layout(src: &[u8]) -> Result<(Vec<Span>, Vec<GroupDef>)> {
     let mut groups = Vec::with_capacity(ng.min(1 << 20));
     for _ in 0..ng {
         let np = get_usize(src, &mut at)?;
-        let has_alpha = *get_bytes(src, &mut at, 1)?.first().unwrap() != 0;
+        let flags = *get_bytes(src, &mut at, 1)?.first().unwrap();
+        let (has_alpha, hinted) = (flags & 1 != 0, flags & 2 != 0);
+        if flags > 3 {
+            return Err(corrupt());
+        }
         let mut planes = Vec::with_capacity(np.min(16));
         for _ in 0..np {
             let s = get_usize(src, &mut at)?;
@@ -408,10 +417,10 @@ fn get_layout(src: &[u8]) -> Result<(Vec<Span>, Vec<GroupDef>)> {
             }
             planes.push((s, p));
         }
-        if np == 0 || has_alpha && np < 2 {
+        if np == 0 || has_alpha && np < 2 || hinted && (np < 3 || planes.iter().any(|p| p.0 != planes[0].0)) {
             return Err(corrupt());
         }
-        groups.push(GroupDef { planes, has_alpha });
+        groups.push(GroupDef { planes, has_alpha, hinted });
     }
     if at != src.len() {
         return Err(corrupt());
@@ -433,7 +442,23 @@ fn group_of(def: &GroupDef, spans: &[Span], datas: Option<&[Vec<u8>]>) -> Result
             None => vec![0u8; n],
         });
     }
-    Ok(Group { w, h, planes, has_alpha: def.has_alpha })
+    Ok(Group { w, h, planes, has_alpha: def.has_alpha, hint: None })
+}
+
+/// The composite of `d` (a whole file, or one up to its composite data) rendered from its
+/// layers, planar, as hint for group `g`.
+fn hint(d: &[u8], g: &GroupDef) -> Result<Vec<Vec<u8>>> {
+    let psd = psd::parse(d)?;
+    let mut rep = composite::Report::default();
+    let r = composite::render(&psd, d, g.has_alpha, &mut rep)?;
+    let n = g.planes.len();
+    let mut planes = vec![Vec::with_capacity(r.len() / n); n];
+    for px in r.chunks_exact(n) {
+        for (k, &v) in px.iter().enumerate() {
+            planes[k].push(v);
+        }
+    }
+    Ok(planes)
 }
 
 /// Compresses a file; never fails (a file that cannot be coded is stored).
@@ -478,6 +503,9 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     let mut rec = model::Recorder::default();
     for g in &groups {
         let mut grp = group_of(g, &spans, Some(&datas)).ok()?;
+        if g.hinted {
+            grp.hint = Some(hint(file, g).ok()?);
+        }
         model::walk(&mut rec, &mut grp);
     }
     let t_walk = t0.elapsed().as_secs_f64();
@@ -508,6 +536,41 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Builds the output from the skeleton and the rebuilt spans, in order.
+struct Assembler<'a> {
+    out: Vec<u8>,
+    sk: &'a [u8],
+    /// Skeleton bytes used.
+    k: usize,
+    /// Spans written.
+    done: usize,
+    /// Whether the skeleton gap before the next span is written.
+    gap_done: bool,
+}
+
+impl Assembler<'_> {
+    fn gap(&mut self, spans: &[Span]) -> Result<()> {
+        if !self.gap_done && self.done < spans.len() {
+            let end = self.k.checked_add(spans[self.done].gap).ok_or_else(corrupt)?;
+            self.out.extend_from_slice(self.sk.get(self.k..end).ok_or_else(corrupt)?);
+            self.k = end;
+            self.gap_done = true;
+        }
+        Ok(())
+    }
+
+    /// Writes spans up to `upto` (excluded), with the gaps before them.
+    fn spans(&mut self, spans: &[Span], datas: &[Vec<u8>], upto: usize) -> Result<()> {
+        while self.done < upto {
+            self.gap(spans)?;
+            rebuild(&spans[self.done], &datas[self.done], &mut self.out)?;
+            self.done += 1;
+            self.gap_done = false;
+        }
+        Ok(())
+    }
+}
+
 pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     if src.len() < 6 || &src[..4] != MAGIC || src[4] != VERSION {
         return Err(Error("not a psd-recons file".into()));
@@ -533,8 +596,17 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
         datas.push(vec![0u8; n]);
     }
     let mut player = model::Player::new(&src[at..])?;
+    // The output is assembled as soon as the spans are decoded, since a hinted group needs
+    // the file up to its span.
+    let mut asm = Assembler { out: Vec::with_capacity(sk.len() * 2), sk: &sk, k: 0, done: 0, gap_done: false };
     for g in &groups {
         let mut grp = group_of(g, &spans, None)?;
+        if g.hinted {
+            let si = g.planes[0].0;
+            asm.spans(&spans, &datas, si)?;
+            asm.gap(&spans)?;
+            grp.hint = Some(hint(&asm.out, g)?);
+        }
         model::walk(&mut player, &mut grp);
         let n = grp.w * grp.h;
         for (&(s, p), plane) in g.planes.iter().zip(grp.planes) {
@@ -544,16 +616,9 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     if !player.finished() {
         return Err(corrupt());
     }
-    // Interleave the skeleton with the rebuilt spans.
-    let mut out = Vec::with_capacity(sk.len() * 2);
-    let mut k = 0usize;
-    for (s, data) in spans.iter().zip(&datas) {
-        let piece = sk.get(k..k.checked_add(s.gap).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
-        out.extend_from_slice(piece);
-        k += s.gap;
-        rebuild(s, data, &mut out)?;
-    }
-    out.extend_from_slice(sk.get(k..).ok_or_else(corrupt)?);
+    asm.spans(&spans, &datas, spans.len())?;
+    let mut out = asm.out;
+    out.extend_from_slice(sk.get(asm.k..).ok_or_else(corrupt)?);
     if xxhash_rust::xxh3::xxh3_64(&out) != hash {
         return Err(Error("checksum mismatch".into()));
     }
