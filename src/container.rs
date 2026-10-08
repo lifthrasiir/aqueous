@@ -98,8 +98,6 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
     let mut check = Vec::new();
     let mut z = Vec::new();
     let mut ac = Vec::new();
-    // Per stream: the way that won clearly on the last block (M_STORED: none).
-    let mut winner = [M_STORED; NSTREAMS];
     let mut cz = zstd::bulk::Compressor::new(opt.level).expect("zstd");
     let mut p = 0;
     let mut nblock = 0;
@@ -148,18 +146,14 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
                 if s.is_empty() {
                     continue;
                 }
-                // Both zstd and rANS for streams that may take either, unless one has won
-                // clearly on the last block (tried again every few blocks).
-                let recheck = nblock % 8 == 0;
-                let try_ans = AC_STREAMS[i] && s.len() > 64 && (winner[i] != M_ZSTD || recheck);
-                let try_zstd = s.len() > 64 && (winner[i] != M_ANS || recheck || !try_ans);
+                // Both zstd and rANS for streams that may take either.
+                let try_ans = AC_STREAMS[i] && s.len() > 64;
                 z.clear();
-                if try_zstd {
+                if s.len() > 64 {
                     z.reserve(zstd::zstd_safe::compress_bound(s.len()));
                     cz.compress_to_buffer(s, &mut z).expect("zstd");
                 }
                 let (mut m, mut d) = if !z.is_empty() && z.len() < s.len() { (M_ZSTD, &z) } else { (M_STORED, s) };
-                let mut margin = M_STORED;
                 if try_ans {
                     // rANS coded, if smaller (and, verifying, if it decodes back).
                     ac.clear();
@@ -167,14 +161,10 @@ pub fn compress_to<W: Write>(src: &[u8], opt: &Options, st: &mut Stats, w: &mut 
                         && ac.len() < d.len()
                         && (!opt.verify || ans::decode(&ac, s.len(), &mut check) && check == *s);
                     if ok {
-                        margin = if !try_zstd || ac.len() * 100 < d.len() * 97 { M_ANS } else { M_STORED };
                         (m, d) = (M_ANS, &ac);
                         st.rc[i] += 1;
-                    } else if m == M_ZSTD && ac.len() * 100 > z.len() * 110 {
-                        margin = M_ZSTD;
                     }
                 }
-                winner[i] = margin;
                 out.push(m);
                 put_uv(&mut out, d.len() as u64);
                 out.extend_from_slice(d);
