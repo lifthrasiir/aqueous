@@ -29,12 +29,19 @@ const CROSS: usize = 4;
 const CTX: usize = ACT * CROSS;
 /// Plane kinds: first color plane, other color planes, alpha, lone plane.
 const KINDS: usize = 4;
-/// Run length tables, by plane kind and transparency.
+/// Run length tables, by plane kind, transparency and how far the row above stays equal.
 const RUN_BASE: usize = KINDS * 2 * CTX;
+const RUN_CTX: usize = 8;
+/// Run mode needs this many samples above, from above on, equal to the left one (and the
+/// upper left one). Short runs are cheap enough with the stretch above as context.
+const RUN_LOOK: usize = 4;
 /// Tables of the difference to the hint where the left and upper samples matched it, by
 /// plane kind and whether the upper diagonal ones did.
-const MATCH_BASE: usize = RUN_BASE + KINDS * 2;
-pub const TABLES: usize = MATCH_BASE + KINDS * 4;
+const MATCH_BASE: usize = RUN_BASE + KINDS * 2 * RUN_CTX;
+/// Tables of the length of a run of pixels equal to the hint, by whether the pixel above the
+/// next one matched it.
+const HRUN_BASE: usize = MATCH_BASE + KINDS * 4;
+pub const TABLES: usize = HRUN_BASE + 2;
 /// Symbols per chunk of the entropy coded stream.
 pub const CHUNK: usize = 1 << 22;
 
@@ -97,13 +104,40 @@ struct RowCtx<'a> {
     hint: Option<(&'a [u8], &'a [u8])>,
 }
 
-/// Whether the 32 samples of `up` from `x` on all equal `v`.
+/// How many samples of `up` from `x` on equal `v`, up to 128; 0 if fewer than the run look.
 #[inline(always)]
-fn flat_above(up: &[u8], x: usize, v: u8) -> bool {
-    let Some(s) = up.get(x..x + 32) else { return false };
-    let pat = u64::from_ne_bytes([v; 8]);
-    let word = |k: usize| u64::from_ne_bytes(s[8 * k..8 * k + 8].try_into().unwrap());
-    word(0) == pat && word(1) == pat && word(2) == pat && word(3) == pat
+fn flat_above(up: &[u8], x: usize, v: u8) -> usize {
+    let look = RUN_LOOK;
+    let Some(s) = up.get(x..x + look) else { return 0 };
+    if look >= 8 {
+        let pat = u64::from_ne_bytes([v; 8]);
+        if u64::from_ne_bytes(s[..8].try_into().unwrap()) != pat {
+            return 0;
+        }
+    }
+    let n = crate::packbits::count_equal(&up[x..(x + 128).min(up.len())], v);
+    if n >= look { n } else { 0 }
+}
+
+/// How many samples of `a` and `b` are equal from the start, compared 8 at a time.
+#[inline(always)]
+fn count_same(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut i = 0;
+    while i + 8 <= n {
+        let x = u64::from_ne_bytes(a[i..i + 8].try_into().unwrap()) ^ u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
+        if x != 0 {
+            return i + (if cfg!(target_endian = "little") { x.trailing_zeros() } else { x.leading_zeros() } / 8) as usize;
+        }
+        i += 8;
+    }
+    i + a[i..n].iter().zip(&b[i..n]).take_while(|(x, y)| x == y).count()
+}
+
+/// The run table context of a stretch of `n` equal samples above.
+#[inline(always)]
+fn run_ctx(n: usize) -> usize {
+    ((usize::BITS - n.leading_zeros()) as usize).saturating_sub(1).min(RUN_CTX - 1)
 }
 
 /// The rows a sample is coded with, cut to the row width.
@@ -208,7 +242,7 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
         base: r.kind * 2 * CTX,
         match_t: MATCH_BASE + r.kind * 4,
     };
-    let run_t = RUN_BASE + r.kind * 2;
+    let run_t = RUN_BASE + r.kind * 2 * RUN_CTX;
     if w == 1 {
         code_sample::<C, ALPHA, FIRST, HINT, TOP, false, false>(c, &q, p, res, 0, fx(0));
         return;
@@ -221,8 +255,9 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
         // number of following samples equal to it, in chunks of up to 254 (255 continues).
         if !TOP && !after_run {
             let v = p[x - 1];
-            if q.up[x - 1] == v && flat_above(q.up, x, v) {
-                let t = run_t + (ALPHA && al[x] == 0) as usize;
+            let above = if q.up[x - 1] == v { flat_above(q.up, x, v) } else { 0 };
+            if above > 0 {
+                let t = run_t + (ALPHA && al[x] == 0) as usize * RUN_CTX + run_ctx(above);
                 let mut n = 0;
                 loop {
                     let avail = if C::DECODES { 0 } else { crate::packbits::count_equal(&p[x + n..(x + n + 255).min(w)], v) };
@@ -297,11 +332,59 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
     let mut x = 1;
     let mut after_run = false;
     while x + 1 < w {
+        // Hint run: where the left and upper pixels equal the hint, the number of pixels from
+        // here equal to it (in chunks of up to 254; 255 continues).
+        if HINT && !TOP && !after_run {
+            let m = |p: &[u8], q: &Rows| p[x - 1] == q.hc[x - 1] && q.up[x] == q.hp[x];
+            if m(p0, q0) && (how[1] == 0 || m(p1, q1)) && (how[2] == 0 || m(p2, q2)) {
+                let t = HRUN_BASE + (q0.up[x + 1] == q0.hp[x + 1]) as usize;
+                let mut n = 0;
+                loop {
+                    let avail = if C::DECODES {
+                        0
+                    } else {
+                        let end = (x + n + 255).min(w);
+                        let mut a = count_same(&p0[x + n..end], &q0.hc[x + n..end]);
+                        if how[1] != 0 {
+                            a = a.min(count_same(&p1[x + n..end], &q1.hc[x + n..end]));
+                        }
+                        if how[2] != 0 {
+                            a = a.min(count_same(&p2[x + n..end], &q2.hc[x + n..end]));
+                        }
+                        a
+                    };
+                    let s = (c.code(t, avail as u8) as usize).min(w - x - n);
+                    if C::DECODES {
+                        let r = x + n..x + n + s;
+                        if how[0] == 1 {
+                            p0[r.clone()].copy_from_slice(&q0.hc[r.clone()]);
+                        }
+                        if how[1] == 1 {
+                            p1[r.clone()].copy_from_slice(&q1.hc[r.clone()]);
+                        }
+                        if how[2] == 1 {
+                            p2[r.clone()].copy_from_slice(&q2.hc[r]);
+                        }
+                    }
+                    n += s;
+                    if s < 255 {
+                        break;
+                    }
+                }
+                for r in [&mut **r0, &mut **r1, &mut **r2] {
+                    r[x..x + n].fill(0);
+                }
+                x += n;
+                after_run = true;
+                continue;
+            }
+        }
         if !TOP && !after_run {
             let v = [p0[x - 1], p1[x - 1], p2[x - 1]];
-            let flat = |p: usize, q: &Rows| q.up[x - 1] == v[p] && flat_above(q.up, x, v[p]);
-            if flat(0, q0) && (how[1] == 0 || flat(1, q1)) && (how[2] == 0 || flat(2, q2)) {
-                let t = k.run_t + (ALPHA && q0.al[x] == 0) as usize;
+            let flat = |p: usize, q: &Rows| if q.up[x - 1] == v[p] { flat_above(q.up, x, v[p]) } else { 0 };
+            let above = flat(0, q0);
+            if above > 0 && (how[1] == 0 || flat(1, q1) > 0) && (how[2] == 0 || flat(2, q2) > 0) {
+                let t = k.run_t + (ALPHA && q0.al[x] == 0) as usize * RUN_CTX + run_ctx(above);
                 let mut n = 0;
                 loop {
                     let avail = if C::DECODES {

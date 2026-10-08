@@ -92,6 +92,8 @@ fn bench(args: &[String]) {
         let t = psd_recons::container::DEC_TIMES.with(|c| c.get());
         let k = iters as f64;
         eprintln!("decompress per iteration: known rows {:.3}s render {:.3}s model {:.3}s rows out {:.3}s", t[0] / k, t[1] / k, t[2] / k, t[3] / k);
+        let t = psd_recons::container::ENC_TIMES.with(|c| c.get());
+        eprintln!("compress per iteration: rows in {:.3}s encoder check {:.3}s render {:.3}s model {:.3}s", t[0] / k, t[1] / k, t[2] / k, t[3] / k);
     }
     println!(
         "{} files, {:.0} -> {:.0} bytes, ratio {:.4}, compress {:.1} MB/s, decompress {:.1} MB/s, stored {stored}, failures {fails}",

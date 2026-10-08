@@ -646,11 +646,22 @@ fn encode_group(rec: &mut model::Recorder, psd: &Psd, d: &[u8], spans: &[Span], 
     let mut rows = vec![vec![0u8; w]; n];
     let mut misses = vec![Vec::new(); n];
     let mut buf = Vec::with_capacity(w + w / 64 + 8);
+    let timing = std::env::var_os("PSDR_STATS").is_some();
+    let mut t = [0f64; 4];
+    let mut clock = std::time::Instant::now();
+    let mut lap = |i: usize, t: &mut [f64; 4]| {
+        if timing {
+            let now = std::time::Instant::now();
+            t[i] += (now - clock).as_secs_f64();
+            clock = now;
+        }
+    };
     for y in 0..h {
         for k in 0..n {
             let Some(r) = &mut readers[k] else { continue };
             let enc = r.encoded();
             r.next(&mut rows[k]).ok()?;
+            lap(0, &mut t);
             if let (Some(enc), Coding::Rle { encoder, .. }) = (enc, &spans[g.planes[k].0].coding) {
                 buf.clear();
                 packbits::encode(*encoder, &rows[k], &mut buf);
@@ -658,12 +669,24 @@ fn encode_group(rec: &mut model::Recorder, psd: &Psd, d: &[u8], spans: &[Span], 
                     misses[k].push(y);
                 }
             }
+            lap(1, &mut t);
         }
         if let Some(r) = &mut hint {
             let mut refs: Vec<&mut [u8]> = hint_rows.iter_mut().map(|v| v.as_mut_slice()).collect();
             r.next_row(&mut refs).ok()?;
         }
+        lap(2, &mut t);
         gc.code_row(rec, &mut rows, hint.as_ref().map(|_| &mut hint_rows[..]));
+        lap(3, &mut t);
+    }
+    if timing {
+        ENC_TIMES.with(|c| {
+            let mut v = c.get();
+            for i in 0..4 {
+                v[i] += t[i];
+            }
+            c.set(v);
+        });
     }
     Some(misses)
 }
@@ -802,6 +825,9 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
 }
 
 thread_local! {
+    /// Encoding time (with `PSDR_STATS`): reading rows, checking them against the encoder,
+    /// rendering, model.
+    pub static ENC_TIMES: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
     /// Decoding time (with `PSDR_STATS`): known rows, rendering, model, writing rows.
     pub static DEC_TIMES: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
 }
