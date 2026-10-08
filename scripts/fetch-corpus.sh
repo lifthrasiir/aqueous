@@ -2,6 +2,7 @@
 # Download public Wavefront OBJ files into corpus/. Idempotent; failures are skipped.
 #   corpus/mcguire/  McGuire Computer Graphics Archive (scenes and scans, several exporters)
 #   corpus/c3d/      alecjacobson/common-3d-test-models (scanned meshes)
+#   corpus/threejs/  three.js example models
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FAILED=()
@@ -12,7 +13,7 @@ fetch_zip() {
   local set=$1 name=$2 url=$3; shift 3
   local out="$ROOT/corpus/$set" tmp m dest n
   mkdir -p "$out"
-  ls "$out/$name".obj "$out/$name"-*.obj >/dev/null 2>&1 && { echo "skip  $set/$name"; return; }
+  compgen -G "$out/$name.obj" >/dev/null || compgen -G "$out/$name-*.obj" >/dev/null && { echo "skip  $set/$name"; return; }
   tmp=$(mktemp -d "$ROOT/corpus/.dl.XXXXXX")
   local ok=1 zip="$tmp/a.zip"
   curl -fsSL --retry 2 -m 1800 -o "$zip" "$url" || ok=0
@@ -61,6 +62,13 @@ C3D=https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/master/
 for m in xyzrgb_dragon igea bimba horse lucy happy armadillo max-planck ogre nefertiti beast \
          stanford-bunny beetle-alt rocker-arm cheburashka fandisk homer; do
   fetch_obj c3d "$m" "$C3D/$m.obj"
+done
+
+# three.js examples: several exporters, vertex colors (female02_vertex_colors).
+TJ=https://raw.githubusercontent.com/mrdoob/three.js/dev/examples/models/obj
+for m in tree male02/male02 female02/female02 female02/female02_vertex_colors walt/WaltHead \
+         cerberus/Cerberus ninja/ninjaHead_Low; do
+  fetch_obj threejs "$(basename $m)" "$TJ/$m.obj"
 done
 
 echo "failed: ${FAILED[*]:-none}"
