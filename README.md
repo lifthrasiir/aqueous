@@ -64,19 +64,21 @@ Two more references, on fewer files:
 `-t N` (`Options::threads`, `decompress_threads`; `objr c` and `objr d` default to the
 available cores): the output is the same bytes whatever the number of threads, and one
 thread runs the code above unchanged. Coded blocks carry state over, so the line coding
-stays on one thread, in order; around it, other threads parse the lines of the blocks
-ahead (number modes, render checks), verify, and code the streams; decompressing, they
-decode the streams of the blocks ahead. Wall time, all 72 files:
+and decoding stay on one thread, in order; around them, a pool parses the lines of the
+blocks ahead (number modes, render checks), verifies, and codes the streams; decompressing,
+it decodes the streams of the blocks ahead and prints the numbers of decoded blocks (the
+decoder emits values, `block::Deferred`). Wall time, all 72 files (about ±10% between
+runs on this machine):
 
 | threads | compress | decompress |
 |---|---|---|
-| 1 (CPU time) | 121 MB/s | 336 MB/s |
-| 2 | 217 MB/s | 356 MB/s |
-| 4-10 | 231 MB/s | 362 MB/s |
+| 1 (CPU time) | 125 MB/s | 346 MB/s |
+| 2 | about 240 MB/s | about 450 MB/s |
+| 4-10 | about 250 MB/s | about 490 MB/s |
 
-The line coding (predictors, corner caches) and, decompressing, the line decoding with
-the printing of numbers are the limit. Going further needs independent segments (state
-reset every so many blocks): measured on the McGuire set, 0.35% larger with 64 MB
+The line coding (predictors, corner caches) and the line decoding are the limit; raising
+the calling thread's QoS class changed nothing. Going further needs independent segments
+(state reset every so many blocks): measured on the McGuire set, 0.35% larger with 64 MB
 segments, 0.9% with 32 MB, 2.1% with 8 MB; not done.
 
 ### Memory

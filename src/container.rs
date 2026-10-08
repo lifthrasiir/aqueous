@@ -604,22 +604,42 @@ pub fn decompress_to_threads<W: Write>(src: &[u8], w: &mut W, threads: usize) ->
 /// A block whose streams (or whole contents) the other threads have decoded.
 type Unpacked = Result<(Box<Streams>, Vec<u8>)>;
 
+/// Work for the decompressing pool: a block to unpack, or a decoded block to print.
+enum DJob<'a> {
+    Unpack(usize, usize, Stored<'a>),
+    Print(usize, usize, block::Deferred),
+}
+
+enum DReport {
+    Unpacked(usize, Unpacked),
+    Printed(usize, Result<Vec<u8>>),
+}
+
 fn decompress_par<W: Write>(mut r: Rd, len: usize, hash: u64, w: &mut W, threads: usize) -> Result<usize> {
-    let limit = 2 * threads + 2;
+    let limit = threads + 1;
     std::thread::scope(|sc| {
-        let (rtx, rrx) = mpsc::channel::<(usize, Unpacked)>();
-        let (jtx, jrx) = mpsc::channel::<(usize, usize, Stored)>();
+        let (rtx, rrx) = mpsc::channel::<DReport>();
+        let (jtx, jrx) = mpsc::channel::<DJob>();
         let jrx = Arc::new(Mutex::new(jrx));
         for _ in 0..threads.saturating_sub(1).max(1) {
             let (rtx, jrx) = (rtx.clone(), jrx.clone());
             sc.spawn(move || {
                 let Ok(mut dz) = zstd::bulk::Decompressor::new() else { return };
                 loop {
-                    let Ok((idx, n, b)) = jrx.lock().expect("job queue").recv() else { break };
-                    let mut streams = Box::new(new_streams());
-                    let mut out = Vec::new();
-                    let res = unpack(&b, n, &mut dz, &mut streams, &mut out).map(|_| (streams, out));
-                    if rtx.send((idx, res)).is_err() {
+                    let Ok(j) = jrx.lock().expect("job queue").recv() else { break };
+                    let rep = match j {
+                        DJob::Unpack(idx, n, b) => {
+                            let mut streams = Box::new(new_streams());
+                            let mut out = Vec::new();
+                            DReport::Unpacked(idx, unpack(&b, n, &mut dz, &mut streams, &mut out).map(|_| (streams, out)))
+                        }
+                        DJob::Print(idx, n, d) => {
+                            let mut out = Vec::with_capacity(n);
+                            d.print(&mut out);
+                            DReport::Printed(idx, if out.len() == n { Ok(out) } else { Err(corrupt()) })
+                        }
+                    };
+                    if rtx.send(rep).is_err() {
                         break;
                     }
                 }
@@ -628,38 +648,47 @@ fn decompress_par<W: Write>(mut r: Rd, len: usize, hash: u64, w: &mut W, threads
         drop(rtx);
         let mut dec = block::Decoder::default();
         let mut h = Xxh3::new();
-        // Blocks read and sent, by index: their length and kind; results as they come.
-        let mut sent: VecDeque<(usize, bool)> = VecDeque::new();
-        let mut ready: VecDeque<Option<Unpacked>> = VecDeque::new();
-        let (mut read, mut done, mut next) = (0usize, 0usize, 0usize);
-        let mut out = Vec::new();
+        // Blocks sent to unpack (length, coded, result), from index `unpacked`; blocks
+        // decoded, being printed (length, text), from index `written`.
+        let mut unpacking: VecDeque<(usize, bool, Option<Unpacked>)> = VecDeque::new();
+        let mut printing: VecDeque<(usize, Option<Result<Vec<u8>>>)> = VecDeque::new();
+        let (mut read, mut done, mut unpacked, mut written) = (0usize, 0usize, 0usize, 0usize);
         while done < len {
-            while sent.len() < limit && read < len {
+            while unpacking.len() < limit && read < len {
                 let (n, b) = read_block(&mut r, len - read)?;
-                sent.push_back((n, matches!(b, Stored::Coded(_))));
-                ready.push_back(None);
-                jtx.send((next + sent.len() - 1, n, b)).expect("workers");
+                unpacking.push_back((n, matches!(b, Stored::Coded(_)), None));
+                jtx.send(DJob::Unpack(unpacked + unpacking.len() - 1, n, b)).expect("workers");
                 read += n;
             }
-            while ready[0].is_none() {
-                let (i, res) = rrx.recv().expect("workers");
-                ready[i - next] = Some(res);
+            if let Some((n, text)) = printing.pop_front_if(|p| p.1.is_some()) {
+                let text = text.expect("printed")?;
+                h.update(&text);
+                w.write_all(&text).map_err(|_| Error("write error"))?;
+                (done, written) = (done + n, written + 1);
+                continue;
             }
-            let (n, coded) = sent.pop_front().expect("block");
-            let (streams, whole) = ready.pop_front().flatten().expect("result")?;
-            next += 1;
-            if coded {
-                out.clear();
-                if !dec.decode(&streams, &mut out) || out.len() != n {
-                    return Err(corrupt());
+            if printing.len() < limit && unpacking.front().is_some_and(|u| u.2.is_some()) {
+                let (n, coded, res) = unpacking.pop_front().expect("front");
+                let (streams, whole) = res.expect("unpacked")?;
+                let idx = unpacked;
+                unpacked += 1;
+                if coded {
+                    // Values here, in order; the text on the pool.
+                    let mut d = block::Deferred::default();
+                    if !dec.decode(&streams, &mut d) {
+                        return Err(corrupt());
+                    }
+                    jtx.send(DJob::Print(idx, n, d)).expect("workers");
+                    printing.push_back((n, None));
+                } else {
+                    printing.push_back((n, Some(Ok(whole))));
                 }
-                h.update(&out);
-                w.write_all(&out).map_err(|_| Error("write error"))?;
-            } else {
-                h.update(&whole);
-                w.write_all(&whole).map_err(|_| Error("write error"))?;
+                continue;
             }
-            done += n;
+            match rrx.recv().expect("workers") {
+                DReport::Unpacked(i, res) => unpacking[i - unpacked].2 = Some(res),
+                DReport::Printed(i, res) => printing[i - written].1 = Some(res),
+            }
         }
         drop(jtx);
         if !r.done() || h.digest() != hash {

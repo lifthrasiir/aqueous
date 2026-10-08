@@ -790,6 +790,123 @@ fn valid_key(k: &[u8]) -> bool {
     k.get(i).is_some_and(|&tl| i + 1 + tl as usize == k.len())
 }
 
+/// Where a decoded block goes: its text (`Vec<u8>`), or records of it (`Deferred`) to
+/// print later, on another thread.
+pub trait Sink {
+    fn bytes(&mut self, b: &[u8]);
+    fn byte(&mut self, c: u8);
+    /// A number: value, scale, mode and flags of its template item.
+    fn number(&mut self, v: i64, s: i32, mode: u8, f: u8);
+    /// A corner index, relative to `count` (the lines of its kind so far) if `neg`.
+    fn index(&mut self, a: i64, neg: bool, count: i64);
+}
+
+impl Sink for Vec<u8> {
+    #[inline]
+    fn bytes(&mut self, b: &[u8]) {
+        self.extend_from_slice(b);
+    }
+
+    #[inline]
+    fn byte(&mut self, c: u8) {
+        self.push(c);
+    }
+
+    #[inline]
+    fn number(&mut self, v: i64, s: i32, mode: u8, f: u8) {
+        dec::put(self, v, s, mode, f);
+    }
+
+    #[inline]
+    fn index(&mut self, a: i64, neg: bool, count: i64) {
+        put_index(self, a, neg, count);
+    }
+}
+
+/// Records of a decoded block: bytes as they are, numbers and indices as values.
+#[derive(Default)]
+pub struct Deferred {
+    rec: Vec<u8>,
+}
+
+const R_BYTES: u8 = 0;
+const R_BYTE: u8 = 1;
+const R_NUMBER: u8 = 2;
+const R_INDEX: u8 = 3;
+const R_NEG_INDEX: u8 = 4;
+
+impl Sink for Deferred {
+    #[inline]
+    fn bytes(&mut self, b: &[u8]) {
+        self.rec.push(R_BYTES);
+        put_uv(&mut self.rec, b.len() as u64);
+        self.rec.extend_from_slice(b);
+    }
+
+    #[inline]
+    fn byte(&mut self, c: u8) {
+        self.rec.extend_from_slice(&[R_BYTE, c]);
+    }
+
+    #[inline]
+    fn number(&mut self, v: i64, s: i32, mode: u8, f: u8) {
+        let mut r = [0u8; 12];
+        r[0] = R_NUMBER;
+        r[1..9].copy_from_slice(&v.to_le_bytes());
+        // Scales stay in -60..=60 (clamped by the decoder).
+        r[9..12].copy_from_slice(&[s as i8 as u8, mode, f]);
+        self.rec.extend_from_slice(&r);
+    }
+
+    #[inline]
+    fn index(&mut self, a: i64, neg: bool, count: i64) {
+        let (t, x) = if neg { (R_NEG_INDEX, (count + 1).wrapping_sub(a)) } else { (R_INDEX, a) };
+        let mut r = [0u8; 9];
+        r[0] = t;
+        r[1..9].copy_from_slice(&x.to_le_bytes());
+        self.rec.extend_from_slice(&r);
+    }
+}
+
+impl Deferred {
+    pub fn clear(&mut self) {
+        self.rec.clear();
+    }
+
+    /// Appends the text the records stand for to `out` (as `decode` into a `Vec` would).
+    pub fn print(&self, out: &mut Vec<u8>) {
+        let r = &self.rec;
+        let mut p = 0;
+        let i64_at = |p: usize| i64::from_le_bytes(r[p..p + 8].try_into().unwrap());
+        while p < r.len() {
+            match r[p] {
+                R_BYTES => {
+                    let mut rd = Rd::new(&r[p + 1..]);
+                    let n = rd.uv() as usize;
+                    let s = p + 1 + rd.p;
+                    out.extend_from_slice(&r[s..s + n]);
+                    p = s + n;
+                }
+                R_BYTE => {
+                    out.push(r[p + 1]);
+                    p += 2;
+                }
+                R_NUMBER => {
+                    dec::put(out, i64_at(p + 1), r[p + 9] as i8 as i32, r[p + 10], r[p + 11]);
+                    p += 12;
+                }
+                t => {
+                    if t == R_NEG_INDEX {
+                        out.push(b'-');
+                    }
+                    num::put(out, i64_at(p + 1), 0);
+                    p += 9;
+                }
+            }
+        }
+    }
+}
+
 pub struct Decoder {
     st: State,
     /// Template keys, by offset and length into `arena`.
@@ -836,7 +953,7 @@ impl Decoder {
 
     /// Appends the block coded in `s` to `out`. False if the streams are inconsistent (the
     /// state is then undefined).
-    pub fn decode(&mut self, s: &[Vec<u8>; NSTREAMS], out: &mut Vec<u8>) -> bool {
+    pub fn decode<O: Sink>(&mut self, s: &[Vec<u8>; NSTREAMS], out: &mut O) -> bool {
         let mut ops = Rd::new(&s[S_OPS]);
         let mut tpl = Rd::new(&s[S_TPL]);
         let text = &s[S_TEXT][..];
@@ -854,12 +971,12 @@ impl Decoder {
             let op = ops.uv();
             if op == OP_RAW {
                 let Some(e) = memchr::memchr(b'\n', &text[tp..]) else { return false };
-                out.extend_from_slice(&text[tp..tp + e + 1]);
+                out.bytes(&text[tp..tp + e + 1]);
                 tp += e + 1;
                 continue;
             }
             if op == OP_RAW_OPEN {
-                out.extend_from_slice(&text[tp..]);
+                out.bytes(&text[tp..]);
                 tp = text.len();
                 continue;
             }
@@ -876,7 +993,7 @@ impl Decoder {
             let Some(&(o, n)) = self.tpls.get(id as usize) else { return false };
             let k = &self.arena[o as usize..(o + n) as usize];
             let kind = k[0];
-            out.extend_from_slice(KEYWORDS[kind as usize]);
+            out.bytes(KEYWORDS[kind as usize]);
             let mut i = 2;
             if kind < K_F {
                 let prev = &mut self.st.prev[kind as usize];
@@ -937,9 +1054,9 @@ impl Decoder {
                 }
                 for (j, &it) in items[..n].iter().enumerate() {
                     let (m, f, sl) = (k[it], k[it + 1], k[it + 2] as usize);
-                    out.extend_from_slice(&k[it + 3..it + 3 + sl]);
+                    out.bytes(&k[it + 3..it + 3 + sl]);
                     let (v, sc) = prev[j];
-                    dec::put(out, v, sc, m, f);
+                    out.number(v, sc, m, f);
                 }
                 if kind < K_VP {
                     self.st.count[kind as usize] += 1;
@@ -952,30 +1069,30 @@ impl Decoder {
                 let mut pv = None;
                 for c in face[..n].iter_mut() {
                     let (pat, sl) = (k[i], k[i + 2] as usize);
-                    out.extend_from_slice(&k[i + 3..i + 3 + sl]);
+                    out.bytes(&k[i + 3..i + 3 + sl]);
                     i += 3 + sl;
                     let (idx, count, cs) = (&mut self.st.idx, self.st.count, &self.corners);
                     let v = idx[0].decode(&mut fsym[0], &mut fesc[0], 0, cs.cands(0, 0, pv, 0));
                     c.0 = v;
-                    put_index(out, v, pat & C_NEG != 0, count[0]);
+                    out.index(v, pat & C_NEG != 0, count[0]);
                     if pat & C_T != 0 {
                         let a = idx[1].decode(&mut fsym[1], &mut fesc[1], v, cs.cands(1, v, pv, idx[1].off));
                         c.1 = a;
-                        out.push(b'/');
-                        put_index(out, a, pat & (C_NEG << 1) != 0, count[1]);
+                        out.byte(b'/');
+                        out.index(a, pat & (C_NEG << 1) != 0, count[1]);
                     }
                     if pat & C_N != 0 {
                         let a = idx[2].decode(&mut fsym[2], &mut fesc[2], v, cs.cands(2, v, pv, idx[2].off));
                         c.2 = a;
-                        out.extend_from_slice(if pat & C_T != 0 { b"/" } else { b"//" });
-                        put_index(out, a, pat & (C_NEG << 2) != 0, count[2]);
+                        out.bytes(if pat & C_T != 0 { b"/" } else { b"//" });
+                        out.index(a, pat & (C_NEG << 2) != 0, count[2]);
                     }
                     pv = Some(v);
                 }
                 self.corners.face(&face);
                 self.fbuf = face;
             }
-            out.extend_from_slice(&k[i + 1..]);
+            out.bytes(&k[i + 1..]);
         }
         let all = [&ops, &tpl, &scale, &nsel, &hdr];
         tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).chain(&vs).chain(&lpred).all(|r| r.done())
