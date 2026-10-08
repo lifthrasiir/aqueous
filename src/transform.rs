@@ -264,6 +264,9 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 .collect()
         })
         .collect();
+    for gr in &mut groups {
+        gr.recs = Vec::new();
+    }
 
     // Indexes predicted from their tables: (table group, columns) per index group.
     let mut refs: Vec<Option<(usize, index::Key)>> = (0..groups.len()).map(|_| None).collect();
@@ -320,7 +323,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         if let Some((t, key)) = &refs[i] {
             let map = &key.cols;
             let tg = &groups[*t];
-            let order = index::order(&pays[*t], &tg.rowids, key);
+            let order = index::order(&pays[*t][..], &tg.rowids, key);
             let mut rank = vec![0u32; order.perm.len()];
             for (k, &r) in order.perm.iter().enumerate() {
                 rank[r as usize] = k as u32;
@@ -356,7 +359,7 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
                 "G {i} first={} table={} recs={} ref={:?} {}",
                 gr.first,
                 gr.table,
-                gr.recs.len(),
+                pays[i].len(),
                 refs[i].as_ref().map(|r| (r.0, &r.1)),
                 ge.stats()
             );
@@ -420,24 +423,30 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
         meta.push((table, r));
         gds.push(GroupDec::new(&mut dir, &mut gstreams)?);
     }
-    let mut recs: Vec<Recs> = (0..ng).map(|_| Recs::default()).collect();
-    for (i, gd) in gds.iter_mut().enumerate() {
-        if meta[i].1.is_none() {
-            recs[i] = gd.decode(meta[i].0, g.fmt4, None)?;
-        }
-    }
-    for (i, gd) in gds.iter_mut().enumerate() {
-        if let Some((t, key)) = &meta[i].1 {
-            if *t >= ng || meta[*t].1.is_some() || !meta[*t].0 {
+    // Tables indexes are predicted from are decoded first, whole; the other groups record
+    // by record as the pages need them.
+    let mut tables: Vec<Option<Recs>> = (0..ng).map(|_| None).collect();
+    for i in 0..ng {
+        if let Some((t, _)) = &meta[i].1 {
+            let t = *t;
+            if t >= ng || meta[t].1.is_some() || !meta[t].0 {
                 return Err(corrupt());
             }
-            let tr = &recs[*t];
-            let rows: Vec<&[u8]> = (0..tr.len()).map(|k| tr.get(k)).collect();
-            let order = index::order(&rows, &tr.rowids, key);
-            let rc = RefCtx { table: tr, order, map: &key.cols };
-            recs[i] = gd.decode(meta[i].0, g.fmt4, Some(&rc))?;
+            if tables[t].is_none() {
+                tables[t] = Some(gds[t].decode(true, g.fmt4, None)?);
+            }
         }
     }
+    let ctxs: Vec<Option<RefCtx>> = meta
+        .iter()
+        .map(|(_, r)| {
+            r.as_ref().map(|(t, key)| {
+                let tr = tables[*t].as_ref().unwrap();
+                RefCtx { table: tr, order: index::order(tr, &tr.rowids, key), map: &key.cols }
+            })
+        })
+        .collect();
+    let mut scratch = Vec::new();
 
     let mut out = vec![0u8; len];
     let [kind, grp, phdr, cptr, child, ikey, ovf, fill, raw, ..] = &mut rd[..] else {
@@ -514,18 +523,27 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
                 let n = put_sqlite(&mut vb, key as u64);
                 cell.extend_from_slice(&vb[..n]);
             } else {
-                let r = &recs[gi];
-                let j = cur[gi];
-                if j >= r.len() {
-                    return Err(corrupt());
-                }
-                cur[gi] += 1;
-                pay = r.get(j);
+                let (p, rowid) = match &tables[gi] {
+                    Some(r) => {
+                        let j = cur[gi];
+                        if j >= r.len() {
+                            return Err(corrupt());
+                        }
+                        cur[gi] += 1;
+                        (r.get(j), if k == 13 { r.rowids[j] } else { 0 })
+                    }
+                    None => {
+                        scratch.clear();
+                        let rowid = gds[gi].next(k == 13, g.fmt4, ctxs[gi].as_ref(), &mut scratch)?;
+                        (&scratch[..], rowid)
+                    }
+                };
+                pay = p;
                 let plen = pay.len() as u64;
                 let n = put_sqlite(&mut vb, plen);
                 cell.extend_from_slice(&vb[..n]);
                 if k == 13 {
-                    let n = put_sqlite(&mut vb, r.rowids[j] as u64);
+                    let n = put_sqlite(&mut vb, rowid as u64);
                     cell.extend_from_slice(&vb[..n]);
                 }
                 local = g.local(plen, k == 13);

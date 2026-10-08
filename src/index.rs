@@ -98,142 +98,191 @@ fn key_cmp(f: u8, sa: u64, a: &[u8], sb: u64, b: &[u8]) -> Ordering {
 pub struct Order {
     pub perm: Vec<u32>,
     /// Per row and indexed column: (serial type, content offset); u32::MAX for the rowid.
-    pub vals: Vec<(u64, u32)>,
+    pub vals: Vec<(u32, u32)>,
     /// Whether the row has all indexed columns (else they read as NULL).
     pub ok: Vec<bool>,
 }
 
-/// Sorts by key, then by position (`keys` come in position order): LSD radix sort over
-/// the bytes that vary.
-fn radix_sort(keys: &mut Vec<(u128, u32)>) {
-    let n = keys.len();
-    if n < 512 {
-        keys.sort_unstable();
-        return;
+/// The rows of a table, by number.
+pub trait Rows {
+    fn count(&self) -> usize;
+    fn row(&self, i: usize) -> &[u8];
+}
+
+impl Rows for [&[u8]] {
+    fn count(&self) -> usize {
+        self.len()
     }
-    let k0 = keys[0].0;
-    let diff = keys.iter().fold(0u128, |a, k| a | (k.0 ^ k0));
+    fn row(&self, i: usize) -> &[u8] {
+        self[i]
+    }
+}
+
+/// Sorts `ix` (which comes in ascending order) by `k`, keeping ties in order: LSD radix
+/// sort over the bytes that vary.
+fn radix_sort(k: &mut Vec<u128>, ix: &mut Vec<u32>) {
+    let n = k.len();
+    let k0 = k.first().copied().unwrap_or(0);
+    let diff = k.iter().fold(0u128, |a, &x| a | (x ^ k0));
     let bytes: Vec<u32> = (0..16).filter(|b| (diff >> (8 * b)) as u8 != 0).collect();
-    if bytes.len() > 10 {
-        keys.sort_unstable();
+    if n < 512 || bytes.len() > 10 {
+        let mut p: Vec<(u128, u32)> = k.iter().copied().zip(ix.iter().copied()).collect();
+        p.sort_unstable();
+        for (i, (a, b)) in p.into_iter().enumerate() {
+            k[i] = a;
+            ix[i] = b;
+        }
         return;
     }
-    let mut tmp = keys.clone();
+    let (mut tk, mut ti) = (vec![0u128; n], vec![0u32; n]);
     for &b in &bytes {
         let mut cnt = [0usize; 257];
-        for k in keys.iter() {
-            cnt[(k.0 >> (8 * b)) as u8 as usize + 1] += 1;
+        for &x in k.iter() {
+            cnt[(x >> (8 * b)) as u8 as usize + 1] += 1;
         }
         for i in 0..256 {
             cnt[i + 1] += cnt[i];
         }
-        for k in keys.iter() {
-            let d = (k.0 >> (8 * b)) as u8 as usize;
-            tmp[cnt[d]] = *k;
+        for (&x, &i) in k.iter().zip(ix.iter()) {
+            let d = (x >> (8 * b)) as u8 as usize;
+            tk[cnt[d]] = x;
+            ti[cnt[d]] = i;
             cnt[d] += 1;
         }
-        std::mem::swap(keys, &mut tmp);
+        std::mem::swap(k, &mut tk);
+        std::mem::swap(ix, &mut ti);
     }
 }
 
-pub fn order(rows: &[&[u8]], rowids: &[i64], key: &Key) -> Order {
+pub fn order<R: Rows + ?Sized>(rows: &R, rowids: &[i64], key: &Key) -> Order {
     let m = key.cols.len();
-    let n = rows.len();
-    let rb: Vec<[u8; 8]> = rowids.iter().map(|r| r.to_be_bytes()).collect();
+    let n = rows.count();
     // (serial type, content offset) of the indexed columns, row by row; NULL when missing,
     // an offset of u32::MAX for the rowid.
-    let mut vals: Vec<(u64, u32)> = Vec::with_capacity(n * m);
+    let mut vals: Vec<(u32, u32)> = Vec::with_capacity(n * m);
     let mut oks = Vec::with_capacity(n);
     let mut cols = Vec::new();
-    for row in rows {
-        let ok = parse(row, &mut cols);
+    for r in 0..n {
+        let ok = parse(rows.row(r), &mut cols);
         oks.push(ok && key.cols.iter().all(|&c| c == ROWID || (c as usize) < cols.len()));
         vals.extend(key.cols.iter().map(|&c| match c {
             ROWID => (6, u32::MAX),
-            _ if ok => cols.get(c as usize).copied().unwrap_or((0, 0)),
+            _ if ok => cols.get(c as usize).map_or((0, 0), |&(st, off)| (st as u32, off)),
             _ => (0, 0),
         }));
     }
-    let val = |r: usize, j: usize| -> (u64, &[u8]) {
-        let (st, off) = vals[r * m + j];
-        if off == u32::MAX {
-            (6, &rb[r][..])
+    let perm = {
+        let rb = |r: usize| rowids[r].to_be_bytes();
+        let val = |r: usize, j: usize, buf: &mut [u8; 8]| -> (u64, usize, usize) {
+            // (serial type, start, end) in the row, or in `buf` for the rowid (start = MAX).
+            let (st, off) = vals[r * m + j];
+            if off == u32::MAX {
+                *buf = rb(r);
+                (6, usize::MAX, 8)
+            } else {
+                (st as u64, off as usize, off as usize + st_size(st as u64))
+            }
+        };
+        let value = |r: usize, j: usize| -> (u64, ValueRef<'_>) {
+            let mut buf = [0u8; 8];
+            let (st, a, b) = val(r, j, &mut buf);
+            if a == usize::MAX {
+                (st, ValueRef::Own(buf))
+            } else {
+                (st, ValueRef::Row(&rows.row(r)[a..b]))
+            }
+        };
+        // A u128 prefix that orders like the key (ties are compared in full): 64 bits per
+        // column. An integer column has an exact code; text and blobs their first 8 bytes.
+        let st_of = |r: usize, j: usize| vals[r * m + j].0 as u64;
+        let code = |j: usize| -> Option<Box<dyn Fn(usize) -> u64 + '_>> {
+            let f = key.flags[j];
+            let inv = if f & F_DESC != 0 { u64::MAX } else { 0 };
+            if (0..n).all(|r| is_int(st_of(r, j))) {
+                return Some(Box::new(move |r| {
+                    let (st, v) = value(r, j);
+                    (int_value(st, v.bytes()) as u64 ^ (1 << 63)) ^ inv
+                }));
+            }
+            let text = (0..n).all(|r| class(st_of(r, j)) == 2);
+            let blob = (0..n).all(|r| class(st_of(r, j)) == 3);
+            if !text && !blob {
+                return None;
+            }
+            let fold = text && f & F_NOCASE != 0;
+            Some(Box::new(move |r| {
+                let (_, v) = value(r, j);
+                let b = v.bytes();
+                let mut p = [0u8; 8];
+                let k = b.len().min(8);
+                p[..k].copy_from_slice(&b[..k]);
+                if fold {
+                    p.make_ascii_lowercase();
+                }
+                u64::from_be_bytes(p) ^ inv
+            }))
+        };
+        let exact0 = m > 0 && (0..n).all(|r| is_int(st_of(r, 0)));
+        let hi = if m > 0 { code(0) } else { None };
+        let lo: Option<Box<dyn Fn(usize) -> u64 + '_>> = if !exact0 {
+            None
+        } else if m == 1 {
+            Some(Box::new(|r: usize| rowids[r] as u64 ^ (1 << 63)))
         } else {
-            (st, &rows[r][off as usize..off as usize + st_size(st)])
-        }
-    };
-    // A u128 prefix that orders like the key (ties are compared in full): 64 bits per column.
-    // An integer column has an exact code; text and blobs their first 8 bytes.
-    let code = |j: usize| -> Option<Box<dyn Fn(usize) -> u64 + '_>> {
-        let f = key.flags[j];
-        let inv = if f & F_DESC != 0 { u64::MAX } else { 0 };
-        if (0..n).all(|r| is_int(vals[r * m + j].0)) {
-            return Some(Box::new(move |r| {
-                let (st, b) = val(r, j);
-                (int_value(st, b) as u64 ^ (1 << 63)) ^ inv
-            }));
-        }
-        let text = (0..n).all(|r| class(vals[r * m + j].0) == 2);
-        let blob = (0..n).all(|r| class(vals[r * m + j].0) == 3);
-        if !text && !blob {
-            return None;
-        }
-        let fold = text && f & F_NOCASE != 0;
-        Some(Box::new(move |r| {
-            let (_, b) = val(r, j);
-            let mut p = [0u8; 8];
-            let k = b.len().min(8);
-            p[..k].copy_from_slice(&b[..k]);
-            if fold {
-                p.make_ascii_lowercase();
+            code(1)
+        };
+        let mut k: Vec<u128> = (0..n)
+            .map(|r| {
+                let h = hi.as_ref().map_or(0, |f| f(r)) as u128;
+                let l = lo.as_ref().map_or(0, |f| f(r)) as u128;
+                (h << 64) | l
+            })
+            .collect();
+        let mut ix: Vec<u32> = (0..n as u32).collect();
+        // Sort by prefix, then runs of equal prefixes in full.
+        radix_sort(&mut k, &mut ix);
+        let full = |x: &u32, y: &u32| {
+            let (a, b) = (*x as usize, *y as usize);
+            for j in 0..m {
+                let (sa, va) = value(a, j);
+                let (sb, vb) = value(b, j);
+                let o = key_cmp(key.flags[j], sa, va.bytes(), sb, vb.bytes());
+                if o != Ordering::Equal {
+                    return o;
+                }
             }
-            u64::from_be_bytes(p) ^ inv
-        }))
-    };
-    let exact0 = m > 0 && (0..n).all(|r| is_int(vals[r * m].0));
-    let hi = if m > 0 { code(0) } else { None };
-    let lo: Option<Box<dyn Fn(usize) -> u64 + '_>> = if !exact0 {
-        None
-    } else if m == 1 {
-        Some(Box::new(|r: usize| rowids[r] as u64 ^ (1 << 63)))
-    } else {
-        code(1)
-    };
-    let mut keys: Vec<(u128, u32)> = (0..n)
-        .map(|r| {
-            let h = hi.as_ref().map_or(0, |f| f(r)) as u128;
-            let l = lo.as_ref().map_or(0, |f| f(r)) as u128;
-            ((h << 64) | l, r as u32)
-        })
-        .collect();
-    // Sort by prefix, then runs of equal prefixes in full.
-    radix_sort(&mut keys);
-    let full = |x: &(u128, u32), y: &(u128, u32)| {
-        let (a, b) = (x.1 as usize, y.1 as usize);
-        for j in 0..m {
-            let (sa, va) = val(a, j);
-            let (sb, vb) = val(b, j);
-            let o = key_cmp(key.flags[j], sa, va, sb, vb);
-            if o != Ordering::Equal {
-                return o;
+            rowids[a].cmp(&rowids[b]).then(a.cmp(&b))
+        };
+        let mut i = 0;
+        while i < n {
+            let mut j = i + 1;
+            while j < n && k[j] == k[i] {
+                j += 1;
             }
+            if j - i > 1 {
+                ix[i..j].sort_unstable_by(full);
+            }
+            i = j;
         }
-        rowids[a].cmp(&rowids[b]).then(a.cmp(&b))
+        ix
     };
-    let mut i = 0;
-    while i < n {
-        let mut j = i + 1;
-        while j < n && keys[j].0 == keys[i].0 {
-            j += 1;
-        }
-        if j - i > 1 {
-            keys[i..j].sort_unstable_by(full);
-        }
-        i = j;
-    }
-    let perm = keys.into_iter().map(|k| k.1).collect();
-    drop((hi, lo));
     Order { perm, vals, ok: oks }
+}
+
+/// A value in a row, or the rowid's bytes.
+enum ValueRef<'a> {
+    Row(&'a [u8]),
+    Own([u8; 8]),
+}
+
+impl ValueRef<'_> {
+    #[inline]
+    fn bytes(&self) -> &[u8] {
+        match self {
+            ValueRef::Row(b) => b,
+            ValueRef::Own(b) => b,
+        }
+    }
 }
 
 /// Is `b` the ASCII string `s` in the database's text encoding (1 UTF-8, 2 UTF-16le,
