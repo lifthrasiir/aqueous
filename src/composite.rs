@@ -1,15 +1,19 @@
-//! Approximate re-rendering of the composite image from the layers.
+//! Approximate re-rendering of the composite image from the layers, row by row.
 //!
 //! This is a predictor, not a renderer: it only needs to be close to what Photoshop stored.
 //! Supported: pixel layers with the separable and non-separable blend modes, opacity, fill
-//! opacity, user masks, clipping and groups. Rounding to 8 bits after each layer follows
-//! Photoshop closely for normal blending. Anything else (dissolve, adjustment layers, layer
-//! effects) is rendered as normal, or skipped, and counted in [`Report`].
+//! opacity, user masks, clipping and groups. Like Photoshop, every step leaves straight 8-bit
+//! color and alpha; normal blending is integer arithmetic. Anything else (dissolve,
+//! adjustment layers, layer effects) is rendered as normal, or skipped, and counted in
+//! [`Report`].
+//!
+//! Every pixel only depends on the same pixel of the layers, so rows are rendered one at a
+//! time: memory is a few rows (per group nesting level), whatever the document size.
 
 use std::collections::BTreeMap;
 
-use crate::pixels;
-use crate::psd::{Layer, Psd, Rect, Result};
+use crate::psd::{Layer, Psd, Result};
+use crate::rows::PlaneRows;
 
 #[derive(Debug, Default)]
 pub struct Report {
@@ -19,72 +23,6 @@ pub struct Report {
     pub skipped: usize,
     /// Layers with layer effects, rendered without them.
     pub effects: usize,
-}
-
-/// Premultiplied RGBA canvas in 0..1, with the bounding box of what was drawn on it.
-#[derive(Clone)]
-struct Canvas {
-    w: usize,
-    h: usize,
-    px: Vec<[f32; 4]>,
-    bbox: Option<Bounds>,
-}
-
-/// A pixel rectangle `[x0, x1) x [y0, y1)` within the canvas.
-#[derive(Clone, Copy, Debug)]
-struct Bounds {
-    x0: usize,
-    y0: usize,
-    x1: usize,
-    y1: usize,
-}
-
-impl Bounds {
-    /// `r` clipped to a `w` x `h` canvas; None if empty.
-    fn of(r: &Rect, w: usize, h: usize) -> Option<Bounds> {
-        let c = |v: i32, m: usize| (v.max(0) as usize).min(m);
-        let b = Bounds { x0: c(r.left, w), y0: c(r.top, h), x1: c(r.right, w), y1: c(r.bottom, h) };
-        (b.x0 < b.x1 && b.y0 < b.y1).then_some(b)
-    }
-    fn union(a: Option<Bounds>, b: Bounds) -> Bounds {
-        match a {
-            None => b,
-            Some(a) => Bounds { x0: a.x0.min(b.x0), y0: a.y0.min(b.y0), x1: a.x1.max(b.x1), y1: a.y1.max(b.y1) },
-        }
-    }
-}
-
-/// Rounds a premultiplied pixel to straight 8-bit color and alpha, as Photoshop keeps them.
-fn quantize(p: &mut [f32; 4]) {
-    let a8 = (p[3] * 255.0).round();
-    if a8 == 0.0 {
-        *p = [0.0; 4];
-        return;
-    }
-    let a = a8 / 255.0;
-    for k in 0..3 {
-        p[k] = (p[k] / p[3] * 255.0).round().clamp(0.0, 255.0) / 255.0 * a;
-    }
-    p[3] = a;
-}
-
-impl Canvas {
-    fn new(w: usize, h: usize) -> Self {
-        Canvas { w, h, px: vec![[0.0; 4]; w * h], bbox: None }
-    }
-    fn over(&mut self, src: &Canvas, opacity: f32, mode: &[u8; 4]) {
-        let Some(b) = src.bbox else { return };
-        for y in b.y0..b.y1 {
-            for x in b.x0..b.x1 {
-                let o = y * self.w + x;
-                let s = src.px[o];
-                if s[3] > 0.0 {
-                    composite_px(&mut self.px[o], [s[0] / s[3], s[1] / s[3], s[2] / s[3]], s[3] * opacity, mode);
-                }
-            }
-        }
-        self.bbox = Some(Bounds::union(self.bbox, b));
-    }
 }
 
 fn lum(c: [f32; 3]) -> f32 {
@@ -179,21 +117,46 @@ fn blend(mode: &[u8; 4], b: [f32; 3], s: [f32; 3]) -> Option<[f32; 3]> {
     }
 }
 
-/// Composites straight color `s` with coverage `a` onto premultiplied `dst` with `mode`.
-fn composite_px(dst: &mut [f32; 4], s: [f32; 3], a: f32, mode: &[u8; 4]) {
-    let ab = dst[3];
-    let s = if ab > 0.0 && mode != b"norm" {
-        let cb = [dst[0] / ab, dst[1] / ab, dst[2] / ab];
-        let m = blend(mode, cb, s).unwrap_or(s);
-        [0, 1, 2].map(|k| (1.0 - ab) * s[k] + ab * m[k])
-    } else {
-        s
-    };
-    for k in 0..3 {
-        dst[k] = s[k] * a + dst[k] * (1.0 - a);
+/// Composites straight color `s` with coverage `a` (0..255) onto straight `dst` with `mode`.
+#[inline]
+fn composite_px(dst: &mut [u8; 4], s: [u8; 3], a: u32, mode: &[u8; 4]) {
+    if a == 0 {
+        return;
     }
-    dst[3] = a + dst[3] * (1.0 - a);
-    quantize(dst);
+    let da = dst[3] as u32;
+    if mode == b"norm" || da == 0 {
+        // Weights a and da (1 - a), both scaled by 255.
+        let ws = a * 255;
+        let wd = da * (255 - a);
+        let tot = ws + wd;
+        let oa = (tot + 127) / 255;
+        if oa == 0 {
+            *dst = [0; 4];
+            return;
+        }
+        for k in 0..3 {
+            dst[k] = ((s[k] as u32 * ws + dst[k] as u32 * wd + tot / 2) / tot) as u8;
+        }
+        dst[3] = oa as u8;
+        return;
+    }
+    let ab = da as f32 / 255.0;
+    let cb = [0, 1, 2].map(|k| dst[k] as f32 / 255.0);
+    let sf = s.map(|v| v as f32 / 255.0);
+    let m = blend(mode, cb, sf).unwrap_or(sf);
+    let sm = [0, 1, 2].map(|k| (1.0 - ab) * sf[k] + ab * m[k]);
+    let af = a as f32 / 255.0;
+    let oa = af + ab * (1.0 - af);
+    let oa8 = (oa * 255.0).round();
+    if oa8 == 0.0 {
+        *dst = [0; 4];
+        return;
+    }
+    for k in 0..3 {
+        let c = (sm[k] * af + cb[k] * ab * (1.0 - af)) / oa;
+        dst[k] = (c * 255.0).round().clamp(0.0, 255.0) as u8;
+    }
+    dst[3] = oa8 as u8;
 }
 
 fn section(l: &Layer, d: &[u8]) -> u32 {
@@ -206,190 +169,323 @@ fn has_effects(l: &Layer) -> bool {
     l.tag(b"lfx2").is_some() || l.tag(b"lmfx").is_some()
 }
 
-/// Layer pixels within their bounds on the canvas: straight color and coverage (alpha times
-/// mask), row-major over the bounds.
-struct LayerPixels {
-    b: Bounds,
-    rgb: [Vec<u8>; 3],
-    alpha: Vec<f32>,
+fn fill_opacity(l: &Layer, d: &[u8]) -> f32 {
+    l.tag(b"iOpa").and_then(|t| d.get(t.data.start)).map_or(1.0, |&b| b as f32 / 255.0)
 }
 
-impl LayerPixels {
-    fn at(&self, x: usize, y: usize) -> Option<usize> {
-        let b = &self.b;
-        (x >= b.x0 && x < b.x1 && y >= b.y0 && y < b.y1).then(|| (y - b.y0) * (b.x1 - b.x0) + x - b.x0)
-    }
+/// One step of rendering a row.
+enum Op {
+    /// Start an isolated group: draw on a new canvas.
+    Push,
+    /// End it: composite its canvas onto the one below.
+    Pop { opacity: u32, mode: [u8; 4], hidden: bool },
+    /// Forget the clipping base.
+    ClearClip,
+    /// Draw a layer (or only take its coverage as clipping base, when hidden).
+    Layer(usize),
 }
 
-/// Channel `j` of layer `i`, decoded.
-pub type Channels<'a> = dyn Fn(usize, usize) -> Result<Vec<u8>> + 'a;
+/// What a pixel layer needs per row.
+struct LayerRows<'a> {
+    top: i64,
+    left: i64,
+    w: usize,
+    h: usize,
+    rgb: [PlaneRows<'a>; 3],
+    alpha: Option<PlaneRows<'a>>,
+    /// The user mask: rows, rectangle (top, left, width, height), default value.
+    mask: Option<(PlaneRows<'a>, i64, i64, usize, usize, u8)>,
+    clip: bool,
+    hidden: bool,
+    mode: [u8; 4],
+    /// Opacity times fill opacity, 0..255.
+    opacity: u32,
+}
 
-fn layer_pixels(psd: &Psd, chan: &Channels, i: usize) -> Result<Option<LayerPixels>> {
-    let l = &psd.layer_info.layers[i];
-    let (cw, ch) = (psd.width as usize, psd.height as usize);
-    let find = |id: i16| l.channels.iter().position(|c| c.id == id);
-    let (Some(r), Some(g), Some(b)) = (find(0), find(1), find(2)) else { return Ok(None) };
-    let Some(bb) = Bounds::of(&l.rect, cw, ch) else {
-        return Ok(Some(LayerPixels { b: Bounds { x0: 0, y0: 0, x1: 0, y1: 0 }, rgb: Default::default(), alpha: Vec::new() }));
-    };
-    let lw = l.rect.width() as usize;
-    let (bw, bh) = (bb.x1 - bb.x0, bb.y1 - bb.y0);
-    let planes = [chan(i, r)?, chan(i, g)?, chan(i, b)?];
-    let a = find(-1).map(|j| chan(i, j)).transpose()?;
-    let mut rgb = [vec![0u8; bw * bh], vec![0u8; bw * bh], vec![0u8; bw * bh]];
-    let mut alpha = vec![1f32; bw * bh];
-    let (ox, oy) = ((bb.x0 as i64 - l.rect.left as i64) as usize, (bb.y0 as i64 - l.rect.top as i64) as usize);
-    for y in 0..bh {
-        let src = (oy + y) * lw + ox;
-        for k in 0..3 {
-            rgb[k][y * bw..(y + 1) * bw].copy_from_slice(&planes[k][src..src + bw]);
-        }
-        if let Some(a) = &a {
-            for x in 0..bw {
-                alpha[y * bw + x] = a[src + x] as f32 / 255.0;
+/// A canvas row with the range drawn on.
+struct Row {
+    px: Vec<[u8; 4]>,
+    x0: usize,
+    x1: usize,
+}
+
+/// Renders the composite row by row.
+pub struct RowRenderer<'a> {
+    w: usize,
+    h: usize,
+    y: usize,
+    ops: Vec<Op>,
+    layers: Vec<Option<LayerRows<'a>>>,
+    stack: Vec<Row>,
+    /// Row buffers: color planes, alpha and mask of a layer.
+    buf: [Vec<u8>; 5],
+    clip: Vec<u8>,
+    clip_range: (usize, usize),
+}
+
+impl<'a> RowRenderer<'a> {
+    /// A renderer of the layers of `psd`, whose bytes (at least up to the composite image
+    /// data) are `d`.
+    pub fn new(psd: &'a Psd, d: &'a [u8], rep: &mut Report) -> Result<Self> {
+        let (w, h) = (psd.width as usize, psd.height as usize);
+        let layers = &psd.layer_info.layers;
+        // Layers are stored bottom to top: a group's divider record (section type 3) first,
+        // its folder record (type 1 or 2) last. Match them.
+        let mut folder_of = vec![usize::MAX; layers.len()];
+        let mut open = Vec::new();
+        for (i, l) in layers.iter().enumerate() {
+            match section(l, d) {
+                3 => open.push(i),
+                1 | 2 => {
+                    if let Some(j) = open.pop() {
+                        folder_of[j] = i;
+                    }
+                }
+                _ => {}
             }
         }
+        // Pass-through groups at full opacity are rendered straight into their parent; their
+        // folder record then has nothing to do.
+        let direct = |f: usize| f != usize::MAX && !layers[f].hidden() && &layers[f].blend == b"pass" && layers[f].opacity == 255;
+        let mut ops = Vec::new();
+        let mut rows = Vec::with_capacity(layers.len());
+        let mut skip_folder = vec![false; layers.len()];
+        let mut depth = 0usize;
+        for (i, l) in layers.iter().enumerate() {
+            rows.push(None);
+            match section(l, d) {
+                3 => {
+                    if direct(folder_of[i]) {
+                        skip_folder[folder_of[i]] = true;
+                    } else {
+                        ops.push(Op::Push);
+                        depth += 1;
+                    }
+                    ops.push(Op::ClearClip);
+                    continue;
+                }
+                1 | 2 => {
+                    ops.push(Op::ClearClip);
+                    if skip_folder[i] || depth == 0 {
+                        continue;
+                    }
+                    depth -= 1;
+                    let mode = if &l.blend == b"pass" { *b"norm" } else { l.blend };
+                    if !l.hidden() && blend(&mode, [0.0; 3], [0.0; 3]).is_none() {
+                        *rep.blend_fallback.entry(String::from_utf8_lossy(&l.blend).into()).or_default() += 1;
+                    }
+                    ops.push(Op::Pop { opacity: l.opacity as u32, mode, hidden: l.hidden() });
+                    continue;
+                }
+                _ => {}
+            }
+            let find = |id: i16| l.channels.iter().position(|c| c.id == id);
+            let (Some(r), Some(g), Some(b)) = (find(0), find(1), find(2)) else {
+                rep.skipped += 1;
+                continue;
+            };
+            let (lw, lh) = (l.rect.width() as usize, l.rect.height() as usize);
+            if lw == 0 || lh == 0 {
+                continue;
+            }
+            let ch = |j: usize| PlaneRows::channel(psd, d, i, j);
+            let mut mask = None;
+            if let (Some(mk), Some(j)) = (&l.mask, find(-2)) {
+                if mk.flags & 2 == 0 {
+                    let c = &l.channels[j];
+                    mask = Some((ch(j)?, mk.rect.top as i64, mk.rect.left as i64, c.width as usize, c.height as usize, mk.default_color));
+                }
+            }
+            if !l.hidden() {
+                if blend(&l.blend, [0.0; 3], [0.0; 3]).is_none() {
+                    *rep.blend_fallback.entry(String::from_utf8_lossy(&l.blend).into()).or_default() += 1;
+                }
+                if has_effects(l) {
+                    rep.effects += 1;
+                }
+            }
+            let mode = if blend(&l.blend, [0.0; 3], [0.0; 3]).is_some() { l.blend } else { *b"norm" };
+            rows[i] = Some(LayerRows {
+                top: l.rect.top as i64,
+                left: l.rect.left as i64,
+                w: lw,
+                h: lh,
+                rgb: [ch(r)?, ch(g)?, ch(b)?],
+                alpha: find(-1).map(ch).transpose()?,
+                mask,
+                clip: l.clipping != 0,
+                hidden: l.hidden(),
+                mode,
+                opacity: (l.opacity as f32 * fill_opacity(l, d)).round() as u32,
+            });
+            ops.push(Op::Layer(i));
+        }
+        for _ in 0..depth {
+            ops.push(Op::Pop { opacity: 255, mode: *b"norm", hidden: false });
+        }
+        let row = || Row { px: vec![[0; 4]; w], x0: w, x1: 0 };
+        Ok(RowRenderer {
+            w,
+            h,
+            y: 0,
+            ops,
+            layers: rows,
+            stack: vec![row()],
+            buf: Default::default(),
+            clip: vec![0; w],
+            clip_range: (0, 0),
+        })
     }
-    // User mask, unless disabled; outside its rectangle, its default color.
-    if let (Some(mk), Some(j)) = (&l.mask, find(-2)) {
-        if mk.flags & 2 == 0 {
-            let c = &l.channels[j];
-            let m = chan(i, j)?;
-            let def = mk.default_color as f32 / 255.0;
-            let (mw, mh) = (c.width as i64, c.height as i64);
-            for y in 0..bh {
-                for x in 0..bw {
-                    let mx = (bb.x0 + x) as i64 - mk.rect.left as i64;
-                    let my = (bb.y0 + y) as i64 - mk.rect.top as i64;
-                    let v = if mx >= 0 && my >= 0 && mx < mw && my < mh { m[(my * mw + mx) as usize] as f32 / 255.0 } else { def };
-                    alpha[y * bw + x] *= v;
+
+    /// Renders the next row into planar `out` rows: R, G, B matted on white, and alpha if
+    /// there are four.
+    pub fn next_row(&mut self, out: &mut [&mut [u8]]) -> Result<()> {
+        let (w, y) = (self.w, self.y);
+        if y >= self.h {
+            return Err(crate::psd::Error("past the last row".into()));
+        }
+        let mut level = 0;
+        let base = &mut self.stack[0];
+        base.px[base.x0.min(w)..base.x1.max(base.x0.min(w))].fill([0; 4]);
+        (base.x0, base.x1) = (w, 0);
+        self.clip_range = (0, 0);
+        for op in &self.ops {
+            match op {
+                Op::ClearClip => self.clip_range = (0, 0),
+                Op::Push => {
+                    level += 1;
+                    if self.stack.len() <= level {
+                        self.stack.push(Row { px: vec![[0; 4]; w], x0: w, x1: 0 });
+                    }
+                    let r = &mut self.stack[level];
+                    if r.x0 < r.x1 {
+                        r.px[r.x0..r.x1].fill([0; 4]);
+                    }
+                    (r.x0, r.x1) = (w, 0);
+                }
+                &Op::Pop { opacity, mode, hidden } => {
+                    let (lo, hi) = self.stack.split_at_mut(level);
+                    let (dst, src) = (&mut lo[level - 1], &hi[0]);
+                    level -= 1;
+                    if hidden || src.x0 >= src.x1 {
+                        continue;
+                    }
+                    for x in src.x0..src.x1 {
+                        let s = src.px[x];
+                        let a = (s[3] as u32 * opacity + 127) / 255;
+                        composite_px(&mut dst.px[x], [s[0], s[1], s[2]], a, &mode);
+                    }
+                    dst.x0 = dst.x0.min(src.x0);
+                    dst.x1 = dst.x1.max(src.x1);
+                }
+                &Op::Layer(i) => {
+                    let l = self.layers[i].as_mut().unwrap();
+                    let ly = y as i64 - l.top;
+                    if ly < 0 || ly >= l.h as i64 {
+                        if !l.clip {
+                            self.clip_range = (0, 0);
+                        }
+                        continue;
+                    }
+                    // Bring the cursors to this row (rows above the canvas are skipped).
+                    let ly = ly as usize;
+                    let [rb, gb, bb, ab, mb] = &mut self.buf;
+                    let decode = |p: &mut PlaneRows, out: &mut Vec<u8>, rows: usize, row: usize, n: usize| -> Result<()> {
+                        while p.rows_left() > rows - row {
+                            p.skip()?;
+                        }
+                        if out.len() < n {
+                            out.resize(n, 0);
+                        }
+                        p.next(&mut out[..n])
+                    };
+                    let [pr, pg, pb] = &mut l.rgb;
+                    decode(pr, rb, l.h, ly, l.w)?;
+                    decode(pg, gb, l.h, ly, l.w)?;
+                    decode(pb, bb, l.h, ly, l.w)?;
+                    match &mut l.alpha {
+                        Some(a) => decode(a, ab, l.h, ly, l.w)?,
+                        None => {
+                            ab.resize(ab.len().max(l.w), 0);
+                            ab[..l.w].fill(255);
+                        }
+                    }
+                    let x0 = l.left.max(0) as usize;
+                    let x1 = ((l.left + l.w as i64).min(w as i64)).max(0) as usize;
+                    // Coverage: alpha times mask, into the alpha buffer (layer coordinates).
+                    if let Some((m, mt, ml, mw, mh, def)) = &mut l.mask {
+                        let my = y as i64 - *mt;
+                        let inside = my >= 0 && my < *mh as i64;
+                        if inside {
+                            decode(m, mb, *mh, my as usize, *mw)?;
+                        }
+                        for x in x0..x1 {
+                            let lx = (x as i64 - l.left) as usize;
+                            let mx = x as i64 - *ml;
+                            let v = if inside && mx >= 0 && mx < *mw as i64 { mb[mx as usize] } else { *def } as u32;
+                            ab[lx] = ((ab[lx] as u32 * v + 127) / 255) as u8;
+                        }
+                    }
+                    if l.clip {
+                        let (c0, c1) = self.clip_range;
+                        for x in x0..x1 {
+                            let lx = (x as i64 - l.left) as usize;
+                            let v = if x >= c0 && x < c1 { self.clip[x] as u32 } else { 0 };
+                            ab[lx] = ((ab[lx] as u32 * v + 127) / 255) as u8;
+                        }
+                    } else {
+                        for x in x0..x1 {
+                            self.clip[x] = ab[(x as i64 - l.left) as usize];
+                        }
+                        self.clip_range = (x0, x1);
+                    }
+                    if l.hidden || x0 >= x1 {
+                        continue;
+                    }
+                    let dst = &mut self.stack[level];
+                    let op = l.opacity;
+                    for x in x0..x1 {
+                        let lx = (x as i64 - l.left) as usize;
+                        let a = (ab[lx] as u32 * op + 127) / 255;
+                        composite_px(&mut dst.px[x], [rb[lx], gb[lx], bb[lx]], a, &l.mode);
+                    }
+                    dst.x0 = dst.x0.min(x0);
+                    dst.x1 = dst.x1.max(x1);
                 }
             }
         }
+        // Colors are matted on white even when the alpha is stored.
+        let base = &self.stack[0];
+        for x in 0..w {
+            let p = base.px[x];
+            let a = p[3] as u32;
+            for k in 0..3 {
+                out[k][x] = ((p[k] as u32 * a + 255 * (255 - a) + 127) / 255) as u8;
+            }
+            if out.len() > 3 {
+                out[3][x] = p[3];
+            }
+        }
+        self.y += 1;
+        Ok(())
     }
-    Ok(Some(LayerPixels { b: bb, rgb, alpha }))
-}
-
-fn fill_opacity(l: &Layer, d: &[u8]) -> f32 {
-    l.tag(b"iOpa").and_then(|t| d.get(t.data.start)).map_or(1.0, |&b| b as f32 / 255.0)
 }
 
 /// Renders the layers of `psd` (whose bytes are `d`); returns interleaved 8-bit RGB matted on
 /// white, plus alpha when `with_alpha`.
 pub fn render(psd: &Psd, d: &[u8], with_alpha: bool, rep: &mut Report) -> Result<Vec<u8>> {
-    render_with(psd, d, &|i, j| pixels::layer_channel(psd, d, i, j), with_alpha, rep)
-}
-
-/// As [`render`], with the layers' channels from `chan`.
-pub fn render_with(psd: &Psd, d: &[u8], chan: &Channels, with_alpha: bool, rep: &mut Report) -> Result<Vec<u8>> {
     let (w, h) = (psd.width as usize, psd.height as usize);
-    let layers = &psd.layer_info.layers;
-    // Layers are stored bottom to top: a group's divider record (section type 3) first, its
-    // folder record (type 1 or 2) last. Match them.
-    let mut folder_of = vec![usize::MAX; layers.len()];
-    let mut open = Vec::new();
-    for (i, l) in layers.iter().enumerate() {
-        match section(l, d) {
-            3 => open.push(i),
-            1 | 2 => {
-                if let Some(j) = open.pop() {
-                    folder_of[j] = i;
-                }
-            }
-            _ => {}
-        }
-    }
-    // Pass-through groups at full opacity are rendered straight into their parent; their
-    // folder record then has nothing to do.
-    let direct = |f: usize| f != usize::MAX && !layers[f].hidden() && &layers[f].blend == b"pass" && layers[f].opacity == 255;
-    let mut stack: Vec<Canvas> = vec![Canvas::new(w, h)];
-    let mut skip_folder = vec![false; layers.len()];
-    let mut clip_base: Option<LayerPixels> = None;
-    for (i, l) in layers.iter().enumerate() {
-        match section(l, d) {
-            3 => {
-                if direct(folder_of[i]) {
-                    skip_folder[folder_of[i]] = true;
-                } else {
-                    stack.push(Canvas::new(w, h));
-                }
-                clip_base = None;
-                continue;
-            }
-            1 | 2 => {
-                clip_base = None;
-                if skip_folder[i] || stack.len() == 1 {
-                    continue;
-                }
-                let group = stack.pop().unwrap();
-                if !l.hidden() {
-                    let mode = if &l.blend == b"pass" { b"norm" } else { &l.blend };
-                    if blend(mode, [0.0; 3], [0.0; 3]).is_none() {
-                        *rep.blend_fallback.entry(String::from_utf8_lossy(&l.blend).into()).or_default() += 1;
-                    }
-                    stack.last_mut().unwrap().over(&group, l.opacity as f32 / 255.0, mode);
-                }
-                continue;
-            }
-            _ => {}
-        }
-        let Some(px) = layer_pixels(psd, chan, i)? else {
-            rep.skipped += 1;
-            continue;
-        };
-        let mut alpha = px.alpha;
-        if l.clipping != 0 {
-            if let Some(base) = &clip_base {
-                let bw = px.b.x1 - px.b.x0;
-                for y in px.b.y0..px.b.y1 {
-                    for x in px.b.x0..px.b.x1 {
-                        alpha[(y - px.b.y0) * bw + x - px.b.x0] *= base.at(x, y).map_or(0.0, |q| base.alpha[q]);
-                    }
-                }
-            }
-        } else {
-            clip_base = Some(LayerPixels { b: px.b, rgb: Default::default(), alpha: alpha.clone() });
-        }
-        if l.hidden() || px.b.x0 == px.b.x1 {
-            continue;
-        }
-        if blend(&l.blend, [0.0; 3], [0.0; 3]).is_none() {
-            *rep.blend_fallback.entry(String::from_utf8_lossy(&l.blend).into()).or_default() += 1;
-        }
-        if has_effects(l) {
-            rep.effects += 1;
-        }
-        let op = l.opacity as f32 / 255.0 * fill_opacity(l, d);
-        let top = stack.last_mut().unwrap();
-        let bw = px.b.x1 - px.b.x0;
-        for y in px.b.y0..px.b.y1 {
-            for x in px.b.x0..px.b.x1 {
-                let q = (y - px.b.y0) * bw + x - px.b.x0;
-                let a = alpha[q] * op;
-                if a == 0.0 {
-                    continue;
-                }
-                let s = [0, 1, 2].map(|k| px.rgb[k][q] as f32 / 255.0);
-                composite_px(&mut top.px[y * w + x], s, a, &l.blend);
-            }
-        }
-        top.bbox = Some(Bounds::union(top.bbox, px.b));
-    }
-    while stack.len() > 1 {
-        let g = stack.pop().unwrap();
-        stack.last_mut().unwrap().over(&g, 1.0, b"norm");
-    }
-    let c = &stack[0];
     let n = if with_alpha { 4 } else { 3 };
-    let mut out = Vec::with_capacity(c.w * c.h * n);
-    let q = |v: f32| (v * 255.0).round().clamp(0.0, 255.0) as u8;
-    // Colors are matted on white even when the alpha is stored.
-    for p in &c.px {
-        for k in 0..3 {
-            out.push(q(p[k] + (1.0 - p[3])));
-        }
-        if with_alpha {
-            out.push(q(p[3]));
+    let mut r = RowRenderer::new(psd, d, rep)?;
+    let mut planes = vec![vec![0u8; w]; n];
+    let mut out = Vec::with_capacity(w * h * n);
+    for _ in 0..h {
+        let mut refs: Vec<&mut [u8]> = planes.iter_mut().map(|p| p.as_mut_slice()).collect();
+        r.next_row(&mut refs)?;
+        for x in 0..w {
+            for p in &planes {
+                out.push(p[x]);
+            }
         }
     }
     Ok(out)

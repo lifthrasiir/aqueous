@@ -117,7 +117,7 @@ pub fn rows(data: &[u8], rows: usize, count_bytes: usize) -> Option<Vec<&[u8]>> 
 /// Positions where an encoded row breaks a token although an encoder working over the whole
 /// row would not have: a run followed by more of the same byte, or a literal shorter than
 /// 128 followed by a literal or a 2-byte run.
-fn forced_splits(src: &[u8], out: &mut Vec<usize>) {
+pub fn forced_splits(src: &[u8], out: &mut Vec<usize>) {
     let (mut t, mut pos) = (0, 0usize);
     let mut prev: Option<(bool, u8, usize)> = None;
     while t + 1 < src.len() {
@@ -140,6 +140,11 @@ fn infer_tiles(encoded: &[&[u8]]) -> Encoder {
     for r in encoded {
         forced_splits(r, &mut splits);
     }
+    infer_tiles_from(splits)
+}
+
+/// The Photoshop tile cut best explaining token breaks at `splits` (see [`forced_splits`]).
+pub fn infer_tiles_from(mut splits: Vec<usize>) -> Encoder {
     splits.sort_unstable();
     splits.dedup();
     let explained = |phase: usize, period: usize| {
@@ -149,7 +154,14 @@ fn infer_tiles(encoded: &[&[u8]]) -> Encoder {
     let (mut phase, mut period) = (usize::MAX, usize::MAX);
     let mut best = explained(phase, period);
     for c in (0..=s0 / 128).map(|j| s0 - 128 * j) {
-        for p in (128..=4096).step_by(8) {
+        // The next break off the 128 grid from c bounds the period (from below: it is at most
+        // that far, less whole chunks).
+        let s1 = splits.iter().copied().find(|&s| s > c && (s - c) % 128 != 0);
+        let periods: Vec<usize> = match s1 {
+            Some(s1) => (0..=(s1 - c) / 128).map(|j| s1 - c - 128 * j).filter(|&p| p >= 128).collect(),
+            None => vec![usize::MAX],
+        };
+        for p in periods {
             let n = explained(c, p);
             if n > best || n == best && c == phase && p > period {
                 (best, phase, period) = (n, c, p);
@@ -159,15 +171,40 @@ fn infer_tiles(encoded: &[&[u8]]) -> Encoder {
     Encoder::Photoshop { phase, period }
 }
 
-/// Candidate encoders for a channel, most likely first.
-pub fn candidates(encoded: &[&[u8]]) -> Vec<Encoder> {
-    let mut v = vec![infer_tiles(encoded)];
+/// Candidate encoders, most likely first, after the tile cut inferred for a channel.
+pub fn candidates_after(tiles: Encoder) -> Vec<Encoder> {
+    let mut v = vec![tiles];
     for min_run in [3, 2] {
         for split_rest in [false, true] {
             v.push(Encoder::Greedy { min_run, split_rest });
         }
     }
     v
+}
+
+/// The decoded length of PackBits `src`, or None if it is malformed.
+pub fn decoded_len(mut src: &[u8]) -> Option<usize> {
+    let mut n = 0;
+    while let [h, rest @ ..] = src {
+        let h = *h as i8;
+        if h >= 0 {
+            let k = h as usize + 1;
+            src = rest.get(k..)?;
+            n += k;
+        } else if h != -128 {
+            rest.first()?;
+            n += (1 - h as isize) as usize;
+            src = &rest[1..];
+        } else {
+            src = rest;
+        }
+    }
+    Some(n)
+}
+
+/// Candidate encoders for a channel, most likely first.
+pub fn candidates(encoded: &[&[u8]]) -> Vec<Encoder> {
+    candidates_after(infer_tiles(encoded))
 }
 
 /// The encoder reproducing most of `encoded` rows, and how many it reproduces. Rows that do
