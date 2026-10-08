@@ -4,7 +4,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: sqlr c IN OUT | sqlr d IN OUT | sqlr bench [-n ITERS] [-l LEVEL] [-v] FILE..."
+        "usage: sqlr c IN OUT | sqlr d IN OUT\n       sqlr bench [-n ITERS] [-l LEVEL] [-b LEVEL] [-V] [-L] [-c|-d] [-v] FILE...\n       sqlr fuzz [-n N] [-s SEED] FILE..."
     );
     std::process::exit(2);
 }
@@ -27,6 +27,7 @@ fn main() {
             }
         }
         Some("bench") => bench(&args[1..]),
+        Some("fuzz") => fuzz(&args[1..]),
         _ => usage(),
     }
 }
@@ -131,4 +132,138 @@ fn bench(args: &[String]) {
         total.zstd_s / iters as f64,
         tin / td / 1e6
     );
+}
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+}
+
+/// Mutates a database file the ways corruption and odd writers do.
+fn mutate(r: &mut Rng, src: &[u8]) -> Vec<u8> {
+    let mut v = src.to_vec();
+    let ps = match u16::from_be_bytes([v[16], v[17]]) {
+        1 => 65536,
+        p if p >= 512 => p as usize,
+        _ => 4096,
+    };
+    let np = (v.len() / ps).max(1);
+    for _ in 0..1 + r.below(3) {
+        let p = r.below(np);
+        let base = p * ps;
+        let h = if p == 0 { 100 } else { 0 };
+        match r.below(9) {
+            0 => {
+                for _ in 0..1 + r.below(16) {
+                    let i = r.below(v.len());
+                    v[i] = r.next() as u8;
+                }
+            }
+            1 if base + h < v.len() => v[base + h] = [0, 2, 5, 10, 13][r.below(5)],
+            2 if base + h + 40 < v.len() => {
+                let i = base + h + 8 + 2 * r.below(16);
+                let x = r.next() as u16 % ps as u16;
+                v[i..i + 2].copy_from_slice(&x.to_be_bytes());
+            }
+            3 => v.truncate(512 + r.below(v.len() - 511)),
+            4 => v.extend((0..1 + r.below(2 * ps)).map(|_| r.next() as u8)),
+            5 => {
+                let q = r.below(np) * ps;
+                if q + ps <= v.len() && base + ps <= v.len() {
+                    let pg = v[q..q + ps].to_vec();
+                    v[base..base + ps].copy_from_slice(&pg);
+                }
+            }
+            6 => {
+                let i = r.below(v.len().saturating_sub(4));
+                let x = r.below(np + 2) as u32;
+                v[i..i + 4].copy_from_slice(&x.to_be_bytes());
+            }
+            7 => {
+                let i = 16 + r.below(84);
+                v[i] = r.next() as u8;
+            }
+            _ => {
+                // A varint-ish byte inside a cell area.
+                let i = base + ps / 2 + r.below(ps / 2);
+                if i < v.len() {
+                    v[i] = 0x80 | r.next() as u8;
+                }
+            }
+        }
+    }
+    v
+}
+
+fn fuzz(args: &[String]) {
+    let mut n = 100;
+    let mut seed = 1u64;
+    let mut files = vec![];
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-n" => n = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-s" => seed = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            _ => files.push(a.clone()),
+        }
+    }
+    std::panic::set_hook(Box::new(|_| {}));
+    let opt = Options { verify: false, catch: false, level: 1, level_bytes: 1, ..Default::default() };
+    let (mut runs, mut bad) = (0, 0);
+    for f in &files {
+        let src = std::fs::read(f).expect("read");
+        if src.len() < 512 {
+            continue;
+        }
+        for i in 0..n {
+            let mut r = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) ^ (i as u64 + 1) ^ (src.len() as u64) << 20);
+            let m = mutate(&mut r, &src);
+            runs += 1;
+            let res = std::panic::catch_unwind(|| {
+                let c = compress_with(&m, &opt, &mut Stats::default());
+                let d = sqlite_recons::decompress(&c);
+                // Corrupted containers: errors, never panics.
+                for k in 0..4 {
+                    let mut cc = c.clone();
+                    let mut r2 = Rng(i as u64 * 31 + k + 7);
+                    match k {
+                        0 => cc.truncate(r2.below(cc.len())),
+                        _ => {
+                            for _ in 0..1 + r2.below(8) {
+                                let j = r2.below(cc.len());
+                                cc[j] ^= 1 << r2.below(8);
+                            }
+                        }
+                    }
+                    let _ = sqlite_recons::decompress(&cc);
+                }
+                matches!(d, Ok(ref d) if *d == m)
+            });
+            match res {
+                Ok(true) => {}
+                Ok(false) => {
+                    bad += 1;
+                    eprintln!("MISMATCH {f} seed {seed} iter {i}");
+                }
+                Err(e) => {
+                    bad += 1;
+                    let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
+                    eprintln!("PANIC {f} seed {seed} iter {i}: {msg:?}");
+                }
+            }
+        }
+    }
+    println!("{runs} runs, {bad} failures");
+    if bad > 0 {
+        std::process::exit(1);
+    }
 }

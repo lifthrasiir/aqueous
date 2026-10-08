@@ -173,7 +173,8 @@ fn decimal(bits: u64) -> Option<(i64, u8)> {
         if m.abs() >= 9007199254740992.0 {
             return None;
         }
-        if (m / p).to_bits() == bits {
+        // Checked as the decoder computes it (an integer m loses the sign of -0.0).
+        if ((m as i64) as f64 / p).to_bits() == bits {
             return Some((m as i64, e as u8));
         }
     }
@@ -189,6 +190,9 @@ const R_COLS: u64 = 2;
 pub struct ColEnc {
     pub tag: Vec<u8>,
     pub ints: Vec<i64>,
+    /// The integer before each in its record (the previous column's), for the horizontal
+    /// prediction.
+    hpred: Vec<i64>,
     pub real: Vec<u8>,
     pub len: Vec<u8>,
     pub bytes: Vec<u8>,
@@ -252,6 +256,7 @@ impl GroupEnc {
         if self.cols.len() < cols.len() {
             self.cols.resize_with(cols.len(), Default::default);
         }
+        let mut last = 0i64;
         for (c, &(st, off)) in self.cols.iter_mut().zip(cols.iter()) {
             let b = &pay[off as usize..off as usize + st_size(st)];
             match st {
@@ -262,6 +267,8 @@ impl GroupEnc {
                     if let Some((m, e)) = decimal(bits) {
                         c.tag.push(T_DEC + e);
                         c.ints.push(m);
+                        c.hpred.push(last);
+                        last = m;
                     } else if (f as f64).to_bits() == bits {
                         c.tag.push(T_F32);
                         c.real.extend_from_slice(&f.to_bits().to_be_bytes());
@@ -274,6 +281,8 @@ impl GroupEnc {
                     let v = int_value(st, b);
                     c.tag.push(if canon_st(v, fmt4) == st { T_INT } else { T_ODD_INT + st as u8 });
                     c.ints.push(v);
+                    c.hpred.push(last);
+                    last = v;
                 }
                 _ => {
                     let text = st & 1 == 1;
@@ -339,26 +348,25 @@ impl GroupEnc {
         rowid.extend_from_slice(&self.rowid);
         rawpay.extend_from_slice(&self.rawpay);
         for c in &self.cols {
-            let raw: usize = c.ints.iter().map(|&v| uv_len(zz(v))).sum();
+            // Integers as they are, against the column's previous one, or against the
+            // previous integer of the record: whichever takes the fewest bytes.
+            let mut cost = [0usize; 3];
             let mut prev = 0i64;
-            let delta: usize = c
-                .ints
-                .iter()
-                .map(|&v| {
-                    let d = v.wrapping_sub(prev);
-                    prev = v;
-                    uv_len(zz(d))
-                })
-                .sum();
-            let use_delta = delta < raw;
+            for (&v, &h) in c.ints.iter().zip(&c.hpred) {
+                cost[0] += uv_len(zz(v));
+                cost[1] += uv_len(zz(v.wrapping_sub(prev)));
+                cost[2] += uv_len(zz(v.wrapping_sub(h)));
+                prev = v;
+            }
+            let mode = (0..3).min_by_key(|&m| (cost[m], m)).unwrap();
             tmp.clear();
             let mut prev = 0i64;
-            for &v in &c.ints {
-                put_sv(tmp, if use_delta { v.wrapping_sub(prev) } else { v });
+            for (&v, &h) in c.ints.iter().zip(&c.hpred) {
+                put_sv(tmp, v.wrapping_sub([0, prev, h][mode]));
                 prev = v;
             }
             put_uv(dir, c.tag.len() as u64);
-            put_uv(dir, use_delta as u64);
+            put_uv(dir, mode as u64);
             put_uv(dir, tmp.len() as u64);
             put_uv(dir, c.real.len() as u64);
             put_uv(dir, c.len.len() as u64);
@@ -375,7 +383,7 @@ impl GroupEnc {
 pub struct ColDec<'a> {
     tag: Rd<'a>,
     int: Rd<'a>,
-    delta: bool,
+    mode: u8,
     prev: i64,
     real: Rd<'a>,
     len: Rd<'a>,
@@ -385,9 +393,13 @@ pub struct ColDec<'a> {
 
 impl ColDec<'_> {
     #[inline]
-    fn next_int(&mut self) -> Result<i64> {
+    fn next_int(&mut self, last: i64) -> Result<i64> {
         let d = self.int.sv()?;
-        let v = if self.delta { self.prev.wrapping_add(d) } else { d };
+        let v = d.wrapping_add(match self.mode {
+            0 => 0,
+            1 => self.prev,
+            _ => last,
+        });
         self.prev = v;
         Ok(v)
     }
@@ -443,12 +455,16 @@ impl<'a> GroupDec<'a> {
         let mut cols = Vec::with_capacity(nc.min(1 << 16));
         for _ in 0..nc {
             let tag = tag.sub(dir.usize()?)?;
-            let delta = dir.uv()? != 0;
+            let mode = dir.uv()?;
+            if mode > 2 {
+                return Err(corrupt());
+            }
+            let mode = mode as u8;
             let int = int.sub(dir.usize()?)?;
             let real = real.sub(dir.usize()?)?;
             let len = len.sub(dir.usize()?)?;
             let bytes = bytes.sub(dir.usize()?)?;
-            cols.push(ColDec { tag, int, delta, prev: 0, real, len, bytes, distinct: Vec::new() });
+            cols.push(ColDec { tag, int, mode, prev: 0, real, len, bytes, distinct: Vec::new() });
         }
         Ok(GroupDec { rec, rowid, rawpay, cols })
     }
@@ -501,12 +517,14 @@ impl<'a> GroupDec<'a> {
         let cols = self.cols.get_mut(..nc).ok_or_else(corrupt)?;
         vals.clear();
         let mut s = 0u64;
+        let mut last = 0i64;
         for c in cols.iter_mut() {
             let t = c.tag.u8()?;
             let (st, v) = match t {
                 T_NULL => (0, 0),
                 T_INT => {
-                    let v = c.next_int()?;
+                    let v = c.next_int(last)?;
+                    last = v;
                     (canon_st(v, fmt4), v)
                 }
                 T_REAL => (7, i64::from_be_bytes(c.real.bytes(8)?.try_into().unwrap())),
@@ -515,7 +533,8 @@ impl<'a> GroupDec<'a> {
                     (7, (f as f64).to_bits() as i64)
                 }
                 T_DEC..=54 => {
-                    let m = c.next_int()?;
+                    let m = c.next_int(last)?;
+                    last = m;
                     (7, (m as f64 / P10[(t - T_DEC) as usize]).to_bits() as i64)
                 }
                 T_TEXT | T_BLOB => {
@@ -531,7 +550,11 @@ impl<'a> GroupDec<'a> {
                     let &(_, n) = c.distinct.get(id).ok_or_else(corrupt)?;
                     (12 + 2 * n as u64 + (t == T_TEXT_REP) as u64, id as i64)
                 }
-                17..=25 => ((t - T_ODD_INT) as u64, c.next_int()?),
+                17..=25 => {
+                    let v = c.next_int(last)?;
+                    last = v;
+                    ((t - T_ODD_INT) as u64, v)
+                }
                 _ => return Err(corrupt()),
             };
             s += sqlite_len(st) as u64;
@@ -563,5 +586,37 @@ impl<'a> GroupDec<'a> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decimals() {
+        for v in [0.1, 0.125, 12.99, -3.5, 1e-7, 123456.789, 0.30000000000000004, 1.0 / 3.0, 1e300, -0.0] {
+            let bits = f64::to_bits(v);
+            if let Some((m, e)) = decimal(bits) {
+                assert_eq!((m as f64 / P10[e as usize]).to_bits(), bits, "{v}");
+            }
+        }
+        assert_eq!(decimal(12.99f64.to_bits()), Some((1299, 2)));
+        assert_eq!(decimal((-0.0f64).to_bits()), None);
+    }
+
+    #[test]
+    fn records() {
+        let mut cols = vec![];
+        let mut out = vec![];
+        // 3 columns: int 300, text "ab", NULL.
+        let rec = [4u8, 2, 17, 0, 1, 44, b'a', b'b'];
+        assert!(parse(&rec, &mut cols));
+        assert_eq!(cols, vec![(2, 4), (17, 6), (0, 8)]);
+        // Non-minimal header length, wrong total length.
+        assert!(!parse(&[0x80, 4, 2, 17, 0, 1, 44, b'a', b'b'], &mut cols));
+        assert!(!parse(&rec[..7], &mut cols));
+        assert!(predict(&rec, 5, &[1, 0], true, &mut cols, &mut out));
+        assert_eq!(out, [4u8, 17, 2, 1, b'a', b'b', 1, 44, 5]);
     }
 }

@@ -27,7 +27,7 @@
 //! them), then rebuilds the pages in file order.
 
 use crate::index;
-use crate::page::{Cell, Geom, K_OVF, K_RAW, K_ZERO, be16, be32, hdr_off, is_btree, parse_page};
+use crate::page::{Cell, Ends, Geom, K_OVF, K_RAW, K_ZERO, be16, be32, hdr_off, is_btree, parse_page};
 use crate::record::{GroupDec, GroupEnc, RefCtx, Recs, int_value, is_int, predict, st_size};
 use crate::varint::{Rd, put_sqlite, put_sv, put_uv};
 use crate::{Result, corrupt};
@@ -198,11 +198,10 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         put_uv(&mut s[S_PHDR], be16(pg, h + 1) as u64);
         put_uv(&mut s[S_PHDR], cells.len() as u64);
         put_uv(&mut s[S_PHDR], pg[h + 7] as u64);
-        let mut pos = g.usable;
+        let mut ends = Ends::new(g.usable);
         let mut minoff = g.usable;
         for c in &cells {
-            put_sv(&mut s[S_CPTR], c.off as i64 - (pos as i64 - c.size.max(4) as i64));
-            pos = c.off;
+            put_uv(&mut s[S_CPTR], ends.encode(c.off, c.size));
             minoff = minoff.min(c.off);
             if k == 2 || k == 5 {
                 put_sv(&mut s[S_CHILD], c.child as i64 - (prev_child + 1));
@@ -492,7 +491,7 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
         }
         iv.clear();
         iv.push((h, ptr_end));
-        let mut pos = u;
+        let mut ends = Ends::new(u);
         let mut minoff = u;
         for i in 0..nc {
             cell.clear();
@@ -542,16 +541,14 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
                 }
             }
             let size = cell.len();
-            let off = pos as i64 - size.max(4) as i64 + cptr.sv()?;
-            if off < ptr_end as i64 || off as usize + size > u {
+            let off = ends.decode(cptr.uv()?, size).ok_or_else(corrupt)?;
+            if off < ptr_end || off + size > u {
                 return Err(corrupt());
             }
-            let off = off as usize;
             out[base + off..base + off + size].copy_from_slice(&cell);
             out[base + h + hl + 2 * i..base + h + hl + 2 * i + 2]
                 .copy_from_slice(&(off as u16).to_be_bytes());
             iv.push((off, off + size));
-            pos = off;
             minoff = minoff.min(off);
             // Overflow pages.
             let mut at = local;

@@ -178,3 +178,92 @@ pub fn parse_page(
 pub fn hdr_off(p: usize) -> usize {
     if p == 1 { 100 } else { 0 }
 }
+
+/// Where cells go on a page: SQLite fills the content area downwards, so a cell mostly
+/// ends where an earlier one starts (or at the end of the usable area). The open ends are
+/// kept most recent last; a cell is coded as the rank of its end among them, or as an
+/// offset against the most recent one.
+pub struct Ends {
+    v: Vec<usize>,
+}
+
+const MAX_RANK: usize = 16;
+const MAX_ENDS: usize = 64;
+
+impl Ends {
+    pub fn new(usable: usize) -> Self {
+        Ends { v: vec![usable] }
+    }
+
+    #[inline]
+    fn update(&mut self, off: usize, end: usize) {
+        if let Some(k) = self.v.iter().rposition(|&e| e == end) {
+            self.v.remove(k);
+        }
+        if self.v.len() == MAX_ENDS {
+            self.v.remove(0);
+        }
+        self.v.push(off);
+    }
+
+    /// The code of a cell at `off` taking `sz` bytes.
+    #[inline]
+    pub fn encode(&mut self, off: usize, sz: usize) -> u64 {
+        let sz = sz.max(4);
+        let end = off + sz;
+        let n = self.v.len();
+        let code = match (0..n.min(MAX_RANK)).find(|&r| self.v[n - 1 - r] == end) {
+            Some(r) => 2 * r as u64,
+            None => {
+                let back = self.v.last().copied().unwrap_or(0) as i64;
+                2 * crate::varint::zz(off as i64 - (back - sz as i64)) + 1
+            }
+        };
+        self.update(off, end);
+        code
+    }
+
+    /// The offset of a cell taking `sz` bytes from its code (unchecked).
+    #[inline]
+    pub fn decode(&mut self, code: u64, sz: usize) -> Option<usize> {
+        let sz = sz.max(4);
+        let n = self.v.len();
+        let off = if code & 1 == 0 {
+            let r = (code / 2) as usize;
+            if r >= n {
+                return None;
+            }
+            self.v[n - 1 - r].checked_sub(sz)?
+        } else {
+            let back = self.v.last().copied().unwrap_or(0) as i64;
+            let off = back - sz as i64 + crate::varint::unzz(code / 2);
+            usize::try_from(off).ok()?
+        };
+        self.update(off, off + sz);
+        Some(off)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ends_round_trip() {
+        let mut x = 99u64;
+        for _ in 0..200 {
+            let mut cells = vec![];
+            let mut e = Ends::new(4096);
+            let mut d = Ends::new(4096);
+            for _ in 0..50 {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let sz = 1 + (x >> 60) as usize * 7;
+                let off = 100 + (x >> 33) as usize % 3900;
+                cells.push((off, sz, e.encode(off, sz)));
+            }
+            for (off, sz, code) in cells {
+                assert_eq!(d.decode(code, sz), Some(off));
+            }
+        }
+    }
+}

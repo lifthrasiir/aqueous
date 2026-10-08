@@ -25,11 +25,13 @@ pub struct Options {
     /// Decode the result and compare (falls back to mode 0 on a mismatch).
     pub verify: bool,
     pub ldm: bool,
+    /// Store the file whole if the transform panics (off to find such bugs).
+    pub catch: bool,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { level: 3, level_bytes: 3, verify: true, ldm: true }
+        Options { level: 7, level_bytes: 9, verify: true, ldm: true, catch: true }
     }
 }
 
@@ -65,7 +67,11 @@ fn whole(src: &[u8], level: i32) -> Vec<u8> {
 
 pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     let t = std::time::Instant::now();
-    let enc = std::panic::catch_unwind(|| transform::encode(src)).ok().flatten();
+    let enc = if opt.catch {
+        std::panic::catch_unwind(|| transform::encode(src)).ok().flatten()
+    } else {
+        transform::encode(src)
+    };
     st.transform_s += t.elapsed().as_secs_f64();
     let Some(enc) = enc else {
         st.whole = true;
