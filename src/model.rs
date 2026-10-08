@@ -114,8 +114,9 @@ struct RowCtx<'a> {
 /// on equal it.
 #[inline(always)]
 fn run_above(up: &[u8], x: usize, v: u8) -> bool {
+    // The row above alone first: it is known, while v (just decoded) may not be yet.
     match up.get(x - 1..x + RUN_LOOK) {
-        Some(s) => u32::from_ne_bytes(s[1..5].try_into().unwrap()) == u32::from_ne_bytes([v; 4]) && s[0] == v,
+        Some(s) => u32::from_ne_bytes(s[1..5].try_into().unwrap()) == u32::from_ne_bytes([s[0]; 4]) && s[0] == v,
         None => false,
     }
 }
@@ -470,8 +471,12 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
             }
         }
         if !TOP && !after_run {
-            let v = [p0[x - 1], p1[x - 1], p2[x - 1]];
-            if run_above(q0.up, x, v[0]) && (how[1] == 0 || run_above(q1.up, x, v[1])) && (how[2] == 0 || run_above(q2.up, x, v[2])) {
+            // The rows above first (see run_above).
+            let flat = |q: &Rows| q.up.get(x - 1..x + RUN_LOOK).is_some_and(|s| u32::from_ne_bytes(s[1..5].try_into().unwrap()) == u32::from_ne_bytes([s[0]; 4]));
+            if flat(q0) && (how[1] == 0 || flat(q1)) && (how[2] == 0 || flat(q2))
+                && p0[x - 1] == q0.up[x - 1] && (how[1] == 0 || p1[x - 1] == q1.up[x - 1]) && (how[2] == 0 || p2[x - 1] == q2.up[x - 1])
+            {
+                let v = [p0[x - 1], p1[x - 1], p2[x - 1]];
                 let t = k.run_t + (ALPHA && q0.al[x] == 0) as usize * RUN_CTX + run_ctx(stretch_above(q0.up, x, v[0]));
                 let mut n = 0;
                 loop {
