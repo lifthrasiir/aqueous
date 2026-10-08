@@ -30,9 +30,17 @@ pub const S_SCALE: usize = 7;
 /// Corner index symbols per attribute (v, vt, vn), then their escapes.
 pub const S_FSYM: usize = 8;
 pub const S_FESC: usize = 11;
-pub const NSTREAMS: usize = 14;
-pub const STREAM_NAMES: [&str; NSTREAMS] =
-    ["ops", "tpl", "text", "v", "vt", "vn", "vp", "scale", "fv", "ft", "fn", "fv-esc", "ft-esc", "fn-esc"];
+/// Block flags (one byte).
+pub const S_HDR: usize = 14;
+/// The predicted component of unit normals, and its sign.
+pub const S_NSEL: usize = 15;
+pub const NSTREAMS: usize = 16;
+pub const STREAM_NAMES: [&str; NSTREAMS] = [
+    "ops", "tpl", "text", "v", "vt", "vn", "vp", "scale", "fv", "ft", "fn", "fv-esc", "ft-esc", "fn-esc", "hdr", "nsel",
+];
+
+/// Block flag: normals (`vn` lines of three numbers) are coded as unit vectors.
+const H_UNIT: u8 = 1;
 
 /// Template kinds; the numeric ones index their value stream from S_V.
 const K_VP: u8 = 3;
@@ -172,6 +180,51 @@ fn kind_of(l: &[u8]) -> Option<(u8, usize)> {
     Some((k, kw))
 }
 
+/// Powers of ten exact as doubles.
+const F64_POW10: [f64; 23] = {
+    let mut t = [1f64; 23];
+    let mut i = 1;
+    while i < 23 {
+        t[i] = t[i - 1] * 10.0;
+        i += 1;
+    }
+    t
+};
+
+/// `v` * 10^-`s`, roughly (exactly for |s| <= 22); only basic IEEE operations, so the same
+/// everywhere.
+#[inline]
+fn to_f64(v: i64, s: i32) -> f64 {
+    if s >= 0 { v as f64 / F64_POW10[(s as usize).min(22)] } else { v as f64 * F64_POW10[((-s) as usize).min(22)] }
+}
+
+/// The third component of a unit vector from the other two, at scale `s`, with the sign of
+/// `neg`.
+#[inline]
+fn unit_pred(a: f64, b: f64, s: i32, neg: bool) -> i64 {
+    let z = (1.0 - a * a - b * b).max(0.0).sqrt();
+    let p = if s >= 0 { z * F64_POW10[(s as usize).min(22)] } else { z / F64_POW10[((-s) as usize).min(22)] };
+    let p = p.round() as i64;
+    if neg { -p } else { p }
+}
+
+/// The order numbers are coded in: the unit-predicted one (`sel`) last.
+#[inline]
+fn order(n: usize, sel: Option<usize>) -> ([usize; MAX_NUMS], usize) {
+    let mut o = [0; MAX_NUMS];
+    let mut m = 0;
+    for j in 0..n {
+        if Some(j) != sel {
+            o[m] = j;
+            m += 1;
+        }
+    }
+    if let Some(j) = sel {
+        o[m] = j;
+    }
+    (o, n)
+}
+
 /// How the encoder writes the numbers of a kind: `%g` with this precision, or fixed (0).
 #[derive(Clone, Copy, Default)]
 struct Style {
@@ -179,19 +232,28 @@ struct Style {
     exp3: bool,
 }
 
-/// Chooses the styles from the first lines of a block: `%.Pg` when most numbers of a kind
-/// are that and their fixed formats vary.
-fn choose_styles(src: &[u8]) -> [Style; 4] {
-    let mut st = [Style::default(); 4];
-    let sample = &src[..src.len().min(32 << 10)];
+/// Chooses the styles from lines spread over a block: `%.Pg` when most numbers of a kind
+/// are that and their fixed formats vary; unit normals when most normals have length 1. A
+/// kind not seen keeps its style (`st`, `unit`: those of the previous block).
+fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
+    const PARTS: usize = 16;
+    const PART: usize = 2 << 10;
     let mut toks: [Vec<&[u8]>; 4] = Default::default();
-    for l in sample.split(|&c| c == b'\n') {
-        let Some((k, kw)) = kind_of(l) else { continue };
-        if k >= K_F {
-            continue;
-        }
-        for t in l[kw..].split(|&c| matches!(c, b' ' | b'\t' | b'\r')).filter(|t| !t.is_empty()) {
-            toks[k as usize].push(t);
+    for i in 0..PARTS {
+        let a = src.len() / PARTS * i;
+        let sample = &src[a..(a + PART).min(src.len())];
+        // Whole lines only: from the first line start.
+        let b = if a == 0 { 0 } else { memchr::memchr(b'\n', sample).map_or(sample.len(), |p| p + 1) };
+        let mut lines = sample[b..].split(|&c| c == b'\n');
+        lines.next_back();
+        for l in lines {
+            let Some((k, kw)) = kind_of(l) else { continue };
+            if k >= K_F {
+                continue;
+            }
+            for t in l[kw..].split(|&c| matches!(c, b' ' | b'\t' | b'\r')).filter(|t| !t.is_empty()) {
+                toks[k as usize].push(t);
+            }
         }
     }
     for k in 0..4 {
@@ -199,6 +261,7 @@ fn choose_styles(src: &[u8]) -> [Style; 4] {
         if ts.is_empty() {
             continue;
         }
+        st[k] = Style::default();
         let mut hist = [0usize; 19];
         let mut maxsig = 1u8;
         let mut exp3 = false;
@@ -219,12 +282,24 @@ fn choose_styles(src: &[u8]) -> [Style; 4] {
             st[k] = Style { gen_p: maxsig, exp3 };
         }
     }
-    st
+    // Normals of length 1 within rounding.
+    let (mut nvn, mut nunit) = (0, 0);
+    for t in toks[2].chunks_exact(3) {
+        let x: Vec<f64> = t.iter().filter_map(|t| std::str::from_utf8(t).ok()?.parse().ok()).collect();
+        if x.len() == 3 {
+            nvn += 1;
+            nunit += ((x[0] * x[0] + x[1] * x[1] + x[2] * x[2] - 1.0).abs() < 1e-3) as usize;
+        }
+    }
+    if nvn > 0 {
+        *unit = nunit * 10 >= nvn * 8;
+    }
 }
 
 pub struct Encoder {
     pub st: State,
     style: [Style; 4],
+    unit: bool,
     map: HashMap<Box<[u8]>, u32>,
     keys: Vec<Box<[u8]>>,
     /// Bytes in `keys`.
@@ -237,6 +312,7 @@ impl Default for Encoder {
         Encoder {
             st: State::default(),
             style: Default::default(),
+            unit: false,
             map: HashMap::new(),
             keys: vec![],
             bytes: 0,
@@ -274,7 +350,8 @@ impl Encoder {
         for v in s.iter_mut() {
             v.clear();
         }
-        self.style = choose_styles(src);
+        choose_styles(src, &mut self.style, &mut self.unit);
+        s[S_HDR].push(if self.unit { H_UNIT } else { 0 });
         let mut p = 0;
         while p < src.len() {
             let e = memchr::memchr(b'\n', &src[p..]).map_or(src.len(), |i| p + i + 1);
@@ -340,12 +417,27 @@ impl Encoder {
             let Some(id) = self.template(s) else { return false };
             put_uv(&mut s[S_OPS], id);
             let prev = &mut self.st.prev[k];
-            for (j, &(v, sc, mode)) in vals[..n].iter().enumerate() {
+            let mut sel = None;
+            if self.unit && kind == 2 && n == 3 {
+                let x = vals.map(|(v, sc, _)| to_f64(v, sc));
+                let j = (0..3).fold(0, |b, j| if x[j].abs() > x[b].abs() { j } else { b });
+                s[S_NSEL].push(j as u8 | ((vals[j].0 < 0) as u8) << 2);
+                sel = Some(j);
+            }
+            let (o, _) = order(n, sel);
+            for &j in &o[..n] {
+                let (v, sc, mode) = vals[j];
                 let (pv, ps) = prev[j];
                 if mode == M_GEN {
                     put_sv(&mut s[S_SCALE], (sc - ps) as i64);
                 }
-                put_sv(&mut s[S_V + k], v.wrapping_sub(num::rescale(pv, ps, sc)));
+                let pred = if Some(j) == sel {
+                    let (a, b) = ((j + 1) % 3, (j + 2) % 3);
+                    unit_pred(to_f64(vals[a].0, vals[a].1), to_f64(vals[b].0, vals[b].1), sc, v < 0)
+                } else {
+                    num::rescale(pv, ps, sc)
+                };
+                put_sv(&mut s[S_V + k], v.wrapping_sub(pred));
                 prev[j] = (v, sc);
             }
             if kind < K_VP {
@@ -542,6 +634,9 @@ impl Decoder {
         let mut scale = Rd::new(&s[S_SCALE]);
         let mut fsym = [Rd::new(&s[S_FSYM]), Rd::new(&s[S_FSYM + 1]), Rd::new(&s[S_FSYM + 2])];
         let mut fesc = [Rd::new(&s[S_FESC]), Rd::new(&s[S_FESC + 1]), Rd::new(&s[S_FESC + 2])];
+        let mut nsel = Rd::new(&s[S_NSEL]);
+        let mut hdr = Rd::new(&s[S_HDR]);
+        let unit = hdr.u8() & H_UNIT != 0;
         while !ops.done() {
             let op = ops.uv();
             if op == OP_RAW {
@@ -573,20 +668,44 @@ impl Decoder {
             if kind < K_F {
                 let r = &mut vs[kind as usize];
                 let prev = &mut self.st.prev[kind as usize];
-                for p in prev.iter_mut().take(k[1] as usize) {
-                    let (m, f, sl) = (k[i], k[i + 1], k[i + 2] as usize);
-                    out.extend_from_slice(&k[i + 3..i + 3 + sl]);
-                    i += 3 + sl;
-                    let (pv, ps) = *p;
+                let n = k[1] as usize;
+                // Item positions, then values in coding order, then the text.
+                let mut items = [0usize; MAX_NUMS];
+                for it in items.iter_mut().take(n) {
+                    *it = i;
+                    i += 3 + k[i + 2] as usize;
+                }
+                let mut sel = None;
+                let mut neg = false;
+                if unit && kind == 2 && n == 3 {
+                    let c = nsel.u8();
+                    sel = Some(((c & 3) as usize).min(2));
+                    neg = c & 4 != 0;
+                }
+                let (o, _) = order(n, sel);
+                for &j in &o[..n] {
+                    let (m, f) = (k[items[j]], k[items[j] + 1]);
+                    let (pv, ps) = prev[j];
+                    let sc = if m == M_GEN {
+                        (ps as i64).wrapping_add(scale.sv()).clamp(num::MIN_SCALE as i64, num::MAX_SCALE as i64) as i32
+                    } else {
+                        (f & num::F_FRAC) as i32
+                    };
+                    let pred = if Some(j) == sel {
+                        let (a, b) = ((j + 1) % 3, (j + 2) % 3);
+                        unit_pred(to_f64(prev[a].0, prev[a].1), to_f64(prev[b].0, prev[b].1), sc, neg)
+                    } else {
+                        num::rescale(pv, ps, sc)
+                    };
+                    prev[j] = (pred.wrapping_add(r.sv()), sc);
+                }
+                for (j, &it) in items[..n].iter().enumerate() {
+                    let (m, f, sl) = (k[it], k[it + 1], k[it + 2] as usize);
+                    out.extend_from_slice(&k[it + 3..it + 3 + sl]);
+                    let (v, sc) = prev[j];
                     if m == M_GEN {
-                        let sc = (ps as i64).wrapping_add(scale.sv()).clamp(num::MIN_SCALE as i64, num::MAX_SCALE as i64) as i32;
-                        let v = num::rescale(pv, ps, sc).wrapping_add(r.sv());
-                        *p = (v, sc);
                         num::put_gen(out, v, sc, f);
                     } else {
-                        let sc = (f & num::F_FRAC) as i32;
-                        let v = num::rescale(pv, ps, sc).wrapping_add(r.sv());
-                        *p = (v, sc);
                         num::put(out, v, f);
                     }
                 }
@@ -615,7 +734,7 @@ impl Decoder {
             }
             out.extend_from_slice(&k[i + 1..]);
         }
-        let all = [&ops, &tpl, &vs[0], &vs[1], &vs[2], &vs[3], &scale];
+        let all = [&ops, &tpl, &vs[0], &vs[1], &vs[2], &vs[3], &scale, &nsel, &hdr];
         tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).all(|r| r.done())
     }
 
