@@ -17,6 +17,34 @@
 use crate::{dec, num};
 use crate::varint::{Rd, put_sv, put_uv};
 use std::collections::HashMap;
+use std::hash::{BuildHasherDefault, Hasher};
+
+/// A multiplicative hash for template keys (short byte strings, not attacker-sensitive:
+/// the table is bounded).
+#[derive(Default)]
+struct KeyHasher(u64);
+
+impl Hasher for KeyHasher {
+    #[inline]
+    fn write(&mut self, b: &[u8]) {
+        let mut h = self.0;
+        let mut c = b.chunks_exact(8);
+        for w in &mut c {
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(w.try_into().unwrap())).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+        for &x in c.remainder() {
+            h = (h.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        }
+        self.0 = h;
+    }
+
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type KeyMap = HashMap<Box<[u8]>, u32, BuildHasherDefault<KeyHasher>>;
 
 pub const S_OPS: usize = 0;
 pub const S_TPL: usize = 1;
@@ -510,7 +538,9 @@ pub struct Encoder {
     pub st: State,
     style: [Style; 4],
     unit: bool,
-    map: HashMap<Box<[u8]>, u32>,
+    map: KeyMap,
+    /// The last template of each kind, to skip the lookup when a line repeats it.
+    last: [u32; 6],
     keys: Vec<Box<[u8]>>,
     /// Bytes in `keys`.
     bytes: usize,
@@ -526,7 +556,8 @@ impl Default for Encoder {
             st: State::default(),
             style: Default::default(),
             unit: false,
-            map: HashMap::new(),
+            map: KeyMap::default(),
+            last: [u32::MAX; 6],
             keys: vec![],
             bytes: 0,
             key: vec![],
@@ -792,7 +823,15 @@ impl Encoder {
     /// The template id of `self.key`, defining it if new; None when the table is full.
     #[inline]
     fn template(&mut self, s: &mut [Vec<u8>; NSTREAMS]) -> Option<u64> {
+        let kind = self.key[0] as usize;
+        let l = self.last[kind];
+        if let Some(k) = self.keys.get(l as usize)
+            && **k == self.key[..]
+        {
+            return Some(l as u64 + FIRST_TPL);
+        }
         if let Some(&id) = self.map.get(&self.key[..]) {
+            self.last[kind] = id;
             return Some(id as u64 + FIRST_TPL);
         }
         if self.keys.len() >= MAX_TEMPLATES || self.bytes + self.key.len() > MAX_TEMPLATE_BYTES {
@@ -800,6 +839,7 @@ impl Encoder {
         }
         self.bytes += self.key.len();
         let id = self.keys.len() as u32;
+        self.last[kind] = id;
         let k: Box<[u8]> = self.key.as_slice().into();
         self.map.insert(k.clone(), id);
         self.keys.push(k);

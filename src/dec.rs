@@ -269,11 +269,21 @@ pub fn exact_digits(x: f64, p: u32) -> (u64, i32) {
     (d.m * POW10[(p as i32 - 1 - (e - d.e)) as usize], e)
 }
 
+const POW5: [u128; 56] = {
+    let mut t = [1u128; 56];
+    let mut i = 1;
+    while i < 56 {
+        t[i] = t[i - 1] * 5;
+        i += 1;
+    }
+    t
+};
+
 /// `mant` × 2^`q` × 10^`k` rounded half to even, if the arithmetic fits 128 bits.
 #[inline]
 fn scaled_round(mant: u64, q: i32, k: i32) -> Option<u128> {
     // num / den with num = mant * 5^k+ * 2^(q+k)+, den = 5^k- * 2^(q+k)-
-    let p5 = |n: i32| -> Option<u128> { if n <= 55 { Some(5u128.pow(n as u32)) } else { None } };
+    let p5 = |n: i32| POW5.get(n as usize).copied();
     let t = q + k;
     let mut num = mant as u128;
     let mut den = 1u128;
@@ -494,52 +504,79 @@ pub fn encode(t: &[u8], mode: u8, p: u8, exp3: bool, prev_scale: i32, tmp: &mut 
     }
     let ex = t.iter().position(|&c| c == b'e' || c == b'E');
     let ex3 = ex.map_or(exp3, |i| t.len() - i - 2 == 3 && matches!(t[i + 1], b'+' | b'-'));
-    let mut f = match r {
+    let f = match r {
         R_GEN | R_SCI => p | if ex3 { G_EXP3 } else { 0 },
         _ => 0,
     };
-    let d = match src {
-        SRC_DEC => parse_dec(t)?,
-        _ => {
-            if !t.iter().all(|&c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E')) {
-                return None;
+    // The integer and scale for decimal `d`, if it renders as `t`.
+    let mut finish = |d: Dec| -> Option<(i64, i32, u8)> {
+        let f = if d.m == 0 && d.neg { f | G_NEGZ } else { f };
+        let s = if d.m == 0 {
+            prev_scale
+        } else if r == R_SCI && src == SRC_DEC {
+            p as i32 - 1 - d.exp()
+        } else {
+            -d.e
+        };
+        if !(num::MIN_SCALE..=num::MAX_SCALE).contains(&s) {
+            return None;
+        }
+        let v = d.scaled(s)?;
+        tmp.clear();
+        put(tmp, v, s, mode, f);
+        (tmp[..] == *t).then_some((v, s, f))
+    };
+    if src == SRC_DEC {
+        return finish(parse_dec(t)?);
+    }
+    // Floats. Fast guesses first (the rendering decides): for a double, its shortest
+    // decimal is the token rounded to 15 digits when it has at most 15 (the 15-digit grid is
+    // far coarser than the token's error); for a float, the token rounded to 9 digits
+    // converts to it.
+    let d = parse_dec(t)?;
+    if d.m != 0 {
+        if src == SRC_F64 {
+            if let Some(r) = finish(round_sig(d, 15)) {
+                return Some(r);
             }
-            // SAFETY: ASCII, checked above.
-            let s = unsafe { std::str::from_utf8_unchecked(t) };
-            if src == SRC_F32 {
-                let x: f32 = s.parse().ok()?;
-                if !x.is_finite() {
-                    return None;
-                }
-                let d = if x == 0.0 { Dec::new(false, 0, 0) } else { shortest(x.abs()) };
-                Dec { neg: x.is_sign_negative(), ..d }
-            } else {
-                let x: f64 = s.parse().ok()?;
-                if !x.is_finite() {
-                    return None;
-                }
-                let d = if x == 0.0 { Dec::new(false, 0, 0) } else { shortest(x.abs()) };
-                Dec { neg: x.is_sign_negative(), ..d }
+        } else {
+            let x = to_f64(round_sig(d, 9)) as f32;
+            if x.is_finite()
+                && let Some(r) = finish(Dec { neg: d.neg, ..shortest(x.abs()) })
+            {
+                return Some(r);
             }
         }
-    };
-    if d.m == 0 && d.neg {
-        f |= G_NEGZ;
     }
-    let s = if d.m == 0 {
-        prev_scale
-    } else if r == R_SCI && src == SRC_DEC {
-        p as i32 - 1 - d.exp()
-    } else {
-        -d.e
-    };
-    if !(num::MIN_SCALE..=num::MAX_SCALE).contains(&s) {
+    if !t.iter().all(|&c| c.is_ascii_digit() || matches!(c, b'-' | b'+' | b'.' | b'e' | b'E')) {
         return None;
     }
-    let v = d.scaled(s)?;
-    tmp.clear();
-    put(tmp, v, s, mode, f);
-    (tmp[..] == *t).then_some((v, s, f))
+    // SAFETY: ASCII, checked above.
+    let s = unsafe { std::str::from_utf8_unchecked(t) };
+    let (x, zero, neg) = if src == SRC_F32 {
+        let x: f32 = s.parse().ok()?;
+        (x.is_finite().then(|| shortest(x.abs()))?, x == 0.0, x.is_sign_negative())
+    } else {
+        let x: f64 = s.parse().ok()?;
+        if x == 0.0 {
+            (Dec::new(false, 0, 0), true, x.is_sign_negative())
+        } else {
+            (x.is_finite().then(|| shortest(x.abs()))?, false, x.is_sign_negative())
+        }
+    };
+    finish(if zero { Dec::new(neg, 0, 0) } else { Dec { neg, ..x } })
+}
+
+/// `d` rounded to `n` significant digits (half up).
+#[inline]
+fn round_sig(d: Dec, n: i32) -> Dec {
+    let nd = ndigits(d.m);
+    if nd <= n {
+        return d;
+    }
+    let p = POW10[(nd - n) as usize];
+    let (q, r) = (d.m / p, d.m % p);
+    Dec::new(d.neg, q + (r >= p - r) as u64, d.e + nd - n)
 }
 
 #[cfg(test)]
