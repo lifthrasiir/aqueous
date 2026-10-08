@@ -16,7 +16,8 @@
 
 use crate::corner::{C_N, C_NEG, C_T, CACHE, Corners, Indices, SYM_ESC, SYM_NEW, SYM_X1, SYM_X2, parse_index, put_index};
 use crate::recent::{Entry, NPRED, Recent, WIN, window_pred};
-use crate::style::{Style, choose_styles, exp_fallback};
+pub use crate::style::Styles;
+use crate::style::{exp_fallback, next_styles};
 use crate::{dec, num};
 use crate::varint::{Rd, put_sv, put_uv};
 use std::collections::HashMap;
@@ -208,10 +209,194 @@ fn order(n: usize, sel: Option<usize>) -> ([usize; MAX_NUMS], usize) {
     (o, n)
 }
 
+/// A line kept as text.
+#[inline]
+fn raw_line(l: &[u8], s: &mut [Vec<u8>; NSTREAMS]) {
+    s[S_OPS].push(if l.last() == Some(&b'\n') { OP_RAW } else { OP_RAW_OPEN } as u8);
+    s[S_TEXT].extend_from_slice(l);
+}
+
+/// Appends tail `t` to `key`, if it is a valid one.
+#[inline]
+fn tail(key: &mut Vec<u8>, t: &[u8]) -> bool {
+    if t.len() > 255 || !valid_tail(t) {
+        return false;
+    }
+    key.push(t.len() as u8);
+    key.extend_from_slice(t);
+    true
+}
+
+/// A corner token: its indices as written (relative ones not resolved), and its pattern.
+#[inline]
+fn parse_corner(t: &[u8]) -> Option<((i64, i64, i64), u8)> {
+    let s1 = memchr::memchr(b'/', t);
+    let Some(s1) = s1 else {
+        let a = parse_index(t)?;
+        return Some(((a.0, 0, 0), (a.1 as u8) * C_NEG));
+    };
+    let a = parse_index(&t[..s1])?;
+    let r = &t[s1 + 1..];
+    let (b, c) = match memchr::memchr(b'/', r) {
+        None => (Some(parse_index(r)?), None),
+        Some(0) => (None, Some(parse_index(&r[1..])?)),
+        Some(s2) => (Some(parse_index(&r[..s2])?), Some(parse_index(&r[s2 + 1..])?)),
+    };
+    let mut pat = (a.1 as u8) * C_NEG;
+    let (mut tv, mut nv) = (0, 0);
+    if let Some(b) = b {
+        pat |= C_T | ((b.1 as u8) * (C_NEG << 1));
+        tv = b.0;
+    }
+    if let Some(c) = c {
+        pat |= C_N | ((c.1 as u8) * (C_NEG << 2));
+        nv = c.0;
+    }
+    Some(((a.0, tv, nv), pat))
+}
+
+/// Parses a `v`, `vt`, `vn`, `vp`, `f` or `l` line in `styles`: its template into `key`,
+/// its numbers into `vals` (zeros not in a fixed format at scale 0: `Encoder::code_line`
+/// gives them the previous one's) or its corners onto `corners`. The kind and the count
+/// of numbers or corners; None if the line does not parse back to itself. Needs no state:
+/// it runs on other threads too.
+#[inline]
+fn parse_line(
+    l: &[u8],
+    styles: &Styles,
+    key: &mut Vec<u8>,
+    vals: &mut [(i64, i32, u8); MAX_NUMS],
+    corners: &mut Vec<(i64, i64, i64)>,
+    tmp: &mut Vec<u8>,
+) -> Option<(u8, usize)> {
+    let (kind, kw) = kind_of(l)?;
+    key.clear();
+    key.push(kind);
+    key.push(0);
+    let mut i = kw;
+    let mut n = 0;
+    if kind < K_F {
+        let style = styles.kinds[kind as usize];
+        loop {
+            let ws = i;
+            while i < l.len() && is_ws(l[i]) {
+                i += 1;
+            }
+            let te = tok_end(l, i);
+            if te == i || i == ws {
+                i = ws;
+                break;
+            }
+            if n == MAX_NUMS || i - ws > 255 {
+                return None;
+            }
+            let t = &l[i..te];
+            let (v, sc, mode, f) = if style.mode != M_FIX
+                && let Some((v, sc, f)) = dec::encode(t, style.mode, style.p, style.exp3, 0, tmp)
+            {
+                (v, sc, style.mode, f)
+            } else if let Some((v, f)) = num::parse(t) {
+                (v, (f & num::F_FRAC) as i32, M_FIX, f)
+            } else if let Some((v, sc, f)) = num::parse_gen(t, style.p.clamp(6, 17), 0, style.exp3, tmp) {
+                (v, sc, M_GEN, f)
+            } else {
+                exp_fallback(t, 0, tmp)?
+            };
+            vals[n] = (v, sc, mode);
+            n += 1;
+            key.extend_from_slice(&[mode, f, (i - ws) as u8]);
+            key.extend_from_slice(&l[ws..i]);
+            i = te;
+        }
+    } else {
+        loop {
+            let ws = i;
+            while i < l.len() && is_ws(l[i]) {
+                i += 1;
+            }
+            let te = tok_end(l, i);
+            if te == i || i == ws {
+                i = ws;
+                break;
+            }
+            if n == MAX_CORNERS || i - ws > 255 {
+                return None;
+            }
+            let (c, pat) = parse_corner(&l[i..te])?;
+            corners.push(c);
+            n += 1;
+            key.extend_from_slice(&[pat, 0, (i - ws) as u8]);
+            key.extend_from_slice(&l[ws..i]);
+            i = te;
+        }
+    }
+    if n == 0 || !tail(key, &l[i..]) {
+        return None;
+    }
+    key[1] = n as u8;
+    Some((kind, n))
+}
+
+/// A line of a block parsed on another thread: its text range, kind (RAW if it is kept as
+/// text), count of numbers or corners, template key and items in the block's arrays.
+pub struct ParsedLine {
+    start: u32,
+    end: u32,
+    kind: u8,
+    n: u16,
+    key_len: u16,
+    key: u32,
+    item: u32,
+}
+
+const RAW: u8 = 255;
+
+/// A block parsed on another thread (`parse_block`), for `Encoder::encode_parsed`.
+#[derive(Default)]
+pub struct ParsedBlock {
+    lines: Vec<ParsedLine>,
+    keys: Vec<u8>,
+    vals: Vec<(i64, i32, u8)>,
+    corners: Vec<(i64, i64, i64)>,
+}
+
+/// Parses the lines of a block (at most `MAX_BLOCK`, well under 4 GB) in `styles`.
+pub fn parse_block(styles: &Styles, src: &[u8]) -> ParsedBlock {
+    let mut b = ParsedBlock::default();
+    let mut key = Vec::new();
+    let mut tmp = Vec::new();
+    let mut vals = [(0i64, 0i32, 0u8); MAX_NUMS];
+    let mut p = 0;
+    while p < src.len() {
+        let e = memchr::memchr(b'\n', &src[p..]).map_or(src.len(), |i| p + i + 1);
+        let mut r = ParsedLine { start: p as u32, end: e as u32, kind: RAW, n: 0, key_len: 0, key: 0, item: 0 };
+        let c0 = b.corners.len();
+        match parse_line(&src[p..e], styles, &mut key, &mut vals, &mut b.corners, &mut tmp) {
+            Some((kind, n)) => {
+                r.kind = kind;
+                r.n = n as u16;
+                r.key = b.keys.len() as u32;
+                r.key_len = key.len() as u16;
+                b.keys.extend_from_slice(&key);
+                if kind < K_F {
+                    r.item = b.vals.len() as u32;
+                    b.vals.extend_from_slice(&vals[..n]);
+                } else {
+                    r.item = c0 as u32;
+                }
+            }
+            // Corners of a line that failed half way.
+            None => b.corners.truncate(c0),
+        }
+        b.lines.push(r);
+        p = e;
+    }
+    b
+}
+
 pub struct Encoder {
     pub st: State,
-    style: [Style; 4],
-    unit: bool,
+    styles: Styles,
     map: KeyMap,
     /// The last template of each kind, to skip the lookup when a line repeats it.
     last: [u32; 6],
@@ -232,8 +417,7 @@ impl Default for Encoder {
     fn default() -> Self {
         Encoder {
             st: State::default(),
-            style: Default::default(),
-            unit: false,
+            styles: Styles::default(),
             map: KeyMap::default(),
             last: [u32::MAX; 6],
             keys: vec![],
@@ -254,8 +438,7 @@ pub struct Mark {
     ntpl: usize,
     // The encoder's own choices carried from block to block, so that undoing blocks gives
     // the same output whenever it happens (a block at a time, or several at once).
-    style: [Style; 4],
-    unit: bool,
+    styles: Styles,
     last_vp: [usize; 3],
 }
 
@@ -266,7 +449,7 @@ impl Encoder {
     }
 
     pub fn mark(&self) -> Mark {
-        Mark { st: self.st, ntpl: self.keys.len(), style: self.style, unit: self.unit, last_vp: self.last_vp }
+        Mark { st: self.st, ntpl: self.keys.len(), styles: self.styles, last_vp: self.last_vp }
     }
 
     /// Undoes the block coded since `m`, which is then stored whole. The corner table and
@@ -274,7 +457,7 @@ impl Encoder {
     /// taught it, and the encoder must only use what the decoder knows.
     pub fn reset(&mut self, m: &Mark) {
         self.st = m.st;
-        (self.style, self.unit, self.last_vp) = (m.style, m.unit, m.last_vp);
+        (self.styles, self.last_vp) = (m.styles, m.last_vp);
         self.corners.clear();
         for r in &mut self.recent {
             r.clear();
@@ -287,190 +470,203 @@ impl Encoder {
 
     /// Codes `src` into `s` (cleared first).
     pub fn encode(&mut self, src: &[u8], s: &mut [Vec<u8>; NSTREAMS]) {
-        for v in s.iter_mut() {
-            v.clear();
-        }
-        choose_styles(src, &mut self.style, &mut self.unit);
-        s[S_HDR].push(if self.unit { H_UNIT } else { 0 });
+        self.styles = next_styles(&self.styles, src);
+        self.begin(s);
         let mut p = 0;
+        let mut vals = [(0i64, 0i32, 0u8); MAX_NUMS];
+        let (mut key, mut corners) = (std::mem::take(&mut self.key), std::mem::take(&mut self.fbuf));
         while p < src.len() {
             let e = memchr::memchr(b'\n', &src[p..]).map_or(src.len(), |i| p + i + 1);
             let l = &src[p..e];
-            if !self.line(l, s) {
-                s[S_OPS].push(if l.last() == Some(&b'\n') { OP_RAW } else { OP_RAW_OPEN } as u8);
-                s[S_TEXT].extend_from_slice(l);
+            corners.clear();
+            let ok = match parse_line(l, &self.styles, &mut key, &mut vals, &mut corners, &mut self.tmp) {
+                Some((kind, n)) => self.code_line(kind, n, &key, &mut vals, &mut corners, s),
+                None => false,
+            };
+            if !ok {
+                raw_line(l, s);
             }
             p = e;
         }
+        (self.key, self.fbuf) = (key, corners);
     }
 
-    /// Codes one line as a template, or returns false (nothing written).
+    /// Codes a block parsed on another thread (`parse_block`, with `styles`, which become
+    /// the encoder's).
+    pub fn encode_parsed(&mut self, styles: &Styles, src: &[u8], b: &ParsedBlock, s: &mut [Vec<u8>; NSTREAMS]) {
+        self.styles = *styles;
+        self.begin(s);
+        let mut corners = std::mem::take(&mut self.fbuf);
+        let mut vals = [(0i64, 0i32, 0u8); MAX_NUMS];
+        for r in &b.lines {
+            let l = &src[r.start as usize..r.end as usize];
+            let key = &b.keys[r.key as usize..r.key as usize + r.key_len as usize];
+            let ok = match r.kind {
+                RAW => false,
+                k if k < K_F => {
+                    vals[..r.n as usize].copy_from_slice(&b.vals[r.item as usize..r.item as usize + r.n as usize]);
+                    self.code_line(k, r.n as usize, key, &mut vals, &mut corners, s)
+                }
+                k => {
+                    corners.clear();
+                    corners.extend_from_slice(&b.corners[r.item as usize..r.item as usize + r.n as usize]);
+                    self.code_line(k, r.n as usize, key, &mut vals, &mut corners, s)
+                }
+            };
+            if !ok {
+                raw_line(l, s);
+            }
+        }
+        self.fbuf = corners;
+    }
+
+    /// The styles for the next block, `src` (from the encoder's current ones).
+    pub fn next_styles(&self, src: &[u8]) -> Styles {
+        next_styles(&self.styles, src)
+    }
+
+    fn begin(&mut self, s: &mut [Vec<u8>; NSTREAMS]) {
+        for v in s.iter_mut() {
+            v.clear();
+        }
+        s[S_HDR].push(if self.styles.unit { H_UNIT } else { 0 });
+    }
+
+    /// Codes a parsed line (`parse_line`): template `key`, numbers `vals` or corner
+    /// indices `corners` (as written; resolved here). False if it cannot (the template
+    /// table is full): nothing is written then.
     #[inline]
-    fn line(&mut self, l: &[u8], s: &mut [Vec<u8>; NSTREAMS]) -> bool {
-        let Some((kind, kw)) = kind_of(l) else { return false };
-        self.key.clear();
-        self.key.push(kind);
-        self.key.push(0);
-        let mut i = kw;
-        let mut n = 0;
-        if kind < K_F {
-            let k = kind as usize;
-            let style = self.style[k];
-            // value, scale, mode
-            let mut vals = [(0i64, 0i32, 0u8); MAX_NUMS];
-            loop {
-                let ws = i;
-                while i < l.len() && is_ws(l[i]) {
-                    i += 1;
-                }
-                let te = tok_end(l, i);
-                if te == i || i == ws {
-                    i = ws;
-                    break;
-                }
-                if n == MAX_NUMS || i - ws > 255 {
-                    return false;
-                }
-                let t = &l[i..te];
-                let ps = self.st.prev[k][n].1;
-                let (v, sc, mode, f) = if style.mode != M_FIX
-                    && let Some((v, sc, f)) = dec::encode(t, style.mode, style.p, style.exp3, ps, &mut self.tmp)
-                {
-                    (v, sc, style.mode, f)
-                } else if let Some((v, f)) = num::parse(t) {
-                    (v, (f & num::F_FRAC) as i32, M_FIX, f)
-                } else if let Some((v, sc, f)) = num::parse_gen(t, style.p.clamp(6, 17), ps, style.exp3, &mut self.tmp) {
-                    (v, sc, M_GEN, f)
-                } else if let Some(r) = exp_fallback(t, ps, &mut self.tmp) {
-                    r
-                } else {
-                    return false;
-                };
-                vals[n] = (v, sc, mode);
-                n += 1;
-                self.key.extend_from_slice(&[mode, f, (i - ws) as u8]);
-                self.key.extend_from_slice(&l[ws..i]);
-                i = te;
+    fn code_line(
+        &mut self,
+        kind: u8,
+        n: usize,
+        key: &[u8],
+        vals: &mut [(i64, i32, u8); MAX_NUMS],
+        corners: &mut [(i64, i64, i64)],
+        s: &mut [Vec<u8>; NSTREAMS],
+    ) -> bool {
+        let Some(id) = self.template(key, s) else { return false };
+        put_uv(&mut s[S_OPS], id);
+        if kind >= K_F {
+            self.code_corners(key, corners, s);
+            return true;
+        }
+        let k = kind as usize;
+        let prev = &mut self.st.prev[k];
+        // Zeros not in a fixed format take the scale of the previous number.
+        for (j, v) in vals[..n].iter_mut().enumerate() {
+            if v.2 != M_FIX && v.0 == 0 {
+                v.1 = prev[j].1;
             }
-            if n == 0 || !self.tail(&l[i..]) {
-                return false;
-            }
-            self.key[1] = n as u8;
-            let Some(id) = self.template(s) else { return false };
-            put_uv(&mut s[S_OPS], id);
-            let prev = &mut self.st.prev[k];
-            if k < 3 && n <= 3 {
-                let line = self.st.count[k] as u64;
-                let vs: [(i64, i32); 3] = [(vals[0].0, vals[0].1), (vals[1].0, vals[1].1), (vals[2].0, vals[2].1)];
-                let d = self.recent[k].find_put(line, Entry::new(&vs[..n]));
-                put_uv(&mut s[S_DUP + k], d);
-                if d > 0 {
-                    prev[..n].copy_from_slice(&vs[..n]);
-                    self.st.count[k] += 1;
-                    return true;
-                }
-            }
-            let mut sel = None;
-            if self.unit && kind == 2 && n == 3 {
-                let x = vals.map(|(v, sc, _)| to_f64(v, sc));
-                let j = (0..3).fold(0, |b, j| if x[j].abs() > x[b].abs() { j } else { b });
-                s[S_NSEL].push(j as u8 | ((vals[j].0 < 0) as u8) << 2);
-                sel = Some(j);
-            }
-            // The predictor that leaves the fewest residual bits, staying with the last one
-            // unless another saves a few.
-            let line = self.st.count[k.min(2)] as u64;
-            let mut vp = 0;
-            if k < 3 && (2..=3).contains(&n) {
-                vp = self.line_pred(k, &vals, n, sel, line);
-                self.last_vp[k] = vp;
-                s[S_PRED + k].push(vp as u8);
-            }
-            let prev = &mut self.st.prev[k];
-            let (o, _) = order(n, sel);
-            for &j in &o[..n] {
-                let (v, sc, mode) = vals[j];
-                let (pv, ps) = prev[j];
-                if mode != M_FIX {
-                    put_sv(&mut s[S_SCALE], (sc - ps) as i64);
-                }
-                let pred = if Some(j) == sel {
-                    let (a, b) = ((j + 1) % 3, (j + 2) % 3);
-                    unit_pred(to_f64(vals[a].0, vals[a].1), to_f64(vals[b].0, vals[b].1), sc, v < 0)
-                } else if vp > 0 {
-                    window_pred(&self.recent[k], line, vp, j, sc).expect("checked")
-                } else {
-                    num::rescale(pv, ps, sc)
-                };
-                put_sv(&mut s[if Some(j) == sel { S_UNIT } else { s_val(k, j) }], v.wrapping_sub(pred));
-                prev[j] = (v, sc);
-            }
-            if kind < K_VP {
+        }
+        if k < 3 && n <= 3 {
+            let line = self.st.count[k] as u64;
+            let vs: [(i64, i32); 3] = [(vals[0].0, vals[0].1), (vals[1].0, vals[1].1), (vals[2].0, vals[2].1)];
+            let d = self.recent[k].find_put(line, Entry::new(&vs[..n]));
+            put_uv(&mut s[S_DUP + k], d);
+            if d > 0 {
+                prev[..n].copy_from_slice(&vs[..n]);
                 self.st.count[k] += 1;
+                return true;
             }
-        } else {
-            // A buffer kept between lines (not an array zeroed for each).
-            let mut corners = std::mem::take(&mut self.fbuf);
-            corners.clear();
-            let ok = self.face_line(l, i, s, &mut corners);
-            self.fbuf = corners;
-            return ok;
+        }
+        let mut sel = None;
+        if self.styles.unit && kind == 2 && n == 3 {
+            let x: [f64; 3] = std::array::from_fn(|j| to_f64(vals[j].0, vals[j].1));
+            let j = (0..3).fold(0, |b, j| if x[j].abs() > x[b].abs() { j } else { b });
+            s[S_NSEL].push(j as u8 | ((vals[j].0 < 0) as u8) << 2);
+            sel = Some(j);
+        }
+        // The predictor that leaves the fewest residual bits, staying with the last one
+        // unless another saves a few.
+        let line = self.st.count[k.min(2)] as u64;
+        let mut vp = 0;
+        if k < 3 && (2..=3).contains(&n) {
+            vp = self.line_pred(k, vals, n, sel, line);
+            self.last_vp[k] = vp;
+            s[S_PRED + k].push(vp as u8);
+        }
+        let prev = &mut self.st.prev[k];
+        let (o, _) = order(n, sel);
+        for &j in &o[..n] {
+            let (v, sc, mode) = vals[j];
+            let (pv, ps) = prev[j];
+            if mode != M_FIX {
+                put_sv(&mut s[S_SCALE], (sc - ps) as i64);
+            }
+            let pred = if Some(j) == sel {
+                let (a, b) = ((j + 1) % 3, (j + 2) % 3);
+                unit_pred(to_f64(vals[a].0, vals[a].1), to_f64(vals[b].0, vals[b].1), sc, v < 0)
+            } else if vp > 0 {
+                window_pred(&self.recent[k], line, vp, j, sc).expect("checked")
+            } else {
+                num::rescale(pv, ps, sc)
+            };
+            put_sv(&mut s[if Some(j) == sel { S_UNIT } else { s_val(k, j) }], v.wrapping_sub(pred));
+            prev[j] = (v, sc);
+        }
+        if kind < K_VP {
+            self.st.count[k] += 1;
         }
         true
     }
 
-    /// Codes the corners of a face or polyline line from position `i` (after the keyword),
-    /// into `corners` (scratch); false if it does not parse (nothing written).
+    /// Codes the corners of a face or polyline line (indices as written, resolved here).
     #[inline]
-    fn face_line(&mut self, l: &[u8], mut i: usize, s: &mut [Vec<u8>; NSTREAMS], corners: &mut Vec<(i64, i64, i64)>) -> bool {
-        let mut n = 0;
-        loop {
-            let ws = i;
-            while i < l.len() && is_ws(l[i]) {
-                i += 1;
-            }
-            let te = tok_end(l, i);
-            if te == i || i == ws {
-                i = ws;
-                break;
-            }
-            if n == MAX_CORNERS || i - ws > 255 {
-                return false;
-            }
-            let Some((c, pat)) = self.corner(&l[i..te]) else { return false };
-            corners.push(c);
-            n += 1;
-            self.key.extend_from_slice(&[pat, 0, (i - ws) as u8]);
-            self.key.extend_from_slice(&l[ws..i]);
-            i = te;
-        }
-        if n == 0 || !self.tail(&l[i..]) {
-            return false;
-        }
-        self.key[1] = n as u8;
-        let Some(id) = self.template(s) else { return false };
-        put_uv(&mut s[S_OPS], id);
+    fn code_corners(&mut self, key: &[u8], corners: &mut [(i64, i64, i64)], s: &mut [Vec<u8>; NSTREAMS]) {
         let mut k = 2;
         let mut pv = None;
+        let count = self.st.count;
+        let abs = |x: i64, neg: bool, k: usize| if neg { (count[k] + 1).wrapping_sub(x) } else { x };
         for c in corners.iter_mut() {
-            let (v, t, nn) = *c;
-            let pat = self.key[k];
-            k += 3 + self.key[k + 2] as usize;
+            let pat = key[k];
+            k += 3 + key[k + 2] as usize;
+            let v = abs(c.0, pat & C_NEG != 0, 0);
+            c.0 = v;
             self.index(s, 0, v, v, pv);
             if pat & C_T != 0 {
-                self.index(s, 1, t, v, pv);
+                c.1 = abs(c.1, pat & (C_NEG << 1) != 0, 1);
+                self.index(s, 1, c.1, v, pv);
             } else {
                 c.1 = 0;
             }
             if pat & C_N != 0 {
-                self.index(s, 2, nn, v, pv);
+                c.2 = abs(c.2, pat & (C_NEG << 2) != 0, 2);
+                self.index(s, 2, c.2, v, pv);
             } else {
                 c.2 = 0;
             }
             pv = Some(v);
         }
         self.corners.face(corners);
-        true
+    }
+
+    /// The template id of `key`, defining it if new; None when the table is full.
+    #[inline]
+    fn template(&mut self, key: &[u8], s: &mut [Vec<u8>; NSTREAMS]) -> Option<u64> {
+        let kind = key[0] as usize;
+        let l = self.last[kind];
+        if let Some(k) = self.keys.get(l as usize)
+            && **k == *key
+        {
+            return Some(l as u64 + FIRST_TPL);
+        }
+        if let Some(&id) = self.map.get(key) {
+            self.last[kind] = id;
+            return Some(id as u64 + FIRST_TPL);
+        }
+        if self.keys.len() >= MAX_TEMPLATES || self.bytes + key.len() > MAX_TEMPLATE_BYTES {
+            return None;
+        }
+        self.bytes += key.len();
+        let id = self.keys.len() as u32;
+        self.last[kind] = id;
+        let k: Box<[u8]> = key.into();
+        self.map.insert(k.clone(), id);
+        self.keys.push(k);
+        put_uv(&mut s[S_TPL], key.len() as u64);
+        s[S_TPL].extend_from_slice(key);
+        Some(id as u64 + FIRST_TPL)
     }
 
     /// Codes index `a` of attribute `k` of a corner whose v index is `v`, after a corner
@@ -567,72 +763,6 @@ impl Encoder {
         best.1
     }
 
-    /// A corner token: absolute indices (relative ones resolved) and its pattern.
-    #[inline]
-    fn corner(&self, t: &[u8]) -> Option<((i64, i64, i64), u8)> {
-        let abs = |(x, neg): (i64, bool), k: usize| if neg { self.st.count[k] + 1 - x } else { x };
-        let s1 = memchr::memchr(b'/', t);
-        let Some(s1) = s1 else {
-            let a = parse_index(t)?;
-            return Some(((abs(a, 0), 0, 0), (a.1 as u8) * C_NEG));
-        };
-        let a = parse_index(&t[..s1])?;
-        let r = &t[s1 + 1..];
-        let (b, c) = match memchr::memchr(b'/', r) {
-            None => (Some(parse_index(r)?), None),
-            Some(0) => (None, Some(parse_index(&r[1..])?)),
-            Some(s2) => (Some(parse_index(&r[..s2])?), Some(parse_index(&r[s2 + 1..])?)),
-        };
-        let mut pat = (a.1 as u8) * C_NEG;
-        let (mut tv, mut nv) = (0, 0);
-        if let Some(b) = b {
-            pat |= C_T | ((b.1 as u8) * (C_NEG << 1));
-            tv = abs(b, 1);
-        }
-        if let Some(c) = c {
-            pat |= C_N | ((c.1 as u8) * (C_NEG << 2));
-            nv = abs(c, 2);
-        }
-        Some(((abs(a, 0), tv, nv), pat))
-    }
-
-    #[inline]
-    fn tail(&mut self, t: &[u8]) -> bool {
-        if t.len() > 255 || !valid_tail(t) {
-            return false;
-        }
-        self.key.push(t.len() as u8);
-        self.key.extend_from_slice(t);
-        true
-    }
-
-    /// The template id of `self.key`, defining it if new; None when the table is full.
-    #[inline]
-    fn template(&mut self, s: &mut [Vec<u8>; NSTREAMS]) -> Option<u64> {
-        let kind = self.key[0] as usize;
-        let l = self.last[kind];
-        if let Some(k) = self.keys.get(l as usize)
-            && **k == self.key[..]
-        {
-            return Some(l as u64 + FIRST_TPL);
-        }
-        if let Some(&id) = self.map.get(&self.key[..]) {
-            self.last[kind] = id;
-            return Some(id as u64 + FIRST_TPL);
-        }
-        if self.keys.len() >= MAX_TEMPLATES || self.bytes + self.key.len() > MAX_TEMPLATE_BYTES {
-            return None;
-        }
-        self.bytes += self.key.len();
-        let id = self.keys.len() as u32;
-        self.last[kind] = id;
-        let k: Box<[u8]> = self.key.as_slice().into();
-        self.map.insert(k.clone(), id);
-        self.keys.push(k);
-        put_uv(&mut s[S_TPL], self.key.len() as u64);
-        s[S_TPL].extend_from_slice(&self.key);
-        Some(id as u64 + FIRST_TPL)
-    }
 }
 
 /// A key: `kind n (mode flags seplen sep...){n} taillen tail...`; for corners, mode is the

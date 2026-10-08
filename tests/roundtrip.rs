@@ -45,6 +45,7 @@ fn small_cases() {
         "v 0 0 0\nv 1 0 0\nv 0 1 0\nf -3 -2 -1\nf -3/-1 -2/-1 -1/-1\n",
         "f 0 1 2\nf 01 2 3\nf 1/ 2/ 3/\nf a b c\nf 1/2/3/4\n",
         "l 1 2 3 4 5\n",
+        "v 0 0 0\nf 1 2 3 4 5 6 7 8 9 10 11 12\nf 1/1 2/2 3/3 4/4 5/5 6/6 7/7 8/8 9/9 10/10\n",
         "# comment\ng group\nusemtl m\ns off\no obj\nmtllib x.mtl\n",
         "\r\n\r\n\n\n",
         "v 1 2 3 4 5 6 7 8 9 10\n",

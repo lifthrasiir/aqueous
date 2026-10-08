@@ -14,6 +14,21 @@ pub(crate) struct Style {
     pub(crate) exp3: bool,
 }
 
+/// The styles of a block: per numeric kind, and whether normals are unit vectors.
+#[derive(Clone, Copy, Default)]
+pub struct Styles {
+    pub(crate) kinds: [Style; 4],
+    pub(crate) unit: bool,
+}
+
+/// The styles for block `src` after a block with `prev` (kinds absent from `src`'s sample
+/// keep theirs).
+pub(crate) fn next_styles(prev: &Styles, src: &[u8]) -> Styles {
+    let mut st = *prev;
+    choose_styles(src, &mut st.kinds, &mut st.unit);
+    st
+}
+
 /// Rough cost of coding `t` in `st`: digits of the integer, plus a scale change from the
 /// previous number in its position (`prev`, updated), or a penalty. `dom` is the usual
 /// number of digits after the point of fixed numbers (others cost a template change).
@@ -32,7 +47,7 @@ fn style_cost(t: &[u8], st: Style, dom: u8, prev: &mut i32, tmp: &mut Vec<u8>) -
 /// Chooses the styles from lines spread over a block: `%.Pg` when most numbers of a kind
 /// are that and their fixed formats vary; unit normals when most normals have length 1. A
 /// kind not seen keeps its style (`st`, `unit`: those of the previous block).
-pub(crate) fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
+fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
     const PARTS: usize = 16;
     const PART: usize = 2 << 10;
     // Tokens with their position in the line.
