@@ -49,31 +49,38 @@ type KeyMap = HashMap<Box<[u8]>, u32, BuildHasherDefault<KeyHasher>>;
 pub const S_OPS: usize = 0;
 pub const S_TPL: usize = 1;
 pub const S_TEXT: usize = 2;
-pub const S_V: usize = 3;
-pub const S_VT: usize = 4;
-pub const S_VN: usize = 5;
-pub const S_VP: usize = 6;
-/// Scale changes of `%g` numbers.
-pub const S_SCALE: usize = 7;
-/// Corner index symbols per attribute (v, vt, vn), then their escapes.
-pub const S_FSYM: usize = 8;
-pub const S_FESC: usize = 11;
 /// Block flags (one byte).
-pub const S_HDR: usize = 14;
+pub const S_HDR: usize = 3;
+/// Scale changes of numbers not in a fixed format.
+pub const S_SCALE: usize = 4;
 /// The predicted component of unit normals, and its sign.
-pub const S_NSEL: usize = 15;
+pub const S_NSEL: usize = 5;
+/// Corner index symbols per attribute (v, vt, vn), then their escapes.
+pub const S_FSYM: usize = 6;
+pub const S_FESC: usize = 9;
 /// Per v, vt, vn line: the distance back to an equal line of its kind, or 0.
-pub const S_DUP: usize = 16;
-pub const NSTREAMS: usize = 19;
+pub const S_DUP: usize = 12;
+/// Number residuals, by kind (v, vt, vn, vp) and position (0, 1, 2, the rest).
+pub const S_VAL: usize = 15;
+/// Residuals of the predicted components of unit normals.
+pub const S_UNIT: usize = 31;
+pub const NSTREAMS: usize = 32;
 pub const STREAM_NAMES: [&str; NSTREAMS] = [
-    "ops", "tpl", "text", "v", "vt", "vn", "vp", "scale", "fv", "ft", "fn", "fv-esc", "ft-esc", "fn-esc", "hdr", "nsel",
-    "v-dup", "vt-dup", "vn-dup",
+    "ops", "tpl", "text", "hdr", "scale", "nsel", "fv", "ft", "fn", "fv-esc", "ft-esc", "fn-esc", "v-dup", "vt-dup",
+    "vn-dup", "v0", "v1", "v2", "v3+", "vt0", "vt1", "vt2", "vt3+", "vn0", "vn1", "vn2", "vn3+", "vp0", "vp1", "vp2",
+    "vp3+", "vn-unit",
 ];
+
+/// The residual stream of position `j` of numeric kind `k`.
+#[inline]
+pub fn s_val(k: usize, j: usize) -> usize {
+    S_VAL + k * 4 + j.min(3)
+}
 
 /// Block flag: normals (`vn` lines of three numbers) are coded as unit vectors.
 const H_UNIT: u8 = 1;
 
-/// Template kinds; the numeric ones index their value stream from S_V.
+/// Template kinds (the numeric ones first).
 const K_VP: u8 = 3;
 const K_F: u8 = 4;
 const K_L: u8 = 5;
@@ -700,7 +707,7 @@ impl Encoder {
                 } else {
                     num::rescale(pv, ps, sc)
                 };
-                put_sv(&mut s[S_V + k], v.wrapping_sub(pred));
+                put_sv(&mut s[if Some(j) == sel { S_UNIT } else { s_val(k, j) }], v.wrapping_sub(pred));
                 prev[j] = (v, sc);
             }
             if kind < K_VP {
@@ -921,7 +928,7 @@ impl Decoder {
         let mut tpl = Rd::new(&s[S_TPL]);
         let text = &s[S_TEXT][..];
         let mut tp = 0;
-        let mut vs = [Rd::new(&s[S_V]), Rd::new(&s[S_VT]), Rd::new(&s[S_VN]), Rd::new(&s[S_VP])];
+        let mut vs: [Rd; 17] = std::array::from_fn(|i| Rd::new(&s[S_VAL + i]));
         let mut scale = Rd::new(&s[S_SCALE]);
         let mut fsym = [Rd::new(&s[S_FSYM]), Rd::new(&s[S_FSYM + 1]), Rd::new(&s[S_FSYM + 2])];
         let mut fesc = [Rd::new(&s[S_FESC]), Rd::new(&s[S_FESC + 1]), Rd::new(&s[S_FESC + 2])];
@@ -958,7 +965,6 @@ impl Decoder {
             out.extend_from_slice(KEYWORDS[kind as usize]);
             let mut i = 2;
             if kind < K_F {
-                let r = &mut vs[kind as usize];
                 let prev = &mut self.st.prev[kind as usize];
                 let n = k[1] as usize;
                 // Item positions, then values in coding order, then the text.
@@ -1001,7 +1007,8 @@ impl Decoder {
                     } else {
                         num::rescale(pv, ps, sc)
                     };
-                    prev[j] = (pred.wrapping_add(r.sv()), sc);
+                    let r = if Some(j) == sel { S_UNIT } else { s_val(kind as usize, j) };
+                    prev[j] = (pred.wrapping_add(vs[r - S_VAL].sv()), sc);
                 }
                 if kk < 3 && n <= 3 {
                     self.recent[kk].put(self.st.count[kk] as u64, Entry::new(&prev[..n]));
@@ -1045,8 +1052,8 @@ impl Decoder {
             }
             out.extend_from_slice(&k[i + 1..]);
         }
-        let all = [&ops, &tpl, &vs[0], &vs[1], &vs[2], &vs[3], &scale, &nsel, &hdr];
-        tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).all(|r| r.done())
+        let all = [&ops, &tpl, &scale, &nsel, &hdr];
+        tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).chain(&vs).all(|r| r.done())
     }
 
 }

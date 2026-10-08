@@ -78,10 +78,10 @@ fn main() {
             enc.encode(&src[p..e], &mut s);
             p = e;
             for (i, st) in s.iter().enumerate() {
-                if ![S_V, S_VT, S_VN, S_FESC, S_FESC + 1, S_FESC + 2].contains(&i) || st.is_empty() {
+                if !(i >= S_VAL || (S_FESC..S_FESC + 3).contains(&i)) || st.is_empty() {
                     continue;
                 }
-                let stride = if i >= S_FESC { sf } else if i == S_VT { 2 } else { sv };
+                let stride = if (S_FESC..S_FESC + 3).contains(&i) { sf } else { sv };
                 tot[i][0] += st.len() as f64;
                 tot[i][1] += zstd::bulk::compress(st, 3).unwrap().len() as f64;
                 let (m1, m0, last) = &mut models[i];
