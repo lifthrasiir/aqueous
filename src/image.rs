@@ -63,6 +63,10 @@ fn colors<'a>(cs: &Obj<'a>, objs: &mut Objects<'a>, depth: usize) -> Option<u32>
 
 /// The geometry of an image with dictionary `d`, if it is consistent.
 pub fn geometry<'a>(d: &Obj<'a>, objs: &mut Objects<'a>) -> Option<Geometry> {
+    // After a second filter, the data is not pixels.
+    if d.get(b"Filter").is_some_and(|f| f.names().len() != 1) {
+        return None;
+    }
     let int = |o: Option<&Obj>| o.and_then(Obj::as_int);
     let parms = match d.get(b"DecodeParms") {
         Some(Obj::Array(a)) => a.first().cloned(),

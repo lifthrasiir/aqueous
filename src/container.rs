@@ -105,7 +105,7 @@ pub struct Stats {
     /// Seconds spent finishing the token coder (tables and rANS).
     pub tok_finish: f64,
     /// Output bytes per mode and class (`TOK`: estimated; `FULL`: metadata plus the pool).
-    pub class_out: [[f64; CLASSES.len()]; NMODES],
+    pub class_out: [[f64; CLASSES.len() + 1]; NMODES],
     /// Estimated ns of the choice of modes (the larger of the two ways per item).
     pub predicted: f64,
     /// Every item: mode, class, raw and inflated bytes, seconds.
@@ -178,6 +178,12 @@ pub fn compress_with(file: &[u8], opts: &Options, st: &mut Stats) -> Vec<u8> {
     }
 }
 
+/// Like [`compress_with`] without the safety nets (panics propagate, nothing is verified),
+/// for testing.
+pub fn compress_unchecked(file: &[u8], opts: &Options, st: &mut Stats) -> Vec<u8> {
+    try_compress(file, opts, st).unwrap_or_else(|| stored(file))
+}
+
 fn stored(file: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(file.len() + 6);
     out.extend_from_slice(MAGIC);
@@ -227,12 +233,15 @@ mod cost {
         match c {
             Class::Content => (([4.8e3, 11.2, 0.0], [5.7e3, 13.0, 0.0]), 0.95),
             Class::Font => (([7.1e3, 10.2, 0.05], [7.7e3, 9.6, 0.22]), 0.997),
-            Class::Image => (([6.8e3, 9.0, 0.11], [7.2e3, 11.6, 0.07]), 0.94),
+            Class::Image => (([7.7e3, 8.4, 0.11], [7.1e3, 11.1, 0.07]), 0.945),
             Class::ObjStm => (([5.7e3, 11.9, 0.04], [6.9e3, 12.6, 0.07]), 0.915),
             Class::XRef => (([7.9e3, 15.7, 0.2], [5.2e3, 18.0, 0.22]), 0.955),
-            Class::Data => (([7.1e3, 10.2, 0.05], [7.7e3, 9.6, 0.22]), 0.99),
+            Class::Data => (([5.1e3, 10.9, 0.63], [8.6e3, 8.0, 1.27]), 1.01),
         }
     }
+
+    /// Token mode for images coded as pixels.
+    pub const TOK_PIXELS: (Time, f64) = (([6.0e3, 13.4, 0.10], [7.3e3, 13.4, 0.06]), 0.846);
 
     /// flate-recons' fast representation; the size is the pool's share and the metadata.
     pub fn full(c: Class) -> (Time, f64) {
@@ -263,6 +272,14 @@ mod cost {
             Class::Data => 1.4,
         }
     }
+}
+
+/// The pixel layout of an image without a predictor, for the token coder's pixel model.
+fn pixels(g: &Geometry) -> Option<tok::Pixels> {
+    (g.predictor == 1 && g.bpc == 8 && g.colors <= 4).then(|| tok::Pixels {
+        bpp: g.colors as usize,
+        stride: g.row(),
+    })
 }
 
 /// Whether the file has an `/Encrypt` entry (a trailer's, normally).
@@ -396,7 +413,8 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
                 varint::put(&mut table, (i - j) as u64);
                 (DUP, cov[j], 0)
             }
-            Plan::Flate(c, _, m @ (TOK | FULL), _) => {
+            Plan::Flate(c, _, m @ (TOK | FULL), g) => {
+                let px = if m == TOK { g.as_ref().and_then(pixels) } else { None };
                 let t = std::time::Instant::now();
                 let hdr = 2 * flate::zlib_header(data) as usize;
                 let parsed = flate_recons::fast::inflate::parse(&data[hdr..]);
@@ -407,12 +425,17 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
                         && data[end..end + 4] == flate::adler32(&f.data).to_be_bytes();
                     f.stream.trailing.clear();
                     plain_n = f.data.len();
-                    let mut fields = vec![m, (hdr as u8 / 2) | ((adler as u8) << 1)];
+                    let flags = (hdr as u8 / 2) | ((adler as u8) << 1) | ((px.is_some() as u8) << 2);
+                    let mut fields = vec![m, flags];
                     fields.extend_from_slice(&data[..hdr]);
                     fields.push(c as u8);
                     varint::put(&mut fields, f.data.len() as u64);
+                    if let Some(px) = px {
+                        varint::put(&mut fields, px.bpp as u64);
+                        varint::put(&mut fields, px.stride as u64);
+                    }
                     let n = if m == TOK {
-                        tokens.add(c, &f).ok()?;
+                        tokens.add(c, &f, px).ok()?;
                         0
                     } else {
                         let t = std::time::Instant::now();
@@ -488,7 +511,9 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
         e.0 += 1;
         e.1 += len;
         e.2 += out_len;
+        // Pixel streams count as of no class.
         let ci = match it.plan {
+            Plan::Flate(_, _, TOK, Some(g)) if mode == TOK && pixels(&g).is_some() => 6,
             Plan::Flate(c, ..) => c as usize,
             _ => 6,
         };
@@ -550,7 +575,7 @@ fn choose(items: &mut [Item], budget: f64, opts: &Options) -> f64 {
         match it.plan {
             Plan::Flate(c, plain, _, g) => {
                 if opts.tok {
-                    let (t, r) = cost::tok(c);
+                    let (t, r) = if g.as_ref().and_then(pixels).is_some() { cost::TOK_PIXELS } else { cost::tok(c) };
                     v.push((TOK, len * r, cost::time(&t, len, plain)));
                 }
                 if opts.full {
@@ -710,7 +735,7 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
             }
             m @ (FULL | TOK) => {
                 let flags = t.u8()?;
-                if flags & !3 != 0 {
+                if flags & !7 != 0 || (m == FULL && flags & 4 != 0) {
                     return Err(Error::Corrupt);
                 }
                 if flags & 1 != 0 {
@@ -721,7 +746,15 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
                     return Err(Error::Corrupt);
                 }
                 let n = t.usize(len.saturating_mul(1032))?;
-                (ci, plain_n) = (c, n);
+                (ci, plain_n) = (if flags & 4 != 0 { 6 } else { c }, n);
+                let px = if flags & 4 != 0 {
+                    Some(tok::Pixels {
+                        bpp: t.usize(64)?,
+                        stride: t.usize(1 << 34)?,
+                    })
+                } else {
+                    None
+                };
                 let adler = if m == FULL {
                     let mlen = t.usize(MAX_LEN)?;
                     let plain = &sec[S_POOL + c][take(&sec[S_POOL + c], &mut pool_at[c], n)?];
@@ -731,7 +764,7 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
                     (flags & 2 != 0).then(|| flate::adler32(plain))
                 } else {
                     let dec = tokens.as_mut().ok_or(Error::Corrupt)?;
-                    let (d, plain) = dec.next(CLASSES[c], n)?;
+                    let (d, plain) = dec.next(CLASSES[c], n, px)?;
                     out.extend_from_slice(&d);
                     (flags & 2 != 0).then(|| flate::adler32(&plain))
                 };

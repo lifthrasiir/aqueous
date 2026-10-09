@@ -298,3 +298,18 @@ fn corrupted_containers() {
         }
     }
 }
+
+#[test]
+fn pixel_geometry_mismatch() {
+    // Rows longer than the data (a second filter after FlateDecode, or a wrong width), and
+    // data longer than the image.
+    let enc = default_enc();
+    let small = pixels(16, 4, 1, false, 12);
+    let f = pdf(&[
+        ("/Type /Catalog".into(), None),
+        ("/Subtype /Image /Width 4000 /Height 3000 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Filter [/FlateDecode /DCTDecode]".into(), Some(zlib(&enc, &small))),
+        ("/Subtype /Image /Width 9000 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /FlateDecode".into(), Some(zlib(&enc, &small))),
+        ("/Subtype /Image /Width 3 /Height 2 /BitsPerComponent 8 /ColorSpace /DeviceCMYK /Filter /FlateDecode".into(), Some(zlib(&enc, &pixels(64, 64, 4, false, 13)))),
+    ]);
+    check("pixel geometry", &f);
+}

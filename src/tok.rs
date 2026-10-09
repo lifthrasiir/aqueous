@@ -125,8 +125,76 @@ fn bucket_map(c: Class) -> &'static [u8; 256] {
     }
 }
 
-/// Literal context resolutions: every byte, 32 buckets, 8 buckets, one.
+/// Literal context resolutions: every byte, 32 buckets, 8 buckets, one (pixels: channel
+/// and activity, activity, channel, one).
 const RESOLUTIONS: usize = 4;
+
+/// Table sets: one per class, and one for images coded as pixels.
+const PIXEL: usize = CLASSES.len();
+const SLOTS: usize = PIXEL + 1;
+/// Activity buckets of the pixel contexts.
+const ACT: usize = 12;
+/// Pixel contexts: whether a match came just before × channel (capped at 3) × activity.
+const PIX_CTX: usize = 8 * ACT;
+
+/// How an image's inflated data is laid out, for the pixel model: rows of `stride` bytes of
+/// `bpp`-byte pixels, no filter bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Pixels {
+    pub bpp: usize,
+    pub stride: usize,
+}
+
+/// MED's prediction for the byte at `p` (column `col`) from left `a`, up `b` and up-left
+/// `c` (zero outside the image), and the activity `|a - c| + |b - c|`.
+#[inline(always)]
+fn med(d: &[u8], p: usize, col: usize, px: Pixels) -> (i32, u32) {
+    let left = col >= px.bpp;
+    let up = p >= px.stride;
+    let a = if left { d[p - px.bpp] } else { 0 } as i32;
+    let b = if up { d[p - px.stride] } else { 0 } as i32;
+    let c = if left && up { d[p - px.stride - px.bpp] } else { 0 } as i32;
+    let pred = if c >= a.max(b) {
+        a.min(b)
+    } else if c <= a.min(b) {
+        a.max(b)
+    } else {
+        a + b - c
+    };
+    (pred, ((a - c).abs() + (b - c).abs()) as u32)
+}
+
+/// The pixel model's prediction and context for the byte at `p`: MED, plus for every
+/// channel but the first the previous channel's residual (inter-channel decorrelation); the
+/// context is the channel (capped) and the activity.
+#[inline(always)]
+fn pixel_ctx(d: &[u8], p: usize, col: usize, ch: usize, after: bool, px: Pixels) -> (u8, usize) {
+    let (mut pred, act) = med(d, p, col, px);
+    if ch > 0 {
+        pred += d[p - 1] as i32 - med(d, p - 1, col - 1, px).0;
+    }
+    let bucket = ((32 - act.leading_zeros()) as usize).min(ACT - 1);
+    (pred as u8, ((after as usize) * 4 + ch.min(3)) * ACT + bucket)
+}
+
+/// The literal table of fine context `t` of slot `slot` at resolution `res`.
+#[inline(always)]
+fn coarse(slot: usize, res: u8, t: usize) -> usize {
+    if slot == PIXEL {
+        match res {
+            0 => t,
+            1 => t % ACT,
+            2 => t / ACT,
+            _ => 0,
+        }
+    } else {
+        lit_ctx(bucket_map(CLASSES[slot]), res, t as u8)
+    }
+}
+
+fn slot_tables(slot: usize, res: u8) -> usize {
+    if slot == PIXEL { [PIX_CTX, ACT, 8, 1][res as usize] } else { res_tables(res) }
+}
 
 /// The literal table (0..) of byte `b` at resolution `res`.
 #[inline(always)]
@@ -190,10 +258,10 @@ pub struct Encoder {
     layout: BitW,
     headers: BitWriter,
     recipe: Recipe,
-    /// Literal and distance counts per class at the finest resolution (allocated on use).
+    /// Literal and distance counts per slot at the finest resolution (allocated on use).
     counts: Vec<Vec<u32>>,
-    /// Raw bits per class.
-    raw_bits: [u64; CLASSES.len()],
+    /// Raw bits per slot.
+    raw_bits: [u64; SLOTS],
 }
 
 impl Default for Encoder {
@@ -204,19 +272,20 @@ impl Default for Encoder {
             layout: BitW::default(),
             headers: BitWriter::new(),
             recipe: Recipe::default(),
-            counts: vec![vec![]; CLASSES.len()],
-            raw_bits: [0; CLASSES.len()],
+            counts: vec![vec![]; SLOTS],
+            raw_bits: [0; SLOTS],
         }
     }
 }
 
 impl Encoder {
-    /// Adds a parsed stream (with no trailing bytes) of class `c`.
-    pub fn add(&mut self, c: Class, f: &Flat) -> Result<()> {
-        if !f.stream.trailing.is_empty() {
+    /// Adds a parsed stream (with no trailing bytes) of class `c`, an image coded as pixels
+    /// if `px` is given.
+    pub fn add(&mut self, c: Class, f: &Flat, px: Option<Pixels>) -> Result<()> {
+        if !f.stream.trailing.is_empty() || px.is_some_and(|p| p.bpp == 0 || p.stride < p.bpp) {
             return Err(Error::Corrupt);
         }
-        let ci = c as usize;
+        let ci = if px.is_some() { PIXEL } else { c as usize };
         if self.counts[ci].is_empty() {
             self.counts[ci] = vec![0; PER_CLASS * STRIDE];
         }
@@ -276,29 +345,44 @@ impl Encoder {
         let mut p = 0usize;
         let mut skips = f.skips.iter().peekable();
         self.syms.reserve(f.tokens.len() + 2 * f.skips.len());
-        let lit = |p: usize, counts: &mut Vec<u32>, syms: &mut Vec<(u16, u16)>| {
-            let prev = if p > 0 { d[p - 1] } else { 0 };
-            let t = prev as usize;
-            counts[t * STRIDE + d[p] as usize] += 1;
-            syms.push((base + t as u16, d[p] as u16));
+        // The fine literal context at `p`, and the byte the literal there is coded against.
+        // `after`: a match came just before (pixels only).
+        let ctx = |p: usize, after: bool| -> (usize, u8) {
+            match px {
+                None => (if p > 0 { d[p - 1] } else { 0 } as usize, 0),
+                Some(px) => {
+                    let col = p % px.stride;
+                    let (pred, t) = pixel_ctx(d, p, col, col % px.bpp, after, px);
+                    (t, pred)
+                }
+            }
+        };
+        let mut after = false;
+        let lit = |p: usize, after: &mut bool, counts: &mut Vec<u32>, syms: &mut Vec<(u16, u16)>| {
+            let (t, pred) = ctx(p, *after);
+            *after = false;
+            let v = d[p].wrapping_sub(pred);
+            counts[t * STRIDE + v as usize] += 1;
+            syms.push((base + t as u16, v as u16));
         };
         for (k, t) in f.tokens.iter().enumerate() {
             while let Some(&&(at, len)) = skips.peek()
                 && at == k
             {
                 for q in p..p + len {
-                    lit(q, counts, &mut self.syms);
+                    lit(q, &mut after, counts, &mut self.syms);
                 }
                 p += len;
                 skips.next();
             }
             match *t {
                 Token::Lit(_) => {
-                    lit(p, counts, &mut self.syms);
+                    lit(p, &mut after, counts, &mut self.syms);
                     p += 1;
                 }
                 Token::Match { len, dist, .. } => {
-                    let prev = if p > 0 { d[p - 1] } else { 0 } as usize;
+                    let prev = ctx(p, after).0;
+                    after = true;
                     let lc = LEN_CODE[len as usize] as usize;
                     counts[prev * STRIDE + 256 + lc] += 1;
                     self.syms.push((base + prev as u16, (256 + lc) as u16));
@@ -315,7 +399,7 @@ impl Encoder {
         }
         for &(_, len) in skips {
             for q in p..p + len {
-                lit(q, counts, &mut self.syms);
+                lit(q, &mut after, counts, &mut self.syms);
             }
             p += len;
         }
@@ -324,13 +408,14 @@ impl Encoder {
     }
 
     /// The coded streams: tables, rANS, raw bits, layout, headers (each with its length);
-    /// and the estimated bytes of each class (tables, symbols and raw bits).
-    pub fn finish(self) -> (Vec<u8>, [f64; CLASSES.len()]) {
-        let mut sizes = [0f64; CLASSES.len()];
+    /// and the estimated bytes of each class, then of the pixel streams (tables, symbols
+    /// and raw bits).
+    pub fn finish(self) -> (Vec<u8>, [f64; CLASSES.len() + 1]) {
+        let mut sizes = [0f64; SLOTS];
         let mut tw = BitW::default();
         // Per class: unused, or the literal resolution, then the tables in use.
         // Fine table -> table actually coded.
-        let mut remap = vec![u16::MAX; CLASSES.len() * PER_CLASS];
+        let mut remap = vec![u16::MAX; SLOTS * PER_CLASS];
         let mut freqs: Vec<Vec<u32>> = vec![];
         for (ci, counts) in self.counts.iter().enumerate() {
             if counts.is_empty() {
@@ -338,12 +423,12 @@ impl Encoder {
                 continue;
             }
             tw.bits(1, 1);
-            let map = bucket_map(CLASSES[ci]);
+            let nfine = if ci == PIXEL { PIX_CTX } else { LIT_CTX };
             // The cheapest resolution, data plus (estimated) tables.
             let lit_counts = |res: u8| -> Vec<Vec<u32>> {
-                let mut v = vec![vec![0u32; LIT_ALPHA]; res_tables(res)];
-                for b in 0..LIT_CTX {
-                    let t = lit_ctx(map, res, b as u8);
+                let mut v = vec![vec![0u32; LIT_ALPHA]; slot_tables(ci, res)];
+                for b in 0..nfine {
+                    let t = coarse(ci, res, b);
                     for s in 0..LIT_ALPHA {
                         v[t][s] += counts[b * STRIDE + s];
                     }
@@ -380,8 +465,8 @@ impl Encoder {
                 })
             };
             let lit_ids: Vec<Option<u16>> = lits.iter().map(|c| code(c, &mut tw)).collect();
-            for b in 0..LIT_CTX {
-                if let Some(id) = lit_ids[lit_ctx(map, res, b as u8)] {
+            for b in 0..nfine {
+                if let Some(id) = lit_ids[coarse(ci, res, b)] {
                     remap[ci * PER_CLASS + b] = id;
                 }
             }
@@ -412,10 +497,169 @@ impl Encoder {
     }
 }
 
+/// How literals are coded: against what, in which table, and how the position moves.
+trait LitModel {
+    /// The byte the literal at `o` is coded against, and its fine context.
+    fn ctx(&self, d: &[u8], o: usize) -> (u8, usize);
+    fn lit(&mut self, b: u8);
+    /// After a match of `len` bytes, ending at `o`.
+    fn skip(&mut self, d: &[u8], o: usize, len: usize);
+}
+
+/// Text and binary data: the context is the byte before.
+struct Prev(u8);
+
+impl LitModel for Prev {
+    #[inline(always)]
+    fn ctx(&self, _: &[u8], _: usize) -> (u8, usize) {
+        (0, self.0 as usize)
+    }
+    #[inline(always)]
+    fn lit(&mut self, b: u8) {
+        self.0 = b;
+    }
+    #[inline(always)]
+    fn skip(&mut self, d: &[u8], o: usize, _: usize) {
+        self.0 = d[o - 1];
+    }
+}
+
+/// Pixels: the residual against MED, by channel and activity.
+struct Pix {
+    px: Pixels,
+    col: usize,
+    ch: usize,
+    after: bool,
+}
+
+impl LitModel for Pix {
+    #[inline(always)]
+    fn ctx(&self, d: &[u8], o: usize) -> (u8, usize) {
+        pixel_ctx(d, o, self.col, self.ch, self.after, self.px)
+    }
+    #[inline(always)]
+    fn lit(&mut self, _: u8) {
+        self.after = false;
+        self.col += 1;
+        if self.col == self.px.stride {
+            self.col = 0;
+        }
+        self.ch += 1;
+        if self.ch == self.px.bpp {
+            self.ch = 0;
+        }
+    }
+    #[inline(always)]
+    fn skip(&mut self, _: &[u8], _: usize, len: usize) {
+        self.after = true;
+        self.col = (self.col + len) % self.px.stride;
+        self.ch = (self.ch + len) % self.px.bpp;
+    }
+}
+
+/// One stream's decoding state.
+struct Cursor<'s, 'a> {
+    tb: &'s Tables,
+    cx: &'s [u16; PER_CLASS],
+    dec: &'s mut Decoder<'a>,
+    raw: &'s mut BitR<'a>,
+    data: &'s mut Vec<u8>,
+    tokens: &'s mut Vec<Token>,
+    freqs: &'s mut Vec<([u32; 288], [u32; 32])>,
+    o: usize,
+    plain: usize,
+}
+
+impl Cursor<'_, '_> {
+    /// Decodes the blocks (stored length, or token count) into data and tokens, with the
+    /// blocks' symbol frequencies. `tokens` has room for all of them.
+    #[inline(always)]
+    fn blocks<M: LitModel>(&mut self, spans: &[(bool, usize)], m: &mut M) -> Result<()> {
+        let (tb, cx, plain) = (self.tb, self.cx, self.plain);
+        let mut dec = *self.dec;
+        let mut o = self.o;
+        let data = &mut self.data[..];
+        for &(stored, n) in spans {
+            if stored {
+                if o + n > plain {
+                    return Err(Error::Corrupt);
+                }
+                for _ in 0..n {
+                    let (pred, t) = m.ctx(data, o);
+                    let s = dec.get(tb, cx[t] as usize);
+                    if s >= 256 {
+                        return Err(Error::Corrupt);
+                    }
+                    let b = (s as u8).wrapping_add(pred);
+                    data[o] = b;
+                    m.lit(b);
+                    o += 1;
+                }
+                self.freqs.push(([0u32; 288], [0u32; 32]));
+                continue;
+            }
+            let mut lf = [0u32; 288];
+            let mut df = [0u32; 32];
+            lf[256] = 1;
+            // The tokens go straight into the buffer (counted against its capacity).
+            let tp = self.tokens.as_mut_ptr();
+            let mut ti = self.tokens.len();
+            if ti + n > self.tokens.capacity() {
+                return Err(Error::Corrupt);
+            }
+            for _ in 0..n {
+                let (pred, t) = m.ctx(data, o);
+                let s = dec.get(tb, cx[t] as usize) as usize;
+                let tok = if s < 256 {
+                    if o >= plain {
+                        return Err(Error::Corrupt);
+                    }
+                    let b = (s as u8).wrapping_add(pred);
+                    data[o] = b;
+                    o += 1;
+                    lf[b as usize] += 1;
+                    m.lit(b);
+                    Token::Lit(b)
+                } else {
+                    let lc = s - 256;
+                    let len = LEN_BASE[lc] as usize + self.raw.bits(LEN_EXTRA[lc] as u32) as usize;
+                    let dc = dec.get(tb, cx[LIT_CTX + lc.min(DIST_CTX - 1)] as usize) as usize;
+                    if dc >= DIST_ALPHA || len > 258 {
+                        return Err(Error::Corrupt);
+                    }
+                    let dist = DIST_BASE[dc] as usize + self.raw.bits(DIST_EXTRA[dc] as u32) as usize;
+                    if dist > o || o + len > plain {
+                        return Err(Error::Corrupt);
+                    }
+                    copy_match(data, o, dist, len);
+                    o += len;
+                    m.skip(data, o, len);
+                    lf[257 + lc] += 1;
+                    df[dc] += 1;
+                    Token::Match {
+                        len: len as u16,
+                        dist: dist as u16,
+                        alt258: false,
+                    }
+                };
+                // SAFETY: `ti` stays below the capacity (checked before the loop).
+                unsafe { tp.add(ti).write(tok) };
+                ti += 1;
+            }
+            // SAFETY: the first `ti` tokens were written.
+            unsafe { self.tokens.set_len(ti) };
+            self.freqs.push((lf, df));
+        }
+        *self.dec = dec;
+        self.o = o;
+        Ok(())
+    }
+}
+
 /// The decoder of a file's token streams, in the order they were added.
 pub struct DecoderState<'a> {
     tables: Tables,
-    /// Per class: literal table of each byte before, then the distance tables.
+    /// Per slot: the literal table of each fine context, then the distance tables.
     ctx: Vec<[u16; PER_CLASS]>,
     dec: Decoder<'a>,
     raw: BitR<'a>,
@@ -434,7 +678,7 @@ impl<'a> DecoderState<'a> {
         let parts: Vec<&[u8]> = lens.iter().map(|&n| r.bytes(n)).collect::<Result<_>>()?;
         let mut tr = BitR::new(parts[0]);
         let mut freqs: Vec<Vec<u32>> = vec![];
-        let mut ctx = vec![[0u16; PER_CLASS]; CLASSES.len()];
+        let mut ctx = vec![[0u16; PER_CLASS]; SLOTS];
         let mut read = |tr: &mut BitR, n: usize| -> Result<Option<u16>> {
             if tr.bits(1) == 0 {
                 return Ok(None);
@@ -450,10 +694,10 @@ impl<'a> DecoderState<'a> {
                 continue;
             }
             let res = tr.bits(2) as u8;
-            let map = bucket_map(CLASSES[ci]);
-            let ids: Vec<Option<u16>> = (0..res_tables(res)).map(|_| read(&mut tr, LIT_ALPHA)).collect::<Result<_>>()?;
-            for b in 0..LIT_CTX {
-                cx[b] = ids[lit_ctx(map, res, b as u8)].unwrap_or(u16::MAX);
+            let ids: Vec<Option<u16>> = (0..slot_tables(ci, res)).map(|_| read(&mut tr, LIT_ALPHA)).collect::<Result<_>>()?;
+            let nfine = if ci == PIXEL { PIX_CTX } else { LIT_CTX };
+            for (b, t) in cx.iter_mut().enumerate().take(nfine) {
+                *t = ids[coarse(ci, res, b)].unwrap_or(u16::MAX);
             }
             for k in 0..DIST_CTX {
                 cx[LIT_CTX + k] = read(&mut tr, DIST_ALPHA)?.unwrap_or(u16::MAX);
@@ -485,9 +729,12 @@ impl<'a> DecoderState<'a> {
         })
     }
 
-    /// Rebuilds the next stream (class `c`, `plain` bytes of data): returns the DEFLATE
-    /// bytes and the data.
-    pub fn next(&mut self, c: Class, plain: usize) -> Result<(Vec<u8>, Vec<u8>)> {
+    /// Rebuilds the next stream (class `c`, `plain` bytes of data, pixels as given to
+    /// [`Encoder::add`]): returns the DEFLATE bytes and the data.
+    pub fn next(&mut self, c: Class, plain: usize, px: Option<Pixels>) -> Result<(Vec<u8>, Vec<u8>)> {
+        if px.is_some_and(|p| p.bpp == 0 || p.stride < p.bpp) {
+            return Err(Error::Corrupt);
+        }
         let l = &mut self.layout;
         let nblocks = l.gamma()? as usize;
         if nblocks > plain + 1 {
@@ -544,79 +791,28 @@ impl<'a> DecoderState<'a> {
             return Err(Error::Corrupt);
         }
 
-        let cx = &self.ctx[c as usize];
-        let tb = &self.tables;
-        let mut dec = self.dec;
-        let raw = &mut self.raw;
+        let slot = if px.is_some() { PIXEL } else { c as usize };
         let mut data = vec![0u8; plain + SLACK];
         let mut tokens: Vec<Token> = Vec::with_capacity(ntok);
         let mut freqs = Vec::with_capacity(nblocks);
-        let mut o = 0usize;
-        for &(stored, n) in &spans {
-            if stored {
-                if o + n > plain {
-                    return Err(Error::Corrupt);
-                }
-                for _ in 0..n {
-                    let prev = if o > 0 { data[o - 1] } else { 0 };
-                    let s = dec.get(tb, cx[prev as usize] as usize);
-                    if s >= 256 {
-                        return Err(Error::Corrupt);
-                    }
-                    data[o] = s as u8;
-                    o += 1;
-                }
-                freqs.push(([0u32; 288], [0u32; 32]));
-                continue;
-            }
-            let mut lf = [0u32; 288];
-            let mut df = [0u32; 32];
-            lf[256] = 1;
-            // The tokens go straight into the buffer (counted against `ntok` above).
-            let tp = tokens.as_mut_ptr();
-            let mut ti = tokens.len();
-            let mut prev = if o > 0 { data[o - 1] } else { 0 };
-            for _ in 0..n {
-                let s = dec.get(tb, cx[prev as usize] as usize) as usize;
-                let tok = if s < 256 {
-                    if o >= plain {
-                        return Err(Error::Corrupt);
-                    }
-                    data[o] = s as u8;
-                    o += 1;
-                    lf[s] += 1;
-                    prev = s as u8;
-                    Token::Lit(s as u8)
-                } else {
-                    let lc = s - 256;
-                    let len = LEN_BASE[lc] as usize + raw.bits(LEN_EXTRA[lc] as u32) as usize;
-                    let dc = dec.get(tb, cx[LIT_CTX + lc.min(DIST_CTX - 1)] as usize) as usize;
-                    if dc >= DIST_ALPHA || len > 258 {
-                        return Err(Error::Corrupt);
-                    }
-                    let dist = DIST_BASE[dc] as usize + raw.bits(DIST_EXTRA[dc] as u32) as usize;
-                    if dist > o || o + len > plain {
-                        return Err(Error::Corrupt);
-                    }
-                    copy_match(&mut data, o, dist, len);
-                    o += len;
-                    prev = data[o - 1];
-                    lf[257 + lc] += 1;
-                    df[dc] += 1;
-                    Token::Match {
-                        len: len as u16,
-                        dist: dist as u16,
-                        alt258: false,
-                    }
-                };
-                // SAFETY: the blocks' token counts sum to `ntok`, the capacity.
-                unsafe { tp.add(ti).write(tok) };
-                ti += 1;
-            }
-            // SAFETY: the first `ti` tokens were written.
-            unsafe { tokens.set_len(ti) };
-            freqs.push((lf, df));
+        let mut dec = self.dec;
+        let mut cur = Cursor {
+            tb: &self.tables,
+            cx: &self.ctx[slot],
+            dec: &mut dec,
+            raw: &mut self.raw,
+            data: &mut data,
+            tokens: &mut tokens,
+            freqs: &mut freqs,
+            o: 0,
+            plain,
+        };
+        match px {
+            None => cur.blocks(&spans, &mut Prev(0))?,
+            Some(px) => cur.blocks(&spans, &mut Pix { px, col: 0, ch: 0, after: false })?,
         }
+        let o = cur.o;
+        let raw = &mut self.raw;
         self.dec = dec;
         if o != plain || raw.overrun() {
             return Err(Error::Corrupt);
@@ -687,12 +883,15 @@ mod tests {
         let raw = flate_zoo_like(&text);
         let f = flate_recons::fast::inflate::parse(&raw).unwrap();
         let mut e = Encoder::default();
-        e.add(Class::Content, &f).unwrap();
-        e.add(Class::Font, &f).unwrap();
+        e.add(Class::Content, &f, None).unwrap();
+        e.add(Class::Font, &f, None).unwrap();
+        let px = Some(Pixels { bpp: 3, stride: 81 });
+        e.add(Class::Image, &f, px).unwrap();
         let out = e.finish().0;
         let mut d = DecoderState::new(&out).unwrap();
-        assert_eq!(d.next(Class::Content, text.len()).unwrap().0, raw);
-        assert_eq!(d.next(Class::Font, text.len()).unwrap().0, raw);
+        assert_eq!(d.next(Class::Content, text.len(), None).unwrap().0, raw);
+        assert_eq!(d.next(Class::Font, text.len(), None).unwrap().0, raw);
+        assert_eq!(d.next(Class::Image, text.len(), px).unwrap().0, raw);
         assert!(d.finished());
     }
 

@@ -24,15 +24,16 @@ fn cpu() -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: pdfr c [-s MB/S] [-l LEVEL] [-V] [-T] [-F] IN OUT | pdfr d IN OUT\n       pdfr bench [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-v] FILE..."
+        "usage: pdfr c [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] IN OUT | pdfr d IN OUT\n       pdfr bench [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...\n       pdfr fuzz [-n ROUNDS] [-r SEED] FILE..."
     );
     std::process::exit(2);
 }
 
 /// Options from the flags in `args`; the rest is returned.
-fn options(args: &[String]) -> (Options, usize, bool, Vec<String>) {
+fn options(args: &[String]) -> (Options, usize, bool, u64, Vec<String>) {
     let mut o = Options::default();
     let (mut iters, mut verbose, mut rest) = (1, false, vec![]);
+    let mut seed = 1u64;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().unwrap_or_else(|| usage()).clone();
@@ -45,10 +46,11 @@ fn options(args: &[String]) -> (Options, usize, bool, Vec<String>) {
             "-F" => o.full = false,
             "-P" => o.png = false,
             "-v" => verbose = true,
+            "-r" => seed = val().parse().unwrap_or_else(|_| usage()),
             _ => rest.push(a.clone()),
         }
     }
-    (o, iters, verbose, rest)
+    (o, iters, verbose, seed, rest)
 }
 
 fn read(p: &str) -> Vec<u8> {
@@ -60,7 +62,7 @@ fn read(p: &str) -> Vec<u8> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (opts, iters, verbose, rest) = options(args.get(1..).unwrap_or(&[]));
+    let (opts, iters, verbose, seed, rest) = options(args.get(1..).unwrap_or(&[]));
     match args.first().map(String::as_str) {
         Some("c") if rest.len() == 2 => {
             let out = container::compress_with(&read(&rest[0]), &opts, &mut Stats::default());
@@ -74,6 +76,7 @@ fn main() {
             }
         },
         Some("bench") if !rest.is_empty() => bench(&opts, iters, verbose, &rest),
+        Some("fuzz") if !rest.is_empty() => fuzz(iters.max(1), seed, &rest),
         _ => usage(),
     }
 }
@@ -126,7 +129,7 @@ fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
         tot.predicted += st.predicted;
         dtot.setup += ds.setup;
         for m in 0..container::NMODES {
-            for c in 0..6 {
+            for c in 0..7 {
                 tot.class_out[m][c] += st.class_out[m][c];
             }
         }
@@ -176,7 +179,7 @@ fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
         tot.skeleton.0, tot.skeleton.1, tot.pools, tot.meta, tot.tok, tot.failed
     );
     println!("  mode/class: items, raw, inflated; ns per raw byte compressing, decompressing; output / raw");
-    let cname = |c: usize| if c < 6 { pdf_recons::kind::CLASSES[c].name() } else { "-" };
+    let cname = |m: usize, c: usize| if c < 6 { pdf_recons::kind::CLASSES[c].name() } else if m == container::TOK as usize { "pixels" } else { "-" };
     for m in 0..container::NMODES {
         for c in 0..7 {
             let (a, b) = (tot.cost[m][c], dtot.cost[m][c]);
@@ -184,13 +187,13 @@ fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
                 println!(
                     "    {:<5} {:<8} {:>7} {:>12} {:>13} {:>6.2} {:>6.2} {:>6.3}",
                     container::MODES[m],
-                    cname(c),
+                    cname(m, c),
                     a.n,
                     a.raw,
                     a.plain,
                     a.secs * 1e9 / a.raw as f64,
                     b.secs * 1e9 / b.raw.max(1) as f64,
-                    if c < 6 && (m == 2 || m >= 4) { tot.class_out[m][c] / a.raw as f64 } else { f64::NAN }
+                    if m == 2 || m >= 4 { tot.class_out[m][c] / a.raw as f64 } else { f64::NAN }
                 );
             }
         }
@@ -202,4 +205,93 @@ fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
         "  compress phases (s, last run): plan {:.3}, parse {:.3}, flate-recons {:.3}, jpeg-recons {:.3}, sections {:.3}",
         t[0], t[1], t[2], t[3], t[4]
     );
+}
+
+/// Mutated files must round-trip under every set of modes (with the panic net off), and
+/// corrupted containers must fail cleanly. Failing inputs are saved as `fuzz_failure_*`.
+fn fuzz(rounds: usize, seed: u64, files: &[String]) {
+    let mut x = seed.wrapping_mul(0x9e3779b97f4a7c15) | 1;
+    let mut rnd = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let base = Options::default();
+    let modes = [
+        Options { speed: f64::INFINITY, ..base.clone() },
+        Options { speed: f64::INFINITY, full: false, png: false, ..base.clone() },
+        Options { speed: f64::INFINITY, tok: false, png: false, ..base.clone() },
+        base,
+    ];
+    let inputs: Vec<Vec<u8>> = files.iter().map(|f| read(f)).collect();
+    let mut failures = 0;
+    for round in 0..rounds {
+        let mut f = inputs[rnd() as usize % inputs.len()].clone();
+        if f.is_empty() {
+            continue;
+        }
+        for _ in 0..1 + rnd() % 8 {
+            let n = f.len().max(1);
+            let at = rnd() as usize % n;
+            match rnd() % 6 {
+                0 => f[at.min(n - 1)] ^= 1 << (rnd() % 8),
+                1 => f.truncate(at),
+                2 => {
+                    let k = (rnd() % 64) as usize;
+                    f.drain(at..(at + k).min(f.len()));
+                }
+                3 => {
+                    let junk: Vec<u8> = (0..rnd() % 64).map(|_| rnd() as u8).collect();
+                    f.splice(at..at, junk);
+                }
+                4 => {
+                    // Copy a piece of the file elsewhere (repeated streams, odd structure).
+                    let k = (rnd() % 4096) as usize;
+                    let piece = f[at..(at + k).min(f.len())].to_vec();
+                    let to = rnd() as usize % f.len().max(1);
+                    f.splice(to..to, piece);
+                }
+                _ => {
+                    if let Some(i) = memchr::memmem::find(&f[at..], b"stream") {
+                        let p = at + i + 7 + (rnd() % 64) as usize;
+                        if p < f.len() {
+                            f[p] = rnd() as u8;
+                        }
+                    }
+                }
+            }
+            if f.is_empty() {
+                break;
+            }
+        }
+        for o in &modes {
+            let ok = std::panic::catch_unwind(|| {
+                let c = container::compress_unchecked(&f, o, &mut Stats::default());
+                let back = container::decompress(&c);
+                // A corrupted container must not panic either.
+                let mut m = c.clone();
+                if !m.is_empty() {
+                    let k = (m.len() * 7919 + 13) % m.len();
+                    m[k] ^= 0x10;
+                    let _ = container::decompress(&m);
+                }
+                back.as_deref() == Ok(&f[..])
+            });
+            if !matches!(ok, Ok(true)) {
+                failures += 1;
+                let path = format!("fuzz_failure_{round}.pdf");
+                std::fs::write(&path, &f).unwrap();
+                println!("round {round}: {} ({:?}), saved {path}", if ok.is_err() { "panic" } else { "mismatch" }, o);
+                break;
+            }
+        }
+        if (round + 1) % 100 == 0 {
+            println!("{} rounds, {failures} failures", round + 1);
+        }
+    }
+    println!("{rounds} rounds, {failures} failures");
+    if failures > 0 {
+        std::process::exit(1);
+    }
 }
