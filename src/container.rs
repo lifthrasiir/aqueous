@@ -206,7 +206,8 @@ enum Plan {
     /// A FlateDecode stream: its class, estimated inflated size, the mode chosen, and for
     /// images their geometry.
     Flate(Class, f64, u8, Option<Geometry>),
-    Jpeg(bool),
+    /// A JPEG: whether it is progressive, whether to code it.
+    Jpeg(bool, bool),
 }
 
 /// Costs on an Apple M4 for the time budget, fitted to the per-item times of the corpus
@@ -226,6 +227,8 @@ mod cost {
 
     pub const JPEG: Time = ([255e3, 15.3, 0.0], [126e3, 15.1, 0.0]);
     pub const JPEG_RATIO: f64 = 0.80;
+    pub const JPEG_PROG: Time = ([404e3, 28.8, 0.0], [93e3, 26.8, 0.0]);
+    pub const JPEG_PROG_RATIO: f64 = 0.89;
     pub const PNG: Time = ([234e3, 13.9, 0.0], [215e3, 13.9, 0.0]);
     pub const PNG_RATIO: f64 = 0.80;
 
@@ -365,7 +368,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
                 };
                 Plan::Flate(c, plain, RAW, g)
             }
-            (None, Filter::Dct) => Plan::Jpeg(false),
+            (None, Filter::Dct) => Plan::Jpeg(image::jpeg_progressive(data).unwrap_or(false), false),
             _ => Plan::Raw,
         };
         covered += data.len();
@@ -484,7 +487,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
                     (RAW, it.len, it.len)
                 }
             }
-            Plan::Jpeg(true) => {
+            Plan::Jpeg(_, true) => {
                 let t = std::time::Instant::now();
                 let p = jpeg_recons::container::compress(data);
                 st.times[3] += t.elapsed().as_secs_f64();
@@ -511,8 +514,9 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
         e.0 += 1;
         e.1 += len;
         e.2 += out_len;
-        // Pixel streams count as of no class.
+        // Pixel streams count as of no class, progressive JPEGs as images.
         let ci = match it.plan {
+            Plan::Jpeg(true, _) => Class::Image as usize,
             Plan::Flate(_, _, TOK, Some(g)) if mode == TOK && pixels(&g).is_some() => 6,
             Plan::Flate(c, ..) => c as usize,
             _ => 6,
@@ -588,7 +592,10 @@ fn choose(items: &mut [Item], budget: f64, opts: &Options) -> f64 {
                     v.push((PNG, len * cost::PNG_RATIO, cost::time(&cost::PNG, len, plain)));
                 }
             }
-            Plan::Jpeg(_) => v.push((JPEG, len * cost::JPEG_RATIO, cost::time(&cost::JPEG, len, 0.0))),
+            Plan::Jpeg(prog, _) => {
+                let (t, r) = if prog { (cost::JPEG_PROG, cost::JPEG_PROG_RATIO) } else { (cost::JPEG, cost::JPEG_RATIO) };
+                v.push((JPEG, len * r, cost::time(&t, len, 0.0)))
+            }
             _ => continue,
         }
         opts_of.push((i, v));
@@ -620,7 +627,7 @@ fn choose(items: &mut [Item], budget: f64, opts: &Options) -> f64 {
         spent += v.iter().find(|o| o.0 == m).map_or(0.0, |o| o.2);
         items[*i].plan = match (items[*i].plan, m) {
             (Plan::Flate(c, p, _, g), m) => Plan::Flate(c, p, m, g),
-            (Plan::Jpeg(_), m) => Plan::Jpeg(m == JPEG),
+            (Plan::Jpeg(prog, _), m) => Plan::Jpeg(prog, m == JPEG),
             (p, _) => p,
         };
     }

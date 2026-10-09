@@ -1,0 +1,208 @@
+# pdf-recons (`pdfr`)
+
+Lossless PDF recompression: a PDF file is stored smaller, and restored bit for bit. Meant as
+a component of a general-purpose compressor, so speed comes first: the target is 100 MB/s
+of PDF file single-threaded on an Apple M4, both ways. Compression ratio is pursued only
+within that time. DEFLATE streams go through [flate-recons](../flate-recons) (parsing,
+writing, Huffman header coding, its fast representation), images through
+[png-recons](../png-recons) and [jpeg-recons](../jpeg-recons).
+
+```sh
+cargo build --release
+pdfr c [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] in.pdf out.pdfr   # compress
+pdfr d out.pdfr back.pdf                                           # decompress
+pdfr bench [-n ITERS] [-s MB/S] [-v] ... FILE...   # round trip, ratio, CPU-time speed, per-mode costs
+pdfr fuzz [-n ROUNDS] [-r SEED] FILE...            # mutated files and containers
+```
+
+```rust
+let packed = pdf_recons::compress(&pdf);              // never fails: stores what it cannot code
+assert_eq!(pdf_recons::decompress(&packed)?, pdf);    // checked against an xxh3 of the original
+```
+
+`-s` is the speed target (`inf`: no limit), `-V` verifies by decompressing (and on a mismatch
+codes the file again without models), `-T`/`-F`/`-P` turn off the token, full and PNG modes.
+Any input is accepted; what is not a PDF goes through as skeleton.
+
+## Results
+
+Apple M4, one thread, process CPU time, best of 2 (`pdfr bench -n 2`); MB/s of PDF file,
+both ways; output size / input size. Every file round-trips. Generic compressors on each
+file, summed (`scripts/baseline.sh`): zstd 1.5.7 `--single-thread`, xz `-9 -T1`.
+
+| set | files | size | **pdfr** | compress | decompress | zstd -3 | zstd -19 | xz -9 |
+|---|---|---|---|---|---|---|---|---|
+| home (code charts, papers) | 20 | 314 MB | **0.8682** | 106 MB/s | 157 MB/s | 0.9145 | 0.8900 | 0.8879 |
+| cc (Common Crawl) | 1,000 | 1,379 MB | **0.8566** | 136 MB/s | 163 MB/s | 0.9073 | 0.8879 | 0.8887 |
+| arxiv | 20 | 94 MB | **0.8430** | 122 MB/s | 138 MB/s | 0.9021 | 0.8831 | 0.8828 |
+
+The speed target binds: everything coded costs more per byte than the budget allows on
+average, so the ratio is what fits in it. With no limit (`-s inf`) CC gives **0.7713** at
+35 / 57 MB/s. The budget is per file (below), and most files' best coding fits within
+it, so the sets run faster than the target overall; 15% of CC's bytes are in files that
+compress slightly slower than 100 MB/s (estimates are within about 10%; tiny files have
+fixed costs). `-s 115` brings that to 4% for 0.8669.
+
+What each mode does on CC at the default target (ns per byte of stream, compressing /
+decompressing; output / input):
+
+| mode | streams | bytes | compress | decompress | ratio |
+|---|---|---|---|---|---|
+| tok, pixels (images without predictor) | 3,217 | 113 MB | 14.5 | 14.1 | 0.841 |
+| tok, content streams | 4,229 | 42 MB | 12.3 | 13.1 | 0.952 |
+| png (PNG-predicted images, png-recons) | 85 | 97 MB | 13.9 | 13.7 | 0.778 |
+| jpeg (jpeg-recons) | 2,060 | 262 MB | 16.3 | 15.4 | about 0.80 |
+| full, fonts (flate-recons fast) | 740 | 11 MB | 34.7 | 24.8 | 0.857 |
+| full, content streams | 564 | 1.6 MB | 73.9 | 51.2 | 0.902 |
+| dup | 7,627 | 30 MB | 0 | 0 | 0 |
+| raw (not worth its time) | 59,500 | 691 MB | 0.1 | 0 | 1 |
+
+## How
+
+### The budget
+
+Everything that pays costs about the budget or more: inflating a DEFLATE stream alone runs
+at about 200 MB/s of DEFLATE data (5 ns/B, half the 10 ns/B the target allows), and the
+coders measured here take 10-115 ns per byte of stream (below). So the compressor does not
+code everything it can; it plans:
+
+- Every stream gets the modes it allows, each with an estimated size and time: a cost
+  model fitted to per-item measurements of the corpus (`PDFR_CALIB=FILE pdfr bench`, then
+  `scripts/fit-costs.py`; ns per item, per stream byte and per inflated byte, each way).
+  Inflated sizes come from the dictionary (images' geometry, fonts' `/Length1`) or a
+  per-class expansion prior, so planning inflates nothing.
+- The mode of each stream minimises *size + λ·time*, with the smallest λ that keeps the
+  file's total time (the larger of compression and decompression per item) within its
+  budget, `file size / target speed`. The budget is per file, so every file meets the
+  target on its own (by the estimates; they are within a few percent of measured times
+  over each set); the estimates, not timing, decide, so the output does not depend on the
+  machine's load.
+
+### Streams (`scan.rs`, `kind.rs`)
+
+A stream is any `N G obj << ... >> stream` whose dictionary parses, wherever it is
+(incremental updates, broken cross-reference tables and junk do not matter); its data runs
+for `/Length` bytes when that is direct and followed by `endstream`, else to the next
+`endstream`. What is not recognised stays in the skeleton, so a miss costs ratio, never
+correctness. Streams are classed (content, font, image, object stream, cross-reference
+stream, other data) by their dictionaries; indirect objects (colour spaces, decode
+parameters) are looked up through an index of every `N G obj` (`objects.rs`).
+
+The file is cut into the skeleton (zstd) and *items*:
+
+| mode | what | coder |
+|---|---|---|
+| raw | stream data kept as it is (incompressible, or not worth its time) | none |
+| dup | a stream equal to an earlier one | reference |
+| tok | FlateDecode: the DEFLATE tokens recoded (`tok.rs`) | own, rANS |
+| full | FlateDecode: inflated data (pooled per class, zstd) + flate-recons' fast metadata | flate-recons |
+| png | FlateDecode image with PNG predictors, wrapped as a PNG file | png-recons |
+| jpeg | DCTDecode | jpeg-recons |
+
+Uncompressed and ASCII-encoded streams stay in the skeleton. zlib headers are kept, the
+Adler-32 recomputed, anything after the DEFLATE data left in the skeleton. Files with an
+`/Encrypt` entry keep their streams raw (they look random).
+
+### Token mode (`tok.rs`, `rans.rs`)
+
+The stream's own LZ77 parse is kept, so rebuilding needs no match search, only Huffman
+coding (the png-recons approach, for any stream):
+
+- Literals and length codes share one alphabet; the table is chosen by the byte before
+  (per class and file, at the resolution that costs least: every byte, 32 classes of
+  bytes, 8, or one table). Distance codes have a table per length code; extra bits are raw.
+- Images without a predictor are coded as pixels: a literal is the residual against MED
+  (left, up, up-left), plus the previous channel's residual for every channel but the
+  first, with tables by channel, local activity and whether a match came just before.
+- Block layout, stored lengths and padding, and length-258 matches sent as 284+31 go to a
+  layout stream; dynamic Huffman headers through flate-recons' header coder against the
+  block's frequencies (zlib's own trees cost a bit).
+- Static per-file tables (quantised log frequencies), 12-bit probabilities, four
+  interleaved rANS states (after png-recons' coder, with alphabets beyond 256).
+- All token streams of a file share one rANS stream, decoded in file order.
+
+### Format
+
+```text
+"PDFR" version mode
+mode 0: the file as it is
+mode 1: varint(length) u64-LE(xxh3) | 13 sections: varint(raw length) u8(0 stored | 1 zstd) [varint(coded length)] data
+  table (zstd): per item varint(skeleton gap) u8(mode) fields
+  skeleton (zstd), raw, flate-recons metadata, jpeg-recons, token streams, png-recons,
+  inflated data of full-mode streams per class (zstd)
+```
+
+`container.rs` documents the fields of each mode.
+
+## Measured, not kept
+
+- Everything through flate-recons' fast representation, no budget: 0.810 on CC at 29 / 55
+  MB/s. It rebuilds at 60-270 MB/s of *inflated* data, and PDF streams inflate 2-12×.
+- Measuring every FlateDecode stream at planning with a counting parse: 5 ns/B, half the
+  budget; the dictionary and class priors do nearly as well for free.
+- 11- and 10-bit probabilities for the token tables (smaller decoding tables): 0.2-1%
+  larger, decoding only a little faster; it is latency-bound (each literal's table depends
+  on the byte before), not cache-bound.
+- Spending what the budget leaves on stronger zstd levels for the skeleton and pools
+  (level 19 makes skeletons 10% smaller than level 9, at 27× the time): a few KB per set.
+
+## Next steps
+
+- JPEG: DCT data is 35% of CC, and only about half of it fits the budget. jpeg-recons takes
+  about 15 ns/B plus 250 µs (compressing) / 125 µs (decompressing) per image on PDF
+  images, mostly per-file table building; default tables for small images would help.
+- Encrypted files (a few percent of CC): with the empty user password their streams can be
+  decrypted, recoded and encrypted again exactly (RC4 and AES-CBC with the stored IV).
+- `[/ASCII85Decode /FlateDecode]` and `[/FlateDecode /DCTDecode]` chains (2.8 and 28 MB in
+  CC) are kept raw or in the skeleton.
+- Token decoding is 11-15 ns/B; its order-1 contexts form a serial chain of table lookups.
+- The skeleton is about 15% of the output; classic cross-reference tables could be rebuilt
+  from object offsets (about 0.8 MB of the 18 MB on CC), object headers predicted.
+
+## Corpus
+
+`corpus/` is not tracked; the scripts rebuild it.
+
+- `scripts/link-home-corpus.sh`: the PDF files under `$HOME`, symlinked (deduplicated) into
+  `corpus/home/`: 20 files, 314 MB, mostly Unicode code charts (PDFlib, Apache FOP: fonts
+  and small glyph images), a few papers and diagrams.
+- `scripts/fetch-corpus.sh`: `corpus/cc/`, 1,000 PDF files from Common Crawl (SafeDocs
+  CC-MAIN-2021-31-PDF-UNTRUNCATED, digitalcorpora.org, zip 0000; 1.38 GB of every kind of
+  producer), and `corpus/arxiv/`, 20 arXiv papers (94 MB).
+- `scripts/baseline.sh SET...`: zstd and xz on each file, cached in `cache/`.
+
+What CC holds (`examples/survey.rs`): DCT images 35%, FlateDecode images 29% (11.8×
+inflated), fonts 12% (2.2×), content streams 10% (4.5×), JPX/CCITT/JBIG2 images 6%,
+skeleton 4%.
+
+## Testing
+
+```sh
+cargo test --release
+target/release/pdfr fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
+```
+
+- `tests/roundtrip.rs`: FlateDecode streams from every encoder of flate-zoo, through every
+  mode; zlib wrapper variants (bare DEFLATE, wrong Adler-32, junk after the data,
+  truncated and damaged streams); syntax (indirect and wrong lengths, CR line ends,
+  keywords in strings, incremental updates, unterminated streams); images with and without
+  predictors, geometry that does not match the data; JPEG; duplicates; encrypted files;
+  non-PDF and cut files; 2,400 corrupted containers (errors, never panics).
+- Unit tests: lexer, scanner, rANS and bit I/O, token coding.
+- `pdfr fuzz`: mutated files (bit flips, cuts, deletions, junk, copied pieces, bytes inside
+  streams) must round-trip under every set of modes with the safety nets off; corrupted
+  containers must fail cleanly.
+- Every file of the three sets round-trips (`pdfr bench` checks).
+
+## Layout
+
+| File | Contents |
+|---|---|
+| `src/container.rs` | Format, the cost model and planner, compression, decompression |
+| `src/scan.rs`, `src/lex.rs` | Finding streams, PDF objects |
+| `src/kind.rs`, `src/objects.rs` | Stream classes and filters, indirect objects |
+| `src/flate.rs`, `src/image.rs` | zlib wrapper; image geometry and the PNG wrapper |
+| `src/tok.rs`, `src/rans.rs` | Token mode; static rANS |
+| `src/bin/pdfr.rs` | Command-line tool, bench, fuzz |
+| `examples/` | Corpus surveys and experiments behind the choices here |
+| `scripts/` | Corpus, baselines, cost fitting, profiling (`profile.py` over samply) |

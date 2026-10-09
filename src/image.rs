@@ -161,3 +161,32 @@ pub fn unwrap(png: &[u8]) -> Option<&[u8]> {
     let n = u32::from_be_bytes(png.get(PRE - 8..PRE - 4)?.try_into().ok()?) as usize;
     png.get(PRE..PRE.checked_add(n)?)
 }
+
+/// Whether a JPEG is progressive (its first frame header is SOF2, SOF6, SOF10 or SOF14),
+/// from its markers; `None` if no frame header is found.
+pub fn jpeg_progressive(d: &[u8]) -> Option<bool> {
+    let mut i = 2;
+    if d.get(..2)? != [0xff, 0xd8] {
+        return None;
+    }
+    while i + 4 <= d.len() {
+        if d[i] != 0xff {
+            return None;
+        }
+        let m = d[i + 1];
+        if m == 0xff {
+            i += 1;
+            continue;
+        }
+        if (0xc0..=0xcf).contains(&m) && !matches!(m, 0xc4 | 0xc8 | 0xcc) {
+            return Some(matches!(m, 0xc2 | 0xc6 | 0xca | 0xce));
+        }
+        if matches!(m, 0xd8 | 0x01 | 0xd0..=0xd7) {
+            i += 2;
+            continue;
+        }
+        let len = u16::from_be_bytes([d[i + 2], d[i + 3]]) as usize;
+        i += 2 + len;
+    }
+    None
+}

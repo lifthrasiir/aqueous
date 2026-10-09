@@ -9,9 +9,9 @@ for set in "$@"; do
     [ -s "$out" ] && continue
     for f in corpus/$set/*; do
         printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$(wc -c < "$f")" \
-            "$(zstd -3 --single-thread -c "$f" | wc -c)" \
-            "$(zstd -19 --single-thread -c "$f" | wc -c)" \
-            "$(xz -9 -T1 -c "$f" | wc -c)"
+            "$(zstd -3 --single-thread -c < "$f" | wc -c)" \
+            "$(zstd -19 --single-thread -c < "$f" | wc -c)" \
+            "$(xz -9 -T1 -c < "$f" | wc -c)"
     done > "$out.part"
     mv "$out.part" "$out"
 done
