@@ -1,0 +1,300 @@
+//! Round trips of synthetic PDF files: FlateDecode streams from every DEFLATE encoder of
+//! flate-zoo through every mode, zlib wrapper variants, images with and without PNG
+//! predictors, JPEG, duplicates, encrypted and malformed files, and corrupted containers.
+
+use flate_zoo::{Encoder, backends};
+use pdf_recons::container::{Options, Stats, compress_with, decompress};
+
+fn adler32(d: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in d {
+        a = (a + x as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    b << 16 | a
+}
+
+fn zlib(enc: &Encoder, data: &[u8]) -> Vec<u8> {
+    let mut z = vec![0x78, 0x9c];
+    z.extend_from_slice(&enc.compress(data).unwrap());
+    z.extend_from_slice(&adler32(data).to_be_bytes());
+    z
+}
+
+fn default_enc() -> Encoder {
+    Encoder::new(flate_zoo::backend("zlib").unwrap_or(backends()[0]))
+}
+
+/// A PDF of the given objects (dictionary body, optional stream data), with an xref table.
+fn pdf(objs: &[(String, Option<Vec<u8>>)]) -> Vec<u8> {
+    let mut f = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut offs = vec![];
+    for (i, (d, s)) in objs.iter().enumerate() {
+        offs.push(f.len());
+        f.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        match s {
+            Some(s) => {
+                f.extend_from_slice(format!("<< {d} /Length {} >>\nstream\n", s.len()).as_bytes());
+                f.extend_from_slice(s);
+                f.extend_from_slice(b"\nendstream\n");
+            }
+            None => f.extend_from_slice(format!("{d}\n").as_bytes()),
+        }
+        f.extend_from_slice(b"endobj\n");
+    }
+    let x = f.len();
+    f.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        f.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    f.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    f
+}
+
+/// Page content: text operators and numbers, somewhat repetitive.
+fn content(seed: u32, n: usize) -> Vec<u8> {
+    let mut s = String::from("BT /F1 12 Tf\n");
+    let mut x = seed;
+    for i in 0..n {
+        x = x.wrapping_mul(1103515245).wrapping_add(12345);
+        s += &format!("{} {} Td ({}) Tj\n", (x >> 16) % 600, i % 800, ["Hello", "PDF", "world", "recompression"][(x >> 8) as usize % 4]);
+        if i % 7 == 0 {
+            s += &format!("{}.{} {} {} re f\n", x % 97, x % 10, x % 300, (x >> 3) % 200);
+        }
+    }
+    s += "ET\n";
+    s.into_bytes()
+}
+
+/// Pixel rows (`bpp` bytes per pixel), smooth with noise; with PNG filter bytes if `png`.
+fn pixels(w: usize, h: usize, bpp: usize, png: bool, seed: u32) -> Vec<u8> {
+    let mut out = vec![];
+    let mut x = seed;
+    let mut prev = vec![0u8; w * bpp];
+    for y in 0..h {
+        let mut row = vec![0u8; w * bpp];
+        for (i, p) in row.iter_mut().enumerate() {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            *p = ((i / bpp * 3 + y * 2 + (i % bpp) * 40) as u32 + (x >> 28)) as u8;
+        }
+        if png {
+            // Up filter on odd rows, none on even ones.
+            let f = (y % 2) as u8 * 2;
+            out.push(f);
+            for i in 0..row.len() {
+                out.push(if f == 2 { row[i].wrapping_sub(prev[i]) } else { row[i] });
+            }
+        } else {
+            out.extend_from_slice(&row);
+        }
+        prev = row;
+    }
+    out
+}
+
+fn options() -> Vec<(&'static str, Options)> {
+    let base = Options::default();
+    vec![
+        ("default", base.clone()),
+        ("all", Options { speed: f64::INFINITY, ..base.clone() }),
+        ("tok", Options { speed: f64::INFINITY, full: false, png: false, ..base.clone() }),
+        ("full", Options { speed: f64::INFINITY, tok: false, png: false, ..base.clone() }),
+        ("raw", Options { tok: false, full: false, png: false, ..base.clone() }),
+        ("verify", Options { speed: f64::INFINITY, verify: true, ..base }),
+    ]
+}
+
+fn check(name: &str, file: &[u8]) {
+    for (oname, o) in options() {
+        let mut st = Stats::default();
+        let c = compress_with(file, &o, &mut st);
+        let back = decompress(&c).unwrap_or_else(|e| panic!("{name} ({oname}): {e}"));
+        assert!(back == file, "{name} ({oname}): round trip differs");
+        assert!(!st.verify_failed, "{name} ({oname}): verification failed");
+    }
+}
+
+/// The coded form with everything allowed, and what it did.
+fn coded(file: &[u8]) -> (Vec<u8>, Stats) {
+    let mut st = Stats::default();
+    let o = Options { speed: f64::INFINITY, ..Options::default() };
+    let c = compress_with(file, &o, &mut st);
+    assert_eq!(decompress(&c).unwrap(), file);
+    (c, st)
+}
+
+#[test]
+fn every_encoder() {
+    let data = content(1, 3000);
+    for b in backends() {
+        let enc = Encoder::new(*b);
+        let Ok(raw) = enc.compress(&data) else { continue };
+        let mut z = vec![0x78, 0xda];
+        z.extend_from_slice(&raw);
+        z.extend_from_slice(&adler32(&data).to_be_bytes());
+        let f = pdf(&[
+            ("/Type /Catalog".into(), None),
+            ("/Filter /FlateDecode".into(), Some(z)),
+            ("/Filter /FlateDecode /Length1 100".into(), Some(raw.clone())),
+        ]);
+        check(b.name(), &f);
+    }
+}
+
+#[test]
+fn modes_are_used() {
+    let enc = default_enc();
+    let g = (64usize, 48usize);
+    let f = pdf(&[
+        ("/Type /Catalog".into(), None),
+        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(2, 4000)))),
+        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(2, 4000)))),
+        (
+            format!("/Type /XObject /Subtype /Image /Width {} /Height {} /BitsPerComponent 8 /ColorSpace /DeviceRGB /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /Columns {} >>", g.0, g.1, g.0),
+            Some(zlib(&enc, &pixels(g.0, g.1, 3, true, 3))),
+        ),
+        (
+            format!("/Type /XObject /Subtype /Image /Width {} /Height {} /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /FlateDecode", g.0, g.1),
+            Some(zlib(&enc, &pixels(g.0, g.1, 1, false, 4))),
+        ),
+        (
+            "/Type /XObject /Subtype /Image /Width 160 /Height 120 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Filter /DCTDecode".into(),
+            Some(std::fs::read("tests/data/gradient.jpg").unwrap()),
+        ),
+    ]);
+    check("modes", &f);
+    let (_, st) = coded(&f);
+    use pdf_recons::container::{DUP, JPEG, PNG};
+    for m in [DUP, PNG, JPEG] {
+        assert!(st.modes[m as usize].0 > 0, "mode {} unused: {:?}", pdf_recons::container::MODES[m as usize], st.modes);
+    }
+}
+
+#[test]
+fn wrappers() {
+    let enc = default_enc();
+    let data = content(5, 2000);
+    let raw = enc.compress(&data).unwrap();
+    let z = zlib(&enc, &data);
+    let mut bad_adler = z.clone();
+    *bad_adler.last_mut().unwrap() ^= 1;
+    let mut junk = z.clone();
+    junk.extend_from_slice(b"\r\n\0junk");
+    let truncated = z[..z.len() / 2].to_vec();
+    let mut garbage = z.clone();
+    garbage[40] ^= 0x55;
+    let f = pdf(&[
+        ("/Type /Catalog".into(), None),
+        ("/Filter /FlateDecode".into(), Some(raw)),
+        ("/Filter /FlateDecode".into(), Some(bad_adler)),
+        ("/Filter /FlateDecode".into(), Some(junk)),
+        ("/Filter /FlateDecode".into(), Some(truncated)),
+        ("/Filter /FlateDecode".into(), Some(garbage)),
+        ("/Filter [/FlateDecode]".into(), Some(z.clone())),
+        ("/Filter /Fl".into(), Some(z.clone())),
+        ("/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 5 >>".into(), Some(z)),
+        ("/Filter /FlateDecode".into(), Some(vec![])),
+        ("/Filter /DCTDecode".into(), Some(b"not a jpeg at all, but long enough to be an item of its own........".to_vec())),
+    ]);
+    check("wrappers", &f);
+}
+
+#[test]
+fn syntax() {
+    let enc = default_enc();
+    let z = zlib(&enc, &content(6, 1500));
+    let mut f = b"%PDF-1.4\n".to_vec();
+    // An indirect length, CR line ends, a dictionary with strings holding keywords.
+    f.extend_from_slice(b"1 0 obj\r<< /Length 2 0 R /Filter /FlateDecode /T (obj stream) >>\rstream\r\n");
+    f.extend_from_slice(&z);
+    f.extend_from_slice(b"\rendstream\rendobj\r2 0 obj\r");
+    f.extend_from_slice(z.len().to_string().as_bytes());
+    f.extend_from_slice(b"\rendobj\r");
+    // A wrong direct length, and a stream keyword in a string.
+    f.extend_from_slice(b"3 0 obj << /Length 7 /Filter /FlateDecode >> stream\n");
+    f.extend_from_slice(&z);
+    f.extend_from_slice(b"\nendstream endobj 4 0 obj (stream\n) endobj\n");
+    // An incremental update redefining object 3, and a dictionary nested deeply.
+    f.extend_from_slice(b"3 0 obj << /A << /B << /C [1 2 [3 << /D 4 >>]] >> >> /Filter /FlateDecode >>\nstream\n");
+    f.extend_from_slice(&z);
+    f.extend_from_slice(b"\nendstream\nendobj\n%%EOF\n");
+    // A stream with no end.
+    f.extend_from_slice(b"5 0 obj << /Filter /FlateDecode >>\nstream\n");
+    f.extend_from_slice(&z[..z.len() - 3]);
+    check("syntax", &f);
+}
+
+#[test]
+fn encrypted() {
+    let enc = default_enc();
+    let mut f = pdf(&[
+        ("/Type /Catalog".into(), None),
+        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(7, 1000)))),
+    ]);
+    f.extend_from_slice(b"trailer << /Encrypt 9 0 R >>\n");
+    check("encrypted", &f);
+    let (_, st) = coded(&f);
+    assert_eq!(st.modes[pdf_recons::container::TOK as usize].0 + st.modes[pdf_recons::container::FULL as usize].0, 0);
+}
+
+#[test]
+fn not_pdf() {
+    for f in [vec![], b"%PDF-".to_vec(), b"hello".repeat(1000), (0..100_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect()] {
+        check("not a pdf", &f);
+    }
+}
+
+#[test]
+fn cut_files() {
+    let enc = default_enc();
+    let f = pdf(&[
+        ("/Type /Catalog".into(), None),
+        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(8, 3000)))),
+        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(9, 3000)))),
+    ]);
+    for cut in [f.len() / 3, f.len() / 2, f.len() - 30] {
+        check("cut", &f[..cut]);
+    }
+}
+
+#[test]
+fn corrupted_containers() {
+    let enc = default_enc();
+    let g = (32usize, 32usize);
+    let f = pdf(&[
+        ("/Type /Catalog".into(), None),
+        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(10, 2000)))),
+        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(10, 2000)))),
+        (
+            format!("/Subtype /Image /Width {} /Height {} /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /FlateDecode /DecodeParms << /Predictor 15 /Columns {} >>", g.0, g.1, g.0),
+            Some(zlib(&enc, &pixels(g.0, g.1, 1, true, 11))),
+        ),
+        ("/Subtype /Image /Filter /DCTDecode".into(), Some(std::fs::read("tests/data/gradient.jpg").unwrap())),
+    ]);
+    for (_, o) in options() {
+        let c = compress_with(&f, &o, &mut Stats::default());
+        let mut x = 99u32;
+        for i in 0..400 {
+            let mut m = c.clone();
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            match i % 4 {
+                0 => {
+                    let k = x as usize % m.len();
+                    m[k] ^= 1 << (x >> 29);
+                }
+                1 => m.truncate(x as usize % m.len()),
+                2 => {
+                    let k = x as usize % m.len();
+                    m.insert(k, (x >> 8) as u8);
+                }
+                _ => {
+                    let k = x as usize % m.len();
+                    m[k] = (x >> 16) as u8;
+                }
+            }
+            if let Ok(d) = decompress(&m) {
+                assert_eq!(d, f, "a corrupt container decoded to something else");
+            }
+        }
+    }
+}

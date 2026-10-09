@@ -1,0 +1,205 @@
+use pdf_recons::container::{self, Options, Stats};
+
+#[repr(C)]
+struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+unsafe extern "C" {
+    fn clock_gettime(clk: u32, tp: *mut Timespec) -> i32;
+}
+
+/// CPU time of the process, in seconds (wall time is skewed by other load). jpeg-recons
+/// works on rayon's pool, so this counts every thread; `bench` runs with one.
+fn cpu() -> f64 {
+    #[cfg(target_os = "macos")]
+    const CLOCK_PROCESS_CPUTIME_ID: u32 = 12;
+    #[cfg(not(target_os = "macos"))]
+    const CLOCK_PROCESS_CPUTIME_ID: u32 = 2;
+    let mut t = Timespec { sec: 0, nsec: 0 };
+    unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut t) };
+    t.sec as f64 + t.nsec as f64 * 1e-9
+}
+
+fn usage() -> ! {
+    eprintln!(
+        "usage: pdfr c [-s MB/S] [-l LEVEL] [-V] [-T] [-F] IN OUT | pdfr d IN OUT\n       pdfr bench [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-v] FILE..."
+    );
+    std::process::exit(2);
+}
+
+/// Options from the flags in `args`; the rest is returned.
+fn options(args: &[String]) -> (Options, usize, bool, Vec<String>) {
+    let mut o = Options::default();
+    let (mut iters, mut verbose, mut rest) = (1, false, vec![]);
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        let mut val = || it.next().unwrap_or_else(|| usage()).clone();
+        match a.as_str() {
+            "-s" => o.speed = val().parse().unwrap_or_else(|_| usage()),
+            "-l" => o.level = val().parse().unwrap_or_else(|_| usage()),
+            "-n" => iters = val().parse().unwrap_or_else(|_| usage()),
+            "-V" => o.verify = true,
+            "-T" => o.tok = false,
+            "-F" => o.full = false,
+            "-P" => o.png = false,
+            "-v" => verbose = true,
+            _ => rest.push(a.clone()),
+        }
+    }
+    (o, iters, verbose, rest)
+}
+
+fn read(p: &str) -> Vec<u8> {
+    std::fs::read(p).unwrap_or_else(|e| {
+        eprintln!("{p}: {e}");
+        std::process::exit(1)
+    })
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let (opts, iters, verbose, rest) = options(args.get(1..).unwrap_or(&[]));
+    match args.first().map(String::as_str) {
+        Some("c") if rest.len() == 2 => {
+            let out = container::compress_with(&read(&rest[0]), &opts, &mut Stats::default());
+            std::fs::write(&rest[1], out).unwrap();
+        }
+        Some("d") if rest.len() == 2 => match container::decompress(&read(&rest[0])) {
+            Ok(d) => std::fs::write(&rest[1], d).unwrap(),
+            Err(e) => {
+                eprintln!("{}: {e}", rest[0]);
+                std::process::exit(1)
+            }
+        },
+        Some("bench") if !rest.is_empty() => bench(&opts, iters, verbose, &rest),
+        _ => usage(),
+    }
+}
+
+fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
+    if std::env::var_os("RAYON_NUM_THREADS").is_none() {
+        // SAFETY: nothing else runs yet.
+        unsafe { std::env::set_var("RAYON_NUM_THREADS", "1") };
+    }
+    let (mut tin, mut tout, mut tc, mut td) = (0usize, 0usize, 0f64, 0f64);
+    let mut tot = Stats::default();
+    let mut dtot = container::DStats::default();
+    // Per item: file, mode, class, raw, inflated, compression and decompression seconds.
+    let mut calib = std::env::var_os("PDFR_CALIB").map(|p| std::io::BufWriter::new(std::fs::File::create(p).unwrap()));
+    for f in files {
+        let file = read(f);
+        let (mut bc, mut bd) = (f64::INFINITY, f64::INFINITY);
+        let mut packed = vec![];
+        let mut st = Stats::default();
+        let mut ds = container::DStats::default();
+        for _ in 0..iters {
+            let t = cpu();
+            st = Stats::default();
+            packed = container::compress_with(&file, opts, &mut st);
+            bc = bc.min(cpu() - t);
+            let t = cpu();
+            ds = container::DStats::default();
+            let back = container::decompress_with(&packed, &mut ds);
+            bd = bd.min(cpu() - t);
+            if back.as_deref() != Ok(&file[..]) {
+                println!("ROUND TRIP FAILED: {f}");
+                std::process::exit(1);
+            }
+        }
+        tin += file.len();
+        tout += packed.len();
+        tc += bc;
+        td += bd;
+        for (a, b) in tot.modes.iter_mut().zip(&st.modes) {
+            a.0 += b.0;
+            a.1 += b.1;
+            a.2 += b.2;
+        }
+        tot.skeleton.0 += st.skeleton.0;
+        tot.skeleton.1 += st.skeleton.1;
+        tot.pools += st.pools;
+        tot.meta += st.meta;
+        tot.tok += st.tok;
+        tot.tok_finish += st.tok_finish;
+        tot.predicted += st.predicted;
+        dtot.setup += ds.setup;
+        for m in 0..container::NMODES {
+            for c in 0..6 {
+                tot.class_out[m][c] += st.class_out[m][c];
+            }
+        }
+        for m in 0..container::NMODES {
+            for c in 0..7 {
+                tot.cost[m][c].add(&st.cost[m][c]);
+                dtot.cost[m][c].add(&ds.cost[m][c]);
+            }
+        }
+        if let Some(w) = &mut calib {
+            use std::io::Write;
+            for (a, b) in st.items.iter().zip(&ds.items) {
+                writeln!(w, "{f}\t{}\t{}\t{}\t{}\t{:.9}\t{:.9}", a.0, a.1, a.2, a.3, a.4, b.4).unwrap();
+            }
+        }
+        tot.failed += st.failed;
+        for (a, b) in tot.times.iter_mut().zip(&st.times) {
+            *a += b;
+        }
+        if verbose {
+            println!(
+                "{:>11} {:.4} {:>7.1} {:>7.1} MB/s  skel {:>9} -> {:>8}  {}",
+                file.len(),
+                packed.len() as f64 / file.len() as f64,
+                file.len() as f64 / bc / 1e6,
+                file.len() as f64 / bd / 1e6,
+                st.skeleton.0,
+                st.skeleton.1,
+                f
+            );
+        }
+    }
+    println!(
+        "{} files, {} -> {} ({:.4}), compress {:.1} MB/s, decompress {:.1} MB/s",
+        files.len(),
+        tin,
+        tout,
+        tout as f64 / tin as f64,
+        tin as f64 / tc / 1e6,
+        tin as f64 / td / 1e6
+    );
+    for (n, m) in container::MODES.iter().zip(&tot.modes) {
+        println!("  {n:<5} {:>7} items {:>12} -> {:>12}", m.0, m.1, m.2);
+    }
+    println!(
+        "  skeleton {} -> {}, pools {}, meta {}, tokens {}, failed {}",
+        tot.skeleton.0, tot.skeleton.1, tot.pools, tot.meta, tot.tok, tot.failed
+    );
+    println!("  mode/class: items, raw, inflated; ns per raw byte compressing, decompressing; output / raw");
+    let cname = |c: usize| if c < 6 { pdf_recons::kind::CLASSES[c].name() } else { "-" };
+    for m in 0..container::NMODES {
+        for c in 0..7 {
+            let (a, b) = (tot.cost[m][c], dtot.cost[m][c]);
+            if a.n > 0 {
+                println!(
+                    "    {:<5} {:<8} {:>7} {:>12} {:>13} {:>6.2} {:>6.2} {:>6.3}",
+                    container::MODES[m],
+                    cname(c),
+                    a.n,
+                    a.raw,
+                    a.plain,
+                    a.secs * 1e9 / a.raw as f64,
+                    b.secs * 1e9 / b.raw.max(1) as f64,
+                    if c < 6 && (m == 2 || m >= 4) { tot.class_out[m][c] / a.raw as f64 } else { f64::NAN }
+                );
+            }
+        }
+    }
+    println!("  estimated time {:.3} s (measured {:.3} s compressing, {:.3} s decompressing)", tot.predicted * 1e-9, tc, td);
+    println!("  token coder finish {:.3} s, decompression setup {:.3} s", tot.tok_finish, dtot.setup);
+    let t = tot.times;
+    println!(
+        "  compress phases (s, last run): plan {:.3}, parse {:.3}, flate-recons {:.3}, jpeg-recons {:.3}, sections {:.3}",
+        t[0], t[1], t[2], t[3], t[4]
+    );
+}

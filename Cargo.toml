@@ -1,0 +1,24 @@
+[package]
+name = "pdf-recons"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless PDF recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[dependencies]
+flate-recons = { path = "../flate-recons" }
+jpeg-recons = { path = "../jpeg-recons" }
+png-recons = { path = "../png-recons" }
+memchr = "2"
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+simd-adler32 = "0.3"
+crc32fast = "1.5"
+
+[profile.release]
+debug = 1
+lto = "fat"
+codegen-units = 1
+
+[dev-dependencies]
+flate-zoo = { path = "../flate-zoo" }
