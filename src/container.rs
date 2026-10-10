@@ -258,7 +258,7 @@ mod cost {
     }
 
     /// Token mode for images coded as pixels.
-    pub const TOK_PIXELS: (Time, f64) = (([6.0e3, 15.3, 0.10], [7.3e3, 14.1, 0.06]), 0.846);
+    pub const TOK_PIXELS: (Time, f64) = (([11.3e3, 12.6, 0.11], [12.5e3, 12.7, 0.07]), 0.846);
 
     /// flate-recons' fast representation; the size is the pool's share and the metadata.
     pub fn full(c: Class) -> (Time, f64) {

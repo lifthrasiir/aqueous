@@ -21,6 +21,7 @@ use flate_recons::deflate::{Block, Body, DynHeader, Stream, Token};
 use flate_recons::fast::header::{self, Recipe};
 use flate_recons::fast::inflate::Flat;
 use flate_recons::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
+use std::cell::Cell;
 
 /// Literals 0-255, then length codes 0-28 (symbols 257-285).
 pub const LIT_ALPHA: usize = 256 + 29;
@@ -154,25 +155,25 @@ fn med(d: &[u8], p: usize, col: usize, px: Pixels) -> (i32, u32) {
     let a = if left { d[p - px.bpp] } else { 0 } as i32;
     let b = if up { d[p - px.stride] } else { 0 } as i32;
     let c = if left && up { d[p - px.stride - px.bpp] } else { 0 } as i32;
-    let pred = if c >= a.max(b) {
-        a.min(b)
-    } else if c <= a.min(b) {
-        a.max(b)
-    } else {
-        a + b - c
-    };
+    // min(a, b) if c >= max(a, b), max(a, b) if c <= min(a, b), else a + b - c.
+    let pred = (a + b - c).clamp(a.min(b), a.max(b));
     (pred, ((a - c).abs() + (b - c).abs()) as u32)
 }
 
 /// The pixel model's prediction and context for the byte at `p`: MED, plus for every
 /// channel but the first the previous channel's residual (inter-channel decorrelation); the
-/// context is the channel (capped) and the activity.
+/// context is the channel (capped) and the activity. `last`: the position and MED of the
+/// last call, reused when it was the byte before.
 #[inline(always)]
-fn pixel_ctx(d: &[u8], p: usize, col: usize, ch: usize, after: bool, px: Pixels) -> (u8, usize) {
-    let (mut pred, act) = med(d, p, col, px);
+fn pixel_ctx(d: &[u8], p: usize, col: usize, ch: usize, after: bool, px: Pixels, last: &Cell<(usize, i32)>) -> (u8, usize) {
+    let (m, act) = med(d, p, col, px);
+    let mut pred = m;
     if ch > 0 {
-        pred += d[p - 1] as i32 - med(d, p - 1, col - 1, px).0;
+        let (at, v) = last.get();
+        let prev = if at == p - 1 { v } else { med(d, p - 1, col - 1, px).0 };
+        pred += d[p - 1] as i32 - prev;
     }
+    last.set((p, m));
     let bucket = ((32 - act.leading_zeros()) as usize).min(ACT - 1);
     (pred as u8, ((after as usize) * 4 + ch.min(3)) * ACT + bucket)
 }
@@ -347,12 +348,13 @@ impl Encoder {
         self.syms.reserve(f.tokens.len() + 2 * f.skips.len());
         // The fine literal context at `p`, and the byte the literal there is coded against.
         // `after`: a match came just before (pixels only).
+        let last = Cell::new((usize::MAX, 0));
         let ctx = |p: usize, after: bool| -> (usize, u8) {
             match px {
                 None => (if p > 0 { d[p - 1] } else { 0 } as usize, 0),
                 Some(px) => {
                     let col = p % px.stride;
-                    let (pred, t) = pixel_ctx(d, p, col, col % px.bpp, after, px);
+                    let (pred, t) = pixel_ctx(d, p, col, col % px.bpp, after, px, &last);
                     (t, pred)
                 }
             }
@@ -550,12 +552,13 @@ struct Pix {
     col: usize,
     ch: usize,
     after: bool,
+    last: Cell<(usize, i32)>,
 }
 
 impl LitModel for Pix {
     #[inline(always)]
     fn ctx(&self, d: &[u8], o: usize) -> (u8, usize) {
-        pixel_ctx(d, o, self.col, self.ch, self.after, self.px)
+        pixel_ctx(d, o, self.col, self.ch, self.after, self.px, &self.last)
     }
     #[inline(always)]
     fn lit(&mut self, _: u8) {
@@ -829,7 +832,7 @@ impl<'a> DecoderState<'a> {
         };
         match px {
             None => cur.blocks(&spans, &mut Prev(0))?,
-            Some(px) => cur.blocks(&spans, &mut Pix { px, col: 0, ch: 0, after: false })?,
+            Some(px) => cur.blocks(&spans, &mut Pix { px, col: 0, ch: 0, after: false, last: Cell::new((usize::MAX, 0)) })?,
         }
         let o = cur.o;
         let raw = &mut self.raw;

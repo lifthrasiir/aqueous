@@ -32,31 +32,31 @@ file, summed (`scripts/baseline.sh`): zstd 1.5.7 `--single-thread`, xz `-9 -T1`.
 
 | set | files | size | **pdfr** | compress | decompress | zstd -3 | zstd -19 | xz -9 |
 |---|---|---|---|---|---|---|---|---|
-| home (code charts, papers) | 20 | 314 MB | **0.8763** | 114 MB/s | 174 MB/s | 0.9145 | 0.8900 | 0.8879 |
-| cc (Common Crawl) | 1,000 | 1,379 MB | **0.8661** | 159 MB/s | 192 MB/s | 0.9073 | 0.8879 | 0.8887 |
-| arxiv | 20 | 94 MB | **0.8356** | 125 MB/s | 145 MB/s | 0.9021 | 0.8831 | 0.8828 |
+| home (code charts, papers) | 20 | 314 MB | **0.8738** | 116 MB/s | 172 MB/s | 0.9145 | 0.8900 | 0.8879 |
+| cc (Common Crawl) | 1,000 | 1,379 MB | **0.8638** | 157 MB/s | 186 MB/s | 0.9073 | 0.8879 | 0.8887 |
+| arxiv | 20 | 94 MB | **0.8346** | 124 MB/s | 142 MB/s | 0.9021 | 0.8831 | 0.8828 |
 
 The speed target binds: everything coded costs more per byte than the budget allows on
 average, so the ratio is what fits in it. With no limit (`-s inf`) CC gives **0.7713** at
 35 / 57 MB/s. The target is met per file, not just per set: the budget is per file
 (below) and planned with a 10% margin for the scatter of the estimates. Files below
-100 MB/s hold 1.4% of CC's bytes compressing (70 files, 40 of them under 100 KB, where
-fixed costs dominate) and 0.01% decompressing, 0.05% of home's and none of arXiv's.
-Without the margin (`-s 91`) CC gives 0.8604 with 9.7% of its bytes in slow files.
+100 MB/s hold 2.2% of CC's bytes compressing (75 files, most of them small, where fixed
+costs dominate) and 0.01% decompressing, 0.05% of home's and none of arXiv's. Without the
+margin (`-s 91`) CC gives 0.8582 with 10.5% of its bytes in slow files.
 
 What each mode does on CC at the default target (ns per byte of stream, compressing /
 decompressing; output / input):
 
 | mode | streams | bytes | compress | decompress | ratio |
 |---|---|---|---|---|---|
-| tok, pixels (images without predictor) | 2,607 | 88 MB | 16.4 | 14.2 | 0.841 |
-| tok, content streams | 3,061 | 29 MB | 15.2 | 13.5 | 0.951 |
-| png (PNG-predicted images, png-recons) | 51 | 80 MB | 13.1 | 12.5 | 0.787 |
-| jpeg (jpeg-recons) | 1,639 | 253 MB | 15.4 | 14.7 | about 0.80 |
-| full, fonts (flate-recons fast) | 747 | 11 MB | 35.1 | 24.8 | 0.864 |
-| full, content streams | 633 | 1.5 MB | 78.6 | 51.8 | 0.885 |
+| tok, pixels (images without predictor) | 2,714 | 111 MB | 14.5 | 13.3 | 0.840 |
+| tok, content streams | 3,223 | 30 MB | 15.0 | 13.5 | 0.951 |
+| png (PNG-predicted images, png-recons) | 51 | 80 MB | 13.1 | 12.8 | 0.787 |
+| jpeg (jpeg-recons) | 1,610 | 250 MB | 15.5 | 14.7 | about 0.80 |
+| full, fonts (flate-recons fast) | 758 | 11 MB | 35.3 | 25.1 | 0.864 |
+| full, content streams | 638 | 1.5 MB | 79.4 | 52.0 | 0.885 |
 | dup | 7,627 | 30 MB | 0 | 0 | 0 |
-| raw (not worth its time) | 61,883 | 763 MB | 0.1 | 0 | 1 |
+| raw (not worth its time) | 61,582 | 741 MB | 0.1 | 0 | 1 |
 
 (Token mode's times include its share of the per-file final pass and decoder setup.)
 
