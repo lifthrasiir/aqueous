@@ -424,32 +424,52 @@ impl Encoder {
             }
             tw.bits(1, 1);
             let nfine = if ci == PIXEL { PIX_CTX } else { LIT_CTX };
-            // The cheapest resolution, data plus (estimated) tables.
-            let lit_counts = |res: u8| -> Vec<Vec<u32>> {
-                let mut v = vec![vec![0u32; LIT_ALPHA]; slot_tables(ci, res)];
-                for b in 0..nfine {
-                    let t = coarse(ci, res, b);
-                    for s in 0..LIT_ALPHA {
-                        v[t][s] += counts[b * STRIDE + s];
+            // The cheapest resolution, data plus (estimated) tables, from the fine contexts'
+            // nonzero counts (few, for small files).
+            let mut rows: Vec<(usize, Vec<(u16, u32)>)> = vec![];
+            for b in 0..nfine {
+                let row = &counts[b * STRIDE..b * STRIDE + LIT_ALPHA];
+                if row.iter().fold(0, |a, &x| a | x) == 0 {
+                    continue;
+                }
+                let nz: Vec<(u16, u32)> = row.iter().enumerate().filter(|&(_, &x)| x > 0).map(|(s, &x)| (s as u16, x)).collect();
+                rows.push((b, nz));
+            }
+            let est_row = |nz: &mut dyn Iterator<Item = u32>| -> f64 {
+                let (mut tot, mut acc, mut n) = (0f64, 0f64, 0usize);
+                for x in nz {
+                    let x = x as f64;
+                    tot += x;
+                    acc += x * x.log2();
+                    n += 1;
+                }
+                tot * tot.log2() - acc + 6.0 * n as f64 + 16.0
+            };
+            let mut best: (f64, u8) = (rows.iter().map(|(_, nz)| est_row(&mut nz.iter().map(|e| e.1))).sum(), 0);
+            for res in 1..RESOLUTIONS as u8 {
+                let mut v = vec![0u32; slot_tables(ci, res) * LIT_ALPHA];
+                for (b, nz) in &rows {
+                    let t = coarse(ci, res, *b) * LIT_ALPHA;
+                    for &(s, x) in nz {
+                        v[t + s as usize] += x;
                     }
                 }
-                v
-            };
-            let est = |v: &[Vec<u32>]| -> f64 {
-                v.iter()
-                    .filter(|c| c.iter().any(|&x| x > 0))
-                    .map(|c| rans::cost(c) + 6.0 * c.iter().filter(|&&x| x > 0).count() as f64 + 16.0)
-                    .sum()
-            };
-            let mut best = (f64::INFINITY, 0u8, vec![]);
-            for res in 0..RESOLUTIONS as u8 {
-                let v = lit_counts(res);
-                let e = est(&v);
+                let e: f64 = v.chunks_exact(LIT_ALPHA).map(|c| c.iter().copied().filter(|&x| x > 0)).map(|mut c| match c.next() {
+                    None => 0.0,
+                    Some(x) => est_row(&mut std::iter::once(x).chain(c)),
+                }).sum();
                 if e < best.0 {
-                    best = (e, res, v);
+                    best = (e, res);
                 }
             }
-            let (bits, res, lits) = best;
+            let (bits, res) = best;
+            let mut lits = vec![vec![0u32; LIT_ALPHA]; slot_tables(ci, res)];
+            for (b, nz) in &rows {
+                let t = &mut lits[coarse(ci, res, *b)];
+                for &(s, x) in nz {
+                    t[s as usize] += x;
+                }
+            }
             sizes[ci] = (bits + self.raw_bits[ci] as f64) / 8.0;
             for k in 0..DIST_CTX {
                 let t = LIT_CTX + k;

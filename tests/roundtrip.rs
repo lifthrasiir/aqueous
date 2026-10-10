@@ -313,3 +313,34 @@ fn pixel_geometry_mismatch() {
     ]);
     check("pixel geometry", &f);
 }
+
+/// The planner's estimates: inflated sizes from the first block's codes, JPEG blocks from the
+/// frame header.
+#[test]
+fn estimates() {
+    // Close for zlib's codes; other encoders' need not fit their data (fdeflate's are
+    // fixed), but must parse or be refused.
+    let data = content(1, 20_000);
+    assert!(flate_zoo::backend("zlib").is_some());
+    for b in backends() {
+        let Ok(z) = Encoder::new(*b).compress(&data) else { continue };
+        let e = pdf_recons::flate::expansion(&z);
+        if b.name() == "zlib" {
+            let (e, actual) = (e.unwrap(), data.len() as f64 / z.len() as f64);
+            assert!((e / actual).log2().abs() < 0.5, "estimate {e:.2}, actual {actual:.2}");
+        }
+    }
+    // Cut and damaged headers.
+    let z = zlib(&default_enc(), &data);
+    for k in 0..400.min(z.len()) {
+        let _ = pdf_recons::flate::expansion(&z[..k]);
+        let mut m = z[..400].to_vec();
+        m[k] ^= 1 << (k % 8);
+        let _ = pdf_recons::flate::expansion(&m);
+    }
+    assert_eq!(pdf_recons::flate::expansion(&[0x78, 0x9c, 0x03, 0x00]), None);
+    assert_eq!(pdf_recons::flate::expansion(&[]), None);
+    let jpeg = std::fs::read("tests/data/gradient.jpg").unwrap();
+    // 160×120 in 4:2:0: 20×15 luma blocks, 10×8 of each chroma (whole MCUs).
+    assert_eq!(pdf_recons::image::jpeg_frame(&jpeg), Some((false, 300 + 2 * 80)));
+}

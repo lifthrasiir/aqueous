@@ -151,11 +151,12 @@ fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
         }
         if verbose {
             println!(
-                "{:>11} {:.4} {:>7.1} {:>7.1} MB/s  skel {:>9} -> {:>8}  {}",
+                "{:>11} {:.4} {:>7.1} {:>7.1} MB/s (est. {:>7.1})  skel {:>9} -> {:>8}  {}",
                 file.len(),
                 packed.len() as f64 / file.len() as f64,
                 file.len() as f64 / bc / 1e6,
                 file.len() as f64 / bd / 1e6,
+                file.len() as f64 / st.predicted * 1e3,
                 st.skeleton.0,
                 st.skeleton.1,
                 f

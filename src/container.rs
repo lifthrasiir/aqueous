@@ -206,8 +206,8 @@ enum Plan {
     /// A FlateDecode stream: its class, estimated inflated size, the mode chosen, and for
     /// images their geometry.
     Flate(Class, f64, u8, Option<Geometry>),
-    /// A JPEG: whether it is progressive, whether to code it.
-    Jpeg(bool, bool),
+    /// A JPEG: whether it is progressive, its number of 8×8 blocks, whether to code it.
+    Jpeg(bool, u64, bool),
 }
 
 /// Costs on an Apple M4 for the time budget, fitted to the per-item times of the corpus
@@ -216,35 +216,49 @@ enum Plan {
 mod cost {
     use crate::kind::Class;
 
+    /// The plan's time is this much under the budget: estimates of a file's time scatter by
+    /// about 10% (content the features do not see), and the target is per file.
+    pub const MARGIN: f64 = 1.1;
     /// ns per byte of file: scanning; ns per byte of skeleton: zstd at the default level.
     pub const SCAN: f64 = 0.2;
     pub const ZSTD_C: f64 = 10.0;
     /// ns per inflated byte of the pools: zstd compression, decompression.
     pub const POOL: (f64, f64) = (7.0, 1.0);
 
-    /// (per item, per byte, per inflated byte), compressing and decompressing.
+    /// (per item, per byte, per inflated byte or JPEG block), compressing and decompressing.
     pub type Time = ([f64; 3], [f64; 3]);
 
-    pub const JPEG: Time = ([255e3, 15.3, 0.0], [126e3, 15.1, 0.0]);
-    pub const JPEG_RATIO: f64 = 0.80;
-    pub const JPEG_PROG: Time = ([404e3, 28.8, 0.0], [93e3, 26.8, 0.0]);
+    pub const JPEG: Time = ([375e3, 10.5, 15.0], [111e3, 10.9, 19.6]);
+    /// Baseline JPEGs: output / input by size (small ones gain little).
+    pub fn jpeg_ratio(n: f64) -> f64 {
+        match n {
+            ..1024.0 => 0.996,
+            ..4096.0 => 0.954,
+            ..16384.0 => 0.856,
+            ..65536.0 => 0.81,
+            _ => 0.79,
+        }
+    }
+    pub const JPEG_PROG: Time = ([301e3, 21.0, 42.3], [27e3, 19.7, 37.1]);
     pub const JPEG_PROG_RATIO: f64 = 0.89;
-    pub const PNG: Time = ([234e3, 13.9, 0.0], [215e3, 13.9, 0.0]);
+    pub const PNG: Time = ([213e3, 13.6, 0.28], [199e3, 13.5, 0.25]);
     pub const PNG_RATIO: f64 = 0.80;
 
+    /// Token mode. Per byte, with the coder's final pass (1.9 ns) and the decoder's setup
+    /// (0.7 ns), which are per file.
     pub fn tok(c: Class) -> (Time, f64) {
         match c {
-            Class::Content => (([4.8e3, 11.2, 0.0], [5.7e3, 13.0, 0.0]), 0.95),
-            Class::Font => (([7.1e3, 10.2, 0.05], [7.7e3, 9.6, 0.22]), 0.997),
-            Class::Image => (([7.7e3, 8.4, 0.11], [7.1e3, 11.1, 0.07]), 0.945),
-            Class::ObjStm => (([5.7e3, 11.9, 0.04], [6.9e3, 12.6, 0.07]), 0.915),
-            Class::XRef => (([7.9e3, 15.7, 0.2], [5.2e3, 18.0, 0.22]), 0.955),
-            Class::Data => (([5.1e3, 10.9, 0.63], [8.6e3, 8.0, 1.27]), 1.01),
+            Class::Content => (([4.8e3, 13.1, 0.0], [5.7e3, 13.7, 0.0]), 0.95),
+            Class::Font => (([7.1e3, 12.1, 0.05], [7.7e3, 10.3, 0.22]), 0.997),
+            Class::Image => (([7.7e3, 10.3, 0.11], [7.1e3, 11.8, 0.07]), 0.945),
+            Class::ObjStm => (([5.7e3, 13.8, 0.04], [6.9e3, 13.3, 0.07]), 0.915),
+            Class::XRef => (([7.9e3, 17.6, 0.2], [5.2e3, 18.7, 0.22]), 0.955),
+            Class::Data => (([5.1e3, 12.8, 0.63], [8.6e3, 8.7, 1.27]), 1.01),
         }
     }
 
     /// Token mode for images coded as pixels.
-    pub const TOK_PIXELS: (Time, f64) = (([6.0e3, 13.4, 0.10], [7.3e3, 13.4, 0.06]), 0.846);
+    pub const TOK_PIXELS: (Time, f64) = (([6.0e3, 15.3, 0.10], [7.3e3, 14.1, 0.06]), 0.846);
 
     /// flate-recons' fast representation; the size is the pool's share and the metadata.
     pub fn full(c: Class) -> (Time, f64) {
@@ -295,7 +309,8 @@ fn encrypted(file: &[u8]) -> bool {
 }
 
 /// The inflated size of a FlateDecode stream, from its dictionary or a prior.
-fn plain_estimate(d: &Obj, c: Class, len: usize) -> f64 {
+fn plain_estimate(d: &Obj, c: Class, data: &[u8]) -> f64 {
+    let len = data.len();
     let int = |k: &[u8]| d.get(k).and_then(Obj::as_int).filter(|&v| v > 0);
     let parms = d.get(b"DecodeParms").map(|p| match p {
         Obj::Array(a) => a.first().cloned().unwrap_or(Obj::Null),
@@ -320,6 +335,12 @@ fn plain_estimate(d: &Obj, c: Class, len: usize) -> f64 {
         Class::Font => int(b"Length1").map(|l| (l + int(b"Length2").unwrap_or(0) + int(b"Length3").unwrap_or(0)) as f64),
         _ => None,
     };
+    // Else the first block's codes tell, except for fonts and other data (where the class
+    // is closer: `examples/expansion.rs`).
+    let est = est.or_else(|| match c {
+        Class::Font | Class::Data => None,
+        _ => flate::expansion(data).map(|e| e * len as f64),
+    });
     est.filter(|&e| e < len as f64 * 1032.0)
         .unwrap_or(len as f64 * cost::expansion(c))
 }
@@ -364,11 +385,14 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
                 let g = (c == Class::Image).then(|| image::geometry(&s.dict, &mut objs)).flatten();
                 let plain = match g {
                     Some(g) => ((g.row() + (g.predictor >= 10) as usize) * g.height as usize) as f64,
-                    None => plain_estimate(&s.dict, c, data.len()),
+                    None => plain_estimate(&s.dict, c, data),
                 };
                 Plan::Flate(c, plain, RAW, g)
             }
-            (None, Filter::Dct) => Plan::Jpeg(image::jpeg_progressive(data).unwrap_or(false), false),
+            (None, Filter::Dct) => {
+                let (prog, blocks) = image::jpeg_frame(data).unwrap_or((false, 0));
+                Plan::Jpeg(prog, blocks, false)
+            },
             _ => Plan::Raw,
         };
         covered += data.len();
@@ -380,7 +404,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     }
     let skel_len = file.len() - covered;
     let budget = if opts.speed.is_finite() {
-        file.len() as f64 * 1e3 / opts.speed
+        file.len() as f64 * 1e3 / (opts.speed * cost::MARGIN)
     } else {
         f64::INFINITY
     };
@@ -473,6 +497,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
                 let p = png_recons::compress(&image::wrap(g.width, g.height, ct, depth, data));
                 st.times[3] += t.elapsed().as_secs_f64();
                 if p.len() < data.len() {
+                    plain_n = (g.row() + 1) * g.height as usize;
                     table.extend_from_slice(&[PNG, ct, depth]);
                     varint::put(&mut table, g.width as u64);
                     varint::put(&mut table, g.height as u64);
@@ -487,11 +512,12 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
                     (RAW, it.len, it.len)
                 }
             }
-            Plan::Jpeg(_, true) => {
+            Plan::Jpeg(_, blocks, true) => {
                 let t = std::time::Instant::now();
                 let p = jpeg_recons::container::compress(data);
                 st.times[3] += t.elapsed().as_secs_f64();
                 if p.len() < data.len() {
+                    plain_n = blocks as usize;
                     table.push(JPEG);
                     varint::put(&mut table, p.len() as u64);
                     jpeg.extend_from_slice(&p);
@@ -516,7 +542,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
         e.2 += out_len;
         // Pixel streams count as of no class, progressive JPEGs as images.
         let ci = match it.plan {
-            Plan::Jpeg(true, _) => Class::Image as usize,
+            Plan::Jpeg(true, ..) => Class::Image as usize,
             Plan::Flate(_, _, TOK, Some(g)) if mode == TOK && pixels(&g).is_some() => 6,
             Plan::Flate(c, ..) => c as usize,
             _ => 6,
@@ -538,6 +564,15 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     let (tok, tok_sizes) = tokens.finish();
     st.class_out[TOK as usize] = tok_sizes;
     st.tok_finish = t.elapsed().as_secs_f64();
+    // The token items' share of it, by bytes, for the cost fit.
+    let tok_bytes: usize = st.items.iter().filter(|i| i.0 == TOK).map(|i| i.2).sum();
+    if tok_bytes > 0 {
+        let per = st.tok_finish / tok_bytes as f64;
+        for i in st.items.iter_mut().filter(|i| i.0 == TOK) {
+            i.4 += per * i.2 as f64;
+            st.cost[TOK as usize][i.1 as usize].secs += per * i.2 as f64;
+        }
+    }
     let mut out = Vec::with_capacity(file.len() / 2);
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&[VERSION, 1]);
@@ -592,9 +627,9 @@ fn choose(items: &mut [Item], budget: f64, opts: &Options) -> f64 {
                     v.push((PNG, len * cost::PNG_RATIO, cost::time(&cost::PNG, len, plain)));
                 }
             }
-            Plan::Jpeg(prog, _) => {
-                let (t, r) = if prog { (cost::JPEG_PROG, cost::JPEG_PROG_RATIO) } else { (cost::JPEG, cost::JPEG_RATIO) };
-                v.push((JPEG, len * r, cost::time(&t, len, 0.0)))
+            Plan::Jpeg(prog, blocks, _) => {
+                let (t, r) = if prog { (cost::JPEG_PROG, cost::JPEG_PROG_RATIO) } else { (cost::JPEG, cost::jpeg_ratio(len)) };
+                v.push((JPEG, len * r, cost::time(&t, len, blocks as f64)))
             }
             _ => continue,
         }
@@ -627,7 +662,7 @@ fn choose(items: &mut [Item], budget: f64, opts: &Options) -> f64 {
         spent += v.iter().find(|o| o.0 == m).map_or(0.0, |o| o.2);
         items[*i].plan = match (items[*i].plan, m) {
             (Plan::Flate(c, p, _, g), m) => Plan::Flate(c, p, m, g),
-            (Plan::Jpeg(prog, _), m) => Plan::Jpeg(prog, m == JPEG),
+            (Plan::Jpeg(prog, b, _), m) => Plan::Jpeg(prog, b, m == JPEG),
             (p, _) => p,
         };
     }

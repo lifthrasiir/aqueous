@@ -163,8 +163,8 @@ pub fn unwrap(png: &[u8]) -> Option<&[u8]> {
 }
 
 /// Whether a JPEG is progressive (its first frame header is SOF2, SOF6, SOF10 or SOF14),
-/// from its markers; `None` if no frame header is found.
-pub fn jpeg_progressive(d: &[u8]) -> Option<bool> {
+/// and its number of 8×8 blocks, from its markers; `None` if no frame header is found.
+pub fn jpeg_frame(d: &[u8]) -> Option<(bool, u64)> {
     let mut i = 2;
     if d.get(..2)? != [0xff, 0xd8] {
         return None;
@@ -179,7 +179,7 @@ pub fn jpeg_progressive(d: &[u8]) -> Option<bool> {
             continue;
         }
         if (0xc0..=0xcf).contains(&m) && !matches!(m, 0xc4 | 0xc8 | 0xcc) {
-            return Some(matches!(m, 0xc2 | 0xc6 | 0xca | 0xce));
+            return Some((matches!(m, 0xc2 | 0xc6 | 0xca | 0xce), jpeg_blocks(d.get(i + 4..)?).unwrap_or(0)));
         }
         if matches!(m, 0xd8 | 0x01 | 0xd0..=0xd7) {
             i += 2;
@@ -189,4 +189,24 @@ pub fn jpeg_progressive(d: &[u8]) -> Option<bool> {
         i += 2 + len;
     }
     None
+}
+
+/// The number of 8×8 blocks of a frame, from its header (after the length).
+fn jpeg_blocks(h: &[u8]) -> Option<u64> {
+    let height = u16::from_be_bytes([*h.get(1)?, *h.get(2)?]) as u64;
+    let width = u16::from_be_bytes([*h.get(3)?, *h.get(4)?]) as u64;
+    let n = *h.get(5)? as usize;
+    let comps = h.get(6..6 + 3 * n)?;
+    let samp = |c: &[u8]| ((c[1] >> 4).max(1) as u64, (c[1] & 15).max(1) as u64);
+    let hmax = comps.chunks_exact(3).map(|c| samp(c).0).max()?;
+    let vmax = comps.chunks_exact(3).map(|c| samp(c).1).max()?;
+    Some(
+        comps
+            .chunks_exact(3)
+            .map(|c| {
+                let (hs, vs) = samp(c);
+                (width * hs).div_ceil(8 * hmax) * (height * vs).div_ceil(8 * vmax)
+            })
+            .sum(),
+    )
 }

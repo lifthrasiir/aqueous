@@ -32,30 +32,33 @@ file, summed (`scripts/baseline.sh`): zstd 1.5.7 `--single-thread`, xz `-9 -T1`.
 
 | set | files | size | **pdfr** | compress | decompress | zstd -3 | zstd -19 | xz -9 |
 |---|---|---|---|---|---|---|---|---|
-| home (code charts, papers) | 20 | 314 MB | **0.8682** | 106 MB/s | 157 MB/s | 0.9145 | 0.8900 | 0.8879 |
-| cc (Common Crawl) | 1,000 | 1,379 MB | **0.8566** | 136 MB/s | 163 MB/s | 0.9073 | 0.8879 | 0.8887 |
-| arxiv | 20 | 94 MB | **0.8430** | 122 MB/s | 138 MB/s | 0.9021 | 0.8831 | 0.8828 |
+| home (code charts, papers) | 20 | 314 MB | **0.8763** | 114 MB/s | 174 MB/s | 0.9145 | 0.8900 | 0.8879 |
+| cc (Common Crawl) | 1,000 | 1,379 MB | **0.8661** | 159 MB/s | 192 MB/s | 0.9073 | 0.8879 | 0.8887 |
+| arxiv | 20 | 94 MB | **0.8356** | 125 MB/s | 145 MB/s | 0.9021 | 0.8831 | 0.8828 |
 
 The speed target binds: everything coded costs more per byte than the budget allows on
 average, so the ratio is what fits in it. With no limit (`-s inf`) CC gives **0.7713** at
-35 / 57 MB/s. The budget is per file (below), and most files' best coding fits within
-it, so the sets run faster than the target overall; 15% of CC's bytes are in files that
-compress slightly slower than 100 MB/s (estimates are within about 10%; tiny files have
-fixed costs). `-s 115` brings that to 4% for 0.8669.
+35 / 57 MB/s. The target is met per file, not just per set: the budget is per file
+(below) and planned with a 10% margin for the scatter of the estimates. Files below
+100 MB/s hold 1.4% of CC's bytes compressing (70 files, 40 of them under 100 KB, where
+fixed costs dominate) and 0.01% decompressing, 0.05% of home's and none of arXiv's.
+Without the margin (`-s 91`) CC gives 0.8604 with 9.7% of its bytes in slow files.
 
 What each mode does on CC at the default target (ns per byte of stream, compressing /
 decompressing; output / input):
 
 | mode | streams | bytes | compress | decompress | ratio |
 |---|---|---|---|---|---|
-| tok, pixels (images without predictor) | 3,217 | 113 MB | 14.5 | 14.1 | 0.841 |
-| tok, content streams | 4,229 | 42 MB | 12.3 | 13.1 | 0.952 |
-| png (PNG-predicted images, png-recons) | 85 | 97 MB | 13.9 | 13.7 | 0.778 |
-| jpeg (jpeg-recons) | 2,060 | 262 MB | 16.3 | 15.4 | about 0.80 |
-| full, fonts (flate-recons fast) | 740 | 11 MB | 34.7 | 24.8 | 0.857 |
-| full, content streams | 564 | 1.6 MB | 73.9 | 51.2 | 0.902 |
+| tok, pixels (images without predictor) | 2,607 | 88 MB | 16.4 | 14.2 | 0.841 |
+| tok, content streams | 3,061 | 29 MB | 15.2 | 13.5 | 0.951 |
+| png (PNG-predicted images, png-recons) | 51 | 80 MB | 13.1 | 12.5 | 0.787 |
+| jpeg (jpeg-recons) | 1,639 | 253 MB | 15.4 | 14.7 | about 0.80 |
+| full, fonts (flate-recons fast) | 747 | 11 MB | 35.1 | 24.8 | 0.864 |
+| full, content streams | 633 | 1.5 MB | 78.6 | 51.8 | 0.885 |
 | dup | 7,627 | 30 MB | 0 | 0 | 0 |
-| raw (not worth its time) | 59,500 | 691 MB | 0.1 | 0 | 1 |
+| raw (not worth its time) | 61,883 | 763 MB | 0.1 | 0 | 1 |
+
+(Token mode's times include its share of the per-file final pass and decoder setup.)
 
 ## How
 
@@ -68,15 +71,19 @@ code everything it can; it plans:
 
 - Every stream gets the modes it allows, each with an estimated size and time: a cost
   model fitted to per-item measurements of the corpus (`PDFR_CALIB=FILE pdfr bench`, then
-  `scripts/fit-costs.py`; ns per item, per stream byte and per inflated byte, each way).
-  Inflated sizes come from the dictionary (images' geometry, fonts' `/Length1`) or a
-  per-class expansion prior, so planning inflates nothing.
+  `scripts/fit-costs.py`; ns per item, per stream byte and per inflated byte, each way;
+  for JPEG, per 8×8 block from the frame header instead, which halves the error).
+  Inflated sizes come from the dictionary (images' geometry, fonts' `/Length1`), else
+  from the first DEFLATE block's code lengths (expected bytes per bit with probabilities
+  2^-length: a third of the class prior's error on content streams), else a per-class
+  prior; planning inflates nothing.
 - The mode of each stream minimises *size + λ·time*, with the smallest λ that keeps the
   file's total time (the larger of compression and decompression per item) within its
-  budget, `file size / target speed`. The budget is per file, so every file meets the
-  target on its own (by the estimates; they are within a few percent of measured times
-  over each set); the estimates, not timing, decide, so the output does not depend on the
-  machine's load.
+  budget, `file size / (1.1 × target speed)`. The estimates are within a few percent of
+  measured times over each set and scatter by about 10% per file (content the features
+  do not see: flate-recons on some encoders' streams, JPEG entropy), hence the margin.
+  The estimates, not timing, decide, so the output does not depend on the machine's
+  load.
 
 ### Streams (`scan.rs`, `kind.rs`)
 
