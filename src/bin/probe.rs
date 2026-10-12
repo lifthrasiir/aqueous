@@ -7,7 +7,7 @@ fn main() {
         let file = std::fs::read(&p).unwrap();
         let Some((chunks, _)) = png::chunks(&file) else { continue };
         let idat: Vec<u8> = chunks.iter().filter(|c| &c.kind == b"IDAT").flat_map(|c| c.data.iter().copied()).collect();
-        let f = flate_recons::fast::inflate::parse(&idat[2..]).unwrap();
+        let f = flate_recons::inflate::parse(&idat[2..]).unwrap();
         png_bytes += file.len();
         for t in &f.tokens {
             match t {

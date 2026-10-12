@@ -24,7 +24,7 @@
 use crate::filter;
 use crate::rans::{self, BitR, BitW, Decoder, Tables};
 use flate_recons::deflate::Token;
-use flate_recons::fast::inflate::{self, Sink};
+use flate_recons::inflate::{self, Sink};
 use flate_recons::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
 
 #[derive(Debug, Clone, Copy)]
@@ -1234,7 +1234,7 @@ fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, payload: &[u8])
 
 /// Rebuilds the data and tokens of `spans` (the decompressor's side); `buf` is the padded
 /// data, `raw` `g.raw_len` zeros (for `Kind::Image`).
-/// Symbol frequencies of a Huffman block as `flate_recons::fast::header` counts them.
+/// Symbol frequencies of a Huffman block as `flate_recons::header` counts them.
 pub type Freqs = ([u32; 288], [u32; 32]);
 
 /// Rebuilds the data and tokens of `spans`, and per span the symbol frequencies (zeros for

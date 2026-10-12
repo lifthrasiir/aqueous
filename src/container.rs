@@ -27,7 +27,7 @@ use crate::rans::{BitR, BitW};
 use crate::{Error, Result};
 use flate_recons::bits::{BitReader, BitWriter};
 use flate_recons::deflate::{Block, Body, Stream, Token};
-use flate_recons::fast::header;
+use flate_recons::header;
 use recons_common::varint;
 
 const MAGIC: &[u8; 4] = b"PNGR";
@@ -744,7 +744,7 @@ fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
         let workers = threads.min(jobs.len());
         let res = par_map(jobs.len(), workers, |i| {
             let j = jobs[i].lock().unwrap().take().unwrap();
-            flate_recons::fast::write::write(&j.stream, &j.local, j.tokens, j.d).map(|w| (j.zhdr, w))
+            flate_recons::write::write(&j.stream, &j.local, j.tokens, j.d).map(|w| (j.zhdr, w))
         });
         for r in res {
             let (zhdr, w) = r?;
@@ -769,7 +769,7 @@ fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
             let d = data.get(pos..pos + bytes).ok_or_else(crate::corrupt)?;
             out.extend_from_slice(&s.zhdr);
             let stream = Stream { blocks: s.blocks, tail_pad: s.tail_pad, trailing: s.trailing };
-            out.extend_from_slice(&flate_recons::fast::write::write(&stream, &local, &tokens[t0..t1], d)?);
+            out.extend_from_slice(&flate_recons::write::write(&stream, &local, &tokens[t0..t1], d)?);
             b0 += nb;
             pos += bytes;
         }
