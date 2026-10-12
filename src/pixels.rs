@@ -32,8 +32,8 @@ fn inflate(zlib: &[u8]) -> Result<Vec<u8>> {
     if zlib.len() < 2 {
         return err("short zlib stream");
     }
-    let (data, _) = flate_recons::deconstruct(&zlib[2..]).map_err(|e| Error(format!("zip channel: {e}")))?;
-    Ok(data)
+    let f = flate_recons::inflate::parse(&zlib[2..]).map_err(|e| Error(format!("zip channel: {e}")))?;
+    Ok(f.data)
 }
 
 /// Undoes the row-wise delta of "ZIP with prediction".
