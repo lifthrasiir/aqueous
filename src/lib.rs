@@ -12,7 +12,6 @@ pub mod block;
 pub mod container;
 mod corner;
 pub mod dec;
-pub mod mem;
 pub mod num;
 mod recent;
 pub mod style;
@@ -37,3 +36,5 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn corrupt() -> Error {
     Error("corrupt input")
 }
+
+pub use recons_common::mem;

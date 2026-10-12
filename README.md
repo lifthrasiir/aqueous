@@ -232,7 +232,7 @@ target/release/objr fuzz -n 200 $(find corpus -name '*.obj' -size -5M)
 | `src/recent.rs` | Equal-line references, line predictor window |
 | `src/corner.rs` | Face corner indices |
 | `src/ans.rs` | rANS for value streams |
-| `src/varint.rs`, `src/mem.rs` | LEB128, heap accounting |
+| `src/varint.rs` | Stream cursor (LEB128 from `recons-common`); heap accounting is `recons_common::mem` |
 | `src/bin/objr.rs` | Command-line tool, bench, stats, fuzz |
 | `examples/` | Experiments behind the choices above |
 | `scripts/` | Corpus, baselines, comparison, profiling (`profile.py` over samply) |

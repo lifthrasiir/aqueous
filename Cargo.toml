@@ -6,6 +6,7 @@ description = "Lossless Wavefront OBJ recompression: bit-exact reconstruction fr
 publish = false
 
 [dependencies]
+recons-common = { path = "../recons-common" }
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memchr = "2"
