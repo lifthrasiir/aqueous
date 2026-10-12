@@ -256,7 +256,9 @@ impl Model {
         if sum > 0 {
             // Make them sum to TOTAL, on the most frequent symbol.
             let total: u32 = freq.iter().sum();
-            let big = (0..ALPHABET).max_by_key(|&s| (freq[s], usize::MAX - s)).unwrap();
+            let big = (0..ALPHABET)
+                .max_by_key(|&s| (freq[s], usize::MAX - s))
+                .unwrap();
             freq[big] = freq[big] + TOTAL - total;
         }
         let mut cum = [0u32; ALPHABET + 1];
@@ -280,7 +282,13 @@ impl Model {
                 enc[s] = Enc::new(cum[s], freq[s]);
             }
         }
-        Model { freq, cum, q, lut, enc }
+        Model {
+            freq,
+            cum,
+            q,
+            lut,
+            enc,
+        }
     }
 
     /// The rounded frequencies: whether there are any, the last symbol used, then for every
@@ -305,7 +313,9 @@ impl Model {
     fn table_bits(&self) -> f64 {
         match self.q.iter().rposition(|&q| q > 0) {
             None => 1.0,
-            Some(last) => 8.0 + (last + 1) as f64 + 6.0 * self.q.iter().filter(|&&q| q > 0).count() as f64,
+            Some(last) => {
+                8.0 + (last + 1) as f64 + 6.0 * self.q.iter().filter(|&&q| q > 0).count() as f64
+            }
         }
     }
 
@@ -348,18 +358,28 @@ impl Model {
     pub fn from_distribution(p: &[f64]) -> Model {
         let mut q = [0u8; ALPHABET];
         for (x, &p) in q.iter_mut().zip(p) {
-            *x = 1 + (2.0 * (p * (1u64 << 24) as f64).max(1.0).log2()).round().min(62.0) as u8;
+            *x = 1
+                + (2.0 * (p * (1u64 << 24) as f64).max(1.0).log2())
+                    .round()
+                    .min(62.0) as u8;
         }
         Model::from_q(q)
     }
 
     /// The rounded frequencies as text (see [`Model::parse`]).
     pub fn to_text(&self) -> String {
-        self.q.iter().map(|q| q.to_string()).collect::<Vec<_>>().join(" ")
+        self.q
+            .iter()
+            .map(|q| q.to_string())
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     pub fn parse(s: &str) -> Option<Model> {
-        let v: Vec<u8> = s.split_whitespace().map(|x| x.parse().ok()).collect::<Option<_>>()?;
+        let v: Vec<u8> = s
+            .split_whitespace()
+            .map(|x| x.parse().ok())
+            .collect::<Option<_>>()?;
         if v.len() != ALPHABET || v.iter().any(|&q| q == 0 || q > 63) {
             return None;
         }
@@ -376,8 +396,7 @@ impl Model {
         (0..ALPHABET)
             .filter(|&s| c.0[s] > 0)
             .map(|s| {
-                c.0[s] as f64
-                    * ((TOTAL as f64 / self.freq[s] as f64).log2() + extra_bits(s) as f64)
+                c.0[s] as f64 * ((TOTAL as f64 / self.freq[s] as f64).log2() + extra_bits(s) as f64)
             })
             .sum()
     }
@@ -560,7 +579,13 @@ mod tests {
     fn codes_round_trip() {
         let vals: Vec<u32> = (0..3000u32).map(|i| (i * 7919) % (1 + i % 300)).collect();
         let skewed: Vec<u32> = (0..5000u32).map(|i| (i % 97 == 0) as u32).collect();
-        for set in [&vals[..], &skewed[..], &[5, 5, 5][..], &[][..], &[1, 100000][..]] {
+        for set in [
+            &vals[..],
+            &skewed[..],
+            &[5, 5, 5][..],
+            &[][..],
+            &[1, 100000][..],
+        ] {
             // Two fields interleaved.
             let mut c = [Counts::default(), Counts::default()];
             for (i, &v) in set.iter().enumerate() {
@@ -578,7 +603,10 @@ mod tests {
             }
             let body = cw.finish();
             let mut r = BitReader::new(&table);
-            let m = [Model::read(&mut r, &def).unwrap(), Model::read(&mut r, &def).unwrap()];
+            let m = [
+                Model::read(&mut r, &def).unwrap(),
+                Model::read(&mut r, &def).unwrap(),
+            ];
             let mut cr = Reader::new(&body).unwrap();
             for (i, &v) in set.iter().enumerate() {
                 assert_eq!(cr.get(&m[i % 2]).unwrap(), v);
@@ -586,7 +614,11 @@ mod tests {
             }
             if set == &skewed[..] {
                 let ideal = c[0].cost() + c[1].cost() + 3.0 * set.len() as f64;
-                assert!((body.len() * 8) as f64 <= ideal * 1.05 + 64.0, "{} vs {ideal}", body.len() * 8);
+                assert!(
+                    (body.len() * 8) as f64 <= ideal * 1.05 + 64.0,
+                    "{} vs {ideal}",
+                    body.len() * 8
+                );
             }
         }
     }

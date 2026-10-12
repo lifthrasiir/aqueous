@@ -21,7 +21,11 @@ pub fn usage(bin: &str, ext: &str, what: &str) -> String {
 
 /// Options (the last value of each) and a single positional argument; flags in `switches`
 /// take no value.
-fn parse(args: &[String], with_value: &[&str], switches: &[&str]) -> Res<(Vec<(String, String)>, String)> {
+fn parse(
+    args: &[String],
+    with_value: &[&str],
+    switches: &[&str],
+) -> Res<(Vec<(String, String)>, String)> {
     let mut o = vec![];
     let mut path = None;
     let mut it = args.iter();
@@ -41,7 +45,10 @@ fn parse(args: &[String], with_value: &[&str], switches: &[&str]) -> Res<(Vec<(S
 }
 
 fn get<'a>(o: &'a [(String, String)], k: &str) -> Option<&'a str> {
-    o.iter().rev().find(|(x, _)| x == k).map(|(_, v)| v.as_str())
+    o.iter()
+        .rev()
+        .find(|(x, _)| x == k)
+        .map(|(_, v)| v.as_str())
 }
 
 fn rate(bytes: usize, secs: f64) -> String {

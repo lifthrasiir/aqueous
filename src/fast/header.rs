@@ -25,7 +25,12 @@ pub fn freqs(tokens: &[Token]) -> ([u32; 288], [u32; 32]) {
         match t {
             Token::Lit(b) => lf[b as usize] += 1,
             Token::Match { len, dist, alt258 } => {
-                lf[257 + if alt258 { 27 } else { LEN_CODE[len as usize] as usize }] += 1;
+                lf[257
+                    + if alt258 {
+                        27
+                    } else {
+                        LEN_CODE[len as usize] as usize
+                    }] += 1;
                 df[dist_code(dist as usize)] += 1;
             }
         }
@@ -87,7 +92,10 @@ fn builder(k: usize, lf: &[u32], df: &[u32]) -> Option<(Vec<u8>, Vec<u8>)> {
         }
         22 => {
             let wide = |f: &[u32]| f.iter().map(|&x| x as u64).collect::<Vec<u64>>();
-            (trees::package_merge(&wide(lf), 15), trees::package_merge(&wide(df), 15))
+            (
+                trees::package_merge(&wide(lf), 15),
+                trees::package_merge(&wide(df), 15),
+            )
         }
         _ => return None,
     })
@@ -167,7 +175,9 @@ impl Recipe {
     /// What the writer found out of the headers so far, as a key: the candidate lengths if
     /// exact (else 255), the run-length coding and the code-length code.
     pub fn key(&self) -> u32 {
-        (if self.exact { self.lens as u32 } else { 255 }) | (self.ops as u32) << 8 | (self.cl as u32) << 16
+        (if self.exact { self.lens as u32 } else { 255 })
+            | (self.ops as u32) << 8
+            | (self.cl as u32) << 16
     }
 }
 
@@ -228,12 +238,21 @@ fn makes(recipe: Recipe, ll: &[u8], d: &[u8], h: &DynHeader) -> bool {
     };
     let hclen = natural_hclen(&cl);
     hclen == h.hclen as usize
-        && CL_ORDER.iter().enumerate().all(|(i, &s)| h.cl_lens[s] == if i < hclen { cl[s] } else { 0 })
+        && CL_ORDER
+            .iter()
+            .enumerate()
+            .all(|(i, &s)| h.cl_lens[s] == if i < hclen { cl[s] } else { 0 })
 }
 
 /// Writes `h`, the header of a block whose symbol frequencies are `lf` and `df` (see
 /// [`freqs`]); `recipe` carries over from block to block.
-pub fn write(w: &mut BitWriter, lf: &[u32; 288], df: &[u32; 32], h: &DynHeader, recipe: &mut Recipe) {
+pub fn write(
+    w: &mut BitWriter,
+    lf: &[u32; 288],
+    df: &[u32; 32],
+    h: &DynHeader,
+    recipe: &mut Recipe,
+) {
     let (lf, df) = (&lf[..], &df[..]);
     let (ll, d) = lens_candidate(recipe.lens, lf, df).unwrap();
     if makes(*recipe, &ll, &d, h) {
@@ -271,7 +290,12 @@ pub fn write(w: &mut BitWriter, lf: &[u32; 288], df: &[u32; 32], h: &DynHeader, 
     let (_, k, (ll, d)) = best.unwrap();
     put_gamma(w, k as u64);
     recipe.lens = k;
-    put_field(w, hlit as u32 - 257, last_nonzero(&ll).max(257) as u32 - 257, 5);
+    put_field(
+        w,
+        hlit as u32 - 257,
+        last_nonzero(&ll).max(257) as u32 - 257,
+        5,
+    );
     put_field(w, hdist as u32 - 1, last_nonzero(&d).max(1) as u32 - 1, 5);
     let pred = cut(&ll, &d, hlit, hdist);
     let diffs: Vec<usize> = (0..pred.len()).filter(|&i| h.lens[i] != pred[i]).collect();
@@ -337,7 +361,12 @@ pub fn read(r: &mut BitReader, tokens: &[Token], recipe: &mut Recipe) -> Result<
 
 /// Reads a header written by [`write`] for a block whose symbol frequencies (see [`freqs`])
 /// the caller counted.
-pub fn read_freqs(r: &mut BitReader, lf: &[u32; 288], df: &[u32; 32], recipe: &mut Recipe) -> Result<DynHeader> {
+pub fn read_freqs(
+    r: &mut BitReader,
+    lf: &[u32; 288],
+    df: &[u32; 32],
+    recipe: &mut Recipe,
+) -> Result<DynHeader> {
     let (lf, df) = (*lf, *df);
     if r.bits(1)? == 1 {
         return build(*recipe, &lf, &df).ok_or(Error::Corrupt);
@@ -380,8 +409,11 @@ pub fn read_freqs(r: &mut BitReader, lf: &[u32; 288], df: &[u32; 32], recipe: &m
     if k < 2 {
         recipe.cl = k;
     }
-    let hclen = get_field(r, natural_hclen(&cands[k.min(1) * (k < 2) as usize]) as u32 - 4, 4)?
-        as usize
+    let hclen = get_field(
+        r,
+        natural_hclen(&cands[k.min(1) * (k < 2) as usize]) as u32 - 4,
+        4,
+    )? as usize
         + 4;
     let order = &CL_ORDER[..hclen];
     let mut cl_lens = [0u8; 19];

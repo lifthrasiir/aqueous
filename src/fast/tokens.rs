@@ -13,9 +13,9 @@
 //! prediction (kind, length), and its distance as an entry of the bucket or verbatim.
 
 use super::code::{self, Counts};
+use super::table::{Cands, NoTable, Search, Table, common};
 use crate::bits::{BitReader, BitWriter};
 use crate::deflate::Token;
-use super::table::{Cands, NoTable, Search, Table, common};
 use crate::matchfind::{MAX_MATCH, WINDOW};
 use crate::{Error, Result};
 
@@ -405,7 +405,11 @@ pub fn code_range<C: Corr>(
     }
     macro_rules! by_key {
         ($w:literal) => {
-            if rule.key == 4 { by_long!($w, 4) } else { by_long!($w, 3) }
+            if rule.key == 4 {
+                by_long!($w, 4)
+            } else {
+                by_long!($w, 3)
+            }
         };
     }
     match rule.ways {
@@ -577,7 +581,15 @@ impl Recorder {
     }
 
     #[inline]
-    fn payload(&mut self, t: &mut dyn Cands, d: &[u8], p: usize, pred: Token, class: usize, a: Token) {
+    fn payload(
+        &mut self,
+        t: &mut dyn Cands,
+        d: &[u8],
+        p: usize,
+        pred: Token,
+        class: usize,
+        a: Token,
+    ) {
         let Token::Match { len, dist, alt258 } = a else {
             self.put(KIND + class, K_LIT);
             return;

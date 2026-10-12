@@ -21,14 +21,14 @@
 //! - headers: each dynamic block's Huffman header, against zlib's trees for its tokens.
 
 pub mod code;
+pub mod header;
 pub mod inflate;
 #[doc(hidden)]
 pub mod table;
-pub mod write;
-pub mod header;
 pub mod tokens;
 #[doc(hidden)]
 pub mod trees;
+pub mod write;
 
 use crate::bits::{BitReader, BitWriter};
 use crate::deflate::{self, Block, Body, Stream, Token};
@@ -100,12 +100,20 @@ pub fn catalog() -> Vec<Rule> {
 
 fn builtin() -> &'static [Rule] {
     static C: std::sync::OnceLock<Vec<Rule>> = std::sync::OnceLock::new();
-    C.get_or_init(|| parse_catalog(include_str!("../../model/rules.txt")).expect("built-in rules are valid").0)
+    C.get_or_init(|| {
+        parse_catalog(include_str!("../../model/rules.txt"))
+            .expect("built-in rules are valid")
+            .0
+    })
 }
 
 fn builtin_map() -> &'static Map {
     static M: std::sync::OnceLock<Map> = std::sync::OnceLock::new();
-    M.get_or_init(|| parse_catalog(include_str!("../../model/rules.txt")).unwrap().1)
+    M.get_or_init(|| {
+        parse_catalog(include_str!("../../model/rules.txt"))
+            .unwrap()
+            .1
+    })
 }
 
 /// The rules (indices in a catalog) for fingerprints: one, or two to try on a short prefix.
@@ -124,7 +132,9 @@ pub fn parse_catalog(text: &str) -> Result<(Vec<Rule>, Map)> {
             let bad = || Error::Param(format!("bad map line {l:?}"));
             let mut it = m.split(' ');
             let k = u64::from_str_radix(it.next().ok_or_else(bad)?, 16).map_err(|_| bad())?;
-            let v: Vec<u16> = it.map(|v| v.parse().map_err(|_| bad())).collect::<Result<_>>()?;
+            let v: Vec<u16> = it
+                .map(|v| v.parse().map_err(|_| bad()))
+                .collect::<Result<_>>()?;
             if v.is_empty() {
                 return Err(bad());
             }
@@ -159,7 +169,9 @@ fn headers(f: &Flat) -> (Vec<u8>, Option<u32>) {
 fn fingerprint(f: &Flat, recipe: u32) -> (u64, u64) {
     let (mut lf, mut df) = ([0u64; 3], [0u64; 30]);
     for (l, d) in &f.stats.freqs {
-        lf.iter_mut().zip(&l[257..]).for_each(|(a, &b)| *a += b as u64);
+        lf.iter_mut()
+            .zip(&l[257..])
+            .for_each(|(a, &b)| *a += b as u64);
         df.iter_mut().zip(d).for_each(|(a, &b)| *a += b as u64);
     }
     let n: u64 = df.iter().sum();
@@ -176,10 +188,12 @@ fn fingerprint(f: &Flat, recipe: u32) -> (u64, u64) {
     } else {
         5
     };
-    let window = [256, 1024, 2048, 4096, 8192, 16384, 32506, 32510, 32767, 32768]
-        .iter()
-        .position(|&w| f.stats.max_dist as usize <= w)
-        .unwrap_or(10);
+    let window = [
+        256, 1024, 2048, 4096, 8192, 16384, 32506, 32510, 32767, 32768,
+    ]
+    .iter()
+    .position(|&w| f.stats.max_dist as usize <= w)
+    .unwrap_or(10);
     // The token count of the first block, if the next has as many.
     let counts: Vec<usize> = f.starts.windows(2).map(|s| s[1] - s[0]).collect();
     let coded: Vec<usize> = f
@@ -201,8 +215,9 @@ fn fingerprint(f: &Flat, recipe: u32) -> (u64, u64) {
         .iter()
         .fold(0u64, |a, b| a | 1 << b.body.btype());
     let mix = |v: &[u64]| {
-        v.iter()
-            .fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ x).wrapping_mul(0x100_0000_01b3))
+        v.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| {
+            (h ^ x).wrapping_mul(0x100_0000_01b3)
+        })
     };
     let far = f.stats.far as u64;
     let coarse = mix(&[1, min_len, window as u64, far]);
@@ -352,7 +367,6 @@ pub fn deconstruct_report(raw: &[u8], opts: &Options) -> Result<(Vec<u8>, Vec<u8
     w.bits(w.pad_len(), 0);
     let main = w.finish();
 
-
     let secs = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64();
     let report = Report {
         times: [
@@ -395,7 +409,11 @@ fn choose_rule(f: &Flat, opts: &Options, fp: (u64, u64)) -> Result<Rule> {
         let Some(cands) = opts.map.get(&k) else {
             continue;
         };
-        let cands: Vec<Rule> = cands.iter().filter_map(|&i| rules.get(i as usize)).copied().collect();
+        let cands: Vec<Rule> = cands
+            .iter()
+            .filter_map(|&i| rules.get(i as usize))
+            .copied()
+            .collect();
         match cands[..] {
             [] => continue,
             [r] => return Ok(r),
@@ -530,14 +548,7 @@ impl Prepared {
         let mut rec = tokens::Recorder::default();
         rec.limit = limit;
         rec.count_only = true;
-        let r = tokens::code_range(
-            &mut rec,
-            &self.data,
-            rule,
-            &range,
-            Some(&self.tokens),
-            None,
-        );
+        let r = tokens::code_range(&mut rec, &self.data, rule, &range, Some(&self.tokens), None);
         r?;
         Ok(rec.cost())
     }
@@ -545,11 +556,7 @@ impl Prepared {
 
 /// A stream's [fingerprint] and the estimated cost in bits of each rule over the first
 /// `prefix` bytes of its data, for deriving rule catalogs.
-pub fn analyze(
-    raw: &[u8],
-    rules: &[Rule],
-    prefix: usize,
-) -> Result<((u64, u64), Vec<f64>, usize)> {
+pub fn analyze(raw: &[u8], rules: &[Rule], prefix: usize) -> Result<((u64, u64), Vec<f64>, usize)> {
     let f = Flat::new(raw, usize::MAX, 1, false)?;
     let fp = fingerprint(&f, headers(&f).1.unwrap_or(u32::MAX));
     let mut p = Prepared::from_flat(&f, prefix);
@@ -630,9 +637,15 @@ fn get_pad(r: &mut BitReader) -> Result<u8> {
 
 /// What [`write_blocks`] says of a block.
 enum Shape {
-    Stored { pad: u8, len: u16 },
+    Stored {
+        pad: u8,
+        len: u16,
+    },
     /// Fixed (1) or dynamic (2), with its token count (`None`: the remaining tokens).
-    Coded { btype: u8, count: Option<usize> },
+    Coded {
+        btype: u8,
+        count: Option<usize>,
+    },
 }
 
 struct Layout {
@@ -805,7 +818,11 @@ pub fn reconstruct_with_threads(data: &[u8], meta: &[u8], threads: usize) -> Res
         end = p;
     }
     // Stored blocks after the last token cover the rest of the data.
-    end += skips.iter().filter(|s| s.0 == total).map(|s| s.1).sum::<usize>();
+    end += skips
+        .iter()
+        .filter(|s| s.0 == total)
+        .map(|s| s.1)
+        .sum::<usize>();
     if end != n {
         return Err(Error::Corrupt);
     }

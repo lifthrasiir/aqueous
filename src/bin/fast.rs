@@ -121,23 +121,27 @@ fn png_idat(file: &[u8]) -> Res<Vec<u8>> {
 
 fn parse(args: &[String]) -> Res<()> {
     // Inputs: raw DEFLATE streams, with the files' sizes.
-    let (streams, inputs): (Vec<Vec<u8>>, f64) = if args.first().map(String::as_str) == Some("--png") {
-        let mut v = vec![];
-        let mut total = 0.0;
-        for f in &args[1..] {
-            let file = std::fs::read(f)?;
-            let z = png_idat(&file).map_err(|e| format!("{f}: {e}"))?;
-            v.push(z.get(2..).ok_or("empty IDAT")?.to_vec());
-            total += file.len() as f64;
-        }
-        (v, total)
-    } else {
-        let o = opts(args, &["-i", "-s"])?;
-        let samples = load(Path::new(one(&o, "-i", "cache/samples")), one(&o, "-s", "held"))?;
-        let v: Vec<Vec<u8>> = samples.into_iter().map(|s| s.raw).collect();
-        let total = v.iter().map(|s| s.len() as f64).sum();
-        (v, total)
-    };
+    let (streams, inputs): (Vec<Vec<u8>>, f64) =
+        if args.first().map(String::as_str) == Some("--png") {
+            let mut v = vec![];
+            let mut total = 0.0;
+            for f in &args[1..] {
+                let file = std::fs::read(f)?;
+                let z = png_idat(&file).map_err(|e| format!("{f}: {e}"))?;
+                v.push(z.get(2..).ok_or("empty IDAT")?.to_vec());
+                total += file.len() as f64;
+            }
+            (v, total)
+        } else {
+            let o = opts(args, &["-i", "-s"])?;
+            let samples = load(
+                Path::new(one(&o, "-i", "cache/samples")),
+                one(&o, "-s", "held"),
+            )?;
+            let v: Vec<Vec<u8>> = samples.into_iter().map(|s| s.raw).collect();
+            let total = v.iter().map(|s| s.len() as f64).sum();
+            (v, total)
+        };
     let mut best = f64::MAX;
     let mut data = 0;
     for _ in 0..7 {
@@ -244,7 +248,12 @@ fn eval(args: &[String]) -> Res<()> {
             let t1 = thread_cpu();
             let back = fast::reconstruct_with_threads(&data, &meta, 1).unwrap();
             let t2 = thread_cpu();
-            assert!(back == s.raw, "{} on {}: reconstruction differs", s.specs, s.source);
+            assert!(
+                back == s.raw,
+                "{} on {}: reconstruction differs",
+                s.specs,
+                s.source
+            );
             (s.raw.len(), r, meta.len(), t1 - t0, t2 - t1)
         })
         .collect();
@@ -304,12 +313,29 @@ fn eval(args: &[String]) -> Res<()> {
     }
     println!(
         "{:<24} {:>4} {:>9} {:>8} {:>7} | {:>6} {:>6} {:>7} | {:>6} | {:>6} {:>6} {:>6} {:>6} {:>6} | rules",
-        "backend", "n", "deflate", "meta", "%", "main", "hdrs", "corr", "miss%", "gap", "kind", "fresh", "delta", "rank"
+        "backend",
+        "n",
+        "deflate",
+        "meta",
+        "%",
+        "main",
+        "hdrs",
+        "corr",
+        "miss%",
+        "gap",
+        "kind",
+        "fresh",
+        "delta",
+        "rank"
     );
     let line = |name: &str, a: &Agg| {
         let mut rules: Vec<_> = a.rules.iter().collect();
         rules.sort_by_key(|r| std::cmp::Reverse(*r.1));
-        let rules: Vec<String> = rules.iter().take(2).map(|(k, v)| format!("{k}:{v}")).collect();
+        let rules: Vec<String> = rules
+            .iter()
+            .take(2)
+            .map(|(k, v)| format!("{k}:{v}"))
+            .collect();
         println!(
             "{name:<24} {:>4} {:>9} {:>8} {:>6.3}% | {:>6} {:>6} {:>7} | {:>6.2} | {:>6.0} {:>6.0} {:>6.0} {:>6.0} {:>6.0} | {}",
             a.n,
@@ -361,17 +387,24 @@ fn dimensions() -> Vec<Vec<Setter>> {
         dim(&[0u8, 5, 6, 8], |r, v| r.long = v),
         dim(&[false, true], |r, v| r.rank = v),
         dim(&[0u16, 4, 5, 6, 16, 32, 259], |r, v| r.inner = v),
-        dim(&[0u16, 4, 5, 6, 8, 16, 32, 64, 128, 258, 259], |r, v| r.lazy = v),
+        dim(&[0u16, 4, 5, 6, 8, 16, 32, 64, 128, 258, 259], |r, v| {
+            r.lazy = v
+        }),
         dim(&[0u8, 1], |r, v| r.margin = v),
         dim(&[3u8, 4, 5], |r, v| r.min_len = v),
-        dim(&[(0u8, 4096u16), (3, 4096), (3, 8192), (4, 4096)], |r, v| {
-            (r.far_len, r.far_dist) = v
-        }),
         dim(
-            &[256u16, 1024, 2048, 4096, 8192, 16384, 32506, 32510, 32767, 32768],
+            &[(0u8, 4096u16), (3, 4096), (3, 8192), (4, 4096)],
+            |r, v| (r.far_len, r.far_dist) = v,
+        ),
+        dim(
+            &[
+                256u16, 1024, 2048, 4096, 8192, 16384, 32506, 32510, 32767, 32768,
+            ],
             |r, v| r.window = v,
         ),
-        dim(&[Kind::Search, Kind::Literals, Kind::Runs], |r, v| r.kind = v),
+        dim(&[Kind::Search, Kind::Literals, Kind::Runs], |r, v| {
+            r.kind = v
+        }),
     ]
 }
 
@@ -504,7 +537,10 @@ fn rules(args: &[String]) -> Res<()> {
     cands.sort();
     cands.dedup();
     // Every candidate on every stream used for fitting.
-    let subset: Vec<&Sample> = classes.iter().flat_map(|(_, v)| v.iter().copied()).collect();
+    let subset: Vec<&Sample> = classes
+        .iter()
+        .flat_map(|(_, v)| v.iter().copied())
+        .collect();
     let t = Instant::now();
     let costs: Vec<Vec<f64>> = subset
         .par_iter()
@@ -563,7 +599,12 @@ fn rules(args: &[String]) -> Res<()> {
             .map(|f| f.0.as_str())
             .take(4)
             .collect();
-        eprintln!("  + {} -> {:.0} bytes ({})", cands[best], total / 8.0, users.join(" "));
+        eprintln!(
+            "  + {} -> {:.0} bytes ({})",
+            cands[best],
+            total / 8.0,
+            users.join(" ")
+        );
         text += &format!("{}\n", cands[best]);
     }
     // Which of the chosen rules is best for every fingerprint, over every training stream.
@@ -683,7 +724,11 @@ fn speed(args: &[String]) -> Res<()> {
         .iter()
         .map(|s| flate_recons::deflate::parse(&s.raw).unwrap().1.len())
         .sum();
-    println!("{} streams, {:.1} MB of data", samples.len(), plain as f64 / 1e6);
+    println!(
+        "{} streams, {:.1} MB of data",
+        samples.len(),
+        plain as f64 / 1e6
+    );
     for rule in rules {
         let opts = Options {
             rules: vec![rule],
@@ -738,7 +783,10 @@ fn decompress(args: &[String]) -> Res<()> {
 
 /// CPU time of the calling thread, in seconds.
 fn thread_cpu() -> f64 {
-    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut ts) };
     ts.tv_sec as f64 + ts.tv_nsec as f64 * 1e-9
 }

@@ -34,11 +34,25 @@ pub trait Cands {
     }
     /// The rank of `dist` among the earlier positions matching `len` bytes at `p` that are
     /// not among the first table's entries (walking at most `limit` of them).
-    fn rank(&mut self, _d: &[u8], _p: usize, _len: usize, _dist: usize, _limit: usize) -> Option<usize> {
+    fn rank(
+        &mut self,
+        _d: &[u8],
+        _p: usize,
+        _len: usize,
+        _dist: usize,
+        _limit: usize,
+    ) -> Option<usize> {
         None
     }
     /// Inverse of [`Cands::rank`]: the distance of the given rank.
-    fn select(&mut self, _d: &[u8], _p: usize, _len: usize, _rank: usize, _limit: usize) -> Option<usize> {
+    fn select(
+        &mut self,
+        _d: &[u8],
+        _p: usize,
+        _len: usize,
+        _rank: usize,
+        _limit: usize,
+    ) -> Option<usize> {
         None
     }
 }
@@ -141,7 +155,10 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
     /// matters for their setup, not for collisions).
     pub fn new(inner: Option<usize>, start: usize, end: usize, rank: bool) -> Self {
         let span = end.saturating_sub(start.saturating_sub(WINDOW)).max(1);
-        let bits = span.next_power_of_two().trailing_zeros().clamp(MIN_BITS, HASH_BITS);
+        let bits = span
+            .next_power_of_two()
+            .trailing_zeros()
+            .clamp(MIN_BITS, HASH_BITS);
         Table {
             bits,
             t: vec![[0; W]; 1 << bits],
@@ -151,9 +168,17 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
             last_start: usize::MAX,
             memo: (usize::MAX, 0, (0, 0)),
             // As many as positions can be inserted, if fewer.
-            prev: if rank { vec![0; CHAIN.min((span + 1).next_power_of_two())] } else { vec![] },
+            prev: if rank {
+                vec![0; CHAIN.min((span + 1).next_power_of_two())]
+            } else {
+                vec![]
+            },
             own: K != 3 || inner.is_some(),
-            heads: if rank && (K != 3 || inner.is_some()) { vec![0; 1 << bits] } else { vec![] },
+            heads: if rank && (K != 3 || inner.is_some()) {
+                vec![0; 1 << bits]
+            } else {
+                vec![]
+            },
             linked: start.saturating_sub(WINDOW),
         }
     }
@@ -169,7 +194,10 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
         if p + 8 <= d.len() {
             Self::hash(load32(d, p) & Self::MASK, self.bits)
         } else {
-            let k = d[p..p + K].iter().rev().fold(0u32, |a, &b| a << 8 | b as u32);
+            let k = d[p..p + K]
+                .iter()
+                .rev()
+                .fold(0u32, |a, &b| a << 8 | b as u32);
             Self::hash(k, self.bits)
         }
     }
@@ -177,7 +205,10 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
     /// The own chain head of `p` (`p + 3 <= d.len()`).
     #[inline(always)]
     fn h3(d: &[u8], p: usize, bits: u32) -> usize {
-        Self::hash(d[p] as u32 | (d[p + 1] as u32) << 8 | (d[p + 2] as u32) << 16, bits)
+        Self::hash(
+            d[p] as u32 | (d[p + 1] as u32) << 8 | (d[p + 2] as u32) << 16,
+            bits,
+        )
     }
 
     /// The second table's bucket of `p` (`p + 8 <= d.len()`).
@@ -435,7 +466,14 @@ impl<const W: usize, const K: usize, const L: usize> Cands for Table<W, K, L> {
         found
     }
 
-    fn select(&mut self, d: &[u8], p: usize, len: usize, rank: usize, limit: usize) -> Option<usize> {
+    fn select(
+        &mut self,
+        d: &[u8],
+        p: usize,
+        len: usize,
+        rank: usize,
+        limit: usize,
+    ) -> Option<usize> {
         let (mut r, mut found) = (0, None);
         self.walk(d, p, limit, |c| {
             if d[c + len - 1] == d[p + len - 1] && common(d, c, p, len) >= len {

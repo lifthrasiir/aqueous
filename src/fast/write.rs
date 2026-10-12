@@ -172,7 +172,12 @@ pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -
 /// of the output (in capacity reserved for the whole block) and the output grows by the
 /// whole bytes among them. A token takes at most 15 + 5 + 15 + 13 = 48 bits, so with
 /// fewer than 8 pending the buffer never overflows.
-fn write_tokens(w: &mut Bits, toks: &[Token], lt: &[(u32, u32)], dt: &[(u32, u32)]) -> Result<usize> {
+fn write_tokens(
+    w: &mut Bits,
+    toks: &[Token],
+    lt: &[(u32, u32)],
+    dt: &[(u32, u32)],
+) -> Result<usize> {
     // Up to 6 bytes per token and the end of block, and the 8 of the last store.
     w.out.reserve(toks.len() * 6 + 16);
     let base = w.out.as_mut_ptr();
@@ -197,8 +202,16 @@ fn write_tokens(w: &mut Bits, toks: &[Token], lt: &[(u32, u32)], dt: &[(u32, u32
                 n += l;
                 span += 1;
             }
-            Token::Match { len: ml, dist, alt258 } => {
-                let lc = if alt258 { 27 } else { LEN_CODE[ml as usize] as usize };
+            Token::Match {
+                len: ml,
+                dist,
+                alt258,
+            } => {
+                let lc = if alt258 {
+                    27
+                } else {
+                    LEN_CODE[ml as usize] as usize
+                };
                 let (c, l) = lt[257 + lc];
                 ok &= l > 0;
                 acc |= (c as u64) << n;

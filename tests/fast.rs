@@ -66,8 +66,18 @@ fn segments_round_trip() {
         prefix: 20_000,
         ..Default::default()
     };
-    for spec in ["zlib:level=6", "zlib:level=1", "libdeflate:level=9", "stb", "zopfli"] {
-        let raw = spec.parse::<flate_zoo::Encoder>().unwrap().compress(&mixed).unwrap();
+    for spec in [
+        "zlib:level=6",
+        "zlib:level=1",
+        "libdeflate:level=9",
+        "stb",
+        "zopfli",
+    ] {
+        let raw = spec
+            .parse::<flate_zoo::Encoder>()
+            .unwrap()
+            .compress(&mixed)
+            .unwrap();
         let (data, meta) = fast::deconstruct_with(&raw, &opts).unwrap();
         for threads in [1, 2, 7] {
             assert!(

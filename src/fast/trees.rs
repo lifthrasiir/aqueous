@@ -181,7 +181,11 @@ pub fn package_merge(freqs: &[u64], maxbits: usize) -> Vec<u8> {
         let (mut li, mut pi) = (0, 0);
         let np = prev.len() / 2;
         while li < ns || pi < np {
-            let pw = if pi < np { (prev[2 * pi] >> 1) + (prev[2 * pi + 1] >> 1) } else { u64::MAX };
+            let pw = if pi < np {
+                (prev[2 * pi] >> 1) + (prev[2 * pi + 1] >> 1)
+            } else {
+                u64::MAX
+            };
             if li < ns && w[li] < pw {
                 cur.push(w[li] << 1 | 1);
                 li += 1;
@@ -612,7 +616,13 @@ pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
         }
     }
     (0..elems)
-        .map(|n| if n <= max_code && coded[n] { lens[n] } else { 0 })
+        .map(|n| {
+            if n <= max_code && coded[n] {
+                lens[n]
+            } else {
+                0
+            }
+        })
         .collect()
 }
 
@@ -625,7 +635,9 @@ mod tests {
     fn huffman_as_package_merge() {
         let mut lcg = 7u64;
         let mut rnd = |n: u64| {
-            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lcg = lcg
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (lcg >> 33) % n
         };
         let (mut same, mut differ, mut deep) = (0, 0, 0);
@@ -663,7 +675,9 @@ mod tests {
     fn zlib_lens_as_zlib() {
         let mut lcg = 1u64;
         let mut rnd = |n: u64| {
-            lcg = lcg.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lcg = lcg
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (lcg >> 33) % n
         };
         for case in 0..40_000 {
@@ -732,7 +746,11 @@ mod tests {
                     .map(|_| {
                         lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
                         let r = lcg >> 16;
-                        if r.is_multiple_of(4) { 0 } else { (r % 1000) as u64 * (r % 7) as u64 }
+                        if r.is_multiple_of(4) {
+                            0
+                        } else {
+                            (r % 1000) as u64 * (r % 7) as u64
+                        }
                     })
                     .collect();
                 let used = f.iter().filter(|&&x| x > 0).count();
@@ -740,7 +758,11 @@ mod tests {
                 if used < 2 {
                     continue;
                 }
-                let kraft: f64 = l.iter().filter(|&&x| x > 0).map(|&x| 0.5f64.powi(x as i32)).sum();
+                let kraft: f64 = l
+                    .iter()
+                    .filter(|&&x| x > 0)
+                    .map(|&x| 0.5f64.powi(x as i32))
+                    .sum();
                 assert!((kraft - 1.0).abs() < 1e-9, "{kraft}");
                 let cost: u64 = f.iter().zip(&l).map(|(&f, &l)| f * l as u64).sum();
                 let f32: Vec<u32> = f.iter().map(|&x| x as u32).collect();

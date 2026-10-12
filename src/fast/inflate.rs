@@ -184,7 +184,10 @@ impl Table {
         // Entries no code reaches read as no code (incomplete codes are legal).
         self.t.clear();
         self.t.resize(psize, 0);
-        for (i, &l) in longest[..if max > p { psize } else { 0 }].iter().enumerate() {
+        for (i, &l) in longest[..if max > p { psize } else { 0 }]
+            .iter()
+            .enumerate()
+        {
             if l > 0 {
                 let sb = l as u32 - p;
                 self.t[i] = self.t.len() as u32 | sb << 16 | SUB;
@@ -330,7 +333,10 @@ impl Sink for Collect {
         // left room for the match and its overshoot.
         unsafe {
             copy_match(self.data.0, self.data.1, dist as usize, len as usize);
-            self.tokens.0.add(self.tokens.1).write(Token::Match { len, dist, alt258 });
+            self.tokens
+                .0
+                .add(self.tokens.1)
+                .write(Token::Match { len, dist, alt258 });
         }
         self.data.1 += len as usize;
         self.tokens.1 += 1;
@@ -341,7 +347,9 @@ impl Sink for Collect {
             self.data = grow(self.data, bytes.len() + ROOM);
         }
         // SAFETY: room made just above.
-        unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.data.0.add(self.data.1), bytes.len()) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.data.0.add(self.data.1), bytes.len())
+        };
         self.data.1 += bytes.len();
     }
 }
@@ -411,9 +419,7 @@ pub fn parse_into<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<L
                 }
                 // Byte aligned here: take the bytes directly.
                 let at = b.bit_pos() / 8;
-                let bytes = raw
-                    .get(at..at + len as usize)
-                    .ok_or(Error::Truncated)?;
+                let bytes = raw.get(at..at + len as usize).ok_or(Error::Truncated)?;
                 sink.stored(bytes);
                 olen += len as usize;
                 b = Bits {
@@ -428,7 +434,9 @@ pub fn parse_into<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<L
                 Body::Stored { pad, len }
             }
             1 => {
-                tokens_into(&mut b, &fixed.0, &fixed.1, sink, &mut olen, &mut tlen, &mut st)?;
+                tokens_into(
+                    &mut b, &fixed.0, &fixed.1, sink, &mut olen, &mut tlen, &mut st,
+                )?;
                 Body::Fixed { tokens: vec![] }
             }
             2 => {
@@ -575,12 +583,16 @@ fn tokens_into<S: Sink>(
         b.refill();
         let d = DIST_BASE[dc] as usize + b.bits(DIST_EXTRA[dc] as u32) as usize;
         if d > o {
-            break b.check().and(Err(Error::Invalid("distance before start of data")));
+            break b
+                .check()
+                .and(Err(Error::Invalid("distance before start of data")));
         }
         max_dist = max_dist.max(d as u16);
         // Length codes 0 and 1 are lengths 3 and 4; distance codes 24 and 26 start past
         // 4096 and 8192.
-        far |= (c == 0 && dc >= 24) as u8 | ((c == 0 && dc >= 26) as u8) << 1 | ((c <= 1 && dc >= 24) as u8) << 2;
+        far |= (c == 0 && dc >= 24) as u8
+            | ((c == 0 && dc >= 26) as u8) << 1
+            | ((c <= 1 && dc >= 24) as u8) << 2;
         sink.mat(len, d as u16, alt258);
         o += len as usize;
         t += 1;
@@ -676,7 +688,13 @@ mod tests {
         let n = blocks.len();
         if let Body::Dynamic { tokens, .. } = &blocks[0].body {
             let t = tokens.clone();
-            blocks.insert(0, Block { last: false, body: Body::Fixed { tokens: t } });
+            blocks.insert(
+                0,
+                Block {
+                    last: false,
+                    body: Body::Fixed { tokens: t },
+                },
+            );
             blocks.remove(1);
         }
         assert_eq!(blocks.len(), n);
@@ -693,11 +711,16 @@ mod tests {
         }
         assert!(f.tokens == toks);
         assert_eq!(f.stream.blocks.len(), rs.blocks.len());
-        assert_eq!((f.stream.tail_pad, &f.stream.trailing), (rs.tail_pad, &rs.trailing));
+        assert_eq!(
+            (f.stream.tail_pad, &f.stream.trailing),
+            (rs.tail_pad, &rs.trailing)
+        );
         for (a, b) in f.stream.blocks.iter().zip(&rs.blocks) {
             assert_eq!(a.last, b.last);
             match (&a.body, &b.body) {
-                (Body::Dynamic { header: x, .. }, Body::Dynamic { header: y, .. }) => assert_eq!(x, y),
+                (Body::Dynamic { header: x, .. }, Body::Dynamic { header: y, .. }) => {
+                    assert_eq!(x, y)
+                }
                 (x, y) => assert_eq!(x.btype(), y.btype()),
             }
         }
