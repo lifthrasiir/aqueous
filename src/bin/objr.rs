@@ -217,7 +217,12 @@ fn bench(args: &[String]) {
         }
     }
     if total.whole > 0 {
-        println!("  whole {:>12} -> {:>11} ({:5.1}%)", total.whole, total.whole_coded, 100.0 * total.whole_coded as f64 / tout);
+        println!(
+            "  whole {:>12} -> {:>11} ({:5.1}%)",
+            total.whole,
+            total.whole_coded,
+            100.0 * total.whole_coded as f64 / tout
+        );
     }
     println!(
         "{} files ({} failed): {:.0} -> {:.0} = {:.4}; compress {:.1} MB/s (transform {:.2}s, verify {:.2}s, zstd {:.2}s), decompress {:.1} MB/s",
@@ -261,7 +266,12 @@ fn stats(files: &[String]) {
             }
         }
         println!("== {f}: {} templates, {} raw lines", enc.keys().len(), uses.iter().take(2).sum::<u64>());
-        let mut t: Vec<(u64, String)> = enc.keys().iter().enumerate().map(|(i, k)| (uses.get(i + 2).copied().unwrap_or(0), obj_recons::block::describe(k))).collect();
+        let mut t: Vec<(u64, String)> = enc
+            .keys()
+            .iter()
+            .enumerate()
+            .map(|(i, k)| (uses.get(i + 2).copied().unwrap_or(0), obj_recons::block::describe(k)))
+            .collect();
         t.sort_by_key(|x| std::cmp::Reverse(x.0));
         for (n, d) in t.iter().take(12) {
             println!("  {n:>10} {d}");
@@ -291,7 +301,22 @@ impl Rng {
 /// Mutates an OBJ file the ways odd writers and corruption do.
 fn mutate(r: &mut Rng, src: &[u8]) -> Vec<u8> {
     const TOKENS: [&str; 16] = [
-        "-0", "1e5", "nan", "//", "/", "-", ".", "0.", "-.5", "00", "1e-005", "99999999999999999999", "\t", "\r", "f", "v",
+        "-0",
+        "1e5",
+        "nan",
+        "//",
+        "/",
+        "-",
+        ".",
+        "0.",
+        "-.5",
+        "00",
+        "1e-005",
+        "99999999999999999999",
+        "\t",
+        "\r",
+        "f",
+        "v",
     ];
     let mut v = src.to_vec();
     for _ in 0..1 + r.below(4) {
@@ -407,7 +432,8 @@ fn fuzz(args: &[String]) {
                 }
                 Err(e) => {
                     bad += 1;
-                    let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
+                    let msg =
+                        e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
                     eprintln!("PANIC {f} seed {seed} iter {i}: {msg:?}");
                 }
             }

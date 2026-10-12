@@ -42,7 +42,10 @@ const AC_STREAMS: [bool; NSTREAMS] = {
     let mut t = [false; NSTREAMS];
     let mut i = 0;
     while i < NSTREAMS {
-        t[i] = i == block::S_SCALE || (i >= block::S_FESC && i < block::S_FESC + 3) || (i >= block::S_DUP && i < block::S_DUP + 3) || i >= block::S_VAL;
+        t[i] = i == block::S_SCALE
+            || (i >= block::S_FESC && i < block::S_FESC + 3)
+            || (i >= block::S_DUP && i < block::S_DUP + 3)
+            || i >= block::S_VAL;
         i += 1;
     }
     t
@@ -184,7 +187,8 @@ impl Coder {
                 z.reserve(zstd::zstd_safe::compress_bound(s.len()));
                 self.cz.compress_to_buffer(s, &mut *z).expect("zstd");
             }
-            let (mut m, mut d): (u8, &[u8]) = if !z.is_empty() && z.len() < s.len() { (M_ZSTD, &z[..]) } else { (M_STORED, &s[..]) };
+            let (mut m, mut d): (u8, &[u8]) =
+                if !z.is_empty() && z.len() < s.len() { (M_ZSTD, &z[..]) } else { (M_STORED, &s[..]) };
             if try_ans {
                 // rANS coded, if smaller. (Verification covers the transform; rANS, like
                 // zstd, is trusted: tests and fuzzing cover it.)
@@ -515,7 +519,13 @@ fn read_block<'a>(r: &mut Rd<'a>, left: usize) -> Result<(usize, Stored<'a>)> {
 
 /// Decodes the streams of a coded block into `streams`, or a whole block (of `n` bytes)
 /// into `out`.
-fn unpack(b: &Stored, n: usize, dz: &mut zstd::bulk::Decompressor, streams: &mut Streams, out: &mut Vec<u8>) -> Result<()> {
+fn unpack(
+    b: &Stored,
+    n: usize,
+    dz: &mut zstd::bulk::Decompressor,
+    streams: &mut Streams,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     match b {
         Stored::Whole(d) => {
             let s = out.len();
@@ -631,7 +641,10 @@ fn decompress_par<W: Write>(mut r: Rd, len: usize, hash: u64, w: &mut W, threads
                         DJob::Unpack(idx, n, b) => {
                             let mut streams = Box::new(new_streams());
                             let mut out = Vec::new();
-                            DReport::Unpacked(idx, unpack(&b, n, &mut dz, &mut streams, &mut out).map(|_| (streams, out)))
+                            DReport::Unpacked(
+                                idx,
+                                unpack(&b, n, &mut dz, &mut streams, &mut out).map(|_| (streams, out)),
+                            )
                         }
                         DJob::Print(idx, n, d) => {
                             let mut out = Vec::with_capacity(n);

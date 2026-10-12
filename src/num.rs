@@ -277,8 +277,21 @@ mod tests {
     #[test]
     fn round_trip() {
         for t in [
-            "0", "-0", "0.5", ".5", "-.5", "-0.000000", "1.000000", "123.456", "5.", "-5.", "0.", "100",
-            "999999999999999999", "-0.00000000000000001", ".000000000000000001",
+            "0",
+            "-0",
+            "0.5",
+            ".5",
+            "-.5",
+            "-0.000000",
+            "1.000000",
+            "123.456",
+            "5.",
+            "-5.",
+            "0.",
+            "100",
+            "999999999999999999",
+            "-0.00000000000000001",
+            ".000000000000000001",
         ] {
             let (m, f) = parse(t.as_bytes()).unwrap_or_else(|| panic!("{t}"));
             assert!(valid_fmt(f), "{t}");
@@ -302,9 +315,19 @@ mod tests {
             r ^= r << 13;
             r ^= r >> 7;
             r ^= r << 17;
-            let x = f64::from_bits(r) ;
-            let x = if x.is_finite() && i % 2 == 0 { x } else { ((r >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 10f64.powi((r % 20) as i32 - 8) };
-            let x = if i % 97 == 0 { 0.0 } else if i % 101 == 0 { -0.0 } else { x };
+            let x = f64::from_bits(r);
+            let x = if x.is_finite() && i % 2 == 0 {
+                x
+            } else {
+                ((r >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 10f64.powi((r % 20) as i32 - 8)
+            };
+            let x = if i % 97 == 0 {
+                0.0
+            } else if i % 101 == 0 {
+                -0.0
+            } else {
+                x
+            };
             if x != 0.0 && x.abs().log10().abs() > 30.0 {
                 continue;
             }
@@ -315,7 +338,8 @@ mod tests {
             if t.len() > 24 {
                 continue;
             }
-            let (v, s, f) = parse_gen(t, p, 0, false, &mut vec![]).unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(t)));
+            let (v, s, f) =
+                parse_gen(t, p, 0, false, &mut vec![]).unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(t)));
             assert!(valid_gen(f));
             let mut o = vec![];
             put_gen(&mut o, v, s, f);

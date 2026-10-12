@@ -10,7 +10,9 @@ const OFF: usize = C + 2;
 const MAP: usize = C + 3;
 const EPREV: usize = C + 4;
 const ENEXT: usize = C + 5;
-fn tb() -> usize { 1 << std::env::var("TB").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(20) }
+fn tb() -> usize {
+    1 << std::env::var("TB").ok().and_then(|s| s.parse::<u32>().ok()).unwrap_or(20)
+}
 
 fn lg(d: i64) -> f64 {
     (d.unsigned_abs() as f64 + 1.0).log2() * 1.1 + 1.0
@@ -156,7 +158,16 @@ fn main() {
             if a.m.hist.iter().sum::<u64>() > 0 {
                 let tot: u64 = a.m.hist.iter().sum();
                 let pct = |s: usize| 100.0 * a.m.hist[s] as f64 / tot as f64;
-                print!(" | {}: {:5.1} b/f (esc {:4.1}; edge {:.0}% map {:.0}% off {:.0}% esc {:.0}%)", ["v", "t", "n"][k], (a.m.bits + a.esc) / n, a.esc / n, pct(EPREV) + pct(ENEXT), pct(MAP), pct(OFF), pct(ESC));
+                print!(
+                    " | {}: {:5.1} b/f (esc {:4.1}; edge {:.0}% map {:.0}% off {:.0}% esc {:.0}%)",
+                    ["v", "t", "n"][k],
+                    (a.m.bits + a.esc) / n,
+                    a.esc / n,
+                    pct(EPREV) + pct(ENEXT),
+                    pct(MAP),
+                    pct(OFF),
+                    pct(ESC)
+                );
             }
         }
         println!("  {f}");

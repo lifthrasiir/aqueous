@@ -45,7 +45,9 @@ pub fn valid(mode: u8, f: u8) -> bool {
     let (r, s) = (render_of(mode), src_of(mode));
     match r {
         R_FIX => s == SRC_DEC && num::valid_fmt(f),
-        R_GEN | R_SCI => s <= SRC_F64 && (1..=19).contains(&(f & G_PREC)) && f & 128 == 0 && (r == R_SCI || f & G_PREC <= 17),
+        R_GEN | R_SCI => {
+            s <= SRC_F64 && (1..=19).contains(&(f & G_PREC)) && f & 128 == 0 && (r == R_SCI || f & G_PREC <= 17)
+        }
         R_PY | R_JS | R_POS => s <= SRC_F64 && f & !G_NEGZ == 0,
         _ => false,
     }
@@ -241,7 +243,8 @@ pub fn to_f64(d: Dec) -> f64 {
 pub fn exact_digits(x: f64, p: u32) -> (u64, i32) {
     let bits = x.to_bits();
     let be = ((bits >> 52) & 0x7ff) as i32;
-    let (mant, q) = if be == 0 { (bits & ((1 << 52) - 1), -1074) } else { ((bits & ((1 << 52) - 1)) | 1 << 52, be - 1075) };
+    let (mant, q) =
+        if be == 0 { (bits & ((1 << 52) - 1), -1074) } else { ((bits & ((1 << 52) - 1)) | 1 << 52, be - 1075) };
     // log10(2) ~ 1233/4096; off by at most one, fixed below.
     let mut e10 = ((63 - mant.leading_zeros() as i32 + q) * 1233) >> 12;
     let lo = POW10[p as usize - 1];
@@ -584,7 +587,8 @@ mod tests {
     use super::*;
 
     fn rt(t: &str, mode: u8, p: u8) {
-        let (v, s, f) = encode(t.as_bytes(), mode, p, false, 0, &mut vec![]).unwrap_or_else(|| panic!("{t} mode {mode:#x} p {p}"));
+        let (v, s, f) =
+            encode(t.as_bytes(), mode, p, false, 0, &mut vec![]).unwrap_or_else(|| panic!("{t} mode {mode:#x} p {p}"));
         assert!(valid(mode, f), "{t}");
         let mut o = vec![];
         put(&mut o, v, s, mode, f);
@@ -595,10 +599,30 @@ mod tests {
     fn writers() {
         let f32m = |r| mode(r, SRC_F32);
         let f64m = |r| mode(r, SRC_F64);
-        for t in ["476.1831970214844", "128.5883026123047", "-0.10000000149011612", "1.0", "0.0", "-0.0", "9.999999747378752e-06", "1.2345678257474901e-08", "3.0000000054977558e+38", "0.5"] {
+        for t in [
+            "476.1831970214844",
+            "128.5883026123047",
+            "-0.10000000149011612",
+            "1.0",
+            "0.0",
+            "-0.0",
+            "9.999999747378752e-06",
+            "1.2345678257474901e-08",
+            "3.0000000054977558e+38",
+            "0.5",
+        ] {
             rt(t, f32m(R_PY), 0);
         }
-        for t in ["476.1831970214844", "1", "0", "0.000009999999747378752", "1.2345678257474901e-8", "1.0000000116860974e-7", "3.3999999521443642e+38", "123456792"] {
+        for t in [
+            "476.1831970214844",
+            "1",
+            "0",
+            "0.000009999999747378752",
+            "1.2345678257474901e-8",
+            "1.0000000116860974e-7",
+            "3.3999999521443642e+38",
+            "123456792",
+        ] {
             rt(t, f32m(R_JS), 0);
         }
         for t in ["4.761831999999999994e+02", "-1.285883000000000038e+02", "0.000000000000000000e+00"] {
@@ -608,7 +632,14 @@ mod tests {
             rt(t, mode(R_SCI, SRC_DEC), 7);
             rt(t, f32m(R_SCI), 7);
         }
-        for t in ["12.759518999999999", "-2.470218", "39.257838999999997", "0", "1.0000000000000001e-05", "0.10000000000000001"] {
+        for t in [
+            "12.759518999999999",
+            "-2.470218",
+            "39.257838999999997",
+            "0",
+            "1.0000000000000001e-05",
+            "0.10000000000000001",
+        ] {
             rt(t, f64m(R_GEN), 17);
         }
         for t in ["-0.00202200002968311", "-0.0401785001158714"] {

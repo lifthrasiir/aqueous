@@ -25,7 +25,13 @@ fn main() {
             let c: u64 = h[k][..32].iter().sum();
             println!(
                 "  {}: cache {:.0}% (pos0-3 {:.0}%), new {:.0}%, esc {:.0}%, x1 {:.0}%, x2 {:.0}%",
-                ["v", "vt", "vn"][k], pc(c), pc(h[k][..4].iter().sum()), pc(h[k][32]), pc(h[k][33]), pc(h[k][34]), pc(h[k][35])
+                ["v", "vt", "vn"][k],
+                pc(c),
+                pc(h[k][..4].iter().sum()),
+                pc(h[k][32]),
+                pc(h[k][33]),
+                pc(h[k][34]),
+                pc(h[k][35])
             );
         }
     }

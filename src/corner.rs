@@ -166,4 +166,3 @@ pub(crate) fn put_index(out: &mut Vec<u8>, a: i64, neg: bool, count: i64) {
         num::put(out, a, 0);
     }
 }
-

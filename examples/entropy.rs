@@ -68,7 +68,8 @@ fn main() {
         let mut s: [Vec<u8>; NSTREAMS] = std::array::from_fn(|_| Vec::new());
         println!("== {f}");
         let mut tot = [[0f64; 4]; NSTREAMS];
-        let mut models: Vec<(Model, Model, [usize; 8])> = (0..NSTREAMS).map(|_| (Model::new(16 * 8), Model::new(8), [0; 8])).collect();
+        let mut models: Vec<(Model, Model, [usize; 8])> =
+            (0..NSTREAMS).map(|_| (Model::new(16 * 8), Model::new(8), [0; 8])).collect();
         let mut p = 0;
         while p < src.len() {
             let mut e = (p + (4 << 20)).min(src.len());
@@ -102,7 +103,15 @@ fn main() {
         }
         for i in 0..NSTREAMS {
             if tot[i][0] > 0.0 {
-                println!("  {:>5} raw {:>11.0} zstd {:>11.0} adapt-o0 {:>11.0} adapt-ctx {:>11.0} ({:.3} of zstd)", STREAM_NAMES[i], tot[i][0], tot[i][1], tot[i][2], tot[i][3], tot[i][3] / tot[i][1]);
+                println!(
+                    "  {:>5} raw {:>11.0} zstd {:>11.0} adapt-o0 {:>11.0} adapt-ctx {:>11.0} ({:.3} of zstd)",
+                    STREAM_NAMES[i],
+                    tot[i][0],
+                    tot[i][1],
+                    tot[i][2],
+                    tot[i][3],
+                    tot[i][3] / tot[i][1]
+                );
             }
         }
     }

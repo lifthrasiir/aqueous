@@ -17,7 +17,15 @@ struct Cache {
 impl Cache {
     fn new() -> Self {
         let size: usize = std::env::var("CACHE").ok().and_then(|s| s.parse().ok()).unwrap_or(32);
-        Cache { size, c: vec![], max: 0, last: 0, cnt: vec![vec![1; size + 2]; 3], tot: [(size + 2) as u32; 3], bits: 0.0 }
+        Cache {
+            size,
+            c: vec![],
+            max: 0,
+            last: 0,
+            cnt: vec![vec![1; size + 2]; 3],
+            tot: [(size + 2) as u32; 3],
+            bits: 0.0,
+        }
     }
     fn code(&mut self, slot: usize, a: i64) {
         let sym = if let Some(p) = self.c.iter().position(|&x| x == a) {
@@ -93,7 +101,13 @@ fn main() {
         print!("{nf:>9} faces");
         for k in 0..3 {
             if has[k] {
-                print!(" | {}: delta {:5.1} off {:5.1} cache {:5.1}", ["v", "t", "n"][k], delta[k] / n, if k > 0 { off[k] / n } else { f64::NAN }, caches[k].bits / n);
+                print!(
+                    " | {}: delta {:5.1} off {:5.1} cache {:5.1}",
+                    ["v", "t", "n"][k],
+                    delta[k] / n,
+                    if k > 0 { off[k] / n } else { f64::NAN },
+                    caches[k].bits / n
+                );
             }
         }
         println!("  {f}");

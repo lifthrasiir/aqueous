@@ -14,13 +14,15 @@
 //! State (previous values, templates) carries over from block to block, so that blocks are
 //! coded in order, but its size does not depend on the input size.
 
-use crate::corner::{C_N, C_NEG, C_T, CACHE, Corners, Indices, SYM_ESC, SYM_NEW, SYM_X1, SYM_X2, parse_index, put_index};
+use crate::corner::{
+    C_N, C_NEG, C_T, CACHE, Corners, Indices, SYM_ESC, SYM_NEW, SYM_X1, SYM_X2, parse_index, put_index,
+};
 use crate::recent::{Entry, NPRED, Recent, WIN, window_pred};
 pub use crate::style::Styles;
-pub use crate::style::next_styles;
 use crate::style::exp_fallback;
-use crate::{dec, num};
+pub use crate::style::next_styles;
 use crate::varint::{Rd, put_sv, put_uv};
+use crate::{dec, num};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -705,7 +707,14 @@ impl Encoder {
     /// The predictor for line `line` of kind `kind` (v, vt, vn) with `n` numbers `vals`
     /// (value, scale), position `sel` predicted otherwise.
     #[inline]
-    fn line_pred(&self, kind: usize, vals: &[(i64, i32, u8); MAX_NUMS], n: usize, sel: Option<usize>, line: u64) -> usize {
+    fn line_pred(
+        &self,
+        kind: usize,
+        vals: &[(i64, i32, u8); MAX_NUMS],
+        n: usize,
+        sel: Option<usize>,
+        line: u64,
+    ) -> usize {
         // The window at the line's scales; p = 0 is the previous numbers.
         let rec = &self.recent[kind];
         let prev = &self.st.prev[kind];
@@ -763,7 +772,6 @@ impl Encoder {
         }
         best.1
     }
-
 }
 
 /// A key: `kind n (mode flags seplen sep...){n} taillen tail...`; for corners, mode is the
@@ -1095,9 +1103,9 @@ impl Decoder {
             out.bytes(&k[i + 1..]);
         }
         let all = [&ops, &tpl, &scale, &nsel, &hdr];
-        tp == text.len() && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).chain(&vs).chain(&lpred).all(|r| r.done())
+        tp == text.len()
+            && all.iter().copied().chain(&fsym).chain(&fesc).chain(&dup).chain(&vs).chain(&lpred).all(|r| r.done())
     }
-
 }
 
 /// A readable form of a template key, for analysis: fixed numbers by their digits after the
@@ -1130,8 +1138,16 @@ pub fn describe(k: &[u8]) -> String {
         } else if m != M_FIX {
             let src = ["", "f32:", "f64:"][(dec::src_of(m) as usize).min(2)];
             let r = ["", "g", "e", "py", "js", "pos"][(dec::render_of(m) as usize).min(5)];
-            let p = if matches!(dec::render_of(m), dec::R_GEN | dec::R_SCI) { format!("{}", f & num::G_PREC) } else { String::new() };
-            s += &format!("{src}{r}{p}{}{}", if f & num::G_EXP3 != 0 { "E" } else { "" }, if f & num::G_NEGZ != 0 { "-" } else { "" });
+            let p = if matches!(dec::render_of(m), dec::R_GEN | dec::R_SCI) {
+                format!("{}", f & num::G_PREC)
+            } else {
+                String::new()
+            };
+            s += &format!(
+                "{src}{r}{p}{}{}",
+                if f & num::G_EXP3 != 0 { "E" } else { "" },
+                if f & num::G_NEGZ != 0 { "-" } else { "" }
+            );
         } else {
             if f & num::F_NEGZ != 0 {
                 s += "-";

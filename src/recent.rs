@@ -80,7 +80,11 @@ impl Recent {
     pub(crate) fn find_put(&mut self, line: u64, e: Entry) -> u64 {
         let h = e.hash();
         let c = self.table[h];
-        let d = if c != 0 && c <= line && line + 1 - c <= RECENT as u64 && self.get(c - 1).is_some_and(|x| x.v == e.v && x.s == e.s) {
+        let d = if c != 0
+            && c <= line
+            && line + 1 - c <= RECENT as u64
+            && self.get(c - 1).is_some_and(|x| x.v == e.v && x.s == e.s)
+        {
             line + 1 - c
         } else {
             0
@@ -109,4 +113,3 @@ pub(crate) fn window_pred(rec: &Recent, line: u64, p: usize, j: usize, sc: i32) 
         Some(at(e(1)?).wrapping_add(at(e(k)?)).wrapping_sub(at(e(k + 1)?)))
     }
 }
-

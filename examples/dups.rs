@@ -36,7 +36,13 @@ fn main() {
                     format!("<=2^{b}: {:.0}%", 100.0 * cum as f64 / d.max(1) as f64)
                 })
                 .collect();
-            println!("  {}: {} lines, {:.1}% duplicates; {}", ["v", "vt", "vn"][k], count[k], 100.0 * d as f64 / count[k] as f64, cs.join(" "));
+            println!(
+                "  {}: {} lines, {:.1}% duplicates; {}",
+                ["v", "vt", "vn"][k],
+                count[k],
+                100.0 * d as f64 / count[k] as f64,
+                cs.join(" ")
+            );
         }
     }
 }

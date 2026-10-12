@@ -17,7 +17,8 @@ fn main() {
         for l in src.split(|&c| c == b'\n') {
             if l.starts_with(b"v ") {
                 let s = std::str::from_utf8(l).unwrap();
-                let mut it = s.split_whitespace().skip(1).map(|t| (t.parse::<f64>().unwrap_or(0.0) * 1e6).round() as i64);
+                let mut it =
+                    s.split_whitespace().skip(1).map(|t| (t.parse::<f64>().unwrap_or(0.0) * 1e6).round() as i64);
                 vs.push([it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0)]);
             }
         }
@@ -55,6 +56,12 @@ fn main() {
             last_best = bp;
         }
         let n = vs.len().max(1) as f64;
-        println!("{:>9} verts: prev {:5.1}  best+index {:5.1}  previous best {:5.1}  bits/vertex  {f}", vs.len(), c_prev / n, c_best / n, c_back / n);
+        println!(
+            "{:>9} verts: prev {:5.1}  best+index {:5.1}  previous best {:5.1}  bits/vertex  {f}",
+            vs.len(),
+            c_prev / n,
+            c_best / n,
+            c_back / n
+        );
     }
 }

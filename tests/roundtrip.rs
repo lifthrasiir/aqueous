@@ -8,7 +8,12 @@ fn rt(src: &[u8]) {
         let opt = Options { verify: false, block, ..Default::default() };
         let mut st = Stats::default();
         let c = compress_with(src, &opt, &mut st);
-        assert_eq!(decompress(&c).unwrap(), src, "block {block}: {:?}", String::from_utf8_lossy(&src[..src.len().min(200)]));
+        assert_eq!(
+            decompress(&c).unwrap(),
+            src,
+            "block {block}: {:?}",
+            String::from_utf8_lossy(&src[..src.len().min(200)])
+        );
         assert_eq!(st.whole, 0, "a block failed to code");
     }
     // Blocks stored whole in between (verification off, or it would hide a mismatch): the
@@ -115,7 +120,12 @@ fn many_templates() {
     let mut s = String::new();
     for i in 0..70000 {
         let sep = " ".repeat(1 + i % 7);
-        s += &format!("v{sep}{}{}{}\n", i % 100, " ".repeat(1 + i / 7 % 11), "0.".to_string() + &"0".repeat(i / 77 % 15) + "1");
+        s += &format!(
+            "v{sep}{}{}{}\n",
+            i % 100,
+            " ".repeat(1 + i / 7 % 11),
+            "0.".to_string() + &"0".repeat(i / 77 % 15) + "1"
+        );
     }
     rt(s.as_bytes());
 }
@@ -137,12 +147,24 @@ fn mesh_corners() {
             r ^= r << 13;
             r ^= r >> 7;
             r ^= r << 17;
-            let (x, y) = if r.is_multiple_of(3) { ((r >> 8) as usize % (w - 1), (r >> 20) as usize % (h - 1)) } else { (x, y) };
+            let (x, y) =
+                if r.is_multiple_of(3) { ((r >> 8) as usize % (w - 1), (r >> 20) as usize % (h - 1)) } else { (x, y) };
             let a = y * w + x + 1;
             let (b, c, d) = (a + 1, a + w + 1, a + w);
             // The vt paired with a vertex changes over time (as at seams).
             let t = |i: usize| (i * 7 + (r >> 40) as usize % 3) % (w * h) + 1;
-            s += &format!("f {a}/{}/{a} {b}/{}/{b} {c}/{}/{c}\nf {a}/{}/{} {c}/{}/{} {d}/{}/{}\n", t(a), t(b), t(c), t(a), w * h - a + 1, t(c), w * h - c + 1, t(d), w * h - d + 1);
+            s += &format!(
+                "f {a}/{}/{a} {b}/{}/{b} {c}/{}/{c}\nf {a}/{}/{} {c}/{}/{} {d}/{}/{}\n",
+                t(a),
+                t(b),
+                t(c),
+                t(a),
+                w * h - a + 1,
+                t(c),
+                w * h - c + 1,
+                t(d),
+                w * h - d + 1
+            );
         }
     }
     rt(s.as_bytes());
@@ -259,7 +281,16 @@ fn dump_writer_styles() {
     let mut s = String::new();
     for &x in &xs {
         let f = x as f32 as f64;
-        for t in [c_fmt(c"%f", x), c_fmt(c"%g", x), c_fmt(c"%.9g", f), c_fmt(c"%.17g", x), c_fmt(c"%e", f), c_fmt(c"%.18e", x), format!("{}", x as f32), format!("{x}")] {
+        for t in [
+            c_fmt(c"%f", x),
+            c_fmt(c"%g", x),
+            c_fmt(c"%.9g", f),
+            c_fmt(c"%.17g", x),
+            c_fmt(c"%e", f),
+            c_fmt(c"%.18e", x),
+            format!("{}", x as f32),
+            format!("{x}"),
+        ] {
             s += &format!("v {t} {t} {t}\nvn {t} 0 1\nvt {t} {t}\n");
         }
     }

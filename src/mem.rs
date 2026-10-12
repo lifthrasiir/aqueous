@@ -57,4 +57,3 @@ pub fn peak_reset() -> usize {
     PEAK.store(c, Relaxed);
     c
 }
-
