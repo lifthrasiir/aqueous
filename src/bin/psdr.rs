@@ -102,7 +102,7 @@ fn bench(args: &[String]) {
             fails += 1;
             println!("ROUNDTRIP FAILURE {f}");
         }
-        let is_stored = c.get(5) == Some(&0);
+        let is_stored = c.get(6..8) == Some(&[0, 0][..]);
         stored += is_stored as usize;
         tin += src.len() as f64;
         tout += c.len() as f64;

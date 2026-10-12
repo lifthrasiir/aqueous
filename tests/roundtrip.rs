@@ -169,9 +169,15 @@ fn layers(w: usize, h: usize, alpha: bool) -> Vec<Layer> {
     v
 }
 
+/// The version of a container (0 stored, 1 coded), after its magic.
+fn version(packed: &[u8]) -> u16 {
+    assert_eq!(packed[..6], [0x69, 0x04, 0x7f, 0xfe, 0x9b, 0x1d]);
+    u16::from_le_bytes([packed[6], packed[7]])
+}
+
 fn check(file: &[u8]) {
     let packed = psd_recons::compress(file);
-    assert_eq!(packed[5], 1, "not coded");
+    assert_eq!(version(&packed), 1, "not coded");
     assert!(packed.len() < file.len(), "{} >= {}", packed.len(), file.len());
     assert_eq!(psd_recons::decompress(&packed).unwrap(), file);
 }
@@ -196,7 +202,7 @@ fn greedy_writer_and_raw_layer() {
 fn not_a_psd_is_stored() {
     let junk: Vec<u8> = (0..5000u32).map(|i| (i * 7 % 13) as u8).collect();
     let packed = psd_recons::compress(&junk);
-    assert_eq!(packed[5], 0);
+    assert_eq!(version(&packed), 0);
     assert_eq!(psd_recons::decompress(&packed).unwrap(), junk);
 }
 
@@ -211,6 +217,13 @@ fn corrupt_input_is_an_error() {
     let k = flipped.len() - 10;
     flipped[k] ^= 0x40;
     assert!(psd_recons::decompress(&flipped).is_err());
+    // Bytes after the last stream, another version.
+    let mut longer = packed.clone();
+    longer.push(0);
+    assert!(psd_recons::decompress(&longer).is_err());
+    let mut other = packed.clone();
+    other[6] = 2;
+    assert!(psd_recons::decompress(&other).is_err());
 }
 
 #[test]
@@ -370,4 +383,64 @@ fn threads_embedded_files() {
         }
         same_outcome(&packed[..packed.len() * 3 / 4]);
     }
+}
+
+/// A file whose composite is its layers rendered (so the composite is coded with the hint).
+fn hinted_file(w: usize, h: usize) -> Vec<u8> {
+    let file = psd(w, h, &layers(w, h, true), packbits::NO_TILES, false, &[]);
+    let p = psd_recons::parse(&file).unwrap();
+    let rgb = psd_recons::composite::render(&p, &file, false, &mut Default::default()).unwrap();
+    let mut planes = Vec::new();
+    for k in 0..3 {
+        planes.extend(rgb.iter().skip(k).step_by(3));
+    }
+    let mut out = file[..p.composite.start].to_vec();
+    be16(&mut out, 1);
+    out.extend_from_slice(&rle(&planes, w, packbits::NO_TILES, false));
+    out
+}
+
+fn get_varint(src: &[u8], at: &mut usize) -> usize {
+    let mut v = 0;
+    for shift in (0..).step_by(7) {
+        let b = src[*at];
+        *at += 1;
+        v |= ((b & 0x7f) as usize) << shift;
+        if b < 0x80 {
+            return v;
+        }
+    }
+    unreachable!()
+}
+
+fn put_varint(out: &mut Vec<u8>, mut v: usize) {
+    while v >= 0x80 {
+        out.push(v as u8 | 0x80);
+        v >>= 7;
+    }
+    out.push(v as u8);
+}
+
+#[test]
+fn hint_needs_8_bit_rgb() {
+    let file = hinted_file(120, 20);
+    check(&file);
+    // The same container with the document's depth (in the skeleton) made 16: an error, not
+    // a renderer reading 8-bit rows as 16-bit ones.
+    let packed = psd_recons::compress(&file);
+    let (mut at, mut streams) = (8, Vec::new());
+    while at < packed.len() {
+        let n = get_varint(&packed, &mut at);
+        streams.push(packed[at..at + n].to_vec());
+        at += n;
+    }
+    let mut sk = zstd::decode_all(&streams[1][..]).unwrap();
+    sk[22..24].copy_from_slice(&16u16.to_be_bytes());
+    streams[1] = zstd::encode_all(&sk[..], 3).unwrap();
+    let mut bad = packed[..8].to_vec();
+    for s in &streams {
+        put_varint(&mut bad, s.len());
+        bad.extend_from_slice(s);
+    }
+    assert!(psd_recons::decompress(&bad).is_err());
 }

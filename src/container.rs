@@ -14,17 +14,17 @@
 //! memory used besides input and output does not grow with the file.
 //!
 //! ```text
-//! "PSDR" version(u8) mode(u8)
-//! mode 0 (stored): zstd(file)
-//! mode 1 (coded):
-//!   u64 LE xxh3 of the original (checked after decompression)
-//!   varint length of the original
-//!   zstd(skeleton)                  -- its length is in the layout
-//!   embedded files, coded           -- likewise
+//! magic 69 04 7f fe 9b 1d ("aQR//psd" in base64), version (u16 LE)
+//! then streams, each a varint length and its bytes:
+//! version 0 (stored): zstd(file)
+//! version 1 (coded):
+//!   head                            -- xxh3 and length of the original; spans, groups
+//!   zstd(skeleton)
+//!   embedded files, coded           -- one stream each, in span order
 //!   model chunks                    -- see model::Recorder
-//!   layout                          -- spans, encoders, exceptions, groups
-//!   u64 LE length of the layout
 //! ```
+//!
+//! FORMAT.md specifies the format in full.
 
 use std::io::{Read, Write};
 
@@ -35,8 +35,9 @@ use crate::psd::{self, Compression, Error, Psd, Result};
 use crate::rows::{self, PlaneRows};
 use recons_common::varint;
 
-const MAGIC: &[u8; 4] = b"PSDR";
-const VERSION: u8 = 2;
+const MAGIC: &[u8; 6] = &[0x69, 0x04, 0x7f, 0xfe, 0x9b, 0x1d];
+const STORED: u16 = 0;
+const CODED: u16 = 1;
 
 #[track_caller]
 fn corrupt() -> Error {
@@ -78,6 +79,29 @@ fn get_opt(src: &[u8], at: &mut usize) -> Result<usize> {
         0 => usize::MAX,
         v => usize::try_from(v - 1).map_err(|_| corrupt())?,
     })
+}
+
+fn put_header(out: &mut Vec<u8>, version: u16) {
+    out.extend_from_slice(MAGIC);
+    out.extend_from_slice(&version.to_le_bytes());
+}
+
+/// Makes the bytes of `out` from `at` on a stream: puts their length before them.
+fn close_stream(out: &mut Vec<u8>, at: usize) {
+    let mut len = Vec::with_capacity(10);
+    put_varint(&mut len, (out.len() - at) as u64);
+    out.splice(at..at, len);
+}
+
+fn put_stream(out: &mut Vec<u8>, bytes: &[u8]) {
+    put_varint(out, bytes.len() as u64);
+    out.extend_from_slice(bytes);
+}
+
+/// The stream at `*at` of a container.
+fn get_stream<'a>(src: &'a [u8], at: &mut usize) -> Result<&'a [u8]> {
+    let n = get_usize(src, at)?;
+    get_bytes(src, at, n)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,9 +202,10 @@ fn nested_compress_(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Optio
     (packed.len() < data.len()).then_some(packed)
 }
 
-fn nested_decompress(codec: Codec, packed: &[u8], par: &Par) -> Result<Vec<u8>> {
+/// Decodes an embedded file of a container `depth` deep.
+fn nested_decompress(codec: Codec, packed: &[u8], par: &Par, depth: usize) -> Result<Vec<u8>> {
     match codec {
-        Codec::Psd => decompress_threads(packed, par.threads),
+        Codec::Psd => decompress_at(packed, par.threads, depth + 1),
         Codec::Png => png_recons::container::decompress_threads(packed, par.threads).map_err(|_| corrupt()),
         Codec::Jpeg => par.jpeg(|| jpeg_recons::container::decompress(packed)).map_err(|_| corrupt()),
     }
@@ -197,10 +222,9 @@ enum Coding<'a> {
         /// Rows (plane * h + row) not reproduced by `encoder`, and their bytes.
         exceptions: Vec<(usize, &'a [u8])>,
     },
-    /// An embedded file, coded by `codec` into `len` bytes of the stream.
+    /// An embedded file, coded by `codec` in a stream of its own.
     Nested {
         codec: Codec,
-        len: usize,
     },
     /// The same bytes as span `of`, which is coded before it.
     Copy {
@@ -352,6 +376,16 @@ fn plan_span<'a>(
     Some(Planned { span: Span { start, end, gap: 0, planes, w, h, coding }, candidates, same: None })
 }
 
+/// The file before a hinted span (of `w` x `h` pixels), parsed: what the hint is rendered
+/// from, on both sides. The renderer takes 8-bit RGB.
+fn hint_psd(prefix: &[u8], w: usize, h: usize) -> Result<Psd> {
+    let psd = psd::parse(prefix)?;
+    if psd.width as usize != w || psd.height as usize != h || psd.depth != 8 || psd.mode != 3 {
+        return Err(corrupt());
+    }
+    Ok(psd)
+}
+
 /// Whether rendering the layers predicts the composite (span `sp`, first `planes` planes) well
 /// enough to be worth its time: on a sample of rows, the share of pixels predicted exactly.
 fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
@@ -360,7 +394,9 @@ fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
     let (w, h) = (sp.w, sp.h);
     let comp = if matches!(sp.coding, Coding::Raw) { Compression::Raw } else { Compression::Rle };
     let src = &d[sp.start..sp.end];
-    let Ok(mut r) = RowRenderer::new(psd, d, &mut composite::Report::default()) else { return false };
+    let prefix = &d[..sp.start];
+    let Ok(hpsd) = hint_psd(prefix, w, h) else { return false };
+    let Ok(mut r) = RowRenderer::new(&hpsd, prefix, &mut composite::Report::default()) else { return false };
     let Ok(mut stored) =
         (0..planes).map(|p| PlaneRows::new(psd.psb, comp, src, w, h, p, sp.planes)).collect::<Result<Vec<_>>>()
     else {
@@ -489,7 +525,7 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>
     let comp = psd.composite_compression(d);
     let rgb_composite = rgb && n >= 3;
     let composite_job = || -> Option<(Planned<'a>, bool)> {
-        if !(pixels && w > 0 && h > 0 && n > 0) {
+        if !(pixels && w > 0 && h > 0 && n > 0 && n <= MAX_PLANES) {
             return None;
         }
         let mut p = plan_span(d, psd.composite.start + 2, psd.composite.end, n, w, h, comp, psd.psb)?;
@@ -533,7 +569,7 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>
                 if spans.last().is_some_and(|s| s.span.end > r.start) {
                     continue;
                 }
-                let coding = Coding::Nested { codec: *codec, len: packed.len() };
+                let coding = Coding::Nested { codec: *codec };
                 let span = Span { start: r.start, end: r.end, gap: 0, planes: 0, w: 0, h: 0, coding };
                 spans.push(Planned { span, candidates: Vec::new(), same: None });
                 nested.push(packed);
@@ -618,24 +654,41 @@ fn get_encoder(src: &[u8], at: &mut usize) -> Result<Encoder> {
             }
             Encoder::Photoshop { phase, period }
         }
-        t @ (1 | 2) => Encoder::Greedy { min_run: get_usize(src, at)?.max(1), split_rest: t == 2 },
+        t @ (1 | 2) => {
+            let min_run = get_usize(src, at)?;
+            if !(1..=128).contains(&min_run) {
+                return Err(corrupt());
+            }
+            Encoder::Greedy { min_run, split_rest: t == 2 }
+        }
         _ => return Err(corrupt()),
     })
 }
 
-fn put_layout(o: &mut Vec<u8>, skeleton: usize, spans: &[Span], groups: &[GroupDef]) {
-    put_varint(o, skeleton as u64);
+/// Most planes in a span or a group.
+const MAX_PLANES: usize = 64;
+
+/// The head stream: the original's hash and length, the spans and the groups.
+fn put_head(o: &mut Vec<u8>, hash: u64, total: usize, spans: &[Span], groups: &[GroupDef]) {
+    o.extend_from_slice(&hash.to_le_bytes());
+    put_varint(o, total as u64);
     put_varint(o, spans.len() as u64);
     for s in spans {
         put_varint(o, s.gap as u64);
         put_varint(o, (s.end - s.start) as u64);
-        put_varint(o, s.planes as u64);
-        put_varint(o, s.w as u64);
-        put_varint(o, s.h as u64);
+        let dims = |o: &mut Vec<u8>| {
+            put_varint(o, s.planes as u64);
+            put_varint(o, s.w as u64);
+            put_varint(o, s.h as u64);
+        };
         match &s.coding {
-            Coding::Raw => o.push(0),
+            Coding::Raw => {
+                o.push(0);
+                dims(o);
+            }
             Coding::Rle { count_bytes, encoder, plane_lens, exceptions } => {
                 o.push(*count_bytes as u8);
+                dims(o);
                 put_encoder(o, *encoder);
                 for &l in plane_lens {
                     put_varint(o, l as u64);
@@ -649,10 +702,7 @@ fn put_layout(o: &mut Vec<u8>, skeleton: usize, spans: &[Span], groups: &[GroupD
                     o.extend_from_slice(bytes);
                 }
             }
-            Coding::Nested { codec, len } => {
-                o.push(16 + *codec as u8);
-                put_varint(o, *len as u64);
-            }
+            Coding::Nested { codec } => o.push(16 + *codec as u8),
             Coding::Copy { of } => {
                 o.push(32);
                 put_varint(o, *of as u64);
@@ -671,12 +721,21 @@ fn put_layout(o: &mut Vec<u8>, skeleton: usize, spans: &[Span], groups: &[GroupD
     }
 }
 
-type Layout<'a> = (usize, Vec<Span<'a>>, Vec<GroupDef>);
+struct Head<'a> {
+    hash: u64,
+    total: usize,
+    spans: Vec<Span<'a>>,
+    groups: Vec<GroupDef>,
+}
 
-/// Reads the layout; spans get their positions in the output of `total` bytes.
-fn get_layout(src: &[u8], total: usize) -> Result<Layout<'_>> {
+/// Reads the head stream (all of `src`); spans get their positions in the output.
+fn get_head(src: &[u8]) -> Result<Head<'_>> {
     let mut at = 0;
-    let skeleton = get_usize(src, &mut at)?;
+    let hash = u64::from_le_bytes(get_bytes(src, &mut at, 8)?.try_into().unwrap());
+    let total = get_usize(src, &mut at)?;
+    if total > 1 << 42 {
+        return Err(corrupt());
+    }
     let n = get_usize(src, &mut at)?;
     let mut spans: Vec<Span> = Vec::with_capacity(n.min(1 << 16));
     let mut pos = 0usize;
@@ -686,23 +745,30 @@ fn get_layout(src: &[u8], total: usize) -> Result<Layout<'_>> {
         let start = pos.checked_add(gap).ok_or_else(corrupt)?;
         let end = start.checked_add(len).filter(|&e| e <= total).ok_or_else(corrupt)?;
         pos = end;
-        let planes = get_usize(src, &mut at)?;
-        let w = get_usize(src, &mut at)?;
-        let h = get_usize(src, &mut at)?;
-        let size = planes.checked_mul(w).and_then(|v| v.checked_mul(h)).ok_or_else(corrupt)?;
-        let coding = match get_u8(src, &mut at)? {
+        let kind = get_u8(src, &mut at)?;
+        // Planes, width and height of pixel data: planes and size within bounds.
+        let dims = |at: &mut usize| -> Result<(usize, usize, usize, usize)> {
+            let planes = get_usize(src, at)?;
+            let w = get_usize(src, at)?;
+            let h = get_usize(src, at)?;
+            let size = planes.checked_mul(w).and_then(|v| v.checked_mul(h)).ok_or_else(corrupt)?;
+            if planes > MAX_PLANES || size == 0 {
+                return Err(corrupt());
+            }
+            Ok((planes, w, h, size))
+        };
+        let (planes, w, h, coding) = match kind {
             0 => {
-                if size != len || size == 0 {
+                let (planes, w, h, size) = dims(&mut at)?;
+                if size != len {
                     return Err(corrupt());
                 }
-                Coding::Raw
+                (planes, w, h, Coding::Raw)
             }
             cb @ (2 | 4) => {
                 let cb = cb as usize;
+                let (planes, w, h, _) = dims(&mut at)?;
                 let encoder = get_encoder(src, &mut at)?;
-                if planes == 0 || planes > 64 || w == 0 || h == 0 {
-                    return Err(corrupt());
-                }
                 let mut plane_lens = Vec::with_capacity(planes);
                 for _ in 0..planes {
                     plane_lens.push(get_usize(src, &mut at)?);
@@ -722,26 +788,20 @@ fn get_layout(src: &[u8], total: usize) -> Result<Layout<'_>> {
                     let bl = get_usize(src, &mut at)?;
                     exceptions.push((r, get_bytes(src, &mut at, bl)?));
                 }
-                Coding::Rle { count_bytes: cb, encoder, plane_lens, exceptions }
+                (planes, w, h, Coding::Rle { count_bytes: cb, encoder, plane_lens, exceptions })
             }
-            c @ 16..=18 => Coding::Nested {
-                codec: [Codec::Psd, Codec::Png, Codec::Jpeg][c as usize - 16],
-                len: get_usize(src, &mut at)?,
-            },
+            c @ 16..=18 => (0, 0, 0, Coding::Nested { codec: [Codec::Psd, Codec::Png, Codec::Jpeg][c as usize - 16] }),
             32 => {
                 let of = get_usize(src, &mut at)?;
-                // The source is an earlier coded span of one plane of the same size and bytes.
-                let ok = spans.get(of).is_some_and(|s| {
-                    s.planes == 1
-                        && s.w == w
-                        && s.h == h
-                        && s.end - s.start == len
-                        && matches!(s.coding, Coding::Raw | Coding::Rle { .. })
-                });
-                if !ok || planes != 1 {
-                    return Err(corrupt());
-                }
-                Coding::Copy { of }
+                // The source is an earlier coded span of one plane of the same length; the
+                // copy has its dimensions.
+                let s = spans
+                    .get(of)
+                    .filter(|s| {
+                        s.planes == 1 && s.end - s.start == len && matches!(s.coding, Coding::Raw | Coding::Rle { .. })
+                    })
+                    .ok_or_else(corrupt)?;
+                (1, s.w, s.h, Coding::Copy { of })
             }
             _ => return Err(corrupt()),
         };
@@ -749,12 +809,13 @@ fn get_layout(src: &[u8], total: usize) -> Result<Layout<'_>> {
     }
     let ng = get_usize(src, &mut at)?;
     let mut groups = Vec::with_capacity(ng.min(1 << 16));
-    let mut owned = vec![0usize; spans.len()];
+    // Per span, the planes in a group (bit p for plane p).
+    let mut owned = vec![0u64; spans.len()];
     for _ in 0..ng {
         let np = get_usize(src, &mut at)?;
         let flags = get_u8(src, &mut at)?;
         let (has_alpha, hinted) = (flags & 1 != 0, flags & 2 != 0);
-        if flags > 3 || np == 0 || np > 64 || has_alpha && np < 2 {
+        if flags > 3 || np == 0 || np > MAX_PLANES || has_alpha && np < 2 {
             return Err(corrupt());
         }
         let mut planes: Vec<PlaneRef> = Vec::with_capacity(np);
@@ -789,10 +850,10 @@ fn get_layout(src: &[u8], total: usize) -> Result<Layout<'_>> {
                 }
             }
             if !matches!(spans[s].coding, Coding::Copy { .. }) {
-                owned[s] += 1;
-                if owned[s] > spans[s].planes {
+                if owned[s] & 1 << p != 0 {
                     return Err(corrupt());
                 }
+                owned[s] |= 1 << p;
             }
         }
         if hinted && (np < 3 || planes.iter().any(|p| p.0 != planes[0].0)) {
@@ -800,10 +861,16 @@ fn get_layout(src: &[u8], total: usize) -> Result<Layout<'_>> {
         }
         groups.push(GroupDef { planes, has_alpha, hinted, same_as });
     }
+    // Every plane of pixel data is in exactly one group.
+    for (s, &o) in spans.iter().zip(&owned) {
+        if matches!(s.coding, Coding::Raw | Coding::Rle { .. }) && o != u64::MAX >> (64 - s.planes) {
+            return Err(corrupt());
+        }
+    }
     if at != src.len() {
         return Err(corrupt());
     }
-    Ok((skeleton, spans, groups))
+    Ok(Head { hash, total, spans, groups })
 }
 
 /// A zstd level for a skeleton of `n` bytes in a file of `total`: the strongest that keeps it
@@ -825,13 +892,14 @@ pub fn compress_with(file: &[u8], opt: &Options) -> Vec<u8> {
     match try_compress(file, 0, &Par::new(opt.threads)) {
         Some(out) => out,
         None => {
-            let mut out = Vec::with_capacity(6 + file.len() / 2);
-            out.extend_from_slice(MAGIC);
-            out.extend_from_slice(&[VERSION, 0]);
+            let mut out = Vec::with_capacity(16 + file.len() / 2);
+            put_header(&mut out, STORED);
+            let at = out.len();
             let mut z = zstd::stream::Encoder::new(&mut out, skeleton_level(file.len(), file.len())).expect("zstd");
             z.set_pledged_src_size(Some(file.len() as u64)).expect("zstd");
             z.write_all(file).expect("zstd");
             z.finish().expect("zstd");
+            close_stream(&mut out, at);
             out
         }
     }
@@ -922,8 +990,13 @@ fn encode_group(
             Some(PlaneRows::new(psd.psb, comp, src, w, h, p, sp.planes).ok()?)
         });
     }
-    let mut hint =
-        if g.hinted { Some(RowRenderer::new(psd, d, &mut composite::Report::default()).ok()?) } else { None };
+    let hpsd;
+    let mut hint = None;
+    if g.hinted {
+        let prefix = &d[..spans[s0].start];
+        hpsd = hint_psd(prefix, w, h).ok()?;
+        hint = Some(RowRenderer::new(&hpsd, prefix, &mut composite::Report::default()).ok()?);
+    }
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
     if threads > 1 && w * h * n >= PIPE_MIN {
         let encoders: Vec<Option<Encoder>> = g
@@ -1239,11 +1312,10 @@ fn try_compress(file: &[u8], depth: usize, par: &Par) -> Option<Vec<u8>> {
         candidates.push(p.candidates);
     }
     let mut out = Vec::with_capacity(file.len() / 4);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&[VERSION, 1]);
-    out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
-    put_varint(&mut out, file.len() as u64);
-    // Skeleton.
+    put_header(&mut out, CODED);
+    // The streams after the head: the head (which needs the encoders settled while coding)
+    // goes before them at the end.
+    let head_at = out.len();
     let sk_len = file.len() - spans.iter().map(|s| s.end - s.start).sum::<usize>();
     let mut prev = 0;
     for s in &mut spans {
@@ -1256,7 +1328,7 @@ fn try_compress(file: &[u8], depth: usize, par: &Par) -> Option<Vec<u8>> {
     }
     let ranges: Vec<(usize, usize)> = spans.iter().map(|s| (s.start, s.end)).collect();
     let (skeleton, t_skel, t_model);
-    let (symbols, model_at);
+    let (symbols, model_len);
     if par.threads > 1 {
         // The skeleton is compressed meanwhile, into a buffer of its own: it comes first in
         // the output, the embedded files and the pixels after it.
@@ -1278,41 +1350,45 @@ fn try_compress(file: &[u8], depth: usize, par: &Par) -> Option<Vec<u8>> {
         let (syms, pix, t_pix) = pixels?;
         skeleton = sk.len();
         t_skel = t;
-        out.extend_from_slice(&sk);
+        put_stream(&mut out, &sk);
         drop(sk);
         for packed in &nested {
-            out.extend_from_slice(packed);
+            put_stream(&mut out, packed);
         }
         drop(nested);
-        model_at = out.len();
-        out.extend_from_slice(&pix);
+        model_len = pix.len();
+        put_stream(&mut out, &pix);
         symbols = syms;
         t_model = t_pix;
     } else {
         let t0 = std::time::Instant::now();
-        let before = out.len();
+        let at = out.len();
         write_skeleton(&mut out, file, &ranges, sk_len)?;
-        skeleton = out.len() - before;
+        skeleton = out.len() - at;
+        close_stream(&mut out, at);
         t_skel = t0.elapsed().as_secs_f64();
         for packed in &nested {
-            out.extend_from_slice(packed);
+            put_stream(&mut out, packed);
         }
         drop(nested);
-        model_at = out.len();
+        let at = out.len();
         let t0 = std::time::Instant::now();
         symbols = code_pixels(&mut out, &psd, file, &mut spans, &candidates, &groups, par)?;
         t_model = t0.elapsed().as_secs_f64();
+        model_len = out.len() - at;
+        close_stream(&mut out, at);
     }
-    let model_len = out.len() - model_at;
-    let layout_at = out.len();
-    put_layout(&mut out, skeleton, &spans, &groups);
-    let layout_len = out.len() - layout_at;
-    out.extend_from_slice(&(layout_len as u64).to_le_bytes());
+    let mut head = Vec::new();
+    put_head(&mut head, xxhash_rust::xxh3::xxh3_64(file), file.len(), &spans, &groups);
+    let mut stream = Vec::with_capacity(head.len() + 10);
+    put_stream(&mut stream, &head);
+    out.splice(head_at..head_at, stream);
     if std::env::var_os("PSDR_STATS").is_some() {
         let samples: usize =
             groups.iter().map(|g| g.planes.len() * spans[g.planes[0].0].w * spans[g.planes[0].0].h).sum();
         eprintln!(
-            "skeleton {sk_len} -> {skeleton}, layout {layout_len}, model {model_len} ({samples} samples, {symbols} symbols); plan {t_plan:.3}s skeleton {t_skel:.3}s pixels {t_model:.3}s"
+            "skeleton {sk_len} -> {skeleton}, head {}, model {model_len} ({samples} samples, {symbols} symbols); plan {t_plan:.3}s skeleton {t_skel:.3}s pixels {t_model:.3}s",
+            head.len()
         );
     }
     Some(out)
@@ -1348,9 +1424,11 @@ pub static DEC_TIMES: Times = Times::new();
 
 /// Writes the rows of a plane of an RLE or raw span as they are decoded.
 struct RowSink<'s> {
-    /// Offsets in the output of the next row's count and bytes.
+    /// Offsets in the output of the next row's count and bytes, and of the end of the
+    /// plane's bytes.
     count_at: usize,
     data_at: usize,
+    end: usize,
     /// 0 for raw data.
     count_bytes: usize,
     encoder: Encoder,
@@ -1371,7 +1449,7 @@ impl RowSink<'_> {
             && let Some((at, n)) = self.prev_at
             && self.prev == row
         {
-            if self.data_at + n > out.len() {
+            if self.data_at + n > self.end {
                 return Err(corrupt());
             }
             out.copy_within(at..at + n, self.data_at);
@@ -1395,11 +1473,22 @@ impl RowSink<'_> {
             self.prev.clear();
             self.prev.extend_from_slice(row);
         }
+        if self.data_at + bytes.len() > self.end {
+            return Err(corrupt());
+        }
         let dst = out.get_mut(self.data_at..self.data_at + bytes.len()).ok_or_else(corrupt)?;
         dst.copy_from_slice(bytes);
         self.data_at += bytes.len();
         let n = bytes.len();
         self.count(out, n)
+    }
+
+    /// Whether the rows filled the plane's bytes exactly.
+    fn finish(&self) -> Result<()> {
+        if self.data_at != self.end {
+            return Err(corrupt());
+        }
+        Ok(())
     }
 
     /// Writes the count of the row of `n` bytes just written, and moves to the next row.
@@ -1502,7 +1591,7 @@ fn decode_rows_piped(
             if timing {
                 DEC_TIMES.add([0.0, 0.0, 0.0, t]);
             }
-            Ok(())
+            sinks.iter().try_for_each(RowSink::finish)
         });
         let mut rows = vec![vec![0u8; w]; n];
         let mut hint_rows = vec![vec![0u8; w]; hn];
@@ -1610,6 +1699,7 @@ fn decode_group(
                 sink = Some(RowSink {
                     count_at: 0,
                     data_at: at,
+                    end: at + w * h,
                     count_bytes: 0,
                     encoder: packbits::NO_TILES,
                     exceptions: &[],
@@ -1626,6 +1716,7 @@ fn decode_group(
                 sink = Some(RowSink {
                     count_at: base + p * h * count_bytes,
                     data_at,
+                    end: data_at + plane_lens[p],
                     count_bytes: *count_bytes,
                     encoder: *encoder,
                     exceptions: &exceptions[first..],
@@ -1642,10 +1733,7 @@ fn decode_group(
     let psd;
     let mut hint = None;
     if g.hinted {
-        psd = psd::parse(left)?;
-        if psd.width as usize != w || psd.height as usize != h {
-            return Err(corrupt());
-        }
+        psd = hint_psd(left, w, h)?;
         hint = Some(RowRenderer::new(&psd, left, &mut composite::Report::default())?);
     }
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
@@ -1692,7 +1780,7 @@ fn decode_group(
     if timing {
         DEC_TIMES.add(t);
     }
-    Ok(())
+    sinks.iter().flatten().try_for_each(RowSink::finish)
 }
 
 pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
@@ -1747,44 +1835,48 @@ impl Pending {
 /// `decompress` with `threads` threads: the same bytes whatever the number. Embedded files
 /// are decoded on other threads, meanwhile with the skeleton and the pixels.
 pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
-    if src.len() < 6 || &src[..4] != MAGIC || src[4] != VERSION {
+    decompress_at(src, threads, 0)
+}
+
+/// [`decompress_threads`] of a container nested `depth` deep.
+fn decompress_at(src: &[u8], threads: usize, depth: usize) -> Result<Vec<u8>> {
+    if src.len() < 8 || &src[..6] != MAGIC {
         return Err(Error("not a psd-recons file".into()));
     }
-    match src[5] {
-        0 => return zstd::stream::decode_all(&src[6..]).map_err(|_| corrupt()),
-        1 => {}
-        _ => return Err(corrupt()),
+    let mut at = 8;
+    match u16::from_le_bytes([src[6], src[7]]) {
+        STORED => {
+            let z = get_stream(src, &mut at)?;
+            if at != src.len() {
+                return Err(corrupt());
+            }
+            return zstd::stream::decode_all(z).map_err(|_| corrupt());
+        }
+        CODED => {}
+        _ => return Err(Error("unknown psd-recons version".into())),
     }
-    let mut at = 6;
-    let hash = u64::from_le_bytes(get_bytes(src, &mut at, 8)?.try_into().unwrap());
-    let total = get_usize(src, &mut at)?;
-    if total > 1 << 42 || src.len() < at + 8 {
-        return Err(corrupt());
-    }
-    let ll = u64::from_le_bytes(src[src.len() - 8..].try_into().unwrap());
-    let layout_at = usize::try_from(ll)
-        .ok()
-        .and_then(|l| (src.len() - 8).checked_sub(l))
-        .filter(|&a| a >= at)
-        .ok_or_else(corrupt)?;
-    let (skeleton, spans, groups) = get_layout(&src[layout_at..src.len() - 8], total)?;
-    let body = &src[at..layout_at];
-    let mut out = vec![0u8; total];
-    let sk = body.get(..skeleton).ok_or_else(corrupt)?;
-    // Embedded files, in order after the skeleton.
-    let mut at = skeleton;
+    let Head { hash, total, spans, groups } = get_head(get_stream(src, &mut at)?)?;
+    let sk = get_stream(src, &mut at)?;
+    // Embedded files, one stream each; none past the depth the compressor goes to.
     let mut files = Vec::new();
     for (i, s) in spans.iter().enumerate() {
-        if let Coding::Nested { codec, len } = s.coding {
-            files.push((i, codec, get_bytes(body, &mut at, len)?));
+        if let Coding::Nested { codec } = s.coding {
+            if depth >= MAX_DEPTH {
+                return Err(corrupt());
+            }
+            files.push((i, codec, get_stream(src, &mut at)?));
         }
     }
-    let rest = &body[at..];
+    let rest = get_stream(src, &mut at)?;
+    if at != src.len() {
+        return Err(corrupt());
+    }
+    let mut out = vec![0u8; total];
     if threads <= 1 || files.is_empty() {
         read_skeleton(&mut out, sk, &spans)?;
         let par = Par::new(threads);
         for (i, codec, packed) in files {
-            let data = nested_decompress(codec, packed, &par)?;
+            let data = nested_decompress(codec, packed, &par, depth)?;
             if data.len() != spans[i].end - spans[i].start {
                 return Err(corrupt());
             }
@@ -1807,7 +1899,7 @@ pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
                     use std::sync::atomic::Ordering::Relaxed;
                     while !stop.load(Relaxed) {
                         let Some(&(i, codec, packed)) = files.get(next.fetch_add(1, Relaxed)) else { break };
-                        if tx.send((i, nested_decompress(codec, packed, par))).is_err() {
+                        if tx.send((i, nested_decompress(codec, packed, par, depth))).is_err() {
                             break;
                         }
                     }
@@ -1842,8 +1934,10 @@ fn decode_pixels(
     let total = out.len();
     let mut player = model::Player::new(coded);
     let mut done = vec![false; spans.len()];
+    let mut planes_left = vec![0usize; spans.len()];
     for (i, s) in spans.iter().enumerate() {
         done[i] = matches!(s.coding, Coding::Nested { .. });
+        planes_left[i] = s.planes;
     }
     let copy_ready = |out: &mut Vec<u8>, done: &mut [bool]| {
         for (i, s) in spans.iter().enumerate() {
@@ -1881,9 +1975,11 @@ fn decode_pixels(
             return Err(corrupt());
         }
         decode_group(&mut player, out, split, spans, g, threads)?;
+        // A span is done with its last plane.
         for &(s, _) in &g.planes {
             if !matches!(spans[s].coding, Coding::Copy { .. }) {
-                done[s] = true;
+                planes_left[s] -= 1;
+                done[s] = planes_left[s] == 0;
             }
         }
         copy_ready(out, &mut done);

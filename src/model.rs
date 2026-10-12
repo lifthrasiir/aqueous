@@ -885,11 +885,10 @@ impl<'o> Recorder<'o> {
         self.chunks += 1;
     }
 
-    /// Writes what is left; the stream ends with a chunk of no symbols. Returns the number
-    /// of symbols.
+    /// Writes what is left (the stream ends after the last chunk). Returns the number of
+    /// symbols.
     pub fn finish(mut self) -> usize {
         self.flush();
-        crate::container::put_varint(self.out, 0);
         self.total
     }
 }
@@ -947,10 +946,13 @@ impl<'a> Player<'a> {
     fn next_chunk(&mut self) {
         let r = (|| -> Result<()> {
             let src = self.src;
-            let n = crate::container::get_varint(src, &mut self.at)? as usize;
-            if n == 0 {
+            if self.at == src.len() {
                 self.ended = true;
                 return Ok(());
+            }
+            let n = crate::container::get_varint(src, &mut self.at)? as usize;
+            if n == 0 {
+                return Err(corrupt());
             }
             let hl = crate::container::get_varint(src, &mut self.at)? as usize;
             let head = src.get(self.at..self.at.checked_add(hl).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
@@ -982,8 +984,8 @@ impl<'a> Player<'a> {
         }
     }
 
-    /// Whether every chunk was consumed exactly; the stream's length in `src`.
-    pub fn finish(mut self) -> Result<usize> {
+    /// Whether every chunk, and so the stream, was consumed exactly.
+    pub fn finish(mut self) -> Result<()> {
         if self.failed || self.left != 0 || !self.dec.finished() {
             return Err(corrupt());
         }
@@ -993,7 +995,7 @@ impl<'a> Player<'a> {
         if self.failed || !self.ended {
             return Err(corrupt());
         }
-        Ok(self.at)
+        Ok(())
     }
 }
 

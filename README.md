@@ -31,6 +31,9 @@ debugging ones (`chan`, `diff`, `rlediff`), run with `cargo run --release --exam
 - Channels repeating an earlier one are copies; files embedded in smart objects are
   recompressed recursively (PSD/PSB), or with png-recons and jpeg-recons.
 - The rest of the file is zstd'd, at the strongest level the time budget allows.
+- The container is a header (magic, version) and length-prefixed streams: the head (spans,
+  groups, encoders, exceptions), the skeleton, one per embedded file, the model's chunks.
+  `FORMAT.md` specifies it completely enough to reimplement both directions.
 - Both directions stream: pixel data is coded row by row from the input and decoded row by
   row into the output (allocated at its final size), so the memory besides input and output
   stays small (about 30 MB compressing, under 10 MB decompressing) whatever the file size
