@@ -170,8 +170,8 @@ const P10I: [i64; 19] = [
 ];
 
 const P10: [f64; MAX_E + 1] = [
-    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16,
-    1e17, 1e18, 1e19, 1e20, 1e21, 1e22,
+    1e0, 1e1, 1e2, 1e3, 1e4, 1e5, 1e6, 1e7, 1e8, 1e9, 1e10, 1e11, 1e12, 1e13, 1e14, 1e15, 1e16, 1e17, 1e18, 1e19, 1e20,
+    1e21, 1e22,
 ];
 
 /// A real as m / 10^e with the smallest e, if there is one (m below 2^53, so the division
@@ -552,10 +552,7 @@ impl<'a> GroupDec<'a> {
                 let rc = rc.ok_or_else(corrupt)?;
                 let rank = self.prev_rank.wrapping_add(1).wrapping_add(self.rowid.sv()?);
                 self.prev_rank = rank;
-                let row = *usize::try_from(rank)
-                    .ok()
-                    .and_then(|i| rc.perm.get(i))
-                    .ok_or_else(corrupt)? as usize;
+                let row = *usize::try_from(rank).ok().and_then(|i| rc.perm.get(i)).ok_or_else(corrupt)? as usize;
                 if !rc.keys.ok[row] {
                     return Err(corrupt());
                 }
@@ -571,13 +568,7 @@ impl<'a> GroupDec<'a> {
         Ok(self.prev_rowid)
     }
 
-    fn columns(
-        &mut self,
-        nc: usize,
-        fmt4: bool,
-        vals: &mut Vec<(u64, i64)>,
-        out: &mut Vec<u8>,
-    ) -> Result<()> {
+    fn columns(&mut self, nc: usize, fmt4: bool, vals: &mut Vec<(u64, i64)>, out: &mut Vec<u8>) -> Result<()> {
         let cols = self.cols.get_mut(..nc).ok_or_else(corrupt)?;
         vals.clear();
         let mut s = 0u64;

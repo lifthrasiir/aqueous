@@ -49,8 +49,8 @@ pub const S_BYTES: usize = 17;
 pub const NSTREAMS: usize = 18;
 
 pub const STREAM_NAMES: [&str; NSTREAMS] = [
-    "kind", "grp", "phdr", "cptr", "child", "ikey", "ovf", "fill", "raw", "dir", "rec", "rowid",
-    "rawpay", "tag", "int", "real", "len", "bytes",
+    "kind", "grp", "phdr", "cptr", "child", "ikey", "ovf", "fill", "raw", "dir", "rec", "rowid", "rawpay", "tag",
+    "int", "real", "len", "bytes",
 ];
 
 pub struct Encoded {
@@ -284,7 +284,6 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
     }
     s[S_RAW].extend_from_slice(&file[n * ps..]);
     crate::mem::mark("enc: pages");
-
 
     // Indexes predicted from their tables: (table group, columns) per index group.
     let mut refs: Vec<Option<(usize, index::Key)>> = (0..groups.len()).map(|_| None).collect();
@@ -585,9 +584,7 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S) -> Result<
 
     let mut pg = vec![0u8; ps];
     let mut op = vec![0u8; ps];
-    let [kind, grp, phdr, cptr, child, ikey, ovf, fill, raw, ..] = &mut rd[..] else {
-        unreachable!()
-    };
+    let [kind, grp, phdr, cptr, child, ikey, ovf, fill, raw, ..] = &mut rd[..] else { unreachable!() };
     let mut cell = Vec::new();
     let mut iv: Vec<(usize, usize)> = Vec::new();
     let mut chain: Vec<usize> = Vec::new();

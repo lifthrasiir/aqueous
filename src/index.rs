@@ -438,10 +438,7 @@ pub fn schema_indexes(schema: &[&[u8]], enc: u32) -> Vec<(u32, u32)> {
             indexes.push((tbl, root as u32));
         }
     }
-    indexes
-        .iter()
-        .filter_map(|&(tbl, ir)| tables.iter().find(|t| t.0 == tbl).map(|t| (ir, t.1)))
-        .collect()
+    indexes.iter().filter_map(|&(tbl, ir)| tables.iter().find(|t| t.0 == tbl).map(|t| (ir, t.1))).collect()
 }
 
 /// Finds the key of an index from its entries: the table column of every indexed column
@@ -546,7 +543,5 @@ fn discover_flags(entries: &[&[u8]], m: usize) -> Vec<u8> {
         std::mem::swap(&mut pa, &mut pb);
         prev = Some(e);
     }
-    viol.iter()
-        .map(|v| (0..4).min_by_key(|&f| (v[f], f)).unwrap() as u8)
-        .collect()
+    viol.iter().map(|v| (0..4).min_by_key(|&f| (v[f], f)).unwrap() as u8).collect()
 }

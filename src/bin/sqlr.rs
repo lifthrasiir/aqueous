@@ -1,6 +1,6 @@
 use sqlite_recons::container::{Options, Stats, compress_with};
-use sqlite_recons::transform::{NSTREAMS, STREAM_NAMES};
 use sqlite_recons::mem::{Counting, PEAK, peak_reset};
+use sqlite_recons::transform::{NSTREAMS, STREAM_NAMES};
 
 #[global_allocator]
 static ALLOC: Counting = Counting;
@@ -129,7 +129,14 @@ fn bench(args: &[String]) {
             let pd = PEAK.load(Relaxed) - base - d2.as_ref().map_or(0, |d| d.len());
             drop(d2);
             let n = src.len() as f64;
-            println!("mem {:>11} c {:>11} ({:5.2}x) d {:>11} ({:5.2}x) {f}", src.len(), pc, pc as f64 / n, pd, pd as f64 / n);
+            println!(
+                "mem {:>11} c {:>11} ({:5.2}x) d {:>11} ({:5.2}x) {f}",
+                src.len(),
+                pc,
+                pc as f64 / n,
+                pd,
+                pd as f64 / n
+            );
             mpeak_c = mpeak_c.max(pc as f64 / n);
             mpeak_d = mpeak_d.max(pd as f64 / n);
         }
@@ -313,7 +320,8 @@ fn fuzz(args: &[String]) {
                 }
                 Err(e) => {
                     bad += 1;
-                    let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
+                    let msg =
+                        e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string()));
                     eprintln!("PANIC {f} seed {seed} iter {i}: {msg:?}");
                 }
             }

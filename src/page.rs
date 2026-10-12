@@ -86,13 +86,7 @@ pub struct Cell {
 
 /// Parses the cells of a b-tree page whose header is at `h`. Fails unless the page can be
 /// rebuilt exactly from its fields and filler. `iv` receives the covered intervals, sorted.
-pub fn parse_page(
-    g: &Geom,
-    pg: &[u8],
-    h: usize,
-    cells: &mut Vec<Cell>,
-    iv: &mut Vec<(usize, usize)>,
-) -> bool {
+pub fn parse_page(g: &Geom, pg: &[u8], h: usize, cells: &mut Vec<Cell>, iv: &mut Vec<(usize, usize)>) -> bool {
     cells.clear();
     iv.clear();
     let typ = pg[h];
