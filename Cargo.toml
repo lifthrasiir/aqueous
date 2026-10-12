@@ -6,6 +6,7 @@ description = "Lossless PNG recompression: bit-exact reconstruction from a small
 publish = false
 
 [dependencies]
+recons-common = { path = "../recons-common" }
 flate-recons = { path = "../flate-recons" }
 crc32fast = "1.5"
 zstd = "0.13"

@@ -117,7 +117,7 @@ on the photo sets).
 - **Matches** start as an escape symbol in the literal alphabet (255, then a binary decision
   against a literal residual of 255), so a literal costs a single symbol. Lengths are coded
   by activity, distances by length bucket, with DEFLATE's extra bits raw.
-- **Entropy coding** (`src/rans.rs`): static per-image tables (two passes when compressing),
+- **Entropy coding** (`src/rans.rs`, on `recons_common::rans32`): static per-image tables (two passes when compressing),
   12-bit probabilities, four interleaved 32-bit rANS states with 16-bit renormalisation.
   Tables are stored as quantised log-frequencies (4 steps per octave, differences coded
   with Elias-gamma). The encoder divides by multiplying with packed reciprocals; the decoder

@@ -28,29 +28,17 @@ use crate::{Error, Result};
 use flate_recons::bits::{BitReader, BitWriter};
 use flate_recons::deflate::{Block, Body, Stream, Token};
 use flate_recons::fast::header;
+use recons_common::varint;
 
 const MAGIC: &[u8; 4] = b"PNGR";
 const VERSION: u8 = 2;
 
-pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+pub fn put_varint(out: &mut Vec<u8>, v: u64) {
+    varint::put(out, v)
 }
 
 pub fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
-    let mut v = 0u64;
-    for shift in (0..64).step_by(7) {
-        let b = *src.get(*at).ok_or_else(crate::corrupt)?;
-        *at += 1;
-        v |= ((b & 0x7f) as u64) << shift;
-        if b < 0x80 {
-            return Ok(v);
-        }
-    }
-    Err(crate::corrupt())
+    varint::get(src, at).map_err(|_| crate::corrupt())
 }
 
 fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {

@@ -92,6 +92,9 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 [[package]]
 name = "flate-recons"
 version = "0.1.0"
+dependencies = [
+ "recons-common",
+]
 
 [[package]]
 name = "flate-zoo"
@@ -230,6 +233,7 @@ dependencies = [
  "crc32fast",
  "flate-recons",
  "flate-zoo",
+ "recons-common",
  "xxhash-rust",
  "zstd",
 ]
@@ -257,6 +261,10 @@ name = "r-efi"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
+
+[[package]]
+name = "recons-common"
+version = "0.1.0"
 
 [[package]]
 name = "relative-path"

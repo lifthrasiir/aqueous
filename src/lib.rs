@@ -30,6 +30,13 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<recons_common::Corrupt> for Error {
+    #[track_caller]
+    fn from(_: recons_common::Corrupt) -> Self {
+        corrupt()
+    }
+}
+
 impl From<flate_recons::Error> for Error {
     fn from(e: flate_recons::Error) -> Self {
         Error::Flate(e)
