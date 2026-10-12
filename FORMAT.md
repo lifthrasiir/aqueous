@@ -938,7 +938,8 @@ Errors: a reserved block type; a stored block whose `NLEN` is not the complement
 over-subscribed code (incomplete codes are allowed, but decoding a bit pattern no code has is
 an error); a dynamic header without a code for 256, a repeat (16) with no previous length, or
 code lengths running past `HLIT + HDIST`; literal/length symbols 286, 287 and distance symbols
-30, 31 (length symbol 284 with extra bits 31 is length 258, as in zlib); a distance before the start of the data; and the data ending before the final block
+30, 31 (the fixed code has 32 five-bit distance codes, of which 30 and 31 are these; length
+symbol 284 with extra bits 31 is length 258, as in zlib); a distance before the start of the data; and the data ending before the final block
 does. The output must be exactly `rowbytes · height` bytes, `rowbytes = ceil(width · depth / 8)`.
 
 For compression 3 with depth 8, each row (of `width` bytes) is undone as
