@@ -182,8 +182,10 @@ fn fuzz(args: &[String]) {
             let ok = match r {
                 Ok(c) => matches!(container::decompress(&c), Ok(ref back) if *back == m),
                 Err(_) => false,
-            } && std::panic::catch_unwind(|| matches!(mp3_recons::codec::decode(&mp3_recons::codec::encode(&m)), Ok(ref r) if *r == m))
-                .unwrap_or(false);
+            } && std::panic::catch_unwind(
+                || matches!(mp3_recons::codec::decode(&mp3_recons::codec::encode(&m)), Ok(ref r) if *r == m),
+            )
+            .unwrap_or(false);
             if !ok {
                 fails += 1;
                 let name = format!("fuzz_failure_{round}.mp3");

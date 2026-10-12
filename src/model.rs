@@ -108,7 +108,13 @@ pub fn family(ctx: usize) -> usize {
 }
 
 /// Codes the coded scalefactors of a granule (`vals`, bitstream order).
-pub fn code_scalefactors<C: Coder>(c: &mut C, st: &mut State, lay: &crate::frame::ScfLayout, ch: usize, vals: &mut [u8]) {
+pub fn code_scalefactors<C: Coder>(
+    c: &mut C,
+    st: &mut State,
+    lay: &crate::frame::ScfLayout,
+    ch: usize,
+    vals: &mut [u8],
+) {
     let mut l = c.local();
     let p = &mut st.scf_prev[ch];
     let (mut i, mut k) = (0usize, 0usize);
@@ -136,7 +142,8 @@ pub fn code_scalefactors<C: Coder>(c: &mut C, st: &mut State, lay: &crate::frame
             i += 1;
             k += 1;
         }
-    }    c.put_back(l);
+    }
+    c.put_back(l);
 }
 
 /// Buckets per octave of the magnitude buckets (2 or 4).
@@ -175,8 +182,10 @@ fn lb(v: u32) -> u32 {
 }
 
 /// 2^(r/16) in 1/65536 units.
-const POW16: [u32; 16] =
-    [65536, 68438, 71468, 74632, 77936, 81386, 84990, 88752, 92682, 96785, 101070, 105545, 110218, 115098, 120194, 125515];
+const POW16: [u32; 16] = [
+    65536, 68438, 71468, 74632, 77936, 81386, 84990, 88752, 92682, 96785, 101070, 105545, 110218, 115098, 120194,
+    125515,
+];
 
 /// 2^(-3d/16) in 1/256 units, for the step exponent difference d (clamped to ±80): how much
 /// the quantized magnitudes of the previous granule change with the current step size.
@@ -217,7 +226,14 @@ pub struct State {
 
 impl State {
     pub fn new() -> Box<State> {
-        Box::new(State { gr0_scf: [[0; 39]; 2], exp: [[0; 22]; 2], prev: [[0; 580]; 2], prev_ok: [false; 2], cur0: [0; 576], scf_prev: [[16; 39]; 2] })
+        Box::new(State {
+            gr0_scf: [[0; 39]; 2],
+            exp: [[0; 22]; 2],
+            prev: [[0; 580]; 2],
+            prev_ok: [false; 2],
+            cur0: [0; 576],
+            scf_prev: [[16; 39]; 2],
+        })
     }
 }
 
@@ -394,7 +410,8 @@ pub fn code_granule<C: Coder>(
             }
             // Signs of the nonzero values, in one go.
             let nz = (x != 0) as u32 + (y != 0) as u32;
-            let sbits = (((a < 0) as u32) << (y != 0) as u32 & ((x != 0) as u32) << (y != 0) as u32) | (y != 0 && b < 0) as u32;
+            let sbits =
+                (((a < 0) as u32) << (y != 0) as u32 & ((x != 0) as u32) << (y != 0) as u32) | (y != 0 && b < 0) as u32;
             let sbits = l.raw(nz, sbits);
             let sy = y != 0 && sbits & 1 != 0;
             let sx = x != 0 && (sbits >> (nz - (x != 0) as u32)) & 1 != 0;
@@ -409,7 +426,10 @@ pub fn code_granule<C: Coder>(
     let p = &st.prev[ch];
     for _ in 0..quads {
         let pg = if use_prev {
-            (p[line + 1] != 0) as usize + (p[line + 2] != 0) as usize + (p[line + 3] != 0) as usize + (p[line + 4] != 0) as usize
+            (p[line + 1] != 0) as usize
+                + (p[line + 2] != 0) as usize
+                + (p[line + 3] != 0) as usize
+                + (p[line + 4] != 0) as usize
         } else {
             5
         };
@@ -528,7 +548,10 @@ pub fn decode_granule<C: Coder>(
     let p = &st.prev[ch];
     for _ in 0..quads {
         let pg = if prep.use_prev {
-            (p[line + 1] != 0) as usize + (p[line + 2] != 0) as usize + (p[line + 3] != 0) as usize + (p[line + 4] != 0) as usize
+            (p[line + 1] != 0) as usize
+                + (p[line + 2] != 0) as usize
+                + (p[line + 3] != 0) as usize
+                + (p[line + 4] != 0) as usize
         } else {
             5
         };
@@ -643,7 +666,8 @@ pub fn encode_granule<C: Coder>(
             for _ in 0..n {
                 bb.refill();
                 let w = bb.acc;
-                let ctx = base + (prep.bucket[line / 2] as usize * NPOS + pos_class(line)) * NCUR + cur_class(&cur, line);
+                let ctx =
+                    base + (prep.bucket[line / 2] as usize * NPOS + pos_class(line)) * NCUR + cur_class(&cur, line);
                 let e = fast[(w >> (64 - FL)) as usize] as u32;
                 let (x, y, len, signs) = if e & 0x8000 != 0 {
                     let (x, y) = (e >> 6 & 15, e >> 2 & 15);
@@ -722,7 +746,10 @@ pub fn encode_granule<C: Coder>(
             break;
         }
         let pg = if prep.use_prev {
-            (p[line + 1] != 0) as usize + (p[line + 2] != 0) as usize + (p[line + 3] != 0) as usize + (p[line + 4] != 0) as usize
+            (p[line + 1] != 0) as usize
+                + (p[line + 2] != 0) as usize
+                + (p[line + 3] != 0) as usize
+                + (p[line + 4] != 0) as usize
         } else {
             5
         };

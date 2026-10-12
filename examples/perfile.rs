@@ -28,8 +28,10 @@ fn main() {
                 }
                 let s: f64 = cnt.iter().zip(&freqs[c]).map(|(&n, &f)| n as f64 * -(f as f64 / 4096.0).log2()).sum();
                 let nz = cnt.iter().filter(|&&n| n > 0).count();
-                let own: f64 = cnt.iter().filter(|&&n| n > 0).map(|&n| n as f64 * (tot as f64 / n as f64).log2()).sum::<f64>()
-                    + nz as f64 * 8.0 + 16.0;
+                let own: f64 =
+                    cnt.iter().filter(|&&n| n > 0).map(|&n| n as f64 * (tot as f64 / n as f64).log2()).sum::<f64>()
+                        + nz as f64 * 8.0
+                        + 16.0;
                 stat += s;
                 for (i, &k) in ks.iter().enumerate() {
                     best[i] += if rank[c] < k { s.min(own) } else { s };

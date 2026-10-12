@@ -101,14 +101,27 @@ impl SideModel {
     /// Frame fields: whether the frame's main data is placed, then main_data_begin
     /// (`mdb_resid` relative to the prediction if placed, else `si.main_data_begin` itself),
     /// private bits and scfsi.
-    pub fn frame<C: BitCoder>(&mut self, c: &mut C, h: Header, si: &mut SideInfo, placed: &mut bool, mdb_resid: &mut i32) {
+    pub fn frame<C: BitCoder>(
+        &mut self,
+        c: &mut C,
+        h: Header,
+        si: &mut SideInfo,
+        placed: &mut bool,
+        mdb_resid: &mut i32,
+    ) {
         *placed = c.bit(&mut self.placed, *placed as u32) != 0;
         if *placed {
             *mdb_resid = c.sint(&mut self.mdb, *mdb_resid);
         } else {
             si.main_data_begin = c.uint(&mut self.mdb_raw, si.main_data_begin as u32) as u16 & 0x1ff;
         }
-        let nbits = if h.lsf() { h.channels() } else if h.mono() { 5 } else { 3 };
+        let nbits = if h.lsf() {
+            h.channels()
+        } else if h.mono() {
+            5
+        } else {
+            3
+        };
         si.private_bits = c.tree(&mut self.private[nbits], nbits as u32, si.private_bits as u32) as u8;
         if !h.lsf() {
             for ch in 0..h.channels() {
@@ -121,7 +134,15 @@ impl SideModel {
 
     /// Granule fields. `raw` (coded only if `placed`) marks a granule stored verbatim;
     /// part2_3_length is coded only for those and in frames that are not placed.
-    pub fn granule<C: BitCoder>(&mut self, c: &mut C, h: Header, g: &mut Granule, ch: usize, placed: bool, raw: &mut bool) {
+    pub fn granule<C: BitCoder>(
+        &mut self,
+        c: &mut C,
+        h: Header,
+        g: &mut Granule,
+        ch: usize,
+        placed: bool,
+        raw: &mut bool,
+    ) {
         if placed {
             *raw = c.bit(&mut self.raw, *raw as u32) != 0;
         } else {
@@ -138,9 +159,12 @@ impl SideModel {
             g.mixed = false;
             3
         };
-        g.big_values = (p.big_values as i32 + c.sint(&mut self.big_values[ch], g.big_values as i32 - p.big_values as i32)) as u16 & 0x1ff;
+        g.big_values =
+            (p.big_values as i32 + c.sint(&mut self.big_values[ch], g.big_values as i32 - p.big_values as i32)) as u16
+                & 0x1ff;
         for t in 0..nt {
-            g.table_select[t] = c.tree(&mut self.table[t * 32 + p.table[t] as usize], 5, g.table_select[t] as u32) as u8;
+            g.table_select[t] =
+                c.tree(&mut self.table[t * 32 + p.table[t] as usize], 5, g.table_select[t] as u32) as u8;
         }
         if g.window_switching {
             g.table_select[2] = 0;
@@ -163,7 +187,8 @@ impl SideModel {
             }
             let band = band.min(23);
             g.region0_count = c.tree(&mut self.r0[band], 4, g.region0_count as u32) as u8;
-            g.region1_count = c.tree(&mut self.r1[band * 16 + g.region0_count as usize], 3, g.region1_count as u32) as u8;
+            g.region1_count =
+                c.tree(&mut self.r1[band * 16 + g.region0_count as usize], 3, g.region1_count as u32) as u8;
         }
         g.global_gain = (p.gain as i32 + c.sint(&mut self.gain[ch], g.global_gain as i32 - p.gain as i32)) as u8;
         if h.lsf() {
@@ -193,7 +218,8 @@ impl SideModel {
     /// Count1 quadruples and tail bits of a decoded granule.
     pub fn part3<C: BitCoder>(&mut self, c: &mut C, ch: usize, nquads: &mut usize, tail: &mut usize) {
         let p = &mut self.prev[ch];
-        *nquads = (p.nquads as i32 + c.sint(&mut self.nquads[ch], *nquads as i32 - p.nquads as i32)).clamp(0, 144) as usize;
+        *nquads =
+            (p.nquads as i32 + c.sint(&mut self.nquads[ch], *nquads as i32 - p.nquads as i32)).clamp(0, 144) as usize;
         p.nquads = *nquads as u16;
         *tail = c.uint(&mut self.tail, *tail as u32) as usize;
     }

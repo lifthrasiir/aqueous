@@ -4,7 +4,10 @@ use std::time::Instant;
 fn main() {
     let mut paths = Vec::new();
     for a in std::env::args().skip(1) {
-        for e in std::fs::read_dir(&a).map(|r| r.flatten().map(|e| e.path()).collect::<Vec<_>>()).unwrap_or_else(|_| vec![a.clone().into()]) {
+        for e in std::fs::read_dir(&a)
+            .map(|r| r.flatten().map(|e| e.path()).collect::<Vec<_>>())
+            .unwrap_or_else(|_| vec![a.clone().into()])
+        {
             paths.push(e);
         }
     }
@@ -32,5 +35,12 @@ fn main() {
         assert_eq!(out, d);
     }
     let mb = |t: f64| tin as f64 / t / 1e6;
-    println!("segment {:.0} MB/s, encode {:.0} MB/s, zstd {:.0} MB/s, unzstd {:.0} MB/s, decode {:.0} MB/s", mb(t_seg), mb(t_enc), mb(t_zstd), mb(t_unz), mb(t_dec));
+    println!(
+        "segment {:.0} MB/s, encode {:.0} MB/s, zstd {:.0} MB/s, unzstd {:.0} MB/s, decode {:.0} MB/s",
+        mb(t_seg),
+        mb(t_enc),
+        mb(t_zstd),
+        mb(t_unz),
+        mb(t_dec)
+    );
 }

@@ -473,7 +473,13 @@ mod tests {
                 g.region0_count = rnd(16) as u8;
                 g.region1_count = rnd(8) as u8;
                 g.count1table = rnd(2) == 1;
-                let maxv = if ts == 0 { 0 } else if LINBITS[ts] > 0 { 15 + (1 << LINBITS[ts]) - 1 } else { crate::huff_tables::DIM[ts] as u64 - 1 };
+                let maxv = if ts == 0 {
+                    0
+                } else if LINBITS[ts] > 0 {
+                    15 + (1 << LINBITS[ts]) - 1
+                } else {
+                    crate::huff_tables::DIM[ts] as u64 - 1
+                };
                 let mut c = [0i32; 576];
                 let bl = g.big_values as usize * 2;
                 for v in c[..bl].iter_mut() {

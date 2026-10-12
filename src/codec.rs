@@ -235,7 +235,11 @@ pub struct Coded {
 
 pub fn encode(d: &[u8]) -> Coded {
     let t = tables();
-    let mut c = Enc { t, rans: rans::Encoder::with_capacity(d.len() * 5 / 4 + model::MAX_GRANULE_SYMS), raw: WordWriter::with_capacity(d.len() / 4) };
+    let mut c = Enc {
+        t,
+        rans: rans::Encoder::with_capacity(d.len() * 5 / 4 + model::MAX_GRANULE_SYMS),
+        raw: WordWriter::with_capacity(d.len() / 4),
+    };
     let (streams, bit_lens) = encode_with(d, &mut c);
     let words = c.rans.finish(t);
     let raw_bits = c.raw.len() as u64;

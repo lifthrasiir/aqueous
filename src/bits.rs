@@ -160,16 +160,29 @@ mod tests {
     #[test]
     fn roundtrip() {
         let mut w = BitWriter::new();
-        let items: Vec<(u32, u32)> = (0..1000u32).map(|i| ((i * 2654435761) >> (32 - i % 33).min(31), i % 33)).collect();
+        let items: Vec<(u32, u32)> =
+            (0..1000u32).map(|i| ((i * 2654435761) >> (32 - i % 33).min(31), i % 33)).collect();
         for &(v, n) in &items {
-            let v = if n == 0 { 0 } else if n == 32 { v } else { v & ((1 << n) - 1) };
+            let v = if n == 0 {
+                0
+            } else if n == 32 {
+                v
+            } else {
+                v & ((1 << n) - 1)
+            };
             w.put(v, n);
         }
         let total = w.len();
         let buf = padded(&w.finish());
         let mut r = BitReader::new(&buf, 0);
         for &(v, n) in &items {
-            let v = if n == 0 { 0 } else if n == 32 { v } else { v & ((1 << n) - 1) };
+            let v = if n == 0 {
+                0
+            } else if n == 32 {
+                v
+            } else {
+                v & ((1 << n) - 1)
+            };
             assert_eq!(r.get(n), v);
         }
         assert_eq!(r.pos, total);

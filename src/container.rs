@@ -136,8 +136,10 @@ pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
     }
     let nwords = get_varint(c, &mut p)? as usize;
     let raw_bits = get_varint(c, &mut p)?;
-    let words: Vec<u32> =
-        take(c, &mut p, nwords.checked_mul(4).ok_or(Error("size".into()))?)?.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
+    let words: Vec<u32> = take(c, &mut p, nwords.checked_mul(4).ok_or(Error("size".into()))?)?
+        .chunks_exact(4)
+        .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+        .collect();
     let raw = c[p..].to_vec();
     let coded = Coded { len, streams, words, raw, raw_bits, bit_lens };
     let out = codec::decode(&coded).map_err(|e| Error(format!("corrupt: {}", e.0)))?;

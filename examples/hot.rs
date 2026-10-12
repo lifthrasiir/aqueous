@@ -7,7 +7,10 @@ fn main() {
     let iters: usize = args[1].parse().unwrap();
     let mut files = Vec::new();
     for a in &args[2..] {
-        for e in std::fs::read_dir(a).map(|r| r.flatten().map(|e| e.path()).collect::<Vec<_>>()).unwrap_or_else(|_| vec![a.into()]) {
+        for e in std::fs::read_dir(a)
+            .map(|r| r.flatten().map(|e| e.path()).collect::<Vec<_>>())
+            .unwrap_or_else(|_| vec![a.into()])
+        {
             files.push(std::fs::read(e).unwrap());
         }
     }
