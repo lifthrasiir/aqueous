@@ -238,6 +238,7 @@ impl State {
 }
 
 #[inline(always)]
+#[allow(clippy::unnecessary_min_or_max)] // NPOS is a tuning constant (currently one class)
 fn pos_class(line: usize) -> usize {
     (line >> 7).min(NPOS - 1)
 }
@@ -310,7 +311,7 @@ fn prepare(st: &State, h: Header, si: &SideInfo, gr: usize, ch: usize, scf: &[u8
     let w = if use_prev { 7 } else { 0 };
     let mut bucket = [NB as u8; 288];
     if w > 0 {
-        let recip = ((16u64 << 16) + w as u64 - 1) / w as u64;
+        let recip = (16u64 << 16).div_ceil(w as u64);
         for i in 0..npairs {
             bucket[i] = lb(((nbh[i] as u64 * recip) >> 16) as u32) as u8;
         }
@@ -347,6 +348,7 @@ fn commit(st: &mut State, p: &Prep, gr: usize, ch: usize, cur: &[u16; 576]) {
 /// Codes the quantized values of one granule and channel (big values per the side
 /// information, then `quads` count1 quadruples; the rest is zero).
 #[inline(never)]
+#[allow(clippy::too_many_arguments)] // the hot path, kept flat
 pub fn code_granule<C: Coder>(
     c: &mut C,
     st: &mut State,
@@ -458,6 +460,7 @@ pub fn code_granule<C: Coder>(
 /// Decompressing only: decodes the values of a granule as [`code_granule`] would and writes
 /// their Huffman coding (part 3 without the tail) to `w` directly.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)] // the hot path, kept flat
 pub fn decode_granule<C: Coder>(
     c: &mut C,
     st: &mut State,
@@ -626,6 +629,7 @@ static PDEP4: [u8; 256] = {
 /// [`code_granule`] would, in one pass. Returns None, with the state untouched, if the
 /// granule cannot be decoded; the caller then discards what was coded for it.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)] // the hot path, kept flat
 pub fn encode_granule<C: Coder>(
     c: &mut C,
     st: &mut State,
@@ -771,6 +775,12 @@ pub fn encode_granule<C: Coder>(
 /// A coder that only counts symbols per context (for training).
 pub struct Counter {
     pub counts: Vec<Vec<u64>>,
+}
+
+impl Default for Counter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Counter {

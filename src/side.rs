@@ -35,7 +35,7 @@ pub struct SideModel {
     prev: [Prev; 2],
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 struct Prev {
     ws: bool,
     block_type: u8,
@@ -48,24 +48,6 @@ struct Prev {
     c1t: bool,
     nquads: u16,
     scfsi: u8,
-}
-
-impl Default for Prev {
-    fn default() -> Self {
-        Prev {
-            ws: false,
-            block_type: 0,
-            table: [0; 3],
-            gain: 0,
-            big_values: 0,
-            sfc: 0,
-            preflag: false,
-            scale: false,
-            c1t: false,
-            nquads: 0,
-            scfsi: 0,
-        }
-    }
 }
 
 impl SideModel {

@@ -9,6 +9,7 @@
 //! ```
 
 use crate::codec::{self, Coded, STREAM_NAMES};
+use recons_common::varint;
 use xxhash_rust::xxh3::xxh3_64;
 
 const MAGIC: &[u8; 3] = b"M3R";
@@ -19,25 +20,12 @@ const ZSTD_LEVEL: i32 = 1;
 #[derive(Debug)]
 pub struct Error(pub String);
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+fn put_varint(out: &mut Vec<u8>, v: u64) {
+    varint::put(out, v)
 }
 
 fn get_varint(d: &[u8], p: &mut usize) -> Result<u64, Error> {
-    let mut v = 0u64;
-    for shift in (0..64).step_by(7) {
-        let b = *d.get(*p).ok_or(Error("truncated".into()))?;
-        *p += 1;
-        v |= ((b & 0x7f) as u64) << shift;
-        if b < 0x80 {
-            return Ok(v);
-        }
-    }
-    Err(Error("bad varint".into()))
+    varint::get(d, p).map_err(|e| Error(e.0.into()))
 }
 
 fn take<'a>(d: &'a [u8], p: &mut usize, n: usize) -> Result<&'a [u8], Error> {

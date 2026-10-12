@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+recons-common = { path = "../recons-common", features = ["zstd"] }
 memchr = "2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"

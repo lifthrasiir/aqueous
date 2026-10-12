@@ -414,26 +414,6 @@ pub fn scf_layout(h: Header, si: &SideInfo, gr: usize, ch: usize) -> ScfLayout {
     l
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn frame_len() {
-        // 128 kbps, 44.1 kHz, MPEG-1, no padding: 417 bytes.
-        let h = Header(0xfffb9000);
-        assert!(h.valid());
-        assert_eq!(h.sample_rate(), 44100);
-        assert_eq!(h.frame_len(), 417);
-        assert_eq!(h.sfb_row(), 5);
-        for row in 0..8 {
-            assert_eq!(SFB_LONG[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
-            assert_eq!(SFB_SHORT[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
-            assert_eq!(SFB_MIXED[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
-        }
-    }
-}
-
 /// Pre-emphasis table (MPEG-1 long blocks with preflag).
 pub static PRETAB: [u8; 22] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 3, 2, 0];
 
@@ -453,4 +433,24 @@ pub fn full_scalefactors(lay: &ScfLayout, coded: &[u8], gr0: &[u8; 39]) -> [u8; 
         i += n;
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_len() {
+        // 128 kbps, 44.1 kHz, MPEG-1, no padding: 417 bytes.
+        let h = Header(0xfffb9000);
+        assert!(h.valid());
+        assert_eq!(h.sample_rate(), 44100);
+        assert_eq!(h.frame_len(), 417);
+        assert_eq!(h.sfb_row(), 5);
+        for row in 0..8 {
+            assert_eq!(SFB_LONG[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
+            assert_eq!(SFB_SHORT[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
+            assert_eq!(SFB_MIXED[row].iter().map(|&w| w as u32).sum::<u32>(), 576);
+        }
+    }
 }

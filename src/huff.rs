@@ -467,12 +467,14 @@ mod tests {
                 continue;
             }
             for _ in 0..20 {
-                let mut g = Granule::default();
-                g.big_values = rnd(289) as u16;
-                g.table_select = [ts as u8, ts as u8, ts as u8];
-                g.region0_count = rnd(16) as u8;
-                g.region1_count = rnd(8) as u8;
-                g.count1table = rnd(2) == 1;
+                let g = Granule {
+                    big_values: rnd(289) as u16,
+                    table_select: [ts as u8, ts as u8, ts as u8],
+                    region0_count: rnd(16) as u8,
+                    region1_count: rnd(8) as u8,
+                    count1table: rnd(2) == 1,
+                    ..Default::default()
+                };
                 let maxv = if ts == 0 {
                     0
                 } else if LINBITS[ts] > 0 {

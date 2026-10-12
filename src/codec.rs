@@ -8,10 +8,11 @@ use crate::bits::{BitReader, BitWriter, FastWriter, WordWriter};
 use crate::frame::{Header, SideInfo, crc16, scf_layout};
 use crate::huff;
 use crate::model::{self, Coder, State, Sym};
-use crate::rans::{self, Tables};
+use crate::rans::{self, Tables, builtin};
 use crate::rc;
 use crate::side::SideModel;
 use crate::stream::{R_PAD, place, segment};
+use recons_common::varint::{self, put as put_varint};
 use std::sync::OnceLock;
 
 /// The built-in frequency tables (see `train`), or uniform ones if none are built in.
@@ -19,11 +20,7 @@ static BUILTIN: &[u8] = include_bytes!("../model/builtin.bin");
 
 /// Identifies the context layout the built-in tables were trained for.
 pub fn layout_id() -> u32 {
-    let mut h = 0x811c9dc5u32;
-    for c in 0..model::N_CTX {
-        h = (h ^ model::alphabet(c) as u32).wrapping_mul(0x01000193);
-    }
-    h
+    builtin::layout_id((0..model::N_CTX).map(|c| model::alphabet(c) as u32))
 }
 
 pub fn tables() -> &'static Tables {
@@ -43,13 +40,7 @@ fn uniform_freqs() -> Vec<Vec<u16>> {
 
 /// Serialises frequency tables (for the built-in model file).
 pub fn freqs_to_bytes(f: &[Vec<u16>]) -> Vec<u8> {
-    let mut raw = layout_id().to_le_bytes().to_vec();
-    for t in f {
-        for &x in t {
-            raw.extend_from_slice(&x.to_le_bytes());
-        }
-    }
-    zstd::bulk::compress(&raw, 19).unwrap()
+    builtin::to_bytes(layout_id(), f)
 }
 
 /// The built-in frequency tables, if any match the layout (for tools).
@@ -58,23 +49,7 @@ pub fn builtin_freqs_pub() -> Option<Vec<Vec<u16>>> {
 }
 
 fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
-    if BUILTIN.is_empty() {
-        return None;
-    }
-    let size = zstd::bulk::Decompressor::upper_bound(BUILTIN).unwrap_or(1 << 24);
-    let raw = zstd::bulk::decompress(BUILTIN, size).ok()?;
-    if raw.len() < 4 || u32::from_le_bytes(raw[0..4].try_into().unwrap()) != layout_id() {
-        return None;
-    }
-    let mut p = 4;
-    let mut out = Vec::with_capacity(model::N_CTX);
-    for c in 0..model::N_CTX {
-        let n = model::alphabet(c);
-        let t: Vec<u16> = raw.get(p..p + 2 * n)?.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
-        p += 2 * n;
-        out.push(t);
-    }
-    Some(out)
+    builtin::from_bytes(BUILTIN, layout_id(), (0..model::N_CTX).map(model::alphabet))
 }
 
 struct Enc<'a> {
@@ -87,7 +62,7 @@ impl Coder for Enc<'_> {
     type L = EncLocal;
     #[inline(always)]
     fn local(&mut self) -> EncLocal {
-        EncLocal { rans: self.rans.local(self.t), raw: self.raw.local() }
+        EncLocal { rans: self.rans.local_tracked(self.t), raw: self.raw.local() }
     }
     #[inline(always)]
     fn put_back(&mut self, l: EncLocal) {
@@ -111,7 +86,7 @@ impl Coder for Enc<'_> {
 }
 
 struct EncLocal {
-    rans: rans::EncLocal,
+    rans: rans::EncLocal<true>,
     raw: crate::bits::WordBits,
 }
 
@@ -181,14 +156,6 @@ const N_BYTE_STREAMS: usize = 8;
 pub const STREAM_NAMES: [&str; N_BYTE_STREAMS + 2] =
     ["segs", "junk", "headers", "crc", "tail bits", "raw gr", "gaps", "side", "rans", "raw bits"];
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
 #[derive(Debug)]
 pub struct Error(pub &'static str);
 
@@ -210,15 +177,7 @@ impl<'a> Rd<'a> {
         Ok(s)
     }
     fn varint(&mut self) -> Result<u64, Error> {
-        let mut v = 0u64;
-        for shift in (0..64).step_by(7) {
-            let b = self.u8()?;
-            v |= ((b & 0x7f) as u64) << shift;
-            if b < 0x80 {
-                return Ok(v);
-            }
-        }
-        Err(Error("bad varint"))
+        varint::get(self.d, &mut self.p).map_err(|e| Error(e.0))
     }
 }
 
