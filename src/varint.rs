@@ -59,34 +59,7 @@ pub fn put_sqlite(out: &mut [u8], v: u64) -> usize {
     n
 }
 
-#[inline]
-pub fn zz(v: i64) -> u64 {
-    ((v << 1) ^ (v >> 63)) as u64
-}
-
-#[inline]
-pub fn unzz(v: u64) -> i64 {
-    (v >> 1) as i64 ^ -((v & 1) as i64)
-}
-
-#[inline]
-pub fn put_uv(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
-
-#[inline]
-pub fn put_sv(out: &mut Vec<u8>, v: i64) {
-    put_uv(out, zz(v))
-}
-
-#[inline]
-pub fn uv_len(v: u64) -> usize {
-    (64 - (v | 1).leading_zeros() as usize).div_ceil(7)
-}
+pub use recons_common::varint::{len as uv_len, put as put_uv, put_signed as put_sv, unzz, zz};
 
 /// A cursor over one of our streams.
 #[derive(Clone, Copy, Default)]
@@ -109,27 +82,7 @@ impl<'a> Rd<'a> {
 
     #[inline]
     pub fn uv(&mut self) -> Result<u64> {
-        // Fast path: one byte.
-        if let Some(&c) = self.b.get(self.p)
-            && c < 0x80
-        {
-            self.p += 1;
-            return Ok(c as u64);
-        }
-        let mut v = 0u64;
-        let mut shift = 0;
-        loop {
-            let c = *self.b.get(self.p).ok_or_else(corrupt)?;
-            self.p += 1;
-            v |= ((c & 0x7f) as u64).checked_shl(shift).ok_or_else(corrupt)?;
-            if c < 0x80 {
-                return Ok(v);
-            }
-            shift += 7;
-            if shift >= 64 {
-                return Err(corrupt());
-            }
-        }
+        recons_common::varint::get(self.b, &mut self.p).map_err(|_| corrupt())
     }
 
     #[inline]

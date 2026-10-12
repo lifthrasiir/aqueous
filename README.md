@@ -171,8 +171,8 @@ target/release/sqlr fuzz -n 200 $(find corpus -type f -size -4M)
 | `src/page.rs` | Geometry, b-tree page parsing, cell placement |
 | `src/record.rs` | Records, column coding |
 | `src/index.rs` | Schema, index keys, index order |
-| `src/varint.rs` | SQLite varints, LEB128 |
-| `src/mem.rs` | Heap accounting (`bench -m`, feature `memprof`) |
+| `src/varint.rs` | SQLite varints, stream cursor (LEB128 from `recons-common`) |
+| `recons_common::mem` | Heap accounting (`bench -m`, feature `memprof`) |
 | `src/bin/sqlr.rs` | Command-line tool, bench, fuzz |
 | `scripts/` | Corpus, baselines, format check, profiling (`profile.py` over samply) |
 

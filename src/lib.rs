@@ -7,9 +7,10 @@
 //! assert_eq!(sqlite_recons::decompress(&packed).unwrap(), db);
 //! ```
 
+#![allow(clippy::needless_range_loop)]
+
 pub mod container;
 pub mod index;
-pub mod mem;
 pub mod page;
 pub mod record;
 pub mod transform;
@@ -34,3 +35,5 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn corrupt() -> Error {
     Error("corrupt input")
 }
+
+pub use recons_common::mem;

@@ -464,7 +464,7 @@ impl Checker<'_> {
     #[inline]
     fn see(&mut self, at: usize, n: usize) -> Option<&[u8]> {
         let p = at / self.psize;
-        if at % self.psize != 0 || self.seen.get(p) != Some(&false) {
+        if !at.is_multiple_of(self.psize) || self.seen.get(p) != Some(&false) {
             self.ok = false;
             return None;
         }

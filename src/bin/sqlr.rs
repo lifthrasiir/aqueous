@@ -172,11 +172,11 @@ fn bench(args: &[String]) {
         println!("heap beyond input and output, worst ratio: compress {mpeak_c:.2}x, decompress {mpeak_d:.2}x");
     }
     println!("streams (raw -> coded):");
-    for i in 0..NSTREAMS {
+    for (i, name) in STREAM_NAMES.iter().enumerate() {
         if total.raw[i] > 0 {
             println!(
                 "  {:>7} {:>12} -> {:>11} ({:5.1}%)",
-                STREAM_NAMES[i],
+                name,
                 total.raw[i],
                 total.coded[i],
                 100.0 * total.coded[i] as f64 / tout

@@ -6,12 +6,13 @@ description = "Lossless SQLite3 database recompression: bit-exact reconstruction
 publish = false
 
 [dependencies]
+recons-common = { path = "../recons-common" }
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [features]
 # Heap use at phase marks, to stderr.
-memprof = []
+memprof = ["recons-common/memprof"]
 
 [profile.release]
 debug = 1
