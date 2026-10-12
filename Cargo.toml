@@ -6,6 +6,7 @@ description = "Lossless PSD/PSB recompression: bit-exact reconstruction from a s
 publish = false
 
 [dependencies]
+recons-common = { path = "../recons-common" }
 flate-recons = { path = "../flate-recons" }
 png-recons = { path = "../png-recons" }
 jpeg-recons = { path = "../jpeg-recons" }

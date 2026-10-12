@@ -69,6 +69,9 @@ checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
 [[package]]
 name = "flate-recons"
 version = "0.1.0"
+dependencies = [
+ "recons-common",
+]
 
 [[package]]
 name = "getrandom"
@@ -97,6 +100,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "rayon",
+ "recons-common",
  "xxhash-rust",
  "zstd",
 ]
@@ -125,6 +129,7 @@ version = "0.1.0"
 dependencies = [
  "crc32fast",
  "flate-recons",
+ "recons-common",
  "xxhash-rust",
  "zstd",
 ]
@@ -136,6 +141,7 @@ dependencies = [
  "flate-recons",
  "jpeg-recons",
  "png-recons",
+ "recons-common",
  "xxhash-rust",
  "zstd",
 ]
@@ -165,6 +171,10 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "recons-common"
+version = "0.1.0"
 
 [[package]]
 name = "shlex"
