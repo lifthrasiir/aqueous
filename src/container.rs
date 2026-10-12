@@ -18,6 +18,10 @@
 //!   length). `FULL` streams' inflated data is in their class's pool, the metadata in the
 //!   meta section; `TOK` streams are in the token section, in order.
 //! - `JPEG`: varint(length); a jpeg-recons container in the jpeg section.
+//!
+//! With more than one thread ([`Options::threads`]), items are coded and restored ahead on a
+//! pool, and joined in order on the calling thread (with the token streams, which share one
+//! coder); the output is the same whatever the number of threads.
 
 use crate::image::{self, Geometry};
 use crate::kind::{self, CLASSES, Class, Filter};
@@ -68,11 +72,14 @@ pub struct Options {
     pub full: bool,
     /// Images with PNG predictors through png-recons.
     pub png: bool,
+    /// Threads (1: the items one after the other on the calling thread, jpeg-recons on
+    /// rayon's global pool as before). The output does not depend on it.
+    pub threads: usize,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { speed: 100.0, verify: false, level: 9, tok: true, full: true, png: true }
+        Options { speed: 100.0, verify: false, level: 9, tok: true, full: true, png: true, threads: 1 }
     }
 }
 
@@ -149,7 +156,7 @@ pub fn compress_with(file: &[u8], opts: &Options, st: &mut Stats) -> Vec<u8> {
     let mut res = attempt(opts);
     if opts.verify
         && let Some((out, _)) = &res
-        && decompress(out).as_deref() != Ok(file)
+        && decompress_threads(out, opts.threads).as_deref() != Ok(file)
     {
         let o = Options { tok: false, full: false, png: false, ..opts.clone() };
         res = attempt(&o).map(|(r, mut s)| {
@@ -390,150 +397,77 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     st.predicted = fixed + choose(&mut items, budget - fixed, opts);
     st.times[0] += t0.elapsed().as_secs_f64();
 
-    // Code the items.
-    let mut table = vec![];
-    let mut skel = Vec::with_capacity(skel_len);
-    let mut raw = vec![];
-    let mut meta = vec![];
-    let mut jpeg = vec![];
-    let mut png = vec![];
-    let mut tokens = tok::Encoder::default();
-    let mut pools: Vec<Vec<u8>> = vec![vec![]; CLASSES.len()];
-    let mut at = 0;
-    // Bytes each item covers once coded.
-    let mut cov: Vec<usize> = Vec::with_capacity(items.len());
+    // Code the items: each on its own (on the pool, with more than one thread), then into
+    // the sections, in order.
+    let pool = pool(opts.threads);
     let fr_opts = flate_recons::fast::Options { threads: 1, ..Default::default() };
-    for (i, it) in items.iter().enumerate() {
-        let data = &file[it.start..it.start + it.len];
-        varint::put(&mut table, (it.start - at) as u64);
-        skel.extend_from_slice(&file[at..it.start]);
-        let t_item = std::time::Instant::now();
-        let mut plain_n = 0usize;
-        let (mode, len, out_len) = match it.plan {
-            Plan::Dup(j) => {
-                table.push(DUP);
-                varint::put(&mut table, (i - j) as u64);
-                (DUP, cov[j], 0)
+    let mut b = Sections::new(skel_len, items.len());
+    match &pool {
+        None => {
+            for (i, it) in items.iter().enumerate() {
+                let t_item = std::time::Instant::now();
+                let d = code_item(file, it, &fr_opts);
+                b.add(file, i, it, d, st, t_item, 0.0);
             }
-            Plan::Flate(c, _, m @ (TOK | FULL), g) => {
-                let px = if m == TOK { g.as_ref().and_then(pixels) } else { None };
-                let t = std::time::Instant::now();
-                let hdr = 2 * flate::zlib_header(data) as usize;
-                let parsed = flate_recons::fast::inflate::parse(&data[hdr..]);
-                st.times[1] += t.elapsed().as_secs_f64();
-                let coded = parsed.ok().and_then(|mut f| {
-                    let end = data.len() - f.stream.trailing.len();
-                    let adler =
-                        f.stream.trailing.len() >= 4 && data[end..end + 4] == flate::adler32(&f.data).to_be_bytes();
-                    f.stream.trailing.clear();
-                    plain_n = f.data.len();
-                    let flags = (hdr as u8 / 2) | ((adler as u8) << 1) | ((px.is_some() as u8) << 2);
-                    let mut fields = vec![m, flags];
-                    fields.extend_from_slice(&data[..hdr]);
-                    fields.push(c as u8);
-                    varint::put(&mut fields, f.data.len() as u64);
-                    if let Some(px) = px {
-                        varint::put(&mut fields, px.bpp as u64);
-                        varint::put(&mut fields, px.stride as u64);
-                    }
-                    let n = if m == TOK {
-                        tokens.add(c, &f, px).ok()?;
-                        0
-                    } else {
-                        let t = std::time::Instant::now();
-                        let r = flate_recons::fast::deconstruct_with(&data[hdr..end], &fr_opts);
-                        st.times[2] += t.elapsed().as_secs_f64();
-                        let (plain, m) = r.ok()?;
-                        varint::put(&mut fields, m.len() as u64);
-                        pools[c as usize].extend_from_slice(&plain);
-                        meta.extend_from_slice(&m);
-                        st.class_out[FULL as usize][c as usize] += m.len() as f64;
-                        m.len()
-                    };
-                    Some((fields, end + 4 * adler as usize, n))
-                });
-                match coded {
-                    Some((fields, len, n)) => {
-                        table.extend_from_slice(&fields);
-                        (m, len, n)
-                    }
-                    None => {
-                        st.failed += 1;
-                        table.push(RAW);
-                        varint::put(&mut table, it.len as u64);
-                        raw.extend_from_slice(data);
-                        (RAW, it.len, it.len)
-                    }
+        }
+        Some(pool) => {
+            // Memory an item takes while coded (the parsed or decoded form), roughly.
+            let est = |i: usize| -> Option<usize> {
+                let it = &items[i];
+                match it.plan {
+                    Plan::Flate(_, plain, TOK | FULL | PNG, _) => Some(it.len + (3.0 * plain) as usize),
+                    Plan::Jpeg(_, blocks, true) => Some(it.len + 160 * blocks as usize),
+                    _ => None,
                 }
-            }
-            Plan::Flate(c, _, PNG, Some(g)) => {
-                let (ct, depth) = image::png_format(&g).unwrap();
+            };
+            let job = |i: usize| {
                 let t = std::time::Instant::now();
-                let p = png_recons::compress(&image::wrap(g.width, g.height, ct, depth, data));
-                st.times[3] += t.elapsed().as_secs_f64();
-                if p.len() < data.len() {
-                    plain_n = (g.row() + 1) * g.height as usize;
-                    table.extend_from_slice(&[PNG, ct, depth]);
-                    varint::put(&mut table, g.width as u64);
-                    varint::put(&mut table, g.height as u64);
-                    varint::put(&mut table, p.len() as u64);
-                    png.extend_from_slice(&p);
-                    st.class_out[PNG as usize][c as usize] += p.len() as f64;
-                    (PNG, it.len, p.len())
-                } else {
-                    table.push(RAW);
-                    varint::put(&mut table, it.len as u64);
-                    raw.extend_from_slice(data);
-                    (RAW, it.len, it.len)
-                }
-            }
-            Plan::Jpeg(_, blocks, true) => {
+                let d = code_item(file, &items[i], &fr_opts);
+                (d, t.elapsed().as_secs_f64())
+            };
+            pipeline(pool, items.len(), est, job, |i, d| {
                 let t = std::time::Instant::now();
-                let p = jpeg_recons::container::compress(data);
-                st.times[3] += t.elapsed().as_secs_f64();
-                if p.len() < data.len() {
-                    plain_n = blocks as usize;
-                    table.push(JPEG);
-                    varint::put(&mut table, p.len() as u64);
-                    jpeg.extend_from_slice(&p);
-                    (JPEG, it.len, p.len())
-                } else {
-                    table.push(RAW);
-                    varint::put(&mut table, it.len as u64);
-                    raw.extend_from_slice(data);
-                    (RAW, it.len, it.len)
-                }
-            }
-            _ => {
-                table.push(RAW);
-                varint::put(&mut table, it.len as u64);
-                raw.extend_from_slice(data);
-                (RAW, it.len, it.len)
-            }
-        };
-        let e = &mut st.modes[mode as usize];
-        e.0 += 1;
-        e.1 += len;
-        e.2 += out_len;
-        // Pixel streams count as of no class, progressive JPEGs as images.
-        let ci = match it.plan {
-            Plan::Jpeg(true, ..) => Class::Image as usize,
-            Plan::Flate(_, _, TOK, Some(g)) if mode == TOK && pixels(&g).is_some() => 6,
-            Plan::Flate(c, ..) => c as usize,
-            _ => 6,
-        };
-        let secs = t_item.elapsed().as_secs_f64();
-        st.cost[mode as usize][ci].add(&Measure { n: 1, raw: len, plain: plain_n, secs });
-        st.items.push((mode, ci as u8, len, plain_n, secs));
-        at = it.start + len;
-        cov.push(len);
+                let (d, secs) = d.unwrap_or_else(|| (code_item(file, &items[i], &fr_opts), 0.0));
+                b.add(file, i, &items[i], d, st, t, secs);
+                Ok::<(), ()>(())
+            })
+            .ok()?;
+        }
     }
+    let Sections { table, mut skel, raw, meta, jpeg, png, tokens, pools, at, .. } = b;
     skel.extend_from_slice(&file[at..]);
 
     let t = std::time::Instant::now();
-    let (tok, tok_sizes) = tokens.finish();
+    let level = opts.level;
+    // The token coder's final pass; with a pool, zstd of the table, the skeleton and the
+    // pools beside it.
+    let finish = |tokens: tok::Encoder| {
+        let t = std::time::Instant::now();
+        let r = tokens.finish();
+        (r, t.elapsed().as_secs_f64())
+    };
+    let ((tok, tok_sizes), tok_secs, mut z) = match &pool {
+        None => {
+            let (r, s) = finish(tokens);
+            (r, s, None)
+        }
+        Some(pool) => {
+            let mut v: Vec<&[u8]> = vec![&table, &skel];
+            v.extend(pools.iter().map(|p| &p[..]));
+            let ((r, s), z) = pool.install(|| {
+                use rayon::prelude::*;
+                rayon::join(|| finish(tokens), || v.par_iter().map(|d| zstd_of(d, level)).collect::<Vec<_>>())
+            });
+            (r, s, Some(z.into_iter()))
+        }
+    };
+    // The zstd form of the next of those sections, made above or now.
+    let mut zs = |d: &[u8]| match &mut z {
+        Some(z) => z.next().expect("a section"),
+        None => zstd_of(d, level),
+    };
     st.class_out[TOK as usize] = tok_sizes;
-    st.tok_finish = t.elapsed().as_secs_f64();
+    st.tok_finish = tok_secs;
     // The token items' share of it, by bytes, for the cost fit.
     let tok_bytes: usize = st.items.iter().filter(|i| i.0 == TOK).map(|i| i.2).sum();
     if tok_bytes > 0 {
@@ -548,10 +482,9 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     out.extend_from_slice(&[VERSION, 1]);
     varint::put(&mut out, file.len() as u64);
     out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
-    let level = opts.level;
-    put_section(&mut out, &table, Some(level));
+    put_section(&mut out, &table, zs(&table));
     let k = out.len();
-    put_section(&mut out, &skel, Some(level));
+    put_section(&mut out, &skel, zs(&skel));
     st.skeleton = (skel.len(), out.len() - k);
     put_section(&mut out, &raw, None);
     put_section(&mut out, &meta, None);
@@ -563,12 +496,304 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     let k = out.len();
     for (c, pool) in pools.iter().enumerate() {
         let k = out.len();
-        put_section(&mut out, pool, Some(level));
+        put_section(&mut out, pool, zs(pool));
         st.class_out[FULL as usize][c] += (out.len() - k) as f64;
     }
     st.pools = out.len() - k;
     st.times[4] += t.elapsed().as_secs_f64();
     Some(out)
+}
+
+/// A pool of `threads` threads, if more than one.
+fn pool(threads: usize) -> Option<rayon::ThreadPool> {
+    if threads <= 1 {
+        return None;
+    }
+    rayon::ThreadPoolBuilder::new().num_threads(threads).build().ok()
+}
+
+/// Memory in flight in [`pipeline`] (estimated); one item at least.
+const IN_FLIGHT: usize = 256 << 20;
+
+/// Hands `consume` the indices `0..n` in order, on the calling thread, each with `job`'s
+/// result for it if `est` gives it an estimate of memory: those jobs run on `pool`, ahead in
+/// order, up to a bound in number and memory. A job's panic is resumed here; once this
+/// returns, jobs not started are skipped.
+fn pipeline<T: Send, E>(
+    pool: &rayon::ThreadPool,
+    n: usize,
+    est: impl Fn(usize) -> Option<usize>,
+    job: impl Fn(usize) -> T + Sync,
+    mut consume: impl FnMut(usize, Option<T>) -> std::result::Result<(), E>,
+) -> std::result::Result<(), E> {
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    struct Stop<'a>(&'a AtomicBool);
+    impl Drop for Stop<'_> {
+        fn drop(&mut self) {
+            self.0.store(true, Relaxed);
+        }
+    }
+    let cap = 4 * pool.current_num_threads() + 4;
+    let stop = AtomicBool::new(false);
+    let (job, stop) = (&job, &stop);
+    let (tx, rx) = std::sync::mpsc::channel::<(usize, std::thread::Result<T>)>();
+    pool.in_place_scope_fifo(|s| {
+        let _stop = Stop(stop);
+        // Spawned and not consumed: (index, estimate), in order.
+        let mut flight = std::collections::VecDeque::new();
+        let mut bytes = 0usize;
+        let mut done = std::collections::HashMap::new();
+        let mut next = 0;
+        for i in 0..n {
+            while next < n && flight.len() < cap {
+                let Some(e) = est(next) else {
+                    next += 1;
+                    continue;
+                };
+                if !flight.is_empty() && bytes.saturating_add(e) > IN_FLIGHT {
+                    break;
+                }
+                bytes = bytes.saturating_add(e);
+                flight.push_back((next, e));
+                let (k, tx) = (next, tx.clone());
+                s.spawn_fifo(move |_| {
+                    if !stop.load(Relaxed) {
+                        let _ = tx.send((k, std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job(k)))));
+                    }
+                });
+                next += 1;
+            }
+            let r = match flight.front() {
+                Some(&(k, e)) if k == i => {
+                    flight.pop_front();
+                    bytes -= e;
+                    Some(loop {
+                        if let Some(r) = done.remove(&i) {
+                            break r;
+                        }
+                        match rx.recv().expect("a job's result") {
+                            (k, Ok(r)) => done.insert(k, r),
+                            (_, Err(p)) => std::panic::resume_unwind(p),
+                        };
+                    })
+                }
+                _ => None,
+            };
+            consume(i, r)?;
+        }
+        Ok(())
+    })
+}
+
+/// An item coded on its own, before it goes in the sections.
+enum Coded {
+    /// Stored as it is; whether a coder failed on it.
+    Raw(bool),
+    Dup(usize),
+    /// A FlateDecode stream: its table fields, the parsed stream for the token coder, its
+    /// class, pixel layout and the bytes it covers.
+    Tok(Vec<u8>, Box<flate_recons::fast::inflate::Flat>, Class, Option<tok::Pixels>, usize),
+    /// A FlateDecode stream: its table fields, inflated data and metadata, class and the
+    /// bytes it covers.
+    Full(Vec<u8>, Vec<u8>, Vec<u8>, Class, usize),
+    /// Table fields, png-recons container, class.
+    Png(Vec<u8>, Vec<u8>, Class),
+    Jpeg(Vec<u8>),
+}
+
+/// An item's coded form, its inflated bytes (or JPEG blocks) and the seconds of each phase
+/// spent on it (as [`Stats::times`]).
+struct Done {
+    coded: Coded,
+    plain_n: usize,
+    times: [f64; 5],
+}
+
+fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::fast::Options) -> Done {
+    let data = &file[it.start..it.start + it.len];
+    let mut times = [0f64; 5];
+    let mut plain_n = 0usize;
+    let coded = match it.plan {
+        Plan::Dup(j) => Coded::Dup(j),
+        Plan::Flate(c, _, m @ (TOK | FULL), g) => {
+            let px = if m == TOK { g.as_ref().and_then(pixels) } else { None };
+            let t = std::time::Instant::now();
+            let hdr = 2 * flate::zlib_header(data) as usize;
+            let parsed = flate_recons::fast::inflate::parse(&data[hdr..]);
+            times[1] += t.elapsed().as_secs_f64();
+            let coded = parsed.ok().and_then(|mut f| {
+                let end = data.len() - f.stream.trailing.len();
+                let adler = f.stream.trailing.len() >= 4 && data[end..end + 4] == flate::adler32(&f.data).to_be_bytes();
+                f.stream.trailing.clear();
+                plain_n = f.data.len();
+                let flags = (hdr as u8 / 2) | ((adler as u8) << 1) | ((px.is_some() as u8) << 2);
+                let mut fields = vec![m, flags];
+                fields.extend_from_slice(&data[..hdr]);
+                fields.push(c as u8);
+                varint::put(&mut fields, f.data.len() as u64);
+                if let Some(px) = px {
+                    varint::put(&mut fields, px.bpp as u64);
+                    varint::put(&mut fields, px.stride as u64);
+                }
+                let len = end + 4 * adler as usize;
+                if m == TOK {
+                    return Some(Coded::Tok(fields, Box::new(f), c, px, len));
+                }
+                let t = std::time::Instant::now();
+                let r = flate_recons::fast::deconstruct_with(&data[hdr..end], fr_opts);
+                times[2] += t.elapsed().as_secs_f64();
+                let (plain, meta) = r.ok()?;
+                varint::put(&mut fields, meta.len() as u64);
+                Some(Coded::Full(fields, plain, meta, c, len))
+            });
+            coded.unwrap_or(Coded::Raw(true))
+        }
+        Plan::Flate(c, _, PNG, Some(g)) => {
+            let (ct, depth) = image::png_format(&g).unwrap();
+            let t = std::time::Instant::now();
+            let p = png_recons::compress(&image::wrap(g.width, g.height, ct, depth, data));
+            times[3] += t.elapsed().as_secs_f64();
+            if p.len() < data.len() {
+                plain_n = (g.row() + 1) * g.height as usize;
+                let mut fields = vec![PNG, ct, depth];
+                varint::put(&mut fields, g.width as u64);
+                varint::put(&mut fields, g.height as u64);
+                varint::put(&mut fields, p.len() as u64);
+                Coded::Png(fields, p, c)
+            } else {
+                Coded::Raw(false)
+            }
+        }
+        Plan::Jpeg(_, blocks, true) => {
+            let t = std::time::Instant::now();
+            let p = jpeg_recons::container::compress(data);
+            times[3] += t.elapsed().as_secs_f64();
+            if p.len() < data.len() {
+                plain_n = blocks as usize;
+                Coded::Jpeg(p)
+            } else {
+                Coded::Raw(false)
+            }
+        }
+        _ => Coded::Raw(false),
+    };
+    Done { coded, plain_n, times }
+}
+
+/// The sections as the items go in, in order.
+struct Sections {
+    table: Vec<u8>,
+    skel: Vec<u8>,
+    raw: Vec<u8>,
+    meta: Vec<u8>,
+    jpeg: Vec<u8>,
+    png: Vec<u8>,
+    tokens: tok::Encoder,
+    pools: Vec<Vec<u8>>,
+    /// The end of the last item.
+    at: usize,
+    /// Bytes each item covers once coded.
+    cov: Vec<usize>,
+}
+
+impl Sections {
+    fn new(skel_len: usize, items: usize) -> Self {
+        Sections {
+            table: vec![],
+            skel: Vec::with_capacity(skel_len),
+            raw: vec![],
+            meta: vec![],
+            jpeg: vec![],
+            png: vec![],
+            tokens: tok::Encoder::default(),
+            pools: vec![vec![]; CLASSES.len()],
+            at: 0,
+            cov: Vec::with_capacity(items),
+        }
+    }
+
+    /// Adds item `i`, coded as `d`; its time is `secs` and since `t_item`.
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        file: &[u8],
+        i: usize,
+        it: &Item,
+        d: Done,
+        st: &mut Stats,
+        t_item: std::time::Instant,
+        secs: f64,
+    ) {
+        let data = &file[it.start..it.start + it.len];
+        varint::put(&mut self.table, (it.start - self.at) as u64);
+        self.skel.extend_from_slice(&file[self.at..it.start]);
+        for (a, b) in st.times.iter_mut().zip(&d.times) {
+            *a += b;
+        }
+        let raw = |s: &mut Self| {
+            s.table.push(RAW);
+            varint::put(&mut s.table, it.len as u64);
+            s.raw.extend_from_slice(data);
+            (RAW, it.len, it.len)
+        };
+        let (mode, len, out_len) = match d.coded {
+            Coded::Dup(j) => {
+                self.table.push(DUP);
+                varint::put(&mut self.table, (i - j) as u64);
+                (DUP, self.cov[j], 0)
+            }
+            Coded::Tok(fields, f, c, px, len) => match self.tokens.add(c, &f, px) {
+                Ok(()) => {
+                    self.table.extend_from_slice(&fields);
+                    (TOK, len, 0)
+                }
+                Err(_) => {
+                    st.failed += 1;
+                    raw(self)
+                }
+            },
+            Coded::Full(fields, plain, m, c, len) => {
+                self.table.extend_from_slice(&fields);
+                self.pools[c as usize].extend_from_slice(&plain);
+                self.meta.extend_from_slice(&m);
+                st.class_out[FULL as usize][c as usize] += m.len() as f64;
+                (FULL, len, m.len())
+            }
+            Coded::Png(fields, p, c) => {
+                self.table.extend_from_slice(&fields);
+                self.png.extend_from_slice(&p);
+                st.class_out[PNG as usize][c as usize] += p.len() as f64;
+                (PNG, it.len, p.len())
+            }
+            Coded::Jpeg(p) => {
+                self.table.push(JPEG);
+                varint::put(&mut self.table, p.len() as u64);
+                self.jpeg.extend_from_slice(&p);
+                (JPEG, it.len, p.len())
+            }
+            Coded::Raw(failed) => {
+                st.failed += failed as usize;
+                raw(self)
+            }
+        };
+        let e = &mut st.modes[mode as usize];
+        e.0 += 1;
+        e.1 += len;
+        e.2 += out_len;
+        // Pixel streams count as of no class, progressive JPEGs as images.
+        let ci = match it.plan {
+            Plan::Jpeg(true, ..) => Class::Image as usize,
+            Plan::Flate(_, _, TOK, Some(g)) if mode == TOK && pixels(&g).is_some() => 6,
+            Plan::Flate(c, ..) => c as usize,
+            _ => 6,
+        };
+        let plain_n = d.plain_n;
+        let secs = secs + t_item.elapsed().as_secs_f64();
+        st.cost[mode as usize][ci].add(&Measure { n: 1, raw: len, plain: plain_n, secs });
+        st.items.push((mode, ci as u8, len, plain_n, secs));
+        self.at = it.start + len;
+        self.cov.push(len);
+    }
 }
 
 /// Picks a mode per item: the smallest estimated size plus `λ` times the estimated time
@@ -637,37 +862,52 @@ fn choose(items: &mut [Item], budget: f64, opts: &Options) -> f64 {
     spent
 }
 
-fn put_section(out: &mut Vec<u8>, data: &[u8], level: Option<i32>) {
-    varint::put(out, data.len() as u64);
-    if let Some(l) = level
-        && data.len() >= 32
-        && let Ok(z) = zstd::bulk::compress(data, l)
-        && z.len() < data.len()
-    {
-        out.push(1);
-        varint::put(out, z.len() as u64);
-        out.extend_from_slice(&z);
-        return;
+/// zstd of a section, if smaller.
+fn zstd_of(data: &[u8], level: i32) -> Option<Vec<u8>> {
+    if data.len() < 32 {
+        return None;
     }
-    out.push(0);
-    out.extend_from_slice(data);
+    zstd::bulk::compress(data, level).ok().filter(|z| z.len() < data.len())
 }
 
-fn get_section(r: &mut Reader, max: usize) -> Result<Vec<u8>> {
+/// A section, stored or as `z` (its zstd form).
+fn put_section(out: &mut Vec<u8>, data: &[u8], z: Option<Vec<u8>>) {
+    varint::put(out, data.len() as u64);
+    match z {
+        Some(z) => {
+            out.push(1);
+            varint::put(out, z.len() as u64);
+            out.extend_from_slice(&z);
+        }
+        None => {
+            out.push(0);
+            out.extend_from_slice(data);
+        }
+    }
+}
+
+/// A section's length and its data: stored, or zstd (`true`).
+fn read_section<'a>(r: &mut Reader<'a>, max: usize) -> Result<(usize, &'a [u8], bool)> {
     let len = r.usize(max)?;
     match r.u8()? {
-        0 => Ok(r.bytes(len)?.to_vec()),
+        0 => Ok((len, r.bytes(len)?, false)),
         1 => {
             let n = r.usize(r.s.len())?;
-            let z = r.bytes(n)?;
-            let d = zstd::bulk::decompress(z, len).map_err(|_| Error::Corrupt)?;
-            if d.len() != len {
-                return Err(Error::Corrupt);
-            }
-            Ok(d)
+            Ok((len, r.bytes(n)?, true))
         }
         _ => Err(Error::Corrupt),
     }
+}
+
+fn get_section((len, data, z): (usize, &[u8], bool)) -> Result<Vec<u8>> {
+    if !z {
+        return Ok(data.to_vec());
+    }
+    let d = zstd::bulk::decompress(data, len).map_err(|_| Error::Corrupt)?;
+    if d.len() != len {
+        return Err(Error::Corrupt);
+    }
+    Ok(d)
 }
 
 /// Bound on any length read, against corrupt sizes.
@@ -677,7 +917,216 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     decompress_with(src, &mut DStats::default())
 }
 
+/// [`decompress`] with `threads` threads (the result does not depend on it).
+pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
+    decompress_with_threads(src, &mut DStats::default(), threads)
+}
+
 pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
+    decompress_with_threads(src, ds, 1)
+}
+
+/// An item of the table, with its data in the sections.
+struct Entry<'a> {
+    /// The skeleton before it.
+    gap: std::ops::Range<usize>,
+    mode: u8,
+    /// Class (as [`Stats::cost`]) and inflated bytes, for the statistics.
+    ci: usize,
+    plain_n: usize,
+    op: Op<'a>,
+}
+
+enum Op<'a> {
+    Raw(&'a [u8]),
+    /// Items back.
+    Dup(usize),
+    /// A FlateDecode stream: zlib header, class, inflated length, pixel layout, whether the
+    /// Adler-32 follows, and for `FULL` the inflated data and metadata.
+    Flate(&'a [u8], usize, usize, Option<tok::Pixels>, bool, Option<(&'a [u8], &'a [u8])>),
+    Png(&'a [u8]),
+    Jpeg(&'a [u8]),
+}
+
+/// Where the items' data is next in each section.
+#[derive(Default)]
+struct Cursors {
+    sk: usize,
+    rw: usize,
+    mt: usize,
+    jp: usize,
+    pn: usize,
+    pool: [usize; CLASSES.len()],
+}
+
+/// The next `n` bytes of `v` from `at`.
+fn take<'a>(v: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
+    let end = at.checked_add(n).filter(|&e| e <= v.len()).ok_or(Error::Corrupt)?;
+    let r = &v[*at..end];
+    *at = end;
+    Ok(r)
+}
+
+/// The next item of the table, the `index`th; `len` is the file's length.
+fn entry<'a>(t: &mut Reader<'a>, sec: &'a [Vec<u8>], cur: &mut Cursors, len: usize, index: usize) -> Result<Entry<'a>> {
+    let gap = t.usize(len)?;
+    let skel = &sec[S_SKEL];
+    let s0 = cur.sk;
+    take(skel, &mut cur.sk, gap)?;
+    let mode = t.u8()?;
+    let (mut ci, mut plain_n) = (6, 0);
+    let op = match mode {
+        RAW => {
+            let n = t.usize(len)?;
+            Op::Raw(take(&sec[S_RAW], &mut cur.rw, n)?)
+        }
+        DUP => {
+            let back = t.usize(index)?;
+            if back == 0 {
+                return Err(Error::Corrupt);
+            }
+            Op::Dup(back)
+        }
+        m @ (FULL | TOK) => {
+            let flags = t.u8()?;
+            if flags & !7 != 0 || (m == FULL && flags & 4 != 0) {
+                return Err(Error::Corrupt);
+            }
+            let hdr = if flags & 1 != 0 { t.bytes(2)? } else { &[] };
+            let c = t.u8()? as usize;
+            if c >= CLASSES.len() {
+                return Err(Error::Corrupt);
+            }
+            let n = t.usize(len.saturating_mul(1032))?;
+            (ci, plain_n) = (if flags & 4 != 0 { 6 } else { c }, n);
+            let px =
+                if flags & 4 != 0 { Some(tok::Pixels { bpp: t.usize(64)?, stride: t.usize(1 << 34)? }) } else { None };
+            let full = if m == FULL {
+                let mlen = t.usize(MAX_LEN)?;
+                let plain = take(&sec[S_POOL + c], &mut cur.pool[c], n)?;
+                Some((plain, take(&sec[S_META], &mut cur.mt, mlen)?))
+            } else {
+                None
+            };
+            Op::Flate(hdr, c, n, px, flags & 2 != 0, full)
+        }
+        PNG => {
+            ci = Class::Image as usize;
+            let _format = t.bytes(2)?;
+            let (_w, _h) = (t.varint()?, t.varint()?);
+            let n = t.usize(len)?;
+            Op::Png(take(&sec[S_PNG], &mut cur.pn, n)?)
+        }
+        JPEG => {
+            let n = t.usize(len)?;
+            Op::Jpeg(take(&sec[S_JPEG], &mut cur.jp, n)?)
+        }
+        _ => return Err(Error::Corrupt),
+    };
+    Ok(Entry { gap: s0..cur.sk, mode, ci, plain_n, op })
+}
+
+/// An item restored on its own: the bytes are `buf[range]`, then the Adler-32 if any.
+struct Restored {
+    buf: Vec<u8>,
+    range: std::ops::Range<usize>,
+    adler: Option<u32>,
+}
+
+/// Restores a `FULL`, `PNG` or `JPEG` item on its own.
+fn restore(e: &Entry) -> Result<Restored> {
+    let whole = |buf: Vec<u8>| Restored { range: 0..buf.len(), buf, adler: None };
+    match e.op {
+        Op::Flate(_, _, _, _, adler, Some((plain, meta))) => {
+            let d = flate_recons::fast::reconstruct_with_threads(plain, meta, 1).map_err(|_| Error::Corrupt)?;
+            Ok(Restored { adler: adler.then(|| flate::adler32(plain)), ..whole(d) })
+        }
+        Op::Png(p) => {
+            let file = png_recons::decompress(p).map_err(|_| Error::Corrupt)?;
+            let u = image::unwrap(&file).ok_or(Error::Corrupt)?;
+            let at = u.as_ptr() as usize - file.as_ptr() as usize;
+            Ok(Restored { range: at..at + u.len(), buf: file, adler: None })
+        }
+        Op::Jpeg(p) => Ok(whole(jpeg_recons::container::decompress(p).map_err(|_| Error::Corrupt)?)),
+        _ => unreachable!("not restored on its own"),
+    }
+}
+
+/// Memory an entry takes while restored, roughly, if restored on its own.
+fn restore_estimate(e: &Entry) -> Option<usize> {
+    match e.op {
+        Op::Flate(.., Some((plain, meta))) => Some(plain.len().saturating_mul(2).saturating_add(meta.len())),
+        Op::Png(p) | Op::Jpeg(p) => Some(p.len().saturating_mul(16)),
+        _ => None,
+    }
+}
+
+/// The output so far, and what restoring the items in order needs.
+struct Out<'a> {
+    out: Vec<u8>,
+    skel: &'a [u8],
+    tokens: Option<tok::DecoderState<'a>>,
+    /// Where each item went in the output.
+    placed: Vec<(usize, usize)>,
+    len: usize,
+}
+
+impl Out<'_> {
+    /// Appends item `e`, restored as `r` if it was on its own; its time is `secs` and
+    /// since `t_item`.
+    fn add(
+        &mut self,
+        e: &Entry,
+        r: Option<Result<Restored>>,
+        ds: &mut DStats,
+        t_item: std::time::Instant,
+        secs: f64,
+    ) -> Result<()> {
+        let out = &mut self.out;
+        out.extend_from_slice(&self.skel[e.gap.clone()]);
+        let start = out.len();
+        let restored = || r.unwrap_or_else(|| restore(e));
+        match e.op {
+            Op::Raw(d) => out.extend_from_slice(d),
+            Op::Dup(back) => {
+                let (s, n) = self.placed[self.placed.len() - back];
+                out.extend_from_within(s..s + n);
+            }
+            Op::Flate(hdr, c, n, px, adler, full) => {
+                out.extend_from_slice(hdr);
+                let a = if full.is_some() {
+                    let r = restored()?;
+                    out.extend_from_slice(&r.buf[r.range]);
+                    r.adler
+                } else {
+                    let dec = self.tokens.as_mut().ok_or(Error::Corrupt)?;
+                    let (d, plain) = dec.next(CLASSES[c], n, px)?;
+                    out.extend_from_slice(&d);
+                    adler.then(|| flate::adler32(&plain))
+                };
+                if let Some(a) = a {
+                    out.extend_from_slice(&a.to_be_bytes());
+                }
+            }
+            Op::Png(_) | Op::Jpeg(_) => {
+                let r = restored()?;
+                out.extend_from_slice(&r.buf[r.range]);
+            }
+        }
+        self.placed.push((start, out.len() - start));
+        let secs = secs + t_item.elapsed().as_secs_f64();
+        ds.cost[e.mode as usize][e.ci].add(&Measure { n: 1, raw: out.len() - start, plain: e.plain_n, secs });
+        ds.items.push((e.mode, e.ci as u8, out.len() - start, e.plain_n, secs));
+        if out.len() > self.len {
+            return Err(Error::Corrupt);
+        }
+        Ok(())
+    }
+}
+
+/// [`decompress_with`] with `threads` threads: the sections are decoded, and the items but
+/// the token streams (one coded stream) restored, on a pool; the rest is in order here.
+pub fn decompress_with_threads(src: &[u8], ds: &mut DStats, threads: usize) -> Result<Vec<u8>> {
     let t_setup = std::time::Instant::now();
     let mut r = Reader::new(src);
     if r.bytes(4)? != MAGIC || r.u8()? != VERSION {
@@ -690,113 +1139,64 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
     }
     let len = r.usize(MAX_LEN)?;
     let sum = r.u64le()?;
+    let pool = pool(threads);
     // Sections are at most the file, but the pools (inflated data, at most 1032 times
     // the DEFLATE data).
-    let mut sec: Vec<Vec<u8>> = Vec::with_capacity(NSECTIONS);
-    for k in 0..NSECTIONS {
-        let max = if k >= S_POOL { len.saturating_mul(1032) } else { len.saturating_add(1 << 20) };
-        sec.push(get_section(&mut r, max)?);
-    }
+    let max = |k: usize| if k >= S_POOL { len.saturating_mul(1032) } else { len.saturating_add(1 << 20) };
+    let sec: Vec<Vec<u8>> = match &pool {
+        None => {
+            let mut sec = Vec::with_capacity(NSECTIONS);
+            for k in 0..NSECTIONS {
+                sec.push(get_section(read_section(&mut r, max(k))?)?);
+            }
+            sec
+        }
+        Some(pool) => {
+            let mut v = Vec::with_capacity(NSECTIONS);
+            for k in 0..NSECTIONS {
+                v.push(read_section(&mut r, max(k))?);
+            }
+            use rayon::prelude::*;
+            pool.install(|| v.into_par_iter().map(get_section).collect::<Result<_>>())?
+        }
+    };
     if !r.at_end() {
         return Err(Error::Corrupt);
     }
-    let mut out = Vec::with_capacity(len);
     let mut t = Reader::new(&sec[S_TABLE]);
-    let (mut sk, mut rw, mut mt, mut jp, mut pn) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    let mut pool_at = [0usize; CLASSES.len()];
-    let mut tokens = if sec[S_TOK].is_empty() { None } else { Some(tok::DecoderState::new(&sec[S_TOK])?) };
-    // Where each item went in the output.
-    let mut placed: Vec<(usize, usize)> = vec![];
-    let skel = &sec[S_SKEL];
+    let mut cur = Cursors::default();
+    let tokens = if sec[S_TOK].is_empty() { None } else { Some(tok::DecoderState::new(&sec[S_TOK])?) };
+    let mut o = Out { out: Vec::with_capacity(len), skel: &sec[S_SKEL], tokens, placed: vec![], len };
     ds.setup += t_setup.elapsed().as_secs_f64();
-    let take = |v: &Vec<u8>, at: &mut usize, n: usize| -> Result<std::ops::Range<usize>> {
-        let end = at.checked_add(n).filter(|&e| e <= v.len()).ok_or(Error::Corrupt)?;
-        let r = *at..end;
-        *at = end;
-        Ok(r)
-    };
-    while !t.at_end() {
-        let gap = t.usize(len)?;
-        out.extend_from_slice(&skel[take(skel, &mut sk, gap)?]);
-        let start = out.len();
-        let t_item = std::time::Instant::now();
-        let mode = t.u8()?;
-        let (mut ci, mut plain_n) = (6, 0);
-        match mode {
-            RAW => {
-                let n = t.usize(len)?;
-                out.extend_from_slice(&sec[S_RAW][take(&sec[S_RAW], &mut rw, n)?]);
+    match &pool {
+        None => {
+            while !t.at_end() {
+                let t_item = std::time::Instant::now();
+                let e = entry(&mut t, &sec, &mut cur, len, o.placed.len())?;
+                o.add(&e, None, ds, t_item, 0.0)?;
             }
-            DUP => {
-                let back = t.usize(placed.len())?;
-                if back == 0 {
-                    return Err(Error::Corrupt);
-                }
-                let (s, n) = placed[placed.len() - back];
-                out.extend_from_within(s..s + n);
-            }
-            m @ (FULL | TOK) => {
-                let flags = t.u8()?;
-                if flags & !7 != 0 || (m == FULL && flags & 4 != 0) {
-                    return Err(Error::Corrupt);
-                }
-                if flags & 1 != 0 {
-                    out.extend_from_slice(t.bytes(2)?);
-                }
-                let c = t.u8()? as usize;
-                if c >= CLASSES.len() {
-                    return Err(Error::Corrupt);
-                }
-                let n = t.usize(len.saturating_mul(1032))?;
-                (ci, plain_n) = (if flags & 4 != 0 { 6 } else { c }, n);
-                let px = if flags & 4 != 0 {
-                    Some(tok::Pixels { bpp: t.usize(64)?, stride: t.usize(1 << 34)? })
-                } else {
-                    None
-                };
-                let adler = if m == FULL {
-                    let mlen = t.usize(MAX_LEN)?;
-                    let plain = &sec[S_POOL + c][take(&sec[S_POOL + c], &mut pool_at[c], n)?];
-                    let meta = &sec[S_META][take(&sec[S_META], &mut mt, mlen)?];
-                    let d = flate_recons::fast::reconstruct_with_threads(plain, meta, 1).map_err(|_| Error::Corrupt)?;
-                    out.extend_from_slice(&d);
-                    (flags & 2 != 0).then(|| flate::adler32(plain))
-                } else {
-                    let dec = tokens.as_mut().ok_or(Error::Corrupt)?;
-                    let (d, plain) = dec.next(CLASSES[c], n, px)?;
-                    out.extend_from_slice(&d);
-                    (flags & 2 != 0).then(|| flate::adler32(&plain))
-                };
-                if let Some(a) = adler {
-                    out.extend_from_slice(&a.to_be_bytes());
-                }
-            }
-            PNG => {
-                ci = Class::Image as usize;
-                let _format = t.bytes(2)?;
-                let (_w, _h) = (t.varint()?, t.varint()?);
-                let n = t.usize(len)?;
-                let p = &sec[S_PNG][take(&sec[S_PNG], &mut pn, n)?];
-                let file = png_recons::decompress(p).map_err(|_| Error::Corrupt)?;
-                out.extend_from_slice(image::unwrap(&file).ok_or(Error::Corrupt)?);
-            }
-            JPEG => {
-                let n = t.usize(len)?;
-                let p = &sec[S_JPEG][take(&sec[S_JPEG], &mut jp, n)?];
-                out.extend_from_slice(&jpeg_recons::container::decompress(p).map_err(|_| Error::Corrupt)?);
-            }
-            _ => return Err(Error::Corrupt),
         }
-        placed.push((start, out.len() - start));
-        let secs = t_item.elapsed().as_secs_f64();
-        ds.cost[mode as usize][ci].add(&Measure { n: 1, raw: out.len() - start, plain: plain_n, secs });
-        ds.items.push((mode, ci as u8, out.len() - start, plain_n, secs));
-        if out.len() > len {
-            return Err(Error::Corrupt);
+        Some(pool) => {
+            let mut entries = vec![];
+            while !t.at_end() {
+                entries.push(entry(&mut t, &sec, &mut cur, len, entries.len())?);
+            }
+            let job = |i: usize| {
+                let t = std::time::Instant::now();
+                let r = restore(&entries[i]);
+                (r, t.elapsed().as_secs_f64())
+            };
+            let est = |i: usize| restore_estimate(&entries[i]);
+            pipeline(pool, entries.len(), est, job, |i, r| {
+                let t = std::time::Instant::now();
+                let (r, secs) = r.map_or((None, 0.0), |(r, s)| (Some(r), s));
+                o.add(&entries[i], r, ds, t, secs)
+            })?;
         }
     }
-    out.extend_from_slice(&skel[sk..]);
-    if tokens.is_some_and(|d| !d.finished()) || out.len() != len || xxhash_rust::xxh3::xxh3_64(&out) != sum {
+    let mut out = o.out;
+    out.extend_from_slice(&o.skel[cur.sk..]);
+    if o.tokens.is_some_and(|d| !d.finished()) || out.len() != len || xxhash_rust::xxh3::xxh3_64(&out) != sum {
         return Err(Error::Corrupt);
     }
     Ok(out)

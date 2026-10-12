@@ -9,9 +9,9 @@ writing, Huffman header coding, its fast representation), images through
 
 ```sh
 cargo build --release
-pdfr c [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] in.pdf out.pdfr   # compress
-pdfr d out.pdfr back.pdf                                           # decompress
-pdfr bench [-n ITERS] [-s MB/S] [-v] ... FILE...   # round trip, ratio, CPU-time speed, per-mode costs
+pdfr c [-t N] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] in.pdf out.pdfr   # compress
+pdfr d [-t N] out.pdfr back.pdf                                           # decompress
+pdfr bench [-t N] [-n ITERS] [-s MB/S] [-v] ... FILE...   # round trip, ratio, CPU-time speed, per-mode costs
 pdfr fuzz [-n ROUNDS] [-r SEED] FILE...            # mutated files and containers
 ```
 
@@ -20,7 +20,8 @@ let packed = pdf_recons::compress(&pdf);              // never fails: stores wha
 assert_eq!(pdf_recons::decompress(&packed)?, pdf);    // checked against an xxh3 of the original
 ```
 
-`-s` is the speed target (`inf`: no limit), `-V` verifies by decompressing (and on a mismatch
+`-t` is the number of threads (`c` and `d`: the available cores; `bench`: 1, timed in CPU
+time with one thread and wall time with more), `-s` is the speed target (`inf`: no limit), `-V` verifies by decompressing (and on a mismatch
 codes the file again without models), `-T`/`-F`/`-P` turn off the token, full and PNG modes.
 Any input is accepted; what is not a PDF goes through as skeleton.
 
@@ -141,6 +142,22 @@ mode 1: varint(length) u64-LE(xxh3) | 13 sections: varint(raw length) u8(0 store
 
 `container.rs` documents the fields of each mode.
 
+### Threads
+
+`-t N` (`Options::threads`, `decompress_threads`, `decompress_with_threads`): the output is
+the same bytes whatever the number of threads, and one thread runs the code as before
+(jpeg-recons on rayon's global pool; `pdfr c -t 1` and `d -t 1` make that pool one
+thread). With more, a pool of N threads codes the items ahead, in
+order, at most 4N + 4 of them and about 256 MB of estimated working memory in flight
+(always one): JPEG, PNG and flate-recons items whole, and FlateDecode streams for the token
+mode parsed; the calling thread appends them to the sections in order and runs the token
+coder, whose state carries over from stream to stream. jpeg-recons' own parallelism runs on
+the same pool, so it takes N threads in all (flate-recons, one thread per item). The token
+coder's final pass runs beside zstd of the table, skeleton and pools. Decompressing, the
+sections are decoded on the pool, the table is read first, and the pool restores the
+full-mode, PNG and JPEG items ahead while the calling thread decodes the token streams (one
+rANS stream) and joins everything in order; the xxh3 check is at the end, as with one thread.
+
 ## Measured, not kept
 
 - Everything through flate-recons' fast representation, no budget: 0.810 on CC at 29 / 55
@@ -198,7 +215,10 @@ target/release/pdfr fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
 - Unit tests: lexer, scanner, rANS and bit I/O, token coding.
 - `pdfr fuzz`: mutated files (bit flips, cuts, deletions, junk, copied pieces, bytes inside
   streams) must round-trip under every set of modes with the safety nets off; corrupted
-  containers must fail cleanly.
+  containers must fail cleanly; with 2 to 4 threads, the same container and the same
+  outcome.
+- With 2, 3 and 8 threads, every test's container is the same bytes, and decompression (of
+  corrupted containers too) has the same outcome.
 - Every file of the three sets round-trips (`pdfr bench` checks).
 
 ## Layout

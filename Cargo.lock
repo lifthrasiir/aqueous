@@ -272,6 +272,7 @@ dependencies = [
  "jpeg-recons",
  "memchr",
  "png-recons",
+ "rayon",
  "recons-common",
  "simd-adler32",
  "xxhash-rust",

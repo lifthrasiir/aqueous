@@ -764,6 +764,9 @@ impl<'a> DecoderState<'a> {
 
     /// Rebuilds the next stream (class `c`, `plain` bytes of data, pixels as given to
     /// [`Encoder::add`]): returns the DEFLATE bytes and the data.
+    // Not inlined into the caller: inlined into the item loop, it was compiled about 5%
+    // slower.
+    #[inline(never)]
     pub fn next(&mut self, c: Class, plain: usize, px: Option<Pixels>) -> Result<(Vec<u8>, Vec<u8>)> {
         if px.is_some_and(|p| p.bpp == 0 || p.stride < p.bpp) {
             return Err(Error::Corrupt);

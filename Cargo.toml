@@ -15,6 +15,7 @@ zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 simd-adler32 = "0.3"
 crc32fast = "1.5"
+rayon = "1.12"
 
 [profile.release]
 debug = 1

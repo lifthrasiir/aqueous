@@ -3,7 +3,10 @@
 //! predictors, JPEG, duplicates, encrypted and malformed files, and corrupted containers.
 
 use flate_zoo::{Encoder, backends};
-use pdf_recons::container::{Options, Stats, compress_with, decompress};
+use pdf_recons::container::{Options, Stats, compress_with, decompress, decompress_threads};
+
+/// Thread counts checked against one thread.
+const THREADS: [usize; 3] = [2, 3, 8];
 
 fn adler32(d: &[u8]) -> u32 {
     let (mut a, mut b) = (1u32, 0u32);
@@ -118,6 +121,13 @@ fn check(name: &str, file: &[u8]) {
         let back = decompress(&c).unwrap_or_else(|e| panic!("{name} ({oname}): {e}"));
         assert!(back == file, "{name} ({oname}): round trip differs");
         assert!(!st.verify_failed, "{name} ({oname}): verification failed");
+        // The same bytes with threads, and the same file back.
+        for t in THREADS {
+            let ct = compress_with(file, &Options { threads: t, ..o.clone() }, &mut Stats::default());
+            assert!(ct == c, "{name} ({oname}): {t} threads give other bytes");
+            let back = decompress_threads(&c, t).unwrap_or_else(|e| panic!("{name} ({oname}, {t} threads): {e}"));
+            assert!(back == file, "{name} ({oname}, {t} threads): round trip differs");
+        }
     }
 }
 
@@ -308,9 +318,12 @@ fn corrupted_containers() {
                     m[k] = (x >> 16) as u8;
                 }
             }
-            if let Ok(d) = decompress(&m) {
-                assert_eq!(d, f, "a corrupt container decoded to something else");
+            let d = decompress(&m);
+            if let Ok(d) = &d {
+                assert_eq!(*d, f, "a corrupt container decoded to something else");
             }
+            let t = THREADS[i % THREADS.len()];
+            assert_eq!(decompress_threads(&m, t), d, "{t} threads: another outcome");
         }
     }
 }
@@ -359,4 +372,39 @@ fn estimates() {
     let jpeg = std::fs::read("tests/data/gradient.jpg").unwrap();
     // 160×120 in 4:2:0: 20×15 luma blocks, 10×8 of each chroma (whole MCUs).
     assert_eq!(pdf_recons::image::jpeg_frame(&jpeg), Some((false, 300 + 2 * 80)));
+}
+
+/// Many items of every mode, more than the threads keep in flight, so that their results
+/// come back out of order.
+#[test]
+fn many_items() {
+    let enc = default_enc();
+    let jpeg = std::fs::read("tests/data/gradient.jpg").unwrap();
+    let mut objs = vec![("/Type /Catalog".to_string(), None)];
+    for i in 0..60u32 {
+        let (d, s) = match i % 6 {
+            0 | 1 => ("/Filter /FlateDecode".into(), zlib(&enc, &content(100 + i, 200 + 37 * i as usize))),
+            2 => {
+                let (w, h) = (24 + i as usize, 16 + i as usize % 7);
+                (
+                    format!(
+                        "/Subtype /Image /Width {w} /Height {h} /BitsPerComponent 8 /ColorSpace /DeviceRGB /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /Columns {w} >>"
+                    ),
+                    zlib(&enc, &pixels(w, h, 3, true, i)),
+                )
+            }
+            3 => (
+                "/Subtype /Image /Width 160 /Height 120 /BitsPerComponent 8 /ColorSpace /DeviceRGB /Filter /DCTDecode"
+                    .into(),
+                jpeg.clone(),
+            ),
+            4 => ("/Filter /FlateDecode".into(), zlib(&enc, &content(100 + i - 4, 200 + 37 * (i - 4) as usize))),
+            _ => ("/Filter /LZWDecode".into(), content(200 + i, 50)),
+        };
+        objs.push((d, Some(s)));
+    }
+    let f = pdf(&objs);
+    check("many items", &f);
+    let (_, st) = coded(&f);
+    assert!(st.modes.iter().filter(|m| m.0 > 0).count() >= 5, "{:?}", st.modes);
 }

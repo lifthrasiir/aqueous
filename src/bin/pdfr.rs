@@ -11,7 +11,7 @@ unsafe extern "C" {
 }
 
 /// CPU time of the process, in seconds (wall time is skewed by other load). jpeg-recons
-/// works on rayon's pool, so this counts every thread; `bench` runs with one.
+/// works on rayon's pool, so this counts every thread; `bench` runs with one by default.
 fn cpu() -> f64 {
     #[cfg(target_os = "macos")]
     const CLOCK_PROCESS_CPUTIME_ID: u32 = 12;
@@ -22,16 +22,29 @@ fn cpu() -> f64 {
     t.sec as f64 + t.nsec as f64 * 1e-9
 }
 
+fn wall() -> f64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64()
+}
+
+/// Seconds: the process's CPU time with one thread, wall time with more.
+fn clock(threads: usize) -> f64 {
+    if threads > 1 { wall() } else { cpu() }
+}
+
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 fn usage() -> ! {
     eprintln!(
-        "usage: pdfr c [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] IN OUT | pdfr d IN OUT\n       pdfr bench [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...\n       pdfr fuzz [-n ROUNDS] [-r SEED] FILE..."
+        "usage: pdfr c [-t THREADS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] IN OUT | pdfr d [-t THREADS] IN OUT\n       pdfr bench [-t THREADS] [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...\n       pdfr fuzz [-n ROUNDS] [-r SEED] FILE..."
     );
     std::process::exit(2);
 }
 
-/// Options from the flags in `args`; the rest is returned.
+/// Options from the flags in `args`; the rest is returned. Threads are 0 if not given.
 fn options(args: &[String]) -> (Options, usize, bool, u64, Vec<String>) {
-    let mut o = Options::default();
+    let mut o = Options { threads: 0, ..Options::default() };
     let (mut iters, mut verbose, mut rest) = (1, false, vec![]);
     let mut seed = 1u64;
     let mut it = args.iter();
@@ -40,6 +53,7 @@ fn options(args: &[String]) -> (Options, usize, bool, u64, Vec<String>) {
         match a.as_str() {
             "-s" => o.speed = val().parse().unwrap_or_else(|_| usage()),
             "-l" => o.level = val().parse().unwrap_or_else(|_| usage()),
+            "-t" => o.threads = val().parse::<usize>().unwrap_or_else(|_| usage()).max(1),
             "-n" => iters = val().parse().unwrap_or_else(|_| usage()),
             "-V" => o.verify = true,
             "-T" => o.tok = false,
@@ -62,13 +76,22 @@ fn read(p: &str) -> Vec<u8> {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let (opts, iters, verbose, seed, rest) = options(args.get(1..).unwrap_or(&[]));
-    match args.first().map(String::as_str) {
+    let (mut opts, iters, verbose, seed, rest) = options(args.get(1..).unwrap_or(&[]));
+    let cmd = args.first().map(String::as_str);
+    if opts.threads == 0 {
+        opts.threads = if matches!(cmd, Some("c" | "d")) { cores() } else { 1 };
+    }
+    if opts.threads == 1 && matches!(cmd, Some("c" | "d")) {
+        // With one thread the library runs as before, jpeg-recons on rayon's global pool:
+        // one thread there too.
+        let _ = rayon::ThreadPoolBuilder::new().num_threads(1).build_global();
+    }
+    match cmd {
         Some("c") if rest.len() == 2 => {
             let out = container::compress_with(&read(&rest[0]), &opts, &mut Stats::default());
             std::fs::write(&rest[1], out).unwrap();
         }
-        Some("d") if rest.len() == 2 => match container::decompress(&read(&rest[0])) {
+        Some("d") if rest.len() == 2 => match container::decompress_threads(&read(&rest[0]), opts.threads) {
             Ok(d) => std::fs::write(&rest[1], d).unwrap(),
             Err(e) => {
                 eprintln!("{}: {e}", rest[0]);
@@ -98,14 +121,14 @@ fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
         let mut st = Stats::default();
         let mut ds = container::DStats::default();
         for _ in 0..iters {
-            let t = cpu();
+            let t = clock(opts.threads);
             st = Stats::default();
             packed = container::compress_with(&file, opts, &mut st);
-            bc = bc.min(cpu() - t);
-            let t = cpu();
+            bc = bc.min(clock(opts.threads) - t);
+            let t = clock(opts.threads);
             ds = container::DStats::default();
-            let back = container::decompress_with(&packed, &mut ds);
-            bd = bd.min(cpu() - t);
+            let back = container::decompress_with_threads(&packed, &mut ds, opts.threads);
+            bd = bd.min(clock(opts.threads) - t);
             if back.as_deref() != Ok(&file[..]) {
                 println!("ROUND TRIP FAILED: {f}");
                 std::process::exit(1);
@@ -283,14 +306,21 @@ fn fuzz(rounds: usize, seed: u64, files: &[String]) {
             let ok = std::panic::catch_unwind(|| {
                 let c = container::compress_unchecked(&f, o, &mut Stats::default());
                 let back = container::decompress(&c);
-                // A corrupted container must not panic either.
+                // Threads: the same bytes, and the same file back.
+                let threads = [2, 3, 4][round % 3];
+                let ot = Options { threads, ..o.clone() };
+                let same = container::compress_unchecked(&f, &ot, &mut Stats::default()) == c;
+                let back_t = container::decompress_threads(&c, threads);
+                // A corrupted container must not panic either, and fails the same way with
+                // threads.
                 let mut m = c.clone();
+                let mut corrupt_same = true;
                 if !m.is_empty() {
                     let k = (m.len() * 7919 + 13) % m.len();
                     m[k] ^= 0x10;
-                    let _ = container::decompress(&m);
+                    corrupt_same = container::decompress(&m) == container::decompress_threads(&m, threads);
                 }
-                back.as_deref() == Ok(&f[..])
+                same && corrupt_same && back.as_deref() == Ok(&f[..]) && back_t == back
             });
             if !matches!(ok, Ok(true)) {
                 failures += 1;
