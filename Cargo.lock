@@ -141,6 +141,7 @@ dependencies = [
  "flate-recons",
  "jpeg-recons",
  "png-recons",
+ "rayon",
  "recons-common",
  "xxhash-rust",
  "zstd",

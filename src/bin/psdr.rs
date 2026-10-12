@@ -1,23 +1,53 @@
 use std::time::Instant;
 
 fn usage() -> ! {
-    eprintln!("usage: psdr c IN OUT | psdr d IN OUT | psdr bench [-n ITERS] [-v] [-c|-d] FILE...");
+    eprintln!(
+        "usage: psdr c [-t THREADS] IN OUT | psdr d [-t THREADS] IN OUT | psdr bench [-n ITERS] [-t THREADS] [-v] [-c|-d] FILE...\n(-t: c and d default to the available cores, bench to 1)"
+    );
     std::process::exit(2);
+}
+
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// The value of `-t`.
+fn threads_arg(it: &mut std::slice::Iter<String>) -> usize {
+    it.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or_else(|| usage()).max(1)
+}
+
+/// `[-t N] IN OUT` after the command.
+fn io_args(args: &[String]) -> (usize, &str, &str) {
+    let mut threads = cores();
+    let mut files = vec![];
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-t" => threads = threads_arg(&mut it),
+            _ => files.push(a.as_str()),
+        }
+    }
+    if files.len() != 2 {
+        usage();
+    }
+    (threads, files[0], files[1])
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("c") if args.len() == 3 => {
-            let src = std::fs::read(&args[1]).expect("read");
-            std::fs::write(&args[2], psd_recons::compress(&src)).expect("write");
+        Some("c") => {
+            let (threads, input, output) = io_args(&args[1..]);
+            let src = std::fs::read(input).expect("read");
+            std::fs::write(output, psd_recons::compress_with(&src, &psd_recons::Options { threads })).expect("write");
         }
-        Some("d") if args.len() == 3 => {
-            let src = std::fs::read(&args[1]).expect("read");
-            match psd_recons::decompress(&src) {
-                Ok(v) => std::fs::write(&args[2], v).expect("write"),
+        Some("d") => {
+            let (threads, input, output) = io_args(&args[1..]);
+            let src = std::fs::read(input).expect("read");
+            match psd_recons::decompress_threads(&src, threads) {
+                Ok(v) => std::fs::write(output, v).expect("write"),
                 Err(e) => {
-                    eprintln!("{}: {e}", args[1]);
+                    eprintln!("{input}: {e}");
                     std::process::exit(1);
                 }
             }
@@ -33,10 +63,12 @@ fn bench(args: &[String]) {
     let mut verbose = false;
     // Repeat only one side (for profiling): 'c' or 'd'.
     let mut only = ' ';
+    let mut threads = 1;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-n" => iters = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-t" => threads = threads_arg(&mut it),
             "-v" => verbose = true,
             "-c" => only = 'c',
             "-d" => only = 'd',
@@ -52,14 +84,14 @@ fn bench(args: &[String]) {
         let mut bc = f64::MAX;
         for _ in 0..if only == 'd' { 1 } else { iters } {
             let t = Instant::now();
-            c = psd_recons::compress(&src);
+            c = psd_recons::compress_with(&src, &psd_recons::Options { threads });
             bc = bc.min(t.elapsed().as_secs_f64());
         }
         let mut bd = f64::MAX;
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
             let t = Instant::now();
-            let d = psd_recons::decompress(&c);
+            let d = psd_recons::decompress_threads(&c, threads);
             bd = bd.min(t.elapsed().as_secs_f64());
             if let Err(e) = &d {
                 eprintln!("{f}: {e}");
@@ -89,7 +121,7 @@ fn bench(args: &[String]) {
         }
     }
     if std::env::var_os("PSDR_STATS").is_some() {
-        let t = psd_recons::container::DEC_TIMES.with(|c| c.get());
+        let t = psd_recons::container::DEC_TIMES.get();
         let k = iters as f64;
         eprintln!(
             "decompress per iteration: known rows {:.3}s render {:.3}s model {:.3}s rows out {:.3}s",
@@ -98,7 +130,7 @@ fn bench(args: &[String]) {
             t[2] / k,
             t[3] / k
         );
-        let t = psd_recons::container::PLAN_TIMES.with(|c| c.get());
+        let t = psd_recons::container::PLAN_TIMES.get();
         eprintln!(
             "plan per iteration: RLE checks {:.3}s tiles {:.3}s ranking {:.3}s hint sampling {:.3}s",
             t[0] / k,
@@ -106,7 +138,7 @@ fn bench(args: &[String]) {
             t[2] / k,
             t[3] / k
         );
-        let t = psd_recons::container::ENC_TIMES.with(|c| c.get());
+        let t = psd_recons::container::ENC_TIMES.get();
         eprintln!(
             "compress per iteration: rows in {:.3}s encoder check {:.3}s render {:.3}s model {:.3}s",
             t[0] / k,

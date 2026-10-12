@@ -90,9 +90,74 @@ enum Codec {
 /// How deep embedded PSDs are recompressed.
 const MAX_DEPTH: usize = 3;
 
-fn nested_compress(codec: Codec, data: &[u8], depth: usize) -> Option<Vec<u8>> {
+/// Options of [`compress_with`].
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Threads (1: all on the calling thread, the serial code). The output is the same
+    /// bytes whatever the number.
+    pub threads: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { threads: 1 }
+    }
+}
+
+/// Thread budget of one call, and what is shared among its threads.
+struct Par {
+    threads: usize,
+    /// The pool jpeg-recons runs in with more than one thread (it uses rayon, whose global
+    /// pool would ignore the budget); with one thread it keeps the global pool, as before.
+    jpeg: std::sync::OnceLock<Option<rayon::ThreadPool>>,
+}
+
+impl Par {
+    fn new(threads: usize) -> Par {
+        Par { threads: threads.max(1), jpeg: std::sync::OnceLock::new() }
+    }
+
+    /// Runs `f` (a jpeg-recons call) in the pool of this budget.
+    fn jpeg<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        if self.threads > 1
+            && let Some(pool) =
+                self.jpeg.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(self.threads).build().ok())
+        {
+            return pool.install(f);
+        }
+        f()
+    }
+}
+
+/// `f` on every item, `threads` at a time (the caller's thread among them); results in the
+/// order of the items. One thread, or one item: in order, on the calling thread. A panic
+/// of `f` propagates, as it would serially.
+fn par_map<T: Send, R: Send>(threads: usize, items: Vec<T>, f: impl Fn(T) -> R + Sync) -> Vec<R> {
+    let n = items.len();
+    if threads <= 1 || n <= 1 {
+        return items.into_iter().map(f).collect();
+    }
+    let queue = std::sync::Mutex::new(items.into_iter().enumerate());
+    let results = std::sync::Mutex::new((0..n).map(|_| None).collect::<Vec<Option<R>>>());
+    let work = || {
+        loop {
+            let Some((i, t)) = queue.lock().unwrap().next() else { break };
+            let r = f(t);
+            results.lock().unwrap()[i] = Some(r);
+        }
+    };
+    std::thread::scope(|sc| {
+        for _ in 1..threads.min(n) {
+            sc.spawn(work);
+        }
+        work();
+    });
+    results.into_inner().unwrap().into_iter().map(|r| r.expect("every item is done")).collect()
+}
+
+fn nested_compress(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Vec<u8>> {
     let t0 = std::time::Instant::now();
-    let r = nested_compress_(codec, data, depth);
+    let r = nested_compress_(codec, data, depth, par);
     if std::env::var_os("PSDR_STATS").is_some() {
         eprintln!(
             "nested {codec:?} {} -> {:?} in {:.3}s",
@@ -104,20 +169,20 @@ fn nested_compress(codec: Codec, data: &[u8], depth: usize) -> Option<Vec<u8>> {
     r
 }
 
-fn nested_compress_(codec: Codec, data: &[u8], depth: usize) -> Option<Vec<u8>> {
+fn nested_compress_(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Vec<u8>> {
     let packed = match codec {
-        Codec::Psd => try_compress(data, depth + 1)?,
-        Codec::Png => png_recons::compress(data),
-        Codec::Jpeg => jpeg_recons::container::compress(data),
+        Codec::Psd => try_compress(data, depth + 1, par)?,
+        Codec::Png => png_recons::container::compress_threads(data, par.threads),
+        Codec::Jpeg => par.jpeg(|| jpeg_recons::container::compress(data)),
     };
     (packed.len() < data.len()).then_some(packed)
 }
 
-fn nested_decompress(codec: Codec, packed: &[u8]) -> Result<Vec<u8>> {
+fn nested_decompress(codec: Codec, packed: &[u8], par: &Par) -> Result<Vec<u8>> {
     match codec {
-        Codec::Psd => decompress(packed),
-        Codec::Png => png_recons::decompress(packed).map_err(|_| corrupt()),
-        Codec::Jpeg => jpeg_recons::container::decompress(packed).map_err(|_| corrupt()),
+        Codec::Psd => decompress_threads(packed, par.threads),
+        Codec::Png => png_recons::container::decompress_threads(packed, par.threads).map_err(|_| corrupt()),
+        Codec::Jpeg => par.jpeg(|| jpeg_recons::container::decompress(packed)).map_err(|_| corrupt()),
     }
 }
 
@@ -279,13 +344,7 @@ fn plan_span<'a>(
             let candidates = packbits::candidates_after(packbits::infer_tiles_from(splits));
             let t2 = std::time::Instant::now();
             let candidates = rank_candidates(candidates, src, planes, w, h, cb);
-            PLAN_TIMES.with(|c| {
-                let mut v = c.get();
-                v[0] += (t1 - t0).as_secs_f64();
-                v[1] += (t2 - t1).as_secs_f64();
-                v[2] += t2.elapsed().as_secs_f64();
-                c.set(v);
-            });
+            PLAN_TIMES.add([(t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), t2.elapsed().as_secs_f64(), 0.0]);
             (Coding::Rle { count_bytes: cb, encoder: candidates[0], plane_lens, exceptions: Vec::new() }, candidates)
         }
         _ => return None,
@@ -345,7 +404,7 @@ fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
 }
 
 /// Spans, groups and coded embedded files of a parsed file.
-fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<GroupDef>, Vec<Vec<u8>>) {
+fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>>, Vec<GroupDef>, Vec<Vec<u8>>) {
     let mut spans: Vec<Planned> = Vec::new();
     let mut groups = Vec::new();
     let mut nested = Vec::new();
@@ -365,15 +424,25 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<Grou
         spans.push(p);
         i
     };
+    // The channels to plan, in order: planning a span depends on nothing else, so it goes
+    // ahead on the threads; spans are added (and found equal to earlier ones) in order.
+    let chan = |c: &psd::Channel| {
+        let (w, h) = (c.width as usize, c.height as usize);
+        let comp = c.compression(d)?;
+        (w != 0 && h != 0).then_some((c.span.start + 2, c.span.end, w, h, comp))
+    };
+    let jobs: Vec<_> =
+        psd.layer_info.layers.iter().filter(|_| pixels).flat_map(|l| &l.channels).filter_map(chan).collect();
+    let mut planned =
+        par_map(par.threads, jobs, |(start, end, w, h, comp)| plan_span(d, start, end, 1, w, h, comp, psd.psb))
+            .into_iter();
     for l in psd.layer_info.layers.iter().filter(|_| pixels) {
         let mut refs: Vec<(i16, PlaneRef)> = Vec::new();
         for c in &l.channels {
-            let (w, h) = (c.width as usize, c.height as usize);
-            let Some(comp) = c.compression(d) else { continue };
-            if w == 0 || h == 0 {
+            if chan(c).is_none() {
                 continue;
             }
-            if let Some(p) = plan_span(d, c.span.start + 2, c.span.end, 1, w, h, comp, psd.psb) {
+            if let Some(p) = planned.next().flatten() {
                 refs.push((c.id, (add(&mut spans, p), 0)));
             }
         }
@@ -398,10 +467,13 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<Grou
             }
         }
     }
-    // Embedded files, which come after the layers' pixel data.
+    // Embedded files, which come after the layers' pixel data; and the composite. Embedded
+    // files are coded, and the composite planned and its hint sampled, on the threads.
+    let mut linked = Vec::new();
     if depth < MAX_DEPTH {
+        let end = spans.last().map_or(0, |s| s.span.end);
         for f in psd::linked(psd, d) {
-            if spans.last().is_some_and(|s| s.span.end > f.data.start) {
+            if end > f.data.start {
                 continue;
             }
             let codec = match &f.file_type {
@@ -410,37 +482,73 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize) -> (Vec<Planned<'a>>, Vec<Grou
                 b"JPEG" => Codec::Jpeg,
                 _ => continue,
             };
-            if let Some(packed) = nested_compress(codec, &d[f.data.clone()], depth) {
-                let coding = Coding::Nested { codec, len: packed.len() };
-                let span = Span { start: f.data.start, end: f.data.end, gap: 0, planes: 0, w: 0, h: 0, coding };
-                spans.push(Planned { span, candidates: Vec::new(), same: None });
-                nested.push(packed);
-            }
+            linked.push((codec, f.data.clone()));
         }
     }
-    // Composite.
     let (w, h, n) = (psd.width as usize, psd.height as usize, psd.channels as usize);
     let comp = psd.composite_compression(d);
-    if pixels
-        && w > 0
-        && h > 0
-        && n > 0
-        && let Some(mut p) = plan_span(d, psd.composite.start + 2, psd.composite.end, n, w, h, comp, psd.psb)
-    {
+    let rgb_composite = rgb && n >= 3;
+    let composite_job = || -> Option<(Planned<'a>, bool)> {
+        if !(pixels && w > 0 && h > 0 && n > 0) {
+            return None;
+        }
+        let mut p = plan_span(d, psd.composite.start + 2, psd.composite.end, n, w, h, comp, psd.psb)?;
         p.same = None;
-        let si = spans.len();
-        spans.push(p);
-        let mut rest = 0;
-        if rgb && n >= 3 {
+        let mut hinted = false;
+        if rgb_composite {
             let has_alpha = n >= 4 && psd.layer_info.merged_alpha;
             let k = 3 + has_alpha as usize;
             let t0 = std::time::Instant::now();
-            let hinted = !psd.layer_info.layers.is_empty() && hint_pays(psd, d, &spans[si].span, k);
-            PLAN_TIMES.with(|c| {
-                let mut v = c.get();
-                v[3] += t0.elapsed().as_secs_f64();
-                c.set(v);
-            });
+            hinted = !psd.layer_info.layers.is_empty() && hint_pays(psd, d, &p.span, k);
+            PLAN_TIMES.add([0.0, 0.0, 0.0, t0.elapsed().as_secs_f64()]);
+        }
+        Some((p, hinted))
+    };
+    enum Task {
+        Linked(Codec, std::ops::Range<usize>),
+        Composite,
+    }
+    enum Done<'a> {
+        Linked(Option<Vec<u8>>),
+        Composite(Option<(Planned<'a>, bool)>),
+    }
+    // Several embedded files at once: a nested PSD gets one thread of the budget; alone, all.
+    let inner = Par::new(if linked.len() > 1 { 1 } else { par.threads });
+    let mut tasks: Vec<Task> = linked.into_iter().map(|(c, r)| Task::Linked(c, r)).collect();
+    // The composite is long: first on the threads, last serially (the order it always had).
+    if par.threads > 1 {
+        tasks.insert(0, Task::Composite);
+    } else {
+        tasks.push(Task::Composite);
+    }
+    let mut composite_planned = None;
+    for (task, done) in tasks.iter().zip(par_map(par.threads, tasks.iter().collect(), |t| match t {
+        Task::Linked(codec, r) => Done::Linked(nested_compress(*codec, &d[r.clone()], depth, &inner)),
+        Task::Composite => Done::Composite(composite_job()),
+    })) {
+        match (task, done) {
+            (Task::Linked(codec, r), Done::Linked(Some(packed))) => {
+                // Not inside the span before it (this is known only now that the earlier ones
+                // are coded; such a file is coded for nothing).
+                if spans.last().is_some_and(|s| s.span.end > r.start) {
+                    continue;
+                }
+                let coding = Coding::Nested { codec: *codec, len: packed.len() };
+                let span = Span { start: r.start, end: r.end, gap: 0, planes: 0, w: 0, h: 0, coding };
+                spans.push(Planned { span, candidates: Vec::new(), same: None });
+                nested.push(packed);
+            }
+            (_, Done::Composite(c)) => composite_planned = c,
+            _ => {}
+        }
+    }
+    if let Some((p, hinted)) = composite_planned {
+        let si = spans.len();
+        spans.push(p);
+        let mut rest = 0;
+        if rgb_composite {
+            let has_alpha = n >= 4 && psd.layer_info.merged_alpha;
+            let k = 3 + has_alpha as usize;
             groups.push(GroupDef {
                 planes: (0..k).map(|p| (si, p)).collect(),
                 has_alpha,
@@ -707,9 +815,14 @@ fn skeleton_level(n: usize, total: usize) -> i32 {
     LEVELS.iter().find(|l| l.1 >= need).map_or(1, |l| l.0)
 }
 
-/// Compresses a file; never fails (a file that cannot be coded is stored).
+/// Compresses a file; never fails (a file that cannot be coded is stored). One thread.
 pub fn compress(file: &[u8]) -> Vec<u8> {
-    match try_compress(file, 0) {
+    compress_with(file, &Options::default())
+}
+
+/// `compress` with the options: the same bytes whatever `opt.threads`.
+pub fn compress_with(file: &[u8], opt: &Options) -> Vec<u8> {
+    match try_compress(file, 0, &Par::new(opt.threads)) {
         Some(out) => out,
         None => {
             let mut out = Vec::with_capacity(6 + file.len() / 2);
@@ -724,6 +837,59 @@ pub fn compress(file: &[u8]) -> Vec<u8> {
     }
 }
 
+/// Rows pipelined through helper threads: batches of this many samples at most...
+const PIPE_BATCH: usize = 1 << 20;
+/// ... this many batches full between two threads (and one more being filled, one used)...
+const PIPE_DEPTH: usize = 3;
+/// ... for groups of at least this many samples (smaller ones are not worth the threads).
+const PIPE_MIN: usize = 1 << 18;
+
+/// Rows of a batch for rows of `w` samples in `n` planes.
+fn pipe_rows(w: usize, n: usize) -> usize {
+    (PIPE_BATCH / (w * n).max(1)).clamp(1, 256)
+}
+
+/// Rows handed from one thread to another: per row, a buffer per plane (empty for planes not
+/// passed), and the hint's.
+struct Batch {
+    len: usize,
+    rows: Vec<Vec<Vec<u8>>>,
+    hint: Vec<Vec<Vec<u8>>>,
+}
+
+impl Batch {
+    fn new(count: usize, w: usize, planes: &[bool], hint: usize) -> Batch {
+        let row = |p: &bool| if *p { vec![0u8; w] } else { Vec::new() };
+        Batch {
+            len: 0,
+            rows: (0..count).map(|_| planes.iter().map(row).collect()).collect(),
+            hint: (0..count).map(|_| (0..hint).map(|_| vec![0u8; w]).collect()).collect(),
+        }
+    }
+}
+
+/// A source of empty batches and a sink of full ones, for a helper thread filling them.
+fn batch_channels(
+    count: usize,
+    mk: impl Fn() -> Batch,
+) -> (
+    std::sync::mpsc::SyncSender<Batch>,
+    std::sync::mpsc::Receiver<Batch>,
+    std::sync::mpsc::Sender<Batch>,
+    std::sync::mpsc::Receiver<Batch>,
+) {
+    let (full_tx, full_rx) = std::sync::mpsc::sync_channel(PIPE_DEPTH);
+    let (free_tx, free_rx) = std::sync::mpsc::channel();
+    for _ in 0..count {
+        free_tx.send(mk()).expect("receiver is here");
+    }
+    (full_tx, full_rx, free_tx, free_rx)
+}
+
+fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+
 /// Codes the rows of group `g`, straight from the file `d`; returns per plane the rows its
 /// span's encoder does not reproduce (for RLE spans that are not copies).
 fn encode_group(
@@ -732,6 +898,7 @@ fn encode_group(
     d: &[u8],
     spans: &[Span],
     g: &GroupDef,
+    threads: usize,
 ) -> Option<Vec<Vec<usize>>> {
     let n = g.planes.len();
     let (s0, _) = g.planes[0];
@@ -757,8 +924,16 @@ fn encode_group(
     }
     let mut hint =
         if g.hinted { Some(RowRenderer::new(psd, d, &mut composite::Report::default()).ok()?) } else { None };
-    let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
+    if threads > 1 && w * h * n >= PIPE_MIN {
+        let encoders: Vec<Option<Encoder>> = g
+            .planes
+            .iter()
+            .map(|&(s, _)| if let Coding::Rle { encoder, .. } = spans[s].coding { Some(encoder) } else { None })
+            .collect();
+        return encode_rows_piped(rec, &mut gc, readers, hint, &encoders, w, h);
+    }
+    let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
     let mut rows = vec![vec![0u8; w]; n];
     let mut misses = vec![Vec::new(); n];
     let timing = std::env::var_os("PSDR_STATS").is_some();
@@ -808,15 +983,130 @@ fn encode_group(
         lap(3, &mut t);
     }
     if timing {
-        ENC_TIMES.with(|c| {
-            let mut v = c.get();
-            for i in 0..4 {
-                v[i] += t[i];
-            }
-            c.set(v);
-        });
+        ENC_TIMES.add(t);
     }
     Some(misses)
+}
+
+/// `encode_group`'s loop with a thread reading the rows (and checking them against the
+/// encoders, and rendering the hint) ahead, in batches, while this one codes them.
+fn encode_rows_piped<'a>(
+    rec: &mut model::Recorder,
+    gc: &mut GroupCoder,
+    mut readers: Vec<Option<PlaneRows<'a>>>,
+    mut hint: Option<RowRenderer<'a>>,
+    encoders: &[Option<Encoder>],
+    w: usize,
+    h: usize,
+) -> Option<Vec<Vec<usize>>> {
+    let n = readers.len();
+    let per = pipe_rows(w, n);
+    let read: Vec<bool> = readers.iter().map(Option::is_some).collect();
+    let hn = if hint.is_some() { n } else { 0 };
+    let (full_tx, full_rx, free_tx, free_rx) = batch_channels(PIPE_DEPTH + 2, || Batch::new(per, w, &read, hn));
+    let timing = std::env::var_os("PSDR_STATS").is_some();
+    std::thread::scope(|sc| {
+        let reader = sc.spawn(move || -> Option<Vec<Vec<usize>>> {
+            let mut misses = vec![Vec::new(); n];
+            // Per plane, the previous row's encoded bytes and whether the encoder missed it, and
+            // the previous row itself.
+            let mut prev: Vec<Option<(&[u8], bool)>> = vec![None; n];
+            let mut last = vec![vec![0u8; w]; n];
+            let mut t = [0f64; 3];
+            let mut y = 0;
+            while y < h {
+                // The coding thread is gone.
+                let Ok(mut b) = free_rx.recv() else { return Some(misses) };
+                b.len = per.min(h - y);
+                for r in 0..b.len {
+                    let t0 = timing.then(std::time::Instant::now);
+                    for k in 0..n {
+                        let Some(rd) = &mut readers[k] else { continue };
+                        let enc = rd.encoded();
+                        if let (Some(e), Some((pe, miss))) = (enc, prev[k])
+                            && e == pe
+                        {
+                            rd.skip().ok()?;
+                            b.rows[r][k].copy_from_slice(&last[k]);
+                            if miss {
+                                misses[k].push(y + r);
+                            }
+                            continue;
+                        }
+                        rd.next(&mut b.rows[r][k]).ok()?;
+                        last[k].copy_from_slice(&b.rows[r][k]);
+                        if let (Some(enc), Some(encoder)) = (enc, encoders[k]) {
+                            let miss = !packbits::reproduces(encoder, &b.rows[r][k], enc);
+                            if miss {
+                                misses[k].push(y + r);
+                            }
+                            prev[k] = Some((enc, miss));
+                        }
+                    }
+                    let t1 = timing.then(std::time::Instant::now);
+                    if let Some(rd) = &mut hint {
+                        let mut refs: Vec<&mut [u8]> = b.hint[r].iter_mut().map(|v| v.as_mut_slice()).collect();
+                        rd.next_row(&mut refs).ok()?;
+                    }
+                    if let (Some(t0), Some(t1)) = (t0, t1) {
+                        t[0] += (t1 - t0).as_secs_f64();
+                        t[2] += t1.elapsed().as_secs_f64();
+                    }
+                }
+                y += b.len;
+                if full_tx.send(b).is_err() {
+                    return Some(misses);
+                }
+            }
+            if timing {
+                ENC_TIMES.add([t[0], 0.0, t[2], 0.0]);
+            }
+            Some(misses)
+        });
+        let mut rows = vec![vec![0u8; w]; n];
+        let mut hint_rows = vec![vec![0u8; w]; hn];
+        let mut t_model = 0f64;
+        let mut ok = true;
+        for _ in 0..h.div_ceil(per) {
+            let Ok(mut b) = full_rx.recv() else {
+                ok = false;
+                break;
+            };
+            for r in 0..b.len {
+                for k in 0..n {
+                    if read[k] {
+                        std::mem::swap(&mut rows[k], &mut b.rows[r][k]);
+                    }
+                }
+                for (a, c) in hint_rows.iter_mut().zip(&mut b.hint[r]) {
+                    std::mem::swap(a, c);
+                }
+                let t0 = timing.then(std::time::Instant::now);
+                gc.code_row(rec, &mut rows, (hn > 0).then_some(&mut hint_rows[..]));
+                if let Some(t0) = t0 {
+                    t_model += t0.elapsed().as_secs_f64();
+                }
+                for k in 0..n {
+                    if read[k] {
+                        std::mem::swap(&mut rows[k], &mut b.rows[r][k]);
+                    }
+                }
+                for (a, c) in hint_rows.iter_mut().zip(&mut b.hint[r]) {
+                    std::mem::swap(a, c);
+                }
+            }
+            // (The reader is gone after the last batch.)
+            let _ = free_tx.send(b);
+        }
+        if timing {
+            ENC_TIMES.add([0.0, 0.0, 0.0, t_model]);
+        }
+        // The reader may be waiting for a batch.
+        drop(free_tx);
+        drop(full_rx);
+        let misses = join(reader)?;
+        ok.then_some(misses)
+    })
 }
 
 /// Picks the encoder of RLE span `sp` among `candidates` reproducing most rows, and its
@@ -876,10 +1166,68 @@ fn settle_encoder<'a>(
     Some(())
 }
 
-fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
+/// Compresses the file but the spans (start, end) with zstd, appending to `out`.
+fn write_skeleton(out: &mut Vec<u8>, file: &[u8], spans: &[(usize, usize)], sk_len: usize) -> Option<()> {
+    let mut z = zstd::stream::Encoder::new(out, skeleton_level(sk_len, file.len())).ok()?;
+    // With the size known, zstd fits its window and tables (memory) to it.
+    z.set_pledged_src_size(Some(sk_len as u64)).ok()?;
+    z.include_contentsize(false).ok()?;
+    let mut prev = 0;
+    for &(start, end) in spans {
+        z.write_all(&file[prev..start]).ok()?;
+        prev = end;
+    }
+    z.write_all(&file[prev..]).ok()?;
+    z.finish().ok()?;
+    Some(())
+}
+
+/// Codes all groups into `out`, then settles the encoders of RLE spans (their exceptions).
+/// Returns the number of symbols.
+fn code_pixels<'a>(
+    out: &mut Vec<u8>,
+    psd: &Psd,
+    file: &'a [u8],
+    spans: &mut [Span<'a>],
+    candidates: &[Vec<Encoder>],
+    groups: &[GroupDef],
+    par: &Par,
+) -> Option<usize> {
+    let mut misses: Vec<Option<Vec<usize>>> = vec![None; spans.len()];
+    let symbols;
+    {
+        let mut rec = model::Recorder::new(out);
+        for g in groups {
+            let m = encode_group(&mut rec, psd, file, spans, g, par.threads)?;
+            for (k, &(s, p)) in g.planes.iter().enumerate() {
+                if matches!(spans[s].coding, Coding::Rle { .. }) {
+                    misses[s].get_or_insert_with(Vec::new).extend(m[k].iter().map(|&y| p * spans[s].h + y));
+                }
+            }
+        }
+        symbols = rec.finish();
+    }
+    // Spans are independent of each other here.
+    let work: Vec<_> = spans
+        .iter_mut()
+        .zip(candidates)
+        .zip(misses)
+        .filter_map(|((sp, c), m)| {
+            let mut m = m?;
+            m.sort_unstable();
+            Some((sp, c, m))
+        })
+        .collect();
+    for ok in par_map(par.threads, work, |(sp, c, m)| settle_encoder(sp, file, psd.psb, c, m)) {
+        ok?;
+    }
+    Some(symbols)
+}
+
+fn try_compress(file: &[u8], depth: usize, par: &Par) -> Option<Vec<u8>> {
     let t0 = std::time::Instant::now();
     let psd = psd::parse(file).ok()?;
-    let (planned, groups, nested) = plan(&psd, file, depth);
+    let (planned, groups, nested) = plan(&psd, file, depth, par);
     if planned.is_empty() {
         return None;
     }
@@ -896,58 +1244,66 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
     put_varint(&mut out, file.len() as u64);
     // Skeleton.
-    let t0 = std::time::Instant::now();
     let sk_len = file.len() - spans.iter().map(|s| s.end - s.start).sum::<usize>();
-    let before = out.len();
-    {
-        let mut z = zstd::stream::Encoder::new(&mut out, skeleton_level(sk_len, file.len())).ok()?;
-        // With the size known, zstd fits its window and tables (memory) to it.
-        z.set_pledged_src_size(Some(sk_len as u64)).ok()?;
-        z.include_contentsize(false).ok()?;
-        let mut prev = 0;
-        for s in &mut spans {
-            // Spans come in file order.
-            if s.start < prev {
-                return None;
-            }
-            s.gap = s.start - prev;
-            z.write_all(&file[prev..s.start]).ok()?;
-            prev = s.end;
+    let mut prev = 0;
+    for s in &mut spans {
+        // Spans come in file order.
+        if s.start < prev {
+            return None;
         }
-        z.write_all(&file[prev..]).ok()?;
-        z.finish().ok()?;
+        s.gap = s.start - prev;
+        prev = s.end;
     }
-    let skeleton = out.len() - before;
-    let t_skel = t0.elapsed().as_secs_f64();
-    for packed in &nested {
-        out.extend_from_slice(packed);
-    }
-    drop(nested);
-    // Pixels.
-    let t0 = std::time::Instant::now();
-    let model_at = out.len();
-    let mut misses: Vec<Option<Vec<usize>>> = vec![None; spans.len()];
-    let symbols;
-    {
-        let mut rec = model::Recorder::new(&mut out);
-        for g in &groups {
-            let m = encode_group(&mut rec, &psd, file, &spans, g)?;
-            for (k, &(s, p)) in g.planes.iter().enumerate() {
-                if matches!(spans[s].coding, Coding::Rle { .. }) {
-                    misses[s].get_or_insert_with(Vec::new).extend(m[k].iter().map(|&y| p * spans[s].h + y));
-                }
-            }
+    let ranges: Vec<(usize, usize)> = spans.iter().map(|s| (s.start, s.end)).collect();
+    let (skeleton, t_skel, t_model);
+    let (symbols, model_at);
+    if par.threads > 1 {
+        // The skeleton is compressed meanwhile, into a buffer of its own: it comes first in
+        // the output, the embedded files and the pixels after it.
+        let (sk, pixels) = std::thread::scope(|sc| {
+            let sk = sc.spawn(|| {
+                let t0 = std::time::Instant::now();
+                let mut sk = Vec::new();
+                write_skeleton(&mut sk, file, &ranges, sk_len)?;
+                Some((sk, t0.elapsed().as_secs_f64()))
+            });
+            let mut pix = Vec::new();
+            let t0 = std::time::Instant::now();
+            let symbols = code_pixels(&mut pix, &psd, file, &mut spans, &candidates, &groups, par);
+            let t_pix = t0.elapsed().as_secs_f64();
+            let sk = sk.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+            (sk, symbols.map(|s| (s, pix, t_pix)))
+        });
+        let (sk, t) = sk?;
+        let (syms, pix, t_pix) = pixels?;
+        skeleton = sk.len();
+        t_skel = t;
+        out.extend_from_slice(&sk);
+        drop(sk);
+        for packed in &nested {
+            out.extend_from_slice(packed);
         }
-        symbols = rec.finish();
-    }
-    for (i, m) in misses.into_iter().enumerate() {
-        if let Some(mut m) = m {
-            m.sort_unstable();
-            settle_encoder(&mut spans[i], file, psd.psb, &candidates[i], m)?;
+        drop(nested);
+        model_at = out.len();
+        out.extend_from_slice(&pix);
+        symbols = syms;
+        t_model = t_pix;
+    } else {
+        let t0 = std::time::Instant::now();
+        let before = out.len();
+        write_skeleton(&mut out, file, &ranges, sk_len)?;
+        skeleton = out.len() - before;
+        t_skel = t0.elapsed().as_secs_f64();
+        for packed in &nested {
+            out.extend_from_slice(packed);
         }
+        drop(nested);
+        model_at = out.len();
+        let t0 = std::time::Instant::now();
+        symbols = code_pixels(&mut out, &psd, file, &mut spans, &candidates, &groups, par)?;
+        t_model = t0.elapsed().as_secs_f64();
     }
     let model_len = out.len() - model_at;
-    let t_model = t0.elapsed().as_secs_f64();
     let layout_at = out.len();
     put_layout(&mut out, skeleton, &spans, &groups);
     let layout_len = out.len() - layout_at;
@@ -962,15 +1318,33 @@ fn try_compress(file: &[u8], depth: usize) -> Option<Vec<u8>> {
     Some(out)
 }
 
-thread_local! {
-    /// Planning time: RLE checks, tile inference, candidate ranking, hint sampling.
-    pub static PLAN_TIMES: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
-    /// Encoding time (with `PSDR_STATS`): reading rows, checking them against the encoder,
-    /// rendering, model.
-    pub static ENC_TIMES: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
-    /// Decoding time (with `PSDR_STATS`): known rows, rendering, model, writing rows.
-    pub static DEC_TIMES: std::cell::Cell<[f64; 4]> = const { std::cell::Cell::new([0.0; 4]) };
+/// Seconds per phase, summed over all threads.
+pub struct Times(std::sync::Mutex<[f64; 4]>);
+
+impl Times {
+    const fn new() -> Times {
+        Times(std::sync::Mutex::new([0.0; 4]))
+    }
+
+    fn add(&self, t: [f64; 4]) {
+        let mut v = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        for i in 0..4 {
+            v[i] += t[i];
+        }
+    }
+
+    pub fn get(&self) -> [f64; 4] {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
+
+/// Planning time: RLE checks, tile inference, candidate ranking, hint sampling.
+pub static PLAN_TIMES: Times = Times::new();
+/// Encoding time (with `PSDR_STATS`): reading rows, checking them against the encoder,
+/// rendering, model.
+pub static ENC_TIMES: Times = Times::new();
+/// Decoding time (with `PSDR_STATS`): known rows, rendering, model, writing rows.
+pub static DEC_TIMES: Times = Times::new();
 
 /// Writes the rows of a plane of an RLE or raw span as they are decoded.
 struct RowSink<'s> {
@@ -1045,9 +1419,168 @@ impl RowSink<'_> {
     }
 }
 
+/// `decode_group`'s loop with a thread reading the known planes and rendering the hint
+/// ahead, and another writing the rows (re-encoding PackBits) behind, in batches, while this
+/// one decodes the model.
+#[allow(clippy::too_many_arguments)]
+fn decode_rows_piped(
+    player: &mut model::Player,
+    gc: &mut GroupCoder,
+    w: usize,
+    h: usize,
+    mut readers: Vec<Option<PlaneRows>>,
+    mut hint: Option<RowRenderer>,
+    sinks: Vec<Option<RowSink>>,
+    right: &mut [u8],
+) -> Result<()> {
+    let n = readers.len();
+    let per = pipe_rows(w, n);
+    let known: Vec<bool> = readers.iter().map(Option::is_some).collect();
+    let hn = if hint.is_some() { n } else { 0 };
+    let has_in = hn > 0 || known.contains(&true);
+    let sink_planes: Vec<usize> = (0..n).filter(|&k| sinks[k].is_some()).collect();
+    let ns = sink_planes.len();
+    let (in_full_tx, in_full_rx, in_free_tx, in_free_rx) =
+        batch_channels(if has_in { PIPE_DEPTH + 2 } else { 0 }, || Batch::new(per, w, &known, hn));
+    let (out_full_tx, out_full_rx, out_free_tx, out_free_rx) =
+        batch_channels(PIPE_DEPTH + 2, || Batch::new(per, w, &vec![true; ns], 0));
+    let timing = std::env::var_os("PSDR_STATS").is_some();
+    std::thread::scope(|sc| {
+        let reader = has_in.then(|| {
+            sc.spawn(move || -> Result<()> {
+                let mut t = [0f64; 2];
+                let mut y = 0;
+                while y < h {
+                    let Ok(mut b) = in_free_rx.recv() else { return Ok(()) };
+                    b.len = per.min(h - y);
+                    for r in 0..b.len {
+                        let t0 = timing.then(std::time::Instant::now);
+                        for (k, rd) in readers.iter_mut().enumerate() {
+                            if let Some(rd) = rd {
+                                rd.next(&mut b.rows[r][k])?;
+                            }
+                        }
+                        let t1 = timing.then(std::time::Instant::now);
+                        if let Some(rd) = &mut hint {
+                            let mut refs: Vec<&mut [u8]> = b.hint[r].iter_mut().map(|v| v.as_mut_slice()).collect();
+                            rd.next_row(&mut refs)?;
+                        }
+                        if let (Some(t0), Some(t1)) = (t0, t1) {
+                            t[0] += (t1 - t0).as_secs_f64();
+                            t[1] += t1.elapsed().as_secs_f64();
+                        }
+                    }
+                    y += b.len;
+                    if in_full_tx.send(b).is_err() {
+                        return Ok(());
+                    }
+                }
+                if timing {
+                    DEC_TIMES.add([t[0], t[1], 0.0, 0.0]);
+                }
+                Ok(())
+            })
+        });
+        let writer = sc.spawn(move || -> Result<()> {
+            let mut sinks: Vec<RowSink> = sinks.into_iter().flatten().collect();
+            let mut buf = Vec::with_capacity(w + w / 64 + 8);
+            let mut t = 0f64;
+            // Ends when the decoding thread is done (or gone).
+            while let Ok(b) = out_full_rx.recv() {
+                let t0 = timing.then(std::time::Instant::now);
+                for r in 0..b.len {
+                    for (j, s) in sinks.iter_mut().enumerate() {
+                        s.put(right, &b.rows[r][j], &mut buf)?;
+                    }
+                }
+                if let Some(t0) = t0 {
+                    t += t0.elapsed().as_secs_f64();
+                }
+                // (Nobody wants it back once the decoding thread is done.)
+                let _ = out_free_tx.send(b);
+            }
+            if timing {
+                DEC_TIMES.add([0.0, 0.0, 0.0, t]);
+            }
+            Ok(())
+        });
+        let mut rows = vec![vec![0u8; w]; n];
+        let mut hint_rows = vec![vec![0u8; w]; hn];
+        let mut t_model = 0f64;
+        let main = (|| -> Result<()> {
+            let mut out_b = out_free_rx.recv().map_err(|_| corrupt())?;
+            let mut filled = 0;
+            let mut y = 0;
+            while y < h {
+                let mut b = if has_in { Some(in_full_rx.recv().map_err(|_| corrupt())?) } else { None };
+                for r in 0..b.as_ref().map_or(per.min(h - y), |b| b.len) {
+                    if let Some(b) = &mut b {
+                        for k in (0..n).filter(|&k| known[k]) {
+                            std::mem::swap(&mut rows[k], &mut b.rows[r][k]);
+                        }
+                        for (a, c) in hint_rows.iter_mut().zip(&mut b.hint[r]) {
+                            std::mem::swap(a, c);
+                        }
+                    }
+                    let t0 = timing.then(std::time::Instant::now);
+                    gc.code_row(player, &mut rows, (hn > 0).then_some(&mut hint_rows[..]));
+                    if let Some(t0) = t0 {
+                        t_model += t0.elapsed().as_secs_f64();
+                    }
+                    if player.failed {
+                        return Err(corrupt());
+                    }
+                    if let Some(b) = &mut b {
+                        for k in (0..n).filter(|&k| known[k]) {
+                            std::mem::swap(&mut rows[k], &mut b.rows[r][k]);
+                        }
+                        for (a, c) in hint_rows.iter_mut().zip(&mut b.hint[r]) {
+                            std::mem::swap(a, c);
+                        }
+                    }
+                    for (j, &k) in sink_planes.iter().enumerate() {
+                        out_b.rows[filled][j].copy_from_slice(gc.last(k));
+                    }
+                    filled += 1;
+                    y += 1;
+                    if filled == per || y == h {
+                        out_b.len = filled;
+                        filled = 0;
+                        out_full_tx.send(out_b).map_err(|_| corrupt())?;
+                        if y < h {
+                            out_b = out_free_rx.recv().map_err(|_| corrupt())?;
+                        } else {
+                            out_b = Batch::new(0, 0, &[], 0);
+                        }
+                    }
+                }
+                if let Some(b) = b {
+                    let _ = in_free_tx.send(b);
+                }
+            }
+            Ok(())
+        })();
+        if timing {
+            DEC_TIMES.add([0.0, 0.0, t_model, 0.0]);
+        }
+        // Helpers waiting for this thread end; the writer finishes what it was sent.
+        drop((in_free_tx, in_full_rx, out_full_tx, out_free_rx));
+        let w_res = join(writer);
+        let r_res = reader.map_or(Ok(()), join);
+        r_res.and(w_res).and(main)
+    })
+}
+
 /// Decodes the rows of group `g` into the output, whose part before `split` is complete
 /// (sources of known planes, and the file up to the composite for a hinted group).
-fn decode_group(player: &mut model::Player, out: &mut [u8], split: usize, spans: &[Span], g: &GroupDef) -> Result<()> {
+fn decode_group(
+    player: &mut model::Player,
+    out: &mut [u8],
+    split: usize,
+    spans: &[Span],
+    g: &GroupDef,
+    threads: usize,
+) -> Result<()> {
     let (left, right) = out.split_at_mut(split);
     let left = &*left;
     let n = g.planes.len();
@@ -1115,8 +1648,11 @@ fn decode_group(player: &mut model::Player, out: &mut [u8], split: usize, spans:
         }
         hint = Some(RowRenderer::new(&psd, left, &mut composite::Report::default())?);
     }
-    let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
+    if threads > 1 && w * h * n >= PIPE_MIN {
+        return decode_rows_piped(player, &mut gc, w, h, readers, hint, sinks, right);
+    }
+    let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
     let mut rows = vec![vec![0u8; w]; n];
     let mut buf = Vec::with_capacity(w + w / 64 + 8);
     let timing = std::env::var_os("PSDR_STATS").is_some();
@@ -1154,18 +1690,63 @@ fn decode_group(player: &mut model::Player, out: &mut [u8], split: usize, spans:
         lap(3, &mut t);
     }
     if timing {
-        DEC_TIMES.with(|c| {
-            let mut v = c.get();
-            for i in 0..4 {
-                v[i] += t[i];
-            }
-            c.set(v);
-        });
+        DEC_TIMES.add(t);
     }
     Ok(())
 }
 
 pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
+    decompress_threads(src, 1)
+}
+
+/// Decodes the skeleton into the gaps between the spans of `out`.
+fn read_skeleton(out: &mut [u8], sk: &[u8], spans: &[Span]) -> Result<()> {
+    let mut z = zstd::stream::read::Decoder::with_buffer(sk).map_err(|_| corrupt())?;
+    let mut prev = 0;
+    for s in spans {
+        z.read_exact(&mut out[prev..s.start]).map_err(|_| corrupt())?;
+        prev = s.end;
+    }
+    z.read_exact(&mut out[prev..]).map_err(|_| corrupt())?;
+    if z.read(&mut [0u8]).map_err(|_| corrupt())? != 0 {
+        return Err(corrupt());
+    }
+    Ok(())
+}
+
+/// Embedded files being decoded on other threads: (span index, the file).
+struct Pending {
+    rx: std::sync::mpsc::Receiver<(usize, Result<Vec<u8>>)>,
+    left: usize,
+}
+
+impl Pending {
+    /// Puts the files decoded so far into `out`; with `all`, waits for the rest.
+    fn drain(&mut self, out: &mut [u8], spans: &[Span], all: bool) -> Result<()> {
+        while self.left > 0 {
+            let (i, data) = if all {
+                self.rx.recv().map_err(|_| corrupt())?
+            } else {
+                match self.rx.try_recv() {
+                    Ok(m) => m,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(_) => return Err(corrupt()),
+                }
+            };
+            self.left -= 1;
+            let data = data?;
+            if data.len() != spans[i].end - spans[i].start {
+                return Err(corrupt());
+            }
+            out[spans[i].start..spans[i].end].copy_from_slice(&data);
+        }
+        Ok(())
+    }
+}
+
+/// `decompress` with `threads` threads: the same bytes whatever the number. Embedded files
+/// are decoded on other threads, meanwhile with the skeleton and the pixels.
+pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     if src.len() < 6 || &src[..4] != MAGIC || src[4] != VERSION {
         return Err(Error("not a psd-recons file".into()));
     }
@@ -1189,33 +1770,77 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     let (skeleton, spans, groups) = get_layout(&src[layout_at..src.len() - 8], total)?;
     let body = &src[at..layout_at];
     let mut out = vec![0u8; total];
-    // Skeleton, into the gaps.
     let sk = body.get(..skeleton).ok_or_else(corrupt)?;
-    {
-        let mut z = zstd::stream::read::Decoder::with_buffer(sk).map_err(|_| corrupt())?;
-        let mut prev = 0;
-        for s in &spans {
-            z.read_exact(&mut out[prev..s.start]).map_err(|_| corrupt())?;
-            prev = s.end;
-        }
-        z.read_exact(&mut out[prev..]).map_err(|_| corrupt())?;
-        if z.read(&mut [0u8]).map_err(|_| corrupt())? != 0 {
-            return Err(corrupt());
+    // Embedded files, in order after the skeleton.
+    let mut at = skeleton;
+    let mut files = Vec::new();
+    for (i, s) in spans.iter().enumerate() {
+        if let Coding::Nested { codec, len } = s.coding {
+            files.push((i, codec, get_bytes(body, &mut at, len)?));
         }
     }
-    let mut at = skeleton;
-    // Embedded files.
-    for s in &spans {
-        if let Coding::Nested { codec, len } = s.coding {
-            let data = nested_decompress(codec, get_bytes(body, &mut at, len)?)?;
-            if data.len() != s.end - s.start {
+    let rest = &body[at..];
+    if threads <= 1 || files.is_empty() {
+        read_skeleton(&mut out, sk, &spans)?;
+        let par = Par::new(threads);
+        for (i, codec, packed) in files {
+            let data = nested_decompress(codec, packed, &par)?;
+            if data.len() != spans[i].end - spans[i].start {
                 return Err(corrupt());
             }
-            out[s.start..s.end].copy_from_slice(&data);
+            out[spans[i].start..spans[i].end].copy_from_slice(&data);
         }
+        decode_pixels(&mut out, &spans, &groups, rest, None, threads)?;
+    } else {
+        // The files go to the other threads (a nested PSD with one thread unless alone).
+        let workers = (threads - 1).max(1).min(files.len());
+        let par = Par::new(if files.len() > 1 { 1 } else { threads });
+        let (tx, rx) = std::sync::mpsc::channel();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let mut pending = Pending { rx, left: files.len() };
+        let res = std::thread::scope(|sc| {
+            for _ in 0..workers {
+                let tx = tx.clone();
+                let (files, par, next, stop) = (&files, &par, &next, &stop);
+                sc.spawn(move || {
+                    use std::sync::atomic::Ordering::Relaxed;
+                    while !stop.load(Relaxed) {
+                        let Some(&(i, codec, packed)) = files.get(next.fetch_add(1, Relaxed)) else { break };
+                        if tx.send((i, nested_decompress(codec, packed, par))).is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+            drop(tx);
+            let res = read_skeleton(&mut out, sk, &spans)
+                .and_then(|()| decode_pixels(&mut out, &spans, &groups, rest, Some(&mut pending), threads));
+            // Whatever the outcome, the workers take no further file.
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            res
+        });
+        res?;
     }
-    // Pixels, group by group; copies as soon as their source is there.
-    let mut player = model::Player::new(&body[at..]);
+    if xxhash_rust::xxh3::xxh3_64(&out) != hash {
+        return Err(Error("checksum mismatch".into()));
+    }
+    Ok(out)
+}
+
+/// Decodes the pixels of all groups into `out` (skeleton in place), and the copies.
+/// `pending` brings the embedded files, which are needed by a hinted group (it renders the
+/// file's layers) and at the end.
+fn decode_pixels(
+    out: &mut Vec<u8>,
+    spans: &[Span],
+    groups: &[GroupDef],
+    coded: &[u8],
+    mut pending: Option<&mut Pending>,
+    threads: usize,
+) -> Result<()> {
+    let total = out.len();
+    let mut player = model::Player::new(coded);
     let mut done = vec![false; spans.len()];
     for (i, s) in spans.iter().enumerate() {
         done[i] = matches!(s.coding, Coding::Nested { .. });
@@ -1231,7 +1856,10 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
             }
         }
     };
-    for g in &groups {
+    for g in groups {
+        if let Some(p) = pending.as_deref_mut() {
+            p.drain(out, spans, g.hinted)?;
+        }
         // Everything before the group's first written span is complete.
         let split = g
             .planes
@@ -1252,20 +1880,20 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
         if g.hinted && done[..g.planes[0].0].iter().any(|&d| !d) {
             return Err(corrupt());
         }
-        decode_group(&mut player, &mut out, split, &spans, g)?;
+        decode_group(&mut player, out, split, spans, g, threads)?;
         for &(s, _) in &g.planes {
             if !matches!(spans[s].coding, Coding::Copy { .. }) {
                 done[s] = true;
             }
         }
-        copy_ready(&mut out, &mut done);
+        copy_ready(out, &mut done);
+    }
+    if let Some(p) = pending {
+        p.drain(out, spans, true)?;
     }
     player.finish()?;
     if done.iter().any(|&d| !d) {
         return Err(corrupt());
     }
-    if xxhash_rust::xxh3::xxh3_64(&out) != hash {
-        return Err(Error("checksum mismatch".into()));
-    }
-    Ok(out)
+    Ok(())
 }

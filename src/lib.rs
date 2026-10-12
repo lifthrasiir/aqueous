@@ -17,5 +17,5 @@ pub mod psd;
 pub mod rans;
 pub mod rows;
 
-pub use container::{compress, decompress};
+pub use container::{Options, compress, compress_with, decompress, decompress_threads};
 pub use psd::{Error, Psd, Result, parse};

@@ -291,3 +291,83 @@ fn repeated_rows_with_exceptions() {
         Layer { top: 0, left: 0, w, h, channels: vec![(0, plane.clone()), (1, plane.clone()), (2, plane)], mask: None };
     check(&psd(w, h, &[l], packbits::NO_TILES, true, &[]));
 }
+
+const THREADS: [usize; 4] = [1, 2, 3, 8];
+
+/// The same bytes whatever the threads, and each decodes back (to `file`) with each.
+fn check_threads(file: &[u8]) {
+    let one = psd_recons::compress(file);
+    for t in THREADS {
+        let packed = psd_recons::compress_with(file, &psd_recons::Options { threads: t });
+        assert!(packed == one, "compress differs with {t} threads");
+        for d in THREADS {
+            assert!(psd_recons::decompress_threads(&packed, d).unwrap() == file, "decompress {d} threads");
+        }
+    }
+}
+
+/// Outcomes (bytes or error) of decompressing `packed` agree across thread counts.
+fn same_outcome(packed: &[u8]) {
+    let one = psd_recons::decompress(packed).ok();
+    for t in THREADS {
+        assert!(psd_recons::decompress_threads(packed, t).ok() == one, "outcome differs with {t} threads");
+    }
+}
+
+#[test]
+fn threads_small_and_large_groups() {
+    check_threads(&psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]));
+    check_threads(&psd(
+        260,
+        35,
+        &layers(260, 35, false),
+        Encoder::Greedy { min_run: 3, split_rest: true },
+        false,
+        &[0],
+    ));
+    // Past the size where rows are pipelined through helper threads.
+    let enc = Encoder::Photoshop { phase: 77, period: 368 };
+    check_threads(&psd(800, 400, &layers(800, 400, true), enc, true, &[]));
+    check_threads(&psd(700, 500, &layers(700, 500, false), packbits::NO_TILES, false, &[1]));
+}
+
+#[test]
+fn threads_corrupt_input() {
+    for file in [
+        psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]),
+        psd(800, 400, &layers(800, 400, true), packbits::NO_TILES, true, &[]),
+    ] {
+        let packed = psd_recons::compress(&file);
+        for cut in [7, 20, packed.len() / 2, packed.len() - 1] {
+            same_outcome(&packed[..cut]);
+            assert!(psd_recons::decompress_threads(&packed[..cut], 8).is_err());
+        }
+        for at in [10, packed.len() / 3, packed.len() / 2, packed.len() - 40, packed.len() - 10] {
+            let mut flipped = packed.clone();
+            flipped[at] ^= 0x40;
+            same_outcome(&flipped);
+        }
+    }
+}
+
+/// Corpus files with embedded files (smart objects), when the corpus is there.
+#[test]
+fn threads_embedded_files() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let files = [
+        "fixtures/psd-tools_psd-tools/tests/psd_files/placedLayer.psd",
+        "fixtures/Agamnentzar_ag-psd/test/read/smart-object-curves/src.psd",
+        "oga/Toast--Toast.psd",
+    ];
+    for f in files {
+        let Ok(file) = std::fs::read(root.join(f)) else { continue };
+        check_threads(&file);
+        let packed = psd_recons::compress(&file);
+        for at in [packed.len() / 4, packed.len() / 2, packed.len() - 20] {
+            let mut flipped = packed.clone();
+            flipped[at] ^= 0x10;
+            same_outcome(&flipped);
+        }
+        same_outcome(&packed[..packed.len() * 3 / 4]);
+    }
+}

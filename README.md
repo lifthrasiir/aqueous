@@ -5,9 +5,9 @@ bit.
 
 ```sh
 cargo build --release
-psdr c in.psd out.psdr                  # compress
-psdr d out.psdr back.psd                # decompress
-psdr bench [-n ITERS] [-v] FILE...      # round trip check, ratio, throughput
+psdr c [-t N] in.psd out.psdr           # compress (-t: threads, default the available cores)
+psdr d [-t N] out.psdr back.psd         # decompress (likewise)
+psdr bench [-n ITERS] [-t N] [-v] [-c|-d] FILE...  # round trip check, ratio, throughput (-t default 1)
 psdstat [-v] FILE...                    # byte breakdown by section, summed over files
 psdx check|predict|rle FILE...          # research tools: decoding, composite prediction, PackBits encoders
 cargo test                              # round trips of synthetic PSDs (no corpus needed)
@@ -35,6 +35,33 @@ debugging ones (`chan`, `diff`, `rlediff`), run with `cargo run --release --exam
   row into the output (allocated at its final size), so the memory besides input and output
   stays small (about 30 MB compressing, under 10 MB decompressing) whatever the file size
   (embedded PNG and JPEG files take what their recompressors need).
+
+## Threads
+
+`-t N` (`Options::threads` with `compress_with`, `decompress_threads`): the output is the same
+bytes whatever the number of threads, and one thread runs the serial code unchanged
+(`compress` and `decompress` are the one-thread calls). The model state is per group but all
+groups share one rANS stream, so the model coding and decoding stay on one thread, in order;
+around it:
+
+- Compressing: spans are planned (RLE checks, tile inference, encoder ranking) in parallel and
+  then added in order; embedded files are recompressed, and the composite is planned and its
+  hint sampled, at the same time; for groups of at least 256K samples a thread reads the rows,
+  checks them against the encoders and renders the hint ahead (in batches of about 1 MB)
+  while the first one codes them; the skeleton is compressed with zstd meanwhile into a
+  buffer of its own; encoders are settled per span in parallel.
+- Decompressing: embedded files are decoded on `N-1` threads (at most) meanwhile with the
+  skeleton and the pixels (a hinted group waits for them, as it renders the layers); in
+  groups of at least 256K samples one thread reads the known planes and renders the hint
+  ahead, and another re-encodes the PackBits rows behind the model decoder.
+- jpeg-recons uses rayon: with more than one thread it runs in a pool of that size (one pool
+  per call); with one thread it keeps the global pool as before. png-recons gets the threads
+  too. A nested PSD gets one thread when several embedded files run at once.
+- `PSDR_STATS` times are summed over threads.
+
+Memory: batches in flight add at most about 10 MB per helper pair (5 batches of about 1 MB,
+twice); decoded embedded files wait in memory until copied in, and with threads the model
+stream is compressed into a buffer before it is appended after the skeleton.
 
 ## Results (2026-10-08)
 
