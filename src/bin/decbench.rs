@@ -35,7 +35,13 @@ fn main() {
         }
         let s = t.elapsed().as_secs_f64() / iters as f64;
         let k = iters as f64 * 1e-3;
-        println!("model encode {:.1} MB/s: walk {:.2} ms, tables {:.2} ms, rans {:.2} ms", data.len() as f64 / s / 1e6, w / k, n / k, r / k);
+        println!(
+            "model encode {:.1} MB/s: walk {:.2} ms, tables {:.2} ms, rans {:.2} ms",
+            data.len() as f64 / s / 1e6,
+            w / k,
+            n / k,
+            r / k
+        );
         return;
     }
     let t = std::time::Instant::now();

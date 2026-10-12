@@ -169,7 +169,12 @@ fn compress_core(input: &[u8], t: &mut Timing, coefs: &mut Vec<Coefs>, clean: &m
     put_varint(&mut out, j.scans.len() as u64);
     for (s, i) in j.scans.iter().zip(&infos) {
         let t = i.truncated.as_ref();
-        out.push(i.pad_zero as u8 | (t.is_some() as u8) << 1 | (t.is_some_and(|t| t.boundary) as u8) << 2 | (i.raw as u8) << 3);
+        out.push(
+            i.pad_zero as u8
+                | (t.is_some() as u8) << 1
+                | (t.is_some_and(|t| t.boundary) as u8) << 2
+                | (i.raw as u8) << 3,
+        );
         if i.raw {
             put_varint(&mut out, (s.end - s.start) as u64);
             out.extend_from_slice(&input[s.start..s.end]);
@@ -247,7 +252,9 @@ fn try_compress(input: &[u8], t: &mut Timing, depth: u32) -> Result<(Vec<u8>, us
 pub fn compress_with(input: &[u8], t: &mut Timing) -> (Vec<u8>, StoreReason) {
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| try_compress(input, t, 0)));
     match r {
-        Ok(Ok((v, nraw))) if v.len() < input.len() + 5 => (v, (nraw > 0).then(|| format!("partial: {nraw} raw scan(s)"))),
+        Ok(Ok((v, nraw))) if v.len() < input.len() + 5 => {
+            (v, (nraw > 0).then(|| format!("partial: {nraw} raw scan(s)")))
+        }
         Ok(Ok(_)) => (stored(input), Some("no gain".into())),
         Ok(Err(e)) => (stored(input), Some(e.0)),
         Err(_) => (stored(input), Some("internal panic".into())),
@@ -260,7 +267,13 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
 
 // ---------------------------------------------------------------- decompression
 
-fn decompress_core(blob: &[u8], c: &[u8], mut p: usize, t: &mut Timing, coefs: &mut Vec<Coefs>) -> Result<Vec<u8>, Error> {
+fn decompress_core(
+    blob: &[u8],
+    c: &[u8],
+    mut p: usize,
+    t: &mut Timing,
+    coefs: &mut Vec<Coefs>,
+) -> Result<Vec<u8>, Error> {
     let t0 = Instant::now();
     let j = jpeg::parse(blob)?;
     let ns = get_varint(c, &mut p)?;
@@ -320,7 +333,8 @@ fn decompress_core(blob: &[u8], c: &[u8], mut p: usize, t: &mut Timing, coefs: &
             Ok(Some(scan))
         })
         .collect::<Result<_, _>>()?;
-    let total: usize = scans.iter().flatten().map(|v| v.len()).sum::<usize>() + raws.iter().flatten().map(|r| r.len()).sum::<usize>();
+    let total: usize =
+        scans.iter().flatten().map(|v| v.len()).sum::<usize>() + raws.iter().flatten().map(|r| r.len()).sum::<usize>();
     let mut out = Vec::with_capacity(blob.len() + total);
     let mut q = 0;
     for ((s, scan), raw) in j.scans.iter().zip(&scans).zip(&raws) {

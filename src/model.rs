@@ -15,9 +15,9 @@ const NS: usize = 4; // interleaved rANS states
 
 /// zigzag index -> natural index
 const ZZ: [usize; 64] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27,
-    20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58,
-    59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21,
+    28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54,
+    47, 55, 62, 63,
 ];
 
 // ---------------------------------------------------------------- contexts
@@ -49,7 +49,19 @@ const N_SYM: usize = CTX_BASE[N_CTX] as usize;
 const _: () = assert!(CTX_BASE[O_NZE] - CTX_BASE[O_TOK7] == (N_TOK7 * 16) as u32);
 
 const fn alphabet(ctx: usize) -> usize {
-    if ctx < O_TOK7 { 50 } else if ctx < O_NZE { 16 } else if ctx < O_TOKE { 15 } else if ctx < O_SGNE { 16 } else if ctx < O_DC { 2 } else { 16 }
+    if ctx < O_TOK7 {
+        50
+    } else if ctx < O_NZE {
+        16
+    } else if ctx < O_TOKE {
+        15
+    } else if ctx < O_SGNE {
+        16
+    } else if ctx < O_DC {
+        2
+    } else {
+        16
+    }
 }
 
 fn bucket_u(x: u32, edges: &[u32]) -> u8 {
@@ -100,17 +112,17 @@ struct Component<'a> {
 /// Lookup tables for context quantisation. Prediction thresholds are multiples of 0.5, so
 /// bucketing floor(2|p|) through an integer LUT is exact.
 struct Tables {
-    interior: [usize; 49], // natural indices, in zigzag order
-    e_lut: [u8; 256],      // 2*(|A|+|L|) -> 0..9
-    e6_lut: [u16; 256],    // e_lut * 6 * 16 (compact-index stride of the TOK7 family)
+    interior: [usize; 49],      // natural indices, in zigzag order
+    e_lut: [u8; 256],           // 2*(|A|+|L|) -> 0..9
+    e6_lut: [u16; 256],         // e_lut * 6 * 16 (compact-index stride of the TOK7 family)
     dens16_lut: [u16; 50 * 49], // dens_lut * 16
-    dens_lut: Vec<u8>,     // [rem 0..49][k 0..48] -> 0..5
-    n7_lut: [u8; 64],      // nz7 -> 0..7
-    rem_e_lut: [u8; 16],   // remaining edge nz -> 0..3
-    pe_lut: [u8; 256],     // floor(2|p|) -> 0..10
-    ps_lut: [u8; 256],     // floor(2|p|) -> 0..5
-    unc_lut: [u8; 128],    // floor(unc) -> 0..7
-    dcn_lut: [u8; 64],     // dc cat sum -> 0..8
+    dens_lut: Vec<u8>,          // [rem 0..49][k 0..48] -> 0..5
+    n7_lut: [u8; 64],           // nz7 -> 0..7
+    rem_e_lut: [u8; 16],        // remaining edge nz -> 0..3
+    pe_lut: [u8; 256],          // floor(2|p|) -> 0..10
+    ps_lut: [u8; 256],          // floor(2|p|) -> 0..5
+    unc_lut: [u8; 128],         // floor(unc) -> 0..7
+    dcn_lut: [u8; 64],          // dc cat sum -> 0..8
 }
 
 impl Tables {
@@ -157,10 +169,10 @@ const WSHIFT: i32 = 10;
 
 #[derive(Clone, Copy)]
 struct Weights {
-    wr: [i32; 64],  // [v][u]: cv[v] q, v >= 1      (row-0 / DC-from-above, column sums)
-    wc: [i32; 64],  // [v][u]: cv[u] q, u >= 1      (col-0 / DC-from-left, row sums)
-    wb: [i32; 64],  // [v][u]: cv[v] (-1)^v q        (bottom boundary of a block, column sums)
-    wrt: [i32; 64], // [v][u]: cv[u] (-1)^u q        (right boundary of a block, row sums)
+    wr: [i32; 64],    // [v][u]: cv[v] q, v >= 1      (row-0 / DC-from-above, column sums)
+    wc: [i32; 64],    // [v][u]: cv[u] q, u >= 1      (col-0 / DC-from-left, row sums)
+    wb: [i32; 64],    // [v][u]: cv[v] (-1)^v q        (bottom boundary of a block, column sums)
+    wrt: [i32; 64],   // [v][u]: cv[u] (-1)^u q        (right boundary of a block, row sums)
     inv_r2: [f32; 8], // 2 / (cv[0] q[0][u] 2^S): row-0 prediction in half quant steps
     inv_c2: [f32; 8], // 2 / (cv[0] q[v][0] 2^S)
     inv_dc: f32,      // 1 / (cv[0] q[0][0] 2^S)
@@ -172,7 +184,15 @@ impl Weights {
         let sg = |v: usize| if v % 2 == 0 { 1.0 } else { -1.0 };
         let s = (1i32 << WSHIFT) as f64;
         let r = |x: f64| x.round() as i32;
-        let mut w = Weights { wr: [0; 64], wc: [0; 64], wb: [0; 64], wrt: [0; 64], inv_r2: [0.0; 8], inv_c2: [0.0; 8], inv_dc: 0.0 };
+        let mut w = Weights {
+            wr: [0; 64],
+            wc: [0; 64],
+            wb: [0; 64],
+            wrt: [0; 64],
+            inv_r2: [0.0; 8],
+            inv_c2: [0.0; 8],
+            inv_dc: 0.0,
+        };
         for v in 0..8 {
             for u in 0..8 {
                 let qq = q[v * 8 + u] as f64;
@@ -236,7 +256,15 @@ fn edge_preds(w: &Weights, bot_above: &[i32; 8], rgt_left: &[i32; 8], sr: &[i32;
 
 /// DC prediction and its uncertainty. Needs the edges of the current block (`sr[0]`, `sc[0]`).
 #[inline(always)]
-fn dc_pred(w: &Weights, bot_above: &[i32; 8], rgt_left: &[i32; 8], sr0: i32, sc0: i32, has_a: bool, has_l: bool) -> (i32, f32) {
+fn dc_pred(
+    w: &Weights,
+    bot_above: &[i32; 8],
+    rgt_left: &[i32; 8],
+    sr0: i32,
+    sc0: i32,
+    has_a: bool,
+    has_l: bool,
+) -> (i32, f32) {
     let dca = bot_above[0].wrapping_sub(sr0) as f32 * w.inv_dc;
     let dcl = rgt_left[0].wrapping_sub(sc0) as f32 * w.inv_dc;
     let (pf, unc) = match (has_a, has_l) {
@@ -255,7 +283,13 @@ fn half_idx(p2: f32) -> usize {
 /// sign class of a prediction given in half steps (p2 = 2p): 0 (p <= -0.25), 1, 2 (p >= 0.25)
 #[inline(always)]
 fn sign_class(p2: f32) -> usize {
-    if p2 >= 0.5 { 2 } else if p2 <= -0.5 { 0 } else { 1 }
+    if p2 >= 0.5 {
+        2
+    } else if p2 <= -0.5 {
+        0
+    } else {
+        1
+    }
 }
 
 #[inline(always)]
@@ -306,7 +340,8 @@ fn walk<I: Io>(io: &mut I, c: &mut Component, cc: usize, t: &Tables) {
             // ---- 7x7 interior
             let pa = if has_a { sd.nz7[i - bw] as u32 } else { 0 };
             let pl = if has_l { sd.nz7[i - 1] as u32 } else { 0 };
-            let n7 = io.sym(O_NZ7 + cc * 50 + ((pa + pl + 1) / 2).min(49) as usize, (mask & INTERIOR_MASK).count_ones());
+            let n7 =
+                io.sym(O_NZ7 + cc * 50 + ((pa + pl + 1) / 2).min(49) as usize, (mask & INTERIOR_MASK).count_ones());
             sd.nz7[i] = n7 as u8;
             let mut rem = n7;
             for (k, &z) in t.interior.iter().enumerate() {
@@ -314,7 +349,9 @@ fn walk<I: Io>(io: &mut I, c: &mut Component, cc: usize, t: &Tables) {
                     break;
                 }
                 let e = 2 * (ab[z].unsigned_abs() as u32 + lb[z].unsigned_abs() as u32);
-                let ctx = tok_base + (k * 10 + t.e_lut[e.min(255) as usize] as usize) * 6 + t.dens_lut[rem as usize * 49 + k] as usize;
+                let ctx = tok_base
+                    + (k * 10 + t.e_lut[e.min(255) as usize] as usize) * 6
+                    + t.dens_lut[rem as usize * 49 + k] as usize;
                 let x = code_value(io, ctx, b[z] as i32);
                 b[z] = x as i16;
                 rem -= (x != 0) as u32;
@@ -362,7 +399,9 @@ fn walk<I: Io>(io: &mut I, c: &mut Component, cc: usize, t: &Tables) {
             let (pred, unc) = dc_pred(w, &sd.bottom[bx], &right, sr0, sc0, has_a, has_l);
             let na = if has_a { sd.dccat[i - bw] as u32 } else { 0 };
             let nl = if has_l { sd.dccat[i - 1] as u32 } else { 0 };
-            let ctx = O_DC + (cc * 9 + t.dcn_lut[(na + nl).min(63) as usize] as usize) * 8 + t.unc_lut[(unc as u32).min(127) as usize] as usize;
+            let ctx = O_DC
+                + (cc * 9 + t.dcn_lut[(na + nl).min(63) as usize] as usize) * 8
+                + t.unc_lut[(unc as u32).min(127) as usize] as usize;
             let r = code_value(io, ctx, b[0] as i32 - pred);
             sd.dccat[i] = bitlen(r) as u8;
             b[0] = (r + pred) as i16;
@@ -583,7 +622,6 @@ impl<'a> Io for Decoder<'a> {
     }
 }
 
-
 // ---------------------------------------------------------------- encoder-only walk
 //
 // Same contexts as `walk`, but the encoder knows every value up front, so all data-dependent
@@ -721,7 +759,10 @@ fn walk_enc(e: &mut EncSink, c: &Component, cc: usize, t: &Tables) {
                 };
                 let (cat, payload) = split_value(x);
                 let idx = unsafe {
-                    kbase + *t.e6_lut.get_unchecked(ea.min(255) as usize) as usize + *t.dens16_lut.get_unchecked(drow + k) as usize + cat as usize
+                    kbase
+                        + *t.e6_lut.get_unchecked(ea.min(255) as usize) as usize
+                        + *t.dens16_lut.get_unchecked(drow + k) as usize
+                        + cat as usize
                 };
                 e.sym_idx(idx as u32);
                 e.raw.put(cat, payload);
@@ -766,7 +807,9 @@ fn walk_enc(e: &mut EncSink, c: &Component, cc: usize, t: &Tables) {
             let (pred, unc) = dc_pred(w, &sd.bottom[bx], &right, sr[0], sc[0], has_a, has_l);
             let na = if has_a { sd.dccat[i - bw] as u32 } else { 0 };
             let nl = if has_l { sd.dccat[i - 1] as u32 } else { 0 };
-            let ctx = O_DC + (cc * 9 + t.dcn_lut[(na + nl).min(63) as usize] as usize) * 8 + t.unc_lut[(unc as u32).min(127) as usize] as usize;
+            let ctx = O_DC
+                + (cc * 9 + t.dcn_lut[(na + nl).min(63) as usize] as usize) * 8
+                + t.unc_lut[(unc as u32).min(127) as usize] as usize;
             let (cat, payload) = split_value(b[0] as i32 - pred);
             e.sym(ctx, cat);
             e.raw.put(cat, payload);
@@ -832,11 +875,7 @@ pub fn encode(j: &Jpeg, coefs: &mut [Coefs], compress_tables: bool) -> (Encoded,
     let tables = if compress_tables { table_bytes(&model, &sink.hist) } else { Vec::new() };
     let t2 = Instant::now();
     let rans = rans_encode(&sink.syms[..sink.nsym], &model);
-    let ph = Phases {
-        walk: (t1 - t0).as_secs_f64(),
-        norm: (t2 - t1).as_secs_f64(),
-        rans: t2.elapsed().as_secs_f64(),
-    };
+    let ph = Phases { walk: (t1 - t0).as_secs_f64(), norm: (t2 - t1).as_secs_f64(), rans: t2.elapsed().as_secs_f64() };
     (Encoded { rans, raw: sink.raw.finish(), tables, model, nsym: sink.nsym }, ph)
 }
 

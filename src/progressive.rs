@@ -6,7 +6,10 @@
 //! which is what libjpeg, libjpeg-turbo and mozjpeg produce. Encoders that decide differently
 //! are detected at compression time by re-encoding every scan and comparing with the original.
 
-use crate::jpeg::{self, err, extend, size_bits, Bits, Clean, Coefs, CompPtr, EncTable, Error, HuffSpec, Jpeg, Scan, ScanInfo, DC_LIMIT, PAD};
+use crate::jpeg::{
+    self, Bits, Clean, Coefs, CompPtr, DC_LIMIT, EncTable, Error, HuffSpec, Jpeg, PAD, Scan, ScanInfo, err, extend,
+    size_bits,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Canonical Huffman decoder for arbitrary symbols (progressive scans use (r, 0) symbols as EOB
@@ -67,7 +70,11 @@ impl SymDec {
             let c = b.peek(l) as i32;
             if c <= self.maxcode[l as usize] {
                 b.consume(l);
-                return self.vals.get((c + self.valoff[l as usize]) as usize).map(|&s| s as u32).ok_or(Error("bad Huffman code".into()));
+                return self
+                    .vals
+                    .get((c + self.valoff[l as usize]) as usize)
+                    .map(|&s| s as u32)
+                    .ok_or(Error("bad Huffman code".into()));
             }
         }
         err("bad Huffman code")
@@ -761,7 +768,10 @@ fn encode_blocks(
                                 ($c:expr) => {{
                                     let c: u32 = $c;
                                     cleft -= c;
-                                    BitList { v: if c == 0 { 0 } else { (cbits >> cleft) & (u64::MAX >> (64 - c)) }, n: c }
+                                    BitList {
+                                        v: if c == 0 { 0 } else { (cbits >> cleft) & (u64::MAX >> (64 - c)) },
+                                        n: c,
+                                    }
                                 }};
                             }
                             let mut r = 0u32;
@@ -911,7 +921,13 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
     let mut whys = Vec::new();
     for (c, trailing_rst) in res.into_iter().map_while(|r| r) {
         whys.push(c.why);
-        infos.push(ScanInfo { standard: c.standard, trailing_rst, pad_zero: c.pad_zero, truncated: None, raw: !c.standard });
+        infos.push(ScanInfo {
+            standard: c.standard,
+            trailing_rst,
+            pad_zero: c.pad_zero,
+            truncated: None,
+            raw: !c.standard,
+        });
     }
     // scans after the first undecodable one stay raw
     infos.resize(j.scans.len(), ScanInfo { raw: true, ..Default::default() });
@@ -936,15 +952,23 @@ pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -
                 let at = buf.iter().zip(orig).position(|(a, b)| a != b).unwrap_or(buf.len().min(orig.len()));
                 panic!(
                     "progressive scan {i} (ss={} se={} ah={} al={} ri={}): judged reproducible but re-encodes differently: {} vs {} bytes, first difference at {at}",
-                    s.ss, s.se, s.ah, s.al, s.ri, buf.len(), orig.len()
+                    s.ss,
+                    s.se,
+                    s.ah,
+                    s.al,
+                    s.ri,
+                    buf.len(),
+                    orig.len()
                 );
             }
             if !info.raw || !same {
                 continue;
             }
             // reproducible but judged otherwise: a missed opportunity, not an error
-            eprintln!("note: progressive scan {i} re-encodes identically but was judged non-canonical: {:?}", whys.get(i));
-
+            eprintln!(
+                "note: progressive scan {i} re-encodes identically but was judged non-canonical: {:?}",
+                whys.get(i)
+            );
         }
     }
     Ok(infos)
@@ -974,20 +998,22 @@ fn decode_concurrent(j: &Jpeg, n: usize, d: &[u8], out: &mut Vec<Coefs>) -> Vec<
     let res: Vec<std::sync::Mutex<Option<(Canon, u32)>>> = (0..n).map(|_| Default::default()).collect();
     rayon::scope(|sc| {
         for _ in 0..rayon::current_num_threads().min(n) {
-            sc.spawn(|_| loop {
-                let k = next.fetch_add(1, Ordering::Relaxed);
-                if k >= n {
-                    break;
+            sc.spawn(|_| {
+                loop {
+                    let k = next.fetch_add(1, Ordering::Relaxed);
+                    if k >= n {
+                        break;
+                    }
+                    let s = &j.scans[k];
+                    let sync = ScanSync { progress: &progress, scan: k };
+                    let r = CLEAN.with(|c| {
+                        let clean = &mut *c.borrow_mut();
+                        jpeg::destuff(&d[s.start..s.end], clean);
+                        decode_scan(j, s, clean, &comps, Some(&sync)).ok().map(|c| (c, trailing_rst(s, clean)))
+                    });
+                    drop(sync);
+                    *res[k].lock().unwrap() = r;
                 }
-                let s = &j.scans[k];
-                let sync = ScanSync { progress: &progress, scan: k };
-                let r = CLEAN.with(|c| {
-                    let clean = &mut *c.borrow_mut();
-                    jpeg::destuff(&d[s.start..s.end], clean);
-                    decode_scan(j, s, clean, &comps, Some(&sync)).ok().map(|c| (c, trailing_rst(s, clean)))
-                });
-                drop(sync);
-                *res[k].lock().unwrap() = r;
             });
         }
     });

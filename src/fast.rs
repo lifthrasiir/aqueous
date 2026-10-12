@@ -205,7 +205,13 @@ impl DcBound {
 #[inline(always)]
 fn med(a: i32, b: i32, c: i32) -> i32 {
     let (mx, mn) = (a.max(b), a.min(b));
-    if c >= mx { mn } else if c <= mn { mx } else { a + b - c }
+    if c >= mx {
+        mn
+    } else if c <= mn {
+        mx
+    } else {
+        a + b - c
+    }
 }
 #[inline(always)]
 fn dc_pred(blocks: &[[i16; 64]], i: usize, bw: usize, bx: usize, by: usize) -> i32 {
@@ -428,7 +434,8 @@ fn best_shift(h: &[u32], tmp: &mut [u16; 64]) -> (f64, u32) {
             break;
         }
         let table: u32 = 4 + tmp[..len - 1].iter().map(|&x| gamma_len(x as u32 + 1)).sum::<u32>();
-        let data: f64 = (0..len).filter(|&a| h[a] > 0).map(|a| h[a] as f64 * (total as f64 / tmp[a] as f64).log2()).sum();
+        let data: f64 =
+            (0..len).filter(|&a| h[a] > 0).map(|a| h[a] as f64 * (total as f64 / tmp[a] as f64).log2()).sum();
         if table as f64 + data < best.0 {
             best = (table as f64 + data, sh);
         }
@@ -554,7 +561,10 @@ fn normalize(hist: &[u32]) -> (Vec<u16>, TablePlan) {
             sh = s;
             if let Some(glo) = grand_of(plo) {
                 let gf = &gfreq[glo..glo + len];
-                let inherit: f64 = (0..len).filter(|&a| h[a] > 0).map(|a| h[a] as f64 * (PROB_SCALE as f64 / gf[a] as f64).log2()).sum();
+                let inherit: f64 = (0..len)
+                    .filter(|&a| h[a] > 0)
+                    .map(|a| h[a] as f64 * (PROB_SCALE as f64 / gf[a] as f64).log2())
+                    .sum();
                 inh = inherit < cost;
             }
             if inh {
@@ -584,7 +594,8 @@ fn normalize(hist: &[u32]) -> (Vec<u16>, TablePlan) {
         let (cost, sh) = best_shift(h, &mut tmp);
         let plo = parent_of(lo);
         let pf = &pfreq[plo..plo + len];
-        let inherit: f64 = (0..len).filter(|&a| h[a] > 0).map(|a| h[a] as f64 * (PROB_SCALE as f64 / pf[a] as f64).log2()).sum();
+        let inherit: f64 =
+            (0..len).filter(|&a| h[a] > 0).map(|a| h[a] as f64 * (PROB_SCALE as f64 / pf[a] as f64).log2()).sum();
         if inherit < cost {
             f.copy_from_slice(pf);
             own.push(None);
@@ -957,7 +968,15 @@ impl<'a> Dec<'a> {
 }
 
 #[inline(never)]
-fn walk_dec(d: &mut Dec, blocks: &mut [[i16; 64]], masks: &mut [u64], bw: usize, bh: usize, cc: usize, dcb: &DcBound) -> Result<(), Error> {
+fn walk_dec(
+    d: &mut Dec,
+    blocks: &mut [[i16; 64]],
+    masks: &mut [u64],
+    bw: usize,
+    bh: usize,
+    cc: usize,
+    dcb: &DcBound,
+) -> Result<(), Error> {
     let mut nzs = vec![0u8; bw * bh];
     let mut dcc = vec![0u8; bw * bh];
     let mut bottom = vec![0i32; bw];
@@ -1097,7 +1116,9 @@ impl Encoded {
         for s in &self.stripes {
             if cfg!(target_endian = "little") {
                 // SAFETY: u32 has no padding; on little-endian targets its bytes are the LE encoding
-                out.extend_from_slice(unsafe { std::slice::from_raw_parts(s.rans.as_ptr() as *const u8, s.rans.len() * 4) });
+                out.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(s.rans.as_ptr() as *const u8, s.rans.len() * 4)
+                });
             } else {
                 for w in &s.rans {
                     out.extend_from_slice(&w.to_le_bytes());
@@ -1234,7 +1255,16 @@ pub fn decode_into(j: &Jpeg, e: &Encoded, out: &mut Vec<Coefs>) -> Result<(), Er
         let mut raw = Vec::with_capacity(s.raw.len() + RAW_PAD);
         raw.extend_from_slice(&s.raw);
         raw.resize(s.raw.len() + RAW_PAD, 0);
-        let mut d = Dec { x: [0; 4], src: &src, pos: 8, t: &e.t, raw: &raw, bp: 0, raw_bits: s.raw.len() * 8, src_len: s.rans.len() };
+        let mut d = Dec {
+            x: [0; 4],
+            src: &src,
+            pos: 8,
+            t: &e.t,
+            raw: &raw,
+            bp: 0,
+            raw_bits: s.raw.len() * 8,
+            src_len: s.rans.len(),
+        };
         for k in 0..4 {
             d.x[k] = (s.rans[2 * k] as u64) << 32 | s.rans[2 * k + 1] as u64;
         }
@@ -1253,7 +1283,8 @@ mod tests {
     #[test]
     fn cv_table_is_the_dct_basis() {
         for (v, &c) in CV.iter().enumerate() {
-            let x = (v as f64 * std::f64::consts::PI / 16.0).cos() * if v == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
+            let x = (v as f64 * std::f64::consts::PI / 16.0).cos()
+                * if v == 0 { std::f64::consts::FRAC_1_SQRT_2 } else { 1.0 };
             // within an ulp of this platform's libm (the table holds the correctly rounded values)
             assert!(c.to_bits().abs_diff(x.to_bits()) <= 1, "c({v}) = {c} vs {x}");
         }

@@ -130,14 +130,16 @@ fn mutate(d: &[u8], r: &mut Rng) -> Vec<u8> {
 
 fn fuzz(files: &[String], rounds: usize, seed: u64) {
     let mut r = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    let inputs: Vec<(String, Vec<u8>)> = files.iter().filter_map(|p| std::fs::read(p).ok().map(|d| (p.clone(), d))).collect();
+    let inputs: Vec<(String, Vec<u8>)> =
+        files.iter().filter_map(|p| std::fs::read(p).ok().map(|d| (p.clone(), d))).collect();
     let (mut coded, mut total) = (0usize, 0usize);
     let mut reasons = std::collections::BTreeMap::<String, usize>::new();
     for round in 0..rounds {
         let (name, d) = &inputs[r.below(inputs.len())];
         let m = mutate(d, &mut r);
         let (c, why) = container::compress_with(&m, &mut Timing::default());
-        let back = container::decompress(&c).unwrap_or_else(|e| panic!("round {round} ({name}): decompress failed: {e}"));
+        let back =
+            container::decompress(&c).unwrap_or_else(|e| panic!("round {round} ({name}): decompress failed: {e}"));
         if back != m {
             std::fs::write("fuzz_failure.jpg", &m).ok();
             panic!("round {round} ({name}): ROUNDTRIP MISMATCH (input saved to fuzz_failure.jpg)");
@@ -191,8 +193,12 @@ fn mutenc(files: &[String], rounds: usize, seed: u64) {
             continue;
         };
         // the generator must only change the coding, never the coefficients
-        let c1 = variant::coefficients(&v).unwrap_or_else(|| panic!("round {round} ({name}): variant does not decode: {desc}"));
-        assert!(c0.iter().zip(&c1).all(|(a, b)| a.blocks == b.blocks), "round {round} ({name}): variant changed coefficients: {desc}");
+        let c1 = variant::coefficients(&v)
+            .unwrap_or_else(|| panic!("round {round} ({name}): variant does not decode: {desc}"));
+        assert!(
+            c0.iter().zip(&c1).all(|(a, b)| a.blocks == b.blocks),
+            "round {round} ({name}): variant changed coefficients: {desc}"
+        );
         if v == *d {
             identical += 1;
         }
@@ -250,7 +256,14 @@ fn main() {
                         continue;
                     }
                 };
-                println!("  {}x{} progressive={} comps={} scans={}", j.width, j.height, j.progressive, j.comps.len(), j.scans.len());
+                println!(
+                    "  {}x{} progressive={} comps={} scans={}",
+                    j.width,
+                    j.height,
+                    j.progressive,
+                    j.comps.len(),
+                    j.scans.len()
+                );
                 let (mut coefs, mut clean) = (Vec::new(), jpeg_recons::jpeg::Clean::default());
                 match jpeg_recons::jpeg::decode_all(&j, &d, jpeg_recons::jpeg::Order::Zigzag, &mut coefs, &mut clean) {
                     Ok(infos) => {
@@ -258,11 +271,34 @@ fn main() {
                             let (e, _) = jpeg_recons::fast::encode(&j, &coefs);
                             let rans: usize = e.stripes.iter().map(|s| s.rans.len() * 4).sum();
                             let raw: usize = e.stripes.iter().map(|s| s.raw.len()).sum();
-                            println!("  model: tables {}B rans {}B raw {}B stripes {}", e.tables.len(), rans, raw, e.stripes.len());
+                            println!(
+                                "  model: tables {}B rans {}B raw {}B stripes {}",
+                                e.tables.len(),
+                                rans,
+                                raw,
+                                e.stripes.len()
+                            );
                         }
                         for (s, i) in j.scans.iter().zip(infos) {
-                            let t = i.truncated.map(|t| format!("truncated at MCU {} bit {} tail {}B boundary={}", t.mcus, t.bits, t.tail.len(), t.boundary));
-                            println!("  scan comps={} ri={} data={}B standard={} trailing_rst={} pad_zero={} {}", s.comps.len(), s.ri, s.end - s.start, i.standard, i.trailing_rst, i.pad_zero, t.unwrap_or_default());
+                            let t = i.truncated.map(|t| {
+                                format!(
+                                    "truncated at MCU {} bit {} tail {}B boundary={}",
+                                    t.mcus,
+                                    t.bits,
+                                    t.tail.len(),
+                                    t.boundary
+                                )
+                            });
+                            println!(
+                                "  scan comps={} ri={} data={}B standard={} trailing_rst={} pad_zero={} {}",
+                                s.comps.len(),
+                                s.ri,
+                                s.end - s.start,
+                                i.standard,
+                                i.trailing_rst,
+                                i.pad_zero,
+                                t.unwrap_or_default()
+                            );
                         }
                     }
                     Err(e) => println!("  decode error: {e}"),

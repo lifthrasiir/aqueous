@@ -133,7 +133,8 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
     if d.len() < 4 || d[0] != 0xFF || d[1] != 0xD8 {
         return err("not a JPEG");
     }
-    let mut j = Jpeg { width: 0, height: 0, progressive: false, comps: Vec::new(), qt: [[0; 64]; 4], scans: Vec::new() };
+    let mut j =
+        Jpeg { width: 0, height: 0, progressive: false, comps: Vec::new(), qt: [[0; 64]; 4], scans: Vec::new() };
     let mut dc: [Option<HuffSpec>; 4] = Default::default();
     let mut ac: [Option<HuffSpec>; 4] = Default::default();
     let mut qt_seen = [[0u16; 64]; 4];
@@ -200,7 +201,9 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
                     return err("image too large");
                 }
             }
-            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => return err("unsupported SOF (lossless/arithmetic/hierarchical)"),
+            0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF => {
+                return err("unsupported SOF (lossless/arithmetic/hierarchical)");
+            }
             0xC4 => {
                 let mut p = 0;
                 while p < seg.len() {
@@ -214,7 +217,11 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
                     let n: usize = counts.iter().map(|&c| c as usize).sum();
                     let vals = seg.get(p + 17..p + 17 + n).ok_or(Error("truncated DHT".into()))?.to_vec();
                     let spec = Some(HuffSpec { counts, vals });
-                    if tc == 0 { dc[th] = spec } else { ac[th] = spec }
+                    if tc == 0 {
+                        dc[th] = spec
+                    } else {
+                        ac[th] = spec
+                    }
                     p += 17 + n;
                 }
             }
@@ -227,7 +234,8 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
                         return err("bad DQT");
                     }
                     for k in 0..64 {
-                        qt_seen[tq][k] = if pq == 0 { byte(seg, p + 1 + k)? as u16 } else { be16(seg, p + 1 + 2 * k)? as u16 };
+                        qt_seen[tq][k] =
+                            if pq == 0 { byte(seg, p + 1 + k)? as u16 } else { be16(seg, p + 1 + 2 * k)? as u16 };
                     }
                     p += 1 + if pq == 0 { 64 } else { 128 };
                 }
@@ -252,7 +260,11 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
                     if comps.iter().any(|c: &ScanComp| c.ci == ci) {
                         return err("duplicate scan component");
                     }
-                    comps.push(ScanComp { ci, dc: dc[(t >> 4) as usize & 3].clone(), ac: ac[(t & 15) as usize & 3].clone() });
+                    comps.push(ScanComp {
+                        ci,
+                        dc: dc[(t >> 4) as usize & 3].clone(),
+                        ac: ac[(t & 15) as usize & 3].clone(),
+                    });
                 }
                 let ss = byte(seg, 1 + 2 * ns)?;
                 let se = byte(seg, 2 + 2 * ns)?;
@@ -383,7 +395,13 @@ pub struct Table {
 #[inline(always)]
 pub(crate) fn extend(v: u32, s: u32) -> i32 {
     // JPEG HUFF_EXTEND
-    if s == 0 { 0 } else if v < (1 << (s - 1)) { v as i32 - (1 << s) + 1 } else { v as i32 }
+    if s == 0 {
+        0
+    } else if v < (1 << (s - 1)) {
+        v as i32 - (1 << s) + 1
+    } else {
+        v as i32
+    }
 }
 
 impl Table {
@@ -616,7 +634,13 @@ pub fn alloc_coefs(j: &Jpeg, out: &mut Vec<Coefs>, zero: bool) {
 
 /// Decode all scans of a sequential JPEG `d` into `out`. Returns per-scan info; scans that
 /// cannot be decoded or reproduced are marked `raw`. Fails only on structural problems.
-pub fn decode_all(j: &Jpeg, d: &[u8], order: Order, out: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Vec<ScanInfo>, Error> {
+pub fn decode_all(
+    j: &Jpeg,
+    d: &[u8],
+    order: Order,
+    out: &mut Vec<Coefs>,
+    clean: &mut Clean,
+) -> Result<Vec<ScanInfo>, Error> {
     if j.progressive {
         return err("progressive JPEG: use progressive::decode_all");
     }
@@ -800,7 +824,12 @@ impl Ctx<'_> {
     /// mask (bits 1..64) and whether the block ends other than a standard encoder ends it
     /// (right after the last nonzero coefficient, with EOB unless at 63).
     #[inline(always)]
-    fn decode_ac<const NAT: bool>(&self, br: &mut Br, si: usize, blk: &mut [i16; 64]) -> Result<(u64, bool), &'static str> {
+    fn decode_ac<const NAT: bool>(
+        &self,
+        br: &mut Br,
+        si: usize,
+        blk: &mut [i16; 64],
+    ) -> Result<(u64, bool), &'static str> {
         let at = &self.act[si];
         let data = self.data;
         let apair: &[Pair; 1 << FAST_BITS] = &at.pair;
@@ -877,7 +906,15 @@ impl Ctx<'_> {
     /// predictions `pred` (MCU `*m` must start a restart interval or continue the decoding of
     /// MCU `*m - 1`). `hook(bit position, MCU)` is asked before every MCU whether to stop there.
     #[inline(always)]
-    fn run<const NAT: bool>(&self, br: &mut Br, pred: &mut [i32; 4], m: &mut usize, m1: usize, chk: &mut Checks, mut hook: impl FnMut(usize, usize) -> bool) -> End {
+    fn run<const NAT: bool>(
+        &self,
+        br: &mut Br,
+        pred: &mut [i32; 4],
+        m: &mut usize,
+        m1: usize,
+        chk: &mut Checks,
+        mut hook: impl FnMut(usize, usize) -> bool,
+    ) -> End {
         let first = *m;
         let ri = self.ri;
         let mut mcu_end = br.used(); // bit position after the last complete MCU
@@ -990,7 +1027,8 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
     let nseg = nmcu.div_ceil(ri);
     let data_len = clean.data.len() - PAD;
     let comps = out.iter_mut().map(CompPtr::of).collect();
-    let ctx = Ctx { dct, act, layout, comps, data: &clean.data, data_len, segments: &clean.segments, ri, nmcu, mcux: s.mcux };
+    let ctx =
+        Ctx { dct, act, layout, comps, data: &clean.data, data_len, segments: &clean.segments, ri, nmcu, mcux: s.mcux };
     let mut info = ScanInfo { standard: clean.markers_ok, ..Default::default() };
     // segments beyond the expected ones must be empty (RSTs after the last MCU)
     if clean.segments.len() > nseg {
@@ -1001,7 +1039,11 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
         }
     }
     let blocks_per_mcu: usize = ctx.layout.iter().map(|&(_, h, v)| h * v).sum();
-    let chunks = if rayon::current_num_threads() > 1 { (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(rayon::current_num_threads() * 4) } else { 1 };
+    let chunks = if rayon::current_num_threads() > 1 {
+        (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(rayon::current_num_threads() * 4)
+    } else {
+        1
+    };
     let serial = |ctx: &Ctx| -> ScanResult {
         let mut chk = Checks::default();
         let (mut br, mut pred, mut m) = (Br { buf: 0, cnt: 0, pos: 0 }, [0; 4], 0);
@@ -1047,7 +1089,14 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
     finish(s, &ctx.layout, out, clean, info, r)
 }
 
-fn finish(s: &Scan, layout: &[(usize, usize, usize)], out: &mut [Coefs], clean: &Clean, mut info: ScanInfo, r: ScanResult) -> Result<ScanInfo, Error> {
+fn finish(
+    s: &Scan,
+    layout: &[(usize, usize, usize)],
+    out: &mut [Coefs],
+    clean: &Clean,
+    mut info: ScanInfo,
+    r: ScanResult,
+) -> Result<ScanInfo, Error> {
     let (chk, trunc) = r?;
     let data_len = clean.data.len() - PAD;
     if let Some(mut t) = trunc {
@@ -1227,7 +1276,10 @@ fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanRes
     let mut t2 = t1;
     let result = (|| {
         if !matches!(e0, End::Hook | End::Done) {
-            { spec_dbg("1"); return None; }
+            {
+                spec_dbg("1");
+                return None;
+            }
         }
         // (chunk, first record, MCU index there, DC predictions there) of each synchronised chunk
         let mut synced: Vec<(usize, usize, usize, [i32; 4], usize)> = Vec::new();
@@ -1265,7 +1317,10 @@ fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanRes
             // MCUs r..last of the chunk are the true MCUs m..; only those before the scan end
             let n = (last - r).min(c.nmcu - m);
             if failed && m + (last - r) < c.nmcu {
-                { spec_dbg("2"); return None; } // the true decoding fails there
+                {
+                    spec_dbg("2");
+                    return None;
+                } // the true decoding fails there
             }
             synced.push((i, r, m, pred, n));
             let (rr, re) = (&o.recs[r], &o.recs[r + n]);
@@ -1277,7 +1332,10 @@ fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanRes
             if m >= c.nmcu {
                 // the scan ends inside this chunk's records: check the end as `run` would
                 if re.bit > c.data_len * 8 {
-                    { spec_dbg("3"); return None; } // truncated: leave it to the serial decoder
+                    {
+                        spec_dbg("3");
+                        return None;
+                    } // truncated: leave it to the serial decoder
                 }
                 br = Br::at(c.data, re.bit);
                 break;
@@ -1285,7 +1343,10 @@ fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanRes
             br = Br::at(c.data, re.bit);
             i += 1;
             if i >= chunks {
-                { spec_dbg("4"); return None; }
+                {
+                    spec_dbg("4");
+                    return None;
+                }
             }
         }
         c.check_segment_end(br.used(), 0, &mut chk);
@@ -1330,15 +1391,20 @@ fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanRes
     SPEC.with(|s| *s.borrow_mut() = outs);
     if std::env::var_os("JRC_DEBUG_SPEC").is_some() {
         let ms = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64() * 1e3;
-        eprintln!("speculative: {chunks} chunks, decode {:.2} ms, sync {:.2} ms, copy {:.2} ms", ms(t0, t1), ms(t1, t2), ms(t2, std::time::Instant::now()));
+        eprintln!(
+            "speculative: {chunks} chunks, decode {:.2} ms, sync {:.2} ms, copy {:.2} ms",
+            ms(t0, t1),
+            ms(t1, t2),
+            ms(t2, std::time::Instant::now())
+        );
     }
     result
 }
 
 pub const ZIGZAG: [usize; 64] = [
-    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27,
-    20, 13, 6, 7, 14, 21, 28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58,
-    59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54, 47, 55, 62, 63,
+    0, 1, 8, 16, 9, 2, 3, 10, 17, 24, 32, 25, 18, 11, 4, 5, 12, 19, 26, 33, 40, 48, 41, 34, 27, 20, 13, 6, 7, 14, 21,
+    28, 35, 42, 49, 56, 57, 50, 43, 36, 29, 22, 15, 23, 30, 37, 44, 51, 58, 59, 52, 45, 38, 31, 39, 46, 53, 60, 61, 54,
+    47, 55, 62, 63,
 ];
 
 // ---------------------------------------------------------------- Huffman encoding (re-emission)
@@ -1383,7 +1449,9 @@ impl BitOut {
         self.acc = (self.acc << len) | bits as u64;
         self.n += len;
         // SAFETY: reserve() keeps >= 8 bytes past pos
-        unsafe { (self.buf.as_mut_ptr().add(self.pos) as *mut u64).write_unaligned((self.acc << (64 - self.n)).to_be()) };
+        unsafe {
+            (self.buf.as_mut_ptr().add(self.pos) as *mut u64).write_unaligned((self.acc << (64 - self.n)).to_be())
+        };
         self.pos += (self.n >> 3) as usize;
         self.n &= 7;
     }

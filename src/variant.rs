@@ -9,7 +9,7 @@
 //!
 //! Deliberately simple (per position, per bit); not used by the codec.
 
-use crate::jpeg::{self, size_bits, BitOut, Clean, Coefs, EncTable, Error, Jpeg, Order, Scan};
+use crate::jpeg::{self, BitOut, Clean, Coefs, EncTable, Error, Jpeg, Order, Scan, size_bits};
 use crate::progressive;
 
 /// xorshift64*
@@ -127,7 +127,12 @@ fn tables(s: &Scan, dc: bool, ac: bool) -> Result<Vec<([u32; 256], [u32; 256])>,
 }
 
 /// Iterate the blocks of a scan in MCU order: f(mcu index, scan component index, block).
-fn for_blocks(j: &Jpeg, s: &Scan, coefs: &[Coefs], mut f: impl FnMut(usize, usize, &[i16; 64]) -> Result<(), Error>) -> Result<(), Error> {
+fn for_blocks(
+    j: &Jpeg,
+    s: &Scan,
+    coefs: &[Coefs],
+    mut f: impl FnMut(usize, usize, &[i16; 64]) -> Result<(), Error>,
+) -> Result<(), Error> {
     let layout = jpeg::scan_layout(j, s);
     for m in 0..s.mcux * s.mcuy {
         let (mx, my) = (m % s.mcux, m / s.mcux);
@@ -359,7 +364,11 @@ pub fn reencode(d: &[u8], rng: &mut Rng) -> Option<(Vec<u8>, String)> {
         desc += &format!("[{k:?}]");
         let mut w = W { w: BitOut { acc: 0, n: 0, buf: vec![0; 1 << 16], pos: 0 }, rng, k };
         let mut seg_ends = Vec::new();
-        let r = if j.progressive { prog_scan(&j, s, &coefs, &mut w, &mut seg_ends) } else { seq_scan(&j, s, &coefs, &mut w, &mut seg_ends) };
+        let r = if j.progressive {
+            prog_scan(&j, s, &coefs, &mut w, &mut seg_ends)
+        } else {
+            seq_scan(&j, s, &coefs, &mut w, &mut seg_ends)
+        };
         r.ok()?;
         finish(w, seg_ends, &mut out);
     }
