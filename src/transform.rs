@@ -32,25 +32,26 @@ use crate::record::{GroupDec, GroupEnc, RefCtx, int_value, is_int, predict, st_s
 use crate::varint::{Rd, put_sqlite, put_sv, put_uv};
 use crate::{Result, corrupt};
 
-// Global streams.
+// The streams, in the container's order: each is read with the help of those before it
+// only (FORMAT.md).
 pub const S_KIND: usize = 0;
-pub const S_GRP: usize = 1;
-pub const S_PHDR: usize = 2;
-pub const S_CPTR: usize = 3;
-pub const S_CHILD: usize = 4;
-pub const S_IKEY: usize = 5;
-pub const S_OVF: usize = 6;
-pub const S_FILL: usize = 7;
-pub const S_RAW: usize = 8;
-pub const S_DIR: usize = 9;
+pub const S_RAW: usize = 1;
+pub const S_DIR: usize = 2;
 /// The group streams (see `record`), in this order.
-pub const S_REC: usize = 10;
-pub const S_BYTES: usize = 17;
+pub const S_REC: usize = 3;
+pub const S_BYTES: usize = 10;
+pub const S_GRP: usize = 11;
+pub const S_PHDR: usize = 12;
+pub const S_CHILD: usize = 13;
+pub const S_IKEY: usize = 14;
+pub const S_CPTR: usize = 15;
+pub const S_OVF: usize = 16;
+pub const S_FILL: usize = 17;
 pub const NSTREAMS: usize = 18;
 
 pub const STREAM_NAMES: [&str; NSTREAMS] = [
-    "kind", "grp", "phdr", "cptr", "child", "ikey", "ovf", "fill", "raw", "dir", "rec", "rowid", "rawpay", "tag",
-    "int", "real", "len", "bytes",
+    "kind", "raw", "dir", "rec", "rowid", "rawpay", "tag", "int", "real", "len", "bytes", "grp", "phdr", "child",
+    "ikey", "cptr", "ovf", "fill",
 ];
 
 pub struct Encoded {
@@ -309,9 +310,9 @@ pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
                     continue;
                 }
                 let t = &groups[gt as usize];
-                let row_of = row_lookup(&t.rowids);
+                let rows = Rows::new(&t.rowids);
                 let (vi, vt) = (groups[gi as usize].view(), t.view());
-                if let Some(key) = index::discover_key(&vi, &vt, &t.rowids, &row_of) {
+                if let Some(key) = index::discover_key(&vi, &vt, &t.rowids, &|r| rows.of(r).next()) {
                     refs[gi as usize] = Some((gt as usize, key));
                 }
             }
@@ -409,21 +410,24 @@ fn code_group(
             rank[r as usize] = k as u32;
         }
         drop(perm);
-        let row_of = row_lookup(&tg.rowids);
-        for &e in pays_i.iter() {
-            // The entry's rowid, its row, and the entry the row predicts.
-            let r = crate::record::parse(e, cols)
+        let rows = Rows::new(&tg.rowids);
+        'entries: for &e in pays_i.iter() {
+            // The entry's rowid, and the first of its rows (several in a broken table) that
+            // predicts the entry.
+            let rowid = crate::record::parse(e, cols)
                 .then(|| cols.last().copied())
                 .flatten()
                 .filter(|&(st, _)| is_int(st))
-                .and_then(|(st, off)| row_of(int_value(st, &e[off as usize..off as usize + st_size(st)])))
-                .filter(|&r| keys.ok[r]);
-            if let Some(r) = r {
+                .map(|(st, off)| int_value(st, &e[off as usize..off as usize + st_size(st)]));
+            for r in rowid.into_iter().flat_map(|rowid| rows.of(rowid)) {
+                if !keys.ok[r] {
+                    continue;
+                }
                 pred.clear();
                 predict(&keys, r, g.fmt4, pred);
                 if *pred == e {
                     ge.reference(rank[r] as i64);
-                    continue;
+                    continue 'entries;
                 }
             }
             ge.record(e, g.fmt4, cols);
@@ -499,20 +503,33 @@ fn code_groups_par(
     }
 }
 
-/// Finds a row by rowid: binary search, over the rowids or a sorted copy.
-fn row_lookup(rowids: &[i64]) -> impl Fn(i64) -> Option<usize> + '_ {
-    let sorted = rowids.windows(2).all(|w| w[0] < w[1]);
-    let mut idx: Vec<(i64, u32)> = Vec::new();
-    if !sorted {
-        idx = rowids.iter().enumerate().map(|(i, &r)| (r, i as u32)).collect();
-        idx.sort_unstable();
-    }
-    move |r| {
-        if sorted {
-            rowids.binary_search(&r).ok()
-        } else {
-            idx.binary_search_by(|e| e.0.cmp(&r)).ok().map(|k| idx[k].1 as usize)
+/// Finds rows by rowid: binary search, over the rowids or a sorted copy.
+struct Rows<'a> {
+    rowids: &'a [i64],
+    /// (rowid, row) sorted, if the rowids are not increasing.
+    idx: Vec<(i64, u32)>,
+}
+
+impl<'a> Rows<'a> {
+    fn new(rowids: &'a [i64]) -> Self {
+        let mut idx: Vec<(i64, u32)> = Vec::new();
+        if !rowids.windows(2).all(|w| w[0] < w[1]) {
+            idx = rowids.iter().enumerate().map(|(i, &r)| (r, i as u32)).collect();
+            idx.sort_unstable();
         }
+        Rows { rowids, idx }
+    }
+
+    /// The rows with rowid `r`, in row order.
+    fn of(&self, r: i64) -> impl Iterator<Item = usize> + '_ {
+        let (single, run) = if self.idx.is_empty() {
+            (self.rowids.binary_search(&r).ok(), &[][..])
+        } else {
+            let k = self.idx.partition_point(|e| e.0 < r);
+            let n = self.idx[k..].iter().take_while(|e| e.0 == r).count();
+            (None, &self.idx[k..k + n])
+        };
+        single.into_iter().chain(run.iter().map(|e| e.1 as usize))
     }
 }
 
@@ -580,6 +597,11 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
 
 /// `decode` with `threads` threads (the first pass over the tables and indexes).
 pub fn decode_threads(g: &Geom, len: usize, s: &[Vec<u8>], threads: usize) -> Result<Vec<u8>> {
+    // The output is no larger than the streams describe: a kind per page, the tail in `raw`
+    // (checked before it is allocated).
+    if s.len() != NSTREAMS || s[S_KIND].len() != g.npages || len % g.psize > s[S_RAW].len() {
+        return Err(corrupt());
+    }
     let mut w = Writer(vec![0u8; len]);
     rebuild(g, len, s, &mut w, threads)?;
     Ok(w.0)
@@ -597,7 +619,8 @@ pub fn verify(g: &Geom, src: &[u8], s: &[Vec<u8>]) -> bool {
 
 fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: usize) -> Result<()> {
     let (ps, np) = (g.psize, g.npages);
-    if s.len() != NSTREAMS || np == 0 || np.checked_mul(ps) != Some(len - len % ps) {
+    // A kind per page (which also bounds the output by the streams).
+    if s.len() != NSTREAMS || np == 0 || np.checked_mul(ps) != Some(len - len % ps) || s[S_KIND].len() != np {
         return Err(corrupt());
     }
     let mut rd: Vec<Rd> = s.iter().map(|v| Rd::new(v)).collect();
@@ -619,14 +642,27 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: u
                 }
                 let mut key = index::Key::default();
                 for _ in 0..m {
-                    key.cols.push((dir.uv()? as u32).wrapping_sub(1));
-                    key.flags.push(dir.u8()? & 3);
+                    let c = u32::try_from(dir.uv()?).map_err(|_| corrupt())?;
+                    let f = dir.u8()?;
+                    if f > 3 {
+                        return Err(corrupt());
+                    }
+                    key.cols.push(c.wrapping_sub(1));
+                    key.flags.push(f);
                 }
                 Some((t - 1, key))
             }
         };
+        // Only index entries are predicted.
+        if table && r.is_some() {
+            return Err(corrupt());
+        }
         meta.push((table, r));
         gds.push(GroupDec::new(&mut dir, &mut gstreams)?);
+    }
+    // The groups' parts cover their streams exactly.
+    if !dir.at_end() || gstreams.iter().any(|r| !r.at_end()) {
+        return Err(corrupt());
     }
     // The indexed columns of the tables indexes are predicted from: a first pass over each
     // such table (on a copy of its cursors), for all its indexes at once. Then every group
@@ -700,7 +736,9 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: u
 
     let mut pg = vec![0u8; ps];
     let mut op = vec![0u8; ps];
-    let [kind, grp, phdr, cptr, child, ikey, ovf, fill, raw, ..] = &mut rd[..] else { unreachable!() };
+    let [kind, raw, _, _, _, _, _, _, _, _, _, grp, phdr, child, ikey, cptr, ovf, fill] = &mut rd[..] else {
+        unreachable!()
+    };
     let mut cell = Vec::new();
     let mut iv: Vec<(usize, usize)> = Vec::new();
     let mut chain: Vec<usize> = Vec::new();
@@ -758,7 +796,7 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: u
         for i in 0..nc {
             cell.clear();
             if interior {
-                let c = prev_child + 1 + child.sv()?;
+                let c = (prev_child + 1).checked_add(child.sv()?).ok_or_else(corrupt)?;
                 if !(0..=u32::MAX as i64).contains(&c) {
                     return Err(corrupt());
                 }
@@ -789,7 +827,7 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: u
                 cell.extend_from_slice(&pay[..local]);
                 if local < pay.len() {
                     for _ in 0..g.ovf_pages(plen, local) {
-                        let q = last_ovf + 1 + ovf.sv()?;
+                        let q = (last_ovf + 1).checked_add(ovf.sv()?).ok_or_else(corrupt)?;
                         if q < 2 || q > np as i64 {
                             return Err(corrupt());
                         }
@@ -822,14 +860,14 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: u
             }
         }
         if interior {
-            let c = prev_child + 1 + child.sv()?;
+            let c = (prev_child + 1).checked_add(child.sv()?).ok_or_else(corrupt)?;
             if !(0..=u32::MAX as i64).contains(&c) {
                 return Err(corrupt());
             }
             prev_child = c;
             pg[h + 8..h + 12].copy_from_slice(&(c as u32).to_be_bytes());
         }
-        let cs = minoff as i64 + phdr.sv()?;
+        let cs = (minoff as i64).checked_add(phdr.sv()?).ok_or_else(corrupt)?;
         if !(1..=65536).contains(&cs) {
             return Err(corrupt());
         }
@@ -850,6 +888,11 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: u
     let tail = len - np * ps;
     if tail > 0 {
         out.put(np * ps, raw.bytes(tail)?);
+    }
+    // Every stream used up, every record of every group placed.
+    let used = [&*kind, &*raw, &*grp, &*phdr, &*child, &*ikey, &*cptr, &*ovf, &*fill];
+    if used.iter().any(|r| !r.at_end()) || gds.iter().any(|gd| !gd.finished()) {
+        return Err(corrupt());
     }
     Ok(())
 }

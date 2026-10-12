@@ -31,8 +31,8 @@ file, summed (`scripts/baseline.sh`).
 |---|---|---|---|---|---|---|---|---|
 | public (real databases) | 13 | 87 MB | **0.1708** | 122 MB/s | 386 MB/s | 0.3685 | 0.2542 | 0.2079 |
 | system (macOS system databases) | 116 | 127 MB | **0.2358** | 119 MB/s | 367 MB/s | 0.4152 | 0.3292 | 0.2913 |
-| synthetic (format features) | 25 | 115 MB | **0.2048** | 90 MB/s | 518 MB/s | 0.3115 | 0.2482 | 0.2300 |
-| **all** | 154 | 328 MB | **0.2078** | **107 MB/s** | **415 MB/s** | 0.3666 | 0.2811 | 0.2478 |
+| synthetic (format features) | 25 | 115 MB | **0.2047** | 90 MB/s | 518 MB/s | 0.3115 | 0.2482 | 0.2300 |
+| **all** | 154 | 328 MB | **0.2077** | **107 MB/s** | **415 MB/s** | 0.3666 | 0.2811 | 0.2478 |
 
 16% smaller than xz -9 and 26% smaller than zstd -19 overall. Compression includes
 verification (the file is rebuilt from the streams and compared; on a mismatch it is stored
@@ -95,14 +95,16 @@ With more than one thread `bench` reports wall time instead of thread CPU time.
 
 ## Format
 
-The format is frozen at this version: `scripts/format-ref.tsv` holds a hash of the output for
-every corpus file, and `scripts/format-check.sh` checks that changes keep it.
+[FORMAT.md](FORMAT.md) specifies the format in full, for a decoder or an encoder written from
+it alone. It is frozen: `scripts/format-ref.tsv` holds a hash of the output for every corpus
+file, and `scripts/format-check.sh` checks that changes keep it.
 
 ```text
-"SQLR" version(1) mode | varint(length) | u64 LE xxh3 of the original
-mode 0: zstd(file)
-mode 1: varint(page size) varint(usable size) u8(schema format >= 4)
-        18 streams: varint(raw length) u8(0 stored | 1 zstd) varint(coded length) data
+magic 69 04 6c ab 58 be ("aQRsq1i+") | u16 LE version | u64 LE length | u64 LE xxh3 of the original
+version 0: zstd(file)
+version 1: varint(page size) varint(usable size) u8(schema format >= 4)
+           18 streams, each read with the help of those before it only:
+             varint(n << 1 | zstd?) [varint(raw length) if zstd] n bytes
 ```
 
 zstd is level 7 for every stream but text/blob content (level 9), with long-distance
@@ -188,6 +190,7 @@ target/release/sqlr fuzz -n 200 $(find corpus -type f -size -4M)
 
 | File | Contents |
 |---|---|
+| `FORMAT.md` | The format, in full |
 | `src/container.rs` | File format, compression (with verification), decompression |
 | `src/transform.rs` | Page classification, streams, encoder and decoder |
 | `src/page.rs` | Geometry, b-tree page parsing, cell placement |

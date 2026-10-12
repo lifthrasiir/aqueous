@@ -1,11 +1,11 @@
-//! The file format.
+//! The file format (FORMAT.md has it in full).
 //!
 //! ```text
-//! "SQLR" version(u8) mode(u8) varint(length) u64-LE(xxh3 of the original)
-//! mode 0 (whole): zstd(file)                 -- not a database we can code
-//! mode 1 (coded): varint(page size) varint(usable size) u8(schema format >= 4)
-//!                 per stream (transform::NSTREAMS):
-//!                   varint(raw length) u8(0 stored | 1 zstd) varint(coded length) data
+//! magic(69 04 6c ab 58 be) u16-LE(version) u64-LE(length) u64-LE(xxh3 of the original)
+//! version 0 (whole): zstd(file)               -- not a database we can code
+//! version 1 (coded): varint(page size) varint(usable size) u8(schema format >= 4)
+//!                    per stream (transform::NSTREAMS), in their order:
+//!                      varint(n << 1 | z) [varint(raw length) if z] n bytes (zstd if z)
 //! ```
 //!
 //! With more than one thread, compression verifies while it compresses the streams (each
@@ -19,8 +19,13 @@ use crate::varint::{Rd, put_uv};
 use crate::{Result, corrupt};
 use xxhash_rust::xxh3::xxh3_64;
 
-const MAGIC: &[u8; 4] = b"SQLR";
-const VERSION: u8 = 1;
+const MAGIC: [u8; 6] = [0x69, 0x04, 0x6c, 0xab, 0x58, 0xbe];
+/// The original, zstd'd whole.
+const V_WHOLE: u16 = 0;
+/// The streams of the transform.
+const V_CODED: u16 = 1;
+/// The largest output of a zstd byte (a 4-byte RLE block makes 128 KiB).
+const ZSTD_MAX_RATIO: usize = 1 << 15;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {
@@ -58,17 +63,40 @@ pub fn compress(src: &[u8]) -> Vec<u8> {
     compress_with(src, &Options::default(), &mut Stats::default())
 }
 
-fn header(out: &mut Vec<u8>, mode: u8, src: &[u8]) {
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.push(mode);
-    put_uv(out, src.len() as u64);
+fn header(out: &mut Vec<u8>, version: u16, src: &[u8]) {
+    out.extend_from_slice(&MAGIC);
+    out.extend_from_slice(&version.to_le_bytes());
+    out.extend_from_slice(&(src.len() as u64).to_le_bytes());
     out.extend_from_slice(&xxh3_64(src).to_le_bytes());
+}
+
+/// The header of version 1 past the common part.
+fn geom(out: &mut Vec<u8>, g: &Geom) {
+    put_uv(out, g.psize as u64);
+    put_uv(out, g.usable as u64);
+    out.push(g.fmt4 as u8);
+}
+
+/// A stream: `z` its zstd frame, if smaller.
+fn put_stream(out: &mut Vec<u8>, s: &[u8], z: Option<&[u8]>) -> usize {
+    match z {
+        Some(z) => {
+            put_uv(out, (z.len() as u64) << 1 | 1);
+            put_uv(out, s.len() as u64);
+            out.extend_from_slice(z);
+            z.len()
+        }
+        None => {
+            put_uv(out, (s.len() as u64) << 1);
+            out.extend_from_slice(s);
+            s.len()
+        }
+    }
 }
 
 fn whole(src: &[u8], level: i32) -> Vec<u8> {
     let mut out = Vec::new();
-    header(&mut out, 0, src);
+    header(&mut out, V_WHOLE, src);
     out.extend_from_slice(&zstd::bulk::compress(src, level).expect("zstd"));
     out
 }
@@ -103,11 +131,8 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     }
     let t = std::time::Instant::now();
     let mut out = Vec::new();
-    header(&mut out, 1, src);
-    let g = enc.geom;
-    put_uv(&mut out, g.psize as u64);
-    put_uv(&mut out, g.usable as u64);
-    out.push(g.fmt4 as u8);
+    header(&mut out, V_CODED, src);
+    geom(&mut out, &enc.geom);
     let mk = |level| {
         let mut cz = zstd::bulk::Compressor::new(level).expect("zstd");
         // Long-distance matching for what lies beyond the window.
@@ -122,7 +147,6 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
     let mut czb = mk(opt.level_bytes);
     let mut z = Vec::new();
     for (i, s) in enc.streams.into_iter().enumerate() {
-        put_uv(&mut out, s.len() as u64);
         st.raw[i] += s.len() as u64;
         let c = if i == transform::S_BYTES { &mut czb } else { &mut cz };
         z.clear();
@@ -130,17 +154,8 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
             z.reserve(zstd::zstd_safe::compress_bound(s.len()));
             c.compress_to_buffer(&s, &mut z).expect("zstd");
         }
-        if !z.is_empty() && z.len() < s.len() {
-            out.push(1);
-            put_uv(&mut out, z.len() as u64);
-            out.extend_from_slice(&z);
-            st.coded[i] += z.len() as u64;
-        } else {
-            out.push(0);
-            put_uv(&mut out, s.len() as u64);
-            out.extend_from_slice(&s);
-            st.coded[i] += s.len() as u64;
-        }
+        let small = !z.is_empty() && z.len() < s.len();
+        st.coded[i] += put_stream(&mut out, &s, small.then_some(&z[..])) as u64;
     }
     st.zstd_s += t.elapsed().as_secs_f64();
     crate::mem::mark("zstd");
@@ -232,26 +247,11 @@ fn compress_par(src: &[u8], opt: &Options, st: &mut Stats, enc: transform::Encod
     }
     crate::mem::mark("verify, zstd");
     let mut out = Vec::new();
-    header(&mut out, 1, src);
-    put_uv(&mut out, g.psize as u64);
-    put_uv(&mut out, g.usable as u64);
-    out.push(g.fmt4 as u8);
+    header(&mut out, V_CODED, src);
+    geom(&mut out, &g);
     for (i, (s, z)) in streams.iter().zip(zs).enumerate() {
-        put_uv(&mut out, s.len() as u64);
         st.raw[i] += s.len() as u64;
-        let c: &[u8] = match &z {
-            Some(z) => {
-                out.push(1);
-                z
-            }
-            None => {
-                out.push(0);
-                s
-            }
-        };
-        put_uv(&mut out, c.len() as u64);
-        out.extend_from_slice(c);
-        st.coded[i] += c.len() as u64;
+        st.coded[i] += put_stream(&mut out, s, z.as_deref()) as u64;
     }
     out
 }
@@ -263,68 +263,81 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
 /// `decompress` with `threads` threads: the same result.
 pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     let mut r = Rd::new(src);
-    if r.bytes(4)? != MAGIC || r.u8()? != VERSION {
+    if r.bytes(6).ok() != Some(&MAGIC[..]) {
         return Err(crate::Error("not an SQLR file"));
     }
-    let mode = r.u8()?;
-    let len = r.usize()?;
+    let version = u16::from_le_bytes(r.bytes(2)?.try_into().unwrap());
+    let len = usize::try_from(u64::from_le_bytes(r.bytes(8)?.try_into().unwrap())).map_err(|_| corrupt())?;
     let hash = u64::from_le_bytes(r.bytes(8)?.try_into().unwrap());
-    let out = match mode {
-        0 => {
+    let out = match version {
+        V_WHOLE => {
+            let z = &src[r.p..];
+            if len > z.len().saturating_mul(ZSTD_MAX_RATIO) {
+                return Err(corrupt());
+            }
             let mut out = Vec::with_capacity(len);
-            zstd::stream::copy_decode(&src[r.p..], &mut out).map_err(|_| corrupt())?;
+            zstd::stream::copy_decode(z, &mut out).map_err(|_| corrupt())?;
             out
         }
-        1 => {
+        V_CODED => {
             let psize = r.usize()?;
             let usable = r.usize()?;
             let fmt4 = r.u8()? != 0;
-            if !(512..=65536).contains(&psize) || !(480..=psize).contains(&usable) {
+            if !(512..=65536).contains(&psize) || !psize.is_power_of_two() || !(480..=psize).contains(&usable) {
                 return Err(corrupt());
             }
             let g = Geom { psize, usable, npages: len / psize, fmt4 };
-            if threads > 1 {
-                let streams = decode_streams_par(&mut r, len, threads)?;
-                crate::mem::mark("dec: streams");
-                let out = transform::decode_threads(&g, len, &streams, threads)?;
-                return if out.len() != len || xxh3_64(&out) != hash {
-                    Err(crate::Error("checksum mismatch"))
-                } else {
-                    Ok(out)
-                };
-            }
-            let mut dz = decompressor()?;
-            let mut streams = Vec::with_capacity(NSTREAMS);
-            for _ in 0..NSTREAMS {
-                let n = r.usize()?;
-                let m = r.u8()?;
-                let c = r.usize()?;
-                let d = r.bytes(c)?;
-                streams.push(match m {
-                    0 if c == n => d.to_vec(),
-                    1 => {
-                        if n > len.saturating_mul(2) + (1 << 20) {
-                            return Err(corrupt());
-                        }
-                        let mut v = Vec::with_capacity(n);
-                        dz.decompress_to_buffer(d, &mut v).map_err(|_| corrupt())?;
-                        if v.len() != n {
-                            return Err(corrupt());
-                        }
-                        v
-                    }
-                    _ => return Err(corrupt()),
-                });
-            }
+            let parts = stream_parts(&mut r, len)?;
+            let streams = if threads > 1 { decode_streams_par(&parts, threads)? } else { decode_streams(&parts)? };
             crate::mem::mark("dec: streams");
-            transform::decode(&g, len, &streams)?
+            transform::decode_threads(&g, len, &streams, threads)?
         }
-        _ => return Err(corrupt()),
+        _ => return Err(crate::Error("unknown version")),
     };
     if out.len() != len || xxh3_64(&out) != hash {
         return Err(crate::Error("checksum mismatch"));
     }
     Ok(out)
+}
+
+/// A stream as stored: its length, whether it is zstd'd, and the bytes.
+type Part<'a> = (usize, bool, &'a [u8]);
+
+/// The streams of a version 1 file, which must end with them; `len` is the original's
+/// length.
+fn stream_parts<'a>(r: &mut Rd<'a>, len: usize) -> Result<Vec<Part<'a>>> {
+    let mut parts = Vec::with_capacity(NSTREAMS);
+    for _ in 0..NSTREAMS {
+        let v = r.uv()?;
+        let c = usize::try_from(v >> 1).map_err(|_| corrupt())?;
+        let z = v & 1 == 1;
+        let n = if z { r.usize()? } else { c };
+        if z && (n > len.saturating_mul(2) + (1 << 20) || n > c.saturating_mul(ZSTD_MAX_RATIO)) {
+            return Err(corrupt());
+        }
+        parts.push((n, z, r.bytes(c)?));
+    }
+    if !r.at_end() {
+        return Err(corrupt());
+    }
+    Ok(parts)
+}
+
+fn decode_part(dz: &mut zstd::bulk::Decompressor, &(n, z, d): &Part) -> Result<Vec<u8>> {
+    if !z {
+        return Ok(d.to_vec());
+    }
+    let mut v = Vec::with_capacity(n);
+    dz.decompress_to_buffer(d, &mut v).map_err(|_| corrupt())?;
+    if v.len() != n {
+        return Err(corrupt());
+    }
+    Ok(v)
+}
+
+fn decode_streams(parts: &[Part]) -> Result<Vec<Vec<u8>>> {
+    let mut dz = decompressor()?;
+    parts.iter().map(|p| decode_part(&mut dz, p)).collect()
 }
 
 fn decompressor() -> Result<zstd::bulk::Decompressor<'static>> {
@@ -333,35 +346,12 @@ fn decompressor() -> Result<zstd::bulk::Decompressor<'static>> {
     Ok(dz)
 }
 
-/// The streams of a container, decoded on `threads` threads (the headers are parsed first,
-/// in order, with the same checks).
-fn decode_streams_par(r: &mut Rd, len: usize, threads: usize) -> Result<Vec<Vec<u8>>> {
-    let mut parts = Vec::with_capacity(NSTREAMS);
-    for _ in 0..NSTREAMS {
-        let n = r.usize()?;
-        let m = r.u8()?;
-        let c = r.usize()?;
-        let d = r.bytes(c)?;
-        match m {
-            0 if c == n => {}
-            1 if n <= len.saturating_mul(2) + (1 << 20) => {}
-            _ => return Err(corrupt()),
-        }
-        parts.push((n, m, d));
-    }
+/// The streams of a container, decoded on `threads` threads.
+fn decode_streams_par(parts: &[Part], threads: usize) -> Result<Vec<Vec<u8>>> {
     let mut order: Vec<usize> = (0..NSTREAMS).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(parts[i].0));
     let res = crate::par::map(threads, NSTREAMS, &order, decompressor, |dz, i| {
-        let (n, m, d) = parts[i];
-        if m == 0 {
-            return Ok(d.to_vec());
-        }
-        let mut v = Vec::with_capacity(n);
-        dz.as_mut().map_err(|e| e.clone())?.decompress_to_buffer(d, &mut v).map_err(|_| corrupt())?;
-        if v.len() != n {
-            return Err(corrupt());
-        }
-        Ok(v)
+        decode_part(dz.as_mut().map_err(|e| e.clone())?, &parts[i])
     });
     res.into_iter().map(|x| x.unwrap()).collect()
 }

@@ -230,7 +230,7 @@ impl Ends {
             self.v[n - 1 - r].checked_sub(sz)?
         } else {
             let back = self.v.last().copied().unwrap_or(0) as i64;
-            let off = back - sz as i64 + crate::varint::unzz(code / 2);
+            let off = (back - sz as i64).checked_add(crate::varint::unzz(code / 2))?;
             usize::try_from(off).ok()?
         };
         self.update(off, off + sz);

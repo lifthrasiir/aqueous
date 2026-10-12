@@ -537,6 +537,12 @@ impl<'a> GroupDec<'a> {
         self.rec.at_end()
     }
 
+    /// Whether all its parts are used up (once every record is decoded).
+    pub fn finished(&self) -> bool {
+        [&self.rec, &self.rowid, &self.rawpay].iter().all(|r| r.at_end())
+            && self.cols.iter().all(|c| [&c.tag, &c.int, &c.real, &c.len, &c.bytes].iter().all(|r| r.at_end()))
+    }
+
     /// Appends the next record to `out`, returns its rowid (if `table`).
     pub fn next(&mut self, table: bool, fmt4: bool, rc: Option<&RefCtx>, out: &mut Vec<u8>) -> Result<i64> {
         if table {
@@ -605,7 +611,8 @@ impl<'a> GroupDec<'a> {
                     let &(_, n) = c.distinct.get(id).ok_or_else(corrupt)?;
                     (12 + 2 * n as u64 + (t == T_TEXT_REP) as u64, id as i64)
                 }
-                17..=25 => {
+                // Serial types 1-6, 8, 9 (7 is a real).
+                17..=22 | 24 | 25 => {
                     let v = c.next_int(last, 0)?;
                     last = v;
                     ((t - T_ODD_INT) as u64, v)

@@ -246,3 +246,39 @@ fn threads_corrupted_containers() {
         }
     }
 }
+
+/// The header (magic, version), and nothing accepted past the end of the payload.
+#[test]
+fn header_and_trailing_bytes() {
+    const MAGIC: [u8; 6] = [0x69, 0x04, 0x6c, 0xab, 0x58, 0xbe];
+    let mut cases = vec![(vec![7u8; 5000], 0u16)];
+    cases.extend(build("trailing", SCHEMA).map(|d| (d, 1)));
+    for (v, version) in cases {
+        let c = sqlite_recons::compress(&v);
+        assert_eq!(c[..6], MAGIC);
+        assert_eq!(u16::from_le_bytes([c[6], c[7]]), version);
+        assert_eq!(u64::from_le_bytes(c[8..16].try_into().unwrap()), v.len() as u64);
+        for threads in [1, 3] {
+            let mut cc = c.clone();
+            cc.push(0);
+            assert!(decompress_threads(&cc, threads).is_err(), "version {version}, {threads} threads");
+        }
+    }
+}
+
+/// A length far beyond what the streams hold fails before anything that large is allocated.
+#[test]
+fn oversized_length() {
+    let mut cases = vec![vec![7u8; 5000]];
+    cases.extend(build("oversized", SCHEMA));
+    for v in cases {
+        let c = sqlite_recons::compress(&v);
+        for len in [1u64 << 62, (v.len() as u64) << 20, v.len() as u64 + (1 << 36)] {
+            let mut cc = c.clone();
+            cc[8..16].copy_from_slice(&len.to_le_bytes());
+            for threads in [1, 3] {
+                assert!(decompress_threads(&cc, threads).is_err(), "length {len}");
+            }
+        }
+    }
+}
