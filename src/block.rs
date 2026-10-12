@@ -5,9 +5,10 @@
 //! end) and its values. Templates are numbered in order of first use; a new one is defined
 //! in the TPL stream where it is first used. Any other line is kept as text.
 //!
-//! A number is an integer at a scale (digits after the point). Its format is either fixed
-//! (`%.Nf`-like: the scale is in the template) or C's `%.Pg` (the scale follows from the
-//! magnitude and is coded as a change from the previous number's). It is coded as the
+//! A number is an integer at a scale (digits after the point) and a mode, a `recons-num`
+//! descriptor kept in the template. In a fixed mode (`%.Nf`-like) the scale is in the
+//! descriptor; in the others (`%g`, `%e`, writers' shortest forms, of decimals or floats)
+//! it is coded as a change from the previous number's. The integer is coded as the
 //! difference from the previous number in the same position of the same kind of line,
 //! brought to its scale.
 //!
@@ -19,10 +20,9 @@ use crate::corner::{
 };
 use crate::recent::{Entry, NPRED, Recent, WIN, window_pred};
 pub use crate::style::Styles;
-use crate::style::exp_fallback;
 pub use crate::style::next_styles;
 use crate::varint::{Rd, put_sv, put_uv};
-use crate::{dec, num};
+use recons_num::{M_FIX, MAX_SCALE, MIN_SCALE, fixed};
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
 
@@ -95,10 +95,6 @@ const K_VP: u8 = 3;
 pub(crate) const K_F: u8 = 4;
 const K_L: u8 = 5;
 const KEYWORDS: [&[u8]; 6] = [b"v", b"vt", b"vn", b"vp", b"f", b"l"];
-
-/// Number formats (first byte of a numeric item; the second is the format's flags).
-pub(crate) const M_FIX: u8 = 0;
-const M_GEN: u8 = 1;
 
 /// Numbers per numeric line, corners per face line.
 pub(crate) const MAX_NUMS: usize = 8;
@@ -294,17 +290,7 @@ fn parse_line(
                 return None;
             }
             let t = &l[i..te];
-            let (v, sc, mode, f) = if style.mode != M_FIX
-                && let Some((v, sc, f)) = dec::encode(t, style.mode, style.p, style.exp3, 0, tmp)
-            {
-                (v, sc, style.mode, f)
-            } else if let Some((v, f)) = num::parse(t) {
-                (v, (f & num::F_FRAC) as i32, M_FIX, f)
-            } else if let Some((v, sc, f)) = num::parse_gen(t, style.p.clamp(6, 17), 0, style.exp3, tmp) {
-                (v, sc, M_GEN, f)
-            } else {
-                exp_fallback(t, 0, tmp)?
-            };
+            let (v, sc, mode, f) = style.encode(t, 0, tmp)?;
             vals[n] = (v, sc, mode);
             n += 1;
             key.extend_from_slice(&[mode, f, (i - ws) as u8]);
@@ -603,7 +589,7 @@ impl Encoder {
             } else if vp > 0 {
                 window_pred(&self.recent[k], line, vp, j, sc).expect("checked")
             } else {
-                num::rescale(pv, ps, sc)
+                fixed::rescale(pv, ps, sc)
             };
             put_sv(&mut s[if Some(j) == sel { S_UNIT } else { s_val(k, j) }], v.wrapping_sub(pred));
             prev[j] = (v, sc);
@@ -721,13 +707,13 @@ impl Encoder {
         let mut w = [[0i64; 3]; WIN + 2];
         let mut have = 1usize;
         for j in 0..n {
-            w[0][j] = num::rescale(prev[j].0, prev[j].1, vals[j].1);
+            w[0][j] = fixed::rescale(prev[j].0, prev[j].1, vals[j].1);
         }
         for (k, wk) in w.iter_mut().enumerate().skip(1) {
             let Some(e) = line.checked_sub(k as u64).and_then(|l| rec.get(l)) else { break };
             for j in 0..n {
                 let sc = vals[j].1;
-                wk[j] = if e.s[j] as i32 == sc { e.v[j] } else { num::rescale(e.v[j], e.s[j] as i32, sc) };
+                wk[j] = if e.s[j] as i32 == sc { e.v[j] } else { fixed::rescale(e.v[j], e.s[j] as i32, sc) };
             }
             have = k + 1;
         }
@@ -786,7 +772,7 @@ fn valid_key(k: &[u8]) -> bool {
     for _ in 0..n {
         let (Some(&m), Some(&f), Some(&sl)) = (k.get(i), k.get(i + 1), k.get(i + 2)) else { return false };
         let ok = if kind < K_F {
-            dec::valid(m, f)
+            recons_num::valid(m, f)
         } else {
             f == 0 && m < 32 && (m & C_T != 0 || m & (C_NEG << 1) == 0) && (m & C_N != 0 || m & (C_NEG << 2) == 0)
         };
@@ -822,7 +808,7 @@ impl Sink for Vec<u8> {
 
     #[inline]
     fn number(&mut self, v: i64, s: i32, mode: u8, f: u8) {
-        dec::put(self, v, s, mode, f);
+        recons_num::put(self, v, s, mode, f);
     }
 
     #[inline]
@@ -900,14 +886,14 @@ impl Deferred {
                     p += 2;
                 }
                 R_NUMBER => {
-                    dec::put(out, i64_at(p + 1), r[p + 9] as i8 as i32, r[p + 10], r[p + 11]);
+                    recons_num::put(out, i64_at(p + 1), r[p + 9] as i8 as i32, r[p + 10], r[p + 11]);
                     p += 12;
                 }
                 t => {
                     if t == R_NEG_INDEX {
                         out.push(b'-');
                     }
-                    num::put(out, i64_at(p + 1), 0);
+                    fixed::put(out, i64_at(p + 1), 0);
                     p += 9;
                 }
             }
@@ -1041,9 +1027,9 @@ impl Decoder {
                     let (m, f) = (k[items[j]], k[items[j] + 1]);
                     let (pv, ps) = prev[j];
                     let sc = if m != M_FIX {
-                        (ps as i64).wrapping_add(scale.sv()).clamp(num::MIN_SCALE as i64, num::MAX_SCALE as i64) as i32
+                        (ps as i64).wrapping_add(scale.sv()).clamp(MIN_SCALE as i64, MAX_SCALE as i64) as i32
                     } else {
-                        (f & num::F_FRAC) as i32
+                        (f & fixed::F_FRAC) as i32
                     };
                     let pred = if Some(j) == sel {
                         let (a, b) = ((j + 1) % 3, (j + 2) % 3);
@@ -1052,7 +1038,7 @@ impl Decoder {
                         let Some(x) = window_pred(&self.recent[kk], line, vp, j, sc) else { return false };
                         x
                     } else {
-                        num::rescale(pv, ps, sc)
+                        fixed::rescale(pv, ps, sc)
                     };
                     let r = if Some(j) == sel { S_UNIT } else { s_val(kind as usize, j) };
                     prev[j] = (pred.wrapping_add(vs[r - S_VAL].sv()), sc);
@@ -1135,27 +1121,8 @@ pub fn describe(k: &[u8]) -> String {
             if m & 0x1c != 0 {
                 s += &format!("~{}", m >> 2);
             }
-        } else if m != M_FIX {
-            let src = ["", "f32:", "f64:"][(dec::src_of(m) as usize).min(2)];
-            let r = ["", "g", "e", "py", "js", "pos"][(dec::render_of(m) as usize).min(5)];
-            let p = if matches!(dec::render_of(m), dec::R_GEN | dec::R_SCI) {
-                format!("{}", f & num::G_PREC)
-            } else {
-                String::new()
-            };
-            s += &format!(
-                "{src}{r}{p}{}{}",
-                if f & num::G_EXP3 != 0 { "E" } else { "" },
-                if f & num::G_NEGZ != 0 { "-" } else { "" }
-            );
         } else {
-            if f & num::F_NEGZ != 0 {
-                s += "-";
-            }
-            if f & num::F_NOINT != 0 {
-                s += "#";
-            }
-            s += &if f & num::F_POINT != 0 { format!("{}", f & num::F_FRAC) } else { "i".into() };
+            s += &recons_num::describe(m, f);
         }
     }
     s + "|" + &esc(&k[i + 1..])

@@ -1,6 +1,6 @@
 //! Recent lines of a kind: references to equal lines, and the window line predictors use.
 
-use crate::num;
+use recons_num::fixed;
 
 /// Lines of a kind (v, vt, vn) kept for references to equal lines: the last RECENT.
 pub(crate) const RECENT: usize = 1 << 16;
@@ -105,7 +105,7 @@ pub(crate) const NPRED: usize = 2 * WIN;
 #[inline]
 pub(crate) fn window_pred(rec: &Recent, line: u64, p: usize, j: usize, sc: i32) -> Option<i64> {
     let e = |k: u64| rec.get(line.checked_sub(k)?);
-    let at = |e: &Entry| num::rescale(e.v[j], e.s[j] as i32, sc);
+    let at = |e: &Entry| fixed::rescale(e.v[j], e.s[j] as i32, sc);
     if p < WIN {
         Some(at(e(p as u64 + 1)?))
     } else {

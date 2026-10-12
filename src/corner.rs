@@ -1,8 +1,8 @@
 //! Face and line corners: per attribute (v, vt, vn) a move-to-front cache of recent
 //! indices and candidates from the faces before (shared edges, pairings).
 
-use crate::num;
 use crate::varint::Rd;
+use recons_num::fixed;
 
 /// Corner patterns: "a", "a/b", "a//c", "a/b/c"; bits 2-4 mark negative (relative) indices.
 pub(crate) const C_T: u8 = 1;
@@ -161,8 +161,8 @@ impl Indices {
 pub(crate) fn put_index(out: &mut Vec<u8>, a: i64, neg: bool, count: i64) {
     if neg {
         out.push(b'-');
-        num::put(out, (count + 1).wrapping_sub(a), 0);
+        fixed::put(out, (count + 1).wrapping_sub(a), 0);
     } else {
-        num::put(out, a, 0);
+        fixed::put(out, a, 0);
     }
 }

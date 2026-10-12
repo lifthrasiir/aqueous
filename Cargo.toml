@@ -7,10 +7,10 @@ publish = false
 
 [dependencies]
 recons-common = { path = "../recons-common" }
+recons-num = { path = "../recons-num" }
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memchr = "2"
-zmij = "1"
 
 [profile.release]
 debug = 1

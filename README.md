@@ -125,7 +125,7 @@ line end. Templates are numbered by first use and defined where first used; a li
 its template number (one byte, nearly free under zstd). Any other line, or one that does
 not parse back to itself, is kept as text.
 
-### Numbers (`src/num.rs`, `src/dec.rs`, `src/style.rs`)
+### Numbers ([`recons-num`](../recons-num), `src/style.rs`)
 
 A number is an integer at a scale (digits after the point), printed in a mode:
 
@@ -142,6 +142,10 @@ integer arithmetic. Only IEEE basic operations are used, so decoding gives the s
 everywhere. The encoder picks a mode per kind of line from a sample of each block (by the
 digits it would code and its scale changes), checks every number by printing it back, and
 falls back to fixed or `%g` (or text) for numbers that are printed otherwise.
+
+The number code is the `recons-num` crate (its README specifies the modes); it knows
+nothing of OBJ. `src/style.rs` samples the lines of a block per kind and detects unit
+normals.
 
 ### Prediction (`src/block.rs`, `src/recent.rs`)
 
@@ -214,8 +218,7 @@ target/release/objr fuzz -n 200 $(find corpus -name '*.obj' -size -5M)
   style mixed in one file, a mesh using every corner symbol, blocks stored whole in
   between (what the encoder forgets then), and 3,000 corrupted containers (errors, never
   panics).
-- Unit tests: number formats against the C library's `%g`, exact digits of doubles
-  against the standard library, writer renders, rANS.
+- Unit tests: rANS; those of the number formats are in `recons-num`.
 - `objr fuzz`: mutated files (bytes, tokens, line copies, line ends, digits) must
   round-trip with verification off, small and large blocks, some stored whole;
   corrupted containers must fail cleanly.
@@ -226,9 +229,7 @@ target/release/objr fuzz -n 200 $(find corpus -name '*.obj' -size -5M)
 |---|---|
 | `src/container.rs` | File format, blocks, zstd/rANS choice, verification |
 | `src/block.rs` | Streams, templates, line encoder and decoder |
-| `src/style.rs` | Number mode per kind of line (encoder) |
-| `src/num.rs` | Fixed and `%g` numbers |
-| `src/dec.rs` | Decimals, floats, writer renders |
+| `src/style.rs` | Number mode per kind of line (encoder; the modes are `recons-num`) |
 | `src/recent.rs` | Equal-line references, line predictor window |
 | `src/corner.rs` | Face corner indices |
 | `src/ans.rs` | rANS for value streams |
