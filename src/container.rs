@@ -73,9 +73,20 @@ pub fn compress(file: &[u8]) -> Vec<u8> {
 }
 
 pub fn compress_timed(file: &[u8], ph: &mut Phases) -> Vec<u8> {
+    compress_timed_threads(file, ph, 1)
+}
+
+/// [`compress`] on up to `threads` threads: the same bytes whatever `threads` is, and
+/// `threads == 1` is [`compress`]. Several images are coded at once; a single large image
+/// has its symbols computed and counted by several threads.
+pub fn compress_threads(file: &[u8], threads: usize) -> Vec<u8> {
+    compress_timed_threads(file, &mut Phases::default(), threads)
+}
+
+fn compress_timed_threads(file: &[u8], ph: &mut Phases, threads: usize) -> Vec<u8> {
     match std::panic::catch_unwind(|| {
         let mut ph2 = Phases::default();
-        let r = coded(file, &mut ph2);
+        let r = coded(file, &mut ph2, threads);
         (r, ph2)
     }) {
         // Coding must save something over storing.
@@ -90,7 +101,7 @@ pub fn compress_timed(file: &[u8], ph: &mut Phases) -> Vec<u8> {
 /// [`compress`] without the guard against panics (for tests: a panic is a bug even where
 /// storing the file would hide it).
 pub fn try_compress(file: &[u8]) -> Vec<u8> {
-    match coded(file, &mut Phases::default()) {
+    match coded(file, &mut Phases::default(), 1) {
         Ok(v) if v.len() < file.len() + 6 => v,
         _ => stored(file),
     }
@@ -149,7 +160,7 @@ fn images<'a>(
     out
 }
 
-fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
+fn coded(file: &[u8], ph: &mut Phases, threads: usize) -> Result<Vec<u8>> {
     let t0 = std::time::Instant::now();
     let (chunks, trailer) = png::chunks(file).ok_or(Error::Unsupported("not a PNG file"))?;
     let classes: Vec<u8> = chunks
@@ -183,6 +194,10 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
     sk.extend_from_slice(trailer);
     ph.parse += t0.elapsed().as_secs_f64();
 
+    // Below this size there is nothing worth a thread to overlap.
+    if threads > 1 && file.len() >= PAR_MIN {
+        return Ok(coded_threads(file, &chunks, &classes, &sk, threads));
+    }
     let z = zstd::bulk::compress(&sk, 19).expect("zstd");
     // Records are kept only if smaller than their payload: the output stays within this.
     let mut out = Vec::with_capacity(file.len() + z.len() + 64);
@@ -201,7 +216,7 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
         // The record goes straight into the output, after its length.
         let at = out.len();
         out.extend_from_slice(&[0; 4]);
-        let coded = ih.is_some_and(|ih| image_record(&ih, &payload, ph, &mut out).is_ok())
+        let coded = ih.is_some_and(|ih| image_record(&ih, &payload, ph, 1, &mut out).is_ok())
             && out.len() - at - 4 <= payload.len();
         if !coded {
             out.truncate(at + 4);
@@ -222,12 +237,94 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// Files smaller than this are handled on one thread whatever the thread count.
+const PAR_MIN: usize = 1 << 16;
+
+/// Runs `f(0..n)` on `workers` threads (the caller's among them), each index once, and
+/// returns the results in order.
+fn par_map<R: Send>(n: usize, workers: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
+    let work = || {
+        loop {
+            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if i >= n {
+                break;
+            }
+            let r = f(i);
+            out.lock().unwrap()[i] = Some(r);
+        }
+    };
+    std::thread::scope(|s| {
+        for _ in 1..workers.min(n) {
+            s.spawn(work);
+        }
+        work();
+    });
+    out.into_inner().unwrap().into_iter().map(|r| r.expect("worker result")).collect()
+}
+
+/// The part of [`coded`] after the skeleton, on `threads` threads: the skeleton's zstd and
+/// the checksum beside the images, the images (each into a record of its own) in parallel.
+/// The same bytes as the serial code writes.
+fn coded_threads(file: &[u8], chunks: &[png::Chunk], classes: &[u8], sk: &[u8], threads: usize) -> Vec<u8> {
+    let imgs = images(classes, |i| chunks[i].data, |i| chunks[i].kind);
+    let workers = threads.min(imgs.len()).max(1);
+    // Threads left over from the images go to each image's own parallel steps.
+    let inner = (threads / workers).max(1);
+    let (z, hash, recs) = std::thread::scope(|s| {
+        let side = s.spawn(|| (zstd::bulk::compress(sk, 19).expect("zstd"), xxhash_rust::xxh3::xxh3_64(file)));
+        let recs = par_map(imgs.len(), workers, |i| {
+            let (range, ih) = &imgs[i];
+            let skip = if classes[range.start] == FDAT { 4 } else { 0 };
+            let mut payload = Vec::with_capacity(chunks[range.clone()].iter().map(|c| c.data.len()).sum());
+            for c in &chunks[range.clone()] {
+                payload.extend_from_slice(&c.data[skip..]);
+            }
+            let mut rec = vec![0u8; 4];
+            let coded = ih
+                .as_ref()
+                .is_some_and(|ih| image_record(ih, &payload, &mut Phases::default(), inner, &mut rec).is_ok())
+                && rec.len() - 4 <= payload.len();
+            if !coded {
+                rec.truncate(4);
+                rec.push(0);
+                rec.extend_from_slice(&payload);
+            }
+            let len = (rec.len() - 4) as u32;
+            rec[..4].copy_from_slice(&len.to_le_bytes());
+            if std::env::var_os("PNGR_DEBUG").is_some() {
+                eprintln!(
+                    "image {} payload {} -> record {len} ({})",
+                    classes[range.start],
+                    payload.len(),
+                    if coded { "coded" } else { "kept" }
+                );
+            }
+            rec
+        });
+        let (z, hash) = side.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+        (z, hash, recs)
+    });
+    let mut out = Vec::with_capacity(file.len() + z.len() + 64);
+    out.extend_from_slice(MAGIC);
+    out.push(VERSION);
+    out.push(1);
+    out.extend_from_slice(&hash.to_le_bytes());
+    put_varint(&mut out, z.len() as u64);
+    out.extend_from_slice(&z);
+    for r in &recs {
+        out.extend_from_slice(r);
+    }
+    out
+}
+
 /// Appends the record of a coded image to `rec`.
-fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases, rec: &mut Vec<u8>) -> Result<()> {
+fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases, threads: usize, rec: &mut Vec<u8>) -> Result<()> {
     let g = Geometry::new(ih).ok_or(Error::Unsupported("bad image header"))?;
     let kind = if ih.depth == 8 && matches!(ih.color, 0 | 2 | 4 | 6) { Kind::Image } else { Kind::Bytes };
     let t1 = std::time::Instant::now();
-    let enc = model::encode(kind, &g, payload)?;
+    let enc = model::encode_threads(kind, &g, payload, threads)?;
     if std::env::var_os("PNGR_DEBUG").is_some() {
         eprintln!("  {} zlib streams, {} bytes of data", enc.streams.len(), enc.len);
     }
@@ -304,7 +401,7 @@ fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases, rec: &mut Vec<u8>) -
         put_varint(rec, part.len() as u64);
         rec.extend_from_slice(part);
     }
-    enc.rec.finish(rec);
+    enc.rec.finish_threads(rec, threads);
     let t4 = std::time::Instant::now();
     ph.model += (t2 - t1).as_secs_f64();
     ph.layout += (t3 - t2).as_secs_f64();
@@ -329,6 +426,13 @@ fn dec_time(i: usize, t: std::time::Instant) -> std::time::Instant {
 }
 
 pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
+    decompress_threads(src, 1)
+}
+
+/// [`decompress`] on up to `threads` threads: the same result whatever `threads` is, and
+/// `threads == 1` is [`decompress`]. Several images are rebuilt at once, and a payload
+/// of several zlib streams has its streams written at once.
+pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     if src.len() < 6 || &src[..4] != MAGIC || src[4] != VERSION {
         return Err(crate::corrupt());
     }
@@ -381,27 +485,46 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     let trailer = get_bytes(&sk, &mut k, tlen)?;
 
     // Images.
-    let mut payloads: Vec<Vec<u8>> = vec![];
     let imgs = images(&classes, |i| cs[i].data, |i| cs[i].kind);
-    for (range, ih) in &imgs {
+    let img_len = |range: &std::ops::Range<usize>| {
         let skip = if classes[range.start] == FDAT { 4 } else { 0 };
-        let len: usize = cs[range.clone()].iter().map(|c| c.len - skip).sum();
-        let n = u32::from_le_bytes(get_bytes(src, &mut at, 4)?.try_into().unwrap()) as usize;
-        let rec = get_bytes(src, &mut at, n)?;
-        let payload = match rec.first() {
-            Some(0) if rec.len() == len + 1 => rec[1..].to_vec(),
-            Some(1) => {
-                let ih = ih.as_ref().ok_or_else(crate::corrupt)?;
-                let g = Geometry::new(ih).ok_or_else(crate::corrupt)?;
-                rebuild(&g, &rec[1..])?
+        cs[range.clone()].iter().map(|c| c.len - skip).sum::<usize>()
+    };
+    let payloads: Vec<Vec<u8>> = if threads > 1 && imgs.len() > 1 {
+        // The records are length-prefixed: slice them all, rebuild them in parallel (a
+        // damaged prefix is reported after the records before it).
+        let mut recs = vec![];
+        let mut bad = None;
+        for _ in &imgs {
+            let r = get_bytes(src, &mut at, 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+                .and_then(|n| get_bytes(src, &mut at, n));
+            match r {
+                Ok(r) => recs.push(r),
+                Err(e) => {
+                    bad = Some(e);
+                    break;
+                }
             }
-            _ => return Err(crate::corrupt()),
-        };
-        if payload.len() != len {
-            return Err(crate::corrupt());
         }
-        payloads.push(payload);
-    }
+        let workers = threads.min(recs.len()).max(1);
+        let inner = (threads / workers).max(1);
+        let res = par_map(recs.len(), workers, |i| image_payload(recs[i], img_len(&imgs[i].0), &imgs[i].1, inner));
+        let payloads = res.into_iter().collect::<Result<Vec<_>>>()?;
+        if let Some(e) = bad {
+            return Err(e);
+        }
+        payloads
+    } else {
+        let mut payloads = vec![];
+        for (range, ih) in &imgs {
+            let len = img_len(range);
+            let n = u32::from_le_bytes(get_bytes(src, &mut at, 4)?.try_into().unwrap()) as usize;
+            let rec = get_bytes(src, &mut at, n)?;
+            payloads.push(image_payload(rec, len, ih, threads)?);
+        }
+        payloads
+    };
 
     // Reassemble the file.
     let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + trailer.len();
@@ -439,6 +562,23 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// The payload (of `len` bytes) an image's record gives.
+fn image_payload(rec: &[u8], len: usize, ih: &Option<Ihdr>, threads: usize) -> Result<Vec<u8>> {
+    let payload = match rec.first() {
+        Some(0) if rec.len() == len + 1 => rec[1..].to_vec(),
+        Some(1) => {
+            let ih = ih.as_ref().ok_or_else(crate::corrupt)?;
+            let g = Geometry::new(ih).ok_or_else(crate::corrupt)?;
+            rebuild(&g, &rec[1..], threads)?
+        }
+        _ => return Err(crate::corrupt()),
+    };
+    if payload.len() != len {
+        return Err(crate::corrupt());
+    }
+    Ok(payload)
+}
+
 /// One stream's structure as the layout gives it.
 struct StreamLayout {
     zhdr: [u8; 2],
@@ -448,7 +588,7 @@ struct StreamLayout {
 }
 
 /// Rebuilds a coded image's payload from its record (past the mode byte).
-fn rebuild(g: &Geometry, rec: &[u8]) -> Result<Vec<u8>> {
+fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
     let mut at = 0;
     let part = |at: &mut usize| -> Result<&[u8]> {
         let n = get_varint(rec, at)? as usize;
@@ -574,23 +714,65 @@ fn rebuild(g: &Geometry, rec: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(n / 2);
     let (mut b0, mut pos) = (0, 0);
     let single = streams.len() == 1;
-    for s in streams {
-        let nb = s.blocks.len();
-        let (t0, t1) = (starts[b0], starts[b0 + nb]);
-        let local: Vec<usize> = starts[b0..=b0 + nb].iter().map(|&x| x - t0).collect();
-        let bytes = if single {
-            n
-        } else {
+    if threads > 1 && !single && n >= PAR_MIN {
+        // The streams are written independently: slice them all, write them in parallel.
+        struct Job<'a> {
+            zhdr: [u8; 2],
+            stream: Stream,
+            local: Vec<usize>,
+            tokens: &'a [Token],
+            d: &'a [u8],
+        }
+        let mut jobs = vec![];
+        let mut bad = None;
+        for s in streams {
+            let nb = s.blocks.len();
+            let (t0, t1) = (starts[b0], starts[b0 + nb]);
+            let local: Vec<usize> = starts[b0..=b0 + nb].iter().map(|&x| x - t0).collect();
             let stored: usize =
                 s.blocks.iter().map(|b| if let Body::Stored { len, .. } = b.body { len as usize } else { 0 }).sum();
-            stored + tokens[t0..t1].iter().map(|t| t.span()).sum::<usize>()
-        };
-        let d = data.get(pos..pos + bytes).ok_or_else(crate::corrupt)?;
-        out.extend_from_slice(&s.zhdr);
-        let stream = Stream { blocks: s.blocks, tail_pad: s.tail_pad, trailing: s.trailing };
-        out.extend_from_slice(&flate_recons::fast::write::write(&stream, &local, &tokens[t0..t1], d)?);
-        b0 += nb;
-        pos += bytes;
+            let bytes = stored + tokens[t0..t1].iter().map(|t| t.span()).sum::<usize>();
+            let Some(d) = data.get(pos..pos + bytes) else {
+                bad = Some(crate::corrupt());
+                break;
+            };
+            let stream = Stream { blocks: s.blocks, tail_pad: s.tail_pad, trailing: s.trailing };
+            jobs.push(std::sync::Mutex::new(Some(Job { zhdr: s.zhdr, stream, local, tokens: &tokens[t0..t1], d })));
+            b0 += nb;
+            pos += bytes;
+        }
+        let workers = threads.min(jobs.len());
+        let res = par_map(jobs.len(), workers, |i| {
+            let j = jobs[i].lock().unwrap().take().unwrap();
+            flate_recons::fast::write::write(&j.stream, &j.local, j.tokens, j.d).map(|w| (j.zhdr, w))
+        });
+        for r in res {
+            let (zhdr, w) = r?;
+            out.extend_from_slice(&zhdr);
+            out.extend_from_slice(&w);
+        }
+        if let Some(e) = bad {
+            return Err(e);
+        }
+    } else {
+        for s in streams {
+            let nb = s.blocks.len();
+            let (t0, t1) = (starts[b0], starts[b0 + nb]);
+            let local: Vec<usize> = starts[b0..=b0 + nb].iter().map(|&x| x - t0).collect();
+            let bytes = if single {
+                n
+            } else {
+                let stored: usize =
+                    s.blocks.iter().map(|b| if let Body::Stored { len, .. } = b.body { len as usize } else { 0 }).sum();
+                stored + tokens[t0..t1].iter().map(|t| t.span()).sum::<usize>()
+            };
+            let d = data.get(pos..pos + bytes).ok_or_else(crate::corrupt)?;
+            out.extend_from_slice(&s.zhdr);
+            let stream = Stream { blocks: s.blocks, tail_pad: s.tail_pad, trailing: s.trailing };
+            out.extend_from_slice(&flate_recons::fast::write::write(&stream, &local, &tokens[t0..t1], d)?);
+            b0 += nb;
+            pos += bytes;
+        }
     }
     if pos != n {
         return Err(crate::corrupt());

@@ -7,7 +7,7 @@ pub mod model;
 pub mod png;
 pub mod rans;
 
-pub use container::{compress, decompress};
+pub use container::{compress, compress_threads, decompress, decompress_threads};
 
 #[derive(Debug)]
 pub enum Error {

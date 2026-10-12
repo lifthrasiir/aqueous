@@ -303,3 +303,139 @@ fn corrupt_input_fails_cleanly() {
         let _ = png_recons::decompress(&c[..cut]);
     }
 }
+
+// Threads: the same bytes whatever the thread count, and the same outcome decompressing.
+
+const THREADS: [usize; 4] = [1, 2, 3, 8];
+
+#[track_caller]
+fn same_for_threads(file: &[u8]) -> Vec<u8> {
+    let c = png_recons::container::try_compress(file);
+    for t in THREADS {
+        assert!(png_recons::compress_threads(file, t) == c, "compressed bytes differ with {t} threads");
+        let d = png_recons::decompress_threads(&c, t).expect("decompresses");
+        assert!(d == file, "round trip differs with {t} threads");
+    }
+    c
+}
+
+fn apng(frames: &[(u32, u32)], seed: u32) -> Vec<u8> {
+    let mut actl = (frames.len() as u32).to_be_bytes().to_vec();
+    actl.extend_from_slice(&0u32.to_be_bytes());
+    let fctl = |seq: u32, w: u32, h: u32| {
+        let mut d = seq.to_be_bytes().to_vec();
+        for v in [w, h, 0, 0] {
+            d.extend_from_slice(&v.to_be_bytes());
+        }
+        d.extend_from_slice(&[0, 1, 0, 10, 0, 0]);
+        d
+    };
+    let (w0, h0) = frames[0];
+    let mut cs = vec![(b"IHDR", ihdr(w0, h0, 8, 6, 0)), (b"acTL", actl), (b"fcTL", fctl(0, w0, h0))];
+    cs.extend(idats(&zlib(&zlib6(), &image_data(w0 as usize, h0 as usize, 8, 6, false, seed)), 8192));
+    let mut seq = 1;
+    for &(w, h) in &frames[1..] {
+        cs.push((b"fcTL", fctl(seq, w, h)));
+        seq += 1;
+        let z = zlib(&zlib6(), &image_data(w as usize, h as usize, 8, 6, false, seed + seq));
+        for c in z.chunks(7000) {
+            let mut d = seq.to_be_bytes().to_vec();
+            d.extend_from_slice(c);
+            cs.push((b"fdAT", d));
+            seq += 1;
+        }
+    }
+    cs.push((b"IEND", vec![]));
+    png(&cs)
+}
+
+#[test]
+fn threads_single_large_image() {
+    // Past the sizes at which rows and symbol counts are split between threads; several
+    // pixel sizes, and interlaced.
+    for (color, interlace) in [(6, false), (2, false), (0, false), (4, true)] {
+        let (w, h) = (700usize, 500usize);
+        let data = image_data(w, h, 8, color, interlace, 9 + color as u32);
+        let mut cs = vec![(b"IHDR", ihdr(w as u32, h as u32, 8, color, interlace as u8))];
+        cs.extend(idats(&zlib(&zlib6(), &data), 65536));
+        cs.push((b"IEND", vec![]));
+        let f = png(&cs);
+        let c = same_for_threads(&f);
+        assert!(c[5] == 1, "coded");
+    }
+}
+
+#[test]
+fn threads_several_zlib_streams() {
+    let data = image_data(600, 400, 8, 6, false, 11);
+    let cut: Vec<usize> = (0..=3).map(|k| (data.len() / 3 * k).min(data.len())).collect();
+    let mut z = vec![];
+    for w in cut.windows(2) {
+        z.extend_from_slice(&zlib(&zlib6(), &data[w[0]..w[1]]));
+    }
+    let mut cs = vec![(b"IHDR", ihdr(600, 400, 8, 6, 0))];
+    cs.extend(idats(&z, 20000));
+    cs.push((b"IEND", vec![]));
+    let c = same_for_threads(&png(&cs));
+    assert!(c[5] == 1);
+}
+
+#[test]
+fn threads_apng() {
+    let f = apng(&[(300, 200), (250, 180), (300, 200), (120, 100)], 21);
+    let c = same_for_threads(&f);
+    assert!(c[5] == 1);
+    // Frames past the image-parallel threshold of the rows as well.
+    same_for_threads(&apng(&[(500, 400), (500, 400), (400, 300)], 31));
+}
+
+#[test]
+fn threads_small_and_malformed() {
+    let data = image_data(100, 80, 8, 2, false, 6);
+    let z = zlib(&zlib6(), &data);
+    let base = |z: &[u8]| {
+        let mut cs = vec![(b"IHDR", ihdr(100, 80, 8, 2, 0))];
+        cs.extend(idats(z, 3000));
+        cs.push((b"IEND", vec![]));
+        png(&cs)
+    };
+    let f = base(&z);
+    same_for_threads(&f);
+    for cut in [0, 5, 20, f.len() / 2, f.len() - 1] {
+        same_for_threads(&f[..cut]);
+    }
+    let mut broken = z.clone();
+    broken[100] ^= 0x55;
+    same_for_threads(&base(&broken));
+    same_for_threads(b"not a png at all");
+    same_for_threads(b"");
+    // A big image with a broken stream is stored whatever the threads.
+    let big = image_data(700, 500, 8, 6, false, 12);
+    let mut zb = zlib(&zlib6(), &big);
+    let at = zb.len() / 2;
+    zb[at] ^= 0x55;
+    let mut cs = vec![(b"IHDR", ihdr(700, 500, 8, 6, 0))];
+    cs.extend(idats(&zb, 65536));
+    cs.push((b"IEND", vec![]));
+    same_for_threads(&png(&cs));
+}
+
+#[test]
+fn threads_corrupt_input_same_outcome() {
+    let c = png_recons::container::try_compress(&apng(&[(120, 90), (100, 80), (120, 90)], 41));
+    let mut x = 7u32;
+    for i in 0..1500 {
+        x = x.wrapping_mul(1103515245).wrapping_add(12345);
+        let mut d = c.clone();
+        let at = (x as usize >> 4) % d.len();
+        d[at] ^= 1 << (i % 8);
+        let serial = png_recons::decompress(&d).ok();
+        for t in [2, 8] {
+            assert!(png_recons::decompress_threads(&d, t).ok() == serial, "outcome differs at {at} with {t} threads");
+        }
+    }
+    for cut in (0..c.len()).step_by(c.len() / 200 + 1) {
+        let serial = png_recons::decompress(&c[..cut]).ok();
+        assert!(png_recons::decompress_threads(&c[..cut], 4).ok() == serial);
+    }
+}

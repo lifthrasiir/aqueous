@@ -135,6 +135,9 @@ pub trait Io {
     fn raw(&mut self, k: u32, v: u32) -> u32;
 }
 
+/// Symbol lists of at least this length are counted by several threads.
+const PAR_HIST_MIN: usize = 1 << 20;
+
 pub struct Recorder {
     pub syms: Vec<(u16, u16)>,
 
@@ -148,11 +151,45 @@ impl Recorder {
 
     /// Tables, then the rANS stream, then the raw bits.
     pub fn finish(self, out: &mut Vec<u8>) {
+        self.finish_threads(out, 1)
+    }
+
+    /// [`Recorder::finish`] counting the symbols on up to `threads` threads (the counts
+    /// are sums, so the output is the same).
+    pub fn finish_threads(self, out: &mut Vec<u8>, threads: usize) {
         let mut w = BitW::default();
         // A bitmap of the tables in use, then their levels.
         let mut h = vec![0u32; TABLES * 256];
-        for &(t, v) in &self.syms {
-            h[t as usize * 256 + v as usize] += 1;
+        let count = |syms: &[(u16, u16)], h: &mut [u32]| {
+            for &(t, v) in syms {
+                h[t as usize * 256 + v as usize] += 1;
+            }
+        };
+        if threads > 1 && self.syms.len() >= PAR_HIST_MIN {
+            let chunk = self.syms.len().div_ceil(threads);
+            let parts: Vec<Vec<u32>> = std::thread::scope(|sc| {
+                let hs: Vec<_> = self
+                    .syms
+                    .chunks(chunk)
+                    .map(|c| {
+                        sc.spawn(move || {
+                            let mut h = vec![0u32; TABLES * 256];
+                            for &(t, v) in c {
+                                h[t as usize * 256 + v as usize] += 1;
+                            }
+                            h
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+            });
+            for p in &parts {
+                for (a, b) in h.iter_mut().zip(p) {
+                    *a += b;
+                }
+            }
+        } else {
+            count(&self.syms, &mut h);
         }
         let counts: Vec<&[u32]> = (0..TABLES).map(|t| &h[t * 256..t * 256 + alphabet(t)]).collect();
         let used: Vec<bool> = counts.iter().map(|c| c.iter().any(|&x| x > 0)).collect();
@@ -686,6 +723,12 @@ fn next_stream(payload: &[u8], end: usize) -> Option<usize> {
 /// Parses and models the payload `payload` (one or more zlib streams, as in Apple's
 /// split IDAT) of an image with geometry `g`.
 pub fn encode(kind: Kind, g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
+    encode_threads(kind, g, payload, 1)
+}
+
+/// [`encode`] with up to `threads` threads for the symbols of the rows of large images;
+/// the result is the same whatever `threads` is.
+pub fn encode_threads(kind: Kind, g: &Geometry, payload: &[u8], threads: usize) -> crate::Result<Encoded> {
     if payload.len() < 2 {
         return Err(crate::Error::Unsupported("no zlib stream"));
     }
@@ -693,10 +736,10 @@ pub fn encode(kind: Kind, g: &Geometry, payload: &[u8]) -> crate::Result<Encoded
     // they come costs less than computing every pixel's symbol up front.
     let sparse = g.len > ROWS_MAX_EXPANSION * payload.len();
     match (kind, g.bpp, sparse) {
-        (Kind::Image, 1, false) => encode_image::<1>(g, payload),
-        (Kind::Image, 2, false) => encode_image::<2>(g, payload),
-        (Kind::Image, 3, false) => encode_image::<3>(g, payload),
-        (Kind::Image, 4, false) => encode_image::<4>(g, payload),
+        (Kind::Image, 1, false) => encode_image::<1>(g, payload, threads),
+        (Kind::Image, 2, false) => encode_image::<2>(g, payload, threads),
+        (Kind::Image, 3, false) => encode_image::<3>(g, payload, threads),
+        (Kind::Image, 4, false) => encode_image::<4>(g, payload, threads),
         (Kind::Image, 1, true) => encode_bpp::<1, true>(g, payload),
         (Kind::Image, 2, true) => encode_bpp::<2, true>(g, payload),
         (Kind::Image, 3, true) => encode_bpp::<3, true>(g, payload),
@@ -714,7 +757,7 @@ const ROWS_MAX_EXPANSION: usize = 4;
 /// which the compressor has in full. So the stream is parsed, the image unfiltered, the
 /// symbols of all pixel bytes computed row by row (no dependency between them), and then
 /// the tokens walked.
-fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
+fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8], threads: usize) -> crate::Result<Encoded> {
     // The streams, then their data and tokens as one.
     let mut flats = vec![];
     let mut o = 0;
@@ -762,19 +805,24 @@ fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result
     for p in g.len.min(n)..n {
         syms.s[p] = zigzag(buf[g.pad + p]) as u8;
     }
-    for ps in &g.passes {
-        for row in 0..ps.rows {
-            let rstart = ps.start + row * ps.rs;
-            if rstart >= n {
-                break;
+    if threads > 1 && n >= PAR_ROWS_MIN {
+        rows_parallel::<BPP>(g, &buf, n, &mut raw, &mut syms, threads);
+    } else {
+        let mut ms = RowSymsMut { s: &mut syms.s, t: &mut syms.t, act: &mut syms.act };
+        for ps in &g.passes {
+            for row in 0..ps.rows {
+                let rstart = ps.start + row * ps.rs;
+                if rstart >= n {
+                    break;
+                }
+                ms.s[rstart] = zigzag(buf[g.pad + rstart]) as u8;
+                let w = (ps.rs - 1).min(n - rstart - 1);
+                let q = ps.base2 + (row + 1) * ps.rs2 + BPP;
+                let at = g.pad + rstart + 1;
+                let d = &buf[at..at + w];
+                unfilter_part::<BPP>(buf[g.pad + rstart], d, &mut raw, q, ps.rs2, 0, w, BPP);
+                row_syms::<BPP>(&raw, &buf, q, at, w, ps.rs, ps.rs2, &mut ms, rstart + 1);
             }
-            syms.s[rstart] = zigzag(buf[g.pad + rstart]) as u8;
-            let w = (ps.rs - 1).min(n - rstart - 1);
-            let q = ps.base2 + (row + 1) * ps.rs2 + BPP;
-            let at = g.pad + rstart + 1;
-            let d = &buf[at..at + w];
-            unfilter_part::<BPP>(buf[g.pad + rstart], d, &mut raw, q, ps.rs2, 0, w, BPP);
-            row_syms::<BPP>(&raw, &buf, q, at, w, ps.rs, ps.rs2, &mut syms, rstart + 1);
         }
     }
     let mut rec = Recorder::new(0);
@@ -805,6 +853,97 @@ fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8]) -> crate::Result
         .map(|(i, _)| i)
         .collect();
     Ok(Encoded { rec, streams, len: n, alts })
+}
+
+/// Images of at least this many data bytes get their symbols computed by several threads.
+const PAR_ROWS_MIN: usize = 1 << 20;
+
+/// One row's place in the symbol computation.
+struct RowJob {
+    rstart: usize,
+    w: usize,
+    q: usize,
+    rs: usize,
+    rs2: usize,
+}
+
+/// The same as the serial loop of [`encode_image`]: unfilters every row (each needs the
+/// row above, so in order), then computes the symbols of stripes of rows on `threads`
+/// threads (each row's symbols depend on `raw` and `buf` only and go to its own bytes).
+fn rows_parallel<const BPP: usize>(
+    g: &Geometry,
+    buf: &[u8],
+    n: usize,
+    raw: &mut [u8],
+    syms: &mut RowSyms,
+    threads: usize,
+) {
+    let mut jobs = vec![];
+    for ps in &g.passes {
+        for row in 0..ps.rows {
+            let rstart = ps.start + row * ps.rs;
+            if rstart >= n {
+                break;
+            }
+            syms.s[rstart] = zigzag(buf[g.pad + rstart]) as u8;
+            let w = (ps.rs - 1).min(n - rstart - 1);
+            let q = ps.base2 + (row + 1) * ps.rs2 + BPP;
+            let at = g.pad + rstart + 1;
+            unfilter_part::<BPP>(buf[g.pad + rstart], &buf[at..at + w], raw, q, ps.rs2, 0, w, BPP);
+            jobs.push(RowJob { rstart, w, q, rs: ps.rs, rs2: ps.rs2 });
+        }
+    }
+    if jobs.is_empty() {
+        return;
+    }
+    // Stripes of about the same number of bytes; rows ascend in position, so the stripes
+    // are contiguous ranges of the symbol arrays, each starting at its first row.
+    let total: usize = jobs.iter().map(|j| j.w).sum();
+    let per = total.div_ceil(threads).max(1);
+    let mut stripes: Vec<&[RowJob]> = vec![];
+    let (mut from, mut acc) = (0, 0);
+    for (i, j) in jobs.iter().enumerate() {
+        acc += j.w;
+        if acc >= per && i + 1 < jobs.len() {
+            stripes.push(&jobs[from..=i]);
+            (from, acc) = (i + 1, 0);
+        }
+    }
+    stripes.push(&jobs[from..]);
+    let raw: &[u8] = raw;
+    std::thread::scope(|sc| {
+        let (mut s, mut t, mut a) =
+            (&mut syms.s[jobs[0].rstart..], &mut syms.t[jobs[0].rstart..], &mut syms.act[jobs[0].rstart..]);
+        let mut base = jobs[0].rstart;
+        let mut last = None;
+        for (k, st) in stripes.iter().enumerate() {
+            let len = match stripes.get(k + 1) {
+                Some(nx) => nx[0].rstart - base,
+                None => s.len(),
+            };
+            let (s1, s2) = std::mem::take(&mut s).split_at_mut(len);
+            let (t1, t2) = std::mem::take(&mut t).split_at_mut(len);
+            let (a1, a2) = std::mem::take(&mut a).split_at_mut(len);
+            (s, t, a) = (s2, t2, a2);
+            let b0 = base;
+            base += len;
+            let work = move || {
+                let mut ms = RowSymsMut { s: s1, t: t1, act: a1 };
+                for j in *st {
+                    let at = g.pad + j.rstart + 1;
+                    row_syms::<BPP>(raw, buf, j.q, at, j.w, j.rs, j.rs2, &mut ms, j.rstart + 1 - b0);
+                }
+            };
+            if k + 1 == stripes.len() {
+                last = Some(work);
+            } else {
+                sc.spawn(work);
+            }
+        }
+        if let Some(mut w) = last {
+            w();
+        }
+    });
 }
 
 /// Records the symbols of a block's tokens from position `p` (`after`: the offset of the
@@ -877,6 +1016,13 @@ struct RowSyms {
     act: Vec<u8>,
 }
 
+/// A window of [`RowSyms`] (all of it, or the stripe of rows one thread fills).
+struct RowSymsMut<'a> {
+    s: &'a mut [u8],
+    t: &'a mut [u8],
+    act: &'a mut [u8],
+}
+
 /// The symbols of a row's pixel bytes `x0..w` (raw offset `q`, data offset `at`), all
 /// unfiltered, into `out` at data position `d` (byte 0's).
 #[allow(clippy::too_many_arguments)]
@@ -890,7 +1036,7 @@ fn row_syms_scalar<const BPP: usize>(
     w: usize,
     rs: usize,
     rs2: usize,
-    out: &mut RowSyms,
+    out: &mut RowSymsMut,
     d: usize,
 ) {
     for x in x0..w {
@@ -911,7 +1057,7 @@ fn row_syms<const BPP: usize>(
     w: usize,
     rs: usize,
     rs2: usize,
-    out: &mut RowSyms,
+    out: &mut RowSymsMut,
     d: usize,
 ) {
     #[cfg(target_arch = "aarch64")]
@@ -925,7 +1071,7 @@ fn row_syms<const BPP: usize>(
 
 #[cfg(target_arch = "aarch64")]
 mod neon {
-    use super::{ACT, RowSyms};
+    use super::{ACT, RowSymsMut};
     use std::arch::aarch64::*;
 
     /// Bit lengths of `v` capped at `ACT - 1` (the `bucket` of 16-bit lanes).
@@ -985,7 +1131,7 @@ mod neon {
         w: usize,
         rs: usize,
         rs2: usize,
-        out: &mut RowSyms,
+        out: &mut RowSymsMut,
         d: usize,
     ) -> usize {
         let chunks = w / 16;

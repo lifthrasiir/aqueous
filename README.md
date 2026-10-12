@@ -7,14 +7,15 @@ DEFLATE parsing, Huffman header coding and writing come from
 
 ```sh
 cargo build --release
-pngr c in.png out.pngr          # compress
-pngr d out.pngr back.png        # decompress
-pngr bench [-n ITERS] [-v] FILE...   # round trip check, ratio, throughput, phase times
+pngr c [-t N] in.png out.pngr  # compress (N threads, default: the available cores)
+pngr d [-t N] out.pngr back.png # decompress (same)
+pngr bench [-t N] [-n ITERS] [-v] FILE...   # round trip check, ratio, throughput, phase times (default 1 thread)
 ```
 
 ```rust
 let packed = png_recons::compress(&png);              // never fails: stores what it cannot code
 assert_eq!(png_recons::decompress(&packed)?, png);    // checked against an xxh3 of the original
+let packed = png_recons::compress_threads(&png, 8);   // the same bytes; decompress_threads likewise
 ```
 
 ## Results
@@ -182,6 +183,27 @@ compression is ~39% parsing, ~16% unfiltering and the row model, ~19% the token 
 expands 30× when inflated; copying and unfiltering 93 MB of image data for 3 MB of PNG is
 already over budget.
 
+### Threads
+
+`-t N` (`compress_threads`, `decompress_threads`): the output is the same bytes whatever the
+number of threads, and one thread runs the code above unchanged. One image is coded by one
+rANS stream whose contexts come from the decoded pixels, so decoding an image stays serial;
+threads overlap what is independent around it:
+
+- An APNG (or any file with several image runs) has its images coded, and rebuilt, in
+  parallel: each image makes a record of its own (length-prefixed), concatenated in order.
+  At most `N` images are in flight.
+- Compressing, the skeleton's zstd and the checksum run beside the images.
+- A large image (1 MB of data or more) has its symbols computed by stripes of rows on
+  several threads, after the serial unfilter pass, and the symbol histograms counted by
+  chunks and summed.
+- Decompressing a payload of several zlib streams writes the streams in parallel.
+
+Files under 64 KB are handled on the calling thread. A panic in a worker is a panic of the
+call, so `compress_threads` stores the file as `compress` does. Not done: parsing the zlib
+streams of a multi-stream image in parallel (a stream's end is known once it is parsed),
+decompressing the skeleton beside the first image (the image's geometry comes from it).
+
 ## Testing
 
 ```sh
@@ -194,6 +216,9 @@ cargo test --release
   malformed files (junk after the stream, wrong CRCs, trailers, truncations, too little or
   too much image data, broken streams, non-PNG input) and 2,000 corrupted containers
   (errors, never panics). These use `container::try_compress`, which does not catch panics.
+  The `threads_*` tests check the compressed bytes are identical for 1, 2, 3 and 8 threads, and
+  that decompression gives the same file or the same Ok/Err, on large images, several zlib
+  streams, APNGs, malformed and corrupted input.
 - Unit tests: the rANS coder, the code tables, Paeth against the specification for all
   inputs, unfiltering in pieces against the reference.
 - Every PNG in codec-corpus (733 files) and zune's fuzz corpus (1,563 files) round-trips.

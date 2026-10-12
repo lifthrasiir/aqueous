@@ -1,20 +1,43 @@
 use std::time::Instant;
 
 fn usage() -> ! {
-    eprintln!("usage: pngr c IN OUT | pngr d IN OUT | pngr bench [-n ITERS] FILE...");
+    eprintln!("usage: pngr c [-t N] IN OUT | pngr d [-t N] IN OUT | pngr bench [-t N] [-n ITERS] FILE...");
     std::process::exit(2);
 }
 
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+/// Takes `-t N` out of `args`.
+fn threads_opt(args: &mut Vec<String>, default: usize) -> usize {
+    match args.iter().position(|a| a == "-t") {
+        Some(i) if i + 1 < args.len() => {
+            let n = args[i + 1].parse::<usize>().unwrap_or_else(|_| usage());
+            args.drain(i..i + 2);
+            n.max(1)
+        }
+        Some(_) => usage(),
+        None => default,
+    }
+}
+
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("bench") => return bench(&mut args[1..].to_vec()),
+        Some("c" | "d") => {}
+        _ => usage(),
+    }
+    let threads = threads_opt(&mut args, cores());
     match args.first().map(String::as_str) {
         Some("c") if args.len() == 3 => {
             let src = std::fs::read(&args[1]).expect("read");
-            std::fs::write(&args[2], png_recons::compress(&src)).expect("write");
+            std::fs::write(&args[2], png_recons::compress_threads(&src, threads)).expect("write");
         }
         Some("d") if args.len() == 3 => {
             let src = std::fs::read(&args[1]).expect("read");
-            match png_recons::decompress(&src) {
+            match png_recons::decompress_threads(&src, threads) {
                 Ok(v) => std::fs::write(&args[2], v).expect("write"),
                 Err(e) => {
                     eprintln!("{}: {e}", args[1]);
@@ -22,12 +45,12 @@ fn main() {
                 }
             }
         }
-        Some("bench") => bench(&args[1..]),
         _ => usage(),
     }
 }
 
-fn bench(args: &[String]) {
+fn bench(args: &mut Vec<String>) {
+    let threads = threads_opt(args, 1);
     let mut iters = 1;
     let mut files = vec![];
     let mut verbose = false;
@@ -54,14 +77,18 @@ fn bench(args: &[String]) {
         let mut p1 = Default::default();
         for _ in 0..if only == 'd' { 1 } else { iters } {
             let t = Instant::now();
-            c = png_recons::container::compress_timed(&src, &mut p1);
+            c = if threads > 1 {
+                png_recons::compress_threads(&src, threads)
+            } else {
+                png_recons::container::compress_timed(&src, &mut p1)
+            };
             bc = bc.min(t.elapsed().as_secs_f64());
         }
         let mut bd = f64::MAX;
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
             let t = Instant::now();
-            let d = png_recons::decompress(&c);
+            let d = png_recons::decompress_threads(&c, threads);
             bd = bd.min(t.elapsed().as_secs_f64());
             ok &= d.as_deref().ok() == Some(&src[..]);
         }
