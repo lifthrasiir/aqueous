@@ -52,7 +52,12 @@ fn run(cmd: &mut Command) -> bool {
 }
 
 /// Runs an external tool: `comp(input, packed)` and `decomp(packed, output)`.
-fn external(file: &Path, ext: &str, comp: impl Fn(&Path, &Path) -> Command, decomp: impl Fn(&Path, &Path) -> Command) -> Res {
+fn external(
+    file: &Path,
+    ext: &str,
+    comp: impl Fn(&Path, &Path) -> Command,
+    decomp: impl Fn(&Path, &Path) -> Command,
+) -> Res {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../cache/tmp");
     std::fs::create_dir_all(&dir).unwrap();
     let input = dir.join("in.png");
@@ -207,7 +212,15 @@ fn main() {
             let f: Vec<&str> = l.split('\t').collect();
             if f.len() == 7 {
                 let key = (f[0].to_owned(), f[1].to_owned(), f[2].parse().unwrap_or(0));
-                cache.insert(key, Res { out: f[3].parse().unwrap_or(0), c: f[4].parse().unwrap_or(0.0), d: f[5].parse().unwrap_or(0.0), ok: f[6] == "1" });
+                cache.insert(
+                    key,
+                    Res {
+                        out: f[3].parse().unwrap_or(0),
+                        c: f[4].parse().unwrap_or(0.0),
+                        d: f[5].parse().unwrap_or(0.0),
+                        ok: f[6] == "1",
+                    },
+                );
             }
         }
     }
@@ -230,7 +243,12 @@ fn main() {
                     Some(r) => *r,
                     None => {
                         let r = measure(tool, f);
-                        writeln!(log, "{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{}", key.0, key.1, key.2, r.out, r.c, r.d, r.ok as u8).unwrap();
+                        writeln!(
+                            log,
+                            "{}\t{}\t{}\t{}\t{:.6}\t{:.6}\t{}",
+                            key.0, key.1, key.2, r.out, r.c, r.d, r.ok as u8
+                        )
+                        .unwrap();
                         cache.insert(key, r);
                         r
                     }

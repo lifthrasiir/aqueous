@@ -43,8 +43,11 @@ fn ihdr(w: u32, h: u32, depth: u8, color: u8, interlace: u8) -> Vec<u8> {
 
 /// Bytes per row (without the filter byte) and rows of each pass.
 fn passes(w: usize, h: usize, bits: usize, interlace: bool) -> Vec<(usize, usize)> {
-    let list: &[(usize, usize, usize, usize)] =
-        if interlace { &[(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)] } else { &[(0, 0, 1, 1)] };
+    let list: &[(usize, usize, usize, usize)] = if interlace {
+        &[(0, 0, 8, 8), (4, 0, 8, 8), (0, 4, 4, 8), (2, 0, 4, 4), (0, 2, 2, 4), (1, 0, 2, 2), (0, 1, 1, 2)]
+    } else {
+        &[(0, 0, 1, 1)]
+    };
     list.iter()
         .filter_map(|&(x0, y0, dx, dy)| {
             let pw = if w > x0 { (w - x0).div_ceil(dx) } else { 0 };
@@ -76,9 +79,7 @@ fn image_data(w: usize, h: usize, depth: u8, color: u8, interlace: bool, seed: u
     for (rb, rows) in passes(w, h, bits, interlace) {
         let mut prev = vec![0u8; rb];
         for y in 0..rows {
-            let raw: Vec<u8> = (0..rb)
-                .map(|x| (((x * 3 + y * 5) as u32 + seed) / 4 % 251 + rnd() % 7) as u8)
-                .collect();
+            let raw: Vec<u8> = (0..rb).map(|x| (((x * 3 + y * 5) as u32 + seed) / 4 % 251 + rnd() % 7) as u8).collect();
             let ft = (y % 5) as u8;
             out.push(ft);
             for x in 0..rb {
@@ -91,7 +92,13 @@ fn image_data(w: usize, h: usize, depth: u8, color: u8, interlace: bool, seed: u
                     4 => {
                         let p = a as i16 + b as i16 - c as i16;
                         let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
-                        if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c }
+                        if pa <= pb && pa <= pc {
+                            a
+                        } else if pb <= pc {
+                            b
+                        } else {
+                            c
+                        }
                     }
                     _ => 0,
                 };
@@ -144,7 +151,22 @@ fn every_encoder() {
 
 #[test]
 fn every_format() {
-    for (depth, color) in [(1, 0), (2, 0), (4, 0), (8, 0), (16, 0), (8, 2), (16, 2), (1, 3), (4, 3), (8, 3), (8, 4), (16, 4), (8, 6), (16, 6)] {
+    for (depth, color) in [
+        (1, 0),
+        (2, 0),
+        (4, 0),
+        (8, 0),
+        (16, 0),
+        (8, 2),
+        (16, 2),
+        (1, 3),
+        (4, 3),
+        (8, 3),
+        (8, 4),
+        (16, 4),
+        (8, 6),
+        (16, 6),
+    ] {
         for interlace in [0, 1] {
             let data = image_data(37, 29, depth, color, interlace == 1, depth as u32 * 7 + color as u32);
             let z = zlib(&zlib6(), &data);

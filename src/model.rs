@@ -220,7 +220,6 @@ impl<'a> Player<'a> {
         }
         Ok(Player { tables: Tables::new(&freqs), dec: Decoder::new(st), raw: BitR::new(raw) })
     }
-
 }
 
 /// The blocks as the token coder sees them: stored bytes or a number of tokens.
@@ -341,7 +340,16 @@ fn unfilter_range(g: &Geometry, buf: &[u8], raw: &mut [u8], from: usize, to: usi
 /// `BPP` is the pixel size, or 0 to take `bpp`.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn unfilter_part<const BPP: usize>(ft: u8, d: &[u8], raw: &mut [u8], q: usize, rs2: usize, x0: usize, x1: usize, bpp: usize) {
+fn unfilter_part<const BPP: usize>(
+    ft: u8,
+    d: &[u8],
+    raw: &mut [u8],
+    q: usize,
+    rs2: usize,
+    x0: usize,
+    x1: usize,
+    bpp: usize,
+) {
     if BPP == 0 {
         return unfilter_bytes(ft, d, raw, q, rs2, x0, x1, bpp);
     }
@@ -661,7 +669,11 @@ const MAX_MATCH: usize = 258;
 
 /// Whether `b` starts with a zlib header (deflate, no preset dictionary).
 fn zlib_header(b: &[u8]) -> bool {
-    b.len() >= 2 && b[0] & 0x0f == 8 && b[0] >> 4 <= 7 && b[1] & 0x20 == 0 && (b[0] as u16 * 256 + b[1] as u16).is_multiple_of(31)
+    b.len() >= 2
+        && b[0] & 0x0f == 8
+        && b[0] >> 4 <= 7
+        && b[1] & 0x20 == 0
+        && (b[0] as u16 * 256 + b[1] as u16).is_multiple_of(31)
 }
 
 /// Where the next zlib stream would start after a stream ending at `end` (past its
@@ -869,7 +881,18 @@ struct RowSyms {
 /// unfiltered, into `out` at data position `d` (byte 0's).
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
-fn row_syms_scalar<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize, x0: usize, w: usize, rs: usize, rs2: usize, out: &mut RowSyms, d: usize) {
+fn row_syms_scalar<const BPP: usize>(
+    raw: &[u8],
+    buf: &[u8],
+    q: usize,
+    at: usize,
+    x0: usize,
+    w: usize,
+    rs: usize,
+    rs2: usize,
+    out: &mut RowSyms,
+    d: usize,
+) {
     for x in x0..w {
         let m = pixel::<BPP>(raw, buf, q + x, at + x, x % BPP, rs, rs2);
         out.s[d + x] = zigzag(get(raw, q + x).wrapping_sub(m.pred)) as u8;
@@ -880,7 +903,17 @@ fn row_syms_scalar<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize
 
 /// [`row_syms_scalar`] for a whole row, 16 bytes at a time with NEON where available.
 #[allow(clippy::too_many_arguments)]
-fn row_syms<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize, w: usize, rs: usize, rs2: usize, out: &mut RowSyms, d: usize) {
+fn row_syms<const BPP: usize>(
+    raw: &[u8],
+    buf: &[u8],
+    q: usize,
+    at: usize,
+    w: usize,
+    rs: usize,
+    rs2: usize,
+    out: &mut RowSyms,
+    d: usize,
+) {
     #[cfg(target_arch = "aarch64")]
     {
         let done = neon::row_syms::<BPP>(raw, buf, q, at, w, rs, rs2, out, d);
@@ -921,7 +954,16 @@ mod neon {
     /// `dec` is set).
     #[inline(always)]
     #[allow(clippy::too_many_arguments)]
-    unsafe fn pred(a: uint8x16_t, b: uint8x16_t, c: uint8x16_t, v1: uint8x16_t, a1: uint8x16_t, b1: uint8x16_t, c1: uint8x16_t, dec: uint8x16_t) -> uint8x16_t {
+    unsafe fn pred(
+        a: uint8x16_t,
+        b: uint8x16_t,
+        c: uint8x16_t,
+        v1: uint8x16_t,
+        a1: uint8x16_t,
+        b1: uint8x16_t,
+        c1: uint8x16_t,
+        dec: uint8x16_t,
+    ) -> uint8x16_t {
         unsafe {
             let m_lo = med16(lo(a), lo(b), lo(c));
             let m_hi = med16(hi(a), hi(b), hi(c));
@@ -935,7 +977,17 @@ mod neon {
 
     /// Returns how many bytes it did (whole 16-byte chunks).
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn row_syms<const BPP: usize>(raw: &[u8], buf: &[u8], q: usize, at: usize, w: usize, rs: usize, rs2: usize, out: &mut RowSyms, d: usize) -> usize {
+    pub(super) fn row_syms<const BPP: usize>(
+        raw: &[u8],
+        buf: &[u8],
+        q: usize,
+        at: usize,
+        w: usize,
+        rs: usize,
+        rs2: usize,
+        out: &mut RowSyms,
+        d: usize,
+    ) -> usize {
         let chunks = w / 16;
         if chunks == 0 {
             return 0;
@@ -1182,7 +1234,8 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
                         if dist > st.p || len > n - st.p {
                             return Err(crate::corrupt());
                         }
-                        *tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)? = Token::Match { len: len as u16, dist: dist as u16, alt258: false };
+                        *tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)? =
+                            Token::Match { len: len as u16, dist: dist as u16, alt258: false };
                         lf[257 + len_code(len as u32) as usize] += 1;
                         df[dist_code(dist as u32) as usize] += 1;
                         st.copy::<BPP, IMAGE>(raw, buf, len, dist);
@@ -1274,7 +1327,8 @@ fn lit_run<I: Io, const BPP: usize, const FT: u8>(
     }
     // The previous byte's MED and raw value, carried along for the decorrelation.
     let (mut pmed, mut pv) = if BPP >= 3 && q > 0 {
-        let (a1, b1, c1) = (get(raw, q - 1 - BPP) as i32, get(raw, q - 1 - rs2) as i32, get(raw, q - 1 - rs2 - BPP) as i32);
+        let (a1, b1, c1) =
+            (get(raw, q - 1 - BPP) as i32, get(raw, q - 1 - rs2) as i32, get(raw, q - 1 - rs2 - BPP) as i32);
         (med(a1, b1, c1), get(raw, q - 1) as i32)
     } else {
         (0, 0)
@@ -1413,7 +1467,14 @@ impl Lit {
 
 /// The coding of position `p` (below the data's length), where the cursor is.
 #[inline(always)]
-fn prepare<const BPP: usize, const IMAGE: bool>(g: &Geometry, cur: &Cursor, raw: &[u8], buf: &[u8], p: usize, bpp: usize) -> Lit {
+fn prepare<const BPP: usize, const IMAGE: bool>(
+    g: &Geometry,
+    cur: &Cursor,
+    raw: &[u8],
+    buf: &[u8],
+    p: usize,
+    bpp: usize,
+) -> Lit {
     let x = p - cur.rstart;
     if x == 0 || cur.rs == usize::MAX {
         return Lit { t: T_FILTER, act: u32::MAX, pred: 0, fp: 0, q: usize::MAX };
@@ -1447,7 +1508,8 @@ mod tests {
             (seed >> 16) as u8
         };
         for (color, ch) in [(0u8, 1usize), (4, 2), (2, 3), (6, 4)] {
-            let ih = crate::png::Ihdr { width: 37, height: 9, depth: 8, color, compression: 0, filter: 0, interlace: 0 };
+            let ih =
+                crate::png::Ihdr { width: 37, height: 9, depth: 8, color, compression: 0, filter: 0, interlace: 0 };
             let g = Geometry::new(&ih).unwrap();
             let rs = g.passes[0].rs;
             let mut data: Vec<u8> = (0..g.len).map(|_| rnd()).collect();
@@ -1476,7 +1538,11 @@ mod tests {
                 }
                 for r in 0..9 {
                     let q = g.passes[0].base2 + (r + 1) * g.passes[0].rs2 + ch;
-                    assert_eq!(&raw[q..q + rs - 1], &want[r * (rs - 1)..(r + 1) * (rs - 1)], "ch {ch} piece {piece} row {r}");
+                    assert_eq!(
+                        &raw[q..q + rs - 1],
+                        &want[r * (rs - 1)..(r + 1) * (rs - 1)],
+                        "ch {ch} piece {piece} row {r}"
+                    );
                 }
                 let mut whole = vec![0u8; g.raw_len];
                 unfilter_all(&g, &buf, &mut whole);

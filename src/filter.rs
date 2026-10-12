@@ -80,7 +80,13 @@ mod tests {
                 for c in 0..=255u8 {
                     let p = a as i16 + b as i16 - c as i16;
                     let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
-                    let want = if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c };
+                    let want = if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    };
                     assert_eq!(super::paeth(a, b, c), want);
                 }
             }

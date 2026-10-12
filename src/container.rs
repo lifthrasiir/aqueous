@@ -126,7 +126,11 @@ const FDAT: u8 = 2;
 
 /// The images of a chunk list: runs of chunks of the same image class, with the geometry
 /// their payload has (the IHDR's, or the frame's from the last fcTL), if valid.
-fn images<'a>(classes: &[u8], data: impl Fn(usize) -> &'a [u8], kinds: impl Fn(usize) -> [u8; 4]) -> Vec<(std::ops::Range<usize>, Option<Ihdr>)> {
+fn images<'a>(
+    classes: &[u8],
+    data: impl Fn(usize) -> &'a [u8],
+    kinds: impl Fn(usize) -> [u8; 4],
+) -> Vec<(std::ops::Range<usize>, Option<Ihdr>)> {
     let ihdr = if classes.first() == Some(&PLAIN) && &kinds(0) == b"IHDR" { Ihdr::parse(data(0)) } else { None };
     let mut frame: Option<Ihdr> = None;
     let mut out = vec![];
@@ -209,7 +213,8 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
         // The record goes straight into the output, after its length.
         let at = out.len();
         out.extend_from_slice(&[0; 4]);
-        let coded = ih.is_some_and(|ih| image_record(&ih, &payload, ph, &mut out).is_ok()) && out.len() - at - 4 <= payload.len();
+        let coded = ih.is_some_and(|ih| image_record(&ih, &payload, ph, &mut out).is_ok())
+            && out.len() - at - 4 <= payload.len();
         if !coded {
             out.truncate(at + 4);
             out.push(0);
@@ -218,7 +223,12 @@ fn coded(file: &[u8], ph: &mut Phases) -> Result<Vec<u8>> {
         let len = (out.len() - at - 4) as u32;
         out[at..at + 4].copy_from_slice(&len.to_le_bytes());
         if std::env::var_os("PNGR_DEBUG").is_some() {
-            eprintln!("image {} payload {} -> record {len} ({})", classes[range.start], payload.len(), if coded { "coded" } else { "kept" });
+            eprintln!(
+                "image {} payload {} -> record {len} ({})",
+                classes[range.start],
+                payload.len(),
+                if coded { "coded" } else { "kept" }
+            );
         }
     }
     Ok(out)
@@ -364,7 +374,11 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
         let len = get_varint(&sk, &mut k)? as usize;
         let flags = *sk.get(k).ok_or_else(crate::corrupt)?;
         k += 1;
-        let crc = if flags & 0x80 != 0 { Some(u32::from_be_bytes(get_bytes(&sk, &mut k, 4)?.try_into().unwrap())) } else { None };
+        let crc = if flags & 0x80 != 0 {
+            Some(u32::from_be_bytes(get_bytes(&sk, &mut k, 4)?.try_into().unwrap()))
+        } else {
+            None
+        };
         let class = flags & 0x7f;
         let data = match class {
             PLAIN => get_bytes(&sk, &mut k, len)?,
@@ -579,7 +593,8 @@ fn rebuild(g: &Geometry, rec: &[u8]) -> Result<Vec<u8>> {
         let bytes = if single {
             n
         } else {
-            let stored: usize = s.blocks.iter().map(|b| if let Body::Stored { len, .. } = b.body { len as usize } else { 0 }).sum();
+            let stored: usize =
+                s.blocks.iter().map(|b| if let Body::Stored { len, .. } = b.body { len as usize } else { 0 }).sum();
             stored + tokens[t0..t1].iter().map(|t| t.span()).sum::<usize>()
         };
         let d = data.get(pos..pos + bytes).ok_or_else(crate::corrupt)?;

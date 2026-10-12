@@ -110,6 +110,10 @@ fn bench(args: &[String]) {
     let k = iters as f64;
     println!(
         "decompress phases (per iteration): tables {:.3}s tokens {:.3}s headers {:.3}s write {:.3}s, total {:.3}s",
-        d[0] / k, d[1] / k, d[2] / k, d[3] / k, td
+        d[0] / k,
+        d[1] / k,
+        d[2] / k,
+        d[3] / k,
+        td
     );
 }

@@ -25,7 +25,10 @@ fn main() {
         prev = s;
     }
     let mut w = BitW::default();
-    let freqs: Vec<Vec<u32>> = counts.iter().map(|c| if c.iter().any(|&x| x > 0) { rans::write_table(&mut w, c) } else { vec![rans::PROB_SCALE] }).collect();
+    let freqs: Vec<Vec<u32>> = counts
+        .iter()
+        .map(|c| if c.iter().any(|&x| x > 0) { rans::write_table(&mut w, c) } else { vec![rans::PROB_SCALE] })
+        .collect();
     let t0 = Instant::now();
     let bytes = rans::encode(&syms, &freqs);
     println!("encode: {:.2} ns/sym", t0.elapsed().as_secs_f64() * 1e9 / n as f64);
