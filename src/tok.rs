@@ -165,7 +165,15 @@ fn med(d: &[u8], p: usize, col: usize, px: Pixels) -> (i32, u32) {
 /// context is the channel (capped) and the activity. `last`: the position and MED of the
 /// last call, reused when it was the byte before.
 #[inline(always)]
-fn pixel_ctx(d: &[u8], p: usize, col: usize, ch: usize, after: bool, px: Pixels, last: &Cell<(usize, i32)>) -> (u8, usize) {
+fn pixel_ctx(
+    d: &[u8],
+    p: usize,
+    col: usize,
+    ch: usize,
+    after: bool,
+    px: Pixels,
+    last: &Cell<(usize, i32)>,
+) -> (u8, usize) {
     let (m, act) = med(d, p, col, px);
     let mut pred = m;
     if ch > 0 {
@@ -434,7 +442,8 @@ impl Encoder {
                 if row.iter().fold(0, |a, &x| a | x) == 0 {
                     continue;
                 }
-                let nz: Vec<(u16, u32)> = row.iter().enumerate().filter(|&(_, &x)| x > 0).map(|(s, &x)| (s as u16, x)).collect();
+                let nz: Vec<(u16, u32)> =
+                    row.iter().enumerate().filter(|&(_, &x)| x > 0).map(|(s, &x)| (s as u16, x)).collect();
                 rows.push((b, nz));
             }
             let est_row = |nz: &mut dyn Iterator<Item = u32>| -> f64 {
@@ -456,10 +465,14 @@ impl Encoder {
                         v[t + s as usize] += x;
                     }
                 }
-                let e: f64 = v.chunks_exact(LIT_ALPHA).map(|c| c.iter().copied().filter(|&x| x > 0)).map(|mut c| match c.next() {
-                    None => 0.0,
-                    Some(x) => est_row(&mut std::iter::once(x).chain(c)),
-                }).sum();
+                let e: f64 = v
+                    .chunks_exact(LIT_ALPHA)
+                    .map(|c| c.iter().copied().filter(|&x| x > 0))
+                    .map(|mut c| match c.next() {
+                        None => 0.0,
+                        Some(x) => est_row(&mut std::iter::once(x).chain(c)),
+                    })
+                    .sum();
                 if e < best.0 {
                     best = (e, res);
                 }
@@ -659,11 +672,7 @@ impl Cursor<'_, '_> {
                     m.skip(data, o, len);
                     lf[257 + lc] += 1;
                     df[dc] += 1;
-                    Token::Match {
-                        len: len as u16,
-                        dist: dist as u16,
-                        alt258: false,
-                    }
+                    Token::Match { len: len as u16, dist: dist as u16, alt258: false }
                 };
                 // SAFETY: `ti` stays below the capacity (checked before the loop).
                 unsafe { tp.add(ti).write(tok) };
@@ -717,7 +726,8 @@ impl<'a> DecoderState<'a> {
                 continue;
             }
             let res = tr.bits(2) as u8;
-            let ids: Vec<Option<u16>> = (0..slot_tables(ci, res)).map(|_| read(&mut tr, LIT_ALPHA)).collect::<Result<_>>()?;
+            let ids: Vec<Option<u16>> =
+                (0..slot_tables(ci, res)).map(|_| read(&mut tr, LIT_ALPHA)).collect::<Result<_>>()?;
             let nfine = if ci == PIXEL { PIX_CTX } else { LIT_CTX };
             for (b, t) in cx.iter_mut().enumerate().take(nfine) {
                 *t = ids[coarse(ci, res, b)].unwrap_or(u16::MAX);
@@ -789,10 +799,7 @@ impl<'a> DecoderState<'a> {
                     if t == 1 {
                         Body::Fixed { tokens: vec![] }
                     } else {
-                        Body::Dynamic {
-                            header: DynHeader::default(),
-                            tokens: vec![],
-                        }
+                        Body::Dynamic { header: DynHeader::default(), tokens: vec![] }
                     }
                 }
                 _ => return Err(Error::Corrupt),
@@ -832,7 +839,9 @@ impl<'a> DecoderState<'a> {
         };
         match px {
             None => cur.blocks(&spans, &mut Prev(0))?,
-            Some(px) => cur.blocks(&spans, &mut Pix { px, col: 0, ch: 0, after: false, last: Cell::new((usize::MAX, 0)) })?,
+            Some(px) => {
+                cur.blocks(&spans, &mut Pix { px, col: 0, ch: 0, after: false, last: Cell::new((usize::MAX, 0)) })?
+            }
         }
         let o = cur.o;
         let raw = &mut self.raw;
@@ -861,14 +870,11 @@ impl<'a> DecoderState<'a> {
         }
         for (b, (lf, df)) in blocks.iter_mut().zip(&freqs) {
             if let Body::Dynamic { header, .. } = &mut b.body {
-                *header = header::read_freqs(&mut self.headers, lf, df, &mut self.recipe).map_err(|_| Error::Corrupt)?;
+                *header =
+                    header::read_freqs(&mut self.headers, lf, df, &mut self.recipe).map_err(|_| Error::Corrupt)?;
             }
         }
-        let stream = Stream {
-            blocks,
-            tail_pad,
-            trailing: vec![],
-        };
+        let stream = Stream { blocks, tail_pad, trailing: vec![] };
         let out = flate_recons::fast::write::write(&stream, &starts, &tokens, &data).map_err(|_| Error::Corrupt)?;
         Ok((out, data))
     }
@@ -933,25 +939,15 @@ mod tests {
                 while i + l < data.len() && l < 258 && data[j + l] == data[i + l] {
                     l += 1;
                 }
-                tokens.push(Token::Match {
-                    len: l as u16,
-                    dist: (i - j) as u16,
-                    alt258: false,
-                });
+                tokens.push(Token::Match { len: l as u16, dist: (i - j) as u16, alt258: false });
                 i += l;
             } else {
                 tokens.push(Token::Lit(data[i]));
                 i += 1;
             }
         }
-        st.blocks.push(Block {
-            last: false,
-            body: Body::Stored { pad: 0, len: 0 },
-        });
-        st.blocks.push(Block {
-            last: true,
-            body: Body::Fixed { tokens },
-        });
+        st.blocks.push(Block { last: false, body: Body::Stored { pad: 0, len: 0 } });
+        st.blocks.push(Block { last: true, body: Body::Fixed { tokens } });
         flate_recons::deflate::write(&st, data).unwrap()
     }
 }

@@ -180,7 +180,15 @@ fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
         tot.skeleton.0, tot.skeleton.1, tot.pools, tot.meta, tot.tok, tot.failed
     );
     println!("  mode/class: items, raw, inflated; ns per raw byte compressing, decompressing; output / raw");
-    let cname = |m: usize, c: usize| if c < 6 { pdf_recons::kind::CLASSES[c].name() } else if m == container::TOK as usize { "pixels" } else { "-" };
+    let cname = |m: usize, c: usize| {
+        if c < 6 {
+            pdf_recons::kind::CLASSES[c].name()
+        } else if m == container::TOK as usize {
+            "pixels"
+        } else {
+            "-"
+        }
+    };
     for m in 0..container::NMODES {
         for c in 0..7 {
             let (a, b) = (tot.cost[m][c], dtot.cost[m][c]);
@@ -199,7 +207,12 @@ fn bench(opts: &Options, iters: usize, verbose: bool, files: &[String]) {
             }
         }
     }
-    println!("  estimated time {:.3} s (measured {:.3} s compressing, {:.3} s decompressing)", tot.predicted * 1e-9, tc, td);
+    println!(
+        "  estimated time {:.3} s (measured {:.3} s compressing, {:.3} s decompressing)",
+        tot.predicted * 1e-9,
+        tc,
+        td
+    );
     println!("  token coder finish {:.3} s, decompression setup {:.3} s", tot.tok_finish, dtot.setup);
     let t = tot.times;
     println!(

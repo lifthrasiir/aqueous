@@ -19,8 +19,8 @@
 //!   meta section; `TOK` streams are in the token section, in order.
 //! - `JPEG`: varint(length); a jpeg-recons container in the jpeg section.
 
-use crate::kind::{self, CLASSES, Class, Filter};
 use crate::image::{self, Geometry};
+use crate::kind::{self, CLASSES, Class, Filter};
 use crate::lex::Obj;
 use crate::objects::Objects;
 use crate::scan;
@@ -72,14 +72,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options {
-            speed: 100.0,
-            verify: false,
-            level: 9,
-            tok: true,
-            full: true,
-            png: true,
-        }
+        Options { speed: 100.0, verify: false, level: 9, tok: true, full: true, png: true }
     }
 }
 
@@ -158,12 +151,7 @@ pub fn compress_with(file: &[u8], opts: &Options, st: &mut Stats) -> Vec<u8> {
         && let Some((out, _)) = &res
         && decompress(out).as_deref() != Ok(file)
     {
-        let o = Options {
-            tok: false,
-            full: false,
-            png: false,
-            ..opts.clone()
-        };
+        let o = Options { tok: false, full: false, png: false, ..opts.clone() };
         res = attempt(&o).map(|(r, mut s)| {
             s.verify_failed = true;
             (r, s)
@@ -293,10 +281,7 @@ mod cost {
 
 /// The pixel layout of an image without a predictor, for the token coder's pixel model.
 fn pixels(g: &Geometry) -> Option<tok::Pixels> {
-    (g.predictor == 1 && g.bpc == 8 && g.colors <= 4).then(|| tok::Pixels {
-        bpp: g.colors as usize,
-        stride: g.row(),
-    })
+    (g.predictor == 1 && g.bpc == 8 && g.colors <= 4).then(|| tok::Pixels { bpp: g.colors as usize, stride: g.row() })
 }
 
 /// Whether the file has an `/Encrypt` entry (a trailer's, normally).
@@ -332,7 +317,9 @@ fn plain_estimate(d: &Obj, c: Class, data: &[u8]) -> f64 {
             let row = (w * colors * bpc + 7) / 8 + pred as i64;
             Some((row * h) as f64)
         })(),
-        Class::Font => int(b"Length1").map(|l| (l + int(b"Length2").unwrap_or(0) + int(b"Length3").unwrap_or(0)) as f64),
+        Class::Font => {
+            int(b"Length1").map(|l| (l + int(b"Length2").unwrap_or(0) + int(b"Length3").unwrap_or(0)) as f64)
+        }
         _ => None,
     };
     // Else the first block's codes tell, except for fonts and other data (where the class
@@ -341,8 +328,7 @@ fn plain_estimate(d: &Obj, c: Class, data: &[u8]) -> f64 {
         Class::Font | Class::Data => None,
         _ => flate::expansion(data).map(|e| e * len as f64),
     });
-    est.filter(|&e| e < len as f64 * 1032.0)
-        .unwrap_or(len as f64 * cost::expansion(c))
+    est.filter(|&e| e < len as f64 * 1032.0).unwrap_or(len as f64 * cost::expansion(c))
 }
 
 fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> {
@@ -373,9 +359,8 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
             continue;
         }
         let h = xxhash_rust::xxh3::xxh3_64(data);
-        let same = seen
-            .get(&h)
-            .and_then(|v| v.iter().copied().find(|&i| file[items[i].start..][..items[i].len] == *data));
+        let same =
+            seen.get(&h).and_then(|v| v.iter().copied().find(|&i| file[items[i].start..][..items[i].len] == *data));
         seen.entry(h).or_default().push(items.len());
         let plan = match (same, f) {
             (Some(i), _) => Plan::Dup(i),
@@ -392,22 +377,15 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
             (None, Filter::Dct) => {
                 let (prog, blocks) = image::jpeg_frame(data).unwrap_or((false, 0));
                 Plan::Jpeg(prog, blocks, false)
-            },
+            }
             _ => Plan::Raw,
         };
         covered += data.len();
-        items.push(Item {
-            start: s.data.start,
-            len: data.len(),
-            plan,
-        });
+        items.push(Item { start: s.data.start, len: data.len(), plan });
     }
     let skel_len = file.len() - covered;
-    let budget = if opts.speed.is_finite() {
-        file.len() as f64 * 1e3 / (opts.speed * cost::MARGIN)
-    } else {
-        f64::INFINITY
-    };
+    let budget =
+        if opts.speed.is_finite() { file.len() as f64 * 1e3 / (opts.speed * cost::MARGIN) } else { f64::INFINITY };
     let fixed = file.len() as f64 * cost::SCAN + skel_len as f64 * cost::ZSTD_C;
     st.predicted = fixed + choose(&mut items, budget - fixed, opts);
     st.times[0] += t0.elapsed().as_secs_f64();
@@ -424,10 +402,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     let mut at = 0;
     // Bytes each item covers once coded.
     let mut cov: Vec<usize> = Vec::with_capacity(items.len());
-    let fr_opts = flate_recons::fast::Options {
-        threads: 1,
-        ..Default::default()
-    };
+    let fr_opts = flate_recons::fast::Options { threads: 1, ..Default::default() };
     for (i, it) in items.iter().enumerate() {
         let data = &file[it.start..it.start + it.len];
         varint::put(&mut table, (it.start - at) as u64);
@@ -448,8 +423,8 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
                 st.times[1] += t.elapsed().as_secs_f64();
                 let coded = parsed.ok().and_then(|mut f| {
                     let end = data.len() - f.stream.trailing.len();
-                    let adler = f.stream.trailing.len() >= 4
-                        && data[end..end + 4] == flate::adler32(&f.data).to_be_bytes();
+                    let adler =
+                        f.stream.trailing.len() >= 4 && data[end..end + 4] == flate::adler32(&f.data).to_be_bytes();
                     f.stream.trailing.clear();
                     plain_n = f.data.len();
                     let flags = (hdr as u8 / 2) | ((adler as u8) << 1) | ((px.is_some() as u8) << 2);
@@ -548,12 +523,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
             _ => 6,
         };
         let secs = t_item.elapsed().as_secs_f64();
-        st.cost[mode as usize][ci].add(&Measure {
-            n: 1,
-            raw: len,
-            plain: plain_n,
-            secs,
-        });
+        st.cost[mode as usize][ci].add(&Measure { n: 1, raw: len, plain: plain_n, secs });
         st.items.push((mode, ci as u8, len, plain_n, secs));
         at = it.start + len;
         cov.push(len);
@@ -628,7 +598,8 @@ fn choose(items: &mut [Item], budget: f64, opts: &Options) -> f64 {
                 }
             }
             Plan::Jpeg(prog, blocks, _) => {
-                let (t, r) = if prog { (cost::JPEG_PROG, cost::JPEG_PROG_RATIO) } else { (cost::JPEG, cost::jpeg_ratio(len)) };
+                let (t, r) =
+                    if prog { (cost::JPEG_PROG, cost::JPEG_PROG_RATIO) } else { (cost::JPEG, cost::jpeg_ratio(len)) };
                 v.push((JPEG, len * r, cost::time(&t, len, blocks as f64)))
             }
             _ => continue,
@@ -636,10 +607,7 @@ fn choose(items: &mut [Item], budget: f64, opts: &Options) -> f64 {
         opts_of.push((i, v));
     }
     let pick = |lambda: f64, v: &[(u8, f64, f64)]| -> (u8, f64) {
-        let b = v
-            .iter()
-            .min_by(|a, b| (a.1 + lambda * a.2).total_cmp(&(b.1 + lambda * b.2)))
-            .unwrap();
+        let b = v.iter().min_by(|a, b| (a.1 + lambda * a.2).total_cmp(&(b.1 + lambda * b.2))).unwrap();
         (b.0, b.2)
     };
     let total = |lambda: f64| opts_of.iter().map(|(_, v)| pick(lambda, v).1).sum::<f64>();
@@ -726,11 +694,7 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
     // the DEFLATE data).
     let mut sec: Vec<Vec<u8>> = Vec::with_capacity(NSECTIONS);
     for k in 0..NSECTIONS {
-        let max = if k >= S_POOL {
-            len.saturating_mul(1032)
-        } else {
-            len.saturating_add(1 << 20)
-        };
+        let max = if k >= S_POOL { len.saturating_mul(1032) } else { len.saturating_add(1 << 20) };
         sec.push(get_section(&mut r, max)?);
     }
     if !r.at_end() {
@@ -740,11 +704,7 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
     let mut t = Reader::new(&sec[S_TABLE]);
     let (mut sk, mut rw, mut mt, mut jp, mut pn) = (0usize, 0usize, 0usize, 0usize, 0usize);
     let mut pool_at = [0usize; CLASSES.len()];
-    let mut tokens = if sec[S_TOK].is_empty() {
-        None
-    } else {
-        Some(tok::DecoderState::new(&sec[S_TOK])?)
-    };
+    let mut tokens = if sec[S_TOK].is_empty() { None } else { Some(tok::DecoderState::new(&sec[S_TOK])?) };
     // Where each item went in the output.
     let mut placed: Vec<(usize, usize)> = vec![];
     let skel = &sec[S_SKEL];
@@ -790,10 +750,7 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
                 let n = t.usize(len.saturating_mul(1032))?;
                 (ci, plain_n) = (if flags & 4 != 0 { 6 } else { c }, n);
                 let px = if flags & 4 != 0 {
-                    Some(tok::Pixels {
-                        bpp: t.usize(64)?,
-                        stride: t.usize(1 << 34)?,
-                    })
+                    Some(tok::Pixels { bpp: t.usize(64)?, stride: t.usize(1 << 34)? })
                 } else {
                     None
                 };
@@ -832,12 +789,7 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
         }
         placed.push((start, out.len() - start));
         let secs = t_item.elapsed().as_secs_f64();
-        ds.cost[mode as usize][ci].add(&Measure {
-            n: 1,
-            raw: out.len() - start,
-            plain: plain_n,
-            secs,
-        });
+        ds.cost[mode as usize][ci].add(&Measure { n: 1, raw: out.len() - start, plain: plain_n, secs });
         ds.items.push((mode, ci as u8, out.len() - start, plain_n, secs));
         if out.len() > len {
             return Err(Error::Corrupt);

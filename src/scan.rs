@@ -72,11 +72,7 @@ pub fn streams(buf: &[u8]) -> Vec<Stream<'_>> {
                 (d, false)
             }
         };
-        out.push(Stream {
-            dict,
-            data: start..end,
-            length_ok,
-        });
+        out.push(Stream { dict, data: start..end, length_ok });
         pos = end;
         floor = end;
     }

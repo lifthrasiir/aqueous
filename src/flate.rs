@@ -59,13 +59,7 @@ pub fn shape(data: &[u8]) -> Option<Shape> {
     let mut c = Count::default();
     let l = inflate::parse_into(&data[hdr..], usize::MAX, &mut c).ok()?;
     let deflate = data.len() - hdr - l.stream.trailing.len();
-    Some(Shape {
-        hdr,
-        deflate,
-        plain: c.plain,
-        tokens: c.tokens,
-        room_adler: l.stream.trailing.len() >= 4,
-    })
+    Some(Shape { hdr, deflate, plain: c.plain, tokens: c.tokens, room_adler: l.stream.trailing.len() >= 4 })
 }
 
 /// Inflated bytes per DEFLATE byte, estimated from the first block's header: the expected
@@ -165,7 +159,15 @@ pub fn expansion(data: &[u8]) -> Option<f64> {
     let p = |l: u8| if l > 0 { (-(l as f64)).exp2() } else { 0.0 };
     let dist_bits: f64 = {
         let tot: f64 = dl.iter().map(|&l| p(l)).sum();
-        if tot > 0.0 { dl.iter().enumerate().map(|(c, &l)| p(l) * (l as f64 + DIST_EXTRA.get(c).copied().unwrap_or(0) as f64)).sum::<f64>() / tot } else { 0.0 }
+        if tot > 0.0 {
+            dl.iter()
+                .enumerate()
+                .map(|(c, &l)| p(l) * (l as f64 + DIST_EXTRA.get(c).copied().unwrap_or(0) as f64))
+                .sum::<f64>()
+                / tot
+        } else {
+            0.0
+        }
     };
     let (mut bytes, mut nbits, mut tot) = (0f64, 0f64, 0f64);
     for (s, &l) in ll.iter().enumerate() {

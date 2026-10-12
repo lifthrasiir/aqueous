@@ -26,10 +26,7 @@ fn main() {
     let mut plains: BTreeMap<Class, Vec<u8>> = BTreeMap::new();
     let mut skel = vec![];
     let (mut total, mut jpeg_in, mut jpeg_out, mut t_jc, mut t_jd) = (0usize, 0usize, 0usize, 0f64, 0f64);
-    let opts = flate_recons::fast::Options {
-        threads: 1,
-        ..Default::default()
-    };
+    let opts = flate_recons::fast::Options { threads: 1, ..Default::default() };
     for f in &files {
         let buf = std::fs::read(f).unwrap();
         total += buf.len();
@@ -102,7 +99,10 @@ fn main() {
         print!("  skel zstd-{lvl} {z}");
     }
     println!();
-    println!("{:<16} {:>6} {:>11} {:>11} {:>5} {:>9} {:>5} {:>7} {:>7} {:>7} {:>4}", "class/filter", "n", "raw", "plain", "x", "meta", "m%", "parse", "dec", "rec", "fail");
+    println!(
+        "{:<16} {:>6} {:>11} {:>11} {:>5} {:>9} {:>5} {:>7} {:>7} {:>7} {:>4}",
+        "class/filter", "n", "raw", "plain", "x", "meta", "m%", "parse", "dec", "rec", "fail"
+    );
     for ((c, fl), a) in &by {
         let mbps = |t: f64| if t > 0.0 { a.plain as f64 / t / 1e6 } else { 0.0 };
         println!(

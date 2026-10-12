@@ -103,16 +103,15 @@ pub fn geometry<'a>(d: &Obj<'a>, objs: &mut Objects<'a>) -> Option<Geometry> {
         (width, height, colors, bpc, 1)
     };
     let ok = |v: i64, max: i64| (1..=max).contains(&v);
-    if !ok(g.0, 1 << 20) || !ok(g.1, 1 << 20) || !ok(g.2, 32) || ![1, 2, 4, 8, 16].contains(&g.3) || !(g.4 == 1 || g.4 == 2 || (10..=15).contains(&g.4)) {
+    if !ok(g.0, 1 << 20)
+        || !ok(g.1, 1 << 20)
+        || !ok(g.2, 32)
+        || ![1, 2, 4, 8, 16].contains(&g.3)
+        || !(g.4 == 1 || g.4 == 2 || (10..=15).contains(&g.4))
+    {
         return None;
     }
-    Some(Geometry {
-        width: g.0 as u32,
-        height: g.1 as u32,
-        colors: g.2 as u32,
-        bpc: g.3 as u32,
-        predictor: g.4 as u32,
-    })
+    Some(Geometry { width: g.0 as u32, height: g.1 as u32, colors: g.2 as u32, bpc: g.3 as u32, predictor: g.4 as u32 })
 }
 
 /// The PNG color type and bit depth for PNG-predicted rows of `g`, if PNG has them.

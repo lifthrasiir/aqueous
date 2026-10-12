@@ -47,7 +47,9 @@ fn pdf(objs: &[(String, Option<Vec<u8>>)]) -> Vec<u8> {
     for o in offs {
         f.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
     }
-    f.extend_from_slice(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    f.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes(),
+    );
     f
 }
 
@@ -57,7 +59,12 @@ fn content(seed: u32, n: usize) -> Vec<u8> {
     let mut x = seed;
     for i in 0..n {
         x = x.wrapping_mul(1103515245).wrapping_add(12345);
-        s += &format!("{} {} Td ({}) Tj\n", (x >> 16) % 600, i % 800, ["Hello", "PDF", "world", "recompression"][(x >> 8) as usize % 4]);
+        s += &format!(
+            "{} {} Td ({}) Tj\n",
+            (x >> 16) % 600,
+            i % 800,
+            ["Hello", "PDF", "world", "recompression"][(x >> 8) as usize % 4]
+        );
         if i % 7 == 0 {
             s += &format!("{}.{} {} {} re f\n", x % 97, x % 10, x % 300, (x >> 3) % 200);
         }
@@ -194,7 +201,10 @@ fn wrappers() {
         ("/Filter /Fl".into(), Some(z.clone())),
         ("/Filter /FlateDecode /DecodeParms << /Predictor 12 /Columns 5 >>".into(), Some(z)),
         ("/Filter /FlateDecode".into(), Some(vec![])),
-        ("/Filter /DCTDecode".into(), Some(b"not a jpeg at all, but long enough to be an item of its own........".to_vec())),
+        (
+            "/Filter /DCTDecode".into(),
+            Some(b"not a jpeg at all, but long enough to be an item of its own........".to_vec()),
+        ),
     ]);
     check("wrappers", &f);
 }
@@ -227,10 +237,8 @@ fn syntax() {
 #[test]
 fn encrypted() {
     let enc = default_enc();
-    let mut f = pdf(&[
-        ("/Type /Catalog".into(), None),
-        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(7, 1000)))),
-    ]);
+    let mut f =
+        pdf(&[("/Type /Catalog".into(), None), ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(7, 1000))))]);
     f.extend_from_slice(b"trailer << /Encrypt 9 0 R >>\n");
     check("encrypted", &f);
     let (_, st) = coded(&f);
@@ -239,7 +247,12 @@ fn encrypted() {
 
 #[test]
 fn not_pdf() {
-    for f in [vec![], b"%PDF-".to_vec(), b"hello".repeat(1000), (0..100_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect()] {
+    for f in [
+        vec![],
+        b"%PDF-".to_vec(),
+        b"hello".repeat(1000),
+        (0..100_000u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect(),
+    ] {
         check("not a pdf", &f);
     }
 }
@@ -266,7 +279,10 @@ fn corrupted_containers() {
         ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(10, 2000)))),
         ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(10, 2000)))),
         (
-            format!("/Subtype /Image /Width {} /Height {} /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /FlateDecode /DecodeParms << /Predictor 15 /Columns {} >>", g.0, g.1, g.0),
+            format!(
+                "/Subtype /Image /Width {} /Height {} /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /FlateDecode /DecodeParms << /Predictor 15 /Columns {} >>",
+                g.0, g.1, g.0
+            ),
             Some(zlib(&enc, &pixels(g.0, g.1, 1, true, 11))),
         ),
         ("/Subtype /Image /Filter /DCTDecode".into(), Some(std::fs::read("tests/data/gradient.jpg").unwrap())),

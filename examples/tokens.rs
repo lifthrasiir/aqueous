@@ -117,7 +117,8 @@ fn main() {
                 m.m[4].code((b1 << 8 | b2) & 0xffff, sym, 286);
                 if let Token::Match { len, dist, .. } = *t {
                     let ls = len_sym(len);
-                    m.extra += (flate_recons::huffman::LEN_EXTRA[ls] + flate_recons::huffman::DIST_EXTRA[dist_sym(dist)]) as f64;
+                    m.extra += (flate_recons::huffman::LEN_EXTRA[ls]
+                        + flate_recons::huffman::DIST_EXTRA[dist_sym(dist)]) as f64;
                     m.m[5].code(ls.min(8) as u32, ds.unwrap(), 30);
                     prev_match = 1;
                 } else {
@@ -151,7 +152,13 @@ fn main() {
     for c in CLASSES {
         let Some(m) = tot.get(&c) else { continue };
         let distb = m.m[5].bits;
-        print!("{:<8} deflate {:>11.0} extra {:>10.0} dist {:>10.0}", c.name(), m.deflate / 8.0, m.extra / 8.0, distb / 8.0);
+        print!(
+            "{:<8} deflate {:>11.0} extra {:>10.0} dist {:>10.0}",
+            c.name(),
+            m.deflate / 8.0,
+            m.extra / 8.0,
+            distb / 8.0
+        );
         for i in 0..5 {
             let (sb, tb) = STATIC.with(|s| s.borrow()[&(c, i)]);
             let a = (m.m[i].bits + m.extra + distb) / m.deflate;

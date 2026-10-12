@@ -137,11 +137,7 @@ pub fn read_table(r: &mut BitR, n: usize) -> Result<Vec<u32>> {
 /// Estimated bits to code `counts` with its own exact table (data only).
 pub fn cost(counts: &[u32]) -> f64 {
     let tot: f64 = counts.iter().map(|&c| c as f64).sum();
-    counts
-        .iter()
-        .filter(|&&c| c > 0)
-        .map(|&c| c as f64 * (tot / c as f64).log2())
-        .sum()
+    counts.iter().filter(|&&c| c > 0).map(|&c| c as f64 * (tot / c as f64).log2()).sum()
 }
 
 /// Bits to code `counts` with the frequencies `f`.

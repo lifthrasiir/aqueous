@@ -25,6 +25,11 @@ fn main() {
             td += t.elapsed().as_secs_f64();
             z += c.len();
         }
-        println!("level {l:>2}: {:.4}  {:6.1} / {:4.1} ns/B", z as f64 / n as f64, tc * 1e9 / n as f64, td * 1e9 / n as f64);
+        println!(
+            "level {l:>2}: {:.4}  {:6.1} / {:4.1} ns/B",
+            z as f64 / n as f64,
+            tc * 1e9 / n as f64,
+            td * 1e9 / n as f64
+        );
     }
 }

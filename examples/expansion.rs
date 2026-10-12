@@ -37,7 +37,12 @@ fn main() {
         if a[0] > 0.0 {
             println!(
                 "{:<8} {:>12.0} bytes {:>5.2}x  mean |log2 err|: prior {:.3}, header {:.3}  (no header estimate {:.1}%)",
-                kind::CLASSES[c].name(), a[0], a[1] / a[0], a[2] / a[0], a[3] / a[0], 100.0 * a[4] / a[0]
+                kind::CLASSES[c].name(),
+                a[0],
+                a[1] / a[0],
+                a[2] / a[0],
+                a[3] / a[0],
+                100.0 * a[4] / a[0]
             );
         }
     }
