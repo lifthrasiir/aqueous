@@ -52,7 +52,7 @@ fn check_damaged(name: &str, c: &[u8], step: usize) {
             assert!(res(decompress_threads(m, t)) == r1, "{name}: {what}, {t} threads: {:?}", r1.as_ref().err());
         }
     };
-    for i in (5..c.len()).step_by(step) {
+    for i in (flac_recons::container::HEADER_LEN..c.len()).step_by(step) {
         let mut m = c.to_vec();
         m[i] ^= 0x5a;
         same(&m, &format!("byte {i}"));

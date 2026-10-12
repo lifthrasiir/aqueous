@@ -1,42 +1,85 @@
 //! Container format and top-level compress / decompress.
 //!
 //! ```text
-//! "FLR" version(u8) mode(u8)
-//! mode 0 (stored): the input verbatim
-//! mode 1 (FLAC), 2 (PCM):
-//!                  u64 LE length, u64 LE xxh3 of the original, then per byte stream
-//!                  varint(len << 1 | zstd) [varint raw len if zstd] data,
-//!                  then varint rANS word count, the words (LE), varint length of raw
-//!                  stream 0, raw streams 0 and 1
+//! magic(6: FLAC, WAV / AIFF or raw PCM) version(u16 LE)
+//! version 0 (stored): the input verbatim
+//! version 1 (coded):  u64 LE length, u64 LE xxh3 of the original, then per byte stream
+//!                     varint(len << 1 | zstd) [varint raw len if zstd] data,
+//!                     then varint rANS word count, the words (LE), varint length of raw
+//!                     stream 0, raw streams 0 and 1 (FLAC streams under the FLAC magic,
+//!                     PCM streams under the others)
 //! ```
+//!
+//! FORMAT.md describes the format in full.
 
 use crate::codec::{self, Coded, N_BYTE_STREAMS, Rd, put_varint};
-use crate::pcm;
+use crate::{flac, pcm};
 use xxhash_rust::xxh3::xxh3_64;
 
-const MAGIC: &[u8; 3] = b"FLR";
-const VERSION: u8 = 1;
+/// Magic of each kind of input (base64 `aQR+f1ac`, `aQR+wav3`, `aQR+pcm/`).
+const MAGIC_FLAC: [u8; 6] = [0x69, 0x04, 0x7e, 0x7f, 0x56, 0x9c];
+const MAGIC_WAV: [u8; 6] = [0x69, 0x04, 0x7e, 0xc1, 0xab, 0xf7];
+const MAGIC_PCM: [u8; 6] = [0x69, 0x04, 0x7e, 0xa5, 0xc9, 0xbf];
+const V_STORED: u16 = 0;
+const V_CODED: u16 = 1;
+/// Magic and version.
+pub const HEADER_LEN: usize = 8;
 /// zstd level of the byte streams.
 const ZSTD_LEVEL: i32 = 3;
 
 #[derive(Debug)]
 pub struct Error(pub String);
 
-fn stored(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(input.len() + 5);
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.push(MODE_STORED);
+/// What the input is: FLAC, WAV / AIFF (both coded as PCM), or raw PCM (also anything
+/// unrecognised, which is stored).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Flac,
+    Wav,
+    Pcm,
+}
+
+impl Kind {
+    fn magic(self) -> [u8; 6] {
+        match self {
+            Kind::Flac => MAGIC_FLAC,
+            Kind::Wav => MAGIC_WAV,
+            Kind::Pcm => MAGIC_PCM,
+        }
+    }
+
+    fn from_magic(m: &[u8]) -> Option<Kind> {
+        [Kind::Flac, Kind::Wav, Kind::Pcm].into_iter().find(|k| k.magic() == m)
+    }
+
+    /// The kind [`encode`] codes the input as.
+    fn of(input: &[u8], opt: &Options) -> Kind {
+        if opt.raw.is_some() {
+            Kind::Pcm
+        } else if flac::parse_metadata(input).is_some() {
+            Kind::Flac
+        } else if pcm::detect(input).is_some() {
+            Kind::Wav
+        } else {
+            Kind::Pcm
+        }
+    }
+}
+
+fn header(out: &mut Vec<u8>, kind: Kind, version: u16) {
+    out.extend_from_slice(&kind.magic());
+    out.extend_from_slice(&version.to_le_bytes());
+}
+
+fn stored(input: &[u8], kind: Kind) -> Vec<u8> {
+    let mut out = Vec::with_capacity(input.len() + HEADER_LEN);
+    header(&mut out, kind, V_STORED);
     out.extend_from_slice(input);
     out
 }
 
 /// Per-stream sizes (raw, stored) in `codec::STREAM_NAMES` order.
 pub type Sizes = Vec<(usize, usize)>;
-
-const MODE_STORED: u8 = 0;
-const MODE_FLAC: u8 = 1;
-const MODE_PCM: u8 = 2;
 
 /// Options of [`compress_opt`].
 #[derive(Clone, Copy, Debug)]
@@ -61,11 +104,9 @@ fn zstd_compress(b: &[u8]) -> Vec<u8> {
 }
 
 /// Serialises a coded file (`hash`: of the input).
-fn pack(input: &[u8], mode: u8, c: &Coded, hash: u64, threads: usize) -> (Vec<u8>, Sizes) {
+fn pack(input: &[u8], kind: Kind, c: &Coded, hash: u64, threads: usize) -> (Vec<u8>, Sizes) {
     let mut out = Vec::with_capacity(input.len());
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.push(mode);
+    header(&mut out, kind, V_CODED);
     out.extend_from_slice(&(input.len() as u64).to_le_bytes());
     out.extend_from_slice(&hash.to_le_bytes());
     let mut sizes = Vec::with_capacity(N_BYTE_STREAMS + 3);
@@ -110,20 +151,22 @@ fn pack(input: &[u8], mode: u8, c: &Coded, hash: u64, threads: usize) -> (Vec<u8
 }
 
 /// Encodes FLAC, or WAV / AIFF (detected), or headerless PCM if `opt.raw` is given.
-fn encode(input: &[u8], opt: &Options) -> Option<(u8, Coded)> {
+/// (`kind` is [`Kind::of`] the input.)
+fn encode(input: &[u8], opt: &Options, kind: Kind) -> Option<Coded> {
     let t = opt.threads;
-    if let Some(fmt) = opt.raw {
-        return Some((MODE_PCM, pcm::encode_threads(input, fmt, 0, input.len(), t)?));
+    match (kind, opt.raw) {
+        (_, Some(fmt)) => pcm::encode_threads(input, fmt, 0, input.len(), t),
+        (Kind::Flac, None) => codec::encode_threads(input, t),
+        (Kind::Wav, None) => {
+            let (fmt, start, len) = pcm::detect(input)?;
+            pcm::encode_threads(input, fmt, start, len, t)
+        }
+        (Kind::Pcm, None) => None,
     }
-    if let Some(c) = codec::encode_threads(input, t) {
-        return Some((MODE_FLAC, c));
-    }
-    let (fmt, start, len) = pcm::detect(input)?;
-    Some((MODE_PCM, pcm::encode_threads(input, fmt, start, len, t)?))
 }
 
-fn decode(mode: u8, c: &Coded, len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), codec::Error> {
-    if mode == MODE_FLAC {
+fn decode(kind: Kind, c: &Coded, len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), codec::Error> {
+    if kind == Kind::Flac {
         codec::decode_threads(c, len, out, threads)
     } else {
         pcm::decode_threads(c, len, out, threads)
@@ -137,25 +180,29 @@ pub fn compress_sizes(input: &[u8], raw: Option<pcm::Format>) -> (Vec<u8>, Sizes
 
 /// [`compress_opt`], with the stream sizes (and without the fallback on panics).
 pub fn compress_sizes_opt(input: &[u8], opt: &Options) -> (Vec<u8>, Sizes) {
+    compress_kind(input, opt, Kind::of(input, opt))
+}
+
+fn compress_kind(input: &[u8], opt: &Options, kind: Kind) -> (Vec<u8>, Sizes) {
     let (coded, hash) = if opt.threads > 1 {
         // The checksum on a thread of its own, if it is needed.
         std::thread::scope(|sc| {
             let h = sc.spawn(|| xxh3_64(input));
-            let coded = encode(input, opt);
+            let coded = encode(input, opt, kind);
             (coded, h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)))
         })
     } else {
-        let Some(coded) = encode(input, opt) else {
-            return (stored(input), vec![(0, 0); N_BYTE_STREAMS + 3]);
+        let Some(coded) = encode(input, opt, kind) else {
+            return (stored(input, kind), vec![(0, 0); N_BYTE_STREAMS + 3]);
         };
         (Some(coded), xxh3_64(input))
     };
-    let Some((mode, c)) = coded else {
-        return (stored(input), vec![(0, 0); N_BYTE_STREAMS + 3]);
+    let Some(c) = coded else {
+        return (stored(input, kind), vec![(0, 0); N_BYTE_STREAMS + 3]);
     };
-    let (out, sizes) = pack(input, mode, &c, hash, opt.threads);
-    if out.len() >= input.len() + 5 {
-        return (stored(input), sizes);
+    let (out, sizes) = pack(input, kind, &c, hash, opt.threads);
+    if out.len() >= input.len() + HEADER_LEN {
+        return (stored(input, kind), sizes);
     }
     (out, sizes)
 }
@@ -173,9 +220,11 @@ pub fn compress_with(input: &[u8], raw: Option<pcm::Format>) -> Vec<u8> {
 
 /// [`compress`] with options; the output is the same whatever the number of threads.
 pub fn compress_opt(input: &[u8], opt: &Options) -> Vec<u8> {
-    match std::panic::catch_unwind(|| compress_sizes_opt(input, opt).0) {
+    // The kind decides the magic of the stored fallback too.
+    let kind = std::panic::catch_unwind(|| Kind::of(input, opt)).unwrap_or(Kind::Pcm);
+    match std::panic::catch_unwind(|| compress_kind(input, opt, kind).0) {
         Ok(c) => c,
-        Err(_) => stored(input),
+        Err(_) => stored(input, kind),
     }
 }
 
@@ -186,9 +235,10 @@ pub fn roundtrip(input: &[u8], raw: Option<pcm::Format>) -> bool {
 
 /// [`roundtrip`] with options (the threads for both ways).
 pub fn roundtrip_opt(input: &[u8], opt: &Options) -> bool {
-    let Some((mode, c)) = encode(input, opt) else { return true };
+    let kind = Kind::of(input, opt);
+    let Some(c) = encode(input, opt, kind) else { return true };
     let mut out = Vec::new();
-    decode(mode, &c, input.len(), &mut out, opt.threads).is_ok() && out == input
+    decode(kind, &c, input.len(), &mut out, opt.threads).is_ok() && out == input
 }
 
 pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
@@ -197,17 +247,15 @@ pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
 
 /// [`decompress`] with `threads` threads; the same result whatever their number.
 pub fn decompress_threads(c: &[u8], threads: usize) -> Result<Vec<u8>, Error> {
-    if c.len() < 5 || &c[0..3] != MAGIC || c[3] != VERSION {
-        return Err(Error("not an FLR file".into()));
-    }
-    let mode = c[4];
-    match mode {
-        MODE_STORED => return Ok(c[5..].to_vec()),
-        MODE_FLAC | MODE_PCM => {}
-        _ => return Err(Error("unknown mode".into())),
+    let kind = c.get(..6).and_then(Kind::from_magic).ok_or(Error("not an flr file".into()))?;
+    match c.get(6..8).map(|v| u16::from_le_bytes([v[0], v[1]])) {
+        Some(V_STORED) => return Ok(c[HEADER_LEN..].to_vec()),
+        Some(V_CODED) => {}
+        Some(v) => return Err(Error(format!("unknown version {v}"))),
+        None => return Err(Error("truncated header".into())),
     }
     let e = corrupt;
-    let mut r = Rd::new(&c[5..]);
+    let mut r = Rd::new(&c[HEADER_LEN..]);
     let len = u64::from_le_bytes(r.bytes(8).map_err(e)?.try_into().unwrap());
     let hash = u64::from_le_bytes(r.bytes(8).map_err(e)?.try_into().unwrap());
     // No output is larger than 16 times the input (minimum code length per residual).
@@ -238,7 +286,7 @@ pub fn decompress_threads(c: &[u8], threads: usize) -> Result<Vec<u8>, Error> {
     let raw = [raw0, r.d[r.p..].to_vec()];
     let coded = Coded { streams, words, raw };
     let mut out = Vec::new();
-    decode(mode, &coded, len as usize, &mut out, threads).map_err(e)?;
+    decode(kind, &coded, len as usize, &mut out, threads).map_err(e)?;
     if out.len() as u64 != len || xxh3_64(&out) != hash {
         return Err(Error("checksum mismatch".into()));
     }

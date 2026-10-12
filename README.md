@@ -71,7 +71,7 @@ assert_eq!(flac_recons::decompress_threads(&packed, 8)?, input);
 | `src/residual.rs` | The pipeline shared by FLAC and PCM: per-frame passes, state across frames, built-in tables, subframe parameter serialisation |
 | `src/codec.rs` | FLAC files: segmentation into frames and junk, header prediction, streams |
 | `src/pcm.rs` | WAV / AIFF / raw PCM: format detection, block LPC encoder, decoding |
-| `src/container.rs` | Container format, stored fallback, checksum, options |
+| `src/container.rs` | Container format (specified in `FORMAT.md`), stored fallback, checksum, options |
 | `src/par.rs` | Pipelines for more than one thread: batches, stages, pool, reordering |
 | `../recons-common` | Alias-table rANS (`rans64`, re-exported as `rans`), bit readers and writers (`msb`, as `bits`), LEB128 |
 | `src/bin/train.rs` | Training of the built-in tables |
@@ -177,10 +177,14 @@ bounded channels; a fixed number of batches circulates, so memory stays bounded.
 
 ### 5. Container
 
+[FORMAT.md](FORMAT.md) specifies the format in full.
+
 ```text
-"FLR" version(u8=1) mode(u8)
-mode 0 (stored): the input verbatim
-mode 1 (FLAC), mode 2 (PCM):
+magic(6) version(u16 LE)
+  magic: 69047e7f569c (base64 aQR+f1ac) FLAC, 69047ec1abf7 (aQR+wav3) WAV / AIFF,
+         69047ea5c9bf (aQR+pcm/) raw PCM or anything not recognised
+version 0 (stored): the input verbatim
+version 1 (coded):
   u64 LE length, u64 LE xxh3 of the original
   6 byte streams (FLAC: prefix, layout, junk, headers, subframes, warm-up samples;
                   PCM: header, format and length, trailing bytes, stereo modes, subframes, samples)
