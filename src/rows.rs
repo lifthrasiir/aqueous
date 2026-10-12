@@ -43,7 +43,12 @@ pub fn count(counts: &[u8], cb: usize, i: usize) -> usize {
 }
 
 enum Source<'a> {
-    Rle { counts: &'a [u8], cb: usize, data: &'a [u8], first: usize },
+    Rle {
+        counts: &'a [u8],
+        cb: usize,
+        data: &'a [u8],
+        first: usize,
+    },
     Raw(&'a [u8]),
     /// Fallback for ZIP: the whole plane, decoded.
     Full(Vec<u8>),
@@ -61,7 +66,15 @@ pub struct PlaneRows<'a> {
 impl<'a> PlaneRows<'a> {
     /// Plane `plane` of `planes` in `data` (pixel data past the compression field), of `h`
     /// rows of `w` bytes.
-    pub fn new(psb: bool, comp: Compression, data: &'a [u8], w: usize, h: usize, plane: usize, planes: usize) -> Result<Self> {
+    pub fn new(
+        psb: bool,
+        comp: Compression,
+        data: &'a [u8],
+        w: usize,
+        h: usize,
+        plane: usize,
+        planes: usize,
+    ) -> Result<Self> {
         let rows = h.checked_mul(planes).ok_or(Error("size".into()))?;
         let src = match comp {
             Compression::Rle => {
@@ -90,8 +103,12 @@ impl<'a> PlaneRows<'a> {
         let c = &psd.layer_info.layers[layer].channels[ch];
         let (w, h) = (psd.row_bytes(c.width) as usize, c.height as usize);
         match c.compression(d) {
-            Some(comp @ (Compression::Rle | Compression::Raw)) => Self::new(psd.psb, comp, &d[c.span.start + 2..c.span.end], w, h, 0, 1),
-            Some(_) => Ok(PlaneRows { src: Source::Full(pixels::layer_channel(psd, d, layer, ch)?), w, h, next: 0, pos: 0 }),
+            Some(comp @ (Compression::Rle | Compression::Raw)) => {
+                Self::new(psd.psb, comp, &d[c.span.start + 2..c.span.end], w, h, 0, 1)
+            }
+            Some(_) => {
+                Ok(PlaneRows { src: Source::Full(pixels::layer_channel(psd, d, layer, ch)?), w, h, next: 0, pos: 0 })
+            }
             None => Ok(PlaneRows { src: Source::Full(vec![0; w * h]), w, h, next: 0, pos: 0 }),
         }
     }

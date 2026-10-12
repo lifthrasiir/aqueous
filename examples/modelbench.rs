@@ -52,7 +52,15 @@ fn main() {
         let mut rs: Vec<PlaneRows> = ids.iter().map(|&j| PlaneRows::channel(&psd, &d, i, j).unwrap()).collect();
         let mut rows = Vec::new();
         for _ in 0..l.rect.height() {
-            rows.push(rs.iter_mut().map(|r| { let mut v = vec![0; w]; r.next(&mut v).unwrap(); v }).collect());
+            rows.push(
+                rs.iter_mut()
+                    .map(|r| {
+                        let mut v = vec![0; w];
+                        r.next(&mut v).unwrap();
+                        v
+                    })
+                    .collect(),
+            );
         }
         groups.push((w, rows));
     }
@@ -112,7 +120,18 @@ fn main() {
             counts[t as usize][s as usize] += 1;
         }
         let mut w = BitW::default();
-        let freqs: Vec<Vec<u32>> = counts.iter().map(|c| if c.iter().any(|&x| x > 0) { rans::write_table(&mut w, c) } else { let mut f = vec![0; 256]; f[0] = rans::PROB_SCALE; f }).collect();
+        let freqs: Vec<Vec<u32>> = counts
+            .iter()
+            .map(|c| {
+                if c.iter().any(|&x| x > 0) {
+                    rans::write_table(&mut w, c)
+                } else {
+                    let mut f = vec![0; 256];
+                    f[0] = rans::PROB_SCALE;
+                    f
+                }
+            })
+            .collect();
         let bytes = rans::encode(&syms, &freqs);
         let tables = Tables::new(&freqs);
         let tb = best(&mut || {

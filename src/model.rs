@@ -133,9 +133,11 @@ fn count_same(a: &[u8], b: &[u8]) -> usize {
     let n = a.len().min(b.len());
     let mut i = 0;
     while i + 8 <= n {
-        let x = u64::from_ne_bytes(a[i..i + 8].try_into().unwrap()) ^ u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
+        let x =
+            u64::from_ne_bytes(a[i..i + 8].try_into().unwrap()) ^ u64::from_ne_bytes(b[i..i + 8].try_into().unwrap());
         if x != 0 {
-            return i + (if cfg!(target_endian = "little") { x.trailing_zeros() } else { x.leading_zeros() } / 8) as usize;
+            return i
+                + (if cfg!(target_endian = "little") { x.trailing_zeros() } else { x.leading_zeros() } / 8) as usize;
         }
         i += 8;
     }
@@ -164,13 +166,24 @@ struct Rows<'a> {
 /// context are made of, with transparent neighbors replaced (see [`code_sample`] for the
 /// flags and bounds).
 #[inline(always)]
-fn predict<const ALPHA: bool, const TOP: bool, const LEFT: bool, const RIGHT: bool>(q: &Rows, p: &[u8], x: usize, vis: u8) -> (u8, [u8; 4]) {
+fn predict<const ALPHA: bool, const TOP: bool, const LEFT: bool, const RIGHT: bool>(
+    q: &Rows,
+    p: &[u8],
+    x: usize,
+    vis: u8,
+) -> (u8, [u8; 4]) {
     debug_assert!(x < p.len() && (!LEFT || x > 0) && (!RIGHT || x + 1 < p.len()));
     // SAFETY: as in code_sample.
     unsafe {
         let g = |s: &[u8], i: usize| *s.get_unchecked(i);
         let up = q.up;
-        let mut a = if LEFT { g(p, x - 1) } else if !TOP { g(up, x) } else { 0 };
+        let mut a = if LEFT {
+            g(p, x - 1)
+        } else if !TOP {
+            g(up, x)
+        } else {
+            0
+        };
         let mut b = if !TOP { g(up, x) } else { a };
         let mut cc = if LEFT && !TOP { g(up, x - 1) } else { b };
         let d = if !TOP && RIGHT { g(up, x + 1) } else { b };
@@ -194,7 +207,15 @@ fn predict<const ALPHA: bool, const TOP: bool, const LEFT: bool, const RIGHT: bo
 /// left/right. Indices are in bounds: `x < w`, every row has `w` samples (but the optional
 /// ones, which are only read under their flags).
 #[inline(always)]
-fn code_sample<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, const TOP: bool, const LEFT: bool, const RIGHT: bool>(
+fn code_sample<
+    C: Coder,
+    const ALPHA: bool,
+    const FIRST: bool,
+    const HINT: bool,
+    const TOP: bool,
+    const LEFT: bool,
+    const RIGHT: bool,
+>(
     c: &mut C,
     q: &Rows,
     p: &mut [u8],
@@ -297,7 +318,12 @@ fn visibility<const ALPHA: bool, const TOP: bool, const LEFT: bool>(q: &Rows, x:
 /// Codes one row `p` of a plane, writing its residuals to `res`. The flags say which of the
 /// optional rows of `r` are there (alpha, first plane's residuals, hint), and whether this is
 /// the first row.
-fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, const TOP: bool>(c: &mut C, r: &RowCtx, p: &mut [u8], res: &mut [u8]) {
+fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, const TOP: bool>(
+    c: &mut C,
+    r: &RowCtx,
+    p: &mut [u8],
+    res: &mut [u8],
+) {
     let w = p.len();
     let res = &mut res[..w];
     let (al, alp) = match r.alpha {
@@ -325,10 +351,26 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
     };
     let run_t = RUN_BASE + r.kind * 2 * RUN_CTX;
     if w == 1 {
-        code_sample::<C, ALPHA, FIRST, HINT, TOP, false, false>(c, &q, p, res, 0, fx(0), visibility::<ALPHA, TOP, false>(&q, 0));
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, false, false>(
+            c,
+            &q,
+            p,
+            res,
+            0,
+            fx(0),
+            visibility::<ALPHA, TOP, false>(&q, 0),
+        );
         return;
     }
-    code_sample::<C, ALPHA, FIRST, HINT, TOP, false, true>(c, &q, p, res, 0, fx(0), visibility::<ALPHA, TOP, false>(&q, 0));
+    code_sample::<C, ALPHA, FIRST, HINT, TOP, false, true>(
+        c,
+        &q,
+        p,
+        res,
+        0,
+        fx(0),
+        visibility::<ALPHA, TOP, false>(&q, 0),
+    );
     let mut x = 1;
     let mut after_run = false;
     while x + 1 < w {
@@ -340,7 +382,8 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
                 let t = run_t + (ALPHA && al[x] == 0) as usize * RUN_CTX + run_ctx(stretch_above(q.up, x, v));
                 let mut n = 0;
                 loop {
-                    let avail = if C::DECODES { 0 } else { crate::packbits::count_equal(&p[x + n..(x + n + 255).min(w)], v) };
+                    let avail =
+                        if C::DECODES { 0 } else { crate::packbits::count_equal(&p[x + n..(x + n + 255).min(w)], v) };
                     let s = (c.code(t, avail as u8) as usize).min(w - x - n);
                     if C::DECODES {
                         p[x + n..x + n + s].fill(v);
@@ -357,11 +400,27 @@ fn code_row<C: Coder, const ALPHA: bool, const FIRST: bool, const HINT: bool, co
             }
         }
         after_run = false;
-        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, true>(c, &q, p, res, x, fx(x), visibility::<ALPHA, TOP, true>(&q, x));
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, true>(
+            c,
+            &q,
+            p,
+            res,
+            x,
+            fx(x),
+            visibility::<ALPHA, TOP, true>(&q, x),
+        );
         x += 1;
     }
     if x + 1 == w {
-        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, false>(c, &q, p, res, x, fx(x), visibility::<ALPHA, TOP, true>(&q, x));
+        code_sample::<C, ALPHA, FIRST, HINT, TOP, true, false>(
+            c,
+            &q,
+            p,
+            res,
+            x,
+            fx(x),
+            visibility::<ALPHA, TOP, true>(&q, x),
+        );
     }
 }
 
@@ -385,15 +444,32 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
     let [r0, r1, r2] = &mut k.res;
     let [q0, q1, q2] = &k.q;
     let how = k.how;
-    let pixel = |c: &mut C, p0: &mut [u8], p1: &mut [u8], p2: &mut [u8], r0: &mut [u8], r1: &mut [u8], r2: &mut [u8], x: usize, left: bool, right: bool| {
+    let pixel = |c: &mut C,
+                 p0: &mut [u8],
+                 p1: &mut [u8],
+                 p2: &mut [u8],
+                 r0: &mut [u8],
+                 r1: &mut [u8],
+                 r2: &mut [u8],
+                 x: usize,
+                 left: bool,
+                 right: bool| {
         let vis = if left { visibility::<ALPHA, TOP, true>(q0, x) } else { visibility::<ALPHA, TOP, false>(q0, x) };
         macro_rules! one {
             ($c:expr, $cc:ty, $q:expr, $p:expr, $r:expr, $first:literal, $f:expr) => {
                 match (left, right) {
-                    (true, true) => code_sample::<$cc, ALPHA, $first, HINT, TOP, true, true>($c, $q, $p, $r, x, $f, vis),
-                    (false, true) => code_sample::<$cc, ALPHA, $first, HINT, TOP, false, true>($c, $q, $p, $r, x, $f, vis),
-                    (true, false) => code_sample::<$cc, ALPHA, $first, HINT, TOP, true, false>($c, $q, $p, $r, x, $f, vis),
-                    (false, false) => code_sample::<$cc, ALPHA, $first, HINT, TOP, false, false>($c, $q, $p, $r, x, $f, vis),
+                    (true, true) => {
+                        code_sample::<$cc, ALPHA, $first, HINT, TOP, true, true>($c, $q, $p, $r, x, $f, vis)
+                    }
+                    (false, true) => {
+                        code_sample::<$cc, ALPHA, $first, HINT, TOP, false, true>($c, $q, $p, $r, x, $f, vis)
+                    }
+                    (true, false) => {
+                        code_sample::<$cc, ALPHA, $first, HINT, TOP, true, false>($c, $q, $p, $r, x, $f, vis)
+                    }
+                    (false, false) => {
+                        code_sample::<$cc, ALPHA, $first, HINT, TOP, false, false>($c, $q, $p, $r, x, $f, vis)
+                    }
                 }
             };
         }
@@ -472,9 +548,16 @@ fn code_colors<C: Coder, const ALPHA: bool, const HINT: bool, const TOP: bool>(c
         }
         if !TOP && !after_run {
             // The rows above first (see run_above).
-            let flat = |q: &Rows| q.up.get(x - 1..x + RUN_LOOK).is_some_and(|s| u32::from_ne_bytes(s[1..5].try_into().unwrap()) == u32::from_ne_bytes([s[0]; 4]));
-            if flat(q0) && (how[1] == 0 || flat(q1)) && (how[2] == 0 || flat(q2))
-                && p0[x - 1] == q0.up[x - 1] && (how[1] == 0 || p1[x - 1] == q1.up[x - 1]) && (how[2] == 0 || p2[x - 1] == q2.up[x - 1])
+            let flat = |q: &Rows| {
+                q.up.get(x - 1..x + RUN_LOOK)
+                    .is_some_and(|s| u32::from_ne_bytes(s[1..5].try_into().unwrap()) == u32::from_ne_bytes([s[0]; 4]))
+            };
+            if flat(q0)
+                && (how[1] == 0 || flat(q1))
+                && (how[2] == 0 || flat(q2))
+                && p0[x - 1] == q0.up[x - 1]
+                && (how[1] == 0 || p1[x - 1] == q1.up[x - 1])
+                && (how[2] == 0 || p2[x - 1] == q2.up[x - 1])
             {
                 let v = [p0[x - 1], p1[x - 1], p2[x - 1]];
                 let t = k.run_t + (ALPHA && q0.al[x] == 0) as usize * RUN_CTX + run_ctx(stretch_above(q0.up, x, v[0]));
@@ -544,7 +627,11 @@ fn code_colors_any<C: Coder>(c: &mut C, k: &mut Colors, alpha: bool, hint: bool,
 fn code_row_any<C: Coder>(c: &mut C, r: &RowCtx, p: &mut [u8], res: &mut [u8]) {
     macro_rules! go {
         ($a:literal, $f:literal, $h:literal) => {
-            if r.top { code_row::<C, $a, $f, $h, true>(c, r, p, res) } else { code_row::<C, $a, $f, $h, false>(c, r, p, res) }
+            if r.top {
+                code_row::<C, $a, $f, $h, true>(c, r, p, res)
+            } else {
+                code_row::<C, $a, $f, $h, false>(c, r, p, res)
+            }
         };
     }
     match (r.alpha.is_some(), r.first.is_some(), r.hint.is_some()) {
@@ -601,7 +688,14 @@ impl GroupCoder {
     }
 
     /// Codes row `k` of `rows` on its own, as a plane of `kind`.
-    fn code_plane<C: Coder>(&mut self, c: &mut C, rows: &mut [Vec<u8>], hint: Option<&[Vec<u8>]>, k: usize, kind: usize) {
+    fn code_plane<C: Coder>(
+        &mut self,
+        c: &mut C,
+        rows: &mut [Vec<u8>],
+        hint: Option<&[Vec<u8>]>,
+        k: usize,
+        kind: usize,
+    ) {
         let coded = self.coded(k);
         let n = rows.len();
         let colors = n - self.has_alpha as usize;
@@ -672,7 +766,15 @@ impl GroupCoder {
                 copy(rows, 0, j);
             }
             let w = self.w;
-            let how: [u8; 3] = std::array::from_fn(|k| if self.coded(k) { 1 } else if k == 0 || self.same_as[k].is_none() { 2 } else { 0 });
+            let how: [u8; 3] = std::array::from_fn(|k| {
+                if self.coded(k) {
+                    1
+                } else if k == 0 || self.same_as[k].is_none() {
+                    2
+                } else {
+                    0
+                }
+            });
             let (cr, ar) = rows.split_at_mut(3);
             let (al, alp) = if self.has_alpha { (&ar[0][..w], &self.prev[3][..w]) } else { (&[][..], &[][..]) };
             let hint_rows = hint.as_deref();
@@ -712,7 +814,15 @@ impl GroupCoder {
                     copy(rows, k, j);
                 }
                 let is_alpha = self.has_alpha && k == colors;
-                let kind = if lone { 3 } else if is_alpha { 2 } else if k == 0 { 0 } else { 1 };
+                let kind = if lone {
+                    3
+                } else if is_alpha {
+                    2
+                } else if k == 0 {
+                    0
+                } else {
+                    1
+                };
                 // Planes not coded are walked only for the first color plane's residuals.
                 if !(self.coded(k) || kind == 0 && colors > 1) {
                     continue;
@@ -820,7 +930,16 @@ pub struct Player<'a> {
 
 impl<'a> Player<'a> {
     pub fn new(src: &'a [u8]) -> Player<'a> {
-        let mut p = Player { src, at: 0, tables: Tables::new(&[]), map: vec![0; TABLES], dec: Decoder::new(&[]), left: 0, failed: false, ended: false };
+        let mut p = Player {
+            src,
+            at: 0,
+            tables: Tables::new(&[]),
+            map: vec![0; TABLES],
+            dec: Decoder::new(&[]),
+            left: 0,
+            failed: false,
+            ended: false,
+        };
         p.next_chunk();
         p
     }

@@ -30,7 +30,8 @@ pub fn count_equal(p: &[u8], v: u8) -> usize {
     while n + 8 <= p.len() {
         let x = u64::from_ne_bytes(p[n..n + 8].try_into().unwrap()) ^ pat;
         if x != 0 {
-            return n + (if cfg!(target_endian = "little") { x.trailing_zeros() } else { x.leading_zeros() } / 8) as usize;
+            return n
+                + (if cfg!(target_endian = "little") { x.trailing_zeros() } else { x.leading_zeros() } / 8) as usize;
         }
         n += 8;
     }
@@ -228,7 +229,8 @@ pub fn forced_splits(src: &[u8], out: &mut Vec<usize>) {
         let h = src[t] as i8;
         let (lit, len) = if h >= 0 { (true, h as usize + 1) } else { (false, (1 - h as i32) as usize) };
         if let Some((plit, pv, pl)) = prev
-            && pl < 128 && (!plit && pv == src[t + 1] || plit && (lit || len == 2))
+            && pl < 128
+            && (!plit && pv == src[t + 1] || plit && (lit || len == 2))
         {
             out.push(pos);
         }
@@ -252,7 +254,10 @@ pub fn infer_tiles_from(mut splits: Vec<usize>) -> Encoder {
     splits.sort_unstable();
     splits.dedup();
     let explained = |phase: usize, period: usize| {
-        splits.iter().filter(|&&s| if s < phase { s % 128 == 0 } else { ((s - phase) % period).is_multiple_of(128) }).count()
+        splits
+            .iter()
+            .filter(|&&s| if s < phase { s % 128 == 0 } else { ((s - phase) % period).is_multiple_of(128) })
+            .count()
     };
     let Some(&s0) = splits.iter().find(|&&s| s % 128 != 0) else { return NO_TILES };
     let (mut phase, mut period) = (usize::MAX, usize::MAX);
@@ -379,7 +384,9 @@ mod tests {
         let mut row: Vec<u8> = (0..1000u32).map(|i| (i * i / 7 % 5) as u8).collect();
         row.extend(std::iter::repeat_n(9, 300));
         row.extend((0..300u32).map(|i| (i % 251) as u8));
-        for enc in [NO_TILES, Encoder::Photoshop { phase: 37, period: 368 }, Encoder::Greedy { min_run: 3, split_rest: true }] {
+        for enc in
+            [NO_TILES, Encoder::Photoshop { phase: 37, period: 368 }, Encoder::Greedy { min_run: 3, split_rest: true }]
+        {
             roundtrip(enc, &row);
             roundtrip(enc, &[]);
             roundtrip(enc, &[1]);
@@ -428,7 +435,12 @@ mod tests {
             let mut row = Vec::with_capacity(n);
             while row.len() < n {
                 let v = (next() % 4) as u8;
-                let len = match next() % 4 { 0 => 1, 1 => 2, 2 => 3, _ => 1 + next() as usize % 140 };
+                let len = match next() % 4 {
+                    0 => 1,
+                    1 => 2,
+                    2 => 3,
+                    _ => 1 + next() as usize % 140,
+                };
                 row.extend(std::iter::repeat_n(v, len.min(n - row.len())));
             }
             let (mut a, mut b) = (Vec::new(), Vec::new());
@@ -481,7 +493,12 @@ mod tests {
             let mut row = Vec::with_capacity(n);
             while row.len() < n {
                 let v = (next() % 4) as u8;
-                let len = match next() % 4 { 0 => 1, 1 => 2, 2 => 3, _ => 1 + next() as usize % 400 };
+                let len = match next() % 4 {
+                    0 => 1,
+                    1 => 2,
+                    2 => 3,
+                    _ => 1 + next() as usize % 400,
+                };
                 row.extend(std::iter::repeat_n(v, len.min(n - row.len())));
             }
             for (min_run, split_rest) in [(2, false), (2, true), (3, false), (3, true)] {

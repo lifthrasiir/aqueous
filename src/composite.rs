@@ -92,10 +92,36 @@ fn blend_fn(mode: &[u8; 4]) -> Option<Option<BlendFn>> {
         b"over" => |b, s| sep(b, s, |b, s| if b <= 0.5 { 2.0 * b * s } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - s) }),
         b"hLit" => |b, s| sep(b, s, |b, s| if s <= 0.5 { 2.0 * b * s } else { 1.0 - 2.0 * (1.0 - b) * (1.0 - s) }),
         b"sLit" => |b, s| {
-            sep(b, s, |b, s| if s <= 0.5 { 2.0 * b * s + b * b * (1.0 - 2.0 * s) } else { 2.0 * b * (1.0 - s) + b.sqrt() * (2.0 * s - 1.0) })
+            sep(b, s, |b, s| {
+                if s <= 0.5 {
+                    2.0 * b * s + b * b * (1.0 - 2.0 * s)
+                } else {
+                    2.0 * b * (1.0 - s) + b.sqrt() * (2.0 * s - 1.0)
+                }
+            })
         },
-        b"div " => |b, s| sep(b, s, |b, s| if b == 0.0 { 0.0 } else if s >= 1.0 { 1.0 } else { (b / (1.0 - s)).min(1.0) }),
-        b"idiv" => |b, s| sep(b, s, |b, s| if b >= 1.0 { 1.0 } else if s <= 0.0 { 0.0 } else { 1.0 - ((1.0 - b) / s).min(1.0) }),
+        b"div " => |b, s| {
+            sep(b, s, |b, s| {
+                if b == 0.0 {
+                    0.0
+                } else if s >= 1.0 {
+                    1.0
+                } else {
+                    (b / (1.0 - s)).min(1.0)
+                }
+            })
+        },
+        b"idiv" => |b, s| {
+            sep(b, s, |b, s| {
+                if b >= 1.0 {
+                    1.0
+                } else if s <= 0.0 {
+                    0.0
+                } else {
+                    1.0 - ((1.0 - b) / s).min(1.0)
+                }
+            })
+        },
         b"lddg" => |b, s| sep(b, s, |b, s| (b + s).min(1.0)),
         b"lbrn" => |b, s| sep(b, s, |b, s| (b + s - 1.0).max(0.0)),
         b"diff" => |b, s| sep(b, s, |b, s| (b - s).abs()),
@@ -266,7 +292,9 @@ impl<'a> RowRenderer<'a> {
         }
         // Pass-through groups at full opacity are rendered straight into their parent; their
         // folder record then has nothing to do.
-        let direct = |f: usize| f != usize::MAX && !layers[f].hidden() && &layers[f].blend == b"pass" && layers[f].opacity == 255;
+        let direct = |f: usize| {
+            f != usize::MAX && !layers[f].hidden() && &layers[f].blend == b"pass" && layers[f].opacity == 255
+        };
         let mut ops = Vec::new();
         let mut rows = Vec::with_capacity(layers.len());
         let mut skip_folder = vec![false; layers.len()];
@@ -314,7 +342,14 @@ impl<'a> RowRenderer<'a> {
                 && mk.flags & 2 == 0
             {
                 let c = &l.channels[j];
-                mask = Some((ch(j)?, mk.rect.top as i64, mk.rect.left as i64, c.width as usize, c.height as usize, mk.default_color));
+                mask = Some((
+                    ch(j)?,
+                    mk.rect.top as i64,
+                    mk.rect.left as i64,
+                    c.width as usize,
+                    c.height as usize,
+                    mk.default_color,
+                ));
             }
             if !l.hidden() {
                 if blend_fn(&l.blend).is_none() {
@@ -444,15 +479,16 @@ impl<'a> RowRenderer<'a> {
                     // Bring the cursors to this row (rows above the canvas are skipped).
                     let ly = ly as usize;
                     let [rb, gb, bb, ab, mb] = &mut self.buf;
-                    let decode = |p: &mut PlaneRows, out: &mut Vec<u8>, rows: usize, row: usize, n: usize| -> Result<()> {
-                        while p.rows_left() > rows - row {
-                            p.skip()?;
-                        }
-                        if out.len() < n {
-                            out.resize(n, 0);
-                        }
-                        p.next(&mut out[..n])
-                    };
+                    let decode =
+                        |p: &mut PlaneRows, out: &mut Vec<u8>, rows: usize, row: usize, n: usize| -> Result<()> {
+                            while p.rows_left() > rows - row {
+                                p.skip()?;
+                            }
+                            if out.len() < n {
+                                out.resize(n, 0);
+                            }
+                            p.next(&mut out[..n])
+                        };
                     // The layer's columns on the canvas (possibly none).
                     let x0 = l.left.clamp(0, w as i64) as usize;
                     let x1 = (l.left + l.w as i64).clamp(x0 as i64, w as i64) as usize;

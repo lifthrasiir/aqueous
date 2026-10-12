@@ -235,7 +235,14 @@ fn duplicate_layers_and_gray_layer() {
 fn same_bytes_other_size_is_no_copy() {
     // Raw channels with equal bytes but different sizes (100 x 2 and 50 x 4).
     let data = image(100, 2, 5);
-    let l = |w, h| Layer { top: 0, left: 0, w, h, channels: vec![(0, data.clone()), (1, data.clone()), (2, data.clone())], mask: None };
+    let l = |w, h| Layer {
+        top: 0,
+        left: 0,
+        w,
+        h,
+        channels: vec![(0, data.clone()), (1, data.clone()), (2, data.clone())],
+        mask: None,
+    };
     check(&psd(100, 4, &[l(100, 2), l(50, 4)], packbits::NO_TILES, false, &[0, 1]));
 }
 
@@ -245,7 +252,14 @@ fn layer_outside_the_canvas() {
     let (w, h) = (120, 20);
     let mut ls = layers(w, h, true);
     for (k, (top, left)) in [(0, 500), (300, 0), (0, -400)].into_iter().enumerate() {
-        ls.push(Layer { top, left, w: 50, h: 10, channels: ls[k % 2].channels.iter().map(|(id, d)| (*id, d[..500].to_vec())).collect(), mask: None });
+        ls.push(Layer {
+            top,
+            left,
+            w: 50,
+            h: 10,
+            channels: ls[k % 2].channels.iter().map(|(id, d)| (*id, d[..500].to_vec())).collect(),
+            mask: None,
+        });
     }
     // A composite the renderer predicts: the hint is used.
     check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
@@ -256,7 +270,9 @@ fn masks_anywhere() {
     // User masks left of, right of, inside and around their layers.
     let (w, h) = (100, 16);
     let mut ls = layers(w, h, true);
-    for (k, (mtop, mleft, mw, mh, def)) in [(0, -300, 40, 8, 0), (2, 500, 30, 4, 255), (3, 10, 20, 6, 0), (-5, -5, 200, 40, 255)].into_iter().enumerate() {
+    for (k, (mtop, mleft, mw, mh, def)) in
+        [(0, -300, 40, 8, 0), (2, 500, 30, 4, 255), (3, 10, 20, 6, 0), (-5, -5, 200, 40, 255)].into_iter().enumerate()
+    {
         let mut channels = ls[k % 2].channels.clone();
         channels.push((-2, image(mw, mh, 50 + k as u32)));
         ls.push(Layer { top: k as i32, left: 3, w, h, channels, mask: Some((mtop, mleft, mw, mh, def)) });
@@ -271,6 +287,7 @@ fn repeated_rows_with_exceptions() {
     let (w, h) = (300, 24);
     let row: Vec<u8> = (0..w).map(|x| if x < 100 { 7 } else { (x * 13 % 256) as u8 }).collect();
     let plane: Vec<u8> = row.iter().copied().cycle().take(w * h).collect();
-    let l = Layer { top: 0, left: 0, w, h, channels: vec![(0, plane.clone()), (1, plane.clone()), (2, plane)], mask: None };
+    let l =
+        Layer { top: 0, left: 0, w, h, channels: vec![(0, plane.clone()), (1, plane.clone()), (2, plane)], mask: None };
     check(&psd(w, h, &[l], packbits::NO_TILES, true, &[]));
 }

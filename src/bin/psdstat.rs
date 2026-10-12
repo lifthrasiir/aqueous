@@ -240,7 +240,8 @@ fn main() -> ExitCode {
     let total = all.total() as f64;
     println!("{:<32} {:>14} {:>7} {:>14} {:>7} {:>8}", "category", "bytes", "%", "raw", "ratio", "count");
     for (k, c) in &all.cells {
-        let ratio = if c.raw > 0 && c.bytes > 0 { format!("{:.3}", c.bytes as f64 / c.raw as f64) } else { String::new() };
+        let ratio =
+            if c.raw > 0 && c.bytes > 0 { format!("{:.3}", c.bytes as f64 / c.raw as f64) } else { String::new() };
         println!(
             "{k:<32} {:>14} {:>7.3} {:>14} {:>7} {:>8}",
             c.bytes,

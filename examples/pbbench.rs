@@ -38,6 +38,11 @@ fn main() {
             same += (out == r) as usize;
         }
         let te = t.elapsed().as_secs_f64() - td;
-        println!("{} rows, {raw} bytes: decode {:.2} GB/s, encode+compare {:.2} GB/s ({same} same)", rows.len(), raw as f64 / td / 1e9, raw as f64 / te / 1e9);
+        println!(
+            "{} rows, {raw} bytes: decode {:.2} GB/s, encode+compare {:.2} GB/s ({same} same)",
+            rows.len(),
+            raw as f64 / td / 1e9,
+            raw as f64 / te / 1e9
+        );
     }
 }

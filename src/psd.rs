@@ -246,8 +246,19 @@ impl Psd {
 pub fn long_key(k: &[u8; 4]) -> bool {
     matches!(
         k,
-        b"LMsk" | b"Lr16" | b"Lr32" | b"Layr" | b"Mt16" | b"Mt32" | b"Mtrn" | b"Alph" | b"FMsk"
-            | b"lnk2" | b"FEid" | b"FXid" | b"PxSD"
+        b"LMsk"
+            | b"Lr16"
+            | b"Lr32"
+            | b"Layr"
+            | b"Mt16"
+            | b"Mt32"
+            | b"Mtrn"
+            | b"Alph"
+            | b"FMsk"
+            | b"lnk2"
+            | b"FEid"
+            | b"FXid"
+            | b"PxSD"
     )
 }
 
@@ -340,18 +351,7 @@ fn layer_info(rd: &mut Rd, psb: bool) -> Result<LayerInfo> {
         let np = (1 + nl).next_multiple_of(4) - 1 - nl;
         ex.skip(np.min(ex.left()))?;
         let tags = tags(&mut ex, psb)?;
-        layers.push(Layer {
-            rect,
-            blend,
-            opacity,
-            clipping,
-            flags,
-            name,
-            mask,
-            channels,
-            tags,
-            record: rs..rd.p,
-        });
+        layers.push(Layer { rect, blend, opacity, clipping, flags, name, mask, channels, tags, record: rs..rd.p });
     }
     let mut lens = lens.into_iter();
     for l in &mut layers {
@@ -478,7 +478,8 @@ pub fn linked(psd: &Psd, d: &[u8]) -> Vec<Linked> {
         let mut p = t.data.start;
         while t.data.end - p >= 8 {
             let n = u64::from_be_bytes(d[p..p + 8].try_into().unwrap());
-            let Some(end) = usize::try_from(n).ok().and_then(|n| (p + 8).checked_add(n)).filter(|&e| e <= t.data.end) else {
+            let Some(end) = usize::try_from(n).ok().and_then(|n| (p + 8).checked_add(n)).filter(|&e| e <= t.data.end)
+            else {
                 break;
             };
             let mut rd = Rd { d, base: p + 8, p: p + 8, end };

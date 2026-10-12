@@ -21,8 +21,8 @@ use std::process::ExitCode;
 
 use psd_recons::packbits::{self, Encoder};
 use psd_recons::psd::Compression;
-use psd_recons::{composite, pixels};
 use psd_recons::psd::Psd;
+use psd_recons::{composite, pixels};
 
 fn check(psd: &Psd, d: &[u8]) -> Vec<String> {
     let mut errs = Vec::new();

@@ -76,14 +76,7 @@ fn unpredict(buf: &mut [u8], width: usize, depth: u16) {
 
 /// Decodes `data` (after the compression field) holding `planes` planes of `width` x
 /// `height` pixels.
-fn decode_planes(
-    psd: &Psd,
-    comp: Compression,
-    data: &[u8],
-    width: u64,
-    height: u64,
-    planes: u64,
-) -> Result<Vec<u8>> {
+fn decode_planes(psd: &Psd, comp: Compression, data: &[u8], width: u64, height: u64, planes: u64) -> Result<Vec<u8>> {
     let rb = psd.row_bytes(width) as usize;
     let size = rb * height as usize * planes as usize;
     match comp {
@@ -103,7 +96,11 @@ fn decode_planes(
             let mut p = rows * cb;
             for r in 0..rows {
                 let c = &data[r * cb..r * cb + cb];
-                let n = if cb == 2 { u16::from_be_bytes([c[0], c[1]]) as usize } else { u32::from_be_bytes(c.try_into().unwrap()) as usize };
+                let n = if cb == 2 {
+                    u16::from_be_bytes([c[0], c[1]]) as usize
+                } else {
+                    u32::from_be_bytes(c.try_into().unwrap()) as usize
+                };
                 let Some(src) = data.get(p..p + n) else { return err("RLE row truncated") };
                 let before = out.len();
                 if !unpackbits(src, &mut out) || out.len() - before != rb {

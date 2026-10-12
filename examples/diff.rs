@@ -11,7 +11,17 @@ fn main() {
     println!("channels {} merged_alpha {} layers {}", p.channels, p.layer_info.merged_alpha, p.layer_info.layers.len());
     for (i, l) in p.layer_info.layers.iter().enumerate() {
         let ids: Vec<i16> = l.channels.iter().map(|c| c.id).collect();
-        println!("L{i} {:?} {} op {} clip {} flags {:x} ch {:?} mask {:?} tags {:?}", String::from_utf8_lossy(&l.name), String::from_utf8_lossy(&l.blend), l.opacity, l.clipping, l.flags, ids, l.mask, l.tags.iter().map(|t| String::from_utf8_lossy(&t.key).into_owned()).collect::<Vec<_>>());
+        println!(
+            "L{i} {:?} {} op {} clip {} flags {:x} ch {:?} mask {:?} tags {:?}",
+            String::from_utf8_lossy(&l.name),
+            String::from_utf8_lossy(&l.blend),
+            l.opacity,
+            l.clipping,
+            l.flags,
+            ids,
+            l.mask,
+            l.tags.iter().map(|t| String::from_utf8_lossy(&t.key).into_owned()).collect::<Vec<_>>()
+        );
     }
     let r = composite::render(&p, &d, wa, &mut Default::default()).unwrap();
     let mut shown = 0;
