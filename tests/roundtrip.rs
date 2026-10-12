@@ -191,7 +191,7 @@ fn coded_smaller() {
     cs.push((b"IEND", vec![]));
     let f = png(&cs);
     let c = roundtrip(&f);
-    assert!(c.len() < f.len() && c[5] == 1, "{} -> {}", f.len(), c.len());
+    assert!(c.len() < f.len() && c[8] == 1, "{} -> {}", f.len(), c.len());
 }
 
 #[test]
@@ -210,7 +210,7 @@ fn several_zlib_streams() {
         cs.push((b"IEND", vec![]));
         let f = png(&cs);
         let c = roundtrip(&f);
-        assert!(c.len() < f.len() && c[5] == 1);
+        assert!(c.len() < f.len() && c[8] == 1);
     }
 }
 
@@ -361,7 +361,7 @@ fn threads_single_large_image() {
         cs.push((b"IEND", vec![]));
         let f = png(&cs);
         let c = same_for_threads(&f);
-        assert!(c[5] == 1, "coded");
+        assert!(c[8] == 1, "coded");
     }
 }
 
@@ -377,14 +377,14 @@ fn threads_several_zlib_streams() {
     cs.extend(idats(&z, 20000));
     cs.push((b"IEND", vec![]));
     let c = same_for_threads(&png(&cs));
-    assert!(c[5] == 1);
+    assert!(c[8] == 1);
 }
 
 #[test]
 fn threads_apng() {
     let f = apng(&[(300, 200), (250, 180), (300, 200), (120, 100)], 21);
     let c = same_for_threads(&f);
-    assert!(c[5] == 1);
+    assert!(c[8] == 1);
     // Frames past the image-parallel threshold of the rows as well.
     same_for_threads(&apng(&[(500, 400), (500, 400), (400, 300)], 31));
 }
@@ -438,4 +438,58 @@ fn threads_corrupt_input_same_outcome() {
         let serial = png_recons::decompress(&c[..cut]).ok();
         assert!(png_recons::decompress_threads(&c[..cut], 4).ok() == serial);
     }
+}
+
+/// The header (magic, version, mode), and nothing may follow the skeleton, a record's
+/// parts or the last record.
+#[test]
+fn header_and_trailing_bytes() {
+    let data = image_data(60, 40, 8, 2, false, 3);
+    let mut cs = vec![(b"IHDR", ihdr(60, 40, 8, 2, 0))];
+    cs.extend(idats(&zlib(&zlib6(), &data), 1 << 20));
+    cs.push((b"IEND", vec![]));
+    let f = png(&cs);
+    let c = png_recons::compress(&f);
+    assert_eq!(c[..9], [0x69, 0x04, 0x7f, 0xa7, 0x59, 0xe0, 0, 0, 1]);
+    assert_eq!(png_recons::decompress(&c).unwrap(), f);
+    for i in 0..8 {
+        let mut d = c.clone();
+        d[i] ^= 1;
+        assert!(png_recons::decompress(&d).is_err(), "header byte {i}");
+    }
+    let mut d = c.clone();
+    d.push(0);
+    assert!(png_recons::decompress(&d).is_err(), "after the last record");
+
+    // The single record: its length, mode 1, then three varint-framed parts.
+    let mut at = 9 + 8;
+    let varint = |src: &[u8], at: &mut usize| png_recons::container::get_varint(src, at).unwrap() as usize;
+    let n = varint(&c, &mut at);
+    let sk_at = at;
+    at += n;
+    let rec_at = at;
+    assert_eq!(u32::from_le_bytes(c[at..at + 4].try_into().unwrap()) as usize, c.len() - at - 4);
+    assert_eq!(c[at + 4], 1);
+    let mut d = c.clone();
+    d.push(0);
+    d[rec_at..rec_at + 4].copy_from_slice(&((c.len() - rec_at - 3) as u32).to_le_bytes());
+    assert!(png_recons::decompress(&d).is_err(), "after a record's model payload");
+
+    // The skeleton with a byte after it.
+    let mut sk = zstd::bulk::decompress(&c[sk_at..sk_at + n], 1 << 20).unwrap();
+    sk.push(0);
+    let z = zstd::bulk::compress(&sk, 19).unwrap();
+    let mut d = c[..9 + 8].to_vec();
+    png_recons::container::put_varint(&mut d, z.len() as u64);
+    d.extend_from_slice(&z);
+    d.extend_from_slice(&c[rec_at..]);
+    assert!(png_recons::decompress(&d).is_err(), "after the skeleton");
+    // The same rebuilt without the extra byte is fine (the test edits what it means to).
+    sk.pop();
+    let z = zstd::bulk::compress(&sk, 19).unwrap();
+    let mut d = c[..9 + 8].to_vec();
+    png_recons::container::put_varint(&mut d, z.len() as u64);
+    d.extend_from_slice(&z);
+    d.extend_from_slice(&c[rec_at..]);
+    assert_eq!(png_recons::decompress(&d).unwrap(), f);
 }

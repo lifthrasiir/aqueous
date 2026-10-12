@@ -24,8 +24,8 @@
 use crate::filter;
 use crate::rans::{self, BitR, BitW, Decoder, Tables};
 use flate_recons::deflate::Token;
-use flate_recons::inflate::{self, Sink};
 use flate_recons::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
+use flate_recons::inflate::{self, Sink};
 
 #[derive(Debug, Clone, Copy)]
 pub struct Pass {

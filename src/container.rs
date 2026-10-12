@@ -7,8 +7,10 @@
 //! files). Every image is coded on its own, or kept as it is if coding does not make it
 //! smaller.
 //!
+//! See FORMAT.md for the full specification.
+//!
 //! ```text
-//! "PNGR" version(u8) mode(u8)
+//! magic 69 04 7f a7 59 e0 ("aQR/p1ng" in base64), version(u16 LE) = 0, mode(u8)
 //! mode 0 (stored): the input verbatim (when coding does not make it smaller)
 //! mode 1 (coded):
 //!   u64 LE xxh3 of the original (checked after decompression)
@@ -30,8 +32,17 @@ use flate_recons::deflate::{Block, Body, Stream, Token};
 use flate_recons::header;
 use recons_common::varint;
 
-const MAGIC: &[u8; 4] = b"PNGR";
-const VERSION: u8 = 2;
+const MAGIC: [u8; 6] = [0x69, 0x04, 0x7f, 0xa7, 0x59, 0xe0];
+const VERSION: u16 = 0;
+/// The magic, the version and the mode.
+pub const HEADER_LEN: usize = 9;
+
+/// Appends the file header with mode `mode`.
+fn put_header(out: &mut Vec<u8>, mode: u8) {
+    out.extend_from_slice(&MAGIC);
+    out.extend_from_slice(&VERSION.to_le_bytes());
+    out.push(mode);
+}
 
 pub fn put_varint(out: &mut Vec<u8>, v: u64) {
     varint::put(out, v)
@@ -90,7 +101,7 @@ fn compress_timed_threads(file: &[u8], ph: &mut Phases, threads: usize) -> Vec<u
         (r, ph2)
     }) {
         // Coding must save something over storing.
-        Ok((Ok(v), p)) if v.len() < file.len() + 6 => {
+        Ok((Ok(v), p)) if v.len() < file.len() + HEADER_LEN => {
             *ph = p;
             v
         }
@@ -102,16 +113,14 @@ fn compress_timed_threads(file: &[u8], ph: &mut Phases, threads: usize) -> Vec<u
 /// storing the file would hide it).
 pub fn try_compress(file: &[u8]) -> Vec<u8> {
     match coded(file, &mut Phases::default(), 1) {
-        Ok(v) if v.len() < file.len() + 6 => v,
+        Ok(v) if v.len() < file.len() + HEADER_LEN => v,
         _ => stored(file),
     }
 }
 
 fn stored(file: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(file.len() + 6);
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.push(0);
+    let mut out = Vec::with_capacity(file.len() + HEADER_LEN);
+    put_header(&mut out, 0);
     out.extend_from_slice(file);
     out
 }
@@ -201,9 +210,7 @@ fn coded(file: &[u8], ph: &mut Phases, threads: usize) -> Result<Vec<u8>> {
     let z = zstd::bulk::compress(&sk, 19).expect("zstd");
     // Records are kept only if smaller than their payload: the output stays within this.
     let mut out = Vec::with_capacity(file.len() + z.len() + 64);
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.push(1);
+    put_header(&mut out, 1);
     out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
     put_varint(&mut out, z.len() as u64);
     out.extend_from_slice(&z);
@@ -307,9 +314,7 @@ fn coded_threads(file: &[u8], chunks: &[png::Chunk], classes: &[u8], sk: &[u8], 
         (z, hash, recs)
     });
     let mut out = Vec::with_capacity(file.len() + z.len() + 64);
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
-    out.push(1);
+    put_header(&mut out, 1);
     out.extend_from_slice(&hash.to_le_bytes());
     put_varint(&mut out, z.len() as u64);
     out.extend_from_slice(&z);
@@ -325,11 +330,24 @@ fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases, threads: usize, rec:
     let kind = if ih.depth == 8 && matches!(ih.color, 0 | 2 | 4 | 6) { Kind::Image } else { Kind::Bytes };
     let t1 = std::time::Instant::now();
     let enc = model::encode_threads(kind, &g, payload, threads)?;
+    // The layout codes the data length in 32 bits.
+    if enc.len > u32::MAX as usize {
+        return Err(Error::Unsupported("image data of 4 GiB or more"));
+    }
     if std::env::var_os("PNGR_DEBUG").is_some() {
         eprintln!("  {} zlib streams, {} bytes of data", enc.streams.len(), enc.len);
     }
     let t2 = std::time::Instant::now();
+    let t3 = write_record(kind, enc, threads, rec);
+    let t4 = std::time::Instant::now();
+    ph.model += (t2 - t1).as_secs_f64();
+    ph.layout += (t3 - t2).as_secs_f64();
+    ph.entropy += (t4 - t3).as_secs_f64();
+    Ok(())
+}
 
+/// Appends the coded record of `enc` to `rec`; returns when the entropy coding started.
+fn write_record(kind: Kind, enc: model::Encoded, threads: usize, rec: &mut Vec<u8>) -> std::time::Instant {
     // Layout.
     let mut lw = BitW::default();
     lw.bits(1, (kind == Kind::Bytes) as u32);
@@ -402,11 +420,7 @@ fn image_record(ih: &Ihdr, payload: &[u8], ph: &mut Phases, threads: usize, rec:
         rec.extend_from_slice(part);
     }
     enc.rec.finish_threads(rec, threads);
-    let t4 = std::time::Instant::now();
-    ph.model += (t2 - t1).as_secs_f64();
-    ph.layout += (t3 - t2).as_secs_f64();
-    ph.entropy += (t4 - t3).as_secs_f64();
-    Ok(())
+    t3
 }
 
 thread_local! {
@@ -433,15 +447,15 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
 /// `threads == 1` is [`decompress`]. Several images are rebuilt at once, and a payload
 /// of several zlib streams has its streams written at once.
 pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
-    if src.len() < 6 || &src[..4] != MAGIC || src[4] != VERSION {
+    if src.len() < HEADER_LEN || src[..6] != MAGIC || u16::from_le_bytes([src[6], src[7]]) != VERSION {
         return Err(crate::corrupt());
     }
-    match src[5] {
-        0 => return Ok(src[6..].to_vec()),
+    match src[8] {
+        0 => return Ok(src[HEADER_LEN..].to_vec()),
         1 => {}
         _ => return Err(crate::corrupt()),
     }
-    let mut at = 6;
+    let mut at = HEADER_LEN;
     let hash = u64::from_le_bytes(get_bytes(src, &mut at, 8)?.try_into().unwrap());
     let part = |at: &mut usize| -> Result<&[u8]> {
         let n = get_varint(src, at)? as usize;
@@ -483,6 +497,9 @@ pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     }
     let tlen = get_varint(&sk, &mut k)? as usize;
     let trailer = get_bytes(&sk, &mut k, tlen)?;
+    if k != sk.len() {
+        return Err(crate::corrupt());
+    }
 
     // Images.
     let imgs = images(&classes, |i| cs[i].data, |i| cs[i].kind);
@@ -525,6 +542,9 @@ pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
         }
         payloads
     };
+    if at != src.len() {
+        return Err(crate::corrupt());
+    }
 
     // Reassemble the file.
     let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + trailer.len();
@@ -658,7 +678,7 @@ fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
         last += r.gamma()? as usize;
         alts.push(last);
     }
-    if r.overrun() || n > 1 << 34 {
+    if r.overrun() {
         return Err(crate::corrupt());
     }
 
@@ -671,6 +691,9 @@ fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
     let mut tokens = vec![Token::Lit(0); ntok];
     let t = std::time::Instant::now();
     let player = model::Player::new(rec, &mut at)?;
+    if at != rec.len() {
+        return Err(crate::corrupt());
+    }
     let t = dec_time(0, t);
     let mut freqs = Vec::with_capacity(spans.len());
     model::decode(&player, kind, g, &spans, &mut tokens, &mut freqs, &mut buf, &mut raw)?;
@@ -685,7 +708,8 @@ fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
     starts.push(ti);
     for &i in &alts {
         match tokens.get_mut(i) {
-            Some(Token::Match { len: 258, alt258, .. }) => *alt258 = true,
+            // Listed once only.
+            Some(Token::Match { len: 258, alt258: alt258 @ false, .. }) => *alt258 = true,
             _ => return Err(crate::corrupt()),
         }
         // Symbol 284 rather than 285, in the block of token `i`.
@@ -779,4 +803,39 @@ fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
     }
     dec_time(3, t);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A token index listed twice among the matches sent as 284 + 31 is corrupt data,
+    /// not a counter underflow.
+    #[test]
+    fn duplicate_alt258() {
+        use flate_recons::deflate::{Stream, Token};
+        let ih = Ihdr { width: 300, height: 1, depth: 8, color: 0, compression: 0, filter: 0, interlace: 0 };
+        let mut data = vec![0u8, 5];
+        data.resize(260, 5);
+        data.extend((0..41).map(|i| i as u8));
+        let mut tokens = vec![Token::Lit(0), Token::Lit(5), Token::Match { len: 258, dist: 1, alt258: true }];
+        tokens.extend(data[260..].iter().map(|&b| Token::Lit(b)));
+        let stream = Stream { blocks: vec![Block { last: true, body: Body::Fixed { tokens } }], ..Default::default() };
+        let mut payload = vec![0x78, 0x9c];
+        payload.extend(flate_recons::deflate::write(&stream, &data).unwrap());
+        payload.extend([0; 4]);
+        let g = Geometry::new(&ih).unwrap();
+        let rec_of = |dup: bool| {
+            let mut enc = model::encode(Kind::Image, &g, &payload).unwrap();
+            assert_eq!(enc.alts, [2]);
+            if dup {
+                enc.alts.push(2);
+            }
+            let mut rec = vec![];
+            write_record(Kind::Image, enc, 1, &mut rec);
+            rec
+        };
+        assert!(rebuild(&g, &rec_of(false)[1..], 1).unwrap() == payload);
+        assert!(matches!(rebuild(&g, &rec_of(true)[1..], 1), Err(Error::Corrupt)));
+    }
 }

@@ -129,8 +129,10 @@ on the photo sets).
 
 ### Container (`src/container.rs`)
 
+The complete format is specified in [FORMAT.md](FORMAT.md).
+
 ```text
-"PNGR" version mode
+magic 69 04 7f a7 59 e0 ("aQR/p1ng" in base64) | version (u16 LE, 0) | mode
 mode 0: the file as it is (when coding does not make it smaller)
 mode 1: xxh3 of the file | zstd(skeleton) | per image: u32 length + record
 record: 0 + payload (kept as it is) | 1 + layout + Huffman headers + model payload
