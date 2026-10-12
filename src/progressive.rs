@@ -113,18 +113,18 @@ fn refine_table(spec: &HuffSpec) -> Box<[REntry; 1 << RBITS]> {
                 (0, _) => Some(r),
                 _ => None, // invalid in refinement scans: generic path reports it
             };
-            if let Some(x) = extra {
-                if l + x <= RBITS {
-                    let rem = RBITS - l;
-                    let base = (code << rem) as usize;
-                    for idx in base..base + (1 << rem) {
-                        let ebits = ((idx as u32) >> (rem - x)) & ((1 << x) - 1);
-                        t[idx] = match (sz, r) {
-                            (1, _) => REntry { len: (l + 1) as u8, kind: 1, r: r as u8, val: ebits as u16 },
-                            (0, 15) => REntry { len: l as u8, kind: 3, r: 15, val: 0 },
-                            _ => REntry { len: (l + x) as u8, kind: 2, r: r as u8, val: ((1 << r) + ebits) as u16 },
-                        };
-                    }
+            if let Some(x) = extra
+                && l + x <= RBITS
+            {
+                let rem = RBITS - l;
+                let base = (code << rem) as usize;
+                for idx in base..base + (1 << rem) {
+                    let ebits = ((idx as u32) >> (rem - x)) & ((1 << x) - 1);
+                    t[idx] = match (sz, r) {
+                        (1, _) => REntry { len: (l + 1) as u8, kind: 1, r: r as u8, val: ebits as u16 },
+                        (0, 15) => REntry { len: l as u8, kind: 3, r: 15, val: 0 },
+                        _ => REntry { len: (l + x) as u8, kind: 2, r: r as u8, val: ((1 << r) + ebits) as u16 },
+                    };
                 }
             }
             code += 1;
@@ -173,17 +173,6 @@ struct Canon {
     why: Option<&'static str>,
 }
 
-/// Decode one scan into `out`, checking on the way that it is exactly what `encode_scan` (i.e.
-/// libjpeg's jcphuff) produces for the resulting coefficients:
-/// - padding before markers is all 1-bits or all 0-bits (consistently), segments are consumed
-///   exactly, markers are numbered in order (only RSTs may follow the last MCU);
-/// - EOB runs never cross a restart boundary or the end of the scan;
-/// - a run is only cut short where libjpeg cuts it: the next block does not start with another
-///   EOB run unless the run reached 0x7FFF blocks or (refinement) more than 937 buffered
-///   correction bits;
-/// - (refinement) a run never continues past a block after which more than 937 correction bits
-///   are buffered;
-/// - a ZRL is always followed by a nonzero coefficient in the same block.
 /// Row-level synchronisation of scans decoded concurrently: `progress[scan][component]` = block
 /// rows of the component the scan has finished (usize::MAX once the scan has ended, also on
 /// failure). A scan only touches a block row once every earlier scan of the same component
@@ -221,6 +210,17 @@ impl Drop for ScanSync<'_> {
     }
 }
 
+/// Decode one scan into `out`, checking on the way that it is exactly what `encode_scan` (i.e.
+/// libjpeg's jcphuff) produces for the resulting coefficients:
+/// - padding before markers is all 1-bits or all 0-bits (consistently), segments are consumed
+///   exactly, markers are numbered in order (only RSTs may follow the last MCU);
+/// - EOB runs never cross a restart boundary or the end of the scan;
+/// - a run is only cut short where libjpeg cuts it: the next block does not start with another
+///   EOB run unless the run reached 0x7FFF blocks or (refinement) more than 937 buffered
+///   correction bits;
+/// - (refinement) a run never continues past a block after which more than 937 correction bits
+///   are buffered;
+/// - a ZRL is always followed by a nonzero coefficient in the same block.
 fn decode_scan(j: &Jpeg, s: &Scan, clean: &Clean, out: &[CompPtr], sync: Option<&ScanSync>) -> Result<Canon, Error> {
     let kind = kind(s)?;
     let mut dec = Vec::new();
@@ -679,11 +679,9 @@ fn encode_blocks(
         }};
     }
     for m in 0..nmcu {
-        if m % s.mcux == 0 {
-            if buf.len() < pos + row_bytes + 16 {
-                buf.resize((buf.len() * 2).max(pos + row_bytes + 16), 0);
-                ptr = buf.as_mut_ptr();
-            }
+        if m % s.mcux == 0 && buf.len() < pos + row_bytes + 16 {
+            buf.resize((buf.len() * 2).max(pos + row_bytes + 16), 0);
+            ptr = buf.as_mut_ptr();
         }
         if m > 0 && m % ri == 0 {
             emit_eobrun!(&tabs[0]);

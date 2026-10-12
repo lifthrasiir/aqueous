@@ -181,7 +181,7 @@ struct Weights {
 impl Weights {
     fn new(q: &[f32; 64]) -> Self {
         let cv = |v: usize| crate::fast::CV[v];
-        let sg = |v: usize| if v % 2 == 0 { 1.0 } else { -1.0 };
+        let sg = |v: usize| if v.is_multiple_of(2) { 1.0 } else { -1.0 };
         let s = (1i32 << WSHIFT) as f64;
         let r = |x: f64| x.round() as i32;
         let mut w = Weights {
@@ -341,7 +341,7 @@ fn walk<I: Io>(io: &mut I, c: &mut Component, cc: usize, t: &Tables) {
             let pa = if has_a { sd.nz7[i - bw] as u32 } else { 0 };
             let pl = if has_l { sd.nz7[i - 1] as u32 } else { 0 };
             let n7 =
-                io.sym(O_NZ7 + cc * 50 + ((pa + pl + 1) / 2).min(49) as usize, (mask & INTERIOR_MASK).count_ones());
+                io.sym(O_NZ7 + cc * 50 + (pa + pl).div_ceil(2).min(49) as usize, (mask & INTERIOR_MASK).count_ones());
             sd.nz7[i] = n7 as u8;
             let mut rem = n7;
             for (k, &z) in t.interior.iter().enumerate() {
@@ -362,7 +362,7 @@ fn walk<I: Io>(io: &mut I, c: &mut Component, cc: usize, t: &Tables) {
             let pea = if has_a { sd.nze[i - bw] as u32 } else { 0 };
             let pel = if has_l { sd.nze[i - 1] as u32 } else { 0 };
             let ne = io.sym(
-                O_NZE + (cc * 15 + ((pea + pel + 1) / 2).min(14) as usize) * 8 + t.n7_lut[n7 as usize] as usize,
+                O_NZE + (cc * 15 + (pea + pel).div_ceil(2).min(14) as usize) * 8 + t.n7_lut[n7 as usize] as usize,
                 (mask & EDGE_MASK).count_ones(),
             );
             sd.nze[i] = ne as u8;
@@ -473,9 +473,7 @@ fn normalize(hist: &[u32], want_enc: bool) -> Model {
         let h = &hist[lo..hi];
         let tot: u64 = h.iter().map(|&x| x as u64).sum();
         let f = &mut freq[lo..hi];
-        if tot == 0 {
-            f[0] = PROB_SCALE as u16;
-        } else {
+        if let Some(tot) = std::num::NonZeroU64::new(tot) {
             let mut s = 0i64;
             let mut best = 0;
             for a in 0..h.len() {
@@ -492,14 +490,16 @@ fn normalize(hist: &[u32], want_enc: bool) -> Model {
                 f[best] = (f[best] as i64 + d) as u16;
             } else {
                 while d < 0 {
-                    for a in 0..f.len() {
-                        if f[a] > 1 && d < 0 {
-                            f[a] -= 1;
+                    for fa in f.iter_mut() {
+                        if *fa > 1 && d < 0 {
+                            *fa -= 1;
                             d += 1;
                         }
                     }
                 }
             }
+        } else {
+            f[0] = PROB_SCALE as u16;
         }
         let mut s = 0u32;
         for a in lo..hi {
@@ -739,7 +739,7 @@ fn walk_enc(e: &mut EncSink, c: &Component, cc: usize, t: &Tables) {
             let pa = if has_a { sd.nz7[i - bw] as u32 } else { 0 };
             let pl = if has_l { sd.nz7[i - 1] as u32 } else { 0 };
             let n7 = (mask & INTERIOR_MASK).count_ones();
-            e.sym(O_NZ7 + cc * 50 + ((pa + pl + 1) / 2).min(49) as usize, n7);
+            e.sym(O_NZ7 + cc * 50 + (pa + pl).div_ceil(2).min(49) as usize, n7);
             sd.nz7[i] = n7 as u8;
             // compact index of the TOK7 family is linear: CTX_BASE[ctx] = base + (ctx - O_TOK7) * 16
             let mut rem = n7;
@@ -781,7 +781,10 @@ fn walk_enc(e: &mut EncSink, c: &Component, cc: usize, t: &Tables) {
             let pea = if has_a { sd.nze[i - bw] as u32 } else { 0 };
             let pel = if has_l { sd.nze[i - 1] as u32 } else { 0 };
             let ne = (mask & EDGE_MASK).count_ones();
-            e.sym(O_NZE + (cc * 15 + ((pea + pel + 1) / 2).min(14) as usize) * 8 + t.n7_lut[n7 as usize] as usize, ne);
+            e.sym(
+                O_NZE + (cc * 15 + (pea + pel).div_ceil(2).min(14) as usize) * 8 + t.n7_lut[n7 as usize] as usize,
+                ne,
+            );
             sd.nze[i] = ne as u8;
             let mut rem = ne;
             let mut ke = 0;

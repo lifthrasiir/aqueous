@@ -30,6 +30,7 @@
 use crate::fast::{self, get_bytes, get_varint};
 use crate::jpeg::{self, Clean, Coefs, Error, Order, ScanInfo};
 use crate::progressive;
+use recons_common::varint;
 use std::time::Instant;
 
 const MAGIC: &[u8; 3] = b"JRC";
@@ -60,12 +61,8 @@ fn stored(input: &[u8]) -> Vec<u8> {
     out
 }
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+fn put_varint(out: &mut Vec<u8>, v: u64) {
+    varint::put(out, v)
 }
 
 thread_local! {
@@ -210,11 +207,11 @@ fn try_compress(input: &[u8], t: &mut Timing, depth: u32) -> Result<(Vec<u8>, us
                 entries.push((a, b, None, k));
                 continue;
             }
-            if let Ok((c, _)) = try_compress(bytes, &mut Timing::default(), depth + 1) {
-                if c.len() + 8 < bytes.len() {
-                    taken.push((a, b));
-                    entries.push((a, b, Some(c), 0));
-                }
+            if let Ok((c, _)) = try_compress(bytes, &mut Timing::default(), depth + 1)
+                && c.len() + 8 < bytes.len()
+            {
+                taken.push((a, b));
+                entries.push((a, b, Some(c), 0));
             }
         }
     }

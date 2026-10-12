@@ -165,7 +165,7 @@ pub fn parse(d: &[u8]) -> Result<Jpeg, Error> {
         }
         let seg = d.get(i + 2..i + len).ok_or(Error("truncated segment".into()))?;
         match m {
-            0xC0 | 0xC1 | 0xC2 => {
+            0xC0..=0xC2 => {
                 if sof {
                     return err("multiple frames");
                 }
@@ -407,11 +407,11 @@ pub(crate) fn extend(v: u32, s: u32) -> i32 {
 impl Table {
     /// Build decoding tables. Fails on tables a standard encoder cannot have produced or that
     /// break the bijection between symbols and codes: oversubscribed code space, duplicate
-    /// symbols, AC symbols (r, 0) other than EOB / ZRL, sizes > 15 (AC) / > 15 (DC).
+    /// symbols, AC symbols (r, 0) other than EOB / ZRL, DC sizes > 15.
     pub fn new(spec: &HuffSpec, is_ac: bool) -> Result<Table, Error> {
         let mut seen = [false; 256];
         for &v in &spec.vals {
-            let bad = if is_ac { (v & 15 == 0 && v != 0 && v != 0xF0) || v & 15 > 15 } else { v > 15 };
+            let bad = if is_ac { v & 15 == 0 && v != 0 && v != 0xF0 } else { v > 15 };
             if bad || std::mem::replace(&mut seen[v as usize], true) {
                 return err("non-standard Huffman table");
             }
@@ -920,7 +920,7 @@ impl Ctx<'_> {
         let mut mcu_end = br.used(); // bit position after the last complete MCU
         while *m < m1 {
             let mm = *m;
-            if mm != first && mm % ri == 0 {
+            if mm != first && mm.is_multiple_of(ri) {
                 self.check_segment_end(br.used(), mm / ri - 1, chk);
                 match self.segments.get(mm / ri) {
                     Some(&p) => *br = Br { buf: 0, cnt: 0, pos: p },
@@ -977,7 +977,7 @@ impl Ctx<'_> {
                 if seg + 1 < self.segments.len() {
                     return End::Err("restart segment overrun");
                 }
-                let boundary = mm > 0 && mm % ri == 0;
+                let boundary = mm > 0 && mm.is_multiple_of(ri);
                 return End::Trunc(Truncation { mcus: mm, bits: mcu_end, boundary, ..Default::default() });
             }
             if let Err(e) = r {
@@ -1063,12 +1063,13 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
     } else if chunks >= 2 && clean.segments.len() == 1 {
         r = decode_speculative::<NAT>(&ctx, chunks);
     }
-    if r.is_some() && std::env::var_os("JRC_VERIFY_PARALLEL").is_some() {
+    if let Some(p) = &r
+        && std::env::var_os("JRC_VERIFY_PARALLEL").is_some()
+    {
         // test oracle: the parallel outcome must equal the serial one
         let par: Vec<(Vec<[i16; 64]>, Vec<u64>)> = out.iter().map(|o| (o.blocks.clone(), o.masks.clone())).collect();
         let ctx2 = Ctx { comps: out.iter_mut().map(CompPtr::of).collect(), ..ctx };
         let ser = serial(&ctx2);
-        let p = r.as_ref().unwrap();
         let same_res = match (p, &ser) {
             (Ok((a, ta)), Ok((b, tb))) => (a.bad, a.pad_ones, a.pad_zeros, ta) == (b.bad, b.pad_ones, b.pad_zeros, tb),
             (Err(_), Err(_)) => true,
@@ -1727,7 +1728,7 @@ fn encode_chunked(
             stuff_into(&src[from..nbytes], &mut piece);
             if k == last {
                 // the final partial byte, padded
-                if n % 8 != 0 {
+                if !n.is_multiple_of(8) {
                     let pad = 8 - (n % 8) as u32;
                     let b = src[nbytes] | if info.pad_zero { 0 } else { (1u8 << pad) - 1 };
                     stuff_into(&[b], &mut piece);

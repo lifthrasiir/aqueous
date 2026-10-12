@@ -11,6 +11,7 @@
 //! 4-way interleaved 64-bit rANS with 32-bit IO.
 
 use crate::jpeg::{Coefs, Error, Jpeg};
+use recons_common::varint;
 use std::time::Instant;
 
 const PROB_BITS: u32 = 12;
@@ -48,7 +49,7 @@ const fn bucket(x: u32, edges: &[u32]) -> u32 {
 /// 1 | 2 | 3 | 4-5 | 6-7 | 8-11 | 12-15 | 16-23 | 24-31 | 32-47 | 48-63.
 const fn rem_class(rem: u32) -> usize {
     let b = 32 - rem.leading_zeros();
-    let sh = if b >= 2 { b - 2 } else { 0 };
+    let sh = b.saturating_sub(2);
     (2 * b + ((rem >> sh) & 1)) as usize - 3
 }
 
@@ -95,7 +96,7 @@ fn nz_ctx(cc: usize, nza: u32, nzl: u32, has_a: bool, has_l: bool) -> usize {
     let n = has_a as u32 + has_l as u32;
     let s = if has_a { nza } else { 0 } + if has_l { nzl } else { 0 };
     let p = match n {
-        2 => (s + 1) / 2,
+        2 => s.div_ceil(2),
         1 => s,
         _ => 0,
     };
@@ -130,11 +131,11 @@ const ZI: [usize; 64] = {
 /// rather than `f64::cos`, whose result depends on the platform's libm (the weights below are
 /// part of the format, and must come out the same in native and Wasm builds).
 pub(crate) const CV: [f64; 8] = [
-    0.7071067811865476,
+    std::f64::consts::FRAC_1_SQRT_2,
     0.9807852804032304,
     0.9238795325112867,
     0.8314696123025452,
-    0.7071067811865476,
+    std::f64::consts::FRAC_1_SQRT_2,
     0.5555702330196023,
     0.38268343236508984,
     0.19509032201612833,
@@ -156,7 +157,7 @@ impl DcBound {
     fn new(q: &[u16; 64]) -> Self {
         // q in zigzag order
         let cv = |v: usize| CV[v];
-        let sg = |v: usize| if v % 2 == 0 { 1.0 } else { -1.0 };
+        let sg = |v: usize| if v.is_multiple_of(2) { 1.0 } else { -1.0 };
         let sc = 1024.0;
         let (qc, qr) = (|v: usize| q[ZI[v * 8]] as f64, |u: usize| q[ZI[u]] as f64);
         let mut b = DcBound { wa: [0; 8], wl: [0; 8], wb: [0; 8], wr: [0; 8], inv: 0.0 };
@@ -537,7 +538,7 @@ fn normalize(hist: &[u32]) -> (Vec<u16>, TablePlan) {
         }
     }
     let mut gfreq = vec![0u16; G_SYM];
-    let mut gshift = vec![0u8; G_SYM / 16];
+    let mut gshift = [0u8; G_SYM / 16];
     for g in 0..G_SYM / 16 {
         let h = &ghist[g * 16..g * 16 + 16];
         if h.iter().any(|&x| x > 0) {
@@ -643,7 +644,7 @@ fn build_tables(freq: Vec<u16>, want_enc: bool) -> Tables {
                     }
                     let x1 = 1u64 << (shift + 31);
                     let t1 = x1 / fr as u64;
-                    let t0 = (fr as u64 - 1 + ((x1 % fr as u64) << 32)) / fr as u64;
+                    let t0 = ((x1 % fr as u64) << 32).div_ceil(fr as u64);
                     e.rcp_freq = t0 + (t1 << 32);
                     e.rcp_shift = (shift - 1) as u16;
                     e.bias = s;
@@ -1072,24 +1073,11 @@ pub struct Encoded {
     pub nsym: usize,
 }
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+fn put_varint(out: &mut Vec<u8>, v: u64) {
+    varint::put(out, v)
 }
 pub(crate) fn get_varint(d: &[u8], p: &mut usize) -> Result<u64, Error> {
-    let mut v = 0u64;
-    for sh in (0..64).step_by(7) {
-        let b = *d.get(*p).ok_or(Error("truncated".into()))?;
-        *p += 1;
-        v |= ((b & 0x7F) as u64) << sh;
-        if b < 0x80 {
-            return Ok(v);
-        }
-    }
-    Err(Error("bad varint".into()))
+    varint::get(d, p).map_err(|e| Error(e.0.into()))
 }
 pub(crate) fn get_bytes<'a>(d: &'a [u8], p: &mut usize, n: u64) -> Result<&'a [u8], Error> {
     let n = usize::try_from(n).map_err(|_| Error("bad length".into()))?;
@@ -1231,7 +1219,8 @@ pub fn decode_into(j: &Jpeg, e: &Encoded, out: &mut Vec<Coefs>) -> Result<(), Er
     out.resize_with(j.comps.len(), || Coefs { bw: 0, bh: 0, blocks: Vec::new(), masks: Vec::new() });
     out.truncate(j.comps.len());
     // per stripe, per component: that stripe's rows of blocks and masks
-    let mut parts: Vec<Vec<(&mut [[i16; 64]], &mut [u64])>> = (0..ns).map(|_| Vec::new()).collect();
+    type Rows<'a> = (&'a mut [[i16; 64]], &'a mut [u64]);
+    let mut parts: Vec<Vec<Rows>> = (0..ns).map(|_| Vec::new()).collect();
     for (ci, (c, o)) in j.comps.iter().zip(out.iter_mut()).enumerate() {
         o.bw = c.bw;
         o.bh = c.bh;

@@ -15,14 +15,14 @@ use crate::progressive;
 /// xorshift64*
 pub struct Rng(pub u64);
 impl Rng {
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
     pub fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
+        self.next_u64() % n.max(1)
     }
     fn chance(&mut self, p_percent: u64) -> bool {
         self.below(100) < p_percent
@@ -115,7 +115,10 @@ fn finish(mut w: W, mut seg_ends: Vec<usize>, out: &mut Vec<u8>) {
     jpeg::stuff_into(&w.w.buf[start..w.w.pos], out);
 }
 
-fn tables(s: &Scan, dc: bool, ac: bool) -> Result<Vec<([u32; 256], [u32; 256])>, Error> {
+/// Per scan component: its DC and AC encoding tables (zeros where not used).
+type Codes = Vec<([u32; 256], [u32; 256])>;
+
+fn tables(s: &Scan, dc: bool, ac: bool) -> Result<Codes, Error> {
     s.comps
         .iter()
         .map(|sc| {

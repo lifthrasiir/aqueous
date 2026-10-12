@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 pub mod container;
 pub mod fast;
 pub mod jpeg;

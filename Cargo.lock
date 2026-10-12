@@ -84,6 +84,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "rayon",
+ "recons-common",
  "xxhash-rust",
  "zstd",
 ]
@@ -131,6 +132,10 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "recons-common"
+version = "0.1.0"
 
 [[package]]
 name = "shlex"
