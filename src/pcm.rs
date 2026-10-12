@@ -7,7 +7,11 @@
 
 use crate::bits;
 use crate::flac::{self, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBATIM};
-use crate::residual::{Coded, Error, Rd, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes, put_varint};
+use crate::par::{self, DecBatch, EncBatch, Item};
+use crate::residual::{
+    Coded, Error, LmsEncoder, Rd, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes, put_varint,
+};
+use std::sync::mpsc::sync_channel;
 
 /// Byte streams (same count as FLAC's).
 const S_PREFIX: usize = 0;
@@ -390,6 +394,17 @@ fn make_frame(f: &mut Frame, ch: &mut [Vec<i64>], fmt: &Format, win: &[f64]) {
     }
 }
 
+/// Splits the samples of `d` into the channels.
+#[inline(always)]
+fn read_block(d: &[u8], fmt: &Format, ch: &mut [Vec<i64>]) {
+    for c in ch.iter_mut() {
+        c.clear();
+    }
+    for (i, smp) in d.chunks_exact(fmt.bytes).enumerate() {
+        ch[i % fmt.channels].push(fmt.read(smp));
+    }
+}
+
 /// Calls `per_frame` with the frame of each block of samples of `d[start..start + len]`.
 fn frames(d: &[u8], fmt: Format, start: usize, len: usize, mut per_frame: impl FnMut(&mut Frame)) {
     let frame_bytes = fmt.channels * fmt.bytes;
@@ -400,12 +415,7 @@ fn frames(d: &[u8], fmt: Format, start: usize, len: usize, mut per_frame: impl F
     let mut p = start;
     while p < data_end {
         let n = BLOCK.min((data_end - p) / frame_bytes);
-        for c in ch.iter_mut() {
-            c.clear();
-        }
-        for (i, smp) in d[p..p + n * frame_bytes].chunks_exact(fmt.bytes).enumerate() {
-            ch[i % fmt.channels].push(fmt.read(smp));
-        }
+        read_block(&d[p..p + n * frame_bytes], &fmt, &mut ch);
         p += n * frame_bytes;
         let short;
         let win = if n == BLOCK {
@@ -452,6 +462,97 @@ pub fn encode(d: &[u8], fmt: Format, start: usize, len: usize) -> Option<Coded> 
     Some(Coded { streams: s, words, raw })
 }
 
+/// [`encode`] with `threads` threads: a pool makes the frames of the blocks ahead (stereo
+/// choice, LPC, residuals); one thread takes them in order through the LMS stage, and this
+/// one codes them. The same output.
+pub fn encode_threads(d: &[u8], fmt: Format, start: usize, len: usize, threads: usize) -> Option<Coded> {
+    if threads <= 1 {
+        return encode(d, fmt, start, len);
+    }
+    if !fmt.valid() || start + len > d.len() {
+        return None;
+    }
+    let frame_bytes = fmt.channels * fmt.bytes;
+    let nframes = len / frame_bytes;
+    let data_end = start + nframes * frame_bytes;
+    let mut s: Vec<Vec<u8>> = vec![Vec::new(); N_BYTE_STREAMS];
+    s[S_PREFIX].extend_from_slice(&d[..start]);
+    s[S_LAYOUT].extend_from_slice(&fmt.to_bytes());
+    put_varint(&mut s[S_LAYOUT], nframes as u64);
+    s[S_JUNK].extend_from_slice(&d[data_end..]);
+    let nblocks = nframes.div_ceil(BLOCK);
+    let per = (par::BATCH_SAMPLES / (BLOCK * fmt.channels)).max(1);
+    let nbatches = nblocks.div_ceil(per);
+    let nb = par::in_flight(threads);
+    let full_win = window(BLOCK);
+    std::thread::scope(|sc| {
+        let (jtx, jrx) = sync_channel::<EncBatch>(nb);
+        let (ptx, prx) = sync_channel(nb);
+        let (ltx, lrx) = sync_channel::<EncBatch>(nb);
+        let mut ch: Vec<Vec<i64>> = vec![Vec::with_capacity(BLOCK); fmt.channels];
+        let win = &full_win;
+        par::pool(sc, threads.saturating_sub(2), jrx, ptx, move |mut b: EncBatch| {
+            b.n = 0;
+            for k in b.idx * per..((b.idx + 1) * per).min(nblocks) {
+                let p = start + k * BLOCK * frame_bytes;
+                let n = BLOCK.min(nframes - k * BLOCK);
+                read_block(&d[p..p + n * frame_bytes], &fmt, &mut ch);
+                let short;
+                let w = if n == BLOCK {
+                    win
+                } else {
+                    short = window(n);
+                    &short
+                };
+                make_frame(b.next_frame(), &mut ch, &fmt, w);
+                b.n += 1;
+            }
+            b
+        });
+        let lms = sc.spawn(move || {
+            let mut le = LmsEncoder::default();
+            let mut ro = par::Reorder::default();
+            for b in prx {
+                let b: EncBatch = par::unwrap(b);
+                ro.put(b.idx, b);
+                while let Some(mut b) = ro.pop() {
+                    for f in &mut b.frames[..b.n] {
+                        s[S_HDR].push(f.assign);
+                        let [sub, warm] = s.get_disjoint_mut([S_SUB, S_WARM]).unwrap();
+                        put_subframes(f, sub, warm, false);
+                        le.frame(f);
+                    }
+                    if ltx.send(b).is_err() {
+                        return s;
+                    }
+                }
+            }
+            s
+        });
+        let mut re = ResEncoder::new(len);
+        let mut next = 0;
+        while next < nbatches.min(nb) {
+            jtx.send(EncBatch { idx: next, ..Default::default() }).expect("pipeline");
+            next += 1;
+        }
+        for _ in 0..nbatches {
+            let mut b = lrx.recv().expect("pipeline");
+            for f in &mut b.frames[..b.n] {
+                re.code(f);
+            }
+            if next < nbatches {
+                b.idx = next;
+                jtx.send(b).expect("pipeline");
+                next += 1;
+            }
+        }
+        drop(jtx);
+        let s = lms.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
+        let (words, raw) = re.finish();
+        Some(Coded { streams: s, words, raw })
+    })
+}
+
 /// Decodes into `out` (appending).
 pub fn decode(c: &Coded, total_len: usize, out: &mut Vec<u8>) -> Result<(), Error> {
     if c.streams.len() != N_BYTE_STREAMS {
@@ -479,44 +580,162 @@ pub fn decode(c: &Coded, total_len: usize, out: &mut Vec<u8>) -> Result<(), Erro
     while done < nframes {
         let n = BLOCK.min(nframes - done);
         done += n;
-        f.block_size = n;
-        f.channels = fmt.channels;
-        f.bps = 8 * fmt.bytes as u32;
-        f.assign = hdr.byte()?;
-        let ok =
-            if fmt.channels == 2 { [1, 8, 9, 10].contains(&f.assign) } else { f.assign as usize == fmt.channels - 1 };
-        if !ok {
-            return Err(Error("channel assignment"));
-        }
-        get_subframes(&mut f, &mut sub, &mut warm, false)?;
+        pcm_frame(&mut f, &fmt, n, &mut hdr, &mut sub, &mut warm)?;
         rd.frame(&mut f)?;
-        for (c, v) in ch.iter_mut().enumerate() {
-            flac::decode_channel(&f, c, v);
-        }
-        if fmt.channels == 2 {
-            let (a, b) = ch.split_at_mut(1);
-            let (a, b) = (&mut a[0], &mut b[0]);
-            match f.assign {
-                8 => b.iter_mut().zip(a.iter()).for_each(|(s, &l)| *s = l.wrapping_sub(*s)),
-                9 => a.iter_mut().zip(b.iter()).for_each(|(s, &r)| *s = s.wrapping_add(r)),
-                10 => a.iter_mut().zip(b.iter_mut()).for_each(|(m, s)| {
-                    let mm = (*m << 1) | (*s & 1);
-                    *m = mm.wrapping_add(*s) >> 1;
-                    *s = mm.wrapping_sub(*s) >> 1;
-                }),
-                _ => {}
-            }
-        }
         let at = out.len();
         out.resize(at + n * frame_bytes, 0);
-        let o = &mut out[at..];
-        for i in 0..n {
-            for (c, v) in ch.iter().enumerate() {
-                let p = (i * fmt.channels + c) * fmt.bytes;
-                fmt.write(v[i], &mut o[p..p + fmt.bytes]);
-            }
-        }
+        synth(&f, &fmt, &mut ch, &mut out[at..]);
     }
     out.extend_from_slice(junk);
     rd.finish()
+}
+
+/// The samples of a decoded frame, interleaved into `o`.
+#[inline(always)]
+fn synth(f: &Frame, fmt: &Format, ch: &mut [Vec<i64>], o: &mut [u8]) {
+    for (c, v) in ch.iter_mut().enumerate() {
+        flac::decode_channel(f, c, v);
+    }
+    if fmt.channels == 2 {
+        let (a, b) = ch.split_at_mut(1);
+        let (a, b) = (&mut a[0], &mut b[0]);
+        match f.assign {
+            8 => b.iter_mut().zip(a.iter()).for_each(|(s, &l)| *s = l.wrapping_sub(*s)),
+            9 => a.iter_mut().zip(b.iter()).for_each(|(s, &r)| *s = s.wrapping_add(r)),
+            10 => a.iter_mut().zip(b.iter_mut()).for_each(|(m, s)| {
+                let mm = (*m << 1) | (*s & 1);
+                *m = mm.wrapping_add(*s) >> 1;
+                *s = mm.wrapping_sub(*s) >> 1;
+            }),
+            _ => {}
+        }
+    }
+    for i in 0..f.block_size {
+        for (c, v) in ch.iter().enumerate() {
+            let p = (i * fmt.channels + c) * fmt.bytes;
+            fmt.write(v[i], &mut o[p..p + fmt.bytes]);
+        }
+    }
+}
+
+/// The first stage of [`decode_threads`]: channel assignments and subframe parameters,
+/// and where each frame's samples go.
+fn front<'a>(
+    e: &mut par::Front<'a, '_, Vec<&'a mut [u8]>>,
+    c: &'a Coded,
+    fmt: Format,
+    nframes: usize,
+    mut rest: &'a mut [u8],
+) -> Result<(), par::Stop<'a>> {
+    let mut hdr = Rd::new(&c.streams[S_HDR]);
+    let mut sub = Rd::new(&c.streams[S_SUB]);
+    let mut warm = Rd::new(&c.streams[S_WARM]);
+    let frame_bytes = fmt.channels * fmt.bytes;
+    let mut done = 0;
+    while done < nframes {
+        let n = BLOCK.min(nframes - done);
+        done += n;
+        let mut f = e.frame();
+        if let Err(err) = pcm_frame(&mut f, &fmt, n, &mut hdr, &mut sub, &mut warm) {
+            e.unused(f);
+            return Err(err.into());
+        }
+        let (o, r) = std::mem::take(&mut rest).split_at_mut(n * frame_bytes);
+        rest = r;
+        e.x().push(o);
+        e.push(Item::Frame(f), n * fmt.channels)?;
+    }
+    Ok(())
+}
+
+/// Reads a frame's channel assignment and subframe parameters into `f`.
+#[inline(always)]
+fn pcm_frame(f: &mut Frame, fmt: &Format, n: usize, hdr: &mut Rd, sub: &mut Rd, warm: &mut Rd) -> Result<(), Error> {
+    f.block_size = n;
+    f.channels = fmt.channels;
+    f.bps = 8 * fmt.bytes as u32;
+    f.assign = hdr.byte()?;
+    let ok = if fmt.channels == 2 { [1, 8, 9, 10].contains(&f.assign) } else { f.assign as usize == fmt.channels - 1 };
+    if !ok {
+        return Err(Error("channel assignment"));
+    }
+    get_subframes(f, sub, warm, false)
+}
+
+/// [`decode`] with `threads` threads: a pipeline of the subframe parameters, the error
+/// decoding and the LMS stage, then a pool reconstructs the samples into their place in
+/// `out`. The same output and errors (the contents of `out` after an error differ).
+pub fn decode_threads(c: &Coded, total_len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), Error> {
+    if threads <= 1 {
+        return decode(c, total_len, out);
+    }
+    if c.streams.len() != N_BYTE_STREAMS {
+        return Err(Error("stream count"));
+    }
+    let mut layout = Rd::new(&c.streams[S_LAYOUT]);
+    let fmt = Format::from_bytes(layout.bytes(3)?).ok_or(Error("format"))?;
+    let nframes = layout.varint()? as usize;
+    let frame_bytes = fmt.channels * fmt.bytes;
+    let prefix = &c.streams[S_PREFIX];
+    let junk = &c.streams[S_JUNK];
+    if nframes.checked_mul(frame_bytes).and_then(|v| v.checked_add(prefix.len() + junk.len())) != Some(total_len) {
+        return Err(Error("length"));
+    }
+    out.reserve(total_len);
+    out.extend_from_slice(prefix);
+    let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
+    let rd = ResDecoder::new(&c.words, &raw_buf)?;
+    let at = out.len();
+    out.resize(at + nframes * frame_bytes, 0);
+    let data = &mut out[at..];
+    let nb = par::in_flight(threads);
+    type B<'a> = DecBatch<'a, Vec<&'a mut [u8]>>;
+    std::thread::scope(|sc| {
+        let (rtx, rrx) = sync_channel::<B>(nb);
+        let (tx1, rx1) = sync_channel::<B>(nb);
+        let (tx2, rx2) = sync_channel::<B>(nb);
+        let (tx3, rx3) = sync_channel::<B>(nb);
+        let (otx, orx) = sync_channel::<Result<B, par::Panic>>(nb);
+        for _ in 0..nb {
+            rtx.send(B::default()).expect("channel");
+        }
+        sc.spawn(move || {
+            if let Some(mut e) = par::Front::new(&rrx, &tx1, Vec::clear) {
+                let r = front(&mut e, c, fmt, nframes, data);
+                e.finish(r);
+            }
+        });
+        sc.spawn(move || par::errors_stage(rd, rx1, tx2));
+        sc.spawn(move || par::lms_stage(rx2, tx3));
+        let mut ch: Vec<Vec<i64>> = vec![Vec::with_capacity(BLOCK); fmt.channels];
+        par::pool(sc, threads.saturating_sub(2), rx3, otx, move |mut b: B| {
+            let mut k = 0;
+            for it in &b.items {
+                if let Item::Frame(f) = it {
+                    synth(f, &fmt, &mut ch, b.x[k]);
+                    k += 1;
+                }
+            }
+            b
+        });
+        // There is at most one error (the stages stop at it), so the order does not matter.
+        let (mut seen, mut end) = (0, usize::MAX);
+        while seen < end {
+            let Ok(b) = orx.recv() else { return Err(Error("pipeline")) };
+            let b = par::unwrap(b);
+            seen += 1;
+            for it in &b.items {
+                if let Item::FrameErr(e) | Item::Err(e) = it {
+                    return Err(Error(e.0));
+                }
+            }
+            if b.last {
+                end = b.idx + 1;
+            }
+            let _ = rtx.send(b);
+        }
+        Ok(())
+    })?;
+    out.extend_from_slice(junk);
+    Ok(())
 }

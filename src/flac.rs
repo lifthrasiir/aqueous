@@ -492,8 +492,15 @@ fn write_rice(w: &mut FastWriter, k: u32, res: &[i32], budget: &mut u64) -> bool
 /// than about `max_bytes` (bounds the work on corrupted input: a residual can take up to
 /// 2^32 bits).
 pub fn write_frame(f: &Frame, out: &mut Vec<u8>, max_bytes: usize) -> bool {
+    write_frame_bits(f, out, (max_bytes as u64).saturating_mul(8)).is_some()
+}
+
+/// [`write_frame`] with the budget in bits of long codes (Rice codes over 56 bits), the
+/// only ones it counts; returns what is left of it. So it fails exactly when the frame's
+/// long codes take more than `budget` bits.
+#[inline]
+pub fn write_frame_bits(f: &Frame, out: &mut Vec<u8>, mut budget: u64) -> Option<u64> {
     let start = out.len();
-    let mut budget = (max_bytes as u64).saturating_mul(8);
     let mut w = FastWriter::with_capacity(f.block_size * f.channels * 4 + 64);
     for &b in &f.header {
         w.reserve(8);
@@ -552,7 +559,7 @@ pub fn write_frame(f: &Frame, out: &mut Vec<u8>, max_bytes: usize) -> bool {
                     } else {
                         w.put(k as u64, pbits);
                         if !write_rice(&mut w, k as u32, part, &mut budget) {
-                            return false;
+                            return None;
                         }
                     }
                     at += n;
@@ -564,7 +571,7 @@ pub fn write_frame(f: &Frame, out: &mut Vec<u8>, max_bytes: usize) -> bool {
     out.extend_from_slice(&bytes);
     let c = crc16(&out[start..]);
     out.extend_from_slice(&c.to_be_bytes());
-    true
+    Some(budget)
 }
 
 /// Reconstructs the samples of channel `ch` (before stereo decorrelation is undone).

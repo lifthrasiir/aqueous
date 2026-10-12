@@ -7,8 +7,9 @@ pub mod codec;
 pub mod container;
 pub mod flac;
 pub mod model;
+pub mod par;
 pub mod pcm;
 pub mod residual;
 
-pub use container::{compress, decompress};
+pub use container::{Options, compress, compress_opt, decompress, decompress_threads};
 pub use recons_common::{msb as bits, rans64 as rans};

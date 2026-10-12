@@ -67,7 +67,13 @@ impl Lms {
 
     /// Runs the stage over `buf` in place: residuals to errors (`DEC` false) or back.
     pub fn run<const DEC: bool>(&mut self, buf: &mut [i32]) {
-        lms_run::<DEC>(self, buf)
+        self.run_in::<DEC, false>(buf)
+    }
+
+    /// [`Lms::run`] with a separate instance for the pipeline stages (`PIPE`, see
+    /// `residual::run_lms`).
+    pub(crate) fn run_in<const DEC: bool, const PIPE: bool>(&mut self, buf: &mut [i32]) {
+        lms_run::<DEC, PIPE>(self, buf)
     }
 }
 
@@ -173,7 +179,7 @@ mod neon {
 }
 
 #[cfg(target_arch = "aarch64")]
-fn lms_run<const DEC: bool>(st: &mut Lms, buf: &mut [i32]) {
+fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
     let mut r = neon::Regs::load(st);
     for v in buf.iter_mut() {
         r.step::<DEC>(v);
@@ -182,8 +188,14 @@ fn lms_run<const DEC: bool>(st: &mut Lms, buf: &mut [i32]) {
 }
 
 /// Two channels in one loop (independent dependency chains).
-#[cfg(target_arch = "aarch64")]
 pub fn lms_run2<const DEC: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
+    lms_run2_in::<DEC, false>(sa, a, sb, b)
+}
+
+/// [`lms_run2`] with a separate instance for the pipeline stages (`PIPE`, see
+/// `residual::run_lms`).
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
     let n = a.len().min(b.len());
     let mut ra = neon::Regs::load(sa);
     let mut rb = neon::Regs::load(sb);
@@ -202,13 +214,13 @@ pub fn lms_run2<const DEC: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-pub fn lms_run2<const DEC: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
-    lms_run::<DEC>(sa, a);
-    lms_run::<DEC>(sb, b);
+pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
+    lms_run::<DEC, PIPE>(sa, a);
+    lms_run::<DEC, PIPE>(sb, b);
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-fn lms_run<const DEC: bool>(st: &mut Lms, buf: &mut [i32]) {
+fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
     let sh = st.in_shift;
     for v in buf.iter_mut() {
         let mut acc = 0i32;
@@ -341,4 +353,40 @@ pub fn count_one(sc: &mut Scale, cc: usize, e: i32) -> (usize, u32) {
     let u = zigzag(e);
     sc.next(u);
     (b * 2 + cc, token(u >> s))
+}
+
+impl Scale {
+    /// [`Scale::next`] with the decay and the add side by side (same result: no overflow
+    /// below 2^31), for [`advance`].
+    #[inline(always)]
+    fn next_short(&mut self, m: u32) {
+        self.avg = (self.avg + self.pend.min(1 << 26)) - (self.avg >> 4);
+        self.pend = m;
+    }
+}
+
+/// Advances the scale states over the errors of one or two channels as [`encode_one`]
+/// does, without coding (for an LMS stage that runs ahead of the coder); two channels in
+/// one loop (independent chains).
+pub fn advance(a: &mut Scale, ea: &[i32], b: Option<(&mut Scale, &[i32])>) {
+    let (mut sa, ea) = (*a, ea);
+    let rest = if let Some((b, eb)) = b {
+        let n = ea.len().min(eb.len());
+        let mut sb = *b;
+        for (&x, &y) in ea[..n].iter().zip(&eb[..n]) {
+            sa.next_short(zigzag(x));
+            sb.next_short(zigzag(y));
+        }
+        for &y in &eb[n..] {
+            sb.next_short(zigzag(y));
+        }
+        *b = sb;
+        &ea[n..]
+    } else {
+        ea
+    };
+    for &x in rest {
+        sa.next_short(zigzag(x));
+    }
+    *a = sa;
 }

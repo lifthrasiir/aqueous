@@ -212,7 +212,13 @@ impl Visit for CountV<'_> {
 }
 
 /// Runs the LMS stage over the frame's residuals in place (channel pairs together).
-fn run_lms<const DEC: bool>(f: &mut Frame, lms: &mut [Lms], sc: &[model::Scale; flac::MAX_CHANNELS]) {
+///
+/// `PIPE` only separates the instances of the pipeline stages ([`LmsEncoder`],
+/// [`LmsDecoder`]) from the serial ones, down to the NEON loops: LLVM inlines the serial
+/// chain whole when each function in it has a single caller; shared with the pipeline
+/// (or forced with `#[inline(always)]`), it was compiled worse, about 2% of serial
+/// decoding.
+fn run_lms<const DEC: bool, const PIPE: bool>(f: &mut Frame, lms: &mut [Lms], sc: &[model::Scale; flac::MAX_CHANNELS]) {
     let mut chs = [0usize; flac::MAX_CHANNELS];
     let mut n = 0;
     for ch in 0..f.channels {
@@ -227,11 +233,11 @@ fn run_lms<const DEC: bool>(f: &mut Frame, lms: &mut [Lms], sc: &[model::Scale; 
         let (a, b) = (chs[i], chs[i + 1]);
         let (ra, rb) = f.res.split_at_mut(b);
         let (la, lb) = lms.split_at_mut(b);
-        model::lms_run2::<DEC>(&mut la[a], &mut ra[a], &mut lb[0], &mut rb[0]);
+        model::lms_run2_in::<DEC, PIPE>(&mut la[a], &mut ra[a], &mut lb[0], &mut rb[0]);
         i += 2;
     }
     if i < n {
-        lms[chs[i]].run::<DEC>(&mut f.res[chs[i]]);
+        lms[chs[i]].run_in::<DEC, PIPE>(&mut f.res[chs[i]]);
     }
 }
 
@@ -256,7 +262,14 @@ impl ResEncoder {
 
     /// Codes the frame's residuals (which the LMS stage overwrites).
     pub fn frame(&mut self, f: &mut Frame) {
-        run_lms::<false>(f, &mut self.lms, &self.avg);
+        run_lms::<false, false>(f, &mut self.lms, &self.avg);
+        self.code(f);
+    }
+
+    /// The coding part of [`ResEncoder::frame`], for errors from an [`LmsEncoder`] (this
+    /// encoder's own LMS state is then unused).
+    #[inline(always)]
+    pub fn code(&mut self, f: &mut Frame) {
         let total: usize = f.res[..f.channels].iter().map(|r| r.len()).sum();
         self.enc.reserve(total);
         self.raw[0].reserve(total * 8 + 16);
@@ -273,6 +286,38 @@ impl ResEncoder {
     pub fn finish(self) -> (Vec<u32>, [Vec<u8>; 2]) {
         let [r0, r1] = self.raw;
         (self.enc.finish(tables()), [r0.finish(), r1.finish()])
+    }
+}
+
+/// The LMS stage of [`ResEncoder`] on its own, for a pipeline (the coding on another
+/// thread): it follows the scale state that the coder will have at each frame.
+pub struct LmsEncoder {
+    lms: Vec<Lms>,
+    avg: [model::Scale; flac::MAX_CHANNELS],
+}
+
+impl Default for LmsEncoder {
+    fn default() -> Self {
+        LmsEncoder { lms: vec![Lms::default(); flac::MAX_CHANNELS], avg: [model::Scale::default(); flac::MAX_CHANNELS] }
+    }
+}
+
+impl LmsEncoder {
+    /// Residuals to errors, in place; [`ResEncoder::code`] then codes them.
+    pub fn frame(&mut self, f: &mut Frame) {
+        run_lms::<false, true>(f, &mut self.lms, &self.avg);
+        let mut chs = (0..f.channels).filter(|&ch| f.sub[ch].has_residual());
+        while let Some(a) = chs.next() {
+            let b = chs.next();
+            let (sa, sb) = match b {
+                Some(b) => {
+                    let (x, y) = self.avg.split_at_mut(b);
+                    (&mut x[a], Some((&mut y[0], &f.res[b][..])))
+                }
+                None => (&mut self.avg[a], None),
+            };
+            model::advance(sa, &f.res[a], sb);
+        }
     }
 }
 
@@ -306,6 +351,23 @@ impl<'a> ResDecoder<'a> {
         // The errors, then the LMS stage in place (with the scale state from before the
         // errors, as the encoder saw it).
         let sc0 = self.avg;
+        self.decode_errors(f);
+        run_lms::<true, false>(f, &mut self.lms, &sc0);
+        self.check()
+    }
+
+    /// The first part of [`ResDecoder::frame`], for a pipeline: decodes the errors and
+    /// returns the scale state from before them, for [`LmsDecoder::frame`] (this decoder's
+    /// own LMS state is then unused).
+    pub fn errors(&mut self, f: &mut Frame) -> Result<[model::Scale; flac::MAX_CHANNELS], Error> {
+        let sc0 = self.avg;
+        self.decode_errors(f);
+        self.check()?;
+        Ok(sc0)
+    }
+
+    #[inline(always)]
+    fn decode_errors(&mut self, f: &mut Frame) {
         // Without bounds checks if the streams have room for the whole frame.
         let nsym: usize = f.res[..f.channels].iter().map(|r| r.len()).sum();
         let dl = self.dec.local();
@@ -321,7 +383,10 @@ impl<'a> ResDecoder<'a> {
             v.dl
         };
         self.dec.put_back(dl);
-        run_lms::<true>(f, &mut self.lms, &sc0);
+    }
+
+    #[inline(always)]
+    fn check(&self) -> Result<(), Error> {
         if self.raw[0].pos > self.raw_len[0] * 8 || self.raw[1].pos > self.raw_len[1] * 8 {
             return Err(Error("raw bits exhausted"));
         }
@@ -334,6 +399,24 @@ impl<'a> ResDecoder<'a> {
             return Err(Error("rans stream exhausted"));
         }
         Ok(())
+    }
+}
+
+/// The LMS stage of [`ResDecoder`] on its own, for a pipeline (see [`ResDecoder::errors`]).
+pub struct LmsDecoder {
+    lms: Vec<Lms>,
+}
+
+impl Default for LmsDecoder {
+    fn default() -> Self {
+        LmsDecoder { lms: vec![Lms::default(); flac::MAX_CHANNELS] }
+    }
+}
+
+impl LmsDecoder {
+    /// Errors to residuals, in place; `sc0` from [`ResDecoder::errors`].
+    pub fn frame(&mut self, f: &mut Frame, sc0: &[model::Scale; flac::MAX_CHANNELS]) {
+        run_lms::<true, true>(f, &mut self.lms, sc0);
     }
 }
 
@@ -351,7 +434,7 @@ impl Default for ResCounter {
 
 impl ResCounter {
     pub fn frame(&mut self, f: &mut Frame, counts: &mut [Vec<u64>]) {
-        run_lms::<false>(f, &mut self.lms, &self.avg);
+        run_lms::<false, false>(f, &mut self.lms, &self.avg);
         let mut v = CountV { counts, res: res_ptrs(f) };
         for_each_residual(f, &mut self.avg, &mut [(); 2], &mut v);
     }

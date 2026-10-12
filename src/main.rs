@@ -1,19 +1,21 @@
 use flac_recons::codec::STREAM_NAMES;
-use flac_recons::container;
+use flac_recons::container::{self, Options};
 use flac_recons::pcm::Format;
 use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
         "usage:
-  flr c [-r FORMAT] IN OUT     compress (FLAC, WAV, AIFF; other files are stored)
-  flr d IN OUT                 decompress
-  flr bench [-r FORMAT] [-n ITERS] [-v] FILE|DIR...
+  flr c [-r FORMAT] [-t THREADS] IN OUT     compress (FLAC, WAV, AIFF; other files are stored)
+  flr d [-t THREADS] IN OUT                 decompress
+  flr bench [-r FORMAT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...
   flr info FILE|DIR...
-  flr fuzz [-r FORMAT] [-n N] [-s SEED] FILE|DIR...
+  flr fuzz [-r FORMAT] [-t THREADS] [-n N] [-s SEED] FILE|DIR...
 
   -r FORMAT: take the input as headerless PCM, e.g. s16le:2, s24be:6, u8:1
-             (sign, bits, endianness, ':' channels)"
+             (sign, bits, endianness, ':' channels)
+  -t THREADS: c and d default to the available cores, bench to 1; fuzz also checks
+             that 2-4 threads (or THREADS) give the same output as one"
     );
     std::process::exit(2)
 }
@@ -45,9 +47,11 @@ fn files(args: &[String]) -> Vec<String> {
     out
 }
 
-/// Options shared by the commands: (raw format, iterations / count, verbose, seed, rest).
+/// Options shared by the commands: (raw format, threads, iterations / count, verbose,
+/// seed, rest).
 struct Opts {
     raw: Option<Format>,
+    threads: Option<usize>,
     n: Option<usize>,
     verbose: bool,
     seed: u64,
@@ -55,7 +59,7 @@ struct Opts {
 }
 
 fn opts(args: &[String]) -> Opts {
-    let mut o = Opts { raw: None, n: None, verbose: false, seed: 1, rest: Vec::new() };
+    let mut o = Opts { raw: None, threads: None, n: None, verbose: false, seed: 1, rest: Vec::new() };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| {
@@ -64,6 +68,7 @@ fn opts(args: &[String]) -> Opts {
         };
         match args[i].as_str() {
             "-r" => o.raw = Some(Format::parse(&next(&mut i)).unwrap_or_else(|| usage())),
+            "-t" => o.threads = Some(next(&mut i).parse::<usize>().unwrap_or_else(|_| usage()).max(1)),
             "-n" => o.n = Some(next(&mut i).parse().unwrap_or_else(|_| usage())),
             "-s" => o.seed = next(&mut i).parse().unwrap_or_else(|_| usage()),
             "-v" => o.verbose = true,
@@ -74,8 +79,13 @@ fn opts(args: &[String]) -> Opts {
     o
 }
 
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 fn bench(args: &[String]) {
     let o = opts(args);
+    let opt = Options { raw: o.raw, threads: o.threads.unwrap_or(1) };
     let iters = o.n.unwrap_or(1);
     let (mut tin, mut tout, mut tc, mut td) = (0usize, 0usize, 0f64, 0f64);
     let mut fails = 0;
@@ -88,19 +98,19 @@ fn bench(args: &[String]) {
         let mut sizes = Vec::new();
         for _ in 0..iters {
             let t = Instant::now();
-            let (cc, ss) = container::compress_sizes(&d, o.raw);
+            let (cc, ss) = container::compress_sizes_opt(&d, &opt);
             best_c = best_c.min(t.elapsed().as_secs_f64());
             c = cc;
             sizes = ss;
         }
         // The coded path, even when the container stores the file.
-        let mut ok = container::roundtrip(&d, o.raw);
+        let mut ok = container::roundtrip_opt(&d, &opt);
         if !ok {
             eprintln!("{path}: coded path does not round-trip");
         }
         for _ in 0..iters {
             let t = Instant::now();
-            let r = container::decompress(&c);
+            let r = container::decompress_threads(&c, opt.threads);
             best_d = best_d.min(t.elapsed().as_secs_f64());
             match r {
                 Ok(r) if r == d => {}
@@ -189,10 +199,26 @@ fn fuzz(args: &[String]) {
             }
             total += 1;
             let r = std::panic::catch_unwind(|| container::compress_sizes(&m, o.raw).0);
+            let opt = Options { raw: o.raw, threads: o.threads.unwrap_or([2, 3, 4][round % 3]) };
             let ok = match r {
-                Ok(c) => matches!(container::decompress(&c), Ok(ref back) if *back == m),
+                Ok(c) => {
+                    // The threaded paths: the same output, and the same result decompressing
+                    // (also of a damaged container).
+                    let flip = (rng() % c.len() as u64) as usize;
+                    let same = std::panic::catch_unwind(|| {
+                        let mut d = c.clone();
+                        d[flip] ^= 0x10;
+                        let res = |r: Result<Vec<u8>, container::Error>| r.map_err(|e| e.0);
+                        container::compress_sizes_opt(&m, &opt).0 == c
+                            && res(container::decompress_threads(&d, opt.threads)) == res(container::decompress(&d))
+                    });
+                    matches!(container::decompress(&c), Ok(ref back) if *back == m)
+                        && matches!(container::decompress_threads(&c, opt.threads), Ok(ref back) if *back == m)
+                        && same.unwrap_or(false)
+                }
                 Err(_) => false,
-            } && std::panic::catch_unwind(|| container::roundtrip(&m, o.raw)).unwrap_or(false);
+            } && std::panic::catch_unwind(|| container::roundtrip(&m, o.raw)).unwrap_or(false)
+                && std::panic::catch_unwind(|| container::roundtrip_opt(&m, &opt)).unwrap_or(false);
             if !ok {
                 fails += 1;
                 let name = format!("fuzz_failure_{round}");
@@ -237,12 +263,18 @@ fn main() {
             let o = opts(&args[1..]);
             let [i, out] = &o.rest[..] else { usage() };
             let d = read(i);
-            std::fs::write(out, container::compress_with(&d, o.raw)).unwrap();
+            let opt = Options { raw: o.raw, threads: o.threads.unwrap_or_else(cores) };
+            std::fs::write(out, container::compress_opt(&d, &opt)).unwrap();
         }
-        "d" if args.len() == 3 => {
-            let c = read(&args[1]);
-            match container::decompress(&c) {
-                Ok(d) => std::fs::write(&args[2], d).unwrap(),
+        "d" => {
+            let o = opts(&args[1..]);
+            let [i, out] = &o.rest[..] else { usage() };
+            if o.raw.is_some() {
+                usage();
+            }
+            let c = read(i);
+            match container::decompress_threads(&c, o.threads.unwrap_or_else(cores)) {
+                Ok(d) => std::fs::write(out, d).unwrap(),
                 Err(e) => {
                     eprintln!("{}", e.0);
                     std::process::exit(1)

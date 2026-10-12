@@ -47,15 +47,19 @@ cargo build --release
 flr c in.flac out.flr                # compress (FLAC, WAV, AIFF; anything else is stored)
 flr c -r s16le:2 in.raw out.flr      # headerless PCM: sign, bits, endianness, channels
 flr d out.flr back.flac              # decompress
-flr bench [-r FMT] [-n ITERS] [-v] FILE|DIR...  # round trip check, ratio, speed, stream sizes
+flr c -t 4 in.flac out.flr           # -t THREADS (c, d: default the available cores)
+flr bench [-r FMT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...  # round trip check, ratio, speed, stream sizes (-t default 1)
 flr info FILE|DIR...
-flr fuzz [-r FMT] [-n N] [-s SEED] FILE|DIR...  # mutated inputs must round-trip
+flr fuzz [-r FMT] [-t THREADS] [-n N] [-s SEED] FILE|DIR...  # mutated inputs must round-trip, the same with threads
 train [-a] OUT FILE|DIR...           # trains the built-in tables (model/builtin.bin)
 ```
 
 ```rust
 let packed = flac_recons::compress(&input);            // never fails: stores what it cannot code
 assert_eq!(flac_recons::decompress(&packed)?, input);  // checked against an xxh3 of the original
+let opt = flac_recons::Options { threads: 8, ..Default::default() };
+assert_eq!(flac_recons::compress_opt(&input, &opt), packed);       // the same bytes
+assert_eq!(flac_recons::decompress_threads(&packed, 8)?, input);
 ```
 
 ## Layout
@@ -67,9 +71,11 @@ assert_eq!(flac_recons::decompress(&packed)?, input);  // checked against an xxh
 | `src/residual.rs` | The pipeline shared by FLAC and PCM: per-frame passes, state across frames, built-in tables, subframe parameter serialisation |
 | `src/codec.rs` | FLAC files: segmentation into frames and junk, header prediction, streams |
 | `src/pcm.rs` | WAV / AIFF / raw PCM: format detection, block LPC encoder, decoding |
-| `src/container.rs` | Container format, stored fallback, checksum |
+| `src/container.rs` | Container format, stored fallback, checksum, options |
+| `src/par.rs` | Pipelines for more than one thread: batches, stages, pool, reordering |
 | `../recons-common` | Alias-table rANS (`rans64`, re-exported as `rans`), bit readers and writers (`msb`, as `bits`), LEB128 |
 | `src/bin/train.rs` | Training of the built-in tables |
+| `tests/threads.rs` | The same container bytes for 1, 2, 3 and 8 threads, threaded round trips, the same result decompressing damaged containers (also on inputs of many batches) |
 | `tests/regress.rs`, `tests/data` | Round trips of small synthetic files (8–32 bit, 1–6 channels, several encoders, lax streams, silence, ID3 tags, junk, cut files, WAV / AIFF / AIFC, raw PCM), corrupted containers |
 | `examples/` | Benchmarks and analysis: `hot`, `dhot` (profiling loops), `lmsbench`, `entbench` (cycles per residual of each pass), `rt` (parse / write round trip), `breakdown` (where FLAC's bits go), `exp2` (model experiments with ideal code lengths), `corrupt` |
 | `tools/` | `gen_testdata.sh`, `gen_synth.sh` (synthetic corpus from MP3s), `profile.py` (samply + atos) |
@@ -140,6 +146,35 @@ FLAC's synthesis.
   state stays in registers (a non-inlined closure kept it in memory: −25%). About 12 cycles
   per residual to decode, 7 + 4 to encode.
 
+### Threads
+
+`-t N` (`Options::threads`, `compress_opt`, `decompress_threads`): the output is the same
+bytes whatever the number of threads, and one thread runs the serial code. The residual
+model carries state across frames (LMS weights and history, scale means, the rANS symbol
+order, the raw bit writers), so it is not split across the file; it is split by stage.
+Frames go between threads in batches of about 65,536 samples (at most 64 items), through
+bounded channels; a fixed number of batches circulates, so memory stays bounded.
+
+- **FLAC compression**: parsing (CRC checks, Rice decoding, header prediction, subframe
+  parameters) on the calling thread → LMS stage → coding, on two threads. The LMS stage
+  needs the scale means from before each frame; it keeps them itself with the same
+  recurrence as the coder (a few operations per residual). rANS encoding, at the end,
+  stays serial.
+- **PCM compression**: a pool makes the frames of the blocks ahead (stereo choice, LPC,
+  residuals); one thread takes them in order (subframe parameters, LMS stage), the calling
+  thread codes them.
+- **Decompression**: subframe parameters → error decoding (rANS and raw bits, which do not
+  depend on the LMS stage) → LMS stage, each on a thread, then a pool: FLAC frames are
+  written (escape checks, Rice coding, CRCs) into per-batch buffers that the calling
+  thread appends in order; PCM samples are reconstructed straight into their place in the
+  output.
+- Errors travel down the pipeline in frame order, so a damaged file gives the same error
+  as with one thread; a frame whose long Rice codes exceed a small budget is written again
+  in order with the exact one. Side streams are zstd'd / unzstd'd on threads of their own,
+  and the checksum of the input is taken on another thread while compressing.
+- `compress_opt` never fails: a panic on any thread still falls back to stored (pool
+  threads forward panics; the other threads see their channels close and stop).
+
 ### 5. Container
 
 ```text
@@ -163,7 +198,7 @@ mode 1 (FLAC), mode 2 (PCM):
 - `flr bench`: every file round-trips through the container and through the coded path.
 - `flr fuzz`: bit flips, truncation, deletion and insertion; both paths must round-trip
   without panics (1170 mutated inputs of the test data and corpus files, also as raw PCM).
-- `cargo test --release`: bit I/O, rANS, and `tests/regress.rs`.
+- `cargo test --release`: bit I/O, rANS, `tests/regress.rs` and `tests/threads.rs`.
 
 ## Tried and dropped
 
