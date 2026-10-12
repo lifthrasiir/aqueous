@@ -12,6 +12,7 @@ train = ["dep:flate-zoo", "dep:rayon", "demo"]
 demo = ["dep:zstd"]
 
 [dependencies]
+recons-common = { path = "../recons-common" }
 flate-zoo = { path = "../flate-zoo", optional = true }
 rayon = { version = "1.12.0", optional = true }
 zstd = { version = "0.13.3", optional = true }

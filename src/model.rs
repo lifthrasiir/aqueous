@@ -11,6 +11,7 @@ use crate::coder::{Coder, Metadata};
 use crate::ctx::{self, Channel, Ctx, NUM_CTX};
 use crate::predict::Config;
 use crate::{Error, Result};
+use recons_common::varint;
 
 /// Probabilities are of the bit being 1, in units of 2^-16.
 pub const PROB_ONE: u32 = 1 << 16;
@@ -327,25 +328,12 @@ impl<'a> ArithDecoder<'a> {
 /// Format version, the first byte of packed metadata.
 const VERSION: u8 = 3;
 
-fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+fn put_varint(out: &mut Vec<u8>, v: u64) {
+    varint::put(out, v)
 }
 
 fn get_varint(input: &[u8], pos: &mut usize) -> Result<u64> {
-    let mut v = 0u64;
-    for shift in (0..64).step_by(7) {
-        let b = *input.get(*pos).ok_or(Error::Corrupt)?;
-        *pos += 1;
-        v |= ((b & 0x7f) as u64) << shift;
-        if b < 0x80 {
-            return Ok(v);
-        }
-    }
-    Err(Error::Corrupt)
+    varint::get(input, pos).map_err(|_| Error::Corrupt)
 }
 
 /// Entropy codes `meta` with the given priors: a header, then one arithmetic coded stream

@@ -8,6 +8,7 @@
 
 use crate::bits::{BitReader, BitWriter};
 use crate::{Error, Result};
+use recons_common::varint;
 
 /// Values below this are coded as a single symbol.
 const DIRECT: u32 = 16;
@@ -105,25 +106,12 @@ pub fn get_usize(r: &mut BitReader, max: usize) -> Result<usize> {
     Ok(v as usize)
 }
 
-pub fn put_varint(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
+pub fn put_varint(out: &mut Vec<u8>, v: u64) {
+    varint::put(out, v)
 }
 
 pub fn get_varint(input: &[u8], at: &mut usize) -> Result<u64> {
-    let mut v = 0u64;
-    for shift in (0..64).step_by(7) {
-        let b = *input.get(*at).ok_or(Error::Corrupt)?;
-        *at += 1;
-        v |= ((b & 0x7f) as u64) << shift;
-        if b < 0x80 {
-            return Ok(v);
-        }
-    }
-    Err(Error::Corrupt)
+    varint::get(input, at).map_err(|_| Error::Corrupt)
 }
 
 /// Symbol counts of one field.

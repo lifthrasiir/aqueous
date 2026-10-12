@@ -21,6 +21,10 @@ impl<'a> BitReader<'a> {
     pub fn peek(&self, n: u32) -> u32 {
         debug_assert!(n <= 32);
         let byte = self.pos >> 3;
+        if let Some(b) = self.data.get(byte..byte + 8) {
+            let w = u64::from_le_bytes(b.try_into().unwrap());
+            return ((w >> (self.pos & 7)) & ((1u64 << n) - 1)) as u32;
+        }
         let mut w = 0u64;
         for i in 0..5 {
             w |= (*self.data.get(byte + i).unwrap_or(&0) as u64) << (8 * i);

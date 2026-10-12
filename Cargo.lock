@@ -126,6 +126,7 @@ version = "0.1.0"
 dependencies = [
  "flate-zoo",
  "rayon",
+ "recons-common",
  "zstd",
 ]
 
@@ -302,6 +303,10 @@ dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
 ]
+
+[[package]]
+name = "recons-common"
+version = "0.1.0"
 
 [[package]]
 name = "relative-path"
