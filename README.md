@@ -62,7 +62,7 @@ results as `internal panic`; the input is saved as `fuzz_panic_<round>.jpg`.
 | `src/jpeg.rs` | Parsing, destuffing, fast Huffman decoding (serial / restart-interval parallel / speculative parallel), canonicality checks, sequential scan re-encoding (parallel chunks) |
 | `src/progressive.rs` | Progressive decoding (jdphuff semantics) with inline canonicality checks, scan-script validation, row pipeline across scans, re-encoding (jcphuff semantics) |
 | `src/fast.rs` | Entropy stage: the "P1" model, table normalisation and serialisation, 4-way rANS, stripes |
-| `src/container.rs` | Container format v4, top-level compress / decompress, recursive compression of embedded JPEGs, stored fallback |
+| `src/container.rs` | Container format (spec: [FORMAT.md](FORMAT.md)), top-level compress / decompress, recursive compression of embedded JPEGs, stored fallback |
 | `src/variant.rs` | Test generator: re-encodes the same coefficients in valid but non-canonical ways |
 | `src/model.rs` | The earlier, heavier model (reference only; only its `Phases` struct is still used) |
 | `tests/regress.rs` | Regression inputs |
@@ -122,7 +122,7 @@ Blocks are processed in raster order per component, coefficients in zigzag order
     refinement loop, and renormalises branchlessly with `select_unpredictable`.
   - Both candidate contexts of the next position are computed ahead, off the dependency chain.
   - Bounds are checked once per block, with padded buffers.
-- **Stripes (format v4)**: the image is split into horizontal stripes of whole MCU rows
+- **Stripes**: the image is split into horizontal stripes of whole MCU rows
   (about 32K blocks each, at most 256).
   - Each stripe has its own rANS and raw streams; the tables are shared.
   - Contexts do not cross stripe boundaries, which costs about 0.04 percentage points of
@@ -190,17 +190,21 @@ serial result.
 - So each block is only ever accessed by one scan at a time, in scan order.
 - If any scan fails, everything is decoded again serially.
 
-### 6. Container v4 and robustness
+### 6. Container and robustness
+
+The full specification is in [FORMAT.md](FORMAT.md).
 
 ```text
-"JRC" version(u8=4) mode(u8)
-mode 0 (stored): the input verbatim
-mode 1 (coded):
-  u64 LE xxh3 of the original             -- checked after decompression; a mismatch is an error
-  embedded JPEGs (gap, len, kind: 0 = nested JRC stream / 1 = reference to an identical earlier one)
-  cut blob                                -- headers, markers, trailer without scan data or embedded JPEGs
-  per scan: flags (zero padding, truncated, boundary, raw) + RST count / truncation tail / raw bytes
-  model payload: tables, stripe count, per stripe (rANS word count, raw byte count), data
+magic 69 04 7E 8E 9D E0, u16 version: 0 = sequential, 1 = progressive, 2 = stored
+then streams (varint length + data); each stream's meaning follows from the earlier ones:
+  head: u64 xxh3 of the original (checked after decompression; a mismatch is an error),
+        embedded JPEGs (gap, len, kind: 0 = nested container stream / 1 = copy of an earlier one)
+  nested containers, one per embedded JPEG of kind 0
+  cut blob                     -- headers, markers, trailer without scan data or embedded JPEGs
+  scan info: per scan flags (zero padding, raw, truncated, boundary) + RST count / truncation
+             point, stripe count
+  raw scan data / truncated tails
+  model tables, then per stripe: rANS words, raw bits
 ```
 
 - `compress` never fails. Whatever cannot be reproduced (unsupported or non-canonical coding,

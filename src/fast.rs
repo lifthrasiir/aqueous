@@ -274,9 +274,11 @@ impl BitWriter {
             self.out.reserve((self.out.capacity()).max(bytes + 16));
         }
     }
+    /// The bytes written, the last one zero-padded (readers pad on their own).
     fn finish(mut self) -> Vec<u8> {
-        self.out.extend_from_slice(&self.acc.to_le_bytes());
-        self.out.extend_from_slice(&[0; 8]);
+        if self.n > 0 {
+            self.out.push(self.acc as u8);
+        }
         self.out
     }
 }
@@ -1040,7 +1042,7 @@ fn walk_dec(
 /// Target stripe size in blocks: large enough that the lost above-context of each stripe's
 /// first row costs little, small enough to balance across cores.
 const STRIPE_BLOCKS: usize = 1 << 15;
-const MAX_STRIPES: usize = 256;
+pub const MAX_STRIPES: usize = 256;
 
 /// Number of MCU rows (of the image's block grid; single-component images: block rows).
 fn mcu_rows(j: &Jpeg) -> usize {
@@ -1073,9 +1075,6 @@ pub struct Encoded {
     pub nsym: usize,
 }
 
-fn put_varint(out: &mut Vec<u8>, v: u64) {
-    varint::put(out, v)
-}
 pub(crate) fn get_varint(d: &[u8], p: &mut usize) -> Result<u64, Error> {
     varint::get(d, p).map_err(|e| Error(e.0.into()))
 }
@@ -1086,62 +1085,46 @@ pub(crate) fn get_bytes<'a>(d: &'a [u8], p: &mut usize, n: u64) -> Result<&'a [u
     Ok(s)
 }
 
+impl Stripe {
+    /// The rANS words as stored: little-endian bytes.
+    pub fn rans_bytes(&self) -> std::borrow::Cow<'_, [u8]> {
+        if cfg!(target_endian = "little") {
+            // SAFETY: u32 has no padding; on little-endian targets its bytes are the LE encoding
+            std::borrow::Cow::Borrowed(unsafe {
+                std::slice::from_raw_parts(self.rans.as_ptr() as *const u8, self.rans.len() * 4)
+            })
+        } else {
+            std::borrow::Cow::Owned(self.rans.iter().flat_map(|w| w.to_le_bytes()).collect())
+        }
+    }
+}
+
 impl Encoded {
     pub fn size(&self) -> usize {
         self.tables.len() + self.stripes.iter().map(|s| s.rans.len() * 4 + s.raw.len()).sum::<usize>()
     }
-    /// Serialise: tables, stripe count, per stripe the rANS word count and raw byte count, then
-    /// per stripe its rANS words (LE) and raw bytes.
-    pub fn write(&self, out: &mut Vec<u8>) {
-        put_varint(out, self.tables.len() as u64);
-        out.extend_from_slice(&self.tables);
-        put_varint(out, self.stripes.len() as u64);
-        for s in &self.stripes {
-            put_varint(out, s.rans.len() as u64);
-            put_varint(out, s.raw.len() as u64);
-        }
-        out.reserve(self.size());
-        for s in &self.stripes {
-            if cfg!(target_endian = "little") {
-                // SAFETY: u32 has no padding; on little-endian targets its bytes are the LE encoding
-                out.extend_from_slice(unsafe {
-                    std::slice::from_raw_parts(s.rans.as_ptr() as *const u8, s.rans.len() * 4)
-                });
-            } else {
-                for w in &s.rans {
-                    out.extend_from_slice(&w.to_le_bytes());
-                }
-            }
-            out.extend_from_slice(&s.raw);
-        }
-    }
-    pub fn read(d: &[u8], p: &mut usize) -> Result<Encoded, Error> {
-        let n = get_varint(d, p)?;
-        let tables = get_bytes(d, p, n)?.to_vec();
-        let t = build_tables(read_tables(&tables)?, false);
-        let ns = get_varint(d, p)?;
-        if ns == 0 || ns > MAX_STRIPES as u64 {
+    /// From the stored parts: the table section and, per stripe, its rANS words (LE bytes) and
+    /// raw bytes.
+    pub fn from_parts(tables: &[u8], stripes: &[(&[u8], &[u8])]) -> Result<Encoded, Error> {
+        let t = build_tables(read_tables(tables)?, false);
+        if stripes.is_empty() || stripes.len() > MAX_STRIPES {
             return Err(Error("bad stripe count".into()));
         }
-        let mut lens = Vec::with_capacity(ns as usize);
-        for _ in 0..ns {
-            lens.push((get_varint(d, p)?, get_varint(d, p)?));
-        }
-        let mut stripes = Vec::with_capacity(lens.len());
-        for (nw, nr) in lens {
-            let words = get_bytes(d, p, nw.checked_mul(4).ok_or(Error("bad length".into()))?)?;
-            if words.len() < 32 {
-                return Err(Error("truncated rANS stream".into()));
-            }
-            // decoder padding (see `walk_dec`) is added here
-            let mut rans = Vec::with_capacity(words.len() / 4 + SRC_PAD);
-            rans.extend(words.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())));
-            let raw_bytes = get_bytes(d, p, nr)?;
-            let mut raw = Vec::with_capacity(raw_bytes.len() + RAW_PAD);
-            raw.extend_from_slice(raw_bytes);
-            stripes.push(Stripe { rans, raw });
-        }
-        Ok(Encoded { tables, stripes, t, nsym: 0 })
+        let stripes = stripes
+            .iter()
+            .map(|&(words, raw)| {
+                if words.len() < 32 || !words.len().is_multiple_of(4) {
+                    return Err(Error("bad rANS stream length".into()));
+                }
+                // decoder padding (see `walk_dec`) is added here
+                let mut rans = Vec::with_capacity(words.len() / 4 + SRC_PAD);
+                rans.extend(words.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())));
+                let mut r = Vec::with_capacity(raw.len() + RAW_PAD);
+                r.extend_from_slice(raw);
+                Ok(Stripe { rans, raw: r })
+            })
+            .collect::<Result<_, _>>()?;
+        Ok(Encoded { tables: tables.to_vec(), stripes, t, nsym: 0 })
     }
 }
 
