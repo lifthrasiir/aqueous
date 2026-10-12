@@ -5,7 +5,7 @@
 //! side information, scalefactors, gaps) goes into small byte streams compressed with zstd.
 
 use crate::bits::{BitReader, BitWriter, FastWriter, WordWriter};
-use crate::frame::{Header, SideInfo, crc16, scf_layout};
+use crate::frame::{Granule, Header, SideInfo, crc16, scf_layout};
 use crate::huff;
 use crate::model::{self, Coder, State, Sym};
 use crate::rans::{self, Tables, builtin};
@@ -52,10 +52,10 @@ fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
     builtin::from_bytes(BUILTIN, layout_id(), (0..model::N_CTX).map(model::alphabet))
 }
 
-struct Enc<'a> {
-    t: &'a Tables,
-    rans: rans::Encoder,
-    raw: WordWriter,
+pub(crate) struct Enc<'a> {
+    pub(crate) t: &'a Tables,
+    pub(crate) rans: rans::Encoder,
+    pub(crate) raw: WordWriter,
 }
 
 impl Coder for Enc<'_> {
@@ -85,7 +85,7 @@ impl Coder for Enc<'_> {
     }
 }
 
-struct EncLocal {
+pub(crate) struct EncLocal {
     rans: rans::EncLocal<true>,
     raw: crate::bits::WordBits,
 }
@@ -104,9 +104,9 @@ impl Sym for EncLocal {
     }
 }
 
-struct Dec<'a, 'b> {
-    rans: rans::Decoder<'a>,
-    raw: huff::BitBuf<'b>,
+pub(crate) struct Dec<'a, 'b> {
+    pub(crate) rans: rans::Decoder<'a>,
+    pub(crate) raw: huff::BitBuf<'b>,
 }
 
 impl<'b> Coder for Dec<'_, 'b> {
@@ -122,7 +122,7 @@ impl<'b> Coder for Dec<'_, 'b> {
     }
 }
 
-struct DecLocal<'b> {
+pub(crate) struct DecLocal<'b> {
     rans: rans::DecLocal,
     raw: huff::BitBuf<'b>,
 }
@@ -143,16 +143,16 @@ impl Sym for DecLocal<'_> {
 }
 
 // Byte streams.
-const S_SEGS: usize = 0;
-const S_JUNK: usize = 1;
-const S_HDR: usize = 2;
-const S_CRC: usize = 3;
-const S_TAILBITS: usize = 4;
-const S_RAWGR: usize = 5;
-const S_GAPS: usize = 6;
+pub(crate) const S_SEGS: usize = 0;
+pub(crate) const S_JUNK: usize = 1;
+pub(crate) const S_HDR: usize = 2;
+pub(crate) const S_CRC: usize = 3;
+pub(crate) const S_TAILBITS: usize = 4;
+pub(crate) const S_RAWGR: usize = 5;
+pub(crate) const S_GAPS: usize = 6;
 /// Range coded side information and scalefactors.
-const S_SIDE: usize = 7;
-const N_BYTE_STREAMS: usize = 8;
+pub(crate) const S_SIDE: usize = 7;
+pub(crate) const N_BYTE_STREAMS: usize = 8;
 pub const STREAM_NAMES: [&str; N_BYTE_STREAMS + 2] =
     ["segs", "junk", "headers", "crc", "tail bits", "raw gr", "gaps", "side", "rans", "raw bits"];
 
@@ -160,18 +160,18 @@ pub const STREAM_NAMES: [&str; N_BYTE_STREAMS + 2] =
 pub struct Error(pub &'static str);
 
 /// Sequential reader of a byte stream.
-struct Rd<'a> {
-    d: &'a [u8],
-    p: usize,
+pub(crate) struct Rd<'a> {
+    pub(crate) d: &'a [u8],
+    pub(crate) p: usize,
 }
 
 impl<'a> Rd<'a> {
-    fn u8(&mut self) -> Result<u8, Error> {
+    pub(crate) fn u8(&mut self) -> Result<u8, Error> {
         let v = *self.d.get(self.p).ok_or(Error("stream exhausted"))?;
         self.p += 1;
         Ok(v)
     }
-    fn bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
+    pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8], Error> {
         let s = self.d.get(self.p..self.p + n).ok_or(Error("stream exhausted"))?;
         self.p += n;
         Ok(s)
@@ -211,6 +211,21 @@ pub fn count<C: Coder>(d: &[u8], c: &mut C) {
 }
 
 fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
+    model_pass(split(d), c)
+}
+
+/// A file split into frames, before the model pass: the byte streams of the file structure
+/// (segments, junk, headers, CRCs) are complete.
+pub(crate) struct Split {
+    pub(crate) b: Vec<Vec<u8>>,
+    /// Header, side information, payload offset in `r_buf` and payload length per frame.
+    pub(crate) frames: Vec<(Header, SideInfo, usize, usize)>,
+    /// The reservoir (payloads of all frames), padded with `R_PAD` zero bytes.
+    r_buf: Vec<u8>,
+    r_len: usize,
+}
+
+pub(crate) fn split(d: &[u8]) -> Split {
     let (junk, runs, offsets) = segment(d);
     let mut b: Vec<Vec<u8>> = vec![Vec::new(); N_BYTE_STREAMS];
     // Junk lengths and frame runs (count, free format length), alternating.
@@ -264,7 +279,12 @@ fn encode_with<C: Coder>(d: &[u8], c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
     }
     let r_len = r_buf.len();
     r_buf.resize(r_len + R_PAD, 0);
+    Split { b, frames, r_buf, r_len }
+}
 
+/// Codes the frames of `s` (coefficients through `c`, the rest into the byte streams).
+pub(crate) fn model_pass<C: Coder>(s: Split, c: &mut C) -> (Vec<Vec<u8>>, [u64; 3]) {
+    let Split { mut b, frames, r_buf, r_len } = s;
     let mut rc = rc::Encoder::default();
     let mut side = SideModel::new();
     let mut tail = BitWriter::new();
@@ -373,39 +393,46 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
     }
-    let mut r: Vec<Rd> = c.streams.iter().map(|s| Rd { d: s, p: 0 }).collect();
-    // Junk lengths and frame runs (count, free format length), alternating.
+    let mut fr = parse_frames(&c.streams[S_SEGS], &c.streams[S_HDR], c.len)?;
+    let mut side = InlineSide { rc: rc::Decoder::new(&c.streams[S_SIDE]), m: SideModel::new() };
+    let s = &c.streams;
+    let r_out = main_pass(&mut fr, &s[S_TAILBITS], &s[S_RAWGR], &s[S_GAPS], &mut side, dc)?;
+    assemble(&fr, &s[S_JUNK], &s[S_CRC], &r_out)
+}
+
+/// The file structure: junk and frame runs, and the frames.
+pub(crate) struct Frames {
+    /// Junk lengths and frame runs (count, free format length), alternating.
+    pub(crate) junk: Vec<usize>,
+    pub(crate) runs: Vec<(usize, usize)>,
+    /// Header, side information, payload offset in the reservoir, payload length.
+    pub(crate) frames: Vec<(Header, SideInfo, usize, usize)>,
+    pub(crate) flens: Vec<usize>,
+    r_len: usize,
+}
+
+/// Reads the segments and the headers; the side information is left to [`main_pass`].
+pub(crate) fn parse_frames(segs: &[u8], hdr: &[u8], file_len: u64) -> Result<Frames, Error> {
+    let mut rs = Rd { d: segs, p: 0 };
+    let mut rh = Rd { d: hdr, p: 0 };
     let mut junk = Vec::new();
     let mut runs = Vec::new();
     loop {
-        junk.push(r[S_SEGS].varint()? as usize);
-        if r[S_SEGS].p == r[S_SEGS].d.len() {
+        junk.push(rs.varint()? as usize);
+        if rs.p == rs.d.len() {
             break;
         }
-        let n = r[S_SEGS].varint()? as usize;
-        let free = r[S_SEGS].varint()? as usize;
+        let n = rs.varint()? as usize;
+        let free = rs.varint()? as usize;
         if free > 1 << 16 {
             return Err(Error("free format length"));
         }
         runs.push((n, free));
     }
     let nframes: usize = runs.iter().map(|r| r.0).sum();
-    if nframes > c.streams[S_HDR].len() / 4 {
+    if nframes > hdr.len() / 4 {
         return Err(Error("frame count"));
     }
-
-    let pad = |v: &[u8]| {
-        let mut p = v.to_vec();
-        p.resize(v.len() + R_PAD, 0);
-        p
-    };
-    let tail_buf = pad(&c.streams[S_TAILBITS]);
-    let raw_gr_buf = pad(&c.streams[S_RAWGR]);
-    let gaps_buf = pad(&c.streams[S_GAPS]);
-    let (mut tail, mut raw_gr, mut gaps) =
-        (BitReader::new(&tail_buf, 0), BitReader::new(&raw_gr_buf, 0), BitReader::new(&gaps_buf, 0));
-    let mut rc = rc::Decoder::new(&c.streams[S_SIDE]);
-    let mut side = SideModel::new();
 
     let mut frames: Vec<(Header, SideInfo, usize, usize)> = Vec::with_capacity(nframes);
     let mut flens = Vec::with_capacity(nframes);
@@ -413,14 +440,14 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
     let mut prev_h = 0u32;
     for &(n, free) in &runs {
         for _ in 0..n {
-            let x = r[S_HDR].bytes(4)?;
+            let x = rh.bytes(4)?;
             let h = Header(u32::from_be_bytes([x[0], x[1], x[2], x[3]]) ^ prev_h);
             prev_h = h.0;
             if !h.valid_any() || h.free_format() != (free > 0) {
                 return Err(Error("bad header"));
             }
             let flen = h.frame_len_free(free);
-            if flen < h.prefix_len() || (r_len + flen) as u64 > c.len {
+            if flen < h.prefix_len() || (r_len + flen) as u64 > file_len {
                 return Err(Error("frame length"));
             }
             let len = flen - h.prefix_len();
@@ -429,21 +456,79 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
             r_len += len;
         }
     }
+    Ok(Frames { junk, runs, frames, flens, r_len })
+}
+
+/// Where the main pass gets the side information from (the decoding order is fixed: per
+/// frame `frame`, then per granule `granule` and, for coded granules, `part3`).
+pub(crate) trait SideSrc {
+    fn frame(&mut self, h: Header, si: &mut SideInfo, placed: &mut bool, resid: &mut i32);
+    fn granule(&mut self, h: Header, g: &mut Granule, ch: usize, placed: bool, raw: &mut bool);
+    fn part3(&mut self, ch: usize, nq: &mut usize, tl: &mut usize);
+    /// After the last frame: whether the side stream was long enough.
+    fn in_bounds(&mut self) -> bool;
+}
+
+/// Side information decoded in the main pass itself.
+pub(crate) struct InlineSide<'a> {
+    pub(crate) rc: rc::Decoder<'a>,
+    pub(crate) m: Box<SideModel>,
+}
+
+impl SideSrc for InlineSide<'_> {
+    #[inline(always)]
+    fn frame(&mut self, h: Header, si: &mut SideInfo, placed: &mut bool, resid: &mut i32) {
+        self.m.frame(&mut self.rc, h, si, placed, resid);
+    }
+    #[inline(always)]
+    fn granule(&mut self, h: Header, g: &mut Granule, ch: usize, placed: bool, raw: &mut bool) {
+        self.m.granule(&mut self.rc, h, g, ch, placed, raw);
+    }
+    #[inline(always)]
+    fn part3(&mut self, ch: usize, nq: &mut usize, tl: &mut usize) {
+        self.m.part3(&mut self.rc, ch, nq, tl);
+    }
+    fn in_bounds(&mut self) -> bool {
+        self.rc.in_bounds()
+    }
+}
+
+/// Rebuilds the reservoir (the main data of all frames) and completes the side information
+/// of the frames (main_data_begin, part2_3_length).
+pub(crate) fn main_pass<C: Coder, S: SideSrc>(
+    fr: &mut Frames,
+    tail: &[u8],
+    raw_gr: &[u8],
+    gaps: &[u8],
+    side: &mut S,
+    dc: &mut C,
+) -> Result<Vec<u8>, Error> {
+    let pad = |v: &[u8]| {
+        let mut p = v.to_vec();
+        p.resize(v.len() + R_PAD, 0);
+        p
+    };
+    let tail_buf = pad(tail);
+    let raw_gr_buf = pad(raw_gr);
+    let gaps_buf = pad(gaps);
+    let (mut tail, mut raw_gr, mut gaps) =
+        (BitReader::new(&tail_buf, 0), BitReader::new(&raw_gr_buf, 0), BitReader::new(&gaps_buf, 0));
+    let r_len = fr.r_len;
 
     let mut w = FastWriter::with_capacity(r_len + 8);
     let mut st = State::new();
     let mut end = 0usize;
     let mut scf = [0u8; 39];
-    for (h, si, pay, len) in frames.iter_mut() {
+    for (h, si, pay, len) in fr.frames.iter_mut() {
         let (h, pay, len) = (*h, *pay, *len);
         let mut placed = false;
         let mut resid = 0;
-        side.frame(&mut rc, h, si, &mut placed, &mut resid);
+        side.frame(h, si, &mut placed, &mut resid);
         if !placed {
             for gr in 0..h.granules() {
                 for ch in 0..h.channels() {
                     let mut raw = true;
-                    side.granule(&mut rc, h, &mut si.gr[gr][ch], ch, false, &mut raw);
+                    side.granule(h, &mut si.gr[gr][ch], ch, false, &mut raw);
                 }
             }
             if place(si, h, pay, len, end).is_some() {
@@ -463,7 +548,7 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
         for gr in 0..h.granules() {
             for ch in 0..h.channels() {
                 let mut raw = false;
-                side.granule(&mut rc, h, &mut si.gr[gr][ch], ch, true, &mut raw);
+                side.granule(h, &mut si.gr[gr][ch], ch, true, &mut raw);
                 let g = si.gr[gr][ch];
                 if raw {
                     w.copy(&mut raw_gr, g.part2_3_length as usize);
@@ -473,7 +558,7 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
                 let lay = scf_layout(h, si, gr, ch);
                 let nscf: usize = (0..4).filter(|&k| !lay.copy[k]).map(|k| lay.count[k] as usize).sum();
                 let (mut nq, mut tl) = (0, 0);
-                side.part3(&mut rc, ch, &mut nq, &mut tl);
+                side.part3(ch, &mut nq, &mut tl);
                 model::code_scalefactors(dc, &mut st, &lay, ch, &mut scf[..nscf]);
                 let mut k = 0;
                 w.reserve(64);
@@ -508,31 +593,35 @@ pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
             return Err(Error("main data overflow"));
         }
     }
-    if !rc.in_bounds() {
+    if !side.in_bounds() {
         return Err(Error("side stream exhausted"));
     }
     w.copy(&mut gaps, r_len * 8 - end);
-    let r_out = w.finish();
+    Ok(w.finish())
+}
 
-    let total = c.streams[S_JUNK].len() + flens.iter().sum::<usize>();
+/// The output file: junk, and per frame header, CRC, side information and main data.
+pub(crate) fn assemble(fr: &Frames, junk_s: &[u8], crc_s: &[u8], r_out: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut crc_r = Rd { d: crc_s, p: 0 };
+    let total = junk_s.len() + fr.flens.iter().sum::<usize>();
     let mut out = Vec::with_capacity(total);
     let (mut fi, mut jp) = (0usize, 0usize);
-    for (k, &j) in junk.iter().enumerate() {
-        out.extend_from_slice(c.streams[S_JUNK].get(jp..jp + j).ok_or(Error("junk"))?);
+    for (k, &j) in fr.junk.iter().enumerate() {
+        out.extend_from_slice(junk_s.get(jp..jp + j).ok_or(Error("junk"))?);
         jp += j;
-        let Some(&(n, _)) = runs.get(k) else { break };
+        let Some(&(n, _)) = fr.runs.get(k) else { break };
         for _ in 0..n {
-            let (h, si, pay, len) = &frames[fi];
+            let (h, si, pay, len) = &fr.frames[fi];
             let hb = h.0.to_be_bytes();
             out.extend_from_slice(&hb);
             let mut sw = BitWriter::new();
             si.write(*h, &mut sw);
             let side = sw.finish();
             if h.protected() {
-                if r[S_CRC].u8()? != 0 {
+                if crc_r.u8()? != 0 {
                     out.extend_from_slice(&crc16(&hb, &side).to_be_bytes());
                 } else {
-                    out.extend_from_slice(r[S_CRC].bytes(2)?);
+                    out.extend_from_slice(crc_r.bytes(2)?);
                 }
             }
             out.extend_from_slice(&side);

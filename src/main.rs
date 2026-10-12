@@ -4,7 +4,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  mp3r c IN OUT\n  mp3r d IN OUT\n  mp3r bench [-n ITERS] [-v] FILE...\n  mp3r info FILE...\n  mp3r fuzz [-n N] [-s SEED] FILE..."
+        "usage:\n  mp3r c [-t THREADS] IN OUT\n  mp3r d [-t THREADS] IN OUT\n  mp3r bench [-n ITERS] [-t THREADS] [-v] FILE...\n  mp3r info FILE...\n  mp3r fuzz [-n N] [-s SEED] [-t THREADS] FILE...\n(-t: c and d default to the available cores, bench and fuzz to 1)"
     );
     std::process::exit(2)
 }
@@ -36,8 +36,17 @@ fn files(args: &[String]) -> Vec<String> {
     out
 }
 
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
+fn num(args: &[String], i: usize) -> usize {
+    args.get(i).and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())
+}
+
 fn bench(args: &[String]) {
     let mut iters = 1;
+    let mut threads = 1;
     let mut verbose = false;
     let mut paths = Vec::new();
     let mut i = 0;
@@ -46,6 +55,10 @@ fn bench(args: &[String]) {
             "-n" => {
                 i += 1;
                 iters = args[i].parse().unwrap();
+            }
+            "-t" => {
+                i += 1;
+                threads = num(args, i).max(1);
             }
             "-v" => verbose = true,
             a => paths.push(a.to_string()),
@@ -63,7 +76,7 @@ fn bench(args: &[String]) {
         let mut sizes = Vec::new();
         for _ in 0..iters {
             let t = Instant::now();
-            let (cc, ss) = container::compress_sizes(&d);
+            let (cc, ss) = container::compress_sizes_threads(&d, threads);
             best_c = best_c.min(t.elapsed().as_secs_f64());
             c = cc;
             sizes = ss;
@@ -75,7 +88,7 @@ fn bench(args: &[String]) {
         }
         for _ in 0..iters {
             let t = Instant::now();
-            let r = container::decompress(&c);
+            let r = container::decompress_threads(&c, threads);
             best_d = best_d.min(t.elapsed().as_secs_f64());
             match r {
                 Ok(r) if r == d => {}
@@ -123,6 +136,7 @@ fn bench(args: &[String]) {
 
 fn fuzz(args: &[String]) {
     let mut rounds = 100;
+    let mut threads = 1;
     let mut seed = 1u64;
     let mut paths = Vec::new();
     let mut i = 0;
@@ -135,6 +149,10 @@ fn fuzz(args: &[String]) {
             "-s" => {
                 i += 1;
                 seed = args[i].parse().unwrap();
+            }
+            "-t" => {
+                i += 1;
+                threads = num(args, i).max(1);
             }
             a => paths.push(a.to_string()),
         }
@@ -178,9 +196,12 @@ fn fuzz(args: &[String]) {
                 }
             }
             total += 1;
-            let r = std::panic::catch_unwind(|| container::compress_sizes(&m).0);
+            let r = std::panic::catch_unwind(|| container::compress_sizes_threads(&m, threads).0);
             let ok = match r {
-                Ok(c) => matches!(container::decompress(&c), Ok(ref back) if *back == m),
+                Ok(c) => {
+                    matches!(container::decompress_threads(&c, threads), Ok(ref back) if *back == m)
+                        && (threads == 1 || c == container::compress(&m))
+                }
                 Err(_) => false,
             } && std::panic::catch_unwind(
                 || matches!(mp3_recons::codec::decode(&mp3_recons::codec::encode(&m)), Ok(ref r) if *r == m),
@@ -221,17 +242,30 @@ fn main() {
         usage();
     }
     match args[0].as_str() {
-        "c" if args.len() == 3 => {
-            let d = read(&args[1]);
-            std::fs::write(&args[2], container::compress(&d)).unwrap();
-        }
-        "d" if args.len() == 3 => {
-            let c = read(&args[1]);
-            match container::decompress(&c) {
-                Ok(d) => std::fs::write(&args[2], d).unwrap(),
-                Err(e) => {
-                    eprintln!("{}", e.0);
-                    std::process::exit(1)
+        "c" | "d" => {
+            let mut threads = cores();
+            let mut rest = Vec::new();
+            let mut i = 1;
+            while i < args.len() {
+                if args[i] == "-t" {
+                    i += 1;
+                    threads = num(&args, i).max(1);
+                } else {
+                    rest.push(&args[i]);
+                }
+                i += 1;
+            }
+            let [inp, outp] = rest[..] else { usage() };
+            let d = read(inp);
+            if args[0] == "c" {
+                std::fs::write(outp, container::compress_threads(&d, threads)).unwrap();
+            } else {
+                match container::decompress_threads(&d, threads) {
+                    Ok(d) => std::fs::write(outp, d).unwrap(),
+                    Err(e) => {
+                        eprintln!("{}", e.0);
+                        std::process::exit(1)
+                    }
                 }
             }
         }

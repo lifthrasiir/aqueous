@@ -8,9 +8,10 @@ pub mod frame;
 pub mod huff;
 pub mod huff_tables;
 pub mod model;
+mod par;
 pub mod rc;
 pub mod side;
 pub mod stream;
 
-pub use container::{compress, decompress};
+pub use container::{compress, compress_threads, decompress, decompress_threads};
 pub use recons_common::{msb as bits, rans64 as rans};

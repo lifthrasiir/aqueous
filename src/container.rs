@@ -9,6 +9,7 @@
 //! ```
 
 use crate::codec::{self, Coded, STREAM_NAMES};
+use crate::par;
 use recons_common::varint;
 use xxhash_rust::xxh3::xxh3_64;
 
@@ -46,21 +47,37 @@ fn stored(input: &[u8]) -> Vec<u8> {
 /// Per-stream sizes (raw, stored) in `STREAM_NAMES` order.
 pub type Sizes = Vec<(usize, usize)>;
 
+/// The stream compressed, if that makes it smaller.
+fn pack(b: &[u8]) -> Option<Vec<u8>> {
+    let z = if b.len() > 16 { zstd::bulk::compress(b, ZSTD_LEVEL).unwrap() } else { Vec::new() };
+    (!z.is_empty() && z.len() < b.len()).then_some(z)
+}
+
 pub fn compress_sizes(input: &[u8]) -> (Vec<u8>, Sizes) {
-    let c = codec::encode(input);
+    compress_sizes_threads(input, 1)
+}
+
+/// [`compress_sizes`] with `threads` threads (the same output).
+pub fn compress_sizes_threads(input: &[u8], threads: usize) -> (Vec<u8>, Sizes) {
+    let (c, packed, hash) = if threads > 1 && input.len() >= par::PAR_MIN {
+        par::encode(input, pack)
+    } else {
+        let c = codec::encode(input);
+        let packed = c.streams.iter().map(|b| pack(b)).collect();
+        (c, packed, xxh3_64(input))
+    };
     let mut out = Vec::with_capacity(input.len());
     out.extend_from_slice(MAGIC);
     out.push(VERSION);
     out.push(1);
     out.extend_from_slice(&(input.len() as u64).to_le_bytes());
-    out.extend_from_slice(&xxh3_64(input).to_le_bytes());
+    out.extend_from_slice(&hash.to_le_bytes());
     let mut sizes = Vec::with_capacity(STREAM_NAMES.len());
-    for b in &c.streams {
-        let z = if b.len() > 16 { zstd::bulk::compress(b, ZSTD_LEVEL).unwrap() } else { Vec::new() };
-        if !z.is_empty() && z.len() < b.len() {
+    for (b, z) in c.streams.iter().zip(&packed) {
+        if let Some(z) = z {
             put_varint(&mut out, (z.len() as u64) << 1 | 1);
             put_varint(&mut out, b.len() as u64);
-            out.extend_from_slice(&z);
+            out.extend_from_slice(z);
             sizes.push((b.len(), z.len()));
         } else {
             put_varint(&mut out, (b.len() as u64) << 1);
@@ -86,7 +103,12 @@ pub fn compress_sizes(input: &[u8]) -> (Vec<u8>, Sizes) {
 }
 
 pub fn compress(input: &[u8]) -> Vec<u8> {
-    match std::panic::catch_unwind(|| compress_sizes(input).0) {
+    compress_threads(input, 1)
+}
+
+/// [`compress`] with `threads` threads: the same output whatever the number.
+pub fn compress_threads(input: &[u8], threads: usize) -> Vec<u8> {
+    match std::panic::catch_unwind(|| compress_sizes_threads(input, threads).0) {
         Ok(c) => c,
         Err(_) => stored(input),
     }
@@ -131,6 +153,59 @@ pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
     let raw = c[p..].to_vec();
     let coded = Coded { len, streams, words, raw, raw_bits, bit_lens };
     let out = codec::decode(&coded).map_err(|e| Error(format!("corrupt: {}", e.0)))?;
+    if out.len() as u64 != len || xxh3_64(&out) != hash {
+        return Err(Error("checksum mismatch".into()));
+    }
+    Ok(out)
+}
+
+/// [`decompress`] with `threads` threads: the same result whatever the number.
+pub fn decompress_threads(c: &[u8], threads: usize) -> Result<Vec<u8>, Error> {
+    if threads <= 1 || c.len() < par::PAR_MIN || c.len() < 5 || &c[0..3] != MAGIC || c[3] != VERSION || c[4] == 0 {
+        return decompress(c);
+    }
+    let mut srcs = Vec::with_capacity(STREAM_NAMES.len() - 2);
+    // The container's layout; on an error, a stream before it that does not decompress
+    // is reported first, as by `decompress`.
+    let framing = (|| -> Result<_, Error> {
+        let mut p = 5;
+        let len = u64::from_le_bytes(take(c, &mut p, 8)?.try_into().unwrap());
+        let hash = u64::from_le_bytes(take(c, &mut p, 8)?.try_into().unwrap());
+        for _ in 0..STREAM_NAMES.len() - 2 {
+            let v = get_varint(c, &mut p)?;
+            let n = (v >> 1) as usize;
+            if v & 1 != 0 {
+                let raw = get_varint(c, &mut p)? as usize;
+                if raw as u64 > len + (1 << 20) {
+                    return Err(Error("stream size".into()));
+                }
+                srcs.push(par::Src::Zstd(take(c, &mut p, n)?, raw));
+            } else {
+                srcs.push(par::Src::Plain(take(c, &mut p, n)?));
+            }
+        }
+        for _ in 0..3 {
+            get_varint(c, &mut p)?;
+        }
+        let nwords = get_varint(c, &mut p)? as usize;
+        let _raw_bits = get_varint(c, &mut p)?;
+        let words = take(c, &mut p, nwords.checked_mul(4).ok_or(Error("size".into()))?)?;
+        Ok((len, hash, words, &c[p..]))
+    })();
+    let (len, hash, words, raw) = match framing {
+        Ok(f) => f,
+        Err(e) => {
+            for s in &srcs {
+                s.unpack().map_err(Error)?;
+            }
+            return Err(e);
+        }
+    };
+    let srcs: &[par::Src; codec::N_BYTE_STREAMS] = srcs[..].try_into().unwrap();
+    let out = par::decode(len, srcs, words, raw, threads).map_err(|e| match e {
+        par::DecError::Stream(m) => Error(m),
+        par::DecError::Codec(e) => Error(format!("corrupt: {}", e.0)),
+    })?;
     if out.len() as u64 != len || xxh3_64(&out) != hash {
         return Err(Error("checksum mismatch".into()));
     }

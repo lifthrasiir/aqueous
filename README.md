@@ -36,17 +36,22 @@ FMA directories 100–104 (73 files, 72.0 MB):
 ```sh
 cargo build --release
 
-mp3r c in.mp3 out.m3r                # compress
-mp3r d out.m3r back.mp3              # decompress
-mp3r bench [-n ITERS] [-v] FILE|DIR... # round trip check, ratio, throughput, per-stream sizes
+mp3r c [-t N] in.mp3 out.m3r         # compress
+mp3r d [-t N] out.m3r back.mp3       # decompress
+mp3r bench [-n ITERS] [-t N] [-v] FILE|DIR... # round trip check, ratio, throughput, per-stream sizes
 mp3r info FILE|DIR...                # frames, junk, tail / raw / gap bits, symbol counts
-mp3r fuzz [-n N] [-s SEED] FILE|DIR... # mutated inputs (flips, cuts, deletions, insertions)
+mp3r fuzz [-n N] [-s SEED] [-t N] FILE|DIR... # mutated inputs (flips, cuts, deletions, insertions)
 train [-a] OUT FILE|DIR...           # trains the built-in tables (every file with -a, else every second)
 ```
+
+`-t N`: threads; `c` and `d` default to the available cores, `bench` and `fuzz` to 1 (`fuzz`
+then also checks that the output equals the one-thread output). See [Threads](#7-threads).
 
 ```rust
 let packed = mp3_recons::compress(&mp3);              // never fails: stores what it cannot code
 assert_eq!(mp3_recons::decompress(&packed)?, mp3);    // checked against an xxh3 of the original
+let packed = mp3_recons::compress_threads(&mp3, 8);   // the same bytes for any number of threads
+assert_eq!(mp3_recons::decompress_threads(&packed, 8)?, mp3);
 ```
 
 Any input is accepted. Whatever is not an MP3 frame is kept verbatim (zstd), and so is any
@@ -65,9 +70,11 @@ main data that cannot be reproduced.
 | `src/rc.rs` | Adaptive binary range coder (LZMA style) |
 | `src/codec.rs` | Whole-file encode / decode, byte streams |
 | `src/container.rs` | Container format, stored fallback, checksum |
+| `src/par.rs` | Compression and decompression with more than one thread |
 | `../recons-common` | Alias-table rANS with lazy table construction (`rans64`, re-exported as `rans`), bit readers and writers (`msb`, as `bits`), LEB128 |
 | `src/bin/train.rs` | Training of the built-in tables (`model/builtin.bin`) |
 | `tests/regress.rs`, `tests/data` | Round trips of small LAME encodings (CBR, VBR, mono, CRC, MPEG-2, MPEG-2.5 8 kHz, free format, tags), with junk, cuts, concatenation, corrupted containers |
+| `tests/threads.rs` | The same with 2, 3 and 8 threads: identical compressed bytes, round trips, the same errors for corrupted containers |
 | `examples/` | Benchmarks and analysis helpers (`hot`, `overhead`, `phases`, `perfile`, `ctxdist`, `init`) |
 | `tools/` | `gen_huff.py`, `profile.py` (samply + atos self/inclusive time by line), `compare.sh`, `experiment.sh` |
 
@@ -171,13 +178,41 @@ mode 1 (coded):
 - Decompression checks length and xxh3, and bounds every size it reads, so corrupted input
   gives an error rather than a crash or a huge allocation.
 
+### 7. Threads
+
+`-t N` (`compress_threads`, `decompress_threads`; `mp3r c` and `mp3r d` default to the
+available cores): the output is the same bytes whatever the number of threads, and one
+thread, or an input below 64 KiB, runs the code above unchanged. The coefficient model
+carries state from granule to granule and the rANS chain is serial, so the model pass
+(compression) and the rANS decoding with the Huffman re-encoding (decompression) stay on
+the calling thread, in order. Around them (`src/par.rs`):
+
+- **Compression** (one helper thread, whatever N ≥ 2): the helper builds the tables and
+  hashes the input while the file is split into frames; compresses the file structure
+  streams (segments, junk, headers, CRCs) with zstd and then builds the encoder's inverse
+  maps of the contexts the side information says may be used (the Huffman tables, count1
+  tables and scalefactor sizes of the file, most used first) while the model pass runs;
+  then compresses the other streams while the rANS words are produced.
+- **Decompression**: the side information (adaptive range coder, independent of the rANS
+  stream) is decoded on its own thread, ahead of the main pass, in batches of frames; with
+  3 or more threads another builds the tables, the decoder's alias tables and the rANS
+  decoder while the streams are unpacked and the headers read (with 2, the side
+  information thread builds the tables first); the output (headers, side information,
+  CRCs, main data) is assembled in up to N pieces, one per 1024 frames.
+- Errors are the same as with one thread, in the same order of precedence.
+- Not done: splitting the Huffman re-encoding from the rANS decoding (it is a table lookup
+  and a write per symbol, about the cost of handing the values over), and a chunked model
+  pass for compression (granules depend on the previous granule of the channel and on
+  scalefactors of any earlier granule; it would need warm-up, state validation and
+  splicing of the symbol and bit streams).
+
 ## Verification
 
 - `mp3r bench`: every file round-trips through the container and through the coded path.
 - `mp3r fuzz`: bit flips, truncation, deletion and insertion; both paths must round-trip
-  without panics.
+  without panics (with `-t`, also through the threads, with the one-thread output).
 - `cargo test --release`: unit tests (bit I/O, Huffman tables and a random round trip for
-  every table, rANS, reciprocals, range coder) and `tests/regress.rs`.
+  every table, rANS, reciprocals, range coder), `tests/regress.rs` and `tests/threads.rs`.
 - The held-out FMA set above (3489 files) and fuzzing of FMA and synthetic files pass.
 
 ## Tried and dropped
