@@ -513,7 +513,7 @@ impl Encoder {
             }
         }
         let syms: Vec<(u16, u16)> = self.syms.iter().map(|&(t, s)| (remap[t as usize], s)).collect();
-        let st = rans::encode(&syms, &freqs, STRIDE);
+        let st = rans::encode(&syms, &freqs);
         let tb = tw.finish();
         let raw = self.raw.finish();
         let layout = self.layout.finish();
@@ -752,7 +752,7 @@ impl<'a> DecoderState<'a> {
             ctx[ci] = [dummy; PER_CLASS];
         }
         Ok(DecoderState {
-            tables: Tables::new(&freqs, STRIDE),
+            tables: Tables::new(&freqs),
             ctx,
             dec: Decoder::new(parts[1]),
             raw: BitR::new(parts[2]),

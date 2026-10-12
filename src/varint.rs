@@ -1,14 +1,9 @@
 //! LEB128 integers and a bounds-checked reader.
 
 use crate::{Error, Result};
+use recons_common::varint;
 
-pub fn put(out: &mut Vec<u8>, mut v: u64) {
-    while v >= 0x80 {
-        out.push(v as u8 | 0x80);
-        v >>= 7;
-    }
-    out.push(v as u8);
-}
+pub use varint::put;
 
 /// A cursor over a byte slice; every read is checked.
 pub struct Reader<'a> {
@@ -28,15 +23,7 @@ impl<'a> Reader<'a> {
     }
 
     pub fn varint(&mut self) -> Result<u64> {
-        let mut v = 0u64;
-        for shift in (0..64).step_by(7) {
-            let b = self.u8()?;
-            v |= ((b & 0x7f) as u64) << shift;
-            if b < 0x80 {
-                return Ok(v);
-            }
-        }
-        Err(Error::Corrupt)
+        Ok(varint::get(self.s, &mut self.pos)?)
     }
 
     /// A varint that must not exceed `max`.

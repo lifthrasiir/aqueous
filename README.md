@@ -209,7 +209,7 @@ target/release/pdfr fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
 | `src/scan.rs`, `src/lex.rs` | Finding streams, PDF objects |
 | `src/kind.rs`, `src/objects.rs` | Stream classes and filters, indirect objects |
 | `src/flate.rs`, `src/image.rs` | zlib wrapper; image geometry and the PNG wrapper |
-| `src/tok.rs`, `src/rans.rs` | Token mode; static rANS |
+| `src/tok.rs`, `src/rans.rs` | Token mode; static rANS (`recons_common::rans32` with 12-bit probabilities) |
 | `src/bin/pdfr.rs` | Command-line tool, bench, fuzz |
 | `examples/` | Corpus surveys and experiments behind the choices here |
 | `scripts/` | Corpus, baselines, cost fitting, profiling (`profile.py` over samply) |
