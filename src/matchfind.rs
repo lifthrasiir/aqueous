@@ -2,11 +2,8 @@
 //! the same three bytes. Unlike an encoder's hash chain this has no collisions, so it does
 //! not depend on any particular implementation's hash function.
 //!
-//! Searches are cached per position as the list of strict improvements found while walking
-//! the chain closest first ("records"). The result of a search with any depth limit and nice
-//! length follows from that list, so one walk serves every predictor configuration and
-//! repeated passes over the same data. Walks are resumable and only go as deep as some
-//! configuration has asked for.
+//! Searches go forward in a single pass (apart from a lookahead, or another pass from the
+//! start): only the chains of the window behind the last search are kept.
 
 pub const WINDOW: usize = 32768;
 pub const MAX_MATCH: usize = 258;
@@ -19,48 +16,11 @@ pub struct Found {
     pub dist: usize,
 }
 
-/// A strict improvement at chain index `idx`.
-#[derive(Debug, Clone, Copy)]
-struct Rec {
-    idx: u16,
-    len: u16,
-    dist: u16,
-}
-
-/// Search state of one position.
-#[derive(Debug, Clone, Copy)]
-struct Slot {
-    /// Records are `recs[start..start + count]`; `start` is `NONE` before the first search.
-    start: u32,
-    count: u16,
-    best: u16,
-    /// Next candidate to examine and its chain index; `next` is `NONE` once the walk is over.
-    next: u32,
-    idx: u32,
-}
-
-const UNSEARCHED: Slot = Slot {
-    start: NONE,
-    count: 0,
-    best: 0,
-    next: NONE,
-    idx: 0,
-};
-
-/// Predicted literal/length and distance code lengths of a block.
-type Trees = std::sync::Arc<(Vec<u8>, Vec<u8>)>;
-
 pub struct Matcher {
     /// Previous position with the same three leading bytes.
     chain: Chain,
-    /// Search state per position, when searches are cached (empty otherwise).
-    slots: Vec<Slot>,
-    /// Without a cache: the last two searches, (position, depth, nice, result).
+    /// The last two searches, (position, depth, nice, result).
     memo: [(usize, usize, usize, Found); 2],
-    recs: Vec<Rec>,
-    /// Predicted Huffman trees by (block start, token count): when deconstructing, a block's
-    /// tokens are the same in every pass.
-    trees: std::collections::HashMap<(usize, usize), Trees>,
 }
 
 /// The last position of every three-byte key so far, from which positions are linked.
@@ -152,13 +112,6 @@ fn key(data: &[u8], i: usize) -> Option<u32> {
     Some(k[0] as u32 | (k[1] as u32) << 8 | (k[2] as u32) << 16)
 }
 
-/// For every position, the previous position with the same three leading bytes.
-fn build_chain(data: &[u8]) -> Vec<u32> {
-    let mut prev = Vec::with_capacity(data.len());
-    Heads::new(data.len()).link(data, 0..data.len(), |_, p| prev.push(p));
-    prev
-}
-
 /// Links kept for positions within this distance of the last one linked: the window, plus
 /// the lookahead of a search behind it, plus the positions linked ahead of it.
 const RING: usize = 1 << 17;
@@ -166,20 +119,15 @@ const RING: usize = 1 << 17;
 /// Positions linked past a search at once; [`RING`] covers them and the window.
 const LINK_AHEAD: usize = 8192;
 
-/// The chains, either for every position or only near the positions searched last (which
-/// must then mostly go forward).
+/// The chains near the positions searched last.
 struct Chain {
     /// The link of position `base + i` is `base + links[i]`. Relative to `base` rather than
     /// modulo a ring size, so that a step along a chain is a single load: any arithmetic
     /// would add to its latency.
     links: Vec<u32>,
     base: usize,
-    /// When only positions `start..next` are linked, in a buffer of `2 * RING` that slides
-    /// by `RING` (or one holding them all).
-    ring: Option<Ring>,
-}
-
-struct Ring {
+    /// Positions `start..next` are linked, in a buffer of `2 * RING` that slides by `RING`
+    /// (or one holding them all).
     heads: Heads,
     start: usize,
     next: usize,
@@ -188,25 +136,18 @@ struct Ring {
 }
 
 impl Chain {
-    fn full(data: &[u8]) -> Chain {
-        Chain {
-            links: build_chain(data),
-            base: 0,
-            ring: None,
-        }
-    }
-
-    fn ring(data: &[u8]) -> Chain {
+    /// Links for searches at `start..end` only (plus lookahead).
+    fn ring(data: &[u8], start: usize, end: usize) -> Chain {
+        // Positions linked: the window before `start`, up to linking ahead of the last search.
+        let span = (end + LINK_AHEAD + 1).min(data.len()) - start.saturating_sub(WINDOW);
         Chain {
             // Never slides if it holds every position.
             links: vec![NONE; (2 * RING).min(data.len() + 1)],
             base: 0,
-            ring: Some(Ring {
-                heads: Heads::new(data.len()),
-                start: 0,
-                next: 0,
-                lo_search: 0,
-            }),
+            heads: Heads::new(span),
+            start: 0,
+            next: 0,
+            lo_search: 0,
         }
     }
 
@@ -214,33 +155,25 @@ impl Chain {
     #[inline(always)]
     fn ensure(&mut self, data: &[u8], p: usize) {
         // Usually linked already: the window behind `p` is still in the buffer.
-        match &self.ring {
-            None => {}
-            Some(r) if p < r.next && p >= r.lo_search => {}
-            Some(_) => self.extend(data, p),
+        if p >= self.next || p < self.lo_search {
+            self.extend(data, p);
         }
-    }
-
-    /// The end of the positions linked.
-    fn linked(&self) -> usize {
-        self.ring.as_ref().map_or(self.links.len(), |r| r.next)
     }
 
     #[inline(never)]
     fn extend(&mut self, data: &[u8], p: usize) {
-        let r = self.ring.as_mut().unwrap();
-        if p < r.next {
+        if p < self.next {
             // A search too far back (another pass): link the window before it afresh.
-            r.heads.clear();
-            r.start = p.saturating_sub(WINDOW);
-            r.next = r.start;
-            self.base = r.start;
+            self.heads.clear();
+            self.start = p.saturating_sub(WINDOW);
+            self.next = self.start;
+            self.base = self.start;
         }
         // Link ahead in batches: tight loops are faster, and links of later positions do not
         // affect searches from earlier ones.
         let end = (p + LINK_AHEAD).min(data.len()).max(p + 1);
-        while r.next < end {
-            if r.next == self.base + self.links.len() {
+        while self.next < end {
+            if self.next == self.base + self.links.len() {
                 // The window of every search from here on is in the second half.
                 for i in 0..RING {
                     let l = self.links[RING + i];
@@ -259,13 +192,13 @@ impl Chain {
                 prev => (prev as usize - base) as u32,
             };
             let links = &mut self.links[..stop - base];
-            r.heads
-                .link(data, r.next..stop, |i, prev| links[i - base] = rel(prev));
-            r.next = stop;
+            self.heads
+                .link(data, self.next..stop, |i, prev| links[i - base] = rel(prev));
+            self.next = stop;
         }
-        let lo = r.start.max(self.base);
-        r.lo_search = if lo == 0 { 0 } else { lo + WINDOW };
-        debug_assert!(r.lo_search <= p && p < r.next);
+        let lo = self.start.max(self.base);
+        self.lo_search = if lo == 0 { 0 } else { lo + WINDOW };
+        debug_assert!(self.lo_search <= p && p < self.next);
     }
 }
 
@@ -308,28 +241,18 @@ fn common(d: &[u8], a: usize, p: usize, max: usize) -> usize {
 }
 
 impl Matcher {
-    /// A matcher caching every search, for several passes and configurations over `data`.
-    pub fn new(data: &[u8]) -> Self {
-        Matcher {
-            chain: Chain::full(data),
-            slots: vec![UNSEARCHED; data.len() + 1],
-            memo: [(usize::MAX, 0, 0, Found::default()); 2],
-            recs: vec![],
-            trees: Default::default(),
-        }
+    /// A matcher over `data`: searches walk the chain directly, and only the last two are
+    /// remembered (a literal's next position is searched again as the next token's).
+    pub fn single(data: &[u8]) -> Self {
+        Self::single_range(data, 0, data.len())
     }
 
-    /// A matcher for a single pass with one configuration (reconstruction): searches walk
-    /// the chain directly, and only the last two are remembered (a literal's next position
-    /// is searched again as the next token's). Searches must go forward, apart from a
-    /// lookahead or restarting another pass; only the chains near the last search are kept.
-    pub fn single(data: &[u8]) -> Self {
+    /// [`Matcher::single`] for searches at `start..end` only: its memory is that of the
+    /// range rather than of the data.
+    pub fn single_range(data: &[u8], start: usize, end: usize) -> Self {
         Matcher {
-            chain: Chain::ring(data),
-            slots: vec![],
+            chain: Chain::ring(data, start, end),
             memo: [(usize::MAX, 0, 0, Found::default()); 2],
-            recs: vec![],
-            trees: Default::default(),
         }
     }
 
@@ -355,153 +278,6 @@ impl Matcher {
     /// The closest longest match among the first `depth` candidates of `data[p..]`, stopping
     /// early once a match reaches `nice`.
     pub fn longest(&mut self, d: &[u8], p: usize, depth: usize, nice: usize) -> Found {
-        if self.slots.is_empty() {
-            return self.longest_direct(d, p, depth, nice);
-        }
-        debug_assert!(self.chain.ring.is_none(), "cached searches go anywhere");
-        let prev = &self.chain.links;
-        let mut slot = self.slots[p];
-        if slot.start == NONE {
-            let max = (d.len() - p).min(MAX_MATCH);
-            slot = Slot {
-                start: self.recs.len() as u32,
-                next: if max >= 3 {
-                    prev.get(p).copied().unwrap_or(NONE)
-                } else {
-                    NONE
-                },
-                ..UNSEARCHED
-            };
-        }
-        // What the walk so far determines: the answer is final once a record reaches `nice`,
-        // or the walk has covered `depth` candidates or ended.
-        let answer = |recs: &[Rec]| {
-            let mut best = Found::default();
-            for r in recs {
-                if r.idx as usize >= depth {
-                    return Some(best);
-                }
-                best = Found {
-                    len: r.len as usize,
-                    dist: r.dist as usize,
-                };
-                if best.len >= nice {
-                    return Some(best);
-                }
-            }
-            None
-        };
-        let have = &self.recs[slot.start as usize..][..slot.count as usize];
-        if let Some(f) = answer(have) {
-            self.slots[p] = slot;
-            return f;
-        }
-        if slot.next != NONE && (slot.idx as usize) < depth {
-            // Resume the walk; the records must stay contiguous, so move them to the end.
-            if slot.start as usize + slot.count as usize != self.recs.len() {
-                let start = slot.start as usize;
-                self.recs
-                    .extend_from_within(start..start + slot.count as usize);
-                slot.start = (self.recs.len() - slot.count as usize) as u32;
-            }
-            let max = (d.len() - p).min(MAX_MATCH);
-            let mut best = slot.best as usize;
-            let (mut c, mut idx) = (slot.next, slot.idx as usize);
-            while c != NONE && p - c as usize <= WINDOW && idx < depth {
-                let cu = c as usize;
-                if best == 0 || d[cu + best] == d[p + best] {
-                    let l = common(d, cu, p, max);
-                    if l > best {
-                        best = l;
-                        self.recs.push(Rec {
-                            idx: idx as u16,
-                            len: l as u16,
-                            dist: (p - cu) as u16,
-                        });
-                        slot.count += 1;
-                        if l == max {
-                            c = NONE;
-                            break;
-                        }
-                    }
-                }
-                c = prev[cu];
-                idx += 1;
-            }
-            if c != NONE && p - c as usize > WINDOW {
-                c = NONE;
-            }
-            slot.best = best as u16;
-            slot.next = c;
-            slot.idx = idx as u32;
-        }
-        self.slots[p] = slot;
-        let have = &self.recs[slot.start as usize..][..slot.count as usize];
-        // Either the walk covers `depth` now or it is over: the last record within depth.
-        answer(have).unwrap_or_else(|| {
-            have.last().map_or(Found::default(), |r| Found {
-                len: r.len as usize,
-                dist: r.dist as usize,
-            })
-        })
-    }
-
-    /// [`crate::predict::predict_trees`] of the block of `tokens` starting at `start`, memoized.
-    pub(crate) fn trees(&mut self, start: usize, tokens: &[crate::deflate::Token]) -> Trees {
-        // A single pass never asks twice.
-        if self.slots.is_empty() {
-            return std::sync::Arc::new(crate::predict::predict_trees(tokens));
-        }
-        self.trees
-            .entry((start, tokens.len()))
-            .or_insert_with(|| std::sync::Arc::new(crate::predict::predict_trees(tokens)))
-            .clone()
-    }
-
-    /// The `q`-quantile (0..=1) of the chain indices of matches `(position, distance)`: how
-    /// many closer candidates each match's source had. O(1) per match, by numbering positions
-    /// within their chains in one pass; `matches` must come in order of position.
-    pub fn depth_quantile(
-        &mut self,
-        data: &[u8],
-        matches: impl Iterator<Item = (usize, usize)>,
-        q: f64,
-    ) -> usize {
-        // Numbers of the last positions (a match's source is within the window), all of them
-        // for short data.
-        let mask = RING.min(data.len().next_power_of_two()) - 1;
-        let mut seq = vec![0u32; mask + 1];
-        let mut next = 0;
-        let mut depths = vec![];
-        for (p, dist) in matches {
-            if p >= data.len() || dist > p || dist > WINDOW {
-                continue;
-            }
-            while next <= p {
-                self.chain.ensure(data, next);
-                let (links, base) = (&self.chain.links, self.chain.base);
-                let until = (p + 1).min(self.chain.linked());
-                for i in next..until {
-                    let link = links[i - base];
-                    let prev = base + link as usize;
-                    seq[i & mask] = if link != NONE && i - prev <= WINDOW {
-                        seq[prev & mask] + 1
-                    } else {
-                        0
-                    };
-                }
-                next = until;
-            }
-            depths.push(seq[p & mask].saturating_sub(seq[(p - dist) & mask] + 1));
-        }
-        if depths.is_empty() {
-            return 0;
-        }
-        let k = ((depths.len() - 1) as f64 * q) as usize;
-        *depths.select_nth_unstable(k).1 as usize
-    }
-
-    fn longest_direct(&mut self, d: &[u8], p: usize, depth: usize, nice: usize) -> Found {
         if let Some(m) = self
             .memo
             .iter()
@@ -538,6 +314,49 @@ impl Matcher {
         self.memo[1] = self.memo[0];
         self.memo[0] = (p, depth, nice, best);
         best
+    }
+
+    /// The `q`-quantile (0..=1) of the chain indices of matches `(position, distance)`: how
+    /// many closer candidates each match's source had. O(1) per match, by numbering positions
+    /// within their chains in one pass; `matches` must come in order of position.
+    pub fn depth_quantile(
+        &mut self,
+        data: &[u8],
+        matches: impl Iterator<Item = (usize, usize)>,
+        q: f64,
+    ) -> usize {
+        // Numbers of the last positions (a match's source is within the window), all of them
+        // for short data.
+        let mask = RING.min(data.len().next_power_of_two()) - 1;
+        let mut seq = vec![0u32; mask + 1];
+        let mut next = 0;
+        let mut depths = vec![];
+        for (p, dist) in matches {
+            if p >= data.len() || dist > p || dist > WINDOW {
+                continue;
+            }
+            while next <= p {
+                self.chain.ensure(data, next);
+                let (links, base) = (&self.chain.links, self.chain.base);
+                let until = (p + 1).min(self.chain.next);
+                for i in next..until {
+                    let link = links[i - base];
+                    let prev = base + link as usize;
+                    seq[i & mask] = if link != NONE && i - prev <= WINDOW {
+                        seq[prev & mask] + 1
+                    } else {
+                        0
+                    };
+                }
+                next = until;
+            }
+            depths.push(seq[p & mask].saturating_sub(seq[(p - dist) & mask] + 1));
+        }
+        if depths.is_empty() {
+            return 0;
+        }
+        let k = ((depths.len() - 1) as f64 * q) as usize;
+        *depths.select_nth_unstable(k).1 as usize
     }
 
     /// Rank of distance `dist` among the candidates of `p` matching at least `len` bytes,
@@ -603,10 +422,85 @@ impl Matcher {
 mod tests {
     use super::*;
 
+    /// Reference chains: the previous position of every position with the same three leading
+    /// bytes, from a hash map.
+    fn reference_chain(data: &[u8]) -> Vec<Option<usize>> {
+        let mut last = std::collections::HashMap::new();
+        (0..data.len())
+            .map(|i| data.get(i..i + 3).and_then(|k| last.insert(k, i)))
+            .collect()
+    }
+
+    /// The first `limit` candidates of `p` within the window, closest first.
+    fn candidates(prev: &[Option<usize>], p: usize, limit: usize) -> Vec<usize> {
+        let mut v = vec![];
+        let mut c = prev[p];
+        while let Some(x) = c.filter(|&x| p - x <= WINDOW && v.len() < limit) {
+            v.push(x);
+            c = prev[x];
+        }
+        v
+    }
+
+    fn reference_longest(
+        d: &[u8],
+        prev: &[Option<usize>],
+        p: usize,
+        depth: usize,
+        nice: usize,
+    ) -> Found {
+        let max = (d.len() - p).min(MAX_MATCH);
+        let mut best = Found::default();
+        if max < 3 {
+            return best;
+        }
+        for c in candidates(prev, p, depth) {
+            let l = common(d, c, p, max);
+            if l > best.len {
+                best = Found {
+                    len: l,
+                    dist: p - c,
+                };
+                if l >= nice || l == max {
+                    break;
+                }
+            }
+        }
+        best
+    }
+
+    fn reference_rank(
+        d: &[u8],
+        prev: &[Option<usize>],
+        p: usize,
+        len: usize,
+        dist: usize,
+        limit: usize,
+    ) -> Option<usize> {
+        let cands = candidates(prev, p, limit);
+        let i = cands.iter().position(|&c| p - c == dist)?;
+        Some(
+            cands[..i]
+                .iter()
+                .filter(|&&c| common(d, c, p, len) >= len)
+                .count(),
+        )
+    }
+
+    fn lcg_data(n: usize, seed: u32, alphabet: &[u8]) -> Vec<u8> {
+        let mut lcg = seed;
+        (0..n)
+            .map(|_| {
+                lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                alphabet[(lcg >> 16) as usize % alphabet.len()]
+            })
+            .collect()
+    }
+
     #[test]
     fn longest_and_rank() {
         let data = b"abcdeXabcdYabcdeZabcQ";
-        let mut m = Matcher::new(data);
+        let mut m = Matcher::single(data);
         // At 17 ("abcQ"): candidates 11 ("abcdeZ"), 6 ("abcdY"), 0 ("abcdeX").
         assert_eq!(m.longest(data, 17, 100, 258), Found { len: 3, dist: 6 });
         assert_eq!(m.longest(data, 11, 100, 258), Found { len: 5, dist: 11 });
@@ -619,18 +513,12 @@ mod tests {
         assert_eq!(m.select(data, 17, 3, 2, 100), Some(17));
     }
 
-    /// Keeping only the chains near the last search gives the same answers as the full
-    /// chains, over data longer than the ring, in a second pass, and after jumping ahead.
+    /// Keeping only the chains near the last search gives the same answers as full chains,
+    /// over data longer than the ring, in a second pass, and after jumping ahead.
     #[test]
     fn ring_matches_full_chain() {
-        let mut lcg = 3u32;
-        let data: Vec<u8> = (0..3 * RING + 1000)
-            .map(|_| {
-                lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                b"aabc"[(lcg >> 16) as usize % 4]
-            })
-            .collect();
-        let mut full = Matcher::new(&data);
+        let data = lcg_data(3 * RING + 1000, 3, b"aabc");
+        let prev = reference_chain(&data);
         let mut ring = Matcher::single(&data);
         let passes = [
             (0..data.len()).step_by(3).collect::<Vec<_>>(),
@@ -642,13 +530,32 @@ mod tests {
                     if q >= data.len() {
                         continue;
                     }
-                    let f = full.longest(&data, q, 64, 258);
+                    let f = reference_longest(&data, &prev, q, 64, 258);
                     assert_eq!(ring.longest(&data, q, 64, 258), f, "q={q}");
                     if f.len >= 3 {
-                        let r = full.rank(&data, q, 3, f.dist, 64);
+                        let r = reference_rank(&data, &prev, q, 3, f.dist, 64);
                         assert_eq!(ring.rank(&data, q, 3, f.dist, 64), r, "q={q}");
                         assert_eq!(ring.select(&data, q, 3, r.unwrap(), 64), Some(f.dist));
                     }
+                }
+            }
+        }
+    }
+
+    /// Every (depth, nice) gives the closest longest match among that many candidates.
+    #[test]
+    fn longest_obeys_depth_and_nice() {
+        let data = lcg_data(20000, 1, b"aab");
+        let prev = reference_chain(&data);
+        let mut m = Matcher::single(&data);
+        for p in (0..data.len()).step_by(7) {
+            for depth in [16, 1, 64, 2, 5, 4096] {
+                for nice in [3, 4, 8, 32, 258] {
+                    assert_eq!(
+                        m.longest(&data, p, depth, nice),
+                        reference_longest(&data, &prev, p, depth, nice),
+                        "p={p} depth={depth} nice={nice}"
+                    );
                 }
             }
         }
@@ -659,57 +566,8 @@ mod tests {
     fn depth_quantile_counts_closer_candidates() {
         let data = b"abcXabcYabcZabcQ";
         // At 12, the candidates are 8, 4, 0.
-        for mut m in [Matcher::new(data), Matcher::single(data)] {
-            let mut q = |dist| m.depth_quantile(data, [(12, dist)].into_iter(), 0.5);
-            assert_eq!((q(4), q(8), q(12)), (0, 1, 2));
-        }
-    }
-
-    /// The cached records answer every (depth, nice) exactly like a direct search.
-    #[test]
-    fn records_match_direct_search() {
-        let mut lcg = 1u32;
-        let data: Vec<u8> = (0..20000)
-            .map(|_| {
-                lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
-                b"aab"[(lcg >> 16) as usize % 3]
-            })
-            .collect();
-        let mut m = Matcher::new(&data);
-        let mut single = Matcher::single(&data);
-        for p in (0..data.len()).step_by(7) {
-            for depth in [16, 1, 64, 2, 5, 4096] {
-                for nice in [3, 4, 8, 32, 258] {
-                    // Direct search, as the predictor was originally written.
-                    let max = (data.len() - p).min(MAX_MATCH);
-                    let mut best = Found::default();
-                    if max >= 3 {
-                        let mut cands = vec![];
-                        m.walk(&data, p, depth, |c, _| {
-                            cands.push(c);
-                            true
-                        });
-                        for c in cands {
-                            let l = common(&data, c, p, max);
-                            if l > best.len {
-                                best = Found {
-                                    len: l,
-                                    dist: p - c,
-                                };
-                                if l >= nice || l == max {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    assert_eq!(single.longest(&data, p, depth, nice), best, "single p={p}");
-                    assert_eq!(
-                        m.longest(&data, p, depth, nice),
-                        best,
-                        "p={p} depth={depth} nice={nice}"
-                    );
-                }
-            }
-        }
+        let mut m = Matcher::single(data);
+        let mut q = |dist| m.depth_quantile(data, [(12, dist)].into_iter(), 0.5);
+        assert_eq!((q(4), q(8), q(12)), (0, 1, 2));
     }
 }

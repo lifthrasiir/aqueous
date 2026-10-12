@@ -2,14 +2,14 @@
 //!
 //! Structural checks come first, after preflate's estimator (deus-libri/preflate,
 //! `preflate_parameter_estimator.cpp` and `preflate_complevel_estimator.cpp`): zlib's dynamic
-//! headers are exactly what [`crate::predict::zlib_header`] gives, full blocks hold exactly
+//! headers are exactly what [`crate::header::zlib_header`] gives, full blocks hold exactly
 //! `lit_bufsize - 1` tokens (which gives memLevel), distances stay within
 //! `w_size - MIN_LOOKAHEAD` (a lower bound on windowBits), no match refers to position 0, and
 //! lazy levels never emit length-3 matches farther than 4096. The remaining candidates are
 //! then ranked by emulating them over a prefix of the stream.
 
 use crate::deflate::{Body, Stream, Token};
-use crate::predict::zlib_header;
+use crate::header::zlib_header;
 use crate::zlib::{Emulator, MultiSlow, Params, Strategy};
 
 /// Tokens emulated per candidate in the first round of ranking; each further round covers
@@ -392,7 +392,7 @@ fn units<'a>(stream: &Stream, data: &'a [u8], candidates: Vec<Params>) -> Vec<Un
     units
 }
 
-/// The first of `candidates` (in their order) that predicts the first [`TRIAL_TOKENS`]
+/// The first of `candidates` (in their order) that predicts the first `TRIAL_TOKENS`
 /// tokens without a miss: a cheap guess, to be verified by coding the whole stream.
 pub fn first_exact(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
     let mut found: Vec<(usize, Detection)> = vec![];

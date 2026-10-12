@@ -63,7 +63,7 @@ const FEW: usize = 5;
 fn builder(k: usize, lf: &[u32], df: &[u32]) -> Option<(Vec<u8>, Vec<u8>)> {
     Some(match k {
         0 => {
-            // zlib's trees (predict::predict_trees), from the counts at hand.
+            // zlib's trees, from the counts at hand.
             let mut pl = trees::zlib_lens(&lf[..286], 15);
             pl.resize(288, 0);
             let mut pd = trees::zlib_lens(&df[..30], 15);
@@ -196,6 +196,12 @@ impl Default for Recipe {
             ops_exact: true,
         }
     }
+}
+
+/// The dynamic block header zlib writes for `tokens`.
+pub fn zlib_header(tokens: &[Token]) -> DynHeader {
+    let (lf, df) = freqs(tokens);
+    build(Recipe::default(), &lf, &df).expect("zlib's candidates always exist")
 }
 
 /// The header `recipe` makes for a block (HLIT, HDIST and HCLEN as encoders set them).
@@ -353,13 +359,13 @@ pub fn write(
     }
 }
 
-/// Reads a header written by [`write`] for a block of `tokens`.
+/// Reads a header written by [`write()`] for a block of `tokens`.
 pub fn read(r: &mut BitReader, tokens: &[Token], recipe: &mut Recipe) -> Result<DynHeader> {
     let (lf, df) = freqs(tokens);
     read_freqs(r, &lf, &df, recipe)
 }
 
-/// Reads a header written by [`write`] for a block whose symbol frequencies (see [`freqs`])
+/// Reads a header written by [`write()`] for a block whose symbol frequencies (see [`freqs`])
 /// the caller counted.
 pub fn read_freqs(
     r: &mut BitReader,

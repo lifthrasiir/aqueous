@@ -3,7 +3,7 @@
 //!
 //! A field's values are split into a bucket symbol (entropy coded with the field's fixed
 //! frequencies) and raw extra bits, like DEFLATE's length and distance codes: values below
-//! [`DIRECT`] are their own symbol, larger ones take one symbol per half-octave. Frequencies
+//! `DIRECT` are their own symbol, larger ones take one symbol per half-octave. Frequencies
 //! are sent rounded to half-octaves; nothing adapts while coding.
 
 use crate::bits::{BitReader, BitWriter};
@@ -38,7 +38,7 @@ pub fn bucket(v: u32) -> (usize, u32, u32) {
 
 /// Inverse of [`bucket`]: the value of symbol `sym` with extra bits `x`.
 #[inline]
-fn unbucket(sym: usize, x: u32) -> u32 {
+pub fn unbucket(sym: usize, x: u32) -> u32 {
     if sym < DIRECT as usize {
         return sym as u32;
     }
@@ -49,7 +49,7 @@ fn unbucket(sym: usize, x: u32) -> u32 {
 }
 
 #[inline]
-fn extra_bits(sym: usize) -> u32 {
+pub fn extra_bits(sym: usize) -> u32 {
     if sym < DIRECT as usize {
         0
     } else {
@@ -161,7 +161,7 @@ fn weight(q: u8) -> u64 {
     (if q & 1 == 1 { 181 } else { 128 }) << (q / 2)
 }
 
-/// Fixed symbol frequencies of one field, summing to [`TOTAL`] (or all zero if the field
+/// Fixed symbol frequencies of one field, summing to `TOTAL` (or all zero if the field
 /// is unused).
 #[derive(Clone)]
 pub struct Model {

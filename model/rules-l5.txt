@@ -1,4 +1,4 @@
-# flate-recons fast rules, derived from flate-zoo's encoders: the best rule of each of
+# flate-recons rules, derived from flate-zoo's encoders: the best rule of each of
 # 369 preset classes (coordinate descent on up to 8 training streams each, first
 # 65536 bytes), then a greedy set cover of the 198 distinct ones on those 2414 streams
 # (all of them: 2668803 bytes).

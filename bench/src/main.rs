@@ -9,22 +9,20 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use flate_recons::Hints;
 use rayon::prelude::*;
 
 const USAGE: &str = "\
-usage: flate-recons-bench [-i DIR] [-s held|train|all] [-t TOOL,...] [-o TSV] [--phases] [--hints] [--no-zlib]
-       flate-recons-bench -f RAW [-t TOOL,...] [-j THREADS] [--no-zlib]
-  DIR   samples cached by flate-recons-train (default ../cache/samples)
+usage: flate-recons-bench [-i DIR] [-s held|train|all] [-t TOOL,...] [-P PROFILE] [-o TSV] [--no-zlib]
+       flate-recons-bench -f RAW [-t TOOL,...] [-P PROFILE] [-j THREADS] [--no-zlib]
+  DIR   samples cached by flate-recons-train samples (default ../cache/samples)
   -s    which split to run (default held: every fifth input file, as in training)
-  -t    tools (default recons,preflate,preflate-rs; also fast)
+  -t    tools (default recons,preflate,preflate-rs)
+  -P    flate-recons' profile (default 10)
   -o    per-stream results (default ../cache/bench.tsv)
-  --phases  instead, time the phases of flate-recons (CPU time summed over streams)
-  --hints   give flate-recons the zlib header the zlib-family encoders would have written
-  --no-zlib turn flate-recons' zlib emulation off
+  --no-zlib turn flate-recons' zlib emulation off (adaptive profiles)
   -f    instead, run the tools on one (long) raw DEFLATE stream and report wall and process
         CPU times; run one tool per process for its peak RSS
-  -j    threads for flate-recons' reconstruction (and fast's split) in -f mode (default: available parallelism)
+  -j    threads for flate-recons in -f mode (default: available parallelism)
   PREFLATE_RS_CHUNK  preflate-rs' plain text limit per chunk in -f mode (default 128 MiB)
 ";
 
@@ -95,8 +93,6 @@ fn timed<T>(f: impl FnOnce() -> T) -> (T, Duration) {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Tool {
     Recons,
-    /// flate-recons' rule-based representation (`flate_recons::fast`).
-    Fast,
     Preflate,
     PreflateRs,
 }
@@ -105,27 +101,15 @@ impl Tool {
     fn name(self) -> &'static str {
         match self {
             Tool::Recons => "recons",
-            Tool::Fast => "fast",
             Tool::Preflate => "preflate",
             Tool::PreflateRs => "preflate-rs",
         }
     }
 
     /// Splits `raw` into (plain text, reconstruction data).
-    fn split(self, raw: &[u8], hints: Hints, zlib: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
+    fn split(self, raw: &[u8], profile: u16, zlib: bool) -> Result<(Vec<u8>, Vec<u8>), String> {
         match self {
-            Tool::Recons => {
-                let opts = flate_recons::Options {
-                    hints,
-                    zlib,
-                    ..Default::default()
-                };
-                let mut packer = flate_recons::model::Packer::new(opts.priors);
-                let data = flate_recons::deconstruct_into(raw, &opts, &mut packer)
-                    .map_err(|e| e.to_string())?;
-                Ok((data, packer.finish()))
-            }
-            Tool::Fast => fast_split(raw, 1),
+            Tool::Recons => recons_split(raw, profile, zlib, 1),
             Tool::Preflate => unsafe {
                 let (mut p, mut pn, mut d, mut dn) =
                     (std::ptr::null_mut(), 0, std::ptr::null_mut(), 0);
@@ -155,18 +139,10 @@ impl Tool {
 
     fn join(self, plain: &[u8], diff: &[u8]) -> Result<Vec<u8>, String> {
         match self {
+            // One thread: times are the calling thread's CPU time.
             Tool::Recons => {
-                // One thread: times are the calling thread's CPU time.
-                flate_recons::model::unpack_with_threads(
-                    plain,
-                    diff,
-                    flate_recons::Priors::builtin(),
-                    1,
-                )
-                .map_err(|e| e.to_string())
+                flate_recons::reconstruct_with_threads(plain, diff, 1).map_err(|e| e.to_string())
             }
-            Tool::Fast => flate_recons::fast::reconstruct_with_threads(plain, diff, 1)
-                .map_err(|e| e.to_string()),
             Tool::Preflate => unsafe {
                 let (mut r, mut rn) = (std::ptr::null_mut(), 0);
                 if ffi::pf_reencode(
@@ -201,8 +177,8 @@ struct Outcome {
     join: Duration,
 }
 
-fn run(tool: Tool, raw: &[u8], expect: &[u8], hints: Hints, zlib: bool) -> Outcome {
-    let (r, split) = timed(|| tool.split(raw, hints, zlib));
+fn run(tool: Tool, raw: &[u8], expect: &[u8], profile: u16, zlib: bool) -> Outcome {
+    let (r, split) = timed(|| tool.split(raw, profile, zlib));
     let (plain, diff) = match r {
         Ok(x) => x,
         Err(e) => {
@@ -260,8 +236,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut split = "held".to_owned();
     let mut tools = vec![Tool::Recons, Tool::Preflate, Tool::PreflateRs];
     let mut tsv = PathBuf::from("../cache/bench.tsv");
-    let mut phases_only = false;
-    let mut use_hints = false;
+    let mut profile = flate_recons::ADAPTIVE;
     let mut use_zlib = true;
     let mut file = None;
     let mut threads = flate_recons::default_threads();
@@ -277,15 +252,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "-o" => tsv = val()?.into(),
             "-f" => file = Some(PathBuf::from(val()?)),
             "-j" => threads = val()?.parse()?,
-            "--phases" => phases_only = true,
-            "--hints" => use_hints = true,
+            "-P" => profile = val()?.parse()?,
             "--no-zlib" => use_zlib = false,
             "-t" => {
                 tools = val()?
                     .split(',')
                     .map(|t| match t {
                         "recons" => Ok(Tool::Recons),
-                        "fast" => Ok(Tool::Fast),
                         "preflate" => Ok(Tool::Preflate),
                         "preflate-rs" => Ok(Tool::PreflateRs),
                         _ => Err(format!("unknown tool {t}")),
@@ -296,14 +269,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(f) = file {
-        return run_file(&f, &tools, use_zlib, threads);
+        return run_file(&f, &tools, profile, use_zlib, threads);
     }
     let samples = load(&dir, &split)?;
     eprintln!("{} streams", samples.len());
-    if phases_only {
-        phases(&samples, use_zlib);
-        return Ok(());
-    }
 
     let results: Vec<(usize, Vec<Outcome>)> = samples
         .par_iter()
@@ -312,16 +281,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let expect = flate_recons::deflate::parse(&s.raw)
                 .map(|(_, d)| d)
                 .unwrap_or_default();
-            let h = if use_hints {
-                hints_for(&s.specs)
-            } else {
-                Hints::default()
-            };
             (
                 i,
                 tools
                     .iter()
-                    .map(|&t| run(t, &s.raw, &expect, h, use_zlib))
+                    .map(|&t| run(t, &s.raw, &expect, profile, use_zlib))
                     .collect(),
             )
         })
@@ -435,116 +399,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn fast_split(raw: &[u8], threads: usize) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let opts = flate_recons::fast::Options {
+fn recons_split(
+    raw: &[u8],
+    profile: u16,
+    zlib: bool,
+    threads: usize,
+) -> Result<(Vec<u8>, Vec<u8>), String> {
+    let opts = flate_recons::Options {
         threads,
-        ..Default::default()
+        zlib,
+        ..flate_recons::Options::for_profile(profile).map_err(|e| e.to_string())?
     };
-    flate_recons::fast::deconstruct_with(raw, &opts).map_err(|e| e.to_string())
-}
-
-/// CPU time of each phase of flate-recons, summed over all streams.
-fn phases(samples: &[Sample], zlib: bool) {
-    use flate_recons::{Priors, coder::Recorder, matchfind::Matcher, model};
-    const NAMES: [&str; 7] = [
-        "parse+check",
-        "chains",
-        "config search",
-        "record",
-        "pack",
-        "unpack",
-        "total",
-    ];
-    let priors = Priors::builtin();
-    let configs = &priors.catalog;
-    let t: Vec<[Duration; 7]> = samples
-        .par_iter()
-        .map(|s| {
-            let mut t = [Duration::ZERO; 7];
-            let (parsed, t0) = timed(|| flate_recons::Parsed::new(&s.raw).unwrap());
-            t[0] = t0;
-            t[1] = timed(|| Matcher::new(&parsed.data)).1;
-            let ((_, log), t2) = timed(|| {
-                parsed
-                    .best(configs, priors, zlib.then_some(&Hints::default()))
-                    .unwrap()
-            });
-            t[2] = t2;
-            let (rec, t3) = timed(|| {
-                let mut rec = Recorder::default();
-                for d in log {
-                    flate_recons::Coder::bit(&mut rec, d.ctx, d.bit);
-                }
-                rec
-            });
-            t[3] = t3;
-            let (packed, t4) = timed(|| model::pack(&rec.meta, priors));
-            t[4] = t4;
-            t[5] =
-                timed(|| model::unpack_with_threads(&parsed.data, &packed, priors, 1).unwrap()).1;
-            t[6] = t.iter().sum();
-            t
-        })
-        .collect();
-    let plain: usize = samples
-        .iter()
-        .map(|s| flate_recons::deflate::parse(&s.raw).map_or(0, |(_, d)| d.len()))
-        .sum();
-    println!(
-        "{} streams, {:.1} MB plain text",
-        samples.len(),
-        plain as f64 / 1e6
-    );
-    for (k, name) in NAMES.iter().enumerate() {
-        let d: Duration = t.iter().map(|x| x[k]).sum();
-        println!(
-            "  {name:<14} {:>8.2} s  {:>7.1} MB/s",
-            d.as_secs_f64(),
-            plain as f64 / 1e6 / d.as_secs_f64()
-        );
-    }
-}
-
-/// The zlib header that the zlib-family library named by the first of `specs` would have
-/// written (deflate.c's level_flags), as hints; nothing for other encoders.
-fn hints_for(specs: &str) -> Hints {
-    let spec = specs.split(' ').next().unwrap_or("");
-    let (backend, params) = spec.split_once(':').unwrap_or((spec, ""));
-    let zlib_family = [
-        "zlib",
-        "zlib-ng",
-        "zlib-chromium",
-        "zlib-chromium-rk",
-        "zlib-cloudflare",
-        "zlib-cloudflare-generic",
-        "zlib-rs",
-        "pako",
-    ];
-    if !zlib_family.contains(&backend) {
-        return Hints::default();
-    }
-    let (mut level, mut strategy, mut wbits) = (6u16, "default", 15u16);
-    for kv in params.split(',').filter(|kv| !kv.is_empty()) {
-        match kv.split_once('=') {
-            Some(("level", v)) => level = v.parse().unwrap(),
-            Some(("strategy", v)) => strategy = v,
-            Some(("wbits", v)) => wbits = v.parse::<u16>().unwrap().max(9),
-            _ => {}
-        }
-    }
-    let special = matches!(strategy, "huffman" | "rle" | "fixed");
-    let flevel = if special || level < 2 {
-        0
-    } else if level < 6 {
-        1
-    } else if level == 6 {
-        2
-    } else {
-        3
-    };
-    let mut h: u16 = (0x08 | ((wbits - 8) << 4)) << 8 | flevel << 6;
-    h += 31 - (h % 31);
-    Hints::zlib_header(h.to_be_bytes())
+    flate_recons::deconstruct_with(raw, &opts).map_err(|e| e.to_string())
 }
 
 /// preflate-rs' whole-stream API stops at `plain_text_limit` (128 MiB by default, or
@@ -599,6 +465,7 @@ fn preflate_rs_join_chunked(plain: &[u8], mut diff: &[u8]) -> Result<Vec<u8>, St
 fn run_file(
     path: &Path,
     tools: &[Tool],
+    profile: u16,
     zlib: bool,
     threads: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -624,8 +491,8 @@ fn run_file(
         let (diff, sw, sc) = measure(&mut || {
             let (p, d) = match tool {
                 Tool::PreflateRs => preflate_rs_split_chunked(&raw)?,
-                Tool::Fast => fast_split(&raw, threads)?,
-                _ => tool.split(&raw, Hints::default(), zlib)?,
+                Tool::Recons => recons_split(&raw, profile, zlib, threads)?,
+                _ => tool.split(&raw, profile, zlib)?,
             };
             plain = p;
             Ok(d)
@@ -642,16 +509,9 @@ fn run_file(
             }
         };
         let (back, jw, jc) = measure(&mut || match tool {
-            Tool::Recons => flate_recons::model::unpack_with_threads(
-                &plain,
-                &diff,
-                flate_recons::Priors::builtin(),
-                threads,
-            )
-            .map_err(|e| e.to_string()),
-            Tool::PreflateRs => preflate_rs_join_chunked(&plain, &diff),
-            Tool::Fast => flate_recons::fast::reconstruct_with_threads(&plain, &diff, threads)
+            Tool::Recons => flate_recons::reconstruct_with_threads(&plain, &diff, threads)
                 .map_err(|e| e.to_string()),
+            Tool::PreflateRs => preflate_rs_join_chunked(&plain, &diff),
             _ => tool.join(&plain, &diff),
         });
         let status = match back {

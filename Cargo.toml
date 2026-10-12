@@ -2,13 +2,14 @@
 name = "flate-recons"
 version = "0.1.0"
 edition = "2024"
-description = "DEFLATE stream deconstruction into predictable decisions and bit-exact reconstruction"
+description = "DEFLATE stream deconstruction into data and predicted corrections, and bit-exact reconstruction"
 publish = false
 
 [features]
-# The training tool, which drives real encoders through flate-zoo.
+# The training and evaluation tool (`flate-recons-train`), which drives real encoders
+# through flate-zoo.
 train = ["dep:flate-zoo", "dep:rayon", "demo"]
-# The recompression demos (`compress`/`decompress`), which store the data with zstd.
+# The recompression tool (`flate-recons compress`/`decompress`), which stores the data with zstd.
 demo = ["dep:zstd"]
 
 [dependencies]
@@ -28,11 +29,6 @@ required-features = ["demo"]
 [[bin]]
 name = "flate-recons-train"
 path = "src/bin/train.rs"
-required-features = ["train"]
-
-[[bin]]
-name = "flate-recons-fast"
-path = "src/bin/fast.rs"
 required-features = ["train"]
 
 [profile.release]

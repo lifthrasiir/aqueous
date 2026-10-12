@@ -230,7 +230,7 @@ pub fn write(stream: &Stream, data: &[u8]) -> Result<Vec<u8>> {
 /// Long streams are written in parallel chunks of at least this many bytes of data.
 const MIN_CHUNK: usize = 1 << 20;
 
-/// Like [`write`], on up to `threads` threads: the blocks are split in chunks that are
+/// Like [`write()`], on up to `threads` threads: the blocks are split in chunks that are
 /// written separately and joined bit by bit. Chunks with stored blocks, whose padding
 /// depends on where they start, are written in place instead.
 pub fn write_threads(stream: &Stream, data: &[u8], threads: usize) -> Result<Vec<u8>> {

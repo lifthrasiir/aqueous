@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn same_as_reference_parser() {
         let mut lcg = 5u32;
-        let mut data = include_bytes!("../predict.rs").to_vec();
+        let mut data = include_bytes!("zlib.rs").to_vec();
         data.extend((0..70_000).map(|_| {
             lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
             (lcg >> 24) as u8
@@ -672,7 +672,7 @@ mod tests {
         let mut e = crate::zlib::Emulator::new(&data, crate::zlib::Params::default());
         let mut blocks = vec![];
         let mut pos = 0;
-        while let Some(g) = crate::predict::zlib_block(&mut e, pos) {
+        while let Some(g) = crate::zlib::zlib_block(&mut e, pos) {
             pos += match &g.body {
                 Body::Stored { len, .. } => *len as usize,
                 Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {

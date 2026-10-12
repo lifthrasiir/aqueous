@@ -13,10 +13,11 @@
 //! prediction (kind, length), and its distance as an entry of the bucket or verbatim.
 
 use super::code::{self, Counts};
-use super::table::{Cands, NoTable, Search, Table, common};
+use super::table::{Cands, ChainTable, NoTable, Search, Table, common};
 use crate::bits::{BitReader, BitWriter};
 use crate::deflate::Token;
 use crate::matchfind::{MAX_MATCH, WINDOW};
+
 use crate::{Error, Result};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -27,6 +28,9 @@ pub enum Kind {
     Literals,
     /// Runs at distance 1 only (RLE strategies).
     Runs,
+    /// The closest longest match among the first `depth` candidates of an exact chain of
+    /// every position, stopping at `nice` (see [`crate::matchfind`]); distances are ranked.
+    Chain,
 }
 
 /// A deterministic token predictor.
@@ -58,9 +62,19 @@ pub struct Rule {
     pub far_dist: u16,
     /// Farthest distance used.
     pub window: u16,
+    /// [`Kind::Chain`]: the search depth and nice length, as indices into [`DEPTHS`] and
+    /// [`NICES`].
+    pub depth: u8,
+    pub nice: u8,
 }
 
 pub const MAX_WAYS: u8 = 8;
+/// Search depths of [`Kind::Chain`], by [`Rule::depth`].
+pub const DEPTHS: [u16; 16] = [
+    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768,
+];
+/// Nice lengths of [`Kind::Chain`], by [`Rule::nice`].
+pub const NICES: [u16; 8] = [8, 16, 24, 32, 64, 128, 192, 258];
 /// [`Rule::inner`]: every position is inserted.
 pub const INNER_ALL: u16 = MAX_MATCH as u16 + 1;
 
@@ -79,6 +93,8 @@ impl Default for Rule {
             far_len: 0,
             far_dist: 4096,
             window: WINDOW as u16,
+            depth: 0,
+            nice: 0,
         }
     }
 }
@@ -88,6 +104,13 @@ impl std::fmt::Display for Rule {
         match self.kind {
             Kind::Literals => return f.write_str("literals"),
             Kind::Runs => return write!(f, "runs,min={}", self.min_len),
+            Kind::Chain => {
+                return write!(
+                    f,
+                    "chain,depth={},nice={}",
+                    DEPTHS[self.depth as usize], NICES[self.nice as usize]
+                );
+            }
             Kind::Search => {}
         }
         write!(f, "key={},ways={}", self.key, self.ways)?;
@@ -137,6 +160,15 @@ impl std::str::FromStr for Rule {
             match kv.split_once('=') {
                 None if kv == "literals" => r.kind = Kind::Literals,
                 None if kv == "runs" => r.kind = Kind::Runs,
+                None if kv == "chain" => r.kind = Kind::Chain,
+                Some(("depth", v)) => {
+                    let v = num(v)?;
+                    r.depth = DEPTHS.iter().position(|&x| x == v).ok_or_else(bad)? as u8
+                }
+                Some(("nice", v)) => {
+                    let v = num(v)?;
+                    r.nice = NICES.iter().position(|&x| x == v).ok_or_else(bad)? as u8
+                }
                 None if kv == "far" => r.far_len = r.far_len.max(3),
                 None if kv == "starts" => r.inner = 0,
                 None if kv == "rank" => r.rank = true,
@@ -163,7 +195,9 @@ impl std::str::FromStr for Rule {
 
 impl Rule {
     pub fn check(&self) -> Result<()> {
-        let ok = (3..=4).contains(&self.key)
+        let ok = (self.depth as usize) < DEPTHS.len()
+            && (self.nice as usize) < NICES.len()
+            && (3..=4).contains(&self.key)
             && (1..=MAX_WAYS).contains(&self.ways)
             && self.ways.is_power_of_two()
             && (self.long == 0 || (5..=8).contains(&self.long))
@@ -179,8 +213,15 @@ impl Rule {
         }
     }
 
+    /// Writes the rule: its kind in 2 bits, then for [`Kind::Chain`] the depth and nice
+    /// indices (4 and 3 bits), else every other field.
     pub fn write(&self, w: &mut BitWriter) {
         w.bits(2, self.kind as u32);
+        if self.kind == Kind::Chain {
+            w.bits(4, self.depth as u32);
+            w.bits(3, self.nice as u32);
+            return;
+        }
         w.bits(1, self.key as u32 - 3);
         w.bits(3, self.ways as u32 - 1);
         w.bits(4, self.long as u32);
@@ -199,7 +240,14 @@ impl Rule {
             0 => Kind::Search,
             1 => Kind::Literals,
             2 => Kind::Runs,
-            _ => return Err(Error::Corrupt),
+            _ => {
+                return Ok(Rule {
+                    kind: Kind::Chain,
+                    depth: r.bits(4)? as u8,
+                    nice: r.bits(3)? as u8,
+                    ..Rule::default()
+                });
+            }
         };
         let g = |r: &mut BitReader, base: usize, max: usize| -> Result<u16> {
             Ok((code::get_usize(r, max)? + base) as u16)
@@ -217,17 +265,21 @@ impl Rule {
             far_len: g(r, 0, u8::MAX as usize)? as u8,
             far_dist: g(r, 0, u16::MAX as usize)?,
             window: g(r, 1, WINDOW - 1)?,
+            depth: 0,
+            nice: 0,
         };
         rule.check().map_err(|_| Error::Corrupt)?;
         Ok(rule)
     }
 
     /// Estimated time of coding with this rule, in nanoseconds per byte of data (measured on
-    /// one core of an M4 over the held-out samples, with `flate-recons-fast speed`).
+    /// one core of an M4 over the held-out samples, with `flate-recons-train speed`).
     pub fn ns_per_byte(&self) -> f64 {
         match self.kind {
             Kind::Literals => return 2.2,
             Kind::Runs => return 3.2,
+            // (Not measured: it depends on the data far more than the others.)
+            Kind::Chain => return 30.0,
             Kind::Search => {}
         }
         let ways = match self.ways {
@@ -276,6 +328,20 @@ impl Rule {
                         1,
                     )
                 }
+            }
+            Kind::Chain => {
+                let (len, dist) = t.search(d, p, WINDOW);
+                if len < 3 {
+                    return (lit, 0);
+                }
+                (
+                    Token::Match {
+                        len: len as u16,
+                        dist: dist as u16,
+                        alt258: false,
+                    },
+                    1,
+                )
             }
             Kind::Search => {
                 let window = self.window as usize;
@@ -326,16 +392,16 @@ pub const FIELDS: usize = 9;
 const RANK_LIMIT: usize = 1024;
 
 /// Kinds of corrections.
-const K_LIT: u32 = 0;
-const K_FRESH: u32 = 1;
-const K_DELTA: u32 = 2;
-const K_ALT258: u32 = 3;
+pub(crate) const K_LIT: u32 = 0;
+pub(crate) const K_FRESH: u32 = 1;
+pub(crate) const K_DELTA: u32 = 2;
+pub(crate) const K_ALT258: u32 = 3;
 
 fn zigzag(v: i32) -> u32 {
     ((v << 1) ^ (v >> 31)) as u32
 }
 
-fn unzigzag(v: u32) -> i32 {
+pub(crate) fn unzigzag(v: u32) -> i32 {
     (v >> 1) as i32 ^ -((v & 1) as i32)
 }
 
@@ -362,6 +428,32 @@ pub trait Corr {
         class: usize,
         actual: Option<Token>,
     ) -> Result<Token>;
+
+    /// A prediction to use instead of the rule's at `p` (coded as class 2), from a
+    /// predictor of the coder's own.
+    #[inline(always)]
+    fn predict(&mut self, _d: &[u8], _p: usize) -> Option<Token> {
+        None
+    }
+
+    /// The token at `p` once known (after every prediction, the rule's or the coder's).
+    #[inline(always)]
+    fn commit(&mut self, _p: usize, _tok: Token) {}
+
+    /// The data up to `end` is in stored blocks.
+    #[inline(always)]
+    fn skip(&mut self, _end: usize) {}
+
+    /// Whether [`Corr::next_len`] is wanted.
+    #[inline(always)]
+    fn lookahead(&self) -> bool {
+        false
+    }
+
+    /// Before a token the rule predicts to be a match, the length its table finds at the
+    /// next position (without inserting anything).
+    #[inline(always)]
+    fn next_len(&mut self, _len: usize) {}
 }
 
 /// Codes the tokens of `range` under `rule`, both ways: `actual` gives them when
@@ -375,8 +467,13 @@ pub fn code_range<C: Corr>(
     actual: Option<&[Token]>,
     out: Option<&mut Vec<Token>>,
 ) -> Result<usize> {
-    if rule.kind != Kind::Search {
-        return code_with(c, NoTable, d, rule, range, actual, out);
+    match rule.kind {
+        Kind::Search => {}
+        Kind::Chain => {
+            let t = ChainTable::new(d, range.pos, range.end, rule.depth, rule.nice);
+            return code_with(c, t, d, rule, range, actual, out);
+        }
+        _ => return code_with(c, NoTable, d, rule, range, actual, out),
     }
     let inner = (rule.inner != INNER_ALL).then_some(rule.inner as usize);
     macro_rules! go {
@@ -440,12 +537,30 @@ fn code_with<C: Corr, T: Search>(
         {
             p += len;
             skips.next();
+            c.skip(p);
         }
         if p >= n {
             return Err(Error::Corrupt);
         }
-        let (pred, class) = rule.predict(&mut t, d, p);
+        let (pred, class) = match c.predict(d, p) {
+            Some(t) => (t, 2),
+            None => {
+                let (pred, class) = rule.predict(&mut t, d, p);
+                if c.lookahead()
+                    && let Token::Match { .. } = pred
+                {
+                    let next = if p + 1 < n {
+                        t.peek(d, p + 1, rule.window as usize).0
+                    } else {
+                        0
+                    };
+                    c.next_len(next);
+                }
+                (pred, class)
+            }
+        };
         let tok = c.token(&mut t, d, p, pred, class, actual.map(|a| a[k]))?;
+        c.commit(p, tok);
         t.token(d, p, tok.span());
         p += tok.span();
         if let Some(o) = out.as_deref_mut() {
@@ -590,35 +705,50 @@ impl Recorder {
         class: usize,
         a: Token,
     ) {
-        let Token::Match { len, dist, alt258 } = a else {
-            self.put(KIND + class, K_LIT);
-            return;
-        };
-        match pred {
-            _ if alt258 => self.put(KIND + class, K_ALT258),
-            Token::Lit(_) => {
-                self.put(KIND + class, K_FRESH);
-                self.put(LEN_FRESH, len as u32 - 3);
-            }
-            Token::Match { len: pl, .. } => {
-                self.put(KIND + class, K_DELTA);
-                self.put(LEN_DELTA, zigzag(len as i32 - pl as i32));
+        payload(t, d, p, pred, class, a, |f, v| self.put(f, v));
+    }
+}
+
+/// The payload fields of a miss (`a` where `pred` was predicted), as (field, value) in
+/// coding order.
+#[inline]
+pub fn payload(
+    t: &mut dyn Cands,
+    d: &[u8],
+    p: usize,
+    pred: Token,
+    class: usize,
+    a: Token,
+    mut put: impl FnMut(usize, u32),
+) {
+    let Token::Match { len, dist, alt258 } = a else {
+        put(KIND + class, K_LIT);
+        return;
+    };
+    match pred {
+        _ if alt258 => put(KIND + class, K_ALT258),
+        Token::Lit(_) => {
+            put(KIND + class, K_FRESH);
+            put(LEN_FRESH, len as u32 - 3);
+        }
+        Token::Match { len: pl, .. } => {
+            put(KIND + class, K_DELTA);
+            put(LEN_DELTA, zigzag(len as i32 - pl as i32));
+        }
+    }
+    let i = dist_index(t, d, p, dist as usize);
+    put(DIST_IDX, i);
+    if i == 0 {
+        if t.ranked() {
+            let r = t
+                .rank(d, p, len as usize, dist as usize, RANK_LIMIT)
+                .map_or(0, |r| r as u32 + 1);
+            put(DIST_RANK, r);
+            if r > 0 {
+                return;
             }
         }
-        let i = dist_index(t, d, p, dist as usize);
-        self.put(DIST_IDX, i);
-        if i == 0 {
-            if t.ranked() {
-                let r = t
-                    .rank(d, p, len as usize, dist as usize, RANK_LIMIT)
-                    .map_or(0, |r| r as u32 + 1);
-                self.put(DIST_RANK, r);
-                if r > 0 {
-                    return;
-                }
-            }
-            self.put(DIST_RAW, dist as u32 - 1);
-        }
+        put(DIST_RAW, dist as u32 - 1);
     }
 }
 
@@ -692,52 +822,64 @@ impl Player<'_> {
         class: usize,
     ) -> Result<Token> {
         let (r, models) = (&mut self.r, self.models);
-        let get = |r: &mut code::Reader, f: usize| r.get(&models[f]);
-        let maxl = (d.len() - p).min(MAX_MATCH);
-        let kind = get(r, KIND + class)?;
-        let (len, alt258) = match (kind, pred) {
-            (K_LIT, Token::Match { .. }) => (0, false),
-            (K_FRESH, Token::Lit(_)) => (3 + get(r, LEN_FRESH)? as usize, false),
-            (K_DELTA, Token::Match { len: pl, .. }) => {
-                let l = pl as i64 + unzigzag(get(r, LEN_DELTA)?) as i64;
-                (usize::try_from(l).map_err(|_| Error::Corrupt)?, false)
-            }
-            (K_ALT258, _) => (MAX_MATCH, true),
-            _ => return Err(Error::Corrupt),
-        };
-        let tok = if len == 0 {
-            Token::Lit(d[p])
-        } else {
-            if !(3..=maxl).contains(&len) {
-                return Err(Error::Corrupt);
-            }
-            let dist = match get(r, DIST_IDX)? {
-                0 => match if t.ranked() { get(r, DIST_RANK)? } else { 0 } {
-                    0 => get(r, DIST_RAW)? as usize + 1,
-                    k => t
-                        .select(d, p, len, k as usize - 1, RANK_LIMIT)
-                        .ok_or(Error::Corrupt)?,
-                },
-                i => {
-                    let e = t.entries(d, p);
-                    p - *e.get(i as usize - 1).ok_or(Error::Corrupt)?
-                }
-            };
-            if !valid(d, p, len, dist) {
-                return Err(Error::Corrupt);
-            }
-            Token::Match {
-                len: len as u16,
-                dist: dist as u16,
-                alt258,
-            }
-        };
+        let tok = read_miss(t, d, p, pred, class, |f| r.get(&models[f]))?;
         self.misses[class] -= 1;
         if self.misses[class] > 0 {
             self.gap[class] = self.r.get(&self.models[GAP + class])?;
         }
         Ok(tok)
     }
+}
+
+/// A miss's token (where `pred` was predicted) from its payload fields, read by `get` in
+/// the order [`payload`] gives them.
+#[inline]
+pub fn read_miss(
+    t: &mut dyn Cands,
+    d: &[u8],
+    p: usize,
+    pred: Token,
+    class: usize,
+    mut get: impl FnMut(usize) -> Result<u32>,
+) -> Result<Token> {
+    let maxl = (d.len() - p).min(MAX_MATCH);
+    let kind = get(KIND + class)?;
+    let (len, alt258) = match (kind, pred) {
+        (K_LIT, Token::Match { .. }) => (0, false),
+        (K_FRESH, Token::Lit(_)) => (3 + get(LEN_FRESH)? as usize, false),
+        (K_DELTA, Token::Match { len: pl, .. }) => {
+            let l = pl as i64 + unzigzag(get(LEN_DELTA)?) as i64;
+            (usize::try_from(l).map_err(|_| Error::Corrupt)?, false)
+        }
+        (K_ALT258, _) => (MAX_MATCH, true),
+        _ => return Err(Error::Corrupt),
+    };
+    if len == 0 {
+        return Ok(Token::Lit(d[p]));
+    }
+    if !(3..=maxl).contains(&len) {
+        return Err(Error::Corrupt);
+    }
+    let dist = match get(DIST_IDX)? {
+        0 => match if t.ranked() { get(DIST_RANK)? } else { 0 } {
+            0 => get(DIST_RAW)? as usize + 1,
+            k => t
+                .select(d, p, len, k as usize - 1, RANK_LIMIT)
+                .ok_or(Error::Corrupt)?,
+        },
+        i => {
+            let e = t.entries(d, p);
+            p - *e.get(i as usize - 1).ok_or(Error::Corrupt)?
+        }
+    };
+    if !valid(d, p, len, dist) {
+        return Err(Error::Corrupt);
+    }
+    Ok(Token::Match {
+        len: len as u16,
+        dist: dist as u16,
+        alt258,
+    })
 }
 
 /// Whether `d[p - dist..]` matches `d[p..]` for `len` bytes, within DEFLATE's window.

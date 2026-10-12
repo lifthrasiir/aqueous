@@ -62,6 +62,8 @@ pub trait Search: Cands {
     /// The longest match at `p` among the candidates within `window`, the closest on ties:
     /// (length, distance), length 0 if none of at least 3.
     fn search(&mut self, d: &[u8], p: usize, window: usize) -> (usize, usize);
+    /// [`Search::search`] among the candidates inserted so far, inserting nothing.
+    fn peek(&mut self, d: &[u8], p: usize, window: usize) -> (usize, usize);
     /// Records that a token starts at `p` (token-driven insertion).
     fn token_start(&mut self, d: &[u8], p: usize);
     /// Records a token of `len` bytes at `p`.
@@ -81,7 +83,69 @@ impl Search for NoTable {
     fn search(&mut self, _: &[u8], _: usize, _: usize) -> (usize, usize) {
         (0, 0)
     }
+    fn peek(&mut self, _: &[u8], _: usize, _: usize) -> (usize, usize) {
+        (0, 0)
+    }
     fn token_start(&mut self, _: &[u8], _: usize) {}
+    fn token(&mut self, _: &[u8], _: usize, _: usize) {}
+}
+
+/// The table of [`super::tokens::Kind::Chain`]: exact chains of every position, which need
+/// no insertion (they are built from the data as searches move forward).
+pub struct ChainTable {
+    m: crate::matchfind::Matcher,
+    depth: usize,
+    nice: usize,
+}
+
+/// Candidates walked when ranking a distance on exact chains.
+const CHAIN_RANK_LIMIT: usize = 8192;
+
+impl ChainTable {
+    /// For searches at `start..end`, with the depth and nice length of the given indices.
+    pub fn new(d: &[u8], start: usize, end: usize, depth: u8, nice: u8) -> Self {
+        ChainTable {
+            m: crate::matchfind::Matcher::single_range(d, start, end),
+            depth: super::tokens::DEPTHS[depth as usize] as usize,
+            nice: super::tokens::NICES[nice as usize] as usize,
+        }
+    }
+}
+
+impl Cands for ChainTable {
+    fn entries(&mut self, _: &[u8], _: usize) -> Vec<usize> {
+        vec![]
+    }
+
+    fn index_of(&mut self, _: &[u8], _: usize, _: usize) -> Option<usize> {
+        None
+    }
+
+    fn ranked(&self) -> bool {
+        true
+    }
+
+    fn rank(&mut self, d: &[u8], p: usize, len: usize, dist: usize, _: usize) -> Option<usize> {
+        self.m.rank(d, p, len, dist, CHAIN_RANK_LIMIT)
+    }
+
+    fn select(&mut self, d: &[u8], p: usize, len: usize, rank: usize, _: usize) -> Option<usize> {
+        self.m.select(d, p, len, rank, CHAIN_RANK_LIMIT)
+    }
+}
+
+impl Search for ChainTable {
+    fn search(&mut self, d: &[u8], p: usize, _: usize) -> (usize, usize) {
+        let f = self.m.longest(d, p, self.depth, self.nice);
+        if f.len < 3 { (0, 0) } else { (f.len, f.dist) }
+    }
+
+    fn peek(&mut self, d: &[u8], p: usize, window: usize) -> (usize, usize) {
+        self.search(d, p, window)
+    }
+
+    fn token_start(&mut self, _: &[u8], _: usize) {}
+
     fn token(&mut self, _: &[u8], _: usize, _: usize) {}
 }
 
@@ -519,6 +583,15 @@ impl<const W: usize, const K: usize, const L: usize> Search for Table<W, K, L> {
         let r = self.search_uncached(d, p, window, max);
         self.memo = (p, window, r);
         r
+    }
+
+    #[inline(always)]
+    fn peek(&mut self, d: &[u8], p: usize, window: usize) -> (usize, usize) {
+        let max = (d.len() - p).min(MAX_MATCH);
+        if max < 3 {
+            return (0, 0);
+        }
+        self.search_uncached(d, p, window, max)
     }
 
     #[inline(always)]

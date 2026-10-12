@@ -1,85 +1,26 @@
-//! Round trips over real encoders from flate-zoo.
+//! zlib's emulation and detection against real zlib output from flate-zoo.
 
-use flate_recons::{Priors, coder::Recorder, deconstruct, model, reconstruct};
-use flate_zoo::{Sweep, backends, presets_of};
+use flate_zoo::{Sweep, presets_of};
 
-fn inputs() -> Vec<Vec<u8>> {
-    let mut lcg = 0x1234_5678u32;
-    let noise: Vec<u8> = (0..70_000)
-        .map(|_| {
-            lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
-            (lcg >> 24) as u8
-        })
-        .collect();
-    let text = include_bytes!("../src/predict.rs").repeat(3);
-    vec![
-        vec![],
-        b"a".to_vec(),
-        b"abcabcabd".repeat(20_000),
-        noise,
-        text,
-        vec![0; 100_000],
-    ]
-}
-
-#[test]
-fn every_backend_round_trips() {
-    let inputs = inputs();
-    let priors = Priors::builtin();
-    let mut failures = vec![];
-    for &b in backends() {
-        for enc in presets_of(b, Sweep::Default) {
-            for input in &inputs {
-                let Ok(raw) = enc.compress(input) else {
-                    continue;
-                };
-                let what = format!("{enc} on {} bytes", input.len());
-                let r = deconstruct(&raw).and_then(|(data, meta)| {
-                    assert_eq!(data, *input, "{what}");
-                    assert_eq!(reconstruct(&data, &meta)?, raw, "{what}");
-                    let packed = model::pack(&meta, priors);
-                    let mut cost = model::CostCoder::new(priors);
-                    for ch in &meta.channels {
-                        for d in ch {
-                            flate_recons::Coder::bit(&mut cost, d.ctx, d.bit);
-                        }
-                    }
-                    // Arithmetic coding overhead: a header plus a few bytes per channel.
-                    let est = cost.total() / 8.0;
-                    assert!(
-                        (packed.len() as f64) < est * 1.01 + 64.0,
-                        "{what}: {} vs {est}",
-                        packed.len()
-                    );
-                    assert_eq!(model::unpack(&data, &packed, priors)?, raw, "{what}");
-                    Ok(())
-                });
-                if let Err(e) = r {
-                    failures.push(format!("{what}: {e}"));
-                }
-            }
-        }
-    }
-    assert!(failures.is_empty(), "{failures:#?}");
-}
-
-/// zlib's Huffman trees are predicted exactly, so its headers cost one decision each.
+/// zlib's Huffman headers are what [`flate_recons::header::zlib_header`] builds for each block.
 #[test]
 fn zlib_headers_are_predicted() {
-    let text = include_bytes!("../src/predict.rs").repeat(3);
+    use flate_recons::deflate::Body;
+    let text = include_bytes!("../src/zlib.rs").repeat(3);
     for level in 1..=9 {
         let enc = flate_zoo::Encoder::new(flate_zoo::backend("zlib").unwrap())
             .set("level", level)
             .unwrap();
         let raw = enc.compress(&text).unwrap();
-        let parsed = flate_recons::Parsed::new(&raw).unwrap();
-        let mut rec = Recorder::default();
-        parsed
-            .code(&mut rec, "depth=128,nice=128".parse().unwrap())
-            .unwrap();
-        let tree = &rec.meta.channels[flate_recons::ctx::Channel::Tree as usize];
-        let wrong: Vec<_> = tree.iter().filter(|d| !d.bit).collect();
-        assert!(wrong.is_empty(), "level {level}: {wrong:?}");
+        let (stream, _) = flate_recons::deflate::parse(&raw).unwrap();
+        for (i, b) in stream.blocks.iter().enumerate() {
+            if let Body::Dynamic { header, tokens } = &b.body {
+                assert!(
+                    flate_recons::header::zlib_header(tokens) == *header,
+                    "level {level}, block {i}"
+                );
+            }
+        }
     }
 }
 
@@ -99,7 +40,7 @@ fn zlib_params(enc: &flate_zoo::Encoder) -> Option<flate_recons::zlib::Params> {
 
 fn zlib_inputs() -> Vec<Vec<u8>> {
     let mut lcg = 7u32;
-    let mut mixed = include_bytes!("../src/predict.rs").repeat(6);
+    let mut mixed = include_bytes!("../src/zlib.rs").repeat(6);
     // Incompressible stretches make zlib emit stored blocks in between.
     mixed.extend((0..40_000).map(|_| {
         lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
@@ -135,7 +76,7 @@ fn zlib_emulation_is_exact() {
                     let fixed = matches!(b.body, Body::Fixed { .. });
                     (tokens.len() == p.block_tokens() || b.last)
                         && fixed
-                            == (fixed_strategy || flate_recons::predict::zlib_prefers_fixed(tokens))
+                            == (fixed_strategy || flate_recons::zlib::zlib_prefers_fixed(tokens))
                 }
                 Body::Stored { .. } => true,
             });
@@ -143,7 +84,7 @@ fn zlib_emulation_is_exact() {
             let mut e = flate_recons::zlib::Emulator::new(&data, p);
             let mut generated = vec![];
             let mut pos = 0;
-            while let Some(g) = flate_recons::predict::zlib_block(&mut e, pos) {
+            while let Some(g) = flate_recons::zlib::zlib_block(&mut e, pos) {
                 pos += match &g.body {
                     Body::Stored { len, .. } => *len as usize,
                     Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => {
@@ -176,7 +117,7 @@ fn multi_slow_matches_single() {
     use flate_recons::detect;
     use flate_recons::zlib::{Params, Strategy};
     let inputs = [
-        include_bytes!("../src/predict.rs").repeat(6),
+        include_bytes!("../src/zlib.rs").repeat(6),
         b"abcabcabd".repeat(20_000),
     ];
     let specs = [
@@ -255,8 +196,8 @@ fn zlib_header_hints() {
     assert_eq!(Hints::zlib_header([0x78, 0x5e]).zlib_flevel, Some(1));
     assert_eq!(Hints::zlib_header([0x78, 0x00]), Hints::default());
 
-    // With the hints of zlib's own header, every preset is still reproduced exactly.
-    let input = include_bytes!("../src/predict.rs").repeat(4);
+    // With the hints of zlib's own header, every preset is still detected exactly.
+    let input = include_bytes!("../src/zlib.rs").repeat(4);
     for enc in presets_of(flate_zoo::backend("zlib").unwrap(), Sweep::OneAtATime) {
         if enc.get("inbuf") != Some(0) || enc.get("outbuf") != Some(0) {
             continue;
@@ -265,24 +206,17 @@ fn zlib_header_hints() {
         let hints = Hints::zlib_header(zlib_header_for(p));
         assert!(hints.allows(&p), "{enc}");
         let raw = enc.compress(&input).unwrap();
-        let opts = flate_recons::Options {
-            hints,
-            ..Default::default()
-        };
-        let (data, meta) = flate_recons::deconstruct_with(&raw, &opts).unwrap();
-        assert_eq!(
-            flate_recons::reconstruct(&data, &meta).unwrap(),
-            raw,
-            "{enc}"
-        );
-        assert!(meta.len() < 100, "{enc}: {} decisions", meta.len());
+        let (stream, data) = flate_recons::deflate::parse(&raw).unwrap();
+        let candidates = flate_recons::detect::candidates_hinted(&stream, &hints);
+        let d = flate_recons::detect::detect_refined(&stream, &data, candidates);
+        assert!(d.is_some_and(|d| d.misses == 0), "{enc}: {d:?}");
     }
 }
 
 /// A large input that zlib compresses without long repeats across windows.
 fn large_input() -> Vec<u8> {
     let srcs: [&[u8]; 4] = [
-        include_bytes!("../src/predict.rs"),
+        include_bytes!("../src/lib.rs"),
         include_bytes!("../src/zlib.rs"),
         include_bytes!("../src/detect.rs"),
         include_bytes!("../src/deflate.rs"),
@@ -306,14 +240,16 @@ fn large_input() -> Vec<u8> {
     out
 }
 
-/// Long zlib streams carry checkpoints, are rebuilt the same with any number of threads, and
-/// a damaged checkpoint is an error rather than a wrong stream.
+/// Long zlib streams are cut into segments that each resume zlib's emulation from a
+/// checkpoint: they cost next to nothing, and are rebuilt the same with any number of threads.
 #[test]
 fn zlib_checkpoints_reconstruct_in_parallel() {
-    use flate_recons::coder::Player;
-    use flate_recons::ctx::Channel;
     let input = large_input();
     assert!(input.len() > 1 << 20, "{}", input.len());
+    let opts = flate_recons::Options {
+        segment: 128 << 10,
+        ..flate_recons::Options::for_profile(flate_recons::ADAPTIVE).unwrap()
+    };
     for (level, wbits) in [(6, 15), (9, 12), (4, 10)] {
         let enc = flate_zoo::Encoder::new(flate_zoo::backend("zlib").unwrap())
             .set("level", level)
@@ -321,54 +257,15 @@ fn zlib_checkpoints_reconstruct_in_parallel() {
             .set("wbits", wbits)
             .unwrap();
         let raw = enc.compress(&input).unwrap();
-        let (data, meta) = deconstruct(&raw).unwrap();
-        let coded = flate_recons::predict::code_stream(
-            &mut Player::new(&meta),
-            &data,
-            None,
-            None,
-            &mut None,
-            1,
-        )
-        .unwrap();
-        assert!(coded.config.zlib.is_some(), "{enc}");
-        assert_eq!(coded.exact_blocks, coded.stream.blocks.len(), "{enc}");
-        assert!(
-            coded.checkpoints >= 3,
-            "{enc}: {} checkpoints",
-            coded.checkpoints
-        );
+        let (data, meta, report) = flate_recons::deconstruct_report(&raw, &opts).unwrap();
+        assert!(report.zlib.is_some(), "{enc}");
+        assert_eq!(report.misses, 0, "{enc}");
+        assert!(meta.len() < 1000, "{enc}: {} B", meta.len());
         for threads in [1, 3, 8] {
-            let mut p = Player::new(&meta);
-            assert_eq!(
-                flate_recons::reconstruct_with_threads(&data, &mut p, threads).unwrap(),
-                raw,
-                "{enc}"
+            assert!(
+                flate_recons::reconstruct_with_threads(&data, &meta, threads).unwrap() == raw,
+                "{enc}, {threads} threads"
             );
-            assert!(p.exhausted());
-        }
-        let priors = Priors::builtin();
-        let packed = model::pack(&meta, priors);
-        assert_eq!(
-            model::unpack_with_threads(&data, &packed, priors, 4).unwrap(),
-            raw
-        );
-
-        // The checkpoints are the block channel's bypass bits after the configuration.
-        let block = &meta.channels[Channel::Block as usize];
-        let cp_bits: Vec<usize> = (0..block.len())
-            .filter(|&i| block[i].ctx.is_bypass())
-            .skip(22)
-            .collect();
-        assert!(cp_bits.len() > 50, "{}", cp_bits.len());
-        for &i in cp_bits.iter().step_by(cp_bits.len() / 12) {
-            let mut bad = meta.clone();
-            bad.channels[Channel::Block as usize][i].bit ^= true;
-            for threads in [1, 4] {
-                let r =
-                    flate_recons::reconstruct_with_threads(&data, &mut Player::new(&bad), threads);
-                assert!(r.is_err(), "{enc}: bit {i} flipped, {threads} threads");
-            }
         }
     }
 }

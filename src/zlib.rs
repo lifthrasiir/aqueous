@@ -8,7 +8,9 @@
 //! with the actual one. On a mismatch the state is forced to follow the actual token, so
 //! prediction resumes right after.
 
-use crate::deflate::Token;
+use crate::deflate::{Block, Body, DynHeader, Token};
+use crate::header::zlib_header;
+use crate::huffman::{self, RleOp};
 
 const MIN_MATCH: usize = 3;
 const MAX_MATCH: usize = 258;
@@ -86,6 +88,12 @@ impl Params {
     /// Tokens per block before zlib flushes it (`lit_bufsize - 1`).
     pub fn block_tokens(self) -> usize {
         (1 << (self.mem as usize + 6)) - 1
+    }
+
+    /// Whether an emulation with these parameters can be resumed from a [`Checkpoint`]: not
+    /// deflate_fast's (levels 1-3), whose hash chains depend on the tokens.
+    pub fn resumable(self) -> bool {
+        self.level > 3 || matches!(self.strategy, Strategy::HuffmanOnly | Strategy::Rle)
     }
 
     fn valid(self) -> bool {
@@ -231,19 +239,33 @@ impl<'a> Emulator<'a> {
         }
     }
 
-    /// The state at this token boundary, or `None` where resuming is not supported: only
-    /// deflate_slow, while input remains to be read (so that every position before strstart
-    /// has been inserted).
+    /// The state at this token boundary, or `None` where resuming is not supported: not in
+    /// deflate_fast (whose hash chains depend on the tokens), and in deflate_slow only while
+    /// input remains to be read (so that every position before strstart has been inserted).
+    /// deflate_rle and deflate_huff keep no state beyond the window.
     pub fn checkpoint(&self) -> Option<Checkpoint> {
-        if self.algo != Algo::Slow
+        if self.algo == Algo::Fast
             || self.pending.is_some()
             || self.done
-            || self.read == self.input.len()
-            || self.match_length < MIN_MATCH - 1
+            || (self.algo == Algo::Slow && self.read == self.input.len())
         {
             return None;
         }
         let strstart = self.base + self.strstart;
+        if self.algo != Algo::Slow {
+            return Some(Checkpoint {
+                strstart,
+                base: self.base,
+                read: self.read,
+                high_water: self.high_water,
+                match_available: false,
+                match_length: MIN_MATCH - 1,
+                match_start: 0,
+            });
+        }
+        if self.match_length < MIN_MATCH - 1 {
+            return None;
+        }
         let match_start = if self.match_length >= MIN_MATCH {
             let m = self.base.wrapping_add(self.match_start);
             if m < self.base || m >= strstart {
@@ -270,17 +292,20 @@ impl<'a> Emulator<'a> {
     /// position of the last window inserted again. `None` if `cp` cannot come from `p` and
     /// `input`.
     pub fn resume(input: &'a [u8], p: Params, cp: &Checkpoint) -> Option<Self> {
-        if !p.valid() || p.level < 4 || matches!(p.strategy, Strategy::HuffmanOnly | Strategy::Rle)
-        {
+        if !p.valid() {
             return None;
         }
         let mut e = Emulator::new(input, p);
+        let slow = e.algo == Algo::Slow;
+        if e.algo == Algo::Fast || (!slow && cp.match_available) {
+            return None;
+        }
         let w = e.w_size;
         let ml = cp.match_length;
         let valid = cp.base.is_multiple_of(w)
             && cp.base <= cp.strstart
             && cp.strstart <= cp.read
-            && cp.read < input.len()
+            && (cp.read < input.len() || (!slow && cp.read == input.len()))
             && cp.read - cp.base <= 2 * w
             && cp.high_water <= 2 * w
             && (!cp.match_available || cp.strstart > cp.base)
@@ -318,9 +343,11 @@ impl<'a> Emulator<'a> {
                 a.checked_sub(w).map_or(0, |x| input[x])
             };
         }
-        for a in cp.base.max(cp.strstart.saturating_sub(w))..cp.strstart {
-            if a + MIN_MATCH <= cp.read {
-                e.insert(a - cp.base);
+        if slow {
+            for a in cp.base.max(cp.strstart.saturating_sub(w))..cp.strstart {
+                if a + MIN_MATCH <= cp.read {
+                    e.insert(a - cp.base);
+                }
             }
         }
         Some(e)
@@ -735,6 +762,118 @@ impl<'a> Emulator<'a> {
     }
 }
 
+/// Whether zlib's `_tr_flush_block` would rather use fixed than dynamic codes for `tokens`
+/// (Z_FIXED aside): fixed when `static_lenb <= opt_lenb`.
+pub fn zlib_prefers_fixed(tokens: &[Token]) -> bool {
+    let (opt, stat) = zlib_lenb(tokens, &zlib_header(tokens));
+    stat <= opt
+}
+
+/// zlib's `opt_lenb` and `static_lenb`: the sizes in bytes of the block with dynamic and with
+/// fixed codes, as `_tr_flush_block` computes them.
+fn zlib_lenb(tokens: &[Token], h: &DynHeader) -> (i64, i64) {
+    let mut lf = [0u64; 288];
+    let mut df = [0u64; 32];
+    lf[256] = 1;
+    for &t in tokens {
+        match t {
+            Token::Lit(b) => lf[b as usize] += 1,
+            Token::Match { len, dist, alt258 } => {
+                lf[257 + if alt258 { 27 } else { huffman::len_code(len) }] += 1;
+                df[huffman::dist_code(dist)] += 1;
+            }
+        }
+    }
+    let fixed_lit = huffman::fixed_lit_lens();
+    let (mut opt, mut stat) = (0i64, 0i64);
+    // gen_bitlen's accounting; symbols zlib forced into a tree count with frequency 1 and
+    // get one bit (and their static length) taken off again.
+    let mut add = |freq: u64, len: u8, slen: Option<u8>, xbits: u8| {
+        if len == 0 {
+            return;
+        }
+        let f = freq.max(1) as i64;
+        opt += f * (len + xbits) as i64;
+        if let Some(sl) = slen {
+            stat += f * (sl + xbits) as i64;
+        }
+        if freq == 0 {
+            opt -= 1;
+            if let Some(sl) = slen {
+                stat -= sl as i64;
+            }
+        }
+    };
+    for (n, &l) in h.lit_lens().iter().enumerate() {
+        let x = if n >= 257 {
+            huffman::LEN_EXTRA.get(n - 257).copied().unwrap_or(0)
+        } else {
+            0
+        };
+        add(lf[n], l, Some(fixed_lit[n]), x);
+    }
+    for (n, &l) in h.dist_lens().iter().enumerate() {
+        add(
+            df[n],
+            l,
+            Some(5),
+            huffman::DIST_EXTRA.get(n).copied().unwrap_or(0),
+        );
+    }
+    let mut cf = [0u64; 19];
+    for op in &h.ops {
+        cf[op.sym as usize] += 1;
+    }
+    for (n, &l) in h.cl_lens.iter().enumerate() {
+        add(cf[n], l, None, RleOp::extra_bits(n as u8) as u8);
+    }
+    opt += 3 * h.hclen as i64 + 14;
+    ((opt + 3 + 7) >> 3, (stat + 3 + 7) >> 3)
+}
+
+/// The next block exactly as zlib writes it: its tokens by emulation (up to `lit_bufsize - 1`
+/// of them, starting at `start`), then `_tr_flush_block`'s choice between stored, fixed and
+/// dynamic. `None` if the emulation cannot continue.
+pub fn zlib_block(e: &mut Emulator, start: usize) -> Option<Block> {
+    let limit = e.params().block_tokens();
+    let mut tokens = vec![];
+    let mut end = start;
+    let last = loop {
+        if tokens.len() == limit {
+            break false;
+        }
+        match e.predict() {
+            None => break true,
+            Some((pos, t)) => {
+                if pos != end || !e.commit(t) {
+                    return None;
+                }
+                end += t.span();
+                tokens.push(t);
+            }
+        }
+    };
+    let header = zlib_header(&tokens);
+    let (opt_lenb, static_lenb) = zlib_lenb(&tokens, &header);
+    let mut opt = opt_lenb;
+    if static_lenb <= opt || e.params().strategy == Strategy::Fixed {
+        opt = static_lenb;
+    }
+    let stored_len = (end - start) as i64;
+    // The data must still be in zlib's window to be stored.
+    let body = if stored_len + 4 <= opt && start >= e.window_base() && stored_len <= 65535 {
+        Body::Stored {
+            pad: 0,
+            len: stored_len as u16,
+        }
+    } else if static_lenb == opt {
+        Body::Fixed { tokens }
+    } else {
+        Body::Dynamic { header, tokens }
+    };
+    Some(Block { last, body })
+}
+
 /// One level's lazy-matching state in a [`MultiSlow`].
 #[derive(Debug, Clone)]
 struct Lane {
@@ -1135,7 +1274,7 @@ mod tests {
     fn test_data() -> Vec<u8> {
         let mut lcg = 1u32;
         let mut data = [
-            &include_bytes!("predict.rs")[..],
+            &include_bytes!("deflate.rs")[..],
             include_bytes!("zlib.rs"),
             include_bytes!("detect.rs"),
         ]
