@@ -26,7 +26,7 @@ fn main() {
     let mut plains: BTreeMap<Class, Vec<u8>> = BTreeMap::new();
     let mut skel = vec![];
     let (mut total, mut jpeg_in, mut jpeg_out, mut t_jc, mut t_jd) = (0usize, 0usize, 0usize, 0f64, 0f64);
-    let opts = flate_recons::fast::Options { threads: 1, ..Default::default() };
+    let opts = flate_recons::Options { threads: 1, ..Default::default() };
     for f in &files {
         let buf = std::fs::read(f).unwrap();
         total += buf.len();
@@ -49,7 +49,7 @@ fn main() {
                 Filter::Flate => {
                     let raw = if data.len() > 2 && data[0] & 0xf == 8 { &data[2..] } else { data };
                     let t0 = Instant::now();
-                    let Ok(flat) = flate_recons::fast::inflate::parse(raw) else {
+                    let Ok(flat) = flate_recons::inflate::parse(raw) else {
                         a.failed += 1;
                         continue;
                     };
@@ -59,12 +59,12 @@ fn main() {
                     a.plain += flat.data.len();
                     plains.entry(c).or_default().extend_from_slice(&flat.data);
                     let t1 = Instant::now();
-                    match flate_recons::fast::deconstruct_with(raw, &opts) {
+                    match flate_recons::deconstruct_with(raw, &opts) {
                         Ok((d, m)) => {
                             let t2 = Instant::now();
                             a.t_dec += (t2 - t1).as_secs_f64();
                             a.meta += m.len();
-                            let back = flate_recons::fast::reconstruct_with_threads(&d, &m, 1).unwrap();
+                            let back = flate_recons::reconstruct_with_threads(&d, &m, 1).unwrap();
                             a.t_rec += t2.elapsed().as_secs_f64();
                             assert_eq!(back, raw);
                         }

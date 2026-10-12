@@ -54,7 +54,7 @@ decompressing; output / input):
 | tok, content streams | 3,223 | 30 MB | 15.0 | 13.5 | 0.951 |
 | png (PNG-predicted images, png-recons) | 51 | 80 MB | 13.1 | 12.8 | 0.787 |
 | jpeg (jpeg-recons) | 1,610 | 250 MB | 15.5 | 14.7 | about 0.80 |
-| full, fonts (flate-recons fast) | 758 | 11 MB | 35.3 | 25.1 | 0.864 |
+| full, fonts (flate-recons) | 758 | 11 MB | 35.3 | 25.1 | 0.864 |
 | full, content streams | 638 | 1.5 MB | 79.4 | 52.0 | 0.885 |
 | dup | 7,627 | 30 MB | 0 | 0 | 0 |
 | raw (not worth its time) | 61,582 | 741 MB | 0.1 | 0 | 1 |
@@ -103,7 +103,7 @@ The file is cut into the skeleton (zstd) and *items*:
 | raw | stream data kept as it is (incompressible, or not worth its time) | none |
 | dup | a stream equal to an earlier one | reference |
 | tok | FlateDecode: the DEFLATE tokens recoded (`tok.rs`) | own, rANS |
-| full | FlateDecode: inflated data (pooled per class, zstd) + flate-recons' fast metadata | flate-recons |
+| full | FlateDecode: inflated data (pooled per class, zstd) + flate-recons' fast metadata (a record: u16 profile + body) | flate-recons |
 | png | FlateDecode image with PNG predictors, wrapped as a PNG file | png-recons |
 | jpeg | DCTDecode | jpeg-recons |
 

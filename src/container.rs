@@ -15,7 +15,8 @@
 //! - `TOK`, `FULL`: a FlateDecode stream, as its tokens ([`crate::tok`]) or as
 //!   flate-recons' fast representation: u8(flags: bit 0 zlib header, bit 1 Adler-32),
 //!   [2 header bytes], u8(class), varint(inflated length), and for `FULL` varint(metadata
-//!   length). `FULL` streams' inflated data is in their class's pool, the metadata in the
+//!   length). `FULL` streams' inflated data is in their class's pool, the metadata (a
+//!   flate-recons record: u16-LE profile, then its body; see flate-recons' FORMAT.md) in the
 //!   meta section; `TOK` streams are in the token section, in order.
 //! - `JPEG`: varint(length); a jpeg-recons container in the jpeg section.
 //!
@@ -33,7 +34,8 @@ use crate::varint::{self, Reader};
 use crate::{Error, Result, flate};
 
 const MAGIC: &[u8; 4] = b"PDFR";
-const VERSION: u8 = 1;
+/// 2: flate-recons metadata is a record with its profile up front.
+const VERSION: u8 = 2;
 
 pub const RAW: u8 = 0;
 pub const DUP: u8 = 1;
@@ -400,7 +402,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     // Code the items: each on its own (on the pool, with more than one thread), then into
     // the sections, in order.
     let pool = pool(opts.threads);
-    let fr_opts = flate_recons::fast::Options { threads: 1, ..Default::default() };
+    let fr_opts = flate_recons::Options { threads: 1, ..Default::default() };
     let mut b = Sections::new(skel_len, items.len());
     match &pool {
         None => {
@@ -592,7 +594,7 @@ enum Coded {
     Dup(usize),
     /// A FlateDecode stream: its table fields, the parsed stream for the token coder, its
     /// class, pixel layout and the bytes it covers.
-    Tok(Vec<u8>, Box<flate_recons::fast::inflate::Flat>, Class, Option<tok::Pixels>, usize),
+    Tok(Vec<u8>, Box<flate_recons::inflate::Flat>, Class, Option<tok::Pixels>, usize),
     /// A FlateDecode stream: its table fields, inflated data and metadata, class and the
     /// bytes it covers.
     Full(Vec<u8>, Vec<u8>, Vec<u8>, Class, usize),
@@ -609,7 +611,7 @@ struct Done {
     times: [f64; 5],
 }
 
-fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::fast::Options) -> Done {
+fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::Options) -> Done {
     let data = &file[it.start..it.start + it.len];
     let mut times = [0f64; 5];
     let mut plain_n = 0usize;
@@ -619,7 +621,7 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::fast::Options) -> D
             let px = if m == TOK { g.as_ref().and_then(pixels) } else { None };
             let t = std::time::Instant::now();
             let hdr = 2 * flate::zlib_header(data) as usize;
-            let parsed = flate_recons::fast::inflate::parse(&data[hdr..]);
+            let parsed = flate_recons::inflate::parse(&data[hdr..]);
             times[1] += t.elapsed().as_secs_f64();
             let coded = parsed.ok().and_then(|mut f| {
                 let end = data.len() - f.stream.trailing.len();
@@ -640,7 +642,7 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::fast::Options) -> D
                     return Some(Coded::Tok(fields, Box::new(f), c, px, len));
                 }
                 let t = std::time::Instant::now();
-                let r = flate_recons::fast::deconstruct_with(&data[hdr..end], fr_opts);
+                let r = flate_recons::deconstruct_with(&data[hdr..end], fr_opts);
                 times[2] += t.elapsed().as_secs_f64();
                 let (plain, meta) = r.ok()?;
                 varint::put(&mut fields, meta.len() as u64);
@@ -1038,7 +1040,7 @@ fn restore(e: &Entry) -> Result<Restored> {
     let whole = |buf: Vec<u8>| Restored { range: 0..buf.len(), buf, adler: None };
     match e.op {
         Op::Flate(_, _, _, _, adler, Some((plain, meta))) => {
-            let d = flate_recons::fast::reconstruct_with_threads(plain, meta, 1).map_err(|_| Error::Corrupt)?;
+            let d = flate_recons::reconstruct_with_threads(plain, meta, 1).map_err(|_| Error::Corrupt)?;
             Ok(Restored { adler: adler.then(|| flate::adler32(plain)), ..whole(d) })
         }
         Op::Png(p) => {

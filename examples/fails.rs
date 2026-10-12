@@ -10,7 +10,7 @@ fn main() {
             }
             let d = &buf[s.data.clone()];
             let hdr = 2 * pdf_recons::flate::zlib_header(d) as usize;
-            if let Err(e) = flate_recons::fast::inflate::parse(&d[hdr..]) {
+            if let Err(e) = flate_recons::inflate::parse(&d[hdr..]) {
                 let k = format!("{e:?} hdr={hdr} len_ok={}", s.length_ok);
                 let ex = format!("{f}@{} {:02x?}", s.data.start, &d[..8.min(d.len())]);
                 let v = by.entry(k).or_insert((0, 0, ex));

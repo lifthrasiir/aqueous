@@ -18,8 +18,8 @@ use crate::rans::{self, BitR, BitW, Decoder, Tables};
 use crate::{Error, Result};
 use flate_recons::bits::{BitReader, BitWriter};
 use flate_recons::deflate::{Block, Body, DynHeader, Stream, Token};
-use flate_recons::fast::header::{self, Recipe};
-use flate_recons::fast::inflate::Flat;
+use flate_recons::header::{self, Recipe};
+use flate_recons::inflate::Flat;
 use flate_recons::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
 use std::cell::Cell;
 
@@ -878,7 +878,7 @@ impl<'a> DecoderState<'a> {
             }
         }
         let stream = Stream { blocks, tail_pad, trailing: vec![] };
-        let out = flate_recons::fast::write::write(&stream, &starts, &tokens, &data).map_err(|_| Error::Corrupt)?;
+        let out = flate_recons::write::write(&stream, &starts, &tokens, &data).map_err(|_| Error::Corrupt)?;
         Ok((out, data))
     }
 
@@ -913,7 +913,7 @@ mod tests {
         let z = zstd::bulk::compress(&text, 1).unwrap();
         let _ = z;
         let raw = flate_zoo_like(&text);
-        let f = flate_recons::fast::inflate::parse(&raw).unwrap();
+        let f = flate_recons::inflate::parse(&raw).unwrap();
         let mut e = Encoder::default();
         e.add(Class::Content, &f, None).unwrap();
         e.add(Class::Font, &f, None).unwrap();

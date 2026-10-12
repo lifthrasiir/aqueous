@@ -88,7 +88,7 @@ fn main() {
                 continue;
             }
             let raw = if data.len() > 2 && data[0] & 0xf == 8 { &data[2..] } else { data };
-            let Ok(flat) = flate_recons::fast::inflate::parse(raw) else { continue };
+            let Ok(flat) = flate_recons::inflate::parse(raw) else { continue };
             let m = per.entry(kind::class(&s.dict)).or_default();
             m.deflate += data.len() as f64 * 8.0;
             let mut p = 0usize;

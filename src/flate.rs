@@ -1,6 +1,6 @@
 //! FlateDecode streams: the zlib wrapper around the DEFLATE data.
 
-use flate_recons::fast::inflate::{self, Sink};
+use flate_recons::inflate::{self, Sink};
 
 /// Whether `b` starts with a zlib header (deflate, no preset dictionary).
 pub fn zlib_header(b: &[u8]) -> bool {
