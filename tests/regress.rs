@@ -53,7 +53,7 @@ fn junk_and_cuts() {
 fn corrupt_containers() {
     for (name, d) in files().into_iter().take(3) {
         let c = compress(&d);
-        for i in (5..c.len()).step_by(97) {
+        for i in (9..c.len()).step_by(97) {
             let mut m = c.clone();
             m[i] ^= 0x5a;
             // Must not panic; mostly an error or a checksum mismatch.
@@ -63,5 +63,19 @@ fn corrupt_containers() {
         for cut in [6, 20, c.len() / 2] {
             let _ = decompress(&c[..c.len() - cut]);
         }
+    }
+}
+
+#[test]
+fn header() {
+    let (_, d) = &files()[0];
+    let c = compress(d);
+    assert_eq!(c[..9], [0x69, 0x04, 0x7e, 0x30, 0xfd, 0xda, 0, 0, 1]);
+    assert_eq!(compress(b"hello")[..], *b"\x69\x04\x7e\x30\xfd\xda\0\0\0hello");
+    // Unknown modes and versions are rejected.
+    for (i, v) in [(8, 2), (8, 0xff), (6, 1), (7, 1)] {
+        let mut m = c.clone();
+        m[i] = v;
+        assert!(decompress(&m).is_err(), "byte {i} = {v}");
     }
 }

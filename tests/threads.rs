@@ -79,13 +79,13 @@ fn corrupt_containers() {
     for (name, d) in files().into_iter().take(4) {
         let c = compress(&big(&d));
         let mut cases = Vec::new();
-        for i in (5..c.len()).step_by(c.len() / 150) {
+        for i in (9..c.len()).step_by(c.len() / 150) {
             let mut m = c.clone();
             m[i] ^= 0x5a;
             cases.push(m);
         }
         // The first bytes (lengths of the streams) and the end.
-        for i in 5..64 {
+        for i in 9..68 {
             let mut m = c.clone();
             m[i] ^= 0x21;
             cases.push(m);
@@ -133,8 +133,8 @@ fn corrupt_containers() {
 /// Offsets (of the length, of the data) and lengths of the stored byte streams of a coded
 /// container.
 fn streams(c: &[u8]) -> Vec<(usize, usize, usize)> {
-    assert_eq!(c[4], 1);
-    let mut p = 21;
+    assert_eq!(c[8], 1);
+    let mut p = 25;
     let varint = |p: &mut usize| {
         let (mut v, mut s) = (0u64, 0);
         loop {
@@ -167,4 +167,39 @@ fn put_varint(out: &mut Vec<u8>, mut v: u64) {
         v >>= 7;
     }
     out.push(v as u8);
+}
+
+/// A zstd stream that decompresses to fewer bytes than its declared size is rejected.
+#[test]
+fn short_zstd_stream() {
+    let (name, d) = &files()[0];
+    let c = compress(&big(d));
+    let mut done = 0;
+    for (start, p, _) in streams(&c) {
+        if c[start] & 1 == 0 {
+            continue;
+        }
+        // Declared size one larger.
+        let mut q = start;
+        let skip = |q: &mut usize| while c[std::mem::replace(q, *q + 1)] >= 0x80 {};
+        skip(&mut q);
+        let raw_at = q;
+        skip(&mut q);
+        assert_eq!(q, p);
+        let (mut raw, mut s) = (0u64, 0);
+        for &b in &c[raw_at..p] {
+            raw |= ((b & 0x7f) as u64) << s;
+            s += 7;
+        }
+        let mut m = c[..raw_at].to_vec();
+        put_varint(&mut m, raw + 1);
+        m.extend_from_slice(&c[p..]);
+        let one = outcome(decompress(&m));
+        assert_eq!(one, Err("stream size".into()), "{name}: stream at {start}");
+        for t in THREADS {
+            assert_eq!(outcome(decompress_threads(&m, t)), one, "{name}: {t} threads");
+        }
+        done += 1;
+    }
+    assert!(done > 0);
 }

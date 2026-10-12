@@ -164,8 +164,10 @@ the input.
 
 ### 6. Container
 
+The full specification is [FORMAT.md](FORMAT.md).
+
 ```text
-"M3R" version(u8=1) mode(u8)
+magic 69 04 7e 30 fd da ("aQR+MP3" in base64), version(u16 LE = 0), mode(u8)
 mode 0 (stored): the input verbatim
 mode 1 (coded):
   u64 LE length, u64 LE xxh3 of the original

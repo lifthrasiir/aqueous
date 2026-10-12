@@ -1,7 +1,7 @@
 //! Container format and top-level compress / decompress.
 //!
 //! ```text
-//! "M3R" version(u8) mode(u8)
+//! magic 69 04 7e 30 fd da ("aQR+MP3" in base64), version(u16 LE = 0), mode(u8)
 //! mode 0 (stored): the input verbatim
 //! mode 1 (coded):  u64 LE length, u64 LE xxh3 of the original, then per byte stream
 //!                  varint(len << 1 | zstd) [varint raw len if zstd] data,
@@ -13,8 +13,10 @@ use crate::par;
 use recons_common::varint;
 use xxhash_rust::xxh3::xxh3_64;
 
-const MAGIC: &[u8; 3] = b"M3R";
-const VERSION: u8 = 1;
+const MAGIC: [u8; 6] = [0x69, 0x04, 0x7e, 0x30, 0xfd, 0xda];
+const VERSION: u16 = 0;
+/// Magic, version and mode.
+const HDR: usize = 9;
 /// zstd level of the byte streams.
 const ZSTD_LEVEL: i32 = 1;
 
@@ -36,9 +38,9 @@ fn take<'a>(d: &'a [u8], p: &mut usize, n: usize) -> Result<&'a [u8], Error> {
 }
 
 fn stored(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(input.len() + 5);
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
+    let mut out = Vec::with_capacity(input.len() + HDR);
+    out.extend_from_slice(&MAGIC);
+    out.extend_from_slice(&VERSION.to_le_bytes());
     out.push(0);
     out.extend_from_slice(input);
     out
@@ -67,8 +69,8 @@ pub fn compress_sizes_threads(input: &[u8], threads: usize) -> (Vec<u8>, Sizes) 
         (c, packed, xxh3_64(input))
     };
     let mut out = Vec::with_capacity(input.len());
-    out.extend_from_slice(MAGIC);
-    out.push(VERSION);
+    out.extend_from_slice(&MAGIC);
+    out.extend_from_slice(&VERSION.to_le_bytes());
     out.push(1);
     out.extend_from_slice(&(input.len() as u64).to_le_bytes());
     out.extend_from_slice(&hash.to_le_bytes());
@@ -96,7 +98,7 @@ pub fn compress_sizes_threads(input: &[u8], threads: usize) -> (Vec<u8>, Sizes) 
     out.extend_from_slice(&c.raw);
     sizes.push((c.words.len() * 4, c.words.len() * 4));
     sizes.push((c.raw.len(), c.raw.len()));
-    if out.len() >= input.len() + 5 {
+    if out.len() >= input.len() + HDR {
         return (stored(input), sizes);
     }
     (out, sizes)
@@ -114,14 +116,22 @@ pub fn compress_threads(input: &[u8], threads: usize) -> Vec<u8> {
     }
 }
 
+/// Magic and version (the mode byte is present).
+fn is_ours(c: &[u8]) -> bool {
+    c.len() >= HDR && c[..6] == MAGIC && u16::from_le_bytes([c[6], c[7]]) == VERSION
+}
+
 pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
-    if c.len() < 5 || &c[0..3] != MAGIC || c[3] != VERSION {
-        return Err(Error("not an M3R file".into()));
+    if !is_ours(c) {
+        return Err(Error("not an mp3-recons file".into()));
     }
-    if c[4] == 0 {
-        return Ok(c[5..].to_vec());
+    if c[HDR - 1] == 0 {
+        return Ok(c[HDR..].to_vec());
     }
-    let mut p = 5;
+    if c[HDR - 1] != 1 {
+        return Err(Error("unknown mode".into()));
+    }
+    let mut p = HDR;
     let len = u64::from_le_bytes(take(c, &mut p, 8)?.try_into().unwrap());
     let hash = u64::from_le_bytes(take(c, &mut p, 8)?.try_into().unwrap());
     let mut streams = Vec::with_capacity(STREAM_NAMES.len());
@@ -135,7 +145,7 @@ pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
                 return Err(Error("stream size".into()));
             }
             let z = take(c, &mut p, n)?;
-            streams.push(zstd::bulk::decompress(z, raw).map_err(|e| Error(e.to_string()))?);
+            streams.push(par::unzstd(z, raw).map_err(Error)?);
         } else {
             streams.push(take(c, &mut p, n)?.to_vec());
         }
@@ -161,14 +171,14 @@ pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
 
 /// [`decompress`] with `threads` threads: the same result whatever the number.
 pub fn decompress_threads(c: &[u8], threads: usize) -> Result<Vec<u8>, Error> {
-    if threads <= 1 || c.len() < par::PAR_MIN || c.len() < 5 || &c[0..3] != MAGIC || c[3] != VERSION || c[4] == 0 {
+    if threads <= 1 || c.len() < par::PAR_MIN || !is_ours(c) || c[HDR - 1] != 1 {
         return decompress(c);
     }
     let mut srcs = Vec::with_capacity(STREAM_NAMES.len() - 2);
     // The container's layout; on an error, a stream before it that does not decompress
     // is reported first, as by `decompress`.
     let framing = (|| -> Result<_, Error> {
-        let mut p = 5;
+        let mut p = HDR;
         let len = u64::from_le_bytes(take(c, &mut p, 8)?.try_into().unwrap());
         let hash = u64::from_le_bytes(take(c, &mut p, 8)?.try_into().unwrap());
         for _ in 0..STREAM_NAMES.len() - 2 {

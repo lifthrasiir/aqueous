@@ -209,9 +209,18 @@ impl<'a> Src<'a> {
     pub(crate) fn unpack(&self) -> Result<Cow<'a, [u8]>, String> {
         match *self {
             Src::Plain(b) => Ok(Cow::Borrowed(b)),
-            Src::Zstd(z, n) => zstd::bulk::decompress(z, n).map(Cow::Owned).map_err(|e| e.to_string()),
+            Src::Zstd(z, n) => unzstd(z, n).map(Cow::Owned),
         }
     }
+}
+
+/// Decompresses a zstd stream of exactly `n` bytes.
+pub(crate) fn unzstd(z: &[u8], n: usize) -> Result<Vec<u8>, String> {
+    let v = zstd::bulk::decompress(z, n).map_err(|e| e.to_string())?;
+    if v.len() != n {
+        return Err("stream size".into());
+    }
+    Ok(v)
 }
 
 pub(crate) enum DecError {
