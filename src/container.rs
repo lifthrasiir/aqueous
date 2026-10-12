@@ -1,7 +1,7 @@
-//! The file format.
+//! The file format (`FORMAT.md` specifies it).
 //!
 //! ```text
-//! "OBJR" version(u8) varint(length) u64-LE(xxh3 of the original)
+//! magic 69 04 7f d1 b8 ed, u16-LE version (0), varint(length), u64-LE(xxh3 of the original)
 //! blocks, until the length is reached:
 //!   u8 mode, varint(raw length)
 //!   mode 0 (whole): varint(coded length) zstd(block)
@@ -26,8 +26,11 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, mpsc};
 use xxhash_rust::xxh3::{Xxh3, xxh3_64};
 
-const MAGIC: &[u8; 4] = b"OBJR";
-const VERSION: u8 = 1;
+/// `aQR/0bjt` in base64.
+const MAGIC: &[u8; 6] = &[0x69, 0x04, 0x7f, 0xd1, 0xb8, 0xed];
+const VERSION: u16 = 0;
+/// Magic and version.
+const HEAD: usize = MAGIC.len() + 2;
 /// Largest block the decoder accepts (bounds its memory).
 const MAX_BLOCK: usize = 64 << 20;
 
@@ -209,7 +212,7 @@ impl Coder {
 fn header(src: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
-    out.push(VERSION);
+    out.extend_from_slice(&VERSION.to_le_bytes());
     put_uv(&mut out, src.len() as u64);
     out.extend_from_slice(&xxh3_64(src).to_le_bytes());
     out
@@ -465,7 +468,7 @@ pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
 /// `decompress` with `threads` threads.
 pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     let mut r = Rd::new(src);
-    let len = if r.bytes(5).is_some() { r.uv() as usize } else { 0 };
+    let len = if r.bytes(HEAD).is_some() { r.uv() as usize } else { 0 };
     // The output is the caller's; reserve it only up to what the input can plausibly hold.
     let mut out = Vec::with_capacity(len.min(src.len().saturating_mul(64)));
     decompress_to_threads(src, &mut out, threads)?;
@@ -564,8 +567,11 @@ fn unpack(
 
 /// Reads the file header: the length and the hash.
 fn read_header(r: &mut Rd) -> Result<(usize, u64)> {
-    if r.bytes(4) != Some(MAGIC) || r.u8() != VERSION {
-        return Err(Error("not an OBJR file"));
+    if r.bytes(MAGIC.len()) != Some(MAGIC) {
+        return Err(Error("not an objr file"));
+    }
+    if r.bytes(2) != Some(&VERSION.to_le_bytes()[..]) {
+        return Err(Error("unsupported objr format version"));
     }
     let len = r.uv() as usize;
     let hash = u64::from_le_bytes(r.bytes(8).ok_or_else(corrupt)?.try_into().unwrap());

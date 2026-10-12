@@ -274,6 +274,28 @@ fn corrupt_containers() {
     }
 }
 
+/// The header (`FORMAT.md`): magic, version 0, length, xxh3; other magics and versions are
+/// refused.
+#[test]
+fn header() {
+    const MAGIC: [u8; 6] = [0x69, 0x04, 0x7f, 0xd1, 0xb8, 0xed];
+    let mut want = MAGIC.to_vec();
+    want.extend_from_slice(&[0, 0, 0]);
+    want.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(b"").to_le_bytes());
+    assert_eq!(compress(b""), want);
+    let c = compress(b"v 1 2 3\n");
+    assert_eq!(c[..8], [0x69, 0x04, 0x7f, 0xd1, 0xb8, 0xed, 0, 0]);
+    assert_eq!(c[8], 8);
+    for (at, x) in [(0, 0x01), (5, 0x01), (6, 0x01), (7, 0x01)] {
+        let mut cc = c.clone();
+        cc[at] ^= x;
+        assert!(decompress(&cc).is_err());
+    }
+    let mut old = b"OBJR\x01".to_vec();
+    old.extend_from_slice(&c[8..]);
+    assert!(decompress(&old).is_err());
+}
+
 #[test]
 #[ignore]
 fn dump_writer_styles() {

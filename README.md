@@ -171,16 +171,16 @@ paired with this vertex, and the vertex's index plus the last offset between the
 
 ## Format
 
+[`FORMAT.md`](FORMAT.md) specifies it in full (version 0). In short:
+
 ```text
-"OBJR" version(1) varint(length) u64-LE(xxh3 of the original)
+magic 69 04 7f d1 b8 ed ("aQR/0bjt"), u16-LE version (0), varint(length), u64-LE(xxh3 of the original)
 blocks, until the length is reached:
   u8 mode, varint(raw length)
   mode 0 (whole): varint(coded length) zstd(block)
   mode 1 (coded): per stream (block::NSTREAMS):
                     varint(raw length) [u8(0 stored | 1 zstd | 2 rANS) varint(coded length) data]
 ```
-
-Streams and template keys are documented in `src/block.rs`; rANS in `src/ans.rs`.
 
 ## Measured, not kept
 
