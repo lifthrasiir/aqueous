@@ -1,7 +1,7 @@
 //! Round trips of databases built with the sqlite3 command-line tool (skipped if it is
 //! missing), of non-databases, and of corrupted containers.
 
-use sqlite_recons::container::{Options, Stats, compress_with};
+use sqlite_recons::container::{Options, Stats, compress_with, decompress_threads};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -180,4 +180,69 @@ fn verification_catches_differences() {
     other[k] ^= 0x40;
     assert!(!transform::verify(&enc.geom, &other, &enc.streams));
     assert!(!transform::verify(&enc.geom, &db[..db.len() - 1], &enc.streams));
+}
+
+/// The same bytes whatever the number of threads, and every thread count decodes them.
+#[test]
+fn threads_same_bytes() {
+    let sql = format!(
+        "PRAGMA page_size=1024;{SCHEMA}
+         CREATE TABLE u(k TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID;
+         CREATE INDEX u_v ON u(v);
+         INSERT INTO u SELECT 'k' || id, a FROM t;
+         UPDATE t SET d = randomblob(3000 + id % 5000) WHERE id % 11 = 0;
+         DELETE FROM t WHERE id % 3 = 0;"
+    );
+    let mut dbs = Vec::new();
+    for (name, sql) in [("thr", sql.as_str()), ("thr_small", "CREATE TABLE e(x);"), ("thr_s", SCHEMA)] {
+        dbs.extend(build(name, sql).map(|d| (name, d)));
+    }
+    if dbs.is_empty() {
+        return;
+    }
+    // Not databases, and databases cut short (stored whole).
+    dbs.push(("zeros", vec![0; 5000]));
+    dbs.push(("cut", dbs[0].1[..dbs[0].1.len() - 1000].to_vec()));
+    for (name, db) in &dbs {
+        for verify in [true, false] {
+            let one = Options { verify, threads: 1, ..Default::default() };
+            let c1 = compress_with(db, &one, &mut Stats::default());
+            for threads in [2, 3, 8] {
+                let c = compress_with(db, &Options { threads, ..one }, &mut Stats::default());
+                assert!(c == c1, "{name}: compressed with {threads} threads differs");
+            }
+            for threads in [1, 2, 3, 8] {
+                assert_eq!(&decompress_threads(&c1, threads).unwrap(), db, "{name}: {threads} threads");
+            }
+        }
+    }
+}
+
+/// Corrupted containers: the same outcome whatever the number of threads.
+#[test]
+fn threads_corrupted_containers() {
+    let Some(db) = build("thr_corrupt", SCHEMA) else { return };
+    let c = sqlite_recons::compress(&db);
+    let mut x = 777u64;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    for i in 0..600 {
+        let mut cc = c.clone();
+        if i % 4 == 0 {
+            cc.truncate((next() % cc.len() as u64) as usize);
+        } else {
+            for _ in 0..1 + next() % 4 {
+                let j = (next() % cc.len() as u64) as usize;
+                cc[j] ^= 1 << (next() % 8);
+            }
+        }
+        let one = decompress_threads(&cc, 1);
+        for threads in [2, 3, 8] {
+            assert_eq!(decompress_threads(&cc, threads), one, "iteration {i}, {threads} threads");
+        }
+    }
 }

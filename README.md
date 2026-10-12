@@ -7,9 +7,9 @@ backend.
 
 ```sh
 cargo build --release
-sqlr c [-l LEVEL] [-b LEVEL] [-x] [-L] in.db out.sqlr   # compress
-sqlr d out.sqlr back.db                                 # decompress
-sqlr bench [-n ITERS] [-m] [-v] [-c|-d] FILE...         # round trip check, ratio, CPU-time throughput
+sqlr c [-l LEVEL] [-b LEVEL] [-x] [-L] [-t N] in.db out.sqlr   # compress
+sqlr d [-t N] out.sqlr back.db                                # decompress
+sqlr bench [-n ITERS] [-t N] [-m] [-v] [-c|-d] FILE...        # round trip check, ratio, CPU-time throughput (wall time with -t > 1)
 sqlr fuzz [-n N] [-s SEED] FILE...                      # mutated databases and containers
 ```
 
@@ -70,6 +70,28 @@ Peak RSS (input and output included):
 compressing and 2.5× decompressing on the files above 5 MB (more on small files, from
 fixed overheads). Build with `--features memprof` for heap use per phase. Everything is in
 memory: there is no streaming over large files.
+
+### Threads
+
+`-t N` (`Options::threads`, default 1 for the library; `container::decompress_threads`;
+`sqlr c` and `sqlr d` default to the available cores, `bench` to 1): the output is the same
+bytes whatever the number of threads (zstd's own `nbWorkers` is not used, as its output
+differs), and one thread runs the serial code unchanged. `std::thread::scope`, a small
+work queue (`src/par.rs`), no dependency. A panic on a worker falls back to the stored file
+like any other.
+
+- Compressing: the b-tree groups are coded in parallel (each makes its directory entry and
+  pieces, put together in group order; an index group reads its table's group, which is
+  freed after its last index as before). The page pass and the index key discovery (first
+  match wins, in schema order) stay serial. Then verification and the zstd of the 18
+  streams run as tasks of one queue (the text/blob stream first), each worker with
+  compressors of its own with the same parameters; a failed verification discards the
+  output. The streams stay in memory until all are done.
+- Decompressing: the stream headers are parsed in order (same checks), the streams are
+  decoded in parallel, then the first pass over the tables and the index orders run in
+  parallel. The page loop and the record decoding stay on one thread.
+
+With more than one thread `bench` reports wall time instead of thread CPU time.
 
 ## Format
 

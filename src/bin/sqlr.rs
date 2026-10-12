@@ -27,9 +27,24 @@ fn cpu() -> f64 {
     t.sec as f64 + t.nsec as f64 * 1e-9
 }
 
+/// Seconds: the thread's CPU time with one thread, wall time with more.
+fn clock(threads: usize) -> f64 {
+    if threads > 1 { wall() } else { cpu() }
+}
+
+fn wall() -> f64 {
+    use std::sync::OnceLock;
+    static T0: OnceLock<std::time::Instant> = OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+
+fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
+}
+
 fn usage() -> ! {
     eprintln!(
-        "usage: sqlr c [-l LEVEL] [-b LEVEL] [-x] [-L] IN OUT | sqlr d IN OUT\n       sqlr bench [-n ITERS] [-l LEVEL] [-b LEVEL] [-x] [-L] [-c|-d] [-v] FILE...\n       sqlr fuzz [-n N] [-s SEED] FILE..."
+        "usage: sqlr c [-l LEVEL] [-b LEVEL] [-x] [-L] [-t THREADS] IN OUT | sqlr d [-t THREADS] IN OUT\n       sqlr bench [-n ITERS] [-l LEVEL] [-b LEVEL] [-x] [-L] [-t THREADS] [-c|-d] [-m] [-v] FILE...\n       sqlr fuzz [-n N] [-s SEED] FILE...\n(-t: c and d default to the available cores, bench to 1)"
     );
     std::process::exit(2);
 }
@@ -38,7 +53,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("c") if args.len() >= 3 => {
-            let mut opt = Options::default();
+            let mut opt = Options { threads: cores(), ..Default::default() };
             let mut it = args[1..args.len() - 2].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
@@ -46,6 +61,7 @@ fn main() {
                     "-b" => opt.level_bytes = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
                     "-x" => opt.verify = false,
                     "-L" => opt.ldm = false,
+                    "-t" => opt.threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
                     _ => usage(),
                 }
             }
@@ -53,9 +69,14 @@ fn main() {
             let src = std::fs::read(&args[n - 2]).expect("read");
             std::fs::write(&args[n - 1], compress_with(&src, &opt, &mut Stats::default())).expect("write");
         }
-        Some("d") if args.len() == 3 => {
+        Some("d") if args.len() == 3 || (args.len() == 5 && args[1] == "-t") => {
+            let (threads, args) = if args.len() == 5 {
+                (args[2].parse().unwrap_or_else(|_| usage()), &args[2..])
+            } else {
+                (cores(), &args[..])
+            };
             let src = std::fs::read(&args[1]).expect("read");
-            match sqlite_recons::decompress(&src) {
+            match sqlite_recons::container::decompress_threads(&src, threads) {
                 Ok(v) => std::fs::write(&args[2], v).expect("write"),
                 Err(e) => {
                     eprintln!("{}: {e}", args[1]);
@@ -89,6 +110,7 @@ fn bench(args: &[String]) {
             "-m" => mem = true,
             "-b" => opt.level_bytes = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-L" => opt.ldm = false,
+            "-t" => opt.threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-c" => only = 'c',
             "-d" => only = 'd',
             "-v" => verbose = true,
@@ -107,16 +129,16 @@ fn bench(args: &[String]) {
         let mut st = Stats::default();
         for _ in 0..if only == 'd' { 1 } else { iters } {
             st = Stats::default();
-            let t = cpu();
+            let t = clock(opt.threads);
             c = compress_with(&src, &opt, &mut st);
-            bc = bc.min(cpu() - t);
+            bc = bc.min(clock(opt.threads) - t);
         }
         let mut bd = f64::MAX;
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
-            let t = cpu();
-            let d = sqlite_recons::decompress(&c);
-            bd = bd.min(cpu() - t);
+            let t = clock(opt.threads);
+            let d = sqlite_recons::container::decompress_threads(&c, opt.threads);
+            bd = bd.min(clock(opt.threads) - t);
             ok &= matches!(d, Ok(ref d) if *d == src);
         }
         if mem {
@@ -125,7 +147,7 @@ fn bench(args: &[String]) {
             let pc = PEAK.load(Relaxed) - base - c2.len();
             drop(c2);
             let base = peak_reset();
-            let d2 = sqlite_recons::decompress(&c);
+            let d2 = sqlite_recons::container::decompress_threads(&c, opt.threads);
             let pd = PEAK.load(Relaxed) - base - d2.as_ref().map_or(0, |d| d.len());
             drop(d2);
             let n = src.len() as f64;

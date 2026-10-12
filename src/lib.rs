@@ -12,6 +12,7 @@
 pub mod container;
 pub mod index;
 pub mod page;
+pub mod par;
 pub mod record;
 pub mod transform;
 pub mod varint;

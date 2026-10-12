@@ -107,6 +107,11 @@ impl<'a> GroupRecs<'a> {
 
 /// Splits a database file into streams. `None` if it is not one we can code.
 pub fn encode(file: &[u8]) -> Option<Encoded> {
+    encode_threads(file, 1)
+}
+
+/// `encode` with `threads` threads (the groups are coded in parallel): the same streams.
+pub fn encode_threads(file: &[u8], threads: usize) -> Option<Encoded> {
     let g = Geom::from_file(file)?;
     let (ps, n) = (g.psize, g.npages);
     let page = |p: usize| &file[(p - 1) * ps..p * ps];
@@ -316,88 +321,28 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
     crate::mem::mark("enc: index keys");
     // Code the groups, freeing their payloads (and rowids) after their last use: a table's
     // with its last index.
-    let mut last_use: Vec<usize> = (0..groups.len()).collect();
-    for (i, r) in refs.iter().enumerate() {
-        if let Some((t, _)) = r {
-            last_use[*t] = last_use[*t].max(i);
-        }
-    }
-    let mut free_at: Vec<Vec<usize>> = vec![Vec::new(); groups.len()];
-    for (x, &i) in last_use.iter().enumerate() {
-        free_at[i].push(x);
-    }
-    let mut cols = Vec::new();
-    let mut pred = Vec::new();
     let mut gs: [Vec<Vec<u8>>; 8] = Default::default();
     put_uv(&mut s[S_DIR], groups.len() as u64);
-    for i in 0..groups.len() {
-        let gr = &groups[i];
-        let pays_i = gr.view();
-        let mut ge = GroupEnc::default();
-        let d = &mut s[S_DIR];
-        d.push(gr.table as u8);
-        match &refs[i] {
-            None => put_uv(d, 0),
-            Some((t, key)) => {
-                put_uv(d, *t as u64 + 1);
-                put_uv(d, key.cols.len() as u64);
-                for (&c, &f) in key.cols.iter().zip(&key.flags) {
-                    put_uv(d, c.wrapping_add(1) as u64);
-                    d.push(f);
-                }
+    if threads > 1 && groups.len() > 1 {
+        code_groups_par(&g, &mut groups, &refs, threads, &mut s[S_DIR], &mut gs);
+    } else {
+        let mut last_use: Vec<usize> = (0..groups.len()).collect();
+        for (i, r) in refs.iter().enumerate() {
+            if let Some((t, _)) = r {
+                last_use[*t] = last_use[*t].max(i);
             }
         }
-        for &r in &gr.rowids {
-            ge.rowid(r);
+        let mut free_at: Vec<Vec<usize>> = vec![Vec::new(); groups.len()];
+        for (x, &i) in last_use.iter().enumerate() {
+            free_at[i].push(x);
         }
-        if let Some((t, key)) = &refs[i] {
-            let tg = &groups[*t];
-            let pays_t = tg.view();
-            let keys = index::Keys::over(&key.cols, &pays_t, &tg.rowids, &mut cols);
-            let perm = index::order(&keys, key);
-            let mut rank = vec![0u32; perm.len()];
-            for (k, &r) in perm.iter().enumerate() {
-                rank[r as usize] = k as u32;
+        let mut sc = Scratch::default();
+        for i in 0..groups.len() {
+            let r = refs[i].as_ref().map(|r| (r.0, &groups[r.0], &r.1));
+            code_group(&g, i, &groups[i], r, &mut sc, &mut s[S_DIR], &mut gs);
+            for &x in &free_at[i] {
+                groups[x].free();
             }
-            drop(perm);
-            let row_of = row_lookup(&tg.rowids);
-            for &e in pays_i.iter() {
-                // The entry's rowid, its row, and the entry the row predicts.
-                let r = crate::record::parse(e, &mut cols)
-                    .then(|| cols.last().copied())
-                    .flatten()
-                    .filter(|&(st, _)| is_int(st))
-                    .and_then(|(st, off)| row_of(int_value(st, &e[off as usize..off as usize + st_size(st)])))
-                    .filter(|&r| keys.ok[r]);
-                if let Some(r) = r {
-                    pred.clear();
-                    predict(&keys, r, g.fmt4, &mut pred);
-                    if pred == e {
-                        ge.reference(rank[r] as i64);
-                        continue;
-                    }
-                }
-                ge.record(e, g.fmt4, &mut cols);
-            }
-        } else {
-            for &e in pays_i.iter() {
-                ge.record(e, g.fmt4, &mut cols);
-            }
-        }
-        if std::env::var_os("SQLR_DUMP").is_some() {
-            eprintln!(
-                "G {i} first={} table={} recs={} ref={:?} {}",
-                gr.first,
-                gr.table,
-                gr.len(),
-                refs[i].as_ref().map(|r| (r.0, &r.1)),
-                ge.stats()
-            );
-        }
-        ge.finish(&mut s[S_DIR], &mut gs);
-        drop(pays_i);
-        for &x in &free_at[i] {
-            groups[x].free();
         }
     }
     drop(groups);
@@ -415,6 +360,143 @@ pub fn encode(file: &[u8]) -> Option<Encoded> {
         };
     }
     Some(Encoded { geom: g, streams: s })
+}
+
+/// Buffers `code_group` reuses.
+#[derive(Default)]
+struct Scratch {
+    cols: Vec<(u64, u32)>,
+    pred: Vec<u8>,
+}
+
+/// Codes group `i` (`gr`; `r` if its records are predicted from a table: its number, the
+/// group and the index key): its
+/// directory entry goes to `d`, its streams to `gs` as pieces.
+#[allow(clippy::too_many_arguments)]
+fn code_group(
+    g: &Geom,
+    i: usize,
+    gr: &GroupRecs,
+    r: Option<(usize, &GroupRecs, &index::Key)>,
+    sc: &mut Scratch,
+    d: &mut Vec<u8>,
+    gs: &mut [Vec<Vec<u8>>; 8],
+) {
+    let Scratch { cols, pred } = sc;
+    let pays_i = gr.view();
+    let mut ge = GroupEnc::default();
+    d.push(gr.table as u8);
+    match r {
+        Some((t, _, key)) => {
+            put_uv(d, t as u64 + 1);
+            put_uv(d, key.cols.len() as u64);
+            for (&c, &f) in key.cols.iter().zip(&key.flags) {
+                put_uv(d, c.wrapping_add(1) as u64);
+                d.push(f);
+            }
+        }
+        None => put_uv(d, 0),
+    }
+    for &r in &gr.rowids {
+        ge.rowid(r);
+    }
+    if let Some((_, tg, key)) = r {
+        let pays_t = tg.view();
+        let keys = index::Keys::over(&key.cols, &pays_t, &tg.rowids, cols);
+        let perm = index::order(&keys, key);
+        let mut rank = vec![0u32; perm.len()];
+        for (k, &r) in perm.iter().enumerate() {
+            rank[r as usize] = k as u32;
+        }
+        drop(perm);
+        let row_of = row_lookup(&tg.rowids);
+        for &e in pays_i.iter() {
+            // The entry's rowid, its row, and the entry the row predicts.
+            let r = crate::record::parse(e, cols)
+                .then(|| cols.last().copied())
+                .flatten()
+                .filter(|&(st, _)| is_int(st))
+                .and_then(|(st, off)| row_of(int_value(st, &e[off as usize..off as usize + st_size(st)])))
+                .filter(|&r| keys.ok[r]);
+            if let Some(r) = r {
+                pred.clear();
+                predict(&keys, r, g.fmt4, pred);
+                if *pred == e {
+                    ge.reference(rank[r] as i64);
+                    continue;
+                }
+            }
+            ge.record(e, g.fmt4, cols);
+        }
+    } else {
+        for &e in pays_i.iter() {
+            ge.record(e, g.fmt4, cols);
+        }
+    }
+    if std::env::var_os("SQLR_DUMP").is_some() {
+        eprintln!(
+            "G {i} first={} table={} recs={} ref={:?} {}",
+            gr.first,
+            gr.table,
+            gr.len(),
+            r.map(|r| r.2),
+            ge.stats()
+        );
+    }
+    ge.finish(d, gs);
+}
+
+/// `code_group` for all groups on several threads: each group makes its own directory
+/// entry and pieces, put together in group order. A group is freed when it and the indexes
+/// predicted from it are done.
+fn code_groups_par(
+    g: &Geom,
+    groups: &mut Vec<GroupRecs>,
+    refs: &[Option<(usize, index::Key)>],
+    threads: usize,
+    dir: &mut Vec<u8>,
+    gs: &mut [Vec<Vec<u8>>; 8],
+) {
+    use std::sync::RwLock;
+    use std::sync::atomic::{
+        AtomicUsize,
+        Ordering::{AcqRel, Relaxed},
+    };
+    let n = groups.len();
+    // The group's own use, and one per index predicted from it.
+    let users: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(1)).collect();
+    for (t, _) in refs.iter().flatten() {
+        users[*t].fetch_add(1, Relaxed);
+    }
+    let cost = |i: usize| groups[i].len() + refs[i].as_ref().map_or(0, |r| groups[r.0].len());
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(cost(i)));
+    let locks: Vec<RwLock<GroupRecs>> = std::mem::take(groups).into_iter().map(RwLock::new).collect();
+    let release = |x: usize| {
+        if users[x].fetch_sub(1, AcqRel) == 1 {
+            locks[x].write().unwrap().free();
+        }
+    };
+    let res = crate::par::map(threads, n, &order, Scratch::default, |sc, i| {
+        let (mut d, mut gp): (Vec<u8>, [Vec<Vec<u8>>; 8]) = Default::default();
+        {
+            let gr = locks[i].read().unwrap();
+            let tg = refs[i].as_ref().map(|r| locks[r.0].read().unwrap());
+            let r = refs[i].as_ref().zip(tg.as_deref()).map(|(r, tg)| (r.0, tg, &r.1));
+            code_group(g, i, &gr, r, sc, &mut d, &mut gp);
+        }
+        release(i);
+        if let Some((t, _)) = &refs[i] {
+            release(*t);
+        }
+        (d, gp)
+    });
+    for (d, gp) in res.into_iter().map(|x| x.unwrap()) {
+        dir.extend_from_slice(&d);
+        for (to, from) in gs.iter_mut().zip(gp) {
+            to.extend(from);
+        }
+    }
 }
 
 /// Finds a row by rowid: binary search, over the rowids or a sorted copy.
@@ -493,8 +575,13 @@ impl Sink for Checker<'_> {
 
 /// Rebuilds the file from its streams. `len` is the original length.
 pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
+    decode_threads(g, len, s, 1)
+}
+
+/// `decode` with `threads` threads (the first pass over the tables and indexes).
+pub fn decode_threads(g: &Geom, len: usize, s: &[Vec<u8>], threads: usize) -> Result<Vec<u8>> {
     let mut w = Writer(vec![0u8; len]);
-    rebuild(g, len, s, &mut w)?;
+    rebuild(g, len, s, &mut w, threads)?;
     Ok(w.0)
 }
 
@@ -505,10 +592,10 @@ pub fn verify(g: &Geom, src: &[u8], s: &[Vec<u8>]) -> bool {
     if src.len() == np * g.psize {
         c.seen[np] = true;
     }
-    rebuild(g, src.len(), s, &mut c).is_ok() && c.ok && c.seen.iter().all(|&x| x)
+    rebuild(g, src.len(), s, &mut c, 1).is_ok() && c.ok && c.seen.iter().all(|&x| x)
 }
 
-fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S) -> Result<()> {
+fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: usize) -> Result<()> {
     let (ps, np) = (g.psize, g.npages);
     if s.len() != NSTREAMS || np == 0 || np.checked_mul(ps) != Some(len - len % ps) {
         return Err(corrupt());
@@ -557,27 +644,56 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S) -> Result<
         }
     }
     for (t, idx) in by_table.iter().enumerate() {
-        if idx.is_empty() {
-            continue;
-        }
-        if meta[t].1.is_some() || !meta[t].0 {
+        if !idx.is_empty() && (meta[t].1.is_some() || !meta[t].0) {
             return Err(corrupt());
         }
+    }
+    // The first pass over a table, for all its indexes at once.
+    let scan = |t: usize, cols: &mut Vec<(u64, u32)>, scratch: &mut Vec<u8>| -> Result<Vec<index::Keys<'static>>> {
         let mut keys: Vec<index::Keys> =
-            idx.iter().map(|&i| index::Keys::new(&meta[i].1.as_ref().unwrap().1.cols)).collect();
+            by_table[t].iter().map(|&i| index::Keys::new(&meta[i].1.as_ref().unwrap().1.cols)).collect();
         let mut gd = gds[t].clone();
         while !gd.at_end() {
             scratch.clear();
-            let rowid = gd.next(true, g.fmt4, None, &mut scratch)?;
+            let rowid = gd.next(true, g.fmt4, None, scratch)?;
             for k in &mut keys {
-                if !k.push(&scratch, rowid, &mut cols) {
+                if !k.push(scratch, rowid, cols) {
                     return Err(corrupt());
                 }
             }
         }
-        for (&i, keys) in idx.iter().zip(keys) {
-            let perm = index::order(&keys, &meta[i].1.as_ref().unwrap().1);
-            ctxs[i] = Some(RefCtx { keys, perm });
+        Ok(keys)
+    };
+    let tables: Vec<usize> = (0..ng).filter(|&t| !by_table[t].is_empty()).collect();
+    if threads > 1 && !tables.is_empty() {
+        // Tables in parallel, then every index's order in parallel.
+        let mut res = crate::par::map(threads, ng, &tables, || (Vec::new(), Vec::new()), |(c, sc), t| scan(t, c, sc));
+        for &t in &tables {
+            for (&i, keys) in by_table[t].iter().zip(res[t].take().unwrap()?) {
+                ctxs[i] = Some(RefCtx { keys, perm: Vec::new() });
+            }
+        }
+        let idxs: Vec<usize> = (0..ng).filter(|&i| ctxs[i].is_some()).collect();
+        let perms = crate::par::map(
+            threads,
+            ng,
+            &idxs,
+            || (),
+            |_, i| index::order(&ctxs[i].as_ref().unwrap().keys, &meta[i].1.as_ref().unwrap().1),
+        );
+        for (i, perm) in perms.into_iter().enumerate() {
+            if let (Some(perm), Some(c)) = (perm, ctxs[i].as_mut()) {
+                c.perm = perm;
+            }
+        }
+    } else {
+        for &t in &tables {
+            let idx = &by_table[t];
+            let keys = scan(t, &mut cols, &mut scratch)?;
+            for (&i, keys) in idx.iter().zip(keys) {
+                let perm = index::order(&keys, &meta[i].1.as_ref().unwrap().1);
+                ctxs[i] = Some(RefCtx { keys, perm });
+            }
         }
     }
     crate::mem::mark("dec: tables, index orders");
