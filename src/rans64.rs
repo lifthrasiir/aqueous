@@ -137,7 +137,7 @@ impl Tables {
             let mut cum = 0u64;
             for (i, &fr) in f.iter().enumerate() {
                 assert!(fr >= 1);
-                let (_, sh) = reciprocal(fr as u64);
+                let sh = rcp_shift(fr as u64);
                 enc[o + i] = fr as u64 | (sh as u64) << 13 | (k as u64 * PROB_SCALE as u64 + cum) << 17;
                 cum += fr as u64;
             }
@@ -173,43 +173,85 @@ impl Tables {
     }
 
     fn dec(&self) -> &DecTables {
-        self.dec.get_or_init(|| {
-            let mut meta = vec![0u32; self.n.len()];
-            let mut alias = Vec::new();
-            for c in 0..self.n.len() {
-                let k = self.canon[c] as usize;
-                if k != c {
-                    meta[c] = meta[k];
-                    continue;
+        self.dec.get_or_init(|| self.build_dec(1))
+    }
+
+    /// Builds the decoder's tables now (otherwise built on first use), on up to `threads`
+    /// threads; the same tables whatever the number.
+    pub fn prepare_dec(&self, threads: usize) {
+        self.dec.get_or_init(|| self.build_dec(threads));
+    }
+
+    fn build_dec(&self, threads: usize) -> DecTables {
+        let mut meta = vec![0u32; self.n.len()];
+        let mut alias = Vec::new();
+        let canon: Vec<usize> = (0..self.n.len()).filter(|&c| self.canon[c] as usize == c).collect();
+        let threads = threads.clamp(1, canon.len().div_ceil(64).max(1));
+        if threads > 1 {
+            // Contiguous runs of contexts, their entries concatenated in order.
+            let per = canon.len().div_ceil(threads);
+            let parts: Vec<(Vec<u64>, Vec<u32>)> = std::thread::scope(|s| {
+                let hs: Vec<_> = canon
+                    .chunks(per)
+                    .map(|cs| {
+                        s.spawn(move || {
+                            let mut alias = Vec::new();
+                            let at = cs
+                                .iter()
+                                .map(|&c| (alias.len() as u32) << 4 | self.alias_entries(c, &mut alias))
+                                .collect();
+                            (alias, at)
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+            });
+            let mut cs = canon.iter();
+            for (part, at) in parts {
+                let base = (alias.len() as u32) << 4;
+                for m in at {
+                    meta[*cs.next().unwrap()] = base + m;
                 }
-                let f = self.freqs(c);
-                let al = build_alias(f);
-                meta[c] = (alias.len() as u32) << 4 | al.bs.trailing_zeros();
-                let fr = |i: usize| f.get(i).map_or(0, |&x| x as u64);
-                for i in 0..al.a {
-                    let cu = al.cutoff[i] as u64;
-                    let has = (cu as usize) < al.bs;
-                    let l = al.alias[i] as usize;
-                    let f_own = fr(i).wrapping_sub(1) & 0xfff;
-                    let f_al = if has { (fr(l) - 1) & 0xfff } else { 0 };
-                    let roff = if has { (al.rank_start[i] as u64).wrapping_sub(cu) & 0xfff } else { 0 };
-                    alias.push(cu | f_own << 11 | (if has { l as u64 } else { 0 }) << 23 | f_al << 31 | roff << 43);
-                }
+                alias.extend_from_slice(&part);
             }
-            // Every context at a fixed stride when all alphabets have the same size.
-            let a = self.n.iter().map(|&n| (n as usize).next_power_of_two().max(4)).max().unwrap_or(4);
-            let flat = if self.n.iter().all(|&n| (n as usize).next_power_of_two().max(4) == a) {
-                let mut flat = Vec::with_capacity(self.n.len() * a);
-                for &m in &meta {
-                    let base = (m >> 4) as usize;
-                    flat.extend_from_slice(&alias[base..base + a]);
-                }
-                flat
-            } else {
-                Vec::new()
-            };
-            DecTables { meta, alias, flat, flat_log: a.trailing_zeros() }
-        })
+        } else {
+            for &c in &canon {
+                meta[c] = (alias.len() as u32) << 4 | self.alias_entries(c, &mut alias);
+            }
+        }
+        for c in 0..self.n.len() {
+            meta[c] = meta[self.canon[c] as usize];
+        }
+        // Every context at a fixed stride when all alphabets have the same size.
+        let a = self.n.iter().map(|&n| (n as usize).next_power_of_two().max(4)).max().unwrap_or(4);
+        let flat = if self.n.iter().all(|&n| (n as usize).next_power_of_two().max(4) == a) {
+            let mut flat = Vec::with_capacity(self.n.len() * a);
+            for &m in &meta {
+                let base = (m >> 4) as usize;
+                flat.extend_from_slice(&alias[base..base + a]);
+            }
+            flat
+        } else {
+            Vec::new()
+        };
+        DecTables { meta, alias, flat, flat_log: a.trailing_zeros() }
+    }
+
+    /// Appends the alias entries of context `c`; returns log2 of its bucket size.
+    fn alias_entries(&self, c: usize, alias: &mut Vec<u64>) -> u32 {
+        let f = self.freqs(c);
+        let al = build_alias(f);
+        let fr = |i: usize| f.get(i).map_or(0, |&x| x as u64);
+        for i in 0..al.a {
+            let cu = al.cutoff[i] as u64;
+            let has = (cu as usize) < al.bs;
+            let l = al.alias[i] as usize;
+            let f_own = fr(i).wrapping_sub(1) & 0xfff;
+            let f_al = if has { (fr(l) - 1) & 0xfff } else { 0 };
+            let roff = if has { (al.rank_start[i] as u64).wrapping_sub(cu) & 0xfff } else { 0 };
+            alias.push(cu | f_own << 11 | (if has { l as u64 } else { 0 }) << 23 | f_al << 31 | roff << 43);
+        }
+        al.bs.trailing_zeros()
     }
 
     /// Makes `inv` available for context `c`.
@@ -295,6 +337,12 @@ pub fn reciprocal(freq: u64) -> (u64, u32) {
     let t1 = x1 / freq;
     let t0 = ((x1 % freq) << 32).div_ceil(freq);
     (t0.wrapping_add(t1 << 32), shift - 1)
+}
+
+/// The shift of [`reciprocal`] alone (without its divisions).
+#[inline(always)]
+fn rcp_shift(freq: u64) -> u32 {
+    if freq < 2 { 0 } else { 63 - (freq - 1).leading_zeros() }
 }
 
 #[inline(always)]
@@ -720,6 +768,7 @@ mod tests {
         let mut seed = 7u64;
         for f in 1..=PROB_SCALE as u64 {
             let (r, sh) = reciprocal(f);
+            assert_eq!(rcp_shift(f), sh, "f={f}");
             for k in 0..200 {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
                 let x = match k {
@@ -728,6 +777,29 @@ mod tests {
                     _ => RANS_L + seed % ((1 << 63) - RANS_L),
                 };
                 assert_eq!(div_rcp(x, f, r, sh), x / f, "x={x} f={f}");
+            }
+        }
+    }
+
+    #[test]
+    fn prepare_dec_threads() {
+        // Many contexts, some repeated (shared tables), mixed and equal alphabet sizes.
+        for sizes in [&[2usize, 5, 16, 200, 256][..], &[72][..]] {
+            let mut freqs = Vec::new();
+            for c in 0..700u64 {
+                let n = sizes[c as usize % sizes.len()];
+                let counts: Vec<u64> = (0..n as u64).map(|i| (i * 7919 + c % 37 * 31) % 101 + 1).collect();
+                let mut f = vec![0u16; n];
+                normalize(&counts, &mut f);
+                freqs.push(f);
+            }
+            let one = Tables::new(&freqs);
+            one.prepare_dec(1);
+            for threads in [2, 3, 8] {
+                let t = Tables::new(&freqs);
+                t.prepare_dec(threads);
+                let (a, b) = (one.dec(), t.dec());
+                assert!(a.meta == b.meta && a.alias == b.alias && a.flat == b.flat && a.flat_log == b.flat_log);
             }
         }
     }
