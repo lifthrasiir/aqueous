@@ -1,0 +1,3 @@
+[submodule "flate-zoo"]
+	path = flate-zoo
+	url = https://github.com/lifthrasiir/flate-zoo.git
