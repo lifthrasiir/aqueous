@@ -22,7 +22,8 @@ and bits beyond 64 are dropped.
 
 **Streams** inside a block are read with a lenient cursor: reading past the end yields
 zero bytes (a varint read there yields 0) and advances the position anyway. Every stream
-must be consumed exactly (§5.8); a position past the end fails.
+must be consumed exactly (§5.8); a position past the end fails. Outside streams (the file
+header, block headers, stream descriptors), a read past the end of the file fails.
 
 ## 2. File
 
@@ -30,7 +31,7 @@ must be consumed exactly (§5.8); a position past the end fails.
 magic       6 bytes   69 04 7f d1 b8 ed      ("aQR/0bjt" in base64)
 version     u16       0
 length      varint    length of the original file in bytes
-hash        u64       XXH3-64 (seed 0) of the original file
+hash        u64       XXH3-64 (seed 0) of the original file, little-endian
 blocks      until their lengths sum to `length`
 ```
 
@@ -131,7 +132,7 @@ tl    u8   then tl bytes: the tail (blanks, then "\r\n", "\n" or nothing)
 
 The key must end exactly after the tail. For numbers, `(mode, flags)` is a number
 descriptor (§7.1) and must be valid. For corners, `flags` is 0 and `mode` is a pattern
-below 32 with bit 3 set only if bit 0 is, and bit 4 only if bit 1 is:
+(each corner item has its own, so the corners of one line may differ) below 32 with bit 3 set only if bit 0 is, and bit 4 only if bit 1 is:
 
 | bit | meaning |
 |---|---|
@@ -156,7 +157,8 @@ Let `K` be the kind, `n` the count, `P = prev[K]`, `c = count[K]` for K < 3.
 
 1. **Equal line.** If K < 3 and n ≤ 3, read `d` from dup[K]. If d > 0, the line equals
    the ring entry for line `c - d` (d > c, or no such entry: fail): set `P[j]` to the
-   entry's value and scale for j < n, and skip to step 6.
+   entry's value and scale for j < n (the entry's own scale, whatever the descriptors),
+   and skip to step 6.
 2. **Unit normal.** If `unit`, K = 2 and n = 3, read a byte from nsel: `sel` =
    min(bits 0-1, 2), `neg` = bit 2. Otherwise there is no `sel`.
 3. **Predictor.** If K < 3 and 2 ≤ n ≤ 3, read a byte from pred[K]: `vp` = min(byte, 31).
@@ -229,12 +231,15 @@ symbols (bytes from stream 6+k):
 After decoding index `a` for a corner whose v index is `v` (for k = 0, `v = a`), update
 the cache: let `p` be `a`'s position for symbols 0..=31, its first position in the cache
 for 33 and 34 (31 if absent), and 31 for 32 and escapes; move `cache[0..p]` to
-`cache[1..p+1]`, set `cache[0] = a`, `max = max(max, a)`, `off = a - v` (wrapping).
+`cache[1..p+1]`, set `cache[0] = a`, `max = max(max, a)`, `off = a - v` (wrapping). With
+`p = 31` the last entry drops out. A corner's candidates (below) are computed before its
+cache update.
 
 **The corner table**: 65,536 slots, slot `v mod 2^16` (of v as a 64-bit two's complement
 number) holding a corner `(v, before, after, t, n)`. A lookup of v finds the slot's
 corner if its v equals v. Before any face has been recorded every lookup fails; after,
-slots never written hold `(0, 0, 0, 0, 0)`.
+slots never written hold `(0, 0, 0, 0, 0)`. Whether a face has been recorded is part of
+the state, carried across blocks like the table.
 
 **Candidates** of attribute k for a corner with v index `v`, after a corner of the same
 line with v index `pv`:
@@ -253,8 +258,9 @@ For each of the n corners, with pattern `pat` from the key:
    output it.
 
 An index `a` of attribute k is output as its decimal digits (`-` first if negative),
-or, if its relative bit is set, as `-` followed by the decimal of `count[k] + 1 - a`
-(wrapping). Absent vt, vn indices are 0.
+or, if its relative bit is set, as `-` followed by `count[k] + 1 - a` (i64, wrapping)
+printed the same way, so a non-positive value gives `-0` or `--` and digits (an encoder
+never codes one). Absent vt, vn indices are 0.
 
 Then record the line's corners in the table, in order: for corner i of n, at the slot of
 its v, `(v_i, v_(i-1 mod n), v_(i+1 mod n), t_i, n_i)`. Corner lines do not change
@@ -304,19 +310,21 @@ Frequencies must sum to 4096 (`M`, 12 bits), each symbol below 260. Symbols are 
 in increasing order: `cum[s]` = sum of the frequencies of the symbols below s.
 
 Decoding: two states, `x0` = the first four rans bytes big-endian, `x1` = the next four
-(reading past `len` gives zeros). For value i = 0, 1, 2… (until the output reaches the
+(reading past `len` gives zeros). The table's varints are read like a stream's (past the
+end of the data they read 0); only `len` bytes must fit in the data. For value i = 0, 1, 2… (until the output reaches the
 stream's raw length), with `x = x_(i mod 2)`:
 
 ```text
 slot = x & 4095
 s    = the symbol with cum[s] <= slot < cum[s] + freq[s]
 x    = freq[s] * (x >> 12) + slot - cum[s]
-twice: if x < 2^23 then x = (x << 8) | next rans byte
+twice (two separate tests): if x < 2^23 then x = (x << 8) | next rans byte
 ```
 
 then take the symbol's raw bits from `raw`, read as one bit stream least significant bit
 first (bit k of the stream is bit `k mod 8` of byte `k / 8`; past the end, zeros), and
-append the LEB128 of the value. The output must reach exactly the raw length.
+append the LEB128 of the value. The output must reach exactly the raw length. Unread rans
+bytes and raw bits are ignored.
 
 Encoder: states start at 2^23; symbols are coded last to first, symbol i on state
 `i mod 2`: `while x >= 2^19 * freq: emit x & 255, x >>= 8`, then `x = (x / freq << 12) +
@@ -386,8 +394,9 @@ zeros.
 
 - `%.Pg`: zero is `0`; scientific when E < -4 or E ≥ P, else positional. A decimal with
   more than P digits prints all of them.
-- `%.Pe`: `d1`, then for P > 1 a `.` and `d2…dP` (the digits cut to, or padded with zeros
-  to, P), then the exponent.
+- `%.Pe`: `d1`, then for P > 1 a `.` and `d2…dP` (the digits truncated to, or padded with
+  zeros to, P; an encoder never codes a decimal with more than P digits), then the
+  exponent.
 - `repr`: positional when zero or -4 ≤ E < 16, `.0` appended when that has no point;
   else scientific.
 - `toString`: positional when zero or -6 ≤ E < 21; else scientific.
@@ -435,7 +444,7 @@ compresses (`objr c -t 1`) to:
 01 00 01  1e                             v0: 15
 01 00 01  04                             v1: 2
 01 00 01  05                             v2: -3
-00 (x 13)                                v3+, vt*, vn*, vp*, vn-unit
+00 (x 14)                                v3+, vt0-vt3+, vn0-vn3+, vp0-vp3+, vn-unit
 01 00 01  00                             v-pred: predictor 0 (previous numbers)
 00 00                                    vt-pred, vn-pred
 ```
