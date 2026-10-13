@@ -1,0 +1,134 @@
+//! LSB-first bit I/O as used by DEFLATE.
+
+use crate::{Error, Result};
+
+pub struct BitReader<'a> {
+    data: &'a [u8],
+    /// Position in bits.
+    pos: usize,
+}
+
+impl<'a> BitReader<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        BitReader { data, pos: 0 }
+    }
+
+    pub fn bit_pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Up to 32 bits without consuming them; bits past the end read as zero.
+    pub fn peek(&self, n: u32) -> u32 {
+        debug_assert!(n <= 32);
+        let byte = self.pos >> 3;
+        if let Some(b) = self.data.get(byte..byte + 8) {
+            let w = u64::from_le_bytes(b.try_into().unwrap());
+            return ((w >> (self.pos & 7)) & ((1u64 << n) - 1)) as u32;
+        }
+        let mut w = 0u64;
+        for i in 0..5 {
+            w |= (*self.data.get(byte + i).unwrap_or(&0) as u64) << (8 * i);
+        }
+        ((w >> (self.pos & 7)) & ((1u64 << n) - 1)) as u32
+    }
+
+    pub fn consume(&mut self, n: u32) -> Result<()> {
+        self.pos += n as usize;
+        if self.pos > self.data.len() * 8 {
+            return Err(Error::Truncated);
+        }
+        Ok(())
+    }
+
+    pub fn bits(&mut self, n: u32) -> Result<u32> {
+        let v = self.peek(n);
+        self.consume(n)?;
+        Ok(v)
+    }
+
+    /// Number of bits up to the next byte boundary.
+    pub fn pad_len(&self) -> u32 {
+        ((8 - (self.pos & 7)) & 7) as u32
+    }
+
+    pub fn bytes(&mut self, n: usize) -> Result<&'a [u8]> {
+        debug_assert!(self.pos & 7 == 0);
+        let start = self.pos >> 3;
+        let s = self.data.get(start..start + n).ok_or(Error::Truncated)?;
+        self.pos += n * 8;
+        Ok(s)
+    }
+}
+
+#[derive(Default)]
+pub struct BitWriter {
+    out: Vec<u8>,
+    acc: u64,
+    nacc: u32,
+}
+
+impl BitWriter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bits(&mut self, n: u32, v: u32) {
+        debug_assert!(n <= 32 && (n == 32 || v >> n == 0));
+        self.acc |= (v as u64) << self.nacc;
+        self.nacc += n;
+        // Up to 31 bits stay pending; whole 32-bit words go out at once.
+        if self.nacc >= 32 {
+            self.out.extend_from_slice(&(self.acc as u32).to_le_bytes());
+            self.acc >>= 32;
+            self.nacc -= 32;
+        }
+    }
+
+    /// Writes out the pending whole bytes.
+    fn flush_bytes(&mut self) {
+        while self.nacc >= 8 {
+            self.out.push(self.acc as u8);
+            self.acc >>= 8;
+            self.nacc -= 8;
+        }
+    }
+
+    pub fn pad_len(&self) -> u32 {
+        (8 - self.nacc % 8) % 8
+    }
+
+    /// Number of bits written so far.
+    pub fn bit_len(&self) -> usize {
+        self.out.len() * 8 + self.nacc as usize
+    }
+
+    pub fn bytes(&mut self, b: &[u8]) {
+        self.flush_bytes();
+        debug_assert!(self.nacc == 0);
+        self.out.extend_from_slice(b);
+    }
+
+    /// The bytes written so far and the pending bits (`nacc` of them in `acc`), unpadded.
+    pub fn into_parts(self) -> (Vec<u8>, u64, u32) {
+        (self.out, self.acc, self.nacc)
+    }
+
+    /// Appends what another writer produced (see [`BitWriter::into_parts`]) at the current
+    /// bit position.
+    pub fn append(&mut self, out: &[u8], acc: u64, nacc: u32) {
+        let mut words = out.chunks_exact(4);
+        for c in &mut words {
+            self.bits(32, u32::from_le_bytes(c.try_into().unwrap()));
+        }
+        for &b in words.remainder() {
+            self.bits(8, b as u32);
+        }
+        self.bits(nacc, acc as u32);
+    }
+
+    pub fn finish(mut self) -> Vec<u8> {
+        self.flush_bytes();
+        debug_assert!(self.nacc == 0, "unpadded trailing bits");
+        self.out
+    }
+}

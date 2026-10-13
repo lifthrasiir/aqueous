@@ -1,0 +1,20 @@
+[package]
+name = "sqlite-recons"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless SQLite3 database recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[dependencies]
+recons-common = { path = "../recons-common" }
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[features]
+# Heap use at phase marks, to stderr.
+memprof = ["recons-common/memprof"]
+
+[profile.release]
+debug = 1
+lto = "fat"
+codegen-units = 1

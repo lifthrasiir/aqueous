@@ -1,0 +1,21 @@
+[package]
+name = "jpeg-recons"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+recons-common = { path = "../recons-common" }
+memchr = "2"
+rayon = "1.12.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = "0.13"
+
+[profile.release]
+debug = true
+lto = true
+codegen-units = 1
+panic = "unwind"
+
+[[bin]]
+name = "jrc"
+path = "src/main.rs"

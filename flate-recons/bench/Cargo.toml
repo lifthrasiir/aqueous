@@ -1,0 +1,21 @@
+[package]
+name = "flate-recons-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Compares flate-recons with preflate and preflate-rs on cached samples"
+
+# Standalone: needs third_party/ checkouts (see README).
+[workspace]
+
+[dependencies]
+flate-recons = { path = ".." }
+preflate-rs = { path = "../third_party/preflate-rs/preflate" }
+rayon = "1.12.0"
+libc = "0.2"
+
+[build-dependencies]
+cc = { version = "1.6.0", features = ["parallel"] }
+
+[profile.release]
+debug = 1
