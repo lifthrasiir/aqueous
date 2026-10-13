@@ -308,11 +308,16 @@ impl<'a> Emulator<'a> {
             && (cp.read < input.len() || (!slow && cp.read == input.len()))
             && cp.read - cp.base <= 2 * w
             && cp.high_water <= 2 * w
+            // What the window holds past the input read (from before its last slide) must
+            // be input too.
+            && (cp.high_water <= cp.read - cp.base || cp.base + cp.high_water <= input.len() + w)
             && (!cp.match_available || cp.strstart > cp.base)
             && (MIN_MATCH - 1..=MAX_MATCH).contains(&ml)
             && if ml >= MIN_MATCH {
+                // The pending match (at strstart - 1 when match_available) starts before
+                // its position.
                 cp.base <= cp.match_start
-                    && cp.match_start < cp.strstart
+                    && cp.match_start + (cp.match_available as usize) < cp.strstart
                     && cp.strstart - cp.match_start <= w
             } else {
                 cp.match_start == 0
@@ -1381,5 +1386,52 @@ mod tests {
             }
         }
         assert!(resumed > 100, "{resumed}");
+    }
+
+    /// A window that the checkpoint says was filled past the input's end (by a slide that
+    /// could not have happened) is refused rather than read out of bounds.
+    #[test]
+    fn resume_refuses_stale_window_past_input() {
+        let data = test_data()[..20].to_vec();
+        let p = Params {
+            wbits: 9,
+            ..Params::default()
+        };
+        let cp = Checkpoint {
+            strstart: 0,
+            base: 0,
+            read: 10,
+            high_water: 2 << p.wbits,
+            match_available: false,
+            match_length: MIN_MATCH - 1,
+            match_start: 0,
+        };
+        assert!(Emulator::resume(&data, p, &cp).is_none());
+    }
+
+    /// A pending match whose source is the pending position itself (distance 0) is refused.
+    #[test]
+    fn resume_refuses_zero_distance() {
+        let data = test_data();
+        let p = Params {
+            wbits: 9,
+            ..Params::default()
+        };
+        let cp = Checkpoint {
+            strstart: 100,
+            base: 0,
+            read: 700,
+            high_water: 2 << p.wbits,
+            match_available: true,
+            match_length: MIN_MATCH,
+            match_start: 99,
+        };
+        if let Some(mut e) = Emulator::resume(&data, p, &cp) {
+            let t = e.predict();
+            assert!(
+                !matches!(t, Some((_, Token::Match { dist: 0, .. }))),
+                "{t:?}"
+            );
+        }
     }
 }

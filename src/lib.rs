@@ -1183,9 +1183,13 @@ pub fn reconstruct_with_threads(data: &[u8], meta: &[u8], threads: usize) -> Res
     let mut at = 2;
     let main_len = get_varint(meta, &mut at)? as usize;
     let hdr_len = get_varint(meta, &mut at)? as usize;
-    let main = meta.get(at..at + main_len).ok_or(Error::Corrupt)?;
+    let main = meta
+        .get(at..at.checked_add(main_len).ok_or(Error::Corrupt)?)
+        .ok_or(Error::Corrupt)?;
     at += main_len;
-    let hdrs = meta.get(at..at + hdr_len).ok_or(Error::Corrupt)?;
+    let hdrs = meta
+        .get(at..at.checked_add(hdr_len).ok_or(Error::Corrupt)?)
+        .ok_or(Error::Corrupt)?;
     at += hdr_len;
 
     let r = &mut BitReader::new(main);

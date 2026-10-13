@@ -124,6 +124,9 @@ pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -
             .ok_or(Error::Invalid("tokens past the end"))?;
         match &b.body {
             Body::Stored { pad, len } => {
+                if *pad as u32 >> w.pad_len() != 0 {
+                    return Err(Error::Invalid("padding wider than its bits"));
+                }
                 w.put(w.pad_len(), *pad as u32);
                 w.put(16, *len as u32);
                 w.put(16, !*len as u32);
@@ -159,6 +162,9 @@ pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -
                 pos += write_tokens(&mut w, toks, &lt, &dt)?;
             }
         }
+    }
+    if stream.tail_pad as u32 >> w.pad_len() != 0 {
+        return Err(Error::Invalid("padding wider than its bits"));
     }
     w.put(w.pad_len(), stream.tail_pad as u32);
     w.flush();
@@ -258,6 +264,31 @@ mod tests {
         }
         for d in 1..=32768u16 {
             assert_eq!(dist_code(d as usize), huffman::dist_code(d), "{d}");
+        }
+    }
+
+    /// Padding values that do not fit in the padding bits are refused, not ORed into the
+    /// bits that follow.
+    #[test]
+    fn wide_padding_is_refused() {
+        let block = |last, body| crate::deflate::Block { last, body };
+        // After a block header (3 bits), 5 bits pad a stored block.
+        for (pad, ok) in [(31, true), (32, false)] {
+            let s = Stream {
+                blocks: vec![block(true, Body::Stored { pad, len: 0 })],
+                tail_pad: 0,
+                trailing: vec![],
+            };
+            assert_eq!(write(&s, &[0, 0], &[], &[]).is_ok(), ok, "{pad}");
+        }
+        // A fixed block of no tokens ends 10 bits in: 6 bits of tail padding.
+        for (pad, ok) in [(63, true), (64, false)] {
+            let s = Stream {
+                blocks: vec![block(true, Body::Fixed { tokens: vec![] })],
+                tail_pad: pad,
+                trailing: vec![],
+            };
+            assert_eq!(write(&s, &[0, 0], &[], &[]).is_ok(), ok, "{pad}");
         }
     }
 }

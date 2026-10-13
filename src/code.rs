@@ -508,7 +508,9 @@ impl<'a> Reader<'a> {
         }
         let mut at = 0;
         let n = get_varint(body, &mut at)? as usize;
-        let rans = body.get(at..at + n).ok_or(Error::Corrupt)?;
+        let rans = body
+            .get(at..at.checked_add(n).ok_or(Error::Corrupt)?)
+            .ok_or(Error::Corrupt)?;
         let extra = Bits::new(&body[at + n..]);
         let mut x = 0;
         if n > 0 {
@@ -552,6 +554,14 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A length of the rANS bytes that overflows is rejected (in debug builds too).
+    #[test]
+    fn huge_rans_length_is_rejected() {
+        let mut body = vec![0xff; 9];
+        body.push(0x01);
+        assert!(Reader::new(&body).is_err());
+    }
 
     #[test]
     fn buckets_round_trip() {

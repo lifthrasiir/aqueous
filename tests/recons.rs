@@ -254,3 +254,18 @@ fn damage(data: &[u8], meta: &[u8]) {
         }
     }
 }
+
+/// Stream lengths that overflow the position arithmetic are rejected (in debug builds too).
+#[test]
+fn huge_stream_lengths_are_rejected() {
+    let mut meta = flate_recons::DEFAULT_PROFILE.to_le_bytes().to_vec();
+    meta.extend([0xff; 9]);
+    meta.push(0x01);
+    meta.push(0);
+    assert!(flate_recons::reconstruct(b"", &meta).is_err());
+    let mut meta = flate_recons::DEFAULT_PROFILE.to_le_bytes().to_vec();
+    meta.push(0);
+    meta.extend([0xff; 9]);
+    meta.push(0x01);
+    assert!(flate_recons::reconstruct(b"", &meta).is_err());
+}
