@@ -130,6 +130,9 @@ Constraints: a raw scan has flags exactly 2. `boundary` requires `truncated`.
 `trailing_rst < 2^32`. `n_scans` must equal the number of scans found by parsing the blob.
 `1 ≤ n_stripes ≤ 256` and `n_stripes ≤ max(1, mcu_rows)` (section 6).
 
+Version 1 has no truncated scans: the compressor keeps a progressive scan that ends early
+as raw, or stores the file (section 11).
+
 ### 3.6 Raw scan data and truncated tails
 
 For a raw scan the stream is the scan's entropy-coded data, exactly as it appeared in the
@@ -247,7 +250,9 @@ The destuffed data concatenates all segments with no markers.
 
 The decoded image is one array per frame component of `bw × bh` blocks, in raster order. A
 block holds 64 signed coefficients in zigzag order. Valid containers have `|AC| ≤ 32767` and
-`|DC| ≤ 16383`. The component class is `cc = 0` for the first frame component and `cc = 1` for
+`|DC| ≤ 16383`. A decoder need not check these limits: the reference keeps coefficients as
+i16 (a DC of `pred + value` is wrapped to 16 bits), and a container that breaks them fails in
+re-emission (section 10) or at the checksum. The component class is `cc = 0` for the first frame component and `cc = 1` for
 all others.
 
 The image is coded as `ns = n_stripes` horizontal stripes of whole MCU rows:
@@ -358,20 +363,21 @@ wb[v] = (−1)^v · W(v, qc(v)),  wr[v] = (−1)^v · W(v, qr(v))  for v = 0..7
 inv   = (f32) (1.0 / (CV[0] * max(q[0], 1) * 1024.0))       (f64, rounded once to f32)
 ```
 
-For a block `b`, sums use wrapping i32 arithmetic (`c(r, s)` is the coefficient at row `r`,
+For a block `b`, products, sums and the differences below use wrapping i32 arithmetic (`c(r, s)` is the coefficient at row `r`,
 column `s`, that is `b[ZI[8r + s]]`):
 
 ```text
 bounds(b)       = ( Σ_{v=0..7} wb[v]·c(v,0),  Σ_{u=0..7} wr[u]·c(0,u) )          -- (bottom, right)
 sa = Σ_{v=1..7} wa[v]·c(v,0),   sl = Σ_{u=1..7} wl[u]·c(0,u)
-dca = (f32)(bottom[bx] − sa) * inv        dcl = (f32)(right − sl) * inv          -- f32 ops
+dca = (f32)(bottom[bx] − sa) * inv        dcl = (f32)(right − sl) * inv          -- i32 difference, then f32 ops
 both neighbours:  pf = (dca + dcl) * 0.5,  unc = |dca − dcl|
 only above:       pf = dca, unc = 0        only left: pf = dcl, unc = 0        none: pf = 0, unc = 0
 pred = (i32) clamp(round(pf), −16383, 16383)                                    -- f32 round half away
 sub  = number of edges in {1, 2, 4, 8, 16, 32, 64} that are ≤ min(trunc(unc), 127)
 ```
 
-`(f32)` of an i32 rounds to nearest-even. All f32 operations are single IEEE operations, so
+`(f32)` of an i32 rounds to nearest-even. `round` of `pf` is half away from zero, and
+converting a float to an integer (`(i32)`, `trunc`) saturates. All f32 operations are single IEEE operations, so
 the results are exact and platform independent. `bottom[bx]` belongs to the block above and
 `right` to the block to the left.
 
@@ -402,7 +408,9 @@ Layout, all in one bit stream:
 2. **inherit**: 1 bit per used group, in group order. 1 means the group takes its parent's
    distribution. A parent is *needed* if some used group inherits it.
 3. **inherit-grand**: 1 bit per needed AC parent, in parent order. 1 means it takes its
-   grandparent's distribution. A grandparent is *needed* if some AC parent inherits it.
+   grandparent's distribution. A grandparent is *needed* if some needed AC parent inherits
+   it. NZ and DC parents have no grandparent and no bit here: when needed, they always have
+   their own table (step 5).
 4. A **table** per needed grandparent, in grandparent order.
 5. A **table** per needed parent that does not inherit its grandparent, in parent order.
 6. A **table** per used group that does not inherit, in group order.
@@ -425,9 +433,9 @@ for each symbol but the last:  v = gamma() − 1;  running sum of v must stay <=
 last symbol:                   f = (total − sum) << sh
 ```
 
-`gamma()` reads an Elias gamma code. Count `n` zero bits (more than 13 is an error), then read
-`n+1` bits, which form the value most significant bit first (the first of them is the leading
-1). Any read past the end of the stream is an error. Writers emit nothing after the last table
+`gamma()` reads an Elias gamma code. Read bits up to and including the first 1 bit; `n` is the
+number of 0 bits before it (more than 13 is an error). That 1 bit is the value's leading bit;
+read `n` more bits, most significant first, below it. The value is in `1 .. 2^14`. Any read past the end of the stream is an error. Writers emit nothing after the last table
 except the zero padding of the final byte.
 
 ## 9. Stripes: rANS and raw bits
@@ -514,7 +522,8 @@ After the last MCU:
   1. If `boundary`, pad and record an RST position.
   2. The written bit count must now equal `bits`, otherwise it is an error.
   3. Cut the buffer to `floor(bits/8)` bytes and append the tail stream. The tail starts with
-     the byte holding the partial bits.
+     the byte holding the partial bits. It is part of the buffer from now on: finish stuffs it
+     like the rest, and `trailing_rst` positions go after it.
 
 Then finish (10.1).
 
