@@ -408,3 +408,50 @@ fn many_items() {
     let (_, st) = coded(&f);
     assert!(st.modes.iter().filter(|m| m.0 > 0).count() >= 5, "{:?}", st.modes);
 }
+
+/// More DEFLATE blocks than inflated bytes (empty stored blocks, as from flushes).
+#[test]
+fn empty_blocks() {
+    let mut z = vec![0x78, 0x01];
+    for _ in 0..20 {
+        z.extend_from_slice(&[0x00, 0x00, 0x00, 0xff, 0xff]);
+    }
+    // A final fixed block holding `a`, then the Adler-32.
+    z.extend_from_slice(&[0x4b, 0x04, 0x00]);
+    z.extend_from_slice(&adler32(b"a").to_be_bytes());
+    // With a stream that gains, so that the file is coded.
+    let f = pdf(&[
+        ("/Type /Catalog".into(), None),
+        ("/Filter /FlateDecode".into(), Some(z)),
+        ("/Filter /FlateDecode".into(), Some(zlib(&default_enc(), &content(14, 3000)))),
+    ]);
+    check("empty blocks", &f);
+}
+
+/// The streams of the items' data are used up exactly.
+#[test]
+fn streams_used_up() {
+    let f = pdf(&[
+        ("/Type /Catalog".into(), None),
+        ("/Filter /LZWDecode".into(), Some(content(15, 200))),
+        ("/Filter /FlateDecode".into(), Some(zlib(&default_enc(), &content(16, 20000)))),
+    ]);
+    let (c, _) = coded(&f);
+    assert_eq!(c[6..8], [0, 0], "coded");
+    let mut r = pdf_recons::varint::Reader::new(&c[8..]);
+    let mut streams = vec![];
+    while !r.at_end() {
+        let n = r.usize(c.len()).unwrap();
+        streams.push(r.bytes(n).unwrap().to_vec());
+    }
+    assert_eq!(streams.len(), 18);
+    // A byte more in the raw stream (stored).
+    assert!(!streams[3].is_empty());
+    streams[3].push(0);
+    let mut m = c[..8].to_vec();
+    for s in &streams {
+        pdf_recons::varint::put(&mut m, s.len() as u64);
+        m.extend_from_slice(s);
+    }
+    assert!(decompress(&m).is_err(), "a byte left in the raw stream");
+}

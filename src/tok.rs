@@ -11,7 +11,8 @@
 //!   flate-recons' header coder, against the block's frequencies.
 //!
 //! All streams of a file share the layout, header and raw bit streams and one rANS stream,
-//! coded and decoded in file order.
+//! coded and decoded in file order. They are the [`PARTS`] parts of the coded form: layout,
+//! tables, rANS, raw bits, headers (each needs only the ones before it to be read).
 
 use crate::kind::{CLASSES, Class};
 use crate::rans::{self, BitR, BitW, Decoder, Tables};
@@ -260,6 +261,14 @@ fn copy_match(d: &mut [u8], o: usize, dist: usize, len: usize) {
 /// Room after the data for overlapping copies.
 const SLACK: usize = 16;
 
+/// The parts of the coded form.
+pub const PARTS: usize = 5;
+
+/// Whether pixels of `bpp` bytes tile rows of `stride` bytes.
+fn tiles(px: Pixels) -> bool {
+    px.bpp > 0 && px.stride >= px.bpp && px.stride.is_multiple_of(px.bpp)
+}
+
 /// The encoder of a file's token streams.
 pub struct Encoder {
     syms: Vec<(u16, u16)>,
@@ -291,7 +300,7 @@ impl Encoder {
     /// Adds a parsed stream (with no trailing bytes) of class `c`, an image coded as pixels
     /// if `px` is given.
     pub fn add(&mut self, c: Class, f: &Flat, px: Option<Pixels>) -> Result<()> {
-        if !f.stream.trailing.is_empty() || px.is_some_and(|p| p.bpp == 0 || p.stride < p.bpp) {
+        if !f.stream.trailing.is_empty() || px.is_some_and(|p| !tiles(p)) {
             return Err(Error::Corrupt);
         }
         let ci = if px.is_some() { PIXEL } else { c as usize };
@@ -417,11 +426,13 @@ impl Encoder {
         Ok(())
     }
 
-    /// The coded streams: tables, rANS, raw bits, layout, headers (each with its length);
-    /// and the estimated bytes of each class, then of the pixel streams (tables, symbols
-    /// and raw bits).
-    pub fn finish(self) -> (Vec<u8>, [f64; CLASSES.len() + 1]) {
+    /// The parts of the coded form (all empty if no stream was added); and the estimated
+    /// bytes of each class, then of the pixel streams (tables, symbols and raw bits).
+    pub fn finish(self) -> ([Vec<u8>; PARTS], [f64; CLASSES.len() + 1]) {
         let mut sizes = [0f64; SLOTS];
+        if self.counts.iter().all(Vec::is_empty) {
+            return (Default::default(), sizes);
+        }
         let mut tw = BitW::default();
         // Per class: unused, or the literal resolution, then the tables in use.
         // Fine table -> table actually coded.
@@ -521,14 +532,7 @@ impl Encoder {
         let pad = hw.pad_len();
         hw.bits(pad, 0);
         let headers = hw.finish();
-        let mut out = vec![];
-        for part in [&tb, &st, &raw, &layout, &headers] {
-            crate::varint::put(&mut out, part.len() as u64);
-        }
-        for part in [&tb, &st, &raw, &layout, &headers] {
-            out.extend_from_slice(part);
-        }
-        (out, sizes)
+        ([layout, tb, st, raw, headers], sizes)
     }
 }
 
@@ -660,7 +664,8 @@ impl Cursor<'_, '_> {
                     let lc = s - 256;
                     let len = LEN_BASE[lc] as usize + self.raw.bits(LEN_EXTRA[lc] as u32) as usize;
                     let dc = dec.get(tb, cx[LIT_CTX + lc.min(DIST_CTX - 1)] as usize) as usize;
-                    if dc >= DIST_ALPHA || len > 258 {
+                    // 258 is code 28's alone (code 27 with extra bits 31 is not a length).
+                    if dc >= DIST_ALPHA || len > 257 + (lc == 28) as usize {
                         return Err(Error::Corrupt);
                     }
                     let dist = DIST_BASE[dc] as usize + self.raw.bits(DIST_EXTRA[dc] as u32) as usize;
@@ -696,19 +701,17 @@ pub struct DecoderState<'a> {
     dec: Decoder<'a>,
     raw: BitR<'a>,
     layout: BitR<'a>,
+    /// Bits of the layout: a block takes 3 at least.
+    layout_bits: usize,
     headers: BitReader<'a>,
     recipe: Recipe,
 }
 
 impl<'a> DecoderState<'a> {
-    pub fn new(src: &'a [u8]) -> Result<DecoderState<'a>> {
-        let mut r = crate::varint::Reader::new(src);
-        let mut lens = [0usize; 5];
-        for l in &mut lens {
-            *l = r.usize(src.len())?;
-        }
-        let parts: Vec<&[u8]> = lens.iter().map(|&n| r.bytes(n)).collect::<Result<_>>()?;
-        let mut tr = BitR::new(parts[0]);
+    /// A decoder of the parts given by [`Encoder::finish`] (not all empty).
+    pub fn new(parts: [&'a [u8]; PARTS]) -> Result<DecoderState<'a>> {
+        let [layout, tb, st, raw, headers] = parts;
+        let mut tr = BitR::new(tb);
         let mut freqs: Vec<Vec<u32>> = vec![];
         let mut ctx = vec![[0u16; PER_CLASS]; SLOTS];
         let mut read = |tr: &mut BitR, n: usize| -> Result<Option<u16>> {
@@ -754,10 +757,11 @@ impl<'a> DecoderState<'a> {
         Ok(DecoderState {
             tables: Tables::new(&freqs),
             ctx,
-            dec: Decoder::new(parts[1]),
-            raw: BitR::new(parts[2]),
-            layout: BitR::new(parts[3]),
-            headers: BitReader::new(parts[4]),
+            dec: Decoder::new(st),
+            raw: BitR::new(raw),
+            layout: BitR::new(layout),
+            layout_bits: layout.len().saturating_mul(8),
+            headers: BitReader::new(headers),
             recipe: Recipe::default(),
         })
     }
@@ -768,12 +772,12 @@ impl<'a> DecoderState<'a> {
     // slower.
     #[inline(never)]
     pub fn next(&mut self, c: Class, plain: usize, px: Option<Pixels>) -> Result<(Vec<u8>, Vec<u8>)> {
-        if px.is_some_and(|p| p.bpp == 0 || p.stride < p.bpp) {
+        if px.is_some_and(|p| !tiles(p)) {
             return Err(Error::Corrupt);
         }
         let l = &mut self.layout;
         let nblocks = l.gamma()? as usize;
-        if nblocks > plain + 1 {
+        if nblocks > self.layout_bits / 3 {
             return Err(Error::Corrupt);
         }
         let std_last = l.bits(1) == 1;
@@ -816,8 +820,13 @@ impl<'a> DecoderState<'a> {
         }
         let mut alts = Vec::with_capacity(nalts);
         let mut last = 0usize;
-        for _ in 0..nalts {
-            last += l.gamma()? as usize;
+        for k in 0..nalts {
+            let d = l.gamma()? as usize;
+            // Increasing: each match is listed once.
+            if k > 0 && d == 0 {
+                return Err(Error::Corrupt);
+            }
+            last += d;
             alts.push(last);
         }
         if l.overrun() || ntok > plain {
@@ -920,11 +929,100 @@ mod tests {
         let px = Some(Pixels { bpp: 3, stride: 81 });
         e.add(Class::Image, &f, px).unwrap();
         let out = e.finish().0;
-        let mut d = DecoderState::new(&out).unwrap();
+        let mut d = DecoderState::new(parts(&out)).unwrap();
         assert_eq!(d.next(Class::Content, text.len(), None).unwrap().0, raw);
         assert_eq!(d.next(Class::Font, text.len(), None).unwrap().0, raw);
         assert_eq!(d.next(Class::Image, text.len(), px).unwrap().0, raw);
         assert!(d.finished());
+    }
+
+    fn parts(p: &[Vec<u8>; PARTS]) -> [&[u8]; PARTS] {
+        p.each_ref().map(|v| &v[..])
+    }
+
+    /// `a`, then a match of 258 from 1 back sent as 284 + 31, in one fixed block.
+    fn alt258() -> (Vec<u8>, Vec<u8>) {
+        let data = vec![b'a'; 259];
+        let tokens = vec![Token::Lit(b'a'), Token::Match { len: 258, dist: 1, alt258: true }];
+        let st = Stream { blocks: vec![Block { last: true, body: Body::Fixed { tokens } }], ..Default::default() };
+        (flate_recons::deflate::write(&st, &data).unwrap(), data)
+    }
+
+    /// The layout of [`alt258`] with the given indices listed as sent as 284 + 31.
+    fn alt258_layout(tail_pad: u8, alts: &[u32]) -> Vec<u8> {
+        let mut w = BitW::default();
+        w.gamma(1);
+        w.bits(1, 1);
+        w.bits(2, 1);
+        w.bits(1, 0);
+        w.gamma(2);
+        w.bits(8, tail_pad as u32);
+        w.gamma(alts.len() as u32);
+        let mut last = 0;
+        for &i in alts {
+            w.gamma(i - last);
+            last = i;
+        }
+        w.finish()
+    }
+
+    /// A match listed twice as sent as 284 + 31 is invalid (it was counted off twice).
+    #[test]
+    fn alt258_listed_twice() {
+        let (raw, data) = alt258();
+        let f = flate_recons::inflate::parse(&raw).unwrap();
+        let mut e = Encoder::default();
+        e.add(Class::Content, &f, None).unwrap();
+        let mut p = e.finish().0;
+        assert_eq!(p[0], alt258_layout(f.stream.tail_pad, &[1]));
+        assert_eq!(DecoderState::new(parts(&p)).unwrap().next(Class::Content, data.len(), None).unwrap().0, raw);
+        p[0] = alt258_layout(f.stream.tail_pad, &[1, 1]);
+        assert!(DecoderState::new(parts(&p)).unwrap().next(Class::Content, data.len(), None).is_err());
+    }
+
+    /// Length 258 is length code 28; code 27 with extra bits 31 is invalid.
+    #[test]
+    fn len258_from_code27() {
+        // Slot 0 at the coarsest resolution: one literal table (0) and distance table 7 (1).
+        let mut lit = vec![0u32; LIT_ALPHA];
+        lit[b'a' as usize] = 1;
+        lit[256 + 27] = 1;
+        let mut dist = vec![0u32; DIST_ALPHA];
+        dist[0] = 1;
+        let mut tw = BitW::default();
+        tw.bits(1, 1);
+        tw.bits(2, 3);
+        tw.bits(1, 1);
+        let mut freqs = vec![rans::write_table(&mut tw, &lit)];
+        for k in 0..DIST_CTX {
+            tw.bits(1, (k == 7) as u32);
+            if k == 7 {
+                freqs.push(rans::write_table(&mut tw, &dist));
+            }
+        }
+        for _ in 1..SLOTS {
+            tw.bits(1, 0);
+        }
+        let syms = rans::encode(&[(0, b'a' as u16), (0, 256 + 27), (1, 0)], &freqs);
+        let mut raw = BitW::default();
+        raw.bits(5, 31);
+        let p = [alt258_layout(0, &[]), tw.finish(), syms, raw.finish(), vec![]];
+        assert!(DecoderState::new(parts(&p)).unwrap().next(Class::Content, 259, None).is_err());
+    }
+
+    /// Pixel rows must hold whole pixels: the channel is the position modulo `bpp`.
+    #[test]
+    fn pixel_rows_whole() {
+        let data: Vec<u8> = (0..400u32).map(|i| (i * i / 7) as u8).collect();
+        let raw = flate_zoo_like(&data);
+        let f = flate_recons::inflate::parse(&raw).unwrap();
+        let px = Some(Pixels { bpp: 2, stride: 5 });
+        let mut e = Encoder::default();
+        if e.add(Class::Image, &f, px).is_ok() {
+            let out = e.finish().0;
+            let back = DecoderState::new(parts(&out)).unwrap().next(Class::Image, data.len(), px);
+            assert_eq!(back.map(|r| r.0), Ok(raw));
+        }
     }
 
     /// A DEFLATE stream with fixed and stored blocks, built by hand from greedy matches.

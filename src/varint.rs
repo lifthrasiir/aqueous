@@ -42,6 +42,10 @@ impl<'a> Reader<'a> {
         Ok(b)
     }
 
+    pub fn u16le(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.bytes(2)?.try_into().unwrap()))
+    }
+
     pub fn u64le(&mut self) -> Result<u64> {
         Ok(u64::from_le_bytes(self.bytes(8)?.try_into().unwrap()))
     }

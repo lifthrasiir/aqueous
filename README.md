@@ -132,15 +132,15 @@ coding (the png-recons approach, for any stream):
 ### Format
 
 ```text
-"PDFR" version mode
-mode 0: the file as it is
-mode 1: varint(length) u64-LE(xxh3) | 13 sections: varint(raw length) u8(0 stored | 1 zstd) [varint(coded length)] data
-  table (zstd): per item varint(skeleton gap) u8(mode) fields
-  skeleton (zstd), raw, flate-recons metadata, jpeg-recons, token streams, png-recons,
-  inflated data of full-mode streams per class (zstd)
+69 04 69 75 fd b4 ("aQRpdf20" in base64) u16(version) | (varint(length) data)*
+version 1 (stored): one stream, the file
+version 0 (coded): head (file length, xxh3, how each later stream is coded: stored or zstd),
+  table (per item: skeleton gap, mode, fields), skeleton, raw, jpeg-recons, png-recons,
+  inflated data of full-mode streams per class, flate-recons records,
+  token streams (layout, tables, rANS, raw bits, headers)
 ```
 
-`container.rs` documents the fields of each mode.
+Each stream is read with the ones before it. [FORMAT.md](FORMAT.md) specifies all of it.
 
 ### Threads
 
@@ -225,6 +225,7 @@ target/release/pdfr fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
 
 | File | Contents |
 |---|---|
+| `FORMAT.md` | The format, in full |
 | `src/container.rs` | Format, the cost model and planner, compression, decompression |
 | `src/scan.rs`, `src/lex.rs` | Finding streams, PDF objects |
 | `src/kind.rs`, `src/objects.rs` | Stream classes and filters, indirect objects |

@@ -1,10 +1,11 @@
-//! File format, compression and decompression.
+//! File format, compression and decompression. `FORMAT.md` specifies the format.
 //!
 //! ```text
-//! "PDFR" version(u8) mode(u8)
-//! mode 0: the file as it is
-//! mode 1: varint(length) u64-LE(xxh3 of the file) | section × NSECTIONS
-//!   section: varint(raw length) u8(0 stored | 1 zstd) [varint(coded length)] data
+//! magic(69 04 69 75 fd b4) u16-LE(version) | stream*, stream: varint(length) data
+//! version 1 (stored): one stream, the file
+//! version 0 (coded): NSTREAMS streams, each read with the ones before it (S_*)
+//!   head: varint(file length) u64-LE(xxh3) | per later stream: u8(0 stored | 1 zstd)
+//!         [varint(decoded length)]
 //! ```
 //!
 //! The file is cut into the skeleton and *items*, ranges of stream data coded on their own.
@@ -17,8 +18,10 @@
 //!   [2 header bytes], u8(class), varint(inflated length), and for `FULL` varint(metadata
 //!   length). `FULL` streams' inflated data is in their class's pool, the metadata (a
 //!   flate-recons record: u16-LE profile, then its body; see flate-recons' FORMAT.md) in the
-//!   meta section; `TOK` streams are in the token section, in order.
-//! - `JPEG`: varint(length); a jpeg-recons container in the jpeg section.
+//!   meta stream; `TOK` streams are in the token streams, in order.
+//! - `PNG`: u8(colour type) u8(bit depth) varint(width) varint(height) varint(length); a
+//!   png-recons file in the png stream, of a PNG file holding the stream as its IDAT.
+//! - `JPEG`: varint(length); a jpeg-recons container in the jpeg stream.
 //!
 //! With more than one thread ([`Options::threads`]), items are coded and restored ahead on a
 //! pool, and joined in order on the calling thread (with the token streams, which share one
@@ -33,9 +36,11 @@ use crate::tok;
 use crate::varint::{self, Reader};
 use crate::{Error, Result, flate};
 
-const MAGIC: &[u8; 4] = b"PDFR";
-/// 2: flate-recons metadata is a record with its profile up front.
-const VERSION: u8 = 2;
+/// `aQRpdf20` in base64.
+const MAGIC: &[u8; 6] = &[0x69, 0x04, 0x69, 0x75, 0xfd, 0xb4];
+/// Versions: the layouts of what follows the magic.
+const CODED: u16 = 0;
+const STORED: u16 = 1;
 
 pub const RAW: u8 = 0;
 pub const DUP: u8 = 1;
@@ -46,15 +51,19 @@ pub const PNG: u8 = 5;
 pub const NMODES: usize = 6;
 pub const MODES: [&str; NMODES] = ["raw", "dup", "full", "jpeg", "tok", "png"];
 
-const S_TABLE: usize = 0;
-const S_SKEL: usize = 1;
-const S_RAW: usize = 2;
-const S_META: usize = 3;
+/// The streams of a coded file, in order: the head, the table, the skeleton, the items'
+/// data (raw, JPEG, PNG, the pools of inflated data per class, flate-recons records), the
+/// token coder's parts.
+const S_HEAD: usize = 0;
+const S_TABLE: usize = 1;
+const S_SKEL: usize = 2;
+const S_RAW: usize = 3;
 const S_JPEG: usize = 4;
-const S_TOK: usize = 5;
-const S_PNG: usize = 6;
-const S_POOL: usize = 7;
-const NSECTIONS: usize = S_POOL + CLASSES.len();
+const S_PNG: usize = 5;
+const S_POOL: usize = 6;
+const S_META: usize = S_POOL + CLASSES.len();
+const S_TOK: usize = S_META + 1;
+const NSTREAMS: usize = S_TOK + tok::PARTS;
 
 /// Streams shorter than this stay in the skeleton.
 const MIN_ITEM: usize = 64;
@@ -167,7 +176,7 @@ pub fn compress_with(file: &[u8], opts: &Options, st: &mut Stats) -> Vec<u8> {
         });
     }
     match res {
-        Some((out, s)) if out.len() < file.len() + 6 => {
+        Some((out, s)) if out.len() < stored_len(file.len()) => {
             *st = s;
             out
         }
@@ -182,11 +191,16 @@ pub fn compress_unchecked(file: &[u8], opts: &Options, st: &mut Stats) -> Vec<u8
 }
 
 fn stored(file: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(file.len() + 6);
+    let mut out = Vec::with_capacity(stored_len(file.len()));
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&[VERSION, 0]);
+    out.extend_from_slice(&STORED.to_le_bytes());
+    varint::put(&mut out, file.len() as u64);
     out.extend_from_slice(file);
     out
+}
+
+fn stored_len(n: usize) -> usize {
+    MAGIC.len() + 2 + recons_common::varint::len(n as u64) + n
 }
 
 /// A range of the file to code on its own.
@@ -448,7 +462,7 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
         let r = tokens.finish();
         (r, t.elapsed().as_secs_f64())
     };
-    let ((tok, tok_sizes), tok_secs, mut z) = match &pool {
+    let ((toks, tok_sizes), tok_secs, mut z) = match &pool {
         None => {
             let (r, s) = finish(tokens);
             (r, s, None)
@@ -479,29 +493,25 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
             st.cost[TOK as usize][i.1 as usize].secs += per * i.2 as f64;
         }
     }
-    let mut out = Vec::with_capacity(file.len() / 2);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&[VERSION, 1]);
-    varint::put(&mut out, file.len() as u64);
-    out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
-    put_section(&mut out, &table, zs(&table));
-    let k = out.len();
-    put_section(&mut out, &skel, zs(&skel));
-    st.skeleton = (skel.len(), out.len() - k);
-    put_section(&mut out, &raw, None);
-    put_section(&mut out, &meta, None);
-    st.meta = meta.len();
-    put_section(&mut out, &jpeg, None);
-    put_section(&mut out, &tok, None);
-    put_section(&mut out, &png, None);
-    st.tok = tok.len();
-    let k = out.len();
+    let mut w = Streams::new(file);
+    w.put(&table, zs(&table));
+    st.skeleton = (skel.len(), w.put(&skel, zs(&skel)));
+    w.put(&raw, None);
+    w.put(&jpeg, None);
+    w.put(&png, None);
+    st.pools = 0;
     for (c, pool) in pools.iter().enumerate() {
-        let k = out.len();
-        put_section(&mut out, pool, zs(pool));
-        st.class_out[FULL as usize][c] += (out.len() - k) as f64;
+        let n = w.put(pool, zs(pool));
+        st.class_out[FULL as usize][c] += n as f64;
+        st.pools += n;
     }
-    st.pools = out.len() - k;
+    w.put(&meta, None);
+    st.meta = meta.len();
+    st.tok = 0;
+    for part in &toks {
+        st.tok += w.put(part, None);
+    }
+    let out = w.finish();
     st.times[4] += t.elapsed().as_secs_f64();
     Some(out)
 }
@@ -872,33 +882,71 @@ fn zstd_of(data: &[u8], level: i32) -> Option<Vec<u8>> {
     zstd::bulk::compress(data, level).ok().filter(|z| z.len() < data.len())
 }
 
-/// A section, stored or as `z` (its zstd form).
-fn put_section(out: &mut Vec<u8>, data: &[u8], z: Option<Vec<u8>>) {
-    varint::put(out, data.len() as u64);
-    match z {
-        Some(z) => {
-            out.push(1);
-            varint::put(out, z.len() as u64);
-            out.extend_from_slice(&z);
+/// The streams of a coded file as they are written: the head (with how each later stream
+/// is coded), then the others.
+struct Streams<'a> {
+    head: Vec<u8>,
+    data: Vec<std::borrow::Cow<'a, [u8]>>,
+}
+
+impl<'a> Streams<'a> {
+    fn new(file: &[u8]) -> Self {
+        let mut head = vec![];
+        varint::put(&mut head, file.len() as u64);
+        head.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
+        Streams { head, data: Vec::with_capacity(NSTREAMS - 1) }
+    }
+
+    /// Adds the next stream, `data` stored or as `z` (its zstd form); returns its length.
+    fn put(&mut self, data: &'a [u8], z: Option<Vec<u8>>) -> usize {
+        match z {
+            Some(z) => {
+                self.head.push(1);
+                varint::put(&mut self.head, data.len() as u64);
+                self.data.push(z.into());
+            }
+            None => {
+                self.head.push(0);
+                self.data.push(data.into());
+            }
         }
-        None => {
-            out.push(0);
-            out.extend_from_slice(data);
+        self.data.last().unwrap().len()
+    }
+
+    fn finish(self) -> Vec<u8> {
+        assert_eq!(self.data.len(), NSTREAMS - 1);
+        let n = self.data.iter().map(|d| d.len() + 10).sum::<usize>() + self.head.len() + 18;
+        let mut out = Vec::with_capacity(n);
+        out.extend_from_slice(MAGIC);
+        out.extend_from_slice(&CODED.to_le_bytes());
+        for d in std::iter::once(&self.head[..]).chain(self.data.iter().map(|d| &d[..])) {
+            varint::put(&mut out, d.len() as u64);
+            out.extend_from_slice(d);
         }
+        out
     }
 }
 
-/// A section's length and its data: stored, or zstd (`true`).
-fn read_section<'a>(r: &mut Reader<'a>, max: usize) -> Result<(usize, &'a [u8], bool)> {
-    let len = r.usize(max)?;
-    match r.u8()? {
-        0 => Ok((len, r.bytes(len)?, false)),
-        1 => {
-            let n = r.usize(r.s.len())?;
-            Ok((len, r.bytes(n)?, true))
-        }
-        _ => Err(Error::Corrupt),
+/// The next stream of `r`: its data, varint length first.
+fn read_stream<'a>(r: &mut Reader<'a>) -> Result<&'a [u8]> {
+    let n = r.usize(r.s.len())?;
+    r.bytes(n)
+}
+
+/// How stream `k` is coded, from the head: its decoded length (at most `max`), its data, and
+/// whether that is zstd.
+fn read_section<'a>(h: &mut Reader, r: &mut Reader<'a>, max: usize) -> Result<(usize, &'a [u8], bool)> {
+    let zstd = match h.u8()? {
+        0 => false,
+        1 => true,
+        _ => return Err(Error::Corrupt),
+    };
+    let len = if zstd { h.usize(max)? } else { 0 };
+    let data = read_stream(r)?;
+    if !zstd && data.len() > max {
+        return Err(Error::Corrupt);
     }
+    Ok((if zstd { len } else { data.len() }, data, zstd))
 }
 
 fn get_section((len, data, z): (usize, &[u8], bool)) -> Result<Vec<u8>> {
@@ -1131,43 +1179,49 @@ impl Out<'_> {
 pub fn decompress_with_threads(src: &[u8], ds: &mut DStats, threads: usize) -> Result<Vec<u8>> {
     let t_setup = std::time::Instant::now();
     let mut r = Reader::new(src);
-    if r.bytes(4)? != MAGIC || r.u8()? != VERSION {
+    if r.bytes(MAGIC.len())? != MAGIC {
         return Err(Error::Corrupt);
     }
-    match r.u8()? {
-        0 => return Ok(r.rest().to_vec()),
-        1 => {}
+    match r.u16le()? {
+        STORED => {
+            let file = read_stream(&mut r)?;
+            return if r.at_end() { Ok(file.to_vec()) } else { Err(Error::Corrupt) };
+        }
+        CODED => {}
         _ => return Err(Error::Corrupt),
     }
-    let len = r.usize(MAX_LEN)?;
-    let sum = r.u64le()?;
+    let mut h = Reader::new(read_stream(&mut r)?);
+    let len = h.usize(MAX_LEN)?;
+    let sum = h.u64le()?;
     let pool = pool(threads);
-    // Sections are at most the file, but the pools (inflated data, at most 1032 times
+    // Streams are at most the file, but the pools (inflated data, at most 1032 times
     // the DEFLATE data).
-    let max = |k: usize| if k >= S_POOL { len.saturating_mul(1032) } else { len.saturating_add(1 << 20) };
-    let sec: Vec<Vec<u8>> = match &pool {
-        None => {
-            let mut sec = Vec::with_capacity(NSECTIONS);
-            for k in 0..NSECTIONS {
-                sec.push(get_section(read_section(&mut r, max(k))?)?);
-            }
-            sec
-        }
-        Some(pool) => {
-            let mut v = Vec::with_capacity(NSECTIONS);
-            for k in 0..NSECTIONS {
-                v.push(read_section(&mut r, max(k))?);
-            }
-            use rayon::prelude::*;
-            pool.install(|| v.into_par_iter().map(get_section).collect::<Result<_>>())?
-        }
-    };
-    if !r.at_end() {
+    let max = |k: usize| if (S_POOL..S_META).contains(&k) { len.saturating_mul(1032) } else { len.saturating_add(1 << 20) };
+    let mut v = Vec::with_capacity(NSTREAMS - 1);
+    for k in S_HEAD + 1..NSTREAMS {
+        v.push(read_section(&mut h, &mut r, max(k))?);
+    }
+    if !h.at_end() || !r.at_end() {
         return Err(Error::Corrupt);
     }
+    // Indexed by stream (the head is read).
+    let sec: Vec<Vec<u8>> = std::iter::once(Ok(vec![]))
+        .chain(match &pool {
+            None => v.into_iter().map(get_section).collect::<Vec<_>>(),
+            Some(pool) => {
+                use rayon::prelude::*;
+                pool.install(|| v.into_par_iter().map(get_section).collect())
+            }
+        })
+        .collect::<Result<_>>()?;
     let mut t = Reader::new(&sec[S_TABLE]);
     let mut cur = Cursors::default();
-    let tokens = if sec[S_TOK].is_empty() { None } else { Some(tok::DecoderState::new(&sec[S_TOK])?) };
+    let toks = &sec[S_TOK..];
+    let tokens = if toks.iter().all(Vec::is_empty) {
+        None
+    } else {
+        Some(tok::DecoderState::new(std::array::from_fn(|k| &toks[k][..]))?)
+    };
     let mut o = Out { out: Vec::with_capacity(len), skel: &sec[S_SKEL], tokens, placed: vec![], len };
     ds.setup += t_setup.elapsed().as_secs_f64();
     match &pool {
@@ -1195,6 +1249,14 @@ pub fn decompress_with_threads(src: &[u8], ds: &mut DStats, threads: usize) -> R
                 o.add(&entries[i], r, ds, t, secs)
             })?;
         }
+    }
+    // Every stream of the items' data used up.
+    let used = [(S_RAW, cur.rw), (S_JPEG, cur.jp), (S_PNG, cur.pn), (S_META, cur.mt)]
+        .into_iter()
+        .chain(cur.pool.iter().enumerate().map(|(c, &n)| (S_POOL + c, n)))
+        .all(|(k, n)| n == sec[k].len());
+    if !used {
+        return Err(Error::Corrupt);
     }
     let mut out = o.out;
     out.extend_from_slice(&o.skel[cur.sk..]);
