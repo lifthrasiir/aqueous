@@ -46,7 +46,8 @@ is the encoder's free choice within the constraints given.
 - **gamma(v)** (`0 ≤ v < 2^32`) is Elias gamma of `u = v + 1` in a bit stream. With
   `k = bitlen(u) − 1`, it is `k` zero bits, a one bit, then the `k` bits of `u` below its
   leading one, **most significant first**. For example, gamma(5) is the bits 0, 0, 1, 1, 0 in
-  that order, the byte `0x0c` on its own. png-recons' gamma (fields least significant first)
+  that order, the byte `0x0c` on its own. More than 32 zero bits, or a value of 2^32 or more,
+  is invalid. png-recons' gamma (fields least significant first)
   and flate-recons' (ones, then a zero) are different codes.
 - `LEN_BASE[c]`, `LEN_EXTRA[c]` (length codes `c` = 0–28, DEFLATE symbols 257–285) and
   `DIST_BASE[c]`, `DIST_EXTRA[c]` (distance codes 0–29) are DEFLATE's (RFC 1951 §3.2.5).
@@ -157,7 +158,7 @@ mode takes the next bytes of its streams, from where the item before it left off
 - `JPEG`: the next `n` bytes of the jpeg stream are a JRC container. Its decompression is the
   item's bytes.
 - `PNG`: the next `n` bytes of the png stream are a png-recons file. Its decompression is a
-  PNG file `P`. With `m` = `u32 BE` at `P[33..37]` (the length of the second chunk), the item's
+  PNG file `P`. With `m` = `u32 BE` at bytes 33 to 36 of `P` (the length of the second chunk), the item's
   bytes are `P[41 .. 41 + m]`, which must lie within `P`. (This is the data of the IDAT chunk
   of the PNG file in section 7.3.)
 - `FULL` and `TOK`: the `zlib` bytes (if flagged), the DEFLATE stream, and the Adler-32 of the
@@ -175,16 +176,17 @@ mode takes the next bytes of its streams, from where the item before it left off
    bytes. The output must never exceed the original's length.
 3. Append the rest of the skeleton.
 4. Check that the raw, jpeg, png, meta and pool streams were used up exactly, that the token
-   symbol stream ended as section 6.5 requires (if any item is `TOK`), that the output is the
+   symbol stream ended as section 6.5 requires (if there is a token decoder, below), that the output is the
    original's length, and that its xxh3 is the head's. Otherwise the file is invalid, and the
    output must not be returned.
 
-If the token streams (13–17) are all empty, there is no token decoder, and a `TOK` item is
+If the token streams (13–17) are all empty (as decoded), there is no token decoder, and a `TOK` item is
 invalid. Otherwise the token decoder is set up from them (6.4) before the first item, and the
 symbol stream must end as 6.5 requires even if no item is `TOK`. The encoder leaves them all
 empty exactly when no item is `TOK`.
 
-Every `gap`, `n`, `plain` and `mlen` must also fit in what is left of its stream. The layout,
+Every `gap`, `n`, `plain` and `mlen` must also fit in what is left of its stream, and an item
+whose fields run past the end of the table is invalid. The layout,
 tables, raw bits and headers streams need not be used up: what follows the last item's bits is
 not read.
 
@@ -262,7 +264,8 @@ At position `p`, with `ch = ch(p)`:
 - `t = (4 × after + min(ch, 3)) × 12 + min(bitlen(act(p)), 11)`.
 
 `after` is 1 if the last token of the item was a match, else 0: it is 0 at the start of the
-item, a match sets it, and a literal or a stored byte clears it.
+item, a match sets it, and a literal or a stored byte clears it. A position's `t` uses `after`
+as it was before that position's token or stored byte.
 
 ## 6. Token coding
 
@@ -298,8 +301,8 @@ The item's tokens are numbered from 0 over its fixed and dynamic blocks in order
 are not tokens. Every listed token must be a match of length 258.
 
 Padding values are the bits (least significant first) from the end of the block header (or of
-the last block) to the next byte boundary. A value must fit in that many bits, or the stream is
-not rebuilt as it was.
+the last block) to the next byte boundary. A value must fit in that many bits, or the file is
+invalid.
 
 ### 6.3 Tokens
 
@@ -336,7 +339,8 @@ The tables bit stream is read once, before the first `TOK` item. For each slot 0
 The bits of a used slot must not pass the end of the stream; the flags of unused slots past
 the end read as 0. Encoders never code a symbol from a table or slot that is not used. The
 reference decoder treats such a table as one whose only symbol is 0, with frequency 4096: it
-gives 0 and leaves the state as it is (6.5).
+gives 0 and leaves the state's value as it is (6.5), but the symbol still counts in the
+`i mod 4` rotation.
 
 **Levels.** Each symbol of a table's alphabet has a level: 0 (absent) or 1 to 63. They are
 read with `prev = 0` at the start of the table, as a series of gamma codes `g`:
@@ -396,7 +400,8 @@ distance counts (each match's distance code).
 
 The headers bit stream holds the Huffman header of every dynamic block, over all `TOK` items
 in order, coded with flate-recons' header coder (flate-recons' `FORMAT.md`, *Header stream*,
-with that document's bit conventions). Each header is read against its block's frequencies
+with that document's bit conventions: its gamma, not section 1's, and any read past the end
+of the stream, padding included, is invalid). Each header is read against its block's frequencies
 (6.7), after the item's tokens. The coder's recipe starts at its initial value once per file
 and carries over from block to block and from item to item.
 
