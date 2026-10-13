@@ -36,6 +36,7 @@ file, summed (`scripts/baseline.sh`): zstd 1.5.7 `--single-thread`, xz `-9 -T1`.
 | home (code charts, papers) | 20 | 314 MB | **0.8738** | 116 MB/s | 172 MB/s | 0.9145 | 0.8900 | 0.8879 |
 | cc (Common Crawl) | 1,000 | 1,379 MB | **0.8638** | 157 MB/s | 186 MB/s | 0.9073 | 0.8879 | 0.8887 |
 | arxiv | 20 | 94 MB | **0.8346** | 124 MB/s | 142 MB/s | 0.9021 | 0.8831 | 0.8828 |
+| pdf20 (PDF Association's PDF 2.0 examples) | 7 | 54 KB | **0.5004** | 80 MB/s | 932 MB/s | 0.5129 | 0.4825 | 0.4738 |
 
 The speed target binds: everything coded costs more per byte than the budget allows on
 average, so the ratio is what fits in it. With no limit (`-s inf`) CC gives **0.7713** at
@@ -192,7 +193,9 @@ rANS stream) and joins everything in order; the xxh3 check is at the end, as wit
   and small glyph images), a few papers and diagrams.
 - `scripts/fetch-corpus.sh`: `corpus/cc/`, 1,000 PDF files from Common Crawl (SafeDocs
   CC-MAIN-2021-31-PDF-UNTRUNCATED, digitalcorpora.org, zip 0000; 1.38 GB of every kind of
-  producer), and `corpus/arxiv/`, 20 arXiv papers (94 MB).
+  producer), `corpus/arxiv/`, 20 arXiv papers (94 MB), and `corpus/pdf20/`, the
+  PDF Association's 7 PDF 2.0 example files (pdf20examples, pinned; 54 KB, nearly all
+  skeleton: a check that PDF 2.0 parses, not a measure of ratio).
 - `scripts/baseline.sh SET...`: zstd and xz on each file, cached in `cache/`.
 
 What CC holds (`examples/survey.rs`): DCT images 35%, FlateDecode images 29% (11.8×
@@ -211,6 +214,8 @@ target/release/pdfr fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
   truncated and damaged streams); syntax (indirect and wrong lengths, CR line ends,
   keywords in strings, incremental updates, unterminated streams); images with and without
   predictors, geometry that does not match the data; JPEG; duplicates; encrypted files;
+  PDF 2.0 (junk before the header, UTF-8 strings, object and cross-reference streams,
+  AES-256);
   non-PDF and cut files; 2,400 corrupted containers (errors, never panics).
 - Unit tests: lexer, scanner, rANS and bit I/O, token coding.
 - `pdfr fuzz`: mutated files (bit flips, cuts, deletions, junk, copied pieces, bytes inside
@@ -219,7 +224,7 @@ target/release/pdfr fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
   outcome.
 - With 2, 3 and 8 threads, every test's container is the same bytes, and decompression (of
   corrupted containers too) has the same outcome.
-- Every file of the three sets round-trips (`pdfr bench` checks).
+- Every file of the four sets round-trips (`pdfr bench` checks).
 
 ## Layout
 

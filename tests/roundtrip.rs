@@ -255,6 +255,80 @@ fn encrypted() {
     assert_eq!(st.modes[pdf_recons::container::TOK as usize].0 + st.modes[pdf_recons::container::FULL as usize].0, 0);
 }
 
+/// A PDF 2.0 file (with junk before the header, as allowed): a UTF-8 text string, an image,
+/// an object stream and a cross-reference stream in place of the xref table; with `encrypt`,
+/// an AES-256 (revision 6) `/Encrypt` dictionary.
+fn pdf20(encrypt: bool) -> Vec<u8> {
+    fn obj(f: &mut Vec<u8>, num: usize, d: &[u8], s: Option<&[u8]>) -> usize {
+        let o = f.len();
+        f.extend_from_slice(format!("{num} 0 obj\n").as_bytes());
+        match s {
+            Some(s) => {
+                f.extend_from_slice(b"<< ");
+                f.extend_from_slice(d);
+                f.extend_from_slice(format!(" /Length {} >>\nstream\n", s.len()).as_bytes());
+                f.extend_from_slice(s);
+                f.extend_from_slice(b"\nendstream");
+            }
+            None => f.extend_from_slice(d),
+        }
+        f.extend_from_slice(b"\nendobj\n");
+        o
+    }
+    let enc = default_enc();
+    let mut f = b"junk before the header\n%PDF-2.0\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    // Cross-reference entries of W [1 4 2] by object number: type, offset or object stream,
+    // generation or index.
+    let mut x = vec![];
+    let mut entry = |t: u8, a: usize, b: u16| {
+        x.push(t);
+        x.extend_from_slice(&(a as u32).to_be_bytes());
+        x.extend_from_slice(&b.to_be_bytes());
+    };
+    entry(0, 0, 0xffff);
+    let mut cat = b"<< /Type /Catalog /Pages 4 0 R /Lang (\xef\xbb\xbf".to_vec();
+    cat.extend_from_slice("한국어 (\u{2192}) \\(".as_bytes());
+    cat.extend_from_slice(b") >>");
+    entry(1, obj(&mut f, 1, &cat, None), 0);
+    entry(1, obj(&mut f, 2, b"/Filter /FlateDecode", Some(&zlib(&enc, &content(17, 3000)))), 0);
+    let (pages, page) = (
+        "<< /Type /Pages /Kids [5 0 R] /Count 1 >>",
+        "<< /Type /Page /Parent 4 0 R /Contents 2 0 R /Resources << /XObject << /Im1 6 0 R >> >> >>",
+    );
+    let head = format!("4 0 5 {} ", pages.len() + 1);
+    let d = format!("/Type /ObjStm /N 2 /First {} /Filter /FlateDecode", head.len());
+    entry(1, obj(&mut f, 3, d.as_bytes(), Some(&zlib(&enc, format!("{head}{pages} {page}").as_bytes()))), 0);
+    entry(2, 3, 0);
+    entry(2, 3, 1);
+    let d = b"/Type /XObject /Subtype /Image /Width 96 /Height 64 /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /FlateDecode";
+    entry(1, obj(&mut f, 6, d, Some(&zlib(&enc, &pixels(96, 64, 1, false, 18)))), 0);
+    let mut e = "";
+    if encrypt {
+        let d = b"<< /Filter /Standard /V 5 /R 6 /Length 256 /CF << /StdCF << /AuthEvent /DocOpen /CFM /AESV3 /Length 32 >> >> /StmF /StdCF /StrF /StdCF /P -1028 /O <00> /U <00> /OE <00> /UE <00> /Perms <00> >>";
+        entry(1, obj(&mut f, 7, d, None), 0);
+        e = " /Encrypt 7 0 R /ID [<00> <00>]";
+    }
+    let (num, start) = (if encrypt { 8 } else { 7 }, f.len());
+    entry(1, start, 0);
+    let d = format!("/Type /XRef /Size {} /W [1 4 2] /Root 1 0 R{e} /Filter /FlateDecode", num + 1);
+    obj(&mut f, num, d.as_bytes(), Some(&zlib(&enc, &x)));
+    f.extend_from_slice(format!("startxref\n{start}\n%%EOF\n").as_bytes());
+    f
+}
+
+#[test]
+fn pdf_2_0() {
+    use pdf_recons::container::{FULL, TOK};
+    let f = pdf20(false);
+    check("PDF 2.0", &f);
+    let (_, st) = coded(&f);
+    assert!(st.modes[TOK as usize].0 + st.modes[FULL as usize].0 >= 2, "{:?}", st.modes);
+    let f = pdf20(true);
+    check("PDF 2.0, AES-256", &f);
+    let (_, st) = coded(&f);
+    assert_eq!(st.modes[TOK as usize].0 + st.modes[FULL as usize].0, 0);
+}
+
 #[test]
 fn not_pdf() {
     for f in [
