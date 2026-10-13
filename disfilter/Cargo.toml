@@ -1,0 +1,30 @@
+[package]
+name = "aqr"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[features]
+default = ["encode", "decode"]
+encode = []
+decode = []
+
+[dependencies]
+bytemuck = { version = "1.16.0", features = ["must_cast"] }
+log = "0.4.21"
+mini-alloc = "0.4.2"
+
+[dev-dependencies]
+env_logger = "0.11.3"
+
+[profile.release-wasm]
+inherits = "release"
+debug = false
+lto = true
+strip = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(trace_decode)', 'cfg(trace_encode)'] }
+

@@ -1,0 +1,1 @@
+@pipx run bikeshed spec index.bs index.html
