@@ -20,8 +20,8 @@ use crate::{Error, Result};
 use flate_recons::bits::{BitReader, BitWriter};
 use flate_recons::deflate::{Block, Body, DynHeader, Stream, Token};
 use flate_recons::header::{self, Recipe};
-use flate_recons::inflate::Flat;
 use flate_recons::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
+use flate_recons::inflate::Flat;
 use std::cell::Cell;
 
 /// Literals 0-255, then length codes 0-28 (symbols 257-285).

@@ -1196,7 +1196,8 @@ pub fn decompress_with_threads(src: &[u8], ds: &mut DStats, threads: usize) -> R
     let pool = pool(threads);
     // Streams are at most the file, but the pools (inflated data, at most 1032 times
     // the DEFLATE data).
-    let max = |k: usize| if (S_POOL..S_META).contains(&k) { len.saturating_mul(1032) } else { len.saturating_add(1 << 20) };
+    let max =
+        |k: usize| if (S_POOL..S_META).contains(&k) { len.saturating_mul(1032) } else { len.saturating_add(1 << 20) };
     let mut v = Vec::with_capacity(NSTREAMS - 1);
     for k in S_HEAD + 1..NSTREAMS {
         v.push(read_section(&mut h, &mut r, max(k))?);
