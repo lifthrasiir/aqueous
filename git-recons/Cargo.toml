@@ -1,0 +1,27 @@
+[package]
+name = "git-recons"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless recompression of git checkouts: the working tree and .git rebuilt bit for bit from interconnected streams"
+publish = false
+
+[dependencies]
+recons-common = { path = "../recons-common" }
+flate-recons = { path = "../flate-recons" }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+sha1 = "0.10"
+crc32fast = "1.5"
+zstd = { version = "0.13", features = ["zstdmt"] }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[[bin]]
+name = "gitr"
+path = "src/bin/gitr.rs"
+
+[profile.release]
+debug = 1
+lto = "fat"
+codegen-units = 1
+
+[dev-dependencies]
+flate-zoo = { path = "../flate-zoo" }
