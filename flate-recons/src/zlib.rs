@@ -240,15 +240,11 @@ impl<'a> Emulator<'a> {
     }
 
     /// The state at this token boundary, or `None` where resuming is not supported: not in
-    /// deflate_fast (whose hash chains depend on the tokens), and in deflate_slow only while
-    /// input remains to be read (so that every position before strstart has been inserted).
+    /// deflate_fast (whose hash chains depend on the tokens). deflate_slow has inserted every
+    /// position before strstart that has three bytes read, also after the input ends, and
     /// deflate_rle and deflate_huff keep no state beyond the window.
     pub fn checkpoint(&self) -> Option<Checkpoint> {
-        if self.algo == Algo::Fast
-            || self.pending.is_some()
-            || self.done
-            || (self.algo == Algo::Slow && self.read == self.input.len())
-        {
+        if self.algo == Algo::Fast || self.pending.is_some() || self.done {
             return None;
         }
         let strstart = self.base + self.strstart;
@@ -305,12 +301,9 @@ impl<'a> Emulator<'a> {
         let valid = cp.base.is_multiple_of(w)
             && cp.base <= cp.strstart
             && cp.strstart <= cp.read
-            && (cp.read < input.len() || (!slow && cp.read == input.len()))
+            && cp.read <= input.len()
             && cp.read - cp.base <= 2 * w
             && cp.high_water <= 2 * w
-            // What the window holds past the input read (from before its last slide) must
-            // be input too.
-            && (cp.high_water <= cp.read - cp.base || cp.base + cp.high_water <= input.len() + w)
             && (!cp.match_available || cp.strstart > cp.base)
             && (MIN_MATCH - 1..=MAX_MATCH).contains(&ml)
             && if ml >= MIN_MATCH {
@@ -344,8 +337,13 @@ impl<'a> Emulator<'a> {
             } else if i >= cp.high_water {
                 0
             } else {
-                // Past the input read so far: what the window held before its last slide.
-                a.checked_sub(w).map_or(0, |x| input[x])
+                // Past the input read so far: what the window held before its last slides,
+                // last written while it was input. Once the input is all read the window can
+                // slide again, past what was written before the previous slide.
+                (1..=cp.base / w)
+                    .map(|k| a - k * w)
+                    .find(|&x| x < input.len())
+                    .map_or(0, |x| input[x])
             };
         }
         if slow {
@@ -1315,11 +1313,14 @@ mod tests {
                             mem: 8,
                         };
                         let mut e = Emulator::new(&data, p);
-                        let (mut n, mut checked) = (0, 0);
+                        let (mut n, mut checked, mut checked_end) = (0, 0, 0);
                         loop {
-                            if n % 997 == 0
+                            // More often once the input has been read.
+                            let every = if e.read == data.len() { 31 } else { 997 };
+                            if n % every == 0
                                 && let Some(cp) = e.checkpoint()
                             {
+                                checked_end += (cp.read == data.len()) as usize;
                                 let mut r = Emulator::resume(&data, p, &cp)
                                     .unwrap_or_else(|| panic!("{p}: {cp:?}"));
                                 let mut a = e.clone();
@@ -1338,6 +1339,7 @@ mod tests {
                             n += 1;
                         }
                         assert!(checked > 10, "{p}: {checked} checkpoints");
+                        assert!(checked_end > 0, "{p}: no checkpoint after the input");
                     }
                 }
             }
@@ -1389,9 +1391,9 @@ mod tests {
     }
 
     /// A window that the checkpoint says was filled past the input's end (by a slide that
-    /// could not have happened) is refused rather than read out of bounds.
+    /// could not have happened) is not read out of bounds.
     #[test]
-    fn resume_refuses_stale_window_past_input() {
+    fn resume_stale_window_past_input_stays_in_bounds() {
         let data = test_data()[..20].to_vec();
         let p = Params {
             wbits: 9,
@@ -1406,7 +1408,11 @@ mod tests {
             match_length: MIN_MATCH - 1,
             match_start: 0,
         };
-        assert!(Emulator::resume(&data, p, &cp).is_none());
+        if let Some(mut e) = Emulator::resume(&data, p, &cp) {
+            while let Some((_, t)) = e.predict() {
+                assert!(e.commit(t));
+            }
+        }
     }
 
     /// A pending match whose source is the pending position itself (distance 0) is refused.

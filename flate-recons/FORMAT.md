@@ -753,9 +753,8 @@ and no match_start; the rebuilt emulator holds the decoded value, which has no e
 resets `match_length` before every use, huff never reads it). Negative results are invalid. The checkpoint is invalid unless:
 the algorithm is not fast (levels 1 to 3 with strategies default, filtered and fixed cannot
 be resumed, as their hash chains depend on the tokens); `match_available` is false unless the
-algorithm is slow, and if true, `strstart > base`; `base ≤ strstart ≤ read`; `read < N`, or
-`read = N` for rle and huff; `read − base ≤ 2w`; `high_water ≤ 2w`; `high_water ≤ read − base`
-or `base + high_water ≤ N + w`; `match_length ≤ 258`; and if `match_length ≥ 3`,
+algorithm is slow, and if true, `strstart > base`; `base ≤ strstart ≤ read ≤ N`;
+`read − base ≤ 2w`; `high_water ≤ 2w`; `match_length ≤ 258`; and if `match_length ≥ 3`,
 `base ≤ match_start`, `match_start + match_available < strstart` and
 `strstart − match_start ≤ w`.
 
@@ -763,15 +762,15 @@ The emulator is rebuilt from the data and the checkpoint: a fresh one, then `bas
 `high_water`, `match_available` and `match_length` as given, `strstart` and `match_start`
 (0 if `match_length = 2`) made window positions (minus `base`), and
 `lookahead = read − strstart`. Window index `i` (data position `a = base + i`) holds `D[a]` if
-`a < read`; else 0 if `i ≥ high_water`; else `D[a − w]` (what it held before the last slide),
-or 0 if `a < w`. For slow, every data position `a` from `max(base, strstart − w)` up to
-`strstart − 1` with `a + 3 ≤ read` is inserted again, in increasing order, as window position
-`a − base`.
+`a < read`; else 0 if `i ≥ high_water`; else `D[a − kw]` for the least `k ≥ 1` with
+`kw ≤ base` and `a − kw < N` (what it held before the last slides: once the input is all
+read the window can still slide, past what it held before), or 0 if there is none. For slow,
+every data position `a` from `max(base, strstart − w)` up to `strstart − 1` with
+`a + 3 ≤ read` is inserted again, in increasing order, as window position `a − base`.
 
 *Informative:* the encoder writes a checkpoint for a segment where the emulation of the
-previous segment still follows the tokens, has no pending token, is not done (and for slow
-has input left to read), its `strstart − match_available` is the segment's position, and the
-emulator rebuilt from the checkpoint exists; it codes that segment with the rebuilt emulator.
+previous segment still follows the tokens, has no pending token, is not done, its
+`strstart − match_available` is the segment's position, and the emulator rebuilt from the checkpoint exists; it codes that segment with the rebuilt emulator.
 Rebuilding is exact: the rebuilt emulator predicts as the original would. When the stream
 looks like zlib's but its emulation cannot be resumed (fast), the encoder codes the whole
 stream as one segment.
