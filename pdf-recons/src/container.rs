@@ -652,7 +652,13 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::Options) -> Done {
                     return Some(Coded::Tok(fields, Box::new(f), c, px, len));
                 }
                 let t = std::time::Instant::now();
-                let r = flate_recons::deconstruct_with(&data[hdr..end], fr_opts);
+                // The zlib header tells zlib emulation what to look for.
+                let hints = if hdr == 2 {
+                    flate_recons::Hints::zlib_header([data[0], data[1]])
+                } else {
+                    flate_recons::Hints::default()
+                };
+                let r = flate_recons::deconstruct_hinted(&data[hdr..end], fr_opts, &hints).map(|(p, m, _)| (p, m));
                 times[2] += t.elapsed().as_secs_f64();
                 let (plain, meta) = r.ok()?;
                 varint::put(&mut fields, meta.len() as u64);
