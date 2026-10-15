@@ -125,7 +125,12 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin flate-recons-trai
   together, SPMD style (`zlib::MultiSlow`): driven by the actual tokens, they keep identical
   windows and hash chains, and one walk of each chain gives every level's `longest_match`.
   `Hints` narrow the candidates by what a container says (a zlib header's FLEVEL and CINFO,
-  a gzip header's XFL).
+  a gzip header's XFL), given to `deconstruct_hinted`; reading the record needs no hints.
+  A hint can also name the parameters themselves (`Hints::params`, e.g. the previous
+  stream's `Report::zlib` in a container of many streams): if they pass the structural
+  checks and predict every token, they are taken without detection, the rule's trial or the
+  chain rule (short streams below 1 KiB still compare the rule alone). On small git objects
+  (zlib -6, profile 10) this splits 1.5-5× faster than with the header's hints alone.
 - **Headers.** Dynamic Huffman headers are coded against candidate builders, chosen per
   stream and carried from block to block: zlib's heap, and package-merge (zopfli, ECT,
   plain) at limits 15-9. Run-length coders cover zlib, libdeflate and zopfli/ECT. An exact
@@ -237,6 +242,6 @@ the old writer and would gain about as much).
 - More emulated encoders behind the same scheme: zlib-ng (`deflate_medium`, its own hash),
   chromium/cloudflare (CRC hashes), libdeflate, miniz, stb.
 - Cheaper splitting in profile 10: the chain configurations and zlib detection are tried in
-  full; container hints (`Hints`) are not used yet.
+  full unless hinted parameters are exact.
 - More Huffman builders (libdeflate, 7-zip, miniz) as header candidates.
 - A larger, more varied corpus, plus the `full` sweep.

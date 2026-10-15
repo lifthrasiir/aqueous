@@ -269,3 +269,94 @@ fn zlib_checkpoints_reconstruct_in_parallel() {
         }
     }
 }
+
+/// A container's hints narrow zlib detection: a level-6 stream whose header claims levels 7-9
+/// is not emulated at level 6, and its own header leads to level 6.
+#[test]
+fn deconstruction_follows_hints() {
+    use flate_recons::Hints;
+    let input = include_bytes!("../src/zlib.rs").repeat(2);
+    let raw = "zlib:level=6"
+        .parse::<flate_zoo::Encoder>()
+        .unwrap()
+        .compress(&input)
+        .unwrap();
+    let opts = flate_recons::Options::for_profile(flate_recons::ADAPTIVE).unwrap();
+    for (header, level) in [([0x78, 0xda], None), ([0x78, 0x9c], Some(6))] {
+        let hints = Hints::zlib_header(header);
+        let (data, meta, report) = flate_recons::deconstruct_hinted(&raw, &opts, &hints).unwrap();
+        assert!(
+            report.zlib.is_none_or(|p| hints.allows(&p)),
+            "{header:02x?}: {:?}",
+            report.zlib
+        );
+        if let Some(level) = level {
+            assert_eq!(report.zlib.map(|p| p.level), Some(level), "{header:02x?}");
+        }
+        assert!(flate_recons::reconstruct_with_threads(&data, &meta, 1).unwrap() == raw);
+    }
+}
+
+/// Parameters given as a hint are taken when they predict every token, even where detection
+/// would prefer others that do too.
+#[test]
+fn exact_hinted_params_are_taken() {
+    use flate_recons::zlib::Params;
+    let input = include_bytes!("../src/zlib.rs")[..3000].to_vec();
+    let raw = "zlib:level=7"
+        .parse::<flate_zoo::Encoder>()
+        .unwrap()
+        .compress(&input)
+        .unwrap();
+    let (stream, data) = flate_recons::deflate::parse(&raw).unwrap();
+    let exact: Vec<Params> = (4..=9)
+        .map(|level| Params {
+            level,
+            ..Params::default()
+        })
+        .filter(|&p| {
+            flate_recons::detect::trial(&stream, &data, p, usize::MAX, 0)
+                .is_some_and(|d| d.complete)
+        })
+        .collect();
+    assert!(exact.len() >= 2, "{exact:?}");
+    let opts = flate_recons::Options::for_profile(flate_recons::ADAPTIVE).unwrap();
+    for p in exact {
+        let hints = flate_recons::Hints {
+            params: Some(p),
+            ..Default::default()
+        };
+        let (data, meta, report) = flate_recons::deconstruct_hinted(&raw, &opts, &hints).unwrap();
+        assert_eq!(report.zlib, Some(p));
+        assert!(
+            flate_recons::reconstruct_with_threads(&data, &meta, 1).unwrap() == raw,
+            "{p}"
+        );
+    }
+}
+
+/// Parameters given as a hint that do not predict every token change nothing.
+#[test]
+fn inexact_hinted_params_change_nothing() {
+    let input = include_bytes!("../src/zlib.rs").repeat(2);
+    let opts = flate_recons::Options::for_profile(flate_recons::ADAPTIVE).unwrap();
+    let hints = flate_recons::Hints {
+        params: Some(flate_recons::zlib::Params::default()),
+        ..Default::default()
+    };
+    for spec in [
+        "zlib:level=1",
+        "zlib:level=9",
+        "zlib:level=6,mem=9",
+        "libdeflate:level=6",
+    ] {
+        let raw = spec
+            .parse::<flate_zoo::Encoder>()
+            .unwrap()
+            .compress(&input)
+            .unwrap();
+        let plain = flate_recons::deconstruct_with(&raw, &opts).unwrap();
+        let (data, meta, _) = flate_recons::deconstruct_hinted(&raw, &opts, &hints).unwrap();
+        assert!((data, meta) == plain, "{spec}");
+    }
+}

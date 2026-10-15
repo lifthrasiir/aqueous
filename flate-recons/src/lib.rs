@@ -352,6 +352,17 @@ pub fn deconstruct(raw: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 use inflate::Flat;
 
 impl Flat {
+    /// The parsed stream with its blocks' tokens in place.
+    fn stream_with_tokens(&self) -> Stream {
+        let mut stream = self.stream.clone();
+        for (b, s) in stream.blocks.iter_mut().zip(self.starts.windows(2)) {
+            if let Body::Fixed { tokens } | Body::Dynamic { tokens, .. } = &mut b.body {
+                *tokens = self.tokens[s[0]..s[1]].to_vec();
+            }
+        }
+        stream
+    }
+
     fn new(raw: &[u8], segment: usize, threads: usize, verify: bool) -> Result<Flat> {
         let f = inflate::parse_segments(raw, segment)?;
         if verify {
@@ -408,6 +419,17 @@ pub struct Report {
 
 /// Like [`deconstruct_with`], also describing the metadata.
 pub fn deconstruct_report(raw: &[u8], opts: &Options) -> Result<(Vec<u8>, Vec<u8>, Report)> {
+    deconstruct_hinted(raw, opts, &Hints::default())
+}
+
+/// Like [`deconstruct_report`], with what the stream's container says about its encoder
+/// (e.g. [`Hints::zlib_header`]): zlib emulation only considers parameters `hints` allows.
+/// The metadata does not depend on hints to be read.
+pub fn deconstruct_hinted(
+    raw: &[u8],
+    opts: &Options,
+    hints: &Hints,
+) -> Result<(Vec<u8>, Vec<u8>, Report)> {
     let threads = opts.threads.max(1);
     let profile = opts.profile;
     let catalog = &profile_catalog(profile)?.0;
@@ -434,6 +456,7 @@ pub fn deconstruct_report(raw: &[u8], opts: &Options) -> Result<(Vec<u8>, Vec<u8
             rule,
             opts,
             priors,
+            hints,
             segment_ranges(&f),
             threads,
         )?),
@@ -597,17 +620,48 @@ struct AdaptiveChoice<'a> {
 
 /// The smallest adaptive coding among: the catalog's `rule`; a chain rule
 /// ([`chain_rule`]); and, for a stream that looks like zlib's, the better of the two with
-/// zlib emulation.
+/// zlib emulation (with parameters `hints` allows). Hinted parameters that predict every
+/// token are taken with `rule` alone.
 fn choose_adaptive<'a>(
     f: &'a Flat,
     rule: Rule,
     opts: &Options,
     priors: &Priors,
+    hints: &Hints,
     ranges: Vec<Range<'a>>,
     threads: usize,
 ) -> Result<AdaptiveChoice<'a>> {
     let collect = opts.collect;
     let size = |v: &[AdaptiveSeg]| v.iter().map(|s| s.body.len() + 4).sum::<usize>();
+    let stream = opts.zlib.then(|| f.stream_with_tokens());
+    // Hinted parameters that predict every token leave nothing to choose.
+    if let (Some(stream), Some(p)) = (&stream, hints.params)
+        && crate::detect::plausible(stream, &f.data, p, hints)
+    {
+        let zr = zlib_ranges(f, p, &ranges);
+        let segs = code_adaptive(f, rule, Some(p), priors, &zr, threads, collect)?;
+        if segs.iter().all(|s| s.misses == 0) {
+            // In a short stream the rule may predict as well, without zlib's parameters (ties
+            // go to the rule, as below).
+            if f.data.len() < HINT_RULE_BELOW {
+                let alone = code_adaptive(f, rule, None, priors, &ranges, threads, collect)?;
+                if size(&alone) <= size(&segs) {
+                    return Ok(AdaptiveChoice {
+                        rule,
+                        zlib: None,
+                        segs: alone,
+                        ranges,
+                    });
+                }
+            }
+            return Ok(AdaptiveChoice {
+                rule,
+                zlib: Some(p),
+                segs,
+                ranges: zr,
+            });
+        }
+    }
     let mut best = AdaptiveChoice {
         rule,
         zlib: None,
@@ -622,22 +676,10 @@ fn choose_adaptive<'a>(
             (best.rule, best.segs) = (chain, segs);
         }
     }
-    let Some(p) = opts.zlib.then(|| zlib_params(f)).flatten() else {
+    let Some(p) = stream.and_then(|s| zlib_params(&s, &f.data, hints)) else {
         return Ok(best);
     };
-    // An emulation that cannot resume at a segment's start would only serve the first one:
-    // then the stream is one segment.
-    let ranges = if p.resumable() || best.ranges.len() <= 1 {
-        best.ranges.iter().map(|r| Range { ..*r }).collect()
-    } else {
-        vec![Range {
-            first: 0,
-            count: f.tokens.len(),
-            pos: 0,
-            end: f.data.len(),
-            skips: &f.skips,
-        }]
-    };
+    let ranges = zlib_ranges(f, p, &best.ranges);
     let segs = code_adaptive(f, best.rule, Some(p), priors, &ranges, threads, collect)?;
     if size(&segs) < size(&best.segs) {
         best = AdaptiveChoice {
@@ -649,6 +691,10 @@ fn choose_adaptive<'a>(
     }
     Ok(best)
 }
+
+/// Below this many bytes of data, the catalog's rule alone is compared with exact hinted
+/// zlib parameters (it is cheap there, and often smaller).
+const HINT_RULE_BELOW: usize = 1 << 10;
 
 /// Chain configurations tried, as (depth, nice) indices into [`tokens::DEPTHS`] and
 /// [`tokens::NICES`]: depth 128 and nice 128, 1 and 8, 16 and 16, 4096 and 128.
@@ -722,19 +768,30 @@ fn chain_rule(f: &Flat, priors: &Priors) -> Result<Option<Rule>> {
     Ok(Some(best.1))
 }
 
-/// zlib's parameters, if the stream looks like zlib's (see [`crate::detect`]).
-fn zlib_params(f: &Flat) -> Option<zlib::Params> {
-    let mut stream = f.stream.clone();
-    for (b, s) in stream.blocks.iter_mut().zip(f.starts.windows(2)) {
-        if let Body::Fixed { tokens } | Body::Dynamic { tokens, .. } = &mut b.body {
-            *tokens = f.tokens[s[0]..s[1]].to_vec();
-        }
-    }
-    let candidates = crate::detect::candidates(&stream);
+/// zlib's parameters among those `hints` allows, if the stream looks like zlib's (see
+/// [`crate::detect`]).
+fn zlib_params(stream: &Stream, data: &[u8], hints: &Hints) -> Option<zlib::Params> {
+    let candidates = crate::detect::candidates_hinted(stream, hints);
     if candidates.is_empty() {
         return None;
     }
-    crate::detect::detect_refined(&stream, &f.data, candidates).map(|d| d.params)
+    crate::detect::detect_refined(stream, data, candidates).map(|d| d.params)
+}
+
+/// The segments to code with zlib emulation under `p`: `ranges`, or the whole stream as one
+/// if the emulation cannot resume at a segment's start (it would only serve the first one).
+fn zlib_ranges<'a>(f: &'a Flat, p: zlib::Params, ranges: &[Range<'a>]) -> Vec<Range<'a>> {
+    if p.resumable() || ranges.len() <= 1 {
+        ranges.iter().map(|r| Range { ..*r }).collect()
+    } else {
+        vec![Range {
+            first: 0,
+            count: f.tokens.len(),
+            pos: 0,
+            end: f.data.len(),
+            skips: &f.skips,
+        }]
+    }
 }
 
 /// A segment's adaptively coded corrections.

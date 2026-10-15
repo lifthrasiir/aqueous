@@ -41,6 +41,9 @@ pub struct Hints {
     /// XFL of a gzip header.
     pub gzip_xfl: Option<u8>,
     pub wbits: Option<u8>,
+    /// Parameters the stream likely shares, e.g. those of the container's previous stream
+    /// ([`crate::Report::zlib`]): tried first, and taken if they predict every token.
+    pub params: Option<Params>,
 }
 
 impl Hints {
@@ -54,6 +57,7 @@ impl Hints {
             zlib_flevel: Some(flg >> 6),
             gzip_xfl: None,
             wbits: Some((cmf >> 4) + 8).filter(|&w| w >= 9),
+            params: None,
         }
     }
 
@@ -291,6 +295,17 @@ pub fn trial(
         t.d.complete = !t.lost && t.d.misses <= give_up;
     }
     (!t.lost && t.d.misses <= give_up).then_some(t.d)
+}
+
+/// Whether `p` (one of [`Hints::params`], say) may have made `stream`: allowed by its structure
+/// (with any memLevel it does not tell) and by `hints`, and exact over its first tokens. A
+/// cheap check before coding the whole stream with `p`.
+pub fn plausible(stream: &Stream, data: &[u8], p: Params, hints: &Hints) -> bool {
+    let alts = mem_alternatives(stream);
+    candidates_hinted(stream, hints)
+        .iter()
+        .any(|&c| c == p || (alts.contains(&p.mem) && Params { mem: c.mem, ..p } == c))
+        && trial(stream, data, p, TRIAL_TOKENS, 0).is_some()
 }
 
 /// The best zlib parameters for `stream`, if it looks like zlib's output at all. Candidates
