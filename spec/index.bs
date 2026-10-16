@@ -73,8 +73,14 @@ Definitions</h2>
   <dd>A fundamental unit of archival, consisting of a sequence of zero or more content bytes,
   a non-empty byte sequence for its name, and any other associated metadata (e.g., size, modification time, permissions).</dd>
 
+  <dt><dfn export>Formula</dfn></dt>
+  <dd>A description of a file content as an expression over stored data, modules and resources.</dd>
+
   <dt><dfn export>Implicitly-sized</dfn></dt>
   <dd>Being its byte length only available through the context.</dd>
+
+  <dt><dfn export>Module</dfn></dt>
+  <dd>A WebAssembly module that performs the postprocessing part of a transformation.</dd>
 
   <dt><dfn export>Postprocess</dfn> or <dfn export>Postprocessor</dfn></dt>
   <dd>The act or component that performs operations on data *after* it has been decompressed or transformed,
@@ -83,6 +89,9 @@ Definitions</h2>
   <dt><dfn export>Preprocess</dfn> or <dfn export>Preprocessor</dfn></dt>
   <dd>The act or component that performs operations on data *before* it is compressed or transformed,
   but after it has been retrieved from its original source.</dd>
+
+  <dt><dfn export>Resource</dfn></dt>
+  <dd>A byte sequence shared by multiple invocations of modules, typically a model for the data.</dd>
 
   <dt><dfn export>Transform</dfn> or <dfn export>Transformation</dfn></dt>
   <dd>A combined term for matching preprocessing and postprocessing algorithms.</dd>
@@ -569,7 +578,11 @@ The internal structure after decompression is as follows:
       <td>[=leb128=]
       <td>
     <tr>
-      <td><dfn>num_transformers</dfn>
+      <td><dfn>num_modules</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>num_resources</dfn>
       <td>[=leb128=]
       <td>
     <tr>
@@ -593,8 +606,12 @@ The internal structure after decompression is as follows:
       <td>[=leb128=]
       <td>
     <tr>
-      <td><dfn>transformer_offsets</dfn>
-      <td>[=u=]([=meta/previous_metadata_offset=])[[=meta/num_transformers=]]
+      <td><dfn>module_offsets</dfn>
+      <td>[=u=]([=meta/previous_metadata_offset=])[[=meta/num_modules=]]
+      <td>
+    <tr>
+      <td><dfn>resource_offsets</dfn>
+      <td>[=u=]([=meta/previous_metadata_offset=])[[=meta/num_resources=]]
       <td>
     <tr>
       <td><dfn>dictionary_offsets</dfn>
@@ -635,8 +652,8 @@ All relative offsets are measured from the beginning of the current metadata blo
 implying that the offset of zero is invalid.
 All valid relative offsets are also even.
 
-Each metadata block describes compressed or uncompressed blocks appeared after the previous metadata block, if any,
-and until the current metadata block.
+Each metadata block describes the [=content blocks=] in its [=segment=],
+i.e. blocks appeared after the previous metadata block, if any, and until the current metadata block.
 The previous metadata block is linked via [=meta/previous_metadata_offset=]
 which is also the maximum possible offsets that can occur in this particular metadata block.
 If there is no prior metadata block,
@@ -644,11 +661,11 @@ If there is no prior metadata block,
 to the end of [=archive/header_magic=] in the Unencrypted Archive structure ([[#unencrypted-archive]]),
 plus 1 so that it never points to a valid block.
 
-Each transformer and dictionary appearing within these offsets is numbered from 1, respectively.
-[=meta/num_transformers=] and [=meta/num_dictionaries=] are therefore
-the maximum possible value for transformer and dictionary indices.
-Relative offsets to corresponding transformer and dictionary blocks are
-later recorded as [=meta/transformer_offsets=] and [=meta/dictionary_offsets=] respectively.
+[=meta/num_modules=], [=meta/num_resources=] and [=meta/num_dictionaries=] are
+the numbers of module, resource and dictionary blocks in the [=segment=] respectively.
+Relative offsets to those blocks are
+later recorded as [=meta/module_offsets=], [=meta/resource_offsets=] and [=meta/dictionary_offsets=] respectively,
+in the order of appearance.
 
 The metadata block represents zero or more files and zero or more directories,
 collectively called [=meta/entries=] and numbered together.
@@ -670,10 +687,6 @@ File parameters (<dfn>file_param</dfn>) occur for each file (but not directory),
   </thead>
   <tbody>
     <tr>
-      <td><dfn>file_transformer</dfn>
-      <td>[=u=]([=meta/num_transformers=])
-      <td>
-    <tr>
       <td><dfn>file_dictionary</dfn>
       <td>[=u=]([=meta/num_dictionaries=])
       <td>
@@ -684,11 +697,14 @@ File parameters (<dfn>file_param</dfn>) occur for each file (but not directory),
   </tbody>
 </table>
 
-Since transformers and dictionaries are numbered from 1,
-the zero index is used to indicate the absence of
-transformer or dictionary in [=meta/file_transformer=] and [=meta/file_dictionary=].
-A relative offset to the corresponding compressed or uncompressed block is recorded as [=meta/file_offset=],
+[=meta/file_dictionary=] is the dictionary used by the block at [=meta/file_offset=]
+as a <em>1-based</em> index, or zero if no dictionary is used.
+Therefore [=meta/file_dictionary=] = |k| refers to the block at [=meta/dictionary_offsets=][|k| - 1],
+and [=meta/num_dictionaries=] is the maximum possible value for it.
+A relative offset to the corresponding [=leaf block=] is recorded as [=meta/file_offset=],
 which can't be zero.
+
+TODO: An output index when the formula block at [=meta/file_offset=] has multiple outputs.
 
 Entry structure (<dfn>entry</dfn>) then occurs for each directory and file, in this order, and consists of the following:
 
@@ -810,11 +826,56 @@ TBW
 Content blocks</h4>
 
 Any other block is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]].
+A metadata block and all content blocks between the previous metadata block (or the beginning of the archive if none)
+and that metadata block form a <dfn>segment</dfn>.
+Each segment MUST be self-contained:
+every reference from a block in a segment, whether by an index or by an offset, MUST point to a block in the same segment.
+
+Content blocks are classified as follows:
+
+* A <dfn>leaf block</dfn> represents the content of a file by itself.
+    [[#compressed-block|Compressed leaf blocks]], [[#uncompressed-block|uncompressed leaf blocks]]
+    and [[#formula-block|formula blocks]] are leaf blocks.
+* A <dfn>non-leaf block</dfn> doesn't represent any file by itself,
+    and only supplies data referenced by one or more formula blocks.
+    [[#compressed-block|Compressed non-leaf blocks]] and [[#uncompressed-block|uncompressed non-leaf blocks]]
+    are non-leaf blocks.
+* An <dfn>auxiliary block</dfn> supplies data used to decode other blocks.
+    [[#dictionary-block|Dictionary blocks]], [[#module-block|module blocks]] and [[#resource-block|resource blocks]]
+    are auxiliary blocks.
+
+Dictionary, module and resource blocks are respectively indexed in the order of appearance within the segment.
+Two conventions are used for these indices:
+
+* Fields in content blocks use <em>0-based</em> indices,
+    because the presence of a reference is signalled separately (e.g. by the block type).
+* Fields in the metadata block that may indicate the absence of a reference use <em>1-based</em> indices,
+    where zero denotes the absence.
+
+<h5 id=block-order>
+Block order</h5>
+
+Blocks in a segment MUST be ordered so that a formula block is resolved by blocks preceding it
+and all data required to evaluate it follows it:
+
+* A dictionary block MUST precede any block using it.
+* A module or resource block MUST precede any formula block referencing it.
+* Every non-leaf block MUST be referenced by at least one formula block,
+    and MUST follow all formula blocks referencing it.
+* Leaf blocks are otherwise not constrained and MAY be interleaved with non-leaf blocks.
+
+<div class=note>
+  These rules make every reference from a formula block to a non-leaf block a forward reference.
+  Therefore, when a non-leaf block is read in a streaming fashion,
+  all formula blocks referencing it have already been read,
+  and the decompressor knows exactly when the block can be discarded.
+  Likewise, the decompressor never has to retain a formula block after all non-leaf blocks it references have been read.
+</div>
 
 <h5 id=compressed-block>
 Compressed block</h5>
 
-Blocks 20<sub>16</sub> through 3F<sub>16</sub> are **compressed blocks**.
+Blocks 20<sub>16</sub> through 37<sub>16</sub> are **compressed blocks**.
 Compressed blocks are parametrized by following variables:
 
 <div dfn-for=cblock>
@@ -823,70 +884,63 @@ Compressed blocks are parametrized by following variables:
   <thead>
     <tr>
       <th>Block Types
+      <th><dfn>leaf</dfn>
       <th><dfn>has_dictionary</dfn>
-      <th><dfn>transformed</dfn>
       <th>[=compression_method=]
       <th>[=checksum_method=]
   </thead>
   <tbody>
     <tr>
       <td>20<sub>16</sub> — 23<sub>16</sub>
-      <td>False
+      <td>True
       <td>False
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>None
     <tr>
       <td>24<sub>16</sub> — 27<sub>16</sub>
-      <td>False
+      <td>True
       <td>False
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>[[#xxh64-checksum-method|XXH64]]
     <tr>
       <td>28<sub>16</sub> — 2B<sub>16</sub>
-      <td>False
+      <td>True
       <td>True
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>None
     <tr>
       <td>2C<sub>16</sub> — 2F<sub>16</sub>
-      <td>False
+      <td>True
       <td>True
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>[[#xxh64-checksum-method|XXH64]]
     <tr>
       <td>30<sub>16</sub> — 33<sub>16</sub>
-      <td>True
+      <td>False
       <td>False
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>None
     <tr>
       <td>34<sub>16</sub> — 37<sub>16</sub>
-      <td>True
       <td>False
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
-    <tr>
-      <td>38<sub>16</sub> — 3B<sub>16</sub>
-      <td>True
       <td>True
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>None
-    <tr>
-      <td>3C<sub>16</sub> — 3F<sub>16</sub>
-      <td>True
-      <td>True
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
   </tbody>
 </table>
 
 <div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>001|d|&thinsp;|x||c||ss|</code> where:
+  Alternatively, the block type can be interpreted as a binary number
+  <code>0010&thinsp;|d||c||ss|</code> for leaf blocks and
+  <code>0011&thinsp;0|d||ss|</code> for non-leaf blocks, where:
 
     * |d| indicates dictionary usage: 0 for no dictionary, 1 for dictionary present.
-    * |x| indicates transformer usage: 0 for no transformer, 1 for transformer present.
     * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
+</div>
+
+<div class=note>
+  Non-leaf blocks have no checksum because their integrity is implied by the integrity of the files derived from them.
 </div>
 
 Its data consists of the following:
@@ -900,10 +954,6 @@ Its data consists of the following:
   </thead>
   <tbody>
     <tr>
-      <td><dfn>transformer_index</dfn>
-      <td>[=leb128=]
-      <td>[=If=] [=cblock/transformed=]
-    <tr>
       <td><dfn>dictionary_index</dfn>
       <td>[=leb128=]
       <td>[=If=] [=cblock/has_dictionary=]
@@ -914,16 +964,12 @@ Its data consists of the following:
   </tbody>
 </table>
 
-If a transformer or dictionary are in use,
-respectively, 0-based [=cblock/transformer_index=] and [=cblock/dictionary_index=] are specified.
-A compressed block can only use transformer and dictionary blocks
-between the previous metadata block (or the beginning of the file if any) and the current compressed block,
-and transformer or dictionary are numbered in the order of appearance.
-These fields are intended for linear scanning,
+If a dictionary is in use, its <em>0-based</em> index is specified as [=cblock/dictionary_index=].
+This field is intended for linear scanning,
 and the metadata block contains all necessary information for random access.
 
 A compressed block consists of one or more <dfn>chunk</dfn>s.
-Each chunk can be decompressed and postprocessed without referring to any other chunk, allowing efficient random access.
+Each chunk can be decompressed without referring to any other chunk, allowing efficient random access.
 Each [=cblock/chunk=] consists of the following:
 
 <table class=data>
@@ -960,14 +1006,15 @@ Each [=cblock/chunk=] consists of the following:
 Except for [=cblock/compressed_size=] which is now explicit,
 the interpretation of these fields is identical to that of the Shared compressed external structure ([[#shared-external-structure]]).
 
-TBW (add expected wasm execution profile, if possible)
+TODO: Whether [=cblock/checksum=] of a leaf block covers compressed or original bytes.
+The latter is desirable for the integrity of the file content.
 
 </div>
 
 <h5 id=uncompressed-block>
 Uncompressed block</h5>
 
-Blocks 40<sub>16</sub> through 47<sub>16</sub> are **uncompressed blocks**.
+Blocks 40<sub>16</sub> through 4B<sub>16</sub> are **uncompressed blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
 where each parameter is determined as follows:
 
@@ -977,27 +1024,36 @@ where each parameter is determined as follows:
   <thead>
     <tr>
       <th>Block Types
+      <th><dfn>leaf</dfn>
       <th>[=checksum_method=]
   </thead>
   <tbody>
     <tr>
       <td>40<sub>16</sub> — 43<sub>16</sub>
+      <td>True
       <td>None
     <tr>
       <td>44<sub>16</sub> — 47<sub>16</sub>
+      <td>True
       <td>[[#xxh64-checksum-method|XXH64]]
+    <tr>
+      <td>48<sub>16</sub> — 4B<sub>16</sub>
+      <td>False
+      <td>None
   </tbody>
 </table>
 
 <div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0100&thinsp;0|c||ss|</code> where:
+  Alternatively, the block type can be interpreted as a binary number
+  <code>0100&thinsp;0|c||ss|</code> for leaf blocks and
+  <code>0100&thinsp;10|ss|</code> for non-leaf blocks, where:
 
     * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
 </div>
 
 The internal structure of an uncompressed block represents a raw, uninterpreted byte sequence.
-This block type MUST be used when given file is barely compressible and can't be represented in terms of compressed blocks.
+This block type MUST be used when given data is barely compressible and can't be represented in terms of compressed blocks.
 
 <div class=note>
   This is mandatory because each Zstandard block incurs 3 bytes of overhead
@@ -1009,77 +1065,38 @@ This block type MUST be used when given file is barely compressible and can't be
 <h5 id=dictionary-block>
 Dictionary block</h5>
 
-Blocks 48<sub>16</sub> through 4F<sub>16</sub> are **dictionary blocks**.
+Blocks 4C<sub>16</sub> through 4F<sub>16</sub> are **dictionary blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
-where each parameter is determined as follows:
-
-<div dfn-for=dict>
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th>[=compression_method=]
-      <th>[=checksum_method=]
-  </thead>
-  <tbody>
-    <tr>
-      <td>48<sub>16</sub> — 4B<sub>16</sub>
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>None
-    <tr>
-      <td>4C<sub>16</sub> — 4F<sub>16</sub>
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
-  </tbody>
-</table>
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
 
 <div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0100&thinsp;1|c||ss|</code> where:
+  Alternatively, the block type can be interpreted as a binary number <code>0100&thinsp;11|ss|</code> where:
 
-    * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
 </div>
+
+<div dfn-for=dict>
 
 TBW
 
 </div>
 
-<h5 id=transformer-block>
-Transformer block</h5>
+<h5 id=module-block>
+Module block</h5>
 
-Blocks 60<sub>16</sub> through 67<sub>16</sub> are **transformer blocks**.
-Transformer blocks are parametrized by following variables:
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th>[=compression_method=]
-      <th>[=checksum_method=]
-  </thead>
-  <tbody>
-    <tr>
-      <td>60<sub>16</sub> — 63<sub>16</sub>
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>None
-    <tr>
-      <td>64<sub>16</sub> — 67<sub>16</sub>
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
-  </tbody>
-</table>
+Blocks 60<sub>16</sub> through 63<sub>16</sub> are **module blocks**.
+Their data uses the Shared external structure ([[#shared-external-structure]]),
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
 
 <div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0110&thinsp;0|c||ss|</code> where:
+  Alternatively, the block type can be interpreted as a binary number <code>0110&thinsp;00|ss|</code> where:
 
-    * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
 </div>
 
-Its data consists of the following:
+The internal structure after decompression is as follows:
 
-<div dfn-for=xform>
+<div dfn-for=module>
 
 <table class=data>
   <thead>
@@ -1096,7 +1113,120 @@ Its data consists of the following:
   </tbody>
 </table>
 
-TBW
+TODO: The WebAssembly profile, the module interface and the identification by a hash.
+
+</div>
+
+<h5 id=resource-block>
+Resource block</h5>
+
+Blocks 64<sub>16</sub> through 67<sub>16</sub> are **resource blocks**.
+Their data uses the Shared external structure ([[#shared-external-structure]]),
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
+
+<div class=note>
+  Alternatively, the block type can be interpreted as a binary number <code>0110&thinsp;01|ss|</code> where:
+
+    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
+</div>
+
+The internal structure after decompression is an uninterpreted byte sequence,
+which is supplied to modules by formula blocks referencing it.
+
+<div dfn-for=resource>
+
+TODO: How resources are supplied to modules, and the identification by a hash.
+
+</div>
+
+<h5 id=formula-block>
+Formula block</h5>
+
+Blocks 70<sub>16</sub> through 7F<sub>16</sub> are **formula blocks**.
+Formula blocks are parametrized by following variables:
+
+<div dfn-for=formula>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Block Types
+      <th><dfn>has_dictionary</dfn>
+      <th><dfn>has_output_checksum</dfn>
+  </thead>
+  <tbody>
+    <tr>
+      <td>70<sub>16</sub> — 73<sub>16</sub>
+      <td>False
+      <td>False
+    <tr>
+      <td>74<sub>16</sub> — 77<sub>16</sub>
+      <td>False
+      <td>True
+    <tr>
+      <td>78<sub>16</sub> — 7B<sub>16</sub>
+      <td>True
+      <td>False
+    <tr>
+      <td>7C<sub>16</sub> — 7F<sub>16</sub>
+      <td>True
+      <td>True
+  </tbody>
+</table>
+
+<div class=note>
+  Alternatively, the block type can be interpreted as a binary number <code>0111&thinsp;|d||c||ss|</code> where:
+
+    * |d| indicates dictionary usage: 0 for no dictionary, 1 for dictionary present.
+    * |c| indicates the presence of output checksums: 0 for absent, 1 for present.
+    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
+</div>
+
+Its data consists of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>dictionary_index</dfn>
+      <td>[=leb128=]
+      <td>[=If=] [=formula/has_dictionary=]
+    <tr>
+      <td><dfn>formula_data</dfn>
+      <td>[=block/compressed_data=]
+      <td>
+  </tbody>
+</table>
+
+If a dictionary is in use, its <em>0-based</em> index is specified as [=formula/dictionary_index=], as in compressed blocks.
+[=formula/formula_data=] uses the Shared compressed external structure ([[#shared-external-structure]])
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
+
+<div class=note>
+  Formula blocks always use Zstandard, which can still store data verbatim with raw Zstandard blocks.
+  Many small formula blocks are expected to share a dictionary to compensate for the lack of shared compression context.
+</div>
+
+A formula block describes the content of a file as an expression over non-leaf blocks following it,
+evaluated with modules and resources preceding it.
+
+TODO: The internal structure of [=formula/formula_data=], which is expected to include:
+
+* The output size;
+* The output checksum, [=If=] [=formula/has_output_checksum=];
+* Nodes of the expression: a byte range of non-leaf blocks, a concatenation of nodes,
+    and an application of a module to nodes with resources and parameters;
+* References to non-leaf blocks, as ordinals among the subsequent non-leaf blocks;
+* References to module and resource blocks, as indices within the segment;
+* Resource declarations for each application (memory limit, input and output window sizes, capacity of shared edges);
+* Multiple outputs from a single formula block, each of which corresponds to a file;
+* References to other files, or their replacement;
+* Padding to keep [=formula/formula_data=] compressible, since its original size can't be smaller than the compressed size.
 
 </div>
 
@@ -1221,8 +1351,9 @@ There SHOULD NOT be multiple [=meta/entry|entries=] with the same path across me
 and if there are, only the last one is considered valid.
 
 Alternatively, [=archive/blocks=] can have no metadata block,
-in which case there SHOULD exist exactly one of either [[#compressed-block|compressed block]] or [[#uncompressed-block|uncompressed block]].
-Such archive decompresses into a single unnamed file with all content blocks concatenated.
+in which case there SHOULD exist exactly one [=leaf block=],
+along with any auxiliary and non-leaf blocks it requires.
+Such archive decompresses into a single unnamed file.
 
 </div>
 
@@ -2040,10 +2171,12 @@ age-encryption.org/v1
 </ol>
 -->
 
-<h3 id=transformer>
-Transformer</h3>
+<h3 id=formula-evaluation>
+Formula evaluation</h3>
 
-<!--
+TODO: Evaluation of formula blocks and the execution environment of modules.
+
+<!-- Obsolete draft, superseded by formula blocks:
 <p>A <dfn>transformer</dfn> is a WebAssembly module that performs preprocessing on data before compression and postprocessing after decompression.
 Transformers are identified by a 1-based index within the metadata block.</p>
 
@@ -2281,22 +2414,34 @@ Block index</h2>
       <td>10<sub>16</sub> — 1F<sub>16</sub>
       <td>[[#metadata-block]]
     <tr>
-      <td>20<sub>16</sub> — 3F<sub>16</sub>
+      <td>20<sub>16</sub> — 37<sub>16</sub>
       <td>[[#compressed-block]]
     <tr>
-      <td>40<sub>16</sub> — 47<sub>16</sub>
+      <td>38<sub>16</sub> — 3F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>40<sub>16</sub> — 4B<sub>16</sub>
       <td>[[#uncompressed-block]]
     <tr>
-      <td>48<sub>16</sub> — 4F<sub>16</sub>
+      <td>4C<sub>16</sub> — 4F<sub>16</sub>
       <td>[[#dictionary-block]]
     <tr>
       <td>50<sub>16</sub> — 5F<sub>16</sub>
       <td>Reserved
     <tr>
-      <td>60<sub>16</sub> — 67<sub>16</sub>
-      <td>[[#transformer-block]]
+      <td>60<sub>16</sub> — 63<sub>16</sub>
+      <td>[[#module-block]]
     <tr>
-      <td>68<sub>16</sub> — CF<sub>16</sub>
+      <td>64<sub>16</sub> — 67<sub>16</sub>
+      <td>[[#resource-block]]
+    <tr>
+      <td>68<sub>16</sub> — 6F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>70<sub>16</sub> — 7F<sub>16</sub>
+      <td>[[#formula-block]]
+    <tr>
+      <td>80<sub>16</sub> — CF<sub>16</sub>
       <td>Reserved
     <tr>
       <td>D0<sub>16</sub> — DF<sub>16</sub>
