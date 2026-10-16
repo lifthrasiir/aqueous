@@ -286,7 +286,7 @@ fn code_pair<C: Coder, const ALPHA: bool, const TOP: bool, const LEFT: bool, con
     let tj = JOINT_BASE + transparent as usize * CTX + bucket((e1 + e2) / 2, ACT) * CROSS + cross;
     let s1 = p1[x].wrapping_sub(pred1).wrapping_sub(f);
     let s2 = p2[x].wrapping_sub(pred2).wrapping_sub(f);
-    let small = |s: u8| (s as i8 + 2) as u8;
+    let small = |s: u8| s.wrapping_add(2);
     let j = if small(s1) < 5 && small(s2) < 5 { small(s1) * 5 + small(s2) } else { JOINT_ESCAPE };
     let j = c.code(tj, j);
     let (s1, s2) = if j < JOINT_ESCAPE {
