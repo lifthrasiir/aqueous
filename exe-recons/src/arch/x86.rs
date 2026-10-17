@@ -129,6 +129,7 @@ const PRE_EVEX: u8 = 0x62;
 const PRE_REX2: u8 = 0xd5;
 const PRE_2BYTE: u8 = 0x0f;
 const PRE_OSIZE: u8 = 0x66;
+const PRE_ASIZE: u8 = 0x67;
 const PRE_REPNE: u8 = 0xf2;
 const PRE_REP: u8 = 0xf3;
 
@@ -283,8 +284,53 @@ const fn has_osize_prefix(prefixes: u32) -> bool {
 }
 
 #[inline(always)]
+const fn has_asize_prefix(prefixes: u32) -> bool {
+    (prefixes >> prefix_hash(PRE_ASIZE)) & 1 != 0
+}
+
+#[inline(always)]
 const fn has_rep_prefix(prefixes: u32) -> bool {
     prefixes & ((1 << prefix_hash(PRE_REPNE)) | (1 << prefix_hash(PRE_REP))) != 0
+}
+
+// ModR/M uses the 16-bit addressing form (no SIB, disp16) in x86-32 with 67.
+#[inline(always)]
+const fn has_addr16(prefixes: u32, is64: bool) -> bool {
+    !is64 && has_asize_prefix(prefixes)
+}
+
+// Log2 of the byte size of an A_ operand.
+#[inline(always)]
+const fn addr_lgn(op: u16, prefixes: u32, is64: bool) -> usize {
+    if op == OP_JMPF {
+        // EA: 32-bit only, 16-bit if 66 ("Ap" = w:z)
+        if has_osize_prefix(prefixes) {
+            1
+        } else {
+            2
+        }
+    } else {
+        // Ax: 32-bit or 64-bit per operating mode, halved with 67 ("Ov")
+        (is64 as usize + 2) - has_asize_prefix(prefixes) as usize
+    }
+}
+
+// J4 and JA operands are 16-bit in x86-32 with 66 (and J4 also truncates the target to 16 bits).
+// x86-64 ignores 66 for them, at least for Intel processors.
+#[inline(always)]
+const fn has_jump16(prefixes: u32, is64: bool) -> bool {
+    !is64 && has_osize_prefix(prefixes)
+}
+
+// Size of an immediate that follows ModR/M, as needed for [rip+disp32].
+#[inline(always)]
+const fn modrm_imm_size(flags: u8, prefixes: u32) -> usize {
+    match flags {
+        N1 => 1,
+        N4 if has_osize_prefix(prefixes) => 2,
+        N4 => 4,
+        _ => 0,
+    }
 }
 
 const _: () = {
@@ -326,9 +372,9 @@ define_streams! {
 
     ST_DISP8_R0 8, ST_DISP8_R1 8, ST_DISP8_R2 8, ST_DISP8_R3 8,
     ST_DISP8_R4 8, ST_DISP8_R5 8, ST_DISP8_R6 8, ST_DISP8_R7 8,
-    ST_DISP32 32,
+    ST_DISP16 16, ST_DISP32 32,
 
-    ST_JUMP8 8, ST_JUMP32 32, ST_JUMP64 64,
+    ST_JUMP8 8, ST_JUMP16 16, ST_JUMP32 32, ST_JUMP64 64,
     ST_IMM8 8, ST_IMM16 16, ST_IMM32 32, ST_IMM64 64,
     ST_ADDR16 16, ST_ADDR32 32, ST_ADDR64 64,
     ST_CALL32 32, ST_CALL64 64,
@@ -339,6 +385,7 @@ define_streams! {
 }
 
 const ST_MODRM: usize = ST_OP;
+const ST_AJUMP16: usize = ST_JUMP16;
 const ST_AJUMP32: usize = ST_JUMP32;
 const ST_JUMPTAB_COUNT: usize = ST_OP;
 
@@ -1027,8 +1074,9 @@ pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedS
             st.put8(ST_MODRM, modrm);
 
             let (mode, base) = parse_modrm(modrm);
+            let addr16 = has_addr16(prefixes, is64);
             let sib;
-            if modrm_has_sib((mode, base)) {
+            if !addr16 && modrm_has_sib((mode, base)) {
                 sib = fetch8();
                 st.put8(ST_SIB, sib);
             } else {
@@ -1036,12 +1084,14 @@ pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedS
             }
 
             match mode {
+                0 if addr16 && base == 6 => copy(16 / 8, &mut st, ST_ADDR16), // [disp16]
+                0 if addr16 => {}
                 0 if base == 5 => {
                     let addr = fetch32();
                     if is64 {
                         // [eip+disp32] or [rip+disp32]
                         // Note that we haven't fully decoded operands yet, hence a delta.
-                        let delta = [0, 1, 2, 4][flags as usize];
+                        let delta = modrm_imm_size(flags, prefixes);
                         st.put64(ST_ADDR64, rel_to_abs(addr, delta));
                     } else {
                         st.put32(ST_ADDR32, addr); // [disp32]
@@ -1050,12 +1100,14 @@ pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedS
                 0 if sib & 7 == 5 => copy(32 / 8, &mut st, ST_DISP32), // [reg*scale+disp32]
                 // [reg+disp8] or [reg*scale+disp8]
                 1 => copy(8 / 8, &mut st, ST_DISP8_R0 + base as usize),
-                2 => copy(32 / 8, &mut st, ST_DISP32), // [reg+disp32]
+                2 if addr16 => copy(16 / 8, &mut st, ST_DISP16), // [regs+disp16]
+                2 => copy(32 / 8, &mut st, ST_DISP32),           // [reg+disp32]
                 _ => {}
             }
         }
 
         match flags {
+            J4 if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_JUMP16),
             J4 => {
                 let target = rel_to_abs(fetch32(), 0);
                 if op == OP_CALLN {
@@ -1075,18 +1127,11 @@ pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedS
             }
 
             A_ => {
-                // EA: 32-bit only, 16-bit if 66 ("Ap" = w:z)
-                // Ax: 32-bit or 64-bit, fixed per operating mode ("Ov")
-                let lgn = if is64 {
-                    3
-                } else if op == OP_JMPF && has_osize_prefix(prefixes) {
-                    1
-                } else {
-                    2
-                };
+                let lgn = addr_lgn(op, prefixes, is64);
                 copy(1 << lgn, &mut st, (ST_ADDR16 - 1) + lgn);
             }
 
+            JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_AJUMP16),
             JA => copy(32 / 8, &mut st, ST_AJUMP32),
             J1 => copy(8 / 8, &mut st, ST_JUMP8),
             N_ => {}
@@ -1408,8 +1453,9 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
             code.push(modrm);
 
             let (mode, base) = parse_modrm(modrm);
+            let addr16 = has_addr16(prefixes, is64);
             let sib;
-            if modrm_has_sib((mode, base)) {
+            if !addr16 && modrm_has_sib((mode, base)) {
                 sib = read8(ST_SIB)?;
                 code.push(sib);
             } else {
@@ -1417,11 +1463,13 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
             }
 
             match mode {
+                0 if addr16 && base == 6 => copy(16 / 8, &mut code, ST_ADDR16)?, // [disp16]
+                0 if addr16 => {}
                 0 if base == 5 => {
                     let addr = if is64 {
                         // [eip+disp32] or [rip+disp32]
                         // Note that we haven't fully decoded operands yet, hence a delta.
-                        let delta = [0, 1, 2, 4][flags as usize];
+                        let delta = modrm_imm_size(flags, prefixes);
                         abs_to_rel(read64(ST_ADDR64)?, &code, delta + 4) as u32
                     } else {
                         read32(ST_ADDR32)? // [disp32]
@@ -1432,12 +1480,14 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
                 0 if sib & 7 == 5 => copy(32 / 8, &mut code, ST_DISP32)?,
                 // [reg+disp8] or [reg*scale+disp8]
                 1 => copy(8 / 8, &mut code, ST_DISP8_R0 + base as usize)?,
-                2 => copy(32 / 8, &mut code, ST_DISP32)?, // [reg+disp32]
+                2 if addr16 => copy(16 / 8, &mut code, ST_DISP16)?, // [regs+disp16]
+                2 => copy(32 / 8, &mut code, ST_DISP32)?,           // [reg+disp32]
                 _ => {}
             }
         }
 
         match flags {
+            J4 if has_jump16(prefixes, is64) => copy(16 / 8, &mut code, ST_JUMP16)?,
             J4 => {
                 let target = if op == OP_CALLN {
                     read_call(&mut call_cache)?
@@ -1451,18 +1501,11 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
             }
 
             A_ => {
-                // EA: 32-bit only, 16-bit if 66 ("Ap" = w:z)
-                // Ax: 32-bit or 64-bit, fixed per operating mode ("Ov")
-                let lgn = if is64 {
-                    3
-                } else if op == OP_JMPF && has_osize_prefix(prefixes) {
-                    1
-                } else {
-                    2
-                };
+                let lgn = addr_lgn(op, prefixes, is64);
                 copy(1 << lgn, &mut code, (ST_ADDR16 - 1) + lgn)?;
             }
 
+            JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut code, ST_AJUMP16)?,
             JA => copy(32 / 8, &mut code, ST_AJUMP32)?,
             J1 => copy(8 / 8, &mut code, ST_JUMP8)?,
             N_ => {}
