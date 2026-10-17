@@ -16,6 +16,8 @@ use core::ops;
 
 use bytemuck::must_cast_slice;
 
+use crate::util::{to_u32, to_u64};
+
 #[cfg(all(feature = "encode", trace_encode))]
 macro_rules! if_trace_encode {
     ($($t:tt)*) => {{$($t)*}};
@@ -34,18 +36,6 @@ macro_rules! if_trace_decode {
 #[cfg(all(feature = "decode", not(trace_decode)))]
 macro_rules! if_trace_decode {
     ($($t:tt)*) => {};
-}
-
-fn to_u16(s: &[u8]) -> u16 {
-    u16::from_le_bytes(s.try_into().unwrap())
-}
-
-fn to_u32(s: &[u8]) -> u32 {
-    u32::from_le_bytes(s.try_into().unwrap())
-}
-
-fn to_u64(s: &[u8]) -> u64 {
-    u64::from_le_bytes(s.try_into().unwrap())
 }
 
 const N_: u8 = 0b0000; // no immediate
@@ -493,7 +483,7 @@ impl EncodedStreams {
             }
         }
 
-        assert!(NUM_STREAMS <= 60);
+        const { assert!(NUM_STREAMS <= 60) };
 
         let mut header = vec![];
         header.extend_from_slice(&self.origin.to_le_bytes());
@@ -741,6 +731,7 @@ impl CallCache {
 }
 
 #[cfg(feature = "encode")]
+#[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
 pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedStreams> {
     let mut st = EncodedStreams::new(origin);
 
@@ -823,7 +814,7 @@ pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedS
                 origin += i as u64;
                 continue;
             }
-        } else if origin % 8 == 0 {
+        } else if origin.is_multiple_of(8) {
             // In x86-64, jump tables are typically 64-bit aligned offsets.
             // Since we don't know where they will be used,
             // we assume that they may be used anywhere within this `code`.
@@ -1149,6 +1140,7 @@ impl<'a> From<&'a EncodedStreams> for DecodedStreams<'a> {
 
 #[cfg(feature = "decode")]
 #[export_name = "disfilter_decode"]
+#[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
 pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
     let origin = streams.origin;
     let sentinel_size = streams.sentinel_size;
@@ -1454,7 +1446,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
                 } else {
                     read32(ST_JUMP32)? as u64
                 };
-                let target = abs_to_rel(target as u64, &code, 4) as u32;
+                let target = abs_to_rel(target, &code, 4) as u32;
                 code.extend_from_slice(&target.to_le_bytes());
             }
 
@@ -1493,97 +1485,6 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
     Some(code)
 }
 
-#[cfg(feature = "encode")]
-pub fn locate_code(f: &mut std::fs::File) -> std::io::Result<Vec<(u64, u64, usize)>> {
-    use std::io::{self, BufReader, Read, Seek, SeekFrom};
-
-    f.seek(SeekFrom::Start(0))?;
-    let mut r = BufReader::new(f);
-
-    // MZ header
-    let mut buf = [0u8; 0x40];
-    r.read_exact(&mut buf)?;
-    let sig = to_u16(&buf[0..2]);
-    if sig != 0x5a4d {
-        return Err(io::Error::other(format!("bad MZ signature {sig:#x}")));
-    }
-    let pe_offset = to_u32(&buf[0x3c..0x40]);
-    if pe_offset < 0x40 {
-        return Err(io::Error::other(format!(
-            "too low offset to PE header {pe_offset:#x}"
-        )));
-    }
-
-    r.seek_relative(pe_offset as i64 - 0x40)?;
-
-    // PE header
-    let mut buf = [0u8; 0x18];
-    r.read_exact(&mut buf)?;
-    let sig = to_u32(&buf[0..4]);
-    if sig != 0x4550 {
-        return Err(io::Error::other(format!("bad PE signature {sig:#x}")));
-    }
-    let num_sections = to_u16(&buf[6..8]);
-    let opt_header_size = to_u16(&buf[0x14..0x16]) as usize;
-
-    // PE optional header
-    let mut opt_header = vec![0u8; opt_header_size];
-    r.read_exact(&mut opt_header)?;
-    let magic = to_u16(&opt_header[0..2]);
-    match magic {
-        0x10b => {
-            // IMAGE_OPTIONAL_HEADER32
-            todo!();
-        }
-
-        0x20b => {
-            // IMAGE_OPTIONAL_HEADER64
-            if opt_header_size < 0x60 {
-                return Err(io::Error::other(format!(
-                    "PE64 optional header too small ({opt_header_size:#x} < 0x60)"
-                )));
-            }
-
-            let num_data_dirs = to_u32(&opt_header[0x5c..0x60]) as usize;
-            let min_size = 0x60 + num_data_dirs * 0x10;
-            if opt_header_size < min_size {
-                return Err(io::Error::other(format!(
-                    "PE64 optional header too small ({opt_header_size:#x} < {min_size:#x})"
-                )));
-            }
-
-            // data directories:
-            // EXPORT, IMPORT, RESOURCE, EXCEPTION, SECURITY, BASERELOC, DEBUG, COPYRIGHT,
-            // GLOBALPTR, TLS, LOAD_CONFIG, BOUND_IMPORT, IAT, DELAY_IMPORT, COM_DESCRIPTOR, -
-        }
-
-        _ => {
-            return Err(io::Error::other(format!(
-                "bad PE optional header magic {magic:#x}"
-            )))
-        }
-    }
-
-    // section headers
-    let mut exec_sections = Vec::new();
-    for _ in 0..num_sections {
-        let mut buf = [0u8; 40];
-        r.read_exact(&mut buf)?;
-        let name = &buf[..8];
-        let _name = String::from_utf8_lossy(name);
-        let rva = to_u32(&buf[12..16]);
-        let stored_size = to_u32(&buf[16..20]);
-        let stored_offset = to_u32(&buf[20..24]);
-        let flags = to_u32(&buf[36..40]);
-        //println!("section {_name:?}: rva {rva:#x}, stored {stored_offset:#x} + {stored_size:#x}, flags {flags:#x}");
-        if flags & 0x20 != 0 {
-            exec_sections.push((rva as u64, stored_offset as u64, stored_size as usize));
-        }
-    }
-
-    Ok(exec_sections)
-}
-
 #[cfg(all(
     test,
     feature = "encode",
@@ -1593,6 +1494,8 @@ pub fn locate_code(f: &mut std::fs::File) -> std::io::Result<Vec<(u64, u64, usiz
 mod tests {
     use super::*;
 
+    // Depends on local files of the original author.
+    #[cfg(windows)]
     #[test]
     fn test_disfilter() -> std::io::Result<()> {
         use std::env;
@@ -1601,44 +1504,46 @@ mod tests {
         use std::iter;
         use std::time::Instant;
 
+        use crate::format::pe::locate_code;
+
         env::set_var("RUST_LOG", "trace");
         env_logger::init();
 
         let mut f = File::open(r"c:\Program Files\ImageMagick-7.1.1-Q16-HDRI\ffmpeg.exe")?;
-        for (origin, offset, size) in locate_code(&mut f)? {
-            f.seek(SeekFrom::Start(offset))?;
-            let mut input = vec![0u8; size];
-            f.read_exact(&mut input)?;
-            File::create(r"x:\unfiltered.bin")?.write_all(&input)?;
+        let Some(&(origin, offset, size)) = locate_code(&mut f)?.first() else {
+            panic!("no executable section");
+        };
+        f.seek(SeekFrom::Start(offset))?;
+        let mut input = vec![0u8; size];
+        f.read_exact(&mut input)?;
+        File::create(r"x:\unfiltered.bin")?.write_all(&input)?;
 
-            let start = Instant::now();
-            let streams = encode(input.clone(), origin, true).expect("failed to encode");
-            let enc_rate = size as f64 / start.elapsed().as_secs_f64() / 1e6;
-            streams.write_to(&mut File::create(r"x:\filtered.bin")?)?;
+        let start = Instant::now();
+        let streams = encode(input.clone(), origin, true).expect("failed to encode");
+        let enc_rate = size as f64 / start.elapsed().as_secs_f64() / 1e6;
+        streams.write_to(&mut File::create(r"x:\filtered.bin")?)?;
 
-            let start = Instant::now();
-            let recons = decode(&(&streams).into(), true).expect("round trip failed");
-            let dec_rate = size as f64 / start.elapsed().as_secs_f64() / 1e6;
-            if input != recons {
-                let mismatch = iter::zip(&input, &recons)
-                    .position(|(a, b)| a != b)
-                    .unwrap();
-                let lo = mismatch.max(15) - 15;
-                let hi = mismatch + 15;
-                panic!(
-                    "input != recons\n    \
-                     Input:  {mismatch}/{} {:02X?}\n    \
-                     Recons: {mismatch}/{} {:02X?}",
-                    input.len(),
-                    &input[lo..hi.min(input.len())],
-                    recons.len(),
-                    &recons[lo..hi.min(recons.len())],
-                );
-            }
-
-            eprintln!("Disfilter: encoding {enc_rate:.2} MB/s, decoding {dec_rate:.2} MB/s");
-            break;
+        let start = Instant::now();
+        let recons = decode(&(&streams).into(), true).expect("round trip failed");
+        let dec_rate = size as f64 / start.elapsed().as_secs_f64() / 1e6;
+        if input != recons {
+            let mismatch = iter::zip(&input, &recons)
+                .position(|(a, b)| a != b)
+                .unwrap();
+            let lo = mismatch.max(15) - 15;
+            let hi = mismatch + 15;
+            panic!(
+                "input != recons\n    \
+                 Input:  {mismatch}/{} {:02X?}\n    \
+                 Recons: {mismatch}/{} {:02X?}",
+                input.len(),
+                &input[lo..hi.min(input.len())],
+                recons.len(),
+                &recons[lo..hi.min(recons.len())],
+            );
         }
+
+        eprintln!("Disfilter: encoding {enc_rate:.2} MB/s, decoding {dec_rate:.2} MB/s");
 
         Ok(())
     }
@@ -1686,11 +1591,7 @@ mod tests {
         fn generate<const N: usize>() -> impl Iterator<Item = [u8; N]> {
             assert!(N <= 3);
             (0..1u32 << (N * 8)).map(|n| {
-                let mut b = [0u8; N];
-                for i in 0..N {
-                    b[i] = (n >> (i * 8) & 0xff) as u8;
-                }
-                b
+                array::from_fn(|i| (n >> (i * 8) & 0xff) as u8)
             })
         }
 

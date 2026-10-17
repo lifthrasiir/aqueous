@@ -12,4 +12,6 @@ unsafe fn panic(_: &core::panic::PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-pub mod disfilter;
+pub mod arch;
+pub mod format;
+mod util;

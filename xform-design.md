@@ -15,7 +15,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
   - 블록 구성은 이 문서의 §4.7을 따른다. leaf와 non-leaf의 compressed·uncompressed 블록, dictionary, module, resource, formula 블록이 정의되어 있다.
   - formula 블록의 내부 구조, 모듈의 실행 환경("Formula evaluation" 절), 모듈과 리소스의 식별 해시는 아직 TODO이다(§7의 8번).
   - 옛 transformer 실행 절차는 주석 안에 obsolete로 남아 있다.
-- `disfilter/` (크레이트 이름 `aqr`): x86-64 disfilter. 실행파일 전처리기의 예시이다.
+- `exe-recons/`: 실행파일 전처리기. 아키텍처(`arch/`, 현재 x86-64 disfilter)와 실행파일 포맷(`format/`, 현재 PE의 코드 섹션 탐색)으로 나뉜다.
 - `flate-recons/`: DEFLATE 재압축기. 원래 main(문맥 모델링, zlib 에뮬레이션)과 fast(규칙 기반) 두 표현이 있었는데, 지금은 *레코드* 하나로 통합되고 프로파일(u16)로 갈린다.
   - 프로파일 0–9: 정적 코드. 빠른 쪽이며, 프로파일마다 속도 페널티 λ로 맞춘 규칙 카탈로그가 다르다. 기본은 6(λ=5)이다.
   - 프로파일 10: 적응형 산술 코딩, lookahead, chain 규칙, zlib 에뮬레이션. 작은 쪽이다.
