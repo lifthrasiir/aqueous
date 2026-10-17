@@ -490,3 +490,99 @@ checksum. The source is the reference for the heuristics named here.
 - The result is stored (version 1) if coding fails or panics, or if the coded file is not
   smaller than the stored one. With verification on, a coded file that does not decompress to
   the original is coded again without the `TOK`, `FULL` and `PNG` modes.
+
+## 8. Formula module
+
+The same representation as a module of entry formulas (`recons-formula`), in
+`formula::encode` and `formula::decode`. The module is `pdf-recons`, version 1. Its output is the
+original (whose length the application gives). The item bytes and the skeleton are those of
+section 3, with the container left out: no magic, version, head, checksum or length fields, and no
+zstd (the streams are stored raw; whatever holds the formula compresses them).
+
+What other recompressors rebuild is not rebuilt here. The module takes the results of their
+modules as input slots, and the formula gives them as applications of those modules: the
+DEFLATE streams of `FULL` items (flate-recons), the PNG files of `PNG` items (png-recons) and the
+JPEG files of `JPEG` items (jpeg-recons). A decoder of this module does not need any of the three.
+
+**Parameters**: none (empty). A module application with parameters is invalid.
+
+**Inputs**: exactly eleven, in this order. Any other count is invalid.
+
+| slot | class | content |
+|---|---|---|
+| 0 | `pdf/table` | the table (8.1) |
+| 1 | `pdf/skeleton` | the skeleton, as stream 2 of the container |
+| 2 | `pdf/raw` | the bytes of `RAW` items, as stream 3 |
+| 3 | (children) | the DEFLATE streams of `FULL` items, concatenated in table order |
+| 4 | (children) | the PNG files of `PNG` items, concatenated in table order |
+| 5 | (children) | the JPEG files of `JPEG` items, concatenated in table order |
+| 6 | `pdf/tok-layout` | the token layout, as stream 13 |
+| 7 | `pdf/tok-tables` | the token tables, as stream 14 |
+| 8 | `pdf/tok-symbols` | the token symbols, as stream 15 |
+| 9 | `pdf/tok-bits` | the token raw bits, as stream 16 |
+| 10 | `pdf/tok-headers` | the token headers, as stream 17 |
+
+Slots 3 to 5 are not streams: the formula gives each as the concatenation of one node per item.
+For the encoder (and the evaluator), the nodes are:
+
+- slot 3, for each `FULL` item: `apply(flate-recons, [slice(pool, off, plain), slice(meta, off, mlen)],
+  deflate)`, with `pool` the stream `pdf/pool-<class>` (`content`, `font`, `image`, `objstm`,
+  `xref`, `data`; the inflated data of the class's `FULL` items in order, as streams 6–11 of the
+  container), `meta` the stream `pdf/meta` (the flate-recons records in order, as stream 12), and
+  `deflate` the length of the DEFLATE stream. The pools and the meta stream are streams of the
+  formula, not slots of this module; the inflated data is only seen by flate-recons;
+- slot 4, for each `PNG` item: the formula of png-recons on the PNG file of section 7.3 (the
+  `formula::encode` of png-recons, embedded), or nothing: an item that png-recons cannot code is a
+  `RAW` item;
+- slot 5, for each `JPEG` item: the formula of jpeg-recons on the item's bytes, embedded; an item
+  that jpeg-recons cannot code (or does not make smaller) is a `RAW` item.
+
+An image is coded only if the streams of its formula (their lengths added) are shorter than the
+item, as the container requires of the png-recons and jpeg-recons files.
+
+### 8.1 Table
+
+Items as in section 3.3, with the same `gap` and modes, in the same order; the differences are in
+the fields:
+
+| mode | fields |
+|---|---|
+| `RAW` | as in the container (`n` bytes of slot 2) |
+| `DUP` | as in the container |
+| `TOK` | as in the container: u8 `flags`, [2 bytes `zlib`], u8 `class`, varint `plain`, [varint `bpp`, varint `stride`] |
+| `FULL` | u8 `flags`, [2 bytes `zlib`], varint `deflate`, [4 bytes `adler`] |
+| `PNG` | varint `n` |
+| `JPEG` | varint `n` |
+
+- `FULL`'s `flags`: bit 0, the 2 `zlib` bytes follow; bit 1, the 4 bytes of the Adler-32 follow.
+  Other bits must be 0. There is no class, inflated length or record length: the module does not
+  see the inflated data, so the Adler-32 is stored (4 bytes, as written after the DEFLATE data)
+  where the container recomputes it. `deflate` is the length of the DEFLATE stream, at most the
+  original's length.
+- `PNG`: `n` is the length of the PNG file, at most the length of slot 4. The colour type, bit
+  depth, width and height are not stored.
+- `JPEG`: `n` is the length of the JPEG file, at most the length of slot 5.
+- `TOK` is as before, so are the constraints on `gap`, `n` and `back`.
+
+### 8.2 Item bytes
+
+As in section 3.4, with these item bytes:
+
+- `FULL`: the `zlib` bytes (if flagged), the next `deflate` bytes of slot 3 and the `adler` bytes
+  (if flagged);
+- `PNG`: with `P` the next `n` bytes of slot 4, `P[41 .. 41 + m]` with `m` = `u32 BE` at bytes
+  33 to 36 of `P` (as in 3.4);
+- `JPEG`: the next `n` bytes of slot 5.
+
+### 8.3 Decompression
+
+As in section 3.5 (with no head to read), over the slots in place of the streams. The slots 2 to 5
+must be used up exactly; the symbols slot (8) must end as 6.5 requires; and the output must be
+the length that the application gives. If slots 6–10 are all empty, there is no token decoder.
+There is no checksum to test: the formula's own evaluation is trusted to hand the module the
+inputs it was made with.
+
+`formula::encode` gives no formula (`None`) where the container would store the file, where no
+item is coded (all are `RAW` or `DUP`), or where the streams of the formula would not be shorter
+than the file, with the table, the skeleton and the pools counted at their zstd size as in the
+container (the pools hold inflated data, which the archive compresses).

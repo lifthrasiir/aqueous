@@ -35,6 +35,7 @@ use crate::scan;
 use crate::tok;
 use crate::varint::{self, Reader};
 use crate::{Error, Result, flate};
+use recons_formula::{Formula, Node};
 
 /// `aQRpdf20` in base64.
 const MAGIC: &[u8; 6] = &[0x69, 0x04, 0x69, 0x75, 0xfd, 0xb4];
@@ -354,7 +355,8 @@ fn plain_estimate(d: &Obj, c: Class, data: &[u8]) -> f64 {
     est.filter(|&e| e < len as f64 * 1032.0).unwrap_or(len as f64 * cost::expansion(c))
 }
 
-fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> {
+/// Cuts the file into items and picks their modes; returns them and the length of the skeleton.
+fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize) {
     let t0 = std::time::Instant::now();
     let streams = scan::streams(file);
     let mut items: Vec<Item> = vec![];
@@ -412,17 +414,25 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     let fixed = file.len() as f64 * cost::SCAN + skel_len as f64 * cost::ZSTD_C;
     st.predicted = fixed + choose(&mut items, budget - fixed, opts);
     st.times[0] += t0.elapsed().as_secs_f64();
+    (items, skel_len)
+}
 
-    // Code the items: each on its own (on the pool, with more than one thread), then into
-    // the sections, in order.
-    let pool = pool(opts.threads);
+/// Codes the items: each on its own (on the pool, with more than one thread), then into
+/// the sections `b`, in order.
+fn code_items(
+    file: &[u8],
+    items: &[Item],
+    st: &mut Stats,
+    pool: &Option<rayon::ThreadPool>,
+    b: &mut Sections,
+) -> Option<()> {
     let fr_opts = flate_recons::Options { threads: 1, ..Default::default() };
-    let mut b = Sections::new(skel_len, items.len());
-    match &pool {
+    let formula = b.fm.is_some();
+    match pool {
         None => {
             for (i, it) in items.iter().enumerate() {
                 let t_item = std::time::Instant::now();
-                let d = code_item(file, it, &fr_opts);
+                let d = code_item(file, it, &fr_opts, formula);
                 b.add(file, i, it, d, st, t_item, 0.0);
             }
         }
@@ -438,18 +448,26 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
             };
             let job = |i: usize| {
                 let t = std::time::Instant::now();
-                let d = code_item(file, &items[i], &fr_opts);
+                let d = code_item(file, &items[i], &fr_opts, formula);
                 (d, t.elapsed().as_secs_f64())
             };
             pipeline(pool, items.len(), est, job, |i, d| {
                 let t = std::time::Instant::now();
-                let (d, secs) = d.unwrap_or_else(|| (code_item(file, &items[i], &fr_opts), 0.0));
+                let (d, secs) = d.unwrap_or_else(|| (code_item(file, &items[i], &fr_opts, formula), 0.0));
                 b.add(file, i, &items[i], d, st, t, secs);
                 Ok::<(), ()>(())
             })
             .ok()?;
         }
     }
+    Some(())
+}
+
+fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> {
+    let (items, skel_len) = plan(file, opts, st);
+    let pool = pool(opts.threads);
+    let mut b = Sections::new(skel_len, items.len(), false);
+    code_items(file, &items, st, &pool, &mut b)?;
     let Sections { table, mut skel, raw, meta, jpeg, png, tokens, pools, at, .. } = b;
     skel.extend_from_slice(&file[at..]);
 
@@ -515,6 +533,52 @@ fn try_compress(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Vec<u8>> 
     st.times[4] += t.elapsed().as_secs_f64();
     Some(out)
 }
+
+/// The formula of `file` (FORMAT.md, *Formula module*): the sections are streams or slots as
+/// they are, and the FlateDecode, PNG and JPEG items are applications of the other modules.
+/// `None` if no item is coded (only raw items and repeats: the formula would be the file cut
+/// up), or if the streams would not be smaller than the file, with the table, the skeleton and
+/// the pools measured by their zstd at `opts.level` as in the container (the pools hold
+/// inflated data, so they are larger than the file).
+pub(crate) fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formula> {
+    let (items, skel_len) = plan(file, opts, st);
+    let pool = pool(opts.threads);
+    let mut b = Sections::new(skel_len, items.len(), true);
+    code_items(file, &items, st, &pool, &mut b)?;
+    let Sections { table, mut skel, raw, meta, tokens, pools, at, fm, .. } = b;
+    skel.extend_from_slice(&file[at..]);
+    let (toks, _) = tokens.finish();
+    let Parts { mut f, deflate, png, jpeg } = fm?;
+    if st.items.iter().all(|i| i.0 == RAW || i.0 == DUP) {
+        return None;
+    }
+    let mut zipped: Vec<&[u8]> = vec![&table, &skel];
+    zipped.extend(pools.iter().map(|p| &p[..]));
+    let zlen = |d: &&[u8]| zstd_of(d, opts.level).map_or(d.len(), |z| z.len());
+    let saved: usize = zipped.iter().map(|d| d.len()).sum::<usize>()
+        - match &pool {
+            Some(pool) => pool.install(|| {
+                use rayon::prelude::*;
+                zipped.par_iter().map(zlen).sum::<usize>()
+            }),
+            None => zipped.iter().map(zlen).sum(),
+        };
+    for (c, pool) in pools.into_iter().enumerate() {
+        f.streams[F_POOL + c].data = pool;
+    }
+    f.streams[F_META].data = meta;
+    let mut inputs = vec![f.push("pdf/table", table), f.push("pdf/skeleton", skel), f.push("pdf/raw", raw)];
+    inputs.extend([Node::concat(deflate), Node::concat(png), Node::concat(jpeg)]);
+    for (part, name) in toks.into_iter().zip(TOK_CLASSES) {
+        inputs.push(f.push(name, part));
+    }
+    f.root = Node::apply(crate::formula::MODULE, Vec::new(), inputs, file.len() as u64);
+    (streams_len(&f) - saved < file.len()).then_some(f)
+}
+
+/// The classes of the token coder's streams in a formula.
+const TOK_CLASSES: [&str; tok::PARTS] =
+    ["pdf/tok-layout", "pdf/tok-tables", "pdf/tok-symbols", "pdf/tok-bits", "pdf/tok-headers"];
 
 /// A pool of `threads` threads, if more than one.
 fn pool(threads: usize) -> Option<rayon::ThreadPool> {
@@ -597,20 +661,68 @@ fn pipeline<T: Send, E>(
     })
 }
 
+/// What the table says of a FlateDecode item, besides its mode.
+struct FlateHead {
+    zlib: Option<[u8; 2]>,
+    /// The Adler-32 after the DEFLATE data, as stored.
+    adler: Option<[u8; 4]>,
+    class: Class,
+    /// Inflated bytes.
+    plain: usize,
+    px: Option<tok::Pixels>,
+    /// Bytes of DEFLATE data.
+    deflate: usize,
+}
+
+impl FlateHead {
+    /// The container's table fields of mode `m`: flags, zlib header, class, inflated length, pixel layout.
+    fn fields(&self, m: u8) -> Vec<u8> {
+        let flags = self.zlib.is_some() as u8 | (self.adler.is_some() as u8) << 1 | (self.px.is_some() as u8) << 2;
+        let mut fields = vec![m, flags];
+        fields.extend(self.zlib.iter().flatten());
+        fields.push(self.class as u8);
+        varint::put(&mut fields, self.plain as u64);
+        if let Some(px) = self.px {
+            varint::put(&mut fields, px.bpp as u64);
+            varint::put(&mut fields, px.stride as u64);
+        }
+        fields
+    }
+
+    /// The formula's table fields of a `FULL` item: flags, zlib header, DEFLATE length,
+    /// Adler-32 (the inflated data is not there to compute it from).
+    fn formula_fields(&self) -> Vec<u8> {
+        let mut fields = vec![FULL, self.zlib.is_some() as u8 | (self.adler.is_some() as u8) << 1];
+        fields.extend(self.zlib.iter().flatten());
+        varint::put(&mut fields, self.deflate as u64);
+        fields.extend(self.adler.iter().flatten());
+        fields
+    }
+}
+
 /// An item coded on its own, before it goes in the sections.
 enum Coded {
     /// Stored as it is; whether a coder failed on it.
     Raw(bool),
     Dup(usize),
-    /// A FlateDecode stream: its table fields, the parsed stream for the token coder, its
-    /// class, pixel layout and the bytes it covers.
-    Tok(Vec<u8>, Box<flate_recons::inflate::Flat>, Class, Option<tok::Pixels>, usize),
-    /// A FlateDecode stream: its table fields, inflated data and metadata, class and the
+    /// A FlateDecode stream: its table fields, the parsed stream for the token coder and the
     /// bytes it covers.
-    Full(Vec<u8>, Vec<u8>, Vec<u8>, Class, usize),
+    Tok(FlateHead, Box<flate_recons::inflate::Flat>, usize),
+    /// A FlateDecode stream: its table fields, inflated data and metadata and the bytes it
+    /// covers.
+    Full(FlateHead, Vec<u8>, Vec<u8>, usize),
     /// Table fields, png-recons container, class.
     Png(Vec<u8>, Vec<u8>, Class),
     Jpeg(Vec<u8>),
+    /// For a formula: the formula of the PNG file that wraps the data.
+    PngFormula(Formula),
+    /// For a formula: the formula of the JPEG.
+    JpegFormula(Formula),
+}
+
+/// Bytes of all streams of `f`.
+fn streams_len(f: &Formula) -> usize {
+    f.streams.iter().map(|s| s.data.len()).sum()
 }
 
 /// An item's coded form, its inflated bytes (or JPEG blocks) and the seconds of each phase
@@ -621,7 +733,8 @@ struct Done {
     times: [f64; 5],
 }
 
-fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::Options) -> Done {
+/// `formula`: the images are coded as formulas of their own (png-recons, jpeg-recons).
+fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::Options, formula: bool) -> Done {
     let data = &file[it.start..it.start + it.len];
     let mut times = [0f64; 5];
     let mut plain_n = 0usize;
@@ -638,18 +751,17 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::Options) -> Done {
                 let adler = f.stream.trailing.len() >= 4 && data[end..end + 4] == flate::adler32(&f.data).to_be_bytes();
                 f.stream.trailing.clear();
                 plain_n = f.data.len();
-                let flags = (hdr as u8 / 2) | ((adler as u8) << 1) | ((px.is_some() as u8) << 2);
-                let mut fields = vec![m, flags];
-                fields.extend_from_slice(&data[..hdr]);
-                fields.push(c as u8);
-                varint::put(&mut fields, f.data.len() as u64);
-                if let Some(px) = px {
-                    varint::put(&mut fields, px.bpp as u64);
-                    varint::put(&mut fields, px.stride as u64);
-                }
+                let head = FlateHead {
+                    zlib: (hdr == 2).then(|| [data[0], data[1]]),
+                    adler: adler.then(|| data[end..end + 4].try_into().unwrap()),
+                    class: c,
+                    plain: f.data.len(),
+                    px,
+                    deflate: end - hdr,
+                };
                 let len = end + 4 * adler as usize;
                 if m == TOK {
-                    return Some(Coded::Tok(fields, Box::new(f), c, px, len));
+                    return Some(Coded::Tok(head, Box::new(f), len));
                 }
                 let t = std::time::Instant::now();
                 // The zlib header tells zlib emulation what to look for.
@@ -661,15 +773,26 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::Options) -> Done {
                 let r = flate_recons::deconstruct_hinted(&data[hdr..end], fr_opts, &hints).map(|(p, m, _)| (p, m));
                 times[2] += t.elapsed().as_secs_f64();
                 let (plain, meta) = r.ok()?;
-                varint::put(&mut fields, meta.len() as u64);
-                Some(Coded::Full(fields, plain, meta, c, len))
+                Some(Coded::Full(head, plain, meta, len))
             });
             coded.unwrap_or(Coded::Raw(true))
         }
         Plan::Flate(c, _, PNG, Some(g)) => {
             let (ct, depth) = image::png_format(&g).unwrap();
             let t = std::time::Instant::now();
-            let p = png_recons::compress(&image::wrap(g.width, g.height, ct, depth, data));
+            let wrapped = image::wrap(g.width, g.height, ct, depth, data);
+            if formula {
+                let f = png_recons::formula::encode(&wrapped, 1).filter(|f| streams_len(f) < data.len());
+                times[3] += t.elapsed().as_secs_f64();
+                return match f {
+                    Some(f) => {
+                        plain_n = (g.row() + 1) * g.height as usize;
+                        Done { coded: Coded::PngFormula(f), plain_n, times }
+                    }
+                    None => Done { coded: Coded::Raw(false), plain_n, times },
+                };
+            }
+            let p = png_recons::compress(&wrapped);
             times[3] += t.elapsed().as_secs_f64();
             if p.len() < data.len() {
                 plain_n = (g.row() + 1) * g.height as usize;
@@ -684,6 +807,14 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &flate_recons::Options) -> Done {
         }
         Plan::Jpeg(_, blocks, true) => {
             let t = std::time::Instant::now();
+            if formula {
+                let f = jpeg_recons::formula::encode(data, 0);
+                times[3] += t.elapsed().as_secs_f64();
+                return match f {
+                    Some(f) => Done { coded: Coded::JpegFormula(f), plain_n: blocks as usize, times },
+                    None => Done { coded: Coded::Raw(false), plain_n, times },
+                };
+            }
             let p = jpeg_recons::container::compress(data);
             times[3] += t.elapsed().as_secs_f64();
             if p.len() < data.len() {
@@ -712,11 +843,38 @@ struct Sections {
     at: usize,
     /// Bytes each item covers once coded.
     cov: Vec<usize>,
+    /// For a formula, what goes into its input slots instead of the sections.
+    fm: Option<Parts>,
+}
+
+/// The formula being built: the pools and metadata are its first streams (`F_POOL`, `F_META`,
+/// filled at the end), then the images' formulas; and the nodes of the slots that hold the
+/// items' rebuilt DEFLATE streams, PNG files and JPEG files.
+pub(crate) struct Parts {
+    pub f: Formula,
+    pub deflate: Vec<Node>,
+    pub png: Vec<Node>,
+    pub jpeg: Vec<Node>,
+}
+
+pub(crate) const F_POOL: usize = 0;
+pub(crate) const F_META: usize = F_POOL + CLASSES.len();
+
+impl Parts {
+    fn new() -> Self {
+        let mut f = Formula::default();
+        for c in CLASSES {
+            f.push(format!("pdf/pool-{}", c.name()), vec![]);
+        }
+        f.push("pdf/meta", vec![]);
+        Parts { f, deflate: vec![], png: vec![], jpeg: vec![] }
+    }
 }
 
 impl Sections {
-    fn new(skel_len: usize, items: usize) -> Self {
+    fn new(skel_len: usize, items: usize, formula: bool) -> Self {
         Sections {
+            fm: formula.then(Parts::new),
             table: vec![],
             skel: Vec::with_capacity(skel_len),
             raw: vec![],
@@ -760,9 +918,9 @@ impl Sections {
                 varint::put(&mut self.table, (i - j) as u64);
                 (DUP, self.cov[j], 0)
             }
-            Coded::Tok(fields, f, c, px, len) => match self.tokens.add(c, &f, px) {
+            Coded::Tok(head, f, len) => match self.tokens.add(head.class, &f, head.px) {
                 Ok(()) => {
-                    self.table.extend_from_slice(&fields);
+                    self.table.extend_from_slice(&head.fields(TOK));
                     (TOK, len, 0)
                 }
                 Err(_) => {
@@ -770,12 +928,37 @@ impl Sections {
                     raw(self)
                 }
             },
-            Coded::Full(fields, plain, m, c, len) => {
-                self.table.extend_from_slice(&fields);
-                self.pools[c as usize].extend_from_slice(&plain);
+            Coded::Full(head, plain, m, len) => {
+                let c = head.class as usize;
+                if let Some(fm) = &mut self.fm {
+                    self.table.extend_from_slice(&head.formula_fields());
+                    let pool = Node::slice(F_POOL + c, self.pools[c].len() as u64, plain.len() as u64);
+                    let record = Node::slice(F_META, self.meta.len() as u64, m.len() as u64);
+                    fm.deflate.push(flate_recons::formula::apply(pool, record, head.deflate as u64));
+                } else {
+                    self.table.extend_from_slice(&head.fields(FULL));
+                    varint::put(&mut self.table, m.len() as u64);
+                }
+                self.pools[c].extend_from_slice(&plain);
                 self.meta.extend_from_slice(&m);
-                st.class_out[FULL as usize][c as usize] += m.len() as f64;
+                st.class_out[FULL as usize][c] += m.len() as f64;
                 (FULL, len, m.len())
+            }
+            Coded::PngFormula(p) => {
+                let fm = self.fm.as_mut().expect("a formula");
+                self.table.push(PNG);
+                varint::put(&mut self.table, p.len());
+                let n = streams_len(&p);
+                fm.png.push(fm.f.embed(p));
+                (PNG, it.len, n)
+            }
+            Coded::JpegFormula(p) => {
+                let fm = self.fm.as_mut().expect("a formula");
+                self.table.push(JPEG);
+                varint::put(&mut self.table, p.len());
+                let n = streams_len(&p);
+                fm.jpeg.push(fm.f.embed(p));
+                (JPEG, it.len, n)
             }
             Coded::Png(fields, p, c) => {
                 self.table.extend_from_slice(&fields);
@@ -983,17 +1166,17 @@ pub fn decompress_with(src: &[u8], ds: &mut DStats) -> Result<Vec<u8>> {
 }
 
 /// An item of the table, with its data in the sections.
-struct Entry<'a> {
+pub(crate) struct Entry<'a> {
     /// The skeleton before it.
-    gap: std::ops::Range<usize>,
-    mode: u8,
+    pub(crate) gap: std::ops::Range<usize>,
+    pub(crate) mode: u8,
     /// Class (as [`Stats::cost`]) and inflated bytes, for the statistics.
-    ci: usize,
-    plain_n: usize,
-    op: Op<'a>,
+    pub(crate) ci: usize,
+    pub(crate) plain_n: usize,
+    pub(crate) op: Op<'a>,
 }
 
-enum Op<'a> {
+pub(crate) enum Op<'a> {
     Raw(&'a [u8]),
     /// Items back.
     Dup(usize),
@@ -1002,6 +1185,11 @@ enum Op<'a> {
     Flate(&'a [u8], usize, usize, Option<tok::Pixels>, bool, Option<(&'a [u8], &'a [u8])>),
     Png(&'a [u8]),
     Jpeg(&'a [u8]),
+    /// A formula's FlateDecode stream: the zlib header, the DEFLATE data and the Adler-32 (each
+    /// perhaps empty).
+    Zlib(&'a [u8], &'a [u8], &'a [u8]),
+    /// A formula's PNG or JPEG item: its bytes.
+    Bytes(&'a [u8]),
 }
 
 /// Where the items' data is next in each section.
@@ -1016,11 +1204,32 @@ struct Cursors {
 }
 
 /// The next `n` bytes of `v` from `at`.
-fn take<'a>(v: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
+pub(crate) fn take<'a>(v: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
     let end = at.checked_add(n).filter(|&e| e <= v.len()).ok_or(Error::Corrupt)?;
     let r = &v[*at..end];
     *at = end;
     Ok(r)
+}
+
+/// What [`flate_fields`] reads.
+pub(crate) type FlateFields<'a> = (&'a [u8], usize, usize, Option<tok::Pixels>, bool);
+
+/// The table fields of a `TOK` (`tok`) or `FULL` item after its mode: the zlib header, the
+/// class, the inflated length, the pixel layout (`TOK` only) and whether the Adler-32 follows
+/// the DEFLATE data. `len` is the file's length.
+pub(crate) fn flate_fields<'a>(t: &mut Reader<'a>, tok: bool, len: usize) -> Result<FlateFields<'a>> {
+    let flags = t.u8()?;
+    if flags & !7 != 0 || (!tok && flags & 4 != 0) {
+        return Err(Error::Corrupt);
+    }
+    let hdr = if flags & 1 != 0 { t.bytes(2)? } else { &[] };
+    let c = t.u8()? as usize;
+    if c >= CLASSES.len() {
+        return Err(Error::Corrupt);
+    }
+    let n = t.usize(len.saturating_mul(1032))?;
+    let px = if flags & 4 != 0 { Some(tok::Pixels { bpp: t.usize(64)?, stride: t.usize(1 << 34)? }) } else { None };
+    Ok((hdr, c, n, px, flags & 2 != 0))
 }
 
 /// The next item of the table, the `index`th; `len` is the file's length.
@@ -1044,19 +1253,8 @@ fn entry<'a>(t: &mut Reader<'a>, sec: &'a [Vec<u8>], cur: &mut Cursors, len: usi
             Op::Dup(back)
         }
         m @ (FULL | TOK) => {
-            let flags = t.u8()?;
-            if flags & !7 != 0 || (m == FULL && flags & 4 != 0) {
-                return Err(Error::Corrupt);
-            }
-            let hdr = if flags & 1 != 0 { t.bytes(2)? } else { &[] };
-            let c = t.u8()? as usize;
-            if c >= CLASSES.len() {
-                return Err(Error::Corrupt);
-            }
-            let n = t.usize(len.saturating_mul(1032))?;
-            (ci, plain_n) = (if flags & 4 != 0 { 6 } else { c }, n);
-            let px =
-                if flags & 4 != 0 { Some(tok::Pixels { bpp: t.usize(64)?, stride: t.usize(1 << 34)? }) } else { None };
+            let (hdr, c, n, px, adler) = flate_fields(t, m == TOK, len)?;
+            (ci, plain_n) = (if px.is_some() { 6 } else { c }, n);
             let full = if m == FULL {
                 let mlen = t.usize(MAX_LEN)?;
                 let plain = take(&sec[S_POOL + c], &mut cur.pool[c], n)?;
@@ -1064,7 +1262,7 @@ fn entry<'a>(t: &mut Reader<'a>, sec: &'a [Vec<u8>], cur: &mut Cursors, len: usi
             } else {
                 None
             };
-            Op::Flate(hdr, c, n, px, flags & 2 != 0, full)
+            Op::Flate(hdr, c, n, px, adler, full)
         }
         PNG => {
             ci = Class::Image as usize;
@@ -1083,7 +1281,7 @@ fn entry<'a>(t: &mut Reader<'a>, sec: &'a [Vec<u8>], cur: &mut Cursors, len: usi
 }
 
 /// An item restored on its own: the bytes are `buf[range]`, then the Adler-32 if any.
-struct Restored {
+pub(crate) struct Restored {
     buf: Vec<u8>,
     range: std::ops::Range<usize>,
     adler: Option<u32>,
@@ -1118,7 +1316,7 @@ fn restore_estimate(e: &Entry) -> Option<usize> {
 }
 
 /// The output so far, and what restoring the items in order needs.
-struct Out<'a> {
+pub(crate) struct Out<'a> {
     out: Vec<u8>,
     skel: &'a [u8],
     tokens: Option<tok::DecoderState<'a>>,
@@ -1127,10 +1325,24 @@ struct Out<'a> {
     len: usize,
 }
 
-impl Out<'_> {
+impl<'a> Out<'a> {
+    pub(crate) fn new(len: usize, skel: &'a [u8], tokens: Option<tok::DecoderState<'a>>) -> Self {
+        Out { out: Vec::with_capacity(len), skel, tokens, placed: vec![], len }
+    }
+
+    /// The output once all items are in: the rest of the skeleton, from `sk`, follows. It must
+    /// be the original's length, and the token decoder (if any) at its end.
+    pub(crate) fn finish(mut self, sk: usize) -> Result<Vec<u8>> {
+        self.out.extend_from_slice(&self.skel[sk..]);
+        if self.tokens.is_some_and(|d| !d.finished()) || self.out.len() != self.len {
+            return Err(Error::Corrupt);
+        }
+        Ok(self.out)
+    }
+
     /// Appends item `e`, restored as `r` if it was on its own; its time is `secs` and
     /// since `t_item`.
-    fn add(
+    pub(crate) fn add(
         &mut self,
         e: &Entry,
         r: Option<Result<Restored>>,
@@ -1168,6 +1380,12 @@ impl Out<'_> {
                 let r = restored()?;
                 out.extend_from_slice(&r.buf[r.range]);
             }
+            Op::Zlib(hdr, d, adler) => {
+                out.extend_from_slice(hdr);
+                out.extend_from_slice(d);
+                out.extend_from_slice(adler);
+            }
+            Op::Bytes(d) => out.extend_from_slice(d),
         }
         self.placed.push((start, out.len() - start));
         let secs = secs + t_item.elapsed().as_secs_f64();
@@ -1229,7 +1447,7 @@ pub fn decompress_with_threads(src: &[u8], ds: &mut DStats, threads: usize) -> R
     } else {
         Some(tok::DecoderState::new(std::array::from_fn(|k| &toks[k][..]))?)
     };
-    let mut o = Out { out: Vec::with_capacity(len), skel: &sec[S_SKEL], tokens, placed: vec![], len };
+    let mut o = Out::new(len, &sec[S_SKEL], tokens);
     ds.setup += t_setup.elapsed().as_secs_f64();
     match &pool {
         None => {
@@ -1265,9 +1483,8 @@ pub fn decompress_with_threads(src: &[u8], ds: &mut DStats, threads: usize) -> R
     if !used {
         return Err(Error::Corrupt);
     }
-    let mut out = o.out;
-    out.extend_from_slice(&o.skel[cur.sk..]);
-    if o.tokens.is_some_and(|d| !d.finished()) || out.len() != len || xxhash_rust::xxh3::xxh3_64(&out) != sum {
+    let out = o.finish(cur.sk)?;
+    if xxhash_rust::xxh3::xxh3_64(&out) != sum {
         return Err(Error::Corrupt);
     }
     Ok(out)

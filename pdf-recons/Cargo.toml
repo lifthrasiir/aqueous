@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 recons-common = { path = "../recons-common" }
+recons-formula = { path = "../recons-formula" }
 flate-recons = { path = "../flate-recons" }
 jpeg-recons = { path = "../jpeg-recons" }
 png-recons = { path = "../png-recons" }
@@ -24,3 +25,4 @@ codegen-units = 1
 
 [dev-dependencies]
 flate-zoo = { path = "../flate-zoo" }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

@@ -2,6 +2,7 @@
 
 pub mod container;
 pub mod flate;
+pub mod formula;
 pub mod image;
 pub mod kind;
 pub mod lex;
