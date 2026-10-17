@@ -16,6 +16,10 @@
 //!
 //! [`Formula::eval`] is the reference, strict evaluation: every node is materialised, with
 //! the modules run by a [`Modules`] implementation.
+//!
+//! [`container`] stores a formula on its own, its streams as one.
+
+pub mod container;
 
 use std::borrow::Cow;
 use std::fmt;
