@@ -6,17 +6,20 @@ use sqlite_recons::transform::{NSTREAMS, STREAM_NAMES};
 static ALLOC: Counting = Counting;
 use std::sync::atomic::Ordering::Relaxed;
 
+#[cfg(unix)]
 #[repr(C)]
 struct Timespec {
     sec: i64,
     nsec: i64,
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn clock_gettime(clk: u32, tp: *mut Timespec) -> i32;
 }
 
 /// CPU time of this thread, in seconds (wall time is skewed by other load).
+#[cfg(unix)]
 fn cpu() -> f64 {
     #[cfg(target_os = "macos")]
     const CLOCK_THREAD_CPUTIME_ID: u32 = 16;
@@ -25,6 +28,11 @@ fn cpu() -> f64 {
     let mut t = Timespec { sec: 0, nsec: 0 };
     unsafe { clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut t) };
     t.sec as f64 + t.nsec as f64 * 1e-9
+}
+
+#[cfg(not(unix))]
+fn cpu() -> f64 {
+    wall()
 }
 
 /// Seconds: the thread's CPU time with one thread, wall time with more.

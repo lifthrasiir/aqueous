@@ -596,10 +596,10 @@ pub fn decode(g: &Geom, len: usize, s: &[Vec<u8>]) -> Result<Vec<u8>> {
 }
 
 /// `decode` with `threads` threads (the first pass over the tables and indexes).
-pub fn decode_threads(g: &Geom, len: usize, s: &[Vec<u8>], threads: usize) -> Result<Vec<u8>> {
+pub fn decode_threads(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], threads: usize) -> Result<Vec<u8>> {
     // The output is no larger than the streams describe: a kind per page, the tail in `raw`
     // (checked before it is allocated).
-    if s.len() != NSTREAMS || s[S_KIND].len() != g.npages || len % g.psize > s[S_RAW].len() {
+    if s.len() != NSTREAMS || s[S_KIND].as_ref().len() != g.npages || len % g.psize > s[S_RAW].as_ref().len() {
         return Err(corrupt());
     }
     let mut w = Writer(vec![0u8; len]);
@@ -617,13 +617,13 @@ pub fn verify(g: &Geom, src: &[u8], s: &[Vec<u8>]) -> bool {
     rebuild(g, src.len(), s, &mut c, 1).is_ok() && c.ok && c.seen.iter().all(|&x| x)
 }
 
-fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[Vec<u8>], out: &mut S, threads: usize) -> Result<()> {
+fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, threads: usize) -> Result<()> {
     let (ps, np) = (g.psize, g.npages);
     // A kind per page (which also bounds the output by the streams).
-    if s.len() != NSTREAMS || np == 0 || np.checked_mul(ps) != Some(len - len % ps) || s[S_KIND].len() != np {
+    if s.len() != NSTREAMS || np == 0 || np.checked_mul(ps) != Some(len - len % ps) || s[S_KIND].as_ref().len() != np {
         return Err(corrupt());
     }
-    let mut rd: Vec<Rd> = s.iter().map(|v| Rd::new(v)).collect();
+    let mut rd: Vec<Rd> = s.iter().map(|v| Rd::new(v.as_ref())).collect();
 
     // Groups: directory, then records (the tables indexes refer to first).
     let mut dir = rd[S_DIR];

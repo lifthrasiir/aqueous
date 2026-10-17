@@ -10,6 +10,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod container;
+pub mod formula;
 pub mod index;
 pub mod page;
 pub mod par;

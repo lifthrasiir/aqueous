@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 recons-common = { path = "../recons-common" }
+recons-formula = { path = "../recons-formula" }
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 

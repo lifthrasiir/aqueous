@@ -70,6 +70,13 @@ name = "recons-common"
 version = "0.1.0"
 
 [[package]]
+name = "recons-formula"
+version = "0.1.0"
+dependencies = [
+ "recons-common",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -80,6 +87,7 @@ name = "sqlite-recons"
 version = "0.1.0"
 dependencies = [
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]

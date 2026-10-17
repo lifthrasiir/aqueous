@@ -20,6 +20,7 @@ Contents:
 9. [Pages](#9-pages)
 10. [Encoding](#10-encoding-encoder) *(encoder)*
 11. [Validation](#11-validation)
+12. [Formula module](#12-formula-module)
 
 ## 1. Conventions
 
@@ -749,3 +750,24 @@ This implementation also bounds its work on corrupt input. It rejects a zstd str
 `len > 32768 ×` the size of the zstd data. It checks `kind` and the tail before allocating
 the output. It also rejects a table whose key column contents, for one index, add up to
 `2^32 - 1` bytes or more. Its zstd decoder accepts window sizes up to 2^27.
+
+## 12. Formula module
+
+`sqlite_recons::formula` gives the coded form (version 1) as an entry formula
+(recons-formula) rather than as a container. It keeps what rebuilding needs and drops the
+rest of the container: the magic, version and `hash` (the archive checks its own), `len`
+(the application declares its output length), and the zstd layer of the streams (each
+stream is stored raw, as a slot; the archive compresses them, so the `z` flags and
+`raw_len` are gone). A file the container would store as version 0 has no formula.
+
+- **Module**: name `sqlite-recons`, version 1.
+- **Params**: `P` varint, `U` varint, `fmt4` u8 (as in §4.1). Nothing else; trailing bytes
+  are an error. The same range checks as §11 apply.
+- **Inputs**: exactly 18 slots, slot `i` being stream `i` of §4.2, decompressed, with the
+  layout given there. Their classes are `sqlr/<name>`: `sqlr/kind`, `sqlr/raw`, `sqlr/dir`,
+  `sqlr/rec`, `sqlr/rowid`, `sqlr/rawpay`, `sqlr/tag`, `sqlr/int`, `sqlr/real`, `sqlr/len`,
+  `sqlr/bytes`, `sqlr/grp`, `sqlr/phdr`, `sqlr/child`, `sqlr/ikey`, `sqlr/cptr`, `sqlr/ovf`,
+  `sqlr/fill`. An empty stream is an empty slot.
+- **Output**: `len` bytes, the application's declared length, taking the place of the header's
+  `len`: `np = floor(len / P)` and `tail` follow from it as in §4.1. Decoding is §4.3
+  without step 1 and without the `hash` check; every other check of §11 applies.
