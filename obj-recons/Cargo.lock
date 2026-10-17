@@ -65,6 +65,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "recons-common",
+ "recons-formula",
  "recons-num",
  "xxhash-rust",
  "zstd",
@@ -85,6 +86,13 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "recons-common"
 version = "0.1.0"
+
+[[package]]
+name = "recons-formula"
+version = "0.1.0"
+dependencies = [
+ "recons-common",
+]
 
 [[package]]
 name = "recons-num"

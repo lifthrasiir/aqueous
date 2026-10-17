@@ -11,6 +11,7 @@ pub mod ans;
 pub mod block;
 pub mod container;
 mod corner;
+pub mod formula;
 mod recent;
 pub mod style;
 pub mod varint;

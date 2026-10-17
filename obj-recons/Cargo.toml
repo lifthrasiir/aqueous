@@ -11,6 +11,7 @@ recons-num = { path = "../recons-num" }
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 memchr = "2"
+recons-formula = { path = "../recons-formula" }
 
 [profile.release]
 debug = 1

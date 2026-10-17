@@ -64,6 +64,7 @@ fn small_cases() {
 
 /// C's printf of a double.
 fn c_fmt(fmt: &std::ffi::CStr, x: f64) -> String {
+    #[cfg_attr(windows, link(name = "legacy_stdio_definitions"))]
     unsafe extern "C" {
         fn snprintf(buf: *mut u8, n: usize, fmt: *const std::ffi::c_char, ...) -> i32;
     }

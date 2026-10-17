@@ -7,17 +7,27 @@ use std::sync::atomic::Ordering::Relaxed;
 #[global_allocator]
 static ALLOC: Counting = Counting;
 
+#[cfg(unix)]
 #[repr(C)]
 struct Timespec {
     sec: i64,
     nsec: i64,
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn clock_gettime(clk: u32, tp: *mut Timespec) -> i32;
 }
 
+/// Wall time where there is no thread CPU time to ask for.
+#[cfg(not(unix))]
+fn cpu() -> f64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+
 /// CPU time of this thread, in seconds (wall time is skewed by other load).
+#[cfg(unix)]
 fn cpu() -> f64 {
     #[cfg(target_os = "macos")]
     const CLOCK_THREAD_CPUTIME_ID: u32 = 16;

@@ -448,3 +448,46 @@ compresses (`objr c -t 1`) to:
 01 00 01  00                             v-pred: predictor 0 (previous numbers)
 00 00                                    vt-pred, vn-pred
 ```
+
+## 9. Formula module
+
+The same coding as an entry formula (recons-formula), for the archive to store: module
+`obj-recons`, version 1. The blocks and their streams are those of §3-§6; what the file
+header and the container carry is not repeated: no magic, version, length or hash (the
+output length is the formula's), and no zstd (streams and whole blocks are stored raw; the
+archive compresses the inputs). The module's output is the original file.
+
+**Params**: none (empty).
+
+**Inputs**: 37, always, any of them may be empty:
+
+| # | class | contents |
+|---|---|---|
+| 0 | `obj/index` | the blocks, below |
+| 1 | `obj/whole` | the bytes of the blocks coded whole, concatenated |
+| 2 + i | `obj/<name>` | stream i of §4 (`ops`, `tpl`, ...), concatenated over the coded blocks: each stored stream as is, each rANS stream as its data (§6) |
+
+**Index**: per block, in file order, until their lengths sum to the output length:
+
+```text
+v           varint    n << 1 | coded; n is the block's length (1 <= n <= 64 MiB, n <= bytes still to come)
+coded = 0:  nothing; the next n bytes of input 1 are the block
+coded = 1:  35 times, in stream order:
+              v       varint    0 for an empty stream, else raw << 1 | rans
+              if rans:
+                c     varint    length of the rANS data
+```
+
+A coded block's stream i takes `raw` bytes (stored; `raw <= 8 n + 64`) or `c` bytes (rANS,
+allowed for the streams marked rANS in §4, decoding to `raw` bytes) from where input 2 + i
+was left by the previous blocks. A stream with `raw == 0` and `rans == 1`, and any
+inconsistency, fails. The coded blocks are then decoded as in §5, with state carried over
+from one coded block to the next, and a whole block does not touch it, as in §3. A block
+must produce exactly n bytes. After the last block the index and all inputs must be
+consumed exactly.
+
+Compared with the container: the `method` byte and `n` become `v`; the stream descriptors
+lose `how` (zstd does not exist; stored and rANS are the low bit of `v`) and the stored
+length (`c == raw`); the encoder (non-normative) takes rANS for a stream longer than 64
+bytes when it is smaller than raw, and no formula is made for an empty file or when every
+block was stored whole.

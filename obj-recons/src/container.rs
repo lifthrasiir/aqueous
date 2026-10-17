@@ -32,16 +32,16 @@ const VERSION: u16 = 0;
 /// Magic and version.
 const HEAD: usize = MAGIC.len() + 2;
 /// Largest block the decoder accepts (bounds its memory).
-const MAX_BLOCK: usize = 64 << 20;
+pub(crate) const MAX_BLOCK: usize = 64 << 20;
 
 /// How a stream is stored.
-const M_STORED: u8 = 0;
+pub(crate) const M_STORED: u8 = 0;
 const M_ZSTD: u8 = 1;
 /// rANS coded (`ans`).
-const M_ANS: u8 = 2;
+pub(crate) const M_ANS: u8 = 2;
 
 /// Streams of LEB128 values, which may be rANS coded.
-const AC_STREAMS: [bool; NSTREAMS] = {
+pub(crate) const AC_STREAMS: [bool; NSTREAMS] = {
     let mut t = [false; NSTREAMS];
     let mut i = 0;
     while i < NSTREAMS {
@@ -54,9 +54,9 @@ const AC_STREAMS: [bool; NSTREAMS] = {
     t
 };
 
-type Streams = [Vec<u8>; NSTREAMS];
+pub(crate) type Streams = [Vec<u8>; NSTREAMS];
 
-fn new_streams() -> Streams {
+pub(crate) fn new_streams() -> Streams {
     std::array::from_fn(|_| Vec::new())
 }
 
@@ -137,7 +137,7 @@ pub fn compress_with(src: &[u8], opt: &Options, st: &mut Stats) -> Vec<u8> {
 
 /// The end of the block starting at `p`: at most `bsize` bytes, at a line end if there is
 /// one.
-fn block_end(src: &[u8], p: usize, bsize: usize) -> usize {
+pub(crate) fn block_end(src: &[u8], p: usize, bsize: usize) -> usize {
     let e = (p + bsize).min(src.len());
     if e < src.len()
         && let Some(i) = memchr::memrchr(b'\n', &src[p..e])
@@ -476,8 +476,11 @@ pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
 }
 
 /// A block as stored: whole, or its streams (raw length, how, data).
-enum Stored<'a> {
+pub(crate) enum Stored<'a> {
+    /// Zstd data of the block.
     Whole(&'a [u8]),
+    /// The block itself (formulas).
+    Plain(&'a [u8]),
     Coded(Box<[(usize, u8, &'a [u8]); NSTREAMS]>),
 }
 
@@ -538,6 +541,7 @@ fn unpack(
                 return Err(corrupt());
             }
         }
+        Stored::Plain(d) => out.extend_from_slice(d),
         Stored::Coded(desc) => {
             for (s, &(raw, m, d)) in streams.iter_mut().zip(desc.iter()) {
                 s.clear();
@@ -591,30 +595,45 @@ pub fn decompress_to<W: Write>(src: &[u8], w: &mut W) -> Result<usize> {
 pub fn decompress_to_threads<W: Write>(src: &[u8], w: &mut W, threads: usize) -> Result<usize> {
     let mut r = Rd::new(src);
     let (len, hash) = read_header(&mut r)?;
+    let digest = decode_blocks(&mut |left| read_block(&mut r, left), len, w, threads, true)?;
+    if !r.done() || digest != hash {
+        return Err(Error("checksum mismatch"));
+    }
+    Ok(len)
+}
+
+/// Decodes blocks into `w` until `len` bytes are written; `next(left)` gives the next block
+/// (`left`: bytes still to come). Returns the XXH3-64 of the output if `hashed`, else 0.
+pub(crate) fn decode_blocks<'a, W: Write>(
+    next: &mut impl FnMut(usize) -> Result<(usize, Stored<'a>)>,
+    len: usize,
+    w: &mut W,
+    threads: usize,
+    hashed: bool,
+) -> Result<u64> {
     if threads > 1 {
-        return decompress_par(r, len, hash, w, threads);
+        return decompress_par(next, len, w, threads, hashed);
     }
     let mut out = Vec::new();
     let mut done = 0;
-    let mut h = Xxh3::new();
+    let mut h = hashed.then(Xxh3::new);
     let mut dec = block::Decoder::default();
     let mut dz = zstd::bulk::Decompressor::new().map_err(|_| corrupt())?;
     let mut streams = new_streams();
     while done < len {
         out.clear();
-        let (n, b) = read_block(&mut r, len - done)?;
+        let (n, b) = next(len - done)?;
         unpack(&b, n, &mut dz, &mut streams, &mut out)?;
         if matches!(b, Stored::Coded(_)) && (!dec.decode(&streams, &mut out) || out.len() != n) {
             return Err(corrupt());
         }
-        h.update(&out);
+        if let Some(h) = &mut h {
+            h.update(&out);
+        }
         w.write_all(&out).map_err(|_| Error("write error"))?;
         done += n;
     }
-    if !r.done() || h.digest() != hash {
-        return Err(Error("checksum mismatch"));
-    }
-    Ok(len)
+    Ok(h.map_or(0, |h| h.digest()))
 }
 
 /// A block whose streams (or whole contents) the other threads have decoded.
@@ -631,7 +650,13 @@ enum DReport {
     Printed(usize, Result<Vec<u8>>),
 }
 
-fn decompress_par<W: Write>(mut r: Rd, len: usize, hash: u64, w: &mut W, threads: usize) -> Result<usize> {
+fn decompress_par<'a, W: Write>(
+    next: &mut impl FnMut(usize) -> Result<(usize, Stored<'a>)>,
+    len: usize,
+    w: &mut W,
+    threads: usize,
+    hashed: bool,
+) -> Result<u64> {
     let limit = threads + 1;
     std::thread::scope(|sc| {
         let (rtx, rrx) = mpsc::channel::<DReport>();
@@ -666,7 +691,7 @@ fn decompress_par<W: Write>(mut r: Rd, len: usize, hash: u64, w: &mut W, threads
         }
         drop(rtx);
         let mut dec = block::Decoder::default();
-        let mut h = Xxh3::new();
+        let mut h = hashed.then(Xxh3::new);
         // Blocks sent to unpack (length, coded, result), from index `unpacked`; blocks
         // decoded, being printed (length, text), from index `written`.
         let mut unpacking: VecDeque<(usize, bool, Option<Unpacked>)> = VecDeque::new();
@@ -674,14 +699,16 @@ fn decompress_par<W: Write>(mut r: Rd, len: usize, hash: u64, w: &mut W, threads
         let (mut read, mut done, mut unpacked, mut written) = (0usize, 0usize, 0usize, 0usize);
         while done < len {
             while unpacking.len() < limit && read < len {
-                let (n, b) = read_block(&mut r, len - read)?;
+                let (n, b) = next(len - read)?;
                 unpacking.push_back((n, matches!(b, Stored::Coded(_)), None));
                 jtx.send(DJob::Unpack(unpacked + unpacking.len() - 1, n, b)).expect("workers");
                 read += n;
             }
             if let Some((n, text)) = printing.pop_front_if(|p| p.1.is_some()) {
                 let text = text.expect("printed")?;
-                h.update(&text);
+                if let Some(h) = &mut h {
+                    h.update(&text);
+                }
                 w.write_all(&text).map_err(|_| Error("write error"))?;
                 (done, written) = (done + n, written + 1);
                 continue;
@@ -710,9 +737,6 @@ fn decompress_par<W: Write>(mut r: Rd, len: usize, hash: u64, w: &mut W, threads
             }
         }
         drop(jtx);
-        if !r.done() || h.digest() != hash {
-            return Err(Error("checksum mismatch"));
-        }
-        Ok(len)
+        Ok(h.map_or(0, |h| h.digest()))
     })
 }
