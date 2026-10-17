@@ -10,4 +10,3 @@ pub(crate) fn to_u32(s: &[u8]) -> u32 {
 pub(crate) fn to_u64(s: &[u8]) -> u64 {
     u64::from_le_bytes(s.try_into().unwrap())
 }
-

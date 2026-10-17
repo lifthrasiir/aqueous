@@ -1590,9 +1590,7 @@ mod tests {
         #[inline(always)]
         fn generate<const N: usize>() -> impl Iterator<Item = [u8; N]> {
             assert!(N <= 3);
-            (0..1u32 << (N * 8)).map(|n| {
-                array::from_fn(|i| (n >> (i * 8) & 0xff) as u8)
-            })
+            (0..1u32 << (N * 8)).map(|n| array::from_fn(|i| (n >> (i * 8) & 0xff) as u8))
         }
 
         let mut seen = std::collections::HashSet::new();
@@ -2196,8 +2194,8 @@ mod tests {
 
         // Bias towards bytes with special meanings to the encoder or decoder.
         const SPECIAL: &[u8] = &[
-            0x00, 0x0f, 0x38, 0x3a, 0x40, 0x48, 0x4f, 0x62, 0x66, 0x67, 0xc4, 0xc5, 0xd5,
-            0xf1, 0xf4, 0xf2, 0xf3, 0xe8, 0xe9, 0xc3, 0xcc, 0x90, 0xf6, 0xf7, 0x05, 0x04,
+            0x00, 0x0f, 0x38, 0x3a, 0x40, 0x48, 0x4f, 0x62, 0x66, 0x67, 0xc4, 0xc5, 0xd5, 0xf1,
+            0xf4, 0xf2, 0xf3, 0xe8, 0xe9, 0xc3, 0xcc, 0x90, 0xf6, 0xf7, 0x05, 0x04,
         ];
 
         for iter in 0..200_000 {
@@ -2253,7 +2251,10 @@ mod tests {
             (&[0xc4, 0x00][..], "LES EAX, [EAX]"),
             (&[0xc5, 0x00][..], "LDS EAX, [EAX]"),
             (&[0x62, 0x00][..], "BOUND EAX, [EAX]"),
-            (&[0xc4, 0xf0, 0x00, 0x00][..], "C4 with mod=11 but VEX3 map bit 4 set"),
+            (
+                &[0xc4, 0xf0, 0x00, 0x00][..],
+                "C4 with mod=11 but VEX3 map bit 4 set",
+            ),
             (&[0xd5, 0x0a][..], "AAD 0Ah"),
         ];
         for (code, desc) in test_cases {
