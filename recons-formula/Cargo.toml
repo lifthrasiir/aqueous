@@ -1,0 +1,6 @@
+[package]
+name = "recons-formula"
+version = "0.1.0"
+edition = "2024"
+description = "Entry formulas: what a recompressor makes of a file, as slices, concatenations and module applications over extracted streams"
+publish = false
