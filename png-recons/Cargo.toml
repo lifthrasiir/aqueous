@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 recons-common = { path = "../recons-common" }
+recons-formula = { path = "../recons-formula" }
 flate-recons = { path = "../flate-recons" }
 crc32fast = "1.5"
 zstd = "0.13"

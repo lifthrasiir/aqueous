@@ -3,6 +3,7 @@
 
 pub mod container;
 pub mod filter;
+pub mod formula;
 pub mod model;
 pub mod png;
 pub mod rans;

@@ -52,7 +52,7 @@ pub fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
     varint::get(src, at).map_err(|_| crate::corrupt())
 }
 
-fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
+pub(crate) fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
     let s = src.get(*at..at.checked_add(n).ok_or_else(crate::corrupt)?).ok_or_else(crate::corrupt)?;
     *at += n;
     Ok(s)
@@ -169,7 +169,21 @@ fn images<'a>(
     out
 }
 
-fn coded(file: &[u8], ph: &mut Phases, threads: usize) -> Result<Vec<u8>> {
+/// A PNG file in parts, before the container's wrapping: the skeleton and the records of the
+/// images, in order (each record's first byte being 0 or 1, see FORMAT.md).
+pub(crate) struct Parts {
+    pub skeleton: Vec<u8>,
+    pub records: Vec<Vec<u8>>,
+}
+
+/// The container's coded form of `file`: the parts, with the result of `side(&skeleton)`,
+/// which runs beside the images when there are threads for it.
+fn coded_parts<S: Send>(
+    file: &[u8],
+    ph: &mut Phases,
+    threads: usize,
+    side: impl FnOnce(&[u8]) -> S + Send,
+) -> Result<(Parts, S)> {
     let t0 = std::time::Instant::now();
     let (chunks, trailer) = png::chunks(file).ok_or(Error::Unsupported("not a PNG file"))?;
     let classes: Vec<u8> = chunks
@@ -203,45 +217,79 @@ fn coded(file: &[u8], ph: &mut Phases, threads: usize) -> Result<Vec<u8>> {
     sk.extend_from_slice(trailer);
     ph.parse += t0.elapsed().as_secs_f64();
 
+    let imgs = images(&classes, |i| chunks[i].data, |i| chunks[i].kind);
     // Below this size there is nothing worth a thread to overlap.
     if threads > 1 && file.len() >= PAR_MIN {
-        return Ok(coded_threads(file, &chunks, &classes, &sk, threads));
+        // The side work beside the images, the images (each into a record of its own) in
+        // parallel.
+        let workers = threads.min(imgs.len()).max(1);
+        // Threads left over from the images go to each image's own parallel steps.
+        let inner = (threads / workers).max(1);
+        let (records, s) = std::thread::scope(|s| {
+            let side = s.spawn(|| side(&sk));
+            let recs = par_map(imgs.len(), workers, |i| {
+                let (range, ih) = &imgs[i];
+                image_rec(&chunks[range.clone()], classes[range.start], ih, &mut Phases::default(), inner)
+            });
+            (recs, side.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
+        });
+        return Ok((Parts { skeleton: sk, records }, s));
     }
-    let z = zstd::bulk::compress(&sk, 19).expect("zstd");
+    let s = side(&sk);
+    let records =
+        imgs.iter().map(|(range, ih)| image_rec(&chunks[range.clone()], classes[range.start], ih, ph, 1)).collect();
+    Ok((Parts { skeleton: sk, records }, s))
+}
+
+/// The record of the image of `chunks` (of class `class`): coded if it has a header and
+/// coding makes it smaller, else the payload as it is.
+fn image_rec(chunks: &[png::Chunk], class: u8, ih: &Option<Ihdr>, ph: &mut Phases, threads: usize) -> Vec<u8> {
+    let skip = if class == FDAT { 4 } else { 0 };
+    let mut payload = Vec::with_capacity(chunks.iter().map(|c| c.data.len()).sum());
+    for c in chunks {
+        payload.extend_from_slice(&c.data[skip..]);
+    }
+    let mut rec = vec![];
+    let coded = ih.as_ref().is_some_and(|ih| image_record(ih, &payload, ph, threads, &mut rec).is_ok())
+        && rec.len() <= payload.len();
+    if !coded {
+        rec.clear();
+        rec.push(0);
+        rec.extend_from_slice(&payload);
+    }
+    if std::env::var_os("PNGR_DEBUG").is_some() {
+        eprintln!(
+            "image {class} payload {} -> record {} ({})",
+            payload.len(),
+            rec.len(),
+            if coded { "coded" } else { "kept" }
+        );
+    }
+    rec
+}
+
+fn coded(file: &[u8], ph: &mut Phases, threads: usize) -> Result<Vec<u8>> {
+    let (parts, (z, hash)) = coded_parts(file, ph, threads, |sk| {
+        (zstd::bulk::compress(sk, 19).expect("zstd"), xxhash_rust::xxh3::xxh3_64(file))
+    })?;
     // Records are kept only if smaller than their payload: the output stays within this.
     let mut out = Vec::with_capacity(file.len() + z.len() + 64);
     put_header(&mut out, 1);
-    out.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(file).to_le_bytes());
+    out.extend_from_slice(&hash.to_le_bytes());
     put_varint(&mut out, z.len() as u64);
     out.extend_from_slice(&z);
-    for (range, ih) in images(&classes, |i| chunks[i].data, |i| chunks[i].kind) {
-        let skip = if classes[range.start] == FDAT { 4 } else { 0 };
-        let mut payload = Vec::with_capacity(chunks[range.clone()].iter().map(|c| c.data.len()).sum());
-        for c in &chunks[range.clone()] {
-            payload.extend_from_slice(&c.data[skip..]);
-        }
-        // The record goes straight into the output, after its length.
-        let at = out.len();
-        out.extend_from_slice(&[0; 4]);
-        let coded = ih.is_some_and(|ih| image_record(&ih, &payload, ph, 1, &mut out).is_ok())
-            && out.len() - at - 4 <= payload.len();
-        if !coded {
-            out.truncate(at + 4);
-            out.push(0);
-            out.extend_from_slice(&payload);
-        }
-        let len = (out.len() - at - 4) as u32;
-        out[at..at + 4].copy_from_slice(&len.to_le_bytes());
-        if std::env::var_os("PNGR_DEBUG").is_some() {
-            eprintln!(
-                "image {} payload {} -> record {len} ({})",
-                classes[range.start],
-                payload.len(),
-                if coded { "coded" } else { "kept" }
-            );
-        }
+    for r in &parts.records {
+        out.extend_from_slice(&(r.len() as u32).to_le_bytes());
+        out.extend_from_slice(r);
     }
     Ok(out)
+}
+
+/// The parts of `file` for a formula, if it is a PNG file and any image is coded (see
+/// [`crate::formula`]).
+pub(crate) fn formula_parts(file: &[u8], threads: usize) -> Option<Parts> {
+    let (parts, ()) = coded_parts(file, &mut Phases::default(), threads, |_| ()).ok()?;
+    parts.records.iter().any(|r| r[0] == 1).then_some(parts)
 }
 
 /// Files smaller than this are handled on one thread whatever the thread count.
@@ -269,59 +317,6 @@ fn par_map<R: Send>(n: usize, workers: usize, f: impl Fn(usize) -> R + Sync) -> 
         work();
     });
     out.into_inner().unwrap().into_iter().map(|r| r.expect("worker result")).collect()
-}
-
-/// The part of [`coded`] after the skeleton, on `threads` threads: the skeleton's zstd and
-/// the checksum beside the images, the images (each into a record of its own) in parallel.
-/// The same bytes as the serial code writes.
-fn coded_threads(file: &[u8], chunks: &[png::Chunk], classes: &[u8], sk: &[u8], threads: usize) -> Vec<u8> {
-    let imgs = images(classes, |i| chunks[i].data, |i| chunks[i].kind);
-    let workers = threads.min(imgs.len()).max(1);
-    // Threads left over from the images go to each image's own parallel steps.
-    let inner = (threads / workers).max(1);
-    let (z, hash, recs) = std::thread::scope(|s| {
-        let side = s.spawn(|| (zstd::bulk::compress(sk, 19).expect("zstd"), xxhash_rust::xxh3::xxh3_64(file)));
-        let recs = par_map(imgs.len(), workers, |i| {
-            let (range, ih) = &imgs[i];
-            let skip = if classes[range.start] == FDAT { 4 } else { 0 };
-            let mut payload = Vec::with_capacity(chunks[range.clone()].iter().map(|c| c.data.len()).sum());
-            for c in &chunks[range.clone()] {
-                payload.extend_from_slice(&c.data[skip..]);
-            }
-            let mut rec = vec![0u8; 4];
-            let coded = ih
-                .as_ref()
-                .is_some_and(|ih| image_record(ih, &payload, &mut Phases::default(), inner, &mut rec).is_ok())
-                && rec.len() - 4 <= payload.len();
-            if !coded {
-                rec.truncate(4);
-                rec.push(0);
-                rec.extend_from_slice(&payload);
-            }
-            let len = (rec.len() - 4) as u32;
-            rec[..4].copy_from_slice(&len.to_le_bytes());
-            if std::env::var_os("PNGR_DEBUG").is_some() {
-                eprintln!(
-                    "image {} payload {} -> record {len} ({})",
-                    classes[range.start],
-                    payload.len(),
-                    if coded { "coded" } else { "kept" }
-                );
-            }
-            rec
-        });
-        let (z, hash) = side.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
-        (z, hash, recs)
-    });
-    let mut out = Vec::with_capacity(file.len() + z.len() + 64);
-    put_header(&mut out, 1);
-    out.extend_from_slice(&hash.to_le_bytes());
-    put_varint(&mut out, z.len() as u64);
-    out.extend_from_slice(&z);
-    for r in &recs {
-        out.extend_from_slice(r);
-    }
-    out
 }
 
 /// Appends the record of a coded image to `rec`.
@@ -457,129 +452,133 @@ pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
     }
     let mut at = HEADER_LEN;
     let hash = u64::from_le_bytes(get_bytes(src, &mut at, 8)?.try_into().unwrap());
-    let part = |at: &mut usize| -> Result<&[u8]> {
-        let n = get_varint(src, at)? as usize;
-        get_bytes(src, at, n)
-    };
-    let sk = zstd::bulk::decompress(part(&mut at)?, 1 << 30).map_err(|_| crate::corrupt())?;
+    let n = get_varint(src, &mut at)? as usize;
+    let sk = zstd::bulk::decompress(get_bytes(src, &mut at, n)?, 1 << 30).map_err(|_| crate::corrupt())?;
+    let skel = Skeleton::parse(&sk)?;
 
-    // Skeleton.
-    let mut k = 0;
-    let nchunks = get_varint(&sk, &mut k)? as usize;
-    struct C<'a> {
-        kind: [u8; 4],
-        len: usize,
-        crc: Option<u32>,
-        /// The whole data (plain chunks) or the sequence number (fdAT).
-        data: &'a [u8],
+    // The records are length-prefixed.
+    let mut recs = Vec::with_capacity(skel.images.len());
+    for _ in &skel.images {
+        let n = u32::from_le_bytes(get_bytes(src, &mut at, 4)?.try_into().unwrap()) as usize;
+        recs.push(get_bytes(src, &mut at, n)?);
     }
-    let mut cs = Vec::with_capacity(nchunks.min(1 << 16));
-    let mut classes = Vec::with_capacity(nchunks.min(1 << 16));
-    for _ in 0..nchunks {
-        let kind: [u8; 4] = get_bytes(&sk, &mut k, 4)?.try_into().unwrap();
-        let len = get_varint(&sk, &mut k)? as usize;
-        let flags = *sk.get(k).ok_or_else(crate::corrupt)?;
-        k += 1;
-        let crc = if flags & 0x80 != 0 {
-            Some(u32::from_be_bytes(get_bytes(&sk, &mut k, 4)?.try_into().unwrap()))
-        } else {
-            None
-        };
-        let class = flags & 0x7f;
-        let data = match class {
-            PLAIN => get_bytes(&sk, &mut k, len)?,
-            FDAT if len >= 4 => get_bytes(&sk, &mut k, 4)?,
-            IDAT => &[][..],
-            _ => return Err(crate::corrupt()),
-        };
-        cs.push(C { kind, len, crc, data });
-        classes.push(class);
-    }
-    let tlen = get_varint(&sk, &mut k)? as usize;
-    let trailer = get_bytes(&sk, &mut k, tlen)?;
-    if k != sk.len() {
-        return Err(crate::corrupt());
-    }
-
-    // Images.
-    let imgs = images(&classes, |i| cs[i].data, |i| cs[i].kind);
-    let img_len = |range: &std::ops::Range<usize>| {
-        let skip = if classes[range.start] == FDAT { 4 } else { 0 };
-        cs[range.clone()].iter().map(|c| c.len - skip).sum::<usize>()
-    };
-    let payloads: Vec<Vec<u8>> = if threads > 1 && imgs.len() > 1 {
-        // The records are length-prefixed: slice them all, rebuild them in parallel (a
-        // damaged prefix is reported after the records before it).
-        let mut recs = vec![];
-        let mut bad = None;
-        for _ in &imgs {
-            let r = get_bytes(src, &mut at, 4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
-                .and_then(|n| get_bytes(src, &mut at, n));
-            match r {
-                Ok(r) => recs.push(r),
-                Err(e) => {
-                    bad = Some(e);
-                    break;
-                }
-            }
-        }
-        let workers = threads.min(recs.len()).max(1);
-        let inner = (threads / workers).max(1);
-        let res = par_map(recs.len(), workers, |i| image_payload(recs[i], img_len(&imgs[i].0), &imgs[i].1, inner));
-        let payloads = res.into_iter().collect::<Result<Vec<_>>>()?;
-        if let Some(e) = bad {
-            return Err(e);
-        }
-        payloads
-    } else {
-        let mut payloads = vec![];
-        for (range, ih) in &imgs {
-            let len = img_len(range);
-            let n = u32::from_le_bytes(get_bytes(src, &mut at, 4)?.try_into().unwrap()) as usize;
-            let rec = get_bytes(src, &mut at, n)?;
-            payloads.push(image_payload(rec, len, ih, threads)?);
-        }
-        payloads
-    };
     if at != src.len() {
         return Err(crate::corrupt());
     }
-
-    // Reassemble the file.
-    let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + trailer.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(&png::SIGNATURE);
-    let mut img = 0;
-    let mut pa = 0;
-    for (i, c) in cs.iter().enumerate() {
-        out.extend_from_slice(&(c.len as u32).to_be_bytes());
-        out.extend_from_slice(&c.kind);
-        let start = out.len();
-        match classes[i] {
-            PLAIN => out.extend_from_slice(c.data),
-            class => {
-                while img < imgs.len() && imgs[img].0.end <= i {
-                    img += 1;
-                    pa = 0;
-                }
-                if class == FDAT {
-                    out.extend_from_slice(c.data);
-                }
-                let n = c.len - if class == FDAT { 4 } else { 0 };
-                let p = payloads.get(img).ok_or_else(crate::corrupt)?;
-                out.extend_from_slice(p.get(pa..pa + n).ok_or_else(crate::corrupt)?);
-                pa += n;
-            }
-        }
-        let crc = c.crc.unwrap_or_else(|| chunk_crc(&c.kind, &out[start..]));
-        out.extend_from_slice(&crc.to_be_bytes());
-    }
-    out.extend_from_slice(trailer);
+    let out = skel.rebuild(&recs, threads)?;
     if xxhash_rust::xxh3::xxh3_64(&out) != hash {
         return Err(crate::corrupt());
     }
     Ok(out)
+}
+
+/// The chunks of a file without its image payloads, as the skeleton gives them.
+pub(crate) struct Skeleton<'a> {
+    chunks: Vec<SkChunk<'a>>,
+    classes: Vec<u8>,
+    trailer: &'a [u8],
+    /// The images, as in [`images`].
+    pub images: Vec<(std::ops::Range<usize>, Option<Ihdr>)>,
+}
+
+struct SkChunk<'a> {
+    kind: [u8; 4],
+    len: usize,
+    crc: Option<u32>,
+    /// The whole data (plain chunks) or the sequence number (fdAT).
+    data: &'a [u8],
+}
+
+impl<'a> Skeleton<'a> {
+    pub(crate) fn parse(sk: &'a [u8]) -> Result<Skeleton<'a>> {
+        let mut k = 0;
+        let nchunks = get_varint(sk, &mut k)? as usize;
+        let mut chunks = Vec::with_capacity(nchunks.min(1 << 16));
+        let mut classes = Vec::with_capacity(nchunks.min(1 << 16));
+        for _ in 0..nchunks {
+            let kind: [u8; 4] = get_bytes(sk, &mut k, 4)?.try_into().unwrap();
+            let len = get_varint(sk, &mut k)? as usize;
+            let flags = *sk.get(k).ok_or_else(crate::corrupt)?;
+            k += 1;
+            let crc = if flags & 0x80 != 0 {
+                Some(u32::from_be_bytes(get_bytes(sk, &mut k, 4)?.try_into().unwrap()))
+            } else {
+                None
+            };
+            let class = flags & 0x7f;
+            let data = match class {
+                PLAIN => get_bytes(sk, &mut k, len)?,
+                FDAT if len >= 4 => get_bytes(sk, &mut k, 4)?,
+                IDAT => &[][..],
+                _ => return Err(crate::corrupt()),
+            };
+            chunks.push(SkChunk { kind, len, crc, data });
+            classes.push(class);
+        }
+        let tlen = get_varint(sk, &mut k)? as usize;
+        let trailer = get_bytes(sk, &mut k, tlen)?;
+        if k != sk.len() {
+            return Err(crate::corrupt());
+        }
+        let images = images(&classes, |i| chunks[i].data, |i| chunks[i].kind);
+        Ok(Skeleton { chunks, classes, trailer, images })
+    }
+
+    /// The file, given the records of its images in order (without the checksum test).
+    pub(crate) fn rebuild(&self, recs: &[&[u8]], threads: usize) -> Result<Vec<u8>> {
+        let (cs, classes, imgs) = (&self.chunks, &self.classes, &self.images);
+        if recs.len() != imgs.len() {
+            return Err(crate::corrupt());
+        }
+        let img_len = |range: &std::ops::Range<usize>| {
+            let skip = if classes[range.start] == FDAT { 4 } else { 0 };
+            cs[range.clone()].iter().map(|c| c.len - skip).sum::<usize>()
+        };
+        let payloads = if threads > 1 && imgs.len() > 1 {
+            let workers = threads.min(imgs.len());
+            let inner = (threads / workers).max(1);
+            let res = par_map(imgs.len(), workers, |i| image_payload(recs[i], img_len(&imgs[i].0), &imgs[i].1, inner));
+            res.into_iter().collect::<Result<Vec<_>>>()?
+        } else {
+            let mut payloads = vec![];
+            for (rec, (range, ih)) in recs.iter().zip(imgs) {
+                payloads.push(image_payload(rec, img_len(range), ih, threads)?);
+            }
+            payloads
+        };
+
+        // Reassemble the file.
+        let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + self.trailer.len();
+        let mut out = Vec::with_capacity(total);
+        out.extend_from_slice(&png::SIGNATURE);
+        let mut img = 0;
+        let mut pa = 0;
+        for (i, c) in cs.iter().enumerate() {
+            out.extend_from_slice(&(c.len as u32).to_be_bytes());
+            out.extend_from_slice(&c.kind);
+            let start = out.len();
+            match classes[i] {
+                PLAIN => out.extend_from_slice(c.data),
+                class => {
+                    while img < imgs.len() && imgs[img].0.end <= i {
+                        img += 1;
+                        pa = 0;
+                    }
+                    if class == FDAT {
+                        out.extend_from_slice(c.data);
+                    }
+                    let n = c.len - if class == FDAT { 4 } else { 0 };
+                    let p = payloads.get(img).ok_or_else(crate::corrupt)?;
+                    out.extend_from_slice(p.get(pa..pa + n).ok_or_else(crate::corrupt)?);
+                    pa += n;
+                }
+            }
+            let crc = c.crc.unwrap_or_else(|| chunk_crc(&c.kind, &out[start..]));
+            out.extend_from_slice(&crc.to_be_bytes());
+        }
+        out.extend_from_slice(self.trailer);
+        Ok(out)
+    }
 }
 
 /// The payload (of `len` bytes) an image's record gives.

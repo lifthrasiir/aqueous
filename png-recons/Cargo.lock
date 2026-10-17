@@ -94,6 +94,7 @@ name = "flate-recons"
 version = "0.1.0"
 dependencies = [
  "recons-common",
+ "recons-formula",
 ]
 
 [[package]]
@@ -234,6 +235,7 @@ dependencies = [
  "flate-recons",
  "flate-zoo",
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]
@@ -265,6 +267,13 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "recons-common"
 version = "0.1.0"
+
+[[package]]
+name = "recons-formula"
+version = "0.1.0"
+dependencies = [
+ "recons-common",
+]
 
 [[package]]
 name = "relative-path"

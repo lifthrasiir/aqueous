@@ -407,3 +407,36 @@ matches the layout lists and 285 for other matches of length 258) and 32 distanc
    Then come the final padding value up to the byte boundary, and the trailing bytes. Every
    token's symbol needs a code. Each stream covers the data of its own tokens and stored
    blocks, and the streams follow each other in the data.
+
+## Formula module
+
+The same representation as a module of entry formulas (`recons-formula`), in
+`formula::encode` and `formula::decode`. The module is `png-recons`, version 1. Its output is
+the PNG file (the original, whose length the application gives). The file is rebuilt as in
+[Rebuilding the file](#rebuilding-the-file), from the same skeleton and image records, with
+the container left out: no magic, version, mode, checksum or length fields, and no zstd (the
+streams are stored raw; whatever holds the formula compresses them).
+
+**Parameters**: none (empty). A module application with parameters is invalid.
+
+**Inputs**: exactly three, in this order. Any other count is invalid.
+
+| slot | class | content |
+|---|---|---|
+| 0 | `png/skeleton` | the [skeleton](#skeleton), as it is (not zstd compressed) |
+| 1 | `png/index` | for each image in order, the length of its record: a varint |
+| 2 | `png/records` | the [image records](#image-records), concatenated in order, without length prefixes |
+
+The images are those that the skeleton gives. The index has one varint per image and ends
+exactly there; the records fill slot 2 exactly. Each record is as in the container: the byte
+0 and the payload, or the byte 1 and a coded record, and a coded record rebuilds a payload
+of exactly the length the skeleton gives. An image that is kept as it is stays kept (record
+0), so the formula's payloads are the file's wherever coding does not make an image smaller.
+
+The rebuilt file must have the length that the application gives. There is no checksum to
+test: the formula's own evaluation is trusted to hand the module the inputs it was made
+with.
+
+`formula::encode` gives no formula (`None`) where the container would not code the file:
+it is not a PNG file, or it cannot be coded, or no image has a coded record (the formula
+would be the file and the overhead of the slots).
