@@ -1,0 +1,231 @@
+{
+ "corpus": "/Users/senokay/.rustup/toolchains/stable-aarch64-apple-darwin/share/doc/rust/html",
+ "level": 3,
+ "threads": 4,
+ "results": [
+  {
+   "name": "L3-pack0",
+   "pack": 0,
+   "dict_size": 0,
+   "extract1": 1662.9035447300782,
+   "extractN": 6253.747294536986
+  },
+  {
+   "name": "L3-pack0-dict64K",
+   "pack": 0,
+   "dict_size": 65536,
+   "extract1": 2639.26647294562,
+   "extractN": 9593.022755100701
+  },
+  {
+   "name": "L3-pack0-dict256K",
+   "pack": 0,
+   "dict_size": 262144,
+   "extract1": 2997.887893337733,
+   "extractN": 10868.836154587301
+  },
+  {
+   "name": "L3-pack0-dict1M",
+   "pack": 0,
+   "dict_size": 1048576,
+   "extract1": 2963.593688267641,
+   "extractN": 10818.223662266852
+  },
+  {
+   "name": "L3-pack16K",
+   "pack": 16384,
+   "dict_size": 0,
+   "extract1": 2421.0441416161552,
+   "extractN": 8988.178058569374
+  },
+  {
+   "name": "L3-pack16K-dict64K",
+   "pack": 16384,
+   "dict_size": 65536,
+   "extract1": 2922.225169664148,
+   "extractN": 10510.923168696965
+  },
+  {
+   "name": "L3-pack16K-dict256K",
+   "pack": 16384,
+   "dict_size": 262144,
+   "extract1": 3377.531708699541,
+   "extractN": 11895.812950463673
+  },
+  {
+   "name": "L3-pack16K-dict1M",
+   "pack": 16384,
+   "dict_size": 1048576,
+   "extract1": 3389.569497053093,
+   "extractN": 11767.50528644973
+  },
+  {
+   "name": "L3-pack64K",
+   "pack": 65536,
+   "dict_size": 0,
+   "extract1": 3304.674222227933,
+   "extractN": 12364.886721746436
+  },
+  {
+   "name": "L3-pack64K-dict64K",
+   "pack": 65536,
+   "dict_size": 65536,
+   "extract1": 3382.352782676257,
+   "extractN": 12329.105633876714
+  },
+  {
+   "name": "L3-pack64K-dict256K",
+   "pack": 65536,
+   "dict_size": 262144,
+   "extract1": 3705.6287903976886,
+   "extractN": 13472.698422661777
+  },
+  {
+   "name": "L3-pack64K-dict1M",
+   "pack": 65536,
+   "dict_size": 1048576,
+   "extract1": 3779.486802453111,
+   "extractN": 13545.955375378522
+  },
+  {
+   "name": "L3-pack256K",
+   "pack": 262144,
+   "dict_size": 0,
+   "extract1": 4076.2038366675506,
+   "extractN": 15236.30879143311
+  },
+  {
+   "name": "L3-pack256K-dict64K",
+   "pack": 262144,
+   "dict_size": 65536,
+   "extract1": 4120.98853118619,
+   "extractN": 14854.723959052673
+  },
+  {
+   "name": "L3-pack256K-dict256K",
+   "pack": 262144,
+   "dict_size": 262144,
+   "extract1": 4127.533118735723,
+   "extractN": 15146.088114306986
+  },
+  {
+   "name": "L3-pack256K-dict1M",
+   "pack": 262144,
+   "dict_size": 1048576,
+   "extract1": 3936.125529399062,
+   "extractN": 14702.701152163221
+  },
+  {
+   "name": "L3-pack1M",
+   "pack": 1048576,
+   "dict_size": 0,
+   "extract1": 5007.226167315469,
+   "extractN": 18634.31454220277
+  },
+  {
+   "name": "L3-pack1M-dict64K",
+   "pack": 1048576,
+   "dict_size": 65536,
+   "extract1": 4967.008563842779,
+   "extractN": 18663.340560616176
+  },
+  {
+   "name": "L3-pack1M-dict256K",
+   "pack": 1048576,
+   "dict_size": 262144,
+   "extract1": 4887.439158432835,
+   "extractN": 18297.185973277108
+  },
+  {
+   "name": "L3-pack1M-dict1M",
+   "pack": 1048576,
+   "dict_size": 1048576,
+   "extract1": 4766.016469885171,
+   "extractN": 17448.52061204179
+  },
+  {
+   "name": "L3-pack4M",
+   "pack": 4194304,
+   "dict_size": 0,
+   "extract1": 5439.29050127219,
+   "extractN": 19319.781822388555
+  },
+  {
+   "name": "L3-pack4M-dict64K",
+   "pack": 4194304,
+   "dict_size": 65536,
+   "extract1": 5468.160017676261,
+   "extractN": 18575.321416556184
+  },
+  {
+   "name": "L3-pack4M-dict256K",
+   "pack": 4194304,
+   "dict_size": 262144,
+   "extract1": 5440.291211748968,
+   "extractN": 19022.62446523911
+  },
+  {
+   "name": "L3-pack4M-dict1M",
+   "pack": 4194304,
+   "dict_size": 1048576,
+   "extract1": 5371.899129552884,
+   "extractN": 19064.886367481486
+  },
+  {
+   "name": "L3-pack16M",
+   "pack": 16777216,
+   "dict_size": 0,
+   "extract1": 5686.90998653587,
+   "extractN": 16856.962172688614
+  },
+  {
+   "name": "L3-pack16M-dict64K",
+   "pack": 16777216,
+   "dict_size": 65536,
+   "extract1": 5642.98737375781,
+   "extractN": 18669.687685664136
+  },
+  {
+   "name": "L3-pack16M-dict256K",
+   "pack": 16777216,
+   "dict_size": 262144,
+   "extract1": 5655.667209383985,
+   "extractN": 18541.97317972425
+  },
+  {
+   "name": "L3-pack16M-dict1M",
+   "pack": 16777216,
+   "dict_size": 1048576,
+   "extract1": 5663.012265792729,
+   "extractN": 18307.989222057022
+  },
+  {
+   "name": "L3-packall",
+   "pack": 4611686018427387904,
+   "dict_size": 0,
+   "extract1": 5754.061479670732,
+   "extractN": 5311.143357905824
+  },
+  {
+   "name": "L3-packall-dict64K",
+   "pack": 4611686018427387904,
+   "dict_size": 65536,
+   "extract1": 5746.922207492749,
+   "extractN": 5503.370192111724
+  },
+  {
+   "name": "L3-packall-dict256K",
+   "pack": 4611686018427387904,
+   "dict_size": 262144,
+   "extract1": 5755.2678989816695,
+   "extractN": 5631.569085980705
+  },
+  {
+   "name": "L3-packall-dict1M",
+   "pack": 4611686018427387904,
+   "dict_size": 1048576,
+   "extract1": 5752.21079482324,
+   "extractN": 5597.760637654047
+  }
+ ]
+}

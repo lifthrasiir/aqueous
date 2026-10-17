@@ -1,0 +1,203 @@
+{
+ "corpus": "data/github_users",
+ "level": 3,
+ "threads": 4,
+ "results": [
+  {
+   "name": "L3-pack0",
+   "pack": 0,
+   "dict_size": 0,
+   "extract1": 484.6300740920426,
+   "extractN": 1501.4506752872578
+  },
+  {
+   "name": "L3-pack0-dict4K",
+   "pack": 0,
+   "dict_size": 4096,
+   "extract1": 2036.4659387858426,
+   "extractN": 5847.920323832234
+  },
+  {
+   "name": "L3-pack0-dict16K",
+   "pack": 0,
+   "dict_size": 16384,
+   "extract1": 2099.2970446154513,
+   "extractN": 6071.678827708551
+  },
+  {
+   "name": "L3-pack0-dict64K",
+   "pack": 0,
+   "dict_size": 65536,
+   "extract1": 2010.212199118008,
+   "extractN": 6143.106220873211
+  },
+  {
+   "name": "L3-pack4K",
+   "pack": 4096,
+   "dict_size": 0,
+   "extract1": 1397.936063403755,
+   "extractN": 4388.295739520004
+  },
+  {
+   "name": "L3-pack4K-dict4K",
+   "pack": 4096,
+   "dict_size": 4096,
+   "extract1": 2727.087799990354,
+   "extractN": 8075.098710689736
+  },
+  {
+   "name": "L3-pack4K-dict16K",
+   "pack": 4096,
+   "dict_size": 16384,
+   "extract1": 2695.819926333451,
+   "extractN": 8358.412282701562
+  },
+  {
+   "name": "L3-pack4K-dict64K",
+   "pack": 4096,
+   "dict_size": 65536,
+   "extract1": 2781.8223424459266,
+   "extractN": 7508.069758551595
+  },
+  {
+   "name": "L3-pack16K",
+   "pack": 16384,
+   "dict_size": 0,
+   "extract1": 2988.96003806548,
+   "extractN": 9125.254906452834
+  },
+  {
+   "name": "L3-pack16K-dict4K",
+   "pack": 16384,
+   "dict_size": 4096,
+   "extract1": 3767.0246083065886,
+   "extractN": 10649.196891556276
+  },
+  {
+   "name": "L3-pack16K-dict16K",
+   "pack": 16384,
+   "dict_size": 16384,
+   "extract1": 3933.0567593715386,
+   "extractN": 9163.889909064965
+  },
+  {
+   "name": "L3-pack16K-dict64K",
+   "pack": 16384,
+   "dict_size": 65536,
+   "extract1": 3514.3125158935322,
+   "extractN": 10449.11510554533
+  },
+  {
+   "name": "L3-pack64K",
+   "pack": 65536,
+   "dict_size": 0,
+   "extract1": 3929.5298535223587,
+   "extractN": 11014.193538890675
+  },
+  {
+   "name": "L3-pack64K-dict4K",
+   "pack": 65536,
+   "dict_size": 4096,
+   "extract1": 3856.9673041145206,
+   "extractN": 10775.668833985566
+  },
+  {
+   "name": "L3-pack64K-dict16K",
+   "pack": 65536,
+   "dict_size": 16384,
+   "extract1": 3802.3502572808793,
+   "extractN": 10541.699672143368
+  },
+  {
+   "name": "L3-pack64K-dict64K",
+   "pack": 65536,
+   "dict_size": 65536,
+   "extract1": 3565.9375751992693,
+   "extractN": 10710.13591999307
+  },
+  {
+   "name": "L3-pack256K",
+   "pack": 262144,
+   "dict_size": 0,
+   "extract1": 4025.964990774023,
+   "extractN": 10252.296491304569
+  },
+  {
+   "name": "L3-pack256K-dict4K",
+   "pack": 262144,
+   "dict_size": 4096,
+   "extract1": 4169.11685671985,
+   "extractN": 10377.875809831794
+  },
+  {
+   "name": "L3-pack256K-dict16K",
+   "pack": 262144,
+   "dict_size": 16384,
+   "extract1": 4200.31179309965,
+   "extractN": 10365.300094209852
+  },
+  {
+   "name": "L3-pack256K-dict64K",
+   "pack": 262144,
+   "dict_size": 65536,
+   "extract1": 3980.0286040431415,
+   "extractN": 10006.707801063687
+  },
+  {
+   "name": "L3-pack1M",
+   "pack": 1048576,
+   "dict_size": 0,
+   "extract1": 4326.5699680108555,
+   "extractN": 12774.176095034058
+  },
+  {
+   "name": "L3-pack1M-dict4K",
+   "pack": 1048576,
+   "dict_size": 4096,
+   "extract1": 4366.430067981376,
+   "extractN": 13080.198323433153
+  },
+  {
+   "name": "L3-pack1M-dict16K",
+   "pack": 1048576,
+   "dict_size": 16384,
+   "extract1": 4351.093241976842,
+   "extractN": 12414.857303841454
+  },
+  {
+   "name": "L3-pack1M-dict64K",
+   "pack": 1048576,
+   "dict_size": 65536,
+   "extract1": 4404.97730200619,
+   "extractN": 11124.696832169622
+  },
+  {
+   "name": "L3-packall",
+   "pack": 4611686018427387904,
+   "dict_size": 0,
+   "extract1": 4511.857130922269,
+   "extractN": 4769.543999636889
+  },
+  {
+   "name": "L3-packall-dict4K",
+   "pack": 4611686018427387904,
+   "dict_size": 4096,
+   "extract1": 4814.413145601007,
+   "extractN": 4784.91493080989
+  },
+  {
+   "name": "L3-packall-dict16K",
+   "pack": 4611686018427387904,
+   "dict_size": 16384,
+   "extract1": 4783.768072118663,
+   "extractN": 4653.639682607236
+  },
+  {
+   "name": "L3-packall-dict64K",
+   "pack": 4611686018427387904,
+   "dict_size": 65536,
+   "extract1": 4789.507780602624,
+   "extractN": 4674.83779815077
+  }
+ ]
+}
