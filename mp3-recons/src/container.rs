@@ -50,7 +50,7 @@ fn stored(input: &[u8]) -> Vec<u8> {
 pub type Sizes = Vec<(usize, usize)>;
 
 /// The stream compressed, if that makes it smaller.
-fn pack(b: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn pack(b: &[u8]) -> Option<Vec<u8>> {
     let z = if b.len() > 16 { zstd::bulk::compress(b, ZSTD_LEVEL).unwrap() } else { Vec::new() };
     (!z.is_empty() && z.len() < b.len()).then_some(z)
 }

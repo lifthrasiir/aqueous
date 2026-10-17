@@ -65,6 +65,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]
@@ -86,6 +87,13 @@ name = "recons-common"
 version = "0.1.0"
 dependencies = [
  "zstd",
+]
+
+[[package]]
+name = "recons-formula"
+version = "0.1.0"
+dependencies = [
+ "recons-common",
 ]
 
 [[package]]

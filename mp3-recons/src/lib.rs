@@ -4,6 +4,7 @@
 
 pub mod codec;
 pub mod container;
+pub mod formula;
 pub mod frame;
 pub mod huff;
 pub mod huff_tables;

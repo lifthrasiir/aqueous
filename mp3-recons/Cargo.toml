@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 recons-common = { path = "../recons-common", features = ["zstd"] }
+recons-formula = { path = "../recons-formula" }
 memchr = "2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"

@@ -21,6 +21,7 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119.
 10. [Reconstruction](#10-reconstruction)
 11. [Validation](#11-validation)
 12. [Encoder](#12-encoder)
+13. [Formula module](#13-formula-module)
 - [Appendix A: tables](#appendix-a-tables)
 
 ## 1. Conventions
@@ -939,6 +940,42 @@ The encoder MUST ensure that every requirement of 10.2 holds for what it writes.
 
 The reference encoder compresses a byte stream with zstd (level 1) if it is longer than 16
 bytes and the compressed data is strictly shorter; otherwise it stores it plain.
+
+## 13. Formula module
+
+The coded form can also be given as an application of a module of entry formulas
+(recons-formula), without the container around it: `mp3_recons::formula::encode` gives the
+formula, `formula::decode` is the module.
+
+- **Module**: name `mp3-recons`, version 1. Version 1 uses the format of this document
+  (version 0) and `model/builtin.bin`, which stays compiled in.
+- **Params**: none (empty). A decoder MUST reject non-empty params.
+- **Output length**: the length `len` of the application is the length of the original file.
+  The decoder MUST fail if its output is not `len` bytes.
+- **Inputs**: exactly ten slots, each stored raw (the archive compresses them):
+
+| Slot | Class | Contents | Container field |
+|---|---|---|---|
+| 0 | `mp3/segs` | SEGS (5.1) | byte stream 0 |
+| 1 | `mp3/junk` | JUNK (5.2) | byte stream 1 |
+| 2 | `mp3/headers` | HDR (5.3) | byte stream 2 |
+| 3 | `mp3/crc` | CRC (5.4) | byte stream 3 |
+| 4 | `mp3/tailbits` | TAIL bit string | byte stream 4 |
+| 5 | `mp3/rawgr` | RAWGR bit string | byte stream 5 |
+| 6 | `mp3/gaps` | GAPS bit string | byte stream 6 |
+| 7 | `mp3/side` | SIDE, range coded | byte stream 7 |
+| 8 | `mp3/rans` | rANS words, u32 LE each; the length is a multiple of 4 | rANS words |
+| 9 | `mp3/rawbits` | raw bit stream | raw bit stream |
+
+Decoding is sections 3 to 10 on these streams. Not carried over from the container: magic,
+version and mode; `hash` (the check of section 11 is left to the evaluator); `len` (the
+application's length); the zstd layer of the byte streams (slots are plain); `tail_bits`,
+`rawgr_bits`, `gap_bits` and `raw_bits` (informational, section 2); `n_words` (the length of
+slot 8 divided by 4). Slot 9 is read as in the container, where it is all remaining bytes.
+
+The encoder gives no formula (the container would be stored, 12.1) where the coded
+container, with its zstd layer as in 12.5, would be at least as long as the input plus 9
+bytes, or if coding fails.
 
 ## Appendix A: tables
 
