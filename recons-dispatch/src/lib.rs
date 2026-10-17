@@ -6,8 +6,9 @@
 //!   streams; the rest of the image is sliced in between.
 //! - gzip and zlib: the container sliced around flate-recons on the DEFLATE stream (data and
 //!   record), and the data recompressed in turn, up to [`Options::depth`] formats deep.
-//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF and SQLite: the recompressor taken whole,
-//!   applied to its container (see [`native`]).
+//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF and SQLite: the recompressor's own formula,
+//!   its module applied to its streams, and files it embeds (PDF's DEFLATE streams and images,
+//!   PSD's and JPEG's embedded files) applied to theirs (see [`native`]).
 //!
 //! [`compress`] and [`decompress`] store the formula on its own, in the formula container
 //! ([`recons_formula::container`], with the module numbers of [`native::IDS`]).
@@ -35,7 +36,7 @@ pub use detect::{Format, detect};
 pub use native::Native;
 pub use recons_formula::{Formula, Module, Node};
 
-use native::Whole;
+use native::Recons;
 use recons_formula::{Stream, container};
 
 #[derive(Debug, Clone)]
@@ -84,13 +85,13 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32) -> Formula {
                 Format::Pe => pe::pe(d, opt),
                 Format::Gzip => flate::gzip(d, opt, depth),
                 Format::Zlib => flate::zlib(d, opt, depth),
-                Format::Png => whole(&native::PNG, d, opt),
-                Format::Jpeg => whole(&native::JPEG, d, opt),
-                Format::Mp3 => whole(&native::MP3, d, opt),
-                Format::Flac => whole(&native::FLAC, d, opt),
-                Format::Psd => whole(&native::PSD, d, opt),
-                Format::Pdf => whole(&native::PDF, d, opt),
-                Format::Sqlite => whole(&native::SQLITE, d, opt),
+                Format::Png => recons(&native::PNG, d, opt),
+                Format::Jpeg => recons(&native::JPEG, d, opt),
+                Format::Mp3 => recons(&native::MP3, d, opt),
+                Format::Flac => recons(&native::FLAC, d, opt),
+                Format::Psd => recons(&native::PSD, d, opt),
+                Format::Pdf => recons(&native::PDF, d, opt),
+                Format::Sqlite => recons(&native::SQLITE, d, opt),
             }))
             .ok()
             .flatten()
@@ -98,22 +99,21 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32) -> Formula {
         .unwrap_or_else(|| Formula::raw("raw", d.to_vec()))
 }
 
-/// The recompressor `w` on `d`, if it makes it smaller (a stored fallback does not).
-fn whole(w: &Whole, d: &[u8], opt: &Options) -> Option<Formula> {
-    let c = (w.compress)(d, opt.threads);
-    let module = w.module();
-    if c.len() >= d.len() || !verified(opt, module, &[], &[&c], d) {
+/// The formula of recompressor `r` on `d`, if it makes one. Whether coding pays off is the
+/// recompressor's call (as for its container): the streams are not compressed yet, so their
+/// size says little.
+fn recons(r: &Recons, d: &[u8], opt: &Options) -> Option<Formula> {
+    let f = (r.encode)(d, opt.threads)?;
+    if opt.verify && !f.eval(&Native { threads: opt.threads }).is_ok_and(|out| out == d) {
         return None;
     }
-    let mut f = Formula::default();
-    let input = f.push(w.name, c);
-    f.root = Node::apply(module, vec![], vec![input], d.len() as u64);
     Some(f)
 }
 
 /// Unless verification is off, whether `m` makes `expect` of `inputs`.
 pub(crate) fn verified(opt: &Options, m: Module, params: &[u8], inputs: &[&[u8]], expect: &[u8]) -> bool {
-    !opt.verify || Native { threads: opt.threads }.run(m, params, inputs).is_ok_and(|out| out == expect)
+    !opt.verify
+        || Native { threads: opt.threads }.run(m, params, inputs, expect.len() as u64).is_ok_and(|out| out == expect)
 }
 
 /// Bytes of the streams of `f` by class, largest first.

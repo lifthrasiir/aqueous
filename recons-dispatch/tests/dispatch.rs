@@ -73,14 +73,14 @@ fn raw_fallback() {
 }
 
 #[test]
-fn whole_fixtures() {
+fn recons_fixtures() {
     let opt = Options::default();
     for (path, module) in [
-        ("flac-recons/tests/data/s16_f5.flac", native::FLAC.name),
-        ("mp3-recons/tests/data/cbr128.mp3", native::MP3.name),
-        ("mp3-recons/tests/data/tags.mp3", native::MP3.name),
-        ("jpeg-recons/tests/data/prog_script_recode.jpg", native::JPEG.name),
-        ("pdf-recons/tests/data/gradient.jpg", native::JPEG.name),
+        ("flac-recons/tests/data/s16_f5.flac", native::FLAC.module.name),
+        ("mp3-recons/tests/data/cbr128.mp3", native::MP3.module.name),
+        ("mp3-recons/tests/data/tags.mp3", native::MP3.module.name),
+        ("jpeg-recons/tests/data/prog_script_recode.jpg", native::JPEG.module.name),
+        ("pdf-recons/tests/data/gradient.jpg", native::JPEG.module.name),
     ] {
         let f = roundtrip(&fixture(path), &opt);
         assert_eq!(modules(&f), [module], "{path}");
@@ -91,7 +91,7 @@ fn whole_fixtures() {
 fn gzip_nested() {
     let flac = fixture("flac-recons/tests/data/s16_f5.flac");
     let f = roundtrip(&gzip(&flac), &Options::default());
-    assert_eq!(modules(&f), [native::FLATE.name, native::FLAC.name]);
+    assert_eq!(modules(&f), [native::FLATE.name, native::FLAC.module.name]);
 
     // Trailing bytes after the member are kept.
     let mut d = gzip(&text(100_000));

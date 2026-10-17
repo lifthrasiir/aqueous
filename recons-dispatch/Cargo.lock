@@ -93,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]
@@ -102,6 +103,7 @@ name = "flate-recons"
 version = "0.1.0"
 dependencies = [
  "recons-common",
+ "recons-formula",
 ]
 
 [[package]]
@@ -141,6 +143,7 @@ dependencies = [
  "memchr",
  "rayon",
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]
@@ -185,6 +188,7 @@ version = "0.1.0"
 dependencies = [
  "memchr",
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]
@@ -200,6 +204,7 @@ dependencies = [
  "png-recons",
  "rayon",
  "recons-common",
+ "recons-formula",
  "simd-adler32",
  "xxhash-rust",
  "zstd",
@@ -218,6 +223,7 @@ dependencies = [
  "crc32fast",
  "flate-recons",
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]
@@ -231,6 +237,7 @@ dependencies = [
  "png-recons",
  "rayon",
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]
@@ -309,6 +316,7 @@ name = "sqlite-recons"
 version = "0.1.0"
 dependencies = [
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]

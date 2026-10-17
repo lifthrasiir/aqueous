@@ -36,7 +36,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
   - 어떤 파일이든 혼자 복원할 수 있다(`Archive::get`, `gitr x`).
 - 엔트리 식 쪽 크레이트.
   - `recons-formula/`: 재압축기가 내놓는 엔트리 식(§4.2)의 데이터 모델. 아직 배치되지 않은 스트림(클래스 이름 포함) 위의 `slice`/`concat`/`apply`와, 모듈을 네이티브로 돌리는 엄격한 참조 평가기가 있다. `ref`와 `apply`의 자원 선언은 아카이브 쪽 일이라 없다. 리소스는 아직 쓰는 모듈이 없어서 없다. `container`는 식 하나를 단독 파일로 담는다. 매직 `69 04 5f ae 69 5a`(`aQRfrmla`) 다음에 u16le 서술 길이(0은 예약)가 오고, 이어서 스택 기계 서술과, 모든 스트림을 이어 붙인 스트림 하나가 온다. 모듈 번호(0x80 이상)는 `recons-dispatch`의 `native::IDS`가 정한다.
-  - `recons-dispatch/`: 매직 바이트로 재압축기를 고르고 결과를 엔트리 식으로 돌려준다. PE는 코드 섹션마다 x86 disfilter를 `apply`해 44개 스트림을 입력으로 두고, gzip과 zlib은 컨테이너를 `slice`로 두고 flate-recons를 `apply`하며 평문을 다시 재귀 처리한다(합성, §4.5). 나머지 포맷은 재압축기의 컨테이너 전체를 입력 하나로 받는 모듈이다(부록 A의 걷어낼 것들이 아직 남아 있음). 기본값으로 모듈을 돌려 왕복 검증하고(§6), 실패하거나 줄지 않으면 원본 `slice`로 남긴다.
+  - `recons-dispatch/`: 매직 바이트로 재압축기를 고르고 결과를 엔트리 식으로 돌려준다. PE는 코드 섹션마다 x86 disfilter를 `apply`해 44개 스트림을 입력으로 두고, gzip과 zlib은 컨테이너를 `slice`로 두고 flate-recons를 `apply`하며 평문을 다시 재귀 처리한다(합성, §4.5). 나머지 포맷은 각 재압축기의 `formula` 모듈을 쓴다. 컨테이너의 스트림이 그대로 입력 슬롯이 되고, 매직·버전·체크섬·길이·내부 zstd는 빠진다(부록 A). pdf·psd·jpeg가 품은 파일(DEFLATE 스트림, PNG, JPEG, 임베디드 PSD)은 그 재압축기 모듈의 `apply`로 식에 들어간다. 기본값으로 모듈을 돌려 왕복 검증하고(§6), 실패하거나 줄지 않으면 원본 `slice`로 남긴다.
 - `scripts/`: 측정 스크립트. `zstd_dict_*.py`와 `zstd-dict-*`는 solid 압축, 프레임 크기, zstd 사전의 조합을 비교한 벤치마크와 그 결과이다(§3).
 - 공용 크레이트.
   - `recons-common/`: 재압축기들이 공유하는 부품. LEB128, rANS 두 종류(`rans64`: 정적 alias 테이블, mp3·flac / `rans32`: 파일별 테이블, png·psd·pdf), 포맷 자체의 MSB-first 비트 I/O, 힙 계량용 allocator.
@@ -767,3 +767,4 @@ png, jpeg, mp3, flac, psd, pdf, sqlite, obj-recons의 디코더는 모두 "스�
   - jpeg-recons는 깊이 3까지 재귀한다.
   - pdf-recons는 jpeg-recons, png-recons, flate-recons를 부른다. png 모드는 PNG 예측기가 걸린 이미지 스트림을 *합성한 PNG 파일*로 감싸서 png-recons에 넘긴다. 식으로 끌어올리면 이 래퍼는 어댑터 모듈이나 png 모듈의 별도 진입점이 된다.
   - 임베디드 파일은 출력 안에서 연속된 구간이므로 식으로 끌어올릴 수 있다(§4.5).
+  - 각 재압축기의 `formula` 모듈(FORMAT.md의 "Formula module")은 이렇게 끌어올렸다. 자식 파일은 자식 모듈의 `apply`이고 부모 모듈은 그 출력을 입력 슬롯으로 받아 자리에 놓기만 한다. pdf의 png 래퍼는 png 모듈이 합성 PNG 파일을 내고 pdf 모듈이 거기서 이미지 데이터를 꺼내는 방식으로 남았다.
