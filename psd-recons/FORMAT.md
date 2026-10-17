@@ -35,6 +35,7 @@ Other formats this one embeds are specified elsewhere:
 9. [ZIP channels](#9-zip-channels)
 10. [Compressor](#10-compressor)
 11. [Appendix: level weights](#appendix-level-weights)
+12. [Formula module](#formula-module)
 
 ## 1. Conventions
 
@@ -1043,3 +1044,45 @@ eight, `l = 0 .. 63`:
     881744    1048576    1246976    1482912    1763488    2097152    2493952    2965824
    3526976    4194304    4987904    5931648    7053952    8388608    9975808   11863296
 ```
+
+## Formula module
+
+The same representation as a module of entry formulas (`recons-formula`), in
+`formula::encode` and `formula::decode`. The module is `psd-recons`, version 1. Its output is
+the PSD or PSB file (the original, whose length the application gives). The file is rebuilt as
+in [3.7](#37-decompression) from the same spans, groups, skeleton and model stream, with the
+container left out: no magic, version, checksum or length fields, the skeleton not zstd
+compressed (the streams are stored raw; whatever holds the formula compresses them), and the
+embedded files not decoded by the module.
+
+**Parameters**: none (empty). A module application with parameters is invalid.
+
+**Inputs**: exactly four, in this order. Any other count is invalid.
+
+| slot | class | content |
+|---|---|---|
+| 0 | `psd/head` | the head (3.2) without its first two fields: no xxh3 and no `total` |
+| 1 | `psd/skeleton` | the skeleton (3.5), the bytes outside the spans, as they are |
+| 2 | (nodes of the children) | the bytes of the embedded files (spans of kind 16), one after another, in span order |
+| 3 | `psd/model` | the model stream (section 5) |
+
+The head is the varint number of spans, the spans (3.3), the varint number of groups and the
+groups (3.4), and must use up the stream. `total` is the length the application gives (at
+most 2^42). An embedded file is a span of kind 16 whatever its format (kinds 17 and 18 are
+invalid here): it has no stream of its own, and the head does not say whether it is a PSD,
+a PNG or a JPEG. Slot 2 is exactly the concatenation of the bytes of these spans, each as
+long as its span; the module copies each into its span and does not interpret it. In a
+formula, slot 2 is not a stream of its own but the concatenation of one node per embedded file: the
+application of the module of its format (`psd-recons`, `png-recons`, `jpeg-recons`) to its
+formula, or, for a file that is not coded, nothing: it is not a span then, and its bytes stay
+in the skeleton. The depth limit (3.6) is a choice of the compressor and is not checked.
+
+The skeleton has exactly `total − Σ len` bytes. The model stream is one slot: its chunks
+(section 5) follow each other and delimit themselves, so no index is needed. The rebuilt
+file has the length the application gives. There is no checksum to test: the formula's own
+evaluation is trusted to hand the module the inputs it was made with.
+
+`formula::encode` gives no formula (`None`) where the container would store the file: it
+does not parse as a PSD/PSB, it has no span, or coding fails. An embedded file is coded as a
+child formula when the streams of that formula together are smaller than the file (the
+container's rule, with the size of the streams for the size of the container).

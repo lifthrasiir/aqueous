@@ -10,6 +10,7 @@ recons-common = { path = "../recons-common" }
 flate-recons = { path = "../flate-recons" }
 png-recons = { path = "../png-recons" }
 jpeg-recons = { path = "../jpeg-recons" }
+recons-formula = { path = "../recons-formula" }
 rayon = "1.12.0"
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

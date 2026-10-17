@@ -10,6 +10,7 @@
 
 pub mod composite;
 pub mod container;
+pub mod formula;
 pub mod model;
 pub mod packbits;
 pub mod pixels;
