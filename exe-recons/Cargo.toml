@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["encode", "decode"]
@@ -17,7 +17,7 @@ log = "0.4.21"
 mini-alloc = "0.4.2"
 
 [dev-dependencies]
-env_logger = "0.11.3"
+zstd = { version = "0.13", features = ["zstdmt"] }
 
 [profile.release-wasm]
 inherits = "release"

@@ -1494,60 +1494,6 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    // Depends on local files of the original author.
-    #[cfg(windows)]
-    #[test]
-    fn test_disfilter() -> std::io::Result<()> {
-        use std::env;
-        use std::fs::File;
-        use std::io::{Read, Seek, SeekFrom, Write};
-        use std::iter;
-        use std::time::Instant;
-
-        use crate::format::pe::locate_code;
-
-        env::set_var("RUST_LOG", "trace");
-        env_logger::init();
-
-        let mut f = File::open(r"c:\Program Files\ImageMagick-7.1.1-Q16-HDRI\ffmpeg.exe")?;
-        let Some(&(origin, offset, size)) = locate_code(&mut f)?.first() else {
-            panic!("no executable section");
-        };
-        f.seek(SeekFrom::Start(offset))?;
-        let mut input = vec![0u8; size];
-        f.read_exact(&mut input)?;
-        File::create(r"x:\unfiltered.bin")?.write_all(&input)?;
-
-        let start = Instant::now();
-        let streams = encode(input.clone(), origin, true).expect("failed to encode");
-        let enc_rate = size as f64 / start.elapsed().as_secs_f64() / 1e6;
-        streams.write_to(&mut File::create(r"x:\filtered.bin")?)?;
-
-        let start = Instant::now();
-        let recons = decode(&(&streams).into(), true).expect("round trip failed");
-        let dec_rate = size as f64 / start.elapsed().as_secs_f64() / 1e6;
-        if input != recons {
-            let mismatch = iter::zip(&input, &recons)
-                .position(|(a, b)| a != b)
-                .unwrap();
-            let lo = mismatch.max(15) - 15;
-            let hi = mismatch + 15;
-            panic!(
-                "input != recons\n    \
-                 Input:  {mismatch}/{} {:02X?}\n    \
-                 Recons: {mismatch}/{} {:02X?}",
-                input.len(),
-                &input[lo..hi.min(input.len())],
-                recons.len(),
-                &recons[lo..hi.min(recons.len())],
-            );
-        }
-
-        eprintln!("Disfilter: encoding {enc_rate:.2} MB/s, decoding {dec_rate:.2} MB/s");
-
-        Ok(())
-    }
-
     #[test]
     fn test_call_cache() {
         let mut expected = vec![
