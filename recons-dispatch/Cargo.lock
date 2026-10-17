@@ -288,6 +288,9 @@ dependencies = [
 [[package]]
 name = "recons-formula"
 version = "0.1.0"
+dependencies = [
+ "recons-common",
+]
 
 [[package]]
 name = "shlex"

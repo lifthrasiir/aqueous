@@ -1,6 +1,7 @@
 use std::io::Write;
 
-use recons_dispatch::{Formula, Native, Node, Options, native, recompress};
+use recons_dispatch::{Formula, Native, Node, Options, compress, decompress, native, recompress};
+use recons_formula::container;
 
 fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(format!("{}/../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -11,11 +12,14 @@ fn modules(f: &Formula) -> Vec<&'static str> {
     f.applies().iter().map(|a| a.module.name).collect()
 }
 
-/// Recompresses `d`, checking that the formula evaluates back to it.
+/// Recompresses `d`, checking that the formula evaluates back to it, also through the
+/// container.
 fn roundtrip(d: &[u8], opt: &Options) -> Formula {
     let f = recompress(d, opt);
     assert_eq!(f.len(), d.len() as u64);
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
+    let c = container::encode(&f, &native::IDS).unwrap();
+    assert!(decompress(&c, 1).unwrap() == d, "container does not decompress to the input:\n{f}");
     f
 }
 
@@ -40,6 +44,23 @@ fn zlib(d: &[u8], level: u32) -> Vec<u8> {
     let mut e = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(level));
     e.write_all(d).unwrap();
     e.finish().unwrap()
+}
+
+#[test]
+fn container_files() {
+    let opt = Options::default();
+    let mut d = gzip(&text(10_000));
+    let c = compress(&d, &opt);
+    assert_eq!(c[..6], container::MAGIC);
+    assert_eq!(decompress(&c, 1).unwrap(), d);
+    d.clear();
+    assert_eq!(decompress(&compress(&d, &opt), 1).unwrap(), d);
+    // The disfilter's 44 streams become offsets and lengths into one stream.
+    let (d, _) = pe();
+    let c = compress(&d, &opt);
+    let streams: usize = recompress(&d, &opt).streams.iter().map(|s| s.data.len()).sum();
+    assert!(c.len() - streams < 300, "{} for {streams} bytes of streams", c.len());
+    assert_eq!(decompress(&c, 1).unwrap(), d);
 }
 
 #[test]

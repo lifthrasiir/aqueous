@@ -20,13 +20,19 @@ pub(crate) fn x86_params(origin: u64, sentinel_size: u8, is64: bool) -> Vec<u8> 
     p
 }
 
-/// A recompressor taken whole: its container (magic, version, internal zstd and checksum
-/// included) is the module's single input, and the version is the container's. What the
-/// archive would take over from the container stays in for now (appendix A).
+/// A recompressor taken whole: its container (magic, version or mode, internal zstd and
+/// checksum included) is the module's single input. What the archive would take over from the
+/// container stays in for now (appendix A).
 pub struct Whole {
     pub name: &'static str,
     pub compress: fn(&[u8], usize) -> Vec<u8>,
     pub decompress: fn(&[u8], usize) -> std::result::Result<Vec<u8>, String>,
+}
+
+impl Whole {
+    pub const fn module(&self) -> Module {
+        Module { name: self.name, version: 1 }
+    }
 }
 
 fn msg(e: impl std::fmt::Debug) -> String {
@@ -71,6 +77,20 @@ pub const SQLITE: Whole = Whole {
 
 pub const WHOLE: [&Whole; 7] = [&PNG, &JPEG, &MP3, &FLAC, &PSD, &PDF, &SQLITE];
 
+/// Numbers of the modules in the formula container ([`recons_formula::container`]). They are
+/// stored, so a number is never reused for another module.
+pub const IDS: [(u64, Module); 9] = [
+    (0x80, X86),
+    (0x81, FLATE),
+    (0x82, PNG.module()),
+    (0x83, JPEG.module()),
+    (0x84, MP3.module()),
+    (0x85, FLAC.module()),
+    (0x86, PSD.module()),
+    (0x87, PDF.module()),
+    (0x88, SQLITE.module()),
+];
+
 /// Runs every module of this crate natively. The output does not depend on `threads`.
 #[derive(Debug, Clone, Copy)]
 pub struct Native {
@@ -103,7 +123,7 @@ impl Native {
         } else if m == FLATE {
             let &[data, record] = inputs else { return Err("bad inputs".into()) };
             flate_recons::reconstruct_with_threads(data, record, threads).map_err(msg)
-        } else if let Some(w) = WHOLE.iter().find(|w| w.name == m.name) {
+        } else if let Some(w) = WHOLE.iter().find(|w| w.module() == m) {
             let &[c] = inputs else { return Err("bad inputs".into()) };
             (w.decompress)(c, threads)
         } else {

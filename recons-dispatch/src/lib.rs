@@ -9,6 +9,9 @@
 //! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF and SQLite: the recompressor taken whole,
 //!   applied to its container (see [`native`]).
 //!
+//! [`compress`] and [`decompress`] store the formula on its own, in the formula container
+//! ([`recons_formula::container`], with the module numbers of [`native::IDS`]).
+//!
 //! Whatever is not recognised, turned down by its recompressor, not made smaller, or (with
 //! [`Options::verify`]) not reconstructed by its module is kept raw: a slice of the input.
 //! [`Native`] evaluates the formulas.
@@ -33,7 +36,7 @@ pub use native::Native;
 pub use recons_formula::{Formula, Module, Node};
 
 use native::Whole;
-use recons_formula::Stream;
+use recons_formula::{Stream, container};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -56,6 +59,20 @@ impl Default for Options {
 /// `d` as a formula, with the recompressor for its format if any takes it.
 pub fn recompress(d: &[u8], opt: &Options) -> Formula {
     recompress_at(d, opt, 0)
+}
+
+/// `d` in the formula container. A formula whose description does not fit (over 65535 bytes)
+/// is given up for `d` raw.
+pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
+    container::encode(&recompress(d, opt), &native::IDS).unwrap_or_else(|_| {
+        container::encode(&Formula::raw("raw", d.to_vec()), &native::IDS).expect("a raw formula fits")
+    })
+}
+
+/// The file in formula container `c`. Nothing checks the output: that is left to whatever
+/// holds the container (R8).
+pub fn decompress(c: &[u8], threads: usize) -> recons_formula::Result<Vec<u8>> {
+    container::decode(c, &native::IDS, "formula")?.eval(&Native { threads })
 }
 
 /// [`recompress`] for data `depth` formats deep.
@@ -84,7 +101,7 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32) -> Formula {
 /// The recompressor `w` on `d`, if it makes it smaller (a stored fallback does not).
 fn whole(w: &Whole, d: &[u8], opt: &Options) -> Option<Formula> {
     let c = (w.compress)(d, opt.threads);
-    let module = Module { name: w.name, version: u16::from_le_bytes(*c.get(6..8)?.first_chunk()?) };
+    let module = w.module();
     if c.len() >= d.len() || !verified(opt, module, &[], &[&c], d) {
         return None;
     }
