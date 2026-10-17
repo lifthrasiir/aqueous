@@ -32,6 +32,7 @@ pub mod bits;
 pub mod code;
 pub mod deflate;
 pub mod detect;
+pub mod formula;
 pub mod header;
 pub mod huffman;
 pub mod inflate;
