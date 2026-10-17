@@ -97,7 +97,7 @@ impl<'a> Streams<'a> {
 }
 
 /// A stream's fields must use it up exactly.
-fn fully_read(d: &[u8], p: usize, what: &str) -> Result<(), Error> {
+pub(crate) fn fully_read(d: &[u8], p: usize, what: &str) -> Result<(), Error> {
     if p != d.len() { Err(Error(format!("excess data in {what} stream"))) } else { Ok(()) }
 }
 
@@ -106,7 +106,7 @@ thread_local! {
     static BUFS: std::cell::RefCell<(Vec<Coefs>, Clean)> = std::cell::RefCell::new((Vec::new(), Clean::default()));
 }
 
-fn with_bufs<R>(f: impl FnOnce(&mut Vec<Coefs>, &mut Clean) -> R) -> R {
+pub(crate) fn with_bufs<R>(f: impl FnOnce(&mut Vec<Coefs>, &mut Clean) -> R) -> R {
     let (mut coefs, mut clean) = BUFS.with(|b| std::mem::take(&mut *b.borrow_mut()));
     let r = f(&mut coefs, &mut clean);
     BUFS.with(|b| *b.borrow_mut() = (coefs, clean));
@@ -168,17 +168,17 @@ fn find_embedded(blob: &[u8]) -> Vec<(usize, usize)> {
 // ---------------------------------------------------------------- compression
 
 /// Main-image part of a coded container: blob, scan info stream, per-scan streams, model.
-struct Core<'a> {
-    progressive: bool,
-    blob: Vec<u8>,
-    info: Vec<u8>,
+pub(crate) struct Core<'a> {
+    pub progressive: bool,
+    pub blob: Vec<u8>,
+    pub info: Vec<u8>,
     /// raw scan data / truncated tails, in scan order
-    scans: Vec<Cow<'a, [u8]>>,
-    model: fast::Encoded,
-    nraw: usize,
+    pub scans: Vec<Cow<'a, [u8]>>,
+    pub model: fast::Encoded,
+    pub nraw: usize,
 }
 
-fn compress_core<'a>(
+pub(crate) fn compress_core<'a>(
     input: &'a [u8],
     t: &mut Timing,
     coefs: &mut Vec<Coefs>,
@@ -236,59 +236,111 @@ fn compress_core<'a>(
     Ok(Core { progressive: j.progressive, blob, info, scans, model, nraw })
 }
 
-fn try_compress(input: &[u8], t: &mut Timing, depth: u32) -> Result<(Vec<u8>, usize), Error> {
-    let core = with_bufs(|coefs, clean| compress_core(input, t, coefs, clean))?;
-    // embedded JPEGs in the blob, compressed recursively (only where it pays off)
-    let mut taken: Vec<(usize, usize)> = Vec::new();
-    let mut entries = Vec::new();
+/// An embedded JPEG of the blob: the byte range, and either its coding `coded` or (None) the
+/// index `back` of an earlier entry with the same bytes.
+pub(crate) struct Entry<C> {
+    pub start: usize,
+    pub end: usize,
+    pub coded: Option<C>,
+    pub back: usize,
+}
+
+/// The embedded JPEGs of `blob` to be coded at `depth`: those `code` gives a coding for (only
+/// where it pays off), and repeats of earlier entries.
+pub(crate) fn embedded_entries<C>(blob: &[u8], depth: u32, mut code: impl FnMut(&[u8]) -> Option<C>) -> Vec<Entry<C>> {
+    let mut entries: Vec<Entry<C>> = Vec::new();
     if depth < MAX_DEPTH {
-        for (a, b) in find_embedded(&core.blob) {
-            let bytes = &core.blob[a..b];
-            if let Some(k) = taken.iter().position(|&(x, y)| core.blob[x..y] == *bytes) {
-                taken.push((a, b));
-                entries.push((a, b, None, k));
-                continue;
-            }
-            if let Ok((c, _)) = try_compress(bytes, &mut Timing::default(), depth + 1)
-                && c.len() + 8 < bytes.len()
-            {
-                taken.push((a, b));
-                entries.push((a, b, Some(c), 0));
+        for (a, b) in find_embedded(blob) {
+            let bytes = &blob[a..b];
+            if let Some(k) = entries.iter().position(|e| blob[e.start..e.end] == *bytes) {
+                entries.push(Entry { start: a, end: b, coded: None, back: k });
+            } else if let Some(c) = code(bytes) {
+                entries.push(Entry { start: a, end: b, coded: Some(c), back: 0 });
             }
         }
     }
+    entries
+}
+
+/// `head` gets the entry list: count, then per entry gap, length and kind (+ back reference).
+pub(crate) fn put_entries<C>(head: &mut Vec<u8>, entries: &[Entry<C>]) {
+    put_varint(head, entries.len() as u64);
+    let mut prev = 0;
+    for e in entries {
+        put_varint(head, (e.start - prev) as u64);
+        put_varint(head, (e.end - e.start) as u64);
+        match e.coded {
+            Some(_) => head.push(0),
+            None => {
+                head.push(1);
+                put_varint(head, e.back as u64);
+            }
+        }
+        prev = e.end;
+    }
+}
+
+/// The blob without the entries.
+pub(crate) fn cut_blob<C>(blob: &[u8], entries: &[Entry<C>]) -> Vec<u8> {
+    let mut cut = Vec::with_capacity(blob.len() - entries.iter().map(|e| e.end - e.start).sum::<usize>());
+    let mut p = 0;
+    for e in entries {
+        cut.extend_from_slice(&blob[p..e.start]);
+        p = e.end;
+    }
+    cut.extend_from_slice(&blob[p..]);
+    cut
+}
+
+/// `info` and the scan, table and stripe streams of the main image, in decoding order.
+pub(crate) trait CoreSource<'a> {
+    fn info(&mut self) -> Result<&'a [u8], Error>;
+    /// A raw scan's data or a truncated scan's tail.
+    fn scan(&mut self) -> Result<&'a [u8], Error>;
+    fn tables(&mut self) -> Result<&'a [u8], Error>;
+    /// The rANS words and the raw bits of a stripe.
+    fn stripe(&mut self) -> Result<(&'a [u8], &'a [u8]), Error>;
+    /// Nothing may be left after the last stripe.
+    fn finish(&mut self) -> Result<(), Error>;
+}
+
+impl<'a> CoreSource<'a> for Streams<'a> {
+    fn info(&mut self) -> Result<&'a [u8], Error> {
+        self.next()
+    }
+    fn scan(&mut self) -> Result<&'a [u8], Error> {
+        self.next()
+    }
+    fn tables(&mut self) -> Result<&'a [u8], Error> {
+        self.next()
+    }
+    fn stripe(&mut self) -> Result<(&'a [u8], &'a [u8]), Error> {
+        Ok((self.next()?, self.next()?))
+    }
+    fn finish(&mut self) -> Result<(), Error> {
+        Streams::finish(self)
+    }
+}
+
+fn try_compress(input: &[u8], t: &mut Timing, depth: u32) -> Result<(Vec<u8>, usize), Error> {
+    let core = with_bufs(|coefs, clean| compress_core(input, t, coefs, clean))?;
+    // embedded JPEGs in the blob, compressed recursively (only where it pays off)
+    let entries = embedded_entries(&core.blob, depth, |bytes| {
+        let (c, _) = try_compress(bytes, &mut Timing::default(), depth + 1).ok()?;
+        (c.len() + 8 < bytes.len()).then_some(c)
+    });
     let mut out = Vec::with_capacity(core.blob.len() + core.info.len() + core.model.size() + 64);
     header(&mut out, if core.progressive { V_PROGRESSIVE } else { V_SEQUENTIAL });
     let mut head = Vec::with_capacity(16 + entries.len() * 8);
     head.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(input).to_le_bytes());
-    put_varint(&mut head, entries.len() as u64);
-    let mut prev = 0;
-    for (a, b, c, k) in &entries {
-        put_varint(&mut head, (a - prev) as u64);
-        put_varint(&mut head, (b - a) as u64);
-        match c {
-            Some(_) => head.push(0),
-            None => {
-                head.push(1);
-                put_varint(&mut head, *k as u64);
-            }
-        }
-        prev = *b;
-    }
+    put_entries(&mut head, &entries);
     put_stream(&mut out, &head);
-    for (_, _, c, _) in &entries {
-        if let Some(c) = c {
+    for e in &entries {
+        if let Some(c) = &e.coded {
             put_stream(&mut out, c);
         }
     }
-    let cut_len = core.blob.len() - entries.iter().map(|(a, b, _, _)| b - a).sum::<usize>();
-    put_varint(&mut out, cut_len as u64);
-    let mut p = 0;
-    for (a, b, _, _) in &entries {
-        out.extend_from_slice(&core.blob[p..*a]);
-        p = *b;
-    }
-    out.extend_from_slice(&core.blob[p..]);
+    put_stream(&mut out, &cut_blob(&core.blob, &entries));
     put_stream(&mut out, &core.info);
     for s in &core.scans {
         put_stream(&mut out, s);
@@ -320,10 +372,58 @@ pub fn compress(input: &[u8]) -> Vec<u8> {
 
 // ---------------------------------------------------------------- decompression
 
-fn decompress_core(
+/// The entry list of a head, as (gap, length, back reference) with None for coded entries;
+/// those are invalid unless `coded_ok`.
+pub(crate) fn parse_entries(
+    head: &[u8],
+    p: &mut usize,
+    coded_ok: bool,
+) -> Result<Vec<(usize, usize, Option<usize>)>, Error> {
+    let n = get_varint(head, p)?;
+    let mut entries = Vec::new();
+    for i in 0..n {
+        let gap = get_varint(head, p)? as usize;
+        let len = get_varint(head, p)? as usize;
+        let kind = *head.get(*p).ok_or(Error("truncated".into()))?;
+        *p += 1;
+        let back = match kind {
+            0 if coded_ok => None,
+            1 => {
+                let k = get_varint(head, p)?;
+                if k >= i {
+                    return Err(Error("bad embedded reference".into()));
+                }
+                Some(k as usize)
+            }
+            _ => return Err(Error("bad embedded entry".into())),
+        };
+        entries.push((gap, len, back));
+    }
+    Ok(entries)
+}
+
+/// The blob: `cut` with the bytes of each entry put back at its gap.
+pub(crate) fn restore_blob<E: AsRef<[u8]>>(
+    cut: &[u8],
+    entries: &[(usize, usize, Option<usize>)],
+    emb: &[E],
+) -> Result<Vec<u8>, Error> {
+    let mut blob = Vec::with_capacity(cut.len() + emb.iter().map(|b| b.as_ref().len()).sum::<usize>());
+    let mut q = 0usize;
+    for ((gap, _, _), bytes) in entries.iter().zip(emb) {
+        let piece = cut.get(q..q.saturating_add(*gap)).ok_or(Error("bad embedded position".into()))?;
+        blob.extend_from_slice(piece);
+        blob.extend_from_slice(bytes.as_ref());
+        q += gap;
+    }
+    blob.extend_from_slice(&cut[q..]);
+    Ok(blob)
+}
+
+pub(crate) fn decompress_core<'a>(
     blob: &[u8],
     progressive: bool,
-    r: &mut Streams,
+    r: &mut impl CoreSource<'a>,
     t: &mut Timing,
     coefs: &mut Vec<Coefs>,
 ) -> Result<Vec<u8>, Error> {
@@ -332,7 +432,7 @@ fn decompress_core(
     if j.progressive != progressive {
         return Err(Error("version does not match the frame type".into()));
     }
-    let info = r.next()?;
+    let info = r.info()?;
     let mut p = 0;
     let ns = get_varint(info, &mut p)?;
     if ns != j.scans.len() as u64 {
@@ -378,16 +478,15 @@ fn decompress_core(
     let mut tails = tails.into_iter().peekable();
     for k in 0..j.scans.len() {
         if raws[k] {
-            raw_data[k] = Some(r.next()?);
+            raw_data[k] = Some(r.scan()?);
         } else if let Some(&(_, mcus, bits, boundary)) = tails.peek().filter(|x| x.0 == k) {
             tails.next();
-            let tail = r.next()?.to_vec();
+            let tail = r.scan()?.to_vec();
             infos[k].truncated = Some(jpeg::Truncation { mcus, bits, tail, boundary });
         }
     }
-    let tables = r.next()?;
-    let stripes: Vec<(&[u8], &[u8])> =
-        (0..nstripes).map(|_| Ok((r.next()?, r.next()?))).collect::<Result<_, Error>>()?;
+    let tables = r.tables()?;
+    let stripes: Vec<(&[u8], &[u8])> = (0..nstripes).map(|_| r.stripe()).collect::<Result<_, Error>>()?;
     r.finish()?;
     let e = fast::Encoded::from_parts(tables, &stripes)?;
     let t1 = Instant::now();
@@ -452,26 +551,7 @@ fn try_decompress(c: &[u8], t: &mut Timing, depth: u32) -> Result<Vec<u8>, Error
     let head = r.next()?;
     let hash = u64::from_le_bytes(head.get(..8).ok_or(Error("truncated".into()))?.try_into().unwrap());
     let mut p = 8;
-    let n = get_varint(head, &mut p)?;
-    let mut entries = Vec::new(); // (gap, len, Some(back reference))
-    for i in 0..n {
-        let gap = get_varint(head, &mut p)? as usize;
-        let len = get_varint(head, &mut p)? as usize;
-        let kind = *head.get(p).ok_or(Error("truncated".into()))?;
-        p += 1;
-        let back = match kind {
-            0 if depth < MAX_DEPTH => None,
-            1 => {
-                let k = get_varint(head, &mut p)?;
-                if k >= i {
-                    return Err(Error("bad embedded reference".into()));
-                }
-                Some(k as usize)
-            }
-            _ => return Err(Error("bad embedded entry".into())),
-        };
-        entries.push((gap, len, back));
-    }
+    let entries = parse_entries(head, &mut p, depth < MAX_DEPTH)?;
     fully_read(head, p, "head")?;
     // embedded JPEGs (recursively), then the blob is restored around them
     let mut emb: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
@@ -486,16 +566,7 @@ fn try_decompress(c: &[u8], t: &mut Timing, depth: u32) -> Result<Vec<u8>, Error
         emb.push(bytes);
     }
     let cut = r.next()?;
-    let blob_len = cut.len() + emb.iter().map(|b| b.len()).sum::<usize>();
-    let mut blob = Vec::with_capacity(blob_len);
-    let mut q = 0usize;
-    for ((gap, _, _), bytes) in entries.iter().zip(&emb) {
-        let piece = cut.get(q..q.saturating_add(*gap)).ok_or(Error("bad embedded position".into()))?;
-        blob.extend_from_slice(piece);
-        blob.extend_from_slice(bytes);
-        q += gap;
-    }
-    blob.extend_from_slice(&cut[q..]);
+    let blob = restore_blob(cut, &entries, &emb)?;
     let out = with_bufs(|coefs, _| decompress_core(&blob, progressive, &mut r, t, coefs))?;
     if xxhash_rust::xxh3::xxh3_64(&out) != hash {
         return Err(Error("checksum mismatch: reconstruction differs from the original".into()));

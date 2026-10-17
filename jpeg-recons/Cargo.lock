@@ -85,6 +85,7 @@ dependencies = [
  "memchr",
  "rayon",
  "recons-common",
+ "recons-formula",
  "xxhash-rust",
  "zstd",
 ]
@@ -136,6 +137,13 @@ dependencies = [
 [[package]]
 name = "recons-common"
 version = "0.1.0"
+
+[[package]]
+name = "recons-formula"
+version = "0.1.0"
+dependencies = [
+ "recons-common",
+]
 
 [[package]]
 name = "shlex"

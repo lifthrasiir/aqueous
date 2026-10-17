@@ -627,6 +627,49 @@ checksum.
 - **Fallback**: the result is stored (version 2) if coding fails or panics, or if the coded
   container is not smaller than the stored one.
 
+## 12. Formula module
+
+The same coding as entry-formula input (recons-formula): module `jpeg-recons` version 1
+(`jpeg_recons::formula`). The module rebuilds the original from one parameter and nine input
+slots. It needs no container: magic, version, checksum, the per-stream lengths and zstd are not
+part of it, and the output length is given by the formula.
+
+**Param**: one byte, the frame type: 0 = sequential (container version 0), 1 = progressive
+(version 1). Other values are invalid. A stored input has no formula.
+
+**Inputs**, in order. The container's per-embedded, per-scan and per-stripe streams are
+concatenated into one slot each, with their lengths in `lens`.
+
+| # | class | content |
+|---|---|---|
+| 0 | `jpeg/head` | the head (3.2) without the xxh3: `n_embedded` and the entries |
+| 1 | `jpeg/embedded` | the *decoded* bytes of each kind 0 entry, concatenated in entry order |
+| 2 | `jpeg/cut` | the cut blob (3.4) |
+| 3 | `jpeg/info` | the scan info (3.5) |
+| 4 | `jpeg/scans` | the raw scan data and truncated tails (3.6), concatenated in scan order |
+| 5 | `jpeg/tables` | the tables (section 8) |
+| 6 | `jpeg/lens` | LEB128 lengths: one per entry of `scans`, then per stripe the length of its rANS words and of its raw bits |
+| 7 | `jpeg/rans` | the rANS words (little-endian bytes) of all stripes, concatenated |
+| 8 | `jpeg/bits` | the raw bits of all stripes, concatenated |
+
+Decoding follows 3.7 with these differences:
+
+- Entries are as in 3.2, with no depth limit (the formula's nesting is what it is, and the
+  compressor stops at depth 3). A kind 0 entry takes `length` bytes from the next position of
+  slot 1 instead of a nested container; the formula fills slot 1 with the formula of the
+  embedded JPEG (this module again, at depth + 1) or with its bytes. Slot 1 must be used up
+  exactly. A kind 1 entry is a copy of an earlier entry, as before, so a repeated JPEG occurs in
+  slot 1 once.
+- The counts come from the scan info (3.5) as before: the scan streams of slot 4 are the raw
+  scans and tails in scan order, with lengths from `lens`, and the stripes follow, each with two
+  lengths. Slots 4 and 6 to 8 must be used up exactly.
+- There is no checksum: the output must have the length the formula declares.
+
+The compressor makes the same choices as in section 11, except that an embedded JPEG is kept as
+kind 0 if its formula's streams are more than 8 bytes shorter than the hit, and that the
+formula is not made (the input is left as it is) where its streams are not shorter than the
+input.
+
 ## Appendix A. Zigzag order
 
 `ZIGZAG[k]`, the natural index of zigzag position `k`:
