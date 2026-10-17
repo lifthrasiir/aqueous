@@ -266,6 +266,13 @@ pub trait Modules {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>>;
 }
 
+/// A function as the modules, e.g. a `match` on `a.module` in tests.
+impl<F: Fn(&Apply, &[&[u8]]) -> Result<Vec<u8>>> Modules for F {
+    fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
+        self(a, inputs)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub String);
 
