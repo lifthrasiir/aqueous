@@ -8,6 +8,7 @@ recons-common = { path = "../recons-common", features = ["zstd"] }
 memchr = "2"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"
+recons-formula = { path = "../recons-formula" }
 
 [profile.release]
 debug = true

@@ -6,6 +6,7 @@
 pub mod codec;
 pub mod container;
 pub mod flac;
+pub mod formula;
 pub mod model;
 pub mod par;
 pub mod pcm;

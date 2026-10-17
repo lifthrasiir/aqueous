@@ -33,7 +33,7 @@ pub struct Error(pub String);
 /// What the input is: FLAC, WAV / AIFF (both coded as PCM), or raw PCM (also anything
 /// unrecognised, which is stored).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Kind {
+pub(crate) enum Kind {
     Flac,
     Wav,
     Pcm,
@@ -53,7 +53,7 @@ impl Kind {
     }
 
     /// The kind [`encode`] codes the input as.
-    fn of(input: &[u8], opt: &Options) -> Kind {
+    pub(crate) fn of(input: &[u8], opt: &Options) -> Kind {
         if opt.raw.is_some() {
             Kind::Pcm
         } else if flac::parse_metadata(input).is_some() {
@@ -152,7 +152,7 @@ fn pack(input: &[u8], kind: Kind, c: &Coded, hash: u64, threads: usize) -> (Vec<
 
 /// Encodes FLAC, or WAV / AIFF (detected), or headerless PCM if `opt.raw` is given.
 /// (`kind` is [`Kind::of`] the input.)
-fn encode(input: &[u8], opt: &Options, kind: Kind) -> Option<Coded> {
+pub(crate) fn encode(input: &[u8], opt: &Options, kind: Kind) -> Option<Coded> {
     let t = opt.threads;
     match (kind, opt.raw) {
         (_, Some(fmt)) => pcm::encode_threads(input, fmt, 0, input.len(), t),
@@ -165,7 +165,7 @@ fn encode(input: &[u8], opt: &Options, kind: Kind) -> Option<Coded> {
     }
 }
 
-fn decode(kind: Kind, c: &Coded, len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), codec::Error> {
+pub(crate) fn decode(kind: Kind, c: &Coded, len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), codec::Error> {
     if kind == Kind::Flac {
         codec::decode_threads(c, len, out, threads)
     } else {

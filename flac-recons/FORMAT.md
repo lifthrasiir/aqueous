@@ -21,6 +21,7 @@ Contents:
 11. [Validation](#11-validation)
 12. [Appendix A: built-in frequency tables](#appendix-a-built-in-frequency-tables)
 13. [Appendix B: CRCs](#appendix-b-crcs)
+14. [Formula module](#formula-module)
 
 ## 1. Conventions
 
@@ -792,3 +793,37 @@ number.
   no final XOR. It covers the header bytes from the sync code.
 - **CRC-16** (frame): polynomial `0x8005`, initial value 0, MSB-first, no reflection, no
   final XOR. It covers every byte of the frame from the sync code up to the CRC itself.
+
+## Formula module
+
+`flac_recons::formula` gives the coded form as a module of entry formulas (recons-formula)
+instead of a file: the same streams as input slots, with what the container adds around
+them left out. Module name `flac-recons`, version 1. `formula::encode_with` makes the
+formula, `formula::decode` is the module; the output has the declared length `len`.
+
+**Params**: one byte, the kind of §10 as far as decoding tells them apart. 0: FLAC (§8).
+1: PCM (§9), for WAV / AIFF and raw samples alike (the two differ only in the magic and in
+how an encoder finds the samples). Any other params are an error.
+
+**Inputs**: nine slots, always in this order, each possibly empty. Their classes are
+`flac/prefix`, `flac/layout`, `flac/junk`, `flac/headers`, `flac/subframes`, `flac/warmup`,
+`flac/rans`, `flac/raw0` and `flac/raw1`.
+
+| # | Slot | Content |
+|---|---|---|
+| 0..5 | byte streams 0..5 | the streams of §4, uncompressed (the `z = 0` form: the module has no zstd) |
+| 6 | rANS words | the W words of §4 as `u32le`, so a length that is not a multiple of 4 is an error |
+| 7 | raw bit stream 0 | the R0 bytes of §4 |
+| 8 | raw bit stream 1 | the rest of the container, i.e. the bytes after raw bit stream 0 |
+
+The slots are the container's own streams, so §5 to §9 apply to them unchanged, and the
+decoder is the same one.
+
+**Left out** relative to §2 to §4: the magic and version (the kind is in params; the stored
+version has no formula, the input is simply not coded), `len` (the application's declared
+length), `hash` (the archive verifies the output), the per-stream `v` / `raw_len` fields
+(streams are raw, the archive compresses the slots), W, R0 (the lengths of the slots).
+The bound of §11 on the work of a decoder holds with the total size of the slots in place
+of the file size; an output whose length is not `len` is an error. *(encoder)* The formula
+is made exactly where the container would code the input (§10),
+except that it does not fall back to stored when the coded form is not smaller.
