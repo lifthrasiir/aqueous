@@ -351,7 +351,8 @@ const _: () = {
 macro_rules! define_streams {
     ($($i:ident $s:literal),* $(,)?) => (
         define_streams! { @0 $($i)* }
-        #[allow(dead_code)] const STREAM_NAMES: [&str; NUM_STREAMS] = [$(stringify!($i)),*];
+        /// Names of the streams, in order.
+        pub const STREAM_NAMES: [&str; NUM_STREAMS] = [$(stringify!($i)),*];
         const STREAM_SIZES: [usize; NUM_STREAMS] = [$($s / 8),*];
     );
 
@@ -361,7 +362,8 @@ macro_rules! define_streams {
     );
 
     (@$c:tt) => (
-        const NUM_STREAMS: usize = $c;
+        /// Number of the streams; all of them are always present, possibly empty.
+        pub const NUM_STREAMS: usize = $c;
     );
 }
 
@@ -520,6 +522,21 @@ impl EncodedStreams {
         }
         self.streams[ST_OP].push(JUMPTAB);
         self.streams[ST_JUMPTAB_COUNT].push(count);
+    }
+
+    /// Virtual address of the code's first byte.
+    pub fn origin(&self) -> u64 {
+        self.origin
+    }
+
+    /// Bytes of the sentinel the decoder drops from the end.
+    pub fn sentinel_size(&self) -> u8 {
+        self.sentinel_size
+    }
+
+    /// The streams, named by [`STREAM_NAMES`].
+    pub fn streams(&self) -> &[Vec<u8>; NUM_STREAMS] {
+        &self.streams
     }
 
     pub fn write_to(&self, w: &mut impl std::io::Write) -> std::io::Result<()> {
@@ -1170,6 +1187,18 @@ pub struct DecodedStreams<'a> {
     origin: u64,
     sentinel_size: u8,
     streams: [&'a [u8]; NUM_STREAMS],
+}
+
+#[cfg(feature = "decode")]
+impl<'a> DecodedStreams<'a> {
+    /// From the parts of an [`EncodedStreams`] (see its accessors).
+    pub fn new(origin: u64, sentinel_size: u8, streams: [&'a [u8]; NUM_STREAMS]) -> Self {
+        Self {
+            origin,
+            sentinel_size,
+            streams,
+        }
+    }
 }
 
 #[cfg(all(feature = "encode", feature = "decode"))]

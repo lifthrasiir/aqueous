@@ -11,8 +11,9 @@ pub struct Code {
     pub sections: Vec<(u64, u64, usize)>,
 }
 
-pub fn locate_code(f: &mut std::fs::File) -> std::io::Result<Code> {
-    use std::io::{self, BufReader, Read, Seek, SeekFrom};
+/// Locates the executable sections of the PE image in `f`.
+pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Result<Code> {
+    use std::io::{self, BufReader, Read, SeekFrom};
 
     f.seek(SeekFrom::Start(0))?;
     let mut r = BufReader::new(f);
