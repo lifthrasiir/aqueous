@@ -67,12 +67,7 @@ fn describe(f: &Formula, n: &Node, bases: &[u64], ids: &[(u64, Module)], out: &m
             varint::put(out, ns.len() as u64);
         }
         Node::Apply(a) => {
-            let id = ids
-                .iter()
-                .find(|(_, m)| *m == a.module)
-                .map(|&(id, _)| id)
-                .filter(|&id| id >= FIRST_MODULE)
-                .ok_or_else(|| Error::new(format!("no number for {}", a.module)))?;
+            let id = module_id(ids, a.module)?;
             a.inputs.iter().try_for_each(|n| describe(f, n, bases, ids, out))?;
             varint::put(out, id);
             varint::put(out, a.params.len() as u64);
@@ -82,6 +77,39 @@ fn describe(f: &Formula, n: &Node, bases: &[u64], ids: &[(u64, Module)], out: &m
         }
     }
     Ok(())
+}
+
+fn module_id(ids: &[(u64, Module)], m: Module) -> Result<u64> {
+    ids.iter()
+        .find(|&&(_, i)| i == m)
+        .map(|&(id, _)| id)
+        .filter(|&id| id >= FIRST_MODULE)
+        .ok_or_else(|| Error::new(format!("no number for {m}")))
+}
+
+/// The most bytes of description [`encode`] takes.
+pub const MAX_DESCRIPTION: usize = u16::MAX as usize;
+
+/// Bytes of the description of node `n` at most, wherever the streams of its formula are among
+/// others (up to 32 GiB of them): the bounds of formulas put together ([`Formula::embed`]) add
+/// up, with the nodes around them. Fails on modules without a number.
+pub fn description_bound(n: &Node, ids: &[(u64, Module)]) -> Result<usize> {
+    Ok(match n {
+        // offsets of up to 35 bits
+        &Node::Slice { start, len, .. } => 1 + varint::len(start).max(5) + varint::len(len),
+        Node::Concat(ns) => {
+            ns.iter().map(|n| description_bound(n, ids)).sum::<Result<usize>>()? + 1 + varint::len(ns.len() as u64)
+        }
+        Node::Apply(a) => {
+            let inputs = a.inputs.iter().map(|n| description_bound(n, ids)).sum::<Result<usize>>()?;
+            let params = varint::len(a.params.len() as u64) + a.params.len();
+            inputs
+                + varint::len(module_id(ids, a.module)?)
+                + params
+                + varint::len(a.inputs.len() as u64)
+                + varint::len(a.len)
+        }
+    })
 }
 
 /// The formula in container `c`, with a single stream of class `class`; modules are numbered
@@ -173,6 +201,30 @@ mod tests {
         assert_eq!(c[6..8], (desc.len() as u16).to_le_bytes());
         assert_eq!(c[8..8 + desc.len()], desc);
         assert_eq!(&c[8 + desc.len()..], b"helloxyz");
+    }
+
+    #[test]
+    fn bound() {
+        let f = sample();
+        let desc =
+            |f: &Formula| encode(f, IDS).unwrap().len() - 8 - f.streams.iter().map(|s| s.data.len()).sum::<usize>();
+        let b = description_bound(&f.root, IDS).unwrap();
+        assert!(b >= desc(&f), "{b}");
+        // Of formulas put together: the parts add up.
+        let mut g = Formula::raw("big", vec![0; 1 << 20]);
+        let parts = [f.clone(), f.clone(), f]
+            .into_iter()
+            .map(|f| {
+                let b = description_bound(&f.root, IDS).unwrap();
+                (g.embed(f), b)
+            })
+            .collect::<Vec<_>>();
+        let sum: usize = parts.iter().map(|p| p.1).sum();
+        g.root = Node::Concat(std::iter::once(g.root.clone()).chain(parts.into_iter().map(|p| p.0)).collect());
+        let b = description_bound(&g.root, IDS).unwrap();
+        assert_eq!(b, sum + description_bound(&Node::slice(0, 0, 1 << 20), IDS).unwrap() + 2);
+        assert!(b >= desc(&g));
+        assert!(description_bound(&g.root, &[]).is_err());
     }
 
     #[test]
