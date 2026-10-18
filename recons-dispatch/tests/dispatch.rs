@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use recons_dispatch::{Formula, Native, Node, Options, compress, decompress, native, recompress};
+use recons_dispatch::{Content, Formula, Native, Nest, Node, Options, compress, decompress, native, recompress};
 use recons_formula::container;
 
 fn fixture(path: &str) -> Vec<u8> {
@@ -160,7 +160,9 @@ fn pe() -> (Vec<u8>, std::ops::Range<usize>) {
 #[test]
 fn pe_sections() {
     let (d, code) = pe();
-    let f = roundtrip(&d, &Options::default());
+    // The data after the sections, scanned, is a stream of its own.
+    assert_eq!(modules(&roundtrip(&d, &Options::default())), [native::X86.name]);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
     assert_eq!(modules(&f), [native::X86.name]);
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts.len(), 3);
@@ -219,4 +221,47 @@ fn pdf_nested() {
     let f = roundtrip(&d, &Options { depth: 1, ..Options::default() });
     assert_eq!(modules(&f), [native::PDF.module.name, native::FLATE.name, native::FLATE.name]);
     assert!(classes(&f).contains(&"pdf/pool-data".into()), "{f}");
+}
+
+/// Files anywhere in the data are found, each cut to its end.
+#[test]
+fn scan_embedded() {
+    let flac = fixture("flac-recons/tests/data/s16_f5.flac");
+    let jpeg = fixture("jpeg-recons/tests/data/gradient.jpg");
+    let wav = fixture("flac-recons/tests/data/s16.wav");
+    let (t1, t2, t3) = (text(5000), text(3000), text(100));
+    let d = [&t1[..], &jpeg, &t2, &gzip(&text(100_000)), &wav, &jpeg, &t3, &flac].concat();
+    let f = roundtrip(&d, &Options::default());
+    let flac_name = native::FLAC.module.name;
+    let jpeg_name = native::JPEG.module.name;
+    assert_eq!(modules(&f), [jpeg_name, native::FLATE.name, flac_name, jpeg_name, flac_name], "{f}");
+    // The data between the files, as one stream.
+    let Node::Concat(parts) = &f.root else { panic!("{f}") };
+    assert_eq!(parts[0], Node::slice(0, 0, t1.len() as u64));
+    assert_eq!(f.streams[0].data, [t1, t2, t3].concat());
+
+    // As one file, the data starts like none.
+    let whole = Options { file: Nest::Exact, ..Options::default() };
+    assert_eq!(roundtrip(&d, &whole).root, Node::slice(0, 0, d.len() as u64));
+
+    // In the data of a DEFLATE stream.
+    let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &Options::default());
+    assert_eq!(modules(&f), [native::FLATE.name, flac_name], "{f}");
+    let exact = Options { contents: vec![Content { nest: Nest::Exact, ..native::CONTENTS[0] }], ..Options::default() };
+    let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &exact);
+    assert_eq!(modules(&f), [native::FLATE.name], "{f}");
+}
+
+/// A file found at the start is cut to its end too, and what follows is scanned.
+#[test]
+fn scan_after_file() {
+    let jpeg = fixture("jpeg-recons/tests/data/gradient.jpg");
+    let d = [&jpeg[..], b"appended", &jpeg].concat();
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(modules(&f), [native::JPEG.module.name; 2], "{f}");
+    let Node::Concat(parts) = &f.root else { panic!("{f}") };
+    assert_eq!(parts.iter().map(Node::len).collect::<Vec<_>>(), [jpeg.len() as u64, 8, jpeg.len() as u64], "{f}");
+    // As one file, all of it is the first JPEG's (whose recompressor codes the other).
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    assert!(matches!(&f.root, Node::Apply(a) if a.module == native::JPEG.module), "{f}");
 }

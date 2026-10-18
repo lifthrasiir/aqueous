@@ -91,6 +91,26 @@ pub fn detect(d: &[u8]) -> Option<Format> {
     }
 }
 
+/// [`detect`] for a file found in data: unless `start` (at the start of the data), not by a
+/// weak signature (zlib, MPEG audio frames without a tag), which data matches by chance. A
+/// first byte no signature starts with is turned down at once.
+pub(crate) fn starts(d: &[u8], start: bool) -> Option<Format> {
+    const FIRST: [bool; 256] = {
+        let mut t = [false; 256];
+        let s = b"\x89S%8fRFI\xffM\x1f";
+        let mut i = 0;
+        while i < s.len() {
+            t[s[i] as usize] = true;
+            i += 1;
+        }
+        t
+    };
+    if !start && !FIRST[*d.first()? as usize] {
+        return None;
+    }
+    detect(d).filter(|&f| start || !(f == Format::Zlib || f == Format::Mp3 && id3_len(d).is_none()))
+}
+
 /// Bytes of the ID3v2 tag at the start of `d`, if any.
 pub(crate) fn id3_len(d: &[u8]) -> Option<usize> {
     let h = d.first_chunk::<10>().filter(|h| h.starts_with(b"ID3") && h[6..].iter().all(|&b| b < 0x80))?;

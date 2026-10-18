@@ -15,6 +15,10 @@
 //! recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
 //! of the data.
 //!
+//! Data is taken as one file by the format it starts like ([`Nest::Exact`]), or scanned for
+//! files starting anywhere in it ([`Nest::Scan`], the default): each is cut to its end
+//! ([`extent`]), and the data between them kept raw, in one stream.
+//!
 //! [`compress`] and [`decompress`] store the formula on its own, in the formula container
 //! ([`recons_formula::container`], with the module numbers of [`native::IDS`]).
 //!
@@ -59,17 +63,28 @@ pub struct Options {
     /// The inputs whose data is recompressed in turn, by module and position; by default
     /// [`native::CONTENTS`].
     pub contents: Vec<Content>,
+    /// How the file itself is recompressed.
+    pub file: Nest,
+}
+
+/// How data is recompressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Nest {
+    /// As one file, all of it, of the format it starts like.
+    Exact,
+    /// As data holding files anywhere: each found is cut to its end, the rest kept raw.
+    Scan,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, depth: 3, verify: true, contents: native::CONTENTS.to_vec() }
+        Options { threads: 1, depth: 3, verify: true, contents: native::CONTENTS.to_vec(), file: Nest::Scan }
     }
 }
 
 /// `d` as a formula, with the recompressor for its format if any takes it.
 pub fn recompress(d: &[u8], opt: &Options) -> Formula {
-    recompress_at(d, opt, 0)
+    recompress_at(d, opt, 0, opt.file)
 }
 
 /// `d` in the formula container. A formula whose description does not fit (over 65535 bytes)
@@ -87,30 +102,67 @@ pub fn decompress(c: &[u8], threads: usize) -> recons_formula::Result<Vec<u8>> {
 }
 
 /// [`recompress`] for data `depth` formats deep.
-pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32) -> Formula {
-    let format = if depth < opt.depth { detect(d) } else { None };
-    format
-        .and_then(|format| {
-            catch_unwind(AssertUnwindSafe(|| match format {
-                Format::Pe => pe::pe(d, opt),
-                Format::Gzip => flate::gzip(d, opt),
-                Format::Zlib => flate::zlib(d, opt),
-                Format::Png => recons(&native::PNG, d, opt),
-                Format::Jpeg => recons(&native::JPEG, d, opt),
-                Format::Mp3 => recons(&native::MP3, d, opt),
-                Format::Flac => recons(&native::FLAC, d, opt),
-                Format::Psd => recons(&native::PSD, d, opt),
-                Format::Pdf => recons(&native::PDF, d, opt),
-                Format::Sqlite => recons(&native::SQLITE, d, opt),
-            }))
-            .ok()
-            .flatten()
-        })
-        .map(|mut f| {
-            nest(&mut f, opt, depth);
-            f
-        })
-        .unwrap_or_else(|| Formula::raw("raw", d.to_vec()))
+pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest) -> Formula {
+    let f = match how {
+        _ if depth >= opt.depth => None,
+        Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth)),
+        Nest::Scan => scan(d, opt, depth),
+    };
+    f.unwrap_or_else(|| Formula::raw("raw", d.to_vec()))
+}
+
+/// `d` as a file of `format`, with its contents nested, if its recompressor takes it.
+fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32) -> Option<Formula> {
+    let mut f = catch_unwind(AssertUnwindSafe(|| match format {
+        Format::Pe => pe::pe(d, opt),
+        Format::Gzip => flate::gzip(d, opt),
+        Format::Zlib => flate::zlib(d, opt),
+        Format::Png => recons(&native::PNG, d, opt),
+        Format::Jpeg => recons(&native::JPEG, d, opt),
+        Format::Mp3 => recons(&native::MP3, d, opt),
+        Format::Flac => recons(&native::FLAC, d, opt),
+        Format::Psd => recons(&native::PSD, d, opt),
+        Format::Pdf => recons(&native::PDF, d, opt),
+        Format::Sqlite => recons(&native::SQLITE, d, opt),
+    }))
+    .ok()
+    .flatten()?;
+    nest(&mut f, opt, depth);
+    Some(f)
+}
+
+/// The files in `d`, if any is found: from the first byte on, a file whose recompressor takes
+/// it (up to its [`extent`]) is put in place, and the scan goes on after it; else on from the
+/// next byte. Those whose signature is weak (zlib, MPEG audio frames without a tag) are only
+/// taken at the start.
+fn scan(d: &[u8], opt: &Options, depth: u32) -> Option<Formula> {
+    let mut f = Formula::default();
+    f.push("raw", Vec::new());
+    let (mut gaps, mut parts) = (Vec::new(), Vec::new());
+    let (mut at, mut p) = (0, 0);
+    while p < d.len() {
+        let found = detect::starts(&d[p..], p == 0).and_then(|format| {
+            let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
+            Some((n, recompress_as(format, &d[p..p + n], opt, depth)?))
+        });
+        let Some((n, child)) = found else {
+            p += 1;
+            continue;
+        };
+        parts.push(Node::slice(0, gaps.len() as u64, (p - at) as u64));
+        gaps.extend_from_slice(&d[at..p]);
+        parts.push(f.embed(child));
+        p += n;
+        at = p;
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    parts.push(Node::slice(0, gaps.len() as u64, (d.len() - at) as u64));
+    gaps.extend_from_slice(&d[at..]);
+    f.streams[0].data = gaps;
+    f.root = Node::concat(parts);
+    Some(f)
 }
 
 /// Recompresses the contents of the applications in `f` ([`Options::contents`]), a formula of
@@ -137,14 +189,15 @@ fn nest_below(n: &mut Node, f: &mut Formula, opt: &Options, depth: u32) -> bool 
             let module = a.module;
             let mut any = false;
             for (i, input) in a.inputs.iter_mut().enumerate() {
-                any |= match input {
-                    &mut Node::Slice { stream, start, len } if opt.contents.contains(&Content { module, input: i }) => {
+                let content = opt.contents.iter().find(|c| c.module == module && c.input == i);
+                any |= match (&*input, content) {
+                    (&Node::Slice { stream, start, len }, Some(content)) => {
                         let Some(d) =
                             f.streams.get(stream).and_then(|s| s.data.get(start as usize..)?.get(..len as usize))
                         else {
                             continue;
                         };
-                        let child = recompress_at(d, opt, depth + 1);
+                        let child = recompress_at(d, opt, depth + 1, content.nest);
                         let some = !child.applies().is_empty();
                         if some {
                             *input = f.embed(child);

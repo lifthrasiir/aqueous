@@ -5,6 +5,8 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use exe_recons::arch::x86;
 use recons_formula::{Apply, Error, Formula, Module, Modules, Result};
 
+use crate::Nest;
+
 /// exe-recons' x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; inputs: the streams of
 /// [`x86::STREAM_NAMES`].
@@ -20,10 +22,11 @@ pub const FLATE: Module = flate_recons::formula::MODULE;
 pub struct Content {
     pub module: Module,
     pub input: usize,
+    pub nest: Nest,
 }
 
-/// The contents of this crate's modules: the data of [`FLATE`].
-pub const CONTENTS: [Content; 1] = [Content { module: FLATE, input: 0 }];
+/// The contents of this crate's modules: the data of [`FLATE`], scanned.
+pub const CONTENTS: [Content; 1] = [Content { module: FLATE, input: 0, nest: Nest::Scan }];
 
 /// The parameters of [`X86`].
 pub(crate) fn x86_params(origin: u64, sentinel_size: u8, is64: bool) -> Vec<u8> {

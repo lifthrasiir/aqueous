@@ -3,6 +3,7 @@
 
 use crate::detect::{Format, id3_len, mp3_header};
 use crate::flate::{gzip_deflate, zlib_deflate};
+use flac_recons::flac;
 
 /// Bytes of the file of format `f` at the start of `d`, as far as its structure tells, or
 /// `None` where its structure does not hold. A file whose structure does not tell its end (a
@@ -169,21 +170,113 @@ fn mp3(d: &[u8]) -> Option<usize> {
     if tagged.is_none() && frames < 2 {
         return None;
     }
-    if d.get(p..).is_some_and(|t| t.starts_with(b"TAG") && t.len() >= 128) {
-        p += 128;
-    }
-    Some(p)
+    Some(p + d.get(p..).map_or(0, id3v1))
 }
 
-/// RIFF and FORM by their sizes; FLAC to the end of `d`.
+/// RIFF and FORM by their sizes; FLAC by its frames ([`flac_frames`]).
 fn flac(d: &[u8]) -> Option<usize> {
     let size = match d.first_chunk::<4>()? {
         b"RIFF" => u32le(d, 4)?,
         b"FORM" => u32be(d, 4)?,
-        _ => return Some(d.len()),
+        _ => return Some(flac_frames(d)),
     };
-    // A size of 0 or one past the data is that of a stream written without seeking back.
+    // A size of 0 is that of a stream written without seeking back.
     Some(if size == 0 { d.len() } else { clamp(d, 8 + size + (size & 1)) })
+}
+
+/// The longest a FLAC frame is taken to be where the stream info does not tell, and the most
+/// junk taken between frames.
+const FLAC_FRAME: usize = 1 << 20;
+const FLAC_JUNK: usize = 4096;
+
+/// The metadata and the frames of a FLAC stream: a frame ends where its CRC-16 does and is
+/// followed by the next, the first header (with its CRC-8) after it (past junk, up to
+/// [`FLAC_JUNK`] bytes) that numbers the frame or samples after its own; a frame without an
+/// end, damaged, is followed by the next within the largest frame size. The last frame ends at
+/// its first end, and an ID3v1 tag may follow it; one without an end is left out. Without the
+/// metadata, to the end of `d`.
+fn flac_frames(d: &[u8]) -> usize {
+    let Some((info, start)) = flac::parse_metadata(d) else { return d.len() };
+    let Some(&sync) = d.get(start + 1) else { return start };
+    // The stream info is the first block; its maximum frame size is 0 where unknown.
+    let si = id3_len(d).unwrap_or(0) + 8;
+    let max_frame = u32be(d, si + 7).map(|v| (v >> 8) as usize).filter(|&n| n > 0).unwrap_or(FLAC_FRAME);
+    // the header's length without its CRC-8, the frame's number (or its first sample's), and
+    // the next frame's
+    let header = |q: usize| -> Option<(usize, u64, u64)> {
+        let (len, block, ..) = flac::parse_header(d, q, info.bps)?;
+        let h = &d[q..];
+        if h[1] != sync {
+            return None;
+        }
+        let n = h[4].leading_ones() as usize;
+        let first = (h[4] & (0x7f >> n)) as u64;
+        let num = h[5..5 + n.saturating_sub(1)].iter().fold(first, |a, &b| a << 6 | (b & 0x3f) as u64);
+        Some((len, num, num + if sync == 0xf8 { 1 } else { block as u64 }))
+    };
+    let Some(mut h) = header(start) else { return start };
+    let mut q = start;
+    loop {
+        // the next frame's header in `from..to`
+        let next = |from: usize, to: usize| {
+            (from..d.len().min(to).saturating_sub(1))
+                .filter(|&s| d[s] == 0xff && d[s + 1] == sync)
+                .find_map(|s| header(s).filter(|n| n.1 == h.2).map(|n| (s, n)))
+        };
+        // A CRC of 0 by chance ends no frame: the next is not after it. A frame without an
+        // end (damaged) is junk up to the next.
+        let mut ends = crc16_ends(d, q, q + h.0 + 1, max_frame);
+        let first = ends.next();
+        let found = first
+            .into_iter()
+            .chain(ends)
+            .find_map(|end| next(end, end + FLAC_JUNK))
+            .or_else(|| next(q + h.0 + 1, q + max_frame + FLAC_JUNK));
+        match (found, first) {
+            (Some((s, n)), _) => (q, h) = (s, n),
+            (None, Some(end)) => return end + id3v1(&d[end..]),
+            (None, None) => return q,
+        }
+    }
+}
+
+/// CRC-16 of FLAC frames (polynomial 0x8005, MSB first), by byte.
+const CRC16: [u16; 256] = {
+    let mut t = [0u16; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut c = (i as u16) << 8;
+        let mut k = 0;
+        while k < 8 {
+            c = if c & 0x8000 != 0 { c << 1 ^ 0x8005 } else { c << 1 };
+            k += 1;
+        }
+        t[i] = c;
+        i += 1;
+    }
+    t
+};
+
+/// The possible ends of the FLAC frame at `q` whose subframes start at `from`, up to `max`
+/// bytes: where the CRC-16 of the frame is 0 (its last two bytes are the CRC of the rest).
+fn crc16_ends(d: &[u8], q: usize, from: usize, max: usize) -> impl Iterator<Item = usize> {
+    let (mut c, mut i, end) = (0u16, q, d.len().min(q.saturating_add(max)));
+    std::iter::from_fn(move || {
+        while i < end {
+            c = c << 8 ^ CRC16[((c >> 8) as u8 ^ d[i]) as usize];
+            i += 1;
+            // a byte of subframe and the CRC
+            if c == 0 && i >= from + 3 {
+                return Some(i);
+            }
+        }
+        None
+    })
+}
+
+/// Bytes of the ID3v1 tag at the start of `d`, if any.
+fn id3v1(d: &[u8]) -> usize {
+    if d.starts_with(b"TAG") && d.len() >= 128 { 128 } else { 0 }
 }
 
 /// The header, the three sections given by their lengths, and the image data where it is raw
@@ -293,16 +386,31 @@ mod tests {
             (Format::Flac, "flac-recons/tests/data/s16.wav"),
             (Format::Flac, "flac-recons/tests/data/s24.aiff"),
             (Format::Flac, "flac-recons/tests/data/s16_sowt.aifc"),
+            (Format::Flac, "flac-recons/tests/data/s16_f5.flac"),
+            (Format::Flac, "flac-recons/tests/data/s24_f8.flac"),
+            (Format::Flac, "flac-recons/tests/data/s16_tags.flac"),
+            (Format::Flac, "flac-recons/tests/data/s16_junk.flac"),
+            (Format::Flac, "flac-recons/tests/data/u8_mono.flac"),
         ] {
             ends(f, &fixture(path));
         }
-        // Without an end of their own: to the end of the data.
-        for (f, path) in
-            [(Format::Flac, "flac-recons/tests/data/s16_f5.flac"), (Format::Mp3, "mp3-recons/tests/data/free.mp3")]
-        {
+        // Without an end of their own (cut short, for the JPEG): to the end of the data.
+        for (f, path) in [
+            (Format::Jpeg, "jpeg-recons/tests/data/prog_script_recode.jpg"),
+            (Format::Mp3, "mp3-recons/tests/data/free.mp3"),
+        ] {
             let d = [&fixture(path)[..], b"trailing"].concat();
             assert_eq!(extent(f, &d), Some(d.len()), "{path}");
         }
+    }
+
+    /// A FLAC stream cut short ends before its last frame.
+    #[test]
+    fn flac_cut() {
+        let d = fixture("flac-recons/tests/data/s16_cut.flac");
+        let n = extent(Format::Flac, &d).unwrap();
+        assert!(n < d.len() && d.len() - n < 16384, "{n} of {}", d.len());
+        assert_eq!(extent(Format::Flac, &[&d[..], &[0xff, 0xf8, 0xc9, 0x18, 0, 0x55, 7, 7]].concat()), Some(n));
     }
 
     #[test]
