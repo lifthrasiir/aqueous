@@ -5,10 +5,14 @@
 //! - PE images: exe-recons' x86 disfilter applied to each executable section, over its
 //!   streams; the rest of the image is sliced in between.
 //! - gzip and zlib: the container sliced around flate-recons on the DEFLATE stream (data and
-//!   record), and the data recompressed in turn, up to [`Options::depth`] formats deep.
+//!   record).
 //! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF and SQLite: the recompressor's own formula,
 //!   its module applied to its streams, and files it embeds (PDF's DEFLATE streams and images,
 //!   PSD's and JPEG's embedded files) applied to theirs (see [`native`]).
+//!
+//! In whatever formula a recompressor gives, the data that its applications take as it is
+//! ([`native::contents`]: that of a DEFLATE stream, of gzip, zlib or PDF) is recompressed in
+//! turn, up to [`Options::depth`] formats deep, and its formula put in place of the data.
 //!
 //! [`compress`] and [`decompress`] store the formula on its own, in the formula container
 //! ([`recons_formula::container`], with the module numbers of [`native::IDS`]).
@@ -44,7 +48,7 @@ pub struct Options {
     /// Threads for the recompressors and modules (the formula does not depend on it).
     pub threads: usize,
     /// Formats nested at most this deep: 1 recompresses the file alone, 2 also the data of a
-    /// gzip or zlib stream, and so on (0 recompresses nothing).
+    /// DEFLATE stream in it (of gzip, zlib or PDF), and so on (0 recompresses nothing).
     pub depth: u32,
     /// Run every module on what it was given, and keep the data raw where the output is not
     /// the original (§6). Without it, the archive must checksum the output (R8).
@@ -83,8 +87,8 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32) -> Formula {
         .and_then(|format| {
             catch_unwind(AssertUnwindSafe(|| match format {
                 Format::Pe => pe::pe(d, opt),
-                Format::Gzip => flate::gzip(d, opt, depth),
-                Format::Zlib => flate::zlib(d, opt, depth),
+                Format::Gzip => flate::gzip(d, opt),
+                Format::Zlib => flate::zlib(d, opt),
                 Format::Png => recons(&native::PNG, d, opt),
                 Format::Jpeg => recons(&native::JPEG, d, opt),
                 Format::Mp3 => recons(&native::MP3, d, opt),
@@ -96,7 +100,57 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32) -> Formula {
             .ok()
             .flatten()
         })
+        .map(|mut f| {
+            nest(&mut f, opt, depth);
+            f
+        })
         .unwrap_or_else(|| Formula::raw("raw", d.to_vec()))
+}
+
+/// Recompresses the contents of the applications in `f` ([`native::contents`]), a formula of
+/// data `depth` formats deep, putting their formulas in place of the slices where they have
+/// any application; the bytes left without a slice are dropped.
+fn nest(f: &mut Formula, opt: &Options, depth: u32) {
+    if depth + 1 >= opt.depth {
+        return;
+    }
+    let mut root = std::mem::replace(&mut f.root, Node::Concat(Vec::new()));
+    let nested = nest_below(&mut root, f, opt, depth);
+    f.root = root;
+    if nested {
+        f.compact();
+    }
+}
+
+/// [`nest`] on node `n` of `f`, whether any content is nested.
+fn nest_below(n: &mut Node, f: &mut Formula, opt: &Options, depth: u32) -> bool {
+    match n {
+        Node::Slice { .. } => false,
+        Node::Concat(ns) => ns.iter_mut().fold(false, |any, n| nest_below(n, f, opt, depth) | any),
+        Node::Apply(a) => {
+            let contents = native::contents(a.module);
+            let mut any = false;
+            for (i, input) in a.inputs.iter_mut().enumerate() {
+                any |= match input {
+                    &mut Node::Slice { stream, start, len } if contents.contains(&i) => {
+                        let Some(d) =
+                            f.streams.get(stream).and_then(|s| s.data.get(start as usize..)?.get(..len as usize))
+                        else {
+                            continue;
+                        };
+                        let child = recompress_at(d, opt, depth + 1);
+                        let some = !child.applies().is_empty();
+                        if some {
+                            *input = f.embed(child);
+                        }
+                        some
+                    }
+                    _ => nest_below(input, f, opt, depth),
+                };
+            }
+            any
+        }
+    }
 }
 
 /// The formula of recompressor `r` on `d`, if it makes one. Whether coding pays off is the

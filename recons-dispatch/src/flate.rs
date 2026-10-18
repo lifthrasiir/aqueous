@@ -1,15 +1,15 @@
 //! gzip and zlib: the container sliced around flate-recons on its DEFLATE stream, whose
-//! data is recompressed in turn (composition, §4.5).
+//! data is a content of the application, recompressed in turn (composition, §4.5).
 
 use flate_recons::Hints;
 use flate_recons::inflate::{self, Sink};
 use recons_formula::{Formula, Node};
 
 use crate::native::FLATE;
-use crate::{Options, recompress_at, verified};
+use crate::{Options, verified};
 
 /// A gzip member (RFC 1952); what follows its trailer is sliced as it is.
-pub(crate) fn gzip(d: &[u8], opt: &Options, depth: u32) -> Option<Formula> {
+pub(crate) fn gzip(d: &[u8], opt: &Options) -> Option<Formula> {
     let flg = *d.get(3)?;
     if flg & 0xe0 != 0 {
         return None;
@@ -29,16 +29,16 @@ pub(crate) fn gzip(d: &[u8], opt: &Options, depth: u32) -> Option<Formula> {
     }
     let end = p + deflate_len(d.get(p..)?)?;
     d.get(end..end + 8)?;
-    wrap("gzip", d, p..end, &Hints::gzip_xfl(d[8]), |_| true, opt, depth)
+    wrap("gzip", d, p..end, &Hints::gzip_xfl(d[8]), |_| true, opt)
 }
 
 /// A zlib stream (RFC 1950); what follows its checksum is sliced as it is.
-pub(crate) fn zlib(d: &[u8], opt: &Options, depth: u32) -> Option<Formula> {
+pub(crate) fn zlib(d: &[u8], opt: &Options) -> Option<Formula> {
     let end = 2 + deflate_len(d.get(2..)?)?;
     let sum = u32::from_be_bytes(*d.get(end..)?.first_chunk()?);
     // Two bytes are a weak sign: the checksum confirms.
     let hints = Hints::zlib_header([d[0], d[1]]);
-    wrap("zlib", d, 2..end, &hints, |data| adler32(data) == sum, opt, depth)
+    wrap("zlib", d, 2..end, &hints, |data| adler32(data) == sum, opt)
 }
 
 /// `d` with flate-recons on the DEFLATE stream at `raw`, if `accept` takes its data.
@@ -49,7 +49,6 @@ fn wrap(
     hints: &Hints,
     accept: impl FnOnce(&[u8]) -> bool,
     opt: &Options,
-    depth: u32,
 ) -> Option<Formula> {
     let fopt = flate_recons::Options { threads: opt.threads, ..Default::default() };
     let (data, record, _) = flate_recons::deconstruct_hinted(&d[raw.clone()], &fopt, hints).ok()?;
@@ -59,7 +58,7 @@ fn wrap(
     let mut f = Formula::default();
     f.push(class, [&d[..raw.start], &d[raw.end..]].concat());
     let record = f.push("flate/record", record);
-    let data = f.embed(recompress_at(&data, opt, depth + 1));
+    let data = f.push("raw", data);
     f.root = Node::concat([
         Node::slice(0, 0, raw.start as u64),
         Node::apply(FLATE, vec![], vec![data, record], raw.len() as u64),

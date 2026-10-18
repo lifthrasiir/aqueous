@@ -13,6 +13,13 @@ pub const X86: Module = Module { name: "exe-recons/x86", version: 1 };
 /// flate-recons reconstruction of a raw DEFLATE stream. Inputs: the data and the record.
 pub const FLATE: Module = flate_recons::formula::MODULE;
 
+/// The inputs of `m` that are data as it is, a file or what a file holds, rather than a
+/// representation of the module's own: the data of [`FLATE`]. A formula may recompress them
+/// in turn (see [`crate::recompress`]).
+pub fn contents(m: Module) -> &'static [usize] {
+    if m == FLATE { &[0] } else { &[] }
+}
+
 /// The parameters of [`X86`].
 pub(crate) fn x86_params(origin: u64, sentinel_size: u8, is64: bool) -> Vec<u8> {
     let mut p = origin.to_le_bytes().to_vec();

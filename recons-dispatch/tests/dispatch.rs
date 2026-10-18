@@ -166,3 +166,53 @@ fn pe_sections() {
     let classes = recons_dispatch::classes(&f);
     assert!(classes.iter().any(|&(c, n)| c == "x86/CALL_IDX" && n > 0), "{classes:?}");
 }
+
+/// A PDF of streams, by their dictionary entries and data.
+fn pdf(streams: &[(&str, Vec<u8>)]) -> Vec<u8> {
+    let mut f = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n".to_vec();
+    let mut objs = vec![b"<< /Type /Catalog >>".to_vec()];
+    for (dict, data) in streams {
+        let mut o = format!("<< {dict} /Length {} >>\nstream\n", data.len()).into_bytes();
+        o.extend_from_slice(data);
+        o.extend_from_slice(b"\nendstream");
+        objs.push(o);
+    }
+    let mut offs = vec![];
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(f.len());
+        f.extend_from_slice(format!("{} 0 obj\n", i + 1).as_bytes());
+        f.extend_from_slice(o);
+        f.extend_from_slice(b"\nendobj\n");
+    }
+    let x = f.len();
+    f.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offs {
+        f.extend_from_slice(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    f.extend_from_slice(
+        format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes(),
+    );
+    f
+}
+
+#[test]
+fn pdf_nested() {
+    let flac = fixture("flac-recons/tests/data/s16_f5.flac");
+    let d = pdf(&[
+        ("/Filter /FlateDecode", zlib(&text(200_000), 6)),
+        ("/Type /EmbeddedFile /Filter /FlateDecode", zlib(&flac, 6)),
+        ("/Filter /LZWDecode", text(1_000_000)),
+    ]);
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(
+        modules(&f),
+        [native::PDF.module.name, native::FLATE.name, native::FLATE.name, native::FLAC.module.name],
+        "{f}"
+    );
+    // The FLAC file, the only data of its class, is not left in a pool beside its formula.
+    let classes = |f: &Formula| f.streams.iter().map(|s| s.class.to_string()).collect::<Vec<_>>();
+    assert!(!classes(&f).contains(&"pdf/pool-data".into()), "{f}");
+    let f = roundtrip(&d, &Options { depth: 1, ..Options::default() });
+    assert_eq!(modules(&f), [native::PDF.module.name, native::FLATE.name, native::FLATE.name]);
+    assert!(classes(&f).contains(&"pdf/pool-data".into()), "{f}");
+}
