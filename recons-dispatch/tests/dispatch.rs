@@ -281,3 +281,43 @@ fn scan_weak() {
     let f = roundtrip(&[&text(5000)[..], &z].concat(), &Options::default());
     assert_eq!(modules(&f), [""; 0], "{f}");
 }
+
+/// Where the files found would take more description than allowed, those with the fewest bytes
+/// per byte of description are kept raw.
+#[test]
+fn description_limit() {
+    let jpeg = fixture("jpeg-recons/tests/data/gradient.jpg");
+    let flac = fixture("flac-recons/tests/data/s16_f5.flac");
+    let d = [jpeg.repeat(20), flac.clone(), jpeg.repeat(20)].concat();
+    let bound = |f: &Formula| container::description_bound(&f.root, &native::IDS).unwrap();
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(f.applies().len(), 41);
+    let limit = bound(&f) / 4;
+    let f = roundtrip(&d, &Options { description: limit, ..Options::default() });
+    assert!(bound(&f) <= limit, "{} > {limit}", bound(&f));
+    let found = modules(&f);
+    // The FLAC file, the largest, is kept.
+    assert!(found.contains(&native::FLAC.module.name) && found.len() < 41 && found.len() > 5, "{found:?}");
+    // In a DEFLATE stream, as its contents.
+    let z = gzip(&d);
+    let opt = Options { description: limit, ..Options::default() };
+    let f = roundtrip(&z, &opt);
+    assert!(bound(&f) <= limit, "{} > {limit}", bound(&f));
+    assert!(modules(&f).len() > 2, "{f}");
+    // and when none of its contents fits, the stream alone (with room for the data around
+    // it, but for no file).
+    let flate = bound(&roundtrip(&z, &Options { depth: 1, ..Options::default() }));
+    let f = roundtrip(&z, &Options { description: flate + 64, ..Options::default() });
+    assert_eq!(modules(&f), [native::FLATE.name]);
+}
+
+/// A file of more files than the container's description can take is not given up whole.
+#[test]
+fn container_many_files() {
+    let jpeg = fixture("jpeg-recons/tests/data/gradient.jpg");
+    let d = jpeg.repeat(3000);
+    let c = compress(&d, &Options::default());
+    assert_eq!(decompress(&c, 1).unwrap(), d);
+    let f = container::decode(&c, &native::IDS, "formula").unwrap();
+    assert!(f.applies().len() > 500, "{}", f.applies().len());
+}

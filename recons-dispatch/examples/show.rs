@@ -1,13 +1,14 @@
 //! Recompresses files into formulas and evaluates them back.
 //!
-//! usage: show [-t THREADS] [-d DEPTH] [-f] FILE...
+//! usage: show [-t THREADS] [-d DEPTH] [-e] [-f] FILE...
 //!
 //! For each file: the detected format, the modules applied, the stream bytes by class, and
-//! the times of recompression and evaluation; `-f` prints the formula itself.
+//! the times of recompression and evaluation; `-e` takes each file as one file of the format
+//! it starts like rather than scanning it, and `-f` prints the formula itself.
 
 use std::time::Instant;
 
-use recons_dispatch::{Native, Options, classes, detect, native, recompress};
+use recons_dispatch::{Native, Nest, Options, classes, detect, native, recompress};
 use recons_formula::container;
 
 fn main() {
@@ -19,6 +20,7 @@ fn main() {
         match &*arg {
             "-t" => opt.threads = args.next().and_then(|s| s.parse().ok()).expect("-t THREADS"),
             "-d" => opt.depth = args.next().and_then(|s| s.parse().ok()).expect("-d DEPTH"),
+            "-e" => opt.file = Nest::Exact,
             "-f" => tree = true,
             _ => files.push(arg),
         }
