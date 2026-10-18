@@ -119,12 +119,17 @@ impl Node {
         }
     }
 
-    fn shift(&mut self, by: usize) {
+    /// Calls `f` on every slice below this node, as `(stream, start, len)`.
+    fn slices_mut(&mut self, f: &mut impl FnMut(&mut usize, &mut u64, &mut u64)) {
         match self {
-            Node::Slice { stream, .. } => *stream += by,
-            Node::Concat(ns) => ns.iter_mut().for_each(|n| n.shift(by)),
-            Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.shift(by)),
+            Node::Slice { stream, start, len } => f(stream, start, len),
+            Node::Concat(ns) => ns.iter_mut().for_each(|n| n.slices_mut(f)),
+            Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.slices_mut(f)),
         }
+    }
+
+    fn shift(&mut self, by: usize) {
+        self.slices_mut(&mut |stream, _, _| *stream += by);
     }
 }
 
@@ -161,6 +166,58 @@ impl Formula {
         root.shift(self.streams.len());
         self.streams.extend(child.streams);
         root
+    }
+
+    /// Drops what no slice points to: the bytes of a stream outside every slice of it, and
+    /// streams without slices. The output is the same: a stream with a slice out of it is
+    /// kept whole, and slices of streams that do not exist still point to none.
+    pub fn compact(&mut self) {
+        // Per stream, the ranges of its slices, merged into (start, end, start in the new data).
+        let mut ranges = vec![Vec::new(); self.streams.len()];
+        self.root.slices_mut(&mut |&mut s, &mut a, &mut l| {
+            if let Some(r) = ranges.get_mut(s) {
+                r.push((a, a.saturating_add(l), 0));
+            }
+        });
+        let old = self.streams.len();
+        let mut index = vec![usize::MAX; old];
+        let mut streams = Vec::new();
+        for (i, (s, r)) in std::mem::take(&mut self.streams).into_iter().zip(&mut ranges).enumerate() {
+            if r.is_empty() {
+                continue;
+            }
+            index[i] = streams.len();
+            if r.iter().any(|&(_, b, _)| b > s.data.len() as u64) {
+                *r = vec![(0, u64::MAX, 0)];
+                streams.push(s);
+                continue;
+            }
+            r.sort_unstable();
+            let mut merged: Vec<(u64, u64, u64)> = Vec::new();
+            for &(a, b, _) in r.iter() {
+                match merged.last_mut() {
+                    Some(m) if a <= m.1 => m.1 = m.1.max(b),
+                    _ => merged.push((a, b, 0)),
+                }
+            }
+            let mut data = Vec::new();
+            for m in &mut merged {
+                m.2 = data.len() as u64;
+                data.extend_from_slice(&s.data[m.0 as usize..m.1 as usize]);
+            }
+            *r = merged;
+            streams.push(Stream { class: s.class, data });
+        }
+        let new = streams.len();
+        self.root.slices_mut(&mut |s, a, _| match ranges.get(*s) {
+            Some(r) => {
+                let m = r[r.partition_point(|m| m.0 <= *a) - 1];
+                *a = m.2 + (*a - m.0);
+                *s = index[*s];
+            }
+            None => *s = *s - old + new,
+        });
+        self.streams = streams;
     }
 
     /// Bytes of the output, as declared.
@@ -335,6 +392,42 @@ mod tests {
             shown,
             "concat 10\n  slice #0 [0, +2) a\n  apply rev@1 8\n    slice #0 [0, +5) a\n    slice #1 [0, +3) b\n"
         );
+    }
+
+    #[test]
+    fn compact() {
+        let mut f = Formula::default();
+        f.push("a", b"0123456789".to_vec());
+        f.push("unused", b"xyz".to_vec());
+        f.push("b", b"abcdef".to_vec());
+        f.root = Node::concat([
+            Node::slice(0, 6, 2),
+            Node::apply(REV, vec![], vec![Node::slice(0, 1, 3), Node::slice(0, 2, 3), Node::slice(0, 9, 0)], 4),
+            Node::slice(2, 4, 3),
+            Node::slice(5, 0, 0),
+        ]);
+        let mut c = f.clone();
+        c.compact();
+        assert_eq!(c.eval(&Rev), f.eval(&Rev));
+        // The slice past the end of "b" keeps it whole; the slice of no stream stays so.
+        assert_eq!(
+            c.streams.iter().map(|s| (&*s.class, &s.data[..])).collect::<Vec<_>>(),
+            [("a", &b"123467"[..]), ("b", &b"abcdef"[..])]
+        );
+        assert_eq!(
+            c.root,
+            Node::concat([
+                Node::slice(0, 4, 2),
+                Node::apply(REV, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 1, 3), Node::slice(0, 6, 0)], 4),
+                Node::slice(1, 4, 3),
+                Node::slice(4, 0, 0),
+            ])
+        );
+        f.root = Node::slice(2, 1, 2);
+        f.compact();
+        assert_eq!(f.eval(&Rev).unwrap(), b"bc");
+        assert_eq!(f.streams.len(), 1);
+        assert_eq!(f.streams[0].data, b"bc");
     }
 
     #[test]
