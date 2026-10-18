@@ -128,8 +128,9 @@ fn jpeg(d: &[u8]) -> Option<usize> {
     Some(d.len())
 }
 
-/// Bytes of the MPEG audio layer III frame at the start of `d`, unless it is free format.
-fn mp3_frame(d: &[u8]) -> Option<usize> {
+/// Bytes of the MPEG audio layer III frame at the start of `d` without its padding byte, and
+/// that byte; `free` for free format, where the header does not tell.
+fn mp3_frame(d: &[u8], free: Option<usize>) -> Option<usize> {
     const KBPS: [[u16; 15]; 2] = [
         [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
         [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
@@ -139,28 +140,36 @@ fn mp3_frame(d: &[u8]) -> Option<usize> {
     if !mp3_header(d) {
         return None;
     }
-    let (version, bitrate, rate, pad) =
-        ((d[1] >> 3 & 3) as usize, (d[2] >> 4) as usize, (d[2] >> 2 & 3) as usize, d[2] >> 1 & 1);
+    let (version, bitrate, rate) = ((d[1] >> 3 & 3) as usize, (d[2] >> 4) as usize, (d[2] >> 2 & 3) as usize);
+    let pad = (d[2] >> 1 & 1) as usize;
     let v1 = version == 3;
     let bps = KBPS[v1 as usize][bitrate] as u32 * 1000;
-    (bps > 0).then(|| ((if v1 { 144 } else { 72 }) * bps / RATE[version][rate]) as usize + pad as usize)
+    let len = if bps > 0 { Some(((if v1 { 144 } else { 72 }) * bps / RATE[version][rate]) as usize) } else { free };
+    Some(len? + pad)
+}
+
+/// The size of the free-format frames at the start of `d` without padding: up to the next
+/// header of the stream, within the largest frame (of 640 kbit/s at the lowest rate).
+fn mp3_free(d: &[u8]) -> Option<usize> {
+    let key = (d[1] & 0xfe, d[2] & 0xfc);
+    let end = d.len().min(5762);
+    (4..end)
+        .find(|&p| d[p] == 0xff && d.get(p + 1..p + 3).is_some_and(|h| (h[0] & 0xfe, h[1] & 0xfc) == key))?
+        .checked_sub((d[2] >> 1 & 1) as usize)
 }
 
 /// Frames of the same version, layer and rate one after another, after an ID3v2 tag if any,
-/// and an ID3v1 tag after them. Without a tag, a single frame is no sign of a file. A stream
-/// whose first frame is free format ends with `d`.
+/// and an ID3v1 tag after them. Without a tag, a single frame is no sign of a file.
 fn mp3(d: &[u8]) -> Option<usize> {
     let tagged = id3_len(d);
     let mut p = tagged.unwrap_or(0);
-    let first = d.get(p..)?;
-    if mp3_header(first) && mp3_frame(first).is_none() {
-        return Some(d.len());
-    }
+    let first = d.get(p..).filter(|f| mp3_header(f))?;
+    let free = if first[2] >> 4 == 0 { Some(mp3_free(first)?) } else { None };
     let (mut frames, mut stream) = (0, None);
     while let Some(f) = d.get(p..) {
-        let Some(n) = mp3_frame(f) else { break };
-        // the CRC and the bitrate may change from frame to frame
-        let key = (f[1] & 0xfe, f[2] & 0x0c);
+        let Some(n) = mp3_frame(f, free) else { break };
+        // the CRC and the bitrate may change from frame to frame (not in free format)
+        let key = (f[1] & 0xfe, f[2] & if free.is_some() { 0xfc } else { 0x0c });
         if *stream.get_or_insert(key) != key {
             break;
         }
@@ -394,14 +403,10 @@ mod tests {
         ] {
             ends(f, &fixture(path));
         }
-        // Without an end of their own (cut short, for the JPEG): to the end of the data.
-        for (f, path) in [
-            (Format::Jpeg, "jpeg-recons/tests/data/prog_script_recode.jpg"),
-            (Format::Mp3, "mp3-recons/tests/data/free.mp3"),
-        ] {
-            let d = [&fixture(path)[..], b"trailing"].concat();
-            assert_eq!(extent(f, &d), Some(d.len()), "{path}");
-        }
+        ends(Format::Mp3, &fixture("mp3-recons/tests/data/free.mp3"));
+        // Without an end of its own (cut short): to the end of the data.
+        let d = [&fixture("jpeg-recons/tests/data/prog_script_recode.jpg")[..], b"trailing"].concat();
+        assert_eq!(extent(Format::Jpeg, &d), Some(d.len()));
     }
 
     /// A FLAC stream cut short ends before its last frame.
@@ -417,7 +422,7 @@ mod tests {
     fn mp3_frames() {
         let cbr = fixture("mp3-recons/tests/data/cbr128.mp3");
         let p = id3_len(&cbr).unwrap_or(0);
-        let n = mp3_frame(&cbr[p..]).unwrap();
+        let n = mp3_frame(&cbr[p..], None).unwrap();
         // Two frames are a file, one is not; nor is a frame of another rate after it.
         assert_eq!(extent(Format::Mp3, &cbr[p..p + 2 * n]), Some(2 * n));
         assert_eq!(extent(Format::Mp3, &[&cbr[p..p + n], b"junk"].concat()), None);

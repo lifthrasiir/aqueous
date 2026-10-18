@@ -265,3 +265,19 @@ fn scan_after_file() {
     let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
     assert!(matches!(&f.root, Node::Apply(a) if a.module == native::JPEG.module), "{f}");
 }
+
+/// zlib streams and MPEG audio frames without a tag are found in data too, by their checksum
+/// and by frames one after another.
+#[test]
+fn scan_weak() {
+    let mp3 = fixture("mp3-recons/tests/data/vbr.mp3");
+    let t = text(100_000);
+    let d = [&text(5000)[..], &zlib(&t, 6), &text(3000), &mp3, &text(100)].concat();
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(modules(&f), [native::FLATE.name, native::MP3.module.name], "{f}");
+    // A wrong checksum is no zlib stream.
+    let mut z = zlib(&t, 6);
+    *z.last_mut().unwrap() ^= 1;
+    let f = roundtrip(&[&text(5000)[..], &z].concat(), &Options::default());
+    assert_eq!(modules(&f), [""; 0], "{f}");
+}

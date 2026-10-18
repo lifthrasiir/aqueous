@@ -91,10 +91,9 @@ pub fn detect(d: &[u8]) -> Option<Format> {
     }
 }
 
-/// [`detect`] for a file found in data: unless `start` (at the start of the data), not by a
-/// weak signature (zlib, MPEG audio frames without a tag), which data matches by chance. A
-/// first byte no signature starts with is turned down at once.
-pub(crate) fn starts(d: &[u8], start: bool) -> Option<Format> {
+/// [`detect`] for a file found anywhere in data. A first byte no signature starts with is
+/// turned down at once.
+pub(crate) fn starts(d: &[u8]) -> Option<Format> {
     const FIRST: [bool; 256] = {
         let mut t = [false; 256];
         let s = b"\x89S%8fRFI\xffM\x1f";
@@ -103,12 +102,15 @@ pub(crate) fn starts(d: &[u8], start: bool) -> Option<Format> {
             t[s[i] as usize] = true;
             i += 1;
         }
+        // zlib's CMF: DEFLATE with a window of at most 32K
+        let mut cmf = 0x08;
+        while cmf <= 0x78 {
+            t[cmf] = true;
+            cmf += 0x10;
+        }
         t
     };
-    if !start && !FIRST[*d.first()? as usize] {
-        return None;
-    }
-    detect(d).filter(|&f| start || !(f == Format::Zlib || f == Format::Mp3 && id3_len(d).is_none()))
+    if FIRST[*d.first()? as usize] { detect(d) } else { None }
 }
 
 /// Bytes of the ID3v2 tag at the start of `d`, if any.

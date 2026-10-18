@@ -13,16 +13,13 @@ use crate::{Options, verified};
 /// A gzip member (RFC 1952); what follows its trailer is sliced as it is.
 pub(crate) fn gzip(d: &[u8], opt: &Options) -> Option<Formula> {
     let raw = gzip_deflate(d)?;
-    wrap("gzip", d, raw, &Hints::gzip_xfl(d[8]), |_| true, opt)
+    wrap("gzip", d, raw, &Hints::gzip_xfl(d[8]), opt)
 }
 
 /// A zlib stream (RFC 1950); what follows its checksum is sliced as it is.
 pub(crate) fn zlib(d: &[u8], opt: &Options) -> Option<Formula> {
     let raw = zlib_deflate(d)?;
-    let sum = u32::from_be_bytes(*d[raw.end..].first_chunk()?);
-    // Two bytes are a weak sign: the checksum confirms.
-    let hints = Hints::zlib_header([d[0], d[1]]);
-    wrap("zlib", d, raw, &hints, |data| adler32(data) == sum, opt)
+    wrap("zlib", d, raw, &Hints::zlib_header([d[0], d[1]]), opt)
 }
 
 /// The DEFLATE stream of the gzip member at the start of `d`, with its 8-byte trailer after it.
@@ -44,31 +41,25 @@ pub(crate) fn gzip_deflate(d: &[u8]) -> Option<Range<usize>> {
     if flg & 2 != 0 {
         p += 2;
     }
-    let end = p + deflate_len(d.get(p..)?)?;
+    let end = p + inflate(d.get(p..)?, &mut Skip)?;
     d.get(end..end + 8)?;
     Some(p..end)
 }
 
-/// The DEFLATE stream of the zlib stream at the start of `d`, with its 4-byte checksum after
-/// it.
+/// The DEFLATE stream of the zlib stream at the start of `d`, with its checksum after it.
+/// Two bytes of header are a weak sign: the checksum confirms.
 pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
-    let end = 2 + deflate_len(d.get(2..)?)?;
-    d.get(end..end + 4)?;
-    Some(2..end)
+    let mut data = Data(Vec::new());
+    let end = 2 + inflate(d.get(2..)?, &mut data)?;
+    let sum = u32::from_be_bytes(*d.get(end..)?.first_chunk()?);
+    (adler32(&data.0) == sum).then_some(2..end)
 }
 
-/// `d` with flate-recons on the DEFLATE stream at `raw`, if `accept` takes its data.
-fn wrap(
-    class: &'static str,
-    d: &[u8],
-    raw: Range<usize>,
-    hints: &Hints,
-    accept: impl FnOnce(&[u8]) -> bool,
-    opt: &Options,
-) -> Option<Formula> {
+/// `d` with flate-recons on the DEFLATE stream at `raw`.
+fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &Options) -> Option<Formula> {
     let fopt = flate_recons::Options { threads: opt.threads, ..Default::default() };
     let (data, record, _) = flate_recons::deconstruct_hinted(&d[raw.clone()], &fopt, hints).ok()?;
-    if !accept(&data) || record.len() >= raw.len() || !verified(opt, FLATE, &[], &[&data, &record], &d[raw.clone()]) {
+    if record.len() >= raw.len() || !verified(opt, FLATE, &[], &[&data, &record], &d[raw.clone()]) {
         return None;
     }
     let mut f = Formula::default();
@@ -83,16 +74,39 @@ fn wrap(
     Some(f)
 }
 
-/// Bytes of the DEFLATE stream at the start of `d`.
-fn deflate_len(d: &[u8]) -> Option<usize> {
-    struct Skip;
-    impl Sink for Skip {
-        fn lit(&mut self, _: u8) {}
-        fn mat(&mut self, _: u16, _: u16, _: bool) {}
-        fn stored(&mut self, _: &[u8]) {}
-    }
-    let layout = inflate::parse_into(d, usize::MAX, &mut Skip).ok()?;
+/// Bytes of the DEFLATE stream at the start of `d`, its data given to `sink`.
+fn inflate(d: &[u8], sink: &mut impl Sink) -> Option<usize> {
+    let layout = inflate::parse_into(d, usize::MAX, sink).ok()?;
     Some(d.len() - layout.stream.trailing.len())
+}
+
+/// A sink of nothing.
+struct Skip;
+
+impl Sink for Skip {
+    fn lit(&mut self, _: u8) {}
+    fn mat(&mut self, _: u16, _: u16, _: bool) {}
+    fn stored(&mut self, _: &[u8]) {}
+}
+
+/// A sink of the data.
+struct Data(Vec<u8>);
+
+impl Sink for Data {
+    fn lit(&mut self, b: u8) {
+        self.0.push(b);
+    }
+
+    fn mat(&mut self, len: u16, dist: u16, _: bool) {
+        let from = self.0.len() - dist as usize;
+        for i in from..from + len as usize {
+            self.0.push(self.0[i]);
+        }
+    }
+
+    fn stored(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
 }
 
 fn adler32(d: &[u8]) -> u32 {

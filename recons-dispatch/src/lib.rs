@@ -133,15 +133,15 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32) -> Option<
 
 /// The files in `d`, if any is found: from the first byte on, a file whose recompressor takes
 /// it (up to its [`extent`]) is put in place, and the scan goes on after it; else on from the
-/// next byte. Those whose signature is weak (zlib, MPEG audio frames without a tag) are only
-/// taken at the start.
+/// next byte. Weak signatures are confirmed by the extent: a zlib stream by its checksum, MPEG
+/// audio frames without a tag by one following another.
 fn scan(d: &[u8], opt: &Options, depth: u32) -> Option<Formula> {
     let mut f = Formula::default();
     f.push("raw", Vec::new());
     let (mut gaps, mut parts) = (Vec::new(), Vec::new());
     let (mut at, mut p) = (0, 0);
     while p < d.len() {
-        let found = detect::starts(&d[p..], p == 0).and_then(|format| {
+        let found = detect::starts(&d[p..]).and_then(|format| {
             let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
             Some((n, recompress_as(format, &d[p..p + n], opt, depth)?))
         });
