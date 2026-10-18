@@ -11,8 +11,9 @@
 //!   PSD's and JPEG's embedded files) applied to theirs (see [`native`]).
 //!
 //! In whatever formula a recompressor gives, the data that its applications take as it is
-//! ([`native::contents`]: that of a DEFLATE stream, of gzip, zlib or PDF) is recompressed in
-//! turn, up to [`Options::depth`] formats deep, and its formula put in place of the data.
+//! ([`Options::contents`], by default that of a DEFLATE stream, of gzip, zlib or PDF) is
+//! recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
+//! of the data.
 //!
 //! [`compress`] and [`decompress`] store the formula on its own, in the formula container
 //! ([`recons_formula::container`], with the module numbers of [`native::IDS`]).
@@ -39,7 +40,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub use detect::{Format, detect};
 pub use extent::extent;
-pub use native::Native;
+pub use native::{Content, Native};
 pub use recons_formula::{Formula, Module, Node};
 
 use native::Recons;
@@ -55,11 +56,14 @@ pub struct Options {
     /// Run every module on what it was given, and keep the data raw where the output is not
     /// the original (§6). Without it, the archive must checksum the output (R8).
     pub verify: bool,
+    /// The inputs whose data is recompressed in turn, by module and position; by default
+    /// [`native::CONTENTS`].
+    pub contents: Vec<Content>,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, depth: 3, verify: true }
+        Options { threads: 1, depth: 3, verify: true, contents: native::CONTENTS.to_vec() }
     }
 }
 
@@ -109,7 +113,7 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32) -> Formula {
         .unwrap_or_else(|| Formula::raw("raw", d.to_vec()))
 }
 
-/// Recompresses the contents of the applications in `f` ([`native::contents`]), a formula of
+/// Recompresses the contents of the applications in `f` ([`Options::contents`]), a formula of
 /// data `depth` formats deep, putting their formulas in place of the slices where they have
 /// any application; the bytes left without a slice are dropped.
 fn nest(f: &mut Formula, opt: &Options, depth: u32) {
@@ -130,11 +134,11 @@ fn nest_below(n: &mut Node, f: &mut Formula, opt: &Options, depth: u32) -> bool 
         Node::Slice { .. } => false,
         Node::Concat(ns) => ns.iter_mut().fold(false, |any, n| nest_below(n, f, opt, depth) | any),
         Node::Apply(a) => {
-            let contents = native::contents(a.module);
+            let module = a.module;
             let mut any = false;
             for (i, input) in a.inputs.iter_mut().enumerate() {
                 any |= match input {
-                    &mut Node::Slice { stream, start, len } if contents.contains(&i) => {
+                    &mut Node::Slice { stream, start, len } if opt.contents.contains(&Content { module, input: i }) => {
                         let Some(d) =
                             f.streams.get(stream).and_then(|s| s.data.get(start as usize..)?.get(..len as usize))
                         else {

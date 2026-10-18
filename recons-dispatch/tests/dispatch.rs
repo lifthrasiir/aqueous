@@ -99,6 +99,10 @@ fn gzip_nested() {
     let f = roundtrip(&d, &Options::default());
     assert_eq!(modules(&f), [native::FLATE.name]);
 
+    // Only the contents named are recompressed.
+    let none = Options { contents: vec![], ..Options::default() };
+    assert_eq!(modules(&roundtrip(&gzip(&flac), &none)), [native::FLATE.name]);
+
     let d = gzip(&zlib(&text(100_000), 9));
     assert_eq!(modules(&roundtrip(&d, &Options::default())), [native::FLATE.name; 2]);
     assert_eq!(modules(&roundtrip(&d, &Options { depth: 1, ..Options::default() })), [native::FLATE.name]);
