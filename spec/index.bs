@@ -19,6 +19,10 @@ a[href="#type-offset"] {
 }
 </style>
 
+<pre class=link-defaults>
+spec:infra; type:dfn; text:list
+</pre>
+
 <h2 id=definitions>
 Definitions</h2>
 
@@ -1449,62 +1453,336 @@ with the following additional constraints:
 <h2 id=semantics>
 Semantics</h2>
 
-<h3 id=exec-env>
-Execution Environment</h3>
+This section defines the meaning of an archive as a function from a byte sequence to an [=archive value=].
+Every algorithm here is declarative:
+it defines *what* the result is, not how or in which order it has to be computed,
+and a conforming implementation MAY compute it in any other way that produces the same result.
 
-The execution environment is an opaque state that provides an interface to the external system,
-primarily including the file system.
+The result of [=interpret an archive|interpreting an archive=] is either an [=archive value=] or a failure,
+which is one of the following:
 
-Every specified algorithm assumes that the file system doesn't change during the operation;
-the behavior when such changes occur is implementation-defined.
-As such, the execution environment is assumed to have an access to the <dfn>file system snapshot</dfn>,
-which type is an [=ordered map=] with [=file system names=] as keys and [=file system entries=] as values.
+* An <dfn>invalid archive</dfn> failure occurs when the input violates any requirement of [[#syntax]] or this section.
+    It is a property of the input alone, and all conforming decompressors agree on it.
+* A <dfn>resource failure</dfn> occurs when the evaluation exceeds a declared or implementation-defined limit.
+    It is not a property of the input, and conforming decompressors MAY disagree on it.
 
-A <dfn>file system name</dfn> is a byte sequence [=u8=][*] with the unspecified encoding, commonly derived from:
+A conforming compressor, given an [=archive value=],
+MUST produce a byte sequence whose interpretation is that [=archive value=].
+This specification doesn't constrain how the compressor chooses blocks, block sizes, dictionaries or formulas.
 
-* A Unicode string, in which case the encoding is UTF-8;
-* A UTF-16 string with lone surrogates (cf. NTFS), in which case the encoding is WTF-8 [[WTF-8]];
-* An uninterpreted raw byte sequence, in which case the encoding is the identity function.
+<h3 id=archive-model>
+Archive model</h3>
 
-A <dfn>file system path</dfn> is a list of [=file system names=] representing a path from the root directory to a file or directory.
+An <dfn>archive value</dfn> is a [=struct=] with the following [=struct/items=]:
 
-A <dfn>file system entry</dfn> is either a [=file entry=] or a [=directory entry=].
+* <dfn for="archive value">root</dfn>, either a [=directory node=] or a [=file node=].
+    The latter represents a single unnamed file.
+* <dfn for="archive value">extra</dfn>, an [=ordered map=] from integers to CBOR data items [[RFC8949]]
+    representing the archive-wide part of the [[#optional-metadata|optional metadata]].
 
-A <dfn>file entry</dfn> is a [=struct=]... contains a byte sequence of <dfn for=file-entry>data</dfn>.
+A <dfn>file node</dfn> is a [=struct=] with the following [=struct/items=]:
 
-A <dfn>directory entry</dfn> is a [=struct=]... contains an [=ordered map=] <dfn for=directory-entry>entries</dfn> from [=file system names=] to [=file system entries=].
+* <dfn for="file node">content</dfn>, a [=byte sequence=].
+* <dfn for="file node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
 
-To <dfn>look up a file system entry</dfn> in a [=file system snapshot=] |snapshot|, given a [=file system path=] |path|:
+A <dfn>directory node</dfn> is a [=struct=] with the following [=struct/items=]:
+
+* <dfn for="directory node">children</dfn>, an [=ordered map=] from [=entry names=] to [=file nodes=] or [=directory nodes=].
+* <dfn for="directory node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+An <dfn>entry name</dfn> is a [=struct=] with the following [=struct/items=]:
+
+* <dfn for="entry name">encoding</dfn>, either "`wtf-8`" or "`raw`".
+* <dfn for="entry name">bytes</dfn>, a non-empty [=byte sequence=]
+    which is a valid WTF-8 [[WTF-8]] string if [=entry name/encoding=] is "`wtf-8`".
+
+Two [=entry names=] are equal if and only if both items are equal.
+In particular, a "`wtf-8`" name and a "`raw`" name are never equal even when their [=entry name/bytes=] are.
+
+No [=entry name/bytes=] of an [=entry name=] can contain 00<sub>16</sub> or 2F<sub>16</sub> (`/`),
+or be equal to (2E)<sub>16</sub> (`.`) or (2E 2E)<sub>16</sub> (`..`).
+
+<div class=note>
+  These restrictions make every path in an [=archive value=] a plain sequence of components,
+  so that no name can refer to the current, parent or nested directory on any common file system.
+  Platform-specific restrictions are handled at the extraction time ([[#extraction]]).
+</div>
+
+To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
 
 <ol class=algorithm>
-    1. If the |path| is empty, return a synthesized [=directory entry=] with the |snapshot| as [=directory-entry/entries=].
-    2. Let |name| be |path|[0].
-    3. If |snapshot|[|name|] doesn't exist, [=throw=] an error.
-    4. Let |entry| be |snapshot|[|name|].
-    5. If |entry| is a [=file entry=],
-        1. If the [=list/size=] of |path| is larger than 1, [=throw=] an error.
-        2. Return |entry|.
-    6. If |entry| is a [=directory entry=],
-        1. Set |snapshot| to the [=directory-entry/entries=] of |entry|.
-        2. Remove the first component from |path|.
-        3. Repeat from step 1.
+    1. If |bytes|[0] is C1<sub>16</sub>, let |name| be an [=entry name=]
+        whose [=entry name/encoding=] is "`raw`" and [=entry name/bytes=] are |bytes| without the first byte.
+    2. Otherwise, if |bytes| is a valid WTF-8 string, let |name| be an [=entry name=]
+        whose [=entry name/encoding=] is "`wtf-8`" and [=entry name/bytes=] are |bytes|.
+    3. Otherwise, return an [=invalid archive=] failure.
+    4. If |name| violates any restriction of an [=entry name=] above, return an [=invalid archive=] failure.
+    5. Return |name|.
 </ol>
 
-An <dfn>input selector algorithm</dfn> rooted at a [=file system path=] |input root directory| is
-an algorithm that takes a [=file system path=] relative to the |input root directory|
-and returns a [=boolean=] indicating whether the file or directory at that path should be included in the archive.
+<h3 id=interpretation>
+Interpreting an archive</h3>
 
-<h3 id=compressor>
-Compressor</h3>
-
-To <dfn export>compress files</dfn> into an Aqueous archive,
-given a [=file system snapshot=] |snapshot|,
-a [=file system path=] |input root directory| and
-an [=input selector algorithm=] |input selector| rooted at the |input root directory|.
+To <dfn export>interpret an archive</dfn> given a [=byte sequence=] |input|:
 
 <ol class=algorithm>
-    1. 
+    1. If |input| starts with [=const/ENCRYPTED_HEADER_MAGIC=]:
+        1. TODO: Decrypt the [=envelope/payload=], check the additional constraints in [[#encrypted-archive]],
+            and interpret the decrypted archive instead.
+    2. Parse |input| as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety.
+        If it fails to parse, return an [=invalid archive=] failure.
+    3. If [=archive/blocks=] contain no [[#metadata-block|metadata block]]:
+        1. Let |content| be the concatenation of the [=file contents=] of all [=leaf blocks=] in [=archive/blocks=],
+            in the order of appearance.
+        2. Return an [=archive value=] whose [=archive value/root=] is a [=file node=]
+            with |content| as [=file node/content=] and null as [=file node/extra=],
+            and whose [=archive value/extra=] is an empty map.
+    4. Let |root| be a [=directory node=] with an empty map as [=directory node/children=] and null as [=directory node/extra=].
+    5. Let |extra| be an empty map.
+    6. For each [=segment=] |segment| in [=archive/blocks=], in the order of appearance:
+        1. Let |segment root| be the result of [=interpret a segment|interpreting=] |segment|.
+        2. [=Merge directory nodes|Merge=] |segment root| into |root|.
+        3. For each key |k| and value |v| in the top-level map of the segment's [[#optional-metadata|optional metadata]]
+            other than `entry-extras`, set |extra|[|k|] to |v|.
+    7. Return an [=archive value=] with |root| as [=archive value/root=] and |extra| as [=archive value/extra=].
 </ol>
+
+The input to this algorithm is exactly the archive, from the first byte of [=archive/header_magic=]
+to the last byte of [=archive/footer_size_copy=].
+
+Issue: An algorithm to locate the archive within a larger file with leading or trailing bytes.
+
+Since every [=content block=] has to be described by a subsequent metadata block ([[#content-block]]),
+an archive with a metadata block can't have any content block after the last metadata block.
+[=meta/previous_metadata_offset=] and [=archive/metadata_backward_offset=] MUST point to
+the metadata blocks found by parsing [=archive/blocks=] as described in [[#metadata-block]] and [[#unencrypted-archive]],
+so that a decompressor can find each [=segment=] either by scanning blocks forward or by following offsets backward.
+
+Issue: [=archive/metadata_backward_offset=] is not yet defined when there is no metadata block.
+
+<h4 id=segment-interpretation>
+Interpreting a segment</h4>
+
+To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata block|:
+
+<ol class=algorithm>
+    1. Let |meta| be the [=decoded data=] of |metadata block|, parsed as its internal structure ([[#metadata-block]]).
+    2. Let |d| be [=meta/num_directories=] and |n| be [=meta/num_directories=] + [=meta/num_files=] of |meta|.
+    3. Let |nodes| be a [=list=] containing a single [=directory node=]
+        with an empty map as [=directory node/children=] and the [=entry extra=] for the entry 0 as [=directory node/extra=].
+    4. For each |k| in [1, |n|]:
+        1. Let |entry| be |meta|.[=meta/entries=][|k| - 1].
+        2. Let |name| be the result of [=decode an entry name|decoding=] |entry|.[=meta/entry_name=].
+        3. Let |parent| be 0 if |k| = 1, or |meta|.[=meta/entry_parents=][|k| - 2] otherwise.
+        4. If |k| ≤ |d|, let |node| be a [=directory node=] with an empty map as [=directory node/children=].
+        5. Otherwise:
+            1. Let |param| be |meta|.[=meta/file_params=][|k| - |d| - 1].
+            2. Let |block| be the block at the relative offset |param|.[=meta/file_offset=] from |metadata block|.
+                It MUST be a [=leaf block=] in |segment|.
+            3. If |param|.[=meta/file_dictionary=] is zero, |block| MUST NOT use a dictionary.
+                Otherwise, |block| MUST use the dictionary block at |meta|.[=meta/dictionary_offsets=][|param|.[=meta/file_dictionary=] - 1].
+            4. Let |content| be the [=file content=] of |block|.
+                Its length MUST be |entry|.[=meta/original_size=].
+            5. Let |node| be a [=file node=] with |content| as [=file node/content=].
+        6. Set the extra of |node| to the [=entry extra=] for the entry |k|.
+        7. Let |children| be the [=directory node/children=] of |nodes|[|parent|].
+            |children|[|name|] MUST NOT [=map/exist=].
+        8. Set |children|[|name|] to |node|.
+        9. [=list/Append=] |node| to |nodes|.
+    5. Return |nodes|[0].
+</ol>
+
+Since every |parent| is less than |k| and at most |d| by [[#metadata-block]], |nodes|[|parent|] is always a [=directory node=] already in |nodes|.
+
+The <dfn>entry extra</dfn> for the entry |k| is the |k|-th element of `entry-extras` in the segment's optional metadata,
+or null if there is no such element.
+
+Issue: Whether `entry-extras` includes the root directory, and whether `aqr-entry-extra` has to be a map rather than a group.
+
+<h4 id=segment-merging>
+Merging segments</h4>
+
+To <dfn>merge directory nodes</dfn> |later| into |earlier|:
+
+<ol class=algorithm>
+    1. For each |name| → |node| of |later|.[=directory node/children=]:
+        1. Let |existing| be |earlier|.[=directory node/children=][|name|], or null if it doesn't [=map/exist=].
+        2. If both |existing| and |node| are [=directory nodes=]:
+            1. If |node|.[=directory node/extra=] is not null, set |existing|.[=directory node/extra=] to it.
+            2. [=Merge directory nodes|Merge=] |node| into |existing|.
+        3. Otherwise, set |earlier|.[=directory node/children=][|name|] to |node|.
+    2. If |later|.[=directory node/extra=] is not null, set |earlier|.[=directory node/extra=] to it.
+</ol>
+
+As a result, a directory appearing in multiple segments has the union of their children,
+while a file or a directory replaced by a node of the different kind is replaced as a whole with its descendants.
+An entry can't be removed by a later segment.
+
+<div class=note>
+  Directories necessarily reappear in later segments to hold new files under them.
+  The rule in [[#unencrypted-archive]] that there SHOULD NOT be multiple entries with the same path
+  therefore only concerns files.
+</div>
+
+Issue: Whether a directory without an [=entry extra=] in a later segment should clear the existing [=directory node/extra=].
+
+<h3 id=block-contents>
+Block contents</h3>
+
+The <dfn>decoded data</dfn> of a block using the Shared external structure ([[#shared-external-structure]]),
+given its [=compression_method=] and [=checksum_method=], is determined as follows:
+
+* If [=compression_method=] is None, it is [=udata/data=].
+* If [=compression_method=] is [[#zstandard-compression-method|Zstandard]],
+    it is the result of decompressing [=cdata/data=] as described there, with [=cdata/compression_params=]
+    and the [=decoded data=] of the dictionary block in use, if any.
+    The result MUST have exactly [=cdata/original_size=] bytes.
+* If [=checksum_method=] is not None, the checksum MUST be equal to the checksum computed by the [=checksum_method=].
+
+Issue: Which bytes the checksum covers; see the TODO in [[#compressed-block]].
+
+Issue: The use of the decoded data of a dictionary block (TBW in [[#dictionary-block]]).
+
+The <dfn>stored content</dfn> of a [[#compressed-block|compressed block]] or an [[#uncompressed-block|uncompressed block]],
+whether a [=leaf block=] or not, is the [=decoded data=] of its [=cblock/compressed_data=] or its data respectively.
+A compressed block using a dictionary uses the dictionary block at [=cblock/dictionary_index=] within the [=segment=].
+
+The <dfn>file content</dfn> of a [=leaf block=] is:
+
+* Its [=stored content=], if it is a compressed or uncompressed block;
+* The result of [=evaluate a formula block|evaluating=] it, if it is a [[#formula-block|formula block]].
+
+<h3 id=formula-evaluation>
+Formula evaluation</h3>
+
+Issue: This section depends on the internal structure of [=formula/formula_data=], which is TODO in [[#formula-block]].
+It currently describes the nodes abstractly.
+
+A <dfn>formula node</dfn> is one of the following:
+
+* A <dfn>slice node</dfn> with a non-leaf block |block|, an offset |o| and a length |l|.
+* A <dfn>concatenation node</dfn> with a [=list=] of [=formula nodes=].
+* An <dfn>application node</dfn> with a [[#module-block|module block]],
+    a [=list=] of [[#resource-block|resource blocks]], a parameter [=byte sequence=],
+    a [=list=] of [=formula nodes=] as inputs, a declared output size and resource declarations.
+* A <dfn>reference node</dfn> with a reference to another file.
+
+To <dfn>evaluate a formula node</dfn> |node|:
+
+<ol class=algorithm>
+    1. If |node| is a [=slice node=] with |block|, |o| and |l|:
+        1. Let |c| be the [=stored content=] of |block|.
+        2. |o| + |l| MUST be at most the length of |c|.
+        3. Return the bytes of |c| in [|o|, |o| + |l|).
+    2. If |node| is a [=concatenation node=], return the concatenation of the results of
+        [=evaluate a formula node|evaluating=] each node in order.
+    3. If |node| is an [=application node=]:
+        1. Let |inputs| be the results of [=evaluate a formula node|evaluating=] each input node in order.
+        2. Return the result of [=apply a module|applying=] the module with |inputs|
+            and the other items of |node|.
+    4. If |node| is a [=reference node=], TODO.
+</ol>
+
+To <dfn>evaluate a formula block</dfn> |block|:
+
+<ol class=algorithm>
+    1. Let |data| be the [=decoded data=] of [=formula/formula_data=] of |block|, parsed as its internal structure.
+    2. Let |output| be the result of [=evaluate a formula node|evaluating=] the root [=formula node=] of |data|.
+    3. The length of |output| MUST be equal to the output size declared in |data|.
+    4. If [=formula/has_output_checksum=] is true, the XXH64 checksum of |output| MUST be equal to the declared one.
+    5. Return |output|.
+</ol>
+
+<div class=note>
+  Inputs are defined as fully evaluated byte sequences.
+  Lazy, streaming or partial evaluation is an implementation strategy and doesn't change the result
+  ([[#partial-access]]).
+</div>
+
+Issue: [=Reference nodes=] (in particular when the referenced file is replaced in a later segment), and multiple outputs.
+
+<h3 id=module-execution>
+Module execution</h3>
+
+Issue: This section is tentative and follows `xform-design.md` §5.
+
+A module is a WebAssembly module [[WASM-CORE-2]] stored as [=module/wasm_module=],
+instantiated and invoked through the embedding interface defined in the Appendix of [[WASM-CORE-2]].
+It MUST conform to the following profile, or an [=invalid archive=] failure occurs:
+
+* WebAssembly 2.0 core with the fixed-width SIMD, executed under the deterministic profile;
+    every NaN result is a canonical NaN.
+* Multiple memories are allowed.
+* Threads, relaxed SIMD, garbage collection, exception handling, memory64 for the working memory
+    and imported tables are not allowed.
+
+Issue: The import module name, the exported entry point, how resources and parameters are supplied, and whether memory64 is allowed for input and output memories.
+
+To <dfn>apply a module</dfn> |module| given a [=list=] of input [=byte sequences=] |inputs|,
+resources, parameters, a declared output size |size| and resource declarations:
+
+<ol class=algorithm>
+    1. For each index |k| of |inputs|, let |W|<sub>|k|</sub> be the declared input window size of |k|-th input,
+        and let the <dfn>visible range</dfn> of the |k|-th input be [0, 0).
+    2. Let |W|<sub>out</sub> be the declared output window size and |output| be an empty [=byte sequence=].
+    3. Instantiate |module| with the host functions below,
+        binding the memory |k| + 1 to a zero-filled memory of |W|<sub>|k|</sub> bytes for each input |k|
+        and the output memory to a zero-filled memory of |W|<sub>out</sub> bytes.
+    4. Invoke the entry point.
+        If it traps or any host function below signals an error, return an [=invalid archive=] failure.
+        If it exceeds any resource declaration or implementation-defined limit, return a [=resource failure=].
+    5. The length of |output| MUST be |size|.
+    6. Return |output|.
+</ol>
+
+Within the declared memory limit, `memory.grow` MUST succeed.
+
+Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|</sub> denote the [=visible range=] of the |k|-th input:
+
+: <dfn>request</dfn>(|k|, |hi|)
+:: |hi| MUST be in [|hi|<sub>|k|</sub>, length of |inputs|[|k|]], and |hi| - |lo|<sub>|k|</sub> MUST be at most |W|<sub>|k|</sub>.
+    For each offset |o| in [|hi|<sub>|k|</sub>, |hi|), write |inputs|[|k|][|o|] to the memory |k| + 1 at |o| % |W|<sub>|k|</sub>.
+    Then set |hi|<sub>|k|</sub> to |hi|.
+: <dfn>release</dfn>(|k|, |lo|)
+:: |lo| MUST be in [|lo|<sub>|k|</sub>, |hi|<sub>|k|</sub>]. Set |lo|<sub>|k|</sub> to |lo|.
+: <dfn>commit</dfn>(|hi|)
+:: |hi| MUST be in [length of |output|, |size|], and |hi| - length of |output| MUST be at most |W|<sub>out</sub>.
+    For each offset |o| in [length of |output|, |hi|), append the byte at |o| % |W|<sub>out</sub> of the output memory to |output|.
+: <dfn>heartbeat</dfn>()
+:: Does nothing.
+
+A violation of any MUST in host functions is signalled as an error to the module invocation.
+
+<div class=note>
+  The host writes input memories only within [=request=] and reads the output memory only within [=commit=],
+  so the content of every memory depends only on the order of calls made by the module.
+  Implementations MAY block in [=request=] until the requested bytes are available
+  and in [=commit=] until consumers catch up, or alias memories between modules,
+  as long as the result is indistinguishable from this definition.
+</div>
+
+Issue: Deterministic fork-join (`spawn`) and channels between tasks.
+
+<h3 id=partial-access>
+Partial access</h3>
+
+A decompressor MAY compute only a part of the result of [=interpret an archive|interpreting an archive=],
+such as a subset of entries, a byte range of a [=file node/content=], or entry names without contents.
+Such a partial result MUST be equal to the corresponding part of the full result, if the full result is an [=archive value=].
+
+A decompressor computing a partial result is not required to detect an [=invalid archive=] failure
+caused only by parts it doesn't compute.
+It SHOULD verify every checksum covering only the bytes it has computed.
+
+<div class=note>
+  For example, a decompressor reading a byte range of a file defined by a formula block can't verify its output checksum,
+  but can verify the checksums of non-leaf blocks it has read.
+  A decompressor looking up a single path has to consider every [=segment=] that may replace it,
+  which is possible by reading metadata blocks backward from [=archive/metadata_backward_offset=]
+  until the path or one of its ancestors is found as a file in a segment.
+</div>
+
+<!-- Obsolete drafts of the compressor, the decompressor and transformers follow, superseded by the declarative semantics above. -->
 
 <!--
 <p>To <dfn export>compress a file</dfn> into an Aqueous archive, given |inputPath| (a file system path), |outputPath| (a file system path), and optional |options|:
@@ -1737,8 +2015,6 @@ an [=input selector algorithm=] |input selector| rooted at the |input root direc
 </ol>
 -->
 
-<h3 id=decompressor>
-Decompressor</h3>
 
 <!--
 <p>To <dfn export>decompress an archive</dfn> given |inputPath| (a file system path), |outputPath| (a file system path), and optional |options|:</p>
@@ -2190,11 +2466,6 @@ age-encryption.org/v1
 </ol>
 -->
 
-<h3 id=formula-evaluation>
-Formula evaluation</h3>
-
-TODO: Evaluation of formula blocks and the execution environment of modules.
-
 <!-- Obsolete draft, superseded by formula blocks:
 <p>A <dfn>transformer</dfn> is a WebAssembly module that performs preprocessing on data before compression and postprocessing after decompression.
 Transformers are identified by a 1-based index within the metadata block.</p>
@@ -2316,6 +2587,28 @@ export memory: WebAssembly.Memory;
 
 <h2 id=conformance>
 Conformance</h2>
+
+<h3 id=extraction>
+Extraction</h3>
+
+Writing an [=archive value=] to a file system is outside the archive model.
+A decompressor doing so is subject to the following requirements:
+
+* It MUST NOT create, modify or remove any file outside the destination directory,
+    including through symbolic links or other redirections already present in the destination.
+* It SHOULD map an [=entry name=] whose [=entry name/encoding=] is "`wtf-8`" to the platform's native Unicode name
+    (e.g. UTF-16 with lone surrogates on Windows), and
+    an [=entry name=] whose [=entry name/encoding=] is "`raw`" to the identical byte sequence where the platform allows.
+* If an [=entry name=] can't be represented on the platform or has a special meaning there
+    (e.g. a name containing `\` or `:`, or a reserved device name on Windows),
+    it MUST either fail or report a substituted name to the user; it MUST NOT silently use a different name.
+* If multiple [=entry names=] in a directory map to the same file system name
+    (e.g. due to case insensitivity or Unicode normalization),
+    it MUST either fail or report the conflict, and MUST NOT write a later entry through an earlier one.
+* It MAY ignore any [=file node/extra=] or [=directory node/extra=].
+    It SHOULD NOT apply ownership information such as `unix-uid` and `unix-gid` unless explicitly requested.
+
+Issue: Symbolic links and hard links are not part of the archive model yet.
 
 <!--
 <p>As well as sections marked as non-normative, all authoring guidelines, diagrams, examples, and notes in this specification are non-normative.
