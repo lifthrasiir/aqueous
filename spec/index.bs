@@ -828,6 +828,7 @@ Content blocks</h4>
 Any other block is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]].
 A metadata block and all content blocks between the previous metadata block (or the beginning of the archive if none)
 and that metadata block form a <dfn>segment</dfn>.
+As an exception, an archive without a metadata block ([[#unencrypted-archive]]) forms a single segment with no metadata block.
 Each segment MUST be self-contained:
 every reference from a block in a segment, whether by an index or by an offset, MUST point to a block in the same segment.
 
@@ -875,7 +876,7 @@ and all data required to evaluate it follows it:
 <h5 id=compressed-block>
 Compressed block</h5>
 
-Blocks 20<sub>16</sub> through 37<sub>16</sub> are **compressed blocks**.
+Blocks 20<sub>16</sub> through 3F<sub>16</sub> are **compressed blocks**.
 Compressed blocks are parametrized by following variables:
 
 <div dfn-for=cblock>
@@ -923,24 +924,32 @@ Compressed blocks are parametrized by following variables:
     <tr>
       <td>34<sub>16</sub> — 37<sub>16</sub>
       <td>False
+      <td>False
+      <td>[[#zstandard-compression-method|Zstandard]]
+      <td>[[#xxh64-checksum-method|XXH64]]
+    <tr>
+      <td>38<sub>16</sub> — 3B<sub>16</sub>
+      <td>False
       <td>True
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>None
+    <tr>
+      <td>3C<sub>16</sub> — 3F<sub>16</sub>
+      <td>False
+      <td>True
+      <td>[[#zstandard-compression-method|Zstandard]]
+      <td>[[#xxh64-checksum-method|XXH64]]
   </tbody>
 </table>
 
 <div class=note>
   Alternatively, the block type can be interpreted as a binary number
-  <code>0010&thinsp;|d||c||ss|</code> for leaf blocks and
-  <code>0011&thinsp;0|d||ss|</code> for non-leaf blocks, where:
+  <code>001|n|&thinsp;|d||c||ss|</code> where:
 
+    * |n| indicates the block class: 0 for a leaf block, 1 for a non-leaf block.
     * |d| indicates dictionary usage: 0 for no dictionary, 1 for dictionary present.
     * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
-
-<div class=note>
-  Non-leaf blocks have no checksum because their integrity is implied by the integrity of the files derived from them.
 </div>
 
 Its data consists of the following:
@@ -958,8 +967,8 @@ Its data consists of the following:
       <td>[=leb128=]
       <td>[=If=] [=cblock/has_dictionary=]
     <tr>
-      <td><dfn>chunks</dfn>
-      <td>[=cblock/chunk=][*]
+      <td><dfn>compressed_data</dfn>
+      <td>[=block/compressed_data=]
       <td>
   </tbody>
 </table>
@@ -967,54 +976,35 @@ Its data consists of the following:
 If a dictionary is in use, its <em>0-based</em> index is specified as [=cblock/dictionary_index=].
 This field is intended for linear scanning,
 and the metadata block contains all necessary information for random access.
+[=cblock/compressed_data=] uses the Shared compressed external structure ([[#shared-external-structure]])
+with [=compression_method=] and [=checksum_method=] determined as above.
 
-A compressed block consists of one or more <dfn>chunk</dfn>s.
-Each chunk can be decompressed without referring to any other chunk, allowing efficient random access.
-Each [=cblock/chunk=] consists of the following:
+A compressed block is a single unit of decompression:
+reading any part of its content requires decompressing it from the beginning.
+Content larger than a desired unit of random access is split into multiple blocks:
 
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-      <th>Conditions
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>compressed_size</dfn>
-      <td>[=leb128=]
-      <td>
-    <tr>
-      <td><dfn>original_size_delta</dfn>
-      <td>[=leb128=]
-      <td>
-    <tr>
-      <td><dfn>compression_params</dfn>
-      <td>[=u8=][*]
-      <td>
-    <tr>
-      <td><dfn>data</dfn>
-      <td>[=u8=][[=cblock/compressed_size=]]
-      <td>
-    <tr>
-      <td><dfn>checksum</dfn>
-      <td>[=u8=][[=checksum_size=]]
-      <td>[=If=] [=checksum_method=] is not None
-  </tbody>
-</table>
+* In general, a file is represented by a [[#formula-block|formula block]] concatenating multiple non-leaf blocks.
+    The formula block then acts as an index for random access within the file.
+* In an archive without a metadata block ([[#unencrypted-archive]]),
+    the file is simply represented by multiple leaf blocks.
 
-Except for [=cblock/compressed_size=] which is now explicit,
-the interpretation of these fields is identical to that of the Shared compressed external structure ([[#shared-external-structure]]).
+<div class=note>
+  A checksum of a non-leaf block is optional and only useful for partial reads.
+  The output checksum of a formula block covers its entire output,
+  so a decompressor that only reads a part of the output can't verify it without reading the whole output.
+  Instead it can verify the checksums of non-leaf blocks it has actually read.
+</div>
 
-TODO: Whether [=cblock/checksum=] of a leaf block covers compressed or original bytes.
-The latter is desirable for the integrity of the file content.
+TODO: Whether [=checksum_method=] covers compressed or original bytes.
+The latter is desirable for the integrity of the file content,
+and required for verifying partial reads through non-leaf blocks.
 
 </div>
 
 <h5 id=uncompressed-block>
 Uncompressed block</h5>
 
-Blocks 40<sub>16</sub> through 4B<sub>16</sub> are **uncompressed blocks**.
+Blocks 40<sub>16</sub> through 4F<sub>16</sub> are **uncompressed blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
 where each parameter is determined as follows:
 
@@ -1040,14 +1030,18 @@ where each parameter is determined as follows:
       <td>48<sub>16</sub> — 4B<sub>16</sub>
       <td>False
       <td>None
+    <tr>
+      <td>4C<sub>16</sub> — 4F<sub>16</sub>
+      <td>False
+      <td>[[#xxh64-checksum-method|XXH64]]
   </tbody>
 </table>
 
 <div class=note>
   Alternatively, the block type can be interpreted as a binary number
-  <code>0100&thinsp;0|c||ss|</code> for leaf blocks and
-  <code>0100&thinsp;10|ss|</code> for non-leaf blocks, where:
+  <code>0100&thinsp;|n||c||ss|</code> where:
 
+    * |n| indicates the block class: 0 for a leaf block, 1 for a non-leaf block.
     * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
 </div>
@@ -1057,7 +1051,7 @@ This block type MUST be used when given data is barely compressible and can't be
 
 <div class=note>
   This is mandatory because each Zstandard block incurs 3 bytes of overhead
-  and [=cblock/original_size_delta=] can't be negative.
+  and [=cdata/original_size_delta=] can't be negative.
 </div>
 
 </div>
@@ -1065,12 +1059,12 @@ This block type MUST be used when given data is barely compressible and can't be
 <h5 id=dictionary-block>
 Dictionary block</h5>
 
-Blocks 4C<sub>16</sub> through 4F<sub>16</sub> are **dictionary blocks**.
+Blocks 50<sub>16</sub> through 53<sub>16</sub> are **dictionary blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
 with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
 
 <div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0100&thinsp;11|ss|</code> where:
+  Alternatively, the block type can be interpreted as a binary number <code>0101&thinsp;00|ss|</code> where:
 
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
 </div>
@@ -1221,12 +1215,28 @@ TODO: The internal structure of [=formula/formula_data=], which is expected to i
 * The output checksum, [=If=] [=formula/has_output_checksum=];
 * Nodes of the expression: a byte range of non-leaf blocks, a concatenation of nodes,
     and an application of a module to nodes with resources and parameters;
-* References to non-leaf blocks, as ordinals among the subsequent non-leaf blocks;
+* References to non-leaf blocks, each as an ordinal among the subsequent non-leaf blocks
+    and a relative offset to the referenced block.
+    The ordinal serves streaming decompressors and the offset serves random access,
+    so they MUST agree with each other, and a decompressor detecting a mismatch MUST treat it as an error.
+    Offsets are expected to be encoded to compress well, e.g. relative to the end of the previously referenced block;
 * References to module and resource blocks, as indices within the segment;
 * Resource declarations for each application (memory limit, input and output window sizes, capacity of shared edges);
 * Multiple outputs from a single formula block, each of which corresponds to a file;
 * References to other files, or their replacement;
 * Padding to keep [=formula/formula_data=] compressible, since its original size can't be smaller than the compressed size.
+
+The structure of [=formula/formula_data=] is not randomly accessible,
+and a decompressor is expected to read and decompress it in its entirety before evaluating any part of the formula.
+Together with the size declared by each node and the offsets of referenced non-leaf blocks,
+it then serves as an index for random access within the output,
+in the same way as a seek table of other formats.
+
+<div class=note>
+  The index grows linearly with the number of non-leaf blocks referenced,
+  but it compresses well because most nodes share the same shape and sizes.
+  The decompression of the whole [=formula/formula_data=] is a one-time cost per file.
+</div>
 
 </div>
 
@@ -1350,10 +1360,19 @@ Each part can be independently processed and decompressed in the reading order.
 There SHOULD NOT be multiple [=meta/entry|entries=] with the same path across metadata blocks,
 and if there are, only the last one is considered valid.
 
-Alternatively, [=archive/blocks=] can have no metadata block,
-in which case there SHOULD exist exactly one [=leaf block=],
-along with any auxiliary and non-leaf blocks it requires.
-Such archive decompresses into a single unnamed file.
+Alternatively, [=archive/blocks=] can have no metadata block.
+Such archive decompresses into a single unnamed file,
+whose content is the concatenation of the contents of all [=leaf blocks=] in the order of appearance.
+It decompresses into an empty file if there is no leaf block.
+
+<div class=note>
+  This allows a single file of unknown size to be compressed in a streaming fashion,
+  by writing each unit of random access as a separate leaf block as soon as it is compressed.
+  It is analogous to a gzip file that doesn't need to contain the name of the decompressed file.
+  Compressing multiple files in a streaming fashion is not supported:
+  a file spanning multiple non-leaf blocks requires a formula block preceding them,
+  which can only be written after all of them have been compressed.
+</div>
 
 </div>
 
@@ -2414,19 +2433,16 @@ Block index</h2>
       <td>10<sub>16</sub> — 1F<sub>16</sub>
       <td>[[#metadata-block]]
     <tr>
-      <td>20<sub>16</sub> — 37<sub>16</sub>
+      <td>20<sub>16</sub> — 3F<sub>16</sub>
       <td>[[#compressed-block]]
     <tr>
-      <td>38<sub>16</sub> — 3F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>40<sub>16</sub> — 4B<sub>16</sub>
+      <td>40<sub>16</sub> — 4F<sub>16</sub>
       <td>[[#uncompressed-block]]
     <tr>
-      <td>4C<sub>16</sub> — 4F<sub>16</sub>
+      <td>50<sub>16</sub> — 53<sub>16</sub>
       <td>[[#dictionary-block]]
     <tr>
-      <td>50<sub>16</sub> — 5F<sub>16</sub>
+      <td>54<sub>16</sub> — 5F<sub>16</sub>
       <td>Reserved
     <tr>
       <td>60<sub>16</sub> — 63<sub>16</sub>
