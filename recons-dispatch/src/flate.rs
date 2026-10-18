@@ -1,6 +1,8 @@
 //! gzip and zlib: the container sliced around flate-recons on its DEFLATE stream, whose
 //! data is a content of the application, recompressed in turn (composition, §4.5).
 
+use std::ops::Range;
+
 use flate_recons::Hints;
 use flate_recons::inflate::{self, Sink};
 use recons_formula::{Formula, Node};
@@ -10,6 +12,21 @@ use crate::{Options, verified};
 
 /// A gzip member (RFC 1952); what follows its trailer is sliced as it is.
 pub(crate) fn gzip(d: &[u8], opt: &Options) -> Option<Formula> {
+    let raw = gzip_deflate(d)?;
+    wrap("gzip", d, raw, &Hints::gzip_xfl(d[8]), |_| true, opt)
+}
+
+/// A zlib stream (RFC 1950); what follows its checksum is sliced as it is.
+pub(crate) fn zlib(d: &[u8], opt: &Options) -> Option<Formula> {
+    let raw = zlib_deflate(d)?;
+    let sum = u32::from_be_bytes(*d[raw.end..].first_chunk()?);
+    // Two bytes are a weak sign: the checksum confirms.
+    let hints = Hints::zlib_header([d[0], d[1]]);
+    wrap("zlib", d, raw, &hints, |data| adler32(data) == sum, opt)
+}
+
+/// The DEFLATE stream of the gzip member at the start of `d`, with its 8-byte trailer after it.
+pub(crate) fn gzip_deflate(d: &[u8]) -> Option<Range<usize>> {
     let flg = *d.get(3)?;
     if flg & 0xe0 != 0 {
         return None;
@@ -29,23 +46,22 @@ pub(crate) fn gzip(d: &[u8], opt: &Options) -> Option<Formula> {
     }
     let end = p + deflate_len(d.get(p..)?)?;
     d.get(end..end + 8)?;
-    wrap("gzip", d, p..end, &Hints::gzip_xfl(d[8]), |_| true, opt)
+    Some(p..end)
 }
 
-/// A zlib stream (RFC 1950); what follows its checksum is sliced as it is.
-pub(crate) fn zlib(d: &[u8], opt: &Options) -> Option<Formula> {
+/// The DEFLATE stream of the zlib stream at the start of `d`, with its 4-byte checksum after
+/// it.
+pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
     let end = 2 + deflate_len(d.get(2..)?)?;
-    let sum = u32::from_be_bytes(*d.get(end..)?.first_chunk()?);
-    // Two bytes are a weak sign: the checksum confirms.
-    let hints = Hints::zlib_header([d[0], d[1]]);
-    wrap("zlib", d, 2..end, &hints, |data| adler32(data) == sum, opt)
+    d.get(end..end + 4)?;
+    Some(2..end)
 }
 
 /// `d` with flate-recons on the DEFLATE stream at `raw`, if `accept` takes its data.
 fn wrap(
     class: &'static str,
     d: &[u8],
-    raw: std::ops::Range<usize>,
+    raw: Range<usize>,
     hints: &Hints,
     accept: impl FnOnce(&[u8]) -> bool,
     opt: &Options,

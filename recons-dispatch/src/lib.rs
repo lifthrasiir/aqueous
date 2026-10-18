@@ -30,6 +30,7 @@
 //! ```
 
 mod detect;
+mod extent;
 mod flate;
 pub mod native;
 mod pe;
@@ -37,6 +38,7 @@ mod pe;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub use detect::{Format, detect};
+pub use extent::extent;
 pub use native::Native;
 pub use recons_formula::{Formula, Module, Node};
 

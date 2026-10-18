@@ -73,10 +73,8 @@ pub fn detect(d: &[u8]) -> Option<Format> {
     } else if at(0, b"fLaC") || at(0, b"RIFF") && at(8, b"WAVE") || at(0, b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC"))
     {
         Some(Format::Flac)
-    } else if at(0, b"ID3") && d.len() >= 10 && d[6..10].iter().all(|&b| b < 0x80) {
+    } else if let Some(p) = id3_len(d) {
         // ID3v2 is found before either; what follows the tag tells them apart.
-        let size = d[6..10].iter().fold(0usize, |a, &b| a << 7 | b as usize);
-        let p = 10 + size + if d[5] & 0x10 != 0 { 10 } else { 0 };
         Some(if at(p, b"fLaC") { Format::Flac } else { Format::Mp3 })
     } else if at(0, &[0xff, 0xd8, 0xff]) {
         Some(Format::Jpeg)
@@ -93,8 +91,15 @@ pub fn detect(d: &[u8]) -> Option<Format> {
     }
 }
 
+/// Bytes of the ID3v2 tag at the start of `d`, if any.
+pub(crate) fn id3_len(d: &[u8]) -> Option<usize> {
+    let h = d.first_chunk::<10>().filter(|h| h.starts_with(b"ID3") && h[6..].iter().all(|&b| b < 0x80))?;
+    let size = h[6..].iter().fold(0usize, |a, &b| a << 7 | b as usize);
+    Some(10 + size + if h[5] & 0x10 != 0 { 10 } else { 0 })
+}
+
 /// An MPEG audio layer III frame header.
-fn mp3_header(d: &[u8]) -> bool {
+pub(crate) fn mp3_header(d: &[u8]) -> bool {
     let &[0xff, b1, b2, ..] = d else { return false };
     let (sync, version, layer) = (b1 >> 5, b1 >> 3 & 3, b1 >> 1 & 3);
     let (bitrate, rate) = (b2 >> 4, b2 >> 2 & 3);
@@ -102,7 +107,7 @@ fn mp3_header(d: &[u8]) -> bool {
 }
 
 /// "MZ" with `e_lfanew` pointing at "PE\0\0".
-fn pe(d: &[u8]) -> bool {
+pub(crate) fn pe(d: &[u8]) -> bool {
     let Some(&[b'M', b'Z']) = d.first_chunk() else { return false };
     let Some(&lfanew) = d.get(0x3c..0x40).and_then(|s| s.first_chunk::<4>()) else { return false };
     let p = u32::from_le_bytes(lfanew) as usize;
