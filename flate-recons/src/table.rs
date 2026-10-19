@@ -2,7 +2,7 @@
 //! length, second key length) so that the per-byte work is a handful of instructions.
 //!
 //! A table keeps, per hash of the first `K` bytes, the last `W` positions inserted (most
-//! recent first), and with `L > 0` a second such table keyed by `L` bytes. Every position is
+//! recent first), and with `L` a second such table keyed by 5 to 8 bytes. Every position is
 //! inserted, or only token starts (and the inside of matches up to some length). Loads go
 //! unchecked where at least 8 bytes are left; the last few positions take a checked path.
 
@@ -149,8 +149,10 @@ impl Search for ChainTable {
     fn token(&mut self, _: &[u8], _: usize, _: usize) {}
 }
 
-pub struct Table<const W: usize, const K: usize, const L: usize> {
+pub struct Table<const W: usize, const K: usize, const L: bool> {
     bits: u32,
+    /// Left shift keeping the second table's key bytes.
+    lshift: u32,
     t: Vec<[u32; W]>,
     t2: Vec<[u32; LW]>,
     /// Token-driven insertion: starts, and the inside of matches up to this long.
@@ -211,13 +213,13 @@ fn push<const W: usize>(b: &mut [u32; W], v: u32) {
     *b = n;
 }
 
-impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
+impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
     const MASK: u32 = if K == 3 { 0xff_ffff } else { u32::MAX };
 
     /// A table for coding tokens from `start` on, below `end`: with every position inserted,
     /// the window before `start` is inserted first. Short ranges get smaller tables (it
     /// matters for their setup, not for collisions).
-    pub fn new(inner: Option<usize>, start: usize, end: usize, rank: bool) -> Self {
+    pub fn new(long: u8, inner: Option<usize>, start: usize, end: usize, rank: bool) -> Self {
         let span = end.saturating_sub(start.saturating_sub(WINDOW)).max(1);
         let bits = span
             .next_power_of_two()
@@ -225,8 +227,9 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
             .clamp(MIN_BITS, HASH_BITS);
         Table {
             bits,
+            lshift: 64 - 8 * long as u32,
             t: vec![[0; W]; 1 << bits],
-            t2: vec![[0; LW]; if L > 0 { 1 << bits } else { 0 }],
+            t2: vec![[0; LW]; if L { 1 << bits } else { 0 }],
             inner,
             next: start.saturating_sub(WINDOW),
             last_start: usize::MAX,
@@ -277,8 +280,8 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
 
     /// The second table's bucket of `p` (`p + 8 <= d.len()`).
     #[inline(always)]
-    fn h2(d: &[u8], p: usize, bits: u32) -> usize {
-        let k = load64(d, p) << (64 - 8 * L);
+    fn h2(d: &[u8], p: usize, bits: u32, lshift: u32) -> usize {
+        let k = load64(d, p) << lshift;
         (k.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - bits)) as usize
     }
 
@@ -300,8 +303,8 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
             self.prev[p & (n - 1)] = b[0];
         }
         push(b, v);
-        if L > 0 && p + 8 <= d.len() {
-            push(&mut self.t2[Self::h2(d, p, self.bits)], v);
+        if L && p + 8 <= d.len() {
+            push(&mut self.t2[Self::h2(d, p, self.bits, self.lshift)], v);
         }
     }
 
@@ -364,7 +367,7 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
     fn insert_run(&mut self, d: &[u8], from: usize, to: usize) {
         debug_assert!(to <= d.len().saturating_sub(7) || from >= to);
         let chain = !self.prev.is_empty() && !self.own;
-        let bits = self.bits;
+        let (bits, lshift) = (self.bits, self.lshift);
         let (t, t2, prev) = (&mut self.t[..], &mut self.t2[..], &mut self.prev[..]);
         let ring = prev.len().wrapping_sub(1);
         for q in from..to {
@@ -374,8 +377,8 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
                 prev[q & ring] = b[0];
             }
             push(b, v);
-            if L > 0 {
-                push(&mut t2[Self::h2(d, q, bits)], v);
+            if L {
+                push(&mut t2[Self::h2(d, q, bits, lshift)], v);
             }
         }
     }
@@ -428,8 +431,9 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
         }
         if p + 8 <= d.len() {
             let mut best = Self::best_of(d, p, window, max, &self.t[self.h1(d, p)], (0, 0));
-            if L > 0 {
-                best = Self::best_of(d, p, window, max, &self.t2[Self::h2(d, p, self.bits)], best);
+            if L {
+                let b2 = &self.t2[Self::h2(d, p, self.bits, self.lshift)];
+                best = Self::best_of(d, p, window, max, b2, best);
             }
             return if best.0 < 3 { (0, 0) } else { best };
         }
@@ -464,8 +468,8 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
                 }
             }
         }
-        if L > 0 && fast {
-            for e in self.t2[Self::h2(d, p, self.bits)] {
+        if L && fast {
+            for e in self.t2[Self::h2(d, p, self.bits, self.lshift)] {
                 if e == 0 {
                     break;
                 }
@@ -489,7 +493,7 @@ impl<const W: usize, const K: usize, const L: usize> Table<W, K, L> {
     }
 }
 
-impl<const W: usize, const K: usize, const L: usize> Cands for Table<W, K, L> {
+impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
     fn entries(&mut self, d: &[u8], p: usize) -> Vec<usize> {
         self.ensure(d, p);
         if p + K > d.len() {
@@ -501,8 +505,8 @@ impl<const W: usize, const K: usize, const L: usize> Cands for Table<W, K, L> {
             .filter(|&e| e > 0 && e - 1 < p)
             .map(|e| e - 1)
             .collect();
-        if L > 0 && p + 8 <= d.len() {
-            for e in self.t2[Self::h2(d, p, self.bits)] {
+        if L && p + 8 <= d.len() {
+            for e in self.t2[Self::h2(d, p, self.bits, self.lshift)] {
                 let e = e as usize;
                 if e > 0 && e - 1 < p && !v.contains(&(e - 1)) {
                     v.push(e - 1);
@@ -553,7 +557,7 @@ impl<const W: usize, const K: usize, const L: usize> Cands for Table<W, K, L> {
     }
 
     fn index_of(&mut self, d: &[u8], p: usize, dist: usize) -> Option<usize> {
-        if L > 0 || dist > p {
+        if L || dist > p {
             return self.entries(d, p).iter().position(|&c| p - c == dist);
         }
         // One table: the entries before `p` in order, without collecting them.
@@ -569,7 +573,7 @@ impl<const W: usize, const K: usize, const L: usize> Cands for Table<W, K, L> {
     }
 }
 
-impl<const W: usize, const K: usize, const L: usize> Search for Table<W, K, L> {
+impl<const W: usize, const K: usize, const L: bool> Search for Table<W, K, L> {
     #[inline(always)]
     fn search(&mut self, d: &[u8], p: usize, window: usize) -> (usize, usize) {
         let max = (d.len() - p).min(MAX_MATCH);

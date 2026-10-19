@@ -480,7 +480,7 @@ pub fn code_range<C: Corr>(
         ($w:literal, $k:literal, $l:literal) => {
             code_with(
                 c,
-                Table::<$w, $k, $l>::new(inner, range.pos, range.end, rule.rank),
+                Table::<$w, $k, $l>::new(rule.long, inner, range.pos, range.end, rule.rank),
                 d,
                 rule,
                 range,
@@ -491,12 +491,10 @@ pub fn code_range<C: Corr>(
     }
     macro_rules! by_long {
         ($w:literal, $k:literal) => {
-            match rule.long {
-                5 => go!($w, $k, 5),
-                6 => go!($w, $k, 6),
-                7 => go!($w, $k, 7),
-                8 => go!($w, $k, 8),
-                _ => go!($w, $k, 0),
+            if rule.long > 0 {
+                go!($w, $k, true)
+            } else {
+                go!($w, $k, false)
             }
         };
     }
@@ -517,7 +515,9 @@ pub fn code_range<C: Corr>(
     }
 }
 
-#[inline(always)]
+/// One function per table type: inlining all of them into [`code_range`] made a function of
+/// hundreds of KB in wasm, which compilers handle poorly, for no gain (it runs once per range).
+#[inline(never)]
 fn code_with<C: Corr, T: Search>(
     c: &mut C,
     mut t: T,
