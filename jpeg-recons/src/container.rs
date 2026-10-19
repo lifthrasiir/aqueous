@@ -424,10 +424,13 @@ pub(crate) fn decompress_core<'a>(
     blob: &[u8],
     progressive: bool,
     r: &mut impl CoreSource<'a>,
-    t: &mut Timing,
+    t: Option<&mut Timing>,
     coefs: &mut Vec<Coefs>,
 ) -> Result<Vec<u8>, Error> {
-    let t0 = Instant::now();
+    // the clock is read only when timing is asked for: the module (`formula::decode`) runs
+    // where there is none, such as wasm32-unknown-unknown
+    let now = || t.is_some().then(Instant::now);
+    let t0 = now();
     let j = jpeg::parse(blob)?;
     if j.progressive != progressive {
         return Err(Error("version does not match the frame type".into()));
@@ -489,9 +492,9 @@ pub(crate) fn decompress_core<'a>(
     let stripes: Vec<(&[u8], &[u8])> = (0..nstripes).map(|_| r.stripe()).collect::<Result<_, Error>>()?;
     r.finish()?;
     let e = fast::Encoded::from_parts(tables, &stripes)?;
-    let t1 = Instant::now();
+    let t1 = now();
     fast::decode_into(&j, &e, coefs)?;
-    let t2 = Instant::now();
+    let t2 = now();
     // scans are re-emitted independently of each other (in parallel; sequential scans are also
     // split internally, see `jpeg::encode_scan`)
     use rayon::prelude::*;
@@ -527,7 +530,9 @@ pub(crate) fn decompress_core<'a>(
         q = s.start;
     }
     out.extend_from_slice(&blob[q..]);
-    *t = Timing { parse: (t1 - t0).as_secs_f64(), model: (t2 - t1).as_secs_f64(), huffman: t2.elapsed().as_secs_f64() };
+    if let (Some(t), Some(t0), Some(t1), Some(t2)) = (t, t0, t1, t2) {
+        *t = Timing { parse: (t1 - t0).as_secs_f64(), model: (t2 - t1).as_secs_f64(), huffman: t2.elapsed().as_secs_f64() };
+    }
     Ok(out)
 }
 
@@ -567,7 +572,7 @@ fn try_decompress(c: &[u8], t: &mut Timing, depth: u32) -> Result<Vec<u8>, Error
     }
     let cut = r.next()?;
     let blob = restore_blob(cut, &entries, &emb)?;
-    let out = with_bufs(|coefs, _| decompress_core(&blob, progressive, &mut r, t, coefs))?;
+    let out = with_bufs(|coefs, _| decompress_core(&blob, progressive, &mut r, Some(t), coefs))?;
     if xxhash_rust::xxh3::xxh3_64(&out) != hash {
         return Err(Error("checksum mismatch: reconstruction differs from the original".into()));
     }

@@ -139,7 +139,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
             let blob = container::restore_blob(cut, &entries, &emb)?;
             let mut slots = Slots { info, scans, tables, lens, rans, bits, pos: [0; 4] };
             container::with_bufs(|coefs, _| {
-                container::decompress_core(&blob, progressive == 1, &mut slots, &mut Timing::default(), coefs)
+                container::decompress_core(&blob, progressive == 1, &mut slots, None, coefs)
             })
         }))
     });
