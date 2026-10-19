@@ -1,0 +1,59 @@
+# Segments delimited by metadata blocks, and parcels delimited by leaf blocks.
+# Rendered into segments.svg by ../Makefile.
+
+scale = 0.667
+boxwid = 0.7
+boxht = 0.42
+fontscale = 1
+thickness = 0.012
+
+# Fill colors are replaced by CSS custom properties in ../Makefile.
+$leaf = 0xc9dcf5
+$nonleaf = 0xe8e8e8
+$aux = 0xd5ead0
+$meta = 0xf5dcb4
+
+# Segment 1: a module block, a formula block over two non-leaf blocks,
+# another leaf block, then a formula block over one non-leaf block.
+MOD: box "module" fill $aux
+F1:  box "formula" fill $leaf
+N11: box "non-leaf" fill $nonleaf
+N12: box "non-leaf" fill $nonleaf
+L2:  box "leaf" fill $leaf
+F3:  box "formula" fill $leaf
+N31: box "non-leaf" fill $nonleaf
+M1:  box "metadata" fill $meta thick
+
+# Segment 2: a single leaf block.
+L4:  box "leaf" fill $leaf
+M2:  box "metadata" fill $meta thick
+
+# Forward references from formula blocks to non-leaf blocks.
+define ref {
+  arc -> cw from $1.n + (0.08, 0) to $2.n
+}
+ref(F1, N11); ref(F1, N12)
+ref(F3, N31)
+
+# Backward references from formula blocks to the preceding module block, dashed.
+define aux {
+  arc -> ccw dashed from $1.n - (0.08, 0) to $2.n + ($3, 0)
+}
+aux(F1, MOD, 0.08); aux(F3, MOD, -0.08)
+
+# Brackets below the blocks from $1 to $2 at depth $3, labelled $4.
+define bracket {
+  line from ($1.w.x + 0.05, $1.s.y - $3) down 0.08 \
+    then right until even with ($2.e.x - 0.05, 0) then up 0.08
+  text $4 italic at ((last line.start.x + last line.end.x) / 2, last line.start.y - 0.22)
+}
+
+# Parcels: from each leaf block up to the next leaf block or the end of the segment.
+bracket(F1, N12, 0.08, "parcel")
+bracket(L2, L2, 0.08, "parcel")
+bracket(F3, N31, 0.08, "parcel")
+bracket(L4, L4, 0.08, "parcel")
+
+# Segments: content blocks and the metadata block describing them.
+bracket(MOD, M1, 0.5, "segment")
+bracket(L4, M2, 0.5, "segment")

@@ -1,0 +1,45 @@
+<svg xmlns='http://www.w3.org/2000/svg' style='font-size:initial;' class="pikchr" width="674" height="206" viewBox="0 0 1011.46 310.464">
+<path d="M1.728,189.936L102.528,189.936L102.528,129.456L1.728,129.456Z"  style="fill:var(--fig-aux,rgb(213,234,208));stroke-width:1.728;stroke:currentColor;" />
+<text x="52.128" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">module</text>
+<path d="M102.528,189.936L203.328,189.936L203.328,129.456L102.528,129.456Z"  style="fill:var(--fig-leaf,rgb(201,220,245));stroke-width:1.728;stroke:currentColor;" />
+<text x="152.928" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">formula</text>
+<path d="M203.328,189.936L304.128,189.936L304.128,129.456L203.328,129.456Z"  style="fill:var(--fig-nonleaf,rgb(232,232,232));stroke-width:1.728;stroke:currentColor;" />
+<text x="253.728" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">non-leaf</text>
+<path d="M304.128,189.936L404.928,189.936L404.928,129.456L304.128,129.456Z"  style="fill:var(--fig-nonleaf,rgb(232,232,232));stroke-width:1.728;stroke:currentColor;" />
+<text x="354.528" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">non-leaf</text>
+<path d="M404.928,189.936L505.728,189.936L505.728,129.456L404.928,129.456Z"  style="fill:var(--fig-leaf,rgb(201,220,245));stroke-width:1.728;stroke:currentColor;" />
+<text x="455.328" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">leaf</text>
+<path d="M505.728,189.936L606.528,189.936L606.528,129.456L505.728,129.456Z"  style="fill:var(--fig-leaf,rgb(201,220,245));stroke-width:1.728;stroke:currentColor;" />
+<text x="556.128" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">formula</text>
+<path d="M606.528,189.936L707.328,189.936L707.328,129.456L606.528,129.456Z"  style="fill:var(--fig-nonleaf,rgb(232,232,232));stroke-width:1.728;stroke:currentColor;" />
+<text x="656.928" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">non-leaf</text>
+<path d="M707.328,189.936L808.128,189.936L808.128,129.456L707.328,129.456Z"  style="fill:var(--fig-meta,rgb(245,220,180));stroke-width:2.592;stroke:currentColor;" />
+<text x="757.728" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">metadata</text>
+<path d="M808.128,189.936L908.928,189.936L908.928,129.456L808.128,129.456Z"  style="fill:var(--fig-leaf,rgb(201,220,245));stroke-width:1.728;stroke:currentColor;" />
+<text x="858.528" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">leaf</text>
+<path d="M908.928,189.936L1009.73,189.936L1009.73,129.456L908.928,129.456Z"  style="fill:var(--fig-meta,rgb(245,220,180));stroke-width:2.592;stroke:currentColor;" />
+<text x="959.328" y="159.696" text-anchor="middle" fill="currentColor" dominant-baseline="central">metadata</text>
+<polygon points="253.728,129.456 242.527,124.365 248.637,118.255" style="fill:currentColor"/>
+<path d="M164.448,129.456Q209.088,84.816 249.655,125.383"  style="fill:none;stroke-width:1.728;stroke:currentColor;" />
+<polygon points="354.528,129.456 343.327,124.365 349.437,118.255" style="fill:currentColor"/>
+<path d="M164.448,129.456Q259.488,34.416 350.455,125.383"  style="fill:none;stroke-width:1.728;stroke:currentColor;" />
+<polygon points="656.928,129.456 645.727,124.365 651.837,118.255" style="fill:currentColor"/>
+<path d="M567.648,129.456Q612.288,84.816 652.855,125.383"  style="fill:none;stroke-width:1.728;stroke:currentColor;" />
+<polygon points="63.648,129.456 68.7392,118.255 74.8486,124.365" style="fill:currentColor"/>
+<path d="M141.408,129.456Q102.528,90.576 67.7209,125.383"  style="fill:none;stroke-width:1.728;stroke:currentColor;stroke-dasharray:7.2,7.2;" />
+<polygon points="40.608,129.456 45.6992,118.255 51.8086,124.365" style="fill:currentColor"/>
+<path d="M544.608,129.456Q292.608,-122.544 44.6809,125.383"  style="fill:none;stroke-width:1.728;stroke:currentColor;stroke-dasharray:7.2,7.2;" />
+<path d="M109.728,201.456L109.728,212.976L397.728,212.976L397.728,201.456"  style="fill:none;stroke-width:1.728;stroke-linejoin:round;stroke:currentColor;" />
+<text x="253.728" y="233.136" text-anchor="middle" font-style="italic" fill="currentColor" dominant-baseline="central">parcel</text>
+<path d="M412.128,201.456L412.128,212.976L498.528,212.976L498.528,201.456"  style="fill:none;stroke-width:1.728;stroke-linejoin:round;stroke:currentColor;" />
+<text x="455.328" y="233.136" text-anchor="middle" font-style="italic" fill="currentColor" dominant-baseline="central">parcel</text>
+<path d="M512.928,201.456L512.928,212.976L700.128,212.976L700.128,201.456"  style="fill:none;stroke-width:1.728;stroke-linejoin:round;stroke:currentColor;" />
+<text x="606.528" y="233.136" text-anchor="middle" font-style="italic" fill="currentColor" dominant-baseline="central">parcel</text>
+<path d="M815.328,201.456L815.328,212.976L901.728,212.976L901.728,201.456"  style="fill:none;stroke-width:1.728;stroke-linejoin:round;stroke:currentColor;" />
+<text x="858.528" y="233.136" text-anchor="middle" font-style="italic" fill="currentColor" dominant-baseline="central">parcel</text>
+<path d="M8.928,261.936L8.928,273.456L800.928,273.456L800.928,261.936"  style="fill:none;stroke-width:1.728;stroke-linejoin:round;stroke:currentColor;" />
+<text x="404.928" y="293.616" text-anchor="middle" font-style="italic" fill="currentColor" dominant-baseline="central">segment</text>
+<path d="M815.328,261.936L815.328,273.456L1002.53,273.456L1002.53,261.936"  style="fill:none;stroke-width:1.728;stroke-linejoin:round;stroke:currentColor;" />
+<text x="908.928" y="293.616" text-anchor="middle" font-style="italic" fill="currentColor" dominant-baseline="central">segment</text>
+</svg>
+

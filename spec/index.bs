@@ -17,6 +17,19 @@ td:has(+td>a[href="#type-offset"])>dfn {
 a[href="#type-offset"] {
   font-style: italic;
 }
+svg.pikchr {
+  max-width: 100%;
+  height: auto;
+  background: none;
+}
+@media (prefers-color-scheme: dark) {
+  svg.pikchr {
+    --fig-leaf: #2c4a70;
+    --fig-nonleaf: #444;
+    --fig-aux: #2f5229;
+    --fig-meta: #6b4d1f;
+  }
+}
 </style>
 
 <pre class=link-defaults>
@@ -876,6 +889,24 @@ and all data required to evaluate it follows it:
   and the decompressor knows exactly when the block can be discarded.
   Likewise, the decompressor never has to retain a formula block after all non-leaf blocks it references have been read.
 </div>
+
+A leaf block and all subsequent content blocks up to the next leaf block or the end of the segment
+form a <dfn>parcel</dfn>.
+When no leaf block is interleaved with non-leaf blocks,
+a parcel consists of a leaf block, the non-leaf blocks it references if it is a formula block,
+and possibly auxiliary blocks.
+
+<figure id=fig-segments>
+  <pre class=include-raw>path: figures/segments.svg</pre>
+  <figcaption>
+    An archive with two segments, each ending with the metadata block describing it,
+    and four [=parcels=], each starting with a leaf block.
+    Arrows denote references from formula blocks to non-leaf blocks (solid) and to a module block (dashed).
+    The module block precedes the first leaf block in its segment, so it belongs to no parcel.
+    Dictionary, resource and spacer blocks are omitted,
+    and no leaf block is interleaved with non-leaf blocks.
+  </figcaption>
+</figure>
 
 <h5 id=compressed-block>
 Compressed block</h5>
