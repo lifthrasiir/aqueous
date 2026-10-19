@@ -1480,7 +1480,9 @@ pub(crate) fn stuff_into(src: &[u8], out: &mut Vec<u8>) {
 #[inline(always)]
 pub(crate) fn size_bits(v: i32) -> (u32, u32) {
     let s = 32 - v.unsigned_abs().leading_zeros();
-    let bits = if v < 0 { (v - 1) as u32 & ((1u32 << s) - 1) } else { v as u32 };
+    // v - 1 when negative, without a branch: the sign is unpredictable, and the wasm32 backend
+    // turns an `if` here into a branch that not every Wasm compiler folds back into a select
+    let bits = v.wrapping_add(v >> 31) as u32 & ((1u32 << s) - 1);
     (s, bits)
 }
 
@@ -1795,4 +1797,18 @@ fn encode_scan_into(
     }
     stuff_into(&w.buf[start..w.pos], out);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::size_bits;
+
+    #[test]
+    fn size_bits_matches_definition() {
+        for v in -(1i32 << 20)..(1 << 20) {
+            let s = 32 - v.unsigned_abs().leading_zeros();
+            let bits = if v < 0 { (v - 1) as u32 & ((1u32 << s) - 1) } else { v as u32 };
+            assert_eq!(size_bits(v), (s, bits), "{v}");
+        }
+    }
 }
