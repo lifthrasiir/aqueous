@@ -726,8 +726,8 @@ File parameters (<dfn>file_param</dfn>) occur for each file (but not directory),
 as a <em>1-based</em> index, or zero if no dictionary is used.
 Therefore [=meta/file_dictionary=] = |k| refers to the block at [=meta/dictionary_offsets=][|k| - 1],
 and [=meta/num_dictionaries=] is the maximum possible value for it.
-A relative offset to the corresponding [=leaf block=] is recorded as [=meta/file_offset=],
-which can't be zero.
+A relative offset to the corresponding [=leaf block=], which starts the file's [=parcel=],
+is recorded as [=meta/file_offset=], which can't be zero.
 
 TODO: An output index when the formula block at [=meta/file_offset=] has multiple outputs.
 
@@ -833,6 +833,8 @@ form a <dfn>parcel</dfn>.
 When no leaf block is interleaved with non-leaf blocks,
 a parcel consists of a leaf block, the non-leaf blocks it references if it is a formula block,
 and possibly auxiliary blocks.
+In that case a decompressor can read a single file by reading its parcel and the auxiliary blocks it uses,
+and a streaming decompressor never has to retain a formula block beyond its parcel.
 
 <figure id=fig-segments>
   <pre class=include-raw>path: figures/segments.svg</pre>
@@ -956,8 +958,9 @@ A compressed block is a single unit of decompression:
 reading any part of its content requires decompressing it from the beginning.
 Content larger than a desired unit of random access is split into multiple blocks:
 
-* In general, a file is represented by a [[#formula-block|formula block]] concatenating multiple non-leaf blocks.
-    The formula block then acts as an index for random access within the file.
+* In general, a file is represented by a [[#formula-block|formula block]] concatenating multiple non-leaf blocks,
+    which typically form a single [=parcel=] together.
+    The formula block then acts as an index for random access within the parcel.
 * In an archive without a metadata block ([[#unencrypted-archive]]),
     the file is simply represented by multiple leaf blocks.
 
@@ -1298,10 +1301,10 @@ to read [=archive/footer_size_copy=] and eventually [=archive/footer_magic=] to 
 [=archive/metadata_backward_offset=] is the offset from [=archive/footer_start=] to the beginning of last metadata block,
 just like [=meta/previous_metadata_offset=] is the offset from the beginning of the current metadata block to the previous one.
 
-[=archive/blocks=] are logically divided into multiple parts,
-consisting of one or more [=content blocks=] and a single [[#metadata-block|metadata block]] describing them,
+[=archive/blocks=] are logically divided into [=segments=],
+each consisting of [=content blocks=] and a single [[#metadata-block|metadata block]] describing them,
 with optional spacer blocks in between.
-Each part can be independently processed and decompressed in the reading order.
+Each segment can be independently processed and decompressed in the reading order.
 There SHOULD NOT be multiple [=meta/entry|entries=] with the same path across metadata blocks,
 and if there are, only the last one is considered valid.
 
@@ -1312,11 +1315,11 @@ It decompresses into an empty file if there is no leaf block.
 
 <div class=note>
   This allows a single file of unknown size to be compressed in a streaming fashion,
-  by writing each unit of random access as a separate leaf block as soon as it is compressed.
+  by writing each unit of random access as a separate leaf block, and thus a separate [=parcel=], as soon as it is compressed.
   It is analogous to a gzip file that doesn't need to contain the name of the decompressed file.
   Compressing multiple files in a streaming fashion is not supported:
-  a file spanning multiple non-leaf blocks requires a formula block preceding them,
-  which can only be written after all of them have been compressed.
+  a file spanning multiple non-leaf blocks requires a [=parcel=] starting with a formula block,
+  which can only be written after all non-leaf blocks in the parcel have been compressed.
 </div>
 
 </div>
@@ -1987,7 +1990,9 @@ caused only by parts it doesn't compute.
 It SHOULD verify every checksum covering only the bytes it has computed.
 
 <div class=note>
-  For example, a decompressor reading a byte range of a file defined by a formula block can't verify its output checksum,
+  For example, a decompressor reading a byte range of a file defined by a formula block
+  only reads the non-leaf blocks covering that range, rather than its entire [=parcel=].
+  It can't verify the output checksum of the formula block,
   but can verify the checksums of non-leaf blocks it has read.
   A decompressor looking up a single path has to consider every [=segment=] that may replace it,
   which is possible by reading metadata blocks backward from [=archive/metadata_backward_offset=]
