@@ -39,6 +39,9 @@ spec:infra; type:dfn; text:list
 <pre class=anchors>
 urlPrefix: https://www.rfc-editor.org/rfc/rfc9581.html; spec: RFC9581; type: cddl-type
     text: etime; url: #section-6
+    text: duration; url: #section-6
+    text: $$ETIME-ELECTIVE; url: #section-3
+    text: $ETIME-TIMESCALE; url: #section-3.4
 </pre>
 
 <h2 id=definitions>
@@ -1399,7 +1402,7 @@ The optional metadata is described by the following CDDL [[RFC8610]] definitions
 where `etime` is the CDDL type name for the extended time defined in [[!RFC9581]]:
 
 <pre class=cddl>
-aqr-opt-metadata = { $$aqr-opt-metadata }
+aqr-opt-metadata = { $$aqr-opt-metadata-member }
 
 aqr-offset = uint .gt 0
 
@@ -1409,21 +1412,26 @@ aqr-text =
   bstr            ; In unknown encoding
 
 aqr-time =
-  $aqr-time /               ; UTC timestamp or its scaling
-  [$aqr-time] /             ; In unknown time zone, encoded like UTC (*)
-  [$aqr-time, offset: int]  ; In a known time zone, offset from UTC in 15 minutes ($)
+  $aqr-base-time /                          ; UTC timestamp, scaled and quantized
+  [$aqr-base-time] /                        ; Local time in unknown time zone, encoded like UTC (*)
+  [$aqr-instant, offset: aqr-tz-offset] /   ; UTC timestamp with time zone offset ($)
+  etime /                                   ; Extended time defined in [[!RFC9581]]
+  [etime]                                   ; Local time in unknown time zone, encoded like UTC
 
-$aqr-time /= #6.100(int)  ; 1d (FAT atime*)
-$aqr-time /= #6.121(int)  ; 2s (FAT mtime*, ZIP*, CAB*)
-$aqr-time /= int          ; 1s (~ext3, HFS/HFS+, tar)
-$aqr-time /= #6.122(int)  ; 10ms (FAT ctime*, ISO 9660$, exFAT$)
-$aqr-time /= #6.123(int)  ; 1ms
-$aqr-time /= #6.124(int)  ; 1us (UDF)
-$aqr-time /= #6.125(int)  ; 100ns (NTFS, RAR*, 7z)
-$aqr-time /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
-$aqr-time /= etime
+aqr-tz-offset = -48..56  ; In 15 minutes, positive east of UTC as in ISO 9660
 
-$$aqr-opt-metadata //= (
+$aqr-base-time  = #6.100(int)    ; 1d (FAT atime*), date as in [[RFC8943]]
+$aqr-base-time /= $aqr-instant  ; Can be given a time zone offset
+
+$aqr-instant  = #6.121(int)  ; 2s (FAT mtime*, exFAT atime$, ZIP*, CAB*)
+$aqr-instant /= int          ; 1s (~ext3, HFS/HFS+, tar, ISO 9660$)
+$aqr-instant /= #6.122(int)  ; 10ms (FAT ctime*, ISO 9660$, exFAT$)
+$aqr-instant /= #6.123(int)  ; 1ms
+$aqr-instant /= #6.124(int)  ; 1us (UDF)
+$aqr-instant /= #6.125(int)  ; 100ns (NTFS, RAR*, 7z)
+$aqr-instant /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
+
+$$aqr-opt-metadata-member = (
   ? &(archive-comment: -1) => aqr-text
   &(entry-extras: -2) => [* aqr-entry-extra]
 )
@@ -1450,7 +1458,7 @@ aqr-entry-extra = (
 )
 
 aqr-zip-extras = { * aqr-zip-extra-id => bstr }
-;aqr-zip-extra-id = 0..0xffff
+aqr-zip-extra-id = 0..65535
 ; TODO: should exclude or at least discourage the following:
 ;       0x0001 - ZIP64
 ;       0x5455 - extended timestamp
@@ -1460,20 +1468,164 @@ aqr-zip-extras = { * aqr-zip-extra-id => bstr }
 
 There MUST NOT be any following bytes after this CBOR item.
 
-Issue: The precisions of `$aqr-time` do not cover every precision found in the wild
-(e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP, 1/300 s in SQL Server `DATETIME`),
-and its time zone offset cannot express minute offsets as in UDF.
-The extended time (`#6.1001`) [[RFC9581]] would be the desirable representation,
-but it is too verbose for every timestamp and has a semantic gap:
-its uncertainty (key -7) and guarantee (key -8) are symmetric and about measurement,
-while a truncated or rounded timestamp only bounds the true time to one side.
-This would need a new elective key (tentatively -14, a quantization interval)
-meaning that the true time lies in a given interval relative to the base time.
-`#6.121`..`#6.127` would then be defined as shortcuts for commonly used `#6.1001` values.
-Since editing an archive can mix multiple precisions in a single file,
-the precision should ideally be recorded per timestamp as above, not per archive.
+Issue: Some precisions found in the wild are only representable with the extended time,
+e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP and 1/300 s in SQL Server `DATETIME`,
+and so are time zone offsets that are not multiples of 15 minutes as in UDF.
+Some of them may deserve their own encodings.
 
-TBW
+<h4 id=aqr-time><code>aqr-time</code>: Timestamp</h4>
+
+<p><code>aqr-time</code> represents a point in time or a local date and time,
+together with a [=quantization interval=] and optional time zone information.</p>
+
+<p>A base time value <code>$aqr-base-time</code> is an integer, either untagged or tagged as follows.
+The integer multiplied by the scale is the number of seconds since 1970-01-01T00:00:00Z,
+not counting leap seconds as in the CBOR tag 1 [[RFC8949]];
+negative values denote the time before that epoch.
+The tag also determines the quantization interval,
+which is relative to the time value and specified in [[#etime-quantization-interval]].
+`#6.100` is the number of days since 1970-01-01 [[RFC8943]],
+and is the only base time value that is not an <code>&#36;aqr-instant</code>, i.e. it can't be given a time zone offset.</p>
+<table class=data>
+<thead>
+<tr>
+  <th>Encoding</th>
+  <th>Quantization Interval (<abbr title="seconds">s</abbr>)</th>
+  <th>Scale (<abbr title="seconds">s</abbr>)</th>
+  <th>Examples</th>
+</tr>
+<tbody>
+<tr>
+  <td><code>#6.100(int)</code></td>
+  <td>[0, 86400]</td>
+  <td>86400</td>
+  <td>FAT atime*</td>
+</tr>
+<tr>
+  <td><code>#6.121(int)</code></td>
+  <td>[0, 2]</td>
+  <td>2</td>
+  <td>FAT mtime*, exFAT atime$, ZIP*, CAB*</td>
+</tr>
+<tr>
+  <td><code>int</code></td>
+  <td>[0, 1]</td>
+  <td>1</td>
+  <td>ext3 and earlier, HFS/HFS+, tar, ISO 9660$ (directory records)</td>
+</tr>
+<tr>
+  <td><code>#6.122(int)</code></td>
+  <td>[0, 10<sup>-2</sup>]</td>
+  <td>10<sup>-2</sup></td>
+  <td>FAT ctime*, ISO 9660$ (volume descriptors), exFAT$</td>
+</tr>
+<tr>
+  <td><code>#6.123(int)</code></td>
+  <td>[0, 10<sup>-3</sup>]</td>
+  <td>10<sup>-3</sup></td>
+  <td>-</td>
+</tr>
+<tr>
+  <td><code>#6.124(int)</code></td>
+  <td>[0, 10<sup>-6</sup>]</td>
+  <td>10<sup>-6</sup></td>
+  <td>UDF</td>
+</tr>
+<tr>
+  <td><code>#6.125(int)</code></td>
+  <td>[0, 10<sup>-7</sup>]</td>
+  <td>10<sup>-7</sup></td>
+  <td>NTFS, RAR*, 7z</td>
+</tr>
+<tr>
+  <td><code>#6.126(int)</code></td>
+  <td>[0, 10<sup>-9</sup>]</td>
+  <td>10<sup>-9</sup></td>
+  <td>ext4, ZFS, Btrfs, APFS</td>
+</tr>
+</table>
+
+<p>In the Examples column, formats marked with * store (or can store) a local time in an unknown time zone,
+and formats marked with $ store a local time with its offset from UTC.</p>
+
+<div class=note>
+  <p>Tags 121 to 126 are the tags for enumerated alternatives 0 to 5 [[CBOR-NOTABLE-TAGS]],
+  whose meanings are given by the schema in use rather than by the tags themselves.
+  They are therefore meaningful only as <code>&#36;aqr-instant</code>,
+  and are not shortcuts for the extended time in general.</p>
+</div>
+
+<div class=note>
+  <p>Since a time zone offset is a multiple of 15 minutes, converting a local time to UTC keeps it a multiple of 2 seconds.
+  A local date, however, doesn't stay a multiple of 1 day unless the offset is zero,
+  so a date with a known time zone offset can only be given as an extended time
+  (e.g. `1001({1: 1697641200, -14: 86400, -10: "+09:00"})` for 2023-10-19 in UTC+9).</p>
+</div>
+
+<p>Each alternative of <code>aqr-time</code> has the following meaning:</p>
+
+<dl>
+<dt><code>&#36;aqr-base-time</code></dt>
+<dd>A point in time without any time zone information.</dd>
+<dt><code>[&#36;aqr-base-time]</code></dt>
+<dd>A local date and time in an unknown time zone, encoded as if it were UTC.
+It does not identify a single point in time.</dd>
+<dt><code>[&#36;aqr-instant, aqr-tz-offset]</code></dt>
+<dd>A point in time, as in the bare <code>&#36;aqr-base-time</code>,
+with the offset of the time zone where it was recorded, in 15-minute increments as in ISO 9660.
+The offset is positive east of UTC: UTC+<var>x</var> hours is 4<var>x</var> and UTC&minus;<var>x</var> hours is &minus;4<var>x</var>.
+The local time is the base time value plus 900 times the offset in seconds.</dd>
+<dt><code>etime</code></dt>
+<dd>An extended time [[RFC9581]] (tag 1001), for any value which doesn't fit the other alternatives.
+The time zone information, if any, is given as a Time Zone Hint (key -10 or 10),
+and the quantization interval is given as a key described in [[#etime-quantization-interval]].</dd>
+<dt><code>[etime]</code></dt>
+<dd>A local date and time in an unknown time zone, encoded as if it were UTC.
+The extended time MUST NOT contain a Time Zone Hint (key -10 or 10),
+and its timescale (key -1, -13 or 13), if present, MUST be 0 (UTC).</dd>
+</dl>
+
+<p><code>etime</code> or <code>[etime]</code> MUST NOT be used
+if another alternative of <code>aqr-time</code> represents the same time value,
+the same quantization interval and the same time zone information.
+A Time Zone Hint is the same as an <code>aqr-tz-offset</code>
+only when it is a numeric offset (e.g. `"+09:00"`) equal to that offset;
+an extended time without any quantization interval is never the same as other alternatives.</p>
+
+<div class=note>
+  <p>As a consequence, timestamps from common file systems and archive formats never need the extended time,
+  and an implementation without full support for [[RFC9581]] can still handle them.
+  Such an implementation can ignore an <code>aqr-time</code> using the extended time,
+  as an extracting decompressor is allowed to ignore any extra metadata ([[#extraction]]).</p>
+</div>
+
+<p>Two <code>aqr-time</code> values in different encodings are different even when they denote the same point in time.
+For example, `1` and `122(100)` differ in their quantization intervals.
+A compressor converting a timestamp from a file system or another archive format
+SHOULD preserve its precision, i.e. use an encoding whose quantization interval matches the source.</p>
+
+<div class=note>
+  <p>Comparing timestamps from file systems of different precisions is a common source of problems,
+  e.g. an unchanged file copied from ext4 to FAT appears to be modified.
+  Recording the quantization interval for each timestamp, rather than for each archive,
+  lets any consumer tell whether two timestamps can denote the same time,
+  even after an archive mixes multiple sources by editing.</p>
+</div>
+
+<div class=example>
+  <p>The following are possible encodings of 2023-10-19T14:12:34.87Z, or 23:12:34.87 in UTC+9,
+  depending on the source:</p>
+  <ul>
+    <li>ZIP with a DOS date and time, a local time in an unknown time zone: `[121(848878577)]`
+    <li>ZIP with an extended timestamp extra field (0x5455) in UTC: `1697724754`
+    <li>git, which records a time zone offset in minutes: `[1697724754, 36]`
+    <li>exFAT modification time with a UTC offset: `[122(169772475487), 36]`
+    <li>NTFS: `125(16977247548700000)`
+    <li>ext4: `126(1697724754870000000)`
+    <li>FAT access date, a local date in an unknown time zone: `[100(19649)]`
+    <li>A source rounding to the nearest second: `1001({1: 1697724755, -14: [-0.5, 0.5]})`
+  </ul>
+</div>
 
 <h3 id=formula-data>
 Formula data</h3>
@@ -2763,6 +2915,67 @@ The actual transformation logic is implementation-dependent and not specified by
 </ul>
 -->
 
+<h2 id=iana-considerations>
+IANA Considerations</h2>
+
+<h3 id=etime-quantization-interval>
+Quantization Interval</h3>
+
+<p>This document requests the registration of a new key for the Time Tag Map Keys Registry (RFC 9581, section 7.3) as follows:</p>
+
+<dl>
+<dt>Key Name</dt>
+<dd><dfn>Quantization Interval</dfn></dd>
+<dt>Key Value</dt>
+<dd>-14 (tentative)</dd>
+<dt>Reference</dt>
+<dd>The [=Quantization Interval=] section in this document.</dd>
+<dt>Semantics</dt>
+<dd>
+  <p>A quantization interval specifies the interval in which the true time lies, relative to the time value given.
+  That is, if the time value is <var>t</var> and the quantization interval is from <var>a</var> to <var>b</var>,
+  the true time lies between <var>t</var> + <var>a</var> and <var>t</var> + <var>b</var> inclusive.
+  The quantization is any means to truncate or round the true time value to a discrete representation,
+  and notably, is not related to the accuracy of the underlying clock.
+  For example, it is possible that the clock has a high precision but the time values are truncated to the last second,
+  in which case the quantization interval would be [0, 1 second].</p>
+  <p>The interval is always closed.
+  It may be slightly wider than the exact set of possible true times
+  (e.g. [0, 1 second] for truncation, where the true time can never be exactly 1 second later),
+  but it never excludes any possible true time, including ties in rounding.</p>
+  <p>A quantization interval can be given in terms of:</p>
+  <ul>
+    <li>A positive numeric value in seconds or a positive duration <var>x</var>, indicating the interval of [0, <var>x</var>];</li>
+    <li>A negative numeric value in seconds or a negative duration <var>x</var>, indicating the interval of [<var>x</var>, 0];</li>
+    <li>An array of two elements <var>[a, b]</var> each of which is either a numeric value in seconds or a duration,
+    indicating the interval of [<var>a</var>, <var>b</var>].</li>
+  </ul>
+  <p>A duration is positive or negative when its total value, i.e. key 1 plus any fractional part, is positive or negative respectively.
+  For example, `{1: -1, -3: 500}` is a negative duration of -0.5 seconds.</p>
+  <p>A valid quantization interval MUST contain a value of zero, referring to the time value given,
+  and MUST NOT be a single point.
+  Therefore a numeric value or duration MUST NOT be zero,
+  and an array <var>[a, b]</var> MUST satisfy <var>a</var> &le; 0 &le; <var>b</var> and <var>a</var> &lt; <var>b</var>.</p>
+  <p>If an extended time doesn't contain this key, its quantization interval is unknown;
+  in particular, the time value is not implied to be exact.</p>
+  <p>For example, the first two of the following represent a time value truncated to 10 milliseconds,
+  and the last one represents a time value rounded to the nearest second:</p>
+<pre>
+1001({1: 1697724754, -3: 870, -14: 0.01}),
+1001({1: 1697724754, -3: 870, -14: [0, {1: 0, -3: 10}]}),
+1001({1: 1697724754, -14: [-0.5, 0.5]})
+</pre>
+</dd>
+
+</dl>
+
+<p>The following CDDL declarations can be used to represent the Quantization Interval key:</p>
+
+<pre class=cddl>
+quantization-interval = ~time / ~duration / [ 2*2 ~time/~duration ]
+$$ETIME-ELECTIVE //= (-14: quantization-interval)
+</pre>
+
 <h2 id=block-index>
 Block index</h2>
 
@@ -2834,6 +3047,13 @@ Block index</h2>
     "authors": ["Filippo Valsorda"],
     "publisher": "The Community Cryptography Specification Project",
     "href": "https://age-encryption.org/v1"
+  },
+  "CBOR-NOTABLE-TAGS": {
+    "title": "Notable CBOR Tags",
+    "authors": ["Carsten Bormann"],
+    "status": "Internet-Draft",
+    "publisher": "IETF",
+    "href": "https://datatracker.ietf.org/doc/draft-bormann-cbor-notable-tags/"
   },
   "RFC2119": {
     "title": "Key words for use in RFCs to Indicate Requirement Levels",
