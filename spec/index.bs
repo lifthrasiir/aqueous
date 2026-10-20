@@ -4,7 +4,7 @@ Shortname: aqueous
 Status: LS
 Boilerplate: omit feedback-header
 Editor: Kang Seonghoon, https://mearie.org/
-Repository: TODO
+Repository: https://github.com/lifthrasiir/aqueous/
 Abstract: This specification defines the Aqueous archive format, a compressed archive format designed for efficient storage and retrieval of files.
 Markup Shorthands: markdown yes
 </pre>
@@ -57,7 +57,8 @@ Definitions</h2>
 
   <div class=note>
     By definition, this condition varies by the choice of compression algorithm.
-    In the case of Zstandard, the minimum overhead is 3 bytes per block of at most 2<sup>21</sup>-1 bytes.
+    In the case of Zstandard, the minimum overhead is 3 bytes per Zstandard block,
+    each of which holds at most 128 KiB (2<sup>17</sup> bytes) of data.
   </div>
   </dd>
 
@@ -87,7 +88,8 @@ Definitions</h2>
   <dd>A component or algorithm responsible for performing decompression.</dd>
 
   <dt><dfn export>Dictionary</dfn></dt>
-  <dd>TBW</dd>
+  <dd>A byte sequence supplied to the compression method as if it preceded the data,
+  typically shared by multiple small blocks to compensate for the lack of shared compression context.</dd>
 
   <dt><dfn export>Directory</dfn></dt>
   <dd>A special type of file that contains references to other files and/or directories,
@@ -444,6 +446,15 @@ The uncompressed external structure (<dfn for=block>uncompressed_data</dfn>) con
 
 </div>
 
+In both structures, the checksum is computed over the [=decoded data=] ([[#block-contents]]),
+i.e. the data after decompression, rather than the stored bytes.
+
+<div class=note>
+  A checksum over the stored bytes would only verify that they have been read correctly.
+  A checksum over the decoded data also verifies the decompression,
+  and lets a decompressor reading only some non-leaf blocks verify the file content it has actually read.
+</div>
+
 <h5 id=zstandard-compression-method>
 Zstandard compression method</h5>
 
@@ -467,9 +478,17 @@ Its parameters ([=cdata/compression_params=]) are as follows:
   </tbody>
 </table>
 
-The meaning of the [=window_descriptor=] field is identical to the Zstandard's `Window_Descriptor` byte [[RFC9659]].
+The meaning of the [=window_descriptor=] field is identical to the Zstandard's `Window_Descriptor` byte [[RFC9659]],
+which determines `Window_Size` as in [[RFC8878]], Section 3.1.1.1.2.
+Consequently each Zstandard block holds at most `Block_Maximum_Size` = min(`Window_Size`, 128 KiB) bytes of data.
 
-TBW
+Conforming decompressors MUST support any `Window_Size` up to 2<sup>27</sup> bytes (128 MiB),
+and MAY return a [=resource failure=] for a larger `Window_Size`.
+Conforming compressors SHOULD NOT use a `Window_Size` larger than 2<sup>27</sup> bytes
+unless explicitly requested.
+
+If a dictionary is in use, its content, entropy tables and repeat offsets are given by the dictionary block
+as described in [[#dictionary-block]].
 
 </div>
 
@@ -540,7 +559,7 @@ Its data consists of the following:
 </table>
 
 If this block is present, it MUST be the first block after the header
-and its [=szhint/size_hint=] field SHOULD equal to the footer's [=archive/size_hint=] field.
+and its [=szhint/size_hint=] field MUST be equal to the footer's [=archive/size_hint=] field.
 
 </div>
 
@@ -697,9 +716,14 @@ collectively called [=meta/entries=] and numbered together.
 The root directory is numbered 0,
 subsequent directories are numbered from 1 to [=meta/num_directories=],
 and individual files are numbered from ([=meta/num_directories=] + 1) to ([=meta/num_directories=] + [=meta/num_files=]).
-Directories can't form a cycle: a parent of the entry index |k| MUST be less than |k| in [=meta/entry_parents=].
+There MUST be at least one entry other than the root directory, i.e. [=meta/num_directories=] + [=meta/num_files=] ≥ 1.
+A parent of the entry index |k| in [=meta/entry_parents=] MUST be a directory less than |k|,
+i.e. in [0, min(|k| - 1, [=meta/num_directories=])], so that directories can't form a cycle.
 The parent of the root directory (entry 0) and the entry 1 is always fixed to None and the root directory,
 so they are omitted.
+
+Issue: Whether a segment without any entry other than the root directory should be allowed,
+e.g. to update only the archive-wide optional metadata or the [=entry extra=] of the root directory.
 
 File parameters (<dfn>file_param</dfn>) occur for each file (but not directory), and consist of the following:
 
@@ -772,6 +796,11 @@ and SHOULD only use the raw byte sequence as a round-trip measure.
 The [=meta/entries=] array is the only part that has the unspecified number of bytes,
 which is therefore available as [=meta/entries_size=] beforehand.
 Any other field can be randomly accessed after reading the initial set of [=leb128=] fields.
+
+As an exception to the relative offsets above, [=meta/entry_offsets=] are measured from [=meta/entries_start=].
+The entry 1 always starts at [=meta/entries_start=], so its offset is omitted,
+and [=meta/entry_offsets=][|k| - 2] is the offset to the beginning of the entry |k| for each |k| ≥ 2.
+They MUST agree with the actual positions of [=meta/entries=].
 
 [=meta/optional_metadata=] is described in Optional metadata ([[#optional-metadata]]).
 
@@ -971,10 +1000,6 @@ Content larger than a desired unit of random access is split into multiple block
   Instead it can verify the checksums of non-leaf blocks it has actually read.
 </div>
 
-TODO: Whether [=checksum_method=] covers compressed or original bytes.
-The latter is desirable for the integrity of the file content,
-and required for verifying partial reads through non-leaf blocks.
-
 </div>
 
 <h5 id=uncompressed-block>
@@ -1035,19 +1060,96 @@ This block type MUST be used when given data is barely compressible and can't be
 <h5 id=dictionary-block>
 Dictionary block</h5>
 
-Blocks 50<sub>16</sub> through 53<sub>16</sub> are **dictionary blocks**.
+Blocks 50<sub>16</sub> through 57<sub>16</sub> are **dictionary blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
 with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
-
-<div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0101&thinsp;00|ss|</code> where:
-
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
+Dictionary blocks are parametrized by following variables:
 
 <div dfn-for=dict>
 
-TBW
+<table class=data>
+  <thead>
+    <tr>
+      <th>Block Types
+      <th><dfn>has_entropy_tables</dfn>
+  </thead>
+  <tbody>
+    <tr>
+      <td>50<sub>16</sub> — 53<sub>16</sub>
+      <td>False
+    <tr>
+      <td>54<sub>16</sub> — 57<sub>16</sub>
+      <td>True
+  </tbody>
+</table>
+
+<div class=note>
+  Alternatively, the block type can be interpreted as a binary number <code>0101&thinsp;0|t||ss|</code> where:
+
+    * |t| indicates the presence of entropy tables: 0 for absent, 1 for present.
+    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
+</div>
+
+The internal structure after decompression is as follows:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>entropy_tables</dfn>
+      <td>[=u8=][*]
+      <td>[=If=] [=dict/has_entropy_tables=]
+    <tr>
+      <td><dfn>repeat_offsets</dfn>
+      <td>[=u32le=][3]
+      <td>[=If=] [=dict/has_entropy_tables=]
+    <tr>
+      <td><dfn>content</dfn>
+      <td>[=u8=][*]
+      <td>
+  </tbody>
+</table>
+
+The decoded data of a dictionary block is a [=dictionary=] for blocks using it,
+and corresponds to a Zstandard dictionary ([[RFC8878]], Section 5) without `Magic_Number` and `Dictionary_ID`:
+
+*   If [=dict/has_entropy_tables=] is true, [=dict/entropy_tables=] is the `Entropy_Tables` structure,
+    whose length is determined by parsing it, and [=dict/repeat_offsets=] are the three `Repeat_Offsets` in order.
+    Each repeat offset MUST be in [1, length of [=dict/content=]].
+*   Otherwise, it is a raw content dictionary:
+    the entropy tables start empty and the repeat offsets start at their initial values (1, 4, 8),
+    even when [=dict/content=] begins with the dictionary `Magic_Number`.
+
+In both cases, [=dict/content=] is the `Content` of the dictionary,
+which is the only part of the dictionary that sequences can reference as preceding data.
+[=dict/content=] MUST be at least 8 bytes long.
+
+<div class=note>
+  `Magic_Number` and `Dictionary_ID` are omitted because they are only meaningful for Zstandard frames
+  and the framing is done by this format.
+  An implementation using libzstd can prepend them (with an arbitrary nonzero `Dictionary_ID`)
+  to load a dictionary with entropy tables.
+  In that case it has to make sure that no sequence references the prepended bytes or [=dict/entropy_tables=],
+  which some decompression paths of libzstd don't check.
+</div>
+
+<div class=note>
+  Entropy tables can be trained independently of the content (e.g. `ZDICT_finalizeDictionary`)
+  and mainly benefit small blocks:
+  in measurements with per-file blocks of 1–20 KB files, they reduced the size by 0.4–26%,
+  while the benefit vanished for blocks of 64 KB or more.
+  Fast strategies of libzstd (e.g. levels 1–3 of 1.5.7) reuse the dictionary's entropy tables for every block
+  even when the block's own tables would be smaller.
+  When the repeat offsets of the dictionary are the initial values,
+  a compressor can avoid this by also compressing a block with the same [=dict/content=] as a raw content dictionary
+  and choosing the smaller result,
+  since a block compressed that way never refers to the entropy tables of the dictionary.
+</div>
 
 </div>
 
@@ -1300,6 +1402,8 @@ to read [=archive/footer_size_copy=] and eventually [=archive/footer_magic=] to 
 
 [=archive/metadata_backward_offset=] is the offset from [=archive/footer_start=] to the beginning of last metadata block,
 just like [=meta/previous_metadata_offset=] is the offset from the beginning of the current metadata block to the previous one.
+It MUST be 0 if and only if there is no metadata block,
+so that a decompressor can tell such archives without scanning [=archive/blocks=].
 
 [=archive/blocks=] are logically divided into [=segments=],
 each consisting of [=content blocks=] and a single [[#metadata-block|metadata block]] describing them,
@@ -1436,10 +1540,10 @@ $aqr-instant /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
 
 $$aqr-opt-metadata-member = (
   ? &(archive-comment: -1) => aqr-text
-  &(entry-extras: -2) => [* aqr-entry-extra]
+  ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
 )
 
-aqr-entry-extra = (
+aqr-entry-extra = {
   ? &(crtime: -1) => aqr-time
   ? &(ctime: -2) => aqr-time
   ? &(mtime: -3) => aqr-time
@@ -1458,7 +1562,7 @@ aqr-entry-extra = (
   ; other extras for round trip
 
   ? &(zip-extras: -100) => aqr-zip-extras
-)
+}
 
 aqr-zip-extras = { * aqr-zip-extra-id => bstr }
 aqr-zip-extra-id = 0..65535
@@ -1470,11 +1574,14 @@ aqr-zip-extra-id = 0..65535
 </pre>
 
 There MUST NOT be any following bytes after this CBOR item.
+If [=meta/optional_metadata_size=] is 0, the optional metadata is an empty map `{}`.
 
-Issue: Some precisions found in the wild are only representable with the extended time,
-e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP and 1/300 s in SQL Server `DATETIME`,
-and so are time zone offsets that are not multiples of 15 minutes as in UDF.
-Some of them may deserve their own encodings.
+<div class=note>
+  Some precisions found in the wild are only representable with the extended time,
+  e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP and 1/300 s in SQL Server `DATETIME`,
+  and so are time zone offsets that are not multiples of 15 minutes as in UDF.
+  They are rare enough in file metadata not to deserve their own encodings.
+</div>
 
 <h4 id=aqr-time><code>aqr-time</code>: Timestamp</h4>
 
@@ -1680,6 +1787,9 @@ which is one of the following:
     It is a property of the input alone, and all conforming decompressors agree on it.
 * A <dfn>resource failure</dfn> occurs when the evaluation exceeds a declared or implementation-defined limit.
     It is not a property of the input, and conforming decompressors MAY disagree on it.
+* A <dfn>decryption failure</dfn> occurs when an [[#encrypted-archive|encrypted archive]] can't be decrypted
+    with the given passphrase, if any.
+    It is a property of the input and the passphrase, and all conforming decompressors agree on it.
 
 A conforming compressor, given an [=archive value=],
 MUST produce a byte sequence whose interpretation is that [=archive value=].
@@ -1738,12 +1848,21 @@ To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
 <h3 id=interpretation>
 Interpreting an archive</h3>
 
-To <dfn export>interpret an archive</dfn> given a [=byte sequence=] |input|:
+To <dfn export>interpret an archive</dfn> given a [=byte sequence=] |input| and an optional passphrase |passphrase|:
 
 <ol class=algorithm>
     1. If |input| starts with [=const/ENCRYPTED_HEADER_MAGIC=]:
-        1. TODO: Decrypt the [=envelope/payload=], check the additional constraints in [[#encrypted-archive]],
-            and interpret the decrypted archive instead.
+        1. Parse |input| as the Encrypted Archive structure ([[#encrypted-archive]]) in its entirety.
+            If it fails to parse, return an [=invalid archive=] failure.
+        2. If [=envelope/lg_work_factor=] exceeds an implementation-defined limit, return a [=resource failure=].
+        3. If |passphrase| is not given, or the file key can't be unwrapped from [=envelope/encrypted_file_key=]
+            with |passphrase| as described in [[AGE]], return a [=decryption failure=].
+        4. Using the unwrapped file key, verify [=envelope/age_header_mac=] against the reconstructed AGE header
+            and decrypt [=envelope/payload=] as described in [[AGE]].
+            If either fails, return an [=invalid archive=] failure.
+        5. Set |input| to the decrypted payload.
+            It MUST satisfy the additional constraints in [[#encrypted-archive]],
+            or an [=invalid archive=] failure is returned.
     2. Parse |input| as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety.
         If it fails to parse, return an [=invalid archive=] failure.
     3. If [=archive/blocks=] contain no [[#metadata-block|metadata block]]:
@@ -1772,8 +1891,6 @@ an archive with a metadata block can't have any content block after the last met
 [=meta/previous_metadata_offset=] and [=archive/metadata_backward_offset=] MUST point to
 the metadata blocks found by parsing [=archive/blocks=] as described in [[#metadata-block]] and [[#unencrypted-archive]],
 so that a decompressor can find each [=segment=] either by scanning blocks forward or by following offsets backward.
-
-Issue: [=archive/metadata_backward_offset=] is not yet defined when there is no metadata block.
 
 <h4 id=segment-interpretation>
 Interpreting a segment</h4>
@@ -1809,10 +1926,11 @@ To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata bl
 
 Since every |parent| is less than |k| and at most |d| by [[#metadata-block]], |nodes|[|parent|] is always a [=directory node=] already in |nodes|.
 
-The <dfn>entry extra</dfn> for the entry |k| is the |k|-th element of `entry-extras` in the segment's optional metadata,
-or null if there is no such element.
-
-Issue: Whether `entry-extras` includes the root directory, and whether `aqr-entry-extra` has to be a map rather than a group.
+The <dfn>entry extra</dfn> for the entry |k| is the element at the <em>0-based</em> index |k| of `entry-extras`
+in the segment's optional metadata, where the index 0 corresponds to the root directory,
+or null if `entry-extras` or such element doesn't exist.
+`entry-extras` MUST NOT have more elements than the entries including the root directory,
+i.e. [=meta/num_directories=] + [=meta/num_files=] + 1.
 
 <h4 id=segment-merging>
 Merging segments</h4>
@@ -1832,14 +1950,15 @@ To <dfn>merge directory nodes</dfn> |later| into |earlier|:
 As a result, a directory appearing in multiple segments has the union of their children,
 while a file or a directory replaced by a node of the different kind is replaced as a whole with its descendants.
 An entry can't be removed by a later segment.
+A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=],
+which can be cleared by an empty map `{}` instead.
 
 <div class=note>
   Directories necessarily reappear in later segments to hold new files under them.
   The rule in [[#unencrypted-archive]] that there SHOULD NOT be multiple entries with the same path
   therefore only concerns files.
+  For the same reason, a reappearing directory doesn't have to repeat its [=entry extra=].
 </div>
-
-Issue: Whether a directory without an [=entry extra=] in a later segment should clear the existing [=directory node/extra=].
 
 <h3 id=block-contents>
 Block contents</h3>
@@ -1850,13 +1969,10 @@ given its [=compression_method=] and [=checksum_method=], is determined as follo
 * If [=compression_method=] is None, it is [=udata/data=].
 * If [=compression_method=] is [[#zstandard-compression-method|Zstandard]],
     it is the result of decompressing [=cdata/data=] as described there, with [=cdata/compression_params=]
-    and the [=decoded data=] of the dictionary block in use, if any.
+    and the [=dictionary=] given by the dictionary block in use ([[#dictionary-block]]), if any.
     The result MUST have exactly [=cdata/original_size=] bytes.
-* If [=checksum_method=] is not None, the checksum MUST be equal to the checksum computed by the [=checksum_method=].
-
-Issue: Which bytes the checksum covers; see the TODO in [[#compressed-block]].
-
-Issue: The use of the decoded data of a dictionary block (TBW in [[#dictionary-block]]).
+* If [=checksum_method=] is not None, the checksum MUST be equal to the checksum of the decoded data
+    computed by the [=checksum_method=].
 
 The <dfn>stored content</dfn> of a [[#compressed-block|compressed block]] or an [[#uncompressed-block|uncompressed block]],
 whether a [=leaf block=] or not, is the [=decoded data=] of its [=cblock/compressed_data=] or its data respectively.
@@ -1932,6 +2048,9 @@ It MUST conform to the following profile, or an [=invalid archive=] failure occu
     and imported tables are not allowed.
 
 Issue: The import module name, the exported entry point, how resources and parameters are supplied, and whether memory64 is allowed for input and output memories.
+
+Issue: Whether the guaranteed limit of 2<sup>27</sup> bytes (128 MiB) for the Zstandard `Window_Size` ([[#zstandard-compression-method]])
+should also apply to the declared input and output window sizes and the memory limit.
 
 To <dfn>apply a module</dfn> |module| given a [=list=] of input [=byte sequences=] |inputs|,
 resources, parameters, a declared output size |size| and resource declarations:
@@ -3010,10 +3129,10 @@ Block index</h2>
       <td>40<sub>16</sub> — 4F<sub>16</sub>
       <td>[[#uncompressed-block]]
     <tr>
-      <td>50<sub>16</sub> — 53<sub>16</sub>
+      <td>50<sub>16</sub> — 57<sub>16</sub>
       <td>[[#dictionary-block]]
     <tr>
-      <td>54<sub>16</sub> — 5F<sub>16</sub>
+      <td>58<sub>16</sub> — 5F<sub>16</sub>
       <td>Reserved
     <tr>
       <td>60<sub>16</sub> — 63<sub>16</sub>
