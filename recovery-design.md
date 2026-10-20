@@ -94,7 +94,7 @@ FreeArc가 이 기능을 진지하게 고려한 것이 계기가 되었다.
 - **블록 헤더에 sync marker가 없다.** 대부분 1바이트 leb128 type과 size뿐이라, size 필드 하나가 깨지면 앞방향 스캔이 탈선한다.
 - **기존 checksum은 디코딩된 데이터에 대한 것이다.**
   - 저장 바이트의 손상 위치를 찾으려면 압축을 풀어 봐야 한다.
-  - dictionary, module, resource, formula block은 `checksum_method`가 None으로 고정되어 있어서, 손상을 감지할 방법이 아예 없다.
+  - ~~dictionary, module, resource, formula block은 `checksum_method`가 None으로 고정되어 있어서, 손상을 감지할 방법이 아예 없다.~~ metadata, dictionary, module, resource block은 XXH64 checksum을 필수로 바꿨다(§5.2). formula block은 output checksum이 있을 때만 손상을 감지할 수 있다.
 - **`footer_size`가 u16이다.** 해시 목록 같은 인덱스를 둘 곳이 못 된다.
 - **Encrypted archive에는 확장할 자리가 없다.** payload 뒤의 trailing byte가 금지되어 있고, 키 없이는 age payload가 어디서 끝나는지 알 수 없다.
 - **metadata는 segment 끝에, footer는 아카이브 끝에 있다.** 가장 흔한 손상인 E4가 가장 중요한 구조를 먼저 지운다(§5.1).
@@ -144,24 +144,32 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 > - slice 격자, set, interleave, slice 수 상한, append 때의 parity 갱신 같은 문제가 모두 사라진다.
 > - segment를 쓸 때 그 segment의 중요 블록 사본만 쓰면 끝나므로, append와 잘 맞는다.
 
-#### 구조
+#### 구조 [잠정]
 
-예를 들어 0C–0F를 mirror block으로 쓴다(`ss` 규칙을 따른다). data는 다음과 같다.
+명세 §3.1.6 Mirror block에 반영했다. 원본 블록 타입 T에 대해 mirror 타입은 C00₁₆ + T이다(예: metadata 13₁₆ → C13₁₆). mirror의 size 필드는 일반 블록과 똑같이 자기 타입의 `ss`를 따르고 자기 data 길이를 센다. mirror가 원본보다 길어 size 필드가 한 단계 넓어져야 하면 타입이 한 칸 밀린 C01₁₆ + T를 쓴다(widened). 이 경우 `target_offset`에 1을 더해 표시한다. data는 다음과 같다.
 
 | 이름 | 형 | 설명 |
 |---|---|---|
-| `mirror_magic` | u8[8] 이상 | 손상 시 스캔으로 찾기 위한 sync marker |
-| `self_hash` | u64le | 이 블록의 나머지에 대한 XXH64 |
-| `target_offset` | leb128 (부호 포함 방식은 미정) | **mirror block 자신으로부터** 원본 블록까지의 상대 오프셋 |
-| `target_hash` | u64le | 원본 블록 저장 바이트(`block_start`부터 padding까지)의 XXH64 |
-| `copy` | u8[*] | 원본 블록 바이트를 그대로 담은 사본 |
+| `mirror_magic` | u8[8] | 손상 시 스캔으로 찾기 위한 sync marker. 값은 미정(명세에 issue로 남김) |
+| `target_offset` | leb128 ≠ 0 | 원본 블록의 `block_start`에서 **mirror block 자신의** `block_start`까지의 거리. widened이면 1을 더한다(거리는 항상 짝수). 원본은 항상 mirror 앞에 온다 |
+| `target_data` | u8[*] | 원본 블록의 data를 그대로 담은 사본 |
+| `mirror_checksum` | u64le | mirror의 `block_start`(type과 size 포함)부터 이 필드 직전까지의 XXH64 |
 
-- repair는 `target_hash`가 맞지 않는 원본 자리에 `copy`를 덮어쓰기만 한다. 사본을 그 위치에서 블록으로 다시 해석하지는 않는다.
+- 원본의 저장 바이트는 `leb128(T)`(최단 인코딩) ‖ size ‖ `target_data` ‖ padding과 정확히 같아야 한다. 따라서 원본과 mirror 모두 type을 최단 leb128로 써야 한다.
+- repair는 원본 자리의 바이트가 재구성한 바이트와 다르면 덮어쓰기만 한다. 사본을 그 위치에서 블록으로 다시 해석하지는 않는다.
   > 다시 해석하지 않는 이유: metadata 안의 오프셋은 모두 metadata block 자신의 위치를 기준으로 한다. 다른 위치에서 해석하면 의미가 깨진다.
-- `target_hash`는 checksum이 없는 dictionary, module, resource, formula block의 감지 공백을 메운다.
+- **원본은 checksum이 있어야 한다.** checksum이 없으면 평소 읽기에서 원본의 손상을 알 수 없으므로, mirror로 넘어갈 계기가 없다. 그래서 metadata, dictionary, module, resource block은 checksum을 필수로 바꿨고(metadata는 10–17로 재할당, 18–1F는 예약), formula block은 output checksum이 있는 타입(74–77, 7C–7F)만 mirror 대상으로 삼는다.
+  > metadata의 checksum 없는 모드는 처음 초안부터 있었고 근거가 남아 있지 않다. 성능 때문이었다면, 이 블록들은 아카이브의 작은 일부이고 한 번씩만 읽히므로 XXH64 비용은 무시할 수준이다. 반면 이름과 구조는 다른 어떤 checksum으로도 검증되지 않는다.
+  > formula data 자체에 대한 checksum은 두지 않았다. 70–7F에 비트가 남아 있지 않고, 손상되면 output checksum이 잡는다. non-leaf 손상과의 구별은 non-leaf checksum이나 mirror로 다시 평가해 보는 것으로 한다. 부분 읽기에서는 감지할 수 없다.
+- 처음 제안의 `target_hash`는 뺐다. 원본 checksum이 손상을 감지하고, `mirror_checksum`이 사본을 검증한다. verify는 사본과 원본을 바이트 비교할 수도 있다.
 - 오프셋을 mirror 자신 기준으로 두면, archive_start나 체인이 깨져도 원본 위치를 알 수 있다.
+- mirror 하나는 원본 하나만 담는다(타입이 원본마다 정해지므로). 한 원본에 mirror가 여럿 있어도 된다.
+- mirror의 data는 원본보다 최소 17바이트 길다. 원본 size가 필드 한계에 가까울 때만 widened가 필요하고, 한 단계면 항상 충분하다. 필요할 때만 widened를 쓰는 것이 SHOULD이다.
+  > 원본의 size 필드 폭은 `target_data` 길이에서 추론할 수 없다(필요 이상으로 넓은 size 필드가 허용된다). 그래서 widened 여부를 따로 표시해야 한다. 원본 쪽 size 필드를 넓히라고 요구하는 방식은 기존 아카이브에 나중에 mirror를 붙일 수 없게 만들어서 택하지 않았다.
+- mirror는 어느 segment에도 속하지 않고 content block도 아니다. 마지막 metadata 뒤에도 올 수 있다. 해석 결과에는 영향이 없지만, 요건을 어긴 mirror가 있으면 invalid archive이다.
+- encrypted archive 안에서는 일단 금지했다(§5.5, 명세에 issue).
 
-보호 대상은 metadata, dictionary, module, resource, formula block이다.
+보호 대상과 mirror 타입은 metadata(C10–C17), dictionary(C50–C57), module(C60–C63), resource(C64–C67), output checksum이 있는 formula(C74–C77, C7C–C7F) block이다.
 
 #### 배치
 
@@ -215,8 +223,8 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 ### 5.6 repair 절차 [제안]
 
-1. `mirror_magic`과 `recovery_magic`을 스캔하고, 각 블록의 `self_hash`를 검증한다.
-2. mirror마다 원본의 `target_hash`를 비교하고, 맞지 않으면 사본으로 덮어쓴다. 비용이 싸고, 이후 RS 단계의 erasure를 줄여 준다.
+1. `mirror_magic`과 `recovery_magic`을 스캔하고, 각 블록의 `mirror_checksum`이나 `self_hash`를 검증한다.
+2. mirror마다 원본을 사본과 비교하고, 다르면 사본으로 덮어쓴다. 비용이 싸고, 이후 RS 단계의 erasure를 줄여 준다.
 3. recovery set이 있으면 slice 해시로 erasure를 표시하고 RS로 복원한다.
 4. footer가 깨졌으면 앞방향 스캔으로 재구성한다.
 5. 결과 바이트열을 `interpret an archive`에 넘긴다. 복원할 수 없는 부분은 §4.6 Partial access의 salvage로 넘긴다.
@@ -230,11 +238,11 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 ## 7. 열린 질문
 
-1. **mirror block 하나에 여러 원본을 담을지.** 헤더 오버헤드와 손상 단위 사이의 트레이드오프이다.
-2. **`target_offset`의 부호.** 사본은 원본 뒤에 오는 것이 기본이지만, 앞에 오는 경우를 허용할지 정해야 한다.
+1. ~~**mirror block 하나에 여러 원본을 담을지.**~~ 원본 하나만 담는다(§5.2).
+2. ~~**`target_offset`의 부호.**~~ 원본은 항상 mirror 앞에 온다(§5.2).
 3. **해시.** XXH64 하나로 통일할지, slice 인덱스에는 XXH3-128을 쓸지. 상대는 무작위 손상뿐이므로 64비트로 충분하다고 본다.
 4. **"무시해도 되는 블록"의 명세 용어.** spacer, mirror, recovery를 묶는 이름이 필요하다. "auxiliary block"은 이미 dictionary, module, resource에 쓰고 있다. size hint block은 위치 제약이 있으므로 이 범주가 아니다.
-5. **encrypted archive 안의 mirror 허용 여부.** 현재 안쪽에서는 spacer를 금지한다.
+5. **encrypted archive 안의 mirror 허용 여부.** 현재 안쪽에서는 spacer를 금지하며, mirror도 일단 금지했다.
 6. **스크러빙.** 필요한 여유분은 "다음 검증 전까지 쌓일 손상"이 정한다. 그래서 `verify` 명령과 권장 주기를 도구 쪽에서 함께 설계해야 한다.
 
 ## 8. Action items
@@ -256,10 +264,10 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 ### 명세 (S)
 
 - [ ] **S1.** "무시해도 되는 블록" 범주를 정의하고, spacer를 그 안으로 옮긴다(§7의 4번).
-- [ ] **S2.** mirror block(0C–0F) 절을 추가한다. 구조, `target_hash` 범위, 배치 SHOULD를 포함한다.
+- [x] **S2.** mirror block 절을 추가한다. 구조와 배치 SHOULD를 포함한다. (`MIRROR_MAGIC` 값은 미정)
 - [ ] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6).
 - [ ] **S4.** 비규범 노트를 추가한다. 내용은 오류 모델 요약, E5가 범위 밖이라는 점, segment 주기 권고, checksum 있는 블록 타입을 기본값으로 쓰라는 권고이다.
-- [ ] **S5.** §7 Block index에 0C–0F(와 §5.4를 진행하면 08–0B)를 반영한다.
+- [ ] **S5.** §7 Block index에 mirror 타입(반영함)과, §5.4를 진행하면 08–0B를 반영한다.
 - [ ] **S6.** (§5.4를 진행할 경우) recovery block 절과 부호의 완전한 정의를 추가한다.
 - [ ] **S7.** encrypted envelope의 trailer 확장안을 정한다(§5.5).
 
@@ -268,6 +276,6 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 - [ ] **I1.** E1–E4를 재현하는 fault injection 하네스를 만든다. 오류 모델을 그대로 시험 생성기로 옮기는 것이다. 4 KiB 정렬 단위 손상, 버스트, 0 채움, truncation을 다루고, 손상 위치는 무작위와 "중요 구조 조준" 두 방식으로 둔다.
 - [ ] **I2.** compressor에 mirror block 생성과 segment 주기 옵션을 넣는다.
 - [ ] **I3.** repair 도구를 만든다. 스캔, mirror 복원, footer 재구성, salvage 추출을 포함한다.
-- [ ] **I4.** `verify` 명령을 만든다. checksum, `target_hash`, slice 해시를 모두 검사한다.
+- [ ] **I4.** `verify` 명령을 만든다. checksum, mirror와 원본의 일치, slice 해시를 모두 검사한다.
 - [ ] **I5.** I1로 "손상된 바이트가 속한 parcel만 잃는다"는 목표를 E1과 E2(D 이상 아카이브)에 대해 검증한다.
 - [ ] **I6.** (선택) §5.4의 recovery set을 구현하고, I1로 L ≤ G·p·S 한계를 검증한다.

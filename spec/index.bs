@@ -285,6 +285,9 @@ This specification defines and uses the following constants, all of which are de
     <tr>
       <td><dfn noexport>ENCRYPTED_HEADER_MAGIC</dfn>
       <td>(F9&nbsp;CA&nbsp;F2&nbsp;A6&nbsp;D0&nbsp;2A&nbsp;01&nbsp;00)<sub>16</sub>
+    <tr>
+      <td><dfn noexport>MIRROR_MAGIC</dfn>
+      <td>To be determined ([[#mirror-block]])
   </tbody>
 </table>
 
@@ -566,43 +569,41 @@ and its [=szhint/size_hint=] field MUST be equal to the footer's [=archive/size_
 <h4 id=metadata-block>
 Metadata block</h4>
 
-Blocks 10<sub>16</sub> through 1F<sub>16</sub> are **metadata blocks**.
+Blocks 10<sub>16</sub> through 17<sub>16</sub> are **metadata blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
-where each parameter is determined as follows:
+with [[#xxh64-checksum-method|XXH64]] as [=checksum_method=]
+and [=compression_method=] determined as follows:
 
 <table class=data>
   <thead>
     <tr>
       <th>Block Types
       <th>[=compression_method=]
-      <th>[=checksum_method=]
   </thead>
   <tbody>
     <tr>
       <td>10<sub>16</sub> — 13<sub>16</sub>
       <td>None
-      <td>None
     <tr>
       <td>14<sub>16</sub> — 17<sub>16</sub>
-      <td>None
-      <td>[[#xxh64-checksum-method|XXH64]]
-    <tr>
-      <td>18<sub>16</sub> — 1B<sub>16</sub>
       <td>[[#zstandard-compression-method|Zstandard]]
-      <td>None
-    <tr>
-      <td>1C<sub>16</sub> — 1F<sub>16</sub>
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
   </tbody>
 </table>
 
 <div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0001&thinsp;|m||c||ss|</code> where:
+  Alternatively, the block type can be interpreted as a binary number <code>0001&thinsp;0|m||ss|</code> where:
 
     * |m| indicates the compression method: 0 for None, 1 for [[#zstandard-compression-method|Zstandard]].
-    * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
+</div>
+
+<div class=note>
+  Unlike content blocks, the checksum is mandatory for metadata, dictionary, module and resource blocks.
+  Names and the structure of entries are not covered by any other checksum,
+  and the damage to these blocks affects many files at once.
+  The cost is negligible because these blocks are a small fraction of the archive and each is read only once.
+  It also allows a decompressor to detect the damage to these blocks by reading them alone,
+  which is a prerequisite for using [[#mirror-block|mirror blocks]].
 </div>
 
 The internal structure after decompression is as follows:
@@ -809,7 +810,8 @@ They MUST agree with the actual positions of [=meta/entries=].
 <h4 id=content-block>
 Content blocks</h4>
 
-Any other block is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]].
+Any block other than spacer, size hint, metadata and [[#mirror-block|mirror]] blocks
+is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]].
 A metadata block and all content blocks between the previous metadata block (or the beginning of the archive if none)
 and that metadata block form a <dfn>segment</dfn>.
 As an exception, an archive without a metadata block ([[#unencrypted-archive]]) forms a single segment with no metadata block.
@@ -1062,7 +1064,8 @@ Dictionary block</h5>
 
 Blocks 50<sub>16</sub> through 57<sub>16</sub> are **dictionary blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=]
+and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
 Dictionary blocks are parametrized by following variables:
 
 <div dfn-for=dict>
@@ -1158,7 +1161,8 @@ Module block</h5>
 
 Blocks 60<sub>16</sub> through 63<sub>16</sub> are **module blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] 
+and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
 
 <div class=note>
   Alternatively, the block type can be interpreted as a binary number <code>0110&thinsp;00|ss|</code> where:
@@ -1194,7 +1198,8 @@ Resource block</h5>
 
 Blocks 64<sub>16</sub> through 67<sub>16</sub> are **resource blocks**.
 Their data uses the Shared external structure ([[#shared-external-structure]]),
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] 
+and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
 
 <div class=note>
   Alternatively, the block type can be interpreted as a binary number <code>0110&thinsp;01|ss|</code> where:
@@ -1289,6 +1294,205 @@ evaluated with modules and resources preceding it.
 The internal structure of [=formula/formula_data=] is described in Formula data ([[#formula-data]]).
 
 </div>
+
+<h4 id=mirror-block>
+Mirror block</h4>
+
+A **mirror block** holds a verbatim copy of another block, called its <dfn for=mirror>target block</dfn>,
+so that the target block can be restored when it is damaged.
+Mirror blocks are only defined for block types whose damage affects more than a single [=parcel=]
+and can be detected by reading the block alone, i.e. that have a checksum:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Block Types
+      <th>Target Block Types
+  </thead>
+  <tbody>
+    <tr>
+      <td>C10<sub>16</sub> — C17<sub>16</sub>
+      <td>10<sub>16</sub> — 17<sub>16</sub> ([[#metadata-block]])
+    <tr>
+      <td>C50<sub>16</sub> — C57<sub>16</sub>
+      <td>50<sub>16</sub> — 57<sub>16</sub> ([[#dictionary-block]])
+    <tr>
+      <td>C60<sub>16</sub> — C63<sub>16</sub>
+      <td>60<sub>16</sub> — 63<sub>16</sub> ([[#module-block]])
+    <tr>
+      <td>C64<sub>16</sub> — C67<sub>16</sub>
+      <td>64<sub>16</sub> — 67<sub>16</sub> ([[#resource-block]])
+    <tr>
+      <td>C74<sub>16</sub> — C77<sub>16</sub>, C7C<sub>16</sub> — C7F<sub>16</sub>
+      <td>74<sub>16</sub> — 77<sub>16</sub>, 7C<sub>16</sub> — 7F<sub>16</sub> ([[#formula-block]])
+  </tbody>
+</table>
+
+<div class=note>
+  A formula block has no checksum over [=formula/formula_data=] itself,
+  but its damage is detected by its output checksum when [=formula/has_output_checksum=] is true.
+  Damage to non-leaf blocks is distinguished by their own checksums, if any,
+  or by retrying the evaluation with the mirror block.
+  A decompressor reading only a part of the output can't detect the damage this way.
+</div>
+
+As with any other block, the [=block/size=] field of a mirror block is determined by its own [=block/type=]
+and counts the bytes of its own [=block/data=].
+Since a mirror block is longer than its target block, its [=block/size=] field may have to be wider.
+Therefore a mirror block is either:
+
+* <dfn for=mirror>Unwidened</dfn>, where the [=block/size=] fields of the mirror block and its target block have the same width,
+    and its [=mirror/target type=] is its [=block/type=] minus C00<sub>16</sub>; or
+* <dfn for=mirror>Widened</dfn>, where the [=block/size=] field of the mirror block is one step wider than that of its target block,
+    and its [=mirror/target type=] is its [=block/type=] minus C01<sub>16</sub>.
+    Its [=block/type=] % 4 MUST NOT be 0.
+
+The [=mirror/target block=] MUST be of the <dfn for=mirror>target type</dfn>,
+which MUST be a block type listed above for the mirror block's [=block/type=].
+Whether a mirror block is widened is signalled by [=mirror/target_offset=].
+
+<div class=note>
+  For example, a mirror block of type C13<sub>16</sub> mirrors a metadata block of type 13<sub>16</sub>,
+  which is uncompressed and has a [=u64le=] [=block/size=] field, if unwidened,
+  or a metadata block of type 12<sub>16</sub> with a [=u32le=] [=block/size=] field if widened.
+  Since C00<sub>16</sub> % 4 = 0, both stay in the same row of the table above.
+</div>
+
+Its data consists of the following:
+
+<div dfn-for=mirror>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>mirror_magic</dfn>
+      <td>[=u8=][8] = [=const/MIRROR_MAGIC=]
+      <td>
+    <tr>
+      <td><dfn>target_offset</dfn>
+      <td>[=leb128=] ≠ 0
+      <td>
+    <tr>
+      <td><dfn>target_data</dfn>
+      <td>[=u8=][*]
+      <td>
+    <tr>
+      <td><dfn>checksum_start</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>mirror_checksum</dfn>
+      <td>[=u64le=]
+      <td>
+  </tbody>
+</table>
+
+Issue: The value of [=const/MIRROR_MAGIC=] is to be determined,
+including whether 8 bytes are enough and whether each target block type should have a distinct magic.
+
+[=mirror/mirror_magic=] is a fixed byte sequence that allows mirror blocks to be found by scanning
+when the surrounding structure, such as the header, the footer or the metadata chain, is damaged.
+
+[=mirror/target_offset=] is the offset from the [=block/block_start=] of the [=mirror/target block=]
+to the [=block/block_start=] of the mirror block, plus 1 if the mirror block is [=mirror/widened=].
+Since the offset between any two blocks is even, [=mirror/target_offset=] % 2 tells whether the mirror block is widened.
+The target block always precedes the mirror block.
+
+[=mirror/target_data=] is a copy of the [=block/data=] of the target block.
+The bytes of the target block, from its [=block/block_start=] to the end of its [=block/padding=] if any,
+MUST be equal to the concatenation of the following:
+
+1. The shortest [=leb128=] encoding of the [=mirror/target type=];
+2. The length of [=mirror/target_data=], encoded as the [=block/size=] field for the [=mirror/target type=];
+3. [=mirror/target_data=];
+4. A single zero byte, if the length of the above is odd.
+
+In particular, the [=block/type=] of the target block MUST use the shortest [=leb128=] encoding.
+The [=block/type=] of the mirror block itself MUST also use the shortest [=leb128=] encoding, which is 2 bytes long.
+
+[=mirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+of all bytes from the [=block/block_start=] of the mirror block to [=mirror/checksum_start=],
+including its [=block/type=] and [=block/size=] fields.
+
+</div>
+
+<div class=note>
+  Unlike other checksums in this specification, [=mirror/mirror_checksum=] is computed over the stored bytes,
+  so that the copy can be verified without decoding it and the mirror block can be verified when found by scanning.
+  A decompressor normally uses a mirror block only after the checksum of its target block fails,
+  while a verifier can also compare the copy with the target block directly.
+</div>
+
+<div class=note>
+  A mirror block is a copy of bytes, not a block to be interpreted at its own position.
+  This is necessary because relative offsets in a metadata block are measured from the metadata block itself.
+</div>
+
+A mirror block SHOULD be [=mirror/unwidened=] unless its [=block/data=] doesn't fit in the [=block/size=] field for the target type.
+
+<div class=note>
+  The data of a mirror block is at least 17 bytes longer than that of its target block,
+  so this is only relevant when the target block is close to the limit of its [=block/size=] field.
+  A single step is always sufficient, since the next width can hold far more than the additional bytes.
+  The width of the target block's [=block/size=] field can't be inferred from the size of [=mirror/target_data=],
+  because a block may use a wider [=block/size=] field than necessary.
+</div>
+
+<div class=note>
+  A block with a [=u64le=] [=block/size=] field can't be mirrored when its data is too close to 2<sup>64</sup> bytes,
+  since its mirror block can't be widened.
+  This is not a practical concern, because such a block is far larger than 2<sup>63</sup> bytes,
+  which is beyond what most systems with signed 64-bit file offsets can store in a single file.
+</div>
+
+<div class=note>
+  To find mirror blocks by scanning, a decoder can look for [=const/MIRROR_MAGIC=]
+  and try each of four possible widths of the [=block/size=] field preceding it.
+  The candidate is correct when the 2 bytes before the [=block/size=] field encode a mirror block type with the matching width
+  and [=mirror/mirror_checksum=] verifies.
+</div>
+
+A mirror block doesn't belong to any [=segment=] and MAY occur anywhere in [=archive/blocks=],
+including after the last metadata block, subject only to the requirement that its target block precedes it.
+A single target block MAY have multiple mirror blocks.
+Mirror blocks don't affect the result of [=interpret an archive|interpreting an archive=],
+except that an archive violating the requirements above is an [=invalid archive=].
+
+<div class=note>
+  By [[#partial-access]], a decompressor not reading mirror blocks is not required to verify them.
+</div>
+
+A mirror block and its target block are expected to be damaged together when they are close to each other.
+Conforming compressors SHOULD separate the end of the target block and the [=block/block_start=] of its mirror block
+by at least 4096 bytes, so that they never share an aligned 4 KiB unit of the underlying storage,
+and SHOULD separate them by at least 4 MiB (4,194,304 bytes) when possible.
+
+Issue: The recommended distances are tentative, pending the measurement of burst lengths of latent sector errors
+(`recovery-design.md` §8, R1).
+
+<div class=note>
+  Dictionary, module and formula blocks typically occur early in their segments,
+  so their mirror blocks can be placed near the end of the segment.
+  A metadata block, on the other hand, only becomes available at the end of its segment,
+  so its mirror block can be placed after a sufficient amount of the next segment has been written.
+  The mirror block of the last metadata block can't be distant from it unless the compressor delays the last segment,
+  and closing segments periodically bounds the loss in that case.
+</div>
+
+<div class=note>
+  Restoring damaged blocks from mirror blocks is a process separate from [=interpret an archive|interpreting an archive=]:
+  it takes a damaged byte sequence and replaces each target block whose bytes differ from a verified mirror block
+  with the bytes reconstructed from the mirror block,
+  locating the target block with [=mirror/target_offset=] alone.
+</div>
+
+Issue: The repair process is to be specified in a separate section (`recovery-design.md` §5.6).
 
 <h4 id=reserved-blocks>
 Reserved blocks</h4>
@@ -1407,7 +1611,7 @@ so that a decompressor can tell such archives without scanning [=archive/blocks=
 
 [=archive/blocks=] are logically divided into [=segments=],
 each consisting of [=content blocks=] and a single [[#metadata-block|metadata block]] describing them,
-with optional spacer blocks in between.
+with optional spacer and [[#mirror-block|mirror]] blocks in between.
 Each segment can be independently processed and decompressed in the reading order.
 There SHOULD NOT be multiple [=meta/entry|entries=] with the same path across metadata blocks,
 and if there are, only the last one is considered valid.
@@ -1494,7 +1698,14 @@ with the following additional constraints:
 
 * [=archive/size_hint_block=] is no longer optional;
 * No spacer block ([[#spacer-block]]) is allowed, in order to discourage an in-place modification of the encrypted archive;
+* No mirror block ([[#mirror-block]]) is allowed;
 * No trailing bytes are allowed after the archive.
+
+Issue: Mirror blocks are disallowed because a damaged AGE chunk fails to authenticate as a whole,
+and a standard AGE implementation stops at the first such chunk,
+so a mirror inside the payload is not usable for repair.
+Whether to allow them anyway, and how to place recovery data outside the payload, is open
+(`recovery-design.md` §5.5).
 
 </div>
 
@@ -3120,8 +3331,11 @@ Block index</h2>
       <td>05<sub>16</sub> — 0F<sub>16</sub>
       <td>Reserved
     <tr>
-      <td>10<sub>16</sub> — 1F<sub>16</sub>
+      <td>10<sub>16</sub> — 17<sub>16</sub>
       <td>[[#metadata-block]]
+    <tr>
+      <td>18<sub>16</sub> — 1F<sub>16</sub>
+      <td>Reserved
     <tr>
       <td>20<sub>16</sub> — 3F<sub>16</sub>
       <td>[[#compressed-block]]
@@ -3156,10 +3370,40 @@ Block index</h2>
       <td>E0<sub>16</sub> — EF<sub>16</sub>
       <td>[=Reserved for experiments=]
     <tr>
-      <td>F0<sub>16</sub> — FF<sub>16</sub>
+      <td>F0<sub>16</sub> — C0F<sub>16</sub>
       <td>Reserved
     <tr>
-      <td>100<sub>16</sub> — FFFF&thinsp;FFFF&thinsp;FFFF&thinsp;FFFF<sub>16</sub>
+      <td>C10<sub>16</sub> — C17<sub>16</sub>
+      <td>[[#mirror-block]] for [[#metadata-block]]
+    <tr>
+      <td>C18<sub>16</sub> — C4F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>C50<sub>16</sub> — C57<sub>16</sub>
+      <td>[[#mirror-block]] for [[#dictionary-block]]
+    <tr>
+      <td>C58<sub>16</sub> — C5F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>C60<sub>16</sub> — C63<sub>16</sub>
+      <td>[[#mirror-block]] for [[#module-block]]
+    <tr>
+      <td>C64<sub>16</sub> — C67<sub>16</sub>
+      <td>[[#mirror-block]] for [[#resource-block]]
+    <tr>
+      <td>C68<sub>16</sub> — C73<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>C74<sub>16</sub> — C77<sub>16</sub>
+      <td>[[#mirror-block]] for [[#formula-block]]
+    <tr>
+      <td>C78<sub>16</sub> — C7B<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>C7C<sub>16</sub> — C7F<sub>16</sub>
+      <td>[[#mirror-block]] for [[#formula-block]]
+    <tr>
+      <td>C80<sub>16</sub> — FFFF&thinsp;FFFF&thinsp;FFFF&thinsp;FFFF<sub>16</sub>
       <td>Reserved for various purposes
   </tbody>
 </table>
