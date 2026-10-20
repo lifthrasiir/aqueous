@@ -36,6 +36,11 @@ svg.pikchr {
 spec:infra; type:dfn; text:list
 </pre>
 
+<pre class=anchors>
+urlPrefix: https://www.rfc-editor.org/rfc/rfc9581.html; spec: RFC9581; type: cddl-type
+    text: etime; url: #section-6
+</pre>
+
 <h2 id=definitions>
 Definitions</h2>
 
@@ -765,79 +770,9 @@ The [=meta/entries=] array is the only part that has the unspecified number of b
 which is therefore available as [=meta/entries_size=] beforehand.
 Any other field can be randomly accessed after reading the initial set of [=leb128=] fields.
 
+[=meta/optional_metadata=] is described in Optional metadata ([[#optional-metadata]]).
+
 </div>
-
-<h5 id=optional-metadata>
-Optional metadata</h5>
-
-The remaining bytes are reserved for the **optional metadata**, encoded in CBOR [[RFC8949]].
-This part encodes any metadata that is not strictly necessary to read the file,
-including associated dates and times, access control information and comments.
-
-The optional metadata is described by the following CDDL [[RFC8610]] definitions:
-
-<pre class=cddl>
-aqr-opt-metadata = { $$aqr-opt-metadata }
-
-aqr-offset = uint .gt 0
-
-aqr-text =
-  tstr /          ; Unicode
-  #6.273(bstr) /  ; UTF-16 + surrogate compat
-  bstr            ; In unknown encoding
-
-aqr-time =
-  $aqr-time /               ; UTC timestamp or its scaling
-  [$aqr-time] /             ; In unknown time zone, encoded like UTC (*)
-  [$aqr-time, offset: int]  ; In a known time zone, offset from UTC in 15 minutes ($)
-
-$aqr-time /= #6.100(int)  ; 1d (FAT atime*)
-$aqr-time /= #6.121(int)  ; 2s (FAT mtime*, ZIP*, CAB*)
-$aqr-time /= int          ; 1s (~ext3, HFS/HFS+, tar)
-$aqr-time /= #6.122(int)  ; 10ms (FAT ctime*, ISO 9660$, exFAT$)
-$aqr-time /= #6.123(int)  ; 1ms (UDF)
-$aqr-time /= #6.124(int)  ; 1us
-$aqr-time /= #6.125(int)  ; 100ns (NTFS, RAR*, 7z)
-$aqr-time /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
-
-$$aqr-opt-metadata //= (
-  ? &(archive-comment: -1) => aqr-text
-  &(entry-extras: -2) => [* aqr-entry-extra]
-)
-
-aqr-entry-extra = (
-  ? &(crtime: -1) => aqr-time
-  ? &(ctime: -2) => aqr-time
-  ? &(mtime: -3) => aqr-time
-  ? &(atime: -4) => aqr-time
-  ? &(arctime: -5) => aqr-time
-
-  ? &(comment: -6) => aqr-text
-
-  ? &(unix-mode: -70) => uint
-  ? &(unix-uid: -71) => uint
-  ? &(unix-gid: -72) => uint
-
-  ; TODO:
-  ; NTFS attributes (ZIP extra 0x000a)
-  ; UNIX attributes (ZIP extra 0x000d) - symlink target
-  ; other extras for round trip
-
-  ? &(zip-extras: -100) => aqr-zip-extras
-)
-
-aqr-zip-extras = { * aqr-zip-extra-id => bstr }
-;aqr-zip-extra-id = 0..0xffff
-; TODO: should exclude or at least discourage the following:
-;       0x0001 - ZIP64
-;       0x5455 - extended timestamp
-;       0x7075 - unicode path (info-zip)
-;       0x6375 - unicode comment (info-zip)
-</pre>
-
-There MUST NOT be any following bytes after this CBOR item.
-
-TBW
 
 <h4 id=content-block>
 Content blocks</h4>
@@ -1243,35 +1178,7 @@ with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and N
 
 A formula block describes the content of a file as an expression over non-leaf blocks following it,
 evaluated with modules and resources preceding it.
-
-TODO: The internal structure of [=formula/formula_data=], which is expected to include:
-
-* The output size;
-* The output checksum, [=If=] [=formula/has_output_checksum=];
-* Nodes of the expression: a byte range of non-leaf blocks, a concatenation of nodes,
-    and an application of a module to nodes with resources and parameters;
-* References to non-leaf blocks, each as an ordinal among the subsequent non-leaf blocks
-    and a relative offset to the referenced block.
-    The ordinal serves streaming decompressors and the offset serves random access,
-    so they MUST agree with each other, and a decompressor detecting a mismatch MUST treat it as an error.
-    Offsets are expected to be encoded to compress well, e.g. relative to the end of the previously referenced block;
-* References to module and resource blocks, as indices within the segment;
-* Resource declarations for each application (memory limit, input and output window sizes, capacity of shared edges);
-* Multiple outputs from a single formula block, each of which corresponds to a file;
-* References to other files, or their replacement;
-* Padding to keep [=formula/formula_data=] compressible, since its original size can't be smaller than the compressed size.
-
-The structure of [=formula/formula_data=] is not randomly accessible,
-and a decompressor is expected to read and decompress it in its entirety before evaluating any part of the formula.
-Together with the size declared by each node and the offsets of referenced non-leaf blocks,
-it then serves as an index for random access within the output,
-in the same way as a seek table of other formats.
-
-<div class=note>
-  The index grows linearly with the number of non-leaf blocks referenced,
-  but it compresses well because most nodes share the same shape and sizes.
-  The decompression of the whole [=formula/formula_data=] is a one-time cost per file.
-</div>
+The internal structure of [=formula/formula_data=] is described in Formula data ([[#formula-data]]).
 
 </div>
 
@@ -1481,6 +1388,128 @@ with the following additional constraints:
 
 </div>
 
+<h3 id=optional-metadata>
+Optional metadata</h3>
+
+The [=meta/optional_metadata=] field of the metadata block ([[#metadata-block]]) holds the **optional metadata**, encoded in CBOR [[RFC8949]].
+This part encodes any metadata that is not strictly necessary to read the file,
+including associated dates and times, access control information and comments.
+
+The optional metadata is described by the following CDDL [[RFC8610]] definitions,
+where `etime` is the CDDL type name for the extended time defined in [[!RFC9581]]:
+
+<pre class=cddl>
+aqr-opt-metadata = { $$aqr-opt-metadata }
+
+aqr-offset = uint .gt 0
+
+aqr-text =
+  tstr /          ; Unicode
+  #6.273(bstr) /  ; UTF-16 + surrogate compat
+  bstr            ; In unknown encoding
+
+aqr-time =
+  $aqr-time /               ; UTC timestamp or its scaling
+  [$aqr-time] /             ; In unknown time zone, encoded like UTC (*)
+  [$aqr-time, offset: int]  ; In a known time zone, offset from UTC in 15 minutes ($)
+
+$aqr-time /= #6.100(int)  ; 1d (FAT atime*)
+$aqr-time /= #6.121(int)  ; 2s (FAT mtime*, ZIP*, CAB*)
+$aqr-time /= int          ; 1s (~ext3, HFS/HFS+, tar)
+$aqr-time /= #6.122(int)  ; 10ms (FAT ctime*, ISO 9660$, exFAT$)
+$aqr-time /= #6.123(int)  ; 1ms
+$aqr-time /= #6.124(int)  ; 1us (UDF)
+$aqr-time /= #6.125(int)  ; 100ns (NTFS, RAR*, 7z)
+$aqr-time /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
+$aqr-time /= etime
+
+$$aqr-opt-metadata //= (
+  ? &(archive-comment: -1) => aqr-text
+  &(entry-extras: -2) => [* aqr-entry-extra]
+)
+
+aqr-entry-extra = (
+  ? &(crtime: -1) => aqr-time
+  ? &(ctime: -2) => aqr-time
+  ? &(mtime: -3) => aqr-time
+  ? &(atime: -4) => aqr-time
+  ? &(arctime: -5) => aqr-time
+
+  ? &(comment: -6) => aqr-text
+
+  ? &(unix-mode: -70) => uint
+  ? &(unix-uid: -71) => uint
+  ? &(unix-gid: -72) => uint
+
+  ; TODO:
+  ; NTFS attributes (ZIP extra 0x000a)
+  ; UNIX attributes (ZIP extra 0x000d) - symlink target
+  ; other extras for round trip
+
+  ? &(zip-extras: -100) => aqr-zip-extras
+)
+
+aqr-zip-extras = { * aqr-zip-extra-id => bstr }
+;aqr-zip-extra-id = 0..0xffff
+; TODO: should exclude or at least discourage the following:
+;       0x0001 - ZIP64
+;       0x5455 - extended timestamp
+;       0x7075 - unicode path (info-zip)
+;       0x6375 - unicode comment (info-zip)
+</pre>
+
+There MUST NOT be any following bytes after this CBOR item.
+
+Issue: The precisions of `$aqr-time` do not cover every precision found in the wild
+(e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP, 1/300 s in SQL Server `DATETIME`),
+and its time zone offset cannot express minute offsets as in UDF.
+The extended time (`#6.1001`) [[RFC9581]] would be the desirable representation,
+but it is too verbose for every timestamp and has a semantic gap:
+its uncertainty (key -7) and guarantee (key -8) are symmetric and about measurement,
+while a truncated or rounded timestamp only bounds the true time to one side.
+This would need a new elective key (tentatively -14, a quantization interval)
+meaning that the true time lies in a given interval relative to the base time.
+`#6.121`..`#6.127` would then be defined as shortcuts for commonly used `#6.1001` values.
+Since editing an archive can mix multiple precisions in a single file,
+the precision should ideally be recorded per timestamp as above, not per archive.
+
+TBW
+
+<h3 id=formula-data>
+Formula data</h3>
+
+This section describes the internal structure of [=formula/formula_data=] in formula blocks ([[#formula-block]]),
+after it has been decompressed.
+
+TODO: The internal structure is expected to include:
+
+* The output size;
+* The output checksum, [=If=] [=formula/has_output_checksum=];
+* Nodes of the expression: a byte range of non-leaf blocks, a concatenation of nodes,
+    and an application of a module to nodes with resources and parameters;
+* References to non-leaf blocks, each as an ordinal among the subsequent non-leaf blocks
+    and a relative offset to the referenced block.
+    The ordinal serves streaming decompressors and the offset serves random access,
+    so they MUST agree with each other, and a decompressor detecting a mismatch MUST treat it as an error.
+    Offsets are expected to be encoded to compress well, e.g. relative to the end of the previously referenced block;
+* References to module and resource blocks, as indices within the segment;
+* Resource declarations for each application (memory limit, input and output window sizes, capacity of shared edges);
+* Multiple outputs from a single formula block, each of which corresponds to a file;
+* References to other files, or their replacement;
+* Padding to keep [=formula/formula_data=] compressible, since its original size can't be smaller than the compressed size.
+
+The structure of [=formula/formula_data=] is not randomly accessible,
+and a decompressor is expected to read and decompress it in its entirety before evaluating any part of the formula.
+Together with the size declared by each node and the offsets of referenced non-leaf blocks,
+it then serves as an index for random access within the output,
+in the same way as a seek table of other formats.
+
+<div class=note>
+  The index grows linearly with the number of non-leaf blocks referenced,
+  but it compresses well because most nodes share the same shape and sizes.
+  The decompression of the whole [=formula/formula_data=] is a one-time cost per file.
+</div>
+
 <h2 id=semantics>
 Semantics</h2>
 
@@ -1686,7 +1715,7 @@ The <dfn>file content</dfn> of a [=leaf block=] is:
 <h3 id=formula-evaluation>
 Formula evaluation</h3>
 
-Issue: This section depends on the internal structure of [=formula/formula_data=], which is TODO in [[#formula-block]].
+Issue: This section depends on the internal structure of [=formula/formula_data=], which is TODO in [[#formula-data]].
 It currently describes the nodes abstractly.
 
 A <dfn>formula node</dfn> is one of the following:
