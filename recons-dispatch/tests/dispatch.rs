@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use recons_common::rng::noise;
 use recons_dispatch::{Content, Formula, Native, Nest, Node, Options, compress, decompress, native, recompress};
 use recons_formula::aqr;
 
@@ -18,9 +19,14 @@ fn roundtrip(d: &[u8], opt: &Options) -> Formula {
     let f = recompress(d, opt);
     assert_eq!(f.len(), d.len() as u64);
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
-    let c = aqr::encode(&f, Some(aqr::checksum(d)), 3).unwrap();
+    let c = aqr::encode(&f, Some(aqr::checksum(d)), aqr::Level::Mid).unwrap();
     assert!(decompress(&c, 1).unwrap() == d, "archive does not decompress to the input:\n{f}");
     f
+}
+
+/// Options keeping every formula, however large it archives: for what is recompressed.
+fn all() -> Options {
+    Options { smaller: false, ..Options::default() }
 }
 
 fn text(n: usize) -> Vec<u8> {
@@ -58,7 +64,7 @@ fn archive_files() {
     let (d, _) = pe();
     assert_eq!(decompress(&compress(&d, &opt), 1).unwrap(), d);
     // The output checksum is verified.
-    let c = aqr::encode(&recompress(&d, &opt), Some(aqr::checksum(&d) ^ 1), 3).unwrap();
+    let c = aqr::encode(&recompress(&d, &opt), Some(aqr::checksum(&d) ^ 1), aqr::Level::Mid).unwrap();
     assert_eq!(decompress(&c, 1), Err(aqr::Failure::Invalid("output checksum mismatch".into())));
 }
 
@@ -71,9 +77,28 @@ fn raw_fallback() {
     }
 }
 
+/// A file whose formula would archive larger than the file itself is kept raw, alone or
+/// found in data.
+#[test]
+fn archive_size_fallback() {
+    let opt = Options::default();
+    let d = gzip(&noise(200_000));
+    assert!(modules(&roundtrip(&d, &opt)).is_empty());
+    assert!(compress(&d, &opt).len() < d.len() + 100);
+    let d = [text(10_000), gzip(&noise(200_000)), text(10_000)].concat();
+    assert!(modules(&roundtrip(&d, &opt)).is_empty());
+    // what does shrink is still recompressed
+    let d = [gzip(&noise(200_000)), gzip(&text(100_000))].concat();
+    assert_eq!(modules(&roundtrip(&d, &opt)), [native::FLATE.name]);
+    // Files found that each archive smaller, but not all together.
+    let d = fixture("jpeg-recons/tests/data/gradient.jpg").repeat(100);
+    assert!(modules(&roundtrip(&d, &opt)).is_empty());
+    assert_eq!(roundtrip(&d, &all()).applies().len(), 100);
+}
+
 #[test]
 fn recons_fixtures() {
-    let opt = Options::default();
+    let opt = all();
     for (path, module) in [
         ("flac-recons/tests/data/s16_f5.flac", native::FLAC.module.name),
         ("mp3-recons/tests/data/cbr128.mp3", native::MP3.module.name),
@@ -89,23 +114,23 @@ fn recons_fixtures() {
 #[test]
 fn gzip_nested() {
     let flac = fixture("flac-recons/tests/data/s16_f5.flac");
-    let f = roundtrip(&gzip(&flac), &Options::default());
+    let f = roundtrip(&gzip(&flac), &all());
     assert_eq!(modules(&f), [native::FLATE.name, native::FLAC.module.name]);
 
     // Trailing bytes after the member are kept.
     let mut d = gzip(&text(100_000));
     d.extend_from_slice(b"trailing");
-    let f = roundtrip(&d, &Options::default());
+    let f = roundtrip(&d, &all());
     assert_eq!(modules(&f), [native::FLATE.name]);
 
     // Only the contents named are recompressed.
-    let none = Options { contents: vec![], ..Options::default() };
+    let none = Options { contents: vec![], ..all() };
     assert_eq!(modules(&roundtrip(&gzip(&flac), &none)), [native::FLATE.name]);
 
     let d = gzip(&zlib(&text(100_000), 9));
-    assert_eq!(modules(&roundtrip(&d, &Options::default())), [native::FLATE.name; 2]);
-    assert_eq!(modules(&roundtrip(&d, &Options { depth: 1, ..Options::default() })), [native::FLATE.name]);
-    assert_eq!(modules(&roundtrip(&d, &Options { depth: 0, ..Options::default() })), [""; 0]);
+    assert_eq!(modules(&roundtrip(&d, &all())), [native::FLATE.name; 2]);
+    assert_eq!(modules(&roundtrip(&d, &Options { depth: 1, ..all() })), [native::FLATE.name]);
+    assert_eq!(modules(&roundtrip(&d, &Options { depth: 0, ..all() })), [""; 0]);
 }
 
 #[test]
@@ -208,7 +233,7 @@ fn pdf_nested() {
         ("/Type /EmbeddedFile /Filter /FlateDecode", zlib(&flac, 6)),
         ("/Filter /LZWDecode", text(1_000_000)),
     ]);
-    let f = roundtrip(&d, &Options::default());
+    let f = roundtrip(&d, &all());
     assert_eq!(
         modules(&f),
         [native::PDF.module.name, native::FLATE.name, native::FLATE.name, native::FLAC.module.name],
@@ -217,7 +242,7 @@ fn pdf_nested() {
     // The FLAC file, the only data of its class, is not left in a pool beside its formula.
     let classes = |f: &Formula| f.streams.iter().map(|s| s.class.to_string()).collect::<Vec<_>>();
     assert!(!classes(&f).contains(&"pdf/pool-data".into()), "{f}");
-    let f = roundtrip(&d, &Options { depth: 1, ..Options::default() });
+    let f = roundtrip(&d, &Options { depth: 1, ..all() });
     assert_eq!(modules(&f), [native::PDF.module.name, native::FLATE.name, native::FLATE.name]);
     assert!(classes(&f).contains(&"pdf/pool-data".into()), "{f}");
 }
@@ -230,7 +255,7 @@ fn scan_embedded() {
     let wav = fixture("flac-recons/tests/data/s16.wav");
     let (t1, t2, t3) = (text(5000), text(3000), text(100));
     let d = [&t1[..], &jpeg, &t2, &gzip(&text(100_000)), &wav, &jpeg, &t3, &flac].concat();
-    let f = roundtrip(&d, &Options::default());
+    let f = roundtrip(&d, &all());
     let flac_name = native::FLAC.module.name;
     let jpeg_name = native::JPEG.module.name;
     assert_eq!(modules(&f), [jpeg_name, native::FLATE.name, flac_name, jpeg_name, flac_name], "{f}");
@@ -240,13 +265,13 @@ fn scan_embedded() {
     assert_eq!(f.streams[0].data, [t1, t2, t3].concat());
 
     // As one file, the data starts like none.
-    let whole = Options { file: Nest::Exact, ..Options::default() };
+    let whole = Options { file: Nest::Exact, ..all() };
     assert_eq!(roundtrip(&d, &whole).root, Node::slice(0, 0, d.len() as u64));
 
     // In the data of a DEFLATE stream.
-    let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &Options::default());
+    let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &all());
     assert_eq!(modules(&f), [native::FLATE.name, flac_name], "{f}");
-    let exact = Options { contents: vec![Content { nest: Nest::Exact, ..native::CONTENTS[0] }], ..Options::default() };
+    let exact = Options { contents: vec![Content { nest: Nest::Exact, ..native::CONTENTS[0] }], ..all() };
     let f = roundtrip(&gzip(&[&text(5000)[..], &flac, &text(5000)].concat()), &exact);
     assert_eq!(modules(&f), [native::FLATE.name], "{f}");
 }
@@ -256,12 +281,12 @@ fn scan_embedded() {
 fn scan_after_file() {
     let jpeg = fixture("jpeg-recons/tests/data/gradient.jpg");
     let d = [&jpeg[..], b"appended", &jpeg].concat();
-    let f = roundtrip(&d, &Options::default());
+    let f = roundtrip(&d, &all());
     assert_eq!(modules(&f), [native::JPEG.module.name; 2], "{f}");
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts.iter().map(Node::len).collect::<Vec<_>>(), [jpeg.len() as u64, 8, jpeg.len() as u64], "{f}");
     // As one file, all of it is the first JPEG's (whose recompressor codes the other).
-    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
     assert!(matches!(&f.root, Node::Apply(a) if a.module == native::JPEG.module), "{f}");
 }
 
@@ -289,24 +314,24 @@ fn description_limit() {
     let flac = fixture("flac-recons/tests/data/s16_f5.flac");
     let d = [jpeg.repeat(20), flac.clone(), jpeg.repeat(20)].concat();
     let bound = |f: &Formula| aqr::description_bound(&f.root);
-    let f = roundtrip(&d, &Options::default());
+    let f = roundtrip(&d, &all());
     assert_eq!(f.applies().len(), 41);
     let limit = bound(&f) / 4;
-    let f = roundtrip(&d, &Options { description: limit, ..Options::default() });
+    let f = roundtrip(&d, &Options { description: limit, ..all() });
     assert!(bound(&f) <= limit, "{} > {limit}", bound(&f));
     let found = modules(&f);
     // The FLAC file, the largest, is kept.
     assert!(found.contains(&native::FLAC.module.name) && found.len() < 41 && found.len() > 5, "{found:?}");
     // In a DEFLATE stream, as its contents.
     let z = gzip(&d);
-    let opt = Options { description: limit, ..Options::default() };
+    let opt = Options { description: limit, ..all() };
     let f = roundtrip(&z, &opt);
     assert!(bound(&f) <= limit, "{} > {limit}", bound(&f));
     assert!(modules(&f).len() > 2, "{f}");
     // and when none of its contents fits, the stream alone (with room for the data around
     // it, but for no file).
-    let flate = bound(&roundtrip(&z, &Options { depth: 1, ..Options::default() }));
-    let f = roundtrip(&z, &Options { description: flate + 64, ..Options::default() });
+    let flate = bound(&roundtrip(&z, &Options { depth: 1, ..all() }));
+    let f = roundtrip(&z, &Options { description: flate + 64, ..all() });
     assert_eq!(modules(&f), [native::FLATE.name]);
 }
 
@@ -315,6 +340,6 @@ fn description_limit() {
 fn archive_many_files() {
     let jpeg = fixture("jpeg-recons/tests/data/gradient.jpg");
     let d = jpeg.repeat(3000);
-    let f = roundtrip(&d, &Options::default());
+    let f = roundtrip(&d, &all());
     assert_eq!(f.applies().len(), 3000);
 }

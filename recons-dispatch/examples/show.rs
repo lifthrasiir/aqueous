@@ -1,10 +1,10 @@
 //! Recompresses files into formulas and evaluates them back.
 //!
-//! usage: show [-t THREADS] [-d DEPTH] [-l LEVEL] [-e] [-f] FILE...
+//! usage: show [-t THREADS] [-d DEPTH] [-l mid|ZSTD_LEVEL] [-e] [-f] FILE...
 //!
 //! For each file: the detected format, the modules applied, the stream bytes by class, the
-//! times of recompression and evaluation, and the archive (of zstd level `-l`) with its round
-//! trip; `-e` takes each file as one file of the format it starts like rather than scanning
+//! times of recompression and evaluation, and the archive (of level `-l`, by default mid) with
+//! its round trip; `-e` takes each file as one file of the format it starts like rather than scanning
 //! it, and `-f` prints the formula itself.
 
 use std::time::Instant;
@@ -21,7 +21,12 @@ fn main() {
         match &*arg {
             "-t" => opt.threads = args.next().and_then(|s| s.parse().ok()).expect("-t THREADS"),
             "-d" => opt.depth = args.next().and_then(|s| s.parse().ok()).expect("-d DEPTH"),
-            "-l" => opt.level = args.next().and_then(|s| s.parse().ok()).expect("-l LEVEL"),
+            "-l" => {
+                opt.level = match args.next().expect("-l mid|ZSTD_LEVEL") {
+                    l if l == "mid" => aqr::Level::Mid,
+                    l => aqr::Level::Zstd(l.parse().expect("-l mid|ZSTD_LEVEL")),
+                }
+            }
             "-e" => opt.file = Nest::Exact,
             "-f" => tree = true,
             _ => files.push(arg),

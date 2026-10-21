@@ -288,6 +288,7 @@ dependencies = [
  "pdf-recons",
  "png-recons",
  "psd-recons",
+ "recons-common",
  "recons-formula",
  "sqlite-recons",
 ]

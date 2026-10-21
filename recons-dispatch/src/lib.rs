@@ -28,7 +28,9 @@
 //! ([`recons_formula::aqr`]), with the modules of [`native::MODULES`].
 //!
 //! Whatever is not recognised, turned down by its recompressor, not made smaller, or (with
-//! [`Options::verify`]) not reconstructed by its module is kept raw: a slice of the input.
+//! [`Options::verify`]) not reconstructed by its module is kept raw: a slice of the input. So
+//! are, with [`Options::smaller`], a file and the files found in data whose formula would
+//! archive no smaller than they do raw.
 //! [`Native`] evaluates the formulas.
 //!
 //! ```no_run
@@ -54,7 +56,7 @@ pub use recons_formula::{Formula, Module, Node};
 
 use native::Recons;
 use recons_formula::Stream;
-use recons_formula::aqr::{self, description_bound};
+use recons_formula::aqr::{self, Encoder, Level, description_bound};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -75,8 +77,12 @@ pub struct Options {
     /// the files found in data, or the contents of a file, would take more, those with the
     /// fewest bytes per byte of their description are kept raw. By default no limit.
     pub description: usize,
-    /// The zstd level of the blocks of [`compress`].
-    pub level: i32,
+    /// The level of the archive of [`compress`] ([`aqr::Encoder`]), and of the formulas sized
+    /// for [`Options::smaller`].
+    pub level: Level,
+    /// Keep a file raw, or the data where files are found, unless its formula archives
+    /// smaller than it does raw ([`aqr::Encoder::smaller`]).
+    pub smaller: bool,
 }
 
 /// How data is recompressed.
@@ -97,19 +103,22 @@ impl Default for Options {
             contents: native::CONTENTS.to_vec(),
             file: Nest::Scan,
             description: usize::MAX,
-            level: 3,
+            level: Level::Mid,
+            smaller: true,
         }
     }
 }
 
 /// `d` as a formula, with the recompressor for its format if any takes it.
 pub fn recompress(d: &[u8], opt: &Options) -> Formula {
-    recompress_at(d, opt, 0, opt.file)
+    recompress_at(d, opt, 0, opt.file, &Encoder::new(opt.level))
 }
 
 /// `d` as an archive, with the checksum of `d`.
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
-    aqr::encode(&recompress(d, opt), Some(aqr::checksum(d)), opt.level).expect("slices within their streams")
+    let enc = Encoder::new(opt.level);
+    let f = recompress_at(d, opt, 0, opt.file, &enc);
+    enc.encode(&f, Some(aqr::checksum(d))).expect("slices within their streams")
 }
 
 /// The file in archive `c`.
@@ -117,18 +126,19 @@ pub fn decompress(c: &[u8], threads: usize) -> Result<Vec<u8>, aqr::Failure> {
     aqr::decode(c, &Native { threads }.modules())
 }
 
-/// [`recompress`] for data `depth` formats deep.
-pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest) -> Formula {
+/// [`recompress`] for data `depth` formats deep, sizing formulas by `enc`.
+pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, enc: &Encoder) -> Formula {
     let f = match how {
         _ if depth >= opt.depth => None,
-        Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth)),
-        Nest::Scan => scan(d, opt, depth),
+        Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, enc)),
+        Nest::Scan => scan(d, opt, depth, enc).filter(|f| smaller(f, d, opt, enc)),
     };
     f.unwrap_or_else(|| Formula::raw("raw", d.to_vec()))
 }
 
-/// `d` as a file of `format`, with its contents nested, if its recompressor takes it.
-fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32) -> Option<Formula> {
+/// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
+/// formula is [`smaller`]).
+fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, enc: &Encoder) -> Option<Formula> {
     let mut f = catch_unwind(AssertUnwindSafe(|| match format {
         Format::Pe => pe::pe(d, opt),
         Format::Gzip => flate::gzip(d, opt),
@@ -143,8 +153,14 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32) -> Option<
     }))
     .ok()
     .flatten()?;
-    nest(&mut f, opt, depth);
-    Some(f)
+    nest(&mut f, opt, depth, enc);
+    smaller(&f, d, opt, enc).then_some(f)
+}
+
+/// Unless [`Options::smaller`] is off, whether formula `f` of `d` archives smaller than `d`
+/// raw, by `enc`.
+fn smaller(f: &Formula, d: &[u8], opt: &Options, enc: &Encoder) -> bool {
+    !opt.smaller || enc.smaller(f, d).expect("slices within their streams")
 }
 
 /// Bytes of the data that a scan may give to recompressors which turn it down, on top of
@@ -156,18 +172,18 @@ const SCAN_SLACK: usize = 16 << 20;
 /// next byte, so that files in one turned down are still found. Weak signatures are confirmed
 /// by the extent: a zlib stream by its checksum, MPEG audio frames without a tag by one
 /// following another.
-fn scan(d: &[u8], opt: &Options, depth: u32) -> Option<Formula> {
-    scan_with(d, opt, depth, SCAN_SLACK)
+fn scan(d: &[u8], opt: &Options, depth: u32, enc: &Encoder) -> Option<Formula> {
+    scan_with(d, opt, depth, SCAN_SLACK, enc)
 }
 
 /// [`scan`] with `slack` for [`SCAN_SLACK`].
-fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize) -> Option<Formula> {
+fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, enc: &Encoder) -> Option<Formula> {
     let mut found = Vec::new();
     let (mut p, mut budget) = (0, d.len().saturating_mul(2).saturating_add(slack));
     while p < d.len() {
         let child = detect::starts(&d[p..]).filter(|_| budget > 0).and_then(|format| {
             let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
-            let child = recompress_as(format, &d[p..p + n], opt, depth);
+            let child = recompress_as(format, &d[p..p + n], opt, depth, enc);
             if child.is_none() {
                 budget = budget.saturating_sub(n);
             }
@@ -231,12 +247,12 @@ fn fit(base: usize, parts: &[(usize, usize)], limit: usize) -> Vec<bool> {
 /// data `depth` formats deep, putting their formulas in place of the slices where they have
 /// any application (as many as fit in [`Options::description`]); the bytes left without a
 /// slice are dropped.
-fn nest(f: &mut Formula, opt: &Options, depth: u32) {
+fn nest(f: &mut Formula, opt: &Options, depth: u32, enc: &Encoder) {
     if depth + 1 >= opt.depth {
         return;
     }
     let mut children = Vec::new();
-    contents(&f.root, f, opt, depth, &mut children);
+    contents(&f.root, f, opt, depth, enc, &mut children);
     let sizes: Vec<_> = children
         .iter()
         .map(|(slice, child)| match child {
@@ -257,19 +273,19 @@ fn nest(f: &mut Formula, opt: &Options, depth: u32) {
 
 /// The contents below node `n` of `f`, in order: each slice, and its formula where it has any
 /// application.
-fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, out: &mut Vec<(Node, Option<Formula>)>) {
+fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, enc: &Encoder, out: &mut Vec<(Node, Option<Formula>)>) {
     match n {
         Node::Slice { .. } => {}
-        Node::Concat(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, out)),
+        Node::Concat(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, enc, out)),
         Node::Apply(a) => {
             for (i, input) in a.inputs.iter().enumerate() {
                 match (input, content(opt, a.module, i)) {
                     (&Node::Slice { stream, start, len }, Some(content)) => {
                         let d = f.streams.get(stream).and_then(|s| s.data.get(start as usize..)?.get(..len as usize));
-                        let child = d.map(|d| recompress_at(d, opt, depth + 1, content.nest));
+                        let child = d.map(|d| recompress_at(d, opt, depth + 1, content.nest, enc));
                         out.push((input.clone(), child.filter(|c| !c.applies().is_empty())));
                     }
-                    _ => contents(input, f, opt, depth, out),
+                    _ => contents(input, f, opt, depth, enc, out),
                 }
             }
         }
@@ -346,7 +362,9 @@ mod tests {
         // PNG signatures with a chunk running to the end of the data, each turned down
         let fake = [&b"\x89PNG\r\n\x1a\n"[..], &0x7fff_0000u32.to_be_bytes(), b"IHDR"].concat();
         let data = |fakes: usize| [fake.repeat(fakes), vec![0; 10000], jpeg.clone()].concat();
-        let found = |d: &[u8]| scan_with(d, &Options::default(), 0, 0).map_or(0, |f| f.applies().len());
+        let found = |d: &[u8]| {
+            scan_with(d, &Options::default(), 0, 0, &Encoder::new(Level::Mid)).map_or(0, |f| f.applies().len())
+        };
         assert_eq!(found(&data(1)), 1);
         assert_eq!(found(&data(3)), 0);
     }

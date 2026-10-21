@@ -11,12 +11,19 @@
 //! what a module reading its inputs whole and committing its output at the end needs: windows
 //! of the whole inputs and output, and no memory limit ([`MEMORY_LIMIT`]).
 //!
+//! [`Encoder`] encodes several formulas, compressing each stream once however many hold it,
+//! at the zstd level that its [`Level`] picks for the stream.
+//!
 //! [`decode`] evaluates such archives, and any other without a metadata block, a dictionary
 //! or an encryption.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::fmt;
 
 use recons_common::varint;
+use xxhash_rust::xxh3::xxh3_128;
 use xxhash_rust::xxh64::xxh64;
 use zstd::zstd_safe::{self, CParameter, InBuffer, OutBuffer};
 
@@ -55,88 +62,154 @@ pub fn checksum(d: &[u8]) -> u64 {
     xxh64(d, 0)
 }
 
-/// `f` as an archive, its blocks compressed at zstd `level`, with `checksum` of the output
-/// ([`checksum`]) if given (a leaf block checksums itself). Fails on slices out of their
+/// `f` as an archive, its blocks compressed at `level` ([`Encoder`]), with `checksum` of the
+/// output ([`checksum`]) if given (a leaf block checksums itself). Fails on slices out of their
 /// stream.
-pub fn encode(f: &Formula, checksum: Option<u64>, level: i32) -> Result<Vec<u8>> {
-    let mut slices = Ok(());
-    f.root.visit(&mut |n| {
-        if let &Node::Slice { stream, start, len } = n
-            && f.streams.get(stream).is_none_or(|s| start.checked_add(len).is_none_or(|e| e > s.data.len() as u64))
-        {
-            slices = Err(Error::new(format!("slice [{start}, +{len}) out of stream #{stream}")));
-        }
-    });
-    slices?;
+pub fn encode(f: &Formula, checksum: Option<u64>, level: Level) -> Result<Vec<u8>> {
+    Encoder::new(level).encode(f, checksum)
+}
 
-    let mut blocks = Vec::new();
-    if let &Node::Slice { stream, start, len } = &f.root {
-        content_block(&mut blocks, true, &f.streams[stream].data[start as usize..][..len as usize], level)?;
-    } else {
-        // the non-leaf block of each stream sliced, by its ordinal
-        let mut ordinals = vec![None; f.streams.len()];
-        f.root.visit(&mut |n| {
-            if let &Node::Slice { stream, .. } = n {
-                ordinals[stream] = Some(0);
-            }
-        });
-        let mut sliced = Vec::new();
-        for (s, o) in ordinals.iter_mut().enumerate() {
-            if o.is_some() {
-                *o = Some(sliced.len() as u64);
-                sliced.push(s);
-            }
-        }
-        let mut modules: Vec<Module> = Vec::new();
-        for a in f.applies() {
-            if !modules.contains(&a.module) {
-                modules.push(a.module);
-            }
-        }
+/// How hard an [`Encoder`] compresses: a level of the archive, which picks the zstd level of
+/// each stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    /// Each stream at the zstd level of [`MID_LEVELS`] that costs the least, its time to
+    /// compress at [`MID_RATE`] bytes per second added to its bytes: mostly 3 or about, higher
+    /// where that saves enough, and uncompressed where the lowest saves less than 1/32 (as of
+    /// a recompressor's entropy-coded output).
+    Mid,
+    /// Every stream at this zstd level.
+    Zstd(i32),
+}
 
-        let mut data = Vec::new();
-        varint::put(&mut data, sliced.len() as u64);
-        sliced.iter().for_each(|_| varint::put(&mut data, 0));
-        varint::put(&mut data, 0);
-        varint::put(&mut data, modules.len() as u64);
-        (0..modules.len()).for_each(|i| varint::put(&mut data, i as u64));
-        instructions(&f.root, &ordinals, &modules, &mut data);
-        if let Some(c) = checksum {
-            data.push(CHECKSUM);
-            data.extend_from_slice(&c.to_le_bytes());
-        }
+/// The bytes that [`Level::Mid`] would save for a second of compression.
+const MID_RATE: f64 = 4e6;
+/// The zstd levels that [`Level::Mid`] picks from, with the bytes per second they compress
+/// (as measured on text and PSD skeletons).
+const MID_LEVELS: [(i32, f64); 5] = [(1, 600e6), (3, 350e6), (4, 330e6), (6, 140e6), (9, 100e6)];
+/// Streams shorter than this are compressed at zstd level 3 by [`Level::Mid`], as picking
+/// would take longer than any level.
+const MID_SMALL: usize = 64 << 10;
+/// [`Level::Mid`] picks the level by this many bytes of the stream, in [`SAMPLE_CHUNKS`]
+/// chunks spread evenly over it (or by the whole stream if no longer).
+const SAMPLE: usize = 512 << 10;
+const SAMPLE_CHUNKS: usize = 4;
 
-        for &m in &modules {
-            block(&mut blocks, MODULE, &padded(|pad| wasm(m, pad), level)?);
-        }
-        block(
-            &mut blocks,
-            FORMULA,
-            &padded(
-                |pad| {
-                    let mut d = data.clone();
-                    d.resize(d.len() + pad, NOP);
-                    d
-                },
-                level,
-            )?,
-        );
-        for s in sliced {
-            content_block(&mut blocks, false, &f.streams[s].data, level)?;
-        }
+/// What an [`Encoder`] makes of a stream: compressed already ([`compressed`]), or to be
+/// compressed at a zstd level.
+enum Plan {
+    Done(Option<Vec<u8>>),
+    Level(i32),
+}
+
+/// Encodes formulas as archives at a [`Level`], keeping the compressed streams by their
+/// contents: [`Encoder::len`] sizes a formula, and the same streams in a later formula are not
+/// compressed again.
+pub struct Encoder {
+    level: Level,
+    /// Compressed streams (as [`compressed`] gives) by their [`StreamKey`].
+    streams: RefCell<HashMap<StreamKey, Option<Vec<u8>>>>,
+}
+
+/// A stream's hash and length.
+type StreamKey = (u128, usize);
+
+impl Encoder {
+    pub fn new(level: Level) -> Encoder {
+        Encoder { level, streams: RefCell::default() }
     }
 
-    let mut out = Vec::with_capacity(blocks.len() + 32);
-    out.extend_from_slice(&HEADER_MAGIC);
-    out.extend_from_slice(&blocks);
-    let mut footer = Vec::new();
-    varint::put(&mut footer, blocks.len() as u64);
-    varint::put(&mut footer, 0);
-    out.extend_from_slice(&FOOTER_MAGIC);
-    out.extend_from_slice(&(footer.len() as u16).to_le_bytes());
-    out.extend_from_slice(&footer);
-    out.extend_from_slice(&(footer.len() as u16).to_le_bytes());
-    Ok(out)
+    /// The length of the archive of `f` without a checksum.
+    pub fn len(&self, f: &Formula) -> Result<usize> {
+        Ok(self.encode(f, None)?.len())
+    }
+
+    /// [`encode`] at the level of the encoder.
+    pub fn encode(&self, f: &Formula, checksum: Option<u64>) -> Result<Vec<u8>> {
+        // of the module and formula blocks
+        let level = match self.level {
+            Level::Mid => 3,
+            Level::Zstd(l) => l,
+        };
+        let mut slices = Ok(());
+        f.root.visit(&mut |n| {
+            if let &Node::Slice { stream, start, len } = n
+                && f.streams.get(stream).is_none_or(|s| start.checked_add(len).is_none_or(|e| e > s.data.len() as u64))
+            {
+                slices = Err(Error::new(format!("slice [{start}, +{len}) out of stream #{stream}")));
+            }
+        });
+        slices?;
+
+        let mut blocks = Vec::new();
+        if let &Node::Slice { stream, start, len } = &f.root {
+            self.content_block(&mut blocks, true, &f.streams[stream].data[start as usize..][..len as usize])?;
+        } else {
+            // the non-leaf block of each stream sliced, by its ordinal
+            let mut ordinals = vec![None; f.streams.len()];
+            f.root.visit(&mut |n| {
+                if let &Node::Slice { stream, .. } = n {
+                    ordinals[stream] = Some(0);
+                }
+            });
+            let mut sliced = Vec::new();
+            for (s, o) in ordinals.iter_mut().enumerate() {
+                if o.is_some() {
+                    *o = Some(sliced.len() as u64);
+                    sliced.push(s);
+                }
+            }
+            let mut modules: Vec<Module> = Vec::new();
+            for a in f.applies() {
+                if !modules.contains(&a.module) {
+                    modules.push(a.module);
+                }
+            }
+
+            let mut data = Vec::new();
+            varint::put(&mut data, sliced.len() as u64);
+            sliced.iter().for_each(|_| varint::put(&mut data, 0));
+            varint::put(&mut data, 0);
+            varint::put(&mut data, modules.len() as u64);
+            (0..modules.len()).for_each(|i| varint::put(&mut data, i as u64));
+            instructions(&f.root, &ordinals, &modules, &mut data);
+            if let Some(c) = checksum {
+                data.push(CHECKSUM);
+                data.extend_from_slice(&c.to_le_bytes());
+            }
+
+            for &m in &modules {
+                block(&mut blocks, MODULE, &padded(|pad| wasm(m, pad), level)?);
+            }
+            block(
+                &mut blocks,
+                FORMULA,
+                &padded(
+                    |pad| {
+                        let mut d = data.clone();
+                        d.resize(d.len() + pad, NOP);
+                        d
+                    },
+                    level,
+                )?,
+            );
+            for s in sliced {
+                self.content_block(&mut blocks, false, &f.streams[s].data)?;
+            }
+        }
+
+        let mut out = Vec::with_capacity(blocks.len() + 32);
+        out.extend_from_slice(&HEADER_MAGIC);
+        out.extend_from_slice(&blocks);
+        let mut footer = Vec::new();
+        varint::put(&mut footer, blocks.len() as u64);
+        varint::put(&mut footer, 0);
+        out.extend_from_slice(&FOOTER_MAGIC);
+        out.extend_from_slice(&(footer.len() as u16).to_le_bytes());
+        out.extend_from_slice(&footer);
+        out.extend_from_slice(&(footer.len() as u16).to_le_bytes());
+        Ok(out)
+    }
 }
 
 /// The instructions pushing node `n`, its streams' blocks at `ordinals` and its modules at
@@ -255,18 +328,101 @@ fn block(out: &mut Vec<u8>, ty: u64, data: &[u8]) {
     }
 }
 
-/// Appends a compressed or uncompressed (leaf or non-leaf) block of `data`, whichever the spec
-/// allows.
-fn content_block(out: &mut Vec<u8>, leaf: bool, data: &[u8], level: i32) -> Result<()> {
-    match compressed(data, level)? {
-        Some(c) => block(out, if leaf { LEAF_ZSTD } else { NON_LEAF_ZSTD }, &c),
+impl Encoder {
+    /// Appends a compressed or uncompressed (leaf or non-leaf) block of `data`, whichever the
+    /// spec allows.
+    fn content_block(&self, out: &mut Vec<u8>, leaf: bool, data: &[u8]) -> Result<()> {
+        let mut streams = self.streams.borrow_mut();
+        let c = match streams.entry(key(data)) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(match self.plan(data)? {
+                Plan::Done(c) => c,
+                Plan::Level(level) => compressed(data, level)?,
+            }),
+        };
+        content_block(out, leaf, data, c.as_deref());
+        Ok(())
+    }
+
+    /// What to make of `data` at the level of the encoder.
+    fn plan(&self, data: &[u8]) -> Result<Plan> {
+        match self.level {
+            Level::Zstd(l) if data.len() <= SAMPLE => Ok(Plan::Done(compressed(data, l)?)),
+            Level::Zstd(l) => Ok(Plan::Level(l)),
+            Level::Mid if data.len() < MID_SMALL => {
+                let c = compressed(data, 3)?;
+                Ok(Plan::Done(c.filter(|c| c.len() < data.len() - data.len() / 32)))
+            }
+            Level::Mid => {
+                let sample = sampled(data);
+                let (mut best, mut cost) = (None, f64::INFINITY);
+                for (level, speed) in MID_LEVELS {
+                    let c = compressed(&sample, level)?;
+                    let n = c.as_ref().map_or(sample.len(), Vec::len);
+                    if best.is_none() && n >= sample.len() - sample.len() / 32 {
+                        return Ok(Plan::Done(None));
+                    }
+                    let k = n as f64 + MID_RATE * sample.len() as f64 / speed;
+                    if k < cost {
+                        (best, cost) = (Some((level, c)), k);
+                    }
+                }
+                let (level, c) = best.expect("levels to pick from");
+                Ok(if sample.len() == data.len() { Plan::Done(c) } else { Plan::Level(level) })
+            }
+        }
+    }
+
+    /// Whether `f` archives smaller than `d` raw. A formula of at most half of the bytes
+    /// that `d` is estimated to compress to (by a sample) is taken as smaller without
+    /// compressing `d`.
+    pub fn smaller(&self, f: &Formula, d: &[u8]) -> Result<bool> {
+        let n = self.len(f)?;
+        if !self.streams.borrow().contains_key(&key(d)) {
+            let c = match self.plan(d)? {
+                Plan::Done(c) => c,
+                Plan::Level(level) => {
+                    let s = sampled(d);
+                    let n_s = compressed(&s, level)?.map_or(s.len(), |c| c.len());
+                    let estimate = (n_s as f64 * d.len() as f64 / s.len() as f64) as usize;
+                    if n <= estimate / 2 {
+                        return Ok(true);
+                    }
+                    compressed(d, level)?
+                }
+            };
+            self.streams.borrow_mut().insert(key(d), c);
+        }
+        Ok(n < self.len(&Formula::raw("raw", d.to_vec()))?)
+    }
+}
+
+/// [`SAMPLE`] bytes of `data` in [`SAMPLE_CHUNKS`] chunks spread evenly over it, or all of it.
+fn sampled(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if data.len() <= SAMPLE {
+        return data.into();
+    }
+    let chunk = SAMPLE / SAMPLE_CHUNKS;
+    let step = (data.len() - chunk) / (SAMPLE_CHUNKS - 1);
+    (0..SAMPLE_CHUNKS).flat_map(|i| &data[i * step..][..chunk]).copied().collect::<Vec<_>>().into()
+}
+
+/// The [`StreamKey`] of `data`.
+fn key(data: &[u8]) -> StreamKey {
+    (xxh3_128(data), data.len())
+}
+
+/// Appends a block of `data`: compressed as `c` ([`compressed`]) if given, else uncompressed
+/// (leaf or non-leaf).
+fn content_block(out: &mut Vec<u8>, leaf: bool, data: &[u8], c: Option<&[u8]>) {
+    match c {
+        Some(c) => block(out, if leaf { LEAF_ZSTD } else { NON_LEAF_ZSTD }, c),
         None => {
             let mut u = data.to_vec();
             u.extend_from_slice(&checksum(data).to_le_bytes());
             block(out, if leaf { LEAF_RAW } else { NON_LEAF_RAW }, &u);
         }
     }
-    Ok(())
 }
 
 /// The compressed external structure of `make(pad)` with the least `pad` tried (0, 16, 32,
@@ -819,7 +975,7 @@ mod tests {
         archive(|out| {
             block(out, MODULE, &padded(|pad| wasm(REV, pad), 3).unwrap());
             block(out, FORMULA, &padded(|pad| [data, &vec![NOP; pad]].concat(), 3).unwrap());
-            streams.iter().for_each(|s| content_block(out, false, s, 3).unwrap());
+            streams.iter().for_each(|s| content_block(out, false, s, compressed(s, 3).unwrap().as_deref()));
         })
     }
 
@@ -847,7 +1003,7 @@ mod tests {
             SAMPLE
         );
         for sum in [None, Some(checksum(SAMPLE))] {
-            let c = encode(&f, sum, 3).unwrap();
+            let c = encode(&f, sum, Level::Zstd(3)).unwrap();
             assert_eq!(c[..6], HEADER_MAGIC);
             assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
             assert_eq!(decode(&c, &natives()).unwrap(), SAMPLE);
@@ -856,14 +1012,14 @@ mod tests {
         let mut f = sample();
         f.streams.insert(0, Stream { class: "unused".into(), data: vec![1; 100] });
         f.root.slices_mut(&mut |s, _, _| *s += 1);
-        let c = encode(&f, None, 3).unwrap();
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &natives()).unwrap(), SAMPLE);
         // A module named twice has one block.
         let mut f = sample();
         let Node::Concat(ns) = &mut f.root else { unreachable!() };
         ns.push(ns[1].clone());
-        let c = encode(&f, None, 3).unwrap();
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &natives()).unwrap(), [SAMPLE, b"zyxolleh"].concat());
     }
@@ -872,17 +1028,43 @@ mod tests {
     #[test]
     fn leaf() {
         for (d, ty) in [(vec![], LEAF_RAW), (b"hello".to_vec(), LEAF_RAW), (vec![7; 100_000], LEAF_ZSTD)] {
-            let c = encode(&Formula::raw("a", d.clone()), None, 3).unwrap();
+            let c = encode(&Formula::raw("a", d.clone()), None, Level::Zstd(3)).unwrap();
             assert_eq!(types(&c), [ty]);
             assert_eq!(decode(&c, &[]).unwrap(), d);
         }
         let mut f = Formula::raw("a", b"0123456789".to_vec());
         f.root = Node::slice(0, 3, 4);
-        assert_eq!(decode(&encode(&f, None, 3).unwrap(), &[]).unwrap(), b"3456");
+        assert_eq!(decode(&encode(&f, None, Level::Zstd(3)).unwrap(), &[]).unwrap(), b"3456");
         // An empty formula is a formula block.
-        let c = encode(&Formula::default(), None, 3).unwrap();
+        let c = encode(&Formula::default(), None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [FORMULA]);
         assert_eq!(decode(&c, &[]).unwrap(), b"");
+    }
+
+    /// [`Level::Mid`] leaves uncompressed what the lowest level hardly shrinks, and compresses
+    /// the rest at 3, or higher where that saves enough for its time.
+    #[test]
+    fn mid_level() {
+        let types_at = |d: &[u8], level| {
+            let c = encode(&Formula::raw("a", d.to_vec()), None, level).unwrap();
+            assert_eq!(decode(&c, &[]).unwrap(), d);
+            (types(&c)[0] & !3, c.len())
+        };
+        // shrunk at level 1, by less than 1/32 (but more than zstd keeps blocks raw below)
+        let mut noise = recons_common::rng::noise(1 << 20);
+        noise.iter_mut().enumerate().filter(|(i, _)| i % 1024 < 32).for_each(|(_, b)| *b = 0);
+        // the whole stream, and a sample
+        for d in [&noise[..300_000], &noise] {
+            assert_eq!(types_at(d, Level::Zstd(3)).0, LEAF_ZSTD, "{}", d.len());
+            assert_eq!(types_at(d, Level::Mid).0, LEAF_RAW, "{}", d.len());
+        }
+        // Text, which level 4 or so shrinks more than enough for its time.
+        let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/index.bs")).unwrap();
+        let (zstd3, mid) = (types_at(&text, Level::Zstd(3)).1, types_at(&text, Level::Mid).1);
+        assert!(mid < zstd3 - zstd3 / 32, "{mid} vs {zstd3}");
+        // short, at level 3
+        let short = Formula::raw("a", text[..30000].to_vec());
+        assert_eq!(encode(&short, None, Level::Mid).unwrap(), encode(&short, None, Level::Zstd(3)).unwrap());
     }
 
     #[test]
@@ -925,7 +1107,7 @@ mod tests {
 
     #[test]
     fn decode_errors() {
-        let c = encode(&sample(), Some(checksum(SAMPLE)), 3).unwrap();
+        let c = encode(&sample(), Some(checksum(SAMPLE)), Level::Zstd(3)).unwrap();
         // A changed byte is an invalid archive, or the same file (e.g. with a larger zstd window).
         let (mut same, mut failed) = (0, 0);
         for i in 0..c.len() {
@@ -943,7 +1125,7 @@ mod tests {
         }
         assert_eq!(decode(&c, &[]), unsupported("no native implementation of rev@1"));
         // the output checksum
-        let bad = encode(&sample(), Some(checksum(SAMPLE) ^ 1), 3).unwrap();
+        let bad = encode(&sample(), Some(checksum(SAMPLE) ^ 1), Level::Zstd(3)).unwrap();
         assert_eq!(decode(&bad, &natives()), invalid("output checksum mismatch"));
     }
 
