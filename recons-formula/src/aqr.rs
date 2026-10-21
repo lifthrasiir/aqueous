@@ -73,27 +73,40 @@ pub fn encode(f: &Formula, checksum: Option<u64>, level: Level) -> Result<Vec<u8
 /// each stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
-    /// Each stream at the zstd level of [`MID_LEVELS`] that costs the least, its time to
-    /// compress at [`MID_RATE`] bytes per second added to its bytes: mostly 3 or about, higher
-    /// where that saves enough, and uncompressed where the lowest saves less than 1/32 (as of
-    /// a recompressor's entropy-coded output).
+    /// Each stream uncompressed if incompressible ([`PROBE`]), else at zstd level
+    /// [`MID_BASE`], or:
+    ///
+    /// - at a level of [`MID_HIGHER`] where that saves enough for its time, at [`MID_RATE`]
+    ///   bytes per second of compression;
+    /// - at a level of [`MID_LOWER`] where that is smaller by 1/32 at least (beyond what a
+    ///   sample may be off by), as it is faster too.
+    ///
+    /// Module and formula blocks, and streams shorter than [`MID_SMALL`], are at the base.
     Mid,
     /// Every stream at this zstd level.
     Zstd(i32),
 }
 
-/// The bytes that [`Level::Mid`] would save for a second of compression.
+/// The zstd level at which a stream is incompressible if it saves less than 1/32 (as a
+/// recompressor's entropy-coded output does), whatever level would compress it otherwise.
+const PROBE: i32 = 1;
+/// The zstd level of [`Level::Mid`], with the bytes per second it compresses (as measured on
+/// text and PSD skeletons, as are the others).
+const MID_BASE: (i32, f64) = (3, 350e6);
+/// The zstd levels below [`MID_BASE`] that [`Level::Mid`] takes where clearly smaller, fastest
+/// first: some data compresses better at lower levels.
+const MID_LOWER: [i32; 1] = [1];
+/// The zstd levels above [`MID_BASE`] that [`Level::Mid`] picks from, with their speed.
+const MID_HIGHER: [(i32, f64); 3] = [(4, 330e6), (6, 140e6), (9, 100e6)];
+/// The bytes that [`Level::Mid`] would save for a second of compression above [`MID_BASE`].
 const MID_RATE: f64 = 4e6;
-/// The zstd levels that [`Level::Mid`] picks from, with the bytes per second they compress
-/// (as measured on text and PSD skeletons).
-const MID_LEVELS: [(i32, f64); 5] = [(1, 600e6), (3, 350e6), (4, 330e6), (6, 140e6), (9, 100e6)];
-/// Streams shorter than this are compressed at zstd level 3 by [`Level::Mid`], as picking
+/// Streams shorter than this are compressed at [`MID_BASE`] by [`Level::Mid`], as picking
 /// would take longer than any level.
 const MID_SMALL: usize = 64 << 10;
 /// [`Level::Mid`] picks the level by this many bytes of the stream, in [`SAMPLE_CHUNKS`]
 /// chunks spread evenly over it (or by the whole stream if no longer).
-const SAMPLE: usize = 512 << 10;
-const SAMPLE_CHUNKS: usize = 4;
+const SAMPLE: usize = 1 << 20;
+const SAMPLE_CHUNKS: usize = 16;
 
 /// What an [`Encoder`] makes of a stream: compressed already ([`compressed`]), or to be
 /// compressed at a zstd level.
@@ -128,7 +141,7 @@ impl Encoder {
     pub fn encode(&self, f: &Formula, checksum: Option<u64>) -> Result<Vec<u8>> {
         // of the module and formula blocks
         let level = match self.level {
-            Level::Mid => 3,
+            Level::Mid => MID_BASE.0,
             Level::Zstd(l) => l,
         };
         let mut slices = Ok(());
@@ -349,26 +362,28 @@ impl Encoder {
         match self.level {
             Level::Zstd(l) if data.len() <= SAMPLE => Ok(Plan::Done(compressed(data, l)?)),
             Level::Zstd(l) => Ok(Plan::Level(l)),
-            Level::Mid if data.len() < MID_SMALL => {
-                let c = compressed(data, 3)?;
-                Ok(Plan::Done(c.filter(|c| c.len() < data.len() - data.len() / 32)))
-            }
             Level::Mid => {
                 let sample = sampled(data);
-                let (mut best, mut cost) = (None, f64::INFINITY);
-                for (level, speed) in MID_LEVELS {
-                    let c = compressed(&sample, level)?;
-                    let n = c.as_ref().map_or(sample.len(), Vec::len);
-                    if best.is_none() && n >= sample.len() - sample.len() / 32 {
-                        return Ok(Plan::Done(None));
-                    }
-                    let k = n as f64 + MID_RATE * sample.len() as f64 / speed;
-                    if k < cost {
-                        (best, cost) = (Some((level, c)), k);
-                    }
+                let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
+                let probe = compressed(&sample, PROBE)?;
+                if len(&probe) >= sample.len() - sample.len() / 32 {
+                    return Ok(Plan::Done(None));
                 }
-                let (level, c) = best.expect("levels to pick from");
-                Ok(if sample.len() == data.len() { Plan::Done(c) } else { Plan::Level(level) })
+                if data.len() < MID_SMALL {
+                    return Ok(Plan::Done(compressed(data, MID_BASE.0)?));
+                }
+                let mut tried = vec![(MID_BASE.0, compressed(&sample, MID_BASE.0)?)];
+                for (level, _) in MID_HIGHER {
+                    tried.push((level, compressed(&sample, level)?));
+                }
+                for level in MID_LOWER {
+                    tried.push((level, if level == PROBE { probe.clone() } else { compressed(&sample, level)? }));
+                }
+                let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
+                let (higher, lower) = lens[1..].split_at(MID_HIGHER.len());
+                let level = mid_pick(sample.len(), lens[0], higher, lower);
+                let best = tried.into_iter().find(|t| t.0 == level).expect("a level tried");
+                Ok(if sample.len() == data.len() { Plan::Done(best.1) } else { Plan::Level(best.0) })
             }
         }
     }
@@ -395,6 +410,25 @@ impl Encoder {
         }
         Ok(n < self.len(&Formula::raw("raw", d.to_vec()))?)
     }
+}
+
+/// The zstd level of [`Level::Mid`] for a sample of `n` bytes, by the bytes it compresses to
+/// at [`MID_BASE`], at [`MID_HIGHER`] and at [`MID_LOWER`] (in their order): above the base by
+/// the time to compress, else below where smaller by 1/32 at least.
+fn mid_pick(n: usize, base: usize, higher: &[usize], lower: &[usize]) -> i32 {
+    let cost = |len: usize, speed: f64| len as f64 + MID_RATE * n as f64 / speed;
+    let (mut best, mut least) = (MID_BASE.0, cost(base, MID_BASE.1));
+    for (&(level, speed), &len) in MID_HIGHER.iter().zip(higher) {
+        if cost(len, speed) < least {
+            (best, least) = (level, cost(len, speed));
+        }
+    }
+    if best == MID_BASE.0
+        && let Some((&level, _)) = MID_LOWER.iter().zip(lower).find(|&(_, &len)| len <= base - base / 32)
+    {
+        best = level;
+    }
+    best
 }
 
 /// [`SAMPLE`] bytes of `data` in [`SAMPLE_CHUNKS`] chunks spread evenly over it, or all of it.
@@ -1051,20 +1085,39 @@ mod tests {
             (types(&c)[0] & !3, c.len())
         };
         // shrunk at level 1, by less than 1/32 (but more than zstd keeps blocks raw below)
-        let mut noise = recons_common::rng::noise(1 << 20);
+        let mut noise = recons_common::rng::noise(2 << 20);
         noise.iter_mut().enumerate().filter(|(i, _)| i % 1024 < 32).for_each(|(_, b)| *b = 0);
-        // the whole stream, and a sample
-        for d in [&noise[..300_000], &noise] {
+        // a short stream, a whole one, and a sample
+        for d in [&noise[..30000], &noise[..300_000], &noise] {
             assert_eq!(types_at(d, Level::Zstd(3)).0, LEAF_ZSTD, "{}", d.len());
             assert_eq!(types_at(d, Level::Mid).0, LEAF_RAW, "{}", d.len());
         }
-        // Text, which level 4 or so shrinks more than enough for its time.
+        // Text, which level 4 shrinks more than enough for its time.
         let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/index.bs")).unwrap();
         let (zstd3, mid) = (types_at(&text, Level::Zstd(3)).1, types_at(&text, Level::Mid).1);
         assert!(mid < zstd3 - zstd3 / 32, "{mid} vs {zstd3}");
         // short, at level 3
         let short = Formula::raw("a", text[..30000].to_vec());
         assert_eq!(encode(&short, None, Level::Mid).unwrap(), encode(&short, None, Level::Zstd(3)).unwrap());
+        // and so are module and formula blocks
+        assert_eq!(encode(&sample(), None, Level::Mid).unwrap(), encode(&sample(), None, Level::Zstd(3)).unwrap());
+    }
+
+    /// Above the base by the time to compress; below where clearly smaller, as a sample may
+    /// be off by a little.
+    #[test]
+    fn mid_picks() {
+        // nothing better
+        assert_eq!(mid_pick(1_000_000, 300_000, &[300_000; 3], &[310_000]), 3);
+        // level 4, 1% smaller for 0.07% of time
+        assert_eq!(mid_pick(1_000_000, 300_000, &[297_000, 297_000, 297_000], &[310_000]), 4);
+        // level 6, 1% smaller than 4 for 1.6% of time: not enough
+        assert_eq!(mid_pick(1_000_000, 300_000, &[297_000, 294_000, 294_000], &[310_000]), 4);
+        // level 9, 12% smaller than 4 for 2.8% of time
+        assert_eq!(mid_pick(1_000_000, 300_000, &[297_000, 294_000, 260_000], &[310_000]), 9);
+        // level 1, by 0.7% (as of a sample of 19tech_4.psd, 8.7% larger whole) and by 10%
+        assert_eq!(mid_pick(1_000_000, 300_000, &[300_000; 3], &[298_000]), 3);
+        assert_eq!(mid_pick(1_000_000, 300_000, &[300_000; 3], &[270_000]), 1);
     }
 
     #[test]

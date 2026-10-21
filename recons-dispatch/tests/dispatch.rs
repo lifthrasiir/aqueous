@@ -137,14 +137,14 @@ fn gzip_nested() {
 fn zlib_checksum() {
     let t = text(50_000);
     for level in [1, 6, 9] {
-        let f = roundtrip(&zlib(&t, level), &Options::default());
+        let f = roundtrip(&zlib(&t, level), &all());
         assert_eq!(modules(&f), [native::FLATE.name]);
         // The data is a raw stream of its own, between the header and the checksum.
         assert!(f.streams.iter().any(|s| s.data == t));
     }
     let mut d = zlib(&t, 6);
     *d.last_mut().unwrap() ^= 1;
-    assert!(modules(&roundtrip(&d, &Options::default())).is_empty());
+    assert!(modules(&roundtrip(&d, &all())).is_empty());
 }
 
 /// A PE32+ image with one executable section of x86-64 code, followed by other data.
