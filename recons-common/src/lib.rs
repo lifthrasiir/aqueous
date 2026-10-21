@@ -7,11 +7,13 @@
 //!   32-bit states and byte output, with its LSB-first bit I/O (png-, psd-, pdf-recons).
 //! - [`msb`]: MSB-first bit I/O of the formats themselves (MP3, FLAC).
 //! - [`mem`]: a counting global allocator for memory profiling.
+//! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
 
 pub mod mem;
 pub mod msb;
 pub mod rans32;
 pub mod rans64;
+pub mod rng;
 pub mod varint;
 
 /// Malformed input; `.0` says what was wrong. The crates convert it into their own error.
