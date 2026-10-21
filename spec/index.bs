@@ -1329,13 +1329,7 @@ and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
 </div>
 
 The internal structure after decompression is an uninterpreted byte sequence,
-which is supplied to modules by formula blocks referencing it.
-
-<div dfn-for=resource>
-
-TODO: How resources are supplied to modules, and the identification by a hash.
-
-</div>
+which is supplied to modules by formula blocks referencing it ([[#formula-data]], [[#module-execution]]).
 
 <h5 id=formula-block>
 Formula block</h5>
@@ -1400,8 +1394,8 @@ and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
 </div>
 
 <div class=note>
-  The checksum of [=formula/formula_data=] is mandatory and distinct from the optional output checksums
-  declared inside [=formula/formula_data=] ([[#formula-data]]).
+  The checksum of [=formula/formula_data=] is mandatory and distinct from the optional [=output checksums=]
+  declared inside [=formula/formula_data=] ([[#formula-evaluation]]).
   [=formula/formula_data=] is always decoded in its entirety before evaluation,
   so its checksum can be verified even by a decompressor reading only a part of the output.
   It lets a damaged formula block be detected by reading the block alone and before evaluating anything,
@@ -1412,7 +1406,7 @@ and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
   but can only be verified after computing the entire output.
 </div>
 
-Unless explicitly requested otherwise, conforming compressors SHOULD declare an output checksum for each output,
+Unless explicitly requested otherwise, conforming compressors SHOULD declare an [=output checksum=] for each output,
 or use a [=checksum_method=] other than None for every non-leaf block referenced by the formula block,
 so that the [=file content=] is covered by some checksum.
 
@@ -1762,7 +1756,7 @@ It decompresses into an empty file if there is no leaf block.
   It is analogous to a gzip file that doesn't need to contain the name of the decompressed file.
   Compressing multiple files in a streaming fashion is not supported:
   a file spanning multiple non-leaf blocks requires a [=parcel=] starting with a formula block,
-  which can only be written after all non-leaf blocks in the parcel have been compressed.
+  which declares the length of every slice of the non-leaf blocks before any of them.
 </div>
 
 </div>
@@ -2646,33 +2640,337 @@ Formula data</h3>
 This section describes the internal structure of [=formula/formula_data=] in formula blocks ([[#formula-block]]),
 after it has been decompressed.
 
-TODO: The internal structure is expected to include:
+A formula consists of the lists of blocks it references, followed by [=formula/instructions=] of a stack machine.
+Each instruction pops zero or more byte sequences from the stack and pushes zero or more byte sequences,
+and the byte sequences remaining on the stack after the last instruction are the outputs of the formula.
 
-* The output size;
-* The output checksum for each output, which is optional and signalled for each output;
-* Nodes of the expression: a byte range of non-leaf blocks, a concatenation of nodes,
-    and an application of a module to nodes with resources and parameters;
-* References to non-leaf blocks, each as an ordinal among the subsequent non-leaf blocks
-    and a relative offset to the referenced block.
-    The ordinal serves streaming decompressors and the offset serves random access,
-    so they MUST agree with each other, and a decompressor detecting a mismatch MUST treat it as an error.
-    Offsets are expected to be encoded to compress well, e.g. relative to the end of the previously referenced block;
-* References to module and resource blocks, as indices within the segment;
-* Resource declarations for each application (memory limit, input and output window sizes, capacity of shared edges);
-* Multiple outputs from a single formula block, each of which corresponds to a file;
-* References to other files, or their replacement;
-* Padding to keep [=formula/formula_data=] compressible, since its original size can't be smaller than the compressed size.
+<div dfn-for=formula>
 
-The structure of [=formula/formula_data=] is not randomly accessible,
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>num_blocks</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>block_ordinal_deltas</dfn>
+      <td>[=leb128=][[=formula/num_blocks=]]
+      <td>
+    <tr>
+      <td><dfn>num_resources</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>resource_indices</dfn>
+      <td>[=leb128=][[=formula/num_resources=]]
+      <td>
+    <tr>
+      <td><dfn>num_modules</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>module_indices</dfn>
+      <td>[=leb128=][[=formula/num_modules=]]
+      <td>
+    <tr>
+      <td><dfn>instructions</dfn>
+      <td>[=formula/instruction=][*]
+      <td>
+  </tbody>
+</table>
+
+[=formula/block_ordinal_deltas=] lists the non-leaf blocks referenced by the formula block.
+Their <em>0-based</em> ordinals among the non-leaf blocks following the formula block within the [=segment=]
+are |o|<sub>0</sub> = [=formula/block_ordinal_deltas=][0] and
+|o|<sub>|i|</sub> = |o|<sub>|i| - 1</sub> + [=formula/block_ordinal_deltas=][|i|] + 1 for |i| ≥ 1,
+so the ordinals are strictly increasing.
+The |i|-th <dfn>referenced block</dfn> is the non-leaf block with the ordinal |o|<sub>|i|</sub>, which MUST exist.
+
+[=formula/resource_indices=] and [=formula/module_indices=] list the resource and module blocks
+referenced by the formula block, as <em>0-based</em> indices within the [=segment=] ([[#content-block]]).
+Each of them MUST refer to an existing block, which precedes the formula block by [[#block-order]].
+
+[=formula/instructions=] fill the rest of [=formula/formula_data=].
+Each block listed in the above lists MUST be used by at least one instruction,
+and is said to be referenced by the formula block only in that case.
+
+<div class=note>
+  Non-leaf blocks are referenced by ordinals rather than by offsets,
+  so that relocating or recompressing a block, or inserting other blocks such as mirror blocks,
+  doesn't invalidate formula blocks referencing blocks after it.
+  An offset would also make the result depend on how the block is located:
+  an offset pointing into the middle of a block can still find a valid-looking block there,
+  e.g. in an archive stored inside an uncompressed block,
+  while a decompressor reading blocks in order would find no block at that offset.
+  Ordinals in a typical parcel are consecutive, so [=formula/block_ordinal_deltas=] are mostly zero.
+  Resources and modules are referenced by absolute indices,
+  which recur in many formula blocks and compress well with a shared dictionary.
+</div>
+
+Each <dfn>instruction</dfn> consists of an <dfn>opcode</dfn> of type [=u8=] followed by its operands,
+whose structure is determined by the opcode as described in the following sections.
+[=formula/opcode=] MUST be one of the following, and its meaning is defined in [[#formula-evaluation]]:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Opcode
+      <th>Instruction
+      <th>Pops
+      <th>Pushes
+  </thead>
+  <tbody>
+    <tr>
+      <td>00<sub>16</sub>
+      <td>[[#insn-nop|Nop]]
+      <td>0
+      <td>0
+    <tr>
+      <td>01<sub>16</sub>
+      <td>[[#insn-literal|Literal]]
+      <td>0
+      <td>1
+    <tr>
+      <td>0F<sub>16</sub>
+      <td>[[#insn-swap|Swap]]
+      <td>0
+      <td>0
+    <tr>
+      <td>10<sub>16</sub>
+      <td>[[#insn-slice|Slice]]
+      <td>0
+      <td>1
+    <tr>
+      <td>11<sub>16</sub>
+      <td>[[#insn-apply|Apply]]
+      <td>[=formula/apply_num_inputs=]
+      <td>[=formula/apply_num_outputs=]
+    <tr>
+      <td>12<sub>16</sub>
+      <td>[[#insn-concat|Concatenate]]
+      <td>[=formula/concat_count=]
+      <td>1
+    <tr>
+      <td>20<sub>16</sub>
+      <td>[[#insn-checksum|Checksum]]
+      <td>0
+      <td>0
+  </tbody>
+</table>
+
+Opcodes are grouped by their roles:
+00<sub>16</sub> through 0F<sub>16</sub> load data or rearrange the stack,
+10<sub>16</sub> through 1F<sub>16</sub> compute byte sequences,
+and 20<sub>16</sub> through 2F<sub>16</sub> check them.
+Other opcodes are reserved.
+
+Issue: Opcode 02<sub>16</sub> is reserved for a reference to another file,
+which may instead be declared as a list along with other referenced blocks.
+
+[=formula/formula_data=] is not randomly accessible,
 and a decompressor is expected to read and decompress it in its entirety before evaluating any part of the formula.
-Together with the size declared by each node and the offsets of referenced non-leaf blocks,
-it then serves as an index for random access within the output,
+Every requirement on [=formula/formula_data=] that doesn't depend on the evaluated byte sequences,
+such as indices into the lists and the number of byte sequences on the stack,
+can be checked in a single pass over [=formula/instructions=] without evaluating anything.
+The same pass determines the length of every byte sequence on the stack,
+so [=formula/formula_data=] then serves as an index for random access within the output,
 in the same way as a seek table of other formats.
+The [=referenced blocks=] are located by skipping blocks following the formula block by their [=block/size=] fields.
 
 <div class=note>
   The index grows linearly with the number of non-leaf blocks referenced,
-  but it compresses well because most nodes share the same shape and sizes.
+  but it compresses well because most instructions share the same shape and sizes.
   The decompression of the whole [=formula/formula_data=] is a one-time cost per file.
+</div>
+
+<h4 id=insn-nop>
+Nop instruction</h4>
+
+Opcode 00<sub>16</sub> denotes a **Nop instruction**, which has no operands.
+
+<div class=note>
+  Nop instructions can pad [=formula/formula_data=],
+  e.g. to keep it compressible when its original size would otherwise be smaller than its compressed size.
+</div>
+
+<h4 id=insn-literal>
+Literal instruction</h4>
+
+Opcode 01<sub>16</sub> denotes a **Literal instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>literal_size</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>literal_data</dfn>
+      <td>[=u8=][[=formula/literal_size=]]
+      <td>
+  </tbody>
+</table>
+
+<h4 id=insn-swap>
+Swap instruction</h4>
+
+Opcode 0F<sub>16</sub> denotes a **Swap instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>swap_depth</dfn>
+      <td>[=leb128=]
+      <td>
+  </tbody>
+</table>
+
+<h4 id=insn-slice>
+Slice instruction</h4>
+
+Opcode 10<sub>16</sub> denotes a **Slice instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>slice_block</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>slice_start</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>slice_length</dfn>
+      <td>[=leb128=]
+      <td>
+  </tbody>
+</table>
+
+<h4 id=insn-apply>
+Apply instruction</h4>
+
+Opcode 11<sub>16</sub> denotes a **Apply instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>apply_module</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>apply_num_resources</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>apply_resources</dfn>
+      <td>[=leb128=][[=formula/apply_num_resources=]]
+      <td>
+    <tr>
+      <td><dfn>apply_params_size</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>apply_params</dfn>
+      <td>[=u8=][[=formula/apply_params_size=]]
+      <td>
+    <tr>
+      <td><dfn>apply_memory_limit</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>apply_num_inputs</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>apply_input_windows</dfn>
+      <td>[=leb128=][[=formula/apply_num_inputs=]]
+      <td>
+    <tr>
+      <td><dfn>apply_num_outputs</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>apply_output_sizes</dfn>
+      <td>[=leb128=][[=formula/apply_num_outputs=]]
+      <td>
+    <tr>
+      <td><dfn>apply_output_windows</dfn>
+      <td>[=leb128=][[=formula/apply_num_outputs=]]
+      <td>
+  </tbody>
+</table>
+
+<h4 id=insn-concat>
+Concatenate instruction</h4>
+
+Opcode 12<sub>16</sub> denotes a **Concatenate instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>concat_count</dfn>
+      <td>[=leb128=]
+      <td>
+  </tbody>
+</table>
+
+<h4 id=insn-checksum>
+Checksum instruction</h4>
+
+Opcode 20<sub>16</sub> denotes a **Checksum instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>checksum_value</dfn>
+      <td>[=u64le=]
+      <td>
+  </tbody>
+</table>
+
 </div>
 
 <h2 id=semantics>
@@ -2980,56 +3278,69 @@ A compressed block using a dictionary uses the dictionary block at [=cblock/dict
 The <dfn>file content</dfn> of a [=leaf block=] is:
 
 * Its [=stored content=], if it is a compressed or uncompressed block;
-* The result of [=evaluate a formula block|evaluating=] it, if it is a [[#formula-block|formula block]].
+* The only output of [=evaluate a formula block|evaluating=] it, if it is a [[#formula-block|formula block]].
+    The formula block MUST have exactly one output, until multiple outputs are specified ([[#formula-evaluation]]).
 
 <h3 id=formula-evaluation>
 Formula evaluation</h3>
 
-Issue: This section depends on the internal structure of [=formula/formula_data=], which is TODO in [[#formula-data]].
-It currently describes the nodes abstractly.
-
-A <dfn>formula node</dfn> is one of the following:
-
-* A <dfn>slice node</dfn> with a non-leaf block |block|, an offset |o| and a length |l|.
-* A <dfn>concatenation node</dfn> with a [=list=] of [=formula nodes=].
-* An <dfn>application node</dfn> with a [[#module-block|module block]],
-    a [=list=] of [[#resource-block|resource blocks]], a parameter [=byte sequence=],
-    a [=list=] of [=formula nodes=] as inputs, a declared output size and resource declarations.
-* A <dfn>reference node</dfn> with a reference to another file.
-
-To <dfn>evaluate a formula node</dfn> |node|:
-
-<ol class=algorithm>
-    1. If |node| is a [=slice node=] with |block|, |o| and |l|:
-        1. Let |c| be the [=stored content=] of |block|.
-        2. |o| + |l| MUST be at most the length of |c|.
-        3. Return the bytes of |c| in [|o|, |o| + |l|).
-    2. If |node| is a [=concatenation node=], return the concatenation of the results of
-        [=evaluate a formula node|evaluating=] each node in order.
-    3. If |node| is an [=application node=]:
-        1. Let |inputs| be the results of [=evaluate a formula node|evaluating=] each input node in order.
-        2. Return the result of [=apply a module|applying=] the module with |inputs|
-            and the other items of |node|.
-    4. If |node| is a [=reference node=], TODO.
-</ol>
-
 To <dfn>evaluate a formula block</dfn> |block|:
 
 <ol class=algorithm>
-    1. Let |data| be the [=decoded data=] of [=formula/formula_data=] of |block|, parsed as its internal structure.
-    2. Let |output| be the result of [=evaluate a formula node|evaluating=] the root [=formula node=] of |data|.
-    3. The length of |output| MUST be equal to the output size declared in |data|.
-    4. If |data| declares an output checksum, the XXH64 checksum of |output| MUST be equal to the declared one.
-    5. Return |output|.
+    1. Let |data| be the [=decoded data=] of [=formula/formula_data=] of |block|, parsed as in [[#formula-data]].
+    2. Let |stack| be an empty [=list=] of [=byte sequences=], whose last item is the top of the stack.
+        To pop |n| items, |stack| MUST have at least |n| items,
+        and the last |n| items are removed from |stack| and used in their order in |stack|.
+    3. For each |insn| of [=formula/instructions=] of |data| in order, depending on [=formula/opcode=] of |insn|:
+        : 00<sub>16</sub> (Nop)
+        :: Do nothing.
+        : 01<sub>16</sub> (Literal)
+        :: Push [=formula/literal_data=].
+        : 0F<sub>16</sub> (Swap)
+        :: |stack| MUST have more than [=formula/swap_depth=] items.
+            Exchange the top of |stack| with the item [=formula/swap_depth=] items below it.
+        : 10<sub>16</sub> (Slice)
+        :: 1. [=formula/slice_block=] MUST be less than [=formula/num_blocks=].
+            2. Let |c| be the [=stored content=] of the [=formula/slice_block=]-th [=referenced block=].
+            3. [=formula/slice_start=] + [=formula/slice_length=] MUST be at most the length of |c|.
+            4. Push the bytes of |c| in [[=formula/slice_start=], [=formula/slice_start=] + [=formula/slice_length=]).
+        : 11<sub>16</sub> (Apply)
+        :: 1. [=formula/apply_module=] MUST be less than [=formula/num_modules=],
+                and each item of [=formula/apply_resources=] MUST be less than [=formula/num_resources=].
+            2. [=formula/apply_num_outputs=] MUST be at least 1.
+            3. Pop [=formula/apply_num_inputs=] items as |inputs|.
+            4. Let |outputs| be the result of [=apply a module|applying=]
+                the module block at [=formula/module_indices=][[=formula/apply_module=]]
+                with |inputs|, the resource blocks at [=formula/resource_indices=][|r|] for each |r| of [=formula/apply_resources=],
+                [=formula/apply_params=] and the resource declarations
+                [=formula/apply_memory_limit=], [=formula/apply_input_windows=], [=formula/apply_output_sizes=]
+                and [=formula/apply_output_windows=].
+            5. Push each item of |outputs| in order.
+        : 12<sub>16</sub> (Concatenate)
+        :: Pop [=formula/concat_count=] items and push their concatenation in order.
+        : 20<sub>16</sub> (Checksum)
+        :: |stack| MUST NOT be empty.
+            The XXH64 checksum of the top of |stack| MUST be equal to [=formula/checksum_value=].
+    4. |stack| MUST NOT be empty.
+    5. Return |stack| as the outputs of |block|.
 </ol>
 
+A Checksum instruction <dfn>covers</dfn> the byte sequence at the top of the stack when it is executed,
+and the byte sequence remains the same item when moved by Swap instructions.
+An <dfn>output checksum</dfn> is a Checksum instruction [=covers|covering=] an output of the formula block.
+
 <div class=note>
-  Inputs are defined as fully evaluated byte sequences.
+  Every byte sequence on the stack is used exactly once, as an input of another instruction or as an output,
+  so a formula is a tree of instructions rooted at its outputs.
+  Byte sequences are defined as fully evaluated values.
   Lazy, streaming or partial evaluation is an implementation strategy and doesn't change the result
   ([[#partial-access]]).
+  A Checksum instruction covering an intermediate byte sequence, such as the output of an Apply instruction,
+  can be verified by a decompressor that has computed that byte sequence but not the entire output.
 </div>
 
-Issue: [=Reference nodes=] (in particular when the referenced file is replaced in a later segment), and multiple outputs.
+Issue: Multiple outputs, in particular how a file selects one of them ([[#metadata-block]]),
+and a reference to another file (in particular when the referenced file is replaced in a later segment).
 
 <h3 id=module-execution>
 Module execution</h3>
@@ -3052,21 +3363,24 @@ Issue: Whether the guaranteed limit of 2<sup>27</sup> bytes (128 MiB) for the Zs
 should also apply to the declared input and output window sizes and the memory limit.
 
 To <dfn>apply a module</dfn> |module| given a [=list=] of input [=byte sequences=] |inputs|,
-resources, parameters, a declared output size |size| and resource declarations:
+resources, parameters, a [=list=] of declared output sizes and resource declarations:
 
 <ol class=algorithm>
-    1. For each index |k| of |inputs|, let |W|<sub>|k|</sub> be the declared input window size of |k|-th input,
+    1. The number of declared output sizes MUST be 1. Let |size| be the declared output size.
+    2. For each index |k| of |inputs|, let |W|<sub>|k|</sub> be the declared input window size of |k|-th input,
         and let the <dfn>visible range</dfn> of the |k|-th input be [0, 0).
-    2. Let |W|<sub>out</sub> be the declared output window size and |output| be an empty [=byte sequence=].
-    3. Instantiate |module| with the host functions below,
+    3. Let |W|<sub>out</sub> be the declared output window size and |output| be an empty [=byte sequence=].
+    4. Instantiate |module| with the host functions below,
         binding the memory |k| + 1 to a zero-filled memory of |W|<sub>|k|</sub> bytes for each input |k|
         and the output memory to a zero-filled memory of |W|<sub>out</sub> bytes.
-    4. Invoke the entry point.
+    5. Invoke the entry point.
         If it traps or any host function below signals an error, return an [=invalid archive=] failure.
         If it exceeds any resource declaration or implementation-defined limit, return a [=resource failure=].
-    5. The length of |output| MUST be |size|.
-    6. Return |output|.
+    6. The length of |output| MUST be |size|.
+    7. Return a [=list=] containing |output|.
 </ol>
+
+Issue: Multiple outputs of a module, which the host functions below don't distinguish yet.
 
 Within the declared memory limit, `memory.grow` MUST succeed.
 
