@@ -1,14 +1,15 @@
 //! Recompresses files into formulas and evaluates them back.
 //!
-//! usage: show [-t THREADS] [-d DEPTH] [-e] [-f] FILE...
+//! usage: show [-t THREADS] [-d DEPTH] [-l LEVEL] [-e] [-f] FILE...
 //!
-//! For each file: the detected format, the modules applied, the stream bytes by class, and
-//! the times of recompression and evaluation; `-e` takes each file as one file of the format
-//! it starts like rather than scanning it, and `-f` prints the formula itself.
+//! For each file: the detected format, the modules applied, the stream bytes by class, the
+//! times of recompression and evaluation, and the archive (of zstd level `-l`) with its round
+//! trip; `-e` takes each file as one file of the format it starts like rather than scanning
+//! it, and `-f` prints the formula itself.
 
 use std::time::Instant;
 
-use recons_dispatch::{Native, Nest, Options, classes, detect, recompress};
+use recons_dispatch::{Native, Nest, Options, classes, decompress, detect, recompress};
 use recons_formula::aqr;
 
 fn main() {
@@ -20,6 +21,7 @@ fn main() {
         match &*arg {
             "-t" => opt.threads = args.next().and_then(|s| s.parse().ok()).expect("-t THREADS"),
             "-d" => opt.depth = args.next().and_then(|s| s.parse().ok()).expect("-d DEPTH"),
+            "-l" => opt.level = args.next().and_then(|s| s.parse().ok()).expect("-l LEVEL"),
             "-e" => opt.file = Nest::Exact,
             "-f" => tree = true,
             _ => files.push(arg),
@@ -46,11 +48,25 @@ fn main() {
         failed |= !ok;
 
         let format = detect(&d).map_or("-", |f| f.name());
-        let packed = aqr::encode(&f, Some(aqr::checksum(&d)), opt.level)
-            .map_or_else(|e| e.to_string(), |c| format!("{} B", c.len()));
+        let start = Instant::now();
+        let packed = aqr::encode(&f, Some(aqr::checksum(&d)), opt.level);
+        let pack = start.elapsed().as_secs_f64();
+        let start = Instant::now();
+        let unpacked = packed.as_ref().ok().map(|c| decompress(c, opt.threads));
+        let unpack = start.elapsed().as_secs_f64();
+        let archived = match (&packed, &unpacked) {
+            (Ok(c), Some(Ok(out))) if *out == d => {
+                format!("archive {} B, pack {:.1} MB/s, unpack {:.1} MB/s", c.len(), mb / pack, mb / unpack)
+            }
+            (Ok(c), Some(Ok(_))) => format!("archive {} B, unpacked MISMATCH", c.len()),
+            (Ok(c), Some(Err(e))) => format!("archive {} B, unpacking failed: {e}", c.len()),
+            (Err(e), _) => format!("archive failed: {e}"),
+            (Ok(_), None) => unreachable!(),
+        };
+        failed |= !matches!(&unpacked, Some(Ok(out)) if *out == d);
         let modules: Vec<String> = f.applies().iter().map(|a| a.module.to_string()).collect();
         println!(
-            "{path}: {format}, {mb:.2} MB, {} streams, archive {packed}, enc {:.1} MB/s, eval {:.1} MB/s{}",
+            "{path}: {format}, {mb:.2} MB, {} streams, enc {:.1} MB/s, eval {:.1} MB/s{}, {archived}",
             f.streams.len(),
             mb / enc,
             mb / dec,
