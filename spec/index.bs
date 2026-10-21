@@ -3565,6 +3565,125 @@ The actual transformation logic is implementation-dependent and not specified by
 <h2 id=iana-considerations>
 IANA Considerations</h2>
 
+<h3 id=media-type>
+<code>application/aqr</code> Media Type</h3>
+
+<p>This document requests the registration of a new media type in the Media Types Registry ([[!RFC6838]], section 5.6) as follows:</p>
+
+<dl>
+<dt>Type name</dt>
+<dd>application</dd>
+<dt>Subtype name</dt>
+<dd>aqr</dd>
+<dt>Required parameters</dt>
+<dd>N/A</dd>
+<dt>Optional parameters</dt>
+<dd>N/A</dd>
+<dt>Encoding considerations</dt>
+<dd>binary</dd>
+<dt>Security considerations</dt>
+<dd>
+  <p>An archive is a container for arbitrary data and doesn't by itself contain active content,
+  except for WebAssembly modules ([[#module-execution]]) that a decompressor executes to reconstruct file contents.
+  Such modules are run under a deterministic profile without access to anything but their inputs and outputs,
+  but a decompressor still has to treat them as untrusted code and isolate them accordingly.</p>
+  <p>Formula blocks and modules can produce outputs far larger than the archive itself,
+  and some fields (e.g. [=envelope/lg_work_factor=]) directly control the amount of computation.
+  A decompressor is expected to enforce implementation-defined limits and fail with a [=resource failure=] when they are exceeded.</p>
+  <p>A decompressor writing an archive to a file system is subject to the requirements in [[#extraction]],
+  in particular to prevent writing outside the destination directory.</p>
+  <p>An unencrypted archive provides no confidentiality,
+  and its checksums ([[#xxh64-checksum-method]]) only detect accidental corruption, not intentional modification.
+  An encrypted archive ([[#encrypted-archive]]) provides confidentiality and integrity through [[AGE]],
+  which is only as strong as the passphrase used.
+  The metadata of an archive, including entry names, timestamps and ownership,
+  may reveal information about the system that created it.</p>
+</dd>
+<dt>Interoperability considerations</dt>
+<dd>
+  <p>An unencrypted archive may be preceded and followed by arbitrary bytes, e.g. a self-extracting executable stub;
+  its extent is determined by [=archive/header_magic=] and the footer ([[#unencrypted-archive]]).
+  An archive without any metadata block decompresses into a single unnamed file rather than a directory tree.</p>
+</dd>
+<dt>Published specification</dt>
+<dd>This document.</dd>
+<dt>Applications that use this media type</dt>
+<dd>Archivers and compressors that implement the Aqueous archive format.</dd>
+<dt>Fragment identifier considerations</dt>
+<dd>N/A</dd>
+<dt>Additional information</dt>
+<dd>
+  <dl>
+  <dt>Deprecated alias names for this type</dt>
+  <dd>N/A</dd>
+  <dt>Magic number(s)</dt>
+  <dd>F8 04 03 6A D6 BE (hexadecimal; [=const/HEADER_MAGIC=]) for an unencrypted archive,
+  possibly preceded by other data;
+  F9 CA F2 A6 D0 2A 01 00 (hexadecimal; [=const/ENCRYPTED_HEADER_MAGIC=]) at offset 0 for an encrypted archive.</dd>
+  <dt>File extension(s)</dt>
+  <dd>.aqr<br>
+  When a single file is compressed into an archive without any metadata block,
+  the extension may be appended to the original file name instead (e.g. `example.tar.aqr`).</dd>
+  <dt>Macintosh file type code(s)</dt>
+  <dd>N/A</dd>
+  </dl>
+</dd>
+<dt>Person & email address to contact for further information</dt>
+<dd>Kang Seonghoon &lt;public+aqr@mearie.org&gt;</dd>
+<dt>Intended usage</dt>
+<dd>COMMON</dd>
+<dt>Restrictions on usage</dt>
+<dd>N/A</dd>
+<dt>Author</dt>
+<dd>Kang Seonghoon</dd>
+<dt>Change controller</dt>
+<dd>Kang Seonghoon</dd>
+</dl>
+
+<h3 id=structured-syntax-suffix>
+<code>+aqr</code> Structured Syntax Suffix</h3>
+
+<p>This document requests the registration of a new structured syntax suffix
+in the Structured Syntax Suffix Registry ([[!RFC6838]], section 6.2) as follows:</p>
+
+<dl>
+<dt>Name</dt>
+<dd>Aqueous Archive Format</dd>
+<dt>+suffix</dt>
+<dd>+aqr</dd>
+<dt>References</dt>
+<dd>This document.</dd>
+<dt>Encoding considerations</dt>
+<dd>binary</dd>
+<dt>Interoperability considerations</dt>
+<dd>
+  <p>A media type with the `+aqr` suffix denotes an Aqueous archive, either unencrypted or encrypted,
+  whose [=archive value=] is given a more specific meaning by that media type.
+  A generic Aqueous decompressor can [=interpret an archive=] of such media type without knowing that meaning.
+  The interoperability considerations for `application/aqr` ([[#media-type]]) also apply.</p>
+</dd>
+<dt>Fragment identifier considerations</dt>
+<dd>
+  <p>The syntax and semantics of fragment identifiers specified for `+aqr` SHOULD be as specified for `application/aqr`.
+  (At publication of this document, there is no fragment identification syntax defined for `application/aqr`.)</p>
+  <p>The syntax and semantics for fragment identifiers for a specific `xxx/yyy+aqr` SHOULD be processed as follows:</p>
+  <ul>
+    <li>For cases defined in `+aqr`, where the fragment identifier resolves per the `+aqr` rules,
+    then process as specified in `+aqr`.</li>
+    <li>For cases defined in `+aqr`, where the fragment identifier does not resolve per the `+aqr` rules,
+    then process as specified in `xxx/yyy+aqr`.</li>
+    <li>For cases not defined in `+aqr`, then process as specified in `xxx/yyy+aqr`.</li>
+  </ul>
+</dd>
+<dt>Security considerations</dt>
+<dd>The security considerations for `application/aqr` ([[#media-type]]) apply to any media type with the `+aqr` suffix.
+Each such media type may have additional security considerations specific to its interpretation of the archive.</dd>
+<dt>Contact</dt>
+<dd>Kang Seonghoon &lt;public+aqr@mearie.org&gt;</dd>
+<dt>Author/Change controller</dt>
+<dd>Kang Seonghoon</dd>
+</dl>
+
 <h3 id=etime-quantization-interval>
 Quantization Interval</h3>
 
