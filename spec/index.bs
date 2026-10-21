@@ -805,9 +805,17 @@ Entry structure (<dfn>entry</dfn>) then occurs for each directory, file and spec
       <td>[=u8=] = 0
       <td>[=If=] this entry is for a special entry and [=meta/special_kind=] = 0
     <tr>
+      <td><dfn>device_major</dfn>
+      <td>[=leb128=]
+      <td>[=If=] this entry is for a special entry and [=meta/special_kind=] is 2 or 3
+    <tr>
+      <td><dfn>device_minor</dfn>
+      <td>[=leb128=]
+      <td>[=If=] this entry is for a special entry and [=meta/special_kind=] is 2 or 3
+    <tr>
       <td><dfn>special_data</dfn>
       <td>[=u8=][*]
-      <td>[=If=] this entry is for a special entry and [=meta/special_kind=] ≠ 0
+      <td>[=If=] this entry is for a special entry and [=meta/special_kind=] > 3
   </tbody>
 </table>
 
@@ -837,7 +845,16 @@ A special entry represents a node other than a file or a directory, as determine
       <td>0
       <td>[=Link node=], with [=meta/link_target=] as its target
     <tr>
-      <td>Others
+      <td>1
+      <td>[=Special node=] of the kind "`fifo`"
+    <tr>
+      <td>2
+      <td>[=Special node=] of the kind "`char-device`", with [=meta/device_major=] and [=meta/device_minor=] as its device number
+    <tr>
+      <td>3
+      <td>[=Special node=] of the kind "`block-device`", with [=meta/device_major=] and [=meta/device_minor=] as its device number
+    <tr>
+      <td>4 or greater
       <td>[=Unknown node=], reserved for future versions of this specification
   </tbody>
 </table>
@@ -2149,7 +2166,7 @@ A <dfn>file node</dfn> is a [=struct=] with the following [=struct/items=]:
 A <dfn>directory node</dfn> is a [=struct=] with the following [=struct/items=]:
 
 * <dfn for="directory node">children</dfn>, an [=ordered map=] from [=entry names=]
-    to [=file nodes=], [=directory nodes=], [=link nodes=] or [=unknown nodes=].
+    to [=file nodes=], [=directory nodes=], [=link nodes=], [=special nodes=] or [=unknown nodes=].
 * <dfn for="directory node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
 
 A <dfn>link node</dfn> is a [=struct=] with the following [=struct/items=], representing a symbolic link:
@@ -2157,17 +2174,30 @@ A <dfn>link node</dfn> is a [=struct=] with the following [=struct/items=], repr
 * <dfn for="link node">target</dfn>, a [=link target=].
 * <dfn for="link node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
 
+A <dfn>special node</dfn> is a [=struct=] with the following [=struct/items=], representing a FIFO or a device file:
+
+* <dfn for="special node">kind</dfn>, one of "`fifo`", "`char-device`" or "`block-device`".
+* <dfn for="special node">device</dfn>, a pair of non-negative integers (major, minor)
+    if [=special node/kind=] is "`char-device`" or "`block-device`", or null otherwise.
+* <dfn for="special node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+<div class=note>
+  A device number is stored as a pair, not as a platform-specific `dev_t` encoding,
+  as tar and cpio do and as `makedev` takes it.
+  Its meaning is up to the platform extracting it:
+  the same pair generally denotes unrelated devices on different platforms,
+  e.g. `/dev/null` is (1, 3) on Linux but (3, 2) on macOS,
+  and this specification doesn't record which platform the number came from.
+</div>
+
 An <dfn>unknown node</dfn> is a [=struct=] with the following [=struct/items=],
 representing a kind of node not defined by this version of this specification:
 
-* <dfn for="unknown node">kind</dfn>, a positive integer.
+* <dfn for="unknown node">kind</dfn>, an integer greater than 3.
 * <dfn for="unknown node">data</dfn>, a [=byte sequence=].
 * <dfn for="unknown node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
 
-The [=archive value/root=] can't be a [=link node=] or an [=unknown node=].
-
-Issue: FIFOs and device files are not part of the archive model yet.
-They would be represented as new kinds of special entries ([[#metadata-block]]).
+The [=archive value/root=] can't be a [=link node=], a [=special node=] or an [=unknown node=].
 
 An <dfn>entry name</dfn> is a [=struct=] with the following [=struct/items=]:
 
@@ -2325,13 +2355,18 @@ To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata bl
         6. Otherwise, if |entry|.[=meta/special_kind=] is 0:
             1. Let |target| be the result of [=decode a link target|decoding=] |entry|.[=meta/link_target=].
             2. Let |node| be a [=link node=] with |target| as [=link node/target=].
-        7. Otherwise, let |node| be an [=unknown node=]
+        7. Otherwise, if |entry|.[=meta/special_kind=] is 1, let |node| be a [=special node=]
+            with "`fifo`" as [=special node/kind=] and null as [=special node/device=].
+        8. Otherwise, if |entry|.[=meta/special_kind=] is 2 or 3, let |node| be a [=special node=]
+            with "`char-device`" or "`block-device`" respectively as [=special node/kind=]
+            and (|entry|.[=meta/device_major=], |entry|.[=meta/device_minor=]) as [=special node/device=].
+        9. Otherwise, let |node| be an [=unknown node=]
             with |entry|.[=meta/special_kind=] as [=unknown node/kind=] and |entry|.[=meta/special_data=] as [=unknown node/data=].
-        8. Set the extra of |node| to the [=entry extra=] for the entry |k|.
-        9. Let |children| be the [=directory node/children=] of |nodes|[|parent|].
+        10. Set the extra of |node| to the [=entry extra=] for the entry |k|.
+        11. Let |children| be the [=directory node/children=] of |nodes|[|parent|].
             |children|[|name|] MUST NOT [=map/exist=].
-        10. Set |children|[|name|] to |node|.
-        11. [=list/Append=] |node| to |nodes|.
+        12. Set |children|[|name|] to |node|.
+        13. [=list/Append=] |node| to |nodes|.
     5. Return |nodes|[0].
 </ol>
 
@@ -3403,6 +3438,18 @@ It MUST NOT create hard links among any other file nodes, even when they have th
   Hard links let extracted files share the disk space, and changes made to one of them,
   which is crucial for e.g. snapshot backups made with `rsync --link-dest`.
   But files that were independent have to remain independent.
+</div>
+
+A decompressor SHOULD NOT create a FIFO or a device file for a [=special node=] unless explicitly requested,
+as with ownership information.
+A special node not created for this reason, or because the platform can't represent it
+(e.g. the lack of privilege, or a device number out of the platform's range),
+MUST be reported to the user.
+
+<div class=note>
+  Creating a device file usually needs the superuser privilege,
+  and a device file with lax permissions created by such an extraction can expose the entire disk.
+  FIFOs are harmless by themselves, but are treated the same for simplicity.
 </div>
 
 A decompressor MUST NOT create anything for an [=unknown node=], and MUST report it to the user.

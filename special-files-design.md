@@ -3,7 +3,7 @@
 Aqueous 아카이브 모델에 symbolic link, hard link, device 파일 같은 특수 파일을 넣을지, 넣는다면 어떻게 넣을지를 다룬다.
 현재 명세는 §Extraction의 Issue("Symbolic links and hard links are not part of the archive model yet")로 이 문제를 미뤄 두었다.
 본문은 현재 제안된 설계를 서술하고, 그렇게 정한 근거는 인용 블록에 둔다.
-2026-10-21에 FIFO/device를 뺀 나머지를 `spec/index.bs`에 반영했다(§9의 S 항목). 반영하면서 달라진 점은 각 절에 적었다.
+2026-10-21에 이 설계를 `spec/index.bs`에 반영했다(§9의 S 항목). FIFO/device는 처음에 보류했다가 같은 날 정의하기로 정하고 반영했다(§1.3, §5.2, S9). 반영하면서 달라진 점은 각 절에 적었다.
 절과 항목의 상태 표기는 `xform-design.md`와 같다.
 
 - **[확정]** 논의 전부터 정해져 있었거나 논의 중 명시적으로 합의된 것
@@ -41,8 +41,8 @@ Aqueous 아카이브 모델에 symbolic link, hard link, device 파일 같은 �
 |---|---|---|---|
 | symbolic link | **높음** | 없으면 흔한 트리가 깨진다. 우회하면 정보가 사라지거나 의미가 바뀐다. | 모델에 새 노드 종류로 넣는다(§4). |
 | hard link | 중간 | 저장 공간 문제는 중복 제거가 이미 푼다. 남는 것은 해제할 때의 inode 공유뿐이다. | 모델은 그대로 둔다. extra의 힌트로 표현한다(§5.3). |
-| FIFO | 낮음 | 시스템 이미지에서만 나온다. | **[보류]** symlink와 같은 틀에 싸게 얹는다. 해제는 명시적 요청이 있을 때만 한다. |
-| character/block device | 낮음 | 시스템 이미지에서만 나온다. 해제하려면 root가 필요하고 보안 위험이 있다. | FIFO와 같다. |
+| FIFO | 낮음 | 시스템 이미지에서만 나온다. OS 의존성은 없다. | **[확정]** symlink와 같은 틀에 싸게 얹는다. 해제는 명시적 요청이 있을 때만 한다. |
+| character/block device | 낮음 | 시스템 이미지에서만 나온다. 해제하려면 root가 필요하고 보안 위험이 있다. 번호는 OS 사이에 대응하지 않는다(§5.2). | **[확정]** FIFO와 같다. 번호는 (major, minor)로만 담고 출처 OS는 기록하지 않는다. |
 | socket | 없음 | 실행 중인 프로세스와 묶인 것이라 보관할 의미가 없다. tar도 건너뛴다. | 표현하지 않는다. |
 
 ### 1.1 symbolic link
@@ -82,18 +82,22 @@ hard link가 쓰이는 곳:
 
 반면 같은 내용이라는 이유만으로 hard link로 해제하면 안 된다. 원래 독립이던 파일이 묶여 버린다. 따라서 중복 제거와 별도로 "이 파일들은 원래 같은 inode였다"는 정보가 필요하다.
 
-### 1.3 FIFO와 device [보류]
+### 1.3 FIFO와 device [확정]
 
-**[보류]** 어떻게 할지 정하지 않았다. 명세에는 Issue로만 남겼다. 아래는 원래 제안이다.
+**[확정]** FIFO, character device, block device를 special node로 정의한다(§4.2, §5.1). 해제 기본값은 "만들지 않음"이다(§6.4).
 
+나오는 곳은 사실상 시스템 이미지뿐이다. initramfs의 `/dev/console`, chroot와 rootfs의 `/dev`, OCI 레이어의 overlayfs whiteout(char device 0/0)이 그 예이다.
+Aqueous의 주 용례(배포, 백업, 재압축)에서 이것들이 핵심은 아니다. 그래도 넣는 이유는 다음과 같다.
 
-나오는 곳은 사실상 시스템 이미지뿐이다. initramfs의 `/dev/console`, chroot와 rootfs의 `/dev`가 그 예이다.
-Aqueous의 주 용례(배포, 백업, 재압축)에서 이것들이 핵심은 아니다. 그래도 넣을 만한 이유가 둘 있다.
-
-- tar, cpio, ZIP(0x000d)에서 변환할 때 불투명 blob(`zip-extras`) 없이 손실 없이 옮길 수 있다.
+- tar, cpio, ZIP(0x000d)에서 변환할 때 불투명 blob(`zip-extras`) 없이 손실 없이 옮길 수 있다. rootfs tarball, initramfs, 컨테이너 레이어를 재압축하는 것은 범위 안이고, 빼면 이것들은 왕복하지 못한다.
 - symlink를 위한 틀(§4.2)이 생기면 추가 비용이 거의 없다. 바이트 몇 개의 payload와 해제 규칙 한 줄이면 된다.
 
-> 넣지 않는 안도 있다. 그 경우 kind 번호만 예약해 두고, 변환기가 device를 만나면 경고하고 버리게 한다. 비용이 너무 작아서 지금 정의하는 쪽을 택했다. 해제 기본값을 "만들지 않음"으로 두면 위험도 늘지 않는다(§6.4).
+FIFO와 device는 사정이 다르다.
+
+- FIFO는 payload가 없고 OS 의존성도 없다(POSIX `mkfifo`). 망설일 이유가 거의 없다.
+- device는 번호의 의미가 OS에 묶여 있다(§5.2). 그래서 넣을지는 이식성이 아니라 tar/cpio를 손실 없이 대신할 수 있느냐로 판단했다.
+
+> 넣지 않는 안도 있었다. kind 번호만 예약해 두고, 변환기가 device를 만나면 경고하고 버리거나 unknown node로 두게 하는 것이다. 비용이 너무 작고, 그러면 rootfs류를 왕복할 수 없어서 기각했다. 해제 기본값을 "만들지 않음"으로 두므로 위험도 늘지 않는다(§6.4).
 
 ## 2. 선행 사례
 
@@ -131,9 +135,9 @@ Aqueous의 주 용례(배포, 백업, 재압축)에서 이것들이 핵심은 �
 > - 이름만 나열하는 partial access(`ls -l`에 해당)가 content block을 읽어야 한다.
 > - `unix-mode`가 Unix 전용 키이므로 Windows에서 만든 아카이브가 symlink를 표현하려면 Unix 모드를 지어내야 한다.
 
-### 4.2 새 노드 종류 [확정, special node는 보류]
+### 4.2 새 노드 종류 [확정]
 
-**[확정]** `archive value`에 link node를 추가한다. special node는 §1.3에 따라 보류했다. 대신 모르는 `special_kind`를 담는 unknown node(**kind**, **data**, **extra**)를 추가했다(§5.1).
+**[확정]** `archive value`에 link node와 special node를 추가한다. 모르는 `special_kind`(4 이상)를 담는 unknown node(**kind**, **data**, **extra**)도 추가했다(§5.1).
 
 A **link node** is a struct with the following items:
 
@@ -215,7 +219,7 @@ A **link target** is a struct with the following items:
 | 1 | special node, "`fifo`" |
 | 2 | special node, "`char-device`" |
 | 3 | special node, "`block-device`" |
-| 그 밖 | invalid archive |
+| 그 밖 | unknown node |
 
 - `link_target`은 `entry_name`과 같은 방식으로 디코딩한다. C1₁₆로 시작하면 "`raw`", 그 밖에는 WTF-8이다. 다만 §4.3의 제약을 적용한다.
 
@@ -227,13 +231,18 @@ A **link target** is a struct with the following items:
 >
 > 비용은 특수 엔트리가 없는 아카이브에서 헤더의 1바이트뿐이다.
 
-**[확정]** `special_kind`에 모르는 값이 오면 invalid archive가 아니라 **unknown node**가 된다. decompressor는 그 노드에 아무것도 만들지 않고 보고하며, 나머지는 계속 해제할 수 있다. 명세에는 1–3도 정의하지 않았으므로 지금은 0 말고는 모두 unknown node이다.
+**[확정]** `special_kind`에 모르는 값이 오면 invalid archive가 아니라 **unknown node**가 된다. decompressor는 그 노드에 아무것도 만들지 않고 보고하며, 나머지는 계속 해제할 수 있다. 0–3 말고는 모두 unknown node이다.
 > invalid archive로 하면 미래 버전이 만든 아카이브는 하나도 풀리지 않는다. 모르는 종류의 나머지 바이트는 `special_data`(u8[*])로 두고, 길이는 `entry_offsets`로 정한다. 병합에서는 다른 비디렉터리 노드처럼 통째로 바뀌므로 규칙을 새로 정의할 필요가 없었다.
 
-### 5.2 device 번호 [보류]
+### 5.2 device 번호 [확정]
 
-- major와 minor를 따로 저장한다. OS 고유의 `dev_t` 인코딩을 그대로 저장하지 않는다.
-  > `dev_t`에서 major/minor를 나누는 방식은 OS마다 다르다. tar와 cpio도 major/minor를 따로 저장한다.
+- **[확정]** major와 minor를 따로 저장한다. OS 고유의 `dev_t` 인코딩을 그대로 저장하지 않는다.
+  > 쪼개서 얻는 것은 OS 사이의 호환이 아니다(아래 참조). `dev_t` 하나로 표현하는 정본 형태가 없다는 것이 이유이다.
+  >
+  > - Linux 안에서조차 인코딩이 여럿이다. old 8:8(16비트), 커널 내부의 12:20, `new_encode_dev`의 32비트 배치, glibc의 64비트 배치가 있다. 하나를 고르는 순간 사실상 (major, minor) 쌍을 정의하는 셈이다.
+  > - `mknod`에 넘기는 값은 어느 OS에서나 `makedev(major, minor)`로 만든다. 다른 포맷도 쌍으로 저장한다: ustar devmajor/devminor, cpio newc rdevmajor/rdevminor, ZIP 0x000d의 u32 두 개. 반례인 cpio odc/bin은 `c_rdev`를 raw로 저장해 이식성이 깨졌고, newc에서 쌍으로 바뀌었다. 쌍이면 변환기가 출처 OS의 인코딩을 몰라도 손실 없이 옮길 수 있다.
+  >
+  > `dev_t`에서 major/minor를 나누는 방식은 OS마다 다르다.
   >
   > | OS | `dev_t` | major | minor |
   > |---|---|---|---|
@@ -246,7 +255,29 @@ A **link target** is a struct with the following items:
   > | OpenBSD | 32비트 | 비트 8–15 (8비트) | 비트 0–7, 16–31 (24비트) |
   >
   > Linux glibc는 32비트 major/minor를 표현하지만 커널은 12/20비트까지만 쓴다. 범위가 OS마다 다르므로 leb128로 저장한다. decompressor는 해제할 OS가 표현할 수 없는 번호를 만나면 실패하거나 보고해야 한다.
-- 번호의 의미는 OS에 따라 다르다. 같은 (major, minor)가 다른 OS에서는 다른 장치이다. 원본 OS를 기록할지는 §8의 4번이다.
+- 번호의 의미는 OS에 따라 다르다. 같은 (major, minor)가 다른 OS에서는 다른 장치이고, OS 사이에 번호로 대응하는 것은 없다. 대응이 있다면 이름과 의미 수준(`/dev/null`은 어디에나 있다)뿐이다.
+  > | 장치 | Linux | macOS 27 |
+  > |---|---|---|
+  > | `/dev/null` | c 1:3 | c 3:2 |
+  > | `/dev/zero` | c 1:5 | c 3:3 |
+  > | `/dev/random`, `/dev/urandom` | c 1:8, 1:9 | c 17:0, 17:1 |
+  > | `/dev/tty` | c 5:0 | c 2:0 |
+  > | `/dev/console` | c 5:1 | c 0:0 |
+  > | 첫 디스크 | b 8:0 (`sda`) | b 1:0 (`disk0`) |
+  >
+  > Linux 열은 `Documentation/admin-guide/devices.txt`, macOS 열은 직접 `ls -l`로 확인했다. macOS의 `/dev/console`이 0:0이라 overlayfs whiteout과 번호가 같다.
+  >
+  > - Linux는 정적 레지스트리(`devices.txt`)를 가진 사실상 유일한 OS이다. 그래도 동적 대역(misc 10:x의 동적 minor, 동적 major, NVMe 등의 259 확장 블록 번호)은 호스트나 부팅마다 다를 수 있다.
+  > - macOS(XNU)는 major를 `cdevsw_add`로 동적으로 받는다. devfs 바깥에 장치 노드를 만들 일이 거의 없다.
+  > - FreeBSD는 5.x부터 devfs가 번호를 관리하고 block device를 없앴다. devfs 바깥에 `mknod`로 만든 장치 노드는 동작하지 않는다 *(확인 필요)*.
+  > - illumos/Solaris의 major는 시스템마다 `/etc/name_to_major`로 정해진다 *(확인 필요)*.
+  > - Windows에는 대응하는 개념이 없다.
+  >
+  > 따라서 아카이브에 든 device node가 실제로 의미를 갖는 경우는 사실상 "Linux에서 나온 번호를 Linux에서 푸는 것" 하나이다. tar도 같아서, Linux의 `/dev`를 tar로 묶어 macOS에서 풀면 엉뚱한 노드가 생긴다.
+- **[확정]** 출처 OS는 모델에도 extra에도 기록하지 않는다(§8의 4번). 명세에는 "번호의 해석은 해제하는 플랫폼에 맡긴다"는 비규범 note만 둔다.
+  > - 변환할 때 채울 수 없다. tar와 cpio에는 출처 OS 정보가 없다. ZIP "version made by"의 host 바이트는 Unix 계열끼리 구분하지 못한다. 그래서 필드는 대부분 "unknown"이 된다.
+  > - 채워진다 해도 다른 OS의 decompressor가 할 수 있는 일은 거부뿐이다. 그것은 §6.4의 기본값(만들지 않고 보고한다)이 이미 한다.
+  > - 위험도 늘지 않는다. 엉뚱한 번호의 노드는 명시적으로 요청했을 때만, 그것도 root로 풀 때만 생긴다.
 
 ### 5.3 optional metadata [확정]
 
@@ -374,7 +405,7 @@ aqr-entry-extra = {
 
 ## 8. 열린 질문
 
-1. **FIFO와 device를 지금 정의할 것인가**, 번호만 예약할 것인가(§1.3). **보류.** 명세에는 Issue만 두었다. 지금은 `special_kind` 1–3도 unknown node이다.
+1. **[해결]** **FIFO와 device를 지금 정의할 것인가**, 번호만 예약할 것인가. 정의한다(§1.3).
 2. **[해결]** **`link_target`의 상한.** 두지 않는다. 플랫폼별 상한은 다음과 같다.
    - Linux VFS: `PATH_MAX`(4096, NUL 포함)이므로 4095바이트이다. 파일 시스템이 더 좁힐 수 있다. ext4는 블록 크기 − 1이고, tmpfs는 페이지 크기 − 1이고, XFS는 1023바이트이다.
    - macOS(APFS): 1023바이트이다(`PATH_MAX` 1024). 직접 시험했다.
@@ -382,7 +413,7 @@ aqr-entry-extra = {
    - Windows: reparse data 전체가 16 KiB(`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`)이다. SubstituteName과 PrintName을 함께 담으면 UTF-16으로 약 8000자이다. 이 값은 구조체에서 계산한 것이고 Microsoft 문서에 적힌 값은 아니다.
    > 모든 플랫폼에서 만들 수 있는 길이는 1023바이트까지이다. 상한을 둔다면 이 값이 후보이다. 두지 않는다면 "해제 시 만들 수 없으면 보고하라"(§6.4)로 충분하다.
 3. **[해결]** **모르는 `special_kind`의 처리.** unknown node를 두고, 해제 시 보고하고 그 노드만 거부한다(§5.1).
-4. **(보류)** **device 번호의 출처 OS.** 기록할 것인가. 기록한다면 모델의 일부로 할지 extra로 할지.
+4. **[해결]** **device 번호의 출처 OS.** 기록하지 않는다. 변환할 때 채울 수 없고, 기록해도 할 수 있는 일이 거부뿐이다(§5.2).
 5. **[해결]** **`link-group`의 범위.** 부호로 나눈다. 0 이상은 segment-local, 음수는 전역(§5.3).
 6. **[해결]** **link node의 대상을 Windows의 드라이브 문자 절대 경로(`C:/…`)로 둘 때의 이식성.** `\`→`/` 말고는 플랫폼에 맡긴다.
 7. **[해결: 기본으로 거부, 옵션으로 허용]** **해제 시 바깥을 가리키는 링크를 기본으로 거부할지.** 이 문서는 "모드를 제공하라(SHOULD)"까지만 요구한다. 기본값을 안전 쪽으로 둘지(unrar, 7-Zip 25.01 이후)는 도구의 결정으로 남긴다. tar 계열은 거부하지 않는다(§6.4).
@@ -407,6 +438,7 @@ aqr-entry-extra = {
 - [x] **S6.** 여러 `file_param`이 같은 leaf block을 가리킬 수 있다고 명시한다(§0).
 - [x] **S7.** §Optional metadata에 `link-group`과 `win-link-type`을 추가하고, `unix-mode`를 권한 비트로 좁힌다(§5.3, §6.5). 0x000d 관련 TODO 주석을 지운다.
 - [ ] **S8.** `zip-extras-design.md`의 §3.4, §5, §6의 3번을 이 문서에 맞춘다(§6.6).
+- [x] **S9.** §Archive model에 special node를, §Metadata block의 `special_kind` 표에 1–3과 `device_major`/`device_minor`를 추가한다(§4.2, §5.1, §5.2). 번호 해석에 대한 note를 넣고, §Extraction의 FIFO/device Issue를 §6.4의 special node 규칙으로 바꾼다.
 
 ### 구현 (I)
 
