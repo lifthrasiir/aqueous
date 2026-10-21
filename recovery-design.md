@@ -175,7 +175,8 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 | 이름 | 형 | 설명 |
 |---|---|---|
-| `mirror_magic` | u8[8] | 손상 시 스캔으로 찾기 위한 sync marker. 값은 미정(명세에 issue로 남김) |
+| `mirror_magic` | u8[8] | 손상 시 스캔으로 찾기 위한 sync marker. 값은 `02 AA F5 FE BA 2B AE 23`(base64 `Aqr1/rorriM=`)이다 [확정] |
+| `archive_offset` | leb128 | `archive_start`에서 mirror block 자신의 `block_start`까지의 거리. 스캔으로 찾은 mirror가 이 아카이브의 것인지 가리는 데 쓴다 |
 | `target_offset` | leb128 ≠ 0 | 원본 블록의 `block_start`에서 **mirror block 자신의** `block_start`까지의 거리. widened이면 1을 더한다(거리는 항상 짝수). 원본은 항상 mirror 앞에 온다 |
 | `target_data` | u8[*] | 원본 블록의 data를 그대로 담은 사본 |
 | `mirror_checksum` | u64le | mirror의 `block_start`(type과 size 포함)부터 이 필드 직전까지의 XXH64 |
@@ -189,7 +190,14 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 - 처음 제안의 `target_hash`는 뺐다. 원본 checksum이 손상을 감지하고, `mirror_checksum`이 사본을 검증한다. verify는 사본과 원본을 바이트 비교할 수도 있다.
 - 오프셋을 mirror 자신 기준으로 두면, archive_start나 체인이 깨져도 원본 위치를 알 수 있다.
 - mirror 하나는 원본 하나만 담는다(타입이 원본마다 정해지므로). 한 원본에 mirror가 여럿 있어도 된다.
-- mirror의 data는 원본보다 최소 17바이트 길다. 원본 size가 필드 한계에 가까울 때만 widened가 필요하고, 한 단계면 항상 충분하다. 필요할 때만 widened를 쓰는 것이 SHOULD이다.
+- magic은 8바이트이고 target type과 관계없이 하나이다.
+  > 길이: magic은 후보를 찾는 데만 쓰고, 확정은 앞의 mirror type, size 폭, `mirror_checksum`이 한다. 따라서 magic 길이는 정확성과 무관하고 잘못된 후보의 비용만 정한다. 압축된 데이터에서 우연한 일치의 기댓값은 1 TiB당 8바이트면 약 6×10⁻⁸개(6바이트면 약 0.004개, 4바이트면 약 256개)이다. Par2도 8바이트 magic(`PAR2\0PKT`)에 패킷 해시를 더한다.
+  > target type별 magic은 두지 않는다. 바로 앞의 mirror type이 이미 그 정보를 담고 있고, magic이 여럿이면 스캔 패턴만 늘어난다.
+  > 값의 조건: 0x00이나 0xFF가 연속되지 않을 것(0 채움, 지워진 flash), ASCII로 읽히지 않을 것, 자기 자신과 겹치지 않을 것, 다른 magic과 앞뒤가 겹치지 않을 것. 현재 값은 여덟 바이트가 모두 달라 자기 겹침이 없고, 나머지 조건도 만족한다.
+- `archive_offset`은 중첩 아카이브 때문에 둔다.
+  > 이미 압축된 `.aqr`은 stored로 들어가기 쉬우므로, 바깥 아카이브 안에 안쪽 아카이브의 mirror가 magic과 checksum까지 유효한 채로 나타난다. magic 길이로는 구별할 수 없다. 안쪽 파일이 여러 블록에 나뉘어 들어가면 `target_offset`이 바깥 블록 헤더만큼 어긋나므로, 이런 mirror로 덮어쓰면 멀쩡한 바깥 데이터가 손상된다. 원본 자리의 checksum 실패 여부로는 막지 못한다. 그 자리는 원래 블록 경계가 아니므로 어떤 바이트가 와도 실패하기 때문이다.
+  > mirror마다 `block_start` − `archive_offset`으로 archive_start를 추정할 수 있다. 안쪽 아카이브는 바깥 아카이브 안에 있으므로 추정값이 항상 바깥의 archive_start보다 크다. 같은 아카이브의 이전 세대가 들어 있어도 위치가 다르므로 구별된다. 아카이브마다 무작위 ID를 두는 방식은 그런 사본을 구별하지 못해서 택하지 않았다.
+- mirror의 data는 원본보다 최소 18바이트 길다. 원본 size가 필드 한계에 가까울 때만 widened가 필요하고, 한 단계면 항상 충분하다. 필요할 때만 widened를 쓰는 것이 SHOULD이다.
   > 원본의 size 필드 폭은 `target_data` 길이에서 추론할 수 없다(필요 이상으로 넓은 size 필드가 허용된다). 그래서 widened 여부를 따로 표시해야 한다. 원본 쪽 size 필드를 넓히라고 요구하는 방식은 기존 아카이브에 나중에 mirror를 붙일 수 없게 만들어서 택하지 않았다.
 - mirror는 어느 segment에도 속하지 않고 content block도 아니다. 마지막 metadata 뒤에도 올 수 있다. 해석 결과에는 영향이 없지만, 요건을 어긴 mirror가 있으면 invalid archive이다.
 - encrypted archive 안에서는 일단 금지했다(§5.5, 명세에 issue).
@@ -210,6 +218,14 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 마지막 metadata가 깨지면 체인의 출발점이 사라진다. 그때는 `mirror_magic` 스캔에 의존한다. repair 모드에서 아카이브 전체를 한 번 읽는 비용은 감수한다.
 
+스캔으로 찾은 후보는 다음 순서로 확정한다.
+
+1. magic 앞의 size 폭 네 가지를 각각 시도해, 그 앞 2바이트가 폭이 맞는 mirror type인지 본다.
+2. `mirror_checksum`을 검증한다.
+3. `block_start` − `archive_offset`이 이 아카이브의 archive_start와 같은지 본다. 같지 않으면 중첩 아카이브의 mirror이므로 버린다.
+
+archive_start는 구조에서 먼저 정한다. header magic의 위치나 footer의 `size_hint`를 쓴다. 둘 다 깨졌으면, 검증을 통과한 mirror들이 추정한 archive_start 중 가장 작은 값을 쓴다. 안쪽 아카이브의 mirror가 바깥 것보다 많을 수 있으므로 다수결은 쓰지 않는다.
+
 ### 5.3 slice 해시 인덱스: 감지 전용 [제안, 선택]
 
 - 저장 바이트를 `slice_size` 단위(2의 거듭제곱, 4 KiB 이상)로 나누고, slice마다 XXH64를 기록한다.
@@ -222,7 +238,8 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 - **블록 타입:** 예를 들어 08–0B를 recovery block으로 쓴다. 공통 앞부분은 `recovery_magic`, `self_hash`, `set_id`, `archive_offset`(archive_start로부터 이 블록까지의 거리), `kind`(index 또는 parity)이다.
   - `set_id`는 파라미터의 해시이다. 세대(generation)와 아카이브를 구분한다.
-  - `archive_offset`이 있으면 header가 깨져도 slice 격자를 복원할 수 있다.
+  - `archive_offset`이 있으면 header가 깨져도 slice 격자를 복원할 수 있다. 중첩 아카이브의 recovery block을 가려내는 데도 mirror와 같은 방식으로 쓴다(§5.2의 찾기).
+  - `recovery_magic`의 길이와 값에 대해서는 §5.2의 `mirror_magic` 분석이 그대로 적용된다.
 - **index 패킷:** `slice_size`, 보호 길이, set 배치, 부호 ID, slice 해시 목록(§5.3)을 담는다. 최소 두 벌을 서로 떨어진 위치에 둔다(Par2의 main packet 중복과 같은 발상).
 - **보호 범위:** `[archive_start, archive_end)`에서 recovery block과 mirror block 영역을 0으로 간주한다. 이러면 자기 자신을 보호하는 순환이 없어진다. footer는 보호하지 않고 재구성한다.
 - **부호:** GF(2¹⁶) 위의 additive-FFT 기반 RS(Lin–Chung–Han 계열, Leopard-RS가 대표 구현)를 제안한다.
@@ -251,8 +268,8 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 ### 5.6 repair 절차 [제안]
 
-1. `mirror_magic`과 `recovery_magic`을 스캔하고, 각 블록의 `mirror_checksum`이나 `self_hash`를 검증한다.
-2. mirror마다 원본을 사본과 비교하고, 다르면 사본으로 덮어쓴다. 비용이 싸고, 이후 RS 단계의 erasure를 줄여 준다.
+1. `mirror_magic`과 `recovery_magic`을 스캔하고, 각 블록의 `mirror_checksum`이나 `self_hash`를 검증한다. `archive_offset`이 archive_start와 맞지 않는 블록은 중첩 아카이브의 것이므로 버린다(§5.2의 찾기).
+2. mirror마다 원본을 사본과 비교하고, 다르면 사본으로 덮어쓴다. 비용이 싸고, 이후 RS 단계의 erasure를 줄여 준다. 구조(metadata 체인이나 앞방향 스캔)로 위치가 확인되지 않은 mirror는 1단계의 `archive_offset` 검사를 통과해야만 덮어쓰기에 쓴다.
 3. recovery set이 있으면 slice 해시로 erasure를 표시하고 RS로 복원한다.
 4. footer가 깨졌으면 앞방향 스캔으로 재구성한다.
 5. 결과 바이트열을 `interpret an archive`에 넘긴다. 복원할 수 없는 부분은 §4.6 Partial access의 salvage로 넘긴다.
@@ -292,7 +309,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 ### 명세 (S)
 
 - [ ] **S1.** "무시해도 되는 블록" 범주를 정의하고, spacer를 그 안으로 옮긴다(§7의 4번).
-- [x] **S2.** mirror block 절을 추가한다. 구조와 배치 SHOULD를 포함한다. (`MIRROR_MAGIC` 값은 미정)
+- [x] **S2.** mirror block 절을 추가한다. 구조와 배치 SHOULD를 포함한다. (`MIRROR_MAGIC` 값 확정, `archive_offset` 추가함)
 - [ ] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6).
 - [ ] **S4.** 비규범 노트를 추가한다. 내용은 오류 모델 요약, E5가 범위 밖이라는 점, segment 주기 권고, checksum 있는 블록 타입을 기본값으로 쓰라는 권고이다.
 - [ ] **S5.** §7 Block index에 mirror 타입(반영함)과, §5.4를 진행하면 08–0B를 반영한다.

@@ -287,7 +287,7 @@ This specification defines and uses the following constants, all of which are de
       <td>(F9&nbsp;CA&nbsp;F2&nbsp;A6&nbsp;D0&nbsp;2A&nbsp;01&nbsp;00)<sub>16</sub>
     <tr>
       <td><dfn noexport>MIRROR_MAGIC</dfn>
-      <td>To be determined ([[#mirror-block]])
+      <td>(02&nbsp;AA&nbsp;F5&nbsp;FE&nbsp;BA&nbsp;2B&nbsp;AE&nbsp;23)<sub>16</sub>
   </tbody>
 </table>
 
@@ -1457,6 +1457,10 @@ Its data consists of the following:
       <td>[=u8=][8] = [=const/MIRROR_MAGIC=]
       <td>
     <tr>
+      <td><dfn>archive_offset</dfn>
+      <td>[=leb128=] = [=block/block_start=] - [=archive/archive_start=]
+      <td>
+    <tr>
       <td><dfn>target_offset</dfn>
       <td>[=leb128=] ≠ 0
       <td>
@@ -1475,11 +1479,19 @@ Its data consists of the following:
   </tbody>
 </table>
 
-Issue: The value of [=const/MIRROR_MAGIC=] is to be determined,
-including whether 8 bytes are enough and whether each target block type should have a distinct magic.
-
 [=mirror/mirror_magic=] is a fixed byte sequence that allows mirror blocks to be found by scanning
 when the surrounding structure, such as the header, the footer or the metadata chain, is damaged.
+
+[=mirror/archive_offset=] is the offset from [=archive/archive_start=] to the [=block/block_start=] of the mirror block.
+
+<div class=note>
+  [=mirror/archive_offset=] distinguishes mirror blocks of this archive from those of another archive stored inside it,
+  which can be found by scanning and verify by themselves just like the mirror blocks of this archive.
+  Such a mirror block may point to bytes that are not its target block in this archive,
+  for example when the inner archive is split into multiple blocks.
+  Since the inner archive is stored after [=archive/archive_start=] of this archive,
+  the start of the archive implied by its [=mirror/archive_offset=] is always greater.
+</div>
 
 [=mirror/target_offset=] is the offset from the [=block/block_start=] of the [=mirror/target block=]
 to the [=block/block_start=] of the mirror block, plus 1 if the mirror block is [=mirror/widened=].
@@ -1519,7 +1531,7 @@ including its [=block/type=] and [=block/size=] fields.
 A mirror block SHOULD be [=mirror/unwidened=] unless its [=block/data=] doesn't fit in the [=block/size=] field for the target type.
 
 <div class=note>
-  The data of a mirror block is at least 17 bytes longer than that of its target block,
+  The data of a mirror block is at least 18 bytes longer than that of its target block,
   so this is only relevant when the target block is close to the limit of its [=block/size=] field.
   A single step is always sufficient, since the next width can hold far more than the additional bytes.
   The width of the target block's [=block/size=] field can't be inferred from the size of [=mirror/target_data=],
@@ -1538,6 +1550,10 @@ A mirror block SHOULD be [=mirror/unwidened=] unless its [=block/data=] doesn't 
   and try each of four possible widths of the [=block/size=] field preceding it.
   The candidate is correct when the 2 bytes before the [=block/size=] field encode a mirror block type with the matching width
   and [=mirror/mirror_checksum=] verifies.
+  The candidate is then discarded unless its [=block/block_start=] minus [=mirror/archive_offset=]
+  equals [=archive/archive_start=], because it belongs to another archive stored inside this archive otherwise.
+  If [=archive/archive_start=] can't be determined from [=archive/header_magic=] or [=archive/size_hint=],
+  the smallest value implied by verified candidates can be used instead.
 </div>
 
 A mirror block doesn't belong to any [=segment=] and MAY occur anywhere in [=archive/blocks=],
