@@ -643,6 +643,10 @@ The internal structure after decompression is as follows:
       <td>[=leb128=]
       <td>
     <tr>
+      <td><dfn>num_specials</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
       <td><dfn>entries_size</dfn>
       <td>[=leb128=] = [=meta/entries_end=] - [=meta/entries_start=]
       <td>
@@ -664,7 +668,7 @@ The internal structure after decompression is as follows:
       <td>
     <tr>
       <td><dfn>entry_parents</dfn>
-      <td>[=u=]([=meta/num_directories=])[[=meta/num_directories=] + [=meta/num_files=] - 1]
+      <td>[=u=]([=meta/num_directories=])[[=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] - 1]
       <td>
     <tr>
       <td><dfn>file_params</dfn>
@@ -672,7 +676,7 @@ The internal structure after decompression is as follows:
       <td>
     <tr>
       <td><dfn>entry_offsets</dfn>
-      <td>[=u=]([=meta/entries_size=])[[=meta/num_directories=] + [=meta/num_files=] - 1]
+      <td>[=u=]([=meta/entries_size=])[[=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] - 1]
       <td>
     <tr>
       <td><dfn>entries_start</dfn>
@@ -680,7 +684,7 @@ The internal structure after decompression is as follows:
       <td>
     <tr>
       <td><dfn>entries</dfn>
-      <td>[=meta/entry=][[=meta/num_directories=] + [=meta/num_files=]]
+      <td>[=meta/entry=][[=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=]]
       <td>
     <tr>
       <td><dfn>entries_end</dfn>
@@ -712,12 +716,15 @@ Relative offsets to those blocks are
 later recorded as [=meta/module_offsets=], [=meta/resource_offsets=] and [=meta/dictionary_offsets=] respectively,
 in the order of appearance.
 
-The metadata block represents zero or more files and zero or more directories,
+The metadata block represents zero or more directories, zero or more files and zero or more <dfn>special entries</dfn>,
 collectively called [=meta/entries=] and numbered together.
 The root directory is numbered 0,
 subsequent directories are numbered from 1 to [=meta/num_directories=],
-and individual files are numbered from ([=meta/num_directories=] + 1) to ([=meta/num_directories=] + [=meta/num_files=]).
-There MUST be at least one entry other than the root directory, i.e. [=meta/num_directories=] + [=meta/num_files=] ≥ 1.
+individual files are numbered from ([=meta/num_directories=] + 1) to ([=meta/num_directories=] + [=meta/num_files=]),
+and special entries are numbered from ([=meta/num_directories=] + [=meta/num_files=] + 1)
+to ([=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=]).
+There MUST be at least one entry other than the root directory,
+i.e. [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] ≥ 1.
 A parent of the entry index |k| in [=meta/entry_parents=] MUST be a directory less than |k|,
 i.e. in [0, min(|k| - 1, [=meta/num_directories=])], so that directories can't form a cycle.
 The parent of the root directory (entry 0) and the entry 1 is always fixed to None and the root directory,
@@ -753,10 +760,17 @@ Therefore [=meta/file_dictionary=] = |k| refers to the block at [=meta/dictionar
 and [=meta/num_dictionaries=] is the maximum possible value for it.
 A relative offset to the corresponding [=leaf block=], which starts the file's [=parcel=],
 is recorded as [=meta/file_offset=], which can't be zero.
+Multiple files MAY refer to the same leaf block, in which case they have the same content.
+
+<div class=note>
+  This is how an archive stores files with the same content only once,
+  including files that were hard links to each other ([[#link-groups]]).
+  It costs only a [=meta/file_param=] and an [=meta/entry=] per file.
+</div>
 
 TODO: An output index when the formula block at [=meta/file_offset=] has multiple outputs.
 
-Entry structure (<dfn>entry</dfn>) then occurs for each directory and file, in this order, and consists of the following:
+Entry structure (<dfn>entry</dfn>) then occurs for each directory, file and special entry, in this order, and consists of the following:
 
 <table class=data>
   <thead>
@@ -778,6 +792,22 @@ Entry structure (<dfn>entry</dfn>) then occurs for each directory and file, in t
       <td><dfn>original_size</dfn>
       <td>[=leb128=]
       <td>[=If=] this entry is for a file
+    <tr>
+      <td><dfn>special_kind</dfn>
+      <td>[=leb128=]
+      <td>[=If=] this entry is for a special entry
+    <tr>
+      <td><dfn>link_target</dfn>
+      <td>[=u8=][*] ≠ 0
+      <td>[=If=] this entry is for a special entry and [=meta/special_kind=] = 0
+    <tr>
+      <td><dfn>link_target_sentinel</dfn>
+      <td>[=u8=] = 0
+      <td>[=If=] this entry is for a special entry and [=meta/special_kind=] = 0
+    <tr>
+      <td><dfn>special_data</dfn>
+      <td>[=u8=][*]
+      <td>[=If=] this entry is for a special entry and [=meta/special_kind=] ≠ 0
   </tbody>
 </table>
 
@@ -793,6 +823,41 @@ No name can contain a zero byte, and there are two allowed encodings:
 
 Conforming compressors are strongly RECOMMENDED to use the WTF-8 encoding,
 and SHOULD only use the raw byte sequence as a round-trip measure.
+
+A special entry represents a node other than a file or a directory, as determined by [=meta/special_kind=]:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>[=meta/special_kind=]
+      <th>Node
+  </thead>
+  <tbody>
+    <tr>
+      <td>0
+      <td>[=Link node=], with [=meta/link_target=] as its target
+    <tr>
+      <td>Others
+      <td>[=Unknown node=], reserved for future versions of this specification
+  </tbody>
+</table>
+
+[=meta/link_target=] uses the same encodings as [=meta/entry_name=].
+[=meta/special_data=] is not interpreted by this version of this specification;
+its length is determined by the beginning of the next entry in [=meta/entry_offsets=],
+or [=meta/entries_end=] for the last entry.
+
+<div class=note>
+  Special entries are numbered separately from files, as directories are,
+  so that [=meta/file_params=] remain directly indexed by entry numbers.
+  A link target is stored in the entry rather than in the [[#optional-metadata|optional metadata]],
+  because it defines the node itself and can't be ignored.
+  Since the metadata block is compressed as a whole, similar targets compress well.
+
+  Unknown kinds are not an [=invalid archive=] failure,
+  so that a decompressor can still extract the rest of an archive using a kind defined in the future.
+  Every special entry can be skipped without knowing its kind, thanks to [=meta/entry_offsets=].
+</div>
 
 The [=meta/entries=] array is the only part that has the unspecified number of bytes,
 which is therefore available as [=meta/entries_size=] beforehand.
@@ -820,7 +885,7 @@ every reference from a block in a segment, whether by an index or by an offset, 
 
 Content blocks are classified as follows:
 
-* A <dfn>leaf block</dfn> represents the content of a file by itself.
+* A <dfn>leaf block</dfn> represents the content of one or more files by itself.
     [[#compressed-block|Compressed leaf blocks]], [[#uncompressed-block|uncompressed leaf blocks]]
     and [[#formula-block|formula blocks]] are leaf blocks.
 * A <dfn>non-leaf block</dfn> doesn't represent any file by itself,
@@ -1613,8 +1678,8 @@ so that a decompressor can tell such archives without scanning [=archive/blocks=
 each consisting of [=content blocks=] and a single [[#metadata-block|metadata block]] describing them,
 with optional spacer and [[#mirror-block|mirror]] blocks in between.
 Each segment can be independently processed and decompressed in the reading order.
-There SHOULD NOT be multiple [=meta/entry|entries=] with the same path across metadata blocks,
-and if there are, only the last one is considered valid.
+There SHOULD NOT be multiple non-directory [=meta/entry|entries=] with the same path across metadata blocks,
+and if there are, only the last one is considered valid ([[#segment-merging]]).
 
 Alternatively, [=archive/blocks=] can have no metadata block.
 Such archive decompresses into a single unnamed file,
@@ -1762,14 +1827,16 @@ aqr-entry-extra = {
   ? &(arctime: -5) => aqr-time
 
   ? &(comment: -6) => aqr-text
+  ? &(link-group: -7) => int  ; File nodes only, see [[#link-groups]]
 
-  ? &(unix-mode: -70) => uint
+  ? &(win-link-type: -60) => &(file: 0, directory: 1, junction: 2)  ; Link nodes only
+
+  ? &(unix-mode: -70) => uint .le 4095  ; Permission bits only (0o7777), without S_IFMT
   ? &(unix-uid: -71) => uint
   ? &(unix-gid: -72) => uint
 
   ; TODO:
   ; NTFS attributes (ZIP extra 0x000a)
-  ; UNIX attributes (ZIP extra 0x000d) - symlink target
   ; other extras for round trip
 
   ? &(zip-extras: -100) => aqr-zip-extras
@@ -1786,6 +1853,17 @@ aqr-zip-extra-id = 0..65535
 
 There MUST NOT be any following bytes after this CBOR item.
 If [=meta/optional_metadata_size=] is 0, the optional metadata is an empty map `{}`.
+
+Keys of `aqr-entry-extra` from -1 to -59 are platform-neutral.
+Keys from -60 to -69 are specific to Windows, -70 to -79 to Unix, -80 to -89 to macOS, and -90 to -99 to other platforms.
+
+`unix-mode` only holds the permission bits, including the set-user-ID, set-group-ID and sticky bits.
+The kind of an entry is solely determined by its node ([[#archive-model]]), so `unix-mode` never includes the file type bits (`S_IFMT`).
+
+`win-link-type` is only meaningful for a [=link node=],
+and determines the kind of a link to be created on Windows ([[#extraction]]).
+"`file`" and "`directory`" denote a symbolic link to a file and to a directory respectively,
+and "`junction`" denotes a junction (a mount point reparse point).
 
 <div class=note>
   Some precisions found in the wild are only representable with the extended time,
@@ -1948,6 +2026,52 @@ SHOULD preserve its precision, i.e. use an encoding whose quantization interval 
   </ul>
 </div>
 
+<h4 id=link-groups><code>link-group</code>: Hard links</h4>
+
+<p><code>link-group</code> records that [=file nodes=] were originally the same file,
+i.e. hard links to the same inode on Unix or to the same file record on NTFS.
+A non-negative value is <dfn>segment-local</dfn> and denotes the same group only within the same [=segment=],
+while a negative value is <dfn>archive-wide</dfn> and denotes the same group in every segment.
+The resulting [=file node/link group=] in the [=archive value=] is determined by [=interpret a segment|interpreting a segment=].</p>
+
+<p>A compressor MUST NOT give the same [=file node/link group=] to files that were not the same file.
+It SHOULD NOT give a [=file node/link group=] that no other file node has.
+A file node with <code>link-group</code> SHOULD refer to the same [=leaf block=] as other file nodes in the same group,
+and SHOULD have the same [=entry extra=] as them except for <code>link-group</code> and <code>comment</code>.</p>
+
+<div class=note>
+  <p>Segment-local groups allow the inode number (<code>st_ino</code>) to be used as is,
+  as CBOR can encode any 64-bit unsigned integer as a non-negative <code>int</code>,
+  and can be assigned without reading earlier segments.
+  Inode numbers are still only unique within a single file system,
+  so a compressor reading from multiple file systems has to renumber some of them.</p>
+  <p>Archive-wide groups link files across segments,
+  e.g. when a compressor periodically starts a new segment while archiving a single tree,
+  or when it appends a segment to an existing archive.
+  A compressor using them is responsible for keeping them consistent with all other segments,
+  e.g. by reading earlier metadata blocks when appending.
+  Inode numbers are not suitable as archive-wide values as is,
+  because they can be reused after the file is removed or come from an unrelated file system,
+  and linking unrelated files with the same content can't be detected by any decompressor.</p>
+</div>
+
+<p>A [=file node/link group=] is <dfn>consistent</dfn> if all file nodes with that group
+in the final [=archive value=] have the same [=file node/content=].
+An inconsistent group, e.g. after a later segment has replaced only some of its file nodes,
+is not an [=invalid archive=] failure, but has no effect on extraction ([[#extraction]]).</p>
+
+<div class=note>
+  <p>The consistency can only be determined from the final archive value,
+  because a later segment may replace any file node in the group.
+  Treating an inconsistent group as an invalid archive would make a decompressor reading only some segments
+  unable to detect such failure ([[#partial-access]]).
+  A decompressor can instead check the consistency before creating hard links,
+  at no cost when file nodes refer to the same leaf block.</p>
+  <p>Hard links are not part of the archive model, so a decompressor ignoring <code>link-group</code>
+  still extracts the correct files with the same contents.
+  Directory hard links, found in some macOS Time Machine volumes, are not represented.</p>
+</div>
+
 <h3 id=formula-data>
 Formula data</h3>
 
@@ -2019,12 +2143,31 @@ An <dfn>archive value</dfn> is a [=struct=] with the following [=struct/items=]:
 A <dfn>file node</dfn> is a [=struct=] with the following [=struct/items=]:
 
 * <dfn for="file node">content</dfn>, a [=byte sequence=].
+* <dfn for="file node">link group</dfn>, a [=/link group=] or null.
 * <dfn for="file node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
 
 A <dfn>directory node</dfn> is a [=struct=] with the following [=struct/items=]:
 
-* <dfn for="directory node">children</dfn>, an [=ordered map=] from [=entry names=] to [=file nodes=] or [=directory nodes=].
+* <dfn for="directory node">children</dfn>, an [=ordered map=] from [=entry names=]
+    to [=file nodes=], [=directory nodes=], [=link nodes=] or [=unknown nodes=].
 * <dfn for="directory node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+A <dfn>link node</dfn> is a [=struct=] with the following [=struct/items=], representing a symbolic link:
+
+* <dfn for="link node">target</dfn>, a [=link target=].
+* <dfn for="link node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+An <dfn>unknown node</dfn> is a [=struct=] with the following [=struct/items=],
+representing a kind of node not defined by this version of this specification:
+
+* <dfn for="unknown node">kind</dfn>, a positive integer.
+* <dfn for="unknown node">data</dfn>, a [=byte sequence=].
+* <dfn for="unknown node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+The [=archive value/root=] can't be a [=link node=] or an [=unknown node=].
+
+Issue: FIFOs and device files are not part of the archive model yet.
+They would be represented as new kinds of special entries ([[#metadata-block]]).
 
 An <dfn>entry name</dfn> is a [=struct=] with the following [=struct/items=]:
 
@@ -2055,6 +2198,55 @@ To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
     4. If |name| violates any restriction of an [=entry name=] above, return an [=invalid archive=] failure.
     5. Return |name|.
 </ol>
+
+A <dfn>link target</dfn> is a [=struct=] with the following [=struct/items=]:
+
+* <dfn for="link target">encoding</dfn>, either "`wtf-8`" or "`raw`".
+* <dfn for="link target">bytes</dfn>, a non-empty [=byte sequence=] not containing 00<sub>16</sub>,
+    which is a valid WTF-8 [[WTF-8]] string if [=link target/encoding=] is "`wtf-8`".
+
+Unlike an [=entry name=], a [=link target=] is a path which may contain 2F<sub>16</sub> (`/`) as a separator,
+and components equal to `.` or `..`.
+It may be absolute, and may refer to a path that doesn't exist in the [=archive value=] or anywhere else.
+The separator is always `/`: a compressor MUST replace every `\` in a link target read on Windows with `/`.
+Otherwise a link target is not normalized, and its meaning, e.g. of a drive letter, is left to the platform.
+There is no limit on its length other than implementation-defined limits.
+
+<div class=note>
+  `/` can't occur in a file name on Windows, and isn't interpreted as a separator in a link target there,
+  so this replacement is lossless.
+  A decompressor on Windows replaces `/` back with `\` when creating a link ([[#extraction]]).
+
+  On Windows, the target of an absolute link or a junction is stored as an NT path starting with `\??\`,
+  which has no meaning on other platforms.
+  A compressor is advised to convert it to a Win32 path first,
+  e.g. `\??\C:\foo` to `C:/foo`, `\??\UNC\server\share\x` to `//server/share/x`
+  and `\??\Volume{GUID}\x` to `//?/Volume{GUID}/x`.
+
+  Platforms differ in the maximum length of a link target:
+  4095 bytes on Linux (less on some file systems, e.g. 1023 bytes on XFS),
+  1023 bytes on macOS and FreeBSD, and about 8,000 UTF-16 code units on Windows.
+  A link that can't be created is handled at the extraction time ([[#extraction]]).
+</div>
+
+To <dfn>decode a link target</dfn> from a [=meta/link_target=] field |bytes|,
+do the same as to [=decode an entry name=] from |bytes|, except that
+the result is a [=link target=] and restrictions of a [=link target=] apply instead.
+
+A [=link target=] is never resolved within the archive model.
+Every path in an [=archive value=] is still a plain sequence of components,
+and a lookup of a path in an [=archive value=] never follows a [=link node=], as `lstat` doesn't.
+In particular, no node is a descendant of a [=link node=].
+
+<div class=note>
+  This makes the classic attack of extracting `a/passwd` through a preceding link `a` pointing to `/etc`
+  inexpressible in the archive model.
+  A tool MAY offer a lookup following links, but it then has to limit the number of links followed.
+</div>
+
+A <dfn>link group</dfn> is an opaque value that is only compared for equality,
+and is either a pair of a segment and a segment-local integer or an archive-wide integer ([[#link-groups]]).
+Two [=archive values=] are equal if they are equal after a one-to-one renaming of their [=/link groups=].
 
 <h3 id=interpretation>
 Interpreting an archive</h3>
@@ -2110,7 +2302,8 @@ To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata bl
 
 <ol class=algorithm>
     1. Let |meta| be the [=decoded data=] of |metadata block|, parsed as its internal structure ([[#metadata-block]]).
-    2. Let |d| be [=meta/num_directories=] and |n| be [=meta/num_directories=] + [=meta/num_files=] of |meta|.
+    2. Let |d| be [=meta/num_directories=], |f| be [=meta/num_directories=] + [=meta/num_files=]
+        and |n| be [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] of |meta|.
     3. Let |nodes| be a [=list=] containing a single [=directory node=]
         with an empty map as [=directory node/children=] and the [=entry extra=] for the entry 0 as [=directory node/extra=].
     4. For each |k| in [1, |n|]:
@@ -2118,7 +2311,7 @@ To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata bl
         2. Let |name| be the result of [=decode an entry name|decoding=] |entry|.[=meta/entry_name=].
         3. Let |parent| be 0 if |k| = 1, or |meta|.[=meta/entry_parents=][|k| - 2] otherwise.
         4. If |k| ≤ |d|, let |node| be a [=directory node=] with an empty map as [=directory node/children=].
-        5. Otherwise:
+        5. Otherwise, if |k| ≤ |f|:
             1. Let |param| be |meta|.[=meta/file_params=][|k| - |d| - 1].
             2. Let |block| be the block at the relative offset |param|.[=meta/file_offset=] from |metadata block|.
                 It MUST be a [=leaf block=] in |segment|.
@@ -2126,12 +2319,19 @@ To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata bl
                 Otherwise, |block| MUST use the dictionary block at |meta|.[=meta/dictionary_offsets=][|param|.[=meta/file_dictionary=] - 1].
             4. Let |content| be the [=file content=] of |block|.
                 Its length MUST be |entry|.[=meta/original_size=].
-            5. Let |node| be a [=file node=] with |content| as [=file node/content=].
-        6. Set the extra of |node| to the [=entry extra=] for the entry |k|.
-        7. Let |children| be the [=directory node/children=] of |nodes|[|parent|].
+            5. Let |node| be a [=file node=] with |content| as [=file node/content=] and null as [=file node/link group=].
+            6. If the [=entry extra=] for the entry |k| has `link-group` with a value |g|,
+                set |node|.[=file node/link group=] to a pair of |segment| and |g| if |g| ≥ 0, or to |g| otherwise.
+        6. Otherwise, if |entry|.[=meta/special_kind=] is 0:
+            1. Let |target| be the result of [=decode a link target|decoding=] |entry|.[=meta/link_target=].
+            2. Let |node| be a [=link node=] with |target| as [=link node/target=].
+        7. Otherwise, let |node| be an [=unknown node=]
+            with |entry|.[=meta/special_kind=] as [=unknown node/kind=] and |entry|.[=meta/special_data=] as [=unknown node/data=].
+        8. Set the extra of |node| to the [=entry extra=] for the entry |k|.
+        9. Let |children| be the [=directory node/children=] of |nodes|[|parent|].
             |children|[|name|] MUST NOT [=map/exist=].
-        8. Set |children|[|name|] to |node|.
-        9. [=list/Append=] |node| to |nodes|.
+        10. Set |children|[|name|] to |node|.
+        11. [=list/Append=] |node| to |nodes|.
     5. Return |nodes|[0].
 </ol>
 
@@ -2141,7 +2341,7 @@ The <dfn>entry extra</dfn> for the entry |k| is the element at the <em>0-based</
 in the segment's optional metadata, where the index 0 corresponds to the root directory,
 or null if `entry-extras` or such element doesn't exist.
 `entry-extras` MUST NOT have more elements than the entries including the root directory,
-i.e. [=meta/num_directories=] + [=meta/num_files=] + 1.
+i.e. [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] + 1.
 
 <h4 id=segment-merging>
 Merging segments</h4>
@@ -2159,7 +2359,9 @@ To <dfn>merge directory nodes</dfn> |later| into |earlier|:
 </ol>
 
 As a result, a directory appearing in multiple segments has the union of their children,
-while a file or a directory replaced by a node of the different kind is replaced as a whole with its descendants.
+while any other node, or a directory replaced by a node of the different kind, is replaced as a whole with its descendants.
+In particular, a directory replaced by a [=link node=] loses all its descendants,
+so no node is a descendant of a [=link node=] in the result.
 An entry can't be removed by a later segment.
 A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=],
 which can be cleared by an empty map `{}` instead.
@@ -2167,7 +2369,7 @@ which can be cleared by an empty map `{}` instead.
 <div class=note>
   Directories necessarily reappear in later segments to hold new files under them.
   The rule in [[#unencrypted-archive]] that there SHOULD NOT be multiple entries with the same path
-  therefore only concerns files.
+  therefore only concerns non-directory entries.
   For the same reason, a reappearing directory doesn't have to repeat its [=entry extra=].
 </div>
 
@@ -2326,7 +2528,7 @@ It SHOULD verify every checksum covering only the bytes it has computed.
   but can verify the checksums of non-leaf blocks it has read.
   A decompressor looking up a single path has to consider every [=segment=] that may replace it,
   which is possible by reading metadata blocks backward from [=archive/metadata_backward_offset=]
-  until the path or one of its ancestors is found as a file in a segment.
+  until the path or one of its ancestors is found as a non-directory entry in a segment.
 </div>
 
 <!-- Obsolete drafts of the compressor, the decompressor and transformers follow, superseded by the declarative semantics above. -->
@@ -3142,7 +3344,8 @@ Writing an [=archive value=] to a file system is outside the archive model.
 A decompressor doing so is subject to the following requirements:
 
 * It MUST NOT create, modify or remove any file outside the destination directory,
-    including through symbolic links or other redirections already present in the destination.
+    including through symbolic links or other redirections already present in the destination
+    or created during the extraction.
 * It SHOULD map an [=entry name=] whose [=entry name/encoding=] is "`wtf-8`" to the platform's native Unicode name
     (e.g. UTF-16 with lone surrogates on Windows), and
     an [=entry name=] whose [=entry name/encoding=] is "`raw`" to the identical byte sequence where the platform allows.
@@ -3155,7 +3358,55 @@ A decompressor doing so is subject to the following requirements:
 * It MAY ignore any [=file node/extra=] or [=directory node/extra=].
     It SHOULD NOT apply ownership information such as `unix-uid` and `unix-gid` unless explicitly requested.
 
-Issue: Symbolic links and hard links are not part of the archive model yet.
+<div class=note>
+  The archive model can't express a path through a [=link node=] ([[#archive-model]]),
+  but a link created during the extraction can still redirect a later write,
+  e.g. when a link `A` and a file `a/x` map to the same directory on a case-insensitive file system.
+  The rule on conflicting names above already prevents this, and the first requirement makes it explicit.
+  Possible implementations include creating all links after all other nodes,
+  or opening each path relative to its parent directory without following links
+  (e.g. `openat` with `O_NOFOLLOW`, or `RESOLVE_BENEATH` on Linux).
+</div>
+
+A decompressor extracting a [=link node=] is subject to the following additional requirements:
+
+* It MUST NOT create a link whose target escapes the destination directory unless explicitly requested,
+    and SHOULD provide a way to request it.
+    A [=link target=] escapes the destination directory
+    if it is absolute or relative to a drive or a root on the platform,
+    or if resolving it from the parent directory of the link,
+    following any [=link nodes=] in the [=archive value=] on the way,
+    reaches a parent of the destination directory.
+    A link not created for this reason MUST be reported to the user.
+
+    <div class=note>
+      Creating such a link doesn't write outside the destination directory by itself,
+      but the extracted tree can lead later users or programs to do so.
+      Resolving a target lexically is not enough:
+      when `d/e/l` is a link to `../../q`, a link to `d/e/l/../..` lexically resolves to `d`
+      but actually reaches the parent of the destination directory.
+    </div>
+* On Windows, it SHOULD replace every `/` in the [=link target=] with `\`.
+    It SHOULD create the kind of link given by `win-link-type`, if any.
+    Otherwise, it SHOULD create a symbolic link to a directory if the target resolves to a [=directory node=]
+    in the [=archive value=] as above, and a symbolic link to a file otherwise.
+* If a link can't be created, e.g. due to the lack of privilege, the file system or the length of its target,
+    it MUST either fail or report it to the user; it MUST NOT silently create a different kind of node.
+    It MAY create a copy of the target instead if it reports so.
+* It MUST NOT apply the [=link node/extra=] of a link node to its target.
+    Timestamps, ownership and permissions SHOULD be applied to the link itself where the platform allows (e.g. `lutimes`, `lchown`).
+
+A decompressor MAY create hard links among [=file nodes=] with the same [=consistent=] [=file node/link group=].
+It MUST NOT create hard links among any other file nodes, even when they have the same content.
+
+<div class=note>
+  Hard links let extracted files share the disk space, and changes made to one of them,
+  which is crucial for e.g. snapshot backups made with `rsync --link-dest`.
+  But files that were independent have to remain independent.
+</div>
+
+A decompressor MUST NOT create anything for an [=unknown node=], and MUST report it to the user.
+It MAY continue extracting other nodes.
 
 <!--
 <p>As well as sections marked as non-normative, all authoring guidelines, diagrams, examples, and notes in this specification are non-normative.

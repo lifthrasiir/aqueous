@@ -3,11 +3,13 @@
 Aqueous 아카이브 모델에 symbolic link, hard link, device 파일 같은 특수 파일을 넣을지, 넣는다면 어떻게 넣을지를 다룬다.
 현재 명세는 §Extraction의 Issue("Symbolic links and hard links are not part of the archive model yet")로 이 문제를 미뤄 두었다.
 본문은 현재 제안된 설계를 서술하고, 그렇게 정한 근거는 인용 블록에 둔다.
+2026-10-21에 FIFO/device를 뺀 나머지를 `spec/index.bs`에 반영했다(§9의 S 항목). 반영하면서 달라진 점은 각 절에 적었다.
 절과 항목의 상태 표기는 `xform-design.md`와 같다.
 
 - **[확정]** 논의 전부터 정해져 있었거나 논의 중 명시적으로 합의된 것
 - **[잠정]** 방향은 합의했으나 세부는 열려 있는 것
 - **[제안]** 제안되었으나 아직 검토하지 않은 것
+- **[보류]** 제안되었으나 결정을 미룬 것
 
 출처를 다시 확인하지 않은 사실에는 *(확인 필요)*를 붙였다. 다른 포맷과 OS에 대한 서술은 2026-10-21에 명세와 구현 소스로 다시 확인했다(§9의 R 항목). 확인하지 못한 것은 본문에 그렇게 적었다.
 
@@ -39,7 +41,7 @@ Aqueous 아카이브 모델에 symbolic link, hard link, device 파일 같은 �
 |---|---|---|---|
 | symbolic link | **높음** | 없으면 흔한 트리가 깨진다. 우회하면 정보가 사라지거나 의미가 바뀐다. | 모델에 새 노드 종류로 넣는다(§4). |
 | hard link | 중간 | 저장 공간 문제는 중복 제거가 이미 푼다. 남는 것은 해제할 때의 inode 공유뿐이다. | 모델은 그대로 둔다. extra의 힌트로 표현한다(§5.3). |
-| FIFO | 낮음 | 시스템 이미지에서만 나온다. | symlink와 같은 틀에 싸게 얹는다. 해제는 명시적 요청이 있을 때만 한다. |
+| FIFO | 낮음 | 시스템 이미지에서만 나온다. | **[보류]** symlink와 같은 틀에 싸게 얹는다. 해제는 명시적 요청이 있을 때만 한다. |
 | character/block device | 낮음 | 시스템 이미지에서만 나온다. 해제하려면 root가 필요하고 보안 위험이 있다. | FIFO와 같다. |
 | socket | 없음 | 실행 중인 프로세스와 묶인 것이라 보관할 의미가 없다. tar도 건너뛴다. | 표현하지 않는다. |
 
@@ -80,7 +82,10 @@ hard link가 쓰이는 곳:
 
 반면 같은 내용이라는 이유만으로 hard link로 해제하면 안 된다. 원래 독립이던 파일이 묶여 버린다. 따라서 중복 제거와 별도로 "이 파일들은 원래 같은 inode였다"는 정보가 필요하다.
 
-### 1.3 FIFO와 device
+### 1.3 FIFO와 device [보류]
+
+**[보류]** 어떻게 할지 정하지 않았다. 명세에는 Issue로만 남겼다. 아래는 원래 제안이다.
+
 
 나오는 곳은 사실상 시스템 이미지뿐이다. initramfs의 `/dev/console`, chroot와 rootfs의 `/dev`가 그 예이다.
 Aqueous의 주 용례(배포, 백업, 재압축)에서 이것들이 핵심은 아니다. 그래도 넣을 만한 이유가 둘 있다.
@@ -108,7 +113,7 @@ Aqueous의 주 용례(배포, 백업, 재압축)에서 이것들이 핵심은 �
 - **"앞의 경로를 가리키는" hard link(tar)는 순서에 의존한다.** 앞의 엔트리를 빼거나 바꾸면 깨진다. 대상이 디렉터리이거나 존재하지 않는 경우도 처리해야 한다.
 - **RAR5는 symlink와 junction을 구분한다.** Windows에서 손실 없이 왕복하려면 이 구분이 필요하다.
 
-## 3. 설계 원칙 [제안]
+## 3. 설계 원칙 [확정]
 
 1. **모델을 바꾸는 것은 모델에, 해제 방식에 대한 힌트는 extra에 둔다.** extra를 무시한 decompressor도 *다른* 트리를 만들어서는 안 된다. symlink는 트리의 모양을 바꾸므로 모델에 들어간다. hard link는 트리의 모양을 바꾸지 않으므로 extra에 들어간다.
 2. **모델 안의 경로 해석은 링크를 따라가지 않는다.** 모든 경로는 계속 단순한 성분의 나열이다. 링크 대상은 해석하지 않는 바이트열이다.
@@ -126,9 +131,9 @@ Aqueous의 주 용례(배포, 백업, 재압축)에서 이것들이 핵심은 �
 > - 이름만 나열하는 partial access(`ls -l`에 해당)가 content block을 읽어야 한다.
 > - `unix-mode`가 Unix 전용 키이므로 Windows에서 만든 아카이브가 symlink를 표현하려면 Unix 모드를 지어내야 한다.
 
-### 4.2 새 노드 종류 [제안]
+### 4.2 새 노드 종류 [확정, special node는 보류]
 
-**[제안]** `archive value`에 다음 노드 종류를 추가한다.
+**[확정]** `archive value`에 link node를 추가한다. special node는 §1.3에 따라 보류했다. 대신 모르는 `special_kind`를 담는 unknown node(**kind**, **data**, **extra**)를 추가했다(§5.1).
 
 A **link node** is a struct with the following items:
 
@@ -147,7 +152,7 @@ A **special node** is a struct with the following items:
 >
 > root를 link로 두는 것은 의미가 없다. 이름 없는 링크는 해제할 곳이 없다.
 
-### 4.3 link target [제안]
+### 4.3 link target [확정]
 
 A **link target** is a struct with the following items:
 
@@ -166,13 +171,14 @@ A **link target** is a struct with the following items:
   > Rust의 `read_link`는 `\??\`를 `\\?\`로 바꾼 뒤 가능하면 일반 경로로 줄인다. 결과는 같은 방향이다. `\??\`가 그대로 새어 나오면 다른 플랫폼에서 의미가 없다.
 - 비어 있으면 안 된다. Linux에서는 빈 대상의 symlink를 만들 수 없다(`ENOENT`).
 - 길이 상한은 두지 않는다. 구현이 상한을 두는 것은 §Conformance의 일반 규칙을 따른다.
+- **[확정]** 드라이브 문자 절대 경로(`C:/…`) 등은 `\`를 `/`로 바꾸는 것 말고는 정규화하지 않고 플랫폼에 맡긴다. `\??\` 변환은 명세에서 note로만 권한다.
 
 **[잠정]** Windows의 symlink에는 "파일 symlink"와 "디렉터리 symlink"의 구분이 있고, 그와 별도로 junction이 있다. 이것은 해제 방식에 대한 힌트이므로 extra에 둔다(§5.3의 `win-link-type`).
 > extra가 없을 때 Windows의 decompressor는 대상을 아카이브 안에서 해석해 디렉터리이면 디렉터리 symlink를 만들 수 있다(§6.4).
 
-### 4.4 hard link는 모델에 넣지 않는다 [제안]
+### 4.4 hard link는 모델에 넣지 않는다 [확정]
 
-**[제안]** hard link로 묶인 파일들은 모델에서 각각 독립된 `file node`이다. 각 노드는 자기 내용을 가진다. 같은 inode였다는 정보는 extra의 `link-group`(§5.3)이 담는다.
+**[확정]** hard link로 묶인 파일들은 모델에서 각각 독립된 `file node`이다. 각 노드는 자기 내용을 가진다. 같은 inode였다는 정보는 extra의 `link-group`(§5.3)이 담는다.
 
 > 대안은 tar처럼 "다른 경로를 가리키는 노드"를 두는 것이다. 다음 이유로 기각한다.
 >
@@ -184,9 +190,9 @@ A **link target** is a struct with the following items:
 
 ## 5. 인코딩
 
-### 5.1 metadata block [제안]
+### 5.1 metadata block [확정]
 
-**[제안]** 엔트리에 세 번째 부류를 추가한다.
+**[확정]** 엔트리에 세 번째 부류를 추가한다.
 
 - 헤더에 `num_specials`(leb128)를 `num_files` 다음에 둔다.
 - 엔트리 번호는 루트(0), 디렉터리(1..d), 파일(d+1..d+f), 그리고 특수 엔트리(d+f+1..d+f+s) 순이다.
@@ -221,10 +227,10 @@ A **link target** is a struct with the following items:
 >
 > 비용은 특수 엔트리가 없는 아카이브에서 헤더의 1바이트뿐이다.
 
-**[잠정]** `special_kind`에 모르는 값이 오면 invalid archive로 한다. 새 종류는 포맷 개정으로만 추가한다.
-> `entry_offsets`가 있으므로 모르는 종류를 건너뛰는 것은 기술적으로 가능하다. 그러나 모델에 "알 수 없는 노드"를 두면 병합과 해제 규칙을 모두 다시 정의해야 하므로 미룬다(§8의 3번).
+**[확정]** `special_kind`에 모르는 값이 오면 invalid archive가 아니라 **unknown node**가 된다. decompressor는 그 노드에 아무것도 만들지 않고 보고하며, 나머지는 계속 해제할 수 있다. 명세에는 1–3도 정의하지 않았으므로 지금은 0 말고는 모두 unknown node이다.
+> invalid archive로 하면 미래 버전이 만든 아카이브는 하나도 풀리지 않는다. 모르는 종류의 나머지 바이트는 `special_data`(u8[*])로 두고, 길이는 `entry_offsets`로 정한다. 병합에서는 다른 비디렉터리 노드처럼 통째로 바뀌므로 규칙을 새로 정의할 필요가 없었다.
 
-### 5.2 device 번호 [제안]
+### 5.2 device 번호 [보류]
 
 - major와 minor를 따로 저장한다. OS 고유의 `dev_t` 인코딩을 그대로 저장하지 않는다.
   > `dev_t`에서 major/minor를 나누는 방식은 OS마다 다르다. tar와 cpio도 major/minor를 따로 저장한다.
@@ -242,21 +248,27 @@ A **link target** is a struct with the following items:
   > Linux glibc는 32비트 major/minor를 표현하지만 커널은 12/20비트까지만 쓴다. 범위가 OS마다 다르므로 leb128로 저장한다. decompressor는 해제할 OS가 표현할 수 없는 번호를 만나면 실패하거나 보고해야 한다.
 - 번호의 의미는 OS에 따라 다르다. 같은 (major, minor)가 다른 OS에서는 다른 장치이다. 원본 OS를 기록할지는 §8의 4번이다.
 
-### 5.3 optional metadata [제안]
+### 5.3 optional metadata [확정]
 
 ```cddl
 aqr-entry-extra = {
   ...
-  ? &(link-group: -7) => uint      ; Files sharing a value were the same file (hard links)
+  ? &(link-group: -7) => int       ; Files sharing a value were the same file (hard links)
   ...
-  ? &(win-link-type: -80) => &(file: 0, directory: 1, junction: 2)  ; Link nodes only
+  ? &(win-link-type: -60) => &(file: 0, directory: 1, junction: 2)  ; Link nodes only
   ...
 }
 ```
 
 **`link-group`** (file node에만):
 
-- 값이 같은 file node들은 원래 같은 파일(inode)이었음을 뜻한다. 값의 범위는 아카이브 전체이다. 즉 segment를 넘어 공유된다.
+- 값이 같은 file node들은 원래 같은 파일(inode)이었음을 뜻한다.
+- **[확정]** 0 이상이면 segment 안에서만 같은 그룹이고, 음수면 아카이브 전체(segment를 넘어 공유)이다. `st_ino`를 그대로 넣으면 segment-local이 된다.
+  > 처음에는 반대(0 이상이 전역)였다. `st_ino`를 그대로 넣으면 전역이 되게 하려는 것이었다. 검토해 보니 inode 번호는 재사용되고 `st_dev` 안에서만 유일하다. 그래서 나중에 덧붙인 segment가 `st_ino`를 그대로 쓰면 앞 segment의 무관한 파일과 묶일 수 있고, 내용까지 같으면(빈 파일 등) decompressor가 감지하지 못한다. 손쉬운 길이 위험한 쪽이 되므로 뒤집었다. segment를 넘는 그룹(`recovery-design.md` §5.1의 주기적인 segment 분할, 덧붙이기)은 compressor가 일관성을 책임지고 음수로 명시한다.
+  >
+  > CBOR `int`는 0..2⁶⁴−1과 −1..−2⁶⁴를 모두 담으므로 64비트 `st_ino`가 그대로 들어가고 음수 쪽도 범위가 같다. 여러 파일 시스템을 담는 compressor는 여전히 일부를 다시 번호 매겨야 한다(ReFS의 128비트 파일 ID도 그렇다).
+  >
+  > 모델의 최종 값에서 segment-local 그룹을 구분하려면 segment 정보가 필요하다. 그래서 `file node`에 **link group** 항목(전역 정수, 또는 (segment, 음수) 쌍)을 두고, link group의 일대일 이름 바꾸기만 다른 archive value는 같다고 정의했다.
 - 같은 그룹의 모든 노드는 내용이 같아야 한다(MUST). compressor는 이들이 같은 leaf block을 가리키게 하는 것이 좋다(SHOULD).
 - 같은 그룹의 노드들은 `link-group`과 `comment`를 뺀 나머지 extra가 같아야 한다(SHOULD).
   > mode, uid, 시각은 inode의 속성이므로 원래 같다. 그래도 MUST로 하지 않는 이유: 아래의 병합 규칙 때문에 그룹의 일관성은 최종 값에서만 판단할 수 있다.
@@ -266,11 +278,11 @@ aqr-entry-extra = {
 
 **`win-link-type`** (link node에만): Windows에서 해제할 때 만들 링크 종류이다. 없으면 decompressor가 정한다(§6.4).
 
-키 번호는 임시이다. `-7`은 플랫폼 중립 키 영역(-1..-6 다음), `-80`대는 Windows 전용 키 영역으로 두는 안이다. `-70`대가 Unix 전용인 것과 맞춘다.
+키 영역은 명세에 적었다. −1..−59는 플랫폼 중립, −60대는 Windows, −70대는 Unix, −80대는 macOS, −90대는 그 밖의 플랫폼이다.
 
 ## 6. 기존 절과의 상호작용
 
-### 6.1 segment 병합 [제안]
+### 6.1 segment 병합 [확정]
 
 §Merging segments의 규칙은 그대로 동작한다. "둘 다 디렉터리면 병합하고, 아니면 통째로 바꾼다"이므로 link node와 special node는 file node처럼 다뤄진다.
 
@@ -278,19 +290,19 @@ aqr-entry-extra = {
 - 따라서 **최종 값에서 link node 아래에는 아무것도 없다.** 모델 안의 어떤 경로도 링크를 지나지 않는다(원칙 2).
 - §Unencrypted Archive의 "같은 경로의 엔트리가 여러 개 있으면 안 된다(SHOULD NOT)"는 note가 "파일에만 해당한다"고 말하는 부분은 "디렉터리가 아닌 엔트리에만 해당한다"로 고친다.
 
-### 6.2 partial access [제안]
+### 6.2 partial access [확정]
 
 - §Partial access의 note에서 "until the path or one of its ancestors is found as a file"을 "as a non-directory entry"로 고친다.
 - 모델 안에서 경로를 찾는 것은 `lstat`의 의미이다. 링크를 따라가지 않는다.
   > 도구가 `cat a/b`처럼 링크를 따라가는 조회를 제공할 수는 있다. 그것은 도구의 일이다. 그럴 때는 따라간 횟수에 상한을 둬야 한다(Linux의 `MAXSYMLINKS`는 40이다).
 
-### 6.3 compressor [제안]
+### 6.3 compressor [확정]
 
 - 기본적으로 symlink를 따라가지 않아야 한다(SHOULD). 따라가는 옵션(`tar -h`에 해당)을 줄 때 순환 감지는 compressor의 몫이다.
 - hard link를 감지하면(`st_nlink > 1`, 같은 `(st_dev, st_ino)`) `link-group`을 붙인다. 아카이브 대상 트리 바깥에 있는 링크는 알 수 없으므로 그룹이 하나뿐인 노드가 생길 수 있다. 그런 그룹은 쓰지 않는 것이 좋다(SHOULD NOT).
-- 기존 아카이브에 segment를 덧붙일 때, 기존 그룹에 새 링크를 넣으려면 기존 그룹 번호를 알아야 한다. 이미 있는 metadata block을 읽어야 한다는 뜻이다. 그렇게 하지 않는 compressor는 새 번호를 쓴다. 그러면 기존 그룹과 묶이지 않을 뿐, 틀린 결과는 나오지 않는다.
+- 기존 아카이브에 segment를 덧붙일 때, 기존 그룹에 새 링크를 넣으려면 기존 그룹 번호를 알아야 한다. 이미 있는 metadata block을 읽어야 한다는 뜻이다. 그렇게 하지 않는 compressor는 segment-local 번호(0 이상)를 쓴다. 그러면 기존 그룹과 묶이지 않을 뿐, 틀린 결과는 나오지 않는다. 한 번의 실행에서 segment를 주기적으로 나눌 때는 compressor가 번호를 모두 알고 있으므로, segment를 넘는 그룹에 음수를 쓰면 된다.
 
-### 6.4 해제 [제안]
+### 6.4 해제 [확정]
 
 §Extraction에 다음을 추가한다.
 
@@ -301,7 +313,8 @@ aqr-entry-extra = {
   >
   > - 앞의 방법을 쓰는 것이 GNU tar(1.35 `extract.c`)이다. `-P`가 없을 때, 대상이 절대 경로이거나 `..` 성분을 담은 symlink는 즉시 만들지 않는다. 대신 모드 0인 빈 파일을 `O_EXCL`로 만들어 둔다. `..`을 담은 hard link와 자리 표시 파일을 가리키는 hard link도 같다. 해제가 끝나면 자리 표시 파일의 (dev, ino, birthtime)이 그대로인지 확인하고 링크로 바꾼다. 다른 엔트리가 그 자리를 덮었으면 링크를 만들지 않는다. 그래서 링크를 통한 쓰기가 일어나지 않는다.
   > - 뒤의 방법에 가까운 것이 libarchive의 `ARCHIVE_EXTRACT_SECURE_SYMLINKS`이다. 경로의 중간 성분이 디스크의 symlink이면 해제를 거부한다(`ARCHIVE_EXTRACT_UNLINK`가 있으면 그 링크를 지운다). bsdtar는 이것과 `SECURE_NODOTDOT`를 기본으로 켜고 `-P`로 끈다.
-- **대상이 바깥을 가리키는 링크.** 절대 경로이거나 `..`으로 대상 디렉터리를 벗어나는 링크를 *만드는 것*은 바깥에 쓰는 것이 아니다. 따라서 금지하지 않는다. 다만 그런 링크를 거부하는 모드를 제공하는 것이 좋다(SHOULD).
+- **대상이 바깥을 가리키는 링크.** **[확정]** 절대 경로이거나 대상 디렉터리를 벗어나는 링크는 명시적으로 요청받지 않으면 만들지 않고(MUST NOT) 보고한다(MUST). 요청할 방법을 제공해야 한다(SHOULD).
+  > 벗어나는지는 링크의 부모 디렉터리에서 시작해, archive value 안의 다른 link node를 따라가며 판단한다. 어휘적으로만 판단하면 `d/e/l -> ../../q`가 있을 때 `d/e/l/../..`를 `d`로 보지만 실제로는 대상 디렉터리의 부모에 닿는다.
   > 기존 도구의 상황은 다음과 같다.
   > - libarchive의 secure 플래그는 이런 링크를 거부하지 *않는다*. `SECURE_NODOTDOT`와 `SECURE_NOABSOLUTEPATHS`는 엔트리 경로와 hard link 대상만 검사한다. symlink 대상은 검사 없이 `symlink()`에 넘긴다. bsdtar도 경로 재작성을 symlink 대상에는 일부러 적용하지 않는다(`tar/util.c`).
   > - GNU tar도 거부하지 않는다. 만들기를 미룰 뿐이다.
@@ -315,13 +328,13 @@ aqr-entry-extra = {
   > device 노드는 root로 해제할 때만 만들 수 있다. 그때 권한이 넓은 block device가 하나 생기면 그것으로 디스크 전체를 읽고 쓸 수 있다. FIFO는 권한 없이 만들 수 있지만 그 자체로는 위험하지 않다. 둘 다 끄는 것은 기본값을 단순하게 하려는 것이다.
 - **링크 자신의 메타데이터.** link node의 extra(시각, uid, mode)는 링크 자신의 것이다. 적용한다면 `lutimes`, `lchown` 같은 함수로 적용한다. 대상에 적용하면 안 된다(MUST NOT).
 
-### 6.5 `unix-mode`와 `S_IFMT` [제안]
+### 6.5 `unix-mode`와 `S_IFMT` [확정]
 
-**[제안]** `unix-mode`는 권한 비트(0o7777, 즉 setuid/setgid/sticky 포함)만 담는다. 파일 형식 비트(`S_IFMT`)를 넣으면 안 된다(MUST NOT). decompressor는 그 비트를 무시해야 한다(MUST).
+**[확정]** `unix-mode`는 권한 비트(0o7777, 즉 setuid/setgid/sticky 포함)만 담는다. 파일 형식 비트(`S_IFMT`)를 넣으면 안 된다(MUST NOT). decompressor는 그 비트를 무시해야 한다(MUST).
 
 > 노드 종류가 정본이다(원칙 3). `S_IFMT`가 함께 있으면 둘이 어긋날 수 있다. 이것으로 `zip-extras-design.md` §6의 3번이 해소된다.
 >
-> 이렇게 하면 `unix-mode`의 CDDL을 `uint .le 4095`로 좁힐 수 있다.
+> 명세의 CDDL은 `uint .le 4095`로 좁혔다. 따라서 그 비트가 있으면 decompressor가 무시하는 것이 아니라 CDDL 위반이다.
 
 ### 6.6 ZIP 변환 (`zip-extras-design.md`) [제안]
 
@@ -361,18 +374,18 @@ aqr-entry-extra = {
 
 ## 8. 열린 질문
 
-1. **FIFO와 device를 지금 정의할 것인가**, 번호만 예약할 것인가(§1.3). 이 문서는 정의하는 쪽을 제안한다.
-2. **`link_target`의 상한.** 엔트리 이름과 같이 두지 않는 것이 맞는지. 플랫폼별 상한은 다음과 같다.
+1. **FIFO와 device를 지금 정의할 것인가**, 번호만 예약할 것인가(§1.3). **보류.** 명세에는 Issue만 두었다. 지금은 `special_kind` 1–3도 unknown node이다.
+2. **[해결]** **`link_target`의 상한.** 두지 않는다. 플랫폼별 상한은 다음과 같다.
    - Linux VFS: `PATH_MAX`(4096, NUL 포함)이므로 4095바이트이다. 파일 시스템이 더 좁힐 수 있다. ext4는 블록 크기 − 1이고, tmpfs는 페이지 크기 − 1이고, XFS는 1023바이트이다.
    - macOS(APFS): 1023바이트이다(`PATH_MAX` 1024). 직접 시험했다.
    - FreeBSD: 1023바이트이다(`copyinstr`에 `MAXPATHLEN` 1024).
    - Windows: reparse data 전체가 16 KiB(`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`)이다. SubstituteName과 PrintName을 함께 담으면 UTF-16으로 약 8000자이다. 이 값은 구조체에서 계산한 것이고 Microsoft 문서에 적힌 값은 아니다.
    > 모든 플랫폼에서 만들 수 있는 길이는 1023바이트까지이다. 상한을 둔다면 이 값이 후보이다. 두지 않는다면 "해제 시 만들 수 없으면 보고하라"(§6.4)로 충분하다.
-3. **모르는 `special_kind`의 처리.** invalid archive로 할지, 모델에 "unknown node"를 두고 해제 시 보고하게 할지(§5.1).
-4. **device 번호의 출처 OS.** 기록할 것인가. 기록한다면 모델의 일부로 할지 extra로 할지.
-5. **`link-group`의 범위.** 아카이브 전체로 둘지, segment 안으로 좁힐지. 좁히면 segment를 덧붙일 때 기존 그룹과 묶을 수 없다. 대신 compressor가 기존 metadata를 읽지 않아도 된다.
-6. **link node의 대상을 Windows의 드라이브 문자 절대 경로(`C:/…`)로 둘 때의 이식성.** 어떤 정규화도 하지 않고 플랫폼에 맡기는 것이 맞는지.
-7. **해제 시 바깥을 가리키는 링크를 기본으로 거부할지.** 이 문서는 "모드를 제공하라(SHOULD)"까지만 요구한다. 기본값을 안전 쪽으로 둘지(unrar, 7-Zip 25.01 이후)는 도구의 결정으로 남긴다. tar 계열은 거부하지 않는다(§6.4).
+3. **[해결]** **모르는 `special_kind`의 처리.** unknown node를 두고, 해제 시 보고하고 그 노드만 거부한다(§5.1).
+4. **(보류)** **device 번호의 출처 OS.** 기록할 것인가. 기록한다면 모델의 일부로 할지 extra로 할지.
+5. **[해결]** **`link-group`의 범위.** 부호로 나눈다. 0 이상은 segment-local, 음수는 전역(§5.3).
+6. **[해결]** **link node의 대상을 Windows의 드라이브 문자 절대 경로(`C:/…`)로 둘 때의 이식성.** `\`→`/` 말고는 플랫폼에 맡긴다.
+7. **[해결: 기본으로 거부, 옵션으로 허용]** **해제 시 바깥을 가리키는 링크를 기본으로 거부할지.** 이 문서는 "모드를 제공하라(SHOULD)"까지만 요구한다. 기본값을 안전 쪽으로 둘지(unrar, 7-Zip 25.01 이후)는 도구의 결정으로 남긴다. tar 계열은 거부하지 않는다(§6.4).
 
 ## 9. Action items
 
@@ -386,13 +399,13 @@ aqr-entry-extra = {
 
 ### 명세 (S)
 
-- [ ] **S1.** §Archive model에 link node, special node, link target을 추가한다(§4.2, §4.3).
-- [ ] **S2.** §Metadata block에 `num_specials`, 특수 엔트리 구조, `special_kind` 표를 추가한다(§5.1).
-- [ ] **S3.** §Interpreting a segment에 특수 엔트리의 해석 단계를 추가한다.
-- [ ] **S4.** §Merging segments, §Unencrypted Archive의 note, §Partial access의 note에서 "file"을 "non-directory"로 고친다(§6.1, §6.2).
-- [ ] **S5.** §Extraction의 Issue를 지우고 §6.4의 규칙을 넣는다.
-- [ ] **S6.** 여러 `file_param`이 같은 leaf block을 가리킬 수 있다고 명시한다(§0).
-- [ ] **S7.** §Optional metadata에 `link-group`과 `win-link-type`을 추가하고, `unix-mode`를 권한 비트로 좁힌다(§5.3, §6.5). 0x000d 관련 TODO 주석을 지운다.
+- [x] **S1.** §Archive model에 link node, link target을 추가한다(§4.2, §4.3). special node 대신 unknown node를 넣었다.
+- [x] **S2.** §Metadata block에 `num_specials`, 특수 엔트리 구조, `special_kind` 표를 추가한다(§5.1).
+- [x] **S3.** §Interpreting a segment에 특수 엔트리의 해석 단계를 추가한다.
+- [x] **S4.** §Merging segments, §Unencrypted Archive의 note, §Partial access의 note에서 "file"을 "non-directory"로 고친다(§6.1, §6.2).
+- [x] **S5.** §Extraction의 Issue를 지우고 §6.4의 규칙을 넣는다.
+- [x] **S6.** 여러 `file_param`이 같은 leaf block을 가리킬 수 있다고 명시한다(§0).
+- [x] **S7.** §Optional metadata에 `link-group`과 `win-link-type`을 추가하고, `unix-mode`를 권한 비트로 좁힌다(§5.3, §6.5). 0x000d 관련 TODO 주석을 지운다.
 - [ ] **S8.** `zip-extras-design.md`의 §3.4, §5, §6의 3번을 이 문서에 맞춘다(§6.6).
 
 ### 구현 (I)
