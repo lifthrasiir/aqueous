@@ -1019,7 +1019,7 @@ reconstructs other data).
 The reference decoder also rejects: more blocks than `N + 8(b + 1) + 2^20`, with `b` the bit
 position in the main stream where the block count starts; and data of 2^32 − 1 bytes or more
 (its tables hold 32-bit positions), for which this document does not define the rule's
-tables.
+tables. `deconstruct` keeps to tighter limits; see [Domain](#domain).
 
 ## Formula module
 
@@ -1032,18 +1032,18 @@ in [Rebuilding the stream](#rebuilding-the-stream).
 
 The module rebuilds any byte string that `deconstruct` reads as a raw DEFLATE stream (RFC
 1951; no zlib or gzip wrapper, no preset dictionary) followed by trailing bytes, the bytes
-after the one holding the final block's last bit:
+after the one holding the final block's last bit. The stream must be valid under RFC 1951 up
+to the end of its final block, with two relaxations:
 
-- the blocks run up to the first with BFINAL set, and none has type 3;
-- a stored block's NLEN is the complement of its LEN;
-- in a dynamic block (where HLIT up to 288 and HDIST up to 32 are allowed), none of its
-  three codes is oversubscribed (incomplete codes are allowed); a code length 16 is not the
-  first; the code lengths do not run past HLIT + HDIST; and symbol 256 has a nonzero length;
-- every symbol read has a code; no literal/length symbol is 286 or 287 and no distance symbol
-  is 30 or 31; no distance reaches before the start of the data;
-- the input does not end before the final block does;
-- within the limits of a record: `N < 2^32 − 1`, at most 2^30 trailing bytes, and at most
-  `N + 2^20` blocks.
+- a dynamic header may declare HLIT up to 288 and HDIST up to 32, as long as the stream codes
+  no literal/length symbol 286 or 287 and no distance symbol 30 or 31;
+- its codes may be incomplete (but not oversubscribed), as long as every symbol read has a
+  code.
+
+It must also be within the limits of a record: `N < 2^32 − 1`, at most 2^30 trailing bytes
+(see [Blocks](#blocks)), and at most `N + 2^20` blocks. The last is tighter than the
+decoder's bound in [Implementation limits](#implementation-limits), which allows another
+`8(b + 1)`, so that it holds whatever precedes the block count.
 
 `deconstruct` rejects any other input. A formula holds such input as it is rather than as an
 application of this module.
@@ -1063,9 +1063,9 @@ instance, with the rule `literals` (in the catalog or in full):
 
 ### Parameters and inputs
 
-**Parameters**: none (empty). An application with parameters is invalid.
+**Parameters**: none (empty).
 
-**Inputs**: exactly two, in this order. Any other count is invalid.
+**Inputs**: exactly two, in this order.
 
 | slot | content | already compressed |
 |---|---|---|
@@ -1074,7 +1074,11 @@ instance, with the rule `literals` (in the catalog or in full):
 
 The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`
 and `flate/record` in recons-dispatch, slices of `pdf/pool-<class>` and `pdf/meta` in
-pdf-recons). The rebuilt stream must have the length that the application gives.
+pdf-recons).
+
+The module fails on any parameters, any other count of inputs, an invalid record that it
+detects, or a rebuilt stream whose length is not the application's declared output size.
+The specification ("Module execution") makes such a failure an invalid archive failure.
 
 ### Encoder obligations
 

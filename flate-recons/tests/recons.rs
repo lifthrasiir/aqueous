@@ -229,7 +229,7 @@ fn literals_rule_in_one_segment_round_trips() {
 #[test]
 fn too_many_blocks_are_not_deconstructed() {
     // Empty fixed blocks of 10 bits each: BFINAL, BTYPE 1, and the end of block (seven 0s).
-    let n = (1 << 20) + 4096;
+    let n: usize = (1 << 20) + 4096;
     let mut raw = vec![0u8; (n * 10).div_ceil(8)];
     for i in 0..n {
         let at = i * 10 + 1;
