@@ -1,9 +1,0 @@
-[package]
-name = "recons-num"
-version = "0.1.0"
-edition = "2024"
-description = "Numbers printed as ASCII text, as integers plus how they were printed: bit-exact, the same everywhere"
-publish = false
-
-[dependencies]
-zmij = "1"

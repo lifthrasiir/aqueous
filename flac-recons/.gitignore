@@ -1,4 +1,0 @@
-/target
-/corpus
-fuzz_failure_*
-/.venv

@@ -1,0 +1,17 @@
+[package]
+name = "aqr-png"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless PNG recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula" }
+aqr-flate = { path = "../aqr-flate" }
+crc32fast = "1.5"
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+flate-zoo = { path = "../flate-zoo" }

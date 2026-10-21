@@ -1,0 +1,24 @@
+[package]
+name = "aqr-mp3"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+aqr-common = { path = "../aqr-common", features = ["zstd"] }
+aqr-formula = { path = "../aqr-formula" }
+memchr = "2"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+zstd = "0.13"
+
+[[bin]]
+name = "mp3r"
+path = "src/main.rs"
+
+# Named apart from aqr-flac's, in the workspace's target directory.
+[[bin]]
+name = "mp3r-train"
+path = "src/bin/train.rs"
+
+[[example]]
+name = "mp3r-hot"
+path = "examples/hot.rs"

@@ -1,6 +1,0 @@
-/target
-/cache/
-/corpus/
-.DS_Store
-/third_party/
-/bench/target/

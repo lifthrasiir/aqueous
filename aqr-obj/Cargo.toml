@@ -1,0 +1,14 @@
+[package]
+name = "aqr-obj"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless Wavefront OBJ recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-num = { path = "../aqr-num" }
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+memchr = "2"
+aqr-formula = { path = "../aqr-formula" }

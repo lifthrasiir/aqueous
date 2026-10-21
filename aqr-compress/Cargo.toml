@@ -1,0 +1,23 @@
+[package]
+name = "aqr-compress"
+version = "0.1.0"
+edition = "2024"
+description = "Picks the recompressor for a file by its magic bytes, gives the result as an entry formula, and stores it as an Aqueous archive"
+publish = false
+
+[dependencies]
+aqr-formula = { path = "../aqr-formula" }
+aqr-decompress = { path = "../aqr-decompress" }
+aqr-exe = { path = "../aqr-exe", default-features = false, features = ["encode"] }
+aqr-flate = { path = "../aqr-flate" }
+aqr-flac = { path = "../aqr-flac" }
+aqr-jpeg = { path = "../aqr-jpeg" }
+aqr-mp3 = { path = "../aqr-mp3" }
+aqr-pdf = { path = "../aqr-pdf" }
+aqr-png = { path = "../aqr-png" }
+aqr-psd = { path = "../aqr-psd" }
+aqr-sqlite = { path = "../aqr-sqlite" }
+
+[dev-dependencies]
+aqr-common = { path = "../aqr-common" }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }

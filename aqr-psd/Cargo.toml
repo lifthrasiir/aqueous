@@ -1,0 +1,16 @@
+[package]
+name = "aqr-psd"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless PSD/PSB recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-flate = { path = "../aqr-flate" }
+aqr-png = { path = "../aqr-png" }
+aqr-jpeg = { path = "../aqr-jpeg" }
+aqr-formula = { path = "../aqr-formula" }
+rayon = "1.12.0"
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }

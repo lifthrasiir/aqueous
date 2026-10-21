@@ -1,0 +1,5 @@
+/corpus/
+/cache/
+.DS_Store
+/bench/target/
+/.venv/

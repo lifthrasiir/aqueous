@@ -1,0 +1,23 @@
+[package]
+name = "aqr-exe"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["encode", "decode"]
+encode = []
+decode = []
+
+[dependencies]
+bytemuck = { version = "1.16.0", features = ["must_cast"] }
+log = "0.4.21"
+mini-alloc = "0.4.2"
+
+[dev-dependencies]
+zstd = { version = "0.13", features = ["zstdmt"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(trace_decode)', 'cfg(trace_encode)'] }

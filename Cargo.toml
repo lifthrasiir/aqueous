@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = [
+    "aqr",
+    "aqr-common",
+    "aqr-formula",
+    "aqr-num",
+    "aqr-compress",
+    "aqr-decompress",
+    "aqr-exe",
+    "aqr-flac",
+    "aqr-flate",
+    "aqr-git",
+    "aqr-jpeg",
+    "aqr-mp3",
+    "aqr-obj",
+    "aqr-pdf",
+    "aqr-png",
+    "aqr-psd",
+    "aqr-sqlite",
+]
+# flate-zoo is a submodule with a workspace of its own; the benches are standalone, with the
+# checkouts of third_party/ (some of them workspaces of their own).
+exclude = ["flate-zoo", "third_party", "aqr-flate/bench", "aqr-png/bench"]
+
+[profile.release]
+debug = 1
+lto = "fat"
+codegen-units = 1
+
+[profile.release.package.aqr-flac]
+debug = true
+
+[profile.release.package.aqr-jpeg]
+debug = true
+
+[profile.release.package.aqr-mp3]
+debug = true
+
+# aqr-exe as a Wasm module (aqr-exe/build-wasm.bat).
+[profile.release-wasm]
+inherits = "release"
+debug = false
+strip = true

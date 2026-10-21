@@ -1,0 +1,18 @@
+[package]
+name = "aqr-decompress"
+version = "0.1.0"
+edition = "2024"
+description = "Runs the modules of entry formulas natively, and decompresses Aqueous archives with them"
+publish = false
+
+[dependencies]
+aqr-formula = { path = "../aqr-formula" }
+aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"] }
+aqr-flate = { path = "../aqr-flate" }
+aqr-flac = { path = "../aqr-flac" }
+aqr-jpeg = { path = "../aqr-jpeg" }
+aqr-mp3 = { path = "../aqr-mp3" }
+aqr-pdf = { path = "../aqr-pdf" }
+aqr-png = { path = "../aqr-png" }
+aqr-psd = { path = "../aqr-psd" }
+aqr-sqlite = { path = "../aqr-sqlite" }

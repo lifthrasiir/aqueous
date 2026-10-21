@@ -1,0 +1,16 @@
+[package]
+name = "aqr-sqlite"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless SQLite3 database recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula" }
+zstd = "0.13"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[features]
+# Heap use at phase marks, to stderr.
+memprof = ["aqr-common/memprof"]

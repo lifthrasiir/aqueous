@@ -1,0 +1,15 @@
+[package]
+name = "aqr"
+version = "0.1.0"
+edition = "2024"
+description = "Command-line tools over the aqr-* recompressors and Aqueous archives"
+publish = false
+
+[dependencies]
+aqr-compress = { path = "../aqr-compress" }
+aqr-decompress = { path = "../aqr-decompress" }
+aqr-formula = { path = "../aqr-formula" }
+
+[[bin]]
+name = "aqr-show"
+path = "src/bin/show.rs"
