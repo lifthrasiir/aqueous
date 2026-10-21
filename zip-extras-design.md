@@ -113,24 +113,24 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 | 0x6542 | BeOS/Haiku | A I | O | local/central 형식이 다르다. |
 | 0x6854 | THEOS | A I | O | |
 | 0x7075 | Info-ZIP Unicode Path ("up") | A I | **M** | §3.2. |
-| 0x7441 | AtheOS/Syllable | A I | O | local/central 형식이 다르다 *(확인 필요)*. |
+| 0x7441 | AtheOS/Syllable | A I | O | BeOS 0x6542의 변형이다(숫자가 little-endian). local/central 형식이 다르다. central은 BSize와 Flags만 담은 5바이트이다(`extrafld.txt`). |
 | 0x756e | ASi UNIX | A I | **P** | mode, uid, gid는 흡수한다. symlink 대상과 SizDev는 남는다. §3.4. |
 | 0x7855 | Info-ZIP UNIX type 2 ("Ux") | A I | **M** | §3.3. |
 | 0x7875 | Info-ZIP UNIX type 3 ("ux") | A I | **M** | version 1만 흡수한다. 다른 version은 O. §3.3. |
 | 0xa220 | Microsoft Open Packaging Growth Hint | A I | **X** | 제자리 편집용으로 확보해 둔 빈 공간일 뿐이다. |
-| 0xfb4a | SMS/QDOS | I Z | O | APPNOTE는 0xfd4a로 적었다. Info-ZIP과 zipdetails는 0xfb4a이므로 APPNOTE의 오기로 보인다 *(확인 필요)*. 두 ID 모두 O로 둔다. |
+| 0xfb4a | SMS/QDOS | I Z | O | APPNOTE는 0xfd4a로 적었으나 오기이다. Info-ZIP 구현(`unzpriv.h`와 `zip.h`의 `EF_QDOS 0xfb4a`, QDOS 포트가 바이트 `4A FB`를 쓰는 `qdos.c`)과 zipdetails는 모두 0xfb4a이다. 0xfd4a를 쓰는 구현은 찾지 못했다(libarchive, CPython, 7-Zip, minizip, libzip, commons-compress). 0xfd4a도 O로 둔다. 미등록 ID는 원래 O이기 때문이다. |
 
 ### 2.3 APPNOTE에만 있는 것
 
 | ID | 이름 | 출처 | 처분 | 비고 |
 |---|---|---|---|---|
-| 0x1986 | Pixar USD header ID | A Z | **X** | USDZ의 64바이트 정렬용 패딩으로 알려져 있다 *(확인 필요)*. |
+| 0x1986 | Pixar USD header ID | A Z | **X** | USDZ의 64바이트 정렬용 패딩이다. OpenUSD `pxr/usd/sdf/zipFile.cpp`가 "Arbitrarily chosen, unreserved ID"로 쓰고, data는 0으로 채운다. |
 | 0x9901 | AE-x (WinZip AES) | A Z | **X** | 암호화(§4.4). 실제 압축 방식도 이 필드에 들어 있지만, 변환 시 이미 소비된다. |
 | 0x9902 | unknown | A | O | |
 | 0xa11e | Data Stream Alignment (Commons Compress) | A Z | **X** | ZIP 안에서 데이터 위치를 정렬하라는 요구와 패딩이다. ZIP을 다시 쓰지 않으므로 의미가 없다. |
 | 0xcafe | Java JAR marker | A Z | **X** | 크기 0. 이 ZIP 파일 자체가 실행 가능한 JAR라는 표시이다. 파일이 아니라 컨테이너에 대한 정보이다. |
 | 0xd935 | Android ZIP Alignment | A Z | **X** | 0xa11e와 같은 이유. |
-| 0xe57a | ALZip (Korean) code page | A Z | **M** / O | 이름을 해당 코드 페이지로 디코딩해 WTF-8로 저장했으면 흡수된다(M). 디코딩하지 못해 이름을 raw(`C1` 접두)로 저장했을 때만 보존한다(O). 필드 형식 *(확인 필요)*. |
+| 0xe57a | ALZip (Korean) code page | A Z | **M** / O | data는 Windows 코드 페이지 번호(u32le, 예: 949, 932) 하나이다. 이름을 해당 코드 페이지로 디코딩해 WTF-8로 저장했으면 흡수된다(M). 디코딩하지 못해 이름을 raw(`C1` 접두)로 저장했을 때만 보존한다(O). 형식의 근거는 역공학 글 하나뿐이다. SharpZipLib issue #657이 같은 해석을 따른다. local과 central 중 어디에 오는지는 확인하지 못했다. |
 
 ### 2.4 두 레지스트리 모두에 없는 것
 
@@ -140,10 +140,10 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 |---|---|---|---|---|
 | 0x10c5 | minizip CMS signature | minizip-ng | **X** | central directory에 대한 서명이다. |
 | 0x1a51 | minizip Hash | minizip-ng | **D** | 비압축 내용의 MD5/SHA1/SHA256. 한 엔트리에 여러 개 올 수 있다(§4.2). |
-| 0x4850 | Info-ZIP PHold ("PH") | Z | **X** | 나중에 다른 필드로 바꿔 쓰려고 잡아 둔 자리로 보인다 *(확인 필요)*. |
+| 0x4850 | Info-ZIP PHold ("PH") | Z | O | zipdetails 4.004(2024)가 이름만 넣었다. 공개된 Info-ZIP 소스(Zip 3.0, UnZip 6.0)와 APPNOTE에는 없다. 아마 미공개 Zip 3.1 계열에서 왔을 것이다. 이름으로 보면 자리 표시(X)일 것 같지만, 확인할 수 없으므로 원칙 4에 따라 O로 둔다. |
 | 0x564b | Key-Value Pairs ("KV", SOZip) | Z | O | 서명 `"KeyValuePairs"` 뒤에 키-값 목록이 온다. 범용 메타데이터이다. |
-| 0x5a4c | ZipArchive Unicode filename ("LZ") | Z | **M** | Artpol ZipArchive. 형식 *(확인 필요)*. 형식을 확인하기 전까지는 O로 취급한다. |
-| 0x5a4d | ZipArchive offsets array ("MZ") | Z | **X** | 오프셋이다. |
+| 0x5a4c | ZipArchive code page / filename ("ZL") | Z | **M** | Artpol ZipArchive의 `ZIP_EXTRA_ZARCH_NAME`이다. central에만 있다. 이름과 달리 Unicode가 아니라 코드 페이지 정보이다. §3.2. |
+| 0x5a4d | ZipArchive offsets array ("MZ") | Z | **X** | ZipArchive의 `ZIP_EXTRA_ZARCH_SEEK`이다. 4.6.7 소스에는 정의만 있고 쓰는 곳이 없다. 이름으로 보아 오프셋이다. |
 | 0x6c78 | libarchive "xl" | libarchive | **M** | 스트리밍 추출을 위해 central 헤더의 version made by, 내부/외부 속성, 주석을 local 헤더에 복제한 것이다. 원본 central 헤더 필드를 매핑하는 과정에서 흡수된다. |
 | 0x9903 | WinZip Reference | Z | **X** | 압축 방식 92(Reference, WinZip 25+)와 짝이다. 다른 엔트리를 가리키는 중복 제거 참조이다. 변환 시 참조를 풀고, 중복 제거는 Aqueous가 스스로 한다. |
 | 0xcdcd | minizip Central Directory | minizip-ng | **X** | central directory 암호화/서명 체계의 일부이다. |
@@ -185,7 +185,7 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 1. 0x7075 (version 1, NameCRC32가 헤더 이름과 일치). CRC가 다르면 APPNOTE대로 무시한다.
 2. general purpose bit 11(EFS)이 켜진 헤더 이름. UTF-8로 해석한다.
 3. 0x554e. UTF-16LE를 WTF-8로 옮긴다. lone surrogate도 무손실로 옮겨진다.
-4. 0x5a4c *(형식 확인 필요)*.
+4. 0x5a4c의 Encoded Filename을 Filename Code Page로 디코딩한 결과. Encoded Filename이 없고 code page만 있으면 헤더 이름을 그 코드 페이지로 디코딩한다.
 5. 0xe57a가 지정한 코드 페이지로 헤더 이름을 디코딩한 결과.
 6. 그 밖: compressor가 판단한 인코딩으로 디코딩한다. 판단할 수 없으면 raw(`C1` 접두)로 저장한다.
 
@@ -270,5 +270,5 @@ X로 분류된 서명(0x0007, 0x0014–0x0016, 0x10c5)은 변환하면 사라진
 2. §4.2: 중복 표현을 채택할 것인가.
 3. `unix-mode`가 `S_IFMT` 비트를 포함하는지.
 4. 0x5455의 2038년 이후 값 해석(부호 있는 32비트 vs 부호 없는 32비트).
-5. *(확인 필요)* 항목들, 즉 0x1986, 0x4850, 0x5a4c, 0xe57a의 형식과 0xfb4a/0xfd4a 중 어느 쪽이 맞는지 원 구현 소스로 확인해야 한다.
+5. ~~*(확인 필요)* 항목들, 즉 0x1986, 0x4850, 0x5a4c, 0xe57a의 형식과 0xfb4a/0xfd4a 중 어느 쪽이 맞는지.~~ 0x4850만 남았다. 0xe57a는 근거가 역공학 하나이다. 0x1986, 0x5a4c, 0xfb4a는 원 구현 소스로 확인했다(§2).
 6. D 분류의 다이제스트가 맞지 않을 때, 버릴 것인가 아니면 손상 신호로 볼 것인가. 변환 원본이 손상되었을 가능성이 있다.

@@ -9,7 +9,7 @@ Aqueous 아카이브 모델에 symbolic link, hard link, device 파일 같은 �
 - **[잠정]** 방향은 합의했으나 세부는 열려 있는 것
 - **[제안]** 제안되었으나 아직 검토하지 않은 것
 
-출처를 다시 확인하지 않은 사실에는 *(확인 필요)*를 붙였다. 다른 포맷과 OS에 대한 서술은 기억에 기반하며, 이번에 원문을 다시 확인하지 않았다(§9의 R 항목).
+출처를 다시 확인하지 않은 사실에는 *(확인 필요)*를 붙였다. 다른 포맷과 OS에 대한 서술은 2026-10-21에 명세와 구현 소스로 다시 확인했다(§9의 R 항목). 확인하지 못한 것은 본문에 그렇게 적었다.
 
 관련 코드:
 
@@ -48,7 +48,8 @@ Aqueous 아카이브 모델에 symbolic link, hard link, device 파일 같은 �
 symlink가 없으면 깨지는 흔한 트리:
 
 - 공유 라이브러리 버전 체인(`libfoo.so -> libfoo.so.1 -> libfoo.so.1.2.3`). 해제한 결과가 동작은 해도 용량이 세 배가 된다.
-- macOS `.framework` 번들의 `Versions/Current`와 최상위 링크. 링크를 복사로 바꾸면 코드 서명 검증이 실패한다 *(확인 필요)*.
+- macOS `.framework` 번들의 `Versions/Current`와 최상위 링크. 링크를 복사로 바꾸면 코드 서명 검증이 실패한다.
+  > macOS 27에서 ad-hoc 서명한 프레임워크를 `cp -RL`로 복사해 확인했다. 번들 최상위의 `codesign -v`는 "bundle format is ambiguous (could be app or framework)"로 실패한다. `Versions/A`만 검증하면 통과한다. 번들 안의 리소스 symlink는 서명이 봉인한다. 그것을 복사로 바꾸면 `Versions/A` 검증도 "a sealed resource is missing or invalid"로 실패한다.
 - 소스 트리와 git 작업 트리(git의 mode 120000). `node_modules/.bin`, monorepo의 workspace 링크.
 - 홈 디렉터리 백업, rootfs, 컨테이너 이미지 레이어.
 
@@ -64,7 +65,11 @@ symlink가 없으면 깨지는 흔한 트리:
 
 hard link가 쓰이는 곳:
 
-- rootfs. 같은 바이너리가 여러 이름으로 링크되어 있는 경우가 흔하다(예: git의 내장 명령, 일부 배포판의 coreutils) *(확인 필요)*.
+- rootfs. 같은 바이너리가 여러 이름으로 링크되어 있는 경우가 흔하다.
+  - macOS 27의 시스템 볼륨에는 `/usr/bin`, `/usr/sbin`, `/usr/libexec` 아래에만 링크 수가 2 이상인 파일이 385개 있다. 개발 도구 shim 하나가 78개 이름을 갖고, `at`/`atq`/`atrm`도 한 파일이다.
+  - Debian `perl-base`의 `/usr/bin/perl`과 `perl5.x.y`는 hard link이다(`debian/rules`의 `ln`).
+  - upstream의 기본 설치가 hard link인 경우도 있다. git `make install`은 내장 명령(`git-add` 등)을, e2fsprogs는 `mkfs.ext*`와 `fsck.ext*`를 hard link로 만든다. 다만 Debian과 CentOS Stream의 git, Debian의 e2fsprogs는 이를 symlink로 바꾼다. 따라서 이 경우는 직접 빌드해 설치한 트리에서 나온다.
+  - coreutils를 hard link로 설치하는 배포판은 찾지 못했다. single-binary 빌드는 symlink나 shebang 스크립트를 쓴다.
 - `rsync --link-dest`나 그와 비슷한 방식으로 만든 스냅샷 백업. 수십 개의 스냅샷이 대부분의 파일을 공유한다.
 - 패키지 관리자의 저장소(pnpm의 content-addressable store 등).
 
@@ -93,8 +98,8 @@ Aqueous의 주 용례(배포, 백업, 재압축)에서 이것들이 핵심은 �
 | **cpio (newc)** | `S_IFLNK` 모드, 내용이 대상 경로 | 같은 (dev, ino)를 가진 엔트리들. 내용은 마지막 하나에만 있다. | `S_IFCHR` 등의 모드와 `rdevmajor`/`rdevminor` |
 | **ZIP (Info-ZIP)** | external attributes의 `S_IFLNK`, 내용이 대상 경로 | 없음 | 없음 |
 | **ZIP (PKWARE)** | 0x000d 가변 부분 | 0x000d 가변 부분 | 0x000d 가변 부분(major/minor) |
-| **RAR5** | file system redirection 레코드: Unix symlink, Windows symlink, junction | 같은 레코드의 hard link 형식. 그 밖에 "file copy" 형식도 있다. | 없음 *(확인 필요)* |
-| **7z** | 표준은 없다. p7zip은 attribute 상위 16비트에 Unix 모드를 넣고 내용을 대상 경로로 쓴다. 7-Zip은 `-snl`로 지원한다. *(확인 필요)* | `-snh` *(확인 필요)* | 없음 |
+| **RAR5** | file system redirection 레코드(extra 0x05): 타입 1 Unix symlink, 2 Windows symlink, 3 junction. flag 0x01은 "대상이 디렉터리"이다. 대상은 NUL 없는 UTF-8이다. 데이터는 저장하지 않는다. | 같은 레코드의 타입 4(hard link). 타입 5(file copy)도 있다. 둘 다 대상은 아카이브 안의 다른 엔트리 경로이다(unrar는 해제 디렉터리 기준으로 풀어 `link`하거나 복사한다). | 없음. 레코드가 없고, unrar도 만들지 않는다. |
+| **7z** | 전용 필드가 없다. `-snl`을 주면 Unix에서는 attribute에 `0x8000`(`FILE_ATTRIBUTE_UNIX_EXTENSION`)과 `st_mode << 16`(`S_IFLNK`)을 넣고 내용을 `readlink` 결과로 쓴다. Windows에서는 `FILE_ATTRIBUTE_REPARSE_POINT`를 세우고 내용을 reparse data 버퍼 그대로 쓴다. `-snl`이 없으면 링크를 따라간다. | 없음. `-snh`의 `kpidHardLink`는 tar와 WIM 핸들러만 쓰고, 7z에는 일반 사본으로 들어간다. | 없음. attribute의 모드 비트에 `S_IFCHR` 등이 남을 뿐이다. |
 | **squashfs** | 별도 inode 형식, 대상은 inode 안에 있다. | inode 번호 공유 | 별도 inode 형식 |
 
 배울 점:
@@ -151,7 +156,14 @@ A **link target** is a struct with the following items:
 
 - `entry name`과 달리 `/`, `.`, `..`을 허용한다. 대상은 경로이고, 절대 경로일 수 있으며, 존재하지 않는 곳(dangling)을 가리킬 수 있다.
 - 구분자는 `/`이다. Windows에서 만든 compressor는 `\`를 `/`로 바꿔야 한다(MUST).
-  > Windows의 대상 경로에는 `/`가 올 수 없으므로 이 변환은 손실이 없다 *(확인 필요: `\\?\` 접두 경로와 NT 네이티브 경로의 처리)*.
+  > Windows의 파일 이름에는 `/`가 올 수 없다. 또 링크 내용의 `/`는 해석되지 않는다(Go의 `os.Symlink`가 "'/' does not work in link's content"라며 `\`로 바꾸고, Git for Windows도 그렇게 한다). 그래서 이 변환은 의미를 잃지 않는다. 해제할 때는 `/`를 `\`로 되돌린다.
+  >
+  > reparse data에는 SubstituteName과 PrintName이 있다. 정본은 SubstituteName이다. PrintName은 표시용이고 생략될 수 있다. 상대 링크(`SYMLINK_FLAG_RELATIVE`)는 접두 없이 그대로 저장된다. 절대 링크와 junction은 NT 경로이므로 `\??\`로 시작한다. compressor는 이것을 Go의 `os.Readlink`처럼 Win32 경로로 바꾼 뒤 구분자를 바꾸는 것이 좋다(SHOULD).
+  > - `\??\C:\foo` → `C:/foo`
+  > - `\??\UNC\server\share\x` → `//server/share/x`
+  > - `\??\Volume{GUID}\x` → `//?/Volume{GUID}/x`
+  >
+  > Rust의 `read_link`는 `\??\`를 `\\?\`로 바꾼 뒤 가능하면 일반 경로로 줄인다. 결과는 같은 방향이다. `\??\`가 그대로 새어 나오면 다른 플랫폼에서 의미가 없다.
 - 비어 있으면 안 된다. Linux에서는 빈 대상의 symlink를 만들 수 없다(`ENOENT`).
 - 길이 상한은 두지 않는다. 구현이 상한을 두는 것은 §Conformance의 일반 규칙을 따른다.
 
@@ -215,7 +227,19 @@ A **link target** is a struct with the following items:
 ### 5.2 device 번호 [제안]
 
 - major와 minor를 따로 저장한다. OS 고유의 `dev_t` 인코딩을 그대로 저장하지 않는다.
-  > `dev_t`에서 major/minor를 나누는 방식은 OS마다 다르다. Linux와 macOS, FreeBSD가 모두 다르다 *(확인 필요: 각 비트 배치)*. tar와 cpio도 major/minor를 따로 저장한다.
+  > `dev_t`에서 major/minor를 나누는 방식은 OS마다 다르다. tar와 cpio도 major/minor를 따로 저장한다.
+  >
+  > | OS | `dev_t` | major | minor |
+  > |---|---|---|---|
+  > | Linux(glibc) | 64비트 | 비트 8–19, 44–63 (32비트) | 비트 0–7, 20–43 (32비트) |
+  > | Linux(커널) | 32비트 | 12비트(0–4095) | 20비트 |
+  > | macOS | 32비트(부호 있음) | 비트 24–31 (8비트) | 비트 0–23 (24비트) |
+  > | FreeBSD 12+ | 64비트, 바이트 배치 `MMMmmmMm` | 32비트 | 32비트 |
+  > | FreeBSD 11 이하 | 32비트 | 비트 8–15 (8비트) | 나머지 24비트 |
+  > | NetBSD | 32비트 | Linux 커널의 인코딩과 같다 | |
+  > | OpenBSD | 32비트 | 비트 8–15 (8비트) | 비트 0–7, 16–31 (24비트) |
+  >
+  > Linux glibc는 32비트 major/minor를 표현하지만 커널은 12/20비트까지만 쓴다. 범위가 OS마다 다르므로 leb128로 저장한다. decompressor는 해제할 OS가 표현할 수 없는 번호를 만나면 실패하거나 보고해야 한다.
 - 번호의 의미는 OS에 따라 다르다. 같은 (major, minor)가 다른 OS에서는 다른 장치이다. 원본 OS를 기록할지는 §8의 4번이다.
 
 ### 5.3 optional metadata [제안]
@@ -273,8 +297,16 @@ aqr-entry-extra = {
 - **symlink를 통한 쓰기.** 모델 안에서는 어떤 경로도 링크를 지나지 않는다(§6.1). 그러나 해제 중에 만든 링크는 이미 있던 링크와 같은 위험을 만든다. 기존 규칙 "MUST NOT create, modify or remove any file outside the destination directory, including through symbolic links …already present"를 "…or created during the extraction"으로 넓힌다.
   > 고전적인 tar 공격(`a -> /etc` 다음에 `a/passwd`)은 Aqueous 모델에서는 표현할 수 없다. 남는 경로는 대소문자 구분이 없는 파일 시스템에서 `A`(링크)와 `a/x`(파일)가 충돌하는 경우이다(git CVE-2021-21300이 이 유형이다). 이것은 기존의 "같은 파일 시스템 이름으로 매핑되면 실패하거나 보고하라"는 규칙이 이미 막는다. 이 규칙을 확장하는 것은 그 보장을 명시하는 것이다.
   >
-  > 구현 방법으로는 모든 링크를 마지막에 만들거나(GNU tar는 위험한 링크를 자리 표시 파일로 두었다가 마지막에 바꾼다 *(확인 필요)*), `openat`과 `O_NOFOLLOW`나 Linux의 `RESOLVE_BENEATH`를 쓰는 방법이 있다. 명세는 결과만 요구한다.
-- **대상이 바깥을 가리키는 링크.** 절대 경로이거나 `..`으로 대상 디렉터리를 벗어나는 링크를 *만드는 것*은 바깥에 쓰는 것이 아니다. 따라서 금지하지 않는다. 다만 그런 링크를 거부하는 모드를 제공하는 것이 좋다(SHOULD). libarchive의 `ARCHIVE_EXTRACT_SECURE_SYMLINKS`/`SECURE_NODOTDOT`와 같은 것이다.
+  > 구현 방법으로는 모든 링크를 마지막에 만들거나, `openat`과 `O_NOFOLLOW`나 Linux의 `RESOLVE_BENEATH`를 쓰는 방법이 있다. 명세는 결과만 요구한다.
+  >
+  > - 앞의 방법을 쓰는 것이 GNU tar(1.35 `extract.c`)이다. `-P`가 없을 때, 대상이 절대 경로이거나 `..` 성분을 담은 symlink는 즉시 만들지 않는다. 대신 모드 0인 빈 파일을 `O_EXCL`로 만들어 둔다. `..`을 담은 hard link와 자리 표시 파일을 가리키는 hard link도 같다. 해제가 끝나면 자리 표시 파일의 (dev, ino, birthtime)이 그대로인지 확인하고 링크로 바꾼다. 다른 엔트리가 그 자리를 덮었으면 링크를 만들지 않는다. 그래서 링크를 통한 쓰기가 일어나지 않는다.
+  > - 뒤의 방법에 가까운 것이 libarchive의 `ARCHIVE_EXTRACT_SECURE_SYMLINKS`이다. 경로의 중간 성분이 디스크의 symlink이면 해제를 거부한다(`ARCHIVE_EXTRACT_UNLINK`가 있으면 그 링크를 지운다). bsdtar는 이것과 `SECURE_NODOTDOT`를 기본으로 켜고 `-P`로 끈다.
+- **대상이 바깥을 가리키는 링크.** 절대 경로이거나 `..`으로 대상 디렉터리를 벗어나는 링크를 *만드는 것*은 바깥에 쓰는 것이 아니다. 따라서 금지하지 않는다. 다만 그런 링크를 거부하는 모드를 제공하는 것이 좋다(SHOULD).
+  > 기존 도구의 상황은 다음과 같다.
+  > - libarchive의 secure 플래그는 이런 링크를 거부하지 *않는다*. `SECURE_NODOTDOT`와 `SECURE_NOABSOLUTEPATHS`는 엔트리 경로와 hard link 대상만 검사한다. symlink 대상은 검사 없이 `symlink()`에 넘긴다. bsdtar도 경로 재작성을 symlink 대상에는 일부러 적용하지 않는다(`tar/util.c`).
+  > - GNU tar도 거부하지 않는다. 만들기를 미룰 뿐이다.
+  > - unrar는 절대 경로이거나 안전하지 않은 상대 경로를 가리키는 링크를 기본으로 건너뛴다(`-ola`로 끈다).
+  > - 7-Zip은 25.01(CVE-2025-55188 대응)부터 위험한 링크를 기본으로 거부한다. 그 수준은 `-snld[N]`로 조정한다.
 - **링크를 만들 수 없는 플랫폼.** 권한이 없거나(Windows는 개발자 모드나 `SeCreateSymbolicLinkPrivilege`가 필요하다) 파일 시스템이 지원하지 않으면(FAT), 엔트리 이름 규칙과 마찬가지로 실패하거나 사용자에게 보고해야 한다(MUST). 조용히 다른 것을 만들면 안 된다(MUST NOT).
   > 대체물로 대상의 복사본을 만드는 것은 보고하는 한 허용된다. 대상이 아카이브 안에 있으면 복사할 수 있다.
 - **Windows의 링크 종류.** `win-link-type`이 있으면 따른다. 없으면 대상을 아카이브 안에서 해석해 디렉터리이면 디렉터리 symlink를, 그 밖에는 파일 symlink를 만드는 것이 좋다(SHOULD).
@@ -297,7 +329,8 @@ aqr-entry-extra = {
 
 - external attributes가 `S_IFLNK`인 엔트리(Info-ZIP 방식)는 link node가 된다. 원래 내용이 대상이다. 내용이 NUL을 담거나 비어 있으면 일반 파일로 두고 경고한다.
 - 0x000d와 0x756e는 P에서 **M**으로 바뀐다. 가변 부분의 symlink 대상은 link node로, device 번호는 special node로 간다.
-  - 0x000d의 hard link 형식은 대상 경로를 담는다 *(확인 필요)*. 그 경로의 엔트리와 같은 `link-group`을 준다.
+  - APPNOTE §4.5.7에 따르면 0x000d의 가변 부분은 link일 때 "the name of the original file"(NUL 없음, 길이 TSize − 12)이고, device일 때 major와 minor(각각 u32le)이다. hard link와 symlink를 구분하는 필드는 0x000d에 없다. external attributes의 모드(`S_IFLNK`인지)로 구분한다.
+  - hard link이면 그 이름을 아카이브 안의 경로로 보고, 그 경로의 엔트리와 같은 `link-group`을 준다. APPNOTE는 이것이 아카이브 경로라고 명시하지 않는다. 이름에 해당하는 엔트리가 없으면 일반 파일로 두고 경고한다.
 - `S_IFCHR`/`S_IFBLK`/`S_IFIFO` 모드의 엔트리도 special node가 된다.
 - `spec/index.bs` §Optional metadata의 TODO 주석 `UNIX attributes (ZIP extra 0x000d) - symlink target`을 지운다.
 - `zip-extras-design.md` §5 표에서 "symlink 대상, hard link, device" 행은 승격된 것으로 처리한다.
@@ -307,7 +340,8 @@ aqr-entry-extra = {
 - tar typeflag `1`(hard link): 가리키는 경로의 엔트리와 같은 `link-group`을 주고 내용을 공유한다. 가리키는 엔트리가 일반 파일이 아니면 경고한다.
 - tar typeflag `2`, pax `linkpath`: link node가 된다.
 - tar typeflag `3`/`4`/`6`: special node가 된다.
-- RAR5 redirection record의 Windows symlink와 junction에는 `win-link-type`을 준다. "file copy" 형식은 중복 제거로 흡수된다.
+- RAR5 redirection record의 Windows symlink와 junction에는 `win-link-type`을 준다. 대상이 디렉터리라는 flag는 symlink의 `file`/`directory` 구분이 된다. hard link(타입 4)는 tar typeflag `1`처럼 처리한다. "file copy"(타입 5)는 대상 엔트리의 내용을 공유하는 독립 파일이 되므로 중복 제거로 흡수된다.
+- 7z: attribute에 `0x8000`이 있고 상위 16비트가 `S_IFLNK`이면 내용이 대상인 link node이다. `FILE_ATTRIBUTE_REPARSE_POINT`가 있으면 내용은 reparse data 버퍼이다. symlink나 mount point 태그이면 대상을 꺼내 link node로 만들고, 그 밖의 태그는 범위 밖이다(§7). hard link 정보는 7z에 없다.
 - 그 밖의 Windows reparse point(WSL symlink, AF_UNIX, 클라우드 placeholder, dedup 등)는 범위 밖이다(§7).
 
 ### 6.8 그 밖
@@ -328,22 +362,27 @@ aqr-entry-extra = {
 ## 8. 열린 질문
 
 1. **FIFO와 device를 지금 정의할 것인가**, 번호만 예약할 것인가(§1.3). 이 문서는 정의하는 쪽을 제안한다.
-2. **`link_target`의 상한.** 엔트리 이름과 같이 두지 않는 것이 맞는지. Windows reparse data는 16 KiB가 상한이고 Linux 대상은 `PATH_MAX`(4096)가 상한이다 *(확인 필요)*.
+2. **`link_target`의 상한.** 엔트리 이름과 같이 두지 않는 것이 맞는지. 플랫폼별 상한은 다음과 같다.
+   - Linux VFS: `PATH_MAX`(4096, NUL 포함)이므로 4095바이트이다. 파일 시스템이 더 좁힐 수 있다. ext4는 블록 크기 − 1이고, tmpfs는 페이지 크기 − 1이고, XFS는 1023바이트이다.
+   - macOS(APFS): 1023바이트이다(`PATH_MAX` 1024). 직접 시험했다.
+   - FreeBSD: 1023바이트이다(`copyinstr`에 `MAXPATHLEN` 1024).
+   - Windows: reparse data 전체가 16 KiB(`MAXIMUM_REPARSE_DATA_BUFFER_SIZE`)이다. SubstituteName과 PrintName을 함께 담으면 UTF-16으로 약 8000자이다. 이 값은 구조체에서 계산한 것이고 Microsoft 문서에 적힌 값은 아니다.
+   > 모든 플랫폼에서 만들 수 있는 길이는 1023바이트까지이다. 상한을 둔다면 이 값이 후보이다. 두지 않는다면 "해제 시 만들 수 없으면 보고하라"(§6.4)로 충분하다.
 3. **모르는 `special_kind`의 처리.** invalid archive로 할지, 모델에 "unknown node"를 두고 해제 시 보고하게 할지(§5.1).
 4. **device 번호의 출처 OS.** 기록할 것인가. 기록한다면 모델의 일부로 할지 extra로 할지.
 5. **`link-group`의 범위.** 아카이브 전체로 둘지, segment 안으로 좁힐지. 좁히면 segment를 덧붙일 때 기존 그룹과 묶을 수 없다. 대신 compressor가 기존 metadata를 읽지 않아도 된다.
 6. **link node의 대상을 Windows의 드라이브 문자 절대 경로(`C:/…`)로 둘 때의 이식성.** 어떤 정규화도 하지 않고 플랫폼에 맡기는 것이 맞는지.
-7. **해제 시 바깥을 가리키는 링크를 기본으로 거부할지.** 이 문서는 "모드를 제공하라(SHOULD)"까지만 요구한다. bsdtar처럼 기본값을 안전 쪽으로 둘지는 도구의 결정으로 남긴다.
+7. **해제 시 바깥을 가리키는 링크를 기본으로 거부할지.** 이 문서는 "모드를 제공하라(SHOULD)"까지만 요구한다. 기본값을 안전 쪽으로 둘지(unrar, 7-Zip 25.01 이후)는 도구의 결정으로 남긴다. tar 계열은 거부하지 않는다(§6.4).
 
 ## 9. Action items
 
 ### 조사 (R)
 
-- [ ] **R1.** RAR5 redirection record와 7z(p7zip, 7-Zip `-snl`/`-snh`)의 실제 저장 형식을 확인해 §2와 §6.7을 고친다.
-- [ ] **R2.** PKWARE 0x000d의 가변 부분이 hard link일 때 무엇을 담는지 확인한다(§6.6).
-- [ ] **R3.** Linux, macOS, FreeBSD의 `dev_t` 비트 배치를 확인한다(§5.2).
-- [ ] **R4.** GNU tar의 자리 표시 파일 방식과 libarchive의 secure 플래그가 실제로 무엇을 막는지 확인한다(§6.4).
-- [ ] **R5.** macOS 프레임워크에서 symlink를 복사로 바꿨을 때 코드 서명이 깨지는지 확인한다(§1.1).
+- [x] **R1.** RAR5 redirection record와 7z(p7zip, 7-Zip `-snl`/`-snh`)의 실제 저장 형식을 확인해 §2와 §6.7을 고친다.
+- [x] **R2.** PKWARE 0x000d의 가변 부분이 hard link일 때 무엇을 담는지 확인한다(§6.6).
+- [x] **R3.** Linux, macOS, FreeBSD의 `dev_t` 비트 배치를 확인한다(§5.2).
+- [x] **R4.** GNU tar의 자리 표시 파일 방식과 libarchive의 secure 플래그가 실제로 무엇을 막는지 확인한다(§6.4).
+- [x] **R5.** macOS 프레임워크에서 symlink를 복사로 바꿨을 때 코드 서명이 깨지는지 확인한다(§1.1).
 
 ### 명세 (S)
 
