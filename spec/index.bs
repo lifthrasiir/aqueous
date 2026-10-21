@@ -889,6 +889,45 @@ They MUST agree with the actual positions of [=meta/entries=].
 
 </div>
 
+<h5 id=entry-names-from-zip>Entry names from ZIP</h5>
+
+<p><em>This section is non-normative.</em></p>
+
+<p>A ZIP archive [[APPNOTE]] stores the path of each entry as a byte sequence in the local and central headers,
+with components separated by `/`.
+Its encoding is not always known from the header alone,
+and several extra fields carry the Unicode version of the same path.
+A compressor converting a ZIP archive can determine the encoding of each component from the following sources,
+where earlier sources are preferred:</p>
+
+<ol>
+  <li>Extra field 0x7075 (Info-ZIP Unicode Path) of version 1 [[INFOZIP-EXTRAFLD]],
+  whose `NameCRC32` matches the CRC-32 of the path in the header.
+  The field holds the path in UTF-8.
+  A field with a mismatching CRC-32 is ignored as specified by [[APPNOTE]],
+  as it may have been left over by a tool that changed the path without updating the field.
+  <li>The path in the header, if bit 11 (language encoding flag) of the general purpose bit flag is set.
+  The path is in UTF-8.
+  <li>Extra field 0x554e (Xceed Unicode), which holds the path in UTF-16LE.
+  It is converted to WTF-8, which preserves any lone surrogate.
+  <li>Extra field 0x5a4c (ZipArchive code page),
+  which holds the path encoded in the code page given in the same field.
+  If the field only has the code page, the path in the header is decoded with it instead.
+  <li>Extra field 0xe57a (ALZip code page), which gives the code page of the path in the header.
+  <li>Otherwise, the encoding of the path in the header is not specified.
+  It is traditionally IBM code page 437, but often the system code page of the machine that made the archive,
+  so the compressor has to guess the encoding.
+  If it can't, the raw byte sequence (prefixed with C1<sub>16</sub>) is used for each component.
+</ol>
+
+<div class=note>
+  <p>When the name comes from any source other than the last one,
+  the original bytes of a path not in UTF-8 are not preserved.
+  They only reflect how the ZIP container encodes the name,
+  while the name of the file itself is the decoded Unicode string.</p>
+</div>
+
+
 <h4 id=content-block>
 Content blocks</h4>
 
@@ -1851,7 +1890,7 @@ $$aqr-opt-metadata-member = (
 )
 
 aqr-entry-extra = {
-  ? &(crtime: -1) => aqr-time
+  ? &(crtime: -1) => aqr-time  ; Timestamps, see [[#timestamps]]
   ? &(ctime: -2) => aqr-time
   ? &(mtime: -3) => aqr-time
   ? &(atime: -4) => aqr-time
@@ -1903,7 +1942,51 @@ and "`junction`" denotes a junction (a mount point reparse point).
   They are rare enough in file metadata not to deserve their own encodings.
 </div>
 
-<h4 id=aqr-time><code>aqr-time</code>: Timestamp</h4>
+<h4 id=timestamps>Timestamps</h4>
+
+<p>The keys `crtime`, `ctime`, `mtime`, `atime` and `arctime` of <code>aqr-entry-extra</code>
+record the timestamps that file systems and archive formats associate with a file, a directory or a link.
+Each is an <code>aqr-time</code> ([[#aqr-time]]), and is absent if the source doesn't have the corresponding timestamp.</p>
+
+<dl>
+<dt>`crtime`</dt>
+<dd><p>The creation time, also known as the birth time: when the file was created at its location.
+It is not updated afterwards, but copying a file usually creates a new one with the time of copying.
+Examples include the creation time of NTFS and FAT, the create date of HFS+ and APFS,
+`i_crtime` of ext4 and `otime` of Btrfs,
+which are exposed as `st_birthtime` on BSD and macOS and as `stx_btime` of `statx` on Linux.</p></dd>
+<dt>`ctime`</dt>
+<dd><p>The status change time:
+when the file's metadata (e.g. permissions, ownership or link count) or its content was last changed.
+It is the POSIX `st_ctime`, and the change time of NTFS and the attribute modification date of HFS+ are similar.
+POSIX doesn't allow it to be set to an arbitrary time,
+so an extracting decompressor usually can't restore it.</p></dd>
+<dt>`mtime`</dt>
+<dd><p>The modification time: when the file's content was last changed.
+For a directory, it is when an entry was last added, removed or renamed in it.
+This is the timestamp that virtually all file systems and archive formats have.</p></dd>
+<dt>`atime`</dt>
+<dd><p>The access time: when the file's content was last read.
+Many systems update it lazily or not at all for performance
+(e.g. `relatime` and `noatime` on Linux, and the access time updates of NTFS that can be disabled),
+and FAT only keeps the date.
+Reading a file for archiving can itself update it.</p></dd>
+<dt>`arctime`</dt>
+<dd><p>The backup time: when the file was last backed up, as recorded by backup software.
+File systems don't update it by themselves.
+An example is the backup date of HFS and HFS+, exposed as `ATTR_CMN_BKUPTIME` of `getattrlist` on macOS.
+It is the time stored by the source, not the time when the archive itself was made.</p></dd>
+</dl>
+
+<div class=note>
+  <p>The name "ctime" is ambiguous.
+  Windows and formats originating from it use "C" for the creation time:
+  `st_ctime` in the Microsoft C runtime, the `Ctime` of ZIP extra field 0x000a,
+  and the `CTime` of 7z and RAR all go to `crtime`, not `ctime`.
+  POSIX formats such as pax use it for the status change time, which goes to `ctime`.</p>
+</div>
+
+<h5 id=aqr-time><code>aqr-time</code>: Timestamp</h5>
 
 <p><code>aqr-time</code> represents a point in time or a local date and time,
 together with a [=quantization interval=] and optional time zone information.</p>
@@ -2056,6 +2139,73 @@ SHOULD preserve its precision, i.e. use an encoding whose quantization interval 
     <li>A source rounding to the nearest second: `1001({1: 1697724755, -14: [0.5, 0.5]})`
   </ul>
 </div>
+
+<h5 id=timestamps-from-zip>Timestamps from ZIP</h5>
+
+<p><em>This section is non-normative.</em></p>
+
+<p>A ZIP archive [[APPNOTE]] can carry the same timestamp in multiple places:
+the DOS date and time in the local and central headers,
+and extra fields 0x000a (NTFS), 0x5455 (extended timestamp), 0x5855 (Info-ZIP UNIX type 1) and 0x000d (UNIX)
+[[INFOZIP-EXTRAFLD]].
+A compressor converting a ZIP archive can choose the source of each key as follows,
+where earlier sources are preferred.
+The order prefers more precise sources first, and then more recent specifications for the same precision.</p>
+
+<table class=data>
+<thead>
+<tr>
+  <th>Key</th>
+  <th>Sources</th>
+</tr>
+<tbody>
+<tr>
+  <td>`crtime`</td>
+  <td>0x000a `Ctime`; 0x5455 `CrTime` (local header only)</td>
+</tr>
+<tr>
+  <td>`ctime`</td>
+  <td>-</td>
+</tr>
+<tr>
+  <td>`mtime`</td>
+  <td>0x000a `Mtime`; 0x5455 `ModTime`; 0x5855 or 0x000d `ModTime`; DOS date and time</td>
+</tr>
+<tr>
+  <td>`atime`</td>
+  <td>0x000a `Atime`; 0x5455 `AcTime` (local header only); 0x5855 or 0x000d `AcTime`</td>
+</tr>
+<tr>
+  <td>`arctime`</td>
+  <td>-</td>
+</tr>
+</table>
+
+<p>Each source is encoded as follows:</p>
+
+<ul>
+  <li>0x000a stores a Windows `FILETIME` |t|, the number of 100 ns intervals since 1601-01-01T00:00:00Z,
+  which is encoded as `125(`|t| &minus; 116444736000000000`)`.
+  A zero value means that the timestamp is absent.
+  <li>0x5455, 0x5855 and 0x000d store the number of seconds since 1970-01-01T00:00:00Z,
+  which is encoded as an untagged `int`.
+  It is a signed 32-bit integer according to [[INFOZIP-EXTRAFLD]],
+  though some implementations write times after 2038 as unsigned.
+  The central header version of 0x5455 only has `ModTime` even when its flags indicate others,
+  so the local header version is preferred when available.
+  <li>The DOS date and time is a local time in an unknown time zone with the precision of 2 seconds,
+  which is encoded as `[121(`|n|`)]` where 2|n| is the local time as if it were UTC.
+</ul>
+
+<p>When both the DOS date and time and a UTC source are present for `mtime`,
+their difference reveals the time zone offset where the archive was made.
+If the DOS time minus the UTC time differs from 900|k| seconds by less than 2 seconds,
+where |k| is an integer in the range of <code>aqr-tz-offset</code>,
+`mtime` can be encoded as `[`|u|`, `|k|`]` where |u| is the encoding of the UTC source.
+Otherwise, e.g. due to a clock error or a daylight saving time transition, the DOS date and time is simply discarded.</p>
+
+<p>If two sources for the same key disagree by more than their quantization intervals,
+a compressor can warn about it, and still uses the preferred source.</p>
 
 <h4 id=link-groups><code>link-group</code>: Hard links</h4>
 
@@ -3841,12 +3991,23 @@ Block index</h2>
     "publisher": "The Community Cryptography Specification Project",
     "href": "https://age-encryption.org/v1"
   },
+  "APPNOTE": {
+    "title": ".ZIP File Format Specification",
+    "publisher": "PKWARE Inc.",
+    "status": "Version 6.3.10",
+    "href": "https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT"
+  },
   "CBOR-NOTABLE-TAGS": {
     "title": "Notable CBOR Tags",
     "authors": ["Carsten Bormann"],
     "status": "Internet-Draft",
     "publisher": "IETF",
     "href": "https://datatracker.ietf.org/doc/draft-bormann-cbor-notable-tags/"
+  },
+  "INFOZIP-EXTRAFLD": {
+    "title": "Info-ZIP Extra Field Descriptions (proginfo/extrafld.txt in UnZip 6.0)",
+    "publisher": "Info-ZIP",
+    "href": "https://infozip.sourceforge.net/"
   },
   "RFC2119": {
     "title": "Key words for use in RFCs to Indicate Requirement Levels",

@@ -154,6 +154,8 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 
 ### 3.1 시각
 
+명세 §Timestamps from ZIP에 informative로 반영했다.
+
 **[제안]** 모델 키별 우선순위는 다음과 같다(왼쪽이 우선).
 여러 출처가 같은 키를 주면 더 정밀한 쪽을 택한다. 정밀도가 같으면 더 최근 규격을 택한다.
 
@@ -179,6 +181,8 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 **[제안]** 상충 처리: 정밀도가 다른 두 출처가 서로의 quantization interval을 벗어나도록 어긋나면, compressor는 경고하는 것이 좋다(SHOULD). 이 경우에도 우선순위가 높은 쪽을 택한다.
 
 ### 3.2 이름과 주석
+
+엔트리 이름은 명세 §Entry names from ZIP에 informative로 반영했다.
 
 **[제안]** 엔트리 이름의 출처 우선순위:
 
