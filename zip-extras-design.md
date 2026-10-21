@@ -11,7 +11,7 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 
 관련 코드:
 
-- `spec/index.bs` §Optional metadata: `aqr-entry-extra`와 `aqr-zip-extras`의 CDDL, 그리고 이 문서가 해소하려는 TODO 주석.
+- `spec/index.bs` §`zip-extras`: ZIP extra fields. 키의 의미, compressor/decompressor 규칙, 제거되는 extra field 목록(§Extra fields not to be preserved).
 - `spec/index.bs` §Entries: 엔트리 이름의 두 인코딩(WTF-8, `C1` 접두 raw 바이트열). §Entry names from ZIP.
 - `spec/index.bs` §Timestamps from ZIP.
 - `spec/index.bs` §Archive model(link node, special node), §`link-group`: Hard links.
@@ -29,7 +29,7 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 
 ## 0. 전제와 목표
 
-- **[확정]** `aqr-zip-extras`는 엔트리별 맵이며, `aqr-entry-extra`의 키 -100에 들어간다. 키의 구성은 §4.1에서 정한다.
+- **[확정]** `aqr-zip-extras`의 구조와 규칙은 명세 §`zip-extras`에 반영했다.
 - **[확정]** 용도는 **ZIP → Aqueous 단방향 변환**이다. 변환 결과에서 ZIP을 다시 만들어 낼 수 있어야 한다는 요구는 없다.
   > ZIP 파일 자체를 바이트 단위로 보존하는 recons(formula)는 별개의 문제이다. 그쪽은 ZIP을 바이트열로 다루므로 extra field의 의미를 신경 쓸 가능성이 낮다. 따라서 이 문서의 결정은 recons에 아무 제약도 주지 않는다.
 - **[제안]** 위 목표에서 다음 원칙이 나온다.
@@ -50,11 +50,7 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 | **D** | 다이제스트 | MAY | 내용과 대조해 맞을 때만 보존한다. |
 | **O** | 불투명 | MAY | 그대로 보존한다. |
 
-**[제안]** 금지 위반에 대한 규칙은 다음과 같다.
-
-- compressor는 M/X로 분류된 ID를 `aqr-zip-extras`에 쓰면 안 된다(MUST NOT).
-- decompressor가 그런 값을 만나면 해당 항목만 무시해야 하며(SHOULD), 아카이브 전체를 거부하지는 않는다.
-  > §Extraction이 이미 extra 전체를 무시해도 된다고 허용하므로, 일부를 무시하는 것은 자연스럽다. 아카이브 거부는 지나치다.
+금지 위반에 대한 규칙은 명세 §`zip-extras`에 반영했다. 명세는 M/X를 "Absorbed"/"Discarded"로 나열하고, P/D는 note로만 다루며, O는 기본값이라 따로 적지 않는다.
 
 ## 2. ID별 처분표
 
@@ -163,12 +159,11 @@ ZIP 아카이브를 Aqueous로 변환할 때 ZIP extra field를 어떻게 다룰
 
 엔트리 이름은 명세 §Entry names from ZIP을 따른다.
 
-**[제안]** 주석(`comment`)도 같은 방식이다. 순서는 0x6375 → EFS → 0x554e(central의 comment 부분) → 그 밖이다. 0x554e의 UTF-16 주석이 올바른 UTF-16이 아니면 `#6.273(bstr)`로 쓴다.
+주석은 명세 §Comments from ZIP을 따른다.
 
 ### 3.3 UID/GID
 
-**[제안]** `unix-uid`와 `unix-gid`의 출처 우선순위는 0x7875 (version 1) → 0x7855 (local) → 0x756e ≈ 0x5855 (local, 있을 때) ≈ 0x000d이다.
-Info-ZIP 문서가 정한 대로 0x7875가 0x7855보다 우선한다. 0x7855의 central 버전은 크기 0인 존재 표시일 뿐이다.
+명세 §Unix metadata from ZIP을 따른다.
 
 ### 3.4 0x000d와 0x756e
 
@@ -177,9 +172,8 @@ Info-ZIP 문서가 정한 대로 0x7875가 0x7855보다 우선한다. 0x7855의 
 - 0x000d: atime, mtime, uid, gid는 모델 키로 간다. 가변 부분은 symlink 대상이면 link node의 대상, hard link 대상이면 `link-group`, device major/minor(각각 u32le)이면 special node의 device 번호가 된다. 나머지가 없으므로 M이다.
 - 0x756e: Mode의 권한 비트 → `unix-mode`, uid, gid는 모델 키로 간다. symlink 대상은 link node의 대상이 된다. external attributes에 모드가 없으면 Mode의 `S_IFMT`로 종류를 정한다.
 - **[확정]** 0x756e의 device 번호(SizDev)는 `st_rdev` 원값이다(`extrafld.txt`). 비트 배치가 OS마다 다르고 version made by의 host 바이트는 Unix 계열을 구분하지 못하므로, (major, minor)로 나눌 수 없다. 이 경우에만 엔트리를 내용이 빈 file node로 두고 원본 0x756e를 보존한다. 그래서 0x756e는 P로 남는다.
-- 보존된 원본 안의 시각/uid/gid/mode는 정본이 아니다. 모델 키와 어긋나면 모델 키를 따른다(MUST).
 
-`unix-mode`의 출처 우선순위는 external file attributes 상위 16비트(host가 Unix일 때) → 0x756e Mode이다.
+`unix-mode`의 출처 우선순위는 명세 §Unix metadata from ZIP을 따른다.
 
 ## 4. 구조상의 문제
 
@@ -188,29 +182,15 @@ Info-ZIP 문서가 정한 대로 0x7875가 0x7855보다 우선한다. 0x7855의 
 ZIP의 extra field는 local 헤더와 central 헤더에 따로 있고, 둘의 내용이 다를 수 있다.
 같은 ID라도 형식이 다른 경우가 많다. Info-ZIP의 압축형 속성 블록(0x0009, 0x4c41, 0x4453, 0x334d, 0x6542, 0x7441)은 central에 크기 요약만 둔다. 0x5455와 0x7855도 central 쪽이 줄어든 형식이다.
 
-**[확정]** local 버전과 central 버전을 맵 키의 부호로 구분한다.
+**[확정]** local 버전과 central 버전을 맵 키의 부호로 구분한다. 키의 의미, 생략 규칙, CDDL(`bstr .size (0..65531)` 포함)과 `−1−n`의 근거는 명세 §`zip-extras`에 반영했다.
 
-- local 헤더의 ID `n` 필드는 키 `n`(0..65535)에 둔다.
-- central 헤더의 ID `n` 필드는 키 `−1−n`(−65536..−1)에 둔다. 단, local 버전과 바이트 단위로 같으면 쓰면 안 된다(MUST NOT). local 버전이 없으면 central 버전은 음수 키에만 둔다.
 - 처분(§1)은 키의 부호와 무관하게 ID `n`에 매긴다. P와 D는 두 버전을 따로 판단한다. 예를 들어 0x000d의 local 버전에만 link 대상이 있으면 양수 키만 남는다.
 
-```cddl
-aqr-zip-extras = { * aqr-zip-extra-key => bstr .size (0..65531) }
-aqr-zip-extra-key = 0..65535      ; local 헤더의 ID n
-                  / -65536..-1    ; central 헤더의 ID n, 키는 −1−n
-```
-
-> 키를 `−n`이 아니라 `−1−n`으로 하는 것은 0x0000이 `−0 = 0`에서 local과 겹치기 때문이다. 0x0000은 미등록이므로 O이고(§2.4), 예전 `zipalign`의 0 채움이 ID 0, 길이 0인 필드의 나열로 파싱되므로 실제로 나타난다(§4.3). `−1−n`은 CBOR major type 1의 인자가 그대로 `n`이 되므로 양수 키와 인코딩 길이도 같다.
->
-> central만 있는 경우를 양수 키에 두지 않는 것은, 같은 ID라도 어느 헤더에서 왔는지에 따라 해석이 달라지기 때문이다(0x5455 central의 flags는 local을 가리키고, 0x7855 central은 크기 0이며, Info-ZIP 압축형 속성 블록의 central은 요약이다). 따라서 양수 키의 값은 언제나 local 형식, 음수 키의 값은 언제나 central 형식이다. 양수 키만 읽는 decompressor도 형식을 잘못 해석하지 않는다.
->
 > 이 표현은 "central이 없다"와 "central이 local과 같다"를 구분하지 않는다. 변환이 단방향이므로(§0) 이 구분은 필요 없다. 같은 이유로 생략을 MUST NOT으로 해서 변환 결과가 결정적이 되도록 했다.
 >
 > 알려진 사례에서는 central이 local의 요약이므로 음수 키는 대개 쓸모가 없지만, 정보를 잃지 않는 쪽을 택한다(원칙 4). 흡수(M/P)할 때의 local/central 우선순위는 이와 별개로 §3이 정한다.
 
 §4.2의 중복 표현을 채택하면, 같은 버전 안의 중복끼리 묶고 두 버전의 비교는 묶은 목록 전체로 한다.
-
-값 하나의 크기 상한은 65531바이트이다. extra field 전체 길이가 u16이고 각 필드 헤더가 4바이트이기 때문이다. 이 상한은 CDDL에서 `bstr .size (0..65531)`로 표현할 수 있다.
 
 ### 4.2 같은 ID의 중복
 
@@ -236,7 +216,7 @@ X로 분류된 서명(0x0007, 0x0014–0x0016, 0x10c5)은 변환하면 사라진
 
 ### 4.6 루트 디렉터리와 아카이브 전역
 
-**[제안]** ZIP에는 루트 디렉터리 엔트리가 없으므로, 엔트리 0의 `zip-extras`는 쓰지 않는 것이 좋다(SHOULD NOT).
+엔트리 0의 `zip-extras`에 대한 규칙은 명세 §`zip-extras`에 반영했다.
 아카이브 전역 extra(첫 central 레코드에 실리는 0x0014 등)는 모두 X이므로, `aqr-opt-metadata`에 아카이브 단위의 `zip-extras`를 둘 필요는 없다.
 
 ## 5. 장차 전용 키로 승격할 후보
@@ -249,8 +229,6 @@ X로 분류된 서명(0x0007, 0x0014–0x0016, 0x10c5)은 변환하면 사라진
 | NT security descriptor | 0x4453 | WIM, `SCHILY.acl.*` 등 |
 | 확장 속성(xattr)과 Mac 메타데이터 | 0x0009, 0x334d, 0x6542, 0x7441, 0x2605–0x2805 | pax `SCHILY.xattr.*`, AppleDouble |
 | 내용 다이제스트 | 0x4b46, 0x1a51 | (Aqueous 자체 checksum과의 관계 정리 필요) |
-
-> 현재 `spec/index.bs`의 TODO 주석 `NTFS attributes (ZIP extra 0x000a)`는 잘못되었다. 0x000a는 시각만 담는다. Windows 파일 속성은 extra가 아니라 central 헤더의 external file attributes에 있다.
 
 ## 6. 미해결 문제
 
