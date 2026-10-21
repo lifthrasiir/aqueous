@@ -1944,7 +1944,7 @@ SHOULD preserve its precision, i.e. use an encoding whose quantization interval 
     <li>NTFS: `125(16977247548700000)`
     <li>ext4: `126(1697724754870000000)`
     <li>FAT access date, a local date in an unknown time zone: `[100(19649)]`
-    <li>A source rounding to the nearest second: `1001({1: 1697724755, -14: [-0.5, 0.5]})`
+    <li>A source rounding to the nearest second: `1001({1: 1697724755, -14: [0.5, 0.5]})`
   </ul>
 </div>
 
@@ -3256,7 +3256,7 @@ IANA Considerations</h2>
 <h3 id=etime-quantization-interval>
 Quantization Interval</h3>
 
-<p>This document requests the registration of a new key for the Time Tag Map Keys Registry (RFC 9581, section 7.3) as follows:</p>
+<p>This document requests the registration of a new key for the Time Tag Map Keys Registry ([[!RFC9581]], section 7.3) as follows:</p>
 
 <dl>
 <dt>Key Name</dt>
@@ -3268,8 +3268,8 @@ Quantization Interval</h3>
 <dt>Semantics</dt>
 <dd>
   <p>A quantization interval specifies the interval in which the true time lies, relative to the time value given.
-  That is, if the time value is <var>t</var> and the quantization interval is from <var>a</var> to <var>b</var>,
-  the true time lies between <var>t</var> + <var>a</var> and <var>t</var> + <var>b</var> inclusive.
+  That is, if the time value is |t| and the quantization interval is from |a| to |b|,
+  the true time lies between |t| + |a| and |t| + |b| inclusive.
   The quantization is any means to truncate or round the true time value to a discrete representation,
   and notably, is not related to the accuracy of the underlying clock.
   For example, it is possible that the clock has a high precision but the time values are truncated to the last second,
@@ -3280,25 +3280,25 @@ Quantization Interval</h3>
   but it never excludes any possible true time, including ties in rounding.</p>
   <p>A quantization interval can be given in terms of:</p>
   <ul>
-    <li>A positive numeric value in seconds or a positive duration <var>x</var>, indicating the interval of [0, <var>x</var>];</li>
-    <li>A negative numeric value in seconds or a negative duration <var>x</var>, indicating the interval of [<var>x</var>, 0];</li>
-    <li>An array of two elements <var>[a, b]</var> each of which is either a numeric value in seconds or a duration,
-    indicating the interval of [<var>a</var>, <var>b</var>].</li>
+    <li>A numeric value in seconds or a duration |y|, indicating the interval of [0, |y|];</li>
+    <li>An array of two elements `[x, y]` each of which is either a numeric value in seconds or a duration,
+    indicating the interval of [&minus;|x|, |y|].
+    That is, |x| is the extent before the time value and |y| is the extent after the time value.</li>
   </ul>
-  <p>A duration is positive or negative when its total value, i.e. key 1 plus any fractional part, is positive or negative respectively.
-  For example, `{1: -1, -3: 500}` is a negative duration of -0.5 seconds.</p>
-  <p>A valid quantization interval MUST contain a value of zero, referring to the time value given,
-  and MUST NOT be a single point.
-  Therefore a numeric value or duration MUST NOT be zero,
-  and an array <var>[a, b]</var> MUST satisfy <var>a</var> &le; 0 &le; <var>b</var> and <var>a</var> &lt; <var>b</var>.</p>
+  <p>Every numeric value MUST be finite and non-negative, and every duration MUST have a non-negative key 1,
+  so that the time value given is always contained in the interval.
+  The interval MUST NOT be a single point.
+  Therefore a single numeric value or duration MUST NOT be zero,
+  and an array `[x, y]` MUST NOT have both |x| and |y| zero.
+  If |x| is zero, the array MUST NOT be used and |y| MUST be given alone instead.</p>
   <p>If an extended time doesn't contain this key, its quantization interval is unknown;
   in particular, the time value is not implied to be exact.</p>
   <p>For example, the first two of the following represent a time value truncated to 10 milliseconds,
   and the last one represents a time value rounded to the nearest second:</p>
 <pre>
 1001({1: 1697724754, -3: 870, -14: 0.01}),
-1001({1: 1697724754, -3: 870, -14: [0, {1: 0, -3: 10}]}),
-1001({1: 1697724754, -14: [-0.5, 0.5]})
+1001({1: 1697724754, -3: 870, -14: {1: 0, -3: 10}}),
+1001({1: 1697724754, -14: [0.5, 0.5]})
 </pre>
 </dd>
 
