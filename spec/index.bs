@@ -4255,7 +4255,7 @@ A decompressor doing so is subject to the following requirements:
 * If multiple [=entry names=] in a directory map to the same file system name
     (e.g. due to case insensitivity or Unicode normalization),
     it MUST either fail or report the conflict, and MUST NOT write a later entry through an earlier one.
-* It MAY ignore any [=file node/extra=] or [=directory node/extra=].
+* It MAY ignore the [=file node/extra=] of any file node and the [=directory node/extra=] of any directory node.
     It SHOULD NOT apply ownership information such as `unix-uid` and `unix-gid` unless explicitly requested.
 
 <div class=note>
