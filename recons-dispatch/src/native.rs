@@ -3,6 +3,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use exe_recons::arch::x86;
+use recons_formula::aqr::{Failure, NativeModule};
 use recons_formula::{Apply, Error, Formula, Module, Modules, Result};
 
 use crate::Nest;
@@ -89,19 +90,9 @@ pub const SQLITE: Recons = Recons {
 
 pub const RECONS: [&Recons; 7] = [&PNG, &JPEG, &MP3, &FLAC, &PSD, &PDF, &SQLITE];
 
-/// Numbers of the modules in the formula container ([`recons_formula::container`]). They are
-/// stored, so a number is never reused for another module.
-pub const IDS: [(u64, Module); 9] = [
-    (0x80, X86),
-    (0x81, FLATE),
-    (0x82, PNG.module),
-    (0x83, JPEG.module),
-    (0x84, MP3.module),
-    (0x85, FLAC.module),
-    (0x86, PSD.module),
-    (0x87, PDF.module),
-    (0x88, SQLITE.module),
-];
+/// Every module of this crate.
+pub const MODULES: [Module; 9] =
+    [X86, FLATE, PNG.module, JPEG.module, MP3.module, FLAC.module, PSD.module, PDF.module, SQLITE.module];
 
 /// Runs every module of this crate natively. The output does not depend on `threads`.
 #[derive(Debug, Clone, Copy)]
@@ -116,6 +107,11 @@ impl Default for Native {
 }
 
 impl Native {
+    /// Every module, as archives apply them ([`recons_formula::aqr`]).
+    pub fn modules(&self) -> Vec<Box<dyn NativeModule>> {
+        MODULES.iter().map(|&module| Box::new(Applied { native: *self, module }) as Box<dyn NativeModule>).collect()
+    }
+
     /// The output of `m` on `inputs` (see [`Modules::apply`]).
     pub fn run(&self, m: Module, params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         catch_unwind(AssertUnwindSafe(|| self.run_unchecked(m, params, inputs, len)))
@@ -151,5 +147,35 @@ impl Native {
 impl Modules for Native {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         self.run(a.module, &a.params, inputs, a.len)
+    }
+}
+
+/// A module of this crate as an archive applies it: without resources, and with one output.
+struct Applied {
+    native: Native,
+    module: Module,
+}
+
+impl NativeModule for Applied {
+    fn module(&self) -> Module {
+        self.module
+    }
+
+    fn apply(
+        &self,
+        params: &[u8],
+        resources: &[&[u8]],
+        inputs: &[&[u8]],
+        sizes: &[u64],
+    ) -> std::result::Result<Vec<Vec<u8>>, Failure> {
+        let (&[len], []) = (sizes, resources) else {
+            return Err(Failure::Invalid(format!(
+                "{}: {} outputs, {} resources",
+                self.module,
+                sizes.len(),
+                resources.len()
+            )));
+        };
+        self.native.run(self.module, params, inputs, len).map(|out| vec![out]).map_err(|e| Failure::Invalid(e.0))
     }
 }

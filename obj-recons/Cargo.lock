@@ -92,6 +92,8 @@ name = "recons-formula"
 version = "0.1.0"
 dependencies = [
  "recons-common",
+ "xxhash-rust",
+ "zstd",
 ]
 
 [[package]]

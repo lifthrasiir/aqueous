@@ -20,12 +20,12 @@
 //! ([`extent`]), and the data between them kept raw, in one stream. Data that recompressors
 //! turn down counts against a scan, which gives up past twice the data (and 16 MiB).
 //!
-//! A formula is kept within [`Options::description`] bytes of description: of the files
+//! A formula may be kept within [`Options::description`] bytes of description: of the files
 //! found, or nested, those with the fewest bytes per byte of their description are kept raw
 //! where all would not fit.
 //!
-//! [`compress`] and [`decompress`] store the formula on its own, in the formula container
-//! ([`recons_formula::container`], with the module numbers of [`native::IDS`]).
+//! [`compress`] and [`decompress`] store the formula as an Aqueous archive of the file alone
+//! ([`recons_formula::aqr`]), with the modules of [`native::MODULES`].
 //!
 //! Whatever is not recognised, turned down by its recompressor, not made smaller, or (with
 //! [`Options::verify`]) not reconstructed by its module is kept raw: a slice of the input.
@@ -53,7 +53,8 @@ pub use native::{Content, Native};
 pub use recons_formula::{Formula, Module, Node};
 
 use native::Recons;
-use recons_formula::{Stream, container};
+use recons_formula::Stream;
+use recons_formula::aqr::{self, description_bound};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -70,11 +71,12 @@ pub struct Options {
     pub contents: Vec<Content>,
     /// How the file itself is recompressed.
     pub file: Nest,
-    /// The most bytes of description a formula may take ([`container::description_bound`]):
-    /// where the files found in data, or the contents of a file, would take more, those with
-    /// the fewest bytes per byte of their description are kept raw. By default the formula
-    /// container's limit.
+    /// The most bytes of description a formula may take ([`aqr::description_bound`]): where
+    /// the files found in data, or the contents of a file, would take more, those with the
+    /// fewest bytes per byte of their description are kept raw. By default no limit.
     pub description: usize,
+    /// The zstd level of the blocks of [`compress`].
+    pub level: i32,
 }
 
 /// How data is recompressed.
@@ -94,7 +96,8 @@ impl Default for Options {
             verify: true,
             contents: native::CONTENTS.to_vec(),
             file: Nest::Scan,
-            description: container::MAX_DESCRIPTION,
+            description: usize::MAX,
+            level: 3,
         }
     }
 }
@@ -104,18 +107,14 @@ pub fn recompress(d: &[u8], opt: &Options) -> Formula {
     recompress_at(d, opt, 0, opt.file)
 }
 
-/// `d` in the formula container. A formula whose description does not fit all the same (a
-/// recompressor's own over 65535 bytes) is given up for `d` raw.
+/// `d` as an archive, with the checksum of `d`.
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
-    container::encode(&recompress(d, opt), &native::IDS).unwrap_or_else(|_| {
-        container::encode(&Formula::raw("raw", d.to_vec()), &native::IDS).expect("a raw formula fits")
-    })
+    aqr::encode(&recompress(d, opt), Some(aqr::checksum(d)), opt.level).expect("slices within their streams")
 }
 
-/// The file in formula container `c`. Nothing checks the output: that is left to whatever
-/// holds the container (R8).
-pub fn decompress(c: &[u8], threads: usize) -> recons_formula::Result<Vec<u8>> {
-    container::decode(c, &native::IDS, "formula")?.eval(&Native { threads })
+/// The file in archive `c`.
+pub fn decompress(c: &[u8], threads: usize) -> Result<Vec<u8>, aqr::Failure> {
+    aqr::decode(c, &Native { threads }.modules())
 }
 
 /// [`recompress`] for data `depth` formats deep.
@@ -207,11 +206,6 @@ fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize) -> Option<Formul
     f.streams[0].data = gaps;
     f.root = Node::concat(parts);
     Some(f)
-}
-
-/// [`container::description_bound`] with this crate's modules.
-fn description_bound(n: &Node) -> usize {
-    container::description_bound(n, &native::IDS).unwrap_or(usize::MAX)
 }
 
 /// Which of `parts` (bytes of data and of description each) to keep, so that `base` and the

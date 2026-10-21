@@ -8,8 +8,8 @@
 
 use std::time::Instant;
 
-use recons_dispatch::{Native, Nest, Options, classes, detect, native, recompress};
-use recons_formula::container;
+use recons_dispatch::{Native, Nest, Options, classes, detect, recompress};
+use recons_formula::aqr;
 
 fn main() {
     let mut opt = Options::default();
@@ -46,10 +46,11 @@ fn main() {
         failed |= !ok;
 
         let format = detect(&d).map_or("-", |f| f.name());
-        let packed = container::encode(&f, &native::IDS).map_or_else(|e| e.to_string(), |c| format!("{} B", c.len()));
+        let packed = aqr::encode(&f, Some(aqr::checksum(&d)), opt.level)
+            .map_or_else(|e| e.to_string(), |c| format!("{} B", c.len()));
         let modules: Vec<String> = f.applies().iter().map(|a| a.module.to_string()).collect();
         println!(
-            "{path}: {format}, {mb:.2} MB, {} streams, container {packed}, enc {:.1} MB/s, eval {:.1} MB/s{}",
+            "{path}: {format}, {mb:.2} MB, {} streams, archive {packed}, enc {:.1} MB/s, eval {:.1} MB/s{}",
             f.streams.len(),
             mb / enc,
             mb / dec,

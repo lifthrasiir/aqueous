@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use recons_dispatch::{Content, Formula, Native, Nest, Node, Options, compress, decompress, native, recompress};
-use recons_formula::container;
+use recons_formula::aqr;
 
 fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(format!("{}/../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -13,13 +13,13 @@ fn modules(f: &Formula) -> Vec<&'static str> {
 }
 
 /// Recompresses `d`, checking that the formula evaluates back to it, also through the
-/// container.
+/// archive.
 fn roundtrip(d: &[u8], opt: &Options) -> Formula {
     let f = recompress(d, opt);
     assert_eq!(f.len(), d.len() as u64);
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
-    let c = container::encode(&f, &native::IDS).unwrap();
-    assert!(decompress(&c, 1).unwrap() == d, "container does not decompress to the input:\n{f}");
+    let c = aqr::encode(&f, Some(aqr::checksum(d)), 3).unwrap();
+    assert!(decompress(&c, 1).unwrap() == d, "archive does not decompress to the input:\n{f}");
     f
 }
 
@@ -47,20 +47,19 @@ fn zlib(d: &[u8], level: u32) -> Vec<u8> {
 }
 
 #[test]
-fn container_files() {
+fn archive_files() {
     let opt = Options::default();
     let mut d = gzip(&text(10_000));
     let c = compress(&d, &opt);
-    assert_eq!(c[..6], container::MAGIC);
+    assert_eq!(c[..6], aqr::HEADER_MAGIC);
     assert_eq!(decompress(&c, 1).unwrap(), d);
     d.clear();
     assert_eq!(decompress(&compress(&d, &opt), 1).unwrap(), d);
-    // The disfilter's 44 streams become offsets and lengths into one stream.
     let (d, _) = pe();
-    let c = compress(&d, &opt);
-    let streams: usize = recompress(&d, &opt).streams.iter().map(|s| s.data.len()).sum();
-    assert!(c.len() - streams < 300, "{} for {streams} bytes of streams", c.len());
-    assert_eq!(decompress(&c, 1).unwrap(), d);
+    assert_eq!(decompress(&compress(&d, &opt), 1).unwrap(), d);
+    // The output checksum is verified.
+    let c = aqr::encode(&recompress(&d, &opt), Some(aqr::checksum(&d) ^ 1), 3).unwrap();
+    assert_eq!(decompress(&c, 1), Err(aqr::Failure::Invalid("output checksum mismatch".into())));
 }
 
 #[test]
@@ -289,7 +288,7 @@ fn description_limit() {
     let jpeg = fixture("jpeg-recons/tests/data/gradient.jpg");
     let flac = fixture("flac-recons/tests/data/s16_f5.flac");
     let d = [jpeg.repeat(20), flac.clone(), jpeg.repeat(20)].concat();
-    let bound = |f: &Formula| container::description_bound(&f.root, &native::IDS).unwrap();
+    let bound = |f: &Formula| aqr::description_bound(&f.root);
     let f = roundtrip(&d, &Options::default());
     assert_eq!(f.applies().len(), 41);
     let limit = bound(&f) / 4;
@@ -311,13 +310,11 @@ fn description_limit() {
     assert_eq!(modules(&f), [native::FLATE.name]);
 }
 
-/// A file of more files than the container's description can take is not given up whole.
+/// A file of many files is recompressed whole.
 #[test]
-fn container_many_files() {
+fn archive_many_files() {
     let jpeg = fixture("jpeg-recons/tests/data/gradient.jpg");
     let d = jpeg.repeat(3000);
-    let c = compress(&d, &Options::default());
-    assert_eq!(decompress(&c, 1).unwrap(), d);
-    let f = container::decode(&c, &native::IDS, "formula").unwrap();
-    assert!(f.applies().len() > 500, "{}", f.applies().len());
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(f.applies().len(), 3000);
 }
