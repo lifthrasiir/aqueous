@@ -1851,102 +1851,56 @@ The [=meta/optional_metadata=] field of the metadata block ([[#metadata-block]])
 This part encodes any metadata that is not strictly necessary to read the file,
 including associated dates and times, access control information and comments.
 
-The optional metadata is described by the following CDDL [[RFC8610]] definitions,
-where `etime` is the CDDL type name for the extended time defined in [[!RFC9581]]:
+The optional metadata is described by the following CDDL [[RFC8610]] definitions:
 
 <pre class=cddl>
-aqr-opt-metadata = { $$aqr-opt-metadata-member }
+aqr-opt-metadata = {
+  aqr-archive-comment
+  ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
+  * $$aqr-opt-metadata-member  ; For future extensions
+}
+
+$$aqr-opt-metadata-member = ()  ; No extension is defined by this specification
 
 aqr-offset = uint .gt 0
 
-aqr-text =
-  tstr /          ; Unicode
-  #6.273(bstr) /  ; UTF-16 + surrogate compat
-  bstr            ; In unknown encoding
-
-aqr-time =
-  $aqr-base-time /                          ; UTC timestamp, scaled and quantized
-  [$aqr-base-time] /                        ; Local time in unknown time zone, encoded like UTC (*)
-  [$aqr-instant, offset: aqr-tz-offset] /   ; UTC timestamp with time zone offset ($)
-  etime /                                   ; Extended time defined in [[!RFC9581]]
-  [etime]                                   ; Local time in unknown time zone, encoded like UTC
-
-aqr-tz-offset = -48..56  ; In 15 minutes, positive east of UTC as in ISO 9660
-
-$aqr-base-time  = #6.100(int)    ; 1d (FAT atime*), date as in [[RFC8943]]
-$aqr-base-time /= $aqr-instant  ; Can be given a time zone offset
-
-$aqr-instant  = #6.121(int)  ; 2s (FAT mtime*, exFAT atime$, ZIP*, CAB*)
-$aqr-instant /= int          ; 1s (~ext3, HFS/HFS+, tar, ISO 9660$)
-$aqr-instant /= #6.122(int)  ; 10ms (FAT ctime*, ISO 9660$, exFAT$)
-$aqr-instant /= #6.123(int)  ; 1ms
-$aqr-instant /= #6.124(int)  ; 1us (UDF)
-$aqr-instant /= #6.125(int)  ; 100ns (NTFS, RAR*, 7z)
-$aqr-instant /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
-
-$$aqr-opt-metadata-member = (
-  ? &(archive-comment: -1) => aqr-text
-  ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
-)
-
 aqr-entry-extra = {
-  ? &(crtime: -1) => aqr-time  ; Timestamps, see [[#timestamps]]
-  ? &(ctime: -2) => aqr-time
-  ? &(mtime: -3) => aqr-time
-  ? &(atime: -4) => aqr-time
-  ? &(arctime: -5) => aqr-time
-
-  ? &(comment: -6) => aqr-text
-  ? &(link-group: -7) => int  ; File nodes only, see [[#link-groups]]
-
-  ? &(win-link-type: -60) => &(file: 0, directory: 1, junction: 2)  ; Link nodes only
-
-  ? &(unix-mode: -70) => uint .le 4095  ; Permission bits only (0o7777), without S_IFMT
-  ? &(unix-uid: -71) => uint
-  ? &(unix-gid: -72) => uint
-
-  ; TODO:
-  ; NTFS attributes (ZIP extra 0x000a)
-  ; other extras for round trip
-
-  ? &(zip-extras: -100) => aqr-zip-extras
+  aqr-entry-timestamps
+  aqr-entry-comment
+  aqr-entry-link-group
+  aqr-entry-windows
+  aqr-entry-unix
+  aqr-entry-zip
+  * $$aqr-entry-extra-member  ; For future extensions
 }
 
-aqr-zip-extras = { * aqr-zip-extra-id => bstr }
-aqr-zip-extra-id = 0..65535
-; TODO: should exclude or at least discourage the following:
-;       0x0001 - ZIP64
-;       0x5455 - extended timestamp
-;       0x7075 - unicode path (info-zip)
-;       0x6375 - unicode comment (info-zip)
+$$aqr-entry-extra-member = ()  ; No extension is defined by this specification
+
+; TODO: other extras for round trip
 </pre>
 
 There MUST NOT be any following bytes after this CBOR item.
 If [=meta/optional_metadata_size=] is 0, the optional metadata is an empty map `{}`.
 
+The members of `aqr-entry-extra` are grouped by their purposes, and each group is described in the following sections.
 Keys of `aqr-entry-extra` from -1 to -59 are platform-neutral.
 Keys from -60 to -69 are specific to Windows, -70 to -79 to Unix, -80 to -89 to macOS, and -90 to -99 to other platforms.
-
-`unix-mode` only holds the permission bits, including the set-user-ID, set-group-ID and sticky bits.
-The kind of an entry is solely determined by its node ([[#archive-model]]), so `unix-mode` never includes the file type bits (`S_IFMT`).
-
-`win-link-type` is only meaningful for a [=link node=],
-and determines the kind of a link to be created on Windows ([[#extraction]]).
-"`file`" and "`directory`" denote a symbolic link to a file and to a directory respectively,
-and "`junction`" denotes a junction (a mount point reparse point).
-
-<div class=note>
-  Some precisions found in the wild are only representable with the extended time,
-  e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP and 1/300 s in SQL Server `DATETIME`,
-  and so are time zone offsets that are not multiples of 15 minutes as in UDF.
-  They are rare enough in file metadata not to deserve their own encodings.
-</div>
 
 <h4 id=timestamps>Timestamps</h4>
 
 <p>The keys `crtime`, `ctime`, `mtime`, `atime` and `arctime` of <code>aqr-entry-extra</code>
 record the timestamps that file systems and archive formats associate with a file, a directory or a link.
-Each is an <code>aqr-time</code> ([[#aqr-time]]), and is absent if the source doesn't have the corresponding timestamp.</p>
+Each is an <code>aqr-time</code> described below, and is absent if the source doesn't have the corresponding timestamp.</p>
+
+<pre class=cddl>
+aqr-entry-timestamps = (
+  ? &(crtime: -1) => aqr-time
+  ? &(ctime: -2) => aqr-time
+  ? &(mtime: -3) => aqr-time
+  ? &(atime: -4) => aqr-time
+  ? &(arctime: -5) => aqr-time
+)
+</pre>
 
 <dl>
 <dt>`crtime`</dt>
@@ -1986,10 +1940,32 @@ It is the time stored by the source, not the time when the archive itself was ma
   POSIX formats such as pax use it for the status change time, which goes to `ctime`.</p>
 </div>
 
-<h5 id=aqr-time><code>aqr-time</code>: Timestamp</h5>
-
 <p><code>aqr-time</code> represents a point in time or a local date and time,
-together with a [=quantization interval=] and optional time zone information.</p>
+together with a [=quantization interval=] and optional time zone information.
+It is described by the following CDDL definitions,
+where `etime` is the CDDL type name for the extended time defined in [[!RFC9581]]:</p>
+
+<pre class=cddl>
+aqr-time =
+  $aqr-base-time /                          ; UTC timestamp, scaled and quantized
+  [$aqr-base-time] /                        ; Local time in unknown time zone, encoded like UTC (*)
+  [$aqr-instant, offset: aqr-tz-offset] /   ; UTC timestamp with time zone offset ($)
+  etime /                                   ; Extended time defined in [[!RFC9581]]
+  [etime]                                   ; Local time in unknown time zone, encoded like UTC
+
+aqr-tz-offset = -48..56  ; In 15 minutes, positive east of UTC as in ISO 9660
+
+$aqr-base-time  = #6.100(int)    ; 1d (FAT atime*), date as in [[RFC8943]]
+$aqr-base-time /= $aqr-instant  ; Can be given a time zone offset
+
+$aqr-instant  = #6.121(int)  ; 2s (FAT mtime*, exFAT atime$, ZIP*, CAB*)
+$aqr-instant /= int          ; 1s (~ext3, HFS/HFS+, tar, ISO 9660$)
+$aqr-instant /= #6.122(int)  ; 10ms (FAT ctime*, ISO 9660$, exFAT$)
+$aqr-instant /= #6.123(int)  ; 1ms
+$aqr-instant /= #6.124(int)  ; 1us (UDF)
+$aqr-instant /= #6.125(int)  ; 100ns (NTFS, RAR*, 7z)
+$aqr-instant /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
+</pre>
 
 <p>A base time value <code>$aqr-base-time</code> is an integer, either untagged or tagged as follows.
 The integer multiplied by the scale is the number of seconds since 1970-01-01T00:00:00Z,
@@ -2112,6 +2088,13 @@ an extended time without any quantization interval is never the same as other al
   as an extracting decompressor is allowed to ignore any extra metadata ([[#extraction]]).</p>
 </div>
 
+<div class=note>
+  Some precisions found in the wild are only representable with the extended time,
+  e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP and 1/300 s in SQL Server `DATETIME`,
+  and so are time zone offsets that are not multiples of 15 minutes as in UDF.
+  They are rare enough in file metadata not to deserve their own encodings.
+</div>
+
 <p>Two <code>aqr-time</code> values in different encodings are different even when they denote the same point in time.
 For example, `1` and `122(100)` differ in their quantization intervals.
 A compressor converting a timestamp from a file system or another archive format
@@ -2207,7 +2190,80 @@ Otherwise, e.g. due to a clock error or a daylight saving time transition, the D
 <p>If two sources for the same key disagree by more than their quantization intervals,
 a compressor can warn about it, and still uses the preferred source.</p>
 
+<h4 id=comments>Comments</h4>
+
+<p>`archive-comment` of <code>aqr-opt-metadata</code> and `comment` of <code>aqr-entry-extra</code>
+are free-form comments attached to the whole archive and to each entry respectively,
+e.g. an archive comment and a file comment of ZIP or RAR.
+Both are an <code>aqr-text</code>, which is a Unicode string,
+a WTF-8 [[WTF-8]] string with lone surrogates, or a byte sequence in an unknown encoding:</p>
+
+<pre class=cddl>
+aqr-archive-comment = (
+  ? &(archive-comment: -1) => aqr-text
+)
+
+aqr-entry-comment = (
+  ? &(comment: -6) => aqr-text
+)
+
+aqr-text =
+  tstr /          ; Unicode
+  #6.273(bstr) /  ; WTF-8, i.e. UTF-16 + surrogate compat
+  bstr            ; In unknown encoding
+</pre>
+
+<p>An <code>aqr-text</code> MUST be a `tstr` if it can be represented as one,
+i.e. if it is a sequence of Unicode scalar values.
+The byte string in `#6.273(bstr)` MUST be a valid WTF-8 string that is not a valid UTF-8 string,
+i.e. it MUST contain at least one encoded lone surrogate.
+A `bstr` is not subject to these requirements even if it happens to be a valid UTF-8 string,
+as its encoding is not known.</p>
+
+<h5 id=comments-from-zip>Comments from ZIP</h5>
+
+<p><em>This section is non-normative.</em></p>
+
+<p>A ZIP archive [[APPNOTE]] stores a comment for each entry in the central header only,
+and a comment for the whole archive in the end of central directory record.
+Both are byte sequences, and an empty comment is no different from the absence of one,
+so the compressor can omit `comment` or `archive-comment` for an empty comment.</p>
+
+<p>A compressor converting a ZIP archive can determine the encoding of each entry comment
+from the following sources, where earlier sources are preferred:</p>
+
+<ol>
+  <li>Extra field 0x6375 (Info-ZIP Unicode Comment) of version 1 in the central header [[INFOZIP-EXTRAFLD]],
+  whose `ComCRC32` matches the CRC-32 of the comment in the header.
+  The field holds the comment in UTF-8.
+  A field with a mismatching CRC-32 is ignored, as for 0x7075 in [[#entry-names-from-zip]].
+  <li>The comment in the header, if bit 11 (language encoding flag) of the general purpose bit flag is set.
+  The comment is in UTF-8.
+  <li>Extra field 0x554e (Xceed Unicode) in the central header, which holds the comment in UTF-16LE.
+  It is converted to WTF-8, which preserves any lone surrogate.
+  <li>Otherwise, the encoding of the comment is not specified.
+  The compressor can decode it with the encoding guessed for entry names in the same archive.
+  If it can't, the raw byte sequence is used as a `bstr`.
+</ol>
+
+<p>The archive comment has neither the language encoding flag nor an extra field,
+so its encoding is never specified by the archive itself.
+The compressor can decode it as in the last source above, and puts the result to `archive-comment`.</p>
+
+<div class=note>
+  <p>Archive comments are often used for purposes other than human-readable text,
+  e.g. a self-extracting archive may store its configuration there,
+  so decoding one with a guessed encoding can be lossy.
+  A compressor unsure about the encoding can keep the raw byte sequence instead.</p>
+</div>
+
 <h4 id=link-groups><code>link-group</code>: Hard links</h4>
+
+<pre class=cddl>
+aqr-entry-link-group = (
+  ? &(link-group: -7) => int  ; File nodes only
+)
+</pre>
 
 <p><code>link-group</code> records that [=file nodes=] were originally the same file,
 i.e. hard links to the same inode on Unix or to the same file record on NTFS.
@@ -2251,6 +2307,337 @@ is not an [=invalid archive=] failure, but has no effect on extraction ([[#extra
   <p>Hard links are not part of the archive model, so a decompressor ignoring <code>link-group</code>
   still extracts the correct files with the same contents.
   Directory hard links, found in some macOS Time Machine volumes, are not represented.</p>
+</div>
+
+<h4 id=windows-extras>Windows-specific metadata</h4>
+
+<pre class=cddl>
+aqr-entry-windows = (
+  ? &(win-link-type: -60) => &(file: 0, directory: 1, junction: 2)  ; Link nodes only
+
+  ; TODO: file attributes (e.g. ZIP external file attributes)
+)
+</pre>
+
+`win-link-type` is only meaningful for a [=link node=],
+and determines the kind of a link to be created on Windows ([[#extraction]]).
+"`file`" and "`directory`" denote a symbolic link to a file and to a directory respectively,
+and "`junction`" denotes a junction (a mount point reparse point).
+
+<h4 id=unix-extras>Unix-specific metadata</h4>
+
+<pre class=cddl>
+aqr-entry-unix = (
+  ? &(unix-mode: -70) => uint .le 4095  ; Permission bits only (0o7777), without S_IFMT
+  ? &(unix-uid: -71) => uint
+  ? &(unix-gid: -72) => uint
+)
+</pre>
+
+`unix-mode` only holds the permission bits, including the set-user-ID, set-group-ID and sticky bits.
+The kind of an entry is solely determined by its node ([[#archive-model]]), so `unix-mode` never includes the file type bits (`S_IFMT`).
+
+`unix-uid` and `unix-gid` are the numeric user and group IDs of the owner.
+
+<h5 id=unix-extras-from-zip>Unix metadata from ZIP</h5>
+
+<p><em>This section is non-normative.</em></p>
+
+<p>A ZIP archive [[APPNOTE]] can carry the Unix metadata of an entry in the external file attributes of the central header
+and in extra fields 0x7875 (Info-ZIP UNIX type 3), 0x7855 (Info-ZIP UNIX type 2), 0x756e (ASi UNIX),
+0x5855 (Info-ZIP UNIX type 1) and 0x000d (UNIX) [[INFOZIP-EXTRAFLD]].
+A compressor converting a ZIP archive can choose the source of each key as follows,
+where earlier sources are preferred and sources in the same item have the same precedence.</p>
+
+<table class=data>
+<thead>
+<tr>
+  <th>Key</th>
+  <th>Sources</th>
+</tr>
+<tbody>
+<tr>
+  <td>`unix-mode`</td>
+  <td>External file attributes; 0x756e `Mode`</td>
+</tr>
+<tr>
+  <td>`unix-uid`</td>
+  <td>0x7875 `UID`; 0x7855 `UID` (local header only); 0x756e, 0x5855 (local header only) or 0x000d `UID`</td>
+</tr>
+<tr>
+  <td>`unix-gid`</td>
+  <td>0x7875 `GID`; 0x7855 `GID` (local header only); 0x756e, 0x5855 (local header only) or 0x000d `GID`</td>
+</tr>
+</table>
+
+<p>Each source is encoded as follows:</p>
+
+<ul>
+  <li>The upper 16 bits of the external file attributes hold the Unix `st_mode`
+  if the upper byte of "version made by" is 3 (UNIX).
+  Only its permission bits (`0o7777`) go to `unix-mode`, and its file type bits (`S_IFMT`) are not stored there.
+  <li>0x7875 of version 1 stores the user and group IDs as little-endian unsigned integers of variable sizes.
+  [[INFOZIP-EXTRAFLD]] specifies that it takes precedence over 0x7855.
+  Other versions are not used as a source.
+  <li>0x7855, 0x756e, 0x5855 and 0x000d store the user and group IDs as 16-bit unsigned integers.
+  The central header version of 0x7855 is empty and only indicates that the local header version exists,
+  and the central header version of 0x5855 doesn't have the user and group IDs.
+</ul>
+
+<p>If two sources for the same key disagree,
+a compressor can warn about it, and still uses the preferred source.</p>
+
+<h4 id=zip-extras><code>zip-extras</code>: ZIP extra fields</h4>
+
+<p><code>zip-extras</code> preserves extra fields [[APPNOTE]] of the ZIP entry that the entry was converted from,
+when they carry information about the file that has no other representation in this specification.</p>
+
+<pre class=cddl>
+aqr-entry-zip = (
+  ? &(zip-extras: -100) => aqr-zip-extras
+)
+
+aqr-zip-extras = { * aqr-zip-extra-key => bstr .size (0..65531) }
+aqr-zip-extra-key =
+  0..65535 /   ; Header ID n in the local header
+  -65536..-1   ; Header ID n in the central header, as -1 - n
+; TODO: multiple extra fields with the same header ID
+</pre>
+
+<p>A key |n| from 0 to 65535 denotes the extra field with the header ID |n| in the local header,
+and a key &minus;1 &minus; |n| from &minus;65536 to &minus;1 denotes the extra field with the header ID |n| in the central header.
+The value is the data of the extra field, excluding its 4-byte header of the header ID and the data size.
+Therefore a value with a non-negative key is always in the format for the local header,
+and a value with a negative key is always in the format for the central header.</p>
+
+<p>A compressor converting a ZIP archive MAY put any extra field of an entry into `zip-extras`, subject to the following requirements:</p>
+
+* It MUST NOT put the central header version of an extra field
+    if the local header version with the same header ID is identical byte by byte.
+    The central header version without the local header version is only put with a negative key.
+* It MUST NOT put an extra field whose information is fully represented elsewhere,
+    i.e. in the entry name, the archive model ([[#archive-model]]) or any other key of <code>aqr-entry-extra</code>.
+* It MUST NOT put an extra field which is only meaningful to the ZIP container itself,
+    e.g. sizes, offsets, padding, alignment, encryption and signatures over the ZIP archive.
+* It SHOULD NOT give `zip-extras` to the root directory, which has no counterpart in ZIP.
+
+<p>Extra fields known to be subject to these requirements are listed in [[#zip-extras-to-remove]].
+Any other extra field, including one with an unregistered header ID, can be put into `zip-extras` as is.</p>
+
+<p>`zip-extras` is never authoritative.
+If information in a preserved extra field disagrees with the archive model or any other key of <code>aqr-entry-extra</code>,
+the latter MUST be used.
+A decompressor finding an extra field that a compressor is not allowed to put SHOULD ignore that field only,
+and SHOULD NOT treat the whole archive as invalid.</p>
+
+<div class=note>
+  <p>`zip-extras` is designed for a one-way conversion from ZIP;
+  reconstructing the original ZIP archive from the converted archive is not a goal.
+  Extra fields are preserved so that information without its own key yet,
+  e.g. platform-specific attributes, access control lists and resource forks,
+  can be recovered from already converted archives once a dedicated key is defined.
+  Unknown extra fields are preserved for the same reason,
+  even though some of them might be only meaningful to the ZIP container.</p>
+  <p>The local and central header versions of the same header ID often differ in their formats,
+  e.g. the central header version of 0x5455 only has the modification time,
+  and that of many Info-ZIP attribute blocks only has a summary.
+  Distinguishing them by keys lets a consumer interpret each value in the correct format.
+  The key for the central header version is &minus;1 &minus; |n| instead of &minus;|n|,
+  so that header ID 0 doesn't collide with the local header version,
+  and both versions have the same encoded length in CBOR.</p>
+</div>
+
+<h5 id=zip-extras-to-remove>Extra fields not to be preserved</h5>
+
+<p><em>This section is non-normative.</em></p>
+
+<p>The following extra fields [[APPNOTE]] [[INFOZIP-EXTRAFLD]] are not put into `zip-extras`,
+because their information is either absorbed into the archive model and other keys,
+or discarded as only meaningful to the ZIP container.</p>
+
+<table class=data>
+<thead>
+<tr>
+  <th>Header ID</th>
+  <th>Name</th>
+  <th>Treatment</th>
+</tr>
+<tbody>
+<tr>
+  <td>0x0001</td>
+  <td>Zip64 extended information</td>
+  <td>Discarded: sizes and offsets</td>
+</tr>
+<tr>
+  <td>0x0007</td>
+  <td>AV Info</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x000a</td>
+  <td>NTFS</td>
+  <td>Absorbed: timestamps ([[#timestamps-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x000d</td>
+  <td>UNIX (PKWARE)</td>
+  <td>Absorbed: timestamps ([[#timestamps-from-zip]]), `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]]), the target of a [=link node=], `link-group` for a hard link, and the device number of a [=special node=]</td>
+</tr>
+<tr>
+  <td>0x0014</td>
+  <td>PKCS#7 Store for X.509 Certificates</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x0015</td>
+  <td>X.509 Certificate ID and Signature for individual file</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x0016</td>
+  <td>X.509 Certificate ID for Central Directory</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x0017</td>
+  <td>Strong Encryption Header</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x0019</td>
+  <td>PKCS#7 Encryption Recipient Certificate List</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x0021</td>
+  <td>Policy Decryption Key Record</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x0022</td>
+  <td>Smartcrypt Key Provider Record</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x0023</td>
+  <td>Smartcrypt Policy Key Data Record</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x10c5</td>
+  <td>minizip CMS signature</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x1986</td>
+  <td>Pixar USD header ID</td>
+  <td>Discarded: padding for alignment</td>
+</tr>
+<tr>
+  <td>0x5455</td>
+  <td>Extended timestamp</td>
+  <td>Absorbed: timestamps ([[#timestamps-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x554e</td>
+  <td>Xceed Unicode</td>
+  <td>Absorbed: entry name ([[#entry-names-from-zip]]) and comment ([[#comments-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x5855</td>
+  <td>Info-ZIP UNIX type 1</td>
+  <td>Absorbed: timestamps ([[#timestamps-from-zip]]), `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x5a4c</td>
+  <td>ZipArchive code page</td>
+  <td>Absorbed: entry name ([[#entry-names-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x5a4d</td>
+  <td>ZipArchive offsets array</td>
+  <td>Discarded: offsets</td>
+</tr>
+<tr>
+  <td>0x6375</td>
+  <td>Info-ZIP Unicode Comment</td>
+  <td>Absorbed: comment ([[#comments-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x6c78</td>
+  <td>libarchive "xl"</td>
+  <td>Absorbed: a copy of the central header fields</td>
+</tr>
+<tr>
+  <td>0x7075</td>
+  <td>Info-ZIP Unicode Path</td>
+  <td>Absorbed: entry name ([[#entry-names-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x7855</td>
+  <td>Info-ZIP UNIX type 2</td>
+  <td>Absorbed: `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x7875</td>
+  <td>Info-ZIP UNIX type 3</td>
+  <td>Absorbed: `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]]), for version 1 only</td>
+</tr>
+<tr>
+  <td>0x9901</td>
+  <td>AE-x (WinZip AES)</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x9903</td>
+  <td>WinZip Reference</td>
+  <td>Discarded: reference to another entry, resolved by conversion</td>
+</tr>
+<tr>
+  <td>0xa11e</td>
+  <td>Data Stream Alignment (Apache Commons Compress)</td>
+  <td>Discarded: padding for alignment</td>
+</tr>
+<tr>
+  <td>0xa220</td>
+  <td>Microsoft Open Packaging Growth Hint</td>
+  <td>Discarded: padding for in-place editing</td>
+</tr>
+<tr>
+  <td>0xcafe</td>
+  <td>Java JAR marker</td>
+  <td>Discarded: information about the ZIP file itself</td>
+</tr>
+<tr>
+  <td>0xcdcd</td>
+  <td>minizip Central Directory</td>
+  <td>Discarded: encryption and signature of the central directory</td>
+</tr>
+<tr>
+  <td>0xd935</td>
+  <td>Android ZIP Alignment</td>
+  <td>Discarded: padding for alignment</td>
+</tr>
+<tr>
+  <td>0xe57a</td>
+  <td>ALZip code page</td>
+  <td>Absorbed: entry name ([[#entry-names-from-zip]]), if decoded with that code page</td>
+</tr>
+</table>
+
+<div class=note>
+  <p>Some extra fields are preserved only in particular cases.
+  The local and central header versions are considered separately.</p>
+  <ul>
+    <li>0x756e (ASi UNIX) is absorbed like 0x000d:
+    the permission bits of its mode go to `unix-mode`, the user and group IDs go to `unix-uid` and `unix-gid`,
+    and the symbolic link target goes to a [=link node=].
+    Its device number, however, is a raw `st_rdev` value whose bit layout differs among platforms,
+    and can't be split into the major and minor numbers of a [=special node=].
+    A device file is therefore converted to an empty [=file node=] with the original extra field preserved.
+    <li>0x4b46 (FWKCS MD5) and 0x1a51 (minizip hash) hold digests of the uncompressed content.
+    They are only preserved when they match the actual content.
+  </ul>
 </div>
 
 <h3 id=formula-data>
