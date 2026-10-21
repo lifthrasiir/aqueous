@@ -2,8 +2,8 @@
 
 flate-recons splits a raw DEFLATE stream into its decompressed **data** and a **record** of
 everything else the encoder chose. From the data and the record the stream is rebuilt bit for
-bit. This document describes the record, and the `.flate.aqr` file that stores a record with
-its data.
+bit. This document describes the record, the `.flate.aqr` file that stores a record with
+its data, and the [formula module](#formula-module) that rebuilds the stream from the two.
 
 This document is normative together with the data files it pins by SHA-256 (see
 [Model data](#model-data)) and the external references below. Everything else a decoder
@@ -1020,6 +1020,90 @@ The reference decoder also rejects: more blocks than `N + 8(b + 1) + 2^20`, with
 position in the main stream where the block count starts; and data of 2^32 − 1 bytes or more
 (its tables hold 32-bit positions), for which this document does not define the rule's
 tables.
+
+## Formula module
+
+The same representation as a module of entry formulas (`recons-formula`), in
+`formula::apply` and `formula::decode`. The module is `flate-recons`, version 1. Its output
+is the DEFLATE stream with its trailing bytes, whose length the application gives, rebuilt as
+in [Rebuilding the stream](#rebuilding-the-stream).
+
+### Domain
+
+The module rebuilds any byte string that `deconstruct` reads as a raw DEFLATE stream (RFC
+1951; no zlib or gzip wrapper, no preset dictionary) followed by trailing bytes, the bytes
+after the one holding the final block's last bit:
+
+- the blocks run up to the first with BFINAL set, and none has type 3;
+- a stored block's NLEN is the complement of its LEN;
+- in a dynamic block (where HLIT up to 288 and HDIST up to 32 are allowed), none of its
+  three codes is oversubscribed (incomplete codes are allowed); a code length 16 is not the
+  first; the code lengths do not run past HLIT + HDIST; and symbol 256 has a nonzero length;
+- every symbol read has a code; no literal/length symbol is 286 or 287 and no distance symbol
+  is 30 or 31; no distance reaches before the start of the data;
+- the input does not end before the final block does;
+- within the limits of a record: `N < 2^32 − 1`, at most 2^30 trailing bytes, and at most
+  `N + 2^20` blocks.
+
+`deconstruct` rejects any other input. A formula holds such input as it is rather than as an
+application of this module.
+
+**Every stream in the domain has a record**, in every profile and with every rule. For
+instance, with the rule `literals` (in the catalog or in full):
+
+- one segment, and for adaptive profiles no zlib emulation;
+- the blocks as in the stream: stored blocks with length code 2 and their padding, fixed and
+  dynamic blocks with their own token counts;
+- static profiles: the default model for every field (it uses all 72 symbols);
+- every match a miss of kind 1 (or 3 for alt258), with entry 0 and a raw distance; every
+  literal is a hit;
+- every dynamic header coded with bit 0: candidate 0, HLIT and HDIST explicit, the
+  differences from candidate 0's lengths, the run-length coding written out, and the
+  explicit code-length code with an explicit HCLEN.
+
+### Parameters and inputs
+
+**Parameters**: none (empty). An application with parameters is invalid.
+
+**Inputs**: exactly two, in this order. Any other count is invalid.
+
+| slot | content | already compressed |
+|---|---|---|
+| 0 | the data `D` | no: whatever the stream held (text, image rows, …) |
+| 1 | the [record](#the-record): the profile (u16) and the body, without the magic | mostly: the corrections are rANS or arithmetic coded, and the main and header streams pack their fields in bits; general-purpose compression gains little |
+
+The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`
+and `flate/record` in recons-dispatch, slices of `pdf/pool-<class>` and `pdf/meta` in
+pdf-recons). The rebuilt stream must have the length that the application gives.
+
+### Encoder obligations
+
+The decoder does not check everything this document requires. Its output for an invalid
+record is not specified (see [Rebuilding the stream](#rebuilding-the-stream)), so an encoder
+must verify that its record rebuilds the original before using it.
+
+Where this document leaves a choice, every option is valid and gives the same stream:
+
+- the profile, the rule, and the rule as a catalog index or in full;
+- where segments are cut, and for adaptive profiles whether a segment has zlib emulation or
+  resumes it;
+- for static profiles, each field's default model or its own table (which must hold every
+  symbol the field codes);
+- for each block, its own token count or the previous one's (when equal), and which block
+  takes the rest; for each stored block, length code 0, 1 or 2 where they agree;
+- for each distance, its entry, its rank or the raw distance (the decoder takes whichever
+  is coded);
+- for each dynamic header, the recipe's header or any candidate with the differences, any
+  matching run-length coding (a candidate, or written out), and any matching code-length
+  code (zlib's, package-merge or explicit), with HLIT, HDIST and HCLEN natural or explicit.
+
+The decoder ignores the following; encoders write none of them:
+
+- bits left over at the end of a bit stream, and nonzero bits in the padding up to its byte
+  boundary;
+- rANS bytes and extra bits left over at the end of a segment's corrections (static
+  profiles);
+- varints longer than needed (up to 10 bytes).
 
 ## Encoder choices (informative)
 

@@ -442,6 +442,14 @@ pub fn deconstruct_hinted(
     };
     let t0 = std::time::Instant::now();
     let f = Flat::new(raw, opts.segment, threads, opts.verify)?;
+    // What a record cannot hold, or reconstruct would reject (FORMAT.md, "Domain").
+    let n = f.data.len();
+    if n >= u32::MAX as usize
+        || f.stream.trailing.len() > 1 << 30
+        || f.stream.blocks.len() > n + (1 << 20)
+    {
+        return Err(Error::Invalid("beyond the limits of a record"));
+    }
     let t1 = std::time::Instant::now();
 
     let t4 = std::time::Instant::now();

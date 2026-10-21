@@ -204,6 +204,44 @@ fn chain_rule_round_trips() {
     }
 }
 
+/// The guaranteed encoding of FORMAT.md's formula module: the literals rule, one segment and
+/// no zlib emulation code every stream, in static and adaptive profiles alike.
+#[test]
+fn literals_rule_in_one_segment_round_trips() {
+    let inputs = inputs();
+    let mut failures = vec![];
+    for profile in [0, flate_recons::ADAPTIVE] {
+        let opts = flate_recons::Options {
+            rules: vec!["literals".parse().unwrap()],
+            map: Default::default(),
+            segment: usize::MAX,
+            zlib: false,
+            chain: false,
+            ..flate_recons::Options::for_profile(profile).unwrap()
+        };
+        every_backend(&inputs, &opts, &mut failures);
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A stream with more blocks than a record may hold (the data's length plus 2^20) is not
+/// deconstructed into a record that cannot be read.
+#[test]
+fn too_many_blocks_are_not_deconstructed() {
+    // Empty fixed blocks of 10 bits each: BFINAL, BTYPE 1, and the end of block (seven 0s).
+    let n = (1 << 20) + 4096;
+    let mut raw = vec![0u8; (n * 10).div_ceil(8)];
+    for i in 0..n {
+        let at = i * 10 + 1;
+        raw[at / 8] |= 1 << (at % 8);
+    }
+    let last = (n - 1) * 10;
+    raw[last / 8] |= 1 << (last % 8);
+    if let Ok((data, meta)) = flate_recons::deconstruct(&raw) {
+        assert!(flate_recons::reconstruct(&data, &meta).unwrap() == raw);
+    }
+}
+
 #[test]
 fn unknown_profiles_are_rejected() {
     let raw = "zlib:level=6"
