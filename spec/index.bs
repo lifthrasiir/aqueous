@@ -1301,7 +1301,7 @@ TODO: How resources are supplied to modules, and the identification by a hash.
 <h5 id=formula-block>
 Formula block</h5>
 
-Blocks 70<sub>16</sub> through 7F<sub>16</sub> are **formula blocks**.
+Blocks 70<sub>16</sub> through 77<sub>16</sub> are **formula blocks**.
 Formula blocks are parametrized by following variables:
 
 <div dfn-for=formula>
@@ -1311,33 +1311,21 @@ Formula blocks are parametrized by following variables:
     <tr>
       <th>Block Types
       <th><dfn>has_dictionary</dfn>
-      <th><dfn>has_output_checksum</dfn>
   </thead>
   <tbody>
     <tr>
       <td>70<sub>16</sub> — 73<sub>16</sub>
       <td>False
-      <td>False
     <tr>
       <td>74<sub>16</sub> — 77<sub>16</sub>
-      <td>False
-      <td>True
-    <tr>
-      <td>78<sub>16</sub> — 7B<sub>16</sub>
-      <td>True
-      <td>False
-    <tr>
-      <td>7C<sub>16</sub> — 7F<sub>16</sub>
-      <td>True
       <td>True
   </tbody>
 </table>
 
 <div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0111&thinsp;|d||c||ss|</code> where:
+  Alternatively, the block type can be interpreted as a binary number <code>0111&thinsp;0|d||ss|</code> where:
 
     * |d| indicates dictionary usage: 0 for no dictionary, 1 for dictionary present.
-    * |c| indicates the presence of output checksums: 0 for absent, 1 for present.
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
 </div>
 
@@ -1364,12 +1352,30 @@ Its data consists of the following:
 
 If a dictionary is in use, its <em>0-based</em> index is specified as [=formula/dictionary_index=], as in compressed blocks.
 [=formula/formula_data=] uses the Shared compressed external structure ([[#shared-external-structure]])
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] and None as [=checksum_method=].
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=]
+and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
 
 <div class=note>
   Formula blocks always use Zstandard, which can still store data verbatim with raw Zstandard blocks.
   Many small formula blocks are expected to share a dictionary to compensate for the lack of shared compression context.
 </div>
+
+<div class=note>
+  The checksum of [=formula/formula_data=] is mandatory and distinct from the optional output checksums
+  declared inside [=formula/formula_data=] ([[#formula-data]]).
+  [=formula/formula_data=] is always decoded in its entirety before evaluation,
+  so its checksum can be verified even by a decompressor reading only a part of the output.
+  It lets a damaged formula block be detected by reading the block alone and before evaluating anything,
+  so that a damaged formula block is always an [=invalid archive=] failure
+  rather than a [=resource failure=] caused by damaged resource declarations,
+  and is distinguished from damage to the non-leaf blocks it references.
+  An output checksum, on the other hand, also verifies the evaluation including module applications,
+  but can only be verified after computing the entire output.
+</div>
+
+Unless explicitly requested otherwise, conforming compressors SHOULD declare an output checksum for each output,
+or use a [=checksum_method=] other than None for every non-leaf block referenced by the formula block,
+so that the [=file content=] is covered by some checksum.
 
 A formula block describes the content of a file as an expression over non-leaf blocks following it,
 evaluated with modules and resources preceding it.
@@ -1405,18 +1411,10 @@ and can be detected by reading the block alone, i.e. that have a checksum:
       <td>C64<sub>16</sub> — C67<sub>16</sub>
       <td>64<sub>16</sub> — 67<sub>16</sub> ([[#resource-block]])
     <tr>
-      <td>C74<sub>16</sub> — C77<sub>16</sub>, C7C<sub>16</sub> — C7F<sub>16</sub>
-      <td>74<sub>16</sub> — 77<sub>16</sub>, 7C<sub>16</sub> — 7F<sub>16</sub> ([[#formula-block]])
+      <td>C70<sub>16</sub> — C77<sub>16</sub>
+      <td>70<sub>16</sub> — 77<sub>16</sub> ([[#formula-block]])
   </tbody>
 </table>
-
-<div class=note>
-  A formula block has no checksum over [=formula/formula_data=] itself,
-  but its damage is detected by its output checksum when [=formula/has_output_checksum=] is true.
-  Damage to non-leaf blocks is distinguished by their own checksums, if any,
-  or by retrying the evaluation with the mirror block.
-  A decompressor reading only a part of the output can't detect the damage this way.
-</div>
 
 As with any other block, the [=block/size=] field of a mirror block is determined by its own [=block/type=]
 and counts the bytes of its own [=block/data=].
@@ -2114,7 +2112,7 @@ after it has been decompressed.
 TODO: The internal structure is expected to include:
 
 * The output size;
-* The output checksum, [=If=] [=formula/has_output_checksum=];
+* The output checksum for each output, which is optional and signalled for each output;
 * Nodes of the expression: a byte range of non-leaf blocks, a concatenation of nodes,
     and an application of a module to nodes with resources and parameters;
 * References to non-leaf blocks, each as an ordinal among the subsequent non-leaf blocks
@@ -2484,7 +2482,7 @@ To <dfn>evaluate a formula block</dfn> |block|:
     1. Let |data| be the [=decoded data=] of [=formula/formula_data=] of |block|, parsed as its internal structure.
     2. Let |output| be the result of [=evaluate a formula node|evaluating=] the root [=formula node=] of |data|.
     3. The length of |output| MUST be equal to the output size declared in |data|.
-    4. If [=formula/has_output_checksum=] is true, the XXH64 checksum of |output| MUST be equal to the declared one.
+    4. If |data| declares an output checksum, the XXH64 checksum of |output| MUST be equal to the declared one.
     5. Return |output|.
 </ol>
 
@@ -3672,10 +3670,10 @@ Block index</h2>
       <td>68<sub>16</sub> — 6F<sub>16</sub>
       <td>Reserved
     <tr>
-      <td>70<sub>16</sub> — 7F<sub>16</sub>
+      <td>70<sub>16</sub> — 77<sub>16</sub>
       <td>[[#formula-block]]
     <tr>
-      <td>80<sub>16</sub> — CF<sub>16</sub>
+      <td>78<sub>16</sub> — CF<sub>16</sub>
       <td>Reserved
     <tr>
       <td>D0<sub>16</sub> — DF<sub>16</sub>
@@ -3705,19 +3703,13 @@ Block index</h2>
       <td>C64<sub>16</sub> — C67<sub>16</sub>
       <td>[[#mirror-block]] for [[#resource-block]]
     <tr>
-      <td>C68<sub>16</sub> — C73<sub>16</sub>
+      <td>C68<sub>16</sub> — C6F<sub>16</sub>
       <td>Reserved
     <tr>
-      <td>C74<sub>16</sub> — C77<sub>16</sub>
+      <td>C70<sub>16</sub> — C77<sub>16</sub>
       <td>[[#mirror-block]] for [[#formula-block]]
     <tr>
-      <td>C78<sub>16</sub> — C7B<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>C7C<sub>16</sub> — C7F<sub>16</sub>
-      <td>[[#mirror-block]] for [[#formula-block]]
-    <tr>
-      <td>C80<sub>16</sub> — FFFF&thinsp;FFFF&thinsp;FFFF&thinsp;FFFF<sub>16</sub>
+      <td>C78<sub>16</sub> — FFFF&thinsp;FFFF&thinsp;FFFF&thinsp;FFFF<sub>16</sub>
       <td>Reserved for various purposes
   </tbody>
 </table>
