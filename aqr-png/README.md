@@ -1,50 +1,31 @@
-# aqr-png (`pngr`)
+# aqr-png
 
-A lossless PNG recompressor: a PNG file is stored smaller, and restored bit for bit. Speed
-comes first: the target is 100 MB/s of PNG file single-threaded on an Apple M4, both ways.
-DEFLATE parsing, Huffman header coding and writing come from
-[aqr-flate](../aqr-flate).
+Lossless PNG recompression, as a module of entry formulas ([aqr-formula](../aqr-formula)):
+a PNG file is rebuilt bit for bit from a smaller representation. Speed comes first: the
+target is 100 MB/s of PNG file single-threaded on an Apple M4, both ways. DEFLATE parsing,
+Huffman header coding and writing come from [aqr-flate](../aqr-flate). The format is
+specified in [FORMAT.md](FORMAT.md).
 
 ```sh
 cargo build --release
-pngr c [-t N] in.png out.pngr  # compress (N threads, default: the available cores)
-pngr d [-t N] out.pngr back.png # decompress (same)
-pngr bench [-t N] [-n ITERS] [-v] FILE...   # round trip check, ratio, throughput, phase times (default 1 thread)
+pngr bench [-t N] [-n ITERS] [-v] [-c | -d] FILE...   # round trip check through an archive, ratio, throughput (default 1 thread)
 ```
 
 ```rust
-let packed = aqr_png::compress(&png);              // never fails: stores what it cannot code
-assert_eq!(aqr_png::decompress(&packed)?, png);    // checked against an xxh3 of the original
-let packed = aqr_png::compress_threads(&png, 8);   // the same bytes; decompress_threads likewise
+let f = aqr_png::formula::encode(&png, 8);   // None where there is nothing to code
+assert!(f.unwrap().eval(&modules)? == png);  // `modules` runs `formula::decode` for `formula::MODULE`
 ```
 
-## Results
+## Results and comparison
 
-Apple M4 (10 cores, 32 GB), one thread, CPU time (best of two runs, from `bench/`); MB/s of
-PNG file, both ways. Sets from [codec-corpus](https://github.com/imazen/codec-corpus);
-every file round-trips.
+The sizes and speeds measured for earlier versions of this crate were of its own file
+format, which is gone; they need re-measuring on archives (`pngr bench`, and `bench/`).
 
-| set | files | PNG | output / PNG | compress | decompress |
-|---|---|---|---|---|---|
-| CID22 (512 px photos, graphics) | 250 | 88.9 MB | 0.857 | 84.2 MB/s | 82.9 MB/s |
-| clic2025 (2048 px photos) | 62 | 228.3 MB | 0.816 | 91.8 MB/s | 89.4 MB/s |
-| kadid10k (photos) | 81 | 25.9 MB | 0.778 | 93.9 MB/s | 97.4 MB/s |
-| gb82 (photos, oxipng'd) | 25 | 10.0 MB | 0.928 | 76.0 MB/s | 76.1 MB/s |
-| gb82-sc (screenshots, oxipng'd) | 10 | 3.0 MB | 0.883 | 40.6 MB/s | 51.9 MB/s |
-| qoi screenshot_web | 14 | 40.3 MB | 0.601 | 89.8 MB/s | 102.2 MB/s |
-| **all** | 442 | 396.3 MB | **0.804** | **88.6 MB/s** | **88.6 MB/s** |
-
-The 100 MB/s target is not reached: only decompression of screenshot_web gets there (see
-[Speed](#speed)). Measured
-in decompressed image data instead of PNG file, the same runs are about 190 MB/s on photos
-and over 1 GB/s on screenshots.
-
-## Comparison
-
-Other lossless recompressors of PNG files, and generic compressors, on the same sets
-(`bench/`: `bench/fetch.sh` builds the tools, then `cargo run --release -- DIR...` in
-`bench/`). Every output is round-tripped; times are CPU times on one thread (libraries:
-the thread's, best of two runs; tools run as processes: the children's).
+`bench/` (`bench/fetch.sh` builds the tools, then `cargo run --release -- DIR...` in
+`bench/`) compares aqr-png with other lossless recompressors of PNG files and with generic
+compressors, on sets of PNG files from [codec-corpus](https://github.com/imazen/codec-corpus).
+Every output is round-tripped; times are CPU times on one thread (libraries: the thread's,
+best of two runs; tools run as processes: the children's).
 
 - [preflate-rs](https://github.com/microsoft/preflate-rs) 0.7.6 (`3bcd334`), its container
   with default settings: preflate reconstruction data, and RGB/RGBA images re-encoded as
@@ -52,37 +33,12 @@ the thread's, best of two runs; tools run as processes: the children's).
 - [precomp](https://github.com/schnaader/precomp-cpp) 0.4.8 dev (`a11b077`), `-cl -lt1`:
   preflate 0.3.5, then LZMA2 over the inflated data (no image model).
 - [paq8px](https://github.com/hxim/paq8px) (`c84f576`), `-8`: context mixing with image
-  models; it recompresses DEFLATE only when its own zlib reproduces the stream.
+  models; it recompresses DEFLATE only when its own zlib reproduces the stream. It is too
+  slow for whole sets (about 7 KB/s both ways).
 - zstd 1.5.7 `-19 --single-thread`, xz 5.8.3 `-9 -T1`, on the PNG file as it is.
 
-Output size / PNG size, and MB/s of PNG file:
-
-| set | aqr-png | preflate-rs | precomp | zstd -19 | xz -9 |
-|---|---|---|---|---|---|
-| CID22 | 0.857 | **0.804** | 0.950 | 0.998 | 0.997 |
-| clic2025 | 0.816 | **0.792** | 0.914 | 0.994 | 0.990 |
-| kadid10k | 0.778 | **0.751** | 0.926 | 0.999 | 0.996 |
-| gb82 | **0.928** | 0.934 | 1.042 | 1.000 | 1.000 |
-| gb82-sc | 0.883 | 0.978 | **0.841** | 0.966 | 0.969 |
-| qoi screenshot_web | 0.601 | **0.532** | 0.637 | 0.952 | 0.950 |
-| **all (442 files, 396 MB)** | 0.804 | **0.771** | 0.897 | 0.991 | 0.988 |
-| compress | **88.6 MB/s** | 2.5 MB/s | 1.1 MB/s | 27.1 MB/s | 10.2 MB/s |
-| decompress | 88.6 MB/s | 13.2 MB/s | 2.9 MB/s | **408.8 MB/s** | 57.1 MB/s |
-
-paq8px is too slow for the whole sets (about 7 KB/s both ways); on 9 files (the first 3 of
-kadid10k, CID22's training set and gb82-sc; 2.7 MB) it gives 0.962, against 0.812 for
-aqr-png, 0.802 for preflate-rs and 0.930 for precomp: none of these zlib streams is one
-its zlib reproduces, so it models the compressed bytes.
-
-- **preflate-rs** is 4% smaller overall: WebP lossless codes the pixels, where aqr-png
-  keeps the stream's LZ77 parse. It is 35× slower to compress and 6.7× slower to
-  decompress, and it gains little on oxipng/zopfli-style streams (gb82, gb82-sc: its
-  reconstruction data is large, or the stream is left as it is).
-- **precomp** recovers the pixel data with preflate but only LZMA-compresses it: 11% larger
-  than aqr-png overall, and 80× / 30× slower. It is best on gb82-sc (where long matches
-  make LZMA's job easy) and expands gb82 (preflate's reconstruction data for those streams
-  outweighs LZMA's gain).
-- **Generic compressors** gain 1% on PNG files (5% on screenshots).
+The sizes of aqr-png in `bench/` are those of the archive of its formula (the skeleton and
+the records, compressed by `aqr-formula`'s archive coder at its middle level).
 
 ## Design
 
@@ -127,14 +83,12 @@ on the photo sets).
   in the filtered domain, by byte position and the filtered neighbours' magnitudes.
 - Interlaced images are handled as their seven passes, each with its own rows.
 
-### Container (`src/container.rs`)
+### Representation (`src/codec.rs`)
 
-The complete format is specified in [FORMAT.md](FORMAT.md).
+The complete format is specified in [FORMAT.md](FORMAT.md). The formula has three inputs:
+the skeleton, an index, and the records of the images.
 
 ```text
-magic 69 04 7f a7 59 e0 ("aQR/p1ng" in base64) | version (u16 LE, 0) | mode
-mode 0: the file as it is (when coding does not make it smaller)
-mode 1: xxh3 of the file | zstd(skeleton) | per image: u32 length + record
 record: 0 + payload (kept as it is) | 1 + layout + Huffman headers + model payload
 ```
 
@@ -148,10 +102,9 @@ record: 0 + payload (kept as it is) | 1 + layout + Huffman headers + model paylo
   last-block flags), tail padding and trailing bytes (the Adler-32, and any junk), and the
   matches of length 258 sent as 284 + 31. **Huffman headers** go through aqr-flate's
   header coder, against the frequencies of the block's tokens: zlib's own trees cost a bit.
-- An image is kept as it is if its record would not be smaller, and the whole file is
-  stored if the coded form would not be smaller. Anything unexpected (not a PNG, broken
-  streams, invalid headers, truncation) is stored or kept; a panic while compressing also
-  falls back to storing.
+- An image is kept as it is if its record would not be smaller. Anything unexpected (not a
+  PNG, broken streams, invalid headers, truncation) is kept, or gives no formula; a panic
+  while encoding gives no formula either.
 
 ### Speed
 
@@ -187,24 +140,22 @@ already over budget.
 
 ### Threads
 
-`-t N` (`compress_threads`, `decompress_threads`): the output is the same bytes whatever the
+The `threads` of `formula::encode` and `formula::decode`: the output is the same whatever the
 number of threads, and one thread runs the code above unchanged. One image is coded by one
 rANS stream whose contexts come from the decoded pixels, so decoding an image stays serial;
 threads overlap what is independent around it:
 
 - An APNG (or any file with several image runs) has its images coded, and rebuilt, in
-  parallel: each image makes a record of its own (length-prefixed), concatenated in order.
+  parallel: each image makes a record of its own, concatenated in order.
   At most `N` images are in flight.
-- Compressing, the skeleton's zstd and the checksum run beside the images.
 - A large image (1 MB of data or more) has its symbols computed by stripes of rows on
   several threads, after the serial unfilter pass, and the symbol histograms counted by
   chunks and summed.
 - Decompressing a payload of several zlib streams writes the streams in parallel.
 
 Files under 64 KB are handled on the calling thread. A panic in a worker is a panic of the
-call, so `compress_threads` stores the file as `compress` does. Not done: parsing the zlib
-streams of a multi-stream image in parallel (a stream's end is known once it is parsed),
-decompressing the skeleton beside the first image (the image's geometry comes from it).
+call, so `formula::encode` gives no formula. Not done: parsing the zlib streams of a
+multi-stream image in parallel (a stream's end is known once it is parsed).
 
 ## Testing
 
@@ -212,18 +163,17 @@ decompressing the skeleton beside the first image (the image's geometry comes fr
 cargo test --release
 ```
 
-- `tests/roundtrip.rs`: synthetic PNG files through every DEFLATE encoder of
-  [flate-zoo](../flate-zoo) (zlib and its forks, libdeflate, zopfli, miniz, ...), every
-  pixel format with and without interlacing, several zlib streams in one image, APNG frames,
-  malformed files (junk after the stream, wrong CRCs, trailers, truncations, too little or
-  too much image data, broken streams, non-PNG input) and 2,000 corrupted containers
-  (errors, never panics). These use `container::try_compress`, which does not catch panics.
-  The `threads_*` tests check the compressed bytes are identical for 1, 2, 3 and 8 threads, and
-  that decompression gives the same file or the same Ok/Err, on large images, several zlib
-  streams, APNGs, malformed and corrupted input.
+- `tests/roundtrip.rs`, `tests/formula.rs`: synthetic PNG files through every DEFLATE
+  encoder of [flate-zoo](../flate-zoo) (zlib and its forks, libdeflate, zopfli, miniz, ...),
+  every pixel format with and without interlacing, several zlib streams in one image, APNG
+  frames, malformed files (junk after the stream, wrong CRCs, trailers, truncations, too
+  little or too much image data, broken streams, non-PNG input), each through
+  `formula::encode` and the evaluation of the formula, and damaged inputs of the module
+  (errors, never panics). The `threads_*` tests check the formula is identical for 1, 2, 3
+  and 8 threads, and that evaluation gives the same file or the same Ok/Err, on large
+  images, several zlib streams, APNGs, malformed and corrupted input.
 - Unit tests: the rANS coder, the code tables, Paeth against the specification for all
   inputs, unfiltering in pieces against the reference.
-- Every PNG in codec-corpus (733 files) and zune's fuzz corpus (1,563 files) round-trips.
 
 ## Layout
 
@@ -233,8 +183,9 @@ cargo test --release
 | `src/filter.rs` | PNG filters (reference unfilter, branch-free Paeth) |
 | `src/model.rs` | Geometry, the token model, encoder and decoder loops, NEON row model |
 | `src/rans.rs` | Static rANS: tables, encoder, decoder, bit I/O |
-| `src/container.rs` | File format, compression, decompression |
-| `src/bin/pngr.rs` | Command-line tool |
+| `src/codec.rs` | Skeleton, image records, rebuilding the file |
+| `src/formula.rs` | The formula module |
+| `src/bin/pngr.rs` | Benchmark tool |
 | `src/bin/probe.rs`, `src/bin/ransbench.rs` | Research tools: token statistics, rANS speed |
 | `bench/` | Comparison with other tools (`bench/fetch.sh` builds them into the workspace's `third_party/`) |
 

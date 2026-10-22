@@ -1,15 +1,18 @@
-//! aqr-flac as a module of entry formulas (see aqr-formula): the container's streams as
-//! input slots instead of one file, without its zstd, length and checksum.
+//! aqr-flac as a module of entry formulas (see aqr-formula): the coded streams as input
+//! slots.
 //!
 //! Params: one byte, 0 for FLAC and 1 for PCM (WAV, AIFF and raw samples decode alike).
 //! Inputs: the six byte streams (`codec::STREAM_NAMES`), the rANS words (u32 LE) and the two
 //! raw bit streams. FORMAT.md describes the module in full.
 
-use crate::codec::{Coded, N_BYTE_STREAMS};
-use crate::container::{self, Error, Kind, Options};
+use crate::codec::{self, Coded, N_BYTE_STREAMS};
+use crate::{flac, pcm};
 use aqr_formula::{Formula, Module, Node};
 
 pub const MODULE: Module = Module { name: "flac-recons", version: 1 };
+
+#[derive(Debug)]
+pub struct Error(pub String);
 
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -26,17 +29,85 @@ const CLASSES: [&str; N_BYTE_STREAMS + 3] = [
     "flac/raw1",
 ];
 
+/// What the input is: FLAC, WAV / AIFF (both coded as PCM), or raw PCM (also anything
+/// unrecognised, which is not coded).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    Flac,
+    Wav,
+    Pcm,
+}
+
+impl Kind {
+    /// The kind [`encode_coded`] codes the input as.
+    fn of(input: &[u8], opt: &Options) -> Kind {
+        if opt.raw.is_some() {
+            Kind::Pcm
+        } else if flac::parse_metadata(input).is_some() {
+            Kind::Flac
+        } else if pcm::detect(input).is_some() {
+            Kind::Wav
+        } else {
+            Kind::Pcm
+        }
+    }
+}
+
+/// Options of [`encode_with`].
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Take the whole input as headerless PCM of this format.
+    pub raw: Option<pcm::Format>,
+    /// Threads (1: all on the calling thread). The output does not depend on it.
+    pub threads: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { raw: None, threads: 1 }
+    }
+}
+
+/// Encodes FLAC, or WAV / AIFF (detected), or headerless PCM if `opt.raw` is given.
+/// (`kind` is [`Kind::of`] the input.)
+fn encode_coded(input: &[u8], opt: &Options, kind: Kind) -> Option<Coded> {
+    let t = opt.threads;
+    match (kind, opt.raw) {
+        (_, Some(fmt)) => pcm::encode_threads(input, fmt, 0, input.len(), t),
+        (Kind::Flac, None) => codec::encode_threads(input, t),
+        (Kind::Wav, None) => {
+            let (fmt, start, len) = pcm::detect(input)?;
+            pcm::encode_threads(input, fmt, start, len, t)
+        }
+        (Kind::Pcm, None) => None,
+    }
+}
+
+fn decode_coded(
+    kind: Kind,
+    c: &Coded,
+    len: usize,
+    out: &mut Vec<u8>,
+    threads: usize,
+) -> std::result::Result<(), codec::Error> {
+    if kind == Kind::Flac {
+        codec::decode_threads(c, len, out, threads)
+    } else {
+        pcm::decode_threads(c, len, out, threads)
+    }
+}
+
 /// [`encode_with`] with the default options (kind detected) and `threads`.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_with(input, &Options { threads, ..Options::default() })
 }
 
 /// The formula of `input` (FLAC, WAV / AIFF, or headerless PCM if `opt.raw` is given). None
-/// where the input is not coded (the container would store it), or the coder panics.
+/// where the input is not coded, or the coder panics.
 pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     let (kind, c) = std::panic::catch_unwind(|| {
         let kind = Kind::of(input, opt);
-        container::encode(input, opt, kind).map(|c| (kind, c))
+        encode_coded(input, opt, kind).map(|c| (kind, c))
     })
     .ok()??;
     let mut f = Formula::default();
@@ -60,7 +131,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     if streams.len() != N_BYTE_STREAMS || words.len() % 4 != 0 {
         return Err(corrupt("inputs"));
     }
-    // The same bound as the container's: no output is larger than 64 times its coded form.
+    // No output is larger than 64 times its coded form.
     let coded_len = inputs.iter().map(|i| i.len() as u64).sum::<u64>();
     if len > coded_len.saturating_mul(64) + (1 << 20) {
         return Err(Error("length".into()));
@@ -71,7 +142,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         raw: [raw0.to_vec(), raw1.to_vec()],
     };
     let mut out = Vec::new();
-    container::decode(kind, &c, len as usize, &mut out, threads).map_err(|e| corrupt(e.0))?;
+    decode_coded(kind, &c, len as usize, &mut out, threads).map_err(|e| corrupt(e.0))?;
     if out.len() as u64 != len {
         return Err(corrupt("length"));
     }

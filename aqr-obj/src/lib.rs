@@ -1,22 +1,14 @@
-//! Lossless Wavefront OBJ recompression: an OBJ file is stored smaller, and restored bit for
-//! bit.
-//!
-//! ```
-//! let obj = b"v 0.5 1.000000 -2\nf 1 1 1\n".to_vec();
-//! let packed = aqr_obj::compress(&obj);               // never fails: stores what it cannot code
-//! assert_eq!(aqr_obj::decompress(&packed).unwrap(), obj);
-//! ```
+//! Lossless Wavefront OBJ recompression: an OBJ file is split into streams that are stored
+//! smaller, and restored bit for bit. `formula` is the entry point (see aqr-formula).
 
 pub mod ans;
 pub mod block;
-pub mod container;
+pub mod codec;
 mod corner;
 pub mod formula;
 mod recent;
 pub mod style;
 pub mod varint;
-
-pub use container::{compress, decompress};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

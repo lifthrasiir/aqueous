@@ -536,6 +536,31 @@ pub trait NativeModule {
     fn apply(&self, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>>;
 }
 
+/// `modules` run by `m`, as archives apply them: without resources, and with one output. The
+/// [`crate::Apply`] that `m` is given has no inputs of its own (they are the evaluated ones).
+pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec<Box<dyn NativeModule + 'a>> {
+    struct Native<'a, M> {
+        module: Module,
+        m: &'a M,
+    }
+
+    impl<M: crate::Modules> NativeModule for Native<'_, M> {
+        fn module(&self) -> Module {
+            self.module
+        }
+
+        fn apply(&self, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>> {
+            let (&[len], []) = (sizes, resources) else {
+                return invalid(format!("{}: {} outputs, {} resources", self.module, sizes.len(), resources.len()));
+            };
+            let a = crate::Apply { module: self.module, params: params.to_vec(), inputs: Vec::new(), len };
+            self.m.apply(&a, inputs).map(|out| vec![out]).map_err(|e| Failure::Invalid(e.0))
+        }
+    }
+
+    modules.iter().map(|&module| Box::new(Native { module, m }) as Box<dyn NativeModule + 'a>).collect()
+}
+
 /// The file in archive `c`, with the modules implemented by `modules`.
 pub fn decode(c: &[u8], modules: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u8>> {
     if c.starts_with(&ENCRYPTED_HEADER_MAGIC) {

@@ -1,17 +1,17 @@
-//! aqr-mp3 as a module of entry formulas (see aqr-formula): the coded form without the
-//! container around it. The formula is one application of [`MODULE`] on ten input slots, the
-//! streams of the container ([`crate::codec::Coded`]) stored raw, and no parameters.
-//! FORMAT.md, "Formula module", specifies it.
+//! aqr-mp3 as a module of entry formulas (see aqr-formula). The formula is one application of
+//! [`MODULE`] on ten input slots, the streams of the coded form ([`crate::codec::Coded`])
+//! stored raw, and no parameters. FORMAT.md specifies it.
 
 use crate::codec::{self, Coded, N_BYTE_STREAMS};
-use crate::container::{Error, pack};
 use crate::par;
-use aqr_common::varint;
 use aqr_formula::{Formula, Module, Node};
 
 pub const MODULE: Module = Module { name: "mp3-recons", version: 1 };
 
-/// Slots: the eight byte streams of the container, then the rANS words (u32 LE) and the raw
+#[derive(Debug)]
+pub struct Error(pub String);
+
+/// Slots: the eight byte streams of the coded form, then the rANS words (u32 LE) and the raw
 /// bits.
 const SLOTS: usize = N_BYTE_STREAMS + 2;
 
@@ -29,44 +29,17 @@ const CLASSES: [&str; SLOTS] = [
     "mp3/rawbits",
 ];
 
-/// The length the container would have, as [`crate::container::compress`] computes it.
-fn container_len(c: &Coded) -> usize {
-    let mut n = 9 + 16;
-    let mut v = Vec::new();
-    for b in &c.streams {
-        v.clear();
-        match pack(b) {
-            Some(z) => {
-                varint::put(&mut v, (z.len() as u64) << 1 | 1);
-                varint::put(&mut v, b.len() as u64);
-                n += v.len() + z.len();
-            }
-            None => {
-                varint::put(&mut v, (b.len() as u64) << 1);
-                n += v.len() + b.len();
-            }
-        }
-    }
-    for l in c.bit_lens {
-        varint::put(&mut v, l);
-    }
-    varint::put(&mut v, c.words.len() as u64);
-    varint::put(&mut v, c.raw_bits);
-    n + v.len() + c.words.len() * 4 + c.raw.len()
-}
-
-/// The formula of `input`: `None` where the container would store it (or on a failure).
+/// The formula of `input`: `None` where the coded form is not smaller (or on a failure).
 /// `threads` threads give the same formula.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let c = std::panic::catch_unwind(|| {
         let c = if threads > 1 && input.len() >= par::PAR_MIN {
-            par::encode(input, |_| None).0
+            par::encode(input)
         } else {
             codec::encode(input)
         };
-        // Streams stored raw already below the input leave no doubt; else measure.
-        let raw: usize = c.streams.iter().map(Vec::len).sum::<usize>() + c.words.len() * 4 + c.raw.len();
-        (raw + 64 < input.len() || container_len(&c) < input.len() + 9).then_some(c)
+        let n: usize = c.streams.iter().map(Vec::len).sum::<usize>() + c.words.len() * 4 + c.raw.len();
+        (n + 64 < input.len()).then_some(c)
     })
     .ok()??;
     let mut f = Formula::default();
@@ -101,11 +74,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         };
         codec::decode(&c).map_err(|e| corrupt(e.0))?
     } else {
-        let srcs: [par::Src; N_BYTE_STREAMS] = std::array::from_fn(|i| par::Src::Plain(inputs[i]));
-        par::decode(len, &srcs, words, raw, threads).map_err(|e| match e {
-            par::DecError::Stream(m) => Error(m),
-            par::DecError::Codec(e) => corrupt(e.0),
-        })?
+        let streams: [&[u8]; N_BYTE_STREAMS] = std::array::from_fn(|i| inputs[i]);
+        par::decode(len, &streams, words, raw, threads).map_err(|e| corrupt(e.0))?
     };
     if out.len() as u64 != len {
         return Err(corrupt("length"));

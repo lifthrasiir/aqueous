@@ -2,93 +2,48 @@
 
 Lossless Wavefront OBJ recompression: an OBJ file is stored smaller, and restored bit for
 bit. Meant as a component of a general-purpose compressor, so speed comes first: the target
-is 100 MB/s single-threaded on an Apple M4, both ways. zstd and a small rANS coder are the
-entropy backends.
+is 100 MB/s single-threaded on an Apple M4, both ways. A small rANS coder is the entropy
+backend of the value streams; the archive (aqr-formula) compresses the other streams.
 
 ```sh
 cargo build --release
-objr c [-l LEVEL] [-B BLOCK] [-x] [-t N] in.obj out.objr   # compress
-objr d [-t N] out.objr back.obj                            # decompress
-objr bench [-n ITERS] [-t N] [-m] [-v] [-c|-d] FILE...     # round trip check, ratio, throughput
+objr bench [-n ITERS] [-B BLOCK] [-x] [-t N] [-c|-d] [-v] FILE...   # archive size, round trip check, throughput
 objr stats FILE...                                  # line templates and lines kept as text
-objr fuzz [-n N] [-s SEED] FILE...                  # mutated files and containers
+objr fuzz [-n N] [-s SEED] FILE...                  # mutated files
 ```
 
 ```rust
-use aqr_obj::container::{Options, Stats};
-let packed = aqr_obj::compress(&obj);               // never fails: stores what it cannot code
-assert_eq!(aqr_obj::decompress(&packed)?, obj);     // checked against an xxh3 of the original
-// Streaming forms, with memory bounded whatever the file size:
-aqr_obj::container::compress_to(&obj, &Options::default(), &mut Stats::default(), &mut writer)?;
-aqr_obj::container::decompress_to(&packed, &mut writer)?;
+use aqr_obj::formula::{self, MODULE};
+// None for an empty file, or where no block could be coded.
+let f = formula::encode(&obj, 1 /* threads */).unwrap();
+// `f` rebuilds `obj` when evaluated with `formula::decode` as the module `MODULE`.
 ```
 
 Any input is accepted: lines that do not parse are kept as text, and a block that fails
-verification is zstd-compressed whole.
+verification is stored whole.
 
 ## Results
 
-Apple M4, one thread, thread CPU time, best of 3 (`objr bench -n 3`, through
-`scripts/compare.py`); MB/s of OBJ file, both ways. Output size / input size; every file
-round-trips. Other compressors on each file, summed (`scripts/baseline.sh`): zstd 1.5.7
-(`--single-thread`; `-19` with `--long=27`), bzip2 1.0.8 `-9`, xz 5.8.4 `-9 -T1`.
-
-| set | files | size | **objr** | compress | decompress | zstd -3 | zstd -19 | bzip2 -9 | xz -9 |
-|---|---|---|---|---|---|---|---|---|---|
-| mcguire (scenes, scans) | 21 | 3,897 MB | **0.0565** | 138 MB/s | 385 MB/s | 0.2140 | 0.1374 | 0.1844 | 0.1159 |
-| writers (number styles) | 27 | 476 MB | **0.0729** | 103 MB/s | 314 MB/s | 0.2385 | 0.1603 | 0.2208 | 0.1414 |
-| c3d (scans, `%.17g`) | 17 | 69 MB | **0.1447** | 93 MB/s | 257 MB/s | 0.3270 | 0.2380 | 0.2801 | 0.2172 |
-| threejs | 7 | 6 MB | **0.1301** | 113 MB/s | 300 MB/s | 0.2873 | 0.2163 | 0.2769 | 0.1935 |
-| **all** | 72 | 4,448 MB | **0.0598** | **132 MB/s** | **373 MB/s** | 0.2185 | 0.1415 | 0.1899 | 0.1203 |
-
-Half the size of xz -9 and 58% smaller than zstd -19 overall; every file is smaller than
-under any of them. Compression includes verification (each block is rebuilt from its
-streams and compared; on a mismatch it is stored whole), about a third of its time; `-x`
-skips it. The machine was not idle (desktop applications); figures are CPU time of the
-thread.
-
-The `%.17g` scans (c3d) compress below 100 MB/s: each number is printed twice (to check
-the mode, then to verify), each time from exact digits of a double.
-
-Two more references, on fewer files:
-
-- [paq8px](https://github.com/hxim/paq8px) (`c84f576`) `-8`, on the 17 files under 5.2 MB
-  (59 MB): 0.1189, against 0.1386 for objr, at about 20 KB/s.
-- [Draco](https://github.com/google/draco) 1.5.7 `draco_encoder -cl 10 -qp 0`, which keeps
-  geometry and connectivity but not the file (values as floats, its own order, no text):
-  0.1052 on the 69 files it reads (3.7 GB), against 0.0573 for objr; on the three.js
-  models 0.0966 against 0.1301.
+Sizes and speeds need re-measuring: the earlier tables were of a file format that no longer
+exists. `objr bench` reports the size of an archive of the formula (`formula::encode`,
+then `aqr_formula::aqr::encode`) and the speed of making and decoding it. The other
+compressors' sizes per file are cached by `scripts/baseline.sh`.
 
 ### Threads
 
-`-t N` (`Options::threads`, `decompress_threads`; `objr c` and `objr d` default to the
-available cores): the output is the same bytes whatever the number of threads, and one
-thread runs the code above unchanged. Coded blocks carry state over, so the line coding
-and decoding stay on one thread, in order; around them, a pool parses the lines of the
-blocks ahead (number modes, render checks), verifies, and codes the streams; decompressing,
-it decodes the streams of the blocks ahead and prints the numbers of decoded blocks (the
-decoder emits values, `block::Deferred`). Wall time, all 72 files (about ±10% between
-runs on this machine):
-
-| threads | compress | decompress |
-|---|---|---|
-| 1 (CPU time) | 125 MB/s | 346 MB/s |
-| 2 | about 240 MB/s | about 450 MB/s |
-| 4-10 | about 250 MB/s | about 490 MB/s |
-
-The line coding (predictors, corner caches) and the line decoding are the limit; raising
-the calling thread's QoS class changed nothing. Going further needs independent segments
-(state reset every so many blocks): measured on the McGuire set, 0.35% larger with 64 MB
-segments, 0.9% with 32 MB, 2.1% with 8 MB; not done.
+`-t N` (`Options::threads`, the threads of `formula::decode`): the output is the same
+whatever the number of threads, and one thread runs the code unchanged. Coded blocks carry
+state over, so the line coding and decoding stay on one thread, in order; around them, a
+pool parses the lines of the blocks ahead (number modes, render checks), verifies, and
+codes the streams; decoding, it unpacks the streams of the blocks ahead and prints the
+numbers of decoded blocks (the decoder emits values, `block::Deferred`). The line coding
+(predictors, corner caches) and the line decoding are the limit. Going further needs
+independent segments (state reset every so many blocks); not done.
 
 ### Memory
 
-The heap beyond input and output does not grow with the file: at most about 36 MB
-compressing and 20 MB decompressing (`objr bench -m`: 1.1 GB San Miguel 36 MB and 20 MB,
-9.6 MB igea 22 MB and 14 MB, a 125 KB file 2.2 MB and 0.4 MB). That is blocks of 4 MB,
-rings of the last 65,536 lines per kind, a table of 65,536 vertices, and templates up to
-4 MB. `compress_to` and `decompress_to` write a block at a time; `objr c` and `objr d` use
-them.
+The heap beyond input and output does not grow with the file: blocks of 4 MB, rings of the
+last 65,536 lines per kind, a table of 65,536 vertices, and templates up to 4 MB.
 
 ## Corpus
 
@@ -112,9 +67,9 @@ them.
 ## How
 
 A file is cut into blocks of 4 MB at line ends. Each block becomes about 35 streams, each
-compressed with zstd (level 3) or rANS, whichever is smaller; state (previous values,
-templates, recent lines and faces) carries over from block to block, but its size does not
-depend on the file's.
+kept as is or rANS coded, whichever is smaller (the archive compresses them further);
+state (previous values, templates, recent lines and faces) carries over from block to
+block, but its size does not depend on the file's.
 
 ### Lines and templates (`src/block.rs`)
 
@@ -122,7 +77,7 @@ A `v`, `vt`, `vn`, `vp`, `f` or `l` line becomes a template and values. The temp
 everything but the values: keyword, separators (any blanks), each number's format or each
 corner's pattern (`a`, `a/b`, `a//c`, `a/b/c`, relative indices), trailing blanks and the
 line end. Templates are numbered by first use and defined where first used; a line costs
-its template number (one byte, nearly free under zstd). Any other line, or one that does
+its template number (one byte, nearly free once compressed). Any other line, or one that does
 not parse back to itself, is kept as text.
 
 ### Numbers ([`aqr-num`](../aqr-num), `src/style.rs`)
@@ -158,7 +113,8 @@ normals.
 - Unit normals: when the normals of a block have length 1, the largest component is
   predicted from the other two, `±sqrt(1 - a² - b²)`.
 - Residuals go to streams per kind and position, rANS coded per value as bit length and
-  two top bits, the other bits raw (`src/ans.rs`), unless zstd does better (repeats).
+  two top bits, the other bits raw (`src/ans.rs`), unless they are kept as is (repeats,
+  which the archive's zstd sees).
 
 ### Faces (`src/corner.rs`)
 
@@ -171,16 +127,8 @@ paired with this vertex, and the vertex's index plus the last offset between the
 
 ## Format
 
-[`FORMAT.md`](FORMAT.md) specifies it in full (version 0). In short:
-
-```text
-magic 69 04 7f d1 b8 ed ("aQR/0bjt"), u16-LE version (0), varint(length), u64-LE(xxh3 of the original)
-blocks, until the length is reached:
-  u8 mode, varint(raw length)
-  mode 0 (whole): varint(coded length) zstd(block)
-  mode 1 (coded): per stream (block::NSTREAMS):
-                    varint(raw length) [u8(0 stored | 1 zstd | 2 rANS) varint(coded length) data]
-```
+[`FORMAT.md`](FORMAT.md) specifies the module (`obj-recons`, version 1) in full: the input
+slots of its formula, the streams, and the decoding of blocks.
 
 ## Measured, not kept
 
@@ -190,21 +138,13 @@ blocks, until the length is reached:
 - Contexts for the residuals (bit length of the previous one): no gain over a model per
   kind and position.
 - rANS for the corner symbols and line ops: zstd wins (it sees the patterns).
-- Trying only last block's winner of zstd and rANS per stream: 2% larger.
 - Larger move-to-front caches for corner indices (128 to 2,048): worse. An escape against
   "one more than the largest index": no gain.
 - Relative coding of the unit normal selector (against the last one): slightly larger.
-- Blocks of 16 MB: 2.6% smaller (with zstd alone), four times the memory.
-- zstd level 5: 2.1% smaller for 6% slower compression; level 9: 3.4% for 13%.
 - A line predictor window of 8 or 12: 2-5% faster compression, 0.2-0.4% larger. Staying
   with the last predictor unless another saves 8 or 16 bits: mixed.
 - Faster digit output (digit pairs, tokens assembled on the stack) and branch-free
   cache search: slower or no change in A/B runs.
-
-## Format stability
-
-`scripts/format-ref.tsv` holds a hash of the output for every corpus file, and
-`scripts/format-check.sh` checks that changes keep it (`--update` rewrites it).
 
 ## Testing
 
@@ -216,25 +156,28 @@ cargo test --release
 - `tests/roundtrip.rs`: edge cases (no line end, CRLF, tabs, odd numbers, relative
   indices, long lines, more templates than the table holds, binary junk), every writer
   style mixed in one file, a mesh using every corner symbol, blocks stored whole in
-  between (what the encoder forgets then), and 3,000 corrupted containers (errors, never
-  panics).
+  between (what the encoder forgets then); through the formula, under several block
+  sizes and threads.
+- `tests/formula.rs`: the formula's structure, and damaged inputs (errors or other
+  output, never panics).
 - Unit tests: rANS; those of the number formats are in `aqr-num`.
 - `objr fuzz`: mutated files (bytes, tokens, line copies, line ends, digits) must
-  round-trip with verification off, small and large blocks, some stored whole;
-  corrupted containers must fail cleanly.
+  round-trip through the formula with verification off, small and large blocks, some
+  stored whole, whatever the threads.
 
 ## Layout
 
 | File | Contents |
 |---|---|
-| `src/container.rs` | File format, blocks, zstd/rANS choice, verification |
+| `src/formula.rs` | The module: formula of a file, and its decoder |
+| `src/codec.rs` | Blocks, their streams, verification, threads |
 | `src/block.rs` | Streams, templates, line encoder and decoder |
 | `src/style.rs` | Number mode per kind of line (encoder; the modes are `aqr-num`) |
 | `src/recent.rs` | Equal-line references, line predictor window |
 | `src/corner.rs` | Face corner indices |
 | `src/ans.rs` | rANS for value streams |
 | `src/varint.rs` | Stream cursor (LEB128 from `aqr-common`); heap accounting is `aqr_common::mem` |
-| `src/bin/objr.rs` | Command-line tool, bench, stats, fuzz |
+| `src/bin/objr.rs` | Bench, stats, fuzz |
 | `examples/` | Experiments behind the choices above |
 | `scripts/` | Corpus, baselines, comparison, profiling (`profile.py` over samply) |
 

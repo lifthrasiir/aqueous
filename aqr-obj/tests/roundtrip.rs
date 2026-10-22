@@ -1,37 +1,49 @@
-use aqr_obj::container::{Options, Stats, compress_with};
-use aqr_obj::{compress, decompress};
+use aqr_formula::{Apply, Formula};
+use aqr_obj::codec::Options;
+use aqr_obj::formula::{self, MODULE};
+
+fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
+    f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+        assert_eq!(a.module, MODULE);
+        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.to_string()))
+    })
+}
+
+/// The formula of `src` under `opt`, evaluated back; None where the formula is not made
+/// (`src` empty, or every block stored whole).
+fn rt_with(src: &[u8], opt: &Options) -> Option<Formula> {
+    let f = formula::encode_with(src, opt)?;
+    assert_eq!(eval(&f, 1).unwrap(), src, "{opt:?}: {:?}", String::from_utf8_lossy(&src[..src.len().min(200)]));
+    Some(f)
+}
 
 /// Round trip with verification off, so that the coded path itself is checked; small
 /// blocks too, so that lines are cut and state carries over.
 fn rt(src: &[u8]) {
     for block in [1 << 10, 4 << 20] {
         let opt = Options { verify: false, block, ..Default::default() };
-        let mut st = Stats::default();
-        let c = compress_with(src, &opt, &mut st);
-        assert_eq!(
-            decompress(&c).unwrap(),
-            src,
-            "block {block}: {:?}",
-            String::from_utf8_lossy(&src[..src.len().min(200)])
-        );
-        assert_eq!(st.whole, 0, "a block failed to code");
+        // A block that failed to code would be stored whole; all of them would make no formula.
+        assert!(rt_with(src, &opt).is_some() || src.is_empty(), "block {block}: a block failed to code");
     }
     // Blocks stored whole in between (verification off, or it would hide a mismatch): the
     // encoder must not use what it learnt from them.
     let opt = Options { block: 1 << 10, verify: false, force_whole: 0x5A5A_1234_8421_0F0F, ..Default::default() };
-    let c = compress_with(src, &opt, &mut Stats::default());
-    assert_eq!(decompress(&c).unwrap(), src);
-    // Threads: the same bytes, whole blocks or not, and the same file back.
+    rt_with(src, &opt);
+    // Threads: the same formula, whole blocks or not, and the same file back.
     for (threads, force_whole) in [(2, 0), (3, 0x5A5A_1234_8421_0F0F), (5, u64::MAX), (4, 1)] {
         for verify in [false, true] {
-            let opt = Options { block: 1 << 10, verify, force_whole, threads, ..Default::default() };
+            let opt = Options { block: 1 << 10, verify, force_whole, threads };
             let seq = Options { threads: 1, ..opt };
-            let c = compress_with(src, &opt, &mut Stats::default());
-            assert_eq!(c, compress_with(src, &seq, &mut Stats::default()), "threads {threads}");
-            assert_eq!(aqr_obj::container::decompress_threads(&c, threads).unwrap(), src);
+            let f = formula::encode_with(src, &opt);
+            assert_eq!(f, formula::encode_with(src, &seq), "threads {threads}");
+            if let Some(f) = f {
+                assert_eq!(eval(&f, threads).unwrap(), src);
+            }
         }
     }
-    assert_eq!(decompress(&compress(src)).unwrap(), src);
+    if let Some(f) = formula::encode(src, 1) {
+        assert_eq!(eval(&f, 1).unwrap(), src);
+    }
 }
 
 #[test]
@@ -96,9 +108,8 @@ fn writer_styles() {
     }
     rt(s.as_bytes());
     // Lines kept as text: only those of 3.4e38 printed positionally (39 digits), 5 per kind.
-    let mut st = Stats::default();
-    compress_with(s.as_bytes(), &Options::default(), &mut st);
-    let raw = st.raw[aqr_obj::block::S_TEXT];
+    let f = formula::encode(s.as_bytes(), 1).unwrap();
+    let raw = f.streams[2 + aqr_obj::block::S_TEXT].data.len();
     assert!(raw < 1300, "{raw} bytes of text");
 }
 
@@ -221,7 +232,7 @@ fn equal_lines_and_undone_blocks() {
     for mask in [0x5A5A_1234_8421_0F0Fu64, 0xAAAA_AAAA_AAAA_AAAA, 0x8888_4444_2222_1111] {
         for block in [1 << 10, 4 << 10] {
             let opt = Options { block, verify: false, force_whole: mask, ..Default::default() };
-            assert_eq!(decompress(&compress_with(s.as_bytes(), &opt, &mut Stats::default())).unwrap(), s.as_bytes());
+            assert!(rt_with(s.as_bytes(), &opt).is_some());
         }
     }
 }
@@ -238,63 +249,6 @@ fn binary_junk() {
         })
         .collect();
     rt(&v);
-}
-
-/// Corrupted containers: errors, never panics.
-#[test]
-fn corrupt_containers() {
-    let mut s = String::new();
-    for i in 0..3000 {
-        s += &format!("v {}.{:03} {} -{}.5\nvn 0 0.6 0.8\nvt 0.{i} 1\n", i, i % 1000, i * 7 % 13, i % 5);
-        if i > 2 {
-            s += &format!("f {}/{}/{} {}/{}/{} {}/{}/{}\n", i, i, i, i - 1, i - 1, i - 1, i - 2, i - 2, i - 2);
-        }
-    }
-    let c = compress_with(s.as_bytes(), &Options { block: 4096, ..Default::default() }, &mut Stats::default());
-    assert_eq!(decompress(&c).unwrap(), s.as_bytes());
-    let mut r = 99u64;
-    for k in 0..3000 {
-        let mut cc = c.clone();
-        r ^= r << 13;
-        r ^= r >> 7;
-        r ^= r << 17;
-        if k % 4 == 0 {
-            cc.truncate(r as usize % cc.len());
-        } else {
-            for _ in 0..1 + k % 8 {
-                r ^= r << 13;
-                r ^= r >> 7;
-                r ^= r << 17;
-                let j = r as usize % cc.len();
-                cc[j] ^= 1 << ((r >> 40) % 8);
-            }
-        }
-        if let Ok(d) = decompress(&cc) {
-            assert_eq!(d, s.as_bytes());
-        }
-    }
-}
-
-/// The header (`FORMAT.md`): magic, version 0, length, xxh3; other magics and versions are
-/// refused.
-#[test]
-fn header() {
-    const MAGIC: [u8; 6] = [0x69, 0x04, 0x7f, 0xd1, 0xb8, 0xed];
-    let mut want = MAGIC.to_vec();
-    want.extend_from_slice(&[0, 0, 0]);
-    want.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(b"").to_le_bytes());
-    assert_eq!(compress(b""), want);
-    let c = compress(b"v 1 2 3\n");
-    assert_eq!(c[..8], [0x69, 0x04, 0x7f, 0xd1, 0xb8, 0xed, 0, 0]);
-    assert_eq!(c[8], 8);
-    for (at, x) in [(0, 0x01), (5, 0x01), (6, 0x01), (7, 0x01)] {
-        let mut cc = c.clone();
-        cc[at] ^= x;
-        assert!(decompress(&cc).is_err());
-    }
-    let mut old = b"OBJR\x01".to_vec();
-    old.extend_from_slice(&c[8..]);
-    assert!(decompress(&old).is_err());
 }
 
 #[test]

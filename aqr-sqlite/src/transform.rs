@@ -32,7 +32,7 @@ use crate::record::{GroupDec, GroupEnc, RefCtx, int_value, is_int, predict, st_s
 use crate::varint::{Rd, put_sqlite, put_sv, put_uv};
 use crate::{Result, corrupt};
 
-// The streams, in the container's order: each is read with the help of those before it
+// The streams, in order: each is read with the help of those before it
 // only (FORMAT.md).
 pub const S_KIND: usize = 0;
 pub const S_RAW: usize = 1;

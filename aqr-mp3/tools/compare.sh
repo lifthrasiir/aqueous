@@ -1,5 +1,5 @@
 #!/bin/sh
-# Compares mp3r with packMP3, zstd -19 and xz -9 on the given files or directories.
+# Sizes of the given files or directories under packMP3, zstd -19 and xz -9.
 # Usage: compare.sh PACKMP3_BINARY WORKDIR PATH...
 # Files that packMP3 rejects count with their original size.
 set -e

@@ -1,29 +1,29 @@
 # aqr-pdf format
 
-This document specifies the file written by `pdfr` (aqr-pdf) completely enough to
-reimplement both directions. A file holds one input file, the *original* (normally a PDF file,
-but any bytes are allowed), which decompression must restore bit for bit.
+This document specifies the module `pdf-recons` of aqr-pdf, an entry formula module
+(`aqr-formula`), completely enough to reimplement the decoder. The module rebuilds one *original*
+(normally a PDF file, but any bytes are allowed), bit for bit.
 
 The original is cut into a *skeleton* and *items*. Items are byte ranges of stream data, coded
 on their own, and the skeleton is everything between them. An item is kept as it is, refers to
 an earlier item, or is rebuilt by one of these coders:
 
 - **tok**: a FlateDecode stream, as its DEFLATE tokens, entropy coded by this format
-  ([Token coding](#token-coding));
-- **full**: a FlateDecode stream, as its inflated data plus a aqr-flate record;
-- **png**: a FlateDecode image with PNG predictors, as a aqr-png file;
-- **jpeg**: a DCTDecode image, as a aqr-jpeg container.
+  ([Token coding](#4-token-coding-overview));
+- **full**: a FlateDecode stream, as its inflated data plus a aqr-flate record, which the
+  formula gives to aqr-flate;
+- **png**: a FlateDecode image with PNG predictors, as a PNG file coded by aqr-png;
+- **jpeg**: a DCTDecode image, coded by aqr-jpeg.
 
 The nested formats are specified by their own documents, which this one refers to rather than
 repeats:
 
 - aqr-flate's `FORMAT.md`: the *record* (section *The record*), and the *header stream*
   that token coding uses for dynamic Huffman headers (section *Header stream*);
-- aqr-png's `FORMAT.md`: the aqr-png file;
-- aqr-jpeg's `FORMAT.md`: the JRC container.
+- aqr-png's `FORMAT.md` and aqr-jpeg's `FORMAT.md`: their formula modules.
 
-Sections 1–6 are normative for decoders. Section 7 is about the compressor: everything there
-is the encoder's free choice within the constraints given.
+Sections 1–6 are normative for decoders. Section 7 is about the encoder: everything there
+is its free choice within the constraints given.
 
 ## 1. Conventions
 
@@ -33,8 +33,6 @@ is the encoder's free choice within the constraints given.
   every byte but the last. Values are `u64`. Readers accept up to 10 bytes, and more is an
   error. Bits above bit 63 are dropped. Writers emit the shortest form; readers accept longer
   ones.
-- **xxh3** is XXH3-64 (`XXH3_64bits`) with seed 0 and the default secret.
-- **zstd** data is one or more zstd frames (RFC 8878).
 - `bitlen(v)` is the number of significant bits of `v ≥ 0` (`bitlen(0) = 0`,
   `bitlen(5) = 3`). `x div y` and `x mod y` are floor division and its remainder, and
   `ceil(x / y)` rounds up.
@@ -53,72 +51,57 @@ is the encoder's free choice within the constraints given.
   `DIST_BASE[c]`, `DIST_EXTRA[c]` (distance codes 0–29) are DEFLATE's (RFC 1951 §3.2.5).
 - **Adler-32** is zlib's checksum (RFC 1950), written as `u32 BE`.
 
-## 2. File
+## 2. Module
 
-```text
-offset 0   6 bytes   magic: 69 04 69 75 FD B4        (base64 "aQRpdf20")
-offset 6   u16       version
-offset 8   streams:  stream 0, stream 1, ..., stream N−1
-stream  =  varint length, then `length` bytes of data
-```
+The module is `pdf-recons`, version 1, implemented by `formula::decode`. Its output is the
+original, whose length the application gives.
 
-The version selects the layout of the streams:
+What other recompressors rebuild is not rebuilt here. The module takes the results of their
+modules as input slots, and the formula gives them as applications of those modules: the
+DEFLATE streams of `FULL` items (aqr-flate), the PNG files of `PNG` items (aqr-png) and the
+JPEG files of `JPEG` items (aqr-jpeg). A decoder of this module does not need any of the three.
 
-| version | layout |
-|---|---|
-| 0 | coded, section 3 (N = 18) |
-| 1 | stored (N = 1) |
-| other | invalid |
+**Parameters**: none (empty). A module application with parameters is invalid.
 
-The number of streams and the meaning of stream *k* follow from the version and the contents of
-streams 0..*k*−1. A file ends exactly after its last stream. Further bytes, a missing stream,
-or a stream extending past the end make the file invalid.
+**Inputs**: exactly eleven, in this order. Any other count is invalid.
 
-**Stored** (version 1): stream 0 is the original, as it is.
-
-## 3. Coded files (version 0)
-
-### 3.1 Streams
-
-| # | stream | contents |
+| slot | class | content |
 |---|---|---|
-| 0 | head | 3.2 |
-| 1 | table | the items (3.3) |
-| 2 | skeleton | the bytes between items |
-| 3 | raw | the bytes of `RAW` items, in order |
-| 4 | jpeg | the aqr-jpeg containers of `JPEG` items, in order |
-| 5 | png | the aqr-png files of `PNG` items, in order |
-| 6–11 | pools | the inflated data of `FULL` items of class 0–5 (3.4), in order |
-| 12 | meta | the aqr-flate records of `FULL` items, in order |
-| 13 | token layout | 6.2 |
-| 14 | token tables | 6.4 |
-| 15 | token symbols | 6.5 |
-| 16 | token raw bits | 6.6 |
-| 17 | token headers | 6.8 |
+| 0 | `pdf/table` | the table (3.1) |
+| 1 | `pdf/skeleton` | the skeleton, the bytes between items |
+| 2 | `pdf/raw` | the bytes of `RAW` items, in order |
+| 3 | (children) | the DEFLATE streams of `FULL` items, concatenated in table order |
+| 4 | (children) | the PNG files of `PNG` items, concatenated in table order |
+| 5 | (children) | the JPEG files of `JPEG` items, concatenated in table order |
+| 6 | `pdf/tok-layout` | the token layout (6.2) |
+| 7 | `pdf/tok-tables` | the token tables (6.4) |
+| 8 | `pdf/tok-symbols` | the token symbols (6.5) |
+| 9 | `pdf/tok-bits` | the token raw bits (6.6) |
+| 10 | `pdf/tok-headers` | the token headers (6.8) |
 
-Streams 1–17 are *coded* as the head says: their *data* is the stream's bytes, or what zstd
-decoding of them gives.
+Sections 4–6 call slots 6–10 the layout, tables, symbols, raw bits and headers streams.
 
-### 3.2 Head
+Slots 3 to 5 are not streams: the formula gives each as the concatenation of one node per item.
+For the encoder (and the evaluator), the nodes are:
 
-```text
-varint  length of the original
-u64     xxh3 of the original
-per stream k = 1 .. 17:
-  u8      method: 0 = stored, 1 = zstd
-  [method 1: varint  decoded length]
-```
+- slot 3, for each `FULL` item: `apply(aqr-flate, [slice(pool, off, plain), slice(meta, off, mlen)],
+  deflate)`, with `pool` the stream `pdf/pool-<class>` (`content`, `font`, `image`, `objstm`,
+  `xref`, `data`; the inflated data of the class's `FULL` items in order), `meta` the stream
+  `pdf/meta` (the aqr-flate records in order), `plain` the inflated length, `mlen` the length of
+  the record and `deflate` the length of the DEFLATE stream. The pools and the meta stream are
+  streams of the formula, not slots of this module; the inflated data is only seen by
+  aqr-flate;
+- slot 4, for each `PNG` item: the formula of aqr-png on the PNG file of section 7.3
+  (the `formula::encode` of aqr-png, embedded), or nothing: an item that aqr-png cannot code is
+  a `RAW` item;
+- slot 5, for each `JPEG` item: the formula of aqr-jpeg on the item's bytes, embedded; an item
+  that aqr-jpeg cannot code is a `RAW` item.
 
-A stored stream's data is its bytes. A zstd stream's bytes must decode to exactly the decoded
-length. Other methods are invalid. The head must be used up exactly by these fields.
+## 3. Items
 
-Decoders may reject sizes beyond these limits, which no valid file exceeds: the original's
-length at most 2^40; the data of the pools (6–11) at most 1032 times the original's length,
-and of every other stream at most the original's length plus 2^20.
+### 3.1 Table
 
-### 3.3 Table
-
-The table is a sequence of items, until its data ends. Each item is:
+The table (slot 0) is a sequence of items, until its data ends. Each item is:
 
 ```text
 varint  gap      bytes of skeleton before the item
@@ -130,65 +113,61 @@ u8      mode
 |---|---|---|
 | 0 | `RAW` | varint `n` |
 | 1 | `DUP` | varint `back` |
-| 2 | `FULL` | u8 `flags`, [2 bytes `zlib`], u8 `class`, varint `plain`, [varint `bpp`, varint `stride`], varint `mlen` |
+| 2 | `FULL` | u8 `flags`, [2 bytes `zlib`], varint `deflate`, [4 bytes `adler`] |
 | 3 | `JPEG` | varint `n` |
 | 4 | `TOK` | u8 `flags`, [2 bytes `zlib`], u8 `class`, varint `plain`, [varint `bpp`, varint `stride`] |
-| 5 | `PNG` | u8 `colour type`, u8 `bit depth`, varint `width`, varint `height`, varint `n` |
+| 5 | `PNG` | varint `n` |
 
 Other modes are invalid. Field constraints:
 
 - `gap` and every `n` at most the original's length; `back` from 1 to the item's index (the
-  number of items before it); `plain` at most 1032 times the original's length; `mlen` at most
-  2^40.
-- `flags`: bit 0, the 2 `zlib` bytes follow; bit 1, the item ends with an Adler-32; bit 2, the
-  `bpp` and `stride` fields follow (pixels, `TOK` only). Other bits must be 0, and bit 2 must
-  be 0 for `FULL`.
+  number of items before it); `plain` at most 1032 times the original's length; `deflate` at
+  most the original's length.
+- `RAW`'s `n` is the number of bytes of slot 2, `PNG`'s `n` the length of the PNG file in slot 4
+  and `JPEG`'s `n` the length of the JPEG file in slot 5.
+- `TOK`'s `flags`: bit 0, the 2 `zlib` bytes follow; bit 1, the item ends with an Adler-32; bit
+  2, the `bpp` and `stride` fields follow (pixels). Other bits must be 0.
+- `FULL`'s `flags`: bit 0, the 2 `zlib` bytes follow; bit 1, the 4 bytes of the Adler-32
+  follow. Other bits must be 0. There is no class, inflated length or record length: the
+  module does not see the inflated data, so the Adler-32 is stored, as written after the DEFLATE
+  data.
 - `class` from 0 to 5: content, font, image, object stream, cross-reference stream, other data.
 - Pixels: `1 ≤ bpp ≤ 64`, `bpp ≤ stride ≤ 2^34`, and `stride` a multiple of `bpp`.
-- `PNG`'s colour type, bit depth, width and height describe the image (section 7); a decoder
-  does not need them, but the varints must still be well formed.
 
-### 3.4 Item bytes
+### 3.2 Item bytes
 
-Each item gives its *bytes*, taking its data from the streams in table order: every item of a
-mode takes the next bytes of its streams, from where the item before it left off.
+Each item gives its *bytes*, taking its data from the slots in table order: every item of a
+mode takes the next bytes of its slots, from where the item before it left off.
 
-- `RAW`: the next `n` bytes of the raw stream.
+- `RAW`: the next `n` bytes of slot 2.
 - `DUP`: the bytes of the item `back` items before it.
-- `JPEG`: the next `n` bytes of the jpeg stream are a JRC container. Its decompression is the
-  item's bytes.
-- `PNG`: the next `n` bytes of the png stream are a aqr-png file. Its decompression is a
-  PNG file `P`. With `m` = `u32 BE` at bytes 33 to 36 of `P` (the length of the second chunk), the item's
-  bytes are `P[41 .. 41 + m]`, which must lie within `P`. (This is the data of the IDAT chunk
-  of the PNG file in section 7.3.)
-- `FULL` and `TOK`: the `zlib` bytes (if flagged), the DEFLATE stream, and the Adler-32 of the
-  inflated data (if flagged). The inflated data is `plain` bytes long.
-  - `FULL`: the inflated data is the next `plain` bytes of the pool of the item's `class`, and
-    the record the next `mlen` bytes of the meta stream. aqr-flate rebuilds the DEFLATE
-    stream from the two (aqr-flate's `FORMAT.md`, *Rebuilding the stream*).
-  - `TOK`: the next stream of the token decoder (section 6) gives the DEFLATE stream and its
-    inflated data.
+- `JPEG`: the next `n` bytes of slot 5, the JPEG file.
+- `PNG`: with `P` the next `n` bytes of slot 4, the PNG file, and `m` = `u32 BE` at bytes 33 to
+  36 of `P` (the length of the second chunk), the item's bytes are `P[41 .. 41 + m]`, which must
+  lie within `P`. (This is the data of the IDAT chunk of the PNG file in section 7.3.)
+- `FULL`: the `zlib` bytes (if flagged), the next `deflate` bytes of slot 3 (the DEFLATE
+  stream) and the `adler` bytes (if flagged).
+- `TOK`: the `zlib` bytes (if flagged), the DEFLATE stream, and the Adler-32 of the inflated
+  data (if flagged, as `u32 BE`). The next stream of the token decoder (section 6) gives the
+  DEFLATE stream and its inflated data, `plain` bytes long.
 
-### 3.5 Decompression
+### 3.3 Decompression
 
-1. Read the magic, the version and the streams, and decode streams 1–17.
-2. For each item of the table: append the next `gap` bytes of the skeleton, then the item's
+1. For each item of the table: append the next `gap` bytes of the skeleton, then the item's
    bytes. The output must never exceed the original's length.
-3. Append the rest of the skeleton.
-4. Check that the raw, jpeg, png, meta and pool streams were used up exactly, that the token
-   symbol stream ended as section 6.5 requires (if there is a token decoder, below), that the output is the
-   original's length, and that its xxh3 is the head's. Otherwise the file is invalid, and the
-   output must not be returned.
+2. Append the rest of the skeleton.
+3. Check that slots 2 to 5 were used up exactly, that the token symbol stream ended as section
+   6.5 requires (if there is a token decoder, below), and that the output is the original's
+   length. Otherwise the input is invalid, and the output must not be returned.
 
-If the token streams (13–17) are all empty (as decoded), there is no token decoder, and a `TOK` item is
-invalid. Otherwise the token decoder is set up from them (6.4) before the first item, and the
-symbol stream must end as 6.5 requires even if no item is `TOK`. The encoder leaves them all
-empty exactly when no item is `TOK`.
+If the token slots 6–10 are all empty, there is no token decoder, and a `TOK` item is invalid.
+Otherwise the token decoder is set up from them (6.4) before the first item, and the symbol
+stream must end as 6.5 requires even if no item is `TOK`. The encoder leaves them all empty
+exactly when no item is `TOK`.
 
-Every `gap`, `n`, `plain` and `mlen` must also fit in what is left of its stream, and an item
-whose fields run past the end of the table is invalid. The layout,
-tables, raw bits and headers streams need not be used up: what follows the last item's bits is
-not read.
+Every `gap` and `n` must also fit in what is left of its slot, and an item whose fields run
+past the end of the table is invalid. The layout, tables, raw bits and headers streams need not
+be used up: what follows the last item's bits is not read.
 
 ## 4. Token coding: overview
 
@@ -301,7 +280,7 @@ The item's tokens are numbered from 0 over its fixed and dynamic blocks in order
 are not tokens. Every listed token must be a match of length 258.
 
 Padding values are the bits (least significant first) from the end of the block header (or of
-the last block) to the next byte boundary. A value must fit in that many bits, or the file is
+the last block) to the next byte boundary. A value must fit in that many bits, or the input is
 invalid.
 
 ### 6.3 Tokens
@@ -419,14 +398,14 @@ item: BFINAL (1 bit), the type (2 bits), and
 
 A literal is its byte's code. A match is its length symbol's code and extra bits, then its
 distance code's code and extra bits. Every symbol written needs a code (a nonzero length), or
-the file is invalid. Codes are canonical (RFC 1951 §3.2.2) and written most significant bit
+the input is invalid. Codes are canonical (RFC 1951 §3.2.2) and written most significant bit
 first, as DEFLATE does. After the last block comes the final padding value up to the byte
 boundary.
 
-## 7. Compressor
+## 7. Encoder
 
-Everything here is the encoder's choice; a decoder relies only on sections 1–6 and the
-checksum. The source is the reference for the heuristics named here.
+Everything here is the encoder's choice; a decoder relies only on sections 1–6. The source is
+the reference for the heuristics named here.
 
 ### 7.1 Items
 
@@ -444,7 +423,7 @@ checksum. The source is the reference for the heuristics named here.
   stream; `/Type /ObjStm` → object stream; `/Subtype /Image` → image; `/Type /Metadata` or
   `/EmbeddedFile` → other data; `/Subtype` Type1C, CIDFontType0C or OpenType, or a `/Length1`
   → font; an `/N` without `/BBox` (ICC profiles) → other data; anything else → content.
-- **The plan** (`container.rs`, `choose`): each item gets the mode that minimises estimated
+- **The plan** (`encode.rs`, `choose`): each item gets the mode that minimises estimated
   size plus λ times estimated time, with the smallest λ that keeps the file's estimated time
   within `file size / (1.1 × target speed)` (100 MB/s by default). The estimates come from the
   dictionaries and fitted cost tables, never from timing, so the output is the same on any
@@ -460,7 +439,8 @@ checksum. The source is the reference for the heuristics named here.
   mod 31 = 0`). The DEFLATE stream after it is parsed with aqr-flate; a stream that does not
   parse is `RAW`. The Adler-32 flag is set if at least 4 bytes follow the DEFLATE data and the
   first 4 are the Adler-32 of the inflated data.
-- `FULL`: the record is `aqr_flate::deconstruct_with` of the DEFLATE stream, one thread.
+- `FULL`: the record is `aqr_flate::deconstruct_hinted` of the DEFLATE stream, one thread,
+  with the hints of the zlib header if there is one (`Hints::zlib_header`).
 - `TOK` uses pixels for images whose geometry (`image.rs`) has no predictor, 8 bits per
   component and at most 4 components: `bpp` is the number of components and `stride` is width
   × `bpp`.
@@ -478,111 +458,20 @@ checksum. The source is the reference for the heuristics named here.
   of 1, 2, 4, 8 or 16 bits, or 2, 3 or 4 components of 8 or 16 bits (PNG colour types 0, 4, 2
   and 6). The stream's data is wrapped as a PNG file: the signature, an IHDR chunk (width,
   height, bit depth, colour type, then 0, 0, 0), one IDAT chunk holding the data, and an empty
-  IEND chunk, each with its CRC-32. The table records the colour type, bit depth, width and
-  height of that IHDR. The item is kept only if the aqr-png file is smaller than the data.
-- `JPEG` is aqr-jpeg's container of the data, kept only if smaller than the data.
+  IEND chunk, each with its CRC-32. The item is kept only if the streams of the formula of
+  aqr-png on that file (their lengths added) are shorter than the data.
+- `JPEG` is the formula of aqr-jpeg on the data; an item that it does not code is `RAW`.
 
-### 7.4 Streams and fallback
+### 7.4 The formula
 
-- The table, the skeleton and the pools are zstd at the chosen level (9 by default) if they
-  are at least 32 bytes long and zstd makes them smaller; every other stream is stored.
+- The streams of the formula are the pools (`pdf/pool-<class>`), `pdf/meta`, those of the
+  images' formulas, the table, the skeleton, the raw bytes (`pdf/table`, `pdf/skeleton`,
+  `pdf/raw`) and the token streams (`pdf/tok-<part>`, as the classes of slots 6–10).
 - The token streams are all empty if no item is `TOK`.
-- The result is stored (version 1) if coding fails or panics, or if the coded file is not
-  smaller than the stored one. With verification on, a coded file that does not decompress to
-  the original is coded again without the `TOK`, `FULL` and `PNG` modes.
-
-## 8. Formula module
-
-The same representation as a module of entry formulas (`aqr-formula`), in
-`formula::encode` and `formula::decode`. The module is `pdf-recons`, version 1. Its output is the
-original (whose length the application gives). The item bytes and the skeleton are those of
-section 3, with the container left out: no magic, version, head, checksum or length fields, and no
-zstd (the streams are stored raw; whatever holds the formula compresses them).
-
-What other recompressors rebuild is not rebuilt here. The module takes the results of their
-modules as input slots, and the formula gives them as applications of those modules: the
-DEFLATE streams of `FULL` items (aqr-flate), the PNG files of `PNG` items (aqr-png) and the
-JPEG files of `JPEG` items (aqr-jpeg). A decoder of this module does not need any of the three.
-
-**Parameters**: none (empty). A module application with parameters is invalid.
-
-**Inputs**: exactly eleven, in this order. Any other count is invalid.
-
-| slot | class | content |
-|---|---|---|
-| 0 | `pdf/table` | the table (8.1) |
-| 1 | `pdf/skeleton` | the skeleton, as stream 2 of the container |
-| 2 | `pdf/raw` | the bytes of `RAW` items, as stream 3 |
-| 3 | (children) | the DEFLATE streams of `FULL` items, concatenated in table order |
-| 4 | (children) | the PNG files of `PNG` items, concatenated in table order |
-| 5 | (children) | the JPEG files of `JPEG` items, concatenated in table order |
-| 6 | `pdf/tok-layout` | the token layout, as stream 13 |
-| 7 | `pdf/tok-tables` | the token tables, as stream 14 |
-| 8 | `pdf/tok-symbols` | the token symbols, as stream 15 |
-| 9 | `pdf/tok-bits` | the token raw bits, as stream 16 |
-| 10 | `pdf/tok-headers` | the token headers, as stream 17 |
-
-Slots 3 to 5 are not streams: the formula gives each as the concatenation of one node per item.
-For the encoder (and the evaluator), the nodes are:
-
-- slot 3, for each `FULL` item: `apply(aqr-flate, [slice(pool, off, plain), slice(meta, off, mlen)],
-  deflate)`, with `pool` the stream `pdf/pool-<class>` (`content`, `font`, `image`, `objstm`,
-  `xref`, `data`; the inflated data of the class's `FULL` items in order, as streams 6–11 of the
-  container), `meta` the stream `pdf/meta` (the aqr-flate records in order, as stream 12), and
-  `deflate` the length of the DEFLATE stream. The pools and the meta stream are streams of the
-  formula, not slots of this module; the inflated data is only seen by aqr-flate;
-- slot 4, for each `PNG` item: the formula of aqr-png on the PNG file of section 7.3 (the
-  `formula::encode` of aqr-png, embedded), or nothing: an item that aqr-png cannot code is a
-  `RAW` item;
-- slot 5, for each `JPEG` item: the formula of aqr-jpeg on the item's bytes, embedded; an item
-  that aqr-jpeg cannot code (or does not make smaller) is a `RAW` item.
-
-An image is coded only if the streams of its formula (their lengths added) are shorter than the
-item, as the container requires of the aqr-png and aqr-jpeg files.
-
-### 8.1 Table
-
-Items as in section 3.3, with the same `gap` and modes, in the same order; the differences are in
-the fields:
-
-| mode | fields |
-|---|---|
-| `RAW` | as in the container (`n` bytes of slot 2) |
-| `DUP` | as in the container |
-| `TOK` | as in the container: u8 `flags`, [2 bytes `zlib`], u8 `class`, varint `plain`, [varint `bpp`, varint `stride`] |
-| `FULL` | u8 `flags`, [2 bytes `zlib`], varint `deflate`, [4 bytes `adler`] |
-| `PNG` | varint `n` |
-| `JPEG` | varint `n` |
-
-- `FULL`'s `flags`: bit 0, the 2 `zlib` bytes follow; bit 1, the 4 bytes of the Adler-32 follow.
-  Other bits must be 0. There is no class, inflated length or record length: the module does not
-  see the inflated data, so the Adler-32 is stored (4 bytes, as written after the DEFLATE data)
-  where the container recomputes it. `deflate` is the length of the DEFLATE stream, at most the
-  original's length.
-- `PNG`: `n` is the length of the PNG file, at most the length of slot 4. The colour type, bit
-  depth, width and height are not stored.
-- `JPEG`: `n` is the length of the JPEG file, at most the length of slot 5.
-- `TOK` is as before, so are the constraints on `gap`, `n` and `back`.
-
-### 8.2 Item bytes
-
-As in section 3.4, with these item bytes:
-
-- `FULL`: the `zlib` bytes (if flagged), the next `deflate` bytes of slot 3 and the `adler` bytes
-  (if flagged);
-- `PNG`: with `P` the next `n` bytes of slot 4, `P[41 .. 41 + m]` with `m` = `u32 BE` at bytes
-  33 to 36 of `P` (as in 3.4);
-- `JPEG`: the next `n` bytes of slot 5.
-
-### 8.3 Decompression
-
-As in section 3.5 (with no head to read), over the slots in place of the streams. The slots 2 to 5
-must be used up exactly; the symbols slot (8) must end as 6.5 requires; and the output must be
-the length that the application gives. If slots 6–10 are all empty, there is no token decoder.
-There is no checksum to test: the formula's own evaluation is trusted to hand the module the
-inputs it was made with.
-
-`formula::encode` gives no formula (`None`) where the container would store the file, where no
-item is coded (all are `RAW` or `DUP`), or where the streams of the formula would not be shorter
-than the file, with the table, the skeleton and the pools counted at their zstd size as in the
-container (the pools hold inflated data, which the archive compresses).
+- `formula::encode` gives no formula (`None`) where no item is coded (all are `RAW` or `DUP`),
+  where it fails or panics, or where the streams of the formula would not be shorter than the
+  file, with the table, the skeleton and the pools counted at their zstd size (at the chosen
+  level, 9 by default; as it is if shorter than 32 bytes or if zstd does not make it smaller):
+  the pools hold inflated data, which the archive compresses.
+- With verification on, a formula that does not evaluate to the original is made again
+  without the `TOK`, `FULL` and `PNG` modes.

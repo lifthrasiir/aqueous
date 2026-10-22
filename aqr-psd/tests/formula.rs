@@ -78,6 +78,176 @@ fn hinted_composite() {
 }
 
 #[test]
+fn duplicate_layers_cost_next_to_nothing() {
+    let (w, h) = (200, 30);
+    let mut ls = layers(w, h, true);
+    let mut copy = Layer { top: 7, left: 2, w, h, channels: ls[0].channels.clone(), mask: None };
+    copy.channels.swap(1, 2);
+    let single = psd(w, h, &ls[..2], packbits::NO_TILES, false, &[]);
+    ls.push(copy);
+    let size = |f: &Formula| f.streams.iter().map(|s| s.data.len()).sum::<usize>();
+    let (a, b) = (size(&check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]))), size(&check(&single)));
+    assert!(a < b + b / 4, "{a} vs {b}");
+}
+
+#[test]
+fn same_bytes_other_size_is_no_copy() {
+    // Raw channels with equal bytes but different sizes (100 x 2 and 50 x 4).
+    let data = image(100, 2, 5);
+    let l = |w, h| Layer {
+        top: 0,
+        left: 0,
+        w,
+        h,
+        channels: vec![(0, data.clone()), (1, data.clone()), (2, data.clone())],
+        mask: None,
+    };
+    check(&psd(100, 4, &[l(100, 2), l(50, 4)], packbits::NO_TILES, false, &[0, 1]));
+}
+
+#[test]
+fn layer_outside_the_canvas() {
+    // Layers right of, below and left of the canvas; the composite is rendered as hint.
+    let (w, h) = (120, 20);
+    let mut ls = layers(w, h, true);
+    for (k, (top, left)) in [(0, 500), (300, 0), (0, -400)].into_iter().enumerate() {
+        ls.push(Layer {
+            top,
+            left,
+            w: 50,
+            h: 10,
+            channels: ls[k % 2].channels.iter().map(|(id, d)| (*id, d[..500].to_vec())).collect(),
+            mask: None,
+        });
+    }
+    // A composite the renderer predicts: the hint is used.
+    check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
+}
+
+#[test]
+fn masks_anywhere() {
+    // User masks left of, right of, inside and around their layers.
+    let (w, h) = (100, 16);
+    let mut ls = layers(w, h, true);
+    for (k, (mtop, mleft, mw, mh, def)) in
+        [(0, -300, 40, 8, 0), (2, 500, 30, 4, 255), (3, 10, 20, 6, 0), (-5, -5, 200, 40, 255)].into_iter().enumerate()
+    {
+        let mut channels = ls[k % 2].channels.clone();
+        channels.push((-2, image(mw, mh, 50 + k as u32)));
+        ls.push(Layer { top: k as i32, left: 3, w, h, channels, mask: Some((mtop, mleft, mw, mh, def)) });
+    }
+    check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
+}
+
+#[test]
+fn repeated_rows_with_exceptions() {
+    // Identical rows, every third written as literals only (an exception): repeated rows must
+    // not reuse an exception's bytes, nor skip one.
+    let (w, h) = (300, 24);
+    let row: Vec<u8> = (0..w).map(|x| if x < 100 { 7 } else { (x * 13 % 256) as u8 }).collect();
+    let plane: Vec<u8> = row.iter().copied().cycle().take(w * h).collect();
+    let l =
+        Layer { top: 0, left: 0, w, h, channels: vec![(0, plane.clone()), (1, plane.clone()), (2, plane)], mask: None };
+    check(&psd(w, h, &[l], packbits::NO_TILES, true, &[]));
+}
+
+const THREADS: [usize; 4] = [1, 2, 3, 8];
+
+/// The same formula whatever the threads of the encoder, and each decodes back (to `file`)
+/// with each of the decoder.
+fn check_threads(file: &[u8]) {
+    let one = formula::encode(file, 1).expect("not coded");
+    for t in THREADS {
+        assert!(formula::encode(file, t).as_ref() == Some(&one), "encode differs with {t} threads");
+        for d in THREADS {
+            assert!(one.eval(&modules(d)).unwrap() == file, "decode with {d} threads");
+        }
+    }
+}
+
+/// Outcomes (bytes or error) of evaluating `f` agree across thread counts.
+fn same_outcome(f: &Formula) {
+    let one = f.eval(&modules(1)).ok();
+    for t in THREADS {
+        assert!(f.eval(&modules(t)).ok() == one, "outcome differs with {t} threads");
+    }
+}
+
+#[test]
+fn threads_small_and_large_groups() {
+    check_threads(&psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]));
+    check_threads(&psd(
+        260,
+        35,
+        &layers(260, 35, false),
+        Encoder::Greedy { min_run: 3, split_rest: true },
+        false,
+        &[0],
+    ));
+    // Past the size where rows are pipelined through helper threads.
+    let enc = Encoder::Photoshop { phase: 77, period: 368 };
+    check_threads(&psd(800, 400, &layers(800, 400, true), enc, true, &[]));
+    check_threads(&psd(700, 500, &layers(700, 500, false), packbits::NO_TILES, false, &[1]));
+}
+
+#[test]
+fn threads_corrupt_streams() {
+    for file in [
+        psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]),
+        psd(800, 400, &layers(800, 400, true), packbits::NO_TILES, true, &[]),
+    ] {
+        let f = formula::encode(&file, 1).unwrap();
+        for (i, s) in f.streams.iter().enumerate() {
+            for at in [0, s.data.len() / 3, s.data.len() / 2, s.data.len().saturating_sub(10)] {
+                let mut g = f.clone();
+                g.streams[i].data.truncate(at);
+                same_outcome(&g);
+                let mut g = f.clone();
+                if let Some(b) = g.streams[i].data.get_mut(at) {
+                    *b ^= 0x40;
+                }
+                same_outcome(&g);
+            }
+        }
+    }
+}
+
+/// Corpus files with embedded files (smart objects), when the corpus is there.
+#[test]
+fn threads_embedded_files() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus");
+    let files = [
+        "fixtures/psd-tools_psd-tools/tests/psd_files/placedLayer.psd",
+        "fixtures/Agamnentzar_ag-psd/test/read/smart-object-curves/src.psd",
+        "oga/Toast--Toast.psd",
+    ];
+    for f in files {
+        let Ok(file) = std::fs::read(root.join(f)) else { continue };
+        check_threads(&file);
+        let formula = formula::encode(&file, 1).unwrap();
+        for (i, s) in formula.streams.iter().enumerate().filter(|(_, s)| s.class.starts_with("psd/")) {
+            for at in [s.data.len() / 4, s.data.len() / 2, s.data.len().saturating_sub(20)] {
+                let mut g = formula.clone();
+                if let Some(b) = g.streams[i].data.get_mut(at) {
+                    *b ^= 0x10;
+                }
+                same_outcome(&g);
+            }
+        }
+    }
+}
+
+#[test]
+fn hint_needs_8_bit_rgb() {
+    let mut f = check(&hinted_file(120, 20));
+    // The document's depth (in the skeleton) made 16: an error, not a renderer reading 8-bit
+    // rows as 16-bit ones.
+    let sk = f.streams.iter_mut().find(|s| s.class == "psd/skeleton").unwrap();
+    sk.data[22..24].copy_from_slice(&16u16.to_be_bytes());
+    assert!(f.eval(&modules(1)).is_err());
+}
+
+#[test]
 fn large_group_uses_threads() {
     // Big enough for the pipelined decoder.
     check(&psd(700, 400, &layers(700, 400, true), packbits::NO_TILES, false, &[]));

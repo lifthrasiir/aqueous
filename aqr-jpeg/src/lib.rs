@@ -1,6 +1,6 @@
 #![allow(clippy::needless_range_loop)]
 
-pub mod container;
+pub mod codec;
 pub mod fast;
 pub mod formula;
 pub mod jpeg;

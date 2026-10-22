@@ -1,19 +1,28 @@
-//! Repeated compression (`c`) or decompression (`d`) of files, for profiling.
-use aqr_flac::container;
+//! Repeated encoding (`c`) or decoding (`d`) of files to formulas, for profiling.
+use aqr_flac::formula::{self, MODULE};
+use aqr_formula::Apply;
+
+fn eval(f: &aqr_formula::Formula) -> Vec<u8> {
+    f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+        assert_eq!(a.module, MODULE);
+        formula::decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.0))
+    })
+    .unwrap()
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let iters: usize = args[1].parse().unwrap();
     let data: Vec<Vec<u8>> = args[2..].iter().map(|p| std::fs::read(p).unwrap()).collect();
-    let packed: Vec<Vec<u8>> = data.iter().map(|d| container::compress(d)).collect();
+    let formulas: Vec<_> = data.iter().map(|d| formula::encode(d, 1).unwrap()).collect();
     let t = std::time::Instant::now();
     let mut n = 0;
     for _ in 0..iters {
-        for (d, c) in data.iter().zip(&packed) {
+        for (d, f) in data.iter().zip(&formulas) {
             if args[0] == "c" {
-                n += container::compress(d).len();
+                n += formula::encode(d, 1).unwrap().len() as usize;
             } else {
-                n += container::decompress(c).unwrap().len();
+                n += eval(f).len();
             }
         }
     }

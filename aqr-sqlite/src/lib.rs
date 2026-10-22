@@ -1,15 +1,8 @@
-//! Lossless SQLite 3 database recompression: a database file is stored smaller, and restored
-//! bit for bit.
-//!
-//! ```
-//! # let db = vec![0u8; 100];
-//! let packed = aqr_sqlite::compress(&db);               // never fails: stores what it cannot code
-//! assert_eq!(aqr_sqlite::decompress(&packed).unwrap(), db);
-//! ```
+//! Lossless SQLite 3 database recompression: a database file is split into streams, and
+//! rebuilt from them bit for bit. `formula` is the entry point (a module of aqr-formula).
 
 #![allow(clippy::needless_range_loop)]
 
-pub mod container;
 pub mod formula;
 pub mod index;
 pub mod page;
@@ -17,8 +10,6 @@ pub mod par;
 pub mod record;
 pub mod transform;
 pub mod varint;
-
-pub use container::{compress, decompress};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

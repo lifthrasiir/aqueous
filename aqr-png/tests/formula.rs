@@ -3,16 +3,9 @@
 
 mod common;
 
-use aqr_formula::{Apply, Formula};
+use aqr_formula::Formula;
 use aqr_png::formula;
 use common::*;
-
-fn modules(threads: usize) -> impl Fn(&Apply, &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
-    move |a, inputs| {
-        assert_eq!(a.module, formula::MODULE);
-        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.to_string()))
-    }
-}
 
 /// The formula of `file` (which must be coded), evaluated on several thread counts.
 #[track_caller]
@@ -195,8 +188,7 @@ fn corrupt_inputs_fail_cleanly() {
     for i in 0..1500 {
         x = x.wrapping_mul(1103515245).wrapping_add(12345);
         let mut copies: Vec<Vec<u8>> = inputs.iter().map(|s| s.to_vec()).collect();
-        // The skeleton is left alone: a damaged IHDR can ask for an image of terabytes (as in
-        // the container, where a damaged skeleton is caught by zstd's checksum first).
+        // The skeleton is left alone: a damaged IHDR can ask for an image of terabytes.
         let k = 1 + i % 2;
         let at = (x as usize >> 4) % copies[k].len();
         copies[k][at] ^= 1 << (i % 8);

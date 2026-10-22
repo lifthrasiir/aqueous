@@ -1,16 +1,15 @@
-# JRC container format
+# aqr-jpeg: the `jpeg-recons` module
 
-This document specifies the container written by `jrc` (aqr-jpeg) completely enough to
-reimplement both directions. A container holds one JPEG file, the *original*, which
-decompression must restore bit-exactly.
+This document specifies module `jpeg-recons` version 1 of aqr-formula (`aqr_jpeg::formula`)
+completely enough to reimplement both directions. The module rebuilds one JPEG file, the
+*original*, bit-exactly from one parameter and nine input slots.
 
-Sections 1–10 are normative for decoders. Section 11 is about the compressor: everything
-there is the encoder's free choice within the constraints given, except where it says
-otherwise.
+Sections 1–9 are normative for decoders. Section 10 is about the encoder: everything there is
+the encoder's free choice within the constraints given, except where it says otherwise.
 
 ## 1. Conventions
 
-- Integers are unsigned unless stated. `u16` and `u64` fields are little-endian.
+- Integers are unsigned unless stated.
 - **varint**: LEB128. 7 bits per byte, least significant group first, bit 7 set on every byte
   but the last. Values are `u64`. Writers emit the shortest form. Readers accept up to 10 bytes;
   more is an error. Bits above bit 63 in the 10th byte are ignored.
@@ -20,84 +19,63 @@ otherwise.
 - *Zigzag order*: coefficient `k` (0–63) of a block in zigzag order is the coefficient at
   natural (row-major) index `ZIGZAG[k]`; see Appendix A. `ZI` is the inverse map
   (`ZI[ZIGZAG[k]] = k`). Coefficient `k = 0` is DC.
-- **xxh3** is XXH3-64 (`XXH3_64bits`) with seed 0 and the default secret.
 
-## 2. Container
+## 2. The module
 
-```text
-offset 0   6 bytes   magic: 69 04 7E 8E 9D E0        (base64 "aQR+jp3g")
-offset 6   u16       version
-offset 8   streams:  stream 1, stream 2, ..., stream N
-stream  =  varint length, then `length` bytes of data
-```
+**Param**: one byte, the frame type: 0 = sequential (SOF0 / SOF1), 1 = progressive (SOF2).
+Other values are invalid. The output length is given by the formula.
 
-The version selects the internal layout:
+**Inputs**, in order. Each is a byte string; those that hold lists of streams concatenate
+them and give their lengths in `lens`.
 
-| version | layout |
-|---|---|
-| 0 | coded, sequential JPEG (SOF0 / SOF1), section 3 |
-| 1 | coded, progressive JPEG (SOF2), section 3 |
-| 2 | stored |
-| other | invalid |
-
-The number of streams and the meaning of stream *n* follow from the version and the contents of
-streams 1..*n*−1. A container ends exactly after its last stream. Further bytes, a missing
-stream, or a stream extending past the end make the container invalid.
-
-**Stored** (version 2): one stream, the original file verbatim.
-
-## 3. Coded containers (versions 0 and 1)
-
-### 3.1 Stream sequence
-
-| # | stream | present |
+| # | class | content |
 |---|---|---|
-| 1 | head (3.2) | always |
-| … | nested container (3.3) | one per embedded entry of kind 0, in entry order |
-| … | cut blob (3.4) | always |
-| … | scan info (3.5) | always |
-| … | raw scan data (3.6) | one per raw scan |
-| … | truncated tail (3.6) | one per truncated scan (version 0 only) |
-| … | tables (section 8) | always |
-| … | rANS words, then raw bits (section 9) | one pair per stripe |
+| 0 | `jpeg/head` | the head (2.1): `n_embedded` and the entries |
+| 1 | `jpeg/embedded` | the *decoded* bytes of each kind 0 entry, concatenated in entry order |
+| 2 | `jpeg/cut` | the cut blob (2.3) |
+| 3 | `jpeg/info` | the scan info (2.4) |
+| 4 | `jpeg/scans` | the raw scan data and truncated tails (2.5), concatenated in scan order |
+| 5 | `jpeg/tables` | the tables (section 7) |
+| 6 | `jpeg/lens` | varints: one length per entry of `scans`, then per stripe the length of its rANS words and of its raw bits |
+| 7 | `jpeg/rans` | the rANS words (section 8) of all stripes, as little-endian bytes, concatenated |
+| 8 | `jpeg/bits` | the raw bits (section 8) of all stripes, concatenated |
 
-The raw scan and tail streams are interleaved in scan order. A scan contributes at most one of
-them. The stripe count comes from the scan info stream.
+The scan info (2.4) tells how many streams `scans` and `lens` hold and how many stripes
+follow: the lengths in `lens` are for the entries of `scans` in scan order, and then for the
+stripes in order, each with two lengths. Slots 4 and 6 to 8 must be used up exactly by them.
+A slot whose fields are listed below (0, 3) must be used up exactly by those fields. Any
+excess byte is an error.
 
-A stream whose fields are listed below (head, scan info) must be used up exactly by those
-fields. Any excess byte is an error.
-
-### 3.2 Head
+### 2.1 Head
 
 ```text
-u64     xxh3 of the original
 varint  n_embedded
 per embedded entry i = 0 .. n_embedded-1:
   varint  gap      bytes of the cut blob between the previous entry (or the blob start) and this one
   varint  length   length of the embedded JPEG
-  u8      kind     0 = coded in a nested container, 1 = copy of an earlier entry
+  u8      kind     0 = coded (bytes in slot 1), 1 = copy of an earlier entry
   [kind 1: varint ref   index of an earlier entry, ref < i]
 ```
 
-Each embedded entry is a byte range of the blob (3.4) that holds a JPEG embedded in the
+Each embedded entry is a byte range of the blob (2.3) that holds a JPEG embedded in the
 original, such as an Exif thumbnail or an MPF secondary image. Kinds other than 0 and 1 are
 invalid.
 
-*Depth*: the outermost container has depth 0, and a nested container has its parent's depth
-plus 1. Kind 0 is invalid in a container of depth 3 or more.
+### 2.2 Embedded JPEGs
 
-### 3.3 Nested containers
+A kind 0 entry takes `length` bytes from the next position of slot 1. A kind 1 entry has no
+bytes of its own: they are those of entry `ref`, and the lengths must agree, so a repeated JPEG
+occurs in slot 1 once. Slot 1 must be used up exactly by the kind 0 entries.
 
-Each kind 0 entry, in entry order, is followed by one stream holding a complete container
-(magic, version, streams; any version) at depth + 1. Decompressing it must give exactly
-`length` bytes. A kind 1 entry has no stream: its bytes are those of entry `ref`, and the
-lengths must agree.
+The formula fills slot 1 with the bytes of the embedded JPEGs, each either verbatim or as the
+output of this module (at one level of nesting deeper). The module itself does not limit the
+nesting; the encoder stops at depth 3 (section 10).
 
-### 3.4 Blob
+### 2.3 Blob
 
-The *blob* is the original with the entropy-coded data of every scan removed. Section 5 defines
+The *blob* is the original with the entropy-coded data of every scan removed. Section 4 defines
 which bytes those are. Everything else (markers, segments, data between and after them, the
-trailer) stays. The *cut blob* stream holds the blob with the embedded entries removed. The
+trailer) stays. The *cut blob* in slot 2 holds the blob with the embedded entries removed. The
 blob is rebuilt as:
 
 ```text
@@ -106,7 +84,7 @@ for each entry:  blob += cut[q .. q+gap]  (error if past the end);  blob += entr
 blob += cut[q ..]
 ```
 
-### 3.5 Scan info
+### 2.4 Scan info
 
 ```text
 varint  n_scans
@@ -118,7 +96,7 @@ varint  n_stripes
 
 Flag bits:
 
-| bit | version 0 | version 1 |
+| bit | param 0 | param 1 |
 |---|---|---|
 | 0 (1) | pad_zero: padding uses 0-bits instead of 1-bits | pad_zero |
 | 1 (2) | raw: the scan's data is stored verbatim | raw |
@@ -128,46 +106,46 @@ Flag bits:
 
 Constraints: a raw scan has flags exactly 2. `boundary` requires `truncated`.
 `trailing_rst < 2^32`. `n_scans` must equal the number of scans found by parsing the blob.
-`1 ≤ n_stripes ≤ 256` and `n_stripes ≤ max(1, mcu_rows)` (section 6).
+`1 ≤ n_stripes ≤ 256` and `n_stripes ≤ max(1, mcu_rows)` (section 5).
 
-Version 1 has no truncated scans: the compressor keeps a progressive scan that ends early
-as raw, or stores the file (section 11).
+Progressive frames have no truncated scans: the encoder keeps a progressive scan that ends
+early as raw, or does not code the file (section 10).
 
-### 3.6 Raw scan data and truncated tails
+### 2.5 Raw scan data and truncated tails
 
-For a raw scan the stream is the scan's entropy-coded data, exactly as it appeared in the
-original (stuffed, RST markers included). For a truncated scan the stream is the tail used in
-10.2, given in destuffed form.
+For a raw scan the entry of `scans` is the scan's entropy-coded data, exactly as it appeared
+in the original (stuffed, RST markers included). For a truncated scan it is the tail used in
+9.2, given in destuffed form. The entries are in scan order. A scan contributes at most one.
 
-### 3.7 Decompression
+### 2.6 Decoding
 
-1. Read the head and the nested containers, then rebuild the blob (3.4).
-2. Parse the blob as a JPEG (section 5). The frame must be progressive exactly when the version
+1. Read the head, then rebuild the blob (2.3) from slots 1 and 2.
+2. Parse the blob as a JPEG (section 4). The frame must be progressive exactly when the param
    is 1. Every scan's entropy-coded data in the blob must be empty (`start = end`).
-3. Read the scan info, the raw scan and tail streams, the tables and the stripes. Check that
-   the container ends there.
-4. Decode the coefficient arrays (sections 6–9).
-5. Re-emit every non-raw scan (section 10), with version 0 or version 1 semantics.
-6. Output the blob with each scan's data (re-emitted, or the raw stream) inserted at that
-   scan's `start` offset in the blob, in scan order.
-7. If xxh3 of the output differs from the head's value, decompression fails. The output must
-   not be returned.
+3. Read the scan info, the raw scan data and tails, the tables and the stripes from their
+   slots, checking that each is used up as 2 requires.
+4. Decode the coefficient arrays (sections 5–8).
+5. Re-emit every non-raw scan (section 9), with sequential or progressive semantics as the
+   param says.
+6. Output the blob with each scan's data (re-emitted, or the raw entry) inserted at that
+   scan's `start` offset in the blob, in scan order. The output must have the length the
+   formula declares.
 
-## 4. Bit orders
+## 3. Bit orders
 
 The format uses three bit orders.
 
-- **JPEG bits** (section 10): MSB-first. Each byte fills from bit 7 down.
-- **Model bits** (tables and raw bits, sections 8–9): LSB-first. Bit `i` of a byte string is
+- **JPEG bits** (section 9): MSB-first. Each byte fills from bit 7 down.
+- **Model bits** (tables and raw bits, sections 7–8): LSB-first. Bit `i` of a byte string is
   `(byte[i/8] >> (i%8)) & 1`. An `n`-bit field read at position `p` has the value
   `Σ bit(p+j) << j` for `j` in 0..n. Writers pad the final byte with zeros and write no
   further bytes. Readers ignore bits after the last field.
-- **rANS words** (section 9): 32-bit words, each stored as 4 little-endian bytes.
+- **rANS words** (section 8): 32-bit words, each stored as 4 little-endian bytes.
 
-## 5. JPEG parsing
+## 4. JPEG parsing
 
-This parser runs on the blob during decompression. The compressor runs it on the original,
-where it also delimits the entropy-coded data. Any error makes the container invalid.
+This parser runs on the blob during decoding. The encoder runs it on the original,
+where it also delimits the entropy-coded data. Any error makes the inputs invalid.
 
 State: an optional frame; DC and AC Huffman table specs for slots 0–3 (initially undefined);
 quantisation tables for slots 0–3 (initially all zero); a restart interval `ri = 0`; a list of
@@ -212,7 +190,7 @@ Reading a field past the end of `seg` is an error. Markers:
 - **DD (DRI)**: `ri = be16(seg[0..])`.
 - **DA (SOS)**:
   1. It is an error without a frame.
-  2. At the first SOS, snapshot the four quantisation tables. Section 7 uses this snapshot.
+  2. At the first SOS, snapshot the four quantisation tables. Section 6 uses this snapshot.
   3. `ns = seg[0]` must satisfy `1 ≤ ns ≤ 4`.
   4. For each scan component `s`, read the id at `seg[1+2s]` and the table selector `t` at
      `seg[2+2s]`. The id must name a frame component, and no component may appear twice in the
@@ -246,14 +224,14 @@ scan_end(d, start):
 
 The destuffed data concatenates all segments with no markers.
 
-## 6. Coefficient arrays and stripes
+## 5. Coefficient arrays and stripes
 
 The decoded image is one array per frame component of `bw × bh` blocks, in raster order. A
-block holds 64 signed coefficients in zigzag order. Valid containers have `|AC| ≤ 32767` and
+block holds 64 signed coefficients in zigzag order. Valid inputs have `|AC| ≤ 32767` and
 `|DC| ≤ 16383`. A decoder need not check these limits: the reference keeps coefficients as
-i16 (a DC of `pred + value` is wrapped to 16 bits), and a container that breaks them fails in
-re-emission (section 10) or at the checksum. The component class is `cc = 0` for the first frame component and `cc = 1` for
-all others.
+i16 (a DC of `pred + value` is wrapped to 16 bits), and inputs that break them fail in
+re-emission (section 9) or give a wrong output. The component class is `cc = 0` for the first
+frame component and `cc = 1` for all others.
 
 The image is coded as `ns = n_stripes` horizontal stripes of whole MCU rows:
 
@@ -265,13 +243,13 @@ rows(c, s) = [ (s·mcu_rows/ns)·f(c),  ((s+1)·mcu_rows/ns)·f(c) )     -- bloc
 ```
 
 Stripe `s` codes, for each component `c` in frame order, the blocks of `rows(c, s)` in raster
-order. Each stripe has its own rANS and raw bit streams (section 9). Each component within
-each stripe starts with fresh neighbour state (section 7), so no context crosses a stripe or a
-component. All stripes share one set of tables (section 8).
+order. Each stripe has its own rANS and raw bit streams (section 8). Each component within
+each stripe starts with fresh neighbour state (section 6), so no context crosses a stripe or a
+component. All stripes share one set of tables (section 7).
 
-## 7. Block model
+## 6. Block model
 
-### 7.1 Symbol groups
+### 6.1 Symbol groups
 
 The model's symbols fall into *groups*, each with its own distribution:
 
@@ -284,17 +262,17 @@ The model's symbols fall into *groups*, each with its own distribution:
 *Group order* is all NZ groups by `cc·64 + p`, then all AC groups by
 `(cc·63 + k−1)·11 + rc`, then all DC groups by `(cc·9 + nb)·8 + sub`. That makes 1658 groups.
 
-### 7.2 Value splitting
+### 6.2 Value splitting
 
 A value `x` is coded as its category `cat = bitlen(|x|)` (a symbol) followed by `cat` raw bits
-(section 9) holding
+(section 8) holding
 `payload = ((|x| & (2^(cat−1) − 1)) << 1) | (x < 0 ? 1 : 0)`. In stream order that is the sign
 bit first, then the bits of `|x|` below its leading 1, least significant first. `cat = 0` writes
 no bits.
 
 Decoding: `m = (payload >> 1) | (2^cat >> 1)` and `x = (payload & 1) ? −m : m`.
 
-### 7.3 Coding one block
+### 6.3 Coding one block
 
 Neighbour state per component per stripe:
 
@@ -326,7 +304,7 @@ Neighbour state per component per stripe:
    | rc | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 
    (`b = bitlen(rem)`, `rc = 2b + ((rem >> max(b−2, 0)) & 1) − 3`.)
-3. **DC**. Compute `(pred, sub)` (7.4) from this block's AC coefficients. Split
+3. **DC**. Compute `(pred, sub)` (6.4) from this block's AC coefficients. Split
    `r = coef[0] − pred`.
    - `C` is the sum of `dcc` of the block above (if `has_a`) and to the left (if `has_l`).
    - `nb` is the number of edges in `{0, 1, 2, 4, 6, 8, 10, 12}` that are `≤ min(C, 63)`, so
@@ -334,12 +312,12 @@ Neighbour state per component per stripe:
    - Code `cat` in group DC(`cc`, `nb`, `sub`) and append the payload to the raw bits.
 4. **Update**:
    - `nz[block] = nz` and `dcc[block] = cat` of the DC residual.
-   - `(bottom[bx], right) = bounds(block)` (7.4).
+   - `(bottom[bx], right) = bounds(block)` (6.4).
 
 Symbols go to the stripe's rANS stream and payloads to its raw bit stream, both in exactly this
 order.
 
-### 7.4 DC prediction
+### 6.4 DC prediction
 
 The prediction comes from boundary continuity with the neighbours, in the coefficient domain.
 `q` is the quantisation table (zigzag order) that the first-SOS snapshot holds in slot `tq` of
@@ -381,10 +359,10 @@ converting a float to an integer (`(i32)`, `trunc`) saturates. All f32 operation
 the results are exact and platform independent. `bottom[bx]` belongs to the block above and
 `right` to the block to the left.
 
-## 8. Tables
+## 7. Tables
 
 The tables stream gives a normalised distribution for every group. Each distribution has
-frequencies summing to 4096 (`PROB_BITS = 12`). The stream is one model bit stream (section 4).
+frequencies summing to 4096 (`PROB_BITS = 12`). The stream is one model bit stream (section 3).
 
 Groups are pooled into *parents*, and AC parents into *grandparents*:
 
@@ -438,12 +416,12 @@ number of 0 bits before it (more than 13 is an error). That 1 bit is the value's
 read `n` more bits, most significant first, below it. The value is in `1 .. 2^14`. Any read past the end of the stream is an error. Writers emit nothing after the last table
 except the zero padding of the final byte.
 
-## 9. Stripes: rANS and raw bits
+## 8. Stripes: rANS and raw bits
 
 Each stripe has two streams:
 
 - **rANS words**: a multiple of 4 bytes, at least 32, read as 32-bit LE words `w[0..]`.
-- **Raw bits**: a model bit stream (section 4). The payloads of section 7 are read from it in
+- **Raw bits**: a model bit stream (section 3). The payloads of section 6 are read from it in
   order.
 
 **Decoding** uses four 64-bit states. Initially `x[i] = w[2i] << 32 | w[2i+1]` for `i` in 0..3,
@@ -458,7 +436,7 @@ x    = f[s] · (x >> 12) + slot − c[s]
 if x < 2^31:  x = (x << 32) | w[pos];  pos += 1
 ```
 
-Reading a word past the end of the stream, or raw bits past its end, makes the container
+Reading a word past the end of the stream, or raw bits past its end, makes the inputs
 invalid. Words left over at the end are allowed.
 
 **Encoding** (reference, gives a valid stream):
@@ -473,9 +451,9 @@ invalid. Words left over at the end are allowed.
 
 The encoder must give every coded symbol a nonzero frequency.
 
-## 10. Scan re-emission
+## 9. Scan re-emission
 
-### 10.1 Common parts
+### 9.1 Common parts
 
 - **Huffman codes**: canonical, as in JPEG Annex C. Lengths 1..16 come in order with
   `counts[l]` codes each. Codes increase by one within a length and are doubled between
@@ -500,7 +478,7 @@ The encoder must give every coded symbol a nonzero frequency.
   buffer cut at the RST positions. Each piece is stuffed (`FF` becomes `FF 00`), and the
   `r`-th RST position (0-based) gets the marker `FF (D0 + r mod 8)`.
 
-### 10.2 Version 0 (sequential)
+### 9.2 Sequential frames (param 0)
 
 For each MCU `m` in `0 .. emit`, where `emit = nmcu` (or `min(mcus, nmcu)` if truncated), apply
 the restart rule. Then code each block:
@@ -525,9 +503,9 @@ After the last MCU:
      the byte holding the partial bits. It is part of the buffer from now on: finish stuffs it
      like the rest, and `trailing_rst` positions go after it.
 
-Then finish (10.1).
+Then finish (9.1).
 
-### 10.3 Version 1 (progressive)
+### 9.3 Progressive frames (param 1)
 
 The scan kind comes from its parameters. Any other combination is an error. Let
 `ok = Al ≤ 13 and (Ah = 0 or Al + 1 = Ah)`:
@@ -549,7 +527,7 @@ correction bits. To *flush the EOB run*, when `EOBRUN > 0`:
 
 Per block (`>>` is an arithmetic shift):
 
-- **DC first**: `d = b[0] >> Al`. Emit the value `d − pred` (as in 10.2) and set `pred = d`.
+- **DC first**: `d = b[0] >> Al`. Emit the value `d − pred` (as in 9.2) and set `pred = d`.
 - **DC refine**: emit 1 bit, `(b[0] >> Al) & 1`.
 - **AC first**:
   ```text
@@ -575,13 +553,12 @@ Per block (`>>` is an arithmetic shift):
     if EOBRUN = 0x7FFF or len(BE) > 937:  flush EOB run
   ```
 
-After the last MCU, flush the EOB run, pad and finish (10.1). EOB runs use the first scan
+After the last MCU, flush the EOB run, pad and finish (9.1). EOB runs use the first scan
 component's table.
 
-## 11. Compressor
+## 10. Encoder
 
-Everything here is the encoder's choice. A decoder relies only on sections 1–10 and on the
-checksum.
+Everything here is the encoder's choice. A decoder relies only on sections 1–9.
 
 - **Coefficients**: blocks of modelled scans hold their decoded quantised coefficients, in
   zigzag order:
@@ -594,8 +571,8 @@ checksum.
     - AC refine: a new coefficient is `±(1 << Al)`. A correction bit adds `1 << Al` to the
       magnitude of a coefficient whose `Al` bit is clear.
 
-  Blocks no modelled scan needs may hold anything within the limits of section 6.
-- **Scan choices**: a scan may be modelled (not raw) only if 10.2 or 10.3 reproduces its bytes
+  Blocks no modelled scan needs may hold anything within the limits of section 5.
+- **Scan choices**: a scan may be modelled (not raw) only if 9.2 or 9.3 reproduces its bytes
   exactly. The reference decoder checks this inline for every degree of freedom (EOB and ZRL
   placement, padding, RST numbering and fill, trailing RSTs, EOB-run cuts). For progressive
   files, from the first scan that breaks the scan script on, every scan is raw:
@@ -603,17 +580,18 @@ checksum.
     whose `Ah` equals the previous `Al`.
   - This also applies from the first scan that fails to decode.
   
-  A file in which no scan can be modelled is stored.
+  A file in which no scan can be modelled is not coded.
 - **Truncation** (sequential): when the data ends inside MCU `M`:
   - `mcus = M`.
   - `bits` is the bit position in the destuffed data right after MCU `M−1`. When `M` starts a
     restart interval whose segment exists, it is that segment's start instead, with `boundary`
     set.
   - The tail is the destuffed data from byte `floor(bits/8)` to the end.
-- **Embedded JPEGs**: the compressor searches the blob for `FF D8 FF`. It follows each
+- **Embedded JPEGs**: the encoder searches the blob for `FF D8 FF`. It follows each
   candidate's markers and scans to its EOI (`jpeg_extent`), keeping non-overlapping hits of at
-  least 1024 bytes. A hit is coded at depth + 1. It is kept as kind 0 only if its container is
-  more than 8 bytes shorter than the hit. A repeat of an earlier entry's bytes becomes kind 1.
+  least 1024 bytes. A hit is coded at depth + 1, down to depth 3 (the original has depth 0). It
+  is kept as kind 0 only if its formula's streams are more than 8 bytes shorter than the hit.
+  A repeat of an earlier entry's bytes becomes kind 1.
 - **Stripes**: `ns = clamp(Σ bw·bh / 32768, 1, clamp(mcu_rows, 1, 256))`. This depends only on
   the image, so the output does not depend on the thread count.
 - **Tables**:
@@ -624,51 +602,8 @@ checksum.
   - The shift that minimises table bits plus estimated data bits wins.
   - A group inherits its parent when coding its counts with the parent's distribution costs
     less than its own table and data. Parents choose against grandparents the same way.
-- **Fallback**: the result is stored (version 2) if coding fails or panics, or if the coded
-  container is not smaller than the stored one.
-
-## 12. Formula module
-
-The same coding as entry-formula input (aqr-formula): module `jpeg-recons` version 1
-(`aqr_jpeg::formula`). The module rebuilds the original from one parameter and nine input
-slots. It needs no container: magic, version, checksum, the per-stream lengths and zstd are not
-part of it, and the output length is given by the formula.
-
-**Param**: one byte, the frame type: 0 = sequential (container version 0), 1 = progressive
-(version 1). Other values are invalid. A stored input has no formula.
-
-**Inputs**, in order. The container's per-embedded, per-scan and per-stripe streams are
-concatenated into one slot each, with their lengths in `lens`.
-
-| # | class | content |
-|---|---|---|
-| 0 | `jpeg/head` | the head (3.2) without the xxh3: `n_embedded` and the entries |
-| 1 | `jpeg/embedded` | the *decoded* bytes of each kind 0 entry, concatenated in entry order |
-| 2 | `jpeg/cut` | the cut blob (3.4) |
-| 3 | `jpeg/info` | the scan info (3.5) |
-| 4 | `jpeg/scans` | the raw scan data and truncated tails (3.6), concatenated in scan order |
-| 5 | `jpeg/tables` | the tables (section 8) |
-| 6 | `jpeg/lens` | LEB128 lengths: one per entry of `scans`, then per stripe the length of its rANS words and of its raw bits |
-| 7 | `jpeg/rans` | the rANS words (little-endian bytes) of all stripes, concatenated |
-| 8 | `jpeg/bits` | the raw bits of all stripes, concatenated |
-
-Decoding follows 3.7 with these differences:
-
-- Entries are as in 3.2, with no depth limit (the formula's nesting is what it is, and the
-  compressor stops at depth 3). A kind 0 entry takes `length` bytes from the next position of
-  slot 1 instead of a nested container; the formula fills slot 1 with the formula of the
-  embedded JPEG (this module again, at depth + 1) or with its bytes. Slot 1 must be used up
-  exactly. A kind 1 entry is a copy of an earlier entry, as before, so a repeated JPEG occurs in
-  slot 1 once.
-- The counts come from the scan info (3.5) as before: the scan streams of slot 4 are the raw
-  scans and tails in scan order, with lengths from `lens`, and the stripes follow, each with two
-  lengths. Slots 4 and 6 to 8 must be used up exactly.
-- There is no checksum: the output must have the length the formula declares.
-
-The compressor makes the same choices as in section 11, except that an embedded JPEG is kept as
-kind 0 if its formula's streams are more than 8 bytes shorter than the hit, and that the
-formula is not made (the input is left as it is) where its streams are not shorter than the
-input.
+- **Fallback**: the file is not coded (it has no formula, and is left as it is) if coding
+  fails or panics, or if the streams of its formula are not shorter than the file.
 
 ## Appendix A. Zigzag order
 

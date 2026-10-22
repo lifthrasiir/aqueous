@@ -68,8 +68,8 @@ impl Default for Native {
 
 impl Native {
     /// Every module, as archives apply them ([`aqr_formula::aqr`]).
-    pub fn modules(&self) -> Vec<Box<dyn NativeModule>> {
-        MODULES.iter().map(|&module| Box::new(Applied { native: *self, module }) as Box<dyn NativeModule>).collect()
+    pub fn modules(&self) -> Vec<Box<dyn NativeModule + '_>> {
+        aqr::natives(&MODULES, self)
     }
 
     /// The output of `m` on `inputs` (see [`Modules::apply`]).
@@ -107,35 +107,5 @@ impl Native {
 impl Modules for Native {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         self.run(a.module, &a.params, inputs, a.len)
-    }
-}
-
-/// A module of this crate as an archive applies it: without resources, and with one output.
-struct Applied {
-    native: Native,
-    module: Module,
-}
-
-impl NativeModule for Applied {
-    fn module(&self) -> Module {
-        self.module
-    }
-
-    fn apply(
-        &self,
-        params: &[u8],
-        resources: &[&[u8]],
-        inputs: &[&[u8]],
-        sizes: &[u64],
-    ) -> std::result::Result<Vec<Vec<u8>>, Failure> {
-        let (&[len], []) = (sizes, resources) else {
-            return Err(Failure::Invalid(format!(
-                "{}: {} outputs, {} resources",
-                self.module,
-                sizes.len(),
-                resources.len()
-            )));
-        };
-        self.native.run(self.module, params, inputs, len).map(|out| vec![out]).map_err(|e| Failure::Invalid(e.0))
     }
 }

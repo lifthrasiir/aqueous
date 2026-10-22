@@ -2,8 +2,7 @@
 //! and the cases where there is no formula.
 
 use aqr_formula::{Apply, Error, Formula};
-use aqr_sqlite::container::Options;
-use aqr_sqlite::formula::{self, MODULE};
+use aqr_sqlite::formula::{self, MODULE, Options};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -109,11 +108,8 @@ fn not_coded() {
         cases.push(db[..db.len() - 1000].to_vec());
     }
     for v in &cases {
-        // Whatever the container would store, there is no formula; nothing panics.
-        let stored = aqr_sqlite::container::compress(v)[6] == 0;
-        let f = formula::encode(v, 1);
-        assert_eq!(f.is_none(), stored, "len {}", v.len());
-        if let Some(f) = f {
+        // Where there is no formula, nothing panics; where there is, it rebuilds the input.
+        if let Some(f) = formula::encode(v, 1) {
             assert!(eval(&f, 1).unwrap() == *v);
         }
     }

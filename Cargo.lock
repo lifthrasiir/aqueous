@@ -88,8 +88,6 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "memchr",
- "xxhash-rust",
- "zstd",
 ]
 
 [[package]]
@@ -100,7 +98,6 @@ dependencies = [
  "aqr-formula",
  "flate-zoo",
  "rayon",
- "zstd",
 ]
 
 [[package]]
@@ -134,8 +131,6 @@ dependencies = [
  "aqr-formula",
  "memchr",
  "rayon",
- "xxhash-rust",
- "zstd",
 ]
 
 [[package]]
@@ -145,8 +140,6 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "memchr",
- "xxhash-rust",
- "zstd",
 ]
 
 [[package]]
@@ -164,7 +157,6 @@ dependencies = [
  "aqr-formula",
  "aqr-num",
  "memchr",
- "xxhash-rust",
  "zstd",
 ]
 
@@ -196,8 +188,6 @@ dependencies = [
  "aqr-formula",
  "crc32fast",
  "flate-zoo",
- "xxhash-rust",
- "zstd",
 ]
 
 [[package]]
@@ -209,9 +199,7 @@ dependencies = [
  "aqr-formula",
  "aqr-jpeg",
  "aqr-png",
- "rayon",
  "xxhash-rust",
- "zstd",
 ]
 
 [[package]]
@@ -221,7 +209,6 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "xxhash-rust",
- "zstd",
 ]
 
 [[package]]

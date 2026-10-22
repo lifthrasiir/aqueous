@@ -1,27 +1,25 @@
-# The `flr` container format
+# The `flac-recons` module
 
-This document specifies the files written by `flr c` (`aqr_flac::compress`). It is meant
-to be complete: a decoder, and an encoder whose output a decoder accepts, can be written
-from it alone. Sections marked *(encoder)* describe the choices this implementation makes.
-A decoder does not need them, but an encoder must follow them to produce the same bytes as
-this implementation.
+This document specifies the module `flac-recons` of entry formulas (`aqr_flac::formula`),
+which restores FLAC, WAV and AIFF files, and headerless PCM, from their coded streams. It is
+meant to be complete: a decoder, and an encoder whose output a decoder accepts, can be
+written from it alone. Sections marked *(encoder)* describe the choices this implementation
+makes. A decoder does not need them, but an encoder must follow them to produce the same
+streams as this implementation.
 
 Contents:
 
 1. [Conventions](#1-conventions)
-2. [Header](#2-header)
-3. [Version 0: stored](#3-version-0-stored)
-4. [Version 1: coded](#4-version-1-coded)
-5. [Frames](#5-frames)
-6. [The residual model](#6-the-residual-model)
-7. [rANS](#7-rans)
-8. [FLAC streams](#8-flac-streams)
-9. [PCM streams](#9-pcm-streams)
-10. [Choosing the kind and the version](#10-choosing-the-kind-and-the-version-encoder) *(encoder)*
-11. [Validation](#11-validation)
-12. [Appendix A: built-in frequency tables](#appendix-a-built-in-frequency-tables)
-13. [Appendix B: CRCs](#appendix-b-crcs)
-14. [Formula module](#formula-module)
+2. [The module](#2-the-module)
+3. [Frames](#3-frames)
+4. [The residual model](#4-the-residual-model)
+5. [rANS](#5-rans)
+6. [FLAC streams](#6-flac-streams)
+7. [PCM streams](#7-pcm-streams)
+8. [Choosing the kind](#8-choosing-the-kind-encoder) *(encoder)*
+9. [Validation](#9-validation)
+10. [Appendix A: built-in frequency tables](#appendix-a-built-in-frequency-tables)
+11. [Appendix B: CRCs](#appendix-b-crcs)
 
 ## 1. Conventions
 
@@ -40,65 +38,35 @@ Contents:
   whole byte.
 - `bitlen(v)` is the number of significant bits of `v > 0` (`bitlen(1) = 1`).
   `floor_log2(v) = bitlen(v) - 1`.
-- **zstd** means one Zstandard frame (RFC 8878). **xxh3** means XXH3-64 with seed 0 and the
-  default secret.
+- **zstd** means one Zstandard frame (RFC 8878).
 
-## 2. Header
+## 2. The module
 
-Every file starts with an 8-byte header:
+The module is `flac-recons`, version 1 (`aqr_flac::formula`), in entry formulas
+(aqr-formula). `formula::encode_with` makes the formula and `formula::decode` is the module.
+Its output, the **original**, has the declared length `len`: a FLAC file, a WAV or AIFF
+file, or headerless samples.
 
-| Offset | Size | Field |
+**Params**: one byte, the kind. 0: FLAC; the application is a FLAC payload
+([§6](#6-flac-streams)). 1: PCM; the application is a PCM payload
+([§7](#7-pcm-streams)), for WAV / AIFF and raw samples alike (the two differ only in how an
+encoder finds the samples). Any other params are an error. Under kind 1 the streams themselves describe where the samples sit in the
+original (§7).
+
+**Inputs**: nine slots, always in this order, each possibly empty. Their classes are
+`flac/prefix`, `flac/layout`, `flac/junk`, `flac/headers`, `flac/subframes`, `flac/warmup`,
+`flac/rans`, `flac/raw0` and `flac/raw1`.
+
+| # | Slot | Content |
 |---|---|---|
-| 0 | 6 | magic: the kind of the original file |
-| 6 | 2 | version, `u16le` |
-
-| Magic (hex) | Base64 | Kind | Original file |
-|---|---|---|---|
-| `69 04 7e 7f 56 9c` | `aQR+f1ac` | FLAC | A native FLAC stream |
-| `69 04 7e c1 ab f7` | `aQR+wav3` | WAV | WAV (RIFF), AIFF or AIFC: PCM samples with a container header |
-| `69 04 7e a5 c9 bf` | `aQR+pcm/` | PCM | Headerless PCM samples of a given format, or anything not recognised |
-
-| Version | Meaning |
-|---|---|
-| 0 | Stored: the original follows verbatim ([§3](#3-version-0-stored)) |
-| 1 | Coded ([§4](#4-version-1-coded)). Under the FLAC magic the payload holds FLAC streams ([§8](#8-flac-streams)); under the WAV and PCM magics it holds PCM streams ([§9](#9-pcm-streams)) |
-
-Any other magic or version is an error. Version 0 and version 1 are both valid under all
-three magics. Under the WAV and PCM magics the payloads are identical, so the magic only
-records where the samples came from. The PCM streams themselves describe where the samples
-sit in the file (§9).
-
-## 3. Version 0: stored
-
-```text
-header (8 bytes) | original bytes
-```
-
-The original is everything after the header. The original may be empty.
-
-## 4. Version 1: coded
-
-```text
-header (8 bytes)
-u64le  len          length of the original in bytes
-u64le  hash         xxh3 of the original
-stream × 6          byte streams 0..5, each:
-                      varint  v = n << 1 | z
-                      if z = 1:  varint raw_len, then n bytes: a zstd frame that decompresses to raw_len bytes
-                      if z = 0:  n bytes: the stream itself
-varint W            number of rANS words
-u32le × W           rANS words (§7)
-varint R0           length of raw bit stream 0 in bytes
-R0 bytes            raw bit stream 0
-rest of the file    raw bit stream 1
-```
-
-After decoding, the original's length must equal `len` and its xxh3 must equal `hash`.
-Anything else is an error.
+| 0..5 | byte streams 0..5 | see below |
+| 6 | rANS words | the W words of the rANS coder (§5) as `u32le`, so a length that is not a multiple of 4 is an error |
+| 7 | raw bit stream 0 | its bytes |
+| 8 | raw bit stream 1 | its bytes |
 
 The six byte streams have the same slots in both payload types:
 
-| # | FLAC (§8) | PCM (§9) |
+| # | FLAC (§6) | PCM (§7) |
 |---|---|---|
 | 0 | prefix: bytes before the first frame | prefix: bytes before the sample data |
 | 1 | layout: runs of frames and junk | layout: sample format and sample frame count |
@@ -107,13 +75,9 @@ The six byte streams have the same slots in both payload types:
 | 4 | subframe parameters | subframe parameters |
 | 5 | warm-up, constant and verbatim samples | warm-up, constant and verbatim samples |
 
-*(encoder)* A stream is stored zstd'd (`z = 1`) when it is longer than 16 bytes and its
-zstd frame is shorter than the stream itself. Otherwise it is stored as is. This
-implementation compresses with libzstd's one-shot API (`ZSTD_compress`) at level 3. Its
-frames record the content size and carry no checksum. Different zstd versions can produce
-different bytes. Any valid zstd frame decodes the same way.
+The output length must be `len`; anything else is an error.
 
-## 5. Frames
+## 3. Frames
 
 Both payload types describe audio as a sequence of **frames**, using FLAC's model of a frame
 ([RFC 9639](https://www.rfc-editor.org/rfc/rfc9639)):
@@ -139,10 +103,10 @@ Both payload types describe audio as a sequence of **frames**, using FLAC's mode
   `order` coefficients of `precision` bits.
 - Subframes with residuals (`typ >= 8`) are the **residual channels** of the frame.
 
-The residuals of all frames go through the residual model (§6) into the rANS words and
+The residuals of all frames go through the residual model (§4) into the rANS words and
 the two raw bit streams. Everything else goes into the byte streams.
 
-### 5.1 Subframe parameters (byte streams 4 and 5)
+### 3.1 Subframe parameters (byte streams 4 and 5)
 
 The parameters of a frame's subframes are stored in channel order. Stream 4 (`sub`) and
 stream 5 (`warm`) are read in parallel:
@@ -177,13 +141,13 @@ values (`b = 0` means all residuals are zero). The partitions are those of FLAC:
 `N / 2^partition_order - order` residuals, and the others hold `N / 2^partition_order`.
 The first partition must not be negative.
 
-## 6. The residual model
+## 4. The residual model
 
 The residual model turns each frame's residuals into rANS symbols and raw bits. Two
 adaptive stages run per channel slot: an LMS predictor in the residual domain, and a scale
 estimate that sets the coding context. Both carry their state from one frame to the next.
 
-### 6.1 State
+### 4.1 State
 
 There are 8 channel slots. The slot of a subframe is its channel index in the frame. All
 state starts at the beginning of the payload, once:
@@ -193,14 +157,14 @@ per slot c in 0..8:
   Scale:  avg = 256 (u32), pend = 0 (u32)
   LMS:    w[32] = 0 (i16 weights), h[32] = 0 (i16 history, oldest first),
           u0[32] = u1[32] = 0 (i16 pending weight steps), in_shift = 0
-rANS:     one symbol sequence for the whole payload (§7)
+rANS:     one symbol sequence for the whole payload (§5)
 raw:      two bit streams, raw[0] and raw[1]
 ```
 
 A slot's state changes only in frames where that slot is a residual channel. Constant and
 verbatim subframes, junk, and slots beyond a frame's channel count leave it untouched.
 
-### 6.2 Coding order
+### 4.2 Coding order
 
 The residuals of a frame are coded time-major, channel-minor. Let `R` be the residual
 channels of the frame in increasing channel order:
@@ -209,13 +173,13 @@ channels of the frame in increasing channel order:
 for t in 0..N:
   for ch in R:
     if t >= order(ch):
-      code residual index t - order(ch) of channel ch      (§6.4)
+      code residual index t - order(ch) of channel ch      (§4.4)
 ```
 
 Raw bits of channel `ch` go to `raw[ch & 1]`. The context class is `cc = 1` if `ch > 0`
 and `cc = 0` if `ch = 0`.
 
-### 6.3 Scale state
+### 4.3 Scale state
 
 ```text
 ctx(avg):                          # avg ≥ 15 always
@@ -233,9 +197,9 @@ next(sc, m):                       # after each residual, with m = its zigzag va
 `avg` is 16 times a running mean of the zigzag values, decaying by 1/16. The newest value
 enters the mean one residual late.
 
-### 6.4 One residual: token and raw bits
+### 4.4 One residual: token and raw bits
 
-The coded value of a residual is its LMS error `e` (a signed 32-bit integer, §6.5).
+The coded value of a residual is its LMS error `e` (a signed 32-bit integer, §4.5).
 
 ```text
 encode(sc, cc, e):
@@ -244,7 +208,7 @@ encode(sc, cc, e):
   next(sc, u)
   v = u >> s
   t = token(v)
-  rANS symbol t in context 2 * b + cc                                    (§7)
+  rANS symbol t in context 2 * b + cc                                    (§5)
   if t >= 16:
     nb = (t - 16) / 2 + 3
     raw[ch & 1]: write (v mod 2^nb) in nb bits, then (u mod 2^s) in s bits
@@ -277,7 +241,7 @@ decode(sc, cc):
 The rANS alphabet has 72 symbols. There are 124 contexts (62 scale buckets × 2 classes).
 At most 53 raw bits are written per residual.
 
-### 6.5 LMS stage
+### 4.5 LMS stage
 
 Each slot runs a 32-tap sign-sign LMS predictor over the slot's residuals. In the encoder,
 residual `x` becomes error `e = x - p`. In the decoder, `x = e + p`. All arithmetic is
@@ -313,13 +277,13 @@ set_scale(st, avg):
 
 Only the history is rescaled. The weights and pending steps keep their values.
 
-### 6.6 Per frame
+### 4.6 Per frame
 
 Encoder:
 
 1. For each residual channel `ch`: `set_scale(lms[ch], scale[ch].avg)`, then replace its
    residuals in time order by `step(lms[ch], x)`.
-2. Code the errors in the coding order (§6.2) with `encode` (§6.4).
+2. Code the errors in the coding order (§4.2) with `encode` (§4.4).
 
 Decoder:
 
@@ -331,7 +295,7 @@ Decoder:
 
 The channels are independent in steps 1 and 3, so their order does not matter.
 
-## 7. rANS
+## 5. rANS
 
 The tokens of the whole payload form one sequence of symbols `s_0 .. s_{M-1}`, each with
 its context. They are coded by rANS with 64-bit states, 32-bit renormalisation, 12-bit
@@ -339,7 +303,7 @@ probabilities and **8 interleaved states**: symbol `j` uses state `j mod 8`. Eac
 has a static frequency table `f[0..72]`. Every entry is at least 1 and each table sums to
 4096 (Appendix A).
 
-### 7.1 Slots: the alias layout
+### 5.1 Slots: the alias layout
 
 Symbols map to the 4096 slots `0..4096` of a context through an alias table. The mapping
 is part of the format: a symbol's state update depends on which slot it lands in.
@@ -372,7 +336,7 @@ Bucket `i` covers slots `i*bs .. i*bs + bs`. Its first `cutoff[i]` slots belong 
 ranked `0 .. f[k]`. Write `slot(k, r)` for the slot of rank `r`, and `sym_rank(slot)` for
 the inverse.
 
-### 7.2 Decoding
+### 5.2 Decoding
 
 ```text
 words: w[0..W]; reading past the end gives 0
@@ -389,7 +353,7 @@ for each symbol, in context c:
 At the end of the payload, `pos ≤ W` must hold. Otherwise the words were exhausted and the
 file is corrupt.
 
-### 7.3 Encoding
+### 5.3 Encoding
 
 ```text
 x[k] = 2^31 for k in 0..8;   out = empty list of u32 (built back to front)
@@ -404,12 +368,12 @@ for k = 7 down to 0:  prepend (x[k] mod 2^32), then prepend (x[k] >> 32)
 The result is `x0_hi, x0_lo, x1_hi, …, x7_lo` followed by the renormalisation words in
 decoding order. `W = len(out)` is always at least 16, even with no symbols.
 
-## 8. FLAC streams
+## 6. FLAC streams
 
 The FLAC payload reproduces the original file byte for byte. The file splits into a prefix
 (everything up to the end of the metadata), then a sequence of FLAC frames and junk.
 
-### 8.1 Prefix (stream 0)
+### 6.1 Prefix (stream 0)
 
 The prefix is the original's bytes up to the first byte after the last metadata block:
 
@@ -426,7 +390,7 @@ stream's `bps`, used by frame headers whose sample size code is 0.
 
 A decoder must parse its prefix stream this way and reach exactly the stream's end.
 
-### 8.2 Layout (stream 1) and junk (stream 2)
+### 6.2 Layout (stream 1) and junk (stream 2)
 
 The rest of the file alternates between runs of frames and pieces of junk. The layout
 stream is a sequence of varints, starting and ending with a run:
@@ -438,7 +402,7 @@ run_0, junk_len_0, run_1, junk_len_1, …, run_K
 ```text
 decode:
   loop:
-    run = varint;  decode `run` frames (§8.5)
+    run = varint;  decode `run` frames (§6.5)
     if the layout stream is exhausted: stop
     n = varint;  copy the next n bytes of the junk stream to the output
 ```
@@ -447,16 +411,16 @@ Runs can be 0, for example when the file starts with junk. The junk stream is al
 bytes concatenated.
 
 *(encoder)* Segmentation: from the end of the prefix, at each position `p`, try to parse a
-frame (§8.6). If one parses, it is the next frame and `p` moves to its end. If not, the
+frame (§6.6). If one parses, it is the next frame and `p` moves to its end. If not, the
 junk extends from `p` to the first position `q > p` holding a `0xFF` byte where a frame
 parses, or to the end of the file. The layout then records the run of frames before it and
 its length.
 
-### 8.3 Frame headers (stream 3)
+### 6.3 Frame headers (stream 3)
 
 A FLAC frame header is: 2 bytes of sync code and blocking strategy, 1 byte of block size
 and sample rate codes, 1 byte of channel assignment and sample size code, the coded
-frame or sample number (1..7 bytes), an optional block size (1 or 2 bytes, §8.6), an
+frame or sample number (1..7 bytes), an optional block size (1 or 2 bytes, §6.6), an
 optional sample rate (1 or 2 bytes), then the CRC-8.
 
 A frame header here means the header bytes from the sync code up to the CRC-8, excluding
@@ -475,7 +439,7 @@ predict(P, prev_block_size):
   step = (P[1] & 1) ? prev_block_size : 1   # variable block size: sample number; else frame number
   return P[0..4] ++ put_coded_number(v + step) ++ P[4+n ..]
 
-coded_number(P):                            # P is a valid header (§8.6), so n is 1..7
+coded_number(P):                            # P is a valid header (§6.6), so n is 1..7
   b = P[4];  n = max(leading_ones(b), 1)
   v = (n == 1) ? b : b & (0x7f >> n)
   for c in P[5 .. 4+n]:  v = v << 6 | (c & 0x3f)
@@ -490,18 +454,18 @@ put_coded_number(v):                        # v as u64
 
 The encoder emits `0x00` exactly when the prediction equals the header. The decoder
 appends the CRC-8 (Appendix B) to the header bytes and parses the result as a FLAC frame
-header (§8.6, header rules), using STREAMINFO's `bps` for sample size code 0. This gives
+header (§6.6, header rules), using STREAMINFO's `bps` for sample size code 0. This gives
 the frame's block size, channel assignment and sample size. It then remembers the header
 and block size for the next prediction. The prediction carries across junk.
 
-### 8.4 Subframes (streams 4 and 5)
+### 6.4 Subframes (streams 4 and 5)
 
-As in §5.1, with the Rice parameters.
+As in §3.1, with the Rice parameters.
 
-### 8.5 Decoding a frame
+### 6.5 Decoding a frame
 
-1. Read the header (§8.3) and the subframe parameters (§8.4).
-2. Decode the residuals of the residual channels (§6.6), `N - order` per channel.
+1. Read the header (§6.3) and the subframe parameters (§6.4).
+2. Decode the residuals of the residual channels (§4.6), `N - order` per channel.
 3. For each escaped partition, every residual must fit in `b` signed bits (`b = 0`: the
    residual must be 0).
 4. Write the FLAC frame:
@@ -522,7 +486,7 @@ As in §5.1, with the Rice parameters.
 
 Rice codes are unique given `k`, so the bytes are those of the original frame.
 
-### 8.6 What counts as a frame *(encoder)*
+### 6.6 What counts as a frame *(encoder)*
 
 A FLAC frame at position `p` is accepted only if all of the following hold. Anything else
 is junk. A decoder's output does not depend on these rules, but the encoder's
@@ -544,7 +508,7 @@ Header:
 
 Subframes:
 
-- The padding bit is 0. The type is valid (§5). If the wasted flag is set, the unary
+- The padding bit is 0. The type is valid (§3). If the wasted flag is set, the unary
   count has fewer than 32 leading zeros, and `wasted < full`.
 - `order ≤ N`. The LPC precision field is not 15. The method is 0 or 1. `N` is divisible
   by the partition count, and `N / 2^partition_order ≥ order`.
@@ -552,12 +516,12 @@ Subframes:
 - The frame lies within the file (padding included). The bits up to the byte boundary are
   zero, and the CRC-16 matches.
 
-## 9. PCM streams
+## 7. PCM streams
 
 The PCM payload holds a byte range of interleaved integer samples, cut into blocks that are
 coded like FLAC frames. All other bytes are kept verbatim.
 
-### 9.1 Streams 0..2
+### 7.1 Streams 0..2
 
 - **Prefix** (stream 0): the bytes before the sample data. This is the WAV / AIFF header,
   and is empty for headerless PCM.
@@ -574,20 +538,20 @@ coded like FLAC frames. All other bytes are kept verbatim.
   sample frame and any chunks after the data.
 
 The original is `prefix ++ samples (nframes × channels × bytes) ++ junk`. Its length must
-equal the container's `len`.
+equal `len`.
 
-### 9.2 Blocks
+### 7.2 Blocks
 
 The sample frames are cut into blocks of 4096. The last block holds the remaining
-`nframes mod 4096` frames, if any. Each block is a frame (§5) with `N` = its length,
+`nframes mod 4096` frames, if any. Each block is a frame (§3) with `N` = its length,
 `bps = 8 × bytes per sample`, and channels = the format's channel count.
 
 - **Stream 3**: one byte per block, the channel assignment. With 2 channels it must be
   1, 8, 9 or 10. Otherwise it must be `channels - 1`.
-- **Streams 4, 5**: the subframe parameters (§5.1) without Rice parameters.
-- The residuals go through the residual model (§6) as in FLAC.
+- **Streams 4, 5**: the subframe parameters (§3.1) without Rice parameters.
+- The residuals go through the residual model (§4) as in FLAC.
 
-### 9.3 Reconstruction
+### 7.3 Reconstruction
 
 Per channel, apply FLAC's synthesis in 64-bit integers (wrapping):
 
@@ -611,10 +575,10 @@ Undo the stereo decorrelation (`a` = channel 0, `b` = channel 1):
 Write the samples interleaved, as the low `8 × bytes` bits of each value. XOR the top bit
 for unsigned formats, and use the format's byte order.
 
-### 9.4 Finding the samples *(encoder)*
+### 7.4 Finding the samples *(encoder)*
 
-Headerless PCM (PCM magic) uses the whole input as sample data, in the format the user
-gives. For WAV / AIFF (WAV magic):
+Headerless PCM uses the whole input as sample data, in the format the user gives. For
+WAV / AIFF:
 
 - **WAV**: `RIFF` at 0 and `WAVE` at 8, then chunks from offset 12 (id, `u32le` length,
   body padded to an even length). A `fmt ` chunk (length ≥ 16) must be PCM: format tag 1,
@@ -634,7 +598,7 @@ gives. For WAV / AIFF (WAV magic):
 
 `nframes = data length / (channels × bytes)`.
 
-### 9.5 Making the blocks *(encoder)*
+### 7.5 Making the blocks *(encoder)*
 
 Samples are read as signed integers (XOR the top bit first for unsigned formats). Then,
 per block:
@@ -687,43 +651,41 @@ quantise with error feedback: e = 0; for j < order:
 The output bytes depend on these floating-point results, so a byte-identical encoder must
 evaluate them in the same order with correctly rounded `cos` and `log2`.
 
-## 10. Choosing the kind and the version *(encoder)*
+## 8. Choosing the kind *(encoder)*
 
 1. With a raw sample format given: kind PCM, the whole input is the sample data.
-2. Otherwise, if the input has FLAC metadata (§8.1): kind FLAC.
-3. Otherwise, if WAV / AIFF sample data is found (§9.4): kind WAV.
-4. Otherwise: kind PCM, version 0.
+2. Otherwise, if the input has FLAC metadata (§6.1): kind FLAC.
+3. Otherwise, if WAV / AIFF sample data is found (§7.4): kind PCM.
+4. Otherwise: no formula, the input is not coded.
 
-The coded file (version 1) is written unless it would be at least as long as the stored
-one (input length + 8), or coding fails. In those cases the input is stored (version 0)
-under the same magic.
+There is no formula either if coding fails. The formula is made whether or not the coded
+form is smaller than the input.
 
-## 11. Validation
+## 9. Validation
 
 A decoder should reject the following rather than produce output:
 
-- Unknown magic or version, or a header or payload cut short (a varint, a byte stream, the
-  rANS words or raw stream 0).
-- A zstd stream that does not decompress to exactly `raw_len` bytes.
-- FLAC: a prefix that does not parse to its own end (§8.1); a header that is not valid
-  (§8.6, header rules) or a prediction with no previous header; a subframe type outside
-  §5; `wasted ≥ full` or a wasted flag with `wasted = 0`; an order larger than `N`; a
+- Params other than 0 and 1, or a number of inputs other than nine; rANS words of a length
+  that is not a multiple of 4; streams cut short (a varint or a byte stream).
+- FLAC: a prefix that does not parse to its own end (§6.1); a header that is not valid
+  (§6.6, header rules) or a prediction with no previous header; a subframe type outside
+  §3; `wasted ≥ full` or a wasted flag with `wasted = 0`; an order larger than `N`; a
   sample out of its `bits` range; an LPC precision outside 1..15 or a shift outside
   -16..15; a coefficient out of range; method > 1; bad partitions; a Rice parameter ≥ 15
   (method 0) or ≥ 31 (method 1); an escape byte with bits 5..6 set; escaped residuals out
-  of range (§8.5).
-- PCM: format bytes outside §9.1; `nframes × channels × bytes + len(prefix) + len(junk) ≠ len`;
+  of range (§6.5).
+- PCM: format bytes outside §7.1; `nframes × channels × bytes + len(prefix) + len(junk) ≠ len`;
   a bad channel assignment.
-- rANS words exhausted (§7.2), or a raw bit stream read past its end.
-- An output whose length or xxh3 differs from the header.
+- rANS words exhausted (§5.2), or a raw bit stream read past its end.
+- An output whose length is not `len`.
 
-This implementation also bounds its work on corrupt input. It rejects `len > 64 ×
-file size + 2^20` and `raw_len > len + 2^20`, and stops writing when the output would
+This implementation also bounds its work on corrupt input. It rejects `len > 64 × S +
+2^20`, where S is the total size of the slots, and stops writing when the output would
 exceed `len`. A Rice code can be up to 2^32 bits long.
 
 ## Appendix A: built-in frequency tables
 
-The 124 frequency tables (§6.4 contexts `2b + cc`, 72 frequencies each) are fixed by the
+The 124 frequency tables (§4.4 contexts `2b + cc`, 72 frequencies each) are fixed by the
 format. They are built into the implementation as `model/builtin.bin`: a zstd frame that
 decompresses to 17,860 bytes:
 
@@ -784,8 +746,8 @@ xJyuWkFNogONxET6ROsapyLL4N3/hw2ZqmhVkZeyOM+jqQ7ZRYKh2edTkgLKG321KGLSKkeUlYgc
 3NxDkF2GypTuDkke0ngQm8MTWk/TgbYri2U=
 ```
 
-Changing the tables (retraining with `train`) changes the format and needs a new version
-number.
+Changing the tables (retraining with `train`) changes the format and needs a new module
+version.
 
 ## Appendix B: CRCs
 
@@ -793,37 +755,3 @@ number.
   no final XOR. It covers the header bytes from the sync code.
 - **CRC-16** (frame): polynomial `0x8005`, initial value 0, MSB-first, no reflection, no
   final XOR. It covers every byte of the frame from the sync code up to the CRC itself.
-
-## Formula module
-
-`aqr_flac::formula` gives the coded form as a module of entry formulas (aqr-formula)
-instead of a file: the same streams as input slots, with what the container adds around
-them left out. Module name `flac-recons`, version 1. `formula::encode_with` makes the
-formula, `formula::decode` is the module; the output has the declared length `len`.
-
-**Params**: one byte, the kind of §10 as far as decoding tells them apart. 0: FLAC (§8).
-1: PCM (§9), for WAV / AIFF and raw samples alike (the two differ only in the magic and in
-how an encoder finds the samples). Any other params are an error.
-
-**Inputs**: nine slots, always in this order, each possibly empty. Their classes are
-`flac/prefix`, `flac/layout`, `flac/junk`, `flac/headers`, `flac/subframes`, `flac/warmup`,
-`flac/rans`, `flac/raw0` and `flac/raw1`.
-
-| # | Slot | Content |
-|---|---|---|
-| 0..5 | byte streams 0..5 | the streams of §4, uncompressed (the `z = 0` form: the module has no zstd) |
-| 6 | rANS words | the W words of §4 as `u32le`, so a length that is not a multiple of 4 is an error |
-| 7 | raw bit stream 0 | the R0 bytes of §4 |
-| 8 | raw bit stream 1 | the rest of the container, i.e. the bytes after raw bit stream 0 |
-
-The slots are the container's own streams, so §5 to §9 apply to them unchanged, and the
-decoder is the same one.
-
-**Left out** relative to §2 to §4: the magic and version (the kind is in params; the stored
-version has no formula, the input is simply not coded), `len` (the application's declared
-length), `hash` (the archive verifies the output), the per-stream `v` / `raw_len` fields
-(streams are raw, the archive compresses the slots), W, R0 (the lengths of the slots).
-The bound of §11 on the work of a decoder holds with the total size of the slots in place
-of the file size; an output whose length is not `len` is an error. *(encoder)* The formula
-is made exactly where the container would code the input (§10),
-except that it does not fall back to stored when the coded form is not smaller.

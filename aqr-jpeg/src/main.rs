@@ -1,22 +1,35 @@
 //! jrc: JPEG recompressor driver.
 //!
 //!   (every command takes -j threads; default: all cores)
-//!   jrc bench [-n iters] file...     roundtrip-verify, ratio and throughput per file
+//!   jrc bench [-n iters] file...     roundtrip-verify through the formula and an .aqr archive,
+//!                                    ratio and throughput per file
 //!   jrc fuzz [-n rounds] [-s seed] file...   mutate inputs; roundtrip must stay exact, no panics
-//!   jrc c in out | jrc d in out      compress / decompress a file
 //!   jrc info file...                 parse and decode, print per-scan information
 //!   jrc mutenc [-n rounds] [-s seed] file...   re-encode inputs with valid non-canonical
 //!                                    choices; roundtrip must stay exact
 
-use aqr_jpeg::container::{self, Timing};
+use aqr_formula::Apply;
+use aqr_formula::aqr::{self, Level};
+use aqr_jpeg::formula::{self, MODULE};
 use std::time::Instant;
 
+fn module(a: &Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
+    formula::decode(&a.params, inputs, a.len, 0).map_err(|e| aqr_formula::Error::new(e.0))
+}
+
+/// `d` as an archive of its formula; None if it is not coded.
+fn pack(d: &[u8]) -> Option<Vec<u8>> {
+    let f = formula::encode(d, 0)?;
+    Some(aqr::encode(&f, Some(aqr::checksum(d)), Level::Mid).expect("archive encoding failed"))
+}
+
+fn unpack(c: &[u8]) -> Result<Vec<u8>, String> {
+    aqr::decode(c, &aqr::natives(&[MODULE], &module)).map_err(|e| e.to_string())
+}
+
 fn bench(files: &[String], iters: usize) {
-    println!(
-        "{:<24} {:>6} {:>6} | {:>6} {:>6} {:>6} {:>6} | {:>6} {:>6} {:>6} {:>6} | note",
-        "file", "MB", "ratio", "parse", "huff", "model", "enc", "parse", "model", "huff", "dec"
-    );
-    let (mut tin, mut tout, mut te, mut td) = (0usize, 0usize, 0f64, 0f64);
+    println!("{:<24} {:>6} {:>6} {:>7} {:>7} | note", "file", "MB", "ratio", "enc", "dec");
+    let (mut tin, mut tout) = (0usize, 0usize);
     let (mut cin, mut ce, mut cd) = (0usize, 0f64, 0f64); // coded files only
     for path in files {
         let data = match std::fs::read(path) {
@@ -27,62 +40,44 @@ fn bench(files: &[String], iters: usize) {
             }
         };
         let n = data.len();
-        let (c, why) = container::compress_with(&data, &mut Timing::default());
-        let back = container::decompress(&c).expect("decompress failed");
+        let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy();
+        let name = &name[..name.len().min(24)];
+        tin += n;
+        let Some(c) = pack(&data) else {
+            println!("{:<24} {:6.2} {:6.4} {:>7} {:>7} | not coded", name, n as f64 / 1e6, 1.0, "", "");
+            tout += n;
+            continue;
+        };
+        let back = unpack(&c).expect("decoding failed");
         assert!(back == data, "{path}: ROUNDTRIP MISMATCH");
-        let (mut tc, mut tdd) = (Timing::default(), Timing::default());
         let (mut ec, mut dc) = (0f64, 0f64);
         for _ in 0..iters {
-            let mut t = Timing::default();
             let s = Instant::now();
-            std::hint::black_box(container::compress_with(&data, &mut t));
+            std::hint::black_box(pack(&data));
             ec += s.elapsed().as_secs_f64();
-            tc.parse += t.parse;
-            tc.huffman += t.huffman;
-            tc.model += t.model;
-            let mut t = Timing::default();
             let s = Instant::now();
-            std::hint::black_box(container::decompress_with(&c, &mut t).unwrap());
+            std::hint::black_box(unpack(&c).unwrap());
             dc += s.elapsed().as_secs_f64();
-            tdd.parse += t.parse;
-            tdd.huffman += t.huffman;
-            tdd.model += t.model;
         }
         let k = iters as f64;
-        let ms = |x: f64| x / k * 1e3 / (n as f64 / 1e6);
         let mbs = |x: f64| n as f64 / (x / k) / 1e6;
-        let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy();
         println!(
-            "{:<24} {:6.2} {:6.4} | {:6.2} {:6.2} {:6.2} {:6.1} | {:6.2} {:6.2} {:6.2} {:6.1} | {}",
-            &name[..name.len().min(24)],
+            "{:<24} {:6.2} {:6.4} {:7.1} {:7.1} |",
+            name,
             n as f64 / 1e6,
             c.len() as f64 / n as f64,
-            ms(tc.parse),
-            ms(tc.huffman),
-            ms(tc.model),
             mbs(ec),
-            ms(tdd.parse),
-            ms(tdd.model),
-            ms(tdd.huffman),
-            mbs(dc),
-            why.as_deref().unwrap_or("")
+            mbs(dc)
         );
-        tin += n;
         tout += c.len();
-        te += ec / k;
-        td += dc / k;
-        if why.as_deref().is_none_or(|w| w.starts_with("partial")) {
-            cin += n;
-            ce += ec / k;
-            cd += dc / k;
-        }
+        cin += n;
+        ce += ec / k;
+        cd += dc / k;
     }
     println!(
-        "TOTAL {:.2} MB ratio {:.4}  enc {:.1} MB/s  dec {:.1} MB/s   (coded files only: enc {:.1} dec {:.1} MB/s)   [phase columns: ms per MB]",
+        "TOTAL {:.2} MB ratio {:.4}   (coded files only: enc {:.1} dec {:.1} MB/s)",
         tin as f64 / 1e6,
         tout as f64 / tin as f64,
-        tin as f64 / te / 1e6,
-        tin as f64 / td / 1e6,
         cin as f64 / ce / 1e6,
         cin as f64 / cd / 1e6
     );
@@ -133,44 +128,27 @@ fn fuzz(files: &[String], rounds: usize, seed: u64) {
     let inputs: Vec<(String, Vec<u8>)> =
         files.iter().filter_map(|p| std::fs::read(p).ok().map(|d| (p.clone(), d))).collect();
     let (mut coded, mut total) = (0usize, 0usize);
-    let mut reasons = std::collections::BTreeMap::<String, usize>::new();
     for round in 0..rounds {
         let (name, d) = &inputs[r.below(inputs.len())];
         let m = mutate(d, &mut r);
-        let (c, why) = container::compress_with(&m, &mut Timing::default());
-        let back =
-            container::decompress(&c).unwrap_or_else(|e| panic!("round {round} ({name}): decompress failed: {e}"));
+        let Some(c) = pack(&m) else {
+            total += 1;
+            continue;
+        };
+        let back = unpack(&c).unwrap_or_else(|e| panic!("round {round} ({name}): decoding failed: {e}"));
         if back != m {
             std::fs::write("fuzz_failure.jpg", &m).ok();
             panic!("round {round} ({name}): ROUNDTRIP MISMATCH (input saved to fuzz_failure.jpg)");
         }
-        // corrupt container: must error or produce something, never panic/hang
+        // corrupt archive: must error or produce something, never panic/hang
         let mut cc = c.clone();
-        if cc.len() > 8 {
-            let i = 5 + r.below(cc.len() - 5);
-            cc[i] ^= 1 << r.below(8);
-            let _ = container::decompress(&cc);
-        }
+        let i = r.below(cc.len());
+        cc[i] ^= 1 << r.below(8);
+        let _ = unpack(&cc);
         total += 1;
-        match why {
-            None => coded += 1,
-            Some(w) if w.starts_with("partial") => {
-                coded += 1;
-                *reasons.entry("(coded, some raw scans)".into()).or_default() += 1
-            }
-            Some(w) => {
-                if w == "internal panic" {
-                    std::fs::write(format!("fuzz_panic_{round}.jpg"), &m).ok();
-                    eprintln!("round {round} ({name}): internal panic, input saved to fuzz_panic_{round}.jpg");
-                }
-                *reasons.entry(w.split(':').next().unwrap().to_string()).or_default() += 1
-            }
-        }
+        coded += 1;
     }
-    println!("fuzz: {total} inputs, all roundtrips exact; coded {coded}, stored {}", total - coded);
-    for (w, n) in reasons {
-        println!("  stored {n:6}: {w}");
-    }
+    println!("fuzz: {total} inputs, all roundtrips exact; coded {coded}, not coded {}", total - coded);
 }
 
 fn mutenc(files: &[String], rounds: usize, seed: u64) {
@@ -185,7 +163,7 @@ fn mutenc(files: &[String], rounds: usize, seed: u64) {
         })
         .collect();
     assert!(!inputs.is_empty(), "no decodable inputs");
-    let (mut identical, mut coded, mut partial, mut stored, mut ungenerated) = (0, 0, 0, 0, 0);
+    let (mut identical, mut coded, mut not_coded, mut ungenerated) = (0, 0, 0, 0);
     for round in 0..rounds {
         let (name, d, c0) = &inputs[r.below(inputs.len() as u64) as usize];
         let Some((v, desc)) = variant::reencode(d, &mut r) else {
@@ -202,30 +180,29 @@ fn mutenc(files: &[String], rounds: usize, seed: u64) {
         if v == *d {
             identical += 1;
         }
-        let (cmp, why) = container::compress_with(&v, &mut Timing::default());
-        let back = container::decompress(&cmp).unwrap_or_else(|e| {
+        let Some(cmp) = pack(&v) else {
+            not_coded += 1;
+            continue;
+        };
+        let back = unpack(&cmp).unwrap_or_else(|e| {
             std::fs::write("mutenc_failure.jpg", &v).ok();
-            panic!("round {round} ({name}): decompress failed: {e} (variant saved to mutenc_failure.jpg): {desc}")
+            panic!("round {round} ({name}): decoding failed: {e} (variant saved to mutenc_failure.jpg): {desc}")
         });
         if back != v {
             std::fs::write("mutenc_failure.jpg", &v).ok();
             panic!("round {round} ({name}): ROUNDTRIP MISMATCH (variant saved to mutenc_failure.jpg): {desc}");
         }
-        match why.as_deref() {
-            None => coded += 1,
-            Some(w) if w.starts_with("partial") => partial += 1,
-            Some(_) => stored += 1,
-        }
+        coded += 1;
     }
     println!(
-        "mutenc: {rounds} rounds, all roundtrips exact; not generated {ungenerated}, identical to original {identical}, fully coded {coded}, some scans raw {partial}, stored {stored}"
+        "mutenc: {rounds} rounds, all roundtrips exact; not generated {ungenerated}, identical to original {identical}, coded {coded}, not coded {not_coded}"
     );
 }
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: jrc bench|fuzz [-n N] [-s seed] files... | jrc c|d in out");
+        eprintln!("usage: jrc bench|fuzz|mutenc|info|pscan [-n N] [-s seed] files...");
         std::process::exit(2);
     }
     let cmd = args.remove(0);
@@ -314,11 +291,6 @@ fn main() {
                     println!("  {desc:<34} {bytes:9} B  decode {:7.2} ms  encode {:7.2} ms", td * 1e3, te * 1e3);
                 }
             }
-        }
-        "c" | "d" => {
-            let d = std::fs::read(&args[0]).unwrap();
-            let out = if cmd == "c" { container::compress(&d) } else { container::decompress(&d).unwrap() };
-            std::fs::write(&args[1], out).unwrap();
         }
         _ => panic!("unknown command {cmd}"),
     }

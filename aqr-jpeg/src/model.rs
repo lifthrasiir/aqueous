@@ -534,21 +534,6 @@ fn normalize(hist: &[u32], want_enc: bool) -> Model {
     Model { freq, cum, enc }
 }
 
-fn table_bytes(m: &Model, hist: &[u32]) -> Vec<u8> {
-    let mut raw = Vec::new();
-    for c in 0..N_CTX {
-        let (lo, hi) = (CTX_BASE[c] as usize, CTX_BASE[c + 1] as usize);
-        let used = hist[lo..hi].iter().any(|&x| x > 0);
-        raw.push(used as u8);
-        if used {
-            for a in lo..hi {
-                raw.extend_from_slice(&m.freq[a].to_le_bytes());
-            }
-        }
-    }
-    zstd::bulk::compress(&raw, 19).unwrap()
-}
-
 // ---------------------------------------------------------------- rANS (64-bit state, 32-bit IO)
 #[inline(always)]
 fn rans_put(x: &mut u64, e: &EncSym, out: &mut Vec<u32>) {
@@ -829,14 +814,13 @@ fn walk_enc(e: &mut EncSink, c: &Component, cc: usize, t: &Tables) {
 pub struct Encoded {
     pub rans: Vec<u32>,
     pub raw: Vec<u8>,
-    pub tables: Vec<u8>,
     model: Model,
     pub nsym: usize,
 }
 
 impl Encoded {
     pub fn size(&self) -> usize {
-        self.rans.len() * 4 + self.raw.len() + self.tables.len()
+        self.rans.len() * 4 + self.raw.len()
     }
 }
 
@@ -859,7 +843,7 @@ fn comp_w(j: &Jpeg, ci: usize) -> Weights {
 
 /// Encode all components. `coefs` is only borrowed mutably because the shared walk writes back
 /// the (unchanged) values it reads.
-pub fn encode(j: &Jpeg, coefs: &mut [Coefs], compress_tables: bool) -> (Encoded, Phases) {
+pub fn encode(j: &Jpeg, coefs: &mut [Coefs]) -> (Encoded, Phases) {
     let t = Tables::new();
     let nblk: usize = coefs.iter().map(|c| c.blocks.len()).sum();
     let mut sink = EncSink {
@@ -875,11 +859,10 @@ pub fn encode(j: &Jpeg, coefs: &mut [Coefs], compress_tables: bool) -> (Encoded,
     }
     let t1 = Instant::now();
     let model = normalize(&sink.hist, true);
-    let tables = if compress_tables { table_bytes(&model, &sink.hist) } else { Vec::new() };
     let t2 = Instant::now();
     let rans = rans_encode(&sink.syms[..sink.nsym], &model);
     let ph = Phases { walk: (t1 - t0).as_secs_f64(), norm: (t2 - t1).as_secs_f64(), rans: t2.elapsed().as_secs_f64() };
-    (Encoded { rans, raw: sink.raw.finish(), tables, model, nsym: sink.nsym }, ph)
+    (Encoded { rans, raw: sink.raw.finish(), model, nsym: sink.nsym }, ph)
 }
 
 pub fn decode(j: &Jpeg, e: &Encoded) -> Vec<Coefs> {

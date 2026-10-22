@@ -1,4 +1,4 @@
-//! The file format, and compression / decompression of whole files.
+//! The coding of a PSD/PSB for the formula module (see [`crate::formula`]).
 //!
 //! The pixel data of a PSD/PSB comes in *spans*: a layer channel's data (past its
 //! compression field) or the composite image's (all planes). 8-bit spans that are RLE
@@ -7,26 +7,13 @@
 //! does not reproduce stored verbatim. A span with the same bytes as one coded before is a
 //! copy. Files embedded in smart objects are spans too, coded by the recompressor of their
 //! format (this one for PSD/PSB, aqr-png, aqr-jpeg) when that makes them smaller. What
-//! remains of the file, the *skeleton*, is compressed with zstd.
+//! remains of the file, the *skeleton*, is kept as it is.
 //!
 //! Both directions stream: pixel data is coded row by row straight from the input, and
 //! decoded row by row straight into the output (allocated at its final size), so that the
 //! memory used besides input and output does not grow with the file.
 //!
-//! ```text
-//! magic 69 04 7f fe 9b 1d ("aQR//psd" in base64), version (u16 LE)
-//! then streams, each a varint length and its bytes:
-//! version 0 (stored): zstd(file)
-//! version 1 (coded):
-//!   head                            -- xxh3 and length of the original; spans, groups
-//!   zstd(skeleton)
-//!   embedded files, coded           -- one stream each, in span order
-//!   model chunks                    -- see model::Recorder
-//! ```
-//!
 //! FORMAT.md specifies the format in full.
-
-use std::io::{Read, Write};
 
 use crate::composite::{self, RowRenderer};
 use crate::model::{self, GroupCoder};
@@ -36,10 +23,6 @@ use crate::rows::{self, PlaneRows};
 use aqr_common::varint;
 use aqr_formula::Formula;
 
-const MAGIC: &[u8; 6] = &[0x69, 0x04, 0x7f, 0xfe, 0x9b, 0x1d];
-const STORED: u16 = 0;
-const CODED: u16 = 1;
-
 #[track_caller]
 fn corrupt() -> Error {
     if std::env::var_os("PSDR_DEBUG").is_some() {
@@ -48,11 +31,11 @@ fn corrupt() -> Error {
     Error("corrupt input".into())
 }
 
-pub fn put_varint(out: &mut Vec<u8>, v: u64) {
+fn put_varint(out: &mut Vec<u8>, v: u64) {
     varint::put(out, v)
 }
 
-pub fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
+fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
     varint::get(src, at).map_err(|_| corrupt())
 }
 
@@ -82,29 +65,6 @@ fn get_opt(src: &[u8], at: &mut usize) -> Result<usize> {
     })
 }
 
-fn put_header(out: &mut Vec<u8>, version: u16) {
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&version.to_le_bytes());
-}
-
-/// Makes the bytes of `out` from `at` on a stream: puts their length before them.
-fn close_stream(out: &mut Vec<u8>, at: usize) {
-    let mut len = Vec::with_capacity(10);
-    put_varint(&mut len, (out.len() - at) as u64);
-    out.splice(at..at, len);
-}
-
-fn put_stream(out: &mut Vec<u8>, bytes: &[u8]) {
-    put_varint(out, bytes.len() as u64);
-    out.extend_from_slice(bytes);
-}
-
-/// The stream at `*at` of a container.
-fn get_stream<'a>(src: &'a [u8], at: &mut usize) -> Result<&'a [u8]> {
-    let n = get_usize(src, at)?;
-    get_bytes(src, at, n)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Codec {
     Psd,
@@ -115,53 +75,19 @@ enum Codec {
 /// How deep embedded PSDs are recompressed.
 const MAX_DEPTH: usize = 3;
 
-/// Options of [`compress_with`].
-#[derive(Clone, Copy, Debug)]
-pub struct Options {
-    /// Threads (1: all on the calling thread, the serial code). The output is the same
-    /// bytes whatever the number.
-    pub threads: usize,
-}
-
-impl Default for Options {
-    fn default() -> Self {
-        Options { threads: 1 }
-    }
-}
-
-/// Thread budget of one call, and what is shared among its threads.
+/// Thread budget of one call.
 pub(crate) struct Par {
     threads: usize,
-    /// Embedded files are coded as formulas (the formula module), not as containers.
-    formula: bool,
-    /// The pool aqr-jpeg runs in with more than one thread (it uses rayon, whose global
-    /// pool would ignore the budget); with one thread it keeps the global pool, as before.
-    jpeg: std::sync::OnceLock<Option<rayon::ThreadPool>>,
 }
 
 impl Par {
     pub(crate) fn new(threads: usize) -> Par {
-        Par { threads: threads.max(1), formula: false, jpeg: std::sync::OnceLock::new() }
-    }
-
-    pub(crate) fn formula(threads: usize) -> Par {
-        Par { formula: true, ..Par::new(threads) }
+        Par { threads: threads.max(1) }
     }
 
     /// The same, with another budget of threads.
     fn with_threads(&self, threads: usize) -> Par {
-        Par { formula: self.formula, ..Par::new(threads) }
-    }
-
-    /// Runs `f` (a aqr-jpeg call) in the pool of this budget.
-    fn jpeg<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
-        if self.threads > 1
-            && let Some(pool) =
-                self.jpeg.get_or_init(|| rayon::ThreadPoolBuilder::new().num_threads(self.threads).build().ok())
-        {
-            return pool.install(f);
-        }
-        f()
+        Par::new(threads)
     }
 }
 
@@ -191,54 +117,28 @@ fn par_map<T: Send, R: Send>(threads: usize, items: Vec<T>, f: impl Fn(T) -> R +
     results.into_inner().unwrap().into_iter().map(|r| r.expect("every item is done")).collect()
 }
 
-/// An embedded file, coded: a container in a stream of its own, or a formula.
-pub(crate) enum Child {
-    Packed(Vec<u8>),
-    Formula(Formula),
-}
-
-fn nested_compress(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Child> {
+fn nested_compress(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Formula> {
     let t0 = std::time::Instant::now();
     let r = nested_compress_(codec, data, depth, par);
     if std::env::var_os("PSDR_STATS").is_some() {
         eprintln!(
             "nested {codec:?} {} -> {:?} in {:.3}s",
             data.len(),
-            r.as_ref().map(|c| match c {
-                Child::Packed(v) => v.len(),
-                Child::Formula(f) => f.streams.iter().map(|s| s.data.len()).sum(),
-            }),
+            r.as_ref().map(|f| f.streams.iter().map(|s| s.data.len()).sum::<usize>()),
             t0.elapsed().as_secs_f64()
         );
     }
     r
 }
 
-fn nested_compress_(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Child> {
-    if par.formula {
-        let f = match codec {
-            Codec::Psd => crate::formula::encode_at(data, depth + 1, par)?,
-            Codec::Png => aqr_png::formula::encode(data, par.threads)?,
-            // (aqr-jpeg runs in the global rayon pool for 0 threads, as the container does with one)
-            Codec::Jpeg => aqr_jpeg::formula::encode(data, if par.threads > 1 { par.threads } else { 0 })?,
-        };
-        return (f.streams.iter().map(|s| s.data.len()).sum::<usize>() < data.len()).then_some(Child::Formula(f));
-    }
-    let packed = match codec {
-        Codec::Psd => try_compress(data, depth + 1, par)?,
-        Codec::Png => aqr_png::container::compress_threads(data, par.threads),
-        Codec::Jpeg => par.jpeg(|| aqr_jpeg::container::compress(data)),
+fn nested_compress_(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Formula> {
+    let f = match codec {
+        Codec::Psd => crate::formula::encode_at(data, depth + 1, par)?,
+        Codec::Png => aqr_png::formula::encode(data, par.threads)?,
+        // (aqr-jpeg runs in the global rayon pool for 0 threads)
+        Codec::Jpeg => aqr_jpeg::formula::encode(data, if par.threads > 1 { par.threads } else { 0 })?,
     };
-    (packed.len() < data.len()).then_some(Child::Packed(packed))
-}
-
-/// Decodes an embedded file of a container `depth` deep.
-fn nested_decompress(codec: Codec, packed: &[u8], par: &Par, depth: usize) -> Result<Vec<u8>> {
-    match codec {
-        Codec::Psd => decompress_at(packed, par.threads, depth + 1),
-        Codec::Png => aqr_png::container::decompress_threads(packed, par.threads).map_err(|_| corrupt()),
-        Codec::Jpeg => par.jpeg(|| aqr_jpeg::container::decompress(packed)).map_err(|_| corrupt()),
-    }
+    (f.streams.iter().map(|s| s.data.len()).sum::<usize>() < data.len()).then_some(f)
 }
 
 #[derive(Debug, Clone)]
@@ -252,10 +152,8 @@ enum Coding<'a> {
         /// Rows (plane * h + row) not reproduced by `encoder`, and their bytes.
         exceptions: Vec<(usize, &'a [u8])>,
     },
-    /// An embedded file, coded by `codec` in a stream of its own.
-    Nested {
-        codec: Codec,
-    },
+    /// An embedded file, coded as a formula of its own.
+    Nested,
     /// The same bytes as span `of`, which is coded before it.
     Copy {
         of: usize,
@@ -470,7 +368,7 @@ fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
 }
 
 /// Spans, groups and coded embedded files of a parsed file.
-fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>>, Vec<GroupDef>, Vec<Child>) {
+fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>>, Vec<GroupDef>, Vec<Formula>) {
     let mut spans: Vec<Planned> = Vec::new();
     let mut groups = Vec::new();
     let mut nested = Vec::new();
@@ -575,7 +473,7 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>
         Composite,
     }
     enum Done<'a> {
-        Linked(Option<Child>),
+        Linked(Option<Formula>),
         Composite(Option<(Planned<'a>, bool)>),
     }
     // Several embedded files at once: a nested PSD gets one thread of the budget; alone, all.
@@ -593,13 +491,13 @@ fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>
         Task::Composite => Done::Composite(composite_job()),
     })) {
         match (task, done) {
-            (Task::Linked(codec, r), Done::Linked(Some(child))) => {
+            (Task::Linked(_, r), Done::Linked(Some(child))) => {
                 // Not inside the span before it (this is known only now that the earlier ones
                 // are coded; such a file is coded for nothing).
                 if spans.last().is_some_and(|s| s.span.end > r.start) {
                     continue;
                 }
-                let coding = Coding::Nested { codec: *codec };
+                let coding = Coding::Nested;
                 let span = Span { start: r.start, end: r.end, gap: 0, planes: 0, w: 0, h: 0, coding };
                 spans.push(Planned { span, candidates: Vec::new(), same: None });
                 nested.push(child);
@@ -698,14 +596,9 @@ fn get_encoder(src: &[u8], at: &mut usize) -> Result<Encoder> {
 /// Most planes in a span or a group.
 const MAX_PLANES: usize = 64;
 
-/// The head stream: the original's hash and length (of a container; the formula module gets
-/// them elsewhere), the spans and the groups. An embedded file is of kind 16 in a formula's
-/// head whatever its format: its bytes are an input of the module.
-fn put_head(o: &mut Vec<u8>, hash_total: Option<(u64, usize)>, spans: &[Span], groups: &[GroupDef]) {
-    if let Some((hash, total)) = hash_total {
-        o.extend_from_slice(&hash.to_le_bytes());
-        put_varint(o, total as u64);
-    }
+/// The head stream: the spans and the groups. An embedded file is of kind 16 whatever its
+/// format: its bytes are an input of the module.
+fn put_head(o: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef]) {
     put_varint(o, spans.len() as u64);
     for s in spans {
         put_varint(o, s.gap as u64);
@@ -736,7 +629,7 @@ fn put_head(o: &mut Vec<u8>, hash_total: Option<(u64, usize)>, spans: &[Span], g
                     o.extend_from_slice(bytes);
                 }
             }
-            Coding::Nested { codec } => o.push(16 + if hash_total.is_some() { *codec as u8 } else { 0 }),
+            Coding::Nested => o.push(16),
             Coding::Copy { of } => {
                 o.push(32);
                 put_varint(o, *of as u64);
@@ -756,24 +649,13 @@ fn put_head(o: &mut Vec<u8>, hash_total: Option<(u64, usize)>, spans: &[Span], g
 }
 
 struct Head<'a> {
-    hash: u64,
-    total: usize,
     spans: Vec<Span<'a>>,
     groups: Vec<GroupDef>,
 }
-
-/// Reads the head stream (all of `src`); spans get their positions in the output. For a
-/// formula's head, `formula_len` is the length of the original (the head has no hash and
-/// length, and the codec of an embedded file, of no use there, is the PSD's).
-fn get_head(src: &[u8], formula_len: Option<usize>) -> Result<Head<'_>> {
+/// Reads the head stream (all of `src`) of a file of `total` bytes; spans get their
+/// positions in the output.
+fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
     let mut at = 0;
-    let (hash, total) = match formula_len {
-        Some(total) => (0, total),
-        None => {
-            let hash = u64::from_le_bytes(get_bytes(src, &mut at, 8)?.try_into().unwrap());
-            (hash, get_usize(src, &mut at)?)
-        }
-    };
     if total > 1 << 42 {
         return Err(corrupt());
     }
@@ -831,9 +713,7 @@ fn get_head(src: &[u8], formula_len: Option<usize>) -> Result<Head<'_>> {
                 }
                 (planes, w, h, Coding::Rle { count_bytes: cb, encoder, plane_lens, exceptions })
             }
-            c @ 16..=18 if c == 16 || formula_len.is_none() => {
-                (0, 0, 0, Coding::Nested { codec: [Codec::Psd, Codec::Png, Codec::Jpeg][c as usize - 16] })
-            }
+            16 => (0, 0, 0, Coding::Nested),
             32 => {
                 let of = get_usize(src, &mut at)?;
                 // The source is an earlier coded span of one plane of the same length; the
@@ -868,7 +748,7 @@ fn get_head(src: &[u8], formula_len: Option<usize>) -> Result<Head<'_>> {
             let p = get_usize(src, &mut at)?;
             let sp = spans.get(s).ok_or_else(corrupt)?;
             let first = &spans[planes.first().map_or(s, |f| f.0)];
-            if p >= sp.planes || matches!(sp.coding, Coding::Nested { .. }) || sp.w != first.w || sp.h != first.h {
+            if p >= sp.planes || matches!(sp.coding, Coding::Nested) || sp.w != first.w || sp.h != first.h {
                 return Err(corrupt());
             }
             planes.push((s, p));
@@ -913,39 +793,7 @@ fn get_head(src: &[u8], formula_len: Option<usize>) -> Result<Head<'_>> {
     if at != src.len() {
         return Err(corrupt());
     }
-    Ok(Head { hash, total, spans, groups })
-}
-
-/// A zstd level for a skeleton of `n` bytes in a file of `total`: the strongest that keeps it
-/// a small part of the time budget (about 100 MB/s of file).
-fn skeleton_level(n: usize, total: usize) -> i32 {
-    // Approximate single-thread zstd compression speeds (MB/s).
-    const LEVELS: [(i32, f64); 6] = [(19, 8.0), (12, 30.0), (9, 60.0), (6, 120.0), (3, 300.0), (1, 500.0)];
-    let need = 500.0 * n as f64 / total.max(1) as f64;
-    LEVELS.iter().find(|l| l.1 >= need).map_or(1, |l| l.0)
-}
-
-/// Compresses a file; never fails (a file that cannot be coded is stored). One thread.
-pub fn compress(file: &[u8]) -> Vec<u8> {
-    compress_with(file, &Options::default())
-}
-
-/// `compress` with the options: the same bytes whatever `opt.threads`.
-pub fn compress_with(file: &[u8], opt: &Options) -> Vec<u8> {
-    match try_compress(file, 0, &Par::new(opt.threads)) {
-        Some(out) => out,
-        None => {
-            let mut out = Vec::with_capacity(16 + file.len() / 2);
-            put_header(&mut out, STORED);
-            let at = out.len();
-            let mut z = zstd::stream::Encoder::new(&mut out, skeleton_level(file.len(), file.len())).expect("zstd");
-            z.set_pledged_src_size(Some(file.len() as u64)).expect("zstd");
-            z.write_all(file).expect("zstd");
-            z.finish().expect("zstd");
-            close_stream(&mut out, at);
-            out
-        }
-    }
+    Ok(Head { spans, groups })
 }
 
 /// Rows pipelined through helper threads: batches of this many samples at most...
@@ -1282,22 +1130,6 @@ fn settle_encoder<'a>(
     Some(())
 }
 
-/// Compresses the file but the spans (start, end) with zstd, appending to `out`.
-fn write_skeleton(out: &mut Vec<u8>, file: &[u8], spans: &[(usize, usize)], sk_len: usize) -> Option<()> {
-    let mut z = zstd::stream::Encoder::new(out, skeleton_level(sk_len, file.len())).ok()?;
-    // With the size known, zstd fits its window and tables (memory) to it.
-    z.set_pledged_src_size(Some(sk_len as u64)).ok()?;
-    z.include_contentsize(false).ok()?;
-    let mut prev = 0;
-    for &(start, end) in spans {
-        z.write_all(&file[prev..start]).ok()?;
-        prev = end;
-    }
-    z.write_all(&file[prev..]).ok()?;
-    z.finish().ok()?;
-    Some(())
-}
-
 /// Codes all groups into `out`, then settles the encoders of RLE spans (their exceptions).
 /// Returns the number of symbols.
 fn code_pixels<'a>(
@@ -1340,14 +1172,13 @@ fn code_pixels<'a>(
     Some(symbols)
 }
 
-/// A file coded, in the pieces a container or a formula is laid out from.
+/// A file coded, in the pieces a formula is laid out from.
 struct Coded<'a> {
     spans: Vec<Span<'a>>,
     groups: Vec<GroupDef>,
-    /// The embedded files, one per span of kind 16, 17 or 18.
-    nested: Vec<Child>,
-    /// The bytes outside the spans: zstd frames in a container (`par.formula` false), as they
-    /// are in a formula.
+    /// The embedded files, one per span of kind 16.
+    nested: Vec<Formula>,
+    /// The bytes outside the spans.
     skeleton: Vec<u8>,
     /// The model stream.
     model: Vec<u8>,
@@ -1380,74 +1211,20 @@ fn code_file<'a>(file: &'a [u8], depth: usize, par: &Par) -> Option<Coded<'a>> {
         s.gap = s.start - prev;
         prev = s.end;
     }
-    let ranges: Vec<(usize, usize)> = spans.iter().map(|s| (s.start, s.end)).collect();
-    let skeleton_of = || {
-        let t0 = std::time::Instant::now();
-        let mut sk = Vec::new();
-        if par.formula {
-            sk.reserve_exact(sk_len);
-            let mut prev = 0;
-            for &(start, end) in &ranges {
-                sk.extend_from_slice(&file[prev..start]);
-                prev = end;
-            }
-            sk.extend_from_slice(&file[prev..]);
-        } else {
-            write_skeleton(&mut sk, file, &ranges, sk_len)?;
-        }
-        Some((sk, t0.elapsed().as_secs_f64()))
-    };
-    let pixels_of = |spans: &mut [Span<'a>]| {
-        let t0 = std::time::Instant::now();
-        let mut pix = Vec::new();
-        let symbols = code_pixels(&mut pix, &psd, file, spans, &candidates, &groups, par)?;
-        Some((symbols, pix, t0.elapsed().as_secs_f64()))
-    };
-    let (sk, pixels) = if par.threads > 1 {
-        // The skeleton is compressed meanwhile, into a buffer of its own.
-        std::thread::scope(|sc| {
-            let sk = sc.spawn(skeleton_of);
-            let pixels = pixels_of(&mut spans);
-            (sk.join().unwrap_or_else(|e| std::panic::resume_unwind(e)), pixels)
-        })
-    } else {
-        (skeleton_of(), pixels_of(&mut spans))
-    };
-    let (skeleton, t_skel) = sk?;
-    let (symbols, model, t_model) = pixels?;
+    let t0 = std::time::Instant::now();
+    let mut skeleton = Vec::with_capacity(sk_len);
+    let mut prev = 0;
+    for s in &spans {
+        skeleton.extend_from_slice(&file[prev..s.start]);
+        prev = s.end;
+    }
+    skeleton.extend_from_slice(&file[prev..]);
+    let t_skel = t0.elapsed().as_secs_f64();
+    let t0 = std::time::Instant::now();
+    let mut model = Vec::new();
+    let symbols = code_pixels(&mut model, &psd, file, &mut spans, &candidates, &groups, par)?;
+    let t_model = t0.elapsed().as_secs_f64();
     Some(Coded { spans, groups, nested, skeleton, model, times: [t_plan, t_skel, t_model], symbols })
-}
-
-fn try_compress(file: &[u8], depth: usize, par: &Par) -> Option<Vec<u8>> {
-    let c = code_file(file, depth, par)?;
-    let mut head = Vec::new();
-    put_head(&mut head, Some((xxhash_rust::xxh3::xxh3_64(file), file.len())), &c.spans, &c.groups);
-    // The head goes first, the model last.
-    let mut out = Vec::with_capacity(16 + head.len() + c.skeleton.len() + c.model.len() + file.len() / 64);
-    put_header(&mut out, CODED);
-    put_stream(&mut out, &head);
-    put_stream(&mut out, &c.skeleton);
-    for child in &c.nested {
-        match child {
-            Child::Packed(packed) => put_stream(&mut out, packed),
-            Child::Formula(_) => unreachable!("a container embeds containers"),
-        }
-    }
-    put_stream(&mut out, &c.model);
-    if std::env::var_os("PSDR_STATS").is_some() {
-        let samples: usize =
-            c.groups.iter().map(|g| g.planes.len() * c.spans[g.planes[0].0].w * c.spans[g.planes[0].0].h).sum();
-        let [t_plan, t_skel, t_model] = c.times;
-        let sk_len = file.len() - c.spans.iter().map(|s| s.end - s.start).sum::<usize>();
-        eprintln!(
-            "skeleton {sk_len} -> {}, head {}, model {} ({samples} samples, {} symbols); plan {t_plan:.3}s skeleton {t_skel:.3}s pixels {t_model:.3}s",
-            c.skeleton.len(),
-            head.len(),
-            c.model.len(),
-            c.symbols
-        );
-    }
-    Some(out)
 }
 
 /// The streams of a formula for `file`: [`crate::formula`] lays them out.
@@ -1459,21 +1236,25 @@ pub(crate) struct FormulaParts {
     pub model: Vec<u8>,
 }
 
-/// Codes `file` for the formula module (`par` made by [`Par::formula`]); None where the
-/// container would store it.
+/// Codes `file` for the formula module; None where it cannot be parsed or has no pixel
+/// data or embedded file to take out.
 pub(crate) fn formula_parts(file: &[u8], depth: usize, par: &Par) -> Option<FormulaParts> {
     let c = code_file(file, depth, par)?;
     let mut head = Vec::new();
-    put_head(&mut head, None, &c.spans, &c.groups);
-    let embedded = c
-        .nested
-        .into_iter()
-        .map(|child| match child {
-            Child::Formula(f) => f,
-            Child::Packed(_) => unreachable!("a formula embeds formulas"),
-        })
-        .collect();
-    Some(FormulaParts { head, skeleton: c.skeleton, embedded, model: c.model })
+    put_head(&mut head, &c.spans, &c.groups);
+    if std::env::var_os("PSDR_STATS").is_some() {
+        let samples: usize =
+            c.groups.iter().map(|g| g.planes.len() * c.spans[g.planes[0].0].w * c.spans[g.planes[0].0].h).sum();
+        let [t_plan, t_skel, t_model] = c.times;
+        eprintln!(
+            "skeleton {}, head {}, model {} ({samples} samples, {} symbols); plan {t_plan:.3}s skeleton {t_skel:.3}s pixels {t_model:.3}s",
+            c.skeleton.len(),
+            head.len(),
+            c.model.len(),
+            c.symbols
+        );
+    }
+    Some(FormulaParts { head, skeleton: c.skeleton, embedded: c.nested, model: c.model })
 }
 
 /// Seconds per phase, summed over all threads.
@@ -1807,7 +1588,7 @@ fn decode_group(
                     prev_at: None,
                 });
             }
-            Coding::Nested { .. } => return Err(corrupt()),
+            Coding::Nested => return Err(corrupt()),
         }
         readers.push(reader);
         sinks.push(sink);
@@ -1865,144 +1646,20 @@ fn decode_group(
     sinks.iter().flatten().try_for_each(RowSink::finish)
 }
 
-pub fn decompress(src: &[u8]) -> Result<Vec<u8>> {
-    decompress_threads(src, 1)
-}
-
-fn zstd_reader(sk: &[u8]) -> Result<impl Read + '_> {
-    zstd::stream::read::Decoder::with_buffer(sk).map_err(|_| corrupt())
-}
-
-/// Reads the skeleton from `z` into the gaps between the spans of `out`; `z` must end there.
-fn read_skeleton(out: &mut [u8], mut z: impl Read, spans: &[Span]) -> Result<()> {
+/// Puts the skeleton into the gaps between the spans of `out`; it must be used up there.
+fn read_skeleton(out: &mut [u8], skeleton: &[u8], spans: &[Span]) -> Result<()> {
+    let mut at = 0;
     let mut prev = 0;
     for s in spans {
-        z.read_exact(&mut out[prev..s.start]).map_err(|_| corrupt())?;
+        out[prev..s.start].copy_from_slice(get_bytes(skeleton, &mut at, s.start - prev)?);
         prev = s.end;
     }
-    z.read_exact(&mut out[prev..]).map_err(|_| corrupt())?;
-    if z.read(&mut [0u8]).map_err(|_| corrupt())? != 0 {
+    let rest = out.len() - prev;
+    out[prev..].copy_from_slice(get_bytes(skeleton, &mut at, rest)?);
+    if at != skeleton.len() {
         return Err(corrupt());
     }
     Ok(())
-}
-
-/// Embedded files being decoded on other threads: (span index, the file).
-struct Pending {
-    rx: std::sync::mpsc::Receiver<(usize, Result<Vec<u8>>)>,
-    left: usize,
-}
-
-impl Pending {
-    /// Puts the files decoded so far into `out`; with `all`, waits for the rest.
-    fn drain(&mut self, out: &mut [u8], spans: &[Span], all: bool) -> Result<()> {
-        while self.left > 0 {
-            let (i, data) = if all {
-                self.rx.recv().map_err(|_| corrupt())?
-            } else {
-                match self.rx.try_recv() {
-                    Ok(m) => m,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(_) => return Err(corrupt()),
-                }
-            };
-            self.left -= 1;
-            let data = data?;
-            if data.len() != spans[i].end - spans[i].start {
-                return Err(corrupt());
-            }
-            out[spans[i].start..spans[i].end].copy_from_slice(&data);
-        }
-        Ok(())
-    }
-}
-
-/// `decompress` with `threads` threads: the same bytes whatever the number. Embedded files
-/// are decoded on other threads, meanwhile with the skeleton and the pixels.
-pub fn decompress_threads(src: &[u8], threads: usize) -> Result<Vec<u8>> {
-    decompress_at(src, threads, 0)
-}
-
-/// [`decompress_threads`] of a container nested `depth` deep.
-fn decompress_at(src: &[u8], threads: usize, depth: usize) -> Result<Vec<u8>> {
-    if src.len() < 8 || &src[..6] != MAGIC {
-        return Err(Error("not a aqr-psd file".into()));
-    }
-    let mut at = 8;
-    match u16::from_le_bytes([src[6], src[7]]) {
-        STORED => {
-            let z = get_stream(src, &mut at)?;
-            if at != src.len() {
-                return Err(corrupt());
-            }
-            return zstd::stream::decode_all(z).map_err(|_| corrupt());
-        }
-        CODED => {}
-        _ => return Err(Error("unknown aqr-psd version".into())),
-    }
-    let Head { hash, total, spans, groups } = get_head(get_stream(src, &mut at)?, None)?;
-    let sk = get_stream(src, &mut at)?;
-    // Embedded files, one stream each; none past the depth the compressor goes to.
-    let mut files = Vec::new();
-    for (i, s) in spans.iter().enumerate() {
-        if let Coding::Nested { codec } = s.coding {
-            if depth >= MAX_DEPTH {
-                return Err(corrupt());
-            }
-            files.push((i, codec, get_stream(src, &mut at)?));
-        }
-    }
-    let rest = get_stream(src, &mut at)?;
-    if at != src.len() {
-        return Err(corrupt());
-    }
-    let mut out = vec![0u8; total];
-    if threads <= 1 || files.is_empty() {
-        read_skeleton(&mut out, zstd_reader(sk)?, &spans)?;
-        let par = Par::new(threads);
-        for (i, codec, packed) in files {
-            let data = nested_decompress(codec, packed, &par, depth)?;
-            if data.len() != spans[i].end - spans[i].start {
-                return Err(corrupt());
-            }
-            out[spans[i].start..spans[i].end].copy_from_slice(&data);
-        }
-        decode_pixels(&mut out, &spans, &groups, rest, None, threads)?;
-    } else {
-        // The files go to the other threads (a nested PSD with one thread unless alone).
-        let workers = (threads - 1).max(1).min(files.len());
-        let par = Par::new(if files.len() > 1 { 1 } else { threads });
-        let (tx, rx) = std::sync::mpsc::channel();
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        let stop = std::sync::atomic::AtomicBool::new(false);
-        let mut pending = Pending { rx, left: files.len() };
-        let res = std::thread::scope(|sc| {
-            for _ in 0..workers {
-                let tx = tx.clone();
-                let (files, par, next, stop) = (&files, &par, &next, &stop);
-                sc.spawn(move || {
-                    use std::sync::atomic::Ordering::Relaxed;
-                    while !stop.load(Relaxed) {
-                        let Some(&(i, codec, packed)) = files.get(next.fetch_add(1, Relaxed)) else { break };
-                        if tx.send((i, nested_decompress(codec, packed, par, depth))).is_err() {
-                            break;
-                        }
-                    }
-                });
-            }
-            drop(tx);
-            let res = read_skeleton(&mut out, zstd_reader(sk)?, &spans)
-                .and_then(|()| decode_pixels(&mut out, &spans, &groups, rest, Some(&mut pending), threads));
-            // Whatever the outcome, the workers take no further file.
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            res
-        });
-        res?;
-    }
-    if xxhash_rust::xxh3::xxh3_64(&out) != hash {
-        return Err(Error("checksum mismatch".into()));
-    }
-    Ok(out)
 }
 
 /// The module of the formula (see [`crate::formula`]): the file of `len` bytes from the
@@ -2015,42 +1672,30 @@ pub(crate) fn decode_formula(
     len: u64,
     threads: usize,
 ) -> Result<Vec<u8>> {
-    let Head { total, spans, groups, .. } = get_head(head, Some(usize::try_from(len).map_err(|_| corrupt())?))?;
-    // The skeleton has the bytes outside the spans, no more, no less.
-    let outside = spans.iter().try_fold(total, |a, s| a.checked_sub(s.end - s.start));
-    if outside != Some(skeleton.len()) {
-        return Err(corrupt());
-    }
+    let total = usize::try_from(len).map_err(|_| corrupt())?;
+    let Head { spans, groups } = get_head(head, total)?;
     let mut out = vec![0u8; total];
     read_skeleton(&mut out, skeleton, &spans)?;
     let mut at = 0;
-    for s in spans.iter().filter(|s| matches!(s.coding, Coding::Nested { .. })) {
+    for s in spans.iter().filter(|s| matches!(s.coding, Coding::Nested)) {
         out[s.start..s.end].copy_from_slice(get_bytes(embedded, &mut at, s.end - s.start)?);
     }
     if at != embedded.len() {
         return Err(corrupt());
     }
-    decode_pixels(&mut out, &spans, &groups, model, None, threads)?;
+    decode_pixels(&mut out, &spans, &groups, model, threads)?;
     Ok(out)
 }
 
 /// Decodes the pixels of all groups into `out` (skeleton in place), and the copies.
-/// `pending` brings the embedded files, which are needed by a hinted group (it renders the
-/// file's layers) and at the end.
-fn decode_pixels(
-    out: &mut Vec<u8>,
-    spans: &[Span],
-    groups: &[GroupDef],
-    coded: &[u8],
-    mut pending: Option<&mut Pending>,
-    threads: usize,
-) -> Result<()> {
+/// The embedded files are in `out` already, as a hinted group renders the file's layers.
+fn decode_pixels(out: &mut Vec<u8>, spans: &[Span], groups: &[GroupDef], coded: &[u8], threads: usize) -> Result<()> {
     let total = out.len();
     let mut player = model::Player::new(coded);
     let mut done = vec![false; spans.len()];
     let mut planes_left = vec![0usize; spans.len()];
     for (i, s) in spans.iter().enumerate() {
-        done[i] = matches!(s.coding, Coding::Nested { .. });
+        done[i] = matches!(s.coding, Coding::Nested);
         planes_left[i] = s.planes;
     }
     let copy_ready = |out: &mut Vec<u8>, done: &mut [bool]| {
@@ -2065,9 +1710,6 @@ fn decode_pixels(
         }
     };
     for g in groups {
-        if let Some(p) = pending.as_deref_mut() {
-            p.drain(out, spans, g.hinted)?;
-        }
         // Everything before the group's first written span is complete.
         let split = g
             .planes
@@ -2097,9 +1739,6 @@ fn decode_pixels(
             }
         }
         copy_ready(out, &mut done);
-    }
-    if let Some(p) = pending {
-        p.drain(out, spans, true)?;
     }
     player.finish()?;
     if done.iter().any(|&d| !d) {

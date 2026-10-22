@@ -327,9 +327,8 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
 }
 
 /// The formula that a recompressor makes of `d` by `encode` (its `formula` module, see its
-/// FORMAT.md), if it makes one. Whether coding pays off is the
-/// recompressor's call (as for its container): the streams are not compressed yet, so their
-/// size says little.
+/// FORMAT.md), if it makes one. Whether coding pays off is the recompressor's call: the
+/// streams are not compressed yet, so their size says little.
 fn recons(encode: fn(&[u8], usize) -> Option<Formula>, d: &[u8], opt: &Options) -> Option<Formula> {
     let f = encode(d, opt.threads)?;
     if opt.verify && !f.eval(&Native { threads: opt.threads }).is_ok_and(|out| out == d) {

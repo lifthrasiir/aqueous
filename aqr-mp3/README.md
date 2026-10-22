@@ -7,55 +7,36 @@ Apple M4, both ways; compression ratio is pursued only where it does not cost th
 
 ## Results
 
-Apple M4, one thread, `mp3r bench -n 2` (best of two runs per file). FMA `fma_small`
-directories 100–155, which the built-in tables were not trained on (they were trained
-on 000–099):
-
-| Set | Files | Input | Output / input | Compress | Decompress |
-|---|---|---|---|---|---|
-| FMA 100–155 | 3489 | 3.61 GB | **0.8521** | **104.9 MB/s** | **114.3 MB/s** |
-
-Every file round-trips (`bench` also checks the coded path when the container falls back
-to storing).
-
-### Comparison
-
-FMA directories 100–104 (73 files, 72.0 MB):
-
-| Tool | Output / input | Speed |
-|---|---|---|
-| mp3r | 0.8489 | 106 MB/s compress, 117 MB/s decompress |
-| packMP3 1.0g (`-np`, clang -O2) | 0.8187 (1 file rejected, counted as stored) | about 5.5 MB/s |
-| zstd 1.5.7 `-19` | 0.9465 | |
-| xz `-9` | 0.9508 | |
-
-`tools/compare.sh PACKMP3 WORKDIR DIR...` reproduces the table.
+The ratios and speeds measured with the former container format (FMA `fma_small` 100–155,
+where the built-in tables were trained on 000–099) no longer apply: they included its zstd
+layer and are to be measured again with `mp3r bench`, which now sizes the `.aqr` archive of
+each file's formula. The comparison with packMP3, `zstd -19` and `xz -9` on the same files
+is `tools/compare.sh PACKMP3 WORKDIR DIR...`.
 
 ## Usage
 
 ```sh
 cargo build --release
 
-mp3r c [-t N] in.mp3 out.m3r         # compress
-mp3r d [-t N] out.m3r back.mp3       # decompress
-mp3r bench [-n ITERS] [-t N] [-v] FILE|DIR... # round trip check, ratio, throughput, per-stream sizes
+mp3r bench [-n ITERS] [-t N] [-v] FILE|DIR... # round trip check, .aqr ratio, throughput, per-stream sizes
 mp3r info FILE|DIR...                # frames, junk, tail / raw / gap bits, symbol counts
 mp3r fuzz [-n N] [-s SEED] [-t N] FILE|DIR... # mutated inputs (flips, cuts, deletions, insertions)
 train [-a] OUT FILE|DIR...           # trains the built-in tables (every file with -a, else every second)
 ```
 
-`-t N`: threads; `c` and `d` default to the available cores, `bench` and `fuzz` to 1 (`fuzz`
-then also checks that the output equals the one-thread output). See [Threads](#7-threads).
+`-t N`: threads, default 1 (`fuzz` then also checks that the formula equals the one-thread
+formula). See [Threads](#6-threads).
+
+The crate is a module of entry formulas (aqr-formula), `mp3-recons`; archives are written
+and read through `aqr-compress` and `aqr-decompress`.
 
 ```rust
-let packed = aqr_mp3::compress(&mp3);              // never fails: stores what it cannot code
-assert_eq!(aqr_mp3::decompress(&packed)?, mp3);    // checked against an xxh3 of the original
-let packed = aqr_mp3::compress_threads(&mp3, 8);   // the same bytes for any number of threads
-assert_eq!(aqr_mp3::decompress_threads(&packed, 8)?, mp3);
+let f = aqr_mp3::formula::encode(&mp3, 8);         // None: not worth a formula; the same for any number of threads
+// f.eval(..) with aqr_mp3::formula::decode as the module gives mp3 back
 ```
 
-Any input is accepted. Whatever is not an MP3 frame is kept verbatim (zstd), and so is any
-main data that cannot be reproduced.
+Any input is accepted. Whatever is not an MP3 frame is kept verbatim in a stream, and so is
+any main data that cannot be reproduced.
 
 ## Layout
 
@@ -69,13 +50,13 @@ main data that cannot be reproduced.
 | `src/side.rs` | Adaptive model of the side information |
 | `src/rc.rs` | Adaptive binary range coder (LZMA style) |
 | `src/codec.rs` | Whole-file encode / decode, byte streams |
-| `src/container.rs` | Container format, stored fallback, checksum |
-| `src/par.rs` | Compression and decompression with more than one thread |
+| `src/formula.rs` | The module `mp3-recons`: formula of a file, decoding from the ten slots |
+| `src/par.rs` | Encoding and decoding with more than one thread |
 | `../aqr-common` | Alias-table rANS with lazy table construction (`rans64`, re-exported as `rans`), bit readers and writers (`msb`, as `bits`), LEB128 |
 | `src/bin/train.rs` | Training of the built-in tables (`model/builtin.bin`) |
-| `tests/regress.rs`, `tests/data` | Round trips of small LAME encodings (CBR, VBR, mono, CRC, MPEG-2, MPEG-2.5 8 kHz, free format, tags), with junk, cuts, concatenation, corrupted containers |
-| `tests/threads.rs` | The same with 2, 3 and 8 threads: identical compressed bytes, round trips, the same errors for corrupted containers |
-| `examples/` | Benchmarks and analysis helpers (`hot`, `overhead`, `phases`, `perfile`, `ctxdist`, `init`) |
+| `tests/regress.rs`, `tests/data` | Round trips of small LAME encodings (CBR, VBR, mono, CRC, MPEG-2, MPEG-2.5 8 kHz, free format, tags), with junk, cuts, concatenation |
+| `tests/formula.rs` | The formula of the same files, large repetitions of them and non-MP3 data; 1, 2 and 8 threads: identical formulas, round trips, the same errors for corrupted slots |
+| `examples/` | Benchmarks and analysis helpers (`hot`, `phases`, `perfile`, `ctxdist`, `init`) |
 | `tools/` | `gen_huff.py`, `profile.py` (samply + atos self/inclusive time by line), `compare.sh`, `experiment.sh` |
 
 ## Design
@@ -100,7 +81,7 @@ main data that cannot be reproduced.
 - **Not stored**: `part2_3_length` (re-derived from the re-encoded size plus the tail),
   `main_data_begin` (predicted as "right after the previous frame's data", residual coded),
   CRCs (recomputed; a flag, or the stored value if it was wrong), headers (XOR with the
-  previous one, zstd).
+  previous one).
 
 ### 2. Coefficient model
 
@@ -162,60 +143,41 @@ the input.
   word writer for the many short raw writes of the encoder.
 - **Coder state** (rANS states, bit buffers) is copied into locals for each granule.
 
-### 6. Container
+### 6. Threads
 
-The full specification is [FORMAT.md](FORMAT.md).
-
-```text
-magic 69 04 7e 30 fd da ("aQR+MP3" in base64), version(u16 LE = 0), mode(u8)
-mode 0 (stored): the input verbatim
-mode 1 (coded):
-  u64 LE length, u64 LE xxh3 of the original
-  byte streams: segments, junk, headers, CRCs, tail bits, raw granules, gaps, side
-                (each varint(len << 1 | zstd) [varint raw len] data; zstd level 1)
-  varint bit lengths, rANS word count, raw bit count; rANS words; raw bits
-```
-
-- `compress` never fails: panics and anything larger than the input fall back to stored.
-- Decompression checks length and xxh3, and bounds every size it reads, so corrupted input
-  gives an error rather than a crash or a huge allocation.
-
-### 7. Threads
-
-`-t N` (`compress_threads`, `decompress_threads`; `mp3r c` and `mp3r d` default to the
-available cores): the output is the same bytes whatever the number of threads, and one
-thread, or an input below 64 KiB, runs the code above unchanged. The coefficient model
-carries state from granule to granule and the rANS chain is serial, so the model pass
-(compression) and the rANS decoding with the Huffman re-encoding (decompression) stay on
+`-t N` (the `threads` of `formula::encode` and `formula::decode`): the formula is the same
+whatever the number of threads, and one thread, or an input below 64 KiB, runs the code
+above unchanged. The coefficient model carries state from granule to granule and the rANS
+chain is serial, so the model pass (encoding) and the rANS decoding with the Huffman
+re-encoding (decoding) stay on
 the calling thread, in order. Around them (`src/par.rs`):
 
-- **Compression** (one helper thread, whatever N ≥ 2): the helper builds the tables and
-  hashes the input while the file is split into frames; compresses the file structure
-  streams (segments, junk, headers, CRCs) with zstd and then builds the encoder's inverse
-  maps of the contexts the side information says may be used (the Huffman tables, count1
-  tables and scalefactor sizes of the file, most used first) while the model pass runs;
-  then compresses the other streams while the rANS words are produced.
-- **Decompression**: the side information (adaptive range coder, independent of the rANS
+- **Encoding** (one helper thread, whatever N ≥ 2): the helper builds the tables while the
+  file is split into frames, and then builds the encoder's inverse maps of the contexts the
+  side information says may be used (the Huffman tables, count1 tables and scalefactor
+  sizes of the file, most used first) while the model pass runs.
+- **Decoding**: the side information (adaptive range coder, independent of the rANS
   stream) is decoded on its own thread, ahead of the main pass, in batches of frames; with
   3 or more threads another builds the tables, the decoder's alias tables and the rANS
-  decoder while the streams are unpacked and the headers read (with 2, the side
+  decoder while the headers are read (with 2, the side
   information thread builds the tables first); the output (headers, side information,
   CRCs, main data) is assembled in up to N pieces, one per 1024 frames.
-- Errors are the same as with one thread, in the same order of precedence.
+- Errors are the same as with one thread.
 - Not done: splitting the Huffman re-encoding from the rANS decoding (it is a table lookup
   and a write per symbol, about the cost of handing the values over), and a chunked model
-  pass for compression (granules depend on the previous granule of the channel and on
+  pass for encoding (granules depend on the previous granule of the channel and on
   scalefactors of any earlier granule; it would need warm-up, state validation and
   splicing of the symbol and bit streams).
 
 ## Verification
 
-- `mp3r bench`: every file round-trips through the container and through the coded path.
+- `mp3r bench`: every file round-trips through its `.aqr` archive and through the coded path.
 - `mp3r fuzz`: bit flips, truncation, deletion and insertion; both paths must round-trip
-  without panics (with `-t`, also through the threads, with the one-thread output).
+  without panics (with `-t`, also through the threads, with the one-thread formula).
 - `cargo test --release`: unit tests (bit I/O, Huffman tables and a random round trip for
-  every table, rANS, reciprocals, range coder), `tests/regress.rs` and `tests/threads.rs`.
-- The held-out FMA set above (3489 files) and fuzzing of FMA and synthetic files pass.
+  every table, rANS, reciprocals, range coder), `tests/regress.rs` and `tests/formula.rs`.
+- The held-out FMA set (3489 files) and fuzzing of FMA and synthetic files passed with the
+  former container format.
 
 ## Tried and dropped
 
@@ -232,11 +194,12 @@ the calling thread, in order. Around them (`src/par.rs`):
 
 ## Open issues and limitations
 
-- **Gap to packMP3**: about 3 pp of ratio (0.849 vs 0.819). Per-file tables for the most
-  used contexts are estimated at 0.5–0.6 pp but cost table construction at decompression.
+- **Gap to packMP3**: about 3 pp of ratio (measured with the former container format).
+  Per-file tables for the most used contexts are estimated at 0.5–0.6 pp but cost table
+  construction at decompression.
 - **Encoder diversity**: tested on FMA (uploads from many encoders, clipped with
   `ffmpeg -acodec copy`) and LAME 3.100. No files from FhG, iTunes, Xing, Helix or Shine
-  have been checked specifically; any oddities still round-trip (stored verbatim where
+  have been checked specifically; any oddities still round-trip (kept verbatim where
   needed), but may compress less.
 - **Mixed blocks** are decoded with minimp3's band layout; MPEG-2.5 8 kHz short blocks may
   differ between decoders (ffmpeg uses a different region boundary). Either way bits are

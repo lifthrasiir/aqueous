@@ -1,21 +1,20 @@
 use aqr_flac::codec::STREAM_NAMES;
-use aqr_flac::container::{self, Options};
+use aqr_flac::formula::{self, MODULE, Options};
 use aqr_flac::pcm::Format;
+use aqr_formula::{Apply, Formula, aqr};
 use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
         "usage:
-  flr c [-r FORMAT] [-t THREADS] IN OUT     compress (FLAC, WAV, AIFF; other files are stored)
-  flr d [-t THREADS] IN OUT                 decompress
-  flr bench [-r FORMAT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...
+  flr bench [-r FORMAT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...   (sizes as .aqr archives)
   flr info FILE|DIR...
   flr fuzz [-r FORMAT] [-t THREADS] [-n N] [-s SEED] FILE|DIR...
 
   -r FORMAT: take the input as headerless PCM, e.g. s16le:2, s24be:6, u8:1
              (sign, bits, endianness, ':' channels)
-  -t THREADS: c and d default to the available cores, bench to 1; fuzz also checks
-             that 2-4 threads (or THREADS) give the same output as one"
+  -t THREADS: bench defaults to 1; fuzz also checks that 2-4 threads (or THREADS) give
+             the same output as one"
     );
     std::process::exit(2)
 }
@@ -79,8 +78,17 @@ fn opts(args: &[String]) -> Opts {
     o
 }
 
-fn cores() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
+/// The module's decoder on `threads` threads, as the modules of [`Formula::eval`] and archives.
+fn modules(threads: usize) -> impl Fn(&Apply, &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
+    move |a, inputs| {
+        assert_eq!(a.module, MODULE);
+        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+    }
+}
+
+/// The formula of `d` where there is one (a panic of the coder is none).
+fn encode(d: &[u8], opt: &Options) -> Option<Formula> {
+    std::panic::catch_unwind(|| formula::encode_with(d, opt)).ok()?
 }
 
 fn bench(args: &[String]) {
@@ -88,35 +96,41 @@ fn bench(args: &[String]) {
     let opt = Options { raw: o.raw, threads: o.threads.unwrap_or(1) };
     let iters = o.n.unwrap_or(1);
     let (mut tin, mut tout, mut tc, mut td) = (0usize, 0usize, 0f64, 0f64);
-    let mut fails = 0;
-    let mut sizes_total: Vec<(usize, usize)> = vec![(0, 0); STREAM_NAMES.len()];
+    let (mut fails, mut skipped) = (0, 0);
+    let mut sizes_total = vec![0usize; STREAM_NAMES.len()];
     for path in files(&o.rest) {
         let d = read(&path);
         let mut best_c = f64::MAX;
         let mut best_d = f64::MAX;
-        let mut c = Vec::new();
-        let mut sizes = Vec::new();
+        let mut coded = None;
         for _ in 0..iters {
             let t = Instant::now();
-            let (cc, ss) = container::compress_sizes_opt(&d, &opt);
+            let f = encode(&d, &opt);
+            let c = f.as_ref().map(|f| aqr::encode(f, Some(aqr::checksum(&d)), aqr::Level::Mid).unwrap());
             best_c = best_c.min(t.elapsed().as_secs_f64());
-            c = cc;
-            sizes = ss;
+            coded = f.zip(c);
         }
-        // The coded path, even when the container stores the file.
-        let mut ok = container::roundtrip_opt(&d, &opt);
+        let Some((f, c)) = coded else {
+            skipped += 1;
+            if o.verbose {
+                println!("{path}: not coded");
+            }
+            continue;
+        };
+        let m = modules(opt.threads);
+        let mut ok = f.eval(&m).is_ok_and(|r| r == d);
         if !ok {
-            eprintln!("{path}: coded path does not round-trip");
+            eprintln!("{path}: formula does not evaluate to the input");
         }
         for _ in 0..iters {
             let t = Instant::now();
-            let r = container::decompress_threads(&c, opt.threads);
+            let r = aqr::decode(&c, &aqr::natives(&[MODULE], &m));
             best_d = best_d.min(t.elapsed().as_secs_f64());
             match r {
                 Ok(r) if r == d => {}
                 Ok(_) => ok = false,
                 Err(e) => {
-                    eprintln!("{path}: {}", e.0);
+                    eprintln!("{path}: {e}");
                     ok = false
                 }
             }
@@ -125,9 +139,8 @@ fn bench(args: &[String]) {
             fails += 1;
             println!("FAIL {path}");
         }
-        for (t, s) in sizes_total.iter_mut().zip(&sizes) {
-            t.0 += s.0;
-            t.1 += s.1;
+        for (t, s) in sizes_total.iter_mut().zip(&f.streams) {
+            *t += s.data.len();
         }
         tin += d.len();
         tout += c.len();
@@ -145,14 +158,14 @@ fn bench(args: &[String]) {
         }
     }
     println!(
-        "total: {tin} -> {tout} ({:.4}), compress {:.1} MB/s, decompress {:.1} MB/s, {fails} failures",
+        "total (.aqr): {tin} -> {tout} ({:.4}), encode {:.1} MB/s, decode {:.1} MB/s, {fails} failures, {skipped} not coded",
         tout as f64 / tin.max(1) as f64,
         tin as f64 / tc / 1e6,
         tin as f64 / td / 1e6
     );
-    println!("streams (raw -> stored, % of input):");
-    for (name, (r, z)) in STREAM_NAMES.iter().zip(&sizes_total) {
-        println!("  {name:10} {r:12} -> {z:12}  {:6.2}%", *z as f64 * 100.0 / tin.max(1) as f64);
+    println!("streams (bytes before the archive's compression, % of input):");
+    for (name, z) in STREAM_NAMES.iter().zip(&sizes_total) {
+        println!("  {name:10} {z:12}  {:6.2}%", *z as f64 * 100.0 / tin.max(1) as f64);
     }
 }
 
@@ -198,27 +211,16 @@ fn fuzz(args: &[String]) {
                 }
             }
             total += 1;
-            let r = std::panic::catch_unwind(|| container::compress_sizes(&m, o.raw).0);
-            let opt = Options { raw: o.raw, threads: o.threads.unwrap_or([2, 3, 4][round % 3]) };
-            let ok = match r {
-                Ok(c) => {
-                    // The threaded paths: the same output, and the same result decompressing
-                    // (also of a damaged container).
-                    let flip = (rng() % c.len() as u64) as usize;
-                    let same = std::panic::catch_unwind(|| {
-                        let mut d = c.clone();
-                        d[flip] ^= 0x10;
-                        let res = |r: Result<Vec<u8>, container::Error>| r.map_err(|e| e.0);
-                        container::compress_sizes_opt(&m, &opt).0 == c
-                            && res(container::decompress_threads(&d, opt.threads)) == res(container::decompress(&d))
-                    });
-                    matches!(container::decompress(&c), Ok(ref back) if *back == m)
-                        && matches!(container::decompress_threads(&c, opt.threads), Ok(ref back) if *back == m)
-                        && same.unwrap_or(false)
-                }
-                Err(_) => false,
-            } && std::panic::catch_unwind(|| container::roundtrip(&m, o.raw)).unwrap_or(false)
-                && std::panic::catch_unwind(|| container::roundtrip_opt(&m, &opt)).unwrap_or(false);
+            let threads = o.threads.unwrap_or([2, 3, 4][round % 3]);
+            // The formula (if any) evaluates to the input, on one thread and on several, and
+            // is the same whatever the number of threads of the encoder.
+            let ok = std::panic::catch_unwind(|| {
+                let Some(f) = formula::encode_with(&m, &Options { raw: o.raw, threads: 1 }) else { return true };
+                f.eval(&modules(1)).is_ok_and(|r| r == m)
+                    && f.eval(&modules(threads)).is_ok_and(|r| r == m)
+                    && formula::encode_with(&m, &Options { raw: o.raw, threads }) == Some(f)
+            })
+            .unwrap_or(false);
             if !ok {
                 fails += 1;
                 let name = format!("fuzz_failure_{round}");
@@ -247,7 +249,7 @@ fn info(args: &[String]) {
             }
             None => match aqr_flac::pcm::detect(&d) {
                 Some((f, start, len)) => println!("{path}: PCM {f:?}, data at {start}, {len} bytes"),
-                None => println!("{path}: not recognised (stored)"),
+                None => println!("{path}: not recognised (not coded)"),
             },
         }
     }
@@ -259,28 +261,6 @@ fn main() {
         usage();
     }
     match args[0].as_str() {
-        "c" => {
-            let o = opts(&args[1..]);
-            let [i, out] = &o.rest[..] else { usage() };
-            let d = read(i);
-            let opt = Options { raw: o.raw, threads: o.threads.unwrap_or_else(cores) };
-            std::fs::write(out, container::compress_opt(&d, &opt)).unwrap();
-        }
-        "d" => {
-            let o = opts(&args[1..]);
-            let [i, out] = &o.rest[..] else { usage() };
-            if o.raw.is_some() {
-                usage();
-            }
-            let c = read(i);
-            match container::decompress_threads(&c, o.threads.unwrap_or_else(cores)) {
-                Ok(d) => std::fs::write(out, d).unwrap(),
-                Err(e) => {
-                    eprintln!("{}", e.0);
-                    std::process::exit(1)
-                }
-            }
-        }
         "bench" => bench(&args[1..]),
         "info" => info(&args[1..]),
         "fuzz" => fuzz(&args[1..]),

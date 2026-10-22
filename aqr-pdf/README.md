@@ -9,58 +9,33 @@ writing, Huffman header coding, its fast representation), images through
 
 ```sh
 cargo build --release
-pdfr c [-t N] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] in.pdf out.pdfr   # compress
-pdfr d [-t N] out.pdfr back.pdf                                           # decompress
-pdfr bench [-t N] [-n ITERS] [-s MB/S] [-v] ... FILE...   # round trip, ratio, CPU-time speed, per-mode costs
-pdfr fuzz [-n ROUNDS] [-r SEED] FILE...            # mutated files and containers
+pdfr bench [-t N] [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...   # formula and .aqr: ratio, CPU-time speed, per-mode sizes
+pdfr fuzz [-n ROUNDS] [-r SEED] FILE...            # mutated files, formulas and archives
 ```
 
 ```rust
-let packed = aqr_pdf::compress(&pdf);              // never fails: stores what it cannot code
-assert_eq!(aqr_pdf::decompress(&packed)?, pdf);    // checked against an xxh3 of the original
+// The formula of a PDF file (None where it would not be smaller), and the file back from it.
+let f = aqr_pdf::formula::encode(&pdf, 1).unwrap();
+let run = |a: &Apply, inputs: &[&[u8]]| aqr_pdf::formula::apply(a, inputs, 1);
+assert_eq!(f.eval(&run)?, pdf);
 ```
 
-`-t` is the number of threads (`c` and `d`: the available cores; `bench`: 1, timed in CPU
-time with one thread and wall time with more), `-s` is the speed target (`inf`: no limit), `-V` verifies by decompressing (and on a mismatch
-codes the file again without models), `-T`/`-F`/`-P` turn off the token, full and PNG modes.
-Any input is accepted; what is not a PDF goes through as skeleton.
+The formula is a file of the Aqueous archives (`.aqr`) through aqr-formula, as aqr-compress
+makes it. `-t` is the number of threads (`bench`: 1 by default, timed in CPU time with one
+thread and wall time with more), `-s` is the speed target (`inf`: no limit), `-l` is the zstd
+level the encoder measures the table, skeleton and pools at to judge whether the formula pays,
+`-V` verifies by evaluating the formula (and on a mismatch codes the file again without
+models), `-T`/`-F`/`-P` turn off the token, full and PNG modes. Any input is accepted; what is
+not a PDF goes through as skeleton.
 
 ## Results
 
-Apple M4, one thread, process CPU time, best of 2 (`pdfr bench -n 2`); MB/s of PDF file,
-both ways; output size / input size. Every file round-trips. Generic compressors on each
-file, summed (`scripts/baseline.sh`): zstd 1.5.7 `--single-thread`, xz `-9 -T1`.
-
-| set | files | size | **pdfr** | compress | decompress | zstd -3 | zstd -19 | xz -9 |
-|---|---|---|---|---|---|---|---|---|
-| home (code charts, papers) | 20 | 314 MB | **0.8738** | 116 MB/s | 172 MB/s | 0.9145 | 0.8900 | 0.8879 |
-| cc (Common Crawl) | 1,000 | 1,379 MB | **0.8638** | 157 MB/s | 186 MB/s | 0.9073 | 0.8879 | 0.8887 |
-| arxiv | 20 | 94 MB | **0.8346** | 124 MB/s | 142 MB/s | 0.9021 | 0.8831 | 0.8828 |
-| pdf20 (PDF Association's PDF 2.0 examples) | 7 | 54 KB | **0.5004** | 80 MB/s | 932 MB/s | 0.5129 | 0.4825 | 0.4738 |
-
-The speed target binds: everything coded costs more per byte than the budget allows on
-average, so the ratio is what fits in it. With no limit (`-s inf`) CC gives **0.7713** at
-35 / 57 MB/s. The target is met per file, not just per set: the budget is per file
-(below) and planned with a 10% margin for the scatter of the estimates. Files below
-100 MB/s hold 2.2% of CC's bytes compressing (75 files, most of them small, where fixed
-costs dominate) and 0.01% decompressing, 0.05% of home's and none of arXiv's. Without the
-margin (`-s 91`) CC gives 0.8582 with 10.5% of its bytes in slow files.
-
-What each mode does on CC at the default target (ns per byte of stream, compressing /
-decompressing; output / input):
-
-| mode | streams | bytes | compress | decompress | ratio |
-|---|---|---|---|---|---|
-| tok, pixels (images without predictor) | 2,714 | 111 MB | 14.5 | 13.3 | 0.840 |
-| tok, content streams | 3,223 | 30 MB | 15.0 | 13.5 | 0.951 |
-| png (PNG-predicted images, aqr-png) | 51 | 80 MB | 13.1 | 12.8 | 0.787 |
-| jpeg (aqr-jpeg) | 1,610 | 250 MB | 15.5 | 14.7 | about 0.80 |
-| full, fonts (aqr-flate) | 758 | 11 MB | 35.3 | 25.1 | 0.864 |
-| full, content streams | 638 | 1.5 MB | 79.4 | 52.0 | 0.885 |
-| dup | 7,627 | 30 MB | 0 | 0 | 0 |
-| raw (not worth its time) | 61,582 | 741 MB | 0.1 | 0 | 1 |
-
-(Token mode's times include its share of the per-file final pass and decoder setup.)
+The ratios and speeds of earlier versions of this document were measured with the file format
+this crate had before the formula module, and are gone; they need measuring again on `.aqr`
+archives (`pdfr bench`). The speed target (100 MB/s of PDF file single-threaded on an Apple
+M4, both ways) binds: everything coded costs more per byte than the budget allows on average,
+so the ratio is what fits in it, and the target is met per file, not just per set: the budget
+is per file (below) and planned with a 10% margin for the scatter of the estimates.
 
 ## How
 
@@ -72,9 +47,9 @@ coders measured here take 10-115 ns per byte of stream (below). So the compresso
 code everything it can; it plans:
 
 - Every stream gets the modes it allows, each with an estimated size and time: a cost
-  model fitted to per-item measurements of the corpus (`PDFR_CALIB=FILE pdfr bench`, then
-  `scripts/fit-costs.py`; ns per item, per stream byte and per inflated byte, each way;
-  for JPEG, per 8×8 block from the frame header instead, which halves the error).
+  model fitted to per-item measurements of the corpus (ns per item, per stream byte and per
+  inflated byte, each way; for JPEG, per 8×8 block from the frame header instead, which
+  halves the error).
   Inflated sizes come from the dictionary (images' geometry, fonts' `/Length1`), else
   from the first DEFLATE block's code lengths (expected bytes per bit with probabilities
   2^-length: a third of the class prior's error on content streams), else a per-class
@@ -97,14 +72,14 @@ correctness. Streams are classed (content, font, image, object stream, cross-ref
 stream, other data) by their dictionaries; indirect objects (colour spaces, decode
 parameters) are looked up through an index of every `N G obj` (`objects.rs`).
 
-The file is cut into the skeleton (zstd) and *items*:
+The file is cut into the skeleton and *items*:
 
 | mode | what | coder |
 |---|---|---|
 | raw | stream data kept as it is (incompressible, or not worth its time) | none |
 | dup | a stream equal to an earlier one | reference |
 | tok | FlateDecode: the DEFLATE tokens recoded (`tok.rs`) | own, rANS |
-| full | FlateDecode: inflated data (pooled per class, zstd) + aqr-flate's fast metadata (a record: u16 profile + body) | aqr-flate |
+| full | FlateDecode: inflated data (pooled per class) + aqr-flate's fast metadata (a record: u16 profile + body) | aqr-flate |
 | png | FlateDecode image with PNG predictors, wrapped as a PNG file | aqr-png |
 | jpeg | DCTDecode | aqr-jpeg |
 
@@ -132,32 +107,25 @@ coding (the aqr-png approach, for any stream):
 
 ### Format
 
-```text
-69 04 69 75 fd b4 ("aQRpdf20" in base64) u16(version) | (varint(length) data)*
-version 1 (stored): one stream, the file
-version 0 (coded): head (file length, xxh3, how each later stream is coded: stored or zstd),
-  table (per item: skeleton gap, mode, fields), skeleton, raw, aqr-jpeg, aqr-png,
-  inflated data of full-mode streams per class, aqr-flate records,
-  token streams (layout, tables, rANS, raw bits, headers)
-```
-
-Each stream is read with the ones before it. [FORMAT.md](FORMAT.md) specifies all of it.
+The module `pdf-recons` takes eleven input slots: the table (per item: skeleton gap, mode,
+fields), the skeleton, the raw bytes, the DEFLATE streams of full-mode items, the PNG files
+and the JPEG files (all three given by the formula as applications of aqr-flate, aqr-png and
+aqr-jpeg), and the token streams (layout, tables, rANS, raw bits, headers). The inflated
+data of full-mode streams and the aqr-flate records are streams of the formula, per class
+(`pdf/pool-<class>`) and `pdf/meta`. [FORMAT.md](FORMAT.md) specifies all of it.
 
 ### Threads
 
-`-t N` (`Options::threads`, `decompress_threads`, `decompress_with_threads`): the output is
-the same bytes whatever the number of threads, and one thread runs the code as before
-(aqr-jpeg on rayon's global pool; `pdfr c -t 1` and `d -t 1` make that pool one
-thread). With more, a pool of N threads codes the items ahead, in
-order, at most 4N + 4 of them and about 256 MB of estimated working memory in flight
-(always one): JPEG, PNG and aqr-flate items whole, and FlateDecode streams for the token
-mode parsed; the calling thread appends them to the sections in order and runs the token
-coder, whose state carries over from stream to stream. aqr-jpeg's own parallelism runs on
-the same pool, so it takes N threads in all (aqr-flate, one thread per item). The token
-coder's final pass runs beside zstd of the table, skeleton and pools. Decompressing, the
-sections are decoded on the pool, the table is read first, and the pool restores the
-full-mode, PNG and JPEG items ahead while the calling thread decodes the token streams (one
-rANS stream) and joins everything in order; the xxh3 check is at the end, as with one thread.
+`-t N` (`Options::threads`): the formula is the same whatever the number of threads, and one
+thread runs the code as before (aqr-jpeg on rayon's global pool). With more, a pool of N
+threads codes the items ahead, in order, at most 4N + 4 of them and about 256 MB of estimated
+working memory in flight (always one): JPEG, PNG and aqr-flate items whole, and FlateDecode
+streams for the token mode parsed; the calling thread adds them to the sections in order and
+runs the token coder, whose state carries over from stream to stream. aqr-jpeg's own
+parallelism runs on the same pool, so it takes N threads in all (aqr-flate, one thread per
+item). The token coder's final pass runs beside the zstd that measures the table, skeleton
+and pools. The decoder of the module takes no threads: the nested modules rebuild their
+items, and the tokens are one rANS stream.
 
 ## Measured, not kept
 
@@ -209,33 +177,34 @@ cargo test --release
 ../target/release/pdfr fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
 ```
 
+- `tests/formula.rs`: synthetic PDF files through `formula::encode_with` and `Formula::eval`
+  with the nested modules, under every set of options and with 1 to 8 threads; the
+  module's input slots corrupted.
 - `tests/roundtrip.rs`: FlateDecode streams from every encoder of flate-zoo, through every
   mode; zlib wrapper variants (bare DEFLATE, wrong Adler-32, junk after the data,
   truncated and damaged streams); syntax (indirect and wrong lengths, CR line ends,
   keywords in strings, incremental updates, unterminated streams); images with and without
   predictors, geometry that does not match the data; JPEG; duplicates; encrypted files;
   PDF 2.0 (junk before the header, UTF-8 strings, object and cross-reference streams,
-  AES-256);
-  non-PDF and cut files; 2,400 corrupted containers (errors, never panics).
+  AES-256); non-PDF and cut files.
 - Unit tests: lexer, scanner, rANS and bit I/O, token coding.
 - `pdfr fuzz`: mutated files (bit flips, cuts, deletions, junk, copied pieces, bytes inside
-  streams) must round-trip under every set of modes with the safety nets off; corrupted
-  containers must fail cleanly; with 2 to 4 threads, the same container and the same
-  outcome.
-- With 2, 3 and 8 threads, every test's container is the same bytes, and decompression (of
-  corrupted containers too) has the same outcome.
-- Every file of the four sets round-trips (`pdfr bench` checks).
+  streams) must round-trip through the formula under every set of modes with the safety
+  nets off; corrupted archives must fail cleanly; with 2 to 4 threads, the same formula and
+  the same outcome.
+- Every file of the four sets round-trips through `.aqr` (`pdfr bench` checks).
 
 ## Layout
 
 | File | Contents |
 |---|---|
 | `FORMAT.md` | The format, in full |
-| `src/container.rs` | Format, the cost model and planner, compression, decompression |
+| `src/formula.rs` | The module: its decoder, and the encoder's entry points |
+| `src/encode.rs` | The cost model and planner, and the formula's encoder |
 | `src/scan.rs`, `src/lex.rs` | Finding streams, PDF objects |
 | `src/kind.rs`, `src/objects.rs` | Stream classes and filters, indirect objects |
 | `src/flate.rs`, `src/image.rs` | zlib wrapper; image geometry and the PNG wrapper |
 | `src/tok.rs`, `src/rans.rs` | Token mode; static rANS (`aqr_common::rans32` with 12-bit probabilities) |
 | `src/bin/pdfr.rs` | Command-line tool, bench, fuzz |
 | `examples/` | Corpus surveys and experiments behind the choices here |
-| `scripts/` | Corpus, baselines, cost fitting, profiling (`profile.py` over samply) |
+| `scripts/` | Corpus, baselines, profiling (`profile.py` over samply) |

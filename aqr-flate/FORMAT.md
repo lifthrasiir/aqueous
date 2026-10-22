@@ -2,8 +2,8 @@
 
 aqr-flate splits a raw DEFLATE stream into its decompressed **data** and a **record** of
 everything else the encoder chose. From the data and the record the stream is rebuilt bit for
-bit. This document describes the record, the `.flate.aqr` file that stores a record with
-its data, and the [formula module](#formula-module) that rebuilds the stream from the two.
+bit. This document describes the record, and the [formula module](#formula-module) that
+rebuilds the stream from the data and the record.
 
 This document is normative together with the data files it pins by SHA-256 (see
 [Model data](#model-data)) and the external references below. Everything else a decoder
@@ -17,7 +17,6 @@ External references:
   with their extra bits (`LEN_BASE`, `LEN_EXTRA`, `DIST_BASE`, `DIST_EXTRA` below are its
   tables), canonical codes from code lengths, and the transmission order of the code-length
   code lengths `CL_ORDER = 16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15`.
-- RFC 8878 (Zstandard) for the data of a `.flate.aqr` file.
 - zlib 1.3.1 (`deflate.c`, `trees.c`), zopfli, brotli, ECT and libdeflate are cited for
   orientation where an algorithm here is a port of theirs. The pseudocode in this document is
   normative, not the cited code.
@@ -43,24 +42,10 @@ External references:
 - `common(a, p, m)` (`a < p`) is the largest `l ≤ m` with `D[a..a+l) = D[p..p+l)`.
 - `maxlen(p) = min(N − p, 258)`, the longest match possible at `p`.
 
-## The `.flate.aqr` file
-
-| bytes | field |
-|---|---|
-| 6 | magic `69 04 5f 95 ab 77` (`aQRflat3` in base64) |
-| 2 | profile (u16) |
-| 4 | length of the record body (u32) |
-| … | the record body |
-| … | the data: the rest of the file, one or more zstd frames, decompressed and concatenated |
-
-The profile and the body together are the record. `aqr-flate compress` writes the data
-with zstd at level 19 by default.
-
 ## The record
 
-A record is a profile (u16) followed by its body. Formats that embed aqr-flate (such as
-aqr-pdf) store the record without the magic, with their own length framing.
-`aqr_flate::deconstruct_with` returns a record, and `reconstruct` takes one.
+A record is a profile (u16) followed by its body. `aqr_flate::deconstruct_with` returns a
+record, and `reconstruct` takes one.
 
 ### Profiles
 
@@ -1070,7 +1055,7 @@ instance, with the rule `literals` (in the catalog or in full):
 | slot | content | already compressed |
 |---|---|---|
 | 0 | the data `D` | no: whatever the stream held (text, image rows, …) |
-| 1 | the [record](#the-record): the profile (u16) and the body, without the magic | mostly: the corrections are rANS or arithmetic coded, and the main and header streams pack their fields in bits; general-purpose compression gains little |
+| 1 | the [record](#the-record): the profile (u16) and the body | mostly: the corrections are rANS or arithmetic coded, and the main and header streams pack their fields in bits; general-purpose compression gains little |
 
 The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`
 and `flate/record` in aqr-compress, slices of `pdf/pool-<class>` and `pdf/meta` in

@@ -4,6 +4,14 @@
 
 pub use flate_zoo::{Encoder, Sweep, backend, backends, presets_of};
 
+/// The modules a formula of aqr-png applies: itself, on `threads` threads.
+pub fn modules(threads: usize) -> impl Fn(&aqr_formula::Apply, &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
+    move |a, inputs| {
+        assert_eq!(a.module, aqr_png::formula::MODULE);
+        aqr_png::formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.to_string()))
+    }
+}
+
 pub fn crc(kind: &[u8], data: &[u8]) -> u32 {
     let mut h = crc32fast::Hasher::new();
     h.update(kind);

@@ -1,11 +1,10 @@
 //! The formula module: `formula::encode` evaluated through `formula::decode` gives the input back,
 //! over the files in tests/data (also with junk, cut, as raw PCM, on threads), and nothing for
-//! what the container stores.
+//! what is not coded.
 
-use aqr_flac::container::Options;
-use aqr_flac::formula::{self, MODULE};
+use aqr_flac::formula::{self, MODULE, Options};
 use aqr_flac::pcm::Format;
-use aqr_formula::{Apply, Formula};
+use aqr_formula::{Apply, Formula, aqr};
 
 fn files() -> Vec<(String, Vec<u8>)> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
@@ -46,7 +45,10 @@ fn data_files() {
             assert_eq!(a.params, [name.ends_with(".flac") as u8 ^ 1], "{name}");
             assert_eq!(a.inputs.len(), 9);
         }
-        assert!(formula::encode(&d, 1).is_some());
+        // These should all be coded, and smaller than the input as archives.
+        let f = formula::encode(&d, 1).unwrap();
+        let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::Mid).unwrap().len();
+        assert!(n < d.len(), "{name}: {n} >= {}", d.len());
     }
 }
 
@@ -58,6 +60,10 @@ fn junk_and_cuts() {
         j.extend_from_slice(&d);
         j.extend_from_slice(b"TAG and after");
         check(&name, &j, &opt);
+        // Two files concatenated.
+        let mut two = d.clone();
+        two.extend_from_slice(&files()[0].1);
+        check(&name, &two, &opt);
         for cut in [1, 5, 417, d.len() / 3, d.len() / 2 + 7] {
             check(&name, &d[..d.len() - cut.min(d.len())], &opt);
             check(&name, &d[cut.min(d.len())..], &opt);
@@ -72,6 +78,7 @@ fn raw_pcm() {
             let opt = Options { raw: Format::parse(f), threads: 1 };
             let fm = check(&format!("{name} as {f}"), &d, &opt).expect(&name);
             assert_eq!(fm.applies()[0].params, [1]);
+            check(&format!("{name} as {f}, cut"), &d[..d.len() * 2 / 3 + 1], &opt);
         }
     }
 }

@@ -1,5 +1,5 @@
 use aqr_formula::{Apply, Formula};
-use aqr_obj::container::Options;
+use aqr_obj::codec::Options;
 use aqr_obj::formula::{self, MODULE};
 
 fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
@@ -184,8 +184,7 @@ fn corrupt_inputs() {
     }
 }
 
-/// `formula::decode` against the container's `decompress` (`cargo test --release --test
-/// formula -- --ignored --nocapture`).
+/// Time of `formula::decode` (`cargo test --release --test formula -- --ignored --nocapture`).
 #[test]
 #[ignore]
 fn bench_decode() {
@@ -208,11 +207,10 @@ fn bench_decode() {
         s += &format!("f {a}/{a}/{a} {}/{}/{} {}/{}/{}\n", a + 1, a + 1, a + 1, a + n, a + n, a + n);
     }
     let src = s.as_bytes();
-    let packed = aqr_obj::compress(src);
     let f = formula::encode(src, 4).unwrap();
     let aqr_formula::Node::Apply(a) = &f.root else { panic!() };
     let ins: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-    println!("{} bytes, container {}, slots {}", src.len(), packed.len(), ins.iter().map(|d| d.len()).sum::<usize>());
+    println!("{} bytes, slots {}", src.len(), ins.iter().map(|d| d.len()).sum::<usize>());
     for threads in [1, 4] {
         let best = |f: &dyn Fn() -> Vec<u8>| {
             (0..5)
@@ -223,8 +221,7 @@ fn bench_decode() {
                 })
                 .fold(f64::MAX, f64::min)
         };
-        let c = best(&|| aqr_obj::container::decompress_threads(&packed, threads).unwrap());
         let m = best(&|| formula::decode(&a.params, &ins, a.len, threads).unwrap());
-        println!("threads {threads}: container {c:.1} ms, formula {m:.1} ms");
+        println!("threads {threads}: {m:.1} ms");
     }
 }

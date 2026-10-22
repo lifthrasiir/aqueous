@@ -8,7 +8,6 @@ publish = false
 [dependencies]
 aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula" }
-zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [features]

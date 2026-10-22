@@ -2,17 +2,17 @@
 //! inputs, the skeleton, the index and the records of the images, and no parameters. See
 //! FORMAT.md, *Formula module*.
 
-use crate::container::{self, Skeleton};
+use crate::codec::{self, Skeleton};
 use crate::{Result, corrupt};
 use aqr_common::varint;
 use aqr_formula::{Formula, Module, Node};
 
 pub const MODULE: Module = Module { name: "png-recons", version: 1 };
 
-/// The formula giving `input`, or `None` where the container would store it: not a PNG file
+/// The formula giving `input`, or `None` where there is nothing to code: not a PNG file
 /// that can be parsed, or no image whose record is coded.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    let parts = std::panic::catch_unwind(|| container::formula_parts(input, threads)).ok()??;
+    let parts = std::panic::catch_unwind(|| codec::formula_parts(input, threads)).ok()??;
     let mut index = vec![];
     let mut records = Vec::with_capacity(parts.records.iter().map(|r| r.len()).sum());
     for r in &parts.records {
@@ -34,8 +34,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     let (mut at, mut from) = (0, 0);
     let mut recs = Vec::with_capacity(skel.images.len());
     for _ in &skel.images {
-        let n = container::get_varint(index, &mut at)? as usize;
-        recs.push(container::get_bytes(records, &mut from, n)?);
+        let n = codec::get_varint(index, &mut at)? as usize;
+        recs.push(codec::get_bytes(records, &mut from, n)?);
     }
     if at != index.len() || from != records.len() {
         return Err(corrupt());

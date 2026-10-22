@@ -1,20 +1,18 @@
 //! Lossless PNG recompression: a smaller representation from which the original file is
 //! rebuilt bit for bit.
 
-pub mod container;
+pub mod codec;
 pub mod filter;
 pub mod formula;
 pub mod model;
 pub mod png;
 pub mod rans;
 
-pub use container::{compress, compress_threads, decompress, decompress_threads};
-
 #[derive(Debug)]
 pub enum Error {
-    /// The input is not a PNG file this tool can handle (it is stored instead).
+    /// The input is not a PNG file this tool can handle.
     Unsupported(&'static str),
-    /// The compressed data is damaged.
+    /// The coded data is damaged.
     Corrupt,
     Flate(aqr_flate::Error),
 }

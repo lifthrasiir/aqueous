@@ -1,10 +1,12 @@
+use aqr_formula::aqr::{self, Level};
+use aqr_formula::{Apply, Formula};
 use aqr_mp3::codec::STREAM_NAMES;
-use aqr_mp3::container;
+use aqr_mp3::formula::{self, MODULE};
 use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  mp3r c [-t THREADS] IN OUT\n  mp3r d [-t THREADS] IN OUT\n  mp3r bench [-n ITERS] [-t THREADS] [-v] FILE...\n  mp3r info FILE...\n  mp3r fuzz [-n N] [-s SEED] [-t THREADS] FILE...\n(-t: c and d default to the available cores, bench and fuzz to 1)"
+        "usage:\n  mp3r bench [-n ITERS] [-t THREADS] [-v] FILE...\n  mp3r info FILE...\n  mp3r fuzz [-n N] [-s SEED] [-t THREADS] FILE...\n(-t: default 1)"
     );
     std::process::exit(2)
 }
@@ -36,12 +38,18 @@ fn files(args: &[String]) -> Vec<String> {
     out
 }
 
-fn cores() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
-}
-
 fn num(args: &[String], i: usize) -> usize {
     args.get(i).and_then(|s| s.parse().ok()).unwrap_or_else(|| usage())
+}
+
+/// The module's output with `threads` threads.
+fn apply(a: &Apply, inputs: &[&[u8]], threads: usize) -> aqr_formula::Result<Vec<u8>> {
+    formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+}
+
+/// The evaluated formula `f`, with `threads` threads.
+fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
+    f.eval(&|a: &Apply, inputs: &[&[u8]]| apply(a, inputs, threads))
 }
 
 fn bench(args: &[String]) {
@@ -65,36 +73,45 @@ fn bench(args: &[String]) {
         }
         i += 1;
     }
-    let (mut tin, mut tout, mut tc, mut td) = (0usize, 0usize, 0f64, 0f64);
+    let (mut tin, mut tout, mut tc, mut td, mut skipped) = (0usize, 0usize, 0f64, 0f64, 0usize);
     let mut fails = 0;
-    let mut sizes_total: Vec<(usize, usize)> = vec![(0, 0); STREAM_NAMES.len()];
+    let mut sizes_total = vec![0usize; STREAM_NAMES.len()];
     for path in files(&paths) {
         let d = read(&path);
         let mut best_c = f64::MAX;
         let mut best_d = f64::MAX;
-        let mut c = Vec::new();
-        let mut sizes = Vec::new();
+        let mut coded = None;
         for _ in 0..iters {
             let t = Instant::now();
-            let (cc, ss) = container::compress_sizes_threads(&d, threads);
+            let f = formula::encode(&d, threads);
+            let c = f.as_ref().map(|f| aqr::encode(f, Some(aqr::checksum(&d)), Level::Mid).unwrap());
             best_c = best_c.min(t.elapsed().as_secs_f64());
-            c = cc;
-            sizes = ss;
+            coded = f.zip(c);
         }
-        // The coded path, even when the container stores the file.
+        // The coded path, even when there is no formula.
         let mut ok = matches!(aqr_mp3::codec::decode(&aqr_mp3::codec::encode(&d)), Ok(ref r) if *r == d);
         if !ok {
             eprintln!("{path}: coded path does not round-trip");
         }
+        let Some((f, c)) = coded else {
+            skipped += 1;
+            if !ok {
+                fails += 1;
+                println!("FAIL {path}");
+            }
+            continue;
+        };
+        let run = |a: &Apply, inputs: &[&[u8]]| apply(a, inputs, threads);
+        let modules = aqr::natives(&[MODULE], &run);
         for _ in 0..iters {
             let t = Instant::now();
-            let r = container::decompress_threads(&c, threads);
+            let r = aqr::decode(&c, &modules);
             best_d = best_d.min(t.elapsed().as_secs_f64());
             match r {
                 Ok(r) if r == d => {}
                 Ok(_) => ok = false,
                 Err(e) => {
-                    eprintln!("{path}: {}", e.0);
+                    eprintln!("{path}: {e}");
                     ok = false
                 }
             }
@@ -103,9 +120,8 @@ fn bench(args: &[String]) {
             fails += 1;
             println!("FAIL {path}");
         }
-        for (t, s) in sizes_total.iter_mut().zip(&sizes) {
-            t.0 += s.0;
-            t.1 += s.1;
+        for (t, s) in sizes_total.iter_mut().zip(&f.streams) {
+            *t += s.data.len();
         }
         tin += d.len();
         tout += c.len();
@@ -123,14 +139,14 @@ fn bench(args: &[String]) {
         }
     }
     println!(
-        "total: {tin} -> {tout} ({:.4}), compress {:.1} MB/s, decompress {:.1} MB/s, {fails} failures",
+        "total: {tin} -> {tout} ({:.4}), compress {:.1} MB/s, decompress {:.1} MB/s, {skipped} without a formula, {fails} failures",
         tout as f64 / tin.max(1) as f64,
         tin as f64 / tc / 1e6,
         tin as f64 / td / 1e6
     );
-    println!("streams (raw -> stored, % of input):");
-    for (name, (r, z)) in STREAM_NAMES.iter().zip(&sizes_total) {
-        println!("  {name:10} {r:12} -> {z:12}  {:6.2}%", *z as f64 * 100.0 / tin.max(1) as f64);
+    println!("streams (raw, % of input):");
+    for (name, r) in STREAM_NAMES.iter().zip(&sizes_total) {
+        println!("  {name:10} {r:12}  {:6.2}%", *r as f64 * 100.0 / tin.max(1) as f64);
     }
 }
 
@@ -196,17 +212,18 @@ fn fuzz(args: &[String]) {
                 }
             }
             total += 1;
-            let r = std::panic::catch_unwind(|| container::compress_sizes_threads(&m, threads).0);
-            let ok = match r {
-                Ok(c) => {
-                    matches!(container::decompress_threads(&c, threads), Ok(ref back) if *back == m)
-                        && (threads == 1 || c == container::compress(&m))
+            let ok = std::panic::catch_unwind(|| match formula::encode(&m, threads) {
+                Some(f) => {
+                    matches!(eval(&f, threads), Ok(ref back) if *back == m)
+                        && (threads == 1 || formula::encode(&m, 1).as_ref() == Some(&f))
                 }
-                Err(_) => false,
-            } && std::panic::catch_unwind(
-                || matches!(aqr_mp3::codec::decode(&aqr_mp3::codec::encode(&m)), Ok(ref r) if *r == m),
-            )
-            .unwrap_or(false);
+                None => true,
+            })
+            .unwrap_or(false)
+                && std::panic::catch_unwind(
+                    || matches!(aqr_mp3::codec::decode(&aqr_mp3::codec::encode(&m)), Ok(ref r) if *r == m),
+                )
+                .unwrap_or(false);
             if !ok {
                 fails += 1;
                 let name = format!("fuzz_failure_{round}.mp3");
@@ -242,33 +259,6 @@ fn main() {
         usage();
     }
     match args[0].as_str() {
-        "c" | "d" => {
-            let mut threads = cores();
-            let mut rest = Vec::new();
-            let mut i = 1;
-            while i < args.len() {
-                if args[i] == "-t" {
-                    i += 1;
-                    threads = num(&args, i).max(1);
-                } else {
-                    rest.push(&args[i]);
-                }
-                i += 1;
-            }
-            let [inp, outp] = rest[..] else { usage() };
-            let d = read(inp);
-            if args[0] == "c" {
-                std::fs::write(outp, container::compress_threads(&d, threads)).unwrap();
-            } else {
-                match container::decompress_threads(&d, threads) {
-                    Ok(d) => std::fs::write(outp, d).unwrap(),
-                    Err(e) => {
-                        eprintln!("{}", e.0);
-                        std::process::exit(1)
-                    }
-                }
-            }
-        }
         "bench" => bench(&args[1..]),
         "info" => info(&args[1..]),
         "fuzz" => fuzz(&args[1..]),

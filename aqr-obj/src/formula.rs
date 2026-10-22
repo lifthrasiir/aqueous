@@ -1,13 +1,9 @@
 //! aqr-obj as a module of entry formulas (see aqr-formula): the streams of the coded
 //! blocks, one input slot per kind of stream across blocks, with an index of the blocks.
-//! `FORMAT.md` specifies it (section "Formula module").
-//!
-//! The container's header (magic, version, length, hash), the block modes and the zstd of
-//! streams and whole blocks are left out: the archive compresses the slots, and the hash is
-//! the formula's business.
+//! `FORMAT.md` specifies it. The archive compresses the slots, and checksums the output.
 
 use crate::block::{self, NSTREAMS};
-use crate::container::{self, AC_STREAMS, M_ANS, M_STORED, MAX_BLOCK, Options, Stored, Streams};
+use crate::codec::{self, AC_STREAMS, M_ANS, M_STORED, MAX_BLOCK, Options, Stored, Streams};
 use crate::varint::{Rd, put_uv};
 use crate::{Result, ans, corrupt};
 use aqr_formula::{Formula, Module, Node};
@@ -30,7 +26,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_with(input, &Options { threads, ..Options::default() })
 }
 
-/// `encode` with `opt` (`level` is not used).
+/// `encode` with `opt`.
 pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     if input.is_empty() {
         return None;
@@ -42,12 +38,12 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Formula> {
     let bsize = opt.block.clamp(1 << 10, MAX_BLOCK);
     let mut enc = block::Encoder::default();
     let mut dec = block::Decoder::default();
-    let mut streams = container::new_streams();
+    let mut streams = codec::new_streams();
     let mut check = Vec::new();
     let mut blocks = Vec::new();
     let mut p = 0;
     while p < input.len() {
-        let e = container::block_end(input, p, bsize);
+        let e = codec::block_end(input, p, bsize);
         let b = &input[p..e];
         let (em, dm) = (enc.mark(), dec.mark());
         enc.encode(b, &mut streams);
@@ -57,7 +53,7 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Formula> {
             ok = dec.decode(&streams, &mut check) && check == b;
         }
         if ok {
-            blocks.push(Blk::Coded(b.len(), Box::new(std::mem::replace(&mut streams, container::new_streams()))));
+            blocks.push(Blk::Coded(b.len(), Box::new(std::mem::replace(&mut streams, codec::new_streams()))));
         } else {
             enc.reset(&em);
             dec.reset(&dm);
@@ -165,7 +161,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         if v & 1 == 0 {
             let d = whole.get(wp..wp + n).ok_or_else(corrupt)?;
             wp += n;
-            return Ok((n, Stored::Plain(d)));
+            return Ok((n, Stored::Whole(d)));
         }
         let mut s = Box::new([(0, 0, &[][..]); NSTREAMS]);
         for (i, e) in s.iter_mut().enumerate() {
@@ -189,7 +185,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     };
     let total = inputs.iter().map(|i| i.len()).sum::<usize>();
     let mut out = Vec::with_capacity((len as usize).min(total.saturating_mul(64)));
-    container::decode_blocks(&mut next, len as usize, &mut out, threads, false)?;
+    codec::decode_blocks(&mut next, len as usize, &mut out, threads)?;
     if !ix.done() || wp != whole.len() || sp.iter().zip(slots).any(|(&p, s)| p != s.len()) {
         return Err(corrupt());
     }

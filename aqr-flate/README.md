@@ -13,17 +13,6 @@ let opts = aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE)?;
 let (data, record) = aqr_flate::deconstruct_with(&raw, &opts)?; // smallest records
 ```
 
-`aqr-flate` (feature `demo`) stores a raw DEFLATE stream as a `.flate.aqr` file: the
-magic `69 04 5f 95 ab 77`, the record's profile, the size of the rest of the record (u32,
-little endian), the rest of the record, then the data compressed by zstd (level 19 by
-default). Formats that embed aqr-flate (aqr-pdf) store the record, profile first,
-without the magic.
-
-```
-aqr-flate compress [-p PROFILE] [-z LEVEL] [-c] [-o OUT] in.deflate   # -> in.deflate.flate.aqr
-aqr-flate decompress [-o OUT] in.deflate.flate.aqr                    # -> in.deflate
-```
-
 ## Profiles
 
 The record starts with a profile (u16). The rest of it is laid out the same way for every

@@ -1,7 +1,8 @@
 //! Round trips of the files in tests/data (small LAME encodings of a synthetic signal),
-//! through the coded path and the container, also with junk around and cut short.
+//! through the coded path and the formula, also with junk around and cut short.
 
-use aqr_mp3::{codec, compress, decompress};
+use aqr_formula::Apply;
+use aqr_mp3::{codec, formula};
 
 fn files() -> Vec<(String, Vec<u8>)> {
     let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
@@ -15,19 +16,28 @@ fn files() -> Vec<(String, Vec<u8>)> {
     v
 }
 
-fn roundtrip(name: &str, d: &[u8]) {
+/// The coded path and the formula (if any) give `d` back; whether there is a formula.
+fn roundtrip(name: &str, d: &[u8]) -> bool {
     let c = codec::encode(d);
     assert_eq!(codec::decode(&c).unwrap(), d, "{name}: coded path");
-    assert_eq!(decompress(&compress(d)).unwrap(), d, "{name}: container");
+    let Some(f) = formula::encode(d, 1) else { return false };
+    let out = f
+        .eval(&|a: &Apply, inputs: &[&[u8]]| {
+            formula::decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.0))
+        })
+        .unwrap();
+    assert_eq!(out, d, "{name}: formula");
+    true
 }
 
 #[test]
 fn data_files() {
     for (name, d) in files() {
-        roundtrip(&name, &d);
-        // These should all be coded, and smaller than the input.
-        let c = compress(&d);
-        assert!(c.len() < d.len(), "{name}: {} >= {}", c.len(), d.len());
+        // These should all have a formula, with streams smaller than the input.
+        assert!(roundtrip(&name, &d), "{name}: no formula");
+        let f = formula::encode(&d, 1).unwrap();
+        let n: usize = f.streams.iter().map(|s| s.data.len()).sum();
+        assert!(n < d.len(), "{name}: {n} >= {}", d.len());
     }
 }
 
@@ -46,36 +56,5 @@ fn junk_and_cuts() {
         let mut two = d.clone();
         two.extend_from_slice(&files()[0].1);
         roundtrip(&name, &two);
-    }
-}
-
-#[test]
-fn corrupt_containers() {
-    for (name, d) in files().into_iter().take(3) {
-        let c = compress(&d);
-        for i in (9..c.len()).step_by(97) {
-            let mut m = c.clone();
-            m[i] ^= 0x5a;
-            // Must not panic; mostly an error or a checksum mismatch.
-            let _ = decompress(&m);
-            let _ = &name;
-        }
-        for cut in [6, 20, c.len() / 2] {
-            let _ = decompress(&c[..c.len() - cut]);
-        }
-    }
-}
-
-#[test]
-fn header() {
-    let (_, d) = &files()[0];
-    let c = compress(d);
-    assert_eq!(c[..9], [0x69, 0x04, 0x7e, 0x30, 0xfd, 0xda, 0, 0, 1]);
-    assert_eq!(compress(b"hello")[..], *b"\x69\x04\x7e\x30\xfd\xda\0\0\0hello");
-    // Unknown modes and versions are rejected.
-    for (i, v) in [(8, 2), (8, 0xff), (6, 1), (7, 1)] {
-        let mut m = c.clone();
-        m[i] = v;
-        assert!(decompress(&m).is_err(), "byte {i} = {v}");
     }
 }

@@ -1,7 +1,8 @@
 //! Round trips of databases built with the sqlite3 command-line tool (skipped if it is
-//! missing), of non-databases, and of corrupted containers.
+//! missing) through entry formulas, and of non-databases.
 
-use aqr_sqlite::container::{Options, Stats, compress_with, decompress_threads};
+use aqr_formula::{Apply, Error, Formula};
+use aqr_sqlite::formula::{self, MODULE, Options};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -22,15 +23,21 @@ fn build(name: &str, sql: &str) -> Option<Vec<u8>> {
     Some(v)
 }
 
-/// Compresses without the safety nets (panics surface, no verification), checks the round
-/// trip, and that the file was coded rather than stored whole. Returns the coded size.
+fn eval(f: &Formula, threads: usize) -> Result<Vec<u8>, Error> {
+    f.eval(&|a: &Apply, ins: &[&[u8]]| {
+        assert_eq!(a.module, MODULE);
+        formula::decode(&a.params, ins, a.len, threads).map_err(|e| Error::new(e.to_string()))
+    })
+}
+
+/// Encodes without the safety nets (panics surface, no verification), checks the round
+/// trip, and that there is a formula. Returns the archive's size.
 fn check(name: &str, db: &[u8]) -> usize {
+    use aqr_formula::aqr::{self, Level};
     let opt = Options { verify: false, catch: false, ..Default::default() };
-    let mut st = Stats::default();
-    let c = compress_with(db, &opt, &mut st);
-    assert!(!st.whole, "{name}: stored whole");
-    assert_eq!(aqr_sqlite::decompress(&c).unwrap(), db, "{name}");
-    c.len()
+    let f = formula::encode_with(db, &opt).unwrap_or_else(|| panic!("{name}: no formula"));
+    assert_eq!(eval(&f, 1).unwrap(), db, "{name}");
+    aqr::encode(&f, Some(aqr::checksum(db)), Level::Zstd(3)).unwrap().len()
 }
 
 const SCHEMA: &str = "
@@ -130,35 +137,9 @@ fn non_databases() {
         cases.push(odd);
     }
     for v in cases {
-        let c = aqr_sqlite::compress(&v);
-        assert_eq!(aqr_sqlite::decompress(&c).unwrap(), v);
-    }
-}
-
-#[test]
-fn corrupted_containers() {
-    let Some(db) = build("corrupt", SCHEMA) else { return };
-    let c = aqr_sqlite::compress(&db);
-    let mut x = 12345u64;
-    let mut next = || {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        x
-    };
-    for i in 0..2000 {
-        let mut cc = c.clone();
-        if i % 4 == 0 {
-            cc.truncate((next() % cc.len() as u64) as usize);
-        } else {
-            for _ in 0..1 + next() % 4 {
-                let j = (next() % cc.len() as u64) as usize;
-                cc[j] ^= 1 << (next() % 8);
-            }
-        }
-        // Errors are fine, panics and wrong output are not.
-        if let Ok(d) = aqr_sqlite::decompress(&cc) {
-            assert_eq!(d, db);
+        // Whatever there is no formula for, nothing panics; the rest round-trips.
+        if let Some(f) = formula::encode(&v, 1) {
+            assert_eq!(eval(&f, 1).unwrap(), v);
         }
     }
 }
@@ -182,9 +163,9 @@ fn verification_catches_differences() {
     assert!(!transform::verify(&enc.geom, &db[..db.len() - 1], &enc.streams));
 }
 
-/// The same bytes whatever the number of threads, and every thread count decodes them.
+/// The same streams whatever the number of threads, and every thread count rebuilds the file.
 #[test]
-fn threads_same_bytes() {
+fn threads_same_streams() {
     let sql = format!(
         "PRAGMA page_size=1024;{SCHEMA}
          CREATE TABLE u(k TEXT PRIMARY KEY, v INTEGER) WITHOUT ROWID;
@@ -200,84 +181,16 @@ fn threads_same_bytes() {
     if dbs.is_empty() {
         return;
     }
-    // Not databases, and databases cut short (stored whole).
-    dbs.push(("zeros", vec![0; 5000]));
-    dbs.push(("cut", dbs[0].1[..dbs[0].1.len() - 1000].to_vec()));
     for (name, db) in &dbs {
         for verify in [true, false] {
             let one = Options { verify, threads: 1, ..Default::default() };
-            let c1 = compress_with(db, &one, &mut Stats::default());
+            let f1 = formula::encode_with(db, &one).unwrap_or_else(|| panic!("{name}: no formula"));
             for threads in [2, 3, 8] {
-                let c = compress_with(db, &Options { threads, ..one }, &mut Stats::default());
-                assert!(c == c1, "{name}: compressed with {threads} threads differs");
+                let f = formula::encode_with(db, &Options { threads, ..one }).unwrap();
+                assert!(f == f1, "{name}: formula with {threads} threads differs");
             }
             for threads in [1, 2, 3, 8] {
-                assert_eq!(&decompress_threads(&c1, threads).unwrap(), db, "{name}: {threads} threads");
-            }
-        }
-    }
-}
-
-/// Corrupted containers: the same outcome whatever the number of threads.
-#[test]
-fn threads_corrupted_containers() {
-    let Some(db) = build("thr_corrupt", SCHEMA) else { return };
-    let c = aqr_sqlite::compress(&db);
-    let mut x = 777u64;
-    let mut next = || {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        x
-    };
-    for i in 0..600 {
-        let mut cc = c.clone();
-        if i % 4 == 0 {
-            cc.truncate((next() % cc.len() as u64) as usize);
-        } else {
-            for _ in 0..1 + next() % 4 {
-                let j = (next() % cc.len() as u64) as usize;
-                cc[j] ^= 1 << (next() % 8);
-            }
-        }
-        let one = decompress_threads(&cc, 1);
-        for threads in [2, 3, 8] {
-            assert_eq!(decompress_threads(&cc, threads), one, "iteration {i}, {threads} threads");
-        }
-    }
-}
-
-/// The header (magic, version), and nothing accepted past the end of the payload.
-#[test]
-fn header_and_trailing_bytes() {
-    const MAGIC: [u8; 6] = [0x69, 0x04, 0x6c, 0xab, 0x58, 0xbe];
-    let mut cases = vec![(vec![7u8; 5000], 0u16)];
-    cases.extend(build("trailing", SCHEMA).map(|d| (d, 1)));
-    for (v, version) in cases {
-        let c = aqr_sqlite::compress(&v);
-        assert_eq!(c[..6], MAGIC);
-        assert_eq!(u16::from_le_bytes([c[6], c[7]]), version);
-        assert_eq!(u64::from_le_bytes(c[8..16].try_into().unwrap()), v.len() as u64);
-        for threads in [1, 3] {
-            let mut cc = c.clone();
-            cc.push(0);
-            assert!(decompress_threads(&cc, threads).is_err(), "version {version}, {threads} threads");
-        }
-    }
-}
-
-/// A length far beyond what the streams hold fails before anything that large is allocated.
-#[test]
-fn oversized_length() {
-    let mut cases = vec![vec![7u8; 5000]];
-    cases.extend(build("oversized", SCHEMA));
-    for v in cases {
-        let c = aqr_sqlite::compress(&v);
-        for len in [1u64 << 62, (v.len() as u64) << 20, v.len() as u64 + (1 << 36)] {
-            let mut cc = c.clone();
-            cc[8..16].copy_from_slice(&len.to_le_bytes());
-            for threads in [1, 3] {
-                assert!(decompress_threads(&cc, threads).is_err(), "length {len}");
+                assert_eq!(&eval(&f1, threads).unwrap(), db, "{name}: {threads} threads");
             }
         }
     }

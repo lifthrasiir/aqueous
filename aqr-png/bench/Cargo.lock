@@ -37,14 +37,13 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "crc32fast",
- "xxhash-rust",
- "zstd",
 ]
 
 [[package]]
 name = "aqr-png-bench"
 version = "0.0.0"
 dependencies = [
+ "aqr-formula",
  "aqr-png",
  "libc",
  "preflate-container",

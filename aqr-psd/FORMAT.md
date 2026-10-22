@@ -1,41 +1,37 @@
 # aqr-psd format
 
-aqr-psd stores a Photoshop file (PSD or PSB), the *original*, in a smaller form from which
-it is rebuilt bit for bit. This document specifies that form completely enough to reimplement
-both directions.
+aqr-psd rebuilds a Photoshop file (PSD or PSB), the *original*, bit for bit from a smaller
+form: it is the module `psd-recons` of aqr-formula. This document specifies that module
+completely enough to reimplement both directions.
 
 The 8-bit pixel data of layer channels and of the composite image (PackBits or raw) is taken
 out of the file and coded by a pixel model with rANS. The PackBits rows are rebuilt by an
 encoder identified for each channel, with the rows it does not reproduce stored verbatim. Files
 embedded in smart objects are coded by their own recompressors. The rest of the file, the
-*skeleton*, is compressed with zstd.
+*skeleton*, is kept as it is.
 
-Sections 1–9 are normative for decoders. Section 10 describes the reference compressor: what it
-chooses is free within the constraints of sections 1–9, and a decoder relies only on those and
-on the checksum.
+Sections 1–9 are normative for decoders. Section 10 describes the reference encoder: what it
+chooses is free within the constraints of sections 1–9, and a decoder relies only on those.
 
-Other formats this one embeds are specified elsewhere:
+Other formats this one uses are specified elsewhere:
 
-- zstd frames: RFC 8878.
-- aqr-png containers: aqr-png's `FORMAT.md`.
-- aqr-jpeg containers: aqr-jpeg's `FORMAT.md`.
+- The modules of the formulas of embedded files: `png-recons` in aqr-png's `FORMAT.md`,
+  `jpeg-recons` in aqr-jpeg's `FORMAT.md`.
 - DEFLATE (ZIP channels, read when rendering the hint): RFC 1951.
-- XXH3-64: the xxHash specification.
 
 ## Contents
 
 1. [Conventions](#1-conventions)
-2. [Container](#2-container)
-3. [Coded containers](#3-coded-containers-version-1)
+2. [Module](#2-module)
+3. [Decoding](#3-decoding)
 4. [Pixel data of spans](#4-pixel-data-of-spans)
 5. [Model stream](#5-model-stream)
 6. [The pixel model](#6-the-pixel-model)
 7. [PSD structure](#7-psd-structure)
 8. [The hint](#8-the-hint)
 9. [ZIP channels](#9-zip-channels)
-10. [Compressor](#10-compressor)
+10. [Encoder](#10-encoder)
 11. [Appendix: level weights](#appendix-level-weights)
-12. [Formula module](#formula-module)
 
 ## 1. Conventions
 
@@ -59,54 +55,37 @@ Other formats this one embeds are specified elsewhere:
 - Arithmetic on samples, residuals and symbols of the pixel model (section 6) is mod 256.
   `sx(v)` reads a byte `v` as a signed 8-bit value (−128 .. 127), and `mag(v) = |sx(v)|`
   (0 .. 128).
-- **xxh3** is XXH3-64 (`XXH3_64bits`) with seed 0 and the default secret.
 - `a[i .. j]` is the elements `i` to `j − 1`. Ranges `[a, b)` are empty when `a ≥ b`.
-- *Invalid* means that decompression fails. A decoder must not output anything for an invalid
-  container. Which error is reported when there are several is not specified.
+- *Invalid* means that decoding fails. A decoder must not output anything for an invalid
+  input. Which error is reported when there are several is not specified.
 
-## 2. Container
+## 2. Module
 
-```text
-offset 0   6 bytes   magic 69 04 7f fe 9b 1d        ("aQR//psd" in base64)
-offset 6   u16       version
-offset 8   streams:  stream 0, stream 1, ..., stream N-1
-stream  =  varint length, then `length` bytes
-```
+The module is `psd-recons`, version 1, implemented by `formula::decode`. Its output is the PSD
+or PSB file (the original) of `total` bytes, the length the application gives; `total` is at
+most 2^42.
 
-| version | layout |
-|---|---|
-| 0 | stored (below) |
-| 1 | coded (section 3) |
-| other | invalid |
+**Parameters**: none (empty). A module application with parameters is invalid.
 
-Stream 0 is the main stream. The number of streams and the meaning of stream *n* follow from
-the version and the contents of streams 0 .. *n* − 1. A container ends exactly after its last
-stream. Further bytes, a missing stream, or a stream extending past the end make the container
-invalid.
+**Inputs**: exactly four (3.1). Any other count is invalid.
 
-**Stored** (version 0): one stream, the original compressed as one or more zstd frames (RFC
-8878; skippable frames are allowed). The original is the concatenated content of the frames.
+There is no checksum to test: the formula's own evaluation is trusted to hand the module the
+inputs it was made with.
 
-**zstd frames** (here and in the skeleton): the reference decoder is libzstd with its default
-limits, which reject frames whose window size exceeds 2^27 bytes. Writers must not produce such
-frames.
+## 3. Decoding
 
-## 3. Coded containers (version 1)
+### 3.1 Inputs
 
-### 3.1 Streams
-
-| # | stream | |
+| slot | class | content |
 |---|---|---|
-| 0 | head (3.2) | always |
-| 1 | skeleton (3.5) | always |
-| 2 … | embedded file (3.6) | one per span of kind 16, 17 or 18, in span order |
-| last | model stream (section 5) | always |
+| 0 | `psd/head` | the head (3.2) |
+| 1 | `psd/skeleton` | the skeleton (3.5), the bytes outside the spans, as they are |
+| 2 | (nodes of the children) | the bytes of the embedded files (3.6), one after another, in span order |
+| 3 | `psd/model` | the model stream (section 5) |
 
 ### 3.2 Head
 
 ```text
-u64     xxh3 of the original
-varint  total: length of the original, at most 2^42
 varint  number of spans
 per span (3.3)
 varint  number of groups
@@ -127,7 +106,7 @@ u8      kind
 kind 0 (raw):          varint planes, varint w, varint h
 kind 2, 4 (PackBits):  varint planes, varint w, varint h, encoder, varint plane_len × planes,
                        varint n_exceptions, exceptions
-kind 16, 17, 18:       nothing (an embedded PSD/PSB, PNG or JPEG file)
+kind 16:               nothing (an embedded file)
 kind 32 (copy):        varint of
 ```
 
@@ -153,8 +132,8 @@ A *pixel span* (kind 0, 2 or 4) holds `planes` planes of `h` rows of `w` samples
   The first exception's index is `dr`, each further one's the previous index plus `dr`, and
   `dr` must be at least 1 after the first. Every index must be below `rows`.
 
-- **Embedded file** (kinds 16, 17, 18): an embedded PSD/PSB (16), PNG (17) or JPEG (18) file,
-  coded in a stream of its own (3.6).
+- **Embedded file** (kind 16): bytes of the embedded-files input (3.6). Kinds 17 and 18 are
+  invalid.
 - **Copy** (kind 32): the same bytes as span `of`, which must be an earlier span (`of < i`) of
   kind 0, 2 or 4 with one plane and `len` equal to this span's. The copy has one plane and the
   `w` and `h` of its source.
@@ -198,24 +177,22 @@ A plane is
 
 ### 3.5 Skeleton
 
-The skeleton stream is one or more zstd frames. Their concatenated content must be exactly
-`total − Σ len` bytes: the bytes of the original outside the spans, in order. It fills the
-gaps between the spans.
+The skeleton stream must have exactly `total − Σ len` bytes: the bytes of the original
+outside the spans, in order. It fills the gaps between the spans.
 
 ### 3.6 Embedded files
 
-The stream of a span of kind 16 holds a complete aqr-psd container (magic, version,
-streams; any version) at depth + 1, kind 17 a aqr-png container, kind 18 a aqr-jpeg
-container. Decompressing it must give exactly `len` bytes, the span's bytes.
+The embedded-files input is exactly the concatenation of the bytes of the spans of kind 16,
+each as long as its span, in span order. The module copies each into its span and does not
+interpret it. The head does not say whether an embedded file is a PSD, a PNG or a JPEG: in a
+formula the input is the concatenation of one node per embedded file, the application of the
+module of its format (`psd-recons`, `png-recons`, `jpeg-recons`) to its formula. A file that
+is not coded has no node: it is not a span then, and its bytes stay in the skeleton.
 
-*Depth*: the outermost container has depth 0, and a container in a kind 16 stream its parent's
-depth plus 1. A container of depth 3 or more must have no spans of kinds 16, 17 or 18.
+### 3.7 Decoding procedure
 
-### 3.7 Decompression
-
-1. Read the head and check the constraints of 3.2–3.4. Read the skeleton stream, one stream per
-   embedded file and the model stream, and check that the container ends there.
-2. Allocate the output of `total` bytes. Fill the gaps with the skeleton (3.5). Decode the
+1. Read the head and check the constraints of 3.2–3.4.
+2. Allocate the output of `total` bytes. Fill the gaps with the skeleton (3.5). Copy the
    embedded files into their spans (3.6). Embedded files and pixel spans are *done* when their
    bytes are written; copies are done when their source is (step 3).
 3. Open the model stream (section 5). For each group in order:
@@ -230,10 +207,9 @@ depth plus 1. A container of depth 3 or more must have no spans of kinds 16, 17 
    4. A pixel span is done when all of its planes are written. Then every copy whose source is
       done is done: its bytes are the source's.
 4. Every span must be done, and the model stream used up exactly (section 5).
-5. If xxh3 of the output differs from the head's, the container is invalid.
 
-Steps 2 and 3 may overlap, and embedded files may be decoded on other threads, as long as each
-step sees what it reads complete. The output does not depend on the order.
+Steps 2 and 3 may overlap, as long as each step sees what it reads complete. The output does
+not depend on the order.
 
 ## 4. Pixel data of spans
 
@@ -336,7 +312,7 @@ The pixel model (section 6) decodes symbols one at a time, each with a *table in
 `t ∈ 0 .. 401`. The first `n` symbols come from the first chunk, the next from the second, and
 so on. Before a chunk's successor is opened, its rANS data must be *finished* (5.2). At the end
 (3.7 step 4) the last chunk must be finished and no chunk may remain. A symbol needed after the
-last chunk makes the container invalid.
+last chunk makes the input invalid.
 
 ### 5.1 Tables
 
@@ -639,7 +615,7 @@ Decoded joint symbols 25 .. 255 are escapes.
 ## 7. PSD structure
 
 A hinted group renders the composite from the layers of the output's first `split` bytes,
-the *prefix*. This section gives how the prefix is parsed; any error makes the container
+the *prefix*. This section gives how the prefix is parsed; any error makes the input
 invalid. Fields are BE. A *window* is a byte range of the prefix; reading past its end is an
 error.
 
@@ -946,15 +922,15 @@ does. The output must be exactly `rowbytes · height` bytes, `rowbytes = ceil(wi
 For compression 3 with depth 8, each row (of `width` bytes) is undone as
 `row[i] += row[i − 1]` for `i = 1 .. width−1`, in order.
 
-## 10. Compressor
+## 10. Encoder
 
-Everything here is the reference compressor's choice. Its output is the same bytes whatever
+Everything here is the reference encoder's choice. Its output is the same bytes whatever
 the number of threads.
 
-**Stored or coded.** The file is stored (version 0, zstd at the level `L(n, n)` below, with
-the content size in the frame header) if it does not parse as a PSD/PSB (section 7, on the
-whole file), if it has no span, or if coding fails (a PackBits row of a coded span that does
-not decode to its width, a panic, …). Otherwise it is coded, even if the result is larger.
+**Coded or not.** `formula::encode` gives no formula (`None`) if the file does not parse as a
+PSD/PSB (section 7, on the whole file), if it has no span, or if coding fails (a PackBits row
+of a coded span that does not decode to its width, a panic, …). Otherwise it is coded, even if
+the streams are larger than the file.
 
 **Pixel spans.** Only in 8-bit documents:
 
@@ -981,15 +957,17 @@ first such) becomes a copy if both are one plane and the earlier one is coded be
 earlier group, or earlier in the coding order of the same group (then the plane gets
 `same_as`). A group of one plane that became a copy of an earlier group's plane is dropped.
 
-**Embedded files** (in containers of depth below 3): the files of the global `lnk2`, `lnkD` and
-`lnk3` blocks with file type `8BPB` or `8BPS` (PSD/PSB, coded by this compressor at depth + 1;
-one it would store is not embedded),
+**Embedded files** (in files of depth below 3, the outermost file having depth 0 and a file
+embedded in a kind 16 span its parent's depth plus 1): the files of the global `lnk2`, `lnkD` and
+`lnk3` blocks with file type `8BPB` or `8BPS` (PSD/PSB, coded by this encoder at depth + 1;
+one it gives no formula for is not embedded),
 `png ` or `PNGf` (aqr-png) and `JPEG` (aqr-jpeg). Each entry of such a block is a BE u64
 length and that many bytes; the entries are 4-aligned relative to the block data. In an entry,
 after 8 bytes, a u8-length id, a u32 character count and twice that many bytes (the name), the
 file type (4 bytes), 4 bytes and a BE u64 file length, the file starts at the first occurrence
 of its leading bytes (`8BPS`, `89 50 4E 47` or `FF D8 FF`) and must fit the entry. A file is
-kept if its coded form is smaller than the file and it starts after every span before it.
+kept if the streams of its formula together are smaller than the file and it starts after
+every span before it.
 
 **Encoder identification** (per PackBits span):
 
@@ -1021,13 +999,6 @@ level 0. The table is written as in 5.1: each run of zero levels as gamma(0), ga
 each other level `l` as gamma(`z + 1`) with `z` the zigzag of `d = l − prev`
 (`2d − 1` for `d > 0`, `−2d` otherwise).
 
-**Skeleton.** One zstd frame without the content size, at level `L(skeleton length, file
-length)`: with `need = 500 · skeleton / file` (MB/s), the first of 19 (8), 12 (30), 9 (60),
-6 (120), 3 (300), 1 (500) whose speed in parentheses is at least `need`, else 1.
-
-**Order of output.** Head, skeleton, embedded files in span order, model stream; the head is
-written last and put in front.
-
 ## Appendix: level weights
 
 `W[l] = (F[(l − 1) mod 4] << ((l − 1) div 4)) >> 8` for `l = 1 .. 63`, with
@@ -1044,45 +1015,3 @@ eight, `l = 0 .. 63`:
     881744    1048576    1246976    1482912    1763488    2097152    2493952    2965824
    3526976    4194304    4987904    5931648    7053952    8388608    9975808   11863296
 ```
-
-## Formula module
-
-The same representation as a module of entry formulas (`aqr-formula`), in
-`formula::encode` and `formula::decode`. The module is `psd-recons`, version 1. Its output is
-the PSD or PSB file (the original, whose length the application gives). The file is rebuilt as
-in [3.7](#37-decompression) from the same spans, groups, skeleton and model stream, with the
-container left out: no magic, version, checksum or length fields, the skeleton not zstd
-compressed (the streams are stored raw; whatever holds the formula compresses them), and the
-embedded files not decoded by the module.
-
-**Parameters**: none (empty). A module application with parameters is invalid.
-
-**Inputs**: exactly four, in this order. Any other count is invalid.
-
-| slot | class | content |
-|---|---|---|
-| 0 | `psd/head` | the head (3.2) without its first two fields: no xxh3 and no `total` |
-| 1 | `psd/skeleton` | the skeleton (3.5), the bytes outside the spans, as they are |
-| 2 | (nodes of the children) | the bytes of the embedded files (spans of kind 16), one after another, in span order |
-| 3 | `psd/model` | the model stream (section 5) |
-
-The head is the varint number of spans, the spans (3.3), the varint number of groups and the
-groups (3.4), and must use up the stream. `total` is the length the application gives (at
-most 2^42). An embedded file is a span of kind 16 whatever its format (kinds 17 and 18 are
-invalid here): it has no stream of its own, and the head does not say whether it is a PSD,
-a PNG or a JPEG. Slot 2 is exactly the concatenation of the bytes of these spans, each as
-long as its span; the module copies each into its span and does not interpret it. In a
-formula, slot 2 is not a stream of its own but the concatenation of one node per embedded file: the
-application of the module of its format (`psd-recons`, `png-recons`, `jpeg-recons`) to its
-formula, or, for a file that is not coded, nothing: it is not a span then, and its bytes stay
-in the skeleton. The depth limit (3.6) is a choice of the compressor and is not checked.
-
-The skeleton has exactly `total − Σ len` bytes. The model stream is one slot: its chunks
-(section 5) follow each other and delimit themselves, so no index is needed. The rebuilt
-file has the length the application gives. There is no checksum to test: the formula's own
-evaluation is trusted to hand the module the inputs it was made with.
-
-`formula::encode` gives no formula (`None`) where the container would store the file: it
-does not parse as a PSD/PSB, it has no span, or coding fails. An embedded file is coded as a
-child formula when the streams of that formula together are smaller than the file (the
-container's rule, with the size of the streams for the size of the container).

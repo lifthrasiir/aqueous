@@ -20,9 +20,9 @@
 //! static per chunk of [`CHUNK`] symbols: counted, written, then the chunk coded with rANS,
 //! which bounds the encoder's buffer.
 
-use crate::rans::{self, BitR, BitW, Decoder, Tables};
-
 use crate::psd::{Error, Result};
+use crate::rans::{self, BitR, BitW, Decoder, Tables};
+use aqr_common::varint;
 
 const ACT: usize = 8;
 const CROSS: usize = 4;
@@ -875,10 +875,10 @@ impl<'o> Recorder<'o> {
         counts.iter_mut().for_each(|c| *c = [0; 256]);
         let body = rans::encode(&self.syms, &freqs);
         let o = &mut *self.out;
-        crate::container::put_varint(o, self.syms.len() as u64);
-        crate::container::put_varint(o, head.len() as u64);
+        varint::put(o, self.syms.len() as u64);
+        varint::put(o, head.len() as u64);
         o.extend_from_slice(&head);
-        crate::container::put_varint(o, body.len() as u64);
+        varint::put(o, body.len() as u64);
         o.extend_from_slice(&body);
         self.total += self.syms.len();
         self.syms.clear();
@@ -950,11 +950,11 @@ impl<'a> Player<'a> {
                 self.ended = true;
                 return Ok(());
             }
-            let n = crate::container::get_varint(src, &mut self.at)? as usize;
+            let n = varint::get(src, &mut self.at).map_err(|_| corrupt())? as usize;
             if n == 0 {
                 return Err(corrupt());
             }
-            let hl = crate::container::get_varint(src, &mut self.at)? as usize;
+            let hl = varint::get(src, &mut self.at).map_err(|_| corrupt())? as usize;
             let head = src.get(self.at..self.at.checked_add(hl).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
             self.at += hl;
             let mut r = BitR::new(head);
@@ -971,7 +971,7 @@ impl<'a> Player<'a> {
             if r.overrun() {
                 return Err(corrupt());
             }
-            let bl = crate::container::get_varint(src, &mut self.at)? as usize;
+            let bl = varint::get(src, &mut self.at).map_err(|_| corrupt())? as usize;
             let body = src.get(self.at..self.at.checked_add(bl).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
             self.at += bl;
             self.tables = Tables::new(&freqs);

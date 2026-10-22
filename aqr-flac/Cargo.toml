@@ -6,8 +6,6 @@ edition = "2024"
 [dependencies]
 aqr-common = { path = "../aqr-common", features = ["zstd"] }
 memchr = "2"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-zstd = "0.13"
 aqr-formula = { path = "../aqr-formula" }
 
 [[bin]]

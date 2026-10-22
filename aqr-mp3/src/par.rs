@@ -1,16 +1,15 @@
-//! Compression and decompression with more than one thread. The output is the same bytes as
+//! Encoding and decoding with more than one thread. The output is the same bytes as
 //! with one thread ([`crate::codec::encode`], [`crate::codec::decode`]): the model pass and the
 //! rANS chain stay on the calling thread, in order; around them, other threads do work that
 //! does not depend on them.
 //!
-//! - Compressing, a helper builds the tables (and hashes the input) while the file is split
-//!   into frames, compresses the byte streams of the file structure, builds the encoder's
-//!   inverse maps of the contexts the side information says may be used while the model
-//!   pass runs, and compresses the other byte streams while the rANS words are produced.
-//! - Decompressing, the side information (adaptive range coder, independent of the rANS
+//! - Encoding, a helper builds the tables while the file is split into frames, then builds
+//!   the encoder's inverse maps of the contexts the side information says may be used while
+//!   the model pass runs.
+//! - Decoding, the side information (adaptive range coder, independent of the rANS
 //!   stream) is decoded on its own thread, ahead of the main pass; the tables and the
-//!   rANS decoder are built on another while the streams are unpacked and the headers read;
-//!   the output is assembled in parallel pieces.
+//!   rANS decoder are built on another while the headers are read; the output is assembled
+//!   in parallel pieces.
 
 use crate::bits::{BitReader, BitWriter, WordWriter};
 use crate::codec::{
@@ -23,13 +22,11 @@ use crate::rans::{self, Tables};
 use crate::rc;
 use crate::side::SideModel;
 use crate::stream::R_PAD;
-use std::borrow::Cow;
 use std::mem::MaybeUninit;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, sync_channel};
-use xxhash_rust::xxh3::xxh3_64;
 
-/// Below this size (input when compressing, container when decompressing) one thread does
+/// Below this size (input when compressing, coded form when decompressing) one thread does
 /// everything: starting threads would cost about what they save.
 pub(crate) const PAR_MIN: usize = 64 << 10;
 
@@ -42,36 +39,25 @@ impl Drop for SetOnDrop<'_> {
     }
 }
 
-/// Byte streams compressed (`Some`) or not, as the container stores them.
-pub(crate) type Packed = Vec<Option<Vec<u8>>>;
-
-/// [`codec::encode`] with a helper thread; also packs the byte streams with `pack` and
-/// returns the xxh3 of `d`.
-pub(crate) fn encode(d: &[u8], pack: fn(&[u8]) -> Option<Vec<u8>>) -> (Coded, Packed, u64) {
+/// [`codec::encode`] with a helper thread.
+pub(crate) fn encode(d: &[u8]) -> Coded {
     let stop = AtomicBool::new(false);
     let stop = &stop;
     std::thread::scope(|s| {
         // Channels are created here so that a panic on this thread drops the senders and
         // the helper returns.
-        let (early_tx, early_rx) = sync_channel::<(Vec<Vec<u8>>, Vec<u32>)>(1);
-        let (late_tx, late_rx) = sync_channel::<Vec<Vec<u8>>>(1);
+        let (ctxs_tx, ctxs_rx) = sync_channel::<Vec<u32>>(1);
         let (ack_tx, ack_rx) = sync_channel::<()>(1);
         let helper = s.spawn(move || {
             let t = codec::tables();
-            let hash = xxh3_64(d);
-            let (early, ctxs) = early_rx.recv().ok()?;
-            let early_p: Packed = early.iter().map(|b| pack(b)).collect();
+            let ctxs = ctxs_rx.recv().ok()?;
             prewarm(t, &ctxs, stop);
-            ack_tx.send(()).ok()?;
-            let late = late_rx.recv().ok()?;
-            let late_p: Packed = late.iter().map(|b| pack(b)).collect();
-            Some((hash, early, early_p, late, late_p))
+            ack_tx.send(()).ok()
         });
         let _stop = SetOnDrop(stop);
-        let mut sp = codec::split(d);
-        let early: Vec<Vec<u8>> = sp.b[..S_TAILBITS].iter_mut().map(std::mem::take).collect();
+        let sp = codec::split(d);
         let ctxs = likely_contexts(&sp.frames);
-        early_tx.send((early, ctxs)).expect("helper thread");
+        ctxs_tx.send(ctxs).expect("helper thread");
         crate::huff::decoders();
         // Waits for the helper if it is still building the tables.
         let t = codec::tables();
@@ -80,23 +66,17 @@ pub(crate) fn encode(d: &[u8], pack: fn(&[u8]) -> Option<Vec<u8>>) -> (Coded, Pa
             rans: rans::Encoder::with_capacity(d.len() * 5 / 4 + model::MAX_GRANULE_SYMS),
             raw: WordWriter::with_capacity(d.len() / 4),
         };
-        let (mut b, bit_lens) = codec::model_pass(sp, &mut c);
+        let (b, bit_lens) = codec::model_pass(sp, &mut c);
         stop.store(true, Ordering::Relaxed);
-        late_tx.send(b[S_TAILBITS..].iter_mut().map(std::mem::take).collect()).expect("helper thread");
         // The helper no longer builds inverse maps once it acknowledges.
         ack_rx.recv().expect("helper thread");
         let words = c.rans.finish(t);
         let raw_bits = c.raw.len() as u64;
         let raw = c.raw.finish();
-        let (hash, early, early_p, late, late_p) = match helper.join() {
-            Ok(r) => r.expect("helper thread"),
-            Err(e) => std::panic::resume_unwind(e),
-        };
-        for (i, v) in early.into_iter().chain(late).enumerate() {
-            b[i] = v;
+        if let Err(e) = helper.join() {
+            std::panic::resume_unwind(e);
         }
-        let packed = early_p.into_iter().chain(late_p).collect();
-        (Coded { len: d.len() as u64, streams: b, words, raw, raw_bits, bit_lens }, packed, hash)
+        Coded { len: d.len() as u64, streams: b, words, raw, raw_bits, bit_lens }
     })
 }
 
@@ -196,37 +176,6 @@ fn warm(threads: usize) {
         codec::tables().prepare_dec(threads);
         DEC_WARM.store(true, Ordering::Release);
     }
-}
-
-/// A byte stream as stored in the container.
-pub(crate) enum Src<'a> {
-    Plain(&'a [u8]),
-    /// zstd data and the size of the stream.
-    Zstd(&'a [u8], usize),
-}
-
-impl<'a> Src<'a> {
-    pub(crate) fn unpack(&self) -> Result<Cow<'a, [u8]>, String> {
-        match *self {
-            Src::Plain(b) => Ok(Cow::Borrowed(b)),
-            Src::Zstd(z, n) => unzstd(z, n).map(Cow::Owned),
-        }
-    }
-}
-
-/// Decompresses a zstd stream of exactly `n` bytes.
-pub(crate) fn unzstd(z: &[u8], n: usize) -> Result<Vec<u8>, String> {
-    let v = zstd::bulk::decompress(z, n).map_err(|e| e.to_string())?;
-    if v.len() != n {
-        return Err("stream size".into());
-    }
-    Ok(v)
-}
-
-pub(crate) enum DecError {
-    /// A stream does not decompress (zstd).
-    Stream(String),
-    Codec(Error),
 }
 
 /// Side information of one frame, decoded ahead.
@@ -362,31 +311,28 @@ fn make_decoder(words: &[u8], raw: &[u8]) -> (rans::Decoder<'static>, Vec<u8>) {
     (dec, rb)
 }
 
-/// [`codec::decode`] of the coded form with byte streams `srcs` (unpacked here), rANS words
-/// `words` (u32 LE) and raw bits `raw`, with `threads` threads. Errors as the container with
-/// one thread reports them: a stream that does not decompress first.
+/// [`codec::decode`] of the coded form with byte streams `streams`, rANS words `words` (u32
+/// LE) and raw bits `raw`, with `threads` threads.
 pub(crate) fn decode(
     file_len: u64,
-    srcs: &[Src; N_BYTE_STREAMS],
+    streams: &[&[u8]; N_BYTE_STREAMS],
     words: &[u8],
     raw: &[u8],
     threads: usize,
-) -> Result<Vec<u8>, DecError> {
+) -> Result<Vec<u8>, Error> {
     std::thread::scope(|s| {
         let (hs_tx, hs_rx) = sync_channel::<Vec<Header>>(1);
         let (side_tx, side_rx) = sync_channel::<SideMsg>(8);
-        let side_src = &srcs[S_SIDE];
+        let side_src = streams[S_SIDE];
         // With two threads, the side information thread builds the tables first.
         let helper = threads >= 3;
         let side_t = s.spawn(move || {
             if !helper {
                 warm(threads);
             }
-            let st = side_src.unpack();
             if let Ok(hs) = hs_rx.recv() {
-                decode_side(st.as_deref().unwrap_or(&[]), &hs, &side_tx);
+                decode_side(side_src, &hs, &side_tx);
             }
-            st.err()
         });
         let dec_t = helper.then(|| {
             s.spawn(move || {
@@ -394,38 +340,27 @@ pub(crate) fn decode(
                 make_decoder(words, raw)
             })
         });
-        let res = (move || -> Result<Vec<u8>, DecError> {
-            let mut st: Vec<Cow<[u8]>> = Vec::with_capacity(S_SIDE);
-            for src in &srcs[..S_SIDE] {
-                st.push(src.unpack().map_err(DecError::Stream)?);
-            }
-            let codec_part = || -> Result<Vec<u8>, Error> {
-                let mut fr = codec::parse_frames(&st[S_SEGS], &st[S_HDR], file_len)?;
-                hs_tx.send(fr.frames.iter().map(|f| f.0).collect()).expect("side information thread");
-                drop(hs_tx);
-                let (rans, raw_buf) = match dec_t {
-                    Some(t) => t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
-                    None => make_decoder(words, raw),
-                };
-                let mut dc = Dec { rans, raw: crate::huff::BitBuf::new(&BitReader::new(&raw_buf, 0)) };
-                let mut side = ThreadSide::new(side_rx);
-                let r_out = codec::main_pass(&mut fr, &st[S_TAILBITS], &st[S_RAWGR], &st[S_GAPS], &mut side, &mut dc)?;
-                drop(side);
-                let out = assemble(&fr, &st[S_JUNK], &st[S_CRC], &r_out, threads)?;
-                if !dc.rans.in_bounds() {
-                    return Err(Error("rans stream exhausted"));
-                }
-                Ok(out)
+        let res = (move || -> Result<Vec<u8>, Error> {
+            let mut fr = codec::parse_frames(streams[S_SEGS], streams[S_HDR], file_len)?;
+            hs_tx.send(fr.frames.iter().map(|f| f.0).collect()).expect("side information thread");
+            drop(hs_tx);
+            let (rans, raw_buf) = match dec_t {
+                Some(t) => t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
+                None => make_decoder(words, raw),
             };
-            codec_part().map_err(DecError::Codec)
+            let mut dc = Dec { rans, raw: crate::huff::BitBuf::new(&BitReader::new(&raw_buf, 0)) };
+            let mut side = ThreadSide::new(side_rx);
+            let r_out =
+                codec::main_pass(&mut fr, streams[S_TAILBITS], streams[S_RAWGR], streams[S_GAPS], &mut side, &mut dc)?;
+            drop(side);
+            let out = assemble(&fr, streams[S_JUNK], streams[S_CRC], &r_out, threads)?;
+            if !dc.rans.in_bounds() {
+                return Err(Error("rans stream exhausted"));
+            }
+            Ok(out)
         })();
-        // The side stream comes last in the container: its error goes before the codec's.
-        let side_err = side_t.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
-        match (res, side_err) {
-            (Err(DecError::Stream(e)), _) => Err(DecError::Stream(e)),
-            (_, Some(e)) => Err(DecError::Stream(e)),
-            (r, None) => r,
-        }
+        side_t.join().unwrap_or_else(|e| std::panic::resume_unwind(e));
+        res
     })
 }
 

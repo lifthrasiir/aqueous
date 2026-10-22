@@ -1,5 +1,7 @@
 //! Reproduces a fuzz mismatch: FILE BLOCK FORCE_WHOLE(hex); prints where the output differs.
-use aqr_obj::container::{Options, Stats, compress_with};
+use aqr_formula::Apply;
+use aqr_obj::codec::Options;
+use aqr_obj::formula;
 
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
@@ -7,12 +9,14 @@ fn main() {
     let opt = Options {
         verify: false,
         block: a[1].parse().unwrap(),
-        level: 1,
         force_whole: u64::from_str_radix(&a[2], 16).unwrap(),
         threads: 1,
     };
-    let c = compress_with(&src, &opt, &mut Stats::default());
-    match aqr_obj::decompress(&c) {
+    let Some(f) = formula::encode_with(&src, &opt) else { return println!("not coded") };
+    let eval = |a: &Apply, inputs: &[&[u8]]| {
+        formula::decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.to_string()))
+    };
+    match f.eval(&eval) {
         Ok(d) => {
             let i = d.iter().zip(&src).position(|(x, y)| x != y).unwrap_or(d.len().min(src.len()));
             println!("lengths {} {}, first difference at {i}", d.len(), src.len());

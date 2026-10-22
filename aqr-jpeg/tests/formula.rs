@@ -2,7 +2,6 @@
 //! module.
 
 use aqr_formula::{Apply, Formula};
-use aqr_jpeg::container;
 use aqr_jpeg::formula::{self, MODULE};
 
 fn module(a: &Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
@@ -37,8 +36,6 @@ fn plain() {
         let f = roundtrip(name, data);
         assert_eq!(f.applies().len(), 1);
         assert_eq!(f.applies()[0].params, [(data == PROGRESSIVE) as u8]);
-        // the container codes it as well
-        assert_eq!(container::decompress(&container::compress(data)).unwrap(), data);
     }
 }
 
@@ -66,10 +63,6 @@ fn embedded() {
     // not embedded JPEGs: too small, or not coded
     let small = wrap(GRADIENT, &[&GRADIENT[..700]]);
     assert_eq!(roundtrip("small", &small).applies().len(), 1);
-    // the same formulas as the container makes
-    for d in [&one, &two, &mixed] {
-        assert_eq!(container::decompress(&container::compress(d)).unwrap(), *d);
-    }
 }
 
 #[test]
@@ -121,14 +114,13 @@ fn corrupt_inputs() {
 }
 
 /// `JPEG_BENCH=file cargo test --release --test formula -- --ignored --nocapture`: decode time of
-/// the formula module against the container's.
+/// the formula module.
 #[test]
 #[ignore]
 fn decode_speed() {
     let Ok(path) = std::env::var("JPEG_BENCH") else { return };
     let data = std::fs::read(path).unwrap();
     let f = formula::encode(&data, 0).unwrap();
-    let c = container::compress(&data);
     let a = f.applies()[0].clone();
     let ins: Vec<Vec<u8>> = a
         .inputs
@@ -144,7 +136,6 @@ fn decode_speed() {
         }
         t.elapsed().as_secs_f64() / 20.0 * 1e3
     };
-    let t_formula = time(&|| formula::decode(&a.params, &refs, a.len, 0).unwrap());
-    let t_container = time(&|| container::decompress(&c).unwrap());
-    println!("{} bytes: formula {t_formula:.2} ms, container {t_container:.2} ms", data.len());
+    let t = time(&|| formula::decode(&a.params, &refs, a.len, 0).unwrap());
+    println!("{} bytes: {t:.2} ms", data.len());
 }

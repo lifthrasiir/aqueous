@@ -7,8 +7,6 @@ edition = "2024"
 aqr-common = { path = "../aqr-common" }
 memchr = "2"
 rayon = "1.12.0"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-zstd = "0.13"
 aqr-formula = { path = "../aqr-formula" }
 
 [[bin]]

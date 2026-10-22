@@ -1,8 +1,8 @@
-//! Compression and decompression of whole files.
+//! Encoding and decoding of whole files.
 //!
 //! The coefficients of decodable granules go through [`model::code_granule`] into one rANS
 //! stream and one raw bit stream (signs, escape mantissas). Everything else (file structure,
-//! side information, scalefactors, gaps) goes into small byte streams compressed with zstd.
+//! side information, scalefactors, gaps) goes into small byte streams.
 
 use crate::bits::{BitReader, BitWriter, FastWriter, WordWriter};
 use crate::frame::{Granule, Header, SideInfo, crc16, scf_layout};
@@ -181,7 +181,7 @@ impl<'a> Rd<'a> {
     }
 }
 
-/// Compressed representation: byte streams (before zstd), rANS words and raw bits.
+/// Compressed representation: byte streams, rANS words and raw bits.
 pub struct Coded {
     /// Length of the original file.
     pub len: u64,

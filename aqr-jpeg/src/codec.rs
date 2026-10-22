@@ -1,39 +1,18 @@
-//! Container format (specified in FORMAT.md) and the top-level compress / decompress entry points.
+//! The codec behind the formula module (specified in FORMAT.md): the main image's split into a
+//! blob, scan info and modelled coefficients, the embedded JPEGs of the blob, and the inverse.
 //!
-//! ```text
-//! magic 69 04 7E 8E 9D E0, u16 LE version (0 = sequential, 1 = progressive, 2 = stored)
-//! then streams, each a LEB128 length and that many bytes; what each stream is follows from
-//! the version and the streams before it:
-//! stored:        [input]
-//! sequential /
-//! progressive:   [head: xxh3 of the input, embedded JPEG entries]
-//!                [nested container] per embedded JPEG coded here (not a back reference)
-//!                [cut blob]
-//!                [scan info: per scan flags / RST count / truncation point, stripe count]
-//!                [raw scan data] per raw scan, [truncated tail] per truncated scan
-//!                [model tables]
-//!                [rANS words] [raw bits] per stripe
-//! ```
 //! The blob is the input with every scan's entropy-coded data removed (headers, inter-scan
 //! markers, trailer); it parses as a JPEG whose scans are empty. JPEGs embedded in it (Exif and
-//! Photoshop thumbnails, MPF / vendor secondary images in the trailer, ...) are compressed
-//! recursively. Decompression restores the blob, re-emits each scan from the decoded
-//! coefficients and splices it back in.
-//!
-//! `compress` never fails: anything it cannot reproduce bit-exactly (unsupported or non-standard
-//! coding, corrupt data, internal errors) is stored.
+//! Photoshop thumbnails, MPF / vendor secondary images in the trailer, ...) are coded
+//! separately. Decoding restores the blob, re-emits each scan from the decoded coefficients
+//! and splices it back in.
 
-use crate::fast::{self, get_bytes, get_varint};
+use crate::fast::{self, get_varint};
 use crate::jpeg::{self, Clean, Coefs, Error, Order, ScanInfo};
 use crate::progressive;
 use aqr_common::varint;
 use std::borrow::Cow;
-use std::time::Instant;
 
-const MAGIC: [u8; 6] = [0x69, 0x04, 0x7E, 0x8E, 0x9D, 0xE0];
-const V_SEQUENTIAL: u16 = 0;
-const V_PROGRESSIVE: u16 = 1;
-const V_STORED: u16 = 2;
 /// scan flags (progressive scans use only the first two)
 const F_PAD_ZERO: u8 = 1;
 const F_RAW: u8 = 2;
@@ -44,56 +23,8 @@ const MAX_DEPTH: u32 = 3;
 /// embedded JPEGs smaller than this are left alone (model tables alone would outweigh them)
 const MIN_EMBEDDED: usize = 1024;
 
-/// Wall-clock breakdown of the last call (seconds), main image only.
-#[derive(Default, Clone, Copy, Debug)]
-pub struct Timing {
-    pub parse: f64,
-    pub huffman: f64,
-    pub model: f64,
-}
-
-/// Why the input (or some of its scans) was stored instead of coded (None if fully coded).
-pub type StoreReason = Option<String>;
-
-fn header(out: &mut Vec<u8>, version: u16) {
-    out.extend_from_slice(&MAGIC);
-    out.extend_from_slice(&version.to_le_bytes());
-}
-
 fn put_varint(out: &mut Vec<u8>, v: u64) {
     varint::put(out, v)
-}
-
-fn put_stream(out: &mut Vec<u8>, d: &[u8]) {
-    put_varint(out, d.len() as u64);
-    out.extend_from_slice(d);
-}
-
-fn stored_len(n: usize) -> usize {
-    MAGIC.len() + 2 + varint::len(n as u64) + n
-}
-
-fn stored(input: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(stored_len(input.len()));
-    header(&mut out, V_STORED);
-    put_stream(&mut out, input);
-    out
-}
-
-/// The streams of a container, in order.
-struct Streams<'a> {
-    d: &'a [u8],
-    p: usize,
-}
-impl<'a> Streams<'a> {
-    fn next(&mut self) -> Result<&'a [u8], Error> {
-        let n = get_varint(self.d, &mut self.p)?;
-        get_bytes(self.d, &mut self.p, n)
-    }
-    /// The container must end with the last stream.
-    fn finish(&self) -> Result<(), Error> {
-        if self.p != self.d.len() { Err(Error("trailing data".into())) } else { Ok(()) }
-    }
 }
 
 /// A stream's fields must use it up exactly.
@@ -165,9 +96,9 @@ fn find_embedded(blob: &[u8]) -> Vec<(usize, usize)> {
     v
 }
 
-// ---------------------------------------------------------------- compression
+// ---------------------------------------------------------------- encoding
 
-/// Main-image part of a coded container: blob, scan info stream, per-scan streams, model.
+/// Main-image part of a formula: blob, scan info stream, per-scan streams, model.
 pub(crate) struct Core<'a> {
     pub progressive: bool,
     pub blob: Vec<u8>,
@@ -175,18 +106,10 @@ pub(crate) struct Core<'a> {
     /// raw scan data / truncated tails, in scan order
     pub scans: Vec<Cow<'a, [u8]>>,
     pub model: fast::Encoded,
-    pub nraw: usize,
 }
 
-pub(crate) fn compress_core<'a>(
-    input: &'a [u8],
-    t: &mut Timing,
-    coefs: &mut Vec<Coefs>,
-    clean: &mut Clean,
-) -> Result<Core<'a>, Error> {
-    let t0 = Instant::now();
+pub(crate) fn encode_core<'a>(input: &'a [u8], coefs: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Core<'a>, Error> {
     let j = jpeg::parse(input)?;
-    let t1 = Instant::now();
     let infos = if j.progressive {
         progressive::decode_all(&j, input, coefs, clean)?
     } else {
@@ -195,9 +118,7 @@ pub(crate) fn compress_core<'a>(
     if infos.iter().all(|i| i.raw) {
         return Err(Error("no scan could be modelled".into()));
     }
-    let t2 = Instant::now();
     let (model, _) = fast::encode(&j, coefs);
-    let t3 = Instant::now();
     // blob: everything but the entropy-coded data
     let removed: usize = j.scans.iter().map(|s| s.end - s.start).sum();
     let mut blob = Vec::with_capacity(input.len() - removed);
@@ -209,11 +130,9 @@ pub(crate) fn compress_core<'a>(
     blob.extend_from_slice(&input[p..]);
     let mut info = Vec::with_capacity(j.scans.len() * 2 + 4);
     let mut scans = Vec::new();
-    let mut nraw = 0;
     put_varint(&mut info, j.scans.len() as u64);
     for (s, i) in j.scans.iter().zip(infos) {
         if i.raw {
-            nraw += 1;
             info.push(F_RAW);
             scans.push(Cow::Borrowed(&input[s.start..s.end]));
             continue;
@@ -232,8 +151,7 @@ pub(crate) fn compress_core<'a>(
         }
     }
     put_varint(&mut info, model.stripes.len() as u64);
-    *t = Timing { parse: (t1 - t0).as_secs_f64(), huffman: (t2 - t1).as_secs_f64(), model: (t3 - t2).as_secs_f64() };
-    Ok(Core { progressive: j.progressive, blob, info, scans, model, nraw })
+    Ok(Core { progressive: j.progressive, blob, info, scans, model })
 }
 
 /// An embedded JPEG of the blob: the byte range, and either its coding `coded` or (None) the
@@ -303,82 +221,10 @@ pub(crate) trait CoreSource<'a> {
     /// Nothing may be left after the last stripe.
     fn finish(&mut self) -> Result<(), Error>;
 }
+// ---------------------------------------------------------------- decoding
 
-impl<'a> CoreSource<'a> for Streams<'a> {
-    fn info(&mut self) -> Result<&'a [u8], Error> {
-        self.next()
-    }
-    fn scan(&mut self) -> Result<&'a [u8], Error> {
-        self.next()
-    }
-    fn tables(&mut self) -> Result<&'a [u8], Error> {
-        self.next()
-    }
-    fn stripe(&mut self) -> Result<(&'a [u8], &'a [u8]), Error> {
-        Ok((self.next()?, self.next()?))
-    }
-    fn finish(&mut self) -> Result<(), Error> {
-        Streams::finish(self)
-    }
-}
-
-fn try_compress(input: &[u8], t: &mut Timing, depth: u32) -> Result<(Vec<u8>, usize), Error> {
-    let core = with_bufs(|coefs, clean| compress_core(input, t, coefs, clean))?;
-    // embedded JPEGs in the blob, compressed recursively (only where it pays off)
-    let entries = embedded_entries(&core.blob, depth, |bytes| {
-        let (c, _) = try_compress(bytes, &mut Timing::default(), depth + 1).ok()?;
-        (c.len() + 8 < bytes.len()).then_some(c)
-    });
-    let mut out = Vec::with_capacity(core.blob.len() + core.info.len() + core.model.size() + 64);
-    header(&mut out, if core.progressive { V_PROGRESSIVE } else { V_SEQUENTIAL });
-    let mut head = Vec::with_capacity(16 + entries.len() * 8);
-    head.extend_from_slice(&xxhash_rust::xxh3::xxh3_64(input).to_le_bytes());
-    put_entries(&mut head, &entries);
-    put_stream(&mut out, &head);
-    for e in &entries {
-        if let Some(c) = &e.coded {
-            put_stream(&mut out, c);
-        }
-    }
-    put_stream(&mut out, &cut_blob(&core.blob, &entries));
-    put_stream(&mut out, &core.info);
-    for s in &core.scans {
-        put_stream(&mut out, s);
-    }
-    put_stream(&mut out, &core.model.tables);
-    for s in &core.model.stripes {
-        put_stream(&mut out, &s.rans_bytes());
-        put_stream(&mut out, &s.raw);
-    }
-    Ok((out, core.nraw))
-}
-
-/// Compress; never fails (falls back to storing the input). Also returns why it stored.
-pub fn compress_with(input: &[u8], t: &mut Timing) -> (Vec<u8>, StoreReason) {
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| try_compress(input, t, 0)));
-    match r {
-        Ok(Ok((v, nraw))) if v.len() < stored_len(input.len()) => {
-            (v, (nraw > 0).then(|| format!("partial: {nraw} raw scan(s)")))
-        }
-        Ok(Ok(_)) => (stored(input), Some("no gain".into())),
-        Ok(Err(e)) => (stored(input), Some(e.0)),
-        Err(_) => (stored(input), Some("internal panic".into())),
-    }
-}
-
-pub fn compress(input: &[u8]) -> Vec<u8> {
-    compress_with(input, &mut Timing::default()).0
-}
-
-// ---------------------------------------------------------------- decompression
-
-/// The entry list of a head, as (gap, length, back reference) with None for coded entries;
-/// those are invalid unless `coded_ok`.
-pub(crate) fn parse_entries(
-    head: &[u8],
-    p: &mut usize,
-    coded_ok: bool,
-) -> Result<Vec<(usize, usize, Option<usize>)>, Error> {
+/// The entry list of a head, as (gap, length, back reference) with None for coded entries.
+pub(crate) fn parse_entries(head: &[u8], p: &mut usize) -> Result<Vec<(usize, usize, Option<usize>)>, Error> {
     let n = get_varint(head, p)?;
     let mut entries = Vec::new();
     for i in 0..n {
@@ -387,7 +233,7 @@ pub(crate) fn parse_entries(
         let kind = *head.get(*p).ok_or(Error("truncated".into()))?;
         *p += 1;
         let back = match kind {
-            0 if coded_ok => None,
+            0 => None,
             1 => {
                 let k = get_varint(head, p)?;
                 if k >= i {
@@ -420,20 +266,15 @@ pub(crate) fn restore_blob<E: AsRef<[u8]>>(
     Ok(blob)
 }
 
-pub(crate) fn decompress_core<'a>(
+pub(crate) fn decode_core<'a>(
     blob: &[u8],
     progressive: bool,
     r: &mut impl CoreSource<'a>,
-    t: Option<&mut Timing>,
     coefs: &mut Vec<Coefs>,
 ) -> Result<Vec<u8>, Error> {
-    // the clock is read only when timing is asked for: the module (`formula::decode`) runs
-    // where there is none, such as wasm32-unknown-unknown
-    let now = || t.is_some().then(Instant::now);
-    let t0 = now();
     let j = jpeg::parse(blob)?;
     if j.progressive != progressive {
-        return Err(Error("version does not match the frame type".into()));
+        return Err(Error("frame type does not match".into()));
     }
     let info = r.info()?;
     let mut p = 0;
@@ -492,9 +333,7 @@ pub(crate) fn decompress_core<'a>(
     let stripes: Vec<(&[u8], &[u8])> = (0..nstripes).map(|_| r.stripe()).collect::<Result<_, Error>>()?;
     r.finish()?;
     let e = fast::Encoded::from_parts(tables, &stripes)?;
-    let t1 = now();
     fast::decode_into(&j, &e, coefs)?;
-    let t2 = now();
     // scans are re-emitted independently of each other (in parallel; sequential scans are also
     // split internally, see `jpeg::encode_scan`)
     use rayon::prelude::*;
@@ -530,66 +369,5 @@ pub(crate) fn decompress_core<'a>(
         q = s.start;
     }
     out.extend_from_slice(&blob[q..]);
-    if let (Some(t), Some(t0), Some(t1), Some(t2)) = (t, t0, t1, t2) {
-        *t = Timing {
-            parse: (t1 - t0).as_secs_f64(),
-            model: (t2 - t1).as_secs_f64(),
-            huffman: t2.elapsed().as_secs_f64(),
-        };
-    }
     Ok(out)
-}
-
-fn try_decompress(c: &[u8], t: &mut Timing, depth: u32) -> Result<Vec<u8>, Error> {
-    if c.len() < 8 || c[..6] != MAGIC {
-        return Err(Error("not a JRC container".into()));
-    }
-    let version = u16::from_le_bytes([c[6], c[7]]);
-    let mut r = Streams { d: c, p: 8 };
-    let progressive = match version {
-        V_STORED => {
-            let s = r.next()?;
-            r.finish()?;
-            return Ok(s.to_vec());
-        }
-        V_SEQUENTIAL => false,
-        V_PROGRESSIVE => true,
-        _ => return Err(Error(format!("unknown version {version}"))),
-    };
-    // head: checksum and embedded JPEG entries
-    let head = r.next()?;
-    let hash = u64::from_le_bytes(head.get(..8).ok_or(Error("truncated".into()))?.try_into().unwrap());
-    let mut p = 8;
-    let entries = parse_entries(head, &mut p, depth < MAX_DEPTH)?;
-    fully_read(head, p, "head")?;
-    // embedded JPEGs (recursively), then the blob is restored around them
-    let mut emb: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
-    for &(_, len, back) in &entries {
-        let bytes = match back {
-            None => try_decompress(r.next()?, &mut Timing::default(), depth + 1)?,
-            Some(k) => emb[k].clone(),
-        };
-        if bytes.len() != len {
-            return Err(Error("embedded length mismatch".into()));
-        }
-        emb.push(bytes);
-    }
-    let cut = r.next()?;
-    let blob = restore_blob(cut, &entries, &emb)?;
-    let out = with_bufs(|coefs, _| decompress_core(&blob, progressive, &mut r, Some(t), coefs))?;
-    if xxhash_rust::xxh3::xxh3_64(&out) != hash {
-        return Err(Error("checksum mismatch: reconstruction differs from the original".into()));
-    }
-    Ok(out)
-}
-
-pub fn decompress_with(c: &[u8], t: &mut Timing) -> Result<Vec<u8>, Error> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| try_decompress(c, t, 0))) {
-        Ok(r) => r,
-        Err(_) => Err(Error("internal panic".into())),
-    }
-}
-
-pub fn decompress(c: &[u8]) -> Result<Vec<u8>, Error> {
-    decompress_with(c, &mut Timing::default())
 }

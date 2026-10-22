@@ -1,10 +1,10 @@
-//! The threaded paths: the same container bytes whatever the number of threads, round
-//! trips, and the same result (output or error) decompressing damaged containers. Over the
-//! files in tests/data, with junk and cuts, as raw PCM, and over inputs large enough to
-//! fill the pipelines (many batches).
+//! The threaded paths: the same formula whatever the number of threads, and evaluating
+//! back to the input on any. Over the files in tests/data, with junk and cuts, as raw PCM,
+//! and over inputs large enough to fill the pipelines (many batches).
 
-use aqr_flac::container::{Options, compress_opt, compress_sizes_opt, decompress_threads, roundtrip_opt};
+use aqr_flac::formula::{self, MODULE, Options};
 use aqr_flac::pcm::Format;
+use aqr_formula::{Apply, Formula};
 
 const THREADS: [usize; 3] = [2, 3, 8];
 
@@ -24,49 +24,31 @@ fn file(name: &str) -> Vec<u8> {
     files().into_iter().find(|f| f.0 == name).unwrap().1
 }
 
-fn res(r: Result<Vec<u8>, aqr_flac::container::Error>) -> Result<Vec<u8>, String> {
-    r.map_err(|e| e.0)
+fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
+    f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+        assert_eq!(a.module, MODULE);
+        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+    })
 }
 
-/// Same bytes for all thread counts, and every decompression round-trips. The serial
-/// container.
-fn check(name: &str, d: &[u8], raw: Option<Format>) -> Vec<u8> {
-    let c1 = compress_opt(d, &Options { raw, threads: 1 });
-    // Without the fallback on panics, so that a panic on a thread fails the test.
-    let (s1, _) = compress_sizes_opt(d, &Options { raw, threads: 1 });
-    assert_eq!(s1, c1, "{name}");
+/// Same formula for all thread counts, and every evaluation round-trips (the formula, if
+/// the input is coded at all).
+fn check(name: &str, d: &[u8], raw: Option<Format>) -> Option<Formula> {
+    let f1 = formula::encode_with(d, &Options { raw, threads: 1 });
     for t in THREADS {
-        let opt = Options { raw, threads: t };
-        assert!(compress_sizes_opt(d, &opt).0 == c1, "{name}: {t} threads, other bytes");
-        assert!(res(decompress_threads(&c1, t)).as_deref() == Ok(d), "{name}: {t} threads, decompress");
-        assert!(roundtrip_opt(d, &opt), "{name}: {t} threads, coded path");
-    }
-    c1
-}
-
-/// Damaged containers: the same result (bytes or error message) for all thread counts.
-fn check_damaged(name: &str, c: &[u8], step: usize) {
-    let same = |m: &[u8], what: &str| {
-        let r1 = res(decompress_threads(m, 1));
-        for t in THREADS {
-            assert!(res(decompress_threads(m, t)) == r1, "{name}: {what}, {t} threads: {:?}", r1.as_ref().err());
+        let f = formula::encode_with(d, &Options { raw, threads: t });
+        assert!(f == f1, "{name}: {t} threads, other formula");
+        if let Some(f) = &f {
+            assert!(eval(f, t).as_deref() == Ok(d), "{name}: {t} threads, evaluate");
         }
-    };
-    for i in (aqr_flac::container::HEADER_LEN..c.len()).step_by(step) {
-        let mut m = c.to_vec();
-        m[i] ^= 0x5a;
-        same(&m, &format!("byte {i}"));
     }
-    for cut in [6, 20, c.len() / 2] {
-        same(&c[..c.len() - cut.min(c.len())], &format!("cut {cut}"));
-    }
+    f1
 }
 
 #[test]
 fn data_files() {
     for (name, d) in files() {
-        let c = check(&name, &d, None);
-        check_damaged(&name, &c, 97);
+        check(&name, &d, None).expect(&name);
         let mut j = b"some junk before".to_vec();
         j.extend_from_slice(&d);
         j.extend_from_slice(b"TAG and after");
@@ -114,8 +96,7 @@ fn long_flac() {
             d.extend_from_slice(b"junk between");
         }
     }
-    let c = check("long FLAC", &d, None);
-    check_damaged("long FLAC", &c, c.len() / 41);
+    check("long FLAC", &d, None).unwrap();
     // Only one kind of stream (the same sample size): no junk but the headers.
     let one = file("s16_f5.flac").repeat(30);
     check("s16_f5 x30", &one, None);
@@ -175,8 +156,7 @@ fn long_pcm() {
     for (ch, bytes, n) in [(2, 2, 700_000), (1, 3, 400_000), (6, 2, 120_000)] {
         let d = wav(&signal(n, ch, 8 * bytes as u32), ch, bytes);
         let name = format!("WAV {ch} ch, {bytes} bytes");
-        let c = check(&name, &d, None);
-        check_damaged(&name, &c, c.len() / 23);
+        check(&name, &d, None).expect(&name);
         // As raw PCM, with a partial sample at the end.
         let fmt = Format::parse(&format!("s{}le:{ch}", 8 * bytes)).unwrap();
         check(&format!("{name}, raw"), &d[44..d.len() - 1], Some(fmt));

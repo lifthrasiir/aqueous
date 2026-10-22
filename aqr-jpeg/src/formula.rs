@@ -1,10 +1,10 @@
-//! aqr-jpeg as a module of entry formulas (see aqr-formula, FORMAT.md "Formula module"):
-//! the container's streams as nine input slots, the frame type as the only parameter.
+//! aqr-jpeg as a module of entry formulas (see aqr-formula, FORMAT.md):
+//! the streams of a coded JPEG as nine input slots, the frame type as the only parameter.
 //!
 //! Embedded JPEGs coded here are not decoded by the module: their decoded bytes are an input
 //! slot, which the formula fills with the children's formulas (this module again).
 
-use crate::container::{self, CoreSource, Timing};
+use crate::codec::{self, CoreSource};
 use crate::fast::{get_bytes, get_varint};
 use crate::jpeg::Error;
 use aqr_common::varint;
@@ -15,7 +15,7 @@ pub const MODULE: Module = Module { name: "jpeg-recons", version: 1 };
 /// what a formula costs beyond its streams, for deciding whether coding an embedded JPEG pays off
 const OVERHEAD: usize = 8;
 
-/// The formula for `input`; None where the container would store it. `threads` (0: the global
+/// The formula for `input`; None where it is not coded. `threads` (0: the global
 /// rayon pool) bounds the parallelism.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     in_pool(threads, || encode_at(input, 0))
@@ -32,16 +32,15 @@ fn size(f: &Formula) -> usize {
 }
 
 fn try_encode(input: &[u8], depth: u32) -> Result<Formula, Error> {
-    let core =
-        container::with_bufs(|coefs, clean| container::compress_core(input, &mut Timing::default(), coefs, clean))?;
+    let core = codec::with_bufs(|coefs, clean| codec::encode_core(input, coefs, clean))?;
     // embedded JPEGs in the blob, coded recursively (only where it pays off)
-    let entries = container::embedded_entries(&core.blob, depth, |bytes| {
+    let entries = codec::embedded_entries(&core.blob, depth, |bytes| {
         let c = encode_at(bytes, depth + 1)?;
         (size(&c) + OVERHEAD < bytes.len()).then_some(c)
     });
     let mut head = Vec::with_capacity(4 + entries.len() * 8);
-    container::put_entries(&mut head, &entries);
-    let cut = container::cut_blob(&core.blob, &entries);
+    codec::put_entries(&mut head, &entries);
+    let cut = codec::cut_blob(&core.blob, &entries);
     let mut f = Formula::default();
     let head = f.push("jpeg/head", head);
     // a repeated entry has no bytes of its own, it is the earlier one
@@ -121,8 +120,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     let r = in_pool(threads, || {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut p = 0;
-            let entries = container::parse_entries(head, &mut p, true)?;
-            container::fully_read(head, p, "head")?;
+            let entries = codec::parse_entries(head, &mut p)?;
+            codec::fully_read(head, p, "head")?;
             // coded entries take their bytes from `embedded` in order, repeats are copies
             let (mut q, mut emb): (usize, Vec<&[u8]>) = (0, Vec::with_capacity(entries.len()));
             for &(_, n, back) in &entries {
@@ -135,12 +134,10 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
                 }
                 emb.push(bytes);
             }
-            container::fully_read(embedded, q, "embedded")?;
-            let blob = container::restore_blob(cut, &entries, &emb)?;
+            codec::fully_read(embedded, q, "embedded")?;
+            let blob = codec::restore_blob(cut, &entries, &emb)?;
             let mut slots = Slots { info, scans, tables, lens, rans, bits, pos: [0; 4] };
-            container::with_bufs(|coefs, _| {
-                container::decompress_core(&blob, progressive == 1, &mut slots, None, coefs)
-            })
+            codec::with_bufs(|coefs, _| codec::decode_core(&blob, progressive == 1, &mut slots, coefs))
         }))
     });
     let out = r.map_err(|_| Error("internal panic".into()))??;

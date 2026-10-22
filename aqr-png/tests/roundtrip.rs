@@ -1,16 +1,25 @@
 //! Round trips of synthetic PNG files: every DEFLATE encoder of flate-zoo, every pixel
-//! format, interlacing, several zlib streams, APNG frames, and malformed files.
+//! format, interlacing, several zlib streams, APNG frames, and malformed files, through the
+//! formula module.
 
 mod common;
 
+use aqr_formula::Formula;
+use aqr_png::formula;
 use common::*;
 
+/// The formula of `file`, if it has one: it evaluates to `file`.
 #[track_caller]
-fn roundtrip(file: &[u8]) -> Vec<u8> {
-    let c = aqr_png::container::try_compress(file);
-    let d = aqr_png::decompress(&c).expect("decompresses");
-    assert!(d == file, "round trip differs");
-    c
+fn roundtrip(file: &[u8]) -> Option<Formula> {
+    let f = formula::encode(file, 1)?;
+    assert_eq!(f.len(), file.len() as u64);
+    assert!(f.eval(&modules(1)).expect("evaluates") == file, "round trip differs");
+    Some(f)
+}
+
+/// The formula's streams, all but the skeleton: what the records are made of.
+fn records_len(f: &Formula) -> usize {
+    f.streams[2].data.len()
 }
 
 #[test]
@@ -68,8 +77,8 @@ fn coded_smaller() {
     cs.extend(idats(&z, 8192));
     cs.push((b"IEND", vec![]));
     let f = png(&cs);
-    let c = roundtrip(&f);
-    assert!(c.len() < f.len() && c[8] == 1, "{} -> {}", f.len(), c.len());
+    let c = roundtrip(&f).expect("coded");
+    assert!(records_len(&c) < f.len(), "{} -> {}", f.len(), records_len(&c));
 }
 
 #[test]
@@ -87,8 +96,8 @@ fn several_zlib_streams() {
         cs.extend(idats(&z, 5000));
         cs.push((b"IEND", vec![]));
         let f = png(&cs);
-        let c = roundtrip(&f);
-        assert!(c.len() < f.len() && c[8] == 1);
+        let c = roundtrip(&f).expect("coded");
+        assert!(records_len(&c) < f.len());
     }
 }
 
@@ -120,8 +129,8 @@ fn apng_frames() {
     }
     cs.push((b"IEND", vec![]));
     let f = png(&cs);
-    let c = roundtrip(&f);
-    assert!(c.len() < f.len() * 9 / 10, "{} -> {}", f.len(), c.len());
+    let c = roundtrip(&f).expect("coded");
+    assert!(records_len(&c) < f.len() * 9 / 10, "{} -> {}", f.len(), records_len(&c));
 }
 
 #[test]
@@ -161,40 +170,20 @@ fn malformed() {
     roundtrip(b"");
 }
 
-#[test]
-fn corrupt_input_fails_cleanly() {
-    let data = image_data(120, 90, 8, 2, false, 7);
-    let mut cs = vec![(b"IHDR", ihdr(120, 90, 8, 2, 0))];
-    cs.extend(idats(&zlib(&zlib6(), &data), 8192));
-    cs.push((b"IEND", vec![]));
-    let c = aqr_png::container::try_compress(&png(&cs));
-    let mut x = 1u32;
-    for i in 0..2000 {
-        x = x.wrapping_mul(1103515245).wrapping_add(12345);
-        let mut d = c.clone();
-        let at = (x as usize >> 4) % d.len();
-        d[at] ^= 1 << (i % 8);
-        // Never a panic; an error or (rarely) the same file.
-        let _ = aqr_png::decompress(&d);
-    }
-    for cut in 0..c.len().min(400) {
-        let _ = aqr_png::decompress(&c[..cut]);
-    }
-}
-
-// Threads: the same bytes whatever the thread count, and the same outcome decompressing.
+// Threads: the same formula whatever the thread count, and the same outcome evaluating it.
 
 const THREADS: [usize; 4] = [1, 2, 3, 8];
 
 #[track_caller]
-fn same_for_threads(file: &[u8]) -> Vec<u8> {
-    let c = aqr_png::container::try_compress(file);
+fn same_for_threads(file: &[u8]) -> Option<Formula> {
+    let f = formula::encode(file, 1);
     for t in THREADS {
-        assert!(aqr_png::compress_threads(file, t) == c, "compressed bytes differ with {t} threads");
-        let d = aqr_png::decompress_threads(&c, t).expect("decompresses");
-        assert!(d == file, "round trip differs with {t} threads");
+        assert!(formula::encode(file, t) == f, "formula differs with {t} threads");
+        if let Some(f) = &f {
+            assert!(f.eval(&modules(t)).expect("evaluates") == file, "round trip differs with {t} threads");
+        }
     }
-    c
+    f
 }
 
 #[test]
@@ -208,8 +197,7 @@ fn threads_single_large_image() {
         cs.extend(idats(&zlib(&zlib6(), &data), 65536));
         cs.push((b"IEND", vec![]));
         let f = png(&cs);
-        let c = same_for_threads(&f);
-        assert!(c[8] == 1, "coded");
+        assert!(same_for_threads(&f).is_some(), "coded");
     }
 }
 
@@ -224,15 +212,13 @@ fn threads_several_zlib_streams() {
     let mut cs = vec![(b"IHDR", ihdr(600, 400, 8, 6, 0))];
     cs.extend(idats(&z, 20000));
     cs.push((b"IEND", vec![]));
-    let c = same_for_threads(&png(&cs));
-    assert!(c[8] == 1);
+    assert!(same_for_threads(&png(&cs)).is_some());
 }
 
 #[test]
 fn threads_apng() {
     let f = apng(&[(300, 200), (250, 180), (300, 200), (120, 100)], 21);
-    let c = same_for_threads(&f);
-    assert!(c[8] == 1);
+    assert!(same_for_threads(&f).is_some());
     // Frames past the image-parallel threshold of the rows as well.
     same_for_threads(&apng(&[(500, 400), (500, 400), (400, 300)], 31));
 }
@@ -257,7 +243,7 @@ fn threads_small_and_malformed() {
     same_for_threads(&base(&broken));
     same_for_threads(b"not a png at all");
     same_for_threads(b"");
-    // A big image with a broken stream is stored whatever the threads.
+    // A big image with a broken stream has the same outcome whatever the threads.
     let big = image_data(700, 500, 8, 6, false, 12);
     let mut zb = zlib(&zlib6(), &big);
     let at = zb.len() / 2;
@@ -270,74 +256,26 @@ fn threads_small_and_malformed() {
 
 #[test]
 fn threads_corrupt_input_same_outcome() {
-    let c = aqr_png::container::try_compress(&apng(&[(120, 90), (100, 80), (120, 90)], 41));
+    let f = formula::encode(&apng(&[(120, 90), (100, 80), (120, 90)], 41), 1).expect("coded");
+    let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+    let len = f.len();
     let mut x = 7u32;
     for i in 0..1500 {
         x = x.wrapping_mul(1103515245).wrapping_add(12345);
-        let mut d = c.clone();
-        let at = (x as usize >> 4) % d.len();
-        d[at] ^= 1 << (i % 8);
-        let serial = aqr_png::decompress(&d).ok();
+        // The skeleton is left alone: a damaged IHDR can ask for an image of terabytes.
+        let mut copies: Vec<Vec<u8>> = inputs.iter().map(|s| s.to_vec()).collect();
+        let k = 1 + i % 2;
+        let at = (x as usize >> 4) % copies[k].len();
+        copies[k][at] ^= 1 << (i % 8);
+        let refs: Vec<&[u8]> = copies.iter().map(|c| &c[..]).collect();
+        let serial = formula::decode(&[], &refs, len, 1).ok();
         for t in [2, 8] {
-            assert!(aqr_png::decompress_threads(&d, t).ok() == serial, "outcome differs at {at} with {t} threads");
+            assert!(formula::decode(&[], &refs, len, t).ok() == serial, "outcome differs at {at} with {t} threads");
         }
     }
-    for cut in (0..c.len()).step_by(c.len() / 200 + 1) {
-        let serial = aqr_png::decompress(&c[..cut]).ok();
-        assert!(aqr_png::decompress_threads(&c[..cut], 4).ok() == serial);
+    for cut in (0..inputs[2].len()).step_by(inputs[2].len() / 200 + 1) {
+        let refs = [inputs[0], inputs[1], &inputs[2][..cut]];
+        let serial = formula::decode(&[], &refs, len, 1).ok();
+        assert!(formula::decode(&[], &refs, len, 4).ok() == serial);
     }
-}
-
-/// The header (magic, version, mode), and nothing may follow the skeleton, a record's
-/// parts or the last record.
-#[test]
-fn header_and_trailing_bytes() {
-    let data = image_data(60, 40, 8, 2, false, 3);
-    let mut cs = vec![(b"IHDR", ihdr(60, 40, 8, 2, 0))];
-    cs.extend(idats(&zlib(&zlib6(), &data), 1 << 20));
-    cs.push((b"IEND", vec![]));
-    let f = png(&cs);
-    let c = aqr_png::compress(&f);
-    assert_eq!(c[..9], [0x69, 0x04, 0x7f, 0xa7, 0x59, 0xe0, 0, 0, 1]);
-    assert_eq!(aqr_png::decompress(&c).unwrap(), f);
-    for i in 0..8 {
-        let mut d = c.clone();
-        d[i] ^= 1;
-        assert!(aqr_png::decompress(&d).is_err(), "header byte {i}");
-    }
-    let mut d = c.clone();
-    d.push(0);
-    assert!(aqr_png::decompress(&d).is_err(), "after the last record");
-
-    // The single record: its length, mode 1, then three varint-framed parts.
-    let mut at = 9 + 8;
-    let varint = |src: &[u8], at: &mut usize| aqr_png::container::get_varint(src, at).unwrap() as usize;
-    let n = varint(&c, &mut at);
-    let sk_at = at;
-    at += n;
-    let rec_at = at;
-    assert_eq!(u32::from_le_bytes(c[at..at + 4].try_into().unwrap()) as usize, c.len() - at - 4);
-    assert_eq!(c[at + 4], 1);
-    let mut d = c.clone();
-    d.push(0);
-    d[rec_at..rec_at + 4].copy_from_slice(&((c.len() - rec_at - 3) as u32).to_le_bytes());
-    assert!(aqr_png::decompress(&d).is_err(), "after a record's model payload");
-
-    // The skeleton with a byte after it.
-    let mut sk = zstd::bulk::decompress(&c[sk_at..sk_at + n], 1 << 20).unwrap();
-    sk.push(0);
-    let z = zstd::bulk::compress(&sk, 19).unwrap();
-    let mut d = c[..9 + 8].to_vec();
-    aqr_png::container::put_varint(&mut d, z.len() as u64);
-    d.extend_from_slice(&z);
-    d.extend_from_slice(&c[rec_at..]);
-    assert!(aqr_png::decompress(&d).is_err(), "after the skeleton");
-    // The same rebuilt without the extra byte is fine (the test edits what it means to).
-    sk.pop();
-    let z = zstd::bulk::compress(&sk, 19).unwrap();
-    let mut d = c[..9 + 8].to_vec();
-    aqr_png::container::put_varint(&mut d, z.len() as u64);
-    d.extend_from_slice(&z);
-    d.extend_from_slice(&c[rec_at..]);
-    assert_eq!(aqr_png::decompress(&d).unwrap(), f);
 }

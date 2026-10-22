@@ -1,9 +1,8 @@
-//! Compression and decompression of whole FLAC files.
+//! Coding and decoding of whole FLAC files.
 //!
 //! Residuals go through [`crate::residual`] into one rANS stream and two raw bit streams
 //! (by channel parity). Everything else (the bytes before the first frame, junk between
-//! frames, frame headers, subframe parameters) goes into small byte streams compressed
-//! with zstd.
+//! frames, frame headers, subframe parameters) goes into small byte streams.
 
 use crate::bits;
 use crate::flac::{self, ESCAPE, Frame};

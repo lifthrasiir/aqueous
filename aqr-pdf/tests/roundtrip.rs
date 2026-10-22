@@ -1,8 +1,11 @@
-//! Round trips of synthetic PDF files: FlateDecode streams from every DEFLATE encoder of
-//! flate-zoo through every mode, zlib wrapper variants, images with and without PNG
-//! predictors, JPEG, duplicates, encrypted and malformed files, and corrupted containers.
+//! Round trips of synthetic PDF files through entry formulas (`formula::encode_with`, then
+//! `Formula::eval`): FlateDecode streams from every DEFLATE encoder of flate-zoo through
+//! every mode, zlib wrapper variants, images with and without PNG predictors, JPEG,
+//! duplicates, encrypted and malformed files.
 
-use aqr_pdf::container::{Options, Stats, compress_with, decompress, decompress_threads};
+use aqr_formula::{Apply, Formula};
+use aqr_pdf::encode::{Options, Stats};
+use aqr_pdf::formula;
 use flate_zoo::{Encoder, backends};
 
 /// Thread counts checked against one thread.
@@ -114,30 +117,34 @@ fn options() -> Vec<(&'static str, Options)> {
     ]
 }
 
+fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
+    f.eval(&|a: &Apply, i: &[&[u8]]| formula::apply(a, i, threads))
+}
+
 fn check(name: &str, file: &[u8]) {
     for (oname, o) in options() {
-        let mut st = Stats::default();
-        let c = compress_with(file, &o, &mut st);
-        let back = decompress(&c).unwrap_or_else(|e| panic!("{name} ({oname}): {e}"));
+        let Some(f) = formula::encode_with(file, &o) else { continue };
+        let back = eval(&f, 1).unwrap_or_else(|e| panic!("{name} ({oname}): {e}"));
         assert!(back == file, "{name} ({oname}): round trip differs");
-        assert!(!st.verify_failed, "{name} ({oname}): verification failed");
-        // The same bytes with threads, and the same file back.
+        // The same formula with threads, and the same file back.
         for t in THREADS {
-            let ct = compress_with(file, &Options { threads: t, ..o.clone() }, &mut Stats::default());
-            assert!(ct == c, "{name} ({oname}): {t} threads give other bytes");
-            let back = decompress_threads(&c, t).unwrap_or_else(|e| panic!("{name} ({oname}, {t} threads): {e}"));
+            let ft = formula::encode_with(file, &Options { threads: t, ..o.clone() });
+            assert!(ft.as_ref() == Some(&f), "{name} ({oname}): {t} threads give another formula");
+            let back = eval(&f, t).unwrap_or_else(|e| panic!("{name} ({oname}, {t} threads): {e}"));
             assert!(back == file, "{name} ({oname}, {t} threads): round trip differs");
         }
     }
 }
 
-/// The coded form with everything allowed, and what it did.
-fn coded(file: &[u8]) -> (Vec<u8>, Stats) {
+/// What the encoder did with everything allowed (and that its formula, if any, restores
+/// the file).
+fn coded(file: &[u8]) -> Stats {
     let mut st = Stats::default();
     let o = Options { speed: f64::INFINITY, ..Options::default() };
-    let c = compress_with(file, &o, &mut st);
-    assert_eq!(decompress(&c).unwrap(), file);
-    (c, st)
+    if let Some(f) = formula::encode_stats(file, &o, &mut st) {
+        assert_eq!(eval(&f, 1).unwrap(), file);
+    }
+    st
 }
 
 #[test]
@@ -180,10 +187,10 @@ fn modes_are_used() {
         ),
     ]);
     check("modes", &f);
-    let (_, st) = coded(&f);
-    use aqr_pdf::container::{DUP, JPEG, PNG};
+    let st = coded(&f);
+    use aqr_pdf::formula::{DUP, JPEG, PNG};
     for m in [DUP, PNG, JPEG] {
-        assert!(st.modes[m as usize].0 > 0, "mode {} unused: {:?}", aqr_pdf::container::MODES[m as usize], st.modes);
+        assert!(st.modes[m as usize].0 > 0, "mode {} unused: {:?}", formula::MODES[m as usize], st.modes);
     }
 }
 
@@ -251,8 +258,8 @@ fn encrypted() {
         pdf(&[("/Type /Catalog".into(), None), ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(7, 1000))))]);
     f.extend_from_slice(b"trailer << /Encrypt 9 0 R >>\n");
     check("encrypted", &f);
-    let (_, st) = coded(&f);
-    assert_eq!(st.modes[aqr_pdf::container::TOK as usize].0 + st.modes[aqr_pdf::container::FULL as usize].0, 0);
+    let st = coded(&f);
+    assert_eq!(st.modes[formula::TOK as usize].0 + st.modes[formula::FULL as usize].0, 0);
 }
 
 /// A PDF 2.0 file (with junk before the header, as allowed): a UTF-8 text string, an image,
@@ -318,14 +325,14 @@ fn pdf20(encrypt: bool) -> Vec<u8> {
 
 #[test]
 fn pdf_2_0() {
-    use aqr_pdf::container::{FULL, TOK};
+    use aqr_pdf::formula::{FULL, TOK};
     let f = pdf20(false);
     check("PDF 2.0", &f);
-    let (_, st) = coded(&f);
+    let st = coded(&f);
     assert!(st.modes[TOK as usize].0 + st.modes[FULL as usize].0 >= 2, "{:?}", st.modes);
     let f = pdf20(true);
     check("PDF 2.0, AES-256", &f);
-    let (_, st) = coded(&f);
+    let st = coded(&f);
     assert_eq!(st.modes[TOK as usize].0 + st.modes[FULL as usize].0, 0);
 }
 
@@ -351,54 +358,6 @@ fn cut_files() {
     ]);
     for cut in [f.len() / 3, f.len() / 2, f.len() - 30] {
         check("cut", &f[..cut]);
-    }
-}
-
-#[test]
-fn corrupted_containers() {
-    let enc = default_enc();
-    let g = (32usize, 32usize);
-    let f = pdf(&[
-        ("/Type /Catalog".into(), None),
-        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(10, 2000)))),
-        ("/Filter /FlateDecode".into(), Some(zlib(&enc, &content(10, 2000)))),
-        (
-            format!(
-                "/Subtype /Image /Width {} /Height {} /BitsPerComponent 8 /ColorSpace /DeviceGray /Filter /FlateDecode /DecodeParms << /Predictor 15 /Columns {} >>",
-                g.0, g.1, g.0
-            ),
-            Some(zlib(&enc, &pixels(g.0, g.1, 1, true, 11))),
-        ),
-        ("/Subtype /Image /Filter /DCTDecode".into(), Some(std::fs::read("tests/data/gradient.jpg").unwrap())),
-    ]);
-    for (_, o) in options() {
-        let c = compress_with(&f, &o, &mut Stats::default());
-        let mut x = 99u32;
-        for i in 0..400 {
-            let mut m = c.clone();
-            x = x.wrapping_mul(1103515245).wrapping_add(12345);
-            match i % 4 {
-                0 => {
-                    let k = x as usize % m.len();
-                    m[k] ^= 1 << (x >> 29);
-                }
-                1 => m.truncate(x as usize % m.len()),
-                2 => {
-                    let k = x as usize % m.len();
-                    m.insert(k, (x >> 8) as u8);
-                }
-                _ => {
-                    let k = x as usize % m.len();
-                    m[k] = (x >> 16) as u8;
-                }
-            }
-            let d = decompress(&m);
-            if let Ok(d) = &d {
-                assert_eq!(*d, f, "a corrupt container decoded to something else");
-            }
-            let t = THREADS[i % THREADS.len()];
-            assert_eq!(decompress_threads(&m, t), d, "{t} threads: another outcome");
-        }
     }
 }
 
@@ -479,7 +438,7 @@ fn many_items() {
     }
     let f = pdf(&objs);
     check("many items", &f);
-    let (_, st) = coded(&f);
+    let st = coded(&f);
     assert!(st.modes.iter().filter(|m| m.0 > 0).count() >= 5, "{:?}", st.modes);
 }
 
@@ -500,32 +459,4 @@ fn empty_blocks() {
         ("/Filter /FlateDecode".into(), Some(zlib(&default_enc(), &content(14, 3000)))),
     ]);
     check("empty blocks", &f);
-}
-
-/// The streams of the items' data are used up exactly.
-#[test]
-fn streams_used_up() {
-    let f = pdf(&[
-        ("/Type /Catalog".into(), None),
-        ("/Filter /LZWDecode".into(), Some(content(15, 200))),
-        ("/Filter /FlateDecode".into(), Some(zlib(&default_enc(), &content(16, 20000)))),
-    ]);
-    let (c, _) = coded(&f);
-    assert_eq!(c[6..8], [0, 0], "coded");
-    let mut r = aqr_pdf::varint::Reader::new(&c[8..]);
-    let mut streams = vec![];
-    while !r.at_end() {
-        let n = r.usize(c.len()).unwrap();
-        streams.push(r.bytes(n).unwrap().to_vec());
-    }
-    assert_eq!(streams.len(), 18);
-    // A byte more in the raw stream (stored).
-    assert!(!streams[3].is_empty());
-    streams[3].push(0);
-    let mut m = c[..8].to_vec();
-    for s in &streams {
-        aqr_pdf::varint::put(&mut m, s.len() as u64);
-        m.extend_from_slice(s);
-    }
-    assert!(decompress(&m).is_err(), "a byte left in the raw stream");
 }

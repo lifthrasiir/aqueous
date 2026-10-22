@@ -4,7 +4,7 @@
 //! always at hand.
 
 use aqr_formula::{Apply, Formula, Node};
-use aqr_pdf::container::Options;
+use aqr_pdf::encode::Options;
 use aqr_pdf::formula::{self, MODULE};
 use flate2::{Compression, write::ZlibEncoder};
 use std::io::Write;
@@ -116,24 +116,8 @@ fn jpeg() -> Vec<u8> {
     std::fs::read("tests/data/gradient.jpg").unwrap()
 }
 
-/// The modules of the formulas of this crate.
-fn modules(a: &Apply, inputs: &[&[u8]], threads: usize) -> aqr_formula::Result<Vec<u8>> {
-    let err = |e: &dyn std::fmt::Debug| aqr_formula::Error::new(format!("{}: {e:?}", a.module));
-    if a.module == MODULE {
-        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| err(&e))
-    } else if a.module == aqr_flate::formula::MODULE {
-        aqr_flate::formula::decode(&a.params, inputs, a.len, threads).map_err(|e| err(&e))
-    } else if a.module == aqr_png::formula::MODULE {
-        aqr_png::formula::decode(&a.params, inputs, a.len, threads).map_err(|e| err(&e))
-    } else if a.module == aqr_jpeg::formula::MODULE {
-        aqr_jpeg::formula::decode(&a.params, inputs, a.len, threads).map_err(|e| err(&e))
-    } else {
-        Err(aqr_formula::Error::new(format!("no module {}", a.module)))
-    }
-}
-
 fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
-    f.eval(&|a: &Apply, i: &[&[u8]]| modules(a, i, threads))
+    f.eval(&|a: &Apply, i: &[&[u8]]| formula::apply(a, i, threads))
 }
 
 fn options() -> Vec<(&'static str, Options)> {
@@ -326,13 +310,12 @@ fn children_fail() {
     check("children fail", &f);
 }
 
-/// Inflated data in the pools is larger than the file, but compresses as the container's does:
-/// the formula is made where the container codes the file.
+/// Inflated data in the pools is larger than the file, but compresses well: the formula is
+/// made where the streams, zstd-compressed, are smaller than the file.
 #[test]
 fn inflated_pools() {
     let f = pdf(&[("/Type /Catalog".into(), None), ("/Filter /FlateDecode".into(), Some(zlib(&content(3, 4000))))]);
     let o = Options { speed: f64::INFINITY, tok: false, png: false, ..Options::default() };
-    assert!(aqr_pdf::container::compress_with(&f, &o, &mut Default::default()).len() < f.len());
     let fm = formula::encode_with(&f, &o).expect("coded");
     assert!(fm.streams.iter().map(|s| s.data.len()).sum::<usize>() > f.len());
     check("inflated pools", &f);

@@ -1,5 +1,5 @@
-//! Compares aqr-png with other lossless recompressors of PNG files (preflate-rs'
-//! container, precomp, paq8px) and with generic compressors (zstd, xz), on sets of PNG files.
+//! Compares aqr-png (the archive of its formula) with other lossless recompressors of PNG
+//! files (preflate-rs' container, precomp, paq8px) and with generic compressors (zstd, xz), on sets of PNG files.
 //! Every output is checked by a round trip. Times are CPU times on one thread: the thread's
 //! own for the libraries (best of two runs), the children's for the tools run as processes.
 //!
@@ -10,6 +10,7 @@
 //! Each DIR is a set (searched recursively for *.png). `-n` takes the first FILES files of
 //! each set (in name order). Results are cached per tool and file in `../cache/bench.tsv`.
 
+use aqr_formula::aqr;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -91,10 +92,19 @@ fn measure_once(tool: &str, file: &Path) -> Res {
     let src = std::fs::read(file).unwrap();
     match tool {
         "aqr-png" => {
+            // The archive of the file's formula; a file with no formula is kept as it is.
+            let apply = |a: &aqr_formula::Apply, inputs: &[&[u8]]| {
+                aqr_png::formula::decode(&a.params, inputs, a.len, 1)
+                    .map_err(|e| aqr_formula::Error::new(e.to_string()))
+            };
+            let natives = aqr::natives(&[aqr_png::formula::MODULE], &apply);
             let t0 = thread_cpu();
-            let c = aqr_png::compress(&src);
+            let Some(f) = aqr_png::formula::encode(&src, 1) else {
+                return Res { out: src.len(), c: thread_cpu() - t0, d: 0.0, ok: true };
+            };
+            let c = aqr::encode(&f, Some(aqr::checksum(&src)), aqr::Level::Mid).expect("archive");
             let t1 = thread_cpu();
-            let d = aqr_png::decompress(&c);
+            let d = aqr::decode(&c, &natives);
             let t2 = thread_cpu();
             Res { out: c.len(), c: t1 - t0, d: t2 - t1, ok: d.ok().as_deref() == Some(&src[..]) }
         }

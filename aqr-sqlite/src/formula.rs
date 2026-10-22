@@ -2,7 +2,6 @@
 //! parameters, the 18 streams of the transform as raw input slots (FORMAT.md, "Formula
 //! module").
 
-use crate::container::Options;
 use crate::page::Geom;
 use crate::transform::{self, NSTREAMS, STREAM_NAMES};
 use crate::varint::{Rd, put_uv};
@@ -11,12 +10,30 @@ use aqr_formula::{Formula, Module, Node};
 
 pub const MODULE: Module = Module { name: "sqlite-recons", version: 1 };
 
-/// The formula of `input`, or `None` where the container would store the file whole.
+#[derive(Clone, Copy, Debug)]
+pub struct Options {
+    /// Rebuild the file from the streams and compare (no formula on a mismatch).
+    pub verify: bool,
+    /// No formula if the transform panics (off to find such bugs).
+    pub catch: bool,
+    /// Threads (1: everything on the calling thread). The streams are the same whatever the
+    /// number.
+    pub threads: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Options { verify: true, catch: true, threads: 1 }
+    }
+}
+
+/// The formula of `input`, or `None` where the file is not a database that the transform
+/// can code.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_with(input, &Options { threads, ..Default::default() })
 }
 
-/// `encode` with the options of `compress_with` (the levels do not matter here).
+/// `encode` with `opt`.
 pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     let enc = if opt.catch {
         std::panic::catch_unwind(|| transform::encode_threads(input, opt.threads)).ok().flatten()

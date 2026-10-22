@@ -9,7 +9,7 @@ except sqlite3.Error:
     names = {}
 env = dict(os.environ, SQLR_DUMP="1")
 exe = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "target", "release", "sqlr")
-out = subprocess.run([exe, "c", db, "/dev/null"], env=env, capture_output=True, text=True).stderr
+out = subprocess.run([exe, "bench", db], env=env, capture_output=True, text=True).stderr
 rows = []
 for line in out.splitlines():
     if not line.startswith("G "):

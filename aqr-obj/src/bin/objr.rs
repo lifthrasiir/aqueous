@@ -1,11 +1,8 @@
-use aqr_obj::block::{NSTREAMS, STREAM_NAMES};
-use aqr_obj::container::{Options, Stats, compress_with};
-use aqr_obj::mem::{Counting, PEAK, peak_reset};
-use std::io::Write;
-use std::sync::atomic::Ordering::Relaxed;
-
-#[global_allocator]
-static ALLOC: Counting = Counting;
+use aqr_formula::aqr::{self, Level};
+use aqr_formula::{Apply, Formula};
+use aqr_obj::block::NSTREAMS;
+use aqr_obj::codec::Options;
+use aqr_obj::formula::{self, MODULE};
 
 #[cfg(unix)]
 #[repr(C)]
@@ -40,7 +37,7 @@ fn cpu() -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: objr c [-l LEVEL] [-B BLOCK] [-x] [-t THREADS] IN OUT | objr d [-t THREADS] IN OUT\n       objr bench [-n ITERS] [-l LEVEL] [-B BLOCK] [-x] [-t THREADS] [-c|-d] [-m] [-v] FILE...\n       objr stats FILE... | objr fuzz [-n N] [-s SEED] FILE...\n(-t: c and d default to the available cores, bench to 1)"
+        "usage: objr bench [-n ITERS] [-B BLOCK] [-x] [-t THREADS] [-c|-d] [-v] FILE...\n       objr stats FILE... | objr fuzz [-n N] [-s SEED] FILE..."
     );
     std::process::exit(2);
 }
@@ -49,17 +46,12 @@ fn usage() -> ! {
 fn opt_arg<'a>(a: &str, it: &mut impl Iterator<Item = &'a String>, opt: &mut Options) -> bool {
     let mut num = || it.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or_else(|| usage());
     match a {
-        "-l" => opt.level = num() as i32,
         "-B" => opt.block = num(),
         "-x" => opt.verify = false,
         "-t" => opt.threads = num().max(1),
         _ => return false,
     }
     true
-}
-
-fn cores() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 /// Seconds: the thread's CPU time with one thread, wall time with more.
@@ -76,43 +68,6 @@ fn wall() -> f64 {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("c") if args.len() >= 3 => {
-            let mut opt = Options { threads: cores(), ..Default::default() };
-            let n = args.len();
-            let mut it = args[1..n - 2].iter();
-            while let Some(a) = it.next() {
-                if !opt_arg(a, &mut it, &mut opt) {
-                    usage();
-                }
-            }
-            let src = std::fs::read(&args[n - 2]).expect("read");
-            let mut w = std::io::BufWriter::new(std::fs::File::create(&args[n - 1]).expect("create"));
-            aqr_obj::container::compress_to(&src, &opt, &mut Stats::default(), &mut w).expect("write");
-            w.flush().expect("write");
-        }
-        Some("d") if args.len() >= 3 => {
-            let mut opt = Options { threads: cores(), ..Default::default() };
-            let n = args.len();
-            let mut it = args[1..n - 2].iter();
-            while let Some(a) = it.next() {
-                if a != "-t" || !opt_arg(a, &mut it, &mut opt) {
-                    usage();
-                }
-            }
-            let (inp, outp) = (&args[n - 2], &args[n - 1]);
-            let src = std::fs::read(inp).expect("read");
-            let mut w = std::io::BufWriter::new(std::fs::File::create(outp).expect("create"));
-            let res = aqr_obj::container::decompress_to_threads(&src, &mut w, opt.threads);
-            match res.and_then(|_| w.flush().map_err(|_| aqr_obj::Error("write error"))) {
-                Ok(()) => {}
-                Err(e) => {
-                    drop(w);
-                    let _ = std::fs::remove_file(outp);
-                    eprintln!("{inp}: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
         Some("bench") => bench(&args[1..]),
         Some("stats") => stats(&args[1..]),
         Some("fuzz") => fuzz(&args[1..]),
@@ -120,6 +75,16 @@ fn main() {
     }
 }
 
+/// The module, with `threads` threads.
+fn apply(threads: usize) -> impl Fn(&Apply, &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
+    move |a, inputs| {
+        assert_eq!(a.module, MODULE);
+        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.to_string()))
+    }
+}
+
+/// Sizes and speeds of archives of the files (the formula, then the archive); files the
+/// formula does not code are counted, and left out of the totals.
 fn bench(args: &[String]) {
     let mut iters = 1;
     let mut files = vec![];
@@ -127,8 +92,6 @@ fn bench(args: &[String]) {
     let mut opt = Options::default();
     // Repeat only one side (for profiling): 'c' or 'd'.
     let mut only = ' ';
-    let mut mem = false;
-    let (mut mpeak_c, mut mpeak_d) = (0usize, 0usize);
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if opt_arg(a, &mut it, &mut opt) {
@@ -139,112 +102,67 @@ fn bench(args: &[String]) {
             "-c" => only = 'c',
             "-d" => only = 'd',
             "-v" => verbose = true,
-            "-m" => mem = true,
             _ => files.push(a.clone()),
         }
     }
     let (mut tin, mut tout, mut tc, mut td) = (0f64, 0f64, 0f64, 0f64);
-    let mut total = Stats::default();
-    let mut fails = 0;
+    let (mut fails, mut skipped) = (0, 0);
+    let modules = apply(opt.threads);
     for f in &files {
         let src = std::fs::read(f).expect("read");
         let mut c = vec![];
         let mut bc = f64::MAX;
-        let mut st = Stats::default();
+        let mut coded = true;
         for _ in 0..if only == 'd' { 1 } else { iters } {
-            st = Stats::default();
             let t = clock(opt.threads);
-            c = compress_with(&src, &opt, &mut st);
+            let Some(fm) = formula::encode_with(&src, &opt) else {
+                coded = false;
+                break;
+            };
+            c = aqr::encode(&fm, Some(aqr::checksum(&src)), Level::Mid).expect("archive");
             bc = bc.min(clock(opt.threads) - t);
+        }
+        if !coded {
+            skipped += 1;
+            continue;
         }
         let mut bd = f64::MAX;
         let mut ok = true;
         for _ in 0..if only == 'c' { 1 } else { iters } {
             let t = clock(opt.threads);
-            let d = aqr_obj::container::decompress_threads(&c, opt.threads);
+            let d = aqr::decode(&c, &aqr::natives(&[MODULE], &modules));
             bd = bd.min(clock(opt.threads) - t);
             ok &= matches!(d, Ok(ref d) if *d == src);
-        }
-        if mem {
-            // Heap beyond the input and the output (which the caller owns).
-            // The streaming forms, writing to nowhere.
-            let base = peak_reset();
-            aqr_obj::container::compress_to(&src, &opt, &mut Stats::default(), &mut std::io::sink()).unwrap();
-            let pc = PEAK.load(Relaxed) - base;
-            let base = peak_reset();
-            let _ = aqr_obj::container::decompress_to(&c, &mut std::io::sink());
-            let pd = PEAK.load(Relaxed) - base;
-            println!("mem {:>11} c {:>11} d {:>11} {f}", src.len(), pc, pd);
-            mpeak_c = mpeak_c.max(pc);
-            mpeak_d = mpeak_d.max(pd);
         }
         if !ok {
             fails += 1;
             eprintln!("ROUNDTRIP FAILURE: {f}");
         }
-        for i in 0..NSTREAMS {
-            total.raw[i] += st.raw[i];
-            total.coded[i] += st.coded[i];
-            total.rc[i] += st.rc[i];
-        }
-        total.whole += st.whole;
-        total.whole_coded += st.whole_coded;
-        total.transform_s += st.transform_s;
-        total.verify_s += st.verify_s;
-        total.zstd_s += st.zstd_s;
         tin += src.len() as f64;
         tout += c.len() as f64;
         tc += bc;
         td += bd;
         if verbose {
             println!(
-                "{:>12} {:>10} {:.4} {:7.1} {:7.1} {}{}",
+                "{:>12} {:>10} {:.4} {:7.1} {:7.1} {}",
                 src.len(),
                 c.len(),
                 c.len() as f64 / src.len() as f64,
                 src.len() as f64 / bc / 1e6,
                 src.len() as f64 / bd / 1e6,
-                if st.whole > 0 { format!("[whole {}] ", st.whole) } else { String::new() },
                 f
             );
         }
     }
-    if mem {
-        println!("heap beyond input and output, largest: compress {mpeak_c}, decompress {mpeak_d}");
-    }
-    println!("streams (raw -> coded, share of output):");
-    #[allow(clippy::needless_range_loop)]
-    for i in 0..NSTREAMS {
-        if total.raw[i] > 0 {
-            println!(
-                "  {:>7} {:>12} -> {:>11} ({:5.1}%){}",
-                STREAM_NAMES[i],
-                total.raw[i],
-                total.coded[i],
-                100.0 * total.coded[i] as f64 / tout,
-                if total.rc[i] > 0 { format!(" rc in {} blocks", total.rc[i]) } else { String::new() }
-            );
-        }
-    }
-    if total.whole > 0 {
-        println!(
-            "  whole {:>12} -> {:>11} ({:5.1}%)",
-            total.whole,
-            total.whole_coded,
-            100.0 * total.whole_coded as f64 / tout
-        );
-    }
     println!(
-        "{} files ({} failed): {:.0} -> {:.0} = {:.4}; compress {:.1} MB/s (transform {:.2}s, verify {:.2}s, zstd {:.2}s), decompress {:.1} MB/s",
+        "{} files ({} failed, {} not coded): {:.0} -> {:.0} = {:.4}; compress {:.1} MB/s, decompress {:.1} MB/s",
         files.len(),
         fails,
+        skipped,
         tin,
         tout,
         tout / tin,
         tin / tc / 1e6,
-        total.transform_s,
-        total.verify_s,
-        total.zstd_s,
         tin / td / 1e6
     );
 }
@@ -375,8 +293,8 @@ fn mutate(r: &mut Rng, src: &[u8]) -> Vec<u8> {
     v
 }
 
-/// Mutated files must round-trip with verification off (so that the coded path is what is
-/// checked), and corrupted containers must fail cleanly.
+/// Mutated files must round-trip through the formula with verification off (so that the
+/// coded path is what is checked).
 fn fuzz(args: &[String]) {
     let mut n = 100;
     let mut seed = 1u64;
@@ -399,34 +317,18 @@ fn fuzz(args: &[String]) {
             let opt = Options {
                 verify: false,
                 block: [1 << 10, 64 << 10, 4 << 20][i % 3],
-                level: 1,
                 force_whole: if i % 2 == 1 { r.next() } else { 0 },
                 threads: 1,
             };
             runs += 1;
             let res = std::panic::catch_unwind(|| {
-                let c = compress_with(&m, &opt, &mut Stats::default());
-                // Threads: the same bytes, and the same file back.
+                // Nothing to check where the formula does not code the file.
+                let Some(fm) = formula::encode_with(&m, &opt) else { return true };
+                // Threads: the same formula, and the same file back.
                 let threads = [2, 3, 4][i % 3];
                 let opt_t = Options { threads, verify: i % 4 == 0, ..opt };
-                let same = opt_t.verify || compress_with(&m, &opt_t, &mut Stats::default()) == c;
-                let d = aqr_obj::container::decompress_threads(&c, threads);
-                for k in 0..4 {
-                    let mut cc = c.clone();
-                    let mut r2 = Rng(i as u64 * 31 + k + 7);
-                    match k {
-                        0 => cc.truncate(r2.below(cc.len())),
-                        _ => {
-                            for _ in 0..1 + r2.below(8) {
-                                let j = r2.below(cc.len());
-                                cc[j] ^= 1 << r2.below(8);
-                            }
-                        }
-                    }
-                    if let Ok(d2) = aqr_obj::decompress(&cc) {
-                        assert!(d2 == m, "corrupted container decoded to something else");
-                    }
-                }
+                let same = opt_t.verify || formula::encode_with(&m, &opt_t).as_ref() == Some(&fm);
+                let d = Formula::eval(&fm, &apply(threads));
                 same && matches!(d, Ok(ref d) if *d == m)
             });
             match res {

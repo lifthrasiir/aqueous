@@ -13,6 +13,9 @@ was far below the target, so this is a new design from scratch.
 Apple M4 (10 cores: 4 P + 6 E), release build with `RUSTFLAGS="-C target-cpu=native"`.
 Ratio is output size / input size.
 
+These figures were measured with the former container format and need re-measuring with `.aqr`
+archives (`jrc bench`).
+
 | Set | Ratio | `-j 1` compress / decompress | All cores compress / decompress |
 |---|---|---|---|
 | sequential (camera and phone photos etc., 101 MB) | 0.8360 | 106 / 89 MB/s | 300–390 / 300–385 MB/s |
@@ -25,9 +28,7 @@ All-core figures are ranges because they varied with thermal state and backgroun
 ```sh
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 
-jrc c in.jpg out.jrc                 # compress
-jrc d out.jrc back.jpg               # decompress
-jrc bench [-n iters] file...         # roundtrip check + ratio / per-phase times / throughput
+jrc bench [-n iters] file...         # roundtrip check (formula, .aqr archive) + ratio / throughput
 jrc info file...                     # parse and decode, per-scan information
 jrc pscan [-n iters] file...         # per-scan decode / encode times of progressive files
 jrc fuzz [-n N] [-s seed] file...    # mutated inputs: roundtrips must stay exact, no panics
@@ -52,8 +53,8 @@ Auxiliary binaries:
 | `JRC_DEBUG_SPEC` | Prints speculative-decoding phase times and fallback reasons |
 | `JRC_DEBUG_TABLES` | Prints the size breakdown of the serialised model tables |
 
-`compress` catches panics and stores the input instead, so an oracle failure shows up in fuzz
-results as `internal panic`; the input is saved as `fuzz_panic_<round>.jpg`.
+`formula::encode` catches panics and leaves the input uncoded, so an oracle failure shows up
+as a file that is not coded.
 
 ## Layout
 
@@ -62,7 +63,8 @@ results as `internal panic`; the input is saved as `fuzz_panic_<round>.jpg`.
 | `src/jpeg.rs` | Parsing, destuffing, fast Huffman decoding (serial / restart-interval parallel / speculative parallel), canonicality checks, sequential scan re-encoding (parallel chunks) |
 | `src/progressive.rs` | Progressive decoding (jdphuff semantics) with inline canonicality checks, scan-script validation, row pipeline across scans, re-encoding (jcphuff semantics) |
 | `src/fast.rs` | Entropy stage: the "P1" model, table normalisation and serialisation, 4-way rANS, stripes |
-| `src/container.rs` | Container format (spec: [FORMAT.md](FORMAT.md)), top-level compress / decompress, recursive compression of embedded JPEGs, stored fallback |
+| `src/codec.rs` | The codec behind the formula module: blob and scan info, embedded JPEGs, model and scan re-emission glue |
+| `src/formula.rs` | The formula module `jpeg-recons` (spec: [FORMAT.md](FORMAT.md)): `encode`, `decode`, recursive coding of embedded JPEGs |
 | `src/variant.rs` | Test generator: re-encodes the same coefficients in valid but non-canonical ways |
 | `src/model.rs` | The earlier, heavier model (reference only; only its `Phases` struct is still used) |
 | `tests/regress.rs` | Regression inputs |
@@ -190,34 +192,36 @@ serial result.
 - So each block is only ever accessed by one scan at a time, in scan order.
 - If any scan fails, everything is decoded again serially.
 
-### 6. Container and robustness
+### 6. Formula module and robustness
 
-The full specification is in [FORMAT.md](FORMAT.md).
+The full specification is in [FORMAT.md](FORMAT.md). The module has one parameter (the frame
+type) and nine input slots:
 
 ```text
-magic 69 04 7E 8E 9D E0, u16 version: 0 = sequential, 1 = progressive, 2 = stored
-then streams (varint length + data); each stream's meaning follows from the earlier ones:
-  head: u64 xxh3 of the original (checked after decompression; a mismatch is an error),
-        embedded JPEGs (gap, len, kind: 0 = nested container stream / 1 = copy of an earlier one)
-  nested containers, one per embedded JPEG of kind 0
-  cut blob                     -- headers, markers, trailer without scan data or embedded JPEGs
-  scan info: per scan flags (zero padding, raw, truncated, boundary) + RST count / truncation
-             point, stripe count
-  raw scan data / truncated tails
-  model tables, then per stripe: rANS words, raw bits
+head          embedded JPEGs (gap, len, kind: 0 = bytes in `embedded` / 1 = copy of an earlier one)
+embedded      the bytes of each kind 0 embedded JPEG (themselves the output of this module)
+cut blob      -- headers, markers, trailer without scan data or embedded JPEGs
+scan info     per scan flags (zero padding, raw, truncated, boundary) + RST count / truncation
+              point, stripe count
+scans         raw scan data / truncated tails
+tables        the model tables
+lens          lengths of the scan entries, then of each stripe's rANS words and raw bits
+rans, bits    the rANS words and the raw bits of all stripes
 ```
 
-- `compress` never fails. Whatever cannot be reproduced (unsupported or non-canonical coding,
-  corruption, internal panics) is stored raw per scan, or else the whole input is stored.
+- `formula::encode` never fails: it gives no formula for what cannot be reproduced
+  (unsupported coding, corruption, internal panics) as a whole, and codes scans that are not
+  canonical raw.
 - Embedded JPEGs of at least 1 KB (Exif / Photoshop thumbnails, MPF and vendor secondary
-  images, ...) are compressed recursively, up to depth 3.
+  images, ...) are coded recursively, up to depth 3.
 - Edge cases handled: truncated files, trailing RSTs, dangling trailing 0xFF, fill bytes.
 
 ## Verification
 
-- `jrc bench`: every file is roundtripped and compared byte for byte.
+- `jrc bench`: every file is roundtripped through its formula and an `.aqr` archive, and compared
+  byte for byte.
 - `jrc fuzz`: inputs mutated by bit flips, truncation, deletion, insertion and marker-byte
-  injection must roundtrip exactly without panics. Corrupted containers are also decompressed
+  injection must roundtrip exactly without panics. Corrupted archives are also decoded
   and must not panic.
 - `jrc mutenc`: variants that re-encode the same coefficients with valid non-canonical choices
   (ZRL placement, padding, fill, trailing RSTs, EOBRUN splits, ...) must roundtrip exactly.
@@ -245,8 +249,7 @@ then streams (varint length + data); each stream's meaning follows from the earl
   cannot know which block it is in, so a single scan cannot be split.
 - **Progressive re-encoding**: each scan is encoded serially. It could be split by
   reconstructing the EOBRUN and BE state at chunk boundaries from the blocks before them.
-- **Stored ratio**: fuzz and mutenc store a large share of inputs verbatim (393 of 600 mutenc
-  rounds). The version before parallelisation gives the same numbers; the cause has not been
-  investigated yet.
+- **Uncoded share**: fuzz and mutenc leave a large share of inputs uncoded. The cause has not
+  been investigated yet.
 - **Sample photos**: `samples/` holds personal photos (with GPS / Exif) and is excluded from
   version control via `.gitignore`.

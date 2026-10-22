@@ -1,8 +1,10 @@
 //! Formulas: `formula::encode` evaluated through `formula::decode` gives the input back, with
-//! any number of threads; inputs that the container stores give no formula.
+//! any number of threads, also with the slots corrupted; inputs that are not mp3 give no formula.
+//! The files of tests/data are repeated so that the inputs are large enough for the threaded
+//! paths (several thousand frames, so that the output is also assembled in pieces).
 
 use aqr_formula::{Apply, Formula, Node};
-use aqr_mp3::{compress, formula};
+use aqr_mp3::formula;
 
 const THREADS: [usize; 3] = [1, 2, 8];
 
@@ -34,12 +36,9 @@ fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
     })
 }
 
-/// The formula, if the container codes `d`, and then its round trip.
+/// The formula of `d` if there is one, and then its round trip.
 fn check(name: &str, d: &[u8]) -> bool {
-    let f = formula::encode(d, 1);
-    let coded = compress(d)[8] == 1;
-    assert_eq!(f.is_some(), coded, "{name}: formula iff coded");
-    let Some(f) = f else { return false };
+    let Some(f) = formula::encode(d, 1) else { return false };
     assert_eq!(f.len(), d.len() as u64);
     let Node::Apply(a) = &f.root else { panic!("{name}: root") };
     assert!(a.params.is_empty() && a.inputs.len() == 10);
@@ -122,16 +121,24 @@ fn corrupt_inputs() {
         assert!(formula::decode(&[], &s, len, t).is_err());
         // Flips in each slot: an error or the same output, never a panic.
         for k in 0..10 {
-            if slots[k].is_empty() {
-                continue;
+            for i in [0, slots[k].len() / 2, slots[k].len().saturating_sub(1)] {
+                if slots[k].is_empty() {
+                    continue;
+                }
+                let mut m = slots[k].to_vec();
+                m[i] ^= 0x5a;
+                let mut s = slots.clone();
+                s[k] = &m;
+                let one = formula::decode(&[], &s, len, 1).map_err(|e| e.0);
+                assert_eq!(formula::decode(&[], &s, len, t).map_err(|e| e.0), one, "slot {k} byte {i}, {t} threads");
             }
-            let mut m = slots[k].to_vec();
-            let i = m.len() / 2;
-            m[i] ^= 0x5a;
+        }
+        // Slots cut short.
+        for k in 0..10 {
             let mut s = slots.clone();
-            s[k] = &m;
+            s[k] = &slots[k][..slots[k].len() / 2];
             let one = formula::decode(&[], &s, len, 1).map_err(|e| e.0);
-            assert_eq!(formula::decode(&[], &s, len, t).map_err(|e| e.0), one, "slot {k}, {t} threads");
+            assert_eq!(formula::decode(&[], &s, len, t).map_err(|e| e.0), one, "slot {k} cut, {t} threads");
         }
     }
 }

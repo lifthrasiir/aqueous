@@ -25,7 +25,7 @@ fn main() {
     let mut by: BTreeMap<(Class, Filter), Acc> = BTreeMap::new();
     let mut plains: BTreeMap<Class, Vec<u8>> = BTreeMap::new();
     let mut skel = vec![];
-    let (mut total, mut jpeg_in, mut jpeg_out, mut t_jc, mut t_jd) = (0usize, 0usize, 0usize, 0f64, 0f64);
+    let mut total = 0usize;
     let opts = aqr_flate::Options { threads: 1, ..Default::default() };
     for f in &files {
         let buf = std::fs::read(f).unwrap();
@@ -45,44 +45,30 @@ fn main() {
             let a = by.entry((c, fl)).or_default();
             a.n += 1;
             a.raw += data.len();
-            match fl {
-                Filter::Flate => {
-                    let raw = if data.len() > 2 && data[0] & 0xf == 8 { &data[2..] } else { data };
-                    let t0 = Instant::now();
-                    let Ok(flat) = aqr_flate::inflate::parse(raw) else {
-                        a.failed += 1;
-                        continue;
-                    };
-                    a.t_parse += t0.elapsed().as_secs_f64();
-                    let trail = flat.stream.trailing.len();
-                    let raw = &raw[..raw.len() - trail.saturating_sub(4).min(raw.len())];
-                    a.plain += flat.data.len();
-                    plains.entry(c).or_default().extend_from_slice(&flat.data);
-                    let t1 = Instant::now();
-                    match aqr_flate::deconstruct_with(raw, &opts) {
-                        Ok((d, m)) => {
-                            let t2 = Instant::now();
-                            a.t_dec += (t2 - t1).as_secs_f64();
-                            a.meta += m.len();
-                            let back = aqr_flate::reconstruct_with_threads(&d, &m, 1).unwrap();
-                            a.t_rec += t2.elapsed().as_secs_f64();
-                            assert_eq!(back, raw);
-                        }
-                        Err(_) => a.failed += 1,
+            if fl == Filter::Flate {
+                let raw = if data.len() > 2 && data[0] & 0xf == 8 { &data[2..] } else { data };
+                let t0 = Instant::now();
+                let Ok(flat) = aqr_flate::inflate::parse(raw) else {
+                    a.failed += 1;
+                    continue;
+                };
+                a.t_parse += t0.elapsed().as_secs_f64();
+                let trail = flat.stream.trailing.len();
+                let raw = &raw[..raw.len() - trail.saturating_sub(4).min(raw.len())];
+                a.plain += flat.data.len();
+                plains.entry(c).or_default().extend_from_slice(&flat.data);
+                let t1 = Instant::now();
+                match aqr_flate::deconstruct_with(raw, &opts) {
+                    Ok((d, m)) => {
+                        let t2 = Instant::now();
+                        a.t_dec += (t2 - t1).as_secs_f64();
+                        a.meta += m.len();
+                        let back = aqr_flate::reconstruct_with_threads(&d, &m, 1).unwrap();
+                        a.t_rec += t2.elapsed().as_secs_f64();
+                        assert_eq!(back, raw);
                     }
+                    Err(_) => a.failed += 1,
                 }
-                Filter::Dct => {
-                    let t0 = Instant::now();
-                    let p = aqr_jpeg::container::compress(data);
-                    let t1 = Instant::now();
-                    let back = aqr_jpeg::container::decompress(&p).unwrap();
-                    t_jd += t1.elapsed().as_secs_f64();
-                    t_jc += (t1 - t0).as_secs_f64();
-                    assert_eq!(back, data);
-                    jpeg_in += data.len();
-                    jpeg_out += p.len();
-                }
-                _ => {}
             }
         }
         skel.extend_from_slice(&buf[at..]);
@@ -131,13 +117,5 @@ fn main() {
             print!("  z{lvl} {z} ({:.0} MB/s)", p.len() as f64 / t.elapsed().as_secs_f64() / 1e6);
         }
         println!();
-    }
-    if jpeg_in > 0 {
-        println!(
-            "jpeg {jpeg_in} -> {jpeg_out} ({:.3}), {:.0} / {:.0} MB/s",
-            jpeg_out as f64 / jpeg_in as f64,
-            jpeg_in as f64 / t_jc / 1e6,
-            jpeg_in as f64 / t_jd / 1e6
-        );
     }
 }

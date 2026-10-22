@@ -1,9 +1,10 @@
 # aqr-png format
 
-aqr-png rebuilds a PNG file bit for bit from a smaller representation. The chunks are
-kept apart from the image data. The image data's DEFLATE streams are kept as their exact
-LZ77 tokens and block structure, and the tokens are entropy coded against a model of the
-image. This document describes that representation.
+aqr-png is a module of entry formulas (`aqr-formula`) that rebuilds a PNG file bit for bit
+from a smaller representation. The chunks are kept apart from the image data. The image
+data's DEFLATE streams are kept as their exact LZ77 tokens and block structure, and the
+tokens are entropy coded against a model of the image. This document describes the module
+and that representation.
 
 The dynamic Huffman headers are coded with aqr-flate's header coder. They are specified
 in aqr-flate's `FORMAT.md` (section *Header stream*), which this document refers to
@@ -29,38 +30,6 @@ rather than repeats. Everything else is specified here.
   inverse.
 - `x div y` and `x mod y` are integer division and remainder; `ceil(x / y)` rounds up.
 - Arithmetic on bytes (sample values, filtered bytes, residuals) is mod 256.
-
-## File
-
-| bytes | field |
-|---|---|
-| 6 | magic `69 04 7f a7 59 e0` (`aQR/p1ng` in base64) |
-| 2 | version (u16), 0 |
-| 1 | mode: 0 stored, 1 coded |
-| … | the body of the mode |
-
-A file with another magic, version or mode is invalid. There is only one version so far.
-
-**Mode 0 (stored)**: the body is the original file, as it is. The compressor stores any input
-that is not a PNG file, that it cannot code, or whose coded form would not be smaller than
-the stored one.
-
-**Mode 1 (coded)**:
-
-| field | |
-|---|---|
-| 8 bytes | XXH3-64 (seed 0, default secret) of the original file (u64) |
-| varint | length of the compressed skeleton |
-| bytes | the [skeleton](#skeleton), as zstd frames |
-| per image | u32 length of the record, then the [image record](#image-records) |
-
-The images are those that the skeleton gives (see [Images](#images)), in order. The file
-must end exactly after the last record. After the file is rebuilt, its XXH3-64 must equal the
-stored one, or the data is invalid.
-
-The compressed skeleton is one or more concatenated zstd frames. The compressor writes one,
-at level 19. The decompressed skeleton must
-not be larger than 2^30 bytes.
 
 ## Skeleton
 
@@ -121,7 +90,7 @@ Each image has a header, or none:
 Write the PNG signature, then each chunk: its length (u32 BE), its type, its data, and its
 CRC (u32 BE). A class 0 chunk's data comes from the skeleton. The data of a class 1 or 2
 chunk is the next bytes of its image's payload (as many as its length, less 4 for class 2),
-after the sequence number for class 2. Then write the trailer, and check the XXH3-64.
+after the sequence number for class 2. Then write the trailer.
 
 ## Image records
 
@@ -410,12 +379,9 @@ matches the layout lists and 285 for other matches of length 258) and 32 distanc
 
 ## Formula module
 
-The same representation as a module of entry formulas (`aqr-formula`), in
-`formula::encode` and `formula::decode`. The module is `png-recons`, version 1. Its output is
-the PNG file (the original, whose length the application gives). The file is rebuilt as in
-[Rebuilding the file](#rebuilding-the-file), from the same skeleton and image records, with
-the container left out: no magic, version, mode, checksum or length fields, and no zstd (the
-streams are stored raw; whatever holds the formula compresses them).
+The module is `png-recons`, version 1, in `formula::encode` and `formula::decode`. Its
+output is the PNG file, whose length the application gives. The file is rebuilt as in
+[Rebuilding the file](#rebuilding-the-file), from the skeleton and the image records.
 
 **Parameters**: none (empty). A module application with parameters is invalid.
 
@@ -423,20 +389,20 @@ streams are stored raw; whatever holds the formula compresses them).
 
 | slot | class | content |
 |---|---|---|
-| 0 | `png/skeleton` | the [skeleton](#skeleton), as it is (not zstd compressed) |
+| 0 | `png/skeleton` | the [skeleton](#skeleton) |
 | 1 | `png/index` | for each image in order, the length of its record: a varint |
 | 2 | `png/records` | the [image records](#image-records), concatenated in order, without length prefixes |
 
 The images are those that the skeleton gives. The index has one varint per image and ends
-exactly there; the records fill slot 2 exactly. Each record is as in the container: the byte
-0 and the payload, or the byte 1 and a coded record, and a coded record rebuilds a payload
-of exactly the length the skeleton gives. An image that is kept as it is stays kept (record
-0), so the formula's payloads are the file's wherever coding does not make an image smaller.
+exactly there; the records fill slot 2 exactly. Each record is the byte 0 and the payload,
+or the byte 1 and a coded record, and a coded record rebuilds a payload of exactly the
+length the skeleton gives. An image that is kept as it is stays kept (record 0), so the
+payloads are the file's wherever coding does not make an image smaller.
 
 The rebuilt file must have the length that the application gives. There is no checksum to
 test: the formula's own evaluation is trusted to hand the module the inputs it was made
 with.
 
-`formula::encode` gives no formula (`None`) where the container would not code the file:
-it is not a PNG file, or it cannot be coded, or no image has a coded record (the formula
-would be the file and the overhead of the slots).
+`formula::encode` gives no formula (`None`) for a file that is not a PNG file, or that
+cannot be parsed, or in which no image has a coded record (the formula would be the file and
+the overhead of the slots).

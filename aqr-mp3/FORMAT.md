@@ -1,16 +1,17 @@
-# aqr-mp3 container format, version 0
+# aqr-mp3 format: module `mp3-recons`, version 1
 
-This document specifies the files written by `mp3r c` / `aqr_mp3::compress` and read by
-`mp3r d` / `aqr_mp3::decompress`, completely enough to write an independent decoder and a
-compatible encoder. A decoder must reproduce the original input bit for bit. The encoder has
-some freedom (section 12); everything the decoder does is normative.
+This document specifies the module `mp3-recons` of entry formulas (aqr-formula), which
+rebuilds an MP3 file from a smaller representation, completely enough to write an
+independent decoder and a compatible encoder. A decoder must reproduce the original input
+bit for bit. The encoder has some freedom (section 12); everything the decoder does is
+normative.
 
 The key words MUST, SHOULD and MAY are used as in RFC 2119.
 
 ## Contents
 
 1. [Conventions](#1-conventions)
-2. [Container](#2-container)
+2. [Module](#2-module)
 3. [Decoding overview](#3-decoding-overview)
 4. [MPEG audio Layer III definitions](#4-mpeg-audio-layer-iii-definitions)
 5. [File structure streams](#5-file-structure-streams)
@@ -21,12 +22,11 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119.
 10. [Reconstruction](#10-reconstruction)
 11. [Validation](#11-validation)
 12. [Encoder](#12-encoder)
-13. [Formula module](#13-formula-module)
 - [Appendix A: tables](#appendix-a-tables)
 
 ## 1. Conventions
 
-- **Integers** in the container are little endian unless stated otherwise. MPEG headers, CRCs
+- **Integers** in the module's inputs are little endian unless stated otherwise. MPEG headers, CRCs
   and everything inside the MP3 bitstream are big endian, as in MPEG.
 - **Bit strings** are MSB first: the first bit of a byte is its most significant bit. A bit
   string of `n` bits stored as bytes takes `ceil(n / 8)` bytes, padded with zero bits.
@@ -38,7 +38,6 @@ The key words MUST, SHOULD and MAY are used as in RFC 2119.
 - `/` on integers truncates towards zero, `>>` is a logical shift on unsigned values,
   `ceil(a / b)` rounds up, `min`, `max` and `clamp(v, lo, hi)` are the usual functions,
   and `popcount` counts set bits.
-- **xxh3** is XXH3-64 (`XXH3_64bits`, seed 0, default secret) from xxHash.
 - **zstd** is a Zstandard stream (RFC 8878): one or more frames, decompressed and concatenated.
 
 External references:
@@ -48,63 +47,35 @@ External references:
   is the common extension of MPEG-2 to 8, 11.025 and 12 kHz. Section 4 restates what is
   used here, except the Huffman code tables (Table B.7 of ISO/IEC 11172-3).
 - `model/builtin.bin` in this repository holds the frequency tables of the rANS coder
-  (section 8.4). Version 0 is defined with exactly that file, whose SHA-256 is
+  (section 8.4). Version 1 is defined with exactly that file, whose SHA-256 is
   `42d9c7cd358dccbcf9e1715597197e82adf9a0cd86e876adee21067c325b9276`.
 
-## 2. Container
+## 2. Module
 
-| Offset | Size | Field |
-|---|---|---|
-| 0 | 6 | magic `69 04 7e 30 fd da` (`aQR+MP3a` when base64 encoded) |
-| 6 | 2 | version, u16 LE: 0 |
-| 8 | 1 | mode: 0 stored, 1 coded |
-| 9 | | payload |
+- **Module**: name `mp3-recons`, version 1. The module is defined with `model/builtin.bin`,
+  which stays compiled in.
+- **Params**: none (empty). A decoder MUST reject non-empty params.
+- **Output length**: the length `len` of the application is the length of the original file.
+  The decoder MUST fail if its output is not `len` bytes.
+- **Inputs**: exactly ten slots, each stored raw (the archive compresses them):
 
-A decoder MUST reject a different magic, an unknown version or a mode other than 0 and 1.
-A later version may change anything after the version field.
+| Slot | Class | Name | Contents | Section |
+|---|---|---|---|---|
+| 0 | `mp3/segs` | SEGS | junk lengths and frame runs | 5.1 |
+| 1 | `mp3/junk` | JUNK | the bytes that are not frames | 5.2 |
+| 2 | `mp3/headers` | HDR | frame headers | 5.3 |
+| 3 | `mp3/crc` | CRC | CRC flags and stored CRCs | 5.4 |
+| 4 | `mp3/tailbits` | TAIL | bit string: granule tails | 10.3 |
+| 5 | `mp3/rawgr` | RAWGR | bit string: granules stored verbatim | 10.3 |
+| 6 | `mp3/gaps` | GAPS | bit string: reservoir bits outside placed frames | 10.2 |
+| 7 | `mp3/side` | SIDE | range coded side information | 6, 7 |
+| 8 | `mp3/rans` | rANS words | u32 LE each; the length is a multiple of 4 | 8 |
+| 9 | `mp3/rawbits` | raw bit stream | all of the slot, read MSB first | 9 |
 
-**Mode 0 (stored).** The payload is the original file, verbatim.
-
-**Mode 1 (coded).**
-
-| Field | Encoding |
-|---|---|
-| `len` | u64 LE: length of the original file in bytes |
-| `hash` | u64 LE: xxh3 of the original file |
-| byte streams 0..7 | per stream, see below |
-| `tail_bits`, `rawgr_bits`, `gap_bits` | 3 varints |
-| `n_words` | varint: number of rANS words |
-| `raw_bits` | varint |
-| rANS words | `n_words` × u32 LE |
-| raw bit stream | all remaining bytes |
-
-Each byte stream is a varint `v`, then
-
-- if `v & 1 == 0`: `v >> 1` bytes, the stream itself;
-- if `v & 1 == 1`: a varint `size`, then `v >> 1` bytes of zstd data that decompress to
-  exactly `size` bytes (a different size is an error).
-
-The eight byte streams, in this order:
-
-| # | Name | Contents | Section |
-|---|---|---|---|
-| 0 | SEGS | junk lengths and frame runs | 5.1 |
-| 1 | JUNK | the bytes that are not frames | 5.2 |
-| 2 | HDR | frame headers | 5.3 |
-| 3 | CRC | CRC flags and stored CRCs | 5.4 |
-| 4 | TAIL | bit string: granule tails | 10.3 |
-| 5 | RAWGR | bit string: granules stored verbatim | 10.3 |
-| 6 | GAPS | bit string: reservoir bits outside placed frames | 10.2 |
-| 7 | SIDE | range coded side information | 6, 7 |
-
-TAIL, RAWGR and GAPS are bit strings packed into bytes (section 1). `tail_bits`,
-`rawgr_bits` and `gap_bits` give their lengths in bits, and `raw_bits` the length in bits of
-the raw bit stream. These four are informational: a decoder does not need them. The rANS
-words are read by the rANS decoder (section 8), and the raw bit stream is read MSB first by
-the coefficient model (section 9).
-
-Decoding ends by checking that the output is `len` bytes long and that its xxh3 equals
-`hash`. A decoder MUST NOT return output that fails this check.
+TAIL, RAWGR and GAPS are bit strings packed into bytes (section 1); their lengths in bits
+are not given, and a decoder does not need them. `n_words`, the number of rANS words, is the
+length of slot 8 divided by 4. The rANS words are read by the rANS decoder (section 8), and
+the raw bit stream by the coefficient model (section 9).
 
 ## 3. Decoding overview
 
@@ -119,16 +90,16 @@ payload in `R` and may extend into later payloads. A frame whose main data lies 
 expected is *placed* (section 10.1). Its granules are coded through the coefficient model or
 stored verbatim; all other bits of `R` are *gap* bits, stored verbatim.
 
-To decode a coded container:
+To decode:
 
-1. Read the header and the byte streams (section 2).
+1. Check the params and the ten slots (section 2).
 2. Parse SEGS and HDR into the list of frames, with their headers and lengths (section 5).
 3. Run the *main pass* (section 10) over the frames in order. For each frame it decodes the
    side information from SIDE (sections 6, 7) and, for placed frames, rebuilds the frame's
    main data from the rANS and raw bit streams (sections 8, 9) or from RAWGR and TAIL. The
    result is the reservoir `R` and the complete side information of every frame.
 4. Assemble the output from JUNK, the headers, CRCs, side information and `R` (section 10.4).
-5. Check length and xxh3.
+5. Check the length.
 
 The rANS decoder, the raw bit reader, the range decoder and the bit readers of TAIL, RAWGR
 and GAPS each have one position that only advances, over the whole file.
@@ -649,8 +620,8 @@ decompresses to 1 540 828 bytes (SHA-256 of the decompressed bytes:
 
 The layout id is a 32-bit FNV-1a over the alphabet sizes as whole u32 values (`h =
 0x811c9dc5`; per value `h = (h XOR n) × 0x01000193 mod 2^32`). It guards against tables
-for a different context layout. Version 0 is defined with these tables; any change to them
-or to the context layout needs a new version number.
+for a different context layout. Version 1 is defined with these tables; any change to them
+or to the context layout needs a new module version.
 
 ## 9. Coefficient model
 
@@ -871,28 +842,27 @@ for k in 0..number of runs + 1:
 ## 11. Validation
 
 A decoder MUST fail on an error named in the sections above, and MUST NOT return output
-that fails the length and xxh3 check (section 2). The reference decoder also rejects, and a
+that is not `len` bytes long (section 2). The reference decoder also rejects, and a
 decoder SHOULD reject:
 
 - a frame count Σ `n[k]` above `len(HDR) / 4`;
 - a frame with `flen < prefix_len`, or with `r + flen > len` where `r` is the payload length
   of the frames before it (a sanity bound);
-- a zstd stream declaring a `size` above `len + 2^20`;
-- `n_words × 4` larger than what remains of the container.
+- a length of slot 8 that is not a multiple of 4.
 
-Any input, including a corrupted container, MUST result in an error or the original output,
-never in undefined behaviour; sizes read from the container SHOULD be bounded before
+Any input, including corrupted slots, MUST result in an error or the original output,
+never in undefined behaviour; sizes read from the slots SHOULD be bounded before
 allocating.
 
 ## 12. Encoder
 
-An encoder MAY write any file that decodes to its input as specified above. This section
+An encoder MAY give any slots that decode to its input as specified above. This section
 describes the reference encoder; its choices are not normative except where stated.
 
-### 12.1 Stored fallback
+### 12.1 No formula
 
-The reference encoder writes mode 0 if coding fails for any reason, or if the coded
-container would be at least as long as the input plus 9 bytes.
+The reference encoder gives no formula if coding fails for any reason, or if the slots
+together are not shorter than the input by more than 64 bytes.
 
 ### 12.2 Segmentation
 
@@ -935,47 +905,6 @@ main_data_begin through the prediction), then:
 - After the last frame, the bits of `R` from `end` to its end go to GAPS.
 
 The encoder MUST ensure that every requirement of 10.2 holds for what it writes.
-
-### 12.5 Byte streams
-
-The reference encoder compresses a byte stream with zstd (level 1) if it is longer than 16
-bytes and the compressed data is strictly shorter; otherwise it stores it plain.
-
-## 13. Formula module
-
-The coded form can also be given as an application of a module of entry formulas
-(aqr-formula), without the container around it: `aqr_mp3::formula::encode` gives the
-formula, `formula::decode` is the module.
-
-- **Module**: name `mp3-recons`, version 1. Version 1 uses the format of this document
-  (version 0) and `model/builtin.bin`, which stays compiled in.
-- **Params**: none (empty). A decoder MUST reject non-empty params.
-- **Output length**: the length `len` of the application is the length of the original file.
-  The decoder MUST fail if its output is not `len` bytes.
-- **Inputs**: exactly ten slots, each stored raw (the archive compresses them):
-
-| Slot | Class | Contents | Container field |
-|---|---|---|---|
-| 0 | `mp3/segs` | SEGS (5.1) | byte stream 0 |
-| 1 | `mp3/junk` | JUNK (5.2) | byte stream 1 |
-| 2 | `mp3/headers` | HDR (5.3) | byte stream 2 |
-| 3 | `mp3/crc` | CRC (5.4) | byte stream 3 |
-| 4 | `mp3/tailbits` | TAIL bit string | byte stream 4 |
-| 5 | `mp3/rawgr` | RAWGR bit string | byte stream 5 |
-| 6 | `mp3/gaps` | GAPS bit string | byte stream 6 |
-| 7 | `mp3/side` | SIDE, range coded | byte stream 7 |
-| 8 | `mp3/rans` | rANS words, u32 LE each; the length is a multiple of 4 | rANS words |
-| 9 | `mp3/rawbits` | raw bit stream | raw bit stream |
-
-Decoding is sections 3 to 10 on these streams. Not carried over from the container: magic,
-version and mode; `hash` (the check of section 11 is left to the evaluator); `len` (the
-application's length); the zstd layer of the byte streams (slots are plain); `tail_bits`,
-`rawgr_bits`, `gap_bits` and `raw_bits` (informational, section 2); `n_words` (the length of
-slot 8 divided by 4). Slot 9 is read as in the container, where it is all remaining bytes.
-
-The encoder gives no formula (the container would be stored, 12.1) where the coded
-container, with its zstd layer as in 12.5, would be at least as long as the input plus 9
-bytes, or if coding fails.
 
 ## Appendix A: tables
 

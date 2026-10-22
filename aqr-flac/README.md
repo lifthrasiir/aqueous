@@ -1,40 +1,22 @@
 # aqr-flac (`flr`)
 
-A lossless FLAC recompressor: FLAC files are stored smaller and restored bit for bit.
+A lossless FLAC recompressor: FLAC files are coded smaller and restored bit for bit, as the
+module `flac-recons` of entry formulas (`aqr_flac::formula`, archived by aqr-compress).
 WAV, AIFF / AIFC and headerless PCM go through the same model and come back byte for byte.
 Speed comes first: the target is 100 MB/s of input, single-threaded on an Apple M4, in both
 directions. Compression ratio is pursued only where it does not cost that.
 
 ## Results
 
-Apple M4, one thread, `flr bench -n 2` (best of two runs per file):
+The cost is about 30 cycles per sample each way, so speed per MB falls with the bits per
+sample: the most compressible 16-bit FLAC files (about 6 bits per sample) are coded at
+100–110 MB/s on an Apple M4, one thread. The ratio and speed tables of earlier versions were
+measured the standalone file format that this module replaced; they need re-measuring as
+`.aqr` archives with `flr bench`.
 
-| Set | Files | Input | Output / input | Compress | Decompress |
-|---|---|---|---|---|---|
-| FLAC, Internet Archive live recordings (16/44.1, libFLAC 1.1.x) | 94 | 2.31 GB | **0.9620** | **142.7 MB/s** | **157.3 MB/s** |
-| FLAC, Internet Archive 24-bit (44.1–96 kHz) | 13 | 363 MB | 0.9705 | 218.0 MB/s | 241.0 MB/s |
-| FLAC, synthetic (decoded MP3s, 12 encoder settings) | 120 | 457 MB | 0.9428 | 175.7 MB/s | 191.1 MB/s |
-| WAV, the first 8 IA tracks decoded | 8 | 128 MB | 0.4511 | 185.1 MB/s | 192.3 MB/s |
-| WAV, synthetic (16 and 24 bit) | 20 | 223 MB | 0.4194 | 208.1 MB/s | 188.6 MB/s |
-
-Every file round-trips (`bench` also checks the coded path when the container stores the
-file). Speed per MB falls with the bits per sample: the cost is about 30 cycles per sample
-each way, so the most compressible 16-bit FLAC files (about 6 bits per sample) are coded at
-100–110 MB/s.
-
-### Comparison
-
-The 8 WAV files above (128.1 MB):
-
-| Tool | Output / WAV |
-|---|---|
-| `flr` on the WAV | **0.4511** |
-| `flr` on the `flac -8` files | 0.4510 (0.9835 of the FLAC) |
-| flac 1.5.0 `-8` | 0.4585 |
-| zstd 1.5 `-19` | 0.7522 |
-
-FFmpeg's WavPack encoder at its highest level was about 1–2% smaller than `flac -8` on these files (and far slower);
-TTA was about the same as `flac -8`. zstd `-19` saves 0.15% on the FLAC files.
+FFmpeg's WavPack encoder at its highest level was about 1–2% smaller than `flac -8` on
+8 IA tracks decoded to WAV (and far slower); TTA was about the same as `flac -8`. zstd `-19` saves 0.15% on the FLAC
+files.
 
 The tables were trained on every second file of the IA, hi-res and synthetic sets (their
 shape is nearly universal once scaled; 101 contexts × 72 tokens).
@@ -44,22 +26,22 @@ shape is nearly universal once scaled; 101 contexts × 72 tokens).
 ```sh
 cargo build --release
 
-flr c in.flac out.flr                # compress (FLAC, WAV, AIFF; anything else is stored)
-flr c -r s16le:2 in.raw out.flr      # headerless PCM: sign, bits, endianness, channels
-flr d out.flr back.flac              # decompress
-flr c -t 4 in.flac out.flr           # -t THREADS (c, d: default the available cores)
-flr bench [-r FMT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...  # round trip check, ratio, speed, stream sizes (-t default 1)
+flr bench [-r FMT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...  # formula and .aqr round trip check, size, speed, stream sizes (-t default 1)
 flr info FILE|DIR...
 flr fuzz [-r FMT] [-t THREADS] [-n N] [-s SEED] FILE|DIR...  # mutated inputs must round-trip, the same with threads
 train [-a] OUT FILE|DIR...           # trains the built-in tables (model/builtin.bin)
 ```
 
+`-r FMT` takes the input as headerless PCM: sign, bits, endianness, channels (`s16le:2`).
+
 ```rust
-let packed = aqr_flac::compress(&input);            // never fails: stores what it cannot code
-assert_eq!(aqr_flac::decompress(&packed)?, input);  // checked against an xxh3 of the original
-let opt = aqr_flac::Options { threads: 8, ..Default::default() };
-assert_eq!(aqr_flac::compress_opt(&input, &opt), packed);       // the same bytes
-assert_eq!(aqr_flac::decompress_threads(&packed, 8)?, input);
+use aqr_flac::formula;
+use aqr_formula::Apply;
+let f = formula::encode(&input, 8).unwrap();   // None where the input is not coded
+let out = f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+    formula::decode(&a.params, inputs, a.len, 8).map_err(|e| aqr_formula::Error::new(e.0))
+})?;
+assert_eq!(out, input);
 ```
 
 ## Layout
@@ -71,13 +53,13 @@ assert_eq!(aqr_flac::decompress_threads(&packed, 8)?, input);
 | `src/residual.rs` | The pipeline shared by FLAC and PCM: per-frame passes, state across frames, built-in tables, subframe parameter serialisation |
 | `src/codec.rs` | FLAC files: segmentation into frames and junk, header prediction, streams |
 | `src/pcm.rs` | WAV / AIFF / raw PCM: format detection, block LPC encoder, decoding |
-| `src/container.rs` | Container format (specified in `FORMAT.md`), stored fallback, checksum, options |
+| `src/formula.rs` | The module `flac-recons` (specified in `FORMAT.md`): choice of the kind, options, the streams as formula inputs |
 | `src/par.rs` | Pipelines for more than one thread: batches, stages, pool, reordering |
 | `../aqr-common` | Alias-table rANS (`rans64`, re-exported as `rans`), bit readers and writers (`msb`, as `bits`), LEB128 |
 | `src/bin/train.rs` | Training of the built-in tables |
-| `tests/threads.rs` | The same container bytes for 1, 2, 3 and 8 threads, threaded round trips, the same result decompressing damaged containers (also on inputs of many batches) |
-| `tests/regress.rs`, `tests/data` | Round trips of small synthetic files (8–32 bit, 1–6 channels, several encoders, lax streams, silence, ID3 tags, junk, cut files, WAV / AIFF / AIFC, raw PCM), corrupted containers |
-| `examples/` | Benchmarks and analysis: `hot`, `dhot` (profiling loops), `lmsbench`, `entbench` (cycles per residual of each pass), `rt` (parse / write round trip), `breakdown` (where FLAC's bits go), `exp2` (model experiments with ideal code lengths), `corrupt` |
+| `tests/threads.rs` | The same formula for 1, 2, 3 and 8 threads, threaded round trips (also on inputs of many batches) |
+| `tests/formula.rs`, `tests/data` | Round trips of small synthetic files (8–32 bit, 1–6 channels, several encoders, lax streams, silence, ID3 tags, junk, cut files, WAV / AIFF / AIFC, raw PCM), corrupted inputs of the module |
+| `examples/` | Benchmarks and analysis: `hot`, `dhot` (profiling loops), `lmsbench`, `entbench` (cycles per residual of each pass), `rt` (parse / write round trip), `breakdown` (where FLAC's bits go), `exp2` (model experiments with ideal code lengths) |
 | `tools/` | `gen_testdata.sh`, `gen_synth.sh` (synthetic corpus from MP3s), `profile.py` (samply + atos) |
 
 ## Design
@@ -94,8 +76,8 @@ assert_eq!(aqr_flac::decompress_threads(&packed, 8)?, input);
   writing the residuals with the same parameters reproduces the bits; CRC-8 and CRC-16 are
   recomputed.
 - **Headers** are predicted from the previous one (frame or sample number advanced); a
-  match costs one byte before zstd. Subframe parameters and stored samples go to zstd'd
-  byte streams (0.5% of the output on CD material).
+  match costs one byte before the archive's zstd. Subframe parameters and stored samples go
+  to small byte streams (0.5% of the output on CD material).
 - **Residuals** (99% of a FLAC file) go through the model.
 
 ### 2. Residual model
@@ -148,8 +130,8 @@ FLAC's synthesis.
 
 ### Threads
 
-`-t N` (`Options::threads`, `compress_opt`, `decompress_threads`): the output is the same
-bytes whatever the number of threads, and one thread runs the serial code. The residual
+`-t N` (`Options::threads` of `formula::encode_with`, the `threads` of `formula::decode`): the
+formula is the same whatever the number of threads, and one thread runs the serial code. The residual
 model carries state across frames (LMS weights and history, scale means, the rANS symbol
 order, the raw bit writers), so it is not split across the file; it is split by stage.
 Frames go between threads in batches of about 65,536 samples (at most 64 items), through
@@ -170,39 +152,31 @@ bounded channels; a fixed number of batches circulates, so memory stays bounded.
   output.
 - Errors travel down the pipeline in frame order, so a damaged file gives the same error
   as with one thread; a frame whose long Rice codes exceed a small budget is written again
-  in order with the exact one. Side streams are zstd'd / unzstd'd on threads of their own,
-  and the checksum of the input is taken on another thread while compressing.
-- `compress_opt` never fails: a panic on any thread still falls back to stored (pool
-  threads forward panics; the other threads see their channels close and stop).
+  in order with the exact one.
+- A panic on any thread reaches the caller (pool threads forward panics; the other threads
+  see their channels close and stop), where `formula::encode_with` callers catch it.
 
-### 5. Container
+### 5. Formula module
 
-[FORMAT.md](FORMAT.md) specifies the format in full.
+[FORMAT.md](FORMAT.md) specifies the module in full. Params: one byte, 0 for FLAC and 1 for
+PCM (WAV, AIFF and raw samples alike). Inputs: nine slots, the 6 byte streams (FLAC: prefix,
+layout, junk, headers, subframes, warm-up samples; PCM: header, format and length, trailing
+bytes, stereo modes, subframes, samples), the rANS words (`u32le`) and raw bit streams 0
+and 1. The output length is the formula's; the archive carries the checksum and compresses
+the slots.
 
-```text
-magic(6) version(u16 LE)
-  magic: 69047e7f569c (base64 aQR+f1ac) FLAC, 69047ec1abf7 (aQR+wav3) WAV / AIFF,
-         69047ea5c9bf (aQR+pcm/) raw PCM or anything not recognised
-version 0 (stored): the input verbatim
-version 1 (coded):
-  u64 LE length, u64 LE xxh3 of the original
-  6 byte streams (FLAC: prefix, layout, junk, headers, subframes, warm-up samples;
-                  PCM: header, format and length, trailing bytes, stereo modes, subframes, samples)
-                 each varint(len << 1 | zstd) [varint raw len] data; zstd level 3
-  varint rANS word count, rANS words, varint length of raw stream 0, raw streams 0 and 1
-```
-
-- `compress` never fails: panics and anything larger than the input fall back to stored.
-- Decompression checks the length and the xxh3 and bounds every size it reads; corrupted
-  input gives an error rather than a crash, a huge allocation or a long loop (Rice codes of
-  garbage residuals can be 2^32 bits long, so frame writing has a byte budget).
+- `formula::encode` gives no formula for what it does not code, and for what makes the
+  coder panic.
+- `formula::decode` bounds every size it reads; corrupted input gives an error rather than
+  a crash, a huge allocation or a long loop (Rice codes of garbage residuals can be 2^32
+  bits long, so frame writing has a byte budget).
 
 ## Verification
 
-- `flr bench`: every file round-trips through the container and through the coded path.
-- `flr fuzz`: bit flips, truncation, deletion and insertion; both paths must round-trip
-  without panics (1170 mutated inputs of the test data and corpus files, also as raw PCM).
-- `cargo test --release`: bit I/O, rANS, `tests/regress.rs` and `tests/threads.rs`.
+- `flr bench`: every file's formula evaluates to the input, and so does its `.aqr` archive.
+- `flr fuzz`: bit flips, truncation, deletion and insertion; the formula, if there is
+  one, must evaluate back without panics, the same with threads (1170 mutated inputs of the test data and corpus files, also as raw PCM).
+- `cargo test --release`: bit I/O, rANS, `tests/formula.rs` and `tests/threads.rs`.
 
 ## Tried and dropped
 
@@ -224,13 +198,13 @@ lengths), unless noted.
 
 ## Open issues and limitations
 
-- **Side information**: warm-up samples and LPC coefficients are only zstd'd (0.5% of the
+- **Side information**: warm-up samples and LPC coefficients are only byte streams (0.5% of the
   output on CD material); warm-up samples could be predicted from the previous frame, but
   that needs the samples, which the FLAC path never reconstructs.
 - **Encoder variety**: tested with libFLAC 1.1.0–1.5.0 (all levels, lax streams) and FFmpeg's
   encoder. Variable block size streams (flake, some FFmpeg settings) are handled by the
   header prediction but were not available for testing.
-- **Not covered** (stored, or the containing bytes kept as junk): FLAC in Ogg, float WAV,
+- **Not covered** (not coded, or the containing bytes kept as junk): FLAC in Ogg, float WAV,
   more than 8 channels, compressed AIFC.
 - **Memory**: the whole input, plus 4 bytes per residual for the rANS symbols.
 - MD5 signatures are not checked (they are kept with the metadata).

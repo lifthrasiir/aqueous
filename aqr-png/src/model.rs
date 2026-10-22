@@ -203,7 +203,7 @@ impl Recorder {
         let st = rans::encode(&self.syms, &freqs);
         let raw = self.raw.finish();
         for part in [&tb, &st, &raw] {
-            crate::container::put_varint(out, part.len() as u64);
+            aqr_common::varint::put(out, part.len() as u64);
         }
         out.extend_from_slice(&tb);
         out.extend_from_slice(&st);
@@ -238,7 +238,7 @@ impl<'a> Player<'a> {
     pub fn new(src: &'a [u8], at: &mut usize) -> crate::Result<Player<'a>> {
         let mut lens = [0usize; 3];
         for l in &mut lens {
-            *l = crate::container::get_varint(src, at)? as usize;
+            *l = crate::codec::get_varint(src, at)? as usize;
         }
         let mut part = |n: usize| -> crate::Result<&'a [u8]> {
             let s = src.get(*at..at.checked_add(n).ok_or_else(crate::corrupt)?).ok_or_else(crate::corrupt)?;

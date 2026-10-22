@@ -2,45 +2,29 @@
 
 Lossless SQLite 3 database recompression: a database file is stored smaller, and restored
 bit for bit. Meant as a component of a general-purpose compressor, so speed comes first:
-the target is 100 MB/s single-threaded on an Apple M4, both ways. zstd is the entropy
-backend.
+the target is 100 MB/s single-threaded on an Apple M4, both ways.
 
 ```sh
 cargo build --release
-sqlr c [-l LEVEL] [-b LEVEL] [-x] [-L] [-t N] in.db out.sqlr   # compress
-sqlr d [-t N] out.sqlr back.db                                # decompress
-sqlr bench [-n ITERS] [-t N] [-m] [-v] [-c|-d] FILE...        # round trip check, ratio, CPU-time throughput (wall time with -t > 1)
-sqlr fuzz [-n N] [-s SEED] FILE...                      # mutated databases and containers
+sqlr bench [-n ITERS] [-t N] [-m] [-v] [-x] [-c|-d] FILE...  # round trip check, archive size, CPU-time throughput (wall time with -t > 1)
+sqlr fuzz [-n N] [-s SEED] FILE...                           # mutated databases and corrupted streams
 ```
 
 ```rust
-let packed = aqr_sqlite::compress(&db);              // never fails: stores what it cannot code
-assert_eq!(aqr_sqlite::decompress(&packed)?, db);    // checked against an xxh3 of the original
+let f = aqr_sqlite::formula::encode(&db, 1);      // None where the transform does not apply
 ```
 
-Any input is accepted: a file that is not a database is zstd-compressed whole, and any page
-or record that cannot be coded is kept as it is.
+The module `sqlite-recons` (`aqr_sqlite::formula`) rebuilds the database from the streams of
+the transform; archiving (`.aqr`) and the compression of the streams are aqr-formula's. Any
+page or record that cannot be coded is kept as it is; a file that is not a database has no
+formula.
 
 ## Results
 
-Apple M4, one thread, thread CPU time, best of 3 (`sqlr bench -n 3`). Output size / input
-size; every file round-trips. zstd 1.5.7 (`--single-thread`) and xz 5.8 (`-T1`) on each
-file, summed (`scripts/baseline.sh`).
-
-| set | files | size | **sqlr** | compress | decompress | zstd -3 | zstd -19 | xz -9 |
-|---|---|---|---|---|---|---|---|---|
-| public (real databases) | 13 | 87 MB | **0.1708** | 122 MB/s | 386 MB/s | 0.3685 | 0.2542 | 0.2079 |
-| system (macOS system databases) | 116 | 127 MB | **0.2358** | 119 MB/s | 367 MB/s | 0.4152 | 0.3292 | 0.2913 |
-| synthetic (format features) | 25 | 115 MB | **0.2047** | 90 MB/s | 518 MB/s | 0.3115 | 0.2482 | 0.2300 |
-| **all** | 154 | 328 MB | **0.2077** | **107 MB/s** | **415 MB/s** | 0.3666 | 0.2811 | 0.2478 |
-
-16% smaller than xz -9 and 26% smaller than zstd -19 overall. Compression includes
-verification (the file is rebuilt from the streams and compared; on a mismatch it is stored
-whole), about a fifth of its time.
-
-The synthetic set is below the speed target: its random text keeps zstd's level-9 match
-finder busy. With `-l 5 -b 8` the whole corpus compresses at about 119 MB/s for 0.2092;
-with `-l 3 -b 3` at 178 MB/s for 0.2181; `-x` skips verification.
+The sizes and speeds measured earlier no longer apply: the streams are now compressed by
+aqr-formula's archive. They need re-measuring with `sqlr bench`, which encodes through the formula and reports the
+archive size. `scripts/baseline.sh` gives the sizes under zstd -3, zstd -19 and xz -9 for
+comparison.
 
 ### Corpus
 
@@ -57,58 +41,34 @@ with `-l 3 -b 3` at 178 MB/s for 0.2181; `-x` skips verification.
 
 ### Memory
 
-Peak RSS (input and output included):
-
-| file | size | compress | decompress |
-|---|---|---|---|
-| northwind.db | 24.7 MB | 131 MB | 75 MB |
-| til.db | 21.1 MB | 105 MB | 56 MB |
-| Certificates valid.sqlite | 13.4 MB | 76 MB | 47 MB |
-| overflow_4096.db | 8.7 MB | 44 MB | 22 MB |
-
-`sqlr bench -m` reports the Rust heap beyond input and output: at most 3.0× the input
-compressing and 2.5× decompressing on the files above 5 MB (more on small files, from
-fixed overheads). Build with `--features memprof` for heap use per phase. Everything is in
-memory: there is no streaming over large files.
+`sqlr bench -m` reports the Rust heap beyond input and output, encoding and decoding. The
+figures measured earlier (at most 3.0x the input compressing and 2.5x decompressing on
+files above 5 MB) need re-measuring. Build with `--features memprof` for heap use per
+phase. Everything is in memory: there is no streaming over large files.
 
 ### Threads
 
-`-t N` (`Options::threads`, default 1 for the library; `container::decompress_threads`;
-`sqlr c` and `sqlr d` default to the available cores, `bench` to 1): the output is the same
-bytes whatever the number of threads (zstd's own `nbWorkers` is not used, as its output
-differs), and one thread runs the serial code unchanged. `std::thread::scope`, a small
-work queue (`src/par.rs`), no dependency. A panic on a worker falls back to the stored file
-like any other.
+`-t N` (`formula::Options::threads`, and the `threads` of `formula::encode` and
+`formula::decode`; default 1 for the library and for `bench`): the streams are the same
+whatever the number of threads, and one thread runs the serial code unchanged.
+`std::thread::scope`, a small work queue (`src/par.rs`), no dependency. A panic on a worker
+means no formula, like any other.
 
-- Compressing: the b-tree groups are coded in parallel (each makes its directory entry and
+- Encoding: the b-tree groups are coded in parallel (each makes its directory entry and
   pieces, put together in group order; an index group reads its table's group, which is
   freed after its last index as before). The page pass and the index key discovery (first
-  match wins, in schema order) stay serial. Then verification and the zstd of the 18
-  streams run as tasks of one queue (the text/blob stream first), each worker with
-  compressors of its own with the same parameters; a failed verification discards the
-  output. The streams stay in memory until all are done.
-- Decompressing: the stream headers are parsed in order (same checks), the streams are
-  decoded in parallel, then the first pass over the tables and the index orders run in
-  parallel. The page loop and the record decoding stay on one thread.
+  match wins, in schema order) stay serial. Verification (the file is rebuilt from the
+  streams and compared) is a separate pass.
+- Decoding: the first pass over the tables and the index orders run in parallel. The page
+  loop and the record decoding stay on one thread.
 
 With more than one thread `bench` reports wall time instead of thread CPU time.
 
 ## Format
 
-[FORMAT.md](FORMAT.md) specifies the format in full, for a decoder or an encoder written from
-it alone. It is frozen: `scripts/format-ref.tsv` holds a hash of the output for every corpus
-file, and `scripts/format-check.sh` checks that changes keep it.
-
-```text
-magic 69 04 6c ab 58 be ("aQRsq1i+") | u16 LE version | u64 LE length | u64 LE xxh3 of the original
-version 0: zstd(file)
-version 1: varint(page size) varint(usable size) u8(schema format >= 4)
-           18 streams, each read with the help of those before it only:
-             varint(n << 1 | zstd?) [varint(raw length) if zstd] n bytes
-```
-
-zstd is level 7 for every stream but text/blob content (level 9), with long-distance
-matching (window 2^27) for inputs over 2 MB.
+[FORMAT.md](FORMAT.md) specifies the module in full, for a decoder or an encoder written
+from it alone: its params, the 18 streams it takes as inputs, and how they rebuild the
+database.
 
 ## How
 
@@ -166,40 +126,40 @@ columns of such a table: it decodes the table once for them, and again for its p
 - Reals byte-transposed or XOR-delta'd: larger under zstd than raw doubles.
 - An adaptive binary model for the integer streams: 9% larger than zstd and 5× slower
   (zstd's gain there is exact repeats).
-- Higher levels for the small streams: little gain for the time.
 - WITHOUT ROWID secondary indexes: none in the real-world sets.
 
 ## Testing
 
 ```sh
 cargo test --release
-scripts/format-check.sh
 ../target/release/sqlr fuzz -n 200 $(find corpus -type f -size -4M)
 ```
 
 - `tests/roundtrip.rs`: databases built with the `sqlite3` tool (page sizes, indexes with
   DESC/NOCASE, overflow, churn, secure_delete, auto_vacuum, UTF-16, WITHOUT ROWID, FTS5),
-  non-databases, cut and padded files, 2,000 corrupted containers (errors, never panics),
-  and that verification catches altered streams.
+  non-databases, cut and padded files, the same streams for every number of threads, and
+  that verification catches altered streams.
+- `tests/formula.rs`: the formula of such databases evaluated with this crate's module,
+  the inputs with no formula, and corrupted params and streams (errors, never panics).
 - Unit tests: varints, records, decimals, cell placement.
 - `sqlr fuzz`: mutated databases (bytes, page types, cell pointers, truncation, junk,
   copied pages, page numbers, header fields) must round-trip with the safety nets off, and
-  corrupted containers must fail cleanly; over 40,000 runs on the corpus without a failure.
+  corrupted streams must fail cleanly or decode.
 
 ## Layout
 
 | File | Contents |
 |---|---|
-| `FORMAT.md` | The format, in full |
-| `src/container.rs` | File format, compression (with verification), decompression |
+| `FORMAT.md` | The module's format, in full |
+| `src/formula.rs` | The module `sqlite-recons`: encoding to a formula, decoding |
 | `src/transform.rs` | Page classification, streams, encoder and decoder |
 | `src/page.rs` | Geometry, b-tree page parsing, cell placement |
 | `src/record.rs` | Records, column coding |
 | `src/index.rs` | Schema, index keys, index order |
 | `src/varint.rs` | SQLite varints, stream cursor (LEB128 from `aqr-common`) |
 | `aqr_common::mem` | Heap accounting (`bench -m`, feature `memprof`) |
-| `src/bin/sqlr.rs` | Command-line tool, bench, fuzz |
-| `scripts/` | Corpus, baselines, format check, profiling (`profile.py` over samply) |
+| `src/bin/sqlr.rs` | Bench, fuzz |
+| `scripts/` | Corpus, baselines, profiling (`profile.py` over samply) |
 
 ## Next steps
 

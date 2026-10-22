@@ -1,6 +1,6 @@
 //! Lossless PDF recompression: a PDF file is stored smaller, and restored bit for bit.
 
-pub mod container;
+pub mod encode;
 pub mod flate;
 pub mod formula;
 pub mod image;
@@ -11,8 +11,6 @@ pub mod rans;
 pub mod scan;
 pub mod tok;
 pub mod varint;
-
-pub use container::{compress, decompress};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {

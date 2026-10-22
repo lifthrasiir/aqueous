@@ -10,6 +10,7 @@ description = "Compares aqr-png with preflate-rs, precomp, paq8px and generic co
 
 [dependencies]
 aqr-png = { path = ".." }
+aqr-formula = { path = "../../aqr-formula" }
 preflate-container = { path = "../../third_party/preflate-rs/container" }
 libc = "0.2"
 
