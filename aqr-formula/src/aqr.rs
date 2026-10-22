@@ -7,9 +7,8 @@
 //!
 //! Until modules are WebAssembly (the spec's "Module execution" is tentative), a module block
 //! holds a Wasm module of custom sections only, one of them ([`NATIVE_SECTION`]) naming the
-//! module (`name@version`), and a [`NativeModule`] stands in for it. Its applications declare
-//! what a module reading its inputs whole and committing its output at the end needs: windows
-//! of the whole inputs and output, and no memory limit ([`MEMORY_LIMIT`]).
+//! module (`name@version`), and a [`NativeModule`] stands in for it as a whole module. Its
+//! applications declare no memory limit ([`MEMORY_LIMIT`]).
 //!
 //! [`Encoder`] encodes several formulas, compressing each stream and resource once however
 //! many hold it, at the zstd level that its [`Level`] picks for it.
@@ -265,9 +264,7 @@ fn instructions(n: &Node, ordinals: &[Option<u64>], modules: &[Module], resource
             out.extend_from_slice(&a.params);
             varint::put(out, MEMORY_LIMIT);
             varint::put(out, a.inputs.len() as u64);
-            a.inputs.iter().for_each(|n| varint::put(out, n.len()));
             varint::put(out, 1);
-            varint::put(out, a.len);
             varint::put(out, a.len);
         }
     }
@@ -281,7 +278,7 @@ pub fn description_bound(n: &Node) -> usize {
         &Node::Slice { start, len, .. } => 1 + 3 + varint::len(start) + varint::len(len),
         Node::Concat(ns) => ns.iter().map(description_bound).sum::<usize>() + 1 + varint::len(ns.len() as u64),
         Node::Apply(a) => {
-            let inputs: usize = a.inputs.iter().map(|n| description_bound(n) + varint::len(n.len())).sum();
+            let inputs: usize = a.inputs.iter().map(description_bound).sum();
             inputs
                 + 1
                 + 2
@@ -292,7 +289,7 @@ pub fn description_bound(n: &Node) -> usize {
                 + varint::len(MEMORY_LIMIT)
                 + varint::len(a.inputs.len() as u64)
                 + 1
-                + 2 * varint::len(a.len)
+                + varint::len(a.len)
         }
     }
 }
@@ -830,9 +827,8 @@ struct Apply<'a> {
     module: usize,
     resources: Vec<usize>,
     params: &'a [u8],
-    input_windows: Vec<u64>,
+    num_inputs: usize,
     output_sizes: Vec<u64>,
-    output_windows: Vec<u64>,
 }
 
 /// Reads formula data, checking what does not depend on the evaluation.
@@ -927,13 +923,12 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
                 res.iter().for_each(|&i| r_used[i] = true);
                 let params = r.bytes()?;
                 let _memory_limit = r.num()?;
-                let input_windows = r.nums()?;
+                let num_inputs = usize::try_from(r.num()?).unwrap_or(usize::MAX);
                 let output_sizes = r.nums()?;
-                let output_windows = (0..output_sizes.len()).map(|_| r.num()).collect::<Decoded<Vec<_>>>()?;
                 if output_sizes.is_empty() {
                     return invalid("an application without outputs");
                 }
-                Insn::Apply(Apply { module, resources: res, params, input_windows, output_sizes, output_windows })
+                Insn::Apply(Apply { module, resources: res, params, num_inputs, output_sizes })
             }
             CONCAT => Insn::Concat(r.index(depth + 1)?),
             CHECKSUM => {
@@ -947,7 +942,7 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
             Insn::Nop | Insn::Swap(_) => {}
             Insn::Literal(_) | Insn::Slice { .. } => depth += 1,
             Insn::Apply(a) => {
-                pop(&mut depth, a.input_windows.len())?;
+                pop(&mut depth, a.num_inputs)?;
                 depth += a.output_sizes.len();
             }
             &Insn::Concat(n) => {
@@ -986,7 +981,7 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
                 stack.push(s.to_vec());
             }
             Insn::Apply(a) => {
-                let inputs = stack.split_off(stack.len() - a.input_windows.len());
+                let inputs = stack.split_off(stack.len() - a.num_inputs);
                 let res: Vec<Resource> = a.resources.iter().map(|&i| env.resources[resources[i]].clone()).collect();
                 stack.extend(apply(env, modules[a.module], &a, &inputs, &res)?);
             }
@@ -1017,10 +1012,6 @@ fn apply(env: &Env, module: usize, a: &Apply, inputs: &[Vec<u8>], resources: &[R
     let &[size] = &a.output_sizes[..] else {
         return invalid(format!("{name}: {} outputs declared", a.output_sizes.len()));
     };
-    // a native module reads its inputs whole, which the windows have to hold
-    if inputs.iter().zip(&a.input_windows).any(|(i, &w)| (i.len() as u64) > w) || a.output_windows[0] < size {
-        return invalid(format!("{name}: a window smaller than its data"));
-    }
     let inputs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
     let outputs = native.apply(a.params, resources, &inputs, &a.output_sizes)?;
     if outputs.len() != 1 || outputs[0].len() as u64 != size {
@@ -1282,20 +1273,20 @@ mod tests {
         assert_eq!(decode(&bad, &natives()), invalid("output checksum mismatch"));
     }
 
-    /// Applications by hand: the declared sizes and windows.
+    /// Applications by hand: the numbers of inputs and the declared sizes.
     #[test]
     fn applications() {
-        let apply = |windows: [u64; 2], size: u64, window: u64| {
+        let apply = |inputs: u8, sizes: &[u8]| {
             let mut d = vec![1, 0, 0, 1, 0, SLICE, 0, 0, 3, SLICE, 0, 1, 2, APPLY, 0, 0, 3, 1, 2, 3];
             varint::put(&mut d, MEMORY_LIMIT);
-            d.extend_from_slice(&[2, windows[0] as u8, windows[1] as u8, 1, size as u8, window as u8]);
+            d.extend_from_slice(&[inputs, sizes.len() as u8]);
+            d.extend_from_slice(sizes);
             decode(&formula(&d, &[b"abc"]), &natives())
         };
-        assert_eq!(apply([3, 2], 5, 5).unwrap(), b"cbcba");
-        assert_eq!(apply([8, 8], 5, 8).unwrap(), b"cbcba");
-        assert_eq!(apply([2, 2], 5, 5), invalid("rev@1: a window smaller than its data"));
-        assert_eq!(apply([3, 2], 5, 4), invalid("rev@1: a window smaller than its data"));
-        assert_eq!(apply([3, 2], 4, 4), invalid("rev@1: outputs of other sizes than declared"));
+        assert_eq!(apply(2, &[5]).unwrap(), b"cbcba");
+        assert_eq!(apply(3, &[5]), invalid("stack underflow"));
+        assert_eq!(apply(2, &[]), invalid("an application without outputs"));
+        assert_eq!(apply(2, &[4]), invalid("rev@1: outputs of other sizes than declared"));
     }
 
     #[test]

@@ -10,7 +10,7 @@
 //! Streams are not placed yet: the archive encoder lays them out into non-leaf blocks, and
 //! [`Stream::class`] tells it which streams are alike (to share frames and a dictionary, §3).
 //! What belongs to the archive is left out: `ref` to other entries, and the resource
-//! declarations of `apply` (memory limit, windows, capacities), which the archive encoder
+//! declarations of `apply` (memory limit, capacities), which the archive encoder
 //! measures while verifying (§6). [`Resource`]s (§5.6), the models that modules take, are
 //! held by the applications, and the archive encoder stores each once.
 //!

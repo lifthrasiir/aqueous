@@ -2913,19 +2913,11 @@ Opcode 11<sub>16</sub> denotes a **Apply instruction**. Its operands consist of 
       <td>[=leb128=]
       <td>
     <tr>
-      <td><dfn>apply_input_windows</dfn>
-      <td>[=leb128=][[=formula/apply_num_inputs=]]
-      <td>
-    <tr>
       <td><dfn>apply_num_outputs</dfn>
       <td>[=leb128=]
       <td>
     <tr>
       <td><dfn>apply_output_sizes</dfn>
-      <td>[=leb128=][[=formula/apply_num_outputs=]]
-      <td>
-    <tr>
-      <td><dfn>apply_output_windows</dfn>
       <td>[=leb128=][[=formula/apply_num_outputs=]]
       <td>
   </tbody>
@@ -3312,9 +3304,7 @@ To <dfn>evaluate a formula block</dfn> |block|:
             4. Let |outputs| be the result of [=apply a module|applying=]
                 the module block at [=formula/module_indices=][[=formula/apply_module=]]
                 with |inputs|, the resource blocks at [=formula/resource_indices=][|r|] for each |r| of [=formula/apply_resources=],
-                [=formula/apply_params=] and the resource declarations
-                [=formula/apply_memory_limit=], [=formula/apply_input_windows=], [=formula/apply_output_sizes=]
-                and [=formula/apply_output_windows=].
+                [=formula/apply_params=], [=formula/apply_output_sizes=] and [=formula/apply_memory_limit=].
             5. Push each item of |outputs| in order.
         : 12<sub>16</sub> (Concatenate)
         :: Pop [=formula/concat_count=] items and push their concatenation in order.
@@ -3354,57 +3344,117 @@ It MUST conform to the following profile, or an [=invalid archive=] failure occu
 * WebAssembly 2.0 core with the fixed-width SIMD, executed under the deterministic profile;
     every NaN result is a canonical NaN.
 * Multiple memories are allowed.
-* Threads, relaxed SIMD, garbage collection, exception handling, memory64 for the working memory
+* Threads, relaxed SIMD, garbage collection, exception handling, memory64 for the [=working memory=]
     and imported tables are not allowed.
+* It defines no memory, and imports each memory at most once.
+* Every `memory.grow` instruction targets the [=working memory=].
+* It exports exactly one of the functions `aqr_apply_whole` and `aqr_apply_part`, the <dfn>entry point</dfn>.
+    The module is a <dfn>whole module</dfn> in the former case and a <dfn>part module</dfn> in the latter.
 
-Issue: The import module name, the exported entry point, how resources and parameters are supplied, and whether memory64 is allowed for input and output memories.
+Issue: Whether memory64 is allowed for the memories other than the working memory.
 
 Issue: Whether the guaranteed limit of 2<sup>27</sup> bytes (128 MiB) for the Zstandard `Window_Size` ([[#zstandard-compression-method]])
-should also apply to the declared input and output window sizes and the memory limit.
+should also apply to the memory limit.
+
+Every import of a module is from the module name `aqr`, under one of the following names.
+The names of imports and exports are prefixed with `aqr_` to avoid collisions in the toolchains and hosts
+that link them into one namespace.
+Any other import is an [=invalid archive=] failure.
+
+: `aqr_memory`
+:: A memory, the <dfn>working memory</dfn>.
+: `aqr_params`
+:: A memory of the parameters.
+: `aqr_resource`|i|
+:: A memory of the |i|-th resource, where |i| is a decimal number without leading zeros.
+: `aqr_input`|k|
+:: A memory of the |k|-th input, where |k| is a decimal number without leading zeros.
+: `aqr_output`
+:: A memory of the output.
+: `aqr_request`, `aqr_release`, `aqr_commit`
+:: Functions of a [=part module=], defined below. A [=whole module=] MUST NOT import them.
+: `aqr_heartbeat`
+:: A function defined below.
+
+The <dfn>page count</dfn> of a length |L| is &lceil;|L| / 65536&rceil;.
+A memory of a length |L| is <dfn>sized to fit</dfn> when its size is the [=page count=] of |L| in pages,
+and its import type MUST allow that size.
+A memory of a length |L| is <dfn>sized as a window</dfn> when its size is
+the [=page count=] of |L|, raised to the minimum and lowered to the maximum of its import type, in pages.
 
 To <dfn>apply a module</dfn> |module| given a [=list=] of input [=byte sequences=] |inputs|,
-resources, parameters, a [=list=] of declared output sizes and resource declarations:
+a [=list=] of resource blocks |resources|, a parameter [=byte sequence=] |params|,
+a [=list=] of declared output sizes and a memory limit:
 
 <ol class=algorithm>
     1. The number of declared output sizes MUST be 1. Let |size| be the declared output size.
-    2. For each index |k| of |inputs|, let |W|<sub>|k|</sub> be the declared input window size of |k|-th input,
-        and let the <dfn>visible range</dfn> of the |k|-th input be [0, 0).
-    3. Let |W|<sub>out</sub> be the declared output window size and |output| be an empty [=byte sequence=].
-    4. Instantiate |module| with the host functions below,
-        binding the memory |k| + 1 to a zero-filled memory of |W|<sub>|k|</sub> bytes for each input |k|
-        and the output memory to a zero-filled memory of |W|<sub>out</sub> bytes.
-    5. Invoke the entry point.
+    2. Every `aqr_resource`|i| imported MUST satisfy |i| < the number of |resources|,
+        and every `aqr_input`|k| imported MUST satisfy |k| < the number of |inputs|.
+    3. Create the memories imported, each initially zero-filled:
+        * The [=working memory=] has the minimum size of its import type.
+        * The memory of the parameters is [=sized to fit=] the length of |params|, and holds |params| from offset 0.
+        * The memory of the |i|-th resource is [=sized to fit=] its [=stored content=] |c|, and holds |c| from offset 0.
+        * The memory of the |k|-th input is [=sized to fit=] the length of |inputs|[|k|], and holds |inputs|[|k|] from offset 0,
+            if |module| is a [=whole module=].
+            Otherwise it is [=sized as a window=] for that length, and let |W|<sub>|k|</sub> be its size in bytes
+            and the <dfn>visible range</dfn> of the |k|-th input be [0, 0).
+        * The memory of the output is [=sized to fit=] |size| if |module| is a [=whole module=].
+            Otherwise it is [=sized as a window=] for |size|, and let |W|<sub>out</sub> be its size in bytes.
+    4. Let |output| be an empty [=byte sequence=].
+    5. If the total size of the memories in bytes exceeds the memory limit, return a [=resource failure=].
+    6. Instantiate |module| with the memories and the host functions below.
+    7. Invoke the [=entry point=] with the arguments of type `i64`, in order:
+        the length of |params|, the length of the [=stored content=] of each item of |resources|,
+        the length of each item of |inputs| and |size|.
+        The [=entry point=] MUST have these parameters and no results.
         If it traps or any host function below signals an error, return an [=invalid archive=] failure.
-        If it exceeds any resource declaration or implementation-defined limit, return a [=resource failure=].
-    6. The length of |output| MUST be |size|.
-    7. Return a [=list=] containing |output|.
+        If it exceeds the memory limit or any implementation-defined limit, return a [=resource failure=].
+    8. If |module| is a [=whole module=], set |output| to the first |size| bytes of the memory of the output, if imported,
+        and to |size| zero bytes otherwise.
+    9. The length of |output| MUST be |size|.
+    10. Return a [=list=] containing |output|.
 </ol>
 
-Issue: Multiple outputs of a module, which the host functions below don't distinguish yet.
+Issue: Multiple outputs of a module, which the imports above don't distinguish yet.
 
-Within the declared memory limit, `memory.grow` MUST succeed.
+A `memory.grow` instruction exceeds the memory limit when the total size of the memories would exceed it,
+and MUST succeed otherwise if the maximum of the import type of the [=working memory=] allows.
 
-Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|</sub> denote the [=visible range=] of the |k|-th input:
+<div class=note>
+  Each application instantiates the module anew, so nothing remains from an earlier one.
+  The size of every memory except the working memory is fixed by its import type and the length of its data,
+  so a window is a property of the module.
+  A module needing a window that depends on its data keeps the bytes in the working memory.
+  The memory of the output of a [=whole module=] can be passed to the module consuming it
+  as the memory of a [=whole module=]'s input of the same import type, as long as the bytes from offset |size| are zeroed,
+  since the result is the same.
+</div>
 
-: <dfn>request</dfn>(|k|, |hi|)
-:: |hi| MUST be in [|hi|<sub>|k|</sub>, length of |inputs|[|k|]], and |hi| - |lo|<sub>|k|</sub> MUST be at most |W|<sub>|k|</sub>.
-    For each offset |o| in [|hi|<sub>|k|</sub>, |hi|), write |inputs|[|k|][|o|] to the memory |k| + 1 at |o| % |W|<sub>|k|</sub>.
+Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|</sub> denote the [=visible range=] of the |k|-th input,
+|k| is of type `i32`, and every offset is of type `i64`:
+
+: <dfn>aqr_request</dfn>(|k|, |hi|)
+:: The |k|-th input MUST be imported.
+    |hi| MUST be in [|hi|<sub>|k|</sub>, length of |inputs|[|k|]], and |hi| - |lo|<sub>|k|</sub> MUST be at most |W|<sub>|k|</sub>.
+    For each offset |o| in [|hi|<sub>|k|</sub>, |hi|), write |inputs|[|k|][|o|] to the memory of the |k|-th input at |o| % |W|<sub>|k|</sub>.
     Then set |hi|<sub>|k|</sub> to |hi|.
-: <dfn>release</dfn>(|k|, |lo|)
-:: |lo| MUST be in [|lo|<sub>|k|</sub>, |hi|<sub>|k|</sub>]. Set |lo|<sub>|k|</sub> to |lo|.
-: <dfn>commit</dfn>(|hi|)
-:: |hi| MUST be in [length of |output|, |size|], and |hi| - length of |output| MUST be at most |W|<sub>out</sub>.
-    For each offset |o| in [length of |output|, |hi|), append the byte at |o| % |W|<sub>out</sub> of the output memory to |output|.
-: <dfn>heartbeat</dfn>()
+: <dfn>aqr_release</dfn>(|k|, |lo|)
+:: The |k|-th input MUST be imported.
+    |lo| MUST be in [|lo|<sub>|k|</sub>, |hi|<sub>|k|</sub>]. Set |lo|<sub>|k|</sub> to |lo|.
+: <dfn>aqr_commit</dfn>(|hi|)
+:: The output MUST be imported.
+    |hi| MUST be in [length of |output|, |size|], and |hi| - length of |output| MUST be at most |W|<sub>out</sub>.
+    For each offset |o| in [length of |output|, |hi|), append the byte at |o| % |W|<sub>out</sub> of the memory of the output to |output|.
+: <dfn>aqr_heartbeat</dfn>()
 :: Does nothing.
 
 A violation of any MUST in host functions is signalled as an error to the module invocation.
 
 <div class=note>
-  The host writes input memories only within [=request=] and reads the output memory only within [=commit=],
+  The host writes input memories of a [=part module=] only within [=aqr_request=] and reads its output memory only within [=aqr_commit=],
   so the content of every memory depends only on the order of calls made by the module.
-  Implementations MAY block in [=request=] until the requested bytes are available
-  and in [=commit=] until consumers catch up, or alias memories between modules,
+  Implementations MAY block in [=aqr_request=] until the requested bytes are available
+  and in [=aqr_commit=] until consumers catch up,
   as long as the result is indistinguishable from this definition.
 </div>
 
