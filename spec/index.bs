@@ -3337,21 +3337,22 @@ Module execution</h3>
 
 Issue: This section is tentative and follows `xform-design.md` §5.
 
-A module is a WebAssembly module [[WASM-CORE-2]] stored as [=module/wasm_module=],
-instantiated and invoked through the embedding interface defined in the Appendix of [[WASM-CORE-2]].
+A module is a WebAssembly module [[WASM-CORE-3]] stored as [=module/wasm_module=],
+instantiated and invoked through the embedding interface defined in the Appendix of [[WASM-CORE-3]].
 It MUST conform to the following profile, or an [=invalid archive=] failure occurs:
 
-* WebAssembly 2.0 core with the fixed-width SIMD, executed under the deterministic profile;
+* WebAssembly 3.0 core, executed under the deterministic profile;
     every NaN result is a canonical NaN.
-* Multiple memories are allowed.
-* Threads, relaxed SIMD, garbage collection, exception handling, memory64 for the [=working memory=]
-    and imported tables are not allowed.
+* None of the features added in WebAssembly 3.0 are allowed,
+    except multiple memories and 64-bit addresses of the memories other than the [=working memory=].
+    That is, tail calls, extended constant expressions, typed function references, garbage collection,
+    exception handling, relaxed SIMD, 64-bit tables and a 64-bit [=working memory=] are not allowed.
+* Imported tables are not allowed.
 * It defines no memory, and imports each memory at most once.
 * Every `memory.grow` instruction targets the [=working memory=].
+* The import type of every memory other than the [=working memory=] has 64-bit addresses, the minimum 0 and no maximum.
 * It exports exactly one of the functions `aqr_apply_whole` and `aqr_apply_part`, the <dfn>entry point</dfn>.
     The module is a <dfn>whole module</dfn> in the former case and a <dfn>part module</dfn> in the latter.
-
-Issue: Whether memory64 is allowed for the memories other than the working memory.
 
 Issue: Whether the guaranteed limit of 2<sup>27</sup> bytes (128 MiB) for the Zstandard `Window_Size` ([[#zstandard-compression-method]])
 should also apply to the memory limit.
@@ -3376,11 +3377,7 @@ Any other import is an [=invalid archive=] failure.
 : `aqr_heartbeat`
 :: A function defined below.
 
-The <dfn>page count</dfn> of a length |L| is &lceil;|L| / 65536&rceil;.
-A memory of a length |L| is <dfn>sized to fit</dfn> when its size is the [=page count=] of |L| in pages,
-and its import type MUST allow that size.
-A memory of a length |L| is <dfn>sized as a window</dfn> when its size is
-the [=page count=] of |L|, raised to the minimum and lowered to the maximum of its import type, in pages.
+A memory is <dfn>sized to fit</dfn> a length |L| when both its minimum and maximum are &lceil;|L| / 65536&rceil; pages.
 
 To <dfn>apply a module</dfn> |module| given a [=list=] of input [=byte sequences=] |inputs|,
 a [=list=] of resource blocks |resources|, a parameter [=byte sequence=] |params|,
@@ -3394,12 +3391,11 @@ a [=list=] of declared output sizes and a memory limit:
         * The [=working memory=] has the minimum size of its import type.
         * The memory of the parameters is [=sized to fit=] the length of |params|, and holds |params| from offset 0.
         * The memory of the |i|-th resource is [=sized to fit=] its [=stored content=] |c|, and holds |c| from offset 0.
-        * The memory of the |k|-th input is [=sized to fit=] the length of |inputs|[|k|], and holds |inputs|[|k|] from offset 0,
-            if |module| is a [=whole module=].
-            Otherwise it is [=sized as a window=] for that length, and let |W|<sub>|k|</sub> be its size in bytes
-            and the <dfn>visible range</dfn> of the |k|-th input be [0, 0).
-        * The memory of the output is [=sized to fit=] |size| if |module| is a [=whole module=].
-            Otherwise it is [=sized as a window=] for |size|, and let |W|<sub>out</sub> be its size in bytes.
+        * The memory of the |k|-th input is [=sized to fit=] the length of |inputs|[|k|].
+            If |module| is a [=whole module=], it holds |inputs|[|k|] from offset 0.
+            Otherwise let |W|<sub>|k|</sub> be its size in bytes and the <dfn>visible range</dfn> of the |k|-th input be [0, 0).
+        * The memory of the output is [=sized to fit=] |size|.
+            If |module| is a [=part module=], let |W|<sub>out</sub> be its size in bytes.
     4. Let |output| be an empty [=byte sequence=].
     5. If the total size of the memories in bytes exceeds the memory limit, return a [=resource failure=].
     6. Instantiate |module| with the memories and the host functions below.
@@ -3417,16 +3413,19 @@ a [=list=] of declared output sizes and a memory limit:
 
 Issue: Multiple outputs of a module, which the imports above don't distinguish yet.
 
+Issue: Windows smaller than their data for a [=part module=], i.e. ring buffers,
+which would allow import types with a maximum.
+
 A `memory.grow` instruction exceeds the memory limit when the total size of the memories would exceed it,
 and MUST succeed otherwise if the maximum of the import type of the [=working memory=] allows.
 
 <div class=note>
   Each application instantiates the module anew, so nothing remains from an earlier one.
-  The size of every memory except the working memory is fixed by its import type and the length of its data,
-  so a window is a property of the module.
+  The size of every memory except the working memory is fixed by the length of its data,
+  so the declarations of an application need no windows.
   A module needing a window that depends on its data keeps the bytes in the working memory.
   The memory of the output of a [=whole module=] can be passed to the module consuming it
-  as the memory of a [=whole module=]'s input of the same import type, as long as the bytes from offset |size| are zeroed,
+  as the memory of a [=whole module=]'s input, as long as the bytes from offset |size| are zeroed,
   since the result is the same.
 </div>
 
@@ -4833,6 +4832,13 @@ Block index</h2>
     "month": "September",
     "year": 2024,
     "href": "https://www.rfc-editor.org/info/rfc9659"
+  },
+  "WASM-CORE-3": {
+    "title": "WebAssembly Core Specification",
+    "authors": ["Andreas Rossberg"],
+    "publisher": "W3C WebAssembly Community Group",
+    "status": "Release 3.0",
+    "href": "https://webassembly.github.io/spec/core/"
   },
   "WTF-8": {
     "title": "The WTF-8 encoding",
