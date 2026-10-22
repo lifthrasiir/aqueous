@@ -34,7 +34,7 @@ pub(crate) fn pe(d: &[u8], opt: &Options) -> Option<Formula> {
         let Some(st) = x86::encode(section.to_vec(), va, code.is64) else { continue };
         let params = x86_params(st.origin(), st.sentinel_size(), code.is64);
         let inputs: Vec<&[u8]> = st.streams().iter().map(|s| &s[..]).collect();
-        if !verified(opt, X86, &params, &inputs, section) {
+        if !verified(opt, X86, &params, &[], &inputs, section) {
             continue;
         }
         parts.push(Node::slice(0, rest.len() as u64, (off - at) as u64));

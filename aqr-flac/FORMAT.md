@@ -42,7 +42,7 @@ Contents:
 
 ## 2. The module
 
-The module is `flac-recons`, version 1 (`aqr_flac::formula`), in entry formulas
+The module is `flac-recons`, version 2 (`aqr_flac::formula`), in entry formulas
 (aqr-formula). `formula::encode_with` makes the formula and `formula::decode` is the module.
 Its output, the **original**, has the declared length `len`: a FLAC file, a WAV or AIFF
 file, or headerless samples.
@@ -52,6 +52,12 @@ file, or headerless samples.
 ([§7](#7-pcm-streams)), for WAV / AIFF and raw samples alike (the two differ only in how an
 encoder finds the samples). Any other params are an error. Under kind 1 the streams themselves describe where the samples sit in the
 original (§7).
+
+**Resources**: exactly one, the frequency tables: the decompressed bytes of Appendix A
+(17,860 bytes), whose SHA-256 is given there. The decoder uses them as the tables of
+§4.4. It MUST fail unless the resource is exactly 17,860 bytes, its layout id is the one
+given in Appendix A, and every table consists of nonzero frequencies summing to 4096; it
+does not need to check the SHA-256. Any other number of resources is an error.
 
 **Inputs**: nine slots, always in this order, each possibly empty. Their classes are
 `flac/prefix`, `flac/layout`, `flac/junk`, `flac/headers`, `flac/subframes`, `flac/warmup`,
@@ -685,8 +691,8 @@ exceed `len`. A Rice code can be up to 2^32 bits long.
 
 ## Appendix A: built-in frequency tables
 
-The 124 frequency tables (§4.4 contexts `2b + cc`, 72 frequencies each) are fixed by the
-format. They are built into the implementation as `model/builtin.bin`: a zstd frame that
+The 124 frequency tables (§4.4 contexts `2b + cc`, 72 frequencies each) are the module's
+resource (§2). The reference encoder takes it from `model/builtin.bin`, a zstd frame that
 decompresses to 17,860 bytes:
 
 ```text
@@ -746,8 +752,8 @@ xJyuWkFNogONxET6ROsapyLL4N3/hw2ZqmhVkZeyOM+jqQ7ZRYKh2edTkgLKG321KGLSKkeUlYgc
 3NxDkF2GypTuDkke0ngQm8MTWk/TgbYri2U=
 ```
 
-Changing the tables (retraining with `train`) changes the format and needs a new module
-version.
+Changing the tables (retraining with `train`) changes the encoder's resource and needs a
+new module version.
 
 ## Appendix B: CRCs
 

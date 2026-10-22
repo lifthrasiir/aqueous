@@ -66,7 +66,8 @@ pub fn apply(a: &Apply, inputs: &[&[u8]], threads: usize) -> aqr_formula::Result
     if a.module == MODULE {
         decode(&a.params, inputs, a.len, threads).map_err(|e| err(&e))
     } else if a.module == aqr_flate::formula::MODULE {
-        aqr_flate::formula::decode(&a.params, inputs, a.len, 1).map_err(|e| err(&e))
+        let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+        aqr_flate::formula::decode(&a.params, &resources, inputs, a.len, 1).map_err(|e| err(&e))
     } else if a.module == aqr_png::formula::MODULE {
         aqr_png::formula::decode(&a.params, inputs, a.len, 1).map_err(|e| err(&e))
     } else if a.module == aqr_jpeg::formula::MODULE {

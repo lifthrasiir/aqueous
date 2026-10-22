@@ -167,17 +167,6 @@ fn likely_contexts(frames: &[(Header, SideInfo, usize, usize)]) -> Vec<u32> {
     v
 }
 
-/// The decoder's tables have been built through [`warm`].
-static DEC_WARM: AtomicBool = AtomicBool::new(false);
-
-/// Builds the tables and the decoder's alias tables.
-fn warm(threads: usize) {
-    if !DEC_WARM.load(Ordering::Acquire) {
-        codec::tables().prepare_dec(threads);
-        DEC_WARM.store(true, Ordering::Release);
-    }
-}
-
 /// Side information of one frame, decoded ahead.
 #[derive(Clone, Copy, Default)]
 struct FrameSide {
@@ -302,9 +291,9 @@ impl codec::SideSrc for ThreadSide {
 }
 
 /// The rANS decoder over `words` (u32 LE) and the raw bits, padded.
-fn make_decoder(words: &[u8], raw: &[u8]) -> (rans::Decoder<'static>, Vec<u8>) {
+fn make_decoder<'a>(t: &'a Tables, words: &[u8], raw: &[u8]) -> (rans::Decoder<'a>, Vec<u8>) {
     let w: Vec<u32> = words.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
-    let dec = rans::Decoder::new(codec::tables(), &w);
+    let dec = rans::Decoder::new(t, &w);
     let mut rb = Vec::with_capacity(raw.len() + R_PAD);
     rb.extend_from_slice(raw);
     rb.resize(raw.len() + R_PAD, 0);
@@ -314,6 +303,7 @@ fn make_decoder(words: &[u8], raw: &[u8]) -> (rans::Decoder<'static>, Vec<u8>) {
 /// [`codec::decode`] of the coded form with byte streams `streams`, rANS words `words` (u32
 /// LE) and raw bits `raw`, with `threads` threads.
 pub(crate) fn decode(
+    t: &Tables,
     file_len: u64,
     streams: &[&[u8]; N_BYTE_STREAMS],
     words: &[u8],
@@ -328,7 +318,7 @@ pub(crate) fn decode(
         let helper = threads >= 3;
         let side_t = s.spawn(move || {
             if !helper {
-                warm(threads);
+                t.prepare_dec(threads);
             }
             if let Ok(hs) = hs_rx.recv() {
                 decode_side(side_src, &hs, &side_tx);
@@ -336,8 +326,8 @@ pub(crate) fn decode(
         });
         let dec_t = helper.then(|| {
             s.spawn(move || {
-                warm(threads);
-                make_decoder(words, raw)
+                t.prepare_dec(threads);
+                make_decoder(t, words, raw)
             })
         });
         let res = (move || -> Result<Vec<u8>, Error> {
@@ -346,7 +336,7 @@ pub(crate) fn decode(
             drop(hs_tx);
             let (rans, raw_buf) = match dec_t {
                 Some(t) => t.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
-                None => make_decoder(words, raw),
+                None => make_decoder(t, words, raw),
             };
             let mut dc = Dec { rans, raw: crate::huff::BitBuf::new(&BitReader::new(&raw_buf, 0)) };
             let mut side = ThreadSide::new(side_rx);

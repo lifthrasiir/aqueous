@@ -7,6 +7,7 @@
 use crate::bits;
 use crate::flac::{self, ESCAPE, Frame};
 use crate::par::{self, DecBatch, EncBatch, Item};
+use crate::rans::Tables;
 pub use crate::residual::{Coded, Error, Rd, freqs_to_bytes, layout_id, put_varint, tables};
 use crate::residual::{LmsEncoder, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes};
 use std::sync::mpsc::sync_channel;
@@ -301,7 +302,7 @@ fn decode_start(c: &Coded) -> Result<flac::StreamInfo, Error> {
 }
 
 /// Decodes into `out` (appending).
-pub fn decode(c: &Coded, total_len: usize, out: &mut Vec<u8>) -> Result<(), Error> {
+pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Result<(), Error> {
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
     }
@@ -314,7 +315,7 @@ pub fn decode(c: &Coded, total_len: usize, out: &mut Vec<u8>) -> Result<(), Erro
     let mut sub = Rd::new(&c.streams[S_SUB]);
     let mut warm = Rd::new(&c.streams[S_WARM]);
     let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
-    let mut rd = ResDecoder::new(&c.words, &raw_buf)?;
+    let mut rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let mut f = Frame::default();
     let mut hs = Headers::default();
     loop {
@@ -394,9 +395,9 @@ fn front<'a>(e: &mut par::Front<'a, '_, Written>, c: &'a Coded, bps: u32) -> Res
 /// [`decode`] with `threads` threads: a pipeline of the frame parameters, the error
 /// decoding, the LMS stage, and a pool writing the frames (escape checks, Rice coding,
 /// CRCs), then the frames are appended here in order. The same output and errors.
-pub fn decode_threads(c: &Coded, total_len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), Error> {
+pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), Error> {
     if threads <= 1 {
-        return decode(c, total_len, out);
+        return decode(c, t, total_len, out);
     }
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
@@ -405,7 +406,7 @@ pub fn decode_threads(c: &Coded, total_len: usize, out: &mut Vec<u8>, threads: u
     out.extend_from_slice(&c.streams[S_PREFIX]);
     let si = decode_start(c)?;
     let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
-    let rd = ResDecoder::new(&c.words, &raw_buf)?;
+    let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let nb = par::in_flight(threads);
     type B<'a> = DecBatch<'a, Written>;
     std::thread::scope(|sc| {

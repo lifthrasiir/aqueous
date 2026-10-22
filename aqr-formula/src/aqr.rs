@@ -1,9 +1,9 @@
 //! A formula as an Aqueous archive (`spec/index.bs`) of a single file, without a metadata
 //! block.
 //!
-//! [`encode`] lays the formula out as blocks: a module block for each module, the formula
-//! block, and a non-leaf block for each stream it slices, in the order of the streams. A
-//! formula of a single slice is a leaf block of its own.
+//! [`encode`] lays the formula out as blocks: a module block for each module, a resource block
+//! for each resource, the formula block, and a non-leaf block for each stream it slices, in the
+//! order of the streams. A formula of a single slice is a leaf block of its own.
 //!
 //! Until modules are WebAssembly (the spec's "Module execution" is tentative), a module block
 //! holds a Wasm module of custom sections only, one of them ([`NATIVE_SECTION`]) naming the
@@ -11,8 +11,8 @@
 //! what a module reading its inputs whole and committing its output at the end needs: windows
 //! of the whole inputs and output, and no memory limit ([`MEMORY_LIMIT`]).
 //!
-//! [`Encoder`] encodes several formulas, compressing each stream once however many hold it,
-//! at the zstd level that its [`Level`] picks for the stream.
+//! [`Encoder`] encodes several formulas, compressing each stream and resource once however
+//! many hold it, at the zstd level that its [`Level`] picks for it.
 //!
 //! [`decode`] evaluates such archives, and any other without a metadata block, a dictionary
 //! or an encryption.
@@ -27,7 +27,7 @@ use xxhash_rust::xxh3::xxh3_128;
 use xxhash_rust::xxh64::xxh64;
 use zstd::zstd_safe::{self, CParameter, InBuffer, OutBuffer};
 
-use crate::{Error, Formula, Module, Node, Result};
+use crate::{Error, Formula, Module, Node, Resource, Result};
 
 pub const HEADER_MAGIC: [u8; 6] = [0xf8, 0x04, 0x03, 0x6a, 0xd6, 0xbe];
 pub const FOOTER_MAGIC: [u8; 6] = [0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12];
@@ -44,6 +44,7 @@ const NON_LEAF_ZSTD: u64 = 0x34;
 const LEAF_RAW: u64 = 0x44;
 const NON_LEAF_RAW: u64 = 0x4c;
 const MODULE: u64 = 0x60;
+const RESOURCE: u64 = 0x64;
 const FORMULA: u64 = 0x70;
 
 const NOP: u8 = 0x00;
@@ -115,21 +116,23 @@ enum Plan {
     Level(i32),
 }
 
-/// Encodes formulas as archives at a [`Level`], keeping the compressed streams by their
-/// contents: [`Encoder::len`] sizes a formula, and the same streams in a later formula are not
-/// compressed again.
+/// Encodes formulas as archives at a [`Level`], keeping the compressed streams and resources
+/// by their contents: [`Encoder::len`] sizes a formula, and the same streams and resources in a
+/// later formula are not compressed again.
 pub struct Encoder {
     level: Level,
     /// Compressed streams (as [`compressed`] gives) by their [`StreamKey`].
     streams: RefCell<HashMap<StreamKey, Option<Vec<u8>>>>,
+    /// Compressed resources by their [`StreamKey`].
+    resources: RefCell<HashMap<StreamKey, Vec<u8>>>,
 }
 
-/// A stream's hash and length.
+/// A stream's (or resource's) hash and length.
 type StreamKey = (u128, usize);
 
 impl Encoder {
     pub fn new(level: Level) -> Encoder {
-        Encoder { level, streams: RefCell::default() }
+        Encoder { level, streams: RefCell::default(), resources: RefCell::default() }
     }
 
     /// The length of the archive of `f` without a checksum.
@@ -137,7 +140,8 @@ impl Encoder {
         Ok(self.encode(f, None)?.len())
     }
 
-    /// [`encode`] at the level of the encoder.
+    /// [`encode`] at the level of the encoder. Fails on slices out of their stream, and on
+    /// resources that do not compress (as resource blocks always are).
     pub fn encode(&self, f: &Formula, checksum: Option<u64>) -> Result<Vec<u8>> {
         // of the module and formula blocks
         let level = match self.level {
@@ -172,20 +176,26 @@ impl Encoder {
                     sliced.push(s);
                 }
             }
-            let mut modules: Vec<Module> = Vec::new();
+            let (mut modules, mut resources): (Vec<Module>, Vec<&Resource>) = (Vec::new(), Vec::new());
             for a in f.applies() {
                 if !modules.contains(&a.module) {
                     modules.push(a.module);
+                }
+                for r in &a.resources {
+                    if !resources.contains(&r) {
+                        resources.push(r);
+                    }
                 }
             }
 
             let mut data = Vec::new();
             varint::put(&mut data, sliced.len() as u64);
             sliced.iter().for_each(|_| varint::put(&mut data, 0));
-            varint::put(&mut data, 0);
-            varint::put(&mut data, modules.len() as u64);
-            (0..modules.len()).for_each(|i| varint::put(&mut data, i as u64));
-            instructions(&f.root, &ordinals, &modules, &mut data);
+            for n in [resources.len(), modules.len()] {
+                varint::put(&mut data, n as u64);
+                (0..n).for_each(|i| varint::put(&mut data, i as u64));
+            }
+            instructions(&f.root, &ordinals, &modules, &resources, &mut data);
             if let Some(c) = checksum {
                 data.push(CHECKSUM);
                 data.extend_from_slice(&c.to_le_bytes());
@@ -193,6 +203,9 @@ impl Encoder {
 
             for &m in &modules {
                 block(&mut blocks, MODULE, &padded(|pad| wasm(m, pad), level)?);
+            }
+            for r in resources {
+                self.resource_block(&mut blocks, r)?;
             }
             block(
                 &mut blocks,
@@ -225,9 +238,9 @@ impl Encoder {
     }
 }
 
-/// The instructions pushing node `n`, its streams' blocks at `ordinals` and its modules at
-/// their indices in `modules`.
-fn instructions(n: &Node, ordinals: &[Option<u64>], modules: &[Module], out: &mut Vec<u8>) {
+/// The instructions pushing node `n`, its streams' blocks at `ordinals` and its modules and
+/// resources at their indices in `modules` and `resources`.
+fn instructions(n: &Node, ordinals: &[Option<u64>], modules: &[Module], resources: &[&Resource], out: &mut Vec<u8>) {
     match n {
         &Node::Slice { stream, start, len } => {
             out.push(SLICE);
@@ -236,15 +249,18 @@ fn instructions(n: &Node, ordinals: &[Option<u64>], modules: &[Module], out: &mu
             varint::put(out, len);
         }
         Node::Concat(ns) => {
-            ns.iter().for_each(|n| instructions(n, ordinals, modules, out));
+            ns.iter().for_each(|n| instructions(n, ordinals, modules, resources, out));
             out.push(CONCAT);
             varint::put(out, ns.len() as u64);
         }
         Node::Apply(a) => {
-            a.inputs.iter().for_each(|n| instructions(n, ordinals, modules, out));
+            a.inputs.iter().for_each(|n| instructions(n, ordinals, modules, resources, out));
             out.push(APPLY);
             varint::put(out, modules.iter().position(|&m| m == a.module).unwrap() as u64);
-            varint::put(out, 0);
+            varint::put(out, a.resources.len() as u64);
+            for r in &a.resources {
+                varint::put(out, resources.iter().position(|&s| s == r).unwrap() as u64);
+            }
             varint::put(out, a.params.len() as u64);
             out.extend_from_slice(&a.params);
             varint::put(out, MEMORY_LIMIT);
@@ -258,8 +274,8 @@ fn instructions(n: &Node, ordinals: &[Option<u64>], modules: &[Module], out: &mu
 }
 
 /// Bytes of the instructions pushing node `n` at most, wherever the streams of its formula are
-/// among others (up to 2^21 of them, and 2^14 modules): the bounds of formulas put together
-/// ([`Formula::embed`]) add up, with the nodes around them.
+/// among others (up to 2^21 of them, and 2^14 modules and resources each): the bounds of
+/// formulas put together ([`Formula::embed`]) add up, with the nodes around them.
 pub fn description_bound(n: &Node) -> usize {
     match n {
         &Node::Slice { start, len, .. } => 1 + 3 + varint::len(start) + varint::len(len),
@@ -269,7 +285,8 @@ pub fn description_bound(n: &Node) -> usize {
             inputs
                 + 1
                 + 2
-                + 1
+                + varint::len(a.resources.len() as u64)
+                + 2 * a.resources.len()
                 + varint::len(a.params.len() as u64)
                 + a.params.len()
                 + varint::len(MEMORY_LIMIT)
@@ -354,6 +371,25 @@ impl Encoder {
             }),
         };
         content_block(out, leaf, data, c.as_deref());
+        Ok(())
+    }
+
+    /// Appends a resource block of `r`, compressed at the level the encoder picks for it, or
+    /// as little as it compresses: the block is always compressed.
+    fn resource_block(&self, out: &mut Vec<u8>, r: &[u8]) -> Result<()> {
+        let mut resources = self.resources.borrow_mut();
+        let c = match resources.entry(key(r)) {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let c = match self.plan(r)? {
+                    Plan::Done(Some(c)) => Some(c),
+                    Plan::Done(None) => compressed(r, MID_BASE.0)?,
+                    Plan::Level(level) => compressed(r, level)?,
+                };
+                e.insert(c.ok_or_else(|| Error::new(format!("a resource of {} bytes does not compress", r.len())))?)
+            }
+        };
+        block(out, RESOURCE, c);
         Ok(())
     }
 
@@ -533,11 +569,11 @@ pub trait NativeModule {
 
     /// The outputs of an application, of `sizes` bytes each: from `inputs`, the resource
     /// blocks given in order and `params`. The decoder checks the outputs against `sizes`.
-    fn apply(&self, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>>;
+    fn apply(&self, params: &[u8], resources: &[Resource], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>>;
 }
 
-/// `modules` run by `m`, as archives apply them: without resources, and with one output. The
-/// [`crate::Apply`] that `m` is given has no inputs of its own (they are the evaluated ones).
+/// `modules` run by `m`, as archives apply them: with one output. The [`crate::Apply`] that `m`
+/// is given has no inputs of its own (they are the evaluated ones).
 pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec<Box<dyn NativeModule + 'a>> {
     struct Native<'a, M> {
         module: Module,
@@ -549,11 +585,23 @@ pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec
             self.module
         }
 
-        fn apply(&self, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>> {
-            let (&[len], []) = (sizes, resources) else {
-                return invalid(format!("{}: {} outputs, {} resources", self.module, sizes.len(), resources.len()));
+        fn apply(
+            &self,
+            params: &[u8],
+            resources: &[Resource],
+            inputs: &[&[u8]],
+            sizes: &[u64],
+        ) -> Decoded<Vec<Vec<u8>>> {
+            let &[len] = sizes else {
+                return invalid(format!("{}: {} outputs", self.module, sizes.len()));
             };
-            let a = crate::Apply { module: self.module, params: params.to_vec(), inputs: Vec::new(), len };
+            let a = crate::Apply {
+                module: self.module,
+                resources: resources.to_vec(),
+                params: params.to_vec(),
+                inputs: Vec::new(),
+                len,
+            };
             self.m.apply(&a, inputs).map(|out| vec![out]).map_err(|e| Failure::Invalid(e.0))
         }
     }
@@ -624,7 +672,7 @@ struct Blocks {
     leaves: Vec<Leaf>,
     non_leaf: Vec<Vec<u8>>,
     modules: Vec<Vec<u8>>,
-    resources: Vec<Vec<u8>>,
+    resources: Vec<Resource>,
 }
 
 enum Leaf {
@@ -688,7 +736,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
                 }
             }
             0x60..=0x63 => b.modules.push(decoded(data, true, true)?),
-            0x64..=0x67 => b.resources.push(decoded(data, true, true)?),
+            0x64..=0x67 => b.resources.push(Resource::new(decoded(data, true, true)?)),
             0x70..=0x73 => b.leaves.push(Leaf::Formula {
                 data: decoded(data, true, true)?,
                 modules: b.modules.len(),
@@ -764,7 +812,7 @@ struct Env<'a, 'n> {
     /// The ordinal of the first non-leaf block after the formula block.
     first: usize,
     modules: &'a [Vec<u8>],
-    resources: &'a [Vec<u8>],
+    resources: &'a [Resource],
     natives: &'a [Box<dyn NativeModule + 'n>],
 }
 
@@ -939,7 +987,7 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
             }
             Insn::Apply(a) => {
                 let inputs = stack.split_off(stack.len() - a.input_windows.len());
-                let res: Vec<&[u8]> = a.resources.iter().map(|&i| &env.resources[resources[i]][..]).collect();
+                let res: Vec<Resource> = a.resources.iter().map(|&i| env.resources[resources[i]].clone()).collect();
                 stack.extend(apply(env, modules[a.module], &a, &inputs, &res)?);
             }
             Insn::Concat(n) => {
@@ -957,7 +1005,7 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
 }
 
 /// The outputs of application `a` of module block `module`.
-fn apply(env: &Env, module: usize, a: &Apply, inputs: &[Vec<u8>], resources: &[&[u8]]) -> Decoded<Vec<Vec<u8>>> {
+fn apply(env: &Env, module: usize, a: &Apply, inputs: &[Vec<u8>], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
     let w = &env.modules[module];
     let name = native_name(w).ok_or_else(|| Failure::Resource("Wasm modules are not supported yet".into()))?;
     let native = env
@@ -996,7 +1044,7 @@ mod tests {
             REV
         }
 
-        fn apply(&self, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], _: &[u64]) -> Decoded<Vec<Vec<u8>>> {
+        fn apply(&self, params: &[u8], resources: &[Resource], inputs: &[&[u8]], _: &[u64]) -> Decoded<Vec<Vec<u8>>> {
             assert_eq!((params, resources.len()), (&[1, 2, 3][..], 0));
             Ok(vec![inputs.concat().into_iter().rev().collect()])
         }
@@ -1081,6 +1129,33 @@ mod tests {
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &natives()).unwrap(), [SAMPLE, b"zyxolleh"].concat());
+    }
+
+    /// Each resource has a block, before the formula block, however many applications take it.
+    #[test]
+    fn resources() {
+        const PRE: Module = Module { name: "pre", version: 1 };
+        // `pre` puts its resources before its inputs.
+        let pre = |a: &crate::Apply, i: &[&[u8]]| {
+            assert_eq!(a.module, PRE);
+            Ok([a.resources.iter().map(|r| &r[..]).collect::<Vec<_>>().concat(), i.concat()].concat())
+        };
+        let (r1, r2) = (Resource::new(vec![b'a'; 1000]), Resource::new(b"0123456789".repeat(10)));
+        let mut f = Formula::default();
+        let x = f.push("x", b"xyz".to_vec());
+        f.root = Node::concat([
+            Node::apply_with(PRE, vec![r1.clone(), r2.clone()], vec![], vec![x.clone()], 1103),
+            Node::apply_with(PRE, vec![r2.clone()], vec![], vec![x.clone()], 103),
+            Node::apply_with(PRE, vec![r1.clone()], vec![], vec![x.clone()], 1003),
+        ]);
+        let expect = [&r1[..], &r2, b"xyz", &r2, b"xyz", &r1, b"xyz"].concat();
+        assert_eq!(f.eval(&pre).unwrap(), expect);
+        let c = encode(&f, None, Level::Mid).unwrap();
+        assert_eq!(types(&c), [MODULE, RESOURCE, RESOURCE, FORMULA, NON_LEAF_RAW]);
+        assert_eq!(decode(&c, &super::natives(&[PRE], &pre)).unwrap(), expect);
+        // A resource block is always compressed.
+        f.root = Node::apply_with(PRE, vec![Resource::new(aqr_common::rng::noise(1000))], vec![], vec![x], 1003);
+        assert!(encode(&f, None, Level::Mid).is_err());
     }
 
     /// A formula of a single slice is a leaf block, compressed if that is smaller.
@@ -1227,11 +1302,16 @@ mod tests {
     fn bound() {
         let desc = |f: &Formula| {
             let ordinals: Vec<_> = (0..f.streams.len() as u64).map(Some).collect();
+            let resources: Vec<&Resource> = f.applies().into_iter().flat_map(|a| &a.resources).collect();
             let mut out = Vec::new();
-            instructions(&f.root, &ordinals, &[REV], &mut out);
+            instructions(&f.root, &ordinals, &[REV], &resources, &mut out);
             out.len()
         };
-        let f = sample();
+        let mut f = sample();
+        assert!(description_bound(&f.root) >= desc(&f));
+        let Node::Concat(ns) = &mut f.root else { unreachable!() };
+        let Node::Apply(a) = &mut ns[1] else { unreachable!() };
+        a.resources = vec![Resource::new(vec![1]), Resource::new(vec![2])];
         assert!(description_bound(&f.root) >= desc(&f));
         // Of formulas put together: the parts add up.
         let mut g = Formula::raw("big", vec![0; 1 << 20]);

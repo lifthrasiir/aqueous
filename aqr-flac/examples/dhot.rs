@@ -12,7 +12,8 @@ fn main() {
         let out = f
             .eval(&|a: &Apply, inputs: &[&[u8]]| {
                 assert_eq!(a.module, MODULE);
-                formula::decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.0))
+                let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+                formula::decode(&a.params, &res, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.0))
             })
             .unwrap();
         n += out.len();

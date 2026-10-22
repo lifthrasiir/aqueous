@@ -67,7 +67,9 @@ sets of priors, possibly with a different context layout.
 
 The catalogs, default models and priors are part of the format: a profile is defined with
 exactly these files, and changing any of them requires a new profile. The library compiles
-them in and uses them as they are (nothing is sorted, merged or deduplicated on load).
+them in and uses them as they are (nothing is sorted, merged or deduplicated on load). The
+[formula module](#formula-module) takes them in binary instead, as
+[resources](#resources).
 
 | file | SHA-256 |
 |---|---|
@@ -1011,7 +1013,8 @@ tables. `deconstruct` keeps to tighter limits; see [Domain](#domain).
 The same representation as a module of entry formulas (`aqr-formula`), in
 `formula::apply` and `formula::decode`. The module is `flate-recons`, version 1. Its output
 is the DEFLATE stream with its trailing bytes, whose length the application gives, rebuilt as
-in [Rebuilding the stream](#rebuilding-the-stream).
+in [Rebuilding the stream](#rebuilding-the-stream), with the model data of its
+[resources](#resources) in place of the profile's files.
 
 ### Domain
 
@@ -1061,9 +1064,50 @@ The module has no classes of its own: the maker of the formula names the inputs 
 and `flate/record` in aqr-compress, slices of `pdf/pool-<class>` and `pdf/meta` in
 aqr-pdf).
 
-The module fails on any parameters, any other count of inputs, an invalid record that it
-detects, or a rebuilt stream whose length is not the application's declared output size.
-The specification ("Module execution") makes such a failure an invalid archive failure.
+The module fails on any parameters, any other count of inputs or resources, an invalid
+resource or record that it detects, or a rebuilt stream whose length is not the
+application's declared output size. The specification ("Module execution") makes such a
+failure an invalid archive failure.
+
+### Resources
+
+Exactly two, in this order: the rules of a catalog, then the default models if the record's
+profile is static (0 – 9) or the priors if it is adaptive (10). The profile still has to be
+one of the [profiles](#profiles), but only tells static coding from adaptive: the rules,
+default models and priors are those of the resources, whatever the profile's files are.
+
+**Rules.** 18 bytes per rule, any number of rules: kind (u8), key, ways, long, rank (u8
+each), inner, lazy (u16 each), margin, min_len, far_len (u8 each), far_dist, window (u16
+each), depth, nice (u8 each). The fields hold the values themselves (not the offsets of
+[Rule](#rule)); depth and nice are indices into DEPTHS and NICES. Kind is 0 (search), 1
+(literals) or 2 (runs), rank 0 or 1, and every field must be within its valid values in
+[Rule](#rule) (depth below 16, nice below 8). A rule's index is its position, from 0. The
+`map` lines are not part of it.
+
+**Default models.** 648 bytes: the `q` (1 to 63) of bucket symbols 0 to 71 of correction
+fields 0 to 8, field after field.
+
+**Priors.** 19 440 bytes: `P` (u16) of contexts 0 to 6479, then `N` (u8, at most 40) of
+contexts 0 to 6479.
+
+Any other length or value makes the resource invalid. The resources of each profile, which
+the reference encoder gives, are its files in this form:
+
+| profile | rules | default models or priors |
+|---|---|---|
+| 0 | `d13b7de847e52068ec612d71daef21e14a56e4f6d27b5855d18eec3971ee9847` | `b8efa619d19e1d48d58facfdbe549047b366a1bc5907f4bf9c94339beb592675` |
+| 1 | `206f45f2be0fa191fe8f85f6c4ec5fb00b2602c7e6629f5b288485c597c1210e` | as profile 0 |
+| 2 | `94946a169bc0d857908b5cd6b74e7796d8db4abaa243d107fb77b6293aa19048` | as profile 0 |
+| 3 | `6ed96e34b9c28b5a1c442bd6dcf8b11b481d4cce95d734dcfd6080a31605d54f` | as profile 0 |
+| 4 | `a8fd6132fe608af81a2e14423120ea55c4b3616827659370ac5a4c4543255283` | as profile 0 |
+| 5 | `94d77bcbd55c4e7f084a1e0a1ba910088cadcbd8eb4f61fbd481dbb47abbe4ec` | as profile 0 |
+| 6 | `66410fdab845be8f797afb902f49a24a25d19603deb6e643e3a30edde4032df9` | as profile 0 |
+| 7 | `36811ee63ba56d17eaa93be81b946645f8e6981aab845f5e81db81efcb543106` | as profile 0 |
+| 8 | `82b8662d8e7ef4f996ccb0baa7c701f18f6fb814fc7b61d8ca82956e20cda0d7` | as profile 0 |
+| 9 | `08c5b9a077cfb1d965d1ec991b23444538399059920c9784ab80aa9cbe6fa170` | as profile 0 |
+| 10 | as profile 9 | `444002adc5123b97214d42bd46c9fd38db1f2c2d759bc5bcee694b71c8f98a92` |
+
+(SHA-256 of the resources.)
 
 ### Encoder obligations
 
@@ -1074,6 +1118,8 @@ must verify that its record rebuilds the original before using it.
 Where this document leaves a choice, every option is valid and gives the same stream:
 
 - the profile, the rule, and the rule as a catalog index or in full;
+- the resources, as long as the record reads as intended with them (the reference encoder
+  gives the profile's);
 - where segments are cut, and for adaptive profiles whether a segment has zlib emulation or
   resumes it;
 - for static profiles, each field's default model or its own table (which must hold every

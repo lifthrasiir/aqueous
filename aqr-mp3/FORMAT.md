@@ -1,4 +1,4 @@
-# aqr-mp3 format: module `mp3-recons`, version 1
+# aqr-mp3 format: module `mp3-recons`, version 2
 
 This document specifies the module `mp3-recons` of entry formulas (aqr-formula), which
 rebuilds an MP3 file from a smaller representation, completely enough to write an
@@ -47,13 +47,16 @@ External references:
   is the common extension of MPEG-2 to 8, 11.025 and 12 kHz. Section 4 restates what is
   used here, except the Huffman code tables (Table B.7 of ISO/IEC 11172-3).
 - `model/builtin.bin` in this repository holds the frequency tables of the rANS coder
-  (section 8.4). Version 1 is defined with exactly that file, whose SHA-256 is
-  `42d9c7cd358dccbcf9e1715597197e82adf9a0cd86e876adee21067c325b9276`.
+  (section 8.4). It is where the reference encoder gets the module's resource; the file's
+  SHA-256 is `42d9c7cd358dccbcf9e1715597197e82adf9a0cd86e876adee21067c325b9276`.
 
 ## 2. Module
 
-- **Module**: name `mp3-recons`, version 1. The module is defined with `model/builtin.bin`,
-  which stays compiled in.
+- **Module**: name `mp3-recons`, version 2.
+- **Resources**: exactly one, the frequency tables of section 8.4 in their decompressed form
+  (1 540 828 bytes, SHA-256 given there). A decoder MUST fail unless there is exactly one
+  resource, it has exactly that size, its layout id is the one given in section 8.4 and
+  every context's frequencies are nonzero and sum to 4096. It need not check the SHA-256.
 - **Params**: none (empty). A decoder MUST reject non-empty params.
 - **Output length**: the length `len` of the application is the length of the original file.
   The decoder MUST fail if its output is not `len` bytes.
@@ -611,17 +614,18 @@ With no symbols at all the words are the 16 words of eight states equal to 2^31.
 
 ### 8.4 Built-in tables
 
-The frequencies of all 6537 contexts come from `model/builtin.bin`: a zstd stream that
-decompresses to 1 540 828 bytes (SHA-256 of the decompressed bytes:
-`bb28688b446550d0e2a88c971e07de2410a9c029b9ac979f5b329b8abf245189`):
+The frequencies of all 6537 contexts are the module's resource (section 2): 1 540 828 bytes
+(SHA-256 `bb28688b446550d0e2a88c971e07de2410a9c029b9ac979f5b329b8abf245189`), which the
+reference encoder takes from `model/builtin.bin`, a zstd stream that decompresses to them:
 
 - u32 LE layout id: `0xe6253d87`;
 - for each context `c` = 0..6537 in order, its `n` frequencies as u16 LE.
 
 The layout id is a 32-bit FNV-1a over the alphabet sizes as whole u32 values (`h =
 0x811c9dc5`; per value `h = (h XOR n) × 0x01000193 mod 2^32`). It guards against tables
-for a different context layout. Version 1 is defined with these tables; any change to them
-or to the context layout needs a new module version.
+for a different context layout. Version 2 is defined with these tables as its resource; any
+change to the tables the encoder attaches or to the context layout needs a new module
+version.
 
 ## 9. Coefficient model
 

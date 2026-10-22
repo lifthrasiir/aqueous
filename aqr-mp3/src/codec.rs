@@ -23,9 +23,20 @@ pub fn layout_id() -> u32 {
     builtin::layout_id((0..model::N_CTX).map(|c| model::alphabet(c) as u32))
 }
 
+/// The built-in tables (what the encoder codes with).
 pub fn tables() -> &'static Tables {
     static T: OnceLock<Tables> = OnceLock::new();
-    T.get_or_init(|| Tables::new(&builtin_freqs().unwrap_or_else(uniform_freqs)))
+    T.get_or_init(|| tables_from(&builtin_raw()).expect("built-in tables"))
+}
+
+/// The built-in tables in their uncompressed form: the module's resource.
+pub fn builtin_raw() -> Vec<u8> {
+    builtin::decompress(BUILTIN).unwrap_or_else(|| builtin::to_raw(layout_id(), &uniform_freqs()))
+}
+
+/// The tables in the uncompressed form `raw`, if they are valid for the layout.
+pub fn tables_from(raw: &[u8]) -> Option<Tables> {
+    Some(Tables::new(&builtin::parse(raw, layout_id(), (0..model::N_CTX).map(model::alphabet))?))
 }
 
 fn uniform_freqs() -> Vec<Vec<u16>> {
@@ -373,8 +384,7 @@ pub(crate) fn model_pass<C: Coder>(s: Split, c: &mut C) -> (Vec<Vec<u8>>, [u64; 
     (b, bit_lens)
 }
 
-pub fn decode(c: &Coded) -> Result<Vec<u8>, Error> {
-    let t = tables();
+pub fn decode(c: &Coded, t: &Tables) -> Result<Vec<u8>, Error> {
     let raw_buf = {
         let mut p = c.raw.to_vec();
         p.resize(c.raw.len() + R_PAD, 0);

@@ -24,7 +24,7 @@ fn main() {
             }
         } else {
             for c in &coded {
-                std::hint::black_box(aqr_mp3::codec::decode(c).unwrap());
+                std::hint::black_box(aqr_mp3::codec::decode(c, aqr_mp3::codec::tables()).unwrap());
             }
         }
     }

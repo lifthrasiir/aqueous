@@ -111,7 +111,7 @@ const CATALOGS: [&str; 10] = [
 /// The first adaptive profile: profile `ADAPTIVE + k` codes with the `k`th set of priors, and
 /// the λ = 0 catalog.
 pub const ADAPTIVE: u16 = 10;
-const PRIORS: [&str; 1] = [include_str!("../model/priors-10.txt")];
+pub(crate) const PRIORS: [&str; 1] = [include_str!("../model/priors-10.txt")];
 /// The profile of [`Options::default`] (λ = 5).
 pub const DEFAULT_PROFILE: u16 = 6;
 
@@ -133,6 +133,39 @@ pub fn profile_catalog(profile: u16) -> Result<&'static (Vec<Rule>, Map)> {
         return Err(Error::Param(format!("unknown profile {profile}")));
     }
     Ok(C[k].get_or_init(|| parse_catalog(CATALOGS[k]).expect("built-in rules are valid")))
+}
+
+/// What a record is read with besides the data: the rules of its profile's catalog, and the
+/// default models (static profiles) or the priors (adaptive ones). The profiles' are built in
+/// ([`profile_data`]); the formula module takes them as resources.
+#[derive(Clone, Copy)]
+pub struct ModelData<'a> {
+    pub rules: &'a [Rule],
+    pub coding: Coding<'a>,
+}
+
+#[derive(Clone, Copy)]
+pub enum Coding<'a> {
+    Static(&'a [code::Model; FIELDS]),
+    Adaptive(&'a Priors),
+}
+
+/// The built-in model data of a profile.
+pub fn profile_data(profile: u16) -> Result<ModelData<'static>> {
+    let rules = &profile_catalog(profile)?.0;
+    let coding = if profile >= ADAPTIVE {
+        Coding::Adaptive(profile_priors(profile)?)
+    } else {
+        Coding::Static(default_models())
+    };
+    Ok(ModelData { rules, coding })
+}
+
+/// The profile of a record.
+pub fn record_profile(meta: &[u8]) -> Result<u16> {
+    Ok(u16::from_le_bytes(
+        *meta.first_chunk::<2>().ok_or(Error::Corrupt)?,
+    ))
 }
 
 /// The priors of an adaptive profile.
@@ -1241,11 +1274,30 @@ pub fn reconstruct(data: &[u8], meta: &[u8]) -> Result<Vec<u8>> {
 }
 
 pub fn reconstruct_with_threads(data: &[u8], meta: &[u8], threads: usize) -> Result<Vec<u8>> {
+    reconstruct_with(data, meta, profile_data(record_profile(meta)?)?, threads)
+}
+
+/// [`reconstruct_with_threads`] with the model data `model` in place of the profile's built-in
+/// one. The profile still tells static coding from adaptive, which `model` must agree with.
+pub fn reconstruct_with(
+    data: &[u8],
+    meta: &[u8],
+    model: ModelData,
+    threads: usize,
+) -> Result<Vec<u8>> {
     let threads = threads.max(1);
     let n = data.len();
-    let profile = u16::from_le_bytes(*meta.first_chunk::<2>().ok_or(Error::Corrupt)?);
-    let catalog = &profile_catalog(profile)?.0;
+    let profile = record_profile(meta)?;
+    if !profiles().contains(&profile) {
+        return Err(Error::Param(format!("unknown profile {profile}")));
+    }
+    let catalog = model.rules;
     let adaptive = profile >= ADAPTIVE;
+    let (defaults, priors) = match model.coding {
+        Coding::Static(m) if !adaptive => (Some(m), None),
+        Coding::Adaptive(p) if adaptive => (None, Some(p)),
+        _ => return Err(Error::Corrupt),
+    };
     let mut at = 2;
     let main_len = get_varint(meta, &mut at)? as usize;
     let hdr_len = get_varint(meta, &mut at)? as usize;
@@ -1285,7 +1337,7 @@ pub fn reconstruct_with_threads(data: &[u8], meta: &[u8], threads: usize) -> Res
         }
     } else {
         let mut m = Vec::with_capacity(FIELDS);
-        for d in default_models() {
+        for d in defaults.unwrap() {
             m.push(code::Model::read(r, d)?);
         }
         let m: [code::Model; FIELDS] = m.try_into().map_err(|_| Error::Corrupt)?;
@@ -1350,11 +1402,6 @@ pub fn reconstruct_with_threads(data: &[u8], meta: &[u8], threads: usize) -> Res
         return Err(Error::Corrupt);
     }
 
-    let priors = if adaptive {
-        Some(profile_priors(profile)?)
-    } else {
-        None
-    };
     let decoded = par_map(segs.len(), threads, |i| -> Result<(Vec<Token>, usize)> {
         let (first, count, misses, pos, body, cp) = segs[i];
         let end = segs.get(i + 1).map_or(n, |s| s.3);

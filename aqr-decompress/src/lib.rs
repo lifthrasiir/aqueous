@@ -14,7 +14,8 @@ use aqr_formula::{Apply, Error, Module, Modules, Result};
 /// [`x86::STREAM_NAMES`].
 pub const X86: Module = Module { name: "exe-recons/x86", version: 1 };
 
-/// aqr-flate reconstruction of a raw DEFLATE stream. Inputs: the data and the record.
+/// aqr-flate reconstruction of a raw DEFLATE stream. Resources: the model data of the record's
+/// profile; inputs: the data and the record.
 pub const FLATE: Module = aqr_flate::formula::MODULE;
 
 // A recompressor as a module of its own (its `formula` module, see its FORMAT.md), rebuilding
@@ -31,22 +32,27 @@ pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 /// Every module of this crate.
 pub const MODULES: [Module; 9] = [X86, FLATE, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE];
 
-/// A module's `decode`: params, inputs, output length and threads.
-pub type Decode = fn(&[u8], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
+/// A module's `decode`: params, resources, inputs, output length and threads.
+pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
 
 fn msg(e: impl std::fmt::Debug) -> String {
     format!("{e:?}")
 }
 
+/// No resources, for the modules that take none.
+fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
+    if r.is_empty() { Ok(()) } else { Err("resources given".into()) }
+}
+
 /// The recompressors' own modules, by their `decode`.
 const RECONS: [(Module, Decode); 7] = [
-    (PNG, |p, i, n, t| aqr_png::formula::decode(p, i, n, t).map_err(msg)),
-    (JPEG, |p, i, n, t| aqr_jpeg::formula::decode(p, i, n, t).map_err(msg)),
-    (MP3, |p, i, n, t| aqr_mp3::formula::decode(p, i, n, t).map_err(msg)),
-    (FLAC, |p, i, n, t| aqr_flac::formula::decode(p, i, n, t).map_err(msg)),
-    (PSD, |p, i, n, t| aqr_psd::formula::decode(p, i, n, t).map_err(msg)),
-    (PDF, |p, i, n, t| aqr_pdf::formula::decode(p, i, n, t).map_err(msg)),
-    (SQLITE, |p, i, n, t| aqr_sqlite::formula::decode(p, i, n, t).map_err(msg)),
+    (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
+    (JPEG, |p, r, i, n, t| none(r).and_then(|_| aqr_jpeg::formula::decode(p, i, n, t).map_err(msg))),
+    (MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(msg)),
+    (FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(msg)),
+    (PSD, |p, r, i, n, t| none(r).and_then(|_| aqr_psd::formula::decode(p, i, n, t).map_err(msg))),
+    (PDF, |p, r, i, n, t| none(r).and_then(|_| aqr_pdf::formula::decode(p, i, n, t).map_err(msg))),
+    (SQLITE, |p, r, i, n, t| none(r).and_then(|_| aqr_sqlite::formula::decode(p, i, n, t).map_err(msg))),
 ];
 
 /// The file in archive `c`.
@@ -72,9 +78,9 @@ impl Native {
         aqr::natives(&MODULES, self)
     }
 
-    /// The output of `m` on `inputs` (see [`Modules::apply`]).
-    pub fn run(&self, m: Module, params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
-        catch_unwind(AssertUnwindSafe(|| self.run_unchecked(m, params, inputs, len)))
+    /// The output of `m` on `inputs` with `resources` (see [`Modules::apply`]).
+    pub fn run(&self, m: Module, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+        catch_unwind(AssertUnwindSafe(|| self.run_unchecked(m, params, resources, inputs, len)))
             .unwrap_or_else(|_| Err("panicked".into()))
             .map_err(|e| Error::new(format!("{m}: {e}")))
     }
@@ -83,11 +89,13 @@ impl Native {
         &self,
         m: Module,
         params: &[u8],
+        resources: &[&[u8]],
         inputs: &[&[u8]],
         len: u64,
     ) -> std::result::Result<Vec<u8>, String> {
         let threads = self.threads.max(1);
         if m == X86 {
+            none(resources)?;
             let (Some(p), Ok(streams)) = (params.first_chunk::<10>(), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs))
             else {
                 return Err("bad parameters or inputs".into());
@@ -95,9 +103,9 @@ impl Native {
             let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
             x86::decode(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0).ok_or_else(|| "corrupt".into())
         } else if m == FLATE {
-            aqr_flate::formula::decode(params, inputs, len, threads).map_err(msg)
+            aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)
         } else if let Some((_, decode)) = RECONS.iter().find(|r| r.0 == m) {
-            decode(params, inputs, len, threads)
+            decode(params, resources, inputs, len, threads)
         } else {
             Err("unknown module".into())
         }
@@ -106,6 +114,7 @@ impl Native {
 
 impl Modules for Native {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
-        self.run(a.module, &a.params, inputs, a.len)
+        let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+        self.run(a.module, &a.params, &resources, inputs, a.len)
     }
 }

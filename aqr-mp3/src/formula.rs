@@ -4,9 +4,10 @@
 
 use crate::codec::{self, Coded, N_BYTE_STREAMS};
 use crate::par;
-use aqr_formula::{Formula, Module, Node};
+use aqr_formula::{Formula, Module, Node, Resource};
+use std::sync::OnceLock;
 
-pub const MODULE: Module = Module { name: "mp3-recons", version: 1 };
+pub const MODULE: Module = Module { name: "mp3-recons", version: 2 };
 
 #[derive(Debug)]
 pub struct Error(pub String);
@@ -33,11 +34,7 @@ const CLASSES: [&str; SLOTS] = [
 /// `threads` threads give the same formula.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let c = std::panic::catch_unwind(|| {
-        let c = if threads > 1 && input.len() >= par::PAR_MIN {
-            par::encode(input)
-        } else {
-            codec::encode(input)
-        };
+        let c = if threads > 1 && input.len() >= par::PAR_MIN { par::encode(input) } else { codec::encode(input) };
         let n: usize = c.streams.iter().map(Vec::len).sum::<usize>() + c.words.len() * 4 + c.raw.len();
         (n + 64 < input.len()).then_some(c)
     })
@@ -47,17 +44,31 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     slots.push(c.words.iter().flat_map(|w| w.to_le_bytes()).collect());
     slots.push(c.raw);
     let inputs = slots.into_iter().zip(CLASSES).map(|(d, class)| f.push(class, d)).collect();
-    f.root = Node::apply(MODULE, Vec::new(), inputs, input.len() as u64);
+    f.root = Node::apply_with(MODULE, vec![resource()], Vec::new(), inputs, input.len() as u64);
     Some(f)
 }
 
-/// The module: the file of `len` bytes rebuilt from the ten `inputs`, with `threads` threads
-/// (the same output whatever the number).
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>, Error> {
+/// The module's resource: the built-in frequency tables, uncompressed.
+pub fn resource() -> Resource {
+    static R: OnceLock<Resource> = OnceLock::new();
+    R.get_or_init(|| Resource::new(codec::builtin_raw())).clone()
+}
+
+/// The module: the file of `len` bytes rebuilt from the ten `inputs` and the `resources` (the
+/// tables), with `threads` threads (the same output whatever the number).
+pub fn decode(
+    params: &[u8],
+    resources: &[&[u8]],
+    inputs: &[&[u8]],
+    len: u64,
+    threads: usize,
+) -> Result<Vec<u8>, Error> {
     let corrupt = |m: &str| Error(format!("corrupt: {m}"));
     if !params.is_empty() {
         return Err(corrupt("params"));
     }
+    let [res] = resources else { return Err(corrupt("resources")) };
+    let t = codec::tables_from(res).ok_or_else(|| corrupt("tables"))?;
     let &[.., words, raw] = inputs else { return Err(corrupt("inputs")) };
     if inputs.len() != SLOTS || words.len() % 4 != 0 {
         return Err(corrupt("inputs"));
@@ -72,10 +83,10 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
             raw_bits: raw.len() as u64 * 8,
             bit_lens: [0; 3],
         };
-        codec::decode(&c).map_err(|e| corrupt(e.0))?
+        codec::decode(&c, &t).map_err(|e| corrupt(e.0))?
     } else {
         let streams: [&[u8]; N_BYTE_STREAMS] = std::array::from_fn(|i| inputs[i]);
-        par::decode(len, &streams, words, raw, threads).map_err(|e| corrupt(e.0))?
+        par::decode(&t, len, &streams, words, raw, threads).map_err(|e| corrupt(e.0))?
     };
     if out.len() as u64 != len {
         return Err(corrupt("length"));

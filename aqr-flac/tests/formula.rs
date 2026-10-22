@@ -21,7 +21,8 @@ fn files() -> Vec<(String, Vec<u8>)> {
 fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
         assert_eq!(a.module, MODULE);
-        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+        let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+        formula::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
     })
 }
 
@@ -45,10 +46,11 @@ fn data_files() {
             assert_eq!(a.params, [name.ends_with(".flac") as u8 ^ 1], "{name}");
             assert_eq!(a.inputs.len(), 9);
         }
-        // These should all be coded, and smaller than the input as archives.
+        // These should all be coded, and smaller than the input as archives; an archive
+        // also holds the tables (2306 bytes compressed, once).
         let f = formula::encode(&d, 1).unwrap();
         let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::Mid).unwrap().len();
-        assert!(n < d.len(), "{name}: {n} >= {}", d.len());
+        assert!(n < d.len() + 2400, "{name}: {n} >= {} + 2400", d.len());
     }
 }
 
@@ -102,7 +104,7 @@ fn corrupt_inputs() {
     let ins: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.clone()).collect();
     let run = |p: &[u8], i: &[Vec<u8>], len: u64| {
         let r: Vec<&[u8]> = i.iter().map(|v| &v[..]).collect();
-        let _ = formula::decode(p, &r, len, 1);
+        let _ = formula::decode(p, &[&a.resources[0][..]], &r, len, 1);
     };
     run(&[2], &ins, a.len);
     run(&[], &ins, a.len);
@@ -123,4 +125,40 @@ fn corrupt_inputs() {
     let mut m = ins.clone();
     m[6].push(1);
     run(&a.params, &m, a.len);
+}
+
+/// The decoder codes with the resource it is given, not the built-in tables.
+#[test]
+fn resource() {
+    let (_, d) = files().into_iter().next().unwrap();
+    let f = formula::encode(&d, 1).unwrap();
+    let a = f.applies()[0];
+    assert_eq!(a.module, MODULE);
+    assert_eq!(a.resources.len(), 1);
+    assert!(a.resources[0][..] == formula::resource()[..]);
+    let ins: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+    let run = |res: &[&[u8]]| formula::decode(&a.params, res, &ins, a.len, 1).map_err(|e| e.0);
+    let good = &a.resources[0][..];
+    assert!(run(&[good]).unwrap() == d);
+    assert!(run(&[]).is_err());
+    assert!(run(&[good, good]).is_err());
+    let mut bad = good.to_vec();
+    bad[0] ^= 1; // layout id
+    assert!(run(&[&bad]).is_err());
+    assert!(run(&[&good[..good.len() - 2]]).is_err());
+    assert!(run(&[&[good, &[0, 0][..]].concat()]).is_err());
+    // Valid tables, different from the built-in ones (two frequencies of each context
+    // exchanged): the output is not `d`.
+    let mut other = good.to_vec();
+    for c in 0..124 {
+        let o = 4 + c * 144;
+        other.copy_within(o + 2..o + 4, o + 4);
+        other[o + 2..o + 4].copy_from_slice(&good[o + 4..o + 6]);
+    }
+    assert!(other != good);
+    assert!(run(&[&other]).map_or(true, |o| o != d));
+    // Frequencies not summing to the scale are rejected, not a panic.
+    let mut bad = good.to_vec();
+    bad[4] ^= 1;
+    assert!(run(&[&bad]).is_err());
 }

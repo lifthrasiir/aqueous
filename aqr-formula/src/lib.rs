@@ -4,15 +4,15 @@
 //! A [`Formula`] is a tree of [`Node`]s over [`Stream`]s:
 //! - `slice`: a byte range of a stream;
 //! - `concat`: nodes one after another;
-//! - `apply`: a [`Module`] (a pure function of its inputs and parameters) applied to nodes,
-//!   declaring the size of its output.
+//! - `apply`: a [`Module`] (a pure function of its inputs, resources and parameters) applied
+//!   to nodes, declaring the size of its output.
 //!
 //! Streams are not placed yet: the archive encoder lays them out into non-leaf blocks, and
 //! [`Stream::class`] tells it which streams are alike (to share frames and a dictionary, §3).
 //! What belongs to the archive is left out: `ref` to other entries, and the resource
 //! declarations of `apply` (memory limit, windows, capacities), which the archive encoder
-//! measures while verifying (§6). So are resources (§5.6), until a module takes one; the
-//! recompressors' models are compiled into them for now.
+//! measures while verifying (§6). [`Resource`]s (§5.6), the models that modules take, are
+//! held by the applications, and the archive encoder stores each once.
 //!
 //! [`Formula::eval`] is the reference, strict evaluation: every node is materialised, with
 //! the modules run by a [`Modules`] implementation.
@@ -23,6 +23,7 @@ pub mod aqr;
 
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::Arc;
 
 /// A module, by name and version of its input format. Eventually a Wasm module identified by
 /// its hash; a native implementation stands in for it (§5.7).
@@ -46,6 +47,31 @@ pub struct Stream {
     pub data: Vec<u8>,
 }
 
+/// Bytes that applications of a module share, typically a model (§5.6): a resource block of
+/// an archive. Clones share the bytes.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct Resource(Arc<[u8]>);
+
+impl Resource {
+    pub fn new(data: impl Into<Arc<[u8]>>) -> Resource {
+        Resource(data.into())
+    }
+}
+
+impl std::ops::Deref for Resource {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Resource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Resource({} bytes, {:016x})", self.len(), xxhash_rust::xxh64::xxh64(self, 0))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {
     /// `len` bytes of stream `stream` (an index into [`Formula::streams`]) from `start`.
@@ -61,6 +87,8 @@ pub enum Node {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Apply {
     pub module: Module,
+    /// Module-defined, in order: models and the like that applications share.
+    pub resources: Vec<Resource>,
     /// Module-defined; small values such as a code's origin.
     pub params: Vec<u8>,
     pub inputs: Vec<Node>,
@@ -92,8 +120,13 @@ impl Node {
         if out.len() == 1 { out.pop().unwrap() } else { Node::Concat(out) }
     }
 
+    /// An application without resources.
     pub fn apply(module: Module, params: Vec<u8>, inputs: Vec<Node>, len: u64) -> Node {
-        Node::Apply(Box::new(Apply { module, params, inputs, len }))
+        Node::apply_with(module, Vec::new(), params, inputs, len)
+    }
+
+    pub fn apply_with(module: Module, resources: Vec<Resource>, params: Vec<u8>, inputs: Vec<Node>, len: u64) -> Node {
+        Node::Apply(Box::new(Apply { module, resources, params, inputs, len }))
     }
 
     /// Bytes of the output, as declared.
@@ -288,7 +321,7 @@ impl Formula {
 }
 
 /// Indented, a node a line: `slice #stream [start, +len)`, `concat LEN`, `apply MODULE LEN`
-/// with its parameters in hex.
+/// with the lengths of its resources and its parameters in hex.
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn node(fm: &Formula, n: &Node, depth: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -304,6 +337,10 @@ impl fmt::Display for Formula {
                 }
                 Node::Apply(a) => {
                     write!(f, "apply {} {}", a.module, a.len)?;
+                    if !a.resources.is_empty() {
+                        write!(f, " resources")?;
+                        a.resources.iter().try_for_each(|r| write!(f, " {}", r.len()))?;
+                    }
                     if !a.params.is_empty() {
                         write!(f, " params ")?;
                         a.params.iter().try_for_each(|b| write!(f, "{b:02x}"))?;
@@ -319,7 +356,7 @@ impl fmt::Display for Formula {
 
 /// Runs modules for [`Formula::eval`].
 pub trait Modules {
-    /// The output of `a` on `inputs`, the evaluated `a.inputs`.
+    /// The output of `a` on `inputs`, the evaluated `a.inputs` (with `a.resources`).
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>>;
 }
 

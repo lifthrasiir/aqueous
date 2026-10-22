@@ -59,7 +59,9 @@ pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
 fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &Options) -> Option<Formula> {
     let fopt = aqr_flate::Options { threads: opt.threads, ..Default::default() };
     let (data, record, _) = aqr_flate::deconstruct_hinted(&d[raw.clone()], &fopt, hints).ok()?;
-    if record.len() >= raw.len() || !verified(opt, FLATE, &[], &[&data, &record], &d[raw.clone()]) {
+    let resources = aqr_flate::formula::resources(fopt.profile).ok()?;
+    let res: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
+    if record.len() >= raw.len() || !verified(opt, FLATE, &[], &res, &[&data, &record], &d[raw.clone()]) {
         return None;
     }
     let mut f = Formula::default();
@@ -68,7 +70,7 @@ fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &O
     let data = f.push("raw", data);
     f.root = Node::concat([
         Node::slice(0, 0, raw.start as u64),
-        Node::apply(FLATE, vec![], vec![data, record], raw.len() as u64),
+        Node::apply_with(FLATE, resources, vec![], vec![data, record], raw.len() as u64),
         Node::slice(0, raw.start as u64, (d.len() - raw.end) as u64),
     ]);
     Some(f)

@@ -8,6 +8,7 @@
 use crate::bits;
 use crate::flac::{self, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBATIM};
 use crate::par::{self, DecBatch, EncBatch, Item};
+use crate::rans::Tables;
 use crate::residual::{
     Coded, Error, LmsEncoder, Rd, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes, put_varint,
 };
@@ -554,7 +555,7 @@ pub fn encode_threads(d: &[u8], fmt: Format, start: usize, len: usize, threads: 
 }
 
 /// Decodes into `out` (appending).
-pub fn decode(c: &Coded, total_len: usize, out: &mut Vec<u8>) -> Result<(), Error> {
+pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Result<(), Error> {
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
     }
@@ -573,7 +574,7 @@ pub fn decode(c: &Coded, total_len: usize, out: &mut Vec<u8>) -> Result<(), Erro
     let mut sub = Rd::new(&c.streams[S_SUB]);
     let mut warm = Rd::new(&c.streams[S_WARM]);
     let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
-    let mut rd = ResDecoder::new(&c.words, &raw_buf)?;
+    let mut rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let mut f = Frame::default();
     let mut ch: Vec<Vec<i64>> = vec![Vec::with_capacity(BLOCK); fmt.channels];
     let mut done = 0;
@@ -665,9 +666,9 @@ fn pcm_frame(f: &mut Frame, fmt: &Format, n: usize, hdr: &mut Rd, sub: &mut Rd, 
 /// [`decode`] with `threads` threads: a pipeline of the subframe parameters, the error
 /// decoding and the LMS stage, then a pool reconstructs the samples into their place in
 /// `out`. The same output and errors (the contents of `out` after an error differ).
-pub fn decode_threads(c: &Coded, total_len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), Error> {
+pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), Error> {
     if threads <= 1 {
-        return decode(c, total_len, out);
+        return decode(c, t, total_len, out);
     }
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
@@ -684,7 +685,7 @@ pub fn decode_threads(c: &Coded, total_len: usize, out: &mut Vec<u8>, threads: u
     out.reserve(total_len);
     out.extend_from_slice(prefix);
     let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
-    let rd = ResDecoder::new(&c.words, &raw_buf)?;
+    let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let at = out.len();
     out.resize(at + nframes * frame_bytes, 0);
     let data = &mut out[at..];

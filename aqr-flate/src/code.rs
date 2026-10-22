@@ -368,10 +368,20 @@ impl Model {
             .split_whitespace()
             .map(|x| x.parse().ok())
             .collect::<Option<_>>()?;
-        if v.len() != ALPHABET || v.iter().any(|&q| q == 0 || q > 63) {
-            return None;
-        }
-        Some(Model::from_q(v.try_into().unwrap()))
+        Model::from_qs(&v)
+    }
+
+    /// The rounded frequencies of a default model, by symbol (1 to 63).
+    pub fn qs(&self) -> &[u8; ALPHABET] {
+        &self.q
+    }
+
+    /// A default model of [`Model::qs`] `q`, if every symbol has one in 1 to 63.
+    pub fn from_qs(q: &[u8]) -> Option<Model> {
+        let q: [u8; ALPHABET] = q.try_into().ok()?;
+        q.iter()
+            .all(|q| (1..=63).contains(q))
+            .then(|| Model::from_q(q))
     }
 
     /// Every symbol equally likely.

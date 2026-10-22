@@ -669,7 +669,9 @@ impl Sections {
                 self.table.extend_from_slice(&head.full_fields());
                 let pool = Node::slice(F_POOL + c, self.pools[c].len() as u64, plain.len() as u64);
                 let record = Node::slice(F_META, self.meta.len() as u64, m.len() as u64);
-                self.fm.deflate.push(aqr_flate::formula::apply(pool, record, head.deflate as u64));
+                let profile = aqr_flate::record_profile(&m).expect("a record");
+                let deflate = aqr_flate::formula::apply(profile, pool, record, head.deflate as u64);
+                self.fm.deflate.push(deflate.expect("a record of a known profile"));
                 self.pools[c].extend_from_slice(&plain);
                 self.meta.extend_from_slice(&m);
                 (FULL, len, m.len())

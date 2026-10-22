@@ -294,8 +294,11 @@ fn scan_weak() {
     let mp3 = fixture("aqr-mp3/tests/data/vbr.mp3");
     let t = text(100_000);
     let d = [&text(5000)[..], &zlib(&t, 6), &text(3000), &mp3, &text(100)].concat();
-    let f = roundtrip(&d, &Options::default());
+    // (The MP3 alone archives no smaller than raw, with the tables of its module.)
+    let f = roundtrip(&d, &Options { smaller: false, ..Options::default() });
     assert_eq!(modules(&f), [FLATE.name, MP3.name], "{f}");
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(modules(&f), [FLATE.name], "{f}");
     // A wrong checksum is no zlib stream.
     let mut z = zlib(&t, 6);
     *z.last_mut().unwrap() ^= 1;

@@ -44,7 +44,8 @@ fn num(args: &[String], i: usize) -> usize {
 
 /// The module's output with `threads` threads.
 fn apply(a: &Apply, inputs: &[&[u8]], threads: usize) -> aqr_formula::Result<Vec<u8>> {
-    formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+    let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+    formula::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
 }
 
 /// The evaluated formula `f`, with `threads` threads.
@@ -89,7 +90,7 @@ fn bench(args: &[String]) {
             coded = f.zip(c);
         }
         // The coded path, even when there is no formula.
-        let mut ok = matches!(aqr_mp3::codec::decode(&aqr_mp3::codec::encode(&d)), Ok(ref r) if *r == d);
+        let mut ok = matches!(aqr_mp3::codec::decode(&aqr_mp3::codec::encode(&d), aqr_mp3::codec::tables()), Ok(ref r) if *r == d);
         if !ok {
             eprintln!("{path}: coded path does not round-trip");
         }
@@ -221,7 +222,7 @@ fn fuzz(args: &[String]) {
             })
             .unwrap_or(false)
                 && std::panic::catch_unwind(
-                    || matches!(aqr_mp3::codec::decode(&aqr_mp3::codec::encode(&m)), Ok(ref r) if *r == m),
+                    || matches!(aqr_mp3::codec::decode(&aqr_mp3::codec::encode(&m), aqr_mp3::codec::tables()), Ok(ref r) if *r == m),
                 )
                 .unwrap_or(false);
             if !ok {

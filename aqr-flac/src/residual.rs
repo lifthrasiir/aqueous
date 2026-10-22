@@ -20,9 +20,21 @@ pub fn layout_id() -> u32 {
     builtin::layout_id([model::N_CTX, model::N_TOK, model::TAPS, 1].map(|v| v as u32))
 }
 
+/// The built-in tables (what the encoder codes with).
 pub fn tables() -> &'static Tables {
     static T: OnceLock<Tables> = OnceLock::new();
-    T.get_or_init(|| Tables::new(&builtin_freqs().unwrap_or_else(default_freqs)))
+    T.get_or_init(|| tables_from(&builtin_raw()).expect("built-in tables"))
+}
+
+/// The built-in tables in their uncompressed form: the module's resource.
+pub fn builtin_raw() -> Vec<u8> {
+    builtin::decompress(BUILTIN).unwrap_or_else(|| builtin::to_raw(layout_id(), &default_freqs()))
+}
+
+/// The tables in the uncompressed form `raw`, if they are valid for the layout.
+pub fn tables_from(raw: &[u8]) -> Option<Tables> {
+    let f = builtin::parse(raw, layout_id(), std::iter::repeat_n(model::N_TOK, model::N_CTX))?;
+    Some(Tables::new(&f))
 }
 
 /// Geometric-like tables for when nothing is built in.
@@ -40,10 +52,6 @@ fn default_freqs() -> Vec<Vec<u16>> {
 /// Serialises frequency tables (for the built-in model file).
 pub fn freqs_to_bytes(f: &[Vec<u16>]) -> Vec<u8> {
     builtin::to_bytes(layout_id(), f)
-}
-
-fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
-    builtin::from_bytes(BUILTIN, layout_id(), std::iter::repeat_n(model::N_TOK, model::N_CTX))
 }
 
 /// The coded form of a file.
@@ -325,15 +333,14 @@ impl LmsEncoder {
 pub struct ResDecoder<'a> {
     lms: Vec<Lms>,
     avg: [model::Scale; flac::MAX_CHANNELS],
-    dec: rans::Decoder<'static>,
+    dec: rans::Decoder<'a>,
     raw_len: [usize; 2],
     raw: [BitReader<'a>; 2],
 }
 
 impl<'a> ResDecoder<'a> {
     /// `raw` padded (see [`bits::padded`]).
-    pub fn new(words: &[u32], raw: &'a [Vec<u8>; 2]) -> Result<Self, Error> {
-        let t = tables();
+    pub fn new(t: &'a Tables, words: &[u32], raw: &'a [Vec<u8>; 2]) -> Result<Self, Error> {
         if t.flat_log() != Some(model::FLAT_LOG) {
             return Err(Error("tables"));
         }

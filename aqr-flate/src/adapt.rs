@@ -76,7 +76,7 @@ pub const PROB_ONE: u32 = 1 << 16;
 /// Probabilities are clamped to `PROB_MIN..=PROB_ONE - PROB_MIN` when coding.
 const PROB_MIN: u32 = 16;
 /// Adaptation slows down as 1/(n + 1.5) until it settles at about 1/(LIMIT + 1.5).
-const LIMIT: u8 = 40;
+pub const LIMIT: u8 = 40;
 
 /// The starting state of every context: its probability of a 1, and how many observations
 /// that is worth.

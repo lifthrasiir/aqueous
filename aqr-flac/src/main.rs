@@ -82,7 +82,8 @@ fn opts(args: &[String]) -> Opts {
 fn modules(threads: usize) -> impl Fn(&Apply, &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
     move |a, inputs| {
         assert_eq!(a.module, MODULE);
-        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+        let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+        formula::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
     }
 }
 

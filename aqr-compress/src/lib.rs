@@ -338,9 +338,18 @@ fn recons(encode: fn(&[u8], usize) -> Option<Formula>, d: &[u8], opt: &Options) 
 }
 
 /// Unless verification is off, whether `m` makes `expect` of `inputs`.
-pub(crate) fn verified(opt: &Options, m: Module, params: &[u8], inputs: &[&[u8]], expect: &[u8]) -> bool {
+pub(crate) fn verified(
+    opt: &Options,
+    m: Module,
+    params: &[u8],
+    resources: &[&[u8]],
+    inputs: &[&[u8]],
+    expect: &[u8],
+) -> bool {
     !opt.verify
-        || Native { threads: opt.threads }.run(m, params, inputs, expect.len() as u64).is_ok_and(|out| out == expect)
+        || Native { threads: opt.threads }
+            .run(m, params, resources, inputs, expect.len() as u64)
+            .is_ok_and(|out| out == expect)
 }
 
 /// Bytes of the streams of `f` by class, largest first.

@@ -6,10 +6,13 @@
 //! raw bit streams. FORMAT.md describes the module in full.
 
 use crate::codec::{self, Coded, N_BYTE_STREAMS};
+use crate::rans::Tables;
+use crate::residual;
 use crate::{flac, pcm};
-use aqr_formula::{Formula, Module, Node};
+use aqr_formula::{Formula, Module, Node, Resource};
+use std::sync::OnceLock;
 
-pub const MODULE: Module = Module { name: "flac-recons", version: 1 };
+pub const MODULE: Module = Module { name: "flac-recons", version: 2 };
 
 #[derive(Debug)]
 pub struct Error(pub String);
@@ -86,14 +89,15 @@ fn encode_coded(input: &[u8], opt: &Options, kind: Kind) -> Option<Coded> {
 fn decode_coded(
     kind: Kind,
     c: &Coded,
+    t: &Tables,
     len: usize,
     out: &mut Vec<u8>,
     threads: usize,
 ) -> std::result::Result<(), codec::Error> {
     if kind == Kind::Flac {
-        codec::decode_threads(c, len, out, threads)
+        codec::decode_threads(c, t, len, out, threads)
     } else {
-        pcm::decode_threads(c, len, out, threads)
+        pcm::decode_threads(c, t, len, out, threads)
     }
 }
 
@@ -115,18 +119,27 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     let [raw0, raw1] = c.raw;
     let slots = c.streams.into_iter().chain([words, raw0, raw1]);
     let inputs = slots.zip(CLASSES).map(|(s, class)| f.push(class, s)).collect();
-    f.root = Node::apply(MODULE, vec![(kind != Kind::Flac) as u8], inputs, input.len() as u64);
+    f.root = Node::apply_with(MODULE, vec![resource()], vec![(kind != Kind::Flac) as u8], inputs, input.len() as u64);
     Some(f)
 }
 
-/// The module: the output of `len` bytes from `params` (the kind) and `inputs` (the streams).
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+/// The module's resource: the built-in frequency tables, uncompressed.
+pub fn resource() -> Resource {
+    static R: OnceLock<Resource> = OnceLock::new();
+    R.get_or_init(|| Resource::new(residual::builtin_raw())).clone()
+}
+
+/// The module: the output of `len` bytes from `params` (the kind), `resources` (the
+/// tables) and `inputs` (the streams).
+pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let corrupt = |s: &str| Error(format!("corrupt: {s}"));
     let kind = match params {
         [0] => Kind::Flac,
         [1] => Kind::Pcm,
         _ => return Err(corrupt("params")),
     };
+    let [res] = resources else { return Err(corrupt("resources")) };
+    let t = residual::tables_from(res).ok_or_else(|| corrupt("tables"))?;
     let [streams @ .., words, raw0, raw1] = inputs else { return Err(corrupt("inputs")) };
     if streams.len() != N_BYTE_STREAMS || words.len() % 4 != 0 {
         return Err(corrupt("inputs"));
@@ -142,7 +155,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         raw: [raw0.to_vec(), raw1.to_vec()],
     };
     let mut out = Vec::new();
-    decode_coded(kind, &c, len as usize, &mut out, threads).map_err(|e| corrupt(e.0))?;
+    decode_coded(kind, &c, &t, len as usize, &mut out, threads).map_err(|e| corrupt(e.0))?;
     if out.len() as u64 != len {
         return Err(corrupt("length"));
     }

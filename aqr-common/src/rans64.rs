@@ -714,8 +714,8 @@ impl DecLocal {
     }
 }
 
-/// Frequency tables built into a binary: a layout id (u32 LE), then every context's
-/// frequencies (u16 LE), compressed with zstd.
+/// Frequency tables as data: a layout id (u32 LE), then every context's frequencies (u16 LE);
+/// built into a binary compressed with zstd.
 #[cfg(feature = "zstd")]
 pub mod builtin {
     /// Identifies a context layout (FNV-1a over `vals`).
@@ -727,41 +727,83 @@ pub mod builtin {
         h
     }
 
-    /// Serialises tables for layout `id`.
-    pub fn to_bytes(id: u32, f: &[Vec<u16>]) -> Vec<u8> {
+    /// The uncompressed form of tables for layout `id`.
+    pub fn to_raw(id: u32, f: &[Vec<u16>]) -> Vec<u8> {
         let mut raw = id.to_le_bytes().to_vec();
         for t in f {
             for &x in t {
                 raw.extend_from_slice(&x.to_le_bytes());
             }
         }
-        zstd::bulk::compress(&raw, 19).unwrap()
+        raw
     }
 
-    /// The tables in `data` if they were made for layout `id`, with `alphabets` giving the
-    /// number of symbols of each context in turn.
-    pub fn from_bytes(data: &[u8], id: u32, alphabets: impl IntoIterator<Item = usize>) -> Option<Vec<Vec<u16>>> {
+    /// Serialises tables for layout `id` (the file form).
+    pub fn to_bytes(id: u32, f: &[Vec<u16>]) -> Vec<u8> {
+        zstd::bulk::compress(&to_raw(id, f), 19).unwrap()
+    }
+
+    /// The uncompressed form in the file `data`.
+    pub fn decompress(data: &[u8]) -> Option<Vec<u8>> {
         if data.is_empty() {
             return None;
         }
         let size = zstd::bulk::Decompressor::upper_bound(data).unwrap_or(1 << 24);
-        let raw = zstd::bulk::decompress(data, size).ok()?;
+        zstd::bulk::decompress(data, size).ok()
+    }
+
+    /// The tables in the uncompressed form `raw` if they were made for layout `id`, with
+    /// `alphabets` giving the number of symbols of each context in turn (each 1..=256). `raw`
+    /// must have exactly the size of those tables, and every context valid frequencies (all
+    /// nonzero, summing to the probability scale).
+    pub fn parse(raw: &[u8], id: u32, alphabets: impl IntoIterator<Item = usize>) -> Option<Vec<Vec<u16>>> {
         if raw.len() < 4 || u32::from_le_bytes(raw[0..4].try_into().unwrap()) != id {
             return None;
         }
-        let mut p = 4;
+        let mut p = 4usize;
         let mut out = Vec::new();
         for n in alphabets {
-            out.push(raw.get(p..p + 2 * n)?.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect());
-            p += 2 * n;
+            let end = p.checked_add(n.checked_mul(2)?)?;
+            let f: Vec<u16> = raw.get(p..end)?.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+            // What `Tables::new` requires.
+            if f.contains(&0) || f.iter().map(|&x| x as u32).sum::<u32>() != super::PROB_SCALE {
+                return None;
+            }
+            out.push(f);
+            p = end;
         }
-        Some(out)
+        (p == raw.len()).then_some(out)
+    }
+
+    /// [`parse`] of the file `data`.
+    pub fn from_bytes(data: &[u8], id: u32, alphabets: impl IntoIterator<Item = usize>) -> Option<Vec<Vec<u16>>> {
+        parse(&decompress(data)?, id, alphabets)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "zstd")]
+    #[test]
+    fn builtin_parse() {
+        let f = vec![vec![PROB_SCALE as u16 - 3, 1, 2], vec![PROB_SCALE as u16]];
+        let raw = builtin::to_raw(7, &f);
+        assert_eq!(raw.len(), 4 + 2 * 4);
+        assert_eq!(builtin::parse(&raw, 7, [3, 1]), Some(f.clone()));
+        assert_eq!(builtin::from_bytes(&builtin::to_bytes(7, &f), 7, [3, 1]), Some(f));
+        assert_eq!(builtin::parse(&raw, 8, [3, 1]), None);
+        assert_eq!(builtin::parse(&raw, 7, [3, 2]), None);
+        assert_eq!(builtin::parse(&raw, 7, [3]), None); // trailing bytes
+        assert_eq!(builtin::parse(&raw[..raw.len() - 1], 7, [3, 1]), None);
+        let mut bad = raw.clone();
+        bad[4] ^= 1; // sum off the scale
+        assert_eq!(builtin::parse(&bad, 7, [3, 1]), None);
+        bad[4] = 0;
+        bad[5] = 0; // zero frequency
+        assert_eq!(builtin::parse(&bad, 7, [3, 1]), None);
+    }
 
     #[test]
     fn reciprocals() {

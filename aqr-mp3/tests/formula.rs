@@ -32,7 +32,8 @@ fn big(d: &[u8]) -> Vec<u8> {
 fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
         assert_eq!(a.module, formula::MODULE);
-        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+        let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+        formula::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
     })
 }
 
@@ -109,16 +110,18 @@ fn corrupt_inputs() {
     let Node::Apply(a) = &f.root else { panic!() };
     let slots: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     let len = a.len;
+    let res = [&a.resources[0][..]];
+    let dec = |p: &[u8], s: &[&[u8]], len: u64, t: usize| formula::decode(p, &res, s, len, t);
     for t in [1, 4] {
-        assert!(formula::decode(&[], &slots, len, t).unwrap() == big(d), "{name}");
-        assert!(formula::decode(&[0], &slots, len, t).is_err());
-        assert!(formula::decode(&[], &slots[..9], len, t).is_err());
-        assert!(formula::decode(&[], &slots, len + 1, t).is_err());
+        assert!(dec(&[], &slots, len, t).unwrap() == big(d), "{name}");
+        assert!(dec(&[0], &slots, len, t).is_err());
+        assert!(dec(&[], &slots[..9], len, t).is_err());
+        assert!(dec(&[], &slots, len + 1, t).is_err());
         let mut words = slots[8].to_vec();
         words.push(0);
         let mut s = slots.clone();
         s[8] = &words;
-        assert!(formula::decode(&[], &s, len, t).is_err());
+        assert!(dec(&[], &s, len, t).is_err());
         // Flips in each slot: an error or the same output, never a panic.
         for k in 0..10 {
             for i in [0, slots[k].len() / 2, slots[k].len().saturating_sub(1)] {
@@ -129,16 +132,58 @@ fn corrupt_inputs() {
                 m[i] ^= 0x5a;
                 let mut s = slots.clone();
                 s[k] = &m;
-                let one = formula::decode(&[], &s, len, 1).map_err(|e| e.0);
-                assert_eq!(formula::decode(&[], &s, len, t).map_err(|e| e.0), one, "slot {k} byte {i}, {t} threads");
+                let one = dec(&[], &s, len, 1).map_err(|e| e.0);
+                assert_eq!(dec(&[], &s, len, t).map_err(|e| e.0), one, "slot {k} byte {i}, {t} threads");
             }
         }
         // Slots cut short.
         for k in 0..10 {
             let mut s = slots.clone();
             s[k] = &slots[k][..slots[k].len() / 2];
-            let one = formula::decode(&[], &s, len, 1).map_err(|e| e.0);
-            assert_eq!(formula::decode(&[], &s, len, t).map_err(|e| e.0), one, "slot {k} cut, {t} threads");
+            let one = dec(&[], &s, len, 1).map_err(|e| e.0);
+            assert_eq!(dec(&[], &s, len, t).map_err(|e| e.0), one, "slot {k} cut, {t} threads");
         }
     }
+}
+
+/// The decoder codes with the resource it is given, not the built-in tables.
+#[test]
+fn resource() {
+    let (_, d) = &files()[0];
+    let f = formula::encode(&big(d), 1).unwrap();
+    let Node::Apply(a) = &f.root else { panic!() };
+    assert_eq!(a.resources.len(), 1);
+    assert!(a.resources[0][..] == formula::resource()[..]);
+    let slots: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+    let run = |res: &[&[u8]], t: usize| formula::decode(&[], res, &slots, a.len, t).map_err(|e| e.0);
+    let good = &a.resources[0][..];
+    for t in [1, 4] {
+        assert!(run(&[good], t).unwrap() == big(d));
+        assert!(run(&[], t).is_err());
+        assert!(run(&[good, good], t).is_err());
+        let mut bad = good.to_vec();
+        bad[0] ^= 1; // layout id
+        assert!(run(&[&bad], t).is_err());
+        assert!(run(&[&good[..good.len() - 2]], t).is_err());
+        assert!(run(&[&[good, &[0, 0][..]].concat()], t).is_err());
+        // Frequencies not summing to the scale are rejected, not a panic.
+        let mut bad = good.to_vec();
+        bad[4] ^= 1;
+        assert!(run(&[&bad], t).is_err());
+    }
+    // Valid tables, different from the built-in ones (each context's frequencies reversed):
+    // the output is not the file's.
+    let mut other = good.to_vec();
+    let mut p = 4;
+    for c in 0..aqr_mp3::model::N_CTX {
+        let n = aqr_mp3::model::alphabet(c);
+        for i in 0..n / 2 {
+            for k in 0..2 {
+                other.swap(p + 2 * i + k, p + 2 * (n - 1 - i) + k);
+            }
+        }
+        p += 2 * n;
+    }
+    assert!(other != good);
+    assert!(run(&[&other], 1).map_or(true, |o| o != big(d)));
 }

@@ -22,15 +22,10 @@ fn main() {
         let c = aqr_mp3::codec::encode(&d);
         t_enc += t.elapsed().as_secs_f64();
         let t = Instant::now();
-        let out = aqr_mp3::codec::decode(&c).unwrap();
+        let out = aqr_mp3::codec::decode(&c, aqr_mp3::codec::tables()).unwrap();
         t_dec += t.elapsed().as_secs_f64();
         assert_eq!(out, d);
     }
     let mb = |t: f64| tin as f64 / t / 1e6;
-    println!(
-        "segment {:.0} MB/s, encode {:.0} MB/s, decode {:.0} MB/s",
-        mb(t_seg),
-        mb(t_enc),
-        mb(t_dec)
-    );
+    println!("segment {:.0} MB/s, encode {:.0} MB/s, decode {:.0} MB/s", mb(t_seg), mb(t_enc), mb(t_dec));
 }

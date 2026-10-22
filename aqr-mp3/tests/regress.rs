@@ -19,11 +19,12 @@ fn files() -> Vec<(String, Vec<u8>)> {
 /// The coded path and the formula (if any) give `d` back; whether there is a formula.
 fn roundtrip(name: &str, d: &[u8]) -> bool {
     let c = codec::encode(d);
-    assert_eq!(codec::decode(&c).unwrap(), d, "{name}: coded path");
+    assert_eq!(codec::decode(&c, codec::tables()).unwrap(), d, "{name}: coded path");
     let Some(f) = formula::encode(d, 1) else { return false };
     let out = f
         .eval(&|a: &Apply, inputs: &[&[u8]]| {
-            formula::decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.0))
+            let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+            formula::decode(&a.params, &res, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.0))
         })
         .unwrap();
     assert_eq!(out, d, "{name}: formula");

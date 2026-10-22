@@ -27,7 +27,8 @@ fn file(name: &str) -> Vec<u8> {
 fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
         assert_eq!(a.module, MODULE);
-        formula::decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+        let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+        formula::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
     })
 }
 

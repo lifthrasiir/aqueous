@@ -304,3 +304,48 @@ fn huge_stream_lengths_are_rejected() {
     meta.push(0x01);
     assert!(aqr_flate::reconstruct(b"", &meta).is_err());
 }
+
+/// The formula module reads the record with the model data it is given as resources, in
+/// binary, not with the built-in one: the profile only tells static coding from adaptive.
+#[test]
+fn formula_module_takes_its_resources() {
+    use aqr_flate::formula;
+    let input = include_bytes!("../src/zlib.rs").repeat(2);
+    let raw = "zlib:level=6"
+        .parse::<flate_zoo::Encoder>()
+        .unwrap()
+        .compress(&input)
+        .unwrap();
+    for profile in profiles() {
+        let opts = aqr_flate::Options::for_profile(profile).unwrap();
+        let (data, meta) = aqr_flate::deconstruct_with(&raw, &opts).unwrap();
+        let res = formula::resources(profile).unwrap();
+        let res: Vec<&[u8]> = res.iter().map(|r| &r[..]).collect();
+        let decode =
+            |res: &[&[u8]]| formula::decode(&[], res, &[&data, &meta], raw.len() as u64, 1);
+        assert_eq!(decode(&res).unwrap(), raw, "profile {profile}");
+        // Too few, and the coding of the other kind of profile.
+        assert!(decode(&res[..1]).is_err());
+        let other = formula::resources(if profile < aqr_flate::ADAPTIVE {
+            aqr_flate::ADAPTIVE
+        } else {
+            0
+        })
+        .unwrap();
+        assert!(decode(&[res[0], &other[1]]).is_err());
+        // Another catalog reads the rule's index (of a static profile) as another rule.
+        if profile < aqr_flate::ADAPTIVE {
+            let mut rev = formula::rules_from_bytes(res[0]).unwrap();
+            rev.reverse();
+            let rev = formula::rules_to_bytes(&rev);
+            assert!(
+                decode(&[&rev, res[1]]).ok().as_ref() != Some(&raw),
+                "profile {profile}"
+            );
+        }
+        // Rules damaged.
+        let mut bad = res[0].to_vec();
+        bad[1] = 9;
+        assert!(decode(&[&bad, res[1]]).is_err());
+    }
+}
