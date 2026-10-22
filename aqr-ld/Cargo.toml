@@ -1,0 +1,10 @@
+[package]
+name = "aqr-ld"
+version = "0.1.0"
+edition = "2024"
+description = "Linker wrapper turning the aqr_api imports of a Wasm module into the aqr ones and multi-memory instructions"
+publish = false
+
+[dependencies]
+walrus = "0.27"
+wasmparser = "0.245"

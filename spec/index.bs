@@ -3376,6 +3376,8 @@ Any other import is an [=invalid archive=] failure.
 :: Functions of a [=part module=], defined below. A [=whole module=] MUST NOT import them.
 : `aqr_heartbeat`
 :: A function defined below.
+: `aqr_log`
+:: The diagnostic function, defined below.
 
 A memory is <dfn>sized to fit</dfn> a length |L| when both its minimum and maximum are &lceil;|L| / 65536&rceil; pages.
 
@@ -3430,7 +3432,7 @@ and MUST succeed otherwise if the maximum of the import type of the [=working me
 </div>
 
 Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|</sub> denote the [=visible range=] of the |k|-th input,
-|k| is of type `i32`, and every offset is of type `i64`:
+|k|, |ptr| and |len| are of type `i32`, and every offset is of type `i64`:
 
 : <dfn>aqr_request</dfn>(|k|, |hi|)
 :: The |k|-th input MUST be imported.
@@ -3446,6 +3448,12 @@ Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|
     For each offset |o| in [length of |output|, |hi|), append the byte at |o| % |W|<sub>out</sub> of the memory of the output to |output|.
 : <dfn>aqr_heartbeat</dfn>()
 :: Does nothing.
+: <dfn>aqr_log</dfn>(|ptr|, |len|)
+:: Does nothing.
+    Implementations MAY present the |len| bytes of the [=working memory=] from the offset |ptr| as a diagnostic message,
+    which is untrusted data from the archive, but doing so MUST NOT affect the application,
+    even when the range is out of bounds.
+    It is the only diagnostic function; a module reports a failure by `aqr_log` followed by a trap.
 
 A violation of any MUST in host functions is signalled as an error to the module invocation.
 

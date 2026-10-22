@@ -1,0 +1,12 @@
+[package]
+name = "aqr-demo-concat"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# The location of a panic is logged, which e2e.mjs checks.
+aqr-api = { path = "../..", features = ["panic-location"] }

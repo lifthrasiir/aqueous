@@ -1,0 +1,185 @@
+//! Rewrites the `aqr_api` imports (see `aqr-api/src/wasm.rs`) into a module of the spec's profile:
+//!
+//! - the memory defined by the linker becomes the working memory `aqr.aqr_memory`;
+//! - `size_M`, `read_M`, `write_M` and `copyout_M` become `memory.size M`, `memory.copy working M`,
+//!   `memory.copy M working` and `memory.copy output M`, with `aqr.aqr_M` imported
+//!   (64-bit, minimum 0, no maximum) for each memory `M` used;
+//! - `request`, `release`, `commit`, `heartbeat` and `log` become `aqr.aqr_request` and so on;
+//! - every export but the entry point goes, and so does whatever only they used.
+
+use std::collections::HashMap;
+
+use walrus::ir::{Instr, InstrLocId, MemoryCopy, MemorySize, VisitorMut, dfs_pre_order_mut};
+use walrus::{ExportItem, FunctionId, ImportKind, MemoryId, Module, ModuleConfig, ValType};
+use wasmparser::{Validator, WasmFeatures};
+
+const API: &str = "aqr_api";
+const WHOLE: &str = "aqr_apply_whole";
+const PART: &str = "aqr_apply_part";
+
+fn parse(wasm: &[u8]) -> Result<Module, String> {
+    ModuleConfig::new().parse(wasm).map_err(|e| e.to_string())
+}
+
+/// Whether the module imports `aqr_api` or exports an entry point.
+pub fn is_aqr_module(wasm: &[u8]) -> Result<bool, String> {
+    let m = parse(wasm)?;
+    Ok(m.imports.iter().any(|i| i.module == API) || m.exports.iter().any(|e| e.name == WHOLE || e.name == PART))
+}
+
+/// `params`, `output`, `input`k or `resource`i, without leading zeros.
+fn is_memory_name(name: &str) -> bool {
+    let index = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && (s == "0" || !s.starts_with('0'));
+    name == "params"
+        || name == "output"
+        || name.strip_prefix("input").is_some_and(index)
+        || name.strip_prefix("resource").is_some_and(index)
+}
+
+enum Op {
+    Host,
+    Size,
+    Read,
+    Write,
+    CopyOut,
+}
+
+struct Calls<'a> {
+    calls: &'a HashMap<FunctionId, Instr>,
+    working: MemoryId,
+    grows_other: bool,
+}
+
+impl VisitorMut for Calls<'_> {
+    fn visit_instr_mut(&mut self, instr: &mut Instr, _: &mut InstrLocId) {
+        match instr {
+            Instr::Call(call) => {
+                if let Some(new) = self.calls.get(&call.func) {
+                    *instr = new.clone();
+                }
+            }
+            Instr::MemoryGrow(grow) => self.grows_other |= grow.memory != self.working,
+            _ => {}
+        }
+    }
+}
+
+pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
+    use ValType::{I32, I64};
+
+    let mut m = parse(wasm)?;
+
+    let working = match m.memories.iter().map(|mem| mem.id()).collect::<Vec<_>>()[..] {
+        [w] => w,
+        _ => return Err("not exactly one memory from the linker".into()),
+    };
+    let mem = m.memories.get(working);
+    if mem.import.is_some() || mem.memory64 || mem.shared {
+        return Err("the memory from the linker is not a defined 32-bit unshared one (--import-memory?)".into());
+    }
+    let import = m.imports.add("aqr", "aqr_memory", working);
+    m.memories.get_mut(working).import = Some(import);
+
+    let mut memories = HashMap::new();
+    let mut memory = |m: &mut Module, name: &str| {
+        *memories.entry(name.to_owned()).or_insert_with(|| {
+            m.add_import_memory("aqr", &format!("aqr_{name}"), false, true, 0, None, None).0
+        })
+    };
+    let mut calls = HashMap::new();
+    let mut part_funcs = Vec::new();
+    let imports: Vec<_> = m.imports.iter().map(|i| (i.id(), i.module.clone(), i.name.clone(), i.kind.clone())).collect();
+    for (id, module, name, kind) in imports {
+        if id == import {
+            continue;
+        }
+        if module != API {
+            return Err(format!("import {module}.{name} other than from {API}"));
+        }
+        let ImportKind::Function(func) = kind else {
+            return Err(format!("{API}.{name} is not a function"));
+        };
+        let (op, mem, params, results): (_, _, &[_], &[_]) = match name.as_str() {
+            "request" | "release" => (Op::Host, "", &[I32, I64], &[]),
+            "commit" => (Op::Host, "", &[I64], &[]),
+            "heartbeat" => (Op::Host, "", &[], &[]),
+            "log" => (Op::Host, "", &[I32, I32], &[]),
+            _ => match name.split_once('_') {
+                Some(("size", mem)) => (Op::Size, mem, &[], &[I64]),
+                Some(("read", mem)) => (Op::Read, mem, &[I32, I64, I32], &[]),
+                Some(("write", mem @ "output")) => (Op::Write, mem, &[I64, I32, I32], &[]),
+                Some(("copyout", mem)) => (Op::CopyOut, mem, &[I64, I64, I64], &[]),
+                _ => return Err(format!("unknown {API}.{name}")),
+            },
+        };
+        let ty = m.types.get(m.funcs.get(func).ty());
+        if ty.params() != params || ty.results() != results {
+            return Err(format!("{API}.{name} has the type {:?} -> {:?}", ty.params(), ty.results()));
+        }
+        if !matches!(op, Op::Host) && !is_memory_name(mem) {
+            return Err(format!("unknown memory in {API}.{name}"));
+        }
+        let instr: Instr = match op {
+            Op::Host => {
+                let i = m.imports.get_mut(id);
+                i.module = "aqr".into();
+                i.name = format!("aqr_{name}");
+                if name != "heartbeat" && name != "log" {
+                    part_funcs.push(i.name.clone());
+                }
+                continue;
+            }
+            Op::Size => MemorySize { memory: memory(&mut m, mem) }.into(),
+            Op::Read => MemoryCopy { dst: working, src: memory(&mut m, mem) }.into(),
+            Op::Write => MemoryCopy { dst: memory(&mut m, mem), src: working }.into(),
+            Op::CopyOut => MemoryCopy { dst: memory(&mut m, "output"), src: memory(&mut m, mem) }.into(),
+        };
+        calls.insert(func, instr);
+    }
+
+    let mut visitor = Calls { calls: &calls, working, grows_other: false };
+    for (_, func) in m.funcs.iter_local_mut() {
+        let entry = func.entry_block();
+        dfs_pre_order_mut(&mut visitor, func, entry);
+    }
+    if visitor.grows_other {
+        return Err("memory.grow on a memory other than the working memory".into());
+    }
+
+    let mut entry = None;
+    let exports: Vec<_> = m.exports.iter().map(|e| (e.id(), e.name.clone(), e.item)).collect();
+    for (id, name, item) in exports {
+        match item {
+            ExportItem::Function(func) if name == WHOLE || name == PART => {
+                if entry.replace((name.clone(), func)).is_some() {
+                    return Err(format!("both {WHOLE} and {PART} exported"));
+                }
+            }
+            _ => m.exports.delete(id),
+        }
+    }
+    let Some((entry, func)) = entry else {
+        return Err(format!("neither {WHOLE} nor {PART} exported"));
+    };
+    let ty = m.types.get(m.funcs.get(func).ty());
+    if !ty.params().iter().all(|&t| t == I64) || !ty.results().is_empty() {
+        return Err(format!("{entry} has the type {:?} -> {:?}", ty.params(), ty.results()));
+    }
+    if entry == WHOLE && !part_funcs.is_empty() {
+        return Err(format!("whole module imports {}", part_funcs.join(", ")));
+    }
+
+    walrus::passes::gc::run(&mut m);
+    if let Some(i) = m.imports.iter().find(|i| i.module == API) {
+        return Err(format!("{API}.{} used other than by a call", i.name));
+    }
+    if m.imports.iter().any(|i| matches!(i.kind, ImportKind::Table(_))) {
+        return Err("table imported".into());
+    }
+
+    let wasm = m.emit_wasm();
+    Validator::new_with_features(WasmFeatures::WASM2 | WasmFeatures::MULTI_MEMORY | WasmFeatures::MEMORY64)
+        .validate_all(&wasm)
+        .map_err(|e| format!("invalid output: {e}"))?;
+    Ok(wasm)
+}

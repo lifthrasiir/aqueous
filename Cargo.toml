@@ -18,6 +18,10 @@ members = [
     "aqr-png",
     "aqr-psd",
     "aqr-sqlite",
+    "aqr-api",
+    "aqr-api/demo/concat",
+    "aqr-api/demo/xor",
+    "aqr-ld",
 ]
 # flate-zoo is a submodule with a workspace of its own; the benches are standalone, with the
 # checkouts of third_party/ (some of them workspaces of their own).
