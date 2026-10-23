@@ -1,15 +1,16 @@
-//! Recompresses files into formulas, archives them and decodes the archives back.
+//! Compresses files into archives, as aqr-compress does (verification included), and
+//! decompresses them back.
 //!
 //! usage: aqr-show [-t THREADS] [-d DEPTH] [-l mid|ZSTD_LEVEL] [-e] [-f] FILE...
 //!
-//! For each file: the detected format, the modules applied, the stream bytes by class, the
-//! time of recompression, and the archive (of level `-l`, by default mid) with its round trip,
-//! which verifies the formula; `-e` takes each file as one file of the format it starts like rather than scanning
-//! it, and `-f` prints the formula itself.
+//! For each file: the detected format, the modules applied, the stream bytes by class, and the
+//! archive (of level `-l`, by default mid) with the speeds of compressing it (recompression,
+//! the archive and its verification) and of decompressing it; `-e` takes each file as one file
+//! of the format it starts like rather than scanning it, and `-f` prints the formula itself.
 
 use std::time::Instant;
 
-use aqr_compress::{Nest, Options, classes, detect, recompress};
+use aqr_compress::{Nest, Options, classes, compress_formula, detect};
 use aqr_decompress::decompress;
 use aqr_formula::aqr;
 
@@ -45,29 +46,23 @@ fn main() {
             }
         };
         let mb = d.len() as f64 / 1e6;
-        let start = Instant::now();
-        let f = recompress(&d, &opt);
-        let enc = start.elapsed().as_secs_f64();
-
         let format = detect(&d).map_or("-", |f| f.name());
         let start = Instant::now();
-        let packed = aqr::Encoder::with_threads(opt.level, opt.threads).encode(&f, Some(aqr::checksum(&d)));
+        let (c, f) = compress_formula(&d, &opt);
         let pack = start.elapsed().as_secs_f64();
         let start = Instant::now();
-        let unpacked = packed.as_ref().ok().map(|c| decompress(c, opt.threads));
+        let unpacked = decompress(&c, opt.threads);
         let unpack = start.elapsed().as_secs_f64();
-        let archived = match (&packed, &unpacked) {
-            (Ok(c), Some(Ok(out))) if *out == d => {
-                format!("archive {} B, pack {:.1} MB/s, unpack {:.1} MB/s", c.len(), mb / pack, mb / unpack)
+        let archived = match &unpacked {
+            Ok(out) if *out == d => {
+                format!("archive {} B, compress {:.1} MB/s, decompress {:.1} MB/s", c.len(), mb / pack, mb / unpack)
             }
-            (Ok(c), Some(Ok(_))) => format!("archive {} B, unpacked MISMATCH", c.len()),
-            (Ok(c), Some(Err(e))) => format!("archive {} B, unpacking failed: {e}", c.len()),
-            (Err(e), _) => format!("archive failed: {e}"),
-            (Ok(_), None) => unreachable!(),
+            Ok(_) => format!("archive {} B, decompressed MISMATCH", c.len()),
+            Err(e) => format!("archive {} B, decompressing failed: {e}", c.len()),
         };
-        failed |= !matches!(&unpacked, Some(Ok(out)) if *out == d);
+        failed |= !matches!(&unpacked, Ok(out) if *out == d);
         let modules: Vec<String> = f.applies().iter().map(|a| a.module.to_string()).collect();
-        println!("{path}: {format}, {mb:.2} MB, {} streams, enc {:.1} MB/s, {archived}", f.streams.len(), mb / enc);
+        println!("{path}: {format}, {mb:.2} MB, {} streams, {archived}", f.streams.len());
         println!("  modules: {}", if modules.is_empty() { "-".into() } else { modules.join(" ") });
         let classes = classes(&f);
         let shown: Vec<String> = classes.iter().take(8).map(|(c, n)| format!("{c} {n}")).collect();

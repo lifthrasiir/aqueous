@@ -191,26 +191,34 @@ pub fn recompress(d: &[u8], opt: &Options) -> Formula {
 
 /// `d` as an archive, with the checksum of `d`.
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
+    compress_formula(d, opt).0
+}
+
+/// [`compress`], with the formula the archive holds: that of `d` raw where it was not verified.
+pub fn compress_formula(d: &[u8], opt: &Options) -> (Vec<u8>, Formula) {
     let mut cx = Cx::new(d, opt);
     cx.pre = opt.verify.then(|| verify::Prevalidator::spawn(opt.threads));
     let f = recompress_at(d, opt, 0, opt.file, &cx);
     let memo = cx.pre.take().map(verify::Prevalidator::finish).unwrap_or_default();
-    finish(&f, d, opt, &cx, &memo)
+    finish(f, d, opt, &cx, &memo)
 }
 
 /// The archive of formula `f` of `d`; with [`Options::verify`], decoded and compared with `d`
 /// (the outputs of applications in `memo` taken from there), and where it is not `d` (a
 /// module's bug), the archive of `d` raw instead.
-fn finish(f: &Formula, d: &[u8], opt: &Options, cx: &Cx, memo: &verify::Memo) -> Vec<u8> {
+fn finish(f: Formula, d: &[u8], opt: &Options, cx: &Cx, memo: &verify::Memo) -> (Vec<u8>, Formula) {
     let sum = Some(aqr::checksum(d));
     let decodes = |c: &[u8]| {
         let m = verify::Cached { native: Native { threads: opt.threads }, memo, hits: Default::default() };
         aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m)).is_ok_and(|out| out == d)
     };
-    match cx.enc.encode(f, sum) {
-        Ok(c) if !opt.verify || decodes(&c) => c,
+    match cx.enc.encode(&f, sum) {
+        Ok(c) if !opt.verify || decodes(&c) => (c, f),
         // a leaf of other bytes than `d` is not encoded with its checksum
-        _ => cx.enc.encode(&Formula::raw("raw", d.to_vec()), sum).expect("a stream of the whole"),
+        _ => {
+            let raw = Formula::raw("raw", d.to_vec());
+            (cx.enc.encode(&raw, sum).expect("a stream of the whole"), raw)
+        }
     }
 }
 
@@ -492,20 +500,23 @@ mod tests {
         wrong.streams[0].data[7] ^= 1;
         let raw = aqr::encode(&Formula::raw("raw", d.clone()), Some(aqr::checksum(&d)), opt.level).unwrap();
         // a leaf, whose checksum is not the output's, is not encoded at all
-        assert_eq!(finish(&wrong, &d, &Options { verify: false, ..opt.clone() }, &cx, &Default::default()), raw);
+        assert_eq!(
+            finish(wrong.clone(), &d, &Options { verify: false, ..opt.clone() }, &cx, &Default::default()).0,
+            raw
+        );
         // two slices: the archive has the output's checksum
         wrong.root = Node::Concat(vec![Node::slice(0, 0, 100), Node::slice(0, 100, d.len() as u64 - 100)]);
-        assert_eq!(finish(&wrong, &d, &opt, &cx, &Default::default()), raw);
+        assert_eq!(finish(wrong.clone(), &d, &opt, &cx, &Default::default()).0, raw);
         // a module that fails
         let fails = Formula {
             streams: vec![aqr_formula::Stream { class: "raw".into(), data: vec![1, 2, 3] }],
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
         };
-        assert_eq!(finish(&fails, &d, &opt, &cx, &Default::default()), raw);
+        assert_eq!(finish(fails, &d, &opt, &cx, &Default::default()).0, raw);
         // without verification, as it is
         let opt = Options { verify: false, ..opt };
         assert_eq!(
-            aqr_decompress::decompress(&finish(&wrong, &d, &opt, &cx, &Default::default()), 1),
+            aqr_decompress::decompress(&finish(wrong, &d, &opt, &cx, &Default::default()).0, 1),
             Err(aqr::Failure::Invalid("output checksum mismatch".into()))
         );
     }
