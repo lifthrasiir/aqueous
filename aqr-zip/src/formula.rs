@@ -51,6 +51,29 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_with(input, &Options { threads, limit: limit(input.len()), ..Options::default() }).map(|e| e.formula)
 }
 
+/// Bytes from which a DEFLATE stream gets threads of its own: two of aqr-flate's segments.
+const LARGE: usize = 2 << 20;
+
+/// `f(item, threads)` on every element of `items`, by `threads` threads: those of `size` at
+/// least [`LARGE`] one after another with all of them (aqr-flate codes segments in parallel),
+/// the others side by side with one each.
+fn par_jobs<T: Sync, R: Send>(
+    items: &[T],
+    size: impl Fn(&T) -> usize,
+    threads: usize,
+    f: impl Fn(&T, usize) -> R + Sync,
+) -> Vec<R> {
+    let (large, small): (Vec<usize>, Vec<usize>) = (0..items.len()).partition(|&i| size(&items[i]) >= LARGE);
+    let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    for i in large {
+        out[i] = Some(f(&items[i], threads));
+    }
+    for (i, r) in small.iter().zip(par_map(&small, threads, |&i| f(&items[i], 1))) {
+        out[*i] = Some(r);
+    }
+    out.into_iter().map(Option::unwrap).collect()
+}
+
 /// `f` on every element of `items`, on up to `threads` threads.
 fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let threads = threads.clamp(1, items.len().max(1));
@@ -145,16 +168,20 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             .map(|(i, _)| i)
             .collect()
     };
-    let per = (opt.threads / chosen.len().max(1)).max(1);
-    let fopt =
-        aqr_flate::Options { threads: per, profile: opt.profile, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
-    let split = par_map(&chosen, opt.threads, |&i| {
-        let body = &input[locals[i].body.clone()];
-        let (data, record) = aqr_flate::deconstruct_with(body, &fopt).ok()?;
-        // kept, the body would also take its CRC-32 and size
-        // (and tiny records are much alike, so that they compress well together)
-        (record.len() < body.len() + 16).then_some(Made::Deflated { data, record })
-    });
+    let fopt = aqr_flate::Options { profile: opt.profile, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
+    let split = par_jobs(
+        &chosen,
+        |&i| locals[i].body.len(),
+        opt.threads,
+        |&i, threads| {
+            let body = &input[locals[i].body.clone()];
+            let (data, record) =
+                aqr_flate::deconstruct_with(body, &aqr_flate::Options { threads, ..fopt.clone() }).ok()?;
+            // kept, the body would also take its CRC-32 and size
+            // (and tiny records are much alike, so that they compress well together)
+            (record.len() < body.len() + 16).then_some(Made::Deflated { data, record })
+        },
+    );
     let mut inflated = 0;
     for (&i, m) in chosen.iter().zip(split) {
         if let Some(Made::Deflated { data, .. }) = &m {
@@ -257,14 +284,18 @@ pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, th
                 models = aqr_flate::formula::models_from_bytes(coding).map_err(flate)?;
                 ModelData { rules: &rules, coding: Coding::Static(&models) }
             };
-            let per = (threads / jobs.len()).max(1);
-            par_map(&jobs, threads, |(d, r)| {
-                let rec = &records[r.clone()];
-                if aqr_flate::record_profile(rec).map_err(flate)? != profile {
-                    return Err(Error("records of another profile"));
-                }
-                aqr_flate::reconstruct_with(&data[d.clone()], rec, model, per).map_err(flate)
-            })
+            par_jobs(
+                &jobs,
+                |(d, _)| d.len(),
+                threads,
+                |(d, r), per| {
+                    let rec = &records[r.clone()];
+                    if aqr_flate::record_profile(rec).map_err(flate)? != profile {
+                        return Err(Error("records of another profile"));
+                    }
+                    aqr_flate::reconstruct_with(&data[d.clone()], rec, model, per).map_err(flate)
+                },
+            )
             .into_iter()
             .collect::<Result<_>>()?
         }
