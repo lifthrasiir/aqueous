@@ -10,7 +10,10 @@ and the design is argued in `xform-design.md`.
 - Through `aqr-show` (`aqr/src/bin/show.rs`): each file is archived (recompression, archive
   coding and the round-trip check) at level `mid`, then extracted.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `objr bench`.
-  - aqr-git, aqr-lz4, aqr-snappy and aqr-exe: see their rows.
+  - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
+- aqr-exe alone was measured on another machine, an AMD Ryzen 7 9700X under Windows 11 (at
+  `aa7a327`, otherwise as above): its speeds are not comparable to the others'. Its memory is
+  the peak working set.
 - Samples: files of 256 KiB or more from each crate's `corpus/` (aqr-jpeg: `samples/` and the
   JPEG files of codec-corpus), taken in the order of their paths' hashes up to about 400 MB.
 - Columns:
@@ -68,9 +71,9 @@ of all of them would); the speeds and memory are those of the files coded.
 
 ### Executables
 
-| format | crate | state |
-|---|---|---|
-| PE code sections (x86, x86-64) | aqr-exe | a disfilter per code section (28 data streams and 16 of padding). Its bench (`aqr-exe/examples/bench.rs`) reads Windows paths and was not run here. No ELF, Mach-O or ARM64 yet |
+| format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
+|---|---|---|---|---|---|---|---|---|
+| PE (x86, x86-64) | aqr-exe | 261 files, 401 MB | 0.339 | 0.383 | 17 | 336 | 5.3× (14 MB + 4.7×) | **Ryzen 7 9700X, not the M4** (above). Samples from `Program Files` and `System32`; 121 files not coded (108 of them .NET). 11 large binaries (1529 MB): 0.306 at 36 and 268 MB/s, 4.7×. The disfilter alone: 238 and 296 MB/s, −20% under zstd -9. No ELF, Mach-O or ARM64 yet |
 
 ### In progress or planned
 
