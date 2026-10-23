@@ -17,7 +17,7 @@
 //! or an encryption.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
@@ -27,7 +27,7 @@ use aqr_common::varint;
 use xxhash_rust::xxh3::Xxh3;
 use xxhash_rust::xxh64::{Xxh64, xxh64};
 use zstd::zstd_safe::zstd_sys::ZSTD_EndDirective;
-use zstd::zstd_safe::{self, CParameter, InBuffer, OutBuffer};
+use zstd::zstd_safe::{self, CCtx, CParameter, InBuffer, OutBuffer, ResetDirective};
 
 use crate::{Error, Formula, Module, Node, Resource, Result};
 
@@ -130,6 +130,9 @@ pub struct Encoder {
     streams: RefCell<HashMap<StreamKey, Option<Vec<u8>>>>,
     /// Compressed resources by their [`StreamKey`].
     resources: RefCell<HashMap<StreamKey, Vec<u8>>>,
+    /// The Zstandard context every stream is compressed with, so that its workers and buffers
+    /// are made once rather than for each stream (while they take at most [`CCTX_KEPT`]).
+    cctx: RefCell<CCtx<'static>>,
 }
 
 /// A stream's (or resource's) hash and length.
@@ -154,7 +157,18 @@ impl Encoder {
 
     /// An encoder compressing each stream on `threads` threads, into the same archive as on one.
     pub fn with_threads(level: Level, threads: usize) -> Encoder {
-        Encoder { level, threads: threads.max(1), streams: RefCell::default(), resources: RefCell::default() }
+        Encoder {
+            level,
+            threads: threads.max(1),
+            streams: RefCell::default(),
+            resources: RefCell::default(),
+            cctx: RefCell::new(CCtx::create()),
+        }
+    }
+
+    /// The Zstandard context of the encoder.
+    fn cctx(&self) -> RefMut<'_, CCtx<'static>> {
+        self.cctx.borrow_mut()
     }
 
     /// The length of the archive of `f` without a checksum.
@@ -268,7 +282,7 @@ impl Encoder {
             }
 
             for &m in &modules {
-                block(out, MODULE, &padded(self.threads, |pad| wasm(m, pad), level)?);
+                block(out, MODULE, &padded(&mut self.cctx(), self.threads, |pad| wasm(m, pad), level)?);
             }
             for r in resources {
                 self.resource_block(out, r)?;
@@ -277,6 +291,7 @@ impl Encoder {
                 out,
                 FORMULA,
                 &padded(
+                    &mut self.cctx(),
                     self.threads,
                     |pad| {
                         let mut d = data.clone();
@@ -471,7 +486,7 @@ impl Encoder {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => e.insert(match self.plan(data)? {
                 Plan::Done(c) => c,
-                Plan::Level(level, size) => compressed_to(data, level, self.threads, size)?,
+                Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
             }),
         };
         content_block(out, leaf, data, c.as_deref());
@@ -487,8 +502,8 @@ impl Encoder {
             Entry::Vacant(e) => {
                 let c = match self.plan(&[r])? {
                     Plan::Done(Some(c)) => Some(c),
-                    Plan::Done(None) => compressed(&[r], MID_BASE.0, self.threads)?,
-                    Plan::Level(level, size) => compressed_to(&[r], level, self.threads, size)?,
+                    Plan::Done(None) => compressed(&mut self.cctx(), &[r], MID_BASE.0, self.threads)?,
+                    Plan::Level(level, size) => compressed_to(&mut self.cctx(), &[r], level, self.threads, size)?,
                 };
                 e.insert(c.ok_or_else(|| Error::new(format!("a resource of {} bytes does not compress", r.len())))?)
             }
@@ -501,30 +516,34 @@ impl Encoder {
     fn plan(&self, data: &[&[u8]]) -> Result<Plan> {
         let n = total(data);
         match self.level {
-            Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(compressed(data, l, self.threads)?)),
+            Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(compressed(&mut self.cctx(), data, l, self.threads)?)),
             Level::Zstd(l) => {
                 let sample = sampled(data);
-                let c = compressed(&[&sample], l, self.threads)?.map_or(sample.len(), |c| c.len());
+                let c = compressed(&mut self.cctx(), &[&sample], l, self.threads)?.map_or(sample.len(), |c| c.len());
                 Ok(Plan::Level(l, scaled(c, sample.len(), n)))
             }
             Level::Mid => {
                 let sample = sampled(data);
                 let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
-                let probe = compressed(&[&sample], PROBE, self.threads)?;
+                let probe = compressed(&mut self.cctx(), &[&sample], PROBE, self.threads)?;
                 if len(&probe) >= sample.len() - sample.len() / 32 {
                     return Ok(Plan::Done(None));
                 }
                 if n < MID_SMALL {
-                    return Ok(Plan::Done(compressed(data, MID_BASE.0, self.threads)?));
+                    return Ok(Plan::Done(compressed(&mut self.cctx(), data, MID_BASE.0, self.threads)?));
                 }
-                let mut tried = vec![(MID_BASE.0, compressed(&[&sample], MID_BASE.0, self.threads)?)];
+                let mut tried = vec![(MID_BASE.0, compressed(&mut self.cctx(), &[&sample], MID_BASE.0, self.threads)?)];
                 for (level, _) in MID_HIGHER {
-                    tried.push((level, compressed(&[&sample], level, self.threads)?));
+                    tried.push((level, compressed(&mut self.cctx(), &[&sample], level, self.threads)?));
                 }
                 for level in MID_LOWER {
                     tried.push((
                         level,
-                        if level == PROBE { probe.clone() } else { compressed(&[&sample], level, self.threads)? },
+                        if level == PROBE {
+                            probe.clone()
+                        } else {
+                            compressed(&mut self.cctx(), &[&sample], level, self.threads)?
+                        },
                     ));
                 }
                 let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
@@ -560,7 +579,7 @@ impl Encoder {
                     if n <= estimate / 2 {
                         return Ok(true);
                     }
-                    compressed_to(&[d], level, self.threads, estimate)?
+                    compressed_to(&mut self.cctx(), &[d], level, self.threads, estimate)?
                 }
             };
             self.streams.borrow_mut().insert(key(&[d]), c);
@@ -655,10 +674,10 @@ fn content_block(out: &mut impl Out, leaf: bool, data: &[&[u8]], c: Option<&[u8]
 
 /// The compressed external structure of `make(pad)` with the least `pad` tried (0, 16, 32,
 /// ...) that compresses, for blocks that are always compressed.
-fn padded(threads: usize, make: impl Fn(usize) -> Vec<u8>, level: i32) -> Result<Vec<u8>> {
+fn padded(cctx: &mut CCtx, threads: usize, make: impl Fn(usize) -> Vec<u8>, level: i32) -> Result<Vec<u8>> {
     let mut pad = 0;
     loop {
-        if let Some(c) = compressed(&[&make(pad)], level, threads)? {
+        if let Some(c) = compressed(cctx, &[&make(pad)], level, threads)? {
             return Ok(c);
         }
         pad = (pad * 2).max(16);
@@ -675,9 +694,9 @@ const ZSTD_OVERLAP: u32 = 9;
 /// The compressed external structure of `data` (Zstandard, XXH64), unless the Zstandard
 /// blocks would be longer than `data`. It is compressed on `threads` threads, always in
 /// Zstandard's multithreaded mode: the output does not depend on how many (up to 1 MiB of data,
-/// it is also that of the single-threaded mode).
-fn compressed(data: &[&[u8]], level: i32, threads: usize) -> Result<Option<Vec<u8>>> {
-    compressed_to(data, level, threads, usize::MAX)
+/// it is also that of the single-threaded mode), nor on what context `c` compressed before.
+fn compressed(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize) -> Result<Option<Vec<u8>>> {
+    compressed_to(c, data, level, threads, usize::MAX)
 }
 
 /// The bytes a stream of `n` bytes compresses to, where a sample of `of` bytes of it compresses
@@ -686,12 +705,17 @@ fn scaled(to: usize, of: usize, n: usize) -> usize {
     (to as f64 * n as f64 / of.max(1) as f64) as usize
 }
 
+/// The most memory a context is kept with ([`compressed`]): it holds what the largest data
+/// and highest level it compressed took, and a new one gives that back.
+const CCTX_KEPT: usize = 4 << 20;
+
 /// [`compressed`], expected to give about `size` bytes: room is made for a little more, and
 /// for as much as Zstandard may give only where that does not do (the output does not depend
 /// on the room it has). A stream is not given room for its own size again for nothing.
-fn compressed_to(data: &[&[u8]], level: i32, threads: usize, size: usize) -> Result<Option<Vec<u8>>> {
+fn compressed_to(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usize) -> Result<Option<Vec<u8>>> {
     let zstd = |e: zstd_safe::ErrorCode| Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)));
-    let mut c = zstd_safe::CCtx::create();
+    // A context compressed with before keeps its workers and buffers, not its parameters.
+    c.reset(ResetDirective::SessionAndParameters).map_err(zstd)?;
     for p in [
         CParameter::CompressionLevel(level),
         CParameter::ContentSizeFlag(false),
@@ -727,6 +751,9 @@ fn compressed_to(data: &[&[u8]], level: i32, threads: usize, size: usize) -> Res
                 break;
             }
         }
+    }
+    if c.sizeof() > CCTX_KEPT {
+        *c = CCtx::create();
     }
     // a frame header of no flags, then the window descriptor
     let [m0, m1, m2, m3, 0, window, blocks @ ..] = &frame[..] else {
@@ -1411,9 +1438,11 @@ mod tests {
     /// before non-leaf blocks of `streams`.
     fn formula(data: &[u8], streams: &[&[u8]]) -> Vec<u8> {
         archive(|out| {
-            block(out, MODULE, &padded(1, |pad| wasm(REV, pad), 3).unwrap());
-            block(out, FORMULA, &padded(1, |pad| [data, &vec![NOP; pad]].concat(), 3).unwrap());
-            streams.iter().for_each(|s| content_block(out, false, &[s], compressed(&[s], 3, 1).unwrap().as_deref()));
+            block(out, MODULE, &padded(&mut CCtx::create(), 1, |pad| wasm(REV, pad), 3).unwrap());
+            block(out, FORMULA, &padded(&mut CCtx::create(), 1, |pad| [data, &vec![NOP; pad]].concat(), 3).unwrap());
+            streams.iter().for_each(|s| {
+                content_block(out, false, &[s], compressed(&mut CCtx::create(), &[s], 3, 1).unwrap().as_deref())
+            });
         })
     }
 
@@ -1561,10 +1590,32 @@ mod tests {
     fn decoded_at_size() {
         let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/index.bs")).unwrap();
         let d = text.repeat((3 << 20) / text.len() + 1);
-        let c = compressed(&[&d], 3, 1).unwrap().unwrap();
+        let c = compressed(&mut CCtx::create(), &[&d], 3, 1).unwrap().unwrap();
         let out = decoded(&c, true, true).unwrap();
         assert_eq!(out, d);
         assert!(out.capacity() <= d.len() + 1, "{} for {}", out.capacity(), d.len());
+    }
+
+    /// A context compressed with before compresses as a new one does, whatever the levels,
+    /// threads and data it had (more than a job among them).
+    #[test]
+    fn cctx_reused() {
+        let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/index.bs")).unwrap();
+        let big = text.repeat(ZSTD_JOB as usize / text.len() + 2);
+        let runs: [(&[u8], i32, usize); 7] = [
+            (&big, 9, 4),
+            (&text[..1000], 1, 1),
+            (&text, 19, 1),
+            (&big, 3, 1),
+            (&text[5000..], 6, 4),
+            (&[], 3, 2),
+            (&text, 3, 1),
+        ];
+        let mut c = CCtx::create();
+        for (d, level, threads) in runs {
+            let fresh = compressed(&mut CCtx::create(), &[d], level, threads).unwrap();
+            assert_eq!(compressed(&mut c, &[d], level, threads).unwrap(), fresh, "level {level}, {threads} threads");
+        }
     }
 
     /// A stream in pieces compresses as it does in one, the pieces ending anywhere (at the end
@@ -1580,7 +1631,7 @@ mod tests {
         }
         d.truncate(2 * ZSTD_JOB as usize);
         let job = ZSTD_JOB as usize;
-        let one = compressed(&[&d], 1, 4).unwrap();
+        let one = compressed(&mut CCtx::create(), &[&d], 1, 4).unwrap();
         // as Zstandard compresses it in one go
         let mut z = zstd::bulk::Compressor::new(1).unwrap();
         for p in [
@@ -1603,7 +1654,7 @@ mod tests {
                 at = c;
             }
             pieces.push(&d[at..]);
-            assert_eq!(compressed(&pieces, 1, 4).unwrap(), one);
+            assert_eq!(compressed(&mut CCtx::create(), &pieces, 1, 4).unwrap(), one);
         }
 
         let d = &d[..3 << 20];
@@ -1697,9 +1748,9 @@ mod tests {
             [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
         let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
         let c = archive(|out| {
-            block(out, MODULE, &padded(1, |pad| wasm(REV, pad), 3).unwrap());
+            block(out, MODULE, &padded(&mut CCtx::create(), 1, |pad| wasm(REV, pad), 3).unwrap());
             for d in [&first[..], &second] {
-                block(out, FORMULA, &padded(1, |pad| [d, &vec![NOP; pad]].concat(), 3).unwrap());
+                block(out, FORMULA, &padded(&mut CCtx::create(), 1, |pad| [d, &vec![NOP; pad]].concat(), 3).unwrap());
             }
             content_block(out, false, &[b"xyz"], None);
         });
