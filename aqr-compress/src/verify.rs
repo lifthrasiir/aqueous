@@ -7,15 +7,17 @@
 //! parameters, resources and inputs are the same ([`Cached`]), rather than running the module
 //! again: modules are pure functions, so that this is the output it would give. Everything else
 //! of the archive (its blocks, the formula block, the streams, the checksums) is decoded as it
-//! would be.
+//! would be. An application whose output is part of the file (that of a formula of a file in
+//! the file, at its top) is not kept in the memo, but known to give that part of the file.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use aqr_decompress::Native;
-use aqr_formula::{Apply, Formula, Modules, Result};
+use aqr_formula::{Apply, Formula, Modules, Node, Result};
 use xxhash_rust::xxh3::Xxh3;
 
 /// What an application is: its module, parameters, resources and inputs, hashed.
@@ -38,41 +40,63 @@ fn key(a: &Apply, inputs: &[&[u8]]) -> Key {
     h.digest128()
 }
 
+/// An application's output: its bytes, or a range of the file.
+enum Output {
+    Bytes(Arc<Vec<u8>>),
+    File(Range<usize>),
+}
+
 /// Outputs of applications, by [`key`].
 #[derive(Default)]
-pub(crate) struct Memo(HashMap<Key, Arc<Vec<u8>>>);
+pub(crate) struct Memo(HashMap<Key, Output>);
 
-/// Runs the modules, keeping the output of every application by its key.
+impl Memo {
+    /// Bytes of the outputs kept.
+    #[cfg(test)]
+    pub fn bytes(&self) -> usize {
+        self.0.values().map(|o| if let Output::Bytes(b) = o { b.len() } else { 0 }).sum()
+    }
+}
+
+/// Runs the modules, keeping the output of every application by its key: as a range of the
+/// file for the applications in `file` (by address).
 struct Recording {
     native: Native,
-    seen: Mutex<Vec<(Key, Arc<Vec<u8>>)>>,
+    file: Vec<(usize, Range<usize>)>,
+    seen: Mutex<Vec<(Key, Output)>>,
 }
 
 impl Modules for Recording {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         let out = self.native.apply(a, inputs)?;
-        self.seen.lock().unwrap().push((key(a, inputs), Arc::new(out.clone())));
+        let kept = match self.file.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)) {
+            Some((_, range)) => Output::File(range.clone()),
+            None => Output::Bytes(Arc::new(out.clone())),
+        };
+        self.seen.lock().unwrap().push((key(a, inputs), kept));
         Ok(out)
     }
 }
 
 /// Runs the modules where the output of an application is not in the memo; `hits` counts those
 /// that are. An output is taken out of the memo when it is used: decoding an archive evaluates
-/// an application once.
-pub(crate) struct Cached {
+/// an application once. `file` is the file that the formulas evaluated beforehand are of.
+pub(crate) struct Cached<'a> {
     pub native: Native,
     pub memo: Mutex<Memo>,
     pub hits: Mutex<usize>,
+    pub file: &'a [u8],
 }
 
-impl Modules for Cached {
+impl Modules for Cached<'_> {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         let hit = self.memo.lock().unwrap().0.remove(&key(a, inputs));
+        if hit.is_some() {
+            *self.hits.lock().unwrap() += 1;
+        }
         match hit {
-            Some(out) => {
-                *self.hits.lock().unwrap() += 1;
-                Ok(Arc::try_unwrap(out).unwrap_or_else(|out| out.to_vec()))
-            }
+            Some(Output::Bytes(out)) => Ok(Arc::try_unwrap(out).unwrap_or_else(|out| out.to_vec())),
+            Some(Output::File(range)) => Ok(self.file[range].to_vec()),
             None => self.native.apply(a, inputs),
         }
     }
@@ -80,11 +104,15 @@ impl Modules for Cached {
 
 /// Evaluates formulas on a thread of its own, as they are submitted, into a [`Memo`]. A
 /// formula is shared with the recompression, and checked against a hash of the data it stands
-/// for: neither is copied.
+/// for: neither is copied. The file is known by its address: data within it is part of it.
 pub(crate) struct Prevalidator {
-    jobs: Sender<(Arc<Formula>, Key)>,
+    jobs: Sender<Job>,
     done: JoinHandle<Memo>,
+    file: Range<usize>,
 }
+
+/// A formula, the hash of its data, and where the data is in the file if it is.
+type Job = (Arc<Formula>, Key, Option<usize>);
 
 fn hash(d: &[u8]) -> Key {
     xxhash_rust::xxh3::xxh3_128(d)
@@ -112,12 +140,19 @@ pub(crate) fn reclaim(mut f: Arc<Formula>) -> Formula {
 }
 
 impl Prevalidator {
-    pub fn spawn(threads: usize) -> Prevalidator {
-        let (jobs, rx) = channel::<(Arc<Formula>, Key)>();
+    /// A prevalidator of the formulas made of `file` and of what it holds.
+    pub fn spawn(threads: usize, file: &[u8]) -> Prevalidator {
+        let (jobs, rx) = channel::<Job>();
         let done = std::thread::spawn(move || {
             let mut memo = Memo::default();
-            for (f, d) in rx {
-                let r = Recording { native: Native { threads }, seen: Mutex::default() };
+            for (f, d, at) in rx {
+                // the file is not kept again: the outputs of the applications at the top of a
+                // formula of data in it are where they make it
+                let r = Recording {
+                    native: Native { threads },
+                    file: at.map_or_else(Vec::new, |at| top(&f.root, at)),
+                    seen: Mutex::default(),
+                };
                 let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
                 drop(f);
                 if good {
@@ -126,7 +161,7 @@ impl Prevalidator {
             }
             memo
         });
-        Prevalidator { jobs, done }
+        Prevalidator { jobs, done, file: file.as_ptr_range().start as usize..file.as_ptr_range().end as usize }
     }
 
     /// Has formula `f` of data `d` evaluated: where it gives `d`, its applications' outputs go
@@ -134,7 +169,9 @@ impl Prevalidator {
     pub fn submit(&self, f: Arc<Formula>, d: &[u8]) {
         if !f.applies().is_empty() {
             // the thread is gone only if it panicked, which `finish` reports
-            let _ = self.jobs.send((f, hash(d)));
+            let at = d.as_ptr() as usize;
+            let within = self.file.contains(&at) && at + d.len() <= self.file.end;
+            let _ = self.jobs.send((f, hash(d), within.then(|| at - self.file.start)));
         }
     }
 
@@ -143,4 +180,19 @@ impl Prevalidator {
         drop(self.jobs);
         self.done.join().unwrap_or_default()
     }
+}
+
+/// The applications at the top of `n`, by address, with the ranges of their outputs in the
+/// output of `n` (of which the output is at `at`): `n`, or those it concatenates.
+fn top(n: &Node, at: usize) -> Vec<(usize, Range<usize>)> {
+    let mut out = Vec::new();
+    let mut p = at;
+    for n in if let Node::Concat(ns) = n { &ns[..] } else { std::slice::from_ref(n) } {
+        let len = n.len() as usize;
+        if let Node::Apply(a) = n {
+            out.push((&**a as *const Apply as usize, p..p + len));
+        }
+        p += len;
+    }
+    out
 }

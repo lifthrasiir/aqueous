@@ -206,7 +206,7 @@ pub fn compress_formula(d: &[u8], opt: &Options) -> (Vec<u8>, Formula) {
 /// before the archive is verified.
 fn compress_with(d: &[u8], opt: &Options, kept: bool) -> (Vec<u8>, Option<Formula>) {
     let mut cx = Cx::new(d, opt);
-    cx.pre = opt.verify.then(|| verify::Prevalidator::spawn(opt.threads));
+    cx.pre = opt.verify.then(|| verify::Prevalidator::spawn(opt.threads, d));
     let f = recompress_at(d, opt, 0, opt.file, &cx);
     let memo = cx.pre.take().map(verify::Prevalidator::finish).unwrap_or_default();
     finish(f, d, opt, &cx, memo, kept)
@@ -222,7 +222,12 @@ fn finish(f: Formula, d: &[u8], opt: &Options, cx: &Cx, memo: verify::Memo, kept
     cx.enc.clear();
     let f = kept.then_some(f);
     let decodes = |c: &[u8]| {
-        let m = verify::Cached { native: Native { threads: opt.threads }, memo: memo.into(), hits: Default::default() };
+        let m = verify::Cached {
+            native: Native { threads: opt.threads },
+            memo: memo.into(),
+            hits: Default::default(),
+            file: d,
+        };
         aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m)).is_ok_and(|out| out == d)
     };
     match c {
@@ -581,20 +586,24 @@ mod tests {
         let d = z.finish().unwrap();
         let opt = Options { smaller: false, ..Options::default() };
         let mut cx = Cx::new(&d, &opt);
-        cx.pre = Some(verify::Prevalidator::spawn(2));
+        cx.pre = Some(verify::Prevalidator::spawn(2, &d));
         let f = recompress_at(&d, &opt, 0, opt.file, &cx);
         let memo = cx.pre.take().unwrap().finish();
         assert!(!f.applies().is_empty());
+        // the DEFLATE stream is not kept again, but known to be the file's
+        assert_eq!(memo.bytes(), 0);
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         let decode = |c: &[u8], memo: verify::Memo| {
-            let m = verify::Cached { native: Native { threads: 1 }, memo: memo.into(), hits: Default::default() };
+            let m =
+                verify::Cached { native: Native { threads: 1 }, memo: memo.into(), hits: Default::default(), file: &d };
             let out = aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m));
             (out, m.hits.into_inner().unwrap())
         };
         let other = compress(&d[..d.len() - 1], &Options { verify: false, ..opt.clone() });
         // another archive's applications are not in it
         let (memo, hits) = {
-            let m = verify::Cached { native: Native { threads: 1 }, memo: memo.into(), hits: Default::default() };
+            let m =
+                verify::Cached { native: Native { threads: 1 }, memo: memo.into(), hits: Default::default(), file: &d };
             aqr::decode(&other, &aqr::natives(&aqr_decompress::MODULES, &m)).unwrap();
             (m.memo.into_inner().unwrap(), m.hits.into_inner().unwrap())
         };
