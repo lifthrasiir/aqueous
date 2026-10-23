@@ -279,42 +279,97 @@ impl BitWriter {
         if self.n > 0 {
             self.out.push(self.acc as u8);
         }
+        self.out.shrink_to_fit();
         self.out
     }
 }
 
+/// The symbols of a stripe, kept compact until the tables are known (see `Walked::expand`):
+/// per block the compact indices of its nonzero count and DC symbols and its last nonzero
+/// position, and per AC symbol its index within the position's contexts (`AC_SUB`).
 struct Sink {
-    syms: Vec<u32>,
-    n: usize,
+    /// two per block (N_SYM <= 2^16)
+    idx: Vec<u16>,
+    ni: usize,
+    /// one per block (`ni / 2` of them)
+    last: Vec<u8>,
+    ac: Vec<u8>,
+    nc: usize,
     hist: Vec<u32>,
     raw: BitWriter,
 }
 impl Sink {
     #[inline(always)]
     fn reserve_block(&mut self) {
-        if self.n + 66 > self.syms.len() {
-            self.syms.resize((self.syms.len() * 2).max(self.n + 66), 0);
+        if self.ni + 2 > self.idx.len() {
+            self.idx.resize((self.idx.len() * 2).max(self.ni + 2), 0);
+            self.last.resize(self.idx.len() / 2, 0);
+        }
+        if self.nc + 63 > self.ac.len() {
+            self.ac.resize((self.ac.len() * 2).max(self.nc + 63), 0);
         }
         self.raw.reserve(64 * 2 + 8);
     }
+    /// A nonzero count or DC symbol.
     #[inline(always)]
     fn sym(&mut self, idx: usize) {
         debug_assert!(idx < N_SYM);
         // SAFETY: reserve_block keeps room for a whole block; idx < N_SYM by construction
         unsafe {
-            *self.syms.get_unchecked_mut(self.n) = idx as u32;
+            *self.idx.get_unchecked_mut(self.ni) = idx as u16;
             *self.hist.get_unchecked_mut(idx) += 1;
         }
-        self.n += 1;
+        self.ni += 1;
+    }
+    /// The last nonzero AC position of the block whose symbols are next.
+    #[inline(always)]
+    fn last(&mut self, k: usize) {
+        // SAFETY: reserve_block keeps room for a whole block
+        unsafe { *self.last.get_unchecked_mut(self.ni / 2) = k as u8 };
+    }
+    /// An AC symbol: compact index `idx`, `sub` within its position's contexts.
+    #[inline(always)]
+    fn ac(&mut self, idx: usize, sub: u32) {
+        debug_assert!(idx < N_SYM && sub < 256);
+        // SAFETY: reserve_block keeps room for a whole block
+        unsafe {
+            *self.ac.get_unchecked_mut(self.nc) = sub as u8;
+            *self.hist.get_unchecked_mut(idx) += 1;
+        }
+        self.nc += 1;
     }
 }
 
-/// Model block rows `rows` of component `c` (one stripe: no context from rows above it).
+/// AC_POS[cc][k] = compact index of the first context of AC position k (1..63); a symbol's
+/// index is that plus `AC_SUB[rem] + cat`.
+static AC_POS: [[u16; 64]; 2] = {
+    let mut t = [[0u16; 64]; 2];
+    let mut cc = 0;
+    while cc < 2 {
+        let mut k = 1;
+        while k < 64 {
+            t[cc][k] = (AC_IDX[cc][k][1] - rem_class(1) as u32 * 16) as u16;
+            k += 1;
+        }
+        cc += 1;
+    }
+    t
+};
+static AC_SUB: [u8; 64] = {
+    let mut t = [0u8; 64];
+    let mut rem = 1;
+    while rem < 64 {
+        t[rem] = (rem_class(rem as u32) * 16) as u8;
+        rem += 1;
+    }
+    t
+};
+
+/// Model the block rows `blocks` (`bw` wide) of a component (one stripe: no context from rows
+/// above it).
 #[inline(never)]
-fn walk_enc(s: &mut Sink, c: &Coefs, rows: std::ops::Range<usize>, cc: usize, dcb: &DcBound) {
-    let bw = c.bw;
-    let (blocks, masks) = (&c.blocks[rows.start * bw..rows.end * bw], &c.masks[rows.start * bw..rows.end * bw]);
-    let bh = rows.len();
+fn walk_enc(s: &mut Sink, blocks: &[[i16; 64]], masks: &[u64], bw: usize, cc: usize, dcb: &DcBound) {
+    let bh = blocks.len() / bw.max(1);
     let mut nzs = vec![0u8; bw * bh];
     let mut dcc = vec![0u8; bw * bh];
     let mut bottom = vec![0i32; bw];
@@ -329,16 +384,18 @@ fn walk_enc(s: &mut Sink, c: &Coefs, rows: std::ops::Range<usize>, cc: usize, dc
             let mask = masks[i] & !1;
             let nz = mask.count_ones();
             let (nza, nzl) = (if has_a { nzs[i - bw] } else { 0 }, if has_l { nzs[i - 1] } else { 0 });
+            let last = if nz > 0 { 63 - mask.leading_zeros() as usize } else { 0 };
+            s.last(last);
             s.sym(nz_ctx(cc, nza as u32, nzl as u32, has_a, has_l) + nz as usize);
             nzs[i] = nz as u8;
             if nz > 0 {
-                let last = 63 - mask.leading_zeros() as usize;
                 let mut rem = nz as usize;
                 for k in 1..=last {
                     // SAFETY: k < 64, rem in 1..=63 while k <= last
                     let x = unsafe { *b.get_unchecked(k) } as i32;
                     let (cat, payload) = split_value(x);
-                    s.sym(unsafe { *ac_idx.get_unchecked(k).get_unchecked(rem) } as usize + cat as usize);
+                    let sub = unsafe { *AC_SUB.get_unchecked(rem) } as u32 + cat;
+                    s.ac(unsafe { *ac_idx.get_unchecked(k).get_unchecked(rem) } as usize + cat as usize, sub);
                     s.raw.put(cat, payload);
                     rem -= (x != 0) as usize;
                 }
@@ -876,19 +933,37 @@ unsafe fn rans_put(x: &mut u64, e: &EncSym, out: *mut u32, w: &mut usize) {
     *x = *x + e.bias as u64 + q * e.cmpl_freq as u64;
 }
 
-/// Symbols are encoded last to first; the words come out in decoding order (the four final
-/// states first). Kept out of line: inlined into a caller, the four states get spilled.
+/// `buf` (written from `w` on) with room for at least `need` more words before `w`: the
+/// words moved to the end of a larger buffer if necessary.
+#[cold]
 #[inline(never)]
-fn rans_encode(syms: &[u32], t: &Tables) -> Vec<u32> {
+fn rans_room(buf: &mut Vec<u32>, w: &mut usize, need: usize) {
+    if *w >= need {
+        return;
+    }
+    let n = buf.len() - *w;
+    let mut b = vec![0; (buf.len() * 2).max(n + need)];
+    let w2 = b.len() - n;
+    b[w2..].copy_from_slice(&buf[*w..]);
+    (*buf, *w) = (b, w2);
+}
+
+/// Symbols are encoded last to first; the words come out in decoding order (the four final
+/// states first). The buffer starts at a typical size and grows as needed: every 1024
+/// symbols, room for as many words is made. Kept out of line: inlined into a caller, the four
+/// states get spilled.
+#[inline(never)]
+fn rans_encode(syms: &[u16], t: &Tables) -> Vec<u32> {
+    const STEP: usize = 1024;
     let n = syms.len();
-    let cap = n + 8;
-    let mut out: Vec<u32> = Vec::with_capacity(cap);
-    let p = out.as_mut_ptr();
-    let mut w = cap;
+    let mut buf = vec![0u32; n / 8 + STEP + 8];
+    let mut w = buf.len();
     let (mut x0, mut x1, mut x2, mut x3) = (RANS_L, RANS_L, RANS_L, RANS_L);
     let full = n & !3;
-    let enc = |s: u32| -> &EncSym { &t.enc[s as usize] };
-    // SAFETY: n symbols write at most n words, leaving 8 for the final states
+    let enc = |s: u16| -> &EncSym { &t.enc[s as usize] };
+    rans_room(&mut buf, &mut w, (n - full) + 8);
+    let mut p = buf.as_mut_ptr();
+    // SAFETY: there is room for a word per symbol (and the final states) up to the next check
     unsafe {
         for j in (full..n).rev() {
             let e = enc(syms[j]);
@@ -898,21 +973,27 @@ fn rans_encode(syms: &[u32], t: &Tables) -> Vec<u32> {
                 _ => rans_put(&mut x2, e, p, &mut w),
             }
         }
-        for g in syms[..full].chunks_exact(4).rev() {
-            rans_put(&mut x3, enc(g[3]), p, &mut w);
-            rans_put(&mut x2, enc(g[2]), p, &mut w);
-            rans_put(&mut x1, enc(g[1]), p, &mut w);
-            rans_put(&mut x0, enc(g[0]), p, &mut w);
+        for c in syms[..full].rchunks(STEP) {
+            if w < c.len() + 8 {
+                rans_room(&mut buf, &mut w, c.len() + 8);
+                p = buf.as_mut_ptr();
+            }
+            for g in c.chunks_exact(4).rev() {
+                rans_put(&mut x3, enc(g[3]), p, &mut w);
+                rans_put(&mut x2, enc(g[2]), p, &mut w);
+                rans_put(&mut x1, enc(g[1]), p, &mut w);
+                rans_put(&mut x0, enc(g[0]), p, &mut w);
+            }
         }
         for x in [x3, x2, x1, x0] {
             w -= 2;
             *p.add(w) = (x >> 32) as u32;
             *p.add(w + 1) = x as u32;
         }
-        std::ptr::copy(p.add(w), p, cap - w);
-        out.set_len(cap - w);
     }
-    out
+    buf.drain(..w);
+    buf.shrink_to_fit();
+    buf
 }
 
 const RAW_PAD: usize = 256;
@@ -1056,9 +1137,33 @@ fn stripe_rows(j: &Jpeg, ci: usize, s: usize, n: usize) -> std::ops::Range<usize
     s * rows / n * f..(s + 1) * rows / n * f
 }
 
-fn stripe_count(j: &Jpeg) -> usize {
+pub(crate) fn stripe_count(j: &Jpeg) -> usize {
     let nblk: usize = j.comps.iter().map(|c| c.bw * c.bh).sum();
     (nblk / STRIPE_BLOCKS).clamp(1, mcu_rows(j).clamp(1, MAX_STRIPES))
+}
+
+/// A stored stripe count must leave every stripe at least one MCU row.
+pub(crate) fn check_stripes(j: &Jpeg, ns: usize) -> Result<(), Error> {
+    if ns == 0 || ns > MAX_STRIPES || ns > mcu_rows(j).max(1) {
+        return Err(Error("bad stripe count".into()));
+    }
+    Ok(())
+}
+
+/// The MCUs of each of `ns` stripes, for a scan that codes every component in MCU rows of
+/// `mcux` MCUs (the stripes' rows are whole MCU rows of it).
+pub(crate) fn stripe_mcus(j: &Jpeg, mcux: usize, ns: usize) -> Vec<(usize, usize)> {
+    let rows = mcu_rows(j);
+    (0..ns).map(|s| (s * rows / ns * mcux, (s + 1) * rows / ns * mcux)).collect()
+}
+
+/// `bufs` holding the rows of stripe `si` of `ns` (contents unspecified).
+pub(crate) fn hold_stripe(j: &Jpeg, si: usize, ns: usize, bufs: &mut Vec<Coefs>) {
+    bufs.resize_with(j.comps.len(), Coefs::default);
+    bufs.truncate(j.comps.len());
+    for (ci, (b, c)) in bufs.iter_mut().zip(&j.comps).enumerate() {
+        b.hold(c.bw, stripe_rows(j, ci, si, ns));
+    }
 }
 
 // ---------------------------------------------------------------- public API
@@ -1103,85 +1208,230 @@ impl Encoded {
     pub fn size(&self) -> usize {
         self.tables.len() + self.stripes.iter().map(|s| s.rans.len() * 4 + s.raw.len()).sum::<usize>()
     }
-    /// From the stored parts: the table section and, per stripe, its rANS words (LE bytes) and
-    /// raw bytes.
-    pub fn from_parts(tables: &[u8], stripes: &[(&[u8], &[u8])]) -> Result<Encoded, Error> {
-        let t = build_tables(read_tables(tables)?, false);
-        if stripes.is_empty() || stripes.len() > MAX_STRIPES {
-            return Err(Error("bad stripe count".into()));
-        }
-        let stripes = stripes
-            .iter()
-            .map(|&(words, raw)| {
-                if words.len() < 32 || !words.len().is_multiple_of(4) {
-                    return Err(Error("bad rANS stream length".into()));
-                }
-                // decoder padding (see `walk_dec`) is added here
-                let mut rans = Vec::with_capacity(words.len() / 4 + SRC_PAD);
-                rans.extend(words.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())));
-                let mut r = Vec::with_capacity(raw.len() + RAW_PAD);
-                r.extend_from_slice(raw);
-                Ok(Stripe { rans, raw: r })
-            })
-            .collect::<Result<_, _>>()?;
-        Ok(Encoded { tables: tables.to_vec(), stripes, t, nsym: 0 })
-    }
 }
 
 pub use crate::model::Phases;
 
-/// Reusable symbol buffers (the stripes of a file are modelled on any worker thread).
-static SYM_POOL: std::sync::Mutex<Vec<Vec<u32>>> = std::sync::Mutex::new(Vec::new());
-fn take_syms() -> Vec<u32> {
-    SYM_POOL.lock().unwrap().pop().unwrap_or_default()
+/// A modelled stripe: its symbols (as in `Sink`, coded once the tables are known) and raw
+/// bits.
+struct Walked {
+    idx: Vec<u16>,
+    last: Vec<u8>,
+    /// followed by 63 bytes of padding
+    ac: Vec<u8>,
+    /// per component: number of blocks, component class
+    comps: Vec<(usize, usize)>,
+    nsym: usize,
+    raw: Vec<u8>,
 }
-fn put_syms(v: Vec<u32>) {
-    SYM_POOL.lock().unwrap().push(v);
+
+impl Walked {
+    /// The symbols' compact indices, in coding order, into `out`.
+    fn expand(&self, out: &mut Vec<u16>) {
+        // every block's AC symbols are written as a whole row of 63 (vectorised), the excess
+        // overwritten by what follows
+        out.clear();
+        out.resize(self.nsym + 64, 0);
+        let (mut n, mut nc) = (0, 0);
+        let mut b = 0;
+        for &(nb, cc) in &self.comps {
+            let pos: &[u16; 63] = AC_POS[cc][1..].try_into().unwrap();
+            for (&last, idx) in self.last[b..b + nb].iter().zip(self.idx[2 * b..2 * (b + nb)].chunks_exact(2)) {
+                let last = last as usize;
+                out[n] = idx[0];
+                let dst: &mut [u16; 63] = (&mut out[n + 1..n + 64]).try_into().unwrap();
+                let src: &[u8; 63] = self.ac[nc..nc + 63].try_into().unwrap();
+                for i in 0..63 {
+                    dst[i] = pos[i] + src[i] as u16;
+                }
+                out[n + 1 + last] = idx[1];
+                (n, nc) = (n + 2 + last, nc + last);
+            }
+            b += nb;
+        }
+        debug_assert_eq!(n, self.nsym);
+        out.truncate(n);
+    }
+}
+
+thread_local! {
+    static SYMS: std::cell::RefCell<Vec<u16>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Models a file stripe by stripe, in any order and on any threads, then codes it: the
+/// coefficients need only be held a stripe at a time.
+pub(crate) struct Modeller {
+    ns: usize,
+    dcb: Vec<DcBound>,
+    hist: std::sync::Mutex<Vec<u32>>,
+    walked: std::sync::Mutex<Vec<Option<Walked>>>,
+}
+
+impl Modeller {
+    pub(crate) fn new(j: &Jpeg, ns: usize) -> Modeller {
+        Modeller {
+            ns,
+            dcb: j.comps.iter().map(|c| DcBound::new(&j.qt[c.tq])).collect(),
+            hist: std::sync::Mutex::new(vec![0; N_SYM]),
+            walked: std::sync::Mutex::new((0..ns).map(|_| None).collect()),
+        }
+    }
+
+    /// Model stripe `si` from `coefs` (zigzag order, with nonzero masks), which hold at least
+    /// its rows.
+    pub(crate) fn stripe(&self, j: &Jpeg, si: usize, coefs: &[Coefs]) {
+        let nblk: usize = (0..j.comps.len()).map(|ci| stripe_rows(j, ci, si, self.ns).len() * coefs[ci].bw).sum();
+        let mut s = Sink {
+            idx: vec![0; nblk * 2],
+            ni: 0,
+            last: vec![0; nblk],
+            ac: vec![0; nblk * 16 + 63],
+            nc: 0,
+            hist: vec![0; N_SYM],
+            raw: BitWriter::with_capacity(nblk * 8),
+        };
+        let mut comps = Vec::with_capacity(coefs.len());
+        for (ci, c) in coefs.iter().enumerate() {
+            let rows = stripe_rows(j, ci, si, self.ns);
+            let (a, b) = ((rows.start - c.y0) * c.bw, (rows.end - c.y0) * c.bw);
+            walk_enc(&mut s, &c.blocks[a..b], &c.masks[a..b], c.bw, ci.min(1), &self.dcb[ci]);
+            comps.push((b - a, ci.min(1)));
+        }
+        let Sink { mut idx, ni, mut last, mut ac, nc, hist, raw } = s;
+        idx.truncate(ni);
+        idx.shrink_to_fit();
+        last.truncate(ni / 2);
+        last.shrink_to_fit();
+        ac.truncate(nc);
+        ac.resize(nc + 63, 0);
+        ac.shrink_to_fit();
+        for (h, x) in self.hist.lock().unwrap().iter_mut().zip(&hist) {
+            *h += x;
+        }
+        self.walked.lock().unwrap()[si] = Some(Walked { idx, last, ac, comps, nsym: ni + nc, raw: raw.finish() });
+    }
+
+    /// The tables and the stripes' rANS words, once every stripe is modelled; with the seconds
+    /// spent on each.
+    pub(crate) fn finish(self) -> (Encoded, f64, f64) {
+        use rayon::prelude::*;
+        let t0 = Instant::now();
+        let hist = self.hist.into_inner().unwrap();
+        let (freq, plan) = normalize(&hist);
+        let tables = write_tables(&freq, &plan, &hist);
+        let t = build_tables(freq, true);
+        let t1 = Instant::now();
+        let walked: Vec<Walked> =
+            self.walked.into_inner().unwrap().into_iter().map(|w| w.expect("stripe not modelled")).collect();
+        let nsym = walked.iter().map(|w| w.nsym).sum();
+        // each stripe's symbols are dropped as soon as they are coded
+        let stripes = walked
+            .into_par_iter()
+            .map(|w| {
+                let mut syms = SYMS.with(|b| std::mem::take(&mut *b.borrow_mut()));
+                w.expand(&mut syms);
+                let rans = rans_encode(&syms, &t);
+                SYMS.with(|b| *b.borrow_mut() = syms);
+                Stripe { rans, raw: w.raw }
+            })
+            .collect();
+        let norm = (t1 - t0).as_secs_f64();
+        (Encoded { tables, stripes, t, nsym }, norm, t1.elapsed().as_secs_f64())
+    }
 }
 
 /// `coefs` must be in zigzag order (`jpeg::Order::Zigzag`), with nonzero masks.
 pub fn encode(j: &Jpeg, coefs: &[Coefs]) -> (Encoded, Phases) {
     use rayon::prelude::*;
     let ns = stripe_count(j);
-    let dcb: Vec<DcBound> = j.comps.iter().map(|c| DcBound::new(&j.qt[c.tq])).collect();
+    let m = Modeller::new(j, ns);
     let t0 = Instant::now();
-    let sinks: Vec<Sink> = (0..ns)
-        .into_par_iter()
-        .map(|si| {
-            let nblk: usize = (0..j.comps.len()).map(|ci| stripe_rows(j, ci, si, ns).len() * coefs[ci].bw).sum();
-            let mut syms = take_syms();
-            if syms.len() < nblk * 16 + 66 {
-                syms.resize(nblk * 16 + 66, 0);
-            }
-            let mut s = Sink { syms, n: 0, hist: vec![0; N_SYM], raw: BitWriter::with_capacity(nblk * 8) };
-            for (ci, c) in coefs.iter().enumerate() {
-                walk_enc(&mut s, c, stripe_rows(j, ci, si, ns), ci.min(1), &dcb[ci]);
-            }
-            s
-        })
-        .collect();
-    let t1 = Instant::now();
-    let mut hist = vec![0u32; N_SYM];
-    for s in &sinks {
-        for (h, x) in hist.iter_mut().zip(&s.hist) {
-            *h += x;
+    (0..ns).into_par_iter().for_each(|si| m.stripe(j, si, coefs));
+    let walk = t0.elapsed().as_secs_f64();
+    let (e, norm, rans) = m.finish();
+    (e, Phases { walk, norm, rans })
+}
+
+/// Decoding tables from a stored table section.
+pub(crate) fn read_tables_section(tables: &[u8]) -> Result<Tables, Error> {
+    Ok(build_tables(read_tables(tables)?, false))
+}
+
+/// Decode one stripe from its rANS words (LE bytes) and raw bytes into the rows `parts` (per
+/// component, in order).
+fn decode_rows<'a>(
+    j: &Jpeg,
+    t: &Tables,
+    (words, raw): (&[u8], &[u8]),
+    parts: impl Iterator<Item = (&'a mut [[i16; 64]], &'a mut [u64])>,
+) -> Result<(), Error> {
+    if words.len() < 32 || !words.len().is_multiple_of(4) {
+        return Err(Error("bad rANS stream length".into()));
+    }
+    // Reads of a corrupt stream may run up to one block past the end before `walk_dec`
+    // notices: pad the rANS words (<= 1 per symbol, <= 65 symbols per block) and raw bits.
+    let nw = words.len() / 4;
+    let mut src = Vec::with_capacity(nw + SRC_PAD);
+    src.extend(words.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())));
+    src.resize(nw + SRC_PAD, 0);
+    let mut rb = Vec::with_capacity(raw.len() + RAW_PAD);
+    rb.extend_from_slice(raw);
+    rb.resize(raw.len() + RAW_PAD, 0);
+    let mut d = Dec { x: [0; 4], src: &src, pos: 8, t, raw: &rb, bp: 0, raw_bits: raw.len() * 8, src_len: nw };
+    for k in 0..4 {
+        d.x[k] = (src[2 * k] as u64) << 32 | src[2 * k + 1] as u64;
+    }
+    for (ci, (blocks, masks)) in parts.enumerate() {
+        let c = &j.comps[ci];
+        let dcb = DcBound::new(&j.qt[c.tq]);
+        walk_dec(&mut d, blocks, masks, c.bw, blocks.len() / c.bw.max(1), ci.min(1), &dcb)?;
+    }
+    Ok(())
+}
+
+/// Decode stripe `si` of `ns` (its stored words and raw bytes) into `bufs`, which then hold its
+/// rows (zigzag order, with nonzero masks).
+pub(crate) fn decode_stripe(
+    j: &Jpeg,
+    t: &Tables,
+    si: usize,
+    ns: usize,
+    stripe: (&[u8], &[u8]),
+    bufs: &mut Vec<Coefs>,
+) -> Result<(), Error> {
+    check_stripes(j, ns)?;
+    hold_stripe(j, si, ns, bufs);
+    decode_rows(j, t, stripe, bufs.iter_mut().map(|c| (&mut c.blocks[..], &mut c.masks[..])))
+}
+
+/// Decode all stripes (stored words and raw bytes) into whole components `out` (zigzag order,
+/// with nonzero masks).
+pub(crate) fn decode_whole(
+    j: &Jpeg,
+    t: &Tables,
+    stripes: &[(&[u8], &[u8])],
+    out: &mut Vec<Coefs>,
+) -> Result<(), Error> {
+    use rayon::prelude::*;
+    let ns = stripes.len();
+    check_stripes(j, ns)?;
+    out.resize_with(j.comps.len(), Coefs::default);
+    out.truncate(j.comps.len());
+    // per stripe, per component: that stripe's rows of blocks and masks
+    type Rows<'a> = (&'a mut [[i16; 64]], &'a mut [u64]);
+    let mut parts: Vec<Vec<Rows>> = (0..ns).map(|_| Vec::new()).collect();
+    for (ci, (c, o)) in j.comps.iter().zip(out.iter_mut()).enumerate() {
+        o.hold(c.bw, 0..c.bh);
+        let (mut blocks, mut masks) = (&mut o.blocks[..], &mut o.masks[..]);
+        for (si, p) in parts.iter_mut().enumerate() {
+            let n = stripe_rows(j, ci, si, ns).len() * c.bw;
+            let (b, rb) = std::mem::take(&mut blocks).split_at_mut(n);
+            let (m, rm) = std::mem::take(&mut masks).split_at_mut(n);
+            (blocks, masks) = (rb, rm);
+            p.push((b, m));
         }
     }
-    let (freq, plan) = normalize(&hist);
-    let tables = write_tables(&freq, &plan, &hist);
-    let t = build_tables(freq, true);
-    let t2 = Instant::now();
-    let nsym = sinks.iter().map(|s| s.n).sum();
-    let stripes: Vec<Stripe> = sinks
-        .into_par_iter()
-        .map(|s| {
-            let rans = rans_encode(&s.syms[..s.n], &t);
-            put_syms(s.syms);
-            Stripe { rans, raw: s.raw.finish() }
-        })
-        .collect();
-    let ph = Phases { walk: (t1 - t0).as_secs_f64(), norm: (t2 - t1).as_secs_f64(), rans: t2.elapsed().as_secs_f64() };
-    (Encoded { tables, stripes, t, nsym }, ph)
+    parts.into_par_iter().zip(stripes).try_for_each(|(p, &s)| decode_rows(j, t, s, p.into_iter()))
 }
 
 /// Decodes into zigzag-ordered blocks, with nonzero masks.
@@ -1193,59 +1443,9 @@ pub fn decode(j: &Jpeg, e: &Encoded) -> Result<Vec<Coefs>, Error> {
 
 /// Like `decode`, reusing the allocations in `out`.
 pub fn decode_into(j: &Jpeg, e: &Encoded, out: &mut Vec<Coefs>) -> Result<(), Error> {
-    use rayon::prelude::*;
-    let ns = e.stripes.len();
-    if ns > mcu_rows(j).max(1) {
-        return Err(Error("bad stripe count".into()));
-    }
-    let dcb: Vec<DcBound> = j.comps.iter().map(|c| DcBound::new(&j.qt[c.tq])).collect();
-    out.resize_with(j.comps.len(), || Coefs { bw: 0, bh: 0, blocks: Vec::new(), masks: Vec::new() });
-    out.truncate(j.comps.len());
-    // per stripe, per component: that stripe's rows of blocks and masks
-    type Rows<'a> = (&'a mut [[i16; 64]], &'a mut [u64]);
-    let mut parts: Vec<Vec<Rows>> = (0..ns).map(|_| Vec::new()).collect();
-    for (ci, (c, o)) in j.comps.iter().zip(out.iter_mut()).enumerate() {
-        o.bw = c.bw;
-        o.bh = c.bh;
-        o.blocks.resize(c.bw * c.bh, [0; 64]);
-        o.masks.resize(c.bw * c.bh, 0);
-        let (mut blocks, mut masks) = (&mut o.blocks[..], &mut o.masks[..]);
-        for (si, p) in parts.iter_mut().enumerate() {
-            let n = stripe_rows(j, ci, si, ns).len() * c.bw;
-            let (b, rb) = std::mem::take(&mut blocks).split_at_mut(n);
-            let (m, rm) = std::mem::take(&mut masks).split_at_mut(n);
-            (blocks, masks) = (rb, rm);
-            p.push((b, m));
-        }
-    }
-    parts.into_par_iter().zip(&e.stripes).try_for_each(|(p, s)| {
-        // Reads of a corrupt stream may run up to one block past the end before `walk_dec`
-        // notices: pad the rANS words (<= 1 per symbol, <= 65 symbols per block) and raw bits.
-        let mut src = Vec::with_capacity(s.rans.len() + SRC_PAD);
-        src.extend_from_slice(&s.rans);
-        src.resize(s.rans.len() + SRC_PAD, 0);
-        let mut raw = Vec::with_capacity(s.raw.len() + RAW_PAD);
-        raw.extend_from_slice(&s.raw);
-        raw.resize(s.raw.len() + RAW_PAD, 0);
-        let mut d = Dec {
-            x: [0; 4],
-            src: &src,
-            pos: 8,
-            t: &e.t,
-            raw: &raw,
-            bp: 0,
-            raw_bits: s.raw.len() * 8,
-            src_len: s.rans.len(),
-        };
-        for k in 0..4 {
-            d.x[k] = (s.rans[2 * k] as u64) << 32 | s.rans[2 * k + 1] as u64;
-        }
-        for (ci, (blocks, masks)) in p.into_iter().enumerate() {
-            let bw = j.comps[ci].bw;
-            walk_dec(&mut d, blocks, masks, bw, blocks.len() / bw.max(1), ci.min(1), &dcb[ci])?;
-        }
-        Ok(())
-    })
+    let words: Vec<_> = e.stripes.iter().map(|s| s.rans_bytes()).collect();
+    let stripes: Vec<(&[u8], &[u8])> = words.iter().zip(&e.stripes).map(|(w, s)| (&w[..], &s.raw[..])).collect();
+    decode_whole(j, &e.t, &stripes, out)
 }
 
 #[cfg(test)]

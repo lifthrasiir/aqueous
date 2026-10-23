@@ -13,7 +13,7 @@ was far below the target, so this is a new design from scratch.
 Apple M4 (10 cores: 4 P + 6 E), release build with `RUSTFLAGS="-C target-cpu=native"`.
 Ratio is output size / input size.
 
-Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+Measured on 2026-10-24 on an Apple M4, one thread, through `aqr-show` (see the
 [top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
 its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
 in the archives yet. Memory is the peak RSS of that process (input, archive and output
@@ -21,15 +21,17 @@ included) over the input size. This build is without `target-cpu=native`.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress |
 |---|---|---|---|---|---|---|
-| `samples/` (camera and phone photos) | 13 | 60.0 | 0.752 | 0.908 | 48.9 MB/s | 84.1 MB/s |
-| codec-corpus jpeg-conformance | 44 | 74.7 | 0.805 | 0.906 | 48.6 MB/s | 115.5 MB/s |
-| codec-corpus ultrahdr-conformance | 14 | 29.7 | 0.788 | 0.919 | 47.1 MB/s | 101.4 MB/s |
-| codec-corpus zune | 20 | 18.4 | 0.795 | 0.955 | 11.7 MB/s | 25.6 MB/s |
-| all (with imageflow) | 96 | 186 | **0.785** | 0.913 | **37 MB/s** | **77 MB/s** |
+| `samples/` (camera and phone photos) | 13 | 60.0 | 0.752 | 0.908 | 50.1 MB/s | 91.4 MB/s |
+| codec-corpus jpeg-conformance | 44 | 74.7 | 0.805 | 0.906 | 52.4 MB/s | 123.5 MB/s |
+| codec-corpus ultrahdr-conformance | 14 | 29.7 | 0.788 | 0.919 | 48.7 MB/s | 104.4 MB/s |
+| codec-corpus zune | 20 | 18.4 | 0.795 | 0.955 | 12.6 MB/s | 26.7 MB/s |
+| all (with imageflow) | 96 | 186 | **0.785** | 0.913 | **39 MB/s** | **82 MB/s** |
 
 zune's large progressive and subsampled test images are the slow ones. Memory is about
-56 MB + 25× the file, but it follows the pixels: the coefficients are held whole, and a
-1.3 MB file of 7680×4320 takes 365 MB.
+28 MB + 8.2× the file (it was 56 MB + 25× while the coefficients were held whole). Sequential
+files are coded a stripe at a time (section 6), so their memory no longer follows the pixels:
+a 1.3 MB file of 7680×4320 takes 54 MB (it took 363 MB). Progressive files still hold their
+coefficients whole: a 1.4 MB one of that size takes 259 MB.
 
 ## Usage
 
@@ -57,8 +59,10 @@ Auxiliary binaries:
 |---|---|
 | `JRC_VERIFY_PROGRESSIVE` | Re-encodes every progressive scan and checks the inline verdict; panics if a scan judged reproducible re-encodes differently |
 | `JRC_VERIFY_PARALLEL` | Checks parallel Huffman decoding (coefficients and verdicts) against serial decoding; panics on any difference |
+| `JRC_VERIFY_STRIPED` | Checks stripe-wise decoding and modelling (scan info, model) and re-emission (scan bytes) against holding the coefficients whole; panics on any difference |
 | `JRC_DEBUG_CANON` | Prints why a progressive scan was judged non-canonical |
 | `JRC_DEBUG_SPEC` | Prints speculative-decoding phase times and fallback reasons |
+| `JRC_DEBUG_STRIPED` | Prints how a scan was decoded stripe by stripe (serially, by restart intervals, from located starts) and the outcome |
 | `JRC_DEBUG_TABLES` | Prints the size breakdown of the serialised model tables |
 
 `formula::encode` catches panics and leaves the input uncoded, so an oracle failure shows up
@@ -68,7 +72,7 @@ as a file that is not coded.
 
 | File | Contents |
 |---|---|
-| `src/jpeg.rs` | Parsing, destuffing, fast Huffman decoding (serial / restart-interval parallel / speculative parallel), canonicality checks, sequential scan re-encoding (parallel chunks) |
+| `src/jpeg.rs` | Parsing, destuffing, fast Huffman decoding (serial / restart-interval parallel / speculative parallel, whole or stripe by stripe), canonicality checks, sequential scan re-encoding (parallel chunks or stripes) |
 | `src/progressive.rs` | Progressive decoding (jdphuff semantics) with inline canonicality checks, scan-script validation, row pipeline across scans, re-encoding (jcphuff semantics) |
 | `src/fast.rs` | Entropy stage: the "P1" model, table normalisation and serialisation, 4-way rANS, stripes |
 | `src/codec.rs` | The codec behind the formula module: blob and scan info, embedded JPEGs, model and scan re-emission glue |
@@ -76,6 +80,7 @@ as a file that is not coded.
 | `src/variant.rs` | Test generator: re-encodes the same coefficients in valid but non-canonical ways |
 | `src/model.rs` | The earlier, heavier model (reference only; only its `Phases` struct is still used) |
 | `tests/regress.rs` | Regression inputs |
+| `tests/memory.rs` | Peak heap use of a large sequential file (counting allocator) |
 
 ## Design
 
@@ -117,13 +122,18 @@ Blocks are processed in raster order per component, coefficients in zigzag order
   - Context: neighbour residual sizes and the disagreement (uncertainty) between the two
     predictions.
 - **Tables**: static per-file histograms (two pass).
+  - Between the passes a stripe's symbols are kept compact: per block the nonzero-count and
+    DC symbols (u16) and the last nonzero position, per AC symbol one byte (its context's
+    remaining-count class and its cat; the position follows from the order). They are
+    expanded per stripe, 63 lanes per block, right before rANS coding.
   - Each group gets the precision shift (0–8) that minimises table bits + data bits.
   - A group whose own table is not worth its cost inherits, with a 1-bit flag, the
     distribution of its parent or, for AC, of its grandparent.
 - **rANS**:
   - 4-way interleaved 64-bit rANS, 32-bit IO, `PROB_BITS = 12`.
-  - The encoder uses reciprocals; it is kept `#[inline(never)]` and writes into a
-    preallocated buffer without pushes.
+  - The encoder uses reciprocals; it is kept `#[inline(never)]` and writes backwards into a
+    buffer of typical size (a word per 8 symbols), which is only checked, and grown if
+    needed, once per 1024 symbols.
   - The decoder finds symbols via a 64-entry coarse LUT per context group followed by a short
     refinement loop, and renormalises branchlessly with `select_unpredictable`.
   - Both candidate contexts of the next position are computed ahead, off the dependency chain.
@@ -173,6 +183,8 @@ serial result.
 | Sequential re-encoding | MCU chunks encoded in parallel (DC predictions are known from the coefficients) → per-chunk bit shift and stuffing → concatenation. With RST, chunks are whole restart intervals, aligned, so no shifting is needed |
 | Sequential decoding, with RST | Groups of restart intervals in parallel |
 | Sequential decoding, no RST | Speculative decoding, see below |
+| Stripe-wise sequential decoding | With RST, each stripe from the start of its restart interval; without, the stripes' starts are located by speculative decoding that keeps only MCU positions, then windows of stripes are decoded with DC predictions relative to their start and rebased in order |
+| Stripe-wise re-encoding | Each stripe encoded as it is decoded from its rANS streams; a stripe's first MCU, whose DC predictions continue the previous stripe, is coded serially afterwards, then the parts are shifted and stuffed in parallel |
 | Progressive decoding | Row pipeline across scans, see below |
 | Progressive re-encoding | Scans encoded in parallel (independent given the final coefficients) |
 
@@ -195,7 +207,18 @@ serial result.
 - So each block is only ever accessed by one scan at a time, in scan order.
 - If any scan fails, everything is decoded again serially.
 
-### 6. Formula module and robustness
+### 6. Memory
+
+Sequential files with a single scan, which most files are, never hold their coefficients
+whole: they are decoded, modelled and re-emitted a stripe at a time (`jpeg::decode_striped`,
+`fast::Modeller`, `jpeg::encode_striped`). Each worker holds a stripe or two (32K blocks of
+136 bytes each), and what follows the file is the input, its destuffed scan, the compact
+symbols and the output. Truncated scans are handled stripe-wise too, and a scan found not to
+be reproducible is left undecoded from there on. Progressive files and files with several
+scans hold their coefficients whole as before. Buffers kept per thread for reuse are dropped
+above 16 MB.
+
+### 7. Formula module and robustness
 
 The format is specified in [FORMAT.md](FORMAT.md).
 

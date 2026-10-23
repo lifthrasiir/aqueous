@@ -883,7 +883,7 @@ pub fn decode(j: &Jpeg, e: &Encoded) -> Vec<Coefs> {
         let mut blocks = vec![[0i16; 64]; c.bw * c.bh];
         let mut comp = Component { bw: c.bw, bh: c.bh, w: comp_w(j, ci), blocks: &mut blocks, masks: &[] };
         walk(&mut d, &mut comp, ci.min(1), &t);
-        out.push(Coefs { bw: c.bw, bh: c.bh, blocks, masks: Vec::new() });
+        out.push(Coefs { bw: c.bw, bh: c.bh, y0: 0, blocks, masks: Vec::new() });
     }
     out
 }

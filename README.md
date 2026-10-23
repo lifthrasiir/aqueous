@@ -11,6 +11,7 @@ and the design is argued in `xform-design.md`.
   coding and the round-trip check) at level `mid`, then extracted.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `objr bench`.
   - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
+- aqr-jpeg was re-measured on 2026-10-24 (otherwise as above).
 - aqr-exe alone was measured on another machine, an AMD Ryzen 7 9700X under Windows 11 (at
   `aa7a327`, otherwise as above): its speeds are not comparable to the others'. Its memory is
   the peak working set.
@@ -36,7 +37,7 @@ and the design is argued in `xform-design.md`.
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | PNG, APNG | aqr-png | 379 files, 391 MB | 0.802 | 0.997 | 39 | 86 | 6 MB + 31.7× | memory follows the inflated pixels, not the file |
-| JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 37 | 77 | 56 MB + 25× | coefficients are held whole, so memory follows the pixels: a 1.3 MB 7680×4320 file takes 365 MB |
+| JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
 | PSD, PSB | aqr-psd | 56 files, 439 MB | 0.332 | 0.555 | 44 | 129 | 7.0× (max 48.7×) | pixels coded in 8-bit documents only |
 
 ### Audio
@@ -81,7 +82,7 @@ of all of them would); the speeds and memory are those of the files coded.
 |---|---|
 | aqr-flate | zlib block layouts predicted; zlib-ng, chromium, libdeflate, miniz and stb emulated; faster splitting at profile 10 |
 | aqr-png | only matches kept when decoding; a pixel-domain mode for streams zlib reproduces; 16-bit and palette models |
-| aqr-jpeg | progressive re-encoding and compression in parallel; why fuzzing leaves many inputs uncoded |
+| aqr-jpeg | progressive re-encoding and compression in parallel; memory of progressive files (compact coefficients); why fuzzing leaves many inputs uncoded |
 | aqr-mp3 | the size of its resource (above); the 3 pp gap to packMP3; other encoders (FhG, iTunes, Xing); MP3 in MP4 or MKV |
 | aqr-flac | warm-up samples predicted; FLAC in Ogg, float WAV, more than 8 channels |
 | aqr-pdf | default JPEG tables for small images; files encrypted with an empty user password; ASCII85 and DCT chains; cross-reference tables rebuilt |

@@ -56,9 +56,12 @@ fn try_encode(input: &[u8], depth: u32) -> Result<Formula, Error> {
         scans.extend_from_slice(s);
     }
     let scans = f.push("jpeg/scans", scans);
-    let tables = f.push("jpeg/tables", core.model.tables.clone());
-    let (mut rans, mut bits) = (Vec::new(), Vec::new());
-    for s in &core.model.stripes {
+    let model = core.model;
+    let tables = f.push("jpeg/tables", model.tables);
+    let (n, m) = model.stripes.iter().fold((0, 0), |(n, m), s| (n + s.rans.len() * 4, m + s.raw.len()));
+    let (mut rans, mut bits) = (Vec::with_capacity(n), Vec::with_capacity(m));
+    // each stripe is dropped once copied
+    for s in model.stripes {
         let w = s.rans_bytes();
         varint::put(&mut lens, w.len() as u64);
         varint::put(&mut lens, s.raw.len() as u64);
