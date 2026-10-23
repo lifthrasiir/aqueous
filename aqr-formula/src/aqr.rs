@@ -853,26 +853,32 @@ pub fn decode(c: &[u8], modules: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
     if at != fields.len() || size_hint != (archive_end - HEADER_MAGIC.len()) as u64 {
         return invalid("bad footer");
     }
-    let blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0)?;
+    let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0)?;
     if metadata != 0 {
         return invalid("no metadata block where the footer points");
     }
 
     let mut used = vec![false; blocks.non_leaf.len()];
     let mut out = Vec::new();
-    for leaf in &blocks.leaves {
-        match leaf {
-            Leaf::Stored(d) => out.extend_from_slice(d),
+    for leaf in std::mem::take(&mut blocks.leaves) {
+        let leaf = match leaf {
+            Leaf::Stored(d) => d,
             Leaf::Formula { data, modules: m, resources: r, non_leaf } => {
                 let env = Env {
                     non_leaf: &blocks.non_leaf,
-                    first: *non_leaf,
-                    modules: &blocks.modules[..*m],
-                    resources: &blocks.resources[..*r],
+                    first: non_leaf,
+                    modules: &blocks.modules[..m],
+                    resources: &blocks.resources[..r],
                     natives: modules,
                 };
-                out.extend_from_slice(&evaluate(data, &env, &mut used)?);
+                evaluate(&data, &env, &mut used)?
             }
+        };
+        // the first leaf as it is
+        if out.is_empty() {
+            out = leaf;
+        } else {
+            out.extend_from_slice(&leaf);
         }
     }
     if used.contains(&false) {
