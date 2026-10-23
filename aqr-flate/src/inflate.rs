@@ -487,6 +487,190 @@ pub fn parse_head<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<L
     })
 }
 
+/// A canonical Huffman code, decoded a bit at a time (as zlib's puff does): for finding
+/// streams, where tables would cost more than the few symbols read.
+struct Canon {
+    count: [u16; 16],
+    sorted: [u16; 320],
+}
+
+impl Canon {
+    /// The code of `lens`, if zlib would take it: not over-subscribed, and complete unless
+    /// `single` and it has one code of one bit. `None` also where it has no code at all.
+    fn new(lens: &[u8], single: bool) -> Option<Canon> {
+        let mut c = Canon {
+            count: [0; 16],
+            sorted: [0; 320],
+        };
+        lens.iter().for_each(|&l| c.count[l as usize] += 1);
+        c.count[0] = 0;
+        let max = (1..16).rev().find(|&l| c.count[l] > 0)?;
+        let mut left = 1i32;
+        for l in 1..16 {
+            left = left * 2 - c.count[l] as i32;
+            if left < 0 {
+                return None;
+            }
+        }
+        if left > 0 && !(single && max == 1) {
+            return None;
+        }
+        let mut offs = [0u16; 16];
+        for l in 1..15 {
+            offs[l + 1] = offs[l] + c.count[l];
+        }
+        for (sym, &l) in lens.iter().enumerate() {
+            if l > 0 {
+                c.sorted[offs[l as usize] as usize] = sym as u16;
+                offs[l as usize] += 1;
+            }
+        }
+        Some(c)
+    }
+
+    fn decode(&self, b: &mut Bits) -> Option<u16> {
+        let (mut code, mut first, mut index) = (0i32, 0i32, 0i32);
+        for l in 1..16 {
+            code |= b.get(1) as i32;
+            let n = self.count[l] as i32;
+            if code - first < n {
+                return Some(self.sorted[(index + code - first) as usize]);
+            }
+            index += n;
+            first = (first + n) << 1;
+            code <<= 1;
+        }
+        None
+    }
+}
+
+/// Tokens of a block decoded by [`plausible_start`]: enough that data which only looks like a
+/// fixed block's start fails, as its matches reach before the stream.
+const PLAUSIBLE_TOKENS: usize = 32;
+
+/// Whether `raw` starts like a DEFLATE stream, by its first block, without decoding its data:
+/// for finding streams in other data, where a header that only looks right is common (a
+/// two-byte zlib header passes once in about 250 places, and more often in code). A stored
+/// block's length has its complement after it. A dynamic block has codes zlib takes (after
+/// rapidgzip's block finder, arXiv:2308.08955): a complete code-length code, code lengths it
+/// decodes into without running over, an end-of-block code, and complete literal/length and
+/// distance codes (or of one code; no distance code at all is allowed too). The first tokens
+/// of a fixed or dynamic block must be valid, their matches within the bytes before them.
+///
+/// A fixed block is taken only with `fixed`: a quarter of all positions have its type, and a
+/// last one of a few literals is as likely in noise (one place in 200) as it is real. Streams
+/// found in the middle of data are better without it: those that start with one hold a few
+/// hundred bytes at most.
+pub fn plausible_start(raw: &[u8], fixed: bool) -> bool {
+    let mut b = Bits {
+        d: raw,
+        pos: 0,
+        buf: 0,
+        n: 0,
+    };
+    let (mut out, mut tokens) = (0usize, 0);
+    // block after block while tokens are left: a block that is not the last does not end
+    // the stream
+    loop {
+        let last = b.get(1) == 1;
+        let codes = match b.get(2) {
+            0 => {
+                let k = (b.bit_pos() as u32).wrapping_neg() & 7;
+                b.get(k);
+                let (len, nlen) = (b.get(16), b.get(16));
+                return len == !nlen & 0xffff && b.check().is_ok();
+            }
+            1 if fixed => {
+                let mut lens = [8u8; 288];
+                lens[144..256].fill(9);
+                lens[256..280].fill(7);
+                Canon::new(&lens, false).zip(Canon::new(&[5; 32], false))
+            }
+            2 => plausible_codes(&mut b),
+            _ => None,
+        };
+        let Some((lit, dist)) = codes else {
+            return false;
+        };
+        loop {
+            if tokens == PLAUSIBLE_TOKENS {
+                return true;
+            }
+            tokens += 1;
+            let ok = match lit.decode(&mut b) {
+                Some(0..=255) => {
+                    out += 1;
+                    true
+                }
+                Some(256) if last => return b.check().is_ok(),
+                Some(256) => break,
+                Some(s @ 257..=285) => {
+                    let len = LEN_BASE[s as usize - 257] as usize;
+                    b.get(LEN_EXTRA[s as usize - 257] as u32);
+                    let d = dist.decode(&mut b).filter(|&d| d < 30).map(|d| {
+                        DIST_BASE[d as usize] as usize
+                            + b.get(DIST_EXTRA[d as usize] as u32) as usize
+                    });
+                    let within = d.is_some_and(|d| d <= out);
+                    out += len;
+                    within
+                }
+                _ => false,
+            };
+            if !ok || b.check().is_err() {
+                return false;
+            }
+        }
+        if b.check().is_err() {
+            return false;
+        }
+    }
+}
+
+/// The codes of a dynamic block's header, if zlib would take them (see [`plausible_start`]).
+fn plausible_codes(b: &mut Bits) -> Option<(Canon, Canon)> {
+    let hlit = b.get(5) as usize + 257;
+    let hdist = b.get(5) as usize + 1;
+    let hclen = b.get(4) as usize + 4;
+    if hlit > 286 || hdist > 30 {
+        return None;
+    }
+    let mut cl = [0u8; 19];
+    for &s in &CL_ORDER[..hclen] {
+        cl[s] = b.get(3) as u8;
+    }
+    let cl = Canon::new(&cl, false)?;
+    let mut lens = [0u8; 316];
+    let mut n = 0;
+    while n < hlit + hdist {
+        let (len, rep) = match cl.decode(b)? {
+            s @ 0..=15 => (s as u8, 1),
+            16 => (*lens.get(n.checked_sub(1)?)?, 3 + b.get(2) as usize),
+            17 => (0, 3 + b.get(3) as usize),
+            _ => (0, 11 + b.get(7) as usize),
+        };
+        if n + rep > hlit + hdist || b.check().is_err() {
+            return None;
+        }
+        lens[n..n + rep].fill(len);
+        n += rep;
+    }
+    let (lit, dist) = lens[..hlit + hdist].split_at(hlit);
+    if lit[256] == 0 {
+        return None;
+    }
+    let dist = if dist.iter().all(|&l| l == 0) {
+        // no match can be decoded: an empty code
+        Canon {
+            count: [0; 16],
+            sorted: [0; 320],
+        }
+    } else {
+        Canon::new(dist, true)?
+    };
+    Some((Canon::new(lit, true)?, dist))
+}
+
 fn parse_header(b: &mut Bits) -> Result<DynHeader> {
     let hlit = b.get(5) as u16 + 257;
     let hdist = b.get(5) as u8 + 1;
@@ -670,6 +854,78 @@ mod tests {
         fn lit(&mut self, _: u8) {}
         fn mat(&mut self, _: u16, _: u16, _: bool) {}
         fn stored(&mut self, _: &[u8]) {}
+    }
+
+    /// Every stream of the samples cached from flate-zoo's encoders starts plausibly (where
+    /// they are cached: `aqr-flate-train samples`).
+    #[test]
+    fn plausible_samples() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/cache/samples");
+        let Ok(dirs) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut n = 0;
+        for d in dirs.flatten() {
+            for f in std::fs::read_dir(d.path()).unwrap().flatten() {
+                if f.path().extension().is_none_or(|e| e != "raw") {
+                    continue;
+                }
+                let raw = std::fs::read(f.path()).unwrap();
+                assert!(plausible_start(&raw, true), "{}", f.path().display());
+                n += 1;
+            }
+        }
+        assert!(n > 0);
+    }
+
+    /// Streams of every block type start plausibly; noise rarely does. What passes is nearly
+    /// all a last fixed block of a few literals, as real streams of a few bytes are; a dynamic
+    /// block hardly ever.
+    #[test]
+    fn plausible() {
+        let data = include_bytes!("zlib.rs");
+        let stored = crate::deflate::write(
+            &Stream {
+                blocks: vec![Block {
+                    last: true,
+                    body: Body::Stored { pad: 0, len: 5 },
+                }],
+                tail_pad: 0,
+                trailing: vec![],
+            },
+            b"hello",
+        )
+        .unwrap();
+        assert!(plausible_start(&stored, false));
+        // fixed: an empty stream, and "aaaa..." as a literal and a match
+        assert!(plausible_start(&[0x03, 0x00], true));
+        assert!(plausible_start(&[0x4b, 0x4c, 0x84, 0x01, 0x00], true));
+        assert!(!plausible_start(&[0x03, 0x00], false));
+        let mut e = crate::zlib::Emulator::new(data, crate::zlib::Params::default());
+        let g = crate::zlib::zlib_block(&mut e, 0).unwrap();
+        let dynamic = crate::deflate::write(
+            &Stream {
+                blocks: vec![Block { last: true, ..g }],
+                tail_pad: 0,
+                trailing: vec![],
+            },
+            &data[..],
+        );
+        if let Ok(d) = dynamic {
+            assert!(plausible_start(&d, false));
+        }
+        let noise = aqr_common::rng::noise(1 << 20);
+        // by block type: stored, fixed, dynamic
+        let mut by = [0usize; 3];
+        for p in (0..noise.len() - 64).filter(|&p| plausible_start(&noise[p..], true)) {
+            by[(noise[p] >> 1 & 3) as usize] += 1;
+        }
+        assert!(by.iter().sum::<usize>() < noise.len() / 100, "{by:?}");
+        assert!(by[0] < 10 && by[2] < 10, "{by:?}");
+        let n = (0..noise.len() - 64)
+            .filter(|&p| plausible_start(&noise[p..], false))
+            .count();
+        assert_eq!(n, by[0] + by[2]);
     }
 
     /// `parse_head` ends where `parse_into` does, without the trailing bytes.
