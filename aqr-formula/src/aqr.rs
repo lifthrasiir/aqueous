@@ -156,12 +156,32 @@ impl Encoder {
 
     /// The length of the archive of `f` without a checksum.
     pub fn len(&self, f: &Formula) -> Result<usize> {
-        Ok(self.encode(f, None)?.len())
+        let mut n = Count(0);
+        self.write(f, None, &mut n)?;
+        Ok(n.0)
+    }
+
+    /// The length of the archive of `d` as it is, without a checksum (`d` itself not copied).
+    fn raw_len(&self, d: &[u8]) -> Result<usize> {
+        let mut n = Count(0);
+        n.put(&HEADER_MAGIC);
+        self.content_block(&mut n, true, d)?;
+        let blocks = n.0 - HEADER_MAGIC.len();
+        footer(&mut n, blocks);
+        Ok(n.0)
     }
 
     /// [`encode`] at the level of the encoder. Fails on slices out of their stream, and on
     /// resources that do not compress (as resource blocks always are).
     pub fn encode(&self, f: &Formula, checksum: Option<u64>) -> Result<Vec<u8>> {
+        // sized first (the streams compressed then are kept), so as to be written at its size
+        let mut out = Vec::with_capacity(self.len(f)? + 16);
+        self.write(f, checksum, &mut out)?;
+        Ok(out)
+    }
+
+    /// [`Encoder::encode`] into `out`.
+    fn write(&self, f: &Formula, checksum: Option<u64>, out: &mut impl Out) -> Result<()> {
         // of the module and formula blocks
         let level = match self.level {
             Level::Mid => MID_BASE.0,
@@ -177,13 +197,14 @@ impl Encoder {
         });
         slices?;
 
-        let mut blocks = Vec::new();
+        out.put(&HEADER_MAGIC);
+        let blocks = out.len();
         if let &Node::Slice { stream, start, len } = &f.root {
             let leaf = &f.streams[stream].data[start as usize..][..len as usize];
             if checksum.is_some_and(|c| c != self::checksum(leaf)) {
                 return Err(Error::new("output checksum not that of the leaf"));
             }
-            self.content_block(&mut blocks, true, leaf)?;
+            self.content_block(out, true, leaf)?;
         } else {
             // the non-leaf block of each stream sliced, by its ordinal
             let mut ordinals = vec![None; f.streams.len()];
@@ -225,13 +246,13 @@ impl Encoder {
             }
 
             for &m in &modules {
-                block(&mut blocks, MODULE, &padded(self.threads, |pad| wasm(m, pad), level)?);
+                block(out, MODULE, &padded(self.threads, |pad| wasm(m, pad), level)?);
             }
             for r in resources {
-                self.resource_block(&mut blocks, r)?;
+                self.resource_block(out, r)?;
             }
             block(
-                &mut blocks,
+                out,
                 FORMULA,
                 &padded(
                     self.threads,
@@ -244,21 +265,12 @@ impl Encoder {
                 )?,
             );
             for s in sliced {
-                self.content_block(&mut blocks, false, &f.streams[s].data)?;
+                self.content_block(out, false, &f.streams[s].data)?;
             }
         }
 
-        let mut out = Vec::with_capacity(blocks.len() + 32);
-        out.extend_from_slice(&HEADER_MAGIC);
-        out.extend_from_slice(&blocks);
-        let mut footer = Vec::new();
-        varint::put(&mut footer, blocks.len() as u64);
-        varint::put(&mut footer, 0);
-        out.extend_from_slice(&FOOTER_MAGIC);
-        out.extend_from_slice(&(footer.len() as u16).to_le_bytes());
-        out.extend_from_slice(&footer);
-        out.extend_from_slice(&(footer.len() as u16).to_le_bytes());
-        Ok(out)
+        footer(out, out.len() - blocks);
+        Ok(())
     }
 }
 
@@ -364,26 +376,74 @@ fn native_name(w: &[u8]) -> Option<&str> {
 
 /// Appends a block of `ty` (with a u8 size field) and `data`, widening the size field as
 /// needed and padding the block to an even length.
-fn block(out: &mut Vec<u8>, ty: u64, data: &[u8]) {
+/// Where an archive is written: its bytes, or only how many ([`Count`], to size it).
+trait Out {
+    fn put(&mut self, b: &[u8]);
+    fn len(&self) -> usize;
+}
+
+impl Out for Vec<u8> {
+    fn put(&mut self, b: &[u8]) {
+        self.extend_from_slice(b);
+    }
+
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+}
+
+/// Bytes written, counted only.
+struct Count(usize);
+
+impl Out for Count {
+    fn put(&mut self, b: &[u8]) {
+        self.0 += b.len();
+    }
+
+    fn len(&self) -> usize {
+        self.0
+    }
+}
+
+/// The end of an archive whose blocks take `blocks` bytes.
+fn footer(out: &mut impl Out, blocks: usize) {
+    let mut f = Vec::new();
+    varint::put(&mut f, blocks as u64);
+    varint::put(&mut f, 0);
+    out.put(&FOOTER_MAGIC);
+    out.put(&(f.len() as u16).to_le_bytes());
+    out.put(&f);
+    out.put(&(f.len() as u16).to_le_bytes());
+}
+
+fn block(out: &mut impl Out, ty: u64, data: &[u8]) {
+    block_of(out, ty, &[data]);
+}
+
+/// A block of the bytes of `parts` one after the other.
+fn block_of(out: &mut impl Out, ty: u64, parts: &[&[u8]]) {
     let start = out.len();
-    let ss = match data.len() as u64 {
+    let len: usize = parts.iter().map(|p| p.len()).sum();
+    let ss = match len as u64 {
         0..0x100 => 0,
         0x100..0x1_0000 => 1,
         0x1_0000..0x1_0000_0000 => 2,
         _ => 3,
     };
-    varint::put(out, ty + ss);
-    out.extend_from_slice(&(data.len() as u64).to_le_bytes()[..1 << ss]);
-    out.extend_from_slice(data);
+    let mut head = Vec::with_capacity(16);
+    varint::put(&mut head, ty + ss);
+    head.extend_from_slice(&(len as u64).to_le_bytes()[..1 << ss]);
+    out.put(&head);
+    parts.iter().for_each(|p| out.put(p));
     if (out.len() - start) % 2 == 1 {
-        out.push(0);
+        out.put(&[0]);
     }
 }
 
 impl Encoder {
     /// Appends a compressed or uncompressed (leaf or non-leaf) block of `data`, whichever the
     /// spec allows.
-    fn content_block(&self, out: &mut Vec<u8>, leaf: bool, data: &[u8]) -> Result<()> {
+    fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[u8]) -> Result<()> {
         let mut streams = self.streams.borrow_mut();
         let c = match streams.entry(key(data)) {
             Entry::Occupied(e) => e.into_mut(),
@@ -398,7 +458,7 @@ impl Encoder {
 
     /// Appends a resource block of `r`, compressed at the level the encoder picks for it, or
     /// as little as it compresses: the block is always compressed.
-    fn resource_block(&self, out: &mut Vec<u8>, r: &[u8]) -> Result<()> {
+    fn resource_block(&self, out: &mut impl Out, r: &[u8]) -> Result<()> {
         let mut resources = self.resources.borrow_mut();
         let c = match resources.entry(key(r)) {
             Entry::Occupied(e) => e.into_mut(),
@@ -471,7 +531,7 @@ impl Encoder {
             };
             self.streams.borrow_mut().insert(key(d), c);
         }
-        Ok(n < self.len(&Formula::raw("raw", d.to_vec()))?)
+        Ok(n < self.raw_len(d)?)
     }
 }
 
@@ -511,14 +571,10 @@ fn key(data: &[u8]) -> StreamKey {
 
 /// Appends a block of `data`: compressed as `c` ([`compressed`]) if given, else uncompressed
 /// (leaf or non-leaf).
-fn content_block(out: &mut Vec<u8>, leaf: bool, data: &[u8], c: Option<&[u8]>) {
+fn content_block(out: &mut impl Out, leaf: bool, data: &[u8], c: Option<&[u8]>) {
     match c {
         Some(c) => block(out, if leaf { LEAF_ZSTD } else { NON_LEAF_ZSTD }, c),
-        None => {
-            let mut u = data.to_vec();
-            u.extend_from_slice(&checksum(data).to_le_bytes());
-            block(out, if leaf { LEAF_RAW } else { NON_LEAF_RAW }, &u);
-        }
+        None => block_of(out, if leaf { LEAF_RAW } else { NON_LEAF_RAW }, &[data, &checksum(data).to_le_bytes()]),
     }
 }
 
