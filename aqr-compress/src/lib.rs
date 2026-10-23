@@ -37,10 +37,13 @@
 //! ([`aqr_formula::aqr`]), with the modules of [`aqr_decompress::MODULES`], which
 //! [`aqr_decompress::decompress`] decompresses.
 //!
-//! Whatever is not recognised, turned down by its recompressor, not made smaller, or (with
-//! [`Options::verify`]) not reconstructed by its module is kept raw: a slice of the input. So
-//! are, with [`Options::smaller`], a file and the files found in data whose formula would
-//! archive no smaller than they do raw.
+//! Whatever is not recognised, turned down by its recompressor or not made smaller is kept raw:
+//! a slice of the input. So are, with [`Options::smaller`], a file and the files found in data
+//! whose formula would archive no smaller than they do raw.
+//!
+//! Formulas are verified by whoever takes them, not as they are made: with
+//! [`Options::verify`], [`compress`] decodes the archive it makes, and stores the file raw
+//! instead where that does not give it back. [`recompress`] does not verify.
 //! [`Native`](aqr_decompress::Native) evaluates the formulas.
 //!
 //! ```no_run
@@ -64,7 +67,7 @@ pub use aqr_formula::{Formula, Module, Node};
 pub use detect::{Format, detect};
 pub use extent::extent;
 
-use aqr_decompress::{FLATE, LZ4, Native, SNAPPY, ZIP};
+use aqr_decompress::{FLATE, LZ4, SNAPPY, ZIP};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 
@@ -76,8 +79,9 @@ pub struct Options {
     /// DEFLATE stream in it (of gzip, zlib or PDF), of an LZ4 stream or of the blocks of a
     /// LevelDB table, and so on (0 recompresses nothing).
     pub depth: u32,
-    /// Run every module on what it was given, and keep the data raw where the output is not
-    /// the original (§6). Without it, the archive must checksum the output (R8).
+    /// Decode the archive that [`compress`] makes, and store the file raw instead where it is
+    /// not given back (§6). Without it, the archive's checksum of the output covers the file
+    /// (R8). [`recompress`] does not verify: whoever takes its formula does.
     pub verify: bool,
     /// The inputs whose data is recompressed in turn, by module and position; by default
     /// [`CONTENTS`].
@@ -184,7 +188,18 @@ pub fn recompress(d: &[u8], opt: &Options) -> Formula {
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
     let cx = Cx::new(d, opt);
     let f = recompress_at(d, opt, 0, opt.file, &cx);
-    cx.enc.encode(&f, Some(aqr::checksum(d))).expect("slices within their streams")
+    finish(&f, d, opt, &cx)
+}
+
+/// The archive of formula `f` of `d`; with [`Options::verify`], decoded and compared with `d`,
+/// and where it is not `d` (a module's bug), the archive of `d` raw instead.
+fn finish(f: &Formula, d: &[u8], opt: &Options, cx: &Cx) -> Vec<u8> {
+    let sum = Some(aqr::checksum(d));
+    let c = cx.enc.encode(f, sum).expect("slices within their streams");
+    if !opt.verify || aqr_decompress::decompress(&c, opt.threads).is_ok_and(|out| out == d) {
+        return c;
+    }
+    cx.enc.encode(&Formula::raw("raw", d.to_vec()), sum).expect("slices within their streams")
 }
 
 /// [`recompress`] for data `depth` formats deep, within `cx`.
@@ -203,7 +218,7 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
     let mut f = catch_unwind(AssertUnwindSafe(|| match format {
-        Format::Pe => pe::pe(d, opt),
+        Format::Pe => pe::pe(d),
         Format::Gzip => flate::gzip(d, opt, cx),
         Format::Zlib => flate::zlib(d, opt, cx),
         Format::Lz4 => recons(aqr_lz4::formula::encode, d, opt),
@@ -399,26 +414,7 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
 /// FORMAT.md), if it makes one. Whether coding pays off is the recompressor's call: the
 /// streams are not compressed yet, so their size says little.
 fn recons(encode: fn(&[u8], usize) -> Option<Formula>, d: &[u8], opt: &Options) -> Option<Formula> {
-    let f = encode(d, opt.threads)?;
-    if opt.verify && !f.eval(&Native { threads: opt.threads }).is_ok_and(|out| out == d) {
-        return None;
-    }
-    Some(f)
-}
-
-/// Unless verification is off, whether `m` makes `expect` of `inputs`.
-pub(crate) fn verified(
-    opt: &Options,
-    m: Module,
-    params: &[u8],
-    resources: &[&[u8]],
-    inputs: &[&[u8]],
-    expect: &[u8],
-) -> bool {
-    !opt.verify
-        || Native { threads: opt.threads }
-            .run(m, params, resources, inputs, expect.len() as u64)
-            .is_ok_and(|out| out == expect)
+    encode(d, opt.threads)
 }
 
 /// Bytes of the streams of `f` by class, largest first.
@@ -441,6 +437,32 @@ mod tests {
     thread_local! {
         /// The formats given to recompressors, in order.
         pub(crate) static TRIED: std::cell::RefCell<Vec<Format>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// An archive that does not give the file back is replaced by that of the file raw.
+    #[test]
+    fn finish_falls_back() {
+        let d = b"some data, kept raw where its formula is wrong".repeat(100);
+        let opt = Options::default();
+        let cx = Cx::new(&d, &opt);
+        // two slices: the archive has the output's checksum
+        let mut wrong = Formula::raw("raw", d.clone());
+        wrong.streams[0].data[7] ^= 1;
+        wrong.root = Node::Concat(vec![Node::slice(0, 0, 100), Node::slice(0, 100, d.len() as u64 - 100)]);
+        let raw = aqr::encode(&Formula::raw("raw", d.clone()), Some(aqr::checksum(&d)), opt.level).unwrap();
+        assert_eq!(finish(&wrong, &d, &opt, &cx), raw);
+        // a module that fails
+        let fails = Formula {
+            streams: vec![aqr_formula::Stream { class: "raw".into(), data: vec![1, 2, 3] }],
+            root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
+        };
+        assert_eq!(finish(&fails, &d, &opt, &cx), raw);
+        // without verification, as it is
+        let opt = Options { verify: false, ..opt };
+        assert_eq!(
+            aqr_decompress::decompress(&finish(&wrong, &d, &opt, &cx), 1),
+            Err(aqr::Failure::Invalid("output checksum mismatch".into()))
+        );
     }
 
     /// An archive turned down is not tried again from each of its later local headers, where an

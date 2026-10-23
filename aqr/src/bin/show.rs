@@ -1,16 +1,16 @@
-//! Recompresses files into formulas and evaluates them back.
+//! Recompresses files into formulas, archives them and decodes the archives back.
 //!
 //! usage: aqr-show [-t THREADS] [-d DEPTH] [-l mid|ZSTD_LEVEL] [-e] [-f] FILE...
 //!
 //! For each file: the detected format, the modules applied, the stream bytes by class, the
-//! times of recompression and evaluation, and the archive (of level `-l`, by default mid) with
-//! its round trip; `-e` takes each file as one file of the format it starts like rather than scanning
+//! time of recompression, and the archive (of level `-l`, by default mid) with its round trip,
+//! which verifies the formula; `-e` takes each file as one file of the format it starts like rather than scanning
 //! it, and `-f` prints the formula itself.
 
 use std::time::Instant;
 
 use aqr_compress::{Nest, Options, classes, detect, recompress};
-use aqr_decompress::{Native, decompress};
+use aqr_decompress::decompress;
 use aqr_formula::aqr;
 
 fn main() {
@@ -48,10 +48,6 @@ fn main() {
         let start = Instant::now();
         let f = recompress(&d, &opt);
         let enc = start.elapsed().as_secs_f64();
-        let start = Instant::now();
-        let ok = f.eval(&Native { threads: opt.threads }).is_ok_and(|out| out == d);
-        let dec = start.elapsed().as_secs_f64();
-        failed |= !ok;
 
         let format = detect(&d).map_or("-", |f| f.name());
         let start = Instant::now();
@@ -71,13 +67,7 @@ fn main() {
         };
         failed |= !matches!(&unpacked, Some(Ok(out)) if *out == d);
         let modules: Vec<String> = f.applies().iter().map(|a| a.module.to_string()).collect();
-        println!(
-            "{path}: {format}, {mb:.2} MB, {} streams, enc {:.1} MB/s, eval {:.1} MB/s{}, {archived}",
-            f.streams.len(),
-            mb / enc,
-            mb / dec,
-            if ok { "" } else { ", MISMATCH" }
-        );
+        println!("{path}: {format}, {mb:.2} MB, {} streams, enc {:.1} MB/s, {archived}", f.streams.len(), mb / enc);
         println!("  modules: {}", if modules.is_empty() { "-".into() } else { modules.join(" ") });
         let classes = classes(&f);
         let shown: Vec<String> = classes.iter().take(8).map(|(c, n)| format!("{c} {n}")).collect();

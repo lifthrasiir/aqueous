@@ -8,9 +8,7 @@ use aqr_exe::arch::x86;
 use aqr_exe::format::pe::locate_code;
 use aqr_formula::{Formula, Node};
 
-use crate::{Options, verified};
-
-pub(crate) fn pe(d: &[u8], opt: &Options) -> Option<Formula> {
+pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
     let code = locate_code(&mut Cursor::new(d)).ok()?;
     // In file order, cut to the file; sections overlapping an earlier one are left in the rest.
     let mut sections: Vec<(u64, usize, usize)> = code
@@ -33,10 +31,6 @@ pub(crate) fn pe(d: &[u8], opt: &Options) -> Option<Formula> {
         let section = &d[off..off + size];
         let Some(st) = x86::encode(section.to_vec(), va, code.is64) else { continue };
         let params = x86_params(st.origin(), st.sentinel_size(), code.is64);
-        let inputs: Vec<&[u8]> = st.streams().iter().map(|s| &s[..]).collect();
-        if !verified(opt, X86, &params, &[], &inputs, section) {
-            continue;
-        }
         parts.push(Node::slice(0, rest.len() as u64, (off - at) as u64));
         rest.extend_from_slice(&d[at..off]);
         let inputs = std::iter::zip(st.streams(), x86::STREAM_NAMES)

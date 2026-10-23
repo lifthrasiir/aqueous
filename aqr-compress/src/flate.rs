@@ -8,7 +8,7 @@ use aqr_flate::Hints;
 use aqr_flate::inflate::{self, Sink};
 use aqr_formula::{Formula, Node};
 
-use crate::{Cx, Options, verified};
+use crate::{Cx, Options};
 
 /// A gzip member (RFC 1952); what follows its trailer is sliced as it is.
 pub(crate) fn gzip(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
@@ -70,8 +70,7 @@ fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &O
         return None;
     }
     let resources = aqr_flate::formula::resources(fopt.profile).ok()?;
-    let res: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
-    if record.len() >= raw.len() || !verified(opt, FLATE, &[], &res, &[&data, &record], &d[raw.clone()]) {
+    if record.len() >= raw.len() {
         return None;
     }
     let mut f = Formula::default();
