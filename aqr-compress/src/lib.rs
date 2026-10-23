@@ -200,6 +200,8 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: 
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
 /// formula is [`smaller`]).
 fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    #[cfg(test)]
+    tests::TRIED.with(|t| t.borrow_mut().push(format));
     let mut f = catch_unwind(AssertUnwindSafe(|| match format {
         Format::Pe => pe::pe(d, opt),
         Format::Gzip => flate::gzip(d, opt, cx),
@@ -244,14 +246,21 @@ fn scan(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
 fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Formula> {
     let mut found = Vec::new();
     let (mut p, mut budget) = (0, d.len().saturating_mul(2).saturating_add(slack));
+    // Where each format's last file turned down ends: within it, a file of that format again
+    // would be part of the same (an archive from each of its local headers, MPEG audio from
+    // each of its frames), and is not tried.
+    let mut turned_down: Vec<(Format, usize)> = Vec::new();
     while p < d.len() {
         // at the start, a file may also be known by its end (a LevelDB table)
         let format = if p == 0 { detect(d) } else { detect::starts(&d[p..]) };
+        let format = format.filter(|f| !turned_down.iter().any(|&(g, end)| g == *f && p < end));
         let child = format.filter(|_| budget > 0).and_then(|format| {
             let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
             let child = recompress_as(format, &d[p..p + n], opt, depth, cx);
             if child.is_none() {
                 budget = budget.saturating_sub(n);
+                turned_down.retain(|&(g, _)| g != format);
+                turned_down.push((format, p + n));
             }
             Some((n, child?))
         });
@@ -428,14 +437,60 @@ pub fn classes(f: &Formula) -> Vec<(&str, usize)> {
 mod tests {
     use super::*;
 
+    thread_local! {
+        /// The formats given to recompressors, in order.
+        pub(crate) static TRIED: std::cell::RefCell<Vec<Format>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// An archive turned down is not tried again from each of its later local headers, where an
+    /// archive also starts and runs to the same end record.
+    #[test]
+    fn scan_after_turned_down() {
+        let (mut d, mut cd) = (Vec::new(), Vec::new());
+        for i in 0..8u32 {
+            let data = aqr_common::rng::noise(5000 + i as usize);
+            // encrypted: kept as they are, so that the archive is turned down
+            let mut h = vec![20, 0, 1, 0, 0, 0, 0, 0, 0, 0];
+            h.extend_from_slice(&crc32fast::hash(&data).to_le_bytes());
+            h.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            h.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            h.extend_from_slice(&[1, 0, 0, 0]);
+            cd.extend_from_slice(b"PK\x01\x02\x14\x03");
+            cd.extend_from_slice(&h);
+            cd.extend_from_slice(&[0; 10]);
+            cd.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            cd.push(b'a' + i as u8);
+            d.extend_from_slice(b"PK\x03\x04");
+            d.extend_from_slice(&h);
+            d.push(b'a' + i as u8);
+            d.extend_from_slice(&data);
+        }
+        let at = d.len() as u32;
+        d.extend_from_slice(&cd);
+        d.extend_from_slice(b"PK\x05\x06\0\0\0\0\x08\0\x08\0");
+        d.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+        d.extend_from_slice(&at.to_le_bytes());
+        d.extend_from_slice(&[0, 0]);
+        TRIED.with(|t| t.borrow_mut().clear());
+        let f = recompress(&d, &Options::default());
+        assert!(f.applies().is_empty());
+        let zips = TRIED.with(|t| t.borrow().iter().filter(|&&f| f == Format::Zip).count());
+        assert_eq!(zips, 1);
+    }
+
     /// Data given to recompressors that turn it down counts against a scan, which stops
     /// looking for files past twice the data.
     #[test]
     fn scan_budget() {
         let jpeg = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../aqr-jpeg/tests/data/gradient.jpg")).unwrap();
-        // PNG signatures with a chunk running to the end of the data, each turned down
-        let fake = [&b"\x89PNG\r\n\x1a\n"[..], &0x7fff_0000u32.to_be_bytes(), b"IHDR"].concat();
-        let data = |fakes: usize| [fake.repeat(fakes), vec![0; 10000], jpeg.clone()].concat();
+        // files of different formats running to the end of the data, each turned down (one of
+        // a format already turned down there would not be tried)
+        let fakes: [&[u8]; 3] = [
+            &[&b"\x89PNG\r\n\x1a\n"[..], &0x7fff_0000u32.to_be_bytes(), b"IHDR"].concat(),
+            b"fLaC\x80\0\0\x22",
+            b"%PDF-1.7\n",
+        ];
+        let data = |n: usize| [fakes[..n].concat(), vec![0; 10000], jpeg.clone()].concat();
         let found = |d: &[u8]| {
             let opt = Options::default();
             scan_with(d, &opt, 0, 0, &Cx::new(d, &opt)).map_or(0, |f| f.applies().len())
