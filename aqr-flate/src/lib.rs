@@ -424,7 +424,8 @@ impl<F: FnMut(usize, Vec<Token>)> inflate::Sink for Split<'_, F> {
 
 /// The segments of `f` (`ranges`) coded by `rule`, their tokens parsed again from `raw` and
 /// given to `threads` threads as each segment is complete, then dropped: a few segments' at
-/// a time rather than the whole stream's.
+/// a time rather than the whole stream's. With one thread or one segment, each is coded as it
+/// is parsed, on this thread.
 fn code_streamed(
     raw: &[u8],
     f: &Flat,
@@ -433,6 +434,26 @@ fn code_streamed(
     threads: usize,
 ) -> Result<Vec<tokens::Recorder>> {
     use std::sync::{Mutex, mpsc};
+    let code = |i: usize, toks: &[Token]| {
+        let mut rec = tokens::Recorder::default();
+        tokens::code_range(&mut rec, &f.data, rule, &ranges[i], Some(toks), None).map(|_| rec)
+    };
+    let threads = threads.min(ranges.len());
+    if threads <= 1 {
+        let mut done = Vec::with_capacity(ranges.len());
+        let mut failed = None;
+        split_parsed(raw, &f.stats.cuts, |i, toks| match code(i, &toks) {
+            Ok(rec) => done.push(rec),
+            Err(e) => {
+                failed.get_or_insert(e);
+            }
+        })?;
+        return match failed {
+            Some(e) => Err(e),
+            None if done.len() == ranges.len() => Ok(done),
+            None => Err(Error::Inconsistent),
+        };
+    }
     let done: Vec<Mutex<Option<Result<tokens::Recorder>>>> =
         ranges.iter().map(|_| Mutex::new(None)).collect();
     // at most two segments waiting per thread: the parse waits for the coding
@@ -445,30 +466,13 @@ fn code_streamed(
                     // (the lock only while taking a segment, not while coding it)
                     let job = rx.lock().unwrap().recv();
                     let Ok((i, toks)) = job else { break };
-                    let mut rec = tokens::Recorder::default();
-                    let r =
-                        tokens::code_range(&mut rec, &f.data, rule, &ranges[i], Some(&toks), None)
-                            .map(|_| rec);
-                    *done[i].lock().unwrap() = Some(r);
+                    *done[i].lock().unwrap() = Some(code(i, &toks));
                 }
             });
         }
-        let mut split = Split {
-            cuts: &f.stats.cuts,
-            seg: 0,
-            n: 0,
-            cur: Vec::new(),
-            send: |i, toks| {
-                let _ = tx.send((i, toks));
-            },
-        };
-        let r = inflate::parse_head(raw, usize::MAX, &mut split);
-        // segments without tokens at the end (none at all in a stream of stored blocks)
-        while split.seg + 1 < split.cuts.len() {
-            (split.send)(split.seg, std::mem::take(&mut split.cur));
-            split.seg += 1;
-        }
-        drop(split);
+        let r = split_parsed(raw, &f.stats.cuts, |i, toks| {
+            let _ = tx.send((i, toks));
+        });
         drop(tx);
         r
     });
@@ -476,6 +480,19 @@ fn code_streamed(
     done.into_iter()
         .map(|d| d.into_inner().unwrap().ok_or(Error::Inconsistent)?)
         .collect()
+}
+
+/// Parses `raw` again, giving `send` the tokens of each segment (as `cuts` mark them) in order
+/// as it is complete, those at the end without tokens too.
+fn split_parsed(raw: &[u8], cuts: &[usize], send: impl FnMut(usize, Vec<Token>)) -> Result<()> {
+    let mut split = Split { cuts, seg: 0, n: 0, cur: Vec::new(), send };
+    let r = inflate::parse_head(raw, usize::MAX, &mut split);
+    // segments without tokens at the end (none at all in a stream of stored blocks)
+    while split.seg + 1 < split.cuts.len() {
+        (split.send)(split.seg, std::mem::take(&mut split.cur));
+        split.seg += 1;
+    }
+    r.map(|_| ())
 }
 
 impl Flat {
