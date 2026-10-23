@@ -14,6 +14,7 @@ use aqr_flac::flac;
 pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
     let end = match f {
         Format::Pe => pe(d),
+        Format::MachO => aqr_exe::format::macho::extent(d).map(|e| clamp(d, e)),
         Format::Gzip => gzip_deflate(d).map(|r| r.end + 8),
         Format::Zlib => zlib_deflate(d).map(|r| r.end + 4),
         Format::Lz4 => aqr_lz4::formula::extent(d),
@@ -534,6 +535,29 @@ mod tests {
         d[opt + 96 + 32..opt + 96 + 36].copy_from_slice(&0x3c0u32.to_le_bytes());
         d[opt + 96 + 36..opt + 96 + 40].copy_from_slice(&0x40u32.to_le_bytes());
         ends(Format::Pe, &d);
+    }
+
+    #[test]
+    fn macho() {
+        // a 64-bit image: a segment's file data, then a code signature
+        let mut d = vec![0u8; 0x400];
+        d[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        d[16] = 2;
+        d[20] = 72 + 16;
+        d[32] = 0x19;
+        d[36] = 72;
+        d[32 + 48..32 + 56].copy_from_slice(&0x200u64.to_le_bytes());
+        d[104] = 0x1d;
+        d[108] = 16;
+        d[112..116].copy_from_slice(&0x200u32.to_le_bytes());
+        d[116..120].copy_from_slice(&0x100u32.to_le_bytes());
+        ends(Format::MachO, &d[..0x300]);
+        // a universal file of it
+        let mut fat = vec![0u8; 0x1000];
+        fat[..8].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 1]);
+        fat[8..28].copy_from_slice(&[1, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0x10, 0, 0, 0, 3, 0, 0, 0, 0, 12]);
+        fat.extend_from_slice(&d);
+        ends(Format::MachO, &fat[..0x1300]);
     }
 
     #[test]

@@ -73,7 +73,7 @@ of all of them would); the speeds and memory are those of the files coded.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| PE (x86, x86-64) | aqr-exe | 261 files, 401 MB | 0.339 | 0.383 | 17 | 336 | 5.3× (14 MB + 4.7×) | **Ryzen 7 9700X, not the M4** (above). Samples from `Program Files` and `System32`; 121 files not coded (108 of them .NET). 11 large binaries (1529 MB): 0.306 at 36 and 268 MB/s, 4.7×. The disfilter alone: 238 and 296 MB/s, −20% under zstd -9. No ELF, Mach-O or ARM64 yet |
+| PE (x86, x86-64) | aqr-exe | 261 files, 401 MB | 0.339 | 0.383 | 17 | 336 | 5.3× (14 MB + 4.7×) | **Ryzen 7 9700X, not the M4** (above). Samples from `Program Files` and `System32`; 121 files not coded (108 of them .NET). 11 large binaries (1529 MB): 0.306 at 36 and 268 MB/s, 4.7×. The disfilter alone: 238 and 296 MB/s, −20% under zstd -9. Mach-O: the x86 images, thin or universal (VS Code's 34 universal binaries, 493 MB: −8.6% against the files as they are, their ARM64 halves kept). No ELF or ARM64 yet |
 
 ### In progress or planned
 
@@ -249,7 +249,7 @@ container is TIFF/EXIF.
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
-| ELF, Mach-O (x86-64) | Linux and macOS binaries | uncompressed (ELF debug sections optionally zlib or zstd) | the disfilter on code sections; the zlib debug sections | aqr-exe, aqr-flate |
+| ELF (x86-64) | Linux binaries | uncompressed (debug sections optionally zlib or zstd) | the disfilter on code sections; the zlib debug sections | aqr-exe, aqr-flate |
 | ARM64 code (ELF, Mach-O, PE) | phones, Apple silicon, servers | uncompressed | a branch and address filter for AArch64 | aqr-exe's structure |
 | Android DEX | APKs | uncompressed, with shared string, type and method tables | the tables and bytecode modelled (as Pack200 did for class files) | |
 | Java class files | JARs | uncompressed constant pools and bytecode | as DEX | |

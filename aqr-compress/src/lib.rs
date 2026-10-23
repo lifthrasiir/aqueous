@@ -2,8 +2,9 @@
 //! the recompressor by the magic bytes of a file, and [`recompress`] runs it on each file found,
 //! giving a [`Formula`] rather than bytes.
 //!
-//! - PE images: aqr-exe's x86 disfilter applied to each executable section, over its
-//!   streams; the rest of the image is sliced in between.
+//! - PE images, and Mach-O images of x86 or x86-64 (thin or universal): aqr-exe's x86
+//!   disfilter applied to each executable section, over its streams; the rest of the file is
+//!   sliced in between.
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
 //!   record).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
@@ -57,9 +58,9 @@
 //! ```
 
 mod detect;
+mod exe;
 mod extent;
 mod flate;
-mod pe;
 mod verify;
 mod zip;
 
@@ -307,7 +308,8 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
     let f = catch_unwind(AssertUnwindSafe(|| match format {
-        Format::Pe => pe::pe(d),
+        Format::Pe => exe::pe(d),
+        Format::MachO => exe::macho(d),
         Format::Gzip => flate::gzip(d, opt, cx),
         Format::Zlib => flate::zlib(d, opt, cx),
         Format::Lz4 => recons(aqr_lz4::formula::encode, d, opt),

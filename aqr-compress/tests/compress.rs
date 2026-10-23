@@ -200,8 +200,8 @@ fn zlib_checksum() {
     assert!(modules(&roundtrip(&d, &all())).is_empty());
 }
 
-/// A PE32+ image with one executable section of x86-64 code, followed by other data.
-fn pe() -> (Vec<u8>, std::ops::Range<usize>) {
+/// x86-64 code: calls among a few functions, RIP-relative loads.
+fn x86_64_code() -> Vec<u8> {
     let mut code = Vec::new();
     for i in 0..2000u32 {
         let at = code.len() as i32;
@@ -212,6 +212,12 @@ fn pe() -> (Vec<u8>, std::ops::Range<usize>) {
         code.extend_from_slice(&(0x10000 - at - 17).to_le_bytes());
         code.extend_from_slice(&[0x48, 0x83, 0xc4, 0x28, 0xc3, 0xcc]);
     }
+    code
+}
+
+/// A PE32+ image with one executable section of x86-64 code, followed by other data.
+fn pe() -> (Vec<u8>, std::ops::Range<usize>) {
+    let code = x86_64_code();
     let mut d = vec![0u8; 0x200];
     d[..2].copy_from_slice(b"MZ");
     d[0x3c] = 0x40;
@@ -248,6 +254,83 @@ fn pe_sections() {
     assert_eq!(parts[2], Node::slice(0, code.start as u64, (d.len() - code.end) as u64));
     let classes = aqr_compress::classes(&f);
     assert!(classes.iter().any(|&(c, n)| c == "x86/CALL_IDX" && n > 0), "{classes:?}");
+}
+
+const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+
+/// A thin 64-bit Mach-O image of `cputype` with one segment holding `code` in a section of
+/// instructions, followed by other data in the segment; and where the code is.
+fn macho(cputype: u32, code: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
+    let (cmds, at) = (72 + 80, 0x200);
+    let mut d = vec![0u8; at];
+    let put32 = |d: &mut Vec<u8>, p: usize, v: u32| d[p..p + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |d: &mut Vec<u8>, p: usize, v: u64| d[p..p + 8].copy_from_slice(&v.to_le_bytes());
+    put32(&mut d, 0, 0xfeed_facf);
+    put32(&mut d, 4, cputype);
+    put32(&mut d, 12, 2); // MH_EXECUTE
+    put32(&mut d, 16, 1);
+    put32(&mut d, 20, cmds as u32);
+    let size = (at + code.len() + 2000) as u64;
+    put32(&mut d, 32, 0x19); // LC_SEGMENT_64
+    put32(&mut d, 36, cmds as u32);
+    d[40..46].copy_from_slice(b"__TEXT");
+    put64(&mut d, 32 + 24, 0x1_0000_0000);
+    put64(&mut d, 32 + 32, size);
+    put64(&mut d, 32 + 48, size);
+    put32(&mut d, 32 + 64, 1);
+    let s = 32 + 72;
+    d[s..s + 6].copy_from_slice(b"__text");
+    d[s + 16..s + 22].copy_from_slice(b"__TEXT");
+    put64(&mut d, s + 32, 0x1_0000_0000 + at as u64);
+    put64(&mut d, s + 40, code.len() as u64);
+    put32(&mut d, s + 48, at as u32);
+    put32(&mut d, s + 64, 0x8000_0400);
+    d.extend_from_slice(code);
+    d.extend_from_slice(&text(2000));
+    (d, at..at + code.len())
+}
+
+#[test]
+fn macho_sections() {
+    let (d, code) = macho(CPU_TYPE_X86_64, &x86_64_code());
+    assert_eq!(modules(&roundtrip(&d, &Options::default())), [X86.name]);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    assert_eq!(modules(&f), [X86.name]);
+    let Node::Concat(parts) = &f.root else { panic!("{f}") };
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0], Node::slice(0, 0, code.start as u64));
+    assert_eq!(parts[1].len(), code.len() as u64);
+    assert_eq!(f.streams[0].class, "macho");
+}
+
+/// In a universal file, the x86-64 image's code is filtered, the ARM64 image kept with the
+/// rest; found in other data too.
+#[test]
+fn macho_universal() {
+    let (x86, code) = macho(CPU_TYPE_X86_64, &x86_64_code());
+    let (arm, _) = macho(CPU_TYPE_ARM64, &[0x1f, 0x20, 0x03, 0xd5].repeat(5000));
+    let mut d = Vec::new();
+    d.extend_from_slice(&0xcafe_babeu32.to_be_bytes());
+    d.extend_from_slice(&2u32.to_be_bytes());
+    let at = [0x1000, (0x1000 + x86.len()).next_multiple_of(0x1000)];
+    for ((cputype, image), at) in [(CPU_TYPE_X86_64, &x86), (CPU_TYPE_ARM64, &arm)].into_iter().zip(at) {
+        for v in [cputype, 3, at as u32, image.len() as u32, 12] {
+            d.extend_from_slice(&v.to_be_bytes());
+        }
+    }
+    d.resize(at[0], 0);
+    d.extend_from_slice(&x86);
+    d.resize(at[1], 0);
+    d.extend_from_slice(&arm);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    assert_eq!(modules(&f), [X86.name]);
+    let Node::Concat(parts) = &f.root else { panic!("{f}") };
+    assert_eq!(parts[0], Node::slice(0, 0, (at[0] + code.start) as u64));
+    let mut wrapped = text(3000);
+    wrapped.extend_from_slice(&d);
+    wrapped.extend_from_slice(&text(3000));
+    assert_eq!(modules(&roundtrip(&wrapped, &Options::default())), [X86.name]);
 }
 
 /// A PDF of streams, by their dictionary entries and data.

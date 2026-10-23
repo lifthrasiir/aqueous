@@ -1,8 +1,8 @@
 # aqr-exe
 
-x86 and x86-64 code recompression: a disfilter splits each executable section of a PE image
-into 46 streams by instruction field, with relative targets made absolute, and the section is
-rebuilt bit for bit from them.
+x86 and x86-64 code recompression: a disfilter splits each executable section of a PE image,
+or of an x86 Mach-O image (thin or in a universal file), into 46 streams by instruction field,
+with relative targets made absolute, and the section is rebuilt bit for bit from them.
 
 ```sh
 cargo run --release -p aqr-exe --example bench -- [-l LEVEL] [--no-zstd] [NAME|PATH ...]  # filter round trip, speed, zstd before and after
@@ -15,6 +15,11 @@ use aqr_exe::format::pe::locate_code;
 let code = locate_code(&mut file)?;                  // the executable sections, PE32 or PE32+
 let st = x86::encode(section, va, code.is64).unwrap();
 let back = x86::decode(&(&st).into(), code.is64);    // Some(section)
+
+use aqr_exe::format::macho;
+for image in macho::images(&file).unwrap_or_default() {  // each architecture of a universal file
+    if image.is_x86() { /* image.sections: (address, file offset, size) */ }
+}
 ```
 
 `FORMAT.md` specifies the module `exe-recons/x86`, with the opcode tables in full.
@@ -59,7 +64,10 @@ speed.
 
 ## Limitations
 
-- PE only: no ELF or Mach-O.
-- x86 and x86-64 only: no ARM64 (or ARM) code. The machine type is not checked, so such images
-  are filtered as x86 code, for nothing.
+- PE and Mach-O only: no ELF.
+- x86 and x86-64 only: no ARM64 (or ARM) code. Mach-O images of other architectures are kept
+  as they are; a PE image's machine type is not checked, so ARM images are filtered as x86
+  code, for nothing.
+- Mach-O code signatures are kept as they are, though their page hashes follow from the
+  image.
 - .NET IL is not modelled.

@@ -7,6 +7,8 @@ use std::fmt;
 pub enum Format {
     /// PE image (aqr-exe on its executable sections).
     Pe,
+    /// Mach-O file, thin or universal (aqr-exe on the executable sections of its x86 images).
+    MachO,
     /// gzip member (aqr-flate on its DEFLATE stream).
     Gzip,
     /// zlib stream (aqr-flate on its DEFLATE stream).
@@ -29,8 +31,9 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 13] = [
+    pub const ALL: [Format; 14] = [
         Format::Pe,
+        Format::MachO,
         Format::Gzip,
         Format::Zlib,
         Format::Lz4,
@@ -48,6 +51,7 @@ impl Format {
     pub fn name(self) -> &'static str {
         match self {
             Format::Pe => "pe",
+            Format::MachO => "macho",
             Format::Gzip => "gzip",
             Format::Zlib => "zlib",
             Format::Lz4 => "lz4",
@@ -71,8 +75,8 @@ impl fmt::Display for Format {
 }
 
 /// The format `d` starts like, if any. Only the first bytes are looked at (and the PE
-/// header, the end of an ID3v2 tag), except for a LevelDB table, known by its footer: the
-/// recompressor may still turn the data down.
+/// header, Mach-O load commands and universal headers, the end of an ID3v2 tag), except for a
+/// LevelDB table, known by its footer: the recompressor may still turn the data down.
 pub fn detect(d: &[u8]) -> Option<Format> {
     detect_at(d, true)
 }
@@ -100,6 +104,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Mp3)
     } else if pe(d) {
         Some(Format::Pe)
+    } else if aqr_exe::format::macho::starts(d) {
+        Some(Format::MachO)
     } else if aqr_lz4::formula::starts(d) {
         Some(Format::Lz4)
     } else if at(0, b"PK\x03\x04") {
@@ -126,6 +132,9 @@ const fn pair(a: u8, b: u8) -> bool {
         b'I' => b == b'D',
         0xff => b == 0xd8 || b & 0xe0 == 0xe0,
         b'M' => b == b'Z',
+        // Mach-O, little-endian (32- or 64-bit), and universal
+        0xce | 0xcf => b == 0xfa,
+        0xca => b == 0xfe,
         0x1f => b == 0x8b,
         b'm' => b == b'o',
         0x04 => b == 0x22,
@@ -182,6 +191,8 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'I' => d.starts_with(b"ID3"),
         0xff => true,
         b'M' => d.starts_with(b"MZ"),
+        0xce | 0xcf => d.starts_with(&[d[0], 0xfa, 0xed, 0xfe]),
+        0xca => d.starts_with(&[0xca, 0xfe, 0xba]),
         0x1f => d.starts_with(&[0x1f, 0x8b]),
         b'm' | 0x04 => aqr_lz4::formula::starts(d),
         b'P' => d.starts_with(b"PK\x03\x04"),
@@ -260,6 +271,9 @@ mod tests {
             (b"\xff\xd8", 0),
             (b"\xff\xfb", 0),
             (b"MZ", 0),
+            (b"\xcf\xfa", 0),
+            (b"\xce\xfa", 0),
+            (b"\xca\xfe", 0),
             (b"\x1f\x8b", 0),
             (b"mozLz4", 0),
             (b"\x04\x22", 0),
@@ -313,6 +327,15 @@ mod tests {
         pe[..2].copy_from_slice(b"MZ");
         pe[0x3c] = 0x80;
         pe[0x80..].copy_from_slice(b"PE\0\0");
+        // a 64-bit Mach-O header with one load command, and a universal header of it
+        let mut macho = vec![0u8; 40];
+        macho[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+        macho[16] = 1;
+        macho[20] = 8;
+        let mut fat = vec![0u8; 0x1000];
+        fat[..8].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 1]);
+        fat[8..28].copy_from_slice(&[1, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0x10, 0, 0, 0, 0, 40, 0, 0, 0, 12]);
+        fat.extend_from_slice(&macho);
         let mut id3_flac = b"ID3\x04\0\0\0\0\0\x02xx".to_vec();
         id3_flac.extend_from_slice(b"fLaC");
         let cases: &[(&[u8], Option<Format>)] = &[
@@ -331,6 +354,11 @@ mod tests {
             (b"\xff\xd8\xff\xe0", Some(Format::Jpeg)),
             (&pe, Some(Format::Pe)),
             (b"MZ\x90\0", None),
+            (&macho, Some(Format::MachO)),
+            (&macho[..36], None),
+            (&fat, Some(Format::MachO)),
+            // a Java class file
+            (b"\xca\xfe\xba\xbe\0\0\0\x34\0\x1d", None),
             (b"\x1f\x8b\x08\0", Some(Format::Gzip)),
             // a header, then the first block's: fixed, stored, dynamic
             (b"\x78\x9c\x03\x00", Some(Format::Zlib)),
