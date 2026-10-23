@@ -2,7 +2,7 @@ use std::io::Write;
 
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
-use aqr_decompress::{FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, SNAPPY, X86, ZIP, decompress};
+use aqr_decompress::{FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, SNAPPY, SQLITE, X86, ZIP, decompress};
 use aqr_formula::aqr;
 
 fn fixture(path: &str) -> Vec<u8> {
@@ -491,4 +491,26 @@ fn zip_nested_like_42() {
     let f = roundtrip(&level, &Options { expansion: 1 << 20, ..opt });
     let inflated: usize = f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum();
     assert!(inflated >= 96 << 20, "{inflated}");
+}
+
+/// A database made by the sqlite3 tool from `sql` (None without it).
+fn sqlite_db(sql: &str) -> Option<Vec<u8>> {
+    let path = std::env::temp_dir().join(format!("aqr-compress-test-{}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let out = std::process::Command::new("sqlite3").arg(&path).arg(sql).output().ok()?;
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let d = std::fs::read(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    Some(d)
+}
+
+#[test]
+fn sqlite_whole() {
+    let sql = "create table t(a integer primary key, b text);
+        with recursive n(i) as (select 1 union all select i + 1 from n where i < 3000)
+        insert into t select i, 'row ' || i || ' of the table, with some text' from n;";
+    let Some(db) = sqlite_db(sql) else { return };
+    assert_eq!(modules(&roundtrip(&db, &all())), [SQLITE.name]);
+    // a database is a whole file: not looked for in the middle of data
+    assert!(modules(&roundtrip(&[&b"some data before "[..], &db].concat(), &all())).is_empty());
 }

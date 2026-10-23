@@ -111,11 +111,12 @@ pub fn detect(d: &[u8]) -> Option<Format> {
 }
 
 /// [`detect`] for a file found anywhere in data. A first byte no signature starts with is
-/// turned down at once, and so is a LevelDB table: its end would be that of the data.
+/// turned down at once, and so are a LevelDB table, whose end would be that of the data, and a
+/// SQLite database, which is a whole file and is not in other data.
 pub(crate) fn starts(d: &[u8]) -> Option<Format> {
     const FIRST: [bool; 256] = {
         let mut t = [false; 256];
-        let s = b"\x89S%8fRFI\xffM\x1fm\x04P";
+        let s = b"\x89%8fRFI\xffM\x1fm\x04P";
         let mut i = 0;
         while i < s.len() {
             t[s[i] as usize] = true;
@@ -129,7 +130,11 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         }
         t
     };
-    if FIRST[*d.first()? as usize] { detect(d).filter(|&f| f != Format::LevelDb) } else { None }
+    if FIRST[*d.first()? as usize] {
+        detect(d).filter(|&f| !matches!(f, Format::LevelDb | Format::Sqlite))
+    } else {
+        None
+    }
 }
 
 /// A SQLite database header: the magic string, a page size, and the fields that must have one

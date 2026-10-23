@@ -251,7 +251,8 @@ fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Opti
     // each of its frames), and is not tried.
     let mut turned_down: Vec<(Format, usize)> = Vec::new();
     while p < d.len() {
-        // at the start, a file may also be known by its end (a LevelDB table)
+        // at the start, a file may also be known by its end (a LevelDB table), or be one that
+        // is only ever a whole file (a SQLite database)
         let format = if p == 0 { detect(d) } else { detect::starts(&d[p..]) };
         let format = format.filter(|f| !turned_down.iter().any(|&(g, end)| g == *f && p < end));
         let child = format.filter(|_| budget > 0).and_then(|format| {
