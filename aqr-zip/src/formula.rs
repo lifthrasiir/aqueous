@@ -199,7 +199,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             });
         }
     }
-    let made: Vec<Made> = made.into_iter().map(Option::unwrap).collect();
+    let mut made: Vec<Made> = made.into_iter().map(Option::unwrap).collect();
     let crcs = par_map(&made.iter().zip(&locals).collect::<Vec<_>>(), opt.threads, |(m, l)| match m {
         Made::Stored => crc32fast::hash(&input[l.body.clone()]),
         Made::Deflated { data, .. } => crc32fast::hash(data),
@@ -207,8 +207,15 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     });
 
     let mut w = Writer::new(input, base);
-    let (mut data, mut records) = (Vec::new(), Vec::new());
-    let mut locals = locals.iter().zip(&made).zip(crcs);
+    // the data and records of all the bodies, of the size they take, each body's dropped once
+    // in place
+    let sizes = made.iter().zip(&locals).fold((0, 0), |(n, r), (m, l)| match m {
+        Made::Stored => (n + l.body.len(), r),
+        Made::Deflated { data, record } => (n + data.len(), r + record.len()),
+        _ => (n, r),
+    });
+    let (mut data, mut records) = (Vec::with_capacity(sizes.0), Vec::with_capacity(sizes.1));
+    let mut locals = locals.iter().zip(made.iter_mut()).zip(crcs);
     for r in &recs {
         match r {
             Rec::Gap(g) => w.gap(g.clone()),
@@ -223,6 +230,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                     _ => {}
                 }
                 w.local(l, m, crc);
+                if let Made::Deflated { data: dd, .. } = m {
+                    *dd = Vec::new();
+                }
             }
             Rec::Central(c) => w.central(c),
             Rec::End64 { pos, ext } => w.end64(*pos, ext.clone()),
