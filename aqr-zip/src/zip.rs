@@ -427,12 +427,13 @@ pub fn records(d: &[u8]) -> (i64, BTreeMap<usize, Info>, Vec<Rec>) {
 /// Bytes of the archive at the start of `d`: as far as its records follow each other without a
 /// gap up to the end of central directory record, or else to the end record found from the end
 /// of `d` whose directory starts with a central header (a gap may hold anything). `None` where
-/// there is neither.
+/// there is neither. The bodies that the directory found from the end of `d` knows of are of the
+/// sizes it says, rather than parsed (as one with a descriptor after it is).
 pub fn extent(d: &[u8]) -> Option<usize> {
     if !d.starts_with(&LOCAL) {
         return None;
     }
-    let map = BTreeMap::new();
+    let (_, map) = directory(d);
     let mut p = 0;
     while let Some(r) = record_at(d, p, &map) {
         if let Rec::End { .. } = r {
