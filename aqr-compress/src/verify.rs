@@ -76,20 +76,49 @@ impl Modules for Cached<'_> {
     }
 }
 
-/// Evaluates formulas on a thread of its own, as they are submitted, into a [`Memo`].
+/// Evaluates formulas on a thread of its own, as they are submitted, into a [`Memo`]. A
+/// formula is shared with the recompression, and checked against a hash of the data it stands
+/// for: neither is copied.
 pub(crate) struct Prevalidator {
-    jobs: Sender<(Formula, Vec<u8>)>,
+    jobs: Sender<(Arc<Formula>, Key)>,
     done: JoinHandle<Memo>,
+}
+
+fn hash(d: &[u8]) -> Key {
+    xxhash_rust::xxh3::xxh3_128(d)
+}
+
+/// Formulas of at most this many bytes of streams are copied by [`reclaim`] rather than waited
+/// for.
+const RECLAIM_COPY: usize = 64 << 20;
+
+/// `f` once the [`Prevalidator`] is done with it: a copy where it is small and still evaluated
+/// (or waiting to be), else `f` itself when it is.
+pub(crate) fn reclaim(mut f: Arc<Formula>) -> Formula {
+    loop {
+        match Arc::try_unwrap(f) {
+            Ok(f) => return f,
+            Err(shared) if shared.streams.iter().map(|s| s.data.len()).sum::<usize>() <= RECLAIM_COPY => {
+                return (*shared).clone();
+            }
+            Err(shared) => {
+                f = shared;
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
 }
 
 impl Prevalidator {
     pub fn spawn(threads: usize) -> Prevalidator {
-        let (jobs, rx) = channel::<(Formula, Vec<u8>)>();
+        let (jobs, rx) = channel::<(Arc<Formula>, Key)>();
         let done = std::thread::spawn(move || {
             let mut memo = Memo::default();
             for (f, d) in rx {
                 let r = Recording { native: Native { threads }, seen: Mutex::default() };
-                if f.eval(&r).is_ok_and(|out| out == d) {
+                let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
+                drop(f);
+                if good {
                     memo.0.extend(r.seen.into_inner().unwrap());
                 }
             }
@@ -100,10 +129,10 @@ impl Prevalidator {
 
     /// Has formula `f` of data `d` evaluated: where it gives `d`, its applications' outputs go
     /// to the memo.
-    pub fn submit(&self, f: &Formula, d: &[u8]) {
+    pub fn submit(&self, f: Arc<Formula>, d: &[u8]) {
         if !f.applies().is_empty() {
             // the thread is gone only if it panicked, which `finish` reports
-            let _ = self.jobs.send((f.clone(), d.to_vec()));
+            let _ = self.jobs.send((f, hash(d)));
         }
     }
 

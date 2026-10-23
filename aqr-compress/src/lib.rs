@@ -65,6 +65,7 @@ mod zip;
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 
 pub use aqr_formula::{Formula, Module, Node};
 pub use detect::{Format, detect};
@@ -237,7 +238,7 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: 
 fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
-    let mut f = catch_unwind(AssertUnwindSafe(|| match format {
+    let f = catch_unwind(AssertUnwindSafe(|| match format {
         Format::Pe => pe::pe(d),
         Format::Gzip => flate::gzip(d, opt, cx),
         Format::Zlib => flate::zlib(d, opt, cx),
@@ -254,10 +255,16 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -
     }))
     .ok()
     .flatten()?;
+    // evaluated beforehand while its contents are recompressed, which reads it only
+    let shared = Arc::new(f);
     if let Some(pre) = &cx.pre {
-        pre.submit(&f, d);
+        pre.submit(shared.clone(), d);
     }
-    nest(&mut f, opt, depth, cx);
+    let children = nested(&shared, opt, depth, cx);
+    let mut f = verify::reclaim(shared);
+    if let Some(children) = children {
+        place_all(&mut f, children, opt);
+    }
     smaller(&f, d, opt, cx).then_some(f)
 }
 
@@ -357,13 +364,12 @@ fn fit(base: usize, parts: &[(usize, usize)], limit: usize) -> Vec<bool> {
     keep
 }
 
-/// Recompresses the contents of the applications in `f` ([`Options::contents`]), a formula of
-/// data `depth` formats deep, putting their formulas in place of the slices where they have
-/// any application (as many as fit in [`Options::description`]); the bytes left without a
-/// slice are dropped.
-fn nest(f: &mut Formula, opt: &Options, depth: u32, cx: &Cx) {
+/// The formulas of the contents of the applications in `f` ([`Options::contents`]), a formula
+/// of data `depth` formats deep, to put in place of their slices ([`place_all`]) where they have
+/// any application (as many as fit in [`Options::description`]); `None` where none has.
+fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<Option<Formula>>> {
     if depth + 1 >= opt.depth {
-        return;
+        return None;
     }
     let mut children = Vec::new();
     contents(&f.root, f, opt, depth, cx, &mut children);
@@ -376,11 +382,15 @@ fn nest(f: &mut Formula, opt: &Options, depth: u32, cx: &Cx) {
         .collect();
     let keep = fit(description_bound(&f.root), &sizes, opt.description);
     if !children.iter().zip(&keep).any(|((_, child), &keep)| keep && child.is_some()) {
-        return;
+        return None;
     }
-    let mut children = children.into_iter().zip(keep).map(|((_, child), keep)| child.filter(|_| keep));
+    Some(children.into_iter().zip(keep).map(|((_, child), keep)| child.filter(|_| keep)).collect())
+}
+
+/// Puts the formulas of [`nested`] in place in `f`; the bytes left without a slice are dropped.
+fn place_all(f: &mut Formula, children: Vec<Option<Formula>>, opt: &Options) {
     let mut root = std::mem::replace(&mut f.root, Node::Concat(Vec::new()));
-    place(&mut root, f, opt, &mut children);
+    place(&mut root, f, opt, &mut children.into_iter());
     f.root = root;
     f.compact();
 }
