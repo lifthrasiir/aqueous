@@ -1,11 +1,17 @@
 # aqr-exe
 
-x86 and x86-64 code recompression: a disfilter splits each executable section of a PE image,
-or of an x86 Mach-O image (thin or in a universal file), into 46 streams by instruction field,
-with relative targets made absolute, and the section is rebuilt bit for bit from them.
+Machine code recompression, of the executable sections of PE images and Mach-O images (thin or
+in a universal file), each rebuilt bit for bit:
+
+- x86 and x86-64: a disfilter splits the code into 46 streams by instruction field, with
+  relative targets made absolute.
+- ARM64: the instructions stay in one stream of big-endian words, with the targets of `BL`
+  and `ADRP` made absolute, and the offsets of local branches taken out of them to streams
+  of their own.
 
 ```sh
 cargo run --release -p aqr-exe --example bench -- [-l LEVEL] [--no-zstd] [NAME|PATH ...]  # filter round trip, speed, zstd before and after
+cargo run --release -p aqr-exe --example bench-arm64 -- [-l LEVEL] MACHO...              # the same for ARM64 Mach-O images, against xz's BCJ
 build-wasm.bat                                                                       # the decoder as a Wasm module
 ```
 
@@ -16,13 +22,20 @@ let code = locate_code(&mut file)?;                  // the executable sections,
 let st = x86::encode(section, va, code.is64).unwrap();
 let back = x86::decode(&(&st).into(), code.is64);    // Some(section)
 
+use aqr_exe::arch::arm64;
 use aqr_exe::format::macho;
 for image in macho::images(&file).unwrap_or_default() {  // each architecture of a universal file
-    if image.is_x86() { /* image.sections: (address, file offset, size) */ }
+    for &(va, off, size) in &image.sections {         // the sections with instructions
+        if image.cputype == macho::CPU_TYPE_ARM64 {
+            let st = arm64::encode(&file[off..off + size], va);
+            let back = arm64::decode(std::array::from_fn(|i| &st.streams()[i][..]), va, size);
+        }
+    }
 }
 ```
 
-`FORMAT.md` specifies the module `exe-recons/x86`, with the opcode tables in full.
+`FORMAT.md` specifies the modules `exe-recons/x86`, with the opcode tables in full, and
+`exe-recons/arm64`.
 
 ## Results
 
@@ -62,12 +75,29 @@ The filter alone (`examples/bench.rs` on the large set, sections only, zstd -9 b
 So the rest of compression (archive coding at `mid` and the check), not the filter, sets its
 speed.
 
+### ARM64
+
+Measured on 2026-10-23 on an Apple M4 with `bench-arm64` (zstd -9, each stream on its own;
+filter speeds on one thread): the code sections of the ARM64 images of 12 Mach-O files,
+298.4 MB (VS Code's Electron Framework, `code-tunnel` and `rg` in Rust, `vsce-sign` in Go,
+ANGLE, SwiftShader, FFmpeg, SQLite, MSAL; Homebrew's libLLVM and libclang-cpp).
+
+| | MB | |
+|---|---|---|
+| zstd -9 | 114.6 | |
+| xz's ARM64 BCJ (`BL`, `ADRP`), then zstd -9 | 100.7 | −12.1% |
+| this filter, then zstd -9 | 94.5 | **−17.6%** (−7.4% for FFmpeg to −32.8% for MSAL) |
+| filter, unfilter | | 1604 and 1289 MB/s |
+
+Through `aqr-show` (level `mid`, 10 threads), VS Code's 34 universal binaries (493 MB) come
+to 163.2 MB, against 196.0 MB as they are (−16.7%) and 179.1 MB with their x86-64 halves
+alone filtered; VS Code's ZIP (267 MB) to 222.2 MB.
+
 ## Limitations
 
 - PE and Mach-O only: no ELF.
-- x86 and x86-64 only: no ARM64 (or ARM) code. Mach-O images of other architectures are kept
-  as they are; a PE image's machine type is not checked, so ARM images are filtered as x86
-  code, for nothing.
+- x86, x86-64 and ARM64 only: images of other machines (32-bit ARM, PowerPC) are kept as
+  they are. ARM64 data in code sections (literal pools) is taken as instructions.
 - Mach-O code signatures are kept as they are, though their page hashes follow from the
   image.
 - .NET IL is not modelled.

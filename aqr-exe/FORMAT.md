@@ -1,7 +1,8 @@
 # The `exe-recons/x86` module
 
-This document specifies the module `exe-recons/x86` of aqr-formula entry formulas. The module
-rebuilds a section of x86 or x86-64 machine code from streams that a disfilter split it into:
+This document specifies the module `exe-recons/x86` of aqr-formula entry formulas, and
+[`exe-recons/arm64`](#the-exe-reconsarm64-module) after it. The x86 module rebuilds a section
+of x86 or x86-64 machine code from streams that a disfilter split it into:
 instructions are parsed, and their fields (opcodes, ModR/M and SIB bytes, prefixes,
 displacements, immediates, jump and call targets, addresses) go to streams of their own, which
 compress better apart than interleaved. Relative targets become absolute, so that repeated
@@ -365,3 +366,87 @@ The module fails if:
 - an opcode is of class `XX`, a map is above 3 without a VEX or EVEX prefix, a REX or REX2
   marker appears in x86-32, or the bits of a prefix fail the checks of §5.3;
 - `out` is shorter than `sentinel` at the end, or the output is not `len` bytes long.
+
+# The `exe-recons/arm64` module
+
+This part specifies the module `exe-recons/arm64`, which rebuilds a section of ARM64 (A64)
+machine code. The instructions stay in one stream, as big-endian words, so that their opcode
+bits come first and repeated instructions match as a whole; the targets of `BL` and `ADRP`
+are made absolute, so that calls to one function and references to one page look alike; and
+the offsets of local branches are taken out of their words, which then repeat, to streams of
+their own, zigzag coded, a byte of each in each. Any byte sequence can be encoded. The
+conventions of §1 hold.
+
+## A1. The module
+
+- **Module**: name `exe-recons/arm64`, version 1.
+- **Params**: exactly 8 bytes, `le64 origin`, the virtual address of the section's first byte.
+- **Resources**: none.
+- **Inputs**: exactly 11, the streams of §A2 in order, each of class `arm64/NAME`.
+- **Output**: the section of §A3, `len` bytes long (the `len` the application declares).
+
+## A2. Streams
+
+| # | name | contents |
+|---|---|---|
+| 0 | `CODE` | one `be32` word per instruction, transformed (§A3) |
+| 1–4 | `B3` … `B0` | offsets of `B`: bytes 3 (most significant) to 0 of their zigzag values |
+| 5–7 | `BCOND2` … `BCOND0` | offsets of `B.cond`, `BC.cond`, `CBZ` and `CBNZ`: bytes 2 to 0 |
+| 8–9 | `TBZ1`, `TBZ0` | offsets of `TBZ` and `TBNZ`: bytes 1 and 0 |
+| 10 | `TAIL` | the last `len mod 4` bytes of the section, as they are |
+
+## A3. Decoding
+
+For `k` from 0 to `floor(len / 4) − 1`, with `pc = origin + 4k`: read `w` as a `be32` from
+`CODE`, rebuild it by the first row of the table that its bits match, and append it to `out`
+as a `le32`. `x[h:l]` are bits `h` down to `l` of `x`; `m(n) = 2^n − 1`.
+
+| instruction | match | rebuilt |
+|---|---|---|
+| `BL` | `w & FC000000 = 94000000` | `w[25:0] ← (w[25:0] − (pc >> 2)) & m(26)` |
+| `ADRP` | `w & 9F000000 = 90000000` | with `a = w[23:5] · 4 + w[30:29]`, `r = (a − (pc >> 12)) & m(21)`: `w[30:29] ← r & 3`, `w[23:5] ← r >> 2` |
+| `B` | `w & FC000000 = 14000000` | local branch: field `w[25:0]` (26 bits), streams `B3`… |
+| `B.cond`, `BC.cond` | `w & FF000000 = 54000000` | local branch: field `w[23:5]` (19 bits), streams `BCOND2`… |
+| `CBZ`, `CBNZ` | `w & 7E000000 = 34000000` | as `B.cond` |
+| `TBZ`, `TBNZ` | `w & 7E000000 = 36000000` | local branch: field `w[18:5]` (14 bits), streams `TBZ1`… |
+| anything else | | `w` as it is |
+
+A **local branch** of a field of `n` bits: the field of `w` must be 0. Read one byte from each
+of its `ceil(n / 8)` streams, most significant first, into `z`, which must be below `2^n`.
+The offset is `v = (z >> 1) XOR −(z & 1)` (unsigned wrapping), and the field becomes
+`v & m(n)`.
+
+Then copy `len mod 4` bytes from `TAIL`. The matches only look at bits outside the fields
+that are transformed, so a word is rebuilt by the same row it was encoded by.
+
+## A4. Encoding *(encoder)*
+
+`aqr_exe::arch::arm64::encode` takes the code and its origin, and never fails. Each whole
+word, read as a `le32`, is matched against the table of §A3 in order and transformed the
+other way: for `BL` and `ADRP` the target is added to `pc >> 2` or `pc >> 12` instead of
+subtracted; for a local branch, the field is cleared and its value `v`, sign-extended from
+its `n` bits to `s`, is written as `z = (s << 1) XOR (s >> 31)` (arithmetic shift), a byte to
+each stream. The word goes to `CODE` big-endian, and the bytes after the last whole word to
+`TAIL`.
+
+aqr-compress filters the sections with instructions of Mach-O images of `CPU_TYPE_ARM64`
+(`S_ATTR_PURE_INSTRUCTIONS` or `S_ATTR_SOME_INSTRUCTIONS`, not zero-filled) and the
+executable sections of PE images whose machine is `AA64`.
+
+Why this layout (measured on 298 MB of code from Mach-O files: Rust, Go, C and C++, LLVM;
+zstd -9, each stream on its own): the code alone, 114.6 MB; with xz's ARM64 BCJ filter (`BL`
+and `ADRP` absolute), 100.7 MB (−12.1%); with this filter, 94.5 MB (−17.6%). Splitting every
+instruction into its fields by encoding class (registers by role, immediates by kind) archived
+larger than the code alone: words repeat as a whole and lose their matches once apart. Taking
+`BL` or `ADRP` targets or immediates out of the words, or making local branches absolute, is
+larger too; zigzag coding and byte planes together take 2.6 points off the offsets' bytes
+as they are.
+
+## A5. Validation
+
+The module fails if:
+
+- the params are not 8 bytes long, or there are resources, or not exactly 11 inputs;
+- a stream runs out where a byte is to be read;
+- a local branch's field in `CODE` is not 0, or its zigzag value is not below `2^n`;
+- any stream has bytes left once the output is `len` bytes long.

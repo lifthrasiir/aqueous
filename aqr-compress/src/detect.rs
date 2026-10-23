@@ -5,9 +5,10 @@ use std::fmt;
 /// What [`detect`] recognises, by the recompressor that takes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Format {
-    /// PE image (aqr-exe on its executable sections).
+    /// PE image of x86, x86-64 or ARM64 (aqr-exe on its executable sections).
     Pe,
-    /// Mach-O file, thin or universal (aqr-exe on the executable sections of its x86 images).
+    /// Mach-O file, thin or universal (aqr-exe on the executable sections of its x86, x86-64
+    /// and ARM64 images).
     MachO,
     /// gzip member (aqr-flate on its DEFLATE stream).
     Gzip,

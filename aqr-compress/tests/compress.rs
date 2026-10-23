@@ -2,7 +2,7 @@ use std::io::Write;
 
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
-use aqr_decompress::{FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, SNAPPY, SQLITE, X86, ZIP, decompress};
+use aqr_decompress::{ARM64, FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, SNAPPY, SQLITE, X86, ZIP, decompress};
 use aqr_formula::aqr;
 
 fn fixture(path: &str) -> Vec<u8> {
@@ -215,14 +215,36 @@ fn x86_64_code() -> Vec<u8> {
     code
 }
 
+/// ARM64 code: calls to a few functions, page references, loads and local branches.
+fn arm64_code() -> Vec<u8> {
+    let mut words = Vec::new();
+    for i in 0..2000u32 {
+        let at = words.len() as u32;
+        words.extend_from_slice(&[
+            0xa9bf7bfd,                                               // stp x29, x30, [sp, #-16]!
+            0x9400_0000 | ((i % 5) * 0x10).wrapping_sub(at + 1) & 0x3ff_ffff, // bl f(i % 5)
+            0x9000_0008 | ((0x100u32.wrapping_sub(at >> 10) & 3) << 29), // adrp x8, page
+            0xf9400108,                                               // ldr x8, [x8]
+            0xb4000048,                                               // cbz x8, +8
+            0xa8c17bfd,                                               // ldp x29, x30, [sp], #16
+            0xd65f03c0,                                               // ret
+        ]);
+    }
+    words.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
 /// A PE32+ image with one executable section of x86-64 code, followed by other data.
 fn pe() -> (Vec<u8>, std::ops::Range<usize>) {
-    let code = x86_64_code();
+    pe_of(0x8664, &x86_64_code())
+}
+
+/// [`pe`] for `machine`, with `code`.
+fn pe_of(machine: u16, code: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
     let mut d = vec![0u8; 0x200];
     d[..2].copy_from_slice(b"MZ");
     d[0x3c] = 0x40;
     d[0x40..0x44].copy_from_slice(b"PE\0\0");
-    d[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
+    d[0x44..0x46].copy_from_slice(&machine.to_le_bytes());
     d[0x46] = 1; // sections
     d[0x54] = 0x70; // optional header size
     let opt = 0x58;
@@ -235,7 +257,7 @@ fn pe() -> (Vec<u8>, std::ops::Range<usize>) {
     d[sec + 20..sec + 24].copy_from_slice(&0x200u32.to_le_bytes());
     d[sec + 36..sec + 40].copy_from_slice(&0x6000_0020u32.to_le_bytes());
     let range = d.len()..d.len() + code.len();
-    d.extend_from_slice(&code);
+    d.extend_from_slice(code);
     d.extend_from_slice(&text(1000));
     (d, range)
 }
@@ -304,12 +326,12 @@ fn macho_sections() {
     assert_eq!(f.streams[0].class, "macho");
 }
 
-/// In a universal file, the x86-64 image's code is filtered, the ARM64 image kept with the
-/// rest; found in other data too.
+/// In a universal file, the code of each image is filtered by its architecture, that of
+/// others (PowerPC) kept with the rest; found in other data too.
 #[test]
 fn macho_universal() {
     let (x86, code) = macho(CPU_TYPE_X86_64, &x86_64_code());
-    let (arm, _) = macho(CPU_TYPE_ARM64, &[0x1f, 0x20, 0x03, 0xd5].repeat(5000));
+    let (arm, _) = macho(CPU_TYPE_ARM64, &arm64_code());
     let mut d = Vec::new();
     d.extend_from_slice(&0xcafe_babeu32.to_be_bytes());
     d.extend_from_slice(&2u32.to_be_bytes());
@@ -324,13 +346,30 @@ fn macho_universal() {
     d.resize(at[1], 0);
     d.extend_from_slice(&arm);
     let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
-    assert_eq!(modules(&f), [X86.name]);
+    assert_eq!(modules(&f), [X86.name, ARM64.name]);
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts[0], Node::slice(0, 0, (at[0] + code.start) as u64));
     let mut wrapped = text(3000);
     wrapped.extend_from_slice(&d);
     wrapped.extend_from_slice(&text(3000));
-    assert_eq!(modules(&roundtrip(&wrapped, &Options::default())), [X86.name]);
+    assert_eq!(modules(&roundtrip(&wrapped, &Options::default())), [X86.name, ARM64.name]);
+    // a PowerPC image in place of the ARM64 one
+    let mut ppc = d.clone();
+    ppc[8 + 20..8 + 24].copy_from_slice(&18u32.to_be_bytes());
+    ppc[at[1]..at[1] + 4].copy_from_slice(&[0xfe, 0xed, 0xfa, 0xcf]);
+    assert_eq!(modules(&roundtrip(&ppc, &Options { file: Nest::Exact, ..Options::default() })), [X86.name]);
+}
+
+/// An ARM64 image is filtered as ARM64 code, and one of another machine (ARM) not at all.
+#[test]
+fn pe_machines() {
+    let (d, code) = pe_of(0xaa64, &arm64_code());
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    assert_eq!(modules(&f), [ARM64.name]);
+    let Node::Concat(parts) = &f.root else { panic!("{f}") };
+    assert_eq!(parts[1].len(), code.len() as u64);
+    let (d, _) = pe_of(0x1c4, &arm64_code());
+    assert!(modules(&roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() })).is_empty());
 }
 
 /// A PDF of streams, by their dictionary entries and data.

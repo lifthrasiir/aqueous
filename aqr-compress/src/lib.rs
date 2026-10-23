@@ -2,8 +2,8 @@
 //! the recompressor by the magic bytes of a file, and [`recompress`] runs it on each file found,
 //! giving a [`Formula`] rather than bytes.
 //!
-//! - PE images, and Mach-O images of x86 or x86-64 (thin or universal): aqr-exe's x86
-//!   disfilter applied to each executable section, over its streams; the rest of the file is
+//! - PE images, and Mach-O images (thin or universal): aqr-exe's x86 disfilter or ARM64
+//!   filter applied to each executable section, over its streams; the rest of the file is
 //!   sliced in between.
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
 //!   record).

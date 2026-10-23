@@ -5,6 +5,8 @@ use crate::util::{to_u16, to_u32, to_u64};
 /// Executable sections of a PE image, as located by [`locate_code`].
 #[derive(Debug, Clone)]
 pub struct Code {
+    /// `IMAGE_FILE_MACHINE_*` of the COFF header (0x14c x86, 0x8664 x86-64, 0xaa64 ARM64).
+    pub machine: u16,
     /// True for PE32+ (64-bit) images.
     pub is64: bool,
     /// `(virtual address, file offset, stored size)` of each executable section.
@@ -41,6 +43,7 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
     if sig != 0x4550 {
         return Err(io::Error::other(format!("bad PE signature {sig:#x}")));
     }
+    let machine = to_u16(&buf[4..6]);
     let num_sections = to_u16(&buf[6..8]);
     let opt_header_size = to_u16(&buf[0x14..0x16]) as usize;
 
@@ -103,5 +106,5 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
         }
     }
 
-    Ok(Code { is64, sections })
+    Ok(Code { machine, is64, sections })
 }

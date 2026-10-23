@@ -5,7 +5,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use aqr_exe::arch::x86;
+use aqr_exe::arch::{arm64, x86};
 use aqr_formula::aqr::{self, Failure, NativeModule};
 use aqr_formula::{Apply, Error, Module, Modules, Result};
 
@@ -13,6 +13,10 @@ use aqr_formula::{Apply, Error, Module, Modules, Result};
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; inputs: the streams of
 /// [`x86::STREAM_NAMES`].
 pub const X86: Module = Module { name: "exe-recons/x86", version: 1 };
+
+/// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
+/// inputs: the streams of [`arm64::STREAM_NAMES`].
+pub const ARM64: Module = Module { name: "exe-recons/arm64", version: 1 };
 
 /// aqr-flate reconstruction of a raw DEFLATE stream. Resources: the model data of the record's
 /// profile; inputs: the data and the record.
@@ -44,7 +48,7 @@ pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 12] = [X86, FLATE, LZ4, SNAPPY, ZIP, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE];
+pub const MODULES: [Module; 13] = [X86, ARM64, FLATE, LZ4, SNAPPY, ZIP, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE];
 
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
@@ -116,6 +120,14 @@ impl Native {
             };
             let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
             x86::decode(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0).ok_or_else(|| "corrupt".into())
+        } else if m == ARM64 {
+            none(resources)?;
+            let (Some(p), Ok(streams), Ok(len)) =
+                (params.first_chunk::<8>(), <[&[u8]; arm64::NUM_STREAMS]>::try_from(inputs), usize::try_from(len))
+            else {
+                return Err("bad parameters or inputs".into());
+            };
+            arm64::decode(streams, u64::from_le_bytes(*p), len).ok_or_else(|| "corrupt".into())
         } else if m == FLATE {
             aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)
         } else if m == LZ4 {
