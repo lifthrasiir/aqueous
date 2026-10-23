@@ -268,6 +268,18 @@ fn enc_sym<const BITS: u32>(start: u32, freq: u32) -> u64 {
     rcp as u64 | (bias as u64) << 32 | (freq as u64) << 45 | (shift as u64) << 58
 }
 
+/// Makes room in front of `out[pos..]` (written from the end) for `left` more symbols:
+/// about twice what there is, at most a word per symbol, and the final states.
+#[cold]
+#[inline(never)]
+fn grow_front(out: &mut Vec<u8>, pos: &mut usize, left: usize) {
+    let used = out.len() - *pos;
+    let room = (2 * out.len()).min(2 * left + 64).max(64);
+    let mut v = vec![0u8; room + used];
+    v[room..].copy_from_slice(&out[*pos..]);
+    (*out, *pos) = (v, room);
+}
+
 /// Encodes one symbol into state `x`, writing a renormalisation word below `pos` in `out`
 /// (branch-free: the word is stored either way).
 #[inline(always)]
@@ -285,9 +297,28 @@ fn put<const BITS: u32>(x: &mut u32, e: u64, out: &mut [u8], pos: &mut usize) {
     *x = y.wrapping_add(bias).wrapping_add(q.wrapping_mul((1 << BITS) - freq));
 }
 
+/// A symbol to encode: (table index, symbol), in as few bytes as the coder's tables allow.
+pub trait Entry: Copy {
+    fn get(self) -> (usize, usize);
+}
+
+impl Entry for (u16, u16) {
+    #[inline(always)]
+    fn get(self) -> (usize, usize) {
+        (self.0 as usize, self.1 as usize)
+    }
+}
+
+impl Entry for (u8, u8) {
+    #[inline(always)]
+    fn get(self) -> (usize, usize) {
+        (self.0 as usize, self.1 as usize)
+    }
+}
+
 /// Encodes `syms` (table index, symbol), in order, with interleaved states; returns the
 /// byte stream the decoder reads forward. `freqs` are the tables' frequencies.
-pub fn encode<const BITS: u32>(syms: &[(u16, u16)], freqs: &[Vec<u32>]) -> Vec<u8> {
+pub fn encode<const BITS: u32>(syms: &[impl Entry], freqs: &[Vec<u32>]) -> Vec<u8> {
     const { check_bits(BITS) };
     let shift = stride_log(freqs);
     let mut enc = vec![0u64; freqs.len() << shift];
@@ -300,24 +331,29 @@ pub fn encode<const BITS: u32>(syms: &[(u16, u16)], freqs: &[Vec<u32>]) -> Vec<u
             acc += fs;
         }
     }
-    // Written backwards from the end: at most one word per symbol, the final states, and
-    // the slack of the branch-free store.
-    let mut out = vec![0u8; 2 * syms.len() + 32];
+    // Written backwards from the end, into room for about 4 bits per symbol to start with
+    // (grown as needed: at most one word per symbol), the final states, and the slack of
+    // the branch-free store.
+    let mut out = vec![0u8; syms.len() / 2 + 64];
     let mut pos = out.len();
     let mut x = [RANS_L; 4];
-    let e = |(t, s): (u16, u16)| enc[((t as usize) << shift) + s as usize];
+    let e = |(t, s): (usize, usize)| enc[(t << shift) + s];
     let mut i = syms.len();
     while !i.is_multiple_of(4) {
         i -= 1;
-        put::<BITS>(&mut x[i & 3], e(syms[i]), &mut out, &mut pos);
+        put::<BITS>(&mut x[i & 3], e(syms[i].get()), &mut out, &mut pos);
     }
     let [mut x0, mut x1, mut x2, mut x3] = x;
     while i > 0 {
+        // Four words and the slack.
+        if pos < 32 {
+            grow_front(&mut out, &mut pos, i);
+        }
         i -= 4;
-        put::<BITS>(&mut x3, e(syms[i + 3]), &mut out, &mut pos);
-        put::<BITS>(&mut x2, e(syms[i + 2]), &mut out, &mut pos);
-        put::<BITS>(&mut x1, e(syms[i + 1]), &mut out, &mut pos);
-        put::<BITS>(&mut x0, e(syms[i]), &mut out, &mut pos);
+        put::<BITS>(&mut x3, e(syms[i + 3].get()), &mut out, &mut pos);
+        put::<BITS>(&mut x2, e(syms[i + 2].get()), &mut out, &mut pos);
+        put::<BITS>(&mut x1, e(syms[i + 1].get()), &mut out, &mut pos);
+        put::<BITS>(&mut x0, e(syms[i].get()), &mut out, &mut pos);
     }
     // The decoder reads the states first, high half first.
     for x in [x3, x2, x1, x0] {

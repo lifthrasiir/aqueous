@@ -2,6 +2,8 @@
 
 #![allow(dead_code)]
 
+// Not every test crate takes all of them.
+#[allow(unused_imports)]
 pub use flate_zoo::{Encoder, Sweep, backend, backends, presets_of};
 
 /// The modules a formula of aqr-png applies: itself, on `threads` threads.

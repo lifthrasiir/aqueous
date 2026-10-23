@@ -27,6 +27,6 @@ pub fn read_table(r: &mut BitR, n: usize) -> Result<Vec<u32>> {
 
 /// Encodes `syms` (table index, symbol), in order; returns the byte stream the decoder
 /// reads forward. `freqs` are the tables' frequencies.
-pub fn encode(syms: &[(u16, u16)], freqs: &[Vec<u32>]) -> Vec<u8> {
+pub fn encode(syms: &[(u8, u8)], freqs: &[Vec<u32>]) -> Vec<u8> {
     rans32::encode::<PROB_BITS>(syms, freqs)
 }

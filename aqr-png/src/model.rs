@@ -111,6 +111,8 @@ const T_ESC: usize = T_FILTER + 1;
 const T_LEN: usize = T_ESC + 1;
 const T_DIST: usize = T_LEN + ACT + 1;
 pub const TABLES: usize = T_DIST + 6;
+// Symbols are kept as (table, value) bytes.
+const _: () = assert!(TABLES <= 256);
 const ESC: u32 = 255;
 
 fn alphabet(t: usize) -> usize {
@@ -139,7 +141,7 @@ pub trait Io {
 const PAR_HIST_MIN: usize = 1 << 20;
 
 pub struct Recorder {
-    pub syms: Vec<(u16, u16)>,
+    pub syms: Vec<(u8, u8)>,
 
     pub raw: BitW,
 }
@@ -160,7 +162,7 @@ impl Recorder {
         let mut w = BitW::default();
         // A bitmap of the tables in use, then their levels.
         let mut h = vec![0u32; TABLES * 256];
-        let count = |syms: &[(u16, u16)], h: &mut [u32]| {
+        let count = |syms: &[(u8, u8)], h: &mut [u32]| {
             for &(t, v) in syms {
                 h[t as usize * 256 + v as usize] += 1;
             }
@@ -200,8 +202,12 @@ impl Recorder {
             .map(|t| if used[t] { rans::write_table(&mut w, counts[t]) } else { vec![rans::PROB_SCALE] })
             .collect();
         let tb = w.finish();
-        let st = rans::encode(&self.syms, &freqs);
-        let raw = self.raw.finish();
+        let Recorder { syms, raw } = self;
+        let st = rans::encode(&syms, &freqs);
+        // The symbols are the largest part by far: gone before the record is copied.
+        drop(syms);
+        let raw = raw.finish();
+        out.reserve(tb.len() + st.len() + raw.len() + 30);
         for part in [&tb, &st, &raw] {
             aqr_common::varint::put(out, part.len() as u64);
         }
@@ -214,7 +220,7 @@ impl Recorder {
 impl Io for Recorder {
     #[inline(always)]
     fn sym(&mut self, t: usize, v: u32) -> u32 {
-        self.syms.push((t as u16, v as u16));
+        self.syms.push((t as u8, v as u8));
         v
     }
     #[inline(always)]
@@ -307,11 +313,13 @@ struct Cursor {
     /// Raw offset of the row's first pixel byte, and the raw row size.
     q0: usize,
     rs2: usize,
+    /// The raw offset the raw buffer starts at (see [`St::slide`]).
+    rbase: usize,
 }
 
 impl Cursor {
     fn new(g: &Geometry) -> Cursor {
-        let mut c = Cursor { pass: usize::MAX, pend: 0, rstart: 0, rend: 0, rs: 0, q0: 0, rs2: 0 };
+        let mut c = Cursor { pass: usize::MAX, pend: 0, rstart: 0, rend: 0, rs: 0, q0: 0, rs2: 0, rbase: 0 };
         c.enter(g, 0);
         c
     }
@@ -325,7 +333,7 @@ impl Cursor {
                 self.pend = ps.start + ps.rows * ps.rs;
                 self.rs = ps.rs;
                 self.rs2 = ps.rs2;
-                self.q0 = ps.base2 + ps.rs2 + g.bpp;
+                self.q0 = ps.base2 + ps.rs2 + g.bpp - self.rbase;
                 self.rend = self.rstart + ps.rs;
             }
             None => {
@@ -474,9 +482,19 @@ fn unfilter_bytes(ft: u8, d: &[u8], raw: &mut [u8], q: usize, rs2: usize, x0: us
     }
 }
 
-/// Unfilters the `len` bytes at `p`, where the cursor is.
+/// Unfilters the `len` bytes at `p`, where the cursor is (position `i` of the data at
+/// `off + i` in `buf`).
 #[inline(always)]
-fn unfilter_span<const BPP: usize>(g: &Geometry, cur: &Cursor, buf: &[u8], raw: &mut [u8], p: usize, len: usize) {
+#[allow(clippy::too_many_arguments)]
+fn unfilter_span<const BPP: usize>(
+    g: &Geometry,
+    cur: &Cursor,
+    buf: &[u8],
+    off: usize,
+    raw: &mut [u8],
+    p: usize,
+    len: usize,
+) {
     // Past the image there is nothing to unfilter; the data may end before the image.
     let end = (p + len).min(g.len);
     if p >= end {
@@ -485,8 +503,9 @@ fn unfilter_span<const BPP: usize>(g: &Geometry, cur: &Cursor, buf: &[u8], raw: 
     let x = p - cur.rstart;
     if x > 0 && end <= cur.rend {
         // Within the row (the usual case).
-        let d = &buf[g.pad + cur.rstart + 1..g.pad + end];
-        unfilter_part::<BPP>(buf[g.pad + cur.rstart], d, raw, cur.q0, cur.rs2, x - 1, end - cur.rstart - 1, g.bpp);
+        let at = off.wrapping_add(cur.rstart);
+        let d = &buf[at + 1..at + end - cur.rstart];
+        unfilter_part::<BPP>(buf[at], d, raw, cur.q0, cur.rs2, x - 1, end - cur.rstart - 1, g.bpp);
     } else {
         let mut c = cur.clone();
         let mut i = p;
@@ -497,8 +516,9 @@ fn unfilter_span<const BPP: usize>(g: &Geometry, cur: &Cursor, buf: &[u8], raw: 
                 continue;
             }
             let x1 = end.min(c.rend) - c.rstart - 1;
-            let d = &buf[g.pad + c.rstart + 1..g.pad + c.rstart + 1 + x1];
-            unfilter_part::<BPP>(buf[g.pad + c.rstart], d, raw, c.q0, c.rs2, i - c.rstart - 1, x1, g.bpp);
+            let at = off.wrapping_add(c.rstart);
+            let d = &buf[at + 1..at + 1 + x1];
+            unfilter_part::<BPP>(buf[at], d, raw, c.q0, c.rs2, i - c.rstart - 1, x1, g.bpp);
             i = c.rstart + 1 + x1;
         }
     }
@@ -519,18 +539,116 @@ struct St<'g> {
     after: usize,
     /// Tokens coded so far.
     tokens: usize,
+    /// Where position `i` of the data is in the buffer: at `off + i` (wrapping), from
+    /// position `base` on, after `Geometry::pad` bytes.
+    off: usize,
+    base: usize,
+    win: Win,
+}
+
+/// The buffers' sizes, and when they are moved on (see [`St::slide`]).
+#[derive(Clone, Copy)]
+struct Win {
+    /// Data bytes kept before the position: the farthest match and a row and a pixel.
+    keep: usize,
+    /// The data buffer's offset, and the raw buffer's, beyond which to move on: with room
+    /// for a stored block, a row or a match, and the raw rows of as many bytes.
+    blim: usize,
+    rlim: usize,
+    buf: usize,
+    raw: usize,
+}
+
+/// Data bytes per move of the windows.
+const WINDOW: usize = 1 << 20;
+
+impl Win {
+    /// The buffers of `g` for `n` bytes of data: whole, or windows of them for large data.
+    fn new(g: &Geometry, n: usize, image: bool) -> Win {
+        let raw_len = if image { g.raw_len } else { 0 };
+        // The data, and the overshoot of a match's copy.
+        let whole = Win { keep: 0, blim: usize::MAX, rlim: usize::MAX, buf: g.pad + n + 16, raw: raw_len };
+        let (min, step) = window_sizes();
+        if n <= min {
+            return whole;
+        }
+        let rs = g.passes.iter().map(|ps| ps.rs).max().unwrap_or(0);
+        let rs2 = g.passes.iter().map(|ps| ps.rs2).max().unwrap_or(0);
+        let keep = 32768 + rs + 16;
+        let room = rs.max(65536) + ROOM;
+        let buf = g.pad + keep + step + room;
+        // Raw offsets advance at most twice as fast as positions (`rs2 < 2 * rs`), and by a
+        // zero row (and a pixel) at each pass.
+        let rroom = 2 * room + 10 * (rs2 + 8) + 256;
+        let rkeep = 2 * rs2 + 16;
+        let raw = if image { rkeep + 2 * (keep + step) + rroom } else { 0 };
+        if buf >= whole.buf || (image && raw >= raw_len) {
+            return whole;
+        }
+        Win { keep, blim: buf - room, rlim: raw.saturating_sub(rroom), buf, raw }
+    }
+}
+
+/// Data sizes above which the buffers are windows, and the windows' steps: `WINDOW`, or
+/// as `PNGR_WINDOW` sets it (a step, for any size; for tests).
+fn window_sizes() -> (usize, usize) {
+    static SIZES: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    *SIZES.get_or_init(|| match std::env::var("PNGR_WINDOW").ok().and_then(|s| s.parse().ok()) {
+        Some(step) => (0, step),
+        None => (4 * WINDOW, WINDOW),
+    })
 }
 
 impl<'g> St<'g> {
-    fn new(g: &'g Geometry) -> St<'g> {
-        St { g, cur: Cursor::new(g), p: 0, after: 0, tokens: 0 }
+    fn new(g: &'g Geometry, win: Win) -> St<'g> {
+        St { g, cur: Cursor::new(g), p: 0, after: 0, tokens: 0, off: g.pad, base: 0, win }
+    }
+
+    /// Where position `p` is in the buffer.
+    #[inline(always)]
+    fn at(&self, p: usize) -> usize {
+        self.off.wrapping_add(p)
+    }
+
+    /// Moves the windows on if the next token (a stored block, a row's literals or a
+    /// match) might not fit; the cursor is at the position.
+    #[inline(always)]
+    fn room(&mut self, buf: &mut [u8], raw: &mut [u8]) {
+        if self.at(self.p) > self.win.blim || self.cur.q0 > self.win.rlim && self.cur.rs != usize::MAX {
+            self.slide(buf, raw);
+        }
+    }
+
+    /// Moves the data so that what the model may still read (the farthest match and the
+    /// row above) starts the buffer, after its padding; and the raw rows from the one above
+    /// the cursor's on, after a margin. The rest of the raw buffer is zeroed (the zero row
+    /// and left margins the rows to come assume).
+    #[cold]
+    #[inline(never)]
+    fn slide(&mut self, buf: &mut [u8], raw: &mut [u8]) {
+        let pad = self.g.pad;
+        let from = self.p.saturating_sub(self.win.keep).max(self.base);
+        let src = self.at(from) - pad;
+        buf.copy_within(src..self.at(self.p), 0);
+        self.base = from;
+        self.off = pad.wrapping_sub(from);
+        let c = &mut self.cur;
+        if c.rs != usize::MAX && !raw.is_empty() {
+            // The row above (and the byte before it), and the row so far.
+            let src = c.q0 - self.g.bpp - c.rs2 - 8;
+            let end = c.q0 + c.rs2;
+            raw.copy_within(src..end, 0);
+            raw[end - src..].fill(0);
+            c.q0 -= src;
+            c.rbase += src;
+        }
     }
 
     #[inline(always)]
     fn prep<const BPP: usize, const IMAGE: bool>(&mut self, raw: &[u8], buf: &[u8], token: bool) -> Lit {
         self.cur.seek(self.g, self.p);
         let bpp = if IMAGE { BPP } else { self.g.bpp };
-        let mut l = prepare::<BPP, IMAGE>(self.g, &self.cur, raw, buf, self.p, bpp);
+        let mut l = prepare::<BPP, IMAGE>(&self.cur, raw, buf, self.off, self.p, bpp);
         if token && l.t < T_FILTER {
             l.t += self.after;
         }
@@ -540,40 +658,18 @@ impl<'g> St<'g> {
     /// Copies a match in the data (and unfilters it).
     #[inline(always)]
     fn copy<const BPP: usize, const IMAGE: bool>(&mut self, raw: &mut [u8], buf: &mut [u8], len: usize, dist: usize) {
-        copy_match(buf, self.g.pad + self.p, dist, len);
+        let at = self.at(self.p);
+        debug_assert!(dist <= at && at + len + 16 <= buf.len());
+        // SAFETY: `1 <= dist <=` the position (checked by the callers), and at most 32768,
+        // which the buffer keeps before it; room for the match and the overshoot of its
+        // copy past it (`Win`: `room`, or 16 bytes past the data).
+        unsafe { inflate::copy_match(buf.as_mut_ptr(), at, dist, len) };
         if IMAGE {
-            unfilter_span::<BPP>(self.g, &self.cur, buf, raw, self.p, len);
+            unfilter_span::<BPP>(self.g, &self.cur, buf, self.off, raw, self.p, len);
         }
         self.p += len;
         self.after = 4 * ACT;
         self.tokens += 1;
-    }
-}
-
-/// Writes the `len` bytes `dist` back at `d` (an LZ77 copy, overlapping if `dist < len`).
-#[inline(always)]
-fn copy_match(buf: &mut [u8], d: usize, dist: usize, len: usize) {
-    let s = d - dist;
-    if len <= 16 {
-        // Short: byte by byte, forward (right for overlapping copies too).
-        for i in 0..len {
-            buf[d + i] = buf[s + i];
-        }
-    } else if dist >= len {
-        buf.copy_within(s..s + len, d);
-    } else if dist == 1 {
-        let b = buf[s];
-        buf[d..d + len].fill(b);
-    } else {
-        // A pattern of period `dist`: copy it, then double what is written (always a
-        // multiple of the period).
-        buf.copy_within(s..d, d);
-        let mut done = dist;
-        while done < len {
-            let k = done.min(len - done);
-            buf.copy_within(d..d + k, d + done);
-            done += k;
-        }
     }
 }
 
@@ -613,10 +709,12 @@ struct Enc<'g, const BPP: usize, const IMAGE: bool> {
 }
 
 impl<const BPP: usize, const IMAGE: bool> Enc<'_, BPP, IMAGE> {
-    /// Room for `k` bytes past the current position.
+    /// Room for `k` bytes past the current position (at most a stored block).
     #[inline(always)]
     fn room(&mut self, k: usize) {
-        let need = self.st.g.pad + self.st.p + k;
+        self.st.cur.seek(self.st.g, self.st.p);
+        self.st.room(&mut self.buf, &mut self.raw);
+        let need = self.st.at(self.st.p) + k;
         if self.buf.len() < need {
             self.grow(need);
         }
@@ -640,7 +738,8 @@ impl<const BPP: usize, const IMAGE: bool> Enc<'_, BPP, IMAGE> {
         if l.q != usize::MAX {
             self.raw[l.q] = v;
         }
-        self.buf[self.st.g.pad + self.st.p] = f;
+        let at = self.st.at(self.st.p);
+        self.buf[at] = f;
         self.st.p += 1;
         if token {
             self.st.after = 0;
@@ -652,8 +751,8 @@ impl<const BPP: usize, const IMAGE: bool> Enc<'_, BPP, IMAGE> {
 impl<const BPP: usize, const IMAGE: bool> Sink for Enc<'_, BPP, IMAGE> {
     #[inline(always)]
     fn reserve(&mut self) {
-        // Three literals or a match.
-        self.room(MAX_MATCH);
+        // Three literals or a match (and the overshoot of its copy).
+        self.room(ROOM);
     }
 
     #[inline(always)]
@@ -754,246 +853,531 @@ pub fn encode_threads(kind: Kind, g: &Geometry, payload: &[u8], threads: usize) 
 const ROWS_MAX_EXPANSION: usize = 4;
 
 /// The compressor's side for images: every literal's context depends on the data only,
-/// which the compressor has in full. So the stream is parsed, the image unfiltered, the
-/// symbols of all pixel bytes computed row by row (no dependency between them), and then
-/// the tokens walked.
+/// which the compressor has before it codes the tokens. So as the stream is parsed, its
+/// rows are unfiltered and the symbols of their pixel bytes computed a window of rows at a
+/// time (once the rows are complete; no dependency between them), and the tokens in the
+/// window walked.
 fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8], threads: usize) -> crate::Result<Encoded> {
-    // The streams, then their data and tokens as one.
-    let mut flats = vec![];
+    let est = g.len.min(MAX_EXPANSION * payload.len());
+    let threads = if est >= PAR_ROWS_MIN { threads.max(1) } else { 1 };
+    let mut sink = Rows::<BPP>::new(g, est, threads);
+    let mut streams = vec![];
     let mut o = 0;
     loop {
-        let f = inflate::parse(&payload[o + 2..])?;
-        let end = payload.len() - f.stream.trailing.len();
-        flats.push((o, f));
-        match next_stream(payload, end) {
-            Some(next) if inflate::parse(&payload[next + 2..]).is_ok() => {
-                flats.last_mut().unwrap().1.stream.trailing.truncate(4);
-                o = next;
-            }
-            _ => break,
-        }
-    }
-    let n: usize = flats.iter().map(|f| f.1.data.len()).sum();
-    let mut buf = vec![0u8; g.pad + n];
-    let single = flats.len() == 1;
-    let mut tokens = if single { vec![] } else { Vec::with_capacity(flats.iter().map(|f| f.1.tokens.len()).sum()) };
-    let mut streams = vec![];
-    let mut stored = 0;
-    let mut at = g.pad;
-    for (o, mut f) in flats {
-        buf[at..at + f.data.len()].copy_from_slice(&f.data);
-        at += f.data.len();
-        let base = tokens.len();
-        if single {
-            tokens = std::mem::take(&mut f.tokens);
-        } else {
-            tokens.extend_from_slice(&f.tokens);
-        }
-        stored += f.skips.iter().map(|s| s.1).sum::<usize>();
+        let base = sink.tokens();
+        let l = inflate::parse_head(&payload[o + 2..], usize::MAX, &mut sink)?;
+        let end = o + 2 + l.end;
+        let next = next_stream(payload, end).filter(|&next| parses(&payload[next + 2..]));
+        let mut stream = l.stream;
+        stream.trailing = payload[end..next.map_or(payload.len(), |_| end + 4)].to_vec();
         streams.push(Coded {
             zhdr: [payload[o], payload[o + 1]],
-            starts: f.starts.iter().map(|&s| s + base).collect(),
-            freqs: f.stats.freqs,
-            stream: f.stream,
+            starts: l.starts.iter().map(|&s| s + base).collect(),
+            freqs: l.stats.freqs,
+            stream,
         });
+        match next {
+            Some(next) => o = next,
+            None => break,
+        }
     }
-    let mut raw = vec![0u8; g.raw_len];
-    // Every position's table (relative to T_LIT; T_FILTER's at filter bytes and past the
-    // image), symbol and activity bucket.
-    const F: u8 = (T_FILTER - T_LIT) as u8;
-    let mut syms = RowSyms { s: vec![0; n], t: vec![F; n], act: vec![ACT as u8; n] };
-    for p in g.len.min(n)..n {
-        syms.s[p] = zigzag(buf[g.pad + p]) as u8;
+    let n = sink.p;
+    // Token indices are kept in 32 bits (as the layout codes the data length).
+    if n > u32::MAX as usize {
+        return Err(crate::Error::Unsupported("image data of 4 GiB or more"));
     }
-    if threads > 1 && n >= PAR_ROWS_MIN {
-        rows_parallel::<BPP>(g, &buf, n, &mut raw, &mut syms, threads);
-    } else {
-        let mut ms = RowSymsMut { s: &mut syms.s, t: &mut syms.t, act: &mut syms.act };
-        for ps in &g.passes {
-            for row in 0..ps.rows {
-                let rstart = ps.start + row * ps.rs;
-                if rstart >= n {
+    sink.advance(true);
+    let tokens = sink.tokens();
+    let Rows { rec, alts, w, events, .. } = sink;
+    if w.ti != tokens || w.ei != events.len() || w.p != n {
+        return Err(crate::corrupt());
+    }
+    Ok(Encoded { rec, streams, len: n, alts })
+}
+
+/// DEFLATE's largest expansion (a stored byte aside): 258 bytes from a 2-bit match code, at
+/// most 1032 bytes per byte of stream.
+const MAX_EXPANSION: usize = 1032;
+
+/// Whether `raw` starts with a DEFLATE stream that parses.
+fn parses(raw: &[u8]) -> bool {
+    inflate::parse_head(raw, usize::MAX, &mut Discard).is_ok()
+}
+
+/// A sink keeping nothing (the parser checks the distances itself).
+struct Discard;
+
+impl Sink for Discard {
+    fn lit(&mut self, _: u8) {}
+    fn mat(&mut self, _: u16, _: u16, _: bool) {}
+    fn stored(&mut self, _: &[u8]) {}
+}
+
+/// A match (`dist > 0`) or a stored block (`dist == 0`, of `len` bytes) of the parse, at a
+/// token index (a stored block comes before that token).
+#[derive(Clone, Copy)]
+struct Event {
+    at: u32,
+    len: u16,
+    dist: u16,
+}
+
+/// The compressor's sink for images: a window of the data (after `Geometry::pad` bytes, as
+/// the model reads it), and of the tokens not walked yet the matches and stored blocks (the
+/// literals are the bytes between). As rows are complete, their symbols are computed and
+/// their tokens walked into the recorder.
+struct Rows<'g, const BPP: usize> {
+    g: &'g Geometry,
+    buf: Vec<u8>,
+    /// The position, and where position `i` is in `buf`: at `off + i` (wrapping), from
+    /// position `base` on.
+    p: usize,
+    off: usize,
+    base: usize,
+    /// Below this position there is room for a match and no window to walk.
+    plim: usize,
+    events: Vec<Event>,
+    /// Bytes not of literals so far, beyond a byte per match: the tokens so far are
+    /// `p - skip`.
+    skip: usize,
+    /// `buf` where position 0 would be (`off` on; wrapping).
+    ptr: *mut u8,
+    /// Token indices of matches of length 258 sent as 284 + 31.
+    alts: Vec<usize>,
+    win: Window,
+    w: Walk,
+    rec: Recorder,
+    threads: usize,
+    /// The largest row size.
+    rs: usize,
+}
+
+impl<'g, const BPP: usize> Rows<'g, BPP> {
+    /// For about `est` bytes of data.
+    fn new(g: &'g Geometry, est: usize, threads: usize) -> Rows<'g, BPP> {
+        let win = Window::new(STRIPE * threads);
+        let size = (g.pad + KEEP + win.size + g.rs_max() + 2 * (65536 + ROOM)).min(g.pad + est + ROOM);
+        let mut rec = Recorder::new(0);
+        // About a symbol per byte (they grow as needed).
+        rec.syms.reserve(est.min(STRIPE * 64));
+        let mut r = Rows {
+            g,
+            buf: vec![0; size],
+            p: 0,
+            off: g.pad,
+            base: 0,
+            plim: 0,
+            events: vec![],
+            skip: 0,
+            ptr: std::ptr::null_mut(),
+            alts: vec![],
+            win,
+            w: Walk { p: 0, ti: 0, ei: 0, left: 0, after: 0 },
+            rec,
+            threads,
+            rs: g.rs_max(),
+        };
+        r.limit();
+        r
+    }
+
+    #[inline(always)]
+    fn at(&self, p: usize) -> usize {
+        self.off.wrapping_add(p)
+    }
+
+    #[inline(always)]
+    fn tokens(&self) -> usize {
+        self.p - self.skip
+    }
+
+    fn limit(&mut self) {
+        self.ptr = self.buf.as_mut_ptr().wrapping_add(self.off);
+        let room = self.base + (self.buf.len() - self.g.pad).saturating_sub(ROOM);
+        self.plim = room.min(self.due());
+    }
+
+    /// Where the next window is due: a window's worth (or a row's) on.
+    fn due(&self) -> usize {
+        self.win.s1 + self.win.size.max(self.rs)
+    }
+
+    /// Walks the windows there are, then makes room for `k` bytes.
+    #[cold]
+    #[inline(never)]
+    fn room(&mut self, k: usize) {
+        if self.p >= self.due() {
+            self.advance(false);
+        }
+        if self.at(self.p) + k > self.buf.len() {
+            // What the parser and the rows to come still read: the farthest match, and from
+            // the row above the next window on.
+            let from = self.p.saturating_sub(32768).min(self.win.s1.saturating_sub(self.rs + 16)).max(self.base);
+            let src = self.at(from) - self.g.pad;
+            let end = self.at(self.p);
+            self.buf.copy_within(src..end, 0);
+            (self.base, self.off) = (from, self.g.pad.wrapping_sub(from));
+            if self.at(self.p) + k > self.buf.len() {
+                self.buf.resize((self.at(self.p) + k).max(2 * self.buf.len()), 0);
+            }
+        }
+        self.limit();
+    }
+
+    /// Computes the windows whose rows are complete (all of them, `last`) and walks their
+    /// tokens.
+    fn advance(&mut self, last: bool) {
+        let mut out = Syms::new(&mut self.rec.syms, &mut self.rec.raw);
+        loop {
+            if self.w.p >= self.win.s1 {
+                let data = &self.buf[..];
+                if !self.win.next::<BPP>(self.g, data, self.off, self.p, self.w.p, self.threads, last) {
                     break;
                 }
-                ms.s[rstart] = zigzag(buf[g.pad + rstart]) as u8;
-                let w = (ps.rs - 1).min(n - rstart - 1);
-                let q = ps.base2 + (row + 1) * ps.rs2 + BPP;
-                let at = g.pad + rstart + 1;
-                let d = &buf[at..at + w];
-                unfilter_part::<BPP>(buf[g.pad + rstart], d, &mut raw, q, ps.rs2, 0, w, BPP);
-                row_syms::<BPP>(&raw, &buf, q, at, w, ps.rs, ps.rs2, &mut ms, rstart + 1);
+            }
+            if !walk(&mut out, &self.win, &self.events, &mut self.w, self.p - self.skip) {
+                break;
             }
         }
+        out.done();
+        self.events.drain(..self.w.ei);
+        self.w.ei = 0;
     }
-    let mut rec = Recorder::new(0);
-    // At most four symbols per token (a match) and one per stored byte.
-    rec.syms.reserve(4 * tokens.len() + stored + 16);
-    let mut out = Syms { ptr: rec.syms.as_mut_ptr(), n: 0, cap: rec.syms.capacity(), raw: &mut rec.raw };
-    let (mut p, mut ti, mut after) = (0usize, 0usize, 0usize);
-    let blocks = streams.iter().flat_map(|c| c.stream.blocks.iter().zip(c.starts.windows(2)));
-    for (b, se) in blocks {
-        if let aqr_flate::deflate::Body::Stored { len, .. } = b.body {
-            for _ in 0..len {
-                out.sym(T_LIT + syms.t[p] as usize, syms.s[p] as u32);
-                p += 1;
-            }
-            continue;
+}
+
+impl<const BPP: usize> Sink for Rows<'_, BPP> {
+    #[inline(always)]
+    fn reserve(&mut self) {
+        // Three literals or a match.
+        if self.p >= self.plim {
+            self.room(ROOM);
         }
-        let end = se[1];
-        (p, after) = walk(&mut out, &syms, &tokens[ti..end], p, after);
-        ti = end;
     }
-    let n_syms = out.n;
-    // SAFETY: `Syms` wrote the first `n_syms` entries (within the capacity it checked).
-    unsafe { rec.syms.set_len(n_syms) };
-    let alts = tokens
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| matches!(t, Token::Match { alt258: true, .. }))
-        .map(|(i, _)| i)
-        .collect();
-    Ok(Encoded { rec, streams, len: n, alts })
+
+    #[inline(always)]
+    fn lit(&mut self, b: u8) {
+        // SAFETY: `reserve` came before, and leaves room for three literals in `buf` (which
+        // `ptr` points into from `off` on).
+        unsafe { self.ptr.wrapping_add(self.p).write(b) };
+        self.p += 1;
+    }
+
+    #[inline(always)]
+    fn mat(&mut self, len: u16, dist: u16, alt258: bool) {
+        // SAFETY: `1 <= dist <=` the bytes so far (checked by the parser), all kept before
+        // the position (at least a match's distance, from `buf`'s start), and `reserve` left
+        // room for the match and the overshoot of its copy.
+        unsafe { inflate::copy_match(self.buf.as_mut_ptr(), self.at(self.p), dist as usize, len as usize) };
+        let t = self.tokens();
+        if alt258 {
+            self.alts.push(t);
+        }
+        self.events.push(Event { at: t as u32, len, dist });
+        self.p += len as usize;
+        self.skip += len as usize - 1;
+    }
+
+    fn stored(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        self.room(bytes.len() + ROOM);
+        let at = self.at(self.p);
+        self.buf[at..at + bytes.len()].copy_from_slice(bytes);
+        self.events.push(Event { at: self.tokens() as u32, len: bytes.len() as u16, dist: 0 });
+        self.p += bytes.len();
+        self.skip += bytes.len();
+    }
+}
+
+/// Data bytes the image sink keeps for the parser: the farthest match.
+const KEEP: usize = 32768 + 16;
+
+/// Room kept past the position: a match and the overshoot of its copy.
+const ROOM: usize = MAX_MATCH + 16;
+
+impl Geometry {
+    /// The largest row size.
+    fn rs_max(&self) -> usize {
+        self.passes.iter().map(|ps| ps.rs).max().unwrap_or(0)
+    }
 }
 
 /// Images of at least this many data bytes get their symbols computed by several threads.
 const PAR_ROWS_MIN: usize = 1 << 20;
 
-/// One row's place in the symbol computation.
-struct RowJob {
-    rstart: usize,
-    w: usize,
-    q: usize,
-    rs: usize,
-    rs2: usize,
+/// Data bytes per window and thread (see [`Window`]).
+const STRIPE: usize = 1 << 18;
+
+/// Per position of a window of the data (whole rows of a pass, or a piece past the image),
+/// its symbol, its table relative to `T_LIT` (before the after-match offset) and the
+/// bucket of its activity; and the raw rows of the window, after the row above.
+struct Window {
+    s: Vec<u8>,
+    t: Vec<u8>,
+    act: Vec<u8>,
+    /// The positions it covers.
+    s0: usize,
+    s1: usize,
+    /// The next row to unfilter: its pass and row.
+    pass: usize,
+    row: usize,
+    /// Bytes it covers (about).
+    size: usize,
+    /// The raw rows, from the raw offset `rbase` on.
+    raw: Vec<u8>,
+    rbase: usize,
 }
 
-/// The same as the serial loop of [`encode_image`]: unfilters every row (each needs the
-/// row above, so in order), then computes the symbols of stripes of rows on `threads`
-/// threads (each row's symbols depend on `raw` and `buf` only and go to its own bytes).
-fn rows_parallel<const BPP: usize>(
-    g: &Geometry,
-    buf: &[u8],
-    n: usize,
-    raw: &mut [u8],
-    syms: &mut RowSyms,
-    threads: usize,
-) {
-    let mut jobs = vec![];
-    for ps in &g.passes {
-        for row in 0..ps.rows {
-            let rstart = ps.start + row * ps.rs;
-            if rstart >= n {
-                break;
-            }
-            syms.s[rstart] = zigzag(buf[g.pad + rstart]) as u8;
-            let w = (ps.rs - 1).min(n - rstart - 1);
-            let q = ps.base2 + (row + 1) * ps.rs2 + BPP;
-            let at = g.pad + rstart + 1;
-            unfilter_part::<BPP>(buf[g.pad + rstart], &buf[at..at + w], raw, q, ps.rs2, 0, w, BPP);
-            jobs.push(RowJob { rstart, w, q, rs: ps.rs, rs2: ps.rs2 });
-        }
+impl Window {
+    fn new(size: usize) -> Window {
+        Window { s: vec![], t: vec![], act: vec![], s0: 0, s1: 0, pass: 0, row: 0, size, raw: vec![], rbase: 0 }
     }
-    if jobs.is_empty() {
-        return;
-    }
-    // Stripes of about the same number of bytes; rows ascend in position, so the stripes
-    // are contiguous ranges of the symbol arrays, each starting at its first row.
-    let total: usize = jobs.iter().map(|j| j.w).sum();
-    let per = total.div_ceil(threads).max(1);
-    let mut stripes: Vec<&[RowJob]> = vec![];
-    let (mut from, mut acc) = (0, 0);
-    for (i, j) in jobs.iter().enumerate() {
-        acc += j.w;
-        if acc >= per && i + 1 < jobs.len() {
-            stripes.push(&jobs[from..=i]);
-            (from, acc) = (i + 1, 0);
-        }
-    }
-    stripes.push(&jobs[from..]);
-    let raw: &[u8] = raw;
-    std::thread::scope(|sc| {
-        let (mut s, mut t, mut a) =
-            (&mut syms.s[jobs[0].rstart..], &mut syms.t[jobs[0].rstart..], &mut syms.act[jobs[0].rstart..]);
-        let mut base = jobs[0].rstart;
-        let mut last = None;
-        for (k, st) in stripes.iter().enumerate() {
-            let len = match stripes.get(k + 1) {
-                Some(nx) => nx[0].rstart - base,
-                None => s.len(),
-            };
-            let (s1, s2) = std::mem::take(&mut s).split_at_mut(len);
-            let (t1, t2) = std::mem::take(&mut t).split_at_mut(len);
-            let (a1, a2) = std::mem::take(&mut a).split_at_mut(len);
-            (s, t, a) = (s2, t2, a2);
-            let b0 = base;
-            base += len;
-            let work = move || {
-                let mut ms = RowSymsMut { s: s1, t: t1, act: a1 };
-                for j in *st {
-                    let at = g.pad + j.rstart + 1;
-                    row_syms::<BPP>(raw, buf, j.q, at, j.w, j.rs, j.rs2, &mut ms, j.rstart + 1 - b0);
+
+    /// Moves on to the window containing position `p` (`p <` the `n` bytes there are) of the
+    /// data (position `i` at `off + i` in `buf`): unfilters the rows before it and its own,
+    /// and computes its symbols, those of its rows on up to `threads` threads. Only whole
+    /// rows are taken but for the `last` window; returns whether there was one.
+    #[allow(clippy::too_many_arguments)]
+    fn next<const BPP: usize>(
+        &mut self,
+        g: &Geometry,
+        buf: &[u8],
+        off: usize,
+        n: usize,
+        p: usize,
+        threads: usize,
+        last: bool,
+    ) -> bool {
+        const F: u8 = (T_FILTER - T_LIT) as u8;
+        let at = |i: usize| off.wrapping_add(i);
+        loop {
+            let ps = g.passes.get(self.pass).filter(|ps| self.row < ps.rows && ps.start + self.row * ps.rs < n);
+            let Some(ps) = ps.copied() else {
+                // Past the image (or the data): pieces of filter-byte symbols.
+                let s0 = self.s1.max(g.len.min(n)).max(p);
+                if s0 >= n {
+                    return false;
                 }
+                self.reset(s0, n.min(s0 + self.size));
+                let k = self.s1 - s0;
+                for (i, s) in self.s[..k].iter_mut().enumerate() {
+                    *s = zigzag(buf[at(s0 + i)]) as u8;
+                }
+                self.t[..k].fill(F);
+                self.act[..k].fill(ACT as u8);
+                return true;
             };
-            if k + 1 == stripes.len() {
-                last = Some(work);
+            let r0 = self.row;
+            let have = if last { (n - ps.start).div_ceil(ps.rs) } else { (n - ps.start) / ps.rs };
+            let r1 = (r0 + (self.size / ps.rs).max(1)).min(ps.rows).min(have);
+            if r1 == r0 {
+                return false;
+            }
+            (self.row, self.pass) = if r1 == ps.rows { (0, self.pass + 1) } else { (r1, self.pass) };
+            let s0 = ps.start + r0 * ps.rs;
+            let s1 = (ps.start + r1 * ps.rs).min(n);
+            // The raw rows: the row above (the pass's zero row for its first), with 8 bytes
+            // before it (the channel decorrelation reads the byte before a pixel's
+            // neighbours), then zeros for the window's rows (and their left margins).
+            let above = ps.base2 + r0 * ps.rs2 - 8;
+            let len = 8 + (r1 - r0 + 1) * ps.rs2 + 16;
+            if self.raw.len() < len {
+                self.raw.resize(len, 0);
+            }
+            if r0 == 0 {
+                self.raw[..8 + ps.rs2].fill(0);
             } else {
-                sc.spawn(work);
+                let src = above - self.rbase;
+                self.raw.copy_within(src..src + 8 + ps.rs2, 0);
             }
-        }
-        if let Some(mut w) = last {
-            w();
-        }
-    });
-}
-
-/// Records the symbols of a block's tokens from position `p` (`after`: the offset of the
-/// literal tables after a match); returns the position and offset after them.
-#[inline(never)]
-fn walk(out: &mut Syms, syms: &RowSyms, tokens: &[Token], mut p: usize, mut after: usize) -> (usize, usize) {
-    const F: usize = T_FILTER - T_LIT;
-    let (st, ss, sa) = (&syms.t[..], &syms.s[..], &syms.act[..]);
-    for tok in tokens {
-        let e = st[p] as usize;
-        // The after-match offset applies to the literal tables only.
-        let mask = ((e < F) as usize).wrapping_neg();
-        let t = T_LIT + e + (after & mask);
-        match *tok {
-            Token::Lit(_) => {
-                let s = ss[p] as u32;
-                out.sym(t, s);
-                if s == ESC {
-                    out.bit(T_ESC, 0);
+            // The rows' bytes are all unfiltered, their left margins not.
+            for r in 1..=r1 - r0 {
+                self.raw[8 + r * ps.rs2..8 + r * ps.rs2 + BPP].fill(0);
+            }
+            self.rbase = above;
+            let rbase = self.rbase;
+            let row = |r: usize| {
+                let rstart = ps.start + r * ps.rs;
+                let w = (ps.rs - 1).min(n - rstart - 1);
+                (rstart, w, ps.base2 + (r + 1) * ps.rs2 + BPP - rbase)
+            };
+            // The rows of this window, unfiltered in order (each needs the row above).
+            for r in r0..r1 {
+                let (rstart, w, q) = row(r);
+                let d = &buf[at(rstart) + 1..at(rstart) + 1 + w];
+                unfilter_part::<BPP>(buf[at(rstart)], d, &mut self.raw, q, ps.rs2, 0, w, BPP);
+            }
+            if s1 <= p {
+                // A match went past all of it.
+                self.s1 = s1;
+                continue;
+            }
+            self.reset(s0, s1);
+            let raw: &[u8] = &self.raw;
+            let syms = |ms: &mut RowSymsMut, rows: std::ops::Range<usize>, d0: usize| {
+                for r in rows {
+                    let (rstart, w, q) = row(r);
+                    ms.s[rstart - d0] = zigzag(buf[at(rstart)]) as u8;
+                    ms.t[rstart - d0] = F;
+                    ms.act[rstart - d0] = ACT as u8;
+                    row_syms::<BPP>(raw, buf, q, at(rstart) + 1, w, ps.rs, ps.rs2, ms, rstart + 1 - d0);
                 }
-                p += 1;
-                after = 0;
+            };
+            let mut ms = RowSymsMut { s: &mut self.s, t: &mut self.t, act: &mut self.act };
+            let k = threads.min(r1 - r0);
+            if k <= 1 {
+                syms(&mut ms, r0..r1, s0);
+                return true;
             }
-            Token::Match { len, dist, .. } => {
-                out.sym(t, ESC);
-                out.bit(T_ESC, 1);
-                code_match(out, sa[p] as usize, len as u32, dist as u32);
-                p += len as usize;
-                after = 4 * ACT;
+            // Stripes of rows, each into its own part of the window.
+            std::thread::scope(|sc| {
+                let per = (r1 - r0).div_ceil(k);
+                let mut rest = ms;
+                for j in (r0..r1).step_by(per) {
+                    let rows = j..(j + per).min(r1);
+                    let len = (ps.start + rows.end * ps.rs).min(n) - (ps.start + j * ps.rs);
+                    let (s1, s2) = std::mem::take(&mut rest.s).split_at_mut(len);
+                    let (t1, t2) = std::mem::take(&mut rest.t).split_at_mut(len);
+                    let (a1, a2) = std::mem::take(&mut rest.act).split_at_mut(len);
+                    rest = RowSymsMut { s: s2, t: t2, act: a2 };
+                    let d0 = ps.start + j * ps.rs;
+                    let mut part = RowSymsMut { s: s1, t: t1, act: a1 };
+                    if rows.end == r1 {
+                        syms(&mut part, rows, d0);
+                    } else {
+                        sc.spawn(move || syms(&mut part, rows, d0));
+                    }
+                }
+            });
+            return true;
+        }
+    }
+
+    /// Covers `s0..s1` (the symbols are left to be written).
+    fn reset(&mut self, s0: usize, s1: usize) {
+        (self.s0, self.s1) = (s0, s1);
+        for v in [&mut self.s, &mut self.t, &mut self.act] {
+            if v.len() < s1 - s0 {
+                v.resize(s1 - s0, 0);
             }
         }
     }
-    (p, after)
 }
 
-/// Symbols written into reserved room (the compressor's token walk).
+/// Where the token walk is: position, token, next event, bytes left of a stored block, and
+/// the offset of the literal tables after a match.
+struct Walk {
+    p: usize,
+    ti: usize,
+    ei: usize,
+    left: usize,
+    after: usize,
+}
+
+/// Records the symbols of the bytes from `w.p` within the window: of the tokens up to
+/// `end` (those parsed) and the stored blocks among them (`events` from `w.ei`). Returns
+/// whether it got to the window's end (else to the tokens').
+#[inline(never)]
+fn walk(out: &mut Syms, win: &Window, events: &[Event], w: &mut Walk, end: usize) -> bool {
+    const F: usize = T_FILTER - T_LIT;
+    let (st, ss, sa) = (&win.t[..], &win.s[..], &win.act[..]);
+    let lim = win.s1 - win.s0;
+    let (mut p, mut ti, mut ei, mut left, mut after) = (w.p - win.s0, w.ti, w.ei, w.left, w.after);
+    let full = loop {
+        if p >= lim {
+            break true;
+        }
+        let e = events.get(ei).copied().unwrap_or(Event { at: u32::MAX, len: 0, dist: 1 });
+        let at = if ei < events.len() { e.at as usize } else { usize::MAX };
+        if left > 0 || at == ti && e.dist == 0 {
+            // A stored block: its bytes as they are, before the token.
+            if left == 0 {
+                left = e.len as usize;
+            }
+            let k = left.min(lim - p);
+            for i in p..p + k {
+                out.sym(T_LIT + st[i] as usize, ss[i] as u32);
+            }
+            p += k;
+            left -= k;
+            if left == 0 {
+                ei += 1;
+            }
+            continue;
+        }
+        if ti == end {
+            break false;
+        }
+        if at == ti {
+            let e2 = st[p] as usize;
+            // The after-match offset applies to the literal tables only.
+            let mask = ((e2 < F) as usize).wrapping_neg();
+            out.sym(T_LIT + e2 + (after & mask), ESC);
+            out.bit(T_ESC, 1);
+            code_match(out, sa[p] as usize, e.len as u32, e.dist as u32);
+            p += e.len as usize;
+            (ti, ei, after) = (ti + 1, ei + 1, 4 * ACT);
+            continue;
+        }
+        // Literals up to the next event, the tokens' end or the window's.
+        let k = (at.min(end) - ti).min(lim - p);
+        for i in p..p + k {
+            let e = st[i] as usize;
+            let mask = ((e < F) as usize).wrapping_neg();
+            let s = ss[i] as u32;
+            out.sym(T_LIT + e + (after & mask), s);
+            if s == ESC {
+                out.bit(T_ESC, 0);
+            }
+            after = 0;
+        }
+        p += k;
+        ti += k;
+    };
+    (w.p, w.ti, w.ei, w.left, w.after) = (p + win.s0, ti, ei, left, after);
+    full
+}
+
+/// Symbols written into reserved room (the compressor's token walk), which grows if it
+/// runs out.
 struct Syms<'a> {
-    ptr: *mut (u16, u16),
+    ptr: *mut (u8, u8),
     n: usize,
     cap: usize,
+    v: &'a mut Vec<(u8, u8)>,
     raw: &'a mut BitW,
+}
+
+impl<'a> Syms<'a> {
+    fn new(v: &'a mut Vec<(u8, u8)>, raw: &'a mut BitW) -> Syms<'a> {
+        Syms { ptr: v.as_mut_ptr(), n: v.len(), cap: v.capacity(), v, raw }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn grow(&mut self) {
+        // SAFETY: the first `n` entries are written.
+        unsafe { self.v.set_len(self.n) };
+        self.v.reserve(self.n.max(1 << 10));
+        (self.ptr, self.cap) = (self.v.as_mut_ptr(), self.v.capacity());
+    }
+
+    /// Gives the vector its length.
+    fn done(self) {
+        // SAFETY: the first `n` entries are written, within the capacity.
+        unsafe { self.v.set_len(self.n) };
+    }
 }
 
 impl Io for Syms<'_> {
     #[inline(always)]
     fn sym(&mut self, t: usize, v: u32) -> u32 {
-        debug_assert!(self.n < self.cap);
-        // SAFETY: the room reserved covers four symbols per token and one per stored byte,
-        // the most the token walk writes.
-        unsafe { self.ptr.add(self.n).write((t as u16, v as u16)) };
+        if self.n == self.cap {
+            self.grow();
+        }
+        // SAFETY: `n < cap`, made sure of just above.
+        unsafe { self.ptr.add(self.n).write((t as u8, v as u8)) };
         self.n += 1;
         v
     }
@@ -1008,15 +1392,8 @@ impl Io for Syms<'_> {
     }
 }
 
-/// Per position its symbol, its table relative to `T_LIT` (before the after-match offset)
-/// and the bucket of its activity.
-struct RowSyms {
-    s: Vec<u8>,
-    t: Vec<u8>,
-    act: Vec<u8>,
-}
-
-/// A window of [`RowSyms`] (all of it, or the stripe of rows one thread fills).
+/// A window's part of [`Window`]'s symbols (all of it, or the stripe of rows one thread
+/// fills).
 struct RowSymsMut<'a> {
     s: &'a mut [u8],
     t: &'a mut [u8],
@@ -1201,11 +1578,14 @@ mod neon {
 }
 
 fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
+    let win = Win::new(g, g.len.min(MAX_EXPANSION * payload.len()), IMAGE);
     let mut e = Enc::<BPP, IMAGE> {
-        io: Recorder::new(g.len / 2 + 1024),
-        st: St::new(g),
-        buf: vec![0u8; g.pad + g.len + MAX_MATCH],
-        raw: if IMAGE { vec![0u8; g.raw_len] } else { vec![] },
+        // Room for a symbol per byte of stream to start with (the data is mostly long
+        // matches); both grow as needed.
+        io: Recorder::new(payload.len().min(g.len) + 1024),
+        st: St::new(g, win),
+        buf: vec![0u8; win.buf + ROOM],
+        raw: vec![0u8; win.raw],
         alts: vec![],
     };
     let mut streams: Vec<Coded> = vec![];
@@ -1222,7 +1602,7 @@ fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, payload: &[u8])
         });
         // Another stream follows if it parses (checked apart, before it feeds the model).
         match next_stream(payload, end) {
-            Some(next) if inflate::parse(&payload[next + 2..]).is_ok() => {
+            Some(next) if parses(&payload[next + 2..]) => {
                 streams.last_mut().unwrap().stream.trailing.truncate(4);
                 o = next;
             }
@@ -1232,31 +1612,32 @@ fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, payload: &[u8])
     Ok(Encoded { rec: e.io, streams, len: e.st.p, alts: e.alts })
 }
 
-/// Rebuilds the data and tokens of `spans` (the decompressor's side); `buf` is the padded
-/// data, `raw` `g.raw_len` zeros (for `Kind::Image`).
 /// Symbol frequencies of a Huffman block as `aqr_flate::header` counts them.
 pub type Freqs = ([u32; 288], [u32; 32]);
 
-/// Rebuilds the data and tokens of `spans`, and per span the symbol frequencies (zeros for
-/// stored blocks; matches of length 258 counted as symbol 285).
-#[allow(clippy::too_many_arguments)]
+/// What [`decode`] hands over after each span: its tokens (none for stored blocks), its
+/// symbol frequencies (zeros for stored blocks; matches of length 258 counted as symbol
+/// 285), and the data from a position on (at least that of the span, if stored), and that
+/// position.
+pub type Emit<'e> = dyn FnMut(&mut [Token], &mut Freqs, &[u8], usize) -> crate::Result<()> + 'e;
+
+/// Rebuilds the `n` bytes of data of `spans` (the decompressor's side), handing each span's
+/// tokens to `emit` as they are decoded.
 pub fn decode(
     player: &Player,
     kind: Kind,
     g: &Geometry,
     spans: &[Span],
-    tokens: &mut [Token],
-    freqs: &mut Vec<Freqs>,
-    buf: &mut [u8],
-    raw: &mut [u8],
+    n: usize,
+    emit: &mut Emit,
 ) -> crate::Result<()> {
     match (kind, g.bpp) {
-        (Kind::Image, 1) => decode_bpp::<1, true>(player, g, spans, tokens, freqs, buf, raw),
-        (Kind::Image, 2) => decode_bpp::<2, true>(player, g, spans, tokens, freqs, buf, raw),
-        (Kind::Image, 3) => decode_bpp::<3, true>(player, g, spans, tokens, freqs, buf, raw),
-        (Kind::Image, 4) => decode_bpp::<4, true>(player, g, spans, tokens, freqs, buf, raw),
+        (Kind::Image, 1) => decode_bpp::<1, true>(player, g, spans, n, emit),
+        (Kind::Image, 2) => decode_bpp::<2, true>(player, g, spans, n, emit),
+        (Kind::Image, 3) => decode_bpp::<3, true>(player, g, spans, n, emit),
+        (Kind::Image, 4) => decode_bpp::<4, true>(player, g, spans, n, emit),
         (Kind::Image, _) => Err(crate::corrupt()),
-        (Kind::Bytes, _) => decode_bpp::<0, false>(player, g, spans, tokens, freqs, buf, raw),
+        (Kind::Bytes, _) => decode_bpp::<0, false>(player, g, spans, n, emit),
     }
 }
 
@@ -1287,13 +1668,13 @@ fn decode_bpp<const BPP: usize, const IMAGE: bool>(
     player: &Player,
     g: &Geometry,
     spans: &[Span],
-    tokens: &mut [Token],
-    freqs: &mut Vec<Freqs>,
-    buf: &mut [u8],
-    raw: &mut [u8],
+    n: usize,
+    emit: &mut Emit,
 ) -> crate::Result<()> {
     let mut live = Live { tables: &player.tables, dec: player.dec, raw: player.raw };
-    decode_loop::<Live, BPP, IMAGE>(&mut live, g, spans, tokens, freqs, buf, raw)?;
+    let win = Win::new(g, n, IMAGE);
+    let (mut buf, mut raw) = (vec![0u8; win.buf], vec![0u8; win.raw]);
+    decode_loop::<Live, BPP, IMAGE>(&mut live, g, spans, n, win, &mut buf, &mut raw, emit)?;
     if !live.dec.finished() || live.raw.overrun() {
         return Err(crate::corrupt());
     }
@@ -1301,52 +1682,60 @@ fn decode_bpp<const BPP: usize, const IMAGE: bool>(
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
     io: &mut I,
     g: &Geometry,
     spans: &[Span],
-    tokens: &mut [Token],
-    freqs: &mut Vec<Freqs>,
+    n: usize,
+    win: Win,
     buf: &mut [u8],
     raw: &mut [u8],
+    emit: &mut Emit,
 ) -> crate::Result<()> {
-    let n = buf.len() - g.pad;
-    let mut st = St::new(g);
+    let mut st = St::new(g, win);
+    // One block's tokens at a time (counted from 0 in `st.tokens`).
+    let most = spans.iter().map(|s| if let Span::Tokens(c) = *s { c } else { 0 }).max().unwrap_or(0);
+    let mut tokens = vec![Token::Lit(0); most];
     for &span in spans {
         match span {
             Span::Stored(len) => {
-                freqs.push(([0; 288], [0; 32]));
                 if len > n - st.p {
                     return Err(crate::corrupt());
                 }
+                st.cur.seek(g, st.p);
+                st.room(buf, raw);
                 for _ in 0..len {
                     let l = st.prep::<BPP, IMAGE>(raw, buf, false);
                     let s = io.sym(l.t, 0);
-                    l.finish::<true>(s, raw, buf, g.pad + st.p);
+                    l.finish::<true>(s, raw, buf, st.at(st.p));
                     st.p += 1;
                 }
+                emit(&mut [], &mut ([0; 288], [0; 32]), &buf[g.pad..st.at(st.p)], st.base)?;
             }
             Span::Tokens(count) => {
                 let (mut lf, mut df) = ([0u32; 288], [0u32; 32]);
                 lf[256] = 1;
-                let end = st.tokens + count;
+                st.tokens = 0;
+                let end = count;
                 while st.tokens < end {
                     if st.p >= n {
                         return Err(crate::corrupt());
                     }
                     st.cur.seek(g, st.p);
+                    st.room(buf, raw);
                     let x = st.p - st.cur.rstart;
                     if IMAGE && x > 0 && st.cur.rs != usize::MAX {
                         // A run of literals within the row, with the row's filter fixed.
                         let run = (st.cur.rend - st.p).min(end - st.tokens).min(n - st.p);
-                        let ft = get(buf, g.pad + st.cur.rstart);
+                        let ft = get(buf, st.at(st.cur.rstart));
                         let (done, act) = match ft {
-                            0 => lit_run::<I, BPP, 0>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
-                            1 => lit_run::<I, BPP, 1>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
-                            2 => lit_run::<I, BPP, 2>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
-                            3 => lit_run::<I, BPP, 3>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
-                            4 => lit_run::<I, BPP, 4>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
-                            _ => lit_run::<I, BPP, 5>(io, &st, x, run, raw, buf, tokens, &mut lf)?,
+                            0 => lit_run::<I, BPP, 0>(io, &st, x, run, raw, buf, &mut tokens, &mut lf)?,
+                            1 => lit_run::<I, BPP, 1>(io, &st, x, run, raw, buf, &mut tokens, &mut lf)?,
+                            2 => lit_run::<I, BPP, 2>(io, &st, x, run, raw, buf, &mut tokens, &mut lf)?,
+                            3 => lit_run::<I, BPP, 3>(io, &st, x, run, raw, buf, &mut tokens, &mut lf)?,
+                            4 => lit_run::<I, BPP, 4>(io, &st, x, run, raw, buf, &mut tokens, &mut lf)?,
+                            _ => lit_run::<I, BPP, 5>(io, &st, x, run, raw, buf, &mut tokens, &mut lf)?,
                         };
                         st.p += done;
                         st.tokens += done;
@@ -1369,7 +1758,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
                     let l = st.prep::<BPP, IMAGE>(raw, buf, true);
                     let s = io.sym(l.t, 0);
                     if s != ESC || io.bit(T_ESC, 0) == 0 {
-                        let v = l.finish::<true>(s, raw, buf, g.pad + st.p);
+                        let v = l.finish::<true>(s, raw, buf, st.at(st.p));
                         *tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)? = Token::Lit(v);
                         lf[v as usize] += 1;
                         st.p += 1;
@@ -1387,7 +1776,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
                         st.copy::<BPP, IMAGE>(raw, buf, len, dist);
                     }
                 }
-                freqs.push((lf, df));
+                emit(&mut tokens[..count], &mut (lf, df), &buf[g.pad..st.at(st.p)], st.base)?;
             }
         }
     }
@@ -1464,7 +1853,7 @@ fn lit_run<I: Io, const BPP: usize, const FT: u8>(
 ) -> crate::Result<(usize, Option<u32>)> {
     let (rs, rs2) = (st.cur.rs, st.cur.rs2);
     let mut q = st.cur.q0 + x - 1;
-    let mut at = st.g.pad + st.p;
+    let mut at = st.at(st.p);
     let mut ch = (x - 1) % BPP;
     let mut after = st.after;
     let ti = st.tokens;
@@ -1611,13 +2000,14 @@ impl Lit {
     }
 }
 
-/// The coding of position `p` (below the data's length), where the cursor is.
+/// The coding of position `p` (below the data's length, at `off + p` in `buf`), where the
+/// cursor is.
 #[inline(always)]
 fn prepare<const BPP: usize, const IMAGE: bool>(
-    g: &Geometry,
     cur: &Cursor,
     raw: &[u8],
     buf: &[u8],
+    off: usize,
     p: usize,
     bpp: usize,
 ) -> Lit {
@@ -1628,11 +2018,11 @@ fn prepare<const BPP: usize, const IMAGE: bool>(
     // A pixel byte: the bytes a row up and a pixel left are within the data's padding,
     // and the raw neighbours within the raw buffer.
     let x = x - 1;
-    let at = g.pad + p;
+    let at = off.wrapping_add(p);
     if IMAGE {
         let q = cur.q0 + x;
         let m = pixel::<BPP>(raw, buf, q, at, x % BPP, cur.rs, cur.rs2);
-        let ft = get(buf, g.pad + cur.rstart);
+        let ft = get(buf, off.wrapping_add(cur.rstart));
         Lit { t: m.t, act: m.act, pred: m.pred, fp: m.fp(ft), q }
     } else {
         let (fl, fu) = (mag(get(buf, at - bpp)), mag(get(buf, at - cur.rs)));
@@ -1675,10 +2065,10 @@ mod tests {
                     cur.seek(&g, p);
                     let len = piece.min(g.len - p);
                     match ch {
-                        1 => unfilter_span::<1>(&g, &cur, &buf, &mut raw, p, len),
-                        2 => unfilter_span::<2>(&g, &cur, &buf, &mut raw, p, len),
-                        3 => unfilter_span::<3>(&g, &cur, &buf, &mut raw, p, len),
-                        _ => unfilter_span::<4>(&g, &cur, &buf, &mut raw, p, len),
+                        1 => unfilter_span::<1>(&g, &cur, &buf, g.pad, &mut raw, p, len),
+                        2 => unfilter_span::<2>(&g, &cur, &buf, g.pad, &mut raw, p, len),
+                        3 => unfilter_span::<3>(&g, &cur, &buf, g.pad, &mut raw, p, len),
+                        _ => unfilter_span::<4>(&g, &cur, &buf, g.pad, &mut raw, p, len),
                     }
                     p += len;
                 }
@@ -1693,21 +2083,6 @@ mod tests {
                 let mut whole = vec![0u8; g.raw_len];
                 unfilter_all(&g, &buf, &mut whole);
                 assert_eq!(whole, raw);
-            }
-        }
-    }
-
-    #[test]
-    fn copies() {
-        for dist in 1..40 {
-            for len in [3, 4, 15, 16, 17, 31, 100, 258] {
-                let mut a: Vec<u8> = (0..400u32).map(|i| (i * 37 % 251) as u8).collect();
-                let mut b = a.clone();
-                copy_match(&mut a, 50, dist, len);
-                for i in 50..50 + len {
-                    b[i] = b[i - dist];
-                }
-                assert_eq!(a, b, "dist {dist} len {len}");
             }
         }
     }

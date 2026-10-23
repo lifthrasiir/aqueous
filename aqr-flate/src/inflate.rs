@@ -870,7 +870,7 @@ fn tokens_into<S: Sink>(
 /// # Safety
 /// As stated: `base[..n]` is initialized and `base[n..n + len + 16]` is allocated.
 #[inline(always)]
-unsafe fn copy_match(base: *mut u8, n: usize, d: usize, len: usize) {
+pub unsafe fn copy_match(base: *mut u8, n: usize, d: usize, len: usize) {
     // Every chunk read lies before the chunk written (16 bytes with `d >= 16`, 8 otherwise)
     // and within what is initialized: `src + i + chunk <= dst + i`. A distance of 1 repeats
     // a byte. Shorter ones than 8 repeat a pattern of period `d`: once its first `dd` bytes

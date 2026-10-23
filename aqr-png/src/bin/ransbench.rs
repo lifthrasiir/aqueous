@@ -21,7 +21,7 @@ fn main() {
             s += 1;
         }
         counts[t][s as usize] += 1;
-        syms.push((t as u16, s as u16));
+        syms.push((t as u8, s as u8));
         prev = s;
     }
     let mut w = BitW::default();

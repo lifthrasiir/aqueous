@@ -139,6 +139,14 @@ impl Writer {
         }
     }
 
+    /// A writer appending to `out`, from a byte boundary.
+    pub fn append_to(out: Vec<u8>) -> Writer {
+        Writer {
+            w: Bits { out, acc: 0, n: 0 },
+            pos: 0,
+        }
+    }
+
     /// Bytes of the data written so far, where the next block's data starts.
     pub fn pos(&self) -> usize {
         self.pos
@@ -146,6 +154,11 @@ impl Writer {
 
     /// Writes block `b` with tokens `toks`, of `data` from [`Writer::pos`] on.
     pub fn block(&mut self, b: &Block, toks: &[Token], data: &[u8]) -> Result<()> {
+        self.block_of(b, toks, data.get(self.pos..).unwrap_or_default())
+    }
+
+    /// [`Writer::block`] given the data from [`Writer::pos`] on (which stored blocks take).
+    pub fn block_of(&mut self, b: &Block, toks: &[Token], rest: &[u8]) -> Result<()> {
         static FIXED: std::sync::OnceLock<[Vec<(u32, u32)>; 2]> = std::sync::OnceLock::new();
         let w = &mut self.w;
         w.put(1, b.last as u32);
@@ -159,12 +172,11 @@ impl Writer {
                 w.put(16, *len as u32);
                 w.put(16, !*len as u32);
                 w.flush();
-                let end = self.pos + *len as usize;
                 w.out.extend_from_slice(
-                    data.get(self.pos..end)
+                    rest.get(..*len as usize)
                         .ok_or(Error::Invalid("stored block past end"))?,
                 );
-                self.pos = end;
+                self.pos += *len as usize;
             }
             Body::Fixed { .. } => {
                 let fixed = FIXED.get_or_init(|| {

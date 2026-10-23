@@ -11,7 +11,7 @@ and the design is argued in `xform-design.md`.
   coding and the round-trip check) at level `mid`, then extracted.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `objr bench`.
   - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
-- aqr-jpeg was re-measured on 2026-10-24 (otherwise as above).
+- aqr-jpeg and aqr-png were re-measured on 2026-10-24 (otherwise as above).
 - aqr-exe alone was measured on another machine, an AMD Ryzen 7 9700X under Windows 11 (at
   `aa7a327`, otherwise as above): its speeds are not comparable to the others'. Its memory is
   the peak working set.
@@ -36,7 +36,7 @@ and the design is argued in `xform-design.md`.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| PNG, APNG | aqr-png | 379 files, 391 MB | 0.802 | 0.997 | 39 | 86 | 6 MB + 31.7× | memory follows the inflated pixels, not the file |
+| PNG, APNG | aqr-png | 379 files, 391 MB | 0.802 | 0.997 | 42 | 90 | 7 MB + 10.3× | the data, the raw image and the tokens are held a window at a time; the encoder's symbols (2 bytes per byte of data on photos) are what still follows the pixels |
 | JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
 | PSD, PSB | aqr-psd | 56 files, 439 MB | 0.332 | 0.555 | 44 | 129 | 7.0× (max 48.7×) | pixels coded in 8-bit documents only |
 

@@ -26,7 +26,7 @@ use crate::rans::{BitR, BitW};
 use crate::{Error, Result};
 use aqr_common::varint;
 use aqr_flate::bits::{BitReader, BitWriter};
-use aqr_flate::deflate::{Block, Body, Stream, Token};
+use aqr_flate::deflate::{Block, Body, Token};
 use aqr_flate::header;
 
 pub fn get_varint(src: &[u8], at: &mut usize) -> Result<u64> {
@@ -415,7 +415,7 @@ fn image_payload(rec: &[u8], len: usize, ih: &Option<Ihdr>, threads: usize) -> R
         Some(1) => {
             let ih = ih.as_ref().ok_or_else(crate::corrupt)?;
             let g = Geometry::new(ih).ok_or_else(crate::corrupt)?;
-            rebuild(&g, &rec[1..], threads)?
+            rebuild(&g, &rec[1..], len, threads)?
         }
         _ => return Err(crate::corrupt()),
     };
@@ -433,8 +433,9 @@ struct StreamLayout {
     trailing: Vec<u8>,
 }
 
-/// Rebuilds a coded image's payload from its record (past the mode byte).
-fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
+/// Rebuilds a coded image's payload (of `len` bytes, if the record is right) from its record
+/// (past the mode byte).
+fn rebuild(g: &Geometry, rec: &[u8], len: usize, threads: usize) -> Result<Vec<u8>> {
     let mut at = 0;
     let part = |at: &mut usize| -> Result<&[u8]> {
         let n = get_varint(rec, at)? as usize;
@@ -508,122 +509,175 @@ fn rebuild(g: &Geometry, rec: &[u8], threads: usize) -> Result<Vec<u8>> {
         return Err(crate::corrupt());
     }
 
-    let mut buf = vec![0u8; g.pad + n];
-    let mut raw = if kind == Kind::Image { vec![0u8; g.raw_len] } else { vec![] };
     let ntok: usize = spans.iter().map(|s| if let Span::Tokens(c) = s { *c } else { 0 }).sum();
     if ntok > n {
         return Err(crate::corrupt());
     }
-    let mut tokens = vec![Token::Lit(0); ntok];
     let player = model::Player::new(rec, &mut at)?;
     if at != rec.len() {
         return Err(crate::corrupt());
     }
-    let mut freqs = Vec::with_capacity(spans.len());
-    model::decode(&player, kind, g, &spans, &mut tokens, &mut freqs, &mut buf, &mut raw)?;
-    let mut starts = Vec::with_capacity(spans.len() + 1);
-    let mut ti = 0;
-    for s in &spans {
-        starts.push(ti);
-        if let Span::Tokens(c) = *s {
-            ti += c;
-        }
-    }
-    starts.push(ti);
-    for &i in &alts {
-        match tokens.get_mut(i) {
-            // Listed once only.
-            Some(Token::Match { len: 258, alt258: alt258 @ false, .. }) => *alt258 = true,
-            _ => return Err(crate::corrupt()),
-        }
-        // Symbol 284 rather than 285, in the block of token `i`.
-        let b = starts.partition_point(|&s| s <= i) - 1;
-        let lf = &mut freqs[b].0;
-        lf[285] -= 1;
-        lf[284] += 1;
-    }
 
-    let mut hr = BitReader::new(headers);
-    let mut recipe = header::Recipe::default();
-    let mut bi = 0;
-    for s in &mut streams {
-        for b in &mut s.blocks {
-            if let Body::Dynamic { header: h, .. } = &mut b.body {
-                *h = header::read_freqs(&mut hr, &freqs[bi].0, &freqs[bi].1, &mut recipe)?;
-            }
-            bi += 1;
-        }
-    }
-
-    // Each stream with its blocks' tokens and its part of the data.
-    let data = &buf[g.pad..];
-    let mut out = Vec::with_capacity(n / 2);
-    let (mut b0, mut pos) = (0, 0);
-    let single = streams.len() == 1;
-    if threads > 1 && !single && n >= PAR_MIN {
-        // The streams are written independently: slice them all, write them in parallel.
-        struct Job<'a> {
-            zhdr: [u8; 2],
-            stream: Stream,
-            local: Vec<usize>,
-            tokens: &'a [Token],
-            d: &'a [u8],
-        }
-        let mut jobs = vec![];
-        let mut bad = None;
-        for s in streams {
-            let nb = s.blocks.len();
-            let (t0, t1) = (starts[b0], starts[b0 + nb]);
-            let local: Vec<usize> = starts[b0..=b0 + nb].iter().map(|&x| x - t0).collect();
-            let stored: usize =
-                s.blocks.iter().map(|b| if let Body::Stored { len, .. } = b.body { len as usize } else { 0 }).sum();
-            let bytes = stored + tokens[t0..t1].iter().map(|t| t.span()).sum::<usize>();
-            let Some(d) = data.get(pos..pos + bytes) else {
-                bad = Some(crate::corrupt());
-                break;
+    // The streams are written block by block as the model gives them: on this thread, or
+    // on another one as this one decodes. (The writer reserves room for the longest codes
+    // of a block's tokens ahead.)
+    let most = spans.iter().map(|s| if let Span::Tokens(c) = *s { c } else { 0 }).max().unwrap_or(0);
+    let mut emit = Payload::new(streams, alts, headers, len + 6 * most + 64)?;
+    if threads > 1 && n >= PAR_MIN {
+        /// A block's tokens and frequencies, and the bytes of a stored block.
+        type Msg = (Vec<Token>, model::Freqs, Vec<u8>);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(PIPE_DEPTH);
+        let (back, spare) = std::sync::mpsc::channel::<Vec<Token>>();
+        let (dec, written) = std::thread::scope(|sc| {
+            let writer = sc.spawn(move || {
+                for (toks, freqs, bytes) in rx {
+                    let (mut toks, mut freqs) = (toks, freqs);
+                    emit.block(&mut toks, &mut freqs, &bytes)?;
+                    // The decoder may be done already.
+                    let _ = back.send(toks);
+                }
+                emit.finish()
+            });
+            // Where the span starts.
+            let mut p = 0usize;
+            let mut send = |toks: &mut [Token], freqs: &mut model::Freqs, data: &[u8], from: usize| {
+                let mut v = spare.try_recv().unwrap_or_default();
+                v.clear();
+                v.extend_from_slice(toks);
+                // Only a stored block's bytes are wanted (and they are all the new ones).
+                let bytes = if toks.is_empty() {
+                    p.checked_sub(from).and_then(|i| data.get(i..)).ok_or_else(crate::corrupt)?.to_vec()
+                } else {
+                    vec![]
+                };
+                p = from + data.len();
+                tx.send((v, *freqs, bytes)).map_err(|_| crate::corrupt())
             };
-            let stream = Stream { blocks: s.blocks, tail_pad: s.tail_pad, trailing: s.trailing };
-            jobs.push(std::sync::Mutex::new(Some(Job { zhdr: s.zhdr, stream, local, tokens: &tokens[t0..t1], d })));
-            b0 += nb;
-            pos += bytes;
-        }
-        let workers = threads.min(jobs.len());
-        let res = par_map(jobs.len(), workers, |i| {
-            let j = jobs[i].lock().unwrap().take().unwrap();
-            aqr_flate::write::write(&j.stream, &j.local, j.tokens, j.d).map(|w| (j.zhdr, w))
+            let dec = model::decode(&player, kind, g, &spans, n, &mut send);
+            drop(tx);
+            (dec, writer.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
         });
-        for r in res {
-            let (zhdr, w) = r?;
-            out.extend_from_slice(&zhdr);
-            out.extend_from_slice(&w);
+        // The writer's error first: the decoder's may only be that it stopped.
+        let (out, pos) = written?;
+        dec?;
+        if pos != n {
+            return Err(crate::corrupt());
         }
-        if let Some(e) = bad {
-            return Err(e);
-        }
+        Ok(out)
     } else {
-        for s in streams {
-            let nb = s.blocks.len();
-            let (t0, t1) = (starts[b0], starts[b0 + nb]);
-            let local: Vec<usize> = starts[b0..=b0 + nb].iter().map(|&x| x - t0).collect();
-            let bytes = if single {
-                n
-            } else {
-                let stored: usize =
-                    s.blocks.iter().map(|b| if let Body::Stored { len, .. } = b.body { len as usize } else { 0 }).sum();
-                stored + tokens[t0..t1].iter().map(|t| t.span()).sum::<usize>()
-            };
-            let d = data.get(pos..pos + bytes).ok_or_else(crate::corrupt)?;
-            out.extend_from_slice(&s.zhdr);
-            let stream = Stream { blocks: s.blocks, tail_pad: s.tail_pad, trailing: s.trailing };
-            out.extend_from_slice(&aqr_flate::write::write(&stream, &local, &tokens[t0..t1], d)?);
-            b0 += nb;
-            pos += bytes;
+        model::decode(&player, kind, g, &spans, n, &mut |toks, freqs, data, from| {
+            // The data from where the block starts (none needed but a stored block's).
+            let rest = emit.at().checked_sub(from).and_then(|i| data.get(i..)).unwrap_or_default();
+            emit.block(toks, freqs, rest)
+        })?;
+        let (out, pos) = emit.finish()?;
+        if pos != n {
+            return Err(crate::corrupt());
         }
+        Ok(out)
     }
-    if pos != n {
-        return Err(crate::corrupt());
+}
+
+/// Blocks in flight between the model and the writer.
+const PIPE_DEPTH: usize = 4;
+
+/// Writes an image's streams block by block, as the model decodes them.
+struct Payload<'a> {
+    streams: Vec<StreamLayout>,
+    /// The stream being written, its next block, and its writer (appending to the payload).
+    si: usize,
+    bi: usize,
+    w: Option<aqr_flate::write::Writer>,
+    out: Vec<u8>,
+    /// Data bytes of the streams written.
+    done: usize,
+    /// Tokens of the blocks written, and the next of `alts` (token indices of matches of
+    /// length 258 sent as 284 + 31).
+    t0: usize,
+    alts: Vec<usize>,
+    ai: usize,
+    hr: BitReader<'a>,
+    recipe: header::Recipe,
+}
+
+impl<'a> Payload<'a> {
+    /// `cap`: room for the payload, if the data is right.
+    fn new(streams: Vec<StreamLayout>, alts: Vec<usize>, headers: &'a [u8], cap: usize) -> Result<Payload<'a>> {
+        let mut e = Payload {
+            streams,
+            si: 0,
+            bi: 0,
+            w: None,
+            out: Vec::with_capacity(cap),
+            done: 0,
+            t0: 0,
+            alts,
+            ai: 0,
+            hr: BitReader::new(headers),
+            recipe: header::Recipe::default(),
+        };
+        e.advance()?;
+        Ok(e)
     }
-    Ok(out)
+
+    /// Where the next block's data starts.
+    fn at(&self) -> usize {
+        self.done + self.w.as_ref().map_or(0, |w| w.pos())
+    }
+
+    /// Writes the next block: its tokens `toks` and frequencies `freqs` (both corrected for
+    /// matches sent as 284 + 31), given the data from [`Payload::at`] on.
+    fn block(&mut self, toks: &mut [Token], freqs: &mut model::Freqs, rest: &[u8]) -> Result<()> {
+        let t1 = self.t0 + toks.len();
+        while let Some(&i) = self.alts.get(self.ai).filter(|&&i| i < t1) {
+            match toks.get_mut(i.wrapping_sub(self.t0)) {
+                // Listed once only.
+                Some(Token::Match { len: 258, alt258: alt258 @ false, .. }) => *alt258 = true,
+                _ => return Err(crate::corrupt()),
+            }
+            // Symbol 284 rather than 285.
+            freqs.0[285] -= 1;
+            freqs.0[284] += 1;
+            self.ai += 1;
+        }
+        self.t0 = t1;
+        let (Some(w), Some(b)) = (&mut self.w, self.streams.get_mut(self.si).and_then(|s| s.blocks.get_mut(self.bi)))
+        else {
+            return Err(crate::corrupt());
+        };
+        if let Body::Dynamic { header: h, .. } = &mut b.body {
+            *h = header::read_freqs(&mut self.hr, &freqs.0, &freqs.1, &mut self.recipe)?;
+        }
+        w.block_of(b, toks, rest)?;
+        self.bi += 1;
+        self.advance()
+    }
+
+    /// Finishes the streams whose blocks are all written, and starts the next one.
+    fn advance(&mut self) -> Result<()> {
+        while let Some(s) = self.streams.get(self.si) {
+            if self.w.is_none() {
+                self.out.extend_from_slice(&s.zhdr);
+                self.w = Some(aqr_flate::write::Writer::append_to(std::mem::take(&mut self.out)));
+            }
+            if self.bi < s.blocks.len() {
+                break;
+            }
+            let w = self.w.take().unwrap();
+            self.done += w.pos();
+            self.out = w.finish(s.tail_pad, &s.trailing)?;
+            (self.si, self.bi) = (self.si + 1, 0);
+        }
+        Ok(())
+    }
+
+    /// The payload and the data bytes its streams cover.
+    fn finish(self) -> Result<(Vec<u8>, usize)> {
+        if self.si != self.streams.len() || self.ai != self.alts.len() {
+            return Err(crate::corrupt());
+        }
+        Ok((self.out, self.done))
+    }
 }
 
 #[cfg(test)]
@@ -656,7 +710,7 @@ mod tests {
             write_record(Kind::Image, enc, 1, &mut rec);
             rec
         };
-        assert!(rebuild(&g, &rec_of(false)[1..], 1).unwrap() == payload);
-        assert!(matches!(rebuild(&g, &rec_of(true)[1..], 1), Err(Error::Corrupt)));
+        assert!(rebuild(&g, &rec_of(false)[1..], payload.len(), 1).unwrap() == payload);
+        assert!(matches!(rebuild(&g, &rec_of(true)[1..], payload.len(), 1), Err(Error::Corrupt)));
     }
 }
