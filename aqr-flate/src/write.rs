@@ -2,7 +2,7 @@
 //! giving exactly what [`crate::deflate::write`] gives: code lookups by table rather than by
 //! search, and a 64-bit bit buffer.
 
-use crate::deflate::{Body, Stream, Token};
+use crate::deflate::{Block, Body, Stream, Token};
 use crate::huffman::{self, CL_ORDER, DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA, RleOp};
 use crate::{Error, Result};
 
@@ -106,22 +106,48 @@ fn table(lens: &[u8], n: usize) -> Vec<(u32, u32)> {
 /// Writes `stream` (whose blocks' tokens are left out) with the tokens of block `i` being
 /// `tokens[starts[i]..starts[i + 1]]`; `data` supplies stored blocks.
 pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -> Result<Vec<u8>> {
-    let mut w = Bits {
-        out: Vec::with_capacity(data.len() / 2 + 64),
-        acc: 0,
-        n: 0,
-    };
-    let mut pos = 0;
-    let fixed = (
-        table(&huffman::fixed_lit_lens(), 288),
-        table(&huffman::FIXED_DIST_LENS, 32),
-    );
+    let mut w = Writer::new(data.len() / 2 + 64);
     for (i, b) in stream.blocks.iter().enumerate() {
-        w.put(1, b.last as u32);
-        w.put(2, b.body.btype() as u32);
         let toks = tokens
             .get(starts[i]..starts[i + 1])
             .ok_or(Error::Invalid("tokens past the end"))?;
+        w.block(b, toks, data)?;
+    }
+    w.finish(stream.tail_pad, &stream.trailing)
+}
+
+/// Writes a stream block after block, its bytes taken as they are written ([`Writer::take`]):
+/// what [`write`] does, without having the whole stream at once.
+pub struct Writer {
+    w: Bits,
+    /// Bytes of the data written so far.
+    pos: usize,
+}
+
+impl Writer {
+    /// A writer with room for `capacity` bytes.
+    pub fn new(capacity: usize) -> Writer {
+        Writer {
+            w: Bits {
+                out: Vec::with_capacity(capacity),
+                acc: 0,
+                n: 0,
+            },
+            pos: 0,
+        }
+    }
+
+    /// Bytes of the data written so far, where the next block's data starts.
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    /// Writes block `b` with tokens `toks`, of `data` from [`Writer::pos`] on.
+    pub fn block(&mut self, b: &Block, toks: &[Token], data: &[u8]) -> Result<()> {
+        static FIXED: std::sync::OnceLock<[Vec<(u32, u32)>; 2]> = std::sync::OnceLock::new();
+        let w = &mut self.w;
+        w.put(1, b.last as u32);
+        w.put(2, b.body.btype() as u32);
         match &b.body {
             Body::Stored { pad, len } => {
                 if *pad as u32 >> w.pad_len() != 0 {
@@ -131,15 +157,21 @@ pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -
                 w.put(16, *len as u32);
                 w.put(16, !*len as u32);
                 w.flush();
-                let end = pos + *len as usize;
+                let end = self.pos + *len as usize;
                 w.out.extend_from_slice(
-                    data.get(pos..end)
+                    data.get(self.pos..end)
                         .ok_or(Error::Invalid("stored block past end"))?,
                 );
-                pos = end;
+                self.pos = end;
             }
             Body::Fixed { .. } => {
-                pos += write_tokens(&mut w, toks, &fixed.0, &fixed.1)?;
+                let fixed = FIXED.get_or_init(|| {
+                    [
+                        table(&huffman::fixed_lit_lens(), 288),
+                        table(&huffman::FIXED_DIST_LENS, 32),
+                    ]
+                });
+                self.pos += write_tokens(w, toks, &fixed[0], &fixed[1])?;
             }
             Body::Dynamic { header: h, .. } => {
                 w.put(5, h.hlit as u32 - 257);
@@ -159,17 +191,29 @@ pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -
                 }
                 let lt = table(h.lit_lens(), 288);
                 let dt = table(h.dist_lens(), 32);
-                pos += write_tokens(&mut w, toks, &lt, &dt)?;
+                self.pos += write_tokens(w, toks, &lt, &dt)?;
             }
         }
+        Ok(())
     }
-    if stream.tail_pad as u32 >> w.pad_len() != 0 {
-        return Err(Error::Invalid("padding wider than its bits"));
+
+    /// The bytes written so far and not yet taken (a few bits may be held back).
+    pub fn take(&mut self) -> Vec<u8> {
+        let cap = self.w.out.capacity().min(1 << 20);
+        std::mem::replace(&mut self.w.out, Vec::with_capacity(cap))
     }
-    w.put(w.pad_len(), stream.tail_pad as u32);
-    w.flush();
-    w.out.extend_from_slice(&stream.trailing);
-    Ok(w.out)
+
+    /// The rest of the stream: the padding after the last block, then `trailing`.
+    pub fn finish(mut self, tail_pad: u8, trailing: &[u8]) -> Result<Vec<u8>> {
+        let w = &mut self.w;
+        if tail_pad as u32 >> w.pad_len() != 0 {
+            return Err(Error::Invalid("padding wider than its bits"));
+        }
+        w.put(w.pad_len(), tail_pad as u32);
+        w.flush();
+        w.out.extend_from_slice(trailing);
+        Ok(std::mem::take(&mut w.out))
+    }
 }
 
 /// Writes a block's tokens and its end; returns the bytes they cover.

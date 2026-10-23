@@ -80,7 +80,8 @@ fn mixed() -> Vec<u8> {
 }
 
 /// Small segments, so that streams are cut in many places (also around stored blocks), give
-/// the same reconstruction whatever the number of threads. With zlib emulation, every
+/// the same reconstruction whatever the number of threads, and whether it is taken whole or
+/// in pieces as it is written. With zlib emulation, every
 /// segment resumes it from its own checkpoint.
 #[test]
 fn segments_round_trip() {
@@ -119,6 +120,16 @@ fn segments_round_trip() {
                     "{spec}, profile {profile}, {threads} threads"
                 );
             }
+            // given as it is written, in pieces
+            let model = aqr_flate::profile_data(profile).unwrap();
+            let mut pieces = Vec::new();
+            aqr_flate::reconstruct_into(&data, &meta, model, 2, &mut |b| pieces.push(b.to_vec()))
+                .unwrap();
+            assert!(
+                pieces.len() > 2 && pieces.concat() == raw,
+                "{spec}, profile {profile}: {} pieces",
+                pieces.len()
+            );
         }
     }
 }

@@ -1285,6 +1285,24 @@ pub fn reconstruct_with(
     model: ModelData,
     threads: usize,
 ) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(data.len() / 2 + 64);
+    reconstruct_into(data, meta, model, threads, &mut |b| {
+        out.extend_from_slice(b)
+    })?;
+    Ok(out)
+}
+
+/// [`reconstruct_with`], the stream given to `sink` in pieces, in order, as it is written:
+/// segments are decoded a batch at a time on the threads, and each block written once its
+/// tokens are all decoded, its tokens then dropped. What is held at once is a batch of
+/// segments' tokens and the largest block's, however long the stream.
+pub fn reconstruct_into(
+    data: &[u8],
+    meta: &[u8],
+    model: ModelData,
+    threads: usize,
+    sink: &mut dyn FnMut(&[u8]),
+) -> Result<()> {
     let threads = threads.max(1);
     let n = data.len();
     let profile = record_profile(meta)?;
@@ -1402,7 +1420,7 @@ pub fn reconstruct_with(
         return Err(Error::Corrupt);
     }
 
-    let decoded = par_map(segs.len(), threads, |i| -> Result<(Vec<Token>, usize)> {
+    let decode = |i: usize| -> Result<(Vec<Token>, usize)> {
         let (first, count, misses, pos, body, cp) = segs[i];
         let end = segs.get(i + 1).map_or(n, |s| s.3);
         let range = Range {
@@ -1440,60 +1458,92 @@ pub fn reconstruct_with(
             _ => unreachable!(),
         };
         Ok((out, p))
-    });
-    let mut toks = Vec::with_capacity(segs.len());
+    };
+
+    let hr = &mut BitReader::new(hdrs);
+    let mut recipe = header::Recipe::default();
+    let mut w = write::Writer::new((data.len() / 2).min(1 << 20) + 64);
+    let nb = layout.blocks.len();
+    let mut shapes = layout.blocks.into_iter();
+    // tokens decoded (from token `base` on), the next block (from token `k` on)
+    let (mut pending, mut base, mut decoded) = (Vec::<Token>::new(), 0usize, 0usize);
+    let (mut bi, mut k) = (0usize, 0usize);
+    // where the last segment's data ends
     let mut end = 0;
-    for (i, r) in decoded.into_iter().enumerate() {
-        let (t, p) = r?;
-        if p != segs.get(i + 1).map_or(p, |s| s.3) {
-            return Err(Error::Corrupt);
+    let batch = 4 * threads;
+    let decode_batch = |s0: usize| {
+        let s1 = (s0 + batch).min(segs.len());
+        (s0, par_map(s1 - s0, threads, |j| decode(s0 + j)))
+    };
+    // the next batch is decoded while the blocks of this one are written
+    std::thread::scope(|scope| -> Result<()> {
+        let mut next = (!segs.is_empty()).then(|| scope.spawn(|| decode_batch(0)));
+        loop {
+            let more = next.is_some();
+            if let Some(h) = next.take() {
+                let (s0, results) = h.join().map_err(|_| Error::Corrupt)?;
+                let s1 = s0 + results.len();
+                if s1 < segs.len() {
+                    next = Some(scope.spawn(move || decode_batch(s1)));
+                }
+                for (i, r) in (s0..s1).zip(results) {
+                    let (t, p) = r?;
+                    if p != segs.get(i + 1).map_or(p, |s| s.3) {
+                        return Err(Error::Corrupt);
+                    }
+                    decoded += t.len();
+                    pending.extend_from_slice(&t);
+                    end = p;
+                }
+            }
+            // the blocks whose tokens are all decoded
+            while bi < nb && (k + counts[bi] <= decoded || !more) {
+                let c = counts[bi];
+                let t = pending.get(k - base..k - base + c).ok_or(Error::Corrupt)?;
+                let body = match shapes.next().unwrap() {
+                    Shape::Stored { pad, len } => Body::Stored { pad, len },
+                    Shape::Coded { btype: 1, .. } => Body::Fixed { tokens: vec![] },
+                    Shape::Coded { .. } => Body::Dynamic {
+                        header: header::read(hr, t, &mut recipe)?,
+                        tokens: vec![],
+                    },
+                };
+                w.block(
+                    &Block {
+                        last: bi + 1 == nb,
+                        body,
+                    },
+                    t,
+                    data,
+                )
+                .map_err(|_| Error::Corrupt)?;
+                k += c;
+                bi += 1;
+            }
+            sink(&w.take());
+            if k - base > pending.len() / 2 {
+                pending.drain(..k - base);
+                base = k;
+            }
+            if !more {
+                return Ok(());
+            }
         }
-        toks.push(t);
-        end = p;
-    }
+    })?;
     // Stored blocks after the last token cover the rest of the data.
     end += skips
         .iter()
         .filter(|s| s.0 == total)
         .map(|s| s.1)
         .sum::<usize>();
-    if end != n {
+    if end != n || bi != nb {
         return Err(Error::Corrupt);
     }
-    let tokens: Vec<Token> = toks.concat();
-    drop(toks);
-
-    // The blocks, with their headers.
-    let hr = &mut BitReader::new(hdrs);
-    let mut recipe = header::Recipe::default();
-    let mut blocks = Vec::with_capacity(layout.blocks.len());
-    let mut starts = Vec::with_capacity(layout.blocks.len() + 1);
-    let mut k = 0;
-    let nb = layout.blocks.len();
-    for (i, (b, &c)) in layout.blocks.into_iter().zip(&counts).enumerate() {
-        let t = &tokens[k..k + c];
-        starts.push(k);
-        k += c;
-        let body = match b {
-            Shape::Stored { pad, len } => Body::Stored { pad, len },
-            Shape::Coded { btype: 1, .. } => Body::Fixed { tokens: vec![] },
-            Shape::Coded { .. } => Body::Dynamic {
-                header: header::read(hr, t, &mut recipe)?,
-                tokens: vec![],
-            },
-        };
-        blocks.push(Block {
-            last: i + 1 == nb,
-            body,
-        });
-    }
-    starts.push(k);
-    let stream = Stream {
-        blocks,
-        tail_pad: layout.tail_pad,
-        trailing: layout.trailing,
-    };
-    write::write(&stream, &starts, &tokens, data).map_err(|_| Error::Corrupt)
+    sink(
+        &w.finish(layout.tail_pad, &layout.trailing)
+            .map_err(|_| Error::Corrupt)?,
+    );
+    Ok(())
 }
 
 /// `f(0..n)` on up to `threads` threads, in order.
