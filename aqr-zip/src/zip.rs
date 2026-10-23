@@ -308,24 +308,16 @@ pub const MAX_EXPANSION: u64 = 1032;
 /// the data.
 pub fn inflated_len(d: &[u8]) -> Option<usize> {
     let mut n = Count(0);
-    inflate::parse_into(d, usize::MAX, &mut n).ok()?;
+    inflate::parse_head(d, usize::MAX, &mut n).ok()?;
     Some(n.0)
 }
 
 /// Bytes of the DEFLATE stream at the start of `d` and of its data, without keeping the data,
-/// where it is not known where the stream ends. It is parsed within windows that double while
-/// it runs past them, so that what follows it is not copied as trailing bytes but once.
+/// where it is not known where the stream ends (what follows it is not copied).
 pub fn deflate_len(d: &[u8]) -> Option<(usize, usize)> {
-    let mut w = 1 << 16;
-    loop {
-        let part = &d[..w.min(d.len())];
-        let mut n = Count(0);
-        match inflate::parse_into(part, usize::MAX, &mut n) {
-            Ok(l) => return Some((part.len() - l.stream.trailing.len(), n.0)),
-            Err(aqr_flate::Error::Truncated) if part.len() < d.len() => w *= 2,
-            Err(_) => return None,
-        }
-    }
+    let mut n = Count(0);
+    let l = inflate::parse_head(d, usize::MAX, &mut n).ok()?;
+    Some((l.end, n.0))
 }
 
 /// The data descriptor after a body of `len` bytes ending at `at`, if one is there: by its

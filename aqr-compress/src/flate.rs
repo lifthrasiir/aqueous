@@ -88,8 +88,8 @@ fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &O
 
 /// Bytes of the DEFLATE stream at the start of `d`, its data given to `sink`.
 fn inflate(d: &[u8], sink: &mut impl Sink) -> Option<usize> {
-    let layout = inflate::parse_into(d, usize::MAX, sink).ok()?;
-    Some(d.len() - layout.stream.trailing.len())
+    // what follows the stream may be the rest of a large file: not copied
+    Some(inflate::parse_head(d, usize::MAX, sink).ok()?.end)
 }
 
 /// A sink of nothing.

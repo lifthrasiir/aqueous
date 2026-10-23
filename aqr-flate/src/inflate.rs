@@ -260,6 +260,8 @@ pub struct Layout {
     pub stats: Stats,
     /// Bytes of data.
     pub len: usize,
+    /// Bytes of the stream: where its trailing bytes start in `raw`.
+    pub end: usize,
 }
 
 /// Collects the data and tokens (for [`parse_segments`]). The vectors are kept as raw
@@ -377,6 +379,15 @@ pub fn parse_segments(raw: &[u8], segment: usize) -> Result<Flat> {
 
 /// Parses `raw` like [`parse_segments`], handing the data and tokens to `sink`.
 pub fn parse_into<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<Layout> {
+    let mut l = parse_head(raw, segment, sink)?;
+    l.stream.trailing = raw[l.end..].to_vec();
+    Ok(l)
+}
+
+/// [`parse_into`] for the stream at the start of `raw` alone: its trailing bytes are left empty
+/// (where they start is [`Layout::end`]), so that what follows the stream is not copied. For a
+/// stream found in data whose end is not known.
+pub fn parse_head<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<Layout> {
     let mut b = Bits {
         d: raw,
         pos: 0,
@@ -462,17 +473,17 @@ pub fn parse_into<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<L
     let k = (b.bit_pos() as u32).wrapping_neg() & 7;
     let tail_pad = b.get(k) as u8;
     b.check()?;
-    let trailing = raw[b.bit_pos() / 8..].to_vec();
     Ok(Layout {
         stream: Stream {
             blocks,
             tail_pad,
-            trailing,
+            trailing: Vec::new(),
         },
         starts,
         skips,
         stats: st,
         len: olen,
+        end: b.bit_pos() / 8,
     })
 }
 
@@ -652,6 +663,39 @@ unsafe fn copy_match(base: *mut u8, n: usize, d: usize, len: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Skip;
+
+    impl Sink for Skip {
+        fn lit(&mut self, _: u8) {}
+        fn mat(&mut self, _: u16, _: u16, _: bool) {}
+        fn stored(&mut self, _: &[u8]) {}
+    }
+
+    /// `parse_head` ends where `parse_into` does, without the trailing bytes.
+    #[test]
+    fn head_without_trailing() {
+        let mut raw = crate::deflate::write(
+            &Stream {
+                blocks: vec![Block {
+                    last: true,
+                    body: Body::Stored { pad: 0, len: 5 },
+                }],
+                tail_pad: 0,
+                trailing: vec![],
+            },
+            b"hello",
+        )
+        .unwrap();
+        let end = raw.len();
+        raw.extend_from_slice(&[9; 1000]);
+        let head = parse_head(&raw, usize::MAX, &mut Skip).unwrap();
+        assert_eq!((head.end, head.len), (end, 5));
+        assert!(head.stream.trailing.is_empty());
+        let full = parse_into(&raw, usize::MAX, &mut Skip).unwrap();
+        assert_eq!(full.end, end);
+        assert_eq!(full.stream.trailing, [9; 1000]);
+    }
 
     /// Gives what `deflate::parse` gives, on streams of every block type.
     #[test]
