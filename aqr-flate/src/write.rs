@@ -2,6 +2,8 @@
 //! giving exactly what [`crate::deflate::write`] gives: code lookups by table rather than by
 //! search, and a 64-bit bit buffer.
 
+use std::ops::Range;
+
 use crate::deflate::{Block, Body, Stream, Token};
 use crate::huffman::{self, CL_ORDER, DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA, RleOp};
 use crate::{Error, Result};
@@ -197,6 +199,85 @@ impl Writer {
         Ok(())
     }
 
+    /// Writes `blocks`, each with its tokens `toks[r]`, as [`Writer::block`] would one after
+    /// another: the runs of blocks between stored ones, whose bits do not depend on where they
+    /// start, are written apart on up to `threads` threads, a few thousand tokens at a time,
+    /// then appended.
+    pub fn blocks(
+        &mut self,
+        blocks: &[(Block, Range<usize>)],
+        toks: &[Token],
+        data: &[u8],
+        threads: usize,
+    ) -> Result<()> {
+        let tokens = |r: &Range<usize>| {
+            toks.get(r.clone())
+                .ok_or(Error::Invalid("tokens past the end"))
+        };
+        if threads <= 1 {
+            for (b, r) in blocks {
+                self.block(b, tokens(r)?, data)?;
+            }
+            return Ok(());
+        }
+        let stored = |b: &Block| matches!(b.body, Body::Stored { .. });
+        // a stored block on its own, else blocks of about `chunk` tokens
+        let chunk = (toks.len() / (4 * threads)).max(1 << 14);
+        let mut runs = vec![];
+        let (mut start, mut n) = (0, 0);
+        for (i, (b, r)) in blocks.iter().enumerate() {
+            n += r.len();
+            if stored(b) || n >= chunk || blocks.get(i + 1).is_none_or(|(b, _)| stored(b)) {
+                runs.push(start..i + 1);
+                (start, n) = (i + 1, 0);
+            }
+        }
+        let written = crate::par_map(runs.len(), threads, |j| -> Result<Option<Writer>> {
+            let run = &blocks[runs[j].clone()];
+            if stored(&run[0].0) {
+                return Ok(None);
+            }
+            let mut w = Writer::new(64);
+            for (b, r) in run {
+                w.block(b, tokens(r)?, data)?;
+            }
+            Ok(Some(w))
+        });
+        for (run, w) in runs.into_iter().zip(written) {
+            match w? {
+                Some(w) => self.append(w),
+                None => {
+                    let (b, r) = &blocks[run.start];
+                    self.block(b, tokens(r)?, data)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Appends what `w` wrote from a byte boundary on, as if it was written here.
+    fn append(&mut self, w: Writer) {
+        let (out, acc, n) = (w.w.out, w.w.acc, w.w.n);
+        let me = &mut self.w;
+        me.flush();
+        // its bytes shifted by the `s < 8` bits held back here
+        let s = me.n;
+        if let Some(&last) = out.last() {
+            if s == 0 {
+                me.out.extend_from_slice(&out);
+            } else {
+                me.out.reserve(out.len());
+                me.out.push(me.acc as u8 | out[0] << s);
+                me.out
+                    .extend(out.windows(2).map(|p| p[0] >> (8 - s) | p[1] << s));
+                me.acc = (last >> (8 - s)) as u64;
+            }
+        }
+        // fewer than 32 bits are ever held back
+        me.put(n, acc as u32);
+        self.pos += w.pos;
+    }
+
     /// The bytes written so far and not yet taken (a few bits may be held back).
     pub fn take(&mut self) -> Vec<u8> {
         let cap = self.w.out.capacity().min(1 << 20);
@@ -309,6 +390,52 @@ mod tests {
         for d in 1..=32768u16 {
             assert_eq!(dist_code(d as usize), huffman::dist_code(d), "{d}");
         }
+    }
+
+    /// Blocks written apart on threads, around stored blocks and appended at any bit offset,
+    /// are what they are written one after another.
+    #[test]
+    fn blocks_on_threads() {
+        let mut lcg = 7u32;
+        let mut d = include_bytes!("deflate.rs").repeat(8);
+        d.extend((0..100_000).map(|_| {
+            lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (lcg >> 24) as u8
+        }));
+        d.extend(include_bytes!("write.rs").repeat(8));
+        let mut stored = 0;
+        for spec in [
+            "zlib:level=6",
+            "zlib:level=1,strategy=huffman",
+            "libdeflate:level=9",
+        ] {
+            let raw = spec
+                .parse::<flate_zoo::Encoder>()
+                .unwrap()
+                .compress(&d)
+                .unwrap();
+            let f = crate::inflate::parse(&raw).unwrap();
+            let blocks: Vec<(Block, Range<usize>)> = f
+                .stream
+                .blocks
+                .iter()
+                .cloned()
+                .zip(f.starts.windows(2).map(|s| s[0]..s[1]))
+                .collect();
+            stored += blocks
+                .iter()
+                .filter(|(b, _)| matches!(b.body, Body::Stored { .. }))
+                .count();
+            for threads in [1, 2, 3, 8] {
+                let mut w = Writer::new(64);
+                w.blocks(&blocks, &f.tokens, &f.data, threads).unwrap();
+                assert!(
+                    w.finish(f.stream.tail_pad, &f.stream.trailing).unwrap() == raw,
+                    "{spec}, {threads} threads"
+                );
+            }
+        }
+        assert!(stored > 0);
     }
 
     /// Padding values that do not fit in the padding bits are refused, not ORed into the

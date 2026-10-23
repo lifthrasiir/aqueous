@@ -1629,29 +1629,43 @@ pub fn reconstruct_into(
                     end = p;
                 }
             }
-            // the blocks whose tokens are all decoded
+            // the blocks whose tokens are all decoded, a few thousand at a time: their symbols
+            // counted on the threads, their headers read in order, and then they are written
+            // on the threads
             while bi < nb && (k + counts[bi] <= decoded || !more) {
-                let c = counts[bi];
-                let t = pending.get(k - base..k - base + c).ok_or(Error::Corrupt)?;
-                let body = match shapes.next().unwrap() {
-                    Shape::Stored { pad, len } => Body::Stored { pad, len },
-                    Shape::Coded { btype: 1, .. } => Body::Fixed { tokens: vec![] },
-                    Shape::Coded { .. } => Body::Dynamic {
-                        header: header::read(hr, t, &mut recipe)?,
-                        tokens: vec![],
-                    },
-                };
-                w.block(
-                    &Block {
-                        last: bi + 1 == nb,
-                        body,
-                    },
-                    t,
-                    data,
-                )
-                .map_err(|_| Error::Corrupt)?;
-                k += c;
-                bi += 1;
+                let mut ready = vec![];
+                while ready.len() < 1 << 12 && bi < nb && (k + counts[bi] <= decoded || !more) {
+                    let c = counts[bi];
+                    pending.get(k - base..k - base + c).ok_or(Error::Corrupt)?;
+                    ready.push((shapes.next().unwrap(), k - base..k - base + c));
+                    k += c;
+                    bi += 1;
+                }
+                let freqs = par_map(ready.len(), threads, |j| match ready[j] {
+                    (Shape::Coded { btype: 1, .. }, _) | (Shape::Stored { .. }, _) => None,
+                    (Shape::Coded { .. }, ref r) => Some(header::freqs(&pending[r.clone()])),
+                });
+                let first = bi - ready.len();
+                let mut blocks = Vec::with_capacity(ready.len());
+                for (j, ((shape, r), f)) in ready.into_iter().zip(freqs).enumerate() {
+                    let body = match (shape, f) {
+                        (Shape::Stored { pad, len }, _) => Body::Stored { pad, len },
+                        (_, Some((lf, df))) => Body::Dynamic {
+                            header: header::read_freqs(hr, &lf, &df, &mut recipe)?,
+                            tokens: vec![],
+                        },
+                        _ => Body::Fixed { tokens: vec![] },
+                    };
+                    blocks.push((
+                        Block {
+                            last: first + j + 1 == nb,
+                            body,
+                        },
+                        r,
+                    ));
+                }
+                w.blocks(&blocks, &pending, data, threads)
+                    .map_err(|_| Error::Corrupt)?;
             }
             sink(&w.take());
             if k - base > pending.len() / 2 {
