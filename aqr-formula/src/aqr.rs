@@ -21,6 +21,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fmt;
+use std::ops::Range;
 
 use aqr_common::varint;
 use xxhash_rust::xxh3::Xxh3;
@@ -828,7 +829,7 @@ pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec
 }
 
 /// The file in archive `c`, with the modules implemented by `modules`.
-pub fn decode(c: &[u8], modules: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u8>> {
+pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u8>> {
     if c.starts_with(&ENCRYPTED_HEADER_MAGIC) {
         return unsupported("encrypted archives are not supported yet");
     }
@@ -858,21 +859,45 @@ pub fn decode(c: &[u8], modules: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
         return invalid("no metadata block where the footer points");
     }
 
+    // every formula block read first: a non-leaf block is dropped once nothing is to slice it
     let mut used = vec![false; blocks.non_leaf.len()];
-    let mut out = Vec::new();
-    for leaf in std::mem::take(&mut blocks.leaves) {
-        let leaf = match leaf {
-            Leaf::Stored(d) => d,
-            Leaf::Formula { data, modules: m, resources: r, non_leaf } => {
-                let env = Env {
-                    non_leaf: &blocks.non_leaf,
-                    first: non_leaf,
-                    modules: &blocks.modules[..m],
-                    resources: &blocks.resources[..r],
-                    natives: modules,
-                };
-                evaluate(&data, &env, &mut used)?
+    let env = |modules: usize, resources: usize, first| Env {
+        first,
+        modules: &blocks.modules[..modules],
+        resources: &blocks.resources[..resources],
+        natives,
+    };
+    let programs = blocks
+        .leaves
+        .iter()
+        .map(|leaf| match *leaf {
+            Leaf::Stored(_) => Ok(None),
+            Leaf::Formula { data, modules, resources, non_leaf } => {
+                read(&blocks.formulas[data], &env(modules, resources, non_leaf), blocks.non_leaf.len(), &mut used)
+                    .map(Some)
             }
+        })
+        .collect::<Decoded<Vec<_>>>()?;
+    if used.contains(&false) {
+        return invalid("a non-leaf block no formula block references");
+    }
+    let mut contents = Contents { refs: vec![0; blocks.non_leaf.len()], data: std::mem::take(&mut blocks.non_leaf) };
+    for p in programs.iter().flatten() {
+        for insn in &p.insns {
+            if let &Insn::Slice { block, .. } = insn {
+                contents.refs[p.blocks[block]] += 1;
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (leaf, program) in std::mem::take(&mut blocks.leaves).into_iter().zip(programs) {
+        let leaf = match (leaf, program) {
+            (Leaf::Stored(d), _) => d,
+            (Leaf::Formula { modules, resources, non_leaf, .. }, Some(p)) => {
+                run(p, &env(modules, resources, non_leaf), &mut contents)?
+            }
+            (Leaf::Formula { .. }, None) => unreachable!(),
         };
         // the first leaf as it is
         if out.is_empty() {
@@ -880,9 +905,6 @@ pub fn decode(c: &[u8], modules: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
         } else {
             out.extend_from_slice(&leaf);
         }
-    }
-    if used.contains(&false) {
-        return invalid("a non-leaf block no formula block references");
     }
     Ok(out)
 }
@@ -894,6 +916,8 @@ fn leb(d: &[u8], at: &mut usize) -> Decoded<u64> {
 /// The blocks of an archive without a metadata block, decoded.
 struct Blocks {
     leaves: Vec<Leaf>,
+    /// The formula data of the formula blocks.
+    formulas: Vec<Vec<u8>>,
     non_leaf: Vec<Vec<u8>>,
     modules: Vec<Vec<u8>>,
     resources: Vec<Resource>,
@@ -901,10 +925,10 @@ struct Blocks {
 
 enum Leaf {
     Stored(Vec<u8>),
-    /// The formula data, with the numbers of module and resource blocks before it and of
-    /// non-leaf blocks.
+    /// The formula data (by index), with the numbers of module and resource blocks before it
+    /// and of non-leaf blocks.
     Formula {
-        data: Vec<u8>,
+        data: usize,
         modules: usize,
         resources: usize,
         non_leaf: usize,
@@ -913,7 +937,13 @@ enum Leaf {
 
 /// The blocks in `d`; `metadata` tells whether the footer points to a metadata block.
 fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
-    let mut b = Blocks { leaves: Vec::new(), non_leaf: Vec::new(), modules: Vec::new(), resources: Vec::new() };
+    let mut b = Blocks {
+        leaves: Vec::new(),
+        formulas: Vec::new(),
+        non_leaf: Vec::new(),
+        modules: Vec::new(),
+        resources: Vec::new(),
+    };
     let mut at = 0;
     while at < d.len() {
         let start = at;
@@ -961,12 +991,15 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
             }
             0x60..=0x63 => b.modules.push(decoded(data, true, true)?),
             0x64..=0x67 => b.resources.push(Resource::new(decoded(data, true, true)?)),
-            0x70..=0x73 => b.leaves.push(Leaf::Formula {
-                data: decoded(data, true, true)?,
-                modules: b.modules.len(),
-                resources: b.resources.len(),
-                non_leaf: b.non_leaf.len(),
-            }),
+            0x70..=0x73 => {
+                b.formulas.push(decoded(data, true, true)?);
+                b.leaves.push(Leaf::Formula {
+                    data: b.formulas.len() - 1,
+                    modules: b.modules.len(),
+                    resources: b.resources.len(),
+                    non_leaf: b.non_leaf.len(),
+                });
+            }
             // mirror blocks, not read
             0xc10..=0xc17 | 0xc50..=0xc57 | 0xc60..=0xc67 | 0xc70..=0xc77 => {}
             0x10..=0x17 if metadata => return unsupported("metadata blocks are not supported yet"),
@@ -1039,7 +1072,6 @@ fn unzstd(window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
 
 /// What a formula block refers to.
 struct Env<'a, 'n> {
-    non_leaf: &'a [Vec<u8>],
     /// The ordinal of the first non-leaf block after the formula block.
     first: usize,
     modules: &'a [Vec<u8>],
@@ -1106,9 +1138,18 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// The output of a formula block of formula data `d`, marking the non-leaf blocks it refers to
-/// in `used`.
-fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
+/// A formula block read: its instructions, and the non-leaf blocks, resources and modules they
+/// refer to (by their ordinals among all).
+struct Program<'a> {
+    insns: Vec<Insn<'a>>,
+    blocks: Vec<usize>,
+    resources: Vec<usize>,
+    modules: Vec<usize>,
+}
+
+/// Formula data `d` read, among `non_leaf` non-leaf blocks, marking those it refers to in
+/// `used`: everything checked that does not depend on the evaluation.
+fn read<'a>(d: &'a [u8], env: &Env, non_leaf: usize, used: &mut [bool]) -> Decoded<Program<'a>> {
     let mut r = Reader { d, at: 0 };
     // the non-leaf blocks referenced, by their ordinals among all
     let (mut blocks, mut next) = (Vec::new(), env.first);
@@ -1116,7 +1157,7 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
         let o = usize::try_from(delta)
             .ok()
             .and_then(|d| next.checked_add(d))
-            .filter(|&o| o < env.non_leaf.len())
+            .filter(|&o| o < non_leaf)
             .ok_or_else(|| Failure::Invalid("a referenced block that does not exist".into()))?;
         blocks.push(o);
         next = o + 1;
@@ -1195,48 +1236,112 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
         return invalid(format!("{depth} outputs, not one"));
     }
     blocks.iter().for_each(|&o| used[o] = true);
+    Ok(Program { insns, blocks, resources, modules })
+}
 
+/// A byte sequence on the stack: a slice of a non-leaf block (by its ordinal among all), a
+/// literal, or bytes of its own.
+enum Value<'a> {
+    Slice(usize, Range<usize>),
+    Literal(&'a [u8]),
+    Bytes(Vec<u8>),
+}
+
+/// The non-leaf blocks as formula blocks are evaluated, each with the slices of it yet to be
+/// evaluated or on the stack: once there are none, it is dropped.
+struct Contents {
+    data: Vec<Vec<u8>>,
+    refs: Vec<usize>,
+}
+
+impl Contents {
+    fn get<'v>(&'v self, v: &'v Value) -> &'v [u8] {
+        match v {
+            Value::Slice(o, r) => &self.data[*o][r.clone()],
+            Value::Literal(l) => l,
+            Value::Bytes(b) => b,
+        }
+    }
+
+    /// `v` used up: its bytes, of its own.
+    fn take(&mut self, v: Value) -> Vec<u8> {
+        match v {
+            Value::Slice(o, r) => {
+                let out = self.data[o][r].to_vec();
+                self.release(o);
+                out
+            }
+            Value::Literal(l) => l.to_vec(),
+            Value::Bytes(b) => b,
+        }
+    }
+
+    /// `vs` used up, once their bytes are no longer needed.
+    fn drop_all(&mut self, vs: Vec<Value>) {
+        for v in vs {
+            if let Value::Slice(o, _) = v {
+                self.release(o);
+            }
+        }
+    }
+
+    fn release(&mut self, o: usize) {
+        self.refs[o] -= 1;
+        if self.refs[o] == 0 {
+            self.data[o] = Vec::new();
+        }
+    }
+}
+
+/// The output of formula block `p`, with the non-leaf blocks in `contents`.
+fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
     // literals and slices where they are
-    let mut stack: Vec<Cow<[u8]>> = Vec::new();
-    for insn in insns {
+    let mut stack: Vec<Value> = Vec::new();
+    for insn in p.insns {
         match insn {
             Insn::Nop => {}
-            Insn::Literal(l) => stack.push(l.into()),
+            Insn::Literal(l) => stack.push(Value::Literal(l)),
             Insn::Swap(depth) => {
                 let top = stack.len() - 1;
                 stack.swap(top, top - depth);
             }
             Insn::Slice { block, start, len } => {
-                let c = &env.non_leaf[blocks[block]];
-                let s = usize::try_from(start)
+                let o = p.blocks[block];
+                let r = usize::try_from(start)
                     .ok()
                     .zip(usize::try_from(len).ok())
-                    .and_then(|(s, l)| c.get(s..s.checked_add(l)?))
+                    .and_then(|(s, l)| Some(s..s.checked_add(l)?))
+                    .filter(|r| r.end <= contents.data[o].len())
                     .ok_or_else(|| Failure::Invalid("slice out of its block".into()))?;
-                stack.push(s.into());
+                stack.push(Value::Slice(o, r));
             }
             Insn::Apply(a) => {
                 let inputs = stack.split_off(stack.len() - a.num_inputs);
-                let res: Vec<Resource> = a.resources.iter().map(|&i| env.resources[resources[i]].clone()).collect();
-                stack.extend(apply(env, modules[a.module], &a, &inputs, &res)?.into_iter().map(Cow::Owned));
+                let res: Vec<Resource> = a.resources.iter().map(|&i| env.resources[p.resources[i]].clone()).collect();
+                let bytes: Vec<&[u8]> = inputs.iter().map(|v| contents.get(v)).collect();
+                let outputs = apply(env, p.modules[a.module], &a, &bytes, &res)?;
+                contents.drop_all(inputs);
+                stack.extend(outputs.into_iter().map(Value::Bytes));
             }
             Insn::Concat(1) => {}
             Insn::Concat(n) => {
                 let parts = stack.split_off(stack.len() - n);
-                stack.push(parts.iter().map(|p| &p[..]).collect::<Vec<_>>().concat().into());
+                let bytes = parts.iter().map(|v| contents.get(v)).collect::<Vec<_>>().concat();
+                contents.drop_all(parts);
+                stack.push(Value::Bytes(bytes));
             }
             Insn::Checksum(v) => {
-                if checksum(stack.last().unwrap()) != v {
+                if checksum(contents.get(stack.last().unwrap())) != v {
                     return invalid("output checksum mismatch");
                 }
             }
         }
     }
-    Ok(stack.pop().unwrap().into_owned())
+    Ok(contents.take(stack.pop().unwrap()))
 }
 
 /// The outputs of application `a` of module block `module`.
-fn apply(env: &Env, module: usize, a: &Apply, inputs: &[Cow<[u8]>], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
+fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
     let w = &env.modules[module];
     let name = native_name(w).ok_or_else(|| Failure::Resource("Wasm modules are not supported yet".into()))?;
     let native = env
@@ -1248,8 +1353,7 @@ fn apply(env: &Env, module: usize, a: &Apply, inputs: &[Cow<[u8]>], resources: &
     let &[size] = &a.output_sizes[..] else {
         return invalid(format!("{name}: {} outputs declared", a.output_sizes.len()));
     };
-    let inputs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
-    let outputs = native.apply(a.params, resources, &inputs, &a.output_sizes)?;
+    let outputs = native.apply(a.params, resources, inputs, &a.output_sizes)?;
     if outputs.len() != 1 || outputs[0].len() as u64 != size {
         return invalid(format!("{name}: outputs of other sizes than declared"));
     }
@@ -1580,6 +1684,26 @@ mod tests {
         ]
         .concat();
         assert_eq!(decode(&formula(&d, &[b"xyz", b"0123"]), &natives()).unwrap(), b"cdab12x");
+    }
+
+    /// A non-leaf block that formula blocks share is there for each of them, as long as any is
+    /// to slice it.
+    #[test]
+    fn shared_blocks() {
+        let mut apply = vec![APPLY, 0, 0, 3, 1, 2, 3];
+        varint::put(&mut apply, MEMORY_LIMIT);
+        apply.extend_from_slice(&[2, 1, 4]);
+        let first =
+            [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
+        let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
+        let c = archive(|out| {
+            block(out, MODULE, &padded(1, |pad| wasm(REV, pad), 3).unwrap());
+            for d in [&first[..], &second] {
+                block(out, FORMULA, &padded(1, |pad| [d, &vec![NOP; pad]].concat(), 3).unwrap());
+            }
+            content_block(out, false, &[b"xyz"], None);
+        });
+        assert_eq!(decode(&c, &natives()).unwrap(), b"zyyxzxyz");
     }
 
     #[test]
