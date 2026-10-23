@@ -285,7 +285,7 @@ fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Opti
                 found.push((p, n, child));
                 p += n;
             }
-            None => p += 1,
+            None => p = detect::next_start(d, p + 1),
         }
     }
     // each file with the data before it, and the data after the last and the whole

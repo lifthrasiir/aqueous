@@ -74,6 +74,11 @@ impl fmt::Display for Format {
 /// header, the end of an ID3v2 tag), except for a LevelDB table, known by its footer: the
 /// recompressor may still turn the data down.
 pub fn detect(d: &[u8]) -> Option<Format> {
+    detect_at(d, true)
+}
+
+/// [`detect`], of data at its start (`start`) or in the middle of other data.
+fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     let at = |p: usize, m: &[u8]| d.get(p..p + m.len()) == Some(m);
     if at(0, b"\x89PNG\r\n\x1a\n") {
         Some(Format::Png)
@@ -101,7 +106,7 @@ pub fn detect(d: &[u8]) -> Option<Format> {
         Some(Format::Zip)
     } else if at(0, &[0x1f, 0x8b, 8]) {
         Some(Format::Gzip)
-    } else if zlib_header(d) {
+    } else if zlib_header(d, start) {
         Some(Format::Zlib)
     } else if aqr_snappy::leveldb::is_table(d) {
         Some(Format::LevelDb)
@@ -110,31 +115,81 @@ pub fn detect(d: &[u8]) -> Option<Format> {
     }
 }
 
-/// [`detect`] for a file found anywhere in data. A first byte no signature starts with is
-/// turned down at once, and so are a LevelDB table, whose end would be that of the data, and a
-/// SQLite database, which is a whole file and is not in other data.
-pub(crate) fn starts(d: &[u8]) -> Option<Format> {
-    const FIRST: [bool; 256] = {
-        let mut t = [false; 256];
-        let s = b"\x89%8fRFI\xffM\x1fm\x04P";
-        let mut i = 0;
-        while i < s.len() {
-            t[s[i] as usize] = true;
-            i += 1;
+/// Whether a file of a format [`starts`] finds may start with bytes `a`, `b`.
+const fn pair(a: u8, b: u8) -> bool {
+    match a {
+        0x89 => b == b'P',
+        b'%' => b == b'P',
+        b'f' => b == b'L',
+        b'R' => b == b'I',
+        b'F' => b == b'O',
+        b'I' => b == b'D',
+        0xff => b == 0xd8 || b & 0xe0 == 0xe0,
+        b'M' => b == b'Z',
+        0x1f => b == 0x8b,
+        b'm' => b == b'o',
+        0x04 => b == 0x22,
+        b'P' => b == b'K',
+        // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
+        _ => {
+            a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
+                || a == b'8' && b == b'B'
         }
-        // zlib's CMF: DEFLATE with a window of at most 32K
-        let mut cmf = 0x08;
-        while cmf <= 0x78 {
-            t[cmf] = true;
-            cmf += 0x10;
-        }
-        t
-    };
-    if FIRST[*d.first()? as usize] {
-        detect(d).filter(|&f| !matches!(f, Format::LevelDb | Format::Sqlite))
-    } else {
-        None
     }
+}
+
+/// [`pair`] for every two bytes, a bit each.
+const PAIRS: [u64; 1024] = {
+    let mut t = [0u64; 1024];
+    let mut i = 0;
+    while i < 65536 {
+        if pair((i >> 8) as u8, i as u8) {
+            t[i >> 6] |= 1 << (i & 63);
+        }
+        i += 1;
+    }
+    t
+};
+
+fn pairs(a: u8, b: u8) -> bool {
+    let i = (a as usize) << 8 | b as usize;
+    PAIRS[i >> 6] >> (i & 63) & 1 != 0
+}
+
+/// Where in `d` from `p` on a file of a format [`starts`] finds may start (by its first two
+/// bytes), or its end.
+pub(crate) fn next_start(d: &[u8], p: usize) -> usize {
+    d.get(p..).and_then(|r| r.windows(2).position(|w| pairs(w[0], w[1]))).map_or(d.len(), |q| p + q)
+}
+
+/// [`detect`] for a file found anywhere in data. Two first bytes no signature starts with are
+/// turned down at once, and so are a LevelDB table, whose end would be that of the data, and a
+/// SQLite database, which is a whole file and is not in other data. A zlib stream starting with
+/// a fixed block is not taken either ([`zlib_header`]).
+pub(crate) fn starts(d: &[u8]) -> Option<Format> {
+    // what every format starting with those bytes starts with: most pairs start none, and some
+    // that are common in code (0x48 0x89, x86-64's `mov`) only a zlib header
+    if !pairs(*d.first()?, *d.get(1)?) {
+        return None;
+    }
+    let likely = match d[0] {
+        0x89 => d.starts_with(b"\x89PNG"),
+        b'%' => d.starts_with(b"%PDF-"),
+        b'8' => d.starts_with(b"8BPS") || zlib_header(d, false),
+        b'f' => d.starts_with(b"fLaC"),
+        b'R' => d.starts_with(b"RIFF"),
+        b'F' => d.starts_with(b"FORM"),
+        b'I' => d.starts_with(b"ID3"),
+        0xff => true,
+        b'M' => d.starts_with(b"MZ"),
+        0x1f => d.starts_with(&[0x1f, 0x8b]),
+        b'm' | 0x04 => aqr_lz4::formula::starts(d),
+        b'P' => d.starts_with(b"PK\x03\x04"),
+        // zlib's CMF: DEFLATE with a window of at most 32K
+        b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
+        _ => false,
+    };
+    if likely { detect_at(d, false).filter(|&f| !matches!(f, Format::LevelDb | Format::Sqlite)) } else { None }
 }
 
 /// A SQLite database header: the magic string, a page size, and the fields that must have one
@@ -172,15 +227,85 @@ pub(crate) fn pe(d: &[u8]) -> bool {
     p >= 0x40 && d.get(p..p.saturating_add(4)) == Some(b"PE\0\0")
 }
 
-/// A zlib header (RFC 1950) for DEFLATE without a preset dictionary.
-pub(crate) fn zlib_header(d: &[u8]) -> bool {
+/// A zlib header (RFC 1950) for DEFLATE without a preset dictionary, followed by what starts
+/// like a DEFLATE stream ([`aqr_flate::inflate::plausible_start`]), with a fixed block only at
+/// the `start` of data.
+pub(crate) fn zlib_header(d: &[u8], start: bool) -> bool {
     let Some(&[cmf, flg]) = d.first_chunk() else { return false };
-    cmf & 15 == 8 && cmf >> 4 <= 7 && flg & 0x20 == 0 && (cmf as u16 * 256 + flg as u16).is_multiple_of(31)
+    if !(cmf & 15 == 8 && cmf >> 4 <= 7 && flg & 0x20 == 0 && (cmf as u16 * 256 + flg as u16).is_multiple_of(31)) {
+        return false;
+    }
+    // Two bytes pass by chance in one of about 250 places, and more often in code (`48 89`,
+    // x86-64's `mov`): the stream must start like one too.
+    aqr_flate::inflate::plausible_start(&d[2..], start)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The first two bytes of anything `starts` takes are a pair; noise has few.
+    #[test]
+    fn pairs_of_starts() {
+        let n = (0..65536).filter(|&i| pairs((i >> 8) as u8, i as u8)).count();
+        assert!(n < 400, "{n}");
+        for (d, _) in [
+            (&b"\x89PNG"[..], 0),
+            (b"%PDF", 0),
+            (b"8BPS", 0),
+            (b"fLaC", 0),
+            (b"RIFF", 0),
+            (b"FORM", 0),
+            (b"ID3\x04", 0),
+            (b"\xff\xd8", 0),
+            (b"\xff\xfb", 0),
+            (b"MZ", 0),
+            (b"\x1f\x8b", 0),
+            (b"mozLz4", 0),
+            (b"\x04\x22", 0),
+            (b"PK", 0),
+            (b"\x78\x9c", 0),
+            (b"\x78\xda", 0),
+            (b"\x48\x89", 0),
+        ] {
+            assert!(pairs(d[0], d[1]), "{d:x?}");
+        }
+    }
+
+    /// `starts` turns down at once only what `detect_at` would turn down in the middle of data
+    /// (or take as a whole file alone), at every position of data of every kind.
+    #[test]
+    fn starts_as_detect() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let mut data = aqr_common::rng::noise(20000);
+        for f in [
+            "aqr-jpeg/tests/data/gradient.jpg",
+            "aqr-flac/tests/data/s16_f5.flac",
+            "aqr-mp3/tests/data/tags.mp3",
+            "aqr-zip/tests/data/py-deflate.zip",
+            "aqr-zip/tests/data/infozip-stream.zip",
+            "aqr-snappy/tests/data/table-mul.ldb",
+        ] {
+            data.extend(std::fs::read(format!("{root}/{f}")).unwrap());
+        }
+        // every signature, and every byte before a header-like pair
+        for b in 0..=255u8 {
+            data.extend([b, 0x9c, 0x03, 0x00, b, 0x89, 0xe5, 0x41, b, 0xfb, 0x90, 0]);
+        }
+        for m in
+            [&b"\x89PNG\r\n\x1a\n"[..], b"%PDF-1.7", b"8BPS\0\x01", b"RIFF\0\0\0\0WAVE", b"ID3\x04\0\0\0\0\0\x02xx"]
+        {
+            data.extend_from_slice(m);
+        }
+        for p in 0..data.len() {
+            let d = &data[p..];
+            assert_eq!(
+                starts(d),
+                detect_at(d, false).filter(|&f| !matches!(f, Format::LevelDb | Format::Sqlite)),
+                "at {p}"
+            );
+        }
+    }
 
     #[test]
     fn magics() {
@@ -207,10 +332,18 @@ mod tests {
             (&pe, Some(Format::Pe)),
             (b"MZ\x90\0", None),
             (b"\x1f\x8b\x08\0", Some(Format::Gzip)),
-            (b"\x78\x9c", Some(Format::Zlib)),
-            (b"\x78\xda", Some(Format::Zlib)),
-            (b"\x78\x9d", None),
-            (b"\x78\xbb", None), // preset dictionary
+            // a header, then the first block's: fixed, stored, dynamic
+            (b"\x78\x9c\x03\x00", Some(Format::Zlib)),
+            (b"\x78\xda\x01\x05\x00\xfa\xff", Some(Format::Zlib)),
+            (b"\x78\x9d\x03\x00", None),
+            (b"\x78\xbb\x03\x00", None), // preset dictionary
+            // a header alone, a reserved block type, stored lengths that do not match, more
+            // length or distance codes than there are
+            (b"\x78\x9c", None),
+            (b"\x78\x9c\x07\x00", None),
+            (b"\x78\x9c\x01\x05\x00\xfb\xff", None),
+            (b"\x78\x9c\xf5\x1c", None),
+            (b"\x78\x9c\xed\x1e", None),
             (b"mozLz40\0\x10\0\0\0", Some(Format::Lz4)),
             (b"\x04\x22\x4d\x18\x64\x40", Some(Format::Lz4)),
             (b"mozLz4", None),
@@ -222,6 +355,16 @@ mod tests {
         for &(d, f) in cases {
             assert_eq!(detect(d), f, "{d:x?}");
         }
+        // a stream of dynamic blocks
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(9));
+        std::io::Write::write_all(
+            &mut z,
+            &std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/src/detect.rs")).unwrap(),
+        )
+        .unwrap();
+        let z = z.finish().unwrap();
+        assert_eq!(z[2] >> 1 & 3, 2);
+        assert_eq!(detect(&z), Some(Format::Zlib));
         // A database header, and the magic string in SQLite's code: a page size by chance,
         // the rest not what a header must have.
         let mut db = b"SQLite format 3\0".to_vec();
