@@ -61,6 +61,8 @@ pub enum Error {
     Inconsistent,
     /// Bad parameters or priors.
     Param(String),
+    /// The stream has more data than allowed ([`Options::max_data`]).
+    Limit,
 }
 
 impl fmt::Display for Error {
@@ -71,6 +73,7 @@ impl fmt::Display for Error {
             Error::Corrupt => f.write_str("corrupt metadata"),
             Error::Inconsistent => f.write_str("internal error: deconstruction is inconsistent"),
             Error::Param(m) => write!(f, "{m}"),
+            Error::Limit => f.write_str("DEFLATE stream of more data than allowed"),
         }
     }
 }
@@ -209,6 +212,8 @@ pub struct Options {
     /// Check that the stream is written back exactly from what was parsed (a safeguard
     /// against parser or writer bugs, which costs a full write).
     pub verify: bool,
+    /// Streams of more data than this are refused ([`Error::Limit`]), before it is all made.
+    pub max_data: usize,
 }
 
 impl Options {
@@ -239,6 +244,7 @@ impl Default for Options {
             segment: 1 << 20,
             prefix: 4 << 10,
             verify: false,
+            max_data: usize::MAX,
         }
     }
 }
@@ -485,7 +491,13 @@ fn code_streamed(
 /// Parses `raw` again, giving `send` the tokens of each segment (as `cuts` mark them) in order
 /// as it is complete, those at the end without tokens too.
 fn split_parsed(raw: &[u8], cuts: &[usize], send: impl FnMut(usize, Vec<Token>)) -> Result<()> {
-    let mut split = Split { cuts, seg: 0, n: 0, cur: Vec::new(), send };
+    let mut split = Split {
+        cuts,
+        seg: 0,
+        n: 0,
+        cur: Vec::new(),
+        send,
+    };
     let r = inflate::parse_head(raw, usize::MAX, &mut split);
     // segments without tokens at the end (none at all in a stream of stored blocks)
     while split.seg + 1 < split.cuts.len() {
@@ -507,8 +519,8 @@ impl Flat {
         stream
     }
 
-    fn new(raw: &[u8], segment: usize, threads: usize, verify: bool) -> Result<Flat> {
-        let f = inflate::parse_segments(raw, segment)?;
+    fn new(raw: &[u8], segment: usize, threads: usize, verify: bool, max: usize) -> Result<Flat> {
+        let f = inflate::parse_segments_max(raw, segment, max)?;
         if verify {
             // The writer must round-trip what the parser saw, or nothing downstream can.
             let mut stream = f.stream.clone();
@@ -588,9 +600,9 @@ pub fn deconstruct_hinted(
     // the rule): they are parsed again by segment, and dropped once coded (`code_streamed`).
     let streamed = priors.is_none() && !opts.verify;
     let f = if streamed {
-        inflate::parse_segments_head(raw, opts.segment, opts.prefix)?
+        inflate::parse_segments_head(raw, opts.segment, opts.prefix, opts.max_data)?
     } else {
-        Flat::new(raw, opts.segment, threads, opts.verify)?
+        Flat::new(raw, opts.segment, threads, opts.verify, opts.max_data)?
     };
     // What a record cannot hold, or reconstruct would reject (FORMAT.md, "Domain").
     let n = f.data.len();
@@ -1132,7 +1144,7 @@ pub struct Prepared {
 impl Prepared {
     /// The first `prefix` bytes of data of a raw stream.
     pub fn new(raw: &[u8], prefix: usize) -> Result<Prepared> {
-        let f = Flat::new(raw, usize::MAX, 1, false)?;
+        let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX)?;
         Ok(Prepared::from_flat(&f, prefix))
     }
 
@@ -1242,7 +1254,7 @@ impl Prepared {
 /// A stream's fingerprint and the estimated cost in bits of each rule over the first
 /// `prefix` bytes of its data, for deriving rule catalogs.
 pub fn analyze(raw: &[u8], rules: &[Rule], prefix: usize) -> Result<((u64, u64), Vec<f64>, usize)> {
-    let f = Flat::new(raw, usize::MAX, 1, false)?;
+    let f = Flat::new(raw, usize::MAX, 1, false, usize::MAX)?;
     let fp = fingerprint(&f, headers(&f).1.unwrap_or(u32::MAX));
     let mut p = Prepared::from_flat(&f, prefix);
     let costs = rules.iter().map(|&r| p.cost(r)).collect::<Result<_>>()?;

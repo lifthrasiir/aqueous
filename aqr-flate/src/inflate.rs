@@ -42,9 +42,13 @@ pub struct Stats {
     pub cuts: Vec<usize>,
     pub cut_pos: Vec<usize>,
     segment: usize,
+    /// Where the next token is looked at: a cut may come at it, or the data is beyond `max`
+    /// past it.
     next: usize,
     /// No cut before this token index (where stored blocks were).
     no_cut: usize,
+    /// Bytes of data allowed.
+    max: usize,
 }
 
 impl Stats {
@@ -53,7 +57,9 @@ impl Stats {
         if p >= self.next && k > 0 && k != self.no_cut {
             self.cuts.push(k);
             self.cut_pos.push(p);
-            self.next = p + self.segment;
+            self.next = p
+                .saturating_add(self.segment)
+                .min(self.max.saturating_add(1));
         }
     }
 }
@@ -372,27 +378,41 @@ pub fn parse(raw: &[u8]) -> Result<Flat> {
 
 /// Parses `raw`, with segments of about `segment` bytes in [`Stats`].
 pub fn parse_segments(raw: &[u8], segment: usize) -> Result<Flat> {
+    parse_segments_max(raw, segment, usize::MAX)
+}
+
+/// [`parse_segments`] refusing data of more than `max` bytes (as [`parse_head_max`] does).
+pub fn parse_segments_max(raw: &[u8], segment: usize, max: usize) -> Result<Flat> {
     collect(
         raw,
         segment,
+        max,
         Collect::<false>::new(raw.len() * 3, raw.len(), usize::MAX),
     )
 }
 
 /// [`parse_segments`] keeping only the tokens that start before `prefix` bytes of data: all
-/// else (the data, the blocks, the statistics) as it gives.
-pub fn parse_segments_head(raw: &[u8], segment: usize, prefix: usize) -> Result<Flat> {
+/// else (the data, the blocks, the statistics) as it gives; refusing data of more than `max`
+/// bytes.
+pub fn parse_segments_head(raw: &[u8], segment: usize, prefix: usize, max: usize) -> Result<Flat> {
     collect(
         raw,
         segment,
+        max,
         Collect::<true>::new(raw.len() * 3, prefix / 2 + 64, prefix),
     )
 }
 
-fn collect<const HEAD: bool>(raw: &[u8], segment: usize, mut c: Collect<HEAD>) -> Result<Flat> {
-    let l = parse_into(raw, segment, &mut c);
+fn collect<const HEAD: bool>(
+    raw: &[u8],
+    segment: usize,
+    max: usize,
+    mut c: Collect<HEAD>,
+) -> Result<Flat> {
+    let l = parse_head_max(raw, segment, max, &mut c);
     let (data, tokens) = c.into_vecs();
-    let l = l?;
+    let mut l = l?;
+    l.stream.trailing = raw[l.end..].to_vec();
     Ok(Flat {
         stream: l.stream,
         data,
@@ -414,6 +434,17 @@ pub fn parse_into<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<L
 /// (where they start is [`Layout::end`]), so that what follows the stream is not copied. For a
 /// stream found in data whose end is not known.
 pub fn parse_head<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<Layout> {
+    parse_head_max(raw, segment, usize::MAX, sink)
+}
+
+/// [`parse_head`] refusing data of more than `max` bytes ([`Error::Limit`]), before it is
+/// all made (it goes at most a match beyond).
+pub fn parse_head_max<S: Sink>(
+    raw: &[u8],
+    segment: usize,
+    max: usize,
+    sink: &mut S,
+) -> Result<Layout> {
     let mut b = Bits {
         d: raw,
         pos: 0,
@@ -427,8 +458,9 @@ pub fn parse_head<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<L
         cuts: vec![0],
         cut_pos: vec![0],
         segment,
-        next: segment,
+        next: segment.min(max.saturating_add(1)),
         no_cut: usize::MAX,
+        max,
         ..Default::default()
     };
     // Bytes and tokens so far.
@@ -489,6 +521,9 @@ pub fn parse_head<S: Sink>(raw: &[u8], segment: usize, sink: &mut S) -> Result<L
             _ => return Err(Error::Invalid("reserved block type")),
         };
         b.check()?;
+        if olen > max {
+            return Err(Error::Limit);
+        }
         blocks.push(Block { last, body });
         if last {
             break;
@@ -754,6 +789,9 @@ fn tokens_into<S: Sink>(
             break Err(Error::Truncated);
         }
         if o >= st.next {
+            if o > st.max {
+                break Err(Error::Limit);
+            }
             st.token_at(t, o);
         }
         let sym = match lit.decode(&mut b) {

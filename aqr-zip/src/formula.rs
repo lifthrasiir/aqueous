@@ -144,44 +144,66 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let candidates: Vec<usize> = (0..locals.len())
         .filter(|&i| made[i].is_none() && locals[i].method(input) == DEFLATED && flags(locals[i]) & ENCRYPTED == 0)
         .collect();
+    let fopt = aqr_flate::Options { profile: opt.profile, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
+    // The bodies of `jobs` made from their data, each refused of more than it is given; None
+    // where one has more.
+    let split = |jobs: &[(usize, u64)]| -> Option<Vec<Option<Made>>> {
+        let made = par_jobs(
+            jobs,
+            |&(i, _)| locals[i].body.len(),
+            opt.threads,
+            |&(i, max), threads| {
+                let body = &input[locals[i].body.clone()];
+                let max_data = usize::try_from(max).unwrap_or(usize::MAX);
+                match aqr_flate::deconstruct_with(body, &aqr_flate::Options { threads, max_data, ..fopt.clone() }) {
+                    // kept, the body would also take its CRC-32 and size
+                    // (and tiny records are much alike, so that they compress well together)
+                    Ok((data, record)) => {
+                        Some((record.len() < body.len() + 16).then_some(Made::Deflated { data, record }))
+                    }
+                    Err(aqr_flate::Error::Limit) => None,
+                    Err(_) => Some(None),
+                }
+            },
+        );
+        made.into_iter().collect()
+    };
     let bound =
         candidates.iter().fold(0u64, |b, &i| b.saturating_add(locals[i].body.len() as u64 * zip::MAX_EXPANSION));
-    let chosen = if bound <= opt.limit {
-        // all fit whatever they hold
-        candidates
-    } else {
-        // by their data's size, measured without keeping it, the least expanding first
-        let sizes = par_map(&candidates, opt.threads, |&i| zip::inflated_len(&input[locals[i].body.clone()]));
-        let mut order: Vec<(usize, u64)> =
-            candidates.iter().zip(&sizes).filter_map(|(&i, s)| Some((i, (*s)? as u64))).collect();
-        order.sort_by_key(|&(i, n)| (n as u128 * u64::MAX as u128 / (locals[i].body.len() as u128 + 1), i));
-        let mut budget = opt.limit;
-        order
-            .into_iter()
-            .filter(|&(_, n)| {
-                let fits = n <= budget;
-                if fits {
-                    budget -= n;
-                }
-                fits
-            })
-            .map(|(i, _)| i)
-            .collect()
+    let declared: Vec<(usize, u64)> = candidates.iter().map(|&i| (i, kept_entry(input, locals[i], &map).1)).collect();
+    let fit = |jobs: &[(usize, u64)]| {
+        jobs.iter().try_fold(0u64, |b, &(_, n)| b.checked_add(n)).is_some_and(|n| n <= opt.limit)
     };
-    let fopt = aqr_flate::Options { profile: opt.profile, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
-    let split = par_jobs(
-        &chosen,
-        |&i| locals[i].body.len(),
-        opt.threads,
-        |&i, threads| {
-            let body = &input[locals[i].body.clone()];
-            let (data, record) =
-                aqr_flate::deconstruct_with(body, &aqr_flate::Options { threads, ..fopt.clone() }).ok()?;
-            // kept, the body would also take its CRC-32 and size
-            // (and tiny records are much alike, so that they compress well together)
-            (record.len() < body.len() + 16).then_some(Made::Deflated { data, record })
-        },
-    );
+    let (chosen, split) = match () {
+        // all fit whatever they hold
+        _ if bound <= opt.limit => {
+            let all: Vec<(usize, u64)> = candidates.iter().map(|&i| (i, u64::MAX)).collect();
+            (candidates, split(&all)?)
+        }
+        // all fit if they hold no more than the headers say, which they are held to: measuring
+        // them first would choose them all as well
+        _ if let Some(made) = fit(&declared).then(|| split(&declared)).flatten() => (candidates, made),
+        _ => {
+            // by their data's size, measured without keeping it, the least expanding first
+            let sizes = par_map(&candidates, opt.threads, |&i| zip::inflated_len(&input[locals[i].body.clone()]));
+            let mut order: Vec<(usize, u64)> =
+                candidates.iter().zip(&sizes).filter_map(|(&i, s)| Some((i, (*s)? as u64))).collect();
+            order.sort_by_key(|&(i, n)| (n as u128 * u64::MAX as u128 / (locals[i].body.len() as u128 + 1), i));
+            let mut budget = opt.limit;
+            let chosen: Vec<(usize, u64)> = order
+                .into_iter()
+                .filter(|&(_, n)| {
+                    let fits = n <= budget;
+                    if fits {
+                        budget -= n;
+                    }
+                    fits
+                })
+                .collect();
+            let made = split(&chosen)?;
+            (chosen.into_iter().map(|(i, _)| i).collect(), made)
+        }
+    };
     let mut inflated = 0;
     for (&i, m) in chosen.iter().zip(split) {
         if let Some(Made::Deflated { data, .. }) = &m {

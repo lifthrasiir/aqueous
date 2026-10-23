@@ -316,6 +316,59 @@ fn huge_stream_lengths_are_rejected() {
     assert!(aqr_flate::reconstruct(b"", &meta).is_err());
 }
 
+/// Streams of more data than [`aqr_flate::Options::max_data`] are refused, with no more of it
+/// made than a match beyond, even within a block; streams of just that much are not.
+#[test]
+fn data_beyond_the_limit_is_refused() {
+    let input = include_bytes!("../src/zlib.rs").repeat(2);
+    let raw = "zlib:level=6"
+        .parse::<flate_zoo::Encoder>()
+        .unwrap()
+        .compress(&input)
+        .unwrap();
+    for (profile, verify) in [
+        (aqr_flate::DEFAULT_PROFILE, false),
+        (aqr_flate::DEFAULT_PROFILE, true),
+        (aqr_flate::ADAPTIVE, false),
+    ] {
+        let opts = |max_data| aqr_flate::Options {
+            verify,
+            max_data,
+            ..aqr_flate::Options::for_profile(profile).unwrap()
+        };
+        let (data, _) = aqr_flate::deconstruct_with(&raw, &opts(input.len())).unwrap();
+        assert!(data == input);
+        assert!(matches!(
+            aqr_flate::deconstruct_with(&raw, &opts(input.len() - 1)),
+            Err(aqr_flate::Error::Limit)
+        ));
+    }
+    struct Count(usize);
+    impl aqr_flate::inflate::Sink for Count {
+        fn lit(&mut self, _: u8) {
+            self.0 += 1;
+        }
+        fn mat(&mut self, len: u16, _: u16, _: bool) {
+            self.0 += len as usize;
+        }
+        fn stored(&mut self, b: &[u8]) {
+            self.0 += b.len();
+        }
+    }
+    let raw = "zlib:level=6"
+        .parse::<flate_zoo::Encoder>()
+        .unwrap()
+        .compress(&vec![0; 1 << 20])
+        .unwrap();
+    let mut n = Count(0);
+    let r = aqr_flate::inflate::parse_head_max(&raw, usize::MAX, 1000, &mut n);
+    assert!(
+        matches!(r, Err(aqr_flate::Error::Limit)) && n.0 <= 1000 + 258,
+        "{}",
+        n.0
+    );
+}
+
 /// The formula module reads the record with the model data it is given as resources, in
 /// binary, not with the built-in one: the profile only tells static coding from adaptive.
 #[test]

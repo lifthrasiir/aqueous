@@ -442,6 +442,22 @@ fn inflate_limit() {
     assert_eq!(e.inflated, 300_000);
 }
 
+/// Bodies inflate all where the sizes their headers say fit the limit; where one holds more
+/// than it says, they are measured as above.
+#[test]
+fn inflate_limit_by_declared_sizes() {
+    let es = vec![entry("zeros", vec![0; 1 << 20]), entry("text", text(100_000)), entry("more", text(200_000))];
+    let limit =
+        |es: &[Entry], limit| roundtrip_with(&archive(es.to_vec()).bytes(), &Options { limit, ..Options::default() }).1;
+    assert_eq!(limit(&es, 1_400_000), [Body::Deflated; 3]);
+    assert_eq!(limit(&es, 1_300_000), [Body::Kept, Body::Deflated, Body::Deflated]);
+    let mut lying = es.clone();
+    lying[0] = Entry { body: Some(deflate(&[0; 1 << 20], 6)), ..entry("zeros", vec![0; 1000]) };
+    assert_eq!(limit(&lying, 400_000), [Body::Kept, Body::Deflated, Body::Deflated]);
+    lying[2] = Entry { body: Some(deflate(&text(200_000), 6)), ..entry("more", text(1000)) };
+    assert_eq!(limit(&lying, 400_000), [Body::Kept, Body::Deflated, Body::Deflated]);
+}
+
 /// An archive of archives like 42.zip: every level holds the same archive many times, which
 /// the layout takes again rather than inflating each.
 #[test]
