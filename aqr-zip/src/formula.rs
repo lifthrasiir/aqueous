@@ -54,22 +54,22 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// Bytes from which a DEFLATE stream gets threads of its own: two of aqr-flate's segments.
 const LARGE: usize = 2 << 20;
 
-/// `f(item, threads)` on every element of `items`, by `threads` threads: those of `size` at
-/// least [`LARGE`] one after another with all of them (aqr-flate codes segments in parallel),
-/// the others side by side with one each.
+/// `f(item, threads)` on every element of `items`, by `threads` threads, the largest by `size`
+/// first: those of at least [`LARGE`] with all of them (aqr-flate codes segments in parallel,
+/// but parses a stream on one), the others with one each, all side by side, so that the small
+/// fill the threads a large one leaves idle.
 fn par_jobs<T: Sync, R: Send>(
     items: &[T],
-    size: impl Fn(&T) -> usize,
+    size: impl Fn(&T) -> usize + Sync,
     threads: usize,
     f: impl Fn(&T, usize) -> R + Sync,
 ) -> Vec<R> {
-    let (large, small): (Vec<usize>, Vec<usize>) = (0..items.len()).partition(|&i| size(&items[i]) >= LARGE);
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(size(&items[i])));
+    let done = par_map(&order, threads, |&i| f(&items[i], if size(&items[i]) >= LARGE { threads } else { 1 }));
     let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
-    for i in large {
-        out[i] = Some(f(&items[i], threads));
-    }
-    for (i, r) in small.iter().zip(par_map(&small, threads, |&i| f(&items[i], 1))) {
-        out[*i] = Some(r);
+    for (i, r) in order.into_iter().zip(done) {
+        out[i] = Some(r);
     }
     out.into_iter().map(Option::unwrap).collect()
 }
