@@ -12,6 +12,7 @@ members = [
     "aqr-flate",
     "aqr-git",
     "aqr-jpeg",
+    "aqr-lz4",
     "aqr-mp3",
     "aqr-obj",
     "aqr-pdf",

@@ -1,0 +1,14 @@
+[package]
+name = "aqr-lz4"
+version = "0.1.0"
+edition = "2024"
+description = "LZ4 blocks and frames rebuilt bit for bit from their data, by liblz4's fast compressor reimplemented"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula" }
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+
+[dev-dependencies]
+zstd = "0.13"

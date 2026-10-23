@@ -18,6 +18,10 @@ pub const X86: Module = Module { name: "exe-recons/x86", version: 1 };
 /// profile; inputs: the data and the record.
 pub const FLATE: Module = aqr_flate::formula::MODULE;
 
+/// liblz4's fast compressor on data, for an LZ4 block or frame. Parameters: the kind of stream
+/// and the compressor's settings; inputs: the data.
+pub const LZ4: Module = aqr_lz4::formula::MODULE;
+
 // A recompressor as a module of its own (its `formula` module, see its FORMAT.md), rebuilding
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
@@ -30,7 +34,7 @@ pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 9] = [X86, FLATE, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE];
+pub const MODULES: [Module; 10] = [X86, FLATE, LZ4, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE];
 
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
@@ -104,6 +108,9 @@ impl Native {
             x86::decode(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0).ok_or_else(|| "corrupt".into())
         } else if m == FLATE {
             aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)
+        } else if m == LZ4 {
+            none(resources)?;
+            aqr_lz4::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if let Some((_, decode)) = RECONS.iter().find(|r| r.0 == m) {
             decode(params, resources, inputs, len, threads)
         } else {

@@ -11,6 +11,8 @@ pub enum Format {
     Gzip,
     /// zlib stream (aqr-flate on its DEFLATE stream).
     Zlib,
+    /// mozlz4 file or LZ4 frame (aqr-lz4 on its stream).
+    Lz4,
     Png,
     Jpeg,
     Mp3,
@@ -23,10 +25,11 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 10] = [
+    pub const ALL: [Format; 11] = [
         Format::Pe,
         Format::Gzip,
         Format::Zlib,
+        Format::Lz4,
         Format::Png,
         Format::Jpeg,
         Format::Mp3,
@@ -41,6 +44,7 @@ impl Format {
             Format::Pe => "pe",
             Format::Gzip => "gzip",
             Format::Zlib => "zlib",
+            Format::Lz4 => "lz4",
             Format::Png => "png",
             Format::Jpeg => "jpeg",
             Format::Mp3 => "mp3",
@@ -82,6 +86,8 @@ pub fn detect(d: &[u8]) -> Option<Format> {
         Some(Format::Mp3)
     } else if pe(d) {
         Some(Format::Pe)
+    } else if aqr_lz4::formula::starts(d) {
+        Some(Format::Lz4)
     } else if at(0, &[0x1f, 0x8b, 8]) {
         Some(Format::Gzip)
     } else if zlib_header(d) {
@@ -96,7 +102,7 @@ pub fn detect(d: &[u8]) -> Option<Format> {
 pub(crate) fn starts(d: &[u8]) -> Option<Format> {
     const FIRST: [bool; 256] = {
         let mut t = [false; 256];
-        let s = b"\x89S%8fRFI\xffM\x1f";
+        let s = b"\x89S%8fRFI\xffM\x1fm\x04";
         let mut i = 0;
         while i < s.len() {
             t[s[i] as usize] = true;
@@ -176,6 +182,9 @@ mod tests {
             (b"\x78\xda", Some(Format::Zlib)),
             (b"\x78\x9d", None),
             (b"\x78\xbb", None), // preset dictionary
+            (b"mozLz40\0\x10\0\0\0", Some(Format::Lz4)),
+            (b"\x04\x22\x4d\x18\x64\x40", Some(Format::Lz4)),
+            (b"mozLz4", None),
             (b"hello", None),
             (b"", None),
         ];

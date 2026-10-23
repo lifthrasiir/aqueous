@@ -57,6 +57,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-jpeg",
+ "aqr-lz4",
  "aqr-mp3",
  "aqr-pdf",
  "aqr-png",
@@ -74,6 +75,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-jpeg",
+ "aqr-lz4",
  "aqr-mp3",
  "aqr-pdf",
  "aqr-png",
@@ -163,6 +165,16 @@ version = "0.1.0"
 dependencies = [
  "walrus",
  "wasmparser",
+]
+
+[[package]]
+name = "aqr-lz4"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "xxhash-rust",
+ "zstd",
 ]
 
 [[package]]

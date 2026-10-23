@@ -2,7 +2,7 @@ use std::io::Write;
 
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
-use aqr_decompress::{FLAC, FLATE, JPEG, MP3, Native, PDF, X86, decompress};
+use aqr_decompress::{FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, X86, decompress};
 use aqr_formula::aqr;
 
 fn fixture(path: &str) -> Vec<u8> {
@@ -132,6 +132,47 @@ fn gzip_nested() {
     assert_eq!(modules(&roundtrip(&d, &all())), [FLATE.name; 2]);
     assert_eq!(modules(&roundtrip(&d, &Options { depth: 1, ..all() })), [FLATE.name]);
     assert_eq!(modules(&roundtrip(&d, &Options { depth: 0, ..all() })), [""; 0]);
+}
+
+/// Lines of JSON like Firefox's session store, less regular than [`text`].
+fn records(n: usize) -> Vec<u8> {
+    let mut t = Vec::new();
+    let mut r = 0x9e3779b97f4a7c15u64;
+    while t.len() < n {
+        r = r.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let k = r >> 33;
+        writeln!(
+            t,
+            r#"{{"url":"https://site{}.example/{:x}","title":"page {}","t":{}}},"#,
+            k % 50,
+            k,
+            k % 997,
+            1790000000000 + k
+        )
+        .unwrap();
+    }
+    t
+}
+
+fn mozlz4(d: &[u8]) -> Vec<u8> {
+    let blk = aqr_lz4::block::Compressor::compress_fast(d, 1).unwrap();
+    [&aqr_lz4::formula::MOZLZ4[..], &(d.len() as u32).to_le_bytes(), &blk].concat()
+}
+
+#[test]
+fn lz4_nested() {
+    let f = roundtrip(&fixture("aqr-lz4/tests/data/f64k.lz4"), &all());
+    assert_eq!(modules(&f), [LZ4.name]);
+    // linked blocks are not reproduced
+    assert!(modules(&roundtrip(&fixture("aqr-lz4/tests/data/f64k-linked.lz4"), &all())).is_empty());
+
+    let flac = fixture("aqr-flac/tests/data/s16_f5.flac");
+    let f = roundtrip(&mozlz4(&gzip(&flac)), &all());
+    assert_eq!(modules(&f), [LZ4.name, FLATE.name, FLAC.name]);
+    // found in data, and archived smaller than raw
+    let d = [text(5000), mozlz4(&records(200_000)), text(5000)].concat();
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(modules(&f), [LZ4.name]);
 }
 
 #[test]
