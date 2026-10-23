@@ -16,6 +16,7 @@
 //! [`decode`] evaluates such archives, and any other without a metadata block, a dictionary
 //! or an encryption.
 
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -610,7 +611,7 @@ fn cut<'a>(pieces: &[&'a [u8]], mut start: usize, mut len: usize) -> Vec<&'a [u8
 }
 
 /// [`SAMPLE`] bytes of `data` in [`SAMPLE_CHUNKS`] chunks spread evenly over it, or all of it.
-fn sampled<'a>(data: &[&'a [u8]]) -> std::borrow::Cow<'a, [u8]> {
+fn sampled<'a>(data: &[&'a [u8]]) -> Cow<'a, [u8]> {
     let n = total(data);
     if let [d] = data
         && n <= SAMPLE
@@ -1189,11 +1190,12 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
     }
     blocks.iter().for_each(|&o| used[o] = true);
 
-    let mut stack: Vec<Vec<u8>> = Vec::new();
+    // literals and slices where they are
+    let mut stack: Vec<Cow<[u8]>> = Vec::new();
     for insn in insns {
         match insn {
             Insn::Nop => {}
-            Insn::Literal(l) => stack.push(l.to_vec()),
+            Insn::Literal(l) => stack.push(l.into()),
             Insn::Swap(depth) => {
                 let top = stack.len() - 1;
                 stack.swap(top, top - depth);
@@ -1205,16 +1207,17 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
                     .zip(usize::try_from(len).ok())
                     .and_then(|(s, l)| c.get(s..s.checked_add(l)?))
                     .ok_or_else(|| Failure::Invalid("slice out of its block".into()))?;
-                stack.push(s.to_vec());
+                stack.push(s.into());
             }
             Insn::Apply(a) => {
                 let inputs = stack.split_off(stack.len() - a.num_inputs);
                 let res: Vec<Resource> = a.resources.iter().map(|&i| env.resources[resources[i]].clone()).collect();
-                stack.extend(apply(env, modules[a.module], &a, &inputs, &res)?);
+                stack.extend(apply(env, modules[a.module], &a, &inputs, &res)?.into_iter().map(Cow::Owned));
             }
+            Insn::Concat(1) => {}
             Insn::Concat(n) => {
                 let parts = stack.split_off(stack.len() - n);
-                stack.push(parts.concat());
+                stack.push(parts.iter().map(|p| &p[..]).collect::<Vec<_>>().concat().into());
             }
             Insn::Checksum(v) => {
                 if checksum(stack.last().unwrap()) != v {
@@ -1223,11 +1226,11 @@ fn evaluate(d: &[u8], env: &Env, used: &mut [bool]) -> Decoded<Vec<u8>> {
             }
         }
     }
-    Ok(stack.pop().unwrap())
+    Ok(stack.pop().unwrap().into_owned())
 }
 
 /// The outputs of application `a` of module block `module`.
-fn apply(env: &Env, module: usize, a: &Apply, inputs: &[Vec<u8>], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
+fn apply(env: &Env, module: usize, a: &Apply, inputs: &[Cow<[u8]>], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
     let w = &env.modules[module];
     let name = native_name(w).ok_or_else(|| Failure::Resource("Wasm modules are not supported yet".into()))?;
     let native = env
