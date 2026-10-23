@@ -20,6 +20,7 @@ aqr-psd = { path = "../aqr-psd" }
 aqr-snappy = { path = "../aqr-snappy" }
 aqr-sqlite = { path = "../aqr-sqlite" }
 aqr-zip = { path = "../aqr-zip" }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 aqr-common = { path = "../aqr-common" }

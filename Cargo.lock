@@ -67,6 +67,7 @@ dependencies = [
  "aqr-zip",
  "crc32fast",
  "flate2",
+ "xxhash-rust",
 ]
 
 [[package]]

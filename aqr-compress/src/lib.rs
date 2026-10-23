@@ -43,7 +43,9 @@
 //!
 //! Formulas are verified by whoever takes them, not as they are made: with
 //! [`Options::verify`], [`compress`] decodes the archive it makes, and stores the file raw
-//! instead where that does not give it back. [`recompress`] does not verify.
+//! instead where that does not give it back. [`recompress`] does not verify. The applications
+//! of modules are evaluated beforehand, while the file is still recompressed, and their outputs
+//! taken by the decoding (`verify`).
 //! [`Native`](aqr_decompress::Native) evaluates the formulas.
 //!
 //! ```no_run
@@ -58,6 +60,7 @@ mod detect;
 mod extent;
 mod flate;
 mod pe;
+mod verify;
 mod zip;
 
 use std::cell::Cell;
@@ -67,7 +70,7 @@ pub use aqr_formula::{Formula, Module, Node};
 pub use detect::{Format, detect};
 pub use extent::extent;
 
-use aqr_decompress::{FLATE, LZ4, SNAPPY, ZIP};
+use aqr_decompress::{FLATE, LZ4, Native, SNAPPY, ZIP};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 
@@ -156,12 +159,14 @@ pub const CONTENTS: [Content; 4] = [
 pub(crate) struct Cx {
     enc: Encoder,
     inflate: Cell<u64>,
+    /// Where the formulas recompressors make are evaluated beforehand, for [`compress`].
+    pre: Option<verify::Prevalidator>,
 }
 
 impl Cx {
     fn new(d: &[u8], opt: &Options) -> Cx {
         let inflate = opt.expansion.saturating_mul(d.len() as u64).saturating_add(EXPANSION_SLACK);
-        Cx { enc: Encoder::with_threads(opt.level, opt.threads), inflate: Cell::new(inflate) }
+        Cx { enc: Encoder::with_threads(opt.level, opt.threads), inflate: Cell::new(inflate), pre: None }
     }
 
     /// Takes `n` bytes of inflated data from the budget, if there are as many left.
@@ -186,17 +191,24 @@ pub fn recompress(d: &[u8], opt: &Options) -> Formula {
 
 /// `d` as an archive, with the checksum of `d`.
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
-    let cx = Cx::new(d, opt);
+    let mut cx = Cx::new(d, opt);
+    cx.pre = opt.verify.then(|| verify::Prevalidator::spawn(opt.threads));
     let f = recompress_at(d, opt, 0, opt.file, &cx);
-    finish(&f, d, opt, &cx)
+    let memo = cx.pre.take().map(verify::Prevalidator::finish).unwrap_or_default();
+    finish(&f, d, opt, &cx, &memo)
 }
 
-/// The archive of formula `f` of `d`; with [`Options::verify`], decoded and compared with `d`,
-/// and where it is not `d` (a module's bug), the archive of `d` raw instead.
-fn finish(f: &Formula, d: &[u8], opt: &Options, cx: &Cx) -> Vec<u8> {
+/// The archive of formula `f` of `d`; with [`Options::verify`], decoded and compared with `d`
+/// (the outputs of applications in `memo` taken from there), and where it is not `d` (a
+/// module's bug), the archive of `d` raw instead.
+fn finish(f: &Formula, d: &[u8], opt: &Options, cx: &Cx, memo: &verify::Memo) -> Vec<u8> {
     let sum = Some(aqr::checksum(d));
+    let decodes = |c: &[u8]| {
+        let m = verify::Cached { native: Native { threads: opt.threads }, memo, hits: Default::default() };
+        aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m)).is_ok_and(|out| out == d)
+    };
     match cx.enc.encode(f, sum) {
-        Ok(c) if !opt.verify || aqr_decompress::decompress(&c, opt.threads).is_ok_and(|out| out == d) => c,
+        Ok(c) if !opt.verify || decodes(&c) => c,
         // a leaf of other bytes than `d` is not encoded with its checksum
         _ => cx.enc.encode(&Formula::raw("raw", d.to_vec()), sum).expect("a stream of the whole"),
     }
@@ -234,6 +246,9 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -
     }))
     .ok()
     .flatten()?;
+    if let Some(pre) = &cx.pre {
+        pre.submit(&f, d);
+    }
     nest(&mut f, opt, depth, cx);
     smaller(&f, d, opt, cx).then_some(f)
 }
@@ -439,6 +454,34 @@ mod tests {
         pub(crate) static TRIED: std::cell::RefCell<Vec<Format>> = const { std::cell::RefCell::new(Vec::new()) };
     }
 
+    /// The formulas recompressors make are evaluated beforehand: decoding the archive takes
+    /// every application's output from the memo, and runs the module where it is not there.
+    #[test]
+    fn verified_beforehand() {
+        let text: Vec<u8> = (0..20000).flat_map(|i| format!("line {i} of the text\n").into_bytes()).collect();
+        let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let d = z.finish().unwrap();
+        let opt = Options { smaller: false, ..Options::default() };
+        let mut cx = Cx::new(&d, &opt);
+        cx.pre = Some(verify::Prevalidator::spawn(2));
+        let f = recompress_at(&d, &opt, 0, opt.file, &cx);
+        let memo = cx.pre.take().unwrap().finish();
+        assert!(!f.applies().is_empty());
+        let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
+        let decode = |c: &[u8], memo: &verify::Memo| {
+            let m = verify::Cached { native: Native { threads: 1 }, memo, hits: Default::default() };
+            let out = aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m));
+            (out, m.hits.into_inner().unwrap())
+        };
+        assert_eq!(decode(&c, &memo), (Ok(d.clone()), f.applies().len()));
+        // without the memo, the same, with the modules run
+        assert_eq!(decode(&c, &Default::default()), (Ok(d.clone()), 0));
+        // another archive's applications are not in it
+        let other = compress(&d[..d.len() - 1], &Options { verify: false, ..opt.clone() });
+        assert_eq!(decode(&other, &memo).1, 0);
+    }
+
     /// An archive that does not give the file back is replaced by that of the file raw.
     #[test]
     fn finish_falls_back() {
@@ -449,20 +492,20 @@ mod tests {
         wrong.streams[0].data[7] ^= 1;
         let raw = aqr::encode(&Formula::raw("raw", d.clone()), Some(aqr::checksum(&d)), opt.level).unwrap();
         // a leaf, whose checksum is not the output's, is not encoded at all
-        assert_eq!(finish(&wrong, &d, &Options { verify: false, ..opt.clone() }, &cx), raw);
+        assert_eq!(finish(&wrong, &d, &Options { verify: false, ..opt.clone() }, &cx, &Default::default()), raw);
         // two slices: the archive has the output's checksum
         wrong.root = Node::Concat(vec![Node::slice(0, 0, 100), Node::slice(0, 100, d.len() as u64 - 100)]);
-        assert_eq!(finish(&wrong, &d, &opt, &cx), raw);
+        assert_eq!(finish(&wrong, &d, &opt, &cx, &Default::default()), raw);
         // a module that fails
         let fails = Formula {
             streams: vec![aqr_formula::Stream { class: "raw".into(), data: vec![1, 2, 3] }],
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
         };
-        assert_eq!(finish(&fails, &d, &opt, &cx), raw);
+        assert_eq!(finish(&fails, &d, &opt, &cx, &Default::default()), raw);
         // without verification, as it is
         let opt = Options { verify: false, ..opt };
         assert_eq!(
-            aqr_decompress::decompress(&finish(&wrong, &d, &opt, &cx), 1),
+            aqr_decompress::decompress(&finish(&wrong, &d, &opt, &cx, &Default::default()), 1),
             Err(aqr::Failure::Invalid("output checksum mismatch".into()))
         );
     }
