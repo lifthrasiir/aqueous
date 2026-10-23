@@ -110,10 +110,10 @@ const SAMPLE: usize = 1 << 20;
 const SAMPLE_CHUNKS: usize = 16;
 
 /// What an [`Encoder`] makes of a stream: compressed already ([`compressed`]), or to be
-/// compressed at a zstd level.
+/// compressed at a zstd level, to about so many bytes (by a sample).
 enum Plan {
     Done(Option<Vec<u8>>),
-    Level(i32),
+    Level(i32, usize),
 }
 
 /// Encodes formulas as archives at a [`Level`], keeping the compressed streams and resources
@@ -389,7 +389,7 @@ impl Encoder {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => e.insert(match self.plan(data)? {
                 Plan::Done(c) => c,
-                Plan::Level(level) => compressed(data, level, self.threads)?,
+                Plan::Level(level, size) => compressed_to(data, level, self.threads, size)?,
             }),
         };
         content_block(out, leaf, data, c.as_deref());
@@ -406,7 +406,7 @@ impl Encoder {
                 let c = match self.plan(r)? {
                     Plan::Done(Some(c)) => Some(c),
                     Plan::Done(None) => compressed(r, MID_BASE.0, self.threads)?,
-                    Plan::Level(level) => compressed(r, level, self.threads)?,
+                    Plan::Level(level, size) => compressed_to(r, level, self.threads, size)?,
                 };
                 e.insert(c.ok_or_else(|| Error::new(format!("a resource of {} bytes does not compress", r.len())))?)
             }
@@ -419,7 +419,11 @@ impl Encoder {
     fn plan(&self, data: &[u8]) -> Result<Plan> {
         match self.level {
             Level::Zstd(l) if data.len() <= SAMPLE => Ok(Plan::Done(compressed(data, l, self.threads)?)),
-            Level::Zstd(l) => Ok(Plan::Level(l)),
+            Level::Zstd(l) => {
+                let sample = sampled(data);
+                let n = compressed(&sample, l, self.threads)?.map_or(sample.len(), |c| c.len());
+                Ok(Plan::Level(l, scaled(n, sample.len(), data.len())))
+            }
             Level::Mid => {
                 let sample = sampled(data);
                 let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
@@ -444,7 +448,8 @@ impl Encoder {
                 let (higher, lower) = lens[1..].split_at(MID_HIGHER.len());
                 let level = mid_pick(sample.len(), lens[0], higher, lower);
                 let best = tried.into_iter().find(|t| t.0 == level).expect("a level tried");
-                Ok(if sample.len() == data.len() { Plan::Done(best.1) } else { Plan::Level(best.0) })
+                let size = scaled(len(&best.1), sample.len(), data.len());
+                Ok(if sample.len() == data.len() { Plan::Done(best.1) } else { Plan::Level(best.0, size) })
             }
         }
     }
@@ -457,14 +462,11 @@ impl Encoder {
         if !self.streams.borrow().contains_key(&key(d)) {
             let c = match self.plan(d)? {
                 Plan::Done(c) => c,
-                Plan::Level(level) => {
-                    let s = sampled(d);
-                    let n_s = compressed(&s, level, self.threads)?.map_or(s.len(), |c| c.len());
-                    let estimate = (n_s as f64 * d.len() as f64 / s.len() as f64) as usize;
+                Plan::Level(level, estimate) => {
                     if n <= estimate / 2 {
                         return Ok(true);
                     }
-                    compressed(d, level, self.threads)?
+                    compressed_to(d, level, self.threads, estimate)?
                 }
             };
             self.streams.borrow_mut().insert(key(d), c);
@@ -544,6 +546,19 @@ const ZSTD_OVERLAP: u32 = 9;
 /// Zstandard's multithreaded mode: the output does not depend on how many (up to 1 MiB of data,
 /// it is also that of the single-threaded mode).
 fn compressed(data: &[u8], level: i32, threads: usize) -> Result<Option<Vec<u8>>> {
+    compressed_to(data, level, threads, usize::MAX)
+}
+
+/// The bytes a stream of `n` bytes compresses to, where a sample of `of` bytes of it compresses
+/// to `to`.
+fn scaled(to: usize, of: usize, n: usize) -> usize {
+    (to as f64 * n as f64 / of.max(1) as f64) as usize
+}
+
+/// [`compressed`], expected to give about `size` bytes: room is made for a little more, and
+/// for as much as Zstandard may give only where that does not do (the output does not depend
+/// on the room it has). A stream is not given room for its own size again for nothing.
+fn compressed_to(data: &[u8], level: i32, threads: usize, size: usize) -> Result<Option<Vec<u8>>> {
     let io = |e: std::io::Error| Error::new(format!("zstd: {e}"));
     let mut c = zstd::bulk::Compressor::new(level).map_err(io)?;
     for p in [
@@ -556,7 +571,18 @@ fn compressed(data: &[u8], level: i32, threads: usize) -> Result<Option<Vec<u8>>
     ] {
         c.set_parameter(p).map_err(io)?;
     }
-    let frame = c.compress(data).map_err(io)?;
+    // the frame, then its checksum
+    let room = size.saturating_add(size / 8).saturating_add(4096).saturating_add(8);
+    let mut frame = Vec::new();
+    if room < zstd::zstd_safe::compress_bound(data.len()) {
+        frame.reserve_exact(room);
+        if c.compress_to_buffer(data, &mut frame).is_err() {
+            frame = Vec::new();
+        }
+    }
+    if frame.is_empty() {
+        frame = c.compress(data).map_err(io)?;
+    }
     // a frame header of no flags, then the window descriptor
     let [m0, m1, m2, m3, 0, window, blocks @ ..] = &frame[..] else {
         return Err(Error::new("zstd: unexpected frame header"));
@@ -565,12 +591,19 @@ fn compressed(data: &[u8], level: i32, threads: usize) -> Result<Option<Vec<u8>>
     if blocks.len() > data.len() {
         return Ok(None);
     }
-    let mut out = Vec::with_capacity(blocks.len() + 20);
-    varint::put(&mut out, (data.len() - blocks.len()) as u64);
-    out.push(*window);
-    out.extend_from_slice(blocks);
-    out.extend_from_slice(&checksum(data).to_le_bytes());
-    Ok(Some(out))
+    // the header put in place of the frame's, in the same vector
+    let mut head = Vec::with_capacity(11);
+    varint::put(&mut head, (data.len() - blocks.len()) as u64);
+    head.push(*window);
+    let sum = checksum(data).to_le_bytes();
+    let Some(at) = 6usize.checked_sub(head.len()) else {
+        // (a varint of 6 bytes: 32 GiB that compress to nothing)
+        return Ok(Some([&head[..], &frame[6..], &sum].concat()));
+    };
+    frame[at..6].copy_from_slice(&head);
+    frame.drain(..at);
+    frame.extend_from_slice(&sum);
+    Ok(Some(frame))
 }
 
 /// Why an archive does not decode, as the spec classifies it.
