@@ -137,6 +137,18 @@ impl Encoder {
         Encoder::with_threads(level, 1)
     }
 
+    /// Drops what is kept of stream `d` compressed (by [`Encoder::smaller`], say), where it will
+    /// not be archived.
+    pub fn forget(&self, d: &[u8]) {
+        self.streams.borrow_mut().remove(&key(d));
+    }
+
+    /// Drops everything kept of the streams and resources compressed.
+    pub fn clear(&self) {
+        self.streams.borrow_mut().clear();
+        self.resources.borrow_mut().clear();
+    }
+
     /// An encoder compressing each stream on `threads` threads, into the same archive as on one.
     pub fn with_threads(level: Level, threads: usize) -> Encoder {
         Encoder { level, threads: threads.max(1), streams: RefCell::default(), resources: RefCell::default() }
