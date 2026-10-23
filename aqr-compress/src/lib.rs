@@ -7,13 +7,14 @@
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
 //!   record).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
+//! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF and SQLite: the recompressor's own formula,
 //!   its module applied to its streams, and files it embeds (PDF's DEFLATE streams and images,
 //!   PSD's and JPEG's embedded files) applied to theirs (see aqr-decompress for the modules).
 //!
 //! In whatever formula a recompressor gives, the data that its applications take as it is
 //! ([`Options::contents`], by default that of a DEFLATE stream, of gzip, zlib or PDF, and
-//! that of an LZ4 stream) is
+//! that of an LZ4 stream or of the blocks of a LevelDB table) is
 //! recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
 //! of the data.
 //!
@@ -55,7 +56,7 @@ pub use aqr_formula::{Formula, Module, Node};
 pub use detect::{Format, detect};
 pub use extent::extent;
 
-use aqr_decompress::{FLATE, LZ4, Native};
+use aqr_decompress::{FLATE, LZ4, Native, SNAPPY};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 
@@ -64,8 +65,8 @@ pub struct Options {
     /// Threads for the recompressors and modules (the formula does not depend on it).
     pub threads: usize,
     /// Formats nested at most this deep: 1 recompresses the file alone, 2 also the data of a
-    /// DEFLATE stream in it (of gzip, zlib or PDF) or of an LZ4 stream, and so on (0
-    /// recompresses nothing).
+    /// DEFLATE stream in it (of gzip, zlib or PDF), of an LZ4 stream or of the blocks of a
+    /// LevelDB table, and so on (0 recompresses nothing).
     pub depth: u32,
     /// Run every module on what it was given, and keep the data raw where the output is not
     /// the original (§6). Without it, the archive must checksum the output (R8).
@@ -121,9 +122,13 @@ pub struct Content {
     pub nest: Nest,
 }
 
-/// The contents of the modules of aqr-decompress: the data of [`FLATE`] and of [`LZ4`], scanned.
-pub const CONTENTS: [Content; 2] =
-    [Content { module: FLATE, input: 0, nest: Nest::Scan }, Content { module: LZ4, input: 0, nest: Nest::Scan }];
+/// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`] and [`SNAPPY`],
+/// scanned.
+pub const CONTENTS: [Content; 3] = [
+    Content { module: FLATE, input: 0, nest: Nest::Scan },
+    Content { module: LZ4, input: 0, nest: Nest::Scan },
+    Content { module: SNAPPY, input: 0, nest: Nest::Scan },
+];
 
 /// `d` as a formula, with the recompressor for its format if any takes it.
 pub fn recompress(d: &[u8], opt: &Options) -> Formula {
@@ -162,6 +167,7 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, enc: &Enco
         Format::Psd => recons(aqr_psd::formula::encode, d, opt),
         Format::Pdf => recons(aqr_pdf::formula::encode, d, opt),
         Format::Sqlite => recons(aqr_sqlite::formula::encode, d, opt),
+        Format::LevelDb => recons(aqr_snappy::formula::encode, d, opt),
     }))
     .ok()
     .flatten()?;
@@ -193,7 +199,9 @@ fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, enc: &Encoder) -
     let mut found = Vec::new();
     let (mut p, mut budget) = (0, d.len().saturating_mul(2).saturating_add(slack));
     while p < d.len() {
-        let child = detect::starts(&d[p..]).filter(|_| budget > 0).and_then(|format| {
+        // at the start, a file may also be known by its end (a LevelDB table)
+        let format = if p == 0 { detect(d) } else { detect::starts(&d[p..]) };
+        let child = format.filter(|_| budget > 0).and_then(|format| {
             let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
             let child = recompress_as(format, &d[p..p + n], opt, depth, enc);
             if child.is_none() {

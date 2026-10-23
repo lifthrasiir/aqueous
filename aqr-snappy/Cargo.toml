@@ -1,0 +1,13 @@
+[package]
+name = "aqr-snappy"
+version = "0.1.0"
+edition = "2024"
+description = "Snappy streams and LevelDB tables rebuilt bit for bit from their data, by Snappy's compressor reimplemented"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula" }
+
+[dev-dependencies]
+zstd = "0.13"

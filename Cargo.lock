@@ -62,6 +62,7 @@ dependencies = [
  "aqr-pdf",
  "aqr-png",
  "aqr-psd",
+ "aqr-snappy",
  "aqr-sqlite",
  "flate2",
 ]
@@ -80,6 +81,7 @@ dependencies = [
  "aqr-pdf",
  "aqr-png",
  "aqr-psd",
+ "aqr-snappy",
  "aqr-sqlite",
 ]
 
@@ -244,6 +246,15 @@ dependencies = [
  "aqr-jpeg",
  "aqr-png",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aqr-snappy"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "zstd",
 ]
 
 [[package]]

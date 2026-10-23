@@ -22,10 +22,12 @@ pub enum Format {
     Psd,
     Pdf,
     Sqlite,
+    /// LevelDB table (aqr-snappy on its blocks), known by its end.
+    LevelDb,
 }
 
 impl Format {
-    pub const ALL: [Format; 11] = [
+    pub const ALL: [Format; 12] = [
         Format::Pe,
         Format::Gzip,
         Format::Zlib,
@@ -37,6 +39,7 @@ impl Format {
         Format::Psd,
         Format::Pdf,
         Format::Sqlite,
+        Format::LevelDb,
     ];
 
     pub fn name(self) -> &'static str {
@@ -52,6 +55,7 @@ impl Format {
             Format::Psd => "psd",
             Format::Pdf => "pdf",
             Format::Sqlite => "sqlite",
+            Format::LevelDb => "leveldb",
         }
     }
 }
@@ -63,7 +67,8 @@ impl fmt::Display for Format {
 }
 
 /// The format `d` starts like, if any. Only the first bytes are looked at (and the PE
-/// header, the end of an ID3v2 tag): the recompressor may still turn the data down.
+/// header, the end of an ID3v2 tag), except for a LevelDB table, known by its footer: the
+/// recompressor may still turn the data down.
 pub fn detect(d: &[u8]) -> Option<Format> {
     let at = |p: usize, m: &[u8]| d.get(p..p + m.len()) == Some(m);
     if at(0, b"\x89PNG\r\n\x1a\n") {
@@ -92,13 +97,15 @@ pub fn detect(d: &[u8]) -> Option<Format> {
         Some(Format::Gzip)
     } else if zlib_header(d) {
         Some(Format::Zlib)
+    } else if aqr_snappy::leveldb::is_table(d) {
+        Some(Format::LevelDb)
     } else {
         None
     }
 }
 
 /// [`detect`] for a file found anywhere in data. A first byte no signature starts with is
-/// turned down at once.
+/// turned down at once, and so is a LevelDB table: its end would be that of the data.
 pub(crate) fn starts(d: &[u8]) -> Option<Format> {
     const FIRST: [bool; 256] = {
         let mut t = [false; 256];
@@ -116,7 +123,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         }
         t
     };
-    if FIRST[*d.first()? as usize] { detect(d) } else { None }
+    if FIRST[*d.first()? as usize] { detect(d).filter(|&f| f != Format::LevelDb) } else { None }
 }
 
 /// Bytes of the ID3v2 tag at the start of `d`, if any.

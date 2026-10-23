@@ -18,6 +18,7 @@ members = [
     "aqr-pdf",
     "aqr-png",
     "aqr-psd",
+    "aqr-snappy",
     "aqr-sqlite",
     "aqr-api",
     "aqr-api/demo/concat",

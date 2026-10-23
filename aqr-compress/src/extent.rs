@@ -24,6 +24,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Psd => psd(d),
         Format::Pdf => Some(pdf(d)),
         Format::Sqlite => sqlite(d),
+        Format::LevelDb => Some(d.len()),
     }?;
     Some(end.min(d.len()))
 }

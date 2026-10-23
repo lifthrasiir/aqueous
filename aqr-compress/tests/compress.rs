@@ -2,7 +2,7 @@ use std::io::Write;
 
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
-use aqr_decompress::{FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, X86, decompress};
+use aqr_decompress::{FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, SNAPPY, X86, decompress};
 use aqr_formula::aqr;
 
 fn fixture(path: &str) -> Vec<u8> {
@@ -173,6 +173,17 @@ fn lz4_nested() {
     let d = [text(5000), mozlz4(&records(200_000)), text(5000)].concat();
     let f = roundtrip(&d, &Options::default());
     assert_eq!(modules(&f), [LZ4.name]);
+}
+
+#[test]
+fn leveldb_tables() {
+    for t in ["table-mul", "table-crc", "mixed-mul", "odd-crc"] {
+        let d = fixture(&format!("aqr-snappy/tests/data/{t}.ldb"));
+        assert_eq!(modules(&roundtrip(&d, &all())), [SNAPPY.name], "{t}");
+    }
+    // known by its end: not found in data, where it would be cut there
+    let d = fixture("aqr-snappy/tests/data/table-mul.ldb");
+    assert!(modules(&roundtrip(&[b"x", &d[..]].concat(), &all())).is_empty());
 }
 
 #[test]
