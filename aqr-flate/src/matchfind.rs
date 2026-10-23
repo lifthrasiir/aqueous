@@ -139,14 +139,15 @@ impl Chain {
     /// Links for searches at `start..end` only (plus lookahead).
     fn ring(data: &[u8], start: usize, end: usize) -> Chain {
         // Positions linked: the window before `start`, up to linking ahead of the last search.
-        let span = (end + LINK_AHEAD + 1).min(data.len()) - start.saturating_sub(WINDOW);
+        let first = start.saturating_sub(WINDOW);
+        let span = (end + LINK_AHEAD + 1).min(data.len()) - first;
         Chain {
             // Never slides if it holds every position.
             links: vec![NONE; (2 * RING).min(data.len() + 1)],
-            base: 0,
+            base: first,
             heads: Heads::new(span),
-            start: 0,
-            next: 0,
+            start: first,
+            next: first,
             lo_search: 0,
         }
     }
@@ -540,6 +541,21 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A matcher for a range far into the data links only the window before the range (its
+    /// table is sized for the range: linking from the start could fill it up).
+    #[test]
+    fn range_links_from_its_window() {
+        let data = lcg_data(4 * RING, 5, b"aabc");
+        let prev = reference_chain(&data);
+        let (start, end) = (3 * RING, 3 * RING + 5000);
+        let mut m = Matcher::single_range(&data, start, end);
+        for q in (start..end).step_by(7) {
+            let f = reference_longest(&data, &prev, q, 64, 258);
+            assert_eq!(m.longest(&data, q, 64, 258), f, "q={q}");
+        }
+        assert_eq!(m.chain.start, start - WINDOW);
     }
 
     /// Every (depth, nice) gives the closest longest match among that many candidates.
