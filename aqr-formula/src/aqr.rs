@@ -22,8 +22,9 @@ use std::collections::hash_map::Entry;
 use std::fmt;
 
 use aqr_common::varint;
-use xxhash_rust::xxh3::xxh3_128;
-use xxhash_rust::xxh64::xxh64;
+use xxhash_rust::xxh3::Xxh3;
+use xxhash_rust::xxh64::{Xxh64, xxh64};
+use zstd::zstd_safe::zstd_sys::ZSTD_EndDirective;
 use zstd::zstd_safe::{self, CParameter, InBuffer, OutBuffer};
 
 use crate::{Error, Formula, Module, Node, Resource, Result};
@@ -140,7 +141,7 @@ impl Encoder {
     /// Drops what is kept of stream `d` compressed (by [`Encoder::smaller`], say), where it will
     /// not be archived.
     pub fn forget(&self, d: &[u8]) {
-        self.streams.borrow_mut().remove(&key(d));
+        self.streams.borrow_mut().remove(&key(&[d]));
     }
 
     /// Drops everything kept of the streams and resources compressed.
@@ -156,8 +157,13 @@ impl Encoder {
 
     /// The length of the archive of `f` without a checksum.
     pub fn len(&self, f: &Formula) -> Result<usize> {
+        self.len_with(f, None)
+    }
+
+    /// [`Encoder::len`], with the stream of `stand_in` (by index) its bytes rather than its data.
+    fn len_with(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>) -> Result<usize> {
         let mut n = Count(0);
-        self.write(f, None, &mut n)?;
+        self.write(f, stand_in, None, &mut n)?;
         Ok(n.0)
     }
 
@@ -165,7 +171,7 @@ impl Encoder {
     fn raw_len(&self, d: &[u8]) -> Result<usize> {
         let mut n = Count(0);
         n.put(&HEADER_MAGIC);
-        self.content_block(&mut n, true, d)?;
+        self.content_block(&mut n, true, &[d])?;
         let blocks = n.0 - HEADER_MAGIC.len();
         footer(&mut n, blocks);
         Ok(n.0)
@@ -176,21 +182,35 @@ impl Encoder {
     pub fn encode(&self, f: &Formula, checksum: Option<u64>) -> Result<Vec<u8>> {
         // sized first (the streams compressed then are kept), so as to be written at its size
         let mut out = Vec::with_capacity(self.len(f)? + 16);
-        self.write(f, checksum, &mut out)?;
+        self.write(f, None, checksum, &mut out)?;
         Ok(out)
     }
 
-    /// [`Encoder::encode`] into `out`.
-    fn write(&self, f: &Formula, checksum: Option<u64>, out: &mut impl Out) -> Result<()> {
+    /// [`Encoder::encode`] into `out`, with the stream of `stand_in` (by index) its bytes rather
+    /// than its data.
+    fn write(
+        &self,
+        f: &Formula,
+        stand_in: Option<(usize, &[&[u8]])>,
+        checksum: Option<u64>,
+        out: &mut impl Out,
+    ) -> Result<()> {
         // of the module and formula blocks
         let level = match self.level {
             Level::Mid => MID_BASE.0,
             Level::Zstd(l) => l,
         };
+        let data: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+        let streams: Vec<&[&[u8]]> = (0..data.len())
+            .map(|s| match stand_in {
+                Some((t, bytes)) if t == s => bytes,
+                _ => std::slice::from_ref(&data[s]),
+            })
+            .collect();
         let mut slices = Ok(());
         f.root.visit(&mut |n| {
             if let &Node::Slice { stream, start, len } = n
-                && f.streams.get(stream).is_none_or(|s| start.checked_add(len).is_none_or(|e| e > s.data.len() as u64))
+                && streams.get(stream).is_none_or(|&s| start.checked_add(len).is_none_or(|e| e > total(s) as u64))
             {
                 slices = Err(Error::new(format!("slice [{start}, +{len}) out of stream #{stream}")));
             }
@@ -200,11 +220,11 @@ impl Encoder {
         out.put(&HEADER_MAGIC);
         let blocks = out.len();
         if let &Node::Slice { stream, start, len } = &f.root {
-            let leaf = &f.streams[stream].data[start as usize..][..len as usize];
-            if checksum.is_some_and(|c| c != self::checksum(leaf)) {
+            let leaf = cut(streams[stream], start as usize, len as usize);
+            if checksum.is_some_and(|c| c != checksum_of(&leaf)) {
                 return Err(Error::new("output checksum not that of the leaf"));
             }
-            self.content_block(out, true, leaf)?;
+            self.content_block(out, true, &leaf)?;
         } else {
             // the non-leaf block of each stream sliced, by its ordinal
             let mut ordinals = vec![None; f.streams.len()];
@@ -265,7 +285,7 @@ impl Encoder {
                 )?,
             );
             for s in sliced {
-                self.content_block(out, false, &f.streams[s].data)?;
+                self.content_block(out, false, streams[s])?;
             }
         }
 
@@ -443,7 +463,7 @@ fn block_of(out: &mut impl Out, ty: u64, parts: &[&[u8]]) {
 impl Encoder {
     /// Appends a compressed or uncompressed (leaf or non-leaf) block of `data`, whichever the
     /// spec allows.
-    fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[u8]) -> Result<()> {
+    fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[&[u8]]) -> Result<()> {
         let mut streams = self.streams.borrow_mut();
         let c = match streams.entry(key(data)) {
             Entry::Occupied(e) => e.into_mut(),
@@ -460,13 +480,13 @@ impl Encoder {
     /// as little as it compresses: the block is always compressed.
     fn resource_block(&self, out: &mut impl Out, r: &[u8]) -> Result<()> {
         let mut resources = self.resources.borrow_mut();
-        let c = match resources.entry(key(r)) {
+        let c = match resources.entry(key(&[r])) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
-                let c = match self.plan(r)? {
+                let c = match self.plan(&[r])? {
                     Plan::Done(Some(c)) => Some(c),
-                    Plan::Done(None) => compressed(r, MID_BASE.0, self.threads)?,
-                    Plan::Level(level, size) => compressed_to(r, level, self.threads, size)?,
+                    Plan::Done(None) => compressed(&[r], MID_BASE.0, self.threads)?,
+                    Plan::Level(level, size) => compressed_to(&[r], level, self.threads, size)?,
                 };
                 e.insert(c.ok_or_else(|| Error::new(format!("a resource of {} bytes does not compress", r.len())))?)
             }
@@ -476,40 +496,41 @@ impl Encoder {
     }
 
     /// What to make of `data` at the level of the encoder.
-    fn plan(&self, data: &[u8]) -> Result<Plan> {
+    fn plan(&self, data: &[&[u8]]) -> Result<Plan> {
+        let n = total(data);
         match self.level {
-            Level::Zstd(l) if data.len() <= SAMPLE => Ok(Plan::Done(compressed(data, l, self.threads)?)),
+            Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(compressed(data, l, self.threads)?)),
             Level::Zstd(l) => {
                 let sample = sampled(data);
-                let n = compressed(&sample, l, self.threads)?.map_or(sample.len(), |c| c.len());
-                Ok(Plan::Level(l, scaled(n, sample.len(), data.len())))
+                let c = compressed(&[&sample], l, self.threads)?.map_or(sample.len(), |c| c.len());
+                Ok(Plan::Level(l, scaled(c, sample.len(), n)))
             }
             Level::Mid => {
                 let sample = sampled(data);
                 let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
-                let probe = compressed(&sample, PROBE, self.threads)?;
+                let probe = compressed(&[&sample], PROBE, self.threads)?;
                 if len(&probe) >= sample.len() - sample.len() / 32 {
                     return Ok(Plan::Done(None));
                 }
-                if data.len() < MID_SMALL {
+                if n < MID_SMALL {
                     return Ok(Plan::Done(compressed(data, MID_BASE.0, self.threads)?));
                 }
-                let mut tried = vec![(MID_BASE.0, compressed(&sample, MID_BASE.0, self.threads)?)];
+                let mut tried = vec![(MID_BASE.0, compressed(&[&sample], MID_BASE.0, self.threads)?)];
                 for (level, _) in MID_HIGHER {
-                    tried.push((level, compressed(&sample, level, self.threads)?));
+                    tried.push((level, compressed(&[&sample], level, self.threads)?));
                 }
                 for level in MID_LOWER {
                     tried.push((
                         level,
-                        if level == PROBE { probe.clone() } else { compressed(&sample, level, self.threads)? },
+                        if level == PROBE { probe.clone() } else { compressed(&[&sample], level, self.threads)? },
                     ));
                 }
                 let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
                 let (higher, lower) = lens[1..].split_at(MID_HIGHER.len());
                 let level = mid_pick(sample.len(), lens[0], higher, lower);
                 let best = tried.into_iter().find(|t| t.0 == level).expect("a level tried");
-                let size = scaled(len(&best.1), sample.len(), data.len());
-                Ok(if sample.len() == data.len() { Plan::Done(best.1) } else { Plan::Level(best.0, size) })
+                let size = scaled(len(&best.1), sample.len(), n);
+                Ok(if sample.len() == n { Plan::Done(best.1) } else { Plan::Level(best.0, size) })
             }
         }
     }
@@ -518,18 +539,29 @@ impl Encoder {
     /// that `d` is estimated to compress to (by a sample) is taken as smaller without
     /// compressing `d`.
     pub fn smaller(&self, f: &Formula, d: &[u8]) -> Result<bool> {
-        let n = self.len(f)?;
-        if !self.streams.borrow().contains_key(&key(d)) {
-            let c = match self.plan(d)? {
+        self.smaller_of(f, None, d)
+    }
+
+    /// [`Encoder::smaller`], with stream `s` of `f` the bytes of `pieces` one after the other
+    /// rather than its data (which is not read): a stream yet to be put together, sized as it
+    /// will be archived.
+    pub fn smaller_with(&self, f: &Formula, s: usize, pieces: &[&[u8]], d: &[u8]) -> Result<bool> {
+        self.smaller_of(f, Some((s, pieces)), d)
+    }
+
+    fn smaller_of(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>, d: &[u8]) -> Result<bool> {
+        let n = self.len_with(f, stand_in)?;
+        if !self.streams.borrow().contains_key(&key(&[d])) {
+            let c = match self.plan(&[d])? {
                 Plan::Done(c) => c,
                 Plan::Level(level, estimate) => {
                     if n <= estimate / 2 {
                         return Ok(true);
                     }
-                    compressed_to(d, level, self.threads, estimate)?
+                    compressed_to(&[d], level, self.threads, estimate)?
                 }
             };
-            self.streams.borrow_mut().insert(key(d), c);
+            self.streams.borrow_mut().insert(key(&[d]), c);
         }
         Ok(n < self.raw_len(d)?)
     }
@@ -554,27 +586,68 @@ fn mid_pick(n: usize, base: usize, higher: &[usize], lower: &[usize]) -> i32 {
     best
 }
 
+/// Bytes of `pieces`, one after the other.
+fn total(pieces: &[&[u8]]) -> usize {
+    pieces.iter().map(|p| p.len()).sum()
+}
+
+/// The `len` bytes from `start` of `pieces`, as pieces.
+fn cut<'a>(pieces: &[&'a [u8]], mut start: usize, mut len: usize) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    for p in pieces {
+        if len == 0 {
+            break;
+        }
+        if start >= p.len() {
+            start -= p.len();
+            continue;
+        }
+        let n = len.min(p.len() - start);
+        out.push(&p[start..][..n]);
+        (start, len) = (0, len - n);
+    }
+    out
+}
+
 /// [`SAMPLE`] bytes of `data` in [`SAMPLE_CHUNKS`] chunks spread evenly over it, or all of it.
-fn sampled(data: &[u8]) -> std::borrow::Cow<'_, [u8]> {
-    if data.len() <= SAMPLE {
-        return data.into();
+fn sampled<'a>(data: &[&'a [u8]]) -> std::borrow::Cow<'a, [u8]> {
+    let n = total(data);
+    if let [d] = data
+        && n <= SAMPLE
+    {
+        return (*d).into();
+    }
+    if n <= SAMPLE {
+        return data.concat().into();
     }
     let chunk = SAMPLE / SAMPLE_CHUNKS;
-    let step = (data.len() - chunk) / (SAMPLE_CHUNKS - 1);
-    (0..SAMPLE_CHUNKS).flat_map(|i| &data[i * step..][..chunk]).copied().collect::<Vec<_>>().into()
+    let step = (n - chunk) / (SAMPLE_CHUNKS - 1);
+    (0..SAMPLE_CHUNKS).flat_map(|i| cut(data, i * step, chunk)).flatten().copied().collect::<Vec<_>>().into()
 }
 
 /// The [`StreamKey`] of `data`.
-fn key(data: &[u8]) -> StreamKey {
-    (xxh3_128(data), data.len())
+fn key(data: &[&[u8]]) -> StreamKey {
+    let mut h = Xxh3::new();
+    data.iter().for_each(|p| h.update(p));
+    (h.digest128(), total(data))
+}
+
+/// [`checksum`] of `data`.
+fn checksum_of(data: &[&[u8]]) -> u64 {
+    let mut h = Xxh64::new(0);
+    data.iter().for_each(|p| h.update(p));
+    h.digest()
 }
 
 /// Appends a block of `data`: compressed as `c` ([`compressed`]) if given, else uncompressed
 /// (leaf or non-leaf).
-fn content_block(out: &mut impl Out, leaf: bool, data: &[u8], c: Option<&[u8]>) {
+fn content_block(out: &mut impl Out, leaf: bool, data: &[&[u8]], c: Option<&[u8]>) {
     match c {
         Some(c) => block(out, if leaf { LEAF_ZSTD } else { NON_LEAF_ZSTD }, c),
-        None => block_of(out, if leaf { LEAF_RAW } else { NON_LEAF_RAW }, &[data, &checksum(data).to_le_bytes()]),
+        None => {
+            let sum = checksum_of(data).to_le_bytes();
+            block_of(out, if leaf { LEAF_RAW } else { NON_LEAF_RAW }, &[data, &[&sum]].concat())
+        }
     }
 }
 
@@ -583,7 +656,7 @@ fn content_block(out: &mut impl Out, leaf: bool, data: &[u8], c: Option<&[u8]>) 
 fn padded(threads: usize, make: impl Fn(usize) -> Vec<u8>, level: i32) -> Result<Vec<u8>> {
     let mut pad = 0;
     loop {
-        if let Some(c) = compressed(&make(pad), level, threads)? {
+        if let Some(c) = compressed(&[&make(pad)], level, threads)? {
             return Ok(c);
         }
         pad = (pad * 2).max(16);
@@ -601,7 +674,7 @@ const ZSTD_OVERLAP: u32 = 9;
 /// blocks would be longer than `data`. It is compressed on `threads` threads, always in
 /// Zstandard's multithreaded mode: the output does not depend on how many (up to 1 MiB of data,
 /// it is also that of the single-threaded mode).
-fn compressed(data: &[u8], level: i32, threads: usize) -> Result<Option<Vec<u8>>> {
+fn compressed(data: &[&[u8]], level: i32, threads: usize) -> Result<Option<Vec<u8>>> {
     compressed_to(data, level, threads, usize::MAX)
 }
 
@@ -614,10 +687,11 @@ fn scaled(to: usize, of: usize, n: usize) -> usize {
 /// [`compressed`], expected to give about `size` bytes: room is made for a little more, and
 /// for as much as Zstandard may give only where that does not do (the output does not depend
 /// on the room it has). A stream is not given room for its own size again for nothing.
-fn compressed_to(data: &[u8], level: i32, threads: usize, size: usize) -> Result<Option<Vec<u8>>> {
-    let io = |e: std::io::Error| Error::new(format!("zstd: {e}"));
-    let mut c = zstd::bulk::Compressor::new(level).map_err(io)?;
+fn compressed_to(data: &[&[u8]], level: i32, threads: usize, size: usize) -> Result<Option<Vec<u8>>> {
+    let zstd = |e: zstd_safe::ErrorCode| Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)));
+    let mut c = zstd_safe::CCtx::create();
     for p in [
+        CParameter::CompressionLevel(level),
         CParameter::ContentSizeFlag(false),
         CParameter::ChecksumFlag(false),
         CParameter::DictIdFlag(false),
@@ -625,33 +699,46 @@ fn compressed_to(data: &[u8], level: i32, threads: usize, size: usize) -> Result
         CParameter::JobSize(ZSTD_JOB),
         CParameter::OverlapSizeLog(ZSTD_OVERLAP),
     ] {
-        c.set_parameter(p).map_err(io)?;
+        c.set_parameter(p).map_err(zstd)?;
     }
+    // Compressed as data in one piece is (of a size known, ended with its last bytes: ended
+    // apart, data ending at the end of a job ends with an empty block).
+    let len = total(data);
+    c.set_pledged_src_size(Some(len as u64)).map_err(zstd)?;
+    let pieces: Vec<&[u8]> = data.iter().copied().filter(|p| !p.is_empty()).collect();
     // the frame, then its checksum
+    let bound = zstd_safe::compress_bound(len).saturating_add(8);
     let room = size.saturating_add(size / 8).saturating_add(4096).saturating_add(8);
-    let mut frame = Vec::new();
-    if room < zstd::zstd_safe::compress_bound(data.len()) {
-        frame.reserve_exact(room);
-        if c.compress_to_buffer(data, &mut frame).is_err() {
-            frame = Vec::new();
+    let mut frame = Vec::with_capacity(room.min(bound));
+    for i in 0..pieces.len().max(1) {
+        let (piece, last) = (pieces.get(i).copied().unwrap_or_default(), i + 1 >= pieces.len());
+        let end = if last { ZSTD_EndDirective::ZSTD_e_end } else { ZSTD_EndDirective::ZSTD_e_continue };
+        let mut input = InBuffer::around(piece);
+        loop {
+            if frame.len() == frame.capacity() {
+                frame.reserve_exact(bound.saturating_sub(frame.len()).max(4096));
+            }
+            let pos = frame.len();
+            let left =
+                c.compress_stream2(&mut OutBuffer::around_pos(&mut frame, pos), &mut input, end).map_err(zstd)?;
+            if if last { left == 0 } else { input.pos() == piece.len() } {
+                break;
+            }
         }
-    }
-    if frame.is_empty() {
-        frame = c.compress(data).map_err(io)?;
     }
     // a frame header of no flags, then the window descriptor
     let [m0, m1, m2, m3, 0, window, blocks @ ..] = &frame[..] else {
         return Err(Error::new("zstd: unexpected frame header"));
     };
     assert_eq!([*m0, *m1, *m2, *m3], ZSTD_MAGIC);
-    if blocks.len() > data.len() {
+    if blocks.len() > len {
         return Ok(None);
     }
     // the header put in place of the frame's, in the same vector
     let mut head = Vec::with_capacity(11);
-    varint::put(&mut head, (data.len() - blocks.len()) as u64);
+    varint::put(&mut head, (len - blocks.len()) as u64);
     head.push(*window);
-    let sum = checksum(data).to_le_bytes();
+    let sum = checksum_of(data).to_le_bytes();
     let Some(at) = 6usize.checked_sub(head.len()) else {
         // (a varint of 6 bytes: 32 GiB that compress to nothing)
         return Ok(Some([&head[..], &frame[6..], &sum].concat()));
@@ -1206,7 +1293,7 @@ mod tests {
         archive(|out| {
             block(out, MODULE, &padded(1, |pad| wasm(REV, pad), 3).unwrap());
             block(out, FORMULA, &padded(1, |pad| [data, &vec![NOP; pad]].concat(), 3).unwrap());
-            streams.iter().for_each(|s| content_block(out, false, s, compressed(s, 3, 1).unwrap().as_deref()));
+            streams.iter().for_each(|s| content_block(out, false, &[s], compressed(&[s], 3, 1).unwrap().as_deref()));
         })
     }
 
@@ -1345,6 +1432,70 @@ mod tests {
             let one = Encoder::new(level).encode(&f, None).unwrap();
             assert_eq!(Encoder::with_threads(level, 4).encode(&f, None).unwrap(), one);
             assert_eq!(decode(&one, &[]).unwrap(), d);
+        }
+    }
+
+    /// A stream in pieces compresses as it does in one, the pieces ending anywhere (at the end
+    /// of a job among them), and is sized as it is archived.
+    #[test]
+    fn pieces() {
+        let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/index.bs")).unwrap();
+        let mut d = Vec::new();
+        let mut rng = aqr_common::rng::Rng::new(1);
+        while d.len() < 2 * ZSTD_JOB as usize {
+            let at = rng.below(text.len() as u64 - 4096) as usize;
+            d.extend_from_slice(&text[at..at + 4096]);
+        }
+        d.truncate(2 * ZSTD_JOB as usize);
+        let job = ZSTD_JOB as usize;
+        let one = compressed(&[&d], 1, 4).unwrap();
+        // as Zstandard compresses it in one go
+        let mut z = zstd::bulk::Compressor::new(1).unwrap();
+        for p in [
+            CParameter::ContentSizeFlag(false),
+            CParameter::ChecksumFlag(false),
+            CParameter::DictIdFlag(false),
+            CParameter::NbWorkers(4),
+            CParameter::JobSize(ZSTD_JOB),
+            CParameter::OverlapSizeLog(ZSTD_OVERLAP),
+        ] {
+            z.set_parameter(p).unwrap();
+        }
+        assert!(
+            one.as_ref().unwrap().ends_with(&[&z.compress(&d).unwrap()[6..], &checksum(&d).to_le_bytes()].concat())
+        );
+        for cuts in [vec![job], vec![1, job - 1, job + 1, d.len()], (1..40).map(|i| i * d.len() / 40).collect()] {
+            let (mut pieces, mut at) = (Vec::new(), 0);
+            for c in cuts {
+                pieces.push(&d[at..c]);
+                at = c;
+            }
+            pieces.push(&d[at..]);
+            assert_eq!(compressed(&pieces, 1, 4).unwrap(), one);
+        }
+
+        let d = &d[..3 << 20];
+        let mut f = Formula::default();
+        f.push("a", b"head".to_vec());
+        f.push("b", Vec::new());
+        f.root = Node::concat([Node::slice(1, 0, d.len() as u64), Node::slice(0, 0, 4)]);
+        let whole = Formula {
+            streams: vec![f.streams[0].clone(), Stream { class: "b".into(), data: d.to_vec() }],
+            ..f.clone()
+        };
+        let pieces = [&d[..100], &d[100..2 << 20], &d[2 << 20..]];
+        let raw = [b"head".as_slice(), d].concat();
+        for level in [Level::Mid, Level::Zstd(3)] {
+            let enc = Encoder::new(level);
+            assert_eq!(enc.len_with(&f, Some((1, &pieces))).unwrap(), Encoder::new(level).len(&whole).unwrap());
+            assert_eq!(
+                enc.smaller_with(&f, 1, &pieces, &raw).unwrap(),
+                Encoder::new(level).smaller(&whole, &raw).unwrap()
+            );
+            // the stream compressed then is the one archived
+            enc.forget(&raw);
+            assert_eq!(enc.encode(&whole, None).unwrap(), Encoder::new(level).encode(&whole, None).unwrap());
+            assert_eq!(enc.streams.borrow().len(), 2);
         }
     }
 

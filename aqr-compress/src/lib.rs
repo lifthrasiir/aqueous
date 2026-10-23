@@ -64,6 +64,7 @@ mod verify;
 mod zip;
 
 use std::cell::Cell;
+use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -236,12 +237,63 @@ fn finish(f: Formula, d: &[u8], opt: &Options, cx: &Cx, memo: verify::Memo, kept
 
 /// [`recompress`] for data `depth` formats deep, within `cx`.
 pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Formula {
-    let f = match how {
+    made(d, opt, depth, how, cx).map_or_else(|| Formula::raw("raw", d.to_vec()), |m| m.cut(d))
+}
+
+/// [`recompress_at`], unless `d` is kept raw; the data that a scan keeps between files is not
+/// cut out of `d` yet.
+fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
+    match how {
         _ if depth >= opt.depth => None,
-        Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)),
-        Nest::Scan => scan(d, opt, depth, cx).filter(|f| smaller(f, d, opt, cx)),
-    };
-    f.unwrap_or_else(|| Formula::raw("raw", d.to_vec()))
+        Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
+        Nest::Scan => scan(d, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx)),
+    }
+}
+
+/// A formula of data, its stream 0 perhaps yet to be cut out of the data: the bytes of `gaps`,
+/// ranges of the data, one after the other. A scan's formula is so until put in place, where
+/// the data between the files found is cut out of the data's own stream if it can be.
+struct Made {
+    f: Formula,
+    gaps: Option<Vec<Range<usize>>>,
+}
+
+impl From<Formula> for Made {
+    fn from(f: Formula) -> Made {
+        Made { f, gaps: None }
+    }
+}
+
+impl Made {
+    /// The formula, cut out of `d`, the data it is of.
+    fn cut(self, d: &[u8]) -> Formula {
+        let Made { mut f, gaps } = self;
+        if let Some(gaps) = gaps {
+            let mut data = Vec::with_capacity(gaps.iter().map(Range::len).sum());
+            gaps.into_iter().for_each(|g| data.extend_from_slice(&d[g]));
+            f.streams[0].data = data;
+        }
+        f
+    }
+
+    /// [`Made::cut`] out of `d` itself, in place.
+    fn cut_from(self, mut d: Vec<u8>) -> Formula {
+        let Made { mut f, gaps } = self;
+        if let Some(gaps) = gaps {
+            let mut at = 0;
+            for g in gaps {
+                let n = g.len();
+                if g.start != at {
+                    d.copy_within(g, at);
+                }
+                at += n;
+            }
+            d.truncate(at);
+            d.shrink_to_fit();
+            f.streams[0].data = d;
+        }
+        f
+    }
 }
 
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
@@ -276,13 +328,21 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -
     if let Some(children) = children {
         place_all(&mut f, children, opt);
     }
-    smaller(&f, d, opt, cx).then_some(f)
+    smaller(&f, None, d, opt, cx).then_some(f)
 }
 
 /// Unless [`Options::smaller`] is off, whether formula `f` of `d` archives smaller than `d`
-/// raw.
-fn smaller(f: &Formula, d: &[u8], opt: &Options, cx: &Cx) -> bool {
-    let smaller = !opt.smaller || cx.enc.smaller(f, d).expect("slices within their streams");
+/// raw, its stream 0 the bytes of `gaps` of `d` if given ([`Made`]).
+fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
+    let smaller = !opt.smaller
+        || match gaps {
+            Some(gaps) => {
+                let pieces: Vec<&[u8]> = gaps.iter().map(|g| &d[g.clone()]).collect();
+                cx.enc.smaller_with(f, 0, &pieces, d)
+            }
+            None => cx.enc.smaller(f, d),
+        }
+        .expect("slices within their streams");
     if smaller {
         // `d` is not archived as it is (`f` is, or is part of something larger kept raw)
         cx.enc.forget(d);
@@ -299,12 +359,12 @@ const SCAN_SLACK: usize = 16 << 20;
 /// next byte, so that files in one turned down are still found. Weak signatures are confirmed
 /// by the extent: a zlib stream by its checksum, MPEG audio frames without a tag by one
 /// following another.
-fn scan(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+fn scan(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
     scan_with(d, opt, depth, SCAN_SLACK, cx)
 }
 
 /// [`scan`] with `slack` for [`SCAN_SLACK`].
-fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Formula> {
+fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Made> {
     let mut found = Vec::new();
     let (mut p, mut budget) = (0, d.len().saturating_mul(2).saturating_add(slack));
     // Where each format's last file turned down ends: within it, a file of that format again
@@ -340,13 +400,15 @@ fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Opti
         found.iter().map(|(_, n, child)| (*n, description_bound(&child.root).saturating_add(around))).collect();
     let keep = fit(around + 11, &sizes, opt.description);
 
+    // the data between the files cut out of `d` once put in place
     let mut f = Formula::default();
     f.push("raw", Vec::new());
-    let (mut gaps, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
+    let (mut gaps, mut parts, mut at, mut len) = (Vec::new(), Vec::new(), 0, 0);
     for ((p, n, child), keep) in found.into_iter().zip(keep) {
         if keep {
-            parts.push(Node::slice(0, gaps.len() as u64, (p - at) as u64));
-            gaps.extend_from_slice(&d[at..p]);
+            parts.push(Node::slice(0, len as u64, (p - at) as u64));
+            gaps.push(at..p);
+            len += p - at;
             parts.push(f.embed(child));
             at = p + n;
         }
@@ -354,11 +416,10 @@ fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Opti
     if parts.is_empty() {
         return None;
     }
-    parts.push(Node::slice(0, gaps.len() as u64, (d.len() - at) as u64));
-    gaps.extend_from_slice(&d[at..]);
-    f.streams[0].data = gaps;
+    parts.push(Node::slice(0, len as u64, (d.len() - at) as u64));
+    gaps.push(at..d.len());
     f.root = Node::concat(parts);
-    Some(f)
+    Some(Made { f, gaps: Some(gaps) })
 }
 
 /// Which of `parts` (bytes of data and of description each) to keep, so that `base` and the
@@ -383,7 +444,7 @@ fn fit(base: usize, parts: &[(usize, usize)], limit: usize) -> Vec<bool> {
 /// The formulas of the contents of the applications in `f` ([`Options::contents`]), a formula
 /// of data `depth` formats deep, to put in place of their slices ([`place_all`]) where they have
 /// any application (as many as fit in [`Options::description`]); `None` where none has.
-fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<Option<Formula>>> {
+fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<Option<Made>>> {
     if depth + 1 >= opt.depth {
         return None;
     }
@@ -392,7 +453,7 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<Option<
     let sizes: Vec<_> = children
         .iter()
         .map(|(slice, child)| match child {
-            Some(c) => (slice.len() as usize, description_bound(&c.root).saturating_sub(description_bound(slice))),
+            Some(c) => (slice.len() as usize, description_bound(&c.f.root).saturating_sub(description_bound(slice))),
             None => (0, 0),
         })
         .collect();
@@ -404,16 +465,24 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<Option<
 }
 
 /// Puts the formulas of [`nested`] in place in `f`; the bytes left without a slice are dropped.
-fn place_all(f: &mut Formula, children: Vec<Option<Formula>>, opt: &Options) {
+fn place_all(f: &mut Formula, children: Vec<Option<Made>>, opt: &Options) {
+    let mut slices = vec![0; f.streams.len()];
+    f.root.visit(&mut |n| {
+        if let &Node::Slice { stream, .. } = n
+            && let Some(n) = slices.get_mut(stream)
+        {
+            *n += 1;
+        }
+    });
     let mut root = std::mem::replace(&mut f.root, Node::Concat(Vec::new()));
-    place(&mut root, f, opt, &mut children.into_iter());
+    place(&mut root, f, &slices, opt, &mut children.into_iter());
     f.root = root;
     f.compact();
 }
 
 /// The contents below node `n` of `f`, in order: each slice, and its formula where it has any
 /// application.
-fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut Vec<(Node, Option<Formula>)>) {
+fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut Vec<(Node, Option<Made>)>) {
     match n {
         Node::Slice { .. } => {}
         Node::Concat(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, cx, out)),
@@ -422,8 +491,8 @@ fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut
                 match (input, content(opt, a.module, i)) {
                     (&Node::Slice { stream, start, len }, Some(content)) => {
                         let d = f.streams.get(stream).and_then(|s| s.data.get(start as usize..)?.get(..len as usize));
-                        let child = d.map(|d| recompress_at(d, opt, depth + 1, content.nest, cx));
-                        out.push((input.clone(), child.filter(|c| !c.applies().is_empty())));
+                        let child = d.and_then(|d| made(d, opt, depth + 1, content.nest, cx));
+                        out.push((input.clone(), child.filter(|c| !c.f.applies().is_empty())));
                     }
                     _ => contents(input, f, opt, depth, cx, out),
                 }
@@ -433,21 +502,35 @@ fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut
 }
 
 /// Puts the formulas of the contents below node `n` of `f`, in the order of [`contents`], in
-/// place of their slices.
-fn place(n: &mut Node, f: &mut Formula, opt: &Options, children: &mut impl Iterator<Item = Option<Formula>>) {
+/// place of their slices: cut out of the stream of their data itself where they are all of it,
+/// the only slice of it (of the `slices` of each stream).
+fn place(
+    n: &mut Node,
+    f: &mut Formula,
+    slices: &[usize],
+    opt: &Options,
+    children: &mut impl Iterator<Item = Option<Made>>,
+) {
     match n {
         Node::Slice { .. } => {}
-        Node::Concat(ns) => ns.iter_mut().for_each(|n| place(n, f, opt, children)),
+        Node::Concat(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
         Node::Apply(a) => {
             let module = a.module;
             for (i, input) in a.inputs.iter_mut().enumerate() {
                 match (&*input, content(opt, module, i)) {
-                    (Node::Slice { .. }, Some(_)) => {
+                    (&Node::Slice { stream, start, len }, Some(_)) => {
                         if let Some(child) = children.next().flatten() {
+                            // (a child is of a slice within its stream)
+                            let data = &mut f.streams[stream].data;
+                            let child = if slices[stream] == 1 && start == 0 && len == data.len() as u64 {
+                                child.cut_from(std::mem::take(data))
+                            } else {
+                                child.cut(&data[start as usize..][..len as usize])
+                            };
                             *input = f.embed(child);
                         }
                     }
-                    _ => place(input, f, opt, children),
+                    _ => place(input, f, slices, opt, children),
                 }
             }
         }
@@ -519,6 +602,40 @@ mod tests {
         assert_eq!(decode(&c, memo), (Ok(d.clone()), f.applies().len()));
         // without the memo, the same, with the modules run
         assert_eq!(decode(&c, Default::default()), (Ok(d.clone()), 0));
+    }
+
+    /// The data between the files a scan found is cut out of the stream of the data in place
+    /// where the stream is all and only the content, else copied out of it.
+    #[test]
+    fn gaps_cut_in_place() {
+        // large enough to be cut to its length where it is (as allocators do)
+        let n = 1 << 20;
+        let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+        let gaps = [&data[2..5], &data[16..]].concat();
+        let child = || {
+            let mut f = Formula::default();
+            f.push("raw", Vec::new());
+            let found = f.push("found", b"FOUND".to_vec());
+            f.root = Node::concat([Node::slice(0, 0, 3), found, Node::slice(0, 3, n as u64 - 16)]);
+            Made { f, gaps: Some(vec![2..5, 16..n]) }
+        };
+        let mut f = Formula::default();
+        let whole = f.push("raw", data.clone());
+        let record = f.push("flate/record", vec![0]);
+        f.root = Node::apply(FLATE, vec![], vec![whole.clone(), record], n as u64);
+        // the stream sliced again
+        let mut copied = f.clone();
+        copied.root = Node::concat([f.root.clone(), whole]);
+
+        let at = f.streams[0].data.as_ptr();
+        place_all(&mut f, vec![Some(child())], &Options::default());
+        let cut = f.streams.iter().find(|s| s.class == "raw").unwrap();
+        assert!(cut.data.as_ptr() == at && cut.data == gaps);
+        assert_eq!(f.streams.len(), 3);
+
+        place_all(&mut copied, vec![Some(child())], &Options::default());
+        let raw: Vec<_> = copied.streams.iter().filter(|s| s.class == "raw").map(|s| &s.data[..]).collect();
+        assert!(raw == [&data[..], &gaps[..]]);
     }
 
     /// An archive that does not give the file back is replaced by that of the file raw.
@@ -603,7 +720,7 @@ mod tests {
         let data = |n: usize| [fakes[..n].concat(), vec![0; 10000], jpeg.clone()].concat();
         let found = |d: &[u8]| {
             let opt = Options::default();
-            scan_with(d, &opt, 0, 0, &Cx::new(d, &opt)).map_or(0, |f| f.applies().len())
+            scan_with(d, &opt, 0, 0, &Cx::new(d, &opt)).map_or(0, |m| m.f.applies().len())
         };
         assert_eq!(found(&data(1)), 1);
         assert_eq!(found(&data(3)), 0);
