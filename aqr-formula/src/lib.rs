@@ -233,11 +233,18 @@ impl Formula {
                     _ => merged.push((a, b, 0)),
                 }
             }
-            let mut data = Vec::new();
+            // in place: the bytes kept only move towards the start
+            let (mut data, mut at) = (s.data, 0);
             for m in &mut merged {
-                m.2 = data.len() as u64;
-                data.extend_from_slice(&s.data[m.0 as usize..m.1 as usize]);
+                let (a, b) = (m.0 as usize, m.1 as usize);
+                if a != at {
+                    data.copy_within(a..b, at);
+                }
+                m.2 = at as u64;
+                at += b - a;
             }
+            data.truncate(at);
+            data.shrink_to_fit();
             *r = merged;
             streams.push(Stream { class: s.class, data });
         }
@@ -464,6 +471,11 @@ mod tests {
         assert_eq!(f.eval(&Rev).unwrap(), b"bc");
         assert_eq!(f.streams.len(), 1);
         assert_eq!(f.streams[0].data, b"bc");
+        // a stream sliced whole is not copied
+        let mut f = Formula::raw("a", b"abc".to_vec());
+        let whole = f.streams[0].data.as_ptr();
+        f.compact();
+        assert_eq!(f.streams[0].data.as_ptr(), whole);
     }
 
     #[test]
