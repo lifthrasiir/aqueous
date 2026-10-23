@@ -130,6 +130,10 @@ pub struct Encoder {
     streams: RefCell<HashMap<StreamKey, Option<Vec<u8>>>>,
     /// Compressed resources by their [`StreamKey`].
     resources: RefCell<HashMap<StreamKey, Vec<u8>>>,
+    /// The archived lengths ([`Encoder::raw_len`]) of streams forgotten compressed
+    /// ([`Encoder::forget`]), by their [`StreamKey`]: a stream is compared with formulas of it
+    /// again without being compressed again.
+    raw_lens: RefCell<HashMap<StreamKey, usize>>,
     /// The Zstandard context every stream is compressed with, so that its workers and buffers
     /// are made once rather than for each stream (while they take at most [`CCTX_KEPT`]).
     cctx: RefCell<CCtx<'static>>,
@@ -144,15 +148,22 @@ impl Encoder {
     }
 
     /// Drops what is kept of stream `d` compressed (by [`Encoder::smaller`], say), where it will
-    /// not be archived.
+    /// not be archived; only its archived length is kept, for [`Encoder::smaller`].
     pub fn forget(&self, d: &[u8]) {
-        self.streams.borrow_mut().remove(&key(&[d]));
+        let k = key(&[d]);
+        if self.streams.borrow().contains_key(&k) {
+            // from what is kept, compressing nothing
+            let n = self.raw_len(d).expect("a stream compressed already");
+            self.raw_lens.borrow_mut().insert(k, n);
+            self.streams.borrow_mut().remove(&k);
+        }
     }
 
     /// Drops everything kept of the streams and resources compressed.
     pub fn clear(&self) {
         self.streams.borrow_mut().clear();
         self.resources.borrow_mut().clear();
+        self.raw_lens.borrow_mut().clear();
     }
 
     /// An encoder compressing each stream on `threads` threads, into the same archive as on one.
@@ -162,6 +173,7 @@ impl Encoder {
             threads: threads.max(1),
             streams: RefCell::default(),
             resources: RefCell::default(),
+            raw_lens: RefCell::default(),
             cctx: RefCell::new(CCtx::create()),
         }
     }
@@ -572,6 +584,10 @@ impl Encoder {
 
     fn smaller_of(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>, d: &[u8]) -> Result<bool> {
         let n = self.len_with(f, stand_in)?;
+        // (`d` was compressed, so a formula of it of at most half of its estimate was not one)
+        if let Some(&raw) = self.raw_lens.borrow().get(&key(&[d])) {
+            return Ok(n < raw);
+        }
         if !self.streams.borrow().contains_key(&key(&[d])) {
             let c = match self.plan(&[d])? {
                 Plan::Done(c) => c,
@@ -713,6 +729,8 @@ const CCTX_KEPT: usize = 4 << 20;
 /// for as much as Zstandard may give only where that does not do (the output does not depend
 /// on the room it has). A stream is not given room for its own size again for nothing.
 fn compressed_to(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usize) -> Result<Option<Vec<u8>>> {
+    #[cfg(test)]
+    tests::COMPRESSED.with(|n| n.set(n.get() + 1));
     let zstd = |e: zstd_safe::ErrorCode| Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)));
     // A context compressed with before keeps its workers and buffers, not its parameters.
     c.reset(ResetDirective::SessionAndParameters).map_err(zstd)?;
@@ -1392,6 +1410,11 @@ mod tests {
     use super::*;
     use crate::Stream;
 
+    thread_local! {
+        /// The streams compressed ([`compressed_to`]), counted.
+        pub(super) static COMPRESSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
     const REV: Module = Module { name: "rev", version: 1 };
 
     /// `rev` reverses the concatenation of its inputs, with parameters 1, 2, 3.
@@ -1679,6 +1702,42 @@ mod tests {
             enc.forget(&raw);
             assert_eq!(enc.encode(&whole, None).unwrap(), Encoder::new(level).encode(&whole, None).unwrap());
             assert_eq!(enc.streams.borrow().len(), 2);
+        }
+    }
+
+    /// Raw data that a formula was found smaller than, then forgotten, is not compressed again
+    /// to be compared with another formula of it (a scan's around the file), and is compared
+    /// as a new encoder would.
+    #[test]
+    fn smaller_after_forget() {
+        let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/index.bs")).unwrap();
+        let mut rng = aqr_common::rng::Rng::new(2);
+        // within a sample and beyond one, alike throughout (so that the sample's estimate holds)
+        for n in [200 << 10, 3 << 20] {
+            let mut d = Vec::new();
+            while d.len() < n {
+                let at = rng.below(text.len() as u64 - 64) as usize;
+                d.extend_from_slice(&text[at..at + 64]);
+                d.extend_from_slice(&rng.below(1 << 32).to_le_bytes()[..4]);
+            }
+            // a formula of most of it, then one a little larger
+            let part = d[..d.len() * 9 / 10].to_vec();
+            let mut f = Formula::default();
+            f.push("a", part.clone());
+            f.root = Node::slice(0, 0, part.len() as u64);
+            let g = Formula { root: Node::concat([f.root.clone(), Node::slice(0, 0, 0)]), ..f.clone() };
+            for level in [Level::Mid, Level::Zstd(3)] {
+                let enc = Encoder::new(level);
+                assert!(enc.smaller(&f, &d).unwrap());
+                enc.forget(&d);
+                let before = COMPRESSED.with(|c| c.get());
+                let smaller = enc.smaller(&g, &d).unwrap();
+                assert_eq!(COMPRESSED.with(|c| c.get()), before, "{n} bytes at {level:?}");
+                assert_eq!(smaller, Encoder::new(level).smaller(&g, &d).unwrap());
+                enc.clear();
+                enc.smaller(&g, &d).unwrap();
+                assert!(COMPRESSED.with(|c| c.get()) > before, "cleared");
+            }
         }
     }
 
