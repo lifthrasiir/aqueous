@@ -157,7 +157,7 @@ pub(crate) struct Cx {
 impl Cx {
     fn new(d: &[u8], opt: &Options) -> Cx {
         let inflate = opt.expansion.saturating_mul(d.len() as u64).saturating_add(EXPANSION_SLACK);
-        Cx { enc: Encoder::new(opt.level), inflate: Cell::new(inflate) }
+        Cx { enc: Encoder::with_threads(opt.level, opt.threads), inflate: Cell::new(inflate) }
     }
 
     /// Takes `n` bytes of inflated data from the budget, if there are as many left.

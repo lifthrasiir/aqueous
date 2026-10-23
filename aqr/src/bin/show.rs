@@ -55,7 +55,7 @@ fn main() {
 
         let format = detect(&d).map_or("-", |f| f.name());
         let start = Instant::now();
-        let packed = aqr::encode(&f, Some(aqr::checksum(&d)), opt.level);
+        let packed = aqr::Encoder::with_threads(opt.level, opt.threads).encode(&f, Some(aqr::checksum(&d)));
         let pack = start.elapsed().as_secs_f64();
         let start = Instant::now();
         let unpacked = packed.as_ref().ok().map(|c| decompress(c, opt.threads));
