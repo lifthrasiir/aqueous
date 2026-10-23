@@ -992,15 +992,18 @@ fn decoded(d: &[u8], zstd: bool, checked: bool) -> Decoded<Vec<u8>> {
 /// Zstandard `blocks` of `window` making exactly `size` bytes.
 fn unzstd(window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
     let zstd = |e: zstd_safe::ErrorCode| Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)));
-    let mut frame = Vec::with_capacity(blocks.len() + 6);
-    frame.extend_from_slice(&ZSTD_MAGIC);
-    frame.extend_from_slice(&[0, window]);
-    frame.extend_from_slice(blocks);
+    // the frame: a header, then the blocks (not copied after it)
+    let head = [ZSTD_MAGIC[0], ZSTD_MAGIC[1], ZSTD_MAGIC[2], ZSTD_MAGIC[3], 0, window];
+    let mut frame = [&head[..], blocks].into_iter();
     let mut dctx = zstd_safe::DCtx::create();
-    let mut input = InBuffer::around(&frame);
-    let mut out: Vec<u8> = Vec::new();
-    // up to one byte more than `size`, to tell a longer output
+    let mut input = InBuffer::around(frame.next().unwrap());
+    // up to one byte more than `size`, to tell a longer output: as much room as that from the
+    // start where it can be had, else made as the output comes
     let limit = size.saturating_add(1);
+    let mut out: Vec<u8> = Vec::new();
+    if let Ok(n) = usize::try_from(limit) {
+        let _ = out.try_reserve_exact(n);
+    }
     loop {
         let Some(room) = limit.checked_sub(out.len() as u64).filter(|&r| r > 0) else {
             return invalid("decompressed data longer than declared");
@@ -1013,11 +1016,15 @@ fn unzstd(window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
         if hint == 0 {
             break;
         }
-        if !written && input.pos() == before {
+        if input.pos() == input.src.len()
+            && let Some(next) = frame.next()
+        {
+            input = InBuffer::around(next);
+        } else if !written && input.pos() == before {
             return invalid("truncated zstd data");
         }
     }
-    if input.pos() != frame.len() || out.len() as u64 != size {
+    if input.pos() != input.src.len() || frame.next().is_some() || out.len() as u64 != size {
         return invalid("zstd data of another size than declared");
     }
     Ok(out)
@@ -1433,6 +1440,18 @@ mod tests {
             assert_eq!(Encoder::with_threads(level, 4).encode(&f, None).unwrap(), one);
             assert_eq!(decode(&one, &[]).unwrap(), d);
         }
+    }
+
+    /// A compressed block decodes into as much memory as it declares (and a byte to tell a
+    /// longer one), not what growing as it comes would take.
+    #[test]
+    fn decoded_at_size() {
+        let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/index.bs")).unwrap();
+        let d = text.repeat((3 << 20) / text.len() + 1);
+        let c = compressed(&[&d], 3, 1).unwrap().unwrap();
+        let out = decoded(&c, true, true).unwrap();
+        assert_eq!(out, d);
+        assert!(out.capacity() <= d.len() + 1, "{} for {}", out.capacity(), d.len());
     }
 
     /// A stream in pieces compresses as it does in one, the pieces ending anywhere (at the end
