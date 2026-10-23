@@ -57,19 +57,21 @@ impl Modules for Recording {
 }
 
 /// Runs the modules where the output of an application is not in the memo; `hits` counts those
-/// that are.
-pub(crate) struct Cached<'a> {
+/// that are. An output is taken out of the memo when it is used: decoding an archive evaluates
+/// an application once.
+pub(crate) struct Cached {
     pub native: Native,
-    pub memo: &'a Memo,
+    pub memo: Mutex<Memo>,
     pub hits: Mutex<usize>,
 }
 
-impl Modules for Cached<'_> {
+impl Modules for Cached {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
-        match self.memo.0.get(&key(a, inputs)) {
+        let hit = self.memo.lock().unwrap().0.remove(&key(a, inputs));
+        match hit {
             Some(out) => {
                 *self.hits.lock().unwrap() += 1;
-                Ok(out.to_vec())
+                Ok(Arc::try_unwrap(out).unwrap_or_else(|out| out.to_vec()))
             }
             None => self.native.apply(a, inputs),
         }
