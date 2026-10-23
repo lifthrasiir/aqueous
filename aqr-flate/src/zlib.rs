@@ -451,35 +451,36 @@ impl<'a> Emulator<'a> {
             0
         };
         // zlib reads up to scan[MAX_MATCH], which strstart <= window_size - MIN_LOOKAHEAD allows.
-        let ws = &self.window[scan..scan + MAX_MATCH + 1];
-        let mut scan_end1 = ws[best_len - 1];
-        let mut scan_end = ws[best_len];
+        let (window, prev, w_mask) = (&self.window[..], &self.prev[..], self.w_mask);
+        let ws = &window[scan..scan + MAX_MATCH + 1];
+        // Bytes best_len - 1 and best_len, and the first two, as zlib's UNALIGNED_OK does.
+        let pair = |w: &[u8], i: usize| u16::from_le_bytes([w[i], w[i + 1]]);
+        let mut scan_end = pair(ws, best_len - 1);
+        let scan_start = pair(ws, 0);
         if self.prev_length >= self.good_match {
             chain >>= 2;
         }
         if nice > self.lookahead {
             nice = self.lookahead;
         }
+        let mut match_start = self.match_start;
         loop {
-            let wm = &self.window[cur..cur + MAX_MATCH + 1];
-            if wm[best_len] == scan_end
-                && wm[best_len - 1] == scan_end1
-                && wm[0] == ws[0]
-                && wm[1] == ws[1]
-            {
+            // Candidates come before strstart, so their MAX_MATCH + 1 bytes are in the window.
+            debug_assert!(cur < scan);
+            let wm = &window[cur..][..MAX_MATCH + 1];
+            if pair(wm, best_len - 1) == scan_end && pair(wm, 0) == scan_start {
                 // Byte 2 is equal by construction of the hash and is not compared.
                 let len = match_len(ws, wm);
                 if len > best_len {
-                    self.match_start = cur;
+                    match_start = cur;
                     best_len = len;
                     if len >= nice {
                         break;
                     }
-                    scan_end1 = ws[best_len - 1];
-                    scan_end = ws[best_len];
+                    scan_end = pair(ws, best_len - 1);
                 }
             }
-            cur = self.prev[cur & self.w_mask] as usize;
+            cur = prev[cur & w_mask] as usize;
             if cur <= limit {
                 break;
             }
@@ -488,6 +489,7 @@ impl<'a> Emulator<'a> {
                 break;
             }
         }
+        self.match_start = match_start;
         best_len.min(self.lookahead)
     }
 
@@ -877,6 +879,16 @@ pub fn zlib_block(e: &mut Emulator, start: usize) -> Option<Block> {
     Some(Block { last, body })
 }
 
+/// An emulation that has followed a stream's first tokens (in [`crate::detect`]): what it
+/// mispredicted on the way, and the emulator after them, to carry on from.
+pub struct Followed<'a> {
+    /// The mispredictions: (position, predicted token).
+    pub log: Vec<(usize, Token)>,
+    /// Where the next token starts (before any stored block there): the emulator is there.
+    pub pos: usize,
+    pub emu: Emulator<'a>,
+}
+
 /// One level's lazy-matching state in a [`MultiSlow`].
 #[derive(Debug, Clone)]
 struct Lane {
@@ -892,6 +904,8 @@ struct Lane {
     match_start: usize,
     predicted: Option<Token>,
     misses: usize,
+    /// The mispredictions: (position, predicted token).
+    log: Vec<(usize, Token)>,
     alive: bool,
 }
 
@@ -957,6 +971,7 @@ impl<'a> MultiSlow<'a> {
                     match_start: 0,
                     predicted: None,
                     misses: 0,
+                    log: vec![],
                     alive: true,
                 }
             })
@@ -986,6 +1001,31 @@ impl<'a> MultiSlow<'a> {
 
     pub fn any_alive(&self) -> bool {
         self.lanes.iter().any(|l| l.alive)
+    }
+
+    /// Lane `k` as an emulator of its own, between tokens, with its mispredictions so far.
+    pub fn into_followed(mut self, k: usize, pos: usize) -> Followed<'a> {
+        debug_assert!(self.pending.is_none());
+        let l = self.lanes.swap_remove(k);
+        let e = Emulator {
+            params: l.params,
+            filtered: l.filtered,
+            good_match: l.good,
+            max_lazy: l.lazy,
+            nice_match: l.nice,
+            max_chain: l.chain,
+            match_length: l.match_length,
+            match_start: l.match_start,
+            prev_length: l.prev_length,
+            prev_match: l.prev_match,
+            done: self.done,
+            ..self.e
+        };
+        Followed {
+            log: l.log,
+            pos,
+            emu: e,
+        }
     }
 
     /// Walks the chain from `hash_head` at strstart once, deep enough for every live lane.
@@ -1146,13 +1186,16 @@ impl<'a> MultiSlow<'a> {
 
     /// Moves on with the actual token, counting each live lane's misprediction.
     pub fn commit(&mut self, actual: Token) -> bool {
-        if self.pending.take().is_none() {
+        let Some(pos) = self.pending.take() else {
             return false;
-        }
+        };
         let alen = t_len(actual);
         let is_match = matches!(actual, Token::Match { .. });
         for l in self.lanes.iter_mut().filter(|l| l.alive) {
-            l.misses += (l.predicted != Some(actual)) as usize;
+            if l.predicted != Some(actual) {
+                l.misses += 1;
+                l.log.extend(l.predicted.map(|t| (pos, t)));
+            }
         }
         let e = &mut self.e;
         if e.lookahead == 0 {

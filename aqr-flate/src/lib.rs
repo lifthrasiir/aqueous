@@ -89,7 +89,7 @@ pub fn default_threads() -> usize {
 
 use crate::bits::{BitReader, BitWriter};
 use crate::deflate::{Block, Body, Stream, Token};
-use crate::zlib::{Checkpoint, Emulator};
+use crate::zlib::{Checkpoint, Emulator, Followed};
 use adapt::{Backend, Priors};
 use code::{get_usize, get_varint, put_gamma, put_varint};
 pub use tokens::Rule;
@@ -814,12 +814,12 @@ fn choose_adaptive<'a>(
         && crate::detect::plausible(stream, &f.data, p, hints)
     {
         let zr = zlib_ranges(f, p, &ranges);
-        let segs = code_adaptive(f, rule, Some(p), priors, &zr, threads, collect)?;
+        let segs = code_adaptive(f, rule, Some(p), None, priors, &zr, threads, collect)?;
         if segs.iter().all(|s| s.misses == 0) {
             // In a short stream the rule may predict as well, without zlib's parameters (ties
             // go to the rule, as below).
             if f.data.len() < HINT_RULE_BELOW {
-                let alone = code_adaptive(f, rule, None, priors, &ranges, threads, collect)?;
+                let alone = code_adaptive(f, rule, None, None, priors, &ranges, threads, collect)?;
                 if size(&alone) <= size(&segs) {
                     return Ok(AdaptiveChoice {
                         rule,
@@ -837,25 +837,60 @@ fn choose_adaptive<'a>(
             });
         }
     }
+    // The rule alone, the chain rule and zlib's parameters are worked out independently, at
+    // once given threads.
+    let alone = || code_adaptive(f, rule, None, None, priors, &ranges, threads, collect);
+    let chain = || -> Result<Option<(Rule, Vec<AdaptiveSeg>)>> {
+        if !opts.chain {
+            return Ok(None);
+        }
+        let Some((chain, coded)) = chain_rule(f, priors, &ranges, collect)? else {
+            return Ok(None);
+        };
+        let segs = match coded {
+            Some(segs) => segs,
+            None => code_adaptive(f, chain, None, None, priors, &ranges, threads, collect)?,
+        };
+        Ok(Some((chain, segs)))
+    };
+    let params = || stream.as_ref().and_then(|s| zlib_params(s, &f.data, hints));
+    let (alone, chain, params) = if threads > 1 {
+        fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+            h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+        }
+        std::thread::scope(|s| {
+            let (c, p) = (s.spawn(chain), s.spawn(params));
+            let a = alone();
+            (a, join(c), join(p))
+        })
+    } else {
+        (alone(), chain(), params())
+    };
     let mut best = AdaptiveChoice {
         rule,
         zlib: None,
-        segs: code_adaptive(f, rule, None, priors, &ranges, threads, collect)?,
+        segs: alone?,
         ranges,
     };
-    if opts.chain
-        && let Some(chain) = chain_rule(f, priors)?
+    if let Some((chain, segs)) = chain?
+        && size(&segs) < size(&best.segs)
     {
-        let segs = code_adaptive(f, chain, None, priors, &best.ranges, threads, collect)?;
-        if size(&segs) < size(&best.segs) {
-            (best.rule, best.segs) = (chain, segs);
-        }
+        (best.rule, best.segs) = (chain, segs);
     }
-    let Some(p) = stream.and_then(|s| zlib_params(&s, &f.data, hints)) else {
+    let Some((p, followed)) = params else {
         return Ok(best);
     };
     let ranges = zlib_ranges(f, p, &best.ranges);
-    let segs = code_adaptive(f, best.rule, Some(p), priors, &ranges, threads, collect)?;
+    let segs = code_adaptive(
+        f,
+        best.rule,
+        Some(p),
+        followed,
+        priors,
+        &ranges,
+        threads,
+        collect,
+    )?;
     if size(&segs) < size(&best.segs) {
         best = AdaptiveChoice {
             rule: best.rule,
@@ -874,6 +909,7 @@ const HINT_RULE_BELOW: usize = 1 << 10;
 /// Chain configurations tried, as (depth, nice) indices into [`tokens::DEPTHS`] and
 /// [`tokens::NICES`]: depth 128 and nice 128, 1 and 8, 16 and 16, 4096 and 128.
 const CHAIN_CONFIGS: [(u8, u8); 4] = [(7, 5), (0, 0), (4, 1), (12, 5)];
+const _: () = assert!(CHAIN_CONFIGS.len() <= table::MULTI);
 /// No chain searches deeper than this quantile of the depths at which the stream's matches
 /// are (the rest are coded by rank anyway): joining stays fast, and the intermediate depths
 /// this gives often predict better too.
@@ -883,8 +919,14 @@ const CHAIN_PREFIX: usize = 256 << 10;
 
 /// The best chain rule for a stream, by adaptive cost: of [`CHAIN_CONFIGS`] with the depth
 /// capped by [`DEPTH_QUANTILE`], compared on a prefix of long streams. `None` without
-/// matches.
-fn chain_rule(f: &Flat, priors: &Priors) -> Result<Option<Rule>> {
+/// matches. When they are compared on the whole stream and it is a single segment of
+/// `ranges`, the segment as [`code_adaptive`] codes it comes along.
+fn chain_rule<'a>(
+    f: &'a Flat,
+    priors: &Priors,
+    ranges: &[Range<'a>],
+    collect: bool,
+) -> Result<Option<(Rule, Option<Vec<AdaptiveSeg>>)>> {
     let mut matches = vec![];
     let mut p = 0;
     let mut skips = f.skips.iter().peekable();
@@ -903,11 +945,8 @@ fn chain_rule(f: &Flat, priors: &Priors) -> Result<Option<Rule>> {
     if matches.is_empty() {
         return Ok(None);
     }
-    let dq = crate::matchfind::Matcher::single(&f.data).depth_quantile(
-        &f.data,
-        matches.into_iter(),
-        DEPTH_QUANTILE,
-    );
+    let mut m = crate::matchfind::Matcher::single(&f.data);
+    let dq = m.depth_quantile(&f.data, matches.into_iter(), DEPTH_QUANTILE);
     let cap = tokens::DEPTHS
         .iter()
         .position(|&d| d as usize > dq)
@@ -924,7 +963,40 @@ fn chain_rule(f: &Flat, priors: &Priors) -> Result<Option<Rule>> {
     rules.sort();
     rules.dedup();
     if rules.len() == 1 {
-        return Ok(Some(rules[0]));
+        return Ok(Some((rules[0], None)));
+    }
+    // The first of the cheapest.
+    let pick = |costs: &mut dyn Iterator<Item = f64>| {
+        let mut best = (f64::INFINITY, 0);
+        for (i, c) in costs.enumerate() {
+            if c < best.0 {
+                best = (c, i);
+            }
+        }
+        best.1
+    };
+    if f.data.len() < 2 * CHAIN_PREFIX
+        && let [r] = ranges
+        && !collect
+        && (r.first, r.count, r.pos, r.end) == (0, f.tokens.len(), 0, f.data.len())
+    {
+        let mut cs: Vec<_> = rules
+            .iter()
+            .map(|_| {
+                adapt::Adaptive::new((adapt::Enc::new(), adapt::Cost::default()), priors, None)
+            })
+            .collect();
+        // The chains just numbered serve again (the matcher is the same as for the range).
+        tokens::code_chains(&mut cs, &f.data, &rules, r, &f.tokens, Some(m))?;
+        let i = pick(&mut cs.iter().map(|a| a.b.1.0));
+        let a = cs.swap_remove(i);
+        let seg = AdaptiveSeg {
+            cp: None,
+            misses: a.misses,
+            seen: vec![],
+            body: a.b.0.finish(),
+        };
+        return Ok(Some((rules[i], Some(vec![seg]))));
     }
     let prefix = if f.data.len() >= 2 * CHAIN_PREFIX {
         CHAIN_PREFIX
@@ -932,25 +1004,27 @@ fn chain_rule(f: &Flat, priors: &Priors) -> Result<Option<Rule>> {
         usize::MAX
     };
     let p = Prepared::from_flat(f, prefix);
-    let mut best = (f64::INFINITY, rules[0]);
-    for r in rules {
-        let mut a = adapt::Adaptive::new(adapt::Cost::default(), priors, None);
-        p.code(r, &mut a)?;
-        if a.b.0 < best.0 {
-            best = (a.b.0, r);
-        }
-    }
-    Ok(Some(best.1))
+    let mut cs: Vec<_> = rules
+        .iter()
+        .map(|_| adapt::Adaptive::new(adapt::Cost::default(), priors, None))
+        .collect();
+    p.code_chains(&rules, &mut cs)?;
+    let i = pick(&mut cs.iter().map(|a| a.b.0));
+    Ok(Some((rules[i], None)))
 }
 
 /// zlib's parameters among those `hints` allows, if the stream looks like zlib's (see
-/// [`crate::detect`]).
-fn zlib_params(stream: &Stream, data: &[u8], hints: &Hints) -> Option<zlib::Params> {
+/// [`crate::detect`]), and the emulation that found them, if at hand.
+fn zlib_params<'a>(
+    stream: &Stream,
+    data: &'a [u8],
+    hints: &Hints,
+) -> Option<(zlib::Params, Option<Followed<'a>>)> {
     let candidates = crate::detect::candidates_hinted(stream, hints);
     if candidates.is_empty() {
         return None;
     }
-    crate::detect::detect_refined(stream, data, candidates).map(|d| d.params)
+    crate::detect::detect_refined_followed(stream, data, candidates).map(|(d, f)| (d.params, f))
 }
 
 /// The segments to code with zlib emulation under `p`: `ranges`, or the whole stream as one
@@ -980,19 +1054,23 @@ struct AdaptiveSeg {
 
 /// Codes the segments adaptively, with zlib emulation under `zlib`. Each segment but the first
 /// resumes the emulation from its state where the previous one ended, if it can be resumed
-/// there (and was not lost on the way); segments are then coded one after another.
+/// there (and was not lost on the way); segments are then coded one after another. A single
+/// segment is coded with the emulation `followed` gives, if any (from the parameters'
+/// detection), rather than a new one.
+#[allow(clippy::too_many_arguments)]
 fn code_adaptive<'a>(
     f: &'a Flat,
     rule: Rule,
     zlib: Option<zlib::Params>,
+    followed: Option<Followed<'a>>,
     priors: &Priors,
     ranges: &[Range],
     threads: usize,
     collect: bool,
 ) -> Result<Vec<AdaptiveSeg>> {
-    let code = |i: usize, cp: Option<Checkpoint>, emu: Option<Emulator<'a>>| {
+    // Segment `i`, coded with `a` (from checkpoint `cp` if not the first).
+    let finish = |mut a: adapt::Adaptive<'a, adapt::Enc>, i: usize, cp: Option<Checkpoint>| {
         let r = &ranges[i];
-        let mut a = adapt::Adaptive::new(adapt::Enc::new(), priors, emu);
         if collect {
             a.seen = Some(vec![[0; 2]; adapt::NUM]);
         }
@@ -1007,11 +1085,19 @@ fn code_adaptive<'a>(
         };
         Ok::<_, Error>((seg, emu))
     };
+    let code = |i: usize, cp: Option<Checkpoint>, emu: Option<Emulator<'a>>| {
+        finish(adapt::Adaptive::new(adapt::Enc::new(), priors, emu), i, cp)
+    };
     let Some(p) = zlib else {
         return par_map(ranges.len(), threads, |i| code(i, None, None).map(|r| r.0))
             .into_iter()
             .collect();
     };
+    if let (Some(followed), [_]) = (followed, ranges) {
+        debug_assert_eq!(followed.emu.params(), p);
+        let a = adapt::Adaptive::following(adapt::Enc::new(), priors, followed);
+        return Ok(vec![finish(a, 0, None)?.0]);
+    }
     let mut emu = Some(Emulator::new(&f.data, p));
     let mut out = Vec::with_capacity(ranges.len());
     for (i, r) in ranges.iter().enumerate() {
@@ -1232,6 +1318,19 @@ impl Prepared {
         };
         tokens::code_range(c, &self.data, rule, &range, Some(&self.tokens), None)?;
         Ok(())
+    }
+
+    /// Codes the tokens under several [`tokens::Kind::Chain`] rules at once, one coder each
+    /// ([`tokens::code_chains`]).
+    fn code_chains<C: tokens::Corr>(&self, rules: &[Rule], cs: &mut [C]) -> Result<()> {
+        let range = Range {
+            first: 0,
+            count: self.tokens.len(),
+            pos: 0,
+            end: self.data.len(),
+            skips: &self.skips,
+        };
+        tokens::code_chains(cs, &self.data, rules, &range, &self.tokens, None)
     }
 
     fn cost_limited(&mut self, rule: Rule, limit: usize) -> Result<f64> {
@@ -1608,16 +1707,31 @@ pub fn reconstruct_into(
         let s1 = (s0 + batch).min(segs.len());
         (s0, par_map(s1 - s0, threads, |j| decode(s0 + j)))
     };
-    // the next batch is decoded while the blocks of this one are written
+    // the next batch is decoded while the blocks of this one are written (before them, on a
+    // single thread)
+    enum Batch<'s, T> {
+        Done(T),
+        Running(std::thread::ScopedJoinHandle<'s, T>),
+    }
     std::thread::scope(|scope| -> Result<()> {
-        let mut next = (!segs.is_empty()).then(|| scope.spawn(|| decode_batch(0)));
+        let start = |s0: usize| {
+            if threads > 1 {
+                Batch::Running(scope.spawn(move || decode_batch(s0)))
+            } else {
+                Batch::Done(decode_batch(s0))
+            }
+        };
+        let mut next = (!segs.is_empty()).then(|| start(0));
         loop {
             let more = next.is_some();
             if let Some(h) = next.take() {
-                let (s0, results) = h.join().map_err(|_| Error::Corrupt)?;
+                let (s0, results) = match h {
+                    Batch::Done(b) => b,
+                    Batch::Running(h) => h.join().map_err(|_| Error::Corrupt)?,
+                };
                 let s1 = s0 + results.len();
                 if s1 < segs.len() {
-                    next = Some(scope.spawn(move || decode_batch(s1)));
+                    next = Some(start(s1));
                 }
                 for (i, r) in (s0..s1).zip(results) {
                     let (t, p) = r?;

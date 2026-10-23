@@ -6,7 +6,7 @@
 //! inserted, or only token starts (and the inside of matches up to some length). Loads go
 //! unchecked where at least 8 bytes are left; the last few positions take a checked path.
 
-use crate::matchfind::{MAX_MATCH, WINDOW};
+use crate::matchfind::{Found, MAX_MATCH, Matcher, WINDOW};
 
 /// Bits of the hashes, for ranges of at least 2^15 positions (fewer for shorter ones, down to
 /// [`MIN_BITS`]).
@@ -93,7 +93,7 @@ impl Search for NoTable {
 /// The table of [`super::tokens::Kind::Chain`]: exact chains of every position, which need
 /// no insertion (they are built from the data as searches move forward).
 pub struct ChainTable {
-    m: crate::matchfind::Matcher,
+    m: Matcher,
     depth: usize,
     nice: usize,
 }
@@ -105,7 +105,7 @@ impl ChainTable {
     /// For searches at `start..end`, with the depth and nice length of the given indices.
     pub fn new(d: &[u8], start: usize, end: usize, depth: u8, nice: u8) -> Self {
         ChainTable {
-            m: crate::matchfind::Matcher::single_range(d, start, end),
+            m: Matcher::single_range(d, start, end),
             depth: super::tokens::DEPTHS[depth as usize] as usize,
             nice: super::tokens::NICES[nice as usize] as usize,
         }
@@ -147,6 +147,85 @@ impl Search for ChainTable {
     fn token_start(&mut self, _: &[u8], _: usize) {}
 
     fn token(&mut self, _: &[u8], _: usize, _: usize) {}
+}
+
+/// Configurations a [`MultiChain`] searches at once, at most.
+pub const MULTI: usize = 4;
+
+/// [`ChainTable`] for several (depth, nice) configurations at once: one walk of a chain
+/// gives every configuration's match ([`Matcher::longest_multi`]).
+pub struct MultiChain {
+    m: Matcher,
+    cfgs: Vec<(usize, usize)>,
+    /// The last two searches: position and every configuration's match, the last one at
+    /// `memo[last]`.
+    memo: [(usize, [Found; MULTI]); 2],
+    last: usize,
+    /// The last rank: (position, length, distance, rank).
+    rank: (usize, usize, usize, Option<usize>),
+}
+
+impl MultiChain {
+    /// With the (depth, nice) indices of `cfgs`, searching with `m` (a
+    /// [`Matcher::single_range`] for the searches).
+    pub fn new(m: Matcher, cfgs: &[(u8, u8)]) -> Self {
+        assert!(cfgs.len() <= MULTI);
+        MultiChain {
+            m,
+            cfgs: cfgs
+                .iter()
+                .map(|&(depth, nice)| {
+                    (
+                        super::tokens::DEPTHS[depth as usize] as usize,
+                        super::tokens::NICES[nice as usize] as usize,
+                    )
+                })
+                .collect(),
+            memo: [(usize::MAX, [Found::default(); MULTI]); 2],
+            last: 0,
+            rank: (usize::MAX, 0, 0, None),
+        }
+    }
+
+    /// Every configuration's longest match at `p` (the first [`MultiChain::new`] gave).
+    pub fn search(&mut self, d: &[u8], p: usize) -> [Found; MULTI] {
+        if let Some(m) = self.memo.iter().find(|m| m.0 == p) {
+            return m.1;
+        }
+        self.last ^= 1;
+        let (at, out) = &mut self.memo[self.last];
+        *at = p;
+        let n = self.cfgs.len();
+        self.m.longest_multi(d, p, &self.cfgs, &mut out[..n]);
+        *out
+    }
+}
+
+impl Cands for MultiChain {
+    fn entries(&mut self, _: &[u8], _: usize) -> Vec<usize> {
+        vec![]
+    }
+
+    fn index_of(&mut self, _: &[u8], _: usize, _: usize) -> Option<usize> {
+        None
+    }
+
+    fn ranked(&self) -> bool {
+        true
+    }
+
+    fn rank(&mut self, d: &[u8], p: usize, len: usize, dist: usize, _: usize) -> Option<usize> {
+        // Configurations that miss the same token rank the same distance.
+        if (self.rank.0, self.rank.1, self.rank.2) != (p, len, dist) {
+            let r = self.m.rank(d, p, len, dist, CHAIN_RANK_LIMIT);
+            self.rank = (p, len, dist, r);
+        }
+        self.rank.3
+    }
+
+    fn select(&mut self, d: &[u8], p: usize, len: usize, rank: usize, _: usize) -> Option<usize> {
+        self.m.select(d, p, len, rank, CHAIN_RANK_LIMIT)
+    }
 }
 
 pub struct Table<const W: usize, const K: usize, const L: bool> {

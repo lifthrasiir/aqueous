@@ -13,7 +13,7 @@ use super::code;
 use super::table::Cands;
 use super::tokens::{self, Corr, DIST_IDX, DIST_RANK, DIST_RAW, K_ALT258, LEN_DELTA, LEN_FRESH};
 use crate::deflate::Token;
-use crate::zlib::Emulator;
+use crate::zlib::{Emulator, Followed};
 use crate::{Error, Result};
 
 /// Classes: no candidate in the rule's table, a candidate, zlib's prediction.
@@ -240,10 +240,35 @@ pub struct Cost(pub f64);
 impl Backend for Cost {
     #[inline]
     fn code(&mut self, p1: u32, bit: bool) -> bool {
+        // -log2(p / PROB_ONE) by probability, worked out once.
+        static BITS: std::sync::OnceLock<Box<[f64]>> = std::sync::OnceLock::new();
+        let bits = BITS.get_or_init(|| {
+            (0..=PROB_ONE)
+                .map(|p| -(p as f64 / PROB_ONE as f64).log2())
+                .collect()
+        });
         let p = if bit { p1 } else { PROB_ONE - p1 };
-        self.0 -= (p as f64 / PROB_ONE as f64).log2();
+        self.0 += bits[p as usize];
         bit
     }
+}
+
+/// Codes into the first backend while measuring the cost with the second.
+impl<A: Backend> Backend for (A, Cost) {
+    #[inline]
+    fn code(&mut self, p1: u32, bit: bool) -> bool {
+        self.1.code(p1, bit);
+        self.0.code(p1, bit)
+    }
+    fn failed(&self) -> bool {
+        self.0.failed()
+    }
+}
+
+struct Replay {
+    log: Vec<(usize, Token)>,
+    next: usize,
+    until: usize,
 }
 
 /// The corrections of a range of tokens, coded both ways ([`Corr`]): the actual tokens are
@@ -261,6 +286,9 @@ pub struct Adaptive<'a, B> {
     /// What [`Corr::next_len`] gave for the current token.
     next: usize,
     emu: Option<Emulator<'a>>,
+    /// Before `until`, the emulation's predictions are replayed rather than worked out again:
+    /// its mispredictions from `log[next..]`, and otherwise the actual token.
+    replay: Option<Replay>,
     /// The payload fields of the current miss, when deconstructing.
     fields: [(usize, u32); 5],
     nfields: usize,
@@ -281,12 +309,25 @@ impl<'a, B: Backend> Adaptive<'a, B> {
             hist: [0; CLASSES],
             next: 0,
             emu,
+            replay: None,
             fields: [(0, 0); 5],
             nfields: 0,
             alen: 0,
             misses: 0,
             seen: None,
         }
+    }
+
+    /// Deconstructing from the start of a stream, with zlib emulation that has `followed` it
+    /// as far as it went: the same coding as with a fresh emulator.
+    pub fn following(b: B, priors: &Priors, followed: Followed<'a>) -> Self {
+        let mut a = Self::new(b, priors, Some(followed.emu));
+        a.replay = Some(Replay {
+            log: followed.log,
+            next: 0,
+            until: followed.pos,
+        });
+        a
     }
 
     /// The emulation after the range, if it still follows the tokens.
@@ -360,7 +401,19 @@ impl<'a, B: Backend> Adaptive<'a, B> {
 
 impl<B: Backend> Corr for Adaptive<'_, B> {
     #[inline(always)]
-    fn predict(&mut self, _: &[u8], p: usize) -> Option<Token> {
+    fn predict(&mut self, _: &[u8], p: usize, actual: Option<Token>) -> Option<Token> {
+        if let Some(r) = &mut self.replay {
+            if p < r.until {
+                return match r.log.get(r.next) {
+                    Some(&(at, t)) if at == p => {
+                        r.next += 1;
+                        Some(t)
+                    }
+                    _ => actual,
+                };
+            }
+            self.replay = None;
+        }
         let e = self.emu.as_mut()?;
         match e.predict() {
             Some((at, t)) if at == p => Some(t),
@@ -374,6 +427,9 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
 
     #[inline(always)]
     fn commit(&mut self, _: usize, tok: Token) {
+        if self.replay.is_some() {
+            return;
+        }
         if let Some(e) = &mut self.emu
             && !e.commit(tok)
         {
@@ -382,6 +438,11 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
     }
 
     fn skip(&mut self, end: usize) {
+        match &self.replay {
+            Some(r) if end <= r.until => return,
+            Some(_) => self.replay = None,
+            None => {}
+        }
         if let Some(e) = &mut self.emu
             && !e.skip_to(end)
         {
@@ -434,7 +495,7 @@ impl<B: Backend> Corr for Adaptive<'_, B> {
         }
         self.alen = 0;
         let mut k = 0;
-        let tok = tokens::read_miss(t, d, p, pred, pc, |f| {
+        let tok = tokens::read_miss(t, d, p, pred, pc, actual, |f| {
             let v = match actual {
                 Some(_) => {
                     let (af, v) = *self.fields[..self.nfields]

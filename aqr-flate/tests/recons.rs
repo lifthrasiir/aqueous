@@ -413,3 +413,60 @@ fn formula_module_takes_its_resources() {
         assert!(decode(&[&bad, res[1]]).is_err());
     }
 }
+
+/// Coding under several chain rules at once (`tokens::code_chains`, one walk of each chain
+/// for all of them) gives each rule's coding on its own, stored blocks and all.
+#[test]
+fn chain_rules_coded_at_once() {
+    use aqr_flate::adapt::{Adaptive, Enc};
+    use aqr_flate::deflate::Body;
+    use aqr_flate::tokens::{self, Kind, Range, Rule};
+    let priors = aqr_flate::profile_priors(aqr_flate::ADAPTIVE).unwrap();
+    let rules: Vec<Rule> = [(7, 5), (0, 0), (4, 1), (12, 5)]
+        .map(|(depth, nice)| Rule {
+            kind: Kind::Chain,
+            depth,
+            nice,
+            ..Rule::default()
+        })
+        .to_vec();
+    let mut mixed = inputs().concat();
+    mixed.extend(include_bytes!("../src/lib.rs"));
+    for spec in ["zlib:level=6", "libdeflate:level=9", "miniz:level=1"] {
+        for input in inputs().iter().chain([&mixed]) {
+            let raw = spec
+                .parse::<flate_zoo::Encoder>()
+                .unwrap()
+                .compress(input)
+                .unwrap();
+            let (stream, data) = aqr_flate::deflate::parse(&raw).unwrap();
+            let (mut tokens, mut skips) = (vec![], vec![]);
+            for b in &stream.blocks {
+                match &b.body {
+                    Body::Stored { len, .. } => skips.push((tokens.len(), *len as usize)),
+                    Body::Fixed { tokens: t } | Body::Dynamic { tokens: t, .. } => {
+                        tokens.extend_from_slice(t)
+                    }
+                }
+            }
+            let range = Range {
+                first: 0,
+                count: tokens.len(),
+                pos: 0,
+                end: data.len(),
+                skips: &skips,
+            };
+            let mut at_once: Vec<_> = rules
+                .iter()
+                .map(|_| Adaptive::new(Enc::new(), priors, None))
+                .collect();
+            tokens::code_chains(&mut at_once, &data, &rules, &range, &tokens, None).unwrap();
+            for (&r, a) in rules.iter().zip(at_once) {
+                let mut alone = Adaptive::new(Enc::new(), priors, None);
+                tokens::code_range(&mut alone, &data, r, &range, Some(&tokens), None).unwrap();
+                assert_eq!(a.misses, alone.misses, "{spec} {r}");
+                assert!(a.b.finish() == alone.b.finish(), "{spec} {r}");
+            }
+        }
+    }
+}

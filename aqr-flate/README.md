@@ -38,7 +38,7 @@ an M4. All round-trip.
 | 7 | 2 | 615,883 B (1.361%) | 0.84 s (101 MB/s) | 0.71 s (120 MB/s) |
 | 8 | 1 | 613,582 B (1.356%) | 0.87 s (98 MB/s) | 0.73 s (117 MB/s) |
 | 9 | 0 | 602,111 B (1.331%) | 0.90 s (95 MB/s) | 0.77 s (111 MB/s) |
-| **10 (adaptive)** | | **289,911 B (0.641%)** | **10.80 s (7.9 MB/s)** | **1.61 s (53 MB/s)** |
+| **10 (adaptive)** | | **289,911 B (0.641%)** | **6.25 s (13.6 MB/s)** | **1.57 s (54 MB/s)** |
 
 ```
 RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -- eval -P 6

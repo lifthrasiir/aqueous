@@ -317,6 +317,85 @@ impl Matcher {
         best
     }
 
+    /// [`Matcher::longest`] for every `(depth, nice)` of `cfgs` at once, into `out`: one walk
+    /// serves them all, since the best match so far is the same for every search not yet
+    /// stopped.
+    pub fn longest_multi(
+        &mut self,
+        d: &[u8],
+        p: usize,
+        cfgs: &[(usize, usize)],
+        out: &mut [Found],
+    ) {
+        debug_assert_eq!(cfgs.len(), out.len());
+        let max = (d.len() - p).min(MAX_MATCH);
+        let mut best = Found::default();
+        out.fill(best);
+        if max < 3 {
+            return;
+        }
+        // Searches not stopped yet, as a bit set, and the least depth and nice length among
+        // them.
+        let mut open: u32 = (1 << cfgs.len()) - 1;
+        let least = |open: u32| {
+            let (mut depth, mut nice) = (usize::MAX, usize::MAX);
+            for (i, c) in cfgs.iter().enumerate() {
+                if open >> i & 1 != 0 {
+                    depth = depth.min(c.0);
+                    nice = nice.min(c.1);
+                }
+            }
+            (depth, nice)
+        };
+        let (mut depth, mut nice) = least(open);
+        let limit = cfgs.iter().map(|c| c.0).max().unwrap_or(0);
+        let dp = &d[p..p + max];
+        let mut end = [0u8; 2];
+        // As in `walk`, positions relative to base.
+        self.chain.ensure(d, p);
+        let (links, base) = (&self.chain.links[..], self.chain.base);
+        let pr = p - base;
+        let mut c = links.get(pr).copied().unwrap_or(NONE);
+        let mut idx = 0;
+        while c != NONE && pr - c as usize <= WINDOW && idx < limit {
+            let dc = &d[base + c as usize..][..max];
+            if best.len == 0 || (dc[best.len] == end[1] && dc[best.len - 1] == end[0]) {
+                let l = common_slices(dc, dp);
+                if l > best.len {
+                    best = Found {
+                        len: l,
+                        dist: pr - c as usize,
+                    };
+                    if l >= max {
+                        break;
+                    }
+                    end = [dp[l - 1], dp[l]];
+                }
+            }
+            idx += 1;
+            if idx >= depth || best.len >= nice {
+                // Searches this candidate exhausts, or that are nice enough now.
+                for (i, cfg) in cfgs.iter().enumerate() {
+                    if open >> i & 1 != 0 && (cfg.0 == idx || best.len >= cfg.1) {
+                        out[i] = best;
+                        open &= !(1 << i);
+                    }
+                }
+                if open == 0 {
+                    return;
+                }
+                (depth, nice) = least(open);
+            }
+            c = links[c as usize];
+        }
+        let mut m = open;
+        while m != 0 {
+            let i = m.trailing_zeros() as usize;
+            m &= m - 1;
+            out[i] = best;
+        }
+    }
+
     /// The `q`-quantile (0..=1) of the chain indices of matches `(position, distance)`: how
     /// many closer candidates each match's source had. O(1) per match, by numbering positions
     /// within their chains in one pass; `matches` must come in order of position.
@@ -573,6 +652,25 @@ mod tests {
                         "p={p} depth={depth} nice={nice}"
                     );
                 }
+            }
+        }
+    }
+
+    /// One walk gives every configuration's longest match.
+    #[test]
+    fn longest_multi_matches_longest() {
+        let data = lcg_data(20000, 2, b"aab");
+        let cfgs = [(128, 128), (1, 8), (16, 16), (4096, 128), (4, 3), (64, 258)];
+        let (mut m, mut r) = (Matcher::single(&data), Matcher::single(&data));
+        let mut out = [Found::default(); 6];
+        for p in 0..data.len() {
+            m.longest_multi(&data, p, &cfgs, &mut out);
+            for (i, &(depth, nice)) in cfgs.iter().enumerate() {
+                assert_eq!(
+                    out[i],
+                    r.longest(&data, p, depth, nice),
+                    "p={p} {depth} {nice}"
+                );
             }
         }
     }

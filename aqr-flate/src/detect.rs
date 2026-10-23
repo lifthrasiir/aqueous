@@ -10,7 +10,7 @@
 
 use crate::deflate::{Body, Stream, Token};
 use crate::header::zlib_header;
-use crate::zlib::{Emulator, MultiSlow, Params, Strategy};
+use crate::zlib::{Emulator, Followed, MultiSlow, Params, Strategy};
 
 /// Tokens emulated per candidate in the first round of ranking; each further round covers
 /// four times as many among the candidates still tied for the fewest misses.
@@ -222,6 +222,8 @@ struct Trial<'a> {
     token: usize,
     pos: usize,
     d: Detection,
+    /// The mispredictions: (position, predicted token).
+    log: Vec<(usize, Token)>,
     /// Set once the emulation cannot follow the stream any more.
     lost: bool,
 }
@@ -239,7 +241,16 @@ impl<'a> Trial<'a> {
                 misses: 0,
                 complete: false,
             },
+            log: vec![],
             lost: false,
+        }
+    }
+
+    fn into_followed(self) -> Followed<'a> {
+        Followed {
+            log: self.log,
+            pos: self.pos,
+            emu: self.e,
         }
     }
 
@@ -266,7 +277,12 @@ impl<'a> Trial<'a> {
                 continue;
             };
             match self.e.predict() {
-                Some((pp, pt)) if pp == self.pos => self.d.misses += (pt != t) as usize,
+                Some((pp, pt)) if pp == self.pos => {
+                    if pt != t {
+                        self.d.misses += 1;
+                        self.log.push((pp, pt));
+                    }
+                }
                 _ => {
                     self.lost = true;
                     break;
@@ -289,12 +305,22 @@ pub fn trial(
     limit: usize,
     give_up: usize,
 ) -> Option<Detection> {
+    run_trial(stream, data, p, limit, give_up).map(|t| t.d)
+}
+
+fn run_trial<'a>(
+    stream: &Stream,
+    data: &'a [u8],
+    p: Params,
+    limit: usize,
+    give_up: usize,
+) -> Option<Trial<'a>> {
     let mut t = Trial::new(data, p);
     t.run(stream, limit, give_up);
     if limit == usize::MAX {
         t.d.complete = !t.lost && t.d.misses <= give_up;
     }
-    (!t.lost && t.d.misses <= give_up).then_some(t.d)
+    (!t.lost && t.d.misses <= give_up).then_some(t)
 }
 
 /// Whether `p` (one of [`Hints::params`], say) may have made `stream`: allowed by its structure
@@ -339,22 +365,32 @@ pub fn mem_alternatives(stream: &Stream) -> Vec<u8> {
 /// [`detect_among`], then, if the best candidate is not exact over the whole stream and its
 /// memLevel was only guessed, the same candidate with the other possible memLevels.
 pub fn detect_refined(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
-    let d = detect_among(stream, data, candidates)?;
+    detect_refined_followed(stream, data, candidates).map(|(d, _)| d)
+}
+
+/// [`detect_refined`], and the emulation it followed the stream with as far as it went, if
+/// it has it at hand.
+pub fn detect_refined_followed<'a>(
+    stream: &Stream,
+    data: &'a [u8],
+    candidates: Vec<Params>,
+) -> Option<(Detection, Option<Followed<'a>>)> {
+    let (d, followed) = detect_among_followed(stream, data, candidates)?;
     let alts = mem_alternatives(stream);
     if alts.is_empty() {
-        return Some(d);
+        return Some((d, followed));
     }
-    let mut best = trial(stream, data, d.params, usize::MAX, usize::MAX)?;
+    let mut best = run_trial(stream, data, d.params, usize::MAX, usize::MAX)?;
     for mem in alts {
-        if best.misses == 0 {
+        if best.d.misses == 0 {
             break;
         }
         let p = Params { mem, ..d.params };
-        if let Some(t) = trial(stream, data, p, usize::MAX, best.misses.saturating_sub(1)) {
+        if let Some(t) = run_trial(stream, data, p, usize::MAX, best.d.misses.saturating_sub(1)) {
             best = t;
         }
     }
-    Some(best)
+    Some((best.d, Some(best.into_followed())))
 }
 
 /// The usual settings among `candidates`: levels 6 (zlib's default), 9 and 1, and the
@@ -419,13 +455,33 @@ pub fn first_exact(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Opt
 }
 
 pub fn detect_among(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Option<Detection> {
+    detect_among_followed(stream, data, candidates).map(|(d, _)| d)
+}
+
+/// [`detect_among`], and the emulation of the candidate found as far as it went.
+fn detect_among_followed<'a>(
+    stream: &Stream,
+    data: &'a [u8],
+    candidates: Vec<Params>,
+) -> Option<(Detection, Option<Followed<'a>>)> {
     let mut units = units(stream, data, candidates);
+    let take = |units: Vec<Unit<'a>>, i: usize| units.into_iter().find_map(|u| u.into_followed(i));
     let mut limit = TRIAL_TOKENS;
     loop {
         let mut best = usize::MAX;
-        for u in &mut units {
-            u.run(stream, limit, best);
-            best = best.min(u.best());
+        for k in 0..units.len() {
+            units[k].run(stream, limit, best);
+            best = best.min(units[k].best());
+            // Exact over the whole stream, and preferred to every other candidate left: none
+            // can do better.
+            let exact = units[k]
+                .detections()
+                .find(|(_, d)| d.complete && d.misses == 0);
+            if let Some((i, d)) = exact
+                && units.iter().flat_map(Unit::detections).all(|(j, _)| j >= i)
+            {
+                return Some((d, take(units, i)));
+            }
         }
         for u in &mut units {
             u.keep(best);
@@ -436,7 +492,8 @@ pub fn detect_among(stream: &Stream, data: &[u8], candidates: Vec<Params>) -> Op
         alive.sort_by_key(|&(i, _)| i);
         if alive.len() <= 1 || alive.iter().all(|(_, d)| d.complete) {
             // Ties that survive the whole stream are equivalent; the first is preferred.
-            return alive.first().map(|&(_, d)| d);
+            let &(i, d) = alive.first()?;
+            return Some((d, take(units, i)));
         }
         limit = limit.saturating_mul(4);
     }
@@ -498,6 +555,12 @@ impl<'a> MultiRun<'a> {
         }
     }
 
+    /// Candidate `i`'s emulation, if it is one of the lanes.
+    fn into_followed(self, i: usize) -> Option<Followed<'a>> {
+        let k = self.ids.iter().position(|&j| j == i)?;
+        Some(self.m.into_followed(k, self.pos))
+    }
+
     fn kill_above(&mut self, give_up: usize) {
         let dead: Vec<usize> = self
             .m
@@ -516,7 +579,15 @@ enum Unit<'a> {
     Multi(MultiRun<'a>),
 }
 
-impl Unit<'_> {
+impl<'a> Unit<'a> {
+    /// Candidate `i`'s emulation, if it is in this unit.
+    fn into_followed(self, i: usize) -> Option<Followed<'a>> {
+        match self {
+            Unit::Single(j, t) => (j == i).then(|| t.into_followed()),
+            Unit::Multi(m) => m.into_followed(i),
+        }
+    }
+
     fn run(&mut self, stream: &Stream, limit: usize, give_up: usize) {
         match self {
             Unit::Single(_, t) => t.run(stream, limit, give_up),

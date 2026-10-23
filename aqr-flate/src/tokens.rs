@@ -13,10 +13,10 @@
 //! prediction (kind, length), and its distance as an entry of the bucket or verbatim.
 
 use super::code::{self, Counts};
-use super::table::{Cands, ChainTable, NoTable, Search, Table, common};
+use super::table::{Cands, ChainTable, MultiChain, NoTable, Search, Table, common};
 use crate::bits::{BitReader, BitWriter};
 use crate::deflate::Token;
-use crate::matchfind::{MAX_MATCH, WINDOW};
+use crate::matchfind::{MAX_MATCH, Matcher, WINDOW};
 
 use crate::{Error, Result};
 
@@ -430,9 +430,9 @@ pub trait Corr {
     ) -> Result<Token>;
 
     /// A prediction to use instead of the rule's at `p` (coded as class 2), from a
-    /// predictor of the coder's own.
+    /// predictor of the coder's own; `actual` is the token there, if known.
     #[inline(always)]
-    fn predict(&mut self, _d: &[u8], _p: usize) -> Option<Token> {
+    fn predict(&mut self, _d: &[u8], _p: usize, _actual: Option<Token>) -> Option<Token> {
         None
     }
 
@@ -542,7 +542,7 @@ fn code_with<C: Corr, T: Search>(
         if p >= n {
             return Err(Error::Corrupt);
         }
-        let (pred, class) = match c.predict(d, p) {
+        let (pred, class) = match c.predict(d, p, actual.map(|a| a[k])) {
             Some(t) => (t, 2),
             None => {
                 let (pred, class) = rule.predict(&mut t, d, p);
@@ -568,6 +568,67 @@ fn code_with<C: Corr, T: Search>(
         }
     }
     Ok(p)
+}
+
+/// Codes the tokens of `range` (deconstructing, as [`code_range`] does) under several
+/// [`Kind::Chain`] rules at once, into one coder each, walking each chain once for all of
+/// them, with `m` (a matcher for the range, if one is at hand). The coders' own predictions
+/// ([`Corr::predict`]) are not asked for.
+pub fn code_chains<C: Corr>(
+    cs: &mut [C],
+    d: &[u8],
+    rules: &[Rule],
+    range: &Range,
+    actual: &[Token],
+    m: Option<Matcher>,
+) -> Result<()> {
+    debug_assert!(rules.iter().all(|r| r.kind == Kind::Chain) && cs.len() == rules.len());
+    let cfgs: Vec<(u8, u8)> = rules.iter().map(|r| (r.depth, r.nice)).collect();
+    let m = m.unwrap_or_else(|| Matcher::single_range(d, range.pos, range.end));
+    let mut t = MultiChain::new(m, &cfgs);
+    let n = d.len().min(range.end);
+    let mut p = range.pos;
+    let skip0 = range.skips.partition_point(|s| s.0 < range.first);
+    let mut skips = range.skips[skip0..].iter().peekable();
+    for (k, &a) in actual[..range.count].iter().enumerate() {
+        while let Some(&&(at, len)) = skips.peek()
+            && at == range.first + k
+        {
+            p += len;
+            skips.next();
+            cs.iter_mut().for_each(|c| c.skip(p));
+        }
+        if p >= n {
+            return Err(Error::Corrupt);
+        }
+        let here = t.search(d, p);
+        // Every configuration's match at the next position, once one needs it.
+        let mut next = None;
+        for (i, (c, f)) in cs.iter_mut().zip(here).enumerate() {
+            let (pred, class) = if f.len < 3 {
+                (Token::Lit(d[p]), 0)
+            } else {
+                let m = Token::Match {
+                    len: f.len as u16,
+                    dist: f.dist as u16,
+                    alt258: false,
+                };
+                (m, 1)
+            };
+            if class == 1 && c.lookahead() {
+                let len = if p + 1 < n {
+                    next.get_or_insert_with(|| t.search(d, p + 1))[i].len
+                } else {
+                    0
+                };
+                c.next_len(if len < 3 { 0 } else { len });
+            }
+            let tok = c.token(&mut t, d, p, pred, class, Some(a))?;
+            c.commit(p, tok);
+        }
+        p += a.span();
+    }
+    Ok(())
 }
 
 /// The distance of a match at `p` as a bucket entry (1 + index) or 0.
@@ -822,7 +883,7 @@ impl Player<'_> {
         class: usize,
     ) -> Result<Token> {
         let (r, models) = (&mut self.r, self.models);
-        let tok = read_miss(t, d, p, pred, class, |f| r.get(&models[f]))?;
+        let tok = read_miss(t, d, p, pred, class, None, |f| r.get(&models[f]))?;
         self.misses[class] -= 1;
         if self.misses[class] > 0 {
             self.gap[class] = self.r.get(&self.models[GAP + class])?;
@@ -832,7 +893,8 @@ impl Player<'_> {
 }
 
 /// A miss's token (where `pred` was predicted) from its payload fields, read by `get` in
-/// the order [`payload`] gives them.
+/// the order [`payload`] gives them. A `known` match's distance is taken as it is rather
+/// than looked up from the fields (when coding fields the caller already has).
 #[inline]
 pub fn read_miss(
     t: &mut dyn Cands,
@@ -840,6 +902,7 @@ pub fn read_miss(
     p: usize,
     pred: Token,
     class: usize,
+    known: Option<Token>,
     mut get: impl FnMut(usize) -> Result<u32>,
 ) -> Result<Token> {
     let maxl = (d.len() - p).min(MAX_MATCH);
@@ -860,14 +923,16 @@ pub fn read_miss(
     if !(3..=maxl).contains(&len) {
         return Err(Error::Corrupt);
     }
-    let dist = match get(DIST_IDX)? {
-        0 => match if t.ranked() { get(DIST_RANK)? } else { 0 } {
-            0 => get(DIST_RAW)? as usize + 1,
-            k => t
+    let dist = match (get(DIST_IDX)?, known) {
+        (0, _) => match (if t.ranked() { get(DIST_RANK)? } else { 0 }, known) {
+            (0, _) => get(DIST_RAW)? as usize + 1,
+            (_, Some(Token::Match { dist, .. })) => dist as usize,
+            (k, _) => t
                 .select(d, p, len, k as usize - 1, RANK_LIMIT)
                 .ok_or(Error::Corrupt)?,
         },
-        i => {
+        (_, Some(Token::Match { dist, .. })) => dist as usize,
+        (i, _) => {
             let e = t.entries(d, p);
             p - *e.get(i as usize - 1).ok_or(Error::Corrupt)?
         }

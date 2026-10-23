@@ -358,3 +358,132 @@ fn inexact_hinted_params_change_nothing() {
         assert!((data, meta) == plain, "{spec}");
     }
 }
+
+/// Checks that `f`, an emulation with parameters `p` that has followed `stream` up to
+/// `f.pos`, logged the mispredictions an emulator of its own makes on the way there, and then
+/// carries on as that emulator does.
+fn check_followed(
+    stream: &aqr_flate::deflate::Stream,
+    data: &[u8],
+    p: aqr_flate::zlib::Params,
+    f: aqr_flate::zlib::Followed,
+    what: &str,
+) {
+    use aqr_flate::deflate::Body;
+    let mut e = aqr_flate::zlib::Emulator::new(data, p);
+    let (mut followed, mut log, mut pos) = (Some(f), vec![], 0);
+    let mut follow = |log: &[(usize, _)], pos: usize| {
+        // Once the emulator of its own gets where `f` is, they agree from there on.
+        if followed.as_ref().is_some_and(|f| f.pos == pos) {
+            let f = followed.take().unwrap();
+            assert_eq!(f.log, log, "{what}: log");
+            return Some(f.emu);
+        }
+        None
+    };
+    let mut fe: Option<aqr_flate::zlib::Emulator> = None;
+    for b in &stream.blocks {
+        let tokens = match &b.body {
+            Body::Stored { len, .. } => {
+                pos += *len as usize;
+                let ok = e.skip_to(pos);
+                if let Some(fe) = &mut fe {
+                    assert_eq!(fe.skip_to(pos), ok, "{what}: skip to {pos}");
+                }
+                fe = fe.or_else(|| follow(&log, pos));
+                continue;
+            }
+            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens,
+        };
+        for &t in tokens {
+            fe = fe.or_else(|| follow(&log, pos));
+            let pred = e.predict();
+            if let Some(fe) = &mut fe {
+                assert_eq!(fe.predict(), pred, "{what}: at {pos}");
+                assert_eq!(fe.commit(t), e.commit(t), "{what}: at {pos}");
+            } else {
+                match pred {
+                    Some((at, pt)) if at == pos && pt != t => log.push((at, pt)),
+                    Some((at, _)) if at == pos => {}
+                    _ => panic!("{what}: lost at {pos}"),
+                }
+                assert!(e.commit(t), "{what}: lost at {pos}");
+            }
+            pos += t.span();
+        }
+    }
+    let fe = fe.or_else(|| follow(&log, pos));
+    assert!(
+        followed.is_none(),
+        "{what}: never got to where the emulation was"
+    );
+    assert_eq!(fe.unwrap().predict(), e.predict(), "{what}: at the end");
+}
+
+/// A lane taken out of a MultiSlow partway carries on as an emulator of its own would, and
+/// so does the emulation detection followed a stream with (stored blocks or not).
+#[test]
+fn followed_emulations_carry_on() {
+    use aqr_flate::deflate::Body;
+    use aqr_flate::zlib::{MultiSlow, Params};
+    let lanes: Vec<Params> = (4..=9)
+        .map(|level| Params {
+            level,
+            ..Params::default()
+        })
+        .collect();
+    let inputs = zlib_inputs();
+    for spec in [
+        "zlib:level=6",
+        "zlib:level=9,mem=1",
+        "zlib-ng:level=6",
+        "libdeflate:level=9",
+    ] {
+        for input in &inputs {
+            let raw = spec
+                .parse::<flate_zoo::Encoder>()
+                .unwrap()
+                .compress(input)
+                .unwrap();
+            let (stream, data) = aqr_flate::deflate::parse(&raw).unwrap();
+            if let Some((d, Some(f))) = aqr_flate::detect::detect_refined_followed(
+                &stream,
+                &data,
+                aqr_flate::detect::candidates(&stream),
+            ) {
+                check_followed(&stream, &data, d.params, f, &format!("{spec} detected"));
+            }
+            let stored = stream
+                .blocks
+                .iter()
+                .any(|b| matches!(b.body, Body::Stored { .. }));
+            if stored {
+                continue;
+            }
+            let tokens: Vec<_> = stream
+                .blocks
+                .iter()
+                .flat_map(|b| match &b.body {
+                    Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => tokens.clone(),
+                    Body::Stored { .. } => unreachable!(),
+                })
+                .collect();
+            // After literals and matches alike.
+            for cut in
+                [0, 1, 2, 3, 7, 100, 999, 1000, 1001, tokens.len()].map(|c| c.min(tokens.len()))
+            {
+                for k in 0..lanes.len() {
+                    let mut m = MultiSlow::new(&data, &lanes);
+                    let mut pos = 0;
+                    for &t in &tokens[..cut] {
+                        assert_eq!(m.predict(), Some(pos));
+                        assert!(m.commit(t));
+                        pos += t.span();
+                    }
+                    let what = format!("{spec} lane {} after {cut}", lanes[k]);
+                    check_followed(&stream, &data, lanes[k], m.into_followed(k, pos), &what);
+                }
+            }
+        }
+    }
+}
