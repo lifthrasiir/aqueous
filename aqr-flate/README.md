@@ -28,33 +28,33 @@ an M4. All round-trip.
 
 | profile | λ | record | split | join |
 |---|---|---|---|---|
-| 0 | 200 | 1,560,843 B (3.450%) | 0.56 s (152 MB/s) | 0.46 s (185 MB/s) |
-| 1 | 100 | 1,305,100 B (2.884%) | 0.57 s (149 MB/s) | 0.47 s (181 MB/s) |
-| 2 | 50 | 1,110,953 B (2.455%) | 0.61 s (140 MB/s) | 0.50 s (170 MB/s) |
-| 3 | 30 | 848,192 B (1.875%) | 0.65 s (131 MB/s) | 0.53 s (161 MB/s) |
-| 4 | 20 | 776,419 B (1.716%) | 0.70 s (122 MB/s) | 0.58 s (147 MB/s) |
-| 5 | 10 | 676,811 B (1.496%) | 0.80 s (106 MB/s) | 0.68 s (125 MB/s) |
-| **6 (default)** | **5** | **650,173 B (1.437%)** | **0.82 s (104 MB/s)** | **0.69 s (123 MB/s)** |
-| 7 | 2 | 615,883 B (1.361%) | 0.84 s (101 MB/s) | 0.71 s (120 MB/s) |
-| 8 | 1 | 613,582 B (1.356%) | 0.87 s (98 MB/s) | 0.73 s (117 MB/s) |
-| 9 | 0 | 602,111 B (1.331%) | 0.90 s (95 MB/s) | 0.77 s (111 MB/s) |
-| **10 (adaptive)** | | **289,911 B (0.641%)** | **6.25 s (13.6 MB/s)** | **1.57 s (54 MB/s)** |
+| 0 | 200 | 1,560,843 B (3.450%) | 0.68 s (125 MB/s) | 0.45 s (189 MB/s) |
+| 1 | 100 | 1,305,100 B (2.884%) | 0.70 s (122 MB/s) | 0.46 s (185 MB/s) |
+| 2 | 50 | 1,110,953 B (2.455%) | 0.73 s (117 MB/s) | 0.48 s (177 MB/s) |
+| 3 | 30 | 848,192 B (1.875%) | 0.76 s (112 MB/s) | 0.52 s (164 MB/s) |
+| 4 | 20 | 776,419 B (1.716%) | 0.81 s (105 MB/s) | 0.57 s (149 MB/s) |
+| 5 | 10 | 676,811 B (1.496%) | 0.91 s (94 MB/s) | 0.65 s (131 MB/s) |
+| **6 (default)** | **5** | **650,173 B (1.437%)** | **0.94 s (91 MB/s)** | **0.68 s (125 MB/s)** |
+| 7 | 2 | 615,883 B (1.361%) | 0.96 s (89 MB/s) | 0.70 s (122 MB/s) |
+| 8 | 1 | 613,582 B (1.356%) | 0.97 s (88 MB/s) | 0.71 s (120 MB/s) |
+| 9 | 0 | 602,111 B (1.331%) | 1.00 s (85 MB/s) | 0.74 s (115 MB/s) |
+| **10 (adaptive)** | | **289,911 B (0.641%)** | **6.23 s (13.7 MB/s)** | **1.57 s (54 MB/s)** |
 
 ```
 RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -- eval -P 6
 ```
 
-- Split time at λ = 5 breaks down to parsing 0.14 s, rule choice 0.04 s, token coding
-  0.53 s, headers 0.07 s and the rest 0.03 s. Only token coding depends on λ. Joining spends
-  0.08 s on headers and 0.05 s on writing.
+- Split time at λ = 5 breaks down to parsing 0.14 s, rule choice 0.03 s, token coding
+  0.70 s (with the second parse, by segment) and headers 0.07 s. Only token coding depends on
+  λ. Joining spends 0.08 s on headers and 0.05 s on writing.
 - Speed costs little size below λ = 10: dropping the penalty altogether (λ = 0) gains only
   0.1 points over λ = 5. A higher λ first drops the 8-way tables, then ranked distances and
   the second table. λ = 200 is hardly faster than λ = 100.
 - With static codes, gaps and kinds (where the misses are and what they are) make 70% of the
   corrections at λ = 5. Lengths and distances make the rest.
-- Profile 10 is less than half the size of profile 9, and joins at half its speed. Splitting
-  codes every stream two or three times (with the catalog's rule, a chain rule, and zlib
-  emulation for streams that look like zlib's).
+- Profile 10 is less than half the size of profile 9, joins at half its speed and splits at
+  a sixth. Splitting codes every stream two or three times (with the catalog's rule, a chain
+  rule, and zlib emulation for streams that look like zlib's).
 
 ## How it works
 
@@ -145,10 +145,11 @@ all 924 streams, one thread, on an M4:
 
 | tool | reconstruction data | streams failed | split | join |
 |---|---|---|---|---|
-| aqr-flate, profile 10 | 207,798 B (0.512%) | 0 | 11.2 s | 1.6 s |
-| aqr-flate, profile 6 | 468,358 B (1.153%) | 0 | 0.8 s | 0.7 s |
-| preflate | 965,499 B (2.378%) | 15 | 3.9 s | 3.1 s |
-| preflate-rs | 316,814 B (0.780%) | 117 | 1.8 s | 0.8 s |
+| aqr-flate, profile 10 | 207,798 B (0.512%) | 0 | 6.2 s | 1.6 s |
+| aqr-flate, profile 9 | 434,083 B (1.069%) | 0 | 1.0 s | 0.8 s |
+| aqr-flate, profile 6 | 468,358 B (1.153%) | 0 | 1.0 s | 0.7 s |
+| preflate | 965,499 B (2.378%) | 15 | 3.8 s | 3.0 s |
+| preflate-rs | 316,814 B (0.780%) | 117 | 1.7 s | 0.8 s |
 
 - preflate-rs is smaller on encoders it models exactly or nearly (gzip, miniz-oxide, sdefl,
   zlib-cloudflare, zlib-ng), and refuses 13% of the streams (`NoCompressionCandidates`,
