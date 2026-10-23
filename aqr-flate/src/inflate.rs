@@ -267,9 +267,11 @@ pub struct Layout {
 /// Collects the data and tokens (for [`parse_segments`]). The vectors are kept as raw
 /// parts and grown by value, so that their lengths can stay in registers in the token loop
 /// (a `&mut Vec` would pin them to memory).
-struct Collect {
+struct Collect<const HEAD: bool> {
     data: (*mut u8, usize, usize),
     tokens: (*mut Token, usize, usize),
+    /// With `HEAD`, the tokens are kept only where they start before this many bytes of data.
+    limit: usize,
 }
 
 // Room the collector keeps per token: a match and the overshoot of its copy.
@@ -286,13 +288,14 @@ fn grow<T>(v: (*mut T, usize, usize), extra: usize) -> (*mut T, usize, usize) {
     (w.as_mut_ptr(), w.len(), w.capacity())
 }
 
-impl Collect {
-    fn new(data: usize, tokens: usize) -> Collect {
+impl<const HEAD: bool> Collect<HEAD> {
+    fn new(data: usize, tokens: usize, limit: usize) -> Collect<HEAD> {
         let mut d = std::mem::ManuallyDrop::new(Vec::<u8>::with_capacity(data));
         let mut t = std::mem::ManuallyDrop::new(Vec::<Token>::with_capacity(tokens));
         Collect {
             data: (d.as_mut_ptr(), 0, d.capacity()),
             tokens: (t.as_mut_ptr(), 0, t.capacity()),
+            limit,
         }
     }
 
@@ -307,7 +310,7 @@ impl Collect {
     }
 }
 
-impl Sink for Collect {
+impl<const HEAD: bool> Sink for Collect<HEAD> {
     #[inline(always)]
     fn reserve(&mut self) {
         if self.data.2 - self.data.1 < ROOM {
@@ -321,27 +324,33 @@ impl Sink for Collect {
     #[inline(always)]
     fn lit(&mut self, b: u8) {
         // SAFETY: `reserve` came before, and leaves room for three literals.
+        let keep = !HEAD || self.data.1 < self.limit;
         unsafe {
             *self.data.0.add(self.data.1) = b;
-            self.tokens.0.add(self.tokens.1).write(Token::Lit(b));
+            if keep {
+                self.tokens.0.add(self.tokens.1).write(Token::Lit(b));
+            }
         }
         self.data.1 += 1;
-        self.tokens.1 += 1;
+        self.tokens.1 += keep as usize;
     }
 
     #[inline(always)]
     fn mat(&mut self, len: u16, dist: u16, alt258: bool) {
         // SAFETY: `1 <= dist <=` the bytes so far (checked by the parser), and `reserve`
         // left room for the match and its overshoot.
+        let keep = !HEAD || self.data.1 < self.limit;
         unsafe {
             copy_match(self.data.0, self.data.1, dist as usize, len as usize);
-            self.tokens
-                .0
-                .add(self.tokens.1)
-                .write(Token::Match { len, dist, alt258 });
+            if keep {
+                self.tokens
+                    .0
+                    .add(self.tokens.1)
+                    .write(Token::Match { len, dist, alt258 });
+            }
         }
         self.data.1 += len as usize;
-        self.tokens.1 += 1;
+        self.tokens.1 += keep as usize;
     }
 
     fn stored(&mut self, bytes: &[u8]) {
@@ -363,7 +372,24 @@ pub fn parse(raw: &[u8]) -> Result<Flat> {
 
 /// Parses `raw`, with segments of about `segment` bytes in [`Stats`].
 pub fn parse_segments(raw: &[u8], segment: usize) -> Result<Flat> {
-    let mut c = Collect::new(raw.len() * 3, raw.len());
+    collect(
+        raw,
+        segment,
+        Collect::<false>::new(raw.len() * 3, raw.len(), usize::MAX),
+    )
+}
+
+/// [`parse_segments`] keeping only the tokens that start before `prefix` bytes of data: all
+/// else (the data, the blocks, the statistics) as it gives.
+pub fn parse_segments_head(raw: &[u8], segment: usize, prefix: usize) -> Result<Flat> {
+    collect(
+        raw,
+        segment,
+        Collect::<true>::new(raw.len() * 3, prefix / 2 + 64, prefix),
+    )
+}
+
+fn collect<const HEAD: bool>(raw: &[u8], segment: usize, mut c: Collect<HEAD>) -> Result<Flat> {
     let l = parse_into(raw, segment, &mut c);
     let (data, tokens) = c.into_vecs();
     let l = l?;

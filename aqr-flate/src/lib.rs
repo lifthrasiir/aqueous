@@ -385,6 +385,99 @@ pub fn deconstruct(raw: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 
 use inflate::Flat;
 
+/// Hands the tokens of a stream parsed again to `send` by segment, as each is complete.
+struct Split<'a, F: FnMut(usize, Vec<Token>)> {
+    cuts: &'a [usize],
+    seg: usize,
+    n: usize,
+    cur: Vec<Token>,
+    send: F,
+}
+
+impl<F: FnMut(usize, Vec<Token>)> Split<'_, F> {
+    #[inline(always)]
+    fn push(&mut self, t: Token) {
+        self.cur.push(t);
+        self.n += 1;
+        while self.cuts.get(self.seg + 1) == Some(&self.n) {
+            let next = self.cuts.get(self.seg + 2).map_or(0, |&c| c - self.n);
+            (self.send)(
+                self.seg,
+                std::mem::replace(&mut self.cur, Vec::with_capacity(next)),
+            );
+            self.seg += 1;
+        }
+    }
+}
+
+impl<F: FnMut(usize, Vec<Token>)> inflate::Sink for Split<'_, F> {
+    fn lit(&mut self, b: u8) {
+        self.push(Token::Lit(b));
+    }
+
+    fn mat(&mut self, len: u16, dist: u16, alt258: bool) {
+        self.push(Token::Match { len, dist, alt258 });
+    }
+
+    fn stored(&mut self, _: &[u8]) {}
+}
+
+/// The segments of `f` (`ranges`) coded by `rule`, their tokens parsed again from `raw` and
+/// given to `threads` threads as each segment is complete, then dropped: a few segments' at
+/// a time rather than the whole stream's.
+fn code_streamed(
+    raw: &[u8],
+    f: &Flat,
+    rule: Rule,
+    ranges: &[Range],
+    threads: usize,
+) -> Result<Vec<tokens::Recorder>> {
+    use std::sync::{Mutex, mpsc};
+    let done: Vec<Mutex<Option<Result<tokens::Recorder>>>> =
+        ranges.iter().map(|_| Mutex::new(None)).collect();
+    // at most two segments waiting per thread: the parse waits for the coding
+    let (tx, rx) = mpsc::sync_channel::<(usize, Vec<Token>)>(2 * threads);
+    let rx = Mutex::new(rx);
+    let parsed = std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| {
+                loop {
+                    // (the lock only while taking a segment, not while coding it)
+                    let job = rx.lock().unwrap().recv();
+                    let Ok((i, toks)) = job else { break };
+                    let mut rec = tokens::Recorder::default();
+                    let r =
+                        tokens::code_range(&mut rec, &f.data, rule, &ranges[i], Some(&toks), None)
+                            .map(|_| rec);
+                    *done[i].lock().unwrap() = Some(r);
+                }
+            });
+        }
+        let mut split = Split {
+            cuts: &f.stats.cuts,
+            seg: 0,
+            n: 0,
+            cur: Vec::new(),
+            send: |i, toks| {
+                let _ = tx.send((i, toks));
+            },
+        };
+        let r = inflate::parse_head(raw, usize::MAX, &mut split);
+        // segments without tokens at the end (none at all in a stream of stored blocks)
+        while split.seg + 1 < split.cuts.len() {
+            (split.send)(split.seg, std::mem::take(&mut split.cur));
+            split.seg += 1;
+        }
+        drop(split);
+        drop(tx);
+        r
+    });
+    parsed?;
+    done.into_iter()
+        .map(|d| d.into_inner().unwrap().ok_or(Error::Inconsistent)?)
+        .collect()
+}
+
 impl Flat {
     /// The parsed stream with its blocks' tokens in place.
     fn stream_with_tokens(&self) -> Stream {
@@ -474,7 +567,14 @@ pub fn deconstruct_hinted(
         _ => None,
     };
     let t0 = std::time::Instant::now();
-    let f = Flat::new(raw, opts.segment, threads, opts.verify)?;
+    // With static codes, the tokens are needed by segment only (and of a prefix, to choose
+    // the rule): they are parsed again by segment, and dropped once coded (`code_streamed`).
+    let streamed = priors.is_none() && !opts.verify;
+    let f = if streamed {
+        inflate::parse_segments_head(raw, opts.segment, opts.prefix)?
+    } else {
+        Flat::new(raw, opts.segment, threads, opts.verify)?
+    };
     // What a record cannot hold, or reconstruct would reject (FORMAT.md, "Domain").
     let n = f.data.len();
     if n >= u32::MAX as usize
@@ -521,7 +621,7 @@ pub fn deconstruct_hinted(
     write_blocks(&mut w, &f);
     let mut report = Report {
         rule,
-        tokens: f.tokens.len(),
+        tokens: f.stats.cuts.last().copied().unwrap_or(0),
         headers: headers.len(),
         counts: vec![vec![0; code::ALPHABET]; FIELDS],
         fingerprint: fp,
@@ -571,15 +671,19 @@ pub fn deconstruct_hinted(
         }
         segs.into_iter().map(|s| s.body).collect::<Vec<_>>()
     } else {
-        let segs = par_map(ranges.len(), threads, |i| -> Result<tokens::Recorder> {
-            let mut rec = tokens::Recorder::default();
-            let r = &ranges[i];
-            let actual = &f.tokens[r.first..r.first + r.count];
-            tokens::code_range(&mut rec, &f.data, rule, r, Some(actual), None)?;
-            Ok(rec)
-        })
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+        let segs = if streamed {
+            code_streamed(raw, &f, rule, &ranges, threads)?
+        } else {
+            par_map(ranges.len(), threads, |i| -> Result<tokens::Recorder> {
+                let mut rec = tokens::Recorder::default();
+                let r = &ranges[i];
+                let actual = &f.tokens[r.first..r.first + r.count];
+                tokens::code_range(&mut rec, &f.data, rule, r, Some(actual), None)?;
+                Ok(rec)
+            })
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+        };
         let mut counts: [code::Counts; FIELDS] = Default::default();
         for s in &segs {
             for (a, b) in counts.iter_mut().zip(&s.counts) {
