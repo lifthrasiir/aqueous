@@ -276,9 +276,8 @@ impl Formula {
     /// The output, with every module run by `m`. Fails on slices out of their stream and on
     /// modules whose output is not of the declared size.
     pub fn eval(&self, m: &impl Modules) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(self.len() as usize);
-        self.eval_into(&self.root, m, &mut out)?;
-        Ok(out)
+        // the output of a single application, or a stream, as it is
+        Ok(self.bytes(&self.root, m)?.into_owned())
     }
 
     fn eval_into(&self, n: &Node, m: &impl Modules, out: &mut Vec<u8>) -> Result<()> {
