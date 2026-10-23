@@ -7,7 +7,7 @@ rebuilt whole from the contents of their blocks: the trailers (types and masked 
 footer are derived.
 
 ```sh
-cargo run --release -p aqr-snappy --example check -- FILE_OR_DIR...   # tables rebuilt, zstd -3 before and after, speed
+cargo run --release -p aqr-snappy --example check-snappy -- FILE_OR_DIR...   # tables rebuilt, zstd -3 before and after, speed
 python3 aqr-snappy/scripts/gen-fixtures.py MUL_LIB CRC_LIB             # tests/data from the reference Snappy
 ```
 
@@ -39,7 +39,7 @@ and 5108 Snappy blocks. All were 1.2.2 with multiplication, none with CRC-32C.
 | tables | 6.06 MB |
 | contents of the blocks | 4.24 MB (−30.0%) |
 
-This crate rebuilt all 33 tables with `check`, keeping no block as it is. Its inputs take
+This crate rebuilt all 33 tables with `check-snappy`, keeping no block as it is. Its inputs take
 4.21 MB under zstd -3 (−30.5%), the trailers and footers being derived. The module made the
 tables at 315 MB/s.
 

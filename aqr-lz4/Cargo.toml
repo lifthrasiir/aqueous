@@ -12,3 +12,7 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 
 [dev-dependencies]
 zstd = "0.13"
+
+[[example]]
+name = "check-lz4"
+path = "examples/check.rs"

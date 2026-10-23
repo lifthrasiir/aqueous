@@ -11,3 +11,7 @@ aqr-formula = { path = "../aqr-formula" }
 
 [dev-dependencies]
 zstd = "0.13"
+
+[[example]]
+name = "check-snappy"
+path = "examples/check.rs"
