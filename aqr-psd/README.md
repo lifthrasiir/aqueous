@@ -30,9 +30,7 @@ debugging ones (`chan`, `diff`, `rlediff`), run with `cargo run --release --exam
   formulas of their own, recursively (PSD/PSB), or by aqr-png and aqr-jpeg.
 - The rest of the file, the skeleton, is kept as it is: whatever holds the formula compresses
   it.
-- The module has four inputs: the head (spans, groups, encoders, exceptions), the skeleton,
-  the embedded files (the nodes of their own formulas) and the model's chunks. `FORMAT.md`
-  specifies it completely enough to reimplement both directions.
+- The format is specified in [FORMAT.md](FORMAT.md).
 - Both directions stream: pixel data is coded row by row from the input and decoded row by
   row into the output (allocated at its final size), so the memory besides input, output and
   the streams stays small whatever the file size (embedded PNG and JPEG files take what their
@@ -62,9 +60,22 @@ twice).
 
 ## Results
 
-The tables measured with the former file format (a header and zstd-compressed streams of its
-own, since removed) are gone; the sizes and speeds of the formula module as `.aqr` archives
-need measuring again (`psdr bench`).
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+[top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
+its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
+in the archives yet. Memory is the peak RSS of that process (input, archive and output
+included) over the input size.
+
+| set | files | MB | ratio | zstd -3 | compress | decompress |
+|---|---|---|---|---|---|---|
+| genposter | 5 | 198.1 | 0.394 | 0.693 | 38.6 MB/s | 98.8 MB/s |
+| oga | 37 | 214.7 | 0.288 | 0.457 | 52.6 MB/s | 181.8 MB/s |
+| fixtures | 13 | 16.1 | 0.231 | 0.284 | 30.0 MB/s | 149.0 MB/s |
+| tori29umai | 1 | 10.3 | 0.231 | 0.383 | 40.4 MB/s | 88.8 MB/s |
+| all | 56 | 439 | **0.332** | 0.555 | **44 MB/s** | **129 MB/s** |
+
+8 files are kept as they are. Memory is 7.0× the file (median of files of 8 MB or more; at
+most 48.7×).
 
 ## Limitations
 

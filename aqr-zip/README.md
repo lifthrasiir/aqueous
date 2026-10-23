@@ -71,6 +71,10 @@ module test data, Office documents, an APK, a VS Code build and others), on an M
   come out 22.6% smaller.
 - The layout is 1.2% of what the inputs take under zstd -3 (2.0 MB of 1.09 GB), the records
   4.8%.
+- One thread, through `aqr-show` (see the [top-level README](../README.md#how-it-was-measured);
+  ratios tentative): enwik9.zip (322 MB, one entry of 1 GB of text) comes to 0.957 (zstd -3:
+  1.000) at 8.3 MB/s compressing and 23 MB/s decompressing, with a peak RSS of 4.5 GB (14×
+  the archive). Two Python wheels (3.1 MB) come to 0.760 (zstd -3: 0.950).
 
 ## Tests
 

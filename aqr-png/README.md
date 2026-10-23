@@ -18,8 +18,21 @@ assert!(f.unwrap().eval(&modules)? == png);  // `modules` runs `formula::decode`
 
 ## Results and comparison
 
-The sizes and speeds measured for earlier versions of this crate were of its own file
-format, which is gone; they need re-measuring on archives (`pngr bench`, and `bench/`).
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+[top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
+its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
+in the archives yet. Memory is the peak RSS of that process (input, archive and output
+included) over the input size.
+
+| set (codec-corpus) | files | MB | ratio | zstd -3 | compress | decompress |
+|---|---|---|---|---|---|---|
+| clic2025 | 62 | 228.3 | 0.816 | 1.000 | 41.9 MB/s | 86.4 MB/s |
+| CID22 | 208 | 82.8 | 0.855 | 1.000 | 37.8 MB/s | 82.1 MB/s |
+| kadid10k | 66 | 22.7 | 0.774 | 1.000 | 44.9 MB/s | 99.0 MB/s |
+| qoi-benchmark | 14 | 40.3 | 0.601 | 0.984 | 41.7 MB/s | 101.4 MB/s |
+| all (with 6 small sets) | 379 | 391 | **0.802** | 0.997 | **39 MB/s** | **86 MB/s** |
+
+Memory is about 6 MB + 32× the file: it follows the inflated pixels, not the PNG file.
 
 `bench/` (`bench/fetch.sh` builds the tools, then `cargo run --release -- DIR...` in
 `bench/`) compares aqr-png with other lossless recompressors of PNG files and with generic
@@ -68,40 +81,25 @@ on the photo sets).
   predictor of its left, upper and upper-left neighbours. Green and blue add the previous
   channel's residual (inter-channel decorrelation). The row's PNG filter is then reapplied
   to give the byte the stream holds, so the PNG filter choice does not matter.
-- **Contexts**: channel × 12 buckets of activity (`|a - c| + |b - c|` of the raw neighbours
-  plus the magnitudes of the filtered bytes left and above) × whether a match came just
-  before; filter bytes have a table of their own.
-- **Matches** start as an escape symbol in the literal alphabet (255, then a binary decision
-  against a literal residual of 255), so a literal costs a single symbol. Lengths are coded
-  by activity, distances by length bucket, with DEFLATE's extra bits raw.
-- **Entropy coding** (`src/rans.rs`, on `aqr_common::rans32`): static per-image tables (two passes when compressing),
-  12-bit probabilities, four interleaved 32-bit rANS states with 16-bit renormalisation.
-  Tables are stored as quantised log-frequencies (4 steps per octave, differences coded
-  with Elias-gamma). The encoder divides by multiplying with packed reciprocals; the decoder
-  looks symbols up in a full table per context and renormalises without a branch.
+- **Contexts**: channel, local activity and whether a match came just before; filter bytes
+  have a table of their own.
+- **Matches** start as an escape symbol in the literal alphabet, so a literal costs a
+  single symbol. Lengths are coded by activity, distances by length bucket, with DEFLATE's
+  extra bits raw.
+- **Entropy coding** (`src/rans.rs`, on `aqr_common::rans32`): static per-image tables (two
+  passes when compressing), four interleaved 32-bit rANS states. The encoder divides by
+  multiplying with packed reciprocals; the decoder looks symbols up in a full table per
+  context and renormalises without a branch.
 - **Other pixel formats** (bit depths other than 8, palettes, 16-bit) are coded byte-wise
   in the filtered domain, by byte position and the filtered neighbours' magnitudes.
 - Interlaced images are handled as their seven passes, each with its own rows.
 
 ### Representation (`src/codec.rs`)
 
-The complete format is specified in [FORMAT.md](FORMAT.md). The formula has three inputs:
-the skeleton, an index, and the records of the images.
-
-```text
-record: 0 + payload (kept as it is) | 1 + layout + Huffman headers + model payload
-```
-
-- The **skeleton** holds every chunk without its image data, CRCs only where they are wrong,
-  and anything after IEND.
-- An **image** is a run of IDAT chunks, or in an APNG a run of fdAT chunks (the frame's size
-  comes from its fcTL; fdAT sequence numbers stay in the skeleton). Its payload may hold
-  several zlib streams one after the other; Apple's iDOT files use one stream with a full
-  flush, which needs nothing special.
-- The **layout** lists each stream's blocks (type, token count, stored lengths and padding,
-  last-block flags), tail padding and trailing bytes (the Adler-32, and any junk), and the
-  matches of length 258 sent as 284 + 31. **Huffman headers** go through aqr-flate's
-  header coder, against the frequencies of the block's tokens: zlib's own trees cost a bit.
+- An image's payload may hold several zlib streams one after the other; Apple's iDOT files
+  use one stream with a full flush, which needs nothing special.
+- Huffman headers go through aqr-flate's header coder, against the frequencies of the
+  block's tokens: zlib's own trees cost a bit.
 - An image is kept as it is if its record would not be smaller. Anything unexpected (not a
   PNG, broken streams, invalid headers, truncation) is kept, or gives no formula; a panic
   while encoding gives no formula either.

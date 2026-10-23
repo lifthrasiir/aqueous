@@ -21,10 +21,21 @@ formula.
 
 ## Results
 
-The sizes and speeds measured earlier no longer apply: the streams are now compressed by
-aqr-formula's archive. They need re-measuring with `sqlr bench`, which encodes through the formula and reports the
-archive size. `scripts/baseline.sh` gives the sizes under zstd -3, zstd -19 and xz -9 for
-comparison.
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+[top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
+its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
+in the archives yet. Memory is the peak RSS of that process (input, archive and output
+included) over the input size.
+
+| set | files | MB | ratio | zstd -3 | compress | decompress |
+|---|---|---|---|---|---|---|
+| public | 9 | 86.4 | 0.222 | 0.368 | 72.6 MB/s | 374.4 MB/s |
+| synthetic | 25 | 114.7 | 0.215 | 0.310 | 33.7 MB/s | 450.6 MB/s |
+| system | 50 | 107.5 | 0.269 | 0.445 | 29.9 MB/s | 363.0 MB/s |
+| all | 84 | 309 | **0.236** | 0.373 | **38 MB/s** | **395 MB/s** |
+
+2 files are kept as they are. `scripts/baseline.sh` gives the sizes under zstd -3, zstd -19
+and xz -9.
 
 ### Corpus
 
@@ -41,9 +52,9 @@ comparison.
 
 ### Memory
 
-`sqlr bench -m` reports the Rust heap beyond input and output, encoding and decoding. The
-figures measured earlier (at most 3.0x the input compressing and 2.5x decompressing on
-files above 5 MB) need re-measuring. Build with `--features memprof` for heap use per
+Through `aqr-show` (above), the peak RSS is 8.9× the file (median of files of 8 MB or
+more; at most 11.0×). `sqlr bench -m` reports the Rust heap beyond input and output,
+encoding and decoding. Build with `--features memprof` for heap use per
 phase. Everything is in memory: there is no streaming over large files.
 
 ### Threads
@@ -66,35 +77,26 @@ With more than one thread `bench` reports wall time instead of thread CPU time.
 
 ## Format
 
-[FORMAT.md](FORMAT.md) specifies the module in full, for a decoder or an encoder written
-from it alone: its params, the 18 streams it takes as inputs, and how they rebuild the
-database.
+The format is specified in [FORMAT.md](FORMAT.md).
 
 ## How
 
 ### Pages (`src/transform.rs`, `src/page.rs`)
 
-Every page gets a kind: a b-tree page, an overflow page (rebuilt with the cell that owns
-it), an all-zero page, or a raw page (freelist trunks, pointer maps, anything that fails a
-check). A b-tree page is parsed into fields that rebuild it exactly; anything SQLite would
+Every page gets a kind; freelist trunks, pointer maps and anything that fails a check are
+raw. A b-tree page is parsed into fields that rebuild it exactly; anything SQLite would
 not have written that way (non-minimal varints, overlapping cells, broken chains) makes the
 page raw.
 
-- Header fields; the content start against the lowest cell.
 - Cell positions: SQLite fills the content area downwards, so a cell mostly ends where an
-  earlier one starts. Open ends are kept most recent last, and a cell is coded as the rank
-  of its end among them, or as an offset (`page::Ends`).
-- Child pointers and interior keys as deltas; overflow chains as page number deltas, the
-  payload put together first.
-- Every byte no header, pointer or cell covers (free space, freeblocks, the database
-  header, reserved bytes, the end of the last overflow page) goes to the filler stream as
-  it is.
+  earlier one starts. A cell is coded as the rank of its end among the open ends, or as an
+  offset (`page::Ends`).
+- Child pointers, interior keys and overflow page numbers are deltas.
 
 ### Records (`src/record.rs`)
 
 Pages are grouped into b-trees by their child pointers; the records of each tree are coded
-by columns. Per value a tag (NULL, integer, real, text, blob, or one of the special forms
-below); serial types, header lengths and payload lengths follow from the values.
+by columns; serial types, header lengths and payload lengths follow from the values.
 
 - Integers, per column: as they are, against the previous value of the column, or against
   the previous integer of the record (wide rows of related numbers), whichever is

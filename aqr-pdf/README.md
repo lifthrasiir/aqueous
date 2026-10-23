@@ -30,9 +30,22 @@ not a PDF goes through as skeleton.
 
 ## Results
 
-The ratios and speeds of earlier versions of this document were measured with the file format
-this crate had before the formula module, and are gone; they need measuring again on `.aqr`
-archives (`pdfr bench`). The speed target (100 MB/s of PDF file single-threaded on an Apple
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+[top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
+its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
+in the archives yet. Memory is the peak RSS of that process (input, archive and output
+included) over the input size.
+
+| set | files | MB | ratio | zstd -3 | compress | decompress |
+|---|---|---|---|---|---|---|
+| cc | 138 | 380.3 | 0.861 | 0.899 | 45.9 MB/s | 202.1 MB/s |
+| arxiv | 6 | 22.2 | 0.753 | 0.843 | 48.3 MB/s | 147.9 MB/s |
+| all | 144 | 402 | **0.855** | 0.896 | **46 MB/s** | **198 MB/s** |
+
+18 files are kept as they are. Memory is 11.4× the file (median of files of 8 MB or more; at
+most 22.9×).
+
+The speed target (100 MB/s of PDF file single-threaded on an Apple
 M4, both ways) binds: everything coded costs more per byte than the budget allows on average,
 so the ratio is what fits in it, and the target is met per file, not just per set: the budget
 is per file (below) and planned with a 10% margin for the scatter of the estimates.
@@ -83,9 +96,9 @@ The file is cut into the skeleton and *items*:
 | png | FlateDecode image with PNG predictors, wrapped as a PNG file | aqr-png |
 | jpeg | DCTDecode | aqr-jpeg |
 
-Uncompressed and ASCII-encoded streams stay in the skeleton. zlib headers are kept, the
-Adler-32 recomputed, anything after the DEFLATE data left in the skeleton. Files with an
-`/Encrypt` entry keep their streams raw (they look random).
+Uncompressed and ASCII-encoded streams stay in the skeleton, as does anything after a
+DEFLATE stream's data. Files with an `/Encrypt` entry keep their streams raw (they look
+random).
 
 ### Token mode (`tok.rs`, `rans.rs`)
 
@@ -93,26 +106,20 @@ The stream's own LZ77 parse is kept, so rebuilding needs no match search, only H
 coding (the aqr-png approach, for any stream):
 
 - Literals and length codes share one alphabet; the table is chosen by the byte before
-  (per class and file, at the resolution that costs least: every byte, 32 classes of
-  bytes, 8, or one table). Distance codes have a table per length code; extra bits are raw.
+  (per class and file, at the resolution that costs least). Distance codes have a table per
+  length code.
 - Images without a predictor are coded as pixels: a literal is the residual against MED
   (left, up, up-left), plus the previous channel's residual for every channel but the
   first, with tables by channel, local activity and whether a match came just before.
-- Block layout, stored lengths and padding, and length-258 matches sent as 284+31 go to a
-  layout stream; dynamic Huffman headers through aqr-flate's header coder against the
-  block's frequencies (zlib's own trees cost a bit).
-- Static per-file tables (quantised log frequencies), 12-bit probabilities, four
-  interleaved rANS states (after aqr-png's coder, with alphabets beyond 256).
-- All token streams of a file share one rANS stream, decoded in file order.
+- Dynamic Huffman headers go through aqr-flate's header coder against the block's
+  frequencies (zlib's own trees cost a bit).
+- Static per-file tables and four interleaved rANS states (after aqr-png's coder, with
+  alphabets beyond 256). All token streams of a file share one rANS stream, decoded in file
+  order.
 
 ### Format
 
-The module `pdf-recons` takes eleven input slots: the table (per item: skeleton gap, mode,
-fields), the skeleton, the raw bytes, the DEFLATE streams of full-mode items, the PNG files
-and the JPEG files (all three given by the formula as applications of aqr-flate, aqr-png and
-aqr-jpeg), and the token streams (layout, tables, rANS, raw bits, headers). The inflated
-data of full-mode streams and the aqr-flate records are streams of the formula, per class
-(`pdf/pool-<class>`) and `pdf/meta`. [FORMAT.md](FORMAT.md) specifies all of it.
+The format is specified in [FORMAT.md](FORMAT.md).
 
 ### Threads
 

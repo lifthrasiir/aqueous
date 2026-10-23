@@ -69,38 +69,24 @@ Working memory is the heap beyond the input and the output (`examples/prof.rs`);
 
 ## Format
 
-[FORMAT.md](FORMAT.md) specifies it. In short:
-
-```text
-magic 69 04 7f 82 2b 43 ("aQR/gitD") | u16 LE version (1)
-10 streams (files, sha, entry, ops, refs, blob, tree, commit, raw, text), each zstd or stored
-symlinks | per file: xxh3
-```
+The format is specified in [FORMAT.md](FORMAT.md).
 
 ## How
 
-- **File table.** Paths front-coded, a kind per file: RAW, SAME (as another file), BLOB and
-  BLOB_CRLF (a blob of the repository, possibly with CR LF line ends: the working tree, and
-  blobs under `.git` such as `lost-found/other`), LOOSE, PACK, IDX and REV (derived from
-  their pack), GIT (any other `.git` file, with its ids and trailing SHA-1 taken out).
-- **One table of object ids** for all repositories in the input (`sha`), in first-occurrence
-  order, from the packs' .idx files and the loose objects' paths. An id anywhere (tree
-  entries, commit and tag headers, ref-deltas, the index, refs, reflogs, commit-graph) is a
-  reference relative to the previous one. The table is a dictionary: nothing is hashed to
-  rebuild, and any file can be rebuilt alone.
-- **Objects.** Every pack entry and loose object has a record: its type, sizes that cannot be
-  derived, how its zlib stream is rebuilt, and its parts of the streams. Payloads are coded
-  as git would read them: whole objects through a state machine that turns tree ids and the
-  `tree`/`parent`/`object` lines of commits and tags into references (the `tree` and
-  `commit` streams), deltas as instructions (`ops`: inserts, copies relative to the previous
-  copy's end) with their inserts coded the same way, the state following the copied bytes of
-  the base. What git would not have written that way (non-canonical headers or deltas) stays
-  verbatim.
+- **Every file is a reference where it can be:** to another file, to a blob of the repository
+  (the working tree, and blobs under `.git`), or to the pack an .idx or .rev derives from.
+  What git wrote with ids (any other `.git` file) has them taken out.
+- **One table of object ids** for all repositories in the input, in first-occurrence order,
+  from the packs' .idx files and the loose objects' paths. An id anywhere is a reference
+  relative to the previous one. The table is a dictionary: nothing is hashed to rebuild, and
+  any file can be rebuilt alone.
+- **Objects** are coded as git would read them, so that ids in trees, commits and tags become
+  references and deltas become instructions with their inserts coded the same way. What git
+  would not have written that way (non-canonical headers or deltas) stays verbatim.
 - **zlib streams** are rebuilt by emulating zlib 1.3.1 (aqr-flate's port, bit-exact) at the
   level the header allows, or kept. Which are rebuilt is the cost model's choice
   ([Trade-offs](#trade-offs)).
-- **Packs** are rebuilt entry by entry; .idx (version 2) and .rev files from the pack (ids,
-  offsets, CRC-32s) and its trailer (the pack's SHA-1, or the hex in its file name).
+- **Packs, .idx and .rev** are rebuilt from the objects, never stored.
 
 ## Trade-offs
 

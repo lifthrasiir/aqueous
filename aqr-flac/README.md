@@ -8,11 +8,23 @@ directions. Compression ratio is pursued only where it does not cost that.
 
 ## Results
 
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+[top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
+its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
+in the archives yet. Memory is the peak RSS of that process (input, archive and output
+included) over the input size.
+
+| set | files | MB | ratio | zstd -3 | compress | decompress |
+|---|---|---|---|---|---|---|
+| ia | 13 | 334.3 | 0.970 | 1.000 | 63.4 MB/s | 159.2 MB/s |
+| synth | 15 | 66.8 | 0.821 | 0.992 | 77.3 MB/s | 198.4 MB/s |
+| all | 28 | 401 | **0.945** | 0.999 | **65 MB/s** | **165 MB/s** |
+
+The resource (the built-in tables) costs about 1.6 KB per archive. Memory is 12.5× the file
+(median of files of 8 MB or more).
+
 The cost is about 30 cycles per sample each way, so speed per MB falls with the bits per
-sample: the most compressible 16-bit FLAC files (about 6 bits per sample) are coded at
-100–110 MB/s on an Apple M4, one thread. The ratio and speed tables of earlier versions were
-measured the standalone file format that this module replaced; they need re-measuring as
-`.aqr` archives with `flr bench`.
+sample.
 
 FFmpeg's WavPack encoder at its highest level was about 1–2% smaller than `flac -8` on
 8 IA tracks decoded to WAV (and far slower); TTA was about the same as `flac -8`. zstd `-19` saves 0.15% on the FLAC
@@ -66,35 +78,25 @@ assert_eq!(out, input);
 
 ### 1. Decomposition (FLAC)
 
-- **Segmentation**: everything before the first frame (an ID3v2 tag, `fLaC`, metadata
-  blocks, pictures) is kept as is. Then frames are parsed one after the other; a frame must
-  parse completely, have zero padding bits and a matching CRC-16. Anything else is junk up
-  to the next position where a frame parses (found through `0xFF` bytes), kept verbatim.
-- **Frames** are taken apart into header bytes, subframe parameters (type, wasted bits,
-  warm-up samples, LPC precision / shift / coefficients, residual coding method,
-  partition order, Rice parameters or escape sizes) and residuals. Rice codes are unique, so
-  writing the residuals with the same parameters reproduces the bits; CRC-8 and CRC-16 are
-  recomputed.
-- **Headers** are predicted from the previous one (frame or sample number advanced); a
-  match costs one byte before the archive's zstd. Subframe parameters and stored samples go
-  to small byte streams (0.5% of the output on CD material).
-- **Residuals** (99% of a FLAC file) go through the model.
+- Frames must parse completely with a matching CRC-16 to be taken apart; anything else is
+  junk, kept verbatim. Rice codes are unique, so writing the residuals with the same
+  parameters reproduces the bits; the CRCs are recomputed.
+- Headers are predicted from the previous one; a match costs one byte before the archive's
+  zstd. Subframe parameters and stored samples go to small byte streams (0.5% of the output
+  on CD material).
+- Residuals (99% of a FLAC file) go through the model.
 
 ### 2. Residual model
 
 FLAC's predictor stays: its residuals are the input. A second, adaptive stage is applied
 in the residual domain, so neither direction ever reconstructs samples:
 
-- **LMS stage**: sign-sign LMS over the last 32 residuals of the channel, weights in 1/4096
-  (i16), step 4, history clamped to i16 after a shift that follows the scale of the
-  residuals (for 24-bit material). The weight update is applied two samples late (delayed
-  LMS), which costs 0.02 pp but takes the update out of the dependency chain.
-- **Entropy coding** of the error `e`: zigzag value `u`; a running mean of `u` (decay 1/16;
-  the newest value enters one sample late) gives a scale context (two per octave) and a
-  shift `s` (about two bits less than the mean); `u >> s` is a token (0–15 directly, then
-  two per bit length) coded with rANS under static tables by (scale, first channel or not);
-  the escape mantissa and the low `s` bits are raw bits. The bits read depend only on the
-  token and the context, not on the bits themselves.
+- **LMS stage**: sign-sign LMS over the last 32 residuals of the channel. The weight update
+  is applied two samples late (delayed LMS), which costs 0.02 pp but takes the update out
+  of the dependency chain.
+- **Entropy coding** of the LMS error: a running mean of the zigzag value gives the scale
+  context, and the value is split into a token coded with rANS under static tables and raw
+  bits. The bits read depend only on the token and the context, not on the bits themselves.
 - Gains on real CD material, by part: about 1.2 pp from the entropy coding (adaptive scale
   against FLAC's partitioned Rice parameters), about 2.3 pp from the LMS stage.
 
@@ -158,12 +160,7 @@ bounded channels; a fixed number of batches circulates, so memory stays bounded.
 
 ### 5. Formula module
 
-[FORMAT.md](FORMAT.md) specifies the module in full. Params: one byte, 0 for FLAC and 1 for
-PCM (WAV, AIFF and raw samples alike). Inputs: nine slots, the 6 byte streams (FLAC: prefix,
-layout, junk, headers, subframes, warm-up samples; PCM: header, format and length, trailing
-bytes, stereo modes, subframes, samples), the rANS words (`u32le`) and raw bit streams 0
-and 1. The output length is the formula's; the archive carries the checksum and compresses
-the slots.
+The format is specified in [FORMAT.md](FORMAT.md).
 
 - `formula::encode` gives no formula for what it does not code, and for what makes the
   coder panic.

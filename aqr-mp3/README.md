@@ -7,11 +7,23 @@ Apple M4, both ways; compression ratio is pursued only where it does not cost th
 
 ## Results
 
-The ratios and speeds measured with the former container format (FMA `fma_small` 100–155,
-where the built-in tables were trained on 000–099) no longer apply: they included its zstd
-layer and are to be measured again with `mp3r bench`, which now sizes the `.aqr` archive of
-each file's formula. The comparison with packMP3, `zstd -19` and `xz -9` on the same files
-is `tools/compare.sh PACKMP3 WORKDIR DIR...`.
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+[top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
+its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
+in the archives yet. Memory is the peak RSS of that process (input, archive and output
+included) over the input size. 402 files of FMA (401 MB, about 1 MB each).
+
+- **One file per archive: nothing is coded.** The built-in tables are the module's resource
+  (290 KB raw, about 340 KB archived), stored in every archive that uses the module: a
+  formula of a 1 MB track comes to 1.2× the file, so every file is kept as it is (0.975,
+  against 0.971 under `zstd -3`).
+- **The resource shared** (counted once over the sample, as in one archive of them all, the
+  formulas taken although they do not pay alone): **0.856**, at **15 MB/s** compressing and
+  **56 MB/s** decompressing.
+- Memory: 117–231 MB (median 143 MB) per file, most of it tables, whatever the file's size.
+
+The comparison with packMP3, `zstd -19` and `xz -9` on the same files is `tools/compare.sh
+PACKMP3 WORKDIR DIR...`.
 
 ## Usage
 
@@ -50,7 +62,7 @@ any main data that cannot be reproduced.
 | `src/side.rs` | Adaptive model of the side information |
 | `src/rc.rs` | Adaptive binary range coder (LZMA style) |
 | `src/codec.rs` | Whole-file encode / decode, byte streams |
-| `src/formula.rs` | The module `mp3-recons`: formula of a file, decoding from the ten slots |
+| `src/formula.rs` | The module `mp3-recons`: formula of a file, decoding |
 | `src/par.rs` | Encoding and decoding with more than one thread |
 | `../aqr-common` | Alias-table rANS with lazy table construction (`rans64`, re-exported as `rans`), bit readers and writers (`msb`, as `bits`), LEB128 |
 | `src/bin/train.rs` | Training of the built-in tables (`model/builtin.bin`) |
@@ -63,62 +75,32 @@ any main data that cannot be reproduced.
 
 ### 1. Decomposition
 
-- **Segmentation**: a run of frames starts where three compatible frames (same version and
-  sample rate) follow each other, or the file ends; everything between runs is junk.
-  An ID3v2 tag is skipped as a whole. Free format runs get their frame length from the
-  distance to the next matching header and store it per run.
-- **Reservoir**: the main data of all frames (after the side information) is concatenated
-  into one buffer `R`. A frame's main data starts `main_data_begin` bytes before its
-  payload and spans its `part2_3_length`s. A frame is *placed* when that span starts at or
-  after the previous placed frame's end and ends within its own payload. Only placed frames
-  are decoded; every other bit of `R` (stuffing, ancillary data, Xing / LAME tag frames,
-  data of frames cut off at the start of a clip) is a gap stored verbatim.
-- **Granules**: scalefactors, then big values and count1 quadruples. A quadruple is
-  decoded only while it fits; what is left is the tail (stuffing inside part2_3_length).
-  A granule that cannot be decoded (missing table, big values past the end, ...) is
-  stored verbatim. Huffman decoding of a prefix code is unique, so re-encoding the decoded
-  values reproduces the bits exactly.
-- **Not stored**: `part2_3_length` (re-derived from the re-encoded size plus the tail),
-  `main_data_begin` (predicted as "right after the previous frame's data", residual coded),
-  CRCs (recomputed; a flag, or the stored value if it was wrong), headers (XOR with the
-  previous one).
+The format is specified in [FORMAT.md](FORMAT.md). Only main data that decodes is modelled:
+a granule that cannot be decoded (missing table, big values past the end, ...) is stored
+verbatim, as is every bit outside placed frames. Huffman decoding of a prefix code is
+unique, so re-encoding the decoded values reproduces the bits exactly. What can be derived
+(`part2_3_length`, CRCs, a predicted `main_data_begin`, headers as differences) is not
+stored.
 
 ### 2. Coefficient model
 
-- Pair symbols `(min(|x|, 15), min(|y|, 15))` in the granule's own Huffman table alphabet,
-  quadruple symbols, and for escapes (values ≥ 15 in tables with linbits) the bit length
-  of the escape together with its second highest bit. Signs and the remaining escape
-  bits are raw bits.
-- Pair context: (table_select, magnitude bucket, other channel class):
-  - the magnitude bucket (2 per octave, 24 + "none") of the neighbourhood of the pair in
-    the previous granule of the same channel (lines k−2..k+3, weighted), scaled by the
-    change of quantizer step size between the two granules (global_gain, scalefactors,
-    pre-emphasis, scalefac_scale; 2^(−3d/16) in fixed point);
-  - the magnitude class (6) of the other channel at the same lines (channel 1 only).
-  - Nothing decoded in the same granule enters the context, so there is no serial
-    dependency between pairs when decoding. Adding the previous pair gained 0.53 pp of
-    ratio but made decompression roughly 40% slower (measured under load); the pair two
-    back gained 0.37 pp for −14% decompression, −9% compression.
-- Quadruples: (count1 table, nonzero lines of the previous granule, other channel);
-  escapes: (table, bucket); scalefactors: (size, previous scalefactor of the granule,
-  same scalefactor of the previous granule).
+- Contexts use only the previous granule of the channel and the other channel, never
+  anything decoded in the same granule, so there is no serial dependency between pairs when
+  decoding. Adding the previous pair gained 0.53 pp of ratio but made decompression roughly
+  40% slower (measured under load); the pair two back gained 0.37 pp for −14%
+  decompression, −9% compression.
 - Static tables trained on FMA (4511 files), built into the binary (290 KB). Adaptive
   per-file models lost to them: learning costs more than they gain at these context
   counts.
 
 ### 3. Side information
 
-Granule fields (block types, table selects, region counts by the band where the big
-values end, big values and gain as deltas, scalefac_compress, flags, count1 quadruple
-count, tail length) and frame fields (placement, main_data_begin residual, private bits,
-scfsi) go through an adaptive binary range coder with contexts from the previous granule.
-Encoders differ in how they set these fields, so per-file adaptation pays here. 1.7% of
-the input.
+Adaptive binary range coding with contexts from the previous granule. Encoders differ in
+how they set these fields, so per-file adaptation pays here. 1.7% of the input.
 
 ### 4. Entropy coding
 
-- **rANS** with 12-bit probabilities, 64-bit state, 32-bit renormalisation, 8
-  interleaved states.
+- **rANS** with 8 interleaved states.
 - **Alias tables** for decoding: one 64-bit entry per bucket holds the cutoff, both
   symbols' frequencies, the alias and its rank offset. A symbol costs one load and a few
   selects, without branches. A sorted-symbol LUT with a fallback search mispredicted on
@@ -205,4 +187,5 @@ the calling thread, in order. Around them (`src/par.rs`):
   differ between decoders (ffmpeg uses a different region boundary). Either way bits are
   reproduced exactly; only the model may be worse.
 - **Layer I/II** and MP3 inside other containers (MP4, MKV, WAV) are stored as junk.
-- **Memory**: about 30–40 MB, mostly tables.
+- **Memory**: 117–231 MB of peak RSS per file through `aqr-show` (see Results), mostly
+  tables. The tables are also the resource every archive carries (290 KB raw).

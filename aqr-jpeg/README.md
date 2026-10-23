@@ -13,15 +13,23 @@ was far below the target, so this is a new design from scratch.
 Apple M4 (10 cores: 4 P + 6 E), release build with `RUSTFLAGS="-C target-cpu=native"`.
 Ratio is output size / input size.
 
-These figures were measured with the former container format and need re-measuring with `.aqr`
-archives (`jrc bench`).
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+[top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
+its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
+in the archives yet. Memory is the peak RSS of that process (input, archive and output
+included) over the input size. This build is without `target-cpu=native`.
 
-| Set | Ratio | `-j 1` compress / decompress | All cores compress / decompress |
-|---|---|---|---|
-| sequential (camera and phone photos etc., 101 MB) | 0.8360 | 106 / 89 MB/s | 300–390 / 300–385 MB/s |
-| progressive (41 MB) | 0.8933 | 43 / 47 MB/s | 90–122 / 120–168 MB/s |
+| set | files | MB | ratio | zstd -3 | compress | decompress |
+|---|---|---|---|---|---|---|
+| `samples/` (camera and phone photos) | 13 | 60.0 | 0.752 | 0.908 | 48.9 MB/s | 84.1 MB/s |
+| codec-corpus jpeg-conformance | 44 | 74.7 | 0.805 | 0.906 | 48.6 MB/s | 115.5 MB/s |
+| codec-corpus ultrahdr-conformance | 14 | 29.7 | 0.788 | 0.919 | 47.1 MB/s | 101.4 MB/s |
+| codec-corpus zune | 20 | 18.4 | 0.795 | 0.955 | 11.7 MB/s | 25.6 MB/s |
+| all (with imageflow) | 96 | 186 | **0.785** | 0.913 | **37 MB/s** | **77 MB/s** |
 
-All-core figures are ranges because they varied with thermal state and background load.
+zune's large progressive and subsampled test images are the slow ones. Memory is about
+56 MB + 25× the file, but it follows the pixels: the coefficients are held whole, and a
+1.3 MB file of 7680×4320 takes 365 MB.
 
 ## Usage
 
@@ -96,26 +104,22 @@ as a file that is not coded.
 
 Blocks are processed in raster order per component, coefficients in zigzag order.
 
-- **Nonzero count**: number of nonzero AC coefficients per block (alphabet 64). Context: the
-  average of the counts of the blocks above and to the left.
+- **Nonzero count**: number of nonzero AC coefficients per block, in the context of its
+  neighbours' counts.
 - **AC coefficients**: for every position up to the last nonzero one, the cat (= bit length of
-  |x|) is coded.
-  - Context: (luma/chroma, position k, half-logarithmic class of the remaining nonzero count,
-    11 classes).
-  - Sign and remaining bits are stored as raw bits.
+  |x|) is coded, in the context of the position and the remaining nonzero count. Sign and
+  remaining bits are stored as raw bits.
 - **DC**: predicted from boundary continuity with the blocks above and to the left
   (Lakhani-style, coefficient domain).
   - Only row 0 and column 0 coefficients are involved. The sums are fixed-point i32, the
     final scaling and rounding basic f32 operations, and the DCT basis a constant table (no
     libm), so the prediction is exact and platform independent.
-  - Context: neighbour residual sizes and a bucket of the disagreement (uncertainty) between
-    the two predictions.
+  - Context: neighbour residual sizes and the disagreement (uncertainty) between the two
+    predictions.
 - **Tables**: static per-file histograms (two pass).
   - Each group gets the precision shift (0–8) that minimises table bits + data bits.
   - A group whose own table is not worth its cost inherits, with a 1-bit flag, the
-    distribution of its parent (nz: component × log2 bucket; AC: (component, k);
-    DC: (component, neighbour bucket)) or, for AC, of its grandparent
-    (component × 10 position bands).
+    distribution of its parent or, for AC, of its grandparent.
 - **rANS**:
   - 4-way interleaved 64-bit rANS, 32-bit IO, `PROB_BITS = 12`.
   - The encoder uses reciprocals; it is kept `#[inline(never)]` and writes into a
@@ -124,8 +128,7 @@ Blocks are processed in raster order per component, coefficients in zigzag order
     refinement loop, and renormalises branchlessly with `select_unpredictable`.
   - Both candidate contexts of the next position are computed ahead, off the dependency chain.
   - Bounds are checked once per block, with padded buffers.
-- **Stripes**: the image is split into horizontal stripes of whole MCU rows
-  (about 32K blocks each, at most 256).
+- **Stripes**: the image is split into horizontal stripes of whole MCU rows.
   - Each stripe has its own rANS and raw streams; the tables are shared.
   - Contexts do not cross stripe boundaries, which costs about 0.04 percentage points of
     ratio.
@@ -194,20 +197,7 @@ serial result.
 
 ### 6. Formula module and robustness
 
-The full specification is in [FORMAT.md](FORMAT.md). The module has one parameter (the frame
-type) and nine input slots:
-
-```text
-head          embedded JPEGs (gap, len, kind: 0 = bytes in `embedded` / 1 = copy of an earlier one)
-embedded      the bytes of each kind 0 embedded JPEG (themselves the output of this module)
-cut blob      -- headers, markers, trailer without scan data or embedded JPEGs
-scan info     per scan flags (zero padding, raw, truncated, boundary) + RST count / truncation
-              point, stripe count
-scans         raw scan data / truncated tails
-tables        the model tables
-lens          lengths of the scan entries, then of each stripe's rANS words and raw bits
-rans, bits    the rANS words and the raw bits of all stripes
-```
+The format is specified in [FORMAT.md](FORMAT.md).
 
 - `formula::encode` never fails: it gives no formula for what cannot be reproduced
   (unsupported coding, corruption, internal panics) as a whole, and codes scans that are not

@@ -15,15 +15,10 @@ let (data, record) = aqr_flate::deconstruct_with(&raw, &opts)?; // smallest reco
 
 ## Profiles
 
-The record starts with a profile (u16). The rest of it is laid out the same way for every
-profile (the rule, the blocks, the Huffman headers, the segments), and only the coding of
-corrections differs.
-
 - **0-9: static codes**, built for speed: at least 100 MB/s of plain text on one core both
   ways from profile 6 down (parallel segments are a bonus, not a requirement). Each profile
   has its own rule catalog, fitted with a speed penalty λ (bits per KB of plain text for
   every ns/B a rule takes, by `Rule::ns_per_byte`, measured with `aqr-flate-train speed`).
-  A rule is coded as its index in the profile's catalog.
 - **10: adaptive coding**, built for size: corrections are binary arithmetic coded under
   adaptive contexts, with a lookahead, and predictors beyond the catalog's rule (exact
   chains and zlib emulation).
@@ -64,46 +59,33 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -
 ## How it works
 
 - **Rules.** A `Rule` predicts every token from the data alone, with a small hash table of
-  recent positions. Its parameters are the key (3 or 4 bytes) and ways per bucket (1-8), plus
-  an optional one-entry table keyed by 5-8 bytes. Every position is inserted, or only token
-  starts and short matches' insides. Parsing is greedy or one step lazy, with a minimum
-  length, zlib-style TOO_FAR and a window. The rules are derived empirically from flate-zoo's
-  encoders (the oracle). `aqr-flate-train rules` fits the best rule of each preset class by
-  coordinate descent, then a greedy set cover picks a catalog of 32
-  (`model/rules-lλ.txt`). Each stream's fingerprint maps to one or two of them; the
-  fingerprint covers the common shortest match, farthest distance, far short matches,
-  full-block token count, block types and how the first Huffman header was built. Two
-  candidates, or an unknown fingerprint, are settled by a trial on a 4 KB prefix.
-- **Chain rules** (adaptive profiles). A `chain` rule predicts the closest longest match
-  among the first `depth` candidates of exact chains (`matchfind`: every earlier position with
-  the same three bytes, within 32 KiB, so nothing depends on an encoder's hash), stopping at
-  `nice`. Its depth never exceeds the 99.5th percentile of how deep the stream's matches lie
-  in their chains (deeper ones are coded by rank anyway, and it keeps joining fast). Up to
-  four configurations are compared by cost, on the first 256 KiB of long streams.
-- **Corrections.** Only mispredicted tokens are corrected. Each miss records its kind, its
-  length (fresh, or relative to the prediction), and its distance: as an entry of the bucket,
-  as its rank among earlier positions matching as long (walking a chain at the misses only),
-  or verbatim.
-  - Static codes: a sparse list per class (whether the table offered a candidate), with the
-    gap since the previous miss. Fields are coded with static per-stream frequencies and rANS
-    (bucketed values plus raw bits). Each field uses a trained default model
-    (`model/models.txt`) or the stream's own, whichever is smaller. Nothing adapts.
-  - Adaptive coding (`aqr_flate::adapt`): every token gets a hit flag, and a miss its fields down
-    binary trees, binary arithmetic coded. The contexts are the class, the predicted length
-    and the class's last two outcomes, plus, for a match the rule predicts, how the match at
-    the next position compares (a lookahead). Priors (`model/priors-10.txt`) come from
-    the first 16 uses of each context in every segment of the training split, worth 2
-    observations each.
+  recent positions. The rules are derived empirically from flate-zoo's encoders (the
+  oracle). `aqr-flate-train rules` fits the best rule of each preset class by coordinate
+  descent, then a greedy set cover picks a catalog of 32 (`model/rules-lλ.txt`). Each
+  stream's fingerprint maps to one or two of them; the fingerprint covers the common
+  shortest match, farthest distance, far short matches, full-block token count, block types
+  and how the first Huffman header was built. Two candidates, or an unknown fingerprint, are
+  settled by a trial on a 4 KB prefix.
+- **Chain rules** (adaptive profiles). A `chain` rule walks exact chains (`matchfind`), so
+  nothing depends on an encoder's hash. Its depth never exceeds the 99.5th percentile of how
+  deep the stream's matches lie in their chains (deeper ones are coded by rank anyway, and
+  it keeps joining fast). Up to four configurations are compared by cost, on the first
+  256 KiB of long streams.
+- **Corrections.** Only mispredicted tokens are corrected. A distance is coded by its entry
+  in the bucket, else by its rank among earlier positions matching as long (walking a chain at
+  the misses only), else verbatim. Static codes: each field uses a trained default model
+  (`model/models.txt`) or the stream's own, whichever is smaller. Nothing adapts. Adaptive
+  coding (`aqr_flate::adapt`): the contexts include a lookahead, how the match at the next
+  position compares. Priors (`model/priors-10.txt`) come from the first 16 uses of each
+  context in every segment of the training split, worth 2 observations each.
 - **zlib emulation** (adaptive profiles). `zlib` ports zlib 1.3.1's `deflate_fast`,
-  `deflate_slow`, `deflate_rle`, `deflate_huff`, `longest_match` and `fill_window`, with the
-  same 2 × w_size window, slides and zero-filling, so its output matches zlib's bit for bit.
-  It is driven by the actual tokens (`predict`, then `commit` of the actual token), so after a
-  misprediction it carries on from where the stream really is. While it follows the stream
-  it predicts the tokens; the rule's table still serves the corrections, and takes over if
-  the emulation is lost. Each segment resumes the emulator from a checkpoint
-  (`zlib::Checkpoint`, a few counters: the lazy levels insert every position, so the rest of
-  the state follows from the data). deflate_fast (levels 1-3) cannot be resumed, since its
-  hash chains depend on the tokens, so such a stream is one segment.
+  `deflate_slow`, `deflate_rle`, `deflate_huff`, `longest_match` and `fill_window`, so its
+  output matches zlib's bit for bit. It is driven by the actual tokens (`predict`, then
+  `commit` of the actual token), so after a misprediction it carries on from where the stream
+  really is. Each segment resumes it from a checkpoint (`zlib::Checkpoint`, a few counters:
+  the lazy levels insert every position, so the rest of the state follows from the data).
+  deflate_fast (levels 1-3) cannot be resumed, since its hash chains depend on the tokens, so
+  such a stream is one segment.
 - **Detection** (`detect`): a cheap check of whether a stream can come from zlib, after
   preflate's estimator. It checks that every dynamic header is exactly zlib's, that full
   blocks hold `2^(mem+6) - 1` tokens (which gives memLevel), the maximum distance (which
@@ -120,10 +102,8 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -
   checks and predict every token, they are taken without detection, the rule's trial or the
   chain rule (short streams below 1 KiB still compare the rule alone). On small git objects
   (zlib -6, profile 10) this splits 1.5-5× faster than with the header's hints alone.
-- **Headers.** Dynamic Huffman headers are coded against candidate builders, chosen per
-  stream and carried from block to block: zlib's heap, and package-merge (zopfli, ECT,
-  plain) at limits 15-9. Run-length coders cover zlib, libdeflate and zopfli/ECT. An exact
-  block costs one bit.
+- **Headers.** Dynamic Huffman headers are coded against the builders and run-length coders of
+  zlib, libdeflate and zopfli/ECT, so an exact block costs one bit.
 - **Speed.** Tokens are cut into ~1 MiB segments that are coded independently. The parser
   (see [below](#parser-and-writer-flate_reconsinflate-flate_reconswrite)) gathers the statistics everything
   else needs (symbol frequencies, fingerprint, segment cuts) as it decodes. Candidate matches
@@ -175,6 +155,11 @@ all 924 streams, one thread, on an M4:
   `InvalidDeflate`). preflate is cheap on its best cases but explodes on others.
 - aqr-flate's zlib streams cost 5.3 KB over 95 streams, most of it the block layout: zlib
   at small memLevels writes many stored blocks, each with its length coded up front.
+
+As gzip files through `aqr-show` (one thread, level `mid`; see the
+[top-level README](../README.md#how-it-was-measured), ratios tentative), the four gzip files at
+hand (4.2 MB) come to 0.932 (zstd -3: 0.977) at 7 MB/s compressing and 58 MB/s decompressing;
+two of them (Unicode data files) are kept as they are.
 
 ## Parser and writer (`aqr_flate::inflate`, `aqr_flate::write`)
 

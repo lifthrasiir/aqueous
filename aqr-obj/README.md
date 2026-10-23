@@ -24,8 +24,21 @@ verification is stored whole.
 
 ## Results
 
-Sizes and speeds need re-measuring: the earlier tables were of a file format that no longer
-exists. `objr bench` reports the size of an archive of the formula (`formula::encode`,
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, with `objr bench -t 1`
+(aqr-obj is not in aqr-compress yet). Ratios are tentative, since the decoder modules are not
+in the archives yet. Memory is the peak RSS of the process (input, archive and output
+included) over the input size.
+
+| set | files | MB | ratio | zstd -3 | compress | decompress |
+|---|---|---|---|---|---|---|
+| mcguire | 7 | 385.1 | 0.086 | 0.220 | 140.1 MB/s | 353.3 MB/s |
+| writers | 10 | 193.6 | 0.071 | 0.222 | 109.9 MB/s | 318.5 MB/s |
+| c3d | 9 | 41.4 | 0.131 | 0.319 | 92.6 MB/s | 266.8 MB/s |
+| threejs | 4 | 4.3 | 0.119 | 0.262 | 98.2 MB/s | 282.0 MB/s |
+| all | 30 | 625 | **0.085** | 0.228 | **125 MB/s** | **334 MB/s** |
+
+Files over 300 MB were left out. Memory is 4.7× the file (median of files of 8 MB or more).
+`objr bench` reports the size of an archive of the formula (`formula::encode`,
 then `aqr_formula::aqr::encode`) and the speed of making and decoding it. The other
 compressors' sizes per file are cached by `scripts/baseline.sh`.
 
@@ -66,7 +79,7 @@ last 65,536 lines per kind, a table of 65,536 vertices, and templates up to 4 MB
 
 ## How
 
-A file is cut into blocks of 4 MB at line ends. Each block becomes about 35 streams, each
+A file is cut into blocks of 4 MB at line ends. Each block becomes a set of streams, each
 kept as is or rANS coded, whichever is smaller (the archive compresses them further);
 state (previous values, templates, recent lines and faces) carries over from block to
 block, but its size does not depend on the file's.
@@ -74,23 +87,16 @@ block, but its size does not depend on the file's.
 ### Lines and templates (`src/block.rs`)
 
 A `v`, `vt`, `vn`, `vp`, `f` or `l` line becomes a template and values. The template holds
-everything but the values: keyword, separators (any blanks), each number's format or each
-corner's pattern (`a`, `a/b`, `a//c`, `a/b/c`, relative indices), trailing blanks and the
-line end. Templates are numbered by first use and defined where first used; a line costs
-its template number (one byte, nearly free once compressed). Any other line, or one that does
-not parse back to itself, is kept as text.
+everything but the values (separators, number formats, corner patterns, line end), so a
+line costs its template number (one byte, nearly free once compressed). Any other line, or
+one that does not parse back to itself, is kept as text.
 
 ### Numbers ([`aqr-num`](../aqr-num), `src/style.rs`)
 
-A number is an integer at a scale (digits after the point), printed in a mode:
-
-- fixed, `%.Nf`-like: the scale is in the template (trailing zeros are free);
-- C's `%.Pg`: the scale follows from the magnitude; trailing zeros are dropped;
-- `%.Pe`, Python's `repr`, JavaScript's `toString`, Rust's `Display`;
-- any of the last four printed from a float: the value is the shortest decimal that
-  rounds to the `f32` or `f64`, and is printed from that float (`%.17g`,
-  `%.18e`, `repr(float(np.float32(x)))`). A `%.17g` number then costs what its double
-  holds, not 17 digits.
+A number is an integer at a scale (digits after the point), printed in a mode (fixed,
+C's `%g` and `%e`, Python's `repr`, JavaScript's `toString`, Rust's `Display`), which may
+print from a float: the value is then the shortest decimal that rounds to the `f32` or
+`f64`. A `%.17g` number costs what its double holds, not 17 digits.
 
 Shortest decimals come from Żmij; exact digits of a double (`%.17g`, `%.18e`) from 128-bit
 integer arithmetic. Only IEEE basic operations are used, so decoding gives the same bytes
@@ -112,23 +118,21 @@ normals.
   another saves more than a few bits.
 - Unit normals: when the normals of a block have length 1, the largest component is
   predicted from the other two, `±sqrt(1 - a² - b²)`.
-- Residuals go to streams per kind and position, rANS coded per value as bit length and
-  two top bits, the other bits raw (`src/ans.rs`), unless they are kept as is (repeats,
-  which the archive's zstd sees).
+- Residuals go to streams per kind and position, rANS coded per value (`src/ans.rs`),
+  unless they are kept as is (repeats, which the archive's zstd sees).
 
 ### Faces (`src/corner.rs`)
 
 Per attribute (v, vt, vn), a move-to-front cache of the 32 last indices; an index is coded
 as its cache position, as "one more than the largest so far", as one of two candidates,
-or as the difference from the nearest cached index. The candidates come from a table of
+or as an escape. The candidates come from a table of
 the last face of each vertex (direct mapped, 65,536 entries): for `v`, the neighbours of
 the previous corner's vertex there (a shared edge); for `vt` and `vn`, the index last
 paired with this vertex, and the vertex's index plus the last offset between them.
 
 ## Format
 
-[`FORMAT.md`](FORMAT.md) specifies the module (`obj-recons`, version 1) in full: the input
-slots of its formula, the streams, and the decoding of blocks.
+The format is specified in [FORMAT.md](FORMAT.md).
 
 ## Measured, not kept
 
