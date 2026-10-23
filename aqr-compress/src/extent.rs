@@ -502,6 +502,7 @@ mod tests {
         let mut d = b"SQLite format 3\0".to_vec();
         d.resize(4096 * 3, 0);
         d[16..18].copy_from_slice(&4096u16.to_be_bytes());
+        d[18..24].copy_from_slice(&[1, 1, 0, 64, 32, 32]);
         d[28..32].copy_from_slice(&2u32.to_be_bytes());
         ends(Format::Sqlite, &d[..8192]);
         // A stale count is not trusted.

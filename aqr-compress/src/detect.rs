@@ -77,7 +77,7 @@ pub fn detect(d: &[u8]) -> Option<Format> {
     let at = |p: usize, m: &[u8]| d.get(p..p + m.len()) == Some(m);
     if at(0, b"\x89PNG\r\n\x1a\n") {
         Some(Format::Png)
-    } else if at(0, b"SQLite format 3\0") {
+    } else if sqlite_header(d) {
         Some(Format::Sqlite)
     } else if at(0, b"%PDF-") {
         Some(Format::Pdf)
@@ -132,6 +132,18 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
     if FIRST[*d.first()? as usize] { detect(d).filter(|&f| f != Format::LevelDb) } else { None }
 }
 
+/// A SQLite database header: the magic string, a page size, and the fields that must have one
+/// value (the file format's versions 1 or 2, payload fractions 64, 32 and 32). SQLite's code
+/// holds the magic string too.
+pub(crate) fn sqlite_header(d: &[u8]) -> bool {
+    let Some(h) = d.first_chunk::<24>().filter(|h| h.starts_with(b"SQLite format 3\0")) else { return false };
+    let size = u16::from_be_bytes([h[16], h[17]]);
+    (size == 1 || size.is_power_of_two() && (512..=32768).contains(&size))
+        && (1..=2).contains(&h[18])
+        && (1..=2).contains(&h[19])
+        && h[21..24] == [64, 32, 32]
+}
+
 /// Bytes of the ID3v2 tag at the start of `d`, if any.
 pub(crate) fn id3_len(d: &[u8]) -> Option<usize> {
     let h = d.first_chunk::<10>().filter(|h| h.starts_with(b"ID3") && h[6..].iter().all(|&b| b < 0x80))?;
@@ -175,7 +187,6 @@ mod tests {
         id3_flac.extend_from_slice(b"fLaC");
         let cases: &[(&[u8], Option<Format>)] = &[
             (b"\x89PNG\r\n\x1a\n....", Some(Format::Png)),
-            (b"SQLite format 3\0....", Some(Format::Sqlite)),
             (b"%PDF-1.7\n", Some(Format::Pdf)),
             (b"8BPS\0\x01", Some(Format::Psd)),
             (b"8BPS\0\x02", Some(Format::Psd)),
@@ -205,6 +216,19 @@ mod tests {
         ];
         for &(d, f) in cases {
             assert_eq!(detect(d), f, "{d:x?}");
+        }
+        // A database header, and the magic string in SQLite's code: a page size by chance,
+        // the rest not what a header must have.
+        let mut db = b"SQLite format 3\0".to_vec();
+        db.extend_from_slice(&[0x10, 0, 1, 1, 0, 64, 32, 32, 0, 0, 0, 1, 0, 0, 0, 2]);
+        assert_eq!(detect(&db), Some(Format::Sqlite));
+        let mut code = b"SQLite format 3\0".to_vec();
+        code.extend_from_slice(&[0x40, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(detect(&code), None);
+        for (at, v) in [(18, 0), (19, 3), (21, 63), (22, 0), (23, 33)] {
+            let mut d = db.clone();
+            d[at] = v;
+            assert_eq!(detect(&d), None, "byte {at}");
         }
     }
 }
