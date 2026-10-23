@@ -47,10 +47,11 @@ in self-extractors' code).
 Bodies the same as an earlier one are taken again, without looking into them: in 42.zip, each
 of the 16 archives of a level is the same, so each level inflates one of them. The data that
 DEFLATE bodies inflate to is bounded (`Options::limit`, which aqr-compress gives from its budget
-for the whole file, 32 times its size and 64 MiB at every depth together): the bodies are
-measured by a parse that keeps no data, then inflated least expanding first, so that bombs, the
-most expanding, are kept as their DEFLATE streams. Those are periodic, and cost the archive
-little.
+for the whole file, 32 times its size and 64 MiB at every depth together). Where the sizes the
+headers say fit, the bodies inflate at once, each stopped as soon as it holds more than it says.
+Otherwise, or where one was stopped, the bodies are measured by a parse that keeps no data, then
+inflated least expanding first, so that bombs, the most expanding, are kept as their DEFLATE
+streams. Those are periodic, and cost the archive little.
 
 `make-42.py` writes 42.zip's levels unencrypted (32,934 bytes: five levels of 16 archives each, down to a
 page holding 4,294,967,295 zero bytes). aqr-compress takes it to any depth in 0.14 s and 41 MB:
