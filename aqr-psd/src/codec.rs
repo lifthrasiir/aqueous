@@ -230,9 +230,9 @@ fn all_splits(src: &[u8], rows: usize, cb: usize) -> Vec<usize> {
     splits
 }
 
-/// Orders candidate encoders by how many of a sample of rows they reproduce (stable, so the
-/// inferred tile cut stays first on ties).
-fn rank_candidates(mut cands: Vec<Encoder>, src: &[u8], planes: usize, w: usize, h: usize, cb: usize) -> Vec<Encoder> {
+/// How many of a sample of rows (every `rows / 32`th) each candidate encoder reproduces, and
+/// the rows sampled (that decode to `w` bytes).
+fn sample_hits(cands: &[Encoder], src: &[u8], planes: usize, w: usize, h: usize, cb: usize) -> (Vec<usize>, usize) {
     const SAMPLE: usize = 32;
     let rows = planes * h;
     let step = rows.div_ceil(SAMPLE).max(1);
@@ -243,20 +243,44 @@ fn rank_candidates(mut cands: Vec<Encoder>, src: &[u8], planes: usize, w: usize,
     }
     let mut row = vec![0u8; w];
     let mut hits = vec![0usize; cands.len()];
+    let mut sampled = 0;
     for r in (0..rows).step_by(step) {
         let enc = &src[starts[r]..starts[r + 1]];
         if !rows::unpackbits_into(enc, &mut row) {
             continue;
         }
+        sampled += 1;
         for (k, &c) in cands.iter().enumerate() {
             hits[k] += packbits::reproduces(c, &row, enc) as usize;
         }
     }
+    (hits, sampled)
+}
+
+/// Candidate encoders ordered by how many of a sample of rows they reproduce (stable, so the
+/// inferred tile cut stays first on ties); None where the best reproduces less than half of
+/// them, and so does the tile cut inferred from all rows: the span is then not worth coding,
+/// its rows being stored as they are (as exceptions) besides.
+fn rank_candidates(
+    cands: Vec<Encoder>,
+    src: &[u8],
+    planes: usize,
+    w: usize,
+    h: usize,
+    cb: usize,
+) -> Option<Vec<Encoder>> {
+    let (hits, sampled) = sample_hits(&cands, src, planes, w, h, cb);
     let mut order: Vec<usize> = (0..cands.len()).collect();
     order.sort_by_key(|&k| std::cmp::Reverse(hits[k]));
-    let ranked = order.iter().map(|&k| cands[k]).collect();
-    cands.clear();
-    ranked
+    let mut ranked: Vec<Encoder> = order.iter().map(|&k| cands[k]).collect();
+    if 2 * hits[order[0]] < sampled {
+        let full = packbits::infer_tiles_from(all_splits(src, planes * h, cb));
+        if ranked.contains(&full) || 2 * sample_hits(&[full], src, planes, w, h, cb).0[0] < sampled {
+            return None;
+        }
+        ranked.insert(0, full);
+    }
+    Some(ranked)
 }
 
 /// A planned span with what is known before coding.
@@ -295,7 +319,7 @@ fn plan_span<'a>(
             let t1 = std::time::Instant::now();
             let candidates = packbits::candidates_after(packbits::infer_tiles_from(splits));
             let t2 = std::time::Instant::now();
-            let candidates = rank_candidates(candidates, src, planes, w, h, cb);
+            let candidates = rank_candidates(candidates, src, planes, w, h, cb)?;
             PLAN_TIMES.add([(t1 - t0).as_secs_f64(), (t2 - t1).as_secs_f64(), t2.elapsed().as_secs_f64(), 0.0]);
             (Coding::Rle { count_bytes: cb, encoder: candidates[0], plane_lens, exceptions: Vec::new() }, candidates)
         }
@@ -803,9 +827,10 @@ const PIPE_DEPTH: usize = 3;
 /// ... for groups of at least this many samples (smaller ones are not worth the threads).
 const PIPE_MIN: usize = 1 << 18;
 
-/// Rows of a batch for rows of `w` samples in `n` planes.
-fn pipe_rows(w: usize, n: usize) -> usize {
-    (PIPE_BATCH / (w * n).max(1)).clamp(1, 256)
+/// Rows of a batch for `h` rows of `w` samples in `n` planes: the batches between two
+/// threads hold fewer rows than there are.
+fn pipe_rows(w: usize, h: usize, n: usize) -> usize {
+    (PIPE_BATCH / (w * n).max(1)).clamp(1, 256).min(h.div_ceil(PIPE_DEPTH + 3)).max(1)
 }
 
 /// Rows handed from one thread to another: per row, a buffer per plane (empty for planes not
@@ -964,7 +989,7 @@ fn encode_rows_piped<'a>(
     h: usize,
 ) -> Option<Vec<Vec<usize>>> {
     let n = readers.len();
-    let per = pipe_rows(w, n);
+    let per = pipe_rows(w, h, n);
     let read: Vec<bool> = readers.iter().map(Option::is_some).collect();
     let hn = if hint.is_some() { n } else { 0 };
     let (full_tx, full_rx, free_tx, free_rx) = batch_channels(PIPE_DEPTH + 2, || Batch::new(per, w, &read, hn));
@@ -1386,7 +1411,7 @@ fn decode_rows_piped(
     right: &mut [u8],
 ) -> Result<()> {
     let n = readers.len();
-    let per = pipe_rows(w, n);
+    let per = pipe_rows(w, h, n);
     let known: Vec<bool> = readers.iter().map(Option::is_some).collect();
     let hn = if hint.is_some() { n } else { 0 };
     let has_in = hn > 0 || known.contains(&true);

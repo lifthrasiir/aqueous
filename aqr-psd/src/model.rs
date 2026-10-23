@@ -49,7 +49,7 @@ pub const TABLES: usize = JOINT_BASE + 2 * CTX;
 /// Joint symbols: 5 x 5 pairs of residuals in -2..=2, then the escape.
 const JOINT_ESCAPE: u8 = 25;
 /// Symbols per chunk of the entropy coded stream.
-pub const CHUNK: usize = 1 << 22;
+pub const CHUNK: usize = 1 << 19;
 
 fn corrupt() -> Error {
     Error("corrupt pixel data".into())

@@ -56,11 +56,11 @@ on one thread, in order; around it:
 - `PSDR_STATS` times are summed over threads.
 
 Memory: batches in flight add at most about 10 MB per helper pair (5 batches of about 1 MB,
-twice).
+twice), and fewer rows than the group has.
 
 ## Results
 
-Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+Measured on 2026-10-24 on an Apple M4, one thread, through `aqr-show` (see the
 [top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
 its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
 in the archives yet. Memory is the peak RSS of that process (input, archive and output
@@ -68,14 +68,20 @@ included) over the input size.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress |
 |---|---|---|---|---|---|---|
-| genposter | 5 | 198.1 | 0.394 | 0.693 | 38.6 MB/s | 98.8 MB/s |
-| oga | 37 | 214.7 | 0.288 | 0.457 | 52.6 MB/s | 181.8 MB/s |
-| fixtures | 13 | 16.1 | 0.231 | 0.284 | 30.0 MB/s | 149.0 MB/s |
-| tori29umai | 1 | 10.3 | 0.231 | 0.383 | 40.4 MB/s | 88.8 MB/s |
-| all | 56 | 439 | **0.332** | 0.555 | **44 MB/s** | **129 MB/s** |
+| genposter | 5 | 198.1 | 0.393 | 0.693 | 35.0 MB/s | 88.7 MB/s |
+| oga | 37 | 214.7 | 0.284 | 0.457 | 52.4 MB/s | 159.0 MB/s |
+| fixtures | 13 | 16.1 | 0.230 | 0.284 | 33.2 MB/s | 127.9 MB/s |
+| tori29umai | 1 | 10.3 | 0.215 | 0.383 | 37.0 MB/s | 78.9 MB/s |
+| all | 56 | 439 | **0.330** | 0.555 | **42 MB/s** | **114 MB/s** |
 
-8 files are kept as they are. Memory is 7.0× the file (median of files of 8 MB or more; at
-most 48.7×).
+8 files are kept as they are. Memory is 6.8× the file (median of files of 8 MB or more). Little
+of it is aqr-psd's: on its own (`formula::encode` and evaluating the formula) it takes the
+streams and at most a few MB besides, plus what aqr-png and aqr-jpeg take for embedded files
+(up to 96 MB, for progressive JPEGs), and decoding holds the embedded files' bytes twice (the
+module's input and its output). The rest is the archive's: its verification, and, for files
+kept raw, recompressors tried on what a scan finds in the file. Small files reach 168× (98 MB
+for 0.58 MB) where the scan takes pixel data for MP3 frames (free format, whose frame length is
+anything up to the next header) and loads aqr-mp3's tables.
 
 ## Limitations
 

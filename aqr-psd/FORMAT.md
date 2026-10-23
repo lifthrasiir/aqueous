@@ -985,14 +985,17 @@ every span before it.
    phase and a longer period.
 3. Candidates: the tile cut, then Greedy (3, false), (3, true), (2, false), (2, true), stably
    sorted by how many of the rows `0, k, 2k, …` (`k = max(1, ceil(rows / 32))`) that decode to
-   `w` bytes each reproduces, most first.
+   `w` bytes each reproduces, most first. If the first reproduces fewer than half of those
+   rows, the tile cut inferred (as in 2) from the forced splits of all rows is put first if it
+   is not a candidate and reproduces at least half of them; otherwise the span is not coded
+   (it stays in the skeleton).
 4. The first candidate codes the span; the rows it does not reproduce are counted while coding.
    If they are more than `rows div 32 + 4`, every other candidate, and the tile cut inferred
    from the forced splits of all rows (if not a candidate already), is tried on all rows; the
    one with the fewest misses wins (the earlier on ties).
 5. The rows the chosen encoder does not reproduce are the exceptions.
 
-**Model stream.** Chunks of `2^22` symbols (the last one shorter). A table is used if it has a
+**Model stream.** Chunks of `2^19` symbols (the last one shorter). A table is used if it has a
 symbol in the chunk. Its levels: with `m` the largest count, a symbol of count `c > 0` gets
 `max(1, 63 + round(4 · log2(c / m)))` (binary64, round half away from zero), and absent symbols
 level 0. The table is written as in 5.1: each run of zero levels as gamma(0), gamma(run − 1);

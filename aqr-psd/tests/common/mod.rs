@@ -23,15 +23,15 @@ pub fn be32(o: &mut Vec<u8>, v: u32) {
     o.extend_from_slice(&v.to_be_bytes());
 }
 
-/// PackBits data of `rows` rows of `w` bytes: counts, then rows. `mangle` re-encodes some
-/// rows all as literals, which no known encoder does.
-pub fn rle(data: &[u8], w: usize, enc: Encoder, mangle: bool) -> Vec<u8> {
+/// PackBits data of `rows` rows of `w` bytes: counts, then rows. `mangle` (if not 0)
+/// re-encodes every `mangle`th row from row 1 on all as literals, which no known encoder does.
+pub fn rle(data: &[u8], w: usize, enc: Encoder, mangle: usize) -> Vec<u8> {
     let rows = data.len() / w;
     let mut enc_rows: Vec<Vec<u8>> = Vec::new();
     for r in 0..rows {
         let row = &data[r * w..(r + 1) * w];
         let mut e = Vec::new();
-        if mangle && r % 3 == 1 {
+        if mangle > 0 && r % mangle == 1 % mangle {
             for chunk in row.chunks(128) {
                 e.push(chunk.len() as u8 - 1);
                 e.extend_from_slice(chunk);
@@ -66,7 +66,7 @@ pub fn image(w: usize, h: usize, seed: u32) -> Vec<u8> {
 }
 
 /// `raw`: which layers are stored raw (the others RLE).
-pub fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: bool, raw: &[usize]) -> Vec<u8> {
+pub fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: usize, raw: &[usize]) -> Vec<u8> {
     let mut o = Vec::new();
     o.extend_from_slice(b"8BPS");
     be16(&mut o, 1);
@@ -154,7 +154,7 @@ pub fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: 
     for k in 0..3 {
         planes.extend(image(width, height, 77 + k));
     }
-    o.extend_from_slice(&rle(&planes, width, enc, false));
+    o.extend_from_slice(&rle(&planes, width, enc, 0));
     o
 }
 
@@ -173,7 +173,7 @@ pub fn layers(w: usize, h: usize, alpha: bool) -> Vec<Layer> {
 
 /// A file whose composite is its layers rendered (so the composite is coded with the hint).
 pub fn hinted_file(w: usize, h: usize) -> Vec<u8> {
-    let file = psd(w, h, &layers(w, h, true), packbits::NO_TILES, false, &[]);
+    let file = psd(w, h, &layers(w, h, true), packbits::NO_TILES, 0, &[]);
     let p = aqr_psd::parse(&file).unwrap();
     let rgb = aqr_psd::composite::render(&p, &file, false, &mut Default::default()).unwrap();
     let mut planes = Vec::new();
@@ -182,6 +182,6 @@ pub fn hinted_file(w: usize, h: usize) -> Vec<u8> {
     }
     let mut out = file[..p.composite.start].to_vec();
     be16(&mut out, 1);
-    out.extend_from_slice(&rle(&planes, w, packbits::NO_TILES, false));
+    out.extend_from_slice(&rle(&planes, w, packbits::NO_TILES, 0));
     out
 }

@@ -46,18 +46,28 @@ fn check(file: &[u8]) -> Formula {
 
 #[test]
 fn photoshop_rle() {
-    check(&psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]));
+    check(&psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, 0, &[]));
 }
 
 #[test]
 fn tiles_and_exceptions() {
     let enc = Encoder::Photoshop { phase: 77, period: 368 };
-    check(&psd(500, 30, &layers(500, 30, true), enc, true, &[]));
+    check(&psd(500, 30, &layers(500, 30, true), enc, 3, &[]));
+}
+
+#[test]
+fn unknown_writer() {
+    // No encoder reproduces the layers' rows: they stay in the skeleton rather than being
+    // coded and stored verbatim as exceptions as well; the composite is still coded.
+    let file = psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, 1, &[]);
+    let f = check(&file);
+    let head = f.streams.iter().find(|s| s.class == "psd/head").unwrap().data.len();
+    assert!(head < 200, "head of {head} bytes");
 }
 
 #[test]
 fn greedy_writer_and_raw_layer() {
-    check(&psd(260, 35, &layers(260, 35, false), Encoder::Greedy { min_run: 3, split_rest: true }, false, &[0]));
+    check(&psd(260, 35, &layers(260, 35, false), Encoder::Greedy { min_run: 3, split_rest: true }, 0, &[0]));
 }
 
 #[test]
@@ -69,7 +79,7 @@ fn copies_and_a_gray_layer() {
     ls.push(copy);
     let g = image(w, h, 99);
     ls.push(Layer { top: 0, left: 0, w, h, channels: vec![(0, g.clone()), (1, g.clone()), (2, g)], mask: None });
-    check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
+    check(&psd(w, h, &ls, packbits::NO_TILES, 0, &[]));
 }
 
 #[test]
@@ -83,10 +93,10 @@ fn duplicate_layers_cost_next_to_nothing() {
     let mut ls = layers(w, h, true);
     let mut copy = Layer { top: 7, left: 2, w, h, channels: ls[0].channels.clone(), mask: None };
     copy.channels.swap(1, 2);
-    let single = psd(w, h, &ls[..2], packbits::NO_TILES, false, &[]);
+    let single = psd(w, h, &ls[..2], packbits::NO_TILES, 0, &[]);
     ls.push(copy);
     let size = |f: &Formula| f.streams.iter().map(|s| s.data.len()).sum::<usize>();
-    let (a, b) = (size(&check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]))), size(&check(&single)));
+    let (a, b) = (size(&check(&psd(w, h, &ls, packbits::NO_TILES, 0, &[]))), size(&check(&single)));
     assert!(a < b + b / 4, "{a} vs {b}");
 }
 
@@ -102,7 +112,7 @@ fn same_bytes_other_size_is_no_copy() {
         channels: vec![(0, data.clone()), (1, data.clone()), (2, data.clone())],
         mask: None,
     };
-    check(&psd(100, 4, &[l(100, 2), l(50, 4)], packbits::NO_TILES, false, &[0, 1]));
+    check(&psd(100, 4, &[l(100, 2), l(50, 4)], packbits::NO_TILES, 0, &[0, 1]));
 }
 
 #[test]
@@ -121,7 +131,7 @@ fn layer_outside_the_canvas() {
         });
     }
     // A composite the renderer predicts: the hint is used.
-    check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
+    check(&psd(w, h, &ls, packbits::NO_TILES, 0, &[]));
 }
 
 #[test]
@@ -136,7 +146,7 @@ fn masks_anywhere() {
         channels.push((-2, image(mw, mh, 50 + k as u32)));
         ls.push(Layer { top: k as i32, left: 3, w, h, channels, mask: Some((mtop, mleft, mw, mh, def)) });
     }
-    check(&psd(w, h, &ls, packbits::NO_TILES, false, &[]));
+    check(&psd(w, h, &ls, packbits::NO_TILES, 0, &[]));
 }
 
 #[test]
@@ -148,7 +158,7 @@ fn repeated_rows_with_exceptions() {
     let plane: Vec<u8> = row.iter().copied().cycle().take(w * h).collect();
     let l =
         Layer { top: 0, left: 0, w, h, channels: vec![(0, plane.clone()), (1, plane.clone()), (2, plane)], mask: None };
-    check(&psd(w, h, &[l], packbits::NO_TILES, true, &[]));
+    check(&psd(w, h, &[l], packbits::NO_TILES, 3, &[]));
 }
 
 const THREADS: [usize; 4] = [1, 2, 3, 8];
@@ -175,26 +185,19 @@ fn same_outcome(f: &Formula) {
 
 #[test]
 fn threads_small_and_large_groups() {
-    check_threads(&psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]));
-    check_threads(&psd(
-        260,
-        35,
-        &layers(260, 35, false),
-        Encoder::Greedy { min_run: 3, split_rest: true },
-        false,
-        &[0],
-    ));
+    check_threads(&psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, 0, &[]));
+    check_threads(&psd(260, 35, &layers(260, 35, false), Encoder::Greedy { min_run: 3, split_rest: true }, 0, &[0]));
     // Past the size where rows are pipelined through helper threads.
     let enc = Encoder::Photoshop { phase: 77, period: 368 };
-    check_threads(&psd(800, 400, &layers(800, 400, true), enc, true, &[]));
-    check_threads(&psd(700, 500, &layers(700, 500, false), packbits::NO_TILES, false, &[1]));
+    check_threads(&psd(800, 400, &layers(800, 400, true), enc, 3, &[]));
+    check_threads(&psd(700, 500, &layers(700, 500, false), packbits::NO_TILES, 0, &[1]));
 }
 
 #[test]
 fn threads_corrupt_streams() {
     for file in [
-        psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, false, &[]),
-        psd(800, 400, &layers(800, 400, true), packbits::NO_TILES, true, &[]),
+        psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, 0, &[]),
+        psd(800, 400, &layers(800, 400, true), packbits::NO_TILES, 3, &[]),
     ] {
         let f = formula::encode(&file, 1).unwrap();
         for (i, s) in f.streams.iter().enumerate() {
@@ -250,18 +253,18 @@ fn hint_needs_8_bit_rgb() {
 #[test]
 fn large_group_uses_threads() {
     // Big enough for the pipelined decoder.
-    check(&psd(700, 400, &layers(700, 400, true), packbits::NO_TILES, false, &[]));
+    check(&psd(700, 400, &layers(700, 400, true), packbits::NO_TILES, 0, &[]));
 }
 
 #[test]
 fn stored_cases_give_none() {
     assert!(formula::encode(b"", 1).is_none());
     assert!(formula::encode(b"not a psd file at all", 1).is_none());
-    let mut truncated = psd(100, 20, &layers(100, 20, false), packbits::NO_TILES, false, &[]);
+    let mut truncated = psd(100, 20, &layers(100, 20, false), packbits::NO_TILES, 0, &[]);
     truncated.truncate(truncated.len() / 2);
     assert!(formula::encode(&truncated, 1).is_none());
     // 16 bits per channel: no pixel data to take out.
-    let mut deep = psd(100, 20, &layers(100, 20, false), packbits::NO_TILES, false, &[]);
+    let mut deep = psd(100, 20, &layers(100, 20, false), packbits::NO_TILES, 0, &[]);
     deep[22..24].copy_from_slice(&16u16.to_be_bytes());
     assert!(formula::encode(&deep, 1).is_none());
 }
@@ -354,7 +357,7 @@ fn with_linked(file: &[u8], files: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
 }
 
 fn small_psd(seed: usize) -> Vec<u8> {
-    psd(150 + seed, 30, &layers(150 + seed, 30, true), packbits::NO_TILES, false, &[])
+    psd(150 + seed, 30, &layers(150 + seed, 30, true), packbits::NO_TILES, 0, &[])
 }
 
 #[test]
