@@ -63,8 +63,9 @@ pub fn checksum(d: &[u8]) -> u64 {
 }
 
 /// `f` as an archive, its blocks compressed at `level` ([`Encoder`]), with `checksum` of the
-/// output ([`checksum`]) if given (a leaf block checksums itself). Fails on slices out of their
-/// stream.
+/// output ([`checksum`]) if given. A leaf block checksums itself, which is the output: a
+/// `checksum` given must be its own. Fails on slices out of their stream, and on such a
+/// checksum that is not the leaf's.
 pub fn encode(f: &Formula, checksum: Option<u64>, level: Level) -> Result<Vec<u8>> {
     Encoder::new(level).encode(f, checksum)
 }
@@ -166,7 +167,11 @@ impl Encoder {
 
         let mut blocks = Vec::new();
         if let &Node::Slice { stream, start, len } = &f.root {
-            self.content_block(&mut blocks, true, &f.streams[stream].data[start as usize..][..len as usize])?;
+            let leaf = &f.streams[stream].data[start as usize..][..len as usize];
+            if checksum.is_some_and(|c| c != self::checksum(leaf)) {
+                return Err(Error::new("output checksum not that of the leaf"));
+            }
+            self.content_block(&mut blocks, true, leaf)?;
         } else {
             // the non-leaf block of each stream sliced, by its ordinal
             let mut ordinals = vec![None; f.streams.len()];
@@ -1187,6 +1192,9 @@ mod tests {
         let mut f = Formula::raw("a", b"0123456789".to_vec());
         f.root = Node::slice(0, 3, 4);
         assert_eq!(decode(&encode(&f, None, Level::Zstd(3)).unwrap(), &[]).unwrap(), b"3456");
+        // The leaf block's checksum is the output's: one given must be it.
+        assert!(encode(&f, Some(checksum(b"3456")), Level::Zstd(3)).is_ok());
+        assert!(encode(&f, Some(checksum(b"0123")), Level::Zstd(3)).is_err());
         // An empty formula is a formula block.
         let c = encode(&Formula::default(), None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [FORMULA]);

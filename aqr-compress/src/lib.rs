@@ -195,11 +195,11 @@ pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
 /// and where it is not `d` (a module's bug), the archive of `d` raw instead.
 fn finish(f: &Formula, d: &[u8], opt: &Options, cx: &Cx) -> Vec<u8> {
     let sum = Some(aqr::checksum(d));
-    let c = cx.enc.encode(f, sum).expect("slices within their streams");
-    if !opt.verify || aqr_decompress::decompress(&c, opt.threads).is_ok_and(|out| out == d) {
-        return c;
+    match cx.enc.encode(f, sum) {
+        Ok(c) if !opt.verify || aqr_decompress::decompress(&c, opt.threads).is_ok_and(|out| out == d) => c,
+        // a leaf of other bytes than `d` is not encoded with its checksum
+        _ => cx.enc.encode(&Formula::raw("raw", d.to_vec()), sum).expect("a stream of the whole"),
     }
-    cx.enc.encode(&Formula::raw("raw", d.to_vec()), sum).expect("slices within their streams")
 }
 
 /// [`recompress`] for data `depth` formats deep, within `cx`.
@@ -445,11 +445,13 @@ mod tests {
         let d = b"some data, kept raw where its formula is wrong".repeat(100);
         let opt = Options::default();
         let cx = Cx::new(&d, &opt);
-        // two slices: the archive has the output's checksum
         let mut wrong = Formula::raw("raw", d.clone());
         wrong.streams[0].data[7] ^= 1;
-        wrong.root = Node::Concat(vec![Node::slice(0, 0, 100), Node::slice(0, 100, d.len() as u64 - 100)]);
         let raw = aqr::encode(&Formula::raw("raw", d.clone()), Some(aqr::checksum(&d)), opt.level).unwrap();
+        // a leaf, whose checksum is not the output's, is not encoded at all
+        assert_eq!(finish(&wrong, &d, &Options { verify: false, ..opt.clone() }, &cx), raw);
+        // two slices: the archive has the output's checksum
+        wrong.root = Node::Concat(vec![Node::slice(0, 0, 100), Node::slice(0, 100, d.len() as u64 - 100)]);
         assert_eq!(finish(&wrong, &d, &opt, &cx), raw);
         // a module that fails
         let fails = Formula {
