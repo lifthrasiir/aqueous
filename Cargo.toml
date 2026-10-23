@@ -20,6 +20,7 @@ members = [
     "aqr-psd",
     "aqr-snappy",
     "aqr-sqlite",
+    "aqr-zip",
     "aqr-api",
     "aqr-api/demo/concat",
     "aqr-api/demo/xor",

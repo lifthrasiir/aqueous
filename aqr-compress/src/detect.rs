@@ -24,10 +24,12 @@ pub enum Format {
     Sqlite,
     /// LevelDB table (aqr-snappy on its blocks), known by its end.
     LevelDb,
+    /// ZIP archive (aqr-zip, and aqr-flate on its DEFLATE bodies).
+    Zip,
 }
 
 impl Format {
-    pub const ALL: [Format; 12] = [
+    pub const ALL: [Format; 13] = [
         Format::Pe,
         Format::Gzip,
         Format::Zlib,
@@ -40,6 +42,7 @@ impl Format {
         Format::Pdf,
         Format::Sqlite,
         Format::LevelDb,
+        Format::Zip,
     ];
 
     pub fn name(self) -> &'static str {
@@ -56,6 +59,7 @@ impl Format {
             Format::Pdf => "pdf",
             Format::Sqlite => "sqlite",
             Format::LevelDb => "leveldb",
+            Format::Zip => "zip",
         }
     }
 }
@@ -93,6 +97,8 @@ pub fn detect(d: &[u8]) -> Option<Format> {
         Some(Format::Pe)
     } else if aqr_lz4::formula::starts(d) {
         Some(Format::Lz4)
+    } else if at(0, b"PK\x03\x04") {
+        Some(Format::Zip)
     } else if at(0, &[0x1f, 0x8b, 8]) {
         Some(Format::Gzip)
     } else if zlib_header(d) {
@@ -109,7 +115,7 @@ pub fn detect(d: &[u8]) -> Option<Format> {
 pub(crate) fn starts(d: &[u8]) -> Option<Format> {
     const FIRST: [bool; 256] = {
         let mut t = [false; 256];
-        let s = b"\x89S%8fRFI\xffM\x1fm\x04";
+        let s = b"\x89S%8fRFI\xffM\x1fm\x04P";
         let mut i = 0;
         while i < s.len() {
             t[s[i] as usize] = true;
@@ -192,6 +198,8 @@ mod tests {
             (b"mozLz40\0\x10\0\0\0", Some(Format::Lz4)),
             (b"\x04\x22\x4d\x18\x64\x40", Some(Format::Lz4)),
             (b"mozLz4", None),
+            (b"PK\x03\x04\x14\0", Some(Format::Zip)),
+            (b"PK\x05\x06", None),
             (b"hello", None),
             (b"", None),
         ];

@@ -8,18 +8,18 @@ use aqr_flate::Hints;
 use aqr_flate::inflate::{self, Sink};
 use aqr_formula::{Formula, Node};
 
-use crate::{Options, verified};
+use crate::{Cx, Options, verified};
 
 /// A gzip member (RFC 1952); what follows its trailer is sliced as it is.
-pub(crate) fn gzip(d: &[u8], opt: &Options) -> Option<Formula> {
+pub(crate) fn gzip(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let raw = gzip_deflate(d)?;
-    wrap("gzip", d, raw, &Hints::gzip_xfl(d[8]), opt)
+    wrap("gzip", d, raw, &Hints::gzip_xfl(d[8]), opt, cx)
 }
 
 /// A zlib stream (RFC 1950); what follows its checksum is sliced as it is.
-pub(crate) fn zlib(d: &[u8], opt: &Options) -> Option<Formula> {
+pub(crate) fn zlib(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let raw = zlib_deflate(d)?;
-    wrap("zlib", d, raw, &Hints::zlib_header([d[0], d[1]]), opt)
+    wrap("zlib", d, raw, &Hints::zlib_header([d[0], d[1]]), opt, cx)
 }
 
 /// The DEFLATE stream of the gzip member at the start of `d`, with its 8-byte trailer after it.
@@ -55,8 +55,12 @@ pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
     (adler32(&data.0) == sum).then_some(2..end)
 }
 
-/// `d` with aqr-flate on the DEFLATE stream at `raw`.
-fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &Options) -> Option<Formula> {
+/// `d` with aqr-flate on the DEFLATE stream at `raw`, if its data fits in the budget.
+fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &Options, cx: &Cx) -> Option<Formula> {
+    let (_, n) = aqr_zip::zip::deflate_len(&d[raw.clone()])?;
+    if !cx.inflate(n as u64) {
+        return None;
+    }
     let fopt = aqr_flate::Options { threads: opt.threads, ..Default::default() };
     let (data, record, _) = aqr_flate::deconstruct_hinted(&d[raw.clone()], &fopt, hints).ok()?;
     let resources = aqr_flate::formula::resources(fopt.profile).ok()?;

@@ -2,7 +2,7 @@ use std::io::Write;
 
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
-use aqr_decompress::{FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, SNAPPY, X86, decompress};
+use aqr_decompress::{FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, SNAPPY, X86, ZIP, decompress};
 use aqr_formula::aqr;
 
 fn fixture(path: &str) -> Vec<u8> {
@@ -394,4 +394,101 @@ fn archive_many_files() {
     let d = jpeg.repeat(3000);
     let f = roundtrip(&d, &all());
     assert_eq!(f.applies().len(), 3000);
+}
+
+/// A ZIP archive of `entries` (name, data, deflated or stored), as most writers make it.
+fn zip(entries: &[(&str, &[u8], bool)]) -> Vec<u8> {
+    let (mut o, mut cd) = (Vec::new(), Vec::new());
+    for &(name, data, deflate) in entries {
+        let body = if deflate {
+            let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+            e.write_all(data).unwrap();
+            e.finish().unwrap()
+        } else {
+            data.to_vec()
+        };
+        let mut common = Vec::new();
+        common.extend_from_slice(&20u16.to_le_bytes());
+        common.extend_from_slice(&0u16.to_le_bytes());
+        common.extend_from_slice(&(if deflate { 8u16 } else { 0 }).to_le_bytes());
+        common.extend_from_slice(&0x5021_6c4au32.to_le_bytes());
+        common.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+        common.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        common.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        common.extend_from_slice(&(name.len() as u16).to_le_bytes());
+        common.extend_from_slice(&0u16.to_le_bytes());
+        cd.extend_from_slice(b"PK\x01\x02\x14\x03");
+        cd.extend_from_slice(&common);
+        cd.extend_from_slice(&[0; 6]);
+        cd.extend_from_slice(&0o100644u32.wrapping_shl(16).to_le_bytes());
+        cd.extend_from_slice(&(o.len() as u32).to_le_bytes());
+        cd.extend_from_slice(name.as_bytes());
+        o.extend_from_slice(b"PK\x03\x04");
+        o.extend_from_slice(&common);
+        o.extend_from_slice(name.as_bytes());
+        o.extend_from_slice(&body);
+    }
+    let (at, n) = (o.len() as u32, entries.len() as u16);
+    o.extend_from_slice(&cd);
+    o.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+    o.extend_from_slice(&n.to_le_bytes());
+    o.extend_from_slice(&n.to_le_bytes());
+    o.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+    o.extend_from_slice(&at.to_le_bytes());
+    o.extend_from_slice(&[0, 0]);
+    o
+}
+
+#[test]
+fn zip_nested() {
+    let flac = fixture("aqr-flac/tests/data/s16_f5.flac");
+    let jpeg = fixture("aqr-jpeg/tests/data/gradient.jpg");
+    let t = text(50_000);
+    let gz = gzip(&t);
+    let d = zip(&[("a.txt", &t, true), ("b.flac", &flac, true), ("c.jpg", &jpeg, false), ("d.gz", &gz, false)]);
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), [ZIP.name, FLAC.name, JPEG.name, FLATE.name]);
+    // found in data, and in data inflated from a gzip member
+    let f = roundtrip(&[&b"some data before "[..], &d, b" and after"].concat(), &all());
+    assert_eq!(modules(&f)[0], ZIP.name);
+    assert_eq!(modules(&roundtrip(&gzip(&d), &all()))[..2], [FLATE.name, ZIP.name]);
+    // with bytes between its records, still found in data
+    let mut odd = d.clone();
+    let cd = odd.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+    odd.splice(cd..cd, *b"padding");
+    let at = odd.len() - 6;
+    let off = u32::from_le_bytes(odd[at..at + 4].try_into().unwrap()) + 7;
+    odd[at..at + 4].copy_from_slice(&off.to_le_bytes());
+    let f = roundtrip(&[&b"some data before "[..], &odd, b" and after"].concat(), &all());
+    assert_eq!(modules(&f)[0], ZIP.name);
+    // archives written by tools
+    for name in ["py-stream.zip", "infozip.zip", "go.zip", "ditto.zip", "bsdtar.zip"] {
+        let f = roundtrip(&fixture(&format!("aqr-zip/tests/data/{name}")), &all());
+        assert_eq!(modules(&f), [ZIP.name], "{name}");
+    }
+}
+
+/// Archives of archives, each level the same archive 16 times like 42.zip, down to a large run
+/// of zeros: each level inflates one of them (the rest are taken again), and the zeros, past
+/// what may be inflated, stay deflated.
+#[test]
+fn zip_nested_like_42() {
+    let mut level = zip(&[("0.dll", &vec![0; 96 << 20], true)]);
+    for name in ["page", "doc", "chapter", "book", "lib"] {
+        let names: Vec<String> = (0..16).map(|i| format!("{name} {i:x}.zip")).collect();
+        let es: Vec<(&str, &[u8], bool)> = names.iter().map(|n| (&n[..], &level[..], true)).collect();
+        level = zip(&es);
+    }
+    let opt = Options { depth: 10, ..all() };
+    let t = std::time::Instant::now();
+    let f = roundtrip(&level, &opt);
+    assert!(t.elapsed().as_secs() < 60);
+    // five levels of archives, and nothing inflated as much as the zeros
+    assert_eq!(modules(&f), [ZIP.name; 6]);
+    let inflated: usize = f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum();
+    assert!(inflated < 64 << 20, "{inflated}");
+    // with room for it, the zeros are inflated too
+    let f = roundtrip(&level, &Options { expansion: 1 << 20, ..opt });
+    let inflated: usize = f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum();
+    assert!(inflated >= 96 << 20, "{inflated}");
 }

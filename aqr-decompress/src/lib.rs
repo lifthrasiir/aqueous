@@ -27,6 +27,11 @@ pub const LZ4: Module = aqr_lz4::formula::MODULE;
 /// data, or the contents, the layout and the blocks kept of the table.
 pub const SNAPPY: Module = aqr_snappy::formula::MODULE;
 
+/// A ZIP archive rebuilt from the contents of its entries, its DEFLATE bodies by aqr-flate.
+/// Resources: aqr-flate's model data of the records' profile, or none; inputs: the contents,
+/// the records, the layout and the bytes kept.
+pub const ZIP: Module = aqr_zip::formula::MODULE;
+
 // A recompressor as a module of its own (its `formula` module, see its FORMAT.md), rebuilding
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
@@ -39,7 +44,7 @@ pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 11] = [X86, FLATE, LZ4, SNAPPY, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE];
+pub const MODULES: [Module; 12] = [X86, FLATE, LZ4, SNAPPY, ZIP, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE];
 
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
@@ -119,6 +124,8 @@ impl Native {
         } else if m == SNAPPY {
             none(resources)?;
             aqr_snappy::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == ZIP {
+            aqr_zip::formula::decode(params, resources, inputs, len, threads).map_err(msg)
         } else if let Some((_, decode)) = RECONS.iter().find(|r| r.0 == m) {
             decode(params, resources, inputs, len, threads)
         } else {

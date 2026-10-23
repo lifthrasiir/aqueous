@@ -17,4 +17,5 @@ aqr-pdf = { path = "../aqr-pdf" }
 aqr-png = { path = "../aqr-png" }
 aqr-psd = { path = "../aqr-psd" }
 aqr-snappy = { path = "../aqr-snappy" }
+aqr-zip = { path = "../aqr-zip" }
 aqr-sqlite = { path = "../aqr-sqlite" }

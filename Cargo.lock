@@ -64,6 +64,8 @@ dependencies = [
  "aqr-psd",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-zip",
+ "crc32fast",
  "flate2",
 ]
 
@@ -83,6 +85,7 @@ dependencies = [
  "aqr-psd",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-zip",
 ]
 
 [[package]]
@@ -264,6 +267,19 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aqr-zip"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-flate",
+ "aqr-formula",
+ "crc32fast",
+ "flate2",
+ "memchr",
+ "zstd",
 ]
 
 [[package]]
