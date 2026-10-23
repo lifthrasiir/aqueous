@@ -300,9 +300,21 @@ impl Sink for Count {
     }
 }
 
-/// Bytes of the DEFLATE stream at the start of `d` and of its data, without keeping the data.
-/// The stream is parsed within windows that double while it runs past them, so that what
-/// follows it is not copied as trailing bytes but once.
+/// The most bytes of data that a DEFLATE stream holds per byte of it: matches of 258 bytes in
+/// two bits.
+pub const MAX_EXPANSION: u64 = 1032;
+
+/// Bytes of the data of the DEFLATE stream `d`, which ends with `d` or before, without keeping
+/// the data.
+pub fn inflated_len(d: &[u8]) -> Option<usize> {
+    let mut n = Count(0);
+    inflate::parse_into(d, usize::MAX, &mut n).ok()?;
+    Some(n.0)
+}
+
+/// Bytes of the DEFLATE stream at the start of `d` and of its data, without keeping the data,
+/// where it is not known where the stream ends. It is parsed within windows that double while
+/// it runs past them, so that what follows it is not copied as trailing bytes but once.
 pub fn deflate_len(d: &[u8]) -> Option<(usize, usize)> {
     let mut w = 1 << 16;
     loop {

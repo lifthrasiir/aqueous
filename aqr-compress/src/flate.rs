@@ -57,12 +57,18 @@ pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
 
 /// `d` with aqr-flate on the DEFLATE stream at `raw`, if its data fits in the budget.
 fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &Options, cx: &Cx) -> Option<Formula> {
-    let (_, n) = aqr_zip::zip::deflate_len(&d[raw.clone()])?;
-    if !cx.inflate(n as u64) {
+    // measured only where it might not fit
+    let left = cx.inflate_left();
+    if (raw.len() as u64).saturating_mul(aqr_zip::zip::MAX_EXPANSION) > left
+        && aqr_zip::zip::inflated_len(&d[raw.clone()])? as u64 > left
+    {
         return None;
     }
     let fopt = aqr_flate::Options { threads: opt.threads, ..Default::default() };
     let (data, record, _) = aqr_flate::deconstruct_hinted(&d[raw.clone()], &fopt, hints).ok()?;
+    if !cx.inflate(data.len() as u64) {
+        return None;
+    }
     let resources = aqr_flate::formula::resources(fopt.profile).ok()?;
     let res: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
     if record.len() >= raw.len() || !verified(opt, FLATE, &[], &res, &[&data, &record], &d[raw.clone()]) {

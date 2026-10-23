@@ -117,28 +117,34 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             }
         })
         .collect();
-    // DEFLATE bodies by their data's size, measured without keeping it
     let flags = |l: &zip::Local| l.flags(input);
     let candidates: Vec<usize> = (0..locals.len())
         .filter(|&i| made[i].is_none() && locals[i].method(input) == DEFLATED && flags(locals[i]) & ENCRYPTED == 0)
         .collect();
-    let sizes = par_map(&candidates, opt.threads, |&i| zip::deflate_len(&input[locals[i].body.clone()]).map(|s| s.1));
-    // the least expanding first, within the limit
-    let mut order: Vec<(usize, u64)> =
-        candidates.iter().zip(&sizes).filter_map(|(&i, s)| Some((i, (*s)? as u64))).collect();
-    order.sort_by_key(|&(i, n)| (n as u128 * u64::MAX as u128 / (locals[i].body.len() as u128 + 1), i));
-    let mut budget = opt.limit;
-    let chosen: Vec<usize> = order
-        .into_iter()
-        .filter(|&(_, n)| {
-            let fits = n <= budget;
-            if fits {
-                budget -= n;
-            }
-            fits
-        })
-        .map(|(i, _)| i)
-        .collect();
+    let bound =
+        candidates.iter().fold(0u64, |b, &i| b.saturating_add(locals[i].body.len() as u64 * zip::MAX_EXPANSION));
+    let chosen = if bound <= opt.limit {
+        // all fit whatever they hold
+        candidates
+    } else {
+        // by their data's size, measured without keeping it, the least expanding first
+        let sizes = par_map(&candidates, opt.threads, |&i| zip::inflated_len(&input[locals[i].body.clone()]));
+        let mut order: Vec<(usize, u64)> =
+            candidates.iter().zip(&sizes).filter_map(|(&i, s)| Some((i, (*s)? as u64))).collect();
+        order.sort_by_key(|&(i, n)| (n as u128 * u64::MAX as u128 / (locals[i].body.len() as u128 + 1), i));
+        let mut budget = opt.limit;
+        order
+            .into_iter()
+            .filter(|&(_, n)| {
+                let fits = n <= budget;
+                if fits {
+                    budget -= n;
+                }
+                fits
+            })
+            .map(|(i, _)| i)
+            .collect()
+    };
     let per = (opt.threads / chosen.len().max(1)).max(1);
     let fopt =
         aqr_flate::Options { threads: per, profile: opt.profile, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
