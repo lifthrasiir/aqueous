@@ -51,6 +51,10 @@ pub struct Stream {
     pub class: Cow<'static, str>,
     /// What the bytes are to whoever recompresses them in turn, alike for streams of a class.
     pub kind: Kind,
+    /// Whether the bytes are data as they are, a file or what a file holds, rather than a
+    /// representation of the recompressor's own: whoever takes the formula may recompress its
+    /// slices in turn wherever they are (aqr-compress, as it does an application's content).
+    pub content: bool,
     pub data: Vec<u8>,
 }
 
@@ -260,8 +264,17 @@ impl Formula {
 
     /// Adds a stream of `kind`, returning a slice of all of it.
     pub fn push_as(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: Vec<u8>) -> Node {
-        let len = data.len() as u64;
-        self.streams.push(Stream { class: class.into(), kind, data });
+        self.push_stream(Stream { class: class.into(), kind, content: false, data })
+    }
+
+    /// Adds a stream of `kind` that is [`Stream::content`], returning a slice of all of it.
+    pub fn push_content(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: Vec<u8>) -> Node {
+        self.push_stream(Stream { class: class.into(), kind, content: true, data })
+    }
+
+    fn push_stream(&mut self, s: Stream) -> Node {
+        let len = s.data.len() as u64;
+        self.streams.push(s);
         Node::slice(self.streams.len() - 1, 0, len)
     }
 
@@ -405,7 +418,7 @@ impl Formula {
 }
 
 /// Indented, a node a line: `slice #stream [start, +len) CLASS` (and the kind of the stream
-/// unless [`Kind::Unknown`]), `concat LEN`, `pack LEN`, `apply MODULE LEN` with the lengths of its
+/// unless [`Kind::Unknown`] and not [`Stream::content`], with `content` if it is), `concat LEN`, `pack LEN`, `apply MODULE LEN` with the lengths of its
 /// resources and its parameters in hex.
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -413,8 +426,9 @@ impl fmt::Display for Formula {
             write!(f, "{:1$}", "", depth * 2)?;
             match n {
                 &Node::Slice { stream, start, len } => match fm.streams.get(stream) {
-                    Some(s) if s.kind != Kind::Unknown => {
-                        writeln!(f, "slice #{stream} [{start}, +{len}) {} ({})", s.class, s.kind)
+                    Some(s) if s.kind != Kind::Unknown || s.content => {
+                        let content = if s.content { ", content" } else { "" };
+                        writeln!(f, "slice #{stream} [{start}, +{len}) {} ({}{content})", s.class, s.kind)
                     }
                     s => writeln!(f, "slice #{stream} [{start}, +{len}) {}", s.map_or("?", |s| &s.class)),
                 },
@@ -518,6 +532,8 @@ mod tests {
         );
         f.streams[1].kind = Kind::Format("zlib");
         assert!(f.to_string().ends_with("slice #1 [0, +3) b (format=zlib)\n"), "{f}");
+        f.streams[1].content = true;
+        assert!(f.to_string().ends_with("slice #1 [0, +3) b (format=zlib, content)\n"), "{f}");
     }
 
     #[test]

@@ -286,6 +286,16 @@ fn pe_sections() {
     assert!(classes.iter().any(|&(c, n)| c == "x86/CALL_IDX" && n > 0), "{classes:?}");
 }
 
+/// The rest of a PE image coded is scanned: a zlib stream in it is found.
+#[test]
+fn pe_rest_scanned() {
+    let (mut d, _) = pe();
+    d.extend_from_slice(&zlib(&text(20_000), 6));
+    d.extend_from_slice(&text(500));
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+    assert_eq!(modules(&f), [X86.name, FLATE.name], "{f}");
+}
+
 const CPU_TYPE_X86_64: u32 = 0x0100_0007;
 const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 

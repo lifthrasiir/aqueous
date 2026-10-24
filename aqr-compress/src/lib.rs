@@ -4,7 +4,7 @@
 //!
 //! - PE images, and Mach-O images (thin or universal): aqr-exe's x86 disfilter or ARM64
 //!   filter applied to each executable section, over its streams; the rest of the file is
-//!   sliced in between.
+//!   sliced in between, a content stream (below).
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
 //!   record).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
@@ -19,7 +19,8 @@
 //! ([`Options::contents`], by default that of a DEFLATE stream, of gzip, zlib or PDF, and
 //! that of an LZ4 stream, of the blocks of a LevelDB table or of the entries of a ZIP archive)
 //! is recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
-//! of the data.
+//! of the data. So are the slices of a stream that a recompressor gives as data as it is
+//! ([`Stream::content`]: the rest of an executable, around its code), wherever they are.
 //!
 //! Data is taken as one file by the format it starts like ([`Nest::Exact`]), or scanned for
 //! files starting anywhere in it ([`Nest::Scan`], the default): each is cut to its end
@@ -60,7 +61,7 @@
 //! instead where that does not give it back. [`recompress`] does not verify. The applications
 //! of modules are evaluated beforehand, while the file is still recompressed, and their outputs
 //! taken by the decoding (`verify`).
-//! [`Native`](aqr_decompress::Native) evaluates the formulas.
+//! [`Native`] evaluates the formulas.
 //!
 //! ```no_run
 //! # let file: Vec<u8> = vec![];
@@ -618,9 +619,11 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, opt: &Options) {
 }
 
 /// The contents below node `n` of `f`, in order: each slice, and its formula where it has any
-/// application.
+/// application. A content is an input of an application ([`Options::contents`]) or a slice of a
+/// stream that is [`Stream::content`], scanned.
 fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut Vec<(Node, Option<Made>)>) {
     match n {
+        &Node::Slice { stream, .. } if is_content(f, stream) => content_slices(n, Nest::Scan, f, opt, depth, cx, out),
         Node::Slice { .. } => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, cx, out)),
         Node::Apply(a) => {
@@ -669,6 +672,7 @@ fn place(
     children: &mut impl Iterator<Item = Option<Made>>,
 ) {
     match n {
+        &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, opt, children),
         Node::Slice { .. } => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
         Node::Apply(a) => {
@@ -707,6 +711,11 @@ fn place_slices(
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, opt, children)),
         Node::Apply(_) => place(n, f, slices, opt, children),
     }
+}
+
+/// Whether `stream` of `f` is [`Stream::content`].
+fn is_content(f: &Formula, stream: usize) -> bool {
+    f.streams.get(stream).is_some_and(|s| s.content)
 }
 
 /// The content that input `i` of `m` is, if any.
@@ -780,6 +789,32 @@ mod tests {
         assert_eq!(decode(&c, Default::default()), (Ok(d.clone()), 0));
     }
 
+    /// A slice of a stream that is content is scanned wherever it is, as an input of an
+    /// application that is not a content too; one of another stream is not.
+    #[test]
+    fn content_streams() {
+        let text: Vec<u8> = (0..20000).flat_map(|i| format!("line {i} of the text\n").into_bytes()).collect();
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let d = [&b"header "[..], &z.finish().unwrap()].concat();
+        let opt = Options { smaller: false, ..Options::default() };
+        let cx = Cx::new(&d, &opt);
+        for content in [false, true] {
+            let mut f = Formula::default();
+            let data =
+                if content { f.push_content("data", Kind::Unknown, d.clone()) } else { f.push("data", d.clone()) };
+            f.root = Node::apply(aqr_decompress::X86, vec![], vec![data], d.len() as u64);
+            let children = nested(&f, &opt, 0, &cx);
+            assert_eq!(children.is_some(), content);
+            if let Some(mut children) = children {
+                assert_eq!(children.len(), 1);
+                let child = children.pop().unwrap().unwrap().cut(&d);
+                assert_eq!(child.applies().iter().map(|a| a.module).collect::<Vec<_>>(), [FLATE]);
+                assert!(child.eval(&Native::default()).unwrap() == d);
+            }
+        }
+    }
+
     /// The data between the files a scan found is cut out of the stream of the data in place
     /// where the stream is all and only the content, else copied out of it.
     #[test]
@@ -833,7 +868,12 @@ mod tests {
         assert_eq!(finish(wrong.clone(), &d, &opt, &cx, Default::default(), false).0, raw);
         // a module that fails
         let fails = Formula {
-            streams: vec![aqr_formula::Stream { class: "raw".into(), kind: Kind::Unknown, data: vec![1, 2, 3] }],
+            streams: vec![aqr_formula::Stream {
+                class: "raw".into(),
+                kind: Kind::Unknown,
+                content: false,
+                data: vec![1, 2, 3],
+            }],
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
         };
         assert_eq!(finish(fails, &d, &opt, &cx, Default::default(), false).0, raw);

@@ -85,7 +85,7 @@ reservoir is rebuilt.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| PE, Mach-O (x86, x86-64, ARM64, CIL) | aqr-exe | 259 files, 391 MB | 0.326 | 0.381 | 30 | 416 | 9.3× (24 MB + 7.3×) | samples from `Program Files` and `System32` of a Windows machine; .NET metadata and IL (CIL) too: 0.306 → 0.267 for the 84 assemblies of IL alone; 41 files not coded (29 of them .NET, mostly satellite assemblies of resources). 11 large binaries (1529 MB): 0.306 at 58 and 347 MB/s, 6.8×. The disfilter alone: 292 and 336 MB/s, −20% under zstd -9. Mach-O, thin or universal, and ARM64 code (in Mach-O and PE): VS Code's 34 universal binaries (493 MB) −16.7% against the files as they are; the ARM64 filter alone −17.6% under zstd -9 (xz's BCJ −12.1%). No ELF yet |
+| PE, Mach-O (x86, x86-64, ARM64, CIL) | aqr-exe | 259 files, 391 MB | 0.326 | 0.381 | 28 | 414 | 9.3× (24 MB + 7.3×) | samples from `Program Files` and `System32` of a Windows machine; .NET metadata and IL (CIL) too: 0.306 → 0.267 for the 84 assemblies of IL alone; the rest of an image scanned (PNG resources); 39 files not coded (27 of them .NET, mostly satellite assemblies of resources). 11 large binaries (1529 MB): 0.306 at 58 and 348 MB/s, 6.8×. The disfilter alone: 292 and 336 MB/s, −20% under zstd -9. Mach-O, thin or universal, and ARM64 code (in Mach-O and PE): VS Code's 34 universal binaries (493 MB) −16.7% against the files as they are; the ARM64 filter alone −17.6% under zstd -9 (xz's BCJ −12.1%). No ELF yet |
 
 ### In progress or planned
 

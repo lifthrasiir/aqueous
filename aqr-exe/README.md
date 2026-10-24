@@ -68,23 +68,25 @@ hashes and original paths), of those on a Windows 11 machine.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress | memory / input |
 |---|---|---|---|---|---|---|---|
-| sample | 259 | 391.3 | **0.326** | 0.381 | **30.2 MB/s** | **416 MB/s** | 9.3× (median of 6 files of 8 MB or more); 24 MB + 7.3× |
-| sample, coded | 218 | 365.6 | 0.328 | 0.387 | 30.2 MB/s | 395 MB/s | |
-| sample, .NET coded | 80 | 90.1 | 0.320 | 0.380 | 27.7 MB/s | 459 MB/s | |
-| sample, not coded | 41 | 25.7 | 0.296 | 0.298 | 29.6 MB/s | 1653 MB/s | |
-| large | 11 | 1528.6 | **0.306** | 0.383 | **57.7 MB/s** | **347 MB/s** | 6.8× (5.7–9.0×) |
+| sample | 259 | 391.3 | **0.326** | 0.381 | **28.4 MB/s** | **414 MB/s** | 9.3× (median of 6 files of 8 MB or more); 24 MB + 7.3× |
+| sample, coded | 220 | 366.3 | 0.328 | 0.387 | 28.3 MB/s | 392 MB/s | |
+| sample, .NET coded | 82 | 90.7 | 0.320 | 0.380 | 28.4 MB/s | 465 MB/s | |
+| sample, not coded | 39 | 25.1 | 0.292 | 0.298 | 30.2 MB/s | 2013 MB/s | |
+| large | 11 | 1528.6 | **0.306** | 0.383 | **58.2 MB/s** | **348 MB/s** | 6.8× (5.7–9.0×) |
 
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
-archiving no smaller: 29 .NET assemblies (24 satellite assemblies of resources alone and
-two with PNG resources coded; `System.Text.Encoding.CodePages.dll`, mostly tables of code
+archiving no smaller: 27 .NET assemblies (24 satellite assemblies of resources alone;
+`System.Text.Encoding.CodePages.dll`, mostly tables of code
 pages; `Microsoft.SqlServer.Types.dll`, whose IL is in another section than its metadata; a
 Silverlight NGen image), and 12 native files: resource-only DLLs, three DirectX SDK samples
 and an ARM DLL among them. Of the .NET assemblies, those of IL alone come to 0.267 from 0.306
 (84 files, 66.1 MB; zstd -3 0.316), and the ReadyToRun ones to 0.374 from 0.432 (24 files,
 38.4 MB; zstd -3 0.435): 0.396 with their native code alone through the x86 disfilter, the
-rest through `exe-recons/cil`. One of the ReadyToRun images loses its PNG resources (the rest
-of a PE image is not scanned once coded). The ARM64 DLL of the sample is coded by
-`exe-recons/arm64` (0.346).
+rest through `exe-recons/cil`. The rest of an image coded, and what `exe-recons/cil` keeps as
+it is, are scanned in turn: 10 PNG files among the resources of 9 files, and an installer
+within `oalinst.exe`, are coded (−74 KB in all), at the cost of about 9% of the speed of
+compression, most of it spent on zlib and PNG data found that does not pay. The ARM64 DLL
+of the sample is coded by `exe-recons/arm64` (0.346).
 
 The archives are those of the first measurement, on an AMD Ryzen 7 9700X under Windows 11 at
 `aa7a327`, byte for byte, but for the ARM64 DLL and the .NET assemblies (kept raw then) and

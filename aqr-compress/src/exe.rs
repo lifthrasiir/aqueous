@@ -2,14 +2,16 @@
 //! filter, the rest of the file sliced in between (§4.2, example 1). PE images, and Mach-O
 //! images, thin or in a universal file (whose images of other architectures are kept with
 //! the rest). Of a .NET image, the section holding the metadata goes through the CIL filter,
-//! the native code of a ReadyToRun image within what that keeps as it is.
+//! the native code of a ReadyToRun image within what that keeps as it is. The rest of the file,
+//! and what the CIL filter keeps as it is, are contents (`Stream::content`): scanned in turn,
+//! e.g. for the images among the resources.
 
 use std::io::Cursor;
 
 use aqr_decompress::{ARM64, CIL, X86};
 use aqr_exe::arch::{arm64, cil, x86};
 use aqr_exe::format::{macho, pe::locate_code};
-use aqr_formula::{Formula, Node};
+use aqr_formula::{Formula, Kind, Node};
 
 /// The code a section holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +74,7 @@ fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize,
     sections.sort_by_key(|s| (s.1, !matches!(s.3, Arch::Cil(_))));
 
     let mut f = Formula::default();
-    f.push(class, Vec::new());
+    f.push_content(class, Kind::Unknown, Vec::new());
     let (mut rest, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
     for (i, &(va, off, size, arch)) in sections.iter().enumerate() {
         if off < at {
@@ -170,6 +172,7 @@ fn cil_apply(
         kept.extend_from_slice(&section[at..r.end]);
     }
     f.streams[rest_stream].data = kept;
+    f.streams[rest_stream].content = true;
     inputs[0] = Node::concat(parts);
     let params = [rva.to_le_bytes(), (meta as u32).to_le_bytes()].concat();
     Some(Node::apply(CIL, params, inputs, section.len() as u64))

@@ -1571,7 +1571,7 @@ mod tests {
         }
         // Streams without slices have no blocks.
         let mut f = sample();
-        f.streams.insert(0, Stream { class: "unused".into(), kind: Kind::Unknown, data: vec![1; 100] });
+        f.streams.insert(0, Stream { class: "unused".into(), kind: Kind::Unknown, content: false, data: vec![1; 100] });
         f.root.slices_mut(&mut |s, _, _| *s += 1);
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
@@ -1778,7 +1778,10 @@ mod tests {
         f.push("b", Vec::new());
         f.root = Node::concat([Node::slice(1, 0, d.len() as u64), Node::slice(0, 0, 4)]);
         let whole = Formula {
-            streams: vec![f.streams[0].clone(), Stream { class: "b".into(), kind: Kind::Unknown, data: d.to_vec() }],
+            streams: vec![
+                f.streams[0].clone(),
+                Stream { class: "b".into(), kind: Kind::Unknown, content: false, data: d.to_vec() },
+            ],
             ..f.clone()
         };
         let pieces = [&d[..100], &d[100..2 << 20], &d[2 << 20..]];
