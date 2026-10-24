@@ -9,6 +9,13 @@ memchr = "2"
 rayon = "1.12.0"
 aqr-formula = { path = "../aqr-formula" }
 
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
 [[bin]]
-name = "jrc"
-path = "src/main.rs"
+name = "aqr-jpeg-decbench"
+path = "src/bin/decbench.rs"
+
+[[bin]]
+name = "aqr-jpeg-huffbench"
+path = "src/bin/huffbench.rs"

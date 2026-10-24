@@ -6,7 +6,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  mp3r bench [-n ITERS] [-t THREADS] [-v] FILE...\n  mp3r info FILE...\n  mp3r fuzz [-n N] [-s SEED] [-t THREADS] FILE...\n(-t: default 1)"
+        "usage:\n  aqr-mp3 bench [-n ITERS] [-t THREADS] [-v] FILE...\n  aqr-mp3 info FILE...\n  aqr-mp3 fuzz [-n N] [-s SEED] [-t THREADS] FILE...\n(-t: default 1)"
     );
     std::process::exit(2)
 }

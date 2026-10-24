@@ -1,10 +1,10 @@
-# aqr-flac (`flr`)
+# aqr-flac
 
 A lossless FLAC recompressor: FLAC files are coded smaller and restored bit for bit, as the
 module `flac-recons` of entry formulas (`aqr_flac::formula`, archived by aqr-compress).
 The frames are parsed exactly here; their residuals go through aqr-raw's audio model
 ([`aqr_raw::audio`](../aqr-raw)), which also codes WAV, AIFF / AIFC and headerless PCM
-(aqr-raw's `pcm-recons`; `flr` benches those too).
+(aqr-raw's `pcm-recons`; `aqr-flac` benches those too).
 Speed comes first: the target is 100 MB/s of input, single-threaded on an Apple M4, in both
 directions. Compression ratio is pursued only where it does not cost that.
 
@@ -43,10 +43,10 @@ shape is nearly universal once scaled; 101 contexts × 72 tokens).
 ```sh
 cargo build --release
 
-flr bench [-r FMT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...  # formula and .aqr round trip check, size, speed, stream sizes (-t default 1); WAV / AIFF through aqr-raw
-flr info FILE|DIR...
-flr fuzz [-r FMT] [-t THREADS] [-n N] [-s SEED] FILE|DIR...  # mutated inputs must round-trip, the same with threads
-flr-train [-a] OUT FILE|DIR...       # trains the built-in tables (aqr-raw's model/audio.bin), on FLAC, WAV and AIFF
+aqr-flac bench [-r FMT] [-t THREADS] [-n ITERS] [-v] FILE|DIR...  # formula and .aqr round trip check, size, speed, stream sizes (-t default 1); WAV / AIFF through aqr-raw
+aqr-flac info FILE|DIR...
+aqr-flac fuzz [-r FMT] [-t THREADS] [-n N] [-s SEED] FILE|DIR...  # mutated inputs must round-trip, the same with threads
+aqr-flac-train [-a] OUT FILE|DIR...       # trains the built-in tables (aqr-raw's model/audio.bin), on FLAC, WAV and AIFF
 ```
 
 `-r FMT` takes the input as headerless PCM (aqr-raw): sign, bits, endianness, channels
@@ -75,7 +75,7 @@ assert_eq!(out, input);
 | `src/bin/train.rs` | Training of the built-in tables |
 | `tests/threads.rs` | The same formula for 1, 2, 3 and 8 threads, threaded round trips (also on inputs of many batches) |
 | `tests/formula.rs`, `tests/data` | Round trips of small synthetic files (8–32 bit, 1–6 channels, several encoders, lax streams, silence, ID3 tags, junk, cut files), corrupted inputs of the module |
-| `examples/` | Benchmarks and analysis: `hot`, `dhot` (profiling loops), `lmsbench`, `entbench` (cycles per residual of each pass), `rt` (parse / write round trip), `breakdown` (where FLAC's bits go), `exp2` (model experiments with ideal code lengths) |
+| `examples/` | Benchmarks and analysis (examples `aqr-flac-NAME`): `hot`, `dhot` (profiling loops), `lmsbench`, `entbench` (cycles per residual of each pass), `rt` (parse / write round trip), `breakdown` (where FLAC's bits go), `exp2` (model experiments with ideal code lengths) |
 | `tools/` | `gen_testdata.sh` (also aqr-raw's WAV and AIFF test files), `gen_synth.sh` (synthetic corpus from MP3s), `profile.py` (samply + atos) |
 
 ## Design
@@ -153,8 +153,8 @@ The format is specified in [FORMAT.md](FORMAT.md).
 
 ## Verification
 
-- `flr bench`: every file's formula evaluates to the input, and so does its `.aqr` archive.
-- `flr fuzz`: bit flips, truncation, deletion and insertion; the formula, if there is
+- `aqr-flac bench`: every file's formula evaluates to the input, and so does its `.aqr` archive.
+- `aqr-flac fuzz`: bit flips, truncation, deletion and insertion; the formula, if there is
   one, must evaluate back without panics, the same with threads (1170 mutated inputs of the test data and corpus files, also as raw PCM, when that was aqr-flac's).
 - `cargo test --release`: `tests/formula.rs` and `tests/threads.rs` (and aqr-raw's own tests for the model and PCM).
 

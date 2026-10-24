@@ -14,3 +14,14 @@ crc32fast = "1.5"
 
 [dev-dependencies]
 flate-zoo = { path = "../flate-zoo" }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[bin]]
+name = "aqr-png-probe"
+path = "src/bin/probe.rs"
+
+[[bin]]
+name = "aqr-png-ransbench"
+path = "src/bin/ransbench.rs"

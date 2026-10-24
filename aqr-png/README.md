@@ -8,7 +8,7 @@ specified in [FORMAT.md](FORMAT.md).
 
 ```sh
 cargo build --release
-pngr bench [-t N] [-n ITERS] [-v] [-c | -d] FILE...   # round trip check through an archive, ratio, throughput (default 1 thread)
+aqr-png bench [-t N] [-n ITERS] [-v] [-c | -d] FILE...   # round trip check through an archive, ratio, throughput (default 1 thread)
 ```
 
 ```rust
@@ -112,7 +112,7 @@ on the photo sets).
 
 ### Speed
 
-Measured with `pngr bench`, `samply`, and retired instruction counts
+Measured with `aqr-png bench`, `samply`, and retired instruction counts
 (`/usr/bin/time -l`). The decoder runs at about 6 instructions per cycle, so what helped
 was doing less:
 
@@ -180,7 +180,7 @@ threads overlap what is independent around it:
   of rows on several threads, after the window's serial unfilter pass, and the symbol
   histograms counted by chunks and summed.
 - Decompressing writes the DEFLATE streams on a thread of their own, block by block as the
-  model decodes them (a few blocks in flight): `pngr bench -t 4` decompresses the sets
+  model decodes them (a few blocks in flight): `aqr-png bench -t 4` decompresses the sets
   above at 104 MB/s, against 88 MB/s on one thread.
 
 Files under 64 KB are handled on the calling thread. A panic in a worker is a panic of the
@@ -208,7 +208,7 @@ cargo test --release
   inputs, unfiltering in pieces against the reference.
 
 `PNGR_WINDOW=N` moves the windows on every `N` bytes, whatever the image's size, so that
-the tests (and `pngr bench` on the corpus) run through them on small images too.
+the tests (and `aqr-png bench` on the corpus) run through them on small images too.
 
 ## Layout
 
@@ -220,7 +220,7 @@ the tests (and `pngr bench` on the corpus) run through them on small images too.
 | `src/rans.rs` | Static rANS: tables, encoder, decoder, bit I/O |
 | `src/codec.rs` | Skeleton, image records, rebuilding the file |
 | `src/formula.rs` | The formula module |
-| `src/bin/pngr.rs` | Benchmark tool |
+| `src/main.rs` | Benchmark tool |
 | `src/bin/probe.rs`, `src/bin/ransbench.rs` | Research tools: token statistics, rANS speed |
 | `bench/` | Comparison with other tools (`bench/fetch.sh` builds them into the workspace's `third_party/`) |
 

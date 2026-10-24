@@ -5,6 +5,6 @@ set -e
 cd "$(dirname "$0")/.."
 F=corpus/fma/fma_small
 cargo build --release -q
-.../target/release/mp3r-train -a model/builtin.bin $(printf "$F/%03d " $(seq 0 19)) 2>&1
+../target/release/aqr-mp3-train -a model/builtin.bin $(printf "$F/%03d " $(seq 0 19)) 2>&1
 cargo build --release -q
-../target/release/mp3r bench $F/100 $F/101 $F/102 $F/103 $F/104 | head -1
+../target/release/aqr-mp3 bench $F/100 $F/101 $F/102 $F/103 $F/104 | head -1

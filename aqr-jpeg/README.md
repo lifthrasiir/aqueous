@@ -1,4 +1,4 @@
-# aqr-jpeg (`jrc`)
+# aqr-jpeg
 
 A lossless JPEG recompressor: files are restored bit-exactly (same family as Lepton and
 brunsli). Speed comes first. The goal is at least 100 MB/s single-threaded for both
@@ -38,19 +38,19 @@ coefficients whole: a 1.4 MB one of that size takes 259 MB.
 ```sh
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 
-jrc bench [-n iters] file...         # roundtrip check (formula, .aqr archive) + ratio / throughput
-jrc info file...                     # parse and decode, per-scan information
-jrc pscan [-n iters] file...         # per-scan decode / encode times of progressive files
-jrc fuzz [-n N] [-s seed] file...    # mutated inputs: roundtrips must stay exact, no panics
-jrc mutenc [-n N] [-s seed] file...  # roundtrip of valid non-canonical re-encodings
+aqr-jpeg bench [-n iters] file...         # roundtrip check (formula, .aqr archive) + ratio / throughput
+aqr-jpeg info file...                     # parse and decode, per-scan information
+aqr-jpeg pscan [-n iters] file...         # per-scan decode / encode times of progressive files
+aqr-jpeg fuzz [-n N] [-s seed] file...    # mutated inputs: roundtrips must stay exact, no panics
+aqr-jpeg mutenc [-n N] [-s seed] file...  # roundtrip of valid non-canonical re-encodings
 ```
 
 Every command takes `-j threads` (default: all cores).
 
 Auxiliary binaries:
-- `decbench`: loops only the model decoder, the model encoder (`enc`) or the Huffman
+- `aqr-jpeg-decbench`: loops only the model decoder, the model encoder (`enc`) or the Huffman
   re-encoder (`huff`).
-- `huffbench`: Huffman decoding throughput, and a coefficient comparison against a
+- `aqr-jpeg-huffbench`: Huffman decoding throughput, and a coefficient comparison against a
   `tools/coefdump.c` (libjpeg) dump.
 
 ### Debug / test environment variables
@@ -231,12 +231,12 @@ The format is specified in [FORMAT.md](FORMAT.md).
 
 ## Verification
 
-- `jrc bench`: every file is roundtripped through its formula and an `.aqr` archive, and compared
+- `aqr-jpeg bench`: every file is roundtripped through its formula and an `.aqr` archive, and compared
   byte for byte.
-- `jrc fuzz`: inputs mutated by bit flips, truncation, deletion, insertion and marker-byte
+- `aqr-jpeg fuzz`: inputs mutated by bit flips, truncation, deletion, insertion and marker-byte
   injection must roundtrip exactly without panics. Corrupted archives are also decoded
   and must not panic.
-- `jrc mutenc`: variants that re-encode the same coefficients with valid non-canonical choices
+- `aqr-jpeg mutenc`: variants that re-encode the same coefficients with valid non-canonical choices
   (ZRL placement, padding, fill, trailing RSTs, EOBRUN splits, ...) must roundtrip exactly.
 - With both oracles (`JRC_VERIFY_PROGRESSIVE`, `JRC_VERIFY_PARALLEL`) enabled: 6000 fuzz
   inputs, 600 mutenc rounds and a 208 MB corpus, all passing.

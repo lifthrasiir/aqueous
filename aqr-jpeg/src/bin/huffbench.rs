@@ -1,5 +1,5 @@
 //! Huffman-decode throughput benchmark and correctness check against a coefdump dump.
-//! usage: huffbench file.jpg [coef.bin] [iters]
+//! usage: aqr-jpeg-huffbench file.jpg [coef.bin] [iters]
 
 use aqr_jpeg::jpeg::{self, Clean, ZIGZAG};
 use std::time::Instant;

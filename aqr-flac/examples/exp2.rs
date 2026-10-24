@@ -1,5 +1,5 @@
 //! Cascade predictors on FLAC residuals: ideal adaptive code lengths of the final error.
-//! usage: exp2 CONFIG FILE...   CONFIG e.g. "ss16:8,ss16:4" or "nl32:x" (see `Stage`).
+//! usage: aqr-flac-exp2 CONFIG FILE...   CONFIG e.g. "ss16:8,ss16:4" or "nl32:x" (see `Stage`).
 #![allow(clippy::needless_range_loop)]
 use aqr_flac::{bits, flac};
 

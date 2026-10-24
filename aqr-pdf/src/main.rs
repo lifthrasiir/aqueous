@@ -36,7 +36,7 @@ fn clock(threads: usize) -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: pdfr bench [-t THREADS] [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...\n       pdfr fuzz [-n ROUNDS] [-r SEED] FILE..."
+        "usage: aqr-pdf bench [-t THREADS] [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...\n       aqr-pdf fuzz [-n ROUNDS] [-r SEED] FILE..."
     );
     std::process::exit(2);
 }

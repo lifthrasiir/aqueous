@@ -3,7 +3,7 @@
 //! BCJ filter (BL and ADRP made absolute), and after the filter (each stream on its own),
 //! file by file and all together.
 //!
-//! usage: bench-arm64 [-l LEVEL] FILE...
+//! usage: aqr-exe-bench-arm64 [-l LEVEL] FILE...
 
 use std::time::Instant;
 

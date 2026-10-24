@@ -17,6 +17,9 @@ crc32fast = "1.5"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 zstd = "0.13"
 
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
 [[example]]
-name = "check-zip"
+name = "aqr-zip-check"
 path = "examples/check.rs"

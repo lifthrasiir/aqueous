@@ -14,9 +14,24 @@ crc32fast = "1.5"
 zstd = { version = "0.13", features = ["zstdmt"] }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
-[[bin]]
-name = "gitr"
-path = "src/bin/gitr.rs"
-
 [dev-dependencies]
 flate-zoo = { path = "../flate-zoo" }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-git-calib"
+path = "examples/calib.rs"
+
+[[example]]
+name = "aqr-git-dump"
+path = "examples/dump.rs"
+
+[[example]]
+name = "aqr-git-emucost"
+path = "examples/emucost.rs"
+
+[[example]]
+name = "aqr-git-prof"
+path = "examples/prof.rs"

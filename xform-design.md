@@ -40,7 +40,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
   - 입력이 파일 하나가 아니라 **디렉토리**이고, 출력도 파일 여러 개이다. 모든 파일이 고정된 스트림 10개를 함께 나눠 쓴다.
   - 파일 사이 참조가 핵심이다. 작업 트리 파일은 저장소의 blob을 가리키고, .idx와 .rev는 팩에서 유도되며, 같은 내용의 파일은 SAME으로 가리킨다. 객체 ID는 입력 전체에 걸친 표(`sha` 스트림) 하나에 대한 참조가 된다.
   - 팩과 loose 객체의 zlib 층은 aqr-flate의 zlib 1.3.1 포트로 다시 만든다. 다시 만들 스트림은 시간 예산 안에서 비용 모델로 고른다(aqr-pdf와 같은 방식).
-  - 어떤 파일이든 혼자 복원할 수 있다(`Archive::get`, `gitr x`).
+  - 어떤 파일이든 혼자 복원할 수 있다(`Archive::get`, `aqr-git x`).
 - 엔트리 식 쪽 크레이트.
   - `aqr-formula/`: 재압축기가 내놓는 엔트리 식(§4.2)의 데이터 모델. 아직 배치되지 않은 스트림(클래스 이름 포함) 위의 `slice`/`concat`/`apply`와, 모듈을 네이티브로 돌리는 엄격한 참조 평가기가 있다. `ref`와 `apply`의 자원 선언은 아카이브 쪽 일이라 없다. 리소스는 아직 쓰는 모듈이 없어서 없다. `aqr`는 식 하나를 메타데이터 블록 없는 명세의 아카이브로 담고 푼다. 모듈마다 module 블록, formula 블록, 슬라이스되는 스트림마다 non-leaf 블록 하나를 둔다. module 블록은 아직 Wasm이 아니다. custom section(`aqueous-native`)에 `이름@버전`만 적은 Wasm 모듈이고, 디코드할 때는 그 이름의 `NativeModule`이 대신 돈다. 네이티브 모듈은 전체형으로 다루고, 메모리 한도는 최대값으로 선언한다(§5.3).
   - `aqr-compress/`: 압축 쪽. 매직 바이트로 재압축기를 고르고 결과를 엔트리 식으로 돌려준다. PE는 코드 섹션마다 x86 disfilter를 `apply`해 44개 스트림을 입력으로 두고, gzip과 zlib은 컨테이너를 `slice`로 두고 aqr-flate를, mozlz4와 LZ4 프레임은 aqr-lz4를, LevelDB 테이블은 aqr-snappy를, ZIP 아카이브는 aqr-zip을 `apply`한다. 나머지 포맷은 각 재압축기의 `formula` 모듈을 쓴다. 컨테이너의 스트림이 그대로 입력 슬롯이 되고, 매직·버전·체크섬·길이·내부 zstd는 빠진다(부록 A). pdf·psd·jpeg가 품은 파일(DEFLATE 스트림, PNG, JPEG, 임베디드 PSD)은 그 재압축기 모듈의 `apply`로 식에 들어간다. 어느 재압축기가 내놓은 식이든 `apply`가 그대로 받는 내용물 입력(지금은 aqr-flate, aqr-lz4, aqr-snappy, aqr-zip의 평문, 곧 gzip·zlib·pdf의 DEFLATE 스트림, LZ4 스트림, LevelDB 블록과 ZIP 엔트리의 내용)은 다시 재귀 처리해(합성, §4.5), 모듈이 적용된 식이 나오면 그 자리에 넣고 어느 `slice`도 가리키지 않게 된 바이트는 버린다. 기본값으로 모듈을 돌려 왕복 검증하고(§6), 실패하거나 줄지 않으면 원본 `slice`로 남긴다. 식은 aqr-compress가 aqr-decompress의 모듈로 아카이브에 담는다.

@@ -1,4 +1,4 @@
-# aqr-mp3 (`mp3r`)
+# aqr-mp3
 
 A lossless MP3 recompressor: MPEG audio Layer III files (MPEG-1, MPEG-2 and MPEG-2.5,
 including free format) are stored smaller and restored bit for bit, in the family of
@@ -40,10 +40,10 @@ PACKMP3 WORKDIR DIR...`.
 ```sh
 cargo build --release
 
-mp3r bench [-n ITERS] [-t N] [-v] FILE|DIR... # round trip check, .aqr ratio, throughput, per-stream sizes
-mp3r info FILE|DIR...                # frames, junk, tail / raw / gap bits, symbol counts
-mp3r fuzz [-n N] [-s SEED] [-t N] FILE|DIR... # mutated inputs (flips, cuts, deletions, insertions)
-cargo run --release --example memprobe FILE... # peak heap of encoding and decoding (LOG=MB: allocations)
+aqr-mp3 bench [-n ITERS] [-t N] [-v] FILE|DIR... # round trip check, .aqr ratio, throughput, per-stream sizes
+aqr-mp3 info FILE|DIR...                # frames, junk, tail / raw / gap bits, symbol counts
+aqr-mp3 fuzz [-n N] [-s SEED] [-t N] FILE|DIR... # mutated inputs (flips, cuts, deletions, insertions)
+cargo run --release --example aqr-mp3-memprobe FILE... # peak heap of encoding and decoding (LOG=MB: allocations)
 train [-a] [-k K] OUT FILE|DIR...    # trains the built-in tables, K of them (500), on every file with -a, else every second
 ```
 
@@ -80,7 +80,7 @@ any main data that cannot be reproduced.
 | `tests/regress.rs`, `tests/data` | Round trips of small LAME encodings (CBR, VBR, mono, CRC, MPEG-2, MPEG-2.5 8 kHz, free format, tags), with junk, cuts, concatenation |
 | `tests/formula.rs` | The formula of the same files, large repetitions of them and non-MP3 data; 1, 2 and 8 threads: identical formulas, round trips, the same errors for corrupted slots |
 | `tests/memory.rs` | Peak heap of a 16 MB file, encoding and decoding, within a few times the file over the tables |
-| `examples/` | Benchmarks and analysis helpers (`hot`, `phases`, `perfile`, `ctxdist`, `init`), and `memprobe` (on `aqr_common::mem`) |
+| `examples/` | Benchmarks and analysis helpers (examples `aqr-mp3-NAME`: `hot`, `phases`, `perfile`, `ctxdist`, `init`), and `memprobe` (on `aqr_common::mem`) |
 | `tools/` | `gen_huff.py`, `profile.py` (samply + atos self/inclusive time by line), `compare.sh`, `experiment.sh` |
 
 ## Design
@@ -178,8 +178,8 @@ the calling thread, in order. Around them (`src/par.rs`):
 
 ## Verification
 
-- `mp3r bench`: every file round-trips through its `.aqr` archive and through the coded path.
-- `mp3r fuzz`: bit flips, truncation, deletion and insertion; both paths must round-trip
+- `aqr-mp3 bench`: every file round-trips through its `.aqr` archive and through the coded path.
+- `aqr-mp3 fuzz`: bit flips, truncation, deletion and insertion; both paths must round-trip
   without panics (with `-t`, also through the threads, with the one-thread formula).
 - `cargo test --release`: unit tests (bit I/O, Huffman tables and a random round trip for
   every table, rANS, reciprocals, range coder), `tests/regress.rs` and `tests/formula.rs`.

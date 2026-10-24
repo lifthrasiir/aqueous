@@ -9,7 +9,7 @@ and the design is argued in `xform-design.md`.
 - 2026-10-23, Apple M4, one thread (`-t 1`), at commit `2abe944`.
 - Through `aqr-show` (`aqr/src/bin/show.rs`): each file is archived (recompression, archive
   coding and the round-trip check) at level `mid`, then extracted.
-  - aqr-obj is not wired into aqr-compress yet, and was measured with `objr bench`.
+  - aqr-obj is not wired into aqr-compress yet, and was measured with `aqr-obj bench`.
   - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
 - aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above),
   and aqr-raw's images measured then.
@@ -68,7 +68,7 @@ reservoir is rebuilt.
 |---|---|---|---|---|---|---|---|---|
 | PDF | aqr-pdf | 144 files, 402 MB | 0.855 | 0.896 | 46 | 198 | 11.4× (max 22.9×) | 18 files kept as they are (no formula paid) |
 | SQLite 3 | aqr-sqlite | 84 files, 309 MB | 0.236 | 0.373 | 38 | 395 | 8.9× | |
-| Wavefront OBJ | aqr-obj | 30 files, 625 MB | 0.085 | 0.228 | 125 | 334 | 4.7× | `objr bench`; not in aqr-compress yet |
+| Wavefront OBJ | aqr-obj | 30 files, 625 MB | 0.085 | 0.228 | 125 | 334 | 4.7× | `aqr-obj bench`; not in aqr-compress yet |
 
 ### Containers and general-purpose compression
 

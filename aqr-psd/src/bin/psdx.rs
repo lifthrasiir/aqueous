@@ -1,16 +1,16 @@
 //! Pixel data tools.
 //!
-//! `psdx check FILE...` decodes every layer channel and the composite image, reporting
+//! `aqr-psd-research check FILE...` decodes every layer channel and the composite image, reporting
 //! failures.
 //!
-//! `psdx predict FILE...` renders the layers of 8-bit RGB files and compares the result with
+//! `aqr-psd-research predict FILE...` renders the layers of 8-bit RGB files and compares the result with
 //! the stored composite: share of exact and near pixels, and order-0 entropy of the residual,
 //! of a left-neighbor prediction of the composite alone, and of a mix of the two.
 //!
-//! `psdx rle FILE...` identifies the PackBits encoder of every RLE channel and of the
+//! `aqr-psd-research rle FILE...` identifies the PackBits encoder of every RLE channel and of the
 //! composite, and prints per file how many rows it reproduces, by encoder.
 //!
-//! `psdx dump OUTDIR FILE...` writes the 8-bit RGB layers (RGBA when they have transparency),
+//! `aqr-psd-research dump OUTDIR FILE...` writes the 8-bit RGB layers (RGBA when they have transparency),
 //! user masks and composite of each file as PAM images under `OUTDIR/<file stem>/`, and
 //! prints one TSV line per image: source file, image path, bytes the image takes in the PSD
 //! (compression fields and RLE counts included), decoded bytes.
@@ -230,7 +230,7 @@ fn main() -> ExitCode {
     let (cmd, rest) = match args.split_first() {
         Some((c, r)) => (c.as_str(), r),
         None => {
-            eprintln!("usage: psdx check|predict|rle FILE... | psdx dump OUTDIR FILE...");
+            eprintln!("usage: aqr-psd-research check|predict|rle FILE... | aqr-psd-research dump OUTDIR FILE...");
             return ExitCode::FAILURE;
         }
     };

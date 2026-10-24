@@ -1,11 +1,11 @@
-//! jrc: JPEG recompressor driver.
+//! aqr-jpeg: JPEG recompressor driver.
 //!
 //!   (every command takes -j threads; default: all cores)
-//!   jrc bench [-n iters] file...     roundtrip-verify through the formula and an .aqr archive,
+//!   aqr-jpeg bench [-n iters] file...     roundtrip-verify through the formula and an .aqr archive,
 //!                                    ratio and throughput per file
-//!   jrc fuzz [-n rounds] [-s seed] file...   mutate inputs; roundtrip must stay exact, no panics
-//!   jrc info file...                 parse and decode, print per-scan information
-//!   jrc mutenc [-n rounds] [-s seed] file...   re-encode inputs with valid non-canonical
+//!   aqr-jpeg fuzz [-n rounds] [-s seed] file...   mutate inputs; roundtrip must stay exact, no panics
+//!   aqr-jpeg info file...                 parse and decode, print per-scan information
+//!   aqr-jpeg mutenc [-n rounds] [-s seed] file...   re-encode inputs with valid non-canonical
 //!                                    choices; roundtrip must stay exact
 
 use aqr_formula::Apply;
@@ -202,7 +202,7 @@ fn mutenc(files: &[String], rounds: usize, seed: u64) {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
-        eprintln!("usage: jrc bench|fuzz|mutenc|info|pscan [-n N] [-s seed] files...");
+        eprintln!("usage: aqr-jpeg bench|fuzz|mutenc|info|pscan [-n N] [-s seed] files...");
         std::process::exit(2);
     }
     let cmd = args.remove(0);

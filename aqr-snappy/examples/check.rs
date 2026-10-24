@@ -3,7 +3,7 @@
 //! found and the module's speed. Only these totals are printed, never names or contents.
 //!
 //! ```sh
-//! cargo run --release -p aqr-snappy --example check-snappy -- FILE_OR_DIR...
+//! cargo run --release -p aqr-snappy --example aqr-snappy-check -- FILE_OR_DIR...
 //! ```
 
 use std::path::{Path, PathBuf};

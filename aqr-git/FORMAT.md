@@ -1,6 +1,6 @@
-# The `gitr` container format
+# The `aqr-git` container format
 
-This document specifies the files written by `gitr c` (`aqr_git::container::compress`
+This document specifies the files written by `aqr-git c` (`aqr_git::container::compress`
 over `aqr_git::deconstruct`). A decoder can be written from it alone. Sections marked
 *(encoder)* describe the choices this implementation makes; a decoder does not need them.
 

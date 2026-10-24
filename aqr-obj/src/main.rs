@@ -37,7 +37,7 @@ fn cpu() -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: objr bench [-n ITERS] [-B BLOCK] [-x] [-t THREADS] [-c|-d] [-v] FILE...\n       objr stats FILE... | objr fuzz [-n N] [-s SEED] FILE..."
+        "usage: aqr-obj bench [-n ITERS] [-B BLOCK] [-x] [-t THREADS] [-c|-d] [-v] FILE...\n       aqr-obj stats FILE... | aqr-obj fuzz [-n N] [-s SEED] FILE..."
     );
     std::process::exit(2);
 }

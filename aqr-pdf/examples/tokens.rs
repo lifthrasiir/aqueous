@@ -2,7 +2,7 @@
 //! FlateDecode stream under a few context models, per stream class, with adaptive counts
 //! over the whole class of a file (no table cost) and static tables (rough table cost).
 //!
-//! `cargo run --release --example tokens -- FILE...`
+//! `cargo run --release --example aqr-pdf-tokens -- FILE...`
 
 use aqr_flate::deflate::Token;
 use aqr_flate::huffman::{DIST_BASE, LEN_BASE};

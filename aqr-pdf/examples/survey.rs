@@ -1,7 +1,7 @@
 //! Corpus survey: bytes by stream class and filter, FlateDecode expansion, the cost and
 //! metadata of aqr-flate's fast representation, and zstd on the inflated data.
 //!
-//! `RAYON_NUM_THREADS=1 cargo run --release --example survey -- FILE...`
+//! `RAYON_NUM_THREADS=1 cargo run --release --example aqr-pdf-survey -- FILE...`
 
 use aqr_pdf::kind::{self, CLASSES, Class, Filter};
 use aqr_pdf::scan;

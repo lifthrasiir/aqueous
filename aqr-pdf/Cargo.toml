@@ -22,3 +22,34 @@ rayon = "1.12"
 [dev-dependencies]
 flate-zoo = { path = "../flate-zoo" }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-pdf-expansion"
+path = "examples/expansion.rs"
+
+[[example]]
+name = "aqr-pdf-fails"
+path = "examples/fails.rs"
+
+[[example]]
+name = "aqr-pdf-filters"
+path = "examples/filters.rs"
+
+[[example]]
+name = "aqr-pdf-images"
+path = "examples/images.rs"
+
+[[example]]
+name = "aqr-pdf-skel"
+path = "examples/skel.rs"
+
+[[example]]
+name = "aqr-pdf-survey"
+path = "examples/survey.rs"
+
+[[example]]
+name = "aqr-pdf-tokens"
+path = "examples/tokens.rs"

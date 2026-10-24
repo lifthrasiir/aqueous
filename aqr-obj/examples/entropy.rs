@@ -1,5 +1,5 @@
 //! Experiment: cost of the residual streams under adaptive binary models, against zstd.
-//! usage: entropy STRIDE_V STRIDE_F FILE...
+//! usage: aqr-obj-entropy STRIDE_V STRIDE_F FILE...
 use aqr_obj::block::*;
 use aqr_obj::varint::Rd;
 

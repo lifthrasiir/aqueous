@@ -1,5 +1,5 @@
 //! Loop the fast model decoder or the Huffman re-encoder only (for profiling).
-//! usage: decbench file.jpg iters [huff|enc]   (RAYON_NUM_THREADS limits the workers)
+//! usage: aqr-jpeg-decbench file.jpg iters [huff|enc]   (RAYON_NUM_THREADS limits the workers)
 use aqr_jpeg::{fast, jpeg};
 
 fn main() {

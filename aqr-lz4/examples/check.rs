@@ -3,7 +3,7 @@
 //! Only these totals are printed, never names or contents.
 //!
 //! ```sh
-//! cargo run --release -p aqr-lz4 --example check-lz4 -- FILE_OR_DIR...
+//! cargo run --release -p aqr-lz4 --example aqr-lz4-check -- FILE_OR_DIR...
 //! ```
 
 use std::path::{Path, PathBuf};

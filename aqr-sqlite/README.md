@@ -1,4 +1,4 @@
-# aqr-sqlite (`sqlr`)
+# aqr-sqlite
 
 Lossless SQLite 3 database recompression: a database file is stored smaller, and restored
 bit for bit. Meant as a component of a general-purpose compressor, so speed comes first:
@@ -6,8 +6,8 @@ the target is 100 MB/s single-threaded on an Apple M4, both ways.
 
 ```sh
 cargo build --release
-sqlr bench [-n ITERS] [-t N] [-m] [-v] [-x] [-c|-d] FILE...  # round trip check, archive size, CPU-time throughput (wall time with -t > 1)
-sqlr fuzz [-n N] [-s SEED] FILE...                           # mutated databases and corrupted streams
+aqr-sqlite bench [-n ITERS] [-t N] [-m] [-v] [-x] [-c|-d] FILE...  # round trip check, archive size, CPU-time throughput (wall time with -t > 1)
+aqr-sqlite fuzz [-n N] [-s SEED] FILE...                           # mutated databases and corrupted streams
 ```
 
 ```rust
@@ -53,7 +53,7 @@ and xz -9.
 ### Memory
 
 Through `aqr-show` (above), the peak RSS is 8.9× the file (median of files of 8 MB or
-more; at most 11.0×). `sqlr bench -m` reports the Rust heap beyond input and output,
+more; at most 11.0×). `aqr-sqlite bench -m` reports the Rust heap beyond input and output,
 encoding and decoding. Build with `--features memprof` for heap use per
 phase. Everything is in memory: there is no streaming over large files.
 
@@ -134,7 +134,7 @@ columns of such a table: it decodes the table once for them, and again for its p
 
 ```sh
 cargo test --release
-../target/release/sqlr fuzz -n 200 $(find corpus -type f -size -4M)
+../target/release/aqr-sqlite fuzz -n 200 $(find corpus -type f -size -4M)
 ```
 
 - `tests/roundtrip.rs`: databases built with the `sqlite3` tool (page sizes, indexes with
@@ -144,7 +144,7 @@ cargo test --release
 - `tests/formula.rs`: the formula of such databases evaluated with this crate's module,
   the inputs with no formula, and corrupted params and streams (errors, never panics).
 - Unit tests: varints, records, decimals, cell placement.
-- `sqlr fuzz`: mutated databases (bytes, page types, cell pointers, truncation, junk,
+- `aqr-sqlite fuzz`: mutated databases (bytes, page types, cell pointers, truncation, junk,
   copied pages, page numbers, header fields) must round-trip with the safety nets off, and
   corrupted streams must fail cleanly or decode.
 
@@ -160,7 +160,7 @@ cargo test --release
 | `src/index.rs` | Schema, index keys, index order |
 | `src/varint.rs` | SQLite varints, stream cursor (LEB128 from `aqr-common`) |
 | `aqr_common::mem` | Heap accounting (`bench -m`, feature `memprof`) |
-| `src/bin/sqlr.rs` | Bench, fuzz |
+| `src/main.rs` | Bench, fuzz |
 | `scripts/` | Corpus, baselines, profiling (`profile.py` over samply) |
 
 ## Next steps

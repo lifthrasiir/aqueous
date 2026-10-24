@@ -1,5 +1,5 @@
 //! Trains the built-in frequency tables from FLAC, WAV and AIFF files:
-//! `flr-train OUT FILE|DIR...` (every second file, or all
+//! `aqr-flac-train OUT FILE|DIR...` (every second file, or all
 //! with `-a`), writing the model file read by `aqr_raw::audio::residual::tables`
 //! (`aqr-raw/model/audio.bin`).
 

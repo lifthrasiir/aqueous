@@ -1,6 +1,6 @@
 //! Round-trip and compression benchmark over large PE files available on the local machine.
 //!
-//! usage: bench [-l LEVEL] [--no-zstd] [NAME|PATH ...]
+//! usage: aqr-exe-bench [-l LEVEL] [--no-zstd] [NAME|PATH ...]
 //!
 //! Without arguments every corpus entry that exists is run; a NAME selects corpus entries
 //! by substring, and an existing PATH is run as is. Each executable section is filtered,

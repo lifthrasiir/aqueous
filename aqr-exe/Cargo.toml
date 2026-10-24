@@ -21,3 +21,14 @@ zstd = { version = "0.13", features = ["zstdmt"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(trace_decode)', 'cfg(trace_encode)'] }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-exe-bench"
+path = "examples/bench.rs"
+
+[[example]]
+name = "aqr-exe-bench-arm64"
+path = "examples/bench-arm64.rs"

@@ -679,5 +679,5 @@ xJyuWkFNogONxET6ROsapyLL4N3/hw2ZqmhVkZeyOM+jqQ7ZRYKh2edTkgLKG321KGLSKkeUlYgc
 3NxDkF2GypTuDkke0ngQm8MTWk/TgbYri2U=
 ```
 
-Changing the tables (retraining with aqr-flac's `flr-train`) changes the encoder's
+Changing the tables (retraining with `aqr-flac-train`) changes the encoder's
 resource and needs new versions of both modules.

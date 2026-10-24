@@ -1,4 +1,4 @@
-# aqr-obj (`objr`)
+# aqr-obj
 
 Lossless Wavefront OBJ recompression: an OBJ file is stored smaller, and restored bit for
 bit. Meant as a component of a general-purpose compressor, so speed comes first: the target
@@ -7,9 +7,9 @@ backend of the value streams; the archive (aqr-formula) compresses the other str
 
 ```sh
 cargo build --release
-objr bench [-n ITERS] [-B BLOCK] [-x] [-t N] [-c|-d] [-v] FILE...   # archive size, round trip check, throughput
-objr stats FILE...                                  # line templates and lines kept as text
-objr fuzz [-n N] [-s SEED] FILE...                  # mutated files
+aqr-obj bench [-n ITERS] [-B BLOCK] [-x] [-t N] [-c|-d] [-v] FILE...   # archive size, round trip check, throughput
+aqr-obj stats FILE...                                  # line templates and lines kept as text
+aqr-obj fuzz [-n N] [-s SEED] FILE...                  # mutated files
 ```
 
 ```rust
@@ -24,7 +24,7 @@ verification is stored whole.
 
 ## Results
 
-Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, with `objr bench -t 1`
+Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, with `aqr-obj bench -t 1`
 (aqr-obj is not in aqr-compress yet). Ratios are tentative, since the decoder modules are not
 in the archives yet. Memory is the peak RSS of the process (input, archive and output
 included) over the input size.
@@ -38,7 +38,7 @@ included) over the input size.
 | all | 30 | 625 | **0.085** | 0.228 | **125 MB/s** | **334 MB/s** |
 
 Files over 300 MB were left out. Memory is 4.7× the file (median of files of 8 MB or more).
-`objr bench` reports the size of an archive of the formula (`formula::encode`,
+`aqr-obj bench` reports the size of an archive of the formula (`formula::encode`,
 then `aqr_formula::aqr::encode`) and the speed of making and decoding it. The other
 compressors' sizes per file are cached by `scripts/baseline.sh`.
 
@@ -154,7 +154,7 @@ The format is specified in [FORMAT.md](FORMAT.md).
 
 ```sh
 cargo test --release
-../target/release/objr fuzz -n 200 $(find corpus -name '*.obj' -size -5M)
+../target/release/aqr-obj fuzz -n 200 $(find corpus -name '*.obj' -size -5M)
 ```
 
 - `tests/roundtrip.rs`: edge cases (no line end, CRLF, tabs, odd numbers, relative
@@ -165,7 +165,7 @@ cargo test --release
 - `tests/formula.rs`: the formula's structure, and damaged inputs (errors or other
   output, never panics).
 - Unit tests: rANS; those of the number formats are in `aqr-num`.
-- `objr fuzz`: mutated files (bytes, tokens, line copies, line ends, digits) must
+- `aqr-obj fuzz`: mutated files (bytes, tokens, line copies, line ends, digits) must
   round-trip through the formula with verification off, small and large blocks, some
   stored whole, whatever the threads.
 
@@ -181,7 +181,7 @@ cargo test --release
 | `src/corner.rs` | Face corner indices |
 | `src/ans.rs` | rANS for value streams |
 | `src/varint.rs` | Stream cursor (LEB128 from `aqr-common`); heap accounting is `aqr_common::mem` |
-| `src/bin/objr.rs` | Bench, stats, fuzz |
+| `src/main.rs` | Bench, stats, fuzz |
 | `examples/` | Experiments behind the choices above |
 | `scripts/` | Corpus, baselines, comparison, profiling (`profile.py` over samply) |
 

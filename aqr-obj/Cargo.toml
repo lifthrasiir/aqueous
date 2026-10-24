@@ -13,3 +13,42 @@ aqr-formula = { path = "../aqr-formula" }
 
 [dev-dependencies]
 zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-obj-dups"
+path = "examples/dups.rs"
+
+[[example]]
+name = "aqr-obj-entropy"
+path = "examples/entropy.rs"
+
+[[example]]
+name = "aqr-obj-fpred"
+path = "examples/fpred.rs"
+
+[[example]]
+name = "aqr-obj-fpred2"
+path = "examples/fpred2.rs"
+
+[[example]]
+name = "aqr-obj-fsym-hist"
+path = "examples/fsym_hist.rs"
+
+[[example]]
+name = "aqr-obj-repro"
+path = "examples/repro.rs"
+
+[[example]]
+name = "aqr-obj-vpred"
+path = "examples/vpred.rs"
+
+[[example]]
+name = "aqr-obj-vpred2"
+path = "examples/vpred2.rs"
+
+[[example]]
+name = "aqr-obj-vpred-hist"
+path = "examples/vpred_hist.rs"

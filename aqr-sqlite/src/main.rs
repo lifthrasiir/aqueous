@@ -66,7 +66,7 @@ fn unpack(c: &[u8], threads: usize) -> Option<Vec<u8>> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: sqlr bench [-n ITERS] [-t THREADS] [-c|-d] [-m] [-v] [-x] FILE...\n       sqlr fuzz [-n N] [-s SEED] FILE..."
+        "usage: aqr-sqlite bench [-n ITERS] [-t THREADS] [-c|-d] [-m] [-v] [-x] FILE...\n       aqr-sqlite fuzz [-n N] [-s SEED] FILE..."
     );
     std::process::exit(2);
 }

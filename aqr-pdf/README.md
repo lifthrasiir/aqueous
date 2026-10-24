@@ -1,4 +1,4 @@
-# aqr-pdf (`pdfr`)
+# aqr-pdf
 
 Lossless PDF recompression: a PDF file is stored smaller, and restored bit for bit. Meant as
 a component of a general-purpose compressor, so speed comes first: the target is 100 MB/s
@@ -9,8 +9,8 @@ writing, Huffman header coding, its fast representation), images through
 
 ```sh
 cargo build --release
-pdfr bench [-t N] [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...   # formula and .aqr: ratio, CPU-time speed, per-mode sizes
-pdfr fuzz [-n ROUNDS] [-r SEED] FILE...            # mutated files, formulas and archives
+aqr-pdf bench [-t N] [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...   # formula and .aqr: ratio, CPU-time speed, per-mode sizes
+aqr-pdf fuzz [-n ROUNDS] [-r SEED] FILE...            # mutated files, formulas and archives
 ```
 
 ```rust
@@ -181,7 +181,7 @@ skeleton 4%.
 
 ```sh
 cargo test --release
-../target/release/pdfr fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
+../target/release/aqr-pdf fuzz -n 5000 $(find corpus -name '*.pdf' -size -600k)
 ```
 
 - `tests/formula.rs`: synthetic PDF files through `formula::encode_with` and `Formula::eval`
@@ -195,11 +195,11 @@ cargo test --release
   PDF 2.0 (junk before the header, UTF-8 strings, object and cross-reference streams,
   AES-256); non-PDF and cut files.
 - Unit tests: lexer, scanner, rANS and bit I/O, token coding.
-- `pdfr fuzz`: mutated files (bit flips, cuts, deletions, junk, copied pieces, bytes inside
+- `aqr-pdf fuzz`: mutated files (bit flips, cuts, deletions, junk, copied pieces, bytes inside
   streams) must round-trip through the formula under every set of modes with the safety
   nets off; corrupted archives must fail cleanly; with 2 to 4 threads, the same formula and
   the same outcome.
-- Every file of the four sets round-trips through `.aqr` (`pdfr bench` checks).
+- Every file of the four sets round-trips through `.aqr` (`aqr-pdf bench` checks).
 
 ## Layout
 
@@ -212,6 +212,6 @@ cargo test --release
 | `src/kind.rs`, `src/objects.rs` | Stream classes and filters, indirect objects |
 | `src/flate.rs`, `src/image.rs` | zlib wrapper; image geometry and the PNG wrapper |
 | `src/tok.rs`, `src/rans.rs` | Token mode; static rANS (`aqr_common::rans32` with 12-bit probabilities) |
-| `src/bin/pdfr.rs` | Command-line tool, bench, fuzz |
+| `src/main.rs` | Command-line tool, bench, fuzz |
 | `examples/` | Corpus surveys and experiments behind the choices here |
 | `scripts/` | Corpus, baselines, profiling (`profile.py` over samply) |

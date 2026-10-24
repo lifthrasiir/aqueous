@@ -8,7 +8,7 @@ prediction: CRCs, sizes, offsets and what the central directory repeats of the l
 cost nothing when they are what they should be, and are kept exactly when they are not.
 
 ```sh
-cargo run --release -p aqr-zip --example check-zip -- [-v] [-t N] FILE_OR_DIR...   # rebuilt, zstd -3 before and after, speed
+cargo run --release -p aqr-zip --example aqr-zip-check -- [-v] [-t N] FILE_OR_DIR...   # rebuilt, zstd -3 before and after, speed
 aqr-zip/scripts/gen-fixtures.sh                    # tests/data from python3, Info-ZIP, ditto, bsdtar and Go
 python3 aqr-zip/scripts/make-42.py OUT.zip         # 42.zip's levels without its password
 ```
@@ -63,7 +63,7 @@ it (2,127 bytes archived as it is, 2,213 through the formulas), so the file is k
 Measured on 2026-10-23 on the ZIP files of one Mac (172 archives, 1.34 GB: Python wheels, Go
 module test data, Office documents, an APK, a VS Code build and others), on an M4.
 
-- `check-zip` rebuilds all 172, none failing: 12,452 bodies stored, 92,304 deflated, 7,971
+- `aqr-zip-check` rebuilds all 172, none failing: 12,452 bodies stored, 92,304 deflated, 7,971
   the same as an earlier one, and 3 kept. On 8 threads the encoder runs at 46 MB/s of archive,
   and the module at 66 MB/s.
 - Through aqr-compress, the Aqueous archive (level mid) is 8.2% smaller than that of the files

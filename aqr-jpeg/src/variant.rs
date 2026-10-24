@@ -1,7 +1,7 @@
 //! Test support: re-encode a JPEG's scans with *valid but non-canonical* choices.
 //!
 //! Every stream produced here decodes to exactly the same coefficients as the original (checked
-//! by `jrc mutenc`), but differs from what libjpeg would write in some encoder decision that a
+//! by `aqr-jpeg mutenc`), but differs from what libjpeg would write in some encoder decision that a
 //! recompressor must notice (or reproduce): EOB-run splitting and limits, correction-bit buffer
 //! limits, ZRLs that libjpeg would fold into an EOB, padding bits, fill bytes before markers,
 //! trailing restart markers. Feeding these through compress / decompress checks that the

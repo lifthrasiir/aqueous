@@ -8,15 +8,33 @@ aqr-common = { path = "../aqr-common", features = ["zstd"] }
 aqr-formula = { path = "../aqr-formula" }
 memchr = "2"
 
-[[bin]]
-name = "mp3r"
-path = "src/main.rs"
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
 
-# Named apart from aqr-flac's, in the workspace's target directory.
 [[bin]]
-name = "mp3r-train"
+name = "aqr-mp3-train"
 path = "src/bin/train.rs"
 
 [[example]]
-name = "mp3r-hot"
+name = "aqr-mp3-ctxdist"
+path = "examples/ctxdist.rs"
+
+[[example]]
+name = "aqr-mp3-init"
+path = "examples/init.rs"
+
+[[example]]
+name = "aqr-mp3-memprobe"
+path = "examples/memprobe.rs"
+
+[[example]]
+name = "aqr-mp3-hot"
 path = "examples/hot.rs"
+
+[[example]]
+name = "aqr-mp3-perfile"
+path = "examples/perfile.rs"
+
+[[example]]
+name = "aqr-mp3-phases"
+path = "examples/phases.rs"

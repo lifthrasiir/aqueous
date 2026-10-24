@@ -1,4 +1,4 @@
-# aqr-git (`gitr`)
+# aqr-git
 
 Lossless recompression of git checkouts: a directory with its `.git` (submodules under
 `.git/modules` included) becomes ten interconnected streams, and every file is rebuilt bit
@@ -11,10 +11,10 @@ allows ([Trade-offs](#trade-offs)).
 
 ```sh
 cargo build --release
-gitr c [-l LEVEL] [-B NS | -A] [-O ORDER] [-k] [-t N] DIR OUT   # compress a directory
-gitr d IN DIR                                                    # decompress into DIR
-gitr x IN PATH                                                   # one file to stdout
-gitr bench [-l LEVEL] [-B NS | -A] [-O ORDER] [-k] [-t N] [-v] DIR...   # round trip, sizes, times
+aqr-git c [-l LEVEL] [-B NS | -A] [-O ORDER] [-k] [-t N] DIR OUT   # compress a directory
+aqr-git d IN DIR                                                    # decompress into DIR
+aqr-git x IN PATH                                                   # one file to stdout
+aqr-git bench [-l LEVEL] [-B NS | -A] [-O ORDER] [-k] [-t N] [-v] DIR...   # round trip, sizes, times
 ```
 
 `-B NS`: the time budget, ns per input byte (default 10: 100 MB/s); `-A`: rebuild every zlib
@@ -38,10 +38,10 @@ transform on one thread (wall time, `examples/prof.rs`); every file round-trips.
 | | output (zstd -19) | of input |
 |---|---|---|
 | `tar \| zstd -19 --long=27` | 778.6 MB | 65.1% |
-| `gitr -B 0` (zlib streams kept) | 668.7 MB | 55.9% |
-| **`gitr` (default: 100 MB/s budget)** | **540.9 MB** | **45.2%** |
-| `gitr -A` (every zlib stream rebuilt) | 304.8 MB | 25.5% |
-| `gitr -l 3` (default budget, zstd -3) | 587.5 MB | 49.1% |
+| `aqr-git -B 0` (zlib streams kept) | 668.7 MB | 55.9% |
+| **`aqr-git` (default: 100 MB/s budget)** | **540.9 MB** | **45.2%** |
+| `aqr-git -A` (every zlib stream rebuilt) | 304.8 MB | 25.5% |
+| `aqr-git -l 3` (default budget, zstd -3) | 587.5 MB | 49.1% |
 
 Per repository (default options):
 

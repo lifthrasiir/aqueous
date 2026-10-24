@@ -8,7 +8,7 @@ holds, and files written again and again (sessions, telemetry pings) share their
 in an archive.
 
 ```sh
-cargo run --release -p aqr-lz4 --example check-lz4 -- FILE_OR_DIR...   # reproduced, zstd -3 before and after, speed
+cargo run --release -p aqr-lz4 --example aqr-lz4-check -- FILE_OR_DIR...   # reproduced, zstd -3 before and after, speed
 python3 aqr-lz4/scripts/gen-fixtures.py                            # tests/data from the reference liblz4
 ```
 
@@ -49,10 +49,10 @@ telemetry pings over two months were all `LZ4_compress_default`, all reproduced.
 This crate reproduces the fixtures of `tests/data` (blocks at accelerations 1-65537, and
 frames with checksums, kept tables, stored blocks and `--fast=3`), which
 `scripts/gen-fixtures.py` makes with the reference liblz4. It also reproduced 4 of the files
-above (the session store, `addonStartup.json.lz4` and a telemetry ping, 2.36 MB) with `check-lz4`.
+above (the session store, `addonStartup.json.lz4` and a telemetry ping, 2.36 MB) with `aqr-lz4-check`.
 
 The module (the compressor) runs at 650-1150 MB/s of data on an M4, single-threaded, on the
-fixtures (`check-lz4`). That is liblz4's speed class. Frames could be made in parallel, since a
+fixtures (`aqr-lz4-check`). That is liblz4's speed class. Frames could be made in parallel, since a
 block of 4 KiB or more clears the state. That is not done.
 
 ## Tests

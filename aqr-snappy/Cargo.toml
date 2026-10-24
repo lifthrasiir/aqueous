@@ -12,6 +12,9 @@ aqr-formula = { path = "../aqr-formula" }
 [dev-dependencies]
 zstd = "0.13"
 
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
 [[example]]
-name = "check-snappy"
+name = "aqr-snappy-check"
 path = "examples/check.rs"

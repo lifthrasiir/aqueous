@@ -1,6 +1,6 @@
 //! Byte breakdown of PSD/PSB files by section, to see where the bytes go.
 //!
-//! `psdstat [-v] FILE...` prints, over all files, the bytes of each category and (for pixel
+//! `aqr-psd-stat [-v] FILE...` prints, over all files, the bytes of each category and (for pixel
 //! data) the decoded size. `-v` adds one line per file. Bytes outside every parsed structure
 //! are counted as `other` (padding, or junk), so every file sums to its size.
 

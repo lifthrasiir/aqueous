@@ -1,4 +1,4 @@
-//! Trains the built-in model: `mp3r-train [-a] [-k K] OUT FILE|DIR...` (every second file, or
+//! Trains the built-in model: `aqr-mp3-train [-a] [-k K] OUT FILE|DIR...` (every second file, or
 //! all with `-a`), writing the model file read by `codec::tables`. Contexts of the same
 //! alphabet size are merged greedily, the pair costing the fewest bits on the training set
 //! first, until `K` tables are left (500 by default).

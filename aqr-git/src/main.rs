@@ -5,7 +5,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: gitr c [-l LEVEL] [-B NS | -A] [-O ORDER] [-k] [-t THREADS] DIR OUT | gitr d IN DIR | gitr x IN PATH\n       gitr bench [-l LEVEL] [-B NS | -A] [-O ORDER] [-k] [-t THREADS] [-v] DIR...\n(-B: time budget in ns per input byte by the cost model, default 10; -A: emulate every zlib stream; -O: largest, smallest or gain first; -k: pass over what does not fit; -t: zstd workers, same output for any)"
+        "usage: aqr-git c [-l LEVEL] [-B NS | -A] [-O ORDER] [-k] [-t THREADS] DIR OUT | aqr-git d IN DIR | aqr-git x IN PATH\n       aqr-git bench [-l LEVEL] [-B NS | -A] [-O ORDER] [-k] [-t THREADS] [-v] DIR...\n(-B: time budget in ns per input byte by the cost model, default 10; -A: emulate every zlib stream; -O: largest, smallest or gain first; -k: pass over what does not fit; -t: zstd workers, same output for any)"
     );
     std::process::exit(2);
 }
@@ -36,7 +36,7 @@ fn opts(args: &[String]) -> (Options, COptions, bool, Vec<String>) {
 }
 
 fn die(e: impl std::fmt::Display) -> ! {
-    eprintln!("gitr: {e}");
+    eprintln!("aqr-git: {e}");
     std::process::exit(1);
 }
 

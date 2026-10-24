@@ -1,4 +1,4 @@
-# aqr-raw (`rawr`)
+# aqr-raw
 
 Uncompressed sampled data, PCM audio and raster images, coded losslessly: for any format whose
 samples are stored as they are (or close to it), rather than for one format. It works both
@@ -22,7 +22,7 @@ samples and their layout ([`container::Found`](src/container.rs)); a new kind of
 
 ## Results
 
-Measured on 2026-10-24 on an Apple M4, one thread, with `rawr bench -n 2` (formula and `.aqr`
+Measured on 2026-10-24 on an Apple M4, one thread, with `aqr-raw bench -n 2` (formula and `.aqr`
 archive at level `mid`, then the archive decoded and compared).
 
 | set | files | MB | ratio | zstd -3 | formula | decompress |
@@ -32,7 +32,7 @@ archive at level `mid`, then the archive decoded and compared).
 
 The images are 17 PNG files of aqr-png's `codec-corpus` of 200 KB or more (every 25th by
 path) written by ImageMagick as BMP3, BMP4 with alpha, PGM and PPM in turn; as PNG files
-they were 19.2 MB (0.367). The peak RSS of `rawr bench` on one image is 4–5× its size
+they were 19.2 MB (0.367). The peak RSS of `aqr-raw bench` on one image is 4–5× its size
 (input, formula, archive and output included).
 
 Before the PCM path moved here from aqr-flac, it gave the same streams for these files, byte
@@ -46,8 +46,8 @@ files, valid and not) round-trip; 97 of them are not coded (fewer than 8 bits pe
 ```sh
 cargo build --release
 
-rawr bench [-t THREADS] [-n ITERS] [-v] [-r LAYOUT] FILE...   # ratio and speed, the archive round trip checked
-rawr info FILE...                                            # the container and where its samples are
+aqr-raw bench [-t THREADS] [-n ITERS] [-v] [-r LAYOUT] FILE...   # ratio and speed, the archive round trip checked
+aqr-raw info FILE...                                            # the container and where its samples are
 ```
 
 `-r LAYOUT` takes the input as headerless samples: PCM as `s16le:2` (sign, bits,
@@ -74,7 +74,7 @@ let node = formula::apply(&mut its_formula, samples, layout, 1);
 | `src/image/raster.rs` | Raw rasters: the coder of 8-bit rows of 1 to 4 channels |
 | `src/container.rs` | WAV, AIFF / AIFC, BMP, PNM: where the samples are, and their layout |
 | `src/formula/` | The modules `pcm-recons` and `raster-recons`, and formulas of containers |
-| `model/audio.bin` | The residual model's built-in tables (trained by aqr-flac's `flr-train`) |
+| `model/audio.bin` | The residual model's built-in tables (trained by `aqr-flac-train`) |
 | `tests/pcm.rs`, `tests/data` | WAV / AIFF / AIFC files and headerless PCM: round trips on threads, junk, cuts, corrupted inputs, the resource |
 | `tests/raster.rs` | Synthetic BMP and PNM files: round trips, trailers, cuts, corrupted inputs |
 

@@ -9,15 +9,37 @@ memchr = "2"
 aqr-formula = { path = "../aqr-formula" }
 aqr-raw = { path = "../aqr-raw" }
 
-[[bin]]
-name = "flr"
-path = "src/main.rs"
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
 
-# Named apart from aqr-mp3's, in the workspace's target directory.
 [[bin]]
-name = "flr-train"
+name = "aqr-flac-train"
 path = "src/bin/train.rs"
 
 [[example]]
-name = "flr-hot"
+name = "aqr-flac-breakdown"
+path = "examples/breakdown.rs"
+
+[[example]]
+name = "aqr-flac-dhot"
+path = "examples/dhot.rs"
+
+[[example]]
+name = "aqr-flac-entbench"
+path = "examples/entbench.rs"
+
+[[example]]
+name = "aqr-flac-exp2"
+path = "examples/exp2.rs"
+
+[[example]]
+name = "aqr-flac-hot"
 path = "examples/hot.rs"
+
+[[example]]
+name = "aqr-flac-lmsbench"
+path = "examples/lmsbench.rs"
+
+[[example]]
+name = "aqr-flac-rt"
+path = "examples/rt.rs"

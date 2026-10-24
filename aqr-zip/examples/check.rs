@@ -4,7 +4,7 @@
 //! (`-v` adds a line per archive, by its index).
 //!
 //! ```sh
-//! cargo run --release -p aqr-zip --example check-zip -- [-v] [-t THREADS] FILE_OR_DIR...
+//! cargo run --release -p aqr-zip --example aqr-zip-check -- [-v] [-t THREADS] FILE_OR_DIR...
 //! ```
 
 use std::path::{Path, PathBuf};

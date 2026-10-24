@@ -13,6 +13,9 @@ xxhash-rust = { version = "0.8", features = ["xxh32"] }
 [dev-dependencies]
 zstd = "0.13"
 
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
 [[example]]
-name = "check-lz4"
+name = "aqr-lz4-check"
 path = "examples/check.rs"

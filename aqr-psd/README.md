@@ -5,15 +5,15 @@ Lossless PSD/PSB recompression: a Photoshop file is coded as a formula (the modu
 
 ```sh
 cargo build --release
-psdr bench [-n ITERS] [-t N] [-v] [-c|-d] FILE...  # .aqr round trip check, ratio, throughput (-t default 1)
-psdstat [-v] FILE...                    # byte breakdown by section, summed over files
-psdx check|predict|rle FILE...          # research tools: decoding, composite prediction, PackBits encoders
+aqr-psd bench [-n ITERS] [-t N] [-v] [-c|-d] FILE...  # .aqr round trip check, ratio, throughput (-t default 1)
+aqr-psd-stat [-v] FILE...                    # byte breakdown by section, summed over files
+aqr-psd-research check|predict|rle FILE...          # research tools: decoding, composite prediction, PackBits encoders
 cargo test                              # formula round trips of synthetic PSDs (no corpus needed)
 ```
 
 `PSDR_STATS=1` prints phase times and sizes; `PSDR_DEBUG=1` where decoding found corrupt
 input. `examples/` holds profiling aids (`modelbench`, `renderbench`, `pbbench`, `recbench`) and
-debugging ones (`chan`, `diff`, `rlediff`), run with `cargo run --release --example NAME -- FILE`.
+debugging ones (`chan`, `diff`, `rlediff`), run with `cargo run --release --example aqr-psd-NAME -- FILE`.
 
 ## How
 
@@ -125,7 +125,7 @@ rows in turns (2-15% slower at every interleave step); forced inlining of the pi
 unchecked indexing in the pair coder and PGO (both cut instructions by 6-10% but not
 cycles); `target-cpu=native` (no change).
 
-How it was measured: `samply record --save-only`, then `dsymutil ../target/release/psdr` and
+How it was measured: `samply record --save-only`, then `dsymutil ../target/release/aqr-psd` and
 `llvm-symbolizer --inlining` on the sampled addresses (plus 0x100000000) for inlined source
 lines and annotated disassembly; A/B comparisons by the cycles and instructions of
 `/usr/bin/time -l`, since wall-clock times moved by ±5% with other load on the machine.

@@ -10,8 +10,8 @@ in a universal file), each rebuilt bit for bit:
   of their own.
 
 ```sh
-cargo run --release -p aqr-exe --example bench -- [-l LEVEL] [--no-zstd] [NAME|PATH ...]  # filter round trip, speed, zstd before and after
-cargo run --release -p aqr-exe --example bench-arm64 -- [-l LEVEL] MACHO...              # the same for ARM64 Mach-O images, against xz's BCJ
+cargo run --release -p aqr-exe --example aqr-exe-bench -- [-l LEVEL] [--no-zstd] [NAME|PATH ...]  # filter round trip, speed, zstd before and after
+cargo run --release -p aqr-exe --example aqr-exe-bench-arm64 -- [-l LEVEL] MACHO...              # the same for ARM64 Mach-O images, against xz's BCJ
 build-wasm.bat                                                                       # the decoder as a Wasm module
 ```
 
@@ -77,7 +77,7 @@ speed.
 
 ### ARM64
 
-Measured on 2026-10-23 on an Apple M4 with `bench-arm64` (zstd -9, each stream on its own;
+Measured on 2026-10-23 on an Apple M4 with `aqr-exe-bench-arm64` (zstd -9, each stream on its own;
 filter speeds on one thread): the code sections of the ARM64 images of 12 Mach-O files,
 298.4 MB (VS Code's Electron Framework, `code-tunnel` and `rg` in Rust, `vsce-sign` in Go,
 ANGLE, SwiftShader, FFmpeg, SQLite, MSAL; Homebrew's libLLVM and libclang-cpp).

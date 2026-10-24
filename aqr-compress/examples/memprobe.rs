@@ -1,7 +1,7 @@
 //! Peak heap of archiving each file (recompression, the archive and its verification) and of
 //! extracting it, as aqr-show does them, and the process's peak resident set.
 //!
-//! usage: memprobe [-t THREADS] [-e] FILE... (`-e` as in aqr-show); `LOG=MB` logs the
+//! usage: aqr-compress-memprobe [-t THREADS] [-e] FILE... (`-e` as in aqr-show); `LOG=MB` logs the
 //! allocations of at least that many MB, with where they were made.
 
 use aqr_common::mem::{self, Counting};
