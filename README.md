@@ -38,7 +38,7 @@ and the design is argued in `xform-design.md`.
 |---|---|---|---|---|---|---|---|---|
 | PNG, APNG | aqr-png | 379 files, 391 MB | 0.802 | 0.997 | 42 | 90 | 7 MB + 10.3× | the data, the raw image and the tokens are held a window at a time; the encoder's symbols (2 bytes per byte of data on photos) are what still follows the pixels |
 | JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
-| PSD, PSB | aqr-psd | 56 files, 439 MB | 0.330 | 0.555 | 45 | 127 | 6.4× (max 71×) | pixels coded in 8-bit documents only; aqr-psd itself takes a few MB besides its streams, the rest is the archive's (a file kept raw is scanned by the parts aqr-psd tells) |
+| PSD, PSB | aqr-psd | 56 files, 439 MB | 0.330 | 0.555 | 45 | 127 | 28 MB + 5.4× | pixels coded in 8-bit documents only; aqr-psd itself takes a few MB besides its streams, the rest is the archive's (a file kept raw is scanned by the parts aqr-psd tells) |
 
 ### Audio
 

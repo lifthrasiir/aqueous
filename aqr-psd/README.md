@@ -74,15 +74,16 @@ included) over the input size.
 | tori29umai | 1 | 10.3 | 0.215 | 0.383 | 40.2 MB/s | 87.5 MB/s |
 | all | 56 | 439 | **0.330** | 0.555 | **45 MB/s** | **127 MB/s** |
 
-8 files are kept as they are. Memory is 6.4× the file (median of files of 8 MB or more; at most
-71×, a 0.26 MB file at the process's floor of about 19 MB). Little of it is aqr-psd's: on its
-own (`formula::encode` and evaluating the formula) it takes the streams and at most a few MB
-besides, plus what aqr-png and aqr-jpeg take for embedded files (up to 96 MB, for progressive
-JPEGs), and decoding holds the embedded files' bytes twice (the module's input and its output).
-The rest is the archive's: its verification, and for files kept raw, the files found in them.
-These are looked for by the parts `formula::regions` tells (pixel data, structure, text and
-embedded files), not from every byte, where MP3 frames were found in pixel data (98 MB for a
-0.58 MB file before).
+8 files are kept as they are. Memory is about 28 MB + 5.4× the file (a least-squares fit; the
+largest above it, 372 MB for a 22.7 MB file with embedded JPEGs, recompressed by aqr-jpeg),
+against 32 MB + 5.2× and up to 98 MB for a 0.58 MB file before files kept raw were scanned by
+their parts. Little of it is aqr-psd's: on its own (`formula::encode` and evaluating the
+formula) it takes the streams and at most a few MB besides, plus what aqr-png and aqr-jpeg take
+for embedded files (up to 96 MB, for progressive JPEGs), and decoding holds the embedded files'
+bytes twice (the module's input and its output). The rest is the archive's: its verification,
+and for files kept raw, the files found in them. These are looked for by the parts
+`formula::regions` tells (pixel data, structure, text and embedded files), not from every byte,
+where MP3 frames were found in pixel data.
 
 ## Limitations
 
