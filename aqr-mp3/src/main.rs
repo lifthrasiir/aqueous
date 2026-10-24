@@ -248,7 +248,7 @@ fn info(args: &[String]) {
             c.bit_lens[0],
             c.bit_lens[1],
             c.bit_lens[2],
-            c.words.len(),
+            c.words.len() / 4,
             c.raw_bits
         );
     }

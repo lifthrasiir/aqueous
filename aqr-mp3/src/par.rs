@@ -11,7 +11,7 @@
 //!   rANS decoder are built on another while the headers are read; the output is assembled
 //!   in parallel pieces.
 
-use crate::bits::{BitReader, BitWriter, WordWriter};
+use crate::bits::{BitReader, BitWriter};
 use crate::codec::{
     self, Coded, Dec, Enc, Error, Frames, N_BYTE_STREAMS, S_CRC, S_GAPS, S_HDR, S_JUNK, S_RAWGR, S_SEGS, S_SIDE,
     S_TAILBITS,
@@ -61,16 +61,12 @@ pub(crate) fn encode(d: &[u8]) -> Coded {
         crate::huff::decoders();
         // Waits for the helper if it is still building the tables.
         let t = codec::tables();
-        let mut c = Enc {
-            t,
-            rans: rans::Encoder::with_capacity(d.len() * 5 / 4 + model::MAX_GRANULE_SYMS),
-            raw: WordWriter::with_capacity(d.len() / 4),
-        };
+        let mut c = Enc::new(t, d.len());
         let (b, bit_lens) = codec::model_pass(sp, &mut c);
         stop.store(true, Ordering::Relaxed);
         // The helper no longer builds inverse maps once it acknowledges.
         ack_rx.recv().expect("helper thread");
-        let words = c.rans.finish(t);
+        let words = c.finish();
         let raw_bits = c.raw.len() as u64;
         let raw = c.raw.finish();
         if let Err(e) = helper.join() {
@@ -292,8 +288,7 @@ impl codec::SideSrc for ThreadSide {
 
 /// The rANS decoder over `words` (u32 LE) and the raw bits, padded.
 fn make_decoder<'a>(t: &'a Tables, words: &[u8], raw: &[u8]) -> (rans::Decoder<'a>, Vec<u8>) {
-    let w: Vec<u32> = words.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
-    let dec = rans::Decoder::new(t, &w);
+    let dec = rans::Decoder::from_le_bytes(t, words);
     let mut rb = Vec::with_capacity(raw.len() + R_PAD);
     rb.extend_from_slice(raw);
     rb.resize(raw.len() + R_PAD, 0);
@@ -340,8 +335,20 @@ pub(crate) fn decode(
             };
             let mut dc = Dec { rans, raw: crate::huff::BitBuf::new(&BitReader::new(&raw_buf, 0)) };
             let mut side = ThreadSide::new(side_rx);
-            let r_out =
-                codec::main_pass(&mut fr, streams[S_TAILBITS], streams[S_RAWGR], streams[S_GAPS], &mut side, &mut dc)?;
+            // The reservoir whole, for the output assembled in parallel pieces; room for the
+            // largest reservation (a granule's) at its end.
+            let cap = fr.frames.iter().map(|f| f.3).sum::<usize>() + 4096;
+            let r_out = codec::main_pass(
+                &mut fr,
+                streams[S_TAILBITS],
+                streams[S_RAWGR],
+                streams[S_GAPS],
+                &mut side,
+                &mut dc,
+                &mut (),
+                cap,
+            )?
+            .finish();
             drop(side);
             let out = assemble(&fr, streams[S_JUNK], streams[S_CRC], &r_out, threads)?;
             if !dc.rans.in_bounds() {

@@ -13,7 +13,7 @@ use crate::rc;
 use crate::side::SideModel;
 use crate::stream::{R_PAD, place, segment};
 use aqr_common::varint::{self, put as put_varint};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// The built-in frequency tables (see `train`), or uniform ones if none are built in.
 static BUILTIN: &[u8] = include_bytes!("../model/builtin.bin");
@@ -26,13 +26,20 @@ pub fn layout_id() -> u32 {
 /// The built-in tables (what the encoder codes with).
 pub fn tables() -> &'static Tables {
     static T: OnceLock<Tables> = OnceLock::new();
-    T.get_or_init(|| tables_from(&builtin_raw()).expect("built-in tables"))
+    T.get_or_init(|| tables_from(builtin_raw()).expect("built-in tables"))
 }
 
 /// The built-in tables in their uncompressed form: the module's resource.
-pub fn builtin_raw() -> Vec<u8> {
-    builtin::decompress(BUILTIN).unwrap_or_else(|| builtin::to_raw(layout_id(), &uniform_freqs()))
+pub fn builtin_raw() -> &'static Arc<[u8]> {
+    static R: OnceLock<Arc<[u8]>> = OnceLock::new();
+    R.get_or_init(|| {
+        builtin::decompress(BUILTIN).unwrap_or_else(|| builtin::to_raw(layout_id(), &uniform_freqs())).into()
+    })
 }
+
+/// Frames per run of the rANS stream: the coder restarts before every frame whose index is a
+/// positive multiple of it, so that the encoder holds the symbols of one run at a time.
+pub const RUN_FRAMES: usize = 1024;
 
 /// The tables in the uncompressed form `raw`, if they are valid for the layout.
 pub fn tables_from(raw: &[u8]) -> Option<Tables> {
@@ -66,7 +73,29 @@ fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
 pub(crate) struct Enc<'a> {
     pub(crate) t: &'a Tables,
     pub(crate) rans: rans::Encoder,
+    /// The words of the runs flushed so far, u32 LE.
+    pub(crate) words: Vec<u8>,
     pub(crate) raw: WordWriter,
+}
+
+impl Enc<'_> {
+    pub(crate) fn new(t: &Tables, input_len: usize) -> Enc<'_> {
+        // Symbols of a run: about 1.2 per byte of input; frames are rarely beyond 1.5 KB.
+        let syms = (input_len * 5 / 4).min(RUN_FRAMES * 1500) + model::MAX_GRANULE_SYMS;
+        Enc {
+            t,
+            rans: rans::Encoder::with_capacity(syms),
+            // About 0.6 bytes per byte of input; what is not used is not touched.
+            words: Vec::with_capacity(input_len),
+            raw: WordWriter::with_capacity(input_len / 4),
+        }
+    }
+
+    /// The rANS words of all runs (u32 LE), the last one flushed.
+    pub(crate) fn finish(&mut self) -> Vec<u8> {
+        self.rans.flush(self.t, &mut self.words);
+        std::mem::take(&mut self.words)
+    }
 }
 
 impl Coder for Enc<'_> {
@@ -93,6 +122,9 @@ impl Coder for Enc<'_> {
     fn restore(&mut self, s: [u64; 4]) {
         self.rans.truncate(s[0] as usize);
         self.raw.rollback((s[1] as usize, s[2], s[3] as u32));
+    }
+    fn restart(&mut self) {
+        self.rans.flush(self.t, &mut self.words);
     }
 }
 
@@ -130,6 +162,9 @@ impl<'b> Coder for Dec<'_, 'b> {
     fn put_back(&mut self, l: DecLocal<'b>) {
         self.rans.put_back(l.rans);
         self.raw = l.raw;
+    }
+    fn restart(&mut self) {
+        self.rans.restart();
     }
 }
 
@@ -197,21 +232,17 @@ pub struct Coded {
     /// Length of the original file.
     pub len: u64,
     pub streams: Vec<Vec<u8>>,
-    pub words: Vec<u32>,
+    /// The rANS words, u32 LE.
+    pub words: Vec<u8>,
     pub raw: Vec<u8>,
     pub raw_bits: u64,
     pub bit_lens: [u64; 3],
 }
 
 pub fn encode(d: &[u8]) -> Coded {
-    let t = tables();
-    let mut c = Enc {
-        t,
-        rans: rans::Encoder::with_capacity(d.len() * 5 / 4 + model::MAX_GRANULE_SYMS),
-        raw: WordWriter::with_capacity(d.len() / 4),
-    };
+    let mut c = Enc::new(tables(), d.len());
     let (streams, bit_lens) = encode_with(d, &mut c);
-    let words = c.rans.finish(t);
+    let words = c.finish();
     let raw_bits = c.raw.len() as u64;
     Coded { len: d.len() as u64, streams, words, raw: c.raw.finish(), raw_bits, bit_lens }
 }
@@ -305,7 +336,10 @@ pub(crate) fn model_pass<C: Coder>(s: Split, c: &mut C) -> (Vec<Vec<u8>>, [u64; 
     let mut coefs = [0i32; 576];
     let mut scf = [0u8; 39];
     let mut end = 0usize;
-    for (h, si, pay, len) in &frames {
+    for (fi, (h, si, pay, len)) in frames.iter().enumerate() {
+        if fi > 0 && fi % RUN_FRAMES == 0 {
+            c.restart();
+        }
         let (h, pay, len) = (*h, *pay, *len);
         let start = place(si, h, pay, len, end);
         let mut placed = start.is_some();
@@ -385,29 +419,36 @@ pub(crate) fn model_pass<C: Coder>(s: Split, c: &mut C) -> (Vec<Vec<u8>>, [u64; 
 }
 
 pub fn decode(c: &Coded, t: &Tables) -> Result<Vec<u8>, Error> {
+    let streams: Vec<&[u8]> = c.streams.iter().map(|s| &s[..]).collect();
+    let streams = streams.try_into().map_err(|_| Error("stream count"))?;
+    decode_parts(t, c.len, &streams, &c.words, &c.raw)
+}
+
+/// [`decode`] of the coded form in parts: the byte streams, the rANS words and the raw bits.
+pub(crate) fn decode_parts(
+    t: &Tables,
+    len: u64,
+    s: &[&[u8]; N_BYTE_STREAMS],
+    words: &[u8],
+    raw: &[u8],
+) -> Result<Vec<u8>, Error> {
     let raw_buf = {
-        let mut p = c.raw.to_vec();
-        p.resize(c.raw.len() + R_PAD, 0);
+        let mut p = Vec::with_capacity(raw.len() + R_PAD);
+        p.extend_from_slice(raw);
+        p.resize(raw.len() + R_PAD, 0);
         p
     };
-    let mut dc = Dec { rans: rans::Decoder::new(t, &c.words), raw: huff::BitBuf::new(&BitReader::new(&raw_buf, 0)) };
-    let out = decode_with(c, &mut dc)?;
+    let mut dc =
+        Dec { rans: rans::Decoder::from_le_bytes(t, words), raw: huff::BitBuf::new(&BitReader::new(&raw_buf, 0)) };
+    let mut fr = parse_frames(s[S_SEGS], s[S_HDR], len)?;
+    let mut side = InlineSide { rc: rc::Decoder::new(s[S_SIDE]), m: SideModel::new() };
+    let mut out = Assembler::new(&fr, s[S_JUNK], s[S_CRC]);
+    let w = main_pass(&mut fr, s[S_TAILBITS], s[S_RAWGR], s[S_GAPS], &mut side, &mut dc, &mut out, WINDOW)?;
+    let out = out.finish(&fr, &w)?;
     if !dc.rans.in_bounds() {
         return Err(Error("rans stream exhausted"));
     }
     Ok(out)
-}
-
-/// [`decode`] with the model's symbols and raw bits taken from `dc`.
-pub fn decode_with<C: Coder>(c: &Coded, dc: &mut C) -> Result<Vec<u8>, Error> {
-    if c.streams.len() != N_BYTE_STREAMS {
-        return Err(Error("stream count"));
-    }
-    let mut fr = parse_frames(&c.streams[S_SEGS], &c.streams[S_HDR], c.len)?;
-    let mut side = InlineSide { rc: rc::Decoder::new(&c.streams[S_SIDE]), m: SideModel::new() };
-    let s = &c.streams;
-    let r_out = main_pass(&mut fr, &s[S_TAILBITS], &s[S_RAWGR], &s[S_GAPS], &mut side, dc)?;
-    assemble(&fr, &s[S_JUNK], &s[S_CRC], &r_out)
 }
 
 /// The file structure: junk and frame runs, and the frames.
@@ -503,16 +544,133 @@ impl SideSrc for InlineSide<'_> {
     }
 }
 
-/// Rebuilds the reservoir (the main data of all frames) and completes the side information
-/// of the frames (main_data_begin, part2_3_length).
-pub(crate) fn main_pass<C: Coder, S: SideSrc>(
+/// What the main pass hands the reservoir to as it is written.
+pub(crate) trait Sink {
+    /// Before frame `fi`, whose predecessors' side information is complete, and at the end
+    /// (`fi` the number of frames): the reservoir written so far in `w`, of which the sink may
+    /// drop what it no longer needs.
+    fn ready(&mut self, fr: &Frames, fi: usize, w: &mut FastWriter);
+}
+
+/// The reservoir kept whole.
+impl Sink for () {
+    #[inline(always)]
+    fn ready(&mut self, _fr: &Frames, _fi: usize, _w: &mut FastWriter) {}
+}
+
+/// Initial size of the reservoir's buffer for [`Assembler`] (it grows as needed).
+const WINDOW: usize = 1 << 20;
+
+/// Bytes of the reservoir dropped at a time by [`Assembler`], at least.
+const DISCARD_MIN: usize = 256 << 10;
+
+/// The output file, written as the main pass goes: junk, and per frame header, CRC, side
+/// information and payload, each frame once its side information is complete and its payload
+/// in the reservoir is final. The reservoir before the next frame's payload is dropped. The
+/// first error is kept for the end of the main pass, whose errors come first.
+pub(crate) struct Assembler<'a> {
+    junk_s: &'a [u8],
+    crc: Rd<'a>,
+    out: Vec<u8>,
+    /// The next junk to write, and its offset in the junk stream.
+    k: usize,
+    jp: usize,
+    /// Frames left in the current run, and the next frame to write.
+    left: usize,
+    fi: usize,
+    err: Option<Error>,
+}
+
+impl<'a> Assembler<'a> {
+    pub(crate) fn new(fr: &Frames, junk_s: &'a [u8], crc_s: &'a [u8]) -> Assembler<'a> {
+        let total = junk_s.len() + fr.flens.iter().sum::<usize>();
+        Assembler {
+            junk_s,
+            crc: Rd { d: crc_s, p: 0 },
+            out: Vec::with_capacity(total),
+            k: 0,
+            jp: 0,
+            left: 0,
+            fi: 0,
+            err: None,
+        }
+    }
+
+    /// Writes the frames before `ready` whose payloads lie within `r` (the reservoir from byte
+    /// `base`), and the junk before them and after the last.
+    fn write(&mut self, fr: &Frames, ready: usize, base: usize, r: &[u8]) -> Result<(), Error> {
+        loop {
+            while self.left == 0 {
+                let Some(&j) = fr.junk.get(self.k) else { return Ok(()) };
+                self.out.extend_from_slice(self.junk_s.get(self.jp..self.jp + j).ok_or(Error("junk"))?);
+                self.jp += j;
+                self.left = fr.runs.get(self.k).map_or(0, |r| r.0);
+                self.k += 1;
+            }
+            let (h, si, pay, len) = &fr.frames[self.fi];
+            if self.fi >= ready || pay + len > base + r.len() {
+                return Ok(());
+            }
+            let hb = h.0.to_be_bytes();
+            self.out.extend_from_slice(&hb);
+            let mut sw = BitWriter::new();
+            si.write(*h, &mut sw);
+            let side = sw.finish();
+            if h.protected() {
+                if self.crc.u8()? != 0 {
+                    self.out.extend_from_slice(&crc16(&hb, &side).to_be_bytes());
+                } else {
+                    self.out.extend_from_slice(self.crc.bytes(2)?);
+                }
+            }
+            self.out.extend_from_slice(&side);
+            self.out.extend_from_slice(&r[pay - base..pay + len - base]);
+            self.fi += 1;
+            self.left -= 1;
+        }
+    }
+
+    /// The output, after the main pass (the whole reservoir written to `w`).
+    pub(crate) fn finish(mut self, fr: &Frames, w: &FastWriter) -> Result<Vec<u8>, Error> {
+        if self.err.is_none() {
+            let (base, r) = w.done();
+            self.write(fr, fr.frames.len(), base, r)?;
+        }
+        self.err.map_or(Ok(self.out), Err)
+    }
+}
+
+impl Sink for Assembler<'_> {
+    fn ready(&mut self, fr: &Frames, fi: usize, w: &mut FastWriter) {
+        if self.err.is_some() {
+            return;
+        }
+        let (base, r) = w.done();
+        if let Err(e) = self.write(fr, fi, base, r) {
+            self.err = Some(e);
+            return;
+        }
+        let keep = fr.frames.get(self.fi).map_or(base + r.len(), |f| f.2.min(base + r.len()));
+        if keep - base >= DISCARD_MIN {
+            w.discard(keep);
+        }
+    }
+}
+
+/// Rebuilds the reservoir (the main data of all frames) into a writer of `capacity` bytes to
+/// begin with, handing it to `sink` as it goes, and completes the side information of the
+/// frames (main_data_begin, part2_3_length). Returns the writer, the whole reservoir written.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn main_pass<C: Coder, S: SideSrc, K: Sink>(
     fr: &mut Frames,
     tail: &[u8],
     raw_gr: &[u8],
     gaps: &[u8],
     side: &mut S,
     dc: &mut C,
-) -> Result<Vec<u8>, Error> {
+    sink: &mut K,
+    capacity: usize,
+) -> Result<FastWriter, Error> {
     let pad = |v: &[u8]| {
         let mut p = v.to_vec();
         p.resize(v.len() + R_PAD, 0);
@@ -525,11 +683,16 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc>(
         (BitReader::new(&tail_buf, 0), BitReader::new(&raw_gr_buf, 0), BitReader::new(&gaps_buf, 0));
     let r_len = fr.r_len;
 
-    let mut w = FastWriter::with_capacity(r_len + 8);
+    let mut w = FastWriter::with_capacity(capacity);
     let mut st = State::new();
     let mut end = 0usize;
     let mut scf = [0u8; 39];
-    for (h, si, pay, len) in fr.frames.iter_mut() {
+    for fi in 0..fr.frames.len() {
+        sink.ready(fr, fi, &mut w);
+        if fi > 0 && fi % RUN_FRAMES == 0 {
+            dc.restart();
+        }
+        let (h, si, pay, len) = &mut fr.frames[fi];
         let (h, pay, len) = (*h, *pay, *len);
         let mut placed = false;
         let mut resid = 0;
@@ -607,37 +770,14 @@ pub(crate) fn main_pass<C: Coder, S: SideSrc>(
         return Err(Error("side stream exhausted"));
     }
     w.copy(&mut gaps, r_len * 8 - end);
-    Ok(w.finish())
+    sink.ready(fr, fr.frames.len(), &mut w);
+    Ok(w)
 }
 
-/// The output file: junk, and per frame header, CRC, side information and main data.
+/// The output file: junk, and per frame header, CRC, side information and main data, from
+/// the whole reservoir `r_out`.
 pub(crate) fn assemble(fr: &Frames, junk_s: &[u8], crc_s: &[u8], r_out: &[u8]) -> Result<Vec<u8>, Error> {
-    let mut crc_r = Rd { d: crc_s, p: 0 };
-    let total = junk_s.len() + fr.flens.iter().sum::<usize>();
-    let mut out = Vec::with_capacity(total);
-    let (mut fi, mut jp) = (0usize, 0usize);
-    for (k, &j) in fr.junk.iter().enumerate() {
-        out.extend_from_slice(junk_s.get(jp..jp + j).ok_or(Error("junk"))?);
-        jp += j;
-        let Some(&(n, _)) = fr.runs.get(k) else { break };
-        for _ in 0..n {
-            let (h, si, pay, len) = &fr.frames[fi];
-            let hb = h.0.to_be_bytes();
-            out.extend_from_slice(&hb);
-            let mut sw = BitWriter::new();
-            si.write(*h, &mut sw);
-            let side = sw.finish();
-            if h.protected() {
-                if crc_r.u8()? != 0 {
-                    out.extend_from_slice(&crc16(&hb, &side).to_be_bytes());
-                } else {
-                    out.extend_from_slice(crc_r.bytes(2)?);
-                }
-            }
-            out.extend_from_slice(&side);
-            out.extend_from_slice(&r_out[*pay..pay + len]);
-            fi += 1;
-        }
-    }
-    Ok(out)
+    let mut a = Assembler::new(fr, junk_s, crc_s);
+    a.write(fr, fr.frames.len(), 0, r_out)?;
+    Ok(a.out)
 }

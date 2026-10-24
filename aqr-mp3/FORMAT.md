@@ -1,4 +1,4 @@
-# aqr-mp3 format: module `mp3-recons`, version 2
+# aqr-mp3 format: module `mp3-recons`, version 3
 
 This document specifies the module `mp3-recons` of entry formulas (aqr-formula), which
 rebuilds an MP3 file from a smaller representation, completely enough to write an
@@ -52,7 +52,9 @@ External references:
 
 ## 2. Module
 
-- **Module**: name `mp3-recons`, version 2.
+- **Module**: name `mp3-recons`, version 3. Version 2 was the same with the rANS stream in a
+  single run (section 8) however many frames there are; it is version 3 for files of up to
+  1024 frames.
 - **Resources**: exactly one, the frequency tables of section 8.4 in their decompressed form
   (1 540 828 bytes, SHA-256 given there). A decoder MUST fail unless there is exactly one
   resource, it has exactly that size, its layout id is the one given in section 8.4 and
@@ -540,8 +542,12 @@ coded. The encoder codes the values that the decoder reads, with `resid`, `big_v
 ## 8. rANS coder and frequency tables
 
 Scalefactors and spectral values of coded granules are coded with static per-context
-frequency tables through one rANS stream: eight interleaved 64-bit states, 12-bit
-probabilities, 32-bit renormalisation.
+frequency tables through a rANS stream: eight interleaved 64-bit states, 12-bit
+probabilities, 32-bit renormalisation. The stream is in *runs* of 1024 frames: the symbols
+of frames `1024 k` to `1024 k + 1023` (frames counted from 0 over the whole file, placed or
+not) form run `k`, coded on their own and their words following those of run `k − 1`. Every
+file has at least run 0, which holds all symbols of a file of up to 1024 frames. Runs bound
+what an encoder holds at a time; they cost 16 words each.
 
 ### 8.1 Frequency tables and slots
 
@@ -580,8 +586,11 @@ inverse mapping.
 
 ```text
 w[k] = rANS word k, for k < n_words; 0 for k ≥ n_words
-x[k] = w[2k] << 32 | w[2k + 1]   for k in 0..8
-pos = 16; lane = 0
+pos = 0; start()
+
+start():                                  (at the start of each run)
+    x[k] = w[pos + 2k] << 32 | w[pos + 2k + 1]   for k in 0..8
+    pos += 16; lane = 0
 
 get(c):
     z = x[lane] & 4095
@@ -593,24 +602,26 @@ get(c):
     return s
 ```
 
-Symbol number `j` of the file (counting from 0 over the whole file) uses state `j mod 8`.
-When the main pass is over, `pos` MUST be at most `n_words`.
+Symbol number `j` of a run (counting from 0 in the run) uses state `j mod 8`. `start` is
+called once before the main pass and before frame `1024 k` for every `k ≥ 1` (10.2). When
+the main pass is over, `pos` MUST be at most `n_words`.
 
 ### 8.3 Encoder
 
-The encoder collects the sequence of (context, symbol) of the whole file and encodes it in
-reverse:
+The encoder collects the sequence of (context, symbol) of each run and encodes it in
+reverse, appending the run's words to those of the runs before:
 
 ```text
 x[k] = 2^31 for k in 0..8; out = []          (words, in emission order)
 for j = (number of symbols − 1) down to 0:
-    (c, s) = symbol j; k = j mod 8; f = f_c[s]
+    (c, s) = symbol j of the run; k = j mod 8; f = f_c[s]
     if x[k] ≥ f × 2^51: out.push(x[k] mod 2^32); x[k] = x[k] >> 32
     x[k] = ((x[k] / f) << 12) + slot(s, x[k] mod f)
 words = [x[0] >> 32, x[0] mod 2^32, x[1] >> 32, ..., x[7] mod 2^32] ++ reverse(out)
 ```
 
-With no symbols at all the words are the 16 words of eight states equal to 2^31.
+A run without symbols is the 16 words of eight states equal to 2^31. With exactly the
+words of all runs, a decoder's `pos` ends at `n_words`.
 
 ### 8.4 Built-in tables
 
@@ -623,9 +634,10 @@ reference encoder takes from `model/builtin.bin`, a zstd stream that decompresse
 
 The layout id is a 32-bit FNV-1a over the alphabet sizes as whole u32 values (`h =
 0x811c9dc5`; per value `h = (h XOR n) × 0x01000193 mod 2^32`). It guards against tables
-for a different context layout. Version 2 is defined with these tables as its resource; any
-change to the tables the encoder attaches or to the context layout needs a new module
-version.
+for a different context layout. The tables are the resource, not part of the module: other
+frequencies for the same layout (retrained tables) are another resource of the same version,
+which a decoder takes as it is given; only a change to the context layout (section 9.1), and
+so to the layout id, needs a new module version.
 
 ## 9. Coefficient model
 
@@ -787,7 +799,8 @@ The output `R` is a bit string built front to back; `end` as above.
 
 ```text
 end = 0
-for each frame (header h, offset pay, length len), in file order:
+for each frame fi (header h, offset pay, length len), in file order:
+    if fi > 0 and fi mod 1024 = 0: start() the next rANS run (8.2)
     frame fields (7.2)
     if not placed:
         for gr, ch: granule fields (7.3) with placed = false

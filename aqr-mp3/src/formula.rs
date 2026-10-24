@@ -2,12 +2,12 @@
 //! [`MODULE`] on ten input slots, the streams of the coded form ([`crate::codec::Coded`])
 //! stored raw, and no parameters. FORMAT.md specifies it.
 
-use crate::codec::{self, Coded, N_BYTE_STREAMS};
+use crate::codec::{self, N_BYTE_STREAMS};
 use crate::par;
 use aqr_formula::{Formula, Kind, Module, Node, Resource};
 use std::sync::OnceLock;
 
-pub const MODULE: Module = Module { name: "mp3-recons", version: 2 };
+pub const MODULE: Module = Module { name: "mp3-recons", version: 3 };
 
 #[derive(Debug)]
 pub struct Error(pub String);
@@ -36,13 +36,13 @@ const CLASSES: [(&str, Kind); SLOTS] = [
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let c = std::panic::catch_unwind(|| {
         let c = if threads > 1 && input.len() >= par::PAR_MIN { par::encode(input) } else { codec::encode(input) };
-        let n: usize = c.streams.iter().map(Vec::len).sum::<usize>() + c.words.len() * 4 + c.raw.len();
+        let n: usize = c.streams.iter().map(Vec::len).sum::<usize>() + c.words.len() + c.raw.len();
         (n + 64 < input.len()).then_some(c)
     })
     .ok()??;
     let mut f = Formula::default();
     let mut slots: Vec<Vec<u8>> = c.streams;
-    slots.push(c.words.iter().flat_map(|w| w.to_le_bytes()).collect());
+    slots.push(c.words);
     slots.push(c.raw);
     let inputs = slots.into_iter().zip(CLASSES).map(|(d, (class, kind))| f.push_as(class, kind, d)).collect();
     f.root = Node::apply_with(MODULE, vec![resource()], Vec::new(), inputs, input.len() as u64);
@@ -52,7 +52,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 /// The module's resource: the built-in frequency tables, uncompressed.
 pub fn resource() -> Resource {
     static R: OnceLock<Resource> = OnceLock::new();
-    R.get_or_init(|| Resource::new(codec::builtin_raw())).clone()
+    R.get_or_init(|| Resource::new(codec::builtin_raw().clone())).clone()
 }
 
 /// The module: the file of `len` bytes rebuilt from the ten `inputs` and the `resources` (the
@@ -69,25 +69,24 @@ pub fn decode(
         return Err(corrupt("params"));
     }
     let [res] = resources else { return Err(corrupt("resources")) };
-    let t = codec::tables_from(res).ok_or_else(|| corrupt("tables"))?;
+    // The built-in tables, built once for the process, unless the resource is another.
+    let own;
+    let t = if *res == &codec::builtin_raw()[..] {
+        codec::tables()
+    } else {
+        own = codec::tables_from(res).ok_or_else(|| corrupt("tables"))?;
+        &own
+    };
     let &[.., words, raw] = inputs else { return Err(corrupt("inputs")) };
     if inputs.len() != SLOTS || words.len() % 4 != 0 {
         return Err(corrupt("inputs"));
     }
     let total: usize = inputs.iter().map(|s| s.len()).sum();
+    let streams: [&[u8]; N_BYTE_STREAMS] = std::array::from_fn(|i| inputs[i]);
     let out = if threads <= 1 || total < par::PAR_MIN {
-        let c = Coded {
-            len,
-            streams: inputs[..N_BYTE_STREAMS].iter().map(|s| s.to_vec()).collect(),
-            words: words.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect(),
-            raw: raw.to_vec(),
-            raw_bits: raw.len() as u64 * 8,
-            bit_lens: [0; 3],
-        };
-        codec::decode(&c, &t).map_err(|e| corrupt(e.0))?
+        codec::decode_parts(t, len, &streams, words, raw).map_err(|e| corrupt(e.0))?
     } else {
-        let streams: [&[u8]; N_BYTE_STREAMS] = std::array::from_fn(|i| inputs[i]);
-        par::decode(&t, len, &streams, words, raw, threads).map_err(|e| corrupt(e.0))?
+        par::decode(t, len, &streams, words, raw, threads).map_err(|e| corrupt(e.0))?
     };
     if out.len() as u64 != len {
         return Err(corrupt("length"));

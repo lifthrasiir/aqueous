@@ -30,6 +30,10 @@ pub trait Coder {
         [0; 4]
     }
     fn restore(&mut self, _s: [u64; 4]) {}
+    /// Called before every frame whose index is a positive multiple of
+    /// [`crate::codec::RUN_FRAMES`]: the rANS stream starts a new run.
+    #[inline(always)]
+    fn restart(&mut self) {}
 }
 
 /// At most this many symbols and raw bits per granule.

@@ -18,7 +18,9 @@ const _: () = assert!(PROB_BITS == 12, "alias entries hold 12-bit frequencies an
 /// of the alphabet rounded up to a power of two, at least 4): bucket `i` covers `B` slots,
 /// the first `cutoff` of them belong to symbol `i`, the rest to its alias. Within a symbol,
 /// ranks count its own bucket's slots first, then its alias slots in bucket order. The
-/// encoder maps ranks back to slots with `inv`, built per context on first use.
+/// encoder maps ranks back to slots with `inv`, built per context on first use. The
+/// decoder's and the encoder's tables are built on first use, so that a decoder does not
+/// pay for the encoder's.
 pub struct Tables {
     /// Context `c` has alphabet `n[c]`, its symbols at `off[c]..off[c] + n[c]`.
     pub off: Vec<u32>,
@@ -27,7 +29,11 @@ pub struct Tables {
     /// The first context with the same frequencies; contexts share tables with it.
     canon: Vec<u32>,
     dec: OnceLock<DecTables>,
-    /// Encoder, by symbol: `freq | rcp_shift << 13 | slot_base << 17`, the symbol's slots
+    enc: OnceLock<EncTables>,
+}
+
+struct EncTables {
+    /// By symbol: `freq | rcp_shift << 13 | slot_base << 17`, the symbol's slots
     /// by rank at `inv[slot_base..slot_base + freq]`.
     enc: Vec<u64>,
     /// Reciprocals (see [`reciprocal`]) by frequency.
@@ -43,7 +49,7 @@ pub struct Tables {
 
 // SAFETY: `inv` is only written under `inv_lock` for contexts whose `inv_ready` flag is not
 // yet set, and only read for contexts whose flag is set (with acquire/release ordering).
-unsafe impl Sync for Tables {}
+unsafe impl Sync for EncTables {}
 
 struct DecTables {
     /// Per context: first bucket in `alias` << 4 | log2 of the bucket size.
@@ -124,41 +130,36 @@ impl Tables {
         let mut flat = Vec::with_capacity(total);
         let mut canon = Vec::with_capacity(freqs.len());
         let mut seen: std::collections::HashMap<&[u16], u32> = Default::default();
-        let mut enc = vec![0u64; total];
         for (c, f) in freqs.iter().enumerate() {
             assert!(!f.is_empty() && f.len() <= 256);
             assert_eq!(f.iter().map(|&x| x as u32).sum::<u32>(), PROB_SCALE);
-            let o = flat.len();
-            off.push(o as u32);
+            assert!(f.iter().all(|&x| x >= 1));
+            off.push(flat.len() as u32);
             n.push(f.len() as u16);
             flat.extend_from_slice(f);
-            let k = *seen.entry(&f[..]).or_insert(c as u32);
-            canon.push(k);
-            let mut cum = 0u64;
-            for (i, &fr) in f.iter().enumerate() {
-                assert!(fr >= 1);
-                let sh = rcp_shift(fr as u64);
-                enc[o + i] = fr as u64 | (sh as u64) << 13 | (k as u64 * PROB_SCALE as u64 + cum) << 17;
-                cum += fr as u64;
+            canon.push(*seen.entry(&f[..]).or_insert(c as u32));
+        }
+        Tables { off, n, freqs: flat, canon, dec: OnceLock::new(), enc: OnceLock::new() }
+    }
+
+    fn enc(&self) -> &EncTables {
+        self.enc.get_or_init(|| {
+            let mut enc = vec![0u64; self.freqs.len()];
+            for c in 0..self.n.len() {
+                let (o, k) = (self.off[c] as usize, self.canon[c] as u64);
+                let mut cum = 0u64;
+                for (i, &fr) in self.freqs(c).iter().enumerate() {
+                    let sh = rcp_shift(fr as u64);
+                    enc[o + i] = fr as u64 | (sh as u64) << 13 | (k * PROB_SCALE as u64 + cum) << 17;
+                    cum += fr as u64;
+                }
             }
-        }
-        let rcp: Vec<u64> = (0..=PROB_SCALE as u64).map(|f| reciprocal(f).0).collect();
-        // Zeroed allocation: pages are only touched for the contexts used.
-        let inv = std::cell::UnsafeCell::new(vec![0u16; freqs.len() * PROB_SCALE as usize]);
-        let inv_ready = (0..freqs.len()).map(|_| AtomicBool::new(false)).collect();
-        Tables {
-            off,
-            n,
-            freqs: flat,
-            canon,
-            dec: OnceLock::new(),
-            enc,
-            rcp,
-            inv,
-            inv_ready,
-            inv_lock: Mutex::new(()),
-            inv_all: AtomicBool::new(false),
-        }
+            let rcp: Vec<u64> = (0..=PROB_SCALE as u64).map(|f| reciprocal(f).0).collect();
+            // Zeroed allocation: pages are only touched for the contexts used.
+            let inv = std::cell::UnsafeCell::new(vec![0u16; self.n.len() * PROB_SCALE as usize]);
+            let inv_ready = (0..self.n.len()).map(|_| AtomicBool::new(false)).collect();
+            EncTables { enc, rcp, inv, inv_ready, inv_lock: Mutex::new(()), inv_all: AtomicBool::new(false) }
+        })
     }
 
     /// log2 of the number of alias buckets of every context, if all have the same
@@ -257,11 +258,12 @@ impl Tables {
     /// Makes `inv` available for context `c`.
     fn ensure_inv(&self, c: usize) {
         let k = self.canon[c] as usize;
-        if self.inv_ready[k].load(Ordering::Acquire) {
+        let e = self.enc();
+        if e.inv_ready[k].load(Ordering::Acquire) {
             return;
         }
-        let _g = self.inv_lock.lock().unwrap_or_else(|e| e.into_inner());
-        if self.inv_ready[k].load(Ordering::Relaxed) {
+        let _g = e.inv_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if e.inv_ready[k].load(Ordering::Relaxed) {
             return;
         }
         let f = self.freqs(k);
@@ -274,7 +276,7 @@ impl Tables {
         }
         // SAFETY: entries of context k are written only here, under the lock, before the
         // flag is released.
-        let p = unsafe { (*self.inv.get()).as_mut_ptr() };
+        let p = unsafe { (*e.inv.get()).as_mut_ptr() };
         let put = |i: usize, v: usize| unsafe { *p.add(i) = v as u16 };
         for i in 0..al.a {
             let cu = al.cutoff[i] as usize;
@@ -290,7 +292,7 @@ impl Tables {
                 }
             }
         }
-        self.inv_ready[k].store(true, Ordering::Release);
+        e.inv_ready[k].store(true, Ordering::Release);
     }
 }
 
@@ -351,10 +353,13 @@ fn div_rcp(x: u64, freq: u64, rcp: u64, shift: u32) -> u64 {
     if freq == 1 { x } else { q }
 }
 
-/// Collects symbols (as indices into `Tables::enc`) and encodes them at the end.
+/// Collects symbols (as indices into the encoder's tables) and encodes them at the end, or at
+/// each [`Encoder::flush`].
 #[derive(Default)]
 pub struct Encoder {
     syms: Vec<u32>,
+    /// The words of one flush, written from the end.
+    buf: Vec<u32>,
     /// Contexts used, one bit each, through [`Encoder::local_tracked`].
     used: Vec<u64>,
     /// Whether symbols were added through [`Encoder::local`] (contexts not tracked).
@@ -363,7 +368,7 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn with_capacity(n: usize) -> Self {
-        Encoder { syms: Vec::with_capacity(n), used: Vec::new(), untracked: false }
+        Encoder { syms: Vec::with_capacity(n), buf: Vec::new(), used: Vec::new(), untracked: false }
     }
 
     /// Makes room for `n` more symbols.
@@ -440,17 +445,42 @@ impl Encoder {
     }
 
     /// Encodes all symbols; the words come out in decoding order.
-    #[inline(never)]
     pub fn finish(&self, t: &Tables) -> Vec<u32> {
+        let mut out = vec![0u32; self.syms.len() + 2 * LANES];
+        let w = self.encode(t, &mut out);
+        out.drain(..w);
+        out
+    }
+
+    /// Encodes the symbols so far, appending the words to `out` in decoding order as u32 LE,
+    /// and starts anew: the decoder takes the words that follow with [`Decoder::restart`].
+    /// The symbols' memory is kept for the next ones.
+    pub fn flush(&mut self, t: &Tables, out: &mut Vec<u8>) {
+        let mut buf = std::mem::take(&mut self.buf);
+        buf.clear();
+        buf.resize(self.syms.len() + 2 * LANES, 0);
+        let w = self.encode(t, &mut buf);
+        out.reserve(4 * (buf.len() - w));
+        buf[w..].iter().for_each(|x| out.extend_from_slice(&x.to_le_bytes()));
+        self.buf = buf;
+        self.syms.clear();
+        self.untracked = false;
+    }
+
+    /// Encodes the symbols into the end of `out` (at least 2 × LANES words more than the
+    /// symbols); returns where the words start.
+    #[inline(never)]
+    fn encode(&self, t: &Tables, out: &mut [u32]) -> usize {
+        let et = t.enc();
         // The inverse maps (kept for the process): with few contexts all of them, once,
         // otherwise those of the contexts used.
         let nc = t.n.len();
         if nc <= INV_ALL_MAX {
-            if !t.inv_all.load(Ordering::Acquire) {
+            if !et.inv_all.load(Ordering::Acquire) {
                 for c in 0..nc {
                     t.ensure_inv(c);
                 }
-                t.inv_all.store(true, Ordering::Release);
+                et.inv_all.store(true, Ordering::Release);
             }
         } else {
             let mut used = std::borrow::Cow::Borrowed(&self.used);
@@ -459,7 +489,7 @@ impl Encoder {
                 let u = used.to_mut();
                 u.resize(nc.div_ceil(64), 0);
                 for &s in &self.syms {
-                    let k = (t.enc[s as usize] >> 17 >> PROB_BITS) as usize;
+                    let k = (et.enc[s as usize] >> 17 >> PROB_BITS) as usize;
                     u[k >> 6] |= 1 << (k & 63);
                 }
             }
@@ -472,15 +502,14 @@ impl Encoder {
             }
         }
         let n = self.syms.len();
-        let cap = n + 2 * LANES;
-        let mut out = vec![0u32; cap];
-        let mut w = cap;
+        assert!(out.len() >= n + 2 * LANES);
+        let mut w = out.len();
         let mut x = [RANS_L; LANES];
         let o = out.as_mut_ptr();
-        let enc = t.enc.as_ptr();
+        let enc = et.enc.as_ptr();
         // SAFETY: the contexts used are ready (above) and no longer written.
-        let inv = unsafe { (*t.inv.get()).as_ptr() };
-        let rcp = t.rcp.as_ptr();
+        let inv = unsafe { (*et.inv.get()).as_ptr() };
+        let rcp = et.rcp.as_ptr();
         // SAFETY: symbol indices come from `put` (below the table size), slots of a symbol
         // lie within `inv`, and each symbol writes at most one word, so `w` stays >= 2 * LANES.
         #[inline(always)]
@@ -519,8 +548,7 @@ impl Encoder {
             out[w] = (x[k] >> 32) as u32;
             out[w + 1] = x[k] as u32;
         }
-        out.drain(..w);
-        out
+        w
     }
 }
 
@@ -571,15 +599,38 @@ pub struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     pub fn new(t: &'a Tables, words: &[u32]) -> Decoder<'a> {
-        let mut src = Vec::with_capacity(words.len() + SRC_PAD);
+        let mut src = Vec::with_capacity(words.len().max(2 * LANES) + SRC_PAD);
         src.extend_from_slice(words);
-        src.resize(words.len().max(2 * LANES) + SRC_PAD, 0);
-        let mut x = [0u64; LANES];
-        for k in 0..LANES {
-            x[k] = (src[2 * k] as u64) << 32 | src[2 * k + 1] as u64;
-        }
+        Decoder::from_vec(t, src)
+    }
+
+    /// [`Decoder::new`] taking the words as they are (padded in place).
+    pub fn from_vec(t: &'a Tables, mut src: Vec<u32>) -> Decoder<'a> {
+        let real_len = src.len();
+        src.resize(real_len.max(2 * LANES) + SRC_PAD, 0);
         let src_max = src.len() - 1;
-        Decoder { x, lane: 0, src, pos: 2 * LANES, src_max, t, real_len: words.len() }
+        let mut d = Decoder { x: [0; LANES], lane: 0, src, pos: 0, src_max, t, real_len };
+        d.restart();
+        d
+    }
+
+    /// [`Decoder::new`] of words as u32 LE (`bytes`, a multiple of 4 long).
+    pub fn from_le_bytes(t: &'a Tables, bytes: &[u8]) -> Decoder<'a> {
+        assert!(bytes.len().is_multiple_of(4));
+        let mut src = Vec::with_capacity((bytes.len() / 4).max(2 * LANES) + SRC_PAD);
+        src.extend(bytes.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())));
+        Decoder::from_vec(t, src)
+    }
+
+    /// Takes the states of the next run of words ([`Encoder::flush`]): the words after the
+    /// last one read, 0 past the end.
+    pub fn restart(&mut self) {
+        for k in 0..LANES {
+            let w = |i: usize| self.src.get(self.pos + i).map_or(0, |&w| w as u64);
+            self.x[k] = w(2 * k) << 32 | w(2 * k + 1);
+        }
+        self.pos += 2 * LANES;
+        self.lane = 0;
     }
 
     /// True if the decoder has not read past the encoded words.
@@ -748,7 +799,11 @@ pub mod builtin {
         if data.is_empty() {
             return None;
         }
-        let size = zstd::bulk::Decompressor::upper_bound(data).unwrap_or(1 << 24);
+        // The size the frame tells, else a bound (`upper_bound` is only an estimate there).
+        let size = match zstd::zstd_safe::get_frame_content_size(data) {
+            Ok(Some(n)) => usize::try_from(n).ok()?,
+            _ => zstd::bulk::Decompressor::upper_bound(data).unwrap_or(1 << 24),
+        };
         zstd::bulk::decompress(data, size).ok()
     }
 
@@ -873,6 +928,70 @@ mod tests {
             assert_eq!(d.get(c), s);
         }
         assert!(d.in_bounds());
+    }
+
+    /// Runs of symbols flushed one after the other decode with a restart between them, and a
+    /// single run as [`Encoder::finish`] gives it.
+    #[test]
+    fn flush_restart() {
+        let freqs: Vec<Vec<u16>> = [3usize, 16, 200]
+            .iter()
+            .map(|&n| {
+                let mut f = vec![0u16; n];
+                normalize(&(0..n as u64).map(|i| i * i % 13 + 1).collect::<Vec<_>>(), &mut f);
+                f
+            })
+            .collect();
+        let t = Tables::new(&freqs);
+        let mut seed = 5u64;
+        let runs: Vec<Vec<(usize, u32)>> = [0usize, 1, 7, 8, 1000, 0, 33]
+            .iter()
+            .map(|&n| {
+                (0..n)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        let c = (seed >> 50) as usize % 3;
+                        (c, (seed >> 20) as u32 % t.n[c] as u32)
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut e = Encoder::default();
+        let mut words = Vec::new();
+        for run in &runs {
+            for &(c, s) in run {
+                e.put(&t, c, s);
+            }
+            if run.len() == 1000 {
+                assert_eq!(e.finish(&t).iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<u8>>(), {
+                    let mut w = Vec::new();
+                    let mut e2 = Encoder::default();
+                    run.iter().for_each(|&(c, s)| e2.put(&t, c, s));
+                    e2.flush(&t, &mut w);
+                    w
+                });
+            }
+            e.flush(&t, &mut words);
+        }
+        let mut d = Decoder::from_le_bytes(&t, &words);
+        for (i, run) in runs.iter().enumerate() {
+            if i > 0 {
+                d.restart();
+            }
+            for &(c, s) in run {
+                assert_eq!(d.get(c), s);
+            }
+        }
+        assert!(d.in_bounds());
+        // One word short: out of bounds.
+        let mut d = Decoder::from_le_bytes(&t, &words[..words.len() - 4]);
+        for (i, run) in runs.iter().enumerate() {
+            if i > 0 {
+                d.restart();
+            }
+            run.iter().for_each(|&(c, _)| _ = d.get(c));
+        }
+        assert!(!d.in_bounds());
     }
 
     /// Many contexts (inverse maps of the used ones only), some sharing tables, all of the
