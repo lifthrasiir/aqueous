@@ -12,10 +12,8 @@ and the design is argued in `xform-design.md`.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `aqr-obj bench`.
   - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
 - aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above),
-  and aqr-raw's images measured then.
-- aqr-exe alone was measured on another machine, an AMD Ryzen 7 9700X under Windows 11 (at
-  `aa7a327`, otherwise as above): its speeds are not comparable to the others'. Its memory is
-  the peak working set.
+  and aqr-raw's images measured then; aqr-exe too, on copies of files from a Windows
+  machine.
 - Samples: files of 256 KiB or more from each crate's `corpus/` (aqr-jpeg: `samples/` and the
   JPEG files of codec-corpus), taken in the order of their paths' hashes up to about 400 MB.
 - Columns:
@@ -32,7 +30,10 @@ and the design is argued in `xform-design.md`.
   - **Memory**: peak RSS over input size, for one process that compresses, checks and
     decompresses. It includes the input, the archive and the output, so its floor is about
     2×. Given as the median over files of 8 MB or more, or else as a linear fit
-    (fixed MB + k × input).
+    (fixed MB + k × input). macOS's allocator keeps freed large blocks resident for reuse,
+    and they count: with that cache off (`MallocLargeCache=0`), aqr-exe's large binaries take
+    4.6× instead of 6.8×, and the largest PDF of aqr-pdf's corpus (179 MB) 954 MB instead of
+    1.38 GB.
 
 ## Done
 
@@ -84,7 +85,7 @@ reservoir is rebuilt.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| PE, Mach-O (x86, x86-64, ARM64) | aqr-exe | 261 files, 401 MB | 0.339 | 0.383 | 17 | 336 | 5.3× (14 MB + 4.7×) | **Ryzen 7 9700X, not the M4** (above). Samples from `Program Files` and `System32`; 121 files not coded (108 of them .NET). 11 large binaries (1529 MB): 0.306 at 36 and 268 MB/s, 4.7×. The disfilter alone: 238 and 296 MB/s, −20% under zstd -9. Mach-O, thin or universal, and ARM64 code (in Mach-O and PE): VS Code's 34 universal binaries (493 MB) −16.7% against the files as they are; the ARM64 filter alone −17.6% under zstd -9 (xz's BCJ −12.1%). No ELF yet |
+| PE, Mach-O (x86, x86-64, ARM64) | aqr-exe | 259 files, 391 MB | 0.339 | 0.381 | 29 | 478 | 9.3× (28 MB + 7.4×) | samples from `Program Files` and `System32` of a Windows machine; 120 files not coded (108 of them .NET). 11 large binaries (1529 MB): 0.306 at 58 and 347 MB/s, 6.8×. The disfilter alone: 292 and 336 MB/s, −20% under zstd -9. Mach-O, thin or universal, and ARM64 code (in Mach-O and PE): VS Code's 34 universal binaries (493 MB) −16.7% against the files as they are; the ARM64 filter alone −17.6% under zstd -9 (xz's BCJ −12.1%). No ELF yet |
 
 ### In progress or planned
 

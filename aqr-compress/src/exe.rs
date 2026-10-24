@@ -62,7 +62,7 @@ fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize,
         let section = &d[off..off + size];
         let apply = match arch {
             Arch::X86(is64) => {
-                let Some(st) = x86::encode(section.to_vec(), va, is64) else { continue };
+                let Some(st) = x86::encode(section, va, is64) else { continue };
                 let params = x86_params(st.origin(), st.sentinel_size(), is64);
                 let inputs = std::iter::zip(st.streams(), x86::STREAM_NAMES)
                     .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.clone()))

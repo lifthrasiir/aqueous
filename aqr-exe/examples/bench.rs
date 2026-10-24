@@ -3,8 +3,9 @@
 //! usage: aqr-exe-bench [-l LEVEL] [--no-zstd] [NAME|PATH ...]
 //!
 //! Without arguments every corpus entry that exists is run; a NAME selects corpus entries
-//! by substring, and an existing PATH is run as is. Each executable section is filtered,
-//! verified to round-trip, and compressed with zstd before and after filtering.
+//! by substring (found on this machine, or else under `corpus/large/`), and an existing PATH
+//! is run as is. Each executable section is filtered, verified to round-trip, and compressed
+//! with zstd before and after filtering.
 //! Raw compressed sizes don't depend on the filter and are cached under `target/`.
 
 use std::collections::HashMap;
@@ -81,13 +82,26 @@ fn wildcard_match(pat: &str, s: &str) -> bool {
     rest.len() >= last.len() && rest.ends_with(last)
 }
 
+/// The pattern on this machine, or else under `corpus/large/` (`C:\X` as `C/X`, `~` as
+/// `C:\Users\*`), where a copy of the corpus is kept elsewhere.
 fn resolve(pattern: &str) -> Option<PathBuf> {
-    let pattern = match pattern.strip_prefix('~') {
-        Some(rest) => format!("{}{rest}", std::env::var("USERPROFILE").ok()?),
+    let local = match pattern.strip_prefix('~') {
+        Some(rest) => std::env::var("USERPROFILE").ok().map(|home| format!("{home}{rest}")),
+        None => Some(pattern.to_owned()),
+    };
+    if let Some(found) = local.and_then(|local| {
+        let comps: Vec<&str> = local.split('\\').collect();
+        resolve_from(PathBuf::from(format!("{}\\", comps[0])), &comps[1..])
+    }) {
+        return Some(found);
+    }
+    let copy = match pattern.strip_prefix('~') {
+        Some(rest) => format!(r"C:\Users\*{rest}"),
         None => pattern.to_owned(),
     };
-    let comps: Vec<&str> = pattern.split('\\').collect();
-    resolve_from(PathBuf::from(format!("{}\\", comps[0])), &comps[1..])
+    let comps: Vec<&str> = copy.split('\\').collect();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("corpus/large");
+    resolve_from(root.join(comps[0].trim_end_matches(':')), &comps[1..])
 }
 
 fn resolve_from(path: PathBuf, comps: &[&str]) -> Option<PathBuf> {
@@ -217,7 +231,7 @@ fn run(
         f.read_exact(&mut input)?;
 
         let start = Instant::now();
-        let Some(streams) = encode(input.clone(), va, code.is64) else {
+        let Some(streams) = encode(&input, va, code.is64) else {
             eprintln!("{name}: failed to encode section at {va:#x}");
             return Ok(false);
         };

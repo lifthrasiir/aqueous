@@ -39,37 +39,49 @@ for image in macho::images(&file).unwrap_or_default() {  // each architecture of
 
 ## Results
 
-Measured on 2026-10-23 at `aa7a327` on an **AMD Ryzen 7 9700X under Windows 11**, one thread,
-not on the Apple M4 of the [top-level README](../README.md#how-it-was-measured): the speeds here
-are not comparable to those of the other crates. Otherwise as there, through `aqr-show`: each
-file archived at level `mid` with its round-trip check, then extracted. Ratios are tentative,
-since the decoder modules are not in the archives yet. Memory is the peak working set of that
-process (input, archive and output included) over the input size.
+Measured on 2026-10-24 as in the [top-level README](../README.md#how-it-was-measured)
+(Apple M4, one thread), through `aqr-show`: each file archived at level `mid` with its
+round-trip check, then extracted. Ratios are tentative, since the decoder modules are not in
+the archives yet. Memory is the peak RSS of that process (input, archive and output included)
+over the input size, with macOS's cache of freed large blocks on, as for every crate. The files are copies, kept in `corpus/` (`manifest.tsv`, with their
+hashes and original paths), of those on a Windows 11 machine.
 
 - **sample**: `.exe` and `.dll` files of 256 KiB or more under `C:\Program Files`,
   `C:\Program Files (x86)` and `C:\Windows\System32` (13,459 files, 38.9 GB), taken in the order
-  of their paths' hashes, without duplicates, up to about 400 MB.
+  of their paths' hashes, without duplicates, up to about 400 MB. Two of the 261 files taken
+  were gone from that machine by the time of the copy (`corpus/missing.tsv`), and one had
+  changed.
 - **large**: the 11 binaries of `examples/bench.rs` (MinGW GCC, clang-cl, MSVC, rustc, Go;
-  x86-64 and two x86-32).
+  x86-64 and two x86-32), found under `corpus/large/` where their Windows paths do not exist.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress | memory / input |
 |---|---|---|---|---|---|---|---|
-| sample | 261 | 400.5 | **0.339** | 0.383 | **16.5 MB/s** | **336 MB/s** | 5.3× (median of 6 files of 8 MB or more); 14 MB + 4.7× |
-| sample, coded | 140 | 287.9 | 0.333 | 0.390 | 16.3 MB/s | 271 MB/s | |
-| sample, not coded | 121 | 112.6 | 0.357 | 0.363 | 17.0 MB/s | 862 MB/s | |
-| large | 11 | 1528.6 | **0.306** | 0.383 | **36.4 MB/s** | **268 MB/s** | 4.7× (4.3–5.2×) |
+| sample | 259 | 391.3 | **0.339** | 0.381 | **28.9 MB/s** | **478 MB/s** | 9.3× (median of 6 files of 8 MB or more); 28 MB + 7.4× |
+| sample, coded | 139 | 279.3 | 0.331 | 0.388 | 31.1 MB/s | 376 MB/s | |
+| sample, not coded | 120 | 112.1 | 0.357 | 0.363 | 24.6 MB/s | 1462 MB/s | |
+| large | 11 | 1528.6 | **0.306** | 0.383 | **57.7 MB/s** | **347 MB/s** | 6.8× (5.7–9.0×) |
 
-All files round-trip. The files not coded were kept raw, their formulas archiving no smaller:
-108 .NET assemblies (IL; the one mixed-mode assembly was coded), and 13 native files: resource-only
-DLLs, three DirectX SDK samples, an ARM64 and an ARM DLL among them.
+All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
+archiving no smaller: 108 .NET assemblies (IL; three of them have PNG resources coded, and the
+one mixed-mode assembly was coded), and 12 native files: resource-only DLLs, three DirectX SDK
+samples and an ARM DLL among them. The ARM64 DLL of the sample is coded by `exe-recons/arm64`
+(0.346).
+
+The archives are those of the first measurement, on an AMD Ryzen 7 9700X under Windows 11 at
+`aa7a327`, byte for byte, but for the ARM64 DLL (kept raw then) and the changed file. That
+run gave 16.5 / 336 MB/s on the sample and 36.4 / 268 MB/s on the large set; its peak working
+set was smaller, 5.3× (14 MB + 4.7×) and 4.7× (4.3–5.2×). Most of the difference is the
+allocator: with the cache off (`MallocLargeCache=0`), the files of 8 MB or more take 6.3×
+(sample) and 4.6× (large, 4.5–5.7×) here, about what the heap holds at its peak, the
+round-trip check (the input, the archive, the decoded streams and sections, and the output).
 
 The filter alone (`examples/bench.rs` on the large set, sections only, zstd -9 before and after):
 
 | | |
 |---|---|
 | code sections | 1108.6 MB |
-| filter | 238 MB/s |
-| unfilter | 296 MB/s |
+| filter | 292 MB/s |
+| unfilter | 336 MB/s |
 | zstd -9 | 406.1 → 324.7 MB (−20.0%; −14.7% for ffmpeg to −25.4% for tensorflow) |
 
 So the rest of compression (archive coding at `mid` and the check), not the filter, sets its

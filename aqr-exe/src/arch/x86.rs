@@ -796,7 +796,7 @@ impl CallCache {
 
 #[cfg(feature = "encode")]
 #[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
-pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedStreams> {
+pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStreams> {
     let mut st = EncodedStreams::new(origin);
 
     let mut call_cache = CallCache::new();
@@ -806,370 +806,380 @@ pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedS
         idx
     };
 
-    let code_len = code.len();
+    let code_len = input.len();
     let code_start = origin;
     let code_end = origin + code_len as u64;
 
-    // should be enough for this encoding scheme
+    // Bytes an instruction may read past its start: should be enough for this encoding scheme.
     const SENTINEL: usize = 15;
-    code.extend_from_slice(&[0u8; SENTINEL]);
 
     let mut prefixes = 0;
     let mut pad = false;
 
-    let mut code = &code[..];
-    while code.len() > SENTINEL {
-        if_trace_encode! {
-            println!();
-            print!("{origin:06X}: ");
-            //print!("{:02X?} ", &code[..SENTINEL]);
-        }
-
-        // Try to skip any padding.
-        if pad {
-            let stream = ST_PAD0 + (origin & 0xf) as usize;
-
-            let pad_size = scan_pad(&code[..code.len() - SENTINEL]);
-            let mut padding;
-            (padding, code) = code.split_at(pad_size);
-            origin += pad_size as u64;
-
-            while padding.len() >= 0xff {
-                let chunk;
-                (chunk, padding) = padding.split_at(0xff);
-                st.put8(stream, 0xff);
-                st.copy(stream, chunk);
-            }
-            st.put8(stream, padding.len() as u8);
-            st.copy(stream, padding);
-
-            if false {
-                // Speculatively record the next instruction as a call target.
-                call_idx(origin);
+    // Encodes `code` up to its last SENTINEL bytes, the last `slack` of which are zeros after
+    // the code; returns the bytes left.
+    let mut run = |mut code: &[u8], slack: usize| -> usize {
+        while code.len() > SENTINEL {
+            if_trace_encode! {
+                println!();
+                print!("{origin:06X}: ");
+                //print!("{:02X?} ", &code[..SENTINEL]);
             }
 
-            pad = false;
-            continue;
-        }
+            // Try to skip any padding.
+            if pad {
+                let stream = ST_PAD0 + (origin & 0xf) as usize;
 
-        // Detect a possible jump table of at least 3 entries.
-        const MIN_JUMPTAB: usize = 3;
-        if !is64 {
-            // TBW
-            let mut i = 0;
-            let min_addr = code_start as u32;
-            let max_addr = (code_end - 1) as u32;
-            while i + 4 <= code.len() - SENTINEL {
-                let addr = to_u32(&code[i..i + 4]);
-                if addr < min_addr || max_addr < addr {
-                    break;
+                let pad_size = scan_pad(&code[..code.len() - slack]);
+                let mut padding;
+                (padding, code) = code.split_at(pad_size);
+                origin += pad_size as u64;
+
+                while padding.len() >= 0xff {
+                    let chunk;
+                    (chunk, padding) = padding.split_at(0xff);
+                    st.put8(stream, 0xff);
+                    st.copy(stream, chunk);
                 }
-                i += 4;
-            }
-            if i >= MIN_JUMPTAB * 4 {
-                for range in range_chunks(i / 4, 0x100) {
-                    st.jumptab((range.len() - 1) as u8);
-                    for j in range {
-                        let addr = to_u32(&code[j * 4..j * 4 + 4]);
-                        st.call32(call_idx(addr as u64), addr);
-                    }
+                st.put8(stream, padding.len() as u8);
+                st.copy(stream, padding);
+
+                if false {
+                    // Speculatively record the next instruction as a call target.
+                    call_idx(origin);
                 }
-                code = &code[i..];
-                origin += i as u64;
+
+                pad = false;
                 continue;
             }
-        } else if origin.is_multiple_of(8) {
-            // In x86-64, jump tables are typically 64-bit aligned offsets.
-            // Since we don't know where they will be used,
-            // we assume that they may be used anywhere within this `code`.
-            let min_offset = -(code_len as i64 - 1);
-            let max_offset = code_len as i64 - 1;
+
+            // Detect a possible jump table of at least 3 entries.
+            const MIN_JUMPTAB: usize = 3;
+            if !is64 {
+                // TBW
+                let mut i = 0;
+                let min_addr = code_start as u32;
+                let max_addr = (code_end - 1) as u32;
+                while i + 4 <= code.len() - slack {
+                    let addr = to_u32(&code[i..i + 4]);
+                    if addr < min_addr || max_addr < addr {
+                        break;
+                    }
+                    i += 4;
+                }
+                if i >= MIN_JUMPTAB * 4 {
+                    for range in range_chunks(i / 4, 0x100) {
+                        st.jumptab((range.len() - 1) as u8);
+                        for j in range {
+                            let addr = to_u32(&code[j * 4..j * 4 + 4]);
+                            st.call32(call_idx(addr as u64), addr);
+                        }
+                    }
+                    code = &code[i..];
+                    origin += i as u64;
+                    continue;
+                }
+            } else if origin.is_multiple_of(8) {
+                // In x86-64, jump tables are typically 64-bit aligned offsets.
+                // Since we don't know where they will be used,
+                // we assume that they may be used anywhere within this `code`.
+                let min_offset = -(code_len as i64 - 1);
+                let max_offset = code_len as i64 - 1;
+                let mut i = 0;
+                while i + 8 <= code.len() - slack {
+                    let offset = to_u64(&code[i..i + 8]) as i64;
+                    if offset < min_offset || max_offset < offset {
+                        break;
+                    }
+                    i += 8;
+                }
+                if i >= MIN_JUMPTAB * 8 {
+                    for range in range_chunks(i / 8, 0x100) {
+                        st.jumptab((range.len() - 1) as u8);
+                        for j in range {
+                            st.put64(ST_JUMPTAB64, to_u64(&code[j * 8..j * 8 + 8]));
+                        }
+                    }
+                    code = &code[i..];
+                    origin += i as u64;
+                    continue;
+                }
+            }
+
             let mut i = 0;
-            while i + 8 <= code.len() - SENTINEL {
-                let offset = to_u64(&code[i..i + 8]) as i64;
-                if offset < min_offset || max_offset < offset {
-                    break;
+            let mut pre = 0;
+            let mut evex = 0;
+            let mut vex = 0;
+            let mut rex = 0;
+            let mut map = 0;
+            let mut op = 0;
+
+            // Handle prefixes that cannot be combined first.
+            // They are all followed by ModR/M, where mode = 0b11 is required in x86-32.
+            if is64 || modrm_is_reg_only(parse_modrm(code[1])) {
+                match code[0] {
+                    PRE_VEX3 => {
+                        if let Some(ret) = shuffle_vex3([code[1], code[2]]) {
+                            pre = PRE_VEX3;
+                            ([vex, rex], map) = ret;
+                            op = code[3];
+                            i = 4;
+                        }
+                    }
+
+                    PRE_VEX2 => {
+                        pre = PRE_VEX2;
+                        ([vex, rex], map) = shuffle_vex2([code[1]]);
+                        op = code[2];
+                        i = 3;
+                    }
+
+                    PRE_EVEX => {
+                        pre = PRE_EVEX;
+                        ([evex, vex, rex], map) = shuffle_evex([code[1], code[2], code[3]]);
+                        op = code[4];
+                        i = 5;
+                    }
+
+                    _ => {}
                 }
-                i += 8;
             }
-            if i >= MIN_JUMPTAB * 8 {
-                for range in range_chunks(i / 8, 0x100) {
-                    st.jumptab((range.len() - 1) as u8);
-                    for j in range {
-                        st.put64(ST_JUMPTAB64, to_u64(&code[j * 8..j * 8 + 8]));
+
+            // *VEX cannot coexist with 0F or REX.
+            let has_vex = i > 0;
+            if !has_vex {
+                if is64 {
+                    let c = code[0];
+                    if c & 0xf0 == 0x40 {
+                        // REX (40..4F)
+                        pre = REX_MARKER;
+                        rex = c & 0x0f;
+                        i = 1;
+                    } else if c == PRE_REX2 {
+                        pre = PRE_REX2;
+                        rex = code[1];
+                        i = 2;
                     }
                 }
-                code = &code[i..];
-                origin += i as u64;
-                continue;
-            }
-        }
 
-        let mut i = 0;
-        let mut pre = 0;
-        let mut evex = 0;
-        let mut vex = 0;
-        let mut rex = 0;
-        let mut map = 0;
-        let mut op = 0;
-
-        // Handle prefixes that cannot be combined first.
-        // They are all followed by ModR/M, where mode = 0b11 is required in x86-32.
-        if is64 || modrm_is_reg_only(parse_modrm(code[1])) {
-            match code[0] {
-                PRE_VEX3 => {
-                    if let Some(ret) = shuffle_vex3([code[1], code[2]]) {
-                        pre = PRE_VEX3;
-                        ([vex, rex], map) = ret;
-                        op = code[3];
-                        i = 4;
-                    }
-                }
-
-                PRE_VEX2 => {
-                    pre = PRE_VEX2;
-                    ([vex, rex], map) = shuffle_vex2([code[1]]);
-                    op = code[2];
-                    i = 3;
-                }
-
-                PRE_EVEX => {
-                    pre = PRE_EVEX;
-                    ([evex, vex, rex], map) = shuffle_evex([code[1], code[2], code[3]]);
-                    op = code[4];
-                    i = 5;
-                }
-
-                _ => {}
-            }
-        }
-
-        // *VEX cannot coexist with 0F or REX.
-        let has_vex = i > 0;
-        if !has_vex {
-            if is64 {
-                let c = code[0];
-                if c & 0xf0 == 0x40 {
-                    // REX (40..4F)
-                    pre = REX_MARKER;
-                    rex = c & 0x0f;
-                    i = 1;
-                } else if c == PRE_REX2 {
-                    pre = PRE_REX2;
-                    rex = code[1];
-                    i = 2;
+                if code[i] == PRE_2BYTE {
+                    map = 1;
+                    op = code[i + 1];
+                    i += 2;
+                } else {
+                    op = code[i];
+                    i += 1;
                 }
             }
 
-            if code[i] == PRE_2BYTE {
-                map = 1;
-                op = code[i + 1];
-                i += 2;
-            } else {
-                op = code[i];
-                i += 1;
-            }
-        }
+            let i = Cell::new(i);
 
-        let i = Cell::new(i);
+            let fetch8 = || {
+                let ret = code[i.get()];
+                i.set(i.get() + 1);
+                ret
+            };
 
-        let fetch8 = || {
-            let ret = code[i.get()];
-            i.set(i.get() + 1);
-            ret
-        };
+            let fetch32 = || {
+                let ret = to_u32(&code[i.get()..i.get() + 4]);
+                i.set(i.get() + 4);
+                ret
+            };
 
-        let fetch32 = || {
-            let ret = to_u32(&code[i.get()..i.get() + 4]);
-            i.set(i.get() + 4);
-            ret
-        };
+            let copy = |n: usize, streams: &mut EncodedStreams, st: usize| {
+                debug_assert_eq!(STREAM_SIZES[st], n);
+                streams.copy(st, &code[i.get()..i.get() + n]);
+                i.set(i.get() + n);
+            };
 
-        let copy = |n: usize, streams: &mut EncodedStreams, st: usize| {
-            debug_assert_eq!(STREAM_SIZES[st], n);
-            streams.copy(st, &code[i.get()..i.get() + n]);
-            i.set(i.get() + n);
-        };
+            let rel_to_abs = |addr: u32, delta: usize| {
+                (origin + (i.get() + delta) as u64).wrapping_add(addr as i32 as u64)
+            };
 
-        let rel_to_abs = |addr: u32, delta: usize| {
-            (origin + (i.get() + delta) as u64).wrapping_add(addr as i32 as u64)
-        };
+            let mut flags = lookup_opcode(op, map, is64);
 
-        let mut flags = lookup_opcode(op, map, is64);
-
-        // In x86-32 these can be regular opcodes (LES/LDS/BOUND/AAD), but the decoder
-        // would see them as *VEX/REX2 prefixes in the ST_OP stream, so they have to be escaped.
-        if pre == 0 && map == 0 && matches!(op, PRE_VEX3 | PRE_VEX2 | PRE_EVEX | PRE_REX2) {
-            flags = XX;
-        }
-
-        if flags == BP {
-            // 1-byte prefixes can't have any *VEX and REX prefix.
-            if i.get() != 1 {
+            // In x86-32 these can be regular opcodes (LES/LDS/BOUND/AAD), but the decoder
+            // would see them as *VEX/REX2 prefixes in the ST_OP stream, so they have to be escaped.
+            if pre == 0 && map == 0 && matches!(op, PRE_VEX3 | PRE_VEX2 | PRE_EVEX | PRE_REX2) {
                 flags = XX;
-            } else {
-                assert_eq!(map, 0);
-                prefixes |= 1 << prefix_hash(op);
-                st.op(map, op);
+            }
+
+            if flags == BP {
+                // 1-byte prefixes can't have any *VEX and REX prefix.
+                if i.get() != 1 {
+                    flags = XX;
+                } else {
+                    assert_eq!(map, 0);
+                    prefixes |= 1 << prefix_hash(op);
+                    st.op(map, op);
+                    code = &code[1..];
+                    origin += 1;
+                    continue;
+                }
+            } else if op3_followed(flags) {
+                // 3-byte opcode prefixes can't have any *VEX prefix which has its own map index.
+                if has_vex {
+                    flags = XX;
+                } else {
+                    assert_eq!(map, 1);
+                    map = (flags - M2) + 2;
+                    flags = (flags - M2) + R_;
+                    op = fetch8();
+                }
+            }
+
+            let mut prefixes = mem::replace(&mut prefixes, 0);
+
+            if flags == XX {
+                // Do NOT commit the current position if this instruction is invalid.
+                st.op_esc(code[0]);
                 code = &code[1..];
                 origin += 1;
                 continue;
             }
-        } else if op3_followed(flags) {
-            // 3-byte opcode prefixes can't have any *VEX prefix which has its own map index.
-            if has_vex {
-                flags = XX;
-            } else {
-                assert_eq!(map, 1);
-                map = (flags - M2) + 2;
-                flags = (flags - M2) + R_;
-                op = fetch8();
-            }
-        }
 
-        let mut prefixes = mem::replace(&mut prefixes, 0);
-
-        if flags == XX {
-            // Do NOT commit the current position if this instruction is invalid.
-            st.op_esc(code[0]);
-            code = &code[1..];
-            origin += 1;
-            continue;
-        }
-
-        // Now we can commit any prefixes and opcode.
-        if pre != 0 {
-            st.put8(ST_OP, pre);
-            if pre == PRE_EVEX {
-                st.put8(ST_EVEX, evex);
-                st.put8(ST_VEX, vex);
-            } else if pre == PRE_VEX2 || pre == PRE_VEX3 {
-                st.put8(ST_VEX, vex);
-            }
-            st.put8(ST_REX, rex);
-        }
-        st.op(map, op);
-
-        let op = (map as u16) << 8 | op as u16;
-
-        match op {
-            // Parse an additional 16-bit immediate for these:
-            //
-            // 9A/EA: CALL/JMP Ap (16-bit segment + 32-bit address)
-            // C8: ENTER Iw,Ib (16-bit immediate + 8-bit immediate)
-            OP_CALLF | OP_JMPF | OP_ENTER => {
-                copy(16 / 8, &mut st, ST_IMM16);
-            }
-
-            // F6/F7: TEST E,I (/0-1) vs. NOT/NEG/[I]MUL/[I]DIV E (/2-7)
-            OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2
-                if modrm_reg(code[i.get()]) >= 2 =>
-            {
-                flags = R_;
-            }
-
-            // 0F B8: JMPE Jz (IA-64 only) vs. POPCNT Gv,Ev (F3)
-            OP_JMPE_POPCNT if has_rep_prefix(prefixes) => {
-                flags = R_;
-            }
-
-            // MAP7 F8: URDMSR Rq,Id; UWRMSR Id,Rq (immediate size doesn't depend on 66)
-            OP_URDMSR_UWRMSR => {
-                prefixes &= !(1 << prefix_hash(PRE_OSIZE));
-            }
-
-            _ => {}
-        }
-
-        pad = pad_followed(op);
-
-        // ModR/M present
-        if has_modrm(flags) {
-            flags = modrm_to_imm(flags);
-
-            let modrm = fetch8();
-            st.put8(ST_MODRM, modrm);
-
-            let (mode, base) = parse_modrm(modrm);
-            let addr16 = has_addr16(prefixes, is64);
-            let sib;
-            if !addr16 && modrm_has_sib((mode, base)) {
-                sib = fetch8();
-                st.put8(ST_SIB, sib);
-            } else {
-                sib = 0;
-            }
-
-            match mode {
-                0 if addr16 && base == 6 => copy(16 / 8, &mut st, ST_ADDR16), // [disp16]
-                0 if addr16 => {}
-                0 if base == 5 => {
-                    let addr = fetch32();
-                    if is64 {
-                        // [eip+disp32] or [rip+disp32]
-                        // Note that we haven't fully decoded operands yet, hence a delta.
-                        let delta = modrm_imm_size(flags, prefixes);
-                        st.put64(ST_ADDR64, rel_to_abs(addr, delta));
-                    } else {
-                        st.put32(ST_ADDR32, addr); // [disp32]
-                    }
+            // Now we can commit any prefixes and opcode.
+            if pre != 0 {
+                st.put8(ST_OP, pre);
+                if pre == PRE_EVEX {
+                    st.put8(ST_EVEX, evex);
+                    st.put8(ST_VEX, vex);
+                } else if pre == PRE_VEX2 || pre == PRE_VEX3 {
+                    st.put8(ST_VEX, vex);
                 }
-                0 if sib & 7 == 5 => copy(32 / 8, &mut st, ST_DISP32), // [reg*scale+disp32]
-                // [reg+disp8] or [reg*scale+disp8]
-                1 => copy(8 / 8, &mut st, ST_DISP8_R0 + base as usize),
-                2 if addr16 => copy(16 / 8, &mut st, ST_DISP16), // [regs+disp16]
-                2 => copy(32 / 8, &mut st, ST_DISP32),           // [reg+disp32]
+                st.put8(ST_REX, rex);
+            }
+            st.op(map, op);
+
+            let op = (map as u16) << 8 | op as u16;
+
+            match op {
+                // Parse an additional 16-bit immediate for these:
+                //
+                // 9A/EA: CALL/JMP Ap (16-bit segment + 32-bit address)
+                // C8: ENTER Iw,Ib (16-bit immediate + 8-bit immediate)
+                OP_CALLF | OP_JMPF | OP_ENTER => {
+                    copy(16 / 8, &mut st, ST_IMM16);
+                }
+
+                // F6/F7: TEST E,I (/0-1) vs. NOT/NEG/[I]MUL/[I]DIV E (/2-7)
+                OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2
+                    if modrm_reg(code[i.get()]) >= 2 =>
+                {
+                    flags = R_;
+                }
+
+                // 0F B8: JMPE Jz (IA-64 only) vs. POPCNT Gv,Ev (F3)
+                OP_JMPE_POPCNT if has_rep_prefix(prefixes) => {
+                    flags = R_;
+                }
+
+                // MAP7 F8: URDMSR Rq,Id; UWRMSR Id,Rq (immediate size doesn't depend on 66)
+                OP_URDMSR_UWRMSR => {
+                    prefixes &= !(1 << prefix_hash(PRE_OSIZE));
+                }
+
                 _ => {}
             }
-        }
 
-        match flags {
-            J4 if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_JUMP16),
-            J4 => {
-                let target = rel_to_abs(fetch32(), 0);
-                if op == OP_CALLN {
-                    let idx = call_idx(target);
-                    if is64 {
-                        st.call64(idx, target);
-                    } else {
-                        st.call32(idx, target as u32);
-                    }
+            pad = pad_followed(op);
+
+            // ModR/M present
+            if has_modrm(flags) {
+                flags = modrm_to_imm(flags);
+
+                let modrm = fetch8();
+                st.put8(ST_MODRM, modrm);
+
+                let (mode, base) = parse_modrm(modrm);
+                let addr16 = has_addr16(prefixes, is64);
+                let sib;
+                if !addr16 && modrm_has_sib((mode, base)) {
+                    sib = fetch8();
+                    st.put8(ST_SIB, sib);
                 } else {
-                    if is64 {
-                        st.put64(ST_JUMP64, target);
+                    sib = 0;
+                }
+
+                match mode {
+                    0 if addr16 && base == 6 => copy(16 / 8, &mut st, ST_ADDR16), // [disp16]
+                    0 if addr16 => {}
+                    0 if base == 5 => {
+                        let addr = fetch32();
+                        if is64 {
+                            // [eip+disp32] or [rip+disp32]
+                            // Note that we haven't fully decoded operands yet, hence a delta.
+                            let delta = modrm_imm_size(flags, prefixes);
+                            st.put64(ST_ADDR64, rel_to_abs(addr, delta));
+                        } else {
+                            st.put32(ST_ADDR32, addr); // [disp32]
+                        }
+                    }
+                    0 if sib & 7 == 5 => copy(32 / 8, &mut st, ST_DISP32), // [reg*scale+disp32]
+                    // [reg+disp8] or [reg*scale+disp8]
+                    1 => copy(8 / 8, &mut st, ST_DISP8_R0 + base as usize),
+                    2 if addr16 => copy(16 / 8, &mut st, ST_DISP16), // [regs+disp16]
+                    2 => copy(32 / 8, &mut st, ST_DISP32),           // [reg+disp32]
+                    _ => {}
+                }
+            }
+
+            match flags {
+                J4 if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_JUMP16),
+                J4 => {
+                    let target = rel_to_abs(fetch32(), 0);
+                    if op == OP_CALLN {
+                        let idx = call_idx(target);
+                        if is64 {
+                            st.call64(idx, target);
+                        } else {
+                            st.call32(idx, target as u32);
+                        }
                     } else {
-                        st.put32(ST_JUMP32, target as u32);
+                        if is64 {
+                            st.put64(ST_JUMP64, target);
+                        } else {
+                            st.put32(ST_JUMP32, target as u32);
+                        }
                     }
                 }
-            }
 
-            A_ => {
-                let lgn = addr_lgn(op, prefixes, is64);
-                copy(1 << lgn, &mut st, (ST_ADDR16 - 1) + lgn);
-            }
-
-            JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_AJUMP16),
-            JA => copy(32 / 8, &mut st, ST_AJUMP32),
-            J1 => copy(8 / 8, &mut st, ST_JUMP8),
-            N_ => {}
-
-            _ => {
-                assert!(matches!(flags, N1 | N2 | N4 | NZ));
-                if flags == NZ && !rex_has_w(rex) {
-                    flags = N4;
+                A_ => {
+                    let lgn = addr_lgn(op, prefixes, is64);
+                    copy(1 << lgn, &mut st, (ST_ADDR16 - 1) + lgn);
                 }
-                if flags == N4 && has_osize_prefix(prefixes) {
-                    flags = N2;
+
+                JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_AJUMP16),
+                JA => copy(32 / 8, &mut st, ST_AJUMP32),
+                J1 => copy(8 / 8, &mut st, ST_JUMP8),
+                N_ => {}
+
+                _ => {
+                    assert!(matches!(flags, N1 | N2 | N4 | NZ));
+                    if flags == NZ && !rex_has_w(rex) {
+                        flags = N4;
+                    }
+                    if flags == N4 && has_osize_prefix(prefixes) {
+                        flags = N2;
+                    }
+                    let lgn = (flags - N1) as usize;
+                    copy(1 << lgn, &mut st, ST_IMM8 + lgn);
                 }
-                let lgn = (flags - N1) as usize;
-                copy(1 << lgn, &mut st, ST_IMM8 + lgn);
             }
+
+            let i = i.get();
+            code = &code[i..];
+            origin += i as u64;
         }
+        code.len()
+    };
 
-        let i = i.get();
-        code = &code[i..];
-        origin += i as u64;
-    }
+    // The code is read where it is while an instruction can be read within it, and its last
+    // bytes from a copy with SENTINEL zeros after them.
+    let left = run(input, 0);
+    let mut tail = [0u8; 2 * SENTINEL];
+    tail[..left].copy_from_slice(&input[code_len - left..]);
+    let left = run(&tail[..left + SENTINEL], SENTINEL);
 
     // The decoder expects a padding record after every padding-followed instruction,
     // even when the input ends right there.
@@ -1177,7 +1187,7 @@ pub fn encode(mut code: Vec<u8>, mut origin: u64, is64: bool) -> Option<EncodedS
         st.put8(ST_PAD0 + (origin & 0xf) as usize, 0);
     }
 
-    st.sentinel_size = (SENTINEL - code.len()) as u8;
+    st.sentinel_size = (SENTINEL - left) as u8;
     Some(st)
 }
 
@@ -1658,7 +1668,7 @@ mod tests {
     fn roundtrip_test(code: &[u8], origin: u64, is64: bool) -> Result<(), String> {
         let input = code.to_vec();
 
-        let encoded = encode(input.clone(), origin, is64).ok_or("encoding failed")?;
+        let encoded = encode(&input, origin, is64).ok_or("encoding failed")?;
 
         let decoded = decode(&(&encoded).into(), is64).ok_or("decoding failed")?;
 
@@ -2287,7 +2297,7 @@ mod tests {
         let roundtrip_test = |code: &[u8], origin: u64, is64: bool| -> Result<(), String> {
             let input = code.to_vec();
 
-            let encoded = encode(input.clone(), origin, is64).ok_or("encoding failed")?;
+            let encoded = encode(&input, origin, is64).ok_or("encoding failed")?;
 
             let decoded = decode(&(&encoded).into(), is64).ok_or("decoding failed")?;
 
