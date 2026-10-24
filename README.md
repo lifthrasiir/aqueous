@@ -12,7 +12,8 @@ and the design is argued in `xform-design.md`.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `aqr-obj bench`.
   - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
 - aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above;
-  aqr-mp3's ratio and speed again on 2026-10-25),
+  aqr-mp3's ratio and speed again on 2026-10-25; aqr-flate's speed on 2026-10-25, its memory
+  not re-measured),
   and aqr-raw's images measured then; aqr-exe too, on copies of files from a Windows
   machine.
 - The memory of aqr-raw, aqr-flac, aqr-pdf, aqr-sqlite, aqr-obj, aqr-zip and aqr-exe was
@@ -80,7 +81,7 @@ reservoir is rebuilt.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| gzip, zlib | aqr-flate | 4 files, 4 MB | 0.932 | 0.977 | 7 | 58 | 34 MB + 35.6× | a small sample (all there is here); 2 of 4 not coded. Per-stream figures on 924 streams are in aqr-flate's README |
+| gzip, zlib | aqr-flate | 4 files, 4 MB | 0.932 | 0.977 | 16 | 58 | 34 MB + 35.6× | a small sample; 2 of 4 not coded, and since 2026-10-25 not deconstructed either (a probe of what the stream may gain): 6.7 and 8.0 to 50 and 33 MB/s. 153 gzip files of this machine (280 MB): 0.881 at 9.0 MB/s (README of aqr-flate). Per-stream figures on 924 streams are in aqr-flate's README |
 | ZIP | aqr-zip | 5 files, 327 MB | 0.954 | 0.998 | 8 | 23 | 48 MB + 13.8× | dominated by enwik9.zip (322 MB, 1 GB of text: 4.5 GB peak); two Python wheels come to 0.76 |
 | mozlz4, LZ4 frames | aqr-lz4 | a Firefox profile (README) | −9 to −18% against `zstd -3` of the files, −57% solid | | | 650–1150 (the compressor) | not measured | no sample on this machine; liblz4 1.10.0's fast compressor reproduced exactly |
 | LevelDB tables (Snappy) | aqr-snappy | 33 tables of a Chrome profile, 13.3 MB (README) | −30.5% against `zstd -3` | | | 315 (tables rebuilt) | not measured | both hashes of Snappy 1.2.2 |

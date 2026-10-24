@@ -359,8 +359,8 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     let f = catch_unwind(AssertUnwindSafe(|| match format {
         Format::Pe => exe::pe(d),
         Format::MachO => exe::macho(d),
-        Format::Gzip => flate::gzip(d, contents, opt, cx),
-        Format::Zlib => flate::zlib(d, contents, opt, cx),
+        Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
+        Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
         Format::Lz4 => recons(aqr_lz4::formula::encode, d, opt),
         Format::Png => recons(aqr_png::formula::encode, d, opt),
         Format::Jpeg => recons(aqr_jpeg::formula::encode, d, opt),
@@ -750,6 +750,33 @@ mod tests {
     thread_local! {
         /// The formats given to recompressors, in order.
         pub(crate) static TRIED: std::cell::RefCell<Vec<Format>> = const { std::cell::RefCell::new(Vec::new()) };
+        /// The DEFLATE streams of gzip and zlib deconstructed.
+        pub(crate) static DECONSTRUCTED: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// The DEFLATE stream of a gzip file is deconstructed where its data may archive smaller
+    /// than the stream by more than the record, and not where it would not: noise gains
+    /// nothing, and is not split for nothing.
+    #[test]
+    fn flate_where_promising() {
+        let gz = |name: &str, d: &[u8], level| {
+            let mut z = flate2::GzBuilder::new().filename(name).write(Vec::new(), flate2::Compression::new(level));
+            std::io::Write::write_all(&mut z, d).unwrap();
+            z.finish().unwrap()
+        };
+        let deconstructed = |d: &[u8]| {
+            DECONSTRUCTED.with(|n| n.set(0));
+            let f = recompress(d, &Options::default());
+            (DECONSTRUCTED.with(Cell::get), f.applies().len())
+        };
+        // (named as compressed data, which is not scanned for files)
+        let noise = aqr_common::rng::noise(300_000);
+        assert_eq!(deconstructed(&gz("noise.mp4", &noise, 6)), (0, 0));
+        // DEFLATE at level 1 leaves much to the archive
+        let text: Vec<u8> = (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+        let (n, applies) = deconstructed(&gz("text.txt", &text, 1));
+        assert_eq!(n, 1);
+        assert!(applies > 0);
     }
 
     /// The formulas recompressors make are evaluated beforehand: decoding the archive takes

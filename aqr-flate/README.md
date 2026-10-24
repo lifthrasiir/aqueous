@@ -11,7 +11,21 @@ assert_eq!(aqr_flate::reconstruct(&data, &record)?, raw);
 
 let opts = aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE)?;
 let (data, record) = aqr_flate::deconstruct_with(&raw, &opts)?; // smallest records
+
+// parsed once: the data and an estimate of the record before anything is coded
+let opts = aqr_flate::Options::default();
+let parsed = aqr_flate::Parsed::head(&file[start..], &opts)?;  // what follows is not part of it
+if parsed.estimate(&opts)? < budget {
+    let (data, record, _) = parsed.deconstruct(&opts, &aqr_flate::Hints::default())?;
+}
 ```
+
+`Parsed::estimate` codes the first 128 KiB of data under the stream's rule and scales it to the
+whole (the blocks and headers exactly); what it computes is not computed again by
+`deconstruct`. On 9 gzip files (the 4 below, and gzip -1, -6 and -9 of text, binaries, audio
+and source trees) it comes to 0.27× to 1.63× of the record, 1.09× in all; coding all of the
+data would give it exactly (the prefix is what is off). aqr-compress uses it to deconstruct
+only the streams that may pay (its `flate.rs`).
 
 ## Profiles
 
@@ -159,8 +173,18 @@ all 924 streams, one thread, on an M4:
 
 As gzip files through `aqr-show` (one thread, level `mid`; see the
 [top-level README](../README.md#how-it-was-measured), ratios tentative), the four gzip files at
-hand (4.2 MB) come to 0.932 (zstd -3: 0.977) at 7 MB/s compressing and 58 MB/s decompressing;
+hand (4.2 MB) come to 0.932 (zstd -3: 0.977) at 16 MB/s compressing and 58 MB/s decompressing;
 two of them (Unicode data files) are kept as they are.
+
+aqr-compress deconstructs a gzip or zlib stream only where its record and its data may archive
+in at least 1/32 less than the stream: the record by `Parsed::estimate`, the data at the fewest
+bytes the archive's level may take it in (zstd 1 and 9 on a sample), the files in it that are
+recompressed in turn counted as nothing. The two Unicode files above went from 6.7 and 8.0 MB/s
+to 50 and 33 MB/s, kept as they were. On 153 gzip files of this machine (280.5 MB, mostly
+Homebrew bottles; 20 MB each at most), compressing went from 8.0 to 9.0 MB/s (the 55 kept as
+they are: 8.8 to 25.6 MB/s; the 98 coded: 7.9 to 8.4, the stream parsed once rather than three
+times), for 8 KB more (0.88120 to 0.88123): three files that gained 1.6-1.7% are kept as they
+are, as their estimates (2.9%) fell short of 1/32.
 
 ## Parser and writer (`aqr_flate::inflate`, `aqr_flate::write`)
 

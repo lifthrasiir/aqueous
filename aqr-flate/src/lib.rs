@@ -586,6 +586,132 @@ pub fn deconstruct_hinted(
     opts: &Options,
     hints: &Hints,
 ) -> Result<(Vec<u8>, Vec<u8>, Report)> {
+    Parsed::new(raw, opts)?.deconstruct(opts, hints)
+}
+
+/// Bytes of data that [`Parsed::estimate`] codes the tokens of, at most.
+const ESTIMATE: usize = 128 << 10;
+
+/// A stream parsed, its data made, before anything is coded: so that whether to deconstruct
+/// it can be decided by its data and [`Parsed::estimate`] without parsing it again.
+pub struct Parsed<'a> {
+    raw: &'a [u8],
+    f: Flat,
+    /// With static codes, the tokens are kept for a prefix only (to choose the rule and to
+    /// estimate), and the stream is parsed again by segment (`code_streamed`).
+    streamed: bool,
+    secs: f64,
+    chosen: std::cell::OnceCell<Chosen>,
+}
+
+/// What both [`Parsed::estimate`] and [`Parsed::deconstruct`] need.
+struct Chosen {
+    headers: Vec<u8>,
+    fp: (u64, u64),
+    rule: Rule,
+    secs: [f64; 2],
+}
+
+impl<'a> Parsed<'a> {
+    /// Parses `raw` for [`Parsed::deconstruct`] with `opts`, as [`deconstruct_with`] would.
+    pub fn new(raw: &'a [u8], opts: &Options) -> Result<Parsed<'a>> {
+        Parsed::parse(raw, opts, false)
+    }
+
+    /// [`Parsed::new`] for the stream at the start of `raw` alone: what follows it is not
+    /// part of it (and not in the record), and [`Parsed::len`] tells where it ends.
+    pub fn head(raw: &'a [u8], opts: &Options) -> Result<Parsed<'a>> {
+        Parsed::parse(raw, opts, true)
+    }
+
+    fn parse(raw: &'a [u8], opts: &Options, head: bool) -> Result<Parsed<'a>> {
+        let t0 = std::time::Instant::now();
+        let streamed = opts.profile < ADAPTIVE && !opts.verify;
+        let mut f = if streamed {
+            let prefix = opts.prefix.max(ESTIMATE);
+            inflate::parse_segments_head(raw, opts.segment, prefix, opts.max_data)?
+        } else {
+            Flat::new(raw, opts.segment, opts.threads.max(1), opts.verify, opts.max_data)?
+        };
+        let raw = if head {
+            let end = raw.len() - f.stream.trailing.len();
+            f.stream.trailing = Vec::new();
+            &raw[..end]
+        } else {
+            raw
+        };
+        // What a record cannot hold, or reconstruct would reject (FORMAT.md, "Domain").
+        let n = f.data.len();
+        if n >= u32::MAX as usize
+            || f.stream.trailing.len() > 1 << 30
+            || f.stream.blocks.len() > n + (1 << 20)
+        {
+            return Err(Error::Invalid("beyond the limits of a record"));
+        }
+        let secs = t0.elapsed().as_secs_f64();
+        Ok(Parsed { raw, f, streamed, secs, chosen: Default::default() })
+    }
+
+    /// Bytes of the stream (without what followed it, for [`Parsed::head`]).
+    pub fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    /// The decompressed data.
+    pub fn data(&self) -> &[u8] {
+        &self.f.data
+    }
+
+    fn chosen(&self, opts: &Options) -> Result<&Chosen> {
+        if let Some(c) = self.chosen.get() {
+            return Ok(c);
+        }
+        let t0 = std::time::Instant::now();
+        let (headers, first_recipe) = headers(&self.f);
+        let fp = fingerprint(&self.f, first_recipe.unwrap_or(u32::MAX));
+        let t1 = std::time::Instant::now();
+        let rule = choose_rule(&self.f, opts, fp)?;
+        let secs = [(t1 - t0).as_secs_f64(), t1.elapsed().as_secs_f64()];
+        Ok(self.chosen.get_or_init(|| Chosen { headers, fp, rule, secs }))
+    }
+
+    /// About how many bytes the record of [`Parsed::deconstruct`] with `opts` takes: the
+    /// blocks and headers as they will be, and the corrections as the first 128 KiB of data
+    /// cost under the rule (as static codes: an adaptive profile codes them in less), scaled
+    /// to the whole. What it computes is not computed again by `deconstruct`.
+    pub fn estimate(&self, opts: &Options) -> Result<usize> {
+        let c = self.chosen(opts)?;
+        let mut w = BitWriter::new();
+        write_blocks(&mut w, &self.f);
+        let mut p = Prepared::from_flat(&self.f, ESTIMATE);
+        let bits = p.cost(c.rule)?;
+        let scale = self.f.data.len() as f64 / p.bytes().max(1) as f64;
+        Ok(w_bits(&w).div_ceil(8) + c.headers.len() + (bits / 8.0 * scale) as usize)
+    }
+
+    /// Deconstructs the stream with `opts` (those it was parsed with), as
+    /// [`deconstruct_hinted`] does.
+    pub fn deconstruct(self, opts: &Options, hints: &Hints) -> Result<(Vec<u8>, Vec<u8>, Report)> {
+        self.chosen(opts)?;
+        let chosen = self.chosen.into_inner().expect("chosen");
+        deconstruct_parsed(self.raw, self.f, self.streamed, self.secs, chosen, opts, hints)
+    }
+}
+
+fn deconstruct_parsed(
+    raw: &[u8],
+    f: Flat,
+    streamed: bool,
+    secs_parse: f64,
+    chosen: Chosen,
+    opts: &Options,
+    hints: &Hints,
+) -> Result<(Vec<u8>, Vec<u8>, Report)> {
+    let Chosen { headers, fp, rule, secs: [secs_headers, secs_rule] } = chosen;
     let threads = opts.threads.max(1);
     let profile = opts.profile;
     let catalog = &profile_catalog(profile)?.0;
@@ -595,31 +721,7 @@ pub fn deconstruct_hinted(
         _ if adaptive => Some(profile_priors(profile)?),
         _ => None,
     };
-    let t0 = std::time::Instant::now();
-    // With static codes, the tokens are needed by segment only (and of a prefix, to choose
-    // the rule): they are parsed again by segment, and dropped once coded (`code_streamed`).
-    let streamed = priors.is_none() && !opts.verify;
-    let f = if streamed {
-        inflate::parse_segments_head(raw, opts.segment, opts.prefix, opts.max_data)?
-    } else {
-        Flat::new(raw, opts.segment, threads, opts.verify, opts.max_data)?
-    };
-    // What a record cannot hold, or reconstruct would reject (FORMAT.md, "Domain").
-    let n = f.data.len();
-    if n >= u32::MAX as usize
-        || f.stream.trailing.len() > 1 << 30
-        || f.stream.blocks.len() > n + (1 << 20)
-    {
-        return Err(Error::Invalid("beyond the limits of a record"));
-    }
-    let t1 = std::time::Instant::now();
-
-    let t4 = std::time::Instant::now();
-    let (headers, first_recipe) = headers(&f);
-    let fp = fingerprint(&f, first_recipe.unwrap_or(u32::MAX));
     let ranges = segment_ranges(&f);
-    let t5 = std::time::Instant::now();
-    let rule = choose_rule(&f, opts, fp)?;
     let t2 = std::time::Instant::now();
     let choice = match priors {
         Some(priors) => Some(choose_adaptive(
@@ -747,13 +849,12 @@ pub fn deconstruct_hinted(
     report.main = main.len();
     report.corrections = bodies.iter().map(Vec::len).sum();
 
-    let secs = |a: std::time::Instant, b: std::time::Instant| (b - a).as_secs_f64();
     report.times = [
-        secs(t0, t1),
-        secs(t5, t2),
-        secs(t2, t3),
-        secs(t4, t5),
-        secs(t3, std::time::Instant::now()),
+        secs_parse,
+        secs_rule,
+        (t3 - t2).as_secs_f64(),
+        secs_headers,
+        t3.elapsed().as_secs_f64(),
     ];
     let mut meta = profile.to_le_bytes().to_vec();
     put_varint(&mut meta, main.len() as u64);

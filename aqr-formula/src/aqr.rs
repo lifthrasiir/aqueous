@@ -137,6 +137,9 @@ pub struct Encoder {
     /// ([`Encoder::forget`]), by their [`StreamKey`]: a stream is compared with formulas of it
     /// again without being compressed again.
     raw_lens: RefCell<HashMap<StreamKey, usize>>,
+    /// Samples of streams compressed by [`Encoder::least`], by their stream's [`StreamKey`]
+    /// and level, for picking the level of the stream without compressing them again.
+    trials: RefCell<HashMap<(StreamKey, i32), Compressed>>,
     /// The Zstandard context every stream is compressed with, so that its workers and buffers
     /// are made once rather than for each stream (while they take at most [`CCTX_KEPT`]).
     cctx: RefCell<CCtx<'static>>,
@@ -147,6 +150,9 @@ pub struct Encoder {
 /// A stream's (or resource's) hash and length.
 type StreamKey = (u128, usize);
 
+/// What [`compressed`] gives: the compressed stream, or `None` where it does not compress.
+type Compressed = Option<Vec<u8>>;
+
 impl Encoder {
     pub fn new(level: Level) -> Encoder {
         Encoder::with_threads(level, 1)
@@ -156,6 +162,7 @@ impl Encoder {
     /// not be archived; only its archived length is kept, for [`Encoder::smaller`].
     pub fn forget(&self, d: &[u8]) {
         let k = key(&[d]);
+        self.trials.borrow_mut().retain(|t, _| t.0 != k);
         if self.streams.borrow().contains_key(&k) {
             // from what is kept, compressing nothing
             let n = self.raw_len(d).expect("a stream compressed already");
@@ -169,6 +176,7 @@ impl Encoder {
         self.streams.borrow_mut().clear();
         self.resources.borrow_mut().clear();
         self.raw_lens.borrow_mut().clear();
+        self.trials.borrow_mut().clear();
     }
 
     /// An encoder compressing each stream on `threads` threads, into the same archive as on one.
@@ -179,6 +187,7 @@ impl Encoder {
             streams: RefCell::default(),
             resources: RefCell::default(),
             raw_lens: RefCell::default(),
+            trials: RefCell::default(),
             cctx: RefCell::new(CCtx::create()),
             shared: false,
         }
@@ -526,10 +535,13 @@ impl Encoder {
         let mut streams = self.streams.borrow_mut();
         let c = match streams.entry(key(data)) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(match if stored { Plan::Done(None) } else { self.plan(data)? } {
-                Plan::Done(c) => c,
-                Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
-            }),
+            Entry::Vacant(e) => {
+                let plan = if stored { Plan::Done(None) } else { self.plan(*e.key(), data)? };
+                e.insert(match plan {
+                    Plan::Done(c) => c,
+                    Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
+                })
+            }
         };
         content_block(out, leaf, data, c.as_deref());
         Ok(())
@@ -542,7 +554,7 @@ impl Encoder {
         let c = match resources.entry(key(&[r])) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
-                let c = match self.plan(&[r])? {
+                let c = match self.plan(key(&[r]), &[r])? {
                     Plan::Done(Some(c)) => Some(c),
                     Plan::Done(None) => compressed(&mut self.cctx(), &[r], MID_BASE.0, self.threads)?,
                     Plan::Level(level, size) => compressed_to(&mut self.cctx(), &[r], level, self.threads, size)?,
@@ -554,29 +566,69 @@ impl Encoder {
         Ok(())
     }
 
-    /// What to make of `data` at the level of the encoder.
-    fn plan(&self, data: &[&[u8]]) -> Result<Plan> {
+    /// About the fewest bytes stream `d` archives to at the level of the encoder, by a sample,
+    /// or as soon as it is known to be at most `enough`: for [`Level::Mid`], at the lowest and
+    /// the highest zstd levels it picks from ([`MID_LOWER`], the last of [`MID_HIGHER`]: some
+    /// data, and data of a few hundred KB, which zstd compresses with parameters of its own,
+    /// compress better at lower levels), or as it is where they do not compress it. It
+    /// compresses the sample at those levels only, the faster first, where picking the level
+    /// compresses it at every level: a bound, for telling whether a formula of `d` may archive
+    /// smaller.
+    pub fn least(&self, d: &[u8], enough: usize) -> Result<usize> {
+        let levels = match self.level {
+            Level::Mid => [&MID_LOWER[..], &[MID_HIGHER[MID_HIGHER.len() - 1].0]].concat(),
+            Level::Zstd(l) => vec![l],
+        };
+        let (k, sample) = (key(&[d]), sampled(&[d]));
+        let mut least = d.len();
+        for level in levels {
+            let c = self.trial(k, &sample, level)?;
+            if let Some(c) = &c {
+                least = least.min(scaled(c.len(), sample.len(), d.len()));
+            }
+            self.trials.borrow_mut().insert((k, level), c);
+            if least <= enough {
+                break;
+            }
+        }
+        Ok(least)
+    }
+
+    /// `sample` of the stream whose key is `k` compressed at `level`, as [`Encoder::least`]
+    /// compressed it if it did.
+    fn trial(&self, k: StreamKey, sample: &[u8], level: i32) -> Result<Option<Vec<u8>>> {
+        match self.trials.borrow_mut().remove(&(k, level)) {
+            Some(c) => Ok(c),
+            None => compressed(&mut self.cctx(), &[sample], level, self.threads),
+        }
+    }
+
+    /// What to make of `data`, whose key is `k`, at the level of the encoder.
+    fn plan(&self, k: StreamKey, data: &[&[u8]]) -> Result<Plan> {
         let n = total(data);
         match self.level {
-            Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(compressed(&mut self.cctx(), data, l, self.threads)?)),
+            Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(match self.trials.borrow_mut().remove(&(k, l)) {
+                Some(c) => c,
+                None => compressed(&mut self.cctx(), data, l, self.threads)?,
+            })),
             Level::Zstd(l) => {
                 let sample = sampled(data);
-                let c = compressed(&mut self.cctx(), &[&sample], l, self.threads)?.map_or(sample.len(), |c| c.len());
+                let c = self.trial(k, &sample, l)?.map_or(sample.len(), |c| c.len());
                 Ok(Plan::Level(l, scaled(c, sample.len(), n)))
             }
             Level::Mid => {
                 let sample = sampled(data);
                 let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
-                let probe = compressed(&mut self.cctx(), &[&sample], PROBE, self.threads)?;
+                let probe = self.trial(k, &sample, PROBE)?;
                 if len(&probe) >= sample.len() - sample.len() / 32 {
                     return Ok(Plan::Done(None));
                 }
                 if n < MID_SMALL {
                     return Ok(Plan::Done(compressed(&mut self.cctx(), data, MID_BASE.0, self.threads)?));
                 }
-                let mut tried = vec![(MID_BASE.0, compressed(&mut self.cctx(), &[&sample], MID_BASE.0, self.threads)?)];
+                let mut tried = vec![(MID_BASE.0, self.trial(k, &sample, MID_BASE.0)?)];
                 for (level, _) in MID_HIGHER {
-                    tried.push((level, compressed(&mut self.cctx(), &[&sample], level, self.threads)?));
+                    tried.push((level, self.trial(k, &sample, level)?));
                 }
                 for level in MID_LOWER {
                     tried.push((
@@ -584,7 +636,7 @@ impl Encoder {
                         if level == PROBE {
                             probe.clone()
                         } else {
-                            compressed(&mut self.cctx(), &[&sample], level, self.threads)?
+                            self.trial(k, &sample, level)?
                         },
                     ));
                 }
@@ -619,7 +671,7 @@ impl Encoder {
             return Ok(n < raw);
         }
         if !self.streams.borrow().contains_key(&key(&[d])) {
-            let c = match self.plan(&[d])? {
+            let c = match self.plan(key(&[d]), &[d])? {
                 Plan::Done(c) => c,
                 Plan::Level(level, estimate) => {
                     if n <= estimate / 2 {

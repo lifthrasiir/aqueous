@@ -1,30 +1,38 @@
 //! gzip and zlib: the container sliced around aqr-flate on its DEFLATE stream, whose
 //! data is a content of the application, recompressed in turn (composition, §4.5): gzip's of
 //! the kind of its name, if it has one ([`kind_by_name`]).
+//!
+//! The stream is parsed once, and deconstructed only where that is [`promising`]: what it
+//! saves comes from its data compressing better than DEFLATE did, and splitting and joining
+//! it costs about as much as compressing it with the encoder did.
 
 use std::ops::Range;
 
 use aqr_decompress::FLATE;
-use aqr_flate::Hints;
 use aqr_flate::inflate::{self, Sink};
+use aqr_flate::{Hints, Parsed};
 use aqr_formula::{Formula, Kind, Node};
 
-use crate::{Cx, Options, kind_by_name};
+use crate::{Cx, Nest, Options, detect, extent, kind_by_name};
 
 /// A gzip member (RFC 1952), its data of the kind of its name, or else `contents`; what follows
 /// its trailer is sliced as it is.
-pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, cx: &Cx) -> Option<Formula> {
-    let raw = gzip_deflate(d)?;
+pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    let start = gzip_start(d)?;
     let kind = gzip_name(d).map_or(Kind::Unknown, kind_by_name);
     let kind = if kind == Kind::Unknown { contents } else { kind };
-    wrap("gzip", d, raw, kind, &Hints::gzip_xfl(d[8]), opt, cx)
+    let hints = Hints::gzip_xfl(d[8]);
+    wrap("gzip", d, start, |_, end| d.get(end..end + 8).is_some(), kind, &hints, opt, depth, cx)
 }
 
 /// A zlib stream (RFC 1950), its data of kind `contents`; what follows its checksum is sliced
 /// as it is.
-pub(crate) fn zlib(d: &[u8], contents: Kind, opt: &Options, cx: &Cx) -> Option<Formula> {
-    let raw = zlib_deflate(d)?;
-    wrap("zlib", d, raw, contents, &Hints::zlib_header([d[0], d[1]]), opt, cx)
+pub(crate) fn zlib(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    let checked = |data: &[u8], end: usize| {
+        d.get(end..).and_then(|t| t.first_chunk()).is_some_and(|&s| adler32(data) == u32::from_be_bytes(s))
+    };
+    let hints = Hints::zlib_header([d[0], d[1]]);
+    wrap("zlib", d, 2, checked, contents, &hints, opt, depth, cx)
 }
 
 /// The name of the file (FNAME) of the gzip member at the start of `d`, if it has one.
@@ -40,6 +48,14 @@ fn gzip_name(d: &[u8]) -> Option<&[u8]> {
 
 /// The DEFLATE stream of the gzip member at the start of `d`, with its 8-byte trailer after it.
 pub(crate) fn gzip_deflate(d: &[u8]) -> Option<Range<usize>> {
+    let p = gzip_start(d)?;
+    let end = p + inflate(d.get(p..)?, &mut Skip)?;
+    d.get(end..end + 8)?;
+    Some(p..end)
+}
+
+/// Where the DEFLATE stream of the gzip member at the start of `d` starts, after its header.
+fn gzip_start(d: &[u8]) -> Option<usize> {
     let flg = *d.get(3)?;
     if flg & 0xe0 != 0 {
         return None;
@@ -57,9 +73,7 @@ pub(crate) fn gzip_deflate(d: &[u8]) -> Option<Range<usize>> {
     if flg & 2 != 0 {
         p += 2;
     }
-    let end = p + inflate(d.get(p..)?, &mut Skip)?;
-    d.get(end..end + 8)?;
-    Some(p..end)
+    Some(p)
 }
 
 /// The DEFLATE stream of the zlib stream at the start of `d`, with its checksum after it.
@@ -71,29 +85,40 @@ pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
     (adler32(&data.0) == sum).then_some(2..end)
 }
 
-/// `d` with aqr-flate on the DEFLATE stream at `raw`, its data of `kind`, if it fits in the
-/// budget.
+/// `d` with aqr-flate on the DEFLATE stream from `start`, its data of `kind` (`depth` formats
+/// deep), if it fits in the budget, the container takes it (`checked`, given its data and where
+/// it ends) and it is [`promising`].
+#[allow(clippy::too_many_arguments)]
 fn wrap(
     class: &'static str,
     d: &[u8],
-    raw: Range<usize>,
+    start: usize,
+    checked: impl FnOnce(&[u8], usize) -> bool,
     kind: Kind,
     hints: &Hints,
     opt: &Options,
+    depth: u32,
     cx: &Cx,
 ) -> Option<Formula> {
-    // measured only where it might not fit
-    let left = cx.inflate_left();
-    if (raw.len() as u64).saturating_mul(aqr_zip::zip::MAX_EXPANSION) > left
-        && aqr_zip::zip::inflated_len(&d[raw.clone()])? as u64 > left
-    {
+    let fopt = aqr_flate::Options {
+        threads: opt.threads,
+        max_data: usize::try_from(cx.inflate_left()).unwrap_or(usize::MAX),
+        ..Default::default()
+    };
+    let parsed = Parsed::head(d.get(start..)?, &fopt).ok()?;
+    let raw = start..start + parsed.len();
+    if !checked(parsed.data(), raw.end) {
         return None;
     }
-    let fopt = aqr_flate::Options { threads: opt.threads, ..Default::default() };
-    let (data, record, _) = aqr_flate::deconstruct_hinted(&d[raw.clone()], &fopt, hints).ok()?;
-    if !cx.inflate(data.len() as u64) {
+    if !cx.inflate(parsed.data().len() as u64) {
         return None;
     }
+    if opt.smaller && !promising(&parsed, kind, &fopt, opt, depth, cx) {
+        return None;
+    }
+    #[cfg(test)]
+    crate::tests::DECONSTRUCTED.with(|n| n.set(n.get() + 1));
+    let (data, record, _) = parsed.deconstruct(&fopt, hints).ok()?;
     let resources = aqr_flate::formula::resources(fopt.profile).ok()?;
     if record.len() >= raw.len() {
         return None;
@@ -108,6 +133,53 @@ fn wrap(
         Node::slice(0, raw.start as u64, (d.len() - raw.end) as u64),
     ]);
     Some(f)
+}
+
+/// Whether deconstructing the stream of `parsed` (its data of `kind`, `depth` formats deep) may
+/// pay: its record and its data archive in at least 1/32 less than the stream as it is (which
+/// does not compress), both estimated (the record by a prefix, the data by a sample, at the
+/// fewest bytes the archive's level may take it in) and the files in the data that would be
+/// recompressed in turn counted as nothing, so as to turn down only what would not pay.
+fn promising(parsed: &Parsed<'_>, kind: Kind, fopt: &aqr_flate::Options, opt: &Options, depth: u32, cx: &Cx) -> bool {
+    let data = parsed.data();
+    let scanned = match Nest::Scan.of(kind) {
+        _ if depth + 1 >= opt.depth => false,
+        None => false,
+        Some(Nest::As(_)) => return true,
+        Some(_) => true,
+    };
+    // (errors are the deconstruction's to tell)
+    let Ok(record) = parsed.estimate(fopt) else { return true };
+    let n = parsed.len();
+    let Some(enough) = (n - n / 32).checked_sub(record + 1) else { return false };
+    // (data that starts as a file is looked into first: it is often all of it)
+    let first = (scanned && detect::detect(data).is_some()).then(|| files_len(data));
+    if first == Some(data.len()) {
+        return true;
+    }
+    let Ok(archived) = cx.enc.least(data, enough) else { return true };
+    let pays = |found: usize| archived as f64 * (1.0 - found as f64 / data.len().max(1) as f64) <= enough as f64;
+    // (else the files looked for only where they would make the difference)
+    let promising = pays(0) || scanned && pays(first.unwrap_or_else(|| files_len(data)));
+    if !promising {
+        // (what was compressed of it, for picking its level)
+        cx.enc.forget(data);
+    }
+    promising
+}
+
+/// Bytes of the files of formats that recompressors take in `d`, as a scan would find them:
+/// by their signatures, then their ends ([`extent`]), each from the end of the one before.
+fn files_len(d: &[u8]) -> usize {
+    let len = |p: usize, f: Option<detect::Format>| f.and_then(|f| extent(f, &d[p..])).unwrap_or(0);
+    let mut total = len(0, detect::detect(d));
+    let mut p = detect::next_start(d, total.max(1));
+    while p < d.len() {
+        let n = len(p, detect::starts(&d[p..]));
+        total += n;
+        p = detect::next_start(d, p + n.max(1));
+    }
+    total
 }
 
 /// Bytes of the DEFLATE stream at the start of `d`, its data given to `sink`.
