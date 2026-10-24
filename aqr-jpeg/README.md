@@ -250,6 +250,10 @@ The format is specified in [FORMAT.md](FORMAT.md).
 | Pair tokens, run-cat tokens | Worse ratio |
 | Dependency-free contexts, two-pass AC decoding, `min(rem, 8)` | No gain |
 | AC context from neighbour magnitudes | −0.22 pp ratio but −6% / −13% speed (table working set exceeds L1) |
+| Edge (row 0 / column 0) signs as rANS symbols, predicted from boundary continuity once the block's other AC coefficients are known (Lepton-style) | −0.60 pp ratio but −26% / −23% speed (compression / decompression); predicted from the neighbours only, −0.36 pp and about as slow. The extra symbols (+21%) alone cost −14% / −7%, the prediction the rest |
+| Edge cat context from that prediction (estimated) | −0.32 pp, but about three times the AC context groups |
+| Separate 7×7 and edge nonzero counts (estimated) | +0.35 pp (worse) on its own |
+| Lepton-style pixel-domain DC prediction (estimated) | −0.04 pp |
 | NEON symbol search (find16) | Slower due to GPR transfers → replaced by the coarse LUT |
 | Branch-free select_bit, combined refinement LUT | No gain |
 | Modelling quantisation tables (libjpeg quality tables) | Gain looked small; set aside |
