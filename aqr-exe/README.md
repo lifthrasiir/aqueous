@@ -68,11 +68,11 @@ hashes and original paths), of those on a Windows 11 machine.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress | memory / input |
 |---|---|---|---|---|---|---|---|
-| sample | 259 | 391.3 | **0.326** | 0.381 | **28.4 MB/s** | **414 MB/s** | 9.3× (median of 6 files of 8 MB or more); 24 MB + 7.3× |
+| sample | 259 | 391.3 | **0.326** | 0.381 | **28.4 MB/s** | **414 MB/s** | 26 MB + 7.9× (two files over twice that, below) |
 | sample, coded | 220 | 366.3 | 0.328 | 0.387 | 28.3 MB/s | 392 MB/s | |
 | sample, .NET coded | 82 | 90.7 | 0.320 | 0.380 | 28.4 MB/s | 465 MB/s | |
 | sample, not coded | 39 | 25.1 | 0.292 | 0.298 | 30.2 MB/s | 2013 MB/s | |
-| large | 11 | 1528.6 | **0.306** | 0.383 | **58.2 MB/s** | **348 MB/s** | 6.8× (5.7–9.0×) |
+| large | 11 | 1528.6 | **0.306** | 0.383 | **58.2 MB/s** | **348 MB/s** | 0.76–1.01 of the sample's fit |
 
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
 archiving no smaller: 27 .NET assemblies (24 satellite assemblies of resources alone;
@@ -92,10 +92,13 @@ The archives are those of the first measurement, on an AMD Ryzen 7 9700X under W
 `aa7a327`, byte for byte, but for the ARM64 DLL and the .NET assemblies (kept raw then) and
 the changed file. That
 run gave 16.5 / 336 MB/s on the sample and 36.4 / 268 MB/s on the large set; its peak working
-set was smaller, 5.3× (14 MB + 4.7×) and 4.7× (4.3–5.2×). Most of the difference is the
-allocator: with the cache off (`MallocLargeCache=0`), the files of 8 MB or more take 6.3×
-(sample) and 4.6× (large, 4.5–5.7×) here, about what the heap holds at its peak, the
-round-trip check (the input, the archive, the decoded streams and sections, and the output).
+set was smaller, 14 MB + 4.7× on the sample. Most of the difference is the allocator: with
+the cache off (`MallocLargeCache=0`), the sample takes 17 MB + 5.3× here (the large set
+0.86–1.01 of that), about what the heap holds at its peak, the round-trip check (the input,
+the archive, the decoded streams and sections, and the output). With the cache on, two files
+kept raw take over twice the fit, from what was tried on them: the Silverlight NGen image
+`System.ni.dll`, 106 MB for 0.7 MB, and a printer driver's `HPFIGLHN.DLL`, 136 MB for 5.3 MB;
+none does with it off.
 
 The filter alone (`examples/bench.rs` on the large set, sections only, zstd -9 before and after):
 
