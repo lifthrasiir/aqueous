@@ -242,7 +242,9 @@ mod tests {
     #[test]
     fn offsets_at_extremes() {
         let mut words = Vec::new();
-        for (base, bits, lo) in [(0x1400_0000u32, 26, 0), (0x5400_0000, 19, 5), (0xb500_0000, 19, 5), (0x3600_0000, 14, 5)] {
+        for (base, bits, lo) in
+            [(0x1400_0000u32, 26, 0), (0x5400_0000, 19, 5), (0xb500_0000, 19, 5), (0x3600_0000, 14, 5)]
+        {
             for v in [0, 1, low(bits), low(bits) >> 1, (low(bits) >> 1) + 1] {
                 words.push(base | v << lo);
             }

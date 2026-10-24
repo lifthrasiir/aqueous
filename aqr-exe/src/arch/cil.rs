@@ -86,51 +86,51 @@ const TYPE_OR_METHOD_DEF: Col = Col::Coded(1, &[0x02, 0x06]);
 const SCHEMA: [&[Col]; 0x2d] = {
     use Col::*;
     [
-        &[U2, Str, Guid, Guid, Guid],                              // 00 Module
-        &[RESOLUTION_SCOPE, Str, Str],                             // 01 TypeRef
-        &[U4, Str, Str, TYPE_DEF_OR_REF, Idx(0x04), Idx(0x06)],    // 02 TypeDef
-        &[Idx(0x04)],                                              // 03 FieldPtr
-        &[U2, Str, Blob],                                          // 04 Field
-        &[Idx(0x06)],                                              // 05 MethodPtr
-        &[U4, U2, U2, Str, Blob, Idx(0x08)],                       // 06 MethodDef
-        &[Idx(0x08)],                                              // 07 ParamPtr
-        &[U2, U2, Str],                                            // 08 Param
-        &[Idx(0x02), TYPE_DEF_OR_REF],                             // 09 InterfaceImpl
-        &[MEMBER_REF_PARENT, Str, Blob],                           // 0A MemberRef
-        &[U2, HAS_CONSTANT, Blob],                                 // 0B Constant
-        &[HAS_CUSTOM_ATTRIBUTE, CUSTOM_ATTRIBUTE_TYPE, Blob],      // 0C CustomAttribute
-        &[HAS_FIELD_MARSHAL, Blob],                                // 0D FieldMarshal
-        &[U2, HAS_DECL_SECURITY, Blob],                            // 0E DeclSecurity
-        &[U2, U4, Idx(0x02)],                                      // 0F ClassLayout
-        &[U4, Idx(0x04)],                                          // 10 FieldLayout
-        &[Blob],                                                   // 11 StandAloneSig
-        &[Idx(0x02), Idx(0x14)],                                   // 12 EventMap
-        &[Idx(0x14)],                                              // 13 EventPtr
-        &[U2, Str, TYPE_DEF_OR_REF],                               // 14 Event
-        &[Idx(0x02), Idx(0x17)],                                   // 15 PropertyMap
-        &[Idx(0x17)],                                              // 16 PropertyPtr
-        &[U2, Str, Blob],                                          // 17 Property
-        &[U2, Idx(0x06), HAS_SEMANTICS],                           // 18 MethodSemantics
-        &[Idx(0x02), METHOD_DEF_OR_REF, METHOD_DEF_OR_REF],        // 19 MethodImpl
-        &[Str],                                                    // 1A ModuleRef
-        &[Blob],                                                   // 1B TypeSpec
-        &[U2, MEMBER_FORWARDED, Str, Idx(0x1a)],                   // 1C ImplMap
-        &[U4, Idx(0x04)],                                          // 1D FieldRVA
-        &[U4, U4],                                                 // 1E EncLog
-        &[U4],                                                     // 1F EncMap
-        &[U4, U2, U2, U2, U2, U4, Blob, Str, Str],                 // 20 Assembly
-        &[U4],                                                     // 21 AssemblyProcessor
-        &[U4, U4, U4],                                             // 22 AssemblyOS
-        &[U2, U2, U2, U2, U4, Blob, Str, Str, Blob],               // 23 AssemblyRef
-        &[U4, Idx(0x23)],                                          // 24 AssemblyRefProcessor
-        &[U4, U4, U4, Idx(0x23)],                                  // 25 AssemblyRefOS
-        &[U4, Str, Blob],                                          // 26 File
-        &[U4, U4, Str, Str, IMPLEMENTATION],                       // 27 ExportedType
-        &[U4, U4, Str, IMPLEMENTATION],                            // 28 ManifestResource
-        &[Idx(0x02), Idx(0x02)],                                   // 29 NestedClass
-        &[U2, U2, TYPE_OR_METHOD_DEF, Str],                        // 2A GenericParam
-        &[METHOD_DEF_OR_REF, Blob],                                // 2B MethodSpec
-        &[Idx(0x2a), TYPE_DEF_OR_REF],                             // 2C GenericParamConstraint
+        &[U2, Str, Guid, Guid, Guid],                           // 00 Module
+        &[RESOLUTION_SCOPE, Str, Str],                          // 01 TypeRef
+        &[U4, Str, Str, TYPE_DEF_OR_REF, Idx(0x04), Idx(0x06)], // 02 TypeDef
+        &[Idx(0x04)],                                           // 03 FieldPtr
+        &[U2, Str, Blob],                                       // 04 Field
+        &[Idx(0x06)],                                           // 05 MethodPtr
+        &[U4, U2, U2, Str, Blob, Idx(0x08)],                    // 06 MethodDef
+        &[Idx(0x08)],                                           // 07 ParamPtr
+        &[U2, U2, Str],                                         // 08 Param
+        &[Idx(0x02), TYPE_DEF_OR_REF],                          // 09 InterfaceImpl
+        &[MEMBER_REF_PARENT, Str, Blob],                        // 0A MemberRef
+        &[U2, HAS_CONSTANT, Blob],                              // 0B Constant
+        &[HAS_CUSTOM_ATTRIBUTE, CUSTOM_ATTRIBUTE_TYPE, Blob],   // 0C CustomAttribute
+        &[HAS_FIELD_MARSHAL, Blob],                             // 0D FieldMarshal
+        &[U2, HAS_DECL_SECURITY, Blob],                         // 0E DeclSecurity
+        &[U2, U4, Idx(0x02)],                                   // 0F ClassLayout
+        &[U4, Idx(0x04)],                                       // 10 FieldLayout
+        &[Blob],                                                // 11 StandAloneSig
+        &[Idx(0x02), Idx(0x14)],                                // 12 EventMap
+        &[Idx(0x14)],                                           // 13 EventPtr
+        &[U2, Str, TYPE_DEF_OR_REF],                            // 14 Event
+        &[Idx(0x02), Idx(0x17)],                                // 15 PropertyMap
+        &[Idx(0x17)],                                           // 16 PropertyPtr
+        &[U2, Str, Blob],                                       // 17 Property
+        &[U2, Idx(0x06), HAS_SEMANTICS],                        // 18 MethodSemantics
+        &[Idx(0x02), METHOD_DEF_OR_REF, METHOD_DEF_OR_REF],     // 19 MethodImpl
+        &[Str],                                                 // 1A ModuleRef
+        &[Blob],                                                // 1B TypeSpec
+        &[U2, MEMBER_FORWARDED, Str, Idx(0x1a)],                // 1C ImplMap
+        &[U4, Idx(0x04)],                                       // 1D FieldRVA
+        &[U4, U4],                                              // 1E EncLog
+        &[U4],                                                  // 1F EncMap
+        &[U4, U2, U2, U2, U2, U4, Blob, Str, Str],              // 20 Assembly
+        &[U4],                                                  // 21 AssemblyProcessor
+        &[U4, U4, U4],                                          // 22 AssemblyOS
+        &[U2, U2, U2, U2, U4, Blob, Str, Str, Blob],            // 23 AssemblyRef
+        &[U4, Idx(0x23)],                                       // 24 AssemblyRefProcessor
+        &[U4, U4, U4, Idx(0x23)],                               // 25 AssemblyRefOS
+        &[U4, Str, Blob],                                       // 26 File
+        &[U4, U4, Str, Str, IMPLEMENTATION],                    // 27 ExportedType
+        &[U4, U4, Str, IMPLEMENTATION],                         // 28 ManifestResource
+        &[Idx(0x02), Idx(0x02)],                                // 29 NestedClass
+        &[U2, U2, TYPE_OR_METHOD_DEF, Str],                     // 2A GenericParam
+        &[METHOD_DEF_OR_REF, Blob],                             // 2B MethodSpec
+        &[Idx(0x2a), TYPE_DEF_OR_REF],                          // 2C GenericParamConstraint
     ]
 };
 
@@ -254,7 +254,18 @@ fn operand(op: u8) -> Operand {
         0x20 => Imm(I4, 4),
         0x21 | 0x23 => Imm(I8, 8),
         0x22 => Imm(I8, 4),
-        0x27 | 0x28 | 0x29 | 0x6f..=0x75 | 0x79 | 0x7b..=0x81 | 0x8c | 0x8d | 0x8f | 0xa3..=0xa5 | 0xc2 | 0xc6
+        0x27
+        | 0x28
+        | 0x29
+        | 0x6f..=0x75
+        | 0x79
+        | 0x7b..=0x81
+        | 0x8c
+        | 0x8d
+        | 0x8f
+        | 0xa3..=0xa5
+        | 0xc2
+        | 0xc6
         | 0xd0 => Token,
         0x2b..=0x37 | 0xde => Br1,
         0x38..=0x44 | 0xdd => Br4,
@@ -303,7 +314,6 @@ impl Tokens {
         c.truncate(CACHE);
     }
 }
-
 
 #[cfg(feature = "encode")]
 mod encode {
@@ -583,7 +593,8 @@ mod encode {
                         .collect();
                     let width = if table == METHOD_DEF && c == 0 {
                         for v in &mut vals {
-                            let body = v.checked_sub(origin).and_then(|o| taken_bodies.binary_search(&(o as usize)).ok());
+                            let body =
+                                v.checked_sub(origin).and_then(|o| taken_bodies.binary_search(&(o as usize)).ok());
                             *v = match body {
                                 _ if *v == 0 => 0,
                                 Some(k) => {

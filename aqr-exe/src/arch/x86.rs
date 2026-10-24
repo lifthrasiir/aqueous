@@ -1,7 +1,4 @@
-#![cfg_attr(
-    not(all(feature = "encode", feature = "decode")),
-    allow(dead_code, unused_imports)
-)]
+#![cfg_attr(not(all(feature = "encode", feature = "decode")), allow(dead_code, unused_imports))]
 
 // TODO:
 // - Better error checking
@@ -240,10 +237,8 @@ fn lookup_opcode(op: u8, map: u8, is64: bool) -> u8 {
         let mut i = 0;
         while i < 256 {
             assert!(OPCODES0[i] | OPCODES1[i] | OPCODES4[i] | OPCODES7[i] < 16);
-            tab[i] = OPCODES0[i] as u16
-                | (OPCODES1[i] as u16) << 4
-                | (OPCODES4[i] as u16) << 8
-                | (OPCODES7[i] as u16) << 12;
+            tab[i] =
+                OPCODES0[i] as u16 | (OPCODES1[i] as u16) << 4 | (OPCODES4[i] as u16) << 8 | (OPCODES7[i] as u16) << 12;
             i += 1;
         }
 
@@ -256,9 +251,7 @@ fn lookup_opcode(op: u8, map: u8, is64: bool) -> u8 {
         tab
     };
 
-    const MAP_FLAGS: [u8; 16] = [
-        0x20, 0x24, R_, R1, 0x28, R_, R_, 0x2c, XX, XX, XX, XX, XX, XX, XX, XX,
-    ];
+    const MAP_FLAGS: [u8; 16] = [0x20, 0x24, R_, R1, 0x28, R_, R_, 0x2c, XX, XX, XX, XX, XX, XX, XX, XX];
 
     if map == 0 && is64 && OPCODES0_I64[op as usize >> 5] >> (op as u32 & 31) & 1 == 1 {
         XX
@@ -334,9 +327,7 @@ const fn modrm_imm_size(flags: u8, prefixes: u32) -> usize {
 }
 
 const _: () = {
-    let prefixes = [
-        0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65, 0x66, 0x67, 0xf0, 0xf2, 0xf3,
-    ];
+    let prefixes = [0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65, 0x66, 0x67, 0xf0, 0xf2, 0xf3];
     let mut bitset = 0;
     let mut i = 0;
     while i < prefixes.len() {
@@ -402,11 +393,7 @@ pub struct EncodedStreams {
 #[cfg(feature = "encode")]
 impl EncodedStreams {
     fn new(origin: u64) -> Self {
-        Self {
-            origin,
-            sentinel_size: 0,
-            streams: array::from_fn(|_| Vec::new()),
-        }
+        Self { origin, sentinel_size: 0, streams: array::from_fn(|_| Vec::new()) }
     }
 
     fn check(&self, st: usize, size: usize) {
@@ -666,14 +653,11 @@ const fn modrm_has_sib((mode, base): (u8, u8)) -> bool {
 
 fn range_chunks(count: usize, chunk_size: usize) -> impl Iterator<Item = ops::Range<usize>> {
     let remainder = count % chunk_size;
-    (0..count - remainder)
-        .step_by(chunk_size)
-        .map(move |start| start..start + chunk_size)
-        .chain(if remainder > 0 {
-            Some(count - remainder..count)
-        } else {
-            None
-        })
+    (0..count - remainder).step_by(chunk_size).map(move |start| start..start + chunk_size).chain(if remainder > 0 {
+        Some(count - remainder..count)
+    } else {
+        None
+    })
 }
 
 // Try to recognize common function boundary padding starting from `code[0]`:
@@ -753,10 +737,7 @@ padding + function target
 
 const fn pad_followed(op: u16) -> bool {
     // TODO
-    matches!(
-        op,
-        0x9a | 0xe8 | 0xe9 | 0xea | 0xeb | 0xc2 | 0xc3 | 0xca | 0xcb | 0xcc | 0xcf
-    )
+    matches!(op, 0x9a | 0xe8 | 0xe9 | 0xea | 0xeb | 0xc2 | 0xc3 | 0xca | 0xcb | 0xcc | 0xcf)
 }
 
 struct CallCache {
@@ -765,17 +746,12 @@ struct CallCache {
 
 impl CallCache {
     fn new() -> Self {
-        Self {
-            cache: [0u64; 0x100],
-        }
+        Self { cache: [0u64; 0x100] }
     }
 
     #[inline(always)]
     fn find_index(&self, target: u64) -> u8 {
-        self.cache
-            .iter()
-            .position(|&cached| cached == target)
-            .unwrap_or(0xff) as u8
+        self.cache.iter().position(|&cached| cached == target).unwrap_or(0xff) as u8
     }
 
     #[inline(always)]
@@ -992,9 +968,8 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
                 i.set(i.get() + n);
             };
 
-            let rel_to_abs = |addr: u32, delta: usize| {
-                (origin + (i.get() + delta) as u64).wrapping_add(addr as i32 as u64)
-            };
+            let rel_to_abs =
+                |addr: u32, delta: usize| (origin + (i.get() + delta) as u64).wrapping_add(addr as i32 as u64);
 
             let mut flags = lookup_opcode(op, map, is64);
 
@@ -1063,9 +1038,7 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
                 }
 
                 // F6/F7: TEST E,I (/0-1) vs. NOT/NEG/[I]MUL/[I]DIV E (/2-7)
-                OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2
-                    if modrm_reg(code[i.get()]) >= 2 =>
-                {
+                OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2 if modrm_reg(code[i.get()]) >= 2 => {
                     flags = R_;
                 }
 
@@ -1203,11 +1176,7 @@ pub struct DecodedStreams<'a> {
 impl<'a> DecodedStreams<'a> {
     /// From the parts of an [`EncodedStreams`] (see its accessors).
     pub fn new(origin: u64, sentinel_size: u8, streams: [&'a [u8]; NUM_STREAMS]) -> Self {
-        Self {
-            origin,
-            sentinel_size,
-            streams,
-        }
+        Self { origin, sentinel_size, streams }
     }
 }
 
@@ -1228,10 +1197,7 @@ impl<'a> From<&'a EncodedStreams> for DecodedStreams<'a> {
 pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
     let origin = streams.origin;
     let sentinel_size = streams.sentinel_size;
-    let streams = streams
-        .streams
-        .each_ref()
-        .map(|stream| Cell::new(&stream[..]));
+    let streams = streams.streams.each_ref().map(|stream| Cell::new(&stream[..]));
 
     let pc = Cell::new(origin);
     let mut code = Vec::new();
@@ -1307,11 +1273,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
 
     macro_rules! fatal {
         ($fmt:tt) => {
-            panic!(
-                concat!($fmt, " @ {:06X} {:02X?}"),
-                pc.get(),
-                &code[code.len().max(15) - 15..]
-            )
+            panic!(concat!($fmt, " @ {:06X} {:02X?}"), pc.get(), &code[code.len().max(15) - 15..])
         };
     }
 
@@ -1459,9 +1421,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
             }
 
             // F6/F7: TEST E,I (/0-1) vs. NOT/NEG/[I]MUL/[I]DIV E (/2-7)
-            OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2
-                if modrm_reg(streams[ST_MODRM].get()[0]) >= 2 =>
-            {
+            OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2 if modrm_reg(streams[ST_MODRM].get()[0]) >= 2 => {
                 flags = R_;
             }
 
@@ -1480,9 +1440,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
 
         pad = pad_followed(op);
 
-        let abs_to_rel = |addr: u64, code: &[u8], delta: usize| {
-            addr.wrapping_sub(origin + (code.len() + delta) as u64)
-        };
+        let abs_to_rel = |addr: u64, code: &[u8], delta: usize| addr.wrapping_sub(origin + (code.len() + delta) as u64);
 
         // ModR/M present
         if has_modrm(flags) {
@@ -1567,25 +1525,13 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
     Some(code)
 }
 
-#[cfg(all(
-    test,
-    feature = "encode",
-    feature = "decode",
-    not(target_family = "wasm")
-))]
+#[cfg(all(test, feature = "encode", feature = "decode", not(target_family = "wasm")))]
 mod tests {
     use super::*;
 
     #[test]
     fn test_call_cache() {
-        let mut expected = vec![
-            (1234, 0xff),
-            (1234, 0),
-            (5678, 0xff),
-            (1234, 1),
-            (1234, 0),
-            (5678, 1),
-        ];
+        let mut expected = vec![(1234, 0xff), (1234, 0), (5678, 0xff), (1234, 1), (1234, 0), (5678, 1)];
         for i in 9000..9256 {
             expected.push((i, 0xff));
         }
@@ -1624,22 +1570,14 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for i in generate::<IN>() {
             if let Some((o, map)) = shuffle(i) {
-                assert_eq!(
-                    unshuffle(o, map),
-                    Some(i),
-                    "{i:02X?} -> {o:02X?} + {map} -> (roundtrip failed)"
-                );
+                assert_eq!(unshuffle(o, map), Some(i), "{i:02X?} -> {o:02X?} + {map} -> (roundtrip failed)");
                 assert!(seen.insert((o, map)), "{i:02X?} -> {o:02X?} + {map} (dupe)");
             }
         }
         for o in generate::<OUT>() {
             for map in map_range.clone() {
                 if !seen.contains(&(o, map)) {
-                    assert_eq!(
-                        unshuffle(o, map),
-                        None,
-                        "? <- {o:02X?} + {map} (didn't fail)"
-                    );
+                    assert_eq!(unshuffle(o, map), None, "? <- {o:02X?} + {map} (didn't fail)");
                 }
             }
         }
@@ -1657,11 +1595,7 @@ mod tests {
 
     #[test]
     fn test_shuffle_evex() {
-        test_shuffle(
-            |i| Some(shuffle_evex(i)),
-            unshuffle_evex,
-            [5, 8].into_iter(),
-        );
+        test_shuffle(|i| Some(shuffle_evex(i)), unshuffle_evex, [5, 8].into_iter());
     }
 
     // Helper function: test encode/decode roundtrip for byte array
@@ -1673,11 +1607,8 @@ mod tests {
         let decoded = decode(&(&encoded).into(), is64).ok_or("decoding failed")?;
 
         if input != decoded {
-            let mismatch = input
-                .iter()
-                .zip(&decoded)
-                .position(|(a, b)| a != b)
-                .unwrap_or(input.len().min(decoded.len()));
+            let mismatch =
+                input.iter().zip(&decoded).position(|(a, b)| a != b).unwrap_or(input.len().min(decoded.len()));
 
             let input_end = (mismatch + 8).min(input.len());
             let decoded_end = (mismatch + 8).min(decoded.len());
@@ -1700,43 +1631,18 @@ mod tests {
         // Test cases for RIP-relative addressing
         let test_cases = vec![
             // MOV EAX, [RIP+disp32] - various displacements
-            (
-                vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00],
-                0x1000,
-                "MOV EAX, [RIP+0]",
-            ),
-            (
-                vec![0x8b, 0x05, 0x10, 0x00, 0x00, 0x00],
-                0x1000,
-                "MOV EAX, [RIP+16]",
-            ),
-            (
-                vec![0x8b, 0x05, 0xff, 0xff, 0xff, 0xff],
-                0x1000,
-                "MOV EAX, [RIP-1]",
-            ),
+            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [RIP+0]"),
+            (vec![0x8b, 0x05, 0x10, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [RIP+16]"),
+            (vec![0x8b, 0x05, 0xff, 0xff, 0xff, 0xff], 0x1000, "MOV EAX, [RIP-1]"),
             // LEA with RIP-relative
-            (
-                vec![0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00],
-                0x2000,
-                "LEA RAX, [RIP+0]",
-            ),
-            (
-                vec![0x48, 0x8d, 0x05, 0x20, 0x00, 0x00, 0x00],
-                0x2000,
-                "LEA RAX, [RIP+32]",
-            ),
+            (vec![0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00], 0x2000, "LEA RAX, [RIP+0]"),
+            (vec![0x48, 0x8d, 0x05, 0x20, 0x00, 0x00, 0x00], 0x2000, "LEA RAX, [RIP+32]"),
             // CMP with RIP-relative and immediate
-            (
-                vec![0x48, 0x83, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x42],
-                0x3000,
-                "CMP QWORD PTR [RIP+0], 0x42",
-            ),
+            (vec![0x48, 0x83, 0x3d, 0x00, 0x00, 0x00, 0x00, 0x42], 0x3000, "CMP QWORD PTR [RIP+0], 0x42"),
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -1744,39 +1650,21 @@ mod tests {
     fn test_modrm_edge_cases() {
         let test_cases = vec![
             // SIB with base=5 (EBP/RBP special case)
-            (
-                vec![0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00],
-                0x1000,
-                "MOV EAX, [0]",
-            ),
+            (vec![0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [0]"),
             (vec![0x8b, 0x44, 0x25, 0x10], 0x1000, "MOV EAX, [EBP+10h]"),
             // ModR/M mode=0, base=5 (special case)
-            (
-                vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00],
-                0x1000,
-                "MOV EAX, [RIP+0] (32-bit: [disp32])",
-            ),
+            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [RIP+0] (32-bit: [disp32])"),
             // Complex SIB combinations
-            (
-                vec![0x8b, 0x04, 0x85, 0x00, 0x00, 0x00, 0x00],
-                0x1000,
-                "MOV EAX, [EAX*4+0]",
-            ),
-            (
-                vec![0x8b, 0x44, 0x85, 0x10],
-                0x1000,
-                "MOV EAX, [EBP+EAX*4+10h]",
-            ),
+            (vec![0x8b, 0x04, 0x85, 0x00, 0x00, 0x00, 0x00], 0x1000, "MOV EAX, [EAX*4+0]"),
+            (vec![0x8b, 0x44, 0x85, 0x10], 0x1000, "MOV EAX, [EBP+EAX*4+10h]"),
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
 
             // Test in both 64-bit and 32-bit modes (excluding RIP-relative cases)
             if !code.starts_with(&[0x8b, 0x05]) {
-                roundtrip_test(&code, origin, false)
-                    .unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
+                roundtrip_test(&code, origin, false).unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
             }
         }
     }
@@ -1789,24 +1677,15 @@ mod tests {
             // REX.R (extends ModR/M reg field)
             (vec![0x44, 0x89, 0xc0], 0x1000, "REX.R MOV EAX, R8D"),
             // REX.X (extends SIB index field)
-            (
-                vec![0x42, 0x8b, 0x04, 0x00],
-                0x1000,
-                "REX.X MOV EAX, [RAX+R8*1]",
-            ),
+            (vec![0x42, 0x8b, 0x04, 0x00], 0x1000, "REX.X MOV EAX, [RAX+R8*1]"),
             // REX.B (extends ModR/M r/m field)
             (vec![0x41, 0x89, 0xc0], 0x1000, "REX.B MOV R8D, EAX"),
             // All REX bit combinations
-            (
-                vec![0x4f, 0x89, 0x04, 0x08],
-                0x1000,
-                "REX.WRXB MOV [R8+R9*1], RAX",
-            ),
+            (vec![0x4f, 0x89, 0x04, 0x08], 0x1000, "REX.WRXB MOV [R8+R9*1], RAX"),
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -1818,24 +1697,15 @@ mod tests {
             // 16-bit immediate with 66 prefix
             (vec![0x66, 0x81, 0xc0, 0x00, 0x10], 0x1000, "ADD AX, 1000h"),
             // 32-bit immediate
-            (
-                vec![0x81, 0xc0, 0x00, 0x00, 0x00, 0x10],
-                0x1000,
-                "ADD EAX, 10000000h",
-            ),
+            (vec![0x81, 0xc0, 0x00, 0x00, 0x00, 0x10], 0x1000, "ADD EAX, 10000000h"),
             // 64-bit immediate with REX.W
-            (
-                vec![0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10],
-                0x1000,
-                "MOV RAX, 1000000000000000h",
-            ),
+            (vec![0x48, 0xb8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10], 0x1000, "MOV RAX, 1000000000000000h"),
             // Operand size prefix effect test
             (vec![0x66, 0xb8, 0x00, 0x10], 0x1000, "MOV AX, 1000h"),
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -1848,16 +1718,11 @@ mod tests {
             (vec![0xe8, 0xf0, 0xff, 0xff, 0xff], 0x1000, "CALL -10h"),
             // Indirect call
             (vec![0xff, 0xd0], 0x1000, "CALL EAX"),
-            (
-                vec![0xff, 0x15, 0x00, 0x00, 0x00, 0x00],
-                0x1000,
-                "CALL [RIP+0]",
-            ),
+            (vec![0xff, 0x15, 0x00, 0x00, 0x00, 0x00], 0x1000, "CALL [RIP+0]"),
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -1876,8 +1741,7 @@ mod tests {
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -1885,29 +1749,16 @@ mod tests {
     fn test_vex_prefix_combinations() {
         let test_cases = vec![
             // VEX2 prefix
-            (
-                vec![0xc5, 0xf8, 0x58, 0xc1],
-                0x1000,
-                "VEX2 VADDPS XMM0, XMM1",
-            ),
+            (vec![0xc5, 0xf8, 0x58, 0xc1], 0x1000, "VEX2 VADDPS XMM0, XMM1"),
             // VEX3 prefix - map 1
-            (
-                vec![0xc4, 0xe1, 0xf8, 0x58, 0xc1],
-                0x1000,
-                "VEX3 VADDPS XMM0, XMM1",
-            ),
+            (vec![0xc4, 0xe1, 0xf8, 0x58, 0xc1], 0x1000, "VEX3 VADDPS XMM0, XMM1"),
             // VEX3 prefix - map 2
-            (
-                vec![0xc4, 0xe2, 0x79, 0x00, 0xc1],
-                0x1000,
-                "VEX3 VPSHUFB XMM0, XMM1",
-            ),
+            (vec![0xc4, 0xe2, 0x79, 0x00, 0xc1], 0x1000, "VEX3 VPSHUFB XMM0, XMM1"),
         ];
 
         for (code, origin, desc) in test_cases {
             // VEX is only valid in 64-bit mode
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -1916,33 +1767,16 @@ mod tests {
         // Test RIP-relative calculation at boundary addresses
         let test_cases = vec![
             // Near zero address
-            (
-                vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00],
-                0x10,
-                "Low address",
-            ),
+            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x10, "Low address"),
             // High address
-            (
-                vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00],
-                0xfffff000,
-                "High address",
-            ),
+            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0xfffff000, "High address"),
             // Page boundary
-            (
-                vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00],
-                0x1000,
-                "Page boundary",
-            ),
-            (
-                vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00],
-                0x0ffe,
-                "Near page boundary",
-            ),
+            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x1000, "Page boundary"),
+            (vec![0x8b, 0x05, 0x00, 0x00, 0x00, 0x00], 0x0ffe, "Near page boundary"),
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -1959,8 +1793,7 @@ mod tests {
             0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, // LEA RAX, [RIP+0]
         ];
 
-        roundtrip_test(&complex_sequence, 0x1000, true)
-            .unwrap_or_else(|e| panic!("Failed complex sequence: {}", e));
+        roundtrip_test(&complex_sequence, 0x1000, true).unwrap_or_else(|e| panic!("Failed complex sequence: {}", e));
     }
 
     #[test]
@@ -1977,12 +1810,10 @@ mod tests {
 
         for (code, desc) in test_cases {
             // Test in 64-bit mode
-            roundtrip_test(&code, 0x1000, true)
-                .unwrap_or_else(|e| panic!("Failed {} (64-bit): {}", desc, e));
+            roundtrip_test(&code, 0x1000, true).unwrap_or_else(|e| panic!("Failed {} (64-bit): {}", desc, e));
 
             // Test in 32-bit mode
-            roundtrip_test(&code, 0x1000, false)
-                .unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
+            roundtrip_test(&code, 0x1000, false).unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
         }
     }
 
@@ -1998,8 +1829,7 @@ mod tests {
             0xe8, 0x10, 0x00, 0x00, 0x00, // CALL +10h (first target again)
         ];
 
-        roundtrip_test(&repeated_calls, 0x1000, true)
-            .unwrap_or_else(|e| panic!("Failed call cache test: {}", e));
+        roundtrip_test(&repeated_calls, 0x1000, true).unwrap_or_else(|e| panic!("Failed call cache test: {}", e));
     }
 
     // Test accuracy of individual functions
@@ -2027,27 +1857,14 @@ mod tests {
             (vec![0xf3, 0x66, 0xa5], 0x1000, "REP MOVSW"),
             (vec![0x66, 0xf3, 0xa5], 0x1000, "REP MOVSW (reversed order)"),
             // Segment override + address size
-            (
-                vec![0x2e, 0x67, 0x8b, 0x00],
-                0x1000,
-                "MOV EAX, CS:[EAX] (32-bit addr)",
-            ),
-            (
-                vec![0x67, 0x2e, 0x8b, 0x00],
-                0x1000,
-                "MOV EAX, CS:[EAX] (reversed order)",
-            ),
+            (vec![0x2e, 0x67, 0x8b, 0x00], 0x1000, "MOV EAX, CS:[EAX] (32-bit addr)"),
+            (vec![0x67, 0x2e, 0x8b, 0x00], 0x1000, "MOV EAX, CS:[EAX] (reversed order)"),
             // Multiple segment overrides (last one wins)
-            (
-                vec![0x26, 0x2e, 0x8b, 0x00],
-                0x1000,
-                "MOV EAX, CS:[EAX] (ES then CS)",
-            ),
+            (vec![0x26, 0x2e, 0x8b, 0x00], 0x1000, "MOV EAX, CS:[EAX] (ES then CS)"),
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -2057,11 +1874,7 @@ mod tests {
         let test_cases = vec![
             // TEST with immediate (reg field 0-1)
             (vec![0xf6, 0xc0, 0x55], 0x1000, "TEST AL, 55h"),
-            (
-                vec![0xf7, 0xc0, 0x55, 0x55, 0x55, 0x55],
-                0x1000,
-                "TEST EAX, 55555555h",
-            ),
+            (vec![0xf7, 0xc0, 0x55, 0x55, 0x55, 0x55], 0x1000, "TEST EAX, 55555555h"),
             // NOT without immediate (reg field 2)
             (vec![0xf6, 0xd0], 0x1000, "NOT AL"),
             (vec![0xf7, 0xd0], 0x1000, "NOT EAX"),
@@ -2071,8 +1884,7 @@ mod tests {
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -2081,40 +1893,22 @@ mod tests {
         // Test various special addressing modes
         let test_cases = vec![
             // Direct addressing (32-bit only)
-            (
-                vec![0xa1, 0x00, 0x00, 0x40, 0x00],
-                0x1000,
-                "MOV EAX, [400000h]",
-            ),
+            (vec![0xa1, 0x00, 0x00, 0x40, 0x00], 0x1000, "MOV EAX, [400000h]"),
             // RIP-relative with large positive displacement
-            (
-                vec![0x8b, 0x05, 0x00, 0x00, 0x10, 0x00],
-                0x1000,
-                "MOV EAX, [RIP+100000h]",
-            ),
+            (vec![0x8b, 0x05, 0x00, 0x00, 0x10, 0x00], 0x1000, "MOV EAX, [RIP+100000h]"),
             // RIP-relative with large negative displacement
-            (
-                vec![0x8b, 0x05, 0x00, 0x00, 0xf0, 0xff],
-                0x1000,
-                "MOV EAX, [RIP-100000h]",
-            ),
+            (vec![0x8b, 0x05, 0x00, 0x00, 0xf0, 0xff], 0x1000, "MOV EAX, [RIP-100000h]"),
             // Complex SIB: [base + index*scale + disp32]
-            (
-                vec![0x8b, 0x84, 0x88, 0x00, 0x10, 0x00, 0x00],
-                0x1000,
-                "MOV EAX, [EAX+ECX*4+1000h]",
-            ),
+            (vec![0x8b, 0x84, 0x88, 0x00, 0x10, 0x00, 0x00], 0x1000, "MOV EAX, [EAX+ECX*4+1000h]"),
         ];
 
         for (code, origin, desc) in test_cases {
             let is_64bit = !desc.contains("[400000h]"); // Direct addressing is 32-bit only
-            roundtrip_test(&code, origin, is_64bit)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, is_64bit).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
 
             // Also test in 32-bit mode where applicable
             if !desc.contains("RIP") {
-                roundtrip_test(&code, origin, false)
-                    .unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
+                roundtrip_test(&code, origin, false).unwrap_or_else(|e| panic!("Failed {} (32-bit): {}", desc, e));
             }
         }
     }
@@ -2131,8 +1925,7 @@ mod tests {
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -2141,28 +1934,15 @@ mod tests {
         // Instructions at the boundary of code sections
         let test_cases = vec![
             // CALL near end of section
-            (
-                vec![0xe8, 0xfb, 0xff, 0xff, 0xff],
-                0x1000,
-                "CALL -5 (near boundary)",
-            ),
+            (vec![0xe8, 0xfb, 0xff, 0xff, 0xff], 0x1000, "CALL -5 (near boundary)"),
             // Jump table detection edge case
-            (
-                vec![0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00],
-                0x1000,
-                "Potential jump table data",
-            ),
+            (vec![0x00, 0x10, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00], 0x1000, "Potential jump table data"),
             // Mixed code and data
-            (
-                vec![0x90, 0x00, 0x00, 0x00, 0x00, 0x90],
-                0x1000,
-                "NOP, data, NOP",
-            ),
+            (vec![0x90, 0x00, 0x00, 0x00, 0x00, 0x90], 0x1000, "NOP, data, NOP"),
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -2177,8 +1957,7 @@ mod tests {
         ];
 
         for (code, origin, desc) in test_cases {
-            roundtrip_test(&code, origin, true)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(&code, origin, true).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -2202,8 +1981,7 @@ mod tests {
             0x90, 0x90, 0x90, // Some padding
         ];
 
-        roundtrip_test(&prologue_pattern, 0x401000, true)
-            .unwrap_or_else(|e| panic!("Failed function prologue: {}", e));
+        roundtrip_test(&prologue_pattern, 0x401000, true).unwrap_or_else(|e| panic!("Failed function prologue: {}", e));
 
         roundtrip_test(&indirect_jump_pattern, 0x401000, true)
             .unwrap_or_else(|e| panic!("Failed indirect jump pattern: {}", e));
@@ -2222,8 +2000,8 @@ mod tests {
 
         // Bias towards bytes with special meanings to the encoder or decoder.
         const SPECIAL: &[u8] = &[
-            0x00, 0x0f, 0x38, 0x3a, 0x40, 0x48, 0x4f, 0x62, 0x66, 0x67, 0xc4, 0xc5, 0xd5, 0xf1,
-            0xf4, 0xf2, 0xf3, 0xe8, 0xe9, 0xc3, 0xcc, 0x90, 0xf6, 0xf7, 0x05, 0x04,
+            0x00, 0x0f, 0x38, 0x3a, 0x40, 0x48, 0x4f, 0x62, 0x66, 0x67, 0xc4, 0xc5, 0xd5, 0xf1, 0xf4, 0xf2, 0xf3, 0xe8,
+            0xe9, 0xc3, 0xcc, 0x90, 0xf6, 0xf7, 0x05, 0x04,
         ];
 
         for iter in 0..200_000 {
@@ -2240,9 +2018,8 @@ mod tests {
                 .collect();
             let origin = next() & 0xffff_ffff & ![0, 7][(iter & 1) as usize];
             for is64 in [false, true] {
-                roundtrip_test(&code, origin, is64).unwrap_or_else(|e| {
-                    panic!("Failed {code:02X?} @ {origin:#x} (is64={is64}): {e}")
-                });
+                roundtrip_test(&code, origin, is64)
+                    .unwrap_or_else(|e| panic!("Failed {code:02X?} @ {origin:#x} (is64={is64}): {e}"));
             }
         }
     }
@@ -2279,15 +2056,11 @@ mod tests {
             (&[0xc4, 0x00][..], "LES EAX, [EAX]"),
             (&[0xc5, 0x00][..], "LDS EAX, [EAX]"),
             (&[0x62, 0x00][..], "BOUND EAX, [EAX]"),
-            (
-                &[0xc4, 0xf0, 0x00, 0x00][..],
-                "C4 with mod=11 but VEX3 map bit 4 set",
-            ),
+            (&[0xc4, 0xf0, 0x00, 0x00][..], "C4 with mod=11 but VEX3 map bit 4 set"),
             (&[0xd5, 0x0a][..], "AAD 0Ah"),
         ];
         for (code, desc) in test_cases {
-            roundtrip_test(code, 0x1000, false)
-                .unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
+            roundtrip_test(code, 0x1000, false).unwrap_or_else(|e| panic!("Failed {}: {}", desc, e));
         }
     }
 
@@ -2302,11 +2075,8 @@ mod tests {
             let decoded = decode(&(&encoded).into(), is64).ok_or("decoding failed")?;
 
             if input != decoded {
-                let mismatch = input
-                    .iter()
-                    .zip(&decoded)
-                    .position(|(a, b)| a != b)
-                    .unwrap_or(input.len().min(decoded.len()));
+                let mismatch =
+                    input.iter().zip(&decoded).position(|(a, b)| a != b).unwrap_or(input.len().min(decoded.len()));
 
                 let input_end = (mismatch + 8).min(input.len());
                 let decoded_end = (mismatch + 8).min(decoded.len());
@@ -2383,8 +2153,7 @@ mod tests {
             .unwrap_or_else(|e| panic!("Failed 32-bit obvious jump table: {}", e));
 
         println!("Testing mixed data (should not be jump table)...");
-        roundtrip_test(&not_jump_table, 0x1000, false)
-            .unwrap_or_else(|e| panic!("Failed mixed data test: {}", e));
+        roundtrip_test(&not_jump_table, 0x1000, false).unwrap_or_else(|e| panic!("Failed mixed data test: {}", e));
 
         println!("Testing minimal jump table (exactly MIN_JUMPTAB entries)...");
         roundtrip_test(&minimal_jump_table_32, 0x1000, false)
@@ -2392,12 +2161,10 @@ mod tests {
 
         println!("Testing 64-bit jump table...");
         // Only test 64-bit jump table at 8-byte aligned address
-        roundtrip_test(&jump_table_64, 0x1000, true)
-            .unwrap_or_else(|e| panic!("Failed 64-bit jump table: {}", e));
+        roundtrip_test(&jump_table_64, 0x1000, true).unwrap_or_else(|e| panic!("Failed 64-bit jump table: {}", e));
 
         println!("Testing misaligned data...");
-        roundtrip_test(&misaligned_data, 0x1000, false)
-            .unwrap_or_else(|e| panic!("Failed misaligned data: {}", e));
+        roundtrip_test(&misaligned_data, 0x1000, false).unwrap_or_else(|e| panic!("Failed misaligned data: {}", e));
 
         println!("Testing instruction followed by data...");
         roundtrip_test(&instruction_then_data, 0x401000, true)

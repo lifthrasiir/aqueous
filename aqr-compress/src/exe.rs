@@ -139,7 +139,13 @@ fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch) -> Option<No
 /// `section` at RVA `rva`, its metadata root at `meta`, through the CIL filter, its streams
 /// added to `f`; the code `inner` (`(virtual address, offset, size, code)`, the offset within
 /// `section`) filtered within its stream `REST` where whole within a range of it.
-fn cil_apply(f: &mut Formula, section: &[u8], rva: u32, meta: usize, inner: &[(u64, usize, usize, Arch)]) -> Option<Node> {
+fn cil_apply(
+    f: &mut Formula,
+    section: &[u8],
+    rva: u32,
+    meta: usize,
+    inner: &[(u64, usize, usize, Arch)],
+) -> Option<Node> {
     let st = cil::encode(section, rva, meta)?;
     let mut inputs: Vec<Node> = std::iter::zip(st.streams(), cil::STREAM_NAMES)
         .map(|(s, name)| f.push(format!("cil/{name}"), s.clone()))

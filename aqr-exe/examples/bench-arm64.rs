@@ -101,4 +101,3 @@ fn main() {
         println!("  {name:8} {:>11} -> {z:>10}", s.len());
     }
 }
-

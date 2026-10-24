@@ -153,7 +153,8 @@ impl Group {
     fn rescan(&mut self, i: usize) {
         let n = self.n();
         let row = &self.d[i * n..(i + 1) * n];
-        self.best[i] = row.iter().enumerate().fold((f64::INFINITY, usize::MAX), |b, (j, &x)| if x < b.0 { (x, j) } else { b });
+        self.best[i] =
+            row.iter().enumerate().fold((f64::INFINITY, usize::MAX), |b, (j, &x)| if x < b.0 { (x, j) } else { b });
     }
 
     /// Merges cluster `j` into `i`.
@@ -209,7 +210,8 @@ fn merge(counts: &[Vec<u64>], k: usize) -> (Vec<u16>, usize, f64) {
                 let (i, j) = (x / n, x % n);
                 if i == j { f64::INFINITY } else { l[i] + l[j] - neg_cost_sum(&m[i], &m[j]) }
             });
-            let mut g = Group { ctxs, m, l, alive: vec![true; n], parent: (0..n).collect(), d, best: vec![(0.0, 0); n] };
+            let mut g =
+                Group { ctxs, m, l, alive: vec![true; n], parent: (0..n).collect(), d, best: vec![(0.0, 0); n] };
             for i in 0..n {
                 g.rescan(i);
             }

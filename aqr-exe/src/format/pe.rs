@@ -46,9 +46,7 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
     }
     let pe_offset = to_u32(&buf[0x3c..0x40]);
     if pe_offset < 0x40 {
-        return Err(io::Error::other(format!(
-            "too low offset to PE header {pe_offset:#x}"
-        )));
+        return Err(io::Error::other(format!("too low offset to PE header {pe_offset:#x}")));
     }
 
     r.seek_relative(pe_offset as i64 - 0x40)?;
@@ -72,11 +70,7 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
     let (is64, image_base_offset, num_data_dirs_offset) = match magic {
         0x10b => (false, 0x1c, 0x5c), // IMAGE_OPTIONAL_HEADER32
         0x20b => (true, 0x18, 0x6c),  // IMAGE_OPTIONAL_HEADER64
-        _ => {
-            return Err(io::Error::other(format!(
-                "bad PE optional header magic {magic:#x}"
-            )))
-        }
+        _ => return Err(io::Error::other(format!("bad PE optional header magic {magic:#x}"))),
     };
 
     let dirs_offset = num_data_dirs_offset + 4;
@@ -93,9 +87,7 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
     let num_data_dirs = to_u32(&opt_header[num_data_dirs_offset..dirs_offset]) as usize;
     let min_size = dirs_offset + num_data_dirs * 8;
     if opt_header_size < min_size {
-        return Err(io::Error::other(format!(
-            "PE optional header too small ({opt_header_size:#x} < {min_size:#x})"
-        )));
+        return Err(io::Error::other(format!("PE optional header too small ({opt_header_size:#x} < {min_size:#x})")));
     }
 
     // data directories:
@@ -117,11 +109,7 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
         //println!("section {_name:?}: rva {rva:#x}, stored {stored_offset:#x} + {stored_size:#x}, flags {flags:#x}");
         headers.push((rva, stored_offset, stored_size));
         if flags & 0x20 != 0 {
-            sections.push((
-                image_base + rva as u64,
-                stored_offset as u64,
-                stored_size as usize,
-            ));
+            sections.push((image_base + rva as u64, stored_offset as u64, stored_size as usize));
         }
     }
 
@@ -201,12 +189,10 @@ impl<R: std::io::Read + std::io::Seek> Image<'_, R> {
     /// `clr` points to; `None` where there are none, or one is not within the stored data of
     /// a section.
     fn ready_to_run_code(&mut self, clr: &[u8]) -> Option<Vec<(u32, u64, usize)>> {
-        let (_, funcs_rva, funcs_size) =
-            self.ready_to_run(clr)?.into_iter().find(|s| s.0 == 102)?; // READYTORUN_SECTION_RUNTIME_FUNCTIONS
-        // RUNTIME_FUNCTION of x86-64: begin, end, unwind data
+        let (_, funcs_rva, funcs_size) = self.ready_to_run(clr)?.into_iter().find(|s| s.0 == 102)?; // READYTORUN_SECTION_RUNTIME_FUNCTIONS
+                                                                                                    // RUNTIME_FUNCTION of x86-64: begin, end, unwind data
         let funcs = self.read(funcs_rva, funcs_size / 12 * 12)?;
-        let mut funcs: Vec<(u32, u32)> =
-            funcs.chunks_exact(12).map(|f| (to_u32(&f[0..4]), to_u32(&f[4..8]))).collect();
+        let mut funcs: Vec<(u32, u32)> = funcs.chunks_exact(12).map(|f| (to_u32(&f[0..4]), to_u32(&f[4..8]))).collect();
         funcs.sort_unstable();
 
         let mut extents: Vec<(u32, u32)> = Vec::new();
@@ -299,10 +285,7 @@ mod tests {
         // out of order, the first two merged over their gap
         let functions = [(0x1800, 0x1900), (0x1400, 0x1480), (0x1490, 0x1500)];
         let code = locate_code(&mut std::io::Cursor::new(image(Some(&functions)))).unwrap();
-        assert_eq!(
-            code.sections,
-            [(0x1_8000_1400, 0x600, 0x100), (0x1_8000_1800, 0xa00, 0x100)]
-        );
+        assert_eq!(code.sections, [(0x1_8000_1400, 0x600, 0x100), (0x1_8000_1800, 0xa00, 0x100)]);
         assert_eq!(code.cli, None);
     }
 

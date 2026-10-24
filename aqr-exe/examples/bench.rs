@@ -23,40 +23,22 @@ const CORPUS: &[(&str, &str)] = &[
     // MinGW GCC
     ("ffmpeg", r"C:\Program Files\ImageMagick-*\ffmpeg.exe"),
     // clang-cl
-    (
-        "chrome",
-        r"C:\Program Files (x86)\Google\Chrome\Application\*\chrome.dll",
-    ),
+    ("chrome", r"C:\Program Files (x86)\Google\Chrome\Application\*\chrome.dll"),
     ("xul", r"C:\Program Files (x86)\Mozilla Firefox\xul.dll"),
     // clang-cl, x86-32
-    (
-        "libcef32",
-        r"C:\Program Files (x86)\Epic Games\Launcher\Portal\Extras\Overlay\Win32\libcef.dll",
-    ),
+    ("libcef32", r"C:\Program Files (x86)\Epic Games\Launcher\Portal\Extras\Overlay\Win32\libcef.dll"),
     // MSVC
     ("amd_comgr", r"C:\Windows\System32\amd_comgr_2.dll"),
     (
         "tensorflow",
         r"C:\Program Files (x86)\Microsoft Visual Studio\*\Community\Common7\IDE\CommonExtensions\Microsoft\ModelBuilder\AutoMLService\tensorflow.dll",
     ),
-    (
-        "qtwebengine",
-        r"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\shareplay\Qt5WebEngineCore.dll",
-    ),
-    (
-        "node",
-        r"C:\Program Files\LM Studio\resources\app\.webpack\bin\node.exe",
-    ),
+    ("qtwebengine", r"C:\Program Files (x86)\Ubisoft\Ubisoft Game Launcher\shareplay\Qt5WebEngineCore.dll"),
+    ("node", r"C:\Program Files\LM Studio\resources\app\.webpack\bin\node.exe"),
     // MSVC, x86-32
-    (
-        "comgr32",
-        r"C:\Windows\System32\DriverStore\FileRepository\amdocl.inf_amd64_*\amd_comgr32.dll",
-    ),
+    ("comgr32", r"C:\Windows\System32\DriverStore\FileRepository\amdocl.inf_amd64_*\amd_comgr32.dll"),
     // rustc (LLVM)
-    (
-        "rustc_driver",
-        r"~\.rustup\toolchains\*\bin\rustc_driver-*.dll",
-    ),
+    ("rustc_driver", r"~\.rustup\toolchains\*\bin\rustc_driver-*.dll"),
     // Go
     ("go", r"D:\Software\Dev\Go\bin\go.exe"),
 ];
@@ -117,10 +99,7 @@ fn resolve_from(path: PathBuf, comps: &[&str]) -> Option<PathBuf> {
         .filter(|name| wildcard_match(comp, name))
         .collect();
     names.sort();
-    names
-        .iter()
-        .rev()
-        .find_map(|name| resolve_from(path.join(name), rest))
+    names.iter().rev().find_map(|name| resolve_from(path.join(name), rest))
 }
 
 /// Raw zstd sizes keyed by `path|len|mtime|level|va`.
@@ -208,20 +187,10 @@ fn report(name: &str, bits: &str, t: &Totals, zstd: bool) {
     println!();
 }
 
-fn run(
-    name: &str,
-    path: &Path,
-    level: Option<i32>,
-    cache: &mut RawCache,
-    all: &mut Totals,
-) -> io::Result<bool> {
+fn run(name: &str, path: &Path, level: Option<i32>, cache: &mut RawCache, all: &mut Totals) -> io::Result<bool> {
     let mut f = File::open(path)?;
     let meta = f.metadata()?;
-    let mtime = meta
-        .modified()?
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let mtime = meta.modified()?.duration_since(UNIX_EPOCH).unwrap().as_secs();
     let code = locate_code(&mut f)?;
 
     let mut t = Totals::default();
@@ -271,12 +240,7 @@ fn run(
         t.size += size as u64;
     }
 
-    report(
-        name,
-        if code.is64 { "x64" } else { "x86" },
-        &t,
-        level.is_some(),
-    );
+    report(name, if code.is64 { "x64" } else { "x86" }, &t, level.is_some());
     all.size += t.size;
     all.enc_secs += t.enc_secs;
     all.dec_secs += t.dec_secs;

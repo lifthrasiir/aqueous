@@ -149,7 +149,8 @@ impl Native {
             else {
                 return Err("bad parameters or inputs".into());
             };
-            let (origin, meta) = (u32::from_le_bytes(p[..4].try_into().unwrap()), u32::from_le_bytes(p[4..].try_into().unwrap()));
+            let (origin, meta) =
+                (u32::from_le_bytes(p[..4].try_into().unwrap()), u32::from_le_bytes(p[4..].try_into().unwrap()));
             cil::decode(streams, origin, meta as usize, len).ok_or_else(|| "corrupt".into())
         } else if m == FLATE {
             aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)

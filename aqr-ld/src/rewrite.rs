@@ -82,13 +82,14 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
 
     let mut memories = HashMap::new();
     let mut memory = |m: &mut Module, name: &str| {
-        *memories.entry(name.to_owned()).or_insert_with(|| {
-            m.add_import_memory("aqr", &format!("aqr_{name}"), false, true, 0, None, None).0
-        })
+        *memories
+            .entry(name.to_owned())
+            .or_insert_with(|| m.add_import_memory("aqr", &format!("aqr_{name}"), false, true, 0, None, None).0)
     };
     let mut calls = HashMap::new();
     let mut part_funcs = Vec::new();
-    let imports: Vec<_> = m.imports.iter().map(|i| (i.id(), i.module.clone(), i.name.clone(), i.kind.clone())).collect();
+    let imports: Vec<_> =
+        m.imports.iter().map(|i| (i.id(), i.module.clone(), i.name.clone(), i.kind.clone())).collect();
     for (id, module, name, kind) in imports {
         if id == import {
             continue;
