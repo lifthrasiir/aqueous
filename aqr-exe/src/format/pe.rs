@@ -9,9 +9,14 @@ pub struct Code {
     pub machine: u16,
     /// True for PE32+ (64-bit) images.
     pub is64: bool,
-    /// `(virtual address, file offset, stored size)` of each executable section.
+    /// `(virtual address, file offset, stored size)` of each executable section; of a
+    /// ReadyToRun image (.NET, x86-64), the extents of its native code instead.
     pub sections: Vec<(u64, u64, usize)>,
 }
+
+/// Runtime functions closer than this are taken in one extent, the padding between them
+/// with them.
+const FUNCTION_GAP: u32 = 64;
 
 /// Locates the executable sections of the PE image in `f`.
 pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Result<Code> {
@@ -87,6 +92,7 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
 
     // section headers
     let mut sections = Vec::new();
+    let mut headers = Vec::new();
     for _ in 0..num_sections {
         let mut buf = [0u8; 40];
         r.read_exact(&mut buf)?;
@@ -97,6 +103,7 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
         let stored_offset = to_u32(&buf[20..24]);
         let flags = to_u32(&buf[36..40]);
         //println!("section {_name:?}: rva {rva:#x}, stored {stored_offset:#x} + {stored_size:#x}, flags {flags:#x}");
+        headers.push((rva, stored_offset, stored_size));
         if flags & 0x20 != 0 {
             sections.push((
                 image_base + rva as u64,
@@ -106,5 +113,161 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
         }
     }
 
+    if machine == 0x8664 && num_data_dirs > 14 {
+        let clr = &opt_header[dirs_offset + 14 * 8..dirs_offset + 15 * 8];
+        let (clr_rva, clr_size) = (to_u32(&clr[0..4]), to_u32(&clr[4..8]));
+        if let Some(native) = ready_to_run_code(&mut r, &headers, clr_rva, clr_size) {
+            let va = |(rva, off, size)| (image_base + rva as u64, off, size);
+            sections = native.into_iter().map(va).collect();
+        }
+    }
+
     Ok(Code { machine, is64, sections })
+}
+
+/// The extents `(RVA, file offset, size)` of the native code of a ReadyToRun image, from
+/// the runtime functions of its ReadyToRun header, which the CLR header at `clr_rva` points
+/// to; `None` where there are none, or one is not within the stored data of a section.
+/// `headers` are the sections' `(RVA, file offset, stored size)`.
+fn ready_to_run_code<R: std::io::Read + std::io::Seek>(
+    r: &mut R,
+    headers: &[(u32, u32, u32)],
+    clr_rva: u32,
+    clr_size: u32,
+) -> Option<Vec<(u32, u64, usize)>> {
+    use std::io::SeekFrom;
+
+    // the section holding `rva..rva + size`
+    let find = |rva: u32, size: u32| {
+        headers.iter().copied().find(|&(s_rva, _, s_size)| {
+            rva.checked_sub(s_rva).is_some_and(|o| o.checked_add(size).is_some_and(|e| e <= s_size))
+        })
+    };
+    let mut read = |rva: u32, size: u32| -> Option<Vec<u8>> {
+        let (s_rva, s_off, _) = find(rva, size)?;
+        r.seek(SeekFrom::Start(s_off as u64 + (rva - s_rva) as u64)).ok()?;
+        let mut buf = vec![0u8; size as usize];
+        r.read_exact(&mut buf).ok()?;
+        Some(buf)
+    };
+
+    // IMAGE_COR20_HEADER: ManagedNativeHeader at 64
+    if clr_size < 72 {
+        return None;
+    }
+    let clr = read(clr_rva, 72)?;
+    let (rtr_rva, rtr_size) = (to_u32(&clr[64..68]), to_u32(&clr[68..72]));
+    // READYTORUN_HEADER: signature, version, flags, number of sections, then sections
+    // (type, RVA, size)
+    if rtr_rva == 0 || rtr_size < 16 {
+        return None;
+    }
+    let rtr = read(rtr_rva, 16)?;
+    if &rtr[0..4] != b"RTR\0" {
+        return None;
+    }
+    let num_sections = to_u32(&rtr[12..16]);
+    let rtr_sections = read(rtr_rva + 16, num_sections.checked_mul(12)?)?;
+    let (funcs_rva, funcs_size) = rtr_sections
+        .chunks_exact(12)
+        .find(|s| to_u32(&s[0..4]) == 102) // READYTORUN_SECTION_RUNTIME_FUNCTIONS
+        .map(|s| (to_u32(&s[4..8]), to_u32(&s[8..12])))?;
+    // RUNTIME_FUNCTION of x86-64: begin, end, unwind data
+    let funcs = read(funcs_rva, funcs_size / 12 * 12)?;
+    let mut funcs: Vec<(u32, u32)> =
+        funcs.chunks_exact(12).map(|f| (to_u32(&f[0..4]), to_u32(&f[4..8]))).collect();
+    funcs.sort_unstable();
+
+    let mut extents: Vec<(u32, u32)> = Vec::new();
+    for (begin, end) in funcs {
+        if end <= begin {
+            return None;
+        }
+        match extents.last_mut() {
+            Some(last) if begin <= last.1.saturating_add(FUNCTION_GAP) => last.1 = last.1.max(end),
+            _ => extents.push((begin, end)),
+        }
+    }
+    if extents.is_empty() {
+        return None;
+    }
+    extents
+        .into_iter()
+        .map(|(begin, end)| {
+            let (s_rva, s_off, _) = find(begin, end - begin)?;
+            Some((begin, s_off as u64 + (begin - s_rva) as u64, (end - begin) as usize))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn put(d: &mut [u8], at: usize, v: &[u8]) {
+        d[at..at + v.len()].copy_from_slice(v);
+    }
+
+    /// A PE32+ image with one section, `.text` (RVA 0x1000, at 0x200, 0x1000 bytes), holding
+    /// a CLR header at its start; with `functions`, a ReadyToRun header with those runtime
+    /// functions `(begin, end)`.
+    fn image(functions: Option<&[(u32, u32)]>) -> Vec<u8> {
+        let mut d = vec![0u8; 0x1200];
+        put(&mut d, 0, b"MZ");
+        put(&mut d, 0x3c, &0x40u32.to_le_bytes());
+        put(&mut d, 0x40, b"PE\0\0");
+        put(&mut d, 0x44, &0x8664u16.to_le_bytes());
+        put(&mut d, 0x46, &1u16.to_le_bytes());
+        put(&mut d, 0x54, &0xf0u16.to_le_bytes());
+        let opt = 0x58;
+        put(&mut d, opt, &0x20bu16.to_le_bytes());
+        put(&mut d, opt + 0x18, &0x1_8000_0000u64.to_le_bytes());
+        put(&mut d, opt + 0x6c, &16u32.to_le_bytes());
+        put(&mut d, opt + 0x70 + 14 * 8, &[0x1000u32.to_le_bytes(), 72u32.to_le_bytes()].concat());
+        let sh = opt + 0xf0;
+        put(&mut d, sh, b".text\0\0\0");
+        for (i, v) in [0x1000u32, 0x1000, 0x1000, 0x200].into_iter().enumerate() {
+            put(&mut d, sh + 8 + 4 * i, &v.to_le_bytes());
+        }
+        put(&mut d, sh + 36, &0x6000_0020u32.to_le_bytes());
+        // CLR header at RVA 0x1000; ManagedNativeHeader at RVA 0x1100
+        put(&mut d, 0x200, &72u32.to_le_bytes());
+        if let Some(functions) = functions {
+            put(&mut d, 0x200 + 64, &[0x1100u32.to_le_bytes(), 16u32.to_le_bytes()].concat());
+            put(&mut d, 0x300, b"RTR\0");
+            put(&mut d, 0x304, &[5u16.to_le_bytes(), 0u16.to_le_bytes()].concat());
+            put(&mut d, 0x30c, &1u32.to_le_bytes());
+            let size = 12 * functions.len() as u32;
+            put(&mut d, 0x310, &[102u32, 0x1200, size].map(u32::to_le_bytes).concat());
+            for (i, &(b, e)) in functions.iter().enumerate() {
+                put(&mut d, 0x400 + 12 * i, &[b, e, 0x1f00].map(u32::to_le_bytes).concat());
+            }
+        }
+        d
+    }
+
+    #[test]
+    fn il_only_whole_section() {
+        let code = locate_code(&mut std::io::Cursor::new(image(None))).unwrap();
+        assert_eq!(code.sections, [(0x1_8000_1000, 0x200, 0x1000)]);
+    }
+
+    #[test]
+    fn ready_to_run_native_code() {
+        // out of order, the first two merged over their gap
+        let functions = [(0x1800, 0x1900), (0x1400, 0x1480), (0x1490, 0x1500)];
+        let code = locate_code(&mut std::io::Cursor::new(image(Some(&functions)))).unwrap();
+        assert_eq!(
+            code.sections,
+            [(0x1_8000_1400, 0x600, 0x100), (0x1_8000_1800, 0xa00, 0x100)]
+        );
+    }
+
+    #[test]
+    fn ready_to_run_out_of_section() {
+        // a function past the section's stored data: the section is taken whole
+        let functions = [(0x1400, 0x1480), (0x1f00, 0x2100)];
+        let code = locate_code(&mut std::io::Cursor::new(image(Some(&functions)))).unwrap();
+        assert_eq!(code.sections, [(0x1_8000_1000, 0x200, 0x1000)]);
+    }
 }

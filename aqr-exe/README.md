@@ -1,7 +1,8 @@
 # aqr-exe
 
 Machine code recompression, of the executable sections of PE images and Mach-O images (thin or
-in a universal file), each rebuilt bit for bit:
+in a universal file), each rebuilt bit for bit; of .NET ReadyToRun images (x86-64), of their
+native code alone, as their runtime functions tell, the metadata and IL around it left out:
 
 - x86 and x86-64: a disfilter splits the code into 46 streams by instruction field, with
   relative targets made absolute.
@@ -56,19 +57,22 @@ hashes and original paths), of those on a Windows 11 machine.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress | memory / input |
 |---|---|---|---|---|---|---|---|
-| sample | 259 | 391.3 | **0.339** | 0.381 | **28.9 MB/s** | **478 MB/s** | 9.3× (median of 6 files of 8 MB or more); 28 MB + 7.4× |
-| sample, coded | 139 | 279.3 | 0.331 | 0.388 | 31.1 MB/s | 376 MB/s | |
-| sample, not coded | 120 | 112.1 | 0.357 | 0.363 | 24.6 MB/s | 1462 MB/s | |
+| sample | 259 | 391.3 | **0.335** | 0.381 | **29.3 MB/s** | **465 MB/s** | 9.3× (median of 6 files of 8 MB or more); 27 MB + 7.2× |
+| sample, coded | 160 | 313.3 | 0.339 | 0.395 | 31.0 MB/s | 396 MB/s | |
+| sample, not coded | 99 | 78.0 | 0.319 | 0.327 | 24.2 MB/s | 1547 MB/s | |
 | large | 11 | 1528.6 | **0.306** | 0.383 | **57.7 MB/s** | **347 MB/s** | 6.8× (5.7–9.0×) |
 
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
-archiving no smaller: 108 .NET assemblies (IL; three of them have PNG resources coded, and the
-one mixed-mode assembly was coded), and 12 native files: resource-only DLLs, three DirectX SDK
-samples and an ARM DLL among them. The ARM64 DLL of the sample is coded by `exe-recons/arm64`
-(0.346).
+archiving no smaller: 87 .NET assemblies (84 of IL alone, two of them with PNG resources coded;
+two ReadyToRun images of x86-32 and ARM64; a Silverlight NGen image), and 12 native files:
+resource-only DLLs, three DirectX SDK samples and an ARM DLL among them. The 22 ReadyToRun
+images of x86-64 are coded, their native code alone (13.0 MB of 37.7 MB): 0.432 → 0.396, though
+one of them loses its PNG resources (the rest of a PE image is not scanned once coded). The
+ARM64 DLL of the sample is coded by `exe-recons/arm64` (0.346).
 
 The archives are those of the first measurement, on an AMD Ryzen 7 9700X under Windows 11 at
-`aa7a327`, byte for byte, but for the ARM64 DLL (kept raw then) and the changed file. That
+`aa7a327`, byte for byte, but for the ARM64 DLL and the ReadyToRun images (kept raw then)
+and the changed file. That
 run gave 16.5 / 336 MB/s on the sample and 36.4 / 268 MB/s on the large set; its peak working
 set was smaller, 5.3× (14 MB + 4.7×) and 4.7× (4.3–5.2×). Most of the difference is the
 allocator: with the cache off (`MallocLargeCache=0`), the files of 8 MB or more take 6.3×
@@ -112,4 +116,5 @@ alone filtered; VS Code's ZIP (267 MB) to 222.2 MB.
   they are. ARM64 data in code sections (literal pools) is taken as instructions.
 - Mach-O code signatures are kept as they are, though their page hashes follow from the
   image.
-- .NET IL is not modelled.
+- .NET IL and metadata are not modelled. Of ReadyToRun images, only those of x86-64 have
+  their native code filtered; NGen images (`*.ni.dll`) are kept as they are.
