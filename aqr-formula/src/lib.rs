@@ -73,7 +73,8 @@ pub enum Kind {
     Compressed,
     /// A file of the format named (as aqr-compress names them: `zlib`, `png`, ...) from the
     /// first byte: recompressed as such without looking for it, and kept as it is where its
-    /// recompressor turns it down. A name not known is taken as [`Kind::Unknown`].
+    /// recompressor turns it down (but for the parts of it the recompressor tells, [`Region`]).
+    /// A name not known is taken as [`Kind::Unknown`].
     Format(&'static str),
 }
 
@@ -89,6 +90,17 @@ impl fmt::Display for Kind {
             Kind::Format(name) => write!(f, "format={name}"),
         }
     }
+}
+
+/// What a part of a file is, as the recompressor of its format knows it: for whoever looks
+/// into a file that recompressor turned down (aqr-compress, scanning it for files).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Region {
+    /// The bytes of the part, in the file.
+    pub span: std::ops::Range<usize>,
+    pub kind: Kind,
+    /// For a [`Kind::Format`] that holds data (as zlib does), the kind of that data.
+    pub contents: Kind,
 }
 
 /// Bytes that applications of a module share, typically a model (§5.6): a resource block of

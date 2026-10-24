@@ -360,6 +360,32 @@ fn small_psd(seed: usize) -> Vec<u8> {
     psd(150 + seed, 30, &layers(150 + seed, 30, true), packbits::NO_TILES, 0, &[])
 }
 
+/// The parts of a file: its resource, the layer records, every channel's pixel data, the global
+/// layer mask, the embedded files and the composite's pixel data, in order.
+#[test]
+fn regions() {
+    use aqr_formula::Kind;
+    let (png, inner) = (png(120, 90), small_psd(1));
+    let file = with_linked(&small_psd(0), &[(b"png ", &png), (b"8BPS", &inner)]);
+    let parts = formula::regions(&file).unwrap();
+    let psd = aqr_psd::parse(&file).unwrap();
+    let channels: usize = psd.layer_info.layers.iter().map(|l| l.channels.len()).sum();
+    let layers = psd.layer_info.layers.len();
+    let kinds: Vec<Kind> = parts.iter().map(|r| r.kind).collect();
+    let mut want = vec![Kind::Table; 1 + layers];
+    want.extend(vec![Kind::Pixels; channels]);
+    want.extend([Kind::Table, Kind::Format("png"), Kind::Format("psd"), Kind::Pixels]);
+    assert_eq!(kinds, want);
+    assert!(parts.windows(2).all(|w| w[0].span.end <= w[1].span.start));
+    assert_eq!(parts[0].span, psd.resources[0].data);
+    assert_eq!(parts[1].span, psd.layer_info.layers[0].record);
+    let at = 1 + layers + channels + 1;
+    assert_eq!(&file[parts[at].span.clone()], &png[..]);
+    assert_eq!(&file[parts[at + 1].span.clone()], &inner[..]);
+    assert_eq!(parts.last().unwrap().span, psd.composite.start + 2..file.len());
+    assert_eq!(formula::regions(b"8BPS but not one"), None);
+}
+
 #[test]
 fn embedded_png_jpeg_and_psd() {
     let (png, inner) = (png(120, 90), small_psd(1));

@@ -11,17 +11,20 @@ use aqr_formula::{Formula, Kind, Node};
 
 use crate::{Cx, Options, kind_by_name};
 
-/// A gzip member (RFC 1952); what follows its trailer is sliced as it is.
-pub(crate) fn gzip(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+/// A gzip member (RFC 1952), its data of the kind of its name, or else `contents`; what follows
+/// its trailer is sliced as it is.
+pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, cx: &Cx) -> Option<Formula> {
     let raw = gzip_deflate(d)?;
     let kind = gzip_name(d).map_or(Kind::Unknown, kind_by_name);
+    let kind = if kind == Kind::Unknown { contents } else { kind };
     wrap("gzip", d, raw, kind, &Hints::gzip_xfl(d[8]), opt, cx)
 }
 
-/// A zlib stream (RFC 1950); what follows its checksum is sliced as it is.
-pub(crate) fn zlib(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+/// A zlib stream (RFC 1950), its data of kind `contents`; what follows its checksum is sliced
+/// as it is.
+pub(crate) fn zlib(d: &[u8], contents: Kind, opt: &Options, cx: &Cx) -> Option<Formula> {
     let raw = zlib_deflate(d)?;
-    wrap("zlib", d, raw, Kind::Unknown, &Hints::zlib_header([d[0], d[1]]), opt, cx)
+    wrap("zlib", d, raw, contents, &Hints::zlib_header([d[0], d[1]]), opt, cx)
 }
 
 /// The name of the file (FNAME) of the gzip member at the start of `d`, if it has one.

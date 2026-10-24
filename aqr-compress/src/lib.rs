@@ -34,6 +34,11 @@
 //! entries their kinds by their names ([`kind_by_name`]), as gzip's data is by its name, and
 //! aqr-pdf the streams of a PDF file by what they are.
 //!
+//! A file that a scan finds but its recompressor turns down is looked into by its parts where
+//! the recompressor tells them ([`Region`]; aqr-psd does): the parts of a format are taken as
+//! files of it, the parts of the other kinds are not looked into, and only the bytes no part
+//! tells of (and parts of unknown kind) are scanned. Else the scan goes on from its next byte.
+//!
 //! What DEFLATE streams inflate to, at every depth together, is kept within
 //! [`Options::expansion`] times the file (and 64 MiB): past it, streams are kept as they are,
 //! so that nested archives (42.zip) and bombs cost no more than that.
@@ -77,7 +82,7 @@ use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-pub use aqr_formula::{Formula, Kind, Module, Node};
+pub use aqr_formula::{Formula, Kind, Module, Node, Region};
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 
@@ -129,7 +134,8 @@ pub enum Nest {
     /// As data holding files anywhere: each found is cut to its end, the rest kept raw.
     Scan,
     /// As data starting with a file of the format, which is not looked for: where its
-    /// recompressor takes it, as [`Nest::Scan`] would, the data after it scanned; else kept raw.
+    /// recompressor takes it, as [`Nest::Scan`] would, the data after it scanned; else looked
+    /// into by its parts where the recompressor tells them ([`Region`]), or kept raw.
     As(Format),
 }
 
@@ -333,13 +339,19 @@ impl Made {
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
 /// formula is [`smaller`]).
 fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    recompress_with(format, d, Kind::Unknown, opt, depth, cx)
+}
+
+/// [`recompress_as`], the data of a zlib stream or gzip member (without a name) of kind
+/// `contents`.
+fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
     let f = catch_unwind(AssertUnwindSafe(|| match format {
         Format::Pe => exe::pe(d),
         Format::MachO => exe::macho(d),
-        Format::Gzip => flate::gzip(d, opt, cx),
-        Format::Zlib => flate::zlib(d, opt, cx),
+        Format::Gzip => flate::gzip(d, contents, opt, cx),
+        Format::Zlib => flate::zlib(d, contents, opt, cx),
         Format::Lz4 => recons(aqr_lz4::formula::encode, d, opt),
         Format::Png => recons(aqr_png::formula::encode, d, opt),
         Format::Jpeg => recons(aqr_jpeg::formula::encode, d, opt),
@@ -390,51 +402,19 @@ fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, 
 const SCAN_SLACK: usize = 16 << 20;
 
 /// The files in `d`, if any is found: from the first byte on, a file whose recompressor takes
-/// it (up to its [`extent`]) is put in place, and the scan goes on after it; else on from the
-/// next byte, so that files in one turned down are still found. Weak signatures are confirmed
-/// by the extent: a zlib stream by its checksum, MPEG audio frames without a tag by one
-/// following another. Where the data is known to start with a file of `first` ([`Nest::As`]),
-/// it is that file, or none where that is turned down.
+/// it (up to its [`extent`]) is put in place, and the scan goes on after it; else, so that
+/// files in one turned down are still found, within it by its parts where its recompressor
+/// tells them ([`within`]), or on from the next byte. Weak signatures are confirmed by the
+/// extent: a zlib stream by its checksum, MPEG audio frames without a tag by one following
+/// another. Where the data is known to start with a file of `first` ([`Nest::As`]), it is that
+/// file, or none where that is turned down and tells nothing of its parts.
 fn scan(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
     scan_with(d, first, opt, depth, SCAN_SLACK, cx)
 }
 
 /// [`scan`] with `slack` for [`SCAN_SLACK`].
 fn scan_with(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Made> {
-    let mut found = Vec::new();
-    let (mut p, mut budget) = (0, d.len().saturating_mul(2).saturating_add(slack));
-    // Where each format's last file turned down ends: within it, a file of that format again
-    // would be part of the same (an archive from each of its local headers, MPEG audio from
-    // each of its frames), and is not tried.
-    let mut turned_down: Vec<(Format, usize)> = Vec::new();
-    while p < d.len() {
-        // at the start, a file may also be known by its end (a LevelDB table), or be one that
-        // is only ever a whole file (a SQLite database)
-        let format = match first {
-            Some(f) if p == 0 => Some(f),
-            _ if p == 0 => detect(d),
-            _ => detect::starts(&d[p..]),
-        };
-        let format = format.filter(|f| !turned_down.iter().any(|&(g, end)| g == *f && p < end));
-        let child = format.filter(|_| budget > 0).and_then(|format| {
-            let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
-            let child = recompress_as(format, &d[p..p + n], opt, depth, cx);
-            if child.is_none() {
-                budget = budget.saturating_sub(n);
-                turned_down.retain(|&(g, _)| g != format);
-                turned_down.push((format, p + n));
-            }
-            Some((n, child?))
-        });
-        match child {
-            Some((n, child)) => {
-                found.push((p, n, child));
-                p += n;
-            }
-            None if p == 0 && first.is_some() => return None,
-            None => p = detect::next_start(d, p + 1),
-        }
-    }
+    let found = find(d, first, opt, depth, slack, cx)?;
     // each file with the data before it, and the data after the last and the whole
     let around = description_bound(&Node::slice(0, u64::MAX, d.len() as u64));
     let sizes: Vec<_> =
@@ -461,6 +441,113 @@ fn scan_with(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: 
     gaps.push(at..d.len());
     f.root = Node::concat(parts);
     Some(Made { f, gaps: Some(gaps) })
+}
+
+/// A file found in data: where it starts, its length and its formula.
+type Found = (usize, usize, Formula);
+
+/// The files of [`scan_with`], in order; `None` where `d` starts with a file of `first` that is
+/// turned down and whose parts are not told ([`regions`]). Within a file turned down whose parts
+/// are told, files are looked for by them ([`within`]), else from each byte on.
+fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Vec<Found>> {
+    let mut found = Vec::new();
+    let (mut p, mut budget) = (0, d.len().saturating_mul(2).saturating_add(slack));
+    // Where each format's last file turned down ends: within it, a file of that format again
+    // would be part of the same (an archive from each of its local headers, MPEG audio from
+    // each of its frames), and is not tried.
+    let mut turned_down: Vec<(Format, usize)> = Vec::new();
+    while p < d.len() {
+        // at the start, a file may also be known by its end (a LevelDB table), or be one that
+        // is only ever a whole file (a SQLite database)
+        let format = match first {
+            Some(f) if p == 0 => Some(f),
+            _ if p == 0 => detect(d),
+            _ => detect::starts(&d[p..]),
+        };
+        let format = format.filter(|f| !turned_down.iter().any(|&(g, end)| g == *f && p < end));
+        let mut down = None;
+        let child = format.filter(|_| budget > 0).and_then(|format| {
+            let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
+            let child = recompress_as(format, &d[p..p + n], opt, depth, cx);
+            if child.is_none() {
+                budget = budget.saturating_sub(n);
+                turned_down.retain(|&(g, _)| g != format);
+                turned_down.push((format, p + n));
+                down = Some((format, n));
+            }
+            Some((n, child?))
+        });
+        match child {
+            Some((n, child)) => {
+                found.push((p, n, child));
+                p += n;
+            }
+            None => match down.and_then(|(format, n)| Some((n, regions(format, &d[p..p + n])?))) {
+                Some((n, parts)) => {
+                    let inner = within(&d[p..p + n], &parts, opt, depth, cx);
+                    found.extend(inner.into_iter().map(|(q, m, f)| (p + q, m, f)));
+                    p += n;
+                }
+                None if p == 0 && first.is_some() => return None,
+                None => p = detect::next_start(d, p + 1),
+            },
+        }
+    }
+    Some(found)
+}
+
+/// The files in `d`, a file turned down whose parts are `parts` ([`regions`]), in order: a part
+/// of a format is that file, taken as one up to its [`extent`] (by its parts again where turned
+/// down; what follows its end in the part is its own, and not looked into), the bytes no part
+/// tells of and parts of unknown kind are scanned, and the other parts are not looked into
+/// ([`Nest::of`]).
+fn within(d: &[u8], parts: &[Region], opt: &Options, depth: u32, cx: &Cx) -> Vec<Found> {
+    let mut found = Vec::new();
+    // (not from the first byte, where `d` itself starts)
+    let scan_part = |found: &mut Vec<Found>, r: Range<usize>| {
+        let r = r.start.max(1)..r.end;
+        if !r.is_empty()
+            && let Some(inner) = find(&d[r.clone()], None, opt, depth, SCAN_SLACK, cx)
+        {
+            found.extend(inner.into_iter().map(|(q, n, f)| (r.start + q, n, f)));
+        }
+    };
+    let mut at = 0;
+    for part in parts {
+        let r = part.span.clone();
+        if r.start < at || r.end > d.len() {
+            continue;
+        }
+        scan_part(&mut found, at..r.start);
+        match Nest::Scan.of(part.kind) {
+            None => {}
+            Some(Nest::As(format)) => {
+                let file = &d[r.clone()];
+                let n = extent(format, file).filter(|&n| n > 0).unwrap_or(file.len());
+                match recompress_with(format, &file[..n], part.contents, opt, depth, cx) {
+                    Some(f) => found.push((r.start, n, f)),
+                    None => {
+                        let inner = regions(format, &file[..n]).map(|p| within(&file[..n], &p, opt, depth, cx));
+                        found.extend(inner.into_iter().flatten().map(|(q, m, f)| (r.start + q, m, f)));
+                    }
+                }
+            }
+            Some(_) => scan_part(&mut found, r.clone()),
+        }
+        at = r.end;
+    }
+    scan_part(&mut found, at..d.len());
+    found
+}
+
+/// What the parts of `d`, a file of `format`, are, where its recompressor tells.
+fn regions(format: Format, d: &[u8]) -> Option<Vec<Region>> {
+    catch_unwind(AssertUnwindSafe(|| match format {
+        Format::Psd => aqr_psd::formula::regions(d),
+        _ => None,
+    }))
+    .ok()
+    .flatten()
 }
 
 /// Which of `parts` (bytes of data and of description each) to keep, so that `base` and the
@@ -747,6 +834,57 @@ mod tests {
             aqr_decompress::decompress(&finish(wrong, &d, &opt, &cx, Default::default(), false).0, 1),
             Err(aqr::Failure::Invalid("output checksum mismatch".into()))
         );
+    }
+
+    /// A PSD file of `w` x `h` 16-bit RGB (whose pixels aqr-psd does not code), its composite
+    /// `image` (raw), with color mode data `colors` and image resources `res`.
+    fn psd_file(w: u32, h: u32, colors: &[u8], res: &[u8], image: &[u8]) -> Vec<u8> {
+        let mut d = b"8BPS\0\x01\0\0\0\0\0\0\0\x03".to_vec();
+        d.extend_from_slice(&h.to_be_bytes());
+        d.extend_from_slice(&w.to_be_bytes());
+        d.extend_from_slice(&[0, 16, 0, 3]);
+        for part in [colors, res] {
+            d.extend_from_slice(&(part.len() as u32).to_be_bytes());
+            d.extend_from_slice(part);
+        }
+        d.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+        d.extend_from_slice(image);
+        d
+    }
+
+    /// In a file turned down whose recompressor tells what its parts are, pixels and structure
+    /// are not looked into (what a scan finds there is there by chance), the rest still is.
+    #[test]
+    fn scan_by_regions() {
+        let (w, h) = (256, 64);
+        // free-format MPEG audio headers, one frame apart, in noise its recompressor turns down,
+        // and in a resource
+        let mp3 = |d: &mut [u8], at: usize| {
+            for at in [at, at + 500] {
+                d[at..at + 4].copy_from_slice(&[0xff, 0xf3, 0x04, 0xc4]);
+            }
+        };
+        let mut image = aqr_common::rng::noise(6 * w * h);
+        mp3(&mut image, 1000);
+        let mut res = b"8BIM\x04\x0f\0\0\0\0\x04\0".to_vec();
+        res.extend(aqr_common::rng::noise(1024));
+        mp3(&mut res, 100);
+        // a gzip member where nothing is told: the color mode data
+        let text: Vec<u8> = (0..2000).flat_map(|i| format!("line {i} of the text\n").into_bytes()).collect();
+        let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let gz = z.finish().unwrap();
+        let d = psd_file(w as u32, h as u32, &gz, &res, &[&[0, 0][..], &image].concat());
+        for at in [26 + 4 + gz.len() + 4 + 100, d.len() - image.len() + 1000] {
+            assert!(detect::starts(&d[at..]) == Some(Format::Mp3) && extent(Format::Mp3, &d[at..]).is_some());
+        }
+        TRIED.with(|t| t.borrow_mut().clear());
+        let f = recompress(&d, &Options::default());
+        let tried = TRIED.with(|t| t.borrow().clone());
+        assert!(tried.contains(&Format::Psd), "{tried:?}");
+        assert!(!tried.contains(&Format::Mp3), "{tried:?}");
+        assert!(tried.contains(&Format::Gzip), "{tried:?}");
+        assert!(f.applies().iter().any(|a| a.module == FLATE));
     }
 
     /// An archive turned down is not tried again from each of its later local headers, where an
