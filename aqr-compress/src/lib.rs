@@ -365,6 +365,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         Format::Jpeg => recons(aqr_jpeg::formula::encode, d, opt),
         Format::Mp3 => recons(aqr_mp3::formula::encode, d, opt),
         Format::Flac => recons(aqr_flac::formula::encode, d, opt),
+        Format::Raw => recons(aqr_raw::formula::encode, d, opt),
         Format::Psd => recons(aqr_psd::formula::encode, d, opt),
         Format::Pdf => recons(aqr_pdf::formula::encode, d, opt),
         Format::Sqlite => recons(aqr_sqlite::formula::encode, d, opt),

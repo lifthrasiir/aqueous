@@ -62,6 +62,7 @@ dependencies = [
  "aqr-pdf",
  "aqr-png",
  "aqr-psd",
+ "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
  "aqr-zip",
@@ -84,6 +85,7 @@ dependencies = [
  "aqr-pdf",
  "aqr-png",
  "aqr-psd",
+ "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
  "aqr-zip",
@@ -119,6 +121,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-common",
  "aqr-formula",
+ "aqr-raw",
  "memchr",
 ]
 
@@ -219,6 +222,7 @@ dependencies = [
  "aqr-formula",
  "aqr-jpeg",
  "aqr-png",
+ "aqr-raw",
  "crc32fast",
  "flate-zoo",
  "flate2",
@@ -236,6 +240,7 @@ dependencies = [
  "aqr-common",
  "aqr-flate",
  "aqr-formula",
+ "aqr-raw",
  "crc32fast",
  "flate-zoo",
 ]
@@ -250,6 +255,14 @@ dependencies = [
  "aqr-jpeg",
  "aqr-png",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aqr-raw"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
 ]
 
 [[package]]

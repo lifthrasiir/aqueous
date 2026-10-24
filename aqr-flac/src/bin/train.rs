@@ -1,8 +1,11 @@
 //! Trains the built-in frequency tables from FLAC, WAV and AIFF files:
 //! `flr-train OUT FILE|DIR...` (every second file, or all
-//! with `-a`), writing the model file read by `codec::tables`.
+//! with `-a`), writing the model file read by `aqr_raw::audio::residual::tables`
+//! (`aqr-raw/model/audio.bin`).
 
-use aqr_flac::{codec, model, pcm, rans};
+use aqr_flac::{codec, rans};
+use aqr_raw::audio::{model, pcm};
+use aqr_raw::container::{self, Layout};
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -33,7 +36,11 @@ fn main() {
     for p in paths.iter().step_by(if all { 1 } else { 2 }) {
         let d = std::fs::read(p).unwrap();
         codec::count(&d, &mut counts);
-        pcm::count(&d, &mut counts);
+        if let Some(c) = container::detect(&d)
+            && let Layout::Pcm(fmt) = c.layout
+        {
+            pcm::count(&d[c.start..c.start + c.len], fmt, &mut counts);
+        }
         n += 1;
     }
     let freqs: Vec<Vec<u16>> = counts

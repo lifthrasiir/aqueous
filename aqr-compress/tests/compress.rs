@@ -2,7 +2,9 @@ use std::io::Write;
 
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
-use aqr_decompress::{ARM64, FLAC, FLATE, JPEG, LZ4, MP3, Native, PDF, SNAPPY, SQLITE, X86, ZIP, decompress};
+use aqr_decompress::{
+    ARM64, FLAC, FLATE, JPEG, LZ4, MP3, Native, PCM, PDF, RASTER, SNAPPY, SQLITE, X86, ZIP, decompress,
+};
 use aqr_formula::aqr;
 
 fn fixture(path: &str) -> Vec<u8> {
@@ -107,6 +109,7 @@ fn recons_fixtures() {
     let opt = all();
     for (path, module) in [
         ("aqr-flac/tests/data/s16_f5.flac", FLAC.name),
+        ("aqr-raw/tests/data/s24.aiff", PCM.name),
         ("aqr-mp3/tests/data/cbr128.mp3", MP3.name),
         ("aqr-mp3/tests/data/tags.mp3", MP3.name),
         ("aqr-jpeg/tests/data/prog_script_recode.jpg", JPEG.name),
@@ -423,18 +426,33 @@ fn pdf_nested() {
     assert!(classes(&f).contains(&"pdf/pool-data".into()), "{f}");
 }
 
+/// An image in a trivial container, its header and trailer kept around aqr-raw's module; as two
+/// bytes are too weak a signature, not looked for in other data.
+#[test]
+fn raw_images() {
+    let mut pgm = b"P5\n# a gradient\n320 200\n255\n".to_vec();
+    pgm.extend((0..200u32).flat_map(|y| (0..320u32).map(move |x| ((x + y) / 3 + (x * y) % 7) as u8)));
+    pgm.extend_from_slice(b"trailer");
+    let f = roundtrip(&pgm, &all());
+    assert_eq!(modules(&f), [RASTER.name], "{f}");
+    let Node::Concat(parts) = &f.root else { panic!("{f}") };
+    assert_eq!(parts.len(), 3, "{f}");
+    let f = roundtrip(&[&text(5000)[..], &pgm].concat(), &all());
+    assert!(modules(&f).is_empty(), "{f}");
+}
+
 /// Files anywhere in the data are found, each cut to its end.
 #[test]
 fn scan_embedded() {
     let flac = fixture("aqr-flac/tests/data/s16_f5.flac");
     let jpeg = fixture("aqr-jpeg/tests/data/gradient.jpg");
-    let wav = fixture("aqr-flac/tests/data/s16.wav");
+    let wav = fixture("aqr-raw/tests/data/s16.wav");
     let (t1, t2, t3) = (text(5000), text(3000), text(100));
     let d = [&t1[..], &jpeg, &t2, &gzip(&text(100_000)), &wav, &jpeg, &t3, &flac].concat();
     let f = roundtrip(&d, &all());
     let flac_name = FLAC.name;
     let jpeg_name = JPEG.name;
-    assert_eq!(modules(&f), [jpeg_name, FLATE.name, flac_name, jpeg_name, flac_name], "{f}");
+    assert_eq!(modules(&f), [jpeg_name, FLATE.name, PCM.name, jpeg_name, flac_name], "{f}");
     // The data between the files, as one stream.
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts[0], Node::slice(0, 0, t1.len() as u64));

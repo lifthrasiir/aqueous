@@ -1,4 +1,5 @@
-//! The pieces of the pipelines used with more than one thread (see `codec` and `pcm`).
+//! The pieces of the pipelines used with more than one thread (see [`super::pcm`] and
+//! aqr-flac's `codec`).
 //!
 //! Frames travel in batches (about [`BATCH_SAMPLES`] samples, so that a hand-over between
 //! threads is rare next to the work on it) through stages on threads of their own, linked
@@ -12,9 +13,9 @@
 //! drops its channels, the threads next to it see that and stop, and `thread::scope`
 //! panics once all have finished.
 
-use crate::flac::{Frame, MAX_CHANNELS};
-use crate::model::Scale;
-use crate::residual::{Error, LmsDecoder, ResDecoder};
+use crate::audio::frame::{Frame, MAX_CHANNELS};
+use crate::audio::model::Scale;
+use crate::audio::residual::{Error, LmsDecoder, ResDecoder};
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, SyncSender};

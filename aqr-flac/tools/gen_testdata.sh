@@ -1,8 +1,10 @@
 #!/bin/bash
-# Regenerates the small test files in tests/data (synthetic signals, various formats).
+# Regenerates the small test files in tests/data (synthetic signals, various formats), and
+# the WAV and AIFF files of aqr-raw's tests/data (from aqr-flac).
 set -eu
 out=${1:-tests/data}
-mkdir -p "$out"
+pcm=${2:-../aqr-raw/tests/data}
+mkdir -p "$out" "$pcm"
 t=$(mktemp -d)
 trap 'rm -rf "$t"' EXIT
 syn() { sox -n -r "$1" -c "$2" -b "$3" "$4" synth 0.6 sine 220-880 pinknoise sine 3000 vol 0.6 remix - fade 0.1 0.6 0.1 "${@:5}"; }
@@ -33,10 +35,10 @@ n = len(d)
 open(sys.argv[2], 'wb').write(d[:n // 2] + b'\xff\xf8junk' * 7 + d[n // 2:])
 open(sys.argv[3], 'wb').write(d[:n * 2 // 3])
 PY
-# PCM.
-cp "$t/s16.wav" "$out/s16.wav"
-cp "$t/u8m.wav" "$out/u8_mono.wav"
-sox "$t/s24.wav" -b 24 "$out/s24.aiff"
-ffmpeg -v error -y -i "$t/s16.wav" -c:a pcm_s16le -f aiff "$out/s16_sowt.aifc"
-ffmpeg -v error -y -i "$t/s24.wav" -c:a pcm_s24le -rf64 never -write_bext 0 -f wav "$out/s24_ext.wav"
-sox "$t/c6.wav" "$out/c6.wav"
+# PCM, for aqr-raw.
+cp "$t/s16.wav" "$pcm/s16.wav"
+cp "$t/u8m.wav" "$pcm/u8_mono.wav"
+sox "$t/s24.wav" -b 24 "$pcm/s24.aiff"
+ffmpeg -v error -y -i "$t/s16.wav" -c:a pcm_s16le -f aiff "$pcm/s16_sowt.aifc"
+ffmpeg -v error -y -i "$t/s24.wav" -c:a pcm_s24le -rf64 never -write_bext 0 -f wav "$pcm/s24_ext.wav"
+sox "$t/c6.wav" "$pcm/c6.wav"

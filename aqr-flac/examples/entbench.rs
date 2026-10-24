@@ -2,7 +2,8 @@
 //! cycles per residual (at 4.4 GHz), both ways.
 #![allow(clippy::needless_range_loop)]
 use aqr_flac::bits::{self, BitReader, FastWriter};
-use aqr_flac::{codec, flac, model, rans};
+use aqr_flac::{codec, flac, rans};
+use aqr_raw::audio::model;
 
 fn main() {
     let path = std::env::args().nth(1).unwrap();

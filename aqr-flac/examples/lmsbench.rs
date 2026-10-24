@@ -1,9 +1,7 @@
 //! LMS stage alone over a file's residuals: cycles per residual (at 4.4 GHz), both ways.
 #![allow(clippy::needless_range_loop)]
-use aqr_flac::{
-    bits, flac,
-    model::{self, Lms},
-};
+use aqr_flac::{bits, flac};
+use aqr_raw::audio::model::{self, Lms};
 
 fn main() {
     let path = std::env::args().nth(1).unwrap();

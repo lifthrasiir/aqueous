@@ -1,0 +1,10 @@
+[package]
+name = "aqr-raw"
+version = "0.1.0"
+edition = "2024"
+description = "Uncompressed sampled data, PCM audio and raster images: their models as a library, and as modules of entry formulas with the trivial containers (WAV, AIFF, BMP, PNM) taken apart"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common", features = ["zstd"] }
+aqr-formula = { path = "../aqr-formula" }

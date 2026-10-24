@@ -21,7 +21,8 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Png => png(d),
         Format::Jpeg => jpeg(d),
         Format::Mp3 => mp3(d),
-        Format::Flac => flac(d),
+        Format::Flac => Some(flac_frames(d)),
+        Format::Raw => raw(d),
         Format::Psd => psd(d),
         Format::Pdf => Some(pdf(d)),
         Format::Sqlite => sqlite(d),
@@ -186,12 +187,13 @@ fn mp3(d: &[u8]) -> Option<usize> {
     Some(p + d.get(p..).map_or(0, id3v1))
 }
 
-/// RIFF and FORM by their sizes; FLAC by its frames ([`flac_frames`]).
-fn flac(d: &[u8]) -> Option<usize> {
+/// RIFF and FORM by their sizes; BMP and PNM (only taken at the start of a file) by their
+/// samples' end.
+fn raw(d: &[u8]) -> Option<usize> {
     let size = match d.first_chunk::<4>()? {
         b"RIFF" => u32le(d, 4)?,
         b"FORM" => u32be(d, 4)?,
-        _ => return Some(flac_frames(d)),
+        _ => return aqr_raw::container::detect(d).map(|c| c.start + c.len),
     };
     // A size of 0 is that of a stream written without seeking back.
     Some(if size == 0 { d.len() } else { clamp(d, 8 + size + (size & 1)) })
@@ -396,9 +398,9 @@ mod tests {
             (Format::Mp3, "aqr-mp3/tests/data/vbr.mp3"),
             (Format::Mp3, "aqr-mp3/tests/data/lsf8.mp3"),
             (Format::Mp3, "aqr-mp3/tests/data/tags.mp3"),
-            (Format::Flac, "aqr-flac/tests/data/s16.wav"),
-            (Format::Flac, "aqr-flac/tests/data/s24.aiff"),
-            (Format::Flac, "aqr-flac/tests/data/s16_sowt.aifc"),
+            (Format::Raw, "aqr-raw/tests/data/s16.wav"),
+            (Format::Raw, "aqr-raw/tests/data/s24.aiff"),
+            (Format::Raw, "aqr-raw/tests/data/s16_sowt.aifc"),
             (Format::Flac, "aqr-flac/tests/data/s16_f5.flac"),
             (Format::Flac, "aqr-flac/tests/data/s24_f8.flac"),
             (Format::Flac, "aqr-flac/tests/data/s16_tags.flac"),

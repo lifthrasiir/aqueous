@@ -318,6 +318,9 @@ previous channel's residual is added:
 `pred = clamp(med(a, b, c) + v1 − med(a1, b1, c1), 0, 255)`, where `v1` is the raw value of
 pixel byte `x − 1` and `a1`, `b1`, `c1` are its neighbours as above.
 
+This is the pixel model of aqr-raw (its `FORMAT.md`, §7.2, which codes raw rasters with it,
+taking the magnitudes of its own residuals where `fl` and `fu` are here).
+
 A position's *literal symbol* is `zigzag(v − pred)`, where `v = data[p] + fp` (the raw value
 for an *image* pixel byte, else the filtered byte itself). When decoding, `v = pred +
 unzigzag(symbol)` and `data[p] = v − fp`.

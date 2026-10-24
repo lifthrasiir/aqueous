@@ -6,8 +6,8 @@
 //! past errors, so the tokens decode without the LMS stage, and the LMS stage then turns
 //! errors back into residuals. Both states run across frames per channel index.
 
-use crate::bits::{BitReader, FastBits};
-use crate::rans::{DecLocal, EncLocal};
+use crate::audio::bits::{BitReader, FastBits};
+use crate::audio::rans::{DecLocal, EncLocal};
 
 /// LMS taps.
 pub const TAPS: usize = 32;
@@ -321,7 +321,7 @@ pub fn encode_one(sc: &mut Scale, cc: usize, e: i32, enc: &mut EncLocal, raw: &m
     }
 }
 
-/// log2 of the alias buckets per context ([`crate::rans::Tables::flat_log`]).
+/// log2 of the alias buckets per context ([`crate::audio::rans::Tables::flat_log`]).
 pub const FLAT_LOG: u32 = N_TOK.next_power_of_two().trailing_zeros();
 /// Most raw bits per error.
 pub const MAX_RAW_BITS: usize = 56;

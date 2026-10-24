@@ -18,6 +18,7 @@ members = [
     "aqr-pdf",
     "aqr-png",
     "aqr-psd",
+    "aqr-raw",
     "aqr-snappy",
     "aqr-sqlite",
     "aqr-zip",
@@ -42,6 +43,9 @@ debug = true
 debug = true
 
 [profile.release.package.aqr-mp3]
+debug = true
+
+[profile.release.package.aqr-raw]
 debug = true
 
 # aqr-exe as a Wasm module (aqr-exe/build-wasm.bat).

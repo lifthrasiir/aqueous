@@ -7,6 +7,7 @@ edition = "2024"
 aqr-common = { path = "../aqr-common", features = ["zstd"] }
 memchr = "2"
 aqr-formula = { path = "../aqr-formula" }
+aqr-raw = { path = "../aqr-raw" }
 
 [[bin]]
 name = "flr"

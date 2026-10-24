@@ -9,6 +9,7 @@ publish = false
 aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-flate = { path = "../aqr-flate" }
+aqr-raw = { path = "../aqr-raw" }
 crc32fast = "1.5"
 
 [dev-dependencies]

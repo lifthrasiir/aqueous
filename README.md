@@ -11,7 +11,8 @@ and the design is argued in `xform-design.md`.
   coding and the round-trip check) at level `mid`, then extracted.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `objr bench`.
   - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
-- aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above).
+- aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above),
+  and aqr-raw's images measured then.
 - aqr-exe alone was measured on another machine, an AMD Ryzen 7 9700X under Windows 11 (at
   `aa7a327`, otherwise as above): its speeds are not comparable to the others'. Its memory is
   the peak working set.
@@ -41,6 +42,7 @@ and the design is argued in `xform-design.md`.
 |---|---|---|---|---|---|---|---|---|
 | PNG, APNG | aqr-png | 379 files, 391 MB | 0.802 | 0.997 | 42 | 90 | 7 MB + 10.3× | the data, the raw image and the tokens are held a window at a time; the encoder's symbols (2 bytes per byte of data on photos) are what still follows the pixels |
 | JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
+| BMP, PGM, PPM, PAM | aqr-raw | 17 files, 52 MB | 0.223 | 0.400 | 73 | 303 | about 35 MB + 4× | 8-bit samples; not a sample of real files (PNGs of aqr-png's corpus converted, README of aqr-raw). 16-bit and RLE images are not taken |
 | PSD, PSB | aqr-psd | 56 files, 439 MB | 0.330 | 0.555 | 45 | 127 | 28 MB + 5.4× | pixels coded in 8-bit documents only; aqr-psd itself takes a few MB besides its streams, the rest is the archive's (a file kept raw is scanned by the parts aqr-psd tells) |
 
 ### Audio
@@ -48,7 +50,7 @@ and the design is argued in `xform-design.md`.
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | MP3 | aqr-mp3 | 402 files, 401 MB | 0.855 ~ 0.893 | 0.971 | 46 | 119 | 61 MB + 6.4× | see below |
-| FLAC, WAV, AIFF | aqr-flac | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 12.5× | the resource is about 2.6 KB per archive |
+| FLAC; WAV, AIFF | aqr-flac; aqr-raw | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 12.5× | the resource is about 2.6 KB per archive. Measured when aqr-flac took WAV and AIFF too: aqr-raw has them now, with the same streams |
 
 The MP3 resource is the built-in tables (131 KB raw, about 38 KB in every archive), so a
 typical 1 MB track is coded alone too (worst). The speeds are those of the files coded
@@ -92,7 +94,8 @@ reservoir is rebuilt.
 | aqr-png | only matches kept when decoding; a pixel-domain mode for streams zlib reproduces; 16-bit and palette models |
 | aqr-jpeg | progressive re-encoding and compression in parallel; memory of progressive files (compact coefficients); why fuzzing leaves many inputs uncoded |
 | aqr-mp3 | the 3 pp gap to packMP3; other encoders (FhG, iTunes, Xing); MP3 in MP4 or MKV |
-| aqr-flac | warm-up samples predicted; FLAC in Ogg, float WAV, more than 8 channels |
+| aqr-flac | warm-up samples predicted; FLAC in Ogg, more than 8 channels |
+| aqr-raw | 16-bit images (PNM, PAM, then TIFF and DICOM); float audio, CAF, W64, RF64; a layout with the pixel data other recompressors hand over, so that aqr-compress sends it to `raster-recons` |
 | aqr-pdf | default JPEG tables for small images; files encrypted with an empty user password; ASCII85 and DCT chains; cross-reference tables rebuilt |
 | aqr-psd | 16- and 32-bit data, ZIP channels, other colour modes; effects and adjustment layers rendered |
 | aqr-sqlite | memory (chunked processing); WAL and rollback journals; WITHOUT ROWID secondary indexes |
@@ -113,7 +116,7 @@ bytes. Gains are estimates unless a tool is cited.
 | Avid DNxHD, DNxHR | broadcast, Avid workflows | intra DCT, VLC; constant bit rate, so every frame is padded | the padding, then the VLC recoded | with ProRes |
 | DV, HDV, XDCAM (MPEG-2), MPEG-4 Part 2 (Xvid, DivX), H.263 | archived broadcast and camcorder footage, DVD VOB, old downloads | DCT, VLC tables fixed by the standard | coefficients recoded (as packMP3). Inter frames also need motion vectors and macroblock modes modelled, but nothing reconstructed | aqr-mp3's structure |
 | Motion JPEG (AVI, MOV) | dashcams, webcams, older cameras' video, security cameras | a JPEG per frame, often without its Huffman tables (the standard ones implied) | each frame through aqr-jpeg; the frames' headers predicted from each other | aqr-jpeg |
-| HuffYUV, FFVHuff, UT Video, MagicYUV | lossless capture, intermediates | spatial prediction, then static Huffman tables per stream or slice | the residuals context-modelled | aqr-png's pixel model |
+| HuffYUV, FFVHuff, UT Video, MagicYUV | lossless capture, intermediates | spatial prediction, then static Huffman tables per stream or slice | the residuals context-modelled | aqr-raw's pixel model |
 | H.264 CAVLC (baseline profile) | older phones, video calls, some security cameras | VLC tables chosen by the neighbours' coefficient counts | parsing needs no reconstruction, so the syntax elements can be recoded under richer contexts | aqr-mp3's structure |
 | Theora | old web video, game cutscenes | VP3: DCT tokens with Huffman tables set in the stream header | as Vorbis | the Vorbis work |
 | CineForm, ProRes RAW | high-end cameras, post-production | wavelets, or a RAW-specific coding | after ProRes | |
@@ -128,11 +131,11 @@ bytes. Gains are estimates unless a tool is cited.
 | AC-3, E-AC-3 (Dolby Digital) | DVD, Blu-ray, broadcast, streaming 5.1 | differential exponents in groups, mantissas at fixed widths from a computed bit allocation: no entropy coding | exponents and mantissas modelled | |
 | DTS core, ATRAC3 | DVD and Blu-ray tracks; MiniDisc, PSP and PS3 games | ADPCM subbands with optional Huffman (DTS); fixed-width or VLC spectra (ATRAC3) | as above | |
 | AMR-NB, AMR-WB | voice memos, 3GP, call recordings | CELP parameters at fixed widths per mode | the parameters modelled across frames | |
-| ALAC | Apple music libraries | adaptive Rice | the residual model of FLAC | aqr-flac |
-| Shorten, TTA | etree live-music archives, older lossless rips | Rice (Shorten), adaptive Rice with a filter (TTA) | the residual model of FLAC; most for Shorten | aqr-flac |
-| CAF, W64, RF64, BWF | audio production | uncompressed PCM | the PCM path of aqr-flac, with these containers | aqr-flac |
+| ALAC | Apple music libraries | adaptive Rice | the residual model of FLAC | aqr-raw's audio model |
+| Shorten, TTA | etree live-music archives, older lossless rips | Rice (Shorten), adaptive Rice with a filter (TTA) | the residual model of FLAC; most for Shorten | aqr-raw's audio model |
+| CAF, W64, RF64 | audio production | uncompressed PCM | aqr-raw's `pcm-recons`, with these containers (BWF is a WAV, taken already) | aqr-raw |
 | DSF, DSDIFF | DSD (SACD) downloads | 1-bit samples uncompressed (DST in DSDIFF is already arithmetic) | a DST-like model of the bit stream | |
-| SoundFont (SF2), DLS, tracker modules (MOD, XM, IT, S3M) | sample libraries, game and demoscene music | uncompressed PCM samples (XM delta-coded; IT optionally its own compression) | the PCM path of aqr-flac | aqr-flac |
+| SoundFont (SF2), DLS, tracker modules (MOD, XM, IT, S3M) | sample libraries, game and demoscene music | uncompressed PCM samples (XM delta-coded; IT optionally its own compression) | `pcm-recons` on the samples found | aqr-raw |
 
 ### Camera RAW
 
@@ -151,10 +154,10 @@ container is TIFF/EXIF.
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
-| GIF | the web, animations | LZW (when codes widen and when to clear differ by encoder) | the encoder's choices reproduced, the pixels modelled | aqr-png's pixel model |
+| GIF | the web, animations | LZW (when codes widen and when to clear differ by encoder) | the encoder's choices reproduced, the pixels modelled | aqr-raw's pixel model |
 | TIFF, GeoTIFF, COG, OME-TIFF | scanning, print, GIS, microscopy | uncompressed, PackBits, LZW or deflate, with an optional horizontal predictor | the existing recompressors per strip or tile | aqr-psd (PackBits), aqr-flate |
 | CCITT Group 3 and 4 | fax, scanned documents in TIFF and PDF (`CCITTFaxDecode`) | modified Huffman and READ codes with fixed tables | the bilevel pixels context-modelled (JBIG's context model, the reference point, beats G4 clearly) | |
-| BMP, ICO, CUR, TGA, PCX, ILBM, PNM | icons, old games, screenshots, textures | uncompressed or RLE | an image model; the RLE runs reproduced | aqr-png's pixel model |
+| ICO, CUR, TGA, PCX, ILBM; RLE BMP | icons, old games, screenshots, textures | uncompressed or RLE | the samples through `raster-recons`; the RLE runs reproduced (uncompressed BMP and PNM are done) | aqr-raw |
 | Radiance HDR | HDR environment maps | RGBE, per-scanline RLE | the RLE reproduced, the RGBE pixels modelled | |
 | OpenEXR | VFX, rendering | per block: ZIP (zlib after a predictor and byte split), PIZ (wavelet, then Huffman), RLE, and lossy ones | ZIP blocks through aqr-flate; PIZ's Huffman recoded | aqr-flate |
 | GIMP XCF | image editing | tiles in RLE or zlib | the zlib tiles; the RLE reproduced | aqr-flate |
@@ -207,7 +210,7 @@ container is TIFF/EXIF.
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
 | BAM, bgzip (VCF.gz, FASTQ.gz) | genomics, petabytes of it | BGZF: gzip members of 64 KiB one after the other (htslib's zlib or libdeflate) | taking the DEFLATE off alone gains much; fields split into streams (as CRAM) can come later | aqr-flate and flate-zoo have nearly all of it |
-| DICOM | medical imaging (PACS) | uncompressed 16-bit, JPEG Lossless, JPEG-LS, RLE | lossless JPEG shared with RAW; uncompressed images need an image model | RAW's lossless JPEG |
+| DICOM | medical imaging (PACS) | uncompressed 16-bit, JPEG Lossless, JPEG-LS, RLE | lossless JPEG shared with RAW; uncompressed images through `raster-recons` once it takes 16 bits | RAW's lossless JPEG, aqr-raw |
 | NIfTI (`.nii.gz`) | neuroimaging | a gzip of the whole volume | the gzip, then a 3D model of the voxels | aqr-flate |
 | mzML, mzXML | mass spectrometry | XML with base64 arrays of floats, optionally zlib | base64 and zlib undone, the m/z and intensity arrays modelled | aqr-flate |
 | FITS (`fpack`) | astronomy | Rice coding of 32-pixel blocks | the Rice codes recoded | aqr-flac's Rice handling |

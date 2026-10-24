@@ -22,6 +22,7 @@ use aqr_flate::deflate::{Block, Body, DynHeader, Stream, Token};
 use aqr_flate::header::{self, Recipe};
 use aqr_flate::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
 use aqr_flate::inflate::Flat;
+use aqr_raw::image::pixel::{ACT, bucket, med as med3};
 use std::cell::Cell;
 
 /// Literals 0-255, then length codes 0-28 (symbols 257-285).
@@ -134,8 +135,6 @@ const RESOLUTIONS: usize = 4;
 /// Table sets: one per class, and one for images coded as pixels.
 const PIXEL: usize = CLASSES.len();
 const SLOTS: usize = PIXEL + 1;
-/// Activity buckets of the pixel contexts.
-const ACT: usize = 12;
 /// Pixel contexts: whether a match came just before × channel (capped at 3) × activity.
 const PIX_CTX: usize = 8 * ACT;
 
@@ -156,9 +155,7 @@ fn med(d: &[u8], p: usize, col: usize, px: Pixels) -> (i32, u32) {
     let a = if left { d[p - px.bpp] } else { 0 } as i32;
     let b = if up { d[p - px.stride] } else { 0 } as i32;
     let c = if left && up { d[p - px.stride - px.bpp] } else { 0 } as i32;
-    // min(a, b) if c >= max(a, b), max(a, b) if c <= min(a, b), else a + b - c.
-    let pred = (a + b - c).clamp(a.min(b), a.max(b));
-    (pred, ((a - c).abs() + (b - c).abs()) as u32)
+    (med3(a, b, c), ((a - c).abs() + (b - c).abs()) as u32)
 }
 
 /// The pixel model's prediction and context for the byte at `p`: MED, plus for every
@@ -183,8 +180,7 @@ fn pixel_ctx(
         pred += d[p - 1] as i32 - prev;
     }
     last.set((p, m));
-    let bucket = ((32 - act.leading_zeros()) as usize).min(ACT - 1);
-    (pred as u8, ((after as usize) * 4 + ch.min(3)) * ACT + bucket)
+    (pred as u8, ((after as usize) * 4 + ch.min(3)) * ACT + bucket(act))
 }
 
 /// The literal table of fine context `t` of slot `slot` at resolution `res`.

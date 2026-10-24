@@ -1,7 +1,8 @@
-use aqr_flac::codec::STREAM_NAMES;
-use aqr_flac::formula::{self, MODULE, Options};
-use aqr_flac::pcm::Format;
+use aqr_flac::formula;
 use aqr_formula::{Apply, Formula, aqr};
+use aqr_raw::audio::pcm::Format;
+use aqr_raw::container::{self, Layout};
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 fn usage() -> ! {
@@ -11,6 +12,7 @@ fn usage() -> ! {
   flr info FILE|DIR...
   flr fuzz [-r FORMAT] [-t THREADS] [-n N] [-s SEED] FILE|DIR...
 
+  FLAC files are coded by aqr-flac, WAV and AIFF (and headerless PCM) by aqr-raw.
   -r FORMAT: take the input as headerless PCM, e.g. s16le:2, s24be:6, u8:1
              (sign, bits, endianness, ':' channels)
   -t THREADS: bench defaults to 1; fuzz also checks that 2-4 threads (or THREADS) give
@@ -78,27 +80,43 @@ fn opts(args: &[String]) -> Opts {
     o
 }
 
-/// The module's decoder on `threads` threads, as the modules of [`Formula::eval`] and archives.
+/// The modules formulas of [`encode`] apply.
+const MODULES: [aqr_formula::Module; 2] = [formula::MODULE, aqr_raw::formula::pcm::MODULE];
+
+/// The modules' decoders on `threads` threads, as the modules of [`Formula::eval`] and archives.
 fn modules(threads: usize) -> impl Fn(&Apply, &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
     move |a, inputs| {
-        assert_eq!(a.module, MODULE);
         let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
-        formula::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.0))
+        let r = if a.module == formula::MODULE {
+            formula::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| e.0)
+        } else {
+            assert_eq!(a.module, aqr_raw::formula::pcm::MODULE);
+            aqr_raw::formula::pcm::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| e.0)
+        };
+        r.map_err(aqr_formula::Error::new)
     }
 }
 
-/// The formula of `d` where there is one (a panic of the coder is none).
-fn encode(d: &[u8], opt: &Options) -> Option<Formula> {
-    std::panic::catch_unwind(|| formula::encode_with(d, opt)).ok()?
+/// The formula of `d`: FLAC by aqr-flac, anything else as audio by aqr-raw (headerless PCM of
+/// `raw`, or a WAV or AIFF file). None where there is none (a panic of the coder is none).
+fn encode(d: &[u8], raw: Option<Format>, threads: usize) -> Option<Formula> {
+    std::panic::catch_unwind(|| match raw {
+        Some(fmt) => aqr_raw::formula::encode_samples(d, Layout::Pcm(fmt), threads),
+        None => formula::encode(d, threads).or_else(|| {
+            let found = container::detect(d).filter(|c| matches!(c.layout, Layout::Pcm(_)))?;
+            aqr_raw::formula::encode_found(d, &found, threads)
+        }),
+    })
+    .ok()?
 }
 
 fn bench(args: &[String]) {
     let o = opts(args);
-    let opt = Options { raw: o.raw, threads: o.threads.unwrap_or(1) };
+    let threads = o.threads.unwrap_or(1);
     let iters = o.n.unwrap_or(1);
     let (mut tin, mut tout, mut tc, mut td) = (0usize, 0usize, 0f64, 0f64);
     let (mut fails, mut skipped) = (0, 0);
-    let mut sizes_total = vec![0usize; STREAM_NAMES.len()];
+    let mut sizes_total = BTreeMap::<String, usize>::new();
     for path in files(&o.rest) {
         let d = read(&path);
         let mut best_c = f64::MAX;
@@ -106,7 +124,7 @@ fn bench(args: &[String]) {
         let mut coded = None;
         for _ in 0..iters {
             let t = Instant::now();
-            let f = encode(&d, &opt);
+            let f = encode(&d, o.raw, threads);
             let c = f.as_ref().map(|f| aqr::encode(f, Some(aqr::checksum(&d)), aqr::Level::Mid).unwrap());
             best_c = best_c.min(t.elapsed().as_secs_f64());
             coded = f.zip(c);
@@ -118,14 +136,14 @@ fn bench(args: &[String]) {
             }
             continue;
         };
-        let m = modules(opt.threads);
+        let m = modules(threads);
         let mut ok = f.eval(&m).is_ok_and(|r| r == d);
         if !ok {
             eprintln!("{path}: formula does not evaluate to the input");
         }
         for _ in 0..iters {
             let t = Instant::now();
-            let r = aqr::decode(&c, &aqr::natives(&[MODULE], &m));
+            let r = aqr::decode(&c, &aqr::natives(&MODULES, &m));
             best_d = best_d.min(t.elapsed().as_secs_f64());
             match r {
                 Ok(r) if r == d => {}
@@ -140,8 +158,8 @@ fn bench(args: &[String]) {
             fails += 1;
             println!("FAIL {path}");
         }
-        for (t, s) in sizes_total.iter_mut().zip(&f.streams) {
-            *t += s.data.len();
+        for s in &f.streams {
+            *sizes_total.entry(s.class.to_string()).or_default() += s.data.len();
         }
         tin += d.len();
         tout += c.len();
@@ -165,8 +183,8 @@ fn bench(args: &[String]) {
         tin as f64 / td / 1e6
     );
     println!("streams (bytes before the archive's compression, % of input):");
-    for (name, z) in STREAM_NAMES.iter().zip(&sizes_total) {
-        println!("  {name:10} {z:12}  {:6.2}%", *z as f64 * 100.0 / tin.max(1) as f64);
+    for (name, z) in &sizes_total {
+        println!("  {name:16} {z:12}  {:6.2}%", *z as f64 * 100.0 / tin.max(1) as f64);
     }
 }
 
@@ -216,10 +234,10 @@ fn fuzz(args: &[String]) {
             // The formula (if any) evaluates to the input, on one thread and on several, and
             // is the same whatever the number of threads of the encoder.
             let ok = std::panic::catch_unwind(|| {
-                let Some(f) = formula::encode_with(&m, &Options { raw: o.raw, threads: 1 }) else { return true };
+                let Some(f) = encode(&m, o.raw, 1) else { return true };
                 f.eval(&modules(1)).is_ok_and(|r| r == m)
                     && f.eval(&modules(threads)).is_ok_and(|r| r == m)
-                    && formula::encode_with(&m, &Options { raw: o.raw, threads }) == Some(f)
+                    && encode(&m, o.raw, threads) == Some(f)
             })
             .unwrap_or(false);
             if !ok {
@@ -248,8 +266,8 @@ fn info(args: &[String]) {
                     c.raw[1].len()
                 );
             }
-            None => match aqr_flac::pcm::detect(&d) {
-                Some((f, start, len)) => println!("{path}: PCM {f:?}, data at {start}, {len} bytes"),
+            None => match container::detect(&d) {
+                Some(c) => println!("{path}: {}, {:?}, samples at {}, {} bytes", c.name, c.layout, c.start, c.len),
                 None => println!("{path}: not recognised (not coded)"),
             },
         }

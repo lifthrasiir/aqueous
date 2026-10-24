@@ -81,10 +81,12 @@ on the photo sets).
 
 ### Model (`src/model.rs`)
 
-- **Literals** are coded as the residual of the raw (unfiltered) byte against LOCO-I's MED
-  predictor of its left, upper and upper-left neighbours. Green and blue add the previous
-  channel's residual (inter-channel decorrelation). The row's PNG filter is then reapplied
-  to give the byte the stream holds, so the PNG filter choice does not matter.
+- **Literals** are coded as the residual of the raw (unfiltered) byte against aqr-raw's pixel
+  model ([`aqr_raw::image::pixel`](../aqr-raw/src/image/pixel.rs), which also codes
+  uncompressed images): LOCO-I's MED predictor of its left, upper and upper-left
+  neighbours, green and blue adding the previous channel's residual (inter-channel
+  decorrelation). The row's PNG filter is then reapplied to give the byte the stream holds,
+  so the PNG filter choice does not matter.
 - **Contexts**: channel, local activity and whether a match came just before; filter bytes
   have a table of their own.
 - **Matches** start as an escape symbol in the literal alphabet, so a literal costs a
@@ -214,7 +216,7 @@ the tests (and `pngr bench` on the corpus) run through them on small images too.
 |---|---|
 | `src/png.rs` | Chunk parsing, IHDR |
 | `src/filter.rs` | PNG filters (reference unfilter, branch-free Paeth) |
-| `src/model.rs` | Geometry, the token model, encoder and decoder loops, NEON row model |
+| `src/model.rs` | Geometry, the token model, encoder and decoder loops, NEON row model (the pixel model's pieces are aqr-raw's) |
 | `src/rans.rs` | Static rANS: tables, encoder, decoder, bit I/O |
 | `src/codec.rs` | Skeleton, image records, rebuilding the file |
 | `src/formula.rs` | The formula module |

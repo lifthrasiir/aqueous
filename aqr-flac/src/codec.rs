@@ -1,15 +1,15 @@
 //! Coding and decoding of whole FLAC files.
 //!
-//! Residuals go through [`crate::residual`] into one rANS stream and two raw bit streams
+//! Residuals go through [`aqr_raw::audio::residual`] into one rANS stream and two raw bit streams
 //! (by channel parity). Everything else (the bytes before the first frame, junk between
 //! frames, frame headers, subframe parameters) goes into small byte streams.
 
 use crate::bits;
 use crate::flac::{self, ESCAPE, Frame};
-use crate::par::{self, DecBatch, EncBatch, Item};
 use crate::rans::Tables;
-pub use crate::residual::{Coded, Error, Rd, freqs_to_bytes, layout_id, put_varint, tables};
-use crate::residual::{LmsEncoder, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes};
+use aqr_raw::audio::par::{self, DecBatch, EncBatch, Item};
+pub use aqr_raw::audio::residual::{Coded, Error, Rd, freqs_to_bytes, layout_id, put_varint, tables};
+use aqr_raw::audio::residual::{LmsEncoder, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes};
 use std::sync::mpsc::sync_channel;
 
 /// Byte streams.

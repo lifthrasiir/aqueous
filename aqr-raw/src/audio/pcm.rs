@@ -1,27 +1,25 @@
-//! Compression of PCM audio (WAV, AIFF / AIFC, or headerless with a given format).
+//! Interleaved PCM samples, as they are in WAV, AIFF and most other containers (which
+//! [`crate::container`] takes apart).
 //!
 //! The samples are cut into blocks, and each block becomes a FLAC-like frame (stereo
 //! decorrelation, wasted bits, a quantised LPC predictor per channel) whose residuals go
-//! through the same pipeline as FLAC residuals ([`crate::residual`]). Headers and
-//! trailing bytes are kept verbatim.
+//! through the same pipeline as FLAC residuals ([`crate::audio::residual`]).
 
-use crate::bits;
-use crate::flac::{self, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBATIM};
-use crate::par::{self, DecBatch, EncBatch, Item};
-use crate::rans::Tables;
-use crate::residual::{
-    Coded, Error, LmsEncoder, Rd, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes, put_varint,
+use crate::audio::bits;
+use crate::audio::frame::{self, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBATIM};
+use crate::audio::par::{self, DecBatch, EncBatch, Item};
+use crate::audio::rans::Tables;
+use crate::audio::residual::{
+    Coded, Error, LmsEncoder, Rd, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes,
 };
 use std::sync::mpsc::sync_channel;
 
-/// Byte streams (same count as FLAC's).
-const S_PREFIX: usize = 0;
-const S_LAYOUT: usize = 1;
-const S_JUNK: usize = 2;
-const S_HDR: usize = 3;
-const S_SUB: usize = 4;
-const S_WARM: usize = 5;
-const N_BYTE_STREAMS: usize = 6;
+/// Byte streams: the channel assignment of each block, the subframe parameters, and the
+/// samples kept in them (warm-up, constant and verbatim).
+const S_HDR: usize = 0;
+const S_SUB: usize = 1;
+const S_WARM: usize = 2;
+pub const N_BYTE_STREAMS: usize = 3;
 
 /// Samples per block.
 const BLOCK: usize = 4096;
@@ -44,8 +42,8 @@ pub struct Format {
 }
 
 impl Format {
-    fn valid(&self) -> bool {
-        (1..=flac::MAX_CHANNELS).contains(&self.channels) && (1..=4).contains(&self.bytes)
+    pub fn valid(&self) -> bool {
+        (1..=frame::MAX_CHANNELS).contains(&self.channels) && (1..=4).contains(&self.bytes)
     }
 
     /// Parses "s16le", "u8", "s24be", ... with a channel count: "s16le:2".
@@ -68,11 +66,19 @@ impl Format {
         (bits.is_multiple_of(8) && fmt.valid()).then_some(fmt)
     }
 
-    fn to_bytes(self) -> [u8; 3] {
+    /// Bytes of a sample frame (one sample of each channel).
+    pub fn frame_bytes(&self) -> usize {
+        self.channels * self.bytes
+    }
+
+    /// The format as 3 bytes: channels, bytes per sample, flags (bit 0 big endian, bit 1
+    /// unsigned).
+    pub fn to_bytes(self) -> [u8; 3] {
         [self.channels as u8, self.bytes as u8, self.big_endian as u8 | (self.unsigned as u8) << 1]
     }
 
-    fn from_bytes(b: &[u8]) -> Option<Format> {
+    pub fn from_bytes(b: &[u8]) -> Option<Format> {
+        let b: &[u8; 3] = b.try_into().ok()?;
         let f = Format {
             channels: b[0] as usize,
             bytes: b[1] as usize,
@@ -112,80 +118,6 @@ impl Format {
             }
         }
     }
-}
-
-/// Finds the sample data of a WAV or AIFF file: (format, data offset, data length).
-pub fn detect(d: &[u8]) -> Option<(Format, usize, usize)> {
-    let u16le = |p: usize| u16::from_le_bytes(d[p..p + 2].try_into().unwrap()) as usize;
-    let u32le = |p: usize| u32::from_le_bytes(d[p..p + 4].try_into().unwrap()) as usize;
-    let u16be = |p: usize| u16::from_be_bytes(d[p..p + 2].try_into().unwrap()) as usize;
-    let u32be = |p: usize| u32::from_be_bytes(d[p..p + 4].try_into().unwrap()) as usize;
-    if d.len() >= 12 && &d[0..4] == b"RIFF" && &d[8..12] == b"WAVE" {
-        let mut fmt = None;
-        let mut p = 12;
-        while p + 8 <= d.len() {
-            let id = &d[p..p + 4];
-            let len = u32le(p + 4);
-            let body = p + 8;
-            if id == b"fmt " && len >= 16 && body + 16 <= d.len() {
-                let tag = u16le(body);
-                let channels = u16le(body + 2);
-                let align = u16le(body + 12);
-                let bits = u16le(body + 14);
-                let pcm = tag == 1 || (tag == 0xfffe && len >= 40 && body + 26 <= d.len() && u16le(body + 24) == 1);
-                if !pcm || channels == 0 || align % channels != 0 || bits == 0 || bits > 8 * (align / channels) {
-                    return None;
-                }
-                let bytes = align / channels;
-                fmt = Some(Format { channels, bytes, big_endian: false, unsigned: bytes == 1 });
-            } else if id == b"data" {
-                let f = fmt?;
-                // The size may be missing (streamed) or wrong: clamp to the file.
-                let len = if len == 0 || len == 0xffff_ffff { d.len() - body } else { len.min(d.len() - body) };
-                return f.valid().then_some((f, body, len));
-            }
-            p = body + len + (len & 1);
-        }
-    } else if d.len() >= 12 && &d[0..4] == b"FORM" && (&d[8..12] == b"AIFF" || &d[8..12] == b"AIFC") {
-        let aifc = &d[8..12] == b"AIFC";
-        let mut fmt = None;
-        let mut p = 12;
-        while p + 8 <= d.len() {
-            let id = &d[p..p + 4];
-            let len = u32be(p + 4);
-            let body = p + 8;
-            if id == b"COMM" && len >= 18 && body + 18 <= d.len() {
-                let channels = u16be(body);
-                let bits = u16be(body + 6);
-                let little = if aifc {
-                    if body + 22 > d.len() {
-                        return None;
-                    }
-                    match &d[body + 18..body + 22] {
-                        b"NONE" | b"twos" => false,
-                        b"sowt" => true,
-                        _ => return None,
-                    }
-                } else {
-                    false
-                };
-                if bits == 0 || bits > 32 {
-                    return None;
-                }
-                fmt = Some(Format { channels, bytes: bits.div_ceil(8), big_endian: !little, unsigned: false });
-            } else if id == b"SSND" && body + 8 <= d.len() {
-                let f = fmt?;
-                let start = body + 8 + u32be(body);
-                if start > d.len() {
-                    return None;
-                }
-                let len = len.saturating_sub(8 + u32be(body)).min(d.len() - start);
-                return f.valid().then_some((f, start, len));
-            }
-            p = body + len + (len & 1);
-        }
-    }
-    None
 }
 
 /// Window for the autocorrelation (Tukey, 0.5), by block size.
@@ -318,7 +250,7 @@ fn subframe(f: &mut Frame, ch: usize, x: &mut [i64], full_bits: u32, win: &[f64]
         residual_lpc(x, &q[..order], shift as u32, res)
     } else {
         // Fixed order 1 (silence, tiny signals).
-        sf.typ = flac::SUB_FIXED + 1;
+        sf.typ = frame::SUB_FIXED + 1;
         sf.order = 1;
         sf.warm[0] = x[0];
         let mut ok = true;
@@ -406,14 +338,14 @@ fn read_block(d: &[u8], fmt: &Format, ch: &mut [Vec<i64>]) {
     }
 }
 
-/// Calls `per_frame` with the frame of each block of samples of `d[start..start + len]`.
-fn frames(d: &[u8], fmt: Format, start: usize, len: usize, mut per_frame: impl FnMut(&mut Frame)) {
-    let frame_bytes = fmt.channels * fmt.bytes;
-    let data_end = start + len / frame_bytes * frame_bytes;
+/// Calls `per_frame` with the frame of each block of samples of `d` (whole sample frames).
+fn frames(d: &[u8], fmt: Format, mut per_frame: impl FnMut(&mut Frame)) {
+    let frame_bytes = fmt.frame_bytes();
+    let data_end = d.len() / frame_bytes * frame_bytes;
     let mut f = Frame::default();
     let mut ch: Vec<Vec<i64>> = vec![Vec::with_capacity(BLOCK); fmt.channels];
     let full_win = window(BLOCK);
-    let mut p = start;
+    let mut p = 0;
     while p < data_end {
         let n = BLOCK.min((data_end - p) / frame_bytes);
         read_block(&d[p..p + n * frame_bytes], &fmt, &mut ch);
@@ -430,30 +362,24 @@ fn frames(d: &[u8], fmt: Format, start: usize, len: usize, mut per_frame: impl F
     }
 }
 
-/// Adds the (context, token) counts of a WAV / AIFF file's residuals to `counts` (for
+/// Adds the (context, token) counts of the residuals of samples `d` to `counts` (for
 /// training).
-pub fn count(d: &[u8], counts: &mut [Vec<u64>]) {
-    let Some((fmt, start, len)) = detect(d) else { return };
+pub fn count(d: &[u8], fmt: Format, counts: &mut [Vec<u64>]) {
+    if !fmt.valid() {
+        return;
+    }
     let mut rc = ResCounter::default();
-    frames(d, fmt, start, len, |f| rc.frame(f, counts));
+    frames(d, fmt, |f| rc.frame(f, counts));
 }
 
-/// Encodes the samples of `d[start..start + len]` (whole sample frames; the rest of `d`
-/// is kept verbatim).
-pub fn encode(d: &[u8], fmt: Format, start: usize, len: usize) -> Option<Coded> {
-    if !fmt.valid() || start + len > d.len() {
+/// Encodes the samples `d`, whole sample frames of `fmt`.
+pub fn encode(d: &[u8], fmt: Format) -> Option<Coded> {
+    if !fmt.valid() || !d.len().is_multiple_of(fmt.frame_bytes()) {
         return None;
     }
-    let frame_bytes = fmt.channels * fmt.bytes;
-    let nframes = len / frame_bytes;
-    let data_end = start + nframes * frame_bytes;
     let mut s: Vec<Vec<u8>> = vec![Vec::new(); N_BYTE_STREAMS];
-    s[S_PREFIX].extend_from_slice(&d[..start]);
-    s[S_LAYOUT].extend_from_slice(&fmt.to_bytes());
-    put_varint(&mut s[S_LAYOUT], nframes as u64);
-    s[S_JUNK].extend_from_slice(&d[data_end..]);
-    let mut re = ResEncoder::new(len);
-    frames(d, fmt, start, len, |f| {
+    let mut re = ResEncoder::new(d.len());
+    frames(d, fmt, |f| {
         s[S_HDR].push(f.assign);
         let [sub, warm] = s.get_disjoint_mut([S_SUB, S_WARM]).unwrap();
         put_subframes(f, sub, warm, false);
@@ -466,21 +392,16 @@ pub fn encode(d: &[u8], fmt: Format, start: usize, len: usize) -> Option<Coded> 
 /// [`encode`] with `threads` threads: a pool makes the frames of the blocks ahead (stereo
 /// choice, LPC, residuals); one thread takes them in order through the LMS stage, and this
 /// one codes them. The same output.
-pub fn encode_threads(d: &[u8], fmt: Format, start: usize, len: usize, threads: usize) -> Option<Coded> {
+pub fn encode_threads(d: &[u8], fmt: Format, threads: usize) -> Option<Coded> {
     if threads <= 1 {
-        return encode(d, fmt, start, len);
+        return encode(d, fmt);
     }
-    if !fmt.valid() || start + len > d.len() {
+    if !fmt.valid() || !d.len().is_multiple_of(fmt.frame_bytes()) {
         return None;
     }
-    let frame_bytes = fmt.channels * fmt.bytes;
-    let nframes = len / frame_bytes;
-    let data_end = start + nframes * frame_bytes;
+    let frame_bytes = fmt.frame_bytes();
+    let nframes = d.len() / frame_bytes;
     let mut s: Vec<Vec<u8>> = vec![Vec::new(); N_BYTE_STREAMS];
-    s[S_PREFIX].extend_from_slice(&d[..start]);
-    s[S_LAYOUT].extend_from_slice(&fmt.to_bytes());
-    put_varint(&mut s[S_LAYOUT], nframes as u64);
-    s[S_JUNK].extend_from_slice(&d[data_end..]);
     let nblocks = nframes.div_ceil(BLOCK);
     let per = (par::BATCH_SAMPLES / (BLOCK * fmt.channels)).max(1);
     let nbatches = nblocks.div_ceil(per);
@@ -495,7 +416,7 @@ pub fn encode_threads(d: &[u8], fmt: Format, start: usize, len: usize, threads: 
         par::pool(sc, threads.saturating_sub(2), jrx, ptx, move |mut b: EncBatch| {
             b.n = 0;
             for k in b.idx * per..((b.idx + 1) * per).min(nblocks) {
-                let p = start + k * BLOCK * frame_bytes;
+                let p = k * BLOCK * frame_bytes;
                 let n = BLOCK.min(nframes - k * BLOCK);
                 read_block(&d[p..p + n * frame_bytes], &fmt, &mut ch);
                 let short;
@@ -530,7 +451,7 @@ pub fn encode_threads(d: &[u8], fmt: Format, start: usize, len: usize, threads: 
             }
             s
         });
-        let mut re = ResEncoder::new(len);
+        let mut re = ResEncoder::new(d.len());
         let mut next = 0;
         while next < nbatches.min(nb) {
             jtx.send(EncBatch { idx: next, ..Default::default() }).expect("pipeline");
@@ -554,22 +475,17 @@ pub fn encode_threads(d: &[u8], fmt: Format, start: usize, len: usize, threads: 
     })
 }
 
-/// Decodes into `out` (appending).
-pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Result<(), Error> {
-    if c.streams.len() != N_BYTE_STREAMS {
+/// Decodes the `len` bytes of samples of `fmt` into `out` (appending).
+pub fn decode(c: &Coded, fmt: Format, t: &Tables, len: usize, out: &mut Vec<u8>) -> Result<(), Error> {
+    if c.streams.len() != N_BYTE_STREAMS || !fmt.valid() {
         return Err(Error("stream count"));
     }
-    let mut layout = Rd::new(&c.streams[S_LAYOUT]);
-    let fmt = Format::from_bytes(layout.bytes(3)?).ok_or(Error("format"))?;
-    let nframes = layout.varint()? as usize;
-    let frame_bytes = fmt.channels * fmt.bytes;
-    let prefix = &c.streams[S_PREFIX];
-    let junk = &c.streams[S_JUNK];
-    if nframes.checked_mul(frame_bytes).and_then(|v| v.checked_add(prefix.len() + junk.len())) != Some(total_len) {
+    let frame_bytes = fmt.frame_bytes();
+    if !len.is_multiple_of(frame_bytes) {
         return Err(Error("length"));
     }
-    out.reserve(total_len);
-    out.extend_from_slice(prefix);
+    let nframes = len / frame_bytes;
+    out.reserve(len);
     let mut hdr = Rd::new(&c.streams[S_HDR]);
     let mut sub = Rd::new(&c.streams[S_SUB]);
     let mut warm = Rd::new(&c.streams[S_WARM]);
@@ -587,7 +503,6 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Res
         out.resize(at + n * frame_bytes, 0);
         synth(&f, &fmt, &mut ch, &mut out[at..]);
     }
-    out.extend_from_slice(junk);
     rd.finish()
 }
 
@@ -595,7 +510,7 @@ pub fn decode(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>) -> Res
 #[inline(always)]
 fn synth(f: &Frame, fmt: &Format, ch: &mut [Vec<i64>], o: &mut [u8]) {
     for (c, v) in ch.iter_mut().enumerate() {
-        flac::decode_channel(f, c, v);
+        frame::decode_channel(f, c, v);
     }
     if fmt.channels == 2 {
         let (a, b) = ch.split_at_mut(1);
@@ -666,24 +581,26 @@ fn pcm_frame(f: &mut Frame, fmt: &Format, n: usize, hdr: &mut Rd, sub: &mut Rd, 
 /// [`decode`] with `threads` threads: a pipeline of the subframe parameters, the error
 /// decoding and the LMS stage, then a pool reconstructs the samples into their place in
 /// `out`. The same output and errors (the contents of `out` after an error differ).
-pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>, threads: usize) -> Result<(), Error> {
+pub fn decode_threads(
+    c: &Coded,
+    fmt: Format,
+    t: &Tables,
+    len: usize,
+    out: &mut Vec<u8>,
+    threads: usize,
+) -> Result<(), Error> {
     if threads <= 1 {
-        return decode(c, t, total_len, out);
+        return decode(c, fmt, t, len, out);
     }
-    if c.streams.len() != N_BYTE_STREAMS {
+    if c.streams.len() != N_BYTE_STREAMS || !fmt.valid() {
         return Err(Error("stream count"));
     }
-    let mut layout = Rd::new(&c.streams[S_LAYOUT]);
-    let fmt = Format::from_bytes(layout.bytes(3)?).ok_or(Error("format"))?;
-    let nframes = layout.varint()? as usize;
-    let frame_bytes = fmt.channels * fmt.bytes;
-    let prefix = &c.streams[S_PREFIX];
-    let junk = &c.streams[S_JUNK];
-    if nframes.checked_mul(frame_bytes).and_then(|v| v.checked_add(prefix.len() + junk.len())) != Some(total_len) {
+    let frame_bytes = fmt.frame_bytes();
+    if !len.is_multiple_of(frame_bytes) {
         return Err(Error("length"));
     }
-    out.reserve(total_len);
-    out.extend_from_slice(prefix);
+    let nframes = len / frame_bytes;
+    out.reserve(len);
     let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
     let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let at = out.len();
@@ -736,7 +653,5 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
             let _ = rtx.send(b);
         }
         Ok(())
-    })?;
-    out.extend_from_slice(junk);
-    Ok(())
+    })
 }

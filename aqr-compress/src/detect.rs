@@ -22,8 +22,10 @@ pub enum Format {
     Png,
     Jpeg,
     Mp3,
-    /// FLAC, WAV or AIFF (aqr-flac).
     Flac,
+    /// Uncompressed samples in a trivial container (aqr-raw): WAV or AIFF anywhere, BMP or
+    /// PNM at the start of a file.
+    Raw,
     /// PSD or PSB.
     Psd,
     Pdf,
@@ -35,7 +37,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 14] = [
+    pub const ALL: [Format; 15] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -45,6 +47,7 @@ impl Format {
         Format::Jpeg,
         Format::Mp3,
         Format::Flac,
+        Format::Raw,
         Format::Psd,
         Format::Pdf,
         Format::Sqlite,
@@ -63,6 +66,7 @@ impl Format {
             Format::Jpeg => "jpeg",
             Format::Mp3 => "mp3",
             Format::Flac => "flac",
+            Format::Raw => "raw",
             Format::Psd => "psd",
             Format::Pdf => "pdf",
             Format::Sqlite => "sqlite",
@@ -92,7 +96,8 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"png" => format(Format::Png),
         b"jpg" | b"jpeg" | b"jpe" | b"jfif" => format(Format::Jpeg),
         b"mp3" => format(Format::Mp3),
-        b"flac" | b"wav" | b"aif" | b"aiff" | b"aifc" => format(Format::Flac),
+        b"flac" => format(Format::Flac),
+        b"wav" | b"aif" | b"aiff" | b"aifc" | b"bmp" | b"pgm" | b"ppm" | b"pnm" | b"pam" => format(Format::Raw),
         b"psd" | b"psb" => format(Format::Psd),
         b"pdf" => format(Format::Pdf),
         b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
@@ -104,7 +109,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"7z" | b"xz" | b"lzma" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv"
         | b"webm" | b"ogg" | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif"
         | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
-        b"bmp" | b"tga" | b"ppm" | b"pgm" | b"pbm" | b"pnm" => Kind::Pixels,
+        b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => Kind::Text,
         b"ttf" | b"otf" | b"ttc" | b"cff" | b"pfb" => Kind::Font,
         _ => Kind::Unknown,
@@ -135,9 +140,10 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Pdf)
     } else if at(0, b"8BPS") {
         Some(Format::Psd)
-    } else if at(0, b"fLaC") || at(0, b"RIFF") && at(8, b"WAVE") || at(0, b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC"))
-    {
+    } else if at(0, b"fLaC") {
         Some(Format::Flac)
+    } else if at(0, b"RIFF") && at(8, b"WAVE") || at(0, b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC")) {
+        Some(Format::Raw)
     } else if let Some(p) = id3_len(d) {
         // ID3v2 is found before either; what follows the tag tells them apart.
         Some(if at(p, b"fLaC") { Format::Flac } else { Format::Mp3 })
@@ -159,6 +165,12 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Zlib)
     } else if aqr_snappy::leveldb::is_table(d) {
         Some(Format::LevelDb)
+    } else if start
+        && (at(0, b"BM") || at(0, b"P5") || at(0, b"P6") || at(0, b"P7"))
+        && aqr_raw::container::detect(d).is_some()
+    {
+        // Two bytes are too weak a signature to look for in other data.
+        Some(Format::Raw)
     } else {
         None
     }
@@ -374,7 +386,9 @@ mod tests {
             (b"lib.tar.gz", Kind::Format("gzip")),
             (b"movie.mp4", Kind::Compressed),
             (b"notes.txt", Kind::Text),
-            (b"scan.BMP", Kind::Pixels),
+            (b"scan.BMP", Kind::Format("raw")),
+            (b"take.wav", Kind::Format("raw")),
+            (b"sky.tga", Kind::Pixels),
             (b"fonts/a.otf", Kind::Font),
             (b"fonts/a.woff", Kind::Unknown),
             (b"setup.exe", Kind::Unknown),
@@ -415,9 +429,12 @@ mod tests {
             (b"8BPS\0\x01", Some(Format::Psd)),
             (b"8BPS\0\x02", Some(Format::Psd)),
             (b"fLaC\0\0\0\x22", Some(Format::Flac)),
-            (b"RIFF\0\0\0\0WAVEfmt ", Some(Format::Flac)),
-            (b"FORM\0\0\0\0AIFCFVER", Some(Format::Flac)),
+            (b"RIFF\0\0\0\0WAVEfmt ", Some(Format::Raw)),
+            (b"FORM\0\0\0\0AIFCFVER", Some(Format::Raw)),
             (&id3_flac, Some(Format::Flac)),
+            (b"P5 2 1 255 \x00\x01", Some(Format::Raw)),
+            (b"P5 2 1 255 \x00", None),
+            (b"BM\0\0", None),
             (b"ID3\x04\0\0\0\0\0\x02xx\xff\xfb\x90\x00", Some(Format::Mp3)),
             (b"\xff\xfb\x90\x00", Some(Format::Mp3)),
             (b"\xff\xf3\x48\xc4", Some(Format::Mp3)),

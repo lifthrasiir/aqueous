@@ -2,15 +2,15 @@
 //! the token / raw bit coding of [`model`], with their state across frames; the built-in
 //! tables; the byte stream helpers and the serialisation of subframe parameters.
 
-use crate::bits::{self, BitReader, FastWriter};
-use crate::flac::{self, ESCAPE, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBATIM};
-use crate::model::{self, Lms};
-use crate::rans::{self, Tables, builtin};
+use crate::audio::bits::{self, BitReader, FastWriter};
+use crate::audio::frame::{self, ESCAPE, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBATIM};
+use crate::audio::model::{self, Lms};
+use crate::audio::rans::{self, Tables, builtin};
 use aqr_common::varint;
 use std::sync::OnceLock;
 
 /// The built-in frequency tables (see `train`), or flat ones if none are built in.
-static BUILTIN: &[u8] = include_bytes!("../model/builtin.bin");
+static BUILTIN: &[u8] = include_bytes!("../../model/audio.bin");
 
 #[derive(Debug)]
 pub struct Error(pub &'static str);
@@ -107,13 +107,13 @@ trait Visit {
 #[inline(always)]
 fn for_each_residual<V: Visit>(
     fr: &Frame,
-    avg: &mut [model::Scale; flac::MAX_CHANNELS],
+    avg: &mut [model::Scale; frame::MAX_CHANNELS],
     st: &mut [V::S; 2],
     v: &mut V,
 ) {
     let n = fr.block_size;
-    let mut orders = [usize::MAX; flac::MAX_CHANNELS];
-    let mut chs = [0usize; flac::MAX_CHANNELS];
+    let mut orders = [usize::MAX; frame::MAX_CHANNELS];
+    let mut chs = [0usize; frame::MAX_CHANNELS];
     let mut nch = 0;
     for ch in 0..fr.channels {
         if fr.sub[ch].has_residual() {
@@ -166,13 +166,13 @@ fn for_each_residual<V: Visit>(
 }
 
 /// Residual pointers by channel (null past the frame's channels).
-fn res_ptrs(f: &mut Frame) -> [*mut i32; flac::MAX_CHANNELS] {
+fn res_ptrs(f: &mut Frame) -> [*mut i32; frame::MAX_CHANNELS] {
     std::array::from_fn(|ch| f.res.get_mut(ch).map_or(std::ptr::null_mut(), |r| r.as_mut_ptr()))
 }
 
 struct EncV {
     el: rans::EncLocal,
-    res: [*mut i32; flac::MAX_CHANNELS],
+    res: [*mut i32; frame::MAX_CHANNELS],
 }
 
 impl Visit for EncV {
@@ -189,7 +189,7 @@ impl Visit for EncV {
 /// [`model::decode_one`]).
 struct DecV<'a, const CHECKED: bool> {
     dl: rans::DecLocal,
-    res: [*mut i32; flac::MAX_CHANNELS],
+    res: [*mut i32; frame::MAX_CHANNELS],
     _raw: std::marker::PhantomData<BitReader<'a>>,
 }
 
@@ -205,7 +205,7 @@ impl<'a, const CHECKED: bool> Visit for DecV<'a, CHECKED> {
 
 struct CountV<'a> {
     counts: &'a mut [Vec<u64>],
-    res: [*mut i32; flac::MAX_CHANNELS],
+    res: [*mut i32; frame::MAX_CHANNELS],
 }
 
 impl Visit for CountV<'_> {
@@ -226,8 +226,12 @@ impl Visit for CountV<'_> {
 /// chain whole when each function in it has a single caller; shared with the pipeline
 /// (or forced with `#[inline(always)]`), it was compiled worse, about 2% of serial
 /// decoding.
-fn run_lms<const DEC: bool, const PIPE: bool>(f: &mut Frame, lms: &mut [Lms], sc: &[model::Scale; flac::MAX_CHANNELS]) {
-    let mut chs = [0usize; flac::MAX_CHANNELS];
+fn run_lms<const DEC: bool, const PIPE: bool>(
+    f: &mut Frame,
+    lms: &mut [Lms],
+    sc: &[model::Scale; frame::MAX_CHANNELS],
+) {
+    let mut chs = [0usize; frame::MAX_CHANNELS];
     let mut n = 0;
     for ch in 0..f.channels {
         if f.sub[ch].has_residual() {
@@ -252,7 +256,7 @@ fn run_lms<const DEC: bool, const PIPE: bool>(f: &mut Frame, lms: &mut [Lms], sc
 /// Encoder of the residuals of a stream of frames.
 pub struct ResEncoder {
     lms: Vec<Lms>,
-    avg: [model::Scale; flac::MAX_CHANNELS],
+    avg: [model::Scale; frame::MAX_CHANNELS],
     enc: rans::Encoder,
     raw: [FastWriter; 2],
 }
@@ -261,8 +265,8 @@ impl ResEncoder {
     /// `size`: about the input size, for preallocation.
     pub fn new(size: usize) -> Self {
         ResEncoder {
-            lms: vec![Lms::default(); flac::MAX_CHANNELS],
-            avg: [model::Scale::default(); flac::MAX_CHANNELS],
+            lms: vec![Lms::default(); frame::MAX_CHANNELS],
+            avg: [model::Scale::default(); frame::MAX_CHANNELS],
             enc: rans::Encoder::with_capacity(size),
             raw: [FastWriter::with_capacity(size / 4), FastWriter::with_capacity(size / 4)],
         }
@@ -301,12 +305,15 @@ impl ResEncoder {
 /// thread): it follows the scale state that the coder will have at each frame.
 pub struct LmsEncoder {
     lms: Vec<Lms>,
-    avg: [model::Scale; flac::MAX_CHANNELS],
+    avg: [model::Scale; frame::MAX_CHANNELS],
 }
 
 impl Default for LmsEncoder {
     fn default() -> Self {
-        LmsEncoder { lms: vec![Lms::default(); flac::MAX_CHANNELS], avg: [model::Scale::default(); flac::MAX_CHANNELS] }
+        LmsEncoder {
+            lms: vec![Lms::default(); frame::MAX_CHANNELS],
+            avg: [model::Scale::default(); frame::MAX_CHANNELS],
+        }
     }
 }
 
@@ -332,7 +339,7 @@ impl LmsEncoder {
 /// Decoder of the residuals of a stream of frames.
 pub struct ResDecoder<'a> {
     lms: Vec<Lms>,
-    avg: [model::Scale; flac::MAX_CHANNELS],
+    avg: [model::Scale; frame::MAX_CHANNELS],
     dec: rans::Decoder<'a>,
     raw_len: [usize; 2],
     raw: [BitReader<'a>; 2],
@@ -345,8 +352,8 @@ impl<'a> ResDecoder<'a> {
             return Err(Error("tables"));
         }
         Ok(ResDecoder {
-            lms: vec![Lms::default(); flac::MAX_CHANNELS],
-            avg: [model::Scale::default(); flac::MAX_CHANNELS],
+            lms: vec![Lms::default(); frame::MAX_CHANNELS],
+            avg: [model::Scale::default(); frame::MAX_CHANNELS],
             dec: rans::Decoder::new(t, words),
             raw_len: [raw[0].len(), raw[1].len()],
             raw: [BitReader::new(&raw[0], 0), BitReader::new(&raw[1], 0)],
@@ -366,7 +373,7 @@ impl<'a> ResDecoder<'a> {
     /// The first part of [`ResDecoder::frame`], for a pipeline: decodes the errors and
     /// returns the scale state from before them, for [`LmsDecoder::frame`] (this decoder's
     /// own LMS state is then unused).
-    pub fn errors(&mut self, f: &mut Frame) -> Result<[model::Scale; flac::MAX_CHANNELS], Error> {
+    pub fn errors(&mut self, f: &mut Frame) -> Result<[model::Scale; frame::MAX_CHANNELS], Error> {
         let sc0 = self.avg;
         self.decode_errors(f);
         self.check()?;
@@ -416,13 +423,13 @@ pub struct LmsDecoder {
 
 impl Default for LmsDecoder {
     fn default() -> Self {
-        LmsDecoder { lms: vec![Lms::default(); flac::MAX_CHANNELS] }
+        LmsDecoder { lms: vec![Lms::default(); frame::MAX_CHANNELS] }
     }
 }
 
 impl LmsDecoder {
     /// Errors to residuals, in place; `sc0` from [`ResDecoder::errors`].
-    pub fn frame(&mut self, f: &mut Frame, sc0: &[model::Scale; flac::MAX_CHANNELS]) {
+    pub fn frame(&mut self, f: &mut Frame, sc0: &[model::Scale; frame::MAX_CHANNELS]) {
         run_lms::<true, true>(f, &mut self.lms, sc0);
     }
 }
@@ -430,12 +437,15 @@ impl LmsDecoder {
 /// Counts (context, token) pairs of a stream of frames (for training).
 pub struct ResCounter {
     lms: Vec<Lms>,
-    avg: [model::Scale; flac::MAX_CHANNELS],
+    avg: [model::Scale; frame::MAX_CHANNELS],
 }
 
 impl Default for ResCounter {
     fn default() -> Self {
-        ResCounter { lms: vec![Lms::default(); flac::MAX_CHANNELS], avg: [model::Scale::default(); flac::MAX_CHANNELS] }
+        ResCounter {
+            lms: vec![Lms::default(); frame::MAX_CHANNELS],
+            avg: [model::Scale::default(); frame::MAX_CHANNELS],
+        }
     }
 }
 
@@ -521,8 +531,8 @@ pub fn get_subframes(f: &mut Frame, sub: &mut Rd, warm: &mut Rd, rice: bool) -> 
                     f.verbatim.push(rv(warm)?);
                 }
             }
-            typ if (flac::SUB_FIXED..=flac::SUB_FIXED + 4).contains(&typ) || typ >= SUB_LPC => {
-                let order = if typ >= SUB_LPC { typ - SUB_LPC + 1 } else { typ - flac::SUB_FIXED } as usize;
+            typ if (frame::SUB_FIXED..=frame::SUB_FIXED + 4).contains(&typ) || typ >= SUB_LPC => {
+                let order = if typ >= SUB_LPC { typ - SUB_LPC + 1 } else { typ - frame::SUB_FIXED } as usize;
                 if order > block {
                     return Err(Error("order"));
                 }

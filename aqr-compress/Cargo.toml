@@ -17,6 +17,7 @@ aqr-mp3 = { path = "../aqr-mp3" }
 aqr-pdf = { path = "../aqr-pdf" }
 aqr-png = { path = "../aqr-png" }
 aqr-psd = { path = "../aqr-psd" }
+aqr-raw = { path = "../aqr-raw" }
 aqr-snappy = { path = "../aqr-snappy" }
 aqr-sqlite = { path = "../aqr-sqlite" }
 aqr-zip = { path = "../aqr-zip" }

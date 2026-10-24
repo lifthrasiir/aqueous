@@ -1,9 +1,8 @@
 //! The formula module: `formula::encode` evaluated through `formula::decode` gives the input back,
-//! over the files in tests/data (also with junk, cut, as raw PCM, on threads), and nothing for
-//! what is not coded.
+//! over the files in tests/data (also with junk, cut, on threads), and nothing for what is not
+//! coded.
 
-use aqr_flac::formula::{self, MODULE, Options};
-use aqr_flac::pcm::Format;
+use aqr_flac::formula::{self, MODULE};
 use aqr_formula::{Apply, Formula, aqr};
 
 fn files() -> Vec<(String, Vec<u8>)> {
@@ -27,8 +26,8 @@ fn eval(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
 }
 
 /// The formula of `d`, if there is one, evaluated back (on 1 and several threads).
-fn check(name: &str, d: &[u8], opt: &Options) -> Option<Formula> {
-    let f = formula::encode_with(d, opt)?;
+fn check(name: &str, d: &[u8], threads: usize) -> Option<Formula> {
+    let f = formula::encode(d, threads)?;
     assert_eq!(f.len(), d.len() as u64, "{name}");
     assert_eq!(f.streams.len(), 9, "{name}");
     for t in [1, 3] {
@@ -41,9 +40,9 @@ fn check(name: &str, d: &[u8], opt: &Options) -> Option<Formula> {
 fn data_files() {
     for (name, d) in files() {
         for threads in [1, 4] {
-            let f = check(&name, &d, &Options { threads, ..Options::default() }).expect(&name);
+            let f = check(&name, &d, threads).expect(&name);
             let [a] = f.applies()[..] else { panic!("{name}") };
-            assert_eq!(a.params, [name.ends_with(".flac") as u8 ^ 1], "{name}");
+            assert!(a.params.is_empty(), "{name}");
             assert_eq!(a.inputs.len(), 9);
         }
         // These should all be coded, and smaller than the input as archives; an archive
@@ -57,30 +56,18 @@ fn data_files() {
 #[test]
 fn junk_and_cuts() {
     for (name, d) in files() {
-        let opt = Options::default();
+        let opt = 1;
         let mut j = b"some junk before".to_vec();
         j.extend_from_slice(&d);
         j.extend_from_slice(b"TAG and after");
-        check(&name, &j, &opt);
+        check(&name, &j, opt);
         // Two files concatenated.
         let mut two = d.clone();
         two.extend_from_slice(&files()[0].1);
-        check(&name, &two, &opt);
+        check(&name, &two, opt);
         for cut in [1, 5, 417, d.len() / 3, d.len() / 2 + 7] {
-            check(&name, &d[..d.len() - cut.min(d.len())], &opt);
-            check(&name, &d[cut.min(d.len())..], &opt);
-        }
-    }
-}
-
-#[test]
-fn raw_pcm() {
-    for (name, d) in files() {
-        for f in ["s16le:2", "s24be:2", "u8:1", "s32le:6", "s16be:3"] {
-            let opt = Options { raw: Format::parse(f), threads: 1 };
-            let fm = check(&format!("{name} as {f}"), &d, &opt).expect(&name);
-            assert_eq!(fm.applies()[0].params, [1]);
-            check(&format!("{name} as {f}, cut"), &d[..d.len() * 2 / 3 + 1], &opt);
+            check(&name, &d[..d.len() - cut.min(d.len())], opt);
+            check(&name, &d[cut.min(d.len())..], opt);
         }
     }
 }
@@ -91,9 +78,9 @@ fn not_coded() {
     assert!(formula::encode(b"", 1).is_none());
     let tiny_flac = b"fLaC\x80\x00\x00\x22".iter().copied().chain([0u8; 34]).collect::<Vec<u8>>();
     // Whatever it does, it must not panic and must round-trip.
-    check("tiny flac", &tiny_flac, &Options::default());
-    let raw = Options { raw: Format::parse("s16le:1"), threads: 1 };
-    check("two bytes", b"ab", &raw);
+    check("tiny flac", &tiny_flac, 1);
+    // WAV and AIFF are aqr-raw's.
+    assert!(formula::encode(b"RIFF\0\0\0\0WAVEfmt ", 1).is_none());
 }
 
 #[test]
@@ -106,8 +93,8 @@ fn corrupt_inputs() {
         let r: Vec<&[u8]> = i.iter().map(|v| &v[..]).collect();
         let _ = formula::decode(p, &[&a.resources[0][..]], &r, len, 1);
     };
-    run(&[2], &ins, a.len);
-    run(&[], &ins, a.len);
+    run(&[0], &ins, a.len);
+    run(&[1], &ins, a.len);
     run(&a.params, &ins[..8], a.len);
     run(&a.params, &ins, a.len + 1);
     run(&a.params, &ins, u64::MAX);

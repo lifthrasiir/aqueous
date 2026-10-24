@@ -1,9 +1,11 @@
 # The `flac-recons` module
 
 This document specifies the module `flac-recons` of entry formulas (`aqr_flac::formula`),
-which restores FLAC, WAV and AIFF files, and headerless PCM, from their coded streams. It is
-meant to be complete: a decoder, and an encoder whose output a decoder accepts, can be
-written from it alone. Sections marked *(encoder)* describe the choices this implementation
+which restores FLAC files from their coded streams. It is meant to be complete together
+with aqr-raw's `FORMAT.md`, whose frames, residual model, rANS coder and built-in tables
+(its §3–§5 and Appendix A) the module shares: a decoder, and an encoder whose output a
+decoder accepts, can be written from the two. WAV, AIFF and headerless PCM are aqr-raw's
+(`pcm-recons`, in the same document). Sections marked *(encoder)* describe the choices this implementation
 makes. A decoder does not need them, but an encoder must follow them to produce the same
 streams as this implementation.
 
@@ -11,15 +13,14 @@ Contents:
 
 1. [Conventions](#1-conventions)
 2. [The module](#2-the-module)
-3. [Frames](#3-frames)
-4. [The residual model](#4-the-residual-model)
-5. [rANS](#5-rans)
+3. [Frames, the residual model and rANS](#3-frames-the-residual-model-and-rans)
 6. [FLAC streams](#6-flac-streams)
-7. [PCM streams](#7-pcm-streams)
-8. [Choosing the kind](#8-choosing-the-kind-encoder) *(encoder)*
+8. [Choosing the input](#8-choosing-the-input-encoder) *(encoder)*
 9. [Validation](#9-validation)
-10. [Appendix A: built-in frequency tables](#appendix-a-built-in-frequency-tables)
-11. [Appendix B: CRCs](#appendix-b-crcs)
+10. [Appendix B: CRCs](#appendix-b-crcs)
+
+(§4, §5, §7 and Appendix A were the residual model, rANS, PCM and the tables, which are
+aqr-raw's now; the numbers are kept so that the references between sections stay.)
 
 ## 1. Conventions
 
@@ -42,22 +43,15 @@ Contents:
 
 ## 2. The module
 
-The module is `flac-recons`, version 2 (`aqr_flac::formula`), in entry formulas
-(aqr-formula). `formula::encode_with` makes the formula and `formula::decode` is the module.
-Its output, the **original**, has the declared length `len`: a FLAC file, a WAV or AIFF
-file, or headerless samples.
+The module is `flac-recons`, version 3 (`aqr_flac::formula`), in entry formulas
+(aqr-formula). `formula::encode` makes the formula and `formula::decode` is the module.
+Its output, the **original**, has the declared length `len`: a FLAC file.
 
-**Params**: one byte, the kind. 0: FLAC; the application is a FLAC payload
-([§6](#6-flac-streams)). 1: PCM; the application is a PCM payload
-([§7](#7-pcm-streams)), for WAV / AIFF and raw samples alike (the two differ only in how an
-encoder finds the samples). Any other params are an error. Under kind 1 the streams themselves describe where the samples sit in the
-original (§7).
+**Params**: none. Any params are an error. (Version 2 took one byte, the kind: 0 for FLAC
+and 1 for PCM, which is aqr-raw's `pcm-recons` now.)
 
-**Resources**: exactly one, the frequency tables: the decompressed bytes of Appendix A
-(17,860 bytes), whose SHA-256 is given there. The decoder uses them as the tables of
-§4.4. It MUST fail unless the resource is exactly 17,860 bytes, its layout id is the one
-given in Appendix A, and every table consists of nonzero frequencies summing to 4096; it
-does not need to check the SHA-256. Any other number of resources is an error.
+**Resources**: exactly one, the frequency tables of aqr-raw's `FORMAT.md`, Appendix A (the
+resource of `pcm-recons` too), checked as that document says.
 
 **Inputs**: nine slots, always in this order, each possibly empty. Their classes are
 `flac/prefix`, `flac/layout`, `flac/junk`, `flac/headers`, `flac/subframes`, `flac/warmup`,
@@ -65,314 +59,24 @@ does not need to check the SHA-256. Any other number of resources is an error.
 
 | # | Slot | Content |
 |---|---|---|
-| 0..5 | byte streams 0..5 | see below |
-| 6 | rANS words | the W words of the rANS coder (§5) as `u32le`, so a length that is not a multiple of 4 is an error |
+| 0 | prefix | bytes before the first frame (§6.1) |
+| 1 | layout | runs of frames and junk (§6.2) |
+| 2 | junk | bytes between frames (§6.2) |
+| 3 | frame headers | §6.3 |
+| 4 | subframe parameters | `sub` of aqr-raw §3.1 (§6.4) |
+| 5 | warm-up, constant and verbatim samples | `warm` of aqr-raw §3.1 (§6.4) |
+| 6 | rANS words | the W words of the rANS coder (aqr-raw §5) as `u32le`, so a length that is not a multiple of 4 is an error |
 | 7 | raw bit stream 0 | its bytes |
 | 8 | raw bit stream 1 | its bytes |
 
-The six byte streams have the same slots in both payload types:
-
-| # | FLAC (§6) | PCM (§7) |
-|---|---|---|
-| 0 | prefix: bytes before the first frame | prefix: bytes before the sample data |
-| 1 | layout: runs of frames and junk | layout: sample format and sample frame count |
-| 2 | junk: bytes between frames | junk: bytes after the sample data |
-| 3 | frame headers | channel assignment per block |
-| 4 | subframe parameters | subframe parameters |
-| 5 | warm-up, constant and verbatim samples | warm-up, constant and verbatim samples |
-
 The output length must be `len`; anything else is an error.
 
-## 3. Frames
+## 3. Frames, the residual model and rANS
 
-Both payload types describe audio as a sequence of **frames**, using FLAC's model of a frame
-([RFC 9639](https://www.rfc-editor.org/rfc/rfc9639)):
-
-- A frame has a block size `N` (samples per channel), a channel assignment `assign`
-  (0..10) and a sample size `bps`. The number of channels is `assign + 1` when
-  `assign < 8`. Otherwise it is 2: 8 is left/side, 9 is side/right, 10 is mid/side.
-- The **side** channel is channel 1 for assignments 8 and 10, and channel 0 for assignment 9.
-  A subframe's full sample size is `bps + 1` on the side channel and `bps` otherwise.
-- Each channel has a subframe:
-
-  | `typ` (FLAC's 6-bit type) | Subframe | Order |
-  |---|---|---|
-  | 0 | constant | 0 |
-  | 1 | verbatim | 0 |
-  | 8..12 | fixed predictor | `typ - 8` (0..4) |
-  | 32..63 | LPC | `typ - 31` (1..32) |
-
-  Other types are invalid. A subframe has `wasted` bits (0 if none), and its coded sample
-  size is `bits = full - wasted`, which must be at least 1. Fixed and LPC subframes have
-  `order` warm-up samples and `N - order` **residuals**, each fitting in a signed 32-bit
-  integer. LPC subframes also have a coefficient precision (1..15), a shift (-16..15) and
-  `order` coefficients of `precision` bits.
-- Subframes with residuals (`typ >= 8`) are the **residual channels** of the frame.
-
-The residuals of all frames go through the residual model (§4) into the rANS words and
-the two raw bit streams. Everything else goes into the byte streams.
-
-### 3.1 Subframe parameters (byte streams 4 and 5)
-
-The parameters of a frame's subframes are stored in channel order. Stream 4 (`sub`) and
-stream 5 (`warm`) are read in parallel:
-
-```text
-for each channel ch in 0..channels:
-  sub:  u8  x = typ << 1 | (wasted > 0)
-  if x & 1:  sub: u8 wasted            (must be ≥ 1)
-  bits = full(ch) - wasted
-  match typ:
-    0 (constant):   warm: varint zz64(value)
-    1 (verbatim):   warm: N × varint zz64(sample)
-    fixed / LPC:    warm: order × varint zz64(warm-up sample)
-                    if LPC:
-                      sub: u8 precision (1..15)
-                      sub: u8 shift (as i8, -16..15)
-                      sub: order × varint zz64(coefficient)
-                    if FLAC payload:
-                      sub: u8 method << 4 | partition_order     (method 0 or 1, partition_order 0..15)
-                      sub: 2^partition_order × u8 param
-```
-
-All samples (constant value, verbatim samples, warm-up samples) are the subframe's coded
-values: they come after the wasted bits are removed, so each fits in `bits` signed bits.
-Coefficients fit in `precision` signed bits.
-
-`param` (FLAC payload only) gives the Rice parameter `k` of each residual partition.
-`k < 15` with method 0, or `k < 31` with method 1, is a Rice parameter. `0x80 | b`, with
-`b` in 0..31, marks an escaped partition whose residuals are stored as `b`-bit signed
-values (`b = 0` means all residuals are zero). The partitions are those of FLAC:
-`N` must be divisible by `2^partition_order`, the first partition holds
-`N / 2^partition_order - order` residuals, and the others hold `N / 2^partition_order`.
-The first partition must not be negative.
-
-## 4. The residual model
-
-The residual model turns each frame's residuals into rANS symbols and raw bits. Two
-adaptive stages run per channel slot: an LMS predictor in the residual domain, and a scale
-estimate that sets the coding context. Both carry their state from one frame to the next.
-
-### 4.1 State
-
-There are 8 channel slots. The slot of a subframe is its channel index in the frame. All
-state starts at the beginning of the payload, once:
-
-```text
-per slot c in 0..8:
-  Scale:  avg = 256 (u32), pend = 0 (u32)
-  LMS:    w[32] = 0 (i16 weights), h[32] = 0 (i16 history, oldest first),
-          u0[32] = u1[32] = 0 (i16 pending weight steps), in_shift = 0
-rANS:     one symbol sequence for the whole payload (§5)
-raw:      two bit streams, raw[0] and raw[1]
-```
-
-A slot's state changes only in frames where that slot is a residual channel. Constant and
-verbatim subframes, junk, and slots beyond a frame's channel count leave it untouched.
-
-### 4.2 Coding order
-
-The residuals of a frame are coded time-major, channel-minor. Let `R` be the residual
-channels of the frame in increasing channel order:
-
-```text
-for t in 0..N:
-  for ch in R:
-    if t >= order(ch):
-      code residual index t - order(ch) of channel ch      (§4.4)
-```
-
-Raw bits of channel `ch` go to `raw[ch & 1]`. The context class is `cc = 1` if `ch > 0`
-and `cc = 0` if `ch = 0`.
-
-### 4.3 Scale state
-
-```text
-ctx(avg):                          # avg ≥ 15 always
-  l    = floor_log2(avg)
-  half = (avg >> (l - 1)) & 1      # the bit below the leading one
-  b    = 2 * l + half              # scale bucket, < 62
-  s    = max(l - 6, 0)             # low bits sent raw
-  return (b, s)
-
-next(sc, m):                       # after each residual, with m = its zigzag value
-  sc.avg  = sc.avg - (sc.avg >> 4) + min(sc.pend, 2^26)
-  sc.pend = m
-```
-
-`avg` is 16 times a running mean of the zigzag values, decaying by 1/16. The newest value
-enters the mean one residual late.
-
-### 4.4 One residual: token and raw bits
-
-The coded value of a residual is its LMS error `e` (a signed 32-bit integer, §4.5).
-
-```text
-encode(sc, cc, e):
-  (b, s) = ctx(sc.avg)
-  u = zz32(e)                      # u32
-  next(sc, u)
-  v = u >> s
-  t = token(v)
-  rANS symbol t in context 2 * b + cc                                    (§5)
-  if t >= 16:
-    nb = (t - 16) / 2 + 3
-    raw[ch & 1]: write (v mod 2^nb) in nb bits, then (u mod 2^s) in s bits
-  else:
-    raw[ch & 1]: write (u mod 2^s) in s bits
-
-token(v):
-  if v < 16: return v
-  L = bitlen(v)                    # 5..32
-  return 16 + 2 * (L - 5) + ((v >> (L - 2)) & 1)      # 16..71
-```
-
-Decoding inverts it:
-
-```text
-decode(sc, cc):
-  (b, s) = ctx(sc.avg)
-  t = rANS symbol in context 2 * b + cc
-  if t >= 16:
-    nb = (t - 16) / 2 + 3
-    mant = read nb bits;  v = ((2 | (t & 1)) << nb) | mant
-  else:
-    v = t
-  low = read s bits
-  u = (v << s) | low               # u32 (wraps only on corrupt input)
-  next(sc, u)
-  return unzz32(u)
-```
-
-The rANS alphabet has 72 symbols. There are 124 contexts (62 scale buckets × 2 classes).
-At most 53 raw bits are written per residual.
-
-### 4.5 LMS stage
-
-Each slot runs a 32-tap sign-sign LMS predictor over the slot's residuals. In the encoder,
-residual `x` becomes error `e = x - p`. In the decoder, `x = e + p`. All arithmetic is
-wrapping i32 unless stated otherwise.
-
-```text
-step(st, value):                       # encoder: value = x;  decoder: value = e
-  acc = sum over j in 0..32 of i32(st.w[j]) * i32(st.h[j])          (wrapping i32)
-  p   = (acc >> 12) << st.in_shift                                   (wrapping i32)
-  if encoding: x = value;     e = x - p
-  else:        e = value;     x = e + p
-  sg = sign(e) * 4                                                   (-4, 0 or 4)
-  for j: st.w[j] = st.w[j] + st.u0[j]                                (wrapping i16)
-  st.u0 = st.u1
-  for j: st.u1[j] = sign(st.h[j]) * sg                               (i16)
-  shift h left by one (drop h[0]) and set h[31] = clamp(x >> st.in_shift, -32768, 32767)
-  return encoding ? e : x
-```
-
-`sign` is -1, 0 or 1. A weight step is applied two samples after its sample (delayed LMS).
-
-Before a frame's LMS pass, each residual channel `ch` of the frame sets its slot's input
-shift from the slot's scale state *as it was before the frame's residuals were coded*:
-
-```text
-set_scale(st, avg):
-  sh = min(max(floor_log2(avg) - 14, 0), 16)
-  if sh != st.in_shift:
-    for j: st.h[j] = sh > st.in_shift ? st.h[j] >> (sh - st.in_shift)
-                                       : clamp(i32(st.h[j]) << (st.in_shift - sh), -32768, 32767)
-    st.in_shift = sh
-```
-
-Only the history is rescaled. The weights and pending steps keep their values.
-
-### 4.6 Per frame
-
-Encoder:
-
-1. For each residual channel `ch`: `set_scale(lms[ch], scale[ch].avg)`, then replace its
-   residuals in time order by `step(lms[ch], x)`.
-2. Code the errors in the coding order (§4.2) with `encode` (§4.4).
-
-Decoder:
-
-1. Copy each residual channel's scale state (`avg`).
-2. Decode the errors in the coding order with `decode`. Decoding does not depend on the
-   LMS stage.
-3. For each residual channel `ch`: `set_scale(lms[ch], copied avg)`, then replace its
-   errors in time order by `step(lms[ch], e)`. This gives the residuals back.
-
-The channels are independent in steps 1 and 3, so their order does not matter.
-
-## 5. rANS
-
-The tokens of the whole payload form one sequence of symbols `s_0 .. s_{M-1}`, each with
-its context. They are coded by rANS with 64-bit states, 32-bit renormalisation, 12-bit
-probabilities and **8 interleaved states**: symbol `j` uses state `j mod 8`. Each context
-has a static frequency table `f[0..72]`. Every entry is at least 1 and each table sums to
-4096 (Appendix A).
-
-### 5.1 Slots: the alias layout
-
-Symbols map to the 4096 slots `0..4096` of a context through an alias table. The mapping
-is part of the format: a symbol's state update depends on which slot it lands in.
-
-```text
-build(f):                         # f: 72 frequencies
-  A  = 128                        # buckets: alphabet size rounded up to a power of two (at least 4)
-  bs = 4096 / A = 32              # slots per bucket
-  rem[i]    = f[i] for i < 72, 0 for 72 ≤ i < 128
-  cutoff[i] = bs;  alias[i] = 0;  rank_start[i] = 0     for all i < A
-  small = [i in 0..A ascending with rem[i] < bs]        # used as stacks: the top is the last element
-  large = [i in 0..A ascending with rem[i] > bs]
-  while small and large are both non-empty:
-    s = pop(small)
-    l = top(large)                                      # not popped
-    cutoff[s] = rem[s];  alias[s] = l
-    rem[l] -= bs - rem[s]
-    if rem[l] < bs:   pop(large);  push(small, l)
-    elif rem[l] == bs: pop(large)
-  # ranks: a symbol's own slots first, then its alias slots in bucket order
-  next[i] = cutoff[i] for all i
-  for i in 0..A ascending:
-    if cutoff[i] < bs:
-      rank_start[i] = next[alias[i]];  next[alias[i]] += bs - cutoff[i]
-```
-
-Bucket `i` covers slots `i*bs .. i*bs + bs`. Its first `cutoff[i]` slots belong to symbol
-`i`, with ranks `0 .. cutoff[i]`. The remaining `bs - cutoff[i]` slots belong to symbol
-`alias[i]`: slot `i*bs + o`, with `o ≥ cutoff[i]`, has rank `rank_start[i] + o - cutoff[i]`. Each symbol `k` then has exactly `f[k]` slots,
-ranked `0 .. f[k]`. Write `slot(k, r)` for the slot of rank `r`, and `sym_rank(slot)` for
-the inverse.
-
-### 5.2 Decoding
-
-```text
-words: w[0..W]; reading past the end gives 0
-x[k] = w[2k] << 32 | w[2k + 1]   for k in 0..8;   pos = 16;   lane = 0
-for each symbol, in context c:
-  slot   = x[lane] & 4095
-  (k, r) = sym_rank_c(slot)
-  x[lane] = f_c[k] * (x[lane] >> 12) + r
-  if x[lane] < 2^31:  x[lane] = x[lane] << 32 | w[pos];  pos += 1
-  lane = (lane + 1) mod 8
-  → symbol k
-```
-
-At the end of the payload, `pos ≤ W` must hold. Otherwise the words were exhausted and the
-file is corrupt.
-
-### 5.3 Encoding
-
-```text
-x[k] = 2^31 for k in 0..8;   out = empty list of u32 (built back to front)
-for j = M-1 down to 0:
-  symbol k in context c, lane = j mod 8, f = f_c[k]
-  if x[lane] ≥ 2^51 * f:  prepend (x[lane] mod 2^32) to out;  x[lane] >>= 32
-  q = x[lane] div f;  r = x[lane] mod f            (integer division)
-  x[lane] = (q << 12) + slot_c(k, r)
-for k = 7 down to 0:  prepend (x[k] mod 2^32), then prepend (x[k] >> 32)
-```
-
-The result is `x0_hi, x0_lo, x1_hi, …, x7_lo` followed by the renormalisation words in
-decoding order. `W = len(out)` is always at least 16, even with no symbols.
+The file's audio is a sequence of FLAC frames, which are the frames of aqr-raw's
+`FORMAT.md` §3. Their residuals go through its residual model (§4 there) into the rANS
+words (§5 there) and the two raw bit streams, one model state for the whole file. In this
+document, §3, §3.1, §4 and §4.6 refer to those sections of aqr-raw's.
 
 ## 6. FLAC streams
 
@@ -522,156 +226,17 @@ Subframes:
 - The frame lies within the file (padding included). The bits up to the byte boundary are
   zero, and the CRC-16 matches.
 
-## 7. PCM streams
+## 8. Choosing the input *(encoder)*
 
-The PCM payload holds a byte range of interleaved integer samples, cut into blocks that are
-coded like FLAC frames. All other bytes are kept verbatim.
-
-### 7.1 Streams 0..2
-
-- **Prefix** (stream 0): the bytes before the sample data. This is the WAV / AIFF header,
-  and is empty for headerless PCM.
-- **Layout** (stream 1): 3 format bytes, then `varint nframes`:
-
-  | Byte | Meaning |
-  |---|---|
-  | 0 | channels (1..8) |
-  | 1 | bytes per sample (1..4) |
-  | 2 | bit 0: big-endian; bit 1: unsigned (offset binary); other bits zero |
-
-  `nframes` is the number of sample frames (one sample per channel).
-- **Junk** (stream 2): the bytes after the sample data. This includes a trailing partial
-  sample frame and any chunks after the data.
-
-The original is `prefix ++ samples (nframes × channels × bytes) ++ junk`. Its length must
-equal `len`.
-
-### 7.2 Blocks
-
-The sample frames are cut into blocks of 4096. The last block holds the remaining
-`nframes mod 4096` frames, if any. Each block is a frame (§3) with `N` = its length,
-`bps = 8 × bytes per sample`, and channels = the format's channel count.
-
-- **Stream 3**: one byte per block, the channel assignment. With 2 channels it must be
-  1, 8, 9 or 10. Otherwise it must be `channels - 1`.
-- **Streams 4, 5**: the subframe parameters (§3.1) without Rice parameters.
-- The residuals go through the residual model (§4) as in FLAC.
-
-### 7.3 Reconstruction
-
-Per channel, apply FLAC's synthesis in 64-bit integers (wrapping):
-
-- constant: `N` copies of the value. Verbatim: the samples.
-- fixed, order `o`: the warm-up samples, then `s[t] = pred(t) + res[t - o]` with the
-  predictors 0, `s[t-1]`, `2s[t-1] - s[t-2]`, `3(s[t-1] - s[t-2]) + s[t-3]` and
-  `4(s[t-1] + s[t-3]) - 6s[t-2] - s[t-4]`.
-- LPC: the warm-up samples, then
-  `s[t] = (Σ_{j<order} coef[j] × s[t-1-j]) >> shift + res[t - order]`. With a negative
-  shift, the sum is shifted left by `-shift` instead.
-- Then shift every sample left by `wasted`.
-
-Undo the stereo decorrelation (`a` = channel 0, `b` = channel 1):
-
-| assign | channel 0 | channel 1 |
-|---|---|---|
-| 8 (left/side) | `a` | `a - b` |
-| 9 (side/right) | `a + b` | `b` |
-| 10 (mid/side) | `(m + b) >> 1` | `(m - b) >> 1`, with `m = (a << 1) \| (b & 1)` |
-
-Write the samples interleaved, as the low `8 × bytes` bits of each value. XOR the top bit
-for unsigned formats, and use the format's byte order.
-
-### 7.4 Finding the samples *(encoder)*
-
-Headerless PCM uses the whole input as sample data, in the format the user gives. For
-WAV / AIFF:
-
-- **WAV**: `RIFF` at 0 and `WAVE` at 8, then chunks from offset 12 (id, `u32le` length,
-  body padded to an even length). A `fmt ` chunk (length ≥ 16) must be PCM: format tag 1,
-  or tag `0xFFFE` with length ≥ 40 and sub-format GUID starting with `u16le` 1. It must
-  have channels ≥ 1, block align divisible by channels, and 1 ≤ bits ≤
-  `8 × (align / channels)`. Bytes per sample = `align / channels`. Samples are
-  little-endian, and unsigned for 1-byte samples. The first `data` chunk after `fmt `
-  holds the samples. Its length is taken to be the rest of the file if it is 0 or
-  `0xFFFFFFFF`, and is otherwise clipped to the file.
-- **AIFF / AIFC**: `FORM` at 0, `AIFF` or `AIFC` at 8, then big-endian chunks from
-  offset 12. `COMM` (length ≥ 18) gives channels at body+0 and bits at body+6 (1..32).
-  Bytes per sample is `ceil(bits / 8)`, and samples are signed big-endian. For AIFC, the
-  compression type at body+18 must be `NONE` or `twos` (big-endian) or `sowt`
-  (little-endian). Samples start in `SSND` at `body + 8 + offset` (offset = `u32be` at the
-  body start). They run for `length - 8 - offset` bytes, clipped to the file.
-- The format must have 1..8 channels and 1..4 bytes per sample.
-
-`nframes = data length / (channels × bytes)`.
-
-### 7.5 Making the blocks *(encoder)*
-
-Samples are read as signed integers (XOR the top bit first for unsigned formats). Then,
-per block:
-
-**Stereo** (2 channels and `N ≥ 3`, otherwise `assign = channels - 1`): compute
-`side = l - r` and `mid = (l + r) >> 1`. Let `cost(x)` be the sum of
-`|x[t] - 2x[t-1] + x[t-2]|`. Pick the first minimum among
-`(cost(l) + cost(r), 1)`, `(cost(l) + cost(side), 8)`, `(cost(side) + cost(r), 9)`,
-`(cost(mid) + cost(side), 10)`. Replace the channels accordingly.
-
-**Per channel** (full sample size `F = bps + side bit`):
-
-1. `wasted` = trailing zero bits of the OR of all samples (0 if all are zero), at most
-   `F - 1`. Shift the samples right by it.
-2. If all samples are equal: a constant subframe with `wasted = 0` and the original
-   (unshifted) value.
-3. Otherwise, if LPC analysis (below) gives a predictor: an LPC subframe with
-   precision 14, warm-up = the first `order` samples, and residuals
-   `x[t] - ((Σ coef[j] x[t-1-j]) >> shift)` in 64 bits.
-   Otherwise: fixed order 1, with residuals `x[t] - x[t-1]`.
-4. If a residual does not fit in i32: a verbatim subframe of the shifted samples, keeping
-   `wasted`.
-
-**LPC analysis** (`x`: the shifted samples, `n` of them; `bits = F - wasted`), in IEEE
-double precision:
-
-```text
-max_order = min(16, n / 4);  if 0: none
-window: T = max(n / 4, 1); for i: k = min(i, n-1-i); win[i] = k < T ? 0.5 - 0.5 cos(π k / T) : 1
-y[i] = x[i] × win[i]
-r[lag] for lag in 0..=max_order:
-  eight partial sums: acc[m] += y[lag + 8q + m] × y[8q + m] over whole chunks of 8 (q ascending);
-  r[lag] = (acc[0] + … + acc[7], summed left to right) + (the leftover products summed left to right)
-if r[0] ≤ 0: none
-r[0] *= 1 + 1e-9
-Levinson–Durbin: a = 0[33]; err = r[0]; best = (+∞, 0, a); per_order = (14 + bits) × 4
-for i in 0..max_order:
-  k = -r[i+1]; for j < i: k -= a[j] × r[i-j]; k /= err
-  for j < i: a[j] = a_prev[j] + k × a_prev[i-1-j];  a[i] = k
-  err *= 1 - k²;  if err ≤ 0: break
-  est = 0.5 × n × log2(err) + per_order × (i+1)
-  if est < best.est: best = (est, i+1, a)
-order = best.order; if 0: none
-cmax = max |a[j]| (j < order); if cmax ≤ 0: none
-shift = clamp(13 - (floor(log2 cmax) + 1), 0, 15)
-quantise with error feedback: e = 0; for j < order:
-  v = -a[j] × 2^shift + e;  q[j] = clamp(round_half_away(v), -8192, 8191);  e = v - q[j]
-```
-
-The output bytes depend on these floating-point results, so a byte-identical encoder must
-evaluate them in the same order with correctly rounded `cos` and `log2`.
-
-## 8. Choosing the kind *(encoder)*
-
-1. With a raw sample format given: kind PCM, the whole input is the sample data.
-2. Otherwise, if the input has FLAC metadata (§6.1): kind FLAC.
-3. Otherwise, if WAV / AIFF sample data is found (§7.4): kind PCM.
-4. Otherwise: no formula, the input is not coded.
-
-There is no formula either if coding fails. The formula is made whether or not the coded
-form is smaller than the input.
+The input is coded if it has FLAC metadata (§6.1). Otherwise there is no formula, and the
+input is not coded; nor is there one if coding fails. The formula is made whether or not
+the coded form is smaller than the input.
 
 ## 9. Validation
 
 A decoder should reject the following rather than produce output:
 
-- Params other than 0 and 1, or a number of inputs other than nine; rANS words of a length
+- Params, or a number of inputs other than nine; rANS words of a length
   that is not a multiple of 4; streams cut short (a varint or a byte stream).
 - FLAC: a prefix that does not parse to its own end (§6.1); a header that is not valid
   (§6.6, header rules) or a prediction with no previous header; a subframe type outside
@@ -680,80 +245,12 @@ A decoder should reject the following rather than produce output:
   -16..15; a coefficient out of range; method > 1; bad partitions; a Rice parameter ≥ 15
   (method 0) or ≥ 31 (method 1); an escape byte with bits 5..6 set; escaped residuals out
   of range (§6.5).
-- PCM: format bytes outside §7.1; `nframes × channels × bytes + len(prefix) + len(junk) ≠ len`;
-  a bad channel assignment.
-- rANS words exhausted (§5.2), or a raw bit stream read past its end.
+- rANS words exhausted (aqr-raw §5.2), or a raw bit stream read past its end.
 - An output whose length is not `len`.
 
 This implementation also bounds its work on corrupt input. It rejects `len > 64 × S +
 2^20`, where S is the total size of the slots, and stops writing when the output would
 exceed `len`. A Rice code can be up to 2^32 bits long.
-
-## Appendix A: built-in frequency tables
-
-The 124 frequency tables (§4.4 contexts `2b + cc`, 72 frequencies each) are the module's
-resource (§2). The reference encoder takes it from `model/builtin.bin`, a zstd frame that
-decompresses to 17,860 bytes:
-
-```text
-u32le layout_id = 0x0b49843e     (FNV-1a 32 over the u32 values 124, 72, 32, 1:
-                                  h = 0x811c9dc5; for v: h = (h ^ v) × 0x01000193 mod 2^32)
-124 × 72 × u16le frequencies     context 0 first; each context's 72 values in symbol order
-```
-
-SHA-256 of the decompressed bytes:
-`007e699ed783140496b4b0e9f3585b422dbcfd99341c1e3ebef7554e442af1a2`. Contexts that never
-occurred in training are flat: 57 for symbols 0..63 and 56 for symbols 64..71.
-
-`model/builtin.bin` in base64 (2306 bytes, SHA-256
-`9f63b9ef15728deee88e46d3210c6199c73f7e4237b877655c2e6ccb4dc8ad81`):
-
-```text
-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
-3NxDkF2GypTuDkke0ngQm8MTWk/TgbYri2U=
-```
-
-Changing the tables (retraining with `train`) changes the encoder's resource and needs a
-new module version.
 
 ## Appendix B: CRCs
 

@@ -11,6 +11,7 @@ aqr-formula = { path = "../aqr-formula" }
 aqr-flate = { path = "../aqr-flate" }
 aqr-jpeg = { path = "../aqr-jpeg" }
 aqr-png = { path = "../aqr-png" }
+aqr-raw = { path = "../aqr-raw" }
 memchr = "2"
 zstd = "0.13"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

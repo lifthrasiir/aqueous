@@ -47,8 +47,15 @@ pub const PSD: Module = aqr_psd::formula::MODULE;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 
+/// aqr-raw's samples of a layout (their params), for the trivial containers around them or
+/// for any recompressor that finds them: PCM audio (resources: the residual model's tables,
+/// as aqr-flac's) and raw rasters (no resources).
+pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
+pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
+
 /// Every module of this crate.
-pub const MODULES: [Module; 13] = [X86, ARM64, FLATE, LZ4, SNAPPY, ZIP, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE];
+pub const MODULES: [Module; 15] =
+    [X86, ARM64, FLATE, LZ4, SNAPPY, ZIP, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE, PCM, RASTER];
 
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
@@ -63,7 +70,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 7] = [
+const RECONS: [(Module, Decode); 9] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (JPEG, |p, r, i, n, t| none(r).and_then(|_| aqr_jpeg::formula::decode(p, i, n, t).map_err(msg))),
     (MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(msg)),
@@ -71,6 +78,8 @@ const RECONS: [(Module, Decode); 7] = [
     (PSD, |p, r, i, n, t| none(r).and_then(|_| aqr_psd::formula::decode(p, i, n, t).map_err(msg))),
     (PDF, |p, r, i, n, t| none(r).and_then(|_| aqr_pdf::formula::decode(p, i, n, t).map_err(msg))),
     (SQLITE, |p, r, i, n, t| none(r).and_then(|_| aqr_sqlite::formula::decode(p, i, n, t).map_err(msg))),
+    (PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(msg)),
+    (RASTER, |p, r, i, n, t| none(r).and_then(|_| aqr_raw::formula::raster::decode(p, i, n, t).map_err(msg))),
 ];
 
 /// The file in archive `c`.
