@@ -7,23 +7,25 @@ Apple M4, both ways; compression ratio is pursued only where it does not cost th
 
 ## Results
 
-Measured on 2026-10-24 on an Apple M4, one thread, through `aqr-show` (see the
+Measured on 2026-10-25 on an Apple M4, one thread, through `aqr-show` (see the
 [top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
 its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
 in the archives yet. Memory is the peak RSS of that process (input, archive and output
 included) over the input size. 402 files of FMA (401 MB, about 1 MB each).
 
-- **One file per archive (worst): 0.893.** The built-in tables are the module's resource
-  (131 KB raw, about 38 KB archived), stored in every archive that uses the module; a 1 MB
+- **One file per archive (worst): 0.890.** The built-in tables are the module's resource
+  (130 KB raw, about 37 KB archived), stored in every archive that uses the module; a 1 MB
   track pays for it (against 0.971 under `zstd -3`). Before the contexts shared tables, the
   resource was 1.5 MB raw and about 340 KB archived, and every file was kept as it is (0.975).
 - **The resource shared (best)**, as by many files of one archive (`aqr-show -r`: the formulas
-  taken where they pay without it, its block left out): **0.855**, at **46 MB/s** compressing
-  and **119 MB/s** decompressing. With a table per context it was 0.855 too (0.0002 better) at
-  20 and 104 MB/s: the encoder's inverse maps (8 KB per table used) and the decoder's alias
-  tables now fit in far less memory.
+  taken where they pay without it, its block left out): **0.853**, at **45 MB/s** compressing
+  and **116 MB/s** decompressing. With the previous granule in place of the moving average
+  (section 2) it was 0.855 at 46 and 119 MB/s. With a table per context it was 0.855 too
+  (0.0002 better than shared tables) at 20 and 104 MB/s: the encoder's inverse maps (8 KB
+  per table used) and the decoder's alias tables now fit in far less memory.
 - Memory: about 61 MB + 6.4× the file (a fit over concatenations of the sample, 9 to 120 MB,
-  each coded as one file with `-e`; the sample's files take 32–59 MB, median 41 MB). The same
+  each coded as one file with `-e`; the sample's files take 32–59 MB, median 41 MB), measured
+  on 2026-10-24; the moving average left the peak of every concatenation within 0.1%. The same
   concatenations took 28–52 MB more with a table per context (102 MB + 6.4×). The fixed part
   is the tables (the frequencies, the decoder's alias tables, and the encoder's inverse maps
   of the tables used, 4 MB at most); what follows the file is the archive's mostly (the file,
@@ -96,11 +98,15 @@ stored.
 
 ### 2. Coefficient model
 
-- Contexts use only the previous granule of the channel and the other channel, never
+- Contexts use only earlier granules of the channel and the other channel, never
   anything decoded in the same granule, so there is no serial dependency between pairs when
-  decoding. Adding the previous pair gained 0.53 pp of ratio but made decompression roughly
-  40% slower (measured under load); the pair two back gained 0.37 pp for −14%
-  decompression, −9% compression.
+  decoding. The earlier granules enter as a moving average of the magnitudes (the history
+  weighing 1/4, as in packMP3's `ctx_h_abs`), kept at the step sizes of the last granule:
+  on the held-out FMA files 0.27 pp better than the previous granule alone (0.8864 against
+  0.8890 through `aqr-mp3 bench`), for 1.6% of compression and 3% of decompression speed.
+  Adding the previous pair gained 0.53 pp of ratio but made decompression roughly 40%
+  slower (measured under load); the pair two back gained 0.37 pp for −14% decompression,
+  −9% compression.
 - Static tables trained on FMA (4511 files), built into the binary (33 KB). The 6537
   contexts share 500 tables: contexts of one alphabet size are merged greedily, the pair
   costing the fewest bits on the training set first. On the held-out FMA files this costs

@@ -1,4 +1,4 @@
-# aqr-mp3 format: module `mp3-recons`, version 4
+# aqr-mp3 format: module `mp3-recons`, version 5
 
 This document specifies the module `mp3-recons` of entry formulas (aqr-formula), which
 rebuilds an MP3 file from a smaller representation, completely enough to write an
@@ -48,12 +48,13 @@ External references:
   used here, except the Huffman code tables (Table B.7 of ISO/IEC 11172-3).
 - `model/builtin.bin` in this repository holds the frequency tables of the rANS coder
   (section 8.4). It is where the reference encoder gets the module's resource; the file's
-  SHA-256 is `bf0283501981eded037af37546211213a773b9b5ed6f36b1e900c31dc4d7bb9d`.
+  SHA-256 is `4f0549f1193412136cbad6acc9d490b269815f9d451736003989334b2a05aac0`.
 
 ## 2. Module
 
-- **Module**: name `mp3-recons`, version 4. Version 3 was the same with a table of its own
-  for every context and a u32 layout id first; version 2, besides, had the rANS stream
+- **Module**: name `mp3-recons`, version 5. Version 4 was the same with the magnitudes of
+  the previous granule in place of their moving average (section 9.2); version 3, besides,
+  had a table of its own for every context and a u32 layout id first; version 2, besides, had the rANS stream
   in a single run (section 8) however many frames there are.
 - **Resources**: exactly one, the frequency tables of section 8.4 in their decompressed form.
   A decoder MUST fail unless there is exactly one resource and it is valid as section 8.4
@@ -637,11 +638,12 @@ one context and all contexts that map to it have the same alphabet size, every t
 frequencies are nonzero and sum to 4096, and nothing follows the last table.
 
 The reference encoder takes the resource from `model/builtin.bin`, a zstd stream that
-decompresses to 500 tables in 131 044 bytes (SHA-256
-`e4451ffb336c7375cec3c7dc4d67efd79944bbc3cc812672a0ac2d29ac2f3666`). The tables are the
+decompresses to 500 tables in 129 576 bytes (SHA-256
+`182b8fa34907d49e1081516d76035aa64419d2a83e3d602118718c97fafdfc78`). The tables are the
 resource, not part of the module: other tables (retrained, or merged otherwise) are another
 resource of the same version, which a decoder takes as it is given; only a change to the
-context layout (section 9.1) needs a new module version.
+context layout (section 9.1) or to how contexts are chosen (sections 9.2–9.7) needs a new
+module version.
 
 ## 9. Coefficient model
 
@@ -662,8 +664,9 @@ Per channel `ch` (0, 1), persisting over the whole file and updated only by code
 
 - `gr0_scf[ch][39]`: full scalefactors of the last coded granule 0 of the channel; 0.
 - `exp[ch][22]`: band step exponents of the last coded granule of the channel; 0.
-- `prev[ch][576]`: magnitudes of the last coded granule of the channel; 0.
-- `prev_ok[ch]`: that granule exists and is not short; false.
+- `avg[ch][576]`: moving average of the magnitudes of the coded long granules of the
+  channel, at the step sizes of the last one, in units of 1/16; 0.
+- `prev_ok[ch]`: the last coded granule of the channel exists and is not short; false.
 - `scf_prev[ch][39]`: last coded value of each scalefactor position, capped at 15; 16
   (none).
 
@@ -704,15 +707,15 @@ Neighbourhood bucket of pair `i` (lines 2i, 2i + 1), 24 meaning none:
 ```text
 bucket[i] = 24 for all i
 if use_prev:
-    m(k) = prev[ch][k] for 0 ≤ k < 576, else 0
+    m(k) = avg[ch][k] for 0 ≤ k < 576, else 0
     line = 0; i = 0
     for b in 0..22 while i < npairs:
-        fac = step_factor(e[b] − exp[ch][b])
+        fac[b] = step_factor(e[b] − exp[ch][b])
         line += SFB_LONG[sfb_row][b]
         while i < min(line / 2, npairs):
             k = 2i
             s = 4 (m(k) + m(k+1)) + 2 (m(k−1) + m(k+2)) + m(k−2) + m(k+3)
-            nb = min((s × fac) >> 9, 2^24)
+            nb = min((s × fac[b]) >> 13, 2^24)
             bucket[i] = LB((nb × 149797) >> 16)
             i += 1
 ```
@@ -763,7 +766,7 @@ bits are the `n − 2` low bits of `e`.
 Then `nquads` quadruples (7.4), at `line` continuing from the big values:
 
 ```text
-g = the number of k in 0..4 with prev[ch][line + k] ≠ 0 if use_prev, else 5
+g = the number of k in 0..4 with avg[ch][line + k] ≠ 0 if use_prev, else 5
 o = 0 if ch = 0, else 1 + [any of cur0[line .. line + 4] ≠ 0]
 q = get(QUAD(count1table, g, o))           (bit 3: first value nonzero, ..., bit 0: fourth)
 signs = RAW(popcount(q))                   (first nonzero value in the highest bit)
@@ -773,8 +776,21 @@ magnitudes of lines line..line+4: the bits of q; line += 4
 
 ### 9.7 State update
 
-After a coded granule: if gr = 0, `gr0_scf[ch] = full`; `exp[ch] = e`; `prev[ch]` = its
-magnitudes; `prev_ok[ch] = not short`; if ch = 0, `cur0` = its magnitudes.
+After a coded granule with magnitudes `cur`: if gr = 0, `gr0_scf[ch] = full`; then, unless
+`short`,
+
+```text
+for k in 0..576:
+    if use_prev:
+        b = the band of line k (the last band runs to 576)
+        h = (min(avg[ch][k], 2^19) × min(fac[b], 2^12)) >> 8
+        avg[ch][k] = (h + 48 cur[k]) >> 2
+    else:
+        avg[ch][k] = 16 cur[k]
+```
+
+(with `fac[b] = step_factor(e[b] − exp[ch][b])` for every band, as in 9.4); then `exp[ch] = e`; `prev_ok[ch] = not short`; if
+ch = 0, `cur0 = cur`.
 
 ### 9.8 Order
 

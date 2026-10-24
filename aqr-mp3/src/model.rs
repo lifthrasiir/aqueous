@@ -218,10 +218,12 @@ static XY: [[u8; 256]; 17] = {
 pub struct State {
     gr0_scf: [[u8; 39]; 2],
     exp: [[i16; 22]; 2],
-    /// Magnitudes of the previous granule per channel, from index 1 (index 0 and the
-    /// end are zero padding).
-    prev: [[u16; 580]; 2],
     prev_ok: [bool; 2],
+    /// Moving average of the magnitudes per channel over the long granules, at the step
+    /// sizes of the last one, with 4 fractional bits, from index 1 (index 0 and the end
+    /// are zero padding); zero from line `avg_end`.
+    avg: [[u32; 580]; 2],
+    avg_end: [usize; 2],
     /// Magnitudes of channel 0 of the current granule.
     cur0: [u16; 576],
     /// Last coded value of each scalefactor index per channel (capped at 15; 16 = none).
@@ -233,8 +235,9 @@ impl State {
         Box::new(State {
             gr0_scf: [[0; 39]; 2],
             exp: [[0; 22]; 2],
-            prev: [[0; 580]; 2],
             prev_ok: [false; 2],
+            avg: [[0; 580]; 2],
+            avg_end: [0; 2],
             cur0: [0; 576],
             scf_prev: [[16; 39]; 2],
         })
@@ -269,6 +272,10 @@ struct Prep {
     use_prev: bool,
     short: bool,
     other: bool,
+    /// Per long band, how much the magnitudes of the previous granule grow at the current
+    /// step sizes (see [`step_factor`]; zero unless `use_prev`).
+    fac: [u64; 22],
+    sfb_row: usize,
 }
 
 fn prepare(st: &State, h: Header, si: &SideInfo, gr: usize, ch: usize, scf: &[u8]) -> Prep {
@@ -278,29 +285,32 @@ fn prepare(st: &State, h: Header, si: &SideInfo, gr: usize, ch: usize, scf: &[u8
     let other = ch == 1 && h.channels() == 2;
     let npairs = (g.big_values as usize).min(288);
 
-    // Per pair: weighted neighbourhood magnitude from the previous granule (scaled to the
-    // current step sizes) and the other channel.
+    // Per pair: weighted neighbourhood magnitude from the moving average of the previous
+    // granules (scaled to the current step sizes) and the other channel.
     let mut nbh = [0u32; 288];
     let lay = scf_layout(h, si, gr, ch);
     let full = full_scalefactors(&lay, scf, &st.gr0_scf[ch]);
     let exp = if short { [0; 22] } else { band_exponents(g, &full) };
+    let mut fac = [0u64; 22];
     if use_prev {
-        let p = &st.prev[ch];
-        let pe = &st.exp[ch];
+        for b in 0..22 {
+            fac[b] = step_factor((exp[b] - st.exp[ch][b]) as i32);
+        }
+        let p = &st.avg[ch];
         let widths = &SFB_LONG[h.sfb_row()];
         let (mut line, mut i) = (0usize, 0usize);
         for b in 0..22 {
             if i >= npairs {
                 break;
             }
-            let f = step_factor((exp[b] - pe[b]) as i32);
+            let f = fac[b];
             line += widths[b] as usize;
             let stop = (line / 2).min(npairs);
             while i < stop {
                 let k = 2 * i;
                 let (pm, p0, p1, p2) = (p[k] as u64, p[k + 1] as u64, p[k + 2] as u64, p[k + 3] as u64);
                 let wide = if k >= 1 { p[k - 1] as u64 } else { 0 } + p[(k + 4).min(579)] as u64;
-                nbh[i] = (((4 * (p0 + p1) + 2 * (pm + p2) + wide) * f) >> 9).min(1 << 24) as u32;
+                nbh[i] = (((4 * (p0 + p1) + 2 * (pm + p2) + wide) * f) >> 13).min(1 << 24) as u32;
                 i += 1;
             }
         }
@@ -323,7 +333,7 @@ fn prepare(st: &State, h: Header, si: &SideInfo, gr: usize, ch: usize, scf: &[u8
     for i in 0..npairs {
         bucket[i] = bucket[i] * NOC as u8 + oc[i];
     }
-    Prep { bucket, exp, full, use_prev, short, other }
+    Prep { bucket, exp, full, use_prev, short, other, fac, sfb_row: h.sfb_row() }
 }
 
 /// Quadruple context from the other channel: 0 none, 1 all zero, 2 some nonzero.
@@ -336,13 +346,45 @@ fn quad_other(p: &Prep, st: &State, line: usize) -> usize {
     1 + (o[0] | o[1] | o[2] | o[3] != 0) as usize
 }
 
-/// Updates the state after a granule with magnitudes `cur`.
-fn commit(st: &mut State, p: &Prep, gr: usize, ch: usize, cur: &[u16; 576]) {
+/// Updates the state after a granule with magnitudes `cur`, zero from line `end`.
+fn commit(st: &mut State, p: &Prep, gr: usize, ch: usize, cur: &[u16; 576], end: usize) {
     if gr == 0 {
         st.gr0_scf[ch] = p.full;
     }
+    if !p.short {
+        let a = &mut st.avg[ch];
+        let stop = end.max(st.avg_end[ch]);
+        let mut last = 0;
+        if p.use_prev {
+            let widths = &SFB_LONG[p.sfb_row];
+            let (mut line, mut b) = (0usize, 0usize);
+            while line < stop {
+                let f = p.fac[b].min(1 << 12) as u32;
+                let next = if b == 21 { 576 } else { (line + widths[b] as usize).min(576) };
+                let e = next.min(stop);
+                // The history weighs 1/4 (0 and 1/2 lose 0.2 and 0.07 pp of ratio, 1/3 and
+                // 2/5 gain as much as 1/4).
+                let mut any = 0;
+                for (v, &c) in a[line + 1..e + 1].iter_mut().zip(&cur[line..e]) {
+                    let h = ((*v).min(1 << 19) * f) >> 8;
+                    *v = (h + 48 * c as u32) >> 2;
+                    any |= *v;
+                }
+                if any != 0 {
+                    last = e;
+                }
+                line = next;
+                b += 1;
+            }
+        } else {
+            for k in 0..stop {
+                a[k + 1] = (cur[k] as u32) << 4;
+            }
+            last = end;
+        }
+        st.avg_end[ch] = last;
+    }
     st.exp[ch] = p.exp;
-    st.prev[ch][1..577].copy_from_slice(cur);
     st.prev_ok[ch] = !p.short;
     if ch == 0 {
         st.cur0 = *cur;
@@ -429,7 +471,7 @@ pub fn code_granule<C: Coder>(
         }
     }
     let qbase = QUAD_BASE + if g.count1table { QUAD_PER_TABLE } else { 0 };
-    let p = &st.prev[ch];
+    let p = &st.avg[ch];
     for _ in 0..quads {
         let pg = if use_prev {
             (p[line + 1] != 0) as usize
@@ -458,7 +500,7 @@ pub fn code_granule<C: Coder>(
     coefs[line..].fill(0);
     cur[line..].fill(0);
     c.put_back(l);
-    commit(st, &prep, gr, ch, &cur);
+    commit(st, &prep, gr, ch, &cur, line);
 }
 
 /// Decompressing only: decodes the values of a granule as [`code_granule`] would and writes
@@ -552,7 +594,7 @@ pub fn decode_granule<C: Coder>(
     }
     let qbase = QUAD_BASE + if g.count1table { QUAD_PER_TABLE } else { 0 };
     let tab = if g.count1table { &COUNT1B } else { &COUNT1A };
-    let p = &st.prev[ch];
+    let p = &st.avg[ch];
     for _ in 0..quads {
         let pg = if prep.use_prev {
             (p[line + 1] != 0) as usize
@@ -574,7 +616,7 @@ pub fn decode_granule<C: Coder>(
     }
     c.put_back(l);
     w.put_back(wl);
-    commit(st, &prep, gr, ch, &cur);
+    commit(st, &prep, gr, ch, &cur, line);
 }
 
 /// The bits of `v` at the set bits of the 4-bit mask `m`, packed (highest first).
@@ -738,7 +780,7 @@ pub fn encode_granule<C: Coder>(
         }
     }
     let qbase = QUAD_BASE + if g.count1table { QUAD_PER_TABLE } else { 0 };
-    let p = &st.prev[ch];
+    let p = &st.avg[ch];
     let mut nq = 0;
     let mut bb = BitBuf::new(r);
     while line + 4 <= 576 {
@@ -772,7 +814,7 @@ pub fn encode_granule<C: Coder>(
     }
     r.pos = bb.pos();
     c.put_back(l);
-    commit(st, &prep, gr, ch, &cur);
+    commit(st, &prep, gr, ch, &cur, line);
     Some(huff::Part3 { quads: nq, tail: end - r.pos })
 }
 

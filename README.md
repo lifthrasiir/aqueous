@@ -11,7 +11,8 @@ and the design is argued in `xform-design.md`.
   coding and the round-trip check) at level `mid`, then extracted.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `aqr-obj bench`.
   - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
-- aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above),
+- aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above;
+  aqr-mp3's ratio and speed again on 2026-10-25),
   and aqr-raw's images measured then; aqr-exe too, on copies of files from a Windows
   machine.
 - The memory of aqr-raw, aqr-flac, aqr-pdf, aqr-sqlite, aqr-obj, aqr-zip and aqr-exe was
@@ -54,7 +55,7 @@ and the design is argued in `xform-design.md`.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| MP3 | aqr-mp3 | 402 files, 401 MB | 0.855 ~ 0.893 | 0.971 | 46 | 119 | 61 MB + 6.4× | see below |
+| MP3 | aqr-mp3 | 402 files, 401 MB | 0.853 ~ 0.890 | 0.971 | 45 | 116 | 61 MB + 6.4× | see below |
 | FLAC; WAV, AIFF | aqr-flac; aqr-raw | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 9 MB + 11.5× | the resource is about 2.6 KB per archive. Measured when aqr-flac took WAV and AIFF too: aqr-raw has them now, with the same streams |
 
 The MP3 resource is the built-in tables (131 KB raw, about 38 KB in every archive), so a

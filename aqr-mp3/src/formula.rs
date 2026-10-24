@@ -7,7 +7,7 @@ use crate::par;
 use aqr_formula::{Formula, Kind, Module, Node, Resource};
 use std::sync::OnceLock;
 
-pub const MODULE: Module = Module { name: "mp3-recons", version: 4 };
+pub const MODULE: Module = Module { name: "mp3-recons", version: 5 };
 
 #[derive(Debug)]
 pub struct Error(pub String);
