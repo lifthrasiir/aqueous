@@ -2,62 +2,13 @@
 //! stripe at a time, so memory must not follow the pixels. (A test binary of its own: the
 //! allocator counts every thread.)
 
+use aqr_common::mem::{Counting, peak};
 use aqr_formula::Apply;
 use aqr_jpeg::formula::{self, MODULE};
 use aqr_jpeg::jpeg::{self, Coefs, ScanInfo};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-
-struct Counting;
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-fn grew(n: usize) {
-    PEAK.fetch_max(LIVE.fetch_add(n, Relaxed) + n, Relaxed);
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc(l) };
-        if !p.is_null() {
-            grew(l.size());
-        }
-        p
-    }
-    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc_zeroed(l) };
-        if !p.is_null() {
-            grew(l.size());
-        }
-        p
-    }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        unsafe { System.dealloc(p, l) };
-        LIVE.fetch_sub(l.size(), Relaxed);
-    }
-    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-        let q = unsafe { System.realloc(p, l, n) };
-        if !q.is_null() {
-            if n > l.size() {
-                grew(n - l.size());
-            } else {
-                LIVE.fetch_sub(l.size() - n, Relaxed);
-            }
-        }
-        q
-    }
-}
 
 #[global_allocator]
 static A: Counting = Counting;
-
-/// Peak heap bytes above the current level while running `f`.
-fn peak<R>(f: impl FnOnce() -> R) -> (R, usize) {
-    let base = LIVE.load(Relaxed);
-    PEAK.store(base, Relaxed);
-    let r = f();
-    (r, PEAK.load(Relaxed) - base)
-}
 
 fn segment(out: &mut Vec<u8>, marker: u8, body: &[u8]) {
     out.extend_from_slice(&[0xFF, marker]);

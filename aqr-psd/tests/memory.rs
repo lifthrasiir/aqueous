@@ -4,61 +4,12 @@
 
 mod common;
 
+use aqr_common::mem::{Counting, peak};
 use aqr_psd::formula;
 use common::*;
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
-
-struct Counting;
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-
-fn grew(n: usize) {
-    PEAK.fetch_max(LIVE.fetch_add(n, Relaxed) + n, Relaxed);
-}
-
-unsafe impl GlobalAlloc for Counting {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc(l) };
-        if !p.is_null() {
-            grew(l.size());
-        }
-        p
-    }
-    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-        let p = unsafe { System.alloc_zeroed(l) };
-        if !p.is_null() {
-            grew(l.size());
-        }
-        p
-    }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        unsafe { System.dealloc(p, l) };
-        LIVE.fetch_sub(l.size(), Relaxed);
-    }
-    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
-        let q = unsafe { System.realloc(p, l, n) };
-        if !q.is_null() {
-            if n > l.size() {
-                grew(n - l.size());
-            } else {
-                LIVE.fetch_sub(l.size() - n, Relaxed);
-            }
-        }
-        q
-    }
-}
 
 #[global_allocator]
 static A: Counting = Counting;
-
-/// Peak heap bytes above the current level while running `f`.
-fn peak<R>(f: impl FnOnce() -> R) -> (R, usize) {
-    let base = LIVE.load(Relaxed);
-    PEAK.store(base, Relaxed);
-    let r = f();
-    (r, PEAK.load(Relaxed) - base)
-}
 
 #[test]
 fn memory_follows_small_files() {
