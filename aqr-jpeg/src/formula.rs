@@ -8,7 +8,7 @@ use crate::codec::{self, CoreSource};
 use crate::fast::{get_bytes, get_varint};
 use crate::jpeg::Error;
 use aqr_common::varint;
-use aqr_formula::{Formula, Module, Node};
+use aqr_formula::{Formula, Kind, Module, Node};
 
 pub const MODULE: Module = Module { name: "jpeg-recons", version: 1 };
 
@@ -69,7 +69,7 @@ fn try_encode(input: &[u8], depth: u32) -> Result<Formula, Error> {
         bits.extend_from_slice(&s.raw);
     }
     let lens = f.push("jpeg/lens", lens);
-    let rans = f.push("jpeg/rans", rans);
+    let rans = f.push_as("jpeg/rans", Kind::Compressed, rans);
     let bits = f.push("jpeg/bits", bits);
     f.root = Node::apply(
         MODULE,

@@ -1,25 +1,38 @@
 //! gzip and zlib: the container sliced around aqr-flate on its DEFLATE stream, whose
-//! data is a content of the application, recompressed in turn (composition, §4.5).
+//! data is a content of the application, recompressed in turn (composition, §4.5): gzip's of
+//! the kind of its name, if it has one ([`kind_by_name`]).
 
 use std::ops::Range;
 
 use aqr_decompress::FLATE;
 use aqr_flate::Hints;
 use aqr_flate::inflate::{self, Sink};
-use aqr_formula::{Formula, Node};
+use aqr_formula::{Formula, Kind, Node};
 
-use crate::{Cx, Options};
+use crate::{Cx, Options, kind_by_name};
 
 /// A gzip member (RFC 1952); what follows its trailer is sliced as it is.
 pub(crate) fn gzip(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let raw = gzip_deflate(d)?;
-    wrap("gzip", d, raw, &Hints::gzip_xfl(d[8]), opt, cx)
+    let kind = gzip_name(d).map_or(Kind::Unknown, kind_by_name);
+    wrap("gzip", d, raw, kind, &Hints::gzip_xfl(d[8]), opt, cx)
 }
 
 /// A zlib stream (RFC 1950); what follows its checksum is sliced as it is.
 pub(crate) fn zlib(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let raw = zlib_deflate(d)?;
-    wrap("zlib", d, raw, &Hints::zlib_header([d[0], d[1]]), opt, cx)
+    wrap("zlib", d, raw, Kind::Unknown, &Hints::zlib_header([d[0], d[1]]), opt, cx)
+}
+
+/// The name of the file (FNAME) of the gzip member at the start of `d`, if it has one.
+fn gzip_name(d: &[u8]) -> Option<&[u8]> {
+    let flg = *d.get(3)?;
+    if flg & 8 == 0 {
+        return None;
+    }
+    let p = 10 + if flg & 4 != 0 { 2 + u16::from_le_bytes(*d.get(10..)?.first_chunk()?) as usize } else { 0 };
+    let name = d.get(p..)?;
+    Some(&name[..name.iter().position(|&b| b == 0)?])
 }
 
 /// The DEFLATE stream of the gzip member at the start of `d`, with its 8-byte trailer after it.
@@ -55,8 +68,17 @@ pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
     (adler32(&data.0) == sum).then_some(2..end)
 }
 
-/// `d` with aqr-flate on the DEFLATE stream at `raw`, if its data fits in the budget.
-fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &Options, cx: &Cx) -> Option<Formula> {
+/// `d` with aqr-flate on the DEFLATE stream at `raw`, its data of `kind`, if it fits in the
+/// budget.
+fn wrap(
+    class: &'static str,
+    d: &[u8],
+    raw: Range<usize>,
+    kind: Kind,
+    hints: &Hints,
+    opt: &Options,
+    cx: &Cx,
+) -> Option<Formula> {
     // measured only where it might not fit
     let left = cx.inflate_left();
     if (raw.len() as u64).saturating_mul(aqr_zip::zip::MAX_EXPANSION) > left
@@ -76,7 +98,7 @@ fn wrap(class: &'static str, d: &[u8], raw: Range<usize>, hints: &Hints, opt: &O
     let mut f = Formula::default();
     f.push(class, [&d[..raw.start], &d[raw.end..]].concat());
     let record = f.push("flate/record", record);
-    let data = f.push("raw", data);
+    let data = f.push_as("raw", kind, data);
     f.root = Node::concat([
         Node::slice(0, 0, raw.start as u64),
         Node::apply_with(FLATE, resources, vec![], vec![data, record], raw.len() as u64),

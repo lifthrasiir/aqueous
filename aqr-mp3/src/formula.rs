@@ -4,7 +4,7 @@
 
 use crate::codec::{self, Coded, N_BYTE_STREAMS};
 use crate::par;
-use aqr_formula::{Formula, Module, Node, Resource};
+use aqr_formula::{Formula, Kind, Module, Node, Resource};
 use std::sync::OnceLock;
 
 pub const MODULE: Module = Module { name: "mp3-recons", version: 2 };
@@ -16,18 +16,19 @@ pub struct Error(pub String);
 /// bits.
 const SLOTS: usize = N_BYTE_STREAMS + 2;
 
-/// Classes of the slots.
-const CLASSES: [&str; SLOTS] = [
-    "mp3/segs",
-    "mp3/junk",
-    "mp3/headers",
-    "mp3/crc",
-    "mp3/tailbits",
-    "mp3/rawgr",
-    "mp3/gaps",
-    "mp3/side",
-    "mp3/rans",
-    "mp3/rawbits",
+/// Classes of the slots, and their kinds: the side information, the rANS words and the raw
+/// bits do not compress.
+const CLASSES: [(&str, Kind); SLOTS] = [
+    ("mp3/segs", Kind::Unknown),
+    ("mp3/junk", Kind::Unknown),
+    ("mp3/headers", Kind::Unknown),
+    ("mp3/crc", Kind::Unknown),
+    ("mp3/tailbits", Kind::Unknown),
+    ("mp3/rawgr", Kind::Unknown),
+    ("mp3/gaps", Kind::Unknown),
+    ("mp3/side", Kind::Compressed),
+    ("mp3/rans", Kind::Compressed),
+    ("mp3/rawbits", Kind::Compressed),
 ];
 
 /// The formula of `input`: `None` where the coded form is not smaller (or on a failure).
@@ -43,7 +44,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let mut slots: Vec<Vec<u8>> = c.streams;
     slots.push(c.words.iter().flat_map(|w| w.to_le_bytes()).collect());
     slots.push(c.raw);
-    let inputs = slots.into_iter().zip(CLASSES).map(|(d, class)| f.push(class, d)).collect();
+    let inputs = slots.into_iter().zip(CLASSES).map(|(d, (class, kind))| f.push_as(class, kind, d)).collect();
     f.root = Node::apply_with(MODULE, vec![resource()], Vec::new(), inputs, input.len() as u64);
     Some(f)
 }

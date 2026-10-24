@@ -1,6 +1,9 @@
-//! Picking a recompressor by the magic bytes at the start of the data.
+//! Picking a recompressor by the magic bytes at the start of the data, and what data is by
+//! the name of its file ([`kind_by_name`]).
 
 use std::fmt;
+
+use aqr_formula::Kind;
 
 /// What [`detect`] recognises, by the recompressor that takes it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -66,6 +69,45 @@ impl Format {
             Format::LevelDb => "leveldb",
             Format::Zip => "zip",
         }
+    }
+
+    /// The format of [`Format::name`] `name`, as [`Kind::Format`] names it.
+    pub fn from_name(name: &str) -> Option<Format> {
+        Format::ALL.into_iter().find(|f| f.name() == name)
+    }
+}
+
+/// What the data of a file named `name` (a path, of `/` or `\` separators) is by its
+/// extension, case aside: a file of a format recompressed ([`Kind::Format`]), already
+/// compressed (audio, video, images and archives that no recompressor takes), uncompressed
+/// images (pixels after a header), text or fonts. Anything else is [`Kind::Unknown`],
+/// executables too (an installer has an archive after its image), and WOFF fonts (of zlib
+/// streams).
+pub fn kind_by_name(name: &[u8]) -> Kind {
+    let base = name.rsplit(|&b| b == b'/' || b == b'\\').next().unwrap_or(name);
+    let Some(dot) = base.iter().rposition(|&b| b == b'.').filter(|&p| p > 0) else { return Kind::Unknown };
+    let ext = base[dot + 1..].to_ascii_lowercase();
+    let format = |f: Format| Kind::Format(f.name());
+    match &ext[..] {
+        b"png" => format(Format::Png),
+        b"jpg" | b"jpeg" | b"jpe" | b"jfif" => format(Format::Jpeg),
+        b"mp3" => format(Format::Mp3),
+        b"flac" | b"wav" | b"aif" | b"aiff" | b"aifc" => format(Format::Flac),
+        b"psd" | b"psb" => format(Format::Psd),
+        b"pdf" => format(Format::Pdf),
+        b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
+        b"sqlite" | b"sqlite3" => format(Format::Sqlite),
+        b"ldb" => format(Format::LevelDb),
+        b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
+        b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
+        | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
+        b"7z" | b"xz" | b"lzma" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv"
+        | b"webm" | b"ogg" | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif"
+        | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
+        b"bmp" | b"tga" | b"ppm" | b"pgm" | b"pbm" | b"pnm" => Kind::Pixels,
+        b"txt" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => Kind::Text,
+        b"ttf" | b"otf" | b"ttc" | b"cff" | b"pfb" => Kind::Font,
+        _ => Kind::Unknown,
     }
 }
 
@@ -320,6 +362,34 @@ mod tests {
                 "at {p}"
             );
         }
+    }
+
+    /// Kinds by the extension of the file's name, case aside, whatever its directories.
+    #[test]
+    fn kinds_by_name() {
+        for (name, kind) in [
+            (&b"photo.JPG"[..], Kind::Format("jpeg")),
+            (b"dir.d/sub\\song.flac", Kind::Format("flac")),
+            (b"a/b/places.sqlite", Kind::Format("sqlite")),
+            (b"lib.tar.gz", Kind::Format("gzip")),
+            (b"movie.mp4", Kind::Compressed),
+            (b"notes.txt", Kind::Text),
+            (b"scan.BMP", Kind::Pixels),
+            (b"fonts/a.otf", Kind::Font),
+            (b"fonts/a.woff", Kind::Unknown),
+            (b"setup.exe", Kind::Unknown),
+            (b".png", Kind::Unknown),
+            (b"dir.png/file", Kind::Unknown),
+            (b"README", Kind::Unknown),
+            (b"", Kind::Unknown),
+        ] {
+            assert_eq!(kind_by_name(name), kind, "{}", String::from_utf8_lossy(name));
+        }
+        // every format named is one known
+        for f in Format::ALL {
+            assert_eq!(Format::from_name(f.name()), Some(f));
+        }
+        assert_eq!(Format::from_name("tar"), None);
     }
 
     #[test]

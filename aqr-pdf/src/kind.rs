@@ -1,5 +1,7 @@
 //! What a stream holds and how it is encoded, from its dictionary.
 
+use aqr_formula::Kind;
+
 use crate::lex::Obj;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -30,6 +32,18 @@ impl Class {
             Class::Data => "data",
         }
     }
+
+    /// What the decoded data of streams of the class is, for whoever recompresses it in turn:
+    /// content is anything not recognised as well, and data anything an embedded file is.
+    pub fn kind(self) -> Kind {
+        match self {
+            Class::Image => Kind::Pixels,
+            Class::Font => Kind::Font,
+            Class::ObjStm => Kind::Text,
+            Class::XRef => Kind::Table,
+            Class::Content | Class::Data => Kind::Unknown,
+        }
+    }
 }
 
 /// The first filter to undo.
@@ -54,6 +68,20 @@ pub fn class(d: &Obj) -> Class {
         // ICC profiles.
         _ if d.get(b"N").is_some() && d.get(b"BBox").is_none() => Class::Data,
         _ => Class::Content,
+    }
+}
+
+/// What the data of a FlateDecode stream of class `c` and dictionary `d` is once inflated: what
+/// the class is ([`Class::kind`]) where FlateDecode is its only filter, else what the next
+/// filter decodes: a JPEG file for DCTDecode, compressed data for the other image codecs, and
+/// anything for the rest.
+pub fn inflated_kind(c: Class, d: &Obj) -> Kind {
+    let f = d.get(b"Filter").map(Obj::names).unwrap_or_default();
+    match f.get(1) {
+        None => c.kind(),
+        Some(&(b"DCTDecode" | b"DCT")) => Kind::Format("jpeg"),
+        Some(&(b"JPXDecode" | b"JBIG2Decode" | b"CCITTFaxDecode" | b"CCF")) => Kind::Compressed,
+        Some(_) => Kind::Unknown,
     }
 }
 

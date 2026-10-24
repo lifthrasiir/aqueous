@@ -2,11 +2,12 @@
 //! contents of its entries, the DEFLATE streams by aqr-flate. `FORMAT.md` specifies it. The
 //! contents may be recompressed in turn.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aqr_flate::{ADAPTIVE, Coding, ModelData};
-use aqr_formula::{Formula, Module, Node};
+use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::layout::{self, Made, Writer};
 use crate::zip::{self, DEFLATED, ENCRYPTED, Rec, STORED};
@@ -25,11 +26,15 @@ pub struct Options {
     /// The most bytes of data that DEFLATE bodies may inflate to, all together; the bodies past
     /// it, those of the highest ratios first, are kept as they are.
     pub limit: u64,
+    /// What an entry's contents are by its name (in the local header): the contents of each
+    /// [`Kind`] are a stream of their own (those of [`Kind::Unknown`] the stream `raw`, the
+    /// others after the four inputs), sliced in order. By default all are unknown.
+    pub kind: fn(&[u8]) -> Kind,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, limit: u64::MAX }
+        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, limit: u64::MAX, kind: |_| Kind::Unknown }
     }
 }
 
@@ -237,6 +242,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         _ => (n, r),
     });
     let (mut data, mut records) = (Vec::with_capacity(sizes.0), Vec::with_capacity(sizes.1));
+    // the kind of each entry's contents, and their end in `data`
+    let mut kinds: Vec<(Kind, usize)> = Vec::new();
     let mut locals = locals.iter().zip(made.iter_mut()).zip(crcs);
     for r in &recs {
         match r {
@@ -250,6 +257,9 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                         records.extend_from_slice(record);
                     }
                     _ => {}
+                }
+                if matches!(m, Made::Stored | Made::Deflated { .. }) {
+                    kinds.push(((opt.kind)(&input[l.name.clone()]), data.len()));
                 }
                 w.local(l, m, crc);
                 if let Made::Deflated { data: dd, .. } = m {
@@ -278,14 +288,69 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     }
     let resources = if records.is_empty() { Vec::new() } else { aqr_flate::formula::resources(opt.profile).ok()? };
     let mut f = Formula::default();
-    let inputs = vec![
-        f.push("raw", data),
+    let mut inputs = vec![
+        f.push("raw", Vec::new()),
         f.push("flate/record", records),
         f.push("zip/layout", layout),
         f.push("zip/kept", kept),
     ];
+    inputs[0] = by_kind(&mut f, 0, data, &kinds);
     f.root = Node::apply_with(MODULE, resources, Vec::new(), inputs, input.len() as u64);
     Some(Encoded { formula: f, inflated })
+}
+
+/// `data` as streams of `f` by kind, of the contents ending at each of `kinds`: the node of
+/// their slices, in order, a slice for each file of a [`Kind::Format`] (those of other kinds
+/// one after another are one). The contents of [`Kind::Unknown`] are stream `raw` (empty, of
+/// `f`), cut out of `data` in place; those of other kinds streams added after the others.
+fn by_kind(f: &mut Formula, raw: usize, mut data: Vec<u8>, kinds: &[(Kind, usize)]) -> Node {
+    if kinds.iter().all(|k| k.0 == Kind::Unknown) {
+        let len = data.len() as u64;
+        f.streams[raw].data = data;
+        return Node::slice(raw, 0, len);
+    }
+    // the stream of each kind, by its first entry
+    let mut order: Vec<Kind> = vec![Kind::Unknown];
+    kinds.iter().for_each(|k| {
+        if !order.contains(&k.0) {
+            order.push(k.0)
+        }
+    });
+    let mut of_kind: Vec<Vec<u8>> = vec![Vec::new(); order.len()];
+    let (mut parts, mut start, mut at) = (Vec::<(usize, usize, usize)>::with_capacity(kinds.len()), 0, 0);
+    for &(kind, end) in kinds {
+        let k = order.iter().position(|&o| o == kind).unwrap();
+        let len = end - start;
+        let from = if k == 0 {
+            data.copy_within(start..end, at);
+            at += len;
+            at - len
+        } else {
+            of_kind[k].extend_from_slice(&data[start..end]);
+            of_kind[k].len() - len
+        };
+        match parts.last_mut() {
+            _ if len == 0 => {}
+            Some(p) if p.0 == k && !matches!(kind, Kind::Format(_)) => p.2 += len,
+            _ => parts.push((k, from, len)),
+        }
+        start = end;
+    }
+    data.truncate(at);
+    data.shrink_to_fit();
+    f.streams[raw].data = data;
+    let base = f.streams.len() - 1;
+    for (kind, d) in order.into_iter().zip(of_kind).skip(1) {
+        let class: Cow<'static, str> = match kind {
+            Kind::Format(name) => format!("zip/{name}").into(),
+            kind => format!("zip/{kind}").into(),
+        };
+        f.push_as(class, kind, d);
+    }
+    let stream = |k| if k == 0 { raw } else { base + k };
+    let mut parts: Vec<Node> =
+        parts.into_iter().map(|(k, start, len)| Node::slice(stream(k), start as u64, len as u64)).collect();
+    if parts.len() == 1 { parts.pop().unwrap() } else { Node::Concat(parts) }
 }
 
 /// The bodies of the local entries of `recs`, in order.

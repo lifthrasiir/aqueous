@@ -524,3 +524,53 @@ fn damaged_archives() {
         }
     }
 }
+
+/// The contents of the entries are a stream for each kind their names give, sliced in order,
+/// the unknown ones in `raw`; the inputs stay the first four streams.
+#[test]
+fn contents_by_kind() {
+    use aqr_formula::Kind;
+    let kind = |name: &[u8]| match name.rsplit(|&b| b == b'.').next() {
+        Some(b"txt") => Kind::Text,
+        Some(b"png") => Kind::Format("png"),
+        _ => Kind::Unknown,
+    };
+    let mut es = entries();
+    es.push(entry("image.png", text(2000)));
+    es.push(Entry { method: 0, ..entry("tail.png", noise(3000)) });
+    let d = archive(es).bytes();
+    let opt = Options { kind, ..Options::default() };
+    let f = formula::encode_with(&d, &opt).unwrap().formula;
+    let classes: Vec<_> = f.streams.iter().map(|s| (&*s.class, s.kind)).collect();
+    assert_eq!(
+        classes,
+        [
+            ("raw", Kind::Unknown),
+            ("flate/record", Kind::Unknown),
+            ("zip/layout", Kind::Unknown),
+            ("zip/kept", Kind::Unknown),
+            ("zip/text", Kind::Text),
+            ("zip/png", Kind::Format("png")),
+        ]
+    );
+    let text_len = |n| text(n).len();
+    // (b.txt is a.txt again, taken as the same body)
+    assert_eq!(f.streams[4].data.len(), text_len(30_000) + text_len(4000));
+    assert_eq!(f.streams[5].data.len(), text_len(2000) + 3000);
+    // the same archive, and the same data as without kinds
+    let Node::Apply(a) = &f.root else { panic!() };
+    let module = |a: &aqr_formula::Apply, ins: &[&[u8]]| {
+        let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+        formula::decode(&a.params, &res, ins, a.len, 1).map_err(|e| aqr_formula::Error::new(format!("{e:?}")))
+    };
+    assert!(f.eval(&module).unwrap() == d);
+    let plain = formula::encode_with(&d, &Options::default()).unwrap().formula;
+    let data = |f: &Formula, n: &Node| {
+        let mut g = f.clone();
+        g.root = n.clone();
+        g.eval(&module).unwrap()
+    };
+    let Node::Apply(p) = &plain.root else { panic!() };
+    assert!(data(&f, &a.inputs[0]) == data(&plain, &p.inputs[0]));
+    assert!(plain.streams.len() == 4 && f.streams[1..4] == plain.streams[1..4]);
+}

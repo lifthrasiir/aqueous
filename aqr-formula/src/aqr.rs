@@ -11,7 +11,8 @@
 //! applications declare no memory limit ([`MEMORY_LIMIT`]).
 //!
 //! [`Encoder`] encodes several formulas, compressing each stream and resource once however
-//! many hold it, at the zstd level that its [`Level`] picks for it.
+//! many hold it, at the zstd level that its [`Level`] picks for it; streams of
+//! [`Kind::Compressed`] are stored as they are.
 //!
 //! [`decode`] evaluates such archives, and any other without a metadata block, a dictionary
 //! or an encryption.
@@ -29,7 +30,7 @@ use xxhash_rust::xxh64::{Xxh64, xxh64};
 use zstd::zstd_safe::zstd_sys::ZSTD_EndDirective;
 use zstd::zstd_safe::{self, CCtx, CParameter, InBuffer, OutBuffer, ResetDirective};
 
-use crate::{Error, Formula, Module, Node, Resource, Result};
+use crate::{Error, Formula, Kind, Module, Node, Resource, Result};
 
 pub const HEADER_MAGIC: [u8; 6] = [0xf8, 0x04, 0x03, 0x6a, 0xd6, 0xbe];
 pub const FOOTER_MAGIC: [u8; 6] = [0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12];
@@ -199,7 +200,7 @@ impl Encoder {
     fn raw_len(&self, d: &[u8]) -> Result<usize> {
         let mut n = Count(0);
         n.put(&HEADER_MAGIC);
-        self.content_block(&mut n, true, &[d])?;
+        self.content_block(&mut n, true, &[d], false)?;
         let blocks = n.0 - HEADER_MAGIC.len();
         footer(&mut n, blocks);
         Ok(n.0)
@@ -252,7 +253,7 @@ impl Encoder {
             if checksum.is_some_and(|c| c != checksum_of(&leaf)) {
                 return Err(Error::new("output checksum not that of the leaf"));
             }
-            self.content_block(out, true, &leaf)?;
+            self.content_block(out, true, &leaf, f.streams[stream].kind == Kind::Compressed)?;
         } else {
             // the non-leaf block of each stream sliced, by its ordinal
             let mut ordinals = vec![None; f.streams.len()];
@@ -314,7 +315,7 @@ impl Encoder {
                 )?,
             );
             for s in sliced {
-                self.content_block(out, false, streams[s])?;
+                self.content_block(out, false, streams[s], f.streams[s].kind == Kind::Compressed)?;
             }
         }
 
@@ -491,12 +492,12 @@ fn block_of(out: &mut impl Out, ty: u64, parts: &[&[u8]]) {
 
 impl Encoder {
     /// Appends a compressed or uncompressed (leaf or non-leaf) block of `data`, whichever the
-    /// spec allows.
-    fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[&[u8]]) -> Result<()> {
+    /// spec allows; uncompressed where `stored` (and not kept compressed already).
+    fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[&[u8]], stored: bool) -> Result<()> {
         let mut streams = self.streams.borrow_mut();
         let c = match streams.entry(key(data)) {
             Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => e.insert(match self.plan(data)? {
+            Entry::Vacant(e) => e.insert(match if stored { Plan::Done(None) } else { self.plan(data)? } {
                 Plan::Done(c) => c,
                 Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
             }),
@@ -1500,7 +1501,7 @@ mod tests {
         }
         // Streams without slices have no blocks.
         let mut f = sample();
-        f.streams.insert(0, Stream { class: "unused".into(), data: vec![1; 100] });
+        f.streams.insert(0, Stream { class: "unused".into(), kind: Kind::Unknown, data: vec![1; 100] });
         f.root.slices_mut(&mut |s, _, _| *s += 1);
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
@@ -1559,6 +1560,27 @@ mod tests {
         let c = encode(&Formula::default(), None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [FORMULA]);
         assert_eq!(decode(&c, &[]).unwrap(), b"");
+    }
+
+    /// A stream of [`Kind::Compressed`] is stored as it is, at any level, leaf or not.
+    #[test]
+    fn compressed_kind_stored() {
+        let d = vec![7; 100_000];
+        for level in [Level::Mid, Level::Zstd(3)] {
+            let mut f = Formula::default();
+            f.root = f.push_as("a", Kind::Compressed, d.clone());
+            let types = |c: &[u8]| types(c).into_iter().map(|t| t & !3).collect::<Vec<_>>();
+            let c = encode(&f, None, level).unwrap();
+            assert_eq!(types(&c), [LEAF_RAW]);
+            assert_eq!(decode(&c, &[]).unwrap(), d);
+            let b = f.push("b", d.clone());
+            f.root = Node::concat([f.root.clone(), b]);
+            // (the bytes of "b" would be kept stored too: they are those of "a")
+            f.streams[1].data[0] = 0;
+            let c = encode(&f, None, level).unwrap();
+            assert_eq!(types(&c), [FORMULA, NON_LEAF_RAW, NON_LEAF_ZSTD]);
+            assert_eq!(decode(&c, &[]).unwrap(), [&d[..], &f.streams[1].data].concat());
+        }
     }
 
     /// [`Level::Mid`] leaves uncompressed what the lowest level hardly shrinks, and compresses
@@ -1686,7 +1708,7 @@ mod tests {
         f.push("b", Vec::new());
         f.root = Node::concat([Node::slice(1, 0, d.len() as u64), Node::slice(0, 0, 4)]);
         let whole = Formula {
-            streams: vec![f.streams[0].clone(), Stream { class: "b".into(), data: d.to_vec() }],
+            streams: vec![f.streams[0].clone(), Stream { class: "b".into(), kind: Kind::Unknown, data: d.to_vec() }],
             ..f.clone()
         };
         let pieces = [&d[..100], &d[100..2 << 20], &d[2 << 20..]];

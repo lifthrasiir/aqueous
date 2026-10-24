@@ -26,6 +26,14 @@
 //! ([`extent`]), and the data between them kept raw, in one stream. Data that recompressors
 //! turn down counts against a scan, which gives up past twice the data (and 16 MiB).
 //!
+//! What a recompressor knows of the data it gives, the [`Kind`] of its stream, refines that
+//! ([`Nest::of`]): pixels, text, fonts, tables and compressed data are not looked into, and
+//! data of [`Kind::Format`] is taken as a file of that format from its start ([`Nest::As`]).
+//! The contents of an application may be slices of several streams one after the other (a
+//! ZIP archive's entries, by kind), each recompressed by its own kind. aqr-zip gives the
+//! entries their kinds by their names ([`kind_by_name`]), as gzip's data is by its name, and
+//! aqr-pdf the streams of a PDF file by what they are.
+//!
 //! What DEFLATE streams inflate to, at every depth together, is kept within
 //! [`Options::expansion`] times the file (and 64 MiB): past it, streams are kept as they are,
 //! so that nested archives (42.zip) and bombs cost no more than that.
@@ -69,8 +77,8 @@ use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-pub use aqr_formula::{Formula, Module, Node};
-pub use detect::{Format, detect};
+pub use aqr_formula::{Formula, Kind, Module, Node};
+pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 
 use aqr_decompress::{FLATE, LZ4, Native, SNAPPY, ZIP};
@@ -120,6 +128,23 @@ pub enum Nest {
     Exact,
     /// As data holding files anywhere: each found is cut to its end, the rest kept raw.
     Scan,
+    /// As data starting with a file of the format, which is not looked for: where its
+    /// recompressor takes it, as [`Nest::Scan`] would, the data after it scanned; else kept raw.
+    As(Format),
+}
+
+impl Nest {
+    /// How data of `kind` is recompressed where it is otherwise as `self`, if at all. No file
+    /// is in pixels, text, a font or a table, and none that a recompressor would take in
+    /// compressed data: what a scan would find there is there by chance (MPEG audio headers in
+    /// pixels, zlib headers in text), and costs the scan its time.
+    pub fn of(self, kind: Kind) -> Option<Nest> {
+        match kind {
+            Kind::Unknown => Some(self),
+            Kind::Pixels | Kind::Text | Kind::Font | Kind::Table | Kind::Compressed => None,
+            Kind::Format(name) => Some(Format::from_name(name).map_or(self, Nest::As)),
+        }
+    }
 }
 
 impl Default for Options {
@@ -252,7 +277,10 @@ fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made>
     match how {
         _ if depth >= opt.depth => None,
         Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
-        Nest::Scan => scan(d, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx)),
+        Nest::Scan => scan(d, None, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx)),
+        Nest::As(format) => {
+            scan(d, Some(format), opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
+        }
     }
 }
 
@@ -365,13 +393,14 @@ const SCAN_SLACK: usize = 16 << 20;
 /// it (up to its [`extent`]) is put in place, and the scan goes on after it; else on from the
 /// next byte, so that files in one turned down are still found. Weak signatures are confirmed
 /// by the extent: a zlib stream by its checksum, MPEG audio frames without a tag by one
-/// following another.
-fn scan(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
-    scan_with(d, opt, depth, SCAN_SLACK, cx)
+/// following another. Where the data is known to start with a file of `first` ([`Nest::As`]),
+/// it is that file, or none where that is turned down.
+fn scan(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
+    scan_with(d, first, opt, depth, SCAN_SLACK, cx)
 }
 
 /// [`scan`] with `slack` for [`SCAN_SLACK`].
-fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Made> {
+fn scan_with(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Option<Made> {
     let mut found = Vec::new();
     let (mut p, mut budget) = (0, d.len().saturating_mul(2).saturating_add(slack));
     // Where each format's last file turned down ends: within it, a file of that format again
@@ -381,7 +410,11 @@ fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Opti
     while p < d.len() {
         // at the start, a file may also be known by its end (a LevelDB table), or be one that
         // is only ever a whole file (a SQLite database)
-        let format = if p == 0 { detect(d) } else { detect::starts(&d[p..]) };
+        let format = match first {
+            Some(f) if p == 0 => Some(f),
+            _ if p == 0 => detect(d),
+            _ => detect::starts(&d[p..]),
+        };
         let format = format.filter(|f| !turned_down.iter().any(|&(g, end)| g == *f && p < end));
         let child = format.filter(|_| budget > 0).and_then(|format| {
             let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
@@ -398,6 +431,7 @@ fn scan_with(d: &[u8], opt: &Options, depth: u32, slack: usize, cx: &Cx) -> Opti
                 found.push((p, n, child));
                 p += n;
             }
+            None if p == 0 && first.is_some() => return None,
             None => p = detect::next_start(d, p + 1),
         }
     }
@@ -495,16 +529,36 @@ fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut
         Node::Concat(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, cx, out)),
         Node::Apply(a) => {
             for (i, input) in a.inputs.iter().enumerate() {
-                match (input, content(opt, a.module, i)) {
-                    (&Node::Slice { stream, start, len }, Some(content)) => {
-                        let d = f.streams.get(stream).and_then(|s| s.data.get(start as usize..)?.get(..len as usize));
-                        let child = d.and_then(|d| made(d, opt, depth + 1, content.nest, cx));
-                        out.push((input.clone(), child.filter(|c| !c.f.applies().is_empty())));
-                    }
-                    _ => contents(input, f, opt, depth, cx, out),
+                match content(opt, a.module, i) {
+                    Some(content) => content_slices(input, content.nest, f, opt, depth, cx, out),
+                    None => contents(input, f, opt, depth, cx, out),
                 }
             }
         }
+    }
+}
+
+/// [`contents`] of node `n`, a content recompressed as `nest`: each of its slices is a content
+/// of the kind of its stream, and the applications in it have contents of their own.
+fn content_slices(
+    n: &Node,
+    nest: Nest,
+    f: &Formula,
+    opt: &Options,
+    depth: u32,
+    cx: &Cx,
+    out: &mut Vec<(Node, Option<Made>)>,
+) {
+    match n {
+        &Node::Slice { stream, start, len } => {
+            let child = f.streams.get(stream).and_then(|s| {
+                let d = s.data.get(start as usize..)?.get(..len as usize)?;
+                made(d, opt, depth + 1, nest.of(s.kind)?, cx)
+            });
+            out.push((n.clone(), child.filter(|c| !c.f.applies().is_empty())));
+        }
+        Node::Concat(ns) => ns.iter().for_each(|n| content_slices(n, nest, f, opt, depth, cx, out)),
+        Node::Apply(_) => contents(n, f, opt, depth, cx, out),
     }
 }
 
@@ -524,23 +578,38 @@ fn place(
         Node::Apply(a) => {
             let module = a.module;
             for (i, input) in a.inputs.iter_mut().enumerate() {
-                match (&*input, content(opt, module, i)) {
-                    (&Node::Slice { stream, start, len }, Some(_)) => {
-                        if let Some(child) = children.next().flatten() {
-                            // (a child is of a slice within its stream)
-                            let data = &mut f.streams[stream].data;
-                            let child = if slices[stream] == 1 && start == 0 && len == data.len() as u64 {
-                                child.cut_from(std::mem::take(data))
-                            } else {
-                                child.cut(&data[start as usize..][..len as usize])
-                            };
-                            *input = f.embed(child);
-                        }
-                    }
-                    _ => place(input, f, slices, opt, children),
+                match content(opt, module, i) {
+                    Some(_) => place_slices(input, f, slices, opt, children),
+                    None => place(input, f, slices, opt, children),
                 }
             }
         }
+    }
+}
+
+/// [`place`] in node `n`, a content: in the order of [`content_slices`].
+fn place_slices(
+    n: &mut Node,
+    f: &mut Formula,
+    slices: &[usize],
+    opt: &Options,
+    children: &mut impl Iterator<Item = Option<Made>>,
+) {
+    match n {
+        &mut Node::Slice { stream, start, len } => {
+            if let Some(child) = children.next().flatten() {
+                // (a child is of a slice within its stream)
+                let data = &mut f.streams[stream].data;
+                let child = if slices[stream] == 1 && start == 0 && len == data.len() as u64 {
+                    child.cut_from(std::mem::take(data))
+                } else {
+                    child.cut(&data[start as usize..][..len as usize])
+                };
+                *n = f.embed(child);
+            }
+        }
+        Node::Concat(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, opt, children)),
+        Node::Apply(_) => place(n, f, slices, opt, children),
     }
 }
 
@@ -559,7 +628,7 @@ fn recons(encode: fn(&[u8], usize) -> Option<Formula>, d: &[u8], opt: &Options) 
 /// Bytes of the streams of `f` by class, largest first.
 pub fn classes(f: &Formula) -> Vec<(&str, usize)> {
     let mut out: Vec<(&str, usize)> = Vec::new();
-    for Stream { class, data } in &f.streams {
+    for Stream { class, data, .. } in &f.streams {
         match out.iter_mut().find(|(c, _)| c == class) {
             Some((_, n)) => *n += data.len(),
             None => out.push((class, data.len())),
@@ -668,7 +737,7 @@ mod tests {
         assert_eq!(finish(wrong.clone(), &d, &opt, &cx, Default::default(), false).0, raw);
         // a module that fails
         let fails = Formula {
-            streams: vec![aqr_formula::Stream { class: "raw".into(), data: vec![1, 2, 3] }],
+            streams: vec![aqr_formula::Stream { class: "raw".into(), kind: Kind::Unknown, data: vec![1, 2, 3] }],
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
         };
         assert_eq!(finish(fails, &d, &opt, &cx, Default::default(), false).0, raw);
@@ -731,7 +800,7 @@ mod tests {
         let data = |n: usize| [fakes[..n].concat(), vec![0; 10000], jpeg.clone()].concat();
         let found = |d: &[u8]| {
             let opt = Options::default();
-            scan_with(d, &opt, 0, 0, &Cx::new(d, &opt)).map_or(0, |m| m.f.applies().len())
+            scan_with(d, None, &opt, 0, 0, &Cx::new(d, &opt)).map_or(0, |m| m.f.applies().len())
         };
         assert_eq!(found(&data(1)), 1);
         assert_eq!(found(&data(3)), 0);

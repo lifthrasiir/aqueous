@@ -8,7 +8,9 @@
 //!   to nodes, declaring the size of its output.
 //!
 //! Streams are not placed yet: the archive encoder lays them out into non-leaf blocks, and
-//! [`Stream::class`] tells it which streams are alike (to share frames and a dictionary, §3).
+//! [`Stream::class`] tells it which streams are alike (to share frames and a dictionary, §3),
+//! and [`Stream::kind`] what the recompressor knows of the bytes: whether they may hold files
+//! for another recompressor to look for, are one such file, or are not worth looking into.
 //! What belongs to the archive is left out: `ref` to other entries, and the resource
 //! declarations of `apply` (memory limit, capacities), which the archive encoder
 //! measures while verifying (§6). [`Resource`]s (§5.6), the models that modules take, are
@@ -44,7 +46,49 @@ impl fmt::Display for Module {
 pub struct Stream {
     /// What the bytes are, e.g. `x86/OP` or `flate/record`; streams of a class are alike.
     pub class: Cow<'static, str>,
+    /// What the bytes are to whoever recompresses them in turn, alike for streams of a class.
+    pub kind: Kind,
     pub data: Vec<u8>,
+}
+
+/// What a recompressor knows of a stream's bytes, for whoever takes them as data to recompress
+/// in turn (aqr-compress, where they are an application's content) and for the archive
+/// encoder. It says what the bytes are, not what is to be done with them: that is for whoever
+/// takes them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Kind {
+    /// Anything: files may be anywhere in it.
+    #[default]
+    Unknown,
+    /// Samples of an image, uncompressed (rows perhaps filtered by a predictor).
+    Pixels,
+    /// Text, or a syntax in text such as PDF objects.
+    Text,
+    /// A font program (TrueType, OpenType, CFF, Type 1).
+    Font,
+    /// Binary records of fixed layout, such as a cross-reference table.
+    Table,
+    /// Of high entropy, such as compressed or encrypted data that no recompressor takes: holds
+    /// no files and does not compress, and is stored as it is.
+    Compressed,
+    /// A file of the format named (as aqr-compress names them: `zlib`, `png`, ...) from the
+    /// first byte: recompressed as such without looking for it, and kept as it is where its
+    /// recompressor turns it down. A name not known is taken as [`Kind::Unknown`].
+    Format(&'static str),
+}
+
+impl fmt::Display for Kind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Kind::Unknown => f.write_str("unknown"),
+            Kind::Pixels => f.write_str("pixels"),
+            Kind::Text => f.write_str("text"),
+            Kind::Font => f.write_str("font"),
+            Kind::Table => f.write_str("table"),
+            Kind::Compressed => f.write_str("compressed"),
+            Kind::Format(name) => write!(f, "format={name}"),
+        }
+    }
 }
 
 /// Bytes that applications of a module share, typically a model (§5.6): a resource block of
@@ -186,10 +230,15 @@ impl Formula {
         f
     }
 
-    /// Adds a stream, returning a slice of all of it.
+    /// Adds a stream of [`Kind::Unknown`], returning a slice of all of it.
     pub fn push(&mut self, class: impl Into<Cow<'static, str>>, data: Vec<u8>) -> Node {
+        self.push_as(class, Kind::Unknown, data)
+    }
+
+    /// Adds a stream of `kind`, returning a slice of all of it.
+    pub fn push_as(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: Vec<u8>) -> Node {
         let len = data.len() as u64;
-        self.streams.push(Stream { class: class.into(), data });
+        self.streams.push(Stream { class: class.into(), kind, data });
         Node::slice(self.streams.len() - 1, 0, len)
     }
 
@@ -246,7 +295,7 @@ impl Formula {
             data.truncate(at);
             data.shrink_to_fit();
             *r = merged;
-            streams.push(Stream { class: s.class, data });
+            streams.push(Stream { data, ..s });
         }
         let new = streams.len();
         self.root.slices_mut(&mut |s, a, _| match ranges.get(*s) {
@@ -326,17 +375,20 @@ impl Formula {
     }
 }
 
-/// Indented, a node a line: `slice #stream [start, +len)`, `concat LEN`, `apply MODULE LEN`
-/// with the lengths of its resources and its parameters in hex.
+/// Indented, a node a line: `slice #stream [start, +len) CLASS` (and the kind of the stream
+/// unless [`Kind::Unknown`]), `concat LEN`, `apply MODULE LEN` with the lengths of its
+/// resources and its parameters in hex.
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn node(fm: &Formula, n: &Node, depth: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             write!(f, "{:1$}", "", depth * 2)?;
             match n {
-                &Node::Slice { stream, start, len } => {
-                    let class = fm.streams.get(stream).map_or("?", |s| &s.class);
-                    writeln!(f, "slice #{stream} [{start}, +{len}) {class}")
-                }
+                &Node::Slice { stream, start, len } => match fm.streams.get(stream) {
+                    Some(s) if s.kind != Kind::Unknown => {
+                        writeln!(f, "slice #{stream} [{start}, +{len}) {} ({})", s.class, s.kind)
+                    }
+                    s => writeln!(f, "slice #{stream} [{start}, +{len}) {}", s.map_or("?", |s| &s.class)),
+                },
                 Node::Concat(ns) => {
                     writeln!(f, "concat {}", n.len())?;
                     ns.iter().try_for_each(|n| node(fm, n, depth + 1, f))
@@ -435,6 +487,8 @@ mod tests {
             shown,
             "concat 10\n  slice #0 [0, +2) a\n  apply rev@1 8\n    slice #0 [0, +5) a\n    slice #1 [0, +3) b\n"
         );
+        f.streams[1].kind = Kind::Format("zlib");
+        assert!(f.to_string().ends_with("slice #1 [0, +3) b (format=zlib)\n"), "{f}");
     }
 
     #[test]

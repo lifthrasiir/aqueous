@@ -20,7 +20,7 @@ use crate::objects::Objects;
 use crate::scan;
 use crate::tok;
 use crate::varint;
-use aqr_formula::{Formula, Node};
+use aqr_formula::{Formula, Kind, Node};
 
 /// Streams shorter than this stay in the skeleton.
 const MIN_ITEM: usize = 64;
@@ -72,6 +72,8 @@ struct Item {
     start: usize,
     len: usize,
     plan: Plan,
+    /// What a FlateDecode stream's data is once inflated ([`kind::inflated_kind`]).
+    kind: Kind,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -249,6 +251,10 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize) {
         let same =
             seen.get(&h).and_then(|v| v.iter().copied().find(|&i| file[items[i].start..][..items[i].len] == *data));
         seen.entry(h).or_default().push(items.len());
+        let kind = match f {
+            Filter::Flate => kind::inflated_kind(kind::class(&s.dict), &s.dict),
+            _ => Kind::Unknown,
+        };
         let plan = match (same, f) {
             (Some(i), _) => Plan::Dup(i),
             _ if encrypted => Plan::Raw,
@@ -268,7 +274,7 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize) {
             _ => Plan::Raw,
         };
         covered += data.len();
-        items.push(Item { start: s.data.start, len: data.len(), plan });
+        items.push(Item { start: s.data.start, len: data.len(), plan, kind });
     }
     let skel_len = file.len() - covered;
     let budget =
@@ -342,7 +348,7 @@ pub fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formul
         return None;
     }
     let mut zipped: Vec<&[u8]> = vec![&table, &skel];
-    zipped.extend(pools.iter().map(|p| &p[..]));
+    zipped.extend(pools.iter().map(|p| &p.data[..]));
     let zlen = |d: &&[u8]| zstd_of(d, opts.level).map_or(d.len(), |z| z.len());
     let saved: usize = zipped.iter().map(|d| d.len()).sum::<usize>()
         - match &pool {
@@ -352,22 +358,28 @@ pub fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formul
             }),
             None => zipped.iter().map(zlen).sum(),
         };
-    for (c, pool) in pools.into_iter().enumerate() {
-        f.streams[F_POOL + c].data = pool;
+    for p in pools {
+        f.streams[p.stream].data = p.data;
     }
     f.streams[F_META].data = meta;
     let mut inputs = vec![f.push("pdf/table", table), f.push("pdf/skeleton", skel), f.push("pdf/raw", raw)];
     inputs.extend([Node::concat(deflate), Node::concat(png), Node::concat(jpeg)]);
-    for (part, name) in toks.into_iter().zip(TOK_CLASSES) {
-        inputs.push(f.push(name, part));
+    for (part, (name, kind)) in toks.into_iter().zip(TOK_CLASSES) {
+        inputs.push(f.push_as(name, kind, part));
     }
     f.root = Node::apply(crate::formula::MODULE, Vec::new(), inputs, file.len() as u64);
     (streams_len(&f) - saved < file.len()).then_some(f)
 }
 
-/// The classes of the token coder's streams in a formula.
-const TOK_CLASSES: [&str; tok::PARTS] =
-    ["pdf/tok-layout", "pdf/tok-tables", "pdf/tok-symbols", "pdf/tok-bits", "pdf/tok-headers"];
+/// The classes of the token coder's streams in a formula, and their kinds: the rANS stream
+/// does not compress.
+const TOK_CLASSES: [(&str, Kind); tok::PARTS] = [
+    ("pdf/tok-layout", Kind::Unknown),
+    ("pdf/tok-tables", Kind::Unknown),
+    ("pdf/tok-symbols", Kind::Compressed),
+    ("pdf/tok-bits", Kind::Unknown),
+    ("pdf/tok-headers", Kind::Unknown),
+];
 
 /// A pool of `threads` threads, if more than one.
 fn pool(threads: usize) -> Option<rayon::ThreadPool> {
@@ -456,6 +468,8 @@ struct FlateHead {
     /// The Adler-32 after the DEFLATE data, as stored.
     adler: Option<[u8; 4]>,
     class: Class,
+    /// What the inflated data is.
+    kind: Kind,
     /// Inflated bytes.
     plain: usize,
     px: Option<tok::Pixels>,
@@ -538,6 +552,7 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &aqr_flate::Options) -> Done {
                     zlib: (hdr == 2).then(|| [data[0], data[1]]),
                     adler: adler.then(|| data[end..end + 4].try_into().unwrap()),
                     class: c,
+                    kind: it.kind,
                     plain: f.data.len(),
                     px,
                     deflate: end - hdr,
@@ -586,7 +601,7 @@ struct Sections {
     raw: Vec<u8>,
     meta: Vec<u8>,
     tokens: tok::Encoder,
-    pools: Vec<Vec<u8>>,
+    pools: Vec<Pool>,
     /// The end of the last item.
     at: usize,
     /// Bytes each item covers once coded.
@@ -595,9 +610,19 @@ struct Sections {
     fm: Parts,
 }
 
-/// The formula being built: the pools and metadata are its first streams (`F_POOL`, `F_META`,
-/// filled at the end), then the images' formulas; and the nodes of the slots that hold the
-/// items' rebuilt DEFLATE streams, PNG files and JPEG files.
+/// The inflated data of the `FULL` items of a class whose data is of a kind, in order: a stream
+/// of the formula, filled at the end.
+struct Pool {
+    class: Class,
+    kind: Kind,
+    stream: usize,
+    data: Vec<u8>,
+}
+
+/// The formula being built: the pools of the classes' own kinds and metadata are its first
+/// streams (`F_POOL`, `F_META`, filled at the end), then the images' formulas and the pools of
+/// other kinds as they come; and the nodes of the slots that hold the items' rebuilt DEFLATE
+/// streams, PNG files and JPEG files.
 pub(crate) struct Parts {
     pub f: Formula,
     pub deflate: Vec<Node>,
@@ -612,7 +637,7 @@ impl Parts {
     fn new() -> Self {
         let mut f = Formula::default();
         for c in CLASSES {
-            f.push(format!("pdf/pool-{}", c.name()), vec![]);
+            f.push_as(format!("pdf/pool-{}", c.name()), c.kind(), vec![]);
         }
         f.push("pdf/meta", vec![]);
         Parts { f, deflate: vec![], png: vec![], jpeg: vec![] }
@@ -628,10 +653,30 @@ impl Sections {
             raw: vec![],
             meta: vec![],
             tokens: tok::Encoder::default(),
-            pools: vec![vec![]; CLASSES.len()],
+            pools: CLASSES
+                .iter()
+                .enumerate()
+                .map(|(i, &class)| Pool { class, kind: class.kind(), stream: F_POOL + i, data: vec![] })
+                .collect(),
             at: 0,
             cov: Vec::with_capacity(items),
         }
+    }
+
+    /// The pool of the data of `kind` of `class`, added to the formula (as
+    /// `pdf/pool-<class>-<kind>`) if there is none yet.
+    fn pool(&mut self, class: Class, kind: Kind) -> usize {
+        if let Some(i) = self.pools.iter().position(|p| p.class == class && p.kind == kind) {
+            return i;
+        }
+        let name = match kind {
+            Kind::Format(f) => f.to_string(),
+            k => k.to_string(),
+        };
+        let f = &mut self.fm.f;
+        f.push_as(format!("pdf/pool-{}-{name}", class.name()), kind, vec![]);
+        self.pools.push(Pool { class, kind, stream: f.streams.len() - 1, data: vec![] });
+        self.pools.len() - 1
     }
 
     /// Adds item `i`, coded as `d`.
@@ -665,14 +710,15 @@ impl Sections {
                 }
             },
             Coded::Full(head, plain, m, len) => {
-                let c = head.class as usize;
+                let c = self.pool(head.class, head.kind);
                 self.table.extend_from_slice(&head.full_fields());
-                let pool = Node::slice(F_POOL + c, self.pools[c].len() as u64, plain.len() as u64);
+                let p = &self.pools[c];
+                let pool = Node::slice(p.stream, p.data.len() as u64, plain.len() as u64);
                 let record = Node::slice(F_META, self.meta.len() as u64, m.len() as u64);
                 let profile = aqr_flate::record_profile(&m).expect("a record");
                 let deflate = aqr_flate::formula::apply(profile, pool, record, head.deflate as u64);
                 self.fm.deflate.push(deflate.expect("a record of a known profile"));
-                self.pools[c].extend_from_slice(&plain);
+                self.pools[c].data.extend_from_slice(&plain);
                 self.meta.extend_from_slice(&m);
                 (FULL, len, m.len())
             }

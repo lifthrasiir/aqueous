@@ -5,7 +5,7 @@
 use crate::codec::{self, Skeleton};
 use crate::{Result, corrupt};
 use aqr_common::varint;
-use aqr_formula::{Formula, Module, Node};
+use aqr_formula::{Formula, Kind, Module, Node};
 
 pub const MODULE: Module = Module { name: "png-recons", version: 1 };
 
@@ -20,8 +20,12 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
         records.extend_from_slice(r);
     }
     let mut f = Formula::default();
-    let inputs =
-        vec![f.push("png/skeleton", parts.skeleton), f.push("png/index", index), f.push("png/records", records)];
+    // (the records are entropy coded)
+    let inputs = vec![
+        f.push("png/skeleton", parts.skeleton),
+        f.push("png/index", index),
+        f.push_as("png/records", Kind::Compressed, records),
+    ];
     f.root = Node::apply(MODULE, Vec::new(), inputs, input.len() as u64);
     Some(f)
 }

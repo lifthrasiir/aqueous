@@ -41,8 +41,13 @@ fn text(n: usize) -> Vec<u8> {
     t
 }
 
+/// A gzip member of `d`, of a name that tells nothing of it.
 fn gzip(d: &[u8]) -> Vec<u8> {
-    let mut e = flate2::GzBuilder::new().filename("a.txt").write(Vec::new(), flate2::Compression::new(6));
+    gzip_named(d, "a")
+}
+
+fn gzip_named(d: &[u8], name: &str) -> Vec<u8> {
+    let mut e = flate2::GzBuilder::new().filename(name).write(Vec::new(), flate2::Compression::new(6));
     e.write_all(d).unwrap();
     e.finish().unwrap()
 }
@@ -221,13 +226,13 @@ fn arm64_code() -> Vec<u8> {
     for i in 0..2000u32 {
         let at = words.len() as u32;
         words.extend_from_slice(&[
-            0xa9bf7bfd,                                               // stp x29, x30, [sp, #-16]!
+            0xa9bf7bfd,                                                       // stp x29, x30, [sp, #-16]!
             0x9400_0000 | ((i % 5) * 0x10).wrapping_sub(at + 1) & 0x3ff_ffff, // bl f(i % 5)
-            0x9000_0008 | ((0x100u32.wrapping_sub(at >> 10) & 3) << 29), // adrp x8, page
-            0xf9400108,                                               // ldr x8, [x8]
-            0xb4000048,                                               // cbz x8, +8
-            0xa8c17bfd,                                               // ldp x29, x30, [sp], #16
-            0xd65f03c0,                                               // ret
+            0x9000_0008 | ((0x100u32.wrapping_sub(at >> 10) & 3) << 29),      // adrp x8, page
+            0xf9400108,                                                       // ldr x8, [x8]
+            0xb4000048,                                                       // cbz x8, +8
+            0xa8c17bfd,                                                       // ldp x29, x30, [sp], #16
+            0xd65f03c0,                                                       // ret
         ]);
     }
     words.iter().flat_map(|w| w.to_le_bytes()).collect()
@@ -635,4 +640,50 @@ fn sqlite_whole() {
     assert_eq!(modules(&roundtrip(&db, &all())), [SQLITE.name]);
     // a database is a whole file: not looked for in the middle of data
     assert!(modules(&roundtrip(&[&b"some data before "[..], &db].concat(), &all())).is_empty());
+}
+
+/// What recompressors know of their data refines what is made of it: the data of a gzip member
+/// by its name, the contents of a ZIP archive's entries by theirs, a PDF file's streams by
+/// what they are.
+#[test]
+fn kinds() {
+    let flac = fixture("aqr-flac/tests/data/s16_f5.flac");
+    // text and compressed data is not looked into
+    for (name, found) in [("a", true), ("a.flac", true), ("a.txt", false), ("a.mp4", false)] {
+        let f = roundtrip(&gzip_named(&flac, name), &all());
+        let want: &[&str] = if found { &[FLATE.name, FLAC.name] } else { &[FLATE.name] };
+        assert_eq!(modules(&f), want, "{name}");
+    }
+    // A file named so is one of its format, whatever it starts like, and not looked into where
+    // its recompressor turns it down; what follows it is.
+    // (no body the same as another, which would be taken again)
+    let gz = |n| gzip(&text(n));
+    let junk = |j: &[u8]| [j, &flac].concat();
+    let d = zip(&[
+        ("a.png", &gz(100_000), false),
+        ("b.png", &junk(b"junk"), true),
+        ("c.bin", &junk(b"other junk"), true),
+        ("d.gz", &[gz(50_000), gz(60_000)].concat(), false),
+        ("e.bin", &gz(70_000), false),
+    ]);
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), [ZIP.name, FLAC.name, FLATE.name, FLATE.name, FLATE.name], "{f}");
+    // Pixels are not looked into, embedded files are, and what an image's filter after
+    // FlateDecode decodes is taken as such: a JPEG file for DCTDecode.
+    let jpeg = fixture("aqr-jpeg/tests/data/gradient.jpg");
+    for (dict, data, found) in [
+        ("/Subtype /Image /Filter /FlateDecode", &flac, None),
+        ("/Type /EmbeddedFile /Filter /FlateDecode", &flac, Some(FLAC.name)),
+        ("/Subtype /Image /Filter [/FlateDecode /DCTDecode]", &jpeg, Some(JPEG.name)),
+        ("/Subtype /Image /Filter [/FlateDecode /JPXDecode]", &[b"junk", &jpeg[..]].concat(), None),
+    ] {
+        let d = pdf(&[
+            ("/Filter /FlateDecode", zlib(&text(200_000), 6)),
+            (dict, zlib(data, 6)),
+            ("/Filter /LZWDecode", text(1_000_000)),
+        ]);
+        let f = roundtrip(&d, &all());
+        let want: Vec<&str> = [PDF.name, FLATE.name, FLATE.name].into_iter().chain(found).collect();
+        assert_eq!(modules(&f), want, "{dict}: {f}");
+    }
 }

@@ -86,7 +86,10 @@ For the encoder (and the evaluator), the nodes are:
 
 - slot 3, for each `FULL` item: `apply(aqr-flate, [slice(pool, off, plain), slice(meta, off, mlen)],
   deflate)`, with `pool` the stream `pdf/pool-<class>` (`content`, `font`, `image`, `objstm`,
-  `xref`, `data`; the inflated data of the class's `FULL` items in order), `meta` the stream
+  `xref`, `data`; the inflated data of the class's `FULL` items in order), or
+  `pdf/pool-<class>-<kind>` for the items of the class whose inflated data is not what the
+  class holds, by the filter after FlateDecode (`jpeg` for DCTDecode, `compressed` for
+  JPXDecode, JBIG2Decode and CCITTFaxDecode, `unknown` for any other), `meta` the stream
   `pdf/meta` (the aqr-flate records in order), `plain` the inflated length, `mlen` the length of
   the record and `deflate` the length of the DEFLATE stream. The pools and the meta stream are
   streams of the formula, not slots of this module; the inflated data is only seen by
@@ -464,8 +467,8 @@ the reference for the heuristics named here.
 
 ### 7.4 The formula
 
-- The streams of the formula are the pools (`pdf/pool-<class>`), `pdf/meta`, those of the
-  images' formulas, the table, the skeleton, the raw bytes (`pdf/table`, `pdf/skeleton`,
+- The streams of the formula are the pools of the classes (`pdf/pool-<class>`), `pdf/meta`,
+  those of the images' formulas and the other pools (`pdf/pool-<class>-<kind>`), the table, the skeleton, the raw bytes (`pdf/table`, `pdf/skeleton`,
   `pdf/raw`) and the token streams (`pdf/tok-<part>`, as the classes of slots 6–10).
 - The token streams are all empty if no item is `TOK`.
 - `formula::encode` gives no formula (`None`) where no item is coded (all are `RAW` or `DUP`),

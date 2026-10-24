@@ -9,7 +9,7 @@ use crate::codec::{self, Coded, N_BYTE_STREAMS};
 use crate::rans::Tables;
 use crate::residual;
 use crate::{flac, pcm};
-use aqr_formula::{Formula, Module, Node, Resource};
+use aqr_formula::{Formula, Kind as StreamKind, Module, Node, Resource};
 use std::sync::OnceLock;
 
 pub const MODULE: Module = Module { name: "flac-recons", version: 2 };
@@ -19,17 +19,18 @@ pub struct Error(pub String);
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Classes of the input slots.
-const CLASSES: [&str; N_BYTE_STREAMS + 3] = [
-    "flac/prefix",
-    "flac/layout",
-    "flac/junk",
-    "flac/headers",
-    "flac/subframes",
-    "flac/warmup",
-    "flac/rans",
-    "flac/raw0",
-    "flac/raw1",
+/// Classes of the input slots, and their kinds: the rANS words and the raw bits do not
+/// compress.
+const CLASSES: [(&str, StreamKind); N_BYTE_STREAMS + 3] = [
+    ("flac/prefix", StreamKind::Unknown),
+    ("flac/layout", StreamKind::Unknown),
+    ("flac/junk", StreamKind::Unknown),
+    ("flac/headers", StreamKind::Unknown),
+    ("flac/subframes", StreamKind::Unknown),
+    ("flac/warmup", StreamKind::Unknown),
+    ("flac/rans", StreamKind::Compressed),
+    ("flac/raw0", StreamKind::Compressed),
+    ("flac/raw1", StreamKind::Compressed),
 ];
 
 /// What the input is: FLAC, WAV / AIFF (both coded as PCM), or raw PCM (also anything
@@ -118,7 +119,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     let words = c.words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let [raw0, raw1] = c.raw;
     let slots = c.streams.into_iter().chain([words, raw0, raw1]);
-    let inputs = slots.zip(CLASSES).map(|(s, class)| f.push(class, s)).collect();
+    let inputs = slots.zip(CLASSES).map(|(s, (class, kind))| f.push_as(class, kind, s)).collect();
     f.root = Node::apply_with(MODULE, vec![resource()], vec![(kind != Kind::Flac) as u8], inputs, input.len() as u64);
     Some(f)
 }
