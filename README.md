@@ -47,17 +47,18 @@ and the design is argued in `xform-design.md`.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| MP3 | aqr-mp3 | 402 files, 401 MB | 0.855 ~ 0.975 | 0.971 | 20 | 104 | 60 MB + 6.6× | see below |
+| MP3 | aqr-mp3 | 402 files, 401 MB | 0.855 ~ 0.893 | 0.971 | 46 | 119 | 61 MB + 6.4× | see below |
 | FLAC, WAV, AIFF | aqr-flac | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 12.5× | the resource is about 2.6 KB per archive |
 
-The MP3 resource is significant: its built-in tables (1.5 MB raw) take about 340 KB in every
-archive, so a formula of a typical 1 MB track is 1.2× the file, and no file of the sample is
-coded alone (worst). The speeds are those of the files coded (`-r`); the memory is a fit over
-concatenations of the sample (9 to 120 MB, coded), as the sample's files are all about 1 MB
-(49–89 MB each, median 67 MB). The fixed part is mostly the tables, among them the
-encoder's inverse maps of the contexts a file uses (7–14 MB for a 1 MB file). It was about
-140 MB + 14.7× before the rANS symbols were held a run of 1024 frames at a time and the
-output assembled as the reservoir is rebuilt.
+The MP3 resource is the built-in tables (131 KB raw, about 38 KB in every archive), so a
+typical 1 MB track is coded alone too (worst). The speeds are those of the files coded
+(`-r`); the memory is a fit over concatenations of the sample (9 to 120 MB, each coded as one
+file with `-e`), as the sample's files are all about 1 MB (32–59 MB each, median 41 MB). The
+fixed part is mostly the tables. Before the contexts shared 500 tables, the resource was
+1.5 MB raw and 340 KB archived, no file of the sample was coded alone (0.975), and the same
+measurements gave 20 / 104 MB/s and 28–52 MB more memory. It was about 140 MB + 14.7× before
+the rANS symbols were held a run of 1024 frames at a time and the output assembled as the
+reservoir is rebuilt.
 
 ### Documents, data, 3D
 
@@ -90,7 +91,7 @@ output assembled as the reservoir is rebuilt.
 | aqr-flate | zlib block layouts predicted; zlib-ng, chromium, libdeflate, miniz and stb emulated; faster splitting at profile 10 |
 | aqr-png | only matches kept when decoding; a pixel-domain mode for streams zlib reproduces; 16-bit and palette models |
 | aqr-jpeg | progressive re-encoding and compression in parallel; memory of progressive files (compact coefficients); why fuzzing leaves many inputs uncoded |
-| aqr-mp3 | the size of its resource (above); the 3 pp gap to packMP3; other encoders (FhG, iTunes, Xing); MP3 in MP4 or MKV |
+| aqr-mp3 | the 3 pp gap to packMP3; other encoders (FhG, iTunes, Xing); MP3 in MP4 or MKV |
 | aqr-flac | warm-up samples predicted; FLAC in Ogg, float WAV, more than 8 channels |
 | aqr-pdf | default JPEG tables for small images; files encrypted with an empty user password; ASCII85 and DCT chains; cross-reference tables rebuilt |
 | aqr-psd | 16- and 32-bit data, ZIP channels, other colour modes; effects and adjustment layers rendered |

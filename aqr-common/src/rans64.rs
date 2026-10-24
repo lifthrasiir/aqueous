@@ -791,7 +791,12 @@ pub mod builtin {
 
     /// Serialises tables for layout `id` (the file form).
     pub fn to_bytes(id: u32, f: &[Vec<u16>]) -> Vec<u8> {
-        zstd::bulk::compress(&to_raw(id, f), 19).unwrap()
+        compress(&to_raw(id, f))
+    }
+
+    /// The file form of the uncompressed form `raw`, whatever its layout.
+    pub fn compress(raw: &[u8]) -> Vec<u8> {
+        zstd::bulk::compress(raw, 19).unwrap()
     }
 
     /// The uncompressed form in the file `data`.

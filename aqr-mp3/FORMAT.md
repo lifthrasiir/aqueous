@@ -1,4 +1,4 @@
-# aqr-mp3 format: module `mp3-recons`, version 3
+# aqr-mp3 format: module `mp3-recons`, version 4
 
 This document specifies the module `mp3-recons` of entry formulas (aqr-formula), which
 rebuilds an MP3 file from a smaller representation, completely enough to write an
@@ -48,17 +48,16 @@ External references:
   used here, except the Huffman code tables (Table B.7 of ISO/IEC 11172-3).
 - `model/builtin.bin` in this repository holds the frequency tables of the rANS coder
   (section 8.4). It is where the reference encoder gets the module's resource; the file's
-  SHA-256 is `42d9c7cd358dccbcf9e1715597197e82adf9a0cd86e876adee21067c325b9276`.
+  SHA-256 is `bf0283501981eded037af37546211213a773b9b5ed6f36b1e900c31dc4d7bb9d`.
 
 ## 2. Module
 
-- **Module**: name `mp3-recons`, version 3. Version 2 was the same with the rANS stream in a
-  single run (section 8) however many frames there are; it is version 3 for files of up to
-  1024 frames.
-- **Resources**: exactly one, the frequency tables of section 8.4 in their decompressed form
-  (1 540 828 bytes, SHA-256 given there). A decoder MUST fail unless there is exactly one
-  resource, it has exactly that size, its layout id is the one given in section 8.4 and
-  every context's frequencies are nonzero and sum to 4096. It need not check the SHA-256.
+- **Module**: name `mp3-recons`, version 4. Version 3 was the same with a table of its own
+  for every context and a u32 layout id first; version 2, besides, had the rANS stream
+  in a single run (section 8) however many frames there are.
+- **Resources**: exactly one, the frequency tables of section 8.4 in their decompressed form.
+  A decoder MUST fail unless there is exactly one resource and it is valid as section 8.4
+  says.
 - **Params**: none (empty). A decoder MUST reject non-empty params.
 - **Output length**: the length `len` of the application is the length of the original file.
   The decoder MUST fail if its output is not `len` bytes.
@@ -552,9 +551,9 @@ what an encoder holds at a time; they cost 16 words each.
 ### 8.1 Frequency tables and slots
 
 Every context `c` (section 9.1) has an alphabet of `n` symbols (1 ≤ n ≤ 256) and
-frequencies `f[0..n]`, each at least 1, summing to 4096. The 4096 *slots* of the context are
-mapped to pairs (symbol, rank), rank in `0..f[s]`, through an alias table built as follows
-(Vose's method; stacks are arrays used from the end):
+frequencies `f[0..n]` (`f_c`, its table in section 8.4), each at least 1, summing to 4096.
+The 4096 *slots* of the context are mapped to pairs (symbol, rank), rank in `0..f[s]`,
+through an alias table built as follows (Vose's method; stacks are arrays used from the end):
 
 ```text
 a = max(4, the smallest power of two ≥ n);  bs = 4096 / a     (bucket size)
@@ -623,21 +622,26 @@ words = [x[0] >> 32, x[0] mod 2^32, x[1] >> 32, ..., x[7] mod 2^32] ++ reverse(o
 A run without symbols is the 16 words of eight states equal to 2^31. With exactly the
 words of all runs, a decoder's `pos` ends at `n_words`.
 
-### 8.4 Built-in tables
+### 8.4 Frequency tables
 
-The frequencies of all 6537 contexts are the module's resource (section 2): 1 540 828 bytes
-(SHA-256 `bb28688b446550d0e2a88c971e07de2410a9c029b9ac979f5b329b8abf245189`), which the
-reference encoder takes from `model/builtin.bin`, a zstd stream that decompresses to them:
+The frequencies of the 6537 contexts (section 9.1) are the module's resource (section 2), as
+tables that contexts share. `f_c` is the table context `c` maps to. All values are u16 LE:
 
-- u32 LE layout id: `0xe6253d87`;
-- for each context `c` = 0..6537 in order, its `n` frequencies as u16 LE.
+- `K`, the number of tables;
+- `map[c]` for each context `c` = 0..6537 in order: the table of the context;
+- for each table `t` = 0..K in order, its frequencies, as many as the alphabet of the
+  contexts that map to it.
 
-The layout id is a 32-bit FNV-1a over the alphabet sizes as whole u32 values (`h =
-0x811c9dc5`; per value `h = (h XOR n) × 0x01000193 mod 2^32`). It guards against tables
-for a different context layout. The tables are the resource, not part of the module: other
-frequencies for the same layout (retrained tables) are another resource of the same version,
-which a decoder takes as it is given; only a change to the context layout (section 9.1), and
-so to the layout id, needs a new module version.
+A decoder MUST fail unless every `map[c]` is below `K`, every table is mapped to by at least
+one context and all contexts that map to it have the same alphabet size, every table's
+frequencies are nonzero and sum to 4096, and nothing follows the last table.
+
+The reference encoder takes the resource from `model/builtin.bin`, a zstd stream that
+decompresses to 500 tables in 131 044 bytes (SHA-256
+`e4451ffb336c7375cec3c7dc4d67efd79944bbc3cc812672a0ac2d29ac2f3666`). The tables are the
+resource, not part of the module: other tables (retrained, or merged otherwise) are another
+resource of the same version, which a decoder takes as it is given; only a change to the
+context layout (section 9.1) needs a new module version.
 
 ## 9. Coefficient model
 

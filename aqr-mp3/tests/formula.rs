@@ -4,7 +4,9 @@
 //! paths (several thousand frames, so that the output is also assembled in pieces).
 
 use aqr_formula::{Apply, Formula, Node};
+use aqr_mp3::codec::Model;
 use aqr_mp3::formula;
+use aqr_mp3::model::N_CTX;
 
 const THREADS: [usize; 3] = [1, 2, 8];
 
@@ -162,28 +164,26 @@ fn resource() {
         assert!(run(&[], t).is_err());
         assert!(run(&[good, good], t).is_err());
         let mut bad = good.to_vec();
-        bad[0] ^= 1; // layout id
+        bad[0] ^= 1; // number of tables
         assert!(run(&[&bad], t).is_err());
         assert!(run(&[&good[..good.len() - 2]], t).is_err());
         assert!(run(&[&[good, &[0, 0][..]].concat()], t).is_err());
         // Frequencies not summing to the scale are rejected, not a panic.
         let mut bad = good.to_vec();
-        bad[4] ^= 1;
+        bad[2 + 2 * N_CTX] ^= 1;
         assert!(run(&[&bad], t).is_err());
+        // A table used by contexts of different alphabet sizes (the last one has 32 symbols).
+        let mut m = Model::parse(good).unwrap();
+        m.map[0] = m.map[N_CTX - 1];
+        assert!(run(&[&m.to_raw()], t).is_err());
     }
-    // Valid tables, different from the built-in ones (each context's frequencies reversed):
-    // the output is not the file's.
-    let mut other = good.to_vec();
-    let mut p = 4;
-    for c in 0..aqr_mp3::model::N_CTX {
-        let n = aqr_mp3::model::alphabet(c);
-        for i in 0..n / 2 {
-            for k in 0..2 {
-                other.swap(p + 2 * i + k, p + 2 * (n - 1 - i) + k);
-            }
-        }
-        p += 2 * n;
+    // Valid tables, different from the built-in ones (each table's frequencies reversed): the
+    // output is not the file's.
+    let mut m = Model::parse(good).unwrap();
+    for f in &mut m.tables {
+        f.reverse();
     }
+    let other = m.to_raw();
     assert!(other != good);
     assert!(run(&[&other], 1).map_or(true, |o| o != big(d)));
 }

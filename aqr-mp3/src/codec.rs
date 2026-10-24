@@ -15,13 +15,9 @@ use crate::stream::{R_PAD, place, segment};
 use aqr_common::varint::{self, put as put_varint};
 use std::sync::{Arc, OnceLock};
 
-/// The built-in frequency tables (see `train`), or uniform ones if none are built in.
+/// The built-in model (see `train`), or one uniform table per alphabet size if none is built
+/// in.
 static BUILTIN: &[u8] = include_bytes!("../model/builtin.bin");
-
-/// Identifies the context layout the built-in tables were trained for.
-pub fn layout_id() -> u32 {
-    builtin::layout_id((0..model::N_CTX).map(|c| model::alphabet(c) as u32))
-}
 
 /// The built-in tables (what the encoder codes with).
 pub fn tables() -> &'static Tables {
@@ -29,45 +25,107 @@ pub fn tables() -> &'static Tables {
     T.get_or_init(|| tables_from(builtin_raw()).expect("built-in tables"))
 }
 
-/// The built-in tables in their uncompressed form: the module's resource.
+/// The built-in model in its uncompressed form: the module's resource.
 pub fn builtin_raw() -> &'static Arc<[u8]> {
     static R: OnceLock<Arc<[u8]>> = OnceLock::new();
-    R.get_or_init(|| {
-        builtin::decompress(BUILTIN).unwrap_or_else(|| builtin::to_raw(layout_id(), &uniform_freqs())).into()
-    })
+    R.get_or_init(|| builtin::decompress(BUILTIN).unwrap_or_else(|| Model::uniform().to_raw()).into())
 }
 
 /// Frames per run of the rANS stream: the coder restarts before every frame whose index is a
 /// positive multiple of it, so that the encoder holds the symbols of one run at a time.
 pub const RUN_FRAMES: usize = 1024;
 
-/// The tables in the uncompressed form `raw`, if they are valid for the layout.
+/// The tables of the model in the uncompressed form `raw`, if it is valid.
 pub fn tables_from(raw: &[u8]) -> Option<Tables> {
-    Some(Tables::new(&builtin::parse(raw, layout_id(), (0..model::N_CTX).map(model::alphabet))?))
+    Some(Tables::new(&Model::parse(raw)?.freqs()))
 }
 
-fn uniform_freqs() -> Vec<Vec<u16>> {
-    (0..model::N_CTX)
-        .map(|c| {
-            let mut f = vec![0u16; model::alphabet(c)];
-            rans::normalize(&vec![0; f.len()], &mut f);
-            f
-        })
-        .collect()
+/// Frequency tables shared by contexts: context `c` codes with `tables[map[c]]`.
+pub struct Model {
+    pub map: Vec<u16>,
+    pub tables: Vec<Vec<u16>>,
 }
 
-/// Serialises frequency tables (for the built-in model file).
-pub fn freqs_to_bytes(f: &[Vec<u16>]) -> Vec<u8> {
-    builtin::to_bytes(layout_id(), f)
+impl Model {
+    fn uniform() -> Model {
+        let mut sizes: Vec<usize> = Vec::new();
+        let map = (0..model::N_CTX)
+            .map(|c| {
+                let n = model::alphabet(c);
+                (sizes.iter().position(|&m| m == n).unwrap_or_else(|| {
+                    sizes.push(n);
+                    sizes.len() - 1
+                })) as u16
+            })
+            .collect();
+        let tables = sizes
+            .into_iter()
+            .map(|n| {
+                let mut f = vec![0u16; n];
+                rans::normalize(&vec![0; n], &mut f);
+                f
+            })
+            .collect();
+        Model { map, tables }
+    }
+
+    /// The uncompressed form: the number of tables, the map and the tables' frequencies, all
+    /// u16 LE.
+    pub fn to_raw(&self) -> Vec<u8> {
+        let mut raw = (self.tables.len() as u16).to_le_bytes().to_vec();
+        for &x in self.map.iter().chain(self.tables.iter().flatten()) {
+            raw.extend_from_slice(&x.to_le_bytes());
+        }
+        raw
+    }
+
+    /// The model in the uncompressed form `raw`, if it is valid: every table used by contexts
+    /// of one alphabet size, its frequencies nonzero and summing to the probability scale.
+    pub fn parse(raw: &[u8]) -> Option<Model> {
+        if !raw.len().is_multiple_of(2) {
+            return None;
+        }
+        let mut words = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+        let k = words.next()? as usize;
+        let map: Vec<u16> = words.by_ref().take(model::N_CTX).collect();
+        if map.len() != model::N_CTX {
+            return None;
+        }
+        let mut sizes = vec![0usize; k];
+        for (c, &t) in map.iter().enumerate() {
+            let s = sizes.get_mut(t as usize)?;
+            if *s != 0 && *s != model::alphabet(c) {
+                return None;
+            }
+            *s = model::alphabet(c);
+        }
+        let mut tables = Vec::with_capacity(k);
+        for n in sizes {
+            let f: Vec<u16> = words.by_ref().take(n).collect();
+            // Also rejects unused tables (no size).
+            if n == 0 || f.len() != n || f.contains(&0) || f.iter().map(|&x| x as u32).sum::<u32>() != rans::PROB_SCALE
+            {
+                return None;
+            }
+            tables.push(f);
+        }
+        words.next().is_none().then_some(Model { map, tables })
+    }
+
+    /// The frequencies of every context.
+    pub fn freqs(&self) -> Vec<Vec<u16>> {
+        self.map.iter().map(|&t| self.tables[t as usize].clone()).collect()
+    }
+
+    /// The file form (for the built-in model file).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        builtin::compress(&self.to_raw())
+    }
 }
 
-/// The built-in frequency tables, if any match the layout (for tools).
+/// The frequencies of every context in the built-in model, if any (for tools).
 pub fn builtin_freqs_pub() -> Option<Vec<Vec<u16>>> {
-    builtin_freqs()
-}
-
-fn builtin_freqs() -> Option<Vec<Vec<u16>>> {
-    builtin::from_bytes(BUILTIN, layout_id(), (0..model::N_CTX).map(model::alphabet))
+    Some(Model::parse(&builtin::decompress(BUILTIN)?)?.freqs())
 }
 
 pub(crate) struct Enc<'a> {

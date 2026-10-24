@@ -13,21 +13,24 @@ its round-trip check, then extracted. Ratios are tentative, since the decoder mo
 in the archives yet. Memory is the peak RSS of that process (input, archive and output
 included) over the input size. 402 files of FMA (401 MB, about 1 MB each).
 
-- **One file per archive (worst): nothing is coded.** The built-in tables are the module's
-  resource (1.5 MB raw, about 340 KB archived), stored in every archive that uses the module:
-  a formula of a 1 MB track comes to 1.2× the file, so every file is kept as it is (0.975,
-  against 0.971 under `zstd -3`).
+- **One file per archive (worst): 0.893.** The built-in tables are the module's resource
+  (131 KB raw, about 38 KB archived), stored in every archive that uses the module; a 1 MB
+  track pays for it (against 0.971 under `zstd -3`). Before the contexts shared tables, the
+  resource was 1.5 MB raw and about 340 KB archived, and every file was kept as it is (0.975).
 - **The resource shared (best)**, as by many files of one archive (`aqr-show -r`: the formulas
-  taken where they pay without it, its block left out): **0.855**, at **20 MB/s** compressing
-  and **104 MB/s** decompressing.
-- Memory: about 60 MB + 6.6× the file (a fit over concatenations of the sample, 9 to 120 MB,
-  coded; the sample's files take 49–89 MB, median 67 MB). The fixed part is the tables (the
-  frequencies, the decoder's alias tables, and the encoder's inverse maps of the contexts used,
-  8 KB each: 7–14 MB for a 1 MB file, 30 MB for a varied 38 MB one); what follows the file is
-  the archive's mostly (the file, its streams, their verification and the output). aqr-mp3 on
-  its own peaks at about 3× the file encoding (the reservoir, the frames, the raw bits and the
-  rANS words) and 2.4× decoding (the output and the words), on top of the tables. It was about
-  140 MB + 14.7× before runs (below) and the assembly as the reservoir is rebuilt.
+  taken where they pay without it, its block left out): **0.855**, at **46 MB/s** compressing
+  and **119 MB/s** decompressing. With a table per context it was 0.855 too (0.0002 better) at
+  20 and 104 MB/s: the encoder's inverse maps (8 KB per table used) and the decoder's alias
+  tables now fit in far less memory.
+- Memory: about 61 MB + 6.4× the file (a fit over concatenations of the sample, 9 to 120 MB,
+  each coded as one file with `-e`; the sample's files take 32–59 MB, median 41 MB). The same
+  concatenations took 28–52 MB more with a table per context (102 MB + 6.4×). The fixed part
+  is the tables (the frequencies, the decoder's alias tables, and the encoder's inverse maps
+  of the tables used, 4 MB at most); what follows the file is the archive's mostly (the file,
+  its streams, their verification and the output). aqr-mp3 on its own peaks at about 3× the
+  file encoding (the reservoir, the frames, the raw bits and the rANS words) and 2.4×
+  decoding (the output and the words), on top of the tables. It was about 140 MB + 14.7×
+  before runs (below) and the assembly as the reservoir is rebuilt.
 
 The comparison with packMP3, `zstd -19` and `xz -9` on the same files is `tools/compare.sh
 PACKMP3 WORKDIR DIR...`.
@@ -41,7 +44,7 @@ mp3r bench [-n ITERS] [-t N] [-v] FILE|DIR... # round trip check, .aqr ratio, th
 mp3r info FILE|DIR...                # frames, junk, tail / raw / gap bits, symbol counts
 mp3r fuzz [-n N] [-s SEED] [-t N] FILE|DIR... # mutated inputs (flips, cuts, deletions, insertions)
 cargo run --release --example memprobe FILE... # peak heap of encoding and decoding (LOG=MB: allocations)
-train [-a] OUT FILE|DIR...           # trains the built-in tables (every file with -a, else every second)
+train [-a] [-k K] OUT FILE|DIR...    # trains the built-in tables, K of them (500), on every file with -a, else every second
 ```
 
 `-t N`: threads, default 1 (`fuzz` then also checks that the formula equals the one-thread
@@ -98,9 +101,14 @@ stored.
   decoding. Adding the previous pair gained 0.53 pp of ratio but made decompression roughly
   40% slower (measured under load); the pair two back gained 0.37 pp for −14%
   decompression, −9% compression.
-- Static tables trained on FMA (4511 files), built into the binary (290 KB). Adaptive
-  per-file models lost to them: learning costs more than they gain at these context
-  counts.
+- Static tables trained on FMA (4511 files), built into the binary (33 KB). The 6537
+  contexts share 500 tables: contexts of one alphabet size are merged greedily, the pair
+  costing the fewest bits on the training set first. On the held-out FMA files this costs
+  0.018 pp of ratio (ideal code lengths) for a resource of 131 KB instead of 1.5 MB raw,
+  38 KB instead of 340 KB archived. Merging is free down to about 1500 tables (the rare
+  contexts gain what the frequent ones lose), and log-quantizing the frequencies (steps of
+  2^(1/8)) would save 10 KB more for 0.004 pp. Adaptive per-file models lost to static
+  tables: learning costs more than they gain at these context counts.
 
 ### 3. Side information
 
@@ -121,8 +129,8 @@ how they set these fields, so per-file adaptation pays here. 1.7% of the input.
   rather than of the file.
 - **Tables** are built lazily: the decoder's alias tables on first decompression (about
   5 ms), the encoder's tables on first compression and its inverse maps per context used.
-  Identical tables (unused contexts) are shared. Decoding with the built-in resource uses the
-  process's tables; another resource of the same layout gets its own.
+  Contexts of one table share its alias table and inverse map. Decoding with the built-in
+  resource uses the process's tables; another resource gets its own.
 
 ### 5. Speed
 
@@ -204,7 +212,7 @@ the calling thread, in order. Around them (`src/par.rs`):
   differ between decoders (ffmpeg uses a different region boundary). Either way bits are
   reproduced exactly; only the model may be worse.
 - **Layer I/II** and MP3 inside other containers (MP4, MKV, WAV) are stored as junk.
-- **Memory**: the tables, about 60 MB of peak RSS through `aqr-show` whatever the file (see
-  Results), 7–30 MB of it the encoder's inverse maps. The tables are also the resource every
-  archive carries (about 340 KB archived). Decoding with more than one thread still holds
-  the reservoir whole.
+- **Memory**: about 61 MB of peak RSS through `aqr-show` whatever the file (see Results), the
+  encoder's inverse maps 4 MB of it at most. The tables are also the resource every archive
+  carries (about 38 KB archived). Decoding with more than one thread still holds the
+  reservoir whole.
