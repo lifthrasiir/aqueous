@@ -7,20 +7,27 @@ Apple M4, both ways; compression ratio is pursued only where it does not cost th
 
 ## Results
 
-Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
+Measured on 2026-10-24 on an Apple M4, one thread, through `aqr-show` (see the
 [top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
 its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
 in the archives yet. Memory is the peak RSS of that process (input, archive and output
 included) over the input size. 402 files of FMA (401 MB, about 1 MB each).
 
-- **One file per archive: nothing is coded.** The built-in tables are the module's resource
-  (290 KB raw, about 340 KB archived), stored in every archive that uses the module: a
-  formula of a 1 MB track comes to 1.2× the file, so every file is kept as it is (0.975,
+- **One file per archive (worst): nothing is coded.** The built-in tables are the module's
+  resource (1.5 MB raw, about 340 KB archived), stored in every archive that uses the module:
+  a formula of a 1 MB track comes to 1.2× the file, so every file is kept as it is (0.975,
   against 0.971 under `zstd -3`).
-- **The resource shared** (counted once over the sample, as in one archive of them all, the
-  formulas taken although they do not pay alone): **0.856**, at **15 MB/s** compressing and
-  **56 MB/s** decompressing.
-- Memory: 117–231 MB (median 143 MB) per file, most of it tables, whatever the file's size.
+- **The resource shared (best)**, as by many files of one archive (`aqr-show -r`: the formulas
+  taken where they pay without it, its block left out): **0.855**, at **20 MB/s** compressing
+  and **104 MB/s** decompressing.
+- Memory: about 60 MB + 6.6× the file (a fit over concatenations of the sample, 9 to 120 MB,
+  coded; the sample's files take 49–89 MB, median 67 MB). The fixed part is the tables (the
+  frequencies, the decoder's alias tables, and the encoder's inverse maps of the contexts used,
+  8 KB each: 7–14 MB for a 1 MB file, 30 MB for a varied 38 MB one); what follows the file is
+  the archive's mostly (the file, its streams, their verification and the output). aqr-mp3 on
+  its own peaks at about 3× the file encoding (the reservoir, the frames, the raw bits and the
+  rANS words) and 2.4× decoding (the output and the words), on top of the tables. It was about
+  140 MB + 14.7× before runs (below) and the assembly as the reservoir is rebuilt.
 
 The comparison with packMP3, `zstd -19` and `xz -9` on the same files is `tools/compare.sh
 PACKMP3 WORKDIR DIR...`.
@@ -33,6 +40,7 @@ cargo build --release
 mp3r bench [-n ITERS] [-t N] [-v] FILE|DIR... # round trip check, .aqr ratio, throughput, per-stream sizes
 mp3r info FILE|DIR...                # frames, junk, tail / raw / gap bits, symbol counts
 mp3r fuzz [-n N] [-s SEED] [-t N] FILE|DIR... # mutated inputs (flips, cuts, deletions, insertions)
+cargo run --release --example memprobe FILE... # peak heap of encoding and decoding (LOG=MB: allocations)
 train [-a] OUT FILE|DIR...           # trains the built-in tables (every file with -a, else every second)
 ```
 
@@ -68,7 +76,8 @@ any main data that cannot be reproduced.
 | `src/bin/train.rs` | Training of the built-in tables (`model/builtin.bin`) |
 | `tests/regress.rs`, `tests/data` | Round trips of small LAME encodings (CBR, VBR, mono, CRC, MPEG-2, MPEG-2.5 8 kHz, free format, tags), with junk, cuts, concatenation |
 | `tests/formula.rs` | The formula of the same files, large repetitions of them and non-MP3 data; 1, 2 and 8 threads: identical formulas, round trips, the same errors for corrupted slots |
-| `examples/` | Benchmarks and analysis helpers (`hot`, `phases`, `perfile`, `ctxdist`, `init`) |
+| `tests/memory.rs` | Peak heap of a 16 MB file, encoding and decoding, within a few times the file over the tables |
+| `examples/` | Benchmarks and analysis helpers (`hot`, `phases`, `perfile`, `ctxdist`, `init`), and `memprobe` (on `aqr_common::mem`) |
 | `tools/` | `gen_huff.py`, `profile.py` (samply + atos self/inclusive time by line), `compare.sh`, `experiment.sh` |
 
 ## Design
@@ -107,9 +116,13 @@ how they set these fields, so per-file adaptation pays here. 1.7% of the input.
   21% of the symbols and was 2× slower.
 - **Encoder**: per context an inverse map (rank → slot, 4096 entries), built on first use
   of the context and kept for the process; division by reciprocal multiplication.
+- **Runs**: the stream restarts every 1024 frames (16 words each, 0.006% of the archive),
+  so the encoder holds the symbols (4 bytes each, about 1.2 per byte of input) of one run
+  rather than of the file.
 - **Tables** are built lazily: the decoder's alias tables on first decompression (about
-  5 ms), the encoder's inverse maps per context used. Identical tables (unused contexts)
-  are shared.
+  5 ms), the encoder's tables on first compression and its inverse maps per context used.
+  Identical tables (unused contexts) are shared. Decoding with the built-in resource uses the
+  process's tables; another resource of the same layout gets its own.
 
 ### 5. Speed
 
@@ -117,6 +130,9 @@ how they set these fields, so per-file adaptation pays here. 1.7% of the input.
   pass (the sign bits are copied from the MP3 stream into the raw stream); decompression
   turns decoded symbols directly into Huffman bits (the raw sign bits follow the codes
   unchanged). No coefficient arrays in between. The failure path rolls the coder back.
+- **Assembly** (one thread): each frame is written out once its side information is
+  complete and its payload final in the reservoir, which is kept from the next frame's
+  payload on only.
 - **Huffman decoding**: register bit buffer with branchless refill; an 11-bit LUT
   resolves code and signs (tables without linbits) or the code (with linbits, escapes
   extracted from the same 64-bit window).
@@ -143,7 +159,8 @@ the calling thread, in order. Around them (`src/par.rs`):
   3 or more threads another builds the tables, the decoder's alias tables and the rANS
   decoder while the headers are read (with 2, the side
   information thread builds the tables first); the output (headers, side information,
-  CRCs, main data) is assembled in up to N pieces, one per 1024 frames.
+  CRCs, main data) is assembled in up to N pieces, one per 1024 frames, from the reservoir
+  held whole.
 - Errors are the same as with one thread.
 - Not done: splitting the Huffman re-encoding from the rANS decoding (it is a table lookup
   and a write per symbol, about the cost of handing the values over), and a chunked model
@@ -187,5 +204,7 @@ the calling thread, in order. Around them (`src/par.rs`):
   differ between decoders (ffmpeg uses a different region boundary). Either way bits are
   reproduced exactly; only the model may be worse.
 - **Layer I/II** and MP3 inside other containers (MP4, MKV, WAV) are stored as junk.
-- **Memory**: 117–231 MB of peak RSS per file through `aqr-show` (see Results), mostly
-  tables. The tables are also the resource every archive carries (290 KB raw).
+- **Memory**: the tables, about 60 MB of peak RSS through `aqr-show` whatever the file (see
+  Results), 7–30 MB of it the encoder's inverse maps. The tables are also the resource every
+  archive carries (about 340 KB archived). Decoding with more than one thread still holds
+  the reservoir whole.

@@ -11,17 +11,20 @@ and the design is argued in `xform-design.md`.
   coding and the round-trip check) at level `mid`, then extracted.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `objr bench`.
   - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
-- aqr-jpeg, aqr-png and aqr-psd were re-measured on 2026-10-24 (otherwise as above).
+- aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above).
 - aqr-exe alone was measured on another machine, an AMD Ryzen 7 9700X under Windows 11 (at
   `aa7a327`, otherwise as above): its speeds are not comparable to the others'. Its memory is
   the peak working set.
 - Samples: files of 256 KiB or more from each crate's `corpus/` (aqr-jpeg: `samples/` and the
   JPEG files of codec-corpus), taken in the order of their paths' hashes up to about 400 MB.
 - Columns:
-  - **Ratio**: Σ archive / Σ input. **Tentative**: the actual decoder modules (Wasm) are not
-    embedded yet, and will add their blocks. Module resources (built-in tables) are counted.
-    An archive shares them only among its own files, so one file per archive, as here, is
-    the worst case.
+  - **Ratio**: Σ archive / Σ input, as *best ~ worst*. Modules' resources (built-in tables)
+    are shared by the files of an archive. Worst: one file per archive, as here, its resources
+    in it (and files kept raw where they do not pay for them). Best: in the limit of many
+    files per archive, Σ (archive − resources) / Σ input, the formulas taken where they pay
+    without them (`aqr-show -r`). One figure where the two agree to three decimals (no
+    resources, or a few KB). **Tentative**: the actual decoder modules (Wasm) are not embedded
+    yet, and will add their blocks.
   - **zstd -3**: the same files under `zstd -3`, for reference.
   - **Speed**: Σ input / Σ time, MB/s. Compression covers recompression, archive coding and
     the check; decompression covers archive decoding and rebuilding.
@@ -44,13 +47,17 @@ and the design is argued in `xform-design.md`.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| MP3 | aqr-mp3 | 402 files, 401 MB | 0.975 (none coded); 0.856 with the resource shared | 0.971 | 15 | 56 | 117–231 MB per file (median 143 MB, for files of about 1 MB) | see below |
-| FLAC, WAV, AIFF | aqr-flac | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 12.5× | the resource is about 1.6 KB per archive |
+| MP3 | aqr-mp3 | 402 files, 401 MB | 0.855 ~ 0.975 | 0.971 | 20 | 104 | 60 MB + 6.6× | see below |
+| FLAC, WAV, AIFF | aqr-flac | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 12.5× | the resource is about 2.6 KB per archive |
 
-The MP3 resource is significant: its built-in tables (290 KB raw) take about 340 KB in every
+The MP3 resource is significant: its built-in tables (1.5 MB raw) take about 340 KB in every
 archive, so a formula of a typical 1 MB track is 1.2× the file, and no file of the sample is
-coded alone. The second ratio counts the resource once over the whole sample (as one archive
-of all of them would); the speeds and memory are those of the files coded.
+coded alone (worst). The speeds are those of the files coded (`-r`); the memory is a fit over
+concatenations of the sample (9 to 120 MB, coded), as the sample's files are all about 1 MB
+(49–89 MB each, median 67 MB). The fixed part is mostly the tables, among them the
+encoder's inverse maps of the contexts a file uses (7–14 MB for a 1 MB file). It was about
+140 MB + 14.7× before the rANS symbols were held a run of 1024 frames at a time and the
+output assembled as the reservoir is rebuilt.
 
 ### Documents, data, 3D
 
