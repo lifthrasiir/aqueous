@@ -1176,7 +1176,6 @@ pub struct Stripe {
 pub struct Encoded {
     pub tables: Vec<u8>,
     pub stripes: Vec<Stripe>,
-    t: Tables,
     pub nsym: usize,
 }
 
@@ -1336,7 +1335,7 @@ impl Modeller {
             })
             .collect();
         let norm = (t1 - t0).as_secs_f64();
-        (Encoded { tables, stripes, t, nsym }, norm, t1.elapsed().as_secs_f64())
+        (Encoded { tables, stripes, nsym }, norm, t1.elapsed().as_secs_f64())
     }
 }
 
@@ -1441,11 +1440,13 @@ pub fn decode(j: &Jpeg, e: &Encoded) -> Result<Vec<Coefs>, Error> {
     Ok(out)
 }
 
-/// Like `decode`, reusing the allocations in `out`.
+/// Like `decode`, reusing the allocations in `out`. The decoding tables are read from the
+/// stored table section (`Encoded` holds the encoder's).
 pub fn decode_into(j: &Jpeg, e: &Encoded, out: &mut Vec<Coefs>) -> Result<(), Error> {
+    let t = read_tables_section(&e.tables)?;
     let words: Vec<_> = e.stripes.iter().map(|s| s.rans_bytes()).collect();
     let stripes: Vec<(&[u8], &[u8])> = words.iter().zip(&e.stripes).map(|(w, s)| (&w[..], &s.raw[..])).collect();
-    decode_whole(j, &e.t, &stripes, out)
+    decode_whole(j, &t, &stripes, out)
 }
 
 #[cfg(test)]
