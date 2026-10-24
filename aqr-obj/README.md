@@ -24,20 +24,21 @@ verification is stored whole.
 
 ## Results
 
-Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, with `aqr-obj bench -t 1`
+Measured on 2026-10-24 at `da98d11` on an Apple M4, one thread, with `aqr-obj bench -t 1`
 (aqr-obj is not in aqr-compress yet). Ratios are tentative, since the decoder modules are not
 in the archives yet. Memory is the peak RSS of the process (input, archive and output
 included) over the input size.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress |
 |---|---|---|---|---|---|---|
-| mcguire | 7 | 385.1 | 0.086 | 0.220 | 140.1 MB/s | 353.3 MB/s |
-| writers | 10 | 193.6 | 0.071 | 0.222 | 109.9 MB/s | 318.5 MB/s |
-| c3d | 9 | 41.4 | 0.131 | 0.319 | 92.6 MB/s | 266.8 MB/s |
-| threejs | 4 | 4.3 | 0.119 | 0.262 | 98.2 MB/s | 282.0 MB/s |
-| all | 30 | 625 | **0.085** | 0.228 | **125 MB/s** | **334 MB/s** |
+| mcguire | 4 | 225.1 | 0.102 | 0.234 | 142.9 MB/s | 352.6 MB/s |
+| writers | 8 | 142.7 | 0.081 | 0.240 | 101.2 MB/s | 298.4 MB/s |
+| c3d | 6 | 30.5 | 0.132 | 0.309 | 101.3 MB/s | 274.1 MB/s |
+| threejs | 4 | 4.3 | 0.119 | 0.262 | 98.2 MB/s | 280.6 MB/s |
+| all | 22 | 403 | **0.097** | 0.242 | **121 MB/s** | **324 MB/s** |
 
-Files over 300 MB were left out. Memory is 4.7× the file (median of files of 8 MB or more).
+The files are taken as for every crate (the top-level README), files over 300 MB left out.
+Memory, with one process per file, is 24 MB + 3.1× the file (a linear fit).
 `aqr-obj bench` reports the size of an archive of the formula (`formula::encode`,
 then `aqr_formula::aqr::encode`) and the speed of making and decoding it. The other
 compressors' sizes per file are cached by `scripts/baseline.sh`.

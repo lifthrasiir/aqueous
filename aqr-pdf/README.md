@@ -42,8 +42,10 @@ included) over the input size.
 | arxiv | 6 | 22.2 | 0.753 | 0.843 | 48.3 MB/s | 147.9 MB/s |
 | all | 144 | 402 | **0.855** | 0.896 | **46 MB/s** | **198 MB/s** |
 
-18 files are kept as they are. Memory is 11.4× the file (median of files of 8 MB or more; at
-most 22.9×).
+18 files are kept as they are. Memory, re-measured on 2026-10-24 at `da98d11` with one
+process per file, is 41 MB + 5.7× the file (a linear fit). Nine files take over twice that,
+up to 331 MB for 3.4 MB (`cc/0000192.pdf`), 202 MB for 1.8 MB (`cc/0000360.pdf`) and 295 MB
+for 13.7 MB (`arxiv/2307.09288.pdf`); most files under 1 MB take less than half of it.
 
 The speed target (100 MB/s of PDF file single-threaded on an Apple
 M4, both ways) binds: everything coded costs more per byte than the budget allows on average,

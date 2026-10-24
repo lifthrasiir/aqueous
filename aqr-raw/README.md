@@ -35,6 +35,11 @@ path) written by ImageMagick as BMP3, BMP4 with alpha, PGM and PPM in turn; as P
 they were 19.2 MB (0.367). The peak RSS of `aqr-raw bench` on one image is 4–5× its size
 (input, formula, archive and output included).
 
+The recipe does not pin the set down (which 25th, the depth and alpha of each output): made
+again on 2026-10-24 from the files of 200 KiB or more, from the third on (17 files, 52.8 MB;
+zstd -3 0.421), they come through `aqr-show` (one process per file, at `da98d11`) to 0.228 at
+71 / 303 MB/s, with a peak RSS of 21 MB + 5.5× the file (a linear fit).
+
 Before the PCM path moved here from aqr-flac, it gave the same streams for these files, byte
 for byte (the header and trailer are slices of the formula now, where they were streams of
 the module). The conformance files of `codec-corpus` (176 BMP and PNM

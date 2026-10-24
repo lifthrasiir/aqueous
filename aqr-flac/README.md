@@ -25,8 +25,8 @@ included) over the input size.
 These were measured before the PCM path moved to aqr-raw: the WAV files of the synthetic set
 are aqr-raw's now, with the same streams (see aqr-raw's README).
 
-The resource (the built-in tables) costs about 1.6 KB per archive. Memory is 12.5× the file
-(median of files of 8 MB or more).
+The resource (the built-in tables) costs about 1.6 KB per archive. Memory, re-measured on
+2026-10-24 at `da98d11` with one process per file, is 9 MB + 11.5× the file (a linear fit).
 
 The cost is about 30 cycles per sample each way, so speed per MB falls with the bits per
 sample.

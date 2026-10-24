@@ -14,6 +14,10 @@ and the design is argued in `xform-design.md`.
 - aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above),
   and aqr-raw's images measured then; aqr-exe too, on copies of files from a Windows
   machine.
+- The memory of aqr-raw, aqr-flac, aqr-pdf, aqr-sqlite, aqr-obj, aqr-zip and aqr-exe was
+  re-measured on 2026-10-24 at `da98d11`. aqr-sqlite (whose system databases have changed
+  since) and aqr-obj were re-measured in full then, on samples taken anew, and so were
+  aqr-raw's images, made again as its README tells.
 - Samples: files of 256 KiB or more from each crate's `corpus/` (aqr-jpeg: `samples/` and the
   JPEG files of codec-corpus), taken in the order of their paths' hashes up to about 400 MB.
 - Columns:
@@ -27,10 +31,10 @@ and the design is argued in `xform-design.md`.
   - **zstd -3**: the same files under `zstd -3`, for reference.
   - **Speed**: Σ input / Σ time, MB/s. Compression covers recompression, archive coding and
     the check; decompression covers archive decoding and rebuilding.
-  - **Memory**: peak RSS over input size, for one process that compresses, checks and
-    decompresses. It includes the input, the archive and the output, so its floor is about
-    2×. Given as the median over files of 8 MB or more, or else as a linear fit
-    (fixed MB + k × input). macOS's allocator keeps freed large blocks resident for reuse,
+  - **Memory**: peak RSS, for one process per file that compresses, checks and decompresses
+    it. It includes the input, the archive and the output, so its floor is about 2× the file.
+    Given as a linear fit over the sample's files, fixed MB + k × input; files far over it
+    are noted. macOS's allocator keeps freed large blocks resident for reuse,
     and they count: with that cache off (`MallocLargeCache=0`), aqr-exe's sample takes
     17 MB + 5.3× instead of 26 MB + 7.9×, and the largest PDF of aqr-pdf's corpus (179 MB)
     954 MB instead of 1.38 GB.
@@ -43,7 +47,7 @@ and the design is argued in `xform-design.md`.
 |---|---|---|---|---|---|---|---|---|
 | PNG, APNG | aqr-png | 379 files, 391 MB | 0.802 | 0.997 | 42 | 90 | 7 MB + 10.3× | the data, the raw image and the tokens are held a window at a time; the encoder's symbols (2 bytes per byte of data on photos) are what still follows the pixels |
 | JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
-| BMP, PGM, PPM, PAM | aqr-raw | 17 files, 52 MB | 0.223 | 0.400 | 73 | 303 | about 35 MB + 4× | 8-bit samples; not a sample of real files (PNGs of aqr-png's corpus converted, README of aqr-raw). 16-bit and RLE images are not taken |
+| BMP, PGM, PPM, PAM | aqr-raw | 17 files, 53 MB | 0.228 | 0.421 | 71 | 303 | 21 MB + 5.5× | 8-bit samples; not a sample of real files (PNGs of aqr-png's corpus converted, README of aqr-raw). 16-bit and RLE images are not taken |
 | PSD, PSB | aqr-psd | 56 files, 439 MB | 0.330 | 0.555 | 45 | 127 | 28 MB + 5.4× | pixels coded in 8-bit documents only; aqr-psd itself takes a few MB besides its streams, the rest is the archive's (a file kept raw is scanned by the parts aqr-psd tells) |
 
 ### Audio
@@ -51,7 +55,7 @@ and the design is argued in `xform-design.md`.
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | MP3 | aqr-mp3 | 402 files, 401 MB | 0.855 ~ 0.893 | 0.971 | 46 | 119 | 61 MB + 6.4× | see below |
-| FLAC; WAV, AIFF | aqr-flac; aqr-raw | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 12.5× | the resource is about 2.6 KB per archive. Measured when aqr-flac took WAV and AIFF too: aqr-raw has them now, with the same streams |
+| FLAC; WAV, AIFF | aqr-flac; aqr-raw | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 9 MB + 11.5× | the resource is about 2.6 KB per archive. Measured when aqr-flac took WAV and AIFF too: aqr-raw has them now, with the same streams |
 
 The MP3 resource is the built-in tables (131 KB raw, about 38 KB in every archive), so a
 typical 1 MB track is coded alone too (worst). The speeds are those of the files coded
@@ -67,16 +71,16 @@ reservoir is rebuilt.
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
-| PDF | aqr-pdf | 144 files, 402 MB | 0.855 | 0.896 | 46 | 198 | 11.4× (max 22.9×) | 18 files kept as they are (no formula paid) |
-| SQLite 3 | aqr-sqlite | 84 files, 309 MB | 0.236 | 0.373 | 38 | 395 | 8.9× | |
-| Wavefront OBJ | aqr-obj | 30 files, 625 MB | 0.085 | 0.228 | 125 | 334 | 4.7× | `aqr-obj bench`; not in aqr-compress yet |
+| PDF | aqr-pdf | 144 files, 402 MB | 0.855 | 0.896 | 46 | 198 | 41 MB + 5.7× | 18 files kept as they are (no formula paid). 9 files take over twice the memory fit, up to 331 MB for 3.4 MB (`cc/0000192.pdf`) and 202 MB for 1.8 MB |
+| SQLite 3 | aqr-sqlite | 88 files, 324 MB | 0.227 | 0.366 | 48 | 368 | 24 MB + 6.7× | |
+| Wavefront OBJ | aqr-obj | 22 files, 403 MB | 0.097 | 0.242 | 121 | 324 | 24 MB + 3.1× | `aqr-obj bench`; not in aqr-compress yet. Files over 300 MB left out |
 
 ### Containers and general-purpose compression
 
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | gzip, zlib | aqr-flate | 4 files, 4 MB | 0.932 | 0.977 | 7 | 58 | 34 MB + 35.6× | a small sample (all there is here); 2 of 4 not coded. Per-stream figures on 924 streams are in aqr-flate's README |
-| ZIP | aqr-zip | 5 files, 327 MB | 0.954 | 0.998 | 8 | 23 | 14× | dominated by enwik9.zip (322 MB, 1 GB of text: 4.5 GB peak); two Python wheels come to 0.76 |
+| ZIP | aqr-zip | 5 files, 327 MB | 0.954 | 0.998 | 8 | 23 | 48 MB + 13.8× | dominated by enwik9.zip (322 MB, 1 GB of text: 4.5 GB peak); two Python wheels come to 0.76 |
 | mozlz4, LZ4 frames | aqr-lz4 | a Firefox profile (README) | −9 to −18% against `zstd -3` of the files, −57% solid | | | 650–1150 (the compressor) | not measured | no sample on this machine; liblz4 1.10.0's fast compressor reproduced exactly |
 | LevelDB tables (Snappy) | aqr-snappy | 33 tables of a Chrome profile, 13.3 MB (README) | −30.5% against `zstd -3` | | | 315 (tables rebuilt) | not measured | both hashes of Snappy 1.2.2 |
 | git checkouts | aqr-git | 15 repositories, 1196 MB (README) | 0.452 (with zstd -19) | 0.651 (`tar \| zstd -19 --long=27`) | 87–117 | 135–750 | 0.1–2.1× beyond input and output (the largest object is the floor) | directories, measured outside `aqr-show`; `-A` (every zlib stream rebuilt): 0.255 at 25–49 MB/s |
