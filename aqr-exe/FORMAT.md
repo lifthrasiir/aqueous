@@ -1,7 +1,8 @@
 # The `exe-recons/x86` module
 
 This document specifies the module `exe-recons/x86` of aqr-formula entry formulas, and
-[`exe-recons/arm64`](#the-exe-reconsarm64-module) after it. The x86 module rebuilds a section
+[`exe-recons/arm64`](#the-exe-reconsarm64-module) and
+[`exe-recons/cil`](#the-exe-reconscil-module) after it. The x86 module rebuilds a section
 of x86 or x86-64 machine code from streams that a disfilter split it into:
 instructions are parsed, and their fields (opcodes, ModR/M and SIB bytes, prefixes,
 displacements, immediates, jump and call targets, addresses) go to streams of their own, which
@@ -449,4 +450,202 @@ The module fails if:
 - the params are not 8 bytes long, or there are resources, or not exactly 11 inputs;
 - a stream runs out where a byte is to be read;
 - a local branch's field in `CODE` is not 0, or its zigzag value is not below `2^n`;
+- any stream has bytes left once the output is `len` bytes long.
+
+# The `exe-recons/cil` module
+
+This part specifies the module `exe-recons/cil`, which rebuilds the section of a .NET image
+(ECMA-335 §II.24 and §II.25) that holds its metadata. The metadata root and the headers in it
+are kept as they are; the heaps go to streams of their own; the metadata tables go column by
+column, a byte plane of each column at a time, columns in ascending order as deltas, and the
+RVAs of method bodies as indices into the bodies; the IL of the method bodies is split by
+operand, its tokens through a move-to-front cache of each table, and the row numbers that miss
+it as deltas. Everything else in the section (the CLR header, resources, the strong name
+signature, native code, padding) is kept as it is in a stream of its own. Any metadata the
+module reads is rebuilt bit for bit; what it does not take is kept. The conventions of §1
+hold.
+
+## C1. The module
+
+- **Module**: name `exe-recons/cil`, version 1.
+- **Params**: exactly 8 bytes.
+
+  ```text
+  le32    origin        the RVA of the section's first byte
+  le32    meta          the offset of the metadata root in the section
+  ```
+
+- **Resources**: none.
+- **Inputs**: exactly 26, the streams of §C2 in order, each of class `cil/NAME`.
+- **Output**: the section of §C3, `len` bytes long (the `len` the application declares).
+
+## C2. Streams
+
+| # | name | contents |
+|---|---|---|
+| 0 | `REST` | the bytes of the section not otherwise taken (§C3.5), in order |
+| 1 | `META` | the metadata root through its stream headers, then the header of the tables stream |
+| 2–5 | `STRINGS`, `US`, `BLOB`, `GUID` | the heaps `#Strings`, `#US`, `#Blob` and `#GUID` |
+| 6 | `TABLES` | the rows of the tables, by column and byte plane (§C3.4) |
+| 7 | `COLFLAGS` | a byte for each column but MethodDef's RVAs: 1 where the column is in deltas |
+| 8 | `RVAX` | MethodDef RVAs that are not of a body taken, `le32` |
+| 9 | `BODYPOS` | for each body taken, its distance from the end of the last (`varint`) |
+| 10 | `HDR` | the headers of the bodies, tiny (1 byte) or fat (12 bytes), as they are |
+| 11 | `EH` | after the code of fat bodies with more sections: the padding and the data sections |
+| 12 | `OP` | opcodes: their bytes, `FE` and the byte after it for two-byte opcodes |
+| 13–16 | `I1`, `I2`, `I4`, `I8` | operands of 1, 2, 4 and 8 bytes (`float32` among the 8-byte ones) |
+| 17 | `BR1` | 8-bit branch offsets |
+| 18 | `BR4` | 32-bit branch offsets, and the operands of `switch` (count and offsets) |
+| 19 | `TOKT` | the table byte (bits 31..24) of each token |
+| 20 | `TOKI` | for each token: 0 where it misses the cache, else its index in it plus 1 |
+| 21–25 | `TOKR_STR`, `TOKR_METHOD`, `TOKR_FIELD`, `TOKR_TYPE`, `TOKR_OTHER` | the row numbers of tokens that miss the cache, as deltas (§C3.3), by table: `70`; `06 0A 2B`; `04`; `01 02 1B`; any other |
+
+A `varint` is an unsigned LEB128 integer of at most 5 bytes, below 2^32: 7 bits a byte, the
+least significant first, bit 7 set on every byte but the last. `zigzag(v) = (v << 1) XOR
+(v >> 31)` of a 32-bit `v` (arithmetic shift), and `unzigzag(z) = (z >> 1) XOR −(z & 1)`.
+
+## C3. Decoding
+
+`out` is `len` zero bytes, written at offsets; each part written is **taken**, as a range of
+`out`. Read the metadata root (§C3.1), the method bodies (§C3.2, §C3.3), the tables (§C3.4),
+then the rest (§C3.5).
+
+### C3.1 The metadata root
+
+Read from `META` the metadata root (§II.24.2.1): 16 bytes, of which `le32` at 12 is the length
+`n` of the version string, then `n` bytes, then 4 bytes, of which `le16` at 2 is the count of
+streams; then each stream header, `le32 offset`, `le32 size` and a name ending at its first
+zero byte, padded with the bytes after it to a multiple of 4. Write it all at `meta`, taken.
+
+Then, for each stream header in order, with `start = meta + offset`:
+
+- the first named `#Strings`, `#US`, `#Blob` or `#GUID` of each name: copy `size` bytes from
+  its stream to `start`, taken;
+- the first named `#~` or `#-`: read the tables' header (below) from `META` and write it at
+  `start`. With `rows` the bytes of the rows of every table (§C3.4), `start + |header| +
+  rows` must not exceed `start + size`; `start` to `start + |header| + rows` is taken, and the
+  tables start at `start + |header|`;
+- any other: nothing.
+
+The tables' header (§II.24.2.6): 24 bytes, of which byte 6 is `HeapSizes` and `le64` at 8 the
+mask `Valid`, then a `le32` row count for each bit of `Valid` set, from bit 0 up, then 4 more
+bytes where `HeapSizes` has bit `40`. `Valid` must have no bit above `2C` set.
+
+### C3.2 The method bodies
+
+With `at = 0`, while `BODYPOS` has bytes left: read a `varint` `g`; the body is at `b = at + g`.
+Read its header from `HDR`, at `b`:
+
+- tiny (byte `h` with `h & 3 = 2`): 1 byte; the code is `h >> 2` bytes;
+- fat (`h & 3 = 3`): 12 bytes, whose `le16` at 0 must be `3` in its bits 15..12; the code is
+  `le32` at 4 bytes;
+- else the module fails.
+
+The code follows the header (§C3.3). For a fat header with bit `08` (`CorILMethod_MoreSects`)
+of its byte 0, the data sections follow it, each: as many bytes copied from `EH` as align
+its offset in the section to 4, then a section whose first byte `k` tells its size `n` (with `k & 40`, `le24`
+of the 3 bytes after `k`; else the byte after it), `n` at least 4, copied from `EH` (`k`
+included); another follows while `k & 80`. `b` to the end of the last part is taken, and is
+body `i` (counting from 0) at `b`; `at` becomes its end.
+
+### C3.3 IL
+
+The code of `c` bytes is instructions (§III), written one after the other until `c` bytes are
+written; an instruction that would end past them makes the module fail. Each: a byte from
+`OP`; if it is `FE`, another byte from `OP` after it. Then its operand, by the opcode:
+
+| opcode | operand |
+|---|---|
+| `0E`–`13`, `1F`; `FE 12`, `FE 19` | 1 byte from `I1` |
+| `FE 09`–`FE 0E` | 2 bytes from `I2` |
+| `20` | 4 bytes from `I4` |
+| `22` | 4 bytes from `I8` |
+| `21`, `23` | 8 bytes from `I8` |
+| `2B`–`37`, `DE` | 1 byte from `BR1` |
+| `38`–`44`, `DD` | 4 bytes from `BR4` |
+| `45` | 4 bytes from `BR4`, the count `m` (`le32`), then `4m` bytes from `BR4` |
+| `27`–`29`, `6F`–`75`, `79`, `7B`–`81`, `8C`, `8D`, `8F`, `A3`–`A5`, `C2`, `C6`, `D0`; `FE 06`, `FE 07`, `FE 15`, `FE 16`, `FE 1C` | a token (below) |
+| any other | none |
+
+A **token**: read its table `t` from `TOKT` and `k` from `TOKI`. Each table has a cache, a
+list of row numbers, the most recent first, empty at the start of the section, and a last row
+number, 0 at the start. With `k > 0`, the row number is entry `k − 1` of the cache of `t`,
+which must exist, and moves to the front. With `k = 0`, read a `varint` `z` from the
+`TOKR_*` stream of `t`; the row number is `r = last + unzigzag(z)` (wrapping), which must be
+below 2^24, becomes the last, and goes to the front of the cache, which keeps its first 255
+entries. Write `le32 (t << 24 | r)`.
+
+### C3.4 The tables
+
+Each table present in `Valid`, from table `00` up to `2C`, is its row count of rows, of the
+columns of ECMA-335 §II.22, in the order listed there, without padding. A column is 2 or 4
+bytes wide:
+
+- a constant of 2 or 4 bytes (`Constant`'s `Type` and its padding byte as one of 2);
+- an index into `#Strings`, `#GUID` or `#Blob`: 4 bytes where `HeapSizes` has bit `01`, `02`
+  or `04`, else 2;
+- an index into table `x`: 2 bytes where `x` has fewer than 2^16 rows, else 4;
+- a coded index of `n` tag bits (§II.24.2.6): 2 bytes where every table it may index has
+  fewer than `2^(16 − n)` rows, else 4. The unused tags of `CustomAttributeType` count none.
+
+The tables follow one another from where §C3.1 says they start. For each table in order, for
+each of its columns in order, with `R` rows: read the values `v[0..R]` of width `w`, a byte
+plane at a time (`R` bytes from `TABLES` for byte 0 of each value, then for byte 1, ...), and
+then:
+
+- MethodDef's RVA column (table `06`, column 0) is read as 4 bytes wide whatever its width,
+  and each value is mapped, with `p` the index of the last body so mapped (−1 at first): 0 is
+  0; 1 is a `le32` read from `RVAX`; any `z ≥ 2` is `origin + b` (wrapping) for the body `i = p +
+  1 + unzigzag(z − 2)` at `b` (§C3.2), which must exist, and `p` becomes `i`;
+- any other column: read a byte from `COLFLAGS`; 1: each `v[r]` for `r ≥ 1` becomes `v[r] +
+  v[r − 1]` modulo `2^(8w)`; 0: as it is; else the module fails.
+
+The value of row `r` is written at its place in the row, `w` bytes little-endian.
+
+### C3.5 The rest
+
+The ranges taken, in order of their start, must not overlap and must lie within `out`. Copy
+from `REST` the bytes between them, before the first and after the last, in order.
+
+## C4. Encoding *(encoder)*
+
+`aqr_exe::arch::cil::encode` takes the section, its RVA and the offset of its metadata root,
+and fails where there is no `BSJB` signature at that offset, the root or the tables' header
+is cut short, the tables have bits above `2C` or rows past their stream, or the parts of
+§C3.1 overlap or are not within the section. The bodies it takes are those at the RVAs of
+the MethodDef table within the section, in ascending order, each where it is whole within the
+section (a fat header of 12 bytes, its data sections each at least 4 bytes), starts at or
+after the end of the last taken, overlaps no part of the metadata, and its code is whole
+instructions by §C3.3. It writes `0` to `COLFLAGS` but for columns of more than one row in
+ascending order (each value at least the one before), which go as deltas, and maps an RVA to a
+body only where it is the RVA of one taken.
+
+`aqr_exe::format::pe::locate_code` finds the metadata through the CLR header (data directory
+14) of images of IL alone (`COMIMAGE_FLAGS_ILONLY`) and of ReadyToRun images (a
+ManagedNativeHeader with the `RTR` signature), of any machine. aqr-compress applies the
+module to the section holding the metadata, in place of the x86 or ARM64 filter there; the
+native code of a ReadyToRun image of x86-64 (the extents of its runtime functions, those
+closer than 64 bytes in one) is filtered by `exe-recons/x86` within `REST`, where whole within
+one of its ranges.
+
+Why this layout (measured on the 84 .NET assemblies of IL alone in aqr-exe's sample, 66.1 MB;
+zstd -9, each stream on its own): the files, 19.54 MB; their parts each in a stream of its
+own, 20.24 MB, of which the tables 6.07 MB and the IL 3.88 MB. The tables by column 4.62 MB,
+with deltas 4.36 MB; the IL split by operand alone 3.87 MB, its tokens 2.17 MB of it, which
+the cache and deltas bring to 1.12 MB (1.14 MB with 64 entries). In all 17.06 MB, −12.7%.
+Grouping the columns into streams by kind or by table makes no difference worth its streams
+(17.06 to 17.13 MB).
+
+## C5. Validation
+
+The module fails if:
+
+- the params are not 8 bytes long, or there are resources, or not exactly 26 inputs;
+- a stream runs out where bytes are to be read, or a `varint` is longer than 5 bytes or not
+  below 2^32;
+- a method header is neither tiny nor fat of 12 bytes, a data section is shorter than 4
+  bytes, an instruction ends past its code, a cache index is past the cache, a row number is
+  not below 2^24, an RVA's body does not exist, or a `COLFLAGS` byte is above 1;
+- `Valid` has a bit above `2C`, or the tables' rows run past their stream;
+- the ranges taken overlap or are not within `out`;
 - any stream has bytes left once the output is `len` bytes long.

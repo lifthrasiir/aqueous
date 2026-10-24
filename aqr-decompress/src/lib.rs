@@ -5,7 +5,7 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use aqr_exe::arch::{arm64, x86};
+use aqr_exe::arch::{arm64, cil, x86};
 use aqr_formula::aqr::{self, Failure, NativeModule};
 use aqr_formula::{Apply, Error, Module, Modules, Result};
 
@@ -17,6 +17,11 @@ pub const X86: Module = Module { name: "exe-recons/x86", version: 1 };
 /// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
 /// inputs: the streams of [`arm64::STREAM_NAMES`].
 pub const ARM64: Module = Module { name: "exe-recons/arm64", version: 1 };
+
+/// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
+/// section's RVA and the offset of the metadata root in it (u32 each, little endian); inputs:
+/// the streams of [`cil::STREAM_NAMES`].
+pub const CIL: Module = Module { name: "exe-recons/cil", version: 1 };
 
 /// aqr-flate reconstruction of a raw DEFLATE stream. Resources: the model data of the record's
 /// profile; inputs: the data and the record.
@@ -54,8 +59,8 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 15] =
-    [X86, ARM64, FLATE, LZ4, SNAPPY, ZIP, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE, PCM, RASTER];
+pub const MODULES: [Module; 16] =
+    [X86, ARM64, CIL, FLATE, LZ4, SNAPPY, ZIP, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE, PCM, RASTER];
 
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
@@ -137,6 +142,15 @@ impl Native {
                 return Err("bad parameters or inputs".into());
             };
             arm64::decode(streams, u64::from_le_bytes(*p), len).ok_or_else(|| "corrupt".into())
+        } else if m == CIL {
+            none(resources)?;
+            let (Some(p), Ok(streams), Ok(len)) =
+                (params.first_chunk::<8>(), <[&[u8]; cil::NUM_STREAMS]>::try_from(inputs), usize::try_from(len))
+            else {
+                return Err("bad parameters or inputs".into());
+            };
+            let (origin, meta) = (u32::from_le_bytes(p[..4].try_into().unwrap()), u32::from_le_bytes(p[4..].try_into().unwrap()));
+            cil::decode(streams, origin, meta as usize, len).ok_or_else(|| "corrupt".into())
         } else if m == FLATE {
             aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)
         } else if m == LZ4 {

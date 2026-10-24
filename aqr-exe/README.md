@@ -1,14 +1,18 @@
 # aqr-exe
 
 Machine code recompression, of the executable sections of PE images and Mach-O images (thin or
-in a universal file), each rebuilt bit for bit; of .NET ReadyToRun images (x86-64), of their
-native code alone, as their runtime functions tell, the metadata and IL around it left out:
+in a universal file), and of the metadata and IL of .NET images, each rebuilt bit for bit:
 
 - x86 and x86-64: a disfilter splits the code into 46 streams by instruction field, with
   relative targets made absolute.
 - ARM64: the instructions stay in one stream of big-endian words, with the targets of `BL`
   and `ADRP` made absolute, and the offsets of local branches taken out of them to streams
   of their own.
+- .NET (CIL), the section holding the metadata of an image of IL alone or ReadyToRun: the
+  tables by column, sorted columns as deltas; the heaps apart; the IL split by operand into
+  26 streams in all, its tokens through a move-to-front cache of each table. The native code
+  of a ReadyToRun image of x86-64 (as its runtime functions tell) goes through the x86
+  disfilter within it.
 
 ```sh
 cargo run --release -p aqr-exe --example aqr-exe-bench -- [-l LEVEL] [--no-zstd] [NAME|PATH ...]  # filter round trip, speed, zstd before and after
@@ -23,6 +27,13 @@ let code = locate_code(&mut file)?;                  // the executable sections,
 let st = x86::encode(section, va, code.is64).unwrap();
 let back = x86::decode(&(&st).into(), code.is64);    // Some(section)
 
+use aqr_exe::arch::cil;
+if let Some(cli) = code.cli {                         // .NET: the section holding the metadata
+    let (rva, off, size) = cli.section;
+    let st = cil::encode(&file[off as usize..][..size], rva, cli.metadata).unwrap();
+    let back = cil::decode(std::array::from_fn(|i| &st.streams()[i][..]), rva, cli.metadata, size);
+}
+
 use aqr_exe::arch::arm64;
 use aqr_exe::format::macho;
 for image in macho::images(&file).unwrap_or_default() {  // each architecture of a universal file
@@ -35,8 +46,8 @@ for image in macho::images(&file).unwrap_or_default() {  // each architecture of
 }
 ```
 
-`FORMAT.md` specifies the modules `exe-recons/x86`, with the opcode tables in full, and
-`exe-recons/arm64`.
+`FORMAT.md` specifies the modules `exe-recons/x86`, with the opcode tables in full,
+`exe-recons/arm64` and `exe-recons/cil`.
 
 ## Results
 
@@ -57,22 +68,27 @@ hashes and original paths), of those on a Windows 11 machine.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress | memory / input |
 |---|---|---|---|---|---|---|---|
-| sample | 259 | 391.3 | **0.335** | 0.381 | **29.3 MB/s** | **465 MB/s** | 9.3× (median of 6 files of 8 MB or more); 27 MB + 7.2× |
-| sample, coded | 160 | 313.3 | 0.339 | 0.395 | 31.0 MB/s | 396 MB/s | |
-| sample, not coded | 99 | 78.0 | 0.319 | 0.327 | 24.2 MB/s | 1547 MB/s | |
+| sample | 259 | 391.3 | **0.326** | 0.381 | **30.2 MB/s** | **416 MB/s** | 9.3× (median of 6 files of 8 MB or more); 24 MB + 7.3× |
+| sample, coded | 218 | 365.6 | 0.328 | 0.387 | 30.2 MB/s | 395 MB/s | |
+| sample, .NET coded | 80 | 90.1 | 0.320 | 0.380 | 27.7 MB/s | 459 MB/s | |
+| sample, not coded | 41 | 25.7 | 0.296 | 0.298 | 29.6 MB/s | 1653 MB/s | |
 | large | 11 | 1528.6 | **0.306** | 0.383 | **57.7 MB/s** | **347 MB/s** | 6.8× (5.7–9.0×) |
 
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
-archiving no smaller: 87 .NET assemblies (84 of IL alone, two of them with PNG resources coded;
-two ReadyToRun images of x86-32 and ARM64; a Silverlight NGen image), and 12 native files:
-resource-only DLLs, three DirectX SDK samples and an ARM DLL among them. The 22 ReadyToRun
-images of x86-64 are coded, their native code alone (13.0 MB of 37.7 MB): 0.432 → 0.396, though
-one of them loses its PNG resources (the rest of a PE image is not scanned once coded). The
-ARM64 DLL of the sample is coded by `exe-recons/arm64` (0.346).
+archiving no smaller: 29 .NET assemblies (24 satellite assemblies of resources alone and
+two with PNG resources coded; `System.Text.Encoding.CodePages.dll`, mostly tables of code
+pages; `Microsoft.SqlServer.Types.dll`, whose IL is in another section than its metadata; a
+Silverlight NGen image), and 12 native files: resource-only DLLs, three DirectX SDK samples
+and an ARM DLL among them. Of the .NET assemblies, those of IL alone come to 0.267 from 0.306
+(84 files, 66.1 MB; zstd -3 0.316), and the ReadyToRun ones to 0.374 from 0.432 (24 files,
+38.4 MB; zstd -3 0.435): 0.396 with their native code alone through the x86 disfilter, the
+rest through `exe-recons/cil`. One of the ReadyToRun images loses its PNG resources (the rest
+of a PE image is not scanned once coded). The ARM64 DLL of the sample is coded by
+`exe-recons/arm64` (0.346).
 
 The archives are those of the first measurement, on an AMD Ryzen 7 9700X under Windows 11 at
-`aa7a327`, byte for byte, but for the ARM64 DLL and the ReadyToRun images (kept raw then)
-and the changed file. That
+`aa7a327`, byte for byte, but for the ARM64 DLL and the .NET assemblies (kept raw then) and
+the changed file. That
 run gave 16.5 / 336 MB/s on the sample and 36.4 / 268 MB/s on the large set; its peak working
 set was smaller, 5.3× (14 MB + 4.7×) and 4.7× (4.3–5.2×). Most of the difference is the
 allocator: with the cache off (`MallocLargeCache=0`), the files of 8 MB or more take 6.3×
@@ -116,5 +132,8 @@ alone filtered; VS Code's ZIP (267 MB) to 222.2 MB.
   they are. ARM64 data in code sections (literal pools) is taken as instructions.
 - Mach-O code signatures are kept as they are, though their page hashes follow from the
   image.
-- .NET IL and metadata are not modelled. Of ReadyToRun images, only those of x86-64 have
-  their native code filtered; NGen images (`*.ni.dll`) are kept as they are.
+- .NET: only the section holding the metadata is taken, so IL in other sections is kept as it
+  is (one file of the sample). Managed resources are kept as they are (they are most of what
+  is left: satellite assemblies, `*.resources.dll`, gain nothing). Of ReadyToRun images, only
+  those of x86-64 have their native code filtered; NGen images (`*.ni.dll`) and mixed-mode
+  assemblies are not taken.
