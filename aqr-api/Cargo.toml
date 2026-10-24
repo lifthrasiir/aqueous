@@ -11,3 +11,6 @@ default = ["panic-handler"]
 panic-handler = []
 # The panic handler logs the location first, at the cost of the message templates of the panics (~2 KB).
 panic-location = ["panic-handler"]
+
+[dev-dependencies]
+aqr-formula = { path = "../aqr-formula" }

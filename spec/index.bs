@@ -2757,6 +2757,16 @@ whose structure is determined by the opcode as described in the following sectio
       <td>[=formula/concat_count=]
       <td>1
     <tr>
+      <td>13<sub>16</sub>
+      <td>[[#insn-pack|Pack]]
+      <td>[=formula/pack_count=]
+      <td>1
+    <tr>
+      <td>14<sub>16</sub>
+      <td>[[#insn-split|Split]]
+      <td>1
+      <td>[=formula/split_count=]
+    <tr>
       <td>20<sub>16</sub>
       <td>[[#insn-checksum|Checksum]]
       <td>0
@@ -2939,6 +2949,50 @@ Opcode 12<sub>16</sub> denotes a **Concatenate instruction**. Its operands consi
     <tr>
       <td><dfn>concat_count</dfn>
       <td>[=leb128=]
+      <td>
+  </tbody>
+</table>
+
+<h4 id=insn-pack>
+Pack instruction</h4>
+
+Opcode 13<sub>16</sub> denotes a **Pack instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>pack_count</dfn>
+      <td>[=leb128=]
+      <td>
+  </tbody>
+</table>
+
+<h4 id=insn-split>
+Split instruction</h4>
+
+Opcode 14<sub>16</sub> denotes a **Split instruction**. Its operands consist of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>split_count</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>split_sizes</dfn>
+      <td>[=leb128=][[=formula/split_count=]]
       <td>
   </tbody>
 </table>
@@ -3308,6 +3362,12 @@ To <dfn>evaluate a formula block</dfn> |block|:
             5. Push each item of |outputs| in order.
         : 12<sub>16</sub> (Concatenate)
         :: Pop [=formula/concat_count=] items and push their concatenation in order.
+        : 13<sub>16</sub> (Pack)
+        :: Pop [=formula/pack_count=] items and push the [=packed byte sequence=] of them in order.
+        : 14<sub>16</sub> (Split)
+        :: 1. [=formula/split_count=] MUST be at least 1.
+            2. Pop an item |x|. The sum of [=formula/split_sizes=] MUST be equal to the length of |x|.
+            3. For each |n| of [=formula/split_sizes=] in order, push the next |n| bytes of |x|.
         : 20<sub>16</sub> (Checksum)
         :: |stack| MUST NOT be empty.
             The XXH64 checksum of the top of |stack| MUST be equal to [=formula/checksum_value=].
@@ -3321,7 +3381,8 @@ An <dfn>output checksum</dfn> is a Checksum instruction [=covers|covering=] an o
 
 <div class=note>
   Every byte sequence on the stack is used exactly once, as an input of another instruction or as an output,
-  so a formula is a tree of instructions rooted at its outputs.
+  so a formula is a tree of instructions rooted at its outputs,
+  except that an instruction pushing multiple items, an Apply or a Split instruction, is shared by them.
   Byte sequences are defined as fully evaluated values.
   Lazy, streaming or partial evaluation is an implementation strategy and doesn't change the result
   ([[#partial-access]]).
@@ -3331,6 +3392,47 @@ An <dfn>output checksum</dfn> is a Checksum instruction [=covers|covering=] an o
 
 Issue: Multiple outputs, in particular how a file selects one of them ([[#metadata-block]]),
 and a reference to another file (in particular when the referenced file is replaced in a later segment).
+
+<h4 id=packed-byte-sequences>
+Packed byte sequences</h4>
+
+The <dfn>packed byte sequence</dfn> of a [=list=] of [=byte sequences=] |items|
+is the concatenation of the following, where |n| is the number of |items|:
+
+* |n| as [=u64le=];
+* For each |i| in [0, |n|), the sum of the lengths of |items|[0] through |items|[|i|] as [=u64le=];
+* Each item of |items| in order.
+
+A byte sequence |p| is a packed byte sequence of exactly one [=list=] |items|, if any.
+To <dfn>unpack</dfn> |p|:
+
+<ol class=algorithm>
+    1. If |p| is shorter than 8 bytes, return failure.
+    2. Let |n| be the first 8 bytes of |p| as [=u64le=], and let |h| be 8 × (|n| + 1).
+        If |h| exceeds the length of |p|, return failure.
+    3. Let |e|<sub>|i|</sub> be the 8 bytes of |p| from the offset 8 × (|i| + 1) as [=u64le=] for each |i| in [0, |n|),
+        and let |e|<sub>-1</sub> be 0.
+    4. If |e|<sub>|i| - 1</sub> > |e|<sub>|i|</sub> for any |i| in [0, |n|), return failure.
+    5. If |h| + |e|<sub>|n| - 1</sub> is not the length of |p|, return failure.
+    6. Return the [=list=] of the bytes of |p| in [|h| + |e|<sub>|i| - 1</sub>, |h| + |e|<sub>|i|</sub>) for each |i| in [0, |n|).
+</ol>
+
+<div class=note>
+  Packed byte sequences let a module take a list of byte sequences whose number varies between applications,
+  e.g. one per section of an executable, as a single input,
+  since the number of inputs of a module is fixed by its [=entry point=] ([[#module-execution]]).
+  The boundaries are not stored: a Pack instruction derives them from the lengths of its items,
+  which are known without evaluating anything ([[#formula-data]]).
+  A module still has to [=unpack=] its input and fail on a failure,
+  since the same bytes can be given in any other way, e.g. by a Literal instruction followed by a Concatenate instruction.
+  The fixed-width boundaries let a module find any item without parsing the others,
+  and precede the items so that a [=part module=] can request them first.
+
+  In the other direction, a module producing a list of byte sequences outputs their plain concatenation,
+  which a Split instruction separates by the sizes declared in the formula.
+  The output of such a module is passed to another module taking a packed byte sequence
+  by a Split instruction followed by a Pack instruction.
+</div>
 
 <h3 id=module-execution>
 Module execution</h3>

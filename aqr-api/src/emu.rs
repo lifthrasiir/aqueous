@@ -71,7 +71,13 @@ fn sized_to_fit(data: &[u8]) -> Vec<u8> {
 }
 
 /// Applies the module `entry` to `inputs`, `resources` and `params` with the declared output size `size`.
-pub fn apply(entry: &Entry, inputs: &[&[u8]], resources: &[&[u8]], params: &[u8], size: u64) -> Result<Vec<u8>, Failure> {
+pub fn apply(
+    entry: &Entry,
+    inputs: &[&[u8]],
+    resources: &[&[u8]],
+    params: &[u8],
+    size: u64,
+) -> Result<Vec<u8>, Failure> {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         let prev = panic::take_hook();

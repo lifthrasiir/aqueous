@@ -4,6 +4,8 @@
 //! A [`Formula`] is a tree of [`Node`]s over [`Stream`]s:
 //! - `slice`: a byte range of a stream;
 //! - `concat`: nodes one after another;
+//! - `pack`: nodes as a [`packed`] byte sequence, for a module taking a list of them as one
+//!   input;
 //! - `apply`: a [`Module`] (a pure function of its inputs, resources and parameters) applied
 //!   to nodes, declaring the size of its output.
 //!
@@ -22,6 +24,7 @@
 //! [`aqr`] stores a formula as an Aqueous archive of the file alone.
 
 pub mod aqr;
+pub mod packed;
 
 use std::borrow::Cow;
 use std::fmt;
@@ -137,6 +140,8 @@ pub enum Node {
         len: u64,
     },
     Concat(Vec<Node>),
+    /// The [`packed`] byte sequence of the nodes.
+    Pack(Vec<Node>),
     Apply(Box<Apply>),
 }
 
@@ -176,6 +181,11 @@ impl Node {
         if out.len() == 1 { out.pop().unwrap() } else { Node::Concat(out) }
     }
 
+    /// The [`packed`] byte sequence of `nodes`, as they are.
+    pub fn pack(nodes: impl IntoIterator<Item = Node>) -> Node {
+        Node::Pack(nodes.into_iter().collect())
+    }
+
     /// An application without resources.
     pub fn apply(module: Module, params: Vec<u8>, inputs: Vec<Node>, len: u64) -> Node {
         Node::apply_with(module, Vec::new(), params, inputs, len)
@@ -190,6 +200,7 @@ impl Node {
         match self {
             Node::Slice { len, .. } => *len,
             Node::Concat(ns) => ns.iter().map(Node::len).sum(),
+            Node::Pack(ns) => packed::header_len(ns.len()) + ns.iter().map(Node::len).sum::<u64>(),
             Node::Apply(a) => a.len,
         }
     }
@@ -203,7 +214,7 @@ impl Node {
         f(self);
         match self {
             Node::Slice { .. } => {}
-            Node::Concat(ns) => ns.iter().for_each(|n| n.visit(f)),
+            Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| n.visit(f)),
             Node::Apply(a) => a.inputs.iter().for_each(|n| n.visit(f)),
         }
     }
@@ -212,7 +223,7 @@ impl Node {
     fn slices_mut(&mut self, f: &mut impl FnMut(&mut usize, &mut u64, &mut u64)) {
         match self {
             Node::Slice { stream, start, len } => f(stream, start, len),
-            Node::Concat(ns) => ns.iter_mut().for_each(|n| n.slices_mut(f)),
+            Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| n.slices_mut(f)),
             Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.slices_mut(f)),
         }
     }
@@ -374,6 +385,12 @@ impl Formula {
                 self.eval_into(n, m, &mut out)?;
                 Ok(Cow::Owned(out))
             }
+            Node::Pack(ns) => {
+                let mut out = Vec::with_capacity(n.len() as usize);
+                packed::put_header(&mut out, ns.iter().map(Node::len));
+                ns.iter().try_for_each(|n| self.eval_into(n, m, &mut out))?;
+                Ok(Cow::Owned(out))
+            }
             Node::Apply(a) => {
                 let inputs = a.inputs.iter().map(|n| self.bytes(n, m)).collect::<Result<Vec<_>>>()?;
                 let inputs: Vec<&[u8]> = inputs.iter().map(|i| &**i).collect();
@@ -388,7 +405,7 @@ impl Formula {
 }
 
 /// Indented, a node a line: `slice #stream [start, +len) CLASS` (and the kind of the stream
-/// unless [`Kind::Unknown`]), `concat LEN`, `apply MODULE LEN` with the lengths of its
+/// unless [`Kind::Unknown`]), `concat LEN`, `pack LEN`, `apply MODULE LEN` with the lengths of its
 /// resources and its parameters in hex.
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -401,8 +418,8 @@ impl fmt::Display for Formula {
                     }
                     s => writeln!(f, "slice #{stream} [{start}, +{len}) {}", s.map_or("?", |s| &s.class)),
                 },
-                Node::Concat(ns) => {
-                    writeln!(f, "concat {}", n.len())?;
+                Node::Concat(ns) | Node::Pack(ns) => {
+                    writeln!(f, "{} {}", if let Node::Pack(_) = n { "pack" } else { "concat" }, n.len())?;
                     ns.iter().try_for_each(|n| node(fm, n, depth + 1, f))
                 }
                 Node::Apply(a) => {
@@ -501,6 +518,23 @@ mod tests {
         );
         f.streams[1].kind = Kind::Format("zlib");
         assert!(f.to_string().ends_with("slice #1 [0, +3) b (format=zlib)\n"), "{f}");
+    }
+
+    #[test]
+    fn eval_pack() {
+        let mut f = Formula::raw("a", b"hello".to_vec());
+        f.root = Node::pack([
+            Node::slice(0, 1, 2),
+            Node::apply(REV, vec![], vec![Node::slice(0, 0, 3)], 3),
+            Node::slice(0, 0, 0),
+        ]);
+        assert_eq!(f.len(), 32 + 5);
+        let out = f.eval(&Rev).unwrap();
+        assert_eq!(packed::unpack(&out).unwrap(), [&b"el"[..], b"leh", b""]);
+        assert_eq!(
+            f.to_string(),
+            "pack 37\n  slice #0 [1, +2) a\n  apply rev@1 3\n    slice #0 [0, +3) a\n  slice #0 [0, +0) a\n"
+        );
     }
 
     #[test]

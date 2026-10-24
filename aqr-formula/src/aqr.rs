@@ -30,7 +30,7 @@ use xxhash_rust::xxh64::{Xxh64, xxh64};
 use zstd::zstd_safe::zstd_sys::ZSTD_EndDirective;
 use zstd::zstd_safe::{self, CCtx, CParameter, InBuffer, OutBuffer, ResetDirective};
 
-use crate::{Error, Formula, Kind, Module, Node, Resource, Result};
+use crate::{Error, Formula, Kind, Module, Node, Resource, Result, packed};
 
 pub const HEADER_MAGIC: [u8; 6] = [0xf8, 0x04, 0x03, 0x6a, 0xd6, 0xbe];
 pub const FOOTER_MAGIC: [u8; 6] = [0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12];
@@ -56,6 +56,8 @@ const SWAP: u8 = 0x0f;
 const SLICE: u8 = 0x10;
 const APPLY: u8 = 0x11;
 const CONCAT: u8 = 0x12;
+const PACK: u8 = 0x13;
+const SPLIT: u8 = 0x14;
 const CHECKSUM: u8 = 0x20;
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -359,9 +361,9 @@ fn instructions(n: &Node, ordinals: &[Option<u64>], modules: &[Module], resource
             varint::put(out, start);
             varint::put(out, len);
         }
-        Node::Concat(ns) => {
+        Node::Concat(ns) | Node::Pack(ns) => {
             ns.iter().for_each(|n| instructions(n, ordinals, modules, resources, out));
-            out.push(CONCAT);
+            out.push(if let Node::Pack(_) = n { PACK } else { CONCAT });
             varint::put(out, ns.len() as u64);
         }
         Node::Apply(a) => {
@@ -388,7 +390,9 @@ fn instructions(n: &Node, ordinals: &[Option<u64>], modules: &[Module], resource
 pub fn description_bound(n: &Node) -> usize {
     match n {
         &Node::Slice { start, len, .. } => 1 + 3 + varint::len(start) + varint::len(len),
-        Node::Concat(ns) => ns.iter().map(description_bound).sum::<usize>() + 1 + varint::len(ns.len() as u64),
+        Node::Concat(ns) | Node::Pack(ns) => {
+            ns.iter().map(description_bound).sum::<usize>() + 1 + varint::len(ns.len() as u64)
+        }
         Node::Apply(a) => {
             let inputs: usize = a.inputs.iter().map(description_bound).sum();
             inputs
@@ -1157,6 +1161,8 @@ enum Insn<'a> {
     Slice { block: usize, start: u64, len: u64 },
     Apply(Apply<'a>),
     Concat(usize),
+    Pack(usize),
+    Split(Vec<u64>),
     Checksum(u64),
 }
 
@@ -1277,6 +1283,14 @@ fn read<'a>(d: &'a [u8], env: &Env, non_leaf: usize, used: &mut [bool]) -> Decod
                 Insn::Apply(Apply { module, resources: res, params, num_inputs, output_sizes })
             }
             CONCAT => Insn::Concat(r.index(depth + 1)?),
+            PACK => Insn::Pack(r.index(depth + 1)?),
+            SPLIT => {
+                let sizes = r.nums()?;
+                if sizes.is_empty() {
+                    return invalid("a split into no items");
+                }
+                Insn::Split(sizes)
+            }
             CHECKSUM => {
                 let v = d.get(r.at..r.at + 8).ok_or_else(|| Failure::Invalid("truncated checksum".into()))?;
                 r.at += 8;
@@ -1291,9 +1305,13 @@ fn read<'a>(d: &'a [u8], env: &Env, non_leaf: usize, used: &mut [bool]) -> Decod
                 pop(&mut depth, a.num_inputs)?;
                 depth += a.output_sizes.len();
             }
-            &Insn::Concat(n) => {
+            &Insn::Concat(n) | &Insn::Pack(n) => {
                 pop(&mut depth, n)?;
                 depth += 1;
+            }
+            Insn::Split(sizes) => {
+                pop(&mut depth, 1)?;
+                depth += sizes.len();
             }
             Insn::Checksum(_) if depth == 0 => return invalid("a checksum of an empty stack"),
             Insn::Checksum(_) => {}
@@ -1400,6 +1418,33 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
                 let bytes = parts.iter().map(|v| contents.get(v)).collect::<Vec<_>>().concat();
                 contents.drop_all(parts);
                 stack.push(Value::Bytes(bytes));
+            }
+            Insn::Pack(n) => {
+                let parts = stack.split_off(stack.len() - n);
+                let bytes = packed::pack(&parts.iter().map(|v| contents.get(v)).collect::<Vec<_>>());
+                contents.drop_all(parts);
+                stack.push(Value::Bytes(bytes));
+            }
+            Insn::Split(sizes) => {
+                let x = stack.pop().unwrap();
+                let bytes = contents.get(&x);
+                if sizes.iter().try_fold(0u64, |s, &n| s.checked_add(n)) != Some(bytes.len() as u64) {
+                    return invalid("a split into sizes not adding up");
+                }
+                // slices and literals split where they are
+                let mut at = 0;
+                for &n in &sizes {
+                    let r = at..at + n as usize;
+                    stack.push(match &x {
+                        Value::Slice(o, s) => Value::Slice(*o, s.start + r.start..s.start + r.end),
+                        &Value::Literal(l) => Value::Literal(&l[r]),
+                        Value::Bytes(b) => Value::Bytes(b[r].to_vec()),
+                    });
+                    at += n as usize;
+                }
+                if let Value::Slice(o, _) = x {
+                    contents.refs[o] += sizes.len() - 1;
+                }
             }
             Insn::Checksum(v) => {
                 if checksum(contents.get(stack.last().unwrap())) != v {
@@ -1841,6 +1886,46 @@ mod tests {
         ]
         .concat();
         assert_eq!(decode(&formula(&d, &[b"xyz", b"0123"]), &natives()).unwrap(), b"cdab12x");
+    }
+
+    #[test]
+    fn pack() {
+        let mut f = sample();
+        let c = f.push("c", b"0123".to_vec());
+        let Node::Concat(ns) = &mut f.root else { unreachable!() };
+        let rev = ns.remove(1);
+        let packed = Node::pack([Node::slice(0, 1, 2), Node::slice(2, 0, 0), rev, c]);
+        f.root = Node::apply(REV, vec![1, 2, 3], vec![Node::pack([Node::slice(1, 0, 1)]), packed.clone()], 71);
+        let want = [&packed::pack(&[b"x"])[..], &packed::pack(&[&b"el"[..], b"", b"zyxolleh", b"0123"])]
+            .concat()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+        assert_eq!((packed.len(), want.len()), (40 + 14, 71));
+        assert_eq!(f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap(), want);
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(3)).unwrap();
+        assert_eq!(decode(&c, &natives()).unwrap(), want);
+    }
+
+    /// Split instructions by hand: of a literal and of a slice, and their sizes.
+    #[test]
+    fn split() {
+        let split = |sizes: &[u8]| {
+            let d = [
+                &[1, 0, 0, 0, LITERAL, 4][..],
+                b"abcd",
+                &[SPLIT, 2, 1, 3, SWAP, 1, SLICE, 0, 0, 4, SPLIT, sizes.len() as u8],
+                sizes,
+                &[SWAP, 1, CONCAT, sizes.len() as u8 + 2],
+            ]
+            .concat();
+            decode(&formula(&d, &[b"0123"]), &natives())
+        };
+        assert_eq!(split(&[2, 0, 2]).unwrap(), b"bcda0123");
+        assert_eq!(split(&[3, 1]).unwrap(), b"bcda3012");
+        assert_eq!(split(&[3, 0]), invalid("a split into sizes not adding up"));
+        assert_eq!(split(&[3, 2]), invalid("a split into sizes not adding up"));
+        assert_eq!(split(&[]), invalid("a split into no items"));
     }
 
     /// A non-leaf block that formula blocks share is there for each of them, as long as any is

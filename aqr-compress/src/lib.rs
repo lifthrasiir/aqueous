@@ -622,7 +622,7 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, opt: &Options) {
 fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut Vec<(Node, Option<Made>)>) {
     match n {
         Node::Slice { .. } => {}
-        Node::Concat(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, cx, out)),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, cx, out)),
         Node::Apply(a) => {
             for (i, input) in a.inputs.iter().enumerate() {
                 match content(opt, a.module, i) {
@@ -653,7 +653,7 @@ fn content_slices(
             });
             out.push((n.clone(), child.filter(|c| !c.f.applies().is_empty())));
         }
-        Node::Concat(ns) => ns.iter().for_each(|n| content_slices(n, nest, f, opt, depth, cx, out)),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, nest, f, opt, depth, cx, out)),
         Node::Apply(_) => contents(n, f, opt, depth, cx, out),
     }
 }
@@ -670,7 +670,7 @@ fn place(
 ) {
     match n {
         Node::Slice { .. } => {}
-        Node::Concat(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
         Node::Apply(a) => {
             let module = a.module;
             for (i, input) in a.inputs.iter_mut().enumerate() {
@@ -704,7 +704,7 @@ fn place_slices(
                 *n = f.embed(child);
             }
         }
-        Node::Concat(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, opt, children)),
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, opt, children)),
         Node::Apply(_) => place(n, f, slices, opt, children),
     }
 }

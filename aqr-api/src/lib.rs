@@ -12,16 +12,20 @@
 //! On WebAssembly, a panic traps without formatting its message, [`log`]ging its location first
 //! with the feature `panic-location`.
 //!
-//! A module defines its entry point with [`entry!`].
+//! A module defines its entry point with [`entry!`], and takes a list of byte sequences as one
+//! input with [`Packed`].
 
 #![cfg_attr(target_family = "wasm", no_std)]
 
 #[cfg(not(target_family = "wasm"))]
 pub mod emu;
+mod packed;
 #[cfg(target_family = "wasm")]
 mod wasm;
 #[cfg(not(target_family = "wasm"))]
 use emu::MemId;
+
+pub use packed::Packed;
 
 mod sealed {
     pub trait Sealed {}
@@ -98,10 +102,10 @@ pub fn trap() -> ! {
     sys::trap()
 }
 
-#[cfg(target_family = "wasm")]
-use wasm as sys;
 #[cfg(not(target_family = "wasm"))]
 use emu::sys;
+#[cfg(target_family = "wasm")]
+use wasm as sys;
 
 macro_rules! memories {
     ($($ty:ty => $name:literal, $id:expr;)*) => {$(

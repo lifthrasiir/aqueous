@@ -42,7 +42,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
   - 팩과 loose 객체의 zlib 층은 aqr-flate의 zlib 1.3.1 포트로 다시 만든다. 다시 만들 스트림은 시간 예산 안에서 비용 모델로 고른다(aqr-pdf와 같은 방식).
   - 어떤 파일이든 혼자 복원할 수 있다(`Archive::get`, `aqr-git x`).
 - 엔트리 식 쪽 크레이트.
-  - `aqr-formula/`: 재압축기가 내놓는 엔트리 식(§4.2)의 데이터 모델. 아직 배치되지 않은 스트림(클래스 이름 포함) 위의 `slice`/`concat`/`apply`와, 모듈을 네이티브로 돌리는 엄격한 참조 평가기가 있다. `ref`와 `apply`의 자원 선언은 아카이브 쪽 일이라 없다. 리소스는 아직 쓰는 모듈이 없어서 없다. `aqr`는 식 하나를 메타데이터 블록 없는 명세의 아카이브로 담고 푼다. 모듈마다 module 블록, formula 블록, 슬라이스되는 스트림마다 non-leaf 블록 하나를 둔다. module 블록은 아직 Wasm이 아니다. custom section(`aqueous-native`)에 `이름@버전`만 적은 Wasm 모듈이고, 디코드할 때는 그 이름의 `NativeModule`이 대신 돈다. 네이티브 모듈은 전체형으로 다루고, 메모리 한도는 최대값으로 선언한다(§5.3).
+  - `aqr-formula/`: 재압축기가 내놓는 엔트리 식(§4.2)의 데이터 모델. 아직 배치되지 않은 스트림(클래스 이름 포함) 위의 `slice`/`concat`/`pack`/`apply`와, 모듈을 네이티브로 돌리는 엄격한 참조 평가기가 있다. `ref`와 `apply`의 자원 선언은 아카이브 쪽 일이라 없다. 리소스는 아직 쓰는 모듈이 없어서 없다. `aqr`는 식 하나를 메타데이터 블록 없는 명세의 아카이브로 담고 푼다. 모듈마다 module 블록, formula 블록, 슬라이스되는 스트림마다 non-leaf 블록 하나를 둔다. module 블록은 아직 Wasm이 아니다. custom section(`aqueous-native`)에 `이름@버전`만 적은 Wasm 모듈이고, 디코드할 때는 그 이름의 `NativeModule`이 대신 돈다. 네이티브 모듈은 전체형으로 다루고, 메모리 한도는 최대값으로 선언한다(§5.3).
   - `aqr-compress/`: 압축 쪽. 매직 바이트로 재압축기를 고르고 결과를 엔트리 식으로 돌려준다. PE는 코드 섹션마다 x86 disfilter를 `apply`해 44개 스트림을 입력으로 두고, gzip과 zlib은 컨테이너를 `slice`로 두고 aqr-flate를, mozlz4와 LZ4 프레임은 aqr-lz4를, LevelDB 테이블은 aqr-snappy를, ZIP 아카이브는 aqr-zip을 `apply`한다. 나머지 포맷은 각 재압축기의 `formula` 모듈을 쓴다. 컨테이너의 스트림이 그대로 입력 슬롯이 되고, 매직·버전·체크섬·길이·내부 zstd는 빠진다(부록 A). pdf·psd·jpeg가 품은 파일(DEFLATE 스트림, PNG, JPEG, 임베디드 PSD)은 그 재압축기 모듈의 `apply`로 식에 들어간다. 어느 재압축기가 내놓은 식이든 `apply`가 그대로 받는 내용물 입력(지금은 aqr-flate, aqr-lz4, aqr-snappy, aqr-zip의 평문, 곧 gzip·zlib·pdf의 DEFLATE 스트림, LZ4 스트림, LevelDB 블록과 ZIP 엔트리의 내용)은 다시 재귀 처리해(합성, §4.5), 모듈이 적용된 식이 나오면 그 자리에 넣고 어느 `slice`도 가리키지 않게 된 바이트는 버린다. 기본값으로 모듈을 돌려 왕복 검증하고(§6), 실패하거나 줄지 않으면 원본 `slice`로 남긴다. 식은 aqr-compress가 aqr-decompress의 모듈로 아카이브에 담는다.
   - `aqr-decompress/`: 압축 해제 쪽. 위 모듈들을 각 재압축기의 `formula::decode`로 네이티브로 돌리고(`Native`), 그 모듈로 아카이브를 푼다. aqr-compress(탐지, 스캔, 인코더 호출)에는 의존하지 않는다. 재압축기 크레이트는 아직 인코더와 디코더를 함께 담는다.
   - `aqr/`: 명령줄 도구. `aqr-show`는 파일마다 식을 만들고 평가와 아카이브 왕복을 재며, 모듈과 스트림 클래스별 크기를 보인다.
@@ -95,7 +95,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
 
 ```
 엔트리 테이블 (정적 데이터)            — 경로, 메타데이터, 크기, leaf 블록 위치 (메타데이터 블록)
-엔트리 식 (제약된 함수, 노드망)       — slice / concat / apply / ref, 출력 체크섬 (formula 블록)
+엔트리 식 (제약된 함수, 노드망)       — slice / concat / pack / apply / ref, 출력 체크섬 (formula 블록)
 물리 저장 (seekable zstd 프레임)     — slice가 가리키는 해제된 주소 공간 (non-leaf 블록)
 모듈 (결정적 Wasm, 해시로 식별)       — apply가 부르는 순수 함수
 리소스 (모델 blob, 해시로 식별)       — apply가 모듈에 넘기는 공유 데이터
@@ -194,7 +194,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
 노드의 종류(`slice`, `concat`, `apply`, 인라인 바이트열, 다른 파일의 참조)와 그 인코딩, 크기와 자원 선언은 명세 "Formula data"와 "Formula evaluation" 절에 반영했다. 명세는 식을 스택 기계로 적는다. 아래에서는 식을 다음 표기로 쓴다.
 
 ```
-node := slice(offset, len) | concat(node, ...) | apply(module#, resources, params, [input, ...]) | ref(file#)
+node := slice(offset, len) | concat(node, ...) | pack(node, ...) | apply(module#, resources, params, [input, ...]) | ref(file#)
 ```
 
 - **모듈은 순수 함수이다.** 선언된 입력 N개와 파라미터, 리소스를 받아 출력을 낸다. 모듈끼리는 서로를 모르므로 링크가 필요 없다.
@@ -439,7 +439,8 @@ apply(...)[a:b]       = apply(...)를 b까지 평가한 출력의 [a:b]
 **메모리 배치.** multiple memories를 써서 allocator 의미론 없이 "미리 지정된 메모리 + 오프셋"으로 데이터를 넘긴다. 메모리는 모두 이름 붙은 import이다(작업 메모리, 파라미터, 리소스, 입력, 출력). import와 export의 이름에는 모두 `aqr_`를 붙인다. 모듈을 한 이름 공간에 링크하는 툴체인이나 시뮬레이션에서 `request` 같은 일반적인 이름이 충돌하지 않게 하기 위해서이다. 이름, 크기 규칙, entry point와 그 인자(길이들)는 명세 "Module execution" 절에 반영했다.
 
 - 입력은 *슬롯*이고, 개수는 모듈에 정적으로 선언된다.
-  - 개수가 가변인 묶음은 `concat`으로 한 슬롯에 넣는다. 경계는 별도 인덱스 스트림이나 모듈 메타데이터로 전달한다.
+  - 개수가 가변인 묶음은 `pack`으로 한 슬롯에 넣는다. 경계는 저장하지 않고 호스트가 식에서 만든다(명세 "Packed byte sequences"). 모듈 쪽은 aqr-api의 `Packed`로 읽는다.
+  - 반대로 모듈이 내는 묶음은 그냥 이어 붙인 출력이고, 식의 `split`이 선언된 크기로 나눈다. 다른 모듈에 묶음으로 넘길 때는 `split` 뒤에 `pack`을 한다.
 - 출력 메모리: 임의 쓰기가 가능하다. 출력 크기는 선언되어 있다.
 - 파라미터와 리소스는 전체형 입력과 같게 다룬다(부분형 모듈에서도).
 - **I/O 메모리는 memory64.** multi-memory에서는 메모리마다 주소 타입을 따로 정할 수 있다. I/O 메모리는 크기 상한이 없으므로 64비트 주소로 고정한다(명세). 작업 공간은 wasm32로 둔다.
