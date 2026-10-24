@@ -1,7 +1,7 @@
 //! Round trips through the formula: `formula::encode`, then `Formula::eval` with this crate's
 //! module.
 
-use aqr_formula::{Apply, Formula};
+use aqr_formula::{Apply, Formula, packed};
 use aqr_jpeg::formula::{self, MODULE};
 
 fn module(a: &Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
@@ -110,6 +110,29 @@ fn corrupt_inputs() {
             let r: Vec<&[u8]> = c.iter().map(|v| &v[..]).collect();
             let _ = formula::decode(&a.params, &r, a.len, 0);
         }
+    }
+}
+
+/// Slot 1 must be packed, with an item for every coded embedded JPEG.
+#[test]
+fn embedded_packed() {
+    let one = wrap(GRADIENT, &[GRADIENT]);
+    let f = formula::encode(&one, 0).unwrap();
+    let a = f.applies()[0].clone();
+    let mut ins: Vec<Vec<u8>> = a
+        .inputs
+        .iter()
+        .map(|n| Formula { streams: f.streams.clone(), root: n.clone() }.eval(&module).unwrap())
+        .collect();
+    let decode = |ins: &[Vec<u8>]| {
+        let refs: Vec<&[u8]> = ins.iter().map(|v| &v[..]).collect();
+        formula::decode(&a.params, &refs, a.len, 0)
+    };
+    assert_eq!(decode(&ins).unwrap(), one);
+    let item = packed::unpack(&ins[1]).unwrap()[0].to_vec();
+    for bad in [item.clone(), packed::pack::<&[u8]>(&[]), packed::pack(&[&item, &b""[..]])] {
+        ins[1] = bad;
+        assert!(decode(&ins).is_err());
     }
 }
 

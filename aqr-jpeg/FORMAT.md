@@ -1,8 +1,9 @@
 # aqr-jpeg: the `jpeg-recons` module
 
-This document specifies module `jpeg-recons` version 1 of aqr-formula (`aqr_jpeg::formula`)
+This document specifies module `jpeg-recons` version 2 of aqr-formula (`aqr_jpeg::formula`)
 completely enough to reimplement both directions. The module rebuilds one JPEG file, the
-*original*, bit-exactly from one parameter and nine input slots.
+*original*, bit-exactly from one parameter and nine input slots. (Version 1 had slot 1 as the
+plain concatenation of the embedded JPEGs, with their lengths in the head.)
 
 Sections 1–9 are normative for decoders. Section 10 is about the encoder: everything there is
 the encoder's free choice within the constraints given, except where it says otherwise.
@@ -25,13 +26,13 @@ the encoder's free choice within the constraints given, except where it says oth
 **Param**: one byte, the frame type: 0 = sequential (SOF0 / SOF1), 1 = progressive (SOF2).
 Other values are invalid. The output length is given by the formula.
 
-**Inputs**, in order. Each is a byte string; those that hold lists of streams concatenate
-them and give their lengths in `lens`.
+**Inputs**, in order. Each is a byte string; those that hold lists of streams but slot 1
+concatenate them and give their lengths in `lens`.
 
 | # | class | content |
 |---|---|---|
 | 0 | `jpeg/head` | the head (2.1): `n_embedded` and the entries |
-| 1 | `jpeg/embedded` | the *decoded* bytes of each kind 0 entry, concatenated in entry order |
+| 1 | `jpeg/embedded` | the *decoded* bytes of each kind 0 entry, in entry order, as a packed byte sequence (2.2) |
 | 2 | `jpeg/cut` | the cut blob (2.3) |
 | 3 | `jpeg/info` | the scan info (2.4) |
 | 4 | `jpeg/scans` | the raw scan data and truncated tails (2.5), concatenated in scan order |
@@ -52,7 +53,6 @@ excess byte is an error.
 varint  n_embedded
 per embedded entry i = 0 .. n_embedded-1:
   varint  gap      bytes of the cut blob between the previous entry (or the blob start) and this one
-  varint  length   length of the embedded JPEG
   u8      kind     0 = coded (bytes in slot 1), 1 = copy of an earlier entry
   [kind 1: varint ref   index of an earlier entry, ref < i]
 ```
@@ -63,11 +63,13 @@ invalid.
 
 ### 2.2 Embedded JPEGs
 
-A kind 0 entry takes `length` bytes from the next position of slot 1. A kind 1 entry has no
-bytes of its own: they are those of entry `ref`, and the lengths must agree, so a repeated JPEG
-occurs in slot 1 once. Slot 1 must be used up exactly by the kind 0 entries.
+Slot 1 is a packed byte sequence (the spec's "Packed byte sequences": the number of items and
+the end of each as u64le, then the items), which is invalid where it fails to unpack. A kind 0
+entry is the next item of slot 1. A kind 1 entry has no bytes of its own: they are those of
+entry `ref`, so a repeated JPEG occurs in slot 1 once. Slot 1 must have exactly as many items
+as there are kind 0 entries.
 
-The formula fills slot 1 with the bytes of the embedded JPEGs, each either verbatim or as the
+The formula fills slot 1 with a `pack` of the embedded JPEGs, each either verbatim or as the
 output of this module (at one level of nesting deeper). The module itself does not limit the
 nesting; the encoder stops at depth 3 (section 10).
 

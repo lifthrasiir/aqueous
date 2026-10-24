@@ -2,15 +2,15 @@
 //! the streams of a coded JPEG as nine input slots, the frame type as the only parameter.
 //!
 //! Embedded JPEGs coded here are not decoded by the module: their decoded bytes are an input
-//! slot, which the formula fills with the children's formulas (this module again).
+//! slot, packed, which the formula fills with the children's formulas (this module again).
 
 use crate::codec::{self, CoreSource};
 use crate::fast::{get_bytes, get_varint};
 use crate::jpeg::Error;
 use aqr_common::varint;
-use aqr_formula::{Formula, Kind, Module, Node};
+use aqr_formula::{Formula, Kind, Module, Node, packed};
 
-pub const MODULE: Module = Module { name: "jpeg-recons", version: 1 };
+pub const MODULE: Module = Module { name: "jpeg-recons", version: 2 };
 
 /// what a formula costs beyond its streams, for deciding whether coding an embedded JPEG pays off
 const OVERHEAD: usize = 8;
@@ -45,7 +45,7 @@ fn try_encode(input: &[u8], depth: u32) -> Result<Formula, Error> {
     let head = f.push("jpeg/head", head);
     // a repeated entry has no bytes of its own, it is the earlier one
     let children: Vec<Node> = entries.into_iter().filter_map(|e| e.coded).map(|c| f.embed(c)).collect();
-    let embedded = Node::concat(children);
+    let embedded = Node::pack(children);
     let cut = f.push("jpeg/cut", cut);
     let info = f.push("jpeg/info", core.info);
     // lengths of the scan streams, then of each stripe's words and raw bits
@@ -125,19 +125,19 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
             let mut p = 0;
             let entries = codec::parse_entries(head, &mut p)?;
             codec::fully_read(head, p, "head")?;
-            // coded entries take their bytes from `embedded` in order, repeats are copies
-            let (mut q, mut emb): (usize, Vec<&[u8]>) = (0, Vec::with_capacity(entries.len()));
-            for &(_, n, back) in &entries {
+            // coded entries are the items of `embedded` in order, repeats are copies
+            let mut items = packed::unpack(embedded).ok_or_else(|| Error("embedded not packed".into()))?.into_iter();
+            let mut emb: Vec<&[u8]> = Vec::with_capacity(entries.len());
+            for &(_, back) in &entries {
                 let bytes = match back {
-                    None => get_bytes(embedded, &mut q, n as u64)?,
+                    None => items.next().ok_or_else(|| Error("too few embedded items".into()))?,
                     Some(k) => emb[k],
                 };
-                if bytes.len() != n {
-                    return Err(Error("embedded length mismatch".into()));
-                }
                 emb.push(bytes);
             }
-            codec::fully_read(embedded, q, "embedded")?;
+            if items.next().is_some() {
+                return Err(Error("too many embedded items".into()));
+            }
             let blob = codec::restore_blob(cut, &entries, &emb)?;
             let mut slots = Slots { info, scans, tables, lens, rans, bits, pos: [0; 4] };
             codec::with_bufs(|coefs, _| codec::decode_core(&blob, progressive == 1, &mut slots, coefs))

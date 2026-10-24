@@ -3,7 +3,7 @@
 //! decoders. The DEFLATE streams come from flate2 (zlib-rs), as flate-zoo's sources are not
 //! always at hand.
 
-use aqr_formula::{Apply, Formula, Node};
+use aqr_formula::{Apply, Formula, Node, packed};
 use aqr_pdf::encode::Options;
 use aqr_pdf::formula::{self, MODULE};
 use flate2::{Compression, write::ZlibEncoder};
@@ -381,6 +381,20 @@ fn corrupted_slots() {
         if less[k].pop().is_some() {
             assert!(run(&less, root.len).is_err(), "slot {k}: a byte less");
         }
+    }
+    // The DEFLATE, PNG and JPEG slots are packed, an item for every item of the table taking one.
+    for k in 3..6 {
+        let items = packed::unpack(&inputs[k]).unwrap();
+        assert!(!items.is_empty(), "slot {k}");
+        let mut more = inputs.clone();
+        more[k] = packed::pack(&[&items[..], &[b""]].concat());
+        assert!(run(&more, root.len).is_err(), "slot {k}: an item more");
+        let mut less = inputs.clone();
+        less[k] = packed::pack(&items[1..]);
+        assert!(run(&less, root.len).is_err(), "slot {k}: an item less");
+        let mut plain = inputs.clone();
+        plain[k] = items.concat();
+        assert!(run(&plain, root.len).is_err(), "slot {k}: not packed");
     }
     for k in 0..inputs.len() {
         for at in (0..inputs[k].len()).step_by(1 + inputs[k].len() / 40) {

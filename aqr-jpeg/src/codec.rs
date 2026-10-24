@@ -264,13 +264,12 @@ pub(crate) fn embedded_entries<C>(blob: &[u8], depth: u32, mut code: impl FnMut(
     entries
 }
 
-/// `head` gets the entry list: count, then per entry gap, length and kind (+ back reference).
+/// `head` gets the entry list: count, then per entry gap and kind (+ back reference).
 pub(crate) fn put_entries<C>(head: &mut Vec<u8>, entries: &[Entry<C>]) {
     put_varint(head, entries.len() as u64);
     let mut prev = 0;
     for e in entries {
         put_varint(head, (e.start - prev) as u64);
-        put_varint(head, (e.end - e.start) as u64);
         match e.coded {
             Some(_) => head.push(0),
             None => {
@@ -307,13 +306,12 @@ pub(crate) trait CoreSource<'a> {
 }
 // ---------------------------------------------------------------- decoding
 
-/// The entry list of a head, as (gap, length, back reference) with None for coded entries.
-pub(crate) fn parse_entries(head: &[u8], p: &mut usize) -> Result<Vec<(usize, usize, Option<usize>)>, Error> {
+/// The entry list of a head, as (gap, back reference) with None for coded entries.
+pub(crate) fn parse_entries(head: &[u8], p: &mut usize) -> Result<Vec<(usize, Option<usize>)>, Error> {
     let n = get_varint(head, p)?;
     let mut entries = Vec::new();
     for i in 0..n {
         let gap = get_varint(head, p)? as usize;
-        let len = get_varint(head, p)? as usize;
         let kind = *head.get(*p).ok_or(Error("truncated".into()))?;
         *p += 1;
         let back = match kind {
@@ -327,7 +325,7 @@ pub(crate) fn parse_entries(head: &[u8], p: &mut usize) -> Result<Vec<(usize, us
             }
             _ => return Err(Error("bad embedded entry".into())),
         };
-        entries.push((gap, len, back));
+        entries.push((gap, back));
     }
     Ok(entries)
 }
@@ -335,12 +333,12 @@ pub(crate) fn parse_entries(head: &[u8], p: &mut usize) -> Result<Vec<(usize, us
 /// The blob: `cut` with the bytes of each entry put back at its gap.
 pub(crate) fn restore_blob<E: AsRef<[u8]>>(
     cut: &[u8],
-    entries: &[(usize, usize, Option<usize>)],
+    entries: &[(usize, Option<usize>)],
     emb: &[E],
 ) -> Result<Vec<u8>, Error> {
     let mut blob = Vec::with_capacity(cut.len() + emb.iter().map(|b| b.as_ref().len()).sum::<usize>());
     let mut q = 0usize;
-    for ((gap, _, _), bytes) in entries.iter().zip(emb) {
+    for ((gap, _), bytes) in entries.iter().zip(emb) {
         let piece = cut.get(q..q.saturating_add(*gap)).ok_or(Error("bad embedded position".into()))?;
         blob.extend_from_slice(piece);
         blob.extend_from_slice(bytes.as_ref());

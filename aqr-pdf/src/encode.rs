@@ -363,7 +363,7 @@ pub fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formul
     }
     f.streams[F_META].data = meta;
     let mut inputs = vec![f.push("pdf/table", table), f.push("pdf/skeleton", skel), f.push("pdf/raw", raw)];
-    inputs.extend([Node::concat(deflate), Node::concat(png), Node::concat(jpeg)]);
+    inputs.extend([Node::pack(deflate), Node::pack(png), Node::pack(jpeg)]);
     for (part, (name, kind)) in toks.into_iter().zip(TOK_CLASSES) {
         inputs.push(f.push_as(name, kind, part));
     }
@@ -493,12 +493,11 @@ impl FlateHead {
         fields
     }
 
-    /// The table fields of a `FULL` item: flags, zlib header, DEFLATE length,
-    /// Adler-32 (the inflated data is not there to compute it from).
+    /// The table fields of a `FULL` item: flags, zlib header, Adler-32 (the inflated data is
+    /// not there to compute it from).
     fn full_fields(&self) -> Vec<u8> {
         let mut fields = vec![FULL, self.zlib.is_some() as u8 | (self.adler.is_some() as u8) << 1];
         fields.extend(self.zlib.iter().flatten());
-        varint::put(&mut fields, self.deflate as u64);
         fields.extend(self.adler.iter().flatten());
         fields
     }
@@ -724,14 +723,12 @@ impl Sections {
             }
             Coded::Png(p) => {
                 self.table.push(PNG);
-                varint::put(&mut self.table, p.len());
                 let n = streams_len(&p);
                 self.fm.png.push(self.fm.f.embed(p));
                 (PNG, it.len, n)
             }
             Coded::Jpeg(p) => {
                 self.table.push(JPEG);
-                varint::put(&mut self.table, p.len());
                 let n = streams_len(&p);
                 self.fm.jpeg.push(self.fm.f.embed(p));
                 (JPEG, it.len, n)

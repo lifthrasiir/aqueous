@@ -53,8 +53,9 @@ is its free choice within the constraints given.
 
 ## 2. Module
 
-The module is `pdf-recons`, version 1, implemented by `formula::decode`. Its output is the
-original, whose length the application gives.
+The module is `pdf-recons`, version 2, implemented by `formula::decode`. Its output is the
+original, whose length the application gives. (Version 1 had slots 3 to 5 as plain
+concatenations, with the length of each item's part in its table fields.)
 
 What other recompressors rebuild is not rebuilt here. The module takes the results of their
 modules as input slots, and the formula gives them as applications of those modules: the
@@ -70,9 +71,9 @@ JPEG files of `JPEG` items (aqr-jpeg). A decoder of this module does not need an
 | 0 | `pdf/table` | the table (3.1) |
 | 1 | `pdf/skeleton` | the skeleton, the bytes between items |
 | 2 | `pdf/raw` | the bytes of `RAW` items, in order |
-| 3 | (children) | the DEFLATE streams of `FULL` items, concatenated in table order |
-| 4 | (children) | the PNG files of `PNG` items, concatenated in table order |
-| 5 | (children) | the JPEG files of `JPEG` items, concatenated in table order |
+| 3 | (children) | the DEFLATE streams of `FULL` items, packed in table order |
+| 4 | (children) | the PNG files of `PNG` items, packed in table order |
+| 5 | (children) | the JPEG files of `JPEG` items, packed in table order |
 | 6 | `pdf/tok-layout` | the token layout (6.2) |
 | 7 | `pdf/tok-tables` | the token tables (6.4) |
 | 8 | `pdf/tok-symbols` | the token symbols (6.5) |
@@ -81,8 +82,10 @@ JPEG files of `JPEG` items (aqr-jpeg). A decoder of this module does not need an
 
 Sections 4–6 call slots 6–10 the layout, tables, symbols, raw bits and headers streams.
 
-Slots 3 to 5 are not streams: the formula gives each as the concatenation of one node per item.
-For the encoder (and the evaluator), the nodes are:
+Slots 3 to 5 are packed byte sequences (the spec's "Packed byte sequences": the number of
+items and the end of each as u64le, then the items), and one that fails to unpack is invalid.
+They are not streams: the formula gives each as a `pack` of one node per item. For the encoder
+(and the evaluator), the nodes are:
 
 - slot 3, for each `FULL` item: `apply(aqr-flate, [slice(pool, off, plain), slice(meta, off, mlen)],
   deflate)`, with `pool` the stream `pdf/pool-<class>` (`content`, `font`, `image`, `objstm`,
@@ -116,18 +119,16 @@ u8      mode
 |---|---|---|
 | 0 | `RAW` | varint `n` |
 | 1 | `DUP` | varint `back` |
-| 2 | `FULL` | u8 `flags`, [2 bytes `zlib`], varint `deflate`, [4 bytes `adler`] |
-| 3 | `JPEG` | varint `n` |
+| 2 | `FULL` | u8 `flags`, [2 bytes `zlib`], [4 bytes `adler`] |
+| 3 | `JPEG` | (none) |
 | 4 | `TOK` | u8 `flags`, [2 bytes `zlib`], u8 `class`, varint `plain`, [varint `bpp`, varint `stride`] |
-| 5 | `PNG` | varint `n` |
+| 5 | `PNG` | (none) |
 
 Other modes are invalid. Field constraints:
 
 - `gap` and every `n` at most the original's length; `back` from 1 to the item's index (the
-  number of items before it); `plain` at most 1032 times the original's length; `deflate` at
-  most the original's length.
-- `RAW`'s `n` is the number of bytes of slot 2, `PNG`'s `n` the length of the PNG file in slot 4
-  and `JPEG`'s `n` the length of the JPEG file in slot 5.
+  number of items before it); `plain` at most 1032 times the original's length.
+- `RAW`'s `n` is the number of bytes of slot 2.
 - `TOK`'s `flags`: bit 0, the 2 `zlib` bytes follow; bit 1, the item ends with an Adler-32; bit
   2, the `bpp` and `stride` fields follow (pixels). Other bits must be 0.
 - `FULL`'s `flags`: bit 0, the 2 `zlib` bytes follow; bit 1, the 4 bytes of the Adler-32
@@ -140,15 +141,16 @@ Other modes are invalid. Field constraints:
 ### 3.2 Item bytes
 
 Each item gives its *bytes*, taking its data from the slots in table order: every item of a
-mode takes the next bytes of its slots, from where the item before it left off.
+mode takes the next bytes of slot 2, or the next item of slots 3 to 5, from where the item
+before it left off.
 
 - `RAW`: the next `n` bytes of slot 2.
 - `DUP`: the bytes of the item `back` items before it.
-- `JPEG`: the next `n` bytes of slot 5, the JPEG file.
-- `PNG`: with `P` the next `n` bytes of slot 4, the PNG file, and `m` = `u32 BE` at bytes 33 to
+- `JPEG`: the next item of slot 5, the JPEG file.
+- `PNG`: with `P` the next item of slot 4, the PNG file, and `m` = `u32 BE` at bytes 33 to
   36 of `P` (the length of the second chunk), the item's bytes are `P[41 .. 41 + m]`, which must
   lie within `P`. (This is the data of the IDAT chunk of the PNG file in section 7.3.)
-- `FULL`: the `zlib` bytes (if flagged), the next `deflate` bytes of slot 3 (the DEFLATE
+- `FULL`: the `zlib` bytes (if flagged), the next item of slot 3 (the DEFLATE
   stream) and the `adler` bytes (if flagged).
 - `TOK`: the `zlib` bytes (if flagged), the DEFLATE stream, and the Adler-32 of the inflated
   data (if flagged, as `u32 BE`). The next stream of the token decoder (section 6) gives the
@@ -159,7 +161,7 @@ mode takes the next bytes of its slots, from where the item before it left off.
 1. For each item of the table: append the next `gap` bytes of the skeleton, then the item's
    bytes. The output must never exceed the original's length.
 2. Append the rest of the skeleton.
-3. Check that slots 2 to 5 were used up exactly, that the token symbol stream ended as section
+3. Check that slot 2 was used up exactly and every item of slots 3 to 5 taken, that the token symbol stream ended as section
    6.5 requires (if there is a token decoder, below), and that the output is the original's
    length. Otherwise the input is invalid, and the output must not be returned.
 
@@ -168,8 +170,9 @@ Otherwise the token decoder is set up from them (6.4) before the first item, and
 stream must end as 6.5 requires even if no item is `TOK`. The encoder leaves them all empty
 exactly when no item is `TOK`.
 
-Every `gap` and `n` must also fit in what is left of its slot, and an item whose fields run
-past the end of the table is invalid. The layout, tables, raw bits and headers streams need not
+Every `gap` and `n` must also fit in what is left of its slot, an item of slots 3 to 5 must be
+left for every item taking one, and an item whose fields run past the end of the table is
+invalid. The layout, tables, raw bits and headers streams need not
 be used up: what follows the last item's bits is not read.
 
 ## 4. Token coding: overview

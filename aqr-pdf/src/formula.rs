@@ -2,18 +2,19 @@
 //! skeleton and the items' data as input slots, no parameters.
 //!
 //! The items that other recompressors code are not decoded by the module. Their results are
-//! input slots, which the formula fills with the children's formulas: the DEFLATE streams of
-//! `FULL` items (aqr-flate applied to a slice of a pool and a slice of the metadata), the
-//! PNG files that wrap `PNG` items (aqr-png) and the `JPEG` items (aqr-jpeg). The
-//! module only places their bytes, with the zlib header and Adler-32 around a DEFLATE stream.
+//! packed input slots, which the formula fills with the children's formulas: the DEFLATE
+//! streams of `FULL` items (aqr-flate applied to a slice of a pool and a slice of the
+//! metadata), the PNG files that wrap `PNG` items (aqr-png) and the `JPEG` items (aqr-jpeg).
+//! The module only places their bytes, with the zlib header and Adler-32 around a DEFLATE
+//! stream.
 
 use crate::encode::{self, Options, Stats};
 use crate::kind::CLASSES;
 use crate::varint::Reader;
 use crate::{Error, Result, flate, image, tok};
-use aqr_formula::{Apply, Formula, Module};
+use aqr_formula::{Apply, Formula, Module, packed};
 
-pub const MODULE: Module = Module { name: "pdf-recons", version: 1 };
+pub const MODULE: Module = Module { name: "pdf-recons", version: 2 };
 
 /// The kinds of item in the table.
 pub const RAW: u8 = 0;
@@ -77,7 +78,7 @@ pub fn apply(a: &Apply, inputs: &[&[u8]], threads: usize) -> aqr_formula::Result
     }
 }
 
-/// Where the items' data is next in each slot.
+/// Where the items' data is next in each slot: a byte, or an item of a packed one.
 #[derive(Default)]
 struct Cursors {
     sk: usize,
@@ -87,13 +88,13 @@ struct Cursors {
     jpeg: usize,
 }
 
-/// The slots of the module.
+/// The slots of the module, the packed ones unpacked.
 struct Slots<'a> {
     skel: &'a [u8],
     raw: &'a [u8],
-    deflate: &'a [u8],
-    png: &'a [u8],
-    jpeg: &'a [u8],
+    deflate: Vec<&'a [u8]>,
+    png: Vec<&'a [u8]>,
+    jpeg: Vec<&'a [u8]>,
 }
 
 /// The module: the PDF file of `len` bytes from the eleven `inputs` (FORMAT.md): the table,
@@ -106,7 +107,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
     let len = usize::try_from(len).map_err(|_| Error::Corrupt)?;
     let toks = [t0, t1, t2, t3, t4];
     let tokens = if toks.iter().all(|t| t.is_empty()) { None } else { Some(tok::DecoderState::new(toks)?) };
-    let slots = Slots { skel, raw, deflate, png, jpeg };
+    let unpack = |p| packed::unpack(p).ok_or(Error::Corrupt);
+    let slots = Slots { skel, raw, deflate: unpack(deflate)?, png: unpack(png)?, jpeg: unpack(jpeg)? };
     let mut o = Out::new(len, skel, tokens);
     let (mut t, mut cur) = (Reader::new(table), Cursors::default());
     let mut index = 0;
@@ -115,7 +117,12 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
         o.add(&e)?;
         index += 1;
     }
-    let used = [(raw.len(), cur.rw), (deflate.len(), cur.deflate), (png.len(), cur.png), (jpeg.len(), cur.jpeg)];
+    let used = [
+        (raw.len(), cur.rw),
+        (slots.deflate.len(), cur.deflate),
+        (slots.png.len(), cur.png),
+        (slots.jpeg.len(), cur.jpeg),
+    ];
     if used.iter().any(|(n, at)| n != at) {
         return Err(Error::Corrupt);
     }
@@ -150,19 +157,11 @@ fn entry<'a>(t: &mut Reader<'a>, s: &Slots<'a>, cur: &mut Cursors, len: usize, i
                 return Err(Error::Corrupt);
             }
             let hdr = if flags & 1 != 0 { t.bytes(2)? } else { &[] };
-            let n = t.usize(len)?;
             let adler = if flags & 2 != 0 { t.bytes(4)? } else { &[] };
-            Op::Zlib(hdr, take(s.deflate, &mut cur.deflate, n)?, adler)
+            Op::Zlib(hdr, next(&s.deflate, &mut cur.deflate)?, adler)
         }
-        PNG => {
-            let n = t.usize(s.png.len())?;
-            let file = take(s.png, &mut cur.png, n)?;
-            Op::Bytes(image::unwrap(file).ok_or(Error::Corrupt)?)
-        }
-        JPEG => {
-            let n = t.usize(s.jpeg.len())?;
-            Op::Bytes(take(s.jpeg, &mut cur.jpeg, n)?)
-        }
+        PNG => Op::Bytes(image::unwrap(next(&s.png, &mut cur.png)?).ok_or(Error::Corrupt)?),
+        JPEG => Op::Bytes(next(&s.jpeg, &mut cur.jpeg)?),
         _ => return Err(Error::Corrupt),
     };
     Ok(Entry { gap: s0..cur.sk, op })
@@ -195,6 +194,13 @@ fn take<'a>(v: &'a [u8], at: &mut usize, n: usize) -> Result<&'a [u8]> {
     let r = &v[*at..end];
     *at = end;
     Ok(r)
+}
+
+/// The item `at` of `items`, the next.
+fn next<'a>(items: &[&'a [u8]], at: &mut usize) -> Result<&'a [u8]> {
+    let item = *items.get(*at).ok_or(Error::Corrupt)?;
+    *at += 1;
+    Ok(item)
 }
 
 /// What [`flate_fields`] reads.
