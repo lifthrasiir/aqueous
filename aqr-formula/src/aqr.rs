@@ -138,6 +138,8 @@ pub struct Encoder {
     /// The Zstandard context every stream is compressed with, so that its workers and buffers
     /// are made once rather than for each stream (while they take at most [`CCTX_KEPT`]).
     cctx: RefCell<CCtx<'static>>,
+    /// Whether formulas are sized without their resource blocks ([`Encoder::share_resources`]).
+    shared: bool,
 }
 
 /// A stream's (or resource's) hash and length.
@@ -176,7 +178,30 @@ impl Encoder {
             resources: RefCell::default(),
             raw_lens: RefCell::default(),
             cctx: RefCell::new(CCtx::create()),
+            shared: false,
         }
+    }
+
+    /// Sizes formulas ([`Encoder::len`], [`Encoder::smaller`]) without their resource blocks,
+    /// as if the archive held them already: as in an archive of many files that share them,
+    /// where they come to nothing per file. For measuring; the archives are the same.
+    pub fn share_resources(&mut self) {
+        self.shared = true;
+    }
+
+    /// The bytes of the resource blocks in the archive of `f`.
+    pub fn resources_len(&self, f: &Formula) -> Result<usize> {
+        let mut resources: Vec<&Resource> = Vec::new();
+        for a in f.applies() {
+            for r in &a.resources {
+                if !resources.contains(&r) {
+                    resources.push(r);
+                }
+            }
+        }
+        let mut n = Count(0);
+        resources.into_iter().try_for_each(|r| self.resource_block(&mut n, r))?;
+        Ok(n.0)
     }
 
     /// The Zstandard context of the encoder.
@@ -193,7 +218,7 @@ impl Encoder {
     fn len_with(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>) -> Result<usize> {
         let mut n = Count(0);
         self.write(f, stand_in, None, &mut n)?;
-        Ok(n.0)
+        Ok(if self.shared { n.0 - self.resources_len(f)? } else { n.0 })
     }
 
     /// The length of the archive of `d` as it is, without a checksum (`d` itself not copied).

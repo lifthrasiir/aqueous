@@ -121,6 +121,9 @@ pub struct Options {
     /// depth together, as a multiple of the file, on top of [`EXPANSION_SLACK`]: the streams
     /// past it are kept as they are.
     pub expansion: u64,
+    /// Size formulas without their resources ([`aqr::Encoder::share_resources`]), as for an
+    /// archive of many files sharing them: for measuring what they come to in the limit.
+    pub shared_resources: bool,
 }
 
 /// Bytes that DEFLATE streams may inflate to on top of [`Options::expansion`] times the file.
@@ -165,6 +168,7 @@ impl Default for Options {
             level: Level::Mid,
             smaller: true,
             expansion: 32,
+            shared_resources: false,
         }
     }
 }
@@ -200,7 +204,11 @@ pub(crate) struct Cx {
 impl Cx {
     fn new(d: &[u8], opt: &Options) -> Cx {
         let inflate = opt.expansion.saturating_mul(d.len() as u64).saturating_add(EXPANSION_SLACK);
-        Cx { enc: Encoder::with_threads(opt.level, opt.threads), inflate: Cell::new(inflate), pre: None }
+        let mut enc = Encoder::with_threads(opt.level, opt.threads);
+        if opt.shared_resources {
+            enc.share_resources();
+        }
+        Cx { enc, inflate: Cell::new(inflate), pre: None }
     }
 
     /// Takes `n` bytes of inflated data from the budget, if there are as many left.
