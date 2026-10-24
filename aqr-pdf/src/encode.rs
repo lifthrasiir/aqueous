@@ -20,6 +20,7 @@ use crate::objects::Objects;
 use crate::scan;
 use crate::tok;
 use crate::varint;
+use aqr_flate::inflate::{self, Layout};
 use aqr_formula::{Formula, Kind, Node};
 
 /// Streams shorter than this stay in the skeleton.
@@ -60,8 +61,8 @@ pub struct Stats {
     pub modes: [(usize, usize, usize); NMODES],
     /// Items that a coder failed on (stored raw instead).
     pub failed: usize,
-    /// Seconds spent scanning and planning, parsing FlateDecode streams, on aqr-flate and on
-    /// aqr-jpeg or aqr-png.
+    /// Seconds spent scanning and planning, parsing FlateDecode streams (and making the token
+    /// mode's parts), on aqr-flate and on aqr-jpeg or aqr-png.
     pub times: [f64; 4],
     /// Estimated ns of the choice of modes (the larger of the two ways per item).
     pub predicted: f64,
@@ -303,11 +304,13 @@ fn code_items(
             }
         }
         Some(pool) => {
-            // Memory an item takes while coded (the parsed or decoded form), roughly.
+            // Memory an item takes while coded (the parsed or decoded form), roughly: for the
+            // token mode, a window and the symbols.
             let est = |i: usize| -> Option<usize> {
                 let it = &items[i];
                 match it.plan {
-                    Plan::Flate(_, plain, TOK | FULL | PNG, _) => Some(it.len + (3.0 * plain) as usize),
+                    Plan::Flate(_, _, TOK, _) => Some(8 * it.len + (2 << 20)),
+                    Plan::Flate(_, plain, FULL | PNG, _) => Some(it.len + (3.0 * plain) as usize),
                     Plan::Jpeg(_, blocks, true) => Some(it.len + 160 * blocks as usize),
                     _ => None,
                 }
@@ -508,9 +511,9 @@ enum Coded {
     /// Stored as it is; whether a coder failed on it.
     Raw(bool),
     Dup(usize),
-    /// A FlateDecode stream: its table fields, the parsed stream for the token coder and the
-    /// bytes it covers.
-    Tok(FlateHead, Box<aqr_flate::inflate::Flat>, usize),
+    /// A FlateDecode stream: its table fields, its part for the token coder and its layout,
+    /// and the bytes it covers.
+    Tok(FlateHead, Box<(tok::Part, Layout)>, usize),
     /// A FlateDecode stream: its table fields, inflated data and metadata and the bytes it
     /// covers.
     Full(FlateHead, Vec<u8>, Vec<u8>, usize),
@@ -541,24 +544,37 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &aqr_flate::Options) -> Done {
             let px = if m == TOK { g.as_ref().and_then(pixels) } else { None };
             let t = std::time::Instant::now();
             let hdr = 2 * flate::zlib_header(data) as usize;
-            let parsed = aqr_flate::inflate::parse(&data[hdr..]);
+            // The token mode's part is made as the stream is parsed; the full mode takes only
+            // the length and checksum of the data from it (aqr-flate parses it again).
+            let raw = &data[hdr..];
+            let parsed = match m {
+                TOK => tok::Part::new(c, px).ok().and_then(|mut p| {
+                    let l = inflate::parse_into(raw, usize::MAX, &mut p).ok()?;
+                    Some((l, p.data_len(), p.finish(), Some(p)))
+                }),
+                _ => {
+                    let mut w = tok::Window::new(None);
+                    let l = inflate::parse_into(raw, usize::MAX, &mut w).ok();
+                    l.map(|l| (l, w.data_len(), w.finish(), None))
+                }
+            };
             times[1] += t.elapsed().as_secs_f64();
-            let coded = parsed.ok().and_then(|mut f| {
-                let end = data.len() - f.stream.trailing.len();
-                let adler = f.stream.trailing.len() >= 4 && data[end..end + 4] == flate::adler32(&f.data).to_be_bytes();
-                f.stream.trailing.clear();
+            let coded = parsed.and_then(|(mut l, plain, sum, part)| {
+                let end = data.len() - l.stream.trailing.len();
+                let adler = l.stream.trailing.len() >= 4 && data[end..end + 4] == sum.to_be_bytes();
+                l.stream.trailing.clear();
                 let head = FlateHead {
                     zlib: (hdr == 2).then(|| [data[0], data[1]]),
                     adler: adler.then(|| data[end..end + 4].try_into().unwrap()),
                     class: c,
                     kind: it.kind,
-                    plain: f.data.len(),
+                    plain,
                     px,
                     deflate: end - hdr,
                 };
                 let len = end + 4 * adler as usize;
-                if m == TOK {
-                    return Some(Coded::Tok(head, Box::new(f), len));
+                if let Some(p) = part {
+                    return Some(Coded::Tok(head, Box::new((p, l)), len));
                 }
                 let t = std::time::Instant::now();
                 // The zlib header tells zlib emulation what to look for.
@@ -698,7 +714,7 @@ impl Sections {
                 varint::put(&mut self.table, (i - j) as u64);
                 (DUP, self.cov[j], 0)
             }
-            Coded::Tok(head, f, len) => match self.tokens.add(head.class, &f, head.px) {
+            Coded::Tok(head, p, len) => match self.tokens.add(p.0, &p.1) {
                 Ok(()) => {
                     self.table.extend_from_slice(&head.tok_fields());
                     (TOK, len, 0)

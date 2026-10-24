@@ -43,6 +43,10 @@ name = "aqr-pdf-images"
 path = "examples/images.rs"
 
 [[example]]
+name = "aqr-pdf-memprobe"
+path = "examples/memprobe.rs"
+
+[[example]]
 name = "aqr-pdf-skel"
 path = "examples/skel.rs"
 

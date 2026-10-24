@@ -118,6 +118,13 @@ coding (the aqr-png approach, for any stream):
 - Static per-file tables and four interleaved rANS states (after aqr-png's coder, with
   alphabets beyond 256). All token streams of a file share one rANS stream, decoded in file
   order.
+- Memory does not follow the inflated data: a stream is parsed straight into its *part*
+  (its symbols, the extra bits of its matches), the literals' contexts read from a window of
+  the data (32 KiB, or a row and a pixel more for pixels, sliding every 256 KiB), and rebuilt
+  block by block through the same window. What the encoder holds is the file's symbols (4
+  bytes each) for the static tables; the full mode takes only the data's length and
+  Adler-32 from its parse. `tests/memory.rs`: 56 MB of data in a 1.55 MB file takes 18 MB
+  to code and 7 MB to rebuild (109 and 80 MB before).
 
 ### Format
 
@@ -129,8 +136,9 @@ The format is specified in [FORMAT.md](FORMAT.md).
 thread runs the code as before (aqr-jpeg on rayon's global pool). With more, a pool of N
 threads codes the items ahead, in order, at most 4N + 4 of them and about 256 MB of estimated
 working memory in flight (always one): JPEG, PNG and aqr-flate items whole, and FlateDecode
-streams for the token mode parsed; the calling thread adds them to the sections in order and
-runs the token coder, whose state carries over from stream to stream. aqr-jpeg's own
+streams for the token mode made into their parts (below); the calling thread adds them to the
+sections in order, and to the token coder, whose tables and bit streams carry over from
+stream to stream. aqr-jpeg's own
 parallelism runs on the same pool, so it takes N threads in all (aqr-flate, one thread per
 item). The token coder's final pass runs beside the zstd that measures the table, skeleton
 and pools. The decoder of the module takes no threads: the nested modules rebuild their
@@ -189,6 +197,7 @@ cargo test --release
 - `tests/formula.rs`: synthetic PDF files through `formula::encode_with` and `Formula::eval`
   with the nested modules, under every set of options and with 1 to 8 threads; the
   module's input slots corrupted.
+- `tests/memory.rs`: peak heap of a file whose streams inflate 36×, with 1 and 4 threads.
 - `tests/roundtrip.rs`: FlateDecode streams from every encoder of flate-zoo, through every
   mode; zlib wrapper variants (bare DEFLATE, wrong Adler-32, junk after the data,
   truncated and damaged streams); syntax (indirect and wrong lengths, CR line ends,
@@ -196,7 +205,7 @@ cargo test --release
   predictors, geometry that does not match the data; JPEG; duplicates; encrypted files;
   PDF 2.0 (junk before the header, UTF-8 strings, object and cross-reference streams,
   AES-256); non-PDF and cut files.
-- Unit tests: lexer, scanner, rANS and bit I/O, token coding.
+- Unit tests: lexer, scanner, rANS and bit I/O, token coding (and its window sliding).
 - `aqr-pdf fuzz`: mutated files (bit flips, cuts, deletions, junk, copied pieces, bytes inside
   streams) must round-trip through the formula under every set of modes with the safety
   nets off; corrupted archives must fail cleanly; with 2 to 4 threads, the same formula and
@@ -215,5 +224,5 @@ cargo test --release
 | `src/flate.rs`, `src/image.rs` | zlib wrapper; image geometry and the PNG wrapper |
 | `src/tok.rs`, `src/rans.rs` | Token mode; static rANS (`aqr_common::rans32` with 12-bit probabilities) |
 | `src/main.rs` | Command-line tool, bench, fuzz |
-| `examples/` | Corpus surveys and experiments behind the choices here |
+| `examples/` | Corpus surveys and experiments behind the choices here; `memprobe.rs`, peak heap and RSS per file (`LOG=MB` logs large allocations) |
 | `scripts/` | Corpus, baselines, profiling (`profile.py` over samply) |

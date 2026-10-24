@@ -485,6 +485,14 @@ impl<const MSB: bool> BitW<MSB> {
         self.bits(k, if MSB { rev(v, k) } else { v as u32 });
     }
 
+    /// Appends the bits `w` wrote.
+    pub fn append(&mut self, w: &BitW<MSB>) {
+        for c in w.out.chunks_exact(4) {
+            self.bits(32, u32::from_le_bytes(c.try_into().unwrap()));
+        }
+        self.bits(w.n, w.acc as u32);
+    }
+
     /// Number of bits written so far.
     pub fn bit_len(&self) -> usize {
         self.out.len() * 8 + self.n as usize

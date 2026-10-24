@@ -11,7 +11,7 @@
 use crate::encode::{self, Options, Stats};
 use crate::kind::CLASSES;
 use crate::varint::Reader;
-use crate::{Error, Result, flate, image, tok};
+use crate::{Error, Result, image, tok};
 use aqr_formula::{Apply, Formula, Module, packed};
 
 pub const MODULE: Module = Module { name: "pdf-recons", version: 2 };
@@ -263,10 +263,9 @@ impl<'a> Out<'a> {
             Op::Tok(hdr, c, n, px, adler) => {
                 out.extend_from_slice(hdr);
                 let dec = self.tokens.as_mut().ok_or(Error::Corrupt)?;
-                let (d, plain) = dec.next(CLASSES[c], n, px)?;
-                out.extend_from_slice(&d);
+                let sum = dec.next(CLASSES[c], n, px, out)?;
                 if adler {
-                    out.extend_from_slice(&flate::adler32(&plain).to_be_bytes());
+                    out.extend_from_slice(&sum.to_be_bytes());
                 }
             }
             Op::Zlib(hdr, d, adler) => {
