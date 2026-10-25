@@ -735,13 +735,11 @@ Its parameters ([=cdata/compression_params=]) are as follows:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>window_descriptor</dfn>
       <td>[=u8=]
-      <td>
   </tbody>
 </table>
 
@@ -791,13 +789,11 @@ Its data consists of the following:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>space</dfn>
       <td>[=u8=][[=block/size=]]
-      <td>
   </tbody>
 </table>
 
@@ -823,13 +819,11 @@ Its data consists of the following:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>size_hint</dfn>
       <td>[=leb128=] ≠ 0
-      <td>
   </tbody>
 </table>
 
@@ -1271,85 +1265,65 @@ The internal structure after decompression is as follows:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>previous_metadata_offset</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>num_modules</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>num_resources</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>num_dictionaries</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>num_directories</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>num_files</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>num_specials</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>entries_size</dfn>
       <td>[=leb128=] = [=meta/entries_end=] - [=meta/entries_start=]
-      <td>
     <tr>
       <td><dfn>optional_metadata_size</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>module_offsets</dfn>
       <td>[=u=]([=meta/previous_metadata_offset=])[[=meta/num_modules=]]
-      <td>
     <tr>
       <td><dfn>resource_offsets</dfn>
       <td>[=u=]([=meta/previous_metadata_offset=])[[=meta/num_resources=]]
-      <td>
     <tr>
       <td><dfn>dictionary_offsets</dfn>
       <td>[=u=]([=meta/previous_metadata_offset=])[[=meta/num_dictionaries=]]
-      <td>
     <tr>
       <td><dfn>entry_parents</dfn>
       <td>[=u=]([=meta/num_directories=])[[=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] - 1]
-      <td>
     <tr>
       <td><dfn>file_params</dfn>
       <td>[=meta/file_param=][[=meta/num_files=]]
-      <td>
     <tr>
       <td><dfn>entry_offsets</dfn>
       <td>[=u=]([=meta/entries_size=])[[=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] - 1]
-      <td>
     <tr>
       <td><dfn>entries_start</dfn>
       <td>[=offset=]
-      <td>
     <tr>
       <td><dfn>entries</dfn>
       <td>[=meta/entry=][[=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=]]
-      <td>
     <tr>
       <td><dfn>entries_end</dfn>
       <td>[=offset=]
-      <td>
     <tr>
       <td><dfn>optional_metadata</dfn>
       <td>[=u8=][[=meta/optional_metadata_size=]]
-      <td>
   </tbody>
 </table>
 
@@ -1396,17 +1370,14 @@ File parameters (<dfn>file_param</dfn>) occur for each file (but not directory),
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>file_dictionary</dfn>
       <td>[=u=]([=meta/num_dictionaries=])
-      <td>
     <tr>
       <td><dfn>file_offset</dfn>
       <td>[=u=]([=meta/previous_metadata_offset=])
-      <td>
   </tbody>
 </table>
 
@@ -1956,37 +1927,29 @@ and the byte sequences remaining on the stack after the last instruction are the
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>num_blocks</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>block_ordinal_deltas</dfn>
       <td>[=leb128=][[=formula/num_blocks=]]
-      <td>
     <tr>
       <td><dfn>num_resources</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>resource_indices</dfn>
       <td>[=leb128=][[=formula/num_resources=]]
-      <td>
     <tr>
       <td><dfn>num_modules</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>module_indices</dfn>
       <td>[=leb128=][[=formula/num_modules=]]
-      <td>
     <tr>
       <td><dfn>instructions</dfn>
       <td>[=formula/instruction=][*]
-      <td>
   </tbody>
 </table>
 
@@ -2142,17 +2105,14 @@ Opcode 01<sub>16</sub> denotes a **Literal instruction**. Its operands consist o
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>literal_size</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>literal_data</dfn>
       <td>[=u8=][[=formula/literal_size=]]
-      <td>
   </tbody>
 </table>
 
@@ -2168,13 +2128,11 @@ Opcode 0F<sub>16</sub> denotes a **Swap instruction**. Its operands consist of t
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>swap_depth</dfn>
       <td>[=leb128=]
-      <td>
   </tbody>
 </table>
 
@@ -2191,21 +2149,17 @@ Opcode 10<sub>16</sub> denotes a **Slice instruction**. Its operands consist of 
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>slice_block</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>slice_start</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>slice_length</dfn>
       <td>[=leb128=]
-      <td>
   </tbody>
 </table>
 
@@ -2226,45 +2180,35 @@ Opcode 11<sub>16</sub> denotes a **Apply instruction**. Its operands consist of 
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>apply_module</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>apply_num_resources</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>apply_resources</dfn>
       <td>[=leb128=][[=formula/apply_num_resources=]]
-      <td>
     <tr>
       <td><dfn>apply_params_size</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>apply_params</dfn>
       <td>[=u8=][[=formula/apply_params_size=]]
-      <td>
     <tr>
       <td><dfn>apply_memory_limit</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>apply_num_inputs</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>apply_num_outputs</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>apply_output_sizes</dfn>
       <td>[=leb128=][[=formula/apply_num_outputs=]]
-      <td>
   </tbody>
 </table>
 
@@ -2290,13 +2234,11 @@ Opcode 12<sub>16</sub> denotes a **Concatenate instruction**. Its operands consi
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>concat_count</dfn>
       <td>[=leb128=]
-      <td>
   </tbody>
 </table>
 
@@ -2312,13 +2254,11 @@ Opcode 13<sub>16</sub> denotes a **Pack instruction**. Its operands consist of t
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>pack_count</dfn>
       <td>[=leb128=]
-      <td>
   </tbody>
 </table>
 
@@ -2334,17 +2274,14 @@ Opcode 14<sub>16</sub> denotes a **Split instruction**. Its operands consist of 
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>split_count</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>split_sizes</dfn>
       <td>[=leb128=][[=formula/split_count=]]
-      <td>
   </tbody>
 </table>
 
@@ -2364,13 +2301,11 @@ Opcode 15<sub>16</sub> denotes a **Patch instruction**. Its operands consist of 
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>patch_size</dfn>
       <td>[=leb128=]
-      <td>
   </tbody>
 </table>
 
@@ -2419,13 +2354,11 @@ Opcode 20<sub>16</sub> denotes a **Checksum instruction**. Its operands consist 
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>checksum_value</dfn>
       <td>[=u64le=]
-      <td>
   </tbody>
 </table>
 
@@ -2525,13 +2458,11 @@ The internal structure after decompression is as follows:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>wasm_module</dfn>
       <td>[=u8=][*]
-      <td>
   </tbody>
 </table>
 
@@ -2710,17 +2641,14 @@ The internal structure after decompression is as follows:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>num_imports</dfn>
       <td>[=leb128=] ≠ 0
-      <td>
     <tr>
       <td><dfn>imports</dfn>
       <td>[=import/import=][[=import/num_imports=]]
-      <td>
   </tbody>
 </table>
 
@@ -2731,29 +2659,23 @@ Each <dfn>import</dfn> consists of the following:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>import_path</dfn>
       <td>[=u8=][*] ≠ 0
-      <td>
     <tr>
       <td><dfn noexport>import_path_sentinel</dfn>
       <td>[=u8=] = 0
-      <td>
     <tr>
       <td><dfn>import_offset</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>import_size</dfn>
       <td>[=leb128=]
-      <td>
     <tr>
       <td><dfn>import_checksum</dfn>
       <td>[=u8=][32]
-      <td>
   </tbody>
 </table>
 
@@ -2997,33 +2919,26 @@ A mirrored header consists of the following:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>checksum_start</dfn>
       <td>[=offset=]
-      <td>
     <tr>
       <td><dfn noexport>encrypted_mirror_magic</dfn>
       <td>[=u8=][8] = [=const/ENCRYPTED_MIRROR_MAGIC=]
-      <td>
     <tr>
       <td><dfn noexport>mirror_index</dfn>
       <td>[=u32le=] = <var>k</var>
-      <td>
     <tr>
       <td><dfn>mirrored_fields</dfn>
       <td>[=u8=][97] = [=header fields=]
-      <td>
     <tr>
       <td><dfn>checksum_end</dfn>
       <td>[=offset=]
-      <td>
     <tr>
       <td><dfn>mirror_checksum</dfn>
       <td>[=u64le=]
-      <td>
   </tbody>
 </table>
 
@@ -3268,33 +3183,26 @@ Its data consists of the following:
     <tr>
       <th>Name
       <th>Type
-      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>mirror_magic</dfn>
       <td>[=u8=][8] ∈ {[=const/MIRROR_MAGIC=], [=const/OVERLAY_MIRROR_MAGIC=]}
-      <td>
     <tr>
       <td><dfn>archive_offset</dfn>
       <td>[=leb128=] = [=block/block_start=] - [=archive/archive_start=]
-      <td>
     <tr>
       <td><dfn>target_offset</dfn>
       <td>[=leb128=] ≠ 0
-      <td>
     <tr>
       <td><dfn>target_data</dfn>
       <td>[=u8=][*]
-      <td>
     <tr>
       <td><dfn>checksum_end</dfn>
       <td>[=offset=]
-      <td>
     <tr>
       <td><dfn>mirror_checksum</dfn>
       <td>[=u64le=]
-      <td>
   </tbody>
 </table>
 
