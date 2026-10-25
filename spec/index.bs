@@ -234,8 +234,48 @@ This specification defines and uses the following constants, all of which are de
   and that of [=const/ENCRYPTED_HEADER_TYPE=] is also a prefix of [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=].
 </div>
 
-<h2 id=syntax>
-Syntax</h2>
+<h3 id=semantics>
+Semantics and failures</h3>
+
+This specification defines the meaning of an archive as a function from a byte sequence to an [=archive value=],
+which also takes a [=base=] for an [=overlay archive=].
+Every algorithm in this specification is declarative:
+it defines *what* the result is, not how or in which order it has to be computed,
+and a conforming implementation MAY compute it in any other way that produces the same result.
+
+The result of [=interpret an archive|interpreting an archive=] is either an [=archive value=] or a failure,
+which is one of the following:
+
+* An <dfn>invalid archive</dfn> failure occurs when the input violates any requirement of this specification.
+    It is a property of the input alone, and all conforming decompressors agree on it.
+* A <dfn>resource failure</dfn> occurs when the evaluation exceeds a declared or implementation-defined limit.
+    It is not a property of the input, and conforming decompressors MAY disagree on it.
+* A <dfn>decryption failure</dfn> occurs when an [[#encrypted-archive|encrypted archive]] can't be decrypted
+    with the given passphrase, if any.
+    It is a property of the input and the passphrase, and all conforming decompressors agree on it.
+* A <dfn>base failure</dfn> occurs when an [=overlay archive=] is interpreted without a [=base=],
+    or an [=import/import=] can't be resolved in the given base ([[#import-resolution]]).
+    It is a property of the input and the base, and all conforming decompressors agree on it.
+* An <dfn>unsupported failure</dfn> occurs when the input contains a block of a [=critical=] type
+    not defined by this specification ([[#reserved-blocks]]).
+    It is a property of the input and the version of this specification,
+    and all conforming decompressors implementing the same version agree on it.
+
+<div class=note>
+  An unsupported failure tells that a decompressor implementing a newer version may be able to interpret the input,
+  which is not the case for an [=invalid archive=] failure in general.
+  It takes precedence over an [=invalid archive=] failure in the rest of the archive,
+  since a future version may give a different meaning to the rest.
+</div>
+
+A conforming compressor, given an [=archive value=],
+MUST produce a byte sequence whose interpretation is that [=archive value=].
+When it produces an [=overlay archive=], it is also given a [=base=],
+and the interpretation with that base MUST be that archive value.
+This specification doesn't constrain how the compressor chooses blocks, block sizes, dictionaries or formulas.
+
+<h2 id=container>
+Container</h2>
 
 <h3 id=block>
 Block</h3>
@@ -311,7 +351,7 @@ but its value doesn't affect the result of [=interpret an archive|interpreting a
   so a single encoding for each type leaves no ambiguity in finding block boundaries, e.g. by scanning.
 </div>
 
-The following sections describe the contents of [=block/data=] field according to each defined [=block/type=].
+Later sections describe the contents of [=block/data=] field according to each defined [=block/type=].
 Since [=block/type=] also determines the byte length of [=block/size=],
 there are generally multiple [=block/type=] values assigned for each logical block type.
 
@@ -476,8 +516,8 @@ The valid archive MUST NOT include such block types as a proper block.
 * Block 7FC<sub>16</sub> ([=const/OVERLAY_FOOTER_TYPE=]) is used for the overlay archive footer.
 * Block 155&thinsp;04DC&thinsp;A579<sub>16</sub> ([=const/ENCRYPTED_HEADER_TYPE=]) is used for the encrypted archive header.
 
-<h4 id=shared-external-structure>
-Shared external structure</h4>
+<h3 id=shared-external-structure>
+Shared external structure</h3>
 
 Many block types share the same external structure, only varying its internal structure.
 It may or may not have been compressed
@@ -571,8 +611,8 @@ i.e. the data after decompression, rather than the stored bytes.
   and lets a decompressor reading only some non-leaf blocks verify the file content it has actually read.
 </div>
 
-<h5 id=zstandard-compression-method>
-Zstandard compression method</h5>
+<h4 id=zstandard-compression-method>
+Zstandard compression method</h4>
 
 This specification only defines a single compression method, Zstandard [[RFC8878]].
 A <dfn export for="">Zstandard block</dfn> is the "Block" structure in the Zstandard frame ([[RFC8878]], Section 3.1.1.2).
@@ -621,15 +661,15 @@ where only the last block is signalled as the final block by its block header.
   and they have to agree.
 </div>
 
-<h5 id=xxh64-checksum-method>
-XXH64 checksum method</h5>
+<h4 id=xxh64-checksum-method>
+XXH64 checksum method</h4>
 
 This specification only defines a single checksum method, XXH64 [[XXHASH]].
 Its seed MUST be zero and the result MUST be stored as [=u64le=].
 The resulting [=checksum_size=] is 8.
 
-<h4 id=spacer-block>
-Spacer block</h4>
+<h3 id=spacer-block>
+Spacer block</h3>
 
 Blocks 0<sub>16</sub> through 3<sub>16</sub> are **spacer blocks**.
 Its data consists of the following:
@@ -660,8 +700,8 @@ Conforming compressors MUST fill [=spacer/space=] with zero bytes in order to av
 but its content doesn't affect the result of [=interpret an archive|interpreting an archive=].
 Conforming compressors are strongly RECOMMENDED to utilize sparse files for performance.
 
-<h4 id=size-hint-block>
-Size hint block</h4>
+<h3 id=size-hint-block>
+Size hint block</h3>
 
 Block 4<sub>16</sub> is a **size hint block**.
 Its data consists of the following:
@@ -688,8 +728,411 @@ and its [=szhint/size_hint=] field MUST be equal to the footer's [=archive/size_
 
 </div>
 
-<h4 id=metadata-block>
-Metadata block</h4>
+<h3 id=unencrypted-archive>
+Unencrypted Archive</h3>
+
+An **unencrypted archive** consists of a header, one or more blocks and a footer.
+
+<div dfn-for=archive>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>header_magic</dfn>
+      <td>[=u8=][6] ∈ {[=const/HEADER_MAGIC=], [=const/OVERLAY_HEADER_MAGIC=]}
+      <td>
+    <tr>
+      <td><dfn>archive_start</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>size_hint_block</dfn>
+      <td>[[#size-hint-block|size_hint_block]]
+      <td>[=cond/Optional=]
+    <tr>
+      <td><dfn>blocks</dfn>
+      <td>[[#block|block]][*]
+      <td>
+    <tr>
+      <td><dfn>archive_end</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>footer_magic</dfn>
+      <td>[=u8=][6] ∈ {[=const/FOOTER_MAGIC=], [=const/OVERLAY_FOOTER_MAGIC=]}
+      <td>
+    <tr>
+      <td><dfn>footer_size</dfn>
+      <td>[=u16le=] = [=archive/footer_end=] - [=archive/footer_start=]
+      <td>
+    <tr>
+      <td><dfn>footer_start</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>size_hint</dfn>
+      <td>[=leb128=] = [=archive/archive_end=] - [=archive/archive_start=]
+      <td>
+    <tr>
+      <td><dfn>metadata_backward_offset</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>footer_end</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>footer_size_copy</dfn>
+      <td>[=u16le=] = [=archive/footer_size=]
+      <td>
+  </tbody>
+</table>
+
+[=archive/header_magic=] is a fixed 6-byte sequence to identify the file as an unencrypted Aqueous archive.
+This header also marks the beginning of the archive, when the archive doesn't start at the beginning of the file.
+
+[=archive/footer_magic=] is a fixed 6-byte sequence to mark the beginning of the footer.
+The footer also marks the end of the archive, when the archive doesn't end at the end of the file.
+
+An unencrypted archive is an <dfn export for="">overlay archive</dfn> if [=archive/header_magic=] is [=const/OVERLAY_HEADER_MAGIC=],
+and a <dfn>standalone archive</dfn> otherwise.
+[=archive/footer_magic=] MUST be [=const/OVERLAY_FOOTER_MAGIC=] in an overlay archive and [=const/FOOTER_MAGIC=] otherwise.
+An overlay archive is interpreted against a <dfn export for="">base</dfn>,
+an existing directory tree or file given separately from the overlay archive:
+it starts from the base instead of an empty directory and applies its segments to it ([[#interpretation]]),
+and only an overlay archive can contain [=external import blocks=] reading the base ([[#import-block]]).
+The format of overlay archives is called the <dfn export>Aqueous overlay archive format</dfn>,
+and has its own media type ([[#overlay-media-type]]).
+
+<div class=note>
+  A standalone archive is interpreted as an overlay archive would be with an empty directory as its base.
+  Confusing the other way is harmful:
+  an overlay archive that only adds and removes files, without any external import,
+  would be silently interpreted without any file of its base.
+  This can happen when an overlay archive with a damaged header is repaired into a standalone archive.
+  Therefore every structure that can be found without the header tells whether the archive is an overlay archive:
+  the footer, found from the end of the archive, and [[#mirror-block|mirror blocks]], found by scanning.
+  Metadata blocks are only found through them, and an encrypted archive tells it in its decrypted payload.
+</div>
+The offset between [=archive/header_magic=] and [=archive/footer_magic=] is recorded as [=archive/size_hint=],
+which MAY be also replicated as [=archive/size_hint_block=] if random access is desired.
+
+The footer size, which is the size of all fields after (but not including) [=archive/footer_magic=],
+is recorded both in [=archive/footer_size=] and in [=archive/footer_size_copy=].
+Implementations are therefore expected to first identify [=archive/header_magic=] and skip to the end of the file
+to read [=archive/footer_size_copy=] and eventually [=archive/footer_magic=] to read the footer.
+
+<div class=note>
+  [=archive/footer_size=] and [=archive/footer_size_copy=] are [=u16le=] instead of [=leb128=].
+  Therefore the footer size is limited to 65,535 bytes,
+  and a single read of 65,543 bytes (including [=archive/footer_magic=] and [=archive/footer_size_copy=]) is
+  sufficient to guarantee that the entire footer is read.
+</div>
+
+[=archive/metadata_backward_offset=] is the offset from [=archive/footer_start=] to the beginning of last metadata block,
+just like [=meta/previous_metadata_offset=] is the offset from the beginning of the current metadata block to the previous one.
+It MUST be 0 if and only if there is no metadata block,
+so that a decompressor can tell such archives without scanning [=archive/blocks=].
+
+[=archive/blocks=] are logically divided into [=segments=],
+each consisting of [=content blocks=] and a single [[#metadata-block|metadata block]] describing them,
+with optional spacer, [[#mirror-block|mirror]] and [=ignored blocks=] in between.
+Each segment can be independently processed and decompressed in the reading order,
+except that [=internal imports=] ([[#import-block]]) read the result of preceding segments.
+There SHOULD NOT be multiple non-directory [=meta/entry|entries=] with the same path across metadata blocks,
+other than a [=tombstone=] removing an earlier entry,
+and if there are, only the last one is considered valid ([[#segment-merging]]).
+
+Alternatively, [=archive/blocks=] can have no metadata block.
+Such archive decompresses into a single unnamed file,
+whose content is the concatenation of the contents of all [=leaf blocks=] in the order of appearance.
+It decompresses into an empty file if there is no leaf block.
+
+<div class=note>
+  This allows a single file of unknown size to be compressed in a streaming fashion,
+  by writing each unit of random access as a separate leaf block, and thus a separate [=parcel=], as soon as it is compressed.
+  It is analogous to a gzip file that doesn't need to contain the name of the decompressed file.
+  Compressing multiple files in a streaming fashion is not supported:
+  a file spanning multiple non-leaf blocks requires a [=parcel=] starting with a formula block,
+  which declares the length of every slice of the non-leaf blocks before any of them.
+</div>
+
+</div>
+
+<h3 id=locating-an-archive>
+Locating an archive</h3>
+
+A file may contain an archive with leading bytes, e.g. a self-extracting executable,
+or with trailing bytes, e.g. appended by a transfer.
+Since [=interpret an archive|interpreting an archive=] takes the archive alone,
+a decompressor accepting such a file has to locate the archive first.
+
+A header magic and a footer magic <dfn>match</dfn> when they are
+[=const/HEADER_MAGIC=] and [=const/FOOTER_MAGIC=], or [=const/OVERLAY_HEADER_MAGIC=] and [=const/OVERLAY_FOOTER_MAGIC=].
+
+To <dfn>locate an archive</dfn> in a [=byte sequence=] |file|:
+
+<ol class=algorithm>
+    1. If |file| starts with [=const/ENCRYPTED_HEADER_MAGIC=] or [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=], return |file|.
+    2. Let |back| be null.
+        Let |n| be the last 2 bytes of |file| as [=u16le=], and let |f| be the length of |file| − |n| − 10.
+        If |f| ≥ 0, the bytes of |file| from |f| are [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=] followed by |n| as [=u16le=],
+        and the [=leb128=] from |f| + 8 is |s| such that |h| = |f| − |s| − 6 ≥ 0
+        and the bytes of |file| from |h| are the header magic [=match|matching=] that footer magic, set |back| to |h|.
+    3. If |file| starts with [=const/HEADER_MAGIC=] or [=const/OVERLAY_HEADER_MAGIC=]:
+        1. If |back| is 0, return |file|.
+        2. Read blocks from the offset 6 by the generic structure ([[#block]]),
+            with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
+            until the bytes at the current offset |f| start with [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=].
+            If it fails to read a block before that, or the footer magic doesn't [=match=] the header magic, return failure.
+        3. Let |n| be the 2 bytes of |file| from |f| + 6 as [=u16le=].
+            If |file| is shorter than |f| + |n| + 10 bytes, return failure.
+            Otherwise, return the first |f| + |n| + 10 bytes of |file|.
+    4. If |back| is not null, return the bytes of |file| from |back|.
+    5. Return failure.
+</ol>
+
+The located archive is then [=interpret an archive|interpreted=], which may still fail.
+A decompressor SHOULD warn the user when |file| has bytes outside the located archive.
+It MAY search for [=const/HEADER_MAGIC=] and [=const/OVERLAY_HEADER_MAGIC=] when the archive can't be located otherwise,
+e.g. when |file| has both leading and trailing bytes.
+
+<div class=note>
+  An encrypted archive is located only at the beginning of a file and extends to its end,
+  because the end of its payload can't be known without decrypting it ([[#encrypted-archive]]).
+
+  A block can't start with [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=],
+  since they start with the shortest [=leb128=] encodings of [=const/FOOTER_TYPE=] and [=const/OVERLAY_FOOTER_TYPE=] ([[#constants]]),
+  which are not valid block types.
+  The step 3.2 therefore finds the end of the first archive in |file|,
+  while the step 4 finds the archive at the end of |file| without reading the bytes before it.
+  Archives concatenated together are not a single archive, and only the first one is located.
+</div>
+
+<h2 id=segments>
+Segments and entries</h2>
+
+<h3 id=archive-model>
+Archive model</h3>
+
+An <dfn>archive value</dfn> is a [=struct=] with the following [=struct/items=]:
+
+* <dfn for="archive value">root</dfn>, either a [=directory node=] or a [=file node=].
+    The latter represents a single unnamed file.
+* <dfn for="archive value">extra</dfn>, an [=ordered map=] from integers to CBOR data items [[RFC8949]]
+    representing the archive-wide part of the [[#optional-metadata|optional metadata]].
+
+A <dfn>file node</dfn> is a [=struct=] with the following [=struct/items=]:
+
+* <dfn for="file node">content</dfn>, a [=byte sequence=].
+* <dfn for="file node">link group</dfn>, a [=/link group=] or null.
+* <dfn for="file node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+A <dfn>directory node</dfn> is a [=struct=] with the following [=struct/items=]:
+
+* <dfn for="directory node">children</dfn>, an [=ordered map=] from [=entry names=]
+    to [=file nodes=], [=directory nodes=], [=link nodes=], [=special nodes=] or [=unknown nodes=].
+* <dfn for="directory node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+A <dfn>link node</dfn> is a [=struct=] with the following [=struct/items=], representing a symbolic link:
+
+* <dfn for="link node">target</dfn>, a [=link target=].
+* <dfn for="link node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+A <dfn>special node</dfn> is a [=struct=] with the following [=struct/items=], representing a FIFO or a device file:
+
+* <dfn for="special node">kind</dfn>, one of "`fifo`", "`char-device`" or "`block-device`".
+* <dfn for="special node">device</dfn>, a pair of non-negative integers (major, minor)
+    if [=special node/kind=] is "`char-device`" or "`block-device`", or null otherwise.
+* <dfn for="special node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+<div class=note>
+  A device number is stored as a pair, not as a platform-specific `dev_t` encoding,
+  as tar and cpio do and as `makedev` takes it.
+  Its meaning is up to the platform extracting it:
+  the same pair generally denotes unrelated devices on different platforms,
+  e.g. `/dev/null` is (1, 3) on Linux but (3, 2) on macOS,
+  and this specification doesn't record which platform the number came from.
+</div>
+
+An <dfn>unknown node</dfn> is a [=struct=] with the following [=struct/items=],
+representing a kind of node not defined by this version of this specification:
+
+* <dfn for="unknown node">kind</dfn>, an integer greater than 4.
+* <dfn for="unknown node">data</dfn>, a [=byte sequence=].
+* <dfn for="unknown node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+
+The [=archive value/root=] can't be a [=link node=], a [=special node=] or an [=unknown node=].
+
+A <dfn>tombstone</dfn> is a [=struct=] with no [=struct/items=], marking the removal of a node.
+It only occurs in [=directory node/children=] of the result of [=interpret a segment|interpreting a segment=],
+and is removed by [=merge directory nodes|merging=] it into the preceding result ([[#segment-merging]]),
+so it never occurs in an [=archive value=].
+
+An <dfn>entry name</dfn> is a [=struct=] with the following [=struct/items=]:
+
+* <dfn for="entry name">encoding</dfn>, either "`wtf-8`" or "`raw`".
+* <dfn for="entry name">bytes</dfn>, a non-empty [=byte sequence=]
+    which is a valid WTF-8 [[WTF-8]] string if [=entry name/encoding=] is "`wtf-8`".
+
+Two [=entry names=] are equal if and only if both items are equal.
+In particular, a "`wtf-8`" name and a "`raw`" name are never equal even when their [=entry name/bytes=] are.
+
+No [=entry name/bytes=] of an [=entry name=] can contain 00<sub>16</sub> or 2F<sub>16</sub> (`/`),
+or be equal to (2E)<sub>16</sub> (`.`) or (2E 2E)<sub>16</sub> (`..`).
+
+<div class=note>
+  These restrictions make every path in an [=archive value=] a plain sequence of components,
+  so that no name can refer to the current, parent or nested directory on any common file system.
+  Platform-specific restrictions are handled at the extraction time ([[#extraction]]).
+</div>
+
+To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
+
+<ol class=algorithm>
+    1. If |bytes|[0] is C1<sub>16</sub>, let |name| be an [=entry name=]
+        whose [=entry name/encoding=] is "`raw`" and [=entry name/bytes=] are |bytes| without the first byte.
+    2. Otherwise, if |bytes| is a valid WTF-8 string, let |name| be an [=entry name=]
+        whose [=entry name/encoding=] is "`wtf-8`" and [=entry name/bytes=] are |bytes|.
+    3. Otherwise, return an [=invalid archive=] failure.
+    4. If |name| violates any restriction of an [=entry name=] above, return an [=invalid archive=] failure.
+    5. Return |name|.
+</ol>
+
+A <dfn>link target</dfn> is a [=struct=] with the following [=struct/items=]:
+
+* <dfn for="link target">encoding</dfn>, either "`wtf-8`" or "`raw`".
+* <dfn for="link target">bytes</dfn>, a non-empty [=byte sequence=] not containing 00<sub>16</sub>,
+    which is a valid WTF-8 [[WTF-8]] string if [=link target/encoding=] is "`wtf-8`".
+
+Unlike an [=entry name=], a [=link target=] is a path which may contain 2F<sub>16</sub> (`/`) as a separator,
+and components equal to `.` or `..`.
+It may be absolute, and may refer to a path that doesn't exist in the [=archive value=] or anywhere else.
+The separator is always `/`: a compressor MUST replace every `\` in a link target read on Windows with `/`.
+Otherwise a link target is not normalized, and its meaning, e.g. of a drive letter, is left to the platform.
+There is no limit on its length other than implementation-defined limits.
+
+<div class=note>
+  `/` can't occur in a file name on Windows, and isn't interpreted as a separator in a link target there,
+  so this replacement is lossless.
+  A decompressor on Windows replaces `/` back with `\` when creating a link ([[#extraction]]).
+
+  On Windows, the target of an absolute link or a junction is stored as an NT path starting with `\??\`,
+  which has no meaning on other platforms.
+  A compressor is advised to convert it to a Win32 path first,
+  e.g. `\??\C:\foo` to `C:/foo`, `\??\UNC\server\share\x` to `//server/share/x`
+  and `\??\Volume{GUID}\x` to `//?/Volume{GUID}/x`.
+
+  Platforms differ in the maximum length of a link target:
+  4095 bytes on Linux (less on some file systems, e.g. 1023 bytes on XFS),
+  1023 bytes on macOS and FreeBSD, and about 8,000 UTF-16 code units on Windows.
+  A link that can't be created is handled at the extraction time ([[#extraction]]).
+</div>
+
+To <dfn>decode a link target</dfn> from a [=meta/link_target=] field |bytes|,
+do the same as to [=decode an entry name=] from |bytes|, except that
+the result is a [=link target=] and restrictions of a [=link target=] apply instead.
+
+A [=link target=] is never resolved within the archive model.
+Every path in an [=archive value=] is still a plain sequence of components,
+and a lookup of a path in an [=archive value=] never follows a [=link node=], as `lstat` doesn't.
+In particular, no node is a descendant of a [=link node=].
+
+<div class=note>
+  This makes the classic attack of extracting `a/passwd` through a preceding link `a` pointing to `/etc`
+  inexpressible in the archive model.
+  A tool MAY offer a lookup following links, but it then has to limit the number of links followed.
+</div>
+
+A <dfn>link group</dfn> is an opaque value that is only compared for equality,
+and is either a pair of a segment and a segment-local integer or an archive-wide integer ([[#link-groups]]).
+Two [=archive values=] are equal if they are equal after a one-to-one renaming of their [=/link groups=].
+
+<h3 id=content-blocks>
+Content blocks</h3>
+
+Any block other than spacer, size hint, metadata, [[#mirror-block|mirror]] and [=ignored blocks=]
+is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]].
+A metadata block and all content blocks between the previous metadata block (or the beginning of the archive if none)
+and that metadata block form a <dfn>segment</dfn>.
+As an exception, an archive without a metadata block ([[#unencrypted-archive]]) forms a single segment with no metadata block.
+Each segment MUST be self-contained:
+every reference from a block in a segment, whether by an index or by an offset, MUST point to a block in the same segment.
+An [=internal import=] ([[#import-block]]) refers to a node of preceding segments by its path rather than to a block,
+and is the only way for a segment to use the content of another segment.
+
+Content blocks are classified as follows:
+
+* A <dfn>leaf block</dfn> represents the content of one or more files by itself.
+    Leaf [[#data-block|data blocks]] and [[#formula-block|formula blocks]] are leaf blocks.
+* A <dfn>non-leaf block</dfn> doesn't represent any file by itself,
+    and only supplies data referenced by one or more formula blocks.
+    Non-leaf [[#data-block|data blocks]] and [[#import-block|import blocks]] are non-leaf blocks.
+    Each non-leaf block supplies one or more <dfn>non-leaf items</dfn> to formula blocks:
+    a non-leaf data block supplies a single item, and an import block supplies one item for each of its [=import/import|imports=].
+* An <dfn>auxiliary block</dfn> supplies data used to decode other blocks.
+    [[#dictionary-block|Dictionary blocks]], [[#module-block|module blocks]] and [[#resource-block|resource blocks]]
+    are auxiliary blocks.
+
+Dictionary, module and resource blocks are respectively indexed in the order of appearance within the segment.
+Two conventions are used for these indices:
+
+* Fields in content blocks use <em>0-based</em> indices,
+    because the presence of a reference is signalled separately (e.g. by the block type).
+* Fields in the metadata block that may indicate the absence of a reference use <em>1-based</em> indices,
+    where zero denotes the absence.
+
+<h4 id=block-order>
+Block order</h4>
+
+Blocks in a segment MUST be ordered so that a formula block is resolved by blocks preceding it
+and all data required to evaluate it follows it:
+
+* A dictionary block MUST precede any block using it.
+* A module or resource block MUST precede any formula block referencing it.
+* Every [=non-leaf item=] MUST be referenced by at least one formula block,
+    and every non-leaf block MUST follow all formula blocks referencing its items.
+* Leaf blocks are otherwise not constrained and MAY be interleaved with non-leaf blocks.
+
+<div class=note>
+  These rules make every reference from a formula block to a non-leaf block a forward reference.
+  Therefore, when a non-leaf block is read in a streaming fashion,
+  all formula blocks referencing it have already been read,
+  and the decompressor knows exactly when the block can be discarded.
+  Likewise, the decompressor never has to retain a formula block after all non-leaf blocks it references have been read.
+  An import block whose imports are referenced by many formula blocks follows all of them,
+  so a streaming decompressor retains those formula blocks until the import block is read.
+  A compressor bounds this by spreading imports over multiple import blocks.
+</div>
+
+A leaf block and all subsequent content blocks up to the next leaf block or the end of the segment
+form a <dfn>parcel</dfn>.
+When no leaf block is interleaved with non-leaf blocks,
+a parcel consists of a leaf block, the non-leaf blocks it references if it is a formula block,
+and possibly auxiliary blocks.
+In that case a decompressor can read a single file by reading its parcel and the auxiliary blocks it uses,
+and a streaming decompressor never has to retain a formula block beyond its parcel.
+
+<figure id=fig-segments>
+  <pre class=include-raw>path: figures/segments.svg</pre>
+  <figcaption>
+    An archive with two segments, each ending with the metadata block describing it,
+    and four [=parcels=], each starting with a leaf block.
+    Arrows denote references from formula blocks to non-leaf blocks (solid) and to a module block (dashed).
+    The module block precedes the first leaf block in its segment, so it belongs to no parcel.
+    Dictionary, resource and spacer blocks are omitted,
+    and no leaf block is interleaved with non-leaf blocks.
+  </figcaption>
+</figure>
+
+<h3 id=metadata-block>
+Metadata block</h3>
 
 Blocks 10<sub>16</sub> through 17<sub>16</sub> are **metadata blocks**,
 whose [=block/type=] is <code>0001&thinsp;0|m||ss|</code> in binary ([[#block-types]]).
@@ -997,85 +1440,182 @@ They MUST agree with the actual positions of [=meta/entries=].
 
 </div>
 
-<h4 id=content-blocks>
-Content blocks</h4>
+<h3 id=interpretation>
+Interpreting an archive</h3>
 
-Any block other than spacer, size hint, metadata, [[#mirror-block|mirror]] and [=ignored blocks=]
-is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]].
-A metadata block and all content blocks between the previous metadata block (or the beginning of the archive if none)
-and that metadata block form a <dfn>segment</dfn>.
-As an exception, an archive without a metadata block ([[#unencrypted-archive]]) forms a single segment with no metadata block.
-Each segment MUST be self-contained:
-every reference from a block in a segment, whether by an index or by an offset, MUST point to a block in the same segment.
-An [=internal import=] ([[#import-block]]) refers to a node of preceding segments by its path rather than to a block,
-and is the only way for a segment to use the content of another segment.
+To <dfn export>interpret an archive</dfn> given a [=byte sequence=] |input|, an optional passphrase |passphrase|
+and an optional [=base=] |base|, which is an [=archive value=]:
 
-Content blocks are classified as follows:
+<ol class=algorithm>
+    1. If |input| starts with [=const/ENCRYPTED_HEADER_MAGIC=] or [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]:
+        1. Parse |input| as the Encrypted Archive structure ([[#encrypted-archive]]) in its entirety.
+            If it fails to parse, return an [=invalid archive=] failure.
+        2. If [=envelope/header_checksum=] is present and doesn't match, return an [=invalid archive=] failure.
+        3. If [=envelope/lg_work_factor=] exceeds an implementation-defined limit, return a [=resource failure=].
+        4. If |passphrase| is not given, or the file key can't be unwrapped from [=envelope/encrypted_file_key=]
+            with |passphrase| as described in [[AGE]], return a [=decryption failure=].
+        5. Using the unwrapped file key, verify [=envelope/age_header_mac=] against the reconstructed AGE header
+            and decrypt the [=AGE payload=] as described in [[AGE]].
+            If either fails, return an [=invalid archive=] failure.
+        6. Set |input| to the decrypted payload.
+            It MUST satisfy the additional constraints in [[#encrypted-archive]],
+            or an [=invalid archive=] failure is returned.
+    2. If |input| parses as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety,
+        with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
+        and the type of any of [=archive/blocks=] is [=critical=] and not defined by this specification,
+        return an [=unsupported failure=].
+    3. Parse |input| as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety.
+        If it fails to parse, return an [=invalid archive=] failure.
+    4. If |input| is an [=overlay archive=] and |base| is not given, return a [=base failure=].
+    5. If |input| is a [=standalone archive=], set |base| to an [=archive value=]
+        whose [=archive value/root=] is a [=directory node=] with an empty map as [=directory node/children=]
+        and null as [=directory node/extra=], and whose [=archive value/extra=] is an empty map.
+    6. If [=archive/blocks=] contain no [[#metadata-block|metadata block]]:
+        1. Let |content| be the concatenation of the [=file contents=] of all [=leaf blocks=] in [=archive/blocks=],
+            in the order of appearance.
+        2. Return an [=archive value=] whose [=archive value/root=] is a [=file node=]
+            with |content| as [=file node/content=] and null as [=file node/extra=],
+            and whose [=archive value/extra=] is an empty map.
+    7. If the [=archive value/root=] of |base| is a [=directory node=], let |root| be a copy of it.
+        Otherwise let |root| be a [=directory node=] with an empty map as [=directory node/children=] and null as [=directory node/extra=].
+    8. Let |extra| be a copy of the [=archive value/extra=] of |base|.
+    9. For each [=segment=] |segment| in [=archive/blocks=], in the order of appearance:
+        1. Let |segment root| be the result of [=interpret a segment|interpreting=] |segment|.
+        2. [=Merge directory nodes|Merge=] |segment root| into |root|.
+        3. For each key |k| and value |v| in the top-level map of the segment's [[#optional-metadata|optional metadata]]
+            other than `entry-extras`, set |extra|[|k|] to |v|.
+    10. Return an [=archive value=] with |root| as [=archive value/root=] and |extra| as [=archive value/extra=].
+</ol>
 
-* A <dfn>leaf block</dfn> represents the content of one or more files by itself.
-    Leaf [[#data-block|data blocks]] and [[#formula-block|formula blocks]] are leaf blocks.
-* A <dfn>non-leaf block</dfn> doesn't represent any file by itself,
-    and only supplies data referenced by one or more formula blocks.
-    Non-leaf [[#data-block|data blocks]] and [[#import-block|import blocks]] are non-leaf blocks.
-    Each non-leaf block supplies one or more <dfn>non-leaf items</dfn> to formula blocks:
-    a non-leaf data block supplies a single item, and an import block supplies one item for each of its [=import/import|imports=].
-* An <dfn>auxiliary block</dfn> supplies data used to decode other blocks.
-    [[#dictionary-block|Dictionary blocks]], [[#module-block|module blocks]] and [[#resource-block|resource blocks]]
-    are auxiliary blocks.
-
-Dictionary, module and resource blocks are respectively indexed in the order of appearance within the segment.
-Two conventions are used for these indices:
-
-* Fields in content blocks use <em>0-based</em> indices,
-    because the presence of a reference is signalled separately (e.g. by the block type).
-* Fields in the metadata block that may indicate the absence of a reference use <em>1-based</em> indices,
-    where zero denotes the absence.
-
-<h5 id=block-order>
-Block order</h5>
-
-Blocks in a segment MUST be ordered so that a formula block is resolved by blocks preceding it
-and all data required to evaluate it follows it:
-
-* A dictionary block MUST precede any block using it.
-* A module or resource block MUST precede any formula block referencing it.
-* Every [=non-leaf item=] MUST be referenced by at least one formula block,
-    and every non-leaf block MUST follow all formula blocks referencing its items.
-* Leaf blocks are otherwise not constrained and MAY be interleaved with non-leaf blocks.
+The <dfn>archive base</dfn> is |base| after the step 5,
+and the <dfn>preceding result</dfn> of a [=segment=] is |root| just before the segment is interpreted in the step 9,
+or the [=archive value/root=] of the archive base for an archive without a metadata block.
+They are what [=external imports=] and [=internal imports=] respectively refer to ([[#import-resolution]]).
+A given |base| doesn't affect the interpretation of a [=standalone archive=].
 
 <div class=note>
-  These rules make every reference from a formula block to a non-leaf block a forward reference.
-  Therefore, when a non-leaf block is read in a streaming fashion,
-  all formula blocks referencing it have already been read,
-  and the decompressor knows exactly when the block can be discarded.
-  Likewise, the decompressor never has to retain a formula block after all non-leaf blocks it references have been read.
-  An import block whose imports are referenced by many formula blocks follows all of them,
-  so a streaming decompressor retains those formula blocks until the import block is read.
-  A compressor bounds this by spreading imports over multiple import blocks.
+  The preceding result of the first segment of an [=overlay archive=] is its base,
+  so an internal import can also read a file of the base, as long as no preceding segment has replaced or removed it.
+  An external import reads the base as given, even after a preceding segment has replaced the file.
+  An overlay archive without a metadata block replaces its base with a single file,
+  e.g. to patch a single file given as the base.
 </div>
 
-A leaf block and all subsequent content blocks up to the next leaf block or the end of the segment
-form a <dfn>parcel</dfn>.
-When no leaf block is interleaved with non-leaf blocks,
-a parcel consists of a leaf block, the non-leaf blocks it references if it is a formula block,
-and possibly auxiliary blocks.
-In that case a decompressor can read a single file by reading its parcel and the auxiliary blocks it uses,
-and a streaming decompressor never has to retain a formula block beyond its parcel.
+The input to this algorithm is exactly the archive, from the first byte of [=archive/header_magic=]
+to the last byte of [=archive/footer_size_copy=].
 
-<figure id=fig-segments>
-  <pre class=include-raw>path: figures/segments.svg</pre>
-  <figcaption>
-    An archive with two segments, each ending with the metadata block describing it,
-    and four [=parcels=], each starting with a leaf block.
-    Arrows denote references from formula blocks to non-leaf blocks (solid) and to a module block (dashed).
-    The module block precedes the first leaf block in its segment, so it belongs to no parcel.
-    Dictionary, resource and spacer blocks are omitted,
-    and no leaf block is interleaved with non-leaf blocks.
-  </figcaption>
-</figure>
+A file may contain an archive with leading or trailing bytes,
+which a decompressor removes by [=locate an archive|locating the archive=] ([[#locating-an-archive]]).
 
-<h5 id=data-block>
-Data block</h5>
+Since every [=content block=] has to be described by a subsequent metadata block ([[#content-blocks]]),
+an archive with a metadata block can't have any content block after the last metadata block.
+[=meta/previous_metadata_offset=] and [=archive/metadata_backward_offset=] MUST point to
+the metadata blocks found by parsing [=archive/blocks=] as described in [[#metadata-block]] and [[#unencrypted-archive]],
+so that a decompressor can find each [=segment=] either by scanning blocks forward or by following offsets backward.
+
+<h4 id=segment-interpretation>
+Interpreting a segment</h4>
+
+To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata block|:
+
+<ol class=algorithm>
+    1. Let |meta| be the [=decoded data=] of |metadata block|, parsed as its internal structure ([[#metadata-block]]).
+    2. Let |d| be [=meta/num_directories=], |f| be [=meta/num_directories=] + [=meta/num_files=]
+        and |n| be [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] of |meta|.
+    3. Let |nodes| be a [=list=] containing a single [=directory node=]
+        with an empty map as [=directory node/children=] and the [=entry extra=] for the entry 0 as [=directory node/extra=].
+    4. For each |k| in [1, |n|]:
+        1. Let |entry| be |meta|.[=meta/entries=][|k| - 1].
+        2. Let |name| be the result of [=decode an entry name|decoding=] |entry|.[=meta/entry_name=].
+        3. Let |parent| be 0 if |k| = 1, or |meta|.[=meta/entry_parents=][|k| - 2] otherwise.
+        4. If |k| ≤ |d|, let |node| be a [=directory node=] with an empty map as [=directory node/children=].
+        5. Otherwise, if |k| ≤ |f|:
+            1. Let |param| be |meta|.[=meta/file_params=][|k| - |d| - 1].
+            2. Let |block| be the block at the relative offset |param|.[=meta/file_offset=] from |metadata block|.
+                It MUST be a [=leaf block=] in |segment|.
+            3. If |param|.[=meta/file_dictionary=] is zero, |block| MUST NOT use a dictionary.
+                Otherwise, |block| MUST use the dictionary block at |meta|.[=meta/dictionary_offsets=][|param|.[=meta/file_dictionary=] - 1].
+            4. Let |content| be the [=file content=] of |block|.
+                Its length MUST be |entry|.[=meta/original_size=].
+            5. Let |node| be a [=file node=] with |content| as [=file node/content=] and null as [=file node/link group=].
+            6. If the [=entry extra=] for the entry |k| has `link-group` with a value |g|,
+                set |node|.[=file node/link group=] to a pair of |segment| and |g| if |g| ≥ 0, or to |g| otherwise.
+        6. Otherwise, if |entry|.[=meta/special_kind=] is 0, let |node| be a [=tombstone=].
+            The [=entry extra=] for the entry |k| MUST be null.
+        7. Otherwise, if |entry|.[=meta/special_kind=] is 1:
+            1. Let |target| be the result of [=decode a link target|decoding=] |entry|.[=meta/link_target=].
+            2. Let |node| be a [=link node=] with |target| as [=link node/target=].
+        8. Otherwise, if |entry|.[=meta/special_kind=] is 2, let |node| be a [=special node=]
+            with "`fifo`" as [=special node/kind=] and null as [=special node/device=].
+        9. Otherwise, if |entry|.[=meta/special_kind=] is 3 or 4, let |node| be a [=special node=]
+            with "`char-device`" or "`block-device`" respectively as [=special node/kind=]
+            and (|entry|.[=meta/device_major=], |entry|.[=meta/device_minor=]) as [=special node/device=].
+        10. Otherwise, let |node| be an [=unknown node=]
+            with |entry|.[=meta/special_kind=] as [=unknown node/kind=] and |entry|.[=meta/special_data=] as [=unknown node/data=].
+        11. If |node| is not a [=tombstone=], set the extra of |node| to the [=entry extra=] for the entry |k|.
+        12. Let |children| be the [=directory node/children=] of |nodes|[|parent|].
+            |children|[|name|] MUST NOT [=map/exist=].
+        13. Set |children|[|name|] to |node|.
+        14. [=list/Append=] |node| to |nodes|.
+    5. Return |nodes|[0].
+</ol>
+
+Since every |parent| is less than |k| and at most |d| by [[#metadata-block]], |nodes|[|parent|] is always a [=directory node=] already in |nodes|.
+
+The <dfn>entry extra</dfn> for the entry |k| is the element at the <em>0-based</em> index |k| of `entry-extras`
+in the segment's optional metadata, where the index 0 corresponds to the root directory,
+or null if `entry-extras` or such element doesn't exist.
+`entry-extras` MUST NOT have more elements than the entries including the root directory,
+i.e. [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] + 1.
+
+<h4 id=segment-merging>
+Merging segments</h4>
+
+To <dfn>merge directory nodes</dfn> |later| into |earlier|:
+
+<ol class=algorithm>
+    1. For each |name| → |node| of |later|.[=directory node/children=]:
+        1. Let |existing| be |earlier|.[=directory node/children=][|name|], or null if it doesn't [=map/exist=].
+        2. If |node| is a [=tombstone=], [=map/remove=] |earlier|.[=directory node/children=][|name|] if it [=map/exists=].
+        3. Otherwise, if |node| is a [=directory node=]:
+            1. If |existing| is not a [=directory node=], set |existing| to a [=directory node=]
+                with an empty map as [=directory node/children=] and null as [=directory node/extra=],
+                and set |earlier|.[=directory node/children=][|name|] to |existing|.
+            2. [=Merge directory nodes|Merge=] |node| into |existing|.
+        4. Otherwise, set |earlier|.[=directory node/children=][|name|] to |node|.
+    2. If |later|.[=directory node/extra=] is not null, set |earlier|.[=directory node/extra=] to it.
+</ol>
+
+As a result, a directory appearing in multiple segments has the union of their children,
+while any other node, or a directory replaced by a node of the different kind, is replaced as a whole with its descendants.
+In particular, a directory replaced by a [=link node=] loses all its descendants,
+so no node is a descendant of a [=link node=] in the result.
+A [=tombstone=] removes the node at its path along with its descendants, and does nothing if there is no such node.
+A tombstone is never kept in the result, even under a directory that didn't exist before.
+A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=],
+which can be cleared by an empty map `{}` instead.
+
+<div class=note>
+  Directories necessarily reappear in later segments to hold new files under them.
+  The rule in [[#unencrypted-archive]] that there SHOULD NOT be multiple entries with the same path
+  therefore only concerns non-directory entries.
+  For the same reason, a reappearing directory doesn't have to repeat its [=entry extra=].
+</div>
+
+<div class=note>
+  A directory whose children change entirely, e.g. from |A| to |B|, keeps its node and gets tombstones for the names in |A| but not in |B|,
+  while the names in |B| replace or add nodes as usual.
+  A tombstone on a directory states that the directory itself is absent from the result,
+  and a single tombstone removes a whole subtree.
+  So replacing the entire base of an [=overlay archive=] needs a tombstone for each name only in the base
+  at the topmost level where the base and the new tree differ.
+</div>
+
+<h2 id=stored-data>
+Stored data</h2>
+
+<h3 id=data-block>
+Data block</h3>
 
 Blocks 20<sub>16</sub> through 37<sub>16</sub> and 40<sub>16</sub> through 4B<sub>16</sub> are **data blocks**.
 A data block is a **compressed block** if its [=compression_method=] is not None,
@@ -1168,8 +1708,8 @@ for every leaf block.
 
 </div>
 
-<h5 id=dictionary-block>
-Dictionary block</h5>
+<h3 id=dictionary-block>
+Dictionary block</h3>
 
 Blocks 50<sub>16</sub> through 57<sub>16</sub> are **dictionary blocks**,
 whose [=block/type=] is <code>0101&thinsp;0|t||ss|</code> in binary ([[#block-types]]).
@@ -1242,171 +1782,37 @@ which is the only part of the dictionary that sequences can reference as precedi
 
 </div>
 
-<h5 id=import-block>
-Import block</h5>
+<h3 id=block-contents>
+Block contents</h3>
 
-Blocks 58<sub>16</sub> through 5F<sub>16</sub> are **import blocks**,
-which are [=non-leaf blocks=] supplying byte ranges of files outside the [=segment=].
-Their [=block/type=] is <code>0101&thinsp;1|e||ss|</code> in binary ([[#block-types]]),
-and their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
+The <dfn>decoded data</dfn> of a block using the Shared external structure ([[#shared-external-structure]]),
+given its [=compression_method=] and [=checksum_method=], is determined as follows:
 
-<div dfn-for=import>
+* If [=compression_method=] is None, it is [=udata/data=].
+* If [=compression_method=] is [[#zstandard-compression-method|Zstandard]],
+    it is the result of decompressing [=cdata/data=] as described there, with [=cdata/compression_params=]
+    and the [=dictionary=] given by the dictionary block in use ([[#dictionary-block]]), if any.
+    The result MUST have exactly [=cdata/original_size=] bytes.
+* If [=checksum_method=] is not None, the checksum MUST be equal to the checksum of the decoded data
+    computed by the [=checksum_method=].
 
-|e| determines the source (<dfn>external</dfn>): preceding segments if 0, and the [=base=] if 1.
+The <dfn>stored content</dfn> of a [[#data-block|data block]],
+whether a [=leaf block=] or not, is the [=decoded data=] of its [=dblock/compressed_data=] or [=dblock/uncompressed_data=].
+The stored content of a [=non-leaf item=] is the stored content of the non-leaf data block supplying it,
+or the [=imported content=] of the [=import/import=] supplying it ([[#import-resolution]]).
+A data block using a dictionary uses the dictionary block at [=dblock/dictionary_index=] within the [=segment=].
 
-An import block is an <dfn>internal import block</dfn> if [=import/external=] is false,
-and an <dfn>external import block</dfn> otherwise.
-An external import block MUST NOT occur in an archive other than an [=overlay archive=] ([[#unencrypted-archive]]).
+The <dfn>file content</dfn> of a [=leaf block=] is:
 
-The internal structure after decompression is as follows:
+* Its [=stored content=], if it is a data block;
+* The only output of [=evaluate a formula block|evaluating=] it, if it is a [[#formula-block|formula block]].
+    The formula block MUST have exactly one output, until multiple outputs are specified ([[#formula-evaluation]]).
 
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-      <th>Conditions
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>num_imports</dfn>
-      <td>[=leb128=] ≠ 0
-      <td>
-    <tr>
-      <td><dfn>imports</dfn>
-      <td>[=import/import=][[=import/num_imports=]]
-      <td>
-  </tbody>
-</table>
+<h2 id=formulas>
+Formulas</h2>
 
-Each <dfn>import</dfn> consists of the following:
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-      <th>Conditions
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>import_path</dfn>
-      <td>[=u8=][*] ≠ 0
-      <td>
-    <tr>
-      <td><dfn>import_path_sentinel</dfn>
-      <td>[=u8=] = 0
-      <td>
-    <tr>
-      <td><dfn>import_offset</dfn>
-      <td>[=leb128=]
-      <td>
-    <tr>
-      <td><dfn>import_size</dfn>
-      <td>[=leb128=]
-      <td>
-    <tr>
-      <td><dfn>import_checksum</dfn>
-      <td>[=u8=][32]
-      <td>
-  </tbody>
-</table>
-
-An import in an [=internal import block|internal=] or [=external import block=]
-is an <dfn>internal import</dfn> or an <dfn>external import</dfn> respectively.
-Each import supplies a single [=non-leaf item=],
-so the import block supplies [=import/num_imports=] items in the order of [=import/imports=].
-The stored content of the item is the [=imported content=] of the import, given by [=resolve an import|resolving=] it,
-the bytes in [[=import/import_offset=], [=import/import_offset=] + [=import/import_size=])
-of the file found at [=import/import_path=]:
-
-* An internal import finds the file in the [=preceding result=] of its segment,
-    i.e. the result of applying all preceding segments to the base, which is empty for a [=standalone archive=].
-* An external import finds the file in the [=base=] as given.
-
-[=import/import_path=] is a sequence of zero or more components separated by 2F<sub>16</sub> (`/`).
-Each component uses the same encodings as [=meta/entry_name=],
-and its decoded name is subject to the same restrictions as an [=entry name=], so no component can be empty.
-An empty [=import/import_path=] denotes the root itself, which is a file when the base is a single file.
-
-[=import/import_checksum=] is the SHA-512/256 hash [[FIPS180-4]] of the [=imported content=].
-
-<div class=note>
-  Since an [=entry name=] can't contain `/` or be `.` or `..`, splitting [=import/import_path=] is unambiguous,
-  and no path can refer to anything outside the root.
-  A path is relative to the root rather than to the directory of the file using it,
-  because a formula block referencing an import is evaluated before the metadata block names that file,
-  and a single leaf block may be shared by files in different directories.
-  The prefixes shared by paths in the same block compress well.
-</div>
-
-<div class=note>
-  An import refers to a byte range rather than a whole file,
-  so that a decompressor reading a part of a large file only reads and verifies the part actually imported.
-  Multiple ranges of the same file are separate imports.
-</div>
-
-<div class=note>
-  [=import/import_checksum=] tells a wrong or modified base before anything is evaluated from it.
-  This matters because a wrong base often doesn't make the evaluation fail,
-  e.g. a [[#insn-patch|Patch instruction]] produces a different output from a different source.
-  Unlike other checksums in this specification, it uses a cryptographic hash:
-  the base is not part of the archive,
-  so an archive authenticated by other means (e.g. a signature) would otherwise not authenticate the result.
-  It costs 32 bytes per import, which don't compress.
-</div>
-
-<div class=note>
-  An import is often used through a module splitting the imported content into streams,
-  i.e. the preprocessing part of a transformation,
-  so that only the streams that changed have to be patched before the module joining them back is applied.
-  Such a module only has to perform the split decided by the compressor, given as its parameters.
-</div>
-
-</div>
-
-<h5 id=module-block>
-Module block</h5>
-
-Blocks 60<sub>16</sub> through 63<sub>16</sub> are **module blocks**,
-whose [=block/type=] is <code>0110&thinsp;00|ss|</code> in binary ([[#block-types]]).
-Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
-
-The internal structure after decompression is as follows:
-
-<div dfn-for=module>
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-      <th>Conditions
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>wasm_module</dfn>
-      <td>[=u8=][*]
-      <td>
-  </tbody>
-</table>
-
-TODO: The WebAssembly profile, the module interface and the identification by a hash.
-
-</div>
-
-<h5 id=resource-block>
-Resource block</h5>
-
-Blocks 64<sub>16</sub> through 67<sub>16</sub> are **resource blocks**,
-whose [=block/type=] is <code>0110&thinsp;01|ss|</code> in binary ([[#block-types]]).
-Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
-
-The internal structure after decompression is an uninterpreted byte sequence,
-which is supplied to modules by formula blocks referencing it ([[#formula-data]], [[#module-execution]]).
-
-<h5 id=formula-block>
-Formula block</h5>
+<h3 id=formula-block>
+Formula block</h3>
 
 Blocks 70<sub>16</sub> through 77<sub>16</sub> are **formula blocks**,
 whose [=block/type=] is <code>0111&thinsp;0|d||ss|</code> in binary ([[#block-types]]).
@@ -1466,1018 +1872,6 @@ A formula block describes the content of a file as an expression over [=non-leaf
 evaluated with modules and resources preceding it.
 The internal structure of [=formula/formula_data=] is described in Formula data ([[#formula-data]]).
 
-</div>
-
-<h4 id=mirror-block>
-Mirror block</h4>
-
-A **mirror block** holds a verbatim copy of another block, called its <dfn for=mirror>target block</dfn>,
-so that the target block can be restored when it is damaged.
-Mirror blocks are only defined for block types whose damage affects more than a single [=parcel=]
-and can be detected by reading the block alone, i.e. that have a checksum:
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th>Target Block Types
-  </thead>
-  <tbody>
-    <tr>
-      <td>C10<sub>16</sub> — C17<sub>16</sub>
-      <td>10<sub>16</sub> — 17<sub>16</sub> ([[#metadata-block]])
-    <tr>
-      <td>C50<sub>16</sub> — C57<sub>16</sub>
-      <td>50<sub>16</sub> — 57<sub>16</sub> ([[#dictionary-block]])
-    <tr>
-      <td>C58<sub>16</sub> — C5F<sub>16</sub>
-      <td>58<sub>16</sub> — 5F<sub>16</sub> ([[#import-block]])
-    <tr>
-      <td>C60<sub>16</sub> — C63<sub>16</sub>
-      <td>60<sub>16</sub> — 63<sub>16</sub> ([[#module-block]])
-    <tr>
-      <td>C64<sub>16</sub> — C67<sub>16</sub>
-      <td>64<sub>16</sub> — 67<sub>16</sub> ([[#resource-block]])
-    <tr>
-      <td>C70<sub>16</sub> — C77<sub>16</sub>
-      <td>70<sub>16</sub> — 77<sub>16</sub> ([[#formula-block]])
-  </tbody>
-</table>
-
-As with any other block, the [=block/size=] field of a mirror block is determined by its own [=block/type=]
-and counts the bytes of its own [=block/data=].
-Since a mirror block is longer than its target block, its [=block/size=] field may have to be wider.
-Therefore a mirror block is either:
-
-* <dfn for=mirror>Unwidened</dfn>, where the [=block/size=] fields of the mirror block and its target block have the same width,
-    and its [=mirror/target type=] is its [=block/type=] minus C00<sub>16</sub>; or
-* <dfn for=mirror>Widened</dfn>, where the [=block/size=] field of the mirror block is one step wider than that of its target block,
-    and its [=mirror/target type=] is its [=block/type=] minus C01<sub>16</sub>.
-    Its [=block/type=] % 4 MUST NOT be 0.
-
-The [=mirror/target block=] MUST be of the <dfn for=mirror>target type</dfn>,
-which MUST be a block type listed above for the mirror block's [=block/type=].
-Whether a mirror block is widened is signalled by [=mirror/target_offset=].
-
-<div class=note>
-  For example, a mirror block of type C13<sub>16</sub> mirrors a metadata block of type 13<sub>16</sub>,
-  which is uncompressed and has a [=u64le=] [=block/size=] field, if unwidened,
-  or a metadata block of type 12<sub>16</sub> with a [=u32le=] [=block/size=] field if widened.
-  Since C00<sub>16</sub> % 4 = 0, both stay in the same row of the table above.
-</div>
-
-Its data consists of the following:
-
-<div dfn-for=mirror>
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-      <th>Conditions
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>mirror_magic</dfn>
-      <td>[=u8=][8] ∈ {[=const/MIRROR_MAGIC=], [=const/OVERLAY_MIRROR_MAGIC=]}
-      <td>
-    <tr>
-      <td><dfn>archive_offset</dfn>
-      <td>[=leb128=] = [=block/block_start=] - [=archive/archive_start=]
-      <td>
-    <tr>
-      <td><dfn>target_offset</dfn>
-      <td>[=leb128=] ≠ 0
-      <td>
-    <tr>
-      <td><dfn>target_data</dfn>
-      <td>[=u8=][*]
-      <td>
-    <tr>
-      <td><dfn>checksum_end</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>mirror_checksum</dfn>
-      <td>[=u64le=]
-      <td>
-  </tbody>
-</table>
-
-[=mirror/mirror_magic=] is a fixed byte sequence that allows mirror blocks to be found by scanning
-when the surrounding structure, such as the header, the footer or the metadata chain, is damaged.
-It MUST be [=const/OVERLAY_MIRROR_MAGIC=] in an [=overlay archive=] and [=const/MIRROR_MAGIC=] otherwise.
-
-[=mirror/archive_offset=] is the offset from [=archive/archive_start=] to the [=block/block_start=] of the mirror block.
-
-<div class=note>
-  [=mirror/archive_offset=] distinguishes mirror blocks of this archive from those of another archive stored inside it,
-  which can be found by scanning and verify by themselves just like the mirror blocks of this archive.
-  Such a mirror block may point to bytes that are not its target block in this archive,
-  for example when the inner archive is split into multiple blocks.
-  Since the inner archive is stored after [=archive/archive_start=] of this archive,
-  the start of the archive implied by its [=mirror/archive_offset=] is always greater.
-</div>
-
-[=mirror/target_offset=] is the offset from the [=block/block_start=] of the [=mirror/target block=]
-to the [=block/block_start=] of the mirror block, plus 1 if the mirror block is [=mirror/widened=].
-Since the offset between any two blocks is even, [=mirror/target_offset=] % 2 tells whether the mirror block is widened.
-The target block always precedes the mirror block.
-
-[=mirror/target_data=] is a copy of the [=block/data=] of the target block.
-The bytes of the target block, from its [=block/block_start=] to its [=block/block_end=],
-MUST be equal to the concatenation of the following:
-
-1. The shortest [=leb128=] encoding of the [=mirror/target type=];
-2. The length of [=mirror/target_data=], encoded as the [=block/size=] field for the [=mirror/target type=];
-3. [=mirror/target_data=].
-
-The [=block/padding=] of the target block, if any, is not compared, and is restored as a zero byte.
-The [=block/type=] of the mirror block itself is 2 bytes long, as every block type uses the shortest [=leb128=] encoding.
-
-[=mirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
-of all bytes from the [=block/block_start=] of the mirror block to [=mirror/checksum_end=],
-including its [=block/type=] and [=block/size=] fields.
-
-</div>
-
-<div class=note>
-  Unlike other checksums in this specification, [=mirror/mirror_checksum=] is computed over the stored bytes,
-  so that the copy can be verified without decoding it and the mirror block can be verified when found by scanning.
-  A decompressor normally uses a mirror block only after the checksum of its target block fails,
-  while a verifier can also compare the copy with the target block directly.
-</div>
-
-<div class=note>
-  A mirror block is a copy of bytes, not a block to be interpreted at its own position.
-  This is necessary because relative offsets in a metadata block are measured from the metadata block itself.
-</div>
-
-A mirror block SHOULD be [=mirror/unwidened=] unless its [=block/data=] doesn't fit in the [=block/size=] field for the target type.
-
-<div class=note>
-  The data of a mirror block is at least 18 bytes longer than that of its target block,
-  so this is only relevant when the target block is close to the limit of its [=block/size=] field.
-  A single step is always sufficient, since the next width can hold far more than the additional bytes.
-  The width of the target block's [=block/size=] field can't be inferred from the size of [=mirror/target_data=],
-  because a block may use a wider [=block/size=] field than necessary.
-</div>
-
-<div class=note>
-  A block with a [=u64le=] [=block/size=] field can't be mirrored when its data is too close to 2<sup>64</sup> bytes,
-  since its mirror block can't be widened.
-  This is not a practical concern, because such a block is far larger than 2<sup>63</sup> bytes,
-  which is beyond what most systems with signed 64-bit file offsets can store in a single file.
-</div>
-
-<div class=note>
-  To find mirror blocks by scanning, a decoder can look for [=const/MIRROR_MAGIC=]
-  and try each of four possible widths of the [=block/size=] field preceding it.
-  The candidate is correct when the 2 bytes before the [=block/size=] field encode a mirror block type with the matching width
-  and [=mirror/mirror_checksum=] verifies.
-  The candidate is then discarded unless its [=block/block_start=] minus [=mirror/archive_offset=]
-  equals [=archive/archive_start=], because it belongs to another archive stored inside this archive otherwise.
-  If [=archive/archive_start=] can't be determined from [=archive/header_magic=] or [=archive/size_hint=],
-  the smallest value implied by verified candidates can be used instead.
-  A decoder that doesn't know whether the archive is an [=overlay archive=], e.g. because both the header and the footer are damaged,
-  looks for both magics, and the magic of verified candidates tells it.
-</div>
-
-<div class=note>
-  Mirror blocks have a distinct magic in an overlay archive for the same reason as the header and the footer ([[#unencrypted-archive]]):
-  every structure that can be found without the header has to tell whether the archive is an overlay archive.
-</div>
-
-A mirror block doesn't belong to any [=segment=] and MAY occur anywhere in [=archive/blocks=],
-including after the last metadata block, subject only to the requirement that its target block precedes it.
-A single target block MAY have multiple mirror blocks.
-Mirror blocks don't affect the result of [=interpret an archive|interpreting an archive=],
-except that an archive violating the requirements above is an [=invalid archive=].
-
-<div class=note>
-  By [[#partial-access]], a decompressor not reading mirror blocks is not required to verify them.
-</div>
-
-A mirror block and its target block are expected to be damaged together when they are close to each other.
-Conforming compressors SHOULD separate the end of the target block and the [=block/block_start=] of its mirror block
-by at least 4096 bytes, so that they never share an aligned 4 KiB unit of the underlying storage,
-and SHOULD separate them by at least 4 MiB (4,194,304 bytes) when possible.
-
-Issue: The recommended distances are tentative, pending the measurement of burst lengths of latent sector errors
-(`recovery-design.md` §8, R1).
-The interval between mirrored headers in an encrypted archive ([[#encrypted-archive]]) changes with the latter distance.
-
-<div class=note>
-  Dictionary, module and formula blocks typically occur early in their segments,
-  so their mirror blocks can be placed near the end of the segment.
-  A metadata block, on the other hand, only becomes available at the end of its segment,
-  so its mirror block can be placed after a sufficient amount of the next segment has been written.
-  The mirror block of the last metadata block can't be distant from it unless the compressor delays the last segment,
-  and closing segments periodically bounds the loss in that case.
-</div>
-
-<div class=note>
-  Restoring damaged blocks from mirror blocks is a process separate from [=interpret an archive|interpreting an archive=]:
-  it takes a damaged byte sequence and replaces each target block whose bytes differ from a verified mirror block
-  with the bytes reconstructed from the mirror block,
-  locating the target block with [=mirror/target_offset=] alone.
-</div>
-
-Issue: The repair process is to be specified in a separate section (`recovery-design.md` §5.6).
-
-<h3 id=archive>
-Archive</h3>
-
-<h4 id=unencrypted-archive>
-Unencrypted Archive</h4>
-
-An **unencrypted archive** consists of a header, one or more blocks and a footer.
-
-<div dfn-for=archive>
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-      <th>Conditions
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>header_magic</dfn>
-      <td>[=u8=][6] ∈ {[=const/HEADER_MAGIC=], [=const/OVERLAY_HEADER_MAGIC=]}
-      <td>
-    <tr>
-      <td><dfn>archive_start</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>size_hint_block</dfn>
-      <td>[[#size-hint-block|size_hint_block]]
-      <td>[=cond/Optional=]
-    <tr>
-      <td><dfn>blocks</dfn>
-      <td>[[#block|block]][*]
-      <td>
-    <tr>
-      <td><dfn>archive_end</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>footer_magic</dfn>
-      <td>[=u8=][6] ∈ {[=const/FOOTER_MAGIC=], [=const/OVERLAY_FOOTER_MAGIC=]}
-      <td>
-    <tr>
-      <td><dfn>footer_size</dfn>
-      <td>[=u16le=] = [=archive/footer_end=] - [=archive/footer_start=]
-      <td>
-    <tr>
-      <td><dfn>footer_start</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>size_hint</dfn>
-      <td>[=leb128=] = [=archive/archive_end=] - [=archive/archive_start=]
-      <td>
-    <tr>
-      <td><dfn>metadata_backward_offset</dfn>
-      <td>[=leb128=]
-      <td>
-    <tr>
-      <td><dfn>footer_end</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>footer_size_copy</dfn>
-      <td>[=u16le=] = [=archive/footer_size=]
-      <td>
-  </tbody>
-</table>
-
-[=archive/header_magic=] is a fixed 6-byte sequence to identify the file as an unencrypted Aqueous archive.
-This header also marks the beginning of the archive, when the archive doesn't start at the beginning of the file.
-
-[=archive/footer_magic=] is a fixed 6-byte sequence to mark the beginning of the footer.
-The footer also marks the end of the archive, when the archive doesn't end at the end of the file.
-
-An unencrypted archive is an <dfn export for="">overlay archive</dfn> if [=archive/header_magic=] is [=const/OVERLAY_HEADER_MAGIC=],
-and a <dfn>standalone archive</dfn> otherwise.
-[=archive/footer_magic=] MUST be [=const/OVERLAY_FOOTER_MAGIC=] in an overlay archive and [=const/FOOTER_MAGIC=] otherwise.
-An overlay archive is interpreted against a <dfn export for="">base</dfn>,
-an existing directory tree or file given separately from the overlay archive:
-it starts from the base instead of an empty directory and applies its segments to it ([[#interpretation]]),
-and only an overlay archive can contain [=external import blocks=] reading the base ([[#import-block]]).
-The format of overlay archives is called the <dfn export>Aqueous overlay archive format</dfn>,
-and has its own media type ([[#overlay-media-type]]).
-
-<div class=note>
-  A standalone archive is interpreted as an overlay archive would be with an empty directory as its base.
-  Confusing the other way is harmful:
-  an overlay archive that only adds and removes files, without any external import,
-  would be silently interpreted without any file of its base.
-  This can happen when an overlay archive with a damaged header is repaired into a standalone archive.
-  Therefore every structure that can be found without the header tells whether the archive is an overlay archive:
-  the footer, found from the end of the archive, and [[#mirror-block|mirror blocks]], found by scanning.
-  Metadata blocks are only found through them, and an encrypted archive tells it in its decrypted payload.
-</div>
-The offset between [=archive/header_magic=] and [=archive/footer_magic=] is recorded as [=archive/size_hint=],
-which MAY be also replicated as [=archive/size_hint_block=] if random access is desired.
-
-The footer size, which is the size of all fields after (but not including) [=archive/footer_magic=],
-is recorded both in [=archive/footer_size=] and in [=archive/footer_size_copy=].
-Implementations are therefore expected to first identify [=archive/header_magic=] and skip to the end of the file
-to read [=archive/footer_size_copy=] and eventually [=archive/footer_magic=] to read the footer.
-
-<div class=note>
-  [=archive/footer_size=] and [=archive/footer_size_copy=] are [=u16le=] instead of [=leb128=].
-  Therefore the footer size is limited to 65,535 bytes,
-  and a single read of 65,543 bytes (including [=archive/footer_magic=] and [=archive/footer_size_copy=]) is
-  sufficient to guarantee that the entire footer is read.
-</div>
-
-[=archive/metadata_backward_offset=] is the offset from [=archive/footer_start=] to the beginning of last metadata block,
-just like [=meta/previous_metadata_offset=] is the offset from the beginning of the current metadata block to the previous one.
-It MUST be 0 if and only if there is no metadata block,
-so that a decompressor can tell such archives without scanning [=archive/blocks=].
-
-[=archive/blocks=] are logically divided into [=segments=],
-each consisting of [=content blocks=] and a single [[#metadata-block|metadata block]] describing them,
-with optional spacer, [[#mirror-block|mirror]] and [=ignored blocks=] in between.
-Each segment can be independently processed and decompressed in the reading order,
-except that [=internal imports=] ([[#import-block]]) read the result of preceding segments.
-There SHOULD NOT be multiple non-directory [=meta/entry|entries=] with the same path across metadata blocks,
-other than a [=tombstone=] removing an earlier entry,
-and if there are, only the last one is considered valid ([[#segment-merging]]).
-
-Alternatively, [=archive/blocks=] can have no metadata block.
-Such archive decompresses into a single unnamed file,
-whose content is the concatenation of the contents of all [=leaf blocks=] in the order of appearance.
-It decompresses into an empty file if there is no leaf block.
-
-<div class=note>
-  This allows a single file of unknown size to be compressed in a streaming fashion,
-  by writing each unit of random access as a separate leaf block, and thus a separate [=parcel=], as soon as it is compressed.
-  It is analogous to a gzip file that doesn't need to contain the name of the decompressed file.
-  Compressing multiple files in a streaming fashion is not supported:
-  a file spanning multiple non-leaf blocks requires a [=parcel=] starting with a formula block,
-  which declares the length of every slice of the non-leaf blocks before any of them.
-</div>
-
-</div>
-
-<h4 id=encrypted-archive>
-Encrypted Archive</h4>
-
-An archive might have been **encrypted**,
-in which case it consists of a block-like header of type [=const/ENCRYPTED_HEADER_TYPE=] followed by encrypted chunks.
-An encrypted archive is <dfn for=envelope>mirrored</dfn> if it starts with [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=],
-in which case copies of its header are placed between encrypted chunks.
-
-<div dfn-for=envelope>
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-      <th>Conditions
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>checksum_start</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>encrypted_header_magic</dfn>
-      <td>[=u8=][8] ∈ {[=const/ENCRYPTED_HEADER_MAGIC=], [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]}
-      <td>
-    <tr>
-      <td><dfn>lg_work_factor</dfn>
-      <td>[=u8=] ∈ [0C<sub>16</sub>, 3F<sub>16</sub>)
-      <td>
-    <tr>
-      <td><dfn>scrypt_ephemeral_secret</dfn>
-      <td>[=u8=][16]
-      <td>
-    <tr>
-      <td><dfn>encrypted_file_key</dfn>
-      <td>[=u8=][32]
-      <td>
-    <tr>
-      <td><dfn>age_header_mac</dfn>
-      <td>[=u8=][32]
-      <td>
-    <tr>
-      <td><dfn>payload_nonce</dfn>
-      <td>[=u8=][16]
-      <td>
-    <tr>
-      <td><dfn>checksum_end</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>header_checksum</dfn>
-      <td>[=u64le=]
-      <td>[=cond/If=] [=envelope/mirrored=]
-    <tr>
-      <td><dfn>chunks</dfn>
-      <td>[=u8=][*]
-      <td>
-  </tbody>
-</table>
-
-The 97 bytes from [=envelope/lg_work_factor=] to [=envelope/payload_nonce=] are called the <dfn>header fields</dfn>.
-
-[=envelope/header_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
-of all bytes from [=envelope/checksum_start=] to [=envelope/checksum_end=].
-
-<div class=note>
-  [=envelope/header_checksum=] tells a damaged header from a wrong passphrase before running scrypt.
-  Without it, damage to [=envelope/lg_work_factor=], [=envelope/scrypt_ephemeral_secret=] or [=envelope/encrypted_file_key=]
-  results in a [=decryption failure=] for any passphrase,
-  and damage to [=envelope/lg_work_factor=] may make scrypt run for an arbitrarily long time.
-</div>
-
-All fields from [=envelope/lg_work_factor=] to [=envelope/age_header_mac=] are used to reconstruct an AGE v1 textual file header [[AGE]] as follows:
-
-<pre>
-age-encryption.org/v1
--> scrypt <var>scrypt_ephemeral_secret_base64</var> <var>lg_work_factor_decimal</var>
-<var>encrypted_file_key_base64</var>
---- <var>age_header_mac_base64</var>
-</pre>
-
-Where,
-
-* |scrypt_ephemeral_secret_base64| is the base64 encoding of [=envelope/scrypt_ephemeral_secret=] without padding ([[RFC4648]], Section 4);
-* |lg_work_factor_decimal| is the decimal representation of [=envelope/lg_work_factor=] without leading zeros;
-* |encrypted_file_key_base64| is the base64 encoding of [=envelope/encrypted_file_key=] without padding;
-* |age_header_mac_base64| is the base64 encoding of [=envelope/age_header_mac=] without padding.
-
-The <dfn>AGE payload</dfn> consists of [=envelope/payload_nonce=] followed by the encrypted chunks in [=envelope/chunks=]
-and is interpreted in accordance to the AGE v1 format.
-Every encrypted chunk except the last one is 65,552 bytes long,
-i.e. 64 KiB of plaintext followed by a 16-byte authentication tag.
-
-If the archive is not [=envelope/mirrored=], [=envelope/chunks=] consists of the encrypted chunks alone.
-Otherwise [=envelope/chunks=] also contains **mirrored headers**:
-for each encrypted chunk <var>C<sub>m</sub></var> numbered from 0,
-a mirrored header immediately precedes <var>C<sub>m</sub></var>
-if and only if <var>m</var> + 1 is either a power of two less than 64 or a positive multiple of 64.
-The <var>k</var>-th mirrored header numbered from 1 therefore precedes <var>C<sub>m</sub></var>
-where <var>m</var> = 2<sup><var>k</var></sup> − 1 for <var>k</var> ≤ 6 and <var>m</var> = 64(<var>k</var> − 5) − 1 for <var>k</var> ≥ 6,
-and no mirrored header follows the last encrypted chunk.
-A mirrored header consists of the following:
-
-<div dfn-for=emirror>
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Name
-      <th>Type
-      <th>Conditions
-  </thead>
-  <tbody>
-    <tr>
-      <td><dfn>checksum_start</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>encrypted_mirror_magic</dfn>
-      <td>[=u8=][8] = [=const/ENCRYPTED_MIRROR_MAGIC=]
-      <td>
-    <tr>
-      <td><dfn>mirror_index</dfn>
-      <td>[=u32le=] = <var>k</var>
-      <td>
-    <tr>
-      <td><dfn>mirrored_fields</dfn>
-      <td>[=u8=][97] = [=header fields=]
-      <td>
-    <tr>
-      <td><dfn>checksum_end</dfn>
-      <td>[=offset=]
-      <td>
-    <tr>
-      <td><dfn>mirror_checksum</dfn>
-      <td>[=u64le=]
-      <td>
-  </tbody>
-</table>
-
-[=emirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
-of all bytes from [=emirror/checksum_start=] to [=emirror/checksum_end=].
-
-</div>
-
-<div class=note>
-  Mirrored headers allow the archive to be decrypted when its header is damaged.
-  Since every encrypted chunk except the last one has the same length,
-  the <var>k</var>-th mirrored header is always 113 + 65,552<var>m</var> + 117(<var>k</var> − 1) bytes
-  after the start of [=envelope/encrypted_header_magic=], with <var>m</var> as above.
-  A single mirrored header found by scanning for [=const/ENCRYPTED_MIRROR_MAGIC=]
-  and verified by [=emirror/mirror_checksum=] thus gives the start of the archive, the position of every encrypted chunk
-  and every field needed to decrypt them.
-  Unlike [[#mirror-block|mirror blocks]], mirrored headers need no offset to tell archives apart:
-  [=envelope/scrypt_ephemeral_secret=] and [=envelope/payload_nonce=] are random,
-  so mirrored headers with the same [=emirror/mirrored_fields=] belong to the same archive.
-</div>
-
-<div class=note>
-  The interval between mirrored headers doubles from 1 to 64 encrypted chunks and stays at 64 chunks afterwards,
-  which equals the distance of 4 MiB recommended in [[#mirror-block]] measured in plaintext,
-  so that small archives have mirrored headers soon after the header
-  and the overhead stays at 117 bytes per 64 chunks, about 0.003%, for large archives.
-</div>
-
-Issue: The interval of 64 encrypted chunks follows the tentative distance of 4 MiB in [[#mirror-block]] and changes with it (`recovery-design.md` §5.5).
-
-The [=AGE payload=] MUST decrypt into a valid unencrypted archive ([[#unencrypted-archive]]),
-either a [=standalone archive=] or an [=overlay archive=],
-with the following additional constraints:
-
-* [=archive/size_hint_block=] is no longer optional;
-* No spacer block ([[#spacer-block]]) is allowed, in order to discourage an in-place modification of the encrypted archive;
-* No trailing bytes are allowed after the archive.
-
-A damaged encrypted chunk fails to authenticate as a whole,
-and an aligned 4 KiB unit of the underlying storage may span two adjacent encrypted chunks.
-Therefore, in place of the distance of 4096 bytes recommended in [[#mirror-block]],
-conforming compressors SHOULD place a mirror block and its target block in an encrypted archive
-so that at least one entire encrypted chunk lies between them.
-
-Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
-the encrypted chunks after one that fails to authenticate, which a standard AGE implementation doesn't do.
-This is to be specified with the repair process as a separate step producing the decrypted bytes,
-where bytes of such chunks are marked as erasures and the interpretation of an archive stays unchanged
-(`recovery-design.md` §5.6).
-
-<div class=note>
-  A repaired encrypted chunk can't be encrypted again with the original file key and [=envelope/payload_nonce=]
-  unless its plaintext is fully restored, because doing so otherwise reuses a nonce for a different plaintext.
-  Since a damaged chunk usually contains [=leaf blocks=] that mirror blocks don't cover,
-  a repaired encrypted archive is expected to be decrypted, or encrypted again with a new file key.
-</div>
-
-</div>
-
-<h3 id=optional-metadata>
-Optional metadata</h3>
-
-The [=meta/optional_metadata=] field of the metadata block ([[#metadata-block]]) holds the **optional metadata**, encoded in CBOR [[RFC8949]].
-This part encodes any metadata that is not strictly necessary to read the file,
-including associated dates and times, access control information and comments.
-
-The optional metadata is described by the following CDDL [[RFC8610]] definitions:
-
-<pre class=cddl>
-aqr-opt-metadata = {
-  aqr-archive-comment
-  ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
-  * $$aqr-opt-metadata-member  ; For future extensions
-}
-
-$$aqr-opt-metadata-member = ()  ; No extension is defined by this specification
-
-aqr-offset = uint .gt 0
-
-aqr-entry-extra = {
-  aqr-entry-timestamps
-  aqr-entry-comment
-  aqr-entry-link-group
-  aqr-entry-windows
-  aqr-entry-unix
-  aqr-entry-zip
-  * $$aqr-entry-extra-member  ; For future extensions
-}
-
-$$aqr-entry-extra-member = ()  ; No extension is defined by this specification
-
-; TODO: other extras for round trip
-</pre>
-
-There MUST NOT be any following bytes after this CBOR item.
-If [=meta/optional_metadata_size=] is 0, the optional metadata is an empty map `{}`.
-
-The members of `aqr-entry-extra` are grouped by their purposes, and each group is described in the following sections.
-Keys of `aqr-entry-extra` from -1 to -59 are platform-neutral.
-Keys from -60 to -69 are specific to Windows, -70 to -79 to Unix, -80 to -89 to macOS, and -90 to -99 to other platforms.
-
-<h4 id=timestamps>Timestamps</h4>
-
-<p>The keys `crtime`, `ctime`, `mtime`, `atime` and `arctime` of <code>aqr-entry-extra</code>
-record the timestamps that file systems and archive formats associate with a file, a directory or a link.
-Each is an <code>aqr-time</code> described below, and is absent if the source doesn't have the corresponding timestamp.</p>
-
-<pre class=cddl>
-aqr-entry-timestamps = (
-  ? &(crtime: -1) => aqr-time
-  ? &(ctime: -2) => aqr-time
-  ? &(mtime: -3) => aqr-time
-  ? &(atime: -4) => aqr-time
-  ? &(arctime: -5) => aqr-time
-)
-</pre>
-
-<dl>
-<dt>`crtime`</dt>
-<dd><p>The creation time, also known as the birth time: when the file was created at its location.
-It is not updated afterwards, but copying a file usually creates a new one with the time of copying.
-Examples include the creation time of NTFS and FAT, the create date of HFS+ and APFS,
-`i_crtime` of ext4 and `otime` of Btrfs,
-which are exposed as `st_birthtime` on BSD and macOS and as `stx_btime` of `statx` on Linux.</p></dd>
-<dt>`ctime`</dt>
-<dd><p>The status change time:
-when the file's metadata (e.g. permissions, ownership or link count) or its content was last changed.
-It is the POSIX `st_ctime`, and the change time of NTFS and the attribute modification date of HFS+ are similar.
-POSIX doesn't allow it to be set to an arbitrary time,
-so an extracting decompressor usually can't restore it.</p></dd>
-<dt>`mtime`</dt>
-<dd><p>The modification time: when the file's content was last changed.
-For a directory, it is when an entry was last added, removed or renamed in it.
-This is the timestamp that virtually all file systems and archive formats have.</p></dd>
-<dt>`atime`</dt>
-<dd><p>The access time: when the file's content was last read.
-Many systems update it lazily or not at all for performance
-(e.g. `relatime` and `noatime` on Linux, and the access time updates of NTFS that can be disabled),
-and FAT only keeps the date.
-Reading a file for archiving can itself update it.</p></dd>
-<dt>`arctime`</dt>
-<dd><p>The backup time: when the file was last backed up, as recorded by backup software.
-File systems don't update it by themselves.
-An example is the backup date of HFS and HFS+, exposed as `ATTR_CMN_BKUPTIME` of `getattrlist` on macOS.
-It is the time stored by the source, not the time when the archive itself was made.</p></dd>
-</dl>
-
-<div class=note>
-  <p>The name "ctime" is ambiguous.
-  Windows and formats originating from it use "C" for the creation time:
-  `st_ctime` in the Microsoft C runtime, the `Ctime` of ZIP extra field 0x000a,
-  and the `CTime` of 7z and RAR all go to `crtime`, not `ctime`.
-  POSIX formats such as pax use it for the status change time, which goes to `ctime`.</p>
-</div>
-
-<p><code>aqr-time</code> represents a point in time or a local date and time,
-together with a [=quantization interval=] and optional time zone information.
-It is described by the following CDDL definitions,
-where `etime` is the CDDL type name for the extended time defined in [[!RFC9581]]:</p>
-
-<pre class=cddl>
-aqr-time =
-  $aqr-base-time /                          ; UTC timestamp, scaled and quantized
-  [$aqr-base-time] /                        ; Local time in unknown time zone, encoded like UTC (*)
-  [$aqr-instant, offset: aqr-tz-offset] /   ; UTC timestamp with time zone offset ($)
-  etime /                                   ; Extended time defined in [[!RFC9581]]
-  [etime]                                   ; Local time in unknown time zone, encoded like UTC
-
-aqr-tz-offset = -48..56  ; In 15 minutes, positive east of UTC as in ISO 9660
-
-$aqr-base-time  = #6.100(int)    ; 1d (FAT atime*), date as in [[RFC8943]]
-$aqr-base-time /= $aqr-instant  ; Can be given a time zone offset
-
-$aqr-instant  = #6.121(int)  ; 2s (FAT mtime*, exFAT atime$, ZIP*, CAB*)
-$aqr-instant /= int          ; 1s (~ext3, HFS/HFS+, tar, ISO 9660$)
-$aqr-instant /= #6.122(int)  ; 10ms (FAT ctime*, ISO 9660$, exFAT$)
-$aqr-instant /= #6.123(int)  ; 1ms
-$aqr-instant /= #6.124(int)  ; 1us (UDF)
-$aqr-instant /= #6.125(int)  ; 100ns (NTFS, RAR*, 7z)
-$aqr-instant /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
-</pre>
-
-<p>A base time value <code>$aqr-base-time</code> is an integer, either untagged or tagged as follows.
-The integer multiplied by the scale is the number of seconds since 1970-01-01T00:00:00Z,
-not counting leap seconds as in the CBOR tag 1 [[RFC8949]];
-negative values denote the time before that epoch.
-The tag also determines the quantization interval,
-which is relative to the time value and specified in [[#etime-quantization-interval]].
-`#6.100` is the number of days since 1970-01-01 [[RFC8943]],
-and is the only base time value that is not an <code>&#36;aqr-instant</code>, i.e. it can't be given a time zone offset.</p>
-<table class=data>
-<thead>
-<tr>
-  <th>Encoding</th>
-  <th>Quantization Interval (<abbr title="seconds">s</abbr>)</th>
-  <th>Scale (<abbr title="seconds">s</abbr>)</th>
-  <th>Examples</th>
-</tr>
-<tbody>
-<tr>
-  <td><code>#6.100(int)</code></td>
-  <td>[0, 86400]</td>
-  <td>86400</td>
-  <td>FAT atime*</td>
-</tr>
-<tr>
-  <td><code>#6.121(int)</code></td>
-  <td>[0, 2]</td>
-  <td>2</td>
-  <td>FAT mtime*, exFAT atime$, ZIP*, CAB*</td>
-</tr>
-<tr>
-  <td><code>int</code></td>
-  <td>[0, 1]</td>
-  <td>1</td>
-  <td>ext3 and earlier, HFS/HFS+, tar, ISO 9660$ (directory records)</td>
-</tr>
-<tr>
-  <td><code>#6.122(int)</code></td>
-  <td>[0, 10<sup>-2</sup>]</td>
-  <td>10<sup>-2</sup></td>
-  <td>FAT ctime*, ISO 9660$ (volume descriptors), exFAT$</td>
-</tr>
-<tr>
-  <td><code>#6.123(int)</code></td>
-  <td>[0, 10<sup>-3</sup>]</td>
-  <td>10<sup>-3</sup></td>
-  <td>-</td>
-</tr>
-<tr>
-  <td><code>#6.124(int)</code></td>
-  <td>[0, 10<sup>-6</sup>]</td>
-  <td>10<sup>-6</sup></td>
-  <td>UDF</td>
-</tr>
-<tr>
-  <td><code>#6.125(int)</code></td>
-  <td>[0, 10<sup>-7</sup>]</td>
-  <td>10<sup>-7</sup></td>
-  <td>NTFS, RAR*, 7z</td>
-</tr>
-<tr>
-  <td><code>#6.126(int)</code></td>
-  <td>[0, 10<sup>-9</sup>]</td>
-  <td>10<sup>-9</sup></td>
-  <td>ext4, ZFS, Btrfs, APFS</td>
-</tr>
-</table>
-
-<p>In the Examples column, formats marked with * store (or can store) a local time in an unknown time zone,
-and formats marked with $ store a local time with its offset from UTC.</p>
-
-<div class=note>
-  <p>Tags 121 to 126 are the tags for enumerated alternatives 0 to 5 [[CBOR-NOTABLE-TAGS]],
-  whose meanings are given by the schema in use rather than by the tags themselves.
-  They are therefore meaningful only as <code>&#36;aqr-instant</code>,
-  and are not shortcuts for the extended time in general.</p>
-</div>
-
-<div class=note>
-  <p>Since a time zone offset is a multiple of 15 minutes, converting a local time to UTC keeps it a multiple of 2 seconds.
-  A local date, however, doesn't stay a multiple of 1 day unless the offset is zero,
-  so a date with a known time zone offset can only be given as an extended time
-  (e.g. `1001({1: 1697641200, -14: 86400, -10: "+09:00"})` for 2023-10-19 in UTC+9).</p>
-</div>
-
-<p>Each alternative of <code>aqr-time</code> has the following meaning:</p>
-
-<dl>
-<dt><code>&#36;aqr-base-time</code></dt>
-<dd>A point in time without any time zone information.</dd>
-<dt><code>[&#36;aqr-base-time]</code></dt>
-<dd>A local date and time in an unknown time zone, encoded as if it were UTC.
-It does not identify a single point in time.</dd>
-<dt><code>[&#36;aqr-instant, aqr-tz-offset]</code></dt>
-<dd>A point in time, as in the bare <code>&#36;aqr-base-time</code>,
-with the offset of the time zone where it was recorded, in 15-minute increments as in ISO 9660.
-The offset is positive east of UTC: UTC+<var>x</var> hours is 4<var>x</var> and UTC&minus;<var>x</var> hours is &minus;4<var>x</var>.
-The local time is the base time value plus 900 times the offset in seconds.</dd>
-<dt><code>etime</code></dt>
-<dd>An extended time [[RFC9581]] (tag 1001), for any value which doesn't fit the other alternatives.
-The time zone information, if any, is given as a Time Zone Hint (key -10 or 10),
-and the quantization interval is given as a key described in [[#etime-quantization-interval]].</dd>
-<dt><code>[etime]</code></dt>
-<dd>A local date and time in an unknown time zone, encoded as if it were UTC.
-The extended time MUST NOT contain a Time Zone Hint (key -10 or 10),
-and its timescale (key -1, -13 or 13), if present, MUST be 0 (UTC).</dd>
-</dl>
-
-<p><code>etime</code> or <code>[etime]</code> MUST NOT be used
-if another alternative of <code>aqr-time</code> represents the same time value,
-the same quantization interval and the same time zone information.
-A Time Zone Hint is the same as an <code>aqr-tz-offset</code>
-only when it is a numeric offset (e.g. `"+09:00"`) equal to that offset;
-an extended time without any quantization interval is never the same as other alternatives.</p>
-
-<div class=note>
-  <p>As a consequence, timestamps from common file systems and archive formats never need the extended time,
-  and an implementation without full support for [[RFC9581]] can still handle them.
-  Such an implementation can ignore an <code>aqr-time</code> using the extended time,
-  as an extracting decompressor is allowed to ignore any extra metadata ([[#extraction]]).</p>
-</div>
-
-<div class=note>
-  Some precisions found in the wild are only representable with the extended time,
-  e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP and 1/300 s in SQL Server `DATETIME`,
-  and so are time zone offsets that are not multiples of 15 minutes as in UDF.
-  They are rare enough in file metadata not to deserve their own encodings.
-</div>
-
-<p>Two <code>aqr-time</code> values in different encodings are different even when they denote the same point in time.
-For example, `1` and `122(100)` differ in their quantization intervals.
-A compressor converting a timestamp from a file system or another archive format
-SHOULD preserve its precision, i.e. use an encoding whose quantization interval matches the source.</p>
-
-<div class=note>
-  <p>Comparing timestamps from file systems of different precisions is a common source of problems,
-  e.g. an unchanged file copied from ext4 to FAT appears to be modified.
-  Recording the quantization interval for each timestamp, rather than for each archive,
-  lets any consumer tell whether two timestamps can denote the same time,
-  even after an archive mixes multiple sources by editing.</p>
-</div>
-
-<div class=example>
-  <p>The following are possible encodings of 2023-10-19T14:12:34.87Z, or 23:12:34.87 in UTC+9,
-  depending on the source:</p>
-  <ul>
-    <li>ZIP with a DOS date and time, a local time in an unknown time zone: `[121(848878577)]`
-    <li>ZIP with an extended timestamp extra field (0x5455) in UTC: `1697724754`
-    <li>git, which records a time zone offset in minutes: `[1697724754, 36]`
-    <li>exFAT modification time with a UTC offset: `[122(169772475487), 36]`
-    <li>NTFS: `125(16977247548700000)`
-    <li>ext4: `126(1697724754870000000)`
-    <li>FAT access date, a local date in an unknown time zone: `[100(19649)]`
-    <li>A source rounding to the nearest second: `1001({1: 1697724755, -14: [0.5, 0.5]})`
-  </ul>
-</div>
-
-<p>Timestamps from ZIP are discussed in [[#timestamps-from-zip]].</p>
-
-<h4 id=comments>Comments</h4>
-
-<p>`archive-comment` of <code>aqr-opt-metadata</code> and `comment` of <code>aqr-entry-extra</code>
-are free-form comments attached to the whole archive and to each entry respectively,
-e.g. an archive comment and a file comment of ZIP or RAR.
-Both are an <code>aqr-text</code>, which is a Unicode string,
-a WTF-8 [[WTF-8]] string with lone surrogates, or a byte sequence in an unknown encoding:</p>
-
-<pre class=cddl>
-aqr-archive-comment = (
-  ? &(archive-comment: -1) => aqr-text
-)
-
-aqr-entry-comment = (
-  ? &(comment: -6) => aqr-text
-)
-
-aqr-text =
-  tstr /          ; Unicode
-  #6.273(bstr) /  ; WTF-8, i.e. UTF-16 + surrogate compat
-  bstr            ; In unknown encoding
-</pre>
-
-<p>An <code>aqr-text</code> MUST be a `tstr` if it can be represented as one,
-i.e. if it is a sequence of Unicode scalar values.
-The byte string in `#6.273(bstr)` MUST be a valid WTF-8 string that is not a valid UTF-8 string,
-i.e. it MUST contain at least one encoded lone surrogate.
-A `bstr` is not subject to these requirements even if it happens to be a valid UTF-8 string,
-as its encoding is not known.</p>
-
-<p>Comments from ZIP are discussed in [[#comments-from-zip]].</p>
-
-<h4 id=link-groups><code>link-group</code>: Hard links</h4>
-
-<pre class=cddl>
-aqr-entry-link-group = (
-  ? &(link-group: -7) => int  ; File nodes only
-)
-</pre>
-
-<p><code>link-group</code> records that [=file nodes=] were originally the same file,
-i.e. hard links to the same inode on Unix or to the same file record on NTFS.
-A non-negative value is <dfn>segment-local</dfn> and denotes the same group only within the same [=segment=],
-while a negative value is <dfn>archive-wide</dfn> and denotes the same group in every segment.
-The resulting [=file node/link group=] in the [=archive value=] is determined by [=interpret a segment|interpreting a segment=].</p>
-
-<p>A compressor MUST NOT give the same [=file node/link group=] to files that were not the same file.
-It SHOULD NOT give a [=file node/link group=] that no other file node has.
-A file node with <code>link-group</code> SHOULD refer to the same [=leaf block=] as other file nodes in the same group,
-and SHOULD have the same [=entry extra=] as them except for <code>link-group</code> and <code>comment</code>.</p>
-
-<div class=note>
-  <p>Segment-local groups allow the inode number (<code>st_ino</code>) to be used as is,
-  as CBOR can encode any 64-bit unsigned integer as a non-negative <code>int</code>,
-  and can be assigned without reading earlier segments.
-  Inode numbers are still only unique within a single file system,
-  so a compressor reading from multiple file systems has to renumber some of them.</p>
-  <p>Archive-wide groups link files across segments,
-  e.g. when a compressor periodically starts a new segment while archiving a single tree,
-  or when it appends a segment to an existing archive.
-  A compressor using them is responsible for keeping them consistent with all other segments,
-  e.g. by reading earlier metadata blocks when appending.
-  Inode numbers are not suitable as archive-wide values as is,
-  because they can be reused after the file is removed or come from an unrelated file system,
-  and linking unrelated files with the same content can't be detected by any decompressor.</p>
-</div>
-
-<p>A [=file node/link group=] is <dfn>consistent</dfn> if all file nodes with that group
-in the final [=archive value=] have the same [=file node/content=].
-An inconsistent group, e.g. after a later segment has replaced only some of its file nodes,
-is not an [=invalid archive=] failure, but has no effect on extraction ([[#extraction]]).</p>
-
-<div class=note>
-  <p>The consistency can only be determined from the final archive value,
-  because a later segment may replace any file node in the group.
-  Treating an inconsistent group as an invalid archive would make a decompressor reading only some segments
-  unable to detect such failure ([[#partial-access]]).
-  A decompressor can instead check the consistency before creating hard links,
-  at no cost when file nodes refer to the same leaf block.</p>
-  <p>Hard links are not part of the archive model, so a decompressor ignoring <code>link-group</code>
-  still extracts the correct files with the same contents.
-  Directory hard links, found in some macOS Time Machine volumes, are not represented.</p>
-</div>
-
-<h4 id=windows-extras>Windows-specific metadata</h4>
-
-<pre class=cddl>
-aqr-entry-windows = (
-  ? &(win-link-type: -60) => &(file: 0, directory: 1, junction: 2)  ; Link nodes only
-
-  ; TODO: file attributes (e.g. ZIP external file attributes)
-)
-</pre>
-
-`win-link-type` is only meaningful for a [=link node=],
-and determines the kind of a link to be created on Windows ([[#extraction]]).
-"`file`" and "`directory`" denote a symbolic link to a file and to a directory respectively,
-and "`junction`" denotes a junction (a mount point reparse point).
-
-<h4 id=unix-extras>Unix-specific metadata</h4>
-
-<pre class=cddl>
-aqr-entry-unix = (
-  ? &(unix-mode: -70) => uint .le 4095  ; Permission bits only (0o7777), without S_IFMT
-  ? &(unix-uid: -71) => uint
-  ? &(unix-gid: -72) => uint
-)
-</pre>
-
-`unix-mode` only holds the permission bits, including the set-user-ID, set-group-ID and sticky bits.
-The kind of an entry is solely determined by its node ([[#archive-model]]), so `unix-mode` never includes the file type bits (`S_IFMT`).
-
-`unix-uid` and `unix-gid` are the numeric user and group IDs of the owner.
-
-Unix metadata from ZIP is discussed in [[#unix-extras-from-zip]].
-
-<h4 id=zip-extras><code>zip-extras</code>: ZIP extra fields</h4>
-
-<p><code>zip-extras</code> preserves extra fields [[APPNOTE]] of the ZIP entry that the entry was converted from,
-when they carry information about the file that has no other representation in this specification.</p>
-
-<pre class=cddl>
-aqr-entry-zip = (
-  ? &(zip-extras: -100) => aqr-zip-extras
-)
-
-aqr-zip-extras = { * aqr-zip-extra-key => bstr .size (0..65531) }
-aqr-zip-extra-key =
-  0..65535 /   ; Header ID n in the local header
-  -65536..-1   ; Header ID n in the central header, as -1 - n
-; TODO: multiple extra fields with the same header ID
-</pre>
-
-<p>A key |n| from 0 to 65535 denotes the extra field with the header ID |n| in the local header,
-and a key &minus;1 &minus; |n| from &minus;65536 to &minus;1 denotes the extra field with the header ID |n| in the central header.
-The value is the data of the extra field, excluding its 4-byte header of the header ID and the data size.
-Therefore a value with a non-negative key is always in the format for the local header,
-and a value with a negative key is always in the format for the central header.</p>
-
-<p>A compressor converting a ZIP archive MAY put any extra field of an entry into `zip-extras`, subject to the following requirements:</p>
-
-* It MUST NOT put the central header version of an extra field
-    if the local header version with the same header ID is identical byte by byte.
-    The central header version without the local header version is only put with a negative key.
-* It MUST NOT put an extra field whose information is fully represented elsewhere,
-    i.e. in the entry name, the archive model ([[#archive-model]]) or any other key of <code>aqr-entry-extra</code>.
-* It MUST NOT put an extra field which is only meaningful to the ZIP container itself,
-    e.g. sizes, offsets, padding, alignment, encryption and signatures over the ZIP archive.
-* It SHOULD NOT give `zip-extras` to the root directory, which has no counterpart in ZIP.
-
-<p>Extra fields known to be subject to these requirements are listed in [[#zip-extras-to-remove]].
-Any other extra field, including one with an unregistered header ID, can be put into `zip-extras` as is.</p>
-
-<p>`zip-extras` is never authoritative.
-If information in a preserved extra field disagrees with the archive model or any other key of <code>aqr-entry-extra</code>,
-the latter MUST be used.
-A decompressor finding an extra field that a compressor is not allowed to put SHOULD ignore that field only,
-and SHOULD NOT treat the whole archive as invalid.</p>
-
-<div class=note>
-  <p>`zip-extras` is designed for a one-way conversion from ZIP;
-  reconstructing the original ZIP archive from the converted archive is not a goal.
-  Extra fields are preserved so that information without its own key yet,
-  e.g. platform-specific attributes, access control lists and resource forks,
-  can be recovered from already converted archives once a dedicated key is defined.
-  Unknown extra fields are preserved for the same reason,
-  even though some of them might be only meaningful to the ZIP container.</p>
-  <p>The local and central header versions of the same header ID often differ in their formats,
-  e.g. the central header version of 0x5455 only has the modification time,
-  and that of many Info-ZIP attribute blocks only has a summary.
-  Distinguishing them by keys lets a consumer interpret each value in the correct format.
-  The key for the central header version is &minus;1 &minus; |n| instead of &minus;|n|,
-  so that header ID 0 doesn't collide with the local header version,
-  and both versions have the same encoded length in CBOR.</p>
 </div>
 
 <h3 id=formula-data>
@@ -2979,413 +2373,6 @@ An <dfn>output checksum</dfn> is a Checksum instruction [=covers|covering=] an o
 
 </div>
 
-<h2 id=semantics>
-Semantics</h2>
-
-This section defines the meaning of an archive as a function from a byte sequence to an [=archive value=],
-which also takes a [=base=] for an [=overlay archive=].
-Every algorithm here is declarative:
-it defines *what* the result is, not how or in which order it has to be computed,
-and a conforming implementation MAY compute it in any other way that produces the same result.
-
-The result of [=interpret an archive|interpreting an archive=] is either an [=archive value=] or a failure,
-which is one of the following:
-
-* An <dfn>invalid archive</dfn> failure occurs when the input violates any requirement of [[#syntax]] or this section.
-    It is a property of the input alone, and all conforming decompressors agree on it.
-* A <dfn>resource failure</dfn> occurs when the evaluation exceeds a declared or implementation-defined limit.
-    It is not a property of the input, and conforming decompressors MAY disagree on it.
-* A <dfn>decryption failure</dfn> occurs when an [[#encrypted-archive|encrypted archive]] can't be decrypted
-    with the given passphrase, if any.
-    It is a property of the input and the passphrase, and all conforming decompressors agree on it.
-* A <dfn>base failure</dfn> occurs when an [=overlay archive=] is interpreted without a [=base=],
-    or an [=import/import=] can't be resolved in the given base ([[#import-resolution]]).
-    It is a property of the input and the base, and all conforming decompressors agree on it.
-* An <dfn>unsupported failure</dfn> occurs when the input contains a block of a [=critical=] type
-    not defined by this specification ([[#reserved-blocks]]).
-    It is a property of the input and the version of this specification,
-    and all conforming decompressors implementing the same version agree on it.
-
-<div class=note>
-  An unsupported failure tells that a decompressor implementing a newer version may be able to interpret the input,
-  which is not the case for an [=invalid archive=] failure in general.
-  It takes precedence over an [=invalid archive=] failure in the rest of the archive,
-  since a future version may give a different meaning to the rest.
-</div>
-
-A conforming compressor, given an [=archive value=],
-MUST produce a byte sequence whose interpretation is that [=archive value=].
-When it produces an [=overlay archive=], it is also given a [=base=],
-and the interpretation with that base MUST be that archive value.
-This specification doesn't constrain how the compressor chooses blocks, block sizes, dictionaries or formulas.
-
-<h3 id=archive-model>
-Archive model</h3>
-
-An <dfn>archive value</dfn> is a [=struct=] with the following [=struct/items=]:
-
-* <dfn for="archive value">root</dfn>, either a [=directory node=] or a [=file node=].
-    The latter represents a single unnamed file.
-* <dfn for="archive value">extra</dfn>, an [=ordered map=] from integers to CBOR data items [[RFC8949]]
-    representing the archive-wide part of the [[#optional-metadata|optional metadata]].
-
-A <dfn>file node</dfn> is a [=struct=] with the following [=struct/items=]:
-
-* <dfn for="file node">content</dfn>, a [=byte sequence=].
-* <dfn for="file node">link group</dfn>, a [=/link group=] or null.
-* <dfn for="file node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
-
-A <dfn>directory node</dfn> is a [=struct=] with the following [=struct/items=]:
-
-* <dfn for="directory node">children</dfn>, an [=ordered map=] from [=entry names=]
-    to [=file nodes=], [=directory nodes=], [=link nodes=], [=special nodes=] or [=unknown nodes=].
-* <dfn for="directory node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
-
-A <dfn>link node</dfn> is a [=struct=] with the following [=struct/items=], representing a symbolic link:
-
-* <dfn for="link node">target</dfn>, a [=link target=].
-* <dfn for="link node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
-
-A <dfn>special node</dfn> is a [=struct=] with the following [=struct/items=], representing a FIFO or a device file:
-
-* <dfn for="special node">kind</dfn>, one of "`fifo`", "`char-device`" or "`block-device`".
-* <dfn for="special node">device</dfn>, a pair of non-negative integers (major, minor)
-    if [=special node/kind=] is "`char-device`" or "`block-device`", or null otherwise.
-* <dfn for="special node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
-
-<div class=note>
-  A device number is stored as a pair, not as a platform-specific `dev_t` encoding,
-  as tar and cpio do and as `makedev` takes it.
-  Its meaning is up to the platform extracting it:
-  the same pair generally denotes unrelated devices on different platforms,
-  e.g. `/dev/null` is (1, 3) on Linux but (3, 2) on macOS,
-  and this specification doesn't record which platform the number came from.
-</div>
-
-An <dfn>unknown node</dfn> is a [=struct=] with the following [=struct/items=],
-representing a kind of node not defined by this version of this specification:
-
-* <dfn for="unknown node">kind</dfn>, an integer greater than 4.
-* <dfn for="unknown node">data</dfn>, a [=byte sequence=].
-* <dfn for="unknown node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
-
-The [=archive value/root=] can't be a [=link node=], a [=special node=] or an [=unknown node=].
-
-A <dfn>tombstone</dfn> is a [=struct=] with no [=struct/items=], marking the removal of a node.
-It only occurs in [=directory node/children=] of the result of [=interpret a segment|interpreting a segment=],
-and is removed by [=merge directory nodes|merging=] it into the preceding result ([[#segment-merging]]),
-so it never occurs in an [=archive value=].
-
-An <dfn>entry name</dfn> is a [=struct=] with the following [=struct/items=]:
-
-* <dfn for="entry name">encoding</dfn>, either "`wtf-8`" or "`raw`".
-* <dfn for="entry name">bytes</dfn>, a non-empty [=byte sequence=]
-    which is a valid WTF-8 [[WTF-8]] string if [=entry name/encoding=] is "`wtf-8`".
-
-Two [=entry names=] are equal if and only if both items are equal.
-In particular, a "`wtf-8`" name and a "`raw`" name are never equal even when their [=entry name/bytes=] are.
-
-No [=entry name/bytes=] of an [=entry name=] can contain 00<sub>16</sub> or 2F<sub>16</sub> (`/`),
-or be equal to (2E)<sub>16</sub> (`.`) or (2E 2E)<sub>16</sub> (`..`).
-
-<div class=note>
-  These restrictions make every path in an [=archive value=] a plain sequence of components,
-  so that no name can refer to the current, parent or nested directory on any common file system.
-  Platform-specific restrictions are handled at the extraction time ([[#extraction]]).
-</div>
-
-To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
-
-<ol class=algorithm>
-    1. If |bytes|[0] is C1<sub>16</sub>, let |name| be an [=entry name=]
-        whose [=entry name/encoding=] is "`raw`" and [=entry name/bytes=] are |bytes| without the first byte.
-    2. Otherwise, if |bytes| is a valid WTF-8 string, let |name| be an [=entry name=]
-        whose [=entry name/encoding=] is "`wtf-8`" and [=entry name/bytes=] are |bytes|.
-    3. Otherwise, return an [=invalid archive=] failure.
-    4. If |name| violates any restriction of an [=entry name=] above, return an [=invalid archive=] failure.
-    5. Return |name|.
-</ol>
-
-A <dfn>link target</dfn> is a [=struct=] with the following [=struct/items=]:
-
-* <dfn for="link target">encoding</dfn>, either "`wtf-8`" or "`raw`".
-* <dfn for="link target">bytes</dfn>, a non-empty [=byte sequence=] not containing 00<sub>16</sub>,
-    which is a valid WTF-8 [[WTF-8]] string if [=link target/encoding=] is "`wtf-8`".
-
-Unlike an [=entry name=], a [=link target=] is a path which may contain 2F<sub>16</sub> (`/`) as a separator,
-and components equal to `.` or `..`.
-It may be absolute, and may refer to a path that doesn't exist in the [=archive value=] or anywhere else.
-The separator is always `/`: a compressor MUST replace every `\` in a link target read on Windows with `/`.
-Otherwise a link target is not normalized, and its meaning, e.g. of a drive letter, is left to the platform.
-There is no limit on its length other than implementation-defined limits.
-
-<div class=note>
-  `/` can't occur in a file name on Windows, and isn't interpreted as a separator in a link target there,
-  so this replacement is lossless.
-  A decompressor on Windows replaces `/` back with `\` when creating a link ([[#extraction]]).
-
-  On Windows, the target of an absolute link or a junction is stored as an NT path starting with `\??\`,
-  which has no meaning on other platforms.
-  A compressor is advised to convert it to a Win32 path first,
-  e.g. `\??\C:\foo` to `C:/foo`, `\??\UNC\server\share\x` to `//server/share/x`
-  and `\??\Volume{GUID}\x` to `//?/Volume{GUID}/x`.
-
-  Platforms differ in the maximum length of a link target:
-  4095 bytes on Linux (less on some file systems, e.g. 1023 bytes on XFS),
-  1023 bytes on macOS and FreeBSD, and about 8,000 UTF-16 code units on Windows.
-  A link that can't be created is handled at the extraction time ([[#extraction]]).
-</div>
-
-To <dfn>decode a link target</dfn> from a [=meta/link_target=] field |bytes|,
-do the same as to [=decode an entry name=] from |bytes|, except that
-the result is a [=link target=] and restrictions of a [=link target=] apply instead.
-
-A [=link target=] is never resolved within the archive model.
-Every path in an [=archive value=] is still a plain sequence of components,
-and a lookup of a path in an [=archive value=] never follows a [=link node=], as `lstat` doesn't.
-In particular, no node is a descendant of a [=link node=].
-
-<div class=note>
-  This makes the classic attack of extracting `a/passwd` through a preceding link `a` pointing to `/etc`
-  inexpressible in the archive model.
-  A tool MAY offer a lookup following links, but it then has to limit the number of links followed.
-</div>
-
-A <dfn>link group</dfn> is an opaque value that is only compared for equality,
-and is either a pair of a segment and a segment-local integer or an archive-wide integer ([[#link-groups]]).
-Two [=archive values=] are equal if they are equal after a one-to-one renaming of their [=/link groups=].
-
-<h3 id=interpretation>
-Interpreting an archive</h3>
-
-To <dfn export>interpret an archive</dfn> given a [=byte sequence=] |input|, an optional passphrase |passphrase|
-and an optional [=base=] |base|, which is an [=archive value=]:
-
-<ol class=algorithm>
-    1. If |input| starts with [=const/ENCRYPTED_HEADER_MAGIC=] or [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]:
-        1. Parse |input| as the Encrypted Archive structure ([[#encrypted-archive]]) in its entirety.
-            If it fails to parse, return an [=invalid archive=] failure.
-        2. If [=envelope/header_checksum=] is present and doesn't match, return an [=invalid archive=] failure.
-        3. If [=envelope/lg_work_factor=] exceeds an implementation-defined limit, return a [=resource failure=].
-        4. If |passphrase| is not given, or the file key can't be unwrapped from [=envelope/encrypted_file_key=]
-            with |passphrase| as described in [[AGE]], return a [=decryption failure=].
-        5. Using the unwrapped file key, verify [=envelope/age_header_mac=] against the reconstructed AGE header
-            and decrypt the [=AGE payload=] as described in [[AGE]].
-            If either fails, return an [=invalid archive=] failure.
-        6. Set |input| to the decrypted payload.
-            It MUST satisfy the additional constraints in [[#encrypted-archive]],
-            or an [=invalid archive=] failure is returned.
-    2. If |input| parses as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety,
-        with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
-        and the type of any of [=archive/blocks=] is [=critical=] and not defined by this specification,
-        return an [=unsupported failure=].
-    3. Parse |input| as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety.
-        If it fails to parse, return an [=invalid archive=] failure.
-    4. If |input| is an [=overlay archive=] and |base| is not given, return a [=base failure=].
-    5. If |input| is a [=standalone archive=], set |base| to an [=archive value=]
-        whose [=archive value/root=] is a [=directory node=] with an empty map as [=directory node/children=]
-        and null as [=directory node/extra=], and whose [=archive value/extra=] is an empty map.
-    6. If [=archive/blocks=] contain no [[#metadata-block|metadata block]]:
-        1. Let |content| be the concatenation of the [=file contents=] of all [=leaf blocks=] in [=archive/blocks=],
-            in the order of appearance.
-        2. Return an [=archive value=] whose [=archive value/root=] is a [=file node=]
-            with |content| as [=file node/content=] and null as [=file node/extra=],
-            and whose [=archive value/extra=] is an empty map.
-    7. If the [=archive value/root=] of |base| is a [=directory node=], let |root| be a copy of it.
-        Otherwise let |root| be a [=directory node=] with an empty map as [=directory node/children=] and null as [=directory node/extra=].
-    8. Let |extra| be a copy of the [=archive value/extra=] of |base|.
-    9. For each [=segment=] |segment| in [=archive/blocks=], in the order of appearance:
-        1. Let |segment root| be the result of [=interpret a segment|interpreting=] |segment|.
-        2. [=Merge directory nodes|Merge=] |segment root| into |root|.
-        3. For each key |k| and value |v| in the top-level map of the segment's [[#optional-metadata|optional metadata]]
-            other than `entry-extras`, set |extra|[|k|] to |v|.
-    10. Return an [=archive value=] with |root| as [=archive value/root=] and |extra| as [=archive value/extra=].
-</ol>
-
-The <dfn>archive base</dfn> is |base| after the step 5,
-and the <dfn>preceding result</dfn> of a [=segment=] is |root| just before the segment is interpreted in the step 9,
-or the [=archive value/root=] of the archive base for an archive without a metadata block.
-They are what [=external imports=] and [=internal imports=] respectively refer to ([[#import-resolution]]).
-A given |base| doesn't affect the interpretation of a [=standalone archive=].
-
-<div class=note>
-  The preceding result of the first segment of an [=overlay archive=] is its base,
-  so an internal import can also read a file of the base, as long as no preceding segment has replaced or removed it.
-  An external import reads the base as given, even after a preceding segment has replaced the file.
-  An overlay archive without a metadata block replaces its base with a single file,
-  e.g. to patch a single file given as the base.
-</div>
-
-The input to this algorithm is exactly the archive, from the first byte of [=archive/header_magic=]
-to the last byte of [=archive/footer_size_copy=].
-
-A file may contain an archive with leading or trailing bytes,
-which a decompressor removes by [=locate an archive|locating the archive=] ([[#locating-an-archive]]).
-
-Since every [=content block=] has to be described by a subsequent metadata block ([[#content-blocks]]),
-an archive with a metadata block can't have any content block after the last metadata block.
-[=meta/previous_metadata_offset=] and [=archive/metadata_backward_offset=] MUST point to
-the metadata blocks found by parsing [=archive/blocks=] as described in [[#metadata-block]] and [[#unencrypted-archive]],
-so that a decompressor can find each [=segment=] either by scanning blocks forward or by following offsets backward.
-
-<h4 id=segment-interpretation>
-Interpreting a segment</h4>
-
-To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata block|:
-
-<ol class=algorithm>
-    1. Let |meta| be the [=decoded data=] of |metadata block|, parsed as its internal structure ([[#metadata-block]]).
-    2. Let |d| be [=meta/num_directories=], |f| be [=meta/num_directories=] + [=meta/num_files=]
-        and |n| be [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] of |meta|.
-    3. Let |nodes| be a [=list=] containing a single [=directory node=]
-        with an empty map as [=directory node/children=] and the [=entry extra=] for the entry 0 as [=directory node/extra=].
-    4. For each |k| in [1, |n|]:
-        1. Let |entry| be |meta|.[=meta/entries=][|k| - 1].
-        2. Let |name| be the result of [=decode an entry name|decoding=] |entry|.[=meta/entry_name=].
-        3. Let |parent| be 0 if |k| = 1, or |meta|.[=meta/entry_parents=][|k| - 2] otherwise.
-        4. If |k| ≤ |d|, let |node| be a [=directory node=] with an empty map as [=directory node/children=].
-        5. Otherwise, if |k| ≤ |f|:
-            1. Let |param| be |meta|.[=meta/file_params=][|k| - |d| - 1].
-            2. Let |block| be the block at the relative offset |param|.[=meta/file_offset=] from |metadata block|.
-                It MUST be a [=leaf block=] in |segment|.
-            3. If |param|.[=meta/file_dictionary=] is zero, |block| MUST NOT use a dictionary.
-                Otherwise, |block| MUST use the dictionary block at |meta|.[=meta/dictionary_offsets=][|param|.[=meta/file_dictionary=] - 1].
-            4. Let |content| be the [=file content=] of |block|.
-                Its length MUST be |entry|.[=meta/original_size=].
-            5. Let |node| be a [=file node=] with |content| as [=file node/content=] and null as [=file node/link group=].
-            6. If the [=entry extra=] for the entry |k| has `link-group` with a value |g|,
-                set |node|.[=file node/link group=] to a pair of |segment| and |g| if |g| ≥ 0, or to |g| otherwise.
-        6. Otherwise, if |entry|.[=meta/special_kind=] is 0, let |node| be a [=tombstone=].
-            The [=entry extra=] for the entry |k| MUST be null.
-        7. Otherwise, if |entry|.[=meta/special_kind=] is 1:
-            1. Let |target| be the result of [=decode a link target|decoding=] |entry|.[=meta/link_target=].
-            2. Let |node| be a [=link node=] with |target| as [=link node/target=].
-        8. Otherwise, if |entry|.[=meta/special_kind=] is 2, let |node| be a [=special node=]
-            with "`fifo`" as [=special node/kind=] and null as [=special node/device=].
-        9. Otherwise, if |entry|.[=meta/special_kind=] is 3 or 4, let |node| be a [=special node=]
-            with "`char-device`" or "`block-device`" respectively as [=special node/kind=]
-            and (|entry|.[=meta/device_major=], |entry|.[=meta/device_minor=]) as [=special node/device=].
-        10. Otherwise, let |node| be an [=unknown node=]
-            with |entry|.[=meta/special_kind=] as [=unknown node/kind=] and |entry|.[=meta/special_data=] as [=unknown node/data=].
-        11. If |node| is not a [=tombstone=], set the extra of |node| to the [=entry extra=] for the entry |k|.
-        12. Let |children| be the [=directory node/children=] of |nodes|[|parent|].
-            |children|[|name|] MUST NOT [=map/exist=].
-        13. Set |children|[|name|] to |node|.
-        14. [=list/Append=] |node| to |nodes|.
-    5. Return |nodes|[0].
-</ol>
-
-Since every |parent| is less than |k| and at most |d| by [[#metadata-block]], |nodes|[|parent|] is always a [=directory node=] already in |nodes|.
-
-The <dfn>entry extra</dfn> for the entry |k| is the element at the <em>0-based</em> index |k| of `entry-extras`
-in the segment's optional metadata, where the index 0 corresponds to the root directory,
-or null if `entry-extras` or such element doesn't exist.
-`entry-extras` MUST NOT have more elements than the entries including the root directory,
-i.e. [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] + 1.
-
-<h4 id=segment-merging>
-Merging segments</h4>
-
-To <dfn>merge directory nodes</dfn> |later| into |earlier|:
-
-<ol class=algorithm>
-    1. For each |name| → |node| of |later|.[=directory node/children=]:
-        1. Let |existing| be |earlier|.[=directory node/children=][|name|], or null if it doesn't [=map/exist=].
-        2. If |node| is a [=tombstone=], [=map/remove=] |earlier|.[=directory node/children=][|name|] if it [=map/exists=].
-        3. Otherwise, if |node| is a [=directory node=]:
-            1. If |existing| is not a [=directory node=], set |existing| to a [=directory node=]
-                with an empty map as [=directory node/children=] and null as [=directory node/extra=],
-                and set |earlier|.[=directory node/children=][|name|] to |existing|.
-            2. [=Merge directory nodes|Merge=] |node| into |existing|.
-        4. Otherwise, set |earlier|.[=directory node/children=][|name|] to |node|.
-    2. If |later|.[=directory node/extra=] is not null, set |earlier|.[=directory node/extra=] to it.
-</ol>
-
-As a result, a directory appearing in multiple segments has the union of their children,
-while any other node, or a directory replaced by a node of the different kind, is replaced as a whole with its descendants.
-In particular, a directory replaced by a [=link node=] loses all its descendants,
-so no node is a descendant of a [=link node=] in the result.
-A [=tombstone=] removes the node at its path along with its descendants, and does nothing if there is no such node.
-A tombstone is never kept in the result, even under a directory that didn't exist before.
-A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=],
-which can be cleared by an empty map `{}` instead.
-
-<div class=note>
-  Directories necessarily reappear in later segments to hold new files under them.
-  The rule in [[#unencrypted-archive]] that there SHOULD NOT be multiple entries with the same path
-  therefore only concerns non-directory entries.
-  For the same reason, a reappearing directory doesn't have to repeat its [=entry extra=].
-</div>
-
-<div class=note>
-  A directory whose children change entirely, e.g. from |A| to |B|, keeps its node and gets tombstones for the names in |A| but not in |B|,
-  while the names in |B| replace or add nodes as usual.
-  A tombstone on a directory states that the directory itself is absent from the result,
-  and a single tombstone removes a whole subtree.
-  So replacing the entire base of an [=overlay archive=] needs a tombstone for each name only in the base
-  at the topmost level where the base and the new tree differ.
-</div>
-
-<h4 id=import-resolution>
-Resolving an import</h4>
-
-To <dfn>resolve an import</dfn> |import| of an import block in a [=segment=]:
-
-<ol class=algorithm>
-    1. Split |import|.[=import/import_path=] at every 2F<sub>16</sub> into components, unless it is empty,
-        and let |names| be the result of [=decode an entry name|decoding=] each component as an entry name.
-        If any component fails to decode, return an [=invalid archive=] failure.
-    2. Let |node| be the [=preceding result=] of the segment if |import| is an [=internal import=],
-        or the [=archive value/root=] of the [=archive base=] otherwise.
-    3. For each |name| of |names| in order:
-        1. |node| MUST be a [=directory node=], and |node|.[=directory node/children=][|name|] MUST [=map/exist=].
-        2. Set |node| to |node|.[=directory node/children=][|name|].
-    4. |node| MUST be a [=file node=].
-    5. |import|.[=import/import_offset=] + |import|.[=import/import_size=] MUST be at most the length of |node|.[=file node/content=].
-    6. Let |content| be the bytes of |node|.[=file node/content=]
-        in [|import|.[=import/import_offset=], |import|.[=import/import_offset=] + |import|.[=import/import_size=]).
-    7. The SHA-512/256 hash [[FIPS180-4]] of |content| MUST be equal to |import|.[=import/import_checksum=].
-    8. Return |content| as the <dfn>imported content</dfn> of |import|.
-</ol>
-
-A violation of any MUST in this algorithm is a [=base failure=] in an [=overlay archive=],
-and an [=invalid archive=] failure in a [=standalone archive=].
-
-<div class=note>
-  As any other lookup in an archive value, resolving an import never follows a [=link node=],
-  since a link node is not a directory node.
-  In a standalone archive the preceding result is determined by the archive alone,
-  so a failure is a property of the archive.
-  In an overlay archive it depends on the base even for an internal import,
-  whose path may lead into the part of the base no preceding segment has replaced.
-</div>
-
-<h3 id=block-contents>
-Block contents</h3>
-
-The <dfn>decoded data</dfn> of a block using the Shared external structure ([[#shared-external-structure]]),
-given its [=compression_method=] and [=checksum_method=], is determined as follows:
-
-* If [=compression_method=] is None, it is [=udata/data=].
-* If [=compression_method=] is [[#zstandard-compression-method|Zstandard]],
-    it is the result of decompressing [=cdata/data=] as described there, with [=cdata/compression_params=]
-    and the [=dictionary=] given by the dictionary block in use ([[#dictionary-block]]), if any.
-    The result MUST have exactly [=cdata/original_size=] bytes.
-* If [=checksum_method=] is not None, the checksum MUST be equal to the checksum of the decoded data
-    computed by the [=checksum_method=].
-
-The <dfn>stored content</dfn> of a [[#data-block|data block]],
-whether a [=leaf block=] or not, is the [=decoded data=] of its [=dblock/compressed_data=] or [=dblock/uncompressed_data=].
-The stored content of a [=non-leaf item=] is the stored content of the non-leaf data block supplying it,
-or the [=imported content=] of the [=import/import=] supplying it ([[#import-resolution]]).
-A data block using a dictionary uses the dictionary block at [=dblock/dictionary_index=] within the [=segment=].
-
-The <dfn>file content</dfn> of a [=leaf block=] is:
-
-* Its [=stored content=], if it is a data block;
-* The only output of [=evaluate a formula block|evaluating=] it, if it is a [[#formula-block|formula block]].
-    The formula block MUST have exactly one output, until multiple outputs are specified ([[#formula-evaluation]]).
-
 <h3 id=formula-evaluation>
 Formula evaluation</h3>
 
@@ -3453,6 +2440,49 @@ To <dfn>unpack</dfn> |p|:
   The output of such a module is passed to another module taking a packed byte sequence
   by a Split instruction followed by a Pack instruction.
 </div>
+
+<h2 id=modules>
+Modules</h2>
+
+<h3 id=module-block>
+Module block</h3>
+
+Blocks 60<sub>16</sub> through 63<sub>16</sub> are **module blocks**,
+whose [=block/type=] is <code>0110&thinsp;00|ss|</code> in binary ([[#block-types]]).
+Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
+
+The internal structure after decompression is as follows:
+
+<div dfn-for=module>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>wasm_module</dfn>
+      <td>[=u8=][*]
+      <td>
+  </tbody>
+</table>
+
+TODO: The WebAssembly profile, the module interface and the identification by a hash.
+
+</div>
+
+<h3 id=resource-block>
+Resource block</h3>
+
+Blocks 64<sub>16</sub> through 67<sub>16</sub> are **resource blocks**,
+whose [=block/type=] is <code>0110&thinsp;01|ss|</code> in binary ([[#block-types]]).
+Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
+
+The internal structure after decompression is an uninterpreted byte sequence,
+which is supplied to modules by formula blocks referencing it ([[#formula-data]], [[#module-execution]]).
 
 <h3 id=module-execution>
 Module execution</h3>
@@ -3589,94 +2619,1102 @@ A violation of any MUST in host functions is signalled as an error to the module
 
 Issue: Deterministic fork-join (`spawn`) and channels between tasks.
 
-<h3 id=partial-access>
-Partial access</h3>
+<h2 id=overlays>
+Overlay archives and imports</h2>
 
-A decompressor MAY compute only a part of the result of [=interpret an archive|interpreting an archive=],
-such as a subset of entries, a byte range of a [=file node/content=], or entry names without contents.
-Such a partial result MUST be equal to the corresponding part of the full result, if the full result is an [=archive value=].
+<h3 id=import-block>
+Import block</h3>
 
-A decompressor computing a partial result is not required to detect an [=invalid archive=] failure
-caused only by parts it doesn't compute.
-It SHOULD verify every checksum covering only the bytes it has computed.
+Blocks 58<sub>16</sub> through 5F<sub>16</sub> are **import blocks**,
+which are [=non-leaf blocks=] supplying byte ranges of files outside the [=segment=].
+Their [=block/type=] is <code>0101&thinsp;1|e||ss|</code> in binary ([[#block-types]]),
+and their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
+
+<div dfn-for=import>
+
+|e| determines the source (<dfn>external</dfn>): preceding segments if 0, and the [=base=] if 1.
+
+An import block is an <dfn>internal import block</dfn> if [=import/external=] is false,
+and an <dfn>external import block</dfn> otherwise.
+An external import block MUST NOT occur in an archive other than an [=overlay archive=] ([[#unencrypted-archive]]).
+
+The internal structure after decompression is as follows:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>num_imports</dfn>
+      <td>[=leb128=] ≠ 0
+      <td>
+    <tr>
+      <td><dfn>imports</dfn>
+      <td>[=import/import=][[=import/num_imports=]]
+      <td>
+  </tbody>
+</table>
+
+Each <dfn>import</dfn> consists of the following:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>import_path</dfn>
+      <td>[=u8=][*] ≠ 0
+      <td>
+    <tr>
+      <td><dfn>import_path_sentinel</dfn>
+      <td>[=u8=] = 0
+      <td>
+    <tr>
+      <td><dfn>import_offset</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>import_size</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
+      <td><dfn>import_checksum</dfn>
+      <td>[=u8=][32]
+      <td>
+  </tbody>
+</table>
+
+An import in an [=internal import block|internal=] or [=external import block=]
+is an <dfn>internal import</dfn> or an <dfn>external import</dfn> respectively.
+Each import supplies a single [=non-leaf item=],
+so the import block supplies [=import/num_imports=] items in the order of [=import/imports=].
+The stored content of the item is the [=imported content=] of the import, given by [=resolve an import|resolving=] it,
+the bytes in [[=import/import_offset=], [=import/import_offset=] + [=import/import_size=])
+of the file found at [=import/import_path=]:
+
+* An internal import finds the file in the [=preceding result=] of its segment,
+    i.e. the result of applying all preceding segments to the base, which is empty for a [=standalone archive=].
+* An external import finds the file in the [=base=] as given.
+
+[=import/import_path=] is a sequence of zero or more components separated by 2F<sub>16</sub> (`/`).
+Each component uses the same encodings as [=meta/entry_name=],
+and its decoded name is subject to the same restrictions as an [=entry name=], so no component can be empty.
+An empty [=import/import_path=] denotes the root itself, which is a file when the base is a single file.
+
+[=import/import_checksum=] is the SHA-512/256 hash [[FIPS180-4]] of the [=imported content=].
 
 <div class=note>
-  For example, a decompressor reading a byte range of a file defined by a formula block
-  only reads the non-leaf blocks covering that range, rather than its entire [=parcel=].
-  It can't verify the output checksum of the formula block,
-  but can verify the checksums of non-leaf blocks it has read.
-  A decompressor looking up a single path has to consider every [=segment=] that may replace it,
-  which is possible by reading metadata blocks backward from [=archive/metadata_backward_offset=]
-  until the path or one of its ancestors is found as a non-directory entry in a segment.
-  If that entry is a [=tombstone=], the path doesn't exist.
-  If no segment has such an entry, the path doesn't exist in a [=standalone archive=],
-  and is looked up in the [=base=] of an [=overlay archive=].
-  Likewise, reading a file using [=import/import|imports=] only needs the imported byte ranges,
-  and an [=internal import=] is resolved by the same lookup from the preceding segment.
+  Since an [=entry name=] can't contain `/` or be `.` or `..`, splitting [=import/import_path=] is unambiguous,
+  and no path can refer to anything outside the root.
+  A path is relative to the root rather than to the directory of the file using it,
+  because a formula block referencing an import is evaluated before the metadata block names that file,
+  and a single leaf block may be shared by files in different directories.
+  The prefixes shared by paths in the same block compress well.
 </div>
 
-<h2 id=conformance>
-Conformance</h2>
+<div class=note>
+  An import refers to a byte range rather than a whole file,
+  so that a decompressor reading a part of a large file only reads and verifies the part actually imported.
+  Multiple ranges of the same file are separate imports.
+</div>
 
-As well as sections marked as non-normative, all diagrams, examples and notes in this specification are non-normative.
-Everything else in this specification is normative.
+<div class=note>
+  [=import/import_checksum=] tells a wrong or modified base before anything is evaluated from it.
+  This matters because a wrong base often doesn't make the evaluation fail,
+  e.g. a [[#insn-patch|Patch instruction]] produces a different output from a different source.
+  Unlike other checksums in this specification, it uses a cryptographic hash:
+  the base is not part of the archive,
+  so an archive authenticated by other means (e.g. a signature) would otherwise not authenticate the result.
+  It costs 32 bytes per import, which don't compress.
+</div>
 
-The key words MAY, MUST, MUST NOT, RECOMMENDED, SHOULD and SHOULD NOT in this specification
-are to be interpreted as described in BCP 14 [[RFC2119]] [[RFC8174]]
-when, and only when, they appear in all capitals, as shown here.
+<div class=note>
+  An import is often used through a module splitting the imported content into streams,
+  i.e. the preprocessing part of a transformation,
+  so that only the streams that changed have to be patched before the module joining them back is applied.
+  Such a module only has to perform the split decided by the compressor, given as its parameters.
+</div>
 
-<h3 id=locating-an-archive>
-Locating an archive</h3>
+</div>
 
-A file may contain an archive with leading bytes, e.g. a self-extracting executable,
-or with trailing bytes, e.g. appended by a transfer.
-Since [=interpret an archive|interpreting an archive=] takes the archive alone,
-a decompressor accepting such a file has to locate the archive first.
+<h3 id=import-resolution>
+Resolving an import</h3>
 
-A header magic and a footer magic <dfn>match</dfn> when they are
-[=const/HEADER_MAGIC=] and [=const/FOOTER_MAGIC=], or [=const/OVERLAY_HEADER_MAGIC=] and [=const/OVERLAY_FOOTER_MAGIC=].
-
-To <dfn>locate an archive</dfn> in a [=byte sequence=] |file|:
+To <dfn>resolve an import</dfn> |import| of an import block in a [=segment=]:
 
 <ol class=algorithm>
-    1. If |file| starts with [=const/ENCRYPTED_HEADER_MAGIC=] or [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=], return |file|.
-    2. Let |back| be null.
-        Let |n| be the last 2 bytes of |file| as [=u16le=], and let |f| be the length of |file| − |n| − 10.
-        If |f| ≥ 0, the bytes of |file| from |f| are [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=] followed by |n| as [=u16le=],
-        and the [=leb128=] from |f| + 8 is |s| such that |h| = |f| − |s| − 6 ≥ 0
-        and the bytes of |file| from |h| are the header magic [=match|matching=] that footer magic, set |back| to |h|.
-    3. If |file| starts with [=const/HEADER_MAGIC=] or [=const/OVERLAY_HEADER_MAGIC=]:
-        1. If |back| is 0, return |file|.
-        2. Read blocks from the offset 6 by the generic structure ([[#block]]),
-            with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
-            until the bytes at the current offset |f| start with [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=].
-            If it fails to read a block before that, or the footer magic doesn't [=match=] the header magic, return failure.
-        3. Let |n| be the 2 bytes of |file| from |f| + 6 as [=u16le=].
-            If |file| is shorter than |f| + |n| + 10 bytes, return failure.
-            Otherwise, return the first |f| + |n| + 10 bytes of |file|.
-    4. If |back| is not null, return the bytes of |file| from |back|.
-    5. Return failure.
+    1. Split |import|.[=import/import_path=] at every 2F<sub>16</sub> into components, unless it is empty,
+        and let |names| be the result of [=decode an entry name|decoding=] each component as an entry name.
+        If any component fails to decode, return an [=invalid archive=] failure.
+    2. Let |node| be the [=preceding result=] of the segment if |import| is an [=internal import=],
+        or the [=archive value/root=] of the [=archive base=] otherwise.
+    3. For each |name| of |names| in order:
+        1. |node| MUST be a [=directory node=], and |node|.[=directory node/children=][|name|] MUST [=map/exist=].
+        2. Set |node| to |node|.[=directory node/children=][|name|].
+    4. |node| MUST be a [=file node=].
+    5. |import|.[=import/import_offset=] + |import|.[=import/import_size=] MUST be at most the length of |node|.[=file node/content=].
+    6. Let |content| be the bytes of |node|.[=file node/content=]
+        in [|import|.[=import/import_offset=], |import|.[=import/import_offset=] + |import|.[=import/import_size=]).
+    7. The SHA-512/256 hash [[FIPS180-4]] of |content| MUST be equal to |import|.[=import/import_checksum=].
+    8. Return |content| as the <dfn>imported content</dfn> of |import|.
 </ol>
 
-The located archive is then [=interpret an archive|interpreted=], which may still fail.
-A decompressor SHOULD warn the user when |file| has bytes outside the located archive.
-It MAY search for [=const/HEADER_MAGIC=] and [=const/OVERLAY_HEADER_MAGIC=] when the archive can't be located otherwise,
-e.g. when |file| has both leading and trailing bytes.
+A violation of any MUST in this algorithm is a [=base failure=] in an [=overlay archive=],
+and an [=invalid archive=] failure in a [=standalone archive=].
 
 <div class=note>
-  An encrypted archive is located only at the beginning of a file and extends to its end,
-  because the end of its payload can't be known without decrypting it ([[#encrypted-archive]]).
-
-  A block can't start with [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=],
-  since they start with the shortest [=leb128=] encodings of [=const/FOOTER_TYPE=] and [=const/OVERLAY_FOOTER_TYPE=] ([[#constants]]),
-  which are not valid block types.
-  The step 3.2 therefore finds the end of the first archive in |file|,
-  while the step 4 finds the archive at the end of |file| without reading the bytes before it.
-  Archives concatenated together are not a single archive, and only the first one is located.
+  As any other lookup in an archive value, resolving an import never follows a [=link node=],
+  since a link node is not a directory node.
+  In a standalone archive the preceding result is determined by the archive alone,
+  so a failure is a property of the archive.
+  In an overlay archive it depends on the base even for an internal import,
+  whose path may lead into the part of the base no preceding segment has replaced.
 </div>
 
-<h3 id=extraction>
-Extraction</h3>
+<h3 id=bases>
+Reading a base</h3>
+
+Reading a [=base=] from a file system is outside the archive model, as is extraction.
+A decompressor doing so maps a directory or a single file to an [=archive value=], and is subject to the following requirements:
+
+* It MUST NOT use a base unless explicitly given one,
+    and in particular MUST NOT use the current directory or the destination directory as a base by default.
+* It MUST NOT read anything outside the given directory,
+    including through symbolic links or other redirections already present in the base.
+    A symbolic link in the base is a [=link node=] and is never followed,
+    so an [=import/import=] whose path leads through or to a link fails to resolve ([[#import-resolution]]).
+* It MUST NOT read a file other than a regular file as the content of a [=file node=].
+    A FIFO or a device file in the base is a [=special node=].
+* It SHOULD map a file system name to an [=entry name=] as the reverse of the mapping in [[#extraction]].
+    If a name can't be mapped, or multiple names map to the same entry name, it MUST either fail or report it to the user.
+* The base MUST appear the same throughout the interpretation, as if it were read at a single point in time.
+    A decompressor MAY read only the parts of the base needed by [=import/import|imports=] and by the result,
+    and the checksums of imports detect a part that changed while reading.
+
+<div class=note>
+  An archive can copy any byte of its base into its result,
+  and the [=base failure=] of an import with a guessed content tells whether the guess is right.
+  An untrusted archive therefore gets as much access to the base as to its own result,
+  which is why the base is only used when explicitly given.
+  A decompressor is advised to report the files of the base it has read.
+</div>
+
+A decompressor MAY write the result of an [=overlay archive=] into its base directory, i.e. apply it in place.
+In that case:
+
+* The result MUST be the same as if every [=imported content=] were read before anything is written,
+    e.g. by writing new files under temporary names and renaming them after all of them are written.
+* It MAY remove a node of the base only when the node is absent from the result,
+    and SHOULD leave every node not given by any segment as it is.
+
+<div class=note>
+  Ordering the writes alone is not sufficient in general:
+  a file may be patched from another file which is in turn patched from the former,
+  e.g. when two files are swapped.
+</div>
+
+<h2 id=encrypted-archive>
+Encrypted archives</h2>
+
+An archive might have been **encrypted**,
+in which case it consists of a block-like header of type [=const/ENCRYPTED_HEADER_TYPE=] followed by encrypted chunks.
+An encrypted archive is <dfn for=envelope>mirrored</dfn> if it starts with [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=],
+in which case copies of its header are placed between encrypted chunks.
+
+<div dfn-for=envelope>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>checksum_start</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>encrypted_header_magic</dfn>
+      <td>[=u8=][8] ∈ {[=const/ENCRYPTED_HEADER_MAGIC=], [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]}
+      <td>
+    <tr>
+      <td><dfn>lg_work_factor</dfn>
+      <td>[=u8=] ∈ [0C<sub>16</sub>, 3F<sub>16</sub>)
+      <td>
+    <tr>
+      <td><dfn>scrypt_ephemeral_secret</dfn>
+      <td>[=u8=][16]
+      <td>
+    <tr>
+      <td><dfn>encrypted_file_key</dfn>
+      <td>[=u8=][32]
+      <td>
+    <tr>
+      <td><dfn>age_header_mac</dfn>
+      <td>[=u8=][32]
+      <td>
+    <tr>
+      <td><dfn>payload_nonce</dfn>
+      <td>[=u8=][16]
+      <td>
+    <tr>
+      <td><dfn>checksum_end</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>header_checksum</dfn>
+      <td>[=u64le=]
+      <td>[=cond/If=] [=envelope/mirrored=]
+    <tr>
+      <td><dfn>chunks</dfn>
+      <td>[=u8=][*]
+      <td>
+  </tbody>
+</table>
+
+The 97 bytes from [=envelope/lg_work_factor=] to [=envelope/payload_nonce=] are called the <dfn>header fields</dfn>.
+
+[=envelope/header_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+of all bytes from [=envelope/checksum_start=] to [=envelope/checksum_end=].
+
+<div class=note>
+  [=envelope/header_checksum=] tells a damaged header from a wrong passphrase before running scrypt.
+  Without it, damage to [=envelope/lg_work_factor=], [=envelope/scrypt_ephemeral_secret=] or [=envelope/encrypted_file_key=]
+  results in a [=decryption failure=] for any passphrase,
+  and damage to [=envelope/lg_work_factor=] may make scrypt run for an arbitrarily long time.
+</div>
+
+All fields from [=envelope/lg_work_factor=] to [=envelope/age_header_mac=] are used to reconstruct an AGE v1 textual file header [[AGE]] as follows:
+
+<pre>
+age-encryption.org/v1
+-> scrypt <var>scrypt_ephemeral_secret_base64</var> <var>lg_work_factor_decimal</var>
+<var>encrypted_file_key_base64</var>
+--- <var>age_header_mac_base64</var>
+</pre>
+
+Where,
+
+* |scrypt_ephemeral_secret_base64| is the base64 encoding of [=envelope/scrypt_ephemeral_secret=] without padding ([[RFC4648]], Section 4);
+* |lg_work_factor_decimal| is the decimal representation of [=envelope/lg_work_factor=] without leading zeros;
+* |encrypted_file_key_base64| is the base64 encoding of [=envelope/encrypted_file_key=] without padding;
+* |age_header_mac_base64| is the base64 encoding of [=envelope/age_header_mac=] without padding.
+
+The <dfn>AGE payload</dfn> consists of [=envelope/payload_nonce=] followed by the encrypted chunks in [=envelope/chunks=]
+and is interpreted in accordance to the AGE v1 format.
+Every encrypted chunk except the last one is 65,552 bytes long,
+i.e. 64 KiB of plaintext followed by a 16-byte authentication tag.
+
+If the archive is not [=envelope/mirrored=], [=envelope/chunks=] consists of the encrypted chunks alone.
+Otherwise [=envelope/chunks=] also contains **mirrored headers**:
+for each encrypted chunk <var>C<sub>m</sub></var> numbered from 0,
+a mirrored header immediately precedes <var>C<sub>m</sub></var>
+if and only if <var>m</var> + 1 is either a power of two less than 64 or a positive multiple of 64.
+The <var>k</var>-th mirrored header numbered from 1 therefore precedes <var>C<sub>m</sub></var>
+where <var>m</var> = 2<sup><var>k</var></sup> − 1 for <var>k</var> ≤ 6 and <var>m</var> = 64(<var>k</var> − 5) − 1 for <var>k</var> ≥ 6,
+and no mirrored header follows the last encrypted chunk.
+A mirrored header consists of the following:
+
+<div dfn-for=emirror>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>checksum_start</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>encrypted_mirror_magic</dfn>
+      <td>[=u8=][8] = [=const/ENCRYPTED_MIRROR_MAGIC=]
+      <td>
+    <tr>
+      <td><dfn>mirror_index</dfn>
+      <td>[=u32le=] = <var>k</var>
+      <td>
+    <tr>
+      <td><dfn>mirrored_fields</dfn>
+      <td>[=u8=][97] = [=header fields=]
+      <td>
+    <tr>
+      <td><dfn>checksum_end</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>mirror_checksum</dfn>
+      <td>[=u64le=]
+      <td>
+  </tbody>
+</table>
+
+[=emirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+of all bytes from [=emirror/checksum_start=] to [=emirror/checksum_end=].
+
+</div>
+
+<div class=note>
+  Mirrored headers allow the archive to be decrypted when its header is damaged.
+  Since every encrypted chunk except the last one has the same length,
+  the <var>k</var>-th mirrored header is always 113 + 65,552<var>m</var> + 117(<var>k</var> − 1) bytes
+  after the start of [=envelope/encrypted_header_magic=], with <var>m</var> as above.
+  A single mirrored header found by scanning for [=const/ENCRYPTED_MIRROR_MAGIC=]
+  and verified by [=emirror/mirror_checksum=] thus gives the start of the archive, the position of every encrypted chunk
+  and every field needed to decrypt them.
+  Unlike [[#mirror-block|mirror blocks]], mirrored headers need no offset to tell archives apart:
+  [=envelope/scrypt_ephemeral_secret=] and [=envelope/payload_nonce=] are random,
+  so mirrored headers with the same [=emirror/mirrored_fields=] belong to the same archive.
+</div>
+
+<div class=note>
+  The interval between mirrored headers doubles from 1 to 64 encrypted chunks and stays at 64 chunks afterwards,
+  which equals the distance of 4 MiB recommended in [[#mirror-block]] measured in plaintext,
+  so that small archives have mirrored headers soon after the header
+  and the overhead stays at 117 bytes per 64 chunks, about 0.003%, for large archives.
+</div>
+
+Issue: The interval of 64 encrypted chunks follows the tentative distance of 4 MiB in [[#mirror-block]] and changes with it (`recovery-design.md` §5.5).
+
+The [=AGE payload=] MUST decrypt into a valid unencrypted archive ([[#unencrypted-archive]]),
+either a [=standalone archive=] or an [=overlay archive=],
+with the following additional constraints:
+
+* [=archive/size_hint_block=] is no longer optional;
+* No spacer block ([[#spacer-block]]) is allowed, in order to discourage an in-place modification of the encrypted archive;
+* No trailing bytes are allowed after the archive.
+
+A damaged encrypted chunk fails to authenticate as a whole,
+and an aligned 4 KiB unit of the underlying storage may span two adjacent encrypted chunks.
+Therefore, in place of the distance of 4096 bytes recommended in [[#mirror-block]],
+conforming compressors SHOULD place a mirror block and its target block in an encrypted archive
+so that at least one entire encrypted chunk lies between them.
+
+Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
+the encrypted chunks after one that fails to authenticate, which a standard AGE implementation doesn't do.
+This is to be specified with the repair process as a separate step producing the decrypted bytes,
+where bytes of such chunks are marked as erasures and the interpretation of an archive stays unchanged
+(`recovery-design.md` §5.6).
+
+<div class=note>
+  A repaired encrypted chunk can't be encrypted again with the original file key and [=envelope/payload_nonce=]
+  unless its plaintext is fully restored, because doing so otherwise reuses a nonce for a different plaintext.
+  Since a damaged chunk usually contains [=leaf blocks=] that mirror blocks don't cover,
+  a repaired encrypted archive is expected to be decrypted, or encrypted again with a new file key.
+</div>
+
+</div>
+
+<h2 id=recovery>
+Integrity and recovery</h2>
+
+<h3 id=profiles>
+Archival profile</h3>
+
+An archive conforms to the <dfn>archival profile</dfn> when the content of every file is covered by a checksum:
+
+* Every [=leaf block|leaf=] [[#data-block|data block]] has a [=checksum_method=] other than None.
+* Every [[#formula-block|formula block]] declares an [=output checksum=].
+
+A conforming compressor producing an archive for long-term preservation SHOULD conform to the archival profile.
+A tool verifying an archive SHOULD report whether it conforms to the archival profile.
+
+<div class=note>
+  Other blocks always have checksums, so an archive conforming to the archival profile
+  detects any damage to the content of a file by its decompression alone.
+  Whether an archive conforms can be determined from block types and formula blocks, without decompressing data blocks.
+</div>
+
+<h3 id=mirror-block>
+Mirror block</h3>
+
+A **mirror block** holds a verbatim copy of another block, called its <dfn for=mirror>target block</dfn>,
+so that the target block can be restored when it is damaged.
+Mirror blocks are only defined for block types whose damage affects more than a single [=parcel=]
+and can be detected by reading the block alone, i.e. that have a checksum:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Block Types
+      <th>Target Block Types
+  </thead>
+  <tbody>
+    <tr>
+      <td>C10<sub>16</sub> — C17<sub>16</sub>
+      <td>10<sub>16</sub> — 17<sub>16</sub> ([[#metadata-block]])
+    <tr>
+      <td>C50<sub>16</sub> — C57<sub>16</sub>
+      <td>50<sub>16</sub> — 57<sub>16</sub> ([[#dictionary-block]])
+    <tr>
+      <td>C58<sub>16</sub> — C5F<sub>16</sub>
+      <td>58<sub>16</sub> — 5F<sub>16</sub> ([[#import-block]])
+    <tr>
+      <td>C60<sub>16</sub> — C63<sub>16</sub>
+      <td>60<sub>16</sub> — 63<sub>16</sub> ([[#module-block]])
+    <tr>
+      <td>C64<sub>16</sub> — C67<sub>16</sub>
+      <td>64<sub>16</sub> — 67<sub>16</sub> ([[#resource-block]])
+    <tr>
+      <td>C70<sub>16</sub> — C77<sub>16</sub>
+      <td>70<sub>16</sub> — 77<sub>16</sub> ([[#formula-block]])
+  </tbody>
+</table>
+
+As with any other block, the [=block/size=] field of a mirror block is determined by its own [=block/type=]
+and counts the bytes of its own [=block/data=].
+Since a mirror block is longer than its target block, its [=block/size=] field may have to be wider.
+Therefore a mirror block is either:
+
+* <dfn for=mirror>Unwidened</dfn>, where the [=block/size=] fields of the mirror block and its target block have the same width,
+    and its [=mirror/target type=] is its [=block/type=] minus C00<sub>16</sub>; or
+* <dfn for=mirror>Widened</dfn>, where the [=block/size=] field of the mirror block is one step wider than that of its target block,
+    and its [=mirror/target type=] is its [=block/type=] minus C01<sub>16</sub>.
+    Its [=block/type=] % 4 MUST NOT be 0.
+
+The [=mirror/target block=] MUST be of the <dfn for=mirror>target type</dfn>,
+which MUST be a block type listed above for the mirror block's [=block/type=].
+Whether a mirror block is widened is signalled by [=mirror/target_offset=].
+
+<div class=note>
+  For example, a mirror block of type C13<sub>16</sub> mirrors a metadata block of type 13<sub>16</sub>,
+  which is uncompressed and has a [=u64le=] [=block/size=] field, if unwidened,
+  or a metadata block of type 12<sub>16</sub> with a [=u32le=] [=block/size=] field if widened.
+  Since C00<sub>16</sub> % 4 = 0, both stay in the same row of the table above.
+</div>
+
+Its data consists of the following:
+
+<div dfn-for=mirror>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>mirror_magic</dfn>
+      <td>[=u8=][8] ∈ {[=const/MIRROR_MAGIC=], [=const/OVERLAY_MIRROR_MAGIC=]}
+      <td>
+    <tr>
+      <td><dfn>archive_offset</dfn>
+      <td>[=leb128=] = [=block/block_start=] - [=archive/archive_start=]
+      <td>
+    <tr>
+      <td><dfn>target_offset</dfn>
+      <td>[=leb128=] ≠ 0
+      <td>
+    <tr>
+      <td><dfn>target_data</dfn>
+      <td>[=u8=][*]
+      <td>
+    <tr>
+      <td><dfn>checksum_end</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>mirror_checksum</dfn>
+      <td>[=u64le=]
+      <td>
+  </tbody>
+</table>
+
+[=mirror/mirror_magic=] is a fixed byte sequence that allows mirror blocks to be found by scanning
+when the surrounding structure, such as the header, the footer or the metadata chain, is damaged.
+It MUST be [=const/OVERLAY_MIRROR_MAGIC=] in an [=overlay archive=] and [=const/MIRROR_MAGIC=] otherwise.
+
+[=mirror/archive_offset=] is the offset from [=archive/archive_start=] to the [=block/block_start=] of the mirror block.
+
+<div class=note>
+  [=mirror/archive_offset=] distinguishes mirror blocks of this archive from those of another archive stored inside it,
+  which can be found by scanning and verify by themselves just like the mirror blocks of this archive.
+  Such a mirror block may point to bytes that are not its target block in this archive,
+  for example when the inner archive is split into multiple blocks.
+  Since the inner archive is stored after [=archive/archive_start=] of this archive,
+  the start of the archive implied by its [=mirror/archive_offset=] is always greater.
+</div>
+
+[=mirror/target_offset=] is the offset from the [=block/block_start=] of the [=mirror/target block=]
+to the [=block/block_start=] of the mirror block, plus 1 if the mirror block is [=mirror/widened=].
+Since the offset between any two blocks is even, [=mirror/target_offset=] % 2 tells whether the mirror block is widened.
+The target block always precedes the mirror block.
+
+[=mirror/target_data=] is a copy of the [=block/data=] of the target block.
+The bytes of the target block, from its [=block/block_start=] to its [=block/block_end=],
+MUST be equal to the concatenation of the following:
+
+1. The shortest [=leb128=] encoding of the [=mirror/target type=];
+2. The length of [=mirror/target_data=], encoded as the [=block/size=] field for the [=mirror/target type=];
+3. [=mirror/target_data=].
+
+The [=block/padding=] of the target block, if any, is not compared, and is restored as a zero byte.
+The [=block/type=] of the mirror block itself is 2 bytes long, as every block type uses the shortest [=leb128=] encoding.
+
+[=mirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+of all bytes from the [=block/block_start=] of the mirror block to [=mirror/checksum_end=],
+including its [=block/type=] and [=block/size=] fields.
+
+</div>
+
+<div class=note>
+  Unlike other checksums in this specification, [=mirror/mirror_checksum=] is computed over the stored bytes,
+  so that the copy can be verified without decoding it and the mirror block can be verified when found by scanning.
+  A decompressor normally uses a mirror block only after the checksum of its target block fails,
+  while a verifier can also compare the copy with the target block directly.
+</div>
+
+<div class=note>
+  A mirror block is a copy of bytes, not a block to be interpreted at its own position.
+  This is necessary because relative offsets in a metadata block are measured from the metadata block itself.
+</div>
+
+A mirror block SHOULD be [=mirror/unwidened=] unless its [=block/data=] doesn't fit in the [=block/size=] field for the target type.
+
+<div class=note>
+  The data of a mirror block is at least 18 bytes longer than that of its target block,
+  so this is only relevant when the target block is close to the limit of its [=block/size=] field.
+  A single step is always sufficient, since the next width can hold far more than the additional bytes.
+  The width of the target block's [=block/size=] field can't be inferred from the size of [=mirror/target_data=],
+  because a block may use a wider [=block/size=] field than necessary.
+</div>
+
+<div class=note>
+  A block with a [=u64le=] [=block/size=] field can't be mirrored when its data is too close to 2<sup>64</sup> bytes,
+  since its mirror block can't be widened.
+  This is not a practical concern, because such a block is far larger than 2<sup>63</sup> bytes,
+  which is beyond what most systems with signed 64-bit file offsets can store in a single file.
+</div>
+
+<div class=note>
+  To find mirror blocks by scanning, a decoder can look for [=const/MIRROR_MAGIC=]
+  and try each of four possible widths of the [=block/size=] field preceding it.
+  The candidate is correct when the 2 bytes before the [=block/size=] field encode a mirror block type with the matching width
+  and [=mirror/mirror_checksum=] verifies.
+  The candidate is then discarded unless its [=block/block_start=] minus [=mirror/archive_offset=]
+  equals [=archive/archive_start=], because it belongs to another archive stored inside this archive otherwise.
+  If [=archive/archive_start=] can't be determined from [=archive/header_magic=] or [=archive/size_hint=],
+  the smallest value implied by verified candidates can be used instead.
+  A decoder that doesn't know whether the archive is an [=overlay archive=], e.g. because both the header and the footer are damaged,
+  looks for both magics, and the magic of verified candidates tells it.
+</div>
+
+<div class=note>
+  Mirror blocks have a distinct magic in an overlay archive for the same reason as the header and the footer ([[#unencrypted-archive]]):
+  every structure that can be found without the header has to tell whether the archive is an overlay archive.
+</div>
+
+A mirror block doesn't belong to any [=segment=] and MAY occur anywhere in [=archive/blocks=],
+including after the last metadata block, subject only to the requirement that its target block precedes it.
+A single target block MAY have multiple mirror blocks.
+Mirror blocks don't affect the result of [=interpret an archive|interpreting an archive=],
+except that an archive violating the requirements above is an [=invalid archive=].
+
+<div class=note>
+  By [[#partial-access]], a decompressor not reading mirror blocks is not required to verify them.
+</div>
+
+A mirror block and its target block are expected to be damaged together when they are close to each other.
+Conforming compressors SHOULD separate the end of the target block and the [=block/block_start=] of its mirror block
+by at least 4096 bytes, so that they never share an aligned 4 KiB unit of the underlying storage,
+and SHOULD separate them by at least 4 MiB (4,194,304 bytes) when possible.
+
+Issue: The recommended distances are tentative, pending the measurement of burst lengths of latent sector errors
+(`recovery-design.md` §8, R1).
+The interval between mirrored headers in an encrypted archive ([[#encrypted-archive]]) changes with the latter distance.
+
+<div class=note>
+  Dictionary, module and formula blocks typically occur early in their segments,
+  so their mirror blocks can be placed near the end of the segment.
+  A metadata block, on the other hand, only becomes available at the end of its segment,
+  so its mirror block can be placed after a sufficient amount of the next segment has been written.
+  The mirror block of the last metadata block can't be distant from it unless the compressor delays the last segment,
+  and closing segments periodically bounds the loss in that case.
+</div>
+
+<div class=note>
+  Restoring damaged blocks from mirror blocks is a process separate from [=interpret an archive|interpreting an archive=]:
+  it takes a damaged byte sequence and replaces each target block whose bytes differ from a verified mirror block
+  with the bytes reconstructed from the mirror block,
+  locating the target block with [=mirror/target_offset=] alone.
+</div>
+
+Issue: The repair process is to be specified in a separate section (`recovery-design.md` §5.6).
+
+<h2 id=optional-metadata>
+Optional metadata</h2>
+
+The [=meta/optional_metadata=] field of the metadata block ([[#metadata-block]]) holds the **optional metadata**, encoded in CBOR [[RFC8949]].
+This part encodes any metadata that is not strictly necessary to read the file,
+including associated dates and times, access control information and comments.
+
+The optional metadata is described by the following CDDL [[RFC8610]] definitions:
+
+<pre class=cddl>
+aqr-opt-metadata = {
+  aqr-archive-comment
+  ? &(entry-extras: -2) => [* aqr-entry-extra / null]  ; Indexed by entry numbers, starting from the root directory
+  * $$aqr-opt-metadata-member  ; For future extensions
+}
+
+$$aqr-opt-metadata-member = ()  ; No extension is defined by this specification
+
+aqr-offset = uint .gt 0
+
+aqr-entry-extra = {
+  aqr-entry-timestamps
+  aqr-entry-comment
+  aqr-entry-link-group
+  aqr-entry-windows
+  aqr-entry-unix
+  aqr-entry-zip
+  * $$aqr-entry-extra-member  ; For future extensions
+}
+
+$$aqr-entry-extra-member = ()  ; No extension is defined by this specification
+
+; TODO: other extras for round trip
+</pre>
+
+There MUST NOT be any following bytes after this CBOR item.
+If [=meta/optional_metadata_size=] is 0, the optional metadata is an empty map `{}`.
+
+The members of `aqr-entry-extra` are grouped by their purposes, and each group is described in the following sections.
+Keys of `aqr-entry-extra` from -1 to -59 are platform-neutral.
+Keys from -60 to -69 are specific to Windows, -70 to -79 to Unix, -80 to -89 to macOS, and -90 to -99 to other platforms.
+
+<h3 id=timestamps>Timestamps</h3>
+
+<p>The keys `crtime`, `ctime`, `mtime`, `atime` and `arctime` of <code>aqr-entry-extra</code>
+record the timestamps that file systems and archive formats associate with a file, a directory or a link.
+Each is an <code>aqr-time</code> described below, and is absent if the source doesn't have the corresponding timestamp.</p>
+
+<pre class=cddl>
+aqr-entry-timestamps = (
+  ? &(crtime: -1) => aqr-time
+  ? &(ctime: -2) => aqr-time
+  ? &(mtime: -3) => aqr-time
+  ? &(atime: -4) => aqr-time
+  ? &(arctime: -5) => aqr-time
+)
+</pre>
+
+<dl>
+<dt>`crtime`</dt>
+<dd><p>The creation time, also known as the birth time: when the file was created at its location.
+It is not updated afterwards, but copying a file usually creates a new one with the time of copying.
+Examples include the creation time of NTFS and FAT, the create date of HFS+ and APFS,
+`i_crtime` of ext4 and `otime` of Btrfs,
+which are exposed as `st_birthtime` on BSD and macOS and as `stx_btime` of `statx` on Linux.</p></dd>
+<dt>`ctime`</dt>
+<dd><p>The status change time:
+when the file's metadata (e.g. permissions, ownership or link count) or its content was last changed.
+It is the POSIX `st_ctime`, and the change time of NTFS and the attribute modification date of HFS+ are similar.
+POSIX doesn't allow it to be set to an arbitrary time,
+so an extracting decompressor usually can't restore it.</p></dd>
+<dt>`mtime`</dt>
+<dd><p>The modification time: when the file's content was last changed.
+For a directory, it is when an entry was last added, removed or renamed in it.
+This is the timestamp that virtually all file systems and archive formats have.</p></dd>
+<dt>`atime`</dt>
+<dd><p>The access time: when the file's content was last read.
+Many systems update it lazily or not at all for performance
+(e.g. `relatime` and `noatime` on Linux, and the access time updates of NTFS that can be disabled),
+and FAT only keeps the date.
+Reading a file for archiving can itself update it.</p></dd>
+<dt>`arctime`</dt>
+<dd><p>The backup time: when the file was last backed up, as recorded by backup software.
+File systems don't update it by themselves.
+An example is the backup date of HFS and HFS+, exposed as `ATTR_CMN_BKUPTIME` of `getattrlist` on macOS.
+It is the time stored by the source, not the time when the archive itself was made.</p></dd>
+</dl>
+
+<div class=note>
+  <p>The name "ctime" is ambiguous.
+  Windows and formats originating from it use "C" for the creation time:
+  `st_ctime` in the Microsoft C runtime, the `Ctime` of ZIP extra field 0x000a,
+  and the `CTime` of 7z and RAR all go to `crtime`, not `ctime`.
+  POSIX formats such as pax use it for the status change time, which goes to `ctime`.</p>
+</div>
+
+<p><code>aqr-time</code> represents a point in time or a local date and time,
+together with a [=quantization interval=] and optional time zone information.
+It is described by the following CDDL definitions,
+where `etime` is the CDDL type name for the extended time defined in [[!RFC9581]]:</p>
+
+<pre class=cddl>
+aqr-time =
+  $aqr-base-time /                          ; UTC timestamp, scaled and quantized
+  [$aqr-base-time] /                        ; Local time in unknown time zone, encoded like UTC (*)
+  [$aqr-instant, offset: aqr-tz-offset] /   ; UTC timestamp with time zone offset ($)
+  etime /                                   ; Extended time defined in [[!RFC9581]]
+  [etime]                                   ; Local time in unknown time zone, encoded like UTC
+
+aqr-tz-offset = -48..56  ; In 15 minutes, positive east of UTC as in ISO 9660
+
+$aqr-base-time  = #6.100(int)    ; 1d (FAT atime*), date as in [[RFC8943]]
+$aqr-base-time /= $aqr-instant  ; Can be given a time zone offset
+
+$aqr-instant  = #6.121(int)  ; 2s (FAT mtime*, exFAT atime$, ZIP*, CAB*)
+$aqr-instant /= int          ; 1s (~ext3, HFS/HFS+, tar, ISO 9660$)
+$aqr-instant /= #6.122(int)  ; 10ms (FAT ctime*, ISO 9660$, exFAT$)
+$aqr-instant /= #6.123(int)  ; 1ms
+$aqr-instant /= #6.124(int)  ; 1us (UDF)
+$aqr-instant /= #6.125(int)  ; 100ns (NTFS, RAR*, 7z)
+$aqr-instant /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
+</pre>
+
+<p>A base time value <code>$aqr-base-time</code> is an integer, either untagged or tagged as follows.
+The integer multiplied by the scale is the number of seconds since 1970-01-01T00:00:00Z,
+not counting leap seconds as in the CBOR tag 1 [[RFC8949]];
+negative values denote the time before that epoch.
+The tag also determines the quantization interval,
+which is relative to the time value and specified in [[#etime-quantization-interval]].
+`#6.100` is the number of days since 1970-01-01 [[RFC8943]],
+and is the only base time value that is not an <code>&#36;aqr-instant</code>, i.e. it can't be given a time zone offset.</p>
+<table class=data>
+<thead>
+<tr>
+  <th>Encoding</th>
+  <th>Quantization Interval (<abbr title="seconds">s</abbr>)</th>
+  <th>Scale (<abbr title="seconds">s</abbr>)</th>
+  <th>Examples</th>
+</tr>
+<tbody>
+<tr>
+  <td><code>#6.100(int)</code></td>
+  <td>[0, 86400]</td>
+  <td>86400</td>
+  <td>FAT atime*</td>
+</tr>
+<tr>
+  <td><code>#6.121(int)</code></td>
+  <td>[0, 2]</td>
+  <td>2</td>
+  <td>FAT mtime*, exFAT atime$, ZIP*, CAB*</td>
+</tr>
+<tr>
+  <td><code>int</code></td>
+  <td>[0, 1]</td>
+  <td>1</td>
+  <td>ext3 and earlier, HFS/HFS+, tar, ISO 9660$ (directory records)</td>
+</tr>
+<tr>
+  <td><code>#6.122(int)</code></td>
+  <td>[0, 10<sup>-2</sup>]</td>
+  <td>10<sup>-2</sup></td>
+  <td>FAT ctime*, ISO 9660$ (volume descriptors), exFAT$</td>
+</tr>
+<tr>
+  <td><code>#6.123(int)</code></td>
+  <td>[0, 10<sup>-3</sup>]</td>
+  <td>10<sup>-3</sup></td>
+  <td>-</td>
+</tr>
+<tr>
+  <td><code>#6.124(int)</code></td>
+  <td>[0, 10<sup>-6</sup>]</td>
+  <td>10<sup>-6</sup></td>
+  <td>UDF</td>
+</tr>
+<tr>
+  <td><code>#6.125(int)</code></td>
+  <td>[0, 10<sup>-7</sup>]</td>
+  <td>10<sup>-7</sup></td>
+  <td>NTFS, RAR*, 7z</td>
+</tr>
+<tr>
+  <td><code>#6.126(int)</code></td>
+  <td>[0, 10<sup>-9</sup>]</td>
+  <td>10<sup>-9</sup></td>
+  <td>ext4, ZFS, Btrfs, APFS</td>
+</tr>
+</table>
+
+<p>In the Examples column, formats marked with * store (or can store) a local time in an unknown time zone,
+and formats marked with $ store a local time with its offset from UTC.</p>
+
+<div class=note>
+  <p>Tags 121 to 126 are the tags for enumerated alternatives 0 to 5 [[CBOR-NOTABLE-TAGS]],
+  whose meanings are given by the schema in use rather than by the tags themselves.
+  They are therefore meaningful only as <code>&#36;aqr-instant</code>,
+  and are not shortcuts for the extended time in general.</p>
+</div>
+
+<div class=note>
+  <p>Since a time zone offset is a multiple of 15 minutes, converting a local time to UTC keeps it a multiple of 2 seconds.
+  A local date, however, doesn't stay a multiple of 1 day unless the offset is zero,
+  so a date with a known time zone offset can only be given as an extended time
+  (e.g. `1001({1: 1697641200, -14: 86400, -10: "+09:00"})` for 2023-10-19 in UTC+9).</p>
+</div>
+
+<p>Each alternative of <code>aqr-time</code> has the following meaning:</p>
+
+<dl>
+<dt><code>&#36;aqr-base-time</code></dt>
+<dd>A point in time without any time zone information.</dd>
+<dt><code>[&#36;aqr-base-time]</code></dt>
+<dd>A local date and time in an unknown time zone, encoded as if it were UTC.
+It does not identify a single point in time.</dd>
+<dt><code>[&#36;aqr-instant, aqr-tz-offset]</code></dt>
+<dd>A point in time, as in the bare <code>&#36;aqr-base-time</code>,
+with the offset of the time zone where it was recorded, in 15-minute increments as in ISO 9660.
+The offset is positive east of UTC: UTC+<var>x</var> hours is 4<var>x</var> and UTC&minus;<var>x</var> hours is &minus;4<var>x</var>.
+The local time is the base time value plus 900 times the offset in seconds.</dd>
+<dt><code>etime</code></dt>
+<dd>An extended time [[RFC9581]] (tag 1001), for any value which doesn't fit the other alternatives.
+The time zone information, if any, is given as a Time Zone Hint (key -10 or 10),
+and the quantization interval is given as a key described in [[#etime-quantization-interval]].</dd>
+<dt><code>[etime]</code></dt>
+<dd>A local date and time in an unknown time zone, encoded as if it were UTC.
+The extended time MUST NOT contain a Time Zone Hint (key -10 or 10),
+and its timescale (key -1, -13 or 13), if present, MUST be 0 (UTC).</dd>
+</dl>
+
+<p><code>etime</code> or <code>[etime]</code> MUST NOT be used
+if another alternative of <code>aqr-time</code> represents the same time value,
+the same quantization interval and the same time zone information.
+A Time Zone Hint is the same as an <code>aqr-tz-offset</code>
+only when it is a numeric offset (e.g. `"+09:00"`) equal to that offset;
+an extended time without any quantization interval is never the same as other alternatives.</p>
+
+<div class=note>
+  <p>As a consequence, timestamps from common file systems and archive formats never need the extended time,
+  and an implementation without full support for [[RFC9581]] can still handle them.
+  Such an implementation can ignore an <code>aqr-time</code> using the extended time,
+  as an extracting decompressor is allowed to ignore any extra metadata ([[#extraction]]).</p>
+</div>
+
+<div class=note>
+  Some precisions found in the wild are only representable with the extended time,
+  e.g. minutes in ASN.1 `UTCTime`, 2<sup>-32</sup> s in NTP and 1/300 s in SQL Server `DATETIME`,
+  and so are time zone offsets that are not multiples of 15 minutes as in UDF.
+  They are rare enough in file metadata not to deserve their own encodings.
+</div>
+
+<p>Two <code>aqr-time</code> values in different encodings are different even when they denote the same point in time.
+For example, `1` and `122(100)` differ in their quantization intervals.
+A compressor converting a timestamp from a file system or another archive format
+SHOULD preserve its precision, i.e. use an encoding whose quantization interval matches the source.</p>
+
+<div class=note>
+  <p>Comparing timestamps from file systems of different precisions is a common source of problems,
+  e.g. an unchanged file copied from ext4 to FAT appears to be modified.
+  Recording the quantization interval for each timestamp, rather than for each archive,
+  lets any consumer tell whether two timestamps can denote the same time,
+  even after an archive mixes multiple sources by editing.</p>
+</div>
+
+<div class=example>
+  <p>The following are possible encodings of 2023-10-19T14:12:34.87Z, or 23:12:34.87 in UTC+9,
+  depending on the source:</p>
+  <ul>
+    <li>ZIP with a DOS date and time, a local time in an unknown time zone: `[121(848878577)]`
+    <li>ZIP with an extended timestamp extra field (0x5455) in UTC: `1697724754`
+    <li>git, which records a time zone offset in minutes: `[1697724754, 36]`
+    <li>exFAT modification time with a UTC offset: `[122(169772475487), 36]`
+    <li>NTFS: `125(16977247548700000)`
+    <li>ext4: `126(1697724754870000000)`
+    <li>FAT access date, a local date in an unknown time zone: `[100(19649)]`
+    <li>A source rounding to the nearest second: `1001({1: 1697724755, -14: [0.5, 0.5]})`
+  </ul>
+</div>
+
+<p>Timestamps from ZIP are discussed in [[#timestamps-from-zip]].</p>
+
+<h3 id=comments>Comments</h3>
+
+<p>`archive-comment` of <code>aqr-opt-metadata</code> and `comment` of <code>aqr-entry-extra</code>
+are free-form comments attached to the whole archive and to each entry respectively,
+e.g. an archive comment and a file comment of ZIP or RAR.
+Both are an <code>aqr-text</code>, which is a Unicode string,
+a WTF-8 [[WTF-8]] string with lone surrogates, or a byte sequence in an unknown encoding:</p>
+
+<pre class=cddl>
+aqr-archive-comment = (
+  ? &(archive-comment: -1) => aqr-text
+)
+
+aqr-entry-comment = (
+  ? &(comment: -6) => aqr-text
+)
+
+aqr-text =
+  tstr /          ; Unicode
+  #6.273(bstr) /  ; WTF-8, i.e. UTF-16 + surrogate compat
+  bstr            ; In unknown encoding
+</pre>
+
+<p>An <code>aqr-text</code> MUST be a `tstr` if it can be represented as one,
+i.e. if it is a sequence of Unicode scalar values.
+The byte string in `#6.273(bstr)` MUST be a valid WTF-8 string that is not a valid UTF-8 string,
+i.e. it MUST contain at least one encoded lone surrogate.
+A `bstr` is not subject to these requirements even if it happens to be a valid UTF-8 string,
+as its encoding is not known.</p>
+
+<p>Comments from ZIP are discussed in [[#comments-from-zip]].</p>
+
+<h3 id=link-groups><code>link-group</code>: Hard links</h3>
+
+<pre class=cddl>
+aqr-entry-link-group = (
+  ? &(link-group: -7) => int  ; File nodes only
+)
+</pre>
+
+<p><code>link-group</code> records that [=file nodes=] were originally the same file,
+i.e. hard links to the same inode on Unix or to the same file record on NTFS.
+A non-negative value is <dfn>segment-local</dfn> and denotes the same group only within the same [=segment=],
+while a negative value is <dfn>archive-wide</dfn> and denotes the same group in every segment.
+The resulting [=file node/link group=] in the [=archive value=] is determined by [=interpret a segment|interpreting a segment=].</p>
+
+<p>A compressor MUST NOT give the same [=file node/link group=] to files that were not the same file.
+It SHOULD NOT give a [=file node/link group=] that no other file node has.
+A file node with <code>link-group</code> SHOULD refer to the same [=leaf block=] as other file nodes in the same group,
+and SHOULD have the same [=entry extra=] as them except for <code>link-group</code> and <code>comment</code>.</p>
+
+<div class=note>
+  <p>Segment-local groups allow the inode number (<code>st_ino</code>) to be used as is,
+  as CBOR can encode any 64-bit unsigned integer as a non-negative <code>int</code>,
+  and can be assigned without reading earlier segments.
+  Inode numbers are still only unique within a single file system,
+  so a compressor reading from multiple file systems has to renumber some of them.</p>
+  <p>Archive-wide groups link files across segments,
+  e.g. when a compressor periodically starts a new segment while archiving a single tree,
+  or when it appends a segment to an existing archive.
+  A compressor using them is responsible for keeping them consistent with all other segments,
+  e.g. by reading earlier metadata blocks when appending.
+  Inode numbers are not suitable as archive-wide values as is,
+  because they can be reused after the file is removed or come from an unrelated file system,
+  and linking unrelated files with the same content can't be detected by any decompressor.</p>
+</div>
+
+<p>A [=file node/link group=] is <dfn>consistent</dfn> if all file nodes with that group
+in the final [=archive value=] have the same [=file node/content=].
+An inconsistent group, e.g. after a later segment has replaced only some of its file nodes,
+is not an [=invalid archive=] failure, but has no effect on extraction ([[#extraction]]).</p>
+
+<div class=note>
+  <p>The consistency can only be determined from the final archive value,
+  because a later segment may replace any file node in the group.
+  Treating an inconsistent group as an invalid archive would make a decompressor reading only some segments
+  unable to detect such failure ([[#partial-access]]).
+  A decompressor can instead check the consistency before creating hard links,
+  at no cost when file nodes refer to the same leaf block.</p>
+  <p>Hard links are not part of the archive model, so a decompressor ignoring <code>link-group</code>
+  still extracts the correct files with the same contents.
+  Directory hard links, found in some macOS Time Machine volumes, are not represented.</p>
+</div>
+
+<h3 id=windows-extras>Windows-specific metadata</h3>
+
+<pre class=cddl>
+aqr-entry-windows = (
+  ? &(win-link-type: -60) => &(file: 0, directory: 1, junction: 2)  ; Link nodes only
+
+  ; TODO: file attributes (e.g. ZIP external file attributes)
+)
+</pre>
+
+`win-link-type` is only meaningful for a [=link node=],
+and determines the kind of a link to be created on Windows ([[#extraction]]).
+"`file`" and "`directory`" denote a symbolic link to a file and to a directory respectively,
+and "`junction`" denotes a junction (a mount point reparse point).
+
+<h3 id=unix-extras>Unix-specific metadata</h3>
+
+<pre class=cddl>
+aqr-entry-unix = (
+  ? &(unix-mode: -70) => uint .le 4095  ; Permission bits only (0o7777), without S_IFMT
+  ? &(unix-uid: -71) => uint
+  ? &(unix-gid: -72) => uint
+)
+</pre>
+
+`unix-mode` only holds the permission bits, including the set-user-ID, set-group-ID and sticky bits.
+The kind of an entry is solely determined by its node ([[#archive-model]]), so `unix-mode` never includes the file type bits (`S_IFMT`).
+
+`unix-uid` and `unix-gid` are the numeric user and group IDs of the owner.
+
+Unix metadata from ZIP is discussed in [[#unix-extras-from-zip]].
+
+<h3 id=zip-extras><code>zip-extras</code>: ZIP extra fields</h3>
+
+<p><code>zip-extras</code> preserves extra fields [[APPNOTE]] of the ZIP entry that the entry was converted from,
+when they carry information about the file that has no other representation in this specification.</p>
+
+<pre class=cddl>
+aqr-entry-zip = (
+  ? &(zip-extras: -100) => aqr-zip-extras
+)
+
+aqr-zip-extras = { * aqr-zip-extra-key => bstr .size (0..65531) }
+aqr-zip-extra-key =
+  0..65535 /   ; Header ID n in the local header
+  -65536..-1   ; Header ID n in the central header, as -1 - n
+; TODO: multiple extra fields with the same header ID
+</pre>
+
+<p>A key |n| from 0 to 65535 denotes the extra field with the header ID |n| in the local header,
+and a key &minus;1 &minus; |n| from &minus;65536 to &minus;1 denotes the extra field with the header ID |n| in the central header.
+The value is the data of the extra field, excluding its 4-byte header of the header ID and the data size.
+Therefore a value with a non-negative key is always in the format for the local header,
+and a value with a negative key is always in the format for the central header.</p>
+
+<p>A compressor converting a ZIP archive MAY put any extra field of an entry into `zip-extras`, subject to the following requirements:</p>
+
+* It MUST NOT put the central header version of an extra field
+    if the local header version with the same header ID is identical byte by byte.
+    The central header version without the local header version is only put with a negative key.
+* It MUST NOT put an extra field whose information is fully represented elsewhere,
+    i.e. in the entry name, the archive model ([[#archive-model]]) or any other key of <code>aqr-entry-extra</code>.
+* It MUST NOT put an extra field which is only meaningful to the ZIP container itself,
+    e.g. sizes, offsets, padding, alignment, encryption and signatures over the ZIP archive.
+* It SHOULD NOT give `zip-extras` to the root directory, which has no counterpart in ZIP.
+
+<p>Extra fields known to be subject to these requirements are listed in [[#zip-extras-to-remove]].
+Any other extra field, including one with an unregistered header ID, can be put into `zip-extras` as is.</p>
+
+<p>`zip-extras` is never authoritative.
+If information in a preserved extra field disagrees with the archive model or any other key of <code>aqr-entry-extra</code>,
+the latter MUST be used.
+A decompressor finding an extra field that a compressor is not allowed to put SHOULD ignore that field only,
+and SHOULD NOT treat the whole archive as invalid.</p>
+
+<div class=note>
+  <p>`zip-extras` is designed for a one-way conversion from ZIP;
+  reconstructing the original ZIP archive from the converted archive is not a goal.
+  Extra fields are preserved so that information without its own key yet,
+  e.g. platform-specific attributes, access control lists and resource forks,
+  can be recovered from already converted archives once a dedicated key is defined.
+  Unknown extra fields are preserved for the same reason,
+  even though some of them might be only meaningful to the ZIP container.</p>
+  <p>The local and central header versions of the same header ID often differ in their formats,
+  e.g. the central header version of 0x5455 only has the modification time,
+  and that of many Info-ZIP attribute blocks only has a summary.
+  Distinguishing them by keys lets a consumer interpret each value in the correct format.
+  The key for the central header version is &minus;1 &minus; |n| instead of &minus;|n|,
+  so that header ID 0 doesn't collide with the local header version,
+  and both versions have the same encoded length in CBOR.</p>
+</div>
+
+<h2 id=extraction>
+Extraction</h2>
 
 Writing an [=archive value=] to a file system is outside the archive model.
 A decompressor doing so is subject to the following requirements:
@@ -3758,63 +3796,40 @@ MUST be reported to the user.
 A decompressor MUST NOT create anything for an [=unknown node=], and MUST report it to the user.
 It MAY continue extracting other nodes.
 
-<h3 id=bases>
-Reading a base</h3>
+<h2 id=conformance>
+Conformance</h2>
 
-Reading a [=base=] from a file system is outside the archive model, as is extraction.
-A decompressor doing so maps a directory or a single file to an [=archive value=], and is subject to the following requirements:
+As well as sections marked as non-normative, all diagrams, examples and notes in this specification are non-normative.
+Everything else in this specification is normative.
 
-* It MUST NOT use a base unless explicitly given one,
-    and in particular MUST NOT use the current directory or the destination directory as a base by default.
-* It MUST NOT read anything outside the given directory,
-    including through symbolic links or other redirections already present in the base.
-    A symbolic link in the base is a [=link node=] and is never followed,
-    so an [=import/import=] whose path leads through or to a link fails to resolve ([[#import-resolution]]).
-* It MUST NOT read a file other than a regular file as the content of a [=file node=].
-    A FIFO or a device file in the base is a [=special node=].
-* It SHOULD map a file system name to an [=entry name=] as the reverse of the mapping in [[#extraction]].
-    If a name can't be mapped, or multiple names map to the same entry name, it MUST either fail or report it to the user.
-* The base MUST appear the same throughout the interpretation, as if it were read at a single point in time.
-    A decompressor MAY read only the parts of the base needed by [=import/import|imports=] and by the result,
-    and the checksums of imports detect a part that changed while reading.
+The key words MAY, MUST, MUST NOT, RECOMMENDED, SHOULD and SHOULD NOT in this specification
+are to be interpreted as described in BCP 14 [[RFC2119]] [[RFC8174]]
+when, and only when, they appear in all capitals, as shown here.
 
-<div class=note>
-  An archive can copy any byte of its base into its result,
-  and the [=base failure=] of an import with a guessed content tells whether the guess is right.
-  An untrusted archive therefore gets as much access to the base as to its own result,
-  which is why the base is only used when explicitly given.
-  A decompressor is advised to report the files of the base it has read.
-</div>
+<h3 id=partial-access>
+Partial access</h3>
 
-A decompressor MAY write the result of an [=overlay archive=] into its base directory, i.e. apply it in place.
-In that case:
+A decompressor MAY compute only a part of the result of [=interpret an archive|interpreting an archive=],
+such as a subset of entries, a byte range of a [=file node/content=], or entry names without contents.
+Such a partial result MUST be equal to the corresponding part of the full result, if the full result is an [=archive value=].
 
-* The result MUST be the same as if every [=imported content=] were read before anything is written,
-    e.g. by writing new files under temporary names and renaming them after all of them are written.
-* It MAY remove a node of the base only when the node is absent from the result,
-    and SHOULD leave every node not given by any segment as it is.
+A decompressor computing a partial result is not required to detect an [=invalid archive=] failure
+caused only by parts it doesn't compute.
+It SHOULD verify every checksum covering only the bytes it has computed.
 
 <div class=note>
-  Ordering the writes alone is not sufficient in general:
-  a file may be patched from another file which is in turn patched from the former,
-  e.g. when two files are swapped.
-</div>
-
-<h3 id=profiles>
-Archival profile</h3>
-
-An archive conforms to the <dfn>archival profile</dfn> when the content of every file is covered by a checksum:
-
-* Every [=leaf block|leaf=] [[#data-block|data block]] has a [=checksum_method=] other than None.
-* Every [[#formula-block|formula block]] declares an [=output checksum=].
-
-A conforming compressor producing an archive for long-term preservation SHOULD conform to the archival profile.
-A tool verifying an archive SHOULD report whether it conforms to the archival profile.
-
-<div class=note>
-  Other blocks always have checksums, so an archive conforming to the archival profile
-  detects any damage to the content of a file by its decompression alone.
-  Whether an archive conforms can be determined from block types and formula blocks, without decompressing data blocks.
+  For example, a decompressor reading a byte range of a file defined by a formula block
+  only reads the non-leaf blocks covering that range, rather than its entire [=parcel=].
+  It can't verify the output checksum of the formula block,
+  but can verify the checksums of non-leaf blocks it has read.
+  A decompressor looking up a single path has to consider every [=segment=] that may replace it,
+  which is possible by reading metadata blocks backward from [=archive/metadata_backward_offset=]
+  until the path or one of its ancestors is found as a non-directory entry in a segment.
+  If that entry is a [=tombstone=], the path doesn't exist.
+  If no segment has such an entry, the path doesn't exist in a [=standalone archive=],
+  and is looked up in the [=base=] of an [=overlay archive=].
+  Likewise, reading a file using [=import/import|imports=] only needs the imported byte ranges,
+  and an [=internal import=] is resolved by the same lookup from the preceding segment.
 </div>
 
 <h2 id=iana-considerations>
