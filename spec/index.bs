@@ -724,8 +724,8 @@ i.e. the data after decompression, rather than the stored bytes ([[#checksums]])
 <h4 id=zstandard-compression-method>
 Zstandard compression method</h4>
 
-This specification only defines a single compression method, Zstandard [[RFC8878]].
-A <dfn export for="">Zstandard block</dfn> is the "Block" structure in the Zstandard frame ([[RFC8878]], Section 3.1.1.2).
+This specification only defines a single compression method, Zstandard [[!RFC8878]].
+A <dfn export for="">Zstandard block</dfn> is the "Block" structure in the Zstandard frame ([[!RFC8878]], Section 3.1.1.2).
 Its parameters ([=cdata/compression_params=]) are as follows:
 
 <div dfn-for=zstd>
@@ -743,8 +743,8 @@ Its parameters ([=cdata/compression_params=]) are as follows:
   </tbody>
 </table>
 
-The meaning of the [=window_descriptor=] field is identical to the Zstandard's `Window_Descriptor` byte [[RFC9659]],
-which determines `Window_Size` as in [[RFC8878]], Section 3.1.1.1.2.
+The meaning of the [=window_descriptor=] field is identical to the Zstandard's `Window_Descriptor` byte [[!RFC9659]],
+which determines `Window_Size` as in [[!RFC8878]], Section 3.1.1.1.2.
 Consequently each Zstandard block holds at most `Block_Maximum_Size` = min(`Window_Size`, 128 KiB) bytes of data.
 
 Conforming decompressors MUST support any `Window_Size` up to 2<sup>27</sup> bytes (128 MiB),
@@ -772,7 +772,7 @@ where only the last block is signalled as the final block by its block header.
 <h4 id=xxh64-checksum-method>
 XXH64 checksum method</h4>
 
-This specification only defines a single checksum method, XXH64 [[XXHASH]].
+This specification only defines a single checksum method, XXH64 [[!XXHASH]].
 Its seed MUST be zero and the result MUST be stored as [=u64le=].
 The resulting [=checksum_size=] is 8.
 
@@ -1027,7 +1027,7 @@ An <dfn>archive value</dfn> is a [=struct=] with the following [=struct/items=]:
 
 * <dfn for="archive value">root</dfn>, either a [=directory node=] or a [=file node=].
     The latter represents a single unnamed file.
-* <dfn for="archive value">extra</dfn>, an [=ordered map=] from integers to CBOR data items [[RFC8949]]
+* <dfn for="archive value">extra</dfn>, an [=ordered map=] from integers to CBOR data items [[!RFC8949]]
     representing the archive-wide part of the [[#optional-metadata|optional metadata]].
 
 A <dfn>file node</dfn> is a [=struct=] with the following [=struct/items=]:
@@ -1081,7 +1081,7 @@ An <dfn>entry name</dfn> is a [=struct=] with the following [=struct/items=]:
 
 * <dfn for="entry name">encoding</dfn>, either "`wtf-8`" or "`raw`".
 * <dfn for="entry name">bytes</dfn>, a non-empty [=byte sequence=]
-    which is a valid WTF-8 [[WTF-8]] string if [=entry name/encoding=] is "`wtf-8`".
+    which is a valid WTF-8 [[!WTF-8]] string if [=entry name/encoding=] is "`wtf-8`".
 
 Two [=entry names=] are equal if and only if both items are equal.
 In particular, a "`wtf-8`" name and a "`raw`" name are never equal even when their [=entry name/bytes=] are.
@@ -1099,7 +1099,7 @@ An [=entry name=] is encoded as a byte sequence in one of the following ways,
 neither of which contains a zero byte:
 
 * If its [=entry name/encoding=] is "`wtf-8`", its [=entry name/bytes=] as is.
-    WTF-8 [[WTF-8]] is an extension to UTF-8 and losslessly encodes a lone surrogate in UTF-16.
+    WTF-8 [[!WTF-8]] is an extension to UTF-8 and losslessly encodes a lone surrogate in UTF-16.
 * If its [=entry name/encoding=] is "`raw`", byte C1<sub>16</sub> followed by its [=entry name/bytes=].
 
 <div class=note>
@@ -1125,7 +1125,7 @@ A <dfn>link target</dfn> is a [=struct=] with the following [=struct/items=]:
 
 * <dfn for="link target">encoding</dfn>, either "`wtf-8`" or "`raw`".
 * <dfn noexport for="link target">bytes</dfn>, a non-empty [=byte sequence=] not containing 00<sub>16</sub>,
-    which is a valid WTF-8 [[WTF-8]] string if [=link target/encoding=] is "`wtf-8`".
+    which is a valid WTF-8 [[!WTF-8]] string if [=link target/encoding=] is "`wtf-8`".
 
 Unlike an [=entry name=], a [=link target=] is a path which may contain 2F<sub>16</sub> (`/`) as a separator,
 and components equal to `.` or `..`.
@@ -1799,7 +1799,7 @@ The internal structure after decompression is as follows:
 </table>
 
 The decoded data of a dictionary block is a [=dictionary=] for blocks using it,
-and corresponds to a Zstandard dictionary ([[RFC8878]], Section 5) without `Magic_Number` and `Dictionary_ID`:
+and corresponds to a Zstandard dictionary ([[!RFC8878]], Section 5) without `Magic_Number` and `Dictionary_ID`:
 
 *   If [=dict/has_entropy_tables=] is true, [=dict/entropy_tables=] is the `Entropy_Tables` structure,
     whose length is determined by parsing it, and [=dict/repeat_offsets=] are the three `Repeat_Offsets` in order.
@@ -2314,7 +2314,7 @@ Opcode 15<sub>16</sub> denotes a **Patch instruction**. Its operands consist of 
     2. |patch| MUST consist of one or more [=Zstandard blocks=] without any other bytes,
         where only the last block is signalled as the final block by its block header,
         and each block holds at most 128 KiB of data.
-    3. Let |output| be the result of decompressing |patch| as a sequence of Zstandard blocks [[RFC8878]]
+    3. Let |output| be the result of decompressing |patch| as a sequence of Zstandard blocks [[!RFC8878]]
         with |source| as the `Content` of a raw content dictionary,
         i.e. the entropy tables start empty and the repeat offsets start at their initial values (1, 4, 8).
         The offset of every match MUST be at most the length of |source| plus the number of bytes already decompressed.
@@ -2485,8 +2485,8 @@ Module execution</h3>
 
 Issue: This section is tentative and follows `xform-design.md` §5.
 
-A module is a WebAssembly module [[WASM-CORE-3]] stored as [=module/wasm_module=],
-instantiated and invoked through the embedding interface defined in the Appendix of [[WASM-CORE-3]].
+A module is a WebAssembly module [[!WASM-CORE-3]] stored as [=module/wasm_module=],
+instantiated and invoked through the embedding interface defined in the Appendix of [[!WASM-CORE-3]].
 It MUST conform to the following profile, or an [=invalid archive=] failure occurs:
 
 * WebAssembly 3.0 core, executed under the deterministic profile;
@@ -2696,7 +2696,7 @@ Each component uses the same encodings as [=meta/entry_name=],
 and its decoded name is subject to the same restrictions as an [=entry name=], so no component can be empty.
 An empty [=import/import_path=] denotes the root itself, which is a file when the base is a single file.
 
-[=import/import_checksum=] is the SHA-512/256 hash [[FIPS180-4]] of the [=imported content=].
+[=import/import_checksum=] is the SHA-512/256 hash [[!FIPS180-4]] of the [=imported content=].
 
 <div class=note>
   Since an [=entry name=] can't contain `/` or be `.` or `..`, splitting [=import/import_path=] is unambiguous,
@@ -2750,7 +2750,7 @@ To <dfn>resolve an import</dfn> |import| of an import block in a [=segment=]:
     5. |import|.[=import/import_offset=] + |import|.[=import/import_size=] MUST be at most the length of |node|.[=file node/content=].
     6. Let |content| be the bytes of |node|.[=file node/content=]
         in [|import|.[=import/import_offset=], |import|.[=import/import_offset=] + |import|.[=import/import_size=]).
-    7. The SHA-512/256 hash [[FIPS180-4]] of |content| MUST be equal to |import|.[=import/import_checksum=].
+    7. The SHA-512/256 hash [[!FIPS180-4]] of |content| MUST be equal to |import|.[=import/import_checksum=].
     8. Return |content| as the <dfn>imported content</dfn> of |import|.
 </ol>
 
@@ -2871,7 +2871,7 @@ in which case copies of its header are placed between encrypted chunks.
 
 The 97 bytes from [=envelope/lg_work_factor=] to [=envelope/payload_nonce=] are called the <dfn>header fields</dfn>.
 
-[=envelope/header_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+[=envelope/header_checksum=] is the XXH64 [[!XXHASH]] hash with the seed zero
 of all bytes from [=envelope/checksum_start=] to [=envelope/checksum_end=].
 
 <div class=note>
@@ -2892,7 +2892,7 @@ age-encryption.org/v1
 
 Where,
 
-* |scrypt_ephemeral_secret_base64| is the base64 encoding of [=envelope/scrypt_ephemeral_secret=] without padding ([[RFC4648]], Section 4);
+* |scrypt_ephemeral_secret_base64| is the base64 encoding of [=envelope/scrypt_ephemeral_secret=] without padding ([[!RFC4648]], Section 4);
 * |lg_work_factor_decimal| is the decimal representation of [=envelope/lg_work_factor=] without leading zeros;
 * |encrypted_file_key_base64| is the base64 encoding of [=envelope/encrypted_file_key=] without padding;
 * |age_header_mac_base64| is the base64 encoding of [=envelope/age_header_mac=] without padding.
@@ -2942,7 +2942,7 @@ A mirrored header consists of the following:
   </tbody>
 </table>
 
-[=emirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+[=emirror/mirror_checksum=] is the XXH64 [[!XXHASH]] hash with the seed zero
 of all bytes from [=emirror/checksum_start=] to [=emirror/checksum_end=].
 
 </div>
@@ -3245,7 +3245,7 @@ MUST be equal to the concatenation of the following:
 The [=block/padding=] of the target block, if any, is not compared, and is restored as a zero byte.
 The [=block/type=] of the mirror block itself is 2 bytes long, as every block type uses the shortest [=leb128=] encoding.
 
-[=mirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+[=mirror/mirror_checksum=] is the XXH64 [[!XXHASH]] hash with the seed zero
 of all bytes from the [=block/block_start=] of the mirror block to [=mirror/checksum_end=],
 including its [=block/type=] and [=block/size=] fields.
 
@@ -3361,7 +3361,7 @@ where bytes of such chunks are marked as erasures and the interpretation of an a
 <h2 id=optional-metadata>
 Optional metadata</h2>
 
-The [=meta/optional_metadata=] field of the metadata block ([[#metadata-block]]) holds the **optional metadata**, encoded in CBOR [[RFC8949]].
+The [=meta/optional_metadata=] field of the metadata block ([[#metadata-block]]) holds the **optional metadata**, encoded in CBOR [[!RFC8949]].
 This part encodes any metadata that is not strictly necessary to read the file,
 including associated dates and times, access control information and comments.
 
@@ -3469,7 +3469,7 @@ aqr-time =
 
 aqr-tz-offset = -48..56  ; In 15 minutes, positive east of UTC as in ISO 9660
 
-$aqr-base-time  = #6.100(int)    ; 1d (FAT atime*), date as in [[RFC8943]]
+$aqr-base-time  = #6.100(int)    ; 1d (FAT atime*), date as in [[!RFC8943]]
 $aqr-base-time /= $aqr-instant  ; Can be given a time zone offset
 
 $aqr-instant  = #6.121(int)  ; 2s (FAT mtime*, exFAT atime$, ZIP*, CAB*)
@@ -3483,11 +3483,11 @@ $aqr-instant /= #6.126(int)  ; 1ns (ext4, ZFS, Btrfs, APFS)
 
 <p>A base time value <code>$aqr-base-time</code> is an integer, either untagged or tagged as follows.
 The integer multiplied by the scale is the number of seconds since 1970-01-01T00:00:00Z,
-not counting leap seconds as in the CBOR tag 1 [[RFC8949]];
+not counting leap seconds as in the CBOR tag 1 [[!RFC8949]];
 negative values denote the time before that epoch.
 The tag also determines the quantization interval,
 which is relative to the time value and specified in [[#etime-quantization-interval]].
-`#6.100` is the number of days since 1970-01-01 [[RFC8943]],
+`#6.100` is the number of days since 1970-01-01 [[!RFC8943]],
 and is the only base time value that is not an <code>&#36;aqr-instant</code>, i.e. it can't be given a time zone offset.</p>
 <table class=data>
 <thead>
@@ -3645,7 +3645,7 @@ SHOULD preserve its precision, i.e. use an encoding whose quantization interval 
 are free-form comments attached to the whole archive and to each entry respectively,
 e.g. an archive comment and a file comment of ZIP or RAR.
 Both are an <code>aqr-text</code>, which is a Unicode string,
-a WTF-8 [[WTF-8]] string with lone surrogates, or a byte sequence in an unknown encoding:</p>
+a WTF-8 [[!WTF-8]] string with lone surrogates, or a byte sequence in an unknown encoding:</p>
 
 <pre class=cddl>
 aqr-archive-comment = (
@@ -3905,7 +3905,7 @@ As well as sections marked as non-normative, all diagrams, examples and notes in
 Everything else in this specification is normative.
 
 The key words MAY, MUST, MUST NOT, RECOMMENDED, SHOULD and SHOULD NOT in this specification
-are to be interpreted as described in BCP 14 [[RFC2119]] [[RFC8174]]
+are to be interpreted as described in BCP 14 [[!RFC2119]] [[!RFC8174]]
 when, and only when, they appear in all capitals, as shown here.
 
 <h3 id=partial-access>
