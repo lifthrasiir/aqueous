@@ -90,6 +90,7 @@ pub use extent::extent;
 use aqr_decompress::{FLATE, LZ4, Native, SNAPPY, ZIP};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
+use aqr_formula::probe::{Look, Probe};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -371,7 +372,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         Format::Pdf => recons(aqr_pdf::formula::encode, d, opt),
         Format::Sqlite => recons(aqr_sqlite::formula::encode, d, opt),
         Format::LevelDb => recons(aqr_snappy::formula::encode, d, opt),
-        Format::Zip => zip::zip(d, opt, cx),
+        Format::Zip => zip::zip(d, opt, depth, cx),
     }))
     .ok()
     .flatten()?;
@@ -386,6 +387,34 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         place_all(&mut f, children, opt);
     }
     smaller(&f, None, d, opt, cx).then_some(f)
+}
+
+/// Unless [`Options::smaller`] is off, what tells whether recompressing a stream may pay,
+/// for its data `depth` formats deep: at the level of the archive, files looked for as
+/// [`Nest::of`] tells (scanned, unless nested formats would go deeper than allowed).
+pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
+    let look = |kind| match Nest::Scan.of(kind) {
+        None => Look::No,
+        Some(Nest::As(_)) => Look::Whole,
+        Some(_) => Look::Scan,
+    };
+    let starts = |d: &[u8]| detect(d).is_some();
+    let probe = Probe { level: opt.level, look, starts, scan: files_len };
+    opt.smaller.then_some(if depth + 1 < opt.depth { probe } else { Probe::flat(opt.level) })
+}
+
+/// Bytes of the files of formats that recompressors take in `d`, as a scan would find them:
+/// by their signatures, then their ends ([`extent`]), each from the end of the one before.
+fn files_len(d: &[u8]) -> usize {
+    let len = |p: usize, f: Option<Format>| f.and_then(|f| extent(f, &d[p..])).unwrap_or(0);
+    let mut total = len(0, detect(d));
+    let mut p = detect::next_start(d, total.max(1));
+    while p < d.len() {
+        let n = len(p, detect::starts(&d[p..]));
+        total += n;
+        p = detect::next_start(d, p + n.max(1));
+    }
+    total
 }
 
 /// Unless [`Options::smaller`] is off, whether formula `f` of `d` archives smaller than `d`

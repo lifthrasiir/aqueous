@@ -589,8 +589,9 @@ pub fn deconstruct_hinted(
     Parsed::new(raw, opts)?.deconstruct(opts, hints)
 }
 
-/// Bytes of data that [`Parsed::estimate`] codes the tokens of, at most.
-const ESTIMATE: usize = 128 << 10;
+/// Bytes of data of the first run of tokens that [`Parsed::estimate`] codes (the others are
+/// of [`inflate::CHUNK`] bytes, as [`inflate::next_chunk`] places them).
+const ESTIMATE_FIRST: usize = 16 << 10;
 
 /// A stream parsed, its data made, before anything is coded: so that whether to deconstruct
 /// it can be decided by its data and [`Parsed::estimate`] without parsing it again.
@@ -628,7 +629,7 @@ impl<'a> Parsed<'a> {
         let t0 = std::time::Instant::now();
         let streamed = opts.profile < ADAPTIVE && !opts.verify;
         let mut f = if streamed {
-            let prefix = opts.prefix.max(ESTIMATE);
+            let prefix = opts.prefix.max(ESTIMATE_FIRST);
             inflate::parse_segments_head(raw, opts.segment, prefix, opts.max_data)?
         } else {
             Flat::new(raw, opts.segment, opts.threads.max(1), opts.verify, opts.max_data)?
@@ -680,17 +681,41 @@ impl<'a> Parsed<'a> {
     }
 
     /// About how many bytes the record of [`Parsed::deconstruct`] with `opts` takes: the
-    /// blocks and headers as they will be, and the corrections as the first 128 KiB of data
-    /// cost under the rule (as static codes: an adaptive profile codes them in less), scaled
-    /// to the whole. What it computes is not computed again by `deconstruct`.
+    /// blocks and headers as they will be, and the corrections as runs of tokens spread over
+    /// the data cost under the rule (16 KiB first, then 8 KiB about 8 times per doubling of
+    /// the data; as static codes: an adaptive profile codes them in less), scaled to the
+    /// whole. What it computes is not computed again by `deconstruct`.
     pub fn estimate(&self, opts: &Options) -> Result<usize> {
         let c = self.chosen(opts)?;
         let mut w = BitWriter::new();
         write_blocks(&mut w, &self.f);
-        let mut p = Prepared::from_flat(&self.f, ESTIMATE);
-        let bits = p.cost(c.rule)?;
-        let scale = self.f.data.len() as f64 / p.bytes().max(1) as f64;
-        Ok(w_bits(&w).div_ceil(8) + c.headers.len() + (bits / 8.0 * scale) as usize)
+        let chunks = match &self.f.chunks[..] {
+            [] => chunks_of(&self.f),
+            chunks => chunks.to_vec(),
+        };
+        // one coder for all, as the segments share their codes
+        let mut rec = tokens::Recorder::default();
+        rec.count_only = true;
+        let mut covered = 0;
+        for k in chunks.iter().filter(|k| k.count > 0) {
+            // the stored blocks within the run (those before its first token are before `pos`)
+            let skips: Vec<(usize, usize)> = self
+                .f
+                .skips
+                .iter()
+                .filter(|s| s.0 > k.token && s.0 < k.token + k.count)
+                .map(|&(at, len)| (at - k.token, len))
+                .collect();
+            let tokens = &self.f.tokens[k.kept..k.kept + k.count];
+            let spans: usize = skips.iter().map(|s| s.1).sum::<usize>() + tokens.iter().map(|t| t.span()).sum::<usize>();
+            let range = Range { first: 0, count: k.count, pos: k.pos, end: k.pos + spans, skips: &skips };
+            let from = if k.pos == 0 { 0 } else { k.pos + inflate::WARM };
+            tokens::code_range(&mut Warm { rec: &mut rec, from }, &self.f.data, c.rule, &range, Some(tokens), None)?;
+            covered += (k.pos + spans).saturating_sub(from.max(k.pos));
+        }
+        // (no tokens at all: stored blocks only)
+        let corrections = if covered == 0 { 0.0 } else { rec.cost() / 8.0 * self.f.data.len() as f64 / covered as f64 };
+        Ok(w_bits(&w).div_ceil(8) + c.headers.len() + corrections as usize)
     }
 
     /// Deconstructs the stream with `opts` (those it was parsed with), as
@@ -700,6 +725,63 @@ impl<'a> Parsed<'a> {
         let chosen = self.chosen.into_inner().expect("chosen");
         deconstruct_parsed(self.raw, self.f, self.streamed, self.secs, chosen, opts, hints)
     }
+}
+
+/// A [`tokens::Recorder`] of the tokens from `from` on, those before only filling the tables
+/// (what a run sampled in the middle of a stream starts with: the coding of a whole stream has
+/// them filled there).
+struct Warm<'a> {
+    rec: &'a mut tokens::Recorder,
+    from: usize,
+}
+
+impl tokens::Corr for Warm<'_> {
+    fn token(
+        &mut self,
+        t: &mut dyn table::Cands,
+        d: &[u8],
+        p: usize,
+        pred: Token,
+        class: usize,
+        actual: Option<Token>,
+    ) -> Result<Token> {
+        if p < self.from {
+            return actual.ok_or(Error::Inconsistent);
+        }
+        self.rec.token(t, d, p, pred, class, actual)
+    }
+}
+
+/// The runs of tokens that [`inflate::parse_segments_head`] would keep, of a stream parsed
+/// with all of them.
+fn chunks_of(f: &Flat) -> Vec<inflate::Chunk> {
+    let mut chunks = vec![inflate::Chunk { token: 0, kept: 0, pos: 0, count: 0 }];
+    let (mut turn, mut next, mut keeping) = (ESTIMATE_FIRST, inflate::next_chunk(0).max(ESTIMATE_FIRST), true);
+    let (mut p, mut skips) = (0, f.skips.iter().peekable());
+    for (k, t) in f.tokens.iter().enumerate() {
+        while let Some(&&(at, len)) = skips.peek()
+            && at == k
+        {
+            p += len;
+            skips.next();
+        }
+        while p >= turn {
+            if keeping {
+                let c = chunks.last_mut().expect("a run");
+                c.count = k - c.kept;
+                (keeping, turn) = (false, next);
+            } else {
+                chunks.push(inflate::Chunk { token: k, kept: k, pos: p, count: 0 });
+                (keeping, turn, next) = (true, p + inflate::CHUNK, inflate::next_chunk(p));
+            }
+        }
+        p += t.span();
+    }
+    if keeping {
+        let c = chunks.last_mut().expect("a run");
+        c.count = f.tokens.len() - c.kept;
+    }
+    chunks
 }
 
 fn deconstruct_parsed(

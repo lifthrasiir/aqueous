@@ -3,10 +3,14 @@
 //! contents may be recompressed in turn.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use aqr_flate::{ADAPTIVE, Coding, ModelData};
+use aqr_flate::{ADAPTIVE, Coding, Hints, ModelData, Parsed};
+use aqr_formula::aqr::Encoder;
+use aqr_formula::probe::{self, Probe};
 use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::layout::{self, Made, Writer};
@@ -30,13 +34,22 @@ pub struct Options {
     /// [`Kind`] are a stream of their own (those of [`Kind::Unknown`] the stream `raw`, the
     /// others after the four inputs), sliced in order. By default all are unknown.
     pub kind: fn(&[u8]) -> Kind,
+    /// Where given, the DEFLATE bodies of at least [`PROBE_MIN`] bytes are rebuilt from their
+    /// data only where the probe tells that it may pay (their contents of the kind of their
+    /// names); the others are kept as they are. By default all are rebuilt.
+    pub probe: Option<Probe>,
 }
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, limit: u64::MAX, kind: |_| Kind::Unknown }
+        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, limit: u64::MAX, kind: |_| Kind::Unknown, probe: None }
     }
 }
+
+/// Bodies shorter than this are rebuilt without a probe: the contents of entries of a kind are
+/// archived together, and those of small entries compress far better so than alone (as a
+/// probe would estimate them); and they cost little to rebuild.
+pub const PROBE_MIN: usize = 256 << 10;
 
 /// [`Options::limit`] for an archive of `n` bytes on its own: 64 MiB, and 32 times the archive.
 pub fn limit(n: usize) -> u64 {
@@ -151,27 +164,75 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         .collect();
     let fopt = aqr_flate::Options { profile: opt.profile, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
     // The bodies of `jobs` made from their data, each refused of more than it is given; None
-    // where one has more.
+    // where one has more. They are parsed first, the large ones' records estimated where there
+    // is a probe; those are probed, what the other entries of their kind hold of their data
+    // counted as nothing (the contents of a kind compress together: and an entry turned down
+    // is not there for the others either), and only the bodies that may pay are rebuilt.
     let split = |jobs: &[(usize, u64)]| -> Option<Vec<Option<Made>>> {
-        let made = par_jobs(
-            jobs,
-            |&(i, _)| locals[i].body.len(),
-            opt.threads,
-            |&(i, max), threads| {
-                let body = &input[locals[i].body.clone()];
-                let max_data = usize::try_from(max).unwrap_or(usize::MAX);
-                match aqr_flate::deconstruct_with(body, &aqr_flate::Options { threads, max_data, ..fopt.clone() }) {
-                    // kept, the body would also take its CRC-32 and size
-                    // (and tiny records are much alike, so that they compress well together)
-                    Ok((data, record)) => {
-                        Some((record.len() < body.len() + 16).then_some(Made::Deflated { data, record }))
-                    }
-                    Err(aqr_flate::Error::Limit) => None,
-                    Err(_) => Some(None),
+        let fopt = |threads: usize, max: u64| aqr_flate::Options {
+            threads,
+            max_data: usize::try_from(max).unwrap_or(usize::MAX),
+            ..fopt.clone()
+        };
+        let probed = |i: usize| opt.probe.is_some() && locals[i].body.len() >= PROBE_MIN;
+        let size = |&(i, _): &(usize, u64)| locals[i].body.len();
+        // (each with its options, made once: they hold the profile's catalog)
+        let parsed = par_jobs(jobs, size, opt.threads, |&(i, max), threads| {
+            let fopt = fopt(threads, max);
+            match Parsed::new(&input[locals[i].body.clone()], &fopt) {
+                Ok(p) => {
+                    let record = if probed(i) { p.estimate(&fopt).ok() } else { None };
+                    Some(Some((p, record, fopt)))
                 }
-            },
-        );
-        made.into_iter().collect()
+                Err(aqr_flate::Error::Limit) => None,
+                Err(_) => Some(None),
+            }
+        });
+        let mut parsed: Vec<Option<(Parsed, Option<usize>, aqr_flate::Options)>> =
+            parsed.into_iter().collect::<Option<_>>()?;
+        if let Some(probe) = &opt.probe {
+            let enc = Encoder::with_threads(probe.level, opt.threads);
+            let kinds: Vec<Kind> = jobs.iter().map(|&(i, _)| (opt.kind)(&input[locals[i].name.clone()])).collect();
+            // what each holds of the others of its kind, for each kind once where asked
+            let shares: RefCell<Vec<Option<f64>>> = RefCell::new(vec![None; jobs.len()]);
+            let shared = |j: usize| {
+                if let Some(f) = shares.borrow()[j] {
+                    return f;
+                }
+                let group: Vec<usize> = (0..jobs.len()).filter(|&e| kinds[e] == kinds[j] && parsed[e].is_some()).collect();
+                let datas: Vec<&[u8]> = group.iter().map(|&e| parsed[e].as_ref().expect("parsed").0.data()).collect();
+                let mut shares = shares.borrow_mut();
+                for (&e, f) in group.iter().zip(probe::shared(&datas)) {
+                    shares[e] = Some(f);
+                }
+                shares[j].unwrap_or(0.0)
+            };
+            let mut turned_down = Vec::new();
+            for (j, p) in parsed.iter().enumerate() {
+                let (i, Some((p, record, _))) = (jobs[j].0, p) else { continue };
+                if probed(i) && !probe.pays(&enc, locals[i].body.len(), || *record, p.data(), || shared(j), kinds[j]) {
+                    turned_down.push(j);
+                }
+            }
+            for j in turned_down {
+                parsed[j] = None;
+            }
+        }
+        let parsed: Vec<Mutex<Option<(Parsed, aqr_flate::Options)>>> =
+            parsed.into_iter().map(|p| Mutex::new(p.map(|p| (p.0, p.2)))).collect();
+        let items: Vec<usize> = (0..jobs.len()).collect();
+        // (on as many threads as they were parsed for: the sizes are the same)
+        let made = par_jobs(&items, |&j| size(&jobs[j]), opt.threads, |&j, _| {
+            let (p, fopt) = parsed[j].lock().unwrap().take()?;
+            let body = &locals[jobs[j].0].body;
+            match p.deconstruct(&fopt, &Hints::default()) {
+                // kept, the body would also take its CRC-32 and size
+                // (and tiny records are much alike, so that they compress well together)
+                Ok((data, record, _)) => (record.len() < body.len() + 16).then_some(Made::Deflated { data, record }),
+                Err(_) => None,
+            }
+        });
+        Some(made)
     };
     let bound =
         candidates.iter().fold(0u64, |b, &i| b.saturating_add(locals[i].body.len() as u64 * zip::MAX_EXPANSION));

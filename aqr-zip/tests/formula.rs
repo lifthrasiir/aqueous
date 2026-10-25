@@ -458,6 +458,37 @@ fn inflate_limit_by_declared_sizes() {
     assert_eq!(limit(&lying, 400_000), [Body::Kept, Body::Deflated, Body::Deflated]);
 }
 
+/// With a probe, a large body is rebuilt only where its data may archive smaller than it (by
+/// more than its record): noise is kept, words deflated at level 1 are rebuilt, and bodies
+/// below [`formula::PROBE_MIN`] are rebuilt whatever they hold.
+#[test]
+fn probed() {
+    let mut rng = Rng::new(7);
+    let vocabulary: Vec<String> = (0..2000).map(|i| format!("w{:x}", i * 2654435761u64 % 1000003)).collect();
+    let mut words = Vec::new();
+    while words.len() < 2_000_000 {
+        words.extend_from_slice(vocabulary[rng.below(2000) as usize].as_bytes());
+        words.push(b' ');
+    }
+    let es = vec![
+        entry("noise", noise(400_000)),
+        Entry { body: Some(deflate(&words, 1)), ..entry("words", words.clone()) },
+        // (other noise: `noise` gives the same bytes first)
+        entry("small", rng.bytes(100_000)),
+    ];
+    let d = archive(es).bytes();
+    let probe = aqr_formula::probe::Probe::flat(aqr_formula::aqr::Level::Mid);
+    let bodies = |probe| roundtrip_with(&d, &Options { probe, ..Options::default() }).1;
+    assert_eq!(bodies(None), [Body::Deflated; 3]);
+    assert_eq!(bodies(Some(probe)), [Body::Kept, Body::Deflated, Body::Deflated]);
+    // noise held twice (a few bytes apart) gains as much as one copy costs: both are rebuilt
+    let mut again = noise(400_000);
+    again[1000..1100].fill(0);
+    let d = archive(vec![entry("noise", noise(400_000)), entry("again", again)]).bytes();
+    let bodies = roundtrip_with(&d, &Options { probe: Some(probe), ..Options::default() }).1;
+    assert_eq!(bodies, [Body::Deflated; 2]);
+}
+
 /// An archive of archives like 42.zip: every level holds the same archive many times, which
 /// the layout takes again rather than inflating each.
 #[test]

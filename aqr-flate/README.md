@@ -20,12 +20,16 @@ if parsed.estimate(&opts)? < budget {
 }
 ```
 
-`Parsed::estimate` codes the first 128 KiB of data under the stream's rule and scales it to the
-whole (the blocks and headers exactly); what it computes is not computed again by
-`deconstruct`. On 9 gzip files (the 4 below, and gzip -1, -6 and -9 of text, binaries, audio
-and source trees) it comes to 0.27× to 1.63× of the record, 1.09× in all; coding all of the
-data would give it exactly (the prefix is what is off). aqr-compress uses it to deconstruct
-only the streams that may pay (its `flate.rs`).
+`Parsed::estimate` codes runs of tokens spread over the stream under its rule and scales them
+to the whole (the blocks and headers exactly); what it computes is not computed again by
+`deconstruct`. The parser keeps the tokens of the first 16 KiB, then of runs of 16 KiB placed
+64 KiB apart, or an eighth of the data before apart (about 8 per doubling, the stream's length
+not known as it is parsed), the first 8 KiB of each only filling the rule's tables. All are
+counted into one coder, as the segments share their codes. On 10 streams (the 9 gzip files of
+aqr-compress's check, below, and a fuzzing input that starts with 600 KB of one byte) it comes
+to 0.96× to 1.80× of the record, 1.14× in all; the first 128 KiB alone came to 0.27× to 5.2×
+(the fuzzing input). aqr-compress and aqr-zip use it to rebuild only the streams that may pay
+(`aqr_formula::probe`).
 
 ## Profiles
 

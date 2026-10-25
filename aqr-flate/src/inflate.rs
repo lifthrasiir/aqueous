@@ -23,6 +23,32 @@ pub struct Flat {
     /// Stored blocks as (token index before which they come, bytes).
     pub skips: Vec<(usize, usize)>,
     pub stats: Stats,
+    /// Where `tokens` holds only some of the tokens ([`parse_segments_head`]), the runs of them
+    /// it holds; else empty (it holds all).
+    pub chunks: Vec<Chunk>,
+}
+
+/// A run of tokens that [`parse_segments_head`] keeps: from the token of index `token` (in
+/// the stream), at `pos` bytes of data, `count` tokens, at index `kept` of [`Flat::tokens`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Chunk {
+    pub token: usize,
+    pub kept: usize,
+    pub pos: usize,
+    pub count: usize,
+}
+
+/// Bytes of data that each run of [`parse_segments_head`] after the first covers: [`WARM`]
+/// bytes, for a coder to fill its tables with, then 8 KiB.
+pub const CHUNK: usize = WARM + (8 << 10);
+/// Bytes at the start of each run after the first that only fill a coder's tables.
+pub const WARM: usize = 8 << 10;
+
+/// Where the run after one starting at `pos` starts: 64 KiB on, or an eighth of `pos` on, so
+/// that the runs sample a stream of any length (its length not known as it is parsed) with
+/// about 8 per doubling of it.
+pub fn next_chunk(pos: usize) -> usize {
+    pos + (pos / 8).max(64 << 10)
 }
 
 /// Per block, its symbol frequencies: 288 literal/length (end of block counted once), 32
@@ -276,8 +302,15 @@ pub struct Layout {
 struct Collect<const HEAD: bool> {
     data: (*mut u8, usize, usize),
     tokens: (*mut Token, usize, usize),
-    /// With `HEAD`, the tokens are kept only where they start before this many bytes of data.
-    limit: usize,
+    /// With `HEAD`, the tokens are kept in runs only (the first of `first` bytes of data, the
+    /// others of [`CHUNK`] bytes as [`next_chunk`] places them): whether they are now, at how
+    /// many bytes of data that changes, and where the next run starts.
+    keeping: bool,
+    turn: usize,
+    next: usize,
+    /// Tokens seen, and the runs kept.
+    seen: usize,
+    chunks: Vec<Chunk>,
 }
 
 // Room the collector keeps per token: a match and the overshoot of its copy.
@@ -295,22 +328,63 @@ fn grow<T>(v: (*mut T, usize, usize), extra: usize) -> (*mut T, usize, usize) {
 }
 
 impl<const HEAD: bool> Collect<HEAD> {
-    fn new(data: usize, tokens: usize, limit: usize) -> Collect<HEAD> {
+    fn new(data: usize, tokens: usize, first: usize) -> Collect<HEAD> {
         let mut d = std::mem::ManuallyDrop::new(Vec::<u8>::with_capacity(data));
         let mut t = std::mem::ManuallyDrop::new(Vec::<Token>::with_capacity(tokens));
         Collect {
             data: (d.as_mut_ptr(), 0, d.capacity()),
             tokens: (t.as_mut_ptr(), 0, t.capacity()),
-            limit,
+            keeping: true,
+            turn: first,
+            next: next_chunk(0).max(first),
+            seen: 0,
+            chunks: if HEAD { vec![Chunk { token: 0, kept: 0, pos: 0, count: 0 }] } else { Vec::new() },
         }
     }
 
-    fn into_vecs(self) -> (Vec<u8>, Vec<Token>) {
+    /// Whether the token starting now is kept.
+    #[inline(always)]
+    fn keep(&mut self) -> bool {
+        if !HEAD {
+            return true;
+        }
+        while self.data.1 >= self.turn {
+            self.turn();
+        }
+        self.seen += 1;
+        self.keeping
+    }
+
+    /// Ends the run being kept, or starts the next.
+    #[cold]
+    #[inline(never)]
+    fn turn(&mut self) {
+        if self.keeping {
+            let c = self.chunks.last_mut().expect("a run");
+            c.count = self.tokens.1 - c.kept;
+            self.keeping = false;
+            self.turn = self.next;
+        } else {
+            let pos = self.data.1;
+            self.chunks.push(Chunk { token: self.seen, kept: self.tokens.1, pos, count: 0 });
+            self.keeping = true;
+            self.turn = pos + CHUNK;
+            self.next = next_chunk(pos);
+        }
+    }
+
+    fn into_vecs(mut self) -> (Vec<u8>, Vec<Token>, Vec<Chunk>) {
+        if self.keeping
+            && let Some(c) = self.chunks.last_mut()
+        {
+            c.count = self.tokens.1 - c.kept;
+        }
         // SAFETY: as in `grow`.
         unsafe {
             (
                 Vec::from_raw_parts(self.data.0, self.data.1, self.data.2),
                 Vec::from_raw_parts(self.tokens.0, self.tokens.1, self.tokens.2),
+                self.chunks,
             )
         }
     }
@@ -330,7 +404,7 @@ impl<const HEAD: bool> Sink for Collect<HEAD> {
     #[inline(always)]
     fn lit(&mut self, b: u8) {
         // SAFETY: `reserve` came before, and leaves room for three literals.
-        let keep = !HEAD || self.data.1 < self.limit;
+        let keep = self.keep();
         unsafe {
             *self.data.0.add(self.data.1) = b;
             if keep {
@@ -345,7 +419,7 @@ impl<const HEAD: bool> Sink for Collect<HEAD> {
     fn mat(&mut self, len: u16, dist: u16, alt258: bool) {
         // SAFETY: `1 <= dist <=` the bytes so far (checked by the parser), and `reserve`
         // left room for the match and its overshoot.
-        let keep = !HEAD || self.data.1 < self.limit;
+        let keep = self.keep();
         unsafe {
             copy_match(self.data.0, self.data.1, dist as usize, len as usize);
             if keep {
@@ -391,9 +465,9 @@ pub fn parse_segments_max(raw: &[u8], segment: usize, max: usize) -> Result<Flat
     )
 }
 
-/// [`parse_segments`] keeping only the tokens that start before `prefix` bytes of data: all
-/// else (the data, the blocks, the statistics) as it gives; refusing data of more than `max`
-/// bytes.
+/// [`parse_segments`] keeping only the tokens that start before `prefix` bytes of data, and
+/// in runs further on ([`Flat::chunks`]): all else (the data, the blocks, the statistics) as
+/// it gives; refusing data of more than `max` bytes.
 pub fn parse_segments_head(raw: &[u8], segment: usize, prefix: usize, max: usize) -> Result<Flat> {
     collect(
         raw,
@@ -410,7 +484,7 @@ fn collect<const HEAD: bool>(
     mut c: Collect<HEAD>,
 ) -> Result<Flat> {
     let l = parse_head_max(raw, segment, max, &mut c);
-    let (data, tokens) = c.into_vecs();
+    let (data, tokens, chunks) = c.into_vecs();
     let mut l = l?;
     l.stream.trailing = raw[l.end..].to_vec();
     Ok(Flat {
@@ -420,6 +494,7 @@ fn collect<const HEAD: bool>(
         starts: l.starts,
         skips: l.skips,
         stats: l.stats,
+        chunks,
     })
 }
 

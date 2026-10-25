@@ -42,6 +42,18 @@ The central directory, found from the end, only says where bodies end when the l
 do not, and a record it does not know of may not run over an entry it does (signatures turn up
 in self-extractors' code).
 
+## Bodies that would not pay
+
+With `Options::probe` (aqr-compress gives one at level `mid`), a DEFLATE body of 256 KiB or more
+is rebuilt only where its record and its data may archive in at least 1/32 less than it
+(`aqr_formula::probe`): the record estimated by aqr-flate on runs of the stream, the data at
+the fewest bytes the archive's level may take it in, the files in it that are recompressed in
+turn counted as nothing, and so is what the other entries of its kind hold of it (by anchors of
+a rolling hash: fuzzing corpora and near copies compress together, which no sample of one entry
+tells). The others are kept as they are. Smaller bodies are rebuilt as before: the contents of
+small entries compress far better together than alone, and cost little. The bodies are parsed
+first (in parallel), probed, then the ones taken deconstructed (in parallel).
+
 ## Zip bombs and 42.zip
 
 Bodies the same as an earlier one are taken again, without looking into them: in 42.zip, each

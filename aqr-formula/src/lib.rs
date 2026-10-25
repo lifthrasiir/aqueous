@@ -25,6 +25,7 @@
 
 pub mod aqr;
 pub mod packed;
+pub mod probe;
 
 use std::borrow::Cow;
 use std::fmt;

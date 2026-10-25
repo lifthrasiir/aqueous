@@ -2,9 +2,10 @@
 //! data is a content of the application, recompressed in turn (composition, §4.5): gzip's of
 //! the kind of its name, if it has one ([`kind_by_name`]).
 //!
-//! The stream is parsed once, and deconstructed only where that is [`promising`]: what it
-//! saves comes from its data compressing better than DEFLATE did, and splitting and joining
-//! it costs about as much as compressing it with the encoder did.
+//! The stream is parsed once, and deconstructed only where that may pay
+//! ([`aqr_formula::probe`]): what it saves comes from its data compressing better than DEFLATE
+//! did, and splitting and joining it costs about as much as compressing it with the encoder
+//! did.
 
 use std::ops::Range;
 
@@ -13,7 +14,7 @@ use aqr_flate::inflate::{self, Sink};
 use aqr_flate::{Hints, Parsed};
 use aqr_formula::{Formula, Kind, Node};
 
-use crate::{Cx, Nest, Options, detect, extent, kind_by_name};
+use crate::{Cx, Options, kind_by_name};
 
 /// A gzip member (RFC 1952), its data of the kind of its name, or else `contents`; what follows
 /// its trailer is sliced as it is.
@@ -87,7 +88,7 @@ pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
 
 /// `d` with aqr-flate on the DEFLATE stream from `start`, its data of `kind` (`depth` formats
 /// deep), if it fits in the budget, the container takes it (`checked`, given its data and where
-/// it ends) and it is [`promising`].
+/// it ends) and it may pay ([`crate::probe`]: its record estimated by aqr-flate on a prefix).
 #[allow(clippy::too_many_arguments)]
 fn wrap(
     class: &'static str,
@@ -113,7 +114,9 @@ fn wrap(
     if !cx.inflate(parsed.data().len() as u64) {
         return None;
     }
-    if opt.smaller && !promising(&parsed, kind, &fopt, opt, depth, cx) {
+    if let Some(probe) = crate::probe(opt, depth)
+        && !probe.pays(&cx.enc, parsed.len(), || parsed.estimate(&fopt).ok(), parsed.data(), || 0.0, kind)
+    {
         return None;
     }
     #[cfg(test)]
@@ -133,53 +136,6 @@ fn wrap(
         Node::slice(0, raw.start as u64, (d.len() - raw.end) as u64),
     ]);
     Some(f)
-}
-
-/// Whether deconstructing the stream of `parsed` (its data of `kind`, `depth` formats deep) may
-/// pay: its record and its data archive in at least 1/32 less than the stream as it is (which
-/// does not compress), both estimated (the record by a prefix, the data by a sample, at the
-/// fewest bytes the archive's level may take it in) and the files in the data that would be
-/// recompressed in turn counted as nothing, so as to turn down only what would not pay.
-fn promising(parsed: &Parsed<'_>, kind: Kind, fopt: &aqr_flate::Options, opt: &Options, depth: u32, cx: &Cx) -> bool {
-    let data = parsed.data();
-    let scanned = match Nest::Scan.of(kind) {
-        _ if depth + 1 >= opt.depth => false,
-        None => false,
-        Some(Nest::As(_)) => return true,
-        Some(_) => true,
-    };
-    // (errors are the deconstruction's to tell)
-    let Ok(record) = parsed.estimate(fopt) else { return true };
-    let n = parsed.len();
-    let Some(enough) = (n - n / 32).checked_sub(record + 1) else { return false };
-    // (data that starts as a file is looked into first: it is often all of it)
-    let first = (scanned && detect::detect(data).is_some()).then(|| files_len(data));
-    if first == Some(data.len()) {
-        return true;
-    }
-    let Ok(archived) = cx.enc.least(data, enough) else { return true };
-    let pays = |found: usize| archived as f64 * (1.0 - found as f64 / data.len().max(1) as f64) <= enough as f64;
-    // (else the files looked for only where they would make the difference)
-    let promising = pays(0) || scanned && pays(first.unwrap_or_else(|| files_len(data)));
-    if !promising {
-        // (what was compressed of it, for picking its level)
-        cx.enc.forget(data);
-    }
-    promising
-}
-
-/// Bytes of the files of formats that recompressors take in `d`, as a scan would find them:
-/// by their signatures, then their ends ([`extent`]), each from the end of the one before.
-fn files_len(d: &[u8]) -> usize {
-    let len = |p: usize, f: Option<detect::Format>| f.and_then(|f| extent(f, &d[p..])).unwrap_or(0);
-    let mut total = len(0, detect::detect(d));
-    let mut p = detect::next_start(d, total.max(1));
-    while p < d.len() {
-        let n = len(p, detect::starts(&d[p..]));
-        total += n;
-        p = detect::next_start(d, p + n.max(1));
-    }
-    total
 }
 
 /// Bytes of the DEFLATE stream at the start of `d`, its data given to `sink`.
