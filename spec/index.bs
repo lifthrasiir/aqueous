@@ -317,6 +317,165 @@ there are generally multiple [=block/type=] values assigned for each logical blo
 
 </div>
 
+<h4 id=block-types>
+Block types</h4>
+
+The following table lists every range of block types.
+A range of block types for a single logical block type is also described in binary,
+e.g. <code>0001&thinsp;0|m||ss|</code>,
+where letters denote bits that determine the parameters of the block.
+|ss| always denotes the two least significant bits, which determine the width of [=block/size=] as above:
+0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=] and 3 for [=u64le=].
+
+<table class=data id=block-index>
+  <thead>
+    <tr>
+      <th>Block Types
+      <th>Definition
+  </thead>
+  <tbody>
+    <tr>
+      <td>00<sub>16</sub> — 03<sub>16</sub>
+      <td>[[#spacer-block]]
+    <tr>
+      <td>04<sub>16</sub>
+      <td>[[#size-hint-block]]
+    <tr>
+      <td>05<sub>16</sub> — 0F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>10<sub>16</sub> — 17<sub>16</sub>
+      <td>[[#metadata-block]]
+    <tr>
+      <td>18<sub>16</sub> — 1F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>20<sub>16</sub> — 37<sub>16</sub>
+      <td>[[#data-block]]
+    <tr>
+      <td>38<sub>16</sub> — 3F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>40<sub>16</sub> — 4B<sub>16</sub>
+      <td>[[#data-block]]
+    <tr>
+      <td>4C<sub>16</sub> — 4F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>50<sub>16</sub> — 57<sub>16</sub>
+      <td>[[#dictionary-block]]
+    <tr>
+      <td>58<sub>16</sub> — 5F<sub>16</sub>
+      <td>[[#import-block]]
+    <tr>
+      <td>60<sub>16</sub> — 63<sub>16</sub>
+      <td>[[#module-block]]
+    <tr>
+      <td>64<sub>16</sub> — 67<sub>16</sub>
+      <td>[[#resource-block]]
+    <tr>
+      <td>68<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>69<sub>16</sub>
+      <td>Reserved for [=const/OVERLAY_HEADER_TYPE=] ([[#reserved-blocks]])
+    <tr>
+      <td>6A<sub>16</sub> — 6F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>70<sub>16</sub> — 77<sub>16</sub>
+      <td>[[#formula-block]]
+    <tr>
+      <td>78<sub>16</sub> — CF<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>D0<sub>16</sub> — DF<sub>16</sub>
+      <td>[=Reserved for development environments=]
+    <tr>
+      <td>E0<sub>16</sub> — EF<sub>16</sub>
+      <td>[=Reserved for experiments=]
+    <tr>
+      <td>F0<sub>16</sub> — C0F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>C10<sub>16</sub> — C17<sub>16</sub>
+      <td>[[#mirror-block]] for [[#metadata-block]]
+    <tr>
+      <td>C18<sub>16</sub> — C4F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>C50<sub>16</sub> — C57<sub>16</sub>
+      <td>[[#mirror-block]] for [[#dictionary-block]]
+    <tr>
+      <td>C58<sub>16</sub> — C5F<sub>16</sub>
+      <td>[[#mirror-block]] for [[#import-block]]
+    <tr>
+      <td>C60<sub>16</sub> — C63<sub>16</sub>
+      <td>[[#mirror-block]] for [[#module-block]]
+    <tr>
+      <td>C64<sub>16</sub> — C67<sub>16</sub>
+      <td>[[#mirror-block]] for [[#resource-block]]
+    <tr>
+      <td>C68<sub>16</sub> — C6F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>C70<sub>16</sub> — C77<sub>16</sub>
+      <td>[[#mirror-block]] for [[#formula-block]]
+    <tr>
+      <td>C78<sub>16</sub> — FFFF&thinsp;FFFF&thinsp;FFFF&thinsp;FFFF<sub>16</sub>
+      <td>Reserved for various purposes
+  </tbody>
+</table>
+
+<h5 id=reserved-blocks>
+Reserved block types</h5>
+
+A block type is <dfn>critical</dfn> if its hexadecimal representation starts with 0<sub>16</sub> through 9<sub>16</sub>,
+and <dfn>non-critical</dfn> if it starts with A<sub>16</sub> through F<sub>16</sub>.
+A block whose type is not defined by this specification:
+
+* Results in an [=unsupported failure=] ([[#interpretation]]) if its type is [=critical=];
+* Is an <dfn>ignored block</dfn> otherwise.
+    Like a mirror block, an ignored block doesn't belong to any [=segment=], MAY occur anywhere in [=archive/blocks=]
+    and doesn't affect the result of [=interpret an archive|interpreting an archive=].
+
+<div class=note>
+  Every block type defined by this specification is [=critical=] except for [[#mirror-block|mirror blocks]],
+  which a decompressor not using them can skip.
+  Future versions of this specification will use a critical type for a block
+  without which an archive can't be correctly interpreted,
+  e.g. a [[#data-block|data block]] with a new compression method in 38<sub>16</sub> through 3F<sub>16</sub>,
+  and a non-critical type for a block that can be safely skipped, e.g. recovery data.
+  The block-like structures below also have critical types, so they are never skipped by mistake.
+</div>
+
+Blocks whose type's hexadecimal representation is at least 2 digits long
+and starts with D<sub>16</sub> (e.g. D0<sub>16</sub> through DF<sub>16</sub>, D00<sub>16</sub> through DFF<sub>16</sub>, …)
+are <dfn>reserved for development environments</dfn>.
+This specification doesn't assign any meanings to these blocks.
+These blocks MUST be written or read only with specific instructions to enable them.
+
+Blocks which type's hexadecimal representation is at least 2 digits long
+and starts with E<sub>16</sub> (e.g. E0<sub>16</sub> through EF<sub>16</sub>, E00<sub>16</sub> through EFF<sub>16</sub>, …)
+are <dfn>reserved for experiments</dfn>.
+This specification doesn't assign any meanings to those blocks.
+
+<div class=note>
+  Blocks reserved for development environments and experiments are [=non-critical=],
+  so a decompressor not enabling them ignores them.
+  An implementation enabling an experiment may treat its blocks as critical,
+  since the experiment is expected to move to a block type defined by this specification once finished.
+</div>
+
+The following block types are defined as invalid due to the use as block-like structures.
+The valid archive MUST NOT include such block types as a proper block.
+
+* Block 278<sub>16</sub> ([=const/HEADER_TYPE=]) is used for the unencrypted archive header.
+* Block 69<sub>16</sub> ([=const/OVERLAY_HEADER_TYPE=]) is used for the overlay archive header.
+* Block 90&thinsp;5BCB&thinsp;957D<sub>16</sub> ([=const/FOOTER_TYPE=]) is used for the archive footer.
+* Block 7FC<sub>16</sub> ([=const/OVERLAY_FOOTER_TYPE=]) is used for the overlay archive footer.
+* Block 155&thinsp;04DC&thinsp;A579<sub>16</sub> ([=const/ENCRYPTED_HEADER_TYPE=]) is used for the encrypted archive header.
+
 <h4 id=shared-external-structure>
 Shared external structure</h4>
 
@@ -325,6 +484,9 @@ It may or may not have been compressed
 and may use different <dfn for=block>compression_method</dfn> or <dfn for=block>checksum_method</dfn>
 specified by the parent structure.
 Each [=checksum_method=] also has an associated, fixed <dfn for=block>checksum_size</dfn>.
+<dfn for="">Checksummed Zstandard data</dfn> is the compressed external structure ([=block/compressed_data=])
+with [[#zstandard-compression-method|Zstandard]] as [=compression_method=]
+and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
 
 The compressed external structure (<dfn for=block>compressed_data</dfn>) consists of the following:
 
@@ -529,33 +691,11 @@ and its [=szhint/size_hint=] field MUST be equal to the footer's [=archive/size_
 <h4 id=metadata-block>
 Metadata block</h4>
 
-Blocks 10<sub>16</sub> through 17<sub>16</sub> are **metadata blocks**.
+Blocks 10<sub>16</sub> through 17<sub>16</sub> are **metadata blocks**,
+whose [=block/type=] is <code>0001&thinsp;0|m||ss|</code> in binary ([[#block-types]]).
 Their data uses the Shared external structure ([[#shared-external-structure]]),
 with [[#xxh64-checksum-method|XXH64]] as [=checksum_method=]
-and [=compression_method=] determined as follows:
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th>[=compression_method=]
-  </thead>
-  <tbody>
-    <tr>
-      <td>10<sub>16</sub> — 13<sub>16</sub>
-      <td>None
-    <tr>
-      <td>14<sub>16</sub> — 17<sub>16</sub>
-      <td>[[#zstandard-compression-method|Zstandard]]
-  </tbody>
-</table>
-
-<div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0001&thinsp;0|m||ss|</code> where:
-
-    * |m| indicates the compression method: 0 for None, 1 for [[#zstandard-compression-method|Zstandard]].
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
+and [=compression_method=] given by |m|: None if |m| is 0, and [[#zstandard-compression-method|Zstandard]] if |m| is 1.
 
 <div class=note>
   Unlike content blocks, the checksum is mandatory for metadata, dictionary, module and resource blocks.
@@ -940,89 +1080,18 @@ Data block</h5>
 Blocks 20<sub>16</sub> through 37<sub>16</sub> and 40<sub>16</sub> through 4B<sub>16</sub> are **data blocks**.
 A data block is a **compressed block** if its [=compression_method=] is not None,
 and an **uncompressed block** otherwise.
-Data blocks are parametrized by following variables:
 
 <div dfn-for=dblock>
 
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th><dfn>leaf</dfn>
-      <th><dfn>has_dictionary</dfn>
-      <th>[=compression_method=]
-      <th>[=checksum_method=]
-  </thead>
-  <tbody>
-    <tr>
-      <td>20<sub>16</sub> — 23<sub>16</sub>
-      <td>True
-      <td>False
-      <td>None
-      <td>None
-    <tr>
-      <td>24<sub>16</sub> — 27<sub>16</sub>
-      <td>True
-      <td>False
-      <td>None
-      <td>[[#xxh64-checksum-method|XXH64]]
-    <tr>
-      <td>28<sub>16</sub> — 2B<sub>16</sub>
-      <td>True
-      <td>False
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>None
-    <tr>
-      <td>2C<sub>16</sub> — 2F<sub>16</sub>
-      <td>True
-      <td>False
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
-    <tr>
-      <td>30<sub>16</sub> — 33<sub>16</sub>
-      <td>True
-      <td>True
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>None
-    <tr>
-      <td>34<sub>16</sub> — 37<sub>16</sub>
-      <td>True
-      <td>True
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
-    <tr>
-      <td>40<sub>16</sub> — 43<sub>16</sub>
-      <td>False
-      <td>False
-      <td>None
-      <td>[[#xxh64-checksum-method|XXH64]]
-    <tr>
-      <td>44<sub>16</sub> — 47<sub>16</sub>
-      <td>False
-      <td>False
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
-    <tr>
-      <td>48<sub>16</sub> — 4B<sub>16</sub>
-      <td>False
-      <td>True
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>[[#xxh64-checksum-method|XXH64]]
-  </tbody>
-</table>
+The [=block/type=] of a data block is <code>001|kk|&thinsp;|c||ss|</code> in binary ([[#block-types]]) for a [=leaf block=],
+and <code>0100&thinsp;|kk||ss|</code> for a [=non-leaf block=], where:
 
-<div class=note>
-  Alternatively, the block type can be interpreted as a binary number
-  <code>001|kk|&thinsp;|c||ss|</code> for a leaf block or <code>0100&thinsp;|kk||ss|</code> for a non-leaf block, where:
-
-    * |kk| indicates the compression method and dictionary usage:
-        0 for None, 1 for [[#zstandard-compression-method|Zstandard]] without dictionary,
-        2 for [[#zstandard-compression-method|Zstandard]] with dictionary.
-        3 is reserved for future compression methods.
-    * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
-        A non-leaf block always uses [[#xxh64-checksum-method|XXH64]].
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
+* |kk| determines [=compression_method=] and whether a dictionary is used (<dfn>has_dictionary</dfn>):
+    0 for None without dictionary, 1 for [[#zstandard-compression-method|Zstandard]] without dictionary,
+    and 2 for [[#zstandard-compression-method|Zstandard]] with dictionary.
+    3 is reserved for future compression methods.
+* |c| determines [=checksum_method=]: None if 0, and [[#xxh64-checksum-method|XXH64]] if 1.
+    A non-leaf data block always uses [[#xxh64-checksum-method|XXH64]].
 
 Its data consists of the following:
 
@@ -1102,36 +1171,13 @@ for every leaf block.
 <h5 id=dictionary-block>
 Dictionary block</h5>
 
-Blocks 50<sub>16</sub> through 57<sub>16</sub> are **dictionary blocks**.
-Their data uses the Shared external structure ([[#shared-external-structure]]),
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=]
-and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
-Dictionary blocks are parametrized by following variables:
+Blocks 50<sub>16</sub> through 57<sub>16</sub> are **dictionary blocks**,
+whose [=block/type=] is <code>0101&thinsp;0|t||ss|</code> in binary ([[#block-types]]).
+Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
 
 <div dfn-for=dict>
 
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th><dfn>has_entropy_tables</dfn>
-  </thead>
-  <tbody>
-    <tr>
-      <td>50<sub>16</sub> — 53<sub>16</sub>
-      <td>False
-    <tr>
-      <td>54<sub>16</sub> — 57<sub>16</sub>
-      <td>True
-  </tbody>
-</table>
-
-<div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0101&thinsp;0|t||ss|</code> where:
-
-    * |t| indicates the presence of entropy tables: 0 for absent, 1 for present.
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
+|t| determines whether the dictionary has entropy tables (<dfn>has_entropy_tables</dfn>): false if 0, and true if 1.
 
 The internal structure after decompression is as follows:
 
@@ -1201,35 +1247,12 @@ Import block</h5>
 
 Blocks 58<sub>16</sub> through 5F<sub>16</sub> are **import blocks**,
 which are [=non-leaf blocks=] supplying byte ranges of files outside the [=segment=].
-Their data uses the Shared external structure ([[#shared-external-structure]]),
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=]
-and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
-Import blocks are parametrized by following variables:
+Their [=block/type=] is <code>0101&thinsp;1|e||ss|</code> in binary ([[#block-types]]),
+and their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
 
 <div dfn-for=import>
 
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th><dfn>external</dfn>
-  </thead>
-  <tbody>
-    <tr>
-      <td>58<sub>16</sub> — 5B<sub>16</sub>
-      <td>False
-    <tr>
-      <td>5C<sub>16</sub> — 5F<sub>16</sub>
-      <td>True
-  </tbody>
-</table>
-
-<div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0101&thinsp;1|e||ss|</code> where:
-
-    * |e| indicates the source: 0 for preceding segments, 1 for the [=base=].
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
+|e| determines the source (<dfn>external</dfn>): preceding segments if 0, and the [=base=] if 1.
 
 An import block is an <dfn>internal import block</dfn> if [=import/external=] is false,
 and an <dfn>external import block</dfn> otherwise.
@@ -1345,16 +1368,9 @@ An empty [=import/import_path=] denotes the root itself, which is a file when th
 <h5 id=module-block>
 Module block</h5>
 
-Blocks 60<sub>16</sub> through 63<sub>16</sub> are **module blocks**.
-Their data uses the Shared external structure ([[#shared-external-structure]]),
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] 
-and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
-
-<div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0110&thinsp;00|ss|</code> where:
-
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
+Blocks 60<sub>16</sub> through 63<sub>16</sub> are **module blocks**,
+whose [=block/type=] is <code>0110&thinsp;00|ss|</code> in binary ([[#block-types]]).
+Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
 
 The internal structure after decompression is as follows:
 
@@ -1382,16 +1398,9 @@ TODO: The WebAssembly profile, the module interface and the identification by a 
 <h5 id=resource-block>
 Resource block</h5>
 
-Blocks 64<sub>16</sub> through 67<sub>16</sub> are **resource blocks**.
-Their data uses the Shared external structure ([[#shared-external-structure]]),
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=] 
-and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
-
-<div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0110&thinsp;01|ss|</code> where:
-
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
+Blocks 64<sub>16</sub> through 67<sub>16</sub> are **resource blocks**,
+whose [=block/type=] is <code>0110&thinsp;01|ss|</code> in binary ([[#block-types]]).
+Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
 
 The internal structure after decompression is an uninterpreted byte sequence,
 which is supplied to modules by formula blocks referencing it ([[#formula-data]], [[#module-execution]]).
@@ -1399,33 +1408,12 @@ which is supplied to modules by formula blocks referencing it ([[#formula-data]]
 <h5 id=formula-block>
 Formula block</h5>
 
-Blocks 70<sub>16</sub> through 77<sub>16</sub> are **formula blocks**.
-Formula blocks are parametrized by following variables:
+Blocks 70<sub>16</sub> through 77<sub>16</sub> are **formula blocks**,
+whose [=block/type=] is <code>0111&thinsp;0|d||ss|</code> in binary ([[#block-types]]).
 
 <div dfn-for=formula>
 
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th><dfn>has_dictionary</dfn>
-  </thead>
-  <tbody>
-    <tr>
-      <td>70<sub>16</sub> — 73<sub>16</sub>
-      <td>False
-    <tr>
-      <td>74<sub>16</sub> — 77<sub>16</sub>
-      <td>True
-  </tbody>
-</table>
-
-<div class=note>
-  Alternatively, the block type can be interpreted as a binary number <code>0111&thinsp;0|d||ss|</code> where:
-
-    * |d| indicates dictionary usage: 0 for no dictionary, 1 for dictionary present.
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
+|d| determines whether a dictionary is used (<dfn>has_dictionary</dfn>): false if 0, and true if 1.
 
 Its data consists of the following:
 
@@ -1449,9 +1437,7 @@ Its data consists of the following:
 </table>
 
 If a dictionary is in use, its <em>0-based</em> index is specified as [=formula/dictionary_index=], as in data blocks.
-[=formula/formula_data=] uses the Shared compressed external structure ([[#shared-external-structure]])
-with [[#zstandard-compression-method|Zstandard]] as [=compression_method=]
-and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
+[=formula/formula_data=] is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
 
 <div class=note>
   Formula blocks always use Zstandard, which can still store data verbatim with raw Zstandard blocks.
@@ -1699,55 +1685,6 @@ The interval between mirrored headers in an encrypted archive ([[#encrypted-arch
 </div>
 
 Issue: The repair process is to be specified in a separate section (`recovery-design.md` §5.6).
-
-<h4 id=reserved-blocks>
-Reserved blocks</h4>
-
-A block type is <dfn>critical</dfn> if its hexadecimal representation starts with 0<sub>16</sub> through 9<sub>16</sub>,
-and <dfn>non-critical</dfn> if it starts with A<sub>16</sub> through F<sub>16</sub>.
-A block whose type is not defined by this specification:
-
-* Results in an [=unsupported failure=] ([[#interpretation]]) if its type is [=critical=];
-* Is an <dfn>ignored block</dfn> otherwise.
-    Like a mirror block, an ignored block doesn't belong to any [=segment=], MAY occur anywhere in [=archive/blocks=]
-    and doesn't affect the result of [=interpret an archive|interpreting an archive=].
-
-<div class=note>
-  Every block type defined by this specification is [=critical=] except for [[#mirror-block|mirror blocks]],
-  which a decompressor not using them can skip.
-  Future versions of this specification will use a critical type for a block
-  without which an archive can't be correctly interpreted,
-  e.g. a [[#data-block|data block]] with a new compression method in 38<sub>16</sub> through 3F<sub>16</sub>,
-  and a non-critical type for a block that can be safely skipped, e.g. recovery data.
-  The block-like structures below also have critical types, so they are never skipped by mistake.
-</div>
-
-Blocks whose type's hexadecimal representation is at least 2 digits long
-and starts with D<sub>16</sub> (e.g. D0<sub>16</sub> through DF<sub>16</sub>, D00<sub>16</sub> through DFF<sub>16</sub>, …)
-are <dfn>reserved for development environments</dfn>.
-This specification doesn't assign any meanings to these blocks.
-These blocks MUST be written or read only with specific instructions to enable them.
-
-Blocks which type's hexadecimal representation is at least 2 digits long
-and starts with E<sub>16</sub> (e.g. E0<sub>16</sub> through EF<sub>16</sub>, E00<sub>16</sub> through EFF<sub>16</sub>, …)
-are <dfn>reserved for experiments</dfn>.
-This specification doesn't assign any meanings to those blocks.
-
-<div class=note>
-  Blocks reserved for development environments and experiments are [=non-critical=],
-  so a decompressor not enabling them ignores them.
-  An implementation enabling an experiment may treat its blocks as critical,
-  since the experiment is expected to move to a block type defined by this specification once finished.
-</div>
-
-The following block types are defined as invalid due to the use as block-like structures.
-The valid archive MUST NOT include such block types as a proper block.
-
-* Block 278<sub>16</sub> ([=const/HEADER_TYPE=]) is used for the unencrypted archive header.
-* Block 69<sub>16</sub> ([=const/OVERLAY_HEADER_TYPE=]) is used for the overlay archive header.
-* Block 90&thinsp;5BCB&thinsp;957D<sub>16</sub> ([=const/FOOTER_TYPE=]) is used for the archive footer.
-* Block 7FC<sub>16</sub> ([=const/OVERLAY_FOOTER_TYPE=]) is used for the overlay archive footer.
-* Block 155&thinsp;04DC&thinsp;A579<sub>16</sub> ([=const/ENCRYPTED_HEADER_TYPE=]) is used for the encrypted archive header.
 
 <h3 id=archive>
 Archive</h3>
@@ -4117,111 +4054,6 @@ Quantization Interval</h3>
 quantization-interval = ~time / ~duration / [ 2*2 ~time/~duration ]
 $$ETIME-ELECTIVE //= (-14: quantization-interval)
 </pre>
-
-<h2 id=block-index>
-Block index</h2>
-
-Each reserved block type is [=critical=] or [=non-critical=] by its first hexadecimal digit ([[#reserved-blocks]]).
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th>Definition
-  </thead>
-  <tbody>
-    <tr>
-      <td>00<sub>16</sub> — 03<sub>16</sub>
-      <td>[[#spacer-block]]
-    <tr>
-      <td>04<sub>16</sub>
-      <td>[[#size-hint-block]]
-    <tr>
-      <td>05<sub>16</sub> — 0F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>10<sub>16</sub> — 17<sub>16</sub>
-      <td>[[#metadata-block]]
-    <tr>
-      <td>18<sub>16</sub> — 1F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>20<sub>16</sub> — 37<sub>16</sub>
-      <td>[[#data-block]]
-    <tr>
-      <td>38<sub>16</sub> — 3F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>40<sub>16</sub> — 4B<sub>16</sub>
-      <td>[[#data-block]]
-    <tr>
-      <td>4C<sub>16</sub> — 4F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>50<sub>16</sub> — 57<sub>16</sub>
-      <td>[[#dictionary-block]]
-    <tr>
-      <td>58<sub>16</sub> — 5F<sub>16</sub>
-      <td>[[#import-block]]
-    <tr>
-      <td>60<sub>16</sub> — 63<sub>16</sub>
-      <td>[[#module-block]]
-    <tr>
-      <td>64<sub>16</sub> — 67<sub>16</sub>
-      <td>[[#resource-block]]
-    <tr>
-      <td>68<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>69<sub>16</sub>
-      <td>Reserved for [=const/OVERLAY_HEADER_TYPE=] ([[#reserved-blocks]])
-    <tr>
-      <td>6A<sub>16</sub> — 6F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>70<sub>16</sub> — 77<sub>16</sub>
-      <td>[[#formula-block]]
-    <tr>
-      <td>78<sub>16</sub> — CF<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>D0<sub>16</sub> — DF<sub>16</sub>
-      <td>[=Reserved for development environments=]
-    <tr>
-      <td>E0<sub>16</sub> — EF<sub>16</sub>
-      <td>[=Reserved for experiments=]
-    <tr>
-      <td>F0<sub>16</sub> — C0F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>C10<sub>16</sub> — C17<sub>16</sub>
-      <td>[[#mirror-block]] for [[#metadata-block]]
-    <tr>
-      <td>C18<sub>16</sub> — C4F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>C50<sub>16</sub> — C57<sub>16</sub>
-      <td>[[#mirror-block]] for [[#dictionary-block]]
-    <tr>
-      <td>C58<sub>16</sub> — C5F<sub>16</sub>
-      <td>[[#mirror-block]] for [[#import-block]]
-    <tr>
-      <td>C60<sub>16</sub> — C63<sub>16</sub>
-      <td>[[#mirror-block]] for [[#module-block]]
-    <tr>
-      <td>C64<sub>16</sub> — C67<sub>16</sub>
-      <td>[[#mirror-block]] for [[#resource-block]]
-    <tr>
-      <td>C68<sub>16</sub> — C6F<sub>16</sub>
-      <td>Reserved
-    <tr>
-      <td>C70<sub>16</sub> — C77<sub>16</sub>
-      <td>[[#mirror-block]] for [[#formula-block]]
-    <tr>
-      <td>C78<sub>16</sub> — FFFF&thinsp;FFFF&thinsp;FFFF&thinsp;FFFF<sub>16</sub>
-      <td>Reserved for various purposes
-  </tbody>
-</table>
 
 <h2 id=zip-conversion>
 Converting from ZIP</h2>
