@@ -2562,7 +2562,7 @@ and is said to be referenced by the formula block only in that case.
 
 Each <dfn>instruction</dfn> consists of an <dfn>opcode</dfn> of type [=u8=] followed by its operands,
 whose structure is determined by the opcode as described in the following sections.
-[=formula/opcode=] MUST be one of the following, and its meaning is defined in [[#formula-evaluation]]:
+[=formula/opcode=] MUST be one of the following:
 
 <table class=data>
   <thead>
@@ -2658,10 +2658,15 @@ and an item of an import block by decoding that block.
   The decompression of the whole [=formula/formula_data=] is a one-time cost per file.
 </div>
 
+To <dfn>execute an instruction</dfn> on a stack, which is a [=list=] of [=byte sequences=] whose last item is the top,
+perform the steps described for its [=formula/opcode=] in the following sections.
+To pop |n| items, the stack MUST have at least |n| items,
+and the last |n| items are removed from the stack and used in their order in the stack.
+
 <h4 id=insn-nop>
 Nop instruction</h4>
 
-Opcode 00<sub>16</sub> denotes a **Nop instruction**, which has no operands.
+Opcode 00<sub>16</sub> denotes a **Nop instruction**, which has no operands and does nothing.
 
 <div class=note>
   Nop instructions can pad [=formula/formula_data=],
@@ -2692,6 +2697,8 @@ Opcode 01<sub>16</sub> denotes a **Literal instruction**. Its operands consist o
   </tbody>
 </table>
 
+It pushes [=formula/literal_data=].
+
 <h4 id=insn-swap>
 Swap instruction</h4>
 
@@ -2711,6 +2718,9 @@ Opcode 0F<sub>16</sub> denotes a **Swap instruction**. Its operands consist of t
       <td>
   </tbody>
 </table>
+
+The stack MUST have more than [=formula/swap_depth=] items.
+It exchanges the top of the stack with the item [=formula/swap_depth=] items below it.
 
 <h4 id=insn-slice>
 Slice instruction</h4>
@@ -2739,6 +2749,13 @@ Opcode 10<sub>16</sub> denotes a **Slice instruction**. Its operands consist of 
       <td>
   </tbody>
 </table>
+
+<ol class=algorithm>
+    1. [=formula/slice_block=] MUST be less than [=formula/num_blocks=].
+    2. Let |c| be the [=stored content=] of the [=formula/slice_block=]-th [=referenced item=].
+    3. [=formula/slice_start=] + [=formula/slice_length=] MUST be at most the length of |c|.
+    4. Push the bytes of |c| in [[=formula/slice_start=], [=formula/slice_start=] + [=formula/slice_length=]).
+</ol>
 
 <h4 id=insn-apply>
 Apply instruction</h4>
@@ -2792,6 +2809,18 @@ Opcode 11<sub>16</sub> denotes a **Apply instruction**. Its operands consist of 
   </tbody>
 </table>
 
+<ol class=algorithm>
+    1. [=formula/apply_module=] MUST be less than [=formula/num_modules=],
+        and each item of [=formula/apply_resources=] MUST be less than [=formula/num_resources=].
+    2. [=formula/apply_num_outputs=] MUST be at least 1.
+    3. Pop [=formula/apply_num_inputs=] items as |inputs|.
+    4. Let |outputs| be the result of [=apply a module|applying=]
+        the module block at [=formula/module_indices=][[=formula/apply_module=]]
+        with |inputs|, the resource blocks at [=formula/resource_indices=][|r|] for each |r| of [=formula/apply_resources=],
+        [=formula/apply_params=], [=formula/apply_output_sizes=] and [=formula/apply_memory_limit=] ([[#module-execution]]).
+    5. Push each item of |outputs| in order.
+</ol>
+
 <h4 id=insn-concat>
 Concatenate instruction</h4>
 
@@ -2812,6 +2841,8 @@ Opcode 12<sub>16</sub> denotes a **Concatenate instruction**. Its operands consi
   </tbody>
 </table>
 
+It pops [=formula/concat_count=] items and pushes their concatenation in order.
+
 <h4 id=insn-pack>
 Pack instruction</h4>
 
@@ -2831,6 +2862,8 @@ Opcode 13<sub>16</sub> denotes a **Pack instruction**. Its operands consist of t
       <td>
   </tbody>
 </table>
+
+It pops [=formula/pack_count=] items and pushes the [=packed byte sequence=] of them in order ([[#packed-byte-sequences]]).
 
 <h4 id=insn-split>
 Split instruction</h4>
@@ -2856,6 +2889,12 @@ Opcode 14<sub>16</sub> denotes a **Split instruction**. Its operands consist of 
   </tbody>
 </table>
 
+<ol class=algorithm>
+    1. [=formula/split_count=] MUST be at least 1.
+    2. Pop an item |x|. The sum of [=formula/split_sizes=] MUST be equal to the length of |x|.
+    3. For each |n| of [=formula/split_sizes=] in order, push the next |n| bytes of |x|.
+</ol>
+
 <h4 id=insn-patch>
 Patch instruction</h4>
 
@@ -2876,6 +2915,19 @@ Opcode 15<sub>16</sub> denotes a **Patch instruction**. Its operands consist of 
   </tbody>
 </table>
 
+<ol class=algorithm>
+    1. Pop 2 items as |source| and |patch|.
+    2. |patch| MUST consist of one or more [=Zstandard blocks=] without any other bytes,
+        where only the last block is signalled as the final block by its block header,
+        and each block holds at most 128 KiB of data.
+    3. Let |output| be the result of decompressing |patch| as a sequence of Zstandard blocks [[RFC8878]]
+        with |source| as the `Content` of a raw content dictionary,
+        i.e. the entropy tables start empty and the repeat offsets start at their initial values (1, 4, 8).
+        The offset of every match MUST be at most the length of |source| plus the number of bytes already decompressed.
+    4. The length of |output| MUST be [=formula/patch_size=].
+    5. Push |output|.
+</ol>
+
 <div class=note>
   A Patch instruction decompresses Zstandard blocks with an earlier byte sequence as a raw content dictionary,
   as `zstd --patch-from` does, so a decompressor reuses its Zstandard decompressor for it.
@@ -2884,6 +2936,18 @@ Opcode 15<sub>16</sub> denotes a **Patch instruction**. Its operands consist of 
   e.g. an [=import/import=] or a stream split from it by a module.
   The patch itself is typically a slice of an uncompressed non-leaf data block,
   whose checksum covers the stored patch, while an [=output checksum=] covers the result.
+</div>
+
+<div class=note>
+  A Patch instruction has no Zstandard frame and therefore no `Window_Size`:
+  a match may refer to any byte of |source| or of the output so far,
+  and the guaranteed limit of `Window_Size` in [[#zstandard-compression-method]] doesn't apply.
+  The decompressor holds both byte sequences anyway, so a long reach costs no additional memory.
+  With libzstd, this is decompressing a frame after `ZSTD_DCtx_refPrefix` with |source|,
+  whose release builds only check offsets against the start of the prefix;
+  a decompressor enforcing `Window_Size` has to lift that check for the frame.
+  A compressor using libzstd sets `ZSTD_c_windowLog` large enough to cover |source| and the output,
+  as `zstd --patch-from` does.
 </div>
 
 <h4 id=insn-checksum>
@@ -2905,6 +2969,13 @@ Opcode 20<sub>16</sub> denotes a **Checksum instruction**. Its operands consist 
       <td>
   </tbody>
 </table>
+
+The stack MUST NOT be empty.
+The XXH64 checksum of the top of the stack MUST be equal to [=formula/checksum_value=].
+
+A Checksum instruction <dfn>covers</dfn> the byte sequence at the top of the stack when it is executed,
+and the byte sequence remains the same item when moved by Swap instructions.
+An <dfn>output checksum</dfn> is a Checksum instruction [=covers|covering=] an output of the formula block.
 
 </div>
 
@@ -3322,61 +3393,12 @@ To <dfn>evaluate a formula block</dfn> |block|:
 
 <ol class=algorithm>
     1. Let |data| be the [=decoded data=] of [=formula/formula_data=] of |block|, parsed as in [[#formula-data]].
-    2. Let |stack| be an empty [=list=] of [=byte sequences=], whose last item is the top of the stack.
-        To pop |n| items, |stack| MUST have at least |n| items,
-        and the last |n| items are removed from |stack| and used in their order in |stack|.
-    3. For each |insn| of [=formula/instructions=] of |data| in order, depending on [=formula/opcode=] of |insn|:
-        : 00<sub>16</sub> (Nop)
-        :: Do nothing.
-        : 01<sub>16</sub> (Literal)
-        :: Push [=formula/literal_data=].
-        : 0F<sub>16</sub> (Swap)
-        :: |stack| MUST have more than [=formula/swap_depth=] items.
-            Exchange the top of |stack| with the item [=formula/swap_depth=] items below it.
-        : 10<sub>16</sub> (Slice)
-        :: 1. [=formula/slice_block=] MUST be less than [=formula/num_blocks=].
-            2. Let |c| be the [=stored content=] of the [=formula/slice_block=]-th [=referenced item=].
-            3. [=formula/slice_start=] + [=formula/slice_length=] MUST be at most the length of |c|.
-            4. Push the bytes of |c| in [[=formula/slice_start=], [=formula/slice_start=] + [=formula/slice_length=]).
-        : 11<sub>16</sub> (Apply)
-        :: 1. [=formula/apply_module=] MUST be less than [=formula/num_modules=],
-                and each item of [=formula/apply_resources=] MUST be less than [=formula/num_resources=].
-            2. [=formula/apply_num_outputs=] MUST be at least 1.
-            3. Pop [=formula/apply_num_inputs=] items as |inputs|.
-            4. Let |outputs| be the result of [=apply a module|applying=]
-                the module block at [=formula/module_indices=][[=formula/apply_module=]]
-                with |inputs|, the resource blocks at [=formula/resource_indices=][|r|] for each |r| of [=formula/apply_resources=],
-                [=formula/apply_params=], [=formula/apply_output_sizes=] and [=formula/apply_memory_limit=].
-            5. Push each item of |outputs| in order.
-        : 12<sub>16</sub> (Concatenate)
-        :: Pop [=formula/concat_count=] items and push their concatenation in order.
-        : 13<sub>16</sub> (Pack)
-        :: Pop [=formula/pack_count=] items and push the [=packed byte sequence=] of them in order.
-        : 14<sub>16</sub> (Split)
-        :: 1. [=formula/split_count=] MUST be at least 1.
-            2. Pop an item |x|. The sum of [=formula/split_sizes=] MUST be equal to the length of |x|.
-            3. For each |n| of [=formula/split_sizes=] in order, push the next |n| bytes of |x|.
-        : 15<sub>16</sub> (Patch)
-        :: 1. Pop 2 items as |source| and |patch|.
-            2. |patch| MUST consist of one or more [=Zstandard blocks=] without any other bytes,
-                where only the last block is signalled as the final block by its block header,
-                and each block holds at most 128 KiB of data.
-            3. Let |output| be the result of decompressing |patch| as a sequence of Zstandard blocks [[RFC8878]]
-                with |source| as the `Content` of a raw content dictionary,
-                i.e. the entropy tables start empty and the repeat offsets start at their initial values (1, 4, 8).
-                The offset of every match MUST be at most the length of |source| plus the number of bytes already decompressed.
-            4. The length of |output| MUST be [=formula/patch_size=].
-            5. Push |output|.
-        : 20<sub>16</sub> (Checksum)
-        :: |stack| MUST NOT be empty.
-            The XXH64 checksum of the top of |stack| MUST be equal to [=formula/checksum_value=].
+    2. Let |stack| be an empty [=list=] of [=byte sequences=].
+    3. For each |insn| of [=formula/instructions=] of |data| in order,
+        [=execute an instruction|execute=] |insn| on |stack| as described for its [=formula/opcode=] in [[#formula-data]].
     4. |stack| MUST NOT be empty.
     5. Return |stack| as the outputs of |block|.
 </ol>
-
-A Checksum instruction <dfn>covers</dfn> the byte sequence at the top of the stack when it is executed,
-and the byte sequence remains the same item when moved by Swap instructions.
-An <dfn>output checksum</dfn> is a Checksum instruction [=covers|covering=] an output of the formula block.
 
 <div class=note>
   Every byte sequence on the stack is used exactly once, as an input of another instruction or as an output,
@@ -3387,18 +3409,6 @@ An <dfn>output checksum</dfn> is a Checksum instruction [=covers|covering=] an o
   ([[#partial-access]]).
   A Checksum instruction covering an intermediate byte sequence, such as the output of an Apply instruction,
   can be verified by a decompressor that has computed that byte sequence but not the entire output.
-</div>
-
-<div class=note>
-  A Patch instruction has no Zstandard frame and therefore no `Window_Size`:
-  a match may refer to any byte of |source| or of the output so far,
-  and the guaranteed limit of `Window_Size` in [[#zstandard-compression-method]] doesn't apply.
-  The decompressor holds both byte sequences anyway, so a long reach costs no additional memory.
-  With libzstd, this is decompressing a frame after `ZSTD_DCtx_refPrefix` with |source|,
-  whose release builds only check offsets against the start of the prefix;
-  a decompressor enforcing `Window_Size` has to lift that check for the frame.
-  A compressor using libzstd sets `ZSTD_c_windowLog` large enough to cover |source| and the output,
-  as `zstd --patch-from` does.
 </div>
 
 Issue: Multiple outputs, in particular how a file selects one of them ([[#metadata-block]]).
