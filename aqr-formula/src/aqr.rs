@@ -37,8 +37,10 @@ pub const FOOTER_MAGIC: [u8; 6] = [0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12];
 const ENCRYPTED_HEADER_MAGIC: [u8; 8] = [0xf9, 0xca, 0xf2, 0xa6, 0xd0, 0x2a, 0x01, 0x00];
 // The block types of block-like structures, invalid as blocks.
 const HEADER_TYPE: u64 = 0x278;
-const FOOTER_TYPE: u64 = 0x98_68eb_d5fd;
-const ENCRYPTED_HEADER_TYPE: u64 = 0x15d_14fc_e5f9;
+const OVERLAY_HEADER_TYPE: u64 = 0x69;
+const FOOTER_TYPE: u64 = 0x90_5bcb_957d;
+const OVERLAY_FOOTER_TYPE: u64 = 0x7fc;
+const ENCRYPTED_HEADER_TYPE: u64 = 0x155_04dc_a579;
 
 /// The name of the custom section naming the native implementation of a module block.
 pub const NATIVE_SECTION: &str = "aqueous-native";
@@ -1155,7 +1157,9 @@ fn defined(ty: u64) -> bool {
             | 0x60..=0x67
             | 0x70..=0x77
             | HEADER_TYPE
+            | OVERLAY_HEADER_TYPE
             | FOOTER_TYPE
+            | OVERLAY_FOOTER_TYPE
             | ENCRYPTED_HEADER_TYPE
     )
 }
@@ -1774,6 +1778,29 @@ mod tests {
         let bad_sum = [&b"\x24\x0dhello"[..], &[0; 8], b"\x00"].concat();
         assert!(matches!(decode(&bad_sum), Err(Failure::Invalid(_))));
         assert!(matches!(decode(&[&bad_sum[..], b"\x78\x00"].concat()), Err(Failure::Unsupported(_))));
+    }
+
+    /// The types of block-like structures, as the spec gives them, begin their magics and are
+    /// invalid as blocks (not unsupported).
+    #[test]
+    fn block_like_types() {
+        let enc = |ty: u64| {
+            let mut v = Vec::new();
+            varint::put(&mut v, ty);
+            v
+        };
+        assert!(HEADER_MAGIC.starts_with(&enc(0x278)));
+        assert!([0x69, 0x0d, 0x15, 0xaf, 0xf6, 0xb2].starts_with(&enc(0x69)));
+        assert!(FOOTER_MAGIC.starts_with(&enc(0x90_5bcb_957d)));
+        assert!([0xfc, 0x0f, 0x6e, 0x7b, 0x4b, 0xac].starts_with(&enc(0x7fc)));
+        assert!(ENCRYPTED_HEADER_MAGIC.starts_with(&enc(0x155_04dc_a579)));
+        for ty in [0x278, 0x69, 0x90_5bcb_957d, 0x7fc, 0x155_04dc_a579] {
+            let mut b = enc(ty);
+            b.resize(b.len() + (1 << (ty % 4)), 0);
+            b.resize(b.len().next_multiple_of(2), 0);
+            let r = decode(&archive(|out| out.extend_from_slice(&b)), &[]);
+            assert!(matches!(r, Err(Failure::Invalid(_))), "{ty:#x}: {r:?}");
+        }
     }
 
     /// A stream of [`Kind::Compressed`] is stored as it is, at any level, leaf or not.
