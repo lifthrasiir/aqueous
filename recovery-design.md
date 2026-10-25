@@ -40,7 +40,7 @@ FreeArc가 이 기능을 진지하게 고려한 것이 계기가 되었다.
 | 사례 | 방식 | 배울 점 |
 |---|---|---|
 | **Par2** | 외부 파일. GF(2¹⁶) RS, slice 최대 32768개. slice마다 MD5와 CRC32. 패킷마다 magic(`PAR2\0PKT`), 길이, 자기 MD5가 있고, main packet을 여러 번 중복 저장한다. | slice 해시로 손상 위치를 찾아 모든 오류를 **erasure로 바꾼다**. 패킷은 스캔만으로 찾을 수 있다. 단점: 인코딩이 O(N·M)이라 느리다. 또 **행렬이 MDS가 아니다**(아래). |
-| **Par3** (2022-01-28 alpha draft, 미확정) | BLAKE3(하위 16바이트), 임의의 선형 부호. 행렬 패킷은 Cauchy(곧 RS), sparse random, explicit(LDPC용) 세 가지이다. Galois field는 8비트의 배수이면 된다. FFT 부호는 정의하지 않는다. | 부호를 고를 수 있다. **"Par inside ZIP"을 명시적으로 다룬다.** ZIP의 데이터와 central directory 사이에 Par3 패킷을 넣고, 패킷이 들어갈 자리를 0으로 간주한 checksum으로 파일 자신을 보호한다. 패킷 자신은 보호하지 못한다. §5.4의 "recovery 영역을 0으로 간주"와 같은 발상이다. |
+| **Par3** (2022-01-28 alpha draft, 미확정) | BLAKE3(하위 16바이트), 임의의 선형 부호. 행렬 패킷은 Cauchy(곧 RS), sparse random, explicit(LDPC용) 세 가지이다. Galois field는 8비트의 배수이면 된다. FFT 부호는 정의하지 않는다. | 부호를 고를 수 있다. **"Par inside ZIP"을 명시적으로 다룬다.** ZIP의 데이터와 central directory 사이에 Par3 패킷을 넣고, 패킷이 들어갈 자리를 0으로 간주한 checksum으로 파일 자신을 보호한다. 패킷 자신은 보호하지 못한다. §5.4가 처음 택했다가 기각한 방식이다. |
 | **RAR recovery record와 .rev** | 아카이브 안에 크기의 n%를 RS로 덧붙인다. 볼륨 단위 복구용 .rev도 있다. | "파일 하나로 끝난다"는 편의가 사용자에게 실제로 먹힌다. |
 | **FreeArc** | `-rr` recovery record. 0.36 문서 기준으로 섹터들의 XOR이고, 연속 손상만 record 크기까지 복구한다. 기본 크기는 아카이브 크기에 따라 4%/2%/1%이다. 0.67에서 바뀌었는지는 확인하지 못했다. 이후 Bulat Ziganshin의 FastECC가 나왔다. GF(0xFFF00001) 위의 NTT 기반 O(n log n) RS이고, 블록 2²⁰개까지, i7-4770에서 1.2 GB/s이다. 다만 v0.1은 인코딩만 구현했다. | 대용량에서는 O(n log n) 부호가 필수라는 문제의식. GF(p)는 이진 데이터에 맞지 않아 parity가 원본보다 조금 길다(4096바이트 섹터에 4100바이트). GF(2¹⁶)를 택할 이유이다. |
 | **dvdisaster RS03** | 매체를 크기가 같은 255개 layer(데이터 n, CRC 1, ECC m)로 나누고, 각 RS 부호어가 layer마다 1바이트씩 가져간다. ECC는 별도 파일로 두거나 ISO 뒤에 붙인다(augmented image). | 국소 손상(긁힘, 연속 불량 섹터)과 복구 데이터가 같이 날아가지 않게 하는 배치. |
@@ -74,7 +74,7 @@ Par2의 MDS 결함: Par2는 Plank의 1997년 RS 튜토리얼을 따랐다. 그 �
   - 공간: 손상 블록의 40–50%는 바로 옆 블록도 손상되어 있다. 연속 블록을 넘어서면 공간적 국소성이 거의 없다. 오류가 둘 이상인 디스크에서 연속 손상의 평균 길이는 3.4블록이다. 3%는 100블록, 0.7%는 1000블록 이상의 연속 손상을 겪는다. 같은 블록 번호가 여러 디스크에서 반복해서 손상되므로, 중복 구조는 서로 멀리 두라고 권한다.
   - identity discrepancy(lost/misdirected write)는 365개 디스크에서만 나타났다. checksum 불일치보다 한 자릿수 이상 적다.
   - Krioukov 2008은 RAID 보호 방식을 model checker로 검사했다. 검사한 모든 방식에서 결함을 찾았다. 손상된 블록이 parity 계산을 거쳐 다른 블록으로 번지는 parity pollution이 대표적이고, 스크러빙이 그 주원인이 되기도 한다. 해법으로 version mirroring, 블록 checksum, 물리·논리 식별 정보를 함께 쓰라고 제안한다.
-  > 이 설계의 교훈: 복구 단계는 손상된 원본으로 복구 데이터를 갱신하면 안 된다. repair가 원본을 덮어쓰기 전에 사본 쪽 checksum을 검증하는 것(§5.2)과 append 때의 parity 제자리 갱신(§5.4)이 여기에 해당한다.
+  > 이 설계의 교훈: 복구 단계는 손상된 원본으로 복구 데이터를 갱신하면 안 된다. repair가 원본을 덮어쓰기 전에 사본 쪽 checksum을 검증하는 것(§5.2)과 append 때 parity를 제자리에서 갱신하지 않는 것(§5.4)이 여기에 해당한다.
 - **SSD.** Schroeder 등(FAST 2016)은 Google의 SSD 10개 모델(MLC, eMLC, SLC, 24–50 nm)을 6년간 관찰했다.
   - 처음 4년 동안 정정 불가 오류(UE)를 한 번 이상 겪은 드라이브는 모델에 따라 20–63%이다. HDD 쪽 비교치는 32개월 동안 3.5%의 디스크에 bad sector가 생겼다는 것이다. 저자들은 SSD가 교체율은 HDD보다 낮지만 UE는 훨씬 많다고 결론지었다.
   - 30–80%의 드라이브에 bad block이 생긴다. bad block이 2–4개 생기면 수백 개가 뒤따를 확률이 50%이다. 2–7%의 드라이브에는 bad chip이 생긴다.
@@ -202,37 +202,97 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 ### 5.3 slice 해시 인덱스: 감지 전용 [제안, 선택]
 
-- 저장 바이트를 `slice_size` 단위(2의 거듭제곱, 4 KiB 이상)로 나누고, slice마다 XXH64를 기록한다.
-- parity 없이 인덱스만 두면 오버헤드가 0.01% 수준이고, 손상 위치를 정확히 짚을 수 있다.
-- §5.2가 있으면 각 파일의 checksum으로 대부분 대체되므로 우선순위는 낮다. 다만 §5.4를 쓴다면 필수이다.
+- §5.4의 index block만 두고 parity block을 두지 않는 set(`parity_count` = 0)으로 표현한다. 별도 구조는 두지 않는다.
+- 오버헤드는 S = 64 KiB에서 0.0125%이고, 압축을 풀지 않고도 손상 위치를 slice 단위로 짚을 수 있다.
+- §5.2가 있으면 각 파일의 checksum으로 대부분 대체되므로 우선순위는 낮다.
 
 ### 5.4 전체 RS parity (E3) [제안, 선택]
 
 파일 내용까지 복구하려는 사용자를 위한 옵션이다. §5.2가 이미 있으므로, 이 단계의 복잡도는 순수하게 내용 보호의 비용이 된다.
 
-- **블록 타입:** non-critical 구간, 예를 들어 B0–B3을 recovery block으로 쓴다. 공통 앞부분은 `recovery_magic`, `self_hash`, `set_id`, `archive_offset`(archive_start로부터 이 블록까지의 거리), `kind`(index 또는 parity)이다.
-  - `set_id`는 파라미터의 해시이다. 세대(generation)와 아카이브를 구분한다.
-  - `archive_offset`이 있으면 header가 깨져도 slice 격자를 복원할 수 있다. 중첩 아카이브의 recovery block을 가려내는 데도 mirror와 같은 방식으로 쓴다(§5.2의 찾기).
-  - `recovery_magic`의 길이와 값에 대해서는 §5.2의 `mirror_magic` 분석이 그대로 적용된다.
-- **index 패킷:** `slice_size`, 보호 길이, set 배치, 부호 ID, slice 해시 목록(§5.3)을 담는다. 최소 두 벌을 서로 떨어진 위치에 둔다(Par2의 main packet 중복과 같은 발상).
-- **보호 범위:** `[archive_start, archive_end)`에서 recovery block과 mirror block 영역을 0으로 간주한다. 이러면 자기 자신을 보호하는 순환이 없어진다. footer는 보호하지 않고 재구성한다.
-- **부호:** GF(2¹⁶) 위의 additive-FFT 기반 RS(Lin–Chung–Han 계열, Leopard-RS가 대표 구현)를 제안한다.
-  - MDS이므로 M개의 slice가 어떤 조합으로 손실돼도 복구된다.
+#### 보호 범위와 배치의 분리
+
+recovery block도 블록이므로 블록 경계에만 놓일 수 있고, data block은 얼마든지 길 수 있다. 따라서 일정한 간격으로 recovery block을 넣을 수 있다는 보장은 없다. 이 설계는 보호 범위를 블록 경계에서 떼어 내어 이 제약을 배치 쪽에만 남긴다.
+
+- **recovery set**은 보호 범위 `[range_start, range_end)`, slice 크기 S, parity 수 p로 정해진다. 보호 범위는 임의의 바이트 구간이다. data block 한가운데에서 시작하거나 끝나도 된다.
+- 보호 범위는 `[archive_start, archive_end)` 안에 있어야 한다. header magic은 상수이고 footer는 재구성하므로 보호하지 않는다.
+- **한 set의 모든 recovery block은 `range_end` 뒤에 온다.** mirror block의 "target block이 앞선다"와 같은 방향이다.
+- 앞선 set의 recovery block과 mirror block은 뒤 set의 보호 범위 안에서 다른 바이트와 똑같이 보호된다.
+  > 처음 제안은 `[archive_start, archive_end)` 전체를 덮고 recovery block과 mirror block 영역을 0으로 간주했다(Par3의 "Par inside ZIP"과 같은 발상). 기각한 이유는 다음과 같다.
+  > - 헤더가 깨진 recovery block은 영역을 알 수 없다. 그 블록이 걸친 멀쩡한 slice까지 0으로 간주할 범위를 몰라 해시가 불일치하고 erasure가 된다. 영역 목록을 index에 두면 스트리밍에서 순환이 생긴다.
+  > - recovery 데이터 자신이 보호받지 못한다. 범위를 분리하면 뒤 set이 앞 set의 recovery 데이터를 보호한다.
+- 블록 크기 상한 같은 추가 조건은 포맷에 두지 않는다. 거대한 data block 때문에 parity를 내보내지 못하는 동안의 버퍼링은 compressor의 문제로 남는다(아래 배치).
+  > 상한을 두면 큰 파일이 formula block과 non-leaf data block 사슬로 쪼개져야 한다. 그러면 formula block이 모든 slice의 길이를 먼저 선언해야 하므로 스트리밍이 깨진다(명세 §3.2.1의 노트). 상한이 주는 것은 parity 대기 시간의 상한뿐이고, 그것은 임시 파일로 해결된다.
+
+#### slice 격자
+
+- S = 2<sup>s</sup>, s ≥ 12이다.
+- 격자 원점은 `archive_start`가 아니라 **header magic의 시작**(`archive_start` − 6)이다. slice i는 원점에서 [i·S, (i+1)·S)이다.
+  > `archive_start`는 header magic 뒤이다. 여기에 맞추면 파일 처음에서 시작하는 보통의 아카이브에서 4 KiB 단위가 항상 slice 두 개에 걸친다. SFX처럼 원점 자체가 4 KiB 정렬이 아니면 E1 하나가 slice 두 개를 소모할 수 있는데, 이것은 감수한다.
+- set의 data shard는 보호 범위와 겹치는 격자 slice들이고, 개수를 n이라 한다. 범위 밖 부분은 가상의 0으로 채운다. 따라서 부분 slice는 양 끝의 두 개뿐이다.
+- 암호화 아카이브에서는 평문의 오프셋 0이 header magic의 시작이므로 같은 원점이 age 청크와 정렬된다. S를 64 KiB의 배수로 잡으면 slice와 청크가 정확히 겹쳐, 청크 하나의 인증 실패가 slice 하나의 erasure가 된다(§7의 8번).
+
+#### 블록
+
+non-critical 타입 둘을 쓴다. 예를 들어 B0–B3은 parity block, B4–B7은 index block이고, size 필드의 폭은 다른 블록처럼 타입 % 4로 정해진다. 데이터는 다음과 같다.
+
+| 필드 | 타입 | 비고 |
+|---|---|---|
+| `recovery_magic` | u8[8] | 값의 조건은 §5.2의 `mirror_magic`과 같다 |
+| `archive_offset` | leb128 | `block_start` − `archive_start`. mirror block과 같은 용도 |
+| `range_offset` | leb128 | `block_start` − `range_start` |
+| `range_length` | leb128 ≠ 0 | |
+| `lg_slice_size` | u8 ≥ 12 | s |
+| `parity_count` | leb128 | p. index block만 있는 set(§5.3)은 0 |
+| (parity) `shard_index` | leb128 < p | |
+| (parity) `shard` | u8[S] | |
+| (index) `slice_hashes` | u64le[n] | data shard마다 보호 범위 안 바이트만의 XXH64 |
+| `recovery_checksum` | u64le | 블록 시작부터 앞 필드까지의 저장 바이트에 대한 XXH64. `mirror_checksum`과 같다 |
+
+- **set의 정체는 (`range_start`, `range_length`, S, p)이다.** 부호가 완전히 고정되어 있으므로(원칙 5) 이 넷이 같으면 내용도 같다.
+  > 처음 제안의 `set_id`(파라미터의 해시)는 뺐다. 세대 구분은 범위가 하고, 아카이브 구분은 `archive_offset`이 한다. 무작위 ID를 쓰지 않는 것은 §5.2의 노선과 같다.
+- parity block 하나에 parity shard 하나를 담는다. 블록의 손상이 정확히 shard 하나의 손실이 되고, 블록마다 스캔으로 찾아 단독으로 검증할 수 있다.
+- index block은 최소 두 벌을 서로 D 이상 떨어뜨려 둔다(Par2의 main packet 중복과 같은 발상). 해시 목록이 없으면 조용한 손상의 위치를 알 수 없다.
+- 압축을 풀지 않는 `verify`(I4)가 slice 해시만으로 아카이브 전체를 검사할 수 있다.
+
+#### 부호
+
+- 명세에서는 GF(2¹⁶) 위의 systematic RS로 정의한다. 차수가 n 미만인 다항식 f에 대해 data shard의 각 심볼은 f(x<sub>i</sub>), parity shard의 심볼은 f(y<sub>j</sub>)이다. 평가점이 서로 다르기만 하면 MDS가 증명된다(§1의 Par2 교훈).
+- 평가점은 additive-FFT 기반 RS(Lin–Chung–Han 계열, Leopard-RS와 `reed-solomon-simd`)의 배치에 맞춰, 그 구현을 그대로 쓸 수 있게 고른다.
+  - MDS이므로 p개의 slice가 어떤 조합으로 손실돼도 복구된다.
   - O(n log n)이다.
-  - 총 slice 수는 65536개로 제한된다. 원본과 복구의 비율 제약은 구현마다 다르다.
+  - 구현별 (n, p) 제약은 다음과 같다. 당장은 n ≤ 32768, p ≤ n을 권고한다.
     - Leopard-RS(C++, BSD-3-Clause): 원본 + 복구 ≤ 65536이고, 복구 ≤ 원본이다. 2017년 README 기준이다. 조각 크기는 64바이트의 배수여야 한다. AVX2 단일 코어 인코딩이 1.2 GB/s 수준이다.
     - `reed-solomon-simd`(Rust, MIT AND BSD-3-Clause, 3.1.0): 원본과 복구가 각각 1–32768이면 아무 조합이나 된다. 한쪽이 32768을 넘으면 다른 쪽이 2ⁿ 이하일 때 2¹⁶ − 2ⁿ까지 허용된다(예: 61440 : 4096). 조각 크기는 짝수이면 된다. Ryzen 5 3600 단일 코어(AVX2), 1 KiB 조각에서 32 : 32는 10.2 GiB/s, 1024 : 1024는 4.8 GiB/s, 32768 : 32768은 1.6 GiB/s로 인코딩한다(원본과 복구 합계 기준). 1024 : 1024 디코딩은 1.3–1.4 GiB/s이다.
-    > 따라서 set 하나의 slice 수는 원본과 복구를 합쳐 65536개 이하로 두고, 복구 비율이 50%를 넘지 않게 하면 두 구현 모두에서 동작한다. 일반적인 parity 비율은 몇 %이므로 제약이 되지 않는다.
   > fountain code는 MDS가 아니고, RaptorQ에는 특허 문제가 있다.
-- **대용량과 interleave:**
-  - set 하나로 1 TB를 덮으면 slice가 16 MB가 되어, 섹터 하나만 깨져도 16 MB를 잃는다.
-  - 그래서 G개의 set으로 나누고, slice k를 set (k mod G)에 배정한다.
-  - slice 크기 S, set당 parity p개일 때 견딜 수 있는 버스트 길이는 대략 **L ≤ G·p·S**이다. 예를 들어 S = 64 KiB, p = 16, G = 64이면 약 64 MiB이다.
-  > G를 키우면 같은 총 parity가 여러 set으로 쪼개진다. 흩어진 E1이 한 set에 몰리면 그 set만 실패할 수 있지만, 확률이 낮아 실용적으로는 무시할 만하다.
-- **배치:** 기본은 footer 앞이다. 끝부분 truncation에는 데이터 꼬리와 parity가 함께 날아가므로, dvdisaster처럼 분산 배치하는 옵션을 둔다. 스트리밍 인코더라면 set을 연속 범위로 잡고, 각 set의 parity를 다음 set 뒤에 지연 배치한다.
-- **append:** 새 segment를 추가해도 기존 바이트는 변하지 않는다(footer는 보호 범위 밖). 따라서 기존 parity는 계속 유효하다.
-  - 기본은 새 범위만 덮는 새 세대의 set을 추가하는 것이다. 이 경우 보호력은 세대 범위 안에서만 작동한다.
-  - RS는 선형이므로, 기존 데이터를 다시 읽지 않고 기존 parity에 새 데이터의 기여분을 더해 제자리에서 갱신할 수도 있다. 이 옵션은 spacer의 원래 용도와도 맞는다. 단, 쓰는 도중 crash가 나면 그 parity를 잃는다(self_hash 불일치로 버려질 뿐, 데이터는 무사하다).
+- **인코딩 메모리는 R이 아니라 O(p·S)이다.** Leopard 계열 high-rate 인코더는 data shard를 m개(p 이상인 가장 작은 2의 거듭제곱)씩 IFFT해 작업 버퍼에 누적하고, 끝에 FFT를 한 번 한다. 그래서 보호 범위를 통째로 들고 있을 필요가 없고, 스트리밍 compressor도 R을 크게 잡을 수 있다. *(확인 필요, §8의 R6)*
+  > Cauchy 행렬을 그대로 곱하는 방식도 메모리는 O(p·S)이지만, 입력 심볼마다 곱셈이 p번이라 p가 수백이면 너무 느리다.
+- 확인할 것(R6):
+  - `reed-solomon-simd`가 위의 누적을 API로 노출하는지, 아니면 모든 원본을 버퍼링하는지.
+  - 평가점의 정확한 배치. Leopard는 parity를 0..m에, data를 m 이후에 두는 것으로 알고 있다.
+  - 심볼의 바이트 배치. Leopard는 64바이트마다 심볼 32개의 하위 바이트와 상위 바이트를 따로 모아 둔다. 명세가 이것을 그대로 정의할지, 연속한 u16le로 정의하고 구현이 변환할지 정한다. S가 4096의 배수이므로 어느 쪽이든 64바이트 정렬은 맞는다.
+  - (n, p)의 허용 조합을 명세에 어떻게 적을지.
+
+#### 크기와 interleave
+
+- 버스트 하나는 slice를 최대 ⌈L/S⌉ + 1개 지운다. 보호 범위 R, parity 비율 r이면 범위 안에서 견디는 버스트는 대략 **L ≤ r·R − S**이고, 흩어진 E1은 p개까지 견딘다. E1 하나가 parity를 S만큼 소모한다.
+- 예를 들어 R = 1 GiB, S = 64 KiB이면 n = 16384이다. r = 1%이면 p = 164, parity는 10.25 MiB이다. 버스트는 약 10 MiB(E2)까지 견디고, 인코딩 메모리는 m = 256으로 약 32 MiB이다.
+- E3을 노리면 R = 16 GiB, S = 512 KiB(n = 32768)로 잡는다. r = 1%이면 약 160 MiB이다.
+- interleave(slice k를 set k mod G에 배정)는 두지 않는다.
+  > interleave를 해도 같은 총 parity로 견디는 버스트 길이는 같다(G·p·S). interleave가 버는 것은 shard 수 상한 아래에서 S를 줄이는 것뿐이고, 그 대가로 전체가 MDS가 아니게 된다. Schroeder 2010(§2.1)이 interleaved parity가 예상보다 약하다고 보인 것과 같은 문제이다. S를 줄이고 싶으면 R을 줄인다.
+
+#### 배치
+
+- compressor는 보통 고정 크기 R마다 범위를 닫는다. 범위의 끝은 블록 경계와 관계없다. 그 set의 recovery block은 `range_end` + D 뒤의 첫 블록 경계에 둔다. 이러면 버스트 하나가 범위와 그 parity를 함께 지우지 않는다.
+- data block이 매우 길면 그동안 닫힌 범위들의 parity(범위마다 약 r·R)가 쌓인다. compressor는 이것을 임시 파일로 내보내거나, 범위를 그 블록의 끝까지 늘리고 S를 키워 n을 상한 안에 둔다. 포맷은 둘 다 허용한다.
+- 마지막 범위의 recovery block은 D 거리를 지킬 수 없다. 마지막 metadata block의 mirror와 같은 처지이고, segment 주기(§5.1)로 손실을 묶는다.
+- 끝부분 truncation(E4)은 마지막 범위와 그 parity를 함께 지운다. parity가 항상 범위 뒤에 있으므로 이것은 구조적으로 피할 수 없다.
+
+#### append
+
+- 새 segment를 추가해도 기존 범위는 모두 옛 `archive_end` 앞에 있으므로 그대로 유효하다. 새 set은 새로 쓴 바이트를 덮는다.
+- 새 set의 범위를 옛 마지막 범위의 끝에서 시작하면, 옛 꼬리에 있던 보호받지 못한 recovery block과 mirror block까지 덮을 수 있다.
+  > 처음 제안은 RS의 선형성을 이용해 기존 parity를 제자리에서 갱신하는 옵션을 두었다. 범위가 분리되면 필요가 없고, crash 중의 parity 손실과 parity pollution(§2.1의 Krioukov 2008)의 위험만 남으므로 뺐다.
 
 ### 5.5 암호화 [잠정]
 
@@ -279,9 +339,9 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
    2. 청크 위치는 명세의 닫힌 식으로 정한다. 손상이 shift를 일으키지 않는다는 전제(§2.2의 E6 제외) 아래에서 정확하다.
    3. 인증에 성공한 청크는 인증된 바이트가 된다. 실패한 청크에서 ⊥가 아닌 바이트는 키스트림으로 복호해 미인증 바이트로 두고(명시적으로 켰을 때), ⊥는 ⊥로 둔다. 미인증 바이트를 쓰지 않으면 청크 전체가 ⊥이다.
    4. final 플래그는 청크의 물리적 위치로 정한다. 다만 마지막 청크가 잘렸을 때처럼 모호하면 두 경우를 모두 복호해 보고, 평문의 블록 구조와 checksum으로 고른다.
-1. `mirror_magic`과 `recovery_magic`을 스캔하고, 각 블록의 `mirror_checksum`이나 `self_hash`를 검증한다. `archive_offset`이 archive_start와 맞지 않는 블록은 중첩 아카이브의 것이므로 버린다(§5.2의 찾기). 이 스캔에는 ⊥가 아닌 바이트만 쓴다.
+1. `mirror_magic`과 `recovery_magic`을 스캔하고, 각 블록의 `mirror_checksum`이나 `recovery_checksum`을 검증한다. `archive_offset`이 archive_start와 맞지 않는 블록은 중첩 아카이브의 것이므로 버린다(§5.2의 찾기). 이 스캔에는 ⊥가 아닌 바이트만 쓴다.
 2. mirror마다 원본을 사본과 비교한다. 원본에 ⊥가 있거나 사본과 다르면 사본으로 덮어쓴다. 덮어쓴 바이트는 사본의 checksum으로 검증되었으므로 인증된 바이트와 같은 정도로 신뢰한다. 비용이 싸고, 이후 RS 단계의 erasure를 줄여 준다. 구조(metadata 체인이나 앞방향 스캔)로 위치가 확인되지 않은 mirror는 1단계의 `archive_offset` 검사를 통과해야만 덮어쓰기에 쓴다.
-3. recovery set이 있으면 ⊥와 slice 해시 불일치를 erasure로 표시하고 RS로 복원한다.
+3. recovery set이 있으면 검증된 recovery block을 set의 정체(§5.4)로 묶는다. set마다 ⊥와 slice 해시 불일치를 erasure로 표시하고, erasure가 살아 있는 parity shard 수 이하이면 RS로 복원한다. set은 서로의 recovery block을 보호하고 mirror 복원도 erasure를 줄이므로, 2단계와 3단계를 더 이상 복원되는 것이 없을 때까지 반복한다. 정상적인 배치에서는 범위가 뒤에 있는 set부터 한 번씩 돌면 끝난다.
 4. footer가 깨졌으면 앞방향 스캔으로 재구성한다.
 5. ⊥가 남지 않았으면 결과를 바이트열로 보고 `interpret an archive`에 넘긴다. 명세의 해석은 바뀌지 않는다. ⊥가 남았으면 strict 해석의 대상이 아니다. 그때는 salvage로 넘겨 ⊥를 읽지 않고 계산되는 부분만 낸다. 이것은 §4.6 Partial access의 연장으로 정의할 수 있다.
 6. (암호화 아카이브) 결과는 평문으로 내거나 새 file key로 다시 암호화한다(§5.5).
@@ -302,7 +362,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 5. ~~**encrypted archive 안의 mirror 허용 여부.**~~ 허용한다. 헤더 필드는 mirrored header로 따로 보호한다(명세 §3.2.2 Encrypted Archive, §5.5).
 6. **스크러빙.** 필요한 여유분은 "다음 검증 전까지 쌓일 손상"이 정한다. 그래서 `verify` 명령과 권장 주기를 도구 쪽에서 함께 설계해야 한다.
 7. **바이트 상태를 명세에 넣을지.** §5.6의 세 상태(인증됨, 검증되지 않음, ⊥)는 지금 이 문서에만 있다. 명세의 Repair 절(S3)을 쓸 때 입력 모델로 넣을지, ⊥만 넣고 미인증 바이트는 구현의 선택으로 남길지 정한다. 미인증 바이트를 기본으로 켤지도 함께 정한다.
-8. **암호화 아카이브의 RS 위치.** §5.4의 RS를 복호한 평문 위에 두면, erasure 단위가 청크(64 KiB)가 되어 흩어진 E1 손상이 parity를 16–32배 빨리 소모하고, 키가 없으면 repair할 수 없다. ciphertext 위(청크 사이의 non-critical 프레임)에 두면 두 문제가 모두 사라지지만, 비암호화 쪽과 RS 구조가 갈라지고 프레임 정렬(§5.5)을 다시 봐야 한다. §5.6의 미인증 바이트는 위치를 아는 손상에 한해 첫 번째 문제를 줄인다.
+8. **암호화 아카이브의 RS 위치.** §5.4의 RS를 복호한 평문 위에 두면, erasure 단위가 청크(64 KiB)가 되어 흩어진 E1 손상이 parity를 16–32배 빨리 소모하고, 키가 없으면 repair할 수 없다. ciphertext 위(청크 사이의 non-critical 프레임)에 두면 두 문제가 모두 사라지지만, 비암호화 쪽과 RS 구조가 갈라지고 프레임 정렬(§5.5)을 다시 봐야 한다. §5.6의 미인증 바이트는 위치를 아는 손상에 한해 첫 번째 문제를 줄인다. 또 S를 64 KiB의 배수로 잡으면 slice가 청크와 정렬되므로(§5.4의 slice 격자) 청크 하나의 손실이 slice 하나만 소모한다. 이때 첫 번째 문제는 S ≥ 64 KiB의 비용으로 바뀌고, 키 없는 repair만 남는다.
 
 ## 8. Action items
 
@@ -313,6 +373,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 - [x] **R3.** 현행 SSD의 erase block과 superblock 크기를 확인해 E2/E3의 경계를 검증한다. (176층 이후 제품의 데이터시트 수치는 찾지 못했다. erase block은 E3로 옮겼다.)
 - [x] **R4.** Par2 행렬이 MDS가 아니라는 지적과, Par3 draft가 다른 포맷 안에 복구 데이터를 넣는 경우를 다루는지 확인한다.
 - [x] **R5.** Leopard 계열 구현(C++ leopard, Rust `reed-solomon-simd` 등)의 slice 수와 비율 제약, 라이선스, 처리 속도를 확인한다.
+- [ ] **R6.** additive-FFT RS 구현(Leopard, `reed-solomon-simd`)의 평가점 배치, 심볼 바이트 배치, (n, p) 제약을 확인하고, m개 단위 누적으로 O(p·S) 메모리 스트리밍 인코딩이 가능한지와 그것을 API로 쓸 수 있는지 확인한다(§5.4의 부호).
 
 ### 측정 (M)
 
@@ -326,7 +387,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 - [x] **S2.** mirror block 절을 추가한다. 구조와 배치 SHOULD를 포함한다. (`MIRROR_MAGIC` 값 확정, `archive_offset` 추가함)
 - [ ] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6). 암호화 아카이브의 복호 단계와 ⊥가 남은 경우의 salvage를 포함한다(§7의 7번).
 - [ ] **S4.** 비규범 노트를 추가한다. 내용은 오류 모델 요약, E5가 범위 밖이라는 점, segment 주기 권고, checksum 있는 블록 타입을 기본값으로 쓰라는 권고이다.
-- [ ] **S5.** §7 Block index에 mirror 타입(반영함)과, §5.4를 진행하면 recovery 타입(B0–B3 등 non-critical)을 반영한다.
+- [ ] **S5.** §7 Block index에 mirror 타입(반영함)과, §5.4를 진행하면 recovery 타입(B0–B7 등 non-critical)을 반영한다.
 - [ ] **S6.** (§5.4를 진행할 경우) recovery block 절과 부호의 완전한 정의를 추가한다.
 - [x] **S7.** encrypted envelope의 복구 구조를 정한다(§5.5). (trailer 대신 청크 사이의 mirrored header로 정했다. 실패한 청크를 건너뛰는 복호는 S3에서 정의한다.)
 
@@ -337,4 +398,4 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 - [ ] **I3.** repair 도구를 만든다. 스캔, mirror 복원, footer 재구성, salvage 추출을 포함한다.
 - [ ] **I4.** `verify` 명령을 만든다. checksum, mirror와 원본의 일치, slice 해시를 모두 검사한다.
 - [ ] **I5.** I1로 "손상된 바이트가 속한 parcel만 잃는다"는 목표를 E1과 E2(D 이상 아카이브)에 대해 검증한다.
-- [ ] **I6.** (선택) §5.4의 recovery set을 구현하고, I1로 L ≤ G·p·S 한계를 검증한다.
+- [ ] **I6.** (선택) §5.4의 recovery set을 구현하고, I1로 L ≤ r·R − S 한계를 검증한다.
