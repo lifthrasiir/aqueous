@@ -1527,9 +1527,9 @@ and an optional [=base=] |base|, which is an [=archive value=]:
         2. If [=envelope/header_checksum=] is present and doesn't match, return an [=invalid archive=] failure.
         3. If [=envelope/lg_work_factor=] exceeds an implementation-defined limit, return a [=resource failure=].
         4. If |passphrase| is not given, or the file key can't be unwrapped from [=envelope/encrypted_file_key=]
-            with |passphrase| as described in [[AGE]], return a [=decryption failure=].
+            with |passphrase| as described in [[!AGE]], return a [=decryption failure=].
         5. Using the unwrapped file key, verify [=envelope/age_header_mac=] against the reconstructed AGE header
-            and decrypt the [=AGE payload=] as described in [[AGE]].
+            and decrypt the [=AGE payload=] as described in [[!AGE]].
             If either fails, return an [=invalid archive=] failure.
         6. Set |input| to the decrypted payload.
             It MUST satisfy the additional constraints in [[#encrypted-archive]],
@@ -2881,7 +2881,7 @@ of all bytes from [=envelope/checksum_start=] to [=envelope/checksum_end=].
   and damage to [=envelope/lg_work_factor=] may make scrypt run for an arbitrarily long time.
 </div>
 
-All fields from [=envelope/lg_work_factor=] to [=envelope/age_header_mac=] are used to reconstruct an AGE v1 textual file header [[AGE]] as follows:
+All fields from [=envelope/lg_work_factor=] to [=envelope/age_header_mac=] are used to reconstruct an AGE v1 textual file header [[!AGE]] as follows:
 
 <pre>
 age-encryption.org/v1
@@ -4572,7 +4572,8 @@ or discarded as only meaningful to the ZIP container.</p>
     "title": "age",
     "authors": ["Filippo Valsorda"],
     "publisher": "The Community Cryptography Specification Project",
-    "href": "https://age-encryption.org/v1"
+    "status": "Version 1.1.0",
+    "href": "https://c2sp.org/age@v1.1.0"
   },
   "APPNOTE": {
     "title": ".ZIP File Format Specification",
