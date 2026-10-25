@@ -44,100 +44,6 @@ urlPrefix: https://www.rfc-editor.org/rfc/rfc9581.html; spec: RFC9581; type: cdd
     text: $ETIME-TIMESCALE; url: #section-3.4
 </pre>
 
-<h2 id=definitions>
-Definitions</h2>
-
-<dl>
-  <dt><dfn export>Archive</dfn> or <dfn export>Uncompressed Archive</dfn></dt>
-  <dd>A logical collection of files, directories, and associated metadata.</dd>
-
-  <dt><dfn export>Base</dfn></dt>
-  <dd>An existing directory tree or file, given separately from an overlay archive, to which the overlay archive applies.</dd>
-
-  <dt><dfn export>Barely Compressible</dfn></dt>
-  <dd>A condition where the algorithm overhead from compression exceeds the size saving
-  so that the normal Compressed Block can't be used.
-
-  <div class=note>
-    By definition, this condition varies by the choice of compression algorithm.
-    In the case of Zstandard, the minimum overhead is 3 bytes per Zstandard block,
-    each of which holds at most 128 KiB (2<sup>17</sup> bytes) of data.
-  </div>
-  </dd>
-
-  <dt><dfn export>Bit</dfn></dt>
-  <dd>The smallest unit of information, representing a binary value of either 0 or 1.</dd>
-
-  <dt><dfn export>Byte</dfn></dt>
-  <dd>A sequence of 8 bits, typically the smallest addressable unit of data.</dd>
-
-  <dt><dfn export>Compress</dfn> or <dfn export>Compression</dfn></dt>
-  <dd>The process of transforming an uncompressed archive into a compressed archive, typically to reduce its size.
-  This is the inverse operation of decompression.</dd>
-
-  <dt><dfn export>Compressor</dfn></dt>
-  <dd>A component or algorithm responsible for performing compression.</dd>
-
-  <dt><dfn export>Compressed Archive</dfn></dt>
-  <dd>A sequence of bytes that represents an archive, organized in a way that is usually, but not necessarily,
-  more compact than the naive concatenation of its constituent parts.
-  A single uncompressed archive can have multiple valid compressed representations.</dd>
-
-  <dt><dfn export>Decompress</dfn> or <dfn export>Decompression</dfn></dt>
-  <dd>The process of transforming a compressed archive back into its original uncompressed form.
-  This is the inverse operation of compression.</dd>
-
-  <dt><dfn export>Decompressor</dfn></dt>
-  <dd>A component or algorithm responsible for performing decompression.</dd>
-
-  <dt><dfn export>Dictionary</dfn></dt>
-  <dd>A byte sequence supplied to the compression method as if it preceded the data,
-  typically shared by multiple small blocks to compensate for the lack of shared compression context.</dd>
-
-  <dt><dfn export>Directory</dfn></dt>
-  <dd>A special type of file that contains references to other files and/or directories,
-  forming a hierarchical file system structure.
-  It includes its own name and associated metadata.</dd>
-
-  <dt><dfn export>File</dfn></dt>
-  <dd>A fundamental unit of archival, consisting of a sequence of zero or more content bytes,
-  a non-empty byte sequence for its name, and any other associated metadata (e.g., size, modification time, permissions).</dd>
-
-  <dt><dfn export>Formula</dfn></dt>
-  <dd>A description of a file content as an expression over stored data, imported data, modules and resources.</dd>
-
-  <dt><dfn export>Implicitly-sized</dfn></dt>
-  <dd>Being its byte length only available through the context.</dd>
-
-  <dt><dfn export>Module</dfn></dt>
-  <dd>A WebAssembly module that computes byte sequences from byte sequences,
-  typically the postprocessing part of a transformation.
-  It may also be the preprocessing part, applied to the data of a [=base=] ([[#import-block]]).</dd>
-
-  <dt><dfn export>Overlay Archive</dfn></dt>
-  <dd>A compressed archive whose content is defined in terms of a [=base=] ([[#unencrypted-archive]]).</dd>
-
-  <dt><dfn export>Postprocess</dfn> or <dfn export>Postprocessor</dfn></dt>
-  <dd>The act or component that performs operations on data *after* it has been decompressed or transformed,
-  but before it is considered fully restored to its original state.</dd>
-
-  <dt><dfn export>Preprocess</dfn> or <dfn export>Preprocessor</dfn></dt>
-  <dd>The act or component that performs operations on data *before* it is compressed or transformed,
-  but after it has been retrieved from its original source.</dd>
-
-  <dt><dfn export>Resource</dfn></dt>
-  <dd>A byte sequence shared by multiple invocations of modules, typically a model for the data.</dd>
-
-  <dt><dfn export>Transform</dfn> or <dfn export>Transformation</dfn></dt>
-  <dd>A combined term for matching preprocessing and postprocessing algorithms.</dd>
-
-  <dt><dfn export>Transformer</dfn></dt>
-  <dd>An algorithm responsible for performing transformation.</dd>
-
-  <dt><dfn export>Zstandard block</dfn></dt>
-  <dd>The "Block" structure in the Zstandard frame [[RFC8878]], Section 3.1.1.2.</dd>
-</dl>
-
 <h2 id=conventions>
 Conventions</h2>
 
@@ -167,7 +73,8 @@ Note that subexpressions still may exceed this range.
 Types</h3>
 
 Types are a set of values and associated encoding scheme.
-Unless stated as being [=implicitly-sized=],
+A type or a structure is <dfn export>implicitly-sized</dfn> when its byte length is only available through the context.
+Unless stated as being implicitly-sized,
 all types have the defined byte length out of the context.
 
 <dfn for=type>bool</dfn> is a Boolean value, either true or false.
@@ -463,7 +370,8 @@ The compressed size (<dfn>compressed_size</dfn>) is inferred from the block size
 The [=cdata/original_size_delta=] field encodes the original size
 <dfn>original_size</dfn> = [=cdata/compressed_size=] + [=cdata/original_size_delta=].
 Therefore [=cdata/compressed_size=] MUST be equal to or less than [=cdata/original_size=];
-any [=barely compressible=] block data MUST NOT use compression.
+any <dfn export for="">barely compressible</dfn> block data,
+for which the overhead of the compression method exceeds the size saving, MUST NOT use compression.
 
 </div>
 
@@ -505,6 +413,7 @@ i.e. the data after decompression, rather than the stored bytes.
 Zstandard compression method</h5>
 
 This specification only defines a single compression method, Zstandard [[RFC8878]].
+A <dfn export for="">Zstandard block</dfn> is the "Block" structure in the Zstandard frame ([[RFC8878]], Section 3.1.1.2).
 Its parameters ([=cdata/compression_params=]) are as follows:
 
 <div dfn-for=zstd>
@@ -533,6 +442,8 @@ and MAY return a [=resource failure=] for a larger `Window_Size`.
 Conforming compressors SHOULD NOT use a `Window_Size` larger than 2<sup>27</sup> bytes
 unless explicitly requested.
 
+A <dfn export for="">dictionary</dfn> is a byte sequence supplied to the compression method as if it preceded the data,
+typically shared by multiple small blocks to compensate for the lack of shared compression context.
 If a dictionary is in use, its content, entropy tables and repeat offsets are given by the dictionary block
 as described in [[#dictionary-block]].
 
@@ -984,7 +895,7 @@ where earlier sources are preferred:</p>
 </div>
 
 
-<h4 id=content-block>
+<h4 id=content-blocks>
 Content blocks</h4>
 
 Any block other than spacer, size hint, metadata, [[#mirror-block|mirror]] and [=ignored blocks=]
@@ -1951,10 +1862,11 @@ This header also marks the beginning of the archive, when the archive doesn't st
 [=archive/footer_magic=] is a fixed 6-byte sequence to mark the beginning of the footer.
 The footer also marks the end of the archive, when the archive doesn't end at the end of the file.
 
-An unencrypted archive is an [=overlay archive=] if [=archive/header_magic=] is [=const/OVERLAY_HEADER_MAGIC=],
+An unencrypted archive is an <dfn export for="">overlay archive</dfn> if [=archive/header_magic=] is [=const/OVERLAY_HEADER_MAGIC=],
 and a <dfn>standalone archive</dfn> otherwise.
 [=archive/footer_magic=] MUST be [=const/OVERLAY_FOOTER_MAGIC=] in an overlay archive and [=const/FOOTER_MAGIC=] otherwise.
-An overlay archive is interpreted against a [=base=] given separately:
+An overlay archive is interpreted against a <dfn export for="">base</dfn>,
+an existing directory tree or file given separately from the overlay archive:
 it starts from the base instead of an empty directory and applies its segments to it ([[#interpretation]]),
 and only an overlay archive can contain [=external import blocks=] reading the base ([[#import-block]]).
 The format of overlay archives is called the <dfn export>Aqueous overlay archive format</dfn>,
@@ -3068,7 +2980,7 @@ so the ordinals are strictly increasing.
 The |i|-th <dfn>referenced item</dfn> is the non-leaf item with the ordinal |o|<sub>|i|</sub>, which MUST exist.
 
 [=formula/resource_indices=] and [=formula/module_indices=] list the resource and module blocks
-referenced by the formula block, as <em>0-based</em> indices within the [=segment=] ([[#content-block]]).
+referenced by the formula block, as <em>0-based</em> indices within the [=segment=] ([[#content-blocks]]).
 Each of them MUST refer to an existing block, which precedes the formula block by [[#block-order]].
 
 [=formula/instructions=] fill the rest of [=formula/formula_data=].
@@ -3679,7 +3591,7 @@ to the last byte of [=archive/footer_size_copy=].
 A file may contain an archive with leading or trailing bytes,
 which a decompressor removes by [=locate an archive|locating the archive=] ([[#locating-an-archive]]).
 
-Since every [=content block=] has to be described by a subsequent metadata block ([[#content-block]]),
+Since every [=content block=] has to be described by a subsequent metadata block ([[#content-blocks]]),
 an archive with a metadata block can't have any content block after the last metadata block.
 [=meta/previous_metadata_offset=] and [=archive/metadata_backward_offset=] MUST point to
 the metadata blocks found by parsing [=archive/blocks=] as described in [[#metadata-block]] and [[#unencrypted-archive]],
