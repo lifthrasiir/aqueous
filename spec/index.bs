@@ -942,12 +942,10 @@ every reference from a block in a segment, whether by an index or by an offset, 
 Content blocks are classified as follows:
 
 * A <dfn>leaf block</dfn> represents the content of one or more files by itself.
-    [[#compressed-block|Compressed leaf blocks]], [[#uncompressed-block|uncompressed leaf blocks]]
-    and [[#formula-block|formula blocks]] are leaf blocks.
+    Leaf [[#data-block|data blocks]] and [[#formula-block|formula blocks]] are leaf blocks.
 * A <dfn>non-leaf block</dfn> doesn't represent any file by itself,
     and only supplies data referenced by one or more formula blocks.
-    [[#compressed-block|Compressed non-leaf blocks]] and [[#uncompressed-block|uncompressed non-leaf blocks]]
-    are non-leaf blocks.
+    Non-leaf [[#data-block|data blocks]] are non-leaf blocks.
 * An <dfn>auxiliary block</dfn> supplies data used to decode other blocks.
     [[#dictionary-block|Dictionary blocks]], [[#module-block|module blocks]] and [[#resource-block|resource blocks]]
     are auxiliary blocks.
@@ -1000,13 +998,15 @@ and a streaming decompressor never has to retain a formula block beyond its parc
   </figcaption>
 </figure>
 
-<h5 id=compressed-block>
-Compressed block</h5>
+<h5 id=data-block>
+Data block</h5>
 
-Blocks 20<sub>16</sub> through 3F<sub>16</sub> are **compressed blocks**.
-Compressed blocks are parametrized by following variables:
+Blocks 20<sub>16</sub> through 37<sub>16</sub> and 40<sub>16</sub> through 4B<sub>16</sub> are **data blocks**.
+A data block is a **compressed block** if its [=compression_method=] is not None,
+and an **uncompressed block** otherwise.
+Data blocks are parametrized by following variables:
 
-<div dfn-for=cblock>
+<div dfn-for=dblock>
 
 <table class=data>
   <thead>
@@ -1022,46 +1022,52 @@ Compressed blocks are parametrized by following variables:
       <td>20<sub>16</sub> — 23<sub>16</sub>
       <td>True
       <td>False
-      <td>[[#zstandard-compression-method|Zstandard]]
+      <td>None
       <td>None
     <tr>
       <td>24<sub>16</sub> — 27<sub>16</sub>
       <td>True
       <td>False
-      <td>[[#zstandard-compression-method|Zstandard]]
+      <td>None
       <td>[[#xxh64-checksum-method|XXH64]]
     <tr>
       <td>28<sub>16</sub> — 2B<sub>16</sub>
       <td>True
-      <td>True
+      <td>False
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>None
     <tr>
       <td>2C<sub>16</sub> — 2F<sub>16</sub>
       <td>True
-      <td>True
+      <td>False
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>[[#xxh64-checksum-method|XXH64]]
     <tr>
       <td>30<sub>16</sub> — 33<sub>16</sub>
-      <td>False
-      <td>False
+      <td>True
+      <td>True
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>None
     <tr>
       <td>34<sub>16</sub> — 37<sub>16</sub>
+      <td>True
+      <td>True
+      <td>[[#zstandard-compression-method|Zstandard]]
+      <td>[[#xxh64-checksum-method|XXH64]]
+    <tr>
+      <td>40<sub>16</sub> — 43<sub>16</sub>
+      <td>False
+      <td>False
+      <td>None
+      <td>[[#xxh64-checksum-method|XXH64]]
+    <tr>
+      <td>44<sub>16</sub> — 47<sub>16</sub>
       <td>False
       <td>False
       <td>[[#zstandard-compression-method|Zstandard]]
       <td>[[#xxh64-checksum-method|XXH64]]
     <tr>
-      <td>38<sub>16</sub> — 3B<sub>16</sub>
-      <td>False
-      <td>True
-      <td>[[#zstandard-compression-method|Zstandard]]
-      <td>None
-    <tr>
-      <td>3C<sub>16</sub> — 3F<sub>16</sub>
+      <td>48<sub>16</sub> — 4B<sub>16</sub>
       <td>False
       <td>True
       <td>[[#zstandard-compression-method|Zstandard]]
@@ -1071,11 +1077,14 @@ Compressed blocks are parametrized by following variables:
 
 <div class=note>
   Alternatively, the block type can be interpreted as a binary number
-  <code>001|n|&thinsp;|d||c||ss|</code> where:
+  <code>001|kk|&thinsp;|c||ss|</code> for a leaf block or <code>0100&thinsp;|kk||ss|</code> for a non-leaf block, where:
 
-    * |n| indicates the block class: 0 for a leaf block, 1 for a non-leaf block.
-    * |d| indicates dictionary usage: 0 for no dictionary, 1 for dictionary present.
+    * |kk| indicates the compression method and dictionary usage:
+        0 for None, 1 for [[#zstandard-compression-method|Zstandard]] without dictionary,
+        2 for [[#zstandard-compression-method|Zstandard]] with dictionary.
+        3 is reserved for future compression methods.
     * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
+        A non-leaf block always uses [[#xxh64-checksum-method|XXH64]].
     * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
 </div>
 
@@ -1092,19 +1101,31 @@ Its data consists of the following:
     <tr>
       <td><dfn>dictionary_index</dfn>
       <td>[=leb128=]
-      <td>[=If=] [=cblock/has_dictionary=]
+      <td>[=If=] [=dblock/has_dictionary=]
     <tr>
       <td><dfn>compressed_data</dfn>
       <td>[=block/compressed_data=]
-      <td>
+      <td>[=If=] [=compression_method=] is not None
+    <tr>
+      <td><dfn>uncompressed_data</dfn>
+      <td>[=block/uncompressed_data=]
+      <td>[=If=] [=compression_method=] is None
   </tbody>
 </table>
 
-If a dictionary is in use, its <em>0-based</em> index is specified as [=cblock/dictionary_index=].
+If a dictionary is in use, its <em>0-based</em> index is specified as [=dblock/dictionary_index=].
 This field is intended for linear scanning,
 and the metadata block contains all necessary information for random access.
-[=cblock/compressed_data=] uses the Shared compressed external structure ([[#shared-external-structure]])
+[=dblock/compressed_data=] and [=dblock/uncompressed_data=] use the Shared external structure ([[#shared-external-structure]])
 with [=compression_method=] and [=checksum_method=] determined as above.
+[=dblock/uncompressed_data=] represents a raw, uninterpreted byte sequence.
+
+An uncompressed block MUST be used when given data is barely compressible and can't be represented in terms of compressed blocks.
+
+<div class=note>
+  This is mandatory because each Zstandard block incurs 3 bytes of overhead
+  and [=cdata/original_size_delta=] can't be negative.
+</div>
 
 A compressed block is a single unit of decompression:
 reading any part of its content requires decompressing it from the beginning.
@@ -1117,65 +1138,25 @@ Content larger than a desired unit of random access is split into multiple block
     the file is simply represented by multiple leaf blocks.
 
 <div class=note>
-  A checksum of a non-leaf block is optional and only useful for partial reads.
+  The checksum is mandatory for non-leaf blocks.
   The output checksum of a formula block covers its entire output,
   so a decompressor that only reads a part of the output can't verify it without reading the whole output.
   Instead it can verify the checksums of non-leaf blocks it has actually read.
+  The checksum also lets damage to a non-leaf block be detected before the block is used by a module application,
+  so that the damage is always an [=invalid archive=] failure rather than a [=resource failure=],
+  as for [=formula/formula_data=] ([[#formula-block]]).
 </div>
 
-</div>
-
-<h5 id=uncompressed-block>
-Uncompressed block</h5>
-
-Blocks 40<sub>16</sub> through 4F<sub>16</sub> are **uncompressed blocks**.
-Their data uses the Shared external structure ([[#shared-external-structure]]),
-where each parameter is determined as follows:
-
-<div dfn-for=ublock>
-
-<table class=data>
-  <thead>
-    <tr>
-      <th>Block Types
-      <th><dfn>leaf</dfn>
-      <th>[=checksum_method=]
-  </thead>
-  <tbody>
-    <tr>
-      <td>40<sub>16</sub> — 43<sub>16</sub>
-      <td>True
-      <td>None
-    <tr>
-      <td>44<sub>16</sub> — 47<sub>16</sub>
-      <td>True
-      <td>[[#xxh64-checksum-method|XXH64]]
-    <tr>
-      <td>48<sub>16</sub> — 4B<sub>16</sub>
-      <td>False
-      <td>None
-    <tr>
-      <td>4C<sub>16</sub> — 4F<sub>16</sub>
-      <td>False
-      <td>[[#xxh64-checksum-method|XXH64]]
-  </tbody>
-</table>
+Unless explicitly requested otherwise, conforming compressors SHOULD use a [=checksum_method=] other than None
+for every leaf block.
 
 <div class=note>
-  Alternatively, the block type can be interpreted as a binary number
-  <code>0100&thinsp;|n||c||ss|</code> where:
+  The checksum is optional for leaf blocks to allow the following:
 
-    * |n| indicates the block class: 0 for a leaf block, 1 for a non-leaf block.
-    * |c| indicates the checksum method: 0 for None, 1 for [[#xxh64-checksum-method|XXH64]].
-    * |ss| indicates the size of the size field: 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=], 3 for [=u64le=].
-</div>
-
-The internal structure of an uncompressed block represents a raw, uninterpreted byte sequence.
-This block type MUST be used when given data is barely compressible and can't be represented in terms of compressed blocks.
-
-<div class=note>
-  This is mandatory because each Zstandard block incurs 3 bytes of overhead
-  and [=cdata/original_size_delta=] can't be negative.
+    * An uncompressed leaf block without a checksum holds the file content verbatim and nothing derived from it,
+        so the file can be memory-mapped from the archive and modified in place.
+    * A compressed leaf block without a checksum can be made from an existing Zstandard frame by copying its Zstandard blocks,
+        without decompressing them to compute the checksum over the decoded data.
 </div>
 
 </div>
@@ -1383,7 +1364,7 @@ Its data consists of the following:
   </tbody>
 </table>
 
-If a dictionary is in use, its <em>0-based</em> index is specified as [=formula/dictionary_index=], as in compressed blocks.
+If a dictionary is in use, its <em>0-based</em> index is specified as [=formula/dictionary_index=], as in data blocks.
 [=formula/formula_data=] uses the Shared compressed external structure ([[#shared-external-structure]])
 with [[#zstandard-compression-method|Zstandard]] as [=compression_method=]
 and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
@@ -1406,9 +1387,10 @@ and [[#xxh64-checksum-method|XXH64]] as [=checksum_method=].
   but can only be verified after computing the entire output.
 </div>
 
-Unless explicitly requested otherwise, conforming compressors SHOULD declare an [=output checksum=] for each output,
-or use a [=checksum_method=] other than None for every non-leaf block referenced by the formula block,
-so that the [=file content=] is covered by some checksum.
+Unless explicitly requested otherwise, conforming compressors SHOULD declare an [=output checksum=]
+for each output computed by an [[#insn-apply|Apply instruction]],
+so that the module application is also verified.
+Other outputs are already covered by the checksums of the non-leaf blocks they are computed from.
 
 A formula block describes the content of a file as an expression over non-leaf blocks following it,
 evaluated with modules and resources preceding it.
@@ -3317,13 +3299,13 @@ given its [=compression_method=] and [=checksum_method=], is determined as follo
 * If [=checksum_method=] is not None, the checksum MUST be equal to the checksum of the decoded data
     computed by the [=checksum_method=].
 
-The <dfn>stored content</dfn> of a [[#compressed-block|compressed block]] or an [[#uncompressed-block|uncompressed block]],
-whether a [=leaf block=] or not, is the [=decoded data=] of its [=cblock/compressed_data=] or its data respectively.
-A compressed block using a dictionary uses the dictionary block at [=cblock/dictionary_index=] within the [=segment=].
+The <dfn>stored content</dfn> of a [[#data-block|data block]],
+whether a [=leaf block=] or not, is the [=decoded data=] of its [=dblock/compressed_data=] or [=dblock/uncompressed_data=].
+A data block using a dictionary uses the dictionary block at [=dblock/dictionary_index=] within the [=segment=].
 
 The <dfn>file content</dfn> of a [=leaf block=] is:
 
-* Its [=stored content=], if it is a compressed or uncompressed block;
+* Its [=stored content=], if it is a data block;
 * The only output of [=evaluate a formula block|evaluating=] it, if it is a [[#formula-block|formula block]].
     The formula block MUST have exactly one output, until multiple outputs are specified ([[#formula-evaluation]]).
 
@@ -4778,11 +4760,17 @@ Block index</h2>
       <td>18<sub>16</sub> — 1F<sub>16</sub>
       <td>Reserved
     <tr>
-      <td>20<sub>16</sub> — 3F<sub>16</sub>
-      <td>[[#compressed-block]]
+      <td>20<sub>16</sub> — 37<sub>16</sub>
+      <td>[[#data-block]]
     <tr>
-      <td>40<sub>16</sub> — 4F<sub>16</sub>
-      <td>[[#uncompressed-block]]
+      <td>38<sub>16</sub> — 3F<sub>16</sub>
+      <td>Reserved
+    <tr>
+      <td>40<sub>16</sub> — 4B<sub>16</sub>
+      <td>[[#data-block]]
+    <tr>
+      <td>4C<sub>16</sub> — 4F<sub>16</sub>
+      <td>Reserved
     <tr>
       <td>50<sub>16</sub> — 57<sub>16</sub>
       <td>[[#dictionary-block]]

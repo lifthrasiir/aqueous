@@ -42,10 +42,10 @@ pub const NATIVE_SECTION: &str = "aqueous-native";
 pub const MEMORY_LIMIT: u64 = u64::MAX;
 
 // Block types with a u8 size field, all with checksums; `+ 0..=3` widens the size field.
-const LEAF_ZSTD: u64 = 0x24;
-const NON_LEAF_ZSTD: u64 = 0x34;
-const LEAF_RAW: u64 = 0x44;
-const NON_LEAF_RAW: u64 = 0x4c;
+const LEAF_RAW: u64 = 0x24;
+const LEAF_ZSTD: u64 = 0x2c;
+const NON_LEAF_RAW: u64 = 0x40;
+const NON_LEAF_ZSTD: u64 = 0x44;
 const MODULE: u64 = 0x60;
 const RESOURCE: u64 = 0x64;
 const FORMULA: u64 = 0x70;
@@ -1098,24 +1098,12 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
                     return invalid("bad size hint block");
                 }
             }
-            0x20..=0x3f if ty & 0x08 != 0 => return unsupported("dictionaries are not supported yet"),
-            0x50..=0x57 | 0x74..=0x77 => return unsupported("dictionaries are not supported yet"),
-            0x20..=0x3f => {
-                let content = decoded(data, true, ty & 0x04 != 0)?;
-                if ty & 0x10 == 0 {
-                    b.leaves.push(Leaf::Stored(content));
-                } else {
-                    b.non_leaf.push(content);
-                }
+            // data blocks: `001k kcss` (leaf) and `0100 kkss` (non-leaf, always checked)
+            0x30..=0x37 | 0x48..=0x4b | 0x50..=0x57 | 0x74..=0x77 => {
+                return unsupported("dictionaries are not supported yet");
             }
-            0x40..=0x4f => {
-                let content = decoded(data, false, ty & 0x04 != 0)?;
-                if ty & 0x08 == 0 {
-                    b.leaves.push(Leaf::Stored(content));
-                } else {
-                    b.non_leaf.push(content);
-                }
-            }
+            0x20..=0x2f => b.leaves.push(Leaf::Stored(decoded(data, ty & 0x08 != 0, ty & 0x04 != 0)?)),
+            0x40..=0x47 => b.non_leaf.push(decoded(data, ty & 0x04 != 0, true)?),
             0x60..=0x63 => b.modules.push(decoded(data, true, true)?),
             0x64..=0x67 => b.resources.push(Resource::new(decoded(data, true, true)?)),
             0x70..=0x73 => {
@@ -1682,6 +1670,20 @@ mod tests {
         let c = encode(&Formula::default(), None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [FORMULA]);
         assert_eq!(decode(&c, &[]).unwrap(), b"");
+    }
+
+    /// A leaf data block may go without a checksum; a non-leaf one may not, nor may a reserved
+    /// compression method be used.
+    #[test]
+    fn data_block_types() {
+        let d = vec![7; 1000];
+        let c = compressed(&mut CCtx::create(), &[&d], 3, 1).unwrap().unwrap();
+        let unchecked = &c[..c.len() - 8];
+        assert_eq!(decode(&archive(|out| block(out, LEAF_RAW & !4, &d)), &[]).unwrap(), d);
+        assert_eq!(decode(&archive(|out| block(out, LEAF_ZSTD & !4, unchecked)), &[]).unwrap(), d);
+        for ty in [0x38, 0x3c, 0x4c] {
+            assert!(matches!(decode(&archive(|out| block(out, ty, &c)), &[]), Err(Failure::Invalid(_))), "{ty:#x}");
+        }
     }
 
     /// A stream of [`Kind::Compressed`] is stored as it is, at any level, leaf or not.
