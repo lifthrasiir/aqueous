@@ -416,97 +416,97 @@ Block types of 2 hexadecimal digits are as follows:
   <thead>
     <tr>
       <th>Block Types
-      <th>[=Leading digit|Leading Digit=]
+      <th>[=Critical=]
       <th>Definition
   </thead>
   <tbody>
     <tr>
-      <td>00<sub>16</sub> — 03<sub>16</sub>
-      <td>0
+      <td>00<sub>16</sub>&nbsp;—&nbsp;03<sub>16</sub>
+      <td>Yes
       <td>[[#spacer-block]]
     <tr>
       <td>04<sub>16</sub>
-      <td>0
+      <td>Yes
       <td>[[#size-hint-block]]
     <tr>
-      <td>05<sub>16</sub> — 0F<sub>16</sub>
-      <td>0
+      <td>05<sub>16</sub>&nbsp;—&nbsp;0F<sub>16</sub>
+      <td>Yes
       <td>Reserved
     <tr>
-      <td>10<sub>16</sub> — 17<sub>16</sub>
-      <td>1
+      <td>10<sub>16</sub>&nbsp;—&nbsp;17<sub>16</sub>
+      <td>Yes
       <td>[[#metadata-block]]
     <tr>
-      <td>18<sub>16</sub> — 1F<sub>16</sub>
-      <td>1
+      <td>18<sub>16</sub>&nbsp;—&nbsp;1F<sub>16</sub>
+      <td>Yes
       <td>Reserved
     <tr>
-      <td>20<sub>16</sub> — 37<sub>16</sub>
-      <td>2 — 3
+      <td>20<sub>16</sub>&nbsp;—&nbsp;37<sub>16</sub>
+      <td>Yes
       <td>[[#data-block]]
     <tr>
-      <td>38<sub>16</sub> — 3F<sub>16</sub>
-      <td>3
+      <td>38<sub>16</sub>&nbsp;—&nbsp;3F<sub>16</sub>
+      <td>Yes
       <td>Reserved
     <tr>
-      <td>40<sub>16</sub> — 4B<sub>16</sub>
-      <td>4
+      <td>40<sub>16</sub>&nbsp;—&nbsp;4B<sub>16</sub>
+      <td>Yes
       <td>[[#data-block]]
     <tr>
-      <td>4C<sub>16</sub> — 4F<sub>16</sub>
-      <td>4
+      <td>4C<sub>16</sub>&nbsp;—&nbsp;4F<sub>16</sub>
+      <td>Yes
       <td>Reserved
     <tr>
-      <td>50<sub>16</sub> — 57<sub>16</sub>
-      <td>5
+      <td>50<sub>16</sub>&nbsp;—&nbsp;57<sub>16</sub>
+      <td>Yes
       <td>[[#dictionary-block]]
     <tr>
-      <td>58<sub>16</sub> — 5F<sub>16</sub>
-      <td>5
+      <td>58<sub>16</sub>&nbsp;—&nbsp;5F<sub>16</sub>
+      <td>Yes
       <td>[[#import-block]]
     <tr>
-      <td>60<sub>16</sub> — 63<sub>16</sub>
-      <td>6
+      <td>60<sub>16</sub>&nbsp;—&nbsp;63<sub>16</sub>
+      <td>Yes
       <td>[[#module-block]]
     <tr>
-      <td>64<sub>16</sub> — 67<sub>16</sub>
-      <td>6
+      <td>64<sub>16</sub>&nbsp;—&nbsp;67<sub>16</sub>
+      <td>Yes
       <td>[[#resource-block]]
     <tr>
       <td>68<sub>16</sub>
-      <td>6
+      <td>Yes
       <td>Reserved
     <tr>
       <td>69<sub>16</sub>
-      <td>6
+      <td>Yes
       <td>Reserved for [=const/OVERLAY_HEADER_TYPE=] ([[#reserved-blocks]])
     <tr>
-      <td>6A<sub>16</sub> — 6F<sub>16</sub>
-      <td>6
+      <td>6A<sub>16</sub>&nbsp;—&nbsp;6F<sub>16</sub>
+      <td>Yes
       <td>Reserved
     <tr>
-      <td>70<sub>16</sub> — 77<sub>16</sub>
-      <td>7
+      <td>70<sub>16</sub>&nbsp;—&nbsp;77<sub>16</sub>
+      <td>Yes
       <td>[[#formula-block]]
     <tr>
-      <td>78<sub>16</sub> — 9F<sub>16</sub>
-      <td>7 — 9
+      <td>78<sub>16</sub>&nbsp;—&nbsp;9F<sub>16</sub>
+      <td>Yes
       <td>Reserved
     <tr>
-      <td>A0<sub>16</sub> — CF<sub>16</sub>
-      <td>A — C
+      <td>A0<sub>16</sub>&nbsp;—&nbsp;CF<sub>16</sub>
+      <td>No
       <td>Reserved
     <tr>
-      <td>D0<sub>16</sub> — DF<sub>16</sub>
-      <td>D
+      <td>D0<sub>16</sub>&nbsp;—&nbsp;DF<sub>16</sub>
+      <td>No
       <td>[=Reserved for development environments=]
     <tr>
-      <td>E0<sub>16</sub> — EF<sub>16</sub>
-      <td>E
+      <td>E0<sub>16</sub>&nbsp;—&nbsp;EF<sub>16</sub>
+      <td>No
       <td>[=Reserved for experiments=]
     <tr>
-      <td>F0<sub>16</sub> — FF<sub>16</sub>
-      <td>F
+      <td>F0<sub>16</sub>&nbsp;—&nbsp;FF<sub>16</sub>
+      <td>No
       <td>Reserved
   </tbody>
 </table>
@@ -517,69 +517,69 @@ Block types of 3 or more hexadecimal digits are as follows:
   <thead>
     <tr>
       <th>Block Types
-      <th>[=Leading digit|Leading Digit=]
+      <th>[=Critical=]
       <th>Definition
   </thead>
   <tbody>
     <tr>
-      <td>100<sub>16</sub> — 9FF<sub>16</sub>, 1000<sub>16</sub> — 9FFF<sub>16</sub>, …
-      <td>1 — 9
+      <td>100<sub>16</sub>&nbsp;—&nbsp;9FF<sub>16</sub>, 1000<sub>16</sub>&nbsp;—&nbsp;9FFF<sub>16</sub>, …
+      <td>Yes
       <td>Reserved, including block-like structures ([[#reserved-blocks]])
     <tr>
-      <td>A00<sub>16</sub> — BFF<sub>16</sub>, A000<sub>16</sub> — BFFF<sub>16</sub>, …
-      <td>A — B
+      <td>A00<sub>16</sub>&nbsp;—&nbsp;BFF<sub>16</sub>, A000<sub>16</sub>&nbsp;—&nbsp;BFFF<sub>16</sub>, …
+      <td>No
       <td>Reserved
     <tr>
-      <td>C00<sub>16</sub> — C0F<sub>16</sub>
-      <td>C
+      <td>C00<sub>16</sub>&nbsp;—&nbsp;C0F<sub>16</sub>
+      <td>No
       <td>Reserved
     <tr>
-      <td>C10<sub>16</sub> — C17<sub>16</sub>
-      <td>C
+      <td>C10<sub>16</sub>&nbsp;—&nbsp;C17<sub>16</sub>
+      <td>No
       <td>[[#mirror-block]] for [[#metadata-block]]
     <tr>
-      <td>C18<sub>16</sub> — C4F<sub>16</sub>
-      <td>C
+      <td>C18<sub>16</sub>&nbsp;—&nbsp;C4F<sub>16</sub>
+      <td>No
       <td>Reserved
     <tr>
-      <td>C50<sub>16</sub> — C57<sub>16</sub>
-      <td>C
+      <td>C50<sub>16</sub>&nbsp;—&nbsp;C57<sub>16</sub>
+      <td>No
       <td>[[#mirror-block]] for [[#dictionary-block]]
     <tr>
-      <td>C58<sub>16</sub> — C5F<sub>16</sub>
-      <td>C
+      <td>C58<sub>16</sub>&nbsp;—&nbsp;C5F<sub>16</sub>
+      <td>No
       <td>[[#mirror-block]] for [[#import-block]]
     <tr>
-      <td>C60<sub>16</sub> — C63<sub>16</sub>
-      <td>C
+      <td>C60<sub>16</sub>&nbsp;—&nbsp;C63<sub>16</sub>
+      <td>No
       <td>[[#mirror-block]] for [[#module-block]]
     <tr>
-      <td>C64<sub>16</sub> — C67<sub>16</sub>
-      <td>C
+      <td>C64<sub>16</sub>&nbsp;—&nbsp;C67<sub>16</sub>
+      <td>No
       <td>[[#mirror-block]] for [[#resource-block]]
     <tr>
-      <td>C68<sub>16</sub> — C6F<sub>16</sub>
-      <td>C
+      <td>C68<sub>16</sub>&nbsp;—&nbsp;C6F<sub>16</sub>
+      <td>No
       <td>Reserved
     <tr>
-      <td>C70<sub>16</sub> — C77<sub>16</sub>
-      <td>C
+      <td>C70<sub>16</sub>&nbsp;—&nbsp;C77<sub>16</sub>
+      <td>No
       <td>[[#mirror-block]] for [[#formula-block]]
     <tr>
-      <td>C78<sub>16</sub> — CFF<sub>16</sub>, C000<sub>16</sub> — CFFF<sub>16</sub>, …
-      <td>C
+      <td>C78<sub>16</sub>&nbsp;—&nbsp;CFF<sub>16</sub>, C000<sub>16</sub>&nbsp;—&nbsp;CFFF<sub>16</sub>, …
+      <td>No
       <td>Reserved
     <tr>
-      <td>D00<sub>16</sub> — DFF<sub>16</sub>, D000<sub>16</sub> — DFFF<sub>16</sub>, …
-      <td>D
+      <td>D00<sub>16</sub>&nbsp;—&nbsp;DFF<sub>16</sub>, D000<sub>16</sub>&nbsp;—&nbsp;DFFF<sub>16</sub>, …
+      <td>No
       <td>[=Reserved for development environments=]
     <tr>
-      <td>E00<sub>16</sub> — EFF<sub>16</sub>, E000<sub>16</sub> — EFFF<sub>16</sub>, …
-      <td>E
+      <td>E00<sub>16</sub>&nbsp;—&nbsp;EFF<sub>16</sub>, E000<sub>16</sub>&nbsp;—&nbsp;EFFF<sub>16</sub>, …
+      <td>No
       <td>[=Reserved for experiments=]
     <tr>
-      <td>F00<sub>16</sub> — FFF<sub>16</sub>, F000<sub>16</sub> — FFFF<sub>16</sub>, …
-      <td>F
+      <td>F00<sub>16</sub>&nbsp;—&nbsp;FFF<sub>16</sub>, F000<sub>16</sub>&nbsp;—&nbsp;FFFF<sub>16</sub>, …
+      <td>No
       <td>Reserved
   </tbody>
 </table>
@@ -3223,23 +3223,23 @@ and can be detected by reading the block alone, i.e. that have a checksum:
   </thead>
   <tbody>
     <tr>
-      <td>C10<sub>16</sub> — C17<sub>16</sub>
-      <td>10<sub>16</sub> — 17<sub>16</sub> ([[#metadata-block]])
+      <td>C10<sub>16</sub>&nbsp;—&nbsp;C17<sub>16</sub>
+      <td>10<sub>16</sub>&nbsp;—&nbsp;17<sub>16</sub> ([[#metadata-block]])
     <tr>
-      <td>C50<sub>16</sub> — C57<sub>16</sub>
-      <td>50<sub>16</sub> — 57<sub>16</sub> ([[#dictionary-block]])
+      <td>C50<sub>16</sub>&nbsp;—&nbsp;C57<sub>16</sub>
+      <td>50<sub>16</sub>&nbsp;—&nbsp;57<sub>16</sub> ([[#dictionary-block]])
     <tr>
-      <td>C58<sub>16</sub> — C5F<sub>16</sub>
-      <td>58<sub>16</sub> — 5F<sub>16</sub> ([[#import-block]])
+      <td>C58<sub>16</sub>&nbsp;—&nbsp;C5F<sub>16</sub>
+      <td>58<sub>16</sub>&nbsp;—&nbsp;5F<sub>16</sub> ([[#import-block]])
     <tr>
-      <td>C60<sub>16</sub> — C63<sub>16</sub>
-      <td>60<sub>16</sub> — 63<sub>16</sub> ([[#module-block]])
+      <td>C60<sub>16</sub>&nbsp;—&nbsp;C63<sub>16</sub>
+      <td>60<sub>16</sub>&nbsp;—&nbsp;63<sub>16</sub> ([[#module-block]])
     <tr>
-      <td>C64<sub>16</sub> — C67<sub>16</sub>
-      <td>64<sub>16</sub> — 67<sub>16</sub> ([[#resource-block]])
+      <td>C64<sub>16</sub>&nbsp;—&nbsp;C67<sub>16</sub>
+      <td>64<sub>16</sub>&nbsp;—&nbsp;67<sub>16</sub> ([[#resource-block]])
     <tr>
-      <td>C70<sub>16</sub> — C77<sub>16</sub>
-      <td>70<sub>16</sub> — 77<sub>16</sub> ([[#formula-block]])
+      <td>C70<sub>16</sub>&nbsp;—&nbsp;C77<sub>16</sub>
+      <td>70<sub>16</sub>&nbsp;—&nbsp;77<sub>16</sub> ([[#formula-block]])
   </tbody>
 </table>
 
