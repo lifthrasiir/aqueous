@@ -2,7 +2,7 @@
 <pre class=metadata>
 Shortname: aqueous
 Status: LS
-Boilerplate: omit feedback-header
+Boilerplate: omit feedback-header, omit conformance
 Editor: Kang Seonghoon, https://mearie.org/
 Repository: https://github.com/lifthrasiir/aqueous/
 Abstract: This specification defines the Aqueous archive format, a compressed archive format designed for efficient storage and retrieval of files.
@@ -292,7 +292,8 @@ This specification defines and uses the following constants, all of which are de
 </table>
 
 <div class=note>
-  The shortest LEB128 encoding of each |XXX_TYPE| is a prefix of each |XXX_MAGIC| byte sequence.
+  The encoding of [=const/HEADER_TYPE=], [=const/FOOTER_TYPE=] and [=const/ENCRYPTED_HEADER_TYPE=] as a block type ([[#block]])
+  is a prefix of [=const/HEADER_MAGIC=], [=const/FOOTER_MAGIC=] and [=const/ENCRYPTED_HEADER_MAGIC=] respectively.
 </div>
 
 <h2 id=syntax>
@@ -350,7 +351,7 @@ Blocks have the following generic structure:
       <td>
     <tr>
       <td><dfn>padding</dfn>
-      <td>[=u8=] = 0
+      <td>[=u8=]
       <td>[=If=] ([=block_end=] - [=block_start=]) % 2 = 1
   </tbody>
 </table>
@@ -359,7 +360,18 @@ Some [=block/type=] values, including [=FOOTER_TYPE=], are also used to denote b
 For example the archive footer has to have a distinct block type in order to be placed after blocks.
 This specification doesn't assign any meaning to such block-like structures unless explicitly stated.
 
+[=block/type=] MUST use the shortest [=leb128=] encoding.
+
 The presence of [=block/padding=] ensures that there are even number of bytes in any block.
+Conforming compressors MUST set [=block/padding=] to zero,
+but its value doesn't affect the result of [=interpret an archive|interpreting an archive=].
+
+<div class=note>
+  [=block/padding=] carries no information,
+  so its damage is not a reason to reject an otherwise readable archive.
+  On the other hand, [=block/type=] determines the width of [=block/size=] and where the next block starts,
+  so a single encoding for each type leaves no ambiguity in finding block boundaries, e.g. by scanning.
+</div>
 
 The following sections describe the contents of [=block/data=] field according to each defined [=block/type=].
 Since [=block/type=] also determines the byte length of [=block/size=],
@@ -497,14 +509,19 @@ as described in [[#dictionary-block]].
 
 Each data compressed by this method is a sequence of Zstandard blocks,
 without an additional framing provided by Zstandard frames.
-Conforming decompressors MUST process those blocks consecutively until the final block is signalled by the block header,
-at which point all compressed bytes should have been consumed.
+[=cdata/data=] MUST consist of one or more such blocks without any other bytes,
+where only the last block is signalled as the final block by its block header.
+
+<div class=note>
+  The end of the compressed data is thus given both by [=cdata/data_end=] and by the final block,
+  and they have to agree.
+</div>
 
 <h5 id=xxh64-checksum-method>
 XXH64 checksum method</h5>
 
 This specification only defines a single checksum method, XXH64 [[XXHASH]].
-Its seed MUST be zero and the result should be stored as [=u64le=].
+Its seed MUST be zero and the result MUST be stored as [=u64le=].
 The resulting [=checksum_size=] is 8.
 
 <h4 id=spacer-block>
@@ -525,7 +542,7 @@ Its data consists of the following:
   <tbody>
     <tr>
       <td><dfn>space</dfn>
-      <td>[=u8=][[=block/size=]] = (0)<sup>[=block/size=]</sup>
+      <td>[=u8=][[=block/size=]]
       <td>
   </tbody>
 </table>
@@ -535,7 +552,8 @@ Its data consists of the following:
 Spacer blocks can skip any number of bytes besides from a single byte,
 which is not required due to the presence of blockwise [=block/padding=].
 
-The skipped bytes MUST be filled with zero bytes in order to avoid data leak.
+Conforming compressors MUST fill [=spacer/space=] with zero bytes in order to avoid data leak,
+but its content doesn't affect the result of [=interpret an archive|interpreting an archive=].
 Conforming compressors are strongly RECOMMENDED to utilize sparse files for performance.
 
 <h4 id=size-hint-block>
@@ -931,7 +949,7 @@ where earlier sources are preferred:</p>
 <h4 id=content-block>
 Content blocks</h4>
 
-Any block other than spacer, size hint, metadata and [[#mirror-block|mirror]] blocks
+Any block other than spacer, size hint, metadata, [[#mirror-block|mirror]] and [=ignored blocks=]
 is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]].
 A metadata block and all content blocks between the previous metadata block (or the beginning of the archive if none)
 and that metadata block form a <dfn>segment</dfn>.
@@ -1157,6 +1175,8 @@ for every leaf block.
         so the file can be memory-mapped from the archive and modified in place.
     * A compressed leaf block without a checksum can be made from an existing Zstandard frame by copying its Zstandard blocks,
         without decompressing them to compute the checksum over the decoded data.
+
+  Neither is a concern for long-term preservation, where the [=archival profile=] requires the checksum.
 </div>
 
 </div>
@@ -1512,16 +1532,15 @@ Since the offset between any two blocks is even, [=mirror/target_offset=] % 2 te
 The target block always precedes the mirror block.
 
 [=mirror/target_data=] is a copy of the [=block/data=] of the target block.
-The bytes of the target block, from its [=block/block_start=] to the end of its [=block/padding=] if any,
+The bytes of the target block, from its [=block/block_start=] to its [=block/block_end=],
 MUST be equal to the concatenation of the following:
 
 1. The shortest [=leb128=] encoding of the [=mirror/target type=];
 2. The length of [=mirror/target_data=], encoded as the [=block/size=] field for the [=mirror/target type=];
-3. [=mirror/target_data=];
-4. A single zero byte, if the length of the above is odd.
+3. [=mirror/target_data=].
 
-In particular, the [=block/type=] of the target block MUST use the shortest [=leb128=] encoding.
-The [=block/type=] of the mirror block itself MUST also use the shortest [=leb128=] encoding, which is 2 bytes long.
+The [=block/padding=] of the target block, if any, is not compared, and is restored as a zero byte.
+The [=block/type=] of the mirror block itself is 2 bytes long, as every block type uses the shortest [=leb128=] encoding.
 
 [=mirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
 of all bytes from the [=block/block_start=] of the mirror block to [=mirror/checksum_start=],
@@ -1608,6 +1627,25 @@ Issue: The repair process is to be specified in a separate section (`recovery-de
 <h4 id=reserved-blocks>
 Reserved blocks</h4>
 
+A block type is <dfn>critical</dfn> if its hexadecimal representation starts with 0<sub>16</sub> through 9<sub>16</sub>,
+and <dfn>non-critical</dfn> if it starts with A<sub>16</sub> through F<sub>16</sub>.
+A block whose type is not defined by this specification:
+
+* Results in an [=unsupported failure=] ([[#interpretation]]) if its type is [=critical=];
+* Is an <dfn>ignored block</dfn> otherwise.
+    Like a mirror block, an ignored block doesn't belong to any [=segment=], MAY occur anywhere in [=archive/blocks=]
+    and doesn't affect the result of [=interpret an archive|interpreting an archive=].
+
+<div class=note>
+  Every block type defined by this specification is [=critical=] except for [[#mirror-block|mirror blocks]],
+  which a decompressor not using them can skip.
+  Future versions of this specification will use a critical type for a block
+  without which an archive can't be correctly interpreted,
+  e.g. a [[#data-block|data block]] with a new compression method in 38<sub>16</sub> through 3F<sub>16</sub>,
+  and a non-critical type for a block that can be safely skipped, e.g. recovery data.
+  The block-like structures below also have critical types, so they are never skipped by mistake.
+</div>
+
 Blocks whose type's hexadecimal representation is at least 2 digits long
 and starts with D<sub>16</sub> (e.g. D0<sub>16</sub> through DF<sub>16</sub>, D00<sub>16</sub> through DFF<sub>16</sub>, …)
 are <dfn>reserved for development environments</dfn>.
@@ -1619,7 +1657,14 @@ and starts with E<sub>16</sub> (e.g. E0<sub>16</sub> through EF<sub>16</sub>, E0
 are <dfn>reserved for experiments</dfn>.
 This specification doesn't assign any meanings to those blocks.
 
-The following block types are invalid due to the use as block-like structures.
+<div class=note>
+  Blocks reserved for development environments and experiments are [=non-critical=],
+  so a decompressor not enabling them ignores them.
+  An implementation enabling an experiment may treat its blocks as critical,
+  since the experiment is expected to move to a block type defined by this specification once finished.
+</div>
+
+The following block types are defined as invalid due to the use as block-like structures.
 The valid archive MUST NOT include such block types as a proper block.
 
 * Block 278<sub>16</sub> ([=const/HEADER_TYPE=]) is used for the unencrypted archive header.
@@ -1722,7 +1767,7 @@ so that a decompressor can tell such archives without scanning [=archive/blocks=
 
 [=archive/blocks=] are logically divided into [=segments=],
 each consisting of [=content blocks=] and a single [[#metadata-block|metadata block]] describing them,
-with optional spacer and [[#mirror-block|mirror]] blocks in between.
+with optional spacer, [[#mirror-block|mirror]] and [=ignored blocks=] in between.
 Each segment can be independently processed and decompressed in the reading order.
 There SHOULD NOT be multiple non-directory [=meta/entry|entries=] with the same path across metadata blocks,
 and if there are, only the last one is considered valid ([[#segment-merging]]).
@@ -3019,6 +3064,17 @@ which is one of the following:
 * A <dfn>decryption failure</dfn> occurs when an [[#encrypted-archive|encrypted archive]] can't be decrypted
     with the given passphrase, if any.
     It is a property of the input and the passphrase, and all conforming decompressors agree on it.
+* An <dfn>unsupported failure</dfn> occurs when the input contains a block of a [=critical=] type
+    not defined by this specification ([[#reserved-blocks]]).
+    It is a property of the input and the version of this specification,
+    and all conforming decompressors implementing the same version agree on it.
+
+<div class=note>
+  An unsupported failure tells that a decompressor implementing a newer version may be able to interpret the input,
+  which is not the case for an [=invalid archive=] failure in general.
+  It takes precedence over an [=invalid archive=] failure in the rest of the archive,
+  since a future version may give a different meaning to the rest.
+</div>
 
 A conforming compressor, given an [=archive value=],
 MUST produce a byte sequence whose interpretation is that [=archive value=].
@@ -3173,7 +3229,11 @@ To <dfn export>interpret an archive</dfn> given a [=byte sequence=] |input| and 
         5. Set |input| to the decrypted payload.
             It MUST satisfy the additional constraints in [[#encrypted-archive]],
             or an [=invalid archive=] failure is returned.
-    2. Parse |input| as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety.
+    2. If |input| parses as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety,
+        with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
+        and the type of any of [=archive/blocks=] is [=critical=] and not defined by this specification,
+        return an [=unsupported failure=].
+    3. Parse |input| as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety.
         If it fails to parse, return an [=invalid archive=] failure.
     3. If [=archive/blocks=] contain no [[#metadata-block|metadata block]]:
         1. Let |content| be the concatenation of the [=file contents=] of all [=leaf blocks=] in [=archive/blocks=],
@@ -3194,7 +3254,8 @@ To <dfn export>interpret an archive</dfn> given a [=byte sequence=] |input| and 
 The input to this algorithm is exactly the archive, from the first byte of [=archive/header_magic=]
 to the last byte of [=archive/footer_size_copy=].
 
-Issue: An algorithm to locate the archive within a larger file with leading or trailing bytes.
+A file may contain an archive with leading or trailing bytes,
+which a decompressor removes by [=locate an archive|locating the archive=] ([[#locating-an-archive]]).
 
 Since every [=content block=] has to be described by a subsequent metadata block ([[#content-block]]),
 an archive with a metadata block can't have any content block after the last metadata block.
@@ -3572,811 +3633,62 @@ It SHOULD verify every checksum covering only the bytes it has computed.
   until the path or one of its ancestors is found as a non-directory entry in a segment.
 </div>
 
-<!-- Obsolete drafts of the compressor, the decompressor and transformers follow, superseded by the declarative semantics above. -->
-
-<!--
-<p>To <dfn export>compress a file</dfn> into an Aqueous archive, given |inputPath| (a file system path), |outputPath| (a file system path), and optional |options|:
-</p>
-
-<ol class=algorithm>
-  <li>Let |inputFile| be the result of opening |inputPath| for reading.
-    If |inputFile| is null, [=throw=] an error.</li>
-
-  <li>Let |inputSize| be the size of |inputFile| in bytes.</li>
-
-  <li>Let |outputFile| be the result of opening |outputPath| for writing.
-    If |outputFile| is null, [=throw=] an error.</li>
-
-  <li>Let |metadataBlocks| be an empty list.</li>
-  <li>Let |contentBlocks| be an empty list.</li>
-  <li>Let |transformerBlocks| be an empty list.</li>
-  <li>Let |dictionaryBlocks| be an empty list.</li>
-
-  <li>Let |transformerIndex| be 0.</li>
-  <li>Let |dictionaryIndex| be 0.</li>
-
-  <li>Write the [=archive/header_magic=] to |outputFile|.</li>
-
-  <li>If |options| is provided and |options|["size_hint"] is true:
-    <ol>
-      <li>Let |sizeHintBlock| be a [=size hint block=] with [=szhint/size_hint=] set to 0 (placeholder).</li>
-      <li>Write |sizeHintBlock| to |outputFile|.</li>
-    </ol>
-  </li>
-
-  <li>If |options| is provided and |options|["transformer"] is provided:
-    <ol>
-      <li>Let |transformerData| be |options|["transformer"].</li>
-      <li>Let |compressedTransformer| be the result of [=compressing a byte sequence=] with |transformerData| using the Zstandard compression method.
-        If the compression fails, [=throw=] an error.</li>
-      <li>Let |transformerBlock| be a [=transformer block=] containing |compressedTransformer|.</li>
-      <li>Append |transformerBlock| to |transformerBlocks|.</li>
-      <li>Increment |transformerIndex| by 1.</li>
-    </ol>
-  </li>
-
-  <li>If |options| is provided and |options|["dictionary"] is provided:
-    <ol>
-      <li>Let |dictionaryData| be |options|["dictionary"].</li>
-      <li>Let |compressedDictionary| be the result of [=compressing a byte sequence=] with |dictionaryData| using the Zstandard compression method.
-        If the compression fails, [=throw=] an error.</li>
-      <li>Let |dictionaryBlock| be a [=dictionary block=] containing |compressedDictionary|.</li>
-      <li>Append |dictionaryBlock| to |dictionaryBlocks|.</li>
-      <li>Increment |dictionaryIndex| by 1.</li>
-    </ol>
-  </li>
-
-  <li>Let |chunkSize| be the maximum chunk size.
-    If |options| is provided and |options|["chunk_size"] is provided, set |chunkSize| to |options|["chunk_size"].
-    Otherwise, set |chunkSize| to 2<sup>21</sup> - 1 (the maximum Zstandard block size).</li>
-
-  <li>Let |chunkOffset| be 0.</li>
-  <li>Let |chunkIndex| be 0.</li>
-  <li>Let |compressedChunks| be an empty list.</li>
-
-  <li>While |chunkOffset| is less than |inputSize|:
-    <ol>
-      <li>Let |remainingSize| be |inputSize| - |chunkOffset|.</li>
-      <li>Let |currentChunkSize| be min(|remainingSize|, |chunkSize|).</li>
-
-      <li>Let |chunkData| be the result of reading |currentChunkSize| bytes from |inputFile| starting at offset |chunkOffset|.
-        If the read fails, [=throw=] an error.</li>
-
-      <li>If |options| is provided and |options|["transformer"] is provided:
-        <ol>
-          <li>Let |transformedData| be the result of applying the transformer specified by |options|["transformer"] to |chunkData| as preprocessing.
-            If the transformation fails, [=throw=] an error.</li>
-          <li>Set |chunkData| to |transformedData|.</li>
-        </ol>
-      </li>
-
-      <li>Let |compressionParams| be an empty byte sequence.</li>
-      <li>Let |compressedData| be an empty byte sequence.
-      <li>Let |useCompression| be true.</li>
-
-      <li>If |options| is provided and |options|["dictionary"] is provided:
-        <ol>
-          <li>Let |dictionary| be the dictionary data from |dictionaryBlocks|[0].</li>
-          <li>Set |compressionParams| to the Zstandard [=window_descriptor=] for |dictionary|.</li>
-          <li>Let |compressedData| be the result of compressing |chunkData| using Zstandard with |dictionary|.
-            If the compression fails, set |useCompression| to false.</li>
-        </ol>
-      </li>
-      <li>Otherwise:
-        <ol>
-          <li>Let |compressedData| be the result of compressing |chunkData| using Zstandard without a dictionary.
-            If the compression fails, set |useCompression| to false.</li>
-        </ol>
-      </li>
-
-      <li>Determine whether to use compression:
-        <ol>
-          <li>If |useCompression| is false, continue to the next step.</li>
-
-          <li>Let |compressedSize| be the length of |compressedData| in bytes.</li>
-          <li>Let |originalSize| be the length of |chunkData| in bytes.</li>
-
-          <li>If |compressedSize| is greater than or equal to |originalSize|:
-            <ol>
-              <li>Set |useCompression| to false.
-              <div class=note>
-                This indicates that the data is [=barely compressible=] and should be stored uncompressed.
-                For Zstandard, the minimum overhead is 3 bytes per block, so if the size saving is less than 3 bytes,
-                compression should not be used.
-              </div>
-              </li>
-            </ol>
-          </li>
-
-          <li>Let |overhead| be the sum of:
-            <ul>
-              <li>The size of the LEB128-encoded |originalSize| - |compressedSize| ([=cblock/original_size_delta=]),</li>
-              <li>The size of the LEB128-encoded |compressedSize| ([=cblock/compressed_size=]),</li>
-              <li>The length of |compressionParams|,</li>
-              <li>8 if checksum is enabled (|checksum_size| for XXH64),</li>
-              <li>And 3 bytes for the Zstandard block header.</li>
-            </ul>
-          </li>
-
-          <li>If |compressedSize| + |overhead| is greater than or equal to |originalSize|:
-            <ol>
-              <li>Set |useCompression| to false.</li>
-            </ol>
-          </li>
-        </ol>
-      </li>
-
-      <li>If |useCompression| is true:
-        <ol>
-          <li>Let |originalSizeDelta| be |originalSize| - |compressedSize|.</li>
-
-          <li>Let |checksum| be an empty byte sequence.
-          <li>If |options| is provided and |options|["checksum"] is true:
-            <ol>
-              <li>Let |checksum| be the XXH64 hash of |compressedData| with seed 0, encoded as a u64le.</li>
-            </ol>
-          </li>
-
-          <li>Let |chunk| be a [=cblock/chunk=] with:
-            <ul>
-              <li>[=cblock/compressed_size=] = |compressedSize|,</li>
-              <li>[=cblock/original_size_delta=] = |originalSizeDelta|,</li>
-              <li>[=cblock/compression_params=] = |compressionParams|,</li>
-              <li>[=cblock/data=] = |compressedData|,</li>
-              <li>[=cblock/checksum=] = |checksum|.</li>
-            </ul>
-          </li>
-
-          <li>Append |chunk| to |compressedChunks|.</li>
-        </ol>
-      </li>
-      <li>Otherwise:
-        <ol>
-          <li>Let |checksum| be an empty byte sequence.
-          <li>If |options| is provided and |options|["checksum"] is true:
-            <ol>
-              <li>Let |checksum| be the XXH64 hash of |chunkData| with seed 0, encoded as a u64le.</li>
-            </ol>
-          </li>
-
-          <li>Let |uncompressedBlock| be an [=uncompressed block=] containing |chunkData| and |checksum|.</li>
-          <li>Write |uncompressedBlock| to |outputFile|.</li>
-        </ol>
-      </li>
-
-      <li>Set |chunkOffset| to |chunkOffset| + |currentChunkSize|.
-      <li>Increment |chunkIndex| by 1.</li>
-    </ol>
-  </li>
-
-  <li>If |compressedChunks| is not empty:
-    <ol>
-      <li>Let |blockType| be 20<sub>16</sub> (compressed block, no dictionary, no transformer, no checksum).</li>
-      <li>If |options| is provided and |options|["checksum"] is true, set |blockType| to 24<sub>16</sub>.</li>
-      <li>If |options| is provided and |options|["transformer"] is provided, add 8<sub>16</sub> to |blockType|.</li>
-      <li>If |options| is provided and |options|["dictionary"] is provided, add 16<sub>16</sub> to |blockType|.</li>
-
-      <li>Let |compressedBlock| be a [=compressed block=] of type |blockType| containing all chunks in |compressedChunks|.
-      <li>Write |compressedBlock| to |outputFile|.</li>
-    </ol>
-  </li>
-
-  <li>Let |archiveEnd| be the current position in |outputFile|.</li>
-
-  <li>Let |metadataBlock| be a [=metadata block=] describing the compressed and uncompressed content.</li>
-  <li>Write |metadataBlock| to |outputFile|.</li>
-
-  <li>Let |footerStart| be the current position in |outputFile|.</li>
-
-  <li>Let |sizeHint| be |archiveEnd| - (position after [=archive/header_magic=]).</li>
-
-  <li>Write the [=archive/footer_magic=] to |outputFile|.</li>
-  <li>Write the [=archive/footer_size=] (placeholder, to be filled later) to |outputFile|.</li>
-  <li>Write the [=archive/size_hint=] to |outputFile|.</li>
-  <li>Write the [=archive/metadata_backward_offset=] to |outputFile|.</li>
-  <li>Let |footerEnd| be the current position in |outputFile|.</li>
-  <li>Let |footerSize| be |footerEnd| - |footerStart|.</li>
-
-  <li>Seek back to the position of [=archive/footer_size=] in |outputFile| and write |footerSize|.</li>
-  <li>Write the [=archive/footer_size_copy=] (= |footerSize|) to |outputFile|.</li>
-
-  <li>If |options| is provided and |options|["size_hint"] is true:
-    <ol>
-      <li>Seek back to the [=szhint/size_hint=] field in the size hint block and write |sizeHint|.</li>
-    </ol>
-  </li>
-
-  <li>Close |inputFile| and |outputFile|.</li>
-  <li>Return success.</li>
-</ol>
-
-<p>To <dfn export>compress a byte sequence</dfn> given |data| and |compressionMethod|:</p>
-
-<ol class=algorithm>
-  <li>If |compressionMethod| is Zstandard:
-    <ol>
-      <li>Let |compressed| be the result of compressing |data| using the Zstandard compression algorithm [[RFC8878]].
-        If the compression fails, return failure.</li>
-      <li>Return |compressed|.</li>
-    </ol>
-  </li>
-
-  <li>Return failure.</li>
-</ol>
--->
-
-
-<!--
-<p>To <dfn export>decompress an archive</dfn> given |inputPath| (a file system path), |outputPath| (a file system path), and optional |options|:</p>
-
-<ol class=algorithm>
-  <li>Let |inputFile| be the result of opening |inputPath| for reading.
-    If |inputFile| is null, [=throw=] an error.</li>
-
-  <li>Let |inputSize| be the size of |inputFile| in bytes.</li>
-
-  <li>Identify the archive type:
-    <ol>
-      <li>Let |header| be the first 8 bytes of |inputFile|.</li>
-
-      <li>If |header| starts with [=const/ENCRYPTED_HEADER_MAGIC=]:
-        <ol>
-          <li>Let |decryptedArchive| be the result of [=decrypting an encrypted archive=] given |inputFile|.
-            If decryption fails, [=throw=] an error.</li>
-          <li>Set |inputFile| to |decryptedArchive|.</li>
-        </ol>
-      </li>
-
-      <li>Otherwise, if |header| does not start with [=const/HEADER_MAGIC=]:
-        <ol>
-          <li>[=throw=] an error ("invalid archive format").</li>
-        </ol>
-      </li>
-    </ol>
-  </li>
-
-  <li>Locate the footer:
-    <ol>
-      <li>Let |maxFooterSize| be 65,543 (maximum footer size including magic and size copy).</li>
-      <li>Let |readSize| be min(|inputSize|, |maxFooterSize|).</li>
-
-      <li>Seek to position |inputSize| - |readSize| in |inputFile|.</li>
-      <li>Let |trailer| be the result of reading |readSize| bytes from |inputFile|.</li>
-
-      <li>Let |footerMagicOffset| be the index of [=const/FOOTER_MAGIC=] within |trailer|, searching from the end.
-        If |footerMagicOffset| is not found, [=throw=] an error ("footer not found").</li>
-
-      <li>Let |footerOffset| be |inputSize| - |readSize| + |footerMagicOffset|.</li>
-
-      <li>Seek to position |footerOffset| + 6 (after [=archive/footer_magic=]) in |inputFile|.</li>
-      <li>Let |footerSize| be the result of reading a u16le from |inputFile|.</li>
-
-      <li>Seek to position |footerOffset| + 6 + 2 + |footerSize| in |inputFile|.</li>
-      <li>Let |footerSizeCopy| be the result of reading a u16le from |inputFile|.</li>
-
-      <li>If |footerSize| is not equal to |footerSizeCopy|:
-        <ol>
-          <li>[=throw=] an error ("footer size mismatch").</li>
-        </ol>
-      </li>
-
-      <li>Let |footerStart| be |footerOffset| + 6.</li>
-      <li>Let |footerEnd| be |footerStart| + |footerSize|.</li>
-    </ol>
-  </li>
-
-  <li>Parse the footer:
-    <ol>
-      <li>Seek to position |footerStart| in |inputFile|.</li>
-
-      <li>Let |sizeHint| be the result of reading a LEB128 from |inputFile|.</li>
-      <li>Let |metadataBackwardOffset| be the result of reading a LEB128 from |inputFile|.</li>
-
-      <li>Let |lastMetadataOffset| be |footerStart| - |metadataBackwardOffset|.</li>
-    </ol>
-  </li>
-
-  <li>Read metadata blocks:
-    <ol>
-      <li>Let |allMetadata| be an empty list.</li>
-      <li>Let |currentMetadataOffset| be |lastMetadataOffset|.</li>
-
-      <li>While |currentMetadataOffset| is greater than the position after [=archive/header_magic=]:
-        <ol>
-          <li>Seek to position |currentMetadataOffset| in |inputFile|.</li>
-
-          <li>Let |blockType| be the result of reading a LEB128 from |inputFile|.
-            If |blockType| is not in the range [10<sub>16</sub>, 1F<sub>16</sub>], [=throw=] an error ("invalid metadata block").</li>
-
-          <li>Let |blockSize| be the result of reading the size field for |blockType| (u8, u16le, u32le, or u64le based on |blockType| % 4).</li>
-
-          <li>Let |blockData| be the result of reading |blockSize| bytes from |inputFile|.</li>
-
-          <li>Let |metadataBlock| be the result of [=parsing a metadata block=] from |blockData| with |blockType|.
-            If parsing fails, [=throw=] an error.</li>
-
-          <li>Prepend |metadataBlock| to |allMetadata|.</li>
-
-          <li>Let |previousMetadataOffset| be |metadataBlock|.[=meta/previous_metadata_offset=].</li>
-          <li>If |previousMetadataOffset| is 0:
-            <ol>
-              <li>Set |currentMetadataOffset| to 0.</li>
-            </ol>
-          </li>
-          <li>Otherwise:
-            <ol>
-              <li>Set |currentMetadataOffset| to |currentMetadataOffset| - |previousMetadataOffset|.</li>
-            </ol>
-          </li>
-        </ol>
-      </li>
-    </ol>
-  </li>
-
-  <li>If |allMetadata| is empty:
-    <ol>
-      <li>Handle single-file archive (no metadata):
-        <ol>
-        <li>Seek to position after [=archive/header_magic=] in |inputFile|.</li>
-
-        <li>Let |outputFile| be the result of opening |outputPath| for writing.
-          If |outputFile| is null, [=throw=] an error.</li>
-
-        <li>Let |fileOffset| be the current position in |inputFile|.</li>
-
-        <li>While |fileOffset| is less than |footerStart|:
-          <ol>
-            <li>Let |blockType| be the result of reading a LEB128 from |inputFile|.</li>
-
-            <li>If |blockType| is in the range [20<sub>16</sub>, 3F<sub>16</sub>]:
-              <ol>
-                <li>Let |decompressedData| be the result of [=decompressing a compressed block=] given |inputFile|, |blockType|, and |options|.
-                  If decompression fails, [=throw=] an error.</li>
-                <li>Write |decompressedData| to |outputFile|.</li>
-              </ol>
-            </li>
-            <li>Else if |blockType| is in the range [40<sub>16</sub>, 47<sub>16</sub>]:
-              <ol>
-                <li>Let |decompressedData| be the result of [=decompressing an uncompressed block=] given |inputFile|, |blockType|, and |options|.
-                  If decompression fails, [=throw=] an error.</li>
-                <li>Write |decompressedData| to |outputFile|.</li>
-              </ol>
-            </li>
-            <li>Else if |blockType| is in the range [0<sub>16</sub>, 3<sub>16</sub>]:
-              <ol>
-                <li>Let |blockSize| be the result of reading the size field for |blockType|.</li>
-                <li>Skip |blockSize| + 1 bytes in |inputFile| (including padding).</li>
-              </ol>
-            </li>
-            <li>Otherwise:
-              <ol>
-                <li>[=throw=] an error ("unexpected block type").</li>
-              </ol>
-            </li>
-
-            <li>Set |fileOffset| to the current position in |inputFile|.</li>
-          </ol>
-        </li>
-        </ol>
-
-        <li>Close |outputFile|.</li>
-        <li>Return success.</li>
-      </ol>
-      </li>
-    </ol>
-  </li>
-
-  <li>Handle multi-file archive (with metadata):
-    <ol>
-      <li>For each |metadataBlock| in |allMetadata|:
-        <ol>
-          <li>For each |entry| in |metadataBlock|.[=meta/entries=]:
-            <ol>
-              <li>Let |entryIndex| be the index of |entry| within |metadataBlock|.[=meta/entries=].</li>
-              <li>Let |entryName| be |entry|.[=meta/entry_name=].</li>
-
-              <li>If |entryIndex| is less than or equal to |metadataBlock|.[=meta/num_directories=]:
-                <ol>
-                  <li>Let |dirPath| be |outputPath| joined with |entryName| using the appropriate path separator for the platform.</li>
-                  <li>Create the directory at |dirPath| if it does not exist.
-                    If directory creation fails, [=throw=] an error.</li>
-                </ol>
-              </li>
-              <li>Otherwise:
-                <ol>
-                  <li>Let |fileIndex| be |entryIndex| - |metadataBlock|.[=meta/num_directories=] - 1.</li>
-                  <li>Let |fileParam| be |metadataBlock|.[=meta/file_params=][|fileIndex|].</li>
-
-                  <li>Let |filePath| be |outputPath| joined with |entryName| using the appropriate path separator for the platform.</li>
-
-                  <li>Let |contentBlockOffset| be |metadataBlock| offset from the beginning of |inputFile| minus |fileParam|.[=meta/file_offset=].</li>
-
-                  <li>Seek to position |contentBlockOffset| in |inputFile|.</li>
-                  <li>Let |blockType| be the result of reading a LEB128 from |inputFile|.</li>
-
-                  <li>Let |fileData| be an empty byte sequence.</li>
-
-                  <li>If |blockType| is in the range [20<sub>16</sub>, 3F<sub>16</sub>]:
-                    <ol>
-                      <li>Let |fileData| be the result of [=decompressing a compressed block=] given |inputFile|, |blockType|, and |options|.
-                        If decompression fails, [=throw=] an error.</li>
-                    </ol>
-                  </li>
-                  <li>Else if |blockType| is in the range [40<sub>16</sub>, 47<sub>16</sub>]:
-                    <ol>
-                      <li>Let |fileData| be the result of [=decompressing an uncompressed block=] given |inputFile|, |blockType|, and |options|.
-                        If decompression fails, [=throw=] an error.</li>
-                    </ol>
-                  </li>
-                  <li>Otherwise:
-                    <ol>
-                      <li>[=throw=] an error ("invalid content block type").</li>
-                    </ol>
-                  </li>
-
-                  <li>Let |outputFile| be the result of opening |filePath| for writing.
-                    If |outputFile| is null, [=throw=] an error.</li>
-
-                  <li>Write |fileData| to |outputFile|.</li>
-                  <li>Close |outputFile|.</li>
-                </ol>
-              </li>
-            </ol>
-          </ol>
-        </li>
-      </ol>
-    </ol>
-  </li>
-
-  <li>Close |inputFile|.</li>
-  <li>Return success.</li>
-</ol>
-
-<p>To <dfn export>parse a metadata block</dfn> from |blockData| with |blockType|:</p>
-
-<ol class=algorithm>
-  <li>Let |compressionMethod| be None if |blockType| is in [10<sub>16</sub>, 17<sub>16</sub>], otherwise Zstandard.</li>
-  <li>Let |checksumMethod| be None if (|blockType| >> 2) & 1 = 0, otherwise XXH64.</li>
-  <li>Let |checksumSize| be 0 if |checksumMethod| is None, otherwise 8.</li>
-
-  <li>Let |decompressedData| be |blockData|.</li>
-
-  <li>If |compressionMethod| is Zstandard:
-    <ol>
-      <li>Let |originalSizeDelta| be the result of reading a LEB128 from the beginning of |blockData|.
-        Let |pos| be the number of bytes consumed.</li>
-
-      <li>Let |compressionParams| be an empty byte sequence.
-        While |pos| is less than the length of |blockData| and the byte at |blockData|[|pos|] is not the start of the Zstandard data:
-          <ol>
-            <li>Append the byte at |blockData|[|pos|] to |compressionParams|.</li>
-            <li>Increment |pos| by 1.</li>
-          </ol>
-        </ol>
-
-      <li>Let |dataStart| be |pos|.</li>
-      <li>Let |compressedSize| be the length of |blockData| - |dataStart| - |checksumSize|.</li>
-      <li>Let |originalSize| be |compressedSize| + |originalSizeDelta|.</li>
-
-      <li>If |checksumMethod| is XXH64:
-        <ol>
-          <li>Let |checksumOffset| be |dataStart| + |compressedSize|.</li>
-          <li>Let |storedChecksum| be |blockData| from |checksumOffset| to |checksumOffset| + 8.</li>
-          <li>Let |computedChecksum| be the XXH64 hash of |blockData| from |dataStart| to |dataStart| + |compressedSize| with seed 0, encoded as u64le.</li>
-          <li>If |storedChecksum| is not equal to |computedChecksum|:
-            <ol>
-              <li>Return failure ("checksum mismatch").</li>
-            </ol>
-          </li>
-        </ol>
-      </li>
-
-      <li>Let |compressedData| be |blockData| from |dataStart| to |dataStart| + |compressedSize|.</li>
-
-      <li>Let |decompressedData| be the result of decompressing |compressedData| using Zstandard [[RFC8878]].
-        The decompressed data should be a sequence of Zstandard blocks.
-        Process Zstandard blocks consecutively until the final block is signalled, at which point all compressed bytes should have been consumed.
-        If decompression fails or the decompressed size is not equal to |originalSize|, return failure ("decompression failed").</li>
-    </ol>
-  </li>
-  <li>Otherwise:
-    <ol>
-      <li>If |checksumMethod| is XXH64:
-        <ol>
-          <li>Let |dataSize| be the length of |blockData| - 8.</li>
-          <li>Let |storedChecksum| be |blockData| from |dataSize| to |dataSize| + 8.</li>
-          <li>Let |computedChecksum| be the XXH64 hash of |blockData| from 0 to |dataSize| with seed 0, encoded as u64le.</li>
-          <li>If |storedChecksum| is not equal to |computedChecksum|:
-            <ol>
-              <li>Return failure ("checksum mismatch").</li>
-            </ol>
-          </li>
-          <li>Set |decompressedData| to |blockData| from 0 to |dataSize|.</li>
-        </ol>
-      </li>
-    </ol>
-  </li>
-
-  <li>Parse |decompressedData| according to the [=metadata block=] structure and return the resulting metadata object.
-    If parsing fails, return failure ("invalid metadata").</li>
-</ol>
-
-<p>To <dfn export>decompress a compressed block</dfn> given |inputFile|, |blockType|, and |options|:</p>
-
-<ol class=algorithm>
-  <li>Let |hasDictionary| be true if (|blockType| >> 5) & 1 = 1, otherwise false.</li>
-  <li>Let |transformed| be true if (|blockType| >> 4) & 1 = 1, otherwise false.</li>
-  <li>Let |checksumMethod| be None if (|blockType| >> 3) & 1 = 0, otherwise XXH64.</li>
-  <li>Let |checksumSize| be 0 if |checksumMethod| is None, otherwise 8.</li>
-
-  <li>Let |transformerIndex| be 0.
-  <li>If |transformed| is true:
-    <ol>
-      <li>Let |transformerIndex| be the result of reading a LEB128 from |inputFile|.</li>
-    </ol>
-  </li>
-
-  <li>Let |dictionaryIndex| be 0.
-  <li>If |hasDictionary| is true:
-    <ol>
-      <li>Let |dictionaryIndex| be the result of reading a LEB128 from |inputFile|.</li>
-    </ol>
-  </li>
-
-  <li>Let |allChunks| be an empty list.</li>
-
-  <li>While the end of the block has not been reached:
-    <ol>
-      <li>Let |compressedSize| be the result of reading a LEB128 from |inputFile|.</li>
-      <li>Let |originalSizeDelta| be the result of reading a LEB128 from |inputFile|.</li>
-      <li>Let |originalSize| be |compressedSize| + |originalSizeDelta|.</li>
-
-      <li>If |originalSize| is greater than |compressedSize|:
-        <ol>
-          <li>Return failure ("invalid size delta: original size cannot be larger than compressed size").</li>
-        </ol>
-      </li>
-
-      <li>Let |compressionParams| be an empty byte sequence.
-        While the current byte is not the start of the Zstandard data:
-          <ol>
-            <li>Read a byte from |inputFile| and append it to |compressionParams|.</li>
-          </ol>
-        </ol>
-
-      <li>Let |compressedData| be the result of reading |compressedSize| bytes from |inputFile|.</li>
-
-      <li>Let |checksum| be an empty byte sequence.
-      <li>If |checksumMethod| is XXH64:
-        <ol>
-          <li>Let |checksum| be the result of reading 8 bytes from |inputFile|.</li>
-          <li>Let |computedChecksum| be the XXH64 hash of |compressedData| with seed 0, encoded as u64le.</li>
-          <li>If |checksum| is not equal to |computedChecksum|:
-            <ol>
-              <li>Return failure ("checksum mismatch").</li>
-            </ol>
-          </li>
-        </ol>
-      </li>
-
-      <li>Let |decompressedData| be the result of decompressing |compressedData| using Zstandard [[RFC8878]].
-        The compressed data is a sequence of Zstandard blocks.
-        Process Zstandard blocks consecutively until the final block is signalled, at which point all compressed bytes should have been consumed.
-        If decompression fails or the decompressed size is not equal to |originalSize|, return failure ("decompression failed").</li>
-
-      <li>If |transformed| is true and |options| is provided and |options|["transformer"] is provided:
-        <ol>
-          <li>Let |transformedData| be the result of applying the transformer specified by |transformerIndex| to |decompressedData| as postprocessing.
-            If the transformation fails, return failure ("transformation failed").</li>
-          <li>Set |decompressedData| to |transformedData|.</li>
-        </ol>
-      </li>
-
-      <li>Append |decompressedData| to |allChunks|.</li>
-    </ol>
-  </li>
-
-  <li>Return the concatenation of all byte sequences in |allChunks|.</li>
-</ol>
-
-<p>To <dfn export>decompress an uncompressed block</dfn> given |inputFile|, |blockType|, and |options|:</p>
-
-<ol class=algorithm>
-  <li>Let |checksumMethod| be None if (|blockType| >> 2) & 1 = 0, otherwise XXH64.</li>
-  <li>Let |checksumSize| be 0 if |checksumMethod| is None, otherwise 8.</li>
-
-  <li>Let |blockSize| be the result of reading the size field for |blockType| (u8, u16le, u32le, or u64le based on |blockType| % 4).</li>
-
-  <li>Let |dataSize| be |blockSize| - |checksumSize|.</li>
-
-  <li>Let |data| be the result of reading |dataSize| bytes from |inputFile|.</li>
-
-  <li>If |checksumMethod| is XXH64:
-    <ol>
-      <li>Let |checksum| be the result of reading 8 bytes from |inputFile|.</li>
-      <li>Let |computedChecksum| be the XXH64 hash of |data| with seed 0, encoded as u64le.</li>
-      <li>If |checksum| is not equal to |computedChecksum|:
-        <ol>
-          <li>Return failure ("checksum mismatch").</li>
-        </ol>
-      </li>
-    </ol>
-  </li>
-
-  <li>Skip the padding byte if present (if the total block size including the padding byte is odd).</li>
-
-  <li>Return |data|.</li>
-</ol>
-
-<p>To <dfn export>decrypt an encrypted archive</dfn> given |inputFile|:</p>
-
-<ol class=algorithm>
-  <li>Let |encryptedHeaderMagic| be the result of reading 8 bytes from |inputFile|.
-    If |encryptedHeaderMagic| is not equal to [=const/ENCRYPTED_HEADER_MAGIC=], return failure ("invalid encrypted header").</li>
-
-  <li>Let |lgWorkFactor| be the result of reading 1 byte from |inputFile|.</li>
-  <li>If |lgWorkFactor| is not in the range [0C<sub>16</sub>, 3F<sub>16</sub>), return failure ("invalid work factor").</li>
-
-  <li>Let |scryptEphemeralSecret| be the result of reading 16 bytes from |inputFile|.</li>
-  <li>Let |encryptedFileKey| be the result of reading 32 bytes from |inputFile|.</li>
-  <li>Let |ageHeaderMac| be the result of reading 32 bytes from |inputFile|.</li>
-
-  <li>Let |payload| be the remaining bytes in |inputFile|.</li>
-
-  <li>Construct the AGE v1 header:
-    <pre>
-age-encryption.org/v1
--> scrypt <var>scryptEphemeralSecretBase64</var> <var>lgWorkFactorDecimal</var>
-<var>encryptedFileKeyBase64</var>
---- <var>ageHeaderMacBase64</var>
-    </pre>
-    Where:
-    <ul>
-      <li>|scryptEphemeralSecretBase64| is the base64 encoding of |scryptEphemeralSecret| without padding.</li>
-      <li>|lgWorkFactorDecimal| is the decimal representation of |lgWorkFactor|.</li>
-      <li>|encryptedFileKeyBase64| is the base64 encoding of |encryptedFileKey| without padding.</li>
-      <li>|ageHeaderMacBase64| is the base64 encoding of |ageHeaderMac| without padding.</li>
-    </ul>
-  </li>
-
-  <li>Prompt the user for the decryption passphrase.</li>
-
-  <li>Let |decryptedPayload| be the result of decrypting |payload| using the AGE v1 format [[AGE]] with the provided passphrase.
-    If decryption fails, return failure ("decryption failed").</li>
-
-  <li>Verify that |decryptedPayload| is a valid unencrypted archive:
-    <ol>
-      <li>If |decryptedPayload| does not start with [=const/HEADER_MAGIC=], return failure ("invalid decrypted archive").</li>
-      <li>If |decryptedPayload| does not contain a [=archive/size_hint_block=], return failure ("missing size hint block").</li>
-      <li>If |decryptedPayload| contains any spacer blocks, return failure ("unexpected spacer block").</li>
-    </ol>
-  </li>
-
-  <li>Return |decryptedPayload| as a byte sequence.</li>
-</ol>
--->
-
-<!-- Obsolete draft, superseded by formula blocks:
-<p>A <dfn>transformer</dfn> is a WebAssembly module that performs preprocessing on data before compression and postprocessing after decompression.
-Transformers are identified by a 1-based index within the metadata block.</p>
-
-<p>Transformers are stored in [=transformer blocks=] and can be referenced by [=compressed blocks=] and [=file parameters=].</p>
-
-<p>To <dfn export>apply a transformer</dfn> given |transformerModule| (a WebAssembly module), |inputData| (a byte sequence), and |mode| ("preprocess" or "postprocess"):</p>
-
-<ol class=algorithm>
-  <li>Let |instance| be the result of instantiating |transformerModule| as a WebAssembly module.
-    If instantiation fails, [=throw=] an error.</li>
-
-  <li>If |instance| does not export an exported function named "transform":
-    <ol>
-      <li>[=throw=] an error ("transformer missing required export").</li>
-    </ol>
-  </li>
-
-  <li>Let |transformFunction| be the exported "transform" function from |instance|.</li>
-
-  <li>Let |memory| be the exported memory from |instance|, if any.
-    Otherwise, let |memory| be the default WebAssembly memory.</li>
-
-  <li>Let |inputOffset| be the result of allocating |inputData|.[=length=] bytes in |memory|.
-    If allocation fails, [=throw=] an error.</li>
-
-  <li>Copy |inputData| into |memory| at offset |inputOffset|.</li>
-
-  <li>Let |modeValue| be 1 if |mode| is "preprocess", otherwise 2 if |mode| is "postprocess".</li>
-
-  <li>Let |result| be the result of invoking |transformFunction| with arguments (|inputOffset|, |inputData|.[=length=], |modeValue|).
-    If the invocation fails, [=throw=] an error.</li>
-
-  <li>If |result| is not a WebAssembly integer or is negative:
-    <ol>
-      <li>[=throw=] an error ("transformer returned invalid result").</li>
-    </ol>
-  </li>
-
-  <li>Let |outputOffset| be |result|.</li>
-
-  <li>If |instance| exports an exported function named "get_output_size":
-    <ol>
-      <li>Let |getOutputSizeFunction| be the exported "get_output_size" function from |instance|.</li>
-      <li>Let |outputSize| be the result of invoking |getOutputSizeFunction| with no arguments.</li>
-      <li>If |outputSize| is not a WebAssembly integer or is negative:
-        <ol>
-          <li>[=throw=] an error ("transformer returned invalid output size").</li>
-        </ol>
-      </li>
-    </ol>
-  </li>
-  <li>Otherwise:
-    <ol>
-      <li>[=throw=] an error ("transformer missing get_output_size export").</li>
-    </ol>
-  </li>
-
-  <li>Let |outputData| be the result of reading |outputSize| bytes from |memory| at offset |outputOffset|.</li>
-
-  <li>If |instance| exports an exported function named "cleanup":
-    <ol>
-      <li>Let |cleanupFunction| be the exported "cleanup" function from |instance|.</li>
-      <li>Invoke |cleanupFunction| with no arguments. Ignore any errors.</li>
-    </ol>
-  </li>
-
-  <li>Return |outputData|.</li>
-</ol>
-
-<p class=note>Transformers SHOULD be deterministic: the same input with the same mode SHOULD always produce the same output.
-Non-deterministic transformers MAY produce different outputs for the same input, but this MAY result in different compressed archives for the same uncompressed data.</p>
-
-<p class=note>Transformers SHOULD NOT have side effects external to the WebAssembly module (such as file system or network access).
-Implementations MAY restrict or prohibit such side effects.</p>
-
-<p>To <dfn export>validate a transformer module</dfn> given |transformerModule|:</p>
-
-<ol class=algorithm>
-  <li>Let |instance| be the result of instantiating |transformerModule| as a WebAssembly module.
-    If instantiation fails, return failure.</li>
-
-  <li>If |instance| does not export an exported function named "transform", return failure.</li>
-
-  <li>If |instance| does not export an exported function named "get_output_size", return failure.</li>
-
-  <li>Return success.</li>
-</ol>
-
-<p>The following interface is the expected interface for transformer modules:</p>
-
-<pre class=def>
-// Exported functions:
-export function transform(input_offset: number, input_size: number, mode: number): number;
-// Returns the offset in WebAssembly memory where the output data is written.
-// mode: 1 for preprocessing (before compression), 2 for postprocessing (after decompression)
-
-export function get_output_size(): number;
-// Returns the size of the output data in bytes.
-
-export function cleanup(): void;
-// Optional. Called after transform() to release any resources.
-
-// WebAssembly memory:
-export memory: WebAssembly.Memory;
-// Optional. If not provided, the default memory is used.
-</pre>
-
-<div class=note>
-  <p>Transformer execution profile:</p>
-  <ul>
-    <li>Transformers SHOULD execute in O(n) time where n is the input size.</li>
-    <li>Transformers SHOULD use O(1) additional memory beyond the input and output buffers.</li>
-    <li>Transformers SHOULD complete within a reasonable time frame (e.g., less than 1 second per MB of data on typical hardware).</li>
-    <li>Implementations MAY impose resource limits on transformer execution (time, memory, CPU cycles).</li>
-  </ul>
-</div>
--->
-
 <h2 id=conformance>
 Conformance</h2>
+
+As well as sections marked as non-normative, all diagrams, examples and notes in this specification are non-normative.
+Everything else in this specification is normative.
+
+The key words MAY, MUST, MUST NOT, RECOMMENDED, SHOULD and SHOULD NOT in this specification
+are to be interpreted as described in BCP 14 [[RFC2119]] [[RFC8174]]
+when, and only when, they appear in all capitals, as shown here.
+
+<h3 id=locating-an-archive>
+Locating an archive</h3>
+
+A file may contain an archive with leading bytes, e.g. a self-extracting executable,
+or with trailing bytes, e.g. appended by a transfer.
+Since [=interpret an archive|interpreting an archive=] takes the archive alone,
+a decompressor accepting such a file has to locate the archive first.
+
+To <dfn>locate an archive</dfn> in a [=byte sequence=] |file|:
+
+<ol class=algorithm>
+    1. If |file| starts with [=const/ENCRYPTED_HEADER_MAGIC=], return |file|.
+    2. Let |back| be null.
+        Let |n| be the last 2 bytes of |file| as [=u16le=], and let |f| be the length of |file| − |n| − 10.
+        If |f| ≥ 0, the bytes of |file| from |f| are [=const/FOOTER_MAGIC=] followed by |n| as [=u16le=],
+        and the [=leb128=] from |f| + 8 is |s| such that |h| = |f| − |s| − 6 ≥ 0
+        and the bytes of |file| from |h| are [=const/HEADER_MAGIC=], set |back| to |h|.
+    3. If |file| starts with [=const/HEADER_MAGIC=]:
+        1. If |back| is 0, return |file|.
+        2. Read blocks from the offset 6 by the generic structure ([[#block]]),
+            with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
+            until the bytes at the current offset |f| start with [=const/FOOTER_MAGIC=].
+            If it fails to read a block before that, return failure.
+        3. Let |n| be the 2 bytes of |file| from |f| + 6 as [=u16le=].
+            If |file| is shorter than |f| + |n| + 10 bytes, return failure.
+            Otherwise, return the first |f| + |n| + 10 bytes of |file|.
+    4. If |back| is not null, return the bytes of |file| from |back|.
+    5. Return failure.
+</ol>
+
+The located archive is then [=interpret an archive|interpreted=], which may still fail.
+A decompressor SHOULD warn the user when |file| has bytes outside the located archive.
+It MAY search for [=const/HEADER_MAGIC=] when the archive can't be located otherwise,
+e.g. when |file| has both leading and trailing bytes.
+
+<div class=note>
+  An encrypted archive is located only at the beginning of a file and extends to its end,
+  because the end of its payload can't be known without decrypting it ([[#encrypted-archive]]).
+
+  A block can't start with [=const/FOOTER_MAGIC=],
+  since it starts with the shortest [=leb128=] encoding of [=const/FOOTER_TYPE=] ([[#constants]]),
+  which is not a valid block type.
+  The step 3.2 therefore finds the end of the first archive in |file|,
+  while the step 4 finds the archive at the end of |file| without reading the bytes before it.
+  Archives concatenated together are not a single archive, and only the first one is located.
+</div>
 
 <h3 id=extraction>
 Extraction</h3>
@@ -4461,98 +3773,22 @@ MUST be reported to the user.
 A decompressor MUST NOT create anything for an [=unknown node=], and MUST report it to the user.
 It MAY continue extracting other nodes.
 
-<!--
-<p>As well as sections marked as non-normative, all authoring guidelines, diagrams, examples, and notes in this specification are non-normative.
-Everything else in this specification is normative.</p>
+<h3 id=profiles>
+Archival profile</h3>
 
-<p>The key words MAY, MUST, MUST NOT, SHOULD, and SHOULD NOT in this specification are to be interpreted as described in BCP 14 [[RFC2119]]
-when, and only when, they appear in all capitals, as shown here.</p>
+An archive conforms to the <dfn>archival profile</dfn> when the content of every file is covered by a checksum:
 
-<p>A conforming <dfn>compressor</dfn> MUST implement all algorithms specified in this specification.
-Specifically:</p>
+* Every [=leaf block|leaf=] [[#data-block|data block]] has a [=checksum_method=] other than None.
+* Every [[#formula-block|formula block]] declares an [=output checksum=].
 
-<ul>
-  <li>It MUST correctly implement the [=compress a file=] algorithm.</li>
-  <li>It MUST correctly implement the [=compress a byte sequence=] algorithm.</li>
-  <li>It MUST correctly implement the [=apply a transformer=] algorithm for preprocessing.</li>
-  <li>It MUST generate valid archives that conform to the syntax specified in the Syntax section.</li>
-  <li>It MUST handle [=barely compressible=] data correctly by using uncompressed blocks when compression would not reduce size.</li>
-  <li>It MUST generate valid checksums when checksums are enabled.</li>
-  <li>It MUST ensure that all constraints specified in the Syntax section are satisfied (e.g., offset ranges, size limits, etc.).</li>
-</ul>
+A conforming compressor producing an archive for long-term preservation SHOULD conform to the archival profile.
+A tool verifying an archive SHOULD report whether it conforms to the archival profile.
 
-<p>A conforming <dfn>decompressor</dfn> MUST implement all algorithms specified in this specification.
-Specifically:</p>
-
-<ul>
-  <li>It MUST correctly implement the [=decompress an archive=] algorithm.</li>
-  <li>It MUST correctly implement the [=parse a metadata block=] algorithm.</li>
-  <li>It MUST correctly implement the [=decompress a compressed block=] algorithm.</li>
-  <li>It MUST correctly implement the [=decompress an uncompressed block=] algorithm.</li>
-  <li>It MUST correctly implement the [=decrypt an encrypted archive=] algorithm if it supports encrypted archives.</li>
-  <li>It MUST correctly implement the [=apply a transformer=] algorithm for postprocessing.</li>
-  <li>It MUST validate checksums when present and fail on checksum mismatch.</li>
-  <li>It MUST validate all constraints specified in the Syntax section and fail on constraint violations.</li>
-</ul>
-
-<p>A conforming <dfn>transformer</dfn> (WebAssembly module) MUST implement the required interface:
-</p>
-
-<ul>
-  <li>It MUST export a function named "transform" that accepts the specified parameters.</li>
-  <li>It MUST export a function named "get_output_size" that returns the output size.</li>
-  <li>It MUST write output data to WebAssembly memory at the offset returned by "transform".</li>
-  <li>It MAY export a function named "cleanup" for resource cleanup.</li>
-</ul>
-
-<p class=note>Conformance for transformers is defined at the module interface level.
-The actual transformation logic is implementation-dependent and not specified by this standard.</p>
-
-<p>An implementation is not required to support:</p>
-
-<ul>
-  <li>Encryption/decryption (encrypted archives).</li>
-  <li>Transformer blocks and transformation.</li>
-  <li>Dictionary blocks and dictionary-based compression.</li>
-  <li>Optional metadata (CBOR-encoded).</li>
-  <li>Specific compression levels or Zstandard features beyond the basic frame format.</li>
-</ul>
-
-<p>However, if an implementation claims to support any of these optional features, it MUST conform to the relevant algorithms and constraints specified in this specification.</p>
-
-<p>Implementations MAY impose additional restrictions beyond those specified in this specification:
-</p>
-
-<ul>
-  <li>Maximum file size or archive size limits.</li>
-  <li>Maximum number of files or directories in an archive.</li>
-  <li>Maximum chunk size or number of chunks.</li>
-  <li>Resource limits for transformer execution (time, memory, CPU).</li>
-  <li>Restrictions on supported file names, metadata, or path separators.</li>
-</ul>
-
-<p>Such restrictions SHOULD be documented and SHOULD NOT prevent processing of valid archives that do not exceed the specified limits.</p>
-
-<p>A conforming implementation MAY:</p>
-
-<ul>
-  <li>Reject archives that exceed implementation-defined limits.</li>
-  <li>Use optimized or alternative algorithms that produce the same result as the specified algorithms.</li>
-  <li>Perform operations in a different order than specified, as long as the result is identical.</li>
-  <li>Cache intermediate results for performance.</li>
-  <li>Parallelize independent operations (e.g., decompressing multiple chunks concurrently).</li>
-</ul>
-
-<p>A conforming implementation MUST NOT:</p>
-
-<ul>
-  <li>Accept invalid archives or archives that violate the specified syntax.</li>
-  <li>Generate invalid archives or archives that violate the specified syntax.</li>
-  <li>Ignore checksums when present.</li>
-  <li>Ignore constraint violations (e.g., size limits, offset ranges).</li>
-  <li>Fail to process a valid archive that does not exceed implementation-defined limits.</li>
-</ul>
--->
+<div class=note>
+  Other blocks always have checksums, so an archive conforming to the archival profile
+  detects any damage to the content of a file by its decompression alone.
+  Whether an archive conforms can be determined from block types and formula blocks, without decompressing data blocks.
+</div>
 
 <h2 id=iana-considerations>
 IANA Considerations</h2>
@@ -4737,6 +3973,8 @@ $$ETIME-ELECTIVE //= (-14: quantization-interval)
 <h2 id=block-index>
 Block index</h2>
 
+Each reserved block type is [=critical=] or [=non-critical=] by its first hexadecimal digit ([[#reserved-blocks]]).
+
 <table class=data>
   <thead>
     <tr>
@@ -4889,6 +4127,17 @@ Block index</h2>
     "month": "October",
     "year": 2006,
     "href": "https://www.rfc-editor.org/info/rfc4648"
+  },
+  "RFC8174": {
+    "title": "Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words",
+    "authors": ["Barry Leiba"],
+    "status": "BCP 14",
+    "publisher": "IETF",
+    "number": 8174,
+    "doi": "10.17487/RFC8174",
+    "month": "May",
+    "year": 2017,
+    "href": "https://www.rfc-editor.org/info/rfc8174"
   },
   "RFC8610": {
     "title": "Concise Data Definition Language (CDDL): A Notational Convention to Express Concise Binary Object Representation (CBOR) and JSON Data Structures",

@@ -124,10 +124,7 @@ pub fn shared(datas: &[&[u8]]) -> Vec<f64> {
             owner.entry(h).and_modify(|o| *o = if *o == i { i } else { MANY }).or_insert(i);
         }
     }
-    anchors
-        .iter()
-        .map(|a| a.iter().filter(|h| owner[h] == MANY).count() as f64 / a.len().max(1) as f64)
-        .collect()
+    anchors.iter().map(|a| a.iter().filter(|h| owner[h] == MANY).count() as f64 / a.len().max(1) as f64).collect()
 }
 
 /// The gear hash's table: 256 values of SplitMix64.
@@ -153,10 +150,12 @@ mod tests {
     fn shared_runs() {
         let noise = |seed: u64, n: usize| {
             let mut x = seed;
-            (0..n).map(|_| {
-                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-                (x >> 56) as u8
-            }).collect::<Vec<u8>>()
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (x >> 56) as u8
+                })
+                .collect::<Vec<u8>>()
         };
         let (a, b) = (noise(1, 200_000), noise(2, 200_000));
         let ab = [&b[..50_000], &a[..], &b[50_000..]].concat();

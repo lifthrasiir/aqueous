@@ -15,12 +15,13 @@ FreeArc가 이 기능을 진지하게 고려한 것이 계기가 되었다.
 
 - `spec/index.bs`: 아카이브 포맷 명세 초안. 이 문서와 관련된 절은 다음과 같다.
   - §3.1 Block: 블록의 일반 구조와 짝수 길이 padding.
-  - §3.1.2 Spacer block: 무시해도 되는 블록의 유일한 선례.
+  - §3.1.2 Spacer block: 무시해도 되는 블록의 첫 선례.
+  - §3.1.7 Reserved blocks: 첫 16진 자리가 A–F인 non-critical 타입은 모르면 무시한다(ignored block).
   - §3.1.5 Content blocks: segment와 parcel, 그리고 "모든 content block은 뒤따르는 metadata block이 기술해야 한다"는 규칙.
   - §3.2.1 Unencrypted Archive: footer, `metadata_backward_offset`, u16 `footer_size`.
   - §3.2.2 Encrypted Archive: age 기반 envelope. 안쪽에서는 spacer와 trailing byte를 금지한다.
   - §4.6 Partial access: 부분 결과와 손상 감지 의무의 범위.
-  - §7 Block index: 05–0F가 예약되어 있다.
+  - §7 Block index: 예약된 타입의 critical 여부는 첫 16진 자리로 정해진다.
 
 ---
 
@@ -109,7 +110,7 @@ Par2의 MDS 결함: Par2는 Plank의 1997년 RS 튜토리얼을 따랐다. 그 �
 유리한 점:
 
 - **모든 블록 길이가 짝수이다**(block padding). GF(2¹⁶) 심볼(2바이트)과 그대로 맞는다.
-- **Spacer처럼 무시해도 되는 블록이라는 개념이 이미 있다.** recovery 관련 블록을 같은 지위로 두면, 복구 기능을 모르는 디코더도 아카이브를 그대로 읽는다. 05–0F 예약 구간도 비어 있다.
+- **Spacer처럼 무시해도 되는 블록이라는 개념이 이미 있다.** recovery 관련 블록을 같은 지위로 두면, 복구 기능을 모르는 디코더도 아카이브를 그대로 읽는다. 명세는 non-critical 타입(첫 16진 자리 A–F)을 모르면 무시하므로, recovery 블록을 그 구간에 두면 된다.
 - **segment는 self-contained이고 parcel 구조가 있으며, 블록 간에 공유되는 압축 문맥이 없다**(dictionary 제외). 복구에 실패해도 손상 범위 밖의 파일은 살릴 수 있고, §4.6 Partial access가 이미 이를 허용한다.
 - **segment를 찾는 경로가 둘이다.** 앞방향 스캔과 footer에서 시작하는 metadata 역방향 체인이다.
 - **footer는 나머지에서 재구성할 수 있다.** `size_hint`는 길이에서, `metadata_backward_offset`은 스캔에서 얻는다. 그래서 보호 범위에서 뺄 수 있다. header magic은 상수이고, size hint block은 footer와 중복이다.
@@ -209,7 +210,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 파일 내용까지 복구하려는 사용자를 위한 옵션이다. §5.2가 이미 있으므로, 이 단계의 복잡도는 순수하게 내용 보호의 비용이 된다.
 
-- **블록 타입:** 예를 들어 08–0B를 recovery block으로 쓴다. 공통 앞부분은 `recovery_magic`, `self_hash`, `set_id`, `archive_offset`(archive_start로부터 이 블록까지의 거리), `kind`(index 또는 parity)이다.
+- **블록 타입:** non-critical 구간, 예를 들어 B0–B3을 recovery block으로 쓴다. 공통 앞부분은 `recovery_magic`, `self_hash`, `set_id`, `archive_offset`(archive_start로부터 이 블록까지의 거리), `kind`(index 또는 parity)이다.
   - `set_id`는 파라미터의 해시이다. 세대(generation)와 아카이브를 구분한다.
   - `archive_offset`이 있으면 header가 깨져도 slice 격자를 복원할 수 있다. 중첩 아카이브의 recovery block을 가려내는 데도 mirror와 같은 방식으로 쓴다(§5.2의 찾기).
   - `recovery_magic`의 길이와 값에 대해서는 §5.2의 `mirror_magic` 분석이 그대로 적용된다.
@@ -259,7 +260,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 1. ~~**mirror block 하나에 여러 원본을 담을지.**~~ 원본 하나만 담는다(명세 §3.1.6 Mirror block).
 2. ~~**`target_offset`의 부호.**~~ 원본은 항상 mirror 앞에 온다(명세 §3.1.6 Mirror block).
 3. **해시.** XXH64 하나로 통일할지, slice 인덱스에는 XXH3-128을 쓸지. 상대는 무작위 손상뿐이므로 64비트로 충분하다고 본다.
-4. **"무시해도 되는 블록"의 명세 용어.** spacer, mirror, recovery를 묶는 이름이 필요하다. "auxiliary block"은 이미 dictionary, module, resource에 쓰고 있다. size hint block은 위치 제약이 있으므로 이 범주가 아니다.
+4. ~~**"무시해도 되는 블록"의 명세 용어.**~~ 첫 16진 자리가 A–F인 non-critical 타입으로 정했다. 모르는 타입은 ignored block이 된다(명세 §3.1.7 Reserved blocks).
 5. **encrypted archive 안의 mirror 허용 여부.** 현재 안쪽에서는 spacer를 금지하며, mirror도 일단 금지했다.
 6. **스크러빙.** 필요한 여유분은 "다음 검증 전까지 쌓일 손상"이 정한다. 그래서 `verify` 명령과 권장 주기를 도구 쪽에서 함께 설계해야 한다.
 
@@ -281,11 +282,11 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 ### 명세 (S)
 
-- [ ] **S1.** "무시해도 되는 블록" 범주를 정의하고, spacer를 그 안으로 옮긴다(§7의 4번).
+- [x] **S1.** "무시해도 되는 블록" 범주를 정의한다(§7의 4번). (non-critical 타입으로 정했다. spacer는 0으로 채워진 구멍이 spacer 블록으로 파싱되도록 00–03에 그대로 둔다.)
 - [x] **S2.** mirror block 절을 추가한다. 구조와 배치 SHOULD를 포함한다. (`MIRROR_MAGIC` 값 확정, `archive_offset` 추가함)
 - [ ] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6).
 - [ ] **S4.** 비규범 노트를 추가한다. 내용은 오류 모델 요약, E5가 범위 밖이라는 점, segment 주기 권고, checksum 있는 블록 타입을 기본값으로 쓰라는 권고이다.
-- [ ] **S5.** §7 Block index에 mirror 타입(반영함)과, §5.4를 진행하면 08–0B를 반영한다.
+- [ ] **S5.** §7 Block index에 mirror 타입(반영함)과, §5.4를 진행하면 recovery 타입(B0–B3 등 non-critical)을 반영한다.
 - [ ] **S6.** (§5.4를 진행할 경우) recovery block 절과 부호의 완전한 정의를 추가한다.
 - [ ] **S7.** encrypted envelope의 trailer 확장안을 정한다(§5.5).
 

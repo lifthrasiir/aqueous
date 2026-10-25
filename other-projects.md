@@ -19,9 +19,8 @@ encode.su에만 첨부된 파일은 받지 않았고, 공개 저장소(GitHub �
 
 명세와 설계 문서:
 
-- 모듈 식별 해시가 TODO이다(`spec/index.bs:1313`). RarVM은 CRC32와 길이로 식별했으니 강한 해시로 정한다(9절).
-- 정의되지 않은 블록 종류의 처리 규칙이 없고, 헤더에 버전 필드가 없다(9절, lzip의 xz 비판).
-- 패딩 바이트(`u8 = 0`) 하나가 손상되면 아카이브 전체가 invalid가 된다(9절).
+- 모듈 식별 해시가 TODO이다(`spec/index.bs`의 `#module-block`). RarVM은 CRC32와 길이로 식별했으니 강한 해시로 정한다(9절).
+- lzip의 xz 비판은 2026-10-25에 명세에 반영했다. 남은 것은 블록 헤더가 손상된 뒤의 재동기화 절차(recovery-design S3)이다(9절).
 - resource failure의 한도가 구현마다 다를 수 있다. 적합성 수준별 최소 한도를 둔다(9절).
 - xform-design.md 62행 "RAR5는 보안과 복잡도 문제로 VM을 없앴다"는 출처가 없다(9절).
 
@@ -952,9 +951,9 @@ aqr-raw 래스터 모델의 참고로 본다.
 ### Aqueous에 대한 시사점
 
 - **RarVM은 xform-design §5.7을 뒷받침한다.** 해시로 식별해 네이티브로 치환하는 것이 실제 생태계에서는 사실상 유일한 실행 경로였다. 해시 동결 표준 모듈만 쓰는 수준 1을 규범으로 두는 방향이 맞다.
-- **모듈 식별 해시를 강한 해시로 정해야 한다.** RAR의 식별자는 CRC32와 길이였다. 명세에서는 아직 TODO이다(`spec/index.bs:1313`, "the identification by a hash").
+- **모듈 식별 해시를 강한 해시로 정해야 한다.** RAR의 식별자는 CRC32와 길이였다. 명세에서는 아직 TODO이다(`spec/index.bs`의 `#module-block`, "the identification by a hash").
 - **xform-design.md 62행**("RAR5는 보안과 복잡도 문제로 VM을 없앴다")은 출처가 없는 통설이다. 출처를 달거나 표현을 낮춰야 한다.
-- **최소 보장 자원 한도.** 명세의 resource failure는 "선언되었거나 구현이 정한 한도"이다(`spec/index.bs:3035`). 이러면 어떤 구현에서는 풀리고 다른 구현에서는 실패하는 아카이브가 생긴다. ZPAQ의 32비트 빌드와 64비트 빌드가 같은 문제를 겪었다. zstd 창의 128 MiB처럼 적합성 수준마다 하한을 두는 편이 낫다(명세 3459행의 Issue와 같은 맥락).
+- **최소 보장 자원 한도.** 명세의 resource failure는 "선언되었거나 구현이 정한 한도"이다(`spec/index.bs`의 `#semantics`). 이러면 어떤 구현에서는 풀리고 다른 구현에서는 실패하는 아카이브가 생긴다. ZPAQ의 32비트 빌드와 64비트 빌드가 같은 문제를 겪었다. zstd 창의 128 MiB처럼 적합성 수준마다 하한을 두는 편이 낫다(명세 `#module-execution`의 Issue와 같은 맥락).
 - **JIT 이식성.** ZPAQ 계열은 x86 RWX JIT에 묶여 ARM과 W^X에서 고생했고, paq8pxv의 JIT도 네이티브의 3.9배이다. 인터프리터를 폴백으로, 네이티브 치환을 JIT와 독립으로 둔 xform-design의 결정이 이를 이미 반영한다. 인터프리터, JIT, 네이티브의 결과가 같은지 확인하는 적합성 벡터를 규범 부록에 둘 만하다.
 - **코드 공유.** ZPAQ는 압축기를 블록마다 반복해 싣고, paq8pxv는 소스를 실어 컴파일 동작이 규범이 된다. Aqueous는 Wasm 바이트코드를 규범으로 하고 해시로 식별해 한 번만 두므로 두 문제를 모두 피한다.
 - **OpenZL은 가장 가까운 대응이다.**
@@ -967,17 +966,17 @@ aqr-raw 래스터 모델의 참고로 본다.
 
 ### lzip의 xz 비판과 명세 [분석]
 
-https://www.nongnu.org/lzip/xz_inadequate.html. lzip은 6바이트 헤더(매직, 버전, dict), LZMA 스트림, 고정 폭 트레일러(CRC32, 데이터 크기, 멤버 크기)이고 선택 필드와 패딩이 없다. 멤버마다 매직이 있어 재동기화되고, lziprecover가 손상된 사본 여럿을 합친다. 아래 판정은 `spec/index.bs`를 직접 읽고 확인한 것이다.
+https://www.nongnu.org/lzip/xz_inadequate.html. lzip은 6바이트 헤더(매직, 버전, dict), LZMA 스트림, 고정 폭 트레일러(CRC32, 데이터 크기, 멤버 크기)이고 선택 필드와 패딩이 없다. 멤버마다 매직이 있어 재동기화되고, lziprecover가 손상된 사본 여럿을 합친다. 아래는 2026-10-25에 명세에 반영한 결과이다. 반영 내용은 명세의 해당 절이 기준이다.
 
-| 비판 | Aqueous | 판정 |
+| 비판 | 대응 | 판정 |
 |---|---|---|
-| 길이·플래그 필드가 보호되지 않아 프레이밍 오류가 난다 | 블록의 `type`(leb128)과 `size`(폭은 `type % 4`)를 덮는 체크섬이 없다(`#block`, 301행). 미러 블록(`#mirror-block`, 1419행)은 체크섬이 있고 여러 parcel에 영향을 주는 블록 종류(메타데이터, 사전 등)만 덮는다. | 같은 약점. content block의 헤더 손상은 메타데이터의 크기 정보와 대조하는 수밖에 없다. |
-| 가변 길이 정수가 뒤 필드의 폭을 바꾼다 | `type`이 leb128이고 그 값이 `size`의 폭을 정한다. footer 크기는 일부러 u16le 고정이다. | 부분적으로 같은 약점. footer 쪽 대응은 맞다. |
-| 패딩 같은 쓸모없는 필드가 오탐을 만든다 | 홀수 길이 블록 뒤 패딩이 구조상 `u8 = 0`이다(358행 부근). 0이 아니면 파싱이 실패하므로 invalid archive가 된다. | 같은 약점. 패딩 바이트 하나의 손상이 아카이브 전체의 실패가 된다. |
-| 체크 종류를 고를 수 있고 생략할 수 있다 | content block은 체크섬 None이 가능하고, 전체를 덮는 것은 SHOULD이다. 나머지 블록은 필수이다. | 대체로 해소. 미지의 체크 방식 같은 xz의 결함은 없다. |
-| 확장성이 과하고 버전 번호가 없다 | 헤더는 매직 6바이트뿐이고 버전 필드가 없다(`#unencrypted-archive`, 1650행). D와 E로 시작하는 종류는 예약되어 있지만(1626행), **그 밖의 정의되지 않은 블록 종류를 어떻게 다루는지(건너뛰기 또는 실패) 규칙을 찾지 못했다.** | 같은 약점. 다만 확장은 대부분 아카이브 안의 Wasm 모듈로 들어오므로 xz의 필터 파편화보다는 안전하다. |
-| 컨테이너 안의 컨테이너 | segment, parcel, formula, block, 모듈의 여러 층. 메타데이터 없는 단일 파일 모드는 gzip처럼 단순하다. | 같은 약점이지만 설계 목표(formula)의 대가이다. |
-| 앞뒤 쓰레기 처리 | 큰 파일 안에서 아카이브를 찾는 알고리즘이 Issue로 남아 있다(`#interpretation`). | 미정. |
+| 길이·플래그 필드가 보호되지 않아 프레이밍 오류가 난다 | 블록 헤더 CRC는 두지 않는다. 오류 모델(recovery-design §2)에서 흔한 손상은 4 KiB 단위라 CRC는 감지만 하고 재동기화는 돕지 못한다. 감지는 이미 데이터 체크섬이 한다. | 유지. 다음 leaf block에서 metadata의 `file_offset`으로 재동기화하는 절차를 Repair 절(recovery-design S3)에 넣는다. non-leaf block은 순번으로 참조되므로 손상 지점 뒤로 같은 parcel의 위치를 잃는다. |
+| 가변 길이 정수가 뒤 필드의 폭을 바꾼다 | 블록 `type`은 최단 leb128만 허용한다(`#block`). `type % 4`로 size 폭을 정하는 구조는 유지한다. | 해소. 큰 블록은 u64le size로 쓰고 나중에 고치면 되므로 스트리밍 쓰기에 비용이 없다. |
+| 패딩 같은 쓸모없는 필드가 오탐을 만든다 | 패딩과 spacer의 0은 압축기만 지키고 해석에는 영향이 없다(`#block`, `#spacer-block`). mirror의 target 비교에서도 패딩을 뺐다. | 해소. footer 크기 사본이나 size hint 같은 중복 필드는 위치를 찾는 데 쓰이므로 엄격하게 둔다. |
+| 체크 종류를 고를 수 있고 생략할 수 있다 | 체크섬을 생략할 수 있는 것은 leaf data block뿐이다(근거는 `#data-block`의 노트). | 해소. 장기 보존용으로 None을 금지하는 archival profile을 두었다(`#profiles`). |
+| 확장성이 과하고 버전 번호가 없다 | 첫 16진 자리가 0–9인 블록 종류는 critical이라 모르면 unsupported failure이고, A–F는 non-critical이라 모르면 무시한다(`#reserved-blocks`). 기존 할당이 그대로 맞는다: content 계열과 block-like structure는 critical, mirror는 non-critical이다. | 해소. 기능은 블록 단위로 들어오므로 헤더 버전 바이트는 두지 않고, 호환되지 않는 개정은 magic을 바꾼다. 38–3F 같은 정의 구간 안의 예약도 critical이라 새 압축 방식에 쓸 수 있다. 실험 블록(E)은 non-critical이고, 실험을 켠 구현만 critical로 다룬다. |
+| 컨테이너 안의 컨테이너 | 층의 수 자체를 문제 삼는 것은 억지에 가깝다. 층마다 맡은 일이 다르고, lzip의 multimember도 결국 블록 구조이다. 알맹이는 두 층이 같은 정보를 가질 때의 일치 규칙이다. | 해소. data block 안 zstd 블록의 끝과 바깥 크기의 일치를 MUST로 바꿨다(`#zstandard-compression-method`). 나머지 중복 쌍(`original_size`, size hint, footer 크기, formula의 크기 선언)은 이미 MUST이다. 디코더가 무겁다는 점은 설계 목표의 대가이다. |
+| 앞뒤 쓰레기 처리 | Conformance의 아카이브 찾기 알고리즘으로 정했다(`#locating-an-archive`). | 해소. 이어 붙인 아카이브는 첫 것만 찾는다. |
 
 ### 장기 보관, 재현 가능 아카이브, Wasm 성능 [개요]
 
@@ -997,10 +996,7 @@ https://www.nongnu.org/lzip/xz_inadequate.html. lzip은 6바이트 헤더(매직
 
 ### Aqueous에 대한 시사점(포맷 설계)
 
-- **정의되지 않은 블록 종류의 처리 규칙을 정한다.** 건너뛸지 실패할지를 정하고, 필요하다면 "이 기능이 필요하다"를 알리는 수단(버전 바이트나 필수 기능 목록)을 둔다. 지금은 옛 디코더가 무엇이 모자라서 못 푸는지 보고할 수 없다.
-- **패딩 손상을 아카이브 실패로 만들지 않는다.** 패딩이 0이 아니면 무시하거나 경고만 하라고 적는 편이 xz 비판에 대한 답이 된다.
-- **content block 헤더의 손상 경로.** `type`과 `size`가 보호되지 않으므로, 메타데이터의 크기 정보로 재동기화하는 절차가 recovery-design.md에 있는지 확인한다.
-- 체크섬 None이 합법이므로, 내용 전체를 덮지 않는 아카이브가 생길 수 있다는 점을 비규범 노트로 경고할 만하다.
+- **content block 헤더의 손상 경로.** `type`과 `size`가 보호되지 않으므로, metadata의 `file_offset`으로 다음 leaf block에서 재동기화하는 절차를 recovery-design.md S3에 넣는다.
 
 
 ## 10. 중복 제거와 구조화 데이터

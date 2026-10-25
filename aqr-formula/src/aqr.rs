@@ -35,6 +35,10 @@ use crate::{Error, Formula, Kind, Module, Node, Resource, Result, packed};
 pub const HEADER_MAGIC: [u8; 6] = [0xf8, 0x04, 0x03, 0x6a, 0xd6, 0xbe];
 pub const FOOTER_MAGIC: [u8; 6] = [0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12];
 const ENCRYPTED_HEADER_MAGIC: [u8; 8] = [0xf9, 0xca, 0xf2, 0xa6, 0xd0, 0x2a, 0x01, 0x00];
+// The block types of block-like structures, invalid as blocks.
+const HEADER_TYPE: u64 = 0x278;
+const FOOTER_TYPE: u64 = 0x98_68eb_d5fd;
+const ENCRYPTED_HEADER_TYPE: u64 = 0x15d_14fc_e5f9;
 
 /// The name of the custom section naming the native implementation of a module block.
 pub const NATIVE_SECTION: &str = "aqueous-native";
@@ -462,8 +466,6 @@ fn native_name(w: &[u8]) -> Option<&str> {
     None
 }
 
-/// Appends a block of `ty` (with a u8 size field) and `data`, widening the size field as
-/// needed and padding the block to an even length.
 /// Where an archive is written: its bytes, or only how many ([`Count`], to size it).
 trait Out {
     fn put(&mut self, b: &[u8]);
@@ -504,6 +506,8 @@ fn footer(out: &mut impl Out, blocks: usize) {
     out.put(&(f.len() as u16).to_le_bytes());
 }
 
+/// Appends a block of `ty` (with a u8 size field) and `data`, widening the size field as
+/// needed and padding the block to an even length.
 fn block(out: &mut impl Out, ty: u64, data: &[u8]) {
     block_of(out, ty, &[data]);
 }
@@ -631,14 +635,7 @@ impl Encoder {
                     tried.push((level, self.trial(k, &sample, level)?));
                 }
                 for level in MID_LOWER {
-                    tried.push((
-                        level,
-                        if level == PROBE {
-                            probe.clone()
-                        } else {
-                            self.trial(k, &sample, level)?
-                        },
-                    ));
+                    tried.push((level, if level == PROBE { probe.clone() } else { self.trial(k, &sample, level)? }));
                 }
                 let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
                 let (higher, lower) = lens[1..].split_at(MID_HIGHER.len());
@@ -886,6 +883,9 @@ pub enum Failure {
     /// The archive exceeds what this decoder supports: a limit, or a feature not implemented
     /// yet (a module without a native implementation among them).
     Resource(String),
+    /// The archive has a block reserved for critical extensions, which a later version of the
+    /// spec may define.
+    Unsupported(String),
 }
 
 impl fmt::Display for Failure {
@@ -893,6 +893,7 @@ impl fmt::Display for Failure {
         match self {
             Failure::Invalid(m) => write!(f, "invalid archive: {m}"),
             Failure::Resource(m) => write!(f, "resource failure: {m}"),
+            Failure::Unsupported(m) => write!(f, "unsupported failure: {m}"),
         }
     }
 }
@@ -905,7 +906,7 @@ fn invalid<T>(msg: impl Into<String>) -> Decoded<T> {
     Err(Failure::Invalid(msg.into()))
 }
 
-fn unsupported<T>(msg: impl Into<String>) -> Decoded<T> {
+fn resource<T>(msg: impl Into<String>) -> Decoded<T> {
     Err(Failure::Resource(msg.into()))
 }
 
@@ -958,7 +959,7 @@ pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec
 /// The file in archive `c`, with the modules implemented by `modules`.
 pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u8>> {
     if c.starts_with(&ENCRYPTED_HEADER_MAGIC) {
-        return unsupported("encrypted archives are not supported yet");
+        return resource("encrypted archives are not supported yet");
     }
     if !c.starts_with(&HEADER_MAGIC) {
         return invalid("bad header magic");
@@ -1071,10 +1072,16 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
         modules: Vec::new(),
         resources: Vec::new(),
     };
+    // the generic structure first: a block of an undefined critical type anywhere in it makes
+    // the archive unsupported, whatever else is wrong with the other blocks
+    let mut framed = Vec::new();
     let mut at = 0;
     while at < d.len() {
         let start = at;
         let ty = leb(d, &mut at)?;
+        if at - start != varint::len(ty) {
+            return invalid("a block type not in the shortest encoding");
+        }
         let width = 1 << (ty % 4);
         let size = d.get(at..at + width).ok_or_else(|| Failure::Invalid("truncated block".into()))?;
         at += width;
@@ -1084,14 +1091,22 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
             .and_then(|n| d.get(at..at.checked_add(n)?))
             .ok_or_else(|| Failure::Invalid("truncated block".into()))?;
         at += data.len();
+        // the padding, of any value: only compressors have to zero it
         if (at - start) % 2 == 1 {
-            if d.get(at) != Some(&0) {
-                return invalid("bad block padding");
+            if at == d.len() {
+                return invalid("truncated block");
             }
             at += 1;
         }
+        framed.push((start, ty, data));
+    }
+    if let Some(&(_, ty, _)) = framed.iter().find(|&&(_, ty, _)| critical(ty) && !defined(ty)) {
+        return Err(Failure::Unsupported(format!("a block of an undefined critical type {ty:#x}")));
+    }
+    for (start, ty, data) in framed {
         match ty {
-            0x00..=0x03 if data.iter().all(|&b| b == 0) => {}
+            // spacer blocks, of any space: only compressors have to zero it
+            0x00..=0x03 => {}
             0x04 if start == 0 => {
                 let mut p = 0;
                 if leb(data, &mut p)? != size_hint || p != data.len() {
@@ -1100,7 +1115,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
             }
             // data blocks: `001k kcss` (leaf) and `0100 kkss` (non-leaf, always checked)
             0x30..=0x37 | 0x48..=0x4b | 0x50..=0x57 | 0x74..=0x77 => {
-                return unsupported("dictionaries are not supported yet");
+                return resource("dictionaries are not supported yet");
             }
             0x20..=0x2f => b.leaves.push(Leaf::Stored(decoded(data, ty & 0x08 != 0, ty & 0x04 != 0)?)),
             0x40..=0x47 => b.non_leaf.push(decoded(data, ty & 0x04 != 0, true)?),
@@ -1115,14 +1130,37 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
                     non_leaf: b.non_leaf.len(),
                 });
             }
-            // mirror blocks, not read
-            0xc10..=0xc17 | 0xc50..=0xc57 | 0xc60..=0xc67 | 0xc70..=0xc77 => {}
-            0x10..=0x17 if metadata => return unsupported("metadata blocks are not supported yet"),
+            // mirror blocks and undefined non-critical blocks, not read
+            _ if !critical(ty) => {}
+            0x10..=0x17 if metadata => return resource("metadata blocks are not supported yet"),
             0x10..=0x17 => return invalid("a metadata block, but none in the footer"),
             _ => return invalid(format!("bad block of type {ty:#x}")),
         }
     }
     Ok(b)
+}
+
+/// Whether block type `ty` is critical: its first hexadecimal digit is from 0 to 9.
+fn critical(ty: u64) -> bool {
+    let digits = (64 - ty.leading_zeros()).div_ceil(4).max(1);
+    ty >> (4 * (digits - 1)) <= 9
+}
+
+/// Whether critical block type `ty` is defined by the spec, block-like structures included.
+fn defined(ty: u64) -> bool {
+    matches!(
+        ty,
+        0x00..=0x04
+            | 0x10..=0x17
+            | 0x20..=0x37
+            | 0x40..=0x4b
+            | 0x50..=0x57
+            | 0x60..=0x67
+            | 0x70..=0x77
+            | HEADER_TYPE
+            | FOOTER_TYPE
+            | ENCRYPTED_HEADER_TYPE
+    )
 }
 
 /// The decoded data of a block's data `d`.
@@ -1672,8 +1710,8 @@ mod tests {
         assert_eq!(decode(&c, &[]).unwrap(), b"");
     }
 
-    /// A leaf data block may go without a checksum; a non-leaf one may not, nor may a reserved
-    /// compression method be used.
+    /// A leaf data block may go without a checksum; a non-leaf one may not. A reserved
+    /// compression method is unsupported.
     #[test]
     fn data_block_types() {
         let d = vec![7; 1000];
@@ -1682,8 +1720,32 @@ mod tests {
         assert_eq!(decode(&archive(|out| block(out, LEAF_RAW & !4, &d)), &[]).unwrap(), d);
         assert_eq!(decode(&archive(|out| block(out, LEAF_ZSTD & !4, unchecked)), &[]).unwrap(), d);
         for ty in [0x38, 0x3c, 0x4c] {
-            assert!(matches!(decode(&archive(|out| block(out, ty, &c)), &[]), Err(Failure::Invalid(_))), "{ty:#x}");
+            assert!(matches!(decode(&archive(|out| block(out, ty, &c)), &[]), Err(Failure::Unsupported(_))), "{ty:#x}");
         }
+    }
+
+    /// Neither the padding nor the space of a spacer block is read. A block type is the shortest
+    /// LEB128; an undefined one is ignored if non-critical (from A to F in its first hexadecimal
+    /// digit), else unsupported, even with an invalid block before it.
+    #[test]
+    fn block_framing() {
+        let decode = |blocks: &[u8]| decode(&archive(|out| out.extend_from_slice(blocks)), &[]);
+        assert_eq!(decode(b"\x20\x05hello\x00"), Ok(b"hello".to_vec()));
+        assert_eq!(decode(b"\x20\x05hello\xaa"), Ok(b"hello".to_vec()));
+        assert_eq!(decode(b"\x00\x02\x01\x02\x20\x05hello\x00"), Ok(b"hello".to_vec()));
+        assert!(matches!(decode(b"\xa0\x00\x05hello"), Err(Failure::Invalid(_))));
+        // non-critical: 0xa0, 0xf0, 0xf00
+        assert_eq!(decode(b"\x20\x05hello\x00\xa0\x01\x01\x00"), Ok(b"hello".to_vec()));
+        assert_eq!(decode(b"\xf0\x01\x00\x00"), Ok(Vec::new()));
+        assert_eq!(decode(b"\x80\x1e\x00\x00"), Ok(Vec::new()));
+        // critical: 0x78, 0x80
+        assert!(matches!(decode(b"\x78\x00"), Err(Failure::Unsupported(_))));
+        assert!(matches!(decode(b"\x80\x01\x00\x00"), Err(Failure::Unsupported(_))));
+        // a block-like structure (the header) as a block
+        assert!(matches!(decode(b"\xf8\x04\x00\x00"), Err(Failure::Invalid(_))));
+        let bad_sum = [&b"\x24\x0dhello"[..], &[0; 8], b"\x00"].concat();
+        assert!(matches!(decode(&bad_sum), Err(Failure::Invalid(_))));
+        assert!(matches!(decode(&[&bad_sum[..], b"\x78\x00"].concat()), Err(Failure::Unsupported(_))));
     }
 
     /// A stream of [`Kind::Compressed`] is stored as it is, at any level, leaf or not.
@@ -2023,7 +2085,7 @@ mod tests {
         for n in 1..c.len() {
             assert!(matches!(decode(&c[..n], &natives()), Err(Failure::Invalid(_))), "{n} bytes");
         }
-        assert_eq!(decode(&c, &[]), unsupported("no native implementation of rev@1"));
+        assert_eq!(decode(&c, &[]), resource("no native implementation of rev@1"));
         // the output checksum
         let bad = encode(&sample(), Some(checksum(SAMPLE) ^ 1), Level::Zstd(3)).unwrap();
         assert_eq!(decode(&bad, &natives()), invalid("output checksum mismatch"));
