@@ -119,9 +119,6 @@ A type or a structure is <dfn export>implicitly-sized</dfn> when its byte length
 Unless stated as being implicitly-sized,
 all types have the defined byte length out of the context.
 
-<dfn for=type>bool</dfn> is a Boolean value, either true or false.
-It has no associated encoding scheme and can't occur in any structure.
-
 <dfn for=type>u8</dfn> is an unsigned 8-bit integer, occupying 1 byte.
 Its range is [0, 2<sup>8</sup>).
 
@@ -171,9 +168,6 @@ This specification uses two kinds of such contexts:
     There MUST be a single set of the numbers of elements that satisfy these conditions.
 *   When an |a|[*] field is given with a constraint,
     the field extends until the first instance of |a| which doesn't satisfy the required constraint.
-
-<dfn for=type>string</dfn> is an alias of [=u8=][*] with an additional constraint that
-the byte sequence is a valid UTF-8 string. [[RFC3629]]
 
 <h3 id=structure>
 Structure</h3>
@@ -682,7 +676,7 @@ The compressed external structure (<dfn for=block>compressed_data</dfn>) consist
       <td>[=offset=]
       <td>
     <tr>
-      <td><dfn>checksum</dfn>
+      <td><dfn noexport>checksum</dfn>
       <td>[=u8=][[=checksum_size=]]
       <td>[=If=] [=checksum_method=] is not None, [=depends on=] [=checksum_method=]
   </tbody>
@@ -715,7 +709,7 @@ The uncompressed external structure (<dfn for=block>uncompressed_data</dfn>) con
       <td>[=u8=][*]
       <td>
     <tr>
-      <td><dfn>checksum</dfn>
+      <td><dfn noexport>checksum</dfn>
       <td>[=u8=][[=checksum_size=]]
       <td>[=If=] [=checksum_method=] is not None
   </tbody>
@@ -1064,7 +1058,7 @@ A <dfn>special node</dfn> is a [=struct=] with the following [=struct/items=], r
 * <dfn for="special node">kind</dfn>, one of "`fifo`", "`char-device`" or "`block-device`".
 * <dfn for="special node">device</dfn>, a pair of non-negative integers (major, minor)
     if [=special node/kind=] is "`char-device`" or "`block-device`", or null otherwise.
-* <dfn for="special node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+* <dfn noexport for="special node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
 
 <div class=note>
   A device number is stored as a pair, not as a platform-specific `dev_t` encoding,
@@ -1080,7 +1074,7 @@ representing a kind of node not defined by this version of this specification:
 
 * <dfn for="unknown node">kind</dfn>, an integer greater than 4.
 * <dfn for="unknown node">data</dfn>, a [=byte sequence=].
-* <dfn for="unknown node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
+* <dfn noexport for="unknown node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
 
 The [=archive value/root=] can't be a [=link node=], a [=special node=] or an [=unknown node=].
 
@@ -1136,7 +1130,7 @@ To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
 A <dfn>link target</dfn> is a [=struct=] with the following [=struct/items=]:
 
 * <dfn for="link target">encoding</dfn>, either "`wtf-8`" or "`raw`".
-* <dfn for="link target">bytes</dfn>, a non-empty [=byte sequence=] not containing 00<sub>16</sub>,
+* <dfn noexport for="link target">bytes</dfn>, a non-empty [=byte sequence=] not containing 00<sub>16</sub>,
     which is a valid WTF-8 [[WTF-8]] string if [=link target/encoding=] is "`wtf-8`".
 
 Unlike an [=entry name=], a [=link target=] is a path which may contain 2F<sub>16</sub> (`/`) as a separator,
@@ -1179,7 +1173,7 @@ In particular, no node is a descendant of a [=link node=].
 </div>
 
 A <dfn>link group</dfn> is an opaque value that is only compared for equality,
-and is either a pair of a segment and a segment-local integer or an archive-wide integer ([[#link-groups]]).
+and is either a pair of a segment and a [=segment-local=] integer or an [=archive-wide=] integer ([[#link-groups]]).
 Two [=archive values=] are equal if they are equal after a one-to-one renaming of their [=/link groups=].
 
 <h3 id=content-blocks>
@@ -1243,8 +1237,8 @@ A leaf block and all subsequent content blocks up to the next leaf block or the 
 form a <dfn>parcel</dfn>.
 When no leaf block is interleaved with non-leaf blocks,
 a parcel consists of a leaf block, the non-leaf blocks it references if it is a formula block,
-and possibly auxiliary blocks.
-In that case a decompressor can read a single file by reading its parcel and the auxiliary blocks it uses,
+and possibly [=auxiliary blocks=].
+In that case a decompressor can read a single file by reading its parcel and the [=auxiliary blocks=] it uses,
 and a streaming decompressor never has to retain a formula block beyond its parcel.
 
 <figure id=fig-segments>
@@ -1383,7 +1377,7 @@ collectively called [=meta/entries=] and numbered together.
 The root directory is numbered 0,
 subsequent directories are numbered from 1 to [=meta/num_directories=],
 individual files are numbered from ([=meta/num_directories=] + 1) to ([=meta/num_directories=] + [=meta/num_files=]),
-and special entries are numbered from ([=meta/num_directories=] + [=meta/num_files=] + 1)
+and [=special entries=] are numbered from ([=meta/num_directories=] + [=meta/num_files=] + 1)
 to ([=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=]).
 There MUST be at least one entry other than the root directory,
 i.e. [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] ≥ 1.
@@ -1447,7 +1441,7 @@ Entry structure (<dfn>entry</dfn>) then occurs for each directory, file and spec
       <td>[=u8=][*] ≠ 0
       <td>
     <tr>
-      <td><dfn>entry_name_sentinel</dfn>
+      <td><dfn noexport>entry_name_sentinel</dfn>
       <td>[=u8=] = 0
       <td>
     <tr>
@@ -1463,7 +1457,7 @@ Entry structure (<dfn>entry</dfn>) then occurs for each directory, file and spec
       <td>[=u8=][*] ≠ 0
       <td>[=If=] this entry is for a special entry and [=meta/special_kind=] = 1
     <tr>
-      <td><dfn>link_target_sentinel</dfn>
+      <td><dfn noexport>link_target_sentinel</dfn>
       <td>[=u8=] = 0
       <td>[=If=] this entry is for a special entry and [=meta/special_kind=] = 1
     <tr>
@@ -2595,11 +2589,11 @@ Any other import is an [=invalid archive=] failure.
 :: A memory of the |k|-th input, where |k| is a decimal number without leading zeros.
 : `aqr_output`
 :: A memory of the output.
-: `aqr_request`, `aqr_release`, `aqr_commit`
+: [=aqr_request|`aqr_request`=], [=aqr_release|`aqr_release`=], [=aqr_commit|`aqr_commit`=]
 :: Functions of a [=part module=], defined below. A [=whole module=] MUST NOT import them.
-: `aqr_heartbeat`
+: [=aqr_heartbeat|`aqr_heartbeat`=]
 :: A function defined below.
-: `aqr_log`
+: [=aqr_log|`aqr_log`=]
 :: The diagnostic function, defined below.
 
 A memory is <dfn>sized to fit</dfn> a length |L| when both its minimum and maximum are &lceil;|L| / 65536&rceil; pages.
@@ -2745,7 +2739,7 @@ Each <dfn>import</dfn> consists of the following:
       <td>[=u8=][*] ≠ 0
       <td>
     <tr>
-      <td><dfn>import_path_sentinel</dfn>
+      <td><dfn noexport>import_path_sentinel</dfn>
       <td>[=u8=] = 0
       <td>
     <tr>
@@ -3011,11 +3005,11 @@ A mirrored header consists of the following:
       <td>[=offset=]
       <td>
     <tr>
-      <td><dfn>encrypted_mirror_magic</dfn>
+      <td><dfn noexport>encrypted_mirror_magic</dfn>
       <td>[=u8=][8] = [=const/ENCRYPTED_MIRROR_MAGIC=]
       <td>
     <tr>
-      <td><dfn>mirror_index</dfn>
+      <td><dfn noexport>mirror_index</dfn>
       <td>[=u32le=] = <var>k</var>
       <td>
     <tr>
@@ -4701,17 +4695,6 @@ or discarded as only meaningful to the ZIP container.</p>
     "month": "March",
     "year": 1997,
     "href": "https://www.rfc-editor.org/info/rfc2119"
-  },
-  "RFC3629": {
-    "title": "UTF-8, a transformation format of ISO 10646",
-    "authors": ["François Yergeau"],
-    "status": "STD 63",
-    "publisher": "IETF",
-    "number": 3629,
-    "doi": "10.17487/RFC3629",
-    "month": "November",
-    "year": 2003,
-    "href": "https://www.rfc-editor.org/info/rfc3629"
   },
   "RFC4648": {
     "title": "The Base16, Base32, and Base64 Data Encodings",
