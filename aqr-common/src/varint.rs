@@ -32,8 +32,8 @@ pub fn len(v: u64) -> usize {
     (64 - (v | 1).leading_zeros() as usize).div_ceil(7)
 }
 
-/// Reads a varint at `*at` and advances past it. At most ten bytes are read; bits beyond
-/// 64 are dropped.
+/// Reads a varint at `*at` and advances past it. At most ten bytes are read, and bits beyond
+/// 64 are an error.
 #[inline]
 pub fn get(src: &[u8], at: &mut usize) -> Result<u64, Corrupt> {
     // Fast path: one byte.
@@ -52,6 +52,9 @@ fn get_slow(src: &[u8], at: &mut usize) -> Result<u64, Corrupt> {
     for shift in (0..64).step_by(7) {
         let b = *src.get(*at).ok_or(Corrupt("truncated"))?;
         *at += 1;
+        if shift == 63 && b > 1 {
+            return Err(Corrupt("bad varint"));
+        }
         v |= ((b & 0x7f) as u64) << shift;
         if b < 0x80 {
             return Ok(v);
@@ -108,5 +111,9 @@ mod tests {
         assert_eq!(get(&b, &mut at), Err(Corrupt("truncated")));
         assert_eq!(get(&[0x80; 11], &mut 0), Err(Corrupt("bad varint")));
         assert_eq!(get(&[0x80, 0x80], &mut 0), Err(Corrupt("truncated")));
+        // ten bytes at most, of 64 bits: the last holds the most significant bit only
+        assert_eq!(get(&[&[0x80; 9][..], &[0x01]].concat(), &mut 0), Ok(1 << 63));
+        assert_eq!(get(&[&[0xff; 9][..], &[0x02]].concat(), &mut 0), Err(Corrupt("bad varint")));
+        assert_eq!(get(&[&[0x80; 9][..], &[0x7f]].concat(), &mut 0), Err(Corrupt("bad varint")));
     }
 }

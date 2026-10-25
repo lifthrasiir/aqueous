@@ -41,7 +41,6 @@ urlPrefix: https://www.rfc-editor.org/rfc/rfc9581.html; spec: RFC9581; type: cdd
     text: etime; url: #section-6
     text: duration; url: #section-6
     text: $$ETIME-ELECTIVE; url: #section-3
-    text: $ETIME-TIMESCALE; url: #section-3.4
 </pre>
 
 <h2 id=introduction>
@@ -94,16 +93,16 @@ Expressions</h3>
 
 All expressions are interpreted according to the standard arithmetics, with the following extensions:
 
-*   |a| / |b| equals to floor(|a| ÷ |b|).
-*   |a| % |b| is a non-negative modulo of |a| divided by |b|, and equals to |a| - (|a| / |b|) × |b|.
-*   |a| &lt;&lt; |b| equals to |a| × 2<sup>|b|</sup>.
-*   |a| &gt;&gt; |b| equals to |a| / 2<sup>|b|</sup>.
+*   |a| / |b| equals floor(|a| ÷ |b|).
+*   |a| % |b|, where |b| > 0, is a non-negative modulo of |a| divided by |b|, and equals |a| - (|a| / |b|) × |b|.
+*   |a| &lt;&lt; |b| equals |a| × 2<sup>|b|</sup>.
+*   |a| &gt;&gt; |b| equals |a| / 2<sup>|b|</sup>.
 *   |XX|<sub>16</sub> denotes a hexadecimal integer.
 *   (|a|, |b|, …) denotes an ordered array of values.
 *   (|XX| |YY| |ZZ|)<sub>16</sub> is a shorthand for (|XX|<sub>16</sub>, |YY|<sub>16</sub>, |ZZ|<sub>16</sub>).
 *   |a| || |b| concatenates two arrays |a| and |b|, treating any non-array value as a singleton array (|a|) or (|b|).
-*   For array |a|, |a|<sup>|n|</sup> equals to |a| || |a|<sup>|n|-1</sup> when |n| > 0.
-    |a|<sup>0</sup> equals to an empty array ().
+*   For array |a|, |a|<sup>|n|</sup> equals |a| || |a|<sup>|n|-1</sup> when |n| > 0.
+    |a|<sup>0</sup> equals an empty array ().
 *   [|a|, |b|] denotes a closed interval between |a| and |b|, both inclusive.
 *   [|a|, |b|) denotes a half-open interval between |a| (inclusive) and |b| (exclusive).
 
@@ -137,29 +136,31 @@ Its range is [0, 2<sup>64</sup>).
 <strong><dfn for=type>u</dfn>(|n|)</strong>, where |n| is an integer less than 2<sup>64</sup>,
 is the smallest integer type that can represent |n| if |n| > 0,
 and a zero-sized type if |n| = 0.
-In the other words,
+In other words,
 
 * If |n| = 0, u(|n|) is zero-sized.
-* If |n| ∈ [1, 2<sup>8</sup>), u(|n|) is same as [=u8=].
-* If |n| ∈ [2<sup>8</sup>, 2<sup>16</sup>), u(|n|) is same as [=u16le=].
-* If |n| ∈ [2<sup>16</sup>, 2<sup>32</sup>), u(|n|) is same as [=u32le=].
-* If |n| ∈ [2<sup>32</sup>, 2<sup>64</sup>), u(|n|) is same as [=u64le=].
+* If |n| ∈ [1, 2<sup>8</sup>), u(|n|) is the same as [=u8=].
+* If |n| ∈ [2<sup>8</sup>, 2<sup>16</sup>), u(|n|) is the same as [=u16le=].
+* If |n| ∈ [2<sup>16</sup>, 2<sup>32</sup>), u(|n|) is the same as [=u32le=].
+* If |n| ∈ [2<sup>32</sup>, 2<sup>64</sup>), u(|n|) is the same as [=u64le=].
 
 <dfn for=type>leb128</dfn> is an unsigned 64-bit integer encoded using the variable number of bytes with the LEB128 encoding.
 Each byte, except the last, has its most significant bit (MSB) set to 1, indicating that more bytes follow.
 The remaining 7 bits of each byte are used to store the integer's value.
 The least significant 7 bits of the first byte are the least significant bits of the integer, and so on.
 The last byte has its MSB set to 0.
-Its range is [0, 2<sup>64</sup>).
+Its range is [0, 2<sup>64</sup>):
+an encoding MUST be at most 10 bytes long, and MUST NOT encode a value of 2<sup>64</sup> or more.
 
 <div class=note>
-  This allows for multiple encodings for given number for any number smaller than 2<sup>32</sup>.
+  This allows multiple encodings for any number less than 2<sup>63</sup>, padded with bytes of zero bits,
+  unless the shortest encoding is required.
 </div>
 
 <strong>|a|[|n|]</strong>, where |n| is an integer, denotes an ordered array of *a*s.
 |n|'s range is [0, 2<sup>64</sup>).
 
-<strong>|a|[*]</strong> denotes an [=implicitly-sized=] unordered array of *a*s with the unspecified quantity.
+<strong>|a|[*]</strong> denotes an [=implicitly-sized=] ordered array of *a*s with an unspecified number of elements.
 The number of elements is implicitly determined from the context.
 This specification uses two kinds of such contexts:
 
@@ -167,7 +168,7 @@ This specification uses two kinds of such contexts:
     the numbers of elements in those fields are increased as needed to exactly fill the required byte length.
     There MUST be a single set of the numbers of elements that satisfy these conditions.
 *   When an |a|[*] field is given with a constraint,
-    the field extends until the first instance of |a| which doesn't satisfy the required constraint.
+    the field extends until, but not including, the first instance of |a| which doesn't satisfy the required constraint.
 
 <h3 id=structure>
 Structure</h3>
@@ -176,12 +177,12 @@ Structure</h3>
 Each field has the following properties:
 
 * The descriptive **name** of the field (e.g. [=block/size=], [=cdata/compression_params=]).
-* The data **type** of the field (e.g. [=leb128=], [=u8=][size]), with an optional constraint.
+* The data **type** of the field (e.g. [=leb128=], [=u8=][[=block/size=]]), with an optional constraint.
 * Optional criteria or **conditions** that dictate the presence, value, or interpretation of the field.
 
 Field names can only coincide when the field's type varies by conditions,
 in which case at most one such condition is applicable at any time.
-The name can be omitted when the field's name is same as the previous field.
+The name can be omitted when the field's name is the same as the previous field's.
 
 The field type may be <dfn for=type>offset</dfn>,
 which is a special zero-sized type interpreted as
@@ -200,10 +201,10 @@ The optional constraint does not affect the field's encoding and only narrows do
 The conditions may be one of the following:
 
 * "<dfn for=cond>Optional</dfn>" indicates that conforming implementations MAY include or exclude given field as needed.
-* "<dfn for=cond>If</dfn> …" indicates that the field MUST be included only when the specified condition is true.
+* "<dfn for=cond>If</dfn> …" indicates that the field MUST be included if and only if the specified condition is true.
 * "<dfn for=cond>Depends on</dfn> …" indicates that the field's interpretation varies with the specified set of other fields.
 
-Structures are [=implicitly-sized=] only when its byte length is not available through the context
+Structures are [=implicitly-sized=] only when their byte length is not available through the context
 and at least one [=implicitly-sized=] field exists therein.
 
 <h3 id=constants>
@@ -300,8 +301,8 @@ which is one of the following:
 <div class=note>
   An unsupported failure tells that a decompressor implementing a newer version may be able to interpret the input,
   which is not the case for an [=invalid archive=] failure in general.
-  It takes precedence over an [=invalid archive=] failure in the rest of the archive,
-  since a future version may give a different meaning to the rest.
+  It takes precedence over an [=invalid archive=] failure in any block ([[#interpretation]]),
+  since a future version may give a different meaning to the other blocks.
 </div>
 
 A conforming compressor, given an [=archive value=],
@@ -317,7 +318,7 @@ Container</h2>
 Block</h3>
 
 **Blocks** are a typed byte sequence.
-The entirety of an unencrypted archive and the beginning of an encrypted archive consists of either blocks or block-like structures.
+The entirety of an unencrypted archive and the beginning of an encrypted archive consist of either blocks or block-like structures.
 
 Blocks have the following generic structure:
 
@@ -623,7 +624,7 @@ This specification doesn't assign any meanings to those blocks.
 </div>
 
 The following block types are defined as invalid due to the use as block-like structures.
-The valid archive MUST NOT include such block types as a proper block.
+A valid archive MUST NOT include such block types as a proper block.
 
 * Block 278<sub>16</sub> ([=const/HEADER_TYPE=]) is used for the unencrypted archive header.
 * Block 69<sub>16</sub> ([=const/OVERLAY_HEADER_TYPE=]) is used for the overlay archive header.
@@ -635,9 +636,11 @@ The valid archive MUST NOT include such block types as a proper block.
 Shared external structure</h3>
 
 Many block types share the same external structure, only varying its internal structure.
-It may or may not have been compressed
-and may use different <dfn for=block>compression_method</dfn> or <dfn for=block>checksum_method</dfn>
+The structure may or may not be compressed,
+and uses a <dfn for=block>compression_method</dfn> and a <dfn for=block>checksum_method</dfn>
 specified by the parent structure.
+Each compression method defines the structure of its parameters ([=cdata/compression_params=]),
+whose byte length is determined by parsing it.
 Each [=checksum_method=] also has an associated, fixed <dfn for=block>checksum_size</dfn>.
 <dfn for="">Checksummed Zstandard data</dfn> is the compressed external structure ([=block/compressed_data=])
 with [[#zstandard-compression-method|Zstandard]] as [=compression_method=]
@@ -665,7 +668,7 @@ The compressed external structure (<dfn for=block>compressed_data</dfn>) consist
       <td>[=If=] [=cdata/original_size_delta=] = 0
     <tr>
       <td><dfn>compression_params</dfn>
-      <td>[=u8=][*]
+      <td>Parameters of [=compression_method=]
       <td>[=Depends on=] [=compression_method=]
     <tr>
       <td><dfn>data_start</dfn>
@@ -760,7 +763,7 @@ Its parameters ([=cdata/compression_params=]) are as follows:
   </tbody>
 </table>
 
-The meaning of the [=window_descriptor=] field is identical to the Zstandard's `Window_Descriptor` byte [[!RFC9659]],
+The meaning of the [=window_descriptor=] field is identical to the Zstandard's `Window_Descriptor` byte,
 which determines `Window_Size` as in [[!RFC8878]], Section 3.1.1.1.2.
 Consequently each Zstandard block holds at most `Block_Maximum_Size` = min(`Window_Size`, 128 KiB) bytes of data.
 
@@ -776,7 +779,7 @@ as described in [[#dictionary-block]].
 
 </div>
 
-Each data compressed by this method is a sequence of Zstandard blocks,
+Data compressed by this method is a sequence of Zstandard blocks,
 without an additional framing provided by Zstandard frames.
 [=cdata/data=] MUST consist of one or more such blocks without any other bytes,
 where only the last block is signalled as the final block by its block header.
@@ -797,7 +800,7 @@ The resulting [=checksum_size=] is 8.
 Spacer block</h3>
 
 Blocks 0<sub>16</sub> through 3<sub>16</sub> are **spacer blocks**.
-Its data consists of the following:
+Their data consists of the following:
 
 <div dfn-for=spacer>
 
@@ -816,8 +819,8 @@ Its data consists of the following:
 
 </div>
 
-Spacer blocks can skip any number of bytes besides from a single byte,
-which is not required due to the presence of blockwise [=block/padding=].
+A spacer block occupies any even number of bytes from 2,
+which is sufficient since every block occupies an even number of bytes due to [=block/padding=].
 
 Conforming compressors MUST fill [=spacer/space=] with zero bytes in order to avoid data leak,
 but its content doesn't affect the result of [=interpret an archive|interpreting an archive=].
@@ -850,9 +853,9 @@ and its [=szhint/size_hint=] field MUST be equal to the footer's [=archive/size_
 </div>
 
 <h3 id=unencrypted-archive>
-Unencrypted Archive</h3>
+Unencrypted archive</h3>
 
-An **unencrypted archive** consists of a header, one or more blocks and a footer.
+An **unencrypted archive** consists of a header, zero or more blocks and a footer.
 
 <div dfn-for=archive>
 
@@ -941,10 +944,11 @@ and has its own media type ([[#overlay-media-type]]).
   the footer, found from the end of the archive, and [[#mirror-block|mirror blocks]], found by scanning.
   Metadata blocks are only found through them, and an encrypted archive tells it in its decrypted payload.
 </div>
-The offset between [=archive/header_magic=] and [=archive/footer_magic=] is recorded as [=archive/size_hint=],
-which MAY be also replicated as [=archive/size_hint_block=] if random access is desired.
 
-The footer size, which is the size of all fields after (but not including) [=archive/footer_magic=],
+The offset between [=archive/header_magic=] and [=archive/footer_magic=] is recorded as [=archive/size_hint=],
+which MAY also be replicated as [=archive/size_hint_block=] if random access is desired.
+
+The footer size, which is the size of all fields between [=archive/footer_size=] and [=archive/footer_size_copy=] (both exclusive),
 is recorded both in [=archive/footer_size=] and in [=archive/footer_size_copy=].
 Implementations are therefore expected to first identify [=archive/header_magic=] and skip to the end of the file
 to read [=archive/footer_size_copy=] and eventually [=archive/footer_magic=] to read the footer.
@@ -952,12 +956,12 @@ to read [=archive/footer_size_copy=] and eventually [=archive/footer_magic=] to 
 <div class=note>
   [=archive/footer_size=] and [=archive/footer_size_copy=] are [=u16le=] instead of [=leb128=].
   Therefore the footer size is limited to 65,535 bytes,
-  and a single read of 65,543 bytes (including [=archive/footer_magic=] and [=archive/footer_size_copy=]) is
+  and a single read of 65,545 bytes (including [=archive/footer_magic=], [=archive/footer_size=] and [=archive/footer_size_copy=]) is
   sufficient to guarantee that the entire footer is read.
 </div>
 
-[=archive/metadata_backward_offset=] is the offset from [=archive/footer_start=] to the beginning of last metadata block,
-just like [=meta/previous_metadata_offset=] is the offset from the beginning of the current metadata block to the previous one.
+[=archive/metadata_backward_offset=] is the offset from [=archive/footer_start=] back to the beginning of the last metadata block,
+just like [=meta/previous_metadata_offset=] is the offset from the beginning of the current metadata block back to the previous one.
 It MUST be 0 if and only if there is no metadata block,
 so that a decompressor can tell such archives without scanning [=archive/blocks=].
 
@@ -969,7 +973,7 @@ except that [=internal imports=] ([[#import-block]]) read the result of precedin
 Segments are described in [[#segments]].
 
 Alternatively, [=archive/blocks=] can have no metadata block.
-Such archive decompresses into a single unnamed file,
+Such an archive decompresses into a single unnamed file,
 whose content is the concatenation of the contents of all [=leaf blocks=] in the order of appearance.
 It decompresses into an empty file if there is no leaf block.
 
@@ -1008,11 +1012,11 @@ To <dfn>locate an archive</dfn> in a [=byte sequence=] |file|:
         1. If |back| is 0, return |file|.
         2. Read blocks from the offset 6 by the generic structure ([[#block]]),
             with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
-            until the bytes at the current offset |f| start with [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=].
+            until the bytes at the current offset |e| start with [=const/FOOTER_MAGIC=] or [=const/OVERLAY_FOOTER_MAGIC=].
             If it fails to read a block before that, or the footer magic doesn't [=match=] the header magic, return failure.
-        3. Let |n| be the 2 bytes of |file| from |f| + 6 as [=u16le=].
-            If |file| is shorter than |f| + |n| + 10 bytes, return failure.
-            Otherwise, return the first |f| + |n| + 10 bytes of |file|.
+        3. Let |m| be the 2 bytes of |file| from |e| + 6 as [=u16le=].
+            If |file| is shorter than |e| + |m| + 10 bytes, return failure.
+            Otherwise, return the first |e| + |m| + 10 bytes of |file|.
     4. If |back| is not null, return the bytes of |file| from |back|.
     5. Return failure.
 </ol>
@@ -1120,7 +1124,7 @@ neither of which contains a zero byte:
 * If its [=entry name/encoding=] is "`raw`", byte C1<sub>16</sub> followed by its [=entry name/bytes=].
 
 <div class=note>
-  Byte C1<sub>16</sub> was chosen because it can't occur in WTF-8 and any other known extension to UTF-8.
+  Byte C1<sub>16</sub> was chosen because it can't occur in WTF-8 or any other known extension to UTF-8.
 </div>
 
 Conforming compressors are strongly RECOMMENDED to use the "`wtf-8`" encoding,
@@ -1129,7 +1133,7 @@ and SHOULD only use the "`raw`" encoding as a round-trip measure.
 To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
 
 <ol class=algorithm>
-    1. If |bytes|[0] is C1<sub>16</sub>, let |name| be an [=entry name=]
+    1. If |bytes| is not empty and |bytes|[0] is C1<sub>16</sub>, let |name| be an [=entry name=]
         whose [=entry name/encoding=] is "`raw`" and [=entry name/bytes=] are |bytes| without the first byte.
     2. Otherwise, if |bytes| is a valid WTF-8 string, let |name| be an [=entry name=]
         whose [=entry name/encoding=] is "`wtf-8`" and [=entry name/bytes=] are |bytes|.
@@ -1185,7 +1189,7 @@ In particular, no node is a descendant of a [=link node=].
 
 A <dfn>link group</dfn> is an opaque value that is only compared for equality,
 and is either a pair of a segment and a [=segment-local=] integer or an [=archive-wide=] integer ([[#link-groups]]).
-Two [=archive values=] are equal if they are equal after a one-to-one renaming of their [=/link groups=].
+Two [=archive values=] are equal if and only if they become identical by some one-to-one renaming of the [=/link groups=] of one of them.
 
 <h3 id=content-blocks>
 Content blocks</h3>
@@ -1269,7 +1273,7 @@ Metadata block</h3>
 
 Blocks 10<sub>16</sub> through 17<sub>16</sub> are **metadata blocks**,
 whose [=block/type=] is <code>0001&thinsp;0|m||ss|</code> in binary ([[#block-types]]).
-Their data uses the Shared external structure ([[#shared-external-structure]]),
+Their data uses the shared external structure ([[#shared-external-structure]]),
 with [[#xxh64-checksum-method|XXH64]] as [=checksum_method=]
 and [=compression_method=] given by |m|: None if |m| is 0, and [[#zstandard-compression-method|Zstandard]] if |m| is 1.
 
@@ -1344,17 +1348,18 @@ The internal structure after decompression is as follows:
   </tbody>
 </table>
 
-All relative offsets are measured from the beginning of the current metadata block,
+All relative offsets are measured backward from the beginning of the current metadata block:
+a relative offset |o| refers to the block starting |o| bytes before the current metadata block,
 implying that the offset of zero is invalid.
 All valid relative offsets are also even.
 
 Each metadata block describes the [=content blocks=] in its [=segment=],
-i.e. blocks appeared after the previous metadata block, if any, and until the current metadata block.
-The previous metadata block is linked via [=meta/previous_metadata_offset=]
-which is also the maximum possible offsets that can occur in this particular metadata block.
+i.e. blocks appearing after the previous metadata block, if any, and until the current metadata block.
+The previous metadata block is linked via [=meta/previous_metadata_offset=],
+which is also the maximum possible offset that can occur in this particular metadata block.
 If there is no prior metadata block,
 [=meta/previous_metadata_offset=] is the relative offset
-to the end of [=archive/header_magic=] in the Unencrypted Archive structure ([[#unencrypted-archive]]),
+to the end of [=archive/header_magic=] in the unencrypted archive structure ([[#unencrypted-archive]]),
 plus 1 so that it never points to a valid block.
 
 [=meta/num_modules=], [=meta/num_resources=] and [=meta/num_dictionaries=] are
@@ -1372,15 +1377,16 @@ and [=special entries=] are numbered from ([=meta/num_directories=] + [=meta/num
 to ([=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=]).
 There MUST be at least one entry other than the root directory,
 i.e. [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] ≥ 1.
-A parent of the entry index |k| in [=meta/entry_parents=] MUST be a directory less than |k|,
+[=meta/entry_parents=][|k| - 2] is the parent of the entry |k| for each |k| ≥ 2,
+and MUST be a directory less than |k|,
 i.e. in [0, min(|k| - 1, [=meta/num_directories=])], so that directories can't form a cycle.
-The parent of the root directory (entry 0) and the entry 1 is always fixed to None and the root directory,
+The root directory (entry 0) has no parent and the parent of the entry 1 is always the root directory,
 so they are omitted.
 
 Issue: Whether a segment without any entry other than the root directory should be allowed,
 e.g. to update only the archive-wide optional metadata or the [=entry extra=] of the root directory.
 
-File parameters (<dfn>file_param</dfn>) occur for each file (but not directory), and consist of the following:
+File parameters (<dfn>file_param</dfn>) occur for each file (but not for directories or special entries), and consist of the following:
 
 <table class=data>
   <thead>
@@ -1539,23 +1545,23 @@ and an optional [=base=] |base|, which is an [=archive value=]:
 
 <ol class=algorithm>
     1. If |input| starts with [=const/ENCRYPTED_HEADER_MAGIC=] or [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]:
-        1. Parse |input| as the Encrypted Archive structure ([[#encrypted-archive]]) in its entirety.
+        1. Parse |input| as the encrypted archive structure ([[#encrypted-archive]]) in its entirety.
             If it fails to parse, return an [=invalid archive=] failure.
         2. If [=envelope/header_checksum=] is present and doesn't match, return an [=invalid archive=] failure.
         3. If [=envelope/lg_work_factor=] exceeds an implementation-defined limit, return a [=resource failure=].
         4. If |passphrase| is not given, or the file key can't be unwrapped from [=envelope/encrypted_file_key=]
             with |passphrase| as described in [[!AGE]], return a [=decryption failure=].
-        5. Using the unwrapped file key, verify [=envelope/age_header_mac=] against the reconstructed AGE header
-            and decrypt the [=AGE payload=] as described in [[!AGE]].
+        5. Using the unwrapped file key, verify [=envelope/age_header_mac=] against the reconstructed age header
+            and decrypt the [=age payload=] as described in [[!AGE]].
             If either fails, return an [=invalid archive=] failure.
         6. Set |input| to the decrypted payload.
             It MUST satisfy the additional constraints in [[#encrypted-archive]],
             or an [=invalid archive=] failure is returned.
-    2. If |input| parses as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety,
+    2. If |input| parses as the unencrypted archive structure ([[#unencrypted-archive]]) in its entirety,
         with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
         and the type of any of [=archive/blocks=] is [=critical=] and not defined by this specification,
         return an [=unsupported failure=].
-    3. Parse |input| as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety.
+    3. Parse |input| as the unencrypted archive structure ([[#unencrypted-archive]]) in its entirety.
         If it fails to parse, return an [=invalid archive=] failure.
     4. If |input| is an [=overlay archive=] and |base| is not given, return a [=base failure=].
     5. If |input| is a [=standalone archive=], set |base| to an [=archive value=]
@@ -1565,7 +1571,7 @@ and an optional [=base=] |base|, which is an [=archive value=]:
         1. Let |content| be the concatenation of the [=file contents=] of all [=leaf blocks=] in [=archive/blocks=],
             in the order of appearance.
         2. Return an [=archive value=] whose [=archive value/root=] is a [=file node=]
-            with |content| as [=file node/content=] and null as [=file node/extra=],
+            with |content| as [=file node/content=], null as [=file node/link group=] and null as [=file node/extra=],
             and whose [=archive value/extra=] is an empty map.
     7. If the [=archive value/root=] of |base| is a [=directory node=], let |root| be a copy of it.
         Otherwise let |root| be a [=directory node=] with an empty map as [=directory node/children=] and null as [=directory node/extra=].
@@ -1686,14 +1692,9 @@ A tombstone is never kept in the result, even under a directory that didn't exis
 A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=],
 which can be cleared by an empty map `{}` instead.
 
-There SHOULD NOT be multiple non-directory [=meta/entry|entries=] with the same path across metadata blocks,
-other than a [=tombstone=] removing an earlier entry,
-and if there are, only the last one is considered valid.
-
 <div class=note>
-  Directories necessarily reappear in later segments to hold new files under them.
-  The rule above that there SHOULD NOT be multiple entries with the same path
-  therefore only concerns non-directory entries.
+  Directories necessarily reappear in later segments to hold new files under them,
+  which is why a directory is merged with an existing one rather than replacing it.
   For the same reason, a reappearing directory doesn't have to repeat its [=entry extra=].
 </div>
 
@@ -1754,9 +1755,10 @@ Its data consists of the following:
 </table>
 
 If a dictionary is in use, its <em>0-based</em> index is specified as [=dblock/dictionary_index=].
-This field is intended for linear scanning,
-and the metadata block contains all necessary information for random access.
-[=dblock/compressed_data=] and [=dblock/uncompressed_data=] use the Shared external structure ([[#shared-external-structure]])
+For a leaf data block, the metadata block also gives the dictionary as [=meta/file_dictionary=],
+which is available before reading the block;
+for a non-leaf data block, [=dblock/dictionary_index=] is the only reference to the dictionary.
+[=dblock/compressed_data=] and [=dblock/uncompressed_data=] use the shared external structure ([[#shared-external-structure]])
 with [=compression_method=] and [=checksum_method=] determined as above.
 [=dblock/uncompressed_data=] represents a raw, uninterpreted byte sequence.
 
@@ -1849,7 +1851,7 @@ which is the only part of the dictionary that sequences can reference as precedi
 <h3 id=block-contents>
 Block contents</h3>
 
-The <dfn>decoded data</dfn> of a block using the Shared external structure ([[#shared-external-structure]]),
+The <dfn>decoded data</dfn> of a block using the shared external structure ([[#shared-external-structure]]),
 given its [=compression_method=] and [=checksum_method=], is determined as follows:
 
 * If [=compression_method=] is None, it is [=udata/data=].
@@ -1964,6 +1966,8 @@ and the byte sequences remaining on the stack after the last instruction are the
 </table>
 
 [=formula/block_ordinal_deltas=] lists the [=non-leaf items=] referenced by the formula block.
+Despite their names, [=formula/num_blocks=], [=formula/block_ordinal_deltas=] and [=formula/slice_block=] count non-leaf items,
+which are blocks except for [=import/import|imports=].
 Their <em>0-based</em> ordinals among the non-leaf items supplied by the non-leaf blocks following the formula block
 within the [=segment=], in the order of appearance,
 are |o|<sub>0</sub> = [=formula/block_ordinal_deltas=][0] and
@@ -2059,8 +2063,8 @@ whose structure is determined by the opcode as described in the following sectio
 </table>
 
 Opcodes are grouped by their roles:
-00<sub>16</sub> through 0F<sub>16</sub> load data or rearrange the stack,
-10<sub>16</sub> through 1F<sub>16</sub> compute byte sequences,
+00<sub>16</sub> through 0F<sub>16</sub> push data in the formula itself or rearrange the stack,
+10<sub>16</sub> through 1F<sub>16</sub> compute byte sequences from [=referenced items=] or the stack,
 and 20<sub>16</sub> through 2F<sub>16</sub> check them.
 Other opcodes are reserved.
 
@@ -2178,7 +2182,7 @@ Opcode 10<sub>16</sub> denotes a **Slice instruction**. Its operands consist of 
 <h4 id=insn-apply>
 Apply instruction</h4>
 
-Opcode 11<sub>16</sub> denotes a **Apply instruction**. Its operands consist of the following:
+Opcode 11<sub>16</sub> denotes an **Apply instruction**. Its operands consist of the following:
 
 <table class=data>
   <thead>
@@ -2368,7 +2372,7 @@ Opcode 20<sub>16</sub> denotes a **Checksum instruction**. Its operands consist 
 </table>
 
 The stack MUST NOT be empty.
-The XXH64 checksum of the top of the stack MUST be equal to [=formula/checksum_value=].
+The [[#xxh64-checksum-method|XXH64]] checksum of the top of the stack MUST be equal to [=formula/checksum_value=].
 
 A Checksum instruction <dfn>covers</dfn> the byte sequence at the top of the stack when it is executed,
 and the byte sequence remains the same item when moved by Swap instructions.
@@ -2886,7 +2890,7 @@ of all bytes from [=envelope/checksum_start=] to [=envelope/checksum_end=].
   and damage to [=envelope/lg_work_factor=] may make scrypt run for an arbitrarily long time.
 </div>
 
-All fields from [=envelope/lg_work_factor=] to [=envelope/age_header_mac=] are used to reconstruct an AGE v1 textual file header [[!AGE]] as follows:
+All fields from [=envelope/lg_work_factor=] to [=envelope/age_header_mac=] are used to reconstruct an age v1 textual file header [[!AGE]] as follows:
 
 <pre>
 age-encryption.org/v1
@@ -2902,8 +2906,8 @@ Where,
 * |encrypted_file_key_base64| is the base64 encoding of [=envelope/encrypted_file_key=] without padding;
 * |age_header_mac_base64| is the base64 encoding of [=envelope/age_header_mac=] without padding.
 
-The <dfn>AGE payload</dfn> consists of [=envelope/payload_nonce=] followed by the encrypted chunks in [=envelope/chunks=]
-and is interpreted in accordance to the AGE v1 format.
+The <dfn>age payload</dfn> consists of [=envelope/payload_nonce=] followed by the encrypted chunks in [=envelope/chunks=]
+and is interpreted in accordance with the age v1 format.
 Every encrypted chunk except the last one is 65,552 bytes long,
 i.e. 64 KiB of plaintext followed by a 16-byte authentication tag.
 
@@ -2911,7 +2915,7 @@ If the archive is not [=envelope/mirrored=], [=envelope/chunks=] consists of the
 Otherwise [=envelope/chunks=] also contains **mirrored headers**:
 for each encrypted chunk <var>C<sub>m</sub></var> numbered from 0,
 a mirrored header immediately precedes <var>C<sub>m</sub></var>
-if and only if <var>m</var> + 1 is either a power of two less than 64 or a positive multiple of 64.
+if and only if <var>m</var> + 1 is either a power of two from 2 to 32 or a positive multiple of 64.
 The <var>k</var>-th mirrored header numbered from 1 therefore precedes <var>C<sub>m</sub></var>
 where <var>m</var> = 2<sup><var>k</var></sup> − 1 for <var>k</var> ≤ 6 and <var>m</var> = 64(<var>k</var> − 5) − 1 for <var>k</var> ≥ 6,
 and no mirrored header follows the last encrypted chunk.
@@ -2974,7 +2978,7 @@ of all bytes from [=emirror/checksum_start=] to [=emirror/checksum_end=].
 
 Issue: The interval of 64 encrypted chunks follows the tentative distance of 4 MiB in [[#mirror-block]] and changes with it (`recovery-design.md` §5.5).
 
-The [=AGE payload=] MUST decrypt into a valid unencrypted archive ([[#unencrypted-archive]]),
+The [=age payload=] MUST decrypt into a valid unencrypted archive ([[#unencrypted-archive]]),
 either a [=standalone archive=] or an [=overlay archive=],
 with the following additional constraints:
 
@@ -3227,7 +3231,7 @@ It MUST be [=const/OVERLAY_MIRROR_MAGIC=] in an [=overlay archive=] and [=const/
 
 <div class=note>
   [=mirror/archive_offset=] distinguishes mirror blocks of this archive from those of another archive stored inside it,
-  which can be found by scanning and verify by themselves just like the mirror blocks of this archive.
+  which can be found by scanning and verified by themselves just like the mirror blocks of this archive.
   Such a mirror block may point to bytes that are not its target block in this archive,
   for example when the inner archive is split into multiple blocks.
   Since the inner archive is stored after [=archive/archive_start=] of this archive,
@@ -3351,7 +3355,7 @@ Repair</h3>
 Issue: The repair process is to be specified in this section (`recovery-design.md` §5.6).
 
 Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
-the encrypted chunks after one that fails to authenticate, which a standard AGE implementation doesn't do.
+the encrypted chunks after one that fails to authenticate, which a standard age implementation doesn't do.
 This is to be specified with the repair process as a separate step producing the decrypted bytes,
 where bytes of such chunks are marked as erasures and the interpretation of an archive stays unchanged
 (`recovery-design.md` §5.6).
@@ -3381,8 +3385,6 @@ aqr-opt-metadata = {
 
 $$aqr-opt-metadata-member = ()  ; No extension is defined by this specification
 
-aqr-offset = uint .gt 0
-
 aqr-entry-extra = {
   aqr-entry-timestamps
   aqr-entry-comment
@@ -3398,12 +3400,15 @@ $$aqr-entry-extra-member = ()  ; No extension is defined by this specification
 ; TODO: other extras for round trip
 </pre>
 
-There MUST NOT be any following bytes after this CBOR item.
+It MUST be a single well-formed CBOR data item [[!RFC8949]] without any following bytes,
+and no map in it can have duplicate keys.
+The value of every key defined by this specification MUST match its definition.
 If [=meta/optional_metadata_size=] is 0, the optional metadata is an empty map `{}`.
 
 The members of `aqr-entry-extra` are grouped by their purposes, and each group is described in the following sections.
 Keys of `aqr-entry-extra` from -1 to -59 are platform-neutral.
 Keys from -60 to -69 are specific to Windows, -70 to -79 to Unix, -80 to -89 to macOS, and -90 to -99 to other platforms.
+Keys from -100 are specific to the formats an entry was converted from.
 
 <h3 id=timestamps>Timestamps</h3>
 
@@ -3686,6 +3691,7 @@ aqr-entry-link-group = (
 
 <p><code>link-group</code> records that [=file nodes=] were originally the same file,
 i.e. hard links to the same inode on Unix or to the same file record on NTFS.
+It has no effect on other nodes, and a compressor SHOULD NOT give it to them.
 A non-negative value is <dfn>segment-local</dfn> and denotes the same group only within the same [=segment=],
 while a negative value is <dfn>archive-wide</dfn> and denotes the same group in every segment.
 The resulting [=file node/link group=] in the [=archive value=] is determined by [=interpret a segment|interpreting a segment=].</p>
@@ -3738,8 +3744,8 @@ aqr-entry-windows = (
 )
 </pre>
 
-`win-link-type` is only meaningful for a [=link node=],
-and determines the kind of a link to be created on Windows ([[#extraction]]).
+`win-link-type` determines the kind of a link to be created on Windows ([[#extraction]]).
+It has no effect on nodes other than [=link nodes=], and a compressor SHOULD NOT give it to them.
 "`file`" and "`directory`" denote a symbolic link to a file and to a directory respectively,
 and "`junction`" denotes a junction (a mount point reparse point).
 
@@ -3838,7 +3844,7 @@ A decompressor doing so is subject to the following requirements:
 * If multiple [=entry names=] in a directory map to the same file system name
     (e.g. due to case insensitivity or Unicode normalization),
     it MUST either fail or report the conflict, and MUST NOT write a later entry through an earlier one.
-* It MAY ignore the [=file node/extra=] of any file node and the [=directory node/extra=] of any directory node.
+* It MAY ignore the extra of any node, e.g. [=file node/extra=] and [=directory node/extra=].
     It SHOULD NOT apply ownership information such as `unix-uid` and `unix-gid` unless explicitly requested.
 
 <div class=note>
@@ -3932,7 +3938,8 @@ It SHOULD verify every checksum covering only the bytes it has computed.
   A decompressor looking up a single path has to consider every [=segment=] that may replace it,
   which is possible by reading metadata blocks backward from [=archive/metadata_backward_offset=]
   until the path or one of its ancestors is found as a non-directory entry in a segment.
-  If that entry is a [=tombstone=], the path doesn't exist.
+  If that entry is the path itself and not a [=tombstone=], it gives the node at the path;
+  otherwise, i.e. if it is a tombstone or an ancestor, the path doesn't exist.
   If no segment has such an entry, the path doesn't exist in a [=standalone archive=],
   and is looked up in the [=base=] of an [=overlay archive=].
   Likewise, reading a file using [=import/import|imports=] only needs the imported byte ranges,
@@ -3988,7 +3995,7 @@ IANA Considerations</h2>
 <dt>Interoperability considerations</dt>
 <dd>
   <p>An unencrypted archive may be preceded and followed by arbitrary bytes, e.g. a self-extracting executable stub;
-  its extent is determined by [=archive/header_magic=] and the footer ([[#unencrypted-archive]]).
+  its extent is determined by [=archive/header_magic=] and the footer ([[#locating-an-archive]]).
   An archive without any metadata block decompresses into a single unnamed file rather than a directory tree.
   An [=overlay archive=] has its own media type `application/aqo` ([[#overlay-media-type]]);
   an encrypted archive whose payload is an overlay archive is also of that type.</p>
@@ -4325,7 +4332,7 @@ from the following sources, where earlier sources are preferred:</p>
 
 <p>The archive comment has neither the language encoding flag nor an extra field,
 so its encoding is never specified by the archive itself.
-The compressor can decode it as in the last source above, and puts the result to `archive-comment`.</p>
+The compressor can decode it as in the last source above, and puts the result into `archive-comment`.</p>
 
 <div class=note>
   <p>Archive comments are often used for purposes other than human-readable text,
@@ -4620,7 +4627,7 @@ or discarded as only meaningful to the ZIP container.</p>
   },
   "RFC4648": {
     "title": "The Base16, Base32, and Base64 Data Encodings",
-    "authors": ["John Klensin", "Markus Hoffman"],
+    "authors": ["Simon Josefsson"],
     "status": "STD 51",
     "publisher": "IETF",
     "number": 4648,
@@ -4642,7 +4649,7 @@ or discarded as only meaningful to the ZIP container.</p>
   },
   "RFC8610": {
     "title": "Concise Data Definition Language (CDDL): A Notational Convention to Express Concise Binary Object Representation (CBOR) and JSON Data Structures",
-    "authors": ["Henk Birkholz", "Carsten Vigano", "Carsten Bormann"],
+    "authors": ["Henk Birkholz", "Christoph Vigano", "Carsten Bormann"],
     "publisher": "IETF",
     "number": 8610,
     "doi": "10.17487/RFC8610",
@@ -4671,22 +4678,12 @@ or discarded as only meaningful to the ZIP container.</p>
     "year": 2020,
     "href": "https://www.rfc-editor.org/info/rfc8949"
   },
-  "RFC9659": {
-    "title": "Window Sizing for Zstandard Content Encoding",
-    "authors": ["Nikhil Jaju", "William Handte"],
-    "publisher": "IETF",
-    "number": 9659,
-    "doi": "10.17487/RFC9659",
-    "month": "September",
-    "year": 2024,
-    "href": "https://www.rfc-editor.org/info/rfc9659"
-  },
   "WASM-CORE-3": {
     "title": "WebAssembly Core Specification",
     "authors": ["Andreas Rossberg"],
     "publisher": "W3C WebAssembly Community Group",
     "status": "Release 3.0",
-    "href": "https://webassembly.github.io/spec/core/"
+    "href": "https://webassembly.github.io/spec/versions/core/WebAssembly-3.0.pdf"
   },
   "WTF-8": {
     "title": "The WTF-8 encoding",
@@ -4694,8 +4691,10 @@ or discarded as only meaningful to the ZIP container.</p>
     "href": "https://wtf-8.codeberg.page/"
   },
   "XXHASH": {
-    "title": "xxHash",
-    "href": "http://www.xxhash.org"
+    "title": "xxHash fast digest algorithm",
+    "authors": ["Yann Collet"],
+    "status": "Version 0.2.0",
+    "href": "https://github.com/Cyan4973/xxHash/blob/v0.8.3/doc/xxhash_spec.md"
   }
 }
 </pre>
