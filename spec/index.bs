@@ -791,6 +791,7 @@ No name can contain a zero byte, and there are two allowed encodings:
 
 Conforming compressors are strongly RECOMMENDED to use the WTF-8 encoding,
 and SHOULD only use the raw byte sequence as a round-trip measure.
+Entry names from ZIP are discussed in [[#entry-names-from-zip]].
 
 A special entry represents a node other than a file or a directory, as determined by [=meta/special_kind=]:
 
@@ -855,45 +856,6 @@ They MUST agree with the actual positions of [=meta/entries=].
 [=meta/optional_metadata=] is described in Optional metadata ([[#optional-metadata]]).
 
 </div>
-
-<h5 id=entry-names-from-zip>Entry names from ZIP</h5>
-
-<p><em>This section is non-normative.</em></p>
-
-<p>A ZIP archive [[APPNOTE]] stores the path of each entry as a byte sequence in the local and central headers,
-with components separated by `/`.
-Its encoding is not always known from the header alone,
-and several extra fields carry the Unicode version of the same path.
-A compressor converting a ZIP archive can determine the encoding of each component from the following sources,
-where earlier sources are preferred:</p>
-
-<ol>
-  <li>Extra field 0x7075 (Info-ZIP Unicode Path) of version 1 [[INFOZIP-EXTRAFLD]],
-  whose `NameCRC32` matches the CRC-32 of the path in the header.
-  The field holds the path in UTF-8.
-  A field with a mismatching CRC-32 is ignored as specified by [[APPNOTE]],
-  as it may have been left over by a tool that changed the path without updating the field.
-  <li>The path in the header, if bit 11 (language encoding flag) of the general purpose bit flag is set.
-  The path is in UTF-8.
-  <li>Extra field 0x554e (Xceed Unicode), which holds the path in UTF-16LE.
-  It is converted to WTF-8, which preserves any lone surrogate.
-  <li>Extra field 0x5a4c (ZipArchive code page),
-  which holds the path encoded in the code page given in the same field.
-  If the field only has the code page, the path in the header is decoded with it instead.
-  <li>Extra field 0xe57a (ALZip code page), which gives the code page of the path in the header.
-  <li>Otherwise, the encoding of the path in the header is not specified.
-  It is traditionally IBM code page 437, but often the system code page of the machine that made the archive,
-  so the compressor has to guess the encoding.
-  If it can't, the raw byte sequence (prefixed with C1<sub>16</sub>) is used for each component.
-</ol>
-
-<div class=note>
-  <p>When the name comes from any source other than the last one,
-  the original bytes of a path not in UTF-8 are not preserved.
-  They only reflect how the ZIP container encodes the name,
-  while the name of the file itself is the decoded Unicode string.</p>
-</div>
-
 
 <h4 id=content-blocks>
 Content blocks</h4>
@@ -2403,72 +2365,7 @@ SHOULD preserve its precision, i.e. use an encoding whose quantization interval 
   </ul>
 </div>
 
-<h5 id=timestamps-from-zip>Timestamps from ZIP</h5>
-
-<p><em>This section is non-normative.</em></p>
-
-<p>A ZIP archive [[APPNOTE]] can carry the same timestamp in multiple places:
-the DOS date and time in the local and central headers,
-and extra fields 0x000a (NTFS), 0x5455 (extended timestamp), 0x5855 (Info-ZIP UNIX type 1) and 0x000d (UNIX)
-[[INFOZIP-EXTRAFLD]].
-A compressor converting a ZIP archive can choose the source of each key as follows,
-where earlier sources are preferred.
-The order prefers more precise sources first, and then more recent specifications for the same precision.</p>
-
-<table class=data>
-<thead>
-<tr>
-  <th>Key</th>
-  <th>Sources</th>
-</tr>
-<tbody>
-<tr>
-  <td>`crtime`</td>
-  <td>0x000a `Ctime`; 0x5455 `CrTime` (local header only)</td>
-</tr>
-<tr>
-  <td>`ctime`</td>
-  <td>-</td>
-</tr>
-<tr>
-  <td>`mtime`</td>
-  <td>0x000a `Mtime`; 0x5455 `ModTime`; 0x5855 or 0x000d `ModTime`; DOS date and time</td>
-</tr>
-<tr>
-  <td>`atime`</td>
-  <td>0x000a `Atime`; 0x5455 `AcTime` (local header only); 0x5855 or 0x000d `AcTime`</td>
-</tr>
-<tr>
-  <td>`arctime`</td>
-  <td>-</td>
-</tr>
-</table>
-
-<p>Each source is encoded as follows:</p>
-
-<ul>
-  <li>0x000a stores a Windows `FILETIME` |t|, the number of 100 ns intervals since 1601-01-01T00:00:00Z,
-  which is encoded as `125(`|t| &minus; 116444736000000000`)`.
-  A zero value means that the timestamp is absent.
-  <li>0x5455, 0x5855 and 0x000d store the number of seconds since 1970-01-01T00:00:00Z,
-  which is encoded as an untagged `int`.
-  It is a signed 32-bit integer according to [[INFOZIP-EXTRAFLD]],
-  though some implementations write times after 2038 as unsigned.
-  The central header version of 0x5455 only has `ModTime` even when its flags indicate others,
-  so the local header version is preferred when available.
-  <li>The DOS date and time is a local time in an unknown time zone with the precision of 2 seconds,
-  which is encoded as `[121(`|n|`)]` where 2|n| is the local time as if it were UTC.
-</ul>
-
-<p>When both the DOS date and time and a UTC source are present for `mtime`,
-their difference reveals the time zone offset where the archive was made.
-If the DOS time minus the UTC time differs from 900|k| seconds by less than 2 seconds,
-where |k| is an integer in the range of <code>aqr-tz-offset</code>,
-`mtime` can be encoded as `[`|u|`, `|k|`]` where |u| is the encoding of the UTC source.
-Otherwise, e.g. due to a clock error or a daylight saving time transition, the DOS date and time is simply discarded.</p>
-
-<p>If two sources for the same key disagree by more than their quantization intervals,
-a compressor can warn about it, and still uses the preferred source.</p>
+<p>Timestamps from ZIP are discussed in [[#timestamps-from-zip]].</p>
 
 <h4 id=comments>Comments</h4>
 
@@ -2500,42 +2397,7 @@ i.e. it MUST contain at least one encoded lone surrogate.
 A `bstr` is not subject to these requirements even if it happens to be a valid UTF-8 string,
 as its encoding is not known.</p>
 
-<h5 id=comments-from-zip>Comments from ZIP</h5>
-
-<p><em>This section is non-normative.</em></p>
-
-<p>A ZIP archive [[APPNOTE]] stores a comment for each entry in the central header only,
-and a comment for the whole archive in the end of central directory record.
-Both are byte sequences, and an empty comment is no different from the absence of one,
-so the compressor can omit `comment` or `archive-comment` for an empty comment.</p>
-
-<p>A compressor converting a ZIP archive can determine the encoding of each entry comment
-from the following sources, where earlier sources are preferred:</p>
-
-<ol>
-  <li>Extra field 0x6375 (Info-ZIP Unicode Comment) of version 1 in the central header [[INFOZIP-EXTRAFLD]],
-  whose `ComCRC32` matches the CRC-32 of the comment in the header.
-  The field holds the comment in UTF-8.
-  A field with a mismatching CRC-32 is ignored, as for 0x7075 in [[#entry-names-from-zip]].
-  <li>The comment in the header, if bit 11 (language encoding flag) of the general purpose bit flag is set.
-  The comment is in UTF-8.
-  <li>Extra field 0x554e (Xceed Unicode) in the central header, which holds the comment in UTF-16LE.
-  It is converted to WTF-8, which preserves any lone surrogate.
-  <li>Otherwise, the encoding of the comment is not specified.
-  The compressor can decode it with the encoding guessed for entry names in the same archive.
-  If it can't, the raw byte sequence is used as a `bstr`.
-</ol>
-
-<p>The archive comment has neither the language encoding flag nor an extra field,
-so its encoding is never specified by the archive itself.
-The compressor can decode it as in the last source above, and puts the result to `archive-comment`.</p>
-
-<div class=note>
-  <p>Archive comments are often used for purposes other than human-readable text,
-  e.g. a self-extracting archive may store its configuration there,
-  so decoding one with a guessed encoding can be lossy.
-  A compressor unsure about the encoding can keep the raw byte sequence instead.</p>
-</div>
+<p>Comments from ZIP are discussed in [[#comments-from-zip]].</p>
 
 <h4 id=link-groups><code>link-group</code>: Hard links</h4>
 
@@ -2619,53 +2481,7 @@ The kind of an entry is solely determined by its node ([[#archive-model]]), so `
 
 `unix-uid` and `unix-gid` are the numeric user and group IDs of the owner.
 
-<h5 id=unix-extras-from-zip>Unix metadata from ZIP</h5>
-
-<p><em>This section is non-normative.</em></p>
-
-<p>A ZIP archive [[APPNOTE]] can carry the Unix metadata of an entry in the external file attributes of the central header
-and in extra fields 0x7875 (Info-ZIP UNIX type 3), 0x7855 (Info-ZIP UNIX type 2), 0x756e (ASi UNIX),
-0x5855 (Info-ZIP UNIX type 1) and 0x000d (UNIX) [[INFOZIP-EXTRAFLD]].
-A compressor converting a ZIP archive can choose the source of each key as follows,
-where earlier sources are preferred and sources in the same item have the same precedence.</p>
-
-<table class=data>
-<thead>
-<tr>
-  <th>Key</th>
-  <th>Sources</th>
-</tr>
-<tbody>
-<tr>
-  <td>`unix-mode`</td>
-  <td>External file attributes; 0x756e `Mode`</td>
-</tr>
-<tr>
-  <td>`unix-uid`</td>
-  <td>0x7875 `UID`; 0x7855 `UID` (local header only); 0x756e, 0x5855 (local header only) or 0x000d `UID`</td>
-</tr>
-<tr>
-  <td>`unix-gid`</td>
-  <td>0x7875 `GID`; 0x7855 `GID` (local header only); 0x756e, 0x5855 (local header only) or 0x000d `GID`</td>
-</tr>
-</table>
-
-<p>Each source is encoded as follows:</p>
-
-<ul>
-  <li>The upper 16 bits of the external file attributes hold the Unix `st_mode`
-  if the upper byte of "version made by" is 3 (UNIX).
-  Only its permission bits (`0o7777`) go to `unix-mode`, and its file type bits (`S_IFMT`) are not stored there.
-  <li>0x7875 of version 1 stores the user and group IDs as little-endian unsigned integers of variable sizes.
-  [[INFOZIP-EXTRAFLD]] specifies that it takes precedence over 0x7855.
-  Other versions are not used as a source.
-  <li>0x7855, 0x756e, 0x5855 and 0x000d store the user and group IDs as 16-bit unsigned integers.
-  The central header version of 0x7855 is empty and only indicates that the local header version exists,
-  and the central header version of 0x5855 doesn't have the user and group IDs.
-</ul>
-
-<p>If two sources for the same key disagree,
-a compressor can warn about it, and still uses the preferred source.</p>
+Unix metadata from ZIP is discussed in [[#unix-extras-from-zip]].
 
 <h4 id=zip-extras><code>zip-extras</code>: ZIP extra fields</h4>
 
@@ -2725,199 +2541,6 @@ and SHOULD NOT treat the whole archive as invalid.</p>
   The key for the central header version is &minus;1 &minus; |n| instead of &minus;|n|,
   so that header ID 0 doesn't collide with the local header version,
   and both versions have the same encoded length in CBOR.</p>
-</div>
-
-<h5 id=zip-extras-to-remove>Extra fields not to be preserved</h5>
-
-<p><em>This section is non-normative.</em></p>
-
-<p>The following extra fields [[APPNOTE]] [[INFOZIP-EXTRAFLD]] are not put into `zip-extras`,
-because their information is either absorbed into the archive model and other keys,
-or discarded as only meaningful to the ZIP container.</p>
-
-<table class=data>
-<thead>
-<tr>
-  <th>Header ID</th>
-  <th>Name</th>
-  <th>Treatment</th>
-</tr>
-<tbody>
-<tr>
-  <td>0x0001</td>
-  <td>Zip64 extended information</td>
-  <td>Discarded: sizes and offsets</td>
-</tr>
-<tr>
-  <td>0x0007</td>
-  <td>AV Info</td>
-  <td>Discarded: signature</td>
-</tr>
-<tr>
-  <td>0x000a</td>
-  <td>NTFS</td>
-  <td>Absorbed: timestamps ([[#timestamps-from-zip]])</td>
-</tr>
-<tr>
-  <td>0x000d</td>
-  <td>UNIX (PKWARE)</td>
-  <td>Absorbed: timestamps ([[#timestamps-from-zip]]), `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]]), the target of a [=link node=], `link-group` for a hard link, and the device number of a [=special node=]</td>
-</tr>
-<tr>
-  <td>0x0014</td>
-  <td>PKCS#7 Store for X.509 Certificates</td>
-  <td>Discarded: signature</td>
-</tr>
-<tr>
-  <td>0x0015</td>
-  <td>X.509 Certificate ID and Signature for individual file</td>
-  <td>Discarded: signature</td>
-</tr>
-<tr>
-  <td>0x0016</td>
-  <td>X.509 Certificate ID for Central Directory</td>
-  <td>Discarded: signature</td>
-</tr>
-<tr>
-  <td>0x0017</td>
-  <td>Strong Encryption Header</td>
-  <td>Discarded: encryption</td>
-</tr>
-<tr>
-  <td>0x0019</td>
-  <td>PKCS#7 Encryption Recipient Certificate List</td>
-  <td>Discarded: encryption</td>
-</tr>
-<tr>
-  <td>0x0021</td>
-  <td>Policy Decryption Key Record</td>
-  <td>Discarded: encryption</td>
-</tr>
-<tr>
-  <td>0x0022</td>
-  <td>Smartcrypt Key Provider Record</td>
-  <td>Discarded: encryption</td>
-</tr>
-<tr>
-  <td>0x0023</td>
-  <td>Smartcrypt Policy Key Data Record</td>
-  <td>Discarded: encryption</td>
-</tr>
-<tr>
-  <td>0x10c5</td>
-  <td>minizip CMS signature</td>
-  <td>Discarded: signature</td>
-</tr>
-<tr>
-  <td>0x1986</td>
-  <td>Pixar USD header ID</td>
-  <td>Discarded: padding for alignment</td>
-</tr>
-<tr>
-  <td>0x5455</td>
-  <td>Extended timestamp</td>
-  <td>Absorbed: timestamps ([[#timestamps-from-zip]])</td>
-</tr>
-<tr>
-  <td>0x554e</td>
-  <td>Xceed Unicode</td>
-  <td>Absorbed: entry name ([[#entry-names-from-zip]]) and comment ([[#comments-from-zip]])</td>
-</tr>
-<tr>
-  <td>0x5855</td>
-  <td>Info-ZIP UNIX type 1</td>
-  <td>Absorbed: timestamps ([[#timestamps-from-zip]]), `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]])</td>
-</tr>
-<tr>
-  <td>0x5a4c</td>
-  <td>ZipArchive code page</td>
-  <td>Absorbed: entry name ([[#entry-names-from-zip]])</td>
-</tr>
-<tr>
-  <td>0x5a4d</td>
-  <td>ZipArchive offsets array</td>
-  <td>Discarded: offsets</td>
-</tr>
-<tr>
-  <td>0x6375</td>
-  <td>Info-ZIP Unicode Comment</td>
-  <td>Absorbed: comment ([[#comments-from-zip]])</td>
-</tr>
-<tr>
-  <td>0x6c78</td>
-  <td>libarchive "xl"</td>
-  <td>Absorbed: a copy of the central header fields</td>
-</tr>
-<tr>
-  <td>0x7075</td>
-  <td>Info-ZIP Unicode Path</td>
-  <td>Absorbed: entry name ([[#entry-names-from-zip]])</td>
-</tr>
-<tr>
-  <td>0x7855</td>
-  <td>Info-ZIP UNIX type 2</td>
-  <td>Absorbed: `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]])</td>
-</tr>
-<tr>
-  <td>0x7875</td>
-  <td>Info-ZIP UNIX type 3</td>
-  <td>Absorbed: `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]]), for version 1 only</td>
-</tr>
-<tr>
-  <td>0x9901</td>
-  <td>AE-x (WinZip AES)</td>
-  <td>Discarded: encryption</td>
-</tr>
-<tr>
-  <td>0x9903</td>
-  <td>WinZip Reference</td>
-  <td>Discarded: reference to another entry, resolved by conversion</td>
-</tr>
-<tr>
-  <td>0xa11e</td>
-  <td>Data Stream Alignment (Apache Commons Compress)</td>
-  <td>Discarded: padding for alignment</td>
-</tr>
-<tr>
-  <td>0xa220</td>
-  <td>Microsoft Open Packaging Growth Hint</td>
-  <td>Discarded: padding for in-place editing</td>
-</tr>
-<tr>
-  <td>0xcafe</td>
-  <td>Java JAR marker</td>
-  <td>Discarded: information about the ZIP file itself</td>
-</tr>
-<tr>
-  <td>0xcdcd</td>
-  <td>minizip Central Directory</td>
-  <td>Discarded: encryption and signature of the central directory</td>
-</tr>
-<tr>
-  <td>0xd935</td>
-  <td>Android ZIP Alignment</td>
-  <td>Discarded: padding for alignment</td>
-</tr>
-<tr>
-  <td>0xe57a</td>
-  <td>ALZip code page</td>
-  <td>Absorbed: entry name ([[#entry-names-from-zip]]), if decoded with that code page</td>
-</tr>
-</table>
-
-<div class=note>
-  <p>Some extra fields are preserved only in particular cases.
-  The local and central header versions are considered separately.</p>
-  <ul>
-    <li>0x756e (ASi UNIX) is absorbed like 0x000d:
-    the permission bits of its mode go to `unix-mode`, the user and group IDs go to `unix-uid` and `unix-gid`,
-    and the symbolic link target goes to a [=link node=].
-    Its device number, however, is a raw `st_rdev` value whose bit layout differs among platforms,
-    and can't be split into the major and minor numbers of a [=special node=].
-    A device file is therefore converted to an empty [=file node=] with the original extra field preserved.
-    <li>0x4b46 (FWKCS MD5) and 0x1a51 (minizip hash) hold digests of the uncompressed content.
-    They are only preserved when they match the actual content.
-  </ul>
 </div>
 
 <h3 id=formula-data>
@@ -4599,6 +4222,388 @@ Each reserved block type is [=critical=] or [=non-critical=] by its first hexade
       <td>Reserved for various purposes
   </tbody>
 </table>
+
+<h2 id=zip-conversion>
+Converting from ZIP</h2>
+
+<p><em>This section is non-normative.</em></p>
+
+<p>This section describes how a compressor can convert entries of a ZIP archive [[APPNOTE]]
+into an [=archive value=] without losing information,
+where ZIP offers multiple sources or encodings for the same information.</p>
+
+<h3 id=entry-names-from-zip>Entry names from ZIP</h3>
+
+<p>A ZIP archive [[APPNOTE]] stores the path of each entry as a byte sequence in the local and central headers,
+with components separated by `/`.
+Its encoding is not always known from the header alone,
+and several extra fields carry the Unicode version of the same path.
+A compressor converting a ZIP archive can determine the encoding of each component from the following sources,
+where earlier sources are preferred:</p>
+
+<ol>
+  <li>Extra field 0x7075 (Info-ZIP Unicode Path) of version 1 [[INFOZIP-EXTRAFLD]],
+  whose `NameCRC32` matches the CRC-32 of the path in the header.
+  The field holds the path in UTF-8.
+  A field with a mismatching CRC-32 is ignored as specified by [[APPNOTE]],
+  as it may have been left over by a tool that changed the path without updating the field.
+  <li>The path in the header, if bit 11 (language encoding flag) of the general purpose bit flag is set.
+  The path is in UTF-8.
+  <li>Extra field 0x554e (Xceed Unicode), which holds the path in UTF-16LE.
+  It is converted to WTF-8, which preserves any lone surrogate.
+  <li>Extra field 0x5a4c (ZipArchive code page),
+  which holds the path encoded in the code page given in the same field.
+  If the field only has the code page, the path in the header is decoded with it instead.
+  <li>Extra field 0xe57a (ALZip code page), which gives the code page of the path in the header.
+  <li>Otherwise, the encoding of the path in the header is not specified.
+  It is traditionally IBM code page 437, but often the system code page of the machine that made the archive,
+  so the compressor has to guess the encoding.
+  If it can't, the raw byte sequence (prefixed with C1<sub>16</sub>) is used for each component.
+</ol>
+
+<div class=note>
+  <p>When the name comes from any source other than the last one,
+  the original bytes of a path not in UTF-8 are not preserved.
+  They only reflect how the ZIP container encodes the name,
+  while the name of the file itself is the decoded Unicode string.</p>
+</div>
+
+<h3 id=timestamps-from-zip>Timestamps from ZIP</h3>
+
+<p>A ZIP archive [[APPNOTE]] can carry the same timestamp in multiple places:
+the DOS date and time in the local and central headers,
+and extra fields 0x000a (NTFS), 0x5455 (extended timestamp), 0x5855 (Info-ZIP UNIX type 1) and 0x000d (UNIX)
+[[INFOZIP-EXTRAFLD]].
+A compressor converting a ZIP archive can choose the source of each key as follows,
+where earlier sources are preferred.
+The order prefers more precise sources first, and then more recent specifications for the same precision.</p>
+
+<table class=data>
+<thead>
+<tr>
+  <th>Key</th>
+  <th>Sources</th>
+</tr>
+<tbody>
+<tr>
+  <td>`crtime`</td>
+  <td>0x000a `Ctime`; 0x5455 `CrTime` (local header only)</td>
+</tr>
+<tr>
+  <td>`ctime`</td>
+  <td>-</td>
+</tr>
+<tr>
+  <td>`mtime`</td>
+  <td>0x000a `Mtime`; 0x5455 `ModTime`; 0x5855 or 0x000d `ModTime`; DOS date and time</td>
+</tr>
+<tr>
+  <td>`atime`</td>
+  <td>0x000a `Atime`; 0x5455 `AcTime` (local header only); 0x5855 or 0x000d `AcTime`</td>
+</tr>
+<tr>
+  <td>`arctime`</td>
+  <td>-</td>
+</tr>
+</table>
+
+<p>Each source is encoded as follows:</p>
+
+<ul>
+  <li>0x000a stores a Windows `FILETIME` |t|, the number of 100 ns intervals since 1601-01-01T00:00:00Z,
+  which is encoded as `125(`|t| &minus; 116444736000000000`)`.
+  A zero value means that the timestamp is absent.
+  <li>0x5455, 0x5855 and 0x000d store the number of seconds since 1970-01-01T00:00:00Z,
+  which is encoded as an untagged `int`.
+  It is a signed 32-bit integer according to [[INFOZIP-EXTRAFLD]],
+  though some implementations write times after 2038 as unsigned.
+  The central header version of 0x5455 only has `ModTime` even when its flags indicate others,
+  so the local header version is preferred when available.
+  <li>The DOS date and time is a local time in an unknown time zone with the precision of 2 seconds,
+  which is encoded as `[121(`|n|`)]` where 2|n| is the local time as if it were UTC.
+</ul>
+
+<p>When both the DOS date and time and a UTC source are present for `mtime`,
+their difference reveals the time zone offset where the archive was made.
+If the DOS time minus the UTC time differs from 900|k| seconds by less than 2 seconds,
+where |k| is an integer in the range of <code>aqr-tz-offset</code>,
+`mtime` can be encoded as `[`|u|`, `|k|`]` where |u| is the encoding of the UTC source.
+Otherwise, e.g. due to a clock error or a daylight saving time transition, the DOS date and time is simply discarded.</p>
+
+<p>If two sources for the same key disagree by more than their quantization intervals,
+a compressor can warn about it, and still uses the preferred source.</p>
+
+<h3 id=comments-from-zip>Comments from ZIP</h3>
+
+<p>A ZIP archive [[APPNOTE]] stores a comment for each entry in the central header only,
+and a comment for the whole archive in the end of central directory record.
+Both are byte sequences, and an empty comment is no different from the absence of one,
+so the compressor can omit `comment` or `archive-comment` for an empty comment.</p>
+
+<p>A compressor converting a ZIP archive can determine the encoding of each entry comment
+from the following sources, where earlier sources are preferred:</p>
+
+<ol>
+  <li>Extra field 0x6375 (Info-ZIP Unicode Comment) of version 1 in the central header [[INFOZIP-EXTRAFLD]],
+  whose `ComCRC32` matches the CRC-32 of the comment in the header.
+  The field holds the comment in UTF-8.
+  A field with a mismatching CRC-32 is ignored, as for 0x7075 in [[#entry-names-from-zip]].
+  <li>The comment in the header, if bit 11 (language encoding flag) of the general purpose bit flag is set.
+  The comment is in UTF-8.
+  <li>Extra field 0x554e (Xceed Unicode) in the central header, which holds the comment in UTF-16LE.
+  It is converted to WTF-8, which preserves any lone surrogate.
+  <li>Otherwise, the encoding of the comment is not specified.
+  The compressor can decode it with the encoding guessed for entry names in the same archive.
+  If it can't, the raw byte sequence is used as a `bstr`.
+</ol>
+
+<p>The archive comment has neither the language encoding flag nor an extra field,
+so its encoding is never specified by the archive itself.
+The compressor can decode it as in the last source above, and puts the result to `archive-comment`.</p>
+
+<div class=note>
+  <p>Archive comments are often used for purposes other than human-readable text,
+  e.g. a self-extracting archive may store its configuration there,
+  so decoding one with a guessed encoding can be lossy.
+  A compressor unsure about the encoding can keep the raw byte sequence instead.</p>
+</div>
+
+<h3 id=unix-extras-from-zip>Unix metadata from ZIP</h3>
+
+<p>A ZIP archive [[APPNOTE]] can carry the Unix metadata of an entry in the external file attributes of the central header
+and in extra fields 0x7875 (Info-ZIP UNIX type 3), 0x7855 (Info-ZIP UNIX type 2), 0x756e (ASi UNIX),
+0x5855 (Info-ZIP UNIX type 1) and 0x000d (UNIX) [[INFOZIP-EXTRAFLD]].
+A compressor converting a ZIP archive can choose the source of each key as follows,
+where earlier sources are preferred and sources in the same item have the same precedence.</p>
+
+<table class=data>
+<thead>
+<tr>
+  <th>Key</th>
+  <th>Sources</th>
+</tr>
+<tbody>
+<tr>
+  <td>`unix-mode`</td>
+  <td>External file attributes; 0x756e `Mode`</td>
+</tr>
+<tr>
+  <td>`unix-uid`</td>
+  <td>0x7875 `UID`; 0x7855 `UID` (local header only); 0x756e, 0x5855 (local header only) or 0x000d `UID`</td>
+</tr>
+<tr>
+  <td>`unix-gid`</td>
+  <td>0x7875 `GID`; 0x7855 `GID` (local header only); 0x756e, 0x5855 (local header only) or 0x000d `GID`</td>
+</tr>
+</table>
+
+<p>Each source is encoded as follows:</p>
+
+<ul>
+  <li>The upper 16 bits of the external file attributes hold the Unix `st_mode`
+  if the upper byte of "version made by" is 3 (UNIX).
+  Only its permission bits (`0o7777`) go to `unix-mode`, and its file type bits (`S_IFMT`) are not stored there.
+  <li>0x7875 of version 1 stores the user and group IDs as little-endian unsigned integers of variable sizes.
+  [[INFOZIP-EXTRAFLD]] specifies that it takes precedence over 0x7855.
+  Other versions are not used as a source.
+  <li>0x7855, 0x756e, 0x5855 and 0x000d store the user and group IDs as 16-bit unsigned integers.
+  The central header version of 0x7855 is empty and only indicates that the local header version exists,
+  and the central header version of 0x5855 doesn't have the user and group IDs.
+</ul>
+
+<p>If two sources for the same key disagree,
+a compressor can warn about it, and still uses the preferred source.</p>
+
+<h3 id=zip-extras-to-remove>Extra fields not to be preserved</h3>
+
+<p>The following extra fields [[APPNOTE]] [[INFOZIP-EXTRAFLD]] are not put into `zip-extras`,
+because their information is either absorbed into the archive model and other keys,
+or discarded as only meaningful to the ZIP container.</p>
+
+<table class=data>
+<thead>
+<tr>
+  <th>Header ID</th>
+  <th>Name</th>
+  <th>Treatment</th>
+</tr>
+<tbody>
+<tr>
+  <td>0x0001</td>
+  <td>Zip64 extended information</td>
+  <td>Discarded: sizes and offsets</td>
+</tr>
+<tr>
+  <td>0x0007</td>
+  <td>AV Info</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x000a</td>
+  <td>NTFS</td>
+  <td>Absorbed: timestamps ([[#timestamps-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x000d</td>
+  <td>UNIX (PKWARE)</td>
+  <td>Absorbed: timestamps ([[#timestamps-from-zip]]), `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]]), the target of a [=link node=], `link-group` for a hard link, and the device number of a [=special node=]</td>
+</tr>
+<tr>
+  <td>0x0014</td>
+  <td>PKCS#7 Store for X.509 Certificates</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x0015</td>
+  <td>X.509 Certificate ID and Signature for individual file</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x0016</td>
+  <td>X.509 Certificate ID for Central Directory</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x0017</td>
+  <td>Strong Encryption Header</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x0019</td>
+  <td>PKCS#7 Encryption Recipient Certificate List</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x0021</td>
+  <td>Policy Decryption Key Record</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x0022</td>
+  <td>Smartcrypt Key Provider Record</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x0023</td>
+  <td>Smartcrypt Policy Key Data Record</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x10c5</td>
+  <td>minizip CMS signature</td>
+  <td>Discarded: signature</td>
+</tr>
+<tr>
+  <td>0x1986</td>
+  <td>Pixar USD header ID</td>
+  <td>Discarded: padding for alignment</td>
+</tr>
+<tr>
+  <td>0x5455</td>
+  <td>Extended timestamp</td>
+  <td>Absorbed: timestamps ([[#timestamps-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x554e</td>
+  <td>Xceed Unicode</td>
+  <td>Absorbed: entry name ([[#entry-names-from-zip]]) and comment ([[#comments-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x5855</td>
+  <td>Info-ZIP UNIX type 1</td>
+  <td>Absorbed: timestamps ([[#timestamps-from-zip]]), `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x5a4c</td>
+  <td>ZipArchive code page</td>
+  <td>Absorbed: entry name ([[#entry-names-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x5a4d</td>
+  <td>ZipArchive offsets array</td>
+  <td>Discarded: offsets</td>
+</tr>
+<tr>
+  <td>0x6375</td>
+  <td>Info-ZIP Unicode Comment</td>
+  <td>Absorbed: comment ([[#comments-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x6c78</td>
+  <td>libarchive "xl"</td>
+  <td>Absorbed: a copy of the central header fields</td>
+</tr>
+<tr>
+  <td>0x7075</td>
+  <td>Info-ZIP Unicode Path</td>
+  <td>Absorbed: entry name ([[#entry-names-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x7855</td>
+  <td>Info-ZIP UNIX type 2</td>
+  <td>Absorbed: `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]])</td>
+</tr>
+<tr>
+  <td>0x7875</td>
+  <td>Info-ZIP UNIX type 3</td>
+  <td>Absorbed: `unix-uid` and `unix-gid` ([[#unix-extras-from-zip]]), for version 1 only</td>
+</tr>
+<tr>
+  <td>0x9901</td>
+  <td>AE-x (WinZip AES)</td>
+  <td>Discarded: encryption</td>
+</tr>
+<tr>
+  <td>0x9903</td>
+  <td>WinZip Reference</td>
+  <td>Discarded: reference to another entry, resolved by conversion</td>
+</tr>
+<tr>
+  <td>0xa11e</td>
+  <td>Data Stream Alignment (Apache Commons Compress)</td>
+  <td>Discarded: padding for alignment</td>
+</tr>
+<tr>
+  <td>0xa220</td>
+  <td>Microsoft Open Packaging Growth Hint</td>
+  <td>Discarded: padding for in-place editing</td>
+</tr>
+<tr>
+  <td>0xcafe</td>
+  <td>Java JAR marker</td>
+  <td>Discarded: information about the ZIP file itself</td>
+</tr>
+<tr>
+  <td>0xcdcd</td>
+  <td>minizip Central Directory</td>
+  <td>Discarded: encryption and signature of the central directory</td>
+</tr>
+<tr>
+  <td>0xd935</td>
+  <td>Android ZIP Alignment</td>
+  <td>Discarded: padding for alignment</td>
+</tr>
+<tr>
+  <td>0xe57a</td>
+  <td>ALZip code page</td>
+  <td>Absorbed: entry name ([[#entry-names-from-zip]]), if decoded with that code page</td>
+</tr>
+</table>
+
+<div class=note>
+  <p>Some extra fields are preserved only in particular cases.
+  The local and central header versions are considered separately.</p>
+  <ul>
+    <li>0x756e (ASi UNIX) is absorbed like 0x000d:
+    the permission bits of its mode go to `unix-mode`, the user and group IDs go to `unix-uid` and `unix-gid`,
+    and the symbolic link target goes to a [=link node=].
+    Its device number, however, is a raw `st_rdev` value whose bit layout differs among platforms,
+    and can't be split into the major and minor numbers of a [=special node=].
+    A device file is therefore converted to an empty [=file node=] with the original extra field preserved.
+    <li>0x4b46 (FWKCS MD5) and 0x1a51 (minizip hash) hold digests of the uncompressed content.
+    They are only preserved when they match the actual content.
+  </ul>
+</div>
 
 <pre class=biblio>
 {
