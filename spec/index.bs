@@ -44,6 +44,48 @@ urlPrefix: https://www.rfc-editor.org/rfc/rfc9581.html; spec: RFC9581; type: cdd
     text: $ETIME-TIMESCALE; url: #section-3.4
 </pre>
 
+<h2 id=introduction>
+Introduction</h2>
+
+<p><em>This section is non-normative.</em></p>
+
+The Aqueous archive format stores a directory tree, or a single file, as a sequence of blocks.
+This section gives an overview of how the parts of the format fit together;
+each paragraph points to the chapter defining the part it describes.
+
+An archive is a header, a sequence of blocks and a footer ([[#container]]).
+Every block starts with its type and its size, so a decompressor can skip any block without understanding it,
+and the type tells whether the block can be ignored when it is not understood ([[#block-types]]).
+The footer points back to the last metadata block, so that a decompressor can start reading from the end of the archive.
+
+Blocks are grouped into <em>segments</em>, each ending with a metadata block ([[#segments]]).
+The metadata block names the entries of the segment, i.e. directories, files, symbolic links and other nodes,
+and points each file to the block holding its content.
+A later segment adds, replaces and removes entries of earlier segments,
+so that an archive can be extended by appending a segment without rewriting what precedes it.
+An archive without any metadata block simply decompresses into a single unnamed file, as a gzip file does.
+
+The content of a file is given by a single <em>leaf block</em>.
+The simplest leaf block is a data block storing the content itself, optionally compressed with Zstandard
+and a dictionary shared by many small blocks ([[#stored-data]]).
+A formula block is a leaf block that describes the content instead,
+as a small stack machine program over <em>non-leaf blocks</em> following it ([[#formulas]]).
+The program takes slices of them, concatenates them, patches them,
+and applies WebAssembly modules to them to undo a transformation made by the compressor ([[#modules]]).
+A leaf block and the non-leaf blocks following it form a <em>parcel</em>,
+which is typically all that a decompressor reads to extract a single file,
+and the formula block serves as an index for random access within it.
+
+An overlay archive describes a directory tree as changes to an existing one, called its base ([[#overlays]]).
+Import blocks read byte ranges of files in the base, which formulas can patch,
+so that an overlay archive works as an update or a delta of the base.
+
+The whole archive may be encrypted with a passphrase using age [[AGE]] ([[#encrypted-archive]]).
+Checksums cover every block except, optionally, leaf data blocks, and mirror blocks hold copies of the blocks
+whose damage would affect many files ([[#recovery]]).
+Metadata that is not necessary to read the files, such as timestamps, comments and permissions,
+is encoded in CBOR and may be ignored by a decompressor ([[#optional-metadata]], [[#extraction]]).
+
 <h2 id=conventions>
 Conventions</h2>
 
