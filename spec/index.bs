@@ -3046,9 +3046,17 @@ Unless explicitly requested otherwise, conforming compressors SHOULD use a [=che
 for every leaf block.
 
 Unless explicitly requested otherwise, conforming compressors SHOULD declare an [=output checksum=]
-for each output computed by an [[#insn-apply|Apply instruction]] or a [[#insn-patch|Patch instruction]],
-so that the module application or the patch is also verified.
-Other outputs are already covered by the checksums of the [=non-leaf items=] they are computed from.
+for every formula block.
+
+<div class=note>
+  An output checksum is the only checksum verifying a module application or a patch,
+  so it matters most for an output computed by an [[#insn-apply|Apply instruction]] or a [[#insn-patch|Patch instruction]].
+  An output computed only by other instructions is already covered by the checksums of [=formula/formula_data=]
+  and of the [=non-leaf items=] it is computed from,
+  but its output checksum still lets the content of the file be verified by itself,
+  so that whether every file is covered by a checksum doesn't depend on the instructions of the formula,
+  as the [=archival profile=] requires.
+</div>
 
 <div class=note>
   A checksum over the stored bytes would only verify that they have been read correctly.
