@@ -840,9 +840,7 @@ each consisting of [=content blocks=] and a single [[#metadata-block|metadata bl
 with optional spacer, [[#mirror-block|mirror]] and [=ignored blocks=] in between.
 Each segment can be independently processed and decompressed in the reading order,
 except that [=internal imports=] ([[#import-block]]) read the result of preceding segments.
-There SHOULD NOT be multiple non-directory [=meta/entry|entries=] with the same path across metadata blocks,
-other than a [=tombstone=] removing an earlier entry,
-and if there are, only the last one is considered valid ([[#segment-merging]]).
+Segments are described in [[#segments]].
 
 Alternatively, [=archive/blocks=] can have no metadata block.
 Such archive decompresses into a single unnamed file,
@@ -987,6 +985,20 @@ or be equal to (2E)<sub>16</sub> (`.`) or (2E 2E)<sub>16</sub> (`..`).
   so that no name can refer to the current, parent or nested directory on any common file system.
   Platform-specific restrictions are handled at the extraction time ([[#extraction]]).
 </div>
+
+An [=entry name=] is encoded as a byte sequence in one of the following ways,
+neither of which contains a zero byte:
+
+* If its [=entry name/encoding=] is "`wtf-8`", its [=entry name/bytes=] as is.
+    WTF-8 [[WTF-8]] is an extension to UTF-8 and losslessly encodes a lone surrogate in UTF-16.
+* If its [=entry name/encoding=] is "`raw`", byte C1<sub>16</sub> followed by its [=entry name/bytes=].
+
+<div class=note>
+  Byte C1<sub>16</sub> was chosen because it can't occur in WTF-8 and any other known extension to UTF-8.
+</div>
+
+Conforming compressors are strongly RECOMMENDED to use the "`wtf-8`" encoding,
+and SHOULD only use the "`raw`" encoding as a round-trip measure.
 
 To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
 
@@ -1348,18 +1360,8 @@ Entry structure (<dfn>entry</dfn>) then occurs for each directory, file and spec
   </tbody>
 </table>
 
-Each entry is named according to [=meta/entry_name=].
-No name can contain a zero byte, and there are two allowed encodings:
-
-* WTF-8 encoding [[WTF-8]], which is an extension to UTF-8 and losslessly encodes a lone surrogate pair in UTF-16; or
-* Byte C1<sub>16</sub> followed by the raw byte sequence.
-
-  <div class=note>
-    Byte C1<sub>16</sub> was chosen because it can't occur in WTF-8 and any other known extension to UTF-8.
-  </div>
-
-Conforming compressors are strongly RECOMMENDED to use the WTF-8 encoding,
-and SHOULD only use the raw byte sequence as a round-trip measure.
+Each entry is named according to [=meta/entry_name=],
+which encodes an [=entry name=] as described in [[#archive-model]] and is [=decode an entry name|decoded=] there.
 Entry names from ZIP are discussed in [[#entry-names-from-zip]].
 
 A special entry represents a node other than a file or a directory, as determined by [=meta/special_kind=]:
@@ -1581,9 +1583,13 @@ A tombstone is never kept in the result, even under a directory that didn't exis
 A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=],
 which can be cleared by an empty map `{}` instead.
 
+There SHOULD NOT be multiple non-directory [=meta/entry|entries=] with the same path across metadata blocks,
+other than a [=tombstone=] removing an earlier entry,
+and if there are, only the last one is considered valid.
+
 <div class=note>
   Directories necessarily reappear in later segments to hold new files under them.
-  The rule in [[#unencrypted-archive]] that there SHOULD NOT be multiple entries with the same path
+  The rule above that there SHOULD NOT be multiple entries with the same path
   therefore only concerns non-directory entries.
   For the same reason, a reappearing directory doesn't have to repeat its [=entry extra=].
 </div>
