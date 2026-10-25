@@ -824,7 +824,7 @@ which is sufficient since every block occupies an even number of bytes due to [=
 
 Conforming compressors MUST fill [=spacer/space=] with zero bytes in order to avoid data leak,
 but its content doesn't affect the result of [=interpret an archive|interpreting an archive=].
-Conforming compressors are strongly RECOMMENDED to utilize sparse files for performance.
+Conforming compressors are RECOMMENDED to utilize sparse files for performance.
 
 <h3 id=size-hint-block>
 Size hint block</h3>
@@ -949,9 +949,8 @@ The offset between [=archive/header_magic=] and [=archive/footer_magic=] is reco
 which MAY also be replicated as [=archive/size_hint_block=] if random access is desired.
 
 The footer size, which is the size of all fields between [=archive/footer_size=] and [=archive/footer_size_copy=] (both exclusive),
-is recorded both in [=archive/footer_size=] and in [=archive/footer_size_copy=].
-Implementations are therefore expected to first identify [=archive/header_magic=] and skip to the end of the file
-to read [=archive/footer_size_copy=] and eventually [=archive/footer_magic=] to read the footer.
+is recorded both in [=archive/footer_size=] and in [=archive/footer_size_copy=],
+so that the footer can be read from the end of the archive ([[#locating-an-archive]]).
 
 <div class=note>
   [=archive/footer_size=] and [=archive/footer_size_copy=] are [=u16le=] instead of [=leb128=].
@@ -1127,7 +1126,7 @@ neither of which contains a zero byte:
   Byte C1<sub>16</sub> was chosen because it can't occur in WTF-8 or any other known extension to UTF-8.
 </div>
 
-Conforming compressors are strongly RECOMMENDED to use the "`wtf-8`" encoding,
+Conforming compressors are RECOMMENDED to use the "`wtf-8`" encoding,
 and SHOULD only use the "`raw`" encoding as a round-trip measure.
 
 To <dfn>decode an entry name</dfn> from a [=meta/entry_name=] field |bytes|:
@@ -1151,7 +1150,8 @@ A <dfn>link target</dfn> is a [=struct=] with the following [=struct/items=]:
 Unlike an [=entry name=], a [=link target=] is a path which may contain 2F<sub>16</sub> (`/`) as a separator,
 and components equal to `.` or `..`.
 It may be absolute, and may refer to a path that doesn't exist in the [=archive value=] or anywhere else.
-The separator is always `/`: a compressor MUST replace every `\` in a link target read on Windows with `/`.
+The separator is always `/`, even for a link target from a platform using `\` as the separator, such as Windows,
+where every `\` is represented as `/`.
 Otherwise a link target is not normalized, and its meaning, e.g. of a drive letter, is left to the platform.
 There is no limit on its length other than implementation-defined limits.
 
@@ -1690,7 +1690,7 @@ so no node is a descendant of a [=link node=] in the result.
 A [=tombstone=] removes the node at its path along with its descendants, and does nothing if there is no such node.
 A tombstone is never kept in the result, even under a directory that didn't exist before.
 A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=],
-which can be cleared by an empty map `{}` instead.
+which can instead be replaced with an empty map `{}`.
 
 <div class=note>
   Directories necessarily reappear in later segments to hold new files under them,
@@ -2954,6 +2954,13 @@ A mirrored header consists of the following:
 [=emirror/mirror_checksum=] is the XXH64 [[!XXHASH]] hash with the seed zero
 of all bytes from [=emirror/checksum_start=] to [=emirror/checksum_end=].
 
+As with [[#mirror-block|mirror blocks]], the constraints on the fields of a mirrored header are requirements on conforming compressors.
+A mirrored header always occupies 117 bytes at its position,
+and its content doesn't affect the result of [=interpret an archive|interpreting an archive=].
+A mirrored header is <dfn>intact</dfn> if its [=emirror/mirror_checksum=] verifies
+and its fields other than [=emirror/mirrored_fields=] satisfy the constraints above.
+A decompressor MUST NOT use the [=emirror/mirrored_fields=] of a mirrored header that is not [=emirror/intact=].
+
 </div>
 
 <div class=note>
@@ -3310,11 +3317,20 @@ A mirror block SHOULD be [=mirror/unwidened=] unless its [=block/data=] doesn't 
 A mirror block doesn't belong to any [=segment=] and MAY occur anywhere in [=archive/blocks=],
 including after the last metadata block, subject only to the requirement that its target block precedes it.
 A single target block MAY have multiple mirror blocks.
-Mirror blocks don't affect the result of [=interpret an archive|interpreting an archive=],
-except that an archive violating the requirements above is an [=invalid archive=].
+The requirements on a mirror block in this section are requirements on conforming compressors,
+and a mirror block violating them doesn't make the archive an [=invalid archive=].
+Mirror blocks don't affect the result of [=interpret an archive|interpreting an archive=] at all.
+
+A mirror block is <dfn for=mirror>intact</dfn> if its [=mirror/mirror_checksum=] verifies
+and it satisfies the requirements above other than being equal to its target block.
+A decompressor MUST NOT restore a target block from a mirror block that is not [=mirror/intact=],
+and SHOULD report a mirror block that is not intact or differs from its intact target block when it reads one.
 
 <div class=note>
-  By [[#partial-access]], a decompressor not reading mirror blocks is not required to verify them.
+  A mirror block is as likely to be damaged as any other block,
+  but its damage loses nothing as long as its target block is intact.
+  Treating it as an invalid archive would reject an archive whose files are all readable,
+  and only by decompressors that happen to read mirror blocks.
 </div>
 
 A mirror block and its target block are expected to be damaged together when they are close to each other.
@@ -3347,7 +3363,7 @@ Repair</h3>
 
 <div class=note>
   Restoring damaged blocks from mirror blocks is a process separate from [=interpret an archive|interpreting an archive=]:
-  it takes a damaged byte sequence and replaces each target block whose bytes differ from a verified mirror block
+  it takes a damaged byte sequence and replaces each target block whose bytes differ from an [=mirror/intact=] mirror block
   with the bytes reconstructed from the mirror block,
   locating the target block with [=mirror/target_offset=] alone.
 </div>
