@@ -660,6 +660,10 @@ The compressed external structure (<dfn for=block>compressed_data</dfn>) consist
       <td>[=leb128=]
       <td>
     <tr>
+      <td><dfn>original_size_shrink</dfn>
+      <td>[=leb128=]
+      <td>[=If=] [=cdata/original_size_delta=] = 0
+    <tr>
       <td><dfn>compression_params</dfn>
       <td>[=u8=][*]
       <td>[=Depends on=] [=compression_method=]
@@ -684,11 +688,24 @@ The compressed external structure (<dfn for=block>compressed_data</dfn>) consist
 
 The compressed size (<dfn>compressed_size</dfn>) is inferred from the block size:
 [=cdata/compressed_size=] = [=cdata/data_end=] - [=cdata/data_start=].
-The [=cdata/original_size_delta=] field encodes the original size
-<dfn>original_size</dfn> = [=cdata/compressed_size=] + [=cdata/original_size_delta=].
-Therefore [=cdata/compressed_size=] MUST be equal to or less than [=cdata/original_size=];
-any <dfn export for="">barely compressible</dfn> block data,
-for which the overhead of the compression method exceeds the size saving, MUST NOT use compression.
+The original size (<dfn>original_size</dfn>) is encoded relative to [=cdata/compressed_size=]:
+
+* If [=cdata/original_size_delta=] is not 0,
+    [=cdata/original_size=] = [=cdata/compressed_size=] + [=cdata/original_size_delta=].
+* Otherwise, [=cdata/original_size=] = [=cdata/compressed_size=] - [=cdata/original_size_shrink=],
+    and [=cdata/original_size_shrink=] MUST be at most [=cdata/compressed_size=].
+
+Each original size thus has exactly one encoding,
+where the original size equal to [=cdata/compressed_size=] is encoded as two zero bytes.
+
+<div class=note>
+  Compressed data is usually shorter than the original, and costs a single field in that case.
+  The original size can still be smaller, e.g. when Zstandard stores incompressible data in raw blocks,
+  each of which has 3 bytes of overhead.
+  This matters for blocks that always use Zstandard, such as [[#import-block|import blocks]]
+  whose [=import/import_checksum=] doesn't compress,
+  while a block that can use None as its [=compression_method=] typically does so instead.
+</div>
 
 </div>
 
@@ -1743,13 +1760,6 @@ and the metadata block contains all necessary information for random access.
 with [=compression_method=] and [=checksum_method=] determined as above.
 [=dblock/uncompressed_data=] represents a raw, uninterpreted byte sequence.
 
-An uncompressed block MUST be used when given data is barely compressible and can't be represented in terms of compressed blocks.
-
-<div class=note>
-  This is mandatory because each Zstandard block incurs 3 bytes of overhead
-  and [=cdata/original_size_delta=] can't be negative.
-</div>
-
 A compressed block is a single unit of decompression:
 reading any part of its content requires decompressing it from the beginning.
 Content larger than a desired unit of random access is split into multiple blocks:
@@ -2089,11 +2099,6 @@ and the last |n| items are removed from the stack and used in their order in the
 Nop instruction</h4>
 
 Opcode 00<sub>16</sub> denotes a **Nop instruction**, which has no operands and does nothing.
-
-<div class=note>
-  Nop instructions can pad [=formula/formula_data=],
-  e.g. to keep it compressible when its original size would otherwise be smaller than its compressed size.
-</div>
 
 <h4 id=insn-literal>
 Literal instruction</h4>

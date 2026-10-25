@@ -246,8 +246,7 @@ impl Encoder {
         Ok(n.0)
     }
 
-    /// [`encode`] at the level of the encoder. Fails on slices out of their stream, and on
-    /// resources that do not compress (as resource blocks always are).
+    /// [`encode`] at the level of the encoder. Fails on slices out of their stream.
     pub fn encode(&self, f: &Formula, checksum: Option<u64>) -> Result<Vec<u8>> {
         // sized first (the streams compressed then are kept), so as to be written at its size
         let mut out = Vec::with_capacity(self.len(f)? + 16);
@@ -335,25 +334,12 @@ impl Encoder {
             }
 
             for &m in &modules {
-                block(out, MODULE, &padded(&mut self.cctx(), self.threads, |pad| wasm(m, pad), level)?);
+                block(out, MODULE, &always_compressed(&mut self.cctx(), &[&wasm(m)], level, self.threads)?);
             }
             for r in resources {
                 self.resource_block(out, r)?;
             }
-            block(
-                out,
-                FORMULA,
-                &padded(
-                    &mut self.cctx(),
-                    self.threads,
-                    |pad| {
-                        let mut d = data.clone();
-                        d.resize(d.len() + pad, NOP);
-                        d
-                    },
-                    level,
-                )?,
-            );
+            block(out, FORMULA, &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?);
             for s in sliced {
                 self.content_block(out, false, streams[s], f.streams[s].kind == Kind::Compressed)?;
             }
@@ -423,9 +409,8 @@ pub fn description_bound(n: &Node) -> usize {
     }
 }
 
-/// A Wasm module of custom sections only, naming `m` in [`NATIVE_SECTION`], with `pad` more
-/// bytes in another section.
-fn wasm(m: Module, pad: usize) -> Vec<u8> {
+/// A Wasm module of a custom section only, naming `m` in [`NATIVE_SECTION`].
+fn wasm(m: Module) -> Vec<u8> {
     fn custom(w: &mut Vec<u8>, name: &str, payload: &[u8]) {
         let mut s = Vec::new();
         varint::put(&mut s, name.len() as u64);
@@ -437,9 +422,6 @@ fn wasm(m: Module, pad: usize) -> Vec<u8> {
     }
     let mut w = WASM_HEADER.to_vec();
     custom(&mut w, NATIVE_SECTION, m.to_string().as_bytes());
-    if pad > 0 {
-        custom(&mut w, "", &vec![0; pad]);
-    }
     w
 }
 
@@ -551,8 +533,8 @@ impl Encoder {
         Ok(())
     }
 
-    /// Appends a resource block of `r`, compressed at the level the encoder picks for it, or
-    /// as little as it compresses: the block is always compressed.
+    /// Appends a resource block of `r`, compressed at the level the encoder picks for it, or at
+    /// [`MID_BASE`] where it does not compress: the block is always compressed.
     fn resource_block(&self, out: &mut impl Out, r: &[u8]) -> Result<()> {
         let mut resources = self.resources.borrow_mut();
         let c = match resources.entry(key(&[r])) {
@@ -560,10 +542,13 @@ impl Encoder {
             Entry::Vacant(e) => {
                 let c = match self.plan(key(&[r]), &[r])? {
                     Plan::Done(Some(c)) => Some(c),
-                    Plan::Done(None) => compressed(&mut self.cctx(), &[r], MID_BASE.0, self.threads)?,
+                    Plan::Done(None) => None,
                     Plan::Level(level, size) => compressed_to(&mut self.cctx(), &[r], level, self.threads, size)?,
                 };
-                e.insert(c.ok_or_else(|| Error::new(format!("a resource of {} bytes does not compress", r.len())))?)
+                e.insert(match c {
+                    Some(c) => c,
+                    None => always_compressed(&mut self.cctx(), &[r], MID_BASE.0, self.threads)?,
+                })
             }
         };
         block(out, RESOURCE, c);
@@ -767,16 +752,10 @@ fn content_block(out: &mut impl Out, leaf: bool, data: &[&[u8]], c: Option<&[u8]
     }
 }
 
-/// The compressed external structure of `make(pad)` with the least `pad` tried (0, 16, 32,
-/// ...) that compresses, for blocks that are always compressed.
-fn padded(cctx: &mut CCtx, threads: usize, make: impl Fn(usize) -> Vec<u8>, level: i32) -> Result<Vec<u8>> {
-    let mut pad = 0;
-    loop {
-        if let Some(c) = compressed(cctx, &[&make(pad)], level, threads)? {
-            return Ok(c);
-        }
-        pad = (pad * 2).max(16);
-    }
+/// The compressed external structure of `data` (Zstandard, XXH64), even where the Zstandard
+/// blocks are longer than `data`: for blocks that are always compressed.
+fn always_compressed(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize) -> Result<Vec<u8>> {
+    Ok(external(c, data, level, threads, usize::MAX)?.0)
 }
 
 /// Zstandard's jobs of multithreaded compression, and how much of the window each job takes
@@ -808,6 +787,13 @@ const CCTX_KEPT: usize = 4 << 20;
 /// for as much as Zstandard may give only where that does not do (the output does not depend
 /// on the room it has). A stream is not given room for its own size again for nothing.
 fn compressed_to(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usize) -> Result<Option<Vec<u8>>> {
+    let (c, longer) = external(c, data, level, threads, size)?;
+    Ok((!longer).then_some(c))
+}
+
+/// The compressed external structure of `data` as [`compressed_to`] makes it, and whether its
+/// Zstandard blocks are longer than `data`.
+fn external(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usize) -> Result<(Vec<u8>, bool)> {
     #[cfg(test)]
     tests::COMPRESSED.with(|n| n.set(n.get() + 1));
     let zstd = |e: zstd_safe::ErrorCode| Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)));
@@ -857,22 +843,27 @@ fn compressed_to(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size:
         return Err(Error::new("zstd: unexpected frame header"));
     };
     assert_eq!([*m0, *m1, *m2, *m3], ZSTD_MAGIC);
-    if blocks.len() > len {
-        return Ok(None);
+    let longer = blocks.len() > len;
+    // the header put in place of the frame's, in the same vector: the original size by how much
+    // longer it is, or `0` then by how much shorter
+    let mut head = Vec::with_capacity(12);
+    match len - blocks.len().min(len) {
+        0 => {
+            head.push(0);
+            varint::put(&mut head, (blocks.len() - len) as u64);
+        }
+        delta => varint::put(&mut head, delta as u64),
     }
-    // the header put in place of the frame's, in the same vector
-    let mut head = Vec::with_capacity(11);
-    varint::put(&mut head, (len - blocks.len()) as u64);
     head.push(*window);
     let sum = checksum_of(data).to_le_bytes();
     let Some(at) = 6usize.checked_sub(head.len()) else {
         // (a varint of 6 bytes: 32 GiB that compress to nothing)
-        return Ok(Some([&head[..], &frame[6..], &sum].concat()));
+        return Ok(([&head[..], &frame[6..], &sum].concat(), longer));
     };
     frame[at..6].copy_from_slice(&head);
     frame.drain(..at);
     frame.extend_from_slice(&sum);
-    Ok(Some(frame))
+    Ok((frame, longer))
 }
 
 /// Why an archive does not decode, as the spec classifies it.
@@ -1174,10 +1165,15 @@ fn decoded(d: &[u8], zstd: bool, checked: bool) -> Decoded<Vec<u8>> {
     let end = d.len().checked_sub(if checked { 8 } else { 0 }).ok_or_else(|| Failure::Invalid("truncated".into()))?;
     let out = if zstd {
         let mut at = 0;
+        // the original size by how much longer it is, or `0` then by how much shorter
         let delta = leb(d, &mut at)?;
+        let shrink = if delta == 0 { leb(d, &mut at)? } else { 0 };
         let &window = d.get(at).filter(|_| at < end).ok_or_else(|| Failure::Invalid("truncated".into()))?;
         let blocks = &d[at + 1..end];
-        let size = (blocks.len() as u64).checked_add(delta).ok_or_else(|| Failure::Invalid("bad size".into()))?;
+        let size = (blocks.len() as u64)
+            .checked_add(delta)
+            .and_then(|n| n.checked_sub(shrink))
+            .ok_or_else(|| Failure::Invalid("bad size".into()))?;
         unzstd(window, blocks, size)?
     } else {
         d[..end].to_vec()
@@ -1612,12 +1608,12 @@ mod tests {
         [&HEADER_MAGIC[..], &blocks, &FOOTER_MAGIC, &n, &footer, &n].concat()
     }
 
-    /// An archive of a formula block of `data` (padded to compress), after a `rev` module block and
+    /// An archive of a formula block of `data`, after a `rev` module block and
     /// before non-leaf blocks of `streams`.
     fn formula(data: &[u8], streams: &[&[u8]]) -> Vec<u8> {
         archive(|out| {
-            block(out, MODULE, &padded(&mut CCtx::create(), 1, |pad| wasm(REV, pad), 3).unwrap());
-            block(out, FORMULA, &padded(&mut CCtx::create(), 1, |pad| [data, &vec![NOP; pad]].concat(), 3).unwrap());
+            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&wasm(REV)], 3, 1).unwrap());
+            block(out, FORMULA, &always_compressed(&mut CCtx::create(), &[data], 3, 1).unwrap());
             streams.iter().for_each(|s| {
                 content_block(out, false, &[s], compressed(&mut CCtx::create(), &[s], 3, 1).unwrap().as_deref())
             });
@@ -1691,9 +1687,33 @@ mod tests {
         let c = encode(&f, None, Level::Mid).unwrap();
         assert_eq!(types(&c), [MODULE, RESOURCE, RESOURCE, FORMULA, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &super::natives(&[PRE], &pre)).unwrap(), expect);
-        // A resource block is always compressed.
-        f.root = Node::apply_with(PRE, vec![Resource::new(aqr_common::rng::noise(1000))], vec![], vec![x], 1003);
-        assert!(encode(&f, None, Level::Mid).is_err());
+        // A resource block is always compressed, even when that makes it longer.
+        let noise = Resource::new(aqr_common::rng::noise(1000));
+        f.root = Node::apply_with(PRE, vec![noise.clone()], vec![], vec![x], 1003);
+        let c = encode(&f, None, Level::Mid).unwrap();
+        assert_eq!(types(&c), [MODULE, RESOURCE + 1, FORMULA, NON_LEAF_RAW]);
+        assert_eq!(decode(&c, &super::natives(&[PRE], &pre)).unwrap(), [&noise[..], b"xyz"].concat());
+    }
+
+    /// Zstandard blocks longer than their data declare by how much (`0` then the excess), and as
+    /// long as their data by `0 0`.
+    #[test]
+    fn longer_than_data() {
+        let d = aqr_common::rng::noise(50);
+        // a raw zstd block, the last: 3 bytes more
+        let header = ((d.len() << 3) | 1) as u32;
+        let external = |size: &[u8]| [size, &[0], &header.to_le_bytes()[..3], &d, &checksum(&d).to_le_bytes()].concat();
+        assert_eq!(decoded(&external(&[0, 3]), true, true).unwrap(), d);
+        assert_eq!(decoded(&external(&[0, 2]), true, true), invalid("zstd data of another size than declared"));
+        assert_eq!(decoded(&external(&[0, 54]), true, true), invalid("bad size"));
+        // as encoded
+        let c = always_compressed(&mut CCtx::create(), &[&d], 3, 1).unwrap();
+        assert_eq!(c[..2], [0, 3]);
+        assert_eq!(decoded(&c, true, true).unwrap(), d);
+        assert_eq!(compressed(&mut CCtx::create(), &[&d], 3, 1).unwrap(), None);
+        // and an empty one
+        let c = always_compressed(&mut CCtx::create(), &[&[]], 3, 1).unwrap();
+        assert_eq!(decoded(&c, true, true).unwrap(), b"");
     }
 
     /// A formula of a single slice is a leaf block, compressed if that is smaller.
@@ -1979,10 +1999,12 @@ mod tests {
 
     #[test]
     fn native_names() {
-        assert_eq!(native_name(&wasm(REV, 0)), Some("rev@1"));
-        assert_eq!(native_name(&wasm(REV, 100)), Some("rev@1"));
+        assert_eq!(native_name(&wasm(REV)), Some("rev@1"));
+        // after another custom section
+        let other = [&WASM_HEADER[..], &[0, 3, 0, 9, 9], &wasm(REV)[WASM_HEADER.len()..]].concat();
+        assert_eq!(native_name(&other), Some("rev@1"));
         assert_eq!(native_name(&WASM_HEADER), None);
-        assert_eq!(native_name(&wasm(REV, 0)[..20]), None);
+        assert_eq!(native_name(&wasm(REV)[..20]), None);
     }
 
     #[test]
@@ -2066,9 +2088,9 @@ mod tests {
             [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
         let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
         let c = archive(|out| {
-            block(out, MODULE, &padded(&mut CCtx::create(), 1, |pad| wasm(REV, pad), 3).unwrap());
+            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&wasm(REV)], 3, 1).unwrap());
             for d in [&first[..], &second] {
-                block(out, FORMULA, &padded(&mut CCtx::create(), 1, |pad| [d, &vec![NOP; pad]].concat(), 3).unwrap());
+                block(out, FORMULA, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
             }
             content_block(out, false, &[b"xyz"], None);
         });
@@ -2086,6 +2108,8 @@ mod tests {
             match decode(&bad, &natives()) {
                 Ok(d) if d == SAMPLE => same += 1,
                 Err(Failure::Invalid(_)) => failed += 1,
+                // (blocks framed anew by a changed size, one of them using a dictionary)
+                Err(Failure::Resource(m)) if m == "dictionaries are not supported yet" => failed += 1,
                 r => panic!("byte {i}: {r:?}"),
             }
         }
