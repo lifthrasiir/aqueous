@@ -3897,6 +3897,31 @@ It SHOULD verify every checksum covering only the bytes it has computed.
   and an [=internal import=] is resolved by the same lookup from the preceding segment.
 </div>
 
+<h2 id=security-considerations>
+Security considerations</h2>
+
+<p>An archive is a container for arbitrary data and doesn't by itself contain active content,
+except for WebAssembly modules ([[#module-execution]]) that a decompressor executes to reconstruct file contents.
+Such modules are run under a deterministic profile without access to anything but their inputs and outputs,
+but a decompressor still has to treat them as untrusted code and isolate them accordingly.</p>
+<p>Formula blocks and modules can produce outputs far larger than the archive itself,
+and some fields (e.g. [=envelope/lg_work_factor=]) directly control the amount of computation.
+A decompressor is expected to enforce implementation-defined limits and fail with a [=resource failure=] when they are exceeded.</p>
+<p>A decompressor writing an archive to a file system is subject to the requirements in [[#extraction]],
+in particular to prevent writing outside the destination directory.</p>
+<p>An unencrypted archive provides no confidentiality,
+and its XXH64 checksums ([[#checksums]]) only detect accidental corruption, not intentional modification.
+An encrypted archive ([[#encrypted-archive]]) provides confidentiality and integrity through [[AGE]],
+which is only as strong as the passphrase used.
+The metadata of an archive, including entry names, timestamps and ownership,
+may reveal information about the system that created it.</p>
+
+<p>An overlay archive is interpreted against a base, typically a directory on the file system,
+and can copy any part of the base into its result.
+A decompressor reading a base is subject to the requirements in [[#bases]],
+in particular to use a base only when explicitly given one and to never read outside it.
+Applying an overlay archive in place modifies and removes files in the base directory.</p>
+
 <h2 id=iana-considerations>
 IANA Considerations</h2>
 
@@ -3917,23 +3942,7 @@ IANA Considerations</h2>
 <dt>Encoding considerations</dt>
 <dd>binary</dd>
 <dt>Security considerations</dt>
-<dd>
-  <p>An archive is a container for arbitrary data and doesn't by itself contain active content,
-  except for WebAssembly modules ([[#module-execution]]) that a decompressor executes to reconstruct file contents.
-  Such modules are run under a deterministic profile without access to anything but their inputs and outputs,
-  but a decompressor still has to treat them as untrusted code and isolate them accordingly.</p>
-  <p>Formula blocks and modules can produce outputs far larger than the archive itself,
-  and some fields (e.g. [=envelope/lg_work_factor=]) directly control the amount of computation.
-  A decompressor is expected to enforce implementation-defined limits and fail with a [=resource failure=] when they are exceeded.</p>
-  <p>A decompressor writing an archive to a file system is subject to the requirements in [[#extraction]],
-  in particular to prevent writing outside the destination directory.</p>
-  <p>An unencrypted archive provides no confidentiality,
-  and its checksums ([[#xxh64-checksum-method]]) only detect accidental corruption, not intentional modification.
-  An encrypted archive ([[#encrypted-archive]]) provides confidentiality and integrity through [[AGE]],
-  which is only as strong as the passphrase used.
-  The metadata of an archive, including entry names, timestamps and ownership,
-  may reveal information about the system that created it.</p>
-</dd>
+<dd>See [[#security-considerations]].</dd>
 <dt>Interoperability considerations</dt>
 <dd>
   <p>An unencrypted archive may be preceded and followed by arbitrary bytes, e.g. a self-extracting executable stub;
@@ -3995,14 +4004,7 @@ IANA Considerations</h2>
 <dt>Encoding considerations</dt>
 <dd>binary</dd>
 <dt>Security considerations</dt>
-<dd>
-  <p>The security considerations for `application/aqr` ([[#media-type]]) apply.</p>
-  <p>An overlay archive is interpreted against a base, typically a directory on the file system,
-  and can copy any part of the base into its result.
-  A decompressor reading a base is subject to the requirements in [[#bases]],
-  in particular to use a base only when explicitly given one and to never read outside it.
-  Applying an overlay archive in place modifies and removes files in the base directory.</p>
-</dd>
+<dd>See [[#security-considerations]].</dd>
 <dt>Interoperability considerations</dt>
 <dd>
   <p>An overlay archive can't be interpreted without its base.
@@ -4079,7 +4081,7 @@ in the Structured Syntax Suffix Registry ([[!RFC6838]], section 6.2) as follows:
   </ul>
 </dd>
 <dt>Security considerations</dt>
-<dd>The security considerations for `application/aqr` ([[#media-type]]) apply to any media type with the `+aqr` suffix.
+<dd>The security considerations in [[#security-considerations]] apply to any media type with the `+aqr` suffix.
 Each such media type may have additional security considerations specific to its interpretation of the archive.</dd>
 <dt>Contact</dt>
 <dd>Kang Seonghoon &lt;public+aqr@mearie.org&gt;</dd>
