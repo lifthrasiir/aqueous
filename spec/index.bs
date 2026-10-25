@@ -603,13 +603,8 @@ The uncompressed external structure (<dfn for=block>uncompressed_data</dfn>) con
 </div>
 
 In both structures, the checksum is computed over the [=decoded data=] ([[#block-contents]]),
-i.e. the data after decompression, rather than the stored bytes.
+i.e. the data after decompression, rather than the stored bytes ([[#checksums]]).
 
-<div class=note>
-  A checksum over the stored bytes would only verify that they have been read correctly.
-  A checksum over the decoded data also verifies the decompression,
-  and lets a decompressor reading only some non-leaf blocks verify the file content it has actually read.
-</div>
 
 <h4 id=zstandard-compression-method>
 Zstandard compression method</h4>
@@ -1140,15 +1135,6 @@ Their data uses the Shared external structure ([[#shared-external-structure]]),
 with [[#xxh64-checksum-method|XXH64]] as [=checksum_method=]
 and [=compression_method=] given by |m|: None if |m| is 0, and [[#zstandard-compression-method|Zstandard]] if |m| is 1.
 
-<div class=note>
-  Unlike content blocks, the checksum is mandatory for metadata, dictionary, module and resource blocks.
-  Names and the structure of entries are not covered by any other checksum,
-  and the damage to these blocks affects many files at once.
-  The cost is negligible because these blocks are a small fraction of the archive and each is read only once.
-  It also allows a decompressor to detect the damage to these blocks by reading them alone,
-  which is a prerequisite for using [[#mirror-block|mirror blocks]].
-</div>
-
 The internal structure after decompression is as follows:
 
 <div dfn-for=meta>
@@ -1631,7 +1617,7 @@ and <code>0100&thinsp;|kk||ss|</code> for a [=non-leaf block=], where:
     and 2 for [[#zstandard-compression-method|Zstandard]] with dictionary.
     3 is reserved for future compression methods.
 * |c| determines [=checksum_method=]: None if 0, and [[#xxh64-checksum-method|XXH64]] if 1.
-    A non-leaf data block always uses [[#xxh64-checksum-method|XXH64]].
+    A non-leaf data block always uses [[#xxh64-checksum-method|XXH64]] ([[#checksums]]).
 
 Its data consists of the following:
 
@@ -1681,30 +1667,6 @@ Content larger than a desired unit of random access is split into multiple block
     The formula block then acts as an index for random access within the parcel.
 * In an archive without a metadata block ([[#unencrypted-archive]]),
     the file is simply represented by multiple leaf blocks.
-
-<div class=note>
-  The checksum is mandatory for non-leaf blocks.
-  The output checksum of a formula block covers its entire output,
-  so a decompressor that only reads a part of the output can't verify it without reading the whole output.
-  Instead it can verify the checksums of non-leaf blocks it has actually read.
-  The checksum also lets damage to a non-leaf block be detected before the block is used by a module application,
-  so that the damage is always an [=invalid archive=] failure rather than a [=resource failure=],
-  as for [=formula/formula_data=] ([[#formula-block]]).
-</div>
-
-Unless explicitly requested otherwise, conforming compressors SHOULD use a [=checksum_method=] other than None
-for every leaf block.
-
-<div class=note>
-  The checksum is optional for leaf blocks to allow the following:
-
-    * An uncompressed leaf block without a checksum holds the file content verbatim and nothing derived from it,
-        so the file can be memory-mapped from the archive and modified in place.
-    * A compressed leaf block without a checksum can be made from an existing Zstandard frame by copying its Zstandard blocks,
-        without decompressing them to compute the checksum over the decoded data.
-
-  Neither is a concern for long-term preservation, where the [=archival profile=] requires the checksum.
-</div>
 
 </div>
 
@@ -1849,24 +1811,6 @@ If a dictionary is in use, its <em>0-based</em> index is specified as [=formula/
   Formula blocks always use Zstandard, which can still store data verbatim with raw Zstandard blocks.
   Many small formula blocks are expected to share a dictionary to compensate for the lack of shared compression context.
 </div>
-
-<div class=note>
-  The checksum of [=formula/formula_data=] is mandatory and distinct from the optional [=output checksums=]
-  declared inside [=formula/formula_data=] ([[#formula-evaluation]]).
-  [=formula/formula_data=] is always decoded in its entirety before evaluation,
-  so its checksum can be verified even by a decompressor reading only a part of the output.
-  It lets a damaged formula block be detected by reading the block alone and before evaluating anything,
-  so that a damaged formula block is always an [=invalid archive=] failure
-  rather than a [=resource failure=] caused by damaged resource declarations,
-  and is distinguished from damage to the non-leaf blocks it references.
-  An output checksum, on the other hand, also verifies the evaluation including module applications,
-  but can only be verified after computing the entire output.
-</div>
-
-Unless explicitly requested otherwise, conforming compressors SHOULD declare an [=output checksum=]
-for each output computed by an [[#insn-apply|Apply instruction]] or a [[#insn-patch|Patch instruction]],
-so that the module application or the patch is also verified.
-Other outputs are already covered by the checksums of the [=non-leaf items=] they are computed from.
 
 A formula block describes the content of a file as an expression over [=non-leaf items=] following it,
 evaluated with modules and resources preceding it.
@@ -3020,6 +2964,123 @@ where bytes of such chunks are marked as erasures and the interpretation of an a
 
 <h2 id=recovery>
 Integrity and recovery</h2>
+
+<h3 id=checksums>
+Checksums</h3>
+
+The following table summarizes every checksum defined by this specification:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Structure
+      <th>Checksum
+      <th>Computed over
+      <th>Presence
+  </thead>
+  <tbody>
+    <tr>
+      <td>[[#metadata-block|Metadata]], [[#dictionary-block|dictionary]], [[#import-block|import]],
+        [[#module-block|module]] and [[#resource-block|resource blocks]]
+      <td>XXH64
+      <td>[=Decoded data=]
+      <td>Always
+    <tr>
+      <td>Non-leaf [[#data-block|data blocks]]
+      <td>XXH64
+      <td>[=Decoded data=]
+      <td>Always
+    <tr>
+      <td>Leaf [[#data-block|data blocks]]
+      <td>XXH64
+      <td>[=Decoded data=]
+      <td>By [=block/type=]
+    <tr>
+      <td>[=formula/formula_data=] of [[#formula-block|formula blocks]]
+      <td>XXH64
+      <td>[=Decoded data=]
+      <td>Always
+    <tr>
+      <td>Byte sequences in a formula
+      <td>XXH64 ([[#insn-checksum|Checksum instruction]])
+      <td>The byte sequence [=covers|covered=]
+      <td>Optional
+    <tr>
+      <td>[=import/import|Imports=]
+      <td>SHA-512/256 ([=import/import_checksum=])
+      <td>[=Imported content=]
+      <td>Always
+    <tr>
+      <td>[[#mirror-block|Mirror blocks]]
+      <td>XXH64 ([=mirror/mirror_checksum=])
+      <td>Stored bytes
+      <td>Always
+    <tr>
+      <td>Header and mirrored headers of an [[#encrypted-archive|encrypted archive]]
+      <td>XXH64 ([=envelope/header_checksum=], [=emirror/mirror_checksum=])
+      <td>Stored bytes
+      <td>If [=envelope/mirrored=]
+  </tbody>
+</table>
+
+The encrypted chunks of an encrypted archive are also authenticated by [[AGE]].
+
+Unless explicitly requested otherwise, conforming compressors SHOULD use a [=checksum_method=] other than None
+for every leaf block.
+
+Unless explicitly requested otherwise, conforming compressors SHOULD declare an [=output checksum=]
+for each output computed by an [[#insn-apply|Apply instruction]] or a [[#insn-patch|Patch instruction]],
+so that the module application or the patch is also verified.
+Other outputs are already covered by the checksums of the [=non-leaf items=] they are computed from.
+
+<div class=note>
+  A checksum over the stored bytes would only verify that they have been read correctly.
+  A checksum over the decoded data also verifies the decompression,
+  and lets a decompressor reading only some non-leaf blocks verify the file content it has actually read.
+</div>
+
+<div class=note>
+  Unlike leaf blocks, the checksum is mandatory for metadata, dictionary, import, module and resource blocks.
+  Names and the structure of entries are not covered by any other checksum,
+  and the damage to these blocks affects many files at once.
+  The cost is negligible because these blocks are a small fraction of the archive and each is read only once.
+  It also allows a decompressor to detect the damage to these blocks by reading them alone,
+  which is a prerequisite for using [[#mirror-block|mirror blocks]].
+</div>
+
+<div class=note>
+  The checksum is mandatory for non-leaf blocks.
+  The output checksum of a formula block covers its entire output,
+  so a decompressor that only reads a part of the output can't verify it without reading the whole output.
+  Instead it can verify the checksums of non-leaf blocks it has actually read.
+  The checksum also lets damage to a non-leaf block be detected before the block is used by a module application,
+  so that the damage is always an [=invalid archive=] failure rather than a [=resource failure=],
+  as for [=formula/formula_data=] below.
+</div>
+
+<div class=note>
+  The checksum of [=formula/formula_data=] is mandatory and distinct from the optional [=output checksums=]
+  declared inside [=formula/formula_data=] ([[#insn-checksum]]).
+  [=formula/formula_data=] is always decoded in its entirety before evaluation,
+  so its checksum can be verified even by a decompressor reading only a part of the output.
+  It lets a damaged formula block be detected by reading the block alone and before evaluating anything,
+  so that a damaged formula block is always an [=invalid archive=] failure
+  rather than a [=resource failure=] caused by damaged resource declarations,
+  and is distinguished from damage to the non-leaf blocks it references.
+  An output checksum, on the other hand, also verifies the evaluation including module applications,
+  but can only be verified after computing the entire output.
+</div>
+
+<div class=note>
+  The checksum is optional for leaf blocks to allow the following:
+
+    * An uncompressed leaf block without a checksum holds the file content verbatim and nothing derived from it,
+        so the file can be memory-mapped from the archive and modified in place.
+    * A compressed leaf block without a checksum can be made from an existing Zstandard frame by copying its Zstandard blocks,
+        without decompressing them to compute the checksum over the decoded data.
+
+  Neither is a concern for long-term preservation, where the [=archival profile=] requires the checksum.
+</div>
 
 <h3 id=profiles>
 Archival profile</h3>
