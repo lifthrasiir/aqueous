@@ -286,14 +286,21 @@ This specification defines and uses the following constants, all of which are de
       <td><dfn noexport>ENCRYPTED_HEADER_MAGIC</dfn>
       <td>(F9&nbsp;CA&nbsp;F2&nbsp;A6&nbsp;D0&nbsp;2A&nbsp;01&nbsp;00)<sub>16</sub>
     <tr>
+      <td><dfn noexport>ENCRYPTED_MIRRORED_HEADER_MAGIC</dfn>
+      <td>(F9&nbsp;CA&nbsp;F2&nbsp;A6&nbsp;D0&nbsp;2A&nbsp;02&nbsp;00)<sub>16</sub>
+    <tr>
       <td><dfn noexport>MIRROR_MAGIC</dfn>
       <td>(02&nbsp;AA&nbsp;F5&nbsp;FE&nbsp;BA&nbsp;2B&nbsp;AE&nbsp;23)<sub>16</sub>
+    <tr>
+      <td><dfn noexport>ENCRYPTED_MIRROR_MAGIC</dfn>
+      <td>(78&nbsp;D7&nbsp;3F&nbsp;69&nbsp;0A&nbsp;FF&nbsp;44&nbsp;83)<sub>16</sub>
   </tbody>
 </table>
 
 <div class=note>
   The encoding of [=const/HEADER_TYPE=], [=const/FOOTER_TYPE=] and [=const/ENCRYPTED_HEADER_TYPE=] as a block type ([[#block]])
   is a prefix of [=const/HEADER_MAGIC=], [=const/FOOTER_MAGIC=] and [=const/ENCRYPTED_HEADER_MAGIC=] respectively.
+  The encoding of [=const/ENCRYPTED_HEADER_TYPE=] is also a prefix of [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=].
 </div>
 
 <h2 id=syntax>
@@ -1502,7 +1509,7 @@ Its data consists of the following:
       <td>[=u8=][*]
       <td>
     <tr>
-      <td><dfn>checksum_start</dfn>
+      <td><dfn>checksum_end</dfn>
       <td>[=offset=]
       <td>
     <tr>
@@ -1543,7 +1550,7 @@ The [=block/padding=] of the target block, if any, is not compared, and is resto
 The [=block/type=] of the mirror block itself is 2 bytes long, as every block type uses the shortest [=leb128=] encoding.
 
 [=mirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
-of all bytes from the [=block/block_start=] of the mirror block to [=mirror/checksum_start=],
+of all bytes from the [=block/block_start=] of the mirror block to [=mirror/checksum_end=],
 including its [=block/type=] and [=block/size=] fields.
 
 </div>
@@ -1605,6 +1612,7 @@ and SHOULD separate them by at least 4 MiB (4,194,304 bytes) when possible.
 
 Issue: The recommended distances are tentative, pending the measurement of burst lengths of latent sector errors
 (`recovery-design.md` §8, R1).
+The interval between mirrored headers in an encrypted archive ([[#encrypted-archive]]) changes with the latter distance.
 
 <div class=note>
   Dictionary, module and formula blocks typically occur early in their segments,
@@ -1792,7 +1800,9 @@ It decompresses into an empty file if there is no leaf block.
 Encrypted Archive</h4>
 
 An archive might have been **encrypted**,
-in which case it consists of a single block of type [=const/ENCRYPTED_HEADER_TYPE=] followed by an encrypted binary payload.
+in which case it consists of a block-like header of type [=const/ENCRYPTED_HEADER_TYPE=] followed by encrypted chunks.
+An encrypted archive is <dfn for=envelope>mirrored</dfn> if it starts with [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=],
+in which case copies of its header are placed between encrypted chunks.
 
 <div dfn-for=envelope>
 
@@ -1805,8 +1815,12 @@ in which case it consists of a single block of type [=const/ENCRYPTED_HEADER_TYP
   </thead>
   <tbody>
     <tr>
+      <td><dfn>checksum_start</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
       <td><dfn>encrypted_header_magic</dfn>
-      <td>[=u8=][8] = [=const/ENCRYPTED_HEADER_MAGIC=]
+      <td>[=u8=][8] ∈ {[=const/ENCRYPTED_HEADER_MAGIC=], [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]}
       <td>
     <tr>
       <td><dfn>lg_work_factor</dfn>
@@ -1825,13 +1839,37 @@ in which case it consists of a single block of type [=const/ENCRYPTED_HEADER_TYP
       <td>[=u8=][32]
       <td>
     <tr>
-      <td><dfn>payload</dfn>
+      <td><dfn>payload_nonce</dfn>
+      <td>[=u8=][16]
+      <td>
+    <tr>
+      <td><dfn>checksum_end</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>header_checksum</dfn>
+      <td>[=u64le=]
+      <td>[=cond/If=] [=envelope/mirrored=]
+    <tr>
+      <td><dfn>chunks</dfn>
       <td>[=u8=][*]
       <td>
   </tbody>
 </table>
 
-All fields except for [=payload=] are used to reconstruct an AGE v1 textual file header [[AGE]] as follows:
+The 97 bytes from [=envelope/lg_work_factor=] to [=envelope/payload_nonce=] are called the <dfn>header fields</dfn>.
+
+[=envelope/header_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+of all bytes from [=envelope/checksum_start=] to [=envelope/checksum_end=].
+
+<div class=note>
+  [=envelope/header_checksum=] tells a damaged header from a wrong passphrase before running scrypt.
+  Without it, damage to [=envelope/lg_work_factor=], [=envelope/scrypt_ephemeral_secret=] or [=envelope/encrypted_file_key=]
+  results in a [=decryption failure=] for any passphrase,
+  and damage to [=envelope/lg_work_factor=] may make scrypt run for an arbitrarily long time.
+</div>
+
+All fields from [=envelope/lg_work_factor=] to [=envelope/age_header_mac=] are used to reconstruct an AGE v1 textual file header [[AGE]] as follows:
 
 <pre>
 age-encryption.org/v1
@@ -1847,21 +1885,110 @@ Where,
 * |encrypted_file_key_base64| is the base64 encoding of [=envelope/encrypted_file_key=] without padding;
 * |age_header_mac_base64| is the base64 encoding of [=envelope/age_header_mac=] without padding.
 
-Subsequent [=payload=] contains the file nonce and encrypted chunks and interpreted in accordance to the AGE v1 format.
+The <dfn>AGE payload</dfn> consists of [=envelope/payload_nonce=] followed by the encrypted chunks in [=envelope/chunks=]
+and is interpreted in accordance to the AGE v1 format.
+Every encrypted chunk except the last one is 65,552 bytes long,
+i.e. 64 KiB of plaintext followed by a 16-byte authentication tag.
 
-The encrypted payload MUST decrypt into a valid unencrypted archive ([[#unencrypted-archive]]),
+If the archive is not [=envelope/mirrored=], [=envelope/chunks=] consists of the encrypted chunks alone.
+Otherwise [=envelope/chunks=] also contains **mirrored headers**:
+for each encrypted chunk <var>C<sub>m</sub></var> numbered from 0,
+a mirrored header immediately precedes <var>C<sub>m</sub></var>
+if and only if <var>m</var> + 1 is either a power of two less than 64 or a positive multiple of 64.
+The <var>k</var>-th mirrored header numbered from 1 therefore precedes <var>C<sub>m</sub></var>
+where <var>m</var> = 2<sup><var>k</var></sup> − 1 for <var>k</var> ≤ 6 and <var>m</var> = 64(<var>k</var> − 5) − 1 for <var>k</var> ≥ 6,
+and no mirrored header follows the last encrypted chunk.
+A mirrored header consists of the following:
+
+<div dfn-for=emirror>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Name
+      <th>Type
+      <th>Conditions
+  </thead>
+  <tbody>
+    <tr>
+      <td><dfn>checksum_start</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>encrypted_mirror_magic</dfn>
+      <td>[=u8=][8] = [=const/ENCRYPTED_MIRROR_MAGIC=]
+      <td>
+    <tr>
+      <td><dfn>mirror_index</dfn>
+      <td>[=u32le=] = <var>k</var>
+      <td>
+    <tr>
+      <td><dfn>mirrored_fields</dfn>
+      <td>[=u8=][97] = [=header fields=]
+      <td>
+    <tr>
+      <td><dfn>checksum_end</dfn>
+      <td>[=offset=]
+      <td>
+    <tr>
+      <td><dfn>mirror_checksum</dfn>
+      <td>[=u64le=]
+      <td>
+  </tbody>
+</table>
+
+[=emirror/mirror_checksum=] is the XXH64 [[XXHASH]] hash with the seed zero
+of all bytes from [=emirror/checksum_start=] to [=emirror/checksum_end=].
+
+</div>
+
+<div class=note>
+  Mirrored headers allow the archive to be decrypted when its header is damaged.
+  Since every encrypted chunk except the last one has the same length,
+  the <var>k</var>-th mirrored header is always 113 + 65,552<var>m</var> + 117(<var>k</var> − 1) bytes
+  after the start of [=envelope/encrypted_header_magic=], with <var>m</var> as above.
+  A single mirrored header found by scanning for [=const/ENCRYPTED_MIRROR_MAGIC=]
+  and verified by [=emirror/mirror_checksum=] thus gives the start of the archive, the position of every encrypted chunk
+  and every field needed to decrypt them.
+  Unlike [[#mirror-block|mirror blocks]], mirrored headers need no offset to tell archives apart:
+  [=envelope/scrypt_ephemeral_secret=] and [=envelope/payload_nonce=] are random,
+  so mirrored headers with the same [=emirror/mirrored_fields=] belong to the same archive.
+</div>
+
+<div class=note>
+  The interval between mirrored headers doubles from 1 to 64 encrypted chunks and stays at 64 chunks afterwards,
+  which equals the distance of 4 MiB recommended in [[#mirror-block]] measured in plaintext,
+  so that small archives have mirrored headers soon after the header
+  and the overhead stays at 117 bytes per 64 chunks, about 0.003%, for large archives.
+</div>
+
+Issue: The interval of 64 encrypted chunks follows the tentative distance of 4 MiB in [[#mirror-block]] and changes with it (`recovery-design.md` §5.5).
+
+The [=AGE payload=] MUST decrypt into a valid unencrypted archive ([[#unencrypted-archive]]),
 with the following additional constraints:
 
 * [=archive/size_hint_block=] is no longer optional;
 * No spacer block ([[#spacer-block]]) is allowed, in order to discourage an in-place modification of the encrypted archive;
-* No mirror block ([[#mirror-block]]) is allowed;
 * No trailing bytes are allowed after the archive.
 
-Issue: Mirror blocks are disallowed because a damaged AGE chunk fails to authenticate as a whole,
-and a standard AGE implementation stops at the first such chunk,
-so a mirror inside the payload is not usable for repair.
-Whether to allow them anyway, and how to place recovery data outside the payload, is open
-(`recovery-design.md` §5.5).
+A damaged encrypted chunk fails to authenticate as a whole,
+and an aligned 4 KiB unit of the underlying storage may span two adjacent encrypted chunks.
+Therefore, in place of the distance of 4096 bytes recommended in [[#mirror-block]],
+conforming compressors SHOULD place a mirror block and its target block in an encrypted archive
+so that at least one entire encrypted chunk lies between them.
+
+Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
+the encrypted chunks after one that fails to authenticate, which a standard AGE implementation doesn't do.
+This is to be specified with the repair process as a separate step producing the decrypted bytes,
+where bytes of such chunks are marked as erasures and the interpretation of an archive stays unchanged
+(`recovery-design.md` §5.6).
+
+<div class=note>
+  A repaired encrypted chunk can't be encrypted again with the original file key and [=envelope/payload_nonce=]
+  unless its plaintext is fully restored, because doing so otherwise reuses a nonce for a different plaintext.
+  Since a damaged chunk usually contains [=leaf blocks=] that mirror blocks don't cover,
+  a repaired encrypted archive is expected to be decrypted, or encrypted again with a new file key.
+</div>
 
 </div>
 
@@ -3217,16 +3344,17 @@ Interpreting an archive</h3>
 To <dfn export>interpret an archive</dfn> given a [=byte sequence=] |input| and an optional passphrase |passphrase|:
 
 <ol class=algorithm>
-    1. If |input| starts with [=const/ENCRYPTED_HEADER_MAGIC=]:
+    1. If |input| starts with [=const/ENCRYPTED_HEADER_MAGIC=] or [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]:
         1. Parse |input| as the Encrypted Archive structure ([[#encrypted-archive]]) in its entirety.
             If it fails to parse, return an [=invalid archive=] failure.
-        2. If [=envelope/lg_work_factor=] exceeds an implementation-defined limit, return a [=resource failure=].
-        3. If |passphrase| is not given, or the file key can't be unwrapped from [=envelope/encrypted_file_key=]
+        2. If [=envelope/header_checksum=] is present and doesn't match, return an [=invalid archive=] failure.
+        3. If [=envelope/lg_work_factor=] exceeds an implementation-defined limit, return a [=resource failure=].
+        4. If |passphrase| is not given, or the file key can't be unwrapped from [=envelope/encrypted_file_key=]
             with |passphrase| as described in [[AGE]], return a [=decryption failure=].
-        4. Using the unwrapped file key, verify [=envelope/age_header_mac=] against the reconstructed AGE header
-            and decrypt [=envelope/payload=] as described in [[AGE]].
+        5. Using the unwrapped file key, verify [=envelope/age_header_mac=] against the reconstructed AGE header
+            and decrypt the [=AGE payload=] as described in [[AGE]].
             If either fails, return an [=invalid archive=] failure.
-        5. Set |input| to the decrypted payload.
+        6. Set |input| to the decrypted payload.
             It MUST satisfy the additional constraints in [[#encrypted-archive]],
             or an [=invalid archive=] failure is returned.
     2. If |input| parses as the Unencrypted Archive structure ([[#unencrypted-archive]]) in its entirety,
@@ -3654,7 +3782,7 @@ a decompressor accepting such a file has to locate the archive first.
 To <dfn>locate an archive</dfn> in a [=byte sequence=] |file|:
 
 <ol class=algorithm>
-    1. If |file| starts with [=const/ENCRYPTED_HEADER_MAGIC=], return |file|.
+    1. If |file| starts with [=const/ENCRYPTED_HEADER_MAGIC=] or [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=], return |file|.
     2. Let |back| be null.
         Let |n| be the last 2 bytes of |file| as [=u16le=], and let |f| be the length of |file| − |n| − 10.
         If |f| ≥ 0, the bytes of |file| from |f| are [=const/FOOTER_MAGIC=] followed by |n| as [=u16le=],
@@ -3847,7 +3975,8 @@ IANA Considerations</h2>
   <dt>Magic number(s)</dt>
   <dd>F8 04 03 6A D6 BE (hexadecimal; [=const/HEADER_MAGIC=]) for an unencrypted archive,
   possibly preceded by other data;
-  F9 CA F2 A6 D0 2A 01 00 (hexadecimal; [=const/ENCRYPTED_HEADER_MAGIC=]) at offset 0 for an encrypted archive.</dd>
+  F9 CA F2 A6 D0 2A (hexadecimal; the common prefix of [=const/ENCRYPTED_HEADER_MAGIC=]
+  and [=const/ENCRYPTED_MIRRORED_HEADER_MAGIC=]) at offset 0 for an encrypted archive.</dd>
   <dt>File extension(s)</dt>
   <dd>.aqr<br>
   When a single file is compressed into an archive without any metadata block,
