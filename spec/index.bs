@@ -2941,25 +2941,6 @@ with the following additional constraints:
 * No spacer block ([[#spacer-block]]) is allowed, in order to discourage an in-place modification of the encrypted archive;
 * No trailing bytes are allowed after the archive.
 
-A damaged encrypted chunk fails to authenticate as a whole,
-and an aligned 4 KiB unit of the underlying storage may span two adjacent encrypted chunks.
-Therefore, in place of the distance of 4096 bytes recommended in [[#mirror-block]],
-conforming compressors SHOULD place a mirror block and its target block in an encrypted archive
-so that at least one entire encrypted chunk lies between them.
-
-Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
-the encrypted chunks after one that fails to authenticate, which a standard AGE implementation doesn't do.
-This is to be specified with the repair process as a separate step producing the decrypted bytes,
-where bytes of such chunks are marked as erasures and the interpretation of an archive stays unchanged
-(`recovery-design.md` §5.6).
-
-<div class=note>
-  A repaired encrypted chunk can't be encrypted again with the original file key and [=envelope/payload_nonce=]
-  unless its plaintext is fully restored, because doing so otherwise reuses a nonce for a different plaintext.
-  Since a damaged chunk usually contains [=leaf blocks=] that mirror blocks don't cover,
-  a repaired encrypted archive is expected to be decrypted, or encrypted again with a new file key.
-</div>
-
 </div>
 
 <h2 id=recovery>
@@ -3299,6 +3280,12 @@ Issue: The recommended distances are tentative, pending the measurement of burst
 (`recovery-design.md` §8, R1).
 The interval between mirrored headers in an encrypted archive ([[#encrypted-archive]]) changes with the latter distance.
 
+A damaged encrypted chunk fails to authenticate as a whole,
+and an aligned 4 KiB unit of the underlying storage may span two adjacent encrypted chunks.
+Therefore, in place of the distance of 4096 bytes recommended above,
+conforming compressors SHOULD place a mirror block and its target block in an encrypted archive
+so that at least one entire encrypted chunk lies between them.
+
 <div class=note>
   Dictionary, module and formula blocks typically occur early in their segments,
   so their mirror blocks can be placed near the end of the segment.
@@ -3308,6 +3295,10 @@ The interval between mirrored headers in an encrypted archive ([[#encrypted-arch
   and closing segments periodically bounds the loss in that case.
 </div>
 
+
+<h3 id=repair>
+Repair</h3>
+
 <div class=note>
   Restoring damaged blocks from mirror blocks is a process separate from [=interpret an archive|interpreting an archive=]:
   it takes a damaged byte sequence and replaces each target block whose bytes differ from a verified mirror block
@@ -3315,7 +3306,20 @@ The interval between mirrored headers in an encrypted archive ([[#encrypted-arch
   locating the target block with [=mirror/target_offset=] alone.
 </div>
 
-Issue: The repair process is to be specified in a separate section (`recovery-design.md` §5.6).
+Issue: The repair process is to be specified in this section (`recovery-design.md` §5.6).
+
+Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
+the encrypted chunks after one that fails to authenticate, which a standard AGE implementation doesn't do.
+This is to be specified with the repair process as a separate step producing the decrypted bytes,
+where bytes of such chunks are marked as erasures and the interpretation of an archive stays unchanged
+(`recovery-design.md` §5.6).
+
+<div class=note>
+  A repaired encrypted chunk can't be encrypted again with the original file key and [=envelope/payload_nonce=]
+  unless its plaintext is fully restored, because doing so otherwise reuses a nonce for a different plaintext.
+  Since a damaged chunk usually contains [=leaf blocks=] that mirror blocks don't cover,
+  a repaired encrypted archive is expected to be decrypted, or encrypted again with a new file key.
+</div>
 
 <h2 id=optional-metadata>
 Optional metadata</h2>
