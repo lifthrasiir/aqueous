@@ -14,14 +14,15 @@ FreeArc가 이 기능을 진지하게 고려한 것이 계기가 되었다.
 관련 코드:
 
 - `spec/index.bs`: 아카이브 포맷 명세 초안. 이 문서와 관련된 절은 다음과 같다.
-  - §3.1 Block: 블록의 일반 구조와 짝수 길이 padding.
-  - §3.1.2 Spacer block: 무시해도 되는 블록의 첫 선례.
-  - §3.1.7 Reserved blocks: 첫 16진 자리가 A–F인 non-critical 타입은 모르면 무시한다(ignored block).
-  - §3.1.5 Content blocks: segment와 parcel, 그리고 "모든 content block은 뒤따르는 metadata block이 기술해야 한다"는 규칙.
-  - §3.2.1 Unencrypted Archive: footer, `metadata_backward_offset`, u16 `footer_size`.
-  - §3.2.2 Encrypted Archive: age 기반 envelope와 mirrored header. 안쪽에서는 spacer와 trailing byte를 금지한다.
-  - §4.6 Partial access: 부분 결과와 손상 감지 의무의 범위.
-  - §7 Block index: 예약된 타입의 critical 여부는 첫 16진 자리로 정해진다.
+  - §Block: 블록의 일반 구조와 짝수 길이 padding.
+  - §Spacer block: 무시해도 되는 블록의 첫 선례.
+  - §Reserved block types: leading digit(두 자리로 채운 첫 16진 자리)이 A–F인 non-critical 타입은 모르면 무시한다(ignored block).
+  - §Content blocks: segment와 parcel, 그리고 "모든 content block은 뒤따르는 metadata block이 기술해야 한다"는 규칙.
+  - §Unencrypted Archive: footer, `metadata_backward_offset`, u16 `footer_size`.
+  - §Encrypted archives: age 기반 envelope와 mirrored header. 안쪽에서는 spacer와 trailing byte를 금지한다.
+  - §Partial access: 부분 결과와 손상 감지 의무의 범위.
+  - §Block types: 예약된 타입의 critical 여부는 leading digit으로 정해진다.
+  - §Checksums, §Repair: 체크섬의 요약과 repair 관련 노트·이슈.
 
 ---
 
@@ -100,7 +101,7 @@ Par2의 MDS 결함: Par2는 Plank의 1997년 RS 튜토리얼을 따랐다. 그 �
 
 전제는 두 가지이다.
 
-- 손상 단위는 **파일 오프셋 기준 4 KiB 정렬**이다. archive_start 기준이 아니다. 아카이브가 파일 처음에서 시작하지 않을 수도 있기 때문이다(§3.2.1).
+- 손상 단위는 **파일 오프셋 기준 4 KiB 정렬**이다. archive_start 기준이 아니다. 아카이브가 파일 처음에서 시작하지 않을 수도 있기 때문이다(명세 §Unencrypted Archive).
 - 오류끼리는 독립이 아니라 **공간적으로 상관**되어 있다. 따라서 핵심 방어는 하나의 손상이 여러 사본을 동시에 덮치지 않도록 멀리 떨어뜨리는 것이다.
 
 > E6은 저장 장치에서 거의 일어나지 않고, 주로 버그 있는 도구나 텍스트 모드 전송에서 생긴다. Par2는 rolling CRC로 어긋난 slice를 다시 찾는데, 이것이 E6 대응에 해당한다. 이 기능은 v1 범위 밖이다.
@@ -110,8 +111,8 @@ Par2의 MDS 결함: Par2는 Plank의 1997년 RS 튜토리얼을 따랐다. 그 �
 유리한 점:
 
 - **모든 블록 길이가 짝수이다**(block padding). GF(2¹⁶) 심볼(2바이트)과 그대로 맞는다.
-- **Spacer처럼 무시해도 되는 블록이라는 개념이 이미 있다.** recovery 관련 블록을 같은 지위로 두면, 복구 기능을 모르는 디코더도 아카이브를 그대로 읽는다. 명세는 non-critical 타입(첫 16진 자리 A–F)을 모르면 무시하므로, recovery 블록을 그 구간에 두면 된다.
-- **segment는 self-contained이고 parcel 구조가 있으며, 블록 간에 공유되는 압축 문맥이 없다**(dictionary 제외). 복구에 실패해도 손상 범위 밖의 파일은 살릴 수 있고, §4.6 Partial access가 이미 이를 허용한다.
+- **Spacer처럼 무시해도 되는 블록이라는 개념이 이미 있다.** recovery 관련 블록을 같은 지위로 두면, 복구 기능을 모르는 디코더도 아카이브를 그대로 읽는다. 명세는 non-critical 타입(leading digit A–F)을 모르면 무시하므로, recovery 블록을 그 구간에 두면 된다.
+- **segment는 self-contained이고 parcel 구조가 있으며, 블록 간에 공유되는 압축 문맥이 없다**(dictionary 제외). 복구에 실패해도 손상 범위 밖의 파일은 살릴 수 있고, 명세 §Partial access가 이미 이를 허용한다.
 - **segment를 찾는 경로가 둘이다.** 앞방향 스캔과 footer에서 시작하는 metadata 역방향 체인이다.
 - **footer는 나머지에서 재구성할 수 있다.** `size_hint`는 길이에서, `metadata_backward_offset`은 스캔에서 얻는다. 그래서 보호 범위에서 뺄 수 있다. header magic은 상수이고, size hint block은 footer와 중복이다.
 
@@ -144,7 +145,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 - 명세에는 비규범 권고로 둔다. 백업 도구가 기본값을 정한다.
 - metadata를 잃은 마지막 segment의 leaf block도 이름 없는 파일로는 추출할 수 있다(photorec식 salvage).
 
-> 대가도 있다. segment가 많아질수록 metadata 오버헤드가 늘고, 디렉토리가 segment마다 다시 나타난다(명세 §4.2.2 Merging segments). 기본 주기는 실측으로 정해야 한다(§8의 M2).
+> 대가도 있다. segment가 많아질수록 metadata 오버헤드가 늘고, 디렉토리가 segment마다 다시 나타난다(명세 §Merging segments). 기본 주기는 실측으로 정해야 한다(§8의 M2).
 
 ### 5.2 mirror block: 중요 구조의 사본 (E1, E2) [제안]
 
@@ -171,7 +172,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 #### 구조 [잠정]
 
-명세 §3.1.6 Mirror block에 반영했다. 아래는 명세에 없는 근거와 기각한 대안이다.
+명세 §Mirror block에 반영했다. 아래는 명세에 없는 근거와 기각한 대안이다.
 
 - 처음 제안의 `target_hash`는 뺐다. 원본 checksum이 손상을 감지하고, `mirror_checksum`이 사본을 검증한다.
 - 오프셋을 mirror 자신 기준으로 두면, archive_start나 체인이 깨져도 원본 위치를 알 수 있다.
@@ -188,7 +189,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 #### 배치
 
-명세 §3.1.6 Mirror block에 반영했다(E1, E2의 거리 SHOULD와 블록 종류별 배치 요령). 거리 D의 값은 명세에서도 잠정이다. 근거는 다음과 같다.
+명세 §Mirror block에 반영했다(E1, E2의 거리 SHOULD와 블록 종류별 배치 요령). 거리 D의 값은 명세에서도 잠정이다. 근거는 다음과 같다.
 
 길이 L인 버스트는, 원본과 사본의 거리 D가 L보다 짧을 때만 둘을 함께 지운다.
 
@@ -196,7 +197,7 @@ metadata는 데이터를 다 쓴 뒤에야 만들어진다. 그래서 스트리�
 
 #### 찾기
 
-마지막 metadata가 깨지면 체인의 출발점이 사라진다. 그때는 `mirror_magic` 스캔에 의존한다. repair 모드에서 아카이브 전체를 한 번 읽는 비용은 감수한다. 후보의 확정 절차와 archive_start 추정은 명세 §3.1.6 Mirror block에 반영했다.
+마지막 metadata가 깨지면 체인의 출발점이 사라진다. 그때는 `mirror_magic` 스캔에 의존한다. repair 모드에서 아카이브 전체를 한 번 읽는 비용은 감수한다. 후보의 확정 절차와 archive_start 추정은 명세 §Mirror block에 반영했다.
 
 > archive_start 추정에 다수결을 쓰지 않는 이유: 안쪽 아카이브의 mirror가 바깥 것보다 많을 수 있다.
 
@@ -222,7 +223,7 @@ recovery block도 블록이므로 블록 경계에만 놓일 수 있고, data bl
   > - 헤더가 깨진 recovery block은 영역을 알 수 없다. 그 블록이 걸친 멀쩡한 slice까지 0으로 간주할 범위를 몰라 해시가 불일치하고 erasure가 된다. 영역 목록을 index에 두면 스트리밍에서 순환이 생긴다.
   > - recovery 데이터 자신이 보호받지 못한다. 범위를 분리하면 뒤 set이 앞 set의 recovery 데이터를 보호한다.
 - 블록 크기 상한 같은 추가 조건은 포맷에 두지 않는다. 거대한 data block 때문에 parity를 내보내지 못하는 동안의 버퍼링은 compressor의 문제로 남는다(아래 배치).
-  > 상한을 두면 큰 파일이 formula block과 non-leaf data block 사슬로 쪼개져야 한다. 그러면 formula block이 모든 slice의 길이를 먼저 선언해야 하므로 스트리밍이 깨진다(명세 §3.2.1의 노트). 상한이 주는 것은 parity 대기 시간의 상한뿐이고, 그것은 임시 파일로 해결된다.
+  > 상한을 두면 큰 파일이 formula block과 non-leaf data block 사슬로 쪼개져야 한다. 그러면 formula block이 모든 slice의 길이를 먼저 선언해야 하므로 스트리밍이 깨진다(명세 §Unencrypted Archive의 노트). 상한이 주는 것은 parity 대기 시간의 상한뿐이고, 그것은 임시 파일로 해결된다.
 
 #### slice 격자
 
@@ -296,7 +297,7 @@ non-critical 타입 둘을 쓴다. 예를 들어 B0–B3은 parity block, B4–B
 
 ### 5.5 암호화 [잠정]
 
-명세 §3.2.2 Encrypted Archive에 반영했다. 헤더 필드의 사본(mirrored header)을 ciphertext 청크 사이에 두고, mirror block은 평문 안에 둔다. 아래는 명세에 없는 근거와 기각한 대안이다.
+명세 §Encrypted archives에 반영했다. 헤더 필드의 사본(mirrored header)을 ciphertext 청크 사이에 두고, mirror block은 평문 안에 둔다. 아래는 명세에 없는 근거와 기각한 대안이다.
 
 - age 청크가 손상되면 그 청크(64 KiB) 전체의 인증이 실패한다. 다만 손상은 erasure이고 오프셋이 보존되므로(§2.2), 실패한 청크를 건너뛰며 복호하면 평문 오프셋도 그대로이다. 그러면 mirror의 `target_offset`이 그대로 작동한다. 표준 age 구현은 첫 실패에서 멈추므로, 이 복호 절차는 repair 절(§5.6)에서 정의한다.
 - 사본에는 payload nonce가 반드시 들어가야 한다. 처음 초안은 age 헤더(81바이트)만 복제했는데, nonce는 헤더 바로 뒤에 있어 앞부분 손상에 함께 지워지므로 사본이 쓸모없어진다. 그래서 nonce를 envelope 필드로 옮겼다.
@@ -343,7 +344,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 2. mirror마다 원본을 사본과 비교한다. 원본에 ⊥가 있거나 사본과 다르면 사본으로 덮어쓴다. 덮어쓴 바이트는 사본의 checksum으로 검증되었으므로 인증된 바이트와 같은 정도로 신뢰한다. 비용이 싸고, 이후 RS 단계의 erasure를 줄여 준다. 구조(metadata 체인이나 앞방향 스캔)로 위치가 확인되지 않은 mirror는 1단계의 `archive_offset` 검사를 통과해야만 덮어쓰기에 쓴다.
 3. recovery set이 있으면 검증된 recovery block을 set의 정체(§5.4)로 묶는다. set마다 ⊥와 slice 해시 불일치를 erasure로 표시하고, erasure가 살아 있는 parity shard 수 이하이면 RS로 복원한다. set은 서로의 recovery block을 보호하고 mirror 복원도 erasure를 줄이므로, 2단계와 3단계를 더 이상 복원되는 것이 없을 때까지 반복한다. 정상적인 배치에서는 범위가 뒤에 있는 set부터 한 번씩 돌면 끝난다.
 4. footer가 깨졌으면 앞방향 스캔으로 재구성한다.
-5. ⊥가 남지 않았으면 결과를 바이트열로 보고 `interpret an archive`에 넘긴다. 명세의 해석은 바뀌지 않는다. ⊥가 남았으면 strict 해석의 대상이 아니다. 그때는 salvage로 넘겨 ⊥를 읽지 않고 계산되는 부분만 낸다. 이것은 §4.6 Partial access의 연장으로 정의할 수 있다.
+5. ⊥가 남지 않았으면 결과를 바이트열로 보고 `interpret an archive`에 넘긴다. 명세의 해석은 바뀌지 않는다. ⊥가 남았으면 strict 해석의 대상이 아니다. 그때는 salvage로 넘겨 ⊥를 읽지 않고 계산되는 부분만 낸다. 이것은 명세 §Partial access의 연장으로 정의할 수 있다.
 6. (암호화 아카이브) 결과는 평문으로 내거나 새 file key로 다시 암호화한다(§5.5).
 
 ## 6. 범위 밖
@@ -355,11 +356,11 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 
 ## 7. 열린 질문
 
-1. ~~**mirror block 하나에 여러 원본을 담을지.**~~ 원본 하나만 담는다(명세 §3.1.6 Mirror block).
-2. ~~**`target_offset`의 부호.**~~ 원본은 항상 mirror 앞에 온다(명세 §3.1.6 Mirror block).
+1. ~~**mirror block 하나에 여러 원본을 담을지.**~~ 원본 하나만 담는다(명세 §Mirror block).
+2. ~~**`target_offset`의 부호.**~~ 원본은 항상 mirror 앞에 온다(명세 §Mirror block).
 3. **해시.** XXH64 하나로 통일할지, slice 인덱스에는 XXH3-128을 쓸지. 상대는 무작위 손상뿐이므로 64비트로 충분하다고 본다.
-4. ~~**"무시해도 되는 블록"의 명세 용어.**~~ 첫 16진 자리가 A–F인 non-critical 타입으로 정했다. 모르는 타입은 ignored block이 된다(명세 §3.1.7 Reserved blocks).
-5. ~~**encrypted archive 안의 mirror 허용 여부.**~~ 허용한다. 헤더 필드는 mirrored header로 따로 보호한다(명세 §3.2.2 Encrypted Archive, §5.5).
+4. ~~**"무시해도 되는 블록"의 명세 용어.**~~ leading digit(두 자리로 채운 첫 16진 자리)이 A–F인 non-critical 타입으로 정했다. 모르는 타입은 ignored block이 된다(명세 §Reserved block types).
+5. ~~**encrypted archive 안의 mirror 허용 여부.**~~ 허용한다. 헤더 필드는 mirrored header로 따로 보호한다(명세 §Encrypted archives, §5.5).
 6. **스크러빙.** 필요한 여유분은 "다음 검증 전까지 쌓일 손상"이 정한다. 그래서 `verify` 명령과 권장 주기를 도구 쪽에서 함께 설계해야 한다.
 7. **바이트 상태를 명세에 넣을지.** §5.6의 세 상태(인증됨, 검증되지 않음, ⊥)는 지금 이 문서에만 있다. 명세의 Repair 절(S3)을 쓸 때 입력 모델로 넣을지, ⊥만 넣고 미인증 바이트는 구현의 선택으로 남길지 정한다. 미인증 바이트를 기본으로 켤지도 함께 정한다.
 8. **암호화 아카이브의 RS 위치.** §5.4의 RS를 복호한 평문 위에 두면, erasure 단위가 청크(64 KiB)가 되어 흩어진 E1 손상이 parity를 16–32배 빨리 소모하고, 키가 없으면 repair할 수 없다. ciphertext 위(청크 사이의 non-critical 프레임)에 두면 두 문제가 모두 사라지지만, 비암호화 쪽과 RS 구조가 갈라지고 프레임 정렬(§5.5)을 다시 봐야 한다. §5.6의 미인증 바이트는 위치를 아는 손상에 한해 첫 번째 문제를 줄인다. 또 S를 64 KiB의 배수로 잡으면 slice가 청크와 정렬되므로(§5.4의 slice 격자) 청크 하나의 손실이 slice 하나만 소모한다. 이때 첫 번째 문제는 S ≥ 64 KiB의 비용으로 바뀌고, 키 없는 repair만 남는다.
@@ -387,7 +388,7 @@ repair의 입력은 바이트열이 아니라, 위치마다 다음 상태 중 �
 - [x] **S2.** mirror block 절을 추가한다. 구조와 배치 SHOULD를 포함한다. (`MIRROR_MAGIC` 값 확정, `archive_offset` 추가함)
 - [ ] **S3.** 해석과 분리된 "Repair" 절을 추가한다(§4의 1번, §5.6). 암호화 아카이브의 복호 단계와 ⊥가 남은 경우의 salvage를 포함한다(§7의 7번).
 - [ ] **S4.** 비규범 노트를 추가한다. 내용은 오류 모델 요약, E5가 범위 밖이라는 점, segment 주기 권고, checksum 있는 블록 타입을 기본값으로 쓰라는 권고이다.
-- [ ] **S5.** §7 Block index에 mirror 타입(반영함)과, §5.4를 진행하면 recovery 타입(B0–B7 등 non-critical)을 반영한다.
+- [ ] **S5.** 명세 §Block types의 표에 mirror 타입(반영함)과, §5.4를 진행하면 recovery 타입(B0–B7 등 non-critical)을 반영한다.
 - [ ] **S6.** (§5.4를 진행할 경우) recovery block 절과 부호의 완전한 정의를 추가한다.
 - [x] **S7.** encrypted envelope의 복구 구조를 정한다(§5.5). (trailer 대신 청크 사이의 mirrored header로 정했다. 실패한 청크를 건너뛰는 복호는 S3에서 정의한다.)
 

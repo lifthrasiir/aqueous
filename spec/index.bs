@@ -408,112 +408,191 @@ e.g. <code>0001&thinsp;0|m||ss|</code>,
 where letters denote bits that determine the parameters of the block.
 |ss| always denotes the two least significant bits, which determine the width of [=block/size=] as above:
 0 for [=u8=], 1 for [=u16le=], 2 for [=u32le=] and 3 for [=u64le=].
+Whether a reserved block type is [=critical=] is determined by its [=leading digit=] ([[#reserved-blocks]]).
+
+Block types of 2 hexadecimal digits are as follows:
 
 <table class=data id=block-index>
   <thead>
     <tr>
       <th>Block Types
+      <th>[=Leading digit|Leading Digit=]
       <th>Definition
   </thead>
   <tbody>
     <tr>
       <td>00<sub>16</sub> — 03<sub>16</sub>
+      <td>0
       <td>[[#spacer-block]]
     <tr>
       <td>04<sub>16</sub>
+      <td>0
       <td>[[#size-hint-block]]
     <tr>
       <td>05<sub>16</sub> — 0F<sub>16</sub>
+      <td>0
       <td>Reserved
     <tr>
       <td>10<sub>16</sub> — 17<sub>16</sub>
+      <td>1
       <td>[[#metadata-block]]
     <tr>
       <td>18<sub>16</sub> — 1F<sub>16</sub>
+      <td>1
       <td>Reserved
     <tr>
       <td>20<sub>16</sub> — 37<sub>16</sub>
+      <td>2 — 3
       <td>[[#data-block]]
     <tr>
       <td>38<sub>16</sub> — 3F<sub>16</sub>
+      <td>3
       <td>Reserved
     <tr>
       <td>40<sub>16</sub> — 4B<sub>16</sub>
+      <td>4
       <td>[[#data-block]]
     <tr>
       <td>4C<sub>16</sub> — 4F<sub>16</sub>
+      <td>4
       <td>Reserved
     <tr>
       <td>50<sub>16</sub> — 57<sub>16</sub>
+      <td>5
       <td>[[#dictionary-block]]
     <tr>
       <td>58<sub>16</sub> — 5F<sub>16</sub>
+      <td>5
       <td>[[#import-block]]
     <tr>
       <td>60<sub>16</sub> — 63<sub>16</sub>
+      <td>6
       <td>[[#module-block]]
     <tr>
       <td>64<sub>16</sub> — 67<sub>16</sub>
+      <td>6
       <td>[[#resource-block]]
     <tr>
       <td>68<sub>16</sub>
+      <td>6
       <td>Reserved
     <tr>
       <td>69<sub>16</sub>
+      <td>6
       <td>Reserved for [=const/OVERLAY_HEADER_TYPE=] ([[#reserved-blocks]])
     <tr>
       <td>6A<sub>16</sub> — 6F<sub>16</sub>
+      <td>6
       <td>Reserved
     <tr>
       <td>70<sub>16</sub> — 77<sub>16</sub>
+      <td>7
       <td>[[#formula-block]]
     <tr>
-      <td>78<sub>16</sub> — CF<sub>16</sub>
+      <td>78<sub>16</sub> — 9F<sub>16</sub>
+      <td>7 — 9
+      <td>Reserved
+    <tr>
+      <td>A0<sub>16</sub> — CF<sub>16</sub>
+      <td>A — C
       <td>Reserved
     <tr>
       <td>D0<sub>16</sub> — DF<sub>16</sub>
+      <td>D
       <td>[=Reserved for development environments=]
     <tr>
       <td>E0<sub>16</sub> — EF<sub>16</sub>
+      <td>E
       <td>[=Reserved for experiments=]
     <tr>
-      <td>F0<sub>16</sub> — C0F<sub>16</sub>
+      <td>F0<sub>16</sub> — FF<sub>16</sub>
+      <td>F
+      <td>Reserved
+  </tbody>
+</table>
+
+Block types of 3 or more hexadecimal digits are as follows:
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Block Types
+      <th>[=Leading digit|Leading Digit=]
+      <th>Definition
+  </thead>
+  <tbody>
+    <tr>
+      <td>100<sub>16</sub> — 9FF<sub>16</sub>, 1000<sub>16</sub> — 9FFF<sub>16</sub>, …
+      <td>1 — 9
+      <td>Reserved, including block-like structures ([[#reserved-blocks]])
+    <tr>
+      <td>A00<sub>16</sub> — BFF<sub>16</sub>, A000<sub>16</sub> — BFFF<sub>16</sub>, …
+      <td>A — B
+      <td>Reserved
+    <tr>
+      <td>C00<sub>16</sub> — C0F<sub>16</sub>
+      <td>C
       <td>Reserved
     <tr>
       <td>C10<sub>16</sub> — C17<sub>16</sub>
+      <td>C
       <td>[[#mirror-block]] for [[#metadata-block]]
     <tr>
       <td>C18<sub>16</sub> — C4F<sub>16</sub>
+      <td>C
       <td>Reserved
     <tr>
       <td>C50<sub>16</sub> — C57<sub>16</sub>
+      <td>C
       <td>[[#mirror-block]] for [[#dictionary-block]]
     <tr>
       <td>C58<sub>16</sub> — C5F<sub>16</sub>
+      <td>C
       <td>[[#mirror-block]] for [[#import-block]]
     <tr>
       <td>C60<sub>16</sub> — C63<sub>16</sub>
+      <td>C
       <td>[[#mirror-block]] for [[#module-block]]
     <tr>
       <td>C64<sub>16</sub> — C67<sub>16</sub>
+      <td>C
       <td>[[#mirror-block]] for [[#resource-block]]
     <tr>
       <td>C68<sub>16</sub> — C6F<sub>16</sub>
+      <td>C
       <td>Reserved
     <tr>
       <td>C70<sub>16</sub> — C77<sub>16</sub>
+      <td>C
       <td>[[#mirror-block]] for [[#formula-block]]
     <tr>
-      <td>C78<sub>16</sub> — FFFF&thinsp;FFFF&thinsp;FFFF&thinsp;FFFF<sub>16</sub>
-      <td>Reserved for various purposes
+      <td>C78<sub>16</sub> — CFF<sub>16</sub>, C000<sub>16</sub> — CFFF<sub>16</sub>, …
+      <td>C
+      <td>Reserved
+    <tr>
+      <td>D00<sub>16</sub> — DFF<sub>16</sub>, D000<sub>16</sub> — DFFF<sub>16</sub>, …
+      <td>D
+      <td>[=Reserved for development environments=]
+    <tr>
+      <td>E00<sub>16</sub> — EFF<sub>16</sub>, E000<sub>16</sub> — EFFF<sub>16</sub>, …
+      <td>E
+      <td>[=Reserved for experiments=]
+    <tr>
+      <td>F00<sub>16</sub> — FFF<sub>16</sub>, F000<sub>16</sub> — FFFF<sub>16</sub>, …
+      <td>F
+      <td>Reserved
   </tbody>
 </table>
 
 <h5 id=reserved-blocks>
 Reserved block types</h5>
 
-A block type is <dfn>critical</dfn> if its hexadecimal representation starts with 0<sub>16</sub> through 9<sub>16</sub>,
-and <dfn>non-critical</dfn> if it starts with A<sub>16</sub> through F<sub>16</sub>.
+The <dfn>leading digit</dfn> of a block type is the first digit of its hexadecimal representation,
+padded with zeros to at least 2 digits.
+For example, the leading digits of 4<sub>16</sub>, 4B<sub>16</sub> and C10<sub>16</sub> are 0, 4 and C respectively.
+
+A block type is <dfn>critical</dfn> if its [=leading digit=] is 0 through 9,
+and <dfn>non-critical</dfn> if it is A through F.
 A block whose type is not defined by this specification:
 
 * Results in an [=unsupported failure=] ([[#interpretation]]) if its type is [=critical=];
@@ -531,14 +610,14 @@ A block whose type is not defined by this specification:
   The block-like structures below also have critical types, so they are never skipped by mistake.
 </div>
 
-Blocks whose type's hexadecimal representation is at least 2 digits long
-and starts with D<sub>16</sub> (e.g. D0<sub>16</sub> through DF<sub>16</sub>, D00<sub>16</sub> through DFF<sub>16</sub>, …)
+Blocks whose type's [=leading digit=] is D
+(i.e. D0<sub>16</sub> through DF<sub>16</sub>, D00<sub>16</sub> through DFF<sub>16</sub>, …)
 are <dfn>reserved for development environments</dfn>.
 This specification doesn't assign any meanings to these blocks.
 These blocks MUST be written or read only with specific instructions to enable them.
 
-Blocks which type's hexadecimal representation is at least 2 digits long
-and starts with E<sub>16</sub> (e.g. E0<sub>16</sub> through EF<sub>16</sub>, E00<sub>16</sub> through EFF<sub>16</sub>, …)
+Blocks whose type's [=leading digit=] is E
+(i.e. E0<sub>16</sub> through EF<sub>16</sub>, E00<sub>16</sub> through EFF<sub>16</sub>, …)
 are <dfn>reserved for experiments</dfn>.
 This specification doesn't assign any meanings to those blocks.
 

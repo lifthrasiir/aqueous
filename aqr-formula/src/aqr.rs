@@ -1140,10 +1140,16 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
     Ok(b)
 }
 
-/// Whether block type `ty` is critical: its first hexadecimal digit is from 0 to 9.
+/// The leading digit of block type `ty`: the first digit of its hexadecimal representation,
+/// padded with zeros to at least 2 digits.
+fn leading_digit(ty: u64) -> u64 {
+    let digits = (64 - ty.leading_zeros()).div_ceil(4).max(2);
+    ty >> (4 * (digits - 1))
+}
+
+/// Whether block type `ty` is critical: its leading digit is from 0 to 9.
 fn critical(ty: u64) -> bool {
-    let digits = (64 - ty.leading_zeros()).div_ceil(4).max(1);
-    ty >> (4 * (digits - 1)) <= 9
+    leading_digit(ty) <= 9
 }
 
 /// Whether critical block type `ty` is defined by the spec, block-like structures included.
@@ -1725,8 +1731,8 @@ mod tests {
     }
 
     /// Neither the padding nor the space of a spacer block is read. A block type is the shortest
-    /// LEB128; an undefined one is ignored if non-critical (from A to F in its first hexadecimal
-    /// digit), else unsupported, even with an invalid block before it.
+    /// LEB128; an undefined one is ignored if non-critical (from A to F in its leading digit, padded to
+    /// 2 hexadecimal digits), else unsupported, even with an invalid block before it.
     #[test]
     fn block_framing() {
         let decode = |blocks: &[u8]| decode(&archive(|out| out.extend_from_slice(blocks)), &[]);
@@ -1738,9 +1744,11 @@ mod tests {
         assert_eq!(decode(b"\x20\x05hello\x00\xa0\x01\x01\x00"), Ok(b"hello".to_vec()));
         assert_eq!(decode(b"\xf0\x01\x00\x00"), Ok(Vec::new()));
         assert_eq!(decode(b"\x80\x1e\x00\x00"), Ok(Vec::new()));
-        // critical: 0x78, 0x80
+        // critical: 0x78, 0x80, and 0x0c and 0x0f, whose leading digit is 0 when padded to 2 digits
         assert!(matches!(decode(b"\x78\x00"), Err(Failure::Unsupported(_))));
         assert!(matches!(decode(b"\x80\x01\x00\x00"), Err(Failure::Unsupported(_))));
+        assert!(matches!(decode(b"\x0c\x00"), Err(Failure::Unsupported(_))));
+        assert!(matches!(decode(&[&[0x0f][..], &[0; 8], &[0]].concat()), Err(Failure::Unsupported(_))));
         // a block-like structure (the header) as a block
         assert!(matches!(decode(b"\xf8\x04\x00\x00"), Err(Failure::Invalid(_))));
         let bad_sum = [&b"\x24\x0dhello"[..], &[0; 8], b"\x00"].concat();
