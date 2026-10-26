@@ -16,3 +16,6 @@ rayon = ["dep:rayon"]
 [dependencies]
 zstd = { version = "0.13", optional = true }
 rayon = { version = "1.12", optional = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

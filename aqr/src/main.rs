@@ -40,6 +40,9 @@ struct Args {
     inputs: Vec<PathBuf>,
 }
 
+#[global_allocator]
+static ALLOC: aqr_common::mem::Mapped = aqr_common::mem::Mapped;
+
 fn main() -> ExitCode {
     let args = match parse() {
         Ok(a) => a,

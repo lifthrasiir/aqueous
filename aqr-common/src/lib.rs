@@ -6,7 +6,8 @@
 //! - [`rans32`]: rANS with per-file tables stored as quantised logarithms, four interleaved
 //!   32-bit states and byte output, with its LSB-first bit I/O (aqr-png, aqr-psd, aqr-pdf).
 //! - [`msb`]: MSB-first bit I/O of the formats themselves (MP3, FLAC).
-//! - [`mem`]: a counting global allocator, peak and large-allocation probes, peak RSS.
+//! - [`mem`]: the global allocator of the binaries ([`mem::Mapped`]), a counting one, peak and
+//!   large-allocation probes, peak RSS.
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
 //! - [`pool`]: the pool of threads every thread of the process runs on.
 

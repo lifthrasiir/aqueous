@@ -16,6 +16,9 @@ use aqr_compress::{Nest, Options, classes, compress_formula, detect};
 use aqr_decompress::decompress;
 use aqr_formula::aqr;
 
+#[global_allocator]
+static ALLOC: aqr_common::mem::Mapped = aqr_common::mem::Mapped;
+
 fn main() {
     let mut opt = Options::default();
     let mut tree = false;

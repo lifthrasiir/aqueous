@@ -1,5 +1,6 @@
-//! Heap accounting for memory profiling (bench -m, probes and memory tests), phase marks
-//! (feature `memprof`), and the process's peak resident set.
+//! The global allocator of the binaries ([`Mapped`]); heap accounting for memory profiling
+//! (bench -m, probes and memory tests), phase marks (feature `memprof`), and the process's
+//! peak resident set.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -145,5 +146,144 @@ pub fn mark(_label: &str) {
             PEAK.load(Relaxed) as f64 / 1e6
         );
         PEAK.store(CUR.load(Relaxed), Relaxed);
+    }
+}
+
+/// Blocks of at least this many bytes are mapped by [`Mapped`] (as of 10gb: 1 MiB below 256 KiB
+/// and 4 MiB keeps decompression the smallest, of the same speed).
+pub const MAPPED_MIN: usize = 1 << 20;
+
+/// The system's allocator, but for blocks of at least [`MAPPED_MIN`] bytes, which are mapped
+/// and unmapped at once (on Unix): macOS's gives back the pages of large blocks freed only
+/// some seconds later, as large blocks come and go faster than that (10gb decompression of
+/// 4.4 GB in use took 7.5 GB). A growing block is extended in place where the pages after it
+/// are free, as the system's realloc does. Registered by the binaries.
+pub struct Mapped;
+
+#[cfg(unix)]
+mod mapped {
+    use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
+
+    static PAGE: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn page() -> usize {
+        match PAGE.load(Relaxed) {
+            0 => {
+                // SAFETY: of no preconditions
+                let p = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap_or(4096);
+                PAGE.store(p, Relaxed);
+                p
+            }
+            p => p,
+        }
+    }
+
+    pub fn round(n: usize) -> usize {
+        n.next_multiple_of(page())
+    }
+
+    /// `n` bytes mapped (zeroed), at `at` if given and free there; null where they could not be.
+    pub fn map(at: *mut u8, n: usize) -> *mut u8 {
+        let (prot, flags) = (libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANON);
+        // SAFETY: a new mapping, without MAP_FIXED: nothing mapped already is touched
+        let p = unsafe { libc::mmap(at.cast(), n, prot, flags, -1, 0) };
+        if p == libc::MAP_FAILED { std::ptr::null_mut() } else { p.cast() }
+    }
+
+    /// # Safety
+    /// `p..p + n` are pages mapped by [`map`] and nothing uses them any more.
+    pub unsafe fn unmap(p: *mut u8, n: usize) {
+        // SAFETY: as the caller guarantees
+        unsafe { libc::munmap(p.cast(), n) };
+    }
+}
+
+impl Mapped {
+    #[inline]
+    fn mapped(l: Layout) -> bool {
+        cfg!(unix) && l.size() >= MAPPED_MIN && l.align() <= 4096
+    }
+}
+
+unsafe impl GlobalAlloc for Mapped {
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        #[cfg(unix)]
+        if Self::mapped(l) {
+            return mapped::map(std::ptr::null_mut(), mapped::round(l.size()));
+        }
+        unsafe { System.alloc(l) }
+    }
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        #[cfg(unix)]
+        if Self::mapped(l) {
+            return mapped::map(std::ptr::null_mut(), mapped::round(l.size()));
+        }
+        unsafe { System.alloc_zeroed(l) }
+    }
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        #[cfg(unix)]
+        if Self::mapped(l) {
+            // SAFETY: mapped by `alloc` as of this size, and the caller's no more
+            return unsafe { mapped::unmap(p, mapped::round(l.size())) };
+        }
+        unsafe { System.dealloc(p, l) }
+    }
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        // SAFETY (all): `l` is the block's layout, `n` its new size, of the same alignment
+        let nl = unsafe { Layout::from_size_align_unchecked(n, l.align()) };
+        let (old, new) = (Self::mapped(l), Self::mapped(nl));
+        if !old && !new {
+            return unsafe { System.realloc(p, l, n) };
+        }
+        #[cfg(unix)]
+        if old && new {
+            let (have, want) = (mapped::round(l.size()), mapped::round(n));
+            if want <= have {
+                if want < have {
+                    unsafe { mapped::unmap(p.add(want), have - want) };
+                }
+                return p;
+            }
+            // the pages right after it, where free
+            let end = unsafe { p.add(have) };
+            let more = mapped::map(end, want - have);
+            if more == end {
+                return p;
+            }
+            if !more.is_null() {
+                unsafe { mapped::unmap(more, want - have) };
+            }
+        }
+        let q = unsafe { self.alloc(nl) };
+        if !q.is_null() {
+            unsafe { std::ptr::copy_nonoverlapping(p, q, l.size().min(n)) };
+            unsafe { self.dealloc(p, l) };
+        }
+        q
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mapped() {
+        let a = Mapped;
+        for (from, to) in [(100, 5 << 20), (3 << 20, 9 << 20), (9 << 20, 2 << 20), (2 << 20, 1000), (MAPPED_MIN, MAPPED_MIN + 1)] {
+            let l = Layout::from_size_align(from, 8).unwrap();
+            // SAFETY: blocks of these layouts, written and read within them
+            unsafe {
+                let p = a.alloc_zeroed(l);
+                assert!(!p.is_null());
+                assert!(std::slice::from_raw_parts(p, from).iter().all(|&b| b == 0));
+                (0..from).for_each(|i| *p.add(i) = i as u8);
+                let q = a.realloc(p, l, to);
+                assert!(!q.is_null());
+                assert!((0..from.min(to)).all(|i| *q.add(i) == i as u8), "{from} -> {to}");
+                (0..to).for_each(|i| *q.add(i) = !(i as u8));
+                a.dealloc(q, Layout::from_size_align(to, 8).unwrap());
+            }
+        }
     }
 }
