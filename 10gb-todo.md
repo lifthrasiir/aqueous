@@ -14,6 +14,8 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
   971 → 706.7 MB이다. 10gb 전체로는 3.266 GB, 압축 92.4 s, 최대 footprint 6.7 GB이다
   (2026-10-26, 커밋 `ac0c17f`).
 - 파일 사이의 내용 공유(2번) 뒤: 2.81 GB(−458 MB), 압축 112.5 s, 최대 footprint 8.9 GB.
+- aqr-bundle(ar, tar, cpio) 뒤: 2810.8 → 2775.0 MB(−35.8 MB), 압축 109.8 → 106.0 s, 최대 footprint
+  8.59 → 7.49 GB(2026-10-26, 커밋 `d150880`, 같은 날 `e6ec924`와 견줌).
 
 ## 종류별
 
@@ -67,8 +69,12 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
    - 남은 것:
      - 재현의 레코드. Info-ZIP `-9`는 profile 6에서 내용의 2.6%(`enwik9.zip` 약 26 MB)이다.
        아래 표대로 profile 10이나 에뮬레이션이면 거의 0이지만 느리다. 높은 레벨에서만 쓸 만하다.
-     - `gimp.tar`(13 MB): tar의 slice는 헤더로 시작해서 잘리지 않는다. tar 멤버를 꺼내거나,
-       slice 가운데에서도 맞는 곳을 찾아야 한다.
+     - **[완료]** `gimp.tar`: aqr-bundle이 멤버를 꺼낸다. 1 KiB 이상인 멤버는 자기 slice를 갖고,
+       `share_slices`의 하한은 1 KiB, `Held`에 드는 파일의 하한은 4 KiB로 내렸으며, `together`는
+       tar·ar·cpio의 4 KiB 이상인 멤버로도 파일을 묶는다. `gimp.tar`와 그 파일들 −11.3 MB(tar는
+       11.87 → 6.93 MB). 같이 따라온 것: 같은 사진의 baseline과 progressive JPEG −15.2 MB.
+     - ZIP 엔트리 중 256 KiB 이상은 자기 slice를 갖는다. 그러지 않으면 `silesia.zip`의 tar
+       엔트리(mozilla, samba, xml)가 따로 있는 같은 파일과 어긋나서 그 뒤가 모두 두 번 저장된다.
      - 묶음이 크면 배치가 그만큼 커진다(상한 2 GiB).
    - Info-ZIP `-9` 스트림의 재현. enwik8을 Info-ZIP `-9`로 만든 스트림(2026-10-26, 10스레드):
 
@@ -85,7 +91,9 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
    - 앞의 둘은 주로 zstd 레벨 문제이다. 예산은 높은 레벨과 `--long`으로 잡았고, 지금 level mid는
      3–9에서 고른다. 버킷별 레벨을 올린다.
    - enwik9는 텍스트 전처리 모듈(xwrt식 단어 치환)이 필요하다.
-4. **ar −14 MB.** COFF 오브젝트에 x86 필터와 테이블 모델.
+4. **ar −14 MB.** COFF 오브젝트에 x86 필터와 테이블 모델. aqr-bundle이 멤버를 꺼내지만
+   (+1.0 MB, 평균 1 KB인 오브젝트는 헤더와 함께 압축하나 따로 하나 비슷하다), 오브젝트를 다루는
+   재압축기가 아직 없다.
 5. **PPMd 재현 −205 MB.** 확장 목표이다. 풀 때 1.1 GB를 단일 스트림으로 다시 인코딩해야 하므로
    별도 레벨에서만 켠다.
 

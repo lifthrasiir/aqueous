@@ -85,6 +85,7 @@ reservoir is rebuilt.
 | gzip, zlib | aqr-flate | 4 files, 4 MB | 0.932 | 0.977 | 16 | 58 | 34 MB + 35.6× | a small sample; 2 of 4 not coded, and since 2026-10-25 not deconstructed either (a probe of what the stream may gain): 6.7 and 8.0 to 50 and 33 MB/s. 153 gzip files of this machine (280 MB): 0.881 at 9.0 MB/s (README of aqr-flate). Per-stream figures on 924 streams are in aqr-flate's README |
 | ZIP | aqr-zip | 5 files, 327 MB | 0.954 | 0.998 | 8 | 23 | 48 MB + 13.8× | dominated by enwik9.zip (322 MB, 1 GB of text: 4.5 GB peak); two Python wheels come to 0.76. Since 2026-10-25 large bodies are rebuilt only where a probe says they may pay: 76 ZIP files of this machine (267 MB: wheels, JARs, Office files, Go modules, test corpora) 0.7799 -> 0.7795 at 10.8 -> 12.6 MB/s (README of aqr-zip) |
 | mozlz4, LZ4 frames | aqr-lz4 | a Firefox profile (README) | −9 to −18% against `zstd -3` of the files, −57% solid | | | 650–1150 (the compressor) | not measured | no sample on this machine; liblz4 1.10.0's fast compressor reproduced exactly |
+| ar, tar, cpio | aqr-bundle | the 10gb corpus (README) | 2810.8 → 2775.0 MB for all of it | | | 6600 (the module) | 28000 (the module) | not measured | measured with `aqr` and `aqr-bundle-check`, not `aqr-show`: an archive alone gains nothing, its files are recompressed by their formats and shared with the same files archived along (`gimp.tar` and its files −11.3 MB); ar archives of objects +1.0 MB |
 | LevelDB tables (Snappy) | aqr-snappy | 33 tables of a Chrome profile, 13.3 MB (README) | −30.5% against `zstd -3` | | | 315 (tables rebuilt) | not measured | both hashes of Snappy 1.2.2 |
 | git checkouts | aqr-git | 15 repositories, 1196 MB (README) | 0.452 (with zstd -19) | 0.651 (`tar \| zstd -19 --long=27`) | 87–117 | 135–750 | 0.1–2.1× beyond input and output (the largest object is the floor) | directories, measured outside `aqr-show`; `-A` (every zlib stream rebuilt): 0.255 at 25–49 MB/s |
 
@@ -109,6 +110,7 @@ reservoir is rebuilt.
 | aqr-sqlite | memory (chunked processing); WAL and rollback journals; WITHOUT ROWID secondary indexes |
 | aqr-obj | wiring into aqr-compress; compression speed of `%.17g` files; connectivity of faces in random order; `.mtl` |
 | aqr-zip | DEFLATE only; other methods (bzip2, LZMA, AES) are kept |
+| aqr-bundle | members sliced from the archive's bytes rather than copied (the memory of `.tar.gz`); COFF objects of ar archives (aqr-exe); old GNU sparse files; tar archives found in other data |
 
 ## Worth doing
 
@@ -254,14 +256,13 @@ container is TIFF/EXIF.
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
-| tar | everything Unix | none, 512-byte blocks and headers | headers predicted and padding dropped; it is what most `.tar.gz` needs besides the gzip | |
 | LZFSE, LZVN | APFS and HFS+ transparent compression (decmpfs), DMG (ULFO), `.aar`, `.xip`, asset catalogs (`.car`) | LZ77; LZFSE adds FSE (tANS) | the reference is open source, so the encoder can be reproduced exactly, as Snappy's and LZ4's are | aqr-lz4, aqr-snappy |
 | DMG (UDZO, UDBZ) | macOS distribution | zlib or bzip2 per chunk | the zlib chunks | aqr-flate |
 | xar (`.pkg`) | macOS installers | a zlib table of contents; a payload in gzip'd cpio or pbzx (xz chunks) | the zlib and gzip parts | aqr-flate |
 | CAB (MSZIP), MSI | Windows installers | MSZIP is deflate per block; MSI is CAB inside OLE | MSZIP is easy | aqr-flate |
 | AppX, MSIX, NuGet | Windows apps, .NET packages | ZIP; AppX adds a block map of SHA-256 hashes | aqr-zip; the block map derived | aqr-zip |
 | squashfs, initramfs, Android sparse images | firmware, Linux distributions | gzip, xz, zstd or lz4 blocks | the gzip and lz4 blocks | aqr-flate, aqr-lz4 |
-| OCI and Docker layers | container registries | tar.gz by Go's `compress/flate` | flate-zoo has Go's encoder already; tar is what is missing | aqr-flate |
+| OCI and Docker layers | container registries | tar.gz by Go's `compress/flate` | flate-zoo has Go's encoder already; the tar is aqr-bundle's | aqr-flate, aqr-bundle |
 | UEFI firmware volumes | PC firmware | EFI/Tiano compression (LZ77 with Huffman) or LZMA | Tiano's reference encoder (EDK II) reproduced | |
 | Intel HEX, Motorola S-record | microcontroller firmware | hex text with per-line checksums | the bytes, with addresses and checksums derived | |
 
