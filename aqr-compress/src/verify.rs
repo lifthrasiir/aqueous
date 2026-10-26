@@ -138,6 +138,10 @@ const RECLAIM_COPY: usize = 64 << 20;
 /// `f` once the [`Prevalidator`] is done with it: a copy where it is small and still evaluated
 /// (or waiting to be), else `f` itself when it is.
 pub(crate) fn reclaim(mut f: Arc<Formula>) -> Formula {
+    #[cfg(test)]
+    if crate::tests::COPY.with(std::cell::Cell::get) {
+        return (*f).clone();
+    }
     loop {
         match Arc::try_unwrap(f) {
             Ok(f) => return f,

@@ -328,15 +328,15 @@ fn set_of_variants() {
     ];
     let refs: Vec<&[u8]> = files.iter().map(|f| &f[..]).collect();
     let parents = [None, Some(0), Some(0), None];
-    let f = formula::encode_set(&refs, &parents, None, 1).expect("coded");
+    let f = formula::encode_set(&refs, &parents, &[], 1).expect("coded");
     let Node::Concat(outputs) = &f.root else { panic!() };
     assert_eq!(outputs.len(), 4);
     assert!(f.eval(&Set(1)).unwrap() == files.concat());
     // the same from the formulas of the files alone, not made again
-    let alone: Vec<Formula> = files.iter().map(|d| formula::encode(d, 1).unwrap()).collect();
-    assert!(formula::encode_set(&refs, &parents, Some(&alone), 1).unwrap() == f);
+    let alone: Vec<_> = files.iter().map(|d| formula::encode(d, 1)).collect();
+    assert!(formula::encode_set(&refs, &parents, &alone, 1).unwrap() == f);
     for t in [2, 8] {
-        assert!(formula::encode_set(&refs, &parents, None, t).unwrap() == f, "{t} threads");
+        assert!(formula::encode_set(&refs, &parents, &[], t).unwrap() == f, "{t} threads");
         assert!(f.eval(&Set(t)).unwrap() == files.concat(), "{t} threads");
     }
     let records: usize = f.streams.iter().filter(|s| s.class == "png/records").map(|s| s.data.len()).sum();
@@ -351,7 +351,7 @@ fn set_of_variants() {
     let natives = aqr_formula::aqr::natives(&[formula::MODULE, formula::SET_MODULE], &Set(1));
     assert!(aqr_formula::aqr::decode(&c, &natives).unwrap() == want);
     // a file that is not a PNG file gives no set
-    assert!(formula::encode_set(&[&files[0], b"not a png"], &[None, Some(0)], None, 1).is_none());
+    assert!(formula::encode_set(&[&files[0], b"not a png"], &[None, Some(0)], &[], 1).is_none());
 }
 
 fn records_of(f: &Formula) -> usize {
@@ -363,7 +363,7 @@ fn records_of(f: &Formula) -> usize {
 fn set_inputs_fail_cleanly() {
     let files = [picture(200, 150, 6, 9, None), picture(200, 150, 6, 9, Some((10, 20, 60, 40)))];
     let refs: Vec<&[u8]> = files.iter().map(|f| &f[..]).collect();
-    let f = formula::encode_set(&refs, &[None, Some(0)], None, 1).unwrap();
+    let f = formula::encode_set(&refs, &[None, Some(0)], &[], 1).unwrap();
     let s = &f.shared[0];
     let inputs: Vec<Vec<u8>> = s
         .apply

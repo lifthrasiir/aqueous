@@ -152,8 +152,16 @@ fn reference_of<'r>(
 
 /// The parts of `file`, as a PNG file with its images coded where that makes them smaller,
 /// against those of `refs` (a reference file's) where that makes them smaller still. With
-/// `alone`, the records of the images coded alone, which are not coded again.
-fn parts(file: &[u8], threads: usize, refs: Option<&References>, alone: Option<&[&[u8]]>) -> Result<Parts> {
+/// `alone`, the records of the images coded alone, which are not coded again; without, the
+/// images coded against a reference are coded alone too only `also_alone` (else only where
+/// they cannot be coded against it).
+fn parts(
+    file: &[u8],
+    threads: usize,
+    refs: Option<&References>,
+    alone: Option<&[&[u8]]>,
+    also_alone: bool,
+) -> Result<Parts> {
     let (chunks, trailer) = png::chunks(file).ok_or(Error::Unsupported("not a PNG file"))?;
     let classes = classes(&chunks);
 
@@ -185,7 +193,7 @@ fn parts(file: &[u8], threads: usize, refs: Option<&References>, alone: Option<&
     let image = |i: usize, threads: usize| {
         let (range, ih) = &imgs[i];
         let r = reference_of(ih, refs.and_then(|r| r.get(i)));
-        image_rec(&chunks[range.clone()], classes[range.start], ih, threads, r, alone.map(|a| a[i]))
+        image_rec(&chunks[range.clone()], classes[range.start], ih, threads, r, alone.map(|a| a[i]), also_alone)
     };
     // Below this size there is nothing worth a thread to overlap.
     let records = if threads > 1 && file.len() >= PAR_MIN {
@@ -202,7 +210,8 @@ fn parts(file: &[u8], threads: usize, refs: Option<&References>, alone: Option<&
 
 /// The record of the image of `chunks` (of class `class`): coded if it has a header and
 /// coding makes it smaller (against `reference` if given and smaller still), else the
-/// payload as it is. `alone` is the record coded alone, if known.
+/// payload as it is. `alone` is the record coded alone, if known; else, against a reference,
+/// it is coded alone too only `also_alone`, or where it cannot be coded against it.
 fn image_rec(
     chunks: &[png::Chunk],
     class: u8,
@@ -210,18 +219,22 @@ fn image_rec(
     threads: usize,
     reference: Option<&model::Reference>,
     alone: Option<&[u8]>,
+    also_alone: bool,
 ) -> Vec<u8> {
     let payload = payload_of(chunks, class);
+    let code_alone = |rec: &mut Vec<u8>| {
+        ih.as_ref().is_some_and(|ih| image_record(ih, &payload, threads, None, rec).is_ok())
+            && rec.len() <= payload.len()
+    };
+    let later = alone.is_none() && !also_alone && ih.is_some() && reference.is_some();
     let mut rec = vec![];
     let mut coded = match alone {
         Some(a) => {
             rec = a.to_vec();
             a.first() == Some(&1)
         }
-        None => {
-            ih.as_ref().is_some_and(|ih| image_record(ih, &payload, threads, None, &mut rec).is_ok())
-                && rec.len() <= payload.len()
-        }
+        None if later => false,
+        None => code_alone(&mut rec),
     };
     if let (Some(ih), Some(r)) = (ih, reference) {
         let mut against = vec![];
@@ -231,6 +244,10 @@ fn image_rec(
         {
             (rec, coded) = (against, true);
         }
+    }
+    if !coded && later {
+        rec.clear();
+        coded = code_alone(&mut rec);
     }
     if !coded {
         rec.clear();
@@ -249,14 +266,16 @@ fn image_rec(
 }
 
 /// The parts of `file` for a formula, if it is a PNG file and any image is coded (see
-/// [`crate::formula`]), against `refs` if given, with the records coded `alone` if known.
+/// [`crate::formula`]), against `refs` if given, with the records coded `alone` if known
+/// (else coded alone `also_alone`, as [`parts`]).
 pub(crate) fn formula_parts(
     file: &[u8],
     threads: usize,
     refs: Option<&References>,
     alone: Option<&[&[u8]]>,
+    also_alone: bool,
 ) -> Option<Parts> {
-    let parts = parts(file, threads, refs, alone).ok()?;
+    let parts = parts(file, threads, refs, alone, also_alone).ok()?;
     parts.records.iter().any(|r| r[0] != 0).then_some(parts)
 }
 
@@ -839,7 +858,7 @@ mod tests {
             png(&[(b"IHDR", ihdr(400, 300, 8, 6, 0)), (b"IDAT", zlib(&zlib6(), &big)), (b"IEND", vec![])]),
         ];
         for (k, file) in files.iter().enumerate() {
-            let parts = parts(file, 1, None, None).unwrap();
+            let parts = parts(file, 1, None, None, true).unwrap();
             let recs: Vec<&[u8]> = parts.records.iter().map(|r| &r[..]).collect();
             for threads in [1, 4] {
                 let (out, own) = Skeleton::parse(&parts.skeleton).unwrap().rebuild(&recs, threads, None, true).unwrap();

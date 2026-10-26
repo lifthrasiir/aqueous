@@ -88,7 +88,7 @@ mod verify;
 mod zip;
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -217,6 +217,9 @@ pub(crate) struct Cx {
     /// The prevalidation of those taken, by where their data is: put off until it is known
     /// whether they are taken into a set ([`sets`]), whose files are not evaluated alone.
     deferred: RefCell<Vec<(usize, verify::Deferred)>>,
+    /// The contents planned to be coded in a set against a parent ([`sets::plan`]), which are
+    /// not made alone.
+    skip: RefCell<HashSet<sets::Key>>,
 }
 
 impl Cx {
@@ -226,7 +229,14 @@ impl Cx {
         if opt.shared_resources {
             enc.share_resources();
         }
-        Cx { enc, inflate: Cell::new(inflate), pre: None, ready: Default::default(), deferred: Default::default() }
+        Cx {
+            enc,
+            inflate: Cell::new(inflate),
+            pre: None,
+            ready: Default::default(),
+            deferred: Default::default(),
+            skip: Default::default(),
+        }
     }
 
     /// Takes `n` bytes of inflated data from the budget, if there are as many left.
@@ -314,7 +324,7 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: 
 
 /// [`recompress_at`], unless `d` is kept raw; the data that a scan keeps between files is not
 /// cut out of `d` yet.
-fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
+pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
     match how {
         _ if depth >= opt.depth => None,
         Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
@@ -328,8 +338,8 @@ fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made>
 /// A formula of data, its stream 0 perhaps yet to be cut out of the data: the bytes of `gaps`,
 /// ranges of the data, one after the other. A scan's formula is so until put in place, where
 /// the data between the files found is cut out of the data's own stream if it can be.
-struct Made {
-    f: Formula,
+pub(crate) struct Made {
+    pub f: Formula,
     gaps: Option<Vec<Range<usize>>>,
 }
 
@@ -413,14 +423,16 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     }
     let mark = cx.deferred.borrow().len();
     let children = nested(&shared, opt, depth, cx);
+    // (where the data put off is, as the formula may be a copy once reclaimed)
+    let bases: Vec<usize> = shared.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let mut f = verify::reclaim(shared);
     let mut taken = Vec::new();
-    if let Some(mut children) = children {
-        let sets = sets::sets(&f, &mut children, opt);
+    if let Some((mut children, plan)) = children {
+        let sets = sets::sets(&f, &mut children, &plan, opt, depth, cx);
         for s in &sets {
             for &m in &s.members {
                 if let &Node::Slice { stream, start, .. } = &children[m].0 {
-                    taken.push(f.streams[stream].data[start as usize..].as_ptr() as usize);
+                    taken.push(bases[stream] + start as usize);
                 }
             }
         }
@@ -655,19 +667,23 @@ fn fit(base: usize, parts: &[(usize, usize)], limit: usize) -> Vec<bool> {
 
 /// The contents of the applications in `f` ([`Options::contents`]), a formula of data `depth`
 /// formats deep, each its slice and its formula to put in place of the slice ([`place_all`])
-/// where it has any application (as many as fit in [`Options::description`]); `None` where
-/// none has.
-fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<(Node, Option<Made>)>> {
+/// where it has any application (as many as fit in [`Options::description`]), and the plan of
+/// the sets of them (whose members with a parent have no formula); `None` where none has any
+/// and there is no set.
+fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, sets::Plan)> {
     if depth + 1 >= opt.depth {
         return None;
     }
-    let prepared = prepare(f, opt, cx);
+    let (prepared, plan) = prepare(f, opt, cx);
     let mut children = Vec::new();
     contents(&f.root, f, opt, depth, cx, &mut children);
     // (those not taken: the contents' own nested contents make and take their own)
     let mut ready = cx.ready.borrow_mut();
     prepared.iter().for_each(|k| drop(ready.remove(k)));
     drop(ready);
+    let mut skip = cx.skip.borrow_mut();
+    plan.children().for_each(|k| _ = skip.remove(&k));
+    drop(skip);
     let sizes: Vec<_> = children
         .iter()
         .map(|(slice, child)| match child {
@@ -676,11 +692,15 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<(Node, 
         })
         .collect();
     let keep = fit(description_bound(&f.root), &sizes, opt.description);
-    if !children.iter().zip(&keep).any(|((_, child), &keep)| keep && child.is_some()) {
+    if plan.is_empty() && !children.iter().zip(&keep).any(|((_, child), &keep)| keep && child.is_some()) {
         return None;
     }
-    Some(children.into_iter().zip(keep).map(|((slice, child), keep)| (slice, child.filter(|_| keep))).collect())
+    let children = children.into_iter().zip(keep).map(|((slice, child), keep)| (slice, child.filter(|_| keep)));
+    Some((children.collect(), plan))
 }
+
+/// Contents, each its slice and its formula where it has one ([`nested`]).
+type Contents = Vec<(Node, Option<Made>)>;
 
 /// What takes the place of a content's slice: its formula, or an output of a set.
 enum Placed {
@@ -749,10 +769,14 @@ fn content_slices(
 ) {
     match n {
         &Node::Slice { stream, start, len } => {
-            let child = f.streams.get(stream).and_then(|s| {
-                let d = s.data.get(start as usize..)?.get(..len as usize)?;
-                made(d, opt, depth + 1, nest.of(s.kind)?, cx)
-            });
+            let s = f.streams.get(stream);
+            let d = s.and_then(|s| s.data.get(start as usize..)?.get(..len as usize));
+            // (the first of a set's contents with a parent: made in the set; any other alone)
+            if d.is_some_and(|d| cx.skip.borrow_mut().remove(&(d.as_ptr() as usize, d.len()))) {
+                out.push((n.clone(), None));
+                return;
+            }
+            let child = s.zip(d).and_then(|(s, d)| made(d, opt, depth + 1, nest.of(s.kind)?, cx));
             out.push((n.clone(), child.filter(|c| !c.f.applies().is_empty())));
         }
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, nest, f, opt, depth, cx, out)),
@@ -864,28 +888,42 @@ fn pure_encode(format: Format) -> Option<Encode> {
 }
 
 /// Makes the formulas of the files of [`pure`] formats among the contents of `f` beforehand,
-/// at once (as [`contents`] would take them in turn), into [`Cx::ready`]; returns their keys.
-fn prepare(f: &Formula, opt: &Options, cx: &Cx) -> Vec<(usize, usize, Format)> {
+/// at once (as [`contents`] would take them in turn), into [`Cx::ready`]; returns their keys,
+/// and the plan of the sets of the PNG files among them ([`sets::plan`]), whose members with
+/// a parent are not made but left out of the contents ([`Cx::skip`]).
+fn prepare(f: &Formula, opt: &Options, cx: &Cx) -> (Vec<(usize, usize, Format)>, sets::Plan) {
     let mut jobs = Vec::new();
     pure_contents(&f.root, None, f, opt, &mut jobs);
     if jobs.len() < 2 {
-        return Vec::new();
+        return Default::default();
     }
+    // (PNG files all of their contents, as sets take them)
+    let pngs: Vec<_> = jobs.iter().filter(|j| j.0 == Format::Png).filter_map(|j| Some((j.1, j.2?))).collect();
+    let plan = sets::plan(&pngs, opt.threads);
+    let skip: HashSet<sets::Key> = plan.children().collect();
+    jobs.retain(|j| !(j.0 == Format::Png && skip.contains(&(j.1.as_ptr() as usize, j.1.len()))));
+    cx.skip.borrow_mut().extend(skip);
     let workers = opt.threads.min(jobs.len()).max(1);
     let inner = (opt.threads / workers).max(1);
     let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, inner).flatten());
     let mut ready = cx.ready.borrow_mut();
-    let keys: Vec<_> = jobs.iter().map(|&(format, d)| (d.as_ptr() as usize, d.len(), format)).collect();
+    let keys: Vec<_> = jobs.iter().map(|&(format, d, _)| (d.as_ptr() as usize, d.len(), format)).collect();
     for (&k, f) in keys.iter().zip(made) {
         ready.insert(k, f);
     }
-    keys
+    (keys, plan)
 }
 
 /// The files of [`pure`] formats below node `n` of `f` that [`contents`] (with `nest` `None`)
 /// or [`content_slices`] (with it) would take as such, each with its data as it is given its
-/// recompressor (to its [`extent`]).
-fn pure_contents<'a>(n: &Node, nest: Option<Nest>, f: &'a Formula, opt: &Options, out: &mut Vec<(Format, &'a [u8])>) {
+/// recompressor (to its [`extent`]), and its slice where that is all of the content.
+fn pure_contents<'a>(
+    n: &Node,
+    nest: Option<Nest>,
+    f: &'a Formula,
+    opt: &Options,
+    out: &mut Vec<(Format, &'a [u8], Option<sets::At>)>,
+) {
     match (n, nest) {
         (&Node::Slice { stream, .. }, None) if is_content(f, stream) => pure_contents(n, Some(Nest::Scan), f, opt, out),
         (&Node::Slice { stream, start, len }, Some(nest)) => {
@@ -895,7 +933,7 @@ fn pure_contents<'a>(n: &Node, nest: Option<Nest>, f: &'a Formula, opt: &Options
                 && is_pure(format)
                 && let Some(n) = extent(format, d).filter(|&n| n > 0)
             {
-                out.push((format, &d[..n]));
+                out.push((format, &d[..n], (n == d.len()).then_some((stream, start, len))));
             }
         }
         (Node::Concat(ns) | Node::Pack(ns), _) => ns.iter().for_each(|n| pure_contents(n, nest, f, opt, out)),
@@ -932,6 +970,8 @@ mod tests {
         pub(crate) static DECONSTRUCTED: Cell<usize> = const { Cell::new(0) };
         /// The files of [`pure`] formats given to their recompressors.
         pub(crate) static PURE: Cell<usize> = const { Cell::new(0) };
+        /// Whether [`verify::reclaim`] copies every formula (as it does those still evaluated).
+        pub(crate) static COPY: Cell<bool> = const { Cell::new(false) };
     }
 
     /// The contents of pure formats are made beforehand, each once: those of a ZIP archive's
@@ -970,6 +1010,101 @@ mod tests {
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert_eq!(PURE.with(Cell::get), 2);
         assert!(f.eval(&Native::default()).unwrap() == d);
+    }
+
+    /// A stored ZIP archive of `files` (name, data).
+    fn stored_zip(files: &[(&str, &[u8])]) -> Vec<u8> {
+        let (mut d, mut cd) = (Vec::new(), Vec::new());
+        for &(name, data) in files {
+            let mut h = vec![20, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            h.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+            h.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            h.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            h.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            h.extend_from_slice(&[0, 0]);
+            cd.extend_from_slice(b"PK\x01\x02\x14\x03");
+            cd.extend_from_slice(&h);
+            cd.extend_from_slice(&[0; 10]);
+            cd.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            cd.extend_from_slice(name.as_bytes());
+            d.extend_from_slice(b"PK\x03\x04");
+            d.extend_from_slice(&h);
+            d.extend_from_slice(name.as_bytes());
+            d.extend_from_slice(data);
+        }
+        let (at, n) = (d.len() as u32, files.len() as u16);
+        d.extend_from_slice(&cd);
+        d.extend_from_slice(b"PK\x05\x06\0\0\0\0");
+        d.extend_from_slice(&n.to_le_bytes());
+        d.extend_from_slice(&n.to_le_bytes());
+        d.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+        d.extend_from_slice(&at.to_le_bytes());
+        d.extend_from_slice(&[0, 0]);
+        d
+    }
+
+    /// A gray PNG file of a gradient of `w` x `h`, with the pixels of `rect` (x, y, width,
+    /// height) changed.
+    fn variant(w: usize, h: usize, rect: Option<(usize, usize, usize, usize)>) -> Vec<u8> {
+        use std::io::Write;
+        let mut data = Vec::new();
+        for y in 0..h {
+            data.push(0);
+            for x in 0..w {
+                let inside =
+                    rect.is_some_and(|(rx, ry, rw, rh)| (rx..rx + rw).contains(&x) && (ry..ry + rh).contains(&y));
+                data.push(if inside { ((x * 7) ^ (y * 3)) as u8 } else { (x + 2 * y) as u8 / 3 });
+            }
+        }
+        let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+        z.write_all(&data).unwrap();
+        let mut ihdr = (w as u32).to_be_bytes().to_vec();
+        ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        for (kind, d) in [(b"IHDR", ihdr), (b"IDAT", z.finish().unwrap()), (b"IEND", vec![])] {
+            out.extend_from_slice(&(d.len() as u32).to_be_bytes());
+            let start = out.len();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(&d);
+            out.extend_from_slice(&crc32fast::hash(&out[start..]).to_be_bytes());
+        }
+        out
+    }
+
+    /// The PNG files of a set are coded alone only where they have no parent: the others are
+    /// coded against theirs only.
+    #[test]
+    fn set_members_not_coded_alone() {
+        let files = [
+            variant(200, 150, None),
+            variant(200, 150, Some((20, 30, 40, 50))),
+            variant(200, 150, Some((90, 10, 30, 90))),
+        ];
+        let d = stored_zip(&[("a.png", &files[0]), ("b.png", &files[1]), ("c.png", &files[2])]);
+        PURE.with(|n| n.set(0));
+        let f = recompress(&d, &Options { threads: 1, ..Options::default() });
+        assert_eq!(f.shared.len(), 1);
+        assert_eq!(f.shared[0].sizes.len(), 3);
+        assert_eq!(PURE.with(Cell::get), 1);
+        assert!(f.eval(&Native::default()).unwrap() == d);
+    }
+
+    /// The sets planned are made where the formula of the contents is a copy once reclaimed
+    /// from the prevalidator (as one is that it still evaluates).
+    #[test]
+    fn sets_of_copies() {
+        let files = [
+            variant(200, 150, None),
+            variant(200, 150, Some((20, 30, 40, 50))),
+            variant(200, 150, Some((90, 10, 30, 90))),
+        ];
+        let d = stored_zip(&[("a.png", &files[0]), ("b.png", &files[1]), ("c.png", &files[2])]);
+        COPY.with(|c| c.set(true));
+        let (c, f) = compress_formula(&d, &Options { threads: 2, ..Options::default() });
+        COPY.with(|c| c.set(false));
+        assert_eq!(f.shared.len(), 1);
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
     /// The DEFLATE stream of a gzip file is deconstructed where its data may archive smaller
@@ -1052,7 +1187,7 @@ mod tests {
             f.root = Node::apply(aqr_decompress::X86, vec![], vec![data], d.len() as u64);
             let children = nested(&f, &opt, 0, &cx);
             assert_eq!(children.is_some(), content);
-            if let Some(mut children) = children {
+            if let Some((mut children, _)) = children {
                 assert_eq!(children.len(), 1);
                 let child = children.pop().unwrap().1.unwrap().cut(&d);
                 assert_eq!(child.applies().iter().map(|a| a.module).collect::<Vec<_>>(), [FLATE]);

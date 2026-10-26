@@ -32,9 +32,15 @@ pub fn encode_against(input: &[u8], reference: &[u8], threads: usize) -> Option<
 }
 
 /// The parts of `input` for a formula, against `refs` if given, with the records coded `alone`
-/// if known (no panic gets out).
-fn parts(input: &[u8], threads: usize, refs: Option<&References>, alone: Option<&[&[u8]]>) -> Option<Parts> {
-    std::panic::catch_unwind(|| codec::formula_parts(input, threads, refs, alone)).ok()?
+/// if known, else coded alone too `also_alone` (no panic gets out).
+fn parts(
+    input: &[u8],
+    threads: usize,
+    refs: Option<&References>,
+    alone: Option<&[&[u8]]>,
+    also_alone: bool,
+) -> Option<Parts> {
+    std::panic::catch_unwind(|| codec::formula_parts(input, threads, refs, alone, also_alone)).ok()?
 }
 
 /// A file's skeleton and the records of its images, as [`encode`] made them.
@@ -69,7 +75,7 @@ fn index_records(parts: &Parts) -> (Vec<u8>, Vec<u8>) {
 
 fn formula(input: &[u8], threads: usize, reference: Option<&[u8]>) -> Option<Formula> {
     let refs = reference.map(codec::references);
-    let parts = parts(input, threads, refs.as_ref(), None)?;
+    let parts = parts(input, threads, refs.as_ref(), None, true)?;
     let (index, records) = index_records(&parts);
     let against = parts.records.iter().any(|r| r[0] == 2);
     let mut f = Formula::default();
@@ -98,32 +104,32 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     Ok(rebuild(sk, index, records, reference.map(codec::references).as_ref(), len, threads, false)?.0)
 }
 
-/// The formula of `files`, each coded against its parent where that makes it smaller
-/// (`parents[i]`, before it, or none): an application of [`SET_MODULE`] of an output per file,
-/// its root the outputs one after another (each for the caller to put where its file is).
-/// `None` where a file gives no formula of its own ([`encode`]). `parents` must be as long as
-/// `files`, each before its file. `alone`, if given, are the files' formulas of [`encode`],
-/// which are not made again: those of the files without a parent are taken as they are.
+/// The formula of `files`, each coded against its parent (`parents[i]`, before it, or none):
+/// an application of [`SET_MODULE`] of an output per file, its root the outputs one after
+/// another (each for the caller to put where its file is). `None` where a file gives no
+/// formula of its own ([`encode`]). `parents` must be as long as `files`, each before its
+/// file. `alone` (as long, or empty) are the files' formulas of [`encode`] where known, which
+/// are not made again: those of the files without a parent are taken as they are, and the
+/// images of the others are coded alone where that is smaller than against the parent. Where
+/// not known, an image with a parent is coded alone only where it cannot be coded against it.
 pub fn encode_set(
     files: &[&[u8]],
     parents: &[Option<usize>],
-    alone: Option<&[Formula]>,
+    alone: &[Option<Formula>],
     threads: usize,
 ) -> Option<Formula> {
     assert!(files.len() == parents.len() && parents.iter().enumerate().all(|(i, p)| p.is_none_or(|p| p < i)));
-    assert!(alone.is_none_or(|a| a.len() == files.len()));
+    assert!(alone.is_empty() || alone.len() == files.len());
     let workers = threads.min(files.len()).max(1);
     let inner = (threads / workers).max(1);
     // the references of the parents, each once
     let mut is_parent = vec![false; files.len()];
     parents.iter().flatten().for_each(|&p| is_parent[p] = true);
     let refs = codec::par_map(files.len(), workers, |i| is_parent[i].then(|| codec::references(files[i])));
-    let alone: Option<Vec<Alone>> = alone.and_then(|a| a.iter().map(parts_of).collect());
-    let parts = codec::par_map(files.len(), workers, |i| match (parents[i], &alone) {
-        (None, Some(a)) => {
-            Some(Parts { skeleton: a[i].0.to_vec(), records: a[i].1.iter().map(|r| r.to_vec()).collect() })
-        }
-        (p, a) => parts(files[i], inner, p.and_then(|p| refs[p].as_ref()), a.as_ref().map(|a| &a[i].1[..])),
+    let alone: Vec<Option<Alone>> = (0..files.len()).map(|i| alone.get(i)?.as_ref().and_then(parts_of)).collect();
+    let parts = codec::par_map(files.len(), workers, |i| match (parents[i], &alone[i]) {
+        (None, Some(a)) => Some(Parts { skeleton: a.0.to_vec(), records: a.1.iter().map(|r| r.to_vec()).collect() }),
+        (p, a) => parts(files[i], inner, p.and_then(|p| refs[p].as_ref()), a.as_ref().map(|a| &a.1[..]), false),
     });
     let parts: Vec<Parts> = parts.into_iter().collect::<Option<_>>()?;
     let mut params = vec![];

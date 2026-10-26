@@ -705,6 +705,10 @@ fn zip_png_set() {
     assert!(decompress(&c, 1).unwrap() == d);
     let raw = aqr::encode(&Formula::raw("raw", d.clone()), None, aqr::Level::Mid).unwrap().len();
     assert!(c.len() * 10 < raw * 9, "{} against {raw}", c.len());
+    // the same where the files coded alone would not pay (as this noise does not)
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(f.shared.len(), 1);
+    assert_eq!(f.shared[0].sizes.len(), 3);
 }
 
 /// Archives of archives, each level the same archive 16 times like 42.zip, down to a large run

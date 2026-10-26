@@ -98,8 +98,8 @@ Variants of pictures (with layers shown or hidden, "差分"), as they are distri
 archives of Clip Studio Paint PNG files (684 MB, in groups of 13 to 88 of the same size, one
 archive cut short), measured on 2026-10-26 through `aqr-show -t 8`. The PNG files alike are
 coded against each other as sets (aqr-compress, aqr-png's `png-set`): the archives come to
-114.1 MB, against 497.1 MB with each file coded alone (and the archive cut short kept raw,
-before it was taken), at 34-51 MB/s compressing (44-54 alone) and 101-208 MB/s
+114.2 MB, against 497.1 MB with each file coded alone (and the archive cut short kept raw,
+before it was taken), at 47-79 MB/s compressing (44-54 alone) and 99-209 MB/s
 decompressing (71-90 alone).
 
 ## Tests
