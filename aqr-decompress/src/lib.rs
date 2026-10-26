@@ -89,9 +89,14 @@ const RECONS: [(Module, Decode); 9] = [
     (RASTER, |p, r, i, n, t| none(r).and_then(|_| aqr_raw::formula::raster::decode(p, i, n, t).map_err(msg))),
 ];
 
-/// The file in archive `c`.
+/// The file in archive `c`, an archive of a single file.
 pub fn decompress(c: &[u8], threads: usize) -> std::result::Result<Vec<u8>, Failure> {
     aqr::decode(c, &Native { threads }.modules())
+}
+
+/// What archive `c` holds: a single file, or a tree of them.
+pub fn decompress_value(c: &[u8], threads: usize) -> std::result::Result<aqr::Value, Failure> {
+    aqr::decode_value(c, &Native { threads }.modules())
 }
 
 /// Runs every module of this crate natively. The output does not depend on `threads`.

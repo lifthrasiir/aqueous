@@ -58,7 +58,8 @@
 //!
 //! [`compress`] stores the formula as an Aqueous archive of the file alone
 //! ([`aqr_formula::aqr`]), with the modules of [`aqr_decompress::MODULES`], which
-//! [`aqr_decompress::decompress`] decompresses.
+//! [`aqr_decompress::decompress`] decompresses. [`compress_tree`] archives several files, a
+//! tree of them, each recompressed as the entries of a ZIP archive are.
 //!
 //! Whatever is not recognised, turned down by its recompressor or not made smaller is kept raw:
 //! a slice of the input. So are, with [`Options::smaller`], a file and the files found in data
@@ -79,6 +80,7 @@
 //! # Ok::<(), aqr_formula::Error>(())
 //! ```
 
+mod archive;
 mod detect;
 mod exe;
 mod extent;
@@ -94,6 +96,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 pub use aqr_formula::{Formula, Kind, Module, Node, Region};
+pub use archive::{Archived, FileReport, Input, Report, Solid, compress_tree};
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 
@@ -136,6 +139,13 @@ pub struct Options {
     /// Size formulas without their resources ([`aqr::Encoder::share_resources`]), as for an
     /// archive of many files sharing them: for measuring what they come to in the limit.
     pub shared_resources: bool,
+    /// Of an archive of several files ([`compress_tree`]): the most bytes of a non-leaf block
+    /// that files share (one stream longer is a block of its own), which a file read alone
+    /// may have to decompress.
+    pub block: usize,
+    /// Of an archive of several files: the most bytes of the files of a set coded against each
+    /// other, which a file of it read alone has to decode.
+    pub set_bytes: usize,
 }
 
 /// Bytes that DEFLATE streams may inflate to on top of [`Options::expansion`] times the file.
@@ -181,6 +191,8 @@ impl Default for Options {
             smaller: true,
             expansion: 32,
             shared_resources: false,
+            block: 16 << 20,
+            set_bytes: 64 << 20,
         }
     }
 }
@@ -220,11 +232,19 @@ pub(crate) struct Cx {
     /// The contents planned to be coded in a set against a parent ([`sets::plan`]), which are
     /// not made alone.
     skip: RefCell<HashSet<sets::Key>>,
+    /// For the files of an archive (the contents of a formula 0 formats deep, `archive`), the
+    /// most bytes of files of a set ([`Options::set_bytes`]).
+    top_sets: Option<usize>,
 }
 
 impl Cx {
     fn new(d: &[u8], opt: &Options) -> Cx {
-        let inflate = opt.expansion.saturating_mul(d.len() as u64).saturating_add(EXPANSION_SLACK);
+        Cx::of_len(d.len(), opt)
+    }
+
+    /// A context of data of `n` bytes.
+    fn of_len(n: usize, opt: &Options) -> Cx {
+        let inflate = opt.expansion.saturating_mul(n as u64).saturating_add(EXPANSION_SLACK);
         let mut enc = Encoder::with_threads(opt.level, opt.threads);
         if opt.shared_resources {
             enc.share_resources();
@@ -236,6 +256,15 @@ impl Cx {
             ready: Default::default(),
             deferred: Default::default(),
             skip: Default::default(),
+            top_sets: None,
+        }
+    }
+
+    /// The most bytes of files of a set of the contents of a formula `depth` formats deep.
+    pub(crate) fn set_limit(&self, depth: u32) -> usize {
+        match self.top_sets {
+            Some(n) if depth == 0 => n,
+            _ => usize::MAX,
         }
     }
 
@@ -274,7 +303,7 @@ pub fn compress_formula(d: &[u8], opt: &Options) -> (Vec<u8>, Formula) {
 /// before the archive is verified.
 fn compress_with(d: &[u8], opt: &Options, kept: bool) -> (Vec<u8>, Option<Formula>) {
     let mut cx = Cx::new(d, opt);
-    cx.pre = opt.verify.then(|| verify::Prevalidator::spawn(opt.threads, d));
+    cx.pre = opt.verify.then(|| verify::Prevalidator::spawn(opt.threads, &[d]));
     let f = recompress_at(d, opt, 0, opt.file, &cx);
     let memo = cx.pre.take().map(verify::Prevalidator::finish).unwrap_or_default();
     finish(f, d, opt, &cx, memo, kept)
@@ -303,7 +332,7 @@ fn finish(
             native: Native { threads: opt.threads },
             memo: memo.into(),
             hits: Default::default(),
-            file: d,
+            files: &[d],
         };
         aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m)).is_ok_and(|out| out == d)
     };
@@ -674,7 +703,7 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, 
     if depth + 1 >= opt.depth {
         return None;
     }
-    let (prepared, plan) = prepare(f, opt, cx);
+    let (prepared, plan) = prepare(f, opt, depth, cx);
     let mut children = Vec::new();
     contents(&f.root, f, opt, depth, cx, &mut children);
     // (those not taken: the contents' own nested contents make and take their own)
@@ -891,7 +920,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
 /// at once (as [`contents`] would take them in turn), into [`Cx::ready`]; returns their keys,
 /// and the plan of the sets of the PNG files among them ([`sets::plan`]), whose members with
 /// a parent are not made but left out of the contents ([`Cx::skip`]).
-fn prepare(f: &Formula, opt: &Options, cx: &Cx) -> (Vec<(usize, usize, Format)>, sets::Plan) {
+fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usize, Format)>, sets::Plan) {
     let mut jobs = Vec::new();
     pure_contents(&f.root, None, f, opt, &mut jobs);
     if jobs.len() < 2 {
@@ -899,7 +928,7 @@ fn prepare(f: &Formula, opt: &Options, cx: &Cx) -> (Vec<(usize, usize, Format)>,
     }
     // (PNG files all of their contents, as sets take them)
     let pngs: Vec<_> = jobs.iter().filter(|j| j.0 == Format::Png).filter_map(|j| Some((j.1, j.2?))).collect();
-    let plan = sets::plan(&pngs, opt.threads);
+    let plan = sets::plan(&pngs, opt.threads, cx.set_limit(depth));
     let skip: HashSet<sets::Key> = plan.children().collect();
     jobs.retain(|j| !(j.0 == Format::Png && skip.contains(&(j.1.as_ptr() as usize, j.1.len()))));
     cx.skip.borrow_mut().extend(skip);
@@ -915,8 +944,9 @@ fn prepare(f: &Formula, opt: &Options, cx: &Cx) -> (Vec<(usize, usize, Format)>,
 }
 
 /// The files of [`pure`] formats below node `n` of `f` that [`contents`] (with `nest` `None`)
-/// or [`content_slices`] (with it) would take as such, each with its data as it is given its
-/// recompressor (to its [`extent`]), and its slice where that is all of the content.
+/// or [`content_slices`] (with it) would take as such (those of a kind of the format, or that a
+/// scan finds at the start), each with its data as it is given its recompressor (to its
+/// [`extent`]), and its slice where that is all of the content.
 fn pure_contents<'a>(
     n: &Node,
     nest: Option<Nest>,
@@ -929,8 +959,13 @@ fn pure_contents<'a>(
         (&Node::Slice { stream, start, len }, Some(nest)) => {
             let Some(s) = f.streams.get(stream) else { return };
             let Some(d) = s.data.get(start as usize..).and_then(|d| d.get(..len as usize)) else { return };
-            if let Some(Nest::As(format)) = nest.of(s.kind)
-                && is_pure(format)
+            // (a scan takes the file it starts with as one of the format it starts like)
+            let format = match nest.of(s.kind) {
+                Some(Nest::As(format)) => Some(format),
+                Some(Nest::Scan) => detect(d),
+                _ => None,
+            };
+            if let Some(format) = format.filter(|&f| is_pure(f))
                 && let Some(n) = extent(format, d).filter(|&n| n > 0)
             {
                 out.push((format, &d[..n], (n == d.len()).then_some((stream, start, len))));
@@ -1143,7 +1178,7 @@ mod tests {
         let d = z.finish().unwrap();
         let opt = Options { smaller: false, ..Options::default() };
         let mut cx = Cx::new(&d, &opt);
-        cx.pre = Some(verify::Prevalidator::spawn(2, &d));
+        cx.pre = Some(verify::Prevalidator::spawn(2, &[&d]));
         let f = recompress_at(&d, &opt, 0, opt.file, &cx);
         let memo = cx.pre.take().unwrap().finish();
         assert!(!f.applies().is_empty());
@@ -1151,16 +1186,24 @@ mod tests {
         assert_eq!(memo.bytes(), 0);
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         let decode = |c: &[u8], memo: verify::Memo| {
-            let m =
-                verify::Cached { native: Native { threads: 1 }, memo: memo.into(), hits: Default::default(), file: &d };
+            let m = verify::Cached {
+                native: Native { threads: 1 },
+                memo: memo.into(),
+                hits: Default::default(),
+                files: &[&d],
+            };
             let out = aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m));
             (out, m.hits.into_inner().unwrap())
         };
         let other = compress(&d[..d.len() - 1], &Options { verify: false, ..opt.clone() });
         // another archive's applications are not in it
         let (memo, hits) = {
-            let m =
-                verify::Cached { native: Native { threads: 1 }, memo: memo.into(), hits: Default::default(), file: &d };
+            let m = verify::Cached {
+                native: Native { threads: 1 },
+                memo: memo.into(),
+                hits: Default::default(),
+                files: &[&d],
+            };
             aqr::decode(&other, &aqr::natives(&aqr_decompress::MODULES, &m)).unwrap();
             (m.memo.into_inner().unwrap(), m.hits.into_inner().unwrap())
         };

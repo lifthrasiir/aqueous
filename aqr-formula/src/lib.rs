@@ -440,6 +440,12 @@ impl Formula {
     /// are), the contents, and those that a slice goes past the end of are left apart. The
     /// output is the same.
     pub fn merge_classes(&mut self) {
+        self.merge_classes_within(u64::MAX);
+    }
+
+    /// [`Formula::merge_classes`], into streams of `limit` bytes at most: a stream that would
+    /// take one past it starts another of its class and kind (one longer is left as it is).
+    pub fn merge_classes_within(&mut self, limit: u64) {
         let n = self.streams.len();
         let lens: Vec<u64> = self.streams.iter().map(|s| s.data.len() as u64).collect();
         let mut past = vec![false; n];
@@ -453,10 +459,15 @@ impl Formula {
         let mut streams: Vec<Stream> = Vec::with_capacity(n);
         for (i, s) in std::mem::take(&mut self.streams).into_iter().enumerate() {
             let alike = s.kind != Kind::Compressed && !s.content && !past[i];
-            match firsts.iter().find(|f| alike && f.0 == s.class && f.1 == s.kind) {
-                Some(&(_, _, j)) => {
+            match firsts.iter_mut().find(|f| alike && f.0 == s.class && f.1 == s.kind) {
+                Some(&mut (_, _, j)) if (streams[j].data.len() + s.data.len()) as u64 <= limit => {
                     to[i] = (j, streams[j].data.len() as u64);
                     streams[j].data.extend_from_slice(&s.data);
+                }
+                Some(first) => {
+                    first.2 = streams.len();
+                    to[i] = (streams.len(), 0);
+                    streams.push(s);
                 }
                 None => {
                     if alike {
@@ -922,6 +933,15 @@ mod tests {
         assert_eq!(g.eval(&Rev), Ok(want));
         let classes: Vec<_> = g.streams.iter().map(|s| (&*s.class, &s.data[..])).collect();
         assert_eq!(classes, [("a", &b"0123456789"[..]), ("b", &b"xyz"[..]), ("a", &b"ccc"[..]), ("a", &b"ttt"[..])]);
+        // within 6 bytes a stream
+        let mut g = f.clone();
+        g.merge_classes_within(6);
+        assert_eq!(g.eval(&Rev), f.eval(&Rev));
+        let classes: Vec<_> = g.streams.iter().map(|s| (&*s.class, &s.data[..])).collect();
+        assert_eq!(
+            classes,
+            [("a", &b"012345"[..]), ("b", &b"xyz"[..]), ("a", &b"ccc"[..]), ("a", &b"ttt"[..]), ("a", &b"6789"[..])]
+        );
         // a slice past the end of the last keeps it apart
         let mut past = f.clone();
         let Node::Concat(ns) = &mut past.root else { unreachable!() };

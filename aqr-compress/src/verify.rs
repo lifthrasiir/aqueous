@@ -40,10 +40,10 @@ fn key(a: &Apply, inputs: &[&[u8]]) -> Key {
     h.digest128()
 }
 
-/// An application's output: its bytes, or a range of the file.
+/// An application's output: its bytes, or a range of a file (by index).
 enum Output {
     Bytes(Arc<Vec<u8>>),
-    File(Range<usize>),
+    File(usize, Range<usize>),
 }
 
 /// Outputs of applications, by [`key`].
@@ -58,19 +58,19 @@ impl Memo {
     }
 }
 
-/// Runs the modules, keeping the output of every application by its key: as a range of the
-/// file for the applications in `file` (by address).
+/// Runs the modules, keeping the output of every application by its key: as a range of a
+/// file for the applications in `file` (by address, with the file's index and the range).
 struct Recording {
     native: Native,
-    file: Vec<(usize, Range<usize>)>,
+    file: Vec<(usize, usize, Range<usize>)>,
     seen: Mutex<Vec<(Key, Output)>>,
 }
 
 impl Modules for Recording {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         let out = self.native.apply(a, inputs)?;
-        let kept = match self.file.iter().find(|(at, _)| std::ptr::addr_eq(a, *at as *const Apply)) {
-            Some((_, range)) => Output::File(range.clone()),
+        let kept = match self.file.iter().find(|(at, ..)| std::ptr::addr_eq(a, *at as *const Apply)) {
+            Some((_, i, range)) => Output::File(*i, range.clone()),
             None => Output::Bytes(Arc::new(out.clone())),
         };
         self.seen.lock().unwrap().push((key(a, inputs), kept));
@@ -85,12 +85,12 @@ impl Modules for Recording {
 
 /// Runs the modules where the output of an application is not in the memo; `hits` counts those
 /// that are. An output is taken out of the memo when it is used: decoding an archive evaluates
-/// an application once. `file` is the file that the formulas evaluated beforehand are of.
+/// an application once. `files` are the files that the formulas evaluated beforehand are of.
 pub(crate) struct Cached<'a> {
     pub native: Native,
     pub memo: Mutex<Memo>,
     pub hits: Mutex<usize>,
-    pub file: &'a [u8],
+    pub files: &'a [&'a [u8]],
 }
 
 impl Modules for Cached<'_> {
@@ -101,7 +101,7 @@ impl Modules for Cached<'_> {
         }
         match hit {
             Some(Output::Bytes(out)) => Ok(Arc::try_unwrap(out).unwrap_or_else(|out| out.to_vec())),
-            Some(Output::File(range)) => Ok(self.file[range].to_vec()),
+            Some(Output::File(i, range)) => Ok(self.files[i][range].to_vec()),
             None => self.native.apply(a, inputs),
         }
     }
@@ -114,15 +114,18 @@ impl Modules for Cached<'_> {
 
 /// Evaluates formulas on a thread of its own, as they are submitted, into a [`Memo`]. A
 /// formula is shared with the recompression, and checked against a hash of the data it stands
-/// for: neither is copied. The file is known by its address: data within it is part of it.
+/// for: neither is copied. The files are known by their addresses: data within one is part of
+/// it.
 pub(crate) struct Prevalidator {
     jobs: Sender<Job>,
     done: JoinHandle<Memo>,
-    file: Range<usize>,
+    /// Where each file is, by address (ordered by it), and its index.
+    files: Vec<(Range<usize>, usize)>,
 }
 
-/// A formula, the hash of its data, and where the data is in the file if it is.
-type Job = (Arc<Formula>, Key, Option<usize>);
+/// A formula, the hash of its data, and where the data is in a file if it is (the file's
+/// index, and the offset).
+type Job = (Arc<Formula>, Key, Option<(usize, usize)>);
 
 /// A formula of data to evaluate beforehand, later ([`Prevalidator::job`]).
 pub(crate) struct Deferred(Job);
@@ -157,9 +160,9 @@ pub(crate) fn reclaim(mut f: Arc<Formula>) -> Formula {
 }
 
 impl Prevalidator {
-    /// A prevalidator of the formulas made of `file` and of what it holds: as many evaluated at
-    /// once as there are `threads`.
-    pub fn spawn(threads: usize, file: &[u8]) -> Prevalidator {
+    /// A prevalidator of the formulas made of `files` and of what they hold: as many evaluated
+    /// at once as there are `threads`.
+    pub fn spawn(threads: usize, files: &[&[u8]]) -> Prevalidator {
         let (jobs, rx) = channel::<Job>();
         let rx = Arc::new(Mutex::new(rx));
         let workers: Vec<_> = (0..threads.max(1))
@@ -174,7 +177,7 @@ impl Prevalidator {
                         // a formula of data in it are where they make it
                         let r = Recording {
                             native: Native { threads },
-                            file: at.map_or_else(Vec::new, |at| top(&f.root, at)),
+                            file: at.map_or_else(Vec::new, |(i, at)| top(&f.root, i, at)),
                             seen: Mutex::default(),
                         };
                         let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
@@ -194,7 +197,13 @@ impl Prevalidator {
             }
             memo
         });
-        Prevalidator { jobs, done, file: file.as_ptr_range().start as usize..file.as_ptr_range().end as usize }
+        let mut files: Vec<(Range<usize>, usize)> = files
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.as_ptr_range().start as usize..f.as_ptr_range().end as usize, i))
+            .collect();
+        files.sort_unstable_by_key(|f| f.0.start);
+        Prevalidator { jobs, done, files }
     }
 
     /// Has formula `f` of data `d` evaluated: where it gives `d`, its applications' outputs go
@@ -209,8 +218,11 @@ impl Prevalidator {
     /// not): `None` for a formula without applications.
     pub fn job(&self, f: Arc<Formula>, d: &[u8]) -> Option<Deferred> {
         let at = d.as_ptr() as usize;
-        let within = self.file.contains(&at) && at + d.len() <= self.file.end;
-        (!f.applies().is_empty()).then(|| Deferred((f, hash(d), within.then(|| at - self.file.start))))
+        let within = self.files[..self.files.partition_point(|f| f.0.start <= at)]
+            .last()
+            .filter(|(r, _)| r.contains(&at) && at + d.len() <= r.end)
+            .map(|(r, i)| (*i, at - r.start));
+        (!f.applies().is_empty()).then(|| Deferred((f, hash(d), within)))
     }
 
     /// Has a formula of [`Prevalidator::job`] evaluated.
@@ -226,15 +238,15 @@ impl Prevalidator {
     }
 }
 
-/// The applications at the top of `n`, by address, with the ranges of their outputs in the
-/// output of `n` (of which the output is at `at`): `n`, or those it concatenates.
-fn top(n: &Node, at: usize) -> Vec<(usize, Range<usize>)> {
+/// The applications at the top of `n`, by address, with the ranges of their outputs in file
+/// `file`, where the output of `n` is at `at`: `n`, or those it concatenates.
+fn top(n: &Node, file: usize, at: usize) -> Vec<(usize, usize, Range<usize>)> {
     let mut out = Vec::new();
     let mut p = at;
     for n in if let Node::Concat(ns) = n { &ns[..] } else { std::slice::from_ref(n) } {
         let len = n.len() as usize;
         if let Node::Apply(a) = n {
-            out.push((&**a as *const Apply as usize, p..p + len));
+            out.push((&**a as *const Apply as usize, file, p..p + len));
         }
         p += len;
     }

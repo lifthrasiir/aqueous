@@ -11,5 +11,9 @@ aqr-decompress = { path = "../aqr-decompress" }
 aqr-formula = { path = "../aqr-formula" }
 
 [[bin]]
+name = "aqr"
+path = "src/main.rs"
+
+[[bin]]
 name = "aqr-show"
 path = "src/bin/show.rs"

@@ -17,11 +17,22 @@
 //!
 //! [`decode`] evaluates such archives, and any other without a metadata block, a dictionary
 //! or an encryption.
+//!
+//! An archive of several files is one segment ([`segment`]): [`Encoder::encode_segment`] lays
+//! out the formulas of the files over streams they may share, with the metadata block of their
+//! [`Tree`], and [`decode_value`] decodes any archive of a segment at most (without
+//! dictionaries, imports or encryption) to its files.
+
+mod segment;
+mod tree;
+
+pub use segment::{Layout, Leaf, Placed, Segment};
+pub use tree::{Entry, EntryNode, Extra, Time, Tree, name_bytes, name_from};
 
 use std::borrow::Cow;
 use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
+use std::collections::hash_map::Entry as MapEntry;
 use std::fmt;
 use std::ops::Range;
 
@@ -250,6 +261,14 @@ impl Encoder {
         Ok(n.0)
     }
 
+    /// The zstd level of the module and formula blocks.
+    fn base_level(&self) -> i32 {
+        match self.level {
+            Level::Mid => MID_BASE.0,
+            Level::Zstd(l) => l,
+        }
+    }
+
     /// [`encode`] at the level of the encoder. Fails on slices out of their stream.
     pub fn encode(&self, f: &Formula, checksum: Option<u64>) -> Result<Vec<u8>> {
         // sized first (the streams compressed then are kept), so as to be written at its size
@@ -268,10 +287,7 @@ impl Encoder {
         out: &mut impl Out,
     ) -> Result<()> {
         // of the module and formula blocks
-        let level = match self.level {
-            Level::Mid => MID_BASE.0,
-            Level::Zstd(l) => l,
-        };
+        let level = self.base_level();
         let data: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         let streams: Vec<&[&[u8]]> = (0..data.len())
             .map(|s| match stand_in {
@@ -302,7 +318,7 @@ impl Encoder {
             // the non-leaf block of each stream sliced, by its ordinal
             let mut ordinals = vec![None; f.streams.len()];
             f.visit(&mut |n| {
-                if let &Node::Slice { stream, .. } = n {
+                if let &Node::Slice { stream, len: 1.., .. } = n {
                     ordinals[stream] = Some(0);
                 }
             });
@@ -380,6 +396,12 @@ impl Emit<'_> {
     /// The instructions pushing node `n`.
     fn node(&mut self, n: &Node) {
         match n {
+            // (nothing of a block: an empty concatenation)
+            Node::Slice { len: 0, .. } => {
+                self.out.push(CONCAT);
+                varint::put(self.out, 0);
+                self.stack.push(None);
+            }
             &Node::Slice { stream, start, len } => {
                 self.out.push(SLICE);
                 varint::put(self.out, self.ordinals[stream].unwrap());
@@ -539,11 +561,17 @@ impl Out for Count {
     }
 }
 
-/// The end of an archive whose blocks take `blocks` bytes.
+/// The end of an archive whose blocks take `blocks` bytes, without a metadata block.
 fn footer(out: &mut impl Out, blocks: usize) {
+    footer_with(out, blocks, 0);
+}
+
+/// The end of an archive whose blocks take `blocks` bytes, its last metadata block `metadata`
+/// bytes before the footer's fields (0: none).
+fn footer_with(out: &mut impl Out, blocks: usize, metadata: u64) {
     let mut f = Vec::new();
     varint::put(&mut f, blocks as u64);
-    varint::put(&mut f, 0);
+    varint::put(&mut f, metadata);
     out.put(&FOOTER_MAGIC);
     out.put(&(f.len() as u16).to_le_bytes());
     out.put(&f);
@@ -589,8 +617,8 @@ impl Encoder {
     fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[&[u8]], stored: bool) -> Result<()> {
         let mut streams = self.streams.borrow_mut();
         let c = match streams.entry(key(data)) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
+            MapEntry::Occupied(e) => e.into_mut(),
+            MapEntry::Vacant(e) => {
                 let plan = if stored { Plan::Done(None) } else { self.plan(*e.key(), data)? };
                 e.insert(match plan {
                     Plan::Done(c) => c,
@@ -607,8 +635,8 @@ impl Encoder {
     fn resource_block(&self, out: &mut impl Out, r: &[u8]) -> Result<()> {
         let mut resources = self.resources.borrow_mut();
         let c = match resources.entry(key(&[r])) {
-            Entry::Occupied(e) => e.into_mut(),
-            Entry::Vacant(e) => {
+            MapEntry::Occupied(e) => e.into_mut(),
+            MapEntry::Vacant(e) => {
                 let c = match self.plan(key(&[r]), &[r])? {
                     Plan::Done(Some(c)) => Some(c),
                     Plan::Done(None) => None,
@@ -650,6 +678,17 @@ impl Encoder {
             }
         }
         Ok(least)
+    }
+
+    /// Whether the encoder would compress stream `d` rather than store it as it is, by a sample
+    /// at the probe level (zstd level 1): it stores what that saves less than 1/32 of, as
+    /// [`Level::Mid`] does (the sample is kept, for when it is compressed).
+    pub fn compresses(&self, d: &[u8]) -> Result<bool> {
+        let (k, sample) = (key(&[d]), sampled(&[d]));
+        let c = self.trial(k, &sample, PROBE)?;
+        let saves = c.as_ref().is_some_and(|c| c.len() < sample.len() - sample.len() / 32);
+        self.trials.borrow_mut().insert((k, PROBE), c);
+        Ok(saves)
     }
 
     /// `sample` of the stream whose key is `k` compressed at `level`, as [`Encoder::least`]
@@ -1032,8 +1071,25 @@ pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec
     modules.iter().map(|&module| Box::new(Native { module, m }) as Box<dyn NativeModule + 'a>).collect()
 }
 
-/// The file in archive `c`, with the modules implemented by `modules`.
+/// What an archive holds: a single file (where it has no metadata block), or files in a tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Value {
+    File(Vec<u8>),
+    /// The entries, and the contents of their files (by [`EntryNode::File`]).
+    Tree(Tree, Vec<Vec<u8>>),
+}
+
+/// The file in archive `c`, an archive without a metadata block, with the modules implemented
+/// by `natives`.
 pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u8>> {
+    match decode_value(c, natives)? {
+        Value::File(d) => Ok(d),
+        Value::Tree(..) => resource("an archive of several files"),
+    }
+}
+
+/// What archive `c` holds, with the modules implemented by `natives`.
+pub fn decode_value(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Value> {
     if c.starts_with(&ENCRYPTED_HEADER_MAGIC) {
         return resource("encrypted archives are not supported yet");
     }
@@ -1059,9 +1115,17 @@ pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
         return invalid("bad footer");
     }
     let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0)?;
-    if metadata != 0 {
-        return invalid("no metadata block where the footer points");
-    }
+    let meta = match metadata {
+        0 => None,
+        back => {
+            let at = usize::try_from(back).ok().and_then(|b| fields_start.checked_sub(b));
+            match blocks.metadata.pop() {
+                Some((m, d)) if Some(m) == at && blocks.metadata.is_empty() => Some((m, tree::read(&d)?)),
+                Some(_) if !blocks.metadata.is_empty() => return resource("several segments are not supported yet"),
+                _ => return invalid("no metadata block where the footer points"),
+            }
+        }
+    };
 
     // every formula block read first: a non-leaf block is dropped once nothing is to slice it
     let mut used = vec![false; blocks.non_leaf.len()];
@@ -1075,8 +1139,8 @@ pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
         .leaves
         .iter()
         .map(|leaf| match *leaf {
-            Leaf::Stored(_) => Ok(None),
-            Leaf::Formula { outputs, data, modules, resources, non_leaf } => {
+            LeafBlock::Stored(_) => Ok(None),
+            LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
                 let env = env(modules, resources, non_leaf);
                 read(&blocks.formulas[data], outputs, &env, blocks.non_leaf.len(), &mut used).map(Some)
             }
@@ -1085,6 +1149,9 @@ pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
     if used.contains(&false) {
         return invalid("a non-leaf block no formula block references");
     }
+    let outputs: Vec<u64> =
+        blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
+    let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
     let mut contents = Contents { refs: vec![0; blocks.non_leaf.len()], data: std::mem::take(&mut blocks.non_leaf) };
     for p in programs.iter().flatten() {
         for insn in &p.insns {
@@ -1095,31 +1162,118 @@ pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
     }
 
     let mut out = Vec::new();
+    let mut leaves = Vec::new();
     for (leaf, program) in std::mem::take(&mut blocks.leaves).into_iter().zip(programs) {
         let leaf = match (leaf, program) {
-            (Leaf::Stored(d), _) => d,
-            (Leaf::Formula { modules, resources, non_leaf, .. }, Some(p)) => {
+            (LeafBlock::Stored(d), _) => vec![d],
+            (LeafBlock::Formula { modules, resources, non_leaf, .. }, Some(p)) => {
                 run(p, &env(modules, resources, non_leaf), &mut contents)?
             }
-            (Leaf::Formula { .. }, None) => unreachable!(),
+            (LeafBlock::Formula { .. }, None) => unreachable!(),
         };
-        // the first leaf as it is
-        if out.is_empty() {
-            out = leaf;
-        } else {
-            out.extend_from_slice(&leaf);
+        match &tree {
+            Some(_) => leaves.push(leaf),
+            // the first leaf as it is
+            None => {
+                for d in leaf {
+                    if out.is_empty() {
+                        out = d;
+                    } else {
+                        out.extend_from_slice(&d);
+                    }
+                }
+            }
         }
     }
-    Ok(out)
+    let Some((tree, refs)) = tree else { return Ok(Value::File(out)) };
+    let mut files = Vec::with_capacity(refs.len());
+    for (leaf, output, size) in refs {
+        let d = std::mem::take(&mut leaves[leaf][output]);
+        if d.len() as u64 != size {
+            return invalid("a file of another size than its entry's");
+        }
+        files.push(d);
+    }
+    Ok(Value::Tree(tree, files))
+}
+
+/// The tree of metadata block `m` at `at`, among `blocks` whose leaves have `outputs` each;
+/// and its contents, each a leaf and an output of it, and the size of the files of it.
+#[allow(clippy::type_complexity)]
+fn tree_of(
+    m: tree::Metadata,
+    at: usize,
+    blocks: &Blocks,
+    outputs: &[u64],
+) -> Decoded<(Tree, Vec<(usize, usize, u64)>)> {
+    if m.prev != (at - HEADER_MAGIC.len() + 1) as u64 {
+        return invalid("a first metadata block not pointing to the header");
+    }
+    let to = |offsets: &[u64], at_: &[usize]| {
+        offsets.len() == at_.len() && offsets.iter().zip(at_).all(|(&o, &b)| at.checked_sub(o as usize) == Some(b))
+    };
+    if !to(&m.modules, &blocks.module_at) || !to(&m.resources, &blocks.resource_at) {
+        return invalid("module or resource offsets not those of the blocks");
+    }
+    let mut t = Tree { root: m.extras[0], entries: Vec::new() };
+    // the tree's index of each entry by number, tombstones (of nothing to remove) left out
+    let mut index = vec![None; m.entries.len() + 1];
+    let mut names = std::collections::HashSet::new();
+    let mut refs: Vec<(usize, usize, u64)> = Vec::new();
+    let mut ref_of: HashMap<(usize, usize), usize> = HashMap::new();
+    for (k, (parent, name, read)) in m.entries.into_iter().enumerate() {
+        let k = k + 1;
+        let parent_index = match parent {
+            0 => None,
+            p => Some(index[p].expect("a directory")),
+        };
+        if !names.insert((parent, name.clone())) {
+            return invalid("two entries of a name in a directory");
+        }
+        let node = match read {
+            tree::Read::Dir => EntryNode::Dir,
+            tree::Read::File { offset, output, size } => {
+                let leaf = at
+                    .checked_sub(offset as usize)
+                    .and_then(|b| blocks.leaf_at.binary_search(&b).ok())
+                    .ok_or_else(|| Failure::Invalid("a file not at a leaf block".into()))?;
+                if output >= outputs[leaf] {
+                    return invalid("a file of an output its leaf block does not have");
+                }
+                let output = output as usize;
+                let c = match ref_of.entry((leaf, output)) {
+                    MapEntry::Occupied(c) if refs[*c.get()].2 == size => *c.get(),
+                    MapEntry::Occupied(_) => return invalid("files of an output of other sizes"),
+                    MapEntry::Vacant(e) => {
+                        refs.push((leaf, output, size));
+                        *e.insert(refs.len() - 1)
+                    }
+                };
+                EntryNode::File(c)
+            }
+            tree::Read::Link(target) => EntryNode::Link(target),
+            tree::Read::Special(0) => continue,
+            tree::Read::Special(kind) => EntryNode::Special(kind),
+        };
+        index[k] = Some(t.entries.len());
+        t.entries.push(Entry { parent: parent_index, name, node, extra: m.extras[k] });
+    }
+    Ok((t, refs))
 }
 
 fn leb(d: &[u8], at: &mut usize) -> Decoded<u64> {
     varint::get(d, at).map_err(|e| Failure::Invalid(e.0.into()))
 }
 
-/// The blocks of an archive without a metadata block, decoded.
+/// The blocks of an archive of a segment at most, decoded.
 struct Blocks {
-    leaves: Vec<Leaf>,
+    leaves: Vec<LeafBlock>,
+    /// Where the leaf, module and resource blocks start, in the archive.
+    leaf_at: Vec<usize>,
+    module_at: Vec<usize>,
+    resource_at: Vec<usize>,
+    /// The metadata blocks, where each starts and its decoded data.
+    metadata: Vec<(usize, Vec<u8>)>,
     /// The formula data of the formula blocks.
     formulas: Vec<Vec<u8>>,
     non_leaf: Vec<Vec<u8>>,
@@ -1127,7 +1281,7 @@ struct Blocks {
     resources: Vec<Resource>,
 }
 
-enum Leaf {
+enum LeafBlock {
     Stored(Vec<u8>),
     /// The number of outputs and the formula data (by index), with the numbers of module and
     /// resource blocks before it and of non-leaf blocks.
@@ -1144,6 +1298,10 @@ enum Leaf {
 fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
     let mut b = Blocks {
         leaves: Vec::new(),
+        leaf_at: Vec::new(),
+        module_at: Vec::new(),
+        resource_at: Vec::new(),
+        metadata: Vec::new(),
         formulas: Vec::new(),
         non_leaf: Vec::new(),
         modules: Vec::new(),
@@ -1181,6 +1339,11 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
         return Err(Failure::Unsupported(format!("a block of an undefined critical type {ty:#x}")));
     }
     for (start, ty, data) in framed {
+        let at = start + HEADER_MAGIC.len();
+        // (content blocks after a metadata block are of another segment)
+        if !b.metadata.is_empty() && matches!(ty, 0x20..=0x37 | 0x40..=0x4b | 0x50..=0x57 | 0x60..=0x67 | 0x70..=0x77) {
+            return resource("several segments are not supported yet");
+        }
         match ty {
             // spacer blocks, of any space: only compressors have to zero it
             0x00..=0x03 => {}
@@ -1194,10 +1357,19 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
             0x30..=0x37 | 0x48..=0x4b | 0x50..=0x57 | 0x74..=0x77 => {
                 return resource("dictionaries are not supported yet");
             }
-            0x20..=0x2f => b.leaves.push(Leaf::Stored(decoded(data, ty & 0x08 != 0, ty & 0x04 != 0)?)),
+            0x20..=0x2f => {
+                b.leaf_at.push(at);
+                b.leaves.push(LeafBlock::Stored(decoded(data, ty & 0x08 != 0, ty & 0x04 != 0)?));
+            }
             0x40..=0x47 => b.non_leaf.push(decoded(data, ty & 0x04 != 0, true)?),
-            0x60..=0x63 => b.modules.push(decoded(data, true, true)?),
-            0x64..=0x67 => b.resources.push(Resource::new(decoded(data, true, true)?)),
+            0x60..=0x63 => {
+                b.module_at.push(at);
+                b.modules.push(decoded(data, true, true)?);
+            }
+            0x64..=0x67 => {
+                b.resource_at.push(at);
+                b.resources.push(Resource::new(decoded(data, true, true)?));
+            }
             0x70..=0x73 => {
                 let mut p = 0;
                 let outputs = leb(data, &mut p)?;
@@ -1205,7 +1377,8 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
                     return invalid("a formula block of no outputs");
                 }
                 b.formulas.push(decoded(&data[p..], true, true)?);
-                b.leaves.push(Leaf::Formula {
+                b.leaf_at.push(at);
+                b.leaves.push(LeafBlock::Formula {
                     outputs,
                     data: b.formulas.len() - 1,
                     modules: b.modules.len(),
@@ -1215,7 +1388,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
             }
             // mirror blocks and undefined non-critical blocks, not read
             _ if !critical(ty) => {}
-            0x10..=0x17 if metadata => return resource("metadata blocks are not supported yet"),
+            0x10..=0x17 if metadata => b.metadata.push((at, decoded(data, ty & 0x04 != 0, true)?)),
             0x10..=0x17 => return invalid("a metadata block, but none in the footer"),
             _ => return invalid(format!("bad block of type {ty:#x}")),
         }
@@ -1510,7 +1683,7 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [b
 
 /// A byte sequence on the stack: a slice of a non-leaf block (by its ordinal among all), a
 /// literal, or bytes of its own.
-enum Value<'a> {
+enum Item<'a> {
     Slice(usize, Range<usize>),
     Literal(&'a [u8]),
     Bytes(Vec<u8>),
@@ -1524,31 +1697,31 @@ struct Contents {
 }
 
 impl Contents {
-    fn get<'v>(&'v self, v: &'v Value) -> &'v [u8] {
+    fn get<'v>(&'v self, v: &'v Item) -> &'v [u8] {
         match v {
-            Value::Slice(o, r) => &self.data[*o][r.clone()],
-            Value::Literal(l) => l,
-            Value::Bytes(b) => b,
+            Item::Slice(o, r) => &self.data[*o][r.clone()],
+            Item::Literal(l) => l,
+            Item::Bytes(b) => b,
         }
     }
 
     /// `v` used up: its bytes, of its own.
-    fn take(&mut self, v: Value) -> Vec<u8> {
+    fn take(&mut self, v: Item) -> Vec<u8> {
         match v {
-            Value::Slice(o, r) => {
+            Item::Slice(o, r) => {
                 let out = self.data[o][r].to_vec();
                 self.release(o);
                 out
             }
-            Value::Literal(l) => l.to_vec(),
-            Value::Bytes(b) => b,
+            Item::Literal(l) => l.to_vec(),
+            Item::Bytes(b) => b,
         }
     }
 
     /// `vs` used up, once their bytes are no longer needed.
-    fn drop_all(&mut self, vs: Vec<Value>) {
+    fn drop_all(&mut self, vs: Vec<Item>) {
         for v in vs {
-            if let Value::Slice(o, _) = v {
+            if let Item::Slice(o, _) = v {
                 self.release(o);
             }
         }
@@ -1562,14 +1735,14 @@ impl Contents {
     }
 }
 
-/// The outputs of formula block `p` one after another, with the non-leaf blocks in `contents`.
-fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
+/// The outputs of formula block `p`, with the non-leaf blocks in `contents`.
+fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<Vec<u8>>> {
     // literals and slices where they are
-    let mut stack: Vec<Value> = Vec::new();
+    let mut stack: Vec<Item> = Vec::new();
     for insn in p.insns {
         match insn {
             Insn::Nop => {}
-            Insn::Literal(l) => stack.push(Value::Literal(l)),
+            Insn::Literal(l) => stack.push(Item::Literal(l)),
             Insn::Swap(depth) => {
                 let top = stack.len() - 1;
                 stack.swap(top, top - depth);
@@ -1582,7 +1755,7 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
                     .and_then(|(s, l)| Some(s..s.checked_add(l)?))
                     .filter(|r| r.end <= contents.data[o].len())
                     .ok_or_else(|| Failure::Invalid("slice out of its block".into()))?;
-                stack.push(Value::Slice(o, r));
+                stack.push(Item::Slice(o, r));
             }
             Insn::Apply(a) => {
                 let inputs = stack.split_off(stack.len() - a.num_inputs);
@@ -1590,20 +1763,20 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
                 let bytes: Vec<&[u8]> = inputs.iter().map(|v| contents.get(v)).collect();
                 let outputs = apply(env, p.modules[a.module], &a, &bytes, &res)?;
                 contents.drop_all(inputs);
-                stack.extend(outputs.into_iter().map(Value::Bytes));
+                stack.extend(outputs.into_iter().map(Item::Bytes));
             }
             Insn::Concat(1) => {}
             Insn::Concat(n) => {
                 let parts = stack.split_off(stack.len() - n);
                 let bytes = parts.iter().map(|v| contents.get(v)).collect::<Vec<_>>().concat();
                 contents.drop_all(parts);
-                stack.push(Value::Bytes(bytes));
+                stack.push(Item::Bytes(bytes));
             }
             Insn::Pack(n) => {
                 let parts = stack.split_off(stack.len() - n);
                 let bytes = packed::pack(&parts.iter().map(|v| contents.get(v)).collect::<Vec<_>>());
                 contents.drop_all(parts);
-                stack.push(Value::Bytes(bytes));
+                stack.push(Item::Bytes(bytes));
             }
             Insn::Split(sizes) => {
                 let x = stack.pop().unwrap();
@@ -1616,13 +1789,13 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
                 for &n in &sizes {
                     let r = at..at + n as usize;
                     stack.push(match &x {
-                        Value::Slice(o, s) => Value::Slice(*o, s.start + r.start..s.start + r.end),
-                        &Value::Literal(l) => Value::Literal(&l[r]),
-                        Value::Bytes(b) => Value::Bytes(b[r].to_vec()),
+                        Item::Slice(o, s) => Item::Slice(*o, s.start + r.start..s.start + r.end),
+                        &Item::Literal(l) => Item::Literal(&l[r]),
+                        Item::Bytes(b) => Item::Bytes(b[r].to_vec()),
                     });
                     at += n as usize;
                 }
-                if let Value::Slice(o, _) = x {
+                if let Item::Slice(o, _) = x {
                     contents.refs[o] += sizes.len() - 1;
                 }
             }
@@ -1631,7 +1804,7 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
                 let out = crate::patch::apply(contents.get(&items[0]), contents.get(&items[1]), len)
                     .map_err(|e| Failure::Invalid(e.0))?;
                 contents.drop_all(items);
-                stack.push(Value::Bytes(out));
+                stack.push(Item::Bytes(out));
             }
             Insn::Checksum(v) => {
                 if checksum(contents.get(stack.last().unwrap())) != v {
@@ -1640,10 +1813,7 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
             }
         }
     }
-    if stack.len() == 1 {
-        return Ok(contents.take(stack.pop().unwrap()));
-    }
-    Ok(stack.into_iter().map(|v| contents.take(v)).collect::<Vec<_>>().concat())
+    Ok(stack.into_iter().map(|v| contents.take(v)).collect())
 }
 
 /// The outputs of application `a` of module block `module`.
@@ -1672,7 +1842,7 @@ mod tests {
         pub(super) static COMPRESSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    const REV: Module = Module { name: "rev", version: 1 };
+    pub(super) const REV: Module = Module { name: "rev", version: 1 };
 
     /// `rev` reverses the concatenation of its inputs, with parameters 1, 2, 3.
     struct Rev;
@@ -1688,7 +1858,7 @@ mod tests {
         }
     }
 
-    const CUT: Module = Module { name: "cut", version: 1 };
+    pub(super) const CUT: Module = Module { name: "cut", version: 1 };
 
     /// `cut` cuts the concatenation of its inputs into outputs of the sizes declared.
     struct Cut;
@@ -1709,7 +1879,7 @@ mod tests {
         }
     }
 
-    fn natives() -> Vec<Box<dyn NativeModule>> {
+    pub(super) fn natives() -> Vec<Box<dyn NativeModule>> {
         vec![Box::new(Rev), Box::new(Cut)]
     }
 

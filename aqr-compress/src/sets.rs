@@ -8,7 +8,10 @@
 //! against it, never alone. Those of other PNG files are found among their formulas alone.
 //!
 //! Within a content, which is decoded whole, the tree's depth costs no random access; the files
-//! are decoded in order, each once.
+//! are decoded in order, each once. A set of files of an archive is decoded whole for any of
+//! them, so that sets of those are cut to a bound of bytes ([`Cx::set_limit`]): along the
+//! order of the tree, each piece a set of its own, whose members with a parent in another one
+//! have none.
 
 use std::collections::{HashMap, HashSet};
 
@@ -64,22 +67,23 @@ impl Plan {
     }
 }
 
-/// The plan of the sets of `files` (PNG files, each the whole of a content, with its slice).
-pub(crate) fn plan(files: &[(&[u8], At)], threads: usize) -> Plan {
+/// The plan of the sets of `files` (PNG files, each the whole of a content, with its slice),
+/// of `limit` bytes of files each at most.
+pub(crate) fn plan(files: &[(&[u8], At)], threads: usize, limit: usize) -> Plan {
     let mut seen = HashSet::new();
     let files: Vec<(&[u8], At)> = files.iter().copied().filter(|&(_, at)| seen.insert(at)).collect();
     let data: Vec<&[u8]> = files.iter().map(|f| f.0).collect();
-    let sets = forests(&data, threads)
+    let sets = forests(&data, threads, limit)
         .into_iter()
         .map(|(order, parents)| (order.into_iter().map(|i| (key(files[i].0), files[i].1)).collect(), parents))
         .collect();
     Plan { sets, seen }
 }
 
-/// The trees of `files` alike, of those of the same geometry: of each, the files (their
-/// indices) in order, parents first, and the parent of each in that order. Only those where
-/// any file has a parent.
-fn forests(files: &[&[u8]], threads: usize) -> Vec<(Vec<usize>, Vec<Option<usize>>)> {
+/// The trees of `files` alike, of those of the same geometry, cut to `limit` bytes of files
+/// each: of each, the files (their indices) in order, parents first, and the parent of each in
+/// that order. Only those where any file has a parent.
+fn forests(files: &[&[u8]], threads: usize, limit: usize) -> Vec<(Vec<usize>, Vec<Option<usize>>)> {
     if files.len() < 2 {
         return Vec::new();
     }
@@ -98,8 +102,10 @@ fn forests(files: &[&[u8]], threads: usize) -> Vec<(Vec<usize>, Vec<Option<usize
         let n = group.len();
         let rows = par_map(n, threads, |i| (0..n).map(|j| if i == j { 1.0 } else { sig(i).alike(sig(j)) }).collect());
         let (order, parents) = tree(&rows);
-        if parents.iter().any(Option::is_some) {
-            out.push((order.into_iter().map(|i| group[i]).collect(), parents));
+        for (order, parents) in cut(&order, &parents, |i| files[group[i]].len(), limit) {
+            if parents.iter().any(Option::is_some) {
+                out.push((order.into_iter().map(|i| group[i]).collect(), parents));
+            }
         }
     }
     out
@@ -186,7 +192,7 @@ pub(crate) fn sets(
         })
         .collect();
     let files: Vec<&[u8]> = pngs.iter().map(|p| p.1).collect();
-    for (order, parents) in forests(&files, opt.threads) {
+    for (order, parents) in forests(&files, opt.threads, cx.set_limit(depth)) {
         let files: Vec<&[u8]> = order.iter().map(|&i| pngs[i].1).collect();
         let members: Vec<usize> = order.iter().map(|&i| pngs[i].0).collect();
         // the formulas alone, taken out (and put back if the set is not taken)
@@ -250,6 +256,36 @@ fn tree(alike: &[Vec<f64>]) -> (Vec<usize>, Vec<Option<usize>>) {
     (order, parents)
 }
 
+/// Tree `order` (members in order, parents first) and `parents` (the parent of each, in that
+/// order) cut into pieces along the order of `limit` bytes at most (by `len` of each member;
+/// one longer is a piece of its own): each its members and their parents in it.
+#[allow(clippy::type_complexity)]
+fn cut(
+    order: &[usize],
+    parents: &[Option<usize>],
+    len: impl Fn(usize) -> usize,
+    limit: usize,
+) -> Vec<(Vec<usize>, Vec<Option<usize>>)> {
+    let mut out: Vec<(Vec<usize>, Vec<Option<usize>>)> = Vec::new();
+    let (mut start, mut bytes) = (0, 0usize);
+    for (i, &m) in order.iter().enumerate() {
+        let n = len(m);
+        if i > start && bytes.saturating_add(n) > limit {
+            start = i;
+            bytes = 0;
+            out.push((Vec::new(), Vec::new()));
+        }
+        if out.is_empty() {
+            out.push((Vec::new(), Vec::new()));
+        }
+        bytes = bytes.saturating_add(n);
+        let piece = out.last_mut().unwrap();
+        piece.0.push(m);
+        piece.1.push(parents[i].filter(|&p| p >= start).map(|p| p - start));
+    }
+    out
+}
+
 /// `f(0..n)` on up to `threads` threads, in order.
 pub(crate) fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
@@ -290,5 +326,11 @@ mod tests {
         let (order, parents) = tree(&alike);
         assert_eq!(order, [2, 0, 1, 3]);
         assert_eq!(parents, [None, Some(0), Some(0), None]);
+        // cut to 2 bytes of members of a byte each: 1 has no parent in its piece
+        let pieces = cut(&order, &parents, |_| 1, 2);
+        assert_eq!(pieces, [(vec![2, 0], vec![None, Some(0)]), (vec![1, 3], vec![None, None])]);
+        // a member longer than the limit is a piece of its own
+        let pieces = cut(&order, &parents, |m| if m == 0 { 5 } else { 1 }, 2);
+        assert_eq!(pieces, [(vec![2], vec![None]), (vec![0], vec![None]), (vec![1, 3], vec![None, None])]);
     }
 }
