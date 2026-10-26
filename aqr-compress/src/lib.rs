@@ -404,7 +404,7 @@ fn finish(
             native: Native { threads: opt.threads },
             memo: memo.into(),
             hits: Default::default(),
-            files: &[d],
+            files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
         };
         aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m)).is_ok_and(|out| out == d)
     };
@@ -1379,7 +1379,7 @@ mod tests {
                 native: Native { threads: 1 },
                 memo: memo.into(),
                 hits: Default::default(),
-                files: &[&d],
+                files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
             };
             let out = aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m));
             (out, m.hits.into_inner().unwrap())
@@ -1391,7 +1391,7 @@ mod tests {
                 native: Native { threads: 1 },
                 memo: memo.into(),
                 hits: Default::default(),
-                files: &[&d],
+                files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
             };
             aqr::decode(&other, &aqr::natives(&aqr_decompress::MODULES, &m)).unwrap();
             (m.memo.into_inner().unwrap(), m.hits.into_inner().unwrap())

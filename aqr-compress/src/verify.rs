@@ -83,12 +83,13 @@ impl Modules for Recording {
 
 /// Runs the modules where the output of an application is not in the memo; `hits` counts those
 /// that are. An output is taken out of the memo when it is used: decoding an archive evaluates
-/// an application once. `files` are the files that the formulas evaluated beforehand are of.
+/// an application once. `files` gives a range of a file (by index) that the formulas evaluated
+/// beforehand are of, where it can (else the module is run).
 pub(crate) struct Cached<'a> {
     pub native: Native,
     pub memo: Mutex<Memo>,
     pub hits: Mutex<usize>,
-    pub files: &'a [&'a [u8]],
+    pub files: &'a (dyn Fn(usize, Range<usize>) -> Option<Vec<u8>> + Sync),
 }
 
 impl Modules for Cached<'_> {
@@ -99,7 +100,10 @@ impl Modules for Cached<'_> {
         }
         match hit {
             Some(Output::Bytes(out)) => Ok(Arc::try_unwrap(out).unwrap_or_else(|out| out.to_vec())),
-            Some(Output::File(i, range)) => Ok(self.files[i][range].to_vec()),
+            Some(Output::File(i, range)) => match (self.files)(i, range) {
+                Some(d) => Ok(d),
+                None => self.native.apply(a, inputs),
+            },
             None => self.native.apply(a, inputs),
         }
     }

@@ -194,17 +194,23 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     let mut at: Vec<Option<ContentAt>> = vec![None; n];
     let mut r = Report { files: vec![FileReport::default(); n], ..Report::default() };
     for batch in &batches {
-        let read = aqr_common::pool::par_map(batch.len(), opt.threads, |i| src.read(batch[i]));
+        let read = aqr_common::pool::par_map(batch.len(), opt.threads, |i| {
+            let d = src.read(batch[i])?;
+            let hash = xxhash_rust::xxh3::xxh3_128(&d);
+            Ok::<_, io::Error>((d, hash))
+        });
         let mut files: Vec<File> = Vec::with_capacity(batch.len());
+        let mut data = Vec::with_capacity(batch.len());
         for (&c, d) in batch.iter().zip(read) {
-            let d = d?;
+            let (d, hash) = d?;
             r.read += d.len() as u64;
             r.files[c].len = d.len() as u64;
-            match first.entry((xxhash_rust::xxh3::xxh3_128(&d), d.len())) {
+            match first.entry((hash, d.len())) {
                 std::collections::hash_map::Entry::Occupied(e) => r.files[c].same_as = Some(*e.get()),
                 std::collections::hash_map::Entry::Vacant(e) => {
                     e.insert(c);
-                    files.push((c, d, kind_by_name(src.name(c))));
+                    files.push(File::of(c, &d, hash, kind_by_name(src.name(c))));
+                    data.push(d);
                 }
             }
         }
@@ -213,27 +219,29 @@ pub fn compress_tree_to<S: Source + ?Sized>(
         }
         let mut raw = HashSet::new();
         let made = loop {
-            let made = make(&w, &files, &raw, opt);
+            let made = make(&w, &files, data, &raw, src, opt);
             let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
             if bad.is_empty() {
                 break made;
             }
             raw.extend(bad);
+            data = reread(src, &files, opt.threads)?;
         };
         out.write_all(&made.batch.bytes)?;
         w.commit(&made.batch);
-        for (k, (c, d, _)) in files.iter().enumerate() {
+        for (k, file) in files.iter().enumerate() {
             let (l, o) = made.at[k];
-            at[*c] = Some(ContentAt { leaf: made.batch.leaf_at[l], output: o, size: d.len() as u64 });
+            at[file.c] = Some(ContentAt { leaf: made.batch.leaf_at[l], output: o, size: file.len as u64 });
             let f = &made.files[k];
-            (r.files[*c].format, r.files[*c].modules, r.files[*c].archived) = (f.format, f.modules.clone(), f.archived);
+            let c = file.c;
+            (r.files[c].format, r.files[c].modules, r.files[c].archived) = (f.format, f.modules.clone(), f.archived);
         }
-        let global = |ks: &[usize]| ks.iter().map(|&k| files[k].0).collect::<Vec<_>>();
+        let global = |ks: &[usize]| ks.iter().map(|&k| files[k].c).collect::<Vec<_>>();
         for s in made.solid {
             r.solid.push(Solid { contents: global(&s.contents), ..s });
         }
         r.sets.extend(made.sets.iter().map(|s| global(s)));
-        r.unverified.extend(raw.iter().map(|&k| files[k].0));
+        r.unverified.extend(raw.iter().map(|&k| files[k].c));
     }
     let contents: Vec<ContentAt> =
         (0..n).map(|c| at[c].or_else(|| at[r.files[c].same_as?]).expect("every content made")).collect();
@@ -378,8 +386,42 @@ fn sort_key(name: &[u8]) -> (Vec<u8>, &[u8]) {
     (ext.to_ascii_lowercase(), base)
 }
 
-/// A file of a batch: its content, its data and the kind its name tells.
-type File = (usize, Vec<u8>, Kind);
+/// A file of a batch: its content, the kind its name tells, and what is known of its data,
+/// which is held only by the formula of the batch ([`make`]).
+struct File {
+    c: usize,
+    kind: Kind,
+    len: usize,
+    /// Its XXH3-128 ([`check`]) and its checksum ([`aqr::checksum`]).
+    hash: u128,
+    sum: u64,
+    /// The format it starts like ([`detect`]).
+    format: Option<&'static str>,
+}
+
+impl File {
+    fn of(c: usize, d: &[u8], hash: u128, kind: Kind) -> File {
+        File { c, kind, len: d.len(), hash, sum: aqr::checksum(d), format: detect(d).map(|f| f.name()) }
+    }
+
+    /// Whether `d` is the file's data.
+    fn is(&self, d: &[u8]) -> bool {
+        d.len() == self.len && xxhash_rust::xxh3::xxh3_128(d) == self.hash
+    }
+}
+
+/// The data of `files` read again from `src`, failing where it is no longer what it was.
+fn reread<S: Source + ?Sized>(src: &S, files: &[File], threads: usize) -> io::Result<Vec<Vec<u8>>> {
+    aqr_common::pool::par_map(files.len(), threads, |k| {
+        let d = src.read(files[k].c)?;
+        match files[k].is(&d) {
+            true => Ok(d),
+            false => Err(io::Error::other(format!("content {} changed while archived", files[k].c))),
+        }
+    })
+    .into_iter()
+    .collect()
+}
 
 /// A batch made: its blocks, each file's leaf and output (by its index in the batch), what
 /// became of the files (by the same), and those not given back.
@@ -410,25 +452,32 @@ fn words(regions: &[&[u8]], files: &[File], raw: &HashSet<usize>, opt: &Options)
     aqr_wrt::formula::Shared::of(&texts, opt.threads)
 }
 
-/// The batch of `files` (each its content and data), to follow the blocks of `w`, recompressed
-/// but those (by index) in `raw`.
-fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) -> Made {
+/// The batch of `files` (by index, the data of each in `data`), to follow the blocks of `w`,
+/// recompressed but those (by index) in `raw`. The data is the formula's: where it is needed
+/// again, to verify the batch, it is read from `src`.
+fn make<S: Source + ?Sized>(
+    w: &SegmentWriter,
+    files: &[File],
+    data: Vec<Vec<u8>>,
+    raw: &HashSet<usize>,
+    src: &S,
+    opt: &Options,
+) -> Made {
     // a formula of the files as the contents of its streams, each a file of its own
     let mut f = Formula::default();
     let mut slices = Vec::with_capacity(files.len());
-    for (k, (_, d, kind)) in files.iter().enumerate() {
-        let kind = *kind;
+    for (k, (file, d)) in files.iter().zip(data).enumerate() {
         slices.push(if raw.contains(&k) {
-            f.push_as("raw", kind, d.clone())
+            f.push_as("raw", file.kind, d)
         } else {
-            f.push_content("raw", kind, d.clone())
+            f.push_content("raw", file.kind, d)
         });
     }
     f.root = Node::Concat(slices);
 
     // nested a format deeper, so that the files are as deep as a file alone is
     let nopt = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
-    let total = files.iter().map(|f| f.1.len()).sum();
+    let total = files.iter().map(|f| f.len).sum();
     let mut cx = Cx::of_len(total, &nopt);
     cx.top_sets = Some(opt.set_bytes);
     // (the files known by where their copies are, and taken from the input; and what they
@@ -465,7 +514,7 @@ fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) 
     let mut at = vec![(0, 0); files.len()];
     let mut set_leaf: HashMap<usize, usize> = HashMap::new();
     for (k, node) in nodes.into_iter().enumerate() {
-        let sum = Some(aqr::checksum(&files[k].1));
+        let sum = Some(files[k].sum);
         match node {
             Node::Output { shared, index, .. } => {
                 let n = f.shared[shared].sizes.len();
@@ -508,7 +557,7 @@ fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) 
             native: Native { threads: opt.threads },
             memo: memo.into(),
             hits: Default::default(),
-            files: &files.iter().map(|f| &f.1[..]).collect::<Vec<_>>(),
+            files: &|k, range: Range<usize>| src.read_range(files[k].c, range.start as u64..range.end as u64).ok(),
         };
         check(w, &batch, files, &at, &m, opt.threads)
     } else {
@@ -542,7 +591,7 @@ fn check(
         let mut bad = bad.lock().unwrap();
         match outputs {
             Ok(outputs) => {
-                bad.extend(of_leaf[l].iter().filter(|&&(o, k)| outputs.get(o) != Some(&files[k].1)).map(|&(_, k)| k))
+                bad.extend(of_leaf[l].iter().filter(|&&(o, k)| !outputs.get(o).is_some_and(|d| files[k].is(d))).map(|&(_, k)| k))
             }
             Err(_) => bad.extend(of_leaf[l].iter().map(|&(_, k)| k)),
         }
@@ -634,14 +683,14 @@ fn report(
         .map(|k| {
             let l = at[k].0;
             FileReport {
-                format: detect(&files[k].1).map(|f| f.name()),
+                format: files[k].format,
                 modules: modules[l].clone(),
                 archived: match leaf_len[l] {
                     n if n > 0.0 => bytes[l] * out_len(k) / n,
                     _ => bytes[l] / leaves[l].outputs.len() as f64,
                 },
                 same_as: None,
-                len: files[k].1.len() as u64,
+                len: files[k].len as u64,
             }
         })
         .collect();
