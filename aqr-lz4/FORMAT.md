@@ -96,56 +96,52 @@ size (§3.4). For `n = |D|` bytes, with `start = offset` (after §3.2) and the m
   - narrow: `(rd32(p) × 2654435761 wrapping in u32) >> 19`;
   - wide: `((rd64(p) << 24) × 889523592379 wrapping in u64) >> 52`.
 - `idx(p) = start + p`. A table entry `e` is the position `e - start` of `D`.
-- A table entry `e` is a *candidate* for position `ip` if all of these hold:
+- A table entry `e` is a *candidate* for position `p` if all of these hold:
   - not `small` or `e ≥ start`;
-  - the mode is narrow, or `e + 65535 ≥ idx(ip)`;
-  - `rd32(e - start) = rd32(ip)`.
+  - the mode is narrow, or `e + 65535 ≥ idx(p)`;
+  - `rd32(e - start) = rd32(p)`.
 - The acceleration is `A`, clamped to 1..65537.
 
-Sequences are written as the LZ4 block format defines them. A sequence has a token, then
-literal length bytes, literals, an offset (`le16`) and match length bytes. A length field of
-15 is continued by bytes of 255 and a final byte below 255. If `n < 13`, the block is only
-the last literals (below), with `anchor = 0`. Otherwise:
+The block is a list of sequences, each a run of literals and then a match, followed by the
+final literals. They are written as the LZ4 block format defines them: a token, the literal
+length continued (a field of 15 is continued by bytes of 255 and a final byte below 255),
+the literals, the offset (`le16`), the match length minus 4 continued the same way. The final
+literals are a token, its length continued, and the bytes. If `n < 13`, the block is the
+final literals alone, all of `D`. The rest of this section is for `n ≥ 13`.
 
-```text
-mflimit = n - 11; matchlimit = n - 5
-anchor = 0
-table[hash(0)] = idx(0)
-ip = 1; fh = hash(1)
-loop:
-    # search: the first step is 1, then A, growing by 1 every 64 probes
-    fwd = ip; step = 1; search = A << 6
-    repeat:
-        h = fh; e = table[h]
-        ip = fwd; fwd += step; step = search >> 6; search += 1
-        if fwd > mflimit: goto last
-        fh = hash(fwd)
-        table[h] = idx(ip)
-    until e is a candidate for ip
-    m = e - start
-    # extend backwards
-    while ip > anchor and m > 0 and D[ip-1] = D[m-1]: ip -= 1; m -= 1
-    write a token, the literal length ip - anchor and the literals D[anchor..ip]
-  match:
-    write the offset ip - m
-    k = the number of bytes from ip + 4 on equal to those from m + 4 on, with ip + 4 + k ≤ matchlimit
-    ip += k + 4
-    write the match length k (in the token, and continued)
-    anchor = ip
-    if ip ≥ mflimit: goto last
-    table[hash(ip - 2)] = idx(ip - 2)
-    h = hash(ip); e = table[h]; table[h] = idx(ip)
-    if e is a candidate for ip:
-        m = e - start
-        write a token with literal length 0
-        goto match
-    ip += 1; fh = hash(ip)
-last:
-    write a token, the literal length n - anchor and the literals D[anchor..n]
-```
+**Bounds.** `B = n − 11` bounds the probes of a search and the start of a sequence after
+a match; no match covers a byte at or beyond `E = n − 5`.
 
-The match length written is `k`, the length minus 4. Neither the offset nor the length is
-ever zero or out of range, so every block is valid.
+**Recording and probing.** To *record* `p` is to set `table[hash(p)] = idx(p)`. To *probe*
+`p` is to read `e = table[hash(p)]` and then record `p`; the probe *hits* if `e` is a
+candidate for `p`, and its match source is then `e - start`.
+
+**Literal start.** The bytes not yet covered by a sequence start at the literal start `P`,
+which is 0 at first and moves to the end of each match.
+
+**Searching.** A search from `s` probes the positions `s`, `s + 1`, and from there on goes
+forward from `s + 1` by `A` for 64 probes, by `A + 1` for the next 64, and so on: the probe
+after the `j`-th one (`j ≥ 1`, counting `s + 1` as the first) lies `A + ⌊(j − 1) / 64⌋` bytes further.
+A position is probed only if the next position of that sequence is at most `B`; where it is
+not, the search fails and the block ends. The search ends at the first hit.
+
+**A sequence from a hit.** A hit at `p` with source `m` becomes a sequence as follows.
+While `p > P`, `m > 0` and `D[p − 1] = D[m − 1]`, both move back by one. The literals are
+`D[P .. p)`, the offset `p − m`, and the match covers `D[p .. q)`, where `q − p − 4` is the
+largest `k` such that `p + 4 + k ≤ E` and `D[p + 4 + i] = D[m + 4 + i]` for all `i < k`. Then
+`P = q`.
+
+**The block.** Record 0, then search from 1. Each hit gives a sequence, which ends at `q`.
+After it:
+
+1. If `q ≥ B`, the block ends.
+2. Record `q − 2`, then probe `q`. If that hits, it gives the next sequence (with no
+   literals, since `P = q`), and this step repeats after it.
+3. Otherwise search from `q + 1`.
+
+When the block ends, the final literals are `D[P .. n)`.
+
+Neither an offset nor a match length is ever zero or out of range, so every block is valid.
 
 ### 3.4 Limited output
 
@@ -153,10 +149,12 @@ In a frame (§4), a block of `n` bytes must fit in `cap = n - 1` bytes. If `cap`
 `n + n / 255 + 16`, there is no limit. Otherwise compression stops, and nothing fits, as soon
 as one of these checks fails. In each check, `w` is the number of bytes written so far.
 
-- before the literals of a sequence, with the token written:
-  `w + L + 8 + L / 255 ≤ cap`, where `L` is the literal length;
-- after the offset of a match is written: `w + 6 + (k + 240) / 255 ≤ cap`;
-- before the last literals: `w + R + 1 + (R + 240) / 255 ≤ cap`, where `R = n - anchor`.
+- for a sequence found by a search, once its token is written and before its literals:
+  `w + L + 8 + L / 255 ≤ cap`, where `L` is the literal length (a sequence from step 2 of
+  §3.3 is not checked here);
+- after the offset of a match is written: `w + 6 + (k + 240) / 255 ≤ cap`, where `k` is the
+  match length minus 4;
+- before the last literals: `w + R + 1 + (R + 240) / 255 ≤ cap`, where `R = n − P`.
 
 The checks overestimate. A block may be refused even though it would have fitted. The table
 and offset keep what was done before the stop.

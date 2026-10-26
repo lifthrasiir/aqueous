@@ -10,14 +10,6 @@ pub const MAX_INPUT: usize = 0x7E00_0000;
 pub const MAX_ACCELERATION: u32 = 65537;
 
 const MINMATCH: usize = 4;
-const MFLIMIT: usize = 12;
-const LASTLITERALS: usize = 5;
-const MAX_DISTANCE: u32 = 65535;
-/// Inputs shorter than this use a table of 16-bit positions (`LZ4_64Klimit`).
-const LIMIT_64K: usize = 65536 + MFLIMIT - 1;
-const SKIP_TRIGGER: u32 = 6;
-/// `LZ4_HASHLOG` of the default `LZ4_MEMORY_USAGE` (14): entries of the table of 32-bit positions.
-const HASH_LOG: u32 = 12;
 
 /// `LZ4_compressBound`.
 pub fn bound(n: usize) -> usize {
@@ -112,300 +104,272 @@ pub fn end(src: &[u8], n: usize) -> Option<usize> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Table {
-    Cleared,
-    U16,
-    U32,
+/// Entries of the table of FORMAT.md §3.1.
+const TABLE: usize = 8192;
+
+/// Where the bytes of a block go: a vector, or a reference they are compared against.
+trait Sink {
+    /// Appends `b`; false where the block can no longer be what is wanted.
+    fn put(&mut self, b: &[u8]) -> bool;
+    /// Bytes put so far.
+    fn len(&self) -> usize;
 }
 
-/// The compression state that liblz4 keeps between blocks (`LZ4_stream_t_internal`).
+impl Sink for Vec<u8> {
+    fn put(&mut self, b: &[u8]) -> bool {
+        self.extend_from_slice(b);
+        true
+    }
+
+    fn len(&self) -> usize {
+        Vec::len(self)
+    }
+}
+
+/// A sink that checks the bytes against `expect` as they come.
+struct Compare<'a> {
+    expect: &'a [u8],
+    at: usize,
+}
+
+impl Sink for Compare<'_> {
+    fn put(&mut self, b: &[u8]) -> bool {
+        let end = self.at + b.len();
+        let ok = self.expect.get(self.at..end) == Some(b);
+        self.at = end;
+        ok
+    }
+
+    fn len(&self) -> usize {
+        self.at
+    }
+}
+
+/// Puts the continuation bytes of a length field of 15 or more (`v` is what lies past 15).
+fn put_extra<S: Sink>(out: &mut S, mut v: usize) -> bool {
+    const FULL: [u8; 64] = [255; 64];
+    while v >= 255 * 64 {
+        if !out.put(&FULL) {
+            return false;
+        }
+        v -= 255 * 64;
+    }
+    out.put(&FULL[..v / 255]) && out.put(&[(v % 255) as u8])
+}
+
+/// Number of equal bytes at the starts of `src[a..]` and `src[b..]`, up to `max`, which must
+/// keep both within `src`.
+fn common(src: &[u8], a: usize, b: usize, max: usize) -> usize {
+    let mut i = 0;
+    while i + 8 <= max {
+        let x = u64::from_le_bytes(src[a + i..a + i + 8].try_into().unwrap());
+        let y = u64::from_le_bytes(src[b + i..b + i + 8].try_into().unwrap());
+        if x != y {
+            return i + ((x ^ y).trailing_zeros() / 8) as usize;
+        }
+        i += 8;
+    }
+    while i < max && src[a + i] == src[b + i] {
+        i += 1;
+    }
+    i
+}
+
+/// The table and the data of one block, with what hashing and candidates need.
+struct Probe<'a, const WIDE: bool> {
+    table: &'a mut [u32; TABLE],
+    src: &'a [u8],
+    start: u32,
+    small: bool,
+}
+
+impl<const WIDE: bool> Probe<'_, WIDE> {
+    fn hash(&self, p: usize) -> usize {
+        if WIDE {
+            let v = u64::from_le_bytes(self.src[p..p + 8].try_into().unwrap());
+            ((v << 24).wrapping_mul(889523592379) >> 52) as usize
+        } else {
+            let v = u32::from_le_bytes(self.src[p..p + 4].try_into().unwrap());
+            (v.wrapping_mul(2654435761) >> 19) as usize
+        }
+    }
+
+    fn record(&mut self, p: usize) {
+        let h = self.hash(p);
+        self.table[h] = self.start.wrapping_add(p as u32);
+    }
+
+    /// Probes `p`, giving the match source on a hit.
+    fn probe(&mut self, p: usize) -> Option<usize> {
+        let h = self.hash(p);
+        let e = self.table[h];
+        self.table[h] = self.start.wrapping_add(p as u32);
+        if self.small && e < self.start {
+            return None;
+        }
+        if WIDE && e as u64 + 65535 < self.start as u64 + p as u64 {
+            return None;
+        }
+        let m = e.wrapping_sub(self.start) as usize;
+        (m < p && self.src[m..m + 4] == self.src[p..p + 4]).then_some(m)
+    }
+
+    /// Searches from `s` (FORMAT.md §3.3) for the first hit, within the bound `b`.
+    fn search(&mut self, s: usize, accel: usize, b: usize) -> Option<(usize, usize)> {
+        let (mut x, mut step, mut count) = (s, 1, 0usize);
+        loop {
+            let next = x + step;
+            if next > b {
+                return None;
+            }
+            if let Some(m) = self.probe(x) {
+                return Some((x, m));
+            }
+            x = next;
+            step = accel + count / 64;
+            count += 1;
+        }
+    }
+}
+
+/// Which of the two table layouts a block uses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Cleared,
+    Narrow,
+    Wide,
+}
+
+/// The compression state kept between the blocks of a frame (FORMAT.md §3.1).
 pub struct Compressor {
-    /// 4096 32-bit positions, or 8192 16-bit ones (`hashTable`, as `table` says).
-    hash: Box<[u32; 1 << (HASH_LOG + 1)]>,
+    table: Box<[u32; TABLE]>,
+    mode: Mode,
     offset: u32,
-    table: Table,
 }
 
 impl Default for Compressor {
     fn default() -> Compressor {
-        Compressor { hash: Box::new([0; 1 << (HASH_LOG + 1)]), offset: 0, table: Table::Cleared }
-    }
-}
-
-/// How the sequences found end up.
-struct Out<'a> {
-    out: Vec<u8>,
-    /// The most bytes, where the output is limited.
-    cap: Option<usize>,
-    /// Bytes the output must be, if known: compression stops where it is not.
-    expect: Option<&'a [u8]>,
-}
-
-/// Why compression stopped.
-enum Stop {
-    /// The output would not fit its limit.
-    Full,
-    /// The output is not what was expected.
-    Differs,
-}
-
-impl Out<'_> {
-    /// Whether `need` more bytes may exceed the limit (liblz4's checks, which overestimate).
-    fn over(&self, need: usize) -> bool {
-        self.cap.is_some_and(|cap| self.out.len() + need > cap)
-    }
-
-    /// Checks the bytes written since `from` against those expected.
-    fn check(&self, from: usize) -> std::result::Result<(), Stop> {
-        match self.expect {
-            Some(e) if e.get(from..self.out.len()) != Some(&self.out[from..]) => Err(Stop::Differs),
-            _ => Ok(()),
-        }
+        Compressor { table: Box::new([0; TABLE]), mode: Mode::Cleared, offset: 0 }
     }
 }
 
 impl Compressor {
-    /// `LZ4_compress_fast`: `src` in a block, with a fresh state.
+    /// `block(src, acceleration)` of FORMAT.md §3.3: `src` in a block, with a fresh state and
+    /// no limit. Fails only where `src` is longer than [`MAX_INPUT`].
     pub fn compress_fast(src: &[u8], acceleration: u32) -> Result<Vec<u8>> {
-        let mut c = Compressor::default();
-        match c.run(src, None, None, acceleration) {
-            Ok(out) => Ok(out),
-            Err(_) => unreachable!("unlimited output"),
-        }
+        let mut out = Vec::with_capacity(bound(src.len()));
+        Compressor::default().compress_into(src, usize::MAX, acceleration, &mut out)?;
+        Ok(out)
     }
 
     /// Whether [`Compressor::compress_fast`] gives `expect`, found without compressing past
     /// the first difference.
     pub fn reproduces_fast(src: &[u8], acceleration: u32, expect: &[u8]) -> bool {
-        let mut c = Compressor::default();
-        c.run(src, None, Some(expect), acceleration).is_ok_and(|out| out == expect)
+        let mut cmp = Compare { expect, at: 0 };
+        matches!(Compressor::default().compress_into(src, usize::MAX, acceleration, &mut cmp), Ok(true))
+            && cmp.at == expect.len()
     }
 
-    /// `LZ4_compress_fast_extState_fastReset` into at most `cap` bytes, keeping this state:
-    /// None where the block does not fit.
+    /// `src` in a block of at most `cap` bytes (FORMAT.md §3.2-§3.4), keeping this state for
+    /// the next block: None where the block does not fit. Fails only where `src` is longer
+    /// than [`MAX_INPUT`].
     pub fn compress_reset(&mut self, src: &[u8], cap: usize, acceleration: u32) -> Result<Option<Vec<u8>>> {
-        let cap = (cap < bound(src.len())).then_some(cap);
-        match self.run(src, cap, None, acceleration) {
-            Ok(out) => Ok(Some(out)),
-            Err(None) => Ok(None),
-            Err(Some(e)) => Err(e),
-        }
+        let mut out = Vec::with_capacity(cap.min(bound(src.len())));
+        Ok(self.compress_into(src, cap, acceleration, &mut out)?.then_some(out))
     }
 
-    /// `LZ4_prepareTable` then `LZ4_compress_generic`, as `LZ4_compress_fast_extState_fastReset`
-    /// calls them (a fresh state makes `LZ4_compress_fast_extState`). Err(None) where the
-    /// output stops short.
-    fn run(
-        &mut self,
-        src: &[u8],
-        cap: Option<usize>,
-        expect: Option<&[u8]>,
-        acceleration: u32,
-    ) -> std::result::Result<Vec<u8>, Option<Error>> {
-        if src.len() > MAX_INPUT {
-            return Err(Some(Error("input too long for LZ4")));
+    /// Prepares for and compresses a block into `out`; false where it was cut short, because
+    /// of the limit or of the sink.
+    fn compress_into<S: Sink>(&mut self, src: &[u8], cap: usize, acceleration: u32, out: &mut S) -> Result<bool> {
+        let n = src.len();
+        if n > MAX_INPUT {
+            return Err(Error("input too long for LZ4"));
         }
-        let acceleration = acceleration.clamp(1, MAX_ACCELERATION);
-        let mut out = Out { out: Vec::with_capacity(bound(src.len()).min(cap.unwrap_or(usize::MAX))), cap, expect };
-        let table = if src.len() < LIMIT_64K { Table::U16 } else { Table::U32 };
-        self.prepare(src.len(), table);
-        if src.is_empty() {
-            // `LZ4_compress_generic` writes a lone token, unless nothing may be written.
-            if cap == Some(0) {
-                return Err(None);
-            }
-            out.out.push(0);
-            out.check(0).map_err(|_| None)?;
-            return Ok(out.out);
+        let cap = if cap >= bound(n) { usize::MAX } else { cap };
+        if n == 0 {
+            return Ok(cap >= 1 && out.put(&[0]));
         }
-        // a 16-bit table used before: positions below this block are not in it
-        let small = table == Table::U16 && self.offset != 0;
-        let r = match table {
-            Table::U16 => self.generic::<false>(src, &mut out, small, acceleration),
-            _ => self.generic::<true>(src, &mut out, small, acceleration),
-        };
-        r.map(|_| out.out).map_err(|_| None)
-    }
-
-    fn prepare(&mut self, n: usize, table: Table) {
-        if self.table != Table::Cleared
-            && (self.table != table
-                || table == Table::U16 && self.offset as u64 + n as u64 >= 0xFFFF
-                || table == Table::U32 && self.offset > 1 << 30
+        // FORMAT.md §3.2.
+        let mode = if n < 65547 { Mode::Narrow } else { Mode::Wide };
+        if self.mode != Mode::Cleared
+            && (self.mode != mode
+                || (mode == Mode::Narrow && self.offset as u64 + n as u64 >= 65535)
+                || (mode == Mode::Wide && self.offset > 1 << 30)
                 || n >= 4096)
         {
-            self.hash.fill(0);
+            self.table.fill(0);
             self.offset = 0;
-            self.table = Table::Cleared;
+            self.mode = Mode::Cleared;
         }
-        // a gap, so that every position kept is too far back
-        if self.offset != 0 && table == Table::U32 {
-            self.offset += 65536;
+        if self.offset != 0 && mode == Mode::Wide {
+            self.offset = self.offset.wrapping_add(65536);
         }
-    }
-
-    /// `LZ4_compress_generic_validated` for a block without a dictionary, in one segment; `WIDE`
-    /// for the table of 32-bit positions. With `small`, positions below the block are not
-    /// matched (`dictSmall`).
-    fn generic<const WIDE: bool>(
-        &mut self,
-        src: &[u8],
-        out: &mut Out,
-        small: bool,
-        acceleration: u32,
-    ) -> std::result::Result<(), Stop> {
-        let n = src.len();
         let start = self.offset;
-        self.offset += n as u32;
-        self.table = if WIDE { Table::U32 } else { Table::U16 };
-        let hash = &mut self.hash;
-        let hash_at = |p: usize| -> usize {
-            if WIDE {
-                let v = u64::from_le_bytes(src[p..p + 8].try_into().unwrap());
-                ((v << 24).wrapping_mul(889523592379) >> (64 - HASH_LOG)) as usize
-            } else {
-                (read32(src, p).wrapping_mul(2654435761) >> (32 - (HASH_LOG + 1))) as usize
-            }
-        };
-        // where a position of the table is in `src`, if it is in this block
-        let pos = |index: u32| index.checked_sub(start).map(|i| i as usize);
-
-        let mut anchor = 0;
-        'seqs: {
-            if n < MFLIMIT + 1 {
-                break 'seqs;
-            }
-            let mflimit1 = n - MFLIMIT + 1;
-            let matchlimit = n - LASTLITERALS;
-            hash[hash_at(0)] = start;
-            let mut ip = 1;
-            let mut forward_h = hash_at(ip);
-            loop {
-                // find a match
-                let mut m;
-                {
-                    let mut forward = ip;
-                    let mut step = 1;
-                    let mut search = acceleration << SKIP_TRIGGER;
-                    loop {
-                        let h = forward_h;
-                        let current = start + forward as u32;
-                        let index = hash[h];
-                        ip = forward;
-                        forward += step;
-                        step = (search >> SKIP_TRIGGER) as usize;
-                        search += 1;
-                        if forward > mflimit1 {
-                            break 'seqs;
-                        }
-                        forward_h = hash_at(forward);
-                        hash[h] = current;
-                        if small && index < start || WIDE && index + MAX_DISTANCE < current {
-                            continue;
-                        }
-                        if let Some(p) = pos(index)
-                            && read32(src, p) == read32(src, ip)
-                        {
-                            m = p;
-                            break;
-                        }
-                    }
-                }
-                // catch up
-                while ip > anchor && m > 0 && src[ip - 1] == src[m - 1] {
-                    ip -= 1;
-                    m -= 1;
-                }
-                // literals
-                let lit = ip - anchor;
-                let from = out.out.len();
-                let mut token = out.out.len();
-                out.out.push(0);
-                if out.over(lit + 2 + 1 + LASTLITERALS + lit / 255) {
-                    return Err(Stop::Full);
-                }
-                if lit >= 15 {
-                    out.out[token] = 15 << 4;
-                    push_len(&mut out.out, lit - 15);
-                } else {
-                    out.out[token] = (lit as u8) << 4;
-                }
-                out.out.extend_from_slice(&src[anchor..ip]);
-                loop {
-                    // the match
-                    out.out.extend_from_slice(&((ip - m) as u16).to_le_bytes());
-                    let code = count(src, ip + MINMATCH, m + MINMATCH, matchlimit);
-                    ip += code + MINMATCH;
-                    if out.over(1 + LASTLITERALS + (code + 240) / 255) {
-                        return Err(Stop::Full);
-                    }
-                    if code >= 15 {
-                        out.out[token] += 15;
-                        push_len(&mut out.out, code - 15);
-                    } else {
-                        out.out[token] += code as u8;
-                    }
-                    out.check(from)?;
-                    anchor = ip;
-                    if ip >= mflimit1 {
-                        break 'seqs;
-                    }
-                    // fill the table, and test the next position
-                    hash[hash_at(ip - 2)] = start + (ip - 2) as u32;
-                    let h = hash_at(ip);
-                    let current = start + ip as u32;
-                    let index = hash[h];
-                    hash[h] = current;
-                    if !(small && index < start || WIDE && index + MAX_DISTANCE < current)
-                        && let Some(p) = pos(index)
-                        && read32(src, p) == read32(src, ip)
-                    {
-                        m = p;
-                        token = out.out.len();
-                        out.out.push(0);
-                        continue;
-                    }
-                    break;
-                }
-                ip += 1;
-                forward_h = hash_at(ip);
-            }
-        }
-        // the last literals
-        let from = out.out.len();
-        let last = n - anchor;
-        if out.over(last + 1 + (last + 255 - 15) / 255) {
-            return Err(Stop::Full);
-        }
-        if last >= 15 {
-            out.out.push(15 << 4);
-            push_len(&mut out.out, last - 15);
+        let small = mode == Mode::Narrow && start != 0;
+        self.offset = start.wrapping_add(n as u32);
+        self.mode = mode;
+        let accel = acceleration.clamp(1, MAX_ACCELERATION) as usize;
+        let table = &mut *self.table;
+        Ok(if mode == Mode::Wide {
+            block_body(Probe::<true> { table, src, start, small }, accel, cap, out)
         } else {
-            out.out.push((last as u8) << 4);
+            block_body(Probe::<false> { table, src, start, small }, accel, cap, out)
         }
-        out.out.extend_from_slice(&src[anchor..]);
-        out.check(from)
+        .is_some())
     }
 }
 
-fn read32(d: &[u8], p: usize) -> u32 {
-    u32::from_le_bytes(d[p..p + 4].try_into().unwrap())
-}
-
-/// Bytes from `a` and `b` on that are equal, `a` going no further than `limit`.
-fn count(d: &[u8], a: usize, b: usize, limit: usize) -> usize {
-    if a >= limit {
-        return 0;
+/// FORMAT.md §3.3 and §3.4 for a block of at least one byte; None where it was cut short.
+fn block_body<const WIDE: bool, S: Sink>(mut pr: Probe<'_, WIDE>, accel: usize, cap: usize, out: &mut S) -> Option<()> {
+    let src = pr.src;
+    let n = src.len();
+    let mut lit = 0; // the literal start
+    if n >= 13 {
+        let (bound_b, end) = (n - 11, n - 5);
+        pr.record(0);
+        let mut hit = pr.search(1, accel, bound_b);
+        let mut checked = true;
+        while let Some((mut p, mut m)) = hit {
+            while p > lit && m > 0 && src[p - 1] == src[m - 1] {
+                p -= 1;
+                m -= 1;
+            }
+            let k = common(src, p + 4, m + 4, end - (p + 4));
+            let q = p + 4 + k;
+            let l = p - lit;
+            out.put(&[(l.min(15) << 4 | k.min(15)) as u8]).then_some(())?;
+            if checked && out.len() + l + 8 + l / 255 > cap {
+                return None;
+            }
+            if l >= 15 {
+                put_extra(out, l - 15).then_some(())?;
+            }
+            out.put(&src[lit..p]).then_some(())?;
+            out.put(&((p - m) as u16).to_le_bytes()).then_some(())?;
+            if out.len() + 6 + (k + 240) / 255 > cap {
+                return None;
+            }
+            if k >= 15 {
+                put_extra(out, k - 15).then_some(())?;
+            }
+            lit = q;
+            if q >= bound_b {
+                break;
+            }
+            pr.record(q - 2);
+            (hit, checked) = match pr.probe(q) {
+                Some(m) => (Some((q, m)), false),
+                None => (pr.search(q + 1, accel, bound_b), true),
+            };
+        }
     }
-    d[a..limit].iter().zip(&d[b..]).take_while(|(x, y)| x == y).count()
-}
-
-/// The bytes after a length field of 15: 255s, then the rest.
-fn push_len(out: &mut Vec<u8>, mut n: usize) {
-    while n >= 255 {
-        out.push(255);
-        n -= 255;
+    let r = n - lit;
+    if out.len() + r + 1 + (r + 240) / 255 > cap {
+        return None;
     }
-    out.push(n as u8);
+    out.put(&[(r.min(15) << 4) as u8]).then_some(())?;
+    if r >= 15 {
+        put_extra(out, r - 15).then_some(())?;
+    }
+    out.put(&src[lit..]).then_some(())
 }
