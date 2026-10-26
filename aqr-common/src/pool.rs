@@ -10,7 +10,7 @@
 //!
 //! Threads that libraries make on their own count in the pool by the workers reserved for them
 //! and left idle: Zstandard's (aqr-formula) and rayon's ([`rayon_pool`], whose threads are the
-//! workers themselves).
+//! workers themselves, and one standing for the thread that waits on it).
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -353,22 +353,30 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
     out.into_iter().map(|m| m.into_inner().unwrap().expect("every index done")).collect()
 }
 
-/// A rayon thread pool of up to `threads` threads: the calling thread, and as many workers of
-/// the pool as are free (none: the calling thread alone, rayon's work done on it); `None`
-/// where the calling thread is one of a rayon pool already, which is then to be used as it is.
-/// Its other threads stay workers of the pool, as reserved, until it is dropped. Work given to
-/// rayon outside such a pool goes to rayon's global pool, of threads of its own.
+/// A rayon thread pool of up to `threads` threads: as many workers of the pool as are free, up
+/// to `threads − 1`, and a thread of its own standing for the calling one, which waits as it
+/// gives the pool work (`install`); `None` where the calling thread is one of a rayon pool
+/// already, which is then to be used as it is. Its workers stay reserved until it is dropped.
+/// Work given to rayon outside such a pool goes to rayon's global pool, of threads of its own.
+///
+/// (The calling thread is not taken over, rayon's `use_current_thread`: rayon leaves a thread
+/// it takes over a worker of the pool for good, which then fails as a thread of another pool,
+/// and runs alone what it gives rayon.)
 #[cfg(feature = "rayon")]
 pub fn rayon_pool(threads: usize) -> Option<rayon::ThreadPool> {
     if rayon::current_thread_index().is_some() {
         return None;
     }
     let mut r = reserve(threads.saturating_sub(1));
+    let mut caller = true;
     rayon::ThreadPoolBuilder::new()
         .num_threads(r.len() + 1)
-        .use_current_thread()
         .spawn_handler(|t| {
-            r.spawn(move || t.run());
+            if std::mem::take(&mut caller) {
+                std::thread::Builder::new().name("aqr-rayon".into()).stack_size(STACK).spawn(move || t.run())?;
+            } else {
+                r.spawn(move || t.run());
+            }
             Ok(())
         })
         .build()
@@ -427,5 +435,31 @@ mod tests {
         );
         assert!(catch_unwind(|| par_map(8, 8, |i| if i == 5 { panic!("five") } else { i })).is_err());
         assert!(run(is_worker));
+    }
+
+    /// A rayon pool leaves no thread a worker of it once dropped: the calling thread, or a
+    /// worker of the pool that made one, makes others, or is one of another's.
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn rayon_pools() {
+        use rayon::prelude::*;
+        let sum = |p: Option<rayon::ThreadPool>| {
+            let f = || (0..100_000u64).into_par_iter().sum::<u64>();
+            p.map_or_else(f, |p| p.install(f))
+        };
+        let pool = rayon_pool(2);
+        assert!(pool.is_some());
+        assert_eq!(sum(pool), 4_999_950_000);
+        assert_eq!(rayon::current_thread_index(), None);
+        for _ in 0..20 {
+            let n = size();
+            let left = par_map(n, n, |_| {
+                let pool = rayon_pool(2);
+                let made = pool.is_some();
+                assert_eq!(sum(pool), 4_999_950_000);
+                made && rayon::current_thread_index().is_none()
+            });
+            assert!(left.into_iter().all(|l| l));
+        }
     }
 }
