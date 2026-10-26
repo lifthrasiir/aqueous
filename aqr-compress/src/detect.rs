@@ -34,10 +34,13 @@ pub enum Format {
     LevelDb,
     /// ZIP archive (aqr-zip, and aqr-flate on its DEFLATE bodies).
     Zip,
+    /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
+    /// data.
+    Fasta,
 }
 
 impl Format {
-    pub const ALL: [Format; 15] = [
+    pub const ALL: [Format; 16] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -53,6 +56,7 @@ impl Format {
         Format::Sqlite,
         Format::LevelDb,
         Format::Zip,
+        Format::Fasta,
     ];
 
     pub fn name(self) -> &'static str {
@@ -72,6 +76,7 @@ impl Format {
             Format::Sqlite => "sqlite",
             Format::LevelDb => "leveldb",
             Format::Zip => "zip",
+            Format::Fasta => "fasta",
         }
     }
 
@@ -102,6 +107,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"pdf" => format(Format::Pdf),
         b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
         b"sqlite" | b"sqlite3" => format(Format::Sqlite),
+        b"fa" | b"fasta" | b"fna" | b"ffn" | b"fas" => format(Format::Fasta),
         b"ldb" => format(Format::LevelDb),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
@@ -171,6 +177,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     {
         // Two bytes are too weak a signature to look for in other data.
         Some(Format::Raw)
+    } else if start && aqr_fasta::formula::starts(d) {
+        Some(Format::Fasta)
     } else {
         None
     }

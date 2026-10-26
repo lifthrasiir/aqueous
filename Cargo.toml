@@ -8,6 +8,7 @@ members = [
     "aqr-compress",
     "aqr-decompress",
     "aqr-exe",
+    "aqr-fasta",
     "aqr-flac",
     "aqr-flate",
     "aqr-git",

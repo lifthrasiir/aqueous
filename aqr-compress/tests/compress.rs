@@ -803,3 +803,18 @@ fn kinds() {
         assert_eq!(modules(&f), want, "{dict}: {f}");
     }
 }
+
+/// A FASTA file of nucleotides goes to aqr-fasta, by its start or its name.
+#[test]
+fn fasta() {
+    let mut d = b">chr test\n".to_vec();
+    for i in 0..4000 {
+        let line: Vec<u8> =
+            (0..60).map(|j| if i % 500 < 5 { b'N' } else { b"ACGTacgtTTAG"[(i * 13 + j * 7 + j / 5) % 12] }).collect();
+        d.extend_from_slice(&line);
+        d.push(b'\n');
+    }
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), ["fasta-recons"]);
+    assert_eq!(aqr_compress::kind_by_name(b"x/chr1.fa"), aqr_formula::Kind::Format("fasta"));
+}

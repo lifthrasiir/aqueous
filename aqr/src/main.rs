@@ -1,12 +1,15 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l mid|ZSTD_LEVEL] [--depth N] [--no-check] INPUT...
+//! usage: aqr [-c | -d] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l mid|ZSTD_LEVEL] [--depth N] [--batch MIB]
+//! [--no-check] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
 //!   archive (several of them, or a directory, as entries of their names).
 //! - `-d` (the default as `unaqr`): each archive into its name without `.aqr`, or `-o`.
 //! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors.
+//! - `--batch` is about the most MiB of files made at once (512 by default), which bounds the
+//!   memory taken by compression (but for a file larger).
 //! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
 //!   the pool of threads that everything runs on ([`aqr_common::pool`]), this work itself too.
 //!
@@ -25,8 +28,8 @@ use aqr_compress::{Options, compress_formula, compress_tree_to, detect};
 use aqr_decompress::Native;
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Time, Tree, Value, name_bytes, name_from};
 
-const USAGE: &str =
-    "usage: aqr [-c | -d] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l mid|ZSTD_LEVEL] [--depth N] [--no-check] INPUT...";
+const USAGE: &str = "usage: aqr [-c | -d] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l mid|ZSTD_LEVEL] [--depth N] [--batch MIB] \
+     [--no-check] INPUT...";
 
 struct Args {
     decompress: bool,
@@ -93,6 +96,10 @@ fn parse() -> Result<Args, String> {
                 }
             }
             "--depth" => a.opt.depth = value("--depth")?.parse().map_err(|_| "--depth takes a number")?,
+            "--batch" => {
+                let mib: usize = value("--batch")?.parse().map_err(|_| "--batch takes a number of MiB")?;
+                a.opt.batch = mib.max(1) << 20;
+            }
             "--no-check" => a.opt.verify = false,
             // -T8 and the like
             s if s.starts_with("-T") => a.opt.threads = s[2..].parse().map_err(|_| "-T takes a number")?,

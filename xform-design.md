@@ -33,6 +33,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
   - `aqr-psd/`: PSD/PSB. 임베디드 PNG/JPEG에 aqr-png와 aqr-jpeg를 쓰고, 임베디드 PSD/PSB는 자기 자신으로 재귀한다(깊이 3).
   - `aqr-pdf/`: PDF. 스트림마다 모드를 고른다. DEFLATE에는 aqr-flate를 쓰거나 aqr-png식 토큰 재코딩을 하고, 이미지에는 aqr-png와 aqr-jpeg를 쓴다. 모드 선택은 파일별 시간 예산 안에서 비용 모델로 계획한다.
   - `aqr-sqlite/`: SQLite 3 데이터베이스.
+  - `aqr-fasta/`: 뉴클레오타이드 FASTA. 염기 ACGT를 order-9 적응형 문맥 모델과 rANS로 코딩하고, 헤더, 줄 배치, 대소문자 run, 그 밖의 글자(N run, IUPAC)는 따로 둔다. 파일 하나가 스트림 하나이며(모델을 청크마다 새로 시작하면 64 Mbase에서 1.6% 손해), 풀기는 파일 사이의 병렬로 빨라진다.
   - `aqr-obj/`: Wavefront OBJ. 줄을 템플릿과 숫자로 나누고, 숫자는 aqr-num으로 "정수 + 출력 방식"으로 저장한다.
   - `aqr-lz4/`: Firefox의 mozlz4와 독립 블록 LZ4 프레임. liblz4 1.10.0의 fast 압축기를 같은 바이트가 나오게 다시 구현했다. 모듈은 평문을 받아 그 압축기를 돌리는 것이 전부이고, 가속값(과 프레임의 FLG, BD)이 파라미터이다. 정정 레코드는 없고, 재현되지 않는 스트림(linked 블록, HC 레벨)은 그대로 둔다.
   - `aqr-snappy/`: LevelDB 테이블. Snappy 1.2.2의 압축기를 두 해시(곱셈, CRC-32C) 모두 같은 바이트가 나오게 다시 구현했다. 테이블 하나를 모듈 하나로 다시 만들며, 블록의 내용과 레이아웃만 저장하고 트레일러의 CRC와 푸터는 유도한다. 재현되지 않는 블록은 그대로 보관한다.

@@ -59,6 +59,7 @@ dependencies = [
  "aqr-common",
  "aqr-decompress",
  "aqr-exe",
+ "aqr-fasta",
  "aqr-flac",
  "aqr-flate",
  "aqr-formula",
@@ -83,6 +84,7 @@ name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
  "aqr-exe",
+ "aqr-fasta",
  "aqr-flac",
  "aqr-flate",
  "aqr-formula",
@@ -126,6 +128,15 @@ dependencies = [
  "bytemuck",
  "log",
  "mini-alloc",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-fasta"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
  "zstd",
 ]
 

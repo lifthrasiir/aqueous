@@ -11,7 +11,7 @@
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
 //!   DEFLATE streams by aqr-flate) with its headers derived.
-//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF and SQLite: the recompressor's own formula,
+//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF, SQLite and FASTA: the recompressor's own formula,
 //!   its module applied to its streams, and files it embeds (PDF's DEFLATE streams and images,
 //!   PSD's and JPEG's embedded files) applied to theirs (see aqr-decompress for the modules).
 //!
@@ -969,6 +969,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Pdf => aqr_pdf::formula::encode,
         Format::Sqlite => aqr_sqlite::formula::encode,
         Format::LevelDb => aqr_snappy::formula::encode,
+        Format::Fasta => aqr_fasta::formula::encode,
         _ => return None,
     })
 }
