@@ -31,8 +31,8 @@ pub use tree::{Entry, EntryNode, Extra, Time, Tree, name_bytes, name_from};
 
 use std::borrow::Cow;
 use std::cell::{RefCell, RefMut};
-use std::collections::HashMap;
 use std::collections::hash_map::Entry as MapEntry;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -166,6 +166,8 @@ pub struct Encoder {
     cctx: RefCell<CCtx<'static>>,
     /// Whether formulas are sized without their resource blocks ([`Encoder::share_resources`]).
     shared: bool,
+    /// The resources that formulas are sized without ([`Encoder::hold_resource`]).
+    held: RefCell<HashSet<StreamKey>>,
 }
 
 /// A stream's (or resource's) hash and length.
@@ -211,6 +213,7 @@ impl Encoder {
             trials: RefCell::default(),
             cctx: RefCell::new(CCtx::create()),
             shared: false,
+            held: RefCell::default(),
         }
     }
 
@@ -221,12 +224,24 @@ impl Encoder {
         self.shared = true;
     }
 
+    /// Sizes formulas without resource `r`, as if the archive held it already: where the
+    /// formulas of the files archived together share it (a dictionary made of them all), whose
+    /// cost is then no one file's. The archives are the same.
+    pub fn hold_resource(&self, r: &Resource) {
+        self.held.borrow_mut().insert(key(&[&r[..]]));
+    }
+
     /// The bytes of the resource blocks in the archive of `f`.
     pub fn resources_len(&self, f: &Formula) -> Result<usize> {
+        self.resources_len_of(f, |_| true)
+    }
+
+    /// [`Encoder::resources_len`] of the resources `which` takes.
+    fn resources_len_of(&self, f: &Formula, which: impl Fn(&Resource) -> bool) -> Result<usize> {
         let mut resources: Vec<&Resource> = Vec::new();
         for a in f.applies() {
             for r in &a.resources {
-                if !resources.contains(&r) {
+                if !resources.contains(&r) && which(r) {
                     resources.push(r);
                 }
             }
@@ -250,7 +265,12 @@ impl Encoder {
     fn len_with(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>) -> Result<usize> {
         let mut n = Count(0);
         self.write(f, stand_in, None, &mut n)?;
-        Ok(if self.shared { n.0 - self.resources_len(f)? } else { n.0 })
+        let held = self.held.borrow();
+        Ok(match self.shared {
+            true => n.0 - self.resources_len(f)?,
+            false if held.is_empty() => n.0,
+            false => n.0 - self.resources_len_of(f, |r| held.contains(&key(&[&r[..]])))?,
+        })
     }
 
     /// The length of the archive of `d` as it is, without a checksum (`d` itself not copied).
@@ -2218,6 +2238,14 @@ mod tests {
         let c = encode(&f, None, Level::Mid).unwrap();
         assert_eq!(types(&c), [MODULE, RESOURCE + 1, FORMULA, NON_LEAF_RAW]);
         assert_eq!(decode(&c, &super::natives(&[PRE], &pre)).unwrap(), [&noise[..], b"xyz"].concat());
+        // sized without the resources held, but archived with them
+        let enc = Encoder::new(Level::Mid);
+        let n = enc.len(&f).unwrap();
+        enc.hold_resource(&r1);
+        assert_eq!(enc.len(&f).unwrap(), n);
+        enc.hold_resource(&noise);
+        assert_eq!(enc.len(&f).unwrap(), n - enc.resources_len(&f).unwrap());
+        assert_eq!(enc.encode(&f, None).unwrap(), c);
     }
 
     /// Zstandard blocks longer than their data declare by how much (`0` then the excess), and as

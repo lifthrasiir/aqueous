@@ -437,8 +437,9 @@ impl Formula {
     /// Takes the slices of at least `min` bytes from other slices that hold the same bytes,
     /// and drops what is left without a slice ([`Formula::compact`]): a file and the same file
     /// in an archive, say, are then stored once. From the shortest slice on, each is cut into
-    /// slices kept before that it starts with, one after another (the longest each time), and
-    /// what follows of its own; one cut nowhere is kept. Slices past the end of their stream
+    /// slices kept before that it starts with, one after another (the longest each time; else
+    /// the longest start of one, of at least half of it), and what follows of its own; one cut
+    /// nowhere is kept. Slices past the end of their stream
     /// are left as they are. The output is the same.
     pub fn share_slices(&mut self, min: usize) {
         type Sl = (usize, u64, u64);
@@ -466,9 +467,18 @@ impl Formula {
             let (mut at, mut pieces) = (0usize, Vec::new());
             while b.len() - at >= min {
                 let rest = &b[at..];
-                let found = kept
-                    .get(&head(rest))
-                    .and_then(|ks| ks.iter().filter(|k| rest.starts_with(bytes(k))).max_by_key(|k| k.2).copied());
+                // (a kept slice the rest starts with, the longest; else the start of one, at least
+                // half of it: of a text coded alike, its end cut by a token)
+                let ks = kept.get(&head(rest)).map_or(&[][..], |ks| &ks[..]);
+                let whole = ks.iter().filter(|k| rest.starts_with(bytes(k))).max_by_key(|k| k.2).copied();
+                let found = whole.or_else(|| {
+                    let common = |k: &Sl| bytes(k).iter().zip(rest).position(|(a, b)| a != b).unwrap_or(0);
+                    ks.iter()
+                        .map(|k| (k, common(k)))
+                        .filter(|&(k, n)| n >= min && 2 * n as u64 >= k.2)
+                        .max_by_key(|&(_, n)| n)
+                        .map(|(k, n)| (k.0, k.1, n as u64))
+                });
                 let Some(k) = found else { break };
                 pieces.push(k);
                 at += k.2 as usize;
@@ -1108,6 +1118,10 @@ mod tests {
         let o = f.push("o", other);
         // long twice within, after other bytes
         f.push("z", [&b"xyz"[..], &long[..], &long[..]].concat());
+        // long's start, but less than half of what a keeps after the 20 bytes of c
+        let mut q = long[..100].to_vec();
+        q[50..].iter_mut().for_each(|x| *x ^= 0x55);
+        let q = f.push("q", q);
         f.root = Node::concat([
             a,
             Node::apply(REV, vec![], vec![Node::slice(2, 0, 20), b], 180),
@@ -1118,6 +1132,7 @@ mod tests {
             Node::slice(6, 3, 120),
             Node::slice(6, 163, 160),
             Node::slice(6, 0, 4),
+            q,
         ]);
         let want = f.eval(&Rev).unwrap();
         let mut g = f.clone();
@@ -1125,14 +1140,15 @@ mod tests {
         assert_eq!(g.eval(&Rev), Ok(want));
         let classes: Vec<_> = g.streams.iter().map(|s| (&*s.class, s.data.len())).collect();
         // long[..20] of c, long[20..100] of a, long[100..120] of e, long[120..] of b (each
-        // of those alone first); o its own but for the first 20
-        assert_eq!(classes, [("a", 80), ("b", 40), ("c", 20), ("d", 8), ("e", 20), ("o", 80), ("z", 4)]);
+        // of those alone first); o its own but for its first 99 (of c, and the start of a's);
+        // q but for the first 20
+        assert_eq!(classes, [("a", 80), ("b", 40), ("c", 20), ("d", 8), ("e", 20), ("o", 1), ("z", 4), ("q", 80)]);
         // a slice past the end of one is left as it is, and keeps it whole
         let Node::Concat(ns) = &mut f.root else { unreachable!() };
         ns.push(Node::slice(2, 90, 20));
         f.share_slices(16);
         let classes: Vec<_> = f.streams.iter().map(|s| (&*s.class, s.data.len())).collect();
-        assert_eq!(classes, [("a", 80), ("b", 40), ("c", 100), ("d", 8), ("e", 20), ("o", 80), ("z", 4)]);
+        assert_eq!(classes, [("a", 80), ("b", 40), ("c", 100), ("d", 8), ("e", 20), ("o", 1), ("z", 4), ("q", 80)]);
         assert!(matches!(&f.root, Node::Concat(ns) if ns.last() == Some(&Node::slice(2, 90, 20))));
     }
 
