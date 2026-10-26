@@ -1114,7 +1114,7 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 - 압축 파일의 내용물이 다른 곳에 그대로 있는 경우:
   - `enwik9.zip`(322.6 MB)과 `enwik8.zip`의 내용은 `benchmarks/enwik9`, `enwik8`이다. `silesia.zip`의 12개 항목은 `benchmarks/silesia/*`와 같다.
     - 이 ZIP들은 Info-ZIP 2.3(NTFS, "maximum")이 만들었다. enwik8.zip의 본문과 silesia.zip의 `xml` 항목은 flate-zoo의 `infozip:level=9`와 비트 단위로 같다. `xml`은 `gzip:level=9`와도 같다.
-    - aqr-flate는 이 인코더를 에뮬레이션하지 않는다. 그래서 enwik8.zip과 text8.zip은 그대로 남고, silesia.zip은 67.6 → 66.1 MB에 그치며 그중 34.6 MB를 그대로 둔다. flate-zoo로 Info-ZIP -9는 6.5 MB/s(enwik8 15 s)이므로, enwik9.zip을 한 코어로 다시 만들면 약 150 s가 걸린다.
+    - aqr-flate는 이 인코더를 에뮬레이션하지 않는다. aqr-zip의 기본 profile 6에서는 그래서 enwik8.zip과 text8.zip이 그대로 남고, silesia.zip은 67.6 → 66.1 MB에 그치며 그중 34.6 MB를 그대로 둔다. 다만 profile 10의 체인 규칙만으로도 enwik8.zip의 본문은 0.41%의 레코드로 재현된다(2026-10-26, `10gb-todo.md`). flate-zoo로 Info-ZIP -9는 enwik8에서 2.9 s(35 MB/s, zlib -9와 같다)이므로, enwik9.zip을 한 코어로 다시 만들면 약 30 s가 걸린다.
   - `benchmarks/gimp.tar`(78.7 MB)는 `benchmarks/gimp-2.0.0`(파일 4,143개)을 그대로 tar로 묶은 것이다.
   - `enwik8`은 `enwik9`의 앞 100 MB와 같다.
   - mingw의 `*.tar.lzma`(117개, 72 MB, LZMA-alone, 사전 8 MiB)를 풀면 설치된 파일과 SHA-1이 같다(`cc1.exe`로 확인했다).
@@ -1226,14 +1226,14 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 2. **내용물 단위의 전역 중복 제거.**
    - formula의 `slice`는 이미 다른 블록의 해제된 바이트를 가리킬 수 있다. 그래서 REP식 긴 반복을 slice로 바꾸는 것은 형식을 고치지 않고 들어간다(10절의 장거리 중복 제거).
    - 재압축으로 드러난 내용물(ZIP 항목, tar 멤버)끼리도 비교한다.
-   - aqr-flate에 Info-ZIP과 gzip -9 에뮬레이션을 더하고, aqr-zip의 probe가 아카이브 전체에 이미 있는 내용물을 비용 0으로 보게 한다. 합쳐서 enwik9.zip, enwik8.zip, silesia.zip으로 약 −420 MB이다.
+   - 큰 DEFLATE 스트림을 profile 10으로 재현하고(Info-ZIP과 gzip -9 에뮬레이션은 레코드를 0.4%에서 거의 0으로 줄일 뿐이다), aqr-zip의 probe가 아카이브 전체에 이미 있는 내용물을 비용 0으로 보게 한다. 합쳐서 enwik9.zip, enwik8.zip, silesia.zip으로 약 −420 MB이다.
    - Insighter는 이 몫을 preflate로 이미 가져간다.
 3. **FASTA.**
    - 2비트 packing과 대소문자·N run 분리에 가벼운 문맥 모델을 더한다(−270~−340 MB).
    - 염색체별로 병렬화할 수 있다. 큰 염색체는 청크로 나눈다.
 4. **텍스트 전처리 모듈** (xwrt식 단어 치환). enwik9에서 Insighter는 198–210 MB, aqueous의 level mid는 284 MB이다. 레벨만으로는 메울 수 없다.
 5. **풀기의 직렬 경로.**
-   - 가장 긴 것은 enwik9.zip 재구성(Info-ZIP -9로 약 150 s), PPMd, chr1(254 MB)이다. Insighter의 2분 풀기도 이것 때문일 것이다.
+   - 가장 긴 것은 enwik9.zip 재구성(한 코어로 약 30 s), PPMd, chr1(254 MB)이다. Insighter의 2분 풀기도 이것 때문일 것이다.
    - 블록 단위의 병렬 DEFLATE 재인코딩이 풀기 목표의 전제이다.
    - aqr-zip이 enwik9.zip에서 쓰는 피크 4.5 GB도 메모리 목표에 걸린다.
 6. **작은 항목.**

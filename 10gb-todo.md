@@ -50,13 +50,25 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
    - 압축은 108 MB/s에 그친다. 배치에 큰 염색체가 몇 개뿐이라 2코어 남짓만 쓴다. 배치의
      파이프라이닝이 필요하다(아카이버 쪽 일).
 2. **다른 파일에 그대로 있는 내용: 약 −470 MB.**
-   - `enwik9.zip`, `enwik8.zip`, `text8.zip`은 본문이 Info-ZIP `-9`라 aqr-flate가 재현하지 못해
+   - `enwik9.zip`, `enwik8.zip`, `text8.zip`은 본문이 Info-ZIP `-9`(gzip `-9`와 출력이 같다)라
      그대로 남는다. `silesia.zip`도 67.6 → 65.6 MB에 그친다.
+   - 재현 자체는 profile 10이면 된다. enwik8을 Info-ZIP `-9`로 만든 스트림(2026-10-26, 10스레드):
+
+     | profile | 레코드 | 쪼개기 | 합치기 |
+     |---|---|---|---|
+     | 6 (aqr-zip의 기본) | 2.61 MB (2.6%) | 214 MB/s | 349 MB/s |
+     | 10, 체인 규칙 | 413 KB (0.41%) | 86 MB/s | 196 MB/s (한 스레드 35 MB/s) |
+     | 10, 같은 스트림을 zlib `-9`로 만든 것(에뮬레이션) | 3 KB | 29 MB/s (직렬) | 204 MB/s (한 스레드 37 MB/s) |
+
+     - 에뮬레이션은 C 인코더와 같은 속도이다(zlib `-9`와 Info-ZIP `-9` 모두 enwik8에서 34–35 MB/s).
+       Info-ZIP `-9` 에뮬레이션을 더해도 10gb 전체에서 레코드 4–5 MB를 덜 뿐이다.
+     - 에뮬레이션으로 쪼개기는 checkpoint를 앞 세그먼트의 에뮬레이션에서 얻어서 스레드를 써도
+       직렬이다. 매치 끝에서 자르면 checkpoint가 토큰만으로 정해지므로 병렬로 바꿀 수 있을 것이다.
    - `enwik9.zip`, `enwik8.zip`, `silesia.zip`의 내용물은 아카이브 안에 그대로 있다
      (`benchmarks/enwik9`, `enwik8`, `silesia/*`).
    - `enwik8`은 `enwik9`의 앞 100 MB이고(32.5 MB), `gimp.tar`는 `gimp-2.0.0`을 묶은 것이다(13 MB).
    - 필요한 것:
-     - aqr-flate의 Info-ZIP `-9`와 gzip `-9` 에뮬레이션
+     - 큰 DEFLATE 스트림에 profile 10
      - 파일 사이의 내용 공유
    - 세그먼트 안에서는 뒤 블록이 앞 블록을 가리킬 수 없다. 그래서 같은 내용을 쓰는 파일을 한
      배치, 한 그룹에 모아 스트림 하나를 함께 slice하게 하거나, 세그먼트를 나눠 internal import로
