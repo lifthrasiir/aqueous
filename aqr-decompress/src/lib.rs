@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use aqr_exe::arch::{arm64, cil, x86};
 use aqr_formula::aqr::{self, Failure, NativeModule};
-use aqr_formula::{Apply, Error, Module, Modules, Result};
+use aqr_formula::{Apply, Error, Module, Modules, Result, Shared};
 
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; inputs: the streams of
@@ -45,6 +45,8 @@ pub const ZIP: Module = aqr_zip::formula::MODULE;
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
 pub const PNG: Module = aqr_png::formula::MODULE;
+/// Sets of PNG files coded against each other, of an output per file.
+pub const PNG_SET: Module = aqr_png::formula::SET_MODULE;
 pub const JPEG: Module = aqr_jpeg::formula::MODULE;
 pub const MP3: Module = aqr_mp3::formula::MODULE;
 pub const FLAC: Module = aqr_flac::formula::MODULE;
@@ -59,8 +61,8 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 16] =
-    [X86, ARM64, CIL, FLATE, LZ4, SNAPPY, ZIP, PNG, JPEG, MP3, FLAC, PSD, PDF, SQLITE, PCM, RASTER];
+pub const MODULES: [Module; 17] =
+    [X86, ARM64, CIL, FLATE, LZ4, SNAPPY, ZIP, PNG, PNG_SET, JPEG, MP3, FLAC, PSD, PDF, SQLITE, PCM, RASTER];
 
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
@@ -162,6 +164,9 @@ impl Native {
             aqr_snappy::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == ZIP {
             aqr_zip::formula::decode(params, resources, inputs, len, threads).map_err(msg)
+        } else if m == PNG_SET {
+            none(resources)?;
+            Ok(aqr_png::formula::decode_set(params, inputs, &[len], threads).map_err(msg)?.remove(0))
         } else if let Some((_, decode)) = RECONS.iter().find(|r| r.0 == m) {
             decode(params, resources, inputs, len, threads)
         } else {
@@ -170,9 +175,40 @@ impl Native {
     }
 }
 
+impl Native {
+    /// The outputs of `m` on `inputs` with `resources`, of `sizes` bytes (see
+    /// [`Modules::apply_shared`]).
+    pub fn run_shared(
+        &self,
+        m: Module,
+        params: &[u8],
+        resources: &[&[u8]],
+        inputs: &[&[u8]],
+        sizes: &[u64],
+    ) -> Result<Vec<Vec<u8>>> {
+        let run = || -> std::result::Result<Vec<Vec<u8>>, String> {
+            if m == PNG_SET {
+                none(resources)?;
+                aqr_png::formula::decode_set(params, inputs, sizes, self.threads.max(1)).map_err(msg)
+            } else {
+                Err(format!("{} outputs", sizes.len()))
+            }
+        };
+        catch_unwind(AssertUnwindSafe(run))
+            .unwrap_or_else(|_| Err("panicked".into()))
+            .map_err(|e| Error::new(format!("{m}: {e}")))
+    }
+}
+
 impl Modules for Native {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
         self.run(a.module, &a.params, &resources, inputs, a.len)
+    }
+
+    fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+        let a = &s.apply;
+        let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+        self.run_shared(a.module, &a.params, &resources, inputs, &s.sizes)
     }
 }

@@ -240,7 +240,7 @@ const PAR_MIN: usize = 1 << 16;
 
 /// Runs `f(0..n)` on `workers` threads (the caller's among them), each index once, and
 /// returns the results in order.
-fn par_map<R: Send>(n: usize, workers: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+pub(crate) fn par_map<R: Send>(n: usize, workers: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
     let work = || {

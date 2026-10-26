@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use aqr_decompress::Native;
-use aqr_formula::{Apply, Formula, Modules, Node, Result};
+use aqr_formula::{Apply, Formula, Modules, Node, Result, Shared};
 use xxhash_rust::xxh3::Xxh3;
 
 /// What an application is: its module, parameters, resources and inputs, hashed.
@@ -76,6 +76,11 @@ impl Modules for Recording {
         self.seen.lock().unwrap().push((key(a, inputs), kept));
         Ok(out)
     }
+
+    // (not kept)
+    fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+        self.native.apply_shared(s, inputs)
+    }
 }
 
 /// Runs the modules where the output of an application is not in the memo; `hits` counts those
@@ -99,6 +104,11 @@ impl Modules for Cached<'_> {
             Some(Output::File(range)) => Ok(self.file[range].to_vec()),
             None => self.native.apply(a, inputs),
         }
+    }
+
+    // (not in the memo)
+    fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+        self.native.apply_shared(s, inputs)
     }
 }
 

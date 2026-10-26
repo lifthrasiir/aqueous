@@ -3,7 +3,7 @@
 
 mod common;
 
-use aqr_formula::Formula;
+use aqr_formula::{Formula, Node};
 use aqr_png::formula;
 use common::*;
 
@@ -294,5 +294,97 @@ fn reference_inputs_fail_cleanly() {
         copies[k][at] ^= 1 << (i % 8);
         let refs: Vec<&[u8]> = copies.iter().map(|c| &c[..]).collect();
         let _ = formula::decode(&[], &refs, len, 1);
+    }
+}
+
+/// aqr-png's modules, sets included, on `threads` threads.
+struct Set(usize);
+
+impl aqr_formula::Modules for Set {
+    fn apply(&self, a: &aqr_formula::Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
+        let r = match a.module {
+            formula::MODULE => formula::decode(&a.params, inputs, a.len, self.0),
+            _ => formula::decode_set(&a.params, inputs, &[a.len], self.0).map(|mut o| o.remove(0)),
+        };
+        r.map_err(|e| aqr_formula::Error::new(e.to_string()))
+    }
+
+    fn apply_shared(&self, s: &aqr_formula::Shared, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<Vec<u8>>> {
+        assert_eq!(s.apply.module, formula::SET_MODULE);
+        formula::decode_set(&s.apply.params, inputs, &s.sizes, self.0)
+            .map_err(|e| aqr_formula::Error::new(e.to_string()))
+    }
+}
+
+/// Variants of a picture, each coded against the one before: an output each, far smaller than
+/// coded alone, the same on any thread count, evaluated and through an archive.
+#[test]
+fn set_of_variants() {
+    let files = [
+        picture(300, 200, 6, 5, None),
+        picture(300, 200, 6, 5, Some((40, 60, 70, 50))),
+        picture(300, 200, 6, 5, Some((100, 20, 30, 150))),
+        picture(120, 80, 2, 7, None),
+    ];
+    let refs: Vec<&[u8]> = files.iter().map(|f| &f[..]).collect();
+    let parents = [None, Some(0), Some(0), None];
+    let f = formula::encode_set(&refs, &parents, 1).expect("coded");
+    let Node::Concat(outputs) = &f.root else { panic!() };
+    assert_eq!(outputs.len(), 4);
+    assert!(f.eval(&Set(1)).unwrap() == files.concat());
+    for t in [2, 8] {
+        assert!(formula::encode_set(&refs, &parents, t).unwrap() == f, "{t} threads");
+        assert!(f.eval(&Set(t)).unwrap() == files.concat(), "{t} threads");
+    }
+    let records: usize = f.streams.iter().filter(|s| s.class == "png/records").map(|s| s.data.len()).sum();
+    let alone: usize = files.iter().map(|d| records_of(&formula::encode(d, 1).unwrap())).sum();
+    assert!(records * 2 < alone, "{records} against {alone}");
+    // through an archive, its outputs in another order than the files'
+    let mut g = f.clone();
+    let Node::Concat(outputs) = &mut g.root else { panic!() };
+    outputs.reverse();
+    let want: Vec<u8> = files.iter().rev().flatten().copied().collect();
+    let c = aqr_formula::aqr::encode(&g, None, aqr_formula::aqr::Level::Zstd(3)).unwrap();
+    let natives = aqr_formula::aqr::natives(&[formula::MODULE, formula::SET_MODULE], &Set(1));
+    assert!(aqr_formula::aqr::decode(&c, &natives).unwrap() == want);
+    // a file that is not a PNG file gives no set
+    assert!(formula::encode_set(&[&files[0], b"not a png"], &[None, Some(0)], 1).is_none());
+}
+
+fn records_of(f: &Formula) -> usize {
+    f.streams.iter().find(|s| s.class == "png/records").unwrap().data.len()
+}
+
+/// Sets of bad parameters or inputs fail, damaged ones never panic.
+#[test]
+fn set_inputs_fail_cleanly() {
+    let files = [picture(200, 150, 6, 9, None), picture(200, 150, 6, 9, Some((10, 20, 60, 40)))];
+    let refs: Vec<&[u8]> = files.iter().map(|f| &f[..]).collect();
+    let f = formula::encode_set(&refs, &[None, Some(0)], 1).unwrap();
+    let s = &f.shared[0];
+    let inputs: Vec<Vec<u8>> = s
+        .apply
+        .inputs
+        .iter()
+        .map(|n| Formula { streams: f.streams.clone(), root: n.clone(), shared: vec![] }.eval(&Set(1)).unwrap())
+        .collect();
+    let ins: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
+    let (params, sizes) = (&s.apply.params[..], &s.sizes[..]);
+    assert!(formula::decode_set(params, &ins, sizes, 1).unwrap() == files);
+    assert!(formula::decode_set(params, &ins, &sizes[..1], 1).is_err());
+    assert!(formula::decode_set(params, &ins[..2], sizes, 1).is_err());
+    // the second's parent itself, or none (its records need one)
+    assert!(formula::decode_set(&[2, 0, 2], &ins, sizes, 1).is_err());
+    assert!(formula::decode_set(&[2, 0, 0], &ins, sizes, 1).is_err());
+    assert!(formula::decode_set(&[2, 0, 1, 0], &ins, sizes, 1).is_err());
+    let mut x = 1u32;
+    for i in 0..1000 {
+        x = x.wrapping_mul(1103515245).wrapping_add(12345);
+        let mut copies = inputs.clone();
+        let k = 1 + i % 2;
+        let at = (x as usize >> 4) % copies[k].len();
+        copies[k][at] ^= 1 << (i % 8);
+        let refs: Vec<&[u8]> = copies.iter().map(|c| &c[..]).collect();
+        let _ = formula::decode_set(params, &refs, sizes, 1);
     }
 }

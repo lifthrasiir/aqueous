@@ -445,3 +445,37 @@ with.
 `formula::encode` gives no formula (`None`) for a file that is not a PNG file, or that
 cannot be parsed, or in which no image has a coded record (the formula would be the file and
 the overhead of the slots).
+
+## Sets of files
+
+The module `png-set`, version 1, in `formula::encode_set` and `formula::decode_set`, rebuilds
+several PNG files at once, each coded against an earlier one (variants of a picture, say). It
+has an output per file, whose sizes the application gives.
+
+**Parameters**:
+
+| field | |
+|---|---|
+| varint | `n`, the number of files, which must be the number of outputs |
+| `n` varints | for each file `i`, 0 if it has no parent, else its parent's index plus 1, which must be at most `i` |
+
+The parameters must end exactly there.
+
+**Inputs**: exactly three, each a packed byte sequence (aqr-formula's `packed`) of `n` items,
+the items of file `i` being:
+
+| slot | content |
+|---|---|
+| 0 | the [skeleton](#skeleton) of file `i` |
+| 1 | the index of file `i`, as slot 1 of `png-recons` |
+| 2 | the records of file `i`, as slot 2 of `png-recons` |
+
+Output `i` is file `i`, rebuilt as `png-recons` rebuilds a file from its slots 0 to 2, with
+its parent's file (output `p`, rebuilt before it) as the [reference file](#references) if it
+has a parent `p`, and none otherwise. It must have the size the application gives.
+
+`formula::encode_set` gives an application of `png-set` with the files' slots as streams of
+the classes of `png-recons`, and a root of its outputs one after another, for the caller to
+put each where its file is. It codes every record against the parent's image where that makes
+it smaller (as `formula::encode_against`), and gives no formula if a file does not have one of
+its own.
