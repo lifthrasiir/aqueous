@@ -711,6 +711,21 @@ impl<'g> St<'g> {
         }
     }
 
+    /// Of the position (a pixel byte of the *image* kind, else none), its raw offset and the
+    /// row filter's prediction: what a literal there needs without its model, as one that is
+    /// the reference's ([`Follow`]).
+    #[inline(always)]
+    fn filtered<const BPP: usize, const IMAGE: bool>(&mut self, raw: &[u8], buf: &[u8]) -> (usize, u8) {
+        self.cur.seek(self.g, self.p);
+        let x = self.p - self.cur.rstart;
+        if !IMAGE || x == 0 || self.cur.rs == usize::MAX {
+            return (usize::MAX, 0);
+        }
+        let (q, rs2) = (self.cur.q0 + x - 1, self.cur.rs2);
+        let ft = get(buf, self.at(self.cur.rstart));
+        (q, filter::predict(ft, get(raw, q - BPP), get(raw, q - rs2), get(raw, q - rs2 - BPP)))
+    }
+
     #[inline(always)]
     fn prep<const BPP: usize, const IMAGE: bool>(&mut self, raw: &[u8], buf: &[u8], token: bool) -> Lit {
         self.cur.seek(self.g, self.p);
@@ -808,17 +823,22 @@ impl<const BPP: usize, const IMAGE: bool> Enc<'_, BPP, IMAGE> {
 
     #[inline(always)]
     fn lit(&mut self, f: u8, token: bool) {
-        let l = self.st.prep::<BPP, IMAGE>(&self.raw, &self.buf, token);
-        let v = f.wrapping_add(l.fp);
-        if !(token && self.same(Token::Lit(f))) {
+        let (q, v) = if token && self.same(Token::Lit(f)) {
+            // the reference's: no symbol, nor its model
+            let (q, fp) = self.st.filtered::<BPP, IMAGE>(&self.raw, &self.buf);
+            (q, f.wrapping_add(fp))
+        } else {
+            let l = self.st.prep::<BPP, IMAGE>(&self.raw, &self.buf, token);
+            let v = f.wrapping_add(l.fp);
             let s = zigzag(v.wrapping_sub(l.pred));
             self.io.sym(l.t, s);
             if token && s == ESC {
                 self.io.bit(T_ESC, 0);
             }
-        }
-        if l.q != usize::MAX {
-            self.raw[l.q] = v;
+            (l.q, v)
+        };
+        if q != usize::MAX {
+            self.raw[q] = v;
         }
         let at = self.st.at(self.st.p);
         self.buf[at] = f;
@@ -1861,8 +1881,11 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
                             let slot = tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)?;
                             match t {
                                 Token::Lit(f) => {
-                                    let l = st.prep::<BPP, IMAGE>(raw, buf, true);
-                                    l.put(f, raw, buf, st.at(st.p));
+                                    let (q, fp) = st.filtered::<BPP, IMAGE>(raw, buf);
+                                    if q != usize::MAX {
+                                        put(raw, q, f.wrapping_add(fp));
+                                    }
+                                    put(buf, st.at(st.p), f);
                                     *slot = t;
                                     lf[f as usize] += 1;
                                     st.p += 1;
@@ -2112,16 +2135,6 @@ impl Lit {
     #[inline(always)]
     fn len_ctx(&self) -> usize {
         if self.act == u32::MAX { ACT } else { bucket(self.act) }
-    }
-
-    /// Stores the filtered byte `f` and its raw value (decoder). `at` is the position's offset
-    /// in the padded data (below its length).
-    #[inline(always)]
-    fn put(&self, f: u8, raw: &mut [u8], buf: &mut [u8], at: usize) {
-        if self.q != usize::MAX {
-            put(raw, self.q, f.wrapping_add(self.fp));
-        }
-        put(buf, at, f);
     }
 
     /// Applies symbol `s`: stores the bytes (decoder) and returns the filtered byte. `at`
