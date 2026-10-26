@@ -60,6 +60,11 @@ impl Default for Options {
 /// probe would estimate them); and they cost little to rebuild.
 pub const PROBE_MIN: usize = 256 << 10;
 
+/// The contents of entries of at least this many bytes are slices of their own, apart from the
+/// others of their kind next to them: each recompressed as a file of its own (a tar archive is
+/// known only at its start), and found where the same file is archived along with them.
+pub const OWN_MIN: usize = 256 << 10;
+
 /// [`Options::limit`] for an archive of `n` bytes on its own: 64 MiB, and 32 times the archive.
 pub fn limit(n: usize) -> u64 {
     (64 << 20) + 32 * n as u64
@@ -364,7 +369,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         f.push("zip/layout", layout),
         f.push("zip/kept", kept),
     ];
-    inputs[0] = f.push_by_kind(0, data, &kinds, "zip", usize::MAX);
+    inputs[0] = f.push_by_kind(0, data, &kinds, "zip", OWN_MIN);
     f.root = Node::apply_with(MODULE, resources, Vec::new(), inputs, input.len() as u64);
     Some(Encoded { formula: f, inflated })
 }

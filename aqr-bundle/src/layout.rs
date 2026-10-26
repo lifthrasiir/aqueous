@@ -210,6 +210,11 @@ impl Rec {
     }
 }
 
+/// The flags of a member: [`INLINE`], [`PAD`] and [`UPPER`] where set.
+fn flags(inline: bool, pad: bool, upper: bool) -> u8 {
+    (if inline { INLINE } else { 0 }) | (if pad { PAD } else { 0 }) | (if upper { UPPER } else { 0 })
+}
+
 /// Makes the layout and the data of records, from the archive `d`.
 pub struct Writer<'a> {
     d: &'a [u8],
@@ -241,7 +246,7 @@ impl<'a> Writer<'a> {
                 let n = body.span.len();
                 let odd = (pre + n) % 2 == 1;
                 let inline = body.role == Role::Meta;
-                l.extend_from_slice(&[AR, inline as u8 * INLINE | (odd && !pad) as u8 * PAD]);
+                l.extend_from_slice(&[AR, flags(inline, odd && !pad, false)]);
                 varint::put(l, pre as u64);
                 varint::put(l, n as u64);
                 let mut h: [u8; AR_HEADER] = d[at..at + AR_HEADER].try_into().unwrap();
@@ -260,7 +265,7 @@ impl<'a> Writer<'a> {
                 let inline = body.role == Role::Meta;
                 let pad = &d[body.span.end..][..pad_to(n, TAR_BLOCK)];
                 let raw = pad.iter().any(|&b| b != 0);
-                l.extend_from_slice(&[TAR, inline as u8 * INLINE | raw as u8 * PAD]);
+                l.extend_from_slice(&[TAR, flags(inline, raw, false)]);
                 varint::put(l, n as u64);
                 let mut h: [u8; TAR_BLOCK] = d[at..at + TAR_BLOCK].try_into().unwrap();
                 let sum = tar_sum(&h);
@@ -287,7 +292,7 @@ impl<'a> Writer<'a> {
                 let upper = matches!(form, Cpio::Newc | Cpio::Crc)
                     && h[6..].iter().any(u8::is_ascii_uppercase)
                     && !h[6..].iter().any(u8::is_ascii_lowercase);
-                l.extend_from_slice(&[CPIO, form as u8, inline as u8 * INLINE | raw as u8 * PAD | upper as u8 * UPPER]);
+                l.extend_from_slice(&[CPIO, form as u8, flags(inline, raw, upper)]);
                 varint::put(l, m as u64);
                 varint::put(l, n as u64);
                 cpio_code(form, upper, &mut h, m as u64, n as u64, byte_sum(&d[body.span.clone()]));
