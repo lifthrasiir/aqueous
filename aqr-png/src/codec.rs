@@ -438,8 +438,14 @@ impl<'a> Skeleton<'a> {
     }
 
     /// The file, given the records of its images in order and the reference file's images if
-    /// any.
-    pub(crate) fn rebuild(&self, recs: &[&[u8]], threads: usize, refs: Option<&References>) -> Result<Vec<u8>> {
+    /// any; and, if `keep`, its own as a reference file (as [`references`] of the file).
+    pub(crate) fn rebuild(
+        &self,
+        recs: &[&[u8]],
+        threads: usize,
+        refs: Option<&References>,
+        keep: bool,
+    ) -> Result<(Vec<u8>, Option<References>)> {
         let (cs, classes, imgs) = (&self.chunks, &self.classes, &self.images);
         if recs.len() != imgs.len() {
             return Err(crate::corrupt());
@@ -451,7 +457,7 @@ impl<'a> Skeleton<'a> {
         let image_payload = |i: usize, threads: usize| {
             let ih = &imgs[i].1;
             let r = if recs[i].first() == Some(&2) { reference_of(ih, refs.and_then(|r| r.get(i))) } else { None };
-            image_payload(recs[i], img_len(&imgs[i].0), ih, threads, r)
+            image_payload(recs[i], img_len(&imgs[i].0), ih, threads, r, keep)
         };
         let payloads = if threads > 1 && imgs.len() > 1 {
             let workers = threads.min(imgs.len());
@@ -461,6 +467,8 @@ impl<'a> Skeleton<'a> {
         } else {
             (0..imgs.len()).map(|i| image_payload(i, threads)).collect::<Result<Vec<_>>>()?
         };
+        let (payloads, own): (Vec<Vec<u8>>, Vec<Option<model::Reference>>) = payloads.into_iter().unzip();
+        let own = keep.then(|| imgs.iter().map(|i| i.1).zip(own).collect());
 
         // Reassemble the file.
         let total: usize = cs.iter().map(|c| c.len + 12).sum::<usize>() + 8 + self.trailer.len();
@@ -492,33 +500,41 @@ impl<'a> Skeleton<'a> {
             out.extend_from_slice(&crc.to_be_bytes());
         }
         out.extend_from_slice(self.trailer);
-        Ok(out)
+        Ok((out, own))
     }
 }
 
 /// The payload (of `len` bytes) an image's record gives (`reference`: the reference of the
-/// image, for a record coded against it).
+/// image, for a record coded against it); and, if `keep`, the image's own as a reference (as
+/// [`references`] makes it).
 fn image_payload(
     rec: &[u8],
     len: usize,
     ih: &Option<Ihdr>,
     threads: usize,
     reference: Option<&model::Reference>,
-) -> Result<Vec<u8>> {
-    let payload = match rec.first() {
-        Some(0) if rec.len() == len + 1 => rec[1..].to_vec(),
+    keep: bool,
+) -> Result<(Vec<u8>, Option<model::Reference>)> {
+    let (payload, own) = match rec.first() {
+        Some(0) if rec.len() == len + 1 => (rec[1..].to_vec(), None),
         Some(&k @ (1 | 2)) => {
             let ih = ih.as_ref().ok_or_else(crate::corrupt)?;
             let g = Geometry::new(ih).ok_or_else(crate::corrupt)?;
             let reference = if k == 2 { Some(reference.ok_or_else(crate::corrupt)?) } else { None };
-            rebuild(&g, &rec[1..], len, threads, reference)?
+            rebuild(&g, &rec[1..], len, threads, reference, keep)?
         }
         _ => return Err(crate::corrupt()),
     };
     if payload.len() != len {
         return Err(crate::corrupt());
     }
-    Ok(payload)
+    // (that of a payload kept as it is parsed, as of a reference file)
+    let own = match own {
+        Some(r) => Some(r),
+        None if keep && ih.is_some() => model::Reference::parse(&payload).ok(),
+        None => None,
+    };
+    Ok((payload, own))
 }
 
 /// One stream's structure as the layout gives it.
@@ -530,14 +546,16 @@ struct StreamLayout {
 }
 
 /// Rebuilds a coded image's payload (of `len` bytes, if the record is right) from its record
-/// (past the mode byte), against `reference` if it is coded against one.
+/// (past the mode byte), against `reference` if it is coded against one; and, if `keep`, the
+/// image's own reference (that [`model::Reference::parse`] gives of the payload).
 fn rebuild(
     g: &Geometry,
     rec: &[u8],
     len: usize,
     threads: usize,
     reference: Option<&model::Reference>,
-) -> Result<Vec<u8>> {
+    keep: bool,
+) -> Result<(Vec<u8>, Option<model::Reference>)> {
     let mut at = 0;
     let part = |at: &mut usize| -> Result<&[u8]> {
         let n = get_varint(rec, at)? as usize;
@@ -626,6 +644,8 @@ fn rebuild(
     // of a block's tokens ahead.)
     let most = spans.iter().map(|s| if let Span::Tokens(c) = *s { c } else { 0 }).max().unwrap_or(0);
     let mut emit = Payload::new(streams, alts, headers, len + 6 * most + 64)?;
+    // (positions as the reference's are 32-bit)
+    let mut own = (keep && n <= u32::MAX as usize).then(model::Reference::empty);
     if threads > 1 && n >= PAR_MIN {
         /// A block's tokens and frequencies, and the bytes of a stored block.
         type Msg = (Vec<Token>, model::Freqs, Vec<u8>);
@@ -644,6 +664,9 @@ fn rebuild(
             // Where the span starts.
             let mut p = 0usize;
             let mut send = |toks: &mut [Token], freqs: &mut model::Freqs, data: &[u8], from: usize| {
+                if let Some(r) = &mut own {
+                    r.span(toks, from + data.len());
+                }
                 let mut v = spare.try_recv().unwrap_or_default();
                 v.clear();
                 v.extend_from_slice(toks);
@@ -666,9 +689,12 @@ fn rebuild(
         if pos != n {
             return Err(crate::corrupt());
         }
-        Ok(out)
+        Ok((out, own))
     } else {
         model::decode(&player, kind, g, &spans, n, reference, &mut |toks, freqs, data, from| {
+            if let Some(r) = &mut own {
+                r.span(toks, from + data.len());
+            }
             // The data from where the block starts (none needed but a stored block's).
             let rest = emit.at().checked_sub(from).and_then(|i| data.get(i..)).unwrap_or_default();
             emit.block(toks, freqs, rest)
@@ -677,7 +703,7 @@ fn rebuild(
         if pos != n {
             return Err(crate::corrupt());
         }
-        Ok(out)
+        Ok((out, own))
     }
 }
 
@@ -783,9 +809,45 @@ impl<'a> Payload<'a> {
     }
 }
 
+/// The helpers of the integration tests.
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod common;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The references a file's rebuild keeps are those parsed of it: of images coded (frames
+    /// among them, also on threads) and kept as they are.
+    #[test]
+    fn kept_references() {
+        use super::common::*;
+        let mut noise = vec![];
+        let mut x = 1u32;
+        for _ in 0..40 {
+            noise.push(0);
+            noise.extend((0..60).map(|_| {
+                x = x.wrapping_mul(1103515245).wrapping_add(12345);
+                (x >> 16) as u8
+            }));
+        }
+        let big = image_data(400, 300, 8, 6, false, 9);
+        let files = [
+            apng(&[(64, 48), (32, 20), (64, 48)], 3),
+            png(&[(b"IHDR", ihdr(60, 40, 8, 0, 0)), (b"IDAT", zlib(&zlib6(), &noise)), (b"IEND", vec![])]),
+            png(&[(b"IHDR", ihdr(400, 300, 8, 6, 0)), (b"IDAT", zlib(&zlib6(), &big)), (b"IEND", vec![])]),
+        ];
+        for (k, file) in files.iter().enumerate() {
+            let parts = parts(file, 1, None, None).unwrap();
+            let recs: Vec<&[u8]> = parts.records.iter().map(|r| &r[..]).collect();
+            for threads in [1, 4] {
+                let (out, own) = Skeleton::parse(&parts.skeleton).unwrap().rebuild(&recs, threads, None, true).unwrap();
+                assert!(out == *file);
+                assert!(own.unwrap() == references(file), "file {k}, {threads} threads");
+            }
+        }
+    }
 
     /// A token index listed twice among the matches sent as 284 + 31 is corrupt data,
     /// not a counter underflow.
@@ -813,7 +875,7 @@ mod tests {
             write_record(Kind::Image, enc, 1, &mut rec);
             rec
         };
-        assert!(rebuild(&g, &rec_of(false)[1..], payload.len(), 1, None).unwrap() == payload);
-        assert!(matches!(rebuild(&g, &rec_of(true)[1..], payload.len(), 1, None), Err(Error::Corrupt)));
+        assert!(rebuild(&g, &rec_of(false)[1..], payload.len(), 1, None, false).unwrap().0 == payload);
+        assert!(matches!(rebuild(&g, &rec_of(true)[1..], payload.len(), 1, None, false), Err(Error::Corrupt)));
     }
 }

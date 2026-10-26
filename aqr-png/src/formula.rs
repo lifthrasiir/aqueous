@@ -95,7 +95,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         (&[], &[sk, index, records, r]) => (sk, index, records, Some(r)),
         _ => return Err(corrupt()),
     };
-    rebuild(sk, index, records, reference.map(codec::references).as_ref(), len, threads)
+    Ok(rebuild(sk, index, records, reference.map(codec::references).as_ref(), len, threads, false)?.0)
 }
 
 /// The formula of `files`, each coded against its parent where that makes it smaller
@@ -169,37 +169,36 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], sizes: &[u64], threads: usize
     if at != params.len() {
         return Err(corrupt());
     }
-    // by depth in the trees, each depth's files at once: their parents (of the depth before)
-    // are rebuilt, and their references made
+    // by depth in the trees, each depth's files at once against their parents (of the depth
+    // before), which keep their references as they are rebuilt (until their children are)
     let mut depth = vec![0usize; n];
+    let mut is_parent = vec![false; n];
     for i in 0..n {
         depth[i] = parents[i].map_or(0, |p| depth[p] + 1);
+        parents[i].inspect(|&p| is_parent[p] = true);
     }
     let mut out: Vec<Option<Vec<u8>>> = (0..n).map(|_| None).collect();
+    let mut refs: Vec<Option<References>> = (0..n).map(|_| None).collect();
     for d in 0..=depth.iter().copied().max().unwrap_or(0) {
         let level: Vec<usize> = (0..n).filter(|&i| depth[i] == d).collect();
-        let mut is_parent = vec![false; n];
-        level.iter().filter_map(|&i| parents[i]).for_each(|p| is_parent[p] = true);
-        let ps: Vec<usize> = (0..n).filter(|&p| is_parent[p]).collect();
-        let workers = threads.min(ps.len()).max(1);
-        let made = codec::par_map(ps.len(), workers, |k| codec::references(out[ps[k]].as_deref().unwrap()));
-        let mut refs: Vec<Option<References>> = (0..n).map(|_| None).collect();
-        ps.iter().zip(made).for_each(|(&p, r)| refs[p] = Some(r));
         let workers = threads.min(level.len()).max(1);
         let inner = (threads / workers).max(1);
         let files = codec::par_map(level.len(), workers, |k| {
-            let i = level[k];
-            rebuild(sks[i], indexes[i], records[i], parents[i].and_then(|p| refs[p].as_ref()), sizes[i], inner)
+            let (i, r) = (level[k], parents[level[k]].and_then(|p| refs[p].as_ref()));
+            rebuild(sks[i], indexes[i], records[i], r, sizes[i], inner, is_parent[i])
         });
+        // (those of the depth before are done with)
+        level.iter().filter_map(|&i| parents[i]).for_each(|p| refs[p] = None);
         for (&i, f) in level.iter().zip(files) {
-            out[i] = Some(f?);
+            let (f, r) = f?;
+            (out[i], refs[i]) = (Some(f), r);
         }
     }
     Ok(out.into_iter().map(Option::unwrap).collect())
 }
 
 /// The file of `len` bytes of the skeleton `sk`, the index and the records, against the images
-/// of a reference file if given.
+/// of a reference file if given; and, if `keep`, the file's own as a reference file.
 fn rebuild(
     sk: &[u8],
     index: &[u8],
@@ -207,7 +206,8 @@ fn rebuild(
     refs: Option<&References>,
     len: u64,
     threads: usize,
-) -> Result<Vec<u8>> {
+    keep: bool,
+) -> Result<(Vec<u8>, Option<References>)> {
     let skel = Skeleton::parse(sk)?;
     let (mut at, mut from) = (0, 0);
     let mut recs = Vec::with_capacity(skel.images.len());
@@ -218,9 +218,9 @@ fn rebuild(
     if at != index.len() || from != records.len() {
         return Err(corrupt());
     }
-    let out = skel.rebuild(&recs, threads, refs)?;
+    let (out, own) = skel.rebuild(&recs, threads, refs, keep)?;
     if out.len() as u64 != len {
         return Err(corrupt());
     }
-    Ok(out)
+    Ok((out, own))
 }

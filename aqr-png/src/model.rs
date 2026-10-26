@@ -138,6 +138,7 @@ fn alphabet(t: usize) -> usize {
 /// variant of the picture with a layer shown or hidden), by where they start in the data.
 /// Where both images have the same data, encoders (of the same writer) mostly make the same
 /// parse, so that a token is often the reference's at the same place.
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct Reference {
     /// Positions, increasing, and the tokens starting there (matches without `alt258`).
     pos: Vec<u32>,
@@ -166,6 +167,25 @@ impl Reference {
             return Err(crate::Error::Unsupported("image data of 4 GiB or more"));
         }
         Ok(sink.r)
+    }
+
+    /// None yet, for [`Reference::span`].
+    pub fn empty() -> Reference {
+        Reference { pos: vec![], tokens: vec![] }
+    }
+
+    /// Adds the tokens `toks` of a span ending at position `end` (none for stored bytes), as
+    /// [`decode`] hands them over: the reference of the data so far.
+    pub fn span(&mut self, toks: &[Token], end: usize) {
+        let mut p = end - toks.iter().map(|t| t.span()).sum::<usize>();
+        for &t in toks {
+            self.pos.push(p as u32);
+            self.tokens.push(match t {
+                Token::Match { len, dist, .. } => Token::Match { len, dist, alt258: false },
+                t => t,
+            });
+            p += t.span();
+        }
     }
 }
 
@@ -1821,7 +1841,7 @@ fn decode_bpp<const BPP: usize, const IMAGE: bool, const REF: bool>(
     let mut live = Live { tables: &player.tables, dec: player.dec, raw: player.raw };
     let win = Win::new(g, n, IMAGE);
     let (mut buf, mut raw) = (vec![0u8; win.buf], vec![0u8; win.raw]);
-    let none = Reference { pos: vec![], tokens: vec![] };
+    let none = Reference::empty();
     let mut fo = Follow::new(reference.unwrap_or(&none));
     decode_loop::<Live, BPP, IMAGE, REF>(&mut live, g, spans, n, win, &mut buf, &mut raw, &mut fo, emit)?;
     if !live.dec.finished() || live.raw.overrun() {

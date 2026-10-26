@@ -9,6 +9,10 @@ pub mod png;
 pub mod rans;
 pub mod similar;
 
+// (for the integration tests' helpers, which unit tests take too)
+#[cfg(test)]
+extern crate self as aqr_png;
+
 #[derive(Debug)]
 pub enum Error {
     /// The input is not a PNG file this tool can handle.
