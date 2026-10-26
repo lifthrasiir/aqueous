@@ -6,7 +6,9 @@
 //! recompressors' outputs do not depend on their threads). A reserved worker runs only what
 //! it is reserved for, so that work handing data from thread to thread over channels that
 //! block (a pipeline of stages) runs its stages at once, never waiting for a worker: nothing
-//! waits for a worker but [`run`], which moves work onto the pool from outside it.
+//! waits for a worker but [`run`], which moves work onto the pool from outside it, and
+//! [`dispatch`], which waits holding none. Workers go back to the pool as soon as nothing is
+//! left for them ([`par_map`], [`dispatch`]), for work still running to reserve.
 //!
 //! Threads that libraries make on their own count in the pool by the workers reserved for them
 //! and left idle: Zstandard's (aqr-formula) and rayon's ([`rayon_pool`], whose threads are the
