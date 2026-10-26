@@ -55,7 +55,7 @@ pub fn resources(profile: u16) -> Result<Vec<Resource>> {
     Ok(vec![catalog.clone(), coding.clone()])
 }
 
-/// A catalog's rules in binary: per rule, its fields in [`RULE_BYTES`] bytes.
+/// A catalog's rules in binary: per rule, its fields in `RULE_BYTES` bytes.
 pub fn rules_to_bytes(rules: &[Rule]) -> Vec<u8> {
     let mut out = Vec::with_capacity(rules.len() * RULE_BYTES);
     for r in rules {

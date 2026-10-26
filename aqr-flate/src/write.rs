@@ -119,7 +119,7 @@ pub fn write(stream: &Stream, starts: &[usize], tokens: &[Token], data: &[u8]) -
 }
 
 /// Writes a stream block after block, its bytes taken as they are written ([`Writer::take`]):
-/// what [`write`] does, without having the whole stream at once.
+/// what [`write()`] does, without having the whole stream at once.
 pub struct Writer {
     w: Bits,
     /// Bytes of the data written so far.
