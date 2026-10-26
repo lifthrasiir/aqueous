@@ -123,13 +123,16 @@ parsing its payload again, so the decoder needs its file, not its record.
 On seven ZIP archives of such sets (Clip Studio Paint, 684 MB of PNG files in groups of 13
 to 88 of the same size), each file coded against a parent along a maximum spanning tree of
 how alike their data are (`aqr-png-refprobe --code`): 85% of the tokens are the parent's,
-and the records come to 109.5 MB against 491.5 MB alone (4.5×). Files are coded token by
-token (the encoder of streams expanding more than 4×), and coded alone too to keep the
-smaller record: coding takes 35 s and decoding 17 s of one thread over the 684 MB.
+and the records come to 109.5 MB against 491.5 MB alone (4.5×). Both encoders code against
+a reference (by rows, and token by token for streams expanding more than 4×, as these do),
+the same symbols; each file is coded alone too to keep the smaller record: coding takes 36 s
+and decoding 18 s of one thread over the 684 MB.
 
 A set of such files is one application of `png-set` (`formula::encode_set`), of an output
-per file, each against an earlier one, its parent: the files are decoded in order, a parent
-being given to its children as their reference file.
+per file, each against an earlier one, its parent. The encoder takes the files' formulas
+alone where it is given them (those without a parent as they are), and parses each parent's
+images once for all its children. The decoder rebuilds the files of each depth of the trees
+at once, their parents being given to them as their reference files.
 
 Tried and dropped: predicting the literals that are not the reference's by the reference's
 pixel where their three neighbours are the reference's (tables of their own). 2.6% of the

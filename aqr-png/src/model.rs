@@ -920,33 +920,26 @@ pub fn encode_threads(
     if payload.len() < 2 {
         return Err(crate::Error::Unsupported("no zlib stream"));
     }
-    if let Some(r) = reference {
-        // Token by token, each against the reference's.
-        return match (kind, g.bpp) {
-            (Kind::Image, 1) => encode_bpp::<1, true>(g, payload, Some(r)),
-            (Kind::Image, 2) => encode_bpp::<2, true>(g, payload, Some(r)),
-            (Kind::Image, 3) => encode_bpp::<3, true>(g, payload, Some(r)),
-            (Kind::Image, 4) => encode_bpp::<4, true>(g, payload, Some(r)),
-            (Kind::Image, _) => Err(crate::Error::Unsupported("pixel size")),
-            (Kind::Bytes, _) => encode_bpp::<0, false>(g, payload, Some(r)),
-        };
-    }
     // Streams that expand a lot are mostly long matches: modelling only the literals as
     // they come costs less than computing every pixel's symbol up front.
     let sparse = g.len > ROWS_MAX_EXPANSION * payload.len();
+    let r = reference;
     match (kind, g.bpp, sparse) {
-        (Kind::Image, 1, false) => encode_image::<1>(g, payload, threads),
-        (Kind::Image, 2, false) => encode_image::<2>(g, payload, threads),
-        (Kind::Image, 3, false) => encode_image::<3>(g, payload, threads),
-        (Kind::Image, 4, false) => encode_image::<4>(g, payload, threads),
-        (Kind::Image, 1, true) => encode_bpp::<1, true>(g, payload, None),
-        (Kind::Image, 2, true) => encode_bpp::<2, true>(g, payload, None),
-        (Kind::Image, 3, true) => encode_bpp::<3, true>(g, payload, None),
-        (Kind::Image, 4, true) => encode_bpp::<4, true>(g, payload, None),
+        (Kind::Image, 1, false) => encode_image::<1>(g, payload, threads, r),
+        (Kind::Image, 2, false) => encode_image::<2>(g, payload, threads, r),
+        (Kind::Image, 3, false) => encode_image::<3>(g, payload, threads, r),
+        (Kind::Image, 4, false) => encode_image::<4>(g, payload, threads, r),
+        (Kind::Image, 1, true) => encode_bpp::<1, true>(g, payload, r),
+        (Kind::Image, 2, true) => encode_bpp::<2, true>(g, payload, r),
+        (Kind::Image, 3, true) => encode_bpp::<3, true>(g, payload, r),
+        (Kind::Image, 4, true) => encode_bpp::<4, true>(g, payload, r),
         (Kind::Image, ..) => Err(crate::Error::Unsupported("pixel size")),
-        (Kind::Bytes, ..) => encode_bpp::<0, false>(g, payload, None),
+        (Kind::Bytes, ..) => encode_bpp::<0, false>(g, payload, r),
     }
 }
+
+/// The reference of none, never followed.
+static NO_REFERENCE: Reference = Reference { pos: Vec::new(), tokens: Vec::new() };
 
 /// Above this ratio of image data to DEFLATE stream, literals are modelled as they come
 /// (see [`encode`]).
@@ -956,11 +949,16 @@ const ROWS_MAX_EXPANSION: usize = 4;
 /// which the compressor has before it codes the tokens. So as the stream is parsed, its
 /// rows are unfiltered and the symbols of their pixel bytes computed a window of rows at a
 /// time (once the rows are complete; no dependency between them), and the tokens in the
-/// window walked.
-fn encode_image<const BPP: usize>(g: &Geometry, payload: &[u8], threads: usize) -> crate::Result<Encoded> {
+/// window walked (against `reference` if given).
+fn encode_image<'g, const BPP: usize>(
+    g: &'g Geometry,
+    payload: &[u8],
+    threads: usize,
+    reference: Option<&'g Reference>,
+) -> crate::Result<Encoded> {
     let est = g.len.min(MAX_EXPANSION * payload.len());
     let threads = if est >= PAR_ROWS_MIN { threads.max(1) } else { 1 };
-    let mut sink = Rows::<BPP>::new(g, est, threads);
+    let mut sink = Rows::<BPP>::new(g, est, threads, reference);
     let mut streams = vec![];
     let mut o = 0;
     loop {
@@ -1050,14 +1048,20 @@ struct Rows<'g, const BPP: usize> {
     threads: usize,
     /// The largest row size.
     rs: usize,
+    follow: Option<Follow<'g>>,
 }
 
 impl<'g, const BPP: usize> Rows<'g, BPP> {
-    /// For about `est` bytes of data.
-    fn new(g: &'g Geometry, est: usize, threads: usize) -> Rows<'g, BPP> {
-        let win = Window::new(STRIPE * threads);
+    /// For about `est` bytes of data, against `reference` if given.
+    fn new(g: &'g Geometry, est: usize, threads: usize, reference: Option<&'g Reference>) -> Rows<'g, BPP> {
+        let mut win = Window::new(STRIPE * threads);
+        // the literals compared with the reference's
+        win.keep = reference.is_some();
         let size = (g.pad + KEEP + win.size + g.rs_max() + 2 * (65536 + ROOM)).min(g.pad + est + ROOM);
         let mut rec = Recorder::new(0);
+        if reference.is_some() {
+            rec.tables = TABLES_REF;
+        }
         // About a symbol per byte (they grow as needed).
         rec.syms.reserve(est.min(STRIPE * 64));
         let mut r = Rows {
@@ -1076,6 +1080,7 @@ impl<'g, const BPP: usize> Rows<'g, BPP> {
             rec,
             threads,
             rs: g.rs_max(),
+            follow: reference.map(Follow::new),
         };
         r.limit();
         r
@@ -1135,7 +1140,14 @@ impl<'g, const BPP: usize> Rows<'g, BPP> {
                     break;
                 }
             }
-            if !walk(&mut out, &self.win, &self.events, &mut self.w, self.p - self.skip) {
+            let end = self.p - self.skip;
+            let full = match &mut self.follow {
+                Some(fo) => walk::<true>(&mut out, &self.win, &self.events, &mut self.w, end, fo),
+                None => {
+                    walk::<false>(&mut out, &self.win, &self.events, &mut self.w, end, &mut Follow::new(&NO_REFERENCE))
+                }
+            };
+            if !full {
                 break;
             }
         }
@@ -1227,11 +1239,27 @@ struct Window {
     /// The raw rows, from the raw offset `rbase` on.
     raw: Vec<u8>,
     rbase: usize,
+    /// Whether to keep the data of the positions it covers, and that data.
+    keep: bool,
+    d: Vec<u8>,
 }
 
 impl Window {
     fn new(size: usize) -> Window {
-        Window { s: vec![], t: vec![], act: vec![], s0: 0, s1: 0, pass: 0, row: 0, size, raw: vec![], rbase: 0 }
+        Window {
+            s: vec![],
+            t: vec![],
+            act: vec![],
+            s0: 0,
+            s1: 0,
+            pass: 0,
+            row: 0,
+            size,
+            raw: vec![],
+            rbase: 0,
+            keep: false,
+            d: vec![],
+        }
     }
 
     /// Moves on to the window containing position `p` (`p <` the `n` bytes there are) of the
@@ -1260,6 +1288,7 @@ impl Window {
                     return false;
                 }
                 self.reset(s0, n.min(s0 + self.size));
+                self.copy(buf, off);
                 let k = self.s1 - s0;
                 for (i, s) in self.s[..k].iter_mut().enumerate() {
                     *s = zigzag(buf[at(s0 + i)]) as u8;
@@ -1314,6 +1343,7 @@ impl Window {
                 continue;
             }
             self.reset(s0, s1);
+            self.copy(buf, off);
             let raw: &[u8] = &self.raw;
             let syms = |ms: &mut RowSymsMut, rows: std::ops::Range<usize>, d0: usize| {
                 for r in rows {
@@ -1354,6 +1384,15 @@ impl Window {
         }
     }
 
+    /// Keeps the data it covers, if it is to (position `i` at `off + i` in `buf`).
+    fn copy(&mut self, buf: &[u8], off: usize) {
+        if self.keep {
+            let (a, n) = (off.wrapping_add(self.s0), self.s1 - self.s0);
+            self.d.clear();
+            self.d.extend_from_slice(&buf[a..a + n]);
+        }
+    }
+
     /// Covers `s0..s1` (the symbols are left to be written).
     fn reset(&mut self, s0: usize, s1: usize) {
         (self.s0, self.s1) = (s0, s1);
@@ -1378,8 +1417,18 @@ struct Walk {
 /// Records the symbols of the bytes from `w.p` within the window: of the tokens up to
 /// `end` (those parsed) and the stored blocks among them (`events` from `w.ei`). Returns
 /// whether it got to the window's end (else to the tokens').
+///
+/// `REF`: against the reference `fo` follows, each token where one of its starts first a
+/// decision whether it is the same (the data of the window kept, [`Window::keep`]).
 #[inline(never)]
-fn walk(out: &mut Syms, win: &Window, events: &[Event], w: &mut Walk, end: usize) -> bool {
+fn walk<const REF: bool>(
+    out: &mut Syms,
+    win: &Window,
+    events: &[Event],
+    w: &mut Walk,
+    end: usize,
+    fo: &mut Follow,
+) -> bool {
     const F: usize = T_FILTER - T_LIT;
     let (st, ss, sa) = (&win.t[..], &win.s[..], &win.act[..]);
     let lim = win.s1 - win.s0;
@@ -1410,12 +1459,15 @@ fn walk(out: &mut Syms, win: &Window, events: &[Event], w: &mut Walk, end: usize
             break false;
         }
         if at == ti {
-            let e2 = st[p] as usize;
-            // The after-match offset applies to the literal tables only.
-            let mask = ((e2 < F) as usize).wrapping_neg();
-            out.sym(T_LIT + e2 + (after & mask), ESC);
-            out.bit(T_ESC, 1);
-            code_match(out, sa[p] as usize, e.len as u32, e.dist as u32);
+            let same = REF && same(out, fo, win.s0 + p, Token::Match { len: e.len, dist: e.dist, alt258: false });
+            if !same {
+                let e2 = st[p] as usize;
+                // The after-match offset applies to the literal tables only.
+                let mask = ((e2 < F) as usize).wrapping_neg();
+                out.sym(T_LIT + e2 + (after & mask), ESC);
+                out.bit(T_ESC, 1);
+                code_match(out, sa[p] as usize, e.len as u32, e.dist as u32);
+            }
             p += e.len as usize;
             (ti, ei, after) = (ti + 1, ei + 1, 4 * ACT);
             continue;
@@ -1423,12 +1475,14 @@ fn walk(out: &mut Syms, win: &Window, events: &[Event], w: &mut Walk, end: usize
         // Literals up to the next event, the tokens' end or the window's.
         let k = (at.min(end) - ti).min(lim - p);
         for i in p..p + k {
-            let e = st[i] as usize;
-            let mask = ((e < F) as usize).wrapping_neg();
-            let s = ss[i] as u32;
-            out.sym(T_LIT + e + (after & mask), s);
-            if s == ESC {
-                out.bit(T_ESC, 0);
+            if !(REF && same(out, fo, win.s0 + i, Token::Lit(win.d[i]))) {
+                let e = st[i] as usize;
+                let mask = ((e < F) as usize).wrapping_neg();
+                let s = ss[i] as u32;
+                out.sym(T_LIT + e + (after & mask), s);
+                if s == ESC {
+                    out.bit(T_ESC, 0);
+                }
             }
             after = 0;
         }
@@ -1437,6 +1491,17 @@ fn walk(out: &mut Syms, win: &Window, events: &[Event], w: &mut Walk, end: usize
     };
     (w.p, w.ti, w.ei, w.left, w.after) = (p + win.s0, ti, ei, left, after);
     full
+}
+
+/// Against the reference `fo` follows, codes whether token `t` at position `p` is the
+/// reference's, if one of its starts there; returns whether it is.
+#[inline(always)]
+fn same(out: &mut Syms, fo: &mut Follow, p: usize, t: Token) -> bool {
+    let Some((r, table)) = fo.at(p) else { return false };
+    let same = r == t;
+    out.bit(table, same as u32);
+    fo.same = same as usize;
+    same
 }
 
 /// Symbols written into reserved room (the compressor's token walk), which grows if it
@@ -2158,6 +2223,72 @@ mod tests {
                 assert_eq!(whole, raw);
             }
         }
+    }
+
+    /// A zlib payload of `data` (rows of `rs` bytes, pixels of `bpp`): a greedy parse by
+    /// matches at the distances of a row, a pixel and a byte, in one fixed block.
+    fn payload(data: &[u8], rs: usize, bpp: usize) -> Vec<u8> {
+        use aqr_flate::deflate::{Block, Body, Stream};
+        let (mut tokens, mut p) = (vec![], 0);
+        while p < data.len() {
+            let best = [rs, bpp, 1]
+                .into_iter()
+                .filter(|&d| d <= p)
+                .map(|d| (d, (0..258.min(data.len() - p)).take_while(|&i| data[p + i] == data[p + i - d]).count()))
+                .max_by_key(|&(_, n)| n)
+                .filter(|&(_, n)| n >= 3);
+            match best {
+                Some((dist, len)) => {
+                    tokens.push(Token::Match { len: len as u16, dist: dist as u16, alt258: false });
+                    p += len;
+                }
+                None => {
+                    tokens.push(Token::Lit(data[p]));
+                    p += 1;
+                }
+            }
+        }
+        let stream = Stream { blocks: vec![Block { last: true, body: Body::Fixed { tokens } }], ..Default::default() };
+        let mut z = vec![0x78, 0x01];
+        z.extend(aqr_flate::deflate::write(&stream, data).unwrap());
+        z.extend([0; 4]);
+        z
+    }
+
+    /// Against a reference, the image encoder (by rows) and the one of tokens as they come
+    /// give the same symbols; and they are fewer than alone.
+    #[test]
+    fn encoders_against_agree() {
+        let ih =
+            crate::png::Ihdr { width: 120, height: 80, depth: 8, color: 6, compression: 0, filter: 0, interlace: 0 };
+        let g = Geometry::new(&ih).unwrap();
+        let rs = g.passes[0].rs;
+        let image = |rect: bool| -> Vec<u8> {
+            let mut d = vec![];
+            for y in 0..80usize {
+                d.push((y % 5) as u8);
+                for x in 0..480usize {
+                    let inside = rect && (20..50).contains(&(x / 4)) && (30..60).contains(&y);
+                    d.push(if inside {
+                        ((x * 7) ^ (y * 13)) as u8
+                    } else {
+                        ((x / 4 * 3 + y * 5) / 7 % 251 + (x % 4) * 50) as u8
+                    });
+                }
+            }
+            d
+        };
+        let (base, variant) = (payload(&image(false), rs, 4), payload(&image(true), rs, 4));
+        let r = Reference::parse(&base).unwrap();
+        let rows = encode_image::<4>(&g, &variant, 1, Some(&r)).unwrap();
+        let tokens = encode_bpp::<4, true>(&g, &variant, Some(&r)).unwrap();
+        let alone = encode_image::<4>(&g, &variant, 1, None).unwrap();
+        let (n, m) = (rows.rec.syms.len(), alone.rec.syms.len());
+        assert!(n * 4 < m * 3, "{n} against {m}");
+        let (mut a, mut b) = (vec![], vec![]);
+        rows.rec.finish(&mut a);
+        tokens.rec.finish(&mut b);
+        assert!(a == b);
     }
 
     #[test]

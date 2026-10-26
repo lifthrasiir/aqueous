@@ -60,16 +60,21 @@ pub(crate) fn sets(f: &Formula, children: &mut [(Node, Option<Made>)], opt: &Opt
             continue;
         }
         let files: Vec<&[u8]> = order.iter().map(|&i| pngs[group[i]].1).collect();
-        let Some(set) = aqr_png::formula::encode_set(&files, &parents, opt.threads) else { continue };
         let members: Vec<usize> = order.iter().map(|&i| pngs[group[i]].0).collect();
         let records = |f: &Formula| -> usize {
             f.streams.iter().filter(|s| s.class == "png/records").map(|s| s.data.len()).sum()
         };
-        let alone: usize = members.iter().map(|&m| children[m].1.as_ref().map_or(0, |c| records(&c.f))).sum();
-        if records(&set) >= alone {
+        // the formulas alone, taken out (and put back if the set is not taken)
+        let made: Vec<Made> = members.iter().map(|&m| children[m].1.take().unwrap()).collect();
+        let formulas: Vec<Formula> = made.into_iter().map(|m| m.f).collect();
+        let alone: usize = formulas.iter().map(records).sum();
+        let set = aqr_png::formula::encode_set(&files, &parents, Some(&formulas), opt.threads);
+        let Some(set) = set.filter(|s| records(s) < alone) else {
+            for (&m, f) in members.iter().zip(formulas) {
+                children[m].1 = Some(Made::from(f));
+            }
             continue;
-        }
-        members.iter().for_each(|&m| children[m].1 = None);
+        };
         out.push(Set { f: set, members });
     }
     out
@@ -122,7 +127,7 @@ fn tree(alike: &[Vec<f64>]) -> (Vec<usize>, Vec<Option<usize>>) {
 }
 
 /// `f(0..n)` on up to `threads` threads, in order.
-fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+pub(crate) fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: Vec<std::sync::Mutex<Option<R>>> = (0..n).map(|_| std::sync::Mutex::new(None)).collect();
     let work = || {

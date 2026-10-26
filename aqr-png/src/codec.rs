@@ -121,30 +121,39 @@ fn payload_of(chunks: &[png::Chunk], class: u8) -> Vec<u8> {
     payload
 }
 
-/// The images of a reference file (none if it is not a PNG file): their headers and
-/// payloads, in order.
-pub(crate) fn reference_images(file: &[u8]) -> Vec<(Option<Ihdr>, Vec<u8>)> {
+/// The images of a reference file (none if it is not a PNG file), in order: their headers, and
+/// their references where their payloads parse.
+pub(crate) type References = Vec<(Option<Ihdr>, Option<model::Reference>)>;
+
+/// The [`References`] of `file`.
+pub(crate) fn references(file: &[u8]) -> References {
     let Some((chunks, _)) = png::chunks(file) else { return vec![] };
     let classes = classes(&chunks);
     let imgs = images(&classes, |i| chunks[i].data, |i| chunks[i].kind);
-    imgs.into_iter().map(|(range, ih)| (ih, payload_of(&chunks[range.clone()], classes[range.start]))).collect()
+    imgs.into_iter()
+        .map(|(range, ih)| {
+            let payload = payload_of(&chunks[range.clone()], classes[range.start]);
+            (ih, ih.and_then(|_| model::Reference::parse(&payload).ok()))
+        })
+        .collect()
 }
 
-/// The reference of an image of header `ih` in a reference's image (`img`, as
-/// [`reference_images`] gives), if both have a header of the same geometry and the
-/// reference's payload parses.
-fn reference_of(ih: &Option<Ihdr>, img: Option<&(Option<Ihdr>, Vec<u8>)>) -> Option<model::Reference> {
-    let (Some(a), Some((Some(b), payload))) = (ih, img) else { return None };
+/// The reference of an image of header `ih` in a reference's image (`img`, of
+/// [`References`]), if both have a header of the same geometry and the reference's payload
+/// parses.
+fn reference_of<'r>(
+    ih: &Option<Ihdr>,
+    img: Option<&'r (Option<Ihdr>, Option<model::Reference>)>,
+) -> Option<&'r model::Reference> {
+    let (Some(a), Some((Some(b), r))) = (ih, img) else { return None };
     let geometry = |h: &Ihdr| (h.width, h.height, h.depth, h.color, h.interlace);
-    if geometry(a) != geometry(b) {
-        return None;
-    }
-    model::Reference::parse(payload).ok()
+    (geometry(a) == geometry(b)).then_some(r.as_ref()).flatten()
 }
 
 /// The parts of `file`, as a PNG file with its images coded where that makes them smaller,
-/// against those of `reference` where that makes them smaller still.
-fn parts(file: &[u8], threads: usize, reference: Option<&[u8]>) -> Result<Parts> {
+/// against those of `refs` (a reference file's) where that makes them smaller still. With
+/// `alone`, the records of the images coded alone, which are not coded again.
+fn parts(file: &[u8], threads: usize, refs: Option<&References>, alone: Option<&[&[u8]]>) -> Result<Parts> {
     let (chunks, trailer) = png::chunks(file).ok_or(Error::Unsupported("not a PNG file"))?;
     let classes = classes(&chunks);
 
@@ -170,11 +179,13 @@ fn parts(file: &[u8], threads: usize, reference: Option<&[u8]>) -> Result<Parts>
     sk.extend_from_slice(trailer);
 
     let imgs = images(&classes, |i| chunks[i].data, |i| chunks[i].kind);
-    let refs = reference.map(reference_images).unwrap_or_default();
+    if alone.is_some_and(|a| a.len() != imgs.len()) {
+        return Err(Error::Unsupported("records alone of other images"));
+    }
     let image = |i: usize, threads: usize| {
         let (range, ih) = &imgs[i];
-        let r = reference_of(ih, refs.get(i));
-        image_rec(&chunks[range.clone()], classes[range.start], ih, threads, r.as_ref())
+        let r = reference_of(ih, refs.and_then(|r| r.get(i)));
+        image_rec(&chunks[range.clone()], classes[range.start], ih, threads, r, alone.map(|a| a[i]))
     };
     // Below this size there is nothing worth a thread to overlap.
     let records = if threads > 1 && file.len() >= PAR_MIN {
@@ -191,18 +202,27 @@ fn parts(file: &[u8], threads: usize, reference: Option<&[u8]>) -> Result<Parts>
 
 /// The record of the image of `chunks` (of class `class`): coded if it has a header and
 /// coding makes it smaller (against `reference` if given and smaller still), else the
-/// payload as it is.
+/// payload as it is. `alone` is the record coded alone, if known.
 fn image_rec(
     chunks: &[png::Chunk],
     class: u8,
     ih: &Option<Ihdr>,
     threads: usize,
     reference: Option<&model::Reference>,
+    alone: Option<&[u8]>,
 ) -> Vec<u8> {
     let payload = payload_of(chunks, class);
     let mut rec = vec![];
-    let mut coded = ih.as_ref().is_some_and(|ih| image_record(ih, &payload, threads, None, &mut rec).is_ok())
-        && rec.len() <= payload.len();
+    let mut coded = match alone {
+        Some(a) => {
+            rec = a.to_vec();
+            a.first() == Some(&1)
+        }
+        None => {
+            ih.as_ref().is_some_and(|ih| image_record(ih, &payload, threads, None, &mut rec).is_ok())
+                && rec.len() <= payload.len()
+        }
+    };
     if let (Some(ih), Some(r)) = (ih, reference) {
         let mut against = vec![];
         if image_record(ih, &payload, threads, Some(r), &mut against).is_ok()
@@ -229,9 +249,14 @@ fn image_rec(
 }
 
 /// The parts of `file` for a formula, if it is a PNG file and any image is coded (see
-/// [`crate::formula`]), against `reference` if given.
-pub(crate) fn formula_parts(file: &[u8], threads: usize, reference: Option<&[u8]>) -> Option<Parts> {
-    let parts = parts(file, threads, reference).ok()?;
+/// [`crate::formula`]), against `refs` if given, with the records coded `alone` if known.
+pub(crate) fn formula_parts(
+    file: &[u8],
+    threads: usize,
+    refs: Option<&References>,
+    alone: Option<&[&[u8]]>,
+) -> Option<Parts> {
+    let parts = parts(file, threads, refs, alone).ok()?;
     parts.records.iter().any(|r| r[0] != 0).then_some(parts)
 }
 
@@ -412,8 +437,9 @@ impl<'a> Skeleton<'a> {
         Ok(Skeleton { chunks, classes, trailer, images })
     }
 
-    /// The file, given the records of its images in order and the reference file if any.
-    pub(crate) fn rebuild(&self, recs: &[&[u8]], threads: usize, reference: Option<&[u8]>) -> Result<Vec<u8>> {
+    /// The file, given the records of its images in order and the reference file's images if
+    /// any.
+    pub(crate) fn rebuild(&self, recs: &[&[u8]], threads: usize, refs: Option<&References>) -> Result<Vec<u8>> {
         let (cs, classes, imgs) = (&self.chunks, &self.classes, &self.images);
         if recs.len() != imgs.len() {
             return Err(crate::corrupt());
@@ -422,15 +448,10 @@ impl<'a> Skeleton<'a> {
             let skip = if classes[range.start] == FDAT { 4 } else { 0 };
             cs[range.clone()].iter().map(|c| c.len - skip).sum::<usize>()
         };
-        // The reference's images, if a record is coded against them.
-        let refs = match reference {
-            Some(r) if recs.iter().any(|r| r.first() == Some(&2)) => reference_images(r),
-            _ => vec![],
-        };
         let image_payload = |i: usize, threads: usize| {
             let ih = &imgs[i].1;
-            let r = if recs[i].first() == Some(&2) { reference_of(ih, refs.get(i)) } else { None };
-            image_payload(recs[i], img_len(&imgs[i].0), ih, threads, r.as_ref())
+            let r = if recs[i].first() == Some(&2) { reference_of(ih, refs.and_then(|r| r.get(i))) } else { None };
+            image_payload(recs[i], img_len(&imgs[i].0), ih, threads, r)
         };
         let payloads = if threads > 1 && imgs.len() > 1 {
             let workers = threads.min(imgs.len());
