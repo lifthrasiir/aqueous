@@ -115,7 +115,8 @@ pub struct Options {
     pub threads: usize,
     /// Formats nested at most this deep: 1 recompresses the file alone, 2 also the data of a
     /// DEFLATE stream in it (of gzip, zlib or PDF), of an LZ4 stream or of the blocks of a
-    /// LevelDB table, and so on (0 recompresses nothing).
+    /// LevelDB table, and so on (0 recompresses nothing). An ar, tar or cpio archive does not
+    /// count: the files in it are as deep as it is.
     pub depth: u32,
     /// Decode the archive that [`compress`] makes, and store the file raw instead where it is
     /// not given back (§6). Without it, the archive's checksum of the output covers the file
@@ -478,6 +479,15 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         }
     }
     let mark = cx.deferred.borrow().len();
+    // (an ar, tar or cpio archive only bundles files: they are as deep as it is)
+    let deeper;
+    let opt = match format.is_bundle() {
+        true => {
+            deeper = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
+            &deeper
+        }
+        false => opt,
+    };
     let children = nested(&shared, opt, depth, cx);
     // (where the data put off is, as the formula may be a copy once reclaimed)
     let bases: Vec<usize> = shared.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
@@ -504,11 +514,12 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
 
 /// Unless [`Options::smaller`] is off, what tells whether recompressing a stream may pay,
 /// for its data `depth` formats deep: at the level of the archive, files looked for as
-/// [`Nest::of`] tells (scanned, unless nested formats would go deeper than allowed).
+/// [`Nest::of`] tells (scanned, unless nested formats would go deeper than allowed). An ar,
+/// tar or cpio archive is scanned for the files in it, as it gains nothing itself.
 pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
     let look = |kind| match Nest::Scan.of(kind) {
         None => Look::No,
-        Some(Nest::As(_)) => Look::Whole,
+        Some(Nest::As(f)) if !f.is_bundle() => Look::Whole,
         Some(_) => Look::Scan,
     };
     let starts = |d: &[u8]| detect(d).is_some();
@@ -517,9 +528,10 @@ pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
 }
 
 /// Bytes of the files of formats that recompressors take in `d`, as a scan would find them:
-/// by their signatures, then their ends ([`extent`]), each from the end of the one before.
+/// by their signatures, then their ends ([`extent`]), each from the end of the one before. An
+/// ar, tar or cpio archive is not one, but the files in it are.
 fn files_len(d: &[u8]) -> usize {
-    let len = |p: usize, f: Option<Format>| f.and_then(|f| extent(f, &d[p..])).unwrap_or(0);
+    let len = |p: usize, f: Option<Format>| f.filter(|f| !f.is_bundle()).and_then(|f| extent(f, &d[p..])).unwrap_or(0);
     let mut total = len(0, detect(d));
     let mut p = detect::next_start(d, total.max(1));
     while p < d.len() {
@@ -1086,6 +1098,23 @@ mod tests {
         pub(crate) static PURE: Cell<usize> = const { Cell::new(0) };
         /// Whether [`verify::reclaim`] copies every formula (as it does those still evaluated).
         pub(crate) static COPY: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// An ar, tar or cpio archive is worth what the files in it are: a probe counts them, not
+    /// the archive, and scans data of its kind.
+    #[test]
+    fn bundles_probed_by_members() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let tar = fixture("aqr-bundle/tests/data/py-gnu.tar");
+        assert_eq!(files_len(&tar), 0);
+        let jpeg = fixture("aqr-jpeg/tests/data/gradient.jpg");
+        let mut with = tar[..1024].to_vec();
+        with.extend_from_slice(&jpeg);
+        with.extend_from_slice(&tar[1024..]);
+        assert_eq!(files_len(&with), jpeg.len());
+        let probe = probe(&Options::default(), 0).unwrap();
+        assert_eq!((probe.look)(Kind::Format("tar")), Look::Scan);
+        assert_eq!((probe.look)(Kind::Format("jpeg")), Look::Whole);
     }
 
     /// The contents of pure formats are made beforehand, each once: those of a ZIP archive's

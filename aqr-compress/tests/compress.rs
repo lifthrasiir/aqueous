@@ -870,3 +870,14 @@ fn bundles() {
     assert_eq!(modules(&f).iter().filter(|&&m| m == BUNDLE.name).count(), 2, "{f}");
     assert_eq!(aqr_compress::kind_by_name(b"x/y.tar"), aqr_formula::Kind::Format("tar"));
 }
+
+/// A bundle does not count as a format deeper: a JPEG file in a ZIP archive in a tar archive in
+/// gzip is recompressed as one in a ZIP archive in gzip is.
+#[test]
+fn bundles_not_deeper() {
+    let jpeg = fixture("aqr-jpeg/tests/data/gradient.jpg");
+    let z = zip(&[("a.jpg", &jpeg, false), ("b.txt", &text(3000), false)]);
+    let d = gzip_named(&tar(&[("x.zip", &z)]), "x.tar");
+    let f = roundtrip(&d, &Options { smaller: false, ..Options::default() });
+    assert_eq!(modules(&f), [FLATE.name, BUNDLE.name, ZIP.name, JPEG.name], "{f}");
+}

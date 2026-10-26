@@ -93,6 +93,11 @@ impl Format {
         }
     }
 
+    /// Whether it is an archive of aqr-bundle's, which only bundles files.
+    pub fn is_bundle(self) -> bool {
+        matches!(self, Format::Ar | Format::Tar | Format::Cpio)
+    }
+
     /// The format of [`Format::name`] `name`, as [`Kind::Format`] names it.
     pub fn from_name(name: &str) -> Option<Format> {
         Format::ALL.into_iter().find(|f| f.name() == name)

@@ -294,7 +294,7 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>
             _ => Vec::new(),
         };
         let held = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
-        let bundle = matches!(format, Some(detect::Format::Ar | detect::Format::Tar | detect::Format::Cpio));
+        let bundle = format.is_some_and(detect::Format::is_bundle);
         Ok((xxhash_rust::xxh3::xxh3_64(&head), held, bundle))
     });
     let mut parent: Vec<usize> = (0..n).collect();
