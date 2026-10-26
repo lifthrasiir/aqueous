@@ -126,8 +126,11 @@ const MID_BASE: (i32, f64) = (3, 350e6);
 const MID_LOWER: [i32; 1] = [1];
 /// The zstd levels above [`MID_BASE`] that [`Level::Mid`] picks from, with their speed.
 const MID_HIGHER: [(i32, f64); 3] = [(4, 330e6), (6, 140e6), (9, 100e6)];
-/// The bytes that [`Level::Mid`] would save for a second of compression above [`MID_BASE`].
-const MID_RATE: f64 = 4e6;
+/// The bytes that [`Level::Mid`] would save for a second of compression above [`MID_BASE`]:
+/// level 9 where it saves 0.71% of the data over level 3 (2–3% of what they compress to,
+/// where 10gb's solid blocks save 8% at the median); zstd at 100 MB/s on a core is still far
+/// from all of compression's time.
+const MID_RATE: f64 = 1e6;
 /// Streams shorter than this are compressed at [`MID_BASE`] by [`Level::Mid`], as picking
 /// would take longer than any level.
 const MID_SMALL: usize = 64 << 10;
@@ -155,7 +158,8 @@ pub struct Encoder {
     /// Compressed resources by their [`StreamKey`].
     resources: RefCell<HashMap<StreamKey, Vec<u8>>>,
     /// The archived lengths ([`Encoder::raw_len`]) of streams forgotten compressed
-    /// ([`Encoder::forget`]), by their [`StreamKey`]: a stream is compared with formulas of it
+    /// ([`Encoder::forget`]), or compared with a formula at the base level of [`Level::Mid`]
+    /// ([`Encoder::smaller`]), by their [`StreamKey`]: a stream is compared with formulas of it
     /// again without being compressed again.
     raw_lens: RefCell<HashMap<StreamKey, usize>>,
     /// Samples of streams compressed by [`Encoder::least`], by their stream's [`StreamKey`]
@@ -765,7 +769,8 @@ impl Encoder {
 
     /// Whether `f` archives smaller than `d` raw. A formula of at most half of the bytes
     /// that `d` is estimated to compress to (by a sample) is taken as smaller without
-    /// compressing `d`.
+    /// compressing `d`; for [`Level::Mid`], `d` is compressed at most at its base level
+    /// to be compared.
     pub fn smaller(&self, f: &Formula, d: &[u8]) -> Result<bool> {
         self.smaller_of(f, None, &[], d)
     }
@@ -809,6 +814,15 @@ impl Encoder {
                 Plan::Level(level, estimate) => {
                     if n <= estimate / 2 {
                         return Ok(true);
+                    }
+                    // Mid compares at the base level, as a formula mostly is smaller, and what
+                    // was compared is then not archived: a formula is taken over data that only
+                    // a higher level would have compressed to less (by up to what they differ)
+                    if self.level == Level::Mid && level > MID_BASE.0 {
+                        let c = compressed_to(&mut self.cctx(), &[d], MID_BASE.0, self.threads, estimate)?;
+                        let raw = archived_raw(d, c.as_deref());
+                        self.raw_lens.borrow_mut().insert(key(&[d]), raw);
+                        return Ok(n < raw);
                     }
                     compressed_to(&mut self.cctx(), &[d], level, self.threads, estimate)?
                 }
@@ -936,6 +950,17 @@ fn checksum_of(data: &[&[u8]]) -> u64 {
     let mut h = Xxh64::new(0);
     data.iter().for_each(|p| h.update(p));
     h.digest()
+}
+
+/// The length of the archive of `d` as it is ([`Encoder::raw_len`]), compressed as `c`
+/// ([`compressed`]) if given.
+fn archived_raw(d: &[u8], c: Option<&[u8]>) -> usize {
+    let mut n = Count(0);
+    n.put(&HEADER_MAGIC);
+    content_block(&mut n, true, &[d], c);
+    let blocks = n.0 - HEADER_MAGIC.len();
+    footer(&mut n, blocks);
+    n.0
 }
 
 /// Appends a block of `data`: compressed as `c` ([`compressed`]) if given, else uncompressed
@@ -2675,18 +2700,47 @@ mod tests {
         }
     }
 
+    /// [`Level::Mid`] compares a formula with raw data compressed at the base level, however
+    /// higher the data would be archived at, and keeps only its length: what is compared is
+    /// mostly not archived.
+    #[test]
+    fn smaller_at_base() {
+        let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../spec/index.bs")).unwrap();
+        // alike throughout, so that the sample's estimate holds
+        let mut rng = aqr_common::rng::Rng::new(3);
+        let mut d = Vec::new();
+        while d.len() < 3 << 20 {
+            let at = rng.below(text.len() as u64 - 64) as usize;
+            d.extend_from_slice(&text[at..at + 64]);
+            d.extend_from_slice(&rng.below(1 << 32).to_le_bytes()[..4]);
+        }
+        let part = d[..d.len() * 9 / 10].to_vec();
+        let mut f = Formula::default();
+        f.push("a", part.clone());
+        f.root = Node::slice(0, 0, part.len() as u64);
+        let enc = Encoder::new(Level::Mid);
+        let k = key(&[&d]);
+        assert!(matches!(enc.plan(k, &[&d]).unwrap(), Plan::Level(l, _) if l > MID_BASE.0));
+        let raw = Encoder::new(Level::Zstd(MID_BASE.0)).raw_len(&d).unwrap();
+        assert_eq!(enc.smaller(&f, &d).unwrap(), enc.len(&f).unwrap() < raw);
+        assert!(!enc.streams.borrow().contains_key(&k));
+        assert_eq!(enc.raw_lens.borrow().get(&k), Some(&raw));
+    }
+
     /// Above the base by the time to compress; below where clearly smaller, as a sample may
     /// be off by a little.
     #[test]
     fn mid_picks() {
         // nothing better
         assert_eq!(mid_pick(1_000_000, 300_000, &[300_000; 3], &[310_000]), 3);
-        // level 4, 1% smaller for 0.07% of time
+        // level 4, 1% smaller for time worth 0.02% of the data
         assert_eq!(mid_pick(1_000_000, 300_000, &[297_000, 297_000, 297_000], &[310_000]), 4);
-        // level 6, 1% smaller than 4 for 1.6% of time: not enough
+        // level 6, 1% smaller than 4 for 0.41%: not enough
         assert_eq!(mid_pick(1_000_000, 300_000, &[297_000, 294_000, 294_000], &[310_000]), 4);
-        // level 9, 12% smaller than 4 for 2.8% of time
+        // level 9, 12% smaller than 4 for 0.70%
         assert_eq!(mid_pick(1_000_000, 300_000, &[297_000, 294_000, 260_000], &[310_000]), 9);
+        // level 9, 3% smaller for 0.71% (most of the solid blocks of 10gb save more)
+        assert_eq!(mid_pick(1_000_000, 300_000, &[300_000, 300_000, 291_000], &[310_000]), 9);
         // level 1, by 0.7% (as of a sample of 19tech_4.psd, 8.7% larger whole) and by 10%
         assert_eq!(mid_pick(1_000_000, 300_000, &[300_000; 3], &[298_000]), 3);
         assert_eq!(mid_pick(1_000_000, 300_000, &[300_000; 3], &[270_000]), 1);
