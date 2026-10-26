@@ -30,6 +30,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "aqr"
 version = "0.1.0"
 dependencies = [
+ "aqr-common",
  "aqr-compress",
  "aqr-decompress",
  "aqr-formula",
@@ -46,6 +47,7 @@ dependencies = [
 name = "aqr-common"
 version = "0.1.0"
 dependencies = [
+ "rayon",
  "zstd",
 ]
 

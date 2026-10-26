@@ -338,7 +338,16 @@ impl<const HEAD: bool> Collect<HEAD> {
             turn: first,
             next: next_chunk(0).max(first),
             seen: 0,
-            chunks: if HEAD { vec![Chunk { token: 0, kept: 0, pos: 0, count: 0 }] } else { Vec::new() },
+            chunks: if HEAD {
+                vec![Chunk {
+                    token: 0,
+                    kept: 0,
+                    pos: 0,
+                    count: 0,
+                }]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -366,7 +375,12 @@ impl<const HEAD: bool> Collect<HEAD> {
             self.turn = self.next;
         } else {
             let pos = self.data.1;
-            self.chunks.push(Chunk { token: self.seen, kept: self.tokens.1, pos, count: 0 });
+            self.chunks.push(Chunk {
+                token: self.seen,
+                kept: self.tokens.1,
+                pos,
+                count: 0,
+            });
             self.keeping = true;
             self.turn = pos + CHUNK;
             self.next = next_chunk(pos);

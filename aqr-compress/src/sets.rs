@@ -288,24 +288,7 @@ fn cut(
 
 /// `f(0..n)` on up to `threads` threads, in order.
 pub(crate) fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let out: Vec<std::sync::Mutex<Option<R>>> = (0..n).map(|_| std::sync::Mutex::new(None)).collect();
-    let work = || {
-        loop {
-            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if i >= n {
-                break;
-            }
-            *out[i].lock().unwrap() = Some(f(i));
-        }
-    };
-    std::thread::scope(|s| {
-        for _ in 1..threads.min(n) {
-            s.spawn(work);
-        }
-        work();
-    });
-    out.into_iter().map(|m| m.into_inner().unwrap().unwrap()).collect()
+    aqr_common::pool::par_map(n, threads, f)
 }
 
 #[cfg(test)]

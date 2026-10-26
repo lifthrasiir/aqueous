@@ -6,6 +6,7 @@ description = "Command-line tools over the aqr-* recompressors and Aqueous archi
 publish = false
 
 [dependencies]
+aqr-common = { path = "../aqr-common" }
 aqr-compress = { path = "../aqr-compress" }
 aqr-decompress = { path = "../aqr-decompress" }
 aqr-formula = { path = "../aqr-formula" }

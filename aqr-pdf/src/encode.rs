@@ -43,8 +43,8 @@ pub struct Options {
     pub full: bool,
     /// Images with PNG predictors through aqr-png.
     pub png: bool,
-    /// Threads (1: the items one after the other on the calling thread, aqr-jpeg on
-    /// rayon's global pool as before). The output does not depend on it.
+    /// Threads (1: the items one after the other on the calling thread), the others workers of
+    /// aqr-common's pool. The output does not depend on it.
     pub threads: usize,
 }
 
@@ -384,12 +384,13 @@ const TOK_CLASSES: [(&str, Kind); tok::PARTS] = [
     ("pdf/tok-headers", Kind::Unknown),
 ];
 
-/// A pool of `threads` threads, if more than one.
+/// A pool of up to `threads` threads (this one and workers of aqr-common's pool), if more than
+/// one are to be had.
 fn pool(threads: usize) -> Option<rayon::ThreadPool> {
     if threads <= 1 {
         return None;
     }
-    rayon::ThreadPoolBuilder::new().num_threads(threads).build().ok()
+    aqr_common::pool::rayon_pool(threads).filter(|p| p.current_num_threads() > 1)
 }
 
 /// Memory in flight in [`pipeline`] (estimated); one item at least.
@@ -600,7 +601,8 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &aqr_flate::Options) -> Done {
         }
         Plan::Jpeg(_, _, true) => {
             let t = std::time::Instant::now();
-            let f = aqr_jpeg::formula::encode(data, 0);
+            // (on the pool the items are coded on, if any)
+            let f = aqr_jpeg::formula::encode(data, 1);
             times[3] += t.elapsed().as_secs_f64();
             f.map_or(Coded::Raw(false), Coded::Jpeg)
         }

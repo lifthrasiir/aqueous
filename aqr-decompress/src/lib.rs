@@ -96,7 +96,7 @@ pub fn decompress(c: &[u8], threads: usize) -> std::result::Result<Vec<u8>, Fail
 
 /// What archive `c` holds: a single file, or a tree of them.
 pub fn decompress_value(c: &[u8], threads: usize) -> std::result::Result<aqr::Value, Failure> {
-    aqr::decode_value(c, &Native { threads }.modules())
+    aqr::decode_value_with(c, &Native { threads }.modules(), threads)
 }
 
 /// Runs every module of this crate natively. The output does not depend on `threads`.

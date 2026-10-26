@@ -222,7 +222,7 @@ pub(crate) struct Cx {
     enc: Encoder,
     inflate: Cell<u64>,
     /// Where the formulas recompressors make are evaluated beforehand, for [`compress`].
-    pre: Option<verify::Prevalidator>,
+    pre: Option<Arc<verify::Prevalidator>>,
     /// Formulas made beforehand (of [`pure`] formats), by the data (where it is, its length)
     /// and the format.
     ready: RefCell<HashMap<(usize, usize, Format), Option<Formula>>>,
@@ -235,6 +235,9 @@ pub(crate) struct Cx {
     /// For the files of an archive (the contents of a formula 0 formats deep, `archive`), the
     /// most bytes of files of a set ([`Options::set_bytes`]).
     top_sets: Option<usize>,
+    /// The files of an archive to make (each its index among the contents, its slice and how),
+    /// at once once all are known ([`nested`]).
+    later: RefCell<Vec<(usize, Node, Nest)>>,
 }
 
 impl Cx {
@@ -257,6 +260,7 @@ impl Cx {
             deferred: Default::default(),
             skip: Default::default(),
             top_sets: None,
+            later: Default::default(),
         }
     }
 
@@ -303,9 +307,9 @@ pub fn compress_formula(d: &[u8], opt: &Options) -> (Vec<u8>, Formula) {
 /// before the archive is verified.
 fn compress_with(d: &[u8], opt: &Options, kept: bool) -> (Vec<u8>, Option<Formula>) {
     let mut cx = Cx::new(d, opt);
-    cx.pre = opt.verify.then(|| verify::Prevalidator::spawn(opt.threads, &[d]));
+    cx.pre = opt.verify.then(|| Arc::new(verify::Prevalidator::spawn(opt.threads, &[d])));
     let f = recompress_at(d, opt, 0, opt.file, &cx);
-    let memo = cx.pre.take().map(verify::Prevalidator::finish).unwrap_or_default();
+    let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
     finish(f, d, opt, &cx, memo, kept)
 }
 
@@ -706,6 +710,7 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, 
     let (prepared, plan) = prepare(f, opt, depth, cx);
     let mut children = Vec::new();
     contents(&f.root, f, opt, depth, cx, &mut children);
+    make_later(f, opt, depth, cx, &mut children);
     // (those not taken: the contents' own nested contents make and take their own)
     let mut ready = cx.ready.borrow_mut();
     prepared.iter().for_each(|k| drop(ready.remove(k)));
@@ -726,6 +731,45 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, 
     }
     let children = children.into_iter().zip(keep).map(|((slice, child), keep)| (slice, child.filter(|_| keep)));
     Some((children.collect(), plan))
+}
+
+/// Makes the contents of [`Cx::later`] (the files of an archive) at once, on up to
+/// [`Options::threads`] threads, each in a context of its own (with the formula made of it
+/// beforehand, if any, and the same prevalidator), into `children`; what is put off of their
+/// prevalidation goes to `cx`'s.
+fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Contents) {
+    let later = std::mem::take(&mut *cx.later.borrow_mut());
+    if later.is_empty() {
+        return;
+    }
+    let data = |n: &Node| {
+        let &Node::Slice { stream, start, len } = n else { unreachable!("a slice") };
+        &f.streams[stream].data[start as usize..][..len as usize]
+    };
+    // the formulas made beforehand, by where their data is
+    let mut by_at: HashMap<usize, Vec<_>> = HashMap::new();
+    for (k, v) in std::mem::take(&mut *cx.ready.borrow_mut()) {
+        by_at.entry(k.0).or_default().push((k, v));
+    }
+    let ready: Vec<std::sync::Mutex<Vec<_>>> = later
+        .iter()
+        .map(|(_, n, _)| std::sync::Mutex::new(by_at.remove(&(data(n).as_ptr() as usize)).unwrap_or_default()))
+        .collect();
+    cx.ready.borrow_mut().extend(by_at.into_values().flatten());
+    let pre = cx.pre.clone();
+    let made = aqr_common::pool::par_map(later.len(), opt.threads, |i| {
+        let (_, n, nest) = &later[i];
+        let d = data(n);
+        let mut own = Cx::of_len(d.len(), opt);
+        own.pre = pre.clone();
+        own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
+        let child = made(d, opt, depth + 1, *nest, &own).filter(|c| !c.f.applies().is_empty());
+        (child, own.deferred.into_inner())
+    });
+    for ((at, ..), (child, deferred)) in later.into_iter().zip(made) {
+        children[at].1 = child;
+        cx.deferred.borrow_mut().extend(deferred);
+    }
 }
 
 /// Contents, each its slice and its formula where it has one ([`nested`]).
@@ -802,6 +846,15 @@ fn content_slices(
             let d = s.and_then(|s| s.data.get(start as usize..)?.get(..len as usize));
             // (the first of a set's contents with a parent: made in the set; any other alone)
             if d.is_some_and(|d| cx.skip.borrow_mut().remove(&(d.as_ptr() as usize, d.len()))) {
+                out.push((n.clone(), None));
+                return;
+            }
+            // (the files of an archive made later, at once)
+            if depth == 0
+                && cx.top_sets.is_some()
+                && let Some(nest) = s.and_then(|s| nest.of(s.kind)).filter(|_| d.is_some())
+            {
+                cx.later.borrow_mut().push((out.len(), n.clone(), nest));
                 out.push((n.clone(), None));
                 return;
             }
@@ -1178,9 +1231,9 @@ mod tests {
         let d = z.finish().unwrap();
         let opt = Options { smaller: false, ..Options::default() };
         let mut cx = Cx::new(&d, &opt);
-        cx.pre = Some(verify::Prevalidator::spawn(2, &[&d]));
+        cx.pre = Some(Arc::new(verify::Prevalidator::spawn(2, &[&d])));
         let f = recompress_at(&d, &opt, 0, opt.file, &cx);
-        let memo = cx.pre.take().unwrap().finish();
+        let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
         assert!(!f.applies().is_empty());
         // the DEFLATE stream is not kept again, but known to be the file's
         assert_eq!(memo.bytes(), 0);

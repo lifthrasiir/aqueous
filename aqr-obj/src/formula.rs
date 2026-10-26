@@ -8,7 +8,6 @@ use crate::varint::{Rd, put_uv};
 use crate::{Result, ans, corrupt};
 use aqr_formula::{Formula, Module, Node};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const MODULE: Module = Module { name: "obj-recons", version: 1 };
 
@@ -81,25 +80,7 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Formula> {
     };
     let mut coded: Vec<Vec<Option<Vec<u8>>>> = vec![Vec::new(); blocks.len()];
     if opt.threads > 1 && blocks.len() > 1 {
-        let next = AtomicUsize::new(0);
-        let found = std::thread::scope(|sc| {
-            let hs: Vec<_> = (0..opt.threads.min(blocks.len()))
-                .map(|_| {
-                    sc.spawn(|| {
-                        let mut found = Vec::new();
-                        loop {
-                            let i = next.fetch_add(1, Ordering::Relaxed);
-                            let Some(b) = blocks.get(i) else { break found };
-                            found.push((i, ans_of(b)));
-                        }
-                    })
-                })
-                .collect();
-            hs.into_iter().flat_map(|h| h.join().expect("rANS worker")).collect::<Vec<_>>()
-        });
-        for (i, a) in found {
-            coded[i] = a;
-        }
+        coded = aqr_common::pool::par_map(blocks.len(), opt.threads, |i| ans_of(&blocks[i]));
     } else {
         for (c, b) in coded.iter_mut().zip(&blocks) {
             *c = ans_of(b);

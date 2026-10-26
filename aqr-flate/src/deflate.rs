@@ -264,25 +264,20 @@ pub fn write_threads(stream: &Stream, data: &[u8], threads: usize) -> Result<Vec
             .any(|b| matches!(b.body, Body::Stored { .. }))
     };
     let parallel = chunks.len() > 1;
-    let parts: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = chunks
-            .iter()
-            .map(|c| {
-                (parallel && !stored(c)).then(|| {
-                    s.spawn(|| -> Result<_> {
-                        let mut w = BitWriter::new();
-                        let mut pos = starts[c.0];
-                        write_blocks(&mut w, &blocks[c.0..c.1], data, &mut pos)?;
-                        Ok(w.into_parts())
-                    })
-                })
-            })
-            .collect();
-        handles
-            .into_iter()
-            .map(|h| h.map(|h| h.join().unwrap()))
-            .collect()
-    });
+    let apart: Vec<usize> = (0..chunks.len())
+        .filter(|&i| parallel && !stored(&chunks[i]))
+        .collect();
+    let mut written = aqr_common::pool::par_map(apart.len(), threads, |k| -> Result<_> {
+        let c = chunks[apart[k]];
+        let mut w = BitWriter::new();
+        let mut pos = starts[c.0];
+        write_blocks(&mut w, &blocks[c.0..c.1], data, &mut pos)?;
+        Ok(w.into_parts())
+    })
+    .into_iter();
+    let parts: Vec<_> = (0..chunks.len())
+        .map(|i| apart.contains(&i).then(|| written.next().unwrap()))
+        .collect();
     let mut w = BitWriter::new();
     for (c, part) in chunks.iter().zip(parts) {
         match part {

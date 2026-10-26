@@ -10,6 +10,9 @@ publish = false
 zstd = ["dep:zstd"]
 # Phase marks of `mem::mark`, to stderr.
 memprof = []
+# rayon thread pools whose threads are workers of `pool` (`pool::rayon_pool`).
+rayon = ["dep:rayon"]
 
 [dependencies]
 zstd = { version = "0.13", optional = true }
+rayon = { version = "1.12", optional = true }

@@ -6,7 +6,6 @@ use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aqr_flate::{ADAPTIVE, Coding, Hints, ModelData, Parsed};
 use aqr_formula::aqr::Encoder;
@@ -42,7 +41,13 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, limit: u64::MAX, kind: |_| Kind::Unknown, probe: None }
+        Options {
+            threads: 1,
+            profile: aqr_flate::DEFAULT_PROFILE,
+            limit: u64::MAX,
+            kind: |_| Kind::Unknown,
+            probe: None,
+        }
     }
 }
 
@@ -94,28 +99,7 @@ fn par_jobs<T: Sync, R: Send>(
 
 /// `f` on every element of `items`, on up to `threads` threads.
 fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
-    let threads = threads.clamp(1, items.len().max(1));
-    if threads == 1 {
-        return items.iter().map(f).collect();
-    }
-    let next = AtomicUsize::new(0);
-    let mut out: Vec<(usize, R)> = std::thread::scope(|s| {
-        let hs: Vec<_> = (0..threads)
-            .map(|_| {
-                s.spawn(|| {
-                    let mut part = Vec::new();
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(t) = items.get(i) else { break part };
-                        part.push((i, f(t)));
-                    }
-                })
-            })
-            .collect();
-        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
-    });
-    out.sort_unstable_by_key(|p| p.0);
-    out.into_iter().map(|p| p.1).collect()
+    aqr_common::pool::par_map(items.len(), threads, |i| f(&items[i]))
 }
 
 /// The CRC-32 and size of the data of a body kept as it is: what the central directory says,
@@ -199,7 +183,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                 if let Some(f) = shares.borrow()[j] {
                     return f;
                 }
-                let group: Vec<usize> = (0..jobs.len()).filter(|&e| kinds[e] == kinds[j] && parsed[e].is_some()).collect();
+                let group: Vec<usize> =
+                    (0..jobs.len()).filter(|&e| kinds[e] == kinds[j] && parsed[e].is_some()).collect();
                 let datas: Vec<&[u8]> = group.iter().map(|&e| parsed[e].as_ref().expect("parsed").0.data()).collect();
                 let mut shares = shares.borrow_mut();
                 for (&e, f) in group.iter().zip(probe::shared(&datas)) {
@@ -222,16 +207,23 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             parsed.into_iter().map(|p| Mutex::new(p.map(|p| (p.0, p.2)))).collect();
         let items: Vec<usize> = (0..jobs.len()).collect();
         // (on as many threads as they were parsed for: the sizes are the same)
-        let made = par_jobs(&items, |&j| size(&jobs[j]), opt.threads, |&j, _| {
-            let (p, fopt) = parsed[j].lock().unwrap().take()?;
-            let body = &locals[jobs[j].0].body;
-            match p.deconstruct(&fopt, &Hints::default()) {
-                // kept, the body would also take its CRC-32 and size
-                // (and tiny records are much alike, so that they compress well together)
-                Ok((data, record, _)) => (record.len() < body.len() + 16).then_some(Made::Deflated { data, record }),
-                Err(_) => None,
-            }
-        });
+        let made = par_jobs(
+            &items,
+            |&j| size(&jobs[j]),
+            opt.threads,
+            |&j, _| {
+                let (p, fopt) = parsed[j].lock().unwrap().take()?;
+                let body = &locals[jobs[j].0].body;
+                match p.deconstruct(&fopt, &Hints::default()) {
+                    // kept, the body would also take its CRC-32 and size
+                    // (and tiny records are much alike, so that they compress well together)
+                    Ok((data, record, _)) => {
+                        (record.len() < body.len() + 16).then_some(Made::Deflated { data, record })
+                    }
+                    Err(_) => None,
+                }
+            },
+        );
         Some(made)
     };
     let bound =

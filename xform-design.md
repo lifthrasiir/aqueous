@@ -49,7 +49,7 @@ Aqueous의 세 번째 목표인 WebAssembly 기반 전처리기(RarVM의 현대�
   - `aqr/`: 명령줄 도구. `aqr`(argv[0]이 `unaqr`이면 `-d`)는 zstd처럼 파일이나 디렉토리를 `.aqr`로 압축하고 푼다. 디렉토리의 파일들은 ZIP 엔트리처럼 재귀 처리되고(최상위 파일이 깊이 0), 같은 내용은 한 번만, 비슷한 PNG는 64 MB 이하의 세트로, 같은 클래스의 스트림은 16 MB 이하의 solid 블록으로 묶는다(압축되지 않는 스트림은 묶지 않는다). 파일 하나를 꺼낼 때 푸는 양이 이 두 상한으로 묶인다. `aqr-show`는 파일마다 식을 만들고 평가와 아카이브 왕복을 재며, 모듈과 스트림 클래스별 크기를 보인다.
 - `scripts/`: 측정 스크립트. `zstd_dict_*.py`와 `zstd-dict-*`는 solid 압축, 프레임 크기, zstd 사전의 조합을 비교한 벤치마크와 그 결과이다(§3).
 - 공용 크레이트.
-  - `aqr-common/`: 재압축기들이 공유하는 부품. LEB128, rANS 두 종류(`rans64`: 정적 alias 테이블, mp3·flac / `rans32`: 파일별 테이블, png·psd·pdf), 포맷 자체의 MSB-first 비트 I/O, 힙 계량용 allocator.
+  - `aqr-common/`: 재압축기들이 공유하는 부품. LEB128, rANS 두 종류(`rans64`: 정적 alias 테이블, mp3·flac / `rans32`: 파일별 테이블, png·psd·pdf), 포맷 자체의 MSB-first 비트 I/O, 힙 계량용 allocator. 그리고 프로세스의 모든 스레드가 도는 고정 크기 스레드 풀(`pool`, `aqr -T`). 작업은 비어 있는 워커만 기다리지 않고 예약하며(파이프라인은 단계 수만큼 한꺼번에, 모자라면 직렬 경로), libzstd와 rayon의 스레드도 예약된 워커로 센다. 출력은 받은 워커 수와 무관하다.
   - `aqr-num/`: 텍스트로 출력된 숫자를 (2바이트 서술자, 정수, 스케일)로 저장하고 비트 단위로 다시 출력한다. `%.Nf`, `%.Pg`, `%.Pe`, Python `repr`, JS `toString`, Rust `Display`를 decimal/f32/f64 원천별로 다룬다. aqr-obj용으로 만들었지만 OBJ와는 독립이다.
 - 공통 사항.
   - 모든 재압축기에 포맷 전체를 기술한 `FORMAT.md`가 있다. aqr-flate는 모델 파일을 SHA-256으로 고정하고, 그 파일들과 함께 규범이 된다. 일부는 클린룸 디코더를 따로 작성해 보며 문서를 보완했다(R2).

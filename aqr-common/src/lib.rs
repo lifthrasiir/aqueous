@@ -8,9 +8,11 @@
 //! - [`msb`]: MSB-first bit I/O of the formats themselves (MP3, FLAC).
 //! - [`mem`]: a counting global allocator, peak and large-allocation probes, peak RSS.
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
+//! - [`pool`]: the pool of threads every thread of the process runs on.
 
 pub mod mem;
 pub mod msb;
+pub mod pool;
 pub mod rans32;
 pub mod rans64;
 pub mod rng;

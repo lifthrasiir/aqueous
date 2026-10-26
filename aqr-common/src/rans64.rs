@@ -191,21 +191,12 @@ impl Tables {
         if threads > 1 {
             // Contiguous runs of contexts, their entries concatenated in order.
             let per = canon.len().div_ceil(threads);
-            let parts: Vec<(Vec<u64>, Vec<u32>)> = std::thread::scope(|s| {
-                let hs: Vec<_> = canon
-                    .chunks(per)
-                    .map(|cs| {
-                        s.spawn(move || {
-                            let mut alias = Vec::new();
-                            let at = cs
-                                .iter()
-                                .map(|&c| (alias.len() as u32) << 4 | self.alias_entries(c, &mut alias))
-                                .collect();
-                            (alias, at)
-                        })
-                    })
-                    .collect();
-                hs.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+            let chunks: Vec<&[usize]> = canon.chunks(per).collect();
+            let parts: Vec<(Vec<u64>, Vec<u32>)> = crate::pool::par_map(chunks.len(), threads, |i| {
+                let mut alias = Vec::new();
+                let at =
+                    chunks[i].iter().map(|&c| (alias.len() as u32) << 4 | self.alias_entries(c, &mut alias)).collect();
+                (alias, at)
             });
             let mut cs = canon.iter();
             for (part, at) in parts {

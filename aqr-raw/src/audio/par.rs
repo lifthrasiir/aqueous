@@ -10,17 +10,18 @@
 //! Errors go down the pipeline as items, in frame order: a stage stops at the first one,
 //! so the last stage meets the error the serial code would have returned. Panics on a
 //! pool thread are forwarded to whoever reads its results; elsewhere a thread that dies
-//! drops its channels, the threads next to it see that and stop, and `thread::scope`
-//! panics once all have finished.
+//! drops its channels, the threads next to it see that and stop, and the scope panics once
+//! all have finished. The threads are workers of aqr-common's `pool`, reserved for a
+//! pipeline at once: where there are not enough of them, the serial code runs instead.
 
 use crate::audio::frame::{Frame, MAX_CHANNELS};
 use crate::audio::model::Scale;
 use crate::audio::residual::{Error, LmsDecoder, ResDecoder};
+use aqr_common::pool::Scope;
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
-use std::thread::Scope;
 
 /// Samples (all channels) per batch.
 pub const BATCH_SAMPLES: usize = 1 << 16;

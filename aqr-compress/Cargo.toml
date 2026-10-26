@@ -6,6 +6,7 @@ description = "Picks the recompressor for a file by its magic bytes, gives the r
 publish = false
 
 [dependencies]
+aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-decompress = { path = "../aqr-decompress" }
 aqr-exe = { path = "../aqr-exe", default-features = false, features = ["encode"] }
@@ -25,7 +26,6 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 zstd = "0.13"
-aqr-common = { path = "../aqr-common" }
 crc32fast = "1.5"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 

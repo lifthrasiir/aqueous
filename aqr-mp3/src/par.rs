@@ -39,11 +39,15 @@ impl Drop for SetOnDrop<'_> {
     }
 }
 
-/// [`codec::encode`] with a helper thread.
+/// [`codec::encode`] with a helper thread (a worker of the pool, else none).
 pub(crate) fn encode(d: &[u8]) -> Coded {
+    let worker = aqr_common::pool::reserve(1);
+    if worker.is_empty() {
+        return codec::encode(d);
+    }
     let stop = AtomicBool::new(false);
     let stop = &stop;
-    std::thread::scope(|s| {
+    aqr_common::pool::scope_in(worker, |s| {
         // Channels are created here so that a panic on this thread drops the senders and
         // the helper returns.
         let (ctxs_tx, ctxs_rx) = sync_channel::<Vec<u32>>(1);
@@ -305,12 +309,17 @@ pub(crate) fn decode(
     raw: &[u8],
     threads: usize,
 ) -> Result<Vec<u8>, Error> {
-    std::thread::scope(|s| {
+    // the side information's thread, and with three threads the helper's: workers of the pool
+    let workers = aqr_common::pool::reserve(if threads >= 3 { 2 } else { 1 });
+    if workers.is_empty() {
+        return codec::decode_parts(t, file_len, streams, words, raw);
+    }
+    let helper = workers.len() >= 2;
+    aqr_common::pool::scope_in(workers, |s| {
         let (hs_tx, hs_rx) = sync_channel::<Vec<Header>>(1);
         let (side_tx, side_rx) = sync_channel::<SideMsg>(8);
         let side_src = streams[S_SIDE];
         // With two threads, the side information thread builds the tables first.
-        let helper = threads >= 3;
         let side_t = s.spawn(move || {
             if !helper {
                 t.prepare_dec(threads);
@@ -406,7 +415,9 @@ fn assemble(fr: &Frames, junk_s: &[u8], crc_s: &[u8], r_out: &[u8], threads: usi
     }
     let total = off;
     let mut out = Vec::<u8>::with_capacity(total);
-    std::thread::scope(|s| {
+    // (as many parts as there are workers of the pool, and this thread)
+    aqr_common::pool::scope(parts - 1, |s| {
+        let parts = s.workers() + 1;
         let mut rest = &mut out.spare_capacity_mut()[..total];
         let mut handles = Vec::with_capacity(parts - 1);
         let mut first = None;

@@ -2,7 +2,8 @@
 //! [`Tree`] are recompressed as the entries of a ZIP archive are, each by its kind by its name
 //! ([`kind_by_name`]) and up to [`Options::depth`] formats deep from the file, the PNG files
 //! alike among them coded as sets; each file's formula is then a leaf of the archive's one
-//! segment.
+//! segment. The files are made at once, on up to [`Options::threads`] threads (the formulas of
+//! those of pure formats beforehand, as contents are; then each file in a context of its own).
 //!
 //! A file is to be read without the others, so what files share is bounded: a set of PNG files
 //! takes at most [`Options::set_bytes`] bytes of them (as it is decoded whole for any of them),
@@ -146,7 +147,7 @@ fn attempt(
     // (the files known by where their copies are, and taken from the input)
     let mut regions: Vec<&[u8]> = vec![&[]; contents.len()];
     order.iter().zip(&f.streams).for_each(|(&c, s)| regions[c] = &s.data);
-    cx.pre = opt.verify.then(|| verify::Prevalidator::spawn(opt.threads, &regions));
+    cx.pre = opt.verify.then(|| std::sync::Arc::new(verify::Prevalidator::spawn(opt.threads, &regions)));
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let mut taken = HashSet::new();
     if let Some((mut children, plan)) = nested(&f, &nopt, 0, &cx) {
@@ -164,7 +165,7 @@ fn attempt(
     if let Some(pre) = &cx.pre {
         deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));
     }
-    let memo = cx.pre.take().map(verify::Prevalidator::finish).unwrap_or_default();
+    let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
 
     // a leaf for each file, or for each set of them
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
@@ -224,7 +225,7 @@ fn attempt(
             hits: Default::default(),
             files: &contents.iter().map(|i| i.data).collect::<Vec<_>>(),
         };
-        match aqr::decode_value(&archive, &aqr::natives(&MODULES, &m)) {
+        match aqr::decode_value_with(&archive, &aqr::natives(&MODULES, &m), opt.threads) {
             Ok(Value::Tree(t, files)) => {
                 let wanted =
                     tree.entries.iter().filter_map(|e| if let EntryNode::File(c) = e.node { Some(c) } else { None });

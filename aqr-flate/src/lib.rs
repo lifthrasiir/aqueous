@@ -444,8 +444,7 @@ fn code_streamed(
         let mut rec = tokens::Recorder::default();
         tokens::code_range(&mut rec, &f.data, rule, &ranges[i], Some(toks), None).map(|_| rec)
     };
-    let threads = threads.min(ranges.len());
-    if threads <= 1 {
+    let serial = || {
         let mut done = Vec::with_capacity(ranges.len());
         let mut failed = None;
         split_parsed(raw, &f.stats.cuts, |i, toks| match code(i, &toks) {
@@ -454,19 +453,27 @@ fn code_streamed(
                 failed.get_or_insert(e);
             }
         })?;
-        return match failed {
+        match failed {
             Some(e) => Err(e),
             None if done.len() == ranges.len() => Ok(done),
             None => Err(Error::Inconsistent),
-        };
+        }
+    };
+    let threads = threads.min(ranges.len());
+    if threads <= 1 {
+        return serial();
     }
     let done: Vec<Mutex<Option<Result<tokens::Recorder>>>> =
         ranges.iter().map(|_| Mutex::new(None)).collect();
     // at most two segments waiting per thread: the parse waits for the coding
     let (tx, rx) = mpsc::sync_channel::<(usize, Vec<Token>)>(2 * threads);
     let rx = Mutex::new(rx);
-    let parsed = std::thread::scope(|scope| {
-        for _ in 0..threads {
+    // the parse here, the coding on the workers of the pool there are (or here too)
+    let parsed = aqr_common::pool::scope(threads - 1, |scope| {
+        if scope.workers() == 0 {
+            return None;
+        }
+        for _ in 0..scope.workers() {
             scope.spawn(|| {
                 loop {
                     // (the lock only while taking a segment, not while coding it)
@@ -480,9 +487,12 @@ fn code_streamed(
             let _ = tx.send((i, toks));
         });
         drop(tx);
-        r
+        Some(r)
     });
-    parsed?;
+    match parsed {
+        None => return serial(),
+        Some(r) => r?,
+    }
     done.into_iter()
         .map(|d| d.into_inner().unwrap().ok_or(Error::Inconsistent)?)
         .collect()
@@ -632,7 +642,13 @@ impl<'a> Parsed<'a> {
             let prefix = opts.prefix.max(ESTIMATE_FIRST);
             inflate::parse_segments_head(raw, opts.segment, prefix, opts.max_data)?
         } else {
-            Flat::new(raw, opts.segment, opts.threads.max(1), opts.verify, opts.max_data)?
+            Flat::new(
+                raw,
+                opts.segment,
+                opts.threads.max(1),
+                opts.verify,
+                opts.max_data,
+            )?
         };
         let raw = if head {
             let end = raw.len() - f.stream.trailing.len();
@@ -650,7 +666,13 @@ impl<'a> Parsed<'a> {
             return Err(Error::Invalid("beyond the limits of a record"));
         }
         let secs = t0.elapsed().as_secs_f64();
-        Ok(Parsed { raw, f, streamed, secs, chosen: Default::default() })
+        Ok(Parsed {
+            raw,
+            f,
+            streamed,
+            secs,
+            chosen: Default::default(),
+        })
     }
 
     /// Bytes of the stream (without what followed it, for [`Parsed::head`]).
@@ -677,7 +699,12 @@ impl<'a> Parsed<'a> {
         let t1 = std::time::Instant::now();
         let rule = choose_rule(&self.f, opts, fp)?;
         let secs = [(t1 - t0).as_secs_f64(), t1.elapsed().as_secs_f64()];
-        Ok(self.chosen.get_or_init(|| Chosen { headers, fp, rule, secs }))
+        Ok(self.chosen.get_or_init(|| Chosen {
+            headers,
+            fp,
+            rule,
+            secs,
+        }))
     }
 
     /// About how many bytes the record of [`Parsed::deconstruct`] with `opts` takes: the
@@ -707,14 +734,35 @@ impl<'a> Parsed<'a> {
                 .map(|&(at, len)| (at - k.token, len))
                 .collect();
             let tokens = &self.f.tokens[k.kept..k.kept + k.count];
-            let spans: usize = skips.iter().map(|s| s.1).sum::<usize>() + tokens.iter().map(|t| t.span()).sum::<usize>();
-            let range = Range { first: 0, count: k.count, pos: k.pos, end: k.pos + spans, skips: &skips };
+            let spans: usize = skips.iter().map(|s| s.1).sum::<usize>()
+                + tokens.iter().map(|t| t.span()).sum::<usize>();
+            let range = Range {
+                first: 0,
+                count: k.count,
+                pos: k.pos,
+                end: k.pos + spans,
+                skips: &skips,
+            };
             let from = if k.pos == 0 { 0 } else { k.pos + inflate::WARM };
-            tokens::code_range(&mut Warm { rec: &mut rec, from }, &self.f.data, c.rule, &range, Some(tokens), None)?;
+            tokens::code_range(
+                &mut Warm {
+                    rec: &mut rec,
+                    from,
+                },
+                &self.f.data,
+                c.rule,
+                &range,
+                Some(tokens),
+                None,
+            )?;
             covered += (k.pos + spans).saturating_sub(from.max(k.pos));
         }
         // (no tokens at all: stored blocks only)
-        let corrections = if covered == 0 { 0.0 } else { rec.cost() / 8.0 * self.f.data.len() as f64 / covered as f64 };
+        let corrections = if covered == 0 {
+            0.0
+        } else {
+            rec.cost() / 8.0 * self.f.data.len() as f64 / covered as f64
+        };
         Ok(w_bits(&w).div_ceil(8) + c.headers.len() + corrections as usize)
     }
 
@@ -723,7 +771,15 @@ impl<'a> Parsed<'a> {
     pub fn deconstruct(self, opts: &Options, hints: &Hints) -> Result<(Vec<u8>, Vec<u8>, Report)> {
         self.chosen(opts)?;
         let chosen = self.chosen.into_inner().expect("chosen");
-        deconstruct_parsed(self.raw, self.f, self.streamed, self.secs, chosen, opts, hints)
+        deconstruct_parsed(
+            self.raw,
+            self.f,
+            self.streamed,
+            self.secs,
+            chosen,
+            opts,
+            hints,
+        )
     }
 }
 
@@ -755,8 +811,17 @@ impl tokens::Corr for Warm<'_> {
 /// The runs of tokens that [`inflate::parse_segments_head`] would keep, of a stream parsed
 /// with all of them.
 fn chunks_of(f: &Flat) -> Vec<inflate::Chunk> {
-    let mut chunks = vec![inflate::Chunk { token: 0, kept: 0, pos: 0, count: 0 }];
-    let (mut turn, mut next, mut keeping) = (ESTIMATE_FIRST, inflate::next_chunk(0).max(ESTIMATE_FIRST), true);
+    let mut chunks = vec![inflate::Chunk {
+        token: 0,
+        kept: 0,
+        pos: 0,
+        count: 0,
+    }];
+    let (mut turn, mut next, mut keeping) = (
+        ESTIMATE_FIRST,
+        inflate::next_chunk(0).max(ESTIMATE_FIRST),
+        true,
+    );
     let (mut p, mut skips) = (0, f.skips.iter().peekable());
     for (k, t) in f.tokens.iter().enumerate() {
         while let Some(&&(at, len)) = skips.peek()
@@ -771,7 +836,12 @@ fn chunks_of(f: &Flat) -> Vec<inflate::Chunk> {
                 c.count = k - c.kept;
                 (keeping, turn) = (false, next);
             } else {
-                chunks.push(inflate::Chunk { token: k, kept: k, pos: p, count: 0 });
+                chunks.push(inflate::Chunk {
+                    token: k,
+                    kept: k,
+                    pos: p,
+                    count: 0,
+                });
                 (keeping, turn, next) = (true, p + inflate::CHUNK, inflate::next_chunk(p));
             }
         }
@@ -793,7 +863,12 @@ fn deconstruct_parsed(
     opts: &Options,
     hints: &Hints,
 ) -> Result<(Vec<u8>, Vec<u8>, Report)> {
-    let Chosen { headers, fp, rule, secs: [secs_headers, secs_rule] } = chosen;
+    let Chosen {
+        headers,
+        fp,
+        rule,
+        secs: [secs_headers, secs_rule],
+    } = chosen;
     let threads = opts.threads.max(1);
     let profile = opts.profile;
     let catalog = &profile_catalog(profile)?.0;
@@ -1038,13 +1113,22 @@ fn choose_adaptive<'a>(
     };
     let params = || stream.as_ref().and_then(|s| zlib_params(s, &f.data, hints));
     let (alone, chain, params) = if threads > 1 {
-        fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+        fn join<T>(h: aqr_common::pool::Handle<'_, T>) -> T {
             h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
         }
-        std::thread::scope(|s| {
-            let (c, p) = (s.spawn(chain), s.spawn(params));
-            let a = alone();
-            (a, join(c), join(p))
+        // (on as many workers as there are, the rest here)
+        aqr_common::pool::scope(2, |s| match s.workers() {
+            0 => (alone(), chain(), params()),
+            1 => {
+                let c = s.spawn(chain);
+                let (a, p) = (alone(), params());
+                (a, join(c), p)
+            }
+            _ => {
+                let (c, p) = (s.spawn(chain), s.spawn(params));
+                let a = alone();
+                (a, join(c), join(p))
+            }
         })
     } else {
         (alone(), chain(), params())
@@ -1894,11 +1978,11 @@ pub fn reconstruct_into(
     // single thread)
     enum Batch<'s, T> {
         Done(T),
-        Running(std::thread::ScopedJoinHandle<'s, T>),
+        Running(aqr_common::pool::Handle<'s, T>),
     }
-    std::thread::scope(|scope| -> Result<()> {
+    aqr_common::pool::scope((threads > 1) as usize, |scope| -> Result<()> {
         let start = |s0: usize| {
-            if threads > 1 {
+            if scope.workers() > 0 {
                 Batch::Running(scope.spawn(move || decode_batch(s0)))
             } else {
                 Batch::Done(decode_batch(s0))
@@ -1992,27 +2076,5 @@ pub fn reconstruct_into(
 
 /// `f(0..n)` on up to `threads` threads, in order.
 fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    if threads <= 1 || n <= 1 {
-        return (0..n).map(f).collect();
-    }
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let next = AtomicUsize::new(0);
-    let out: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
-    std::thread::scope(|s| {
-        for _ in 0..threads.min(n) {
-            s.spawn(|| {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    *out[i].lock().unwrap() = Some(f(i));
-                }
-            });
-        }
-    });
-    out.into_iter()
-        .map(|m| m.into_inner().unwrap().expect("every item runs"))
-        .collect()
+    aqr_common::pool::par_map(n, threads, f)
 }

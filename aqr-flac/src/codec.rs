@@ -170,11 +170,15 @@ pub fn encode_threads(input: &[u8], threads: usize) -> Option<Coded> {
     if threads <= 1 {
         return encode(input);
     }
+    // Three stages, one batch each and one waiting: two on workers of the pool.
+    let workers = aqr_common::pool::reserve(2);
+    if workers.len() < 2 {
+        return encode(input);
+    }
     let mut s: Vec<Vec<u8>> = vec![Vec::new(); N_BYTE_STREAMS];
     let mut sp = Splitter::new(input, &mut s)?;
-    // Three stages, one batch each and one waiting.
     let nb = 6;
-    std::thread::scope(|sc| {
+    aqr_common::pool::scope_in(workers, |sc| {
         let (rtx, rrx) = sync_channel::<EncBatch>(nb);
         let (ltx, lrx) = sync_channel::<EncBatch>(nb);
         let (ctx, crx) = sync_channel::<EncBatch>(nb);
@@ -402,6 +406,12 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
     }
+    // three stages and a pool of one at least, on workers of the pool
+    let workers = aqr_common::pool::reserve((threads - 1).max(4));
+    if workers.len() < 4 {
+        return decode(c, t, total_len, out);
+    }
+    let pool = workers.len() - 3;
     out.reserve(total_len);
     out.extend_from_slice(&c.streams[S_PREFIX]);
     let si = decode_start(c)?;
@@ -409,7 +419,7 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
     let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
     let nb = par::in_flight(threads);
     type B<'a> = DecBatch<'a, Written>;
-    std::thread::scope(|sc| {
+    aqr_common::pool::scope_in(workers, |sc| {
         let (rtx, rrx) = sync_channel::<B>(nb);
         let (tx1, rx1) = sync_channel::<B>(nb);
         let (tx2, rx2) = sync_channel::<B>(nb);
@@ -426,7 +436,7 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
         });
         sc.spawn(move || par::errors_stage(rd, rx1, tx2));
         sc.spawn(move || par::lms_stage(rx2, tx3));
-        par::pool(sc, threads.saturating_sub(2), rx3, otx, |mut b: B| {
+        par::pool(sc, pool, rx3, otx, |mut b: B| {
             let w = &mut b.x;
             for it in &b.items {
                 let Item::Frame(f) = it else { continue };

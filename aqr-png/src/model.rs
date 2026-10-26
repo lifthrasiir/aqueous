@@ -281,22 +281,11 @@ impl Recorder {
             }
         };
         if threads > 1 && self.syms.len() >= PAR_HIST_MIN {
-            let chunk = self.syms.len().div_ceil(threads);
-            let parts: Vec<Vec<u32>> = std::thread::scope(|sc| {
-                let hs: Vec<_> = self
-                    .syms
-                    .chunks(chunk)
-                    .map(|c| {
-                        sc.spawn(move || {
-                            let mut h = vec![0u32; tables * 256];
-                            for &(t, v) in c {
-                                h[t as usize * 256 + v as usize] += 1;
-                            }
-                            h
-                        })
-                    })
-                    .collect();
-                hs.into_iter().map(|h| h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))).collect()
+            let chunks: Vec<&[(u8, u8)]> = self.syms.chunks(self.syms.len().div_ceil(threads)).collect();
+            let parts: Vec<Vec<u32>> = aqr_common::pool::par_map(chunks.len(), threads, |i| {
+                let mut h = vec![0u32; tables * 256];
+                count(chunks[i], &mut h);
+                h
             });
             for p in &parts {
                 for (a, b) in h.iter_mut().zip(p) {
@@ -1445,9 +1434,10 @@ impl Window {
                 syms(&mut ms, r0..r1, s0);
                 return true;
             }
-            // Stripes of rows, each into its own part of the window.
-            std::thread::scope(|sc| {
-                let per = (r1 - r0).div_ceil(k);
+            // Stripes of rows, each into its own part of the window: as many as there are
+            // workers of the pool, and this thread.
+            aqr_common::pool::scope(k - 1, |sc| {
+                let per = (r1 - r0).div_ceil(sc.workers() + 1);
                 let mut rest = ms;
                 for j in (r0..r1).step_by(per) {
                     let rows = j..(j + per).min(r1);

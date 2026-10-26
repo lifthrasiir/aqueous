@@ -35,6 +35,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::Entry as MapEntry;
 use std::fmt;
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use aqr_common::varint;
 use xxhash_rust::xxh3::Xxh3;
@@ -882,7 +884,8 @@ const WINDOW_LOG_MAX: u32 = 27;
 const ZSTD_OVERLAP: u32 = 9;
 
 /// The compressed external structure of `data` (Zstandard, XXH64), unless the Zstandard
-/// blocks would be longer than `data`. It is compressed on `threads` threads, always in
+/// blocks would be longer than `data`. It is compressed on up to `threads` threads (those of
+/// the pool there are, [`aqr_common::pool`]), always in
 /// Zstandard's multithreaded mode: the output does not depend on how many (up to 1 MiB of data,
 /// it is also that of the single-threaded mode), nor on what context `c` compressed before.
 fn compressed(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize) -> Result<Option<Vec<u8>>> {
@@ -915,6 +918,11 @@ fn external(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usiz
     let zstd = |e: zstd_safe::ErrorCode| Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)));
     // A context compressed with before keeps its workers and buffers, not its parameters.
     c.reset(ResetDirective::SessionAndParameters).map_err(zstd)?;
+    // Zstandard's workers counted in aqr-common's pool: as many workers of it reserved, but
+    // for the calling thread, which waits while they compress (one job a worker at most).
+    let jobs = total(data).div_ceil(ZSTD_JOB as usize).max(1);
+    let lent = aqr_common::pool::reserve(threads.min(jobs).saturating_sub(1));
+    let threads = lent.len() + 1;
     for p in [
         CParameter::CompressionLevel(level),
         CParameter::ContentSizeFlag(false),
@@ -1024,7 +1032,7 @@ fn resource<T>(msg: impl Into<String>) -> Decoded<T> {
 }
 
 /// A native implementation standing in for the module blocks naming [`NativeModule::module`].
-pub trait NativeModule {
+pub trait NativeModule: Sync {
     fn module(&self) -> Module;
 
     /// The outputs of an application, of `sizes` bytes each: from `inputs`, the resource
@@ -1035,13 +1043,13 @@ pub trait NativeModule {
 /// `modules` run by `m`, as archives apply them: [`crate::Modules::apply`] for one output, else
 /// [`crate::Modules::apply_shared`]. The [`crate::Apply`] that `m` is given has no inputs of its
 /// own (they are the evaluated ones).
-pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec<Box<dyn NativeModule + 'a>> {
+pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + Sync + 'a)) -> Vec<Box<dyn NativeModule + 'a>> {
     struct Native<'a, M> {
         module: Module,
         m: &'a M,
     }
 
-    impl<M: crate::Modules> NativeModule for Native<'_, M> {
+    impl<M: crate::Modules + Sync> NativeModule for Native<'_, M> {
         fn module(&self) -> Module {
             self.module
         }
@@ -1090,6 +1098,13 @@ pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
 
 /// What archive `c` holds, with the modules implemented by `natives`.
 pub fn decode_value(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Value> {
+    decode_value_with(c, natives, 1)
+}
+
+/// [`decode_value`], its leaf blocks evaluated at once on up to `threads` threads (the calling
+/// one and workers of [`aqr_common::pool`]). The first failure of a leaf, in their order, is
+/// the archive's.
+pub fn decode_value_with(c: &[u8], natives: &[Box<dyn NativeModule + '_>], threads: usize) -> Decoded<Value> {
     if c.starts_with(&ENCRYPTED_HEADER_MAGIC) {
         return resource("encrypted archives are not supported yet");
     }
@@ -1152,25 +1167,36 @@ pub fn decode_value(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded
     let outputs: Vec<u64> =
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
     let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
-    let mut contents = Contents { refs: vec![0; blocks.non_leaf.len()], data: std::mem::take(&mut blocks.non_leaf) };
+    let mut refs = vec![0; blocks.non_leaf.len()];
     for p in programs.iter().flatten() {
         for insn in &p.insns {
             if let &Insn::Slice { block, .. } = insn {
-                contents.refs[p.blocks[block]] += 1;
+                refs[p.blocks[block]] += 1;
             }
         }
     }
+    let contents = Contents {
+        refs: refs.into_iter().map(AtomicUsize::new).collect(),
+        data: std::mem::take(&mut blocks.non_leaf).into_iter().map(|d| Mutex::new(Some(Arc::new(d)))).collect(),
+    };
 
-    let mut out = Vec::new();
-    let mut leaves = Vec::new();
-    for (leaf, program) in std::mem::take(&mut blocks.leaves).into_iter().zip(programs) {
-        let leaf = match (leaf, program) {
-            (LeafBlock::Stored(d), _) => vec![d],
+    // the leaves at once, on up to `threads` threads
+    type Job<'p> = Mutex<Option<(LeafBlock, Option<Program<'p>>)>>;
+    let jobs: Vec<Job> =
+        std::mem::take(&mut blocks.leaves).into_iter().zip(programs).map(|j| Mutex::new(Some(j))).collect();
+    let evaluated = aqr_common::pool::par_map(jobs.len(), threads, |i| {
+        match jobs[i].lock().unwrap().take().expect("each leaf once") {
+            (LeafBlock::Stored(d), _) => Ok(vec![d]),
             (LeafBlock::Formula { modules, resources, non_leaf, .. }, Some(p)) => {
-                run(p, &env(modules, resources, non_leaf), &mut contents)?
+                run(p, &env(modules, resources, non_leaf), &contents)
             }
             (LeafBlock::Formula { .. }, None) => unreachable!(),
-        };
+        }
+    });
+    let mut out = Vec::new();
+    let mut leaves = Vec::new();
+    for leaf in evaluated {
+        let leaf = leaf?;
         match &tree {
             Some(_) => leaves.push(leaf),
             // the first leaf as it is
@@ -1681,35 +1707,40 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [b
     Ok(Program { insns, blocks, resources, modules })
 }
 
-/// A byte sequence on the stack: a slice of a non-leaf block (by its ordinal among all), a
-/// literal, or bytes of its own.
+/// A byte sequence on the stack: a slice of a non-leaf block (by its ordinal among all, with
+/// its data), a literal, or bytes of its own.
 enum Item<'a> {
-    Slice(usize, Range<usize>),
+    Slice(usize, Arc<Vec<u8>>, Range<usize>),
     Literal(&'a [u8]),
     Bytes(Vec<u8>),
 }
 
-/// The non-leaf blocks as formula blocks are evaluated, each with the slices of it yet to be
-/// evaluated or on the stack: once there are none, it is dropped.
+/// The non-leaf blocks as formula blocks are evaluated (several at once), each with the slices
+/// of it yet to be evaluated or on a stack: once there are none, it is dropped.
 struct Contents {
-    data: Vec<Vec<u8>>,
-    refs: Vec<usize>,
+    data: Vec<Mutex<Option<Arc<Vec<u8>>>>>,
+    refs: Vec<AtomicUsize>,
 }
 
 impl Contents {
-    fn get<'v>(&'v self, v: &'v Item) -> &'v [u8] {
+    /// The data of block `o`, while any slice of it is to be evaluated.
+    fn block(&self, o: usize) -> Arc<Vec<u8>> {
+        self.data[o].lock().unwrap().clone().expect("a block with slices left")
+    }
+
+    fn get<'v>(&self, v: &'v Item) -> &'v [u8] {
         match v {
-            Item::Slice(o, r) => &self.data[*o][r.clone()],
+            Item::Slice(_, d, r) => &d[r.clone()],
             Item::Literal(l) => l,
             Item::Bytes(b) => b,
         }
     }
 
     /// `v` used up: its bytes, of its own.
-    fn take(&mut self, v: Item) -> Vec<u8> {
+    fn take(&self, v: Item) -> Vec<u8> {
         match v {
-            Item::Slice(o, r) => {
-                let out = self.data[o][r].to_vec();
+            Item::Slice(o, d, r) => {
+                let out = d[r].to_vec();
                 self.release(o);
                 out
             }
@@ -1719,24 +1750,23 @@ impl Contents {
     }
 
     /// `vs` used up, once their bytes are no longer needed.
-    fn drop_all(&mut self, vs: Vec<Item>) {
+    fn drop_all(&self, vs: Vec<Item>) {
         for v in vs {
-            if let Item::Slice(o, _) = v {
+            if let Item::Slice(o, ..) = v {
                 self.release(o);
             }
         }
     }
 
-    fn release(&mut self, o: usize) {
-        self.refs[o] -= 1;
-        if self.refs[o] == 0 {
-            self.data[o] = Vec::new();
+    fn release(&self, o: usize) {
+        if self.refs[o].fetch_sub(1, Ordering::Relaxed) == 1 {
+            *self.data[o].lock().unwrap() = None;
         }
     }
 }
 
 /// The outputs of formula block `p`, with the non-leaf blocks in `contents`.
-fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<Vec<u8>>> {
+fn run(p: Program, env: &Env, contents: &Contents) -> Decoded<Vec<Vec<u8>>> {
     // literals and slices where they are
     let mut stack: Vec<Item> = Vec::new();
     for insn in p.insns {
@@ -1749,13 +1779,14 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<Vec<u8>>> 
             }
             Insn::Slice { block, start, len } => {
                 let o = p.blocks[block];
+                let d = contents.block(o);
                 let r = usize::try_from(start)
                     .ok()
                     .zip(usize::try_from(len).ok())
                     .and_then(|(s, l)| Some(s..s.checked_add(l)?))
-                    .filter(|r| r.end <= contents.data[o].len())
+                    .filter(|r| r.end <= d.len())
                     .ok_or_else(|| Failure::Invalid("slice out of its block".into()))?;
-                stack.push(Item::Slice(o, r));
+                stack.push(Item::Slice(o, d, r));
             }
             Insn::Apply(a) => {
                 let inputs = stack.split_off(stack.len() - a.num_inputs);
@@ -1789,14 +1820,14 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<Vec<u8>>> 
                 for &n in &sizes {
                     let r = at..at + n as usize;
                     stack.push(match &x {
-                        Item::Slice(o, s) => Item::Slice(*o, s.start + r.start..s.start + r.end),
+                        Item::Slice(o, d, s) => Item::Slice(*o, d.clone(), s.start + r.start..s.start + r.end),
                         &Item::Literal(l) => Item::Literal(&l[r]),
                         Item::Bytes(b) => Item::Bytes(b[r].to_vec()),
                     });
                     at += n as usize;
                 }
-                if let Item::Slice(o, _) = x {
-                    contents.refs[o] += sizes.len() - 1;
+                if let Item::Slice(o, ..) = x {
+                    contents.refs[o].fetch_add(sizes.len() - 1, Ordering::Relaxed);
                 }
             }
             Insn::Patch(len) => {

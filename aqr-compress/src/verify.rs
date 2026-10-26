@@ -1,6 +1,6 @@
 //! Verification of the archive that [`compress`](crate::compress) makes (xform-design.md §6):
 //! it is decoded, and must give the file back. The applications of modules are evaluated
-//! beforehand, on a thread of their own while the file is still recompressed: each formula a
+//! beforehand, on threads of their own while the file is still recompressed: each formula a
 //! recompressor makes is evaluated as it is made ([`Prevalidator`]), and where it gives what it
 //! stands for, the outputs of its applications are kept by what they were applied to ([`Memo`]).
 //! Decoding the archive then takes an application's output from there where its module,
@@ -12,9 +12,7 @@
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 
 use aqr_decompress::Native;
 use aqr_formula::{Apply, Formula, Modules, Node, Result, Shared};
@@ -112,13 +110,15 @@ impl Modules for Cached<'_> {
     }
 }
 
-/// Evaluates formulas on a thread of its own, as they are submitted, into a [`Memo`]. A
-/// formula is shared with the recompression, and checked against a hash of the data it stands
-/// for: neither is copied. The files are known by their addresses: data within one is part of
-/// it.
+/// Evaluates formulas as they are submitted, into a [`Memo`]: each on a worker of the pool if
+/// one is free, else then and there. A formula is shared with the recompression, and checked
+/// against a hash of the data it stands for: neither is copied. The files are known by their
+/// addresses: data within one is part of it.
 pub(crate) struct Prevalidator {
-    jobs: Sender<Job>,
-    done: JoinHandle<Memo>,
+    memo: Arc<Mutex<Memo>>,
+    /// The evaluations on workers.
+    running: Mutex<Vec<aqr_common::pool::Handle<'static, ()>>>,
+    threads: usize,
     /// Where each file is, by address (ordered by it), and its index.
     files: Vec<(Range<usize>, usize)>,
 }
@@ -160,50 +160,16 @@ pub(crate) fn reclaim(mut f: Arc<Formula>) -> Formula {
 }
 
 impl Prevalidator {
-    /// A prevalidator of the formulas made of `files` and of what they hold: as many evaluated
-    /// at once as there are `threads`.
+    /// A prevalidator of the formulas made of `files` and of what they hold, each evaluated on
+    /// up to `threads` threads.
     pub fn spawn(threads: usize, files: &[&[u8]]) -> Prevalidator {
-        let (jobs, rx) = channel::<Job>();
-        let rx = Arc::new(Mutex::new(rx));
-        let workers: Vec<_> = (0..threads.max(1))
-            .map(|_| {
-                let rx = rx.clone();
-                std::thread::spawn(move || {
-                    let mut memo = Memo::default();
-                    loop {
-                        // (the lock is held while waiting for a job only)
-                        let Ok((f, d, at)) = rx.lock().unwrap().recv() else { break };
-                        // the file is not kept again: the outputs of the applications at the top of
-                        // a formula of data in it are where they make it
-                        let r = Recording {
-                            native: Native { threads },
-                            file: at.map_or_else(Vec::new, |(i, at)| top(&f.root, i, at)),
-                            seen: Mutex::default(),
-                        };
-                        let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
-                        drop(f);
-                        if good {
-                            memo.0.extend(r.seen.into_inner().unwrap());
-                        }
-                    }
-                    memo
-                })
-            })
-            .collect();
-        let done = std::thread::spawn(move || {
-            let mut memo = Memo::default();
-            for w in workers {
-                memo.0.extend(w.join().unwrap_or_default().0);
-            }
-            memo
-        });
         let mut files: Vec<(Range<usize>, usize)> = files
             .iter()
             .enumerate()
             .map(|(i, f)| (f.as_ptr_range().start as usize..f.as_ptr_range().end as usize, i))
             .collect();
         files.sort_unstable_by_key(|f| f.0.start);
-        Prevalidator { jobs, done, files }
+        Prevalidator { memo: Arc::default(), running: Mutex::default(), threads, files }
     }
 
     /// Has formula `f` of data `d` evaluated: where it gives `d`, its applications' outputs go
@@ -227,14 +193,45 @@ impl Prevalidator {
 
     /// Has a formula of [`Prevalidator::job`] evaluated.
     pub fn send(&self, j: Deferred) {
-        // the thread is gone only if it panicked, which `finish` reports
-        let _ = self.jobs.send(j.0);
+        let (memo, threads) = (self.memo.clone(), self.threads);
+        let eval = move || {
+            let mut m = Memo::default();
+            evaluate(j.0, threads, &mut m);
+            memo.lock().unwrap().0.extend(m.0);
+        };
+        let mut worker = aqr_common::pool::reserve(1);
+        match worker.is_empty() {
+            true => eval(),
+            false => self.running.lock().unwrap().push(worker.spawn(eval)),
+        }
+    }
+
+    /// [`Prevalidator::finish`] of one shared, once nothing else holds it.
+    pub fn finish_shared(p: Arc<Prevalidator>) -> Memo {
+        Arc::into_inner(p).expect("the prevalidator held only here").finish()
     }
 
     /// The memo, once every formula submitted is evaluated.
     pub fn finish(self) -> Memo {
-        drop(self.jobs);
-        self.done.join().unwrap_or_default()
+        // (one that panicked leaves its outputs out)
+        self.running.into_inner().unwrap().into_iter().for_each(|h| _ = h.join());
+        Arc::into_inner(self.memo).expect("evaluations done").into_inner().unwrap()
+    }
+}
+
+/// Evaluates job `j` on `threads` threads, keeping its applications' outputs in `memo` where it
+/// gives what it stands for. The file is not kept again: the outputs of the applications at
+/// the top of a formula of data in it are where they make it.
+fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
+    let r = Recording {
+        native: Native { threads },
+        file: at.map_or_else(Vec::new, |(i, at)| top(&f.root, i, at)),
+        seen: Mutex::default(),
+    };
+    let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
+    drop(f);
+    if good {
+        memo.0.extend(r.seen.into_inner().unwrap());
     }
 }
 

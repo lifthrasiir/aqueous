@@ -7,7 +7,8 @@
 //!   archive (several of them, or a directory, as entries of their names).
 //! - `-d` (the default as `unaqr`): each archive into its name without `.aqr`, or `-o`.
 //! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors.
-//! - `-T` is the number of threads (0, the default: as many as the machine has).
+//! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
+//!   the pool of threads that everything runs on ([`aqr_common::pool`]), this work itself too.
 //!
 //! The log (to standard error) tells, for each file, what it was taken for, the modules its
 //! formula applies and the bytes of the archive that are its; the files stored together in a
@@ -44,7 +45,8 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let r = if args.decompress { decompress_all(&args) } else { compress_all(&args) };
+    aqr_common::pool::init(args.opt.threads);
+    let r = aqr_common::pool::run(|| if args.decompress { decompress_all(&args) } else { compress_all(&args) });
     match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

@@ -405,15 +405,21 @@ pub fn encode_threads(d: &[u8], fmt: Format, threads: usize) -> Option<Coded> {
     let nblocks = nframes.div_ceil(BLOCK);
     let per = (par::BATCH_SAMPLES / (BLOCK * fmt.channels)).max(1);
     let nbatches = nblocks.div_ceil(per);
+    // the LMS stage and a pool of one at least, on workers of the pool
+    let workers = aqr_common::pool::reserve((threads - 1).max(2));
+    if workers.len() < 2 {
+        return encode(d, fmt);
+    }
+    let pool = workers.len() - 1;
     let nb = par::in_flight(threads);
     let full_win = window(BLOCK);
-    std::thread::scope(|sc| {
+    aqr_common::pool::scope_in(workers, |sc| {
         let (jtx, jrx) = sync_channel::<EncBatch>(nb);
         let (ptx, prx) = sync_channel(nb);
         let (ltx, lrx) = sync_channel::<EncBatch>(nb);
         let mut ch: Vec<Vec<i64>> = vec![Vec::with_capacity(BLOCK); fmt.channels];
         let win = &full_win;
-        par::pool(sc, threads.saturating_sub(2), jrx, ptx, move |mut b: EncBatch| {
+        par::pool(sc, pool, jrx, ptx, move |mut b: EncBatch| {
             b.n = 0;
             for k in b.idx * per..((b.idx + 1) * per).min(nblocks) {
                 let p = k * BLOCK * frame_bytes;
@@ -599,6 +605,12 @@ pub fn decode_threads(
     if !len.is_multiple_of(frame_bytes) {
         return Err(Error("length"));
     }
+    // three stages and a pool of one at least, on workers of the pool
+    let workers = aqr_common::pool::reserve((threads - 1).max(4));
+    if workers.len() < 4 {
+        return decode(c, fmt, t, len, out);
+    }
+    let pool = workers.len() - 3;
     let nframes = len / frame_bytes;
     out.reserve(len);
     let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
@@ -608,7 +620,7 @@ pub fn decode_threads(
     let data = &mut out[at..];
     let nb = par::in_flight(threads);
     type B<'a> = DecBatch<'a, Vec<&'a mut [u8]>>;
-    std::thread::scope(|sc| {
+    aqr_common::pool::scope_in(workers, |sc| {
         let (rtx, rrx) = sync_channel::<B>(nb);
         let (tx1, rx1) = sync_channel::<B>(nb);
         let (tx2, rx2) = sync_channel::<B>(nb);
@@ -626,7 +638,7 @@ pub fn decode_threads(
         sc.spawn(move || par::errors_stage(rd, rx1, tx2));
         sc.spawn(move || par::lms_stage(rx2, tx3));
         let mut ch: Vec<Vec<i64>> = vec![Vec::with_capacity(BLOCK); fmt.channels];
-        par::pool(sc, threads.saturating_sub(2), rx3, otx, move |mut b: B| {
+        par::pool(sc, pool, rx3, otx, move |mut b: B| {
             let mut k = 0;
             for it in &b.items {
                 if let Item::Frame(f) = it {

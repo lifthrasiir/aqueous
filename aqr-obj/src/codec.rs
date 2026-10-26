@@ -108,8 +108,10 @@ pub(crate) fn decode_blocks<'a>(
     w: &mut Vec<u8>,
     threads: usize,
 ) -> Result<()> {
-    if threads > 1 {
-        return decode_par(next, len, w, threads);
+    // (the workers of the pool, if any is free)
+    let workers = aqr_common::pool::reserve(threads.saturating_sub(1));
+    if !workers.is_empty() {
+        return decode_par(workers, next, len, w, threads);
     }
     let mut out = Vec::new();
     let mut done = 0;
@@ -146,17 +148,18 @@ enum DReport {
 }
 
 fn decode_par<'a>(
+    workers: aqr_common::pool::Reservation,
     next: &mut impl FnMut(usize) -> Result<(usize, Stored<'a>)>,
     len: usize,
     w: &mut Vec<u8>,
     threads: usize,
 ) -> Result<()> {
     let limit = threads + 1;
-    std::thread::scope(|sc| {
+    aqr_common::pool::scope_in(workers, |sc| {
         let (rtx, rrx) = mpsc::channel::<DReport>();
         let (jtx, jrx) = mpsc::channel::<DJob>();
         let jrx = Arc::new(Mutex::new(jrx));
-        for _ in 0..threads.saturating_sub(1).max(1) {
+        for _ in 0..sc.workers() {
             let (rtx, jrx) = (rtx.clone(), jrx.clone());
             sc.spawn(move || {
                 loop {

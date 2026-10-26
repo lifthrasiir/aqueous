@@ -282,28 +282,10 @@ pub(crate) fn formula_parts(
 /// Files smaller than this are handled on one thread whatever the thread count.
 const PAR_MIN: usize = 1 << 16;
 
-/// Runs `f(0..n)` on `workers` threads (the caller's among them), each index once, and
-/// returns the results in order.
+/// Runs `f(0..n)` on `workers` threads at most (the caller's among them, the others of
+/// the pool), each index once, and returns the results in order.
 pub(crate) fn par_map<R: Send>(n: usize, workers: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
-    let next = std::sync::atomic::AtomicUsize::new(0);
-    let out: std::sync::Mutex<Vec<Option<R>>> = std::sync::Mutex::new((0..n).map(|_| None).collect());
-    let work = || {
-        loop {
-            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if i >= n {
-                break;
-            }
-            let r = f(i);
-            out.lock().unwrap()[i] = Some(r);
-        }
-    };
-    std::thread::scope(|s| {
-        for _ in 1..workers.min(n) {
-            s.spawn(work);
-        }
-        work();
-    });
-    out.into_inner().unwrap().into_iter().map(|r| r.expect("worker result")).collect()
+    aqr_common::pool::par_map(n, workers, f)
 }
 
 /// Appends the record of a coded image to `rec`, against `reference` if given.
@@ -665,12 +647,14 @@ fn rebuild(
     let mut emit = Payload::new(streams, alts, headers, len + 6 * most + 64)?;
     // (positions as the reference's are 32-bit)
     let mut own = (keep && n <= u32::MAX as usize).then(model::Reference::empty);
-    if threads > 1 && n >= PAR_MIN {
+    // (the writer on a worker of the pool, if one is free)
+    let writer = (threads > 1 && n >= PAR_MIN).then(|| aqr_common::pool::reserve(1)).filter(|w| !w.is_empty());
+    if let Some(writer) = writer {
         /// A block's tokens and frequencies, and the bytes of a stored block.
         type Msg = (Vec<Token>, model::Freqs, Vec<u8>);
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(PIPE_DEPTH);
         let (back, spare) = std::sync::mpsc::channel::<Vec<Token>>();
-        let (dec, written) = std::thread::scope(|sc| {
+        let (dec, written) = aqr_common::pool::scope_in(writer, |sc| {
             let writer = sc.spawn(move || {
                 for (toks, freqs, bytes) in rx {
                     let (mut toks, mut freqs) = (toks, freqs);

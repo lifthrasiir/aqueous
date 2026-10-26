@@ -38,10 +38,19 @@ fn main() {
         }
     }
 
+    // (the threads of the pool, as many as -t)
+    aqr_common::pool::init(opt.threads);
+    if !aqr_common::pool::run(|| show(&files, &opt, tree)) {
+        std::process::exit(1);
+    }
+}
+
+/// Shows each of `files` as the module docs tell; returns whether all went well.
+fn show(files: &[String], opt: &Options, tree: bool) -> bool {
     // the resources compressed once for all files
     let enc = aqr::Encoder::with_threads(opt.level, opt.threads);
     let mut failed = false;
-    for path in &files {
+    for path in files {
         let d = match std::fs::read(path) {
             Ok(d) => d,
             Err(e) => {
@@ -53,7 +62,7 @@ fn main() {
         let mb = d.len() as f64 / 1e6;
         let format = detect(&d).map_or("-", |f| f.name());
         let start = Instant::now();
-        let (c, f) = compress_formula(&d, &opt);
+        let (c, f) = compress_formula(&d, opt);
         let pack = start.elapsed().as_secs_f64();
         let start = Instant::now();
         let unpacked = decompress(&c, opt.threads);
@@ -81,7 +90,5 @@ fn main() {
             print!("{f}");
         }
     }
-    if failed {
-        std::process::exit(1);
-    }
+    !failed
 }

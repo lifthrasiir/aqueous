@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-aqr-common = { path = "../aqr-common" }
+aqr-common = { path = "../aqr-common", features = ["rayon"] }
 memchr = "2"
 rayon = "1.12.0"
 aqr-formula = { path = "../aqr-formula" }

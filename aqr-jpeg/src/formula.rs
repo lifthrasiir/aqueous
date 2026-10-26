@@ -15,8 +15,9 @@ pub const MODULE: Module = Module { name: "jpeg-recons", version: 2 };
 /// what a formula costs beyond its streams, for deciding whether coding an embedded JPEG pays off
 const OVERHEAD: usize = 8;
 
-/// The formula for `input`; None where it is not coded. `threads` (0: the global
-/// rayon pool) bounds the parallelism.
+/// The formula for `input`; None where it is not coded. `threads` bounds the parallelism: the
+/// calling thread and workers of aqr-common's pool (0: rayon's pool as it is, the global one
+/// outside any other).
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     in_pool(threads, || encode_at(input, 0))
 }
@@ -150,13 +151,11 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     Ok(out)
 }
 
-/// Runs `f` on a pool of `threads` threads, or as it is if 0.
+/// Runs `f` on a rayon pool of up to `threads` threads of aqr-common's pool, or as it is if 0
+/// or within a rayon pool already.
 fn in_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
-    match threads {
-        0 => f(),
-        n => match rayon::ThreadPoolBuilder::new().num_threads(n).build() {
-            Ok(pool) => pool.install(f),
-            Err(_) => f(),
-        },
+    match (threads > 0).then(|| aqr_common::pool::rayon_pool(threads)).flatten() {
+        Some(pool) => pool.install(f),
+        None => f(),
     }
 }

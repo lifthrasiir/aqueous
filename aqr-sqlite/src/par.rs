@@ -1,5 +1,6 @@
-//! A scoped work queue: tasks run on up to `threads` threads (the caller included), each
-//! worker with its own state, and the results come back by task number.
+//! A scoped work queue: tasks run on up to `threads` threads (the caller included, the others
+//! workers of aqr-common's pool), each worker with its own state, and the results come back by
+//! task number.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -25,8 +26,8 @@ pub fn map<S, R: Send>(
         }
     };
     let workers = threads.clamp(1, order.len().max(1));
-    std::thread::scope(|sc| {
-        for _ in 1..workers {
+    aqr_common::pool::scope(workers - 1, |sc| {
+        for _ in 0..sc.workers() {
             sc.spawn(work);
         }
         work();

@@ -1,0 +1,431 @@
+//! The threads of the process: a pool of a fixed number of them ([`init`]), on which every
+//! thread of the recompressors, their modules and the archive encoder runs.
+//!
+//! Work does not wait for threads: it reserves what workers are free ([`reserve`], [`scope`]),
+//! as many as it would take at most, and runs on those it gets, alone where it gets none (the
+//! recompressors' outputs do not depend on their threads). A reserved worker runs only what
+//! it is reserved for, so that work handing data from thread to thread over channels that
+//! block (a pipeline of stages) runs its stages at once, never waiting for a worker: nothing
+//! waits for a worker but [`run`], which moves work onto the pool from outside it.
+//!
+//! Threads that libraries make on their own count in the pool by the workers reserved for them
+//! and left idle: Zstandard's (aqr-formula) and rayon's ([`rayon_pool`], whose threads are the
+//! workers themselves).
+
+use std::any::Any;
+use std::collections::VecDeque;
+use std::marker::PhantomData;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
+
+/// Bytes of stack of a worker: as much as a main thread has, for the work [`run`] moves there.
+const STACK: usize = 16 << 20;
+
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+struct Pool {
+    size: usize,
+    /// Workers neither reserved nor running anything.
+    free: Mutex<usize>,
+    freed: Condvar,
+    jobs: Mutex<VecDeque<Job>>,
+    queued: Condvar,
+}
+
+static POOL: OnceLock<Pool> = OnceLock::new();
+/// The size [`init`] asked for, until the pool is made (0: the machine's threads).
+static SIZE: AtomicUsize = AtomicUsize::new(0);
+
+thread_local! {
+    static WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the pool of `n` workers (at least one), unless it is made already: before anything
+/// else uses it. Returns whether it is of `n`.
+pub fn init(n: usize) -> bool {
+    SIZE.store(n.max(1), Ordering::Relaxed);
+    pool().size == n.max(1)
+}
+
+/// The number of workers of the pool: those that [`init`] asked for, else as many as the
+/// machine has threads.
+pub fn size() -> usize {
+    pool().size
+}
+
+/// Whether the calling thread is a worker of the pool.
+pub fn is_worker() -> bool {
+    WORKER.with(|w| w.get())
+}
+
+fn pool() -> &'static Pool {
+    POOL.get_or_init(|| {
+        let size = match SIZE.load(Ordering::Relaxed) {
+            0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
+            n => n,
+        };
+        for i in 0..size {
+            std::thread::Builder::new()
+                .name(format!("aqr-pool-{i}"))
+                .stack_size(STACK)
+                .spawn(work)
+                .expect("a worker of the pool");
+        }
+        Pool {
+            size,
+            free: Mutex::new(size),
+            freed: Condvar::new(),
+            jobs: Mutex::new(VecDeque::new()),
+            queued: Condvar::new(),
+        }
+    })
+}
+
+/// What a worker does: the jobs queued, one after another. (A job is queued only for a worker
+/// reserved for it, so that one is idle for each.)
+fn work() {
+    WORKER.with(|w| w.set(true));
+    let p = pool();
+    loop {
+        let job = {
+            let mut jobs = p.jobs.lock().unwrap();
+            loop {
+                match jobs.pop_front() {
+                    Some(j) => break j,
+                    None => jobs = p.queued.wait(jobs).unwrap(),
+                }
+            }
+        };
+        job();
+    }
+}
+
+fn release(n: usize) {
+    if n > 0 {
+        let p = pool();
+        *p.free.lock().unwrap() += n;
+        p.freed.notify_all();
+    }
+}
+
+/// Workers reserved: free until spawned on ([`Reservation::spawn`]), given back as what runs on
+/// them returns, and those not spawned on as the reservation is dropped.
+pub struct Reservation {
+    n: usize,
+}
+
+/// Reserves up to `want` workers of those free, without waiting for any.
+pub fn reserve(want: usize) -> Reservation {
+    if want == 0 {
+        return Reservation { n: 0 };
+    }
+    let mut free = pool().free.lock().unwrap();
+    let n = want.min(*free);
+    *free -= n;
+    Reservation { n }
+}
+
+impl Reservation {
+    /// The workers left to spawn on.
+    pub fn len(&self) -> usize {
+        self.n
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.n == 0
+    }
+
+    /// Runs `f` on a worker reserved, which is given back once it returns. Panics where none
+    /// is left.
+    pub fn spawn<T: Send + 'static>(&mut self, f: impl FnOnce() -> T + Send + 'static) -> Handle<'static, T> {
+        // SAFETY: it borrows nothing
+        unsafe { self.spawn_unchecked(f, None) }
+    }
+
+    /// [`Reservation::spawn`] of `f` borrowing for `'a`, of `scope` if any.
+    ///
+    /// # Safety
+    /// `f` has to have returned before `'a` ends ([`Handle::join`], or as [`scope`] waits).
+    unsafe fn spawn_unchecked<'a, T: Send + 'a>(
+        &mut self,
+        f: impl FnOnce() -> T + Send + 'a,
+        scope: Option<Arc<ScopeState>>,
+    ) -> Handle<'a, T> {
+        assert!(self.n > 0, "no worker reserved left");
+        self.n -= 1;
+        let slot = Arc::new(Slot { value: Mutex::new(None), done: Condvar::new(), scope: scope.clone() });
+        let s = slot.clone();
+        let job: Box<dyn FnOnce() + Send + 'a> = Box::new(move || {
+            let r = catch_unwind(AssertUnwindSafe(f));
+            *s.value.lock().unwrap() = Some(r);
+            s.done.notify_all();
+        });
+        // SAFETY: as the caller makes sure; the slot outlives the job
+        let job: Job = unsafe { std::mem::transmute::<Box<dyn FnOnce() + Send + 'a>, Job>(job) };
+        let p = pool();
+        p.jobs.lock().unwrap().push_back(Box::new(move || {
+            // (the job's part of the slot dropped with it, before the scope is told)
+            job();
+            match scope {
+                // (back to the scope, for it to spawn on again)
+                Some(s) => {
+                    let mut w = s.workers.lock().unwrap();
+                    (w.idle, w.running) = (w.idle + 1, w.running - 1);
+                    s.finished.notify_all();
+                }
+                None => release(1),
+            }
+        }));
+        p.queued.notify_one();
+        Handle { slot, _borrow: PhantomData }
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        release(self.n);
+    }
+}
+
+struct Slot<T> {
+    value: Mutex<Option<std::thread::Result<T>>>,
+    done: Condvar,
+    scope: Option<Arc<ScopeState>>,
+}
+
+impl<T> Drop for Slot<T> {
+    /// A panic nobody joined goes to the scope, which resumes it.
+    fn drop(&mut self) {
+        if let (Some(s), Some(Err(p))) = (&self.scope, self.value.get_mut().unwrap().take()) {
+            s.panic.lock().unwrap().get_or_insert(p);
+        }
+    }
+}
+
+/// What runs on a worker, to wait for.
+pub struct Handle<'a, T> {
+    slot: Arc<Slot<T>>,
+    _borrow: PhantomData<&'a ()>,
+}
+
+impl<T> Handle<'_, T> {
+    /// What it returned, or its panic, once it has.
+    pub fn join(self) -> std::thread::Result<T> {
+        let mut v = self.slot.value.lock().unwrap();
+        loop {
+            match v.take() {
+                Some(r) => return r,
+                None => v = self.slot.done.wait(v).unwrap(),
+            }
+        }
+    }
+}
+
+/// The workers of a [`Scope`], and a panic of what was spawned on them that nobody joined.
+#[derive(Default)]
+struct ScopeState {
+    workers: Mutex<Workers>,
+    finished: Condvar,
+    panic: Mutex<Option<Box<dyn Any + Send>>>,
+}
+
+#[derive(Default)]
+struct Workers {
+    all: usize,
+    idle: usize,
+    running: usize,
+}
+
+/// Workers of the pool for work borrowing what is outside it, as [`std::thread::scope`] gives
+/// threads: what is spawned has returned once [`scope`] does. The workers are the scope's
+/// until then: what is spawned once all of them run something waits for one.
+pub struct Scope<'scope, 'env: 'scope> {
+    state: Arc<ScopeState>,
+    _scope: PhantomData<&'scope mut &'scope ()>,
+    _env: PhantomData<&'env mut &'env ()>,
+}
+
+/// Runs `f` with up to `want` workers of the pool reserved (those free, without waiting for
+/// any), to spawn as many things on ([`Scope::spawn`]); returns once they all have. A panic of
+/// one not joined is resumed here, as is one of `f`.
+pub fn scope<'env, R>(want: usize, f: impl for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> R) -> R {
+    scope_in(reserve(want), f)
+}
+
+/// [`scope`] of the workers of `r`: for work that tells first whether it has enough of them
+/// (a pipeline, of a thread per stage).
+pub fn scope_in<'env, R>(mut r: Reservation, f: impl for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> R) -> R {
+    let n = std::mem::take(&mut r.n);
+    let s = Scope {
+        state: Arc::new(ScopeState {
+            workers: Mutex::new(Workers { all: n, idle: n, running: 0 }),
+            ..Default::default()
+        }),
+        _scope: PhantomData,
+        _env: PhantomData,
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| f(&s)));
+    // what is spawned waited for, then the workers given back
+    let mut w = s.state.workers.lock().unwrap();
+    while w.running > 0 {
+        w = s.state.finished.wait(w).unwrap();
+    }
+    release(w.idle);
+    drop(w);
+    let panic = s.state.panic.lock().unwrap().take();
+    match (r, panic) {
+        (Err(p), _) | (Ok(_), Some(p)) => resume_unwind(p),
+        (Ok(r), None) => r,
+    }
+}
+
+impl<'scope> Scope<'scope, '_> {
+    /// The workers of the scope: so many things spawned run at once.
+    pub fn workers(&self) -> usize {
+        self.state.workers.lock().unwrap().all
+    }
+
+    /// Runs `f` on a worker of the scope, once one is idle. Panics where the scope has none.
+    pub fn spawn<T: Send + 'scope>(&'scope self, f: impl FnOnce() -> T + Send + 'scope) -> Handle<'scope, T> {
+        let mut w = self.state.workers.lock().unwrap();
+        assert!(w.all > 0, "a scope of no workers");
+        while w.idle == 0 {
+            w = self.state.finished.wait(w).unwrap();
+        }
+        (w.idle, w.running) = (w.idle - 1, w.running + 1);
+        drop(w);
+        // SAFETY: the scope waits for it before it returns
+        unsafe { Reservation { n: 1 }.spawn_unchecked(f, Some(self.state.clone())) }
+    }
+}
+
+/// `f` on a worker of the pool, waiting for one to be free; on the calling thread itself where
+/// it is a worker already. Its panic is resumed here.
+pub fn run<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    if is_worker() {
+        return f();
+    }
+    let p = pool();
+    let mut free = p.free.lock().unwrap();
+    while *free == 0 {
+        free = p.freed.wait(free).unwrap();
+    }
+    *free -= 1;
+    drop(free);
+    let mut r = Reservation { n: 1 };
+    // SAFETY: joined before `f`'s borrows end
+    let h = unsafe { r.spawn_unchecked(f, None) };
+    h.join().unwrap_or_else(|p| resume_unwind(p))
+}
+
+/// `f(0..n)` on up to `threads` threads (the calling one and workers reserved), in order. A
+/// panic of `f` is resumed here.
+pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    let next = AtomicUsize::new(0);
+    let out: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let work = || {
+        loop {
+            let i = next.fetch_add(1, Ordering::Relaxed);
+            if i >= n {
+                break;
+            }
+            *out[i].lock().unwrap() = Some(f(i));
+        }
+    };
+    scope(threads.min(n).saturating_sub(1), |s| {
+        let hs: Vec<_> = (0..s.workers()).map(|_| s.spawn(work)).collect();
+        // (another's panic stops the rest: the next index is past them)
+        let mine = catch_unwind(AssertUnwindSafe(work));
+        if mine.is_err() {
+            next.store(n, Ordering::Relaxed);
+        }
+        for h in hs {
+            if let Err(p) = h.join() {
+                next.store(n, Ordering::Relaxed);
+                resume_unwind(p);
+            }
+        }
+        if let Err(p) = mine {
+            resume_unwind(p);
+        }
+    });
+    out.into_iter().map(|m| m.into_inner().unwrap().expect("every index done")).collect()
+}
+
+/// A rayon thread pool of up to `threads` threads: the calling thread, and as many workers of
+/// the pool as are free (none: the calling thread alone, rayon's work done on it); `None`
+/// where the calling thread is one of a rayon pool already, which is then to be used as it is.
+/// Its other threads stay workers of the pool, as reserved, until it is dropped. Work given to
+/// rayon outside such a pool goes to rayon's global pool, of threads of its own.
+#[cfg(feature = "rayon")]
+pub fn rayon_pool(threads: usize) -> Option<rayon::ThreadPool> {
+    if rayon::current_thread_index().is_some() {
+        return None;
+    }
+    let mut r = reserve(threads.saturating_sub(1));
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(r.len() + 1)
+        .use_current_thread()
+        .spawn_handler(|t| {
+            r.spawn(move || t.run());
+            Ok(())
+        })
+        .build()
+        .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::mpsc::sync_channel;
+
+    /// Work that borrows, a pipeline of stages blocking on each other, panics; never more
+    /// than the pool's workers reserved.
+    #[test]
+    fn scopes() {
+        let n = size();
+        let data: Vec<usize> = (0..1000).collect();
+        let sums = par_map(10, 4, |i| data[i * 100..(i + 1) * 100].iter().sum::<usize>());
+        assert_eq!(sums.iter().sum::<usize>(), data.iter().sum());
+
+        // stages on their workers, or none where there are not enough
+        let got = scope(2, |s| {
+            if s.workers() < 2 {
+                return None;
+            }
+            let (tx, rx) = sync_channel::<usize>(0);
+            let (tx2, rx2) = sync_channel::<usize>(0);
+            s.spawn(move || (0..100).for_each(|i| tx.send(i).unwrap()));
+            s.spawn(move || rx.iter().for_each(|i| tx2.send(i * 2).unwrap()));
+            Some(rx2.iter().sum::<usize>())
+        });
+        assert!(got.is_none_or(|g| g == 9900));
+
+        // a worker spawned on again once what ran on it returns
+        let twice = scope(1, |s| {
+            (s.workers() == 1).then(|| (0..3).map(|i| s.spawn(move || i * 2).join().unwrap()).sum::<usize>())
+        });
+        assert!(twice.is_none_or(|t| t == 6));
+
+        // all reserved: none is left to nested work
+        scope(n, |s| {
+            assert!(s.workers() <= n);
+            if s.workers() == n {
+                assert_eq!(reserve(1).len(), 0);
+            }
+        });
+        assert!(
+            catch_unwind(|| scope(1, |s| {
+                if s.workers() == 1 {
+                    s.spawn(|| panic!("in a worker"));
+                } else {
+                    panic!("here");
+                }
+            }))
+            .is_err()
+        );
+        assert!(catch_unwind(|| par_map(8, 8, |i| if i == 5 { panic!("five") } else { i })).is_err());
+        assert!(run(is_worker));
+    }
+}

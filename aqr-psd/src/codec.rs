@@ -99,22 +99,8 @@ fn par_map<T: Send, R: Send>(threads: usize, items: Vec<T>, f: impl Fn(T) -> R +
     if threads <= 1 || n <= 1 {
         return items.into_iter().map(f).collect();
     }
-    let queue = std::sync::Mutex::new(items.into_iter().enumerate());
-    let results = std::sync::Mutex::new((0..n).map(|_| None).collect::<Vec<Option<R>>>());
-    let work = || {
-        loop {
-            let Some((i, t)) = queue.lock().unwrap().next() else { break };
-            let r = f(t);
-            results.lock().unwrap()[i] = Some(r);
-        }
-    };
-    std::thread::scope(|sc| {
-        for _ in 1..threads.min(n) {
-            sc.spawn(work);
-        }
-        work();
-    });
-    results.into_inner().unwrap().into_iter().map(|r| r.expect("every item is done")).collect()
+    let items: Vec<std::sync::Mutex<Option<T>>> = items.into_iter().map(|t| std::sync::Mutex::new(Some(t))).collect();
+    aqr_common::pool::par_map(n, threads, |i| f(items[i].lock().unwrap().take().expect("each item once")))
 }
 
 fn nested_compress(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Formula> {
@@ -135,8 +121,7 @@ fn nested_compress_(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Optio
     let f = match codec {
         Codec::Psd => crate::formula::encode_at(data, depth + 1, par)?,
         Codec::Png => aqr_png::formula::encode(data, par.threads)?,
-        // (aqr-jpeg runs in the global rayon pool for 0 threads)
-        Codec::Jpeg => aqr_jpeg::formula::encode(data, if par.threads > 1 { par.threads } else { 0 })?,
+        Codec::Jpeg => aqr_jpeg::formula::encode(data, par.threads)?,
     };
     (f.streams.iter().map(|s| s.data.len()).sum::<usize>() < data.len()).then_some(f)
 }
@@ -870,7 +855,7 @@ fn batch_channels(
     (full_tx, full_rx, free_tx, free_rx)
 }
 
-fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+fn join<T>(h: aqr_common::pool::Handle<'_, T>) -> T {
     h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
 }
 
@@ -914,13 +899,15 @@ fn encode_group(
         hint = Some(RowRenderer::new(&hpsd, prefix, &mut composite::Report::default()).ok()?);
     }
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
-    if threads > 1 && w * h * n >= PIPE_MIN {
+    // (the reader on a worker of the pool, if one is free)
+    let reader = (threads > 1 && w * h * n >= PIPE_MIN).then(|| aqr_common::pool::reserve(1));
+    if let Some(reader) = reader.filter(|r| !r.is_empty()) {
         let encoders: Vec<Option<Encoder>> = g
             .planes
             .iter()
             .map(|&(s, _)| if let Coding::Rle { encoder, .. } = spans[s].coding { Some(encoder) } else { None })
             .collect();
-        return encode_rows_piped(rec, &mut gc, readers, hint, &encoders, w, h);
+        return encode_rows_piped(reader, rec, &mut gc, readers, hint, &encoders, w, h);
     }
     let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
     let mut rows = vec![vec![0u8; w]; n];
@@ -979,7 +966,9 @@ fn encode_group(
 
 /// `encode_group`'s loop with a thread reading the rows (and checking them against the
 /// encoders, and rendering the hint) ahead, in batches, while this one codes them.
+#[allow(clippy::too_many_arguments)]
 fn encode_rows_piped<'a>(
+    reader: aqr_common::pool::Reservation,
     rec: &mut model::Recorder,
     gc: &mut GroupCoder,
     mut readers: Vec<Option<PlaneRows<'a>>>,
@@ -994,7 +983,7 @@ fn encode_rows_piped<'a>(
     let hn = if hint.is_some() { n } else { 0 };
     let (full_tx, full_rx, free_tx, free_rx) = batch_channels(PIPE_DEPTH + 2, || Batch::new(per, w, &read, hn));
     let timing = std::env::var_os("PSDR_STATS").is_some();
-    std::thread::scope(|sc| {
+    aqr_common::pool::scope_in(reader, |sc| {
         let reader = sc.spawn(move || -> Option<Vec<Vec<usize>>> {
             let mut misses = vec![Vec::new(); n];
             // Per plane, the previous row's encoded bytes and whether the encoder missed it, and
@@ -1401,6 +1390,7 @@ impl RowSink<'_> {
 /// one decodes the model.
 #[allow(clippy::too_many_arguments)]
 fn decode_rows_piped(
+    workers: aqr_common::pool::Reservation,
     player: &mut model::Player,
     gc: &mut GroupCoder,
     w: usize,
@@ -1422,7 +1412,7 @@ fn decode_rows_piped(
     let (out_full_tx, out_full_rx, out_free_tx, out_free_rx) =
         batch_channels(PIPE_DEPTH + 2, || Batch::new(per, w, &vec![true; ns], 0));
     let timing = std::env::var_os("PSDR_STATS").is_some();
-    std::thread::scope(|sc| {
+    aqr_common::pool::scope_in(workers, |sc| {
         let reader = has_in.then(|| {
             sc.spawn(move || -> Result<()> {
                 let mut t = [0f64; 2];
@@ -1625,8 +1615,11 @@ fn decode_group(
         hint = Some(RowRenderer::new(&psd, left, &mut composite::Report::default())?);
     }
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
-    if threads > 1 && w * h * n >= PIPE_MIN {
-        return decode_rows_piped(player, &mut gc, w, h, readers, hint, sinks, right);
+    // (the writer and the reader, if any, on workers of the pool, if they are free)
+    let need = 1 + (hint.is_some() || readers.iter().any(Option::is_some)) as usize;
+    let workers = (threads > 1 && w * h * n >= PIPE_MIN).then(|| aqr_common::pool::reserve(need));
+    if let Some(workers) = workers.filter(|r| r.len() == need) {
+        return decode_rows_piped(workers, player, &mut gc, w, h, readers, hint, sinks, right);
     }
     let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
     let mut rows = vec![vec![0u8; w]; n];
