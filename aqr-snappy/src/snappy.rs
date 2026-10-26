@@ -130,128 +130,138 @@ fn load32(d: &[u8], p: usize) -> u32 {
     u32::from_le_bytes(d[p..p + 4].try_into().unwrap())
 }
 
-/// `CompressFragment` of `src` (at most [`FRAGMENT`] bytes) with a cleared table; `CRC` for
-/// [`Hash::Crc`].
+/// FORMAT.md §3.3: `src` (at most [`FRAGMENT`] bytes) compressed with `table` (cleared, and cut to
+/// [`table_size`] entries, here), appended to `out`; `CRC` for [`Hash::Crc`] (§3.2).
 fn fragment<const CRC: bool>(src: &[u8], table: &mut [u16], out: &mut Vec<u8>) {
     let n = src.len();
-    let size = table_size(n);
-    let table = &mut table[..size];
+    if n < MARGIN {
+        if n > 0 {
+            literal(out, src);
+        }
+        return;
+    }
+    // The buffer is shared by fragments, and the last one may need less of it.
+    let table = &mut table[..table_size(n)];
     table.fill(0);
-    let mask = 2 * (size as u32 - 1);
-    // the entry of 4 bytes (`TableEntry`: a byte offset in the table, masked)
-    let hash = |v: u32| -> usize {
-        let h = if CRC { crc32c::update32(v, mask) } else { v.wrapping_mul(0x1e35_a7bd) >> 16 };
+    let bound = n - MARGIN;
+    let mask = 2 * (table.len() - 1) as u32;
+    // The table slot of the 4 bytes `v` (§3.2).
+    let slot = |v: u32| -> usize {
+        let h = if CRC { crc32c::update32(v, mask) } else { v.wrapping_mul(0x1E35_A7BD) >> 16 };
         ((h & mask) >> 1) as usize
     };
-    let mut ip = 0;
-    'remainder: {
-        if n < MARGIN {
-            break 'remainder;
-        }
-        let limit = n - MARGIN;
-        loop {
-            let next_emit = ip;
-            ip += 1;
-            let mut skip = 32u32;
-            let mut found = None;
-            if limit as isize - ip as isize >= 16 {
-                // the first 16 positions, one after another
-                for q in ip..ip + 16 {
-                    let v = load32(src, q);
-                    let h = hash(v);
-                    let c = table[h] as usize;
-                    table[h] = q as u16;
-                    if load32(src, c) == v {
-                        found = Some((q, c));
-                        break;
-                    }
-                }
-                if found.is_none() {
-                    ip += 16;
-                    skip += 16;
+    // Looks `q` up, and records it: the position of the earlier occurrence on a hit.
+    let probe = |table: &mut [u16], q: usize| -> Option<usize> {
+        let v = load32(src, q);
+        let e = &mut table[slot(v)];
+        let c = *e as usize;
+        *e = q as u16;
+        (load32(src, c) == v).then_some(c)
+    };
+    // The first hit at a position after `start`, as (position, earlier position).
+    let search = |table: &mut [u16], start: usize| -> Option<(usize, usize)> {
+        let mut x = start + 1;
+        let mut k = 32;
+        if x + 16 <= bound {
+            for q in x..x + 16 {
+                if let Some(c) = probe(table, q) {
+                    return Some((q, c));
                 }
             }
-            let mut candidate = match found {
-                Some((q, c)) => {
-                    ip = q;
-                    c
-                }
-                None => loop {
-                    let v = load32(src, ip);
-                    let h = hash(v);
-                    let step = skip >> 5;
-                    skip += step;
-                    let next = ip + step as usize;
-                    if next > limit {
-                        ip = next_emit;
-                        break 'remainder;
-                    }
-                    let c = table[h] as usize;
-                    table[h] = ip as u16;
-                    if load32(src, c) == v {
-                        break c;
-                    }
-                    ip = next;
-                },
-            };
-            literal(out, &src[next_emit..ip]);
-            loop {
-                let base = ip;
-                let matched = 4 + src[ip + 4..].iter().zip(&src[candidate + 4..]).take_while(|(a, b)| a == b).count();
-                ip += matched;
-                copy(out, base - candidate, matched);
-                if ip >= limit {
-                    break 'remainder;
-                }
-                table[hash(load32(src, ip - 1))] = (ip - 1) as u16;
-                let v = load32(src, ip);
-                let h = hash(v);
-                candidate = table[h] as usize;
-                table[h] = ip as u16;
-                if load32(src, candidate) != v {
+            x += 16;
+            k = 48;
+        }
+        loop {
+            let gap = k / 32;
+            k += gap;
+            if x + gap > bound {
+                return None;
+            }
+            if let Some(c) = probe(table, x) {
+                return Some((x, c));
+            }
+            x += gap;
+        }
+    };
+
+    let mut emitted = 0;
+    let mut found = search(table, 0);
+    while let Some((mut q, mut c)) = found {
+        if q > emitted {
+            literal(out, &src[emitted..q]);
+        }
+        // Copies, one after another while the position right after a copy hits again.
+        loop {
+            let len = 4 + common_len(src, c + 4, q + 4);
+            copy(out, q - c, len);
+            let r = q + len;
+            emitted = r;
+            if r >= bound {
+                found = None;
+                break;
+            }
+            table[slot(load32(src, r - 1))] = (r - 1) as u16;
+            match probe(table, r) {
+                Some(c2) => (q, c) = (r, c2),
+                None => {
+                    found = search(table, r);
                     break;
                 }
             }
         }
     }
-    if ip < n {
-        literal(out, &src[ip..]);
+    if emitted < n {
+        literal(out, &src[emitted..]);
     }
 }
 
-/// `EmitLiteral`.
+/// The number of equal bytes from `a` and from `b` (`a < b`) on, up to the end of `d`.
+fn common_len(d: &[u8], a: usize, b: usize) -> usize {
+    let mut i = 0;
+    while b + i + 8 <= d.len() {
+        let x = u64::from_le_bytes(d[a + i..a + i + 8].try_into().unwrap())
+            ^ u64::from_le_bytes(d[b + i..b + i + 8].try_into().unwrap());
+        if x != 0 {
+            return i + (x.trailing_zeros() >> 3) as usize;
+        }
+        i += 8;
+    }
+    while b + i < d.len() && d[a + i] == d[b + i] {
+        i += 1;
+    }
+    i
+}
+
+/// Writes a literal element of the non-empty `lits` (FORMAT.md §3.3).
 fn literal(out: &mut Vec<u8>, lits: &[u8]) {
-    let n = lits.len() - 1;
-    if n < 60 {
-        out.push((n as u8) << 2);
+    let m = lits.len() as u32 - 1;
+    if m < 60 {
+        out.push((m << 2) as u8);
     } else {
-        let count = (n.ilog2() as usize >> 3) + 1;
-        out.push(((59 + count) as u8) << 2);
-        out.extend_from_slice(&(n as u32).to_le_bytes()[..count]);
+        // Bytes needed for `m`; the tag says how many follow.
+        let width = (m.ilog2() / 8 + 1) as usize;
+        out.push(((59 + width as u32) << 2) as u8);
+        out.extend_from_slice(&m.to_le_bytes()[..width]);
     }
     out.extend_from_slice(lits);
 }
 
-/// `EmitCopy`: copies of at most 64 bytes, with 4 at least left for the last.
+/// Writes copy elements of `len` (at least 4) bytes at `offset` (FORMAT.md §3.3): pieces of 64,
+/// then a 60 if more than 64 are left, then the rest.
 fn copy(out: &mut Vec<u8>, offset: usize, mut len: usize) {
-    while len >= 68 {
-        copy64(out, offset, 64);
-        len -= 64;
-    }
-    if len > 64 {
-        copy64(out, offset, 60);
-        len -= 60;
-    }
-    copy64(out, offset, len);
-}
-
-/// `EmitCopyAtMost64`: a copy with a 1-byte offset where it fits, else a 2-byte one.
-fn copy64(out: &mut Vec<u8>, offset: usize, len: usize) {
-    if len < 12 && offset < 2048 {
-        out.push(1 | ((len - 4) as u8) << 2 | ((offset >> 8) as u8) << 5);
-        out.push(offset as u8);
-    } else {
-        out.push(2 | ((len - 1) as u8) << 2);
-        out.extend_from_slice(&(offset as u16).to_le_bytes());
+    while len > 0 {
+        let k = match len {
+            68.. => 64,
+            65..=67 => 60,
+            _ => len,
+        };
+        if k < 12 && offset < 2048 {
+            out.push(1 | ((k - 4) << 2 | (offset >> 8) << 5) as u8);
+            out.push(offset as u8);
+        } else {
+            out.push(2 | ((k - 1) << 2) as u8);
+            out.extend_from_slice(&(offset as u16).to_le_bytes());
+        }
+        len -= k;
     }
 }

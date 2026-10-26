@@ -92,35 +92,33 @@ position. An *element* is written as the Snappy format defines it:
 zero included, is a position before `q`.
 
 If `n < 15`, the fragment is a single literal of all of it (none if `n = 0`). Otherwise, with
-`limit = n - 15`:
+the bound `B = n − 15`:
 
-```text
-ip = 0
-loop:
-    next_emit = ip; ip += 1; skip = 32
-    if limit - ip ≥ 16 (as signed numbers):
-        for q = ip, ip + 1, ..., ip + 15:
-            if probe(q) is a hit with c: ip = q; candidate = c; goto found
-        ip += 16; skip += 16
-    loop:
-        step = skip >> 5; skip += step
-        if ip + step > limit: ip = next_emit; goto remainder   # ip is not probed
-        if probe(ip) is a hit with c: candidate = c; break
-        ip += step
-  found:
-    write a literal of F[next_emit .. ip]
-    loop:
-        k = 4 + the number of bytes from ip + 4 on equal to those from candidate + 4 on,
-            up to the end of the fragment
-        write a copy of k bytes at offset ip - candidate
-        ip += k
-        if ip ≥ limit: goto remainder
-        table[entry(rd32(ip - 1))] = ip - 1
-        if probe(ip) is a hit with c: candidate = c
-        else: break
-remainder:
-    if ip < n: write a literal of F[ip .. n]
-```
+**Emit start.** The bytes not yet written start at the emit start `P`, which is 0 at first.
+
+**Searching.** A search after `P` looks for a hit at positions from `P + 1` on, and fails
+when it would go past `B`:
+
+1. *Dense run.* If `P + 1 + 16 ≤ B`, the 16 positions `P + 1` to `P + 16` are probed in order;
+   the first hit ends the search there. If none hits, the search goes on at `P + 17` with
+   the skip counter `K = 48`. Otherwise (fewer than 16 positions before `B`), it goes on at
+   `P + 1` with `K = 32`.
+2. *Sparse run.* At position `x`, the gap is `g = ⌊K / 32⌋`, and `K` grows by `g`. If
+   `x + g > B`, the search fails and `x` is not probed. Otherwise `x` is probed; a hit ends
+   the search there, and a miss moves on to `x + g`.
+
+**The fragment.** Starting with `P = 0`, search after `P`. If the search fails, the fragment
+ends. A hit at `q` with `c` gives a literal of `F[P .. q)` (none if empty), then copies:
+
+1. The copy at `q` takes `k = 4 + j` bytes at offset `q − c`, where `j` counts the bytes from
+   `q + 4` on that equal those from `c + 4` on, up to the end of the fragment. Let `r = q + k`
+   and `P = r`.
+2. If `r ≥ B`, the fragment ends.
+3. Set `table[entry(rd32(r − 1))] = r − 1`, then probe `r`. If that hits with `c'`, the next
+   copy is at `q = r` with `c = c'`, from step 1, with no literal before it.
+4. Otherwise search after `P` again, as above.
+
+When the fragment ends, a literal of `F[P .. n)` follows, unless it is empty.
 
 ## 4. LevelDB tables
 
