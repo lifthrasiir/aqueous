@@ -276,12 +276,15 @@ pub(crate) struct Cx {
 /// Text coded once, for the files of an archive that other files of it hold as the contents of
 /// their entries or members: the second to code a text of one takes the formula the first made,
 /// kept for it, rather than coding the text again; nor is that formula evaluated beforehand
-/// again ([`Once::copied`]).
+/// again ([`Once::evaluated`]). Nor is the first's where the text is large: what it would keep
+/// is only that its output is the file, which decoding the archive takes for one of the two
+/// alike applications only, reading it as much as running the module gives; it would only
+/// hold the output while the files are recompressed (10gb: `enwik9`, 1 GB).
 #[derive(Default)]
 pub(crate) struct Once {
     /// By the length and XXH3-128 of the text.
     slots: HashMap<(usize, u128), std::sync::Mutex<Slot>>,
-    /// Where the texts given a formula kept are (address and length).
+    /// Where the texts whose formulas are not evaluated beforehand are (address and length).
     copies: std::sync::Mutex<HashSet<(usize, usize)>>,
 }
 
@@ -292,6 +295,9 @@ enum Slot {
 }
 
 impl Once {
+    /// Texts longer than this are not evaluated beforehand ([`Once::evaluated`]).
+    const LARGE: usize = 64 << 20;
+
     /// For the texts of these lengths and XXH3-128s.
     pub(crate) fn of(texts: impl IntoIterator<Item = (usize, u128)>) -> Once {
         let slots = texts.into_iter().map(|k| (k, std::sync::Mutex::new(Slot::Empty))).collect();
@@ -311,6 +317,9 @@ impl Once {
             Slot::Empty => {
                 let f = code();
                 *slot = Slot::Kept(f.clone());
+                if d.len() > Self::LARGE {
+                    self.copies.lock().unwrap().insert((d.as_ptr() as usize, d.len()));
+                }
                 f
             }
             Slot::Kept(f) => {
@@ -321,10 +330,9 @@ impl Once {
         }
     }
 
-    /// Whether the formula of text `d` was one kept ([`Once::code`]), evaluated beforehand
-    /// already.
-    fn copied(&self, d: &[u8]) -> bool {
-        self.copies.lock().unwrap().contains(&(d.as_ptr() as usize, d.len()))
+    /// Whether the formula of text `d` ([`Once::code`]) is to be evaluated beforehand.
+    fn evaluated(&self, d: &[u8]) -> bool {
+        !self.copies.lock().unwrap().contains(&(d.as_ptr() as usize, d.len()))
     }
 }
 
@@ -594,7 +602,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 .job(shared.clone(), d)
                 .into_iter()
                 .for_each(|j| cx.deferred.borrow_mut().push((d.as_ptr() as usize, j))),
-            false if format == Format::Text && cx.once.copied(d) => {}
+            false if format == Format::Text && !cx.once.evaluated(d) => {}
             false => pre.submit(shared.clone(), d),
         }
     }
@@ -1346,6 +1354,21 @@ mod tests {
         assert!(a.report.files.iter().all(|f| f.modules.iter().any(|m| m.name == "wrt-recons")), "{:?}", a.report);
         assert!(a.report.unverified.is_empty());
         assert_eq!(TEXTS.lock().unwrap().iter().filter(|&&n| n == t.len()).count(), 1);
+    }
+
+    /// Of a text coded once for two, the formula kept is not evaluated beforehand again; nor is
+    /// the first where the text is large.
+    #[test]
+    fn once_evaluated() {
+        let (small, large) = (vec![b'a'; 1000], vec![b'a'; Once::LARGE + 1]);
+        let key = |d: &[u8]| (d.len(), xxhash_rust::xxh3::xxh3_128(d));
+        let once = Once::of([key(&small), key(&large)]);
+        let (small2, large2) = (small.clone(), large.clone());
+        for d in [&small, &small2, &large, &large2] {
+            once.code(d, || Some(Formula::default()));
+        }
+        assert!(once.evaluated(&small) && !once.evaluated(&small2));
+        assert!(!once.evaluated(&large) && !once.evaluated(&large2));
     }
 
     /// A stored ZIP archive of `files` (name, data).
