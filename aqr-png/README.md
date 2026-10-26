@@ -127,6 +127,11 @@ and the records come to 109.5 MB against 491.5 MB alone (4.5×). Files are coded
 token (the encoder of streams expanding more than 4×), and coded alone too to keep the
 smaller record: coding takes 35 s and decoding 17 s of one thread over the 684 MB.
 
+Tried and dropped: predicting the literals that are not the reference's by the reference's
+pixel where their three neighbours are the reference's (tables of their own). 2.6% of the
+tokens are such literals over the same pixels, but the records came to 108.5 MB only, and
+decoding took twice as long (the reference's data unfiltered).
+
 ### Speed
 
 Measured with `aqr-png bench`, `samply`, and retired instruction counts
