@@ -35,7 +35,7 @@ use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Placed, SegmentWriter, Tree
 use aqr_formula::probe::Held;
 use aqr_formula::{Formula, Kind, Module, Node};
 
-use crate::{Cx, Options, detect, kind_by_name, nested, place_all, sets, verify};
+use crate::{Cx, Once, Options, detect, kind_by_name, nested, place_all, sets, verify};
 
 /// Streams shorter than this are put together with those of their class and kind without
 /// telling whether they compress.
@@ -172,7 +172,7 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     order.sort_by(|&a, &b| sort_key(src.name(a)).cmp(&sort_key(src.name(b))).then(a.cmp(&b)));
     // the contents that may hold each other together, in the place of the first, a batch never
     // cutting them apart
-    let group = together(src, opt)?;
+    let (group, entries) = together(src, opt)?;
     let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
     order.iter().for_each(|&c| members.entry(group[c]).or_default().push(c));
     let mut batches: Vec<Vec<usize>> = vec![Vec::new()];
@@ -209,7 +209,7 @@ pub fn compress_tree_to<S: Source + ?Sized>(
                 std::collections::hash_map::Entry::Occupied(e) => r.files[c].same_as = Some(*e.get()),
                 std::collections::hash_map::Entry::Vacant(e) => {
                     e.insert(c);
-                    files.push(File::of(c, &d, hash, kind_by_name(src.name(c))));
+                    files.push(File::of(c, &d, hash, kind_by_name(src.name(c)), entries.contains(&c)));
                     data.push(d);
                 }
             }
@@ -279,8 +279,9 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// of at least [`MEMBER_MIN`] bytes), and contents that start alike (their first 64 KiB; the
 /// same file, longer or shorter). Of the contents of at least [`TOGETHER_MIN`] bytes, which are
 /// read at their start (and the archives at their end, the contents of the sizes of entries
-/// whole); together, no more than [`TOGETHER_MAX`] bytes.
-fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>> {
+/// whole); together, no more than [`TOGETHER_MAX`] bytes. Returns them, and the contents found
+/// as entries or members of others.
+fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize>, HashSet<usize>)> {
     const HEAD: u64 = 64 << 10;
     // (the end of a ZIP archive holding its central directory, mostly)
     const TAIL: u64 = 1 << 20;
@@ -357,11 +358,13 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>
     for (&c, sum) in wanted.iter().zip(sums) {
         by_sum.entry((sum?, src.size(c))).or_default().push(c);
     }
+    let mut entries = HashSet::new();
     for (e, archives) in &by_entry {
         let alike = by_sum.get(e).map_or(&[][..], |cs| &cs[..]);
         archives.iter().chain(alike).for_each(|&c| join(archives[0], c));
+        entries.extend(alike);
     }
-    Ok((0..n).map(|c| root(&mut parent, c)).collect())
+    Ok(((0..n).map(|c| root(&mut parent, c)).collect(), entries))
 }
 
 /// The CRC-32 and size of the files' contents in ar, tar or cpio archive `d`, those of at least
@@ -391,6 +394,8 @@ fn sort_key(name: &[u8]) -> (Vec<u8>, &[u8]) {
 struct File {
     c: usize,
     kind: Kind,
+    /// Whether it is found as an entry or member of another ([`together`]).
+    entry: bool,
     len: usize,
     /// Its XXH3-128 ([`check`]) and its checksum ([`aqr::checksum`]).
     hash: u128,
@@ -400,8 +405,8 @@ struct File {
 }
 
 impl File {
-    fn of(c: usize, d: &[u8], hash: u128, kind: Kind) -> File {
-        File { c, kind, len: d.len(), hash, sum: aqr::checksum(d), format: detect(d).map(|f| f.name()) }
+    fn of(c: usize, d: &[u8], hash: u128, kind: Kind, entry: bool) -> File {
+        File { c, kind, entry, len: d.len(), hash, sum: aqr::checksum(d), format: detect(d).map(|f| f.name()) }
     }
 
     /// Whether `d` is the file's data.
@@ -485,6 +490,10 @@ fn make<S: Source + ?Sized>(
     let regions: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     cx.held = Some(std::sync::Arc::new(Held::of(&regions, opt.threads)));
     cx.share_words(words(&regions, files, raw, opt).map(std::sync::Arc::new));
+    // (the text of a file found in another coded once, for both)
+    cx.once = std::sync::Arc::new(Once::of(
+        files.iter().enumerate().filter(|(k, f)| f.entry && !raw.contains(k)).map(|(_, f)| (f.len, f.hash)),
+    ));
     cx.pre = opt.verify.then(|| std::sync::Arc::new(verify::Prevalidator::spawn(opt.threads, &regions)));
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let mut taken = HashSet::new();
@@ -502,6 +511,8 @@ fn make<S: Source + ?Sized>(
         // same in an archive, both kept as they are)
         f.share_slices(SLICE_MIN);
     }
+    // (a text formula kept that none took)
+    cx.once = Default::default();
     let deferred: Vec<_> = cx.deferred.borrow_mut().drain(..).collect();
     if let Some(pre) = &cx.pre {
         deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));

@@ -268,6 +268,64 @@ pub(crate) struct Cx {
     /// nothing as that data does ([`smaller`]). Shared with the contexts of the files and
     /// contents made apart.
     coded_held: Arc<std::sync::Mutex<HashSet<(usize, u64)>>>,
+    /// The text of the files of an archive that others hold as contents, coded once ([`Once`]).
+    /// Shared with the contexts of the files made apart.
+    once: Arc<Once>,
+}
+
+/// Text coded once, for the files of an archive that other files of it hold as the contents of
+/// their entries or members: the second to code a text of one takes the formula the first made,
+/// kept for it, rather than coding the text again; nor is that formula evaluated beforehand
+/// again ([`Once::copied`]).
+#[derive(Default)]
+pub(crate) struct Once {
+    /// By the length and XXH3-128 of the text.
+    slots: HashMap<(usize, u128), std::sync::Mutex<Slot>>,
+    /// Where the texts given a formula kept are (address and length).
+    copies: std::sync::Mutex<HashSet<(usize, usize)>>,
+}
+
+enum Slot {
+    Empty,
+    Kept(Option<Formula>),
+    Taken,
+}
+
+impl Once {
+    /// For the texts of these lengths and XXH3-128s.
+    pub(crate) fn of(texts: impl IntoIterator<Item = (usize, u128)>) -> Once {
+        let slots = texts.into_iter().map(|k| (k, std::sync::Mutex::new(Slot::Empty))).collect();
+        Once { slots, copies: Default::default() }
+    }
+
+    /// The formula `code` makes of text `d`, or the one made of the same text before, kept.
+    fn code(&self, d: &[u8], code: impl FnOnce() -> Option<Formula>) -> Option<Formula> {
+        let slot = match self.slots.keys().any(|k| k.0 == d.len()) {
+            true => self.slots.get(&(d.len(), xxhash_rust::xxh3::xxh3_128(d))),
+            false => None,
+        };
+        let Some(slot) = slot else { return code() };
+        // (held as it is coded: the second waits for it)
+        let mut slot = slot.lock().unwrap();
+        match std::mem::replace(&mut *slot, Slot::Taken) {
+            Slot::Empty => {
+                let f = code();
+                *slot = Slot::Kept(f.clone());
+                f
+            }
+            Slot::Kept(f) => {
+                self.copies.lock().unwrap().insert((d.as_ptr() as usize, d.len()));
+                f
+            }
+            Slot::Taken => code(),
+        }
+    }
+
+    /// Whether the formula of text `d` was one kept ([`Once::code`]), evaluated beforehand
+    /// already.
+    fn copied(&self, d: &[u8]) -> bool {
+        self.copies.lock().unwrap().contains(&(d.as_ptr() as usize, d.len()))
+    }
 }
 
 impl Cx {
@@ -294,6 +352,7 @@ impl Cx {
             held: None,
             words: None,
             coded_held: Default::default(),
+            once: Default::default(),
         }
     }
 
@@ -507,7 +566,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     let prepared = ready.is_some();
     let f = match ready {
         Some(f) => f,
-        None => pure(format, d, opt.threads, cx.words.as_deref()).unwrap_or_else(|| {
+        None => pure(format, d, opt.threads, cx.words.as_deref(), &cx.once).unwrap_or_else(|| {
             catch_unwind(AssertUnwindSafe(|| match format {
                 Format::Pe => exe::pe(d),
                 Format::MachO => exe::macho(d),
@@ -535,6 +594,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 .job(shared.clone(), d)
                 .into_iter()
                 .for_each(|j| cx.deferred.borrow_mut().push((d.as_ptr() as usize, j))),
+            false if format == Format::Text && cx.once.copied(d) => {}
             false => pre.submit(shared.clone(), d),
         }
     }
@@ -861,6 +921,7 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         .collect();
     cx.ready.borrow_mut().extend(by_at.into_values().flatten());
     let (pre, held, words, coded_held) = (cx.pre.clone(), cx.held.clone(), cx.words.clone(), cx.coded_held.clone());
+    let once = cx.once.clone();
     let made = aqr_common::pool::par_map(later.len(), opt.threads, |i| {
         let (_, n, nest) = &later[i];
         let d = data(n);
@@ -869,6 +930,7 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         own.held = held.clone();
         own.share_words(words.clone());
         own.coded_held = coded_held.clone();
+        own.once = once.clone();
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         let child = made(d, opt, depth + 1, *nest, &own).filter(|c| !c.f.applies().is_empty());
         (child, own.deferred.into_inner())
@@ -1044,19 +1106,30 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
 /// its data, and takes nothing of a budget): `None` for the other formats. Whether coding pays
 /// off is the recompressor's call: the streams are not compressed yet, so their size says
 /// little. The formula is the same whatever `threads` is. Text is coded with `words` where
-/// given ([`Cx::words`]).
-fn pure(format: Format, d: &[u8], threads: usize, words: Option<&aqr_wrt::formula::Shared>) -> Option<Option<Formula>> {
+/// given ([`Cx::words`]), and as `once` tells.
+fn pure(
+    format: Format,
+    d: &[u8],
+    threads: usize,
+    words: Option<&aqr_wrt::formula::Shared>,
+    once: &Once,
+) -> Option<Option<Formula>> {
     let encode = pure_encode(format)?;
     #[cfg(test)]
     tests::PURE.with(|n| n.set(n.get() + 1));
-    Some(
+    let code = || {
+        #[cfg(test)]
+        if format == Format::Text {
+            tests::TEXTS.lock().unwrap().push(d.len());
+        }
         catch_unwind(AssertUnwindSafe(|| match (format, words) {
             (Format::Text, Some(w)) => aqr_wrt::formula::encode_with(d, w, threads),
             _ => encode(d, threads),
         }))
         .ok()
-        .flatten(),
-    )
+        .flatten()
+    };
+    Some(if format == Format::Text { once.code(d, code) } else { code() })
 }
 
 /// Whether `format` is one of [`pure`].
@@ -1105,7 +1178,8 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     let workers = opt.threads.min(jobs.len()).max(1);
     let inner = (opt.threads / workers).max(1);
     let words = cx.words.as_deref();
-    let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, inner, words).flatten());
+    let once = &*cx.once;
+    let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, inner, words, once).flatten());
     let mut ready = cx.ready.borrow_mut();
     let keys: Vec<_> = jobs.iter().map(|&(format, d, _)| (d.as_ptr() as usize, d.len(), format)).collect();
     for (&k, f) in keys.iter().zip(made) {
@@ -1180,6 +1254,12 @@ mod tests {
         pub(crate) static COPY: Cell<bool> = const { Cell::new(false) };
     }
 
+    /// The lengths of the texts given to aqr-wrt, on any thread.
+    pub(crate) static TEXTS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+    thread_local! {
+    }
+
     /// An ar, tar or cpio archive is worth what the files in it are: a probe counts them, not
     /// the archive, and scans data of its kind.
     #[test]
@@ -1233,6 +1313,39 @@ mod tests {
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert_eq!(PURE.with(Cell::get), 2);
         assert!(f.eval(&Native::default()).unwrap() == d);
+    }
+
+    /// A text file, and a ZIP archive of it, archived together: the text is coded once, the
+    /// archive's entry taking what was coded of the file.
+    #[test]
+    fn text_coded_once() {
+        let mut t = Vec::new();
+        let mut x = 7u64;
+        let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
+        while t.len() < 1_000_003 {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            std::io::Write::write_fmt(&mut t, format_args!("{} {} ", words[(x >> 61) as usize], (x >> 40) % 1000)).unwrap();
+        }
+        t.truncate(1_000_003);
+        let zip = stored_zip(&[("t.txt", &t)]);
+        let tree = aqr::Tree {
+            entries: ["t.txt", "t.zip"]
+                .iter()
+                .enumerate()
+                .map(|(c, name)| aqr::Entry {
+                    parent: None,
+                    name: name.as_bytes().to_vec(),
+                    node: aqr::EntryNode::File(c),
+                    extra: Default::default(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let inputs = [Input { name: b"t.txt", data: &t }, Input { name: b"t.zip", data: &zip }];
+        let a = compress_tree(&tree, &inputs, &Options { threads: 4, ..Options::default() });
+        assert!(a.report.files.iter().all(|f| f.modules.iter().any(|m| m.name == "wrt-recons")), "{:?}", a.report);
+        assert!(a.report.unverified.is_empty());
+        assert_eq!(TEXTS.lock().unwrap().iter().filter(|&&n| n == t.len()).count(), 1);
     }
 
     /// A stored ZIP archive of `files` (name, data).
