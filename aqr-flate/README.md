@@ -96,16 +96,16 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -
   coding (`aqr_flate::adapt`): the contexts include a lookahead, how the match at the next
   position compares. Priors (`model/priors-10.txt`) come from the first 16 uses of each
   context in every segment of the training split, worth 2 observations each.
-- **zlib emulation** (adaptive profiles). `zlib` ports zlib 1.3.1's `deflate_fast`,
-  `deflate_slow`, `deflate_rle`, `deflate_huff`, `longest_match` and `fill_window`, so its
-  output matches zlib's bit for bit. It is driven by the actual tokens (`predict`, then
+- **zlib emulation** (adaptive profiles). `zlib` reproduces the output of zlib 1.3.1's four
+  parsers (greedy for levels 1-3, lazy for 4-9, runs and Huffman only) bit for bit, as
+  FORMAT.md describes them; it is written from that description, not from zlib's code. It is driven by the actual tokens (`predict`, then
   `commit` of the actual token), so after a misprediction it carries on from where the stream
   really is. Each segment resumes it from a checkpoint (`zlib::Checkpoint`, a few counters:
   the lazy levels insert every position, so the rest of the state follows from the data).
   deflate_fast (levels 1-3) cannot be resumed, since its hash chains depend on the tokens, so
   such a stream is one segment.
-- **Detection** (`detect`): a cheap check of whether a stream can come from zlib, after
-  preflate's estimator. It checks that every dynamic header is exactly zlib's, that full
+- **Detection** (`detect`): a cheap check of whether a stream can come from zlib, on the idea
+  of preflate's estimator. It checks that every dynamic header is exactly zlib's, that full
   blocks hold `2^(mem+6) - 1` tokens (which gives memLevel), the maximum distance (which
   bounds windowBits), that no match refers to position 0 or uses 284+31, and that there are no
   far length-3 matches for lazy levels. The candidates left are ranked by emulating them over
@@ -125,9 +125,9 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -
 - **Speed.** Tokens are cut into ~1 MiB segments that are coded independently. The parser
   (see [below](#parser-and-writer-flate_reconsinflate-flate_reconswrite)) gathers the statistics everything
   else needs (symbol frequencies, fingerprint, segment cuts) as it decodes. Candidate matches
-  are measured on 8 bytes without branching. Exact zlib trees use a bottom-up heap with packed
+  are measured on 8 bytes without branching. Exact zlib trees use a heap with packed
   keys. Package-merge is computed as Huffman's two-queue algorithm whenever the limit does not
-  bite; tests check that it matches zopfli bit for bit.
+  bite; tests check that it matches the full package-merge.
 - **`deflate`**: a parser and bit-exact writer. `Stream` keeps everything an encoder can
   choose: block types and boundaries, stored-block padding and lengths, exact Huffman headers
   (HLIT, HDIST, HCLEN, the code-length RLE ops), the tokens, symbol 284+31 used for length 258,

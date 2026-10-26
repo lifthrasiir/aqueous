@@ -1373,7 +1373,7 @@ fn code_adaptive<'a>(
             cp = emu
                 .as_ref()
                 .and_then(Emulator::checkpoint)
-                .filter(|cp| cp.strstart - cp.match_available as usize == r.pos);
+                .filter(|cp| cp.cursor - cp.held as usize == r.pos);
             // Both ways the segment is coded with the emulator rebuilt from the checkpoint.
             emu = cp.as_ref().and_then(|cp| Emulator::resume(&f.data, p, cp));
             if emu.is_none() {
@@ -1390,48 +1390,48 @@ fn code_adaptive<'a>(
 /// An emulator's state at the start of a segment, relative to where it normally is.
 fn put_checkpoint(w: &mut BitWriter, cp: &Checkpoint, wbits: u8) {
     let ws = 1u64 << wbits;
-    let (s, b) = (cp.strstart as u64, cp.base as u64);
-    w.bits(1, cp.match_available as u32);
+    let (s, b) = (cp.cursor as u64, cp.origin as u64);
+    w.bits(1, cp.held as u32);
     put_gamma(w, s / ws - b / ws);
-    put_gamma(w, b + 2 * ws - cp.read as u64);
-    put_gamma(w, 2 * ws - cp.high_water as u64);
-    put_gamma(w, cp.match_length as u64 - 2);
-    if cp.match_length > 2 {
-        put_gamma(w, s - cp.match_start as u64);
+    put_gamma(w, b + 2 * ws - cp.fed as u64);
+    put_gamma(w, 2 * ws - cp.zero_mark as u64);
+    put_gamma(w, cp.length as u64 - 2);
+    if cp.length > 2 {
+        put_gamma(w, s - cp.source as u64);
     }
 }
 
 /// Inverse of [`put_checkpoint`] for a segment starting at `pos` in `n` bytes of data.
 fn get_checkpoint(r: &mut BitReader, pos: usize, wbits: u8, n: usize) -> Result<Checkpoint> {
     let ws = 1usize << wbits;
-    let match_available = r.bits(1)? == 1;
-    let strstart = pos + match_available as usize;
-    let base = (strstart / ws)
+    let held = r.bits(1)? == 1;
+    let cursor = pos + held as usize;
+    let origin = (cursor / ws)
         .checked_sub(get_usize(r, n)?)
         .ok_or(Error::Corrupt)?
         * ws;
-    let read = (base + 2 * ws)
+    let fed = (origin + 2 * ws)
         .checked_sub(get_usize(r, 2 * ws)?)
         .ok_or(Error::Corrupt)?;
-    let high_water = (2 * ws)
+    let zero_mark = (2 * ws)
         .checked_sub(get_usize(r, 2 * ws)?)
         .ok_or(Error::Corrupt)?;
-    let match_length = 2 + get_usize(r, crate::matchfind::MAX_MATCH)?;
-    let match_start = if match_length > 2 {
-        strstart
+    let length = 2 + get_usize(r, crate::matchfind::MAX_MATCH)?;
+    let source = if length > 2 {
+        cursor
             .checked_sub(get_usize(r, ws)?)
             .ok_or(Error::Corrupt)?
     } else {
         0
     };
     Ok(Checkpoint {
-        strstart,
-        base,
-        read,
-        high_water,
-        match_available,
-        match_length,
-        match_start,
+        cursor,
+        origin,
+        fed,
+        zero_mark,
+        held,
+        length,
+        source,
     })
 }
 

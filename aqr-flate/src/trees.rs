@@ -1,153 +1,20 @@
-//! Huffman code builders of known encoders, as candidates for predicting dynamic headers.
-//!
-//! Bit-exact ports of zopfli's length-limited package-merge, of zopfli's and brotli's (as
-//! used by ECT) count smoothing for run-length coding, and of zopfli/ECT's run-length coder
-//! of code lengths.
+//! Huffman code builders of known encoders, as candidates for predicting dynamic headers
+//! (FORMAT.md, "Header candidates"): zopfli's length-limited package-merge, zopfli's and
+//! brotli's (as ECT uses it) smoothing of counts, zopfli's / ECT's run-length coding of code
+//! lengths, and zlib's code lengths.
 
 use crate::huffman::RleOp;
 
-/// zopfli's `ZopfliLengthLimitedCodeLengths`: boundary package-merge (Katajainen, Moffat,
-/// Turpin) over `freqs`, with leaves sorted by (weight, symbol). A bit-exact port, kept as the
-/// reference of [`package_merge`].
-#[cfg(test)]
-fn package_merge_boundary(freqs: &[u64], maxbits: usize) -> Vec<u8> {
-    #[derive(Clone, Copy, Default)]
-    struct Node {
-        weight: u64,
-        tail: u32,
-        count: u32,
-    }
-    const NIL: u32 = u32::MAX;
-    thread_local! {
-        static POOL: std::cell::RefCell<Vec<Node>> = const { std::cell::RefCell::new(Vec::new()) };
-    }
-    let n = freqs.len();
-    let mut out = vec![0u8; n];
-    // Leaves by (weight, symbol), packed in one key.
-    let mut leaves: Vec<u64> = (0..n)
-        .filter(|&i| freqs[i] > 0)
-        .map(|i| freqs[i] << 9 | i as u64)
-        .collect();
-    let numsymbols = leaves.len();
-    if numsymbols == 0 || (1usize << maxbits) < numsymbols {
-        return out;
-    }
-    if numsymbols <= 2 {
-        for &l in &leaves {
-            out[(l & 511) as usize] = 1;
-        }
-        return out;
-    }
-    leaves.sort_unstable();
-    let weight = |i: usize| leaves[i] >> 9;
-    let maxbits = maxbits.min(numsymbols - 1);
-    POOL.with_borrow_mut(|pool| {
-        pool.clear();
-        pool.push(Node {
-            weight: weight(0),
-            tail: NIL,
-            count: 1,
-        });
-        pool.push(Node {
-            weight: weight(1),
-            tail: NIL,
-            count: 2,
-        });
-        let mut lists = [[0u32, 1u32]; 16];
-        let ns = numsymbols as u32;
-
-        // BoundaryPM. The original recurses twice into the previous list after packaging; a
-        // LIFO stack keeps its depth-first order, since every call sets up its node before
-        // recursing.
-        let mut stack: Vec<usize> = Vec::with_capacity(2 * maxbits);
-        for _ in 0..2 * numsymbols - 5 {
-            stack.push(maxbits - 1);
-            while let Some(index) = stack.pop() {
-                let lastcount = pool[lists[index][1] as usize].count;
-                if index == 0 && lastcount >= ns {
-                    continue;
-                }
-                let oldchain = lists[index][1];
-                let newchain = pool.len() as u32;
-                lists[index] = [oldchain, newchain];
-                if index == 0 {
-                    pool.push(Node {
-                        weight: weight(lastcount as usize),
-                        tail: NIL,
-                        count: lastcount + 1,
-                    });
-                    continue;
-                }
-                let sum = pool[lists[index - 1][0] as usize].weight
-                    + pool[lists[index - 1][1] as usize].weight;
-                if lastcount < ns && sum > weight(lastcount as usize) {
-                    let tail = pool[oldchain as usize].tail;
-                    pool.push(Node {
-                        weight: weight(lastcount as usize),
-                        tail,
-                        count: lastcount + 1,
-                    });
-                } else {
-                    pool.push(Node {
-                        weight: sum,
-                        tail: lists[index - 1][1],
-                        count: lastcount,
-                    });
-                    stack.push(index - 1);
-                    stack.push(index - 1);
-                }
-            }
-        }
-        // BoundaryPMFinal.
-        let index = maxbits - 1;
-        let lastcount = pool[lists[index][1] as usize].count;
-        let sum =
-            pool[lists[index - 1][0] as usize].weight + pool[lists[index - 1][1] as usize].weight;
-        if lastcount < ns && sum > weight(lastcount as usize) {
-            let tail = pool[lists[index][1] as usize].tail;
-            pool.push(Node {
-                weight: 0,
-                tail,
-                count: lastcount + 1,
-            });
-            lists[index][1] = pool.len() as u32 - 1;
-        } else {
-            let last = lists[index][1] as usize;
-            pool[last].tail = lists[index - 1][1];
-        }
-        // ExtractBitLengths.
-        let mut counts = [0usize; 16];
-        let mut end = 16;
-        let mut node = lists[maxbits - 1][1];
-        while node != NIL {
-            end -= 1;
-            counts[end] = pool[node as usize].count as usize;
-            node = pool[node as usize].tail;
-        }
-        let mut val = counts[15];
-        let mut ptr = 15;
-        let mut value = 1;
-        while ptr >= end {
-            while val > counts[ptr - 1] {
-                out[(leaves[val - 1] & 511) as usize] = value;
-                val -= 1;
-            }
-            ptr -= 1;
-            value += 1;
-        }
-    });
-    out
-}
-
 /// zopfli's `ZopfliLengthLimitedCodeLengths` (boundary package-merge, after Katajainen,
 /// Moffat and Turpin, with leaves sorted by weight then symbol), computed as the classic
-/// package-merge over arrays, which gives the same lengths several times faster: at every level the leaves merge with the packages of the level
-/// below, a package going first on equal weights (as zopfli takes a leaf only when it is
+/// package-merge over arrays, which gives the same lengths several times faster: at every
+/// level the leaves merge with the packages of the level below, a package going first on
+/// equal weights (as zopfli takes a leaf only when it is
 /// strictly lighter); the lengths count the levels at which each leaf is among the items
 /// needed.
 pub fn package_merge(freqs: &[u64], maxbits: usize) -> Vec<u8> {
     // Without the limit biting, the plain Huffman code with the same tie breaking (much
-    // cheaper) is the same; the tests check that against zopfli's own algorithm.
+    // cheaper) is the same; the tests check that against the package-merge below.
     if let Some(l) = huffman_lens(freqs, maxbits) {
         return l;
     }
@@ -277,186 +144,147 @@ pub fn patch_distances(d: &mut [u8]) {
     }
 }
 
-/// zopfli's `OptimizeHuffmanForRle`.
+/// The positions below `c.len()` that lie in a long enough run of equal counts (5 or more
+/// zeros, 7 or more of anything else), as the smoothings treat them.
+fn settled_positions(c: &[u64]) -> Vec<bool> {
+    let mut settled = vec![false; c.len()];
+    let mut start = 0;
+    for run in c.chunk_by(|a, b| a == b) {
+        if run.len() >= if run[0] == 0 { 5 } else { 7 } {
+            settled[start..start + run.len()].fill(true);
+        }
+        start += run.len();
+    }
+    settled
+}
+
+/// zopfli's smoothing of `counts` (FORMAT.md, "Code lengths").
 pub fn smooth_zopfli(counts: &mut [u64]) {
-    let Some(length) = counts.iter().rposition(|&c| c != 0).map(|i| i + 1) else {
+    let Some(len) = counts.iter().rposition(|&x| x != 0).map(|i| i + 1) else {
         return;
     };
-    let mut good = vec![false; length];
-    let mut symbol = counts[0];
-    let mut stride = 0usize;
-    for i in 0..=length {
-        if i == length || counts[i] != symbol {
-            if (symbol == 0 && stride >= 5) || (symbol != 0 && stride >= 7) {
-                for k in 0..stride {
-                    good[i - k - 1] = true;
-                }
-            }
-            stride = 1;
-            if i != length {
-                symbol = counts[i];
-            }
-        } else {
-            stride += 1;
-        }
-    }
-    let mut stride = 0u64;
-    let mut limit = counts[0];
-    let mut sum = 0u64;
-    for i in 0..=length {
-        if i == length || good[i] || counts[i].abs_diff(limit) >= 4 {
-            if stride >= 4 || (stride >= 3 && sum == 0) {
-                let count = if sum == 0 {
+    let settled = settled_positions(&counts[..len]);
+    let (mut size, mut sum, mut reference) = (0usize, 0u64, counts[0]);
+    for i in 0..=len {
+        let here = counts.get(i).copied().filter(|_| i < len).unwrap_or(0);
+        if i == len || settled[i] || here.abs_diff(reference) >= 4 {
+            if size >= 4 || (size >= 3 && sum == 0) {
+                let v = if sum == 0 {
                     0
                 } else {
-                    ((sum + stride / 2) / stride).max(1)
+                    ((sum + size as u64 / 2) / size as u64).max(1)
                 };
-                for k in 0..stride as usize {
-                    counts[i - k - 1] = count;
-                }
+                counts[i - size..i].fill(v);
             }
-            stride = 0;
+            size = 0;
             sum = 0;
-            limit = if i + 3 < length {
-                (counts[i] + counts[i + 1] + counts[i + 2] + counts[i + 3] + 2) / 4
-            } else if i < length {
-                counts[i]
+            reference = if i + 3 < len {
+                (counts[i..i + 4].iter().sum::<u64>() + 2) / 4
             } else {
-                0
+                here
             };
         }
-        stride += 1;
-        if i != length {
-            sum += counts[i];
-        }
+        size += 1;
+        sum += here;
     }
 }
 
-/// brotli's `OptimizeHuffmanCountsForRle`, as ECT uses it.
+/// brotli's smoothing of `counts`, as ECT uses it (FORMAT.md, "Code lengths").
 pub fn smooth_brotli(counts: &mut [u64]) {
-    let Some(length) = counts.iter().rposition(|&c| c != 0).map(|i| i + 1) else {
+    let Some(len) = counts.iter().rposition(|&x| x != 0).map(|i| i + 1) else {
         return;
     };
-    let mut good = vec![false; length];
-    let mut symbol = counts[0];
-    let mut stride = 0usize;
-    for i in 0..=length {
-        if i == length || counts[i] != symbol {
-            if (symbol == 0 && stride >= 5) || stride >= 7 {
-                for k in 0..stride {
-                    good[i - k - 1] = true;
-                }
-            }
-            stride = 1;
-            // The original reads counts[length] here; its value only matters as `symbol`
-            // after the loop, which is not used.
-            symbol = counts.get(i).copied().unwrap_or(0);
-        } else {
-            stride += 1;
-        }
-    }
-    const STREAK_LIMIT: i64 = 1240;
-    let c = |counts: &[u64], i: usize| counts.get(i).copied().unwrap_or(0) as i64;
-    let mut stride = 0i64;
-    let mut limit: i64 = 256 * (c(counts, 0) + c(counts, 1) + c(counts, 2)) / 3 + 420;
-    let mut sum: i64 = 0;
-    let mut i = 0;
-    while i <= length {
-        let ci = if i < length { counts[i] as i64 } else { 0 };
-        if i == length
-            || good[i]
-            || (i > 0 && good[i - 1])
-            || (256 * ci - limit).abs() >= STREAK_LIMIT
+    let settled = settled_positions(&counts[..len]);
+    // Counts past the end read as 0; references are on a scale of 256.
+    let at = |c: &[u64], i: usize| c.get(i).copied().unwrap_or(0) as i128;
+    let (mut size, mut sum) = (0i128, 0i128);
+    let mut reference = 256 * (at(counts, 0) + at(counts, 1) + at(counts, 2)) / 3 + 420;
+    for i in 0..=len {
+        let here = if i < len { at(counts, i) } else { 0 };
+        if i == len
+            || settled[i]
+            || (i > 0 && settled[i - 1])
+            || (256 * here - reference).abs() >= 1240
         {
-            if stride >= 4 {
-                let mut count = (sum + stride / 2) / stride;
-                if count < 1 && sum != 0 {
-                    count = 1;
+            if size >= 4 {
+                let mut v = (sum + size / 2) / size;
+                if v < 1 && sum != 0 {
+                    v = 1;
                 }
-                for k in 0..stride as usize {
-                    counts[i - k - 1] = count as u64;
-                }
+                counts[i - size as usize..i].fill(v as u64);
             }
-            stride = 0;
+            size = 0;
             sum = 0;
-            let ci = c(counts, i);
-            limit = if (i as i64) < length as i64 - 2 {
-                256 * (counts[i] + counts[i + 1] + counts[i + 2]) as i64 / 3 + 420
+            reference = if i + 2 < len {
+                256 * (at(counts, i) + at(counts, i + 1) + at(counts, i + 2)) / 3 + 420
             } else {
-                256 * ci
+                256 * at(counts, i)
             };
         }
-        stride += 1;
-        if i != length {
-            sum += counts[i] as i64;
-            if stride >= 4 {
-                limit = (256 * sum + stride / 2) / stride;
-            }
-            if stride == 4 {
-                limit += 120;
+        size += 1;
+        if i < len {
+            sum += here;
+            if size >= 4 {
+                reference = (256 * sum + size / 2) / size + if size == 4 { 120 } else { 0 };
             }
         }
-        i += 1;
     }
 }
 
-/// zopfli/ECT's `EncodeTree` over the code lengths `lens` (literal/length then distance,
-/// already cut to HLIT and HDIST), with its flags (`fuse_8` and `fuse_7` are ECT's): the
-/// run-length coding.
+/// zopfli's / ECT's run-length coding of `lens` (FORMAT.md, "Run-length codings") with the
+/// flags `use_16`, `use_17`, `use_18`, `fuse_8` and `fuse_7`.
 pub fn encode_tree(lens: &[u8], [use_16, use_17, use_18, fuse_8, fuse_7]: [bool; 5]) -> Vec<RleOp> {
-    let mut ops = vec![];
-    let op = |sym: u8, extra: u8| RleOp { sym, extra };
-    let total = lens.len();
+    let op = |sym: u8, extra: usize| RleOp {
+        sym,
+        extra: extra as u8,
+    };
+    let mut out = vec![];
     let mut i = 0;
-    while i < total {
-        let symbol = lens[i];
-        let mut count = 1usize;
-        if use_16 || (symbol == 0 && (use_17 || use_18)) {
-            while i + count < total && lens[i + count] == symbol {
-                count += 1;
-            }
-        }
-        i += count;
-        if symbol == 0 && count >= 3 {
+    while i < lens.len() {
+        let v = lens[i];
+        let whole = lens[i..].iter().take_while(|&&l| l == v).count();
+        let mut r = if use_16 || (v == 0 && (use_17 || use_18)) {
+            whole
+        } else {
+            1
+        };
+        i += r;
+        if v == 0 && r >= 3 {
             if use_18 {
-                while count >= 11 {
-                    let c2 = count.min(138);
-                    ops.push(op(18, (c2 - 11) as u8));
-                    count -= c2;
+                while r >= 11 {
+                    let k = r.min(138);
+                    out.push(op(18, k - 11));
+                    r -= k;
                 }
             }
             if use_17 {
-                while count >= 3 {
-                    let c2 = count.min(10);
-                    ops.push(op(17, (c2 - 3) as u8));
-                    count -= c2;
+                while r >= 3 {
+                    let k = r.min(10);
+                    out.push(op(17, k - 3));
+                    r -= k;
                 }
             }
         }
-        if use_16 && count >= 4 {
-            count -= 1;
-            ops.push(op(symbol, 0));
-            while count >= 3 {
-                if fuse_8 && count == 8 {
-                    ops.push(op(16, 1));
-                    ops.push(op(16, 1));
-                    count = 0;
-                } else if fuse_7 && count == 7 {
-                    ops.push(op(16, 1));
-                    ops.push(op(16, 0));
-                    count = 0;
+        if use_16 && r >= 4 {
+            out.push(op(v, 0));
+            r -= 1;
+            while r >= 3 {
+                if fuse_8 && r == 8 {
+                    out.extend([op(16, 1); 2]);
+                    r = 0;
+                } else if fuse_7 && r == 7 {
+                    out.extend([op(16, 1), op(16, 0)]);
+                    r = 0;
                 } else {
-                    let c2 = count.min(6);
-                    ops.push(op(16, (c2 - 3) as u8));
-                    count -= c2;
+                    let k = r.min(6);
+                    out.push(op(16, k - 3));
+                    r -= k;
                 }
             }
         }
-        for _ in 0..count {
-            ops.push(op(symbol, 0));
-        }
+        out.extend(std::iter::repeat_n(op(v, 0), r));
     }
-    ops
+    out
 }
 
 /// Number of flag combinations of zopfli/ECT's run-length coder ([`zopfli_ops`]): ECT's
@@ -471,159 +299,123 @@ pub fn zopfli_ops(lens: &[u8], k: usize) -> Option<Vec<RleOp>> {
     Some(encode_tree(lens, flags))
 }
 
-/// [`crate::huffman::zlib_lens`] (zlib's `build_tree` and `gen_bitlen`), the same lengths
-/// faster: 32-bit keys and a sentinel past the heap, so that sifting down picks a child
-/// without branching.
+/// zlib's code lengths, as [`crate::huffman::zlib_lens`] gives them; this one is on the hot
+/// path of header coding and should be fast.
 pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
-    const MAX_NODES: usize = 2 * 286 + 1;
-    // Heap entries are key << 16 | node, keys frequency << 8 | depth (zlib's order); only
-    // keys are compared. Past the heap, sentinels heavier than anything.
-    const SENT: u64 = u64::MAX;
-    let elems = freq.len();
-    // Keys must fit in 32 bits: sums of frequencies in 24.
-    if elems > 286 || freq.iter().map(|&f| f as u64).sum::<u64>() >= 1 << 23 {
+    const NODES: usize = 2 * 288;
+    let n = freq.len();
+    let max_len = max_length as usize;
+    if !(2..=288).contains(&n) || !(1..=15).contains(&max_len) {
         return crate::huffman::zlib_lens(freq, max_length);
     }
-    let mut heap = [SENT; MAX_NODES + 2];
-    let mut len = 0usize;
-    let mut max_code: isize = -1;
-    for (n, &f) in freq.iter().enumerate() {
+    // A heap entry packs (frequency, depth, id) so that the weight, all that is compared,
+    // is `entry >> 10`; frequencies stay below 2^41, depths below 2^9, ids below 2^10.
+    let weight = |e: u64| e >> 10;
+    let mut heap = [0u64; 290];
+    let mut m = 0;
+    let mut top: isize = -1;
+    for (i, &f) in freq.iter().enumerate() {
         if f != 0 {
-            len += 1;
-            heap[len] = (f as u64) << 24 | n as u64;
-            max_code = n as isize;
+            m += 1;
+            heap[m] = (f as u64) << 19 | i as u64;
+            top = i as isize;
         }
     }
-    while len < 2 {
-        let node = if max_code < 2 {
-            max_code += 1;
-            max_code as usize
+    while m < 2 {
+        let sym = if top < 2 {
+            top += 1;
+            top as usize
         } else {
             0
         };
-        len += 1;
-        heap[len] = 1 << 24 | node as u64;
+        m += 1;
+        heap[m] = 1 << 19 | sym as u64;
     }
-    let max_code = max_code as usize;
-    // Which symbols are coded (zlib's nonzero frequencies, forced ones included).
-    let mut coded = [false; 286];
-    for &e in &heap[1..=len] {
-        coded[(e & 0xffff) as usize] = true;
-    }
-
-    /// zlib's sift-down, bottom-up (after Floyd): the smaller children move up all the way
-    /// to a leaf, then `v` climbs back to where zlib's sift-down stops (the first child on the
-    /// path not lighter than it; keys only grow along the path), with fewer unpredictable
-    /// branches.
-    #[inline(always)]
-    fn down(heap: &mut [u64; MAX_NODES + 2], len: usize, start: usize) {
-        let v = heap[start];
-        let kv = v >> 16;
-        let mut k = start;
-        loop {
-            let j = 2 * k;
-            if j > len {
+    let sink = |heap: &mut [u64; 290], m: usize, mut k: usize| {
+        let node = heap[k];
+        while 2 * k <= m {
+            let mut c = 2 * k;
+            if c < m && weight(heap[c + 1]) <= weight(heap[c]) {
+                c += 1;
+            }
+            if weight(node) <= weight(heap[c]) {
                 break;
             }
-            let (a, b) = (heap[j], heap[j + 1]);
-            let right = b >> 16 <= a >> 16;
-            heap[k] = if right { b } else { a };
-            k = j + right as usize;
+            heap[k] = heap[c];
+            k = c;
         }
-        while k > start && heap[k / 2] >> 16 >= kv {
-            heap[k] = heap[k / 2];
-            k /= 2;
-        }
-        heap[k] = v;
+        heap[k] = node;
+    };
+    for k in (1..=m / 2).rev() {
+        sink(&mut heap, m, k);
     }
+    let mut parent = [0u16; NODES];
+    let mut list = [0u16; NODES];
+    let mut listed = 0;
+    let mut next = n;
+    while m >= 2 {
+        let x = heap[1];
+        heap[1] = heap[m];
+        m -= 1;
+        sink(&mut heap, m, 1);
+        let y = heap[1];
+        let (x_id, y_id) = ((x & 1023) as usize, (y & 1023) as usize);
+        list[listed] = x_id as u16;
+        list[listed + 1] = y_id as u16;
+        listed += 2;
+        parent[x_id] = next as u16;
+        parent[y_id] = next as u16;
+        let depth = ((x >> 10) & 511).max((y >> 10) & 511) + 1;
+        heap[1] = ((x >> 19) + (y >> 19)) << 19 | depth << 10 | next as u64;
+        sink(&mut heap, m, 1);
+        next += 1;
+    }
+    list[listed] = (heap[1] & 1023) as u16;
+    listed += 1;
 
-    for k in (1..=len / 2).rev() {
-        down(&mut heap, len, k);
-    }
-    // Nodes in the order zlib stacks them at the top of its heap array, and parents.
-    let mut order = [0u16; MAX_NODES];
-    let mut no = 0;
-    let mut dad = [0u16; MAX_NODES];
-    let mut node = elems;
-    loop {
-        let n = heap[1];
-        heap[1] = heap[len];
-        heap[len] = SENT;
-        len -= 1;
-        down(&mut heap, len, 1);
-        let m = heap[1];
-        let (kn, km) = (n >> 16, m >> 16);
-        let (n, m) = ((n & 0xffff) as u16, (m & 0xffff) as u16);
-        order[no] = n;
-        order[no + 1] = m;
-        no += 2;
-        let depth = (kn & 0xff).max(km & 0xff) + 1;
-        let k = ((kn >> 8) + (km >> 8)) << 8 | depth;
-        dad[n as usize] = node as u16;
-        dad[m as usize] = node as u16;
-        heap[1] = k << 16 | node as u64;
-        node += 1;
-        down(&mut heap, len, 1);
-        if len < 2 {
-            break;
-        }
-    }
-    order[no] = (heap[1] & 0xffff) as u16;
-    no += 1;
-
-    // gen_bitlen: from the root down.
-    let mut lens = [0u8; MAX_NODES];
-    let mut bl_count = [0u32; 16];
+    let mut len = [0u8; NODES];
+    let mut count = [0u16; 16];
     let mut overflow = 0i32;
-    for &n in order[..no - 1].iter().rev() {
-        let n = n as usize;
-        let mut bits = lens[dad[n] as usize] + 1;
-        if bits > max_length {
-            bits = max_length;
+    for &node in list[..listed - 1].iter().rev() {
+        let mut l = len[parent[node as usize] as usize] + 1;
+        if l as usize > max_len {
+            l = max_len as u8;
             overflow += 1;
         }
-        lens[n] = bits;
-        if n <= max_code {
-            bl_count[bits as usize] += 1;
+        len[node as usize] = l;
+        if node as isize <= top {
+            count[l as usize] += 1;
         }
     }
     if overflow > 0 {
-        loop {
-            let mut bits = max_length as usize - 1;
-            while bl_count[bits] == 0 {
-                bits -= 1;
+        while overflow > 0 {
+            let mut l = max_len - 1;
+            while count[l] == 0 {
+                l -= 1;
             }
-            bl_count[bits] -= 1;
-            bl_count[bits + 1] += 2;
-            bl_count[max_length as usize] -= 1;
+            count[l] -= 1;
+            count[l + 1] += 2;
+            count[max_len] -= 1;
             overflow -= 2;
-            if overflow <= 0 {
-                break;
-            }
         }
-        let mut h = 0;
-        for bits in (1..=max_length as usize).rev() {
-            let mut k = bl_count[bits];
-            while k != 0 {
-                let m = order[h] as usize;
-                h += 1;
-                if m > max_code {
-                    continue;
-                }
-                lens[m] = bits as u8;
-                k -= 1;
+        let mut bits = max_len;
+        let mut left = count[bits];
+        for &node in list[..listed].iter().filter(|&&x| x as isize <= top) {
+            while left == 0 {
+                bits -= 1;
+                left = count[bits];
             }
+            len[node as usize] = bits as u8;
+            left -= 1;
         }
     }
-    (0..elems)
-        .map(|n| {
-            if n <= max_code && coded[n] {
-                lens[n]
-            } else {
-                0
-            }
-        })
-        .collect()
+    let mut out = vec![0u8; n];
+    for &node in &list[..listed] {
+        if node as isize <= top {
+            out[node as usize] = len[node as usize];
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -662,7 +454,7 @@ mod tests {
             let maxbits = if n == 19 { 7 } else { 15 };
             match huffman_lens(&freq, maxbits) {
                 None => deep += 1,
-                Some(h) if h == package_merge_boundary(&freq, maxbits) => same += 1,
+                Some(h) if h == package_merge(&freq, maxbits) => same += 1,
                 Some(_) => differ += 1,
             }
         }
@@ -703,35 +495,6 @@ mod tests {
                 crate::huffman::zlib_lens(&freq, max_length),
                 "{freq:?}"
             );
-        }
-    }
-
-    /// The array package-merge gives the boundary package-merge's lengths, ties included.
-    #[test]
-    fn package_merge_is_zopflis() {
-        let mut lcg = 77u32;
-        let mut rnd = |m: u32| {
-            lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
-            (lcg >> 8) % m
-        };
-        for round in 0..20000 {
-            let n = [3, 5, 19, 30, 32, 286, 288][round % 7];
-            // Many ties: few distinct weights, and skewed ones that hit the limit.
-            let f: Vec<u64> = (0..n)
-                .map(|_| match rnd(4) {
-                    0 => 0,
-                    1 => rnd(4) as u64 + 1,
-                    2 => 1u64 << rnd(20),
-                    _ => rnd(1000) as u64,
-                })
-                .collect();
-            for maxbits in [7, 9, 12, 15] {
-                assert_eq!(
-                    package_merge(&f, maxbits),
-                    package_merge_boundary(&f, maxbits),
-                    "{f:?} limit {maxbits}"
-                );
-            }
         }
     }
 

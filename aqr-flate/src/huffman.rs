@@ -121,151 +121,112 @@ impl Decoder {
     }
 }
 
-/// zlib's `build_tree` + `gen_bitlen` (trees.c), bit-exact including tie breaking and the
-/// overflow fixup. `freq` is indexed by symbol and has `elems` entries (286, 30 or 19).
-/// Unused symbols get length 0; at least two codes are always produced.
+/// zlib's code lengths `zlib(freq, max_length)` (FORMAT.md, "Code lengths"); `freq` has at
+/// most 286 entries.
 pub fn zlib_lens(freq: &[u32], max_length: u8) -> Vec<u8> {
-    const MAX_NODES: usize = 2 * 286 + 1;
-    let elems = freq.len();
-    assert!(elems <= 286);
-    let nodes = 2 * elems + 1;
-    let heap_size = nodes;
-    // Fixed-size scratch on the stack: this runs for every block of every pass.
-    let mut f = [0u32; MAX_NODES];
-    f[..elems].copy_from_slice(freq);
-    let mut depth = [0u8; MAX_NODES];
-    let mut dad = [0usize; MAX_NODES];
-    let mut len = [0u8; MAX_NODES];
-    let mut heap = [0usize; MAX_NODES + 1];
-    let mut heap_len = 0usize;
-    let mut heap_max = heap_size;
-    let mut max_code: isize = -1;
-
-    for n in 0..elems {
-        if f[n] != 0 {
-            heap_len += 1;
-            heap[heap_len] = n;
-            max_code = n as isize;
-            depth[n] = 0;
+    let n = freq.len();
+    let max_len = max_length as usize;
+    // A node is (frequency, depth, id); the heap's weight is the first two, and the layout
+    // alone settles ties. Leaves have their symbol as id, forced ones included.
+    type Node = (u64, u32, usize);
+    let mut nodes: Vec<Node> = vec![];
+    let mut top: isize = -1;
+    for (i, &f) in freq.iter().enumerate() {
+        if f != 0 {
+            nodes.push((f as u64, 0, i));
+            top = i as isize;
         }
     }
-    while heap_len < 2 {
-        let node = if max_code < 2 {
-            max_code += 1;
-            max_code as usize
-        } else {
-            0
-        };
-        heap_len += 1;
-        heap[heap_len] = node;
-        f[node] = 1;
-        depth[node] = 0;
+    while nodes.len() < 2 {
+        let sym = if top < 2 { (top + 1) as usize } else { 0 };
+        if top < 2 {
+            top += 1;
+        }
+        nodes.push((1, 0, sym));
     }
-    let max_code = max_code as usize;
-
-    // zlib's `smaller`: by frequency, then by depth, i.e. by this key.
-    let mut key = [0u64; MAX_NODES];
-    for n in 0..elems {
-        key[n] = (f[n] as u64) << 8 | depth[n] as u64;
-    }
-    let downheap = |heap: &mut [usize], heap_len: usize, key: &[u64], mut k: usize| {
-        let v = heap[k];
-        let mut j = k << 1;
-        while j <= heap_len {
-            if j < heap_len && key[heap[j + 1]] <= key[heap[j]] {
-                j += 1;
+    let base = n.max(top as usize + 1);
+    let no_heavier = |a: &Node, b: &Node| (a.0, a.1) <= (b.0, b.1);
+    let sink = |heap: &mut Vec<Node>, mut k: usize| {
+        // `heap[0]` is unused, so that the children of `k` are at `2k` and `2k + 1`.
+        let node = heap[k];
+        let m = heap.len() - 1;
+        while 2 * k <= m {
+            let mut c = 2 * k;
+            if c < m && no_heavier(&heap[c + 1], &heap[c]) {
+                c += 1;
             }
-            if key[v] <= key[heap[j]] {
+            if no_heavier(&node, &heap[c]) {
                 break;
             }
-            heap[k] = heap[j];
-            k = j;
-            j <<= 1;
+            heap[k] = heap[c];
+            k = c;
         }
-        heap[k] = v;
+        heap[k] = node;
     };
-
-    for k in (1..=heap_len / 2).rev() {
-        downheap(&mut heap, heap_len, &key, k);
+    let mut heap = vec![(0, 0, 0)];
+    heap.extend(nodes);
+    for k in (1..=(heap.len() - 1) / 2).rev() {
+        sink(&mut heap, k);
     }
-    let mut node = elems;
-    loop {
-        let n = heap[1];
-        heap[1] = heap[heap_len];
-        heap_len -= 1;
-        downheap(&mut heap, heap_len, &key, 1);
-        let m = heap[1];
-        heap_max -= 1;
-        heap[heap_max] = n;
-        heap_max -= 1;
-        heap[heap_max] = m;
-        f[node] = f[n] + f[m];
-        depth[node] = depth[n].max(depth[m]) + 1;
-        key[node] = (f[node] as u64) << 8 | depth[node] as u64;
-        dad[n] = node;
-        dad[m] = node;
-        heap[1] = node;
-        node += 1;
-        downheap(&mut heap, heap_len, &key, 1);
-        if heap_len < 2 {
-            break;
-        }
+    let mut parent = vec![0usize; base + heap.len()];
+    let mut list: Vec<usize> = vec![];
+    let mut next = base;
+    while heap.len() > 2 {
+        let x = heap[1];
+        heap[1] = heap.pop().unwrap();
+        sink(&mut heap, 1);
+        let y = heap[1];
+        list.extend([x.2, y.2]);
+        parent[x.2] = next;
+        parent[y.2] = next;
+        heap[1] = (x.0 + y.0, x.1.max(y.1) + 1, next);
+        sink(&mut heap, 1);
+        next += 1;
     }
-    heap_max -= 1;
-    heap[heap_max] = heap[1];
+    list.push(heap[1].2);
 
-    // gen_bitlen
-    let mut bl_count = [0u32; 16];
-    let mut overflow = 0i32;
-    len[heap[heap_max]] = 0;
-    let mut h = heap_max + 1;
-    while h < heap_size {
-        let n = heap[h];
-        let mut bits = len[dad[n]] + 1;
-        if bits > max_length {
-            bits = max_length;
+    let mut len = vec![0usize; next];
+    let mut count = vec![0usize; max_len + 1];
+    let mut overflow = 0i64;
+    for &node in list[..list.len() - 1].iter().rev() {
+        let mut l = len[parent[node]] + 1;
+        if l > max_len {
+            l = max_len;
             overflow += 1;
         }
-        len[n] = bits;
-        if n <= max_code {
-            bl_count[bits as usize] += 1;
+        len[node] = l;
+        if node as isize <= top {
+            count[l] += 1;
         }
-        h += 1;
     }
     if overflow > 0 {
-        loop {
-            let mut bits = max_length as usize - 1;
-            while bl_count[bits] == 0 {
-                bits -= 1;
+        while overflow > 0 {
+            let mut l = max_len - 1;
+            while count[l] == 0 {
+                l -= 1;
             }
-            bl_count[bits] -= 1;
-            bl_count[bits + 1] += 2;
-            bl_count[max_length as usize] -= 1;
+            count[l] -= 1;
+            count[l + 1] += 2;
+            count[max_len] -= 1;
             overflow -= 2;
-            if overflow <= 0 {
-                break;
-            }
         }
-        h = heap_size;
-        for bits in (1..=max_length as usize).rev() {
-            let mut n = bl_count[bits];
-            while n != 0 {
-                h -= 1;
-                let m = heap[h];
-                if m > max_code {
-                    continue;
-                }
-                len[m] = bits as u8;
-                n -= 1;
+        let mut bits = max_len;
+        let mut left = count[bits];
+        for &node in list.iter().filter(|&&node| node as isize <= top) {
+            while left == 0 {
+                bits -= 1;
+                left = count[bits];
             }
+            len[node] = bits;
+            left -= 1;
         }
     }
-    let mut out = vec![0u8; elems];
-    for n in 0..elems {
-        // Symbols never pushed onto the heap keep length 0.
-        if n <= max_code && f[n] != 0 {
-            out[n] = len[n];
-        }
+    let mut out = vec![0u8; n];
+    for &node in list
+        .iter()
+        .filter(|&&node| node as isize <= top && node < n)
+    {
+        out[node] = len[node] as u8;
     }
     out
 }
@@ -298,92 +259,81 @@ impl RleOp {
     }
 }
 
-/// zlib's `send_tree` over one tree (`lens` is `max_code + 1` long).
+/// zlib's run-length coding of one tree's lengths (FORMAT.md, "Run-length codings"),
+/// appended to `out`.
 pub fn rle_zlib(lens: &[u8], out: &mut Vec<RleOp>) {
-    let op = |sym: u8, extra: u8| RleOp { sym, extra };
-    let mut prevlen: i32 = -1;
-    let mut nextlen = lens.first().map_or(-1, |&l| l as i32);
-    let mut count = 0usize;
-    let (mut max_count, mut min_count) = if nextlen == 0 { (138, 3) } else { (7, 4) };
-    for n in 0..lens.len() {
-        let curlen = nextlen;
-        nextlen = lens.get(n + 1).map_or(-1, |&l| l as i32);
-        count += 1;
-        if count < max_count && curlen == nextlen {
-            continue;
-        } else if count < min_count {
-            for _ in 0..count {
-                out.push(op(curlen as u8, 0));
+    let op = |sym: u8, extra: usize| RleOp {
+        sym,
+        extra: extra as u8,
+    };
+    let mut i = 0;
+    let mut previous = None;
+    let mut limits = match lens.first() {
+        Some(0) => (138, 3),
+        _ => (7, 4),
+    };
+    while i < lens.len() {
+        let v = lens[i];
+        let k = lens[i..]
+            .iter()
+            .take(limits.0)
+            .take_while(|&&l| l == v)
+            .count();
+        i += k;
+        if k < limits.1 {
+            out.extend(std::iter::repeat_n(op(v, 0), k));
+        } else if v != 0 {
+            if previous != Some(v) {
+                out.push(op(v, 0));
+                out.push(op(16, k - 4));
+            } else {
+                out.push(op(16, k - 3));
             }
-        } else if curlen != 0 {
-            if curlen != prevlen {
-                out.push(op(curlen as u8, 0));
-                count -= 1;
-            }
-            out.push(op(16, (count - 3) as u8));
-        } else if count <= 10 {
-            out.push(op(17, (count - 3) as u8));
+        } else if k <= 10 {
+            out.push(op(17, k - 3));
         } else {
-            out.push(op(18, (count - 11) as u8));
+            out.push(op(18, k - 11));
         }
-        count = 0;
-        prevlen = curlen;
-        (max_count, min_count) = if nextlen == 0 {
-            (138, 3)
-        } else if curlen == nextlen {
-            (6, 3)
-        } else {
-            (7, 4)
+        previous = Some(v);
+        limits = match lens.get(i) {
+            Some(0) => (138, 3),
+            Some(&u) if u == v => (6, 3),
+            _ => (7, 4),
         };
     }
 }
 
-/// libdeflate's `deflate_compute_precode_items` over the concatenated lengths.
+/// libdeflate's run-length coding of the concatenated lengths (FORMAT.md, "Run-length
+/// codings"), appended to `out`.
 pub fn rle_libdeflate(lens: &[u8], out: &mut Vec<RleOp>) {
-    let n = lens.len();
-    let mut run_start = 0;
-    while run_start < n {
-        let len = lens[run_start];
-        let mut run_end = run_start + 1;
-        while run_end < n && lens[run_end] == len {
-            run_end += 1;
-        }
-        if len == 0 {
-            while run_end - run_start >= 11 {
-                let e = (run_end - run_start - 11).min(0x7f);
-                out.push(RleOp {
-                    sym: 18,
-                    extra: e as u8,
-                });
-                run_start += 11 + e;
+    let op = |sym: u8, extra: usize| RleOp {
+        sym,
+        extra: extra as u8,
+    };
+    for run in lens.chunk_by(|a, b| a == b) {
+        let v = run[0];
+        let mut rest = run.len();
+        if v == 0 {
+            while rest >= 11 {
+                let x = (rest - 11).min(127);
+                out.push(op(18, x));
+                rest -= x + 11;
             }
-            if run_end - run_start >= 3 {
-                let e = (run_end - run_start - 3).min(7);
-                out.push(RleOp {
-                    sym: 17,
-                    extra: e as u8,
-                });
-                run_start += 3 + e;
+            if rest >= 3 {
+                let x = (rest - 3).min(7);
+                out.push(op(17, x));
+                rest -= x + 3;
             }
-        } else if run_end - run_start >= 4 {
-            out.push(RleOp { sym: len, extra: 0 });
-            run_start += 1;
-            loop {
-                let e = (run_end - run_start - 3).min(3);
-                out.push(RleOp {
-                    sym: 16,
-                    extra: e as u8,
-                });
-                run_start += 3 + e;
-                if run_end - run_start < 3 {
-                    break;
-                }
+        } else if rest >= 4 {
+            out.push(op(v, 0));
+            rest -= 1;
+            while rest >= 3 {
+                let x = (rest - 3).min(3);
+                out.push(op(16, x));
+                rest -= x + 3;
             }
         }
-        while run_start != run_end {
-            out.push(RleOp { sym: len, extra: 0 });
-            run_start += 1;
-        }
+        out.extend(std::iter::repeat_n(op(v, 0), rest));
     }
 }
 

@@ -17,9 +17,9 @@ External references:
   with their extra bits (`LEN_BASE`, `LEN_EXTRA`, `DIST_BASE`, `DIST_EXTRA` below are its
   tables), canonical codes from code lengths, and the transmission order of the code-length
   code lengths `CL_ORDER = 16 17 18 0 8 7 9 6 10 5 11 4 12 3 13 2 14 1 15`.
-- zlib 1.3.1 (`deflate.c`, `trees.c`), zopfli, brotli, ECT and libdeflate are cited for
-  orientation where an algorithm here is a port of theirs. The pseudocode in this document is
-  normative, not the cited code.
+- zlib 1.3.1, zopfli, brotli, ECT and libdeflate are named where an algorithm here
+  reproduces their output, with the name of their function for orientation. The descriptions
+  in this document are normative, not their code.
 
 ## Conventions
 
@@ -495,7 +495,7 @@ Each segment's corrections are one binary arithmetic coded stream. Every token c
 flag, and a miss codes its fields down binary trees. Every bit has a context, with an
 adaptive probability that starts from the profile's priors.
 
-**Arithmetic coder** (carry-less, after lpaq). The state is two 32-bit bounds `x1 = 0` and
+**Arithmetic coder** (carry-less, in lpaq's style). The state is two 32-bit bounds `x1 = 0` and
 `x2 = 2^32 − 1`. A bit with probability `p` of being 1 (in units of 2^−16) splits the range
 at `xm = x1 + ((x2 − x1) · p ≫ 16)`: a 1 keeps `[x1, xm]`, a 0 keeps `[xm + 1, x2]`. While
 the top bytes of `x1` and `x2` agree, that byte is output and both shift left by 8 (`x2`
@@ -547,11 +547,10 @@ are 6480 contexts in all.
 
 ### zlib emulation
 
-With zlib emulation (adaptive profiles), the emulator below runs alongside the tokens. It is
-a port of zlib 1.3.1's `deflate_slow`, `deflate_fast`, `deflate_rle`, `deflate_huff`,
-`longest_match` and `fill_window` (`deflate.c`), as for a single `deflate(Z_FINISH)` call
-with all the data as input, made to follow the actual tokens. Its input is the whole data
-`D`.
+With zlib emulation (adaptive profiles), an emulator runs alongside the tokens. It predicts
+the tokens that zlib 1.3.1 emits for the whole data `D` given to a single `deflate(Z_FINISH)`
+call, at given parameters, while it is told the tokens actually found and keeps following
+them. This section defines its behaviour completely.
 
 **Driving it.** In a segment with an emulator:
 
@@ -568,9 +567,9 @@ The first segment starts with a fresh emulator. Any other segment starts with th
 rebuilt from its checkpoint, if it has one (a checkpoint that cannot be rebuilt makes the
 record invalid); otherwise it has no emulation.
 
-**Parameters.** `w = 2^windowBits`, `MAX_DIST = w − 262`; hashes are `memLevel + 7` bits
-wide (`hmask = 2^(memLevel+7) − 1`), with `shift = ceil((memLevel + 7) / 3)`. zlib's
-configuration table gives (good, lazy, nice, chain) per level:
+**Parameters.** `w = 2^windowBits` and `MAX_DIST = w − 262`. Hash values have
+`b = memLevel + 7` bits, and `t = ceil(b / 3)`. zlib's configuration table gives
+(good, lazy, nice, chain) per level:
 
 | level | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
 |---|---|---|---|---|---|---|---|---|---|
@@ -579,188 +578,165 @@ configuration table gives (good, lazy, nice, chain) per level:
 | nice | 8 | 16 | 32 | 16 | 32 | 128 | 128 | 258 | 258 |
 | chain | 4 | 8 | 32 | 16 | 32 | 128 | 256 | 1024 | 4096 |
 
-The algorithm is *huff* for strategy Huffman only, *rle* for RLE, else *fast* for levels 1
-to 3 and *slow* for 4 to 9. Strategy filtered sets `filtered` (used by slow only); fixed
-emulates as default.
+The emulator follows one of four *parsers*: *store-free Huffman* for strategy Huffman only,
+*runs* for RLE, *greedy* for levels 1 to 3, and *lazy* for levels 4 to 9 (strategies default,
+filtered and fixed; fixed behaves as default here, and filtered only changes the lazy
+parser's short-match rule below).
 
-**State.** `window[0..2w)`, all 0; `head[0..2^(memLevel+7))` and `prev[0..w)`, all 0 (window
-positions; 0 is none); `base = 0` (the data position of `window[0]`); `read = 0`;
-`strstart = 0`, `lookahead = 0`, `high_water = 0`; `match_length = 2`, `match_start = 0`,
-`prev_length = 2`, `prev_match = 0` (`match_start` and `prev_match` are signed: a slide can
-take them below 0); `match_available = false`; `last_head = 0`; no pending token; not done.
+#### The emulator's state
 
-```
-hash(s)   = ((window[s] << 2·shift) ^ (window[s+1] << shift) ^ window[s+2]) & hmask
-insert(s) = h = hash(s); old = head[h]; prev[s mod w] = old; head[h] = s; return old
+- The **window** `W`: `2w` bytes, all 0 at first. Window index `i` stands for data position
+  `o + i`, where the **origin** `o` (a multiple of `w`) starts at 0.
+- The **fed** count `f`: the data bytes copied into the window so far, `D[0 .. f)`.
+- The **cursor** `c` (a window index) and the **ahead** count `a`: `W[c .. c + a)` are data
+  bytes not yet consumed. Both start at 0.
+- The **zero mark** `z`, a window index, initially 0 (see refilling).
+- **Chains**: a head table `H` of `2^b` entries and a link table `K` of `w` entries, all 0 at
+  first. Entries are window indices, 0 meaning none.
+- The **current match** (length `ℓ`, window index `σ`) and, for the lazy parser, the
+  **deferred match** (`ℓ'`, `σ'`): initially `ℓ = ℓ' = 2` and `σ = σ' = 0`. `σ` and `σ'` are
+  signed: sliding can take them below 0.
+- For the lazy parser, the **held** flag (initially off): the byte before the cursor has been
+  passed over and its token is not out yet. Also the **last head** `λ`, initially 0.
+- At most one **pending** token, initially none, with its kind (lazy parser: *final* or
+  *deferred*; the others: *here*); and a **finished** flag, initially off.
 
-fill_window():
-  repeat
-    more = 2w − lookahead − strstart
-    if strstart ≥ 2w − 262:                       # slide
-      window[0 .. w − more) = window[w .. 2w − more)
-      match_start −= w; strstart −= w; base += w
-      every entry v of head and prev becomes (v ≥ w ? v − w : 0)
-      more += w
-    if read = N: leave the loop
-    n = min(N − read, more)
-    window[strstart + lookahead ..+ n) = D[read ..+ n); read += n; lookahead += n
-  until lookahead ≥ 262 or read = N
-  if high_water < 2w:                             # zero what may be read past the input
-    curr = strstart + lookahead
-    if high_water < curr:
-      k = min(2w − curr, 258); window[curr ..+ k) = 0; high_water = curr + k
-    else if high_water < curr + 258:
-      k = min(curr + 258 − high_water, 2w − high_water)
-      window[high_water ..+ k) = 0; high_water += k
+#### Window, hashing and chains
 
-longest_match(cur):
-  chain' = chain; best = prev_length; nice' = min(nice, lookahead)
-  limit = strstart > MAX_DIST ? strstart − MAX_DIST : 0
-  if prev_length ≥ good: chain' = chain' div 4
-  loop
-    if window[cur+best] = window[strstart+best] and window[cur+best−1] = window[strstart+best−1]
-       and window[cur] = window[strstart] and window[cur+1] = window[strstart+1]:
-      l = 3                                       # byte 2 is not compared
-      while l < 258 and window[cur+l] = window[strstart+l]: l += 1
-      if l > best:
-        match_start = cur; best = l
-        if l ≥ nice': leave the loop
-    cur = prev[cur mod w]
-    if cur ≤ limit: leave the loop
-    chain' −= 1; if chain' = 0: leave the loop
-  return min(best, lookahead)
+`key(i) = ((W[i] << 2t) ^ (W[i + 1] << t) ^ W[i + 2]) mod 2^b`. To **chain** index `i` is to
+take `v = H[key(i)]`, then set `K[i mod w] = v` and `H[key(i)] = i`; it yields `v`.
 
-slow_search(h):
-  match_length = longest_match(h)
-  if match_length ≤ 5 and (filtered or (match_length = 3 and strstart − match_start > 4096)):
-    match_length = 2
-```
+To **refill** the window:
 
-The steps that produce the next token, each returning `(kind, window position, token)` or
-nothing. A match's distance is computed modulo 2^16.
+1. Let `room = 2w − a − c`. If `c ≥ 2w − 262`, the window *slides* by `w`: `W[0 .. w − room)`
+   becomes what `W[w .. 2w − room)` was; `o` grows by `w`, `c` and `σ` decrease by `w` (`σ'` does
+   not change); every entry `v` of
+   `H` and `K` becomes `v − w` if `v ≥ w`, else 0; and `room` grows by `w`.
+2. If `f = N`, go to 3. Otherwise copy `k = min(N − f, room)` bytes `D[f .. f + k)` to
+   `W[c + a ..)`, and add `k` to `f` and to `a`. If now `a < 262` and `f < N`, go to 1.
+3. If `z < 2w`: with `e = c + a` and `u = min(e + 258, 2w)`, set `W[max(z, e) .. u)` to 0
+   (nothing if that is empty), and then `z = max(z, u)`.
 
-```
-step_slow():
-  loop
-    if lookahead < 262:
-      fill_window()
-      if lookahead = 0:
-        if match_available: return (END, strstart−1, literal window[strstart−1])
-        return nothing
-    hash_head = lookahead ≥ 3 ? insert(strstart) : 0
-    last_head = hash_head
-    prev_length = match_length; prev_match = match_start; match_length = 2
-    if hash_head ≠ 0 and prev_length < lazy and strstart − hash_head ≤ MAX_DIST:
-      slow_search(hash_head)
-    if prev_length ≥ 3 and match_length ≤ prev_length:
-      return (PENDING, strstart−1, match (prev_length, strstart − 1 − prev_match))
-    if match_available: return (PENDING, strstart−1, literal window[strstart−1])
-    match_available = true; strstart += 1; lookahead −= 1
+(`z` does not move when the window slides.)
 
-step_fast():
-  if lookahead < 262: fill_window(); if lookahead = 0: return nothing
-  hash_head = lookahead ≥ 3 ? insert(strstart) : 0
-  if hash_head ≠ 0 and strstart − hash_head ≤ MAX_DIST: match_length = longest_match(hash_head)
-  if match_length ≥ 3: return (AT, strstart, match (match_length, strstart − match_start))
-  return (AT, strstart, literal window[strstart])
+**Searching the chain** from a window index `h`, for the cursor, with the current match as
+the best so far: let the budget be `chain`, quartered (integer division by 4) if `ℓ' ≥ good`
+(`ℓ'` the deferred length: for the greedy parser it is 2), and let the stop length be
+`min(nice, a)`. The floor is `c − MAX_DIST` if `c > MAX_DIST`, else 0. Let `best = ℓ'` and
+visit candidates `x`, starting with `x = h`:
 
-step_rle():
-  if lookahead ≤ 258: fill_window(); if lookahead = 0: return nothing
-  match_length = 0; s = strstart
-  if lookahead ≥ 3 and s > 0 and window[s] = window[s+1] = window[s+2] = window[s−1]:
-    l = 3; while l < 258 and window[s+l] = window[s−1]: l += 1
-    match_length = min(l, lookahead)
-  if match_length ≥ 3: return (AT, s, match (match_length, 1))
-  return (AT, s, literal window[s])
+- `x` is *compared* only if `W[x + best] = W[c + best]`, `W[x + best − 1] = W[c + best − 1]`,
+  `W[x] = W[c]` and `W[x + 1] = W[c + 1]`. Then its length is `3 + m`, where `m` counts the
+  bytes `W[x + 3 + j] = W[c + 3 + j]` for `j = 0, 1, …`, stopping at `3 + m = 258`. (Byte 2
+  is not compared; the hash makes it equal.) If that length exceeds `best`, it becomes
+  `best`, `σ = x`, and the visit stops if `best ≥` the stop length.
+- The next candidate is `K[x mod w]`. The visit stops if it is at most the floor, and also
+  once `chain` candidates (the budget) have been visited.
 
-step_huff():
-  if lookahead = 0: fill_window(); if lookahead = 0: return nothing
-  return (AT, strstart, literal window[strstart])
-```
+The result is `min(best, a)`. `σ` keeps its earlier value if no candidate was longer than
+`ℓ'`. (Comparisons may read window bytes at or past `c + a`; the window's contents there are
+as refilling left them, which matters.)
 
-`predict()`: if there is no pending token and not done, run the algorithm's step; its
-result becomes pending, or nothing sets done. Returns the pending token, at data position
-`base + its window position`, or nothing. It is idempotent until `commit`.
+A **lazy search** from `h` sets `ℓ` to the result of searching the chain from `h`, then sets
+`ℓ = 2` if `ℓ ≤ 5` and either the strategy is filtered, or `ℓ = 3` and `c − σ > 4096`.
 
-`commit(a)`, with `a` the actual token (`alen` its length, 0 for a literal) and
-`hit = (a = pending token)`; fails without a pending token. The pending token is cleared,
-then by algorithm and kind:
+#### Predicting
 
-```
-slow, END:       fail unless hit; match_available = false
-slow, PENDING:   if a is a match:
-                   fail if alen − 1 > lookahead
-                   max_insert = strstart + lookahead − 3; lookahead −= alen − 1
-                   repeat alen − 2 times: strstart += 1; if strstart ≤ max_insert: insert(strstart)
-                   match_available = false; match_length = 2; strstart += 1
-                 else:
-                   if not hit:                    # zlib wanted a match: search afresh
-                     prev_length = 2; match_length = 2
-                     if last_head ≠ 0 and strstart − last_head ≤ MAX_DIST: slow_search(last_head)
-                   strstart += 1; lookahead −= 1
-fast:            if a is a match:
-                   fail if alen > lookahead
-                   lookahead −= alen
-                   if alen ≤ lazy and lookahead ≥ 3:
-                     repeat alen − 1 times: strstart += 1; insert(strstart)
-                     strstart += 1
-                   else: strstart += alen
-                   match_length = 0
-                 else:
-                   lookahead −= 1; strstart += 1; if not hit: match_length = 0
-rle, huff:       n = max(alen, 1); fail if n > lookahead; lookahead −= n; strstart += n
-                 match_length = 0
-```
+`predict()`: if there is no pending token and the emulator is not finished, the parser's
+step below runs; its token becomes pending, or, if it gives none, the emulator is finished.
+`predict()` returns the pending token and its data position `o + (its window index)`, or
+nothing. It changes nothing more until the next `commit`. A match's distance is computed
+modulo 2^16.
+
+**Lazy step.** Repeat:
+
+1. If `a < 262`, refill. If then `a = 0`: if held, the token is *final*, the literal
+   `W[c − 1]` at `c − 1`; else there is none. Either way the step ends.
+2. Chain the cursor if `a ≥ 3`, giving `h`; else `h = 0`. Set `λ = h`.
+3. The current match becomes the deferred one (`ℓ' = ℓ`, `σ' = σ`), and `ℓ = 2`. If `h ≠ 0`,
+   `ℓ' < lazy` and `c − h ≤ MAX_DIST`, run a lazy search from `h`.
+4. If `ℓ' ≥ 3` and `ℓ ≤ ℓ'`, the token is *deferred*: the match of length `ℓ'` and distance
+   `c − 1 − σ'` at `c − 1`. The step ends.
+5. Else if held, the token is *deferred*: the literal `W[c − 1]` at `c − 1`. The step ends.
+6. Else turn held on, advance the cursor (`c += 1`, `a −= 1`) and repeat from 1.
+
+**Greedy step.** If `a < 262`, refill, and if then `a = 0` there is no token. Chain the
+cursor if `a ≥ 3`, giving `h` (else `h = 0`). If `h ≠ 0` and `c − h ≤ MAX_DIST`, `ℓ` becomes
+the result of searching the chain from `h`. The token is, *here* at `c`, the match of length
+`ℓ` and distance `c − σ` if `ℓ ≥ 3`, else the literal `W[c]`.
+
+**Runs step.** If `a ≤ 258`, refill, and if then `a = 0` there is no token. Let `ℓ = 0`. If
+`a ≥ 3`, `c > 0` and `W[c]`, `W[c + 1]` and `W[c + 2]` all equal `W[c − 1]`, then `ℓ` is
+`min(r, a)`, where `r` is 3 plus the number of further bytes `W[c + 3], W[c + 4], …` equal to
+`W[c − 1]`, stopping at `r = 258`. The token is, *here* at `c`, the match of length `ℓ` and
+distance 1 if `ℓ ≥ 3`, else the literal `W[c]`.
+
+**Huffman step.** If `a = 0`, refill, and if then still `a = 0` there is no token. The token
+is the literal `W[c]`, *here* at `c`.
+
+#### Following the actual tokens
+
+`commit(t)`, with `t` the actual token: it fails if nothing is pending. Let `n` be `t`'s
+length (0 for a literal) and `hit` whether `t` is the pending token. The pending token is
+cleared, and then:
+
+- **Lazy, final**: fails unless `hit`; held turns off.
+- **Lazy, deferred, `t` a match**: fails if `n − 1 > a`. Let `last = c + a − 3`; `a` drops by
+  `n − 1`. The cursor then advances `n − 2` times by one, and after each advance the cursor is
+  chained if it is at most `last`. Finally held turns off, `ℓ = 2`, and `c += 1`.
+- **Lazy, deferred, `t` a literal**: if not `hit` (zlib wanted a match there), `ℓ' = ℓ = 2`
+  and, if `λ ≠ 0` and `c − λ ≤ MAX_DIST`, a lazy search from `λ` runs. Then `c += 1`,
+  `a −= 1`.
+- **Greedy, `t` a match**: fails if `n > a`; `a` drops by `n`. If `n ≤ lazy` and `a ≥ 3`, the
+  cursor advances `n − 1` times by one, being chained after each advance, and then once more;
+  otherwise `c += n`. Then `ℓ = 0`.
+- **Greedy, `t` a literal**: `a −= 1`, `c += 1`, and `ℓ = 0` if not `hit`.
+- **Runs and Huffman**: with `k = max(n, 1)`, fails if `k > a`; `a −= k`, `c += k`, `ℓ = 0`.
 
 `skip_to(end)` lets zlib run on its own over a stored block: while `predict()` gives a
 token at `q < end`, it commits that token, or the literal `D[q]` instead if the token would
 end past `end`; it fails if a commit fails. A token at `end` or beyond stays pending.
 
-These are the deliberate deviations from zlib: it is driven by the actual tokens (the
-`not hit` paths above, and the actual token's length deciding the insertions); it assumes
-the whole input at once, so zlib's deferred insertion (`s->insert`) and partial-input returns
-never happen; and its hash is computed from three bytes directly, which equals zlib's rolling
-hash after three updates. Block flushes do not affect zlib's matching and are not emulated.
+These are the deliberate deviations from zlib: the emulator is driven by the actual tokens
+(the paths without `hit` above, and the actual token's length deciding the chaining); it
+assumes the whole input at once, so zlib's deferred insertion and partial-input returns never
+happen; and its hash is computed from three bytes directly, which equals zlib's rolling hash
+after three updates. Block flushes do not affect zlib's matching and are not emulated.
 
 **Checkpoints.** A checkpoint is the emulator's state at the segment's first token, coded
 relative to the segment's position `s` and `w`:
 
 | field | | value |
 |---|---|---|
-| match_available | 1 bit | slow's pending literal; `strstart = s + match_available` |
-| base | gamma, at most `N` | `strstart div w − base div w` (base: the window's start, a multiple of `w`) |
-| read | gamma, at most `2w` | `base + 2w − read` (read: the input read into the window) |
-| high_water | gamma, at most `2w` | `2w − high_water` |
-| match_length | gamma, at most 258 | `match_length − 2` |
-| match_start | gamma, at most `w` | `strstart − match_start`, only if `match_length > 2`; else `match_start = 0` |
+| held | 1 bit | the lazy parser's held flag; the cursor's data position is `s + held` |
+| origin | gamma, at most `N` | `C div w − o div w`, with `C` the cursor's data position |
+| fed | gamma, at most `2w` | `o + 2w − f` |
+| zero mark | gamma, at most `2w` | `2w − z` |
+| current length | gamma, at most 258 | `ℓ − 2` |
+| current source | gamma, at most `w` | `C − (o + σ)`, only if `ℓ > 2`; else `σ = 0` |
 
-Here `strstart`, `base`, `read`, `high_water` (a window index) and `match_start` are data
-positions where applicable. For rle and huff the encoder writes `match_length = 2` (field 0)
-and no match_start; the rebuilt emulator holds the decoded value, which has no effect (rle
-resets `match_length` before every use, huff never reads it). Negative results are invalid. The checkpoint is invalid unless:
-the algorithm is not fast (levels 1 to 3 with strategies default, filtered and fixed cannot
-be resumed, as their hash chains depend on the tokens); `match_available` is false unless the
-algorithm is slow, and if true, `strstart > base`; `base ≤ strstart ≤ read ≤ N`;
-`read − base ≤ 2w`; `high_water ≤ 2w`; `match_length ≤ 258`; and if `match_length ≥ 3`,
-`base ≤ match_start`, `match_start + match_available < strstart` and
-`strstart − match_start ≤ w`.
+Negative results are invalid. For the runs and Huffman parsers the encoder writes `ℓ = 2`
+(field 0) and no source; the rebuilt emulator holds the decoded value, which has no effect
+(the runs parser sets `ℓ` before every use, the Huffman parser never reads it). The
+checkpoint is invalid unless: the parser is not greedy (levels 1 to 3 with strategies
+default, filtered and fixed cannot be resumed, as their chains depend on the tokens); held is
+off unless the parser is lazy, and if on, `C > o`; `o ≤ C ≤ f ≤ N`; `f − o ≤ 2w`; `z ≤ 2w`;
+`ℓ ≤ 258`; and if `ℓ ≥ 3`, `o ≤ o + σ`, `o + σ + held < C` and `C − (o + σ) ≤ w`.
 
-The emulator is rebuilt from the data and the checkpoint: a fresh one, then `base`, `read`,
-`high_water`, `match_available` and `match_length` as given, `strstart` and `match_start`
-(0 if `match_length = 2`) made window positions (minus `base`), and
-`lookahead = read − strstart`. Window index `i` (data position `a = base + i`) holds `D[a]` if
-`a < read`; else 0 if `i ≥ high_water`; else `D[a − kw]` for the least `k ≥ 1` with
-`kw ≤ base` and `a − kw < N` (what it held before the last slides: once the input is all
-read the window can still slide, past what it held before), or 0 if there is none. For slow,
-every data position `a` from `max(base, strstart − w)` up to `strstart − 1` with
-`a + 3 ≤ read` is inserted again, in increasing order, as window position `a − base`.
+The emulator is rebuilt from the data and the checkpoint: a fresh one, then `o`, `f`, `z`,
+held and `ℓ` as given, `c = C − o`, `σ` as given (0 if `ℓ = 2`), and `a = f − (o + c)`. Window
+index `i` (data position `p = o + i`) holds `D[p]` if `p < f`; else 0 if `i ≥ z`; else
+`D[p − kw]` for the least `k ≥ 1` with `kw ≤ o` and `p − kw < N` (what it held before the
+last slides: once the input is all fed, the window can still slide past what it held before),
+or 0 if there is none. For the lazy parser, every data position `p` from `max(o, C − w)` up to
+`C − 1` with `p + 3 ≤ f` is chained again, in increasing order, as window index `p − o`.
 
 *Informative:* the encoder writes a checkpoint for a segment where the emulation of the
-previous segment still follows the tokens, has no pending token, is not done, its
-`strstart − match_available` is the segment's position, and the emulator rebuilt from the checkpoint exists; it codes that segment with the rebuilt emulator.
-Rebuilding is exact: the rebuilt emulator predicts as the original would. When the stream
-looks like zlib's but its emulation cannot be resumed (fast), the encoder codes the whole
-stream as one segment.
+previous segment still follows the tokens, has no pending token, is not finished, its cursor's
+data position minus held is the segment's position, and the emulator rebuilt from the
+checkpoint exists; it codes that segment with the rebuilt emulator. Rebuilding is exact: the
+rebuilt emulator predicts as the original would. When the stream looks like zlib's but its
+emulation cannot be resumed (greedy), the encoder codes the whole stream as one segment.
 
 ## Header candidates
 
@@ -784,48 +760,39 @@ Candidate code lengths `k` (288 literal/length lengths, 32 distance lengths) are
 
 `pm` and the smoothing apply to the full 288 and 32 counts, separately.
 
-**zlib's** (`build_tree` and `gen_bitlen` of zlib's `trees.c`), on `f[0..n)` with limit `M`:
+**zlib's** lengths `zlib(f[0..n), M)` come from a Huffman construction over a binary heap
+whose tie-breaking is part of the result:
 
-```
-heap = []; max_code = −1; depth[i] = 0
-for i in 0..n: if f[i] ≠ 0: append i to heap; max_code = i
-while |heap| < 2:                                # at least two codes
-  if max_code < 2: max_code += 1; node = max_code
-  else: node = 0
-  append node to heap; f[node] = 1
-key(i) = 256 · f[i] + depth[i]                   # by frequency, then depth
-down(k): v = heap[k]; j = 2k
-  while j ≤ |heap|:
-    if j < |heap| and key(heap[j+1]) ≤ key(heap[j]): j += 1
-    if key(v) ≤ key(heap[j]): stop
-    heap[k] = heap[j]; k = j; j = 2j
-  heap[k] = v                                    # heap is 1-based
-for k = |heap| div 2 down to 1: down(k)
-order = []; node = n
-repeat
-  a = heap[1]; heap[1] = last of heap; remove the last; down(1)
-  b = heap[1]
-  append a, b to order
-  f[node] = f[a] + f[b]; depth[node] = max(depth[a], depth[b]) + 1
-  dad[a] = dad[b] = node; heap[1] = node; down(1); node += 1
-until |heap| < 2
-append heap[1] to order                          # the root
-len[root] = 0; overflow = 0; bl_count[*] = 0
-for x in order without the root, from the last to the first:
-  bits = len[dad[x]] + 1
-  if bits > M: bits = M; overflow += 1           # internal nodes count too
-  len[x] = bits; if x ≤ max_code: bl_count[bits] += 1
-if overflow > 0:
-  repeat
-    bits = M − 1; while bl_count[bits] = 0: bits −= 1
-    bl_count[bits] −= 1; bl_count[bits+1] += 2; bl_count[M] −= 1; overflow −= 2
-  until overflow ≤ 0
-  h = 0
-  for bits = M down to 1:
-    k = bl_count[bits]
-    while k ≠ 0: x = order[h]; h += 1; if x ≤ max_code: len[x] = bits; k −= 1
-result[i] = len[i] if i ≤ max_code and f[i] ≠ 0, else 0   # f as updated: forced nodes have f = 1
-```
+- *Leaves.* The symbols `i` with `f[i] ≠ 0`, and `top` the largest of them (−1 if none).
+  While there are fewer than two leaves, one more is forced with frequency 1: symbol
+  `top + 1` (which becomes `top`) if `top < 2`, else symbol 0.
+- *Weights.* Every node has a frequency and a depth (0 for leaves). Nodes are compared by
+  (frequency, depth) in lexicographic order; *no heavier* means at most in that order. Ties
+  are resolved by the heap's layout alone.
+- *The heap* is an array `A[1..m]`, with the children of `A[k]` at `2k` and `2k + 1`. To
+  *sink* the node at `k`: while `k` has a child, take the left child, or the right one if it
+  exists and is no heavier than the left; if the node at `k` is no heavier than that child,
+  stop; else move the child up to `k` and continue at its place.
+  The heap starts as the leaves in increasing order of symbol, then the forced ones in the
+  order they were forced, and is ordered by sinking each `k` from `⌊m / 2⌋` down to 1.
+- *Merging.* New nodes are numbered `n, n + 1, …`. While the heap has two nodes or more: take
+  out the top `x` (the last node moves to the top and sinks), note `y`, the new top, without
+  taking it out; record `x` then `y` in a list; make a node of frequency `f(x) + f(y)` and
+  depth `max(depth(x), depth(y)) + 1`, the parent of both; put it at the top in `y`'s place,
+  and sink it. The last remaining node is the root; it ends the list.
+- *Lengths.* The root has length 0. Going through the list backwards from the node before
+  the root, each node's length is its parent's plus one, lowered to `M` if it exceeds `M`;
+  every lowering (internal nodes included) counts as one *overflow*. The leaves (the nodes
+  numbered at most `top`) are counted by length.
+- *Overflow repair*, if any overflow was counted: repeatedly, take the longest length `L`
+  below `M` that some leaf has (searching down from `M − 1`), move one leaf from `L` to
+  `L + 1` and one from `M` to `L + 1` (counts: `L` loses one, `L + 1` gains two, `M` loses
+  one), and take 2 off the overflows, until they are none or fewer. Then the leaves are given
+  lengths anew: the list is read from its start, skipping internal nodes, and its leaves take
+  the lengths from `M` down to 1, as many of each as now counted.
+
+The result for symbol `i < n` is its leaf length if `i ≤ top` and its frequency (1 for a
+forced leaf) is nonzero, else 0.
 
 **`pm(f, M)`** (zopfli's `ZopfliLengthLimitedCodeLengths`). Sort the leaves by (count,
 symbol). With 0 leaves all lengths are 0; with 1 or 2 they get length 1. Otherwise, first
@@ -854,50 +821,40 @@ length of the i-th sorted leaf (from 0) = the number of j with i < count[j]
 `d`: with no nonzero length among `d[0..30)`, `d[0] = d[1] = 1`; with exactly one,
 `d[1] = 1` if `d[0]` is nonzero, else `d[0] = 1`.
 
-**zopfli's smoothing** (`OptimizeHuffmanForRle`), in place on `c[0..n)`:
+**Smoothing** rewrites counts `c[0..n)` in place so that run-length coding of the lengths
+built from them is cheaper. Both kinds below share these notions. `len` is one more than the
+last index with a nonzero count; if there is none, nothing changes. A position `i < len` is
+*settled* if it lies in a maximal run of equal counts within `c[0..len)` that is 5 or more
+long when the count is 0, or 7 or more long otherwise; settledness is decided once, before
+anything changes. Both then scan `i = 0, 1, …, len` (`len` included), growing a *segment*
+that ends just before `i`: its *size* `s` (the positions it covers), its *sum* `Σ` of the
+counts it covers, and a *reference* `ρ`. At each `i`, if a break condition holds, the
+segment is *closed* (it may be flattened, then it restarts empty with a new reference);
+after that, in every case, `i` joins the segment: `s` grows by one and, if `i < len`, `Σ`
+by `c[i]`. Counts at or past `n` read as 0.
 
-```
-len = 1 + the last index with c nonzero; none: return
-good[0..len) = false
-sym = c[0]; stride = 0
-for i in 0..len (inclusive):
-  if i = len or c[i] ≠ sym:
-    if (sym = 0 and stride ≥ 5) or (sym ≠ 0 and stride ≥ 7): good[i−stride .. i) = true
-    stride = 1; if i < len: sym = c[i]
-  else: stride += 1
-stride = 0; limit = c[0]; sum = 0
-for i in 0..len (inclusive):
-  if i = len or good[i] or |c[i] − limit| ≥ 4:
-    if stride ≥ 4 or (stride ≥ 3 and sum = 0):
-      v = (sum = 0) ? 0 : max(1, (sum + stride div 2) div stride)
-      c[i−stride .. i) = v
-    stride = 0; sum = 0
-    limit = (i + 3 < len) ? (c[i] + c[i+1] + c[i+2] + c[i+3] + 2) div 4
-          : (i < len) ? c[i] : 0
-  stride += 1
-  if i < len: sum += c[i]
-```
+**zopfli's smoothing** (`OptimizeHuffmanForRle`):
 
-**brotli's smoothing** (`OptimizeHuffmanCountsForRle` as ECT uses it), in place on
-`c[0..n)`, in signed arithmetic, with `c[j] = 0` for `j ≥ n`:
+- At first, `s = Σ = 0` and `ρ = c[0]`.
+- Break at `i` when `i = len`, `i` is settled, or `|c[i] − ρ| ≥ 4`.
+- Flattening on a close: if `s ≥ 4`, or `s ≥ 3` and `Σ = 0`, every position of the segment
+  gets 0 if `Σ = 0`, else the rounded mean `max(1, ⌊(Σ + ⌊s / 2⌋) / s⌋)`.
+- The new reference: `⌊(c[i] + c[i + 1] + c[i + 2] + c[i + 3] + 2) / 4⌋` if `i + 3 < len`,
+  else `c[i]` if `i < len`, else 0.
 
-```
-len, good: as for zopfli's (a run of 7 or more of any value, or of 5 or more zeros)
-stride = 0; sum = 0; limit = floor(256 · (c[0] + c[1] + c[2]) / 3) + 420
-for i in 0..len (inclusive):
-  ci = (i < len) ? c[i] : 0
-  if i = len or good[i] or (i > 0 and good[i−1]) or |256 · ci − limit| ≥ 1240:
-    if stride ≥ 4:
-      v = (sum + stride div 2) div stride; if v < 1 and sum ≠ 0: v = 1
-      c[i−stride .. i) = v
-    stride = 0; sum = 0
-    limit = (i < len − 2) ? floor(256 · (c[i] + c[i+1] + c[i+2]) / 3) + 420 : 256 · c[i]
-  stride += 1
-  if i < len:
-    sum += c[i]
-    if stride ≥ 4: limit = (256 · sum + stride div 2) div stride
-    if stride = 4: limit += 120
-```
+**brotli's smoothing** (`OptimizeHuffmanCountsForRle` as ECT uses it), with references on a
+scale of 256 and signed arithmetic:
+
+- At first, `s = Σ = 0` and `ρ = ⌊256 (c[0] + c[1] + c[2]) / 3⌋ + 420`.
+- Break at `i` when `i = len`, `i` is settled, `i − 1` is settled (for `i > 0`), or
+  `|256 c[i] − ρ| ≥ 1240`, with `c[i]` read as 0 at `i = len`.
+- Flattening on a close: if `s ≥ 4`, every position of the segment gets
+  `v = ⌊(Σ + ⌊s / 2⌋) / s⌋`, or 1 if `v < 1` and `Σ ≠ 0`.
+- The new reference: `⌊256 (c[i] + c[i + 1] + c[i + 2]) / 3⌋ + 420` if `i < len − 2`, else
+  `256 c[i]`.
+- When `i < len` joins the segment and its size is then 4 or more, the reference becomes the
+  segment's rounded mean on the scale, `⌊(256 Σ + ⌊s / 2⌋) / s⌋`, plus 120 if the size is
+  exactly 4.
 
 ### Run-length codings
 
@@ -911,61 +868,45 @@ of its extra bits):
 | 2 | libdeflate's (`deflate_compute_precode_items`), on all of `lens` |
 | 3 – 22 | zopfli's / ECT's `EncodeTree` on all of `lens`, with flags number `k − 3` |
 
-**zlib's** (`send_tree`), on `L[0..n)`, with `L[n]` reading as −1:
+In all of them a *run* is a maximal stretch of equal lengths, an op `v` (0 to 15) stands
+for one length `v`, and `(16, x)`, `(17, x)` and `(18, x)` repeat the previous length
+`3 + x` times, write `3 + x` zeros and write `11 + x` zeros.
 
-```
-prevlen = −1; nextlen = L[0] (−1 if n = 0); count = 0
-(max, min) = (nextlen = 0) ? (138, 3) : (7, 4)
-for i in 0..n:
-  curlen = nextlen; nextlen = L[i+1]; count += 1
-  if count < max and curlen = nextlen: continue
-  if count < min: emit curlen, count times
-  else if curlen ≠ 0:
-    if curlen ≠ prevlen: emit curlen; count −= 1
-    emit (16, count − 3)
-  else if count ≤ 10: emit (17, count − 3)
-  else: emit (18, count − 11)
-  count = 0; prevlen = curlen
-  (max, min) = (nextlen = 0) ? (138, 3) : (curlen = nextlen) ? (6, 3) : (7, 4)
-```
+**zlib's** (`send_tree`), on `L[0..n)`. The lengths are cut into *groups*, from the start;
+each group is a stretch of equal lengths, as long as possible up to a cap, and is written by
+a rule that depends on a threshold. For the first group, and after every group according to
+the length `u` that follows it (and the group's own length `v`), the cap and the threshold
+are (138, 3) if `u = 0`; else (6, 3) if `u = v`; else (7, 4). The first group uses
+(138, 3) if `L[0] = 0`, else (7, 4). A group of `k` lengths `v`, with threshold `m`, is
+written:
 
-**libdeflate's**:
+- if `k < m`: `v`, `k` times;
+- else if `v ≠ 0`: if `v` differs from the previous group's length (or this is the first
+  group), `v` and then `(16, k − 4)`; else `(16, k − 3)`;
+- else if `k ≤ 10`: `(17, k − 3)`;
+- else `(18, k − 11)`.
 
-```
-i = 0
-while i < n:
-  v = L[i]; end = the first index after i with L[end] ≠ v, or n
-  if v = 0:
-    while end − i ≥ 11: x = min(end − i − 11, 127); emit (18, x); i += 11 + x
-    if end − i ≥ 3: x = min(end − i − 3, 7); emit (17, x); i += 3 + x
-  else if end − i ≥ 4:
-    emit v; i += 1
-    repeat: x = min(end − i − 3, 3); emit (16, x); i += 3 + x  until end − i < 3
-  while i < end: emit v; i += 1
-```
+**libdeflate's** (`deflate_compute_precode_items`), on `L[0..n)`, run by run. A run of `r`
+zeros: while at least 11 remain, `(18, x)` for `x = min(remaining − 11, 127)`; then, if at
+least 3 remain, `(17, x)` for `x = min(remaining − 3, 7)`. A run of `r ≥ 4` lengths `v ≠ 0`:
+`v`, then `(16, x)` for `x = min(remaining − 3, 3)` as long as at least 3 remain (at least
+once). What remains of either kind is written as single lengths.
 
-**zopfli's / ECT's**: flags number `k` (0 to 19) is the `k`-th of the integers 0 to 31 that
-are odd or below 8, in increasing order (0 to 7, 9, 11, …, 31). Its bits 0 to 4 are
-`use_16`, `use_17`, `use_18`, `fuse_8` and `fuse_7` (the last two are ECT's).
+**zopfli's / ECT's** (`EncodeTree`), with flags: flags number `k` (0 to 19) is the `k`-th of
+the integers 0 to 31 that are odd or below 8, in increasing order (0 to 7, 9, 11, …, 31).
+Its bits 0 to 4 are `use_16`, `use_17`, `use_18`, `fuse_8` and `fuse_7` (the last two are
+ECT's). The lengths are taken in pieces from the start: a piece is the whole run starting
+there if `use_16` is set, or if its length is 0 and `use_17` or `use_18` is set; otherwise
+it is a single length. A piece of `r` lengths `v` is written:
 
-```
-i = 0
-while i < n:
-  v = L[i]; count = 1
-  if use_16 or (v = 0 and (use_17 or use_18)):
-    while i + count < n and L[i + count] = v: count += 1
-  i += count
-  if v = 0 and count ≥ 3:
-    if use_18: while count ≥ 11: c = min(count, 138); emit (18, c − 11); count −= c
-    if use_17: while count ≥ 3: c = min(count, 10); emit (17, c − 3); count −= c
-  if use_16 and count ≥ 4:
-    count −= 1; emit v
-    while count ≥ 3:
-      if fuse_8 and count = 8: emit (16, 1), (16, 1); count = 0
-      else if fuse_7 and count = 7: emit (16, 1), (16, 0); count = 0
-      else: c = min(count, 6); emit (16, c − 3); count −= c
-  emit v, count times
-```
+1. If `v = 0` and `r ≥ 3`: with `use_18`, `(18, min(r, 138) − 11)` while `r ≥ 11`, each
+   taking `min(r, 138)` off `r`; then with `use_17`, `(17, min(r, 10) − 3)` while `r ≥ 3`,
+   each taking `min(r, 10)` off.
+2. If `use_16` and `r ≥ 4` (what is left): `v` (taking one off), then while `r ≥ 3`: if
+   `fuse_8` and `r = 8`, `(16, 1)` twice and nothing is left; else if `fuse_7` and `r = 7`,
+   `(16, 1)` then `(16, 0)` and nothing is left; else `(16, min(r, 6) − 3)`, taking
+   `min(r, 6)` off.
+3. What is left: `v`, that many times.
 
 ### Code-length codes
 

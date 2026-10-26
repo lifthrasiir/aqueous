@@ -1,22 +1,11 @@
-//! Emulation of zlib's (1.3.1) match finding and lazy evaluation, used as a token predictor.
-//!
-//! This is a port of `deflate_fast`, `deflate_slow`, `deflate_rle`, `deflate_huff`,
-//! `longest_match` and `fill_window` from zlib's deflate.c, operating on the same 2 x w_size
-//! window buffer with the same sliding and zero-filling, so that predictions match zlib's output
-//! bit for bit (for a one-shot `deflate(Z_FINISH)` call). It is driven by the actual tokens:
-//! [`Emulator::predict`] gives the token zlib would emit next, and [`Emulator::commit`] moves on
-//! with the actual one. On a mismatch the state is forced to follow the actual token, so
-//! prediction resumes right after.
+//! Emulation of zlib 1.3.1's compressor as a token predictor (FORMAT.md, "zlib emulation"),
+//! for a one-shot `deflate(Z_FINISH)` call: [`Emulator::predict`] gives the token zlib would
+//! emit next, and [`Emulator::commit`] moves on with the actual one, so that prediction resumes
+//! right after a mismatch.
 
 use crate::deflate::{Block, Body, DynHeader, Token};
 use crate::header::zlib_header;
 use crate::huffman::{self, RleOp};
-
-const MIN_MATCH: usize = 3;
-const MAX_MATCH: usize = 258;
-const MIN_LOOKAHEAD: usize = MAX_MATCH + MIN_MATCH + 1;
-const TOO_FAR: usize = 4096;
-const WIN_INIT: usize = MAX_MATCH;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Strategy {
@@ -103,659 +92,801 @@ impl Params {
     }
 }
 
-/// good_length, max_lazy, nice_length, max_chain; levels 1-3 use deflate_fast.
-const CONFIG: [(usize, usize, usize, usize); 10] = [
-    (0, 0, 0, 0),
-    (4, 4, 8, 4),
-    (4, 5, 16, 8),
-    (4, 6, 32, 32),
-    (4, 4, 16, 16),
-    (8, 16, 32, 32),
-    (8, 16, 128, 128),
-    (8, 32, 128, 256),
-    (32, 128, 258, 1024),
-    (32, 258, 258, 4096),
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Algo {
-    Fast,
-    Slow,
-    Rle,
-    Huff,
-}
-
-/// Which emission point of which algorithm is pending.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Point {
-    /// deflate_slow: the match of the previous position (prev_length/prev_match).
-    SlowMatch,
-    /// deflate_slow: the pending literal at strstart - 1.
-    SlowLit,
-    /// deflate_slow: the last pending literal after the input ended.
-    SlowEnd,
-    /// deflate_fast / deflate_rle / deflate_huff at strstart.
-    Match,
-    Lit,
-}
-
-/// What a deflate_slow [`Emulator`] at a token boundary knows beyond its input, enough to
-/// resume it there with [`Emulator::resume`] (positions are absolute).
+/// What an emulator of the lazy parser (or of runs or Huffman only) knows at a token boundary
+/// beyond its input, enough to resume it there with [`Emulator::resume`]: FORMAT.md,
+/// "Checkpoints". Positions are data positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Checkpoint {
-    pub strstart: usize,
-    /// Start of the window; a multiple of its size.
-    pub base: usize,
-    /// End of the input read into the window.
-    pub read: usize,
-    pub high_water: usize,
-    pub match_available: bool,
-    /// The search result at `strstart - 1`'s successor, compared at the next position.
-    pub match_length: usize,
-    /// Where that match is; 0 when `match_length` is not a match.
-    pub match_start: usize,
+    /// The cursor's data position.
+    pub cursor: usize,
+    /// The data position of the window's start (the origin); a multiple of its size.
+    pub origin: usize,
+    /// The data fed into the window so far.
+    pub fed: usize,
+    /// The zero mark (a window index).
+    pub zero_mark: usize,
+    /// The lazy parser's held flag.
+    pub held: bool,
+    /// The current match's length.
+    pub length: usize,
+    /// The current match's data position; 0 when `length` is 2 or less.
+    pub source: usize,
 }
 
+/// The parsers of FORMAT.md.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Huffman,
+    Runs,
+    Greedy,
+    Lazy,
+}
+
+/// When a pending token is emitted, relative to the cursor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum When {
+    /// At the cursor (greedy, runs and Huffman).
+    Here,
+    /// The lazy parser's last literal.
+    Final,
+    /// The lazy parser's token at the held byte.
+    Deferred,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Pending {
+    token: Token,
+    /// Window index of the token.
+    at: usize,
+    when: When,
+}
+
+/// The match state of one parser: everything that depends on its parameters. Lanes of a lazy
+/// run share the window, the chains, the cursor and the held flag.
 #[derive(Clone)]
-pub struct Emulator<'a> {
-    params: Params,
-    input: &'a [u8],
-    /// Bytes of `input` consumed into the window so far.
-    read: usize,
-    /// Absolute position of window[0].
-    base: usize,
-
-    algo: Algo,
+struct Lane {
+    p: Params,
+    good: usize,
+    lazy: usize,
+    nice: usize,
+    chain: usize,
     filtered: bool,
-    good_match: usize,
-    max_lazy: usize,
-    nice_match: usize,
-    max_chain: usize,
-
-    w_size: usize,
-    w_mask: usize,
-    window: Vec<u8>,
-    hash_shift: u32,
-    hash_mask: usize,
-    head: Vec<u16>,
-    prev: Vec<u16>,
-
-    strstart: usize,
-    lookahead: usize,
-    high_water: usize,
-    match_length: usize,
-    match_start: usize,
-    prev_length: usize,
-    prev_match: usize,
-    match_available: bool,
-    /// Hash head found by the last insertion at strstart (for forced literals).
-    last_head: usize,
-
-    pending: Option<(Point, usize, Token)>,
-    done: bool,
+    /// The current match (length, window index of the source).
+    len: usize,
+    src: isize,
+    /// The deferred match.
+    dlen: usize,
+    dsrc: isize,
+    pending: Option<Pending>,
+    /// Whether the last commit hit the pending token.
+    hit: bool,
+    alive: bool,
+    misses: usize,
+    log: Vec<(usize, Token)>,
 }
 
-impl<'a> Emulator<'a> {
-    pub fn new(input: &'a [u8], p: Params) -> Self {
-        assert!(p.valid(), "bad zlib parameters {p:?}");
-        let (good, lazy, nice, chain) = CONFIG[p.level as usize];
-        let algo = match p.strategy {
-            Strategy::HuffmanOnly => Algo::Huff,
-            Strategy::Rle => Algo::Rle,
-            _ if p.level <= 3 => Algo::Fast,
-            _ => Algo::Slow,
-        };
-        let w_size = 1usize << p.wbits;
-        let hash_bits = p.mem as u32 + 7;
-        Emulator {
-            params: p,
-            input,
-            read: 0,
-            base: 0,
-            algo,
+impl Lane {
+    fn new(p: Params) -> Self {
+        const GOOD: [usize; 9] = [4, 4, 4, 4, 8, 8, 8, 32, 32];
+        const LAZY: [usize; 9] = [4, 5, 6, 4, 16, 16, 32, 128, 258];
+        const NICE: [usize; 9] = [8, 16, 32, 16, 32, 128, 128, 258, 258];
+        const CHAIN: [usize; 9] = [4, 8, 32, 16, 32, 128, 256, 1024, 4096];
+        let l = p.level.clamp(1, 9) as usize - 1;
+        Lane {
+            p,
+            good: GOOD[l],
+            lazy: LAZY[l],
+            nice: NICE[l],
+            chain: CHAIN[l],
             filtered: p.strategy == Strategy::Filtered,
-            good_match: good,
-            max_lazy: lazy,
-            nice_match: nice,
-            max_chain: chain,
-            w_size,
-            w_mask: w_size - 1,
-            window: vec![0; 2 * w_size],
-            hash_shift: hash_bits.div_ceil(3),
-            hash_mask: (1 << hash_bits) - 1,
-            head: vec![0; 1 << hash_bits],
-            prev: vec![0; w_size],
-            strstart: 0,
-            lookahead: 0,
-            high_water: 0,
-            match_length: MIN_MATCH - 1,
-            match_start: 0,
-            prev_length: MIN_MATCH - 1,
-            prev_match: 0,
-            match_available: false,
-            last_head: 0,
+            len: 2,
+            src: 0,
+            dlen: 2,
+            dsrc: 0,
             pending: None,
-            done: false,
+            hit: false,
+            alive: true,
+            misses: 0,
+            log: vec![],
+        }
+    }
+}
+
+fn kind_of(p: Params) -> Kind {
+    match p.strategy {
+        Strategy::HuffmanOnly => Kind::Huffman,
+        Strategy::Rle => Kind::Runs,
+        _ if p.level <= 3 => Kind::Greedy,
+        _ => Kind::Lazy,
+    }
+}
+
+/// A chain search of one lane, walked along with others over the same chain.
+#[derive(Clone, Copy)]
+struct Job {
+    lane: usize,
+    best: usize,
+    sigma: isize,
+    budget: usize,
+    stop: usize,
+    active: bool,
+}
+
+/// Slack behind the window: the longest match plus a word.
+const SLACK: usize = 272;
+
+/// The window, the chains and the data fed so far.
+#[derive(Clone)]
+struct Window<'a> {
+    input: &'a [u8],
+    /// The window size.
+    w: usize,
+    max_dist: usize,
+    hash_mask: usize,
+    shift: u32,
+    buf: Vec<u8>,
+    heads: Vec<u16>,
+    links: Vec<u16>,
+    origin: usize,
+    fed: usize,
+    cursor: usize,
+    ahead: usize,
+    zero_mark: usize,
+}
+
+impl<'a> Window<'a> {
+    fn new(input: &'a [u8], p: Params) -> Self {
+        let w = 1usize << p.wbits.clamp(9, 15);
+        let bits = p.mem.clamp(1, 9) as u32 + 7;
+        Window {
+            input,
+            w,
+            max_dist: w - 262,
+            hash_mask: (1 << bits) - 1,
+            shift: bits.div_ceil(3),
+            buf: vec![0; 2 * w + SLACK],
+            heads: vec![0; 1 << bits],
+            links: vec![0; w],
+            origin: 0,
+            fed: 0,
+            cursor: 0,
+            ahead: 0,
+            zero_mark: 0,
         }
     }
 
-    /// The state at this token boundary, or `None` where resuming is not supported: not in
-    /// deflate_fast (whose hash chains depend on the tokens). deflate_slow has inserted every
-    /// position before strstart that has three bytes read, also after the input ends, and
-    /// deflate_rle and deflate_huff keep no state beyond the window.
-    pub fn checkpoint(&self) -> Option<Checkpoint> {
-        if self.algo == Algo::Fast || self.pending.is_some() || self.done {
-            return None;
-        }
-        let strstart = self.base + self.strstart;
-        if self.algo != Algo::Slow {
-            return Some(Checkpoint {
-                strstart,
-                base: self.base,
-                read: self.read,
-                high_water: self.high_water,
-                match_available: false,
-                match_length: MIN_MATCH - 1,
-                match_start: 0,
-            });
-        }
-        if self.match_length < MIN_MATCH - 1 {
-            return None;
-        }
-        let match_start = if self.match_length >= MIN_MATCH {
-            let m = self.base.wrapping_add(self.match_start);
-            if m < self.base || m >= strstart {
-                return None;
-            }
-            m
-        } else {
-            // Not a match: overwritten by the next search before it is used.
-            0
-        };
-        Some(Checkpoint {
-            strstart,
-            base: self.base,
-            read: self.read,
-            high_water: self.high_water,
-            match_available: self.match_available,
-            match_length: self.match_length,
-            match_start,
-        })
-    }
-
-    /// An emulator in the state of [`Emulator::checkpoint`], rebuilt from the input alone:
-    /// the window holds the input (and what zlib leaves past it), the hash chains get every
-    /// position of the last window inserted again. `None` if `cp` cannot come from `p` and
-    /// `input`.
-    pub fn resume(input: &'a [u8], p: Params, cp: &Checkpoint) -> Option<Self> {
-        if !p.valid() {
-            return None;
-        }
-        let mut e = Emulator::new(input, p);
-        let slow = e.algo == Algo::Slow;
-        if e.algo == Algo::Fast || (!slow && cp.match_available) {
-            return None;
-        }
-        let w = e.w_size;
-        let ml = cp.match_length;
-        let valid = cp.base.is_multiple_of(w)
-            && cp.base <= cp.strstart
-            && cp.strstart <= cp.read
-            && cp.read <= input.len()
-            && cp.read - cp.base <= 2 * w
-            && cp.high_water <= 2 * w
-            && (!cp.match_available || cp.strstart > cp.base)
-            && (MIN_MATCH - 1..=MAX_MATCH).contains(&ml)
-            && if ml >= MIN_MATCH {
-                // The pending match (at strstart - 1 when match_available) starts before
-                // its position.
-                cp.base <= cp.match_start
-                    && cp.match_start + (cp.match_available as usize) < cp.strstart
-                    && cp.strstart - cp.match_start <= w
-            } else {
-                cp.match_start == 0
-            };
-        if !valid {
-            return None;
-        }
-        e.base = cp.base;
-        e.read = cp.read;
-        e.high_water = cp.high_water;
-        e.strstart = cp.strstart - cp.base;
-        e.lookahead = cp.read - cp.strstart;
-        e.match_available = cp.match_available;
-        e.match_length = ml;
-        e.match_start = if ml >= MIN_MATCH {
-            cp.match_start - cp.base
-        } else {
-            0
-        };
-        for (i, b) in e.window.iter_mut().enumerate() {
-            let a = cp.base + i;
-            *b = if a < cp.read {
-                input[a]
-            } else if i >= cp.high_water {
-                0
-            } else {
-                // Past the input read so far: what the window held before its last slides,
-                // last written while it was input. Once the input is all read the window can
-                // slide again, past what was written before the previous slide.
-                (1..=cp.base / w)
-                    .map(|k| a - k * w)
-                    .find(|&x| x < input.len())
-                    .map_or(0, |x| input[x])
-            };
-        }
-        if slow {
-            for a in cp.base.max(cp.strstart.saturating_sub(w))..cp.strstart {
-                if a + MIN_MATCH <= cp.read {
-                    e.insert(a - cp.base);
-                }
-            }
-        }
-        Some(e)
-    }
-
-    pub fn params(&self) -> Params {
-        self.params
-    }
-
-    /// Absolute position of the start of zlib's window.
-    pub fn window_base(&self) -> usize {
-        self.base
-    }
-
-    fn max_dist(&self) -> usize {
-        self.w_size - MIN_LOOKAHEAD
-    }
-
-    fn window_size(&self) -> usize {
-        2 * self.w_size
-    }
-
-    fn fill_window(&mut self) {
-        let wsize = self.w_size;
-        loop {
-            let mut more = self.window_size() - self.lookahead - self.strstart;
-            if self.strstart >= wsize + self.max_dist() {
-                self.window.copy_within(wsize..2 * wsize - more, 0);
-                self.match_start = self.match_start.wrapping_sub(wsize);
-                self.strstart -= wsize;
-                self.base += wsize;
-                for h in self.head.iter_mut().chain(self.prev.iter_mut()) {
-                    *h = if *h as usize >= wsize {
-                        *h - wsize as u16
-                    } else {
-                        0
-                    };
-                }
-                more += wsize;
-            }
-            let avail = self.input.len() - self.read;
-            if avail == 0 {
-                break;
-            }
-            let n = avail.min(more);
-            let at = self.strstart + self.lookahead;
-            self.window[at..at + n].copy_from_slice(&self.input[self.read..self.read + n]);
-            self.read += n;
-            self.lookahead += n;
-            // (Hash initialization: the hash is computed directly from the bytes; see `hash`.)
-            if self.lookahead >= MIN_LOOKAHEAD || self.read == self.input.len() {
-                break;
-            }
-        }
-        let window_size = self.window_size();
-        if self.high_water < window_size {
-            let curr = self.strstart + self.lookahead;
-            if self.high_water < curr {
-                let init = (window_size - curr).min(WIN_INIT);
-                self.window[curr..curr + init].fill(0);
-                self.high_water = curr + init;
-            } else if self.high_water < curr + WIN_INIT {
-                let init = (curr + WIN_INIT - self.high_water).min(window_size - self.high_water);
-                self.window[self.high_water..self.high_water + init].fill(0);
-                self.high_water += init;
-            }
-        }
-    }
-
-    /// zlib's rolling hash after three updates, which depends on the last three bytes only.
-    #[inline]
-    fn hash(&self, s: usize) -> usize {
-        let w = &self.window;
-        (((w[s] as usize) << (2 * self.hash_shift))
-            ^ ((w[s + 1] as usize) << self.hash_shift)
-            ^ w[s + 2] as usize)
+    #[inline(always)]
+    fn key(&self, i: usize) -> usize {
+        let t = self.shift;
+        (((self.buf[i] as usize) << (2 * t))
+            ^ ((self.buf[i + 1] as usize) << t)
+            ^ self.buf[i + 2] as usize)
             & self.hash_mask
     }
 
-    /// INSERT_STRING: returns the previous head of the chain.
-    #[inline]
-    fn insert(&mut self, s: usize) -> usize {
-        let h = self.hash(s);
-        let head = self.head[h];
-        self.prev[s & self.w_mask] = head;
-        self.head[h] = s as u16;
-        head as usize
+    /// Chains window index `i`, giving the previous head of its key.
+    #[inline(always)]
+    fn chain(&mut self, i: usize) -> usize {
+        let k = self.key(i);
+        let v = self.heads[k];
+        self.links[i & (self.w - 1)] = v;
+        self.heads[k] = i as u16;
+        v as usize
     }
 
-    fn longest_match(&mut self, mut cur: usize) -> usize {
-        let mut chain = self.max_chain;
-        let scan = self.strstart;
-        let mut best_len = self.prev_length;
-        let mut nice = self.nice_match;
-        let limit = if self.strstart > self.max_dist() {
-            self.strstart - self.max_dist()
+    /// Slides the window by `w`.
+    fn slide(&mut self) {
+        let w = self.w;
+        self.buf.copy_within(w..self.cursor + self.ahead, 0);
+        self.origin += w;
+        self.cursor -= w;
+        let down = |v: &mut u16| *v = v.saturating_sub(w as u16);
+        self.heads.iter_mut().for_each(down);
+        self.links.iter_mut().for_each(down);
+    }
+
+    /// Copies data in; whether the refill procedure goes back to sliding.
+    fn feed(&mut self) -> bool {
+        let n = self.input.len();
+        if self.fed == n {
+            return false;
+        }
+        let room = 2 * self.w - self.ahead - self.cursor;
+        let k = (n - self.fed).min(room);
+        let at = self.cursor + self.ahead;
+        self.buf[at..at + k].copy_from_slice(&self.input[self.fed..self.fed + k]);
+        self.fed += k;
+        self.ahead += k;
+        self.ahead < 262 && self.fed < n
+    }
+
+    /// Zeroes the bytes just past the data, once.
+    fn zero_tail(&mut self) {
+        let top = 2 * self.w;
+        if self.zero_mark < top {
+            let e = self.cursor + self.ahead;
+            let u = (e + 258).min(top);
+            let from = self.zero_mark.max(e);
+            if from < u {
+                self.buf[from..u].fill(0);
+            }
+            self.zero_mark = self.zero_mark.max(u);
+        }
+    }
+
+    /// The length (at most 258) of the match between the cursor and `x`, whose first two
+    /// bytes and the hash agree.
+    #[inline(always)]
+    fn common(&self, x: usize) -> usize {
+        let c = self.cursor;
+        let mut n = 3;
+        while n < 258 {
+            let a = u64::from_le_bytes(self.buf[x + n..x + n + 8].try_into().unwrap());
+            let b = u64::from_le_bytes(self.buf[c + n..c + n + 8].try_into().unwrap());
+            let d = a ^ b;
+            if d != 0 {
+                n += (d.trailing_zeros() / 8) as usize;
+                break;
+            }
+            n += 8;
+        }
+        n.min(258)
+    }
+
+    /// Searches the chain from `h` for the cursor on behalf of all `jobs` at once, each as
+    /// its own search with its own best length and budget would.
+    fn walk(&self, h: usize, jobs: &mut [Job]) {
+        let c = self.cursor;
+        let floor = c.saturating_sub(self.max_dist);
+        let buf = &self.buf[..];
+        let mut live = jobs.iter().filter(|j| j.active).count();
+        let mut x = h;
+        while live > 0 {
+            let mut len = 0;
+            for job in jobs.iter_mut().filter(|j| j.active) {
+                let b = job.best;
+                if buf[x + b] == buf[c + b]
+                    && buf[x + b - 1] == buf[c + b - 1]
+                    && buf[x] == buf[c]
+                    && buf[x + 1] == buf[c + 1]
+                {
+                    if len == 0 {
+                        len = self.common(x);
+                    }
+                    if len > b {
+                        job.best = len;
+                        job.sigma = x as isize;
+                        if len >= job.stop {
+                            job.active = false;
+                            live -= 1;
+                            continue;
+                        }
+                    }
+                }
+                job.budget -= 1;
+                if job.budget == 0 {
+                    job.active = false;
+                    live -= 1;
+                }
+            }
+            let next = self.links[x & (self.w - 1)] as usize;
+            if live == 0 || next <= floor {
+                break;
+            }
+            x = next;
+        }
+    }
+}
+
+/// The parsers' common machinery: a window and one or more lanes (several only for the lazy
+/// parser, in [`MultiSlow`]).
+#[derive(Clone)]
+struct Engine<'a> {
+    win: Window<'a>,
+    kind: Kind,
+    held: bool,
+    last_head: usize,
+    finished: bool,
+    /// Whether lanes count and log their misses.
+    track: bool,
+    lanes: Vec<Lane>,
+    jobs: Vec<Job>,
+}
+
+impl<'a> Engine<'a> {
+    fn new(input: &'a [u8], params: &[Params], track: bool) -> Self {
+        let first = params.first().copied().unwrap_or_default();
+        Engine {
+            win: Window::new(input, first),
+            kind: kind_of(first),
+            held: false,
+            last_head: 0,
+            finished: false,
+            track,
+            lanes: params.iter().map(|&p| Lane::new(p)).collect(),
+            jobs: vec![],
+        }
+    }
+
+    /// Refills the window.
+    fn refill(&mut self) {
+        loop {
+            if self.win.cursor + 262 >= 2 * self.win.w {
+                self.win.slide();
+                let w = self.win.w as isize;
+                for l in &mut self.lanes {
+                    l.src -= w;
+                }
+            }
+            if !self.win.feed() {
+                break;
+            }
+        }
+        self.win.zero_tail();
+    }
+
+    /// Queues lane `i`'s chain search at the deferred length.
+    fn add_job(&mut self, i: usize) {
+        let l = &self.lanes[i];
+        let budget = if l.dlen >= l.good {
+            l.chain / 4
+        } else {
+            l.chain
+        };
+        self.jobs.push(Job {
+            lane: i,
+            best: l.dlen,
+            sigma: l.src,
+            budget,
+            stop: l.nice.min(self.win.ahead),
+            active: true,
+        });
+    }
+
+    /// Runs the queued searches from `h` as lazy searches, setting the lanes' current matches.
+    fn run_jobs(&mut self, h: usize) {
+        if self.jobs.is_empty() {
+            return;
+        }
+        self.win.walk(h, &mut self.jobs);
+        let (c, a) = (self.win.cursor as isize, self.win.ahead);
+        for job in &self.jobs {
+            let l = &mut self.lanes[job.lane];
+            let mut len = job.best.min(a);
+            if len <= 5 && (l.filtered || (len == 3 && c - job.sigma > 4096)) {
+                len = 2;
+            }
+            l.len = len;
+            l.src = job.sigma;
+        }
+        self.jobs.clear();
+    }
+
+    fn set_pending(&mut self, token: Token, at: usize, when: When) {
+        for l in self.lanes.iter_mut().filter(|l| l.alive) {
+            l.pending = Some(Pending { token, at, when });
+        }
+    }
+
+    /// Runs the parser's step, giving the alive lanes pending tokens (or finishing).
+    fn step(&mut self) {
+        match self.kind {
+            Kind::Lazy => self.step_lazy(),
+            Kind::Greedy => self.step_greedy(),
+            Kind::Runs => self.step_runs(),
+            Kind::Huffman => self.step_huffman(),
+        }
+    }
+
+    fn step_lazy(&mut self) {
+        loop {
+            if self.win.ahead < 262 {
+                self.refill();
+                if self.win.ahead == 0 {
+                    if self.held {
+                        let at = self.win.cursor - 1;
+                        let token = Token::Lit(self.win.buf[at]);
+                        self.set_pending(token, at, When::Final);
+                    } else {
+                        self.finished = true;
+                    }
+                    return;
+                }
+            }
+            let c = self.win.cursor;
+            let h = if self.win.ahead >= 3 {
+                self.win.chain(c)
+            } else {
+                0
+            };
+            self.last_head = h;
+            self.jobs.clear();
+            let near = h != 0 && c.wrapping_sub(h) <= self.win.max_dist;
+            for i in 0..self.lanes.len() {
+                let l = &mut self.lanes[i];
+                if !l.alive {
+                    continue;
+                }
+                l.dlen = l.len;
+                l.dsrc = l.src;
+                l.len = 2;
+                if near && l.dlen < l.lazy {
+                    self.add_job(i);
+                }
+            }
+            self.run_jobs(h);
+            let mut ended = false;
+            for l in self.lanes.iter_mut().filter(|l| l.alive) {
+                if l.dlen >= 3 && l.len <= l.dlen {
+                    let dist = (c as isize - 1 - l.dsrc) as u16;
+                    let token = Token::Match {
+                        len: l.dlen as u16,
+                        dist,
+                        alt258: false,
+                    };
+                    l.pending = Some(Pending {
+                        token,
+                        at: c - 1,
+                        when: When::Deferred,
+                    });
+                    ended = true;
+                } else if self.held {
+                    let token = Token::Lit(self.win.buf[c - 1]);
+                    l.pending = Some(Pending {
+                        token,
+                        at: c - 1,
+                        when: When::Deferred,
+                    });
+                    ended = true;
+                }
+            }
+            if ended {
+                return;
+            }
+            self.held = true;
+            self.win.cursor += 1;
+            self.win.ahead -= 1;
+        }
+    }
+
+    fn step_greedy(&mut self) {
+        if self.win.ahead < 262 {
+            self.refill();
+            if self.win.ahead == 0 {
+                self.finished = true;
+                return;
+            }
+        }
+        let c = self.win.cursor;
+        let h = if self.win.ahead >= 3 {
+            self.win.chain(c)
         } else {
             0
         };
-        // zlib reads up to scan[MAX_MATCH], which strstart <= window_size - MIN_LOOKAHEAD allows.
-        let (window, prev, w_mask) = (&self.window[..], &self.prev[..], self.w_mask);
-        let ws = &window[scan..scan + MAX_MATCH + 1];
-        // Bytes best_len - 1 and best_len, and the first two, as zlib's UNALIGNED_OK does.
-        let pair = |w: &[u8], i: usize| u16::from_le_bytes([w[i], w[i + 1]]);
-        let mut scan_end = pair(ws, best_len - 1);
-        let scan_start = pair(ws, 0);
-        if self.prev_length >= self.good_match {
-            chain >>= 2;
+        let l = &mut self.lanes[0];
+        if h != 0 && c.wrapping_sub(h) <= self.win.max_dist {
+            let mut job = [Job {
+                lane: 0,
+                best: 2,
+                sigma: l.src,
+                budget: l.chain,
+                stop: l.nice.min(self.win.ahead),
+                active: true,
+            }];
+            self.win.walk(h, &mut job);
+            l.len = job[0].best.min(self.win.ahead);
+            l.src = job[0].sigma;
         }
-        if nice > self.lookahead {
-            nice = self.lookahead;
+        let token = if l.len >= 3 {
+            Token::Match {
+                len: l.len as u16,
+                dist: (c as isize - l.src) as u16,
+                alt258: false,
+            }
+        } else {
+            Token::Lit(self.win.buf[c])
+        };
+        self.set_pending(token, c, When::Here);
+    }
+
+    fn step_runs(&mut self) {
+        if self.win.ahead <= 258 {
+            self.refill();
+            if self.win.ahead == 0 {
+                self.finished = true;
+                return;
+            }
         }
-        let mut match_start = self.match_start;
-        loop {
-            // Candidates come before strstart, so their MAX_MATCH + 1 bytes are in the window.
-            debug_assert!(cur < scan);
-            let wm = &window[cur..][..MAX_MATCH + 1];
-            if pair(wm, best_len - 1) == scan_end && pair(wm, 0) == scan_start {
-                // Byte 2 is equal by construction of the hash and is not compared.
-                let len = match_len(ws, wm);
-                if len > best_len {
-                    match_start = cur;
-                    best_len = len;
-                    if len >= nice {
-                        break;
-                    }
-                    scan_end = pair(ws, best_len - 1);
+        let (c, a) = (self.win.cursor, self.win.ahead);
+        let buf = &self.win.buf;
+        let mut len = 0;
+        if a >= 3 && c > 0 {
+            let b = buf[c - 1];
+            if buf[c] == b && buf[c + 1] == b && buf[c + 2] == b {
+                let mut r = 3;
+                while r < 258 && buf[c + r] == b {
+                    r += 1;
                 }
-            }
-            cur = prev[cur & w_mask] as usize;
-            if cur <= limit {
-                break;
-            }
-            chain -= 1;
-            if chain == 0 {
-                break;
+                len = r.min(a);
             }
         }
-        self.match_start = match_start;
-        best_len.min(self.lookahead)
-    }
-
-    /// The token zlib emits next and its absolute position, or `None` at the end.
-    pub fn predict(&mut self) -> Option<(usize, Token)> {
-        if self.pending.is_none() && !self.done {
-            self.pending = match self.algo {
-                Algo::Slow => self.run_slow(),
-                Algo::Fast => self.run_fast(),
-                Algo::Rle => self.run_rle(),
-                Algo::Huff => self.run_huff(),
-            };
-            if self.pending.is_none() {
-                self.done = true;
-            }
-        }
-        self.pending.map(|(_, pos, t)| (pos, t))
-    }
-
-    fn lit(&self, rel: usize) -> (usize, Token) {
-        (self.base + rel, Token::Lit(self.window[rel]))
-    }
-
-    fn mat(&self, rel: usize, len: usize, dist: usize) -> (usize, Token) {
-        (
-            self.base + rel,
+        self.lanes[0].len = len;
+        let token = if len >= 3 {
             Token::Match {
                 len: len as u16,
-                dist: dist as u16,
+                dist: 1,
                 alt258: false,
-            },
-        )
-    }
-
-    fn run_slow(&mut self) -> Option<(Point, usize, Token)> {
-        loop {
-            if self.lookahead < MIN_LOOKAHEAD {
-                self.fill_window();
-                if self.lookahead == 0 {
-                    if self.match_available {
-                        let (p, t) = self.lit(self.strstart - 1);
-                        return Some((Point::SlowEnd, p, t));
-                    }
-                    return None;
-                }
             }
-            let mut hash_head = 0;
-            if self.lookahead >= MIN_MATCH {
-                hash_head = self.insert(self.strstart);
-            }
-            self.last_head = hash_head;
-            self.prev_length = self.match_length;
-            self.prev_match = self.match_start;
-            self.match_length = MIN_MATCH - 1;
-            if hash_head != 0
-                && self.prev_length < self.max_lazy
-                && self.strstart - hash_head <= self.max_dist()
-            {
-                self.slow_search(hash_head);
-            }
-            if self.prev_length >= MIN_MATCH && self.match_length <= self.prev_length {
-                let q = self.strstart - 1;
-                // match_start wraps like zlib's unsigned one when a slide leaves it just below the
-                // window, so the distance does too.
-                let (p, t) = self.mat(q, self.prev_length, q.wrapping_sub(self.prev_match));
-                return Some((Point::SlowMatch, p, t));
-            } else if self.match_available {
-                let (p, t) = self.lit(self.strstart - 1);
-                return Some((Point::SlowLit, p, t));
-            } else {
-                self.match_available = true;
-                self.strstart += 1;
-                self.lookahead -= 1;
-            }
-        }
-    }
-
-    /// longest_match plus deflate_slow's filtering of short matches.
-    fn slow_search(&mut self, hash_head: usize) {
-        self.match_length = self.longest_match(hash_head);
-        if self.match_length <= 5
-            && (self.filtered
-                || (self.match_length == MIN_MATCH
-                    && self.strstart.wrapping_sub(self.match_start) > TOO_FAR))
-        {
-            self.match_length = MIN_MATCH - 1;
-        }
-    }
-
-    fn run_fast(&mut self) -> Option<(Point, usize, Token)> {
-        if self.lookahead < MIN_LOOKAHEAD {
-            self.fill_window();
-            if self.lookahead == 0 {
-                return None;
-            }
-        }
-        let mut hash_head = 0;
-        if self.lookahead >= MIN_MATCH {
-            hash_head = self.insert(self.strstart);
-        }
-        if hash_head != 0 && self.strstart - hash_head <= self.max_dist() {
-            self.match_length = self.longest_match(hash_head);
-        }
-        if self.match_length >= MIN_MATCH {
-            let (p, t) = self.mat(
-                self.strstart,
-                self.match_length,
-                self.strstart - self.match_start,
-            );
-            Some((Point::Match, p, t))
         } else {
-            let (p, t) = self.lit(self.strstart);
-            Some((Point::Lit, p, t))
-        }
+            Token::Lit(buf[c])
+        };
+        self.set_pending(token, c, When::Here);
     }
 
-    fn run_rle(&mut self) -> Option<(Point, usize, Token)> {
-        if self.lookahead <= MAX_MATCH {
-            self.fill_window();
-            if self.lookahead == 0 {
-                return None;
+    fn step_huffman(&mut self) {
+        if self.win.ahead == 0 {
+            self.refill();
+            if self.win.ahead == 0 {
+                self.finished = true;
+                return;
             }
         }
-        self.match_length = 0;
-        let s = self.strstart;
-        let w = &self.window;
-        if self.lookahead >= MIN_MATCH && s > 0 {
-            let prev = w[s - 1];
-            if w[s] == prev && w[s + 1] == prev && w[s + 2] == prev {
-                // Same grouping as zlib: 8 compares, then the bound check.
-                let mut scan = s + 2;
-                let strend = s + MAX_MATCH;
-                'outer: loop {
-                    for _ in 0..8 {
-                        scan += 1;
-                        if w[scan] != prev {
-                            break 'outer;
-                        }
-                    }
-                    if scan >= strend {
-                        break;
-                    }
-                }
-                self.match_length = (MAX_MATCH - (strend - scan)).min(self.lookahead);
-            }
-        }
-        if self.match_length >= MIN_MATCH {
-            let (p, t) = self.mat(s, self.match_length, 1);
-            Some((Point::Match, p, t))
-        } else {
-            let (p, t) = self.lit(s);
-            Some((Point::Lit, p, t))
-        }
+        let c = self.win.cursor;
+        let token = Token::Lit(self.win.buf[c]);
+        self.set_pending(token, c, When::Here);
     }
 
-    fn run_huff(&mut self) -> Option<(Point, usize, Token)> {
-        if self.lookahead == 0 {
-            self.fill_window();
-            if self.lookahead == 0 {
-                return None;
-            }
-        }
-        let (p, t) = self.lit(self.strstart);
-        Some((Point::Lit, p, t))
-    }
-
-    /// Advances past the predicted token, replaced by `actual` if different. Returns false
-    /// when `actual` cannot be followed (the emulation is then unusable).
-    pub fn commit(&mut self, actual: Token) -> bool {
-        let Some((point, pos, predicted)) = self.pending.take() else {
+    /// Follows the actual token `t`; false where it cannot.
+    fn commit(&mut self, t: Token) -> bool {
+        let Some(rep) = self.lanes.iter().position(|l| l.alive) else {
             return false;
         };
-        let hit = actual == predicted;
-        let alen = match actual {
+        let Some(first) = self.lanes[rep].pending else {
+            return false;
+        };
+        let (o, track) = (self.win.origin, self.track);
+        for l in self.lanes.iter_mut().filter(|l| l.alive) {
+            if let Some(p) = l.pending.take() {
+                l.hit = p.token == t;
+                if track && !l.hit {
+                    l.misses += 1;
+                    l.log.push((o + p.at, p.token));
+                }
+            }
+        }
+        let n = match t {
             Token::Lit(_) => 0,
             Token::Match { len, .. } => len as usize,
         };
-        match (self.algo, point) {
-            (Algo::Slow, Point::SlowEnd) => {
-                if !hit {
-                    return false;
-                }
-                self.match_available = false;
-            }
-            (Algo::Slow, Point::SlowMatch | Point::SlowLit) => {
-                if alen > 0 {
-                    if alen - 1 > self.lookahead {
-                        return false;
-                    }
-                    let max_insert = self.strstart + self.lookahead - MIN_MATCH;
-                    self.lookahead -= alen - 1;
-                    for _ in 0..alen - 2 {
-                        self.strstart += 1;
-                        if self.strstart <= max_insert {
-                            self.insert(self.strstart);
-                        }
-                    }
-                    self.match_available = false;
-                    self.match_length = MIN_MATCH - 1;
-                    self.strstart += 1;
-                } else {
-                    if !hit {
-                        // zlib wanted a match here. Make the next position pending with a
-                        // fresh search, as if this literal had been chosen normally.
-                        self.prev_length = MIN_MATCH - 1;
-                        self.match_length = MIN_MATCH - 1;
-                        let h = self.last_head;
-                        if h != 0 && self.strstart - h <= self.max_dist() {
-                            self.slow_search(h);
-                        }
-                    }
-                    self.strstart += 1;
-                    self.lookahead -= 1;
-                }
-            }
-            (Algo::Fast, _) => {
-                if alen > 0 {
-                    if alen > self.lookahead {
-                        return false;
-                    }
-                    self.lookahead -= alen;
-                    if alen <= self.max_lazy && self.lookahead >= MIN_MATCH {
-                        for _ in 0..alen - 1 {
-                            self.strstart += 1;
-                            self.insert(self.strstart);
-                        }
-                        self.strstart += 1;
-                    } else {
-                        self.strstart += alen;
-                    }
-                    self.match_length = 0;
-                } else {
-                    self.lookahead -= 1;
-                    self.strstart += 1;
-                    if !hit {
-                        self.match_length = 0;
-                    }
-                }
-            }
-            (Algo::Rle | Algo::Huff, _) => {
-                let n = alen.max(1);
-                if n > self.lookahead {
-                    return false;
-                }
-                self.lookahead -= n;
-                self.strstart += n;
-                self.match_length = 0;
-            }
-            _ => return false,
+        if matches!(t, Token::Match { .. }) && n < 3 {
+            return false;
         }
-        debug_assert_eq!(
-            self.base + self.strstart - self.match_available as usize,
-            pos + alen.max(1)
-        );
+        match (self.kind, first.when) {
+            (Kind::Lazy, When::Final) => {
+                if !self.lanes[rep].hit {
+                    return false;
+                }
+                self.held = false;
+            }
+            (Kind::Lazy, _) if n > 0 => {
+                let win = &mut self.win;
+                if n - 1 > win.ahead {
+                    return false;
+                }
+                let last = (win.cursor + win.ahead) as isize - 3;
+                win.ahead -= n - 1;
+                for _ in 0..n - 2 {
+                    win.cursor += 1;
+                    if win.cursor as isize <= last {
+                        win.chain(win.cursor);
+                    }
+                }
+                self.held = false;
+                for l in self.lanes.iter_mut().filter(|l| l.alive) {
+                    l.len = 2;
+                }
+                win.cursor += 1;
+            }
+            (Kind::Lazy, _) => {
+                if self.win.ahead == 0 {
+                    return false;
+                }
+                let (h, c) = (self.last_head, self.win.cursor);
+                let near = h != 0 && c.wrapping_sub(h) <= self.win.max_dist;
+                self.jobs.clear();
+                for i in 0..self.lanes.len() {
+                    let l = &mut self.lanes[i];
+                    if l.alive && !l.hit {
+                        l.dlen = 2;
+                        l.len = 2;
+                        if near {
+                            self.add_job(i);
+                        }
+                    }
+                }
+                self.run_jobs(h);
+                self.win.cursor += 1;
+                self.win.ahead -= 1;
+            }
+            (Kind::Greedy, _) if n > 0 => {
+                let win = &mut self.win;
+                if n > win.ahead {
+                    return false;
+                }
+                win.ahead -= n;
+                let l = &mut self.lanes[0];
+                if n <= l.lazy && win.ahead >= 3 {
+                    for _ in 0..n - 1 {
+                        win.cursor += 1;
+                        win.chain(win.cursor);
+                    }
+                    win.cursor += 1;
+                } else {
+                    win.cursor += n;
+                }
+                l.len = 0;
+            }
+            (Kind::Greedy, _) => {
+                if self.win.ahead == 0 {
+                    return false;
+                }
+                self.win.ahead -= 1;
+                self.win.cursor += 1;
+                let l = &mut self.lanes[0];
+                if !l.hit {
+                    l.len = 0;
+                }
+            }
+            _ => {
+                let k = n.max(1);
+                if k > self.win.ahead {
+                    return false;
+                }
+                self.win.ahead -= k;
+                self.win.cursor += k;
+                self.lanes[0].len = 0;
+            }
+        }
         true
     }
+}
 
-    /// Lets zlib run on its own until `end` (absolute), e.g. over a stored block whose tokens
-    /// are not in the stream. A token that would cross `end` is replaced by literals.
+/// The emulator of FORMAT.md, "zlib emulation".
+#[derive(Clone)]
+pub struct Emulator<'a> {
+    p: Params,
+    e: Engine<'a>,
+}
+
+impl<'a> Emulator<'a> {
+    /// A fresh emulator of `p` over the whole data `input`.
+    pub fn new(input: &'a [u8], p: Params) -> Self {
+        assert!(p.valid(), "bad zlib parameters {p:?}");
+        Emulator {
+            p,
+            e: Engine::new(input, &[p], false),
+        }
+    }
+
+    /// The checkpoint of this emulator, where it can be resumed (see [`Params::resumable`]),
+    /// it has no pending token and is not finished.
+    pub fn checkpoint(&self) -> Option<Checkpoint> {
+        let e = &self.e;
+        let l = &e.lanes[0];
+        if !self.p.resumable() || e.finished || l.pending.is_some() {
+            return None;
+        }
+        let w = &e.win;
+        let (length, source) = if e.kind == Kind::Lazy && l.len > 2 {
+            (l.len, usize::try_from(w.origin as isize + l.src).ok()?)
+        } else if e.kind == Kind::Lazy {
+            (l.len, 0)
+        } else {
+            (2, 0)
+        };
+        Some(Checkpoint {
+            cursor: w.origin + w.cursor,
+            origin: w.origin,
+            fed: w.fed,
+            zero_mark: w.zero_mark,
+            held: e.held,
+            length,
+            source,
+        })
+    }
+
+    /// The emulator rebuilt from `input` and a checkpoint (FORMAT.md, "Checkpoints"), or
+    /// None where the checkpoint is invalid.
+    pub fn resume(input: &'a [u8], p: Params, cp: &Checkpoint) -> Option<Self> {
+        if !p.valid() || !p.resumable() {
+            return None;
+        }
+        let mut em = Emulator::new(input, p);
+        let e = &mut em.e;
+        let (w, n) = (e.win.w, input.len());
+        let (o, c_pos, f) = (cp.origin, cp.cursor, cp.fed);
+        let held = cp.held as usize;
+        let lazy = e.kind == Kind::Lazy;
+        if o % w != 0
+            || (cp.held && (!lazy || c_pos <= o))
+            || !(o <= c_pos && c_pos <= f && f <= n)
+            || f - o > 2 * w
+            || cp.zero_mark > 2 * w
+            || cp.length > 258
+        {
+            return None;
+        }
+        if cp.length >= 3 && !(o <= cp.source && cp.source + held < c_pos && c_pos - cp.source <= w)
+        {
+            return None;
+        }
+        let z = cp.zero_mark;
+        let win = &mut e.win;
+        win.origin = o;
+        win.fed = f;
+        win.zero_mark = z;
+        win.cursor = c_pos - o;
+        win.ahead = f - c_pos;
+        for i in 0..2 * w {
+            let p = o + i;
+            win.buf[i] = if p < f {
+                input[p]
+            } else if i >= z {
+                0
+            } else {
+                let k = if p < n { 1 } else { (p - n) / w + 1 };
+                if k * w <= o { input[p - k * w] } else { 0 }
+            };
+        }
+        e.held = cp.held;
+        let l = &mut e.lanes[0];
+        l.len = cp.length;
+        l.src = if cp.length >= 3 {
+            cp.source as isize - o as isize
+        } else {
+            0
+        };
+        if lazy {
+            for p in o.max(c_pos.saturating_sub(w))..c_pos {
+                if p + 3 <= f {
+                    win.chain(p - o);
+                }
+            }
+        }
+        Some(em)
+    }
+
+    pub fn params(&self) -> Params {
+        self.p
+    }
+
+    /// The data position of the window's start (the origin).
+    pub fn window_base(&self) -> usize {
+        self.e.win.origin
+    }
+
+    /// `predict()`: the token zlib emits next and its data position, or `None` at the end.
+    pub fn predict(&mut self) -> Option<(usize, Token)> {
+        if self.e.lanes[0].pending.is_none() && !self.e.finished {
+            self.e.step();
+        }
+        let p = self.e.lanes[0].pending?;
+        Some((self.e.win.origin + p.at, p.token))
+    }
+
+    /// `commit(actual)`: false where it fails.
+    pub fn commit(&mut self, actual: Token) -> bool {
+        self.e.commit(actual)
+    }
+
+    /// `skip_to(end)`: false where it fails.
     pub fn skip_to(&mut self, end: usize) -> bool {
-        while let Some((pos, t)) = self.predict() {
-            if pos >= end {
+        while let Some((q, t)) = self.predict() {
+            if q >= end {
                 break;
             }
-            let t = if pos + t_len(t) > end {
-                Token::Lit(self.input[pos])
+            let t = if q + t.span() > end {
+                Token::Lit(self.e.win.input[q])
             } else {
                 t
             };
@@ -889,392 +1020,85 @@ pub struct Followed<'a> {
     pub emu: Emulator<'a>,
 }
 
-/// One level's lazy-matching state in a [`MultiSlow`].
-#[derive(Debug, Clone)]
-struct Lane {
-    params: Params,
-    good: usize,
-    lazy: usize,
-    nice: usize,
-    chain: usize,
-    filtered: bool,
-    prev_length: usize,
-    prev_match: usize,
-    match_length: usize,
-    match_start: usize,
-    predicted: Option<Token>,
-    misses: usize,
-    /// The mispredictions: (position, predicted token).
-    log: Vec<(usize, Token)>,
-    alive: bool,
-}
-
-/// A strict improvement found walking a hash chain from best length 2: the candidate's index
-/// in the chain, its match length and its position.
-#[derive(Debug, Clone, Copy)]
-struct ChainRec {
-    idx: usize,
-    len: usize,
-    cur: usize,
-}
-
-/// Several deflate_slow levels (4-9, default, filtered or fixed, same windowBits and memLevel)
-/// emulated at once against the actual tokens, in SPMD fashion.
-///
-/// Driven by the actual tokens, these levels insert the same strings and keep the same window,
-/// so all of that is shared; only the lazy-matching state differs per level ("lane"). The hash
-/// chain at each position is walked once, recording the strict improvements from length 2;
-/// every improvement a lane's `longest_match` would find (starting from its own previous
-/// length, within its own chain limit and nice length) is among them, so each lane's result
-/// follows exactly.
+/// Several lazy-parser emulations (levels 4-9, strategies default, filtered or fixed, the same
+/// windowBits and memLevel) run at once against the actual tokens, each predicting and missing
+/// exactly as its own [`Emulator`] would. Driven by the same actual tokens, they chain the same
+/// positions and keep the same window, so that much can be shared.
 pub struct MultiSlow<'a> {
-    e: Emulator<'a>,
-    lanes: Vec<Lane>,
-    recs: Vec<ChainRec>,
-    /// Absolute position the records are for (`usize::MAX`: none).
-    recs_at: usize,
-    pending: Option<usize>,
-    done: bool,
+    e: Engine<'a>,
 }
 
 impl<'a> MultiSlow<'a> {
-    /// `params` must all use deflate_slow (level >= 4, default, filtered or fixed strategy) with the
-    /// same windowBits and memLevel.
+    /// All `params` must be lazy-parser ones with the same windowBits and memLevel.
     pub fn new(input: &'a [u8], params: &[Params]) -> Self {
         assert!(!params.is_empty());
-        for p in params {
-            assert!(
-                p.level >= 4
-                    && matches!(
-                        p.strategy,
-                        Strategy::Default | Strategy::Filtered | Strategy::Fixed
-                    )
-                    && p.wbits == params[0].wbits
-                    && p.mem == params[0].mem,
-                "{p} cannot share a MultiSlow"
-            );
-        }
-        let lanes = params
-            .iter()
-            .map(|&p| {
-                let (good, lazy, nice, chain) = CONFIG[p.level as usize];
-                Lane {
-                    params: p,
-                    good,
-                    lazy,
-                    nice,
-                    chain,
-                    filtered: p.strategy == Strategy::Filtered,
-                    prev_length: MIN_MATCH - 1,
-                    prev_match: 0,
-                    match_length: MIN_MATCH - 1,
-                    match_start: 0,
-                    predicted: None,
-                    misses: 0,
-                    log: vec![],
-                    alive: true,
-                }
-            })
-            .collect();
+        assert!(
+            params
+                .iter()
+                .all(|&p| p.valid() && kind_of(p) == Kind::Lazy)
+        );
+        assert!(
+            params
+                .iter()
+                .all(|p| (p.wbits, p.mem) == (params[0].wbits, params[0].mem))
+        );
         MultiSlow {
-            e: Emulator::new(input, params[0]),
-            lanes,
-            recs: vec![],
-            recs_at: usize::MAX,
-            pending: None,
-            done: false,
+            e: Engine::new(input, params, true),
         }
     }
 
-    /// Parameters and mispredictions so far of each lane still alive.
+    /// The lanes still alive: (index, parameters, misses so far).
     pub fn lanes(&self) -> impl Iterator<Item = (usize, Params, usize)> + '_ {
-        self.lanes
+        self.e
+            .lanes
             .iter()
             .enumerate()
             .filter(|(_, l)| l.alive)
-            .map(|(i, l)| (i, l.params, l.misses))
+            .map(|(i, l)| (i, l.p, l.misses))
     }
 
+    /// Stops following lane `lane`.
     pub fn kill(&mut self, lane: usize) {
-        self.lanes[lane].alive = false;
+        self.e.lanes[lane].alive = false;
     }
 
     pub fn any_alive(&self) -> bool {
-        self.lanes.iter().any(|l| l.alive)
+        self.e.lanes.iter().any(|l| l.alive)
     }
 
-    /// Lane `k` as an emulator of its own, between tokens, with its mispredictions so far.
-    pub fn into_followed(mut self, k: usize, pos: usize) -> Followed<'a> {
-        debug_assert!(self.pending.is_none());
-        let l = self.lanes.swap_remove(k);
-        let e = Emulator {
-            params: l.params,
-            filtered: l.filtered,
-            good_match: l.good,
-            max_lazy: l.lazy,
-            nice_match: l.nice,
-            max_chain: l.chain,
-            match_length: l.match_length,
-            match_start: l.match_start,
-            prev_length: l.prev_length,
-            prev_match: l.prev_match,
-            done: self.done,
-            ..self.e
-        };
+    /// Lane `k` as a single emulation that has followed the tokens so far, at data position
+    /// `pos` (where the next token starts), with its log of mispredictions.
+    pub fn into_followed(self, k: usize, pos: usize) -> Followed<'a> {
+        let mut e = self.e;
+        let mut lane = e.lanes.swap_remove(k);
+        lane.alive = true;
+        let log = std::mem::take(&mut lane.log);
+        let p = lane.p;
+        e.lanes = vec![lane];
+        e.track = false;
+        e.jobs.clear();
         Followed {
-            log: l.log,
+            log,
             pos,
-            emu: e,
+            emu: Emulator { p, e },
         }
     }
 
-    /// Walks the chain from `hash_head` at strstart once, deep enough for every live lane.
-    fn records(&mut self, hash_head: usize) {
-        // Keyed by absolute position: window slides reuse relative ones.
-        if self.recs_at == self.e.base + self.e.strstart {
-            return;
-        }
-        self.recs_at = self.e.base + self.e.strstart;
-        self.recs.clear();
-        let dmax = self
-            .lanes
-            .iter()
-            .filter(|l| l.alive)
-            .map(|l| l.chain)
-            .max()
-            .unwrap_or(0);
-        let e = &self.e;
-        let scan = e.strstart;
-        let limit = if scan > e.max_dist() {
-            scan - e.max_dist()
-        } else {
-            0
-        };
-        let ws = &e.window[scan..scan + MAX_MATCH + 1];
-        let mut best = MIN_MATCH - 1;
-        let (mut scan_end1, mut scan_end) = (ws[best - 1], ws[best]);
-        let mut cur = hash_head;
-        for idx in 0..dmax {
-            let wm = &e.window[cur..cur + MAX_MATCH + 1];
-            if wm[best] == scan_end && wm[best - 1] == scan_end1 && wm[0] == ws[0] && wm[1] == ws[1]
-            {
-                let len = match_len(ws, wm);
-                if len > best {
-                    self.recs.push(ChainRec { idx, len, cur });
-                    best = len;
-                    if best >= MAX_MATCH {
-                        break;
-                    }
-                    scan_end1 = ws[best - 1];
-                    scan_end = ws[best];
-                }
-            }
-            cur = e.prev[cur & e.w_mask] as usize;
-            if cur <= limit {
-                break;
-            }
-        }
-    }
-
-    /// `longest_match` for one lane, from the shared records.
-    fn lane_search(recs: &[ChainRec], lane: &mut Lane, lookahead: usize, strstart: usize) {
-        let mut chain = lane.chain;
-        if lane.prev_length >= lane.good {
-            chain >>= 2;
-        }
-        let nice = lane.nice.min(lookahead);
-        let mut best = lane.prev_length;
-        for r in recs {
-            if r.idx >= chain {
-                break;
-            }
-            if r.len > best {
-                best = r.len;
-                lane.match_start = r.cur;
-                if best >= nice {
-                    break;
-                }
-            }
-        }
-        lane.match_length = best.min(lookahead);
-        if lane.match_length <= 5
-            && (lane.filtered
-                || (lane.match_length == MIN_MATCH
-                    && strstart.wrapping_sub(lane.match_start) > TOO_FAR))
-        {
-            lane.match_length = MIN_MATCH - 1;
-        }
-    }
-
-    /// Runs to the next emission and returns its absolute position; each live lane's
-    /// prediction is then set. `None` at the end of the input.
+    /// The data position of the next token that the lanes predict, or None at the end (all
+    /// alive lanes predict at the same position, or the emulation is over).
     pub fn predict(&mut self) -> Option<usize> {
-        if self.pending.is_some() || self.done {
-            return self.pending;
+        let rep = self.e.lanes.iter().position(|l| l.alive)?;
+        if self.e.lanes[rep].pending.is_none() && !self.e.finished {
+            self.e.step();
         }
-        loop {
-            let e = &mut self.e;
-            if e.lookahead < MIN_LOOKAHEAD {
-                let base = e.base;
-                e.fill_window();
-                // fill_window moves zlib's (single) match_start with the window.
-                let slid = e.base - base;
-                for l in &mut self.lanes {
-                    l.match_start = l.match_start.wrapping_sub(slid);
-                }
-                if e.lookahead == 0 {
-                    if e.match_available {
-                        let q = e.strstart - 1;
-                        let t = Token::Lit(e.window[q]);
-                        for l in self.lanes.iter_mut().filter(|l| l.alive) {
-                            l.predicted = Some(t);
-                        }
-                        self.pending = Some(e.base + q);
-                        return self.pending;
-                    }
-                    self.done = true;
-                    return None;
-                }
-            }
-            let mut hash_head = 0;
-            if e.lookahead >= MIN_MATCH {
-                hash_head = e.insert(e.strstart);
-            }
-            e.last_head = hash_head;
-            let (strstart, lookahead, max_dist) = (e.strstart, e.lookahead, e.max_dist());
-            let search = hash_head != 0 && strstart - hash_head <= max_dist;
-            if search
-                && self
-                    .lanes
-                    .iter()
-                    .any(|l| l.alive && l.match_length < l.lazy)
-            {
-                self.records(hash_head);
-            }
-            for l in self.lanes.iter_mut().filter(|l| l.alive) {
-                l.prev_length = l.match_length;
-                l.prev_match = l.match_start;
-                l.match_length = MIN_MATCH - 1;
-                if search && l.prev_length < l.lazy {
-                    Self::lane_search(&self.recs, l, lookahead, strstart);
-                }
-            }
-            let e = &mut self.e;
-            if e.match_available {
-                let q = e.strstart - 1;
-                for l in self.lanes.iter_mut().filter(|l| l.alive) {
-                    l.predicted = Some(
-                        if l.prev_length >= MIN_MATCH && l.match_length <= l.prev_length {
-                            Token::Match {
-                                len: l.prev_length as u16,
-                                dist: q.wrapping_sub(l.prev_match) as u16,
-                                alt258: false,
-                            }
-                        } else {
-                            Token::Lit(e.window[q])
-                        },
-                    );
-                }
-                self.pending = Some(e.base + q);
-                return self.pending;
-            }
-            e.match_available = true;
-            e.strstart += 1;
-            e.lookahead -= 1;
-        }
+        let p = self.e.lanes[rep].pending?;
+        Some(self.e.win.origin + p.at)
     }
 
-    /// Moves on with the actual token, counting each live lane's misprediction.
+    /// Moves every alive lane on with the actual token, counting and logging its miss where it
+    /// predicted otherwise; false where the emulation cannot follow it.
     pub fn commit(&mut self, actual: Token) -> bool {
-        let Some(pos) = self.pending.take() else {
-            return false;
-        };
-        let alen = t_len(actual);
-        let is_match = matches!(actual, Token::Match { .. });
-        for l in self.lanes.iter_mut().filter(|l| l.alive) {
-            if l.predicted != Some(actual) {
-                l.misses += 1;
-                l.log.extend(l.predicted.map(|t| (pos, t)));
-            }
-        }
-        let e = &mut self.e;
-        if e.lookahead == 0 {
-            // The final pending literal.
-            if is_match {
-                return false;
-            }
-            e.match_available = false;
-            self.done = true;
-            return true;
-        }
-        if is_match {
-            if alen - 1 > e.lookahead {
-                return false;
-            }
-            let max_insert = e.strstart + e.lookahead - MIN_MATCH;
-            e.lookahead -= alen - 1;
-            for _ in 0..alen - 2 {
-                e.strstart += 1;
-                if e.strstart <= max_insert {
-                    e.insert(e.strstart);
-                }
-            }
-            e.match_available = false;
-            e.strstart += 1;
-            for l in self.lanes.iter_mut().filter(|l| l.alive) {
-                l.match_length = MIN_MATCH - 1;
-            }
-        } else {
-            // Lanes that wanted a match here continue with a fresh search at the next
-            // position, as the single emulator does.
-            let h = e.last_head;
-            let (strstart, lookahead, max_dist) = (e.strstart, e.lookahead, e.max_dist());
-            let refresh = |l: &Lane| l.alive && matches!(l.predicted, Some(Token::Match { .. }));
-            if h != 0 && strstart - h <= max_dist && self.lanes.iter().any(refresh) {
-                self.records(h);
-            }
-            for l in self.lanes.iter_mut() {
-                if refresh(l) {
-                    l.prev_length = MIN_MATCH - 1;
-                    l.match_length = MIN_MATCH - 1;
-                    if h != 0 && strstart - h <= max_dist {
-                        Self::lane_search(&self.recs, l, lookahead, strstart);
-                    }
-                }
-            }
-            let e = &mut self.e;
-            e.strstart += 1;
-            e.lookahead -= 1;
-        }
-        true
-    }
-}
-
-/// Length of the match between `ws` and `wm` as zlib's `longest_match` measures it: byte 2 is
-/// not compared, the result is the first mismatch from byte 3 on, at most MAX_MATCH.
-#[inline]
-fn match_len(ws: &[u8], wm: &[u8]) -> usize {
-    let mut len = 3;
-    loop {
-        if len + 8 > MAX_MATCH {
-            while len < MAX_MATCH && ws[len] == wm[len] {
-                len += 1;
-            }
-            return len;
-        }
-        let x = u64::from_le_bytes(ws[len..len + 8].try_into().unwrap());
-        let y = u64::from_le_bytes(wm[len..len + 8].try_into().unwrap());
-        if x != y {
-            return len + ((x ^ y).trailing_zeros() / 8) as usize;
-        }
-        len += 8;
-    }
-}
-
-fn t_len(t: Token) -> usize {
-    match t {
-        Token::Lit(_) => 1,
-        Token::Match { len, .. } => len as usize,
+        self.e.commit(actual)
     }
 }
 
@@ -1282,205 +1106,179 @@ fn t_len(t: Token) -> usize {
 mod tests {
     use super::*;
 
-    /// Free-running emulation reproduces the input.
+    fn sample(n: usize, seed: u64) -> Vec<u8> {
+        let mut s = seed;
+        let mut next = move || {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 33) as usize
+        };
+        let mut v: Vec<u8> = vec![];
+        while v.len() < n {
+            match next() % 4 {
+                0 => v.push((next() % 7) as u8 + b'a'),
+                1 if v.len() > 10 => {
+                    let d = 1 + next() % v.len().min(3000);
+                    let l = 3 + next() % 40;
+                    for _ in 0..l {
+                        v.push(v[v.len() - d]);
+                    }
+                }
+                2 => v.extend(std::iter::repeat_n((next() % 3) as u8, next() % 300)),
+                _ => v.push(next() as u8),
+            }
+        }
+        v.truncate(n);
+        v
+    }
+
+    fn all_params() -> Vec<Params> {
+        let mut v = vec![];
+        for level in [1, 3, 4, 6, 9] {
+            for strategy in Strategy::ALL {
+                for (wbits, mem) in [(15, 8), (9, 1), (10, 3)] {
+                    v.push(Params {
+                        level,
+                        strategy,
+                        wbits,
+                        mem,
+                    });
+                }
+            }
+        }
+        v
+    }
+
+    /// Runs `e` freely, giving its tokens.
+    fn run(e: &mut Emulator, limit: usize) -> Vec<(usize, Token)> {
+        let mut out = vec![];
+        while out.len() < limit {
+            let Some((at, t)) = e.predict() else { break };
+            assert!(e.commit(t));
+            out.push((at, t));
+        }
+        out
+    }
+
     #[test]
     fn free_run_covers_input() {
-        let data: Vec<u8> = include_bytes!("deflate.rs").repeat(3);
-        for level in 1..=9 {
-            for strategy in [
-                Strategy::Default,
-                Strategy::Filtered,
-                Strategy::Rle,
-                Strategy::HuffmanOnly,
-            ] {
-                let p = Params {
+        for seed in 0..3 {
+            let data = sample(30_000, seed);
+            for p in all_params() {
+                let mut e = Emulator::new(&data, p);
+                let mut pos = 0;
+                for (at, t) in run(&mut e, usize::MAX) {
+                    assert_eq!(at, pos, "{p}");
+                    pos += t.span();
+                }
+                assert_eq!(pos, data.len(), "{p}");
+                assert_eq!(e.predict(), None);
+            }
+        }
+        let mut e = Emulator::new(&[], Params::default());
+        assert_eq!(e.predict(), None);
+    }
+
+    #[test]
+    fn resume_continues_the_run() {
+        let data = sample(12_000, 7);
+        for p in all_params().into_iter().filter(|p| p.resumable()) {
+            let mut e = Emulator::new(&data, p);
+            let mut n = 0;
+            loop {
+                if let Some(cp) = e.checkpoint()
+                    && let Some(mut r) = Emulator::resume(&data, p, &cp)
+                {
+                    let mut orig = e.clone();
+                    assert_eq!(
+                        run(&mut r, 60),
+                        run(&mut orig, 60),
+                        "{p} after {n} tokens {cp:?}"
+                    );
+                }
+                let Some((_, t)) = e.predict() else { break };
+                assert!(e.commit(t));
+                n += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn resume_survives_arbitrary_checkpoints() {
+        let data = sample(9_000, 3);
+        let mut s = 12345u64;
+        let mut next = move |m: usize| {
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (s >> 33) as usize % m
+        };
+        for p in all_params() {
+            let w = 1usize << p.wbits;
+            for _ in 0..300 {
+                let origin = next(2) * w;
+                let cursor = origin + next(2 * w + 1);
+                let cp = Checkpoint {
+                    cursor,
+                    origin,
+                    fed: cursor + next(3000),
+                    zero_mark: next(2 * w + 1),
+                    held: next(2) == 1,
+                    length: 2 + next(270),
+                    source: cursor.saturating_sub(next(w + 1)),
+                };
+                if let Some(mut e) = Emulator::resume(&data, p, &cp) {
+                    let mut k = 0;
+                    while let Some((_, t)) = e.predict() {
+                        if !e.commit(t) || k > 50 {
+                            break;
+                        }
+                        k += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multi_lanes_match_single_emulators() {
+        let data = sample(20_000, 11);
+        let lanes: Vec<Params> = (4..=9)
+            .flat_map(|level| {
+                [Strategy::Default, Strategy::Filtered].map(|strategy| Params {
                     level,
                     strategy,
-                    ..Params::default()
-                };
-                let mut e = Emulator::new(&data, p);
-                let mut out = vec![];
-                while let Some((pos, t)) = e.predict() {
-                    assert_eq!(pos, out.len(), "{p}");
-                    match t {
-                        Token::Lit(b) => out.push(b),
-                        Token::Match { len, dist, .. } => {
-                            for _ in 0..len {
-                                out.push(out[out.len() - dist as usize]);
-                            }
-                        }
-                    }
-                    assert!(e.commit(t));
-                }
-                assert_eq!(out, data, "{p}");
-            }
-        }
-    }
-
-    fn test_data() -> Vec<u8> {
-        let mut lcg = 1u32;
-        let mut data = [
-            &include_bytes!("deflate.rs")[..],
-            include_bytes!("zlib.rs"),
-            include_bytes!("detect.rs"),
-        ]
-        .concat();
-        data.extend((0..20_000).map(|_| {
-            lcg = lcg.wrapping_mul(1_103_515_245).wrapping_add(12345);
-            (lcg >> 24) as u8
-        }));
-        data.extend(include_bytes!("huffman.rs"));
-        data
-    }
-
-    /// An emulator resumed from a checkpoint continues exactly as the original, also when
-    /// both are made to follow tokens other than their own.
-    #[test]
-    fn resume_continues_exactly() {
-        let data = test_data();
-        // Every `perturb`-th match is replaced by a literal (0: never).
-        let drive = |perturb: usize, n: usize, pos: usize, t: Token| match t {
-            Token::Match { .. } if perturb > 0 && n.is_multiple_of(perturb) => {
-                Token::Lit(data[pos])
-            }
-            t => t,
-        };
-        for level in 4..=9 {
-            for strategy in [Strategy::Default, Strategy::Filtered] {
-                for wbits in [9, 12, 15] {
-                    for perturb in [0, 7] {
-                        let p = Params {
-                            level,
-                            strategy,
-                            wbits,
-                            mem: 8,
-                        };
-                        let mut e = Emulator::new(&data, p);
-                        let (mut n, mut checked, mut checked_end) = (0, 0, 0);
-                        loop {
-                            // More often once the input has been read.
-                            let every = if e.read == data.len() { 31 } else { 997 };
-                            if n % every == 0
-                                && let Some(cp) = e.checkpoint()
-                            {
-                                checked_end += (cp.read == data.len()) as usize;
-                                let mut r = Emulator::resume(&data, p, &cp)
-                                    .unwrap_or_else(|| panic!("{p}: {cp:?}"));
-                                let mut a = e.clone();
-                                for i in n..n + 2000 {
-                                    let pa = a.predict();
-                                    assert_eq!(pa, r.predict(), "{p} perturb {perturb} {cp:?}");
-                                    let Some((pos, t)) = pa else { break };
-                                    let t = drive(perturb, i, pos, t);
-                                    assert!(a.commit(t) && r.commit(t));
-                                }
-                                assert_eq!(a.checkpoint(), r.checkpoint());
-                                checked += 1;
-                            }
-                            let Some((pos, t)) = e.predict() else { break };
-                            assert!(e.commit(drive(perturb, n, pos, t)));
-                            n += 1;
-                        }
-                        assert!(checked > 10, "{p}: {checked} checkpoints");
-                        assert!(checked_end > 0, "{p}: no checkpoint after the input");
-                    }
-                }
-            }
-        }
-    }
-
-    /// Checkpoints from corrupt metadata are refused or give an emulator that runs to the end
-    /// without panicking.
-    #[test]
-    fn resume_never_panics() {
-        let data = test_data();
-        let mut lcg = 99u64;
-        let mut rnd = |n: usize| {
-            lcg = lcg.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-            (lcg >> 33) as usize % n
-        };
-        let p = Params {
-            wbits: 9,
-            ..Params::default()
-        };
-        let w = 1 << p.wbits;
-        let mut resumed = 0;
-        for _ in 0..20_000 {
-            let base = rnd(data.len() / w + 2) * w + [0, 0, 0, 1][rnd(4)];
-            let near =
-                |x: usize, r: &mut dyn FnMut(usize) -> usize| (x + r(4 * w)).saturating_sub(2 * w);
-            let strstart = near(base, &mut rnd);
-            let cp = Checkpoint {
-                strstart,
-                base,
-                read: near(base + 2 * w, &mut rnd),
-                high_water: near(2 * w, &mut rnd),
-                match_available: rnd(2) == 1,
-                match_length: rnd(300),
-                match_start: near(strstart, &mut rnd),
-            };
-            let Some(mut e) = Emulator::resume(&data, p, &cp) else {
-                continue;
-            };
-            resumed += 1;
-            for _ in 0..2000 {
-                let Some((_, t)) = e.predict() else { break };
-                if !e.commit(t) {
-                    break;
-                }
-            }
-        }
-        assert!(resumed > 100, "{resumed}");
-    }
-
-    /// A window that the checkpoint says was filled past the input's end (by a slide that
-    /// could not have happened) is not read out of bounds.
-    #[test]
-    fn resume_stale_window_past_input_stays_in_bounds() {
-        let data = test_data()[..20].to_vec();
-        let p = Params {
-            wbits: 9,
-            ..Params::default()
-        };
-        let cp = Checkpoint {
-            strstart: 0,
-            base: 0,
-            read: 10,
-            high_water: 2 << p.wbits,
-            match_available: false,
-            match_length: MIN_MATCH - 1,
-            match_start: 0,
-        };
-        if let Some(mut e) = Emulator::resume(&data, p, &cp) {
-            while let Some((_, t)) = e.predict() {
+                    wbits: 10,
+                    mem: 8,
+                })
+            })
+            .collect();
+        // Follow tokens of a level-6 run, so that other lanes miss.
+        let mut driver = Emulator::new(&data, lanes[4]);
+        let tokens: Vec<Token> = run(&mut driver, usize::MAX)
+            .into_iter()
+            .map(|x| x.1)
+            .collect();
+        let mut m = MultiSlow::new(&data, &lanes);
+        let mut singles: Vec<_> = lanes
+            .iter()
+            .map(|&p| (Emulator::new(&data, p), 0))
+            .collect();
+        let mut pos = 0;
+        for &t in &tokens {
+            assert_eq!(m.predict(), Some(pos));
+            for (e, misses) in &mut singles {
+                let (at, pt) = e.predict().unwrap();
+                assert_eq!(at, pos);
+                *misses += (pt != t) as usize;
                 assert!(e.commit(t));
             }
+            assert!(m.commit(t));
+            pos += t.span();
         }
-    }
-
-    /// A pending match whose source is the pending position itself (distance 0) is refused.
-    #[test]
-    fn resume_refuses_zero_distance() {
-        let data = test_data();
-        let p = Params {
-            wbits: 9,
-            ..Params::default()
-        };
-        let cp = Checkpoint {
-            strstart: 100,
-            base: 0,
-            read: 700,
-            high_water: 2 << p.wbits,
-            match_available: true,
-            match_length: MIN_MATCH,
-            match_start: 99,
-        };
-        if let Some(mut e) = Emulator::resume(&data, p, &cp) {
-            let t = e.predict();
-            assert!(
-                !matches!(t, Some((_, Token::Match { dist: 0, .. }))),
-                "{t:?}"
-            );
+        for (k, p, misses) in m.lanes() {
+            assert_eq!((p, misses), (lanes[k], singles[k].1));
         }
     }
 }
