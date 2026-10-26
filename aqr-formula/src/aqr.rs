@@ -1236,6 +1236,8 @@ pub struct Archive<'c, 'n> {
     natives: &'n [Box<dyn NativeModule + 'n>],
     /// The tree, and its contents (each a leaf, an output of it and its size).
     tree: Option<(Tree, Vec<ContentRef>)>,
+    /// The bytes of the leaves evaluated at once, by their weights ([`Archive::set_budget`]).
+    budget: u64,
 }
 
 /// Archive `c` opened, its modules implemented by `natives`.
@@ -1279,13 +1281,21 @@ pub fn open<'c, 'n>(c: &'c [u8], natives: &'n [Box<dyn NativeModule + 'n>]) -> D
     let outputs: Vec<u64> =
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
     let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
-    Ok(Archive { blocks, natives, tree })
+    Ok(Archive { blocks, natives, tree, budget: u64::MAX })
 }
 
 impl Archive<'_, '_> {
     /// The tree, where the archive has a metadata block.
     pub fn tree(&self) -> Option<&Tree> {
         self.tree.as_ref().map(|t| &t.0)
+    }
+
+    /// Has leaves evaluated at once only while their weights add up to at most `bytes` (or one
+    /// alone), taken in their order: the weight of a leaf is the most bytes its evaluation holds
+    /// at once, as its formula tells (its literals and slices, and the inputs and outputs of an
+    /// application as it is made), short of what modules take within. None by default.
+    pub fn set_budget(&mut self, bytes: u64) {
+        self.budget = bytes;
     }
 
     /// The number of contents of the tree's files.
@@ -1342,8 +1352,17 @@ impl Archive<'_, '_> {
             refs: refs.into_iter().map(AtomicUsize::new).collect(),
             data: blocks.non_leaf.iter().map(|&(d, zstd)| Mutex::new(Slot::Raw(d, zstd))).collect(),
         };
+        let weights: Vec<u64> = (blocks.leaves.iter().zip(&programs))
+            .map(|(leaf, p)| match (leaf, p) {
+                (&LeafBlock::Stored(d, zstd, checked), _) => stored_len(d, zstd, checked),
+                (_, Some(p)) => p.weight(),
+                _ => 0,
+            })
+            .collect();
+        let gate = Gate::new(self.budget);
         let programs: Vec<Mutex<Option<Program>>> = programs.into_iter().map(Mutex::new).collect();
         let done = aqr_common::pool::par_map(blocks.leaves.len(), threads, |i| {
+            let _admitted = gate.admit(i, weights[i]);
             let outputs = match blocks.leaves[i] {
                 LeafBlock::Stored(d, zstd, checked) => decoded(d, zstd, checked).map(|d| vec![d]),
                 LeafBlock::Formula { modules, resources, non_leaf, .. } => {
@@ -1750,6 +1769,93 @@ struct Program<'a> {
     blocks: Vec<usize>,
     resources: Vec<usize>,
     modules: Vec<usize>,
+}
+
+impl Program<'_> {
+    /// The most bytes on the stack at once (with the inputs and outputs of an instruction as it
+    /// runs both), as the sizes the program tells: the weight of its leaf ([`Archive::set_budget`]).
+    fn weight(&self) -> u64 {
+        let (mut st, mut on, mut most) = (Vec::<u64>::new(), 0u64, 0u64);
+        let pop = |st: &mut Vec<u64>, on: &mut u64, n: usize| -> u64 {
+            let taken: u64 = st.drain(st.len().saturating_sub(n)..).sum();
+            *on -= taken;
+            taken
+        };
+        for insn in &self.insns {
+            let (ins, outs): (u64, Vec<u64>) = match insn {
+                Insn::Literal(l) => (0, vec![l.len() as u64]),
+                &Insn::Slice { len, .. } => (0, vec![len]),
+                Insn::Apply(a) => (pop(&mut st, &mut on, a.num_inputs), a.output_sizes.clone()),
+                &Insn::Concat(n) | &Insn::Pack(n) => {
+                    let taken = pop(&mut st, &mut on, n);
+                    (taken, vec![taken])
+                }
+                Insn::Split(sizes) => (pop(&mut st, &mut on, 1), sizes.clone()),
+                &Insn::Patch(len) => (pop(&mut st, &mut on, 2), vec![len]),
+                Insn::Nop | Insn::Swap(_) | Insn::Checksum(_) => continue,
+            };
+            let out: u64 = outs.iter().sum();
+            most = most.max(on.saturating_add(ins).saturating_add(out));
+            on = on.saturating_add(out);
+            st.extend(outs);
+        }
+        most
+    }
+}
+
+/// The size of the data of a stored leaf block `d` (where it is Zstandard data, by its header;
+/// `d`'s own where that is not read).
+fn stored_len(d: &[u8], zstd: bool, checked: bool) -> u64 {
+    let raw = d.len().saturating_sub(if checked { 8 } else { 0 }) as u64;
+    if !zstd {
+        return raw;
+    }
+    let mut at = 0;
+    let Ok(delta) = leb(d, &mut at) else { return raw };
+    let shrink = if delta == 0 { leb(d, &mut at).unwrap_or(0) } else { 0 };
+    raw.saturating_sub(at as u64 + 1).saturating_add(delta).saturating_sub(shrink)
+}
+
+/// The leaves let in by [`Archive::set_budget`]: in their order, each once those evaluated
+/// leave room for it.
+struct Gate {
+    budget: u64,
+    /// The next leaf to let in, and the weights of those in.
+    state: Mutex<(usize, u64)>,
+    changed: std::sync::Condvar,
+}
+
+/// A leaf let in, until dropped.
+struct Admitted<'g>(&'g Gate, u64);
+
+impl Gate {
+    fn new(budget: u64) -> Self {
+        Gate { budget, state: Mutex::new((0, 0)), changed: std::sync::Condvar::new() }
+    }
+
+    /// Waits for leaf `i` of weight `w` to be let in. The leaves are asked for in their order
+    /// ([`aqr_common::pool::par_map`]), so that the next one is always waiting or on its way.
+    fn admit(&self, i: usize, w: u64) -> Admitted<'_> {
+        if self.budget == u64::MAX {
+            return Admitted(self, 0);
+        }
+        let mut s = self.state.lock().unwrap();
+        while s.0 != i || (s.1 != 0 && s.1.saturating_add(w) > self.budget) {
+            s = self.changed.wait(s).unwrap();
+        }
+        *s = (i + 1, s.1 + w);
+        self.changed.notify_all();
+        Admitted(self, w)
+    }
+}
+
+impl Drop for Admitted<'_> {
+    fn drop(&mut self) {
+        if self.0.budget != u64::MAX {
+            self.0.state.lock().unwrap().1 -= self.1;
+            self.0.changed.notify_all();
+        }
+    }
 }
 
 /// Formula data `d` of `outputs` outputs read, among `non_leaf` non-leaf blocks, marking those it
@@ -2700,6 +2806,47 @@ mod tests {
             content_block(out, false, &[b"xyz"], None);
         });
         assert_eq!(decode(&c, &natives()).unwrap(), b"zyyxzxyz");
+    }
+
+    /// Leaves evaluated within a budget, even of one at a time, give what they give without.
+    #[test]
+    fn budget() {
+        let mut apply = vec![APPLY, 0, 0, 3, 1, 2, 3];
+        varint::put(&mut apply, MEMORY_LIMIT);
+        apply.extend_from_slice(&[2, 1, 4]);
+        let first =
+            [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
+        let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
+        let c = archive(|out| {
+            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&wasm(REV)], 3, 1).unwrap());
+            for _ in 0..20 {
+                for d in [&first[..], &second] {
+                    formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
+                }
+                content_block(out, false, &[b"xyz"], None);
+            }
+        });
+        let natives = natives();
+        let each = |budget: Option<u64>| {
+            let mut a = open(&c, &natives).unwrap();
+            if let Some(b) = budget {
+                a.set_budget(b);
+            }
+            let got = Mutex::new(Vec::new());
+            a.leaves(4, |i, o| {
+                got.lock().unwrap().push((i, o));
+                Ok(())
+            })
+            .unwrap();
+            let mut got = got.into_inner().unwrap();
+            got.sort();
+            got
+        };
+        let all = each(None);
+        assert_eq!(all.len(), 40);
+        for b in [1, 6, 1000] {
+            assert_eq!(each(Some(b)), all, "{b}");
+        }
     }
 
     #[test]

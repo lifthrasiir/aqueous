@@ -137,8 +137,8 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
 
 ## 함께 볼 것
 
-- 메모리(2026-10-27): 압축 최대 footprint 9.72 → 7.99 GB(117.7 s), 풀기 8.66 → 4.60 GB(24.8 s,
-  목표 2 GB).
+- 메모리(2026-10-27): 압축 최대 footprint 9.72 → 7.99 GB(117.7 s), 풀기 8.66 → 2.64 GB(23.9 →
+  26.9 s, 목표 2 GB).
   - 풀기 8.66 GB 중 쓰이는 힙은 4.8 GB였고, 나머지는 macOS malloc이 놓은 큰 블록의 페이지를
     몇 초 늦게 돌려주는 몫이었다(`MallocSpaceEfficient=1`이면 4.1 GB). `aqr`의 전역 할당자를
     `aqr_common::mem::Mapped`(1 MiB 이상은 바로 mmap/munmap)로 바꿨다. mimalloc은 5.4 GB였다.
@@ -146,7 +146,10 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
   - 남은 힙: 풀기는 염색체 10개를 한꺼번에 푸는 동안(각 150–250 MB와 그 입력), 그리고
     `enwik9.zip`이 wrt로 푼 1 GB를 들고 DEFLATE를 다시 만드는 동안이다. `enwik9`의 wrt 디코딩은
     `enwik9`와 `enwik9.zip`의 leaf가 따로 한 번씩 한다(leaf는 다른 leaf의 출력을 못 쓴다).
-    leaf를 출력 크기의 예산 안에서만 동시에 돌리는 것이 다음이다.
+  - 그래서 `aqr`는 leaf를 무게(식이 말하는, 한꺼번에 드는 가장 많은 바이트)의 합이 2 GB 안일
+    때만 동시에 푼다(`Archive::set_budget`): 4.60 → 2.64 GB. 예산이 1.5 GB면 2.55 GB에 37.5 s,
+    3.5 GB면 3.51 GB에 25.1 s이다. 2 GB에서 늘어난 3 s는 `enwik9.zip`의 직렬 재구성이 `enwik9`가
+    끝난 뒤에야 시작하는 몫이다.
   - `enwik9.zip`의 leaf는 혼자 22 s(풀기 전체의 대부분)를 직렬로 돈다. 풀기의 `par_map`이 일꾼을
     모두 잡고 있어서 DEFLATE 재구성이 일꾼을 하나도 못 얻는다(`pool`은 시작할 때 노는 일꾼만
     잡는다).

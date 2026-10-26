@@ -40,6 +40,12 @@ struct Args {
     inputs: Vec<PathBuf>,
 }
 
+/// The bytes of the leaves decoded at once ([`aqr::Archive::set_budget`]). On 10gb (10
+/// threads): 2.65 GB of peak footprint in 26.7 s, against 4.59 GB in 24.0 s without, 3.51 GB in
+/// 25.1 s at 3.5 GB, and 2.55 GB in 37.5 s at 1.5 GB (where the serial rebuild of `enwik9.zip`
+/// starts only once `enwik9` is done).
+const DECODE_BUDGET: u64 = 2_000_000_000;
+
 #[global_allocator]
 static ALLOC: aqr_common::mem::Mapped = aqr_common::mem::Mapped;
 
@@ -478,7 +484,8 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
     let native = Native { threads: a.opt.threads };
     let modules = native.modules();
-    let archive = aqr::open(&c, &modules).map_err(|e| err(&e))?;
+    let mut archive = aqr::open(&c, &modules).map_err(|e| err(&e))?;
+    archive.set_budget(DECODE_BUDGET);
     match archive.tree() {
         None => {
             drop(archive);
