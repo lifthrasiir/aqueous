@@ -7,6 +7,7 @@ pub mod formula;
 pub mod model;
 pub mod png;
 pub mod rans;
+pub mod similar;
 
 #[derive(Debug)]
 pub enum Error {

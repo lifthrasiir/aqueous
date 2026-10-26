@@ -35,6 +35,10 @@
 //! entries their kinds by their names ([`kind_by_name`]), as gzip's data is by its name, and
 //! aqr-pdf the streams of a PDF file by what they are.
 //!
+//! Contents that are PNG files of the same geometry and alike (variants of a picture, with
+//! layers shown or hidden) are coded against each other, as one set of an output per file
+//! ([`sets`]), where that is smaller than coding them alone.
+//!
 //! A file that a scan finds but its recompressor turns down is looked into by its parts where
 //! the recompressor tells them ([`Region`]; aqr-psd does): the parts of a format are taken as
 //! files of it, the parts of the other kinds are not looked into, and only the bytes no part
@@ -75,6 +79,7 @@ mod detect;
 mod exe;
 mod extent;
 mod flate;
+mod sets;
 mod verify;
 mod zip;
 
@@ -383,8 +388,9 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     }
     let children = nested(&shared, opt, depth, cx);
     let mut f = verify::reclaim(shared);
-    if let Some(children) = children {
-        place_all(&mut f, children, opt);
+    if let Some(mut children) = children {
+        let sets = sets::sets(&f, &mut children, opt);
+        place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets, opt);
     }
     smaller(&f, None, d, opt, cx).then_some(f)
 }
@@ -608,10 +614,11 @@ fn fit(base: usize, parts: &[(usize, usize)], limit: usize) -> Vec<bool> {
     keep
 }
 
-/// The formulas of the contents of the applications in `f` ([`Options::contents`]), a formula
-/// of data `depth` formats deep, to put in place of their slices ([`place_all`]) where they have
-/// any application (as many as fit in [`Options::description`]); `None` where none has.
-fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<Option<Made>>> {
+/// The contents of the applications in `f` ([`Options::contents`]), a formula of data `depth`
+/// formats deep, each its slice and its formula to put in place of the slice ([`place_all`])
+/// where it has any application (as many as fit in [`Options::description`]); `None` where
+/// none has.
+fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<(Node, Option<Made>)>> {
     if depth + 1 >= opt.depth {
         return None;
     }
@@ -628,11 +635,28 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<Option<
     if !children.iter().zip(&keep).any(|((_, child), &keep)| keep && child.is_some()) {
         return None;
     }
-    Some(children.into_iter().zip(keep).map(|((_, child), keep)| child.filter(|_| keep)).collect())
+    Some(children.into_iter().zip(keep).map(|((slice, child), keep)| (slice, child.filter(|_| keep))).collect())
 }
 
-/// Puts the formulas of [`nested`] in place in `f`; the bytes left without a slice are dropped.
-fn place_all(f: &mut Formula, children: Vec<Option<Made>>, opt: &Options) {
+/// What takes the place of a content's slice: its formula, or an output of a set.
+enum Placed {
+    Made(Made),
+    Node(Node),
+}
+
+/// Puts the formulas of [`nested`] in place in `f`, and the outputs of the `sets` of them
+/// ([`sets::sets`], whose formulas are `None` in `children`); the bytes left without a slice
+/// are dropped.
+fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>, opt: &Options) {
+    let mut outputs: Vec<Option<Node>> = (0..children.len()).map(|_| None).collect();
+    for s in sets {
+        let Node::Concat(outs) = f.embed(s.f) else { unreachable!("a set's root is its outputs") };
+        s.members.into_iter().zip(outs).for_each(|(m, o)| outputs[m] = Some(o));
+    }
+    let children = children.into_iter().zip(outputs).map(|(c, o)| match o {
+        Some(o) => Some(Placed::Node(o)),
+        None => c.map(Placed::Made),
+    });
     // (of the applications of several outputs too, which are not looked into)
     let mut slices = vec![0; f.streams.len()];
     f.visit(&mut |n| {
@@ -701,7 +725,7 @@ fn place(
     f: &mut Formula,
     slices: &[usize],
     opt: &Options,
-    children: &mut impl Iterator<Item = Option<Made>>,
+    children: &mut impl Iterator<Item = Option<Placed>>,
 ) {
     match n {
         &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, opt, children),
@@ -725,11 +749,12 @@ fn place_slices(
     f: &mut Formula,
     slices: &[usize],
     opt: &Options,
-    children: &mut impl Iterator<Item = Option<Made>>,
+    children: &mut impl Iterator<Item = Option<Placed>>,
 ) {
     match n {
-        &mut Node::Slice { stream, start, len } => {
-            if let Some(child) = children.next().flatten() {
+        &mut Node::Slice { stream, start, len } => match children.next().flatten() {
+            Some(Placed::Node(o)) => *n = o,
+            Some(Placed::Made(child)) => {
                 // (a child is of a slice within its stream)
                 let data = &mut f.streams[stream].data;
                 let child = if slices[stream] == 1 && start == 0 && len == data.len() as u64 {
@@ -739,7 +764,8 @@ fn place_slices(
                 };
                 *n = f.embed(child);
             }
-        }
+            None => {}
+        },
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, opt, children)),
         Node::Apply(_) => place(n, f, slices, opt, children),
         Node::Output { .. } | Node::Patch(_) => {}
@@ -869,7 +895,7 @@ mod tests {
             assert_eq!(children.is_some(), content);
             if let Some(mut children) = children {
                 assert_eq!(children.len(), 1);
-                let child = children.pop().unwrap().unwrap().cut(&d);
+                let child = children.pop().unwrap().1.unwrap().cut(&d);
                 assert_eq!(child.applies().iter().map(|a| a.module).collect::<Vec<_>>(), [FLATE]);
                 assert!(child.eval(&Native::default()).unwrap() == d);
             }
@@ -900,12 +926,12 @@ mod tests {
         copied.root = Node::concat([f.root.clone(), whole]);
 
         let at = f.streams[0].data.as_ptr();
-        place_all(&mut f, vec![Some(child())], &Options::default());
+        place_all(&mut f, vec![Some(child())], vec![], &Options::default());
         let cut = f.streams.iter().find(|s| s.class == "raw").unwrap();
         assert!(cut.data.as_ptr() == at && cut.data == gaps);
         assert_eq!(f.streams.len(), 3);
 
-        place_all(&mut copied, vec![Some(child())], &Options::default());
+        place_all(&mut copied, vec![Some(child())], vec![], &Options::default());
         let raw: Vec<_> = copied.streams.iter().filter(|s| s.class == "raw").map(|s| &s.data[..]).collect();
         assert!(raw == [&data[..], &gaps[..]]);
     }

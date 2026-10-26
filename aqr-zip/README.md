@@ -94,6 +94,14 @@ module test data, Office documents, an APK, a VS Code build and others), on an M
   1.000) at 8.3 MB/s compressing and 23 MB/s decompressing, with a peak RSS of 4.5 GB (14×
   the archive). Two Python wheels (3.1 MB) come to 0.760 (zstd -3: 0.950).
 
+Variants of pictures (with layers shown or hidden, "差分"), as they are distributed: seven ZIP
+archives of Clip Studio Paint PNG files (684 MB, in groups of 13 to 88 of the same size, one
+archive cut short), measured on 2026-10-26 through `aqr-show -t 8`. The PNG files alike are
+coded against each other as sets (aqr-compress, aqr-png's `png-set`): the archives come to
+114.8 MB, against 497.1 MB with each file coded alone (and the archive cut short kept raw,
+before it was taken), at 21-26 MB/s compressing (about half as fast) and 55-70 MB/s
+decompressing (64-90).
+
 ## Tests
 
 - `tests/formula.rs`: the fixtures of `tests/data`, rebuilt with no body kept; archives written
@@ -101,7 +109,8 @@ module test data, Office documents, an APK, a VS Code build and others), on an M
   or pointing nowhere, lying headers, encrypted and other methods, overlapping entries, cuts; the
   inflation limit; a nest like 42.zip; damaged layouts (errors, never panics) and damaged
   archives (still rebuilt).
-- aqr-compress `tests/compress.rs` (`zip_nested`, `zip_cut`, `zip_nested_like_42`): contents
-  recompressed in turn, archives found in data and in gzip, an archive cut short, and six levels
-  of nested archives over 96 MiB of zeros within the budget; `src/extent.rs` (`zip_cut`): the
+- aqr-compress `tests/compress.rs` (`zip_nested`, `zip_cut`, `zip_png_set`, `zip_nested_like_42`):
+  contents recompressed in turn, archives found in data and in gzip, an archive cut short,
+  variants of a picture as a set, and six levels of nested archives over 96 MiB of zeros within
+  the budget; `src/extent.rs` (`zip_cut`): the
   fixtures cut at every byte after their first entry.

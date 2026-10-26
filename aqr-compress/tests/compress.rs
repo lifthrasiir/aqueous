@@ -3,7 +3,7 @@ use std::io::Write;
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, FLAC, FLATE, JPEG, LZ4, MP3, Native, PCM, PDF, RASTER, SNAPPY, SQLITE, X86, ZIP, decompress,
+    ARM64, FLAC, FLATE, JPEG, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SNAPPY, SQLITE, X86, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -635,6 +635,70 @@ fn zip_cut() {
     assert_eq!(modules(&f), [ZIP.name, JPEG.name]);
     let f = roundtrip(&[&b"some data before "[..], cut].concat(), &all());
     assert_eq!(modules(&f), [ZIP.name, JPEG.name]);
+}
+
+/// An RGBA PNG file of a picture of `w` x `h` (noise, rows filtered with Sub), with the pixels
+/// of `rect` (x, y, width, height) changed: a layer shown over it.
+fn picture(w: usize, h: usize, rect: Option<(usize, usize, usize, usize)>) -> Vec<u8> {
+    let mut data = Vec::new();
+    for y in 0..h {
+        data.push(1);
+        let mut left = [0u8; 4];
+        for x in 0..w {
+            let inside = rect.is_some_and(|(rx, ry, rw, rh)| (rx..rx + rw).contains(&x) && (ry..ry + rh).contains(&y));
+            for (c, l) in left.iter_mut().enumerate() {
+                let v = if inside {
+                    ((x * 31) ^ (y * 17)) as u8
+                } else {
+                    (((x as u32).wrapping_mul(2654435761) ^ (y as u32 * 40503) ^ (c as u32 * 977)) >> 11) as u8
+                };
+                data.push(v.wrapping_sub(*l));
+                *l = v;
+            }
+        }
+    }
+    let mut ihdr = (w as u32).to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&(h as u32).to_be_bytes());
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    for (kind, d) in [(b"IHDR", ihdr), (b"IDAT", zlib(&data, 6)), (b"IEND", vec![])] {
+        out.extend_from_slice(&(d.len() as u32).to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(&d);
+        out.extend_from_slice(&crc32fast::hash(&out[start..]).to_be_bytes());
+    }
+    out
+}
+
+/// PNG files of a ZIP archive that are variants of a picture are one set, coded against each
+/// other, and smaller than coded alone; one of another size is coded alone.
+#[test]
+fn zip_png_set() {
+    let files = [
+        picture(240, 160, None),
+        picture(240, 160, Some((20, 30, 50, 40))),
+        picture(240, 160, Some((100, 10, 30, 120))),
+        picture(240, 160, Some((20, 30, 50, 40))).into_iter().rev().collect::<Vec<u8>>(),
+        picture(100, 90, None),
+    ];
+    let names = ["a.png", "b.png", "c.png", "d.bin", "e.png"];
+    let entries: Vec<(&str, &[u8], bool)> = names.iter().zip(&files).map(|(n, d)| (*n, &d[..], false)).collect();
+    let d = zip(&entries);
+    let f = roundtrip(&d, &all());
+    assert_eq!(f.shared.len(), 1);
+    assert_eq!(f.shared[0].sizes.len(), 3);
+    let m = modules(&f);
+    assert_eq!(
+        (m.iter().filter(|&&m| m == PNG_SET.name).count(), m.iter().filter(|&&m| m == PNG.name).count()),
+        (1, 1)
+    );
+    // smaller than without the set
+    let records =
+        |f: &Formula| -> usize { f.streams.iter().filter(|s| s.class == "png/records").map(|s| s.data.len()).sum() };
+    let alone: usize = files[..3].iter().map(|d| records(&recompress(d, &all()))).sum();
+    let set = records(&f) - records(&recompress(&files[4], &all()));
+    assert!(set * 2 < alone, "{set} against {alone}");
 }
 
 /// Archives of archives, each level the same archive 16 times like 42.zip, down to a large run
