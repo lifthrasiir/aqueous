@@ -631,6 +631,12 @@ struct St<'g> {
     off: usize,
     base: usize,
     win: Win,
+    /// Whether data is copied but not unfiltered, from position `done` (where `dcur` is):
+    /// matches and literals that are the reference's are unfiltered only as far as a literal
+    /// coded by its model (or a move of the windows) needs them ([`St::flush`]).
+    pending: bool,
+    done: usize,
+    dcur: Cursor,
 }
 
 /// The buffers' sizes, and when they are moved on (see [`St::slide`]).
@@ -688,7 +694,53 @@ fn window_sizes() -> (usize, usize) {
 
 impl<'g> St<'g> {
     fn new(g: &'g Geometry, win: Win) -> St<'g> {
-        St { g, cur: Cursor::new(g), p: 0, after: 0, tokens: 0, off: g.pad, base: 0, win }
+        let cur = Cursor::new(g);
+        St { g, dcur: cur.clone(), cur, p: 0, after: 0, tokens: 0, off: g.pad, base: 0, win, pending: false, done: 0 }
+    }
+
+    /// Leaves the data from the position on to be unfiltered later (an image's).
+    #[inline(always)]
+    fn defer(&mut self) {
+        if !self.pending {
+            self.cur.seek(self.g, self.p);
+            (self.pending, self.done, self.dcur) = (true, self.p, self.cur.clone());
+        }
+    }
+
+    /// Unfilters what the model needs of the data left to be unfiltered, where the cursor is
+    /// at the position: the row so far and the row above, and the rows before those as far
+    /// as their filters take the rows above them (none for *Sub*, as most encoders' for
+    /// photos and paintings). The other rows' raw bytes are never needed, and are never
+    /// unfiltered. `BPP` is 0 for any pixel size.
+    #[inline(always)]
+    fn flush<const BPP: usize>(&mut self, buf: &[u8], raw: &mut [u8]) {
+        if self.pending {
+            self.flush_from::<BPP>(buf, raw);
+        }
+    }
+
+    #[inline(never)]
+    fn flush_from<const BPP: usize>(&mut self, buf: &[u8], raw: &mut [u8]) {
+        self.pending = false;
+        let c = &self.cur;
+        if c.rs == usize::MAX {
+            // past the image, where nothing is unfiltered
+            return;
+        }
+        let start = self.g.passes[c.pass].start;
+        let mut s = c.rstart;
+        if s >= start + c.rs && s > self.done {
+            s -= c.rs;
+            while s >= start + c.rs && s > self.done && matches!(get(buf, self.at(s)), 2..=4) {
+                s -= c.rs;
+            }
+        }
+        let from = s.max(self.done);
+        if from < self.p {
+            let mut d = self.dcur.clone();
+            d.seek(self.g, from);
+            unfilter_span::<BPP>(self.g, &d, buf, self.off, raw, from, self.p - from);
+        }
     }
 
     /// Where position `p` is in the buffer.
@@ -713,6 +765,9 @@ impl<'g> St<'g> {
     #[cold]
     #[inline(never)]
     fn slide(&mut self, buf: &mut [u8], raw: &mut [u8]) {
+        if !raw.is_empty() {
+            self.flush::<0>(buf, raw);
+        }
         let pad = self.g.pad;
         let from = self.p.saturating_sub(self.win.keep).max(self.base);
         let src = self.at(from) - pad;
@@ -731,24 +786,12 @@ impl<'g> St<'g> {
         }
     }
 
-    /// Of the position (a pixel byte of the *image* kind, else none), its raw offset and the
-    /// row filter's prediction: what a literal there needs without its model, as one that is
-    /// the reference's ([`Follow`]).
     #[inline(always)]
-    fn filtered<const BPP: usize, const IMAGE: bool>(&mut self, raw: &[u8], buf: &[u8]) -> (usize, u8) {
+    fn prep<const BPP: usize, const IMAGE: bool>(&mut self, raw: &mut [u8], buf: &[u8], token: bool) -> Lit {
         self.cur.seek(self.g, self.p);
-        let x = self.p - self.cur.rstart;
-        if !IMAGE || x == 0 || self.cur.rs == usize::MAX {
-            return (usize::MAX, 0);
+        if IMAGE {
+            self.flush::<BPP>(buf, raw);
         }
-        let (q, rs2) = (self.cur.q0 + x - 1, self.cur.rs2);
-        let ft = get(buf, self.at(self.cur.rstart));
-        (q, filter::predict(ft, get(raw, q - BPP), get(raw, q - rs2), get(raw, q - rs2 - BPP)))
-    }
-
-    #[inline(always)]
-    fn prep<const BPP: usize, const IMAGE: bool>(&mut self, raw: &[u8], buf: &[u8], token: bool) -> Lit {
-        self.cur.seek(self.g, self.p);
         let bpp = if IMAGE { BPP } else { self.g.bpp };
         let mut l = prepare::<BPP, IMAGE>(&self.cur, raw, buf, self.off, self.p, bpp);
         if token && l.t < T_FILTER {
@@ -757,9 +800,9 @@ impl<'g> St<'g> {
         l
     }
 
-    /// Copies a match in the data (and unfilters it).
+    /// Copies a match in the data (unfiltered later, [`St::flush`]).
     #[inline(always)]
-    fn copy<const BPP: usize, const IMAGE: bool>(&mut self, raw: &mut [u8], buf: &mut [u8], len: usize, dist: usize) {
+    fn copy<const IMAGE: bool>(&mut self, buf: &mut [u8], len: usize, dist: usize) {
         let at = self.at(self.p);
         debug_assert!(dist <= at && at + len + 16 <= buf.len());
         // SAFETY: `1 <= dist <=` the position (checked by the callers), and at most 32768,
@@ -767,7 +810,7 @@ impl<'g> St<'g> {
         // copy past it (`Win`: `room`, or 16 bytes past the data).
         unsafe { inflate::copy_match(buf.as_mut_ptr(), at, dist, len) };
         if IMAGE {
-            unfilter_span::<BPP>(self.g, &self.cur, buf, self.off, raw, self.p, len);
+            self.defer();
         }
         self.p += len;
         self.after = 4 * ACT;
@@ -843,22 +886,22 @@ impl<const BPP: usize, const IMAGE: bool> Enc<'_, BPP, IMAGE> {
 
     #[inline(always)]
     fn lit(&mut self, f: u8, token: bool) {
-        let (q, v) = if token && self.same(Token::Lit(f)) {
-            // the reference's: no symbol, nor its model
-            let (q, fp) = self.st.filtered::<BPP, IMAGE>(&self.raw, &self.buf);
-            (q, f.wrapping_add(fp))
+        if token && self.same(Token::Lit(f)) {
+            // the reference's: no symbol, nor its model (unfiltered later)
+            if IMAGE {
+                self.st.defer();
+            }
         } else {
-            let l = self.st.prep::<BPP, IMAGE>(&self.raw, &self.buf, token);
+            let l = self.st.prep::<BPP, IMAGE>(&mut self.raw, &self.buf, token);
             let v = f.wrapping_add(l.fp);
             let s = zigzag(v.wrapping_sub(l.pred));
             self.io.sym(l.t, s);
             if token && s == ESC {
                 self.io.bit(T_ESC, 0);
             }
-            (l.q, v)
-        };
-        if q != usize::MAX {
-            self.raw[q] = v;
+            if l.q != usize::MAX {
+                self.raw[l.q] = v;
+            }
         }
         let at = self.st.at(self.st.p);
         self.buf[at] = f;
@@ -885,7 +928,7 @@ impl<const BPP: usize, const IMAGE: bool> Sink for Enc<'_, BPP, IMAGE> {
     #[inline(always)]
     fn mat(&mut self, len: u16, dist: u16, alt258: bool) {
         if !self.same(Token::Match { len, dist, alt258: false }) {
-            let l = self.st.prep::<BPP, IMAGE>(&self.raw, &self.buf, true);
+            let l = self.st.prep::<BPP, IMAGE>(&mut self.raw, &self.buf, true);
             self.io.sym(l.t, ESC);
             self.io.bit(T_ESC, 1);
             code_match(&mut self.io, l.len_ctx(), len as u32, dist as u32);
@@ -893,7 +936,7 @@ impl<const BPP: usize, const IMAGE: bool> Sink for Enc<'_, BPP, IMAGE> {
         if alt258 {
             self.alts.push(self.st.tokens);
         }
-        self.st.copy::<BPP, IMAGE>(&mut self.raw, &mut self.buf, len as usize, dist as usize);
+        self.st.copy::<IMAGE>(&mut self.buf, len as usize, dist as usize);
     }
 
     fn stored(&mut self, bytes: &[u8]) {
@@ -1901,9 +1944,8 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
                             let slot = tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)?;
                             match t {
                                 Token::Lit(f) => {
-                                    let (q, fp) = st.filtered::<BPP, IMAGE>(raw, buf);
-                                    if q != usize::MAX {
-                                        put(raw, q, f.wrapping_add(fp));
+                                    if IMAGE {
+                                        st.defer();
                                     }
                                     put(buf, st.at(st.p), f);
                                     *slot = t;
@@ -1920,7 +1962,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
                                     *slot = t;
                                     lf[257 + len_code(len as u32) as usize] += 1;
                                     df[dist_code(dist as u32) as usize] += 1;
-                                    st.copy::<BPP, IMAGE>(raw, buf, len, dist);
+                                    st.copy::<IMAGE>(buf, len, dist);
                                 }
                             }
                             continue;
@@ -1929,6 +1971,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
                     let x = st.p - st.cur.rstart;
                     if IMAGE && !REF && x > 0 && st.cur.rs != usize::MAX {
                         // A run of literals within the row, with the row's filter fixed.
+                        st.flush::<BPP>(buf, raw);
                         let run = (st.cur.rend - st.p).min(end - st.tokens).min(n - st.p);
                         let ft = get(buf, st.at(st.cur.rstart));
                         let (done, act) = match ft {
@@ -1953,7 +1996,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
                             tokens[st.tokens] = Token::Match { len: len as u16, dist: dist as u16, alt258: false };
                             lf[257 + len_code(len as u32) as usize] += 1;
                             df[dist_code(dist as u32) as usize] += 1;
-                            st.copy::<BPP, IMAGE>(raw, buf, len, dist);
+                            st.copy::<IMAGE>(buf, len, dist);
                         }
                         continue;
                     }
@@ -1975,7 +2018,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
                             Token::Match { len: len as u16, dist: dist as u16, alt258: false };
                         lf[257 + len_code(len as u32) as usize] += 1;
                         df[dist_code(dist as u32) as usize] += 1;
-                        st.copy::<BPP, IMAGE>(raw, buf, len, dist);
+                        st.copy::<IMAGE>(buf, len, dist);
                     }
                 }
                 emit(&mut tokens[..count], &mut (lf, df), &buf[g.pad..st.at(st.p)], st.base)?;
@@ -2291,21 +2334,26 @@ mod tests {
     }
 
     /// Against a reference, the image encoder (by rows) and the one of tokens as they come
-    /// give the same symbols; and they are fewer than alone.
+    /// give the same symbols; and they are fewer than alone. The same alone, and on sparse
+    /// images too (rows of matches, which are unfiltered only where literals need them), with
+    /// rows of every filter.
     #[test]
     fn encoders_against_agree() {
         let ih =
             crate::png::Ihdr { width: 120, height: 80, depth: 8, color: 6, compression: 0, filter: 0, interlace: 0 };
         let g = Geometry::new(&ih).unwrap();
         let rs = g.passes[0].rs;
-        let image = |rect: bool| -> Vec<u8> {
+        let image = |rect: bool, sparse: bool| -> Vec<u8> {
             let mut d = vec![];
             for y in 0..80usize {
                 d.push((y % 5) as u8);
                 for x in 0..480usize {
                     let inside = rect && (20..50).contains(&(x / 4)) && (30..60).contains(&y);
+                    let blob = (y / 9 % 3 == 1 && (x / 4 + y) % 37 < 6) || (60..64).contains(&y);
                     d.push(if inside {
                         ((x * 7) ^ (y * 13)) as u8
+                    } else if sparse && !blob {
+                        0
                     } else {
                         ((x / 4 * 3 + y * 5) / 7 % 251 + (x % 4) * 50) as u8
                     });
@@ -2313,17 +2361,23 @@ mod tests {
             }
             d
         };
-        let (base, variant) = (payload(&image(false), rs, 4), payload(&image(true), rs, 4));
-        let r = Reference::parse(&base).unwrap();
-        let rows = encode_image::<4>(&g, &variant, 1, Some(&r)).unwrap();
-        let tokens = encode_bpp::<4, true>(&g, &variant, Some(&r)).unwrap();
-        let alone = encode_image::<4>(&g, &variant, 1, None).unwrap();
-        let (n, m) = (rows.rec.syms.len(), alone.rec.syms.len());
-        assert!(n * 4 < m * 3, "{n} against {m}");
-        let (mut a, mut b) = (vec![], vec![]);
-        rows.rec.finish(&mut a);
-        tokens.rec.finish(&mut b);
-        assert!(a == b);
+        let symbols = |e: Encoded| {
+            let mut v = vec![];
+            e.rec.finish(&mut v);
+            v
+        };
+        for sparse in [false, true] {
+            let (base, variant) = (payload(&image(false, sparse), rs, 4), payload(&image(true, sparse), rs, 4));
+            let r = Reference::parse(&base).unwrap();
+            let rows = encode_image::<4>(&g, &variant, 1, Some(&r)).unwrap();
+            let tokens = encode_bpp::<4, true>(&g, &variant, Some(&r)).unwrap();
+            let alone = encode_image::<4>(&g, &variant, 1, None).unwrap();
+            let (n, m) = (rows.rec.syms.len(), alone.rec.syms.len());
+            assert!(n * 4 < m * 3 || sparse && n < m, "{n} against {m}");
+            assert!(symbols(rows) == symbols(tokens), "sparse {sparse}");
+            let tokens = encode_bpp::<4, true>(&g, &variant, None).unwrap();
+            assert!(symbols(alone) == symbols(tokens), "sparse {sparse}, alone");
+        }
     }
 
     #[test]
