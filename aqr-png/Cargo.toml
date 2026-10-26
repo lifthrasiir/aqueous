@@ -25,3 +25,7 @@ path = "src/bin/probe.rs"
 [[bin]]
 name = "aqr-png-ransbench"
 path = "src/bin/ransbench.rs"
+
+[[bin]]
+name = "aqr-png-refprobe"
+path = "src/bin/refprobe.rs"
