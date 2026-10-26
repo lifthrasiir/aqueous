@@ -9,7 +9,8 @@
 //! - `apply`: a [`Module`] (a pure function of its inputs, resources and parameters) applied
 //!   to nodes, declaring the size of its output;
 //! - `output`: an output of an application of several outputs, [`Shared`], which the formula
-//!   lists apart and whose every output is taken by exactly one `output` node.
+//!   lists apart and whose every output is taken by exactly one `output` node;
+//! - `patch`: a [`patch`] of a node against another one, its source.
 //!
 //! Streams are not placed yet: the archive encoder lays them out into non-leaf blocks, and
 //! [`Stream::class`] tells it which streams are alike (to share frames and a dictionary, §3),
@@ -27,6 +28,7 @@
 
 pub mod aqr;
 pub mod packed;
+pub mod patch;
 pub mod probe;
 
 use std::borrow::Cow;
@@ -157,6 +159,15 @@ pub enum Node {
         index: usize,
         len: u64,
     },
+    Patch(Box<Patch>),
+}
+
+/// The output of `patch` ([`patch`]), of `len` bytes, against `source`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Patch {
+    pub source: Node,
+    pub patch: Node,
+    pub len: u64,
 }
 
 /// An application of several outputs, which [`Node::Output`]s take one each (anywhere in the
@@ -219,6 +230,11 @@ impl Node {
         Node::Apply(Box::new(Apply { module, resources, params, inputs, len }))
     }
 
+    /// The output of `patch`, of `len` bytes, against `source` ([`patch::make`]).
+    pub fn patch(source: Node, patch: Node, len: u64) -> Node {
+        Node::Patch(Box::new(Patch { source, patch, len }))
+    }
+
     /// Bytes of the output, as declared.
     pub fn len(&self) -> u64 {
         match self {
@@ -227,6 +243,7 @@ impl Node {
             Node::Pack(ns) => packed::header_len(ns.len()) + ns.iter().map(Node::len).sum::<u64>(),
             Node::Apply(a) => a.len,
             Node::Output { len, .. } => *len,
+            Node::Patch(p) => p.len,
         }
     }
 
@@ -241,6 +258,7 @@ impl Node {
             Node::Slice { .. } | Node::Output { .. } => {}
             Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| n.visit(f)),
             Node::Apply(a) => a.inputs.iter().for_each(|n| n.visit(f)),
+            Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| n.visit(f)),
         }
     }
 
@@ -260,6 +278,7 @@ impl Node {
             Node::Slice { .. } | Node::Output { .. } => {}
             Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| n.visit_mut(f)),
             Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.visit_mut(f)),
+            Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| n.visit_mut(f)),
         }
     }
 
@@ -540,6 +559,10 @@ impl Formula {
             }
             // (checked, and taken only once)
             &Node::Output { shared, index, .. } => Ok(Cow::Borrowed(&outputs[shared][index])),
+            Node::Patch(p) => {
+                let (source, patch) = (self.bytes(&p.source, m, outputs)?, self.bytes(&p.patch, m, outputs)?);
+                Ok(Cow::Owned(patch::apply(&source, &patch, p.len)?))
+            }
             Node::Apply(a) => {
                 let inputs = a.inputs.iter().map(|n| self.bytes(n, m, outputs)).collect::<Result<Vec<_>>>()?;
                 let inputs: Vec<&[u8]> = inputs.iter().map(|i| &**i).collect();
@@ -555,7 +578,8 @@ impl Formula {
 
 /// Indented, a node a line: `slice #stream [start, +len) CLASS` (and the kind of the stream
 /// unless [`Kind::Unknown`] and not [`Stream::content`], with `content` if it is), `concat LEN`, `pack LEN`, `apply MODULE LEN` with the lengths of its
-/// resources and its parameters in hex, `output #SHARED.INDEX LEN`: first each application of
+/// resources and its parameters in hex, `output #SHARED.INDEX LEN`, `patch LEN` (its source then
+/// its patch): first each application of
 /// several outputs, `shared #I MODULE SIZES...` and its inputs, then the root.
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -579,6 +603,10 @@ impl fmt::Display for Formula {
                     a.inputs.iter().try_for_each(|n| node(fm, n, depth + 1, f))
                 }
                 &Node::Output { shared, index, len } => writeln!(f, "output #{shared}.{index} {len}"),
+                Node::Patch(p) => {
+                    writeln!(f, "patch {}", p.len)?;
+                    [&p.source, &p.patch].into_iter().try_for_each(|n| node(fm, n, depth + 1, f))
+                }
             }
         }
         // the resources' lengths and the parameters, then the end of the line
@@ -806,6 +834,25 @@ mod tests {
         c.compact();
         assert_eq!(c.eval(&RevCut).unwrap(), b"efghhabcd");
         assert_eq!(c.streams[0].data, b"abcdefgh");
+    }
+
+    /// A patch of a slice against another one, shown.
+    #[test]
+    fn eval_patch() {
+        let (source, target) = (b"the quick brown fox jumps".to_vec(), b"the quick red fox jumps!".to_vec());
+        let mut f = Formula::raw("a", source.clone());
+        let d = f.push_as("d", Kind::Compressed, patch::make(&source, &target, 3).unwrap());
+        let n = target.len() as u64;
+        f.root = Node::concat([Node::slice(0, 0, 4), Node::patch(Node::slice(0, 0, 25), d, n)]);
+        assert_eq!(f.eval(&Rev).unwrap(), [&b"the "[..], &target].concat());
+        assert!(
+            f.to_string().starts_with("concat 28\n  slice #0 [0, +4) a\n  patch 24\n    slice #0 [0, +25) a\n"),
+            "{f}"
+        );
+        let Node::Concat(ns) = &mut f.root else { unreachable!() };
+        let Node::Patch(p) = &mut ns[1] else { unreachable!() };
+        p.len += 1;
+        assert!(f.eval(&Rev).is_err());
     }
 
     /// Outputs not taken once each, of other sizes, or taken by an application before theirs.

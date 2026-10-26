@@ -64,6 +64,7 @@ const APPLY: u8 = 0x11;
 const CONCAT: u8 = 0x12;
 const PACK: u8 = 0x13;
 const SPLIT: u8 = 0x14;
+const PATCH: u8 = 0x15;
 const CHECKSUM: u8 = 0x20;
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
@@ -408,6 +409,14 @@ impl Emit<'_> {
                 self.stack.remove(at);
                 self.stack.push(None);
             }
+            Node::Patch(p) => {
+                self.node(&p.source);
+                self.node(&p.patch);
+                self.out.push(PATCH);
+                varint::put(self.out, p.len);
+                self.stack.truncate(self.stack.len() - 2);
+                self.stack.push(None);
+            }
         }
     }
 
@@ -439,6 +448,7 @@ impl Emit<'_> {
 pub fn description_bound(n: &Node) -> usize {
     match n {
         Node::Output { .. } => 1 + 3,
+        Node::Patch(p) => description_bound(&p.source) + description_bound(&p.patch) + 1 + varint::len(p.len),
         &Node::Slice { start, len, .. } => 1 + 3 + varint::len(start) + varint::len(len),
         Node::Concat(ns) | Node::Pack(ns) => {
             ns.iter().map(description_bound).sum::<usize>() + 1 + varint::len(ns.len() as u64)
@@ -1312,6 +1322,7 @@ enum Insn<'a> {
     Concat(usize),
     Pack(usize),
     Split(Vec<u64>),
+    Patch(u64),
     Checksum(u64),
 }
 
@@ -1440,6 +1451,7 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [b
                 }
                 Insn::Split(sizes)
             }
+            PATCH => Insn::Patch(r.num()?),
             CHECKSUM => {
                 let v = d.get(r.at..r.at + 8).ok_or_else(|| Failure::Invalid("truncated checksum".into()))?;
                 r.at += 8;
@@ -1461,6 +1473,10 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [b
             Insn::Split(sizes) => {
                 pop(&mut depth, 1)?;
                 depth += sizes.len();
+            }
+            Insn::Patch(_) => {
+                pop(&mut depth, 2)?;
+                depth += 1;
             }
             Insn::Checksum(_) if depth == 0 => return invalid("a checksum of an empty stack"),
             Insn::Checksum(_) => {}
@@ -1595,6 +1611,13 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
                     contents.refs[o] += sizes.len() - 1;
                 }
             }
+            Insn::Patch(len) => {
+                let items = stack.split_off(stack.len() - 2);
+                let out = crate::patch::apply(contents.get(&items[0]), contents.get(&items[1]), len)
+                    .map_err(|e| Failure::Invalid(e.0))?;
+                contents.drop_all(items);
+                stack.push(Value::Bytes(out));
+            }
             Insn::Checksum(v) => {
                 if checksum(contents.get(stack.last().unwrap())) != v {
                     return invalid("output checksum mismatch");
@@ -1673,6 +1696,31 @@ mod tests {
 
     fn natives() -> Vec<Box<dyn NativeModule>> {
         vec![Box::new(Rev), Box::new(Cut)]
+    }
+
+    /// Patches in archives: of a slice, and of an output of an application of several outputs
+    /// against another; one damaged, or of another length, is invalid.
+    #[test]
+    fn patches() {
+        let noise = aqr_common::rng::noise(10_000);
+        let mut target = noise[..6000].to_vec();
+        target[100..200].fill(1);
+        let mut f = Formula::default();
+        let a = f.push("a", noise.clone());
+        let d = f.push_as("d", Kind::Compressed, crate::patch::make(&noise[..6000], &target, 3).unwrap());
+        let cut = crate::Apply { module: CUT, resources: vec![], params: vec![], inputs: vec![a], len: 0 };
+        let [o0, o1] = <[Node; 2]>::try_from(f.share(cut, vec![6000, 4000])).unwrap();
+        f.root = Node::concat([o1, Node::patch(o0, d, 6000)]);
+        let want = [&noise[6000..], &target[..]].concat();
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
+        assert!(decode(&c, &natives()).unwrap() == want);
+        let mut bad = f.clone();
+        bad.streams[1].data[3] ^= 0x40;
+        assert!(matches!(decode(&encode(&bad, None, Level::Zstd(3)).unwrap(), &natives()), Err(Failure::Invalid(_))));
+        let Node::Concat(ns) = &mut f.root else { unreachable!() };
+        let Node::Patch(p) = &mut ns[1] else { unreachable!() };
+        p.len -= 1;
+        assert!(matches!(decode(&encode(&f, None, Level::Zstd(3)).unwrap(), &natives()), Err(Failure::Invalid(_))));
     }
 
     /// Applications of several outputs: their outputs taken anywhere, by the root or by a later
