@@ -37,7 +37,7 @@
 //!
 //! Contents that are PNG files of the same geometry and alike (variants of a picture, with
 //! layers shown or hidden) are coded against each other, as one set of an output per file
-//! ([`sets`]), where that is smaller than coding them alone.
+//! (`sets`), where that is smaller than coding them alone.
 //!
 //! A file that a scan finds but its recompressor turns down is looked into by its parts where
 //! the recompressor tells them ([`Region`]; aqr-psd does): the parts of a format are taken as
@@ -47,6 +47,10 @@
 //! What DEFLATE streams inflate to, at every depth together, is kept within
 //! [`Options::expansion`] times the file (and 64 MiB): past it, streams are kept as they are,
 //! so that nested archives (42.zip) and bombs cost no more than that.
+//!
+//! Before the formula is archived, its streams of each class and kind are put one after
+//! another in one stream ([`Formula::merge_classes`]), as they are alike: the same
+//! recompressor's, of the files of a container.
 //!
 //! A formula may be kept within [`Options::description`] bytes of description: of the files
 //! found, or nested, those with the fewest bytes per byte of their description are kept raw
@@ -263,7 +267,16 @@ fn compress_with(d: &[u8], opt: &Options, kept: bool) -> (Vec<u8>, Option<Formul
 /// (the outputs of applications in `memo` taken from there), and where it is not `d` (a
 /// module's bug), the archive of `d` raw instead. The formula is returned where `kept`; what is
 /// no longer needed (the formula, the streams compressed) is dropped before the decoding.
-fn finish(f: Formula, d: &[u8], opt: &Options, cx: &Cx, memo: verify::Memo, kept: bool) -> (Vec<u8>, Option<Formula>) {
+fn finish(
+    mut f: Formula,
+    d: &[u8],
+    opt: &Options,
+    cx: &Cx,
+    memo: verify::Memo,
+    kept: bool,
+) -> (Vec<u8>, Option<Formula>) {
+    // the streams of a class together, as they compress smaller
+    f.merge_classes();
     let sum = Some(aqr::checksum(d));
     let c = cx.enc.encode(&f, sum);
     cx.enc.clear();

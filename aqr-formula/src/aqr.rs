@@ -11,8 +11,9 @@
 //! applications declare no memory limit ([`MEMORY_LIMIT`]).
 //!
 //! [`Encoder`] encodes several formulas, compressing each stream and resource once however
-//! many hold it, at the zstd level that its [`Level`] picks for it; streams of
-//! [`Kind::Compressed`] are stored as they are.
+//! many hold it, at the zstd level that its [`Level`] picks for it, a long one (8 MiB or more)
+//! with long-distance matching over a window of all of it (up to the 128 MiB every decoder
+//! takes); streams of [`Kind::Compressed`] are stored as they are.
 //!
 //! [`decode`] evaluates such archives, and any other without a metadata block, a dictionary
 //! or an encryption.
@@ -831,6 +832,14 @@ fn always_compressed(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize) -
 /// so that it compresses the same on any; this loses 0.1-0.2% against compressing it in one
 /// piece, at levels 3 and 4.
 const ZSTD_JOB: u32 = 16 << 20;
+
+/// Bytes of data above which it is compressed with long-distance matching, over a window of
+/// all of it up to [`WINDOW_LOG_MAX`].
+const LONG: usize = 8 << 20;
+
+/// The largest window, as a power of two, that every decoder takes (spec, "Zstandard
+/// compression method").
+const WINDOW_LOG_MAX: u32 = 27;
 const ZSTD_OVERLAP: u32 = 9;
 
 /// The compressed external structure of `data` (Zstandard, XXH64), unless the Zstandard
@@ -881,6 +890,12 @@ fn external(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usiz
     // Compressed as data in one piece is (of a size known, ended with its last bytes: ended
     // apart, data ending at the end of a job ends with an empty block).
     let len = total(data);
+    // Long data matched from afar, over a window of all of it as far as decoders must take.
+    if len > LONG {
+        let window = (64 - (len as u64 - 1).leading_zeros()).min(WINDOW_LOG_MAX);
+        c.set_parameter(CParameter::WindowLog(window)).map_err(zstd)?;
+        c.set_parameter(CParameter::EnableLongDistanceMatching(true)).map_err(zstd)?;
+    }
     c.set_pledged_src_size(Some(len as u64)).map_err(zstd)?;
     let pieces: Vec<&[u8]> = data.iter().copied().filter(|p| !p.is_empty()).collect();
     // the frame, then its checksum
@@ -2026,6 +2041,17 @@ mod tests {
         }
     }
 
+    /// A long stream is matched from afar: the same noise twice, 20 MiB apart, takes about
+    /// as much as once.
+    #[test]
+    fn long_distance() {
+        let noise = aqr_common::rng::noise(20 << 20);
+        let d = noise.repeat(2);
+        let c = encode(&Formula::raw("a", d.clone()), None, Level::Zstd(3)).unwrap();
+        assert!(c.len() < noise.len() + (1 << 20), "{}", c.len());
+        assert!(decode(&c, &[]).unwrap() == d);
+    }
+
     /// A compressed block decodes into as much memory as it declares (and a byte to tell a
     /// longer one), not what growing as it comes would take.
     #[test]
@@ -2074,7 +2100,8 @@ mod tests {
         d.truncate(2 * ZSTD_JOB as usize);
         let job = ZSTD_JOB as usize;
         let one = compressed(&mut CCtx::create(), &[&d], 1, 4).unwrap();
-        // as Zstandard compresses it in one go
+        // as Zstandard compresses it in one go (long data from afar)
+        assert!(d.len() > LONG);
         let mut z = zstd::bulk::Compressor::new(1).unwrap();
         for p in [
             CParameter::ContentSizeFlag(false),
@@ -2083,6 +2110,8 @@ mod tests {
             CParameter::NbWorkers(4),
             CParameter::JobSize(ZSTD_JOB),
             CParameter::OverlapSizeLog(ZSTD_OVERLAP),
+            CParameter::WindowLog(25),
+            CParameter::EnableLongDistanceMatching(true),
         ] {
             z.set_parameter(p).unwrap();
         }

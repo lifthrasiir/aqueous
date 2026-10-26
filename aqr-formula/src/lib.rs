@@ -434,6 +434,47 @@ impl Formula {
         self.streams = streams;
     }
 
+    /// Puts the streams of each class and kind one after another, in one stream (in the place
+    /// of the first): they are alike, and archive smaller together (the archive encoder
+    /// compresses each stream on its own). The streams of [`Kind::Compressed`] (stored as they
+    /// are), the contents, and those that a slice goes past the end of are left apart. The
+    /// output is the same.
+    pub fn merge_classes(&mut self) {
+        let n = self.streams.len();
+        let lens: Vec<u64> = self.streams.iter().map(|s| s.data.len() as u64).collect();
+        let mut past = vec![false; n];
+        self.slices_mut(&mut |&mut s, &mut a, &mut l| {
+            if let Some(p) = past.get_mut(s) {
+                *p |= a.checked_add(l).is_none_or(|e| e > lens[s]);
+            }
+        });
+        let mut to = vec![(0usize, 0u64); n];
+        let mut firsts: Vec<(Cow<'static, str>, Kind, usize)> = Vec::new();
+        let mut streams: Vec<Stream> = Vec::with_capacity(n);
+        for (i, s) in std::mem::take(&mut self.streams).into_iter().enumerate() {
+            let alike = s.kind != Kind::Compressed && !s.content && !past[i];
+            match firsts.iter().find(|f| alike && f.0 == s.class && f.1 == s.kind) {
+                Some(&(_, _, j)) => {
+                    to[i] = (j, streams[j].data.len() as u64);
+                    streams[j].data.extend_from_slice(&s.data);
+                }
+                None => {
+                    if alike {
+                        firsts.push((s.class.clone(), s.kind, streams.len()));
+                    }
+                    to[i] = (streams.len(), 0);
+                    streams.push(s);
+                }
+            }
+        }
+        let new = streams.len();
+        self.slices_mut(&mut |s, a, _| match to.get(*s) {
+            Some(&(j, o)) => (*s, *a) = (j, *a + o),
+            None => *s = *s - n + new,
+        });
+        self.streams = streams;
+    }
+
     /// Bytes of the output, as declared.
     pub fn len(&self) -> u64 {
         self.root.len()
@@ -853,6 +894,41 @@ mod tests {
         let Node::Patch(p) = &mut ns[1] else { unreachable!() };
         p.len += 1;
         assert!(f.eval(&Rev).is_err());
+    }
+
+    /// Streams of a class and kind merged, but those compressed, the contents and those a slice
+    /// goes past; the output the same.
+    #[test]
+    fn merge_classes() {
+        let mut f = Formula::default();
+        let a0 = f.push("a", b"012".to_vec());
+        let b = f.push("b", b"xyz".to_vec());
+        let a1 = f.push("a", b"345".to_vec());
+        let c = f.push_as("a", Kind::Compressed, b"ccc".to_vec());
+        let t = f.push_content("a", Kind::Unknown, b"ttt".to_vec());
+        f.push("a", b"678".to_vec());
+        let a3 = f.push("a", b"9".to_vec());
+        f.root = Node::concat([
+            a1,
+            Node::apply(REV, vec![], vec![a0, b, Node::slice(5, 1, 2)], 8),
+            c,
+            t,
+            a3,
+            Node::slice(5, 0, 1),
+        ]);
+        let want = f.eval(&Rev).unwrap();
+        let mut g = f.clone();
+        g.merge_classes();
+        assert_eq!(g.eval(&Rev), Ok(want));
+        let classes: Vec<_> = g.streams.iter().map(|s| (&*s.class, &s.data[..])).collect();
+        assert_eq!(classes, [("a", &b"0123456789"[..]), ("b", &b"xyz"[..]), ("a", &b"ccc"[..]), ("a", &b"ttt"[..])]);
+        // a slice past the end of the last keeps it apart
+        let mut past = f.clone();
+        let Node::Concat(ns) = &mut past.root else { unreachable!() };
+        ns.push(Node::slice(6, 0, 3));
+        past.merge_classes();
+        assert_eq!(past.streams.len(), 5);
+        assert_eq!((&past.streams[0].data[..], &past.streams[4].data[..]), (&b"012345678"[..], &b"9"[..]));
     }
 
     /// Outputs not taken once each, of other sizes, or taken by an application before theirs.
