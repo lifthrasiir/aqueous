@@ -699,6 +699,12 @@ fn zip_png_set() {
     let alone: usize = files[..3].iter().map(|d| records(&recompress(d, &all()))).sum();
     let set = records(&f) - records(&recompress(&files[4], &all()));
     assert!(set * 2 < alone, "{set} against {alone}");
+    // archived and verified (the files alone evaluated beforehand but those of the set), and
+    // not kept as they are (as verification failing would)
+    let c = compress(&d, &all());
+    assert!(decompress(&c, 1).unwrap() == d);
+    let raw = aqr::encode(&Formula::raw("raw", d.clone()), None, aqr::Level::Mid).unwrap().len();
+    assert!(c.len() * 10 < raw * 9, "{} against {raw}", c.len());
 }
 
 /// Archives of archives, each level the same archive 16 times like 42.zip, down to a large run

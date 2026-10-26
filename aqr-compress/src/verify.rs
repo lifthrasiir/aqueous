@@ -124,6 +124,9 @@ pub(crate) struct Prevalidator {
 /// A formula, the hash of its data, and where the data is in the file if it is.
 type Job = (Arc<Formula>, Key, Option<usize>);
 
+/// A formula of data to evaluate beforehand, later ([`Prevalidator::job`]).
+pub(crate) struct Deferred(Job);
+
 fn hash(d: &[u8]) -> Key {
     xxhash_rust::xxh3::xxh3_128(d)
 }
@@ -193,12 +196,23 @@ impl Prevalidator {
     /// Has formula `f` of data `d` evaluated: where it gives `d`, its applications' outputs go
     /// to the memo.
     pub fn submit(&self, f: Arc<Formula>, d: &[u8]) {
-        if !f.applies().is_empty() {
-            // the thread is gone only if it panicked, which `finish` reports
-            let at = d.as_ptr() as usize;
-            let within = self.file.contains(&at) && at + d.len() <= self.file.end;
-            let _ = self.jobs.send((f, hash(d), within.then(|| at - self.file.start)));
+        if let Some(j) = self.job(f, d) {
+            self.send(j);
         }
+    }
+
+    /// What [`Prevalidator::submit`] would have evaluated, to [`Prevalidator::send`] later (or
+    /// not): `None` for a formula without applications.
+    pub fn job(&self, f: Arc<Formula>, d: &[u8]) -> Option<Deferred> {
+        let at = d.as_ptr() as usize;
+        let within = self.file.contains(&at) && at + d.len() <= self.file.end;
+        (!f.applies().is_empty()).then(|| Deferred((f, hash(d), within.then(|| at - self.file.start))))
+    }
+
+    /// Has a formula of [`Prevalidator::job`] evaluated.
+    pub fn send(&self, j: Deferred) {
+        // the thread is gone only if it panicked, which `finish` reports
+        let _ = self.jobs.send(j.0);
     }
 
     /// The memo, once every formula submitted is evaluated.

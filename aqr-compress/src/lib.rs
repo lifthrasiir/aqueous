@@ -214,6 +214,9 @@ pub(crate) struct Cx {
     /// Formulas made beforehand (of [`pure`] formats), by the data (where it is, its length)
     /// and the format.
     ready: RefCell<HashMap<(usize, usize, Format), Option<Formula>>>,
+    /// The prevalidation of those taken, by where their data is: put off until it is known
+    /// whether they are taken into a set ([`sets`]), whose files are not evaluated alone.
+    deferred: RefCell<Vec<(usize, verify::Deferred)>>,
 }
 
 impl Cx {
@@ -223,7 +226,7 @@ impl Cx {
         if opt.shared_resources {
             enc.share_resources();
         }
-        Cx { enc, inflate: Cell::new(inflate), pre: None, ready: Default::default() }
+        Cx { enc, inflate: Cell::new(inflate), pre: None, ready: Default::default(), deferred: Default::default() }
     }
 
     /// Takes `n` bytes of inflated data from the budget, if there are as many left.
@@ -380,6 +383,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
     let ready = cx.ready.borrow_mut().remove(&(d.as_ptr() as usize, d.len(), format));
+    let prepared = ready.is_some();
     let f = match ready {
         Some(f) => f,
         None => pure(format, d, opt.threads).unwrap_or_else(|| {
@@ -395,16 +399,37 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
             .flatten()
         }),
     }?;
-    // evaluated beforehand while its contents are recompressed, which reads it only
+    // evaluated beforehand while its contents are recompressed, which reads it only (once it is
+    // known not to be taken into a set, where made beforehand as a content)
     let shared = Arc::new(f);
     if let Some(pre) = &cx.pre {
-        pre.submit(shared.clone(), d);
+        match prepared {
+            true => pre
+                .job(shared.clone(), d)
+                .into_iter()
+                .for_each(|j| cx.deferred.borrow_mut().push((d.as_ptr() as usize, j))),
+            false => pre.submit(shared.clone(), d),
+        }
     }
+    let mark = cx.deferred.borrow().len();
     let children = nested(&shared, opt, depth, cx);
     let mut f = verify::reclaim(shared);
+    let mut taken = Vec::new();
     if let Some(mut children) = children {
         let sets = sets::sets(&f, &mut children, opt);
+        for s in &sets {
+            for &m in &s.members {
+                if let &Node::Slice { stream, start, .. } = &children[m].0 {
+                    taken.push(f.streams[stream].data[start as usize..].as_ptr() as usize);
+                }
+            }
+        }
         place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets, opt);
+    }
+    // the contents' put off, but those taken into a set
+    let deferred: Vec<_> = cx.deferred.borrow_mut().drain(mark..).collect();
+    if let Some(pre) = &cx.pre {
+        deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));
     }
     smaller(&f, None, d, opt, cx).then_some(f)
 }
