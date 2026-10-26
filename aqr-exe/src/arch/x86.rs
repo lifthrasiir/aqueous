@@ -709,32 +709,6 @@ fn scan_pad(mut code: &[u8]) -> usize {
     len - code.len()
 }
 
-/*
-https://stackoverflow.com/questions/25545470/long-multi-byte-nops-commonly-understood-macros-or-other-notation
-https://gist.github.com/stevemk14ebr/d117e8d0fd1432fb2a92354a034ce5b9
-
-      if(code == OP_RETNI || code == OP_RETN || code == OP_INT3) // return/padding
-        nextIsFunc = sTRUE; // next opcode is likely to be first of a new function
-
-CALL    9A E8 FF/2-3
-JMP     E9 EA EB FF/4-5
-JMPE    0FB8(w/o F2/F3) 0F00/5
-RET     C2 C3 CA CB CF
-JMPABS  REX2+A1
-
-REX2 invalid: 7x Ax Ex 13x
-
-JMPABS transfers program control to the 64-bit absolute address target64 given as a quadword
-immediate. JMPABS is in legacy map 0 and requires a REX2 prefix with REX2.M0 = 0 and REX2.W = 0. All
-other REX2 payload bits are ignored, and code-generators should set these bits to 0. JMPABS does not
-have a ModRM byte and target64 is placed immediately after the opcode byte, so the entire instruction is
-11 bytes long. Prefixing JMPABS with 0x66, 0x67, 0xF0, 0xF2, or 0xF3 triggers #UD. Segment overrides are
-allowed but ignored by JMPABS.
-
-padding + function target
-
-*/
-
 const fn pad_followed(op: u16) -> bool {
     // TODO
     matches!(op, 0x9a | 0xe8 | 0xe9 | 0xea | 0xeb | 0xc2 | 0xc3 | 0xca | 0xcb | 0xcc | 0xcf)

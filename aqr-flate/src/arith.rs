@@ -1,6 +1,6 @@
-//! Carry-less binary arithmetic coding (32-bit, after lpaq), for the adaptive profiles.
+//! Carry-less binary arithmetic coding (32-bit, lpaq/PAQ style), for the adaptive profiles.
 
-/// Carry-less binary arithmetic coder (32-bit, after lpaq).
+/// Carry-less binary arithmetic coder (32-bit, lpaq/PAQ style).
 #[derive(Default)]
 pub struct ArithEncoder {
     x1: u32,
