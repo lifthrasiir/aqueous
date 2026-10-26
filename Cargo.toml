@@ -23,6 +23,7 @@ members = [
     "aqr-raw",
     "aqr-snappy",
     "aqr-sqlite",
+    "aqr-wrt",
     "aqr-zip",
     "aqr-api",
     "aqr-api/demo/concat",

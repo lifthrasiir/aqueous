@@ -75,6 +75,7 @@ reservoir is rebuilt.
 |---|---|---|---|---|---|---|---|---|
 | PDF | aqr-pdf | 144 files, 402 MB | 0.855 | 0.896 | 46 | 198 | 41 MB + 5.7× | 18 files kept as they are (no formula paid). 9 files take over twice the memory fit, up to 331 MB for 3.4 MB (`cc/0000192.pdf`) and 202 MB for 1.8 MB |
 | SQLite 3 | aqr-sqlite | 88 files, 324 MB | 0.227 | 0.366 | 48 | 368 | 24 MB + 6.7× | |
+| Text (words, XML markup) | aqr-wrt | enwik9, 1 GB (README) | 0.253 | 0.312 | 148 | 291 | not measured | measured 2026-10-26 with `aqr` (10 threads) on enwik9 alone, not `aqr-show`; text of 256 KiB or more. The 10gb corpus −35.8 MB (README) |
 | FASTA (nucleotides) | aqr-fasta | hg19, 93 files, 3.2 GB (README) | 0.218 | 0.309 | 170 | 133 (753 through `aqr`, files at once) | not measured | measured 2026-10-26 with `aqr-fasta-bench` (chr1) and `aqr` (hg19 of the 10gb corpus), not `aqr-show`; zstd -3 file by file |
 | Wavefront OBJ | aqr-obj | 22 files, 403 MB | 0.097 | 0.242 | 121 | 324 | 24 MB + 3.1× | `aqr-obj bench`; not in aqr-compress yet. Files over 300 MB left out |
 

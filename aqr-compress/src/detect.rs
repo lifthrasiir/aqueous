@@ -44,10 +44,12 @@ pub enum Format {
     Tar,
     /// cpio archive (aqr-bundle); of the binary forms, not looked for in other data.
     Cpio,
+    /// Text (aqr-wrt), a whole file of text bytes only: not looked for in other data.
+    Text,
 }
 
 impl Format {
-    pub const ALL: [Format; 19] = [
+    pub const ALL: [Format; 20] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -67,6 +69,7 @@ impl Format {
         Format::Ar,
         Format::Tar,
         Format::Cpio,
+        Format::Text,
     ];
 
     pub fn name(self) -> &'static str {
@@ -90,6 +93,7 @@ impl Format {
             Format::Ar => "ar",
             Format::Tar => "tar",
             Format::Cpio => "cpio",
+            Format::Text => "text",
         }
     }
 
@@ -204,6 +208,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Cpio)
     } else if start && aqr_bundle::tar::starts(d) {
         Some(Format::Tar)
+    } else if start && aqr_wrt::formula::starts(d) {
+        Some(Format::Text)
     } else {
         None
     }

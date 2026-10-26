@@ -13,6 +13,8 @@
 //!   DEFLATE streams by aqr-flate) with its headers derived.
 //! - ar, tar and cpio archives: aqr-bundle, rebuilding the archive from the contents of its
 //!   members with their sizes and checksums derived.
+//! - Text, a whole file of text bytes or data of a name telling text: aqr-wrt, its words and
+//!   markup replaced by codes of a dictionary of its own.
 //! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF, SQLite and FASTA: the recompressor's own formula,
 //!   its module applied to its streams, and files it embeds (PDF's DEFLATE streams and images,
 //!   PSD's and JPEG's embedded files) applied to theirs (see aqr-decompress for the modules).
@@ -31,8 +33,9 @@
 //! turn down counts against a scan, which gives up past twice the data (and 16 MiB).
 //!
 //! What a recompressor knows of the data it gives, the [`Kind`] of its stream, refines that
-//! ([`Nest::of`]): pixels, text, fonts, tables and compressed data are not looked into, and
-//! data of [`Kind::Format`] is taken as a file of that format from its start ([`Nest::As`]).
+//! ([`Nest::of`]): pixels, fonts, tables and compressed data are not looked into, text is
+//! taken as a whole by aqr-wrt, and data of [`Kind::Format`] is taken as a file of that format
+//! from its start ([`Nest::As`]).
 //! The contents of an application may be slices of several streams one after the other (a
 //! ZIP archive's entries, by kind), each recompressed by its own kind. aqr-zip and aqr-bundle
 //! give the entries their kinds by their names ([`kind_by_name`]), as gzip's data is by its name, and
@@ -180,11 +183,13 @@ impl Nest {
     /// How data of `kind` is recompressed where it is otherwise as `self`, if at all. No file
     /// is in pixels, text, a font or a table, and none that a recompressor would take in
     /// compressed data: what a scan would find there is there by chance (MPEG audio headers in
-    /// pixels, zlib headers in text), and costs the scan its time.
+    /// pixels, zlib headers in text), and costs the scan its time. Text is taken as a whole by
+    /// aqr-wrt.
     pub fn of(self, kind: Kind) -> Option<Nest> {
         match kind {
             Kind::Unknown => Some(self),
-            Kind::Pixels | Kind::Text | Kind::Font | Kind::Table | Kind::Compressed => None,
+            Kind::Text => Some(Nest::As(Format::Text)),
+            Kind::Pixels | Kind::Font | Kind::Table | Kind::Compressed => None,
             Kind::Format(name) => Some(Format::from_name(name).map_or(self, Nest::As)),
         }
     }
@@ -254,6 +259,15 @@ pub(crate) struct Cx {
     later: RefCell<Vec<(usize, Node, Nest)>>,
     /// What the files archived together hold ([`Held`]), for an archive of several.
     held: Option<Arc<Held>>,
+    /// The dictionary that the text archived together is coded with (aqr-wrt), for an archive
+    /// of several: made of the files that are text, so that text holding other text codes to
+    /// what holds the other's code. Else each text has its own.
+    words: Option<Arc<aqr_wrt::formula::Shared>>,
+    /// The text coded with [`Cx::words`] of data the files archived together hold, by its
+    /// length and hash: the text that holds it codes to what holds this, so that it costs
+    /// nothing as that data does ([`smaller`]). Shared with the contexts of the files and
+    /// contents made apart.
+    coded_held: Arc<std::sync::Mutex<HashSet<(usize, u64)>>>,
 }
 
 impl Cx {
@@ -278,6 +292,8 @@ impl Cx {
             top_sets: None,
             later: Default::default(),
             held: None,
+            words: None,
+            coded_held: Default::default(),
         }
     }
 
@@ -308,6 +324,35 @@ impl Cx {
     pub(crate) fn held_by_others(&self, data: &[u8], within: &[u8]) -> bool {
         self.held.as_ref().is_some_and(|h| h.holds(data, h.owner(within)))
     }
+
+    /// Codes the text archived with `words` ([`Cx::words`]), its resource sized as nothing.
+    pub(crate) fn share_words(&mut self, words: Option<Arc<aqr_wrt::formula::Shared>>) {
+        if let Some(w) = &words {
+            self.enc.hold_resource(&w.resource);
+        }
+        self.words = words;
+    }
+
+    /// Notes the text coded by formula `f` of text `d` ([`Cx::coded_held`]), where it is coded
+    /// with [`Cx::words`] and the files archived together hold `d`.
+    fn note_coded(&self, f: &Formula, d: &[u8]) {
+        let Some(w) = &self.words else { return };
+        let shared = f.applies().iter().any(|a| a.resources.first() == Some(&w.resource));
+        if shared && f.streams.len() == 1 && self.held_by_others(d, d) {
+            self.coded_held.lock().unwrap().insert(stream_key(&f.streams[0].data));
+        }
+    }
+
+    /// Whether `data` is text noted by [`Cx::note_coded`].
+    fn coded_held(&self, data: &[u8]) -> bool {
+        let held = self.coded_held.lock().unwrap();
+        !held.is_empty() && held.contains(&stream_key(data))
+    }
+}
+
+/// `d` by its length and hash, for [`Cx::coded_held`].
+fn stream_key(d: &[u8]) -> (usize, u64) {
+    (d.len(), xxhash_rust::xxh3::xxh3_64(d))
 }
 
 /// `d` as a formula, with the recompressor for its format if any takes it.
@@ -381,9 +426,19 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: 
 /// [`recompress_at`], unless `d` is kept raw; the data that a scan keeps between files is not
 /// cut out of `d` yet.
 pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
+    let text = how == Nest::As(Format::Text) || how == Nest::Scan && detect(d) == Some(Format::Text);
     match how {
         _ if depth >= opt.depth => None,
         Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
+        // text as aqr-wrt tells of it alone (not [`smaller`]), so that the same text is taken
+        // alike wherever it is; else scanned as other data is, or kept raw where named as text
+        _ if text => match recompress_as(Format::Text, d, opt, depth, cx) {
+            Some(f) => Some(Made::from(f)),
+            None if how == Nest::Scan => {
+                scan(d, None, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
+            }
+            None => None,
+        },
         Nest::Scan => scan(d, None, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx)),
         Nest::As(format) => {
             scan(d, Some(format), opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
@@ -452,7 +507,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     let prepared = ready.is_some();
     let f = match ready {
         Some(f) => f,
-        None => pure(format, d, opt.threads).unwrap_or_else(|| {
+        None => pure(format, d, opt.threads, cx.words.as_deref()).unwrap_or_else(|| {
             catch_unwind(AssertUnwindSafe(|| match format {
                 Format::Pe => exe::pe(d),
                 Format::MachO => exe::macho(d),
@@ -466,6 +521,9 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
             .flatten()
         }),
     }?;
+    if format == Format::Text {
+        cx.note_coded(&f, d);
+    }
     // evaluated beforehand while its contents are recompressed, which reads it only (once it is
     // known not to be taken into a set, where made beforehand as a PNG file among contents: it
     // is put off, and does not hold up [`verify::reclaim`] of a large formula, as only PNG
@@ -511,16 +569,18 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     if let Some(pre) = &cx.pre {
         deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));
     }
-    smaller(&f, None, d, opt, cx).then_some(f)
+    // (text as aqr-wrt tells, see [`made`])
+    (format == Format::Text || smaller(&f, None, d, opt, cx)).then_some(f)
 }
 
 /// Unless [`Options::smaller`] is off, what tells whether recompressing a stream may pay,
 /// for its data `depth` formats deep: at the level of the archive, files looked for as
 /// [`Nest::of`] tells (scanned, unless nested formats would go deeper than allowed). An ar,
-/// tar or cpio archive is scanned for the files in it, as it gains nothing itself.
+/// tar or cpio archive is scanned for the files in it, as it gains nothing itself; text is
+/// told by its data, as aqr-wrt takes no more than a tenth off it.
 pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
     let look = |kind| match Nest::Scan.of(kind) {
-        None => Look::No,
+        None | Some(Nest::As(Format::Text)) => Look::No,
         Some(Nest::As(f)) if !f.is_bundle() => Look::Whole,
         Some(_) => Look::Scan,
     };
@@ -531,9 +591,11 @@ pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
 
 /// Bytes of the files of formats that recompressors take in `d`, as a scan would find them:
 /// by their signatures, then their ends ([`extent`]), each from the end of the one before. An
-/// ar, tar or cpio archive is not one, but the files in it are.
+/// ar, tar or cpio archive is not one, but the files in it are; nor is text (see [`probe`]).
 fn files_len(d: &[u8]) -> usize {
-    let len = |p: usize, f: Option<Format>| f.filter(|f| !f.is_bundle()).and_then(|f| extent(f, &d[p..])).unwrap_or(0);
+    let len = |p: usize, f: Option<Format>| {
+        f.filter(|f| !f.is_bundle() && *f != Format::Text).and_then(|f| extent(f, &d[p..])).unwrap_or(0)
+    };
     let mut total = len(0, detect(d));
     let mut p = detect::next_start(d, total.max(1));
     while p < d.len() {
@@ -553,7 +615,11 @@ fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, 
         // (the streams the files archived together hold cost nothing)
         let free: Vec<usize> = (0..f.streams.len())
             .filter(|&s| stand_in.is_none_or(|(t, _)| t != s))
-            .filter(|&s| f.streams[s].data.len() >= SHARE_MIN && cx.held_by_others(&f.streams[s].data, d))
+            .filter(|&s| {
+                // (text coded alike as its copies, whose data was long enough to tell)
+                let data = &f.streams[s].data;
+                data.len() >= SHARE_MIN && cx.held_by_others(data, d) || cx.coded_held(data)
+            })
             .collect();
         cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
     };
@@ -794,13 +860,15 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         .map(|(_, n, _)| std::sync::Mutex::new(by_at.remove(&(data(n).as_ptr() as usize)).unwrap_or_default()))
         .collect();
     cx.ready.borrow_mut().extend(by_at.into_values().flatten());
-    let (pre, held) = (cx.pre.clone(), cx.held.clone());
+    let (pre, held, words, coded_held) = (cx.pre.clone(), cx.held.clone(), cx.words.clone(), cx.coded_held.clone());
     let made = aqr_common::pool::par_map(later.len(), opt.threads, |i| {
         let (_, n, nest) = &later[i];
         let d = data(n);
         let mut own = Cx::of_len(d.len(), opt);
         own.pre = pre.clone();
         own.held = held.clone();
+        own.share_words(words.clone());
+        own.coded_held = coded_held.clone();
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         let child = made(d, opt, depth + 1, *nest, &own).filter(|c| !c.f.applies().is_empty());
         (child, own.deferred.into_inner())
@@ -975,12 +1043,20 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
 /// FORMAT.md), if it makes one, where it is a function of `d` alone (it looks for no files in
 /// its data, and takes nothing of a budget): `None` for the other formats. Whether coding pays
 /// off is the recompressor's call: the streams are not compressed yet, so their size says
-/// little. The formula is the same whatever `threads` is.
-fn pure(format: Format, d: &[u8], threads: usize) -> Option<Option<Formula>> {
+/// little. The formula is the same whatever `threads` is. Text is coded with `words` where
+/// given ([`Cx::words`]).
+fn pure(format: Format, d: &[u8], threads: usize, words: Option<&aqr_wrt::formula::Shared>) -> Option<Option<Formula>> {
     let encode = pure_encode(format)?;
     #[cfg(test)]
     tests::PURE.with(|n| n.set(n.get() + 1));
-    Some(catch_unwind(AssertUnwindSafe(|| encode(d, threads))).ok().flatten())
+    Some(
+        catch_unwind(AssertUnwindSafe(|| match (format, words) {
+            (Format::Text, Some(w)) => aqr_wrt::formula::encode_with(d, w, threads),
+            _ => encode(d, threads),
+        }))
+        .ok()
+        .flatten(),
+    )
 }
 
 /// Whether `format` is one of [`pure`].
@@ -1005,6 +1081,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Sqlite => aqr_sqlite::formula::encode,
         Format::LevelDb => aqr_snappy::formula::encode,
         Format::Fasta => aqr_fasta::formula::encode,
+        Format::Text => aqr_wrt::formula::encode,
         _ => return None,
     })
 }
@@ -1027,7 +1104,8 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     cx.skip.borrow_mut().extend(skip);
     let workers = opt.threads.min(jobs.len()).max(1);
     let inner = (opt.threads / workers).max(1);
-    let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, inner).flatten());
+    let words = cx.words.as_deref();
+    let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, inner, words).flatten());
     let mut ready = cx.ready.borrow_mut();
     let keys: Vec<_> = jobs.iter().map(|&(format, d, _)| (d.as_ptr() as usize, d.len(), format)).collect();
     for (&k, f) in keys.iter().zip(made) {
@@ -1282,7 +1360,8 @@ mod tests {
     /// every application's output from the memo, and runs the module where it is not there.
     #[test]
     fn verified_beforehand() {
-        let text: Vec<u8> = (0..20000).flat_map(|i| format!("line {i} of the text\n").into_bytes()).collect();
+        // (of no words, which aqr-wrt would take)
+        let text: Vec<u8> = (0..20000).flat_map(|i| format!("{i}: {}\n", i * 7).into_bytes()).collect();
         let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
         std::io::Write::write_all(&mut z, &text).unwrap();
         let d = z.finish().unwrap();
@@ -1327,7 +1406,8 @@ mod tests {
     /// application that is not a content too; one of another stream is not.
     #[test]
     fn content_streams() {
-        let text: Vec<u8> = (0..20000).flat_map(|i| format!("line {i} of the text\n").into_bytes()).collect();
+        // (of no words, which aqr-wrt would take)
+        let text: Vec<u8> = (0..20000).flat_map(|i| format!("{i}: {}\n", i * 7).into_bytes()).collect();
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
         std::io::Write::write_all(&mut z, &text).unwrap();
         let d = [&b"header "[..], &z.finish().unwrap()].concat();

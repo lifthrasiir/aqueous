@@ -280,7 +280,8 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>
     let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= TOGETHER_MIN).collect();
     // of each: the hash of its start, the CRC-32 and size of the entries it holds, and whether
     // it is an archive of aqr-bundle's (whose members are known once it is read whole)
-    let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<(u64, Vec<(u32, u64)>, bool)> {
+    type Looked = (u64, Vec<(u32, u64)>, bool);
+    let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<Looked> {
         let (c, size) = (large[i], src.size(large[i]));
         let head = src.read_range(c, 0..HEAD)?;
         let format = detect(&head);
@@ -391,6 +392,24 @@ struct Made {
     bad: Vec<usize>,
 }
 
+/// Text of the files of a batch shorter than this in all is coded with dictionaries of each
+/// text's own: one of them all would cost more than it saves.
+const WORDS_MIN: usize = 256 << 10;
+
+/// The dictionary of the text of a batch ([`Cx::words`]): of the files that are text (at least
+/// [`aqr_wrt::formula::MIN_LEN`] bytes, but those kept raw), where they are [`WORDS_MIN`]
+/// bytes in all.
+fn words(regions: &[&[u8]], files: &[File], raw: &HashSet<usize>, opt: &Options) -> Option<aqr_wrt::formula::Shared> {
+    let texts: Vec<&[u8]> = (0..files.len())
+        .filter(|k| !raw.contains(k) && aqr_wrt::formula::starts(regions[*k]))
+        .map(|k| regions[k])
+        .collect();
+    if texts.iter().map(|t| t.len()).sum::<usize>() < WORDS_MIN {
+        return None;
+    }
+    aqr_wrt::formula::Shared::of(&texts, opt.threads)
+}
+
 /// The batch of `files` (each its content and data), to follow the blocks of `w`, recompressed
 /// but those (by index) in `raw`.
 fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) -> Made {
@@ -416,6 +435,7 @@ fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) 
     // hold, a content told by where it is)
     let regions: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     cx.held = Some(std::sync::Arc::new(Held::of(&regions, opt.threads)));
+    cx.share_words(words(&regions, files, raw, opt).map(std::sync::Arc::new));
     cx.pre = opt.verify.then(|| std::sync::Arc::new(verify::Prevalidator::spawn(opt.threads, &regions)));
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let mut taken = HashSet::new();

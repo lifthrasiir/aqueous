@@ -58,6 +58,9 @@ pub const PSD: Module = aqr_psd::formula::MODULE;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 pub const FASTA: Module = aqr_fasta::formula::MODULE;
+/// Text of words and markup replaced by codes of a dictionary (aqr-wrt). Resources: the
+/// dictionary; inputs: the coded text.
+pub const WRT: Module = aqr_wrt::formula::MODULE;
 
 /// aqr-raw's samples of a layout (their params), for the trivial containers around them or
 /// for any recompressor that finds them: PCM audio (resources: the residual model's tables,
@@ -66,8 +69,8 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 19] = [
-    X86, ARM64, CIL, FLATE, LZ4, SNAPPY, ZIP, BUNDLE, PNG, PNG_SET, JPEG, MP3, FLAC, PSD, PDF, SQLITE, FASTA, PCM,
+pub const MODULES: [Module; 20] = [
+    X86, ARM64, CIL, FLATE, LZ4, SNAPPY, ZIP, BUNDLE, PNG, PNG_SET, JPEG, MP3, FLAC, PSD, PDF, SQLITE, FASTA, WRT, PCM,
     RASTER,
 ];
 
@@ -84,7 +87,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 10] = [
+const RECONS: [(Module, Decode); 11] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (JPEG, |p, r, i, n, t| none(r).and_then(|_| aqr_jpeg::formula::decode(p, i, n, t).map_err(msg))),
     (MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(msg)),
@@ -93,6 +96,7 @@ const RECONS: [(Module, Decode); 10] = [
     (PDF, |p, r, i, n, t| none(r).and_then(|_| aqr_pdf::formula::decode(p, i, n, t).map_err(msg))),
     (SQLITE, |p, r, i, n, t| none(r).and_then(|_| aqr_sqlite::formula::decode(p, i, n, t).map_err(msg))),
     (FASTA, |p, r, i, n, t| none(r).and_then(|_| aqr_fasta::formula::decode(p, i, n, t).map_err(msg))),
+    (WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(msg)),
     (PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(msg)),
     (RASTER, |p, r, i, n, t| none(r).and_then(|_| aqr_raw::formula::raster::decode(p, i, n, t).map_err(msg))),
 ];

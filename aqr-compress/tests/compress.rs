@@ -3,7 +3,7 @@ use std::io::Write;
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, BUNDLE, FLAC, FLATE, JPEG, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SNAPPY, SQLITE, X86, ZIP,
+    ARM64, BUNDLE, FLAC, FLATE, JPEG, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SNAPPY, SQLITE, WRT, X86, ZIP,
     decompress,
 };
 use aqr_formula::aqr;
@@ -33,7 +33,20 @@ fn all() -> Options {
     Options { smaller: false, ..Options::default() }
 }
 
+/// Lines of text of no words (which aqr-wrt would take, see [`prose`]).
 fn text(n: usize) -> Vec<u8> {
+    let mut t = Vec::new();
+    for i in 0.. {
+        if t.len() >= n {
+            break;
+        }
+        writeln!(t, "{i}: {} + {} = {} (% 13)", i * 7 % 13, i % 5, (i * 7 + i % 5) % 13).unwrap();
+    }
+    t
+}
+
+/// Lines of text of words.
+fn prose(n: usize) -> Vec<u8> {
     let mut t = Vec::new();
     for i in 0.. {
         if t.len() >= n {
@@ -500,7 +513,7 @@ fn scan_after_file() {
 #[test]
 fn scan_weak() {
     let mp3 = fixture("aqr-mp3/tests/data/vbr.mp3");
-    let t = text(100_000);
+    let t = prose(100_000);
     let d = [&text(5000)[..], &zlib(&t, 6), &text(3000), &mp3, &text(100)].concat();
     // (The MP3 alone archives no smaller than raw, with the tables of its module.)
     let f = roundtrip(&d, &Options { smaller: false, ..Options::default() });
@@ -818,6 +831,21 @@ fn fasta() {
     let f = roundtrip(&d, &all());
     assert_eq!(modules(&f), ["fasta-recons"]);
     assert_eq!(aqr_compress::kind_by_name(b"x/chr1.fa"), aqr_formula::Kind::Format("fasta"));
+}
+
+/// Text goes to aqr-wrt where that pays: a whole file of text bytes, and data of a name telling
+/// text (a gzip member's); not text that is short, or has other bytes, or of no words.
+#[test]
+fn text_words() {
+    let d = prose(400_000);
+    assert_eq!(modules(&roundtrip(&d, &all())), [WRT.name]);
+    assert_eq!(modules(&roundtrip(&gzip_named(&d, "a.txt"), &all())), [FLATE.name, WRT.name]);
+    assert_eq!(modules(&roundtrip(&gzip(&d), &all())), [FLATE.name, WRT.name]);
+    // as aqr-wrt tells, whatever the archive would make of the file without it
+    assert_eq!(modules(&roundtrip(&d, &Options::default())), [WRT.name]);
+    assert!(modules(&roundtrip(&d[..200_000], &all())).is_empty());
+    assert!(modules(&roundtrip(&[&d[..], b"\0"].concat(), &all())).is_empty());
+    assert!(modules(&roundtrip(&text(400_000), &all())).is_empty());
 }
 
 /// A ustar header of `name` for a body of `n` bytes.
