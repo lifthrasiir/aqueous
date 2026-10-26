@@ -99,8 +99,8 @@ archives of Clip Studio Paint PNG files (684 MB, in groups of 13 to 88 of the sa
 archive cut short), measured on 2026-10-26 through `aqr-show -t 8`. The PNG files alike are
 coded against each other as sets (aqr-compress, aqr-png's `png-set`): the archives come to
 114.1 MB, against 497.1 MB with each file coded alone (and the archive cut short kept raw,
-before it was taken), at 21-26 MB/s compressing (about half as fast) and 55-70 MB/s
-decompressing (64-90).
+before it was taken), at 28-39 MB/s compressing (44-54 alone) and 84-167 MB/s
+decompressing (71-90 alone).
 
 ## Tests
 

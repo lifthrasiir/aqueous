@@ -87,7 +87,8 @@ mod sets;
 mod verify;
 mod zip;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -210,6 +211,9 @@ pub(crate) struct Cx {
     inflate: Cell<u64>,
     /// Where the formulas recompressors make are evaluated beforehand, for [`compress`].
     pre: Option<verify::Prevalidator>,
+    /// Formulas made beforehand (of [`pure`] formats), by the data (where it is, its length)
+    /// and the format.
+    ready: RefCell<HashMap<(usize, usize, Format), Option<Formula>>>,
 }
 
 impl Cx {
@@ -219,7 +223,7 @@ impl Cx {
         if opt.shared_resources {
             enc.share_resources();
         }
-        Cx { enc, inflate: Cell::new(inflate), pre: None }
+        Cx { enc, inflate: Cell::new(inflate), pre: None, ready: Default::default() }
     }
 
     /// Takes `n` bytes of inflated data from the budget, if there are as many left.
@@ -375,25 +379,22 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -
 fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
-    let f = catch_unwind(AssertUnwindSafe(|| match format {
-        Format::Pe => exe::pe(d),
-        Format::MachO => exe::macho(d),
-        Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
-        Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
-        Format::Lz4 => recons(aqr_lz4::formula::encode, d, opt),
-        Format::Png => recons(aqr_png::formula::encode, d, opt),
-        Format::Jpeg => recons(aqr_jpeg::formula::encode, d, opt),
-        Format::Mp3 => recons(aqr_mp3::formula::encode, d, opt),
-        Format::Flac => recons(aqr_flac::formula::encode, d, opt),
-        Format::Raw => recons(aqr_raw::formula::encode, d, opt),
-        Format::Psd => recons(aqr_psd::formula::encode, d, opt),
-        Format::Pdf => recons(aqr_pdf::formula::encode, d, opt),
-        Format::Sqlite => recons(aqr_sqlite::formula::encode, d, opt),
-        Format::LevelDb => recons(aqr_snappy::formula::encode, d, opt),
-        Format::Zip => zip::zip(d, opt, depth, cx),
-    }))
-    .ok()
-    .flatten()?;
+    let ready = cx.ready.borrow_mut().remove(&(d.as_ptr() as usize, d.len(), format));
+    let f = match ready {
+        Some(f) => f,
+        None => pure(format, d, opt.threads).unwrap_or_else(|| {
+            catch_unwind(AssertUnwindSafe(|| match format {
+                Format::Pe => exe::pe(d),
+                Format::MachO => exe::macho(d),
+                Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
+                Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
+                Format::Zip => zip::zip(d, opt, depth, cx),
+                _ => unreachable!("a pure format"),
+            }))
+            .ok()
+            .flatten()
+        }),
+    }?;
     // evaluated beforehand while its contents are recompressed, which reads it only
     let shared = Arc::new(f);
     if let Some(pre) = &cx.pre {
@@ -635,8 +636,13 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<(Node, 
     if depth + 1 >= opt.depth {
         return None;
     }
+    let prepared = prepare(f, opt, cx);
     let mut children = Vec::new();
     contents(&f.root, f, opt, depth, cx, &mut children);
+    // (those not taken: the contents' own nested contents make and take their own)
+    let mut ready = cx.ready.borrow_mut();
+    prepared.iter().for_each(|k| drop(ready.remove(k)));
+    drop(ready);
     let sizes: Vec<_> = children
         .iter()
         .map(|(slice, child)| match child {
@@ -795,11 +801,86 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
     opt.contents.iter().find(|c| c.module == m && c.input == i)
 }
 
-/// The formula that a recompressor makes of `d` by `encode` (its `formula` module, see its
-/// FORMAT.md), if it makes one. Whether coding pays off is the recompressor's call: the
-/// streams are not compressed yet, so their size says little.
-fn recons(encode: fn(&[u8], usize) -> Option<Formula>, d: &[u8], opt: &Options) -> Option<Formula> {
-    encode(d, opt.threads)
+/// The formula that the recompressor of `format` makes of `d` (its `formula` module, see its
+/// FORMAT.md), if it makes one, where it is a function of `d` alone (it looks for no files in
+/// its data, and takes nothing of a budget): `None` for the other formats. Whether coding pays
+/// off is the recompressor's call: the streams are not compressed yet, so their size says
+/// little. The formula is the same whatever `threads` is.
+fn pure(format: Format, d: &[u8], threads: usize) -> Option<Option<Formula>> {
+    let encode = pure_encode(format)?;
+    #[cfg(test)]
+    tests::PURE.with(|n| n.set(n.get() + 1));
+    Some(catch_unwind(AssertUnwindSafe(|| encode(d, threads))).ok().flatten())
+}
+
+/// Whether `format` is one of [`pure`].
+fn is_pure(format: Format) -> bool {
+    pure_encode(format).is_some()
+}
+
+/// A recompressor's `encode`: the formula of the data, on so many threads.
+type Encode = fn(&[u8], usize) -> Option<Formula>;
+
+/// The `encode` of the recompressor of a [`pure`] format.
+fn pure_encode(format: Format) -> Option<Encode> {
+    Some(match format {
+        Format::Lz4 => aqr_lz4::formula::encode,
+        Format::Png => aqr_png::formula::encode,
+        Format::Jpeg => aqr_jpeg::formula::encode,
+        Format::Mp3 => aqr_mp3::formula::encode,
+        Format::Flac => aqr_flac::formula::encode,
+        Format::Raw => aqr_raw::formula::encode,
+        Format::Psd => aqr_psd::formula::encode,
+        Format::Pdf => aqr_pdf::formula::encode,
+        Format::Sqlite => aqr_sqlite::formula::encode,
+        Format::LevelDb => aqr_snappy::formula::encode,
+        _ => return None,
+    })
+}
+
+/// Makes the formulas of the files of [`pure`] formats among the contents of `f` beforehand,
+/// at once (as [`contents`] would take them in turn), into [`Cx::ready`]; returns their keys.
+fn prepare(f: &Formula, opt: &Options, cx: &Cx) -> Vec<(usize, usize, Format)> {
+    let mut jobs = Vec::new();
+    pure_contents(&f.root, None, f, opt, &mut jobs);
+    if jobs.len() < 2 {
+        return Vec::new();
+    }
+    let workers = opt.threads.min(jobs.len()).max(1);
+    let inner = (opt.threads / workers).max(1);
+    let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, inner).flatten());
+    let mut ready = cx.ready.borrow_mut();
+    let keys: Vec<_> = jobs.iter().map(|&(format, d)| (d.as_ptr() as usize, d.len(), format)).collect();
+    for (&k, f) in keys.iter().zip(made) {
+        ready.insert(k, f);
+    }
+    keys
+}
+
+/// The files of [`pure`] formats below node `n` of `f` that [`contents`] (with `nest` `None`)
+/// or [`content_slices`] (with it) would take as such, each with its data as it is given its
+/// recompressor (to its [`extent`]).
+fn pure_contents<'a>(n: &Node, nest: Option<Nest>, f: &'a Formula, opt: &Options, out: &mut Vec<(Format, &'a [u8])>) {
+    match (n, nest) {
+        (&Node::Slice { stream, .. }, None) if is_content(f, stream) => pure_contents(n, Some(Nest::Scan), f, opt, out),
+        (&Node::Slice { stream, start, len }, Some(nest)) => {
+            let Some(s) = f.streams.get(stream) else { return };
+            let Some(d) = s.data.get(start as usize..).and_then(|d| d.get(..len as usize)) else { return };
+            if let Some(Nest::As(format)) = nest.of(s.kind)
+                && is_pure(format)
+                && let Some(n) = extent(format, d).filter(|&n| n > 0)
+            {
+                out.push((format, &d[..n]));
+            }
+        }
+        (Node::Concat(ns) | Node::Pack(ns), _) => ns.iter().for_each(|n| pure_contents(n, nest, f, opt, out)),
+        (Node::Apply(a), _) => {
+            for (i, input) in a.inputs.iter().enumerate() {
+                pure_contents(input, content(opt, a.module, i).map(|c| c.nest), f, opt, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Bytes of the streams of `f` by class, largest first.
@@ -824,6 +905,46 @@ mod tests {
         pub(crate) static TRIED: std::cell::RefCell<Vec<Format>> = const { std::cell::RefCell::new(Vec::new()) };
         /// The DEFLATE streams of gzip and zlib deconstructed.
         pub(crate) static DECONSTRUCTED: Cell<usize> = const { Cell::new(0) };
+        /// The files of [`pure`] formats given to their recompressors.
+        pub(crate) static PURE: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// The contents of pure formats are made beforehand, each once: those of a ZIP archive's
+    /// entries are not made again where the first entry's own contents are looked for.
+    #[test]
+    fn contents_made_once() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let files =
+            [fixture("aqr-jpeg/tests/data/gradient.jpg"), fixture("aqr-jpeg/tests/data/prog_script_recode.jpg")];
+        let (mut d, mut cd) = (Vec::new(), Vec::new());
+        for (i, data) in files.iter().enumerate() {
+            let mut h = vec![20, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            h.extend_from_slice(&crc32fast::hash(data).to_le_bytes());
+            h.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            h.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            h.extend_from_slice(&[5, 0, 0, 0]);
+            let name = [b'a' + i as u8, b'.', b'j', b'p', b'g'];
+            cd.extend_from_slice(b"PK\x01\x02\x14\x03");
+            cd.extend_from_slice(&h);
+            cd.extend_from_slice(&[0; 10]);
+            cd.extend_from_slice(&(d.len() as u32).to_le_bytes());
+            cd.extend_from_slice(&name);
+            d.extend_from_slice(b"PK\x03\x04");
+            d.extend_from_slice(&h);
+            d.extend_from_slice(&name);
+            d.extend_from_slice(data);
+        }
+        let at = d.len() as u32;
+        d.extend_from_slice(&cd);
+        d.extend_from_slice(b"PK\x05\x06\0\0\0\0\x02\0\x02\0");
+        d.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+        d.extend_from_slice(&at.to_le_bytes());
+        d.extend_from_slice(&[0, 0]);
+        PURE.with(|n| n.set(0));
+        let f = recompress(&d, &Options { threads: 1, ..Options::default() });
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert_eq!(PURE.with(Cell::get), 2);
+        assert!(f.eval(&Native::default()).unwrap() == d);
     }
 
     /// The DEFLATE stream of a gzip file is deconstructed where its data may archive smaller
