@@ -27,6 +27,9 @@ Measured 2026-10-26 on an Apple M4 (10 cores), on hg19 (93 chromosome files of t
   occurrence, its prediction weighed by an adaptive table of its length) brought 1.787 to
   1.773 on 60 MB at four times the time, not taken. Models started anew every 64 Mbase cost
   1.6%, every 16 Mbase 4.0%: a file is one stream.
+- The bases are decoded as the file is built, never held: a file decodes in its own size and
+  the coded bases. Held, they took as much again (10gb decompression 8.66 → 7.49 GB of peak
+  footprint, ten chromosomes decoded at once).
 - The archive's batches (512 MB) hold few chromosomes each, which keeps compression to two
   or three cores; the module itself encodes at 170 MB/s a thread.
 

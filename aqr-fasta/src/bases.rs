@@ -106,17 +106,55 @@ pub fn encode(s: &[u8]) -> Vec<u8> {
 
 /// The `n` bases of coded form `c`; fails where `c` is not exactly of them.
 pub fn decode(c: &[u8], n: usize) -> Result<Vec<u8>> {
-    let mut t = model();
-    let mut s = Vec::with_capacity(n);
-    let mut x = u32::from_be_bytes(*c.first_chunk().ok_or_else(corrupt)?);
-    let mut at = 4;
-    let next = |at: &mut usize| {
-        let b = c.get(*at).copied().unwrap_or(0);
-        *at += 1;
+    let mut d = Decoder::new(c, n)?;
+    let s = d.by_ref().collect();
+    d.finish()?;
+    Ok(s)
+}
+
+/// The `n` bases of coded form `c` as they are decoded, without the bases themselves held
+/// ([`Decoder::finish`] tells whether `c` was exactly of them).
+pub struct Decoder<'c> {
+    t: Vec<[u16; 4]>,
+    c: &'c [u8],
+    at: usize,
+    x: u32,
+    h: usize,
+    left: usize,
+}
+
+impl<'c> Decoder<'c> {
+    pub fn new(c: &'c [u8], n: usize) -> Result<Self> {
+        let x = u32::from_be_bytes(*c.first_chunk().ok_or_else(corrupt)?);
+        Ok(Decoder { t: model(), c, at: 4, x, h: 0, left: n })
+    }
+
+    /// Whether every base was decoded, the state back where the coder started, every byte read.
+    pub fn finish(self) -> Result<()> {
+        if self.left != 0 || self.x != LOW || self.at != self.c.len() {
+            return Err(corrupt());
+        }
+        Ok(())
+    }
+
+    #[inline(always)]
+    fn byte(&mut self) -> u32 {
+        let b = self.c.get(self.at).copied().unwrap_or(0);
+        self.at += 1;
         b as u32
-    };
-    let mut h = 0usize;
-    for _ in 0..n {
+    }
+}
+
+impl Iterator for Decoder<'_> {
+    type Item = u8;
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<u8> {
+        if self.left == 0 {
+            return None;
+        }
+        self.left -= 1;
+        let (t, h, mut x) = (&mut self.t, self.h, self.x);
         // the contexts two bases on, one cache line of them: loaded as this one decodes
         prefetch(t.as_ptr().wrapping_add((h << 4) & (CONTEXTS - 1)));
         let p = &mut t[h & (CONTEXTS - 1)];
@@ -128,21 +166,21 @@ pub fn decode(c: &[u8], n: usize) -> Result<Vec<u8>> {
         let b = (slot >= c1) as usize + (slot >= c2) as usize + (slot >= c3) as usize;
         let cum = [0, c1, c2, c3];
         x = f[b] * (x >> SCALE) + slot - cum[b];
+        update(p, b);
+        self.h = h << 2 | b;
         if x < LOW {
-            x = x << 8 | next(&mut at);
+            x = x << 8 | self.byte();
             if x < LOW {
-                x = x << 8 | next(&mut at);
+                x = x << 8 | self.byte();
             }
         }
-        s.push(b as u8);
-        update(p, b);
-        h = h << 2 | b;
+        self.x = x;
+        Some(b as u8)
     }
-    // the state back where the coder started, every byte read
-    if x != LOW || at != c.len() {
-        return Err(corrupt());
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.left, Some(self.left))
     }
-    Ok(s)
 }
 
 #[cfg(test)]

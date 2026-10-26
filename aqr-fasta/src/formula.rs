@@ -58,6 +58,9 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
     if n > len as u64 {
         return Err(corrupt());
     }
-    let bases = bases::decode(coded, n as usize)?;
-    fasta::build(View { width, final_newline: nl == 1, headers, layout, case, other, bases: &bases }, len)
+    // (the bases as they are decoded: a file's worth of them not held)
+    let mut bases = bases::Decoder::new(coded, n as usize)?;
+    let out = fasta::build(View { width, final_newline: nl == 1, headers, layout, case, other }, &mut bases, len)?;
+    bases.finish()?;
+    Ok(out)
 }

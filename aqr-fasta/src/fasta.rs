@@ -40,7 +40,6 @@ pub struct View<'a> {
     pub layout: &'a [u8],
     pub case: &'a [u8],
     pub other: &'a [u8],
-    pub bases: &'a [u8],
 }
 
 impl Parts {
@@ -52,7 +51,6 @@ impl Parts {
             layout: &self.layout,
             case: &self.case,
             other: &self.other,
-            bases: &self.bases,
         }
     }
 }
@@ -238,8 +236,9 @@ pub fn bases_len(layout: &[u8], other: &[u8]) -> Result<u64> {
     letters.checked_sub(others).ok_or_else(corrupt)
 }
 
-/// The file of `p`, of `len` bytes; fails where the parts do not make one of that length.
-pub fn build(p: View, len: usize) -> Result<Vec<u8>> {
+/// The file of `p` and `bases` (taken as they come), of `len` bytes; fails where they do not
+/// make one of that length.
+pub fn build(p: View, mut bases: impl Iterator<Item = u8>, len: usize) -> Result<Vec<u8>> {
     let mut out = Vec::with_capacity(len);
     let mut layout = Rd { d: p.layout, at: 0 };
     let mut case = Rd { d: p.case, at: 0 };
@@ -247,7 +246,6 @@ pub fn build(p: View, len: usize) -> Result<Vec<u8>> {
     let mut headers = p.headers.split(|&b| b == b'\n');
     // the letters as they come: the bases left before the next run of another letter, and
     // the case's run left
-    let mut bases = p.bases.iter();
     // (after the last run, none: as many bases as there are)
     let next_other = |o: &mut Rd| -> Result<(u64, u64, u8)> {
         if o.done() {
@@ -281,7 +279,7 @@ pub fn build(p: View, len: usize) -> Result<Vec<u8>> {
             } else {
                 k = k.min(gap);
                 for _ in 0..k {
-                    let &b = bases.next().ok_or_else(corrupt)?;
+                    let b = bases.next().ok_or_else(corrupt)?;
                     out.push(LETTERS[b as usize & 3] | lower);
                 }
                 gap = gap.saturating_sub(k);
@@ -361,8 +359,8 @@ mod tests {
     fn back(d: &[u8]) {
         let p = parse(d).unwrap_or_else(|| panic!("not taken: {:?}", String::from_utf8_lossy(d)));
         assert_eq!(bases_len(&p.layout, &p.other).unwrap(), p.bases.len() as u64);
-        assert_eq!(build(p.view(), d.len()).unwrap(), d, "{p:?}");
-        assert!(build(p.view(), d.len() + 1).is_err());
+        assert_eq!(build(p.view(), p.bases.iter().copied(), d.len()).unwrap(), d, "{p:?}");
+        assert!(build(p.view(), p.bases.iter().copied(), d.len() + 1).is_err());
     }
 
     #[test]
