@@ -252,3 +252,15 @@ fn zip_of(name: &str, data: &[u8], deflated: &[u8]) -> Vec<u8> {
     o.extend_from_slice(&[0, 0]);
     o
 }
+
+/// Files whose formulas' streams are larger than what is copied rather than waited for once
+/// evaluated (made beforehand as files of the batch): archived, not waited for forever.
+#[test]
+fn large_formulas() {
+    let pgm = |seed: u64| {
+        let (w, h) = (8192, 8500);
+        [format!("P5\n{w} {h}\n255\n").into_bytes(), aqr_common::rng::Rng::new(seed).bytes(w * h)].concat()
+    };
+    let (_, r) = archived(&[("a.pgm", pgm(1)), ("b.pgm", pgm(2))], &Options { smaller: false, ..Options::default() });
+    assert!(r.files.iter().all(|f| !f.modules.is_empty()), "{r:?}");
+}

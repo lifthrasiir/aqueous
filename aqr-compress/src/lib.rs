@@ -467,10 +467,12 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         }),
     }?;
     // evaluated beforehand while its contents are recompressed, which reads it only (once it is
-    // known not to be taken into a set, where made beforehand as a content)
+    // known not to be taken into a set, where made beforehand as a PNG file among contents: it
+    // is put off, and does not hold up [`verify::reclaim`] of a large formula, as only PNG
+    // files are taken into sets)
     let shared = Arc::new(f);
     if let Some(pre) = &cx.pre {
-        match prepared {
+        match prepared && format == Format::Png {
             true => pre
                 .job(shared.clone(), d)
                 .into_iter()
