@@ -199,3 +199,100 @@ fn corrupt_inputs_fail_cleanly() {
         let _ = formula::decode(&[], &[inputs[0], &inputs[1][..cut], inputs[2]], len, 1);
     }
 }
+
+/// A PNG file of a picture (8 bits per sample, `color`), with the pixels of `rect` changed.
+fn picture(w: usize, h: usize, color: u8, seed: u32, rect: Option<(usize, usize, usize, usize)>) -> Vec<u8> {
+    let ch = match color {
+        2 => 3,
+        4 => 2,
+        6 => 4,
+        _ => 1,
+    };
+    let data = filter_rows(&raw_rows(w, h, ch, seed, rect), ch);
+    single(w as u32, h as u32, 8, color, 0, &zlib(&zlib6(), &data), b"")
+}
+
+/// The records' bytes of a formula.
+fn records(f: &Formula) -> usize {
+    f.streams.iter().find(|s| s.class == "png/records").unwrap().data.len()
+}
+
+/// A variant of a picture coded against it: records of kind 2, far smaller than alone, the
+/// reference the last input; the same on any thread count, and evaluated back.
+#[test]
+fn against_reference() {
+    for color in [0, 2, 3, 4, 6] {
+        let base = picture(300, 200, color, 5, None);
+        let variant = picture(300, 200, color, 5, Some((40, 60, 70, 50)));
+        let f = formula::encode_against(&variant, &base, 1).expect("coded");
+        assert_eq!(record_kinds(&f), [2], "colour {color}");
+        let classes: Vec<_> = f.streams.iter().map(|s| &*s.class).collect();
+        assert_eq!(classes, ["png/skeleton", "png/index", "png/records", formula::REFERENCE]);
+        assert_eq!(f.streams[3].data, base);
+        let alone = formula::encode(&variant, 1).unwrap();
+        assert!(records(&f) * 3 < records(&alone), "colour {color}: {} against {}", records(&f), records(&alone));
+        for t in [1, 2, 8] {
+            assert!(f.eval(&modules(t)).expect("evaluates") == variant, "colour {color}, {t} threads");
+            assert!(formula::encode_against(&variant, &base, t).unwrap() == f, "colour {color}, {t} threads");
+        }
+        // The same picture costs next to nothing.
+        let same = formula::encode_against(&base, &base, 1).unwrap();
+        assert!(records(&same) * 20 < records(&alone), "colour {color}: {}", records(&same));
+        assert!(same.eval(&modules(1)).unwrap() == base);
+    }
+}
+
+/// Against a reference of another geometry, or not a PNG file, or with nothing alike, the
+/// images are coded alone and the reference is no input.
+#[test]
+fn reference_not_taken() {
+    let variant = picture(300, 200, 2, 5, Some((40, 60, 70, 50)));
+    for reference in [picture(300, 201, 2, 5, None), picture(300, 200, 6, 5, None), b"not a png".to_vec()] {
+        let f = formula::encode_against(&variant, &reference, 1).unwrap();
+        assert_eq!(record_kinds(&f), [1]);
+        assert_eq!(f.streams.len(), 3);
+        assert!(f == formula::encode(&variant, 1).unwrap());
+    }
+}
+
+/// Frames of an APNG file are coded against the reference's frames of the same index.
+#[test]
+fn reference_frames() {
+    let base = apng(&[(300, 200), (250, 180), (300, 200)], 21);
+    let f = formula::encode_against(&base, &base, 1).unwrap();
+    assert_eq!(record_kinds(&f), [2, 2, 2]);
+    assert!(f.eval(&modules(1)).unwrap() == base);
+    // A frame of another size than the reference's of its index is coded alone.
+    let other = apng(&[(300, 200), (240, 180), (300, 200)], 21);
+    let f = formula::encode_against(&other, &base, 1).unwrap();
+    assert_eq!(record_kinds(&f)[1], 1);
+    assert!(f.eval(&modules(1)).unwrap() == other);
+}
+
+/// Records coded against a reference need it: without it decoding fails, with another or
+/// with damaged inputs it never panics.
+#[test]
+fn reference_inputs_fail_cleanly() {
+    let base = picture(200, 150, 6, 9, None);
+    let variant = picture(200, 150, 6, 9, Some((10, 20, 60, 40)));
+    let f = formula::encode_against(&variant, &base, 1).unwrap();
+    let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+    let len = variant.len() as u64;
+    assert!(formula::decode(&[], &inputs, len, 1).unwrap() == variant);
+    assert!(formula::decode(&[], &inputs[..3], len, 1).is_err());
+    assert!(formula::decode(&[], &[inputs[0], inputs[1], inputs[2], inputs[3], inputs[3]], len, 1).is_err());
+    assert!(formula::decode(&[], &[inputs[0], inputs[1], inputs[2], b"not a png"], len, 1).is_err());
+    let other = picture(200, 150, 6, 10, None);
+    let _ = formula::decode(&[], &[inputs[0], inputs[1], inputs[2], &other], len, 1);
+    let mut x = 1u32;
+    for i in 0..1500 {
+        x = x.wrapping_mul(1103515245).wrapping_add(12345);
+        let mut copies: Vec<Vec<u8>> = inputs.iter().map(|s| s.to_vec()).collect();
+        // The records, or the reference.
+        let k = 2 + i % 2;
+        let at = (x as usize >> 4) % copies[k].len();
+        copies[k][at] ^= 1 << (i % 8);
+        let refs: Vec<&[u8]> = copies.iter().map(|c| &c[..]).collect();
+        let _ = formula::decode(&[], &refs, len, 1);
+    }
+}

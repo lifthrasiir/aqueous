@@ -110,6 +110,23 @@ on the photo sets).
   PNG, broken streams, invalid headers, truncation) is kept, or gives no formula; a panic
   while encoding gives no formula either.
 
+### Against a reference
+
+A PNG file can be coded against a similar one (`formula::encode_against`, the module's
+fourth input): sets of variants of a picture, with layers shown or hidden ("差分"), are
+mostly the same pixels, and the same writer mostly makes the same parse of them. Each token
+where the reference's image has one starting at the same place of the data is first a
+decision whether it is that token (by the last decision and whether the reference's is a
+match); the tokens that are are coded by nothing else. The reference's tokens come from
+parsing its payload again, so the decoder needs its file, not its record.
+
+On seven ZIP archives of such sets (Clip Studio Paint, 684 MB of PNG files in groups of 13
+to 88 of the same size), each file coded against a parent along a maximum spanning tree of
+how alike their data are (`aqr-png-refprobe --code`): 85% of the tokens are the parent's,
+and the records come to 109.5 MB against 491.5 MB alone (4.5×). Files are coded token by
+token (the encoder of streams expanding more than 4×), and coded alone too to keep the
+smaller record: coding takes 35 s and decoding 17 s of one thread over the 684 MB.
+
 ### Speed
 
 Measured with `aqr-png bench`, `samply`, and retired instruction counts

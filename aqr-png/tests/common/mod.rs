@@ -167,3 +167,65 @@ pub fn apng(frames: &[(u32, u32)], seed: u32) -> Vec<u8> {
     cs.push((b"IEND", vec![]));
     png(&cs)
 }
+
+/// Raw rows of an 8-bit image of `ch` channels, without filter bytes: as [`image_data`]'s,
+/// with the pixels of `rect` (x, y, width, height) given values of their own (a layer shown
+/// over the picture).
+pub fn raw_rows(w: usize, h: usize, ch: usize, seed: u32, rect: Option<(usize, usize, usize, usize)>) -> Vec<Vec<u8>> {
+    let mut rng = seed.wrapping_mul(2654435761) | 1;
+    let mut rnd = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        rng
+    };
+    (0..h)
+        .map(|y| {
+            (0..w * ch)
+                .map(|x| {
+                    let v = (((x * 3 + y * 5) as u32 + seed) / 4 % 251 + rnd() % 7) as u8;
+                    match rect {
+                        Some((rx, ry, rw, rh)) if (rx..rx + rw).contains(&(x / ch)) && (ry..ry + rh).contains(&y) => {
+                            (x as u8).wrapping_mul(31) ^ (y as u8).wrapping_mul(17)
+                        }
+                        _ => v,
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// `rows` filtered as [`image_data`] does (filter `y % 5` for row `y`), `bpp` bytes per pixel.
+pub fn filter_rows(rows: &[Vec<u8>], bpp: usize) -> Vec<u8> {
+    let mut out = vec![];
+    let zero = vec![0u8; rows.first().map_or(0, |r| r.len())];
+    for (y, raw) in rows.iter().enumerate() {
+        let prev = if y == 0 { &zero } else { &rows[y - 1] };
+        let ft = (y % 5) as u8;
+        out.push(ft);
+        for x in 0..raw.len() {
+            let a = if x >= bpp { raw[x - bpp] } else { 0 };
+            let (b, c) = (prev[x], if x >= bpp { prev[x - bpp] } else { 0 });
+            let p = match ft {
+                1 => a,
+                2 => b,
+                3 => ((a as u16 + b as u16) / 2) as u8,
+                4 => {
+                    let p = a as i16 + b as i16 - c as i16;
+                    let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
+                    if pa <= pb && pa <= pc {
+                        a
+                    } else if pb <= pc {
+                        b
+                    } else {
+                        c
+                    }
+                }
+                _ => 0,
+            };
+            out.push(raw[x].wrapping_sub(p));
+        }
+    }
+    out
+}

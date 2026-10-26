@@ -2,7 +2,7 @@
 //! as in sets of variants of one picture with layers shown or hidden ("差分"), where most
 //! pixels are the same.
 //!
-//! usage: aqr-png-refprobe DIR...
+//! usage: aqr-png-refprobe [--code] DIR...
 //!
 //! In each directory, the PNG files of the same header (8 bits per sample, not interlaced)
 //! are a group. Each file but one is paired with a parent: a maximum spanning tree of the
@@ -18,6 +18,9 @@
 //! The record that aqr-png codes each file to, alone, gives rough estimates: the record times
 //! the fraction of tokens out of sync (and of those over other pixels), plus the flags. Tokens
 //! out of sync are where the images differ, so they may well cost more than the others.
+//!
+//! With `--code`, each file is also coded against its parent (`formula::encode_against`) and
+//! decoded back: the records' size, checked, and the time both take (one thread each).
 
 use std::path::Path;
 
@@ -27,6 +30,7 @@ use aqr_png::{filter, png};
 /// A PNG file: its group, the inflated (filtered) and unfiltered data, the tokens, and the
 /// bytes of its record coded alone.
 struct Image {
+    path: std::path::PathBuf,
     key: (u32, u32, u8),
     stride: usize,
     data: Vec<u8>,
@@ -54,6 +58,7 @@ fn load(path: &Path) -> Option<Image> {
         .and_then(|f| f.streams.into_iter().find(|s| s.class == "png/records"))
         .map_or(file.len(), |s| s.data.len());
     Some(Image {
+        path: path.to_owned(),
         key: (ih.width, ih.height, ih.color),
         stride,
         data: f.data,
@@ -103,6 +108,8 @@ struct Counts {
     /// Out of sync, over pixels that are the same in the parent.
     same_pixels: usize,
     same_pixel_bytes: usize,
+    /// Of those, the literals.
+    same_pixel_lits: usize,
     /// Where the parent has a token at the same place, whether the one before was in sync
     /// and whether this one is.
     flags: [[usize; 2]; 2],
@@ -129,6 +136,7 @@ impl std::ops::AddAssign for Counts {
         self.runs += o.runs;
         self.same_pixels += o.same_pixels;
         self.same_pixel_bytes += o.same_pixel_bytes;
+        self.same_pixel_lits += o.same_pixel_lits;
         for (f, g) in self.flags.as_flattened_mut().iter_mut().zip(o.flags.as_flattened()) {
             *f += g;
         }
@@ -164,12 +172,29 @@ fn sync(b: &Image, a: &Image) -> Counts {
             s.runs += !was as usize;
         } else if (p..p + n).all(same) {
             s.same_pixels += 1;
+            s.same_pixel_lits += matches!(t, Token::Lit(_)) as usize;
             s.same_pixel_bytes += n;
         }
         was = ok;
         p += n;
     }
     s
+}
+
+/// The record of `b` coded against `a`, its size (checked by decoding it back), and the
+/// seconds coding and decoding take.
+fn against(b: &Image, a: &Image) -> (usize, f64, f64) {
+    let (fb, fa) = (std::fs::read(&b.path).unwrap(), std::fs::read(&a.path).unwrap());
+    let t = std::time::Instant::now();
+    let f = aqr_png::formula::encode_against(&fb, &fa, 1).expect("coded");
+    let enc = t.elapsed().as_secs_f64();
+    let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+    let t = std::time::Instant::now();
+    let out = aqr_png::formula::decode(&[], &inputs, fb.len() as u64, 1).expect("decodes");
+    let dec = t.elapsed().as_secs_f64();
+    assert!(out == fb, "{} against {} does not round trip", b.path.display(), a.path.display());
+    let rec = f.streams.iter().find(|s| s.class == "png/records").unwrap().data.len();
+    (rec, enc, dec)
 }
 
 fn len(t: &Token) -> usize {
@@ -200,7 +225,10 @@ fn par<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
 
 fn main() {
     let (mut all, mut files, mut records, mut est_sync, mut est_pixels) = (Counts::default(), 0, 0, 0.0, 0.0);
-    for dir in std::env::args().skip(1) {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let code = args.iter().any(|a| a == "--code");
+    let (mut coded, mut enc_s, mut dec_s) = (0usize, 0.0, 0.0);
+    for dir in args.into_iter().filter(|a| a != "--code") {
         let mut paths: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.path()))
@@ -236,10 +264,19 @@ fn main() {
             let root = parent.iter().position(|p| p.is_none()).unwrap();
             let (rec, fil) = (g.iter().map(|i| i.record).sum::<usize>(), g.iter().map(|i| i.file).sum::<usize>());
             let (e1, e2) = (est1 + g[root].record as f64, est2 + g[root].record as f64);
+            let mut got = String::new();
+            if code {
+                let res = par(&kids, |&(k, p)| against(g[k], g[p]));
+                let c = g[root].record + res.iter().map(|r| r.0).sum::<usize>();
+                coded += c;
+                enc_s += res.iter().map(|r| r.1).sum::<f64>();
+                dec_s += res.iter().map(|r| r.2).sum::<f64>();
+                got = format!(", coded {:.1} MB", c as f64 / 1e6);
+            }
             if g.len() > 1 {
                 println!(
                     "{dir} {}x{} n={}: in sync {:.1}% of tokens ({:.1}% of bytes), out of sync over the same pixels \
-                     {:.1}% ({:.1}%), runs {} (flags {:.2} MB); png {:.1} MB, records {:.1} MB, est. {:.1} / {:.1} MB",
+                     {:.1}% ({:.1}%), runs {} (flags {:.2} MB); png {:.1} MB, records {:.1} MB, est. {:.1} / {:.1} MB{got}",
                     key.0,
                     key.1,
                     g.len(),
@@ -264,15 +301,25 @@ fn main() {
             (files + dir_files, records + dir_records, est_sync + dir_est_sync, est_pixels + dir_est_pixels);
     }
     println!(
-        "all: in sync {:.1}% of tokens ({:.1}% of bytes), out of sync over the same pixels {:.1}% ({:.1}%); \
+        "all: in sync {:.1}% of tokens ({:.1}% of bytes), out of sync over the same pixels {:.1}% ({:.1}%, \
+         literals {:.1}%); \
          png {:.1} MB, records {:.1} MB, est. in sync {:.1} MB, with the same pixels {:.1} MB",
         100.0 * all.synced as f64 / all.tokens as f64,
         100.0 * all.synced_bytes as f64 / all.bytes as f64,
         100.0 * all.same_pixels as f64 / all.tokens as f64,
         100.0 * all.same_pixel_bytes as f64 / all.bytes as f64,
+        100.0 * all.same_pixel_lits as f64 / all.tokens as f64,
         files as f64 / 1e6,
         records as f64 / 1e6,
         est_sync / 1e6,
         est_pixels / 1e6
     );
+    if code {
+        println!(
+            "coded against the parents: {:.1} MB (all checked), coding {:.1} s, decoding {:.1} s (the parents' files not counted)",
+            coded as f64 / 1e6,
+            enc_s,
+            dec_s
+        );
+    }
 }

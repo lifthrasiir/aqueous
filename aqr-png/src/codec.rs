@@ -5,8 +5,9 @@
 //! and in an APNG every run of fdAT chunks (a frame, whose size its fcTL gives; each fdAT
 //! starts with a sequence number). An image's *payload* is the concatenation of its chunks'
 //! data (past the sequence numbers): one or more zlib streams (several in Apple's iDOT
-//! files). Every image is coded on its own, or kept as it is if coding does not make it
-//! smaller.
+//! files). Every image is coded on its own, or against the image of the same index and
+//! geometry of a similar file (the *reference*, see [`model::Reference`]), or kept as it is
+//! if coding does not make it smaller.
 //!
 //! See FORMAT.md for the full specification.
 //!
@@ -18,6 +19,7 @@
 //!   1, varint length + layout        -- streams, blocks, exceptions, model kind
 //!      varint length + headers       -- dynamic Huffman headers (aqr-flate's header coder)
 //!      model payload                 -- see model::Recorder::finish
+//!   2, as 1                          -- coded against the reference's image
 //! ```
 
 use crate::model::{self, Geometry, Kind, Span};
@@ -91,23 +93,60 @@ fn images<'a>(
 }
 
 /// A PNG file in parts: the skeleton and the records of the
-/// images, in order (each record's first byte being 0 or 1, see FORMAT.md).
+/// images, in order (each record's first byte being 0, 1 or 2, see FORMAT.md).
 pub(crate) struct Parts {
     pub skeleton: Vec<u8>,
     pub records: Vec<Vec<u8>>,
 }
 
-/// The parts of `file`, as a PNG file with its images coded where that makes them smaller.
-fn parts(file: &[u8], threads: usize) -> Result<Parts> {
-    let (chunks, trailer) = png::chunks(file).ok_or(Error::Unsupported("not a PNG file"))?;
-    let classes: Vec<u8> = chunks
+/// The classes of chunks.
+fn classes(chunks: &[png::Chunk]) -> Vec<u8> {
+    chunks
         .iter()
         .map(|c| match &c.kind {
             b"IDAT" => IDAT,
             b"fdAT" if c.data.len() >= 4 => FDAT,
             _ => PLAIN,
         })
-        .collect();
+        .collect()
+}
+
+/// The payload of the image of `chunks` (of class `class`).
+fn payload_of(chunks: &[png::Chunk], class: u8) -> Vec<u8> {
+    let skip = if class == FDAT { 4 } else { 0 };
+    let mut payload = Vec::with_capacity(chunks.iter().map(|c| c.data.len()).sum());
+    for c in chunks {
+        payload.extend_from_slice(&c.data[skip..]);
+    }
+    payload
+}
+
+/// The images of a reference file (none if it is not a PNG file): their headers and
+/// payloads, in order.
+pub(crate) fn reference_images(file: &[u8]) -> Vec<(Option<Ihdr>, Vec<u8>)> {
+    let Some((chunks, _)) = png::chunks(file) else { return vec![] };
+    let classes = classes(&chunks);
+    let imgs = images(&classes, |i| chunks[i].data, |i| chunks[i].kind);
+    imgs.into_iter().map(|(range, ih)| (ih, payload_of(&chunks[range.clone()], classes[range.start]))).collect()
+}
+
+/// The reference of an image of header `ih` in a reference's image (`img`, as
+/// [`reference_images`] gives), if both have a header of the same geometry and the
+/// reference's payload parses.
+fn reference_of(ih: &Option<Ihdr>, img: Option<&(Option<Ihdr>, Vec<u8>)>) -> Option<model::Reference> {
+    let (Some(a), Some((Some(b), payload))) = (ih, img) else { return None };
+    let geometry = |h: &Ihdr| (h.width, h.height, h.depth, h.color, h.interlace);
+    if geometry(a) != geometry(b) {
+        return None;
+    }
+    model::Reference::parse(payload).ok()
+}
+
+/// The parts of `file`, as a PNG file with its images coded where that makes them smaller,
+/// against those of `reference` where that makes them smaller still.
+fn parts(file: &[u8], threads: usize, reference: Option<&[u8]>) -> Result<Parts> {
+    let (chunks, trailer) = png::chunks(file).ok_or(Error::Unsupported("not a PNG file"))?;
+    let classes = classes(&chunks);
 
     // Skeleton: everything but the image payloads.
     let mut sk = vec![];
@@ -131,33 +170,48 @@ fn parts(file: &[u8], threads: usize) -> Result<Parts> {
     sk.extend_from_slice(trailer);
 
     let imgs = images(&classes, |i| chunks[i].data, |i| chunks[i].kind);
+    let refs = reference.map(reference_images).unwrap_or_default();
+    let image = |i: usize, threads: usize| {
+        let (range, ih) = &imgs[i];
+        let r = reference_of(ih, refs.get(i));
+        image_rec(&chunks[range.clone()], classes[range.start], ih, threads, r.as_ref())
+    };
     // Below this size there is nothing worth a thread to overlap.
     let records = if threads > 1 && file.len() >= PAR_MIN {
         // The images (each into a record of its own) in parallel.
         let workers = threads.min(imgs.len()).max(1);
         // Threads left over from the images go to each image's own parallel steps.
         let inner = (threads / workers).max(1);
-        par_map(imgs.len(), workers, |i| {
-            let (range, ih) = &imgs[i];
-            image_rec(&chunks[range.clone()], classes[range.start], ih, inner)
-        })
+        par_map(imgs.len(), workers, |i| image(i, inner))
     } else {
-        imgs.iter().map(|(range, ih)| image_rec(&chunks[range.clone()], classes[range.start], ih, 1)).collect()
+        (0..imgs.len()).map(|i| image(i, 1)).collect()
     };
     Ok(Parts { skeleton: sk, records })
 }
 
 /// The record of the image of `chunks` (of class `class`): coded if it has a header and
-/// coding makes it smaller, else the payload as it is.
-fn image_rec(chunks: &[png::Chunk], class: u8, ih: &Option<Ihdr>, threads: usize) -> Vec<u8> {
-    let skip = if class == FDAT { 4 } else { 0 };
-    let mut payload = Vec::with_capacity(chunks.iter().map(|c| c.data.len()).sum());
-    for c in chunks {
-        payload.extend_from_slice(&c.data[skip..]);
-    }
+/// coding makes it smaller (against `reference` if given and smaller still), else the
+/// payload as it is.
+fn image_rec(
+    chunks: &[png::Chunk],
+    class: u8,
+    ih: &Option<Ihdr>,
+    threads: usize,
+    reference: Option<&model::Reference>,
+) -> Vec<u8> {
+    let payload = payload_of(chunks, class);
     let mut rec = vec![];
-    let coded = ih.as_ref().is_some_and(|ih| image_record(ih, &payload, threads, &mut rec).is_ok())
+    let mut coded = ih.as_ref().is_some_and(|ih| image_record(ih, &payload, threads, None, &mut rec).is_ok())
         && rec.len() <= payload.len();
+    if let (Some(ih), Some(r)) = (ih, reference) {
+        let mut against = vec![];
+        if image_record(ih, &payload, threads, Some(r), &mut against).is_ok()
+            && against.len() <= payload.len()
+            && (!coded || against.len() < rec.len())
+        {
+            (rec, coded) = (against, true);
+        }
+    }
     if !coded {
         rec.clear();
         rec.push(0);
@@ -175,10 +229,10 @@ fn image_rec(chunks: &[png::Chunk], class: u8, ih: &Option<Ihdr>, threads: usize
 }
 
 /// The parts of `file` for a formula, if it is a PNG file and any image is coded (see
-/// [`crate::formula`]).
-pub(crate) fn formula_parts(file: &[u8], threads: usize) -> Option<Parts> {
-    let parts = parts(file, threads).ok()?;
-    parts.records.iter().any(|r| r[0] == 1).then_some(parts)
+/// [`crate::formula`]), against `reference` if given.
+pub(crate) fn formula_parts(file: &[u8], threads: usize, reference: Option<&[u8]>) -> Option<Parts> {
+    let parts = parts(file, threads, reference).ok()?;
+    parts.records.iter().any(|r| r[0] != 0).then_some(parts)
 }
 
 /// Files smaller than this are handled on one thread whatever the thread count.
@@ -208,11 +262,17 @@ fn par_map<R: Send>(n: usize, workers: usize, f: impl Fn(usize) -> R + Sync) -> 
     out.into_inner().unwrap().into_iter().map(|r| r.expect("worker result")).collect()
 }
 
-/// Appends the record of a coded image to `rec`.
-fn image_record(ih: &Ihdr, payload: &[u8], threads: usize, rec: &mut Vec<u8>) -> Result<()> {
+/// Appends the record of a coded image to `rec`, against `reference` if given.
+fn image_record(
+    ih: &Ihdr,
+    payload: &[u8],
+    threads: usize,
+    reference: Option<&model::Reference>,
+    rec: &mut Vec<u8>,
+) -> Result<()> {
     let g = Geometry::new(ih).ok_or(Error::Unsupported("bad image header"))?;
     let kind = if ih.depth == 8 && matches!(ih.color, 0 | 2 | 4 | 6) { Kind::Image } else { Kind::Bytes };
-    let enc = model::encode_threads(kind, &g, payload, threads)?;
+    let enc = model::encode_threads(kind, &g, payload, threads, reference)?;
     // The layout codes the data length in 32 bits.
     if enc.len > u32::MAX as usize {
         return Err(Error::Unsupported("image data of 4 GiB or more"));
@@ -224,7 +284,8 @@ fn image_record(ih: &Ihdr, payload: &[u8], threads: usize, rec: &mut Vec<u8>) ->
     Ok(())
 }
 
-/// Appends the coded record of `enc` to `rec`.
+/// Appends the coded record of `enc` to `rec` (of kind 2 if it has the tables of coding
+/// against a reference, else 1).
 fn write_record(kind: Kind, enc: model::Encoded, threads: usize, rec: &mut Vec<u8>) {
     // Layout.
     let mut lw = BitW::default();
@@ -291,7 +352,7 @@ fn write_record(kind: Kind, enc: model::Encoded, threads: usize, rec: &mut Vec<u
     let headers = hw.finish();
     let layout = lw.finish();
 
-    rec.push(1);
+    rec.push(if enc.rec.tables == model::TABLES_REF { 2 } else { 1 });
     for part in [&layout, &headers] {
         varint::put(rec, part.len() as u64);
         rec.extend_from_slice(part);
@@ -351,8 +412,8 @@ impl<'a> Skeleton<'a> {
         Ok(Skeleton { chunks, classes, trailer, images })
     }
 
-    /// The file, given the records of its images in order .
-    pub(crate) fn rebuild(&self, recs: &[&[u8]], threads: usize) -> Result<Vec<u8>> {
+    /// The file, given the records of its images in order and the reference file if any.
+    pub(crate) fn rebuild(&self, recs: &[&[u8]], threads: usize, reference: Option<&[u8]>) -> Result<Vec<u8>> {
         let (cs, classes, imgs) = (&self.chunks, &self.classes, &self.images);
         if recs.len() != imgs.len() {
             return Err(crate::corrupt());
@@ -361,17 +422,23 @@ impl<'a> Skeleton<'a> {
             let skip = if classes[range.start] == FDAT { 4 } else { 0 };
             cs[range.clone()].iter().map(|c| c.len - skip).sum::<usize>()
         };
+        // The reference's images, if a record is coded against them.
+        let refs = match reference {
+            Some(r) if recs.iter().any(|r| r.first() == Some(&2)) => reference_images(r),
+            _ => vec![],
+        };
+        let image_payload = |i: usize, threads: usize| {
+            let ih = &imgs[i].1;
+            let r = if recs[i].first() == Some(&2) { reference_of(ih, refs.get(i)) } else { None };
+            image_payload(recs[i], img_len(&imgs[i].0), ih, threads, r.as_ref())
+        };
         let payloads = if threads > 1 && imgs.len() > 1 {
             let workers = threads.min(imgs.len());
             let inner = (threads / workers).max(1);
-            let res = par_map(imgs.len(), workers, |i| image_payload(recs[i], img_len(&imgs[i].0), &imgs[i].1, inner));
+            let res = par_map(imgs.len(), workers, |i| image_payload(i, inner));
             res.into_iter().collect::<Result<Vec<_>>>()?
         } else {
-            let mut payloads = vec![];
-            for (rec, (range, ih)) in recs.iter().zip(imgs) {
-                payloads.push(image_payload(rec, img_len(range), ih, threads)?);
-            }
-            payloads
+            (0..imgs.len()).map(|i| image_payload(i, threads)).collect::<Result<Vec<_>>>()?
         };
 
         // Reassemble the file.
@@ -408,14 +475,22 @@ impl<'a> Skeleton<'a> {
     }
 }
 
-/// The payload (of `len` bytes) an image's record gives.
-fn image_payload(rec: &[u8], len: usize, ih: &Option<Ihdr>, threads: usize) -> Result<Vec<u8>> {
+/// The payload (of `len` bytes) an image's record gives (`reference`: the reference of the
+/// image, for a record coded against it).
+fn image_payload(
+    rec: &[u8],
+    len: usize,
+    ih: &Option<Ihdr>,
+    threads: usize,
+    reference: Option<&model::Reference>,
+) -> Result<Vec<u8>> {
     let payload = match rec.first() {
         Some(0) if rec.len() == len + 1 => rec[1..].to_vec(),
-        Some(1) => {
+        Some(&k @ (1 | 2)) => {
             let ih = ih.as_ref().ok_or_else(crate::corrupt)?;
             let g = Geometry::new(ih).ok_or_else(crate::corrupt)?;
-            rebuild(&g, &rec[1..], len, threads)?
+            let reference = if k == 2 { Some(reference.ok_or_else(crate::corrupt)?) } else { None };
+            rebuild(&g, &rec[1..], len, threads, reference)?
         }
         _ => return Err(crate::corrupt()),
     };
@@ -434,8 +509,14 @@ struct StreamLayout {
 }
 
 /// Rebuilds a coded image's payload (of `len` bytes, if the record is right) from its record
-/// (past the mode byte).
-fn rebuild(g: &Geometry, rec: &[u8], len: usize, threads: usize) -> Result<Vec<u8>> {
+/// (past the mode byte), against `reference` if it is coded against one.
+fn rebuild(
+    g: &Geometry,
+    rec: &[u8],
+    len: usize,
+    threads: usize,
+    reference: Option<&model::Reference>,
+) -> Result<Vec<u8>> {
     let mut at = 0;
     let part = |at: &mut usize| -> Result<&[u8]> {
         let n = get_varint(rec, at)? as usize;
@@ -513,7 +594,8 @@ fn rebuild(g: &Geometry, rec: &[u8], len: usize, threads: usize) -> Result<Vec<u
     if ntok > n {
         return Err(crate::corrupt());
     }
-    let player = model::Player::new(rec, &mut at)?;
+    let tables = if reference.is_some() { model::TABLES_REF } else { model::TABLES };
+    let player = model::Player::new(rec, &mut at, tables)?;
     if at != rec.len() {
         return Err(crate::corrupt());
     }
@@ -553,7 +635,7 @@ fn rebuild(g: &Geometry, rec: &[u8], len: usize, threads: usize) -> Result<Vec<u
                 p = from + data.len();
                 tx.send((v, *freqs, bytes)).map_err(|_| crate::corrupt())
             };
-            let dec = model::decode(&player, kind, g, &spans, n, &mut send);
+            let dec = model::decode(&player, kind, g, &spans, n, reference, &mut send);
             drop(tx);
             (dec, writer.join().unwrap_or_else(|e| std::panic::resume_unwind(e)))
         });
@@ -565,7 +647,7 @@ fn rebuild(g: &Geometry, rec: &[u8], len: usize, threads: usize) -> Result<Vec<u
         }
         Ok(out)
     } else {
-        model::decode(&player, kind, g, &spans, n, &mut |toks, freqs, data, from| {
+        model::decode(&player, kind, g, &spans, n, reference, &mut |toks, freqs, data, from| {
             // The data from where the block starts (none needed but a stored block's).
             let rest = emit.at().checked_sub(from).and_then(|i| data.get(i..)).unwrap_or_default();
             emit.block(toks, freqs, rest)
@@ -710,7 +792,7 @@ mod tests {
             write_record(Kind::Image, enc, 1, &mut rec);
             rec
         };
-        assert!(rebuild(&g, &rec_of(false)[1..], payload.len(), 1).unwrap() == payload);
-        assert!(matches!(rebuild(&g, &rec_of(true)[1..], payload.len(), 1), Err(Error::Corrupt)));
+        assert!(rebuild(&g, &rec_of(false)[1..], payload.len(), 1, None).unwrap() == payload);
+        assert!(matches!(rebuild(&g, &rec_of(true)[1..], payload.len(), 1, None), Err(Error::Corrupt)));
     }
 }

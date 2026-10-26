@@ -111,8 +111,13 @@ const T_ESC: usize = T_FILTER + 1;
 const T_LEN: usize = T_ESC + 1;
 const T_DIST: usize = T_LEN + ACT + 1;
 pub const TABLES: usize = T_DIST + 6;
+/// Records coded against a reference ([`Reference`]) have more tables: whether a token is the
+/// reference's at the same place, by whether the last such decision was yes and whether the
+/// reference's token is a match.
+const T_SAME: usize = TABLES;
+pub const TABLES_REF: usize = T_SAME + 4;
 // Symbols are kept as (table, value) bytes.
-const _: () = assert!(TABLES <= 256);
+const _: () = assert!(TABLES_REF <= 256);
 const ESC: u32 = 255;
 
 fn alphabet(t: usize) -> usize {
@@ -122,8 +127,91 @@ fn alphabet(t: usize) -> usize {
         2
     } else if t < T_DIST {
         29
-    } else {
+    } else if t < T_SAME {
         30
+    } else {
+        2
+    }
+}
+
+/// The tokens of a similar image's data (the *reference*: of the same geometry, such as a
+/// variant of the picture with a layer shown or hidden), by where they start in the data.
+/// Where both images have the same data, encoders (of the same writer) mostly make the same
+/// parse, so that a token is often the reference's at the same place.
+pub struct Reference {
+    /// Positions, increasing, and the tokens starting there (matches without `alt258`).
+    pos: Vec<u32>,
+    tokens: Vec<Token>,
+}
+
+impl Reference {
+    /// The reference of the image of payload `payload`: its zlib streams as [`encode`] finds
+    /// them. Fails where it would.
+    pub fn parse(payload: &[u8]) -> crate::Result<Reference> {
+        if payload.len() < 2 {
+            return Err(crate::Error::Unsupported("no zlib stream"));
+        }
+        let mut sink = RefSink { p: 0, r: Reference { pos: vec![], tokens: vec![] } };
+        let mut o = 0;
+        loop {
+            let l = inflate::parse_head(&payload[o + 2..], usize::MAX, &mut sink)?;
+            match next_stream(payload, o + 2 + l.end).filter(|&next| parses(&payload[next + 2..])) {
+                Some(next) => o = next,
+                None => break,
+            }
+        }
+        if sink.p > u32::MAX as usize {
+            return Err(crate::Error::Unsupported("image data of 4 GiB or more"));
+        }
+        Ok(sink.r)
+    }
+}
+
+/// The parser's sink for a [`Reference`]: the position, and the tokens so far.
+struct RefSink {
+    p: usize,
+    r: Reference,
+}
+
+impl Sink for RefSink {
+    fn lit(&mut self, b: u8) {
+        self.r.pos.push(self.p as u32);
+        self.r.tokens.push(Token::Lit(b));
+        self.p += 1;
+    }
+    fn mat(&mut self, len: u16, dist: u16, _: bool) {
+        self.r.pos.push(self.p as u32);
+        self.r.tokens.push(Token::Match { len, dist, alt258: false });
+        self.p += len as usize;
+    }
+    fn stored(&mut self, b: &[u8]) {
+        self.p += b.len();
+    }
+}
+
+/// Where coding against a reference is: its next token, and whether the last decision was
+/// that a token is the reference's.
+struct Follow<'r> {
+    r: &'r Reference,
+    i: usize,
+    same: usize,
+}
+
+impl<'r> Follow<'r> {
+    fn new(r: &'r Reference) -> Follow<'r> {
+        Follow { r, i: 0, same: 0 }
+    }
+
+    /// The reference's token starting at position `p` (positions only grow), if one does,
+    /// and the table of the decision whether the token there is the same.
+    #[inline(always)]
+    fn at(&mut self, p: usize) -> Option<(Token, usize)> {
+        let pos = &self.r.pos;
+        while self.i < pos.len() && (pos[self.i] as usize) < p {
+            self.i += 1;
+        }
+        let t = *self.r.tokens.get(self.i).filter(|_| pos[self.i] as usize == p)?;
+        Some((t, T_SAME + 2 * self.same + matches!(t, Token::Match { .. }) as usize))
     }
 }
 
@@ -144,11 +232,13 @@ pub struct Recorder {
     pub syms: Vec<(u8, u8)>,
 
     pub raw: BitW,
+    /// The tables there are ([`TABLES`], or [`TABLES_REF`] against a reference).
+    pub tables: usize,
 }
 
 impl Recorder {
     pub fn new(cap: usize) -> Recorder {
-        Recorder { syms: Vec::with_capacity(cap), raw: BitW::default() }
+        Recorder { syms: Vec::with_capacity(cap), raw: BitW::default(), tables: TABLES }
     }
 
     /// Tables, then the rANS stream, then the raw bits.
@@ -160,8 +250,9 @@ impl Recorder {
     /// are sums, so the output is the same).
     pub fn finish_threads(self, out: &mut Vec<u8>, threads: usize) {
         let mut w = BitW::default();
+        let tables = self.tables;
         // A bitmap of the tables in use, then their levels.
-        let mut h = vec![0u32; TABLES * 256];
+        let mut h = vec![0u32; tables * 256];
         let count = |syms: &[(u8, u8)], h: &mut [u32]| {
             for &(t, v) in syms {
                 h[t as usize * 256 + v as usize] += 1;
@@ -175,7 +266,7 @@ impl Recorder {
                     .chunks(chunk)
                     .map(|c| {
                         sc.spawn(move || {
-                            let mut h = vec![0u32; TABLES * 256];
+                            let mut h = vec![0u32; tables * 256];
                             for &(t, v) in c {
                                 h[t as usize * 256 + v as usize] += 1;
                             }
@@ -193,16 +284,16 @@ impl Recorder {
         } else {
             count(&self.syms, &mut h);
         }
-        let counts: Vec<&[u32]> = (0..TABLES).map(|t| &h[t * 256..t * 256 + alphabet(t)]).collect();
+        let counts: Vec<&[u32]> = (0..tables).map(|t| &h[t * 256..t * 256 + alphabet(t)]).collect();
         let used: Vec<bool> = counts.iter().map(|c| c.iter().any(|&x| x > 0)).collect();
         for &u in &used {
             w.bits(1, u as u32);
         }
-        let freqs: Vec<Vec<u32>> = (0..TABLES)
+        let freqs: Vec<Vec<u32>> = (0..tables)
             .map(|t| if used[t] { rans::write_table(&mut w, counts[t]) } else { vec![rans::PROB_SCALE] })
             .collect();
         let tb = w.finish();
-        let Recorder { syms, raw } = self;
+        let Recorder { syms, raw, .. } = self;
         let st = rans::encode(&syms, &freqs);
         // The symbols are the largest part by far: gone before the record is copied.
         drop(syms);
@@ -241,7 +332,9 @@ pub struct Player<'a> {
 }
 
 impl<'a> Player<'a> {
-    pub fn new(src: &'a [u8], at: &mut usize) -> crate::Result<Player<'a>> {
+    /// The model payload at `at` of `src`, with `tables` tables ([`TABLES`] or
+    /// [`TABLES_REF`]).
+    pub fn new(src: &'a [u8], at: &mut usize, tables: usize) -> crate::Result<Player<'a>> {
         let mut lens = [0usize; 3];
         for l in &mut lens {
             *l = crate::codec::get_varint(src, at)? as usize;
@@ -253,8 +346,8 @@ impl<'a> Player<'a> {
         };
         let (tb, st, raw) = (part(lens[0])?, part(lens[1])?, part(lens[2])?);
         let mut r = BitR::new(tb);
-        let used: Vec<bool> = (0..TABLES).map(|_| r.bits(1) == 1).collect();
-        let mut freqs = Vec::with_capacity(TABLES);
+        let used: Vec<bool> = (0..tables).map(|_| r.bits(1) == 1).collect();
+        let mut freqs = Vec::with_capacity(tables);
         for (t, &u) in used.iter().enumerate() {
             freqs.push(if u { rans::read_table(&mut r, alphabet(t))? } else { vec![] });
         }
@@ -678,9 +771,22 @@ struct Enc<'g, const BPP: usize, const IMAGE: bool> {
     raw: Vec<u8>,
     /// Token indices of matches of length 258 sent as 284 + 31.
     alts: Vec<usize>,
+    follow: Option<Follow<'g>>,
 }
 
 impl<const BPP: usize, const IMAGE: bool> Enc<'_, BPP, IMAGE> {
+    /// Against a reference, codes whether token `t` (a match without `alt258`) is the
+    /// reference's where it starts, if one starts there; returns whether it is.
+    #[inline(always)]
+    fn same(&mut self, t: Token) -> bool {
+        let Some(fo) = &mut self.follow else { return false };
+        let Some((r, table)) = fo.at(self.st.p) else { return false };
+        let same = r == t;
+        self.io.bit(table, same as u32);
+        fo.same = same as usize;
+        same
+    }
+
     /// Room for `k` bytes past the current position (at most a stored block).
     #[inline(always)]
     fn room(&mut self, k: usize) {
@@ -702,10 +808,12 @@ impl<const BPP: usize, const IMAGE: bool> Enc<'_, BPP, IMAGE> {
     fn lit(&mut self, f: u8, token: bool) {
         let l = self.st.prep::<BPP, IMAGE>(&self.raw, &self.buf, token);
         let v = f.wrapping_add(l.fp);
-        let s = zigzag(v.wrapping_sub(l.pred));
-        self.io.sym(l.t, s);
-        if token && s == ESC {
-            self.io.bit(T_ESC, 0);
+        if !(token && self.same(Token::Lit(f))) {
+            let s = zigzag(v.wrapping_sub(l.pred));
+            self.io.sym(l.t, s);
+            if token && s == ESC {
+                self.io.bit(T_ESC, 0);
+            }
         }
         if l.q != usize::MAX {
             self.raw[l.q] = v;
@@ -734,10 +842,12 @@ impl<const BPP: usize, const IMAGE: bool> Sink for Enc<'_, BPP, IMAGE> {
 
     #[inline(always)]
     fn mat(&mut self, len: u16, dist: u16, alt258: bool) {
-        let l = self.st.prep::<BPP, IMAGE>(&self.raw, &self.buf, true);
-        self.io.sym(l.t, ESC);
-        self.io.bit(T_ESC, 1);
-        code_match(&mut self.io, l.len_ctx(), len as u32, dist as u32);
+        if !self.same(Token::Match { len, dist, alt258: false }) {
+            let l = self.st.prep::<BPP, IMAGE>(&self.raw, &self.buf, true);
+            self.io.sym(l.t, ESC);
+            self.io.bit(T_ESC, 1);
+            code_match(&mut self.io, l.len_ctx(), len as u32, dist as u32);
+        }
         if alt258 {
             self.alts.push(self.st.tokens);
         }
@@ -794,14 +904,32 @@ fn next_stream(payload: &[u8], end: usize) -> Option<usize> {
 /// Parses and models the payload `payload` (one or more zlib streams, as in Apple's
 /// split IDAT) of an image with geometry `g`.
 pub fn encode(kind: Kind, g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
-    encode_threads(kind, g, payload, 1)
+    encode_threads(kind, g, payload, 1, None)
 }
 
-/// [`encode`] with up to `threads` threads for the symbols of the rows of large images;
-/// the result is the same whatever `threads` is.
-pub fn encode_threads(kind: Kind, g: &Geometry, payload: &[u8], threads: usize) -> crate::Result<Encoded> {
+/// [`encode`] with up to `threads` threads for the symbols of the rows of large images, and
+/// against `reference` if given (of an image of the same geometry); the result is the same
+/// whatever `threads` is.
+pub fn encode_threads(
+    kind: Kind,
+    g: &Geometry,
+    payload: &[u8],
+    threads: usize,
+    reference: Option<&Reference>,
+) -> crate::Result<Encoded> {
     if payload.len() < 2 {
         return Err(crate::Error::Unsupported("no zlib stream"));
+    }
+    if let Some(r) = reference {
+        // Token by token, each against the reference's.
+        return match (kind, g.bpp) {
+            (Kind::Image, 1) => encode_bpp::<1, true>(g, payload, Some(r)),
+            (Kind::Image, 2) => encode_bpp::<2, true>(g, payload, Some(r)),
+            (Kind::Image, 3) => encode_bpp::<3, true>(g, payload, Some(r)),
+            (Kind::Image, 4) => encode_bpp::<4, true>(g, payload, Some(r)),
+            (Kind::Image, _) => Err(crate::Error::Unsupported("pixel size")),
+            (Kind::Bytes, _) => encode_bpp::<0, false>(g, payload, Some(r)),
+        };
     }
     // Streams that expand a lot are mostly long matches: modelling only the literals as
     // they come costs less than computing every pixel's symbol up front.
@@ -811,12 +939,12 @@ pub fn encode_threads(kind: Kind, g: &Geometry, payload: &[u8], threads: usize) 
         (Kind::Image, 2, false) => encode_image::<2>(g, payload, threads),
         (Kind::Image, 3, false) => encode_image::<3>(g, payload, threads),
         (Kind::Image, 4, false) => encode_image::<4>(g, payload, threads),
-        (Kind::Image, 1, true) => encode_bpp::<1, true>(g, payload),
-        (Kind::Image, 2, true) => encode_bpp::<2, true>(g, payload),
-        (Kind::Image, 3, true) => encode_bpp::<3, true>(g, payload),
-        (Kind::Image, 4, true) => encode_bpp::<4, true>(g, payload),
+        (Kind::Image, 1, true) => encode_bpp::<1, true>(g, payload, None),
+        (Kind::Image, 2, true) => encode_bpp::<2, true>(g, payload, None),
+        (Kind::Image, 3, true) => encode_bpp::<3, true>(g, payload, None),
+        (Kind::Image, 4, true) => encode_bpp::<4, true>(g, payload, None),
         (Kind::Image, ..) => Err(crate::Error::Unsupported("pixel size")),
-        (Kind::Bytes, ..) => encode_bpp::<0, false>(g, payload),
+        (Kind::Bytes, ..) => encode_bpp::<0, false>(g, payload, None),
     }
 }
 
@@ -1492,16 +1620,25 @@ mod neon {
     }
 }
 
-fn encode_bpp<const BPP: usize, const IMAGE: bool>(g: &Geometry, payload: &[u8]) -> crate::Result<Encoded> {
+fn encode_bpp<'g, const BPP: usize, const IMAGE: bool>(
+    g: &'g Geometry,
+    payload: &[u8],
+    reference: Option<&'g Reference>,
+) -> crate::Result<Encoded> {
     let win = Win::new(g, g.len.min(MAX_EXPANSION * payload.len()), IMAGE);
+    let mut io = Recorder::new(payload.len().min(g.len) + 1024);
+    if reference.is_some() {
+        io.tables = TABLES_REF;
+    }
     let mut e = Enc::<BPP, IMAGE> {
         // Room for a symbol per byte of stream to start with (the data is mostly long
         // matches); both grow as needed.
-        io: Recorder::new(payload.len().min(g.len) + 1024),
+        io,
         st: St::new(g, win),
         buf: vec![0u8; win.buf + ROOM],
         raw: vec![0u8; win.raw],
         alts: vec![],
+        follow: reference.map(Follow::new),
     };
     let mut streams: Vec<Coded> = vec![];
     let mut o = 0;
@@ -1537,22 +1674,28 @@ pub type Freqs = ([u32; 288], [u32; 32]);
 pub type Emit<'e> = dyn FnMut(&mut [Token], &mut Freqs, &[u8], usize) -> crate::Result<()> + 'e;
 
 /// Rebuilds the `n` bytes of data of `spans` (the decompressor's side), handing each span's
-/// tokens to `emit` as they are decoded.
+/// tokens to `emit` as they are decoded; against `reference` if given.
 pub fn decode(
     player: &Player,
     kind: Kind,
     g: &Geometry,
     spans: &[Span],
     n: usize,
+    reference: Option<&Reference>,
     emit: &mut Emit,
 ) -> crate::Result<()> {
-    match (kind, g.bpp) {
-        (Kind::Image, 1) => decode_bpp::<1, true>(player, g, spans, n, emit),
-        (Kind::Image, 2) => decode_bpp::<2, true>(player, g, spans, n, emit),
-        (Kind::Image, 3) => decode_bpp::<3, true>(player, g, spans, n, emit),
-        (Kind::Image, 4) => decode_bpp::<4, true>(player, g, spans, n, emit),
-        (Kind::Image, _) => Err(crate::corrupt()),
-        (Kind::Bytes, _) => decode_bpp::<0, false>(player, g, spans, n, emit),
+    match (kind, g.bpp, reference) {
+        (Kind::Image, 1, None) => decode_bpp::<1, true, false>(player, g, spans, n, None, emit),
+        (Kind::Image, 2, None) => decode_bpp::<2, true, false>(player, g, spans, n, None, emit),
+        (Kind::Image, 3, None) => decode_bpp::<3, true, false>(player, g, spans, n, None, emit),
+        (Kind::Image, 4, None) => decode_bpp::<4, true, false>(player, g, spans, n, None, emit),
+        (Kind::Image, 1, r) => decode_bpp::<1, true, true>(player, g, spans, n, r, emit),
+        (Kind::Image, 2, r) => decode_bpp::<2, true, true>(player, g, spans, n, r, emit),
+        (Kind::Image, 3, r) => decode_bpp::<3, true, true>(player, g, spans, n, r, emit),
+        (Kind::Image, 4, r) => decode_bpp::<4, true, true>(player, g, spans, n, r, emit),
+        (Kind::Image, ..) => Err(crate::corrupt()),
+        (Kind::Bytes, _, None) => decode_bpp::<0, false, false>(player, g, spans, n, None, emit),
+        (Kind::Bytes, _, r) => decode_bpp::<0, false, true>(player, g, spans, n, r, emit),
     }
 }
 
@@ -1579,17 +1722,21 @@ impl Io for Live<'_> {
     }
 }
 
-fn decode_bpp<const BPP: usize, const IMAGE: bool>(
+/// `REF`: against `reference`, which is then given.
+fn decode_bpp<const BPP: usize, const IMAGE: bool, const REF: bool>(
     player: &Player,
     g: &Geometry,
     spans: &[Span],
     n: usize,
+    reference: Option<&Reference>,
     emit: &mut Emit,
 ) -> crate::Result<()> {
     let mut live = Live { tables: &player.tables, dec: player.dec, raw: player.raw };
     let win = Win::new(g, n, IMAGE);
     let (mut buf, mut raw) = (vec![0u8; win.buf], vec![0u8; win.raw]);
-    decode_loop::<Live, BPP, IMAGE>(&mut live, g, spans, n, win, &mut buf, &mut raw, emit)?;
+    let none = Reference { pos: vec![], tokens: vec![] };
+    let mut fo = Follow::new(reference.unwrap_or(&none));
+    decode_loop::<Live, BPP, IMAGE, REF>(&mut live, g, spans, n, win, &mut buf, &mut raw, &mut fo, emit)?;
     if !live.dec.finished() || live.raw.overrun() {
         return Err(crate::corrupt());
     }
@@ -1598,7 +1745,7 @@ fn decode_bpp<const BPP: usize, const IMAGE: bool>(
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
+fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool, const REF: bool>(
     io: &mut I,
     g: &Geometry,
     spans: &[Span],
@@ -1606,6 +1753,7 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
     win: Win,
     buf: &mut [u8],
     raw: &mut [u8],
+    fo: &mut Follow,
     emit: &mut Emit,
 ) -> crate::Result<()> {
     let mut st = St::new(g, win);
@@ -1639,8 +1787,37 @@ fn decode_loop<I: Io, const BPP: usize, const IMAGE: bool>(
                     }
                     st.cur.seek(g, st.p);
                     st.room(buf, raw);
+                    if REF && let Some((t, table)) = fo.at(st.p) {
+                        fo.same = io.bit(table, 0) as usize;
+                        if fo.same == 1 {
+                            // The reference's token.
+                            let slot = tokens.get_mut(st.tokens).ok_or_else(crate::corrupt)?;
+                            match t {
+                                Token::Lit(f) => {
+                                    let l = st.prep::<BPP, IMAGE>(raw, buf, true);
+                                    l.put(f, raw, buf, st.at(st.p));
+                                    *slot = t;
+                                    lf[f as usize] += 1;
+                                    st.p += 1;
+                                    st.after = 0;
+                                    st.tokens += 1;
+                                }
+                                Token::Match { len, dist, .. } => {
+                                    let (len, dist) = (len as usize, dist as usize);
+                                    if dist > st.p || len > n - st.p {
+                                        return Err(crate::corrupt());
+                                    }
+                                    *slot = t;
+                                    lf[257 + len_code(len as u32) as usize] += 1;
+                                    df[dist_code(dist as u32) as usize] += 1;
+                                    st.copy::<BPP, IMAGE>(raw, buf, len, dist);
+                                }
+                            }
+                            continue;
+                        }
+                    }
                     let x = st.p - st.cur.rstart;
-                    if IMAGE && x > 0 && st.cur.rs != usize::MAX {
+                    if IMAGE && !REF && x > 0 && st.cur.rs != usize::MAX {
                         // A run of literals within the row, with the row's filter fixed.
                         let run = (st.cur.rend - st.p).min(end - st.tokens).min(n - st.p);
                         let ft = get(buf, st.at(st.cur.rstart));
@@ -1868,6 +2045,16 @@ impl Lit {
     #[inline(always)]
     fn len_ctx(&self) -> usize {
         if self.act == u32::MAX { ACT } else { bucket(self.act) }
+    }
+
+    /// Stores the filtered byte `f` and its raw value (decoder). `at` is the position's offset
+    /// in the padded data (below its length).
+    #[inline(always)]
+    fn put(&self, f: u8, raw: &mut [u8], buf: &mut [u8], at: usize) {
+        if self.q != usize::MAX {
+            put(raw, self.q, f.wrapping_add(self.fp));
+        }
+        put(buf, at, f);
     }
 
     /// Applies symbol `s`: stores the bytes (decoder) and returns the filtered byte. `at`

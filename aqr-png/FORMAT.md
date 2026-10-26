@@ -98,19 +98,21 @@ after the sequence number for class 2. Then write the trailer.
 |---|---|
 | 0 | the payload, as it is (the record is one byte longer than the payload) |
 | 1 | a coded payload (only for an image with a header) |
+| 2 | a payload coded against its [reference](#references) (only for an image with one) |
 
 Any other first byte is invalid. A coded record rebuilds a payload of exactly the length
 the skeleton gives.
 
 The compressor codes an image whose header gives a [geometry](#geometry) and whose payload
-it can parse. It keeps the payload as it is if coding fails, or if the coded record would
-be longer than the payload.
+it can parse. Where the image has a reference, it codes it against it too, and keeps the
+smaller of the two records. It keeps the payload as it is if coding fails, or if the coded
+record would be longer than the payload.
 
 A coded record is:
 
 | field | |
 |---|---|
-| 1 byte | 1 |
+| 1 byte | 1 or 2 |
 | varint | length of the layout |
 | bytes | the [layout](#layout) (a bit stream) |
 | varint | length of the header stream |
@@ -123,6 +125,24 @@ A coded record is:
 | bytes | the raw bits (a bit stream) |
 
 The record must end exactly after the raw bits.
+
+## References
+
+The module may be given a *reference file*, a PNG file such as a variant of the same
+picture (a layer shown or hidden). Its images are found as in [Images](#images), from its
+own chunks (as the compressor reads them). Image `i` of the file has a *reference* if the
+reference file has an image `i`, both have a header, and the headers have the same width,
+height, bit depth, colour type and interlace byte. A record of kind 2 for an image without
+a reference is invalid.
+
+The reference's *tokens* are those of its image's payload: the payload's zlib streams,
+found as the compressor finds them (see [Layout](#layout): the first at the payload's start,
+then a new one wherever the 4 bytes after a stream's end are followed by a valid zlib header
+without preset dictionary, at least 3 more bytes remain, and a DEFLATE stream parses from
+there), each parsed as DEFLATE. If the first does not parse, the record is invalid. Each
+token *starts* at a position of the data (all streams' decompressed data concatenated, as
+for the image itself): a literal takes one position, a match its length, and stored bytes
+take their positions without being tokens. Whatever follows the streams is not read.
 
 ## Geometry
 
@@ -215,8 +235,8 @@ and stored bytes of the spans make up the `n` bytes of data, in order.
 
 ## Entropy coding
 
-The data is coded as a sequence of *symbols*, each from one of 117 *tables*, with rANS, and
-of *raw bits*, written to the raw bit stream in order.
+The data is coded as a sequence of *symbols*, each from one of 117 *tables* (121 in a record
+of kind 2), with rANS, and of *raw bits*, written to the raw bit stream in order.
 
 ### Tables
 
@@ -227,9 +247,10 @@ of *raw bits*, written to the raw bit stream in order.
 | 97 | escape | 2 |
 | 98–110 | length codes: `98 + bucket` (bucket 0–12) | 29 |
 | 111–116 | distance codes: `111 + length bucket` (0–5) | 30 |
+| 117–120 | kind 2 only, the same token as the reference's: `117 + 2 × same + match` | 2 |
 
-The tables part is a bit stream: first one bit per table (0 to 116), 1 if the table is
-used. Then, for every used table in order, its *levels*, one per symbol of its alphabet.
+The tables part is a bit stream: first one bit per table (0 to 116, or to 120 in a record of
+kind 2), 1 if the table is used. Then, for every used table in order, its *levels*, one per symbol of its alphabet.
 Each level is 0 (the symbol is absent) or 1 to 63. They are coded with `prev = 0` at the
 start of each table, as a series of gamma codes `g`:
 
@@ -328,6 +349,15 @@ unzigzag(symbol)` and `data[p] = v − fp`.
 **A stored byte** is its literal symbol in table `T`, without the `after` offset, and
 without an escape symbol even if the literal symbol is 255.
 
+**Against a reference** (a record of kind 2), a token at a position where a reference token
+starts is first a symbol from table `117 + 2 × same + match`, where `match` is 1 if the
+reference token is a match, and `same` is the last such symbol of the image (0 for the
+first). Symbol 1 means the token is the reference token: a literal of the same byte, or a
+match of the same length and distance (whether it is sent as 284 + 31 is the layout's). It
+updates the data and `after` as that token would, and nothing else of it is coded. Symbol 0
+means it is not, and the token is coded as below. Elsewhere, and in a record of kind 1, a
+token is coded as below only.
+
 **A token** is coded at its position from table `T + 48 × after` if `T < 96`, else `T`:
 
 - A literal: its literal symbol. If that symbol is 255, a symbol 0 of the escape table
@@ -382,19 +412,25 @@ matches the layout lists and 285 for other matches of length 258) and 32 distanc
 
 ## Formula module
 
-The module is `png-recons`, version 1, in `formula::encode` and `formula::decode`. Its
-output is the PNG file, whose length the application gives. The file is rebuilt as in
-[Rebuilding the file](#rebuilding-the-file), from the skeleton and the image records.
+The module is `png-recons`, version 2, in `formula::encode`, `formula::encode_against` and
+`formula::decode`. Its output is the PNG file, whose length the application gives. The file
+is rebuilt as in [Rebuilding the file](#rebuilding-the-file), from the skeleton and the image
+records.
 
 **Parameters**: none (empty). A module application with parameters is invalid.
 
-**Inputs**: exactly three, in this order. Any other count is invalid.
+**Inputs**: three or four, in this order. Any other count is invalid.
 
 | slot | class | content |
 |---|---|---|
 | 0 | `png/skeleton` | the [skeleton](#skeleton) |
 | 1 | `png/index` | for each image in order, the length of its record: a varint |
 | 2 | `png/records` | the [image records](#image-records), concatenated in order, without length prefixes |
+| 3 | `png/reference`, or any node | the [reference file](#references), if any |
+
+`formula::encode_against` puts the reference file in a stream of its own, for the caller to
+replace with whatever node gives it (the output of the reference's own application, say).
+It gives the fourth input only if a record is of kind 2.
 
 The images are those that the skeleton gives. The index has one varint per image and ends
 exactly there; the records fill slot 2 exactly. Each record is the byte 0 and the payload,
