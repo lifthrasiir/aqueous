@@ -277,8 +277,9 @@ impl Encoder {
                 _ => std::slice::from_ref(&data[s]),
             })
             .collect();
+        f.check_outputs()?;
         let mut slices = Ok(());
-        f.root.visit(&mut |n| {
+        f.visit(&mut |n| {
             if let &Node::Slice { stream, start, len } = n
                 && streams.get(stream).is_none_or(|&s| start.checked_add(len).is_none_or(|e| e > total(s) as u64))
             {
@@ -289,7 +290,7 @@ impl Encoder {
 
         out.put(&HEADER_MAGIC);
         let blocks = out.len();
-        if let &Node::Slice { stream, start, len } = &f.root {
+        if let (&Node::Slice { stream, start, len }, []) = (&f.root, &f.shared[..]) {
             let leaf = cut(streams[stream], start as usize, len as usize);
             if checksum.is_some_and(|c| c != checksum_of(&leaf)) {
                 return Err(Error::new("output checksum not that of the leaf"));
@@ -298,7 +299,7 @@ impl Encoder {
         } else {
             // the non-leaf block of each stream sliced, by its ordinal
             let mut ordinals = vec![None; f.streams.len()];
-            f.root.visit(&mut |n| {
+            f.visit(&mut |n| {
                 if let &Node::Slice { stream, .. } = n {
                     ordinals[stream] = Some(0);
                 }
@@ -329,7 +330,16 @@ impl Encoder {
                 varint::put(&mut data, n as u64);
                 (0..n).for_each(|i| varint::put(&mut data, i as u64));
             }
-            instructions(&f.root, &ordinals, &modules, &resources, &mut data);
+            let mut e =
+                Emit { ordinals: &ordinals, modules: &modules, resources: &resources, out: &mut data, stack: vec![] };
+            for (i, s) in f.shared.iter().enumerate() {
+                s.apply.inputs.iter().for_each(|n| e.node(n));
+                e.apply(&s.apply, &s.sizes);
+                let k = e.stack.len() - s.sizes.len();
+                (0..s.sizes.len()).for_each(|j| e.stack[k + j] = Some((i, j)));
+            }
+            e.node(&f.root);
+            debug_assert_eq!(e.stack, [None]);
             if let Some(c) = checksum {
                 data.push(CHECKSUM);
                 data.extend_from_slice(&c.to_le_bytes());
@@ -354,42 +364,81 @@ impl Encoder {
 
 /// The instructions pushing node `n`, its streams' blocks at `ordinals` and its modules and
 /// resources at their indices in `modules` and `resources`.
-fn instructions(n: &Node, ordinals: &[Option<u64>], modules: &[Module], resources: &[&Resource], out: &mut Vec<u8>) {
-    match n {
-        &Node::Slice { stream, start, len } => {
-            out.push(SLICE);
-            varint::put(out, ordinals[stream].unwrap());
-            varint::put(out, start);
-            varint::put(out, len);
-        }
-        Node::Concat(ns) | Node::Pack(ns) => {
-            ns.iter().for_each(|n| instructions(n, ordinals, modules, resources, out));
-            out.push(if let Node::Pack(_) = n { PACK } else { CONCAT });
-            varint::put(out, ns.len() as u64);
-        }
-        Node::Apply(a) => {
-            a.inputs.iter().for_each(|n| instructions(n, ordinals, modules, resources, out));
-            out.push(APPLY);
-            varint::put(out, modules.iter().position(|&m| m == a.module).unwrap() as u64);
-            varint::put(out, a.resources.len() as u64);
-            for r in &a.resources {
-                varint::put(out, resources.iter().position(|&s| s == r).unwrap() as u64);
+/// Instructions as nodes push their values, with the stack they leave: the outputs of
+/// applications of several outputs not taken yet by (application, output), the rest `None`.
+struct Emit<'a> {
+    ordinals: &'a [Option<u64>],
+    modules: &'a [Module],
+    resources: &'a [&'a Resource],
+    out: &'a mut Vec<u8>,
+    stack: Vec<Option<(usize, usize)>>,
+}
+
+impl Emit<'_> {
+    /// The instructions pushing node `n`.
+    fn node(&mut self, n: &Node) {
+        match n {
+            &Node::Slice { stream, start, len } => {
+                self.out.push(SLICE);
+                varint::put(self.out, self.ordinals[stream].unwrap());
+                varint::put(self.out, start);
+                varint::put(self.out, len);
+                self.stack.push(None);
             }
-            varint::put(out, a.params.len() as u64);
-            out.extend_from_slice(&a.params);
-            varint::put(out, MEMORY_LIMIT);
-            varint::put(out, a.inputs.len() as u64);
-            varint::put(out, 1);
-            varint::put(out, a.len);
+            Node::Concat(ns) | Node::Pack(ns) => {
+                ns.iter().for_each(|n| self.node(n));
+                self.out.push(if let Node::Pack(_) = n { PACK } else { CONCAT });
+                varint::put(self.out, ns.len() as u64);
+                self.stack.truncate(self.stack.len() - ns.len());
+                self.stack.push(None);
+            }
+            Node::Apply(a) => {
+                a.inputs.iter().for_each(|n| self.node(n));
+                self.apply(a, &[a.len]);
+            }
+            &Node::Output { shared, index, .. } => {
+                // up from where it is, the others keeping their order: swapped with the item
+                // above it, then with the next one up and so on
+                let at = self.stack.iter().rposition(|&o| o == Some((shared, index))).unwrap();
+                let depth = self.stack.len() - 1 - at;
+                for d in 1..=depth {
+                    self.out.push(SWAP);
+                    varint::put(self.out, d as u64);
+                }
+                self.stack.remove(at);
+                self.stack.push(None);
+            }
         }
+    }
+
+    /// The Apply instruction of `a` (its inputs pushed), of outputs of `sizes`.
+    fn apply(&mut self, a: &crate::Apply, sizes: &[u64]) {
+        let out = &mut *self.out;
+        out.push(APPLY);
+        varint::put(out, self.modules.iter().position(|&m| m == a.module).unwrap() as u64);
+        varint::put(out, a.resources.len() as u64);
+        for r in &a.resources {
+            varint::put(out, self.resources.iter().position(|&s| s == r).unwrap() as u64);
+        }
+        varint::put(out, a.params.len() as u64);
+        out.extend_from_slice(&a.params);
+        varint::put(out, MEMORY_LIMIT);
+        varint::put(out, a.inputs.len() as u64);
+        varint::put(out, sizes.len() as u64);
+        sizes.iter().for_each(|&n| varint::put(out, n));
+        self.stack.truncate(self.stack.len() - a.inputs.len());
+        self.stack.extend(sizes.iter().map(|_| None));
     }
 }
 
 /// Bytes of the instructions pushing node `n` at most, wherever the streams of its formula are
 /// among others (up to 2^21 of them, and 2^14 modules and resources each): the bounds of
-/// formulas put together ([`Formula::embed`]) add up, with the nodes around them.
+/// formulas put together ([`Formula::embed`]) add up, with the nodes around them. An output of
+/// an application of several outputs ([`Node::Output`]) is counted as one Swap: the Swaps
+/// bringing it up to the top of the stack depend on the formula around it.
 pub fn description_bound(n: &Node) -> usize {
     match n {
+        Node::Output { .. } => 1 + 3,
         &Node::Slice { start, len, .. } => 1 + 3 + varint::len(start) + varint::len(len),
         Node::Concat(ns) | Node::Pack(ns) => {
             ns.iter().map(description_bound).sum::<usize>() + 1 + varint::len(ns.len() as u64)
@@ -919,8 +968,9 @@ pub trait NativeModule {
     fn apply(&self, params: &[u8], resources: &[Resource], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>>;
 }
 
-/// `modules` run by `m`, as archives apply them: with one output. The [`crate::Apply`] that `m`
-/// is given has no inputs of its own (they are the evaluated ones).
+/// `modules` run by `m`, as archives apply them: [`crate::Modules::apply`] for one output, else
+/// [`crate::Modules::apply_shared`]. The [`crate::Apply`] that `m` is given has no inputs of its
+/// own (they are the evaluated ones).
 pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec<Box<dyn NativeModule + 'a>> {
     struct Native<'a, M> {
         module: Module,
@@ -939,17 +989,18 @@ pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + 'a)) -> Vec
             inputs: &[&[u8]],
             sizes: &[u64],
         ) -> Decoded<Vec<Vec<u8>>> {
-            let &[len] = sizes else {
-                return invalid(format!("{}: {} outputs", self.module, sizes.len()));
-            };
             let a = crate::Apply {
                 module: self.module,
                 resources: resources.to_vec(),
                 params: params.to_vec(),
                 inputs: Vec::new(),
-                len,
+                len: sizes.iter().sum(),
             };
-            self.m.apply(&a, inputs).map(|out| vec![out]).map_err(|e| Failure::Invalid(e.0))
+            match sizes {
+                [_] => self.m.apply(&a, inputs).map(|out| vec![out]),
+                _ => self.m.apply_shared(&crate::Shared { apply: a, sizes: sizes.to_vec() }, inputs),
+            }
+            .map_err(|e| Failure::Invalid(e.0))
         }
     }
 
@@ -1566,12 +1617,8 @@ fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Res
         .iter()
         .find(|n| n.module().to_string() == name)
         .ok_or_else(|| Failure::Resource(format!("no native implementation of {name}")))?;
-    // only one output for now, which a native module commits at the end
-    let &[size] = &a.output_sizes[..] else {
-        return invalid(format!("{name}: {} outputs declared", a.output_sizes.len()));
-    };
     let outputs = native.apply(a.params, resources, inputs, &a.output_sizes)?;
-    if outputs.len() != 1 || outputs[0].len() as u64 != size {
+    if outputs.len() != a.output_sizes.len() || outputs.iter().zip(&a.output_sizes).any(|(o, &n)| o.len() as u64 != n) {
         return invalid(format!("{name}: outputs of other sizes than declared"));
     }
     Ok(outputs)
@@ -1603,8 +1650,52 @@ mod tests {
         }
     }
 
+    const CUT: Module = Module { name: "cut", version: 1 };
+
+    /// `cut` cuts the concatenation of its inputs into outputs of the sizes declared.
+    struct Cut;
+
+    impl NativeModule for Cut {
+        fn module(&self) -> Module {
+            CUT
+        }
+
+        fn apply(&self, _: &[u8], _: &[Resource], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>> {
+            let (all, mut at) = (inputs.concat(), 0);
+            let mut next = |n: u64| {
+                let a = at.min(all.len());
+                at += n as usize;
+                all[a..at.min(all.len())].to_vec()
+            };
+            Ok(sizes.iter().map(|&n| next(n)).collect())
+        }
+    }
+
     fn natives() -> Vec<Box<dyn NativeModule>> {
-        vec![Box::new(Rev)]
+        vec![Box::new(Rev), Box::new(Cut)]
+    }
+
+    /// Applications of several outputs: their outputs taken anywhere, by the root or by a later
+    /// one, each brought up the stack where it is taken. The archive gives what the formula
+    /// does; one whose outputs are not taken once each is not made.
+    #[test]
+    fn shared_outputs() {
+        let mut f = Formula::default();
+        let a = f.push("a", b"abcdefgh".to_vec());
+        let cut = |inputs| crate::Apply { module: CUT, resources: vec![], params: vec![], inputs, len: 0 };
+        let [o0, o1] = <[Node; 2]>::try_from(f.share(cut(vec![a]), vec![3, 5])).unwrap();
+        let [p0, p1] = <[Node; 2]>::try_from(f.share(cut(vec![o1, Node::slice(0, 0, 2)]), vec![1, 6])).unwrap();
+        f.root = Node::concat([p1, Node::slice(0, 7, 1), o0, Node::apply(REV, vec![1, 2, 3], vec![p0], 1)]);
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
+        assert_eq!(decode(&c, &natives()).unwrap(), b"efghabhabcd");
+        // the outputs of the second taken in the other order
+        let Node::Concat(ns) = &mut f.root else { unreachable!() };
+        ns.swap(0, 3);
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
+        assert_eq!(decode(&c, &natives()).unwrap(), b"dhabcefghab");
+        let mut twice = f.clone();
+        twice.root = Node::concat([twice.root.clone(), Node::Output { shared: 0, index: 0, len: 3 }]);
+        assert!(encode(&twice, None, Level::Zstd(3)).is_err());
     }
 
     fn sample() -> Formula {
@@ -2204,7 +2295,8 @@ mod tests {
             let ordinals: Vec<_> = (0..f.streams.len() as u64).map(Some).collect();
             let resources: Vec<&Resource> = f.applies().into_iter().flat_map(|a| &a.resources).collect();
             let mut out = Vec::new();
-            instructions(&f.root, &ordinals, &[REV], &resources, &mut out);
+            Emit { ordinals: &ordinals, modules: &[REV], resources: &resources, out: &mut out, stack: vec![] }
+                .node(&f.root);
             out.len()
         };
         let mut f = sample();

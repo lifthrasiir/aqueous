@@ -7,7 +7,9 @@
 //! - `pack`: nodes as a [`packed`] byte sequence, for a module taking a list of them as one
 //!   input;
 //! - `apply`: a [`Module`] (a pure function of its inputs, resources and parameters) applied
-//!   to nodes, declaring the size of its output.
+//!   to nodes, declaring the size of its output;
+//! - `output`: an output of an application of several outputs, [`Shared`], which the formula
+//!   lists apart and whose every output is taken by exactly one `output` node.
 //!
 //! Streams are not placed yet: the archive encoder lays them out into non-leaf blocks, and
 //! [`Stream::class`] tells it which streams are alike (to share frames and a dictionary, §3),
@@ -148,6 +150,23 @@ pub enum Node {
     /// The [`packed`] byte sequence of the nodes.
     Pack(Vec<Node>),
     Apply(Box<Apply>),
+    /// Output `index` (of `len` bytes) of the application of several outputs
+    /// [`Formula::shared`]`[shared]`. Each output is taken exactly once.
+    Output {
+        shared: usize,
+        index: usize,
+        len: u64,
+    },
+}
+
+/// An application of several outputs, which [`Node::Output`]s take one each (anywhere in the
+/// formula: in its root, or in the inputs of a later one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shared {
+    /// The application, its `len` the outputs' sizes added up.
+    pub apply: Apply,
+    /// Bytes of each output.
+    pub sizes: Vec<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +226,7 @@ impl Node {
             Node::Concat(ns) => ns.iter().map(Node::len).sum(),
             Node::Pack(ns) => packed::header_len(ns.len()) + ns.iter().map(Node::len).sum::<u64>(),
             Node::Apply(a) => a.len,
+            Node::Output { len, .. } => *len,
         }
     }
 
@@ -218,7 +238,7 @@ impl Node {
     pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
         f(self);
         match self {
-            Node::Slice { .. } => {}
+            Node::Slice { .. } | Node::Output { .. } => {}
             Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| n.visit(f)),
             Node::Apply(a) => a.inputs.iter().for_each(|n| n.visit(f)),
         }
@@ -226,15 +246,31 @@ impl Node {
 
     /// Calls `f` on every slice below this node, as `(stream, start, len)`.
     fn slices_mut(&mut self, f: &mut impl FnMut(&mut usize, &mut u64, &mut u64)) {
+        self.visit_mut(&mut |n| {
+            if let Node::Slice { stream, start, len } = n {
+                f(stream, start, len)
+            }
+        });
+    }
+
+    /// Calls `f` on this node and every node below it, parents first.
+    fn visit_mut(&mut self, f: &mut impl FnMut(&mut Node)) {
+        f(self);
         match self {
-            Node::Slice { stream, start, len } => f(stream, start, len),
-            Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| n.slices_mut(f)),
-            Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.slices_mut(f)),
+            Node::Slice { .. } | Node::Output { .. } => {}
+            Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| n.visit_mut(f)),
+            Node::Apply(a) => a.inputs.iter_mut().for_each(|n| n.visit_mut(f)),
         }
     }
 
-    fn shift(&mut self, by: usize) {
-        self.slices_mut(&mut |stream, _, _| *stream += by);
+    /// Moves the streams the slices below take by `streams`, and the applications of several
+    /// outputs the outputs below take by `shared`.
+    fn shift(&mut self, streams: usize, shared: usize) {
+        self.visit_mut(&mut |n| match n {
+            Node::Slice { stream, .. } => *stream += streams,
+            Node::Output { shared: s, .. } => *s += shared,
+            _ => {}
+        });
     }
 }
 
@@ -242,11 +278,14 @@ impl Node {
 pub struct Formula {
     pub streams: Vec<Stream>,
     pub root: Node,
+    /// The applications of several outputs, in order: the inputs of one take only outputs of
+    /// those before it.
+    pub shared: Vec<Shared>,
 }
 
 impl Default for Formula {
     fn default() -> Formula {
-        Formula { streams: Vec::new(), root: Node::Concat(Vec::new()) }
+        Formula { streams: Vec::new(), root: Node::Concat(Vec::new()), shared: Vec::new() }
     }
 }
 
@@ -279,12 +318,42 @@ impl Formula {
         Node::slice(self.streams.len() - 1, 0, len)
     }
 
-    /// Takes over the streams of `child`, returning its root to be placed in this formula.
+    /// Adds the application `a` of outputs of `sizes` bytes (its `len` set to their sum),
+    /// returning the outputs to be placed in the formula, each once.
+    pub fn share(&mut self, mut a: Apply, sizes: Vec<u64>) -> Vec<Node> {
+        a.len = sizes.iter().sum();
+        let shared = self.shared.len();
+        let outputs = sizes.iter().enumerate().map(|(index, &len)| Node::Output { shared, index, len }).collect();
+        self.shared.push(Shared { apply: a, sizes });
+        outputs
+    }
+
+    /// Takes over the streams and the applications of several outputs of `child`, returning
+    /// its root to be placed in this formula.
     pub fn embed(&mut self, child: Formula) -> Node {
+        let (streams, shared) = (self.streams.len(), self.shared.len());
         let mut root = child.root;
-        root.shift(self.streams.len());
+        root.shift(streams, shared);
         self.streams.extend(child.streams);
+        for mut s in child.shared {
+            s.apply.inputs.iter_mut().for_each(|n| n.shift(streams, shared));
+            self.shared.push(s);
+        }
         root
+    }
+
+    /// Calls `f` on every node of the inputs of the applications of several outputs, in order,
+    /// then of the root, parents first.
+    pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
+        self.shared.iter().flat_map(|s| &s.apply.inputs).for_each(|n| n.visit(f));
+        self.root.visit(f);
+    }
+
+    /// [`Node::slices_mut`] of the inputs of the applications of several outputs, and of the
+    /// root.
+    fn slices_mut(&mut self, f: &mut impl FnMut(&mut usize, &mut u64, &mut u64)) {
+        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.slices_mut(f));
+        self.root.slices_mut(f);
     }
 
     /// Drops what no slice points to: the bytes of a stream outside every slice of it, and
@@ -293,7 +362,7 @@ impl Formula {
     pub fn compact(&mut self) {
         // Per stream, the ranges of its slices, merged into (start, end, start in the new data).
         let mut ranges = vec![Vec::new(); self.streams.len()];
-        self.root.slices_mut(&mut |&mut s, &mut a, &mut l| {
+        self.slices_mut(&mut |&mut s, &mut a, &mut l| {
             if let Some(r) = ranges.get_mut(s) {
                 r.push((a, a.saturating_add(l), 0));
             }
@@ -335,7 +404,7 @@ impl Formula {
             streams.push(Stream { data, ..s });
         }
         let new = streams.len();
-        self.root.slices_mut(&mut |s, a, _| match ranges.get(*s) {
+        self.slices_mut(&mut |s, a, _| match ranges.get(*s) {
             Some(r) => {
                 let m = r[r.partition_point(|m| m.0 <= *a) - 1];
                 *a = m.2 + (*a - m.0);
@@ -355,7 +424,7 @@ impl Formula {
         self.root.is_empty()
     }
 
-    /// The applications, parents first.
+    /// The applications, those of the root parents first, then those of several outputs.
     pub fn applies(&self) -> Vec<&Apply> {
         let mut out = Vec::new();
         self.root.visit(&mut |n| {
@@ -363,27 +432,91 @@ impl Formula {
                 out.push(&**a);
             }
         });
+        for i in self.shared.iter().flat_map(|s| &s.apply.inputs) {
+            i.visit(&mut |n| {
+                if let Node::Apply(a) = n {
+                    out.push(&**a);
+                }
+            });
+        }
+        out.extend(self.shared.iter().map(|s| &s.apply));
         out
     }
 
-    /// The output, with every module run by `m`. Fails on slices out of their stream and on
-    /// modules whose output is not of the declared size.
-    pub fn eval(&self, m: &impl Modules) -> Result<Vec<u8>> {
-        // the output of a single application, or a stream, as it is
-        Ok(self.bytes(&self.root, m)?.into_owned())
+    /// Checks the outputs of the applications of several outputs: each taken exactly once, of
+    /// the size declared, and in the inputs of an application only from those before it.
+    pub fn check_outputs(&self) -> Result<()> {
+        let mut taken: Vec<Vec<bool>> = self.shared.iter().map(|s| vec![false; s.sizes.len()]).collect();
+        let mut check = |n: &Node, before: usize| -> Result<()> {
+            let mut r = Ok(());
+            n.visit(&mut |n| {
+                if let &Node::Output { shared, index, len } = n
+                    && r.is_ok()
+                {
+                    r = match self.shared.get(shared).and_then(|s| s.sizes.get(index)) {
+                        _ if shared >= before => {
+                            Err(Error::new(format!("output #{shared}.{index} taken before it is")))
+                        }
+                        Some(&size) if size == len && !taken[shared][index] => {
+                            taken[shared][index] = true;
+                            Ok(())
+                        }
+                        Some(&size) if size != len => {
+                            Err(Error::new(format!("output #{shared}.{index} of {len} bytes, not {size}")))
+                        }
+                        Some(_) => Err(Error::new(format!("output #{shared}.{index} taken twice"))),
+                        None => Err(Error::new(format!("no output #{shared}.{index}"))),
+                    };
+                }
+            });
+            r
+        };
+        for (i, s) in self.shared.iter().enumerate() {
+            if s.sizes.is_empty() || s.apply.len != s.sizes.iter().sum::<u64>() {
+                return Err(Error::new(format!("application #{i} of several outputs of bad sizes")));
+            }
+            s.apply.inputs.iter().try_for_each(|n| check(n, i))?;
+        }
+        check(&self.root, self.shared.len())?;
+        match taken.iter().position(|t| t.contains(&false)) {
+            Some(i) => Err(Error::new(format!("an output of #{i} not taken"))),
+            None => Ok(()),
+        }
     }
 
-    fn eval_into(&self, n: &Node, m: &impl Modules, out: &mut Vec<u8>) -> Result<()> {
+    /// The output, with every module run by `m`. Fails on slices out of their stream, on
+    /// modules whose output is not of the declared size, and on outputs not taken once
+    /// ([`Formula::check_outputs`]).
+    pub fn eval(&self, m: &impl Modules) -> Result<Vec<u8>> {
+        self.check_outputs()?;
+        // the outputs of the applications of several outputs, in order
+        let mut outputs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(self.shared.len());
+        for s in &self.shared {
+            let inputs = s.apply.inputs.iter().map(|n| self.bytes(n, m, &outputs)).collect::<Result<Vec<_>>>()?;
+            let inputs: Vec<&[u8]> = inputs.iter().map(|i| &**i).collect();
+            let out = m.apply_shared(s, &inputs)?;
+            if out.len() != s.sizes.len() || out.iter().zip(&s.sizes).any(|(o, &n)| o.len() as u64 != n) {
+                return Err(Error::new(format!("{} made outputs of other sizes than {:?}", s.apply.module, s.sizes)));
+            }
+            outputs.push(out);
+        }
+        // the output of a single application, or a stream, as it is
+        Ok(self.bytes(&self.root, m, &outputs)?.into_owned())
+    }
+
+    fn eval_into(&self, n: &Node, m: &impl Modules, outputs: &[Vec<Vec<u8>>], out: &mut Vec<u8>) -> Result<()> {
         match n {
-            Node::Concat(ns) => ns.iter().try_for_each(|n| self.eval_into(n, m, out)),
+            Node::Concat(ns) => ns.iter().try_for_each(|n| self.eval_into(n, m, outputs, out)),
             _ => {
-                out.extend_from_slice(&self.bytes(n, m)?);
+                out.extend_from_slice(&self.bytes(n, m, outputs)?);
                 Ok(())
             }
         }
     }
 
-    fn bytes(&self, n: &Node, m: &impl Modules) -> Result<Cow<'_, [u8]>> {
+    /// The bytes of `n`, given the `outputs` of the applications of several outputs (those
+    /// before it).
+    fn bytes<'a>(&'a self, n: &Node, m: &impl Modules, outputs: &'a [Vec<Vec<u8>>]) -> Result<Cow<'a, [u8]>> {
         match n {
             &Node::Slice { stream, start, len } => {
                 let data = &self.streams.get(stream).ok_or_else(|| Error::new(format!("no stream #{stream}")))?.data;
@@ -396,17 +529,19 @@ impl Formula {
             }
             Node::Concat(_) => {
                 let mut out = Vec::with_capacity(n.len() as usize);
-                self.eval_into(n, m, &mut out)?;
+                self.eval_into(n, m, outputs, &mut out)?;
                 Ok(Cow::Owned(out))
             }
             Node::Pack(ns) => {
                 let mut out = Vec::with_capacity(n.len() as usize);
                 packed::put_header(&mut out, ns.iter().map(Node::len));
-                ns.iter().try_for_each(|n| self.eval_into(n, m, &mut out))?;
+                ns.iter().try_for_each(|n| self.eval_into(n, m, outputs, &mut out))?;
                 Ok(Cow::Owned(out))
             }
+            // (checked, and taken only once)
+            &Node::Output { shared, index, .. } => Ok(Cow::Borrowed(&outputs[shared][index])),
             Node::Apply(a) => {
-                let inputs = a.inputs.iter().map(|n| self.bytes(n, m)).collect::<Result<Vec<_>>>()?;
+                let inputs = a.inputs.iter().map(|n| self.bytes(n, m, outputs)).collect::<Result<Vec<_>>>()?;
                 let inputs: Vec<&[u8]> = inputs.iter().map(|i| &**i).collect();
                 let out = m.apply(a, &inputs)?;
                 if out.len() as u64 != a.len {
@@ -420,7 +555,8 @@ impl Formula {
 
 /// Indented, a node a line: `slice #stream [start, +len) CLASS` (and the kind of the stream
 /// unless [`Kind::Unknown`] and not [`Stream::content`], with `content` if it is), `concat LEN`, `pack LEN`, `apply MODULE LEN` with the lengths of its
-/// resources and its parameters in hex.
+/// resources and its parameters in hex, `output #SHARED.INDEX LEN`: first each application of
+/// several outputs, `shared #I MODULE SIZES...` and its inputs, then the root.
 impl fmt::Display for Formula {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fn node(fm: &Formula, n: &Node, depth: usize, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -439,18 +575,29 @@ impl fmt::Display for Formula {
                 }
                 Node::Apply(a) => {
                     write!(f, "apply {} {}", a.module, a.len)?;
-                    if !a.resources.is_empty() {
-                        write!(f, " resources")?;
-                        a.resources.iter().try_for_each(|r| write!(f, " {}", r.len()))?;
-                    }
-                    if !a.params.is_empty() {
-                        write!(f, " params ")?;
-                        a.params.iter().try_for_each(|b| write!(f, "{b:02x}"))?;
-                    }
-                    writeln!(f)?;
+                    attrs(a, f)?;
                     a.inputs.iter().try_for_each(|n| node(fm, n, depth + 1, f))
                 }
+                &Node::Output { shared, index, len } => writeln!(f, "output #{shared}.{index} {len}"),
             }
+        }
+        // the resources' lengths and the parameters, then the end of the line
+        fn attrs(a: &Apply, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            if !a.resources.is_empty() {
+                write!(f, " resources")?;
+                a.resources.iter().try_for_each(|r| write!(f, " {}", r.len()))?;
+            }
+            if !a.params.is_empty() {
+                write!(f, " params ")?;
+                a.params.iter().try_for_each(|b| write!(f, "{b:02x}"))?;
+            }
+            writeln!(f)
+        }
+        for (i, s) in self.shared.iter().enumerate() {
+            write!(f, "shared #{i} {}", s.apply.module)?;
+            s.sizes.iter().try_for_each(|n| write!(f, " {n}"))?;
+            attrs(&s.apply, f)?;
+            s.apply.inputs.iter().try_for_each(|n| node(self, n, 1, f))?;
         }
         node(self, &self.root, 0, f)
     }
@@ -460,6 +607,15 @@ impl fmt::Display for Formula {
 pub trait Modules {
     /// The output of `a` on `inputs`, the evaluated `a.inputs` (with `a.resources`).
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>>;
+
+    /// The outputs of `s` on `inputs`, the evaluated `s.apply.inputs`: by default those of a
+    /// module of one output, by [`Modules::apply`].
+    fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+        match s.sizes[..] {
+            [_] => Ok(vec![self.apply(&s.apply, inputs)?]),
+            _ => Err(Error::new(format!("{}: {} outputs", s.apply.module, s.sizes.len()))),
+        }
+    }
 }
 
 /// A function as the modules, e.g. a `match` on `a.module` in tests.
@@ -593,6 +749,89 @@ mod tests {
         let whole = f.streams[0].data.as_ptr();
         f.compact();
         assert_eq!(f.streams[0].data.as_ptr(), whole);
+    }
+
+    const CUT: Module = Module { name: "cut", version: 1 };
+
+    /// `rev`, and `cut`, cutting the concatenation of its inputs into its outputs.
+    struct RevCut;
+
+    impl Modules for RevCut {
+        fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
+            Rev.apply(a, inputs)
+        }
+
+        fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+            assert_eq!(s.apply.module, CUT);
+            let (all, mut at) = (inputs.concat(), 0);
+            let mut next = |n: u64| {
+                at += n as usize;
+                all[at - n as usize..at].to_vec()
+            };
+            Ok(s.sizes.iter().map(|&n| next(n)).collect())
+        }
+    }
+
+    fn cut(inputs: Vec<Node>) -> Apply {
+        Apply { module: CUT, resources: vec![], params: vec![], inputs, len: 0 }
+    }
+
+    /// Outputs of applications of several outputs, taken by the root and by later ones; shown,
+    /// embedded and compacted.
+    #[test]
+    fn eval_shared() {
+        let mut f = Formula::raw("a", b"abcdefgh".to_vec());
+        let a = f.root.clone();
+        let [o0, o1] = <[Node; 2]>::try_from(f.share(cut(vec![a]), vec![3, 5])).unwrap();
+        let [p0, p1] = <[Node; 2]>::try_from(f.share(cut(vec![o1]), vec![1, 4])).unwrap();
+        f.root = Node::concat([p1, Node::slice(0, 7, 1), o0, Node::apply(REV, vec![], vec![p0], 1)]);
+        assert_eq!(f.len(), 9);
+        assert_eq!(f.eval(&RevCut).unwrap(), b"efghhabcd");
+        assert_eq!(f.applies().len(), 3);
+        assert_eq!(
+            f.to_string(),
+            "shared #0 cut@1 3 5\n  slice #0 [0, +8) a\nshared #1 cut@1 1 4\n  output #0.1 5\n\
+             concat 9\n  output #1.1 4\n  slice #0 [7, +1) a\n  output #0.0 3\n  apply rev@1 1\n    output #1.0 1\n"
+        );
+        // embedded after a formula of its own application of several outputs
+        let mut g = Formula::raw("b", b"xy".to_vec());
+        let b = g.root.clone();
+        let [x, y] = <[Node; 2]>::try_from(g.share(cut(vec![b]), vec![1, 1])).unwrap();
+        let child = g.embed(f.clone());
+        g.root = Node::concat([y, child, x]);
+        assert_eq!(g.eval(&RevCut).unwrap(), b"yefghhabcdx");
+        // compacted: the slices of the applications are kept
+        let mut c = f.clone();
+        c.streams[0].data.extend_from_slice(b"unused");
+        c.compact();
+        assert_eq!(c.eval(&RevCut).unwrap(), b"efghhabcd");
+        assert_eq!(c.streams[0].data, b"abcdefgh");
+    }
+
+    /// Outputs not taken once each, of other sizes, or taken by an application before theirs.
+    #[test]
+    fn shared_errors() {
+        let mut f = Formula::raw("a", b"abcdefgh".to_vec());
+        let a = f.root.clone();
+        let [o0, o1] = <[Node; 2]>::try_from(f.share(cut(vec![a]), vec![3, 5])).unwrap();
+        for root in [
+            Node::concat([o0.clone()]),
+            Node::concat([o0.clone(), o1.clone(), o0.clone()]),
+            Node::concat([o0.clone(), Node::Output { shared: 0, index: 1, len: 4 }]),
+            Node::concat([o0.clone(), o1.clone(), Node::Output { shared: 0, index: 2, len: 0 }]),
+        ] {
+            f.root = root;
+            assert!(f.check_outputs().is_err() && f.eval(&RevCut).is_err(), "{f}");
+        }
+        f.root = Node::concat([o0, o1]);
+        assert_eq!(f.eval(&RevCut).unwrap(), b"abcdefgh");
+        f.shared[0].apply.inputs = vec![Node::Output { shared: 0, index: 0, len: 3 }];
+        assert!(f.check_outputs().is_err());
+        // a module of one output only, by default
+        let mut g = Formula::raw("a", b"ab".to_vec());
+        let a = g.root.clone();
+        g.root = Node::concat(g.share(Apply { module: REV, ..cut(vec![a]) }, vec![1, 1]));
+        assert!(g.eval(&Rev).is_err());
     }
 
     #[test]

@@ -633,8 +633,9 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<Vec<Option<
 
 /// Puts the formulas of [`nested`] in place in `f`; the bytes left without a slice are dropped.
 fn place_all(f: &mut Formula, children: Vec<Option<Made>>, opt: &Options) {
+    // (of the applications of several outputs too, which are not looked into)
     let mut slices = vec![0; f.streams.len()];
-    f.root.visit(&mut |n| {
+    f.visit(&mut |n| {
         if let &Node::Slice { stream, .. } = n
             && let Some(n) = slices.get_mut(stream)
         {
@@ -653,7 +654,7 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, opt: &Options) {
 fn contents(n: &Node, f: &Formula, opt: &Options, depth: u32, cx: &Cx, out: &mut Vec<(Node, Option<Made>)>) {
     match n {
         &Node::Slice { stream, .. } if is_content(f, stream) => content_slices(n, Nest::Scan, f, opt, depth, cx, out),
-        Node::Slice { .. } => {}
+        Node::Slice { .. } | Node::Output { .. } => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| contents(n, f, opt, depth, cx, out)),
         Node::Apply(a) => {
             for (i, input) in a.inputs.iter().enumerate() {
@@ -687,6 +688,7 @@ fn content_slices(
         }
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, nest, f, opt, depth, cx, out)),
         Node::Apply(_) => contents(n, f, opt, depth, cx, out),
+        Node::Output { .. } => {}
     }
 }
 
@@ -702,7 +704,7 @@ fn place(
 ) {
     match n {
         &mut Node::Slice { stream, .. } if is_content(f, stream) => place_slices(n, f, slices, opt, children),
-        Node::Slice { .. } => {}
+        Node::Slice { .. } | Node::Output { .. } => {}
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place(n, f, slices, opt, children)),
         Node::Apply(a) => {
             let module = a.module;
@@ -739,6 +741,7 @@ fn place_slices(
         }
         Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| place_slices(n, f, slices, opt, children)),
         Node::Apply(_) => place(n, f, slices, opt, children),
+        Node::Output { .. } => {}
     }
 }
 
@@ -802,7 +805,8 @@ mod tests {
         let noise = aqr_common::rng::noise(300_000);
         assert_eq!(deconstructed(&gz("noise.mp4", &noise, 6)), (0, 0));
         // DEFLATE at level 1 leaves much to the archive
-        let text: Vec<u8> = (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+        let text: Vec<u8> =
+            (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
         let (n, applies) = deconstructed(&gz("text.txt", &text, 1));
         assert_eq!(n, 1);
         assert!(applies > 0);
@@ -931,6 +935,7 @@ mod tests {
                 data: vec![1, 2, 3],
             }],
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
+            shared: vec![],
         };
         assert_eq!(finish(fails, &d, &opt, &cx, Default::default(), false).0, raw);
         // without verification, as it is

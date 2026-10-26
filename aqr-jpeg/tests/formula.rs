@@ -95,7 +95,7 @@ fn corrupt_inputs() {
     let ins: Vec<Vec<u8>> = a
         .inputs
         .iter()
-        .map(|n| Formula { streams: f.streams.clone(), root: n.clone() }.eval(&module).unwrap())
+        .map(|n| Formula { streams: f.streams.clone(), root: n.clone(), shared: vec![] }.eval(&module).unwrap())
         .collect();
     let refs: Vec<&[u8]> = ins.iter().map(|v| &v[..]).collect();
     assert_eq!(formula::decode(&a.params, &refs, a.len, 0).unwrap(), GRADIENT);
@@ -122,7 +122,7 @@ fn embedded_packed() {
     let mut ins: Vec<Vec<u8>> = a
         .inputs
         .iter()
-        .map(|n| Formula { streams: f.streams.clone(), root: n.clone() }.eval(&module).unwrap())
+        .map(|n| Formula { streams: f.streams.clone(), root: n.clone(), shared: vec![] }.eval(&module).unwrap())
         .collect();
     let decode = |ins: &[Vec<u8>]| {
         let refs: Vec<&[u8]> = ins.iter().map(|v| &v[..]).collect();
@@ -148,7 +148,7 @@ fn decode_speed() {
     let ins: Vec<Vec<u8>> = a
         .inputs
         .iter()
-        .map(|n| Formula { streams: f.streams.clone(), root: n.clone() }.eval(&module).unwrap())
+        .map(|n| Formula { streams: f.streams.clone(), root: n.clone(), shared: vec![] }.eval(&module).unwrap())
         .collect();
     let refs: Vec<&[u8]> = ins.iter().map(|v| &v[..]).collect();
     let time = |f: &dyn Fn() -> Vec<u8>| {

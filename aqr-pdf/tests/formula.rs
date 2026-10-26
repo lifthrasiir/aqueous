@@ -358,7 +358,7 @@ fn corrupted_slots() {
     let inputs: Vec<Vec<u8>> = root
         .inputs
         .iter()
-        .map(|n| eval(&Formula { streams: fm.streams.clone(), root: n.clone() }, 1).unwrap())
+        .map(|n| eval(&Formula { streams: fm.streams.clone(), root: n.clone(), shared: vec![] }, 1).unwrap())
         .collect();
     let run = |ins: &[Vec<u8>], len: u64| {
         let r: Vec<&[u8]> = ins.iter().map(|v| &v[..]).collect();
