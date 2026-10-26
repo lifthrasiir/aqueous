@@ -37,10 +37,17 @@ pub enum Format {
     /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
     /// data.
     Fasta,
+    /// ar archive (aqr-bundle).
+    Ar,
+    /// tar archive (aqr-bundle), known by its first header's checksum: not looked for in other
+    /// data.
+    Tar,
+    /// cpio archive (aqr-bundle); of the binary forms, not looked for in other data.
+    Cpio,
 }
 
 impl Format {
-    pub const ALL: [Format; 16] = [
+    pub const ALL: [Format; 19] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -57,6 +64,9 @@ impl Format {
         Format::LevelDb,
         Format::Zip,
         Format::Fasta,
+        Format::Ar,
+        Format::Tar,
+        Format::Cpio,
     ];
 
     pub fn name(self) -> &'static str {
@@ -77,6 +87,9 @@ impl Format {
             Format::LevelDb => "leveldb",
             Format::Zip => "zip",
             Format::Fasta => "fasta",
+            Format::Ar => "ar",
+            Format::Tar => "tar",
+            Format::Cpio => "cpio",
         }
     }
 
@@ -109,6 +122,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"sqlite" | b"sqlite3" => format(Format::Sqlite),
         b"fa" | b"fasta" | b"fna" | b"ffn" | b"fas" => format(Format::Fasta),
         b"ldb" => format(Format::LevelDb),
+        b"tar" => format(Format::Tar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
@@ -179,6 +193,12 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Raw)
     } else if start && aqr_fasta::formula::starts(d) {
         Some(Format::Fasta)
+    } else if aqr_bundle::ar::starts(d) {
+        Some(Format::Ar)
+    } else if (start || d.starts_with(b"07070")) && aqr_bundle::cpio::starts(d) {
+        Some(Format::Cpio)
+    } else if start && aqr_bundle::tar::starts(d) {
+        Some(Format::Tar)
     } else {
         None
     }
@@ -202,6 +222,8 @@ const fn pair(a: u8, b: u8) -> bool {
         b'm' => b == b'o',
         0x04 => b == 0x22,
         b'P' => b == b'K',
+        b'!' => b == b'<',
+        b'0' => b == b'7',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -259,6 +281,8 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         0x1f => d.starts_with(&[0x1f, 0x8b]),
         b'm' | 0x04 => aqr_lz4::formula::starts(d),
         b'P' => d.starts_with(b"PK\x03\x04"),
+        b'!' => d.starts_with(aqr_bundle::ar::MAGIC),
+        b'0' => d.starts_with(b"07070"),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,
@@ -343,6 +367,8 @@ mod tests {
             (b"PK", 0),
             (b"\x78\x9c", 0),
             (b"\x78\xda", 0),
+            (b"!<", 0),
+            (b"07", 0),
             (b"\x48\x89", 0),
         ] {
             assert!(pairs(d[0], d[1]), "{d:x?}");
@@ -411,7 +437,7 @@ mod tests {
         for f in Format::ALL {
             assert_eq!(Format::from_name(f.name()), Some(f));
         }
-        assert_eq!(Format::from_name("tar"), None);
+        assert_eq!(Format::from_name("tgz"), None);
     }
 
     #[test]

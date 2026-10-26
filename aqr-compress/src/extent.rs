@@ -29,8 +29,17 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::LevelDb => Some(d.len()),
         Format::Zip => aqr_zip::zip::extent(d),
         Format::Fasta => Some(d.len()),
+        Format::Ar => bundle(aqr_bundle::formula::Format::Ar, d),
+        Format::Tar => bundle(aqr_bundle::formula::Format::Tar, d),
+        Format::Cpio => bundle(aqr_bundle::formula::Format::Cpio, d),
     }?;
     Some(end.min(d.len()))
+}
+
+/// An archive of aqr-bundle: up to its last member, and the zeros after it; or, where it has
+/// none, all of it (an archive of nothing, which is not taken).
+fn bundle(f: aqr_bundle::formula::Format, d: &[u8]) -> Option<usize> {
+    Some(aqr_bundle::formula::extent(f, d).unwrap_or(d.len()))
 }
 
 fn u16le(d: &[u8], p: usize) -> Option<u64> {

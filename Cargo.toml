@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "aqr",
     "aqr-common",
+    "aqr-bundle",
     "aqr-formula",
     "aqr-num",
     "aqr-compress",

@@ -3,7 +3,8 @@ use std::io::Write;
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, FLAC, FLATE, JPEG, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SNAPPY, SQLITE, X86, ZIP, decompress,
+    ARM64, BUNDLE, FLAC, FLATE, JPEG, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SNAPPY, SQLITE, X86, ZIP,
+    decompress,
 };
 use aqr_formula::aqr;
 
@@ -817,4 +818,55 @@ fn fasta() {
     let f = roundtrip(&d, &all());
     assert_eq!(modules(&f), ["fasta-recons"]);
     assert_eq!(aqr_compress::kind_by_name(b"x/chr1.fa"), aqr_formula::Kind::Format("fasta"));
+}
+
+/// A ustar header of `name` for a body of `n` bytes.
+fn tar_header(name: &str, n: usize) -> Vec<u8> {
+    let mut h = vec![0u8; 512];
+    h[..name.len()].copy_from_slice(name.as_bytes());
+    h[100..108].copy_from_slice(b"0000644\0");
+    h[124..136].copy_from_slice(format!("{n:011o}\0").as_bytes());
+    h[136..148].copy_from_slice(b"14123456701\0");
+    h[156] = b'0';
+    h[257..265].copy_from_slice(b"ustar\x0000");
+    let sum: u32 = h.iter().map(|&b| b as u32).sum::<u32>() + 8 * b' ' as u32;
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    h
+}
+
+fn tar(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut d = Vec::new();
+    for (name, body) in files {
+        d.extend(tar_header(name, body.len()));
+        d.extend_from_slice(body);
+        d.resize(d.len().next_multiple_of(512), 0);
+    }
+    d.resize(d.len() + 10240 - d.len() % 10240, 0);
+    d
+}
+
+/// ar, tar and cpio archives go to aqr-bundle, and their members to their recompressors (by
+/// their names, or found in them); a tar archive in a gzip file too.
+#[test]
+fn bundles() {
+    let jpeg = fixture("aqr-jpeg/tests/data/gradient.jpg");
+    let png = picture(64, 48, None);
+    let t = tar(&[
+        ("a.txt", &text(5000)),
+        ("b.jpg", &jpeg),
+        ("c.bin", &[&noise(100)[..], &zlib(&text(30_000), 6)].concat()),
+        ("d.png", &png),
+    ]);
+    let f = roundtrip(&t, &all());
+    assert_eq!(modules(&f), [BUNDLE.name, JPEG.name, FLATE.name, PNG.name], "{f}");
+    let f = roundtrip(&gzip_named(&t, "x.tar"), &all());
+    assert_eq!(modules(&f), [FLATE.name, BUNDLE.name, JPEG.name, FLATE.name, PNG.name], "{f}");
+    // found where a file starts: ar and cpio of ASCII headers, not tar
+    let ar = fixture("aqr-bundle/tests/data/llvm-gnu.a");
+    let cpio = fixture("aqr-bundle/tests/data/bsdtar-newc.cpio");
+    let d = [&noise(1000)[..], &ar, &noise(1000), &cpio, &t].concat();
+    let f = roundtrip(&d, &all());
+    // (the Mach-O objects of the ar archive by aqr-exe)
+    assert_eq!(modules(&f).iter().filter(|&&m| m == BUNDLE.name).count(), 2, "{f}");
+    assert_eq!(aqr_compress::kind_by_name(b"x/y.tar"), aqr_formula::Kind::Format("tar"));
 }

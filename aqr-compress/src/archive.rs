@@ -35,7 +35,7 @@ use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Placed, SegmentWriter, Tree
 use aqr_formula::probe::Held;
 use aqr_formula::{Formula, Kind, Module, Node};
 
-use crate::{Cx, Options, SHARE_MIN, detect, kind_by_name, nested, place_all, sets, verify};
+use crate::{Cx, Options, detect, kind_by_name, nested, place_all, sets, verify};
 
 /// Streams shorter than this are put together with those of their class and kind without
 /// telling whether they compress.
@@ -251,27 +251,40 @@ pub fn compress_tree_to<S: Source + ?Sized>(
 /// ([`together`]), as [`Held`] is.
 const TOGETHER_MIN: u64 = Held::MIN as u64;
 
+/// Members of ar, tar and cpio archives of at least this many bytes are looked for among the
+/// contents ([`together`]): the files of a tar archive are mostly small.
+const MEMBER_MIN: u64 = 4 << 10;
+
+/// Slices shorter than this are not shared with others ([`Formula::share_slices`]): what they
+/// share is found by compressing them solid, or not at all where they are apart (a tar
+/// archive's members of a kind, and the same files of other kinds, apart from it).
+const SLICE_MIN: usize = 1 << 10;
+
 /// The most bytes of contents put in one batch for holding each other ([`together`]).
 const TOGETHER_MAX: u64 = 2 << 30;
 
 /// For each content of `src`, the first of those that may hold each other (where the archive
 /// stores what they share once, [`Formula::share_slices`], only within a batch): a ZIP archive
 /// or gzip file and the contents of its entries (of the CRC-32 and size that its central
-/// directory or its trailer tells; and other archives with such entries), and contents that
-/// start alike (their first 64 KiB; the same file, longer or shorter). Of the contents of at
-/// least [`TOGETHER_MIN`] bytes, which are read at their start (and the archives at their end,
-/// the contents of the sizes of entries whole); together, no more than [`TOGETHER_MAX`] bytes.
+/// directory or its trailer tells; and other archives with such entries), an ar, tar or cpio
+/// archive and the contents of its members (read whole, one at a time, for their CRC-32; those
+/// of at least [`MEMBER_MIN`] bytes), and contents that start alike (their first 64 KiB; the
+/// same file, longer or shorter). Of the contents of at least [`TOGETHER_MIN`] bytes, which are
+/// read at their start (and the archives at their end, the contents of the sizes of entries
+/// whole); together, no more than [`TOGETHER_MAX`] bytes.
 fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>> {
     const HEAD: u64 = 64 << 10;
     // (the end of a ZIP archive holding its central directory, mostly)
     const TAIL: u64 = 1 << 20;
     let n = src.len();
     let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= TOGETHER_MIN).collect();
-    // of each: the hash of its start, and the CRC-32 and size of the entries it holds
-    let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<(u64, Vec<(u32, u64)>)> {
+    // of each: the hash of its start, the CRC-32 and size of the entries it holds, and whether
+    // it is an archive of aqr-bundle's (whose members are known once it is read whole)
+    let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<(u64, Vec<(u32, u64)>, bool)> {
         let (c, size) = (large[i], src.size(large[i]));
         let head = src.read_range(c, 0..HEAD)?;
-        let held = match detect(&head) {
+        let format = detect(&head);
+        let held = match format {
             Some(detect::Format::Zip) => aqr_zip::zip::entry_sums(&src.read_range(c, size.saturating_sub(TAIL)..size)?),
             Some(detect::Format::Gzip) => {
                 let t = src.read_range(c, size - 8..size)?;
@@ -281,7 +294,8 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>
             _ => Vec::new(),
         };
         let held = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
-        Ok((xxhash_rust::xxh3::xxh3_64(&head), held))
+        let bundle = matches!(format, Some(detect::Format::Ar | detect::Format::Tar | detect::Format::Cpio));
+        Ok((xxhash_rust::xxh3::xxh3_64(&head), held, bundle))
     });
     let mut parent: Vec<usize> = (0..n).collect();
     let mut bytes: Vec<u64> = (0..n).map(|c| src.size(c)).collect();
@@ -306,10 +320,17 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>
     let mut sizes: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut by_entry: HashMap<(u32, u64), Vec<usize>> = HashMap::new();
     for (&c, l) in large.iter().zip(looked) {
-        let (head, entries) = l?;
+        let (head, mut entries, bundle) = l?;
+        // (one past what a batch may hold is not put with others)
+        if bundle && src.size(c) <= TOGETHER_MAX {
+            entries = member_sums(&src.read(c)?, opt.threads);
+        }
         heads.entry(head).or_default().push(c);
-        sizes.entry(src.size(c)).or_default().push(c);
         entries.into_iter().for_each(|e| by_entry.entry(e).or_default().push(c));
+    }
+    // (of those that may be a member)
+    for c in (0..n).filter(|&c| src.size(c) >= MEMBER_MIN) {
+        sizes.entry(src.size(c)).or_default().push(c);
     }
     for cs in heads.values().filter(|cs| (2..=8).contains(&cs.len())) {
         cs.iter().for_each(|&c| join(cs[0], c));
@@ -332,6 +353,20 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>
         archives.iter().chain(alike).for_each(|&c| join(archives[0], c));
     }
     Ok((0..n).map(|c| root(&mut parent, c)).collect())
+}
+
+/// The CRC-32 and size of the files' contents in ar, tar or cpio archive `d`, those of at least
+/// [`MEMBER_MIN`] bytes.
+fn member_sums(d: &[u8], threads: usize) -> Vec<(u32, u64)> {
+    use aqr_bundle::{formula, layout::Role};
+    let recs = formula::detect(d).and_then(|f| formula::records(f, d)).unwrap_or_default();
+    let bodies: Vec<&[u8]> = recs
+        .iter()
+        .filter_map(|r| r.body())
+        .filter(|b| b.role == Role::File && b.span.len() as u64 >= MEMBER_MIN)
+        .map(|b| &d[b.span.clone()])
+        .collect();
+    aqr_common::pool::par_map(bodies.len(), threads, |i| (crc32fast::hash(bodies[i]), bodies[i].len() as u64))
 }
 
 /// What files are ordered by, to put those alike next to each other: the extension, then the
@@ -396,7 +431,7 @@ fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) 
         place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets, &nopt);
         // (what the files hold of each other, by what they are taken for: a file and the
         // same in an archive, both kept as they are)
-        f.share_slices(SHARE_MIN);
+        f.share_slices(SLICE_MIN);
     }
     let deferred: Vec<_> = cx.deferred.borrow_mut().drain(..).collect();
     if let Some(pre) = &cx.pre {

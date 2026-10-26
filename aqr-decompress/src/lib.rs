@@ -41,6 +41,10 @@ pub const SNAPPY: Module = aqr_snappy::formula::MODULE;
 /// the records, the layout and the bytes kept.
 pub const ZIP: Module = aqr_zip::formula::MODULE;
 
+/// An ar, tar or cpio archive rebuilt from the contents of its members. Inputs: the contents
+/// and the layout.
+pub const BUNDLE: Module = aqr_bundle::formula::MODULE;
+
 // A recompressor as a module of its own (its `formula` module, see its FORMAT.md), rebuilding
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
@@ -62,8 +66,10 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 18] =
-    [X86, ARM64, CIL, FLATE, LZ4, SNAPPY, ZIP, PNG, PNG_SET, JPEG, MP3, FLAC, PSD, PDF, SQLITE, FASTA, PCM, RASTER];
+pub const MODULES: [Module; 19] = [
+    X86, ARM64, CIL, FLATE, LZ4, SNAPPY, ZIP, BUNDLE, PNG, PNG_SET, JPEG, MP3, FLAC, PSD, PDF, SQLITE, FASTA, PCM,
+    RASTER,
+];
 
 /// A module's `decode`: params, resources, inputs, output length and threads.
 pub type Decode = fn(&[u8], &[&[u8]], &[&[u8]], u64, usize) -> std::result::Result<Vec<u8>, String>;
@@ -171,6 +177,9 @@ impl Native {
             aqr_snappy::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == ZIP {
             aqr_zip::formula::decode(params, resources, inputs, len, threads).map_err(msg)
+        } else if m == BUNDLE {
+            none(resources)?;
+            aqr_bundle::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == PNG_SET {
             none(resources)?;
             Ok(aqr_png::formula::decode_set(params, inputs, &[len], threads).map_err(msg)?.remove(0))

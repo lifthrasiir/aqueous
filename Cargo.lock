@@ -45,6 +45,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-bundle"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-common"
 version = "0.1.0"
 dependencies = [
@@ -56,6 +65,7 @@ dependencies = [
 name = "aqr-compress"
 version = "0.1.0"
 dependencies = [
+ "aqr-bundle",
  "aqr-common",
  "aqr-decompress",
  "aqr-exe",
@@ -83,6 +93,7 @@ dependencies = [
 name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
+ "aqr-bundle",
  "aqr-exe",
  "aqr-fasta",
  "aqr-flac",

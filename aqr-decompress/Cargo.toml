@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 aqr-formula = { path = "../aqr-formula" }
+aqr-bundle = { path = "../aqr-bundle" }
 aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"] }
 aqr-flate = { path = "../aqr-flate" }
 aqr-fasta = { path = "../aqr-fasta" }

@@ -1,0 +1,20 @@
+[package]
+name = "aqr-bundle"
+version = "0.1.0"
+edition = "2024"
+description = "ar, tar (v7, ustar, GNU, pax) and cpio archives rebuilt bit for bit from the contents of their members, with their headers' sizes and checksums derived"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula" }
+
+[dev-dependencies]
+zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-bundle-check"
+path = "examples/check.rs"

@@ -568,6 +568,74 @@ impl Formula {
         self.root.is_empty()
     }
 
+    /// `data`, the contents of the entries of an archive, as streams by kind: `ends` gives the
+    /// kind of each entry's contents and their end in `data`. Returns the node of their slices,
+    /// in order: a slice for each entry of a [`Kind::Format`] or of at least `own` bytes, those
+    /// of other kinds one after another being one. The contents of [`Kind::Unknown`] are stream
+    /// `raw` (of this formula, empty), cut out of `data` in place; those of other kinds are
+    /// streams added after the others, of class `{prefix}/{kind}` (`{prefix}/{name}` for a
+    /// format).
+    pub fn push_by_kind(
+        &mut self,
+        raw: usize,
+        mut data: Vec<u8>,
+        ends: &[(Kind, usize)],
+        prefix: &str,
+        own: usize,
+    ) -> Node {
+        if ends.iter().all(|k| k.0 == Kind::Unknown)
+            && ends.iter().scan(0, |s, &(_, e)| Some(e - std::mem::replace(s, e))).all(|n| n < own)
+        {
+            let len = data.len() as u64;
+            self.streams[raw].data = data;
+            return Node::slice(raw, 0, len);
+        }
+        // the stream of each kind, by its first entry
+        let mut order: Vec<Kind> = vec![Kind::Unknown];
+        ends.iter().for_each(|k| {
+            if !order.contains(&k.0) {
+                order.push(k.0)
+            }
+        });
+        let mut of_kind: Vec<Vec<u8>> = vec![Vec::new(); order.len()];
+        // (each the kind's index, start and length, and whether the next of its kind joins it)
+        let (mut parts, mut start, mut at) = (Vec::<(usize, usize, usize, bool)>::with_capacity(ends.len()), 0, 0);
+        for &(kind, end) in ends {
+            let k = order.iter().position(|&o| o == kind).unwrap();
+            let len = end - start;
+            let from = if k == 0 {
+                data.copy_within(start..end, at);
+                at += len;
+                at - len
+            } else {
+                of_kind[k].extend_from_slice(&data[start..end]);
+                of_kind[k].len() - len
+            };
+            let open = !matches!(kind, Kind::Format(_)) && len < own;
+            match parts.last_mut() {
+                _ if len == 0 => {}
+                Some(p) if p.0 == k && p.3 && open => p.2 += len,
+                _ => parts.push((k, from, len, open)),
+            }
+            start = end;
+        }
+        data.truncate(at);
+        data.shrink_to_fit();
+        self.streams[raw].data = data;
+        let base = self.streams.len() - 1;
+        for (kind, d) in order.into_iter().zip(of_kind).skip(1) {
+            let class: Cow<'static, str> = match kind {
+                Kind::Format(name) => format!("{prefix}/{name}").into(),
+                kind => format!("{prefix}/{kind}").into(),
+            };
+            self.push_as(class, kind, d);
+        }
+        let stream = |k| if k == 0 { raw } else { base + k };
+        let mut parts: Vec<Node> =
+            parts.into_iter().map(|(k, start, len, _)| Node::slice(stream(k), start as u64, len as u64)).collect();
+        if parts.len() == 1 { parts.pop().unwrap() } else { Node::Concat(parts) }
+    }
+
     /// The applications, those of the root parents first, then those of several outputs.
     pub fn applies(&self) -> Vec<&Apply> {
         let mut out = Vec::new();

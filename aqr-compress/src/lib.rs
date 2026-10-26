@@ -11,13 +11,16 @@
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
 //!   DEFLATE streams by aqr-flate) with its headers derived.
+//! - ar, tar and cpio archives: aqr-bundle, rebuilding the archive from the contents of its
+//!   members with their sizes and checksums derived.
 //! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF, SQLite and FASTA: the recompressor's own formula,
 //!   its module applied to its streams, and files it embeds (PDF's DEFLATE streams and images,
 //!   PSD's and JPEG's embedded files) applied to theirs (see aqr-decompress for the modules).
 //!
 //! In whatever formula a recompressor gives, the data that its applications take as it is
 //! ([`Options::contents`], by default that of a DEFLATE stream, of gzip, zlib or PDF, and
-//! that of an LZ4 stream, of the blocks of a LevelDB table or of the entries of a ZIP archive)
+//! that of an LZ4 stream, of the blocks of a LevelDB table, of the entries of a ZIP archive or
+//! of the members of an ar, tar or cpio archive)
 //! is recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
 //! of the data. So are the slices of a stream that a recompressor gives as data as it is
 //! ([`Stream::content`]: the rest of an executable, around its code), wherever they are.
@@ -31,8 +34,8 @@
 //! ([`Nest::of`]): pixels, text, fonts, tables and compressed data are not looked into, and
 //! data of [`Kind::Format`] is taken as a file of that format from its start ([`Nest::As`]).
 //! The contents of an application may be slices of several streams one after the other (a
-//! ZIP archive's entries, by kind), each recompressed by its own kind. aqr-zip gives the
-//! entries their kinds by their names ([`kind_by_name`]), as gzip's data is by its name, and
+//! ZIP archive's entries, by kind), each recompressed by its own kind. aqr-zip and aqr-bundle
+//! give the entries their kinds by their names ([`kind_by_name`]), as gzip's data is by its name, and
 //! aqr-pdf the streams of a PDF file by what they are.
 //!
 //! Contents that are PNG files of the same geometry and alike (variants of a picture, with
@@ -81,6 +84,7 @@
 //! ```
 
 mod archive;
+mod bundle;
 mod detect;
 mod exe;
 mod extent;
@@ -100,7 +104,7 @@ pub use archive::{Archived, FileReport, Input, Report, Solid, Source, compress_t
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 
-use aqr_decompress::{FLATE, LZ4, Native, SNAPPY, ZIP};
+use aqr_decompress::{BUNDLE, FLATE, LZ4, Native, SNAPPY, ZIP};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
@@ -151,9 +155,8 @@ pub struct Options {
     pub batch: usize,
 }
 
-/// Slices shorter than this are not shared with others ([`Formula::share_slices`]), nor
-/// streams taken as held by the files archived together ([`Held`]): what they share is found by
-/// compressing them solid.
+/// Streams shorter than this are not taken as held by the files archived together ([`Held`]):
+/// what they share is found by compressing them solid.
 pub(crate) const SHARE_MIN: usize = 256 << 10;
 
 /// Bytes that DEFLATE streams may inflate to on top of [`Options::expansion`] times the file.
@@ -216,13 +219,14 @@ pub struct Content {
     pub nest: Nest,
 }
 
-/// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`SNAPPY`] and
-/// [`ZIP`], scanned.
-pub const CONTENTS: [Content; 4] = [
+/// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`SNAPPY`],
+/// [`ZIP`] and [`BUNDLE`], scanned.
+pub const CONTENTS: [Content; 5] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: SNAPPY, input: 0, nest: Nest::Scan },
     Content { module: ZIP, input: 0, nest: Nest::Scan },
+    Content { module: BUNDLE, input: 0, nest: Nest::Scan },
 ];
 
 /// What recompressing a file carries along: the encoder sizing formulas, and the bytes that
@@ -454,6 +458,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
                 Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
                 Format::Zip => zip::zip(d, opt, depth, cx),
+                Format::Ar | Format::Tar | Format::Cpio => bundle::bundle(d),
                 _ => unreachable!("a pure format"),
             }))
             .ok()

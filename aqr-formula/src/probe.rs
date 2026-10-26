@@ -147,10 +147,15 @@ impl Held {
     /// Data shorter than this is not looked for: its anchors are too few to tell.
     pub const MIN: usize = 256 << 10;
 
-    /// What `datas` hold, of those at least [`Held::MIN`] bytes long, hashed on up to
+    /// Data shorter than this does not count as holding any: it has about no anchor. Shorter
+    /// data than [`Held::MIN`] does, as data looked for may be many such (the files of a tar
+    /// archive, each held by a file of its own).
+    pub const INDEX_MIN: usize = 4 << 10;
+
+    /// What `datas` hold, of those at least [`Held::INDEX_MIN`] bytes long, hashed on up to
     /// `threads` threads.
     pub fn of(datas: &[&[u8]], threads: usize) -> Held {
-        let long: Vec<usize> = (0..datas.len()).filter(|&i| datas[i].len() >= Held::MIN).collect();
+        let long: Vec<usize> = (0..datas.len()).filter(|&i| datas[i].len() >= Held::INDEX_MIN).collect();
         let found = aqr_common::pool::par_map(long.len(), threads, |j| held_anchors(datas[long[j]]));
         let mut anchors: HashMap<u64, usize> = HashMap::new();
         for (&i, a) in long.iter().zip(found) {
