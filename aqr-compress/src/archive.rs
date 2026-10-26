@@ -5,21 +5,28 @@
 //! segment. The files are made at once, on up to [`Options::threads`] threads (the formulas of
 //! those of pure formats beforehand, as contents are; then each file in a context of its own).
 //!
+//! The files are taken in batches of about [`Options::batch`] bytes, in their order (by
+//! extension, then by name): each batch read ([`Source`]), made, laid out, checked and written
+//! before the next, so that what is held at once is about a batch's, whatever the files'
+//! (but for the largest file). Files of the same content as one before are stored once.
+//!
 //! A file is to be read without the others, so what files share is bounded: a set of PNG files
 //! takes at most [`Options::set_bytes`] bytes of them (as it is decoded whole for any of them),
-//! and the streams of a class and kind of all the files are put one after another, solid, in
-//! non-leaf blocks of at most [`Options::block`] bytes, in the order of the files (by
-//! extension, then by name), but those that do not compress ([`aqr::Encoder::compresses`]).
-//! Files of the same content are stored once.
+//! and the streams of a class and kind of the files of a batch are put one after another,
+//! solid, in non-leaf blocks of at most [`Options::block`] bytes, but those that do not compress
+//! ([`aqr::Encoder::compresses`]).
 //!
-//! With [`Options::verify`], the archive is decoded (the applications' outputs taken from those
-//! evaluated beforehand, as [`crate::compress`] does) and its files compared with the input:
-//! those not given back, or all where the archive does not decode, are made again kept raw.
+//! With [`Options::verify`], each batch is decoded alone ([`aqr::SegmentWriter::standalone`],
+//! the applications' outputs taken from those evaluated beforehand, as [`crate::compress`]
+//! does) and its files compared with the input: those not given back (all of the batch's where
+//! it does not decode) are made again kept raw.
 
 use std::collections::{HashMap, HashSet};
+use std::io::{self, Write};
+use std::sync::Mutex;
 
 use aqr_decompress::{MODULES, Native};
-use aqr_formula::aqr::{self, EntryNode, Leaf, Placed, Segment, Tree, Value};
+use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Placed, SegmentWriter, Tree};
 use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::{Cx, Options, detect, kind_by_name, nested, place_all, sets, verify};
@@ -33,6 +40,41 @@ const MERGE_PROBE: usize = 4 << 10;
 pub struct Input<'a> {
     pub name: &'a [u8],
     pub data: &'a [u8],
+}
+
+/// Where the contents of the files to archive come from, read as their batch is made.
+pub trait Source: Sync {
+    fn len(&self) -> usize;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// A name telling the kind of content `c` ([`kind_by_name`]), and its order.
+    fn name(&self, c: usize) -> &[u8];
+
+    /// Bytes of content `c`, as it is to be read (for the batches: it may be read otherwise).
+    fn size(&self, c: usize) -> u64;
+
+    fn read(&self, c: usize) -> io::Result<Vec<u8>>;
+}
+
+impl Source for [Input<'_>] {
+    fn len(&self) -> usize {
+        <[Input]>::len(self)
+    }
+
+    fn name(&self, c: usize) -> &[u8] {
+        self[c].name
+    }
+
+    fn size(&self, c: usize) -> u64 {
+        self[c].data.len() as u64
+    }
+
+    fn read(&self, c: usize) -> io::Result<Vec<u8>> {
+        Ok(self[c].data.to_vec())
+    }
 }
 
 /// An archive of several files, and what became of them.
@@ -55,6 +97,9 @@ pub struct Report {
     pub overhead: usize,
     /// The contents kept raw because the archive did not give them back.
     pub unverified: Vec<usize>,
+    /// Bytes of the archive, and of the contents read.
+    pub len: usize,
+    pub read: u64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -69,6 +114,8 @@ pub struct FileReport {
     pub archived: f64,
     /// The content it is the same as, stored once.
     pub same_as: Option<usize>,
+    /// Bytes of the content.
+    pub len: u64,
 }
 
 /// A non-leaf block that several files slice.
@@ -84,31 +131,97 @@ pub struct Solid {
 
 /// The archive of `tree`, whose files are of `contents` (by [`EntryNode::File`]), with what
 /// became of them. Panics on a tree that is not one the spec allows.
+///
+/// [`EntryNode::File`]: aqr::EntryNode::File
 pub fn compress_tree(tree: &Tree, contents: &[Input], opt: &Options) -> Archived {
-    // the same contents once, by the first of them
-    let mut first: HashMap<(u128, usize), usize> = HashMap::new();
-    let same_as: Vec<Option<usize>> = contents
-        .iter()
-        .enumerate()
-        .map(|(c, i)| {
-            let k = (xxhash_rust::xxh3::xxh3_128(i.data), i.data.len());
-            let f = *first.entry(k).or_insert(c);
-            (f != c).then_some(f)
-        })
-        .collect();
-    let mut order: Vec<usize> = (0..contents.len()).filter(|&c| same_as[c].is_none()).collect();
-    order.sort_by(|&a, &b| sort_key(contents[a].name).cmp(&sort_key(contents[b].name)).then(a.cmp(&b)));
-    let mut raw = HashSet::new();
-    loop {
-        let (archive, mut report, bad) = attempt(tree, contents, &order, &same_as, &raw, opt);
-        let bad: Vec<usize> = bad.into_iter().filter(|c| !raw.contains(c)).collect();
-        if bad.is_empty() {
-            report.unverified = raw.into_iter().collect();
-            report.unverified.sort_unstable();
-            return Archived { archive, report };
+    let mut archive = Vec::new();
+    let report = compress_tree_to(tree, contents, opt, &mut archive).expect("no failure but of the tree");
+    Archived { archive, report }
+}
+
+/// The archive of `tree`, whose files are of the contents of `src`, written to `out` as it is
+/// made, with what became of the files. Fails where a content cannot be read or the archive
+/// written, and on a tree the spec does not allow.
+pub fn compress_tree_to<S: Source + ?Sized>(
+    tree: &Tree,
+    src: &S,
+    opt: &Options,
+    out: &mut dyn Write,
+) -> io::Result<Report> {
+    let n = src.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| sort_key(src.name(a)).cmp(&sort_key(src.name(b))).then(a.cmp(&b)));
+    let mut batches: Vec<&[usize]> = Vec::new();
+    let mut start = 0;
+    let mut bytes = 0u64;
+    for (i, &c) in order.iter().enumerate() {
+        if i > start && bytes.saturating_add(src.size(c)) > opt.batch as u64 {
+            batches.push(&order[start..i]);
+            (start, bytes) = (i, 0);
         }
-        raw.extend(bad);
+        bytes = bytes.saturating_add(src.size(c));
     }
+    if start < order.len() {
+        batches.push(&order[start..]);
+    }
+
+    let mut w = SegmentWriter::new();
+    out.write_all(SegmentWriter::header())?;
+    let mut first: HashMap<(u128, usize), usize> = HashMap::new();
+    let mut at: Vec<Option<ContentAt>> = vec![None; n];
+    let mut r = Report { files: vec![FileReport::default(); n], ..Report::default() };
+    for batch in batches {
+        let read = aqr_common::pool::par_map(batch.len(), opt.threads, |i| src.read(batch[i]));
+        let mut files: Vec<File> = Vec::with_capacity(batch.len());
+        for (&c, d) in batch.iter().zip(read) {
+            let d = d?;
+            r.read += d.len() as u64;
+            r.files[c].len = d.len() as u64;
+            match first.entry((xxhash_rust::xxh3::xxh3_128(&d), d.len())) {
+                std::collections::hash_map::Entry::Occupied(e) => r.files[c].same_as = Some(*e.get()),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(c);
+                    files.push((c, d, kind_by_name(src.name(c))));
+                }
+            }
+        }
+        if files.is_empty() {
+            continue;
+        }
+        let mut raw = HashSet::new();
+        let made = loop {
+            let made = make(&w, &files, &raw, opt);
+            let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
+            if bad.is_empty() {
+                break made;
+            }
+            raw.extend(bad);
+        };
+        out.write_all(&made.batch.bytes)?;
+        w.commit(&made.batch);
+        for (k, (c, d, _)) in files.iter().enumerate() {
+            let (l, o) = made.at[k];
+            at[*c] = Some(ContentAt { leaf: made.batch.leaf_at[l], output: o, size: d.len() as u64 });
+            let f = &made.files[k];
+            (r.files[*c].format, r.files[*c].modules, r.files[*c].archived) = (f.format, f.modules.clone(), f.archived);
+        }
+        let global = |ks: &[usize]| ks.iter().map(|&k| files[k].0).collect::<Vec<_>>();
+        for s in made.solid {
+            r.solid.push(Solid { contents: global(&s.contents), ..s });
+        }
+        r.sets.extend(made.sets.iter().map(|s| global(s)));
+        r.unverified.extend(raw.iter().map(|&k| files[k].0));
+    }
+    let contents: Vec<ContentAt> =
+        (0..n).map(|c| at[c].or_else(|| at[r.files[c].same_as?]).expect("every content made")).collect();
+    // (an encoder of the metadata block only)
+    let enc = aqr::Encoder::with_threads(opt.level, opt.threads);
+    let (end, _) = w.finish(&enc, tree, &contents).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
+    out.write_all(&end)?;
+    r.len = w.len() + end.len();
+    r.overhead = r.len - r.files.iter().map(|f| f.archived).sum::<f64>().round() as usize;
+    r.unverified.sort_unstable();
+    Ok(r)
 }
 
 /// What files are ordered by, to put those alike next to each other: the extension, then the
@@ -119,34 +232,43 @@ fn sort_key(name: &[u8]) -> (Vec<u8>, &[u8]) {
     (ext.to_ascii_lowercase(), base)
 }
 
-/// The archive of `tree`, its contents (those in `order`; the others `same_as` one of them)
-/// recompressed but those in `raw`, with its report; and the contents it does not give back
-/// (where verified).
-fn attempt(
-    tree: &Tree,
-    contents: &[Input],
-    order: &[usize],
-    same_as: &[Option<usize>],
-    raw: &HashSet<usize>,
-    opt: &Options,
-) -> (Vec<u8>, Report, Vec<usize>) {
+/// A file of a batch: its content, its data and the kind its name tells.
+type File = (usize, Vec<u8>, Kind);
+
+/// A batch made: its blocks, each file's leaf and output (by its index in the batch), what
+/// became of the files (by the same), and those not given back.
+struct Made {
+    batch: Batch,
+    at: Vec<(usize, usize)>,
+    files: Vec<FileReport>,
+    solid: Vec<Solid>,
+    sets: Vec<Vec<usize>>,
+    bad: Vec<usize>,
+}
+
+/// The batch of `files` (each its content and data), to follow the blocks of `w`, recompressed
+/// but those (by index) in `raw`.
+fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) -> Made {
     // a formula of the files as the contents of its streams, each a file of its own
     let mut f = Formula::default();
-    let mut slices = Vec::with_capacity(order.len());
-    for &c in order {
-        let (kind, d) = (kind_by_name(contents[c].name), contents[c].data.to_vec());
-        slices.push(if raw.contains(&c) { f.push_as("raw", kind, d) } else { f.push_content("raw", kind, d) });
+    let mut slices = Vec::with_capacity(files.len());
+    for (k, (_, d, kind)) in files.iter().enumerate() {
+        let kind = *kind;
+        slices.push(if raw.contains(&k) {
+            f.push_as("raw", kind, d.clone())
+        } else {
+            f.push_content("raw", kind, d.clone())
+        });
     }
     f.root = Node::Concat(slices);
 
     // nested a format deeper, so that the files are as deep as a file alone is
     let nopt = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
-    let total = contents.iter().map(|i| i.data.len()).sum();
+    let total = files.iter().map(|f| f.1.len()).sum();
     let mut cx = Cx::of_len(total, &nopt);
     cx.top_sets = Some(opt.set_bytes);
     // (the files known by where their copies are, and taken from the input)
-    let mut regions: Vec<&[u8]> = vec![&[]; contents.len()];
-    order.iter().zip(&f.streams).for_each(|(&c, s)| regions[c] = &s.data);
+    let regions: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     cx.pre = opt.verify.then(|| std::sync::Arc::new(verify::Prevalidator::spawn(opt.threads, &regions)));
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let mut taken = HashSet::new();
@@ -170,10 +292,10 @@ fn attempt(
     // a leaf for each file, or for each set of them
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
     let mut leaves: Vec<Leaf> = Vec::new();
-    let mut at = vec![(0, 0); contents.len()];
+    let mut at = vec![(0, 0); files.len()];
     let mut set_leaf: HashMap<usize, usize> = HashMap::new();
-    for (&c, node) in order.iter().zip(nodes) {
-        let sum = Some(aqr::checksum(contents[c].data));
+    for (k, node) in nodes.into_iter().enumerate() {
+        let sum = Some(aqr::checksum(&files[k].1));
         match node {
             Node::Output { shared, index, .. } => {
                 let n = f.shared[shared].sizes.len();
@@ -182,17 +304,12 @@ fn attempt(
                     leaves.len() - 1
                 });
                 (leaves[l].outputs[index], leaves[l].sums[index]) = (node, sum);
-                at[c] = (l, index);
+                at[k] = (l, index);
             }
             node => {
                 leaves.push(Leaf { outputs: vec![node], sums: vec![sum] });
-                at[c] = (leaves.len() - 1, 0);
+                at[k] = (leaves.len() - 1, 0);
             }
-        }
-    }
-    for (c, s) in same_as.iter().enumerate() {
-        if let Some(s) = s {
-            at[c] = at[*s];
         }
     }
 
@@ -211,11 +328,9 @@ fn attempt(
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());
 
-    let seg = Segment { f: &f, leaves: &leaves, tree, contents: &at };
-    let (archive, placed) =
-        cx.enc.encode_segment(&seg).expect("a tree the spec allows, of slices within their streams");
-    cx.enc.clear();
-    let report = report(&f, &leaves, &placed, archive.len(), contents, &at, same_as);
+    let batch = w.batch(&cx.enc, &f, &leaves).expect("slices within their streams");
+    drop(cx);
+    let (reports, solid, sets) = report(&f, &leaves, &batch.layout, files, &at);
     drop(f);
 
     let bad = if opt.verify {
@@ -223,42 +338,63 @@ fn attempt(
             native: Native { threads: opt.threads },
             memo: memo.into(),
             hits: Default::default(),
-            files: &contents.iter().map(|i| i.data).collect::<Vec<_>>(),
+            files: &files.iter().map(|f| &f.1[..]).collect::<Vec<_>>(),
         };
-        match aqr::decode_value_with(&archive, &aqr::natives(&MODULES, &m), opt.threads) {
-            Ok(Value::Tree(t, files)) => {
-                let wanted =
-                    tree.entries.iter().filter_map(|e| if let EntryNode::File(c) = e.node { Some(c) } else { None });
-                let got = t.entries.iter().filter_map(|e| if let EntryNode::File(c) = e.node { Some(c) } else { None });
-                let mut bad: Vec<usize> = wanted
-                    .zip(got)
-                    .filter(|&(c, g)| files[g] != contents[c].data)
-                    .map(|(c, _)| same_as[c].unwrap_or(c))
-                    .collect();
-                bad.sort_unstable();
-                bad.dedup();
-                bad
-            }
-            // (which file is not known: all of them raw)
-            _ => order.to_vec(),
-        }
+        check(w, &batch, files, &at, &m, opt.threads)
     } else {
         Vec::new()
     };
-    (archive, report, bad)
+    Made { batch, at, files: reports, solid, sets, bad }
 }
 
-/// The report of the archive of `len` bytes whose blocks are `placed`, of formula `f` and its
-/// `leaves`, each content at its leaf and output in `at`.
+/// The files of batch `b` (by index; each at its leaf and output in `at`) that its blocks, decoded
+/// alone with the modules of `m`, do not give back: all of them where it does not decode.
+fn check(
+    w: &SegmentWriter,
+    b: &Batch,
+    files: &[File],
+    at: &[(usize, usize)],
+    m: &verify::Cached,
+    threads: usize,
+) -> Vec<usize> {
+    let c = w.standalone(b);
+    let natives = aqr::natives(&MODULES, m);
+    // the leaves in the order of their blocks, and of each the files of its outputs
+    let mut by_block: Vec<usize> = (0..b.leaf_at.len()).collect();
+    by_block.sort_by_key(|&l| b.leaf_at[l]);
+    let mut of_leaf: Vec<Vec<(usize, usize)>> = vec![Vec::new(); b.leaf_at.len()];
+    at.iter().enumerate().for_each(|(k, &(l, o))| of_leaf[l].push((o, k)));
+    let bad = Mutex::new(Vec::new());
+    let all = || (0..files.len()).collect();
+    let Ok(a) = aqr::open(&c, &natives) else { return all() };
+    let r = a.each_leaf(threads, |i, outputs| {
+        let l = by_block[i];
+        let mut bad = bad.lock().unwrap();
+        match outputs {
+            Ok(outputs) => {
+                bad.extend(of_leaf[l].iter().filter(|&&(o, k)| outputs.get(o) != Some(&files[k].1)).map(|&(_, k)| k))
+            }
+            Err(_) => bad.extend(of_leaf[l].iter().map(|&(_, k)| k)),
+        }
+        Ok(())
+    });
+    if r.is_err() {
+        return all();
+    }
+    let mut bad = bad.into_inner().unwrap();
+    bad.sort_unstable();
+    bad
+}
+
+/// What became of `files` (by index) in batch `layout` of formula `f` and its `leaves`, each
+/// file at its leaf and output in `at`: its report, the solid blocks and the sets.
 fn report(
     f: &Formula,
     leaves: &[Leaf],
-    placed: &[(Placed, usize)],
-    len: usize,
-    contents: &[Input],
+    layout: &[(Placed, usize)],
+    files: &[File],
     at: &[(usize, usize)],
-    same_as: &[Option<usize>],
-) -> Report {
+) -> (Vec<FileReport>, Vec<Solid>, Vec<Vec<usize>>) {
     // by leaf, the bytes it slices of each stream, and the modules it applies
     let mut sliced: Vec<HashMap<usize, u64>> = vec![HashMap::new(); leaves.len()];
     let mut modules: Vec<Vec<Module>> = vec![Vec::new(); leaves.len()];
@@ -287,57 +423,57 @@ fn report(
         s.keys().for_each(|&st| by_stream.entry(st).or_default().push(l));
     }
     let mut bytes = vec![0f64; leaves.len()];
-    let mut r = Report { overhead: len, ..Report::default() };
-    // by leaf, its contents (the first of each content)
+    let mut solid = Vec::new();
+    // by leaf, its files
     let mut of_leaf: Vec<Vec<usize>> = vec![Vec::new(); leaves.len()];
-    (0..contents.len()).filter(|&c| same_as[c].is_none()).for_each(|c| of_leaf[at[c].0].push(c));
-    for &(p, n) in placed {
+    (0..files.len()).for_each(|k| of_leaf[at[k].0].push(k));
+    for &(p, n) in layout {
         match p {
             Placed::Formula(l) | Placed::Data(l) => bytes[l] += n as f64,
             Placed::NonLeaf(st) => {
                 let ls = &by_stream[&st];
                 let total: u64 = ls.iter().map(|&l| sliced[l][&st]).sum();
                 ls.iter().for_each(|&l| bytes[l] += n as f64 * sliced[l][&st] as f64 / total.max(1) as f64);
-                let mut cs: Vec<usize> = ls.iter().flat_map(|&l| of_leaf[l].iter().copied()).collect();
-                cs.sort_unstable();
-                if cs.len() > 1 {
+                let mut ks: Vec<usize> = ls.iter().flat_map(|&l| of_leaf[l].iter().copied()).collect();
+                ks.sort_unstable();
+                if ks.len() > 1 {
                     let s = &f.streams[st];
-                    r.solid.push(Solid {
+                    solid.push(Solid {
                         class: s.class.to_string(),
                         kind: s.kind,
                         len: s.data.len(),
                         archived: n,
-                        contents: cs,
+                        contents: ks,
                     });
                 }
             }
-            Placed::Module | Placed::Resource | Placed::Metadata => continue,
+            Placed::Module | Placed::Resource | Placed::Metadata => {}
         }
-        r.overhead -= n;
     }
-    for (l, cs) in of_leaf.iter().enumerate() {
+    let mut sets = Vec::new();
+    for (l, ks) in of_leaf.iter().enumerate() {
         if leaves[l].outputs.len() > 1 {
-            let mut set = cs.clone();
-            set.sort_by_key(|&c| at[c].1);
-            r.sets.push(set);
+            let mut set = ks.clone();
+            set.sort_by_key(|&k| at[k].1);
+            sets.push(set);
         }
     }
-    let out_len = |c: usize| leaves[at[c].0].outputs[at[c].1].len() as f64;
+    let out_len = |k: usize| leaves[at[k].0].outputs[at[k].1].len() as f64;
     let leaf_len: Vec<f64> = leaves.iter().map(|l| l.outputs.iter().map(|o| o.len() as f64).sum()).collect();
-    r.files = (0..contents.len())
-        .map(|c| {
-            let l = at[c].0;
+    let reports = (0..files.len())
+        .map(|k| {
+            let l = at[k].0;
             FileReport {
-                format: detect(contents[c].data).map(|f| f.name()),
+                format: detect(&files[k].1).map(|f| f.name()),
                 modules: modules[l].clone(),
-                archived: match same_as[c] {
-                    Some(_) => 0.0,
-                    None if leaf_len[l] > 0.0 => bytes[l] * out_len(c) / leaf_len[l],
-                    None => bytes[l] / leaves[l].outputs.len() as f64,
+                archived: match leaf_len[l] {
+                    n if n > 0.0 => bytes[l] * out_len(k) / n,
+                    _ => bytes[l] / leaves[l].outputs.len() as f64,
                 },
-                same_as: same_as[c],
+                same_as: None,
+                len: files[k].1.len() as u64,
             }
         })
         .collect();
-    r
+    (reports, solid, sets)
 }

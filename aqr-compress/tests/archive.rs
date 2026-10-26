@@ -157,8 +157,9 @@ fn files_given_back() {
     let total: usize = files.iter().map(|f| f.1.len()).sum();
     assert!(c.len() < total / 3, "{} of {total}", c.len());
     // the text files solid, the same content once, the PNG files a set, the others recompressed
-    assert!(r.solid.iter().any(|s| [0, 1, 2].iter().all(|c| s.contents.contains(c))), "{:?}", r.solid);
-    assert_eq!(r.files[3].same_as, Some(1));
+    // (the first of the same contents in the order of the files: same.txt)
+    assert!(r.solid.iter().any(|s| [0, 2, 3].iter().all(|c| s.contents.contains(c))), "{:?}", r.solid);
+    assert_eq!(r.files[1].same_as, Some(3));
     assert_eq!(sets(&r), [vec![5, 6, 7]]);
     let names = |c: usize| r.files[c].modules.iter().map(|m| m.name).collect::<Vec<_>>();
     assert_eq!(names(8), ["flate-recons"]);
@@ -185,4 +186,17 @@ fn bounded() {
     // nothing recompressed: all raw, solid still
     let (_, r) = archived(&files, &Options { depth: 0, ..Options::default() });
     assert!(r.files.iter().all(|f| f.modules.is_empty()) && !r.solid.is_empty());
+}
+
+/// Files in batches of 30 KB: each batch apart, the same content once across them.
+#[test]
+fn batches() {
+    let files = sample();
+    let (one, _) = archived(&files, &Options::default());
+    let (c, r) = archived(&files, &Options { batch: 30_000, ..Options::default() });
+    assert_eq!(r.files[1].same_as, Some(3));
+    // (the text files no longer solid all together)
+    assert!(c.len() > one.len() && r.solid.iter().all(|s| s.len <= 2 * 30_000), "{} {}", c.len(), one.len());
+    let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
+    assert!((attributed + r.overhead as f64 - c.len() as f64).abs() < 1.0);
 }

@@ -96,7 +96,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
 pub use aqr_formula::{Formula, Kind, Module, Node, Region};
-pub use archive::{Archived, FileReport, Input, Report, Solid, compress_tree};
+pub use archive::{Archived, FileReport, Input, Report, Solid, Source, compress_tree, compress_tree_to};
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 
@@ -146,6 +146,9 @@ pub struct Options {
     /// Of an archive of several files: the most bytes of the files of a set coded against each
     /// other, which a file of it read alone has to decode.
     pub set_bytes: usize,
+    /// Of an archive of several files: about the most bytes of files made at once (a file
+    /// longer is a batch of its own), which bounds the memory taken.
+    pub batch: usize,
 }
 
 /// Bytes that DEFLATE streams may inflate to on top of [`Options::expansion`] times the file.
@@ -193,6 +196,7 @@ impl Default for Options {
             shared_resources: false,
             block: 16 << 20,
             set_bytes: 64 << 20,
+            batch: 512 << 20,
         }
     }
 }

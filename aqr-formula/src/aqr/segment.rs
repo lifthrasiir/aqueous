@@ -1,12 +1,15 @@
-//! An archive of several files, as one segment ([`Encoder::encode_segment`]): the module and
-//! resource blocks first, then the leaves, each a formula block of the outputs of a [`Leaf`]
-//! (or a leaf data block, where it is all of a stream of its own), and after the formula blocks
-//! that slice them the non-leaf blocks of the streams; the metadata block of the [`Tree`] last.
+//! An archive of several files, as one segment, written a batch of leaves at a time
+//! ([`SegmentWriter`]; all of them at once, [`Encoder::encode_segment`]): each leaf a formula
+//! block of the outputs of a [`Leaf`] (or a leaf data block, where it is all of a stream of its
+//! own), after the formula blocks that slice them the non-leaf blocks of the streams, each module
+//! and resource block before the first leaf taking it; the metadata block of the [`Tree`] last.
 //!
 //! Leaves that slice a stream together are laid out together, as a group: their formula
 //! blocks, then the streams any of them slices (spec, "Block order"). A stream sliced by
 //! several leaves holds them solid; the encoder is given the streams as they are, and decides
-//! nothing of what goes together.
+//! nothing of what goes together. A batch is checked alone ([`SegmentWriter::standalone`])
+//! before it is written: its blocks with the module and resource blocks before them make an
+//! archive of a single file, its leaves' outputs one after another.
 
 use std::collections::HashSet;
 
@@ -14,13 +17,13 @@ use aqr_common::varint;
 
 use super::tree::{self, EntryNode, FileParam, Tree};
 use super::{
-    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, Kind, MODULE, SWAP, always_compressed, block, footer_with,
-    formula_block, wasm,
+    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, Kind, MODULE, SWAP, always_compressed, block, footer,
+    footer_with, formula_block, wasm,
 };
 use crate::{Error, Formula, Module, Node, Resource, Result};
 
 /// The content of one or more files: outputs over the streams (and the applications of several
-/// outputs) of the formula of the segment.
+/// outputs) of a formula.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Leaf {
     pub outputs: Vec<Node>,
@@ -43,11 +46,11 @@ pub struct Segment<'a> {
 pub enum Placed {
     Module,
     Resource,
-    /// The formula block of a leaf.
+    /// The formula block of a leaf (of its batch).
     Formula(usize),
     /// The leaf data block of a leaf, all of a stream.
     Data(usize),
-    /// The non-leaf block of a stream.
+    /// The non-leaf block of a stream (of the formula of its batch).
     NonLeaf(usize),
     Metadata,
 }
@@ -55,22 +58,80 @@ pub enum Placed {
 /// The blocks of an archive in order, each what it is and its bytes.
 pub type Layout = Vec<(Placed, usize)>;
 
-impl Encoder {
-    /// The archive of segment `s`, with what each of its blocks is. Fails on slices out of
-    /// their streams, on outputs not taken once each (by one leaf), and on a tree the spec
-    /// does not allow.
-    pub fn encode_segment(&self, s: &Segment) -> Result<(Vec<u8>, Layout)> {
-        let f = s.f;
-        tree::check(s.tree, s.contents.len()).map_err(Error::new)?;
-        for &(leaf, output) in s.contents {
-            if s.leaves.get(leaf).is_none_or(|l| output >= l.outputs.len()) {
-                return Err(Error::new(format!("no output {output} of leaf #{leaf}")));
-            }
+/// A segment being written: where it is, and the modules and resources of its blocks so far.
+pub struct SegmentWriter {
+    /// Bytes of the archive so far, its header magic among them.
+    at: usize,
+    modules: Vec<Module>,
+    module_at: Vec<usize>,
+    resources: Vec<Resource>,
+    resource_at: Vec<usize>,
+    /// The module and resource blocks so far, one after another.
+    prefix: Vec<u8>,
+}
+
+/// The blocks of a batch of leaves, to write after those before ([`SegmentWriter::commit`]).
+pub struct Batch {
+    pub bytes: Vec<u8>,
+    /// Where each leaf block is in the archive.
+    pub leaf_at: Vec<usize>,
+    pub layout: Layout,
+    /// The modules and resources it adds, and where their blocks are in `bytes`.
+    modules: Vec<Module>,
+    resources: Vec<Resource>,
+    added: Vec<std::ops::Range<usize>>,
+}
+
+/// Where a content of an archive is: the leaf block (where it starts in the archive), its output
+/// and its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContentAt {
+    pub leaf: usize,
+    pub output: usize,
+    pub size: u64,
+}
+
+impl Default for SegmentWriter {
+    fn default() -> SegmentWriter {
+        SegmentWriter::new()
+    }
+}
+
+impl SegmentWriter {
+    /// A segment of no blocks yet, after the header ([`SegmentWriter::header`]).
+    pub fn new() -> SegmentWriter {
+        SegmentWriter {
+            at: HEADER_MAGIC.len(),
+            modules: Vec::new(),
+            module_at: Vec::new(),
+            resources: Vec::new(),
+            resource_at: Vec::new(),
+            prefix: Vec::new(),
         }
+    }
+
+    /// The bytes of the archive before its blocks.
+    pub fn header() -> &'static [u8] {
+        &HEADER_MAGIC
+    }
+
+    /// Bytes of the archive so far.
+    pub fn len(&self) -> usize {
+        self.at
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.at == HEADER_MAGIC.len()
+    }
+
+    /// The blocks of `leaves` over `f`'s streams and applications of several outputs (its root
+    /// not used), to follow those so far. Fails on slices out of their streams and on outputs
+    /// not taken once each (by one leaf).
+    pub fn batch(&self, enc: &Encoder, f: &Formula, leaves: &[Leaf]) -> Result<Batch> {
         let mut check = f.clone();
-        check.root = Node::Concat(s.leaves.iter().flat_map(|l| l.outputs.iter().cloned()).collect());
+        check.root = Node::Concat(leaves.iter().flat_map(|l| l.outputs.iter().cloned()).collect());
         check.check_outputs()?;
-        for (i, l) in s.leaves.iter().enumerate() {
+        for (i, l) in leaves.iter().enumerate() {
             if l.outputs.is_empty() || l.sums.len() != l.outputs.len() {
                 return Err(Error::new(format!("leaf #{i} of no outputs, or not as many checksums")));
             }
@@ -87,12 +148,12 @@ impl Encoder {
             return Err(e);
         }
 
-        let uses: Vec<Uses> = s.leaves.iter().map(|l| uses(f, l)).collect();
+        let uses: Vec<Uses> = leaves.iter().map(|l| uses(f, l)).collect();
         // leaves of a stream of their own, all of it (or of nothing)
         let mut slicers = vec![0usize; f.streams.len()];
         uses.iter().for_each(|u| u.streams.iter().for_each(|&st| slicers[st] += 1));
         let data_leaf = |i: usize| -> Option<Option<usize>> {
-            let l = &s.leaves[i];
+            let l = &leaves[i];
             match (&l.outputs[..], uses[i].shared.is_empty()) {
                 ([n], true) if n.is_empty() => Some(None),
                 ([Node::Slice { stream, start: 0, len }], true)
@@ -105,7 +166,7 @@ impl Encoder {
         };
 
         // the groups of leaves slicing a stream together, by their first leaf
-        let mut group: Vec<usize> = (0..s.leaves.len()).collect();
+        let mut group: Vec<usize> = (0..leaves.len()).collect();
         fn find(g: &mut [usize], i: usize) -> usize {
             let mut r = i;
             while g[r] != r {
@@ -126,49 +187,60 @@ impl Encoder {
                 }
             }
         }
-        let roots: Vec<usize> = (0..s.leaves.len()).map(|i| find(&mut group, i)).collect();
+        let roots: Vec<usize> = (0..leaves.len()).map(|i| find(&mut group, i)).collect();
 
-        let (mut modules, mut resources): (Vec<Module>, Vec<&Resource>) = (Vec::new(), Vec::new());
-        for u in &uses {
-            for m in &u.modules {
-                if !modules.contains(m) {
-                    modules.push(*m);
-                }
-            }
-            for r in &u.resources {
-                if !resources.contains(&r) {
-                    resources.push(r);
-                }
-            }
-        }
-        let level = self.base_level();
+        // the streams compressed at once, then laid out
+        let mut written = vec![false; f.streams.len()];
+        uses.iter().for_each(|u| u.streams.iter().for_each(|&st| written[st] = true));
+        let todo: Vec<&[u8]> = (0..f.streams.len())
+            .filter(|&st| written[st] && f.streams[st].kind != Kind::Compressed)
+            .map(|st| &f.streams[st].data[..])
+            .collect();
+        enc.precompress(&todo)?;
 
-        let mut out = HEADER_MAGIC.to_vec();
-        let mut placed = Vec::new();
-        let mut put = |out: &mut Vec<u8>, p: Placed, start: usize| placed.push((p, out.len() - start));
-        let (mut module_at, mut resource_at) = (Vec::new(), Vec::new());
-        for &m in &modules {
-            let at = out.len();
-            module_at.push(at);
-            block(&mut out, MODULE, &always_compressed(&mut self.cctx(), &[&wasm(m)], level, self.threads)?);
-            put(&mut out, Placed::Module, at);
-        }
-        for r in &resources {
-            let at = out.len();
-            resource_at.push(at);
-            self.resource_block(&mut out, r)?;
-            put(&mut out, Placed::Resource, at);
-        }
-
-        let mut leaf_at = vec![0; s.leaves.len()];
+        let level = enc.base_level();
+        let mut b = Batch {
+            bytes: Vec::new(),
+            leaf_at: vec![0; leaves.len()],
+            layout: Vec::new(),
+            modules: Vec::new(),
+            resources: Vec::new(),
+            added: Vec::new(),
+        };
+        let (mut modules, mut resources): (Vec<Module>, Vec<Resource>) = (self.modules.clone(), self.resources.clone());
+        // (the non-leaf blocks counted from the batch's first: only their deltas are stored)
         let mut ordinals = vec![None; f.streams.len()];
         let mut non_leaf = 0u64;
-        let mut done = vec![false; s.leaves.len()];
-        for first in 0..s.leaves.len() {
+        let mut done = vec![false; leaves.len()];
+        let out = &mut b.bytes;
+        for first in 0..leaves.len() {
             if done[first] {
                 continue;
             }
-            let members: Vec<usize> = (first..s.leaves.len()).filter(|&i| roots[i] == roots[first]).collect();
+            let members: Vec<usize> = (first..leaves.len()).filter(|&i| roots[i] == roots[first]).collect();
+            // the modules and resources of the group not written yet
+            for &i in &members {
+                for &m in &uses[i].modules {
+                    if !modules.contains(&m) {
+                        let at = out.len();
+                        block(out, MODULE, &always_compressed(&mut enc.cctx(), &[&wasm(m)], level, enc.threads)?);
+                        b.layout.push((Placed::Module, out.len() - at));
+                        b.added.push(at..out.len());
+                        modules.push(m);
+                        b.modules.push(m);
+                    }
+                }
+                for r in &uses[i].resources {
+                    if !resources.contains(r) {
+                        let at = out.len();
+                        enc.resource_block(out, r)?;
+                        b.layout.push((Placed::Resource, out.len() - at));
+                        b.added.push(at..out.len());
+                        resources.push(r.clone());
+                        b.resources.push(r.clone());
+                    }
+                }
+            }
             // the streams of the group, in their order, as the blocks after its formula blocks
             let mut streams: Vec<usize> = members
                 .iter()
@@ -179,56 +251,121 @@ impl Encoder {
                 .collect();
             streams.sort_unstable();
             streams.iter().enumerate().for_each(|(k, &st)| ordinals[st] = Some(non_leaf + k as u64));
+            let refs: Vec<&Resource> = resources.iter().collect();
             for &i in &members {
                 done[i] = true;
                 let at = out.len();
-                leaf_at[i] = at;
+                b.leaf_at[i] = self.at + at;
                 match data_leaf(i) {
                     Some(stream) => {
                         let data: &[u8] = stream.map_or(&[], |st| &f.streams[st].data);
                         let stored = stream.is_some_and(|st| f.streams[st].kind == Kind::Compressed);
-                        self.content_block(&mut out, true, &[data], stored)?;
-                        put(&mut out, Placed::Data(i), at);
+                        enc.content_block(out, true, &[data], stored)?;
+                        b.layout.push((Placed::Data(i), out.len() - at));
                     }
                     None => {
-                        let data =
-                            self.leaf_formula(f, &s.leaves[i], &uses[i], non_leaf, &ordinals, &modules, &resources);
-                        let n = s.leaves[i].outputs.len() as u64;
-                        formula_block(
-                            &mut out,
-                            n,
-                            &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?,
-                        );
-                        put(&mut out, Placed::Formula(i), at);
+                        let data = enc.leaf_formula(f, &leaves[i], &uses[i], non_leaf, &ordinals, &modules, &refs);
+                        let n = leaves[i].outputs.len() as u64;
+                        formula_block(out, n, &always_compressed(&mut enc.cctx(), &[&data], level, enc.threads)?);
+                        b.layout.push((Placed::Formula(i), out.len() - at));
                     }
                 }
             }
             for &st in &streams {
                 let at = out.len();
                 let stored = f.streams[st].kind == Kind::Compressed;
-                self.content_block(&mut out, false, &[&f.streams[st].data], stored)?;
-                put(&mut out, Placed::NonLeaf(st), at);
+                enc.content_block(out, false, &[&f.streams[st].data], stored)?;
+                b.layout.push((Placed::NonLeaf(st), out.len() - at));
             }
             non_leaf += streams.len() as u64;
         }
+        Ok(b)
+    }
 
-        let at = out.len();
-        let mut files = vec![None; s.tree.entries.len()];
-        for (i, e) in s.tree.entries.iter().enumerate() {
-            if let EntryNode::File(c) = e.node {
-                let (leaf, output) = s.contents[c];
-                let size = s.leaves[leaf].outputs[output].len();
-                files[i] = Some(FileParam { leaf: leaf_at[leaf], output: output as u64, size });
+    /// An archive of a single file of batch `b` (the blocks so far not in it but the module and
+    /// resource blocks): its leaves' outputs one after another.
+    pub fn standalone(&self, b: &Batch) -> Vec<u8> {
+        let mut out = Vec::with_capacity(HEADER_MAGIC.len() + self.prefix.len() + b.bytes.len() + 32);
+        out.extend_from_slice(&HEADER_MAGIC);
+        out.extend_from_slice(&self.prefix);
+        out.extend_from_slice(&b.bytes);
+        let blocks = out.len() - HEADER_MAGIC.len();
+        footer(&mut out, blocks);
+        out
+    }
+
+    /// Takes batch `b` as written after the blocks so far.
+    pub fn commit(&mut self, b: &Batch) {
+        for r in &b.added {
+            self.prefix.extend_from_slice(&b.bytes[r.clone()]);
+        }
+        // (the added blocks in the order of their kinds, modules and resources each in order)
+        let mut adds = b.added.iter();
+        let (mut mi, mut ri) = (0, 0);
+        for &(p, _) in &b.layout {
+            match p {
+                Placed::Module => {
+                    self.module_at.push(self.at + adds.next().unwrap().start);
+                    self.modules.push(b.modules[mi]);
+                    mi += 1;
+                }
+                Placed::Resource => {
+                    self.resource_at.push(self.at + adds.next().unwrap().start);
+                    self.resources.push(b.resources[ri].clone());
+                    ri += 1;
+                }
+                _ => {}
             }
         }
-        let meta = tree::metadata(s.tree, at, &module_at, &resource_at, &files);
-        block(&mut out, METADATA_ZSTD, &always_compressed(&mut self.cctx(), &[&meta], level, self.threads)?);
-        put(&mut out, Placed::Metadata, at);
-        let blocks = out.len() - HEADER_MAGIC.len();
+        self.at += b.bytes.len();
+    }
+
+    /// The end of the archive: the metadata block of `t`, its contents where `contents` tells
+    /// (by [`EntryNode::File`]), and the footer. Fails on a tree the spec does not allow.
+    pub fn finish(&self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<(Vec<u8>, usize)> {
+        tree::check(t, contents.len()).map_err(Error::new)?;
+        let mut files = vec![None; t.entries.len()];
+        for (i, e) in t.entries.iter().enumerate() {
+            if let EntryNode::File(c) = e.node {
+                let c = contents[c];
+                files[i] = Some(FileParam { leaf: c.leaf, output: c.output as u64, size: c.size });
+            }
+        }
+        let meta = tree::metadata(t, self.at, &self.module_at, &self.resource_at, &files);
+        let mut out = Vec::new();
+        block(&mut out, METADATA_ZSTD, &always_compressed(&mut enc.cctx(), &[&meta], enc.base_level(), enc.threads)?);
+        let metadata = out.len();
+        let end = self.at + out.len();
         // (from the start of the footer's fields: after the magic and the size)
-        let back = out.len() + FOOTER_MAGIC.len() + 2 - at;
-        footer_with(&mut out, blocks, back as u64);
-        Ok((out, placed))
+        let back = end + FOOTER_MAGIC.len() + 2 - self.at;
+        footer_with(&mut out, end - HEADER_MAGIC.len(), back as u64);
+        Ok((out, metadata))
+    }
+}
+
+impl Encoder {
+    /// The archive of segment `s`, with what each of its blocks is: all of its leaves one batch.
+    /// Fails on slices out of their streams, on outputs not taken once each (by one leaf), and
+    /// on a tree the spec does not allow.
+    pub fn encode_segment(&self, s: &Segment) -> Result<(Vec<u8>, Layout)> {
+        tree::check(s.tree, s.contents.len()).map_err(Error::new)?;
+        for &(leaf, output) in s.contents {
+            if s.leaves.get(leaf).is_none_or(|l| output >= l.outputs.len()) {
+                return Err(Error::new(format!("no output {output} of leaf #{leaf}")));
+            }
+        }
+        let mut w = SegmentWriter::new();
+        let b = w.batch(self, s.f, s.leaves)?;
+        w.commit(&b);
+        let contents: Vec<ContentAt> = s
+            .contents
+            .iter()
+            .map(|&(l, o)| ContentAt { leaf: b.leaf_at[l], output: o, size: s.leaves[l].outputs[o].len() })
+            .collect();
+        let (end, metadata) = w.finish(self, s.tree, &contents)?;
+        let mut layout = b.layout;
+        layout.push((Placed::Metadata, metadata));
+        Ok(([&HEADER_MAGIC[..], &b.bytes, &end].concat(), layout))
     }
 
     /// The formula data of `leaf`, its streams' non-leaf blocks at `ordinals` (from `first`,
@@ -367,6 +504,40 @@ mod tests {
         Entry { parent, name: name.as_bytes().to_vec(), node, extra: Extra::default() }
     }
 
+    /// A segment of two batches, each checked alone first: the second takes the modules the
+    /// first wrote, and a content of the first.
+    #[test]
+    fn batches() {
+        let mut f = Formula::default();
+        let a = f.push("a", b"hello".to_vec());
+        let b = f.push("b", b"xyz".to_vec());
+        let enc = Encoder::new(Level::Zstd(3));
+        let rev = |inputs| Node::apply(REV, vec![1, 2, 3], inputs, 8);
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        let mut at = Vec::new();
+        for leaves in [
+            vec![Leaf { outputs: vec![rev(vec![a.clone(), b.clone()])], sums: vec![None] }],
+            vec![Leaf { outputs: vec![rev(vec![b, a])], sums: vec![Some(checksum(b"ollehzyx"))] }],
+        ] {
+            let batch = w.batch(&enc, &f, &leaves).unwrap();
+            let want = if at.is_empty() { &b"zyxolleh"[..] } else { b"ollehzyx" };
+            assert_eq!(decode(&w.standalone(&batch), &natives()).unwrap(), want);
+            assert_eq!(batch.layout.iter().filter(|p| p.0 == Placed::Module).count(), at.is_empty() as usize);
+            w.commit(&batch);
+            out.extend_from_slice(&batch.bytes);
+            at.push(batch.leaf_at[0]);
+        }
+        assert_eq!(w.len(), out.len());
+        let mut t = Tree::default();
+        t.entries.push(entry(None, "x", EntryNode::File(0)));
+        t.entries.push(entry(None, "y", EntryNode::File(1)));
+        let contents: Vec<ContentAt> = at.iter().map(|&leaf| ContentAt { leaf, output: 0, size: 8 }).collect();
+        out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
+        let Ok(Value::Tree(_, files)) = decode_value(&out, &natives()) else { panic!() };
+        assert_eq!(files, [b"zyxolleh".to_vec(), b"ollehzyx".to_vec()]);
+    }
+
     /// Files of leaves of every kind: of a stream of their own (a leaf data block), solid in a
     /// stream with others, empty, an application, and the outputs of an application of
     /// several outputs; directories, a link, a file of the same content as another, extras.
@@ -409,9 +580,9 @@ mod tests {
         assert_eq!(
             kinds,
             [
-                Placed::Module,
-                Placed::Module,
                 Placed::Data(0),
+                Placed::Module,
+                Placed::Module,
                 Placed::Formula(1),
                 Placed::Formula(3),
                 Placed::Formula(4),

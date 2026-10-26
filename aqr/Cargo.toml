@@ -10,6 +10,7 @@ aqr-common = { path = "../aqr-common" }
 aqr-compress = { path = "../aqr-compress" }
 aqr-decompress = { path = "../aqr-decompress" }
 aqr-formula = { path = "../aqr-formula" }
+memmap2 = "0.9"
 
 [[bin]]
 name = "aqr"

@@ -21,8 +21,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Instant, UNIX_EPOCH};
 
-use aqr_compress::{Input, Options, compress_formula, compress_tree, detect};
-use aqr_decompress::decompress_value;
+use aqr_compress::{Options, compress_formula, compress_tree_to, detect};
+use aqr_decompress::Native;
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Time, Tree, Value, name_bytes, name_from};
 
 const USAGE: &str =
@@ -161,9 +161,30 @@ fn compress_all(a: &Args) -> Result<(), String> {
 /// The entries and contents being gathered for an archive.
 struct Gathered {
     tree: Tree,
-    /// By content: the path (for the log) and the data.
-    contents: Vec<(PathBuf, Vec<u8>)>,
+    /// By content: the path (read as the archive is made), as bytes (the name telling its
+    /// kind) and its size as gathered.
+    contents: Vec<(PathBuf, Vec<u8>, u64)>,
     skipped: Vec<String>,
+}
+
+/// The files of `Gathered`, read as their batch is made.
+impl aqr_compress::Source for Gathered {
+    fn len(&self) -> usize {
+        self.contents.len()
+    }
+
+    fn name(&self, c: usize) -> &[u8] {
+        &self.contents[c].1
+    }
+
+    fn size(&self, c: usize) -> u64 {
+        self.contents[c].2
+    }
+
+    fn read(&self, c: usize) -> std::io::Result<Vec<u8>> {
+        let p = &self.contents[c].0;
+        fs::read(p).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))
+    }
 }
 
 fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String> {
@@ -212,17 +233,24 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     if g.tree.entries.is_empty() {
         return Err(format!("nothing to archive in {}", inputs[0].display()));
     }
-    let names: Vec<Vec<u8>> = g.contents.iter().map(|(p, _)| os_bytes(p.as_os_str())).collect();
-    let inputs: Vec<Input> = g.contents.iter().zip(&names).map(|((_, d), n)| Input { name: n, data: d }).collect();
-    let total: usize = inputs.iter().map(|i| i.data.len()).sum();
-    let archived = compress_tree(&g.tree, &inputs, &a.opt);
-    write_new(out, &archived.archive, a.force)?;
+    // written as it is made: removed where it is not made to the end
+    let file = create(out, a.force)?;
+    let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
+    let r = compress_tree_to(&g.tree, &g, &a.opt, &mut w).and_then(|r| w.flush().map(|_| r));
+    let r = match r {
+        Ok(r) => r,
+        Err(e) => {
+            drop(w);
+            let _ = fs::remove_file(out);
+            return Err(format!("{}: {e}", out.display()));
+        }
+    };
     if !a.quiet {
         for s in &g.skipped {
             eprintln!("skipped {s}");
         }
-        log(&g, &archived.report);
-        summary(out, g.contents.len(), total, archived.archive.len(), start);
+        log(&g, &r);
+        summary(out, g.contents.len(), r.read as usize, r.len, start);
     }
     Ok(())
 }
@@ -253,7 +281,7 @@ fn log(g: &Gathered, r: &aqr_compress::Report) {
         s.iter().for_each(|&c| set_of[c] = Some(i + 1));
     }
     for (c, f) in r.files.iter().enumerate() {
-        let len = g.contents[c].1.len() as f64;
+        let len = f.len as f64;
         let what = match f.same_as {
             Some(s) => format!("same as {}", path(s)),
             None => {
@@ -311,8 +339,7 @@ fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) ->
     let node = if t.is_dir() {
         EntryNode::Dir
     } else if t.is_file() {
-        let d = fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
-        g.contents.push((path.to_owned(), d));
+        g.contents.push((path.to_owned(), os_bytes(path.as_os_str()), m.len()));
         EntryNode::File(g.contents.len() - 1)
     } else if t.is_symlink() {
         let target = fs::read_link(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -394,12 +421,16 @@ fn os_from(b: &[u8]) -> OsString {
 
 /// Writes `d` to a new file `path` (or over one, where `force`).
 fn write_new(path: &Path, d: &[u8], force: bool) -> Result<(), String> {
+    create(path, force)?.write_all(d).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// A new file `path` (or one in place of it, where `force`).
+fn create(path: &Path, force: bool) -> Result<fs::File, String> {
     let err = |e: std::io::Error| format!("{}: {e}", path.display());
     if force && fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir()) {
         fs::remove_file(path).map_err(err)?;
     }
-    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(err)?;
-    f.write_all(d).map_err(err)
+    fs::OpenOptions::new().write(true).create_new(true).open(path).map_err(err)
 }
 
 fn decompress_all(a: &Args) -> Result<(), String> {
@@ -419,20 +450,27 @@ fn decompress_all(a: &Args) -> Result<(), String> {
 fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
     output(out, a.force)?;
     let start = Instant::now();
-    let c = fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-    let v = decompress_value(&c, a.opt.threads).map_err(|e| format!("{}: {e}", input.display()))?;
-    match v {
-        Value::File(d) => {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
+    let file = fs::File::open(input).map_err(|e| err(&e))?;
+    // (mapped, so that what is read of it is the system's to drop)
+    // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
+    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
+    let native = Native { threads: a.opt.threads };
+    let modules = native.modules();
+    let archive = aqr::open(&c, &modules).map_err(|e| err(&e))?;
+    match archive.tree() {
+        None => {
+            drop(archive);
+            let d = aqr::decode_value_with(&c, &modules, a.opt.threads).map_err(|e| err(&e))?;
+            let Value::File(d) = d else { unreachable!("an archive of a single file") };
             write_new(out, &d, a.force)?;
             if !a.quiet {
-                summary_d(input, out, 1, d.len(), start);
+                summary_d(input, out, 1, d.len() as u64, start);
             }
         }
-        Value::Tree(t, files) => {
-            let n = extract(&t, &files, out, a.force, a.quiet)?;
+        Some(t) => {
+            let (n, total) = extract(t, &archive, a.opt.threads, out, a.force, a.quiet)?;
             if !a.quiet {
-                let total =
-                    t.entries.iter().map(|e| if let EntryNode::File(c) = e.node { files[c].len() } else { 0 }).sum();
                 summary_d(input, out, n, total, start);
             }
         }
@@ -440,7 +478,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn summary_d(input: &Path, out: &Path, files: usize, total: usize, start: Instant) {
+fn summary_d(input: &Path, out: &Path, files: usize, total: u64, start: Instant) {
     let t = start.elapsed().as_secs_f64();
     eprintln!(
         "{} -> {}: {files} file{}, {} in {t:.2} s, {:.1} MB/s",
@@ -452,18 +490,27 @@ fn summary_d(input: &Path, out: &Path, files: usize, total: usize, start: Instan
     );
 }
 
-/// Extracts tree `t` (its files' contents in `files`) into directory `out`: the directories and
-/// files first, then the links (but those reaching out of `out`), then the times of the
-/// directories. Returns the number of files.
-fn extract(t: &Tree, files: &[Vec<u8>], out: &Path, force: bool, quiet: bool) -> Result<usize, String> {
+/// Extracts tree `t` of `archive` into directory `out`: the directories first, then the files
+/// as their contents are decoded (on up to `threads` threads), then the links (but those
+/// reaching out of `out`), then the times of the directories. Returns the number of files and
+/// their bytes.
+fn extract(
+    t: &Tree,
+    archive: &aqr::Archive,
+    threads: usize,
+    out: &Path,
+    force: bool,
+    quiet: bool,
+) -> Result<(usize, u64), String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     match fs::create_dir(out) {
         Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && out.is_dir()) => return Err(err(out, e)),
         _ => {}
     }
     let mut paths: Vec<PathBuf> = Vec::with_capacity(t.entries.len());
-    let mut n = 0;
     let mut links = Vec::new();
+    // by content, the files of it
+    let mut files: Vec<Vec<usize>> = vec![Vec::new(); archive.contents_len()];
     for (i, e) in t.entries.iter().enumerate() {
         let (name, _) = name_bytes(&e.name);
         let parent = e.parent.map_or(out, |p| &paths[p]);
@@ -473,11 +520,7 @@ fn extract(t: &Tree, files: &[Vec<u8>], out: &Path, force: bool, quiet: bool) ->
                 Err(x) if !(force && path.is_dir() && !path.is_symlink()) => return Err(err(&path, x)),
                 _ => {}
             },
-            EntryNode::File(c) => {
-                write_new(&path, &files[*c], force)?;
-                set_extra(&path, &e.extra)?;
-                n += 1;
-            }
+            EntryNode::File(c) => files[*c].push(i),
             EntryNode::Link(_) => links.push(i),
             EntryNode::Special(kind) => {
                 if !quiet {
@@ -487,6 +530,19 @@ fn extract(t: &Tree, files: &[Vec<u8>], out: &Path, force: bool, quiet: bool) ->
         }
         paths.push(path);
     }
+    let (n, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicU64::new(0));
+    archive
+        .contents(threads, |c, d| {
+            for &i in &files[c] {
+                let fail = |m: String| aqr::Failure::Resource(m);
+                write_new(&paths[i], &d, force).map_err(fail)?;
+                set_extra(&paths[i], &t.entries[i].extra).map_err(fail)?;
+                n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                total.fetch_add(d.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            }
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
     for i in links {
         let e = &t.entries[i];
         let EntryNode::Link(target) = &e.node else { unreachable!() };
@@ -506,7 +562,7 @@ fn extract(t: &Tree, files: &[Vec<u8>], out: &Path, force: bool, quiet: bool) ->
         }
     }
     set_extra(out, &t.root)?;
-    Ok(n)
+    Ok((n.into_inner(), total.into_inner()))
 }
 
 /// Whether link `i` of `t` reaches out of the directory it is extracted into: by an absolute

@@ -26,7 +26,7 @@
 mod segment;
 mod tree;
 
-pub use segment::{Layout, Leaf, Placed, Segment};
+pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter};
 pub use tree::{Entry, EntryNode, Extra, Time, Tree, name_bytes, name_from};
 
 use std::borrow::Cow;
@@ -704,42 +704,43 @@ impl Encoder {
 
     /// What to make of `data`, whose key is `k`, at the level of the encoder.
     fn plan(&self, k: StreamKey, data: &[&[u8]]) -> Result<Plan> {
-        let n = total(data);
-        match self.level {
-            Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(match self.trials.borrow_mut().remove(&(k, l)) {
-                Some(c) => c,
-                None => compressed(&mut self.cctx(), data, l, self.threads)?,
-            })),
-            Level::Zstd(l) => {
-                let sample = sampled(data);
-                let c = self.trial(k, &sample, l)?.map_or(sample.len(), |c| c.len());
-                Ok(Plan::Level(l, scaled(c, sample.len(), n)))
-            }
-            Level::Mid => {
-                let sample = sampled(data);
-                let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
-                let probe = self.trial(k, &sample, PROBE)?;
-                if len(&probe) >= sample.len() - sample.len() / 32 {
-                    return Ok(Plan::Done(None));
-                }
-                if n < MID_SMALL {
-                    return Ok(Plan::Done(compressed(&mut self.cctx(), data, MID_BASE.0, self.threads)?));
-                }
-                let mut tried = vec![(MID_BASE.0, self.trial(k, &sample, MID_BASE.0)?)];
-                for (level, _) in MID_HIGHER {
-                    tried.push((level, self.trial(k, &sample, level)?));
-                }
-                for level in MID_LOWER {
-                    tried.push((level, if level == PROBE { probe.clone() } else { self.trial(k, &sample, level)? }));
-                }
-                let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
-                let (higher, lower) = lens[1..].split_at(MID_HIGHER.len());
-                let level = mid_pick(sample.len(), lens[0], higher, lower);
-                let best = tried.into_iter().find(|t| t.0 == level).expect("a level tried");
-                let size = scaled(len(&best.1), sample.len(), n);
-                Ok(if sample.len() == n { Plan::Done(best.1) } else { Plan::Level(best.0, size) })
-            }
+        plan_by(self.level, data, &mut |sample, level| match sample {
+            Some(sample) => match self.trials.borrow_mut().remove(&(k, level)) {
+                Some(c) => Ok(c),
+                None => compressed(&mut self.cctx(), &[sample], level, self.threads),
+            },
+            None => compressed(&mut self.cctx(), data, level, self.threads),
+        })
+    }
+
+    /// Compresses `streams` (not of [`Kind::Compressed`], which are stored as they are) as
+    /// [`Encoder::encode`] would, each on a thread of its own (on up to the encoder's threads,
+    /// the calling one and workers of [`aqr_common::pool`]), for the blocks of them written
+    /// next: the same bytes as one after another.
+    pub fn precompress(&self, streams: &[&[u8]]) -> Result<()> {
+        let todo: Vec<&[u8]> = {
+            let kept = self.streams.borrow();
+            let mut seen = std::collections::HashSet::new();
+            streams.iter().copied().filter(|d| !kept.contains_key(&key(&[d])) && seen.insert(key(&[d]))).collect()
+        };
+        let level = self.level;
+        let made = aqr_common::pool::par_map(todo.len(), self.threads, |i| -> Result<(StreamKey, Compressed)> {
+            let d = todo[i];
+            THREAD_CCTX.with(|c| {
+                let c = &mut c.borrow_mut();
+                let c = match plan_by(level, &[d], &mut |sample, l| compressed(c, &[sample.unwrap_or(d)], l, 1))? {
+                    Plan::Done(c) => c,
+                    Plan::Level(l, size) => compressed_to(c, &[d], l, 1, size)?,
+                };
+                Ok((key(&[d]), c))
+            })
+        });
+        let mut kept = self.streams.borrow_mut();
+        for m in made {
+            let (k, c) = m?;
+            kept.insert(k, c);
         }
+        Ok(())
     }
 
     /// Whether `f` archives smaller than `d` raw. A formula of at most half of the bytes
@@ -775,6 +776,53 @@ impl Encoder {
             self.streams.borrow_mut().insert(key(&[d]), c);
         }
         Ok(n < self.raw_len(d)?)
+    }
+}
+
+thread_local! {
+    /// The Zstandard context of a thread compressing streams for [`Encoder::precompress`].
+    static THREAD_CCTX: RefCell<CCtx<'static>> = RefCell::new(CCtx::create());
+}
+
+/// A compression of a sample at a level (or of all the data, given none).
+type Compress<'a> = dyn FnMut(Option<&[u8]>, i32) -> Result<Compressed> + 'a;
+
+/// What to make of `data` at `level`: `compress` compresses a sample at a level (or all of
+/// `data`, given none), as [`compressed`] does.
+fn plan_by(level: Level, data: &[&[u8]], compress: &mut Compress) -> Result<Plan> {
+    let mut trial = |sample: &[u8], level| compress(Some(sample), level);
+    let n = total(data);
+    match level {
+        Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(trial(&data.concat(), l)?)),
+        Level::Zstd(l) => {
+            let sample = sampled(data);
+            let c = trial(&sample, l)?.map_or(sample.len(), |c| c.len());
+            Ok(Plan::Level(l, scaled(c, sample.len(), n)))
+        }
+        Level::Mid => {
+            let sample = sampled(data);
+            let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
+            let probe = trial(&sample, PROBE)?;
+            if len(&probe) >= sample.len() - sample.len() / 32 {
+                return Ok(Plan::Done(None));
+            }
+            if n < MID_SMALL {
+                return Ok(Plan::Done(compress(None, MID_BASE.0)?));
+            }
+            let mut tried = vec![(MID_BASE.0, trial(&sample, MID_BASE.0)?)];
+            for (level, _) in MID_HIGHER {
+                tried.push((level, trial(&sample, level)?));
+            }
+            for level in MID_LOWER {
+                tried.push((level, if level == PROBE { probe.clone() } else { trial(&sample, level)? }));
+            }
+            let lens: Vec<usize> = tried.iter().map(|(_, c)| len(c)).collect();
+            let (higher, lower) = lens[1..].split_at(MID_HIGHER.len());
+            let level = mid_pick(sample.len(), lens[0], higher, lower);
+            let best = tried.into_iter().find(|t| t.0 == level).expect("a level tried");
+            let size = scaled(len(&best.1), sample.len(), n);
+            Ok(if sample.len() == n { Plan::Done(best.1) } else { Plan::Level(best.0, size) })
+        }
     }
 }
 
@@ -1105,6 +1153,53 @@ pub fn decode_value(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded
 /// one and workers of [`aqr_common::pool`]). The first failure of a leaf, in their order, is
 /// the archive's.
 pub fn decode_value_with(c: &[u8], natives: &[Box<dyn NativeModule + '_>], threads: usize) -> Decoded<Value> {
+    let a = open(c, natives)?;
+    match a.tree() {
+        None => {
+            let leaves: Mutex<Vec<Option<Vec<Vec<u8>>>>> =
+                Mutex::new((0..a.blocks.leaves.len()).map(|_| None).collect());
+            a.leaves(threads, |i, outputs| {
+                leaves.lock().unwrap()[i] = Some(outputs);
+                Ok(())
+            })?;
+            // the first leaf as it is
+            let mut out = Vec::new();
+            for d in leaves.into_inner().unwrap().into_iter().flatten().flatten() {
+                if out.is_empty() {
+                    out = d;
+                } else {
+                    out.extend_from_slice(&d);
+                }
+            }
+            Ok(Value::File(out))
+        }
+        Some(t) => {
+            let files: Mutex<Vec<Vec<u8>>> = Mutex::new(vec![Vec::new(); a.contents_len()]);
+            a.contents(threads, |c, d| {
+                files.lock().unwrap()[c] = d;
+                Ok(())
+            })?;
+            Ok(Value::Tree(t.clone(), files.into_inner().unwrap()))
+        }
+    }
+}
+
+/// A content of a tree: its leaf, its output of it and its size.
+type ContentRef = (usize, usize, u64);
+
+/// An archive opened ([`open`]): its blocks framed, and its tree read where it has one. The
+/// data of its blocks is decoded as the leaves are evaluated, a non-leaf block when first sliced
+/// (and dropped once no slice of it is left), so that evaluating them takes about the memory of
+/// those evaluated at once.
+pub struct Archive<'c, 'n> {
+    blocks: Blocks<'c>,
+    natives: &'n [Box<dyn NativeModule + 'n>],
+    /// The tree, and its contents (each a leaf, an output of it and its size).
+    tree: Option<(Tree, Vec<ContentRef>)>,
+}
+
+/// Archive `c` opened, its modules implemented by `natives`.
+pub fn open<'c, 'n>(c: &'c [u8], natives: &'n [Box<dyn NativeModule + 'n>]) -> Decoded<Archive<'c, 'n>> {
     if c.starts_with(&ENCRYPTED_HEADER_MAGIC) {
         return resource("encrypted archives are not supported yet");
     }
@@ -1141,86 +1236,104 @@ pub fn decode_value_with(c: &[u8], natives: &[Box<dyn NativeModule + '_>], threa
             }
         }
     };
-
-    // every formula block read first: a non-leaf block is dropped once nothing is to slice it
-    let mut used = vec![false; blocks.non_leaf.len()];
-    let env = |modules: usize, resources: usize, first| Env {
-        first,
-        modules: &blocks.modules[..modules],
-        resources: &blocks.resources[..resources],
-        natives,
-    };
-    let programs = blocks
-        .leaves
-        .iter()
-        .map(|leaf| match *leaf {
-            LeafBlock::Stored(_) => Ok(None),
-            LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
-                let env = env(modules, resources, non_leaf);
-                read(&blocks.formulas[data], outputs, &env, blocks.non_leaf.len(), &mut used).map(Some)
-            }
-        })
-        .collect::<Decoded<Vec<_>>>()?;
-    if used.contains(&false) {
-        return invalid("a non-leaf block no formula block references");
-    }
     let outputs: Vec<u64> =
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
     let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
-    let mut refs = vec![0; blocks.non_leaf.len()];
-    for p in programs.iter().flatten() {
-        for insn in &p.insns {
-            if let &Insn::Slice { block, .. } = insn {
-                refs[p.blocks[block]] += 1;
-            }
-        }
-    }
-    let contents = Contents {
-        refs: refs.into_iter().map(AtomicUsize::new).collect(),
-        data: std::mem::take(&mut blocks.non_leaf).into_iter().map(|d| Mutex::new(Some(Arc::new(d)))).collect(),
-    };
+    Ok(Archive { blocks, natives, tree })
+}
 
-    // the leaves at once, on up to `threads` threads
-    type Job<'p> = Mutex<Option<(LeafBlock, Option<Program<'p>>)>>;
-    let jobs: Vec<Job> =
-        std::mem::take(&mut blocks.leaves).into_iter().zip(programs).map(|j| Mutex::new(Some(j))).collect();
-    let evaluated = aqr_common::pool::par_map(jobs.len(), threads, |i| {
-        match jobs[i].lock().unwrap().take().expect("each leaf once") {
-            (LeafBlock::Stored(d), _) => Ok(vec![d]),
-            (LeafBlock::Formula { modules, resources, non_leaf, .. }, Some(p)) => {
-                run(p, &env(modules, resources, non_leaf), &contents)
-            }
-            (LeafBlock::Formula { .. }, None) => unreachable!(),
+impl Archive<'_, '_> {
+    /// The tree, where the archive has a metadata block.
+    pub fn tree(&self) -> Option<&Tree> {
+        self.tree.as_ref().map(|t| &t.0)
+    }
+
+    /// The number of contents of the tree's files.
+    pub fn contents_len(&self) -> usize {
+        self.tree.as_ref().map_or(0, |t| t.1.len())
+    }
+
+    /// Evaluates every leaf, at once on up to `threads` threads, giving `f` each one's outputs
+    /// (by its index among the leaf blocks) as it is evaluated. The first failure, in the order
+    /// of the leaves, is returned (as is one of `f`); the others may have been given theirs.
+    pub fn leaves(&self, threads: usize, f: impl Fn(usize, Vec<Vec<u8>>) -> Decoded<()> + Sync) -> Decoded<()> {
+        self.each_leaf(threads, |i, r| f(i, r?))
+    }
+
+    /// [`Archive::leaves`], giving `f` each leaf's failure too (that of reading the formula
+    /// blocks, before any is evaluated, is returned).
+    pub fn each_leaf(
+        &self,
+        threads: usize,
+        f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
+    ) -> Decoded<()> {
+        let blocks = &self.blocks;
+        // every formula block read first: a non-leaf block is dropped once nothing is to slice it
+        let mut used = vec![false; blocks.non_leaf.len()];
+        let env = |modules: usize, resources: usize, first| Env {
+            first,
+            modules: &blocks.modules[..modules],
+            resources: &blocks.resources[..resources],
+            natives: self.natives,
+        };
+        let programs = blocks
+            .leaves
+            .iter()
+            .map(|leaf| match *leaf {
+                LeafBlock::Stored(..) => Ok(None),
+                LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
+                    let env = env(modules, resources, non_leaf);
+                    read(&blocks.formulas[data], outputs, &env, blocks.non_leaf.len(), &mut used).map(Some)
+                }
+            })
+            .collect::<Decoded<Vec<_>>>()?;
+        if used.contains(&false) {
+            return invalid("a non-leaf block no formula block references");
         }
-    });
-    let mut out = Vec::new();
-    let mut leaves = Vec::new();
-    for leaf in evaluated {
-        let leaf = leaf?;
-        match &tree {
-            Some(_) => leaves.push(leaf),
-            // the first leaf as it is
-            None => {
-                for d in leaf {
-                    if out.is_empty() {
-                        out = d;
-                    } else {
-                        out.extend_from_slice(&d);
-                    }
+        let mut refs = vec![0; blocks.non_leaf.len()];
+        for p in programs.iter().flatten() {
+            for insn in &p.insns {
+                if let &Insn::Slice { block, .. } = insn {
+                    refs[p.blocks[block]] += 1;
                 }
             }
         }
+        let contents = Contents {
+            refs: refs.into_iter().map(AtomicUsize::new).collect(),
+            data: blocks.non_leaf.iter().map(|&(d, zstd)| Mutex::new(Slot::Raw(d, zstd))).collect(),
+        };
+        let programs: Vec<Mutex<Option<Program>>> = programs.into_iter().map(Mutex::new).collect();
+        let done = aqr_common::pool::par_map(blocks.leaves.len(), threads, |i| {
+            let outputs = match blocks.leaves[i] {
+                LeafBlock::Stored(d, zstd, checked) => decoded(d, zstd, checked).map(|d| vec![d]),
+                LeafBlock::Formula { modules, resources, non_leaf, .. } => {
+                    let p = programs[i].lock().unwrap().take().expect("each leaf once");
+                    run(p, &env(modules, resources, non_leaf), &contents)
+                }
+            };
+            f(i, outputs)
+        });
+        done.into_iter().collect()
     }
-    let Some((tree, refs)) = tree else { return Ok(Value::File(out)) };
-    let mut files = Vec::with_capacity(refs.len());
-    for (leaf, output, size) in refs {
-        let d = std::mem::take(&mut leaves[leaf][output]);
-        if d.len() as u64 != size {
-            return invalid("a file of another size than its entry's");
-        }
-        files.push(d);
+
+    /// Evaluates every leaf as [`Archive::leaves`] does, giving `f` each content of the tree
+    /// (by [`EntryNode::File`]) once, as it is evaluated; checked against the size of its files.
+    pub fn contents(&self, threads: usize, f: impl Fn(usize, Vec<u8>) -> Decoded<()> + Sync) -> Decoded<()> {
+        let Some((_, refs)) = &self.tree else { return invalid("an archive of a single file") };
+        // by leaf, its outputs taken: output, content, size
+        let mut of: Vec<Vec<(usize, usize, u64)>> = vec![Vec::new(); self.blocks.leaves.len()];
+        refs.iter().enumerate().for_each(|(c, &(l, o, n))| of[l].push((o, c, n)));
+        self.leaves(threads, |i, mut outputs| {
+            for &(o, c, n) in &of[i] {
+                let d = std::mem::take(&mut outputs[o]);
+                if d.len() as u64 != n {
+                    return invalid("a file of another size than its entry's");
+                }
+                f(c, d)?;
+            }
+            Ok(())
+        })
     }
-    Ok(Value::Tree(tree, files))
 }
 
 /// The tree of metadata block `m` at `at`, among `blocks` whose leaves have `outputs` each;
@@ -1291,9 +1404,10 @@ fn leb(d: &[u8], at: &mut usize) -> Decoded<u64> {
     varint::get(d, at).map_err(|e| Failure::Invalid(e.0.into()))
 }
 
-/// The blocks of an archive of a segment at most, decoded.
-struct Blocks {
-    leaves: Vec<LeafBlock>,
+/// The blocks of an archive of a segment at most, framed: the data of leaf data blocks and
+/// non-leaf blocks as it is in the archive (with whether it is Zstandard data, and checked).
+struct Blocks<'c> {
+    leaves: Vec<LeafBlock<'c>>,
     /// Where the leaf, module and resource blocks start, in the archive.
     leaf_at: Vec<usize>,
     module_at: Vec<usize>,
@@ -1302,13 +1416,13 @@ struct Blocks {
     metadata: Vec<(usize, Vec<u8>)>,
     /// The formula data of the formula blocks.
     formulas: Vec<Vec<u8>>,
-    non_leaf: Vec<Vec<u8>>,
+    non_leaf: Vec<(&'c [u8], bool)>,
     modules: Vec<Vec<u8>>,
     resources: Vec<Resource>,
 }
 
-enum LeafBlock {
-    Stored(Vec<u8>),
+enum LeafBlock<'c> {
+    Stored(&'c [u8], bool, bool),
     /// The number of outputs and the formula data (by index), with the numbers of module and
     /// resource blocks before it and of non-leaf blocks.
     Formula {
@@ -1321,7 +1435,7 @@ enum LeafBlock {
 }
 
 /// The blocks in `d`; `metadata` tells whether the footer points to a metadata block.
-fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
+fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
     let mut b = Blocks {
         leaves: Vec::new(),
         leaf_at: Vec::new(),
@@ -1385,9 +1499,9 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
             }
             0x20..=0x2f => {
                 b.leaf_at.push(at);
-                b.leaves.push(LeafBlock::Stored(decoded(data, ty & 0x08 != 0, ty & 0x04 != 0)?));
+                b.leaves.push(LeafBlock::Stored(data, ty & 0x08 != 0, ty & 0x04 != 0));
             }
-            0x40..=0x47 => b.non_leaf.push(decoded(data, ty & 0x04 != 0, true)?),
+            0x40..=0x47 => b.non_leaf.push((data, ty & 0x04 != 0)),
             0x60..=0x63 => {
                 b.module_at.push(at);
                 b.modules.push(decoded(data, true, true)?);
@@ -1717,15 +1831,30 @@ enum Item<'a> {
 
 /// The non-leaf blocks as formula blocks are evaluated (several at once), each with the slices
 /// of it yet to be evaluated or on a stack: once there are none, it is dropped.
-struct Contents {
-    data: Vec<Mutex<Option<Arc<Vec<u8>>>>>,
+struct Contents<'c> {
+    data: Vec<Mutex<Slot<'c>>>,
     refs: Vec<AtomicUsize>,
 }
 
-impl Contents {
-    /// The data of block `o`, while any slice of it is to be evaluated.
-    fn block(&self, o: usize) -> Arc<Vec<u8>> {
-        self.data[o].lock().unwrap().clone().expect("a block with slices left")
+/// A non-leaf block: its data as it is in the archive (and whether it is Zstandard data) until
+/// first sliced, then decoded until no slice of it is left.
+enum Slot<'c> {
+    Raw(&'c [u8], bool),
+    Decoded(Arc<Vec<u8>>),
+    Gone,
+}
+
+impl Contents<'_> {
+    /// The data of block `o`, while any slice of it is to be evaluated: decoded the first time.
+    fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
+        let mut s = self.data[o].lock().unwrap();
+        if let Slot::Raw(d, zstd) = *s {
+            *s = Slot::Decoded(Arc::new(decoded(d, zstd, true)?));
+        }
+        match &*s {
+            Slot::Decoded(d) => Ok(d.clone()),
+            _ => unreachable!("a block with slices left"),
+        }
     }
 
     fn get<'v>(&self, v: &'v Item) -> &'v [u8] {
@@ -1760,7 +1889,7 @@ impl Contents {
 
     fn release(&self, o: usize) {
         if self.refs[o].fetch_sub(1, Ordering::Relaxed) == 1 {
-            *self.data[o].lock().unwrap() = None;
+            *self.data[o].lock().unwrap() = Slot::Gone;
         }
     }
 }
@@ -1779,7 +1908,7 @@ fn run(p: Program, env: &Env, contents: &Contents) -> Decoded<Vec<Vec<u8>>> {
             }
             Insn::Slice { block, start, len } => {
                 let o = p.blocks[block];
-                let d = contents.block(o);
+                let d = contents.block(o)?;
                 let r = usize::try_from(start)
                     .ok()
                     .zip(usize::try_from(len).ok())
