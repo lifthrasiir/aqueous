@@ -151,7 +151,9 @@ impl Reference {
         if payload.len() < 2 {
             return Err(crate::Error::Unsupported("no zlib stream"));
         }
-        let mut sink = RefSink { p: 0, r: Reference { pos: vec![], tokens: vec![] } };
+        // (about a token per byte of the stream, more for photos)
+        let n = payload.len() + payload.len() / 4;
+        let mut sink = RefSink { p: 0, r: Reference { pos: Vec::with_capacity(n), tokens: Vec::with_capacity(n) } };
         let mut o = 0;
         loop {
             let l = inflate::parse_head(&payload[o + 2..], usize::MAX, &mut sink)?;

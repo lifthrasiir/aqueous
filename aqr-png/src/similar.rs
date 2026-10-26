@@ -19,7 +19,9 @@ impl Signature {
         let (chunks, _) = png::chunks(file)?;
         let header = Ihdr::parse(chunks.first().filter(|c| &c.kind == b"IHDR")?.data)?;
         let idat: Vec<u8> = chunks.iter().filter(|c| &c.kind == b"IDAT").flat_map(|c| c.data.iter().copied()).collect();
-        let mut data = Collect(Vec::new());
+        // as much as the image takes, as far as the stream may hold (a header may be wrong)
+        let len = crate::model::Geometry::new(&header).map_or(0, |g| g.len);
+        let mut data = Collect(Vec::with_capacity(len.min(idat.len().saturating_mul(1032))));
         inflate::parse_head(idat.get(2..)?, usize::MAX, &mut data).ok()?;
         Some(Signature { header, segments: data.0.chunks(256).map(hash).collect() })
     }
@@ -43,11 +45,14 @@ impl Signature {
 
 /// A 64-bit hash of a segment, for telling segments apart.
 fn hash(d: &[u8]) -> u64 {
-    let mut h = d.len() as u64;
-    for w in d.chunks(8) {
+    let mix = |h: u64, w: u64| (h ^ w).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(31);
+    let words = d.chunks_exact(8);
+    let rest = words.remainder();
+    let mut h = words.fold(d.len() as u64, |h, w| mix(h, u64::from_le_bytes(w.try_into().unwrap())));
+    if !rest.is_empty() {
         let mut b = [0u8; 8];
-        b[..w.len()].copy_from_slice(w);
-        h = (h ^ u64::from_le_bytes(b)).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(31);
+        b[..rest.len()].copy_from_slice(rest);
+        h = mix(h, u64::from_le_bytes(b));
     }
     h
 }
@@ -62,9 +67,14 @@ impl Sink for Collect {
 
     fn mat(&mut self, len: u16, dist: u16, _: bool) {
         // (the parser checks the distance)
-        let from = self.0.len() - dist as usize;
-        for i in 0..len as usize {
-            self.0.push(self.0[from + i]);
+        let (len, dist) = (len as usize, dist as usize);
+        let from = self.0.len() - dist;
+        if dist >= len {
+            self.0.extend_from_within(from..from + len);
+        } else {
+            for i in 0..len {
+                self.0.push(self.0[from + i]);
+            }
         }
     }
 
