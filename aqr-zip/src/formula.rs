@@ -5,11 +5,11 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use aqr_flate::{ADAPTIVE, Coding, Hints, ModelData, Parsed};
 use aqr_formula::aqr::Encoder;
-use aqr_formula::probe::{self, Probe};
+use aqr_formula::probe::{self, Held, Probe};
 use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::layout::{self, Made, Writer};
@@ -37,6 +37,10 @@ pub struct Options {
     /// data only where the probe tells that it may pay (their contents of the kind of their
     /// names); the others are kept as they are. By default all are rebuilt.
     pub probe: Option<Probe>,
+    /// What data archived along with the archive holds, and the data (its index) the archive is
+    /// part of: the probe counts the contents held by the others as nothing, as the archive
+    /// stores them once.
+    pub held: Option<(Arc<Held>, Option<usize>)>,
 }
 
 impl Default for Options {
@@ -47,6 +51,7 @@ impl Default for Options {
             limit: u64::MAX,
             kind: |_| Kind::Unknown,
             probe: None,
+            held: None,
         }
     }
 }
@@ -192,10 +197,23 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                 }
                 shares[j].unwrap_or(0.0)
             };
+            let held = |j: usize| {
+                let data = parsed[j].as_ref().map_or(&[][..], |p| p.0.data());
+                opt.held.as_ref().is_some_and(|(h, except)| h.holds(data, *except)) as u8 as f64
+            };
             let mut turned_down = Vec::new();
             for (j, p) in parsed.iter().enumerate() {
                 let (i, Some((p, record, _))) = (jobs[j].0, p) else { continue };
-                if probed(i) && !probe.pays(&enc, locals[i].body.len(), || *record, p.data(), || shared(j), kinds[j]) {
+                if probed(i)
+                    && !probe.pays(
+                        &enc,
+                        locals[i].body.len(),
+                        || *record,
+                        p.data(),
+                        || shared(j).max(held(j)),
+                        kinds[j],
+                    )
+                {
                     turned_down.push(j);
                 }
             }

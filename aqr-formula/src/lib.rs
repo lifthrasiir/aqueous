@@ -434,6 +434,79 @@ impl Formula {
         self.streams = streams;
     }
 
+    /// Takes the slices of at least `min` bytes from other slices that hold the same bytes,
+    /// and drops what is left without a slice ([`Formula::compact`]): a file and the same file
+    /// in an archive, say, are then stored once. From the shortest slice on, each is cut into
+    /// slices kept before that it starts with, one after another (the longest each time), and
+    /// what follows of its own; one cut nowhere is kept. Slices past the end of their stream
+    /// are left as they are. The output is the same.
+    pub fn share_slices(&mut self, min: usize) {
+        type Sl = (usize, u64, u64);
+        let mut slices: Vec<Sl> = Vec::new();
+        self.visit(&mut |n| {
+            if let &Node::Slice { stream, start, len } = n
+                && len >= min as u64
+                && self
+                    .streams
+                    .get(stream)
+                    .is_some_and(|s| start.checked_add(len).is_some_and(|e| e <= s.data.len() as u64))
+            {
+                slices.push((stream, start, len));
+            }
+        });
+        slices.sort_unstable_by_key(|&(s, a, l)| (l, s, a));
+        slices.dedup();
+        let bytes = |&(s, a, l): &Sl| &self.streams[s].data[a as usize..][..l as usize];
+        let head = |b: &[u8]| xxhash_rust::xxh3::xxh3_64(&b[..min]);
+        // the slices kept, by their first `min` bytes
+        let mut kept: std::collections::HashMap<u64, Vec<Sl>> = Default::default();
+        let mut to: std::collections::HashMap<Sl, Vec<Sl>> = Default::default();
+        for x in slices {
+            let b = bytes(&x);
+            let (mut at, mut pieces) = (0usize, Vec::new());
+            while b.len() - at >= min {
+                let rest = &b[at..];
+                let found = kept
+                    .get(&head(rest))
+                    .and_then(|ks| ks.iter().filter(|k| rest.starts_with(bytes(k))).max_by_key(|k| k.2).copied());
+                let Some(k) = found else { break };
+                pieces.push(k);
+                at += k.2 as usize;
+            }
+            if at == 0 {
+                kept.entry(head(b)).or_default().push(x);
+                continue;
+            }
+            if at < b.len() {
+                let rest = (x.0, x.1 + at as u64, x.2 - at as u64);
+                match to.get(&rest) {
+                    Some(ps) => pieces.extend_from_slice(&ps.clone()),
+                    None => {
+                        if rest.2 >= min as u64 {
+                            kept.entry(head(bytes(&rest))).or_default().push(rest);
+                        }
+                        pieces.push(rest);
+                    }
+                }
+            }
+            to.insert(x, pieces);
+        }
+        if to.is_empty() {
+            return;
+        }
+        // (the pieces are slices kept, not cut again)
+        let mut cut = |n: &mut Node| {
+            if let &mut Node::Slice { stream, start, len } = n
+                && let Some(ps) = to.get(&(stream, start, len))
+            {
+                *n = Node::concat(ps.iter().map(|&(s, a, l)| Node::slice(s, a, l)));
+            }
+        };
+        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.visit_mut(&mut cut));
+        self.root.visit_mut(&mut cut);
+        self.compact();
+    }
+
     /// Puts the streams of each class and kind one after another, in one stream (in the place
     /// of the first): they are alike, and archive smaller together (the archive encoder
     /// compresses each stream on its own). The streams of [`Kind::Compressed`] (stored as they
@@ -949,6 +1022,50 @@ mod tests {
         past.merge_classes();
         assert_eq!(past.streams.len(), 5);
         assert_eq!((&past.streams[0].data[..], &past.streams[4].data[..]), (&b"012345678"[..], &b"9"[..]));
+    }
+
+    /// Slices cut into the shorter ones they start with, wherever those lie, but those shorter
+    /// than the least, and those past the end of their stream; the output the same.
+    #[test]
+    fn share_slices() {
+        let long: Vec<u8> = (0..40u32).flat_map(|i| i.to_le_bytes()).collect();
+        let mut f = Formula::default();
+        let a = f.push("a", long[..100].to_vec());
+        let b = f.push_content("b", Kind::Unknown, long.clone());
+        let c = f.push("c", long[..100].to_vec());
+        let d = f.push("d", long[..8].to_vec());
+        f.push("e", long[..120].to_vec());
+        let mut other = long[..100].to_vec();
+        other[99] ^= 1;
+        let o = f.push("o", other);
+        // long twice within, after other bytes
+        f.push("z", [&b"xyz"[..], &long[..], &long[..]].concat());
+        f.root = Node::concat([
+            a,
+            Node::apply(REV, vec![], vec![Node::slice(2, 0, 20), b], 180),
+            c,
+            d,
+            o,
+            Node::slice(4, 100, 20),
+            Node::slice(6, 3, 120),
+            Node::slice(6, 163, 160),
+            Node::slice(6, 0, 4),
+        ]);
+        let want = f.eval(&Rev).unwrap();
+        let mut g = f.clone();
+        g.share_slices(16);
+        assert_eq!(g.eval(&Rev), Ok(want));
+        let classes: Vec<_> = g.streams.iter().map(|s| (&*s.class, s.data.len())).collect();
+        // long[..20] of c, long[20..100] of a, long[100..120] of e, long[120..] of b (each
+        // of those alone first); o its own but for the first 20
+        assert_eq!(classes, [("a", 80), ("b", 40), ("c", 20), ("d", 8), ("e", 20), ("o", 80), ("z", 4)]);
+        // a slice past the end of one is left as it is, and keeps it whole
+        let Node::Concat(ns) = &mut f.root else { unreachable!() };
+        ns.push(Node::slice(2, 90, 20));
+        f.share_slices(16);
+        let classes: Vec<_> = f.streams.iter().map(|s| (&*s.class, s.data.len())).collect();
+        assert_eq!(classes, [("a", 80), ("b", 40), ("c", 100), ("d", 8), ("e", 20), ("o", 80), ("z", 4)]);
+        assert!(matches!(&f.root, Node::Concat(ns) if ns.last() == Some(&Node::slice(2, 90, 20))));
     }
 
     /// Outputs not taken once each, of other sizes, or taken by an application before theirs.

@@ -243,6 +243,22 @@ fn find_end(d: &[u8]) -> Option<(i64, Range<usize>)> {
     None
 }
 
+/// The CRC-32 and size of the entries' data that the central directory found from the end of
+/// `d` tells, unchecked against local headers: `d` may be the end of an archive alone, holding
+/// the directory.
+pub fn entry_sums(d: &[u8]) -> Vec<(u32, u64)> {
+    let Some((_, cd)) = find_end(d) else { return Vec::new() };
+    let (mut out, mut p) = (Vec::new(), cd.start);
+    while p < cd.end
+        && let Some(c) = central_at(d, p)
+    {
+        let i = c.info(d).1;
+        out.push((i.crc, i.usize));
+        p = c.comment.end;
+    }
+    out
+}
+
 /// The central directory found from the end of `d`: its base, and what it says of each entry by
 /// the position of its local header (the first header wins). Of the base the end record implies
 /// and 0, the one putting more of the entries on local headers is taken, and only the entries

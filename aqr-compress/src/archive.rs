@@ -8,7 +8,11 @@
 //! The files are taken in batches of about [`Options::batch`] bytes, in their order (by
 //! extension, then by name): each batch read ([`Source`]), made, laid out, checked and written
 //! before the next, so that what is held at once is about a batch's, whatever the files'
-//! (but for the largest file). Files of the same content as one before are stored once.
+//! (but for the largest file). Files of the same content as one before are stored once. Files
+//! that may hold each other (a file and a ZIP archive or gzip file of it, a file and the start
+//! of it) are put in one batch ([`together`]), where what their streams share is stored once
+//! ([`Formula::share_slices`]): the recompressors take what the batch holds as costing
+//! nothing ([`Held`]).
 //!
 //! A file is to be read without the others, so what files share is bounded: a set of PNG files
 //! takes at most [`Options::set_bytes`] bytes of them (as it is decoded whole for any of them),
@@ -23,13 +27,15 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::ops::Range;
 use std::sync::Mutex;
 
 use aqr_decompress::{MODULES, Native};
 use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Placed, SegmentWriter, Tree};
+use aqr_formula::probe::Held;
 use aqr_formula::{Formula, Kind, Module, Node};
 
-use crate::{Cx, Options, detect, kind_by_name, nested, place_all, sets, verify};
+use crate::{Cx, Options, SHARE_MIN, detect, kind_by_name, nested, place_all, sets, verify};
 
 /// Streams shorter than this are put together with those of their class and kind without
 /// telling whether they compress.
@@ -57,6 +63,13 @@ pub trait Source: Sync {
     fn size(&self, c: usize) -> u64;
 
     fn read(&self, c: usize) -> io::Result<Vec<u8>>;
+
+    /// Bytes `range` of content `c` (those within it), for a look at its start or its end.
+    fn read_range(&self, c: usize, range: Range<u64>) -> io::Result<Vec<u8>> {
+        let d = self.read(c)?;
+        let end = (range.end as usize).min(d.len());
+        Ok(d[(range.start as usize).min(end)..end].to_vec())
+    }
 }
 
 impl Source for [Input<'_>] {
@@ -74,6 +87,12 @@ impl Source for [Input<'_>] {
 
     fn read(&self, c: usize) -> io::Result<Vec<u8>> {
         Ok(self[c].data.to_vec())
+    }
+
+    fn read_range(&self, c: usize, range: Range<u64>) -> io::Result<Vec<u8>> {
+        let d = self[c].data;
+        let end = (range.end as usize).min(d.len());
+        Ok(d[(range.start as usize).min(end)..end].to_vec())
     }
 }
 
@@ -151,18 +170,22 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     let n = src.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| sort_key(src.name(a)).cmp(&sort_key(src.name(b))).then(a.cmp(&b)));
-    let mut batches: Vec<&[usize]> = Vec::new();
-    let mut start = 0;
+    // the contents that may hold each other together, in the place of the first, a batch never
+    // cutting them apart
+    let group = together(src, opt)?;
+    let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
+    order.iter().for_each(|&c| members.entry(group[c]).or_default().push(c));
+    let mut batches: Vec<Vec<usize>> = vec![Vec::new()];
     let mut bytes = 0u64;
-    for (i, &c) in order.iter().enumerate() {
-        if i > start && bytes.saturating_add(src.size(c)) > opt.batch as u64 {
-            batches.push(&order[start..i]);
-            (start, bytes) = (i, 0);
+    for &c in &order {
+        let Some(unit) = members.remove(&group[c]) else { continue };
+        let size = unit.iter().fold(0u64, |n, &c| n.saturating_add(src.size(c)));
+        if !batches.last().unwrap().is_empty() && bytes.saturating_add(size) > opt.batch as u64 {
+            batches.push(Vec::new());
+            bytes = 0;
         }
-        bytes = bytes.saturating_add(src.size(c));
-    }
-    if start < order.len() {
-        batches.push(&order[start..]);
+        batches.last_mut().unwrap().extend(unit);
+        bytes = bytes.saturating_add(size);
     }
 
     let mut w = SegmentWriter::new();
@@ -170,7 +193,7 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     let mut first: HashMap<(u128, usize), usize> = HashMap::new();
     let mut at: Vec<Option<ContentAt>> = vec![None; n];
     let mut r = Report { files: vec![FileReport::default(); n], ..Report::default() };
-    for batch in batches {
+    for batch in &batches {
         let read = aqr_common::pool::par_map(batch.len(), opt.threads, |i| src.read(batch[i]));
         let mut files: Vec<File> = Vec::with_capacity(batch.len());
         for (&c, d) in batch.iter().zip(read) {
@@ -224,6 +247,93 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     Ok(r)
 }
 
+/// Contents of at least this many bytes are looked into for others they may hold
+/// ([`together`]), as [`Held`] is.
+const TOGETHER_MIN: u64 = Held::MIN as u64;
+
+/// The most bytes of contents put in one batch for holding each other ([`together`]).
+const TOGETHER_MAX: u64 = 2 << 30;
+
+/// For each content of `src`, the first of those that may hold each other (where the archive
+/// stores what they share once, [`Formula::share_slices`], only within a batch): a ZIP archive
+/// or gzip file and the contents of its entries (of the CRC-32 and size that its central
+/// directory or its trailer tells; and other archives with such entries), and contents that
+/// start alike (their first 64 KiB; the same file, longer or shorter). Of the contents of at
+/// least [`TOGETHER_MIN`] bytes, which are read at their start (and the archives at their end,
+/// the contents of the sizes of entries whole); together, no more than [`TOGETHER_MAX`] bytes.
+fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<Vec<usize>> {
+    const HEAD: u64 = 64 << 10;
+    // (the end of a ZIP archive holding its central directory, mostly)
+    const TAIL: u64 = 1 << 20;
+    let n = src.len();
+    let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= TOGETHER_MIN).collect();
+    // of each: the hash of its start, and the CRC-32 and size of the entries it holds
+    let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<(u64, Vec<(u32, u64)>)> {
+        let (c, size) = (large[i], src.size(large[i]));
+        let head = src.read_range(c, 0..HEAD)?;
+        let held = match detect(&head) {
+            Some(detect::Format::Zip) => aqr_zip::zip::entry_sums(&src.read_range(c, size.saturating_sub(TAIL)..size)?),
+            Some(detect::Format::Gzip) => {
+                let t = src.read_range(c, size - 8..size)?;
+                let word = |p: usize| u32::from_le_bytes(t[p..p + 4].try_into().expect("4 bytes"));
+                vec![(word(0), word(4) as u64)]
+            }
+            _ => Vec::new(),
+        };
+        let held = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
+        Ok((xxhash_rust::xxh3::xxh3_64(&head), held))
+    });
+    let mut parent: Vec<usize> = (0..n).collect();
+    let mut bytes: Vec<u64> = (0..n).map(|c| src.size(c)).collect();
+    fn root(p: &mut [usize], mut c: usize) -> usize {
+        while p[c] != c {
+            (p[c], c) = (p[p[c]], p[c]);
+        }
+        c
+    }
+    let mut join = |a: usize, b: usize| {
+        let (a, b) = (root(&mut parent, a), root(&mut parent, b));
+        if a != b && bytes[a].saturating_add(bytes[b]) <= TOGETHER_MAX {
+            let (a, b) = (a.min(b), a.max(b));
+            parent[b] = a;
+            bytes[a] += bytes[b];
+        }
+    };
+    // by what they start with (but for many alike, which are not the same file), and by the
+    // entries of the archives (the contents of their sizes told by their CRC-32, of the sizes
+    // of few)
+    let mut heads: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut sizes: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut by_entry: HashMap<(u32, u64), Vec<usize>> = HashMap::new();
+    for (&c, l) in large.iter().zip(looked) {
+        let (head, entries) = l?;
+        heads.entry(head).or_default().push(c);
+        sizes.entry(src.size(c)).or_default().push(c);
+        entries.into_iter().for_each(|e| by_entry.entry(e).or_default().push(c));
+    }
+    for cs in heads.values().filter(|cs| (2..=8).contains(&cs.len())) {
+        cs.iter().for_each(|&c| join(cs[0], c));
+    }
+    let wanted: Vec<usize> = {
+        let mut w: Vec<usize> =
+            by_entry.keys().filter_map(|e| sizes.get(&e.1).filter(|cs| cs.len() <= 8)).flatten().copied().collect();
+        w.sort_unstable();
+        w.dedup();
+        w
+    };
+    let sums =
+        aqr_common::pool::par_map(wanted.len(), opt.threads, |i| src.read(wanted[i]).map(|d| crc32fast::hash(&d)));
+    let mut by_sum: HashMap<(u32, u64), Vec<usize>> = HashMap::new();
+    for (&c, sum) in wanted.iter().zip(sums) {
+        by_sum.entry((sum?, src.size(c))).or_default().push(c);
+    }
+    for (e, archives) in &by_entry {
+        let alike = by_sum.get(e).map_or(&[][..], |cs| &cs[..]);
+        archives.iter().chain(alike).for_each(|&c| join(archives[0], c));
+    }
+    Ok((0..n).map(|c| root(&mut parent, c)).collect())
+}
+
 /// What files are ordered by, to put those alike next to each other: the extension, then the
 /// name, of the last component.
 fn sort_key(name: &[u8]) -> (Vec<u8>, &[u8]) {
@@ -267,8 +377,10 @@ fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) 
     let total = files.iter().map(|f| f.1.len()).sum();
     let mut cx = Cx::of_len(total, &nopt);
     cx.top_sets = Some(opt.set_bytes);
-    // (the files known by where their copies are, and taken from the input)
+    // (the files known by where their copies are, and taken from the input; and what they
+    // hold, a content told by where it is)
     let regions: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
+    cx.held = Some(std::sync::Arc::new(Held::of(&regions, opt.threads)));
     cx.pre = opt.verify.then(|| std::sync::Arc::new(verify::Prevalidator::spawn(opt.threads, &regions)));
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let mut taken = HashSet::new();
@@ -282,6 +394,9 @@ fn make(w: &SegmentWriter, files: &[File], raw: &HashSet<usize>, opt: &Options) 
             }
         }
         place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets, &nopt);
+        // (what the files hold of each other, by what they are taken for: a file and the
+        // same in an archive, both kept as they are)
+        f.share_slices(SHARE_MIN);
     }
     let deferred: Vec<_> = cx.deferred.borrow_mut().drain(..).collect();
     if let Some(pre) = &cx.pre {

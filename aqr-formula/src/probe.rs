@@ -127,6 +127,76 @@ pub fn shared(datas: &[&[u8]]) -> Vec<f64> {
     anchors.iter().map(|a| a.iter().filter(|h| owner[h] == MANY).count() as f64 / a.len().max(1) as f64).collect()
 }
 
+/// What the data archived together holds (the files of a batch, say), to tell whether data
+/// is held there already: data that repeats one of them costs nothing, where the archive stores
+/// it once (a file and the same file in an archive). By anchors as in [`shared`], but sparser,
+/// where the gear hash's top 12 bits are zero (1 in 4096, of all 64 bytes hashed), each with
+/// the data that has it.
+#[derive(Debug, Default)]
+pub struct Held {
+    /// The anchors, each with the index of the only data that has it, or [`MANY`].
+    anchors: HashMap<u64, usize>,
+    /// Where each data is in memory (its start and end, and its index), by its start, to tell
+    /// data within it.
+    at: Vec<(usize, usize, usize)>,
+}
+
+const MANY: usize = usize::MAX;
+
+impl Held {
+    /// Data shorter than this is not looked for: its anchors are too few to tell.
+    pub const MIN: usize = 256 << 10;
+
+    /// What `datas` hold, of those at least [`Held::MIN`] bytes long, hashed on up to
+    /// `threads` threads.
+    pub fn of(datas: &[&[u8]], threads: usize) -> Held {
+        let long: Vec<usize> = (0..datas.len()).filter(|&i| datas[i].len() >= Held::MIN).collect();
+        let found = aqr_common::pool::par_map(long.len(), threads, |j| held_anchors(datas[long[j]]));
+        let mut anchors: HashMap<u64, usize> = HashMap::new();
+        for (&i, a) in long.iter().zip(found) {
+            for h in a {
+                anchors.entry(h).and_modify(|o| *o = if *o == i { i } else { MANY }).or_insert(i);
+            }
+        }
+        let mut at: Vec<(usize, usize, usize)> =
+            datas.iter().enumerate().map(|(i, d)| (d.as_ptr() as usize, d.as_ptr() as usize + d.len(), i)).collect();
+        at.sort_unstable();
+        Held { anchors, at }
+    }
+
+    /// The data (its index) that `d` lies within, if any.
+    pub fn owner(&self, d: &[u8]) -> Option<usize> {
+        let p = d.as_ptr() as usize;
+        // (the last that starts at it or before, of those not empty)
+        let n = self.at.partition_point(|&(a, _, _)| a <= p);
+        self.at[..n].iter().rev().find(|&&(a, b, _)| a < b).filter(|&&(_, b, _)| p + d.len() <= b).map(|&(_, _, i)| i)
+    }
+
+    /// Whether `data` is about all held by data other than `except` (that it is part of, say):
+    /// all but 1 in 100 of its distinct anchors.
+    pub fn holds(&self, data: &[u8], except: Option<usize>) -> bool {
+        if data.len() < Held::MIN || self.anchors.is_empty() {
+            return false;
+        }
+        let mut a = held_anchors(data);
+        a.sort_unstable();
+        a.dedup();
+        let held = a.iter().filter(|h| self.anchors.get(h).is_some_and(|&o| Some(o) != except)).count();
+        !a.is_empty() && held >= a.len() - a.len() / 100
+    }
+}
+
+fn held_anchors(d: &[u8]) -> Vec<u64> {
+    let (mut h, mut a) = (0u64, Vec::with_capacity(d.len() >> 12));
+    for &b in d {
+        h = (h << 1).wrapping_add(GEAR[b as usize]);
+        if h >> 52 == 0 {
+            a.push(h);
+        }
+    }
+    a
+}
+
 /// The gear hash's table: 256 values of SplitMix64.
 const GEAR: [u64; 256] = {
     let (mut t, mut x, mut i) = ([0u64; 256], 0u64, 0);
@@ -166,5 +236,33 @@ mod tests {
         let f = shared(&[&a, &b]);
         assert!(f[0] < 0.01 && f[1] < 0.01, "{f:?}");
         assert_eq!(shared(&[&a]), [0.0]);
+    }
+
+    /// Data held whole (all of a data, or part of it) by another, but not by itself alone;
+    /// data held in part or by none, not.
+    #[test]
+    fn held_runs() {
+        let noise = |seed: u64, n: usize| {
+            let mut x = seed;
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (x >> 56) as u8
+                })
+                .collect::<Vec<u8>>()
+        };
+        let (a, b, c) = (noise(1, 4 << 20), noise(2, 4 << 20), noise(3, 4 << 20));
+        let held = Held::of(&[&a, &b], 2);
+        assert!(held.holds(&a, None));
+        assert!(held.holds(&a[1 << 20..3 << 20], None));
+        assert!(!held.holds(&[&a[1 << 20..3 << 20], &c[..2 << 20]].concat(), None));
+        assert!(!held.holds(&c, None));
+        assert!(!held.holds(&a[..1000], None));
+        // where data is, and not held by the data it is part of alone; but by another as well
+        assert_eq!((held.owner(&a[5..100]), held.owner(&b), held.owner(&c)), (Some(0), Some(1), None));
+        assert!(!held.holds(&a[1 << 20..3 << 20], held.owner(&a[1 << 20..3 << 20])));
+        let ab = [&a[..], &b[..]].concat();
+        let held = Held::of(&[&a, &ab], 2);
+        assert!(held.holds(&a[1 << 20..3 << 20], held.owner(&a)));
     }
 }

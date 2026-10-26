@@ -11,7 +11,9 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
   나눴고, 크기는 `aqr` 로그의 파일별 몫(파일이 slice하는 블록을 slice한 바이트에 비례해 나눈 것)을
   더한 것이다.
 - FASTA는 그 뒤 aqr-fasta(커밋 `0d908d1`)로 다시 쟀다. hg19 디렉토리(98개 파일, 3.24 GB)가
-  971 → 706.7 MB이다. 10gb 전체로는 약 3.30 GB가 된다(다시 재지 않았다).
+  971 → 706.7 MB이다. 10gb 전체로는 3.266 GB, 압축 92.4 s, 최대 footprint 6.7 GB이다
+  (2026-10-26, 커밋 `ac0c17f`).
+- 파일 사이의 내용 공유(2번) 뒤: 2.81 GB(−458 MB), 압축 112.5 s, 최대 footprint 8.9 GB.
 
 ## 종류별
 
@@ -49,10 +51,26 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
 1. **[완료] FASTA: −264 MB.** aqr-fasta(order-9 문맥 모델과 rANS). 풀기는 hg19에서 753 MB/s이다.
    - 압축은 108 MB/s에 그친다. 배치에 큰 염색체가 몇 개뿐이라 2코어 남짓만 쓴다. 배치의
      파이프라이닝이 필요하다(아카이버 쪽 일).
-2. **다른 파일에 그대로 있는 내용: 약 −470 MB.**
-   - `enwik9.zip`, `enwik8.zip`, `text8.zip`은 본문이 Info-ZIP `-9`(gzip `-9`와 출력이 같다)라
-     그대로 남는다. `silesia.zip`도 67.6 → 65.6 MB에 그친다.
-   - 재현 자체는 profile 10이면 된다. enwik8을 Info-ZIP `-9`로 만든 스트림(2026-10-26, 10스레드):
+2. **[대부분 완료] 다른 파일에 그대로 있는 내용: −458 MB.**
+   - 서로 담고 있을 수 있는 파일을 한 배치에 모은다(`aqr-compress`의 `together`). ZIP 중앙
+     디렉토리와 gzip trailer의 CRC-32와 크기가 맞는 파일, 앞 64 KiB가 같은 파일(`enwik8` ⊂
+     `enwik9`)이다. 계획은 10gb에서 0.9 s이다.
+   - 배치의 파일이 담은 내용은 probe와 `smaller`가 공짜로 본다(`probe::Held`, 앵커 1/4096).
+     그래서 `enwik9.zip`처럼 그냥은 그대로 두던 스트림도 profile 6으로 재현한다.
+   - 스트림을 만든 뒤 slice끼리 나눠 갖는다(`Formula::share_slices`). 짧은 slice부터, 각
+     slice를 앞서 남긴 slice들로 앞에서부터 자른다. 형식은 그대로이다.
+   - 이득(파일별 몫의 차): `enwik9.zip`과 `enwik9` −316 MB, `enwik8.zip`과 `enwik8` −50 MB,
+     `silesia.zip`과 `silesia/*` −88 MB. 같은 배치의 다른 공유(progressive/baseline JPEG 쌍 등)가
+     약 −30 MB이다.
+   - 비용: 압축 +20 s, 최대 footprint +2.2 GB(enwik 묶음 1.46 GB가 한 배치). 그 묶음의 풀기는
+     2.0 → 5.0 s(CPU 0.7 → 25 s), footprint 1.7 → 4.2 GB이다.
+   - 남은 것:
+     - 재현의 레코드. Info-ZIP `-9`는 profile 6에서 내용의 2.6%(`enwik9.zip` 약 26 MB)이다.
+       아래 표대로 profile 10이나 에뮬레이션이면 거의 0이지만 느리다. 높은 레벨에서만 쓸 만하다.
+     - `gimp.tar`(13 MB): tar의 slice는 헤더로 시작해서 잘리지 않는다. tar 멤버를 꺼내거나,
+       slice 가운데에서도 맞는 곳을 찾아야 한다.
+     - 묶음이 크면 배치가 그만큼 커진다(상한 2 GiB).
+   - Info-ZIP `-9` 스트림의 재현. enwik8을 Info-ZIP `-9`로 만든 스트림(2026-10-26, 10스레드):
 
      | profile | 레코드 | 쪼개기 | 합치기 |
      |---|---|---|---|
@@ -61,18 +79,8 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
      | 10, 같은 스트림을 zlib `-9`로 만든 것(에뮬레이션) | 3 KB | 29 MB/s (직렬) | 204 MB/s (한 스레드 37 MB/s) |
 
      - 에뮬레이션은 C 인코더와 같은 속도이다(zlib `-9`와 Info-ZIP `-9` 모두 enwik8에서 34–35 MB/s).
-       Info-ZIP `-9` 에뮬레이션을 더해도 10gb 전체에서 레코드 4–5 MB를 덜 뿐이다.
      - 에뮬레이션으로 쪼개기는 checkpoint를 앞 세그먼트의 에뮬레이션에서 얻어서 스레드를 써도
        직렬이다. 매치 끝에서 자르면 checkpoint가 토큰만으로 정해지므로 병렬로 바꿀 수 있을 것이다.
-   - `enwik9.zip`, `enwik8.zip`, `silesia.zip`의 내용물은 아카이브 안에 그대로 있다
-     (`benchmarks/enwik9`, `enwik8`, `silesia/*`).
-   - `enwik8`은 `enwik9`의 앞 100 MB이고(32.5 MB), `gimp.tar`는 `gimp-2.0.0`을 묶은 것이다(13 MB).
-   - 필요한 것:
-     - 큰 DEFLATE 스트림에 profile 10
-     - 파일 사이의 내용 공유
-   - 세그먼트 안에서는 뒤 블록이 앞 블록을 가리킬 수 없다. 그래서 같은 내용을 쓰는 파일을 한
-     배치, 한 그룹에 모아 스트림 하나를 함께 slice하게 하거나, 세그먼트를 나눠 internal import로
-     가리켜야 한다. 배치와 세그먼트의 구조를 먼저 정해야 한다.
 3. **PE −50~−90 MB, 텍스트 −50 MB, enwik9 −35~−75 MB.**
    - 앞의 둘은 주로 zstd 레벨 문제이다. 예산은 높은 레벨과 `--long`으로 잡았고, 지금 level mid는
      3–9에서 고른다. 버킷별 레벨을 올린다.
@@ -81,10 +89,10 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
 5. **PPMd 재현 −205 MB.** 확장 목표이다. 풀 때 1.1 GB를 단일 스트림으로 다시 인코딩해야 하므로
    별도 레벨에서만 켠다.
 
-1과 2를 하면 약 3.1 GB, 3까지 하면 2.5 GB 안팎이다. 주 목표 2.4 GB에는 4와 5의 일부까지 필요하다.
+1과 2로 2.81 GB이다. 3까지 하면 2.6–2.7 GB이다. 주 목표 2.4 GB에는 4와 5의 일부까지 필요하다.
 
 ## 함께 볼 것
 
-- 메모리: 압축 최대 RSS 6.6 GB(배치 크기의 약 7배), 풀기 footprint 4.8 GB. 스트리밍을 제대로
-  구현하며 다시 본다.
+- 메모리: 압축 최대 footprint 8.9 GB(배치 크기의 약 7배, 그리고 2번의 큰 묶음), 풀기 footprint
+  4.8 GB(2번 전). 스트리밍을 제대로 구현하며 다시 본다.
 - 16 MiB solid 블록 상한은 텍스트에서 약 4%의 손해이다(`other-projects.md`).

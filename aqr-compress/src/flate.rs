@@ -115,7 +115,14 @@ fn wrap(
         return None;
     }
     if let Some(probe) = crate::probe(opt, depth)
-        && !probe.pays(&cx.enc, parsed.len(), || parsed.estimate(&fopt).ok(), parsed.data(), || 0.0, kind)
+        && !probe.pays(
+            &cx.enc,
+            parsed.len(),
+            || parsed.estimate(&fopt).ok(),
+            parsed.data(),
+            || cx.held_by_others(parsed.data(), d) as u8 as f64,
+            kind,
+        )
     {
         return None;
     }

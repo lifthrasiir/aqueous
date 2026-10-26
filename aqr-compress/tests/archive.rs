@@ -200,3 +200,55 @@ fn batches() {
     let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
     assert!((attributed + r.overhead as f64 - c.len() as f64).abs() < 1.0);
 }
+
+/// A file, and the same in a gzip file and in a ZIP archive: their streams rebuilt and taken
+/// from the file, so that its data is stored once, however far apart (in streams longer than
+/// a block, which are not solid, and in batches smaller than each).
+#[test]
+fn held_once() {
+    let mut x = 1u64;
+    let words = ["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dogs", "and", "cats"];
+    let mut data = Vec::new();
+    while data.len() < 3 << 20 {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        write!(data, "{} {} ", words[(x >> 60) as usize % 10], (x >> 40) % 1000).unwrap();
+    }
+    let mut e = flate2::GzBuilder::new().filename("words").write(Vec::new(), flate2::Compression::new(9));
+    e.write_all(&data).unwrap();
+    let gz = e.finish().unwrap();
+    let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(9));
+    e.write_all(&data).unwrap();
+    let zip = zip_of("words", &data, &e.finish().unwrap());
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let (alone, _) = archived(&[("w/words", data.clone())], &opt);
+    let files = [("w/words", data), ("w/words.gz", gz), ("w/words.zip", zip)];
+    let (c, r) = archived(&files, &opt);
+    assert!(!r.files[1].modules.is_empty() && !r.files[2].modules.is_empty(), "{r:?}");
+    // (their records not small: rules fit miniz's streams less well than zlib's)
+    assert!(c.len() < alone.len() * 3 / 2, "{} of {} alone", c.len(), alone.len());
+    // in batches of less than each, kept together
+    let (c, _) = archived(&files, &Options { batch: 1 << 20, ..opt });
+    assert!(c.len() < alone.len() * 3 / 2, "{} of {} alone, in batches", c.len(), alone.len());
+}
+
+/// A ZIP archive of a single entry `name` of `data`, its body `deflated`.
+fn zip_of(name: &str, data: &[u8], deflated: &[u8]) -> Vec<u8> {
+    let mut common = Vec::new();
+    for v in [20u16, 0, 8, 0, 0] {
+        common.extend_from_slice(&v.to_le_bytes());
+    }
+    for v in [crc32fast::hash(data), deflated.len() as u32, data.len() as u32] {
+        common.extend_from_slice(&v.to_le_bytes());
+    }
+    common.extend_from_slice(&(name.len() as u16).to_le_bytes());
+    common.extend_from_slice(&0u16.to_le_bytes());
+    let mut o = [&b"PK\x03\x04"[..], &common, name.as_bytes(), deflated].concat();
+    let at = o.len() as u32;
+    let cd = [&b"PK\x01\x02\x14\x03"[..], &common, &[0; 14], name.as_bytes()].concat();
+    o.extend_from_slice(&cd);
+    o.extend_from_slice(b"PK\x05\x06\0\0\0\0\x01\0\x01\0");
+    o.extend_from_slice(&(cd.len() as u32).to_le_bytes());
+    o.extend_from_slice(&at.to_le_bytes());
+    o.extend_from_slice(&[0, 0]);
+    o
+}

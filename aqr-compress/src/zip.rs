@@ -13,6 +13,10 @@ pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formul
         limit: cx.inflate_left(),
         kind: kind_by_name,
         probe: crate::probe(opt, depth),
+        held: cx.held.clone().map(|h| {
+            let except = h.owner(d);
+            (h, except)
+        }),
         ..aqr_zip::formula::Options::default()
     };
     let e = aqr_zip::formula::encode_with(d, &zopt)?;

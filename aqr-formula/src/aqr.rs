@@ -747,18 +747,38 @@ impl Encoder {
     /// that `d` is estimated to compress to (by a sample) is taken as smaller without
     /// compressing `d`.
     pub fn smaller(&self, f: &Formula, d: &[u8]) -> Result<bool> {
-        self.smaller_of(f, None, d)
+        self.smaller_of(f, None, &[], d)
     }
 
     /// [`Encoder::smaller`], with stream `s` of `f` the bytes of `pieces` one after the other
     /// rather than its data (which is not read): a stream yet to be put together, sized as it
     /// will be archived.
     pub fn smaller_with(&self, f: &Formula, s: usize, pieces: &[&[u8]], d: &[u8]) -> Result<bool> {
-        self.smaller_of(f, Some((s, pieces)), d)
+        self.smaller_of(f, Some((s, pieces)), &[], d)
     }
 
-    fn smaller_of(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>, d: &[u8]) -> Result<bool> {
-        let n = self.len_with(f, stand_in)?;
+    /// [`Encoder::smaller`] (or [`Encoder::smaller_with`] the stream of `stand_in`), the
+    /// non-leaf blocks of streams `free` (by index) not counted: data the archive holds anyway,
+    /// as the same data elsewhere ([`Formula::share_slices`]).
+    pub fn smaller_but(
+        &self,
+        f: &Formula,
+        stand_in: Option<(usize, &[&[u8]])>,
+        free: &[usize],
+        d: &[u8],
+    ) -> Result<bool> {
+        self.smaller_of(f, stand_in, free, d)
+    }
+
+    fn smaller_of(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>, free: &[usize], d: &[u8]) -> Result<bool> {
+        let mut n = self.len_with(f, stand_in)?;
+        if !matches!((&f.root, &f.shared[..]), (Node::Slice { .. }, [])) {
+            for &s in free {
+                let mut c = Count(0);
+                self.content_block(&mut c, false, &[&f.streams[s].data], f.streams[s].kind == Kind::Compressed)?;
+                n = n.saturating_sub(c.0);
+            }
+        }
         // (`d` was compressed, so a formula of it of at most half of its estimate was not one)
         if let Some(&raw) = self.raw_lens.borrow().get(&key(&[d])) {
             return Ok(n < raw);

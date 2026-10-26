@@ -23,11 +23,11 @@ aqr-raw = { path = "../aqr-raw" }
 aqr-snappy = { path = "../aqr-snappy" }
 aqr-sqlite = { path = "../aqr-sqlite" }
 aqr-zip = { path = "../aqr-zip" }
+crc32fast = "1.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 zstd = "0.13"
-crc32fast = "1.5"
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

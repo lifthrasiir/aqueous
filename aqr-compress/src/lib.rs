@@ -103,7 +103,7 @@ pub use extent::extent;
 use aqr_decompress::{FLATE, LZ4, Native, SNAPPY, ZIP};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
-use aqr_formula::probe::{Look, Probe};
+use aqr_formula::probe::{Held, Look, Probe};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -150,6 +150,11 @@ pub struct Options {
     /// longer is a batch of its own), which bounds the memory taken.
     pub batch: usize,
 }
+
+/// Slices shorter than this are not shared with others ([`Formula::share_slices`]), nor
+/// streams taken as held by the files archived together ([`Held`]): what they share is found by
+/// compressing them solid.
+pub(crate) const SHARE_MIN: usize = 256 << 10;
 
 /// Bytes that DEFLATE streams may inflate to on top of [`Options::expansion`] times the file.
 pub const EXPANSION_SLACK: u64 = 64 << 20;
@@ -242,6 +247,8 @@ pub(crate) struct Cx {
     /// The files of an archive to make (each its index among the contents, its slice and how),
     /// at once once all are known ([`nested`]).
     later: RefCell<Vec<(usize, Node, Nest)>>,
+    /// What the files archived together hold ([`Held`]), for an archive of several.
+    held: Option<Arc<Held>>,
 }
 
 impl Cx {
@@ -265,6 +272,7 @@ impl Cx {
             skip: Default::default(),
             top_sets: None,
             later: Default::default(),
+            held: None,
         }
     }
 
@@ -288,6 +296,12 @@ impl Cx {
 
     pub(crate) fn inflate_left(&self) -> u64 {
         self.inflate.get()
+    }
+
+    /// Whether the files archived together hold `data` ([`Held`]), but for the one `within`
+    /// is part of.
+    pub(crate) fn held_by_others(&self, data: &[u8], within: &[u8]) -> bool {
+        self.held.as_ref().is_some_and(|h| h.holds(data, h.owner(within)))
     }
 }
 
@@ -514,15 +528,16 @@ fn files_len(d: &[u8]) -> usize {
 /// Unless [`Options::smaller`] is off, whether formula `f` of `d` archives smaller than `d`
 /// raw, its stream 0 the bytes of `gaps` of `d` if given ([`Made`]).
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
-    let smaller = !opt.smaller
-        || match gaps {
-            Some(gaps) => {
-                let pieces: Vec<&[u8]> = gaps.iter().map(|g| &d[g.clone()]).collect();
-                cx.enc.smaller_with(f, 0, &pieces, d)
-            }
-            None => cx.enc.smaller(f, d),
-        }
-        .expect("slices within their streams");
+    let smaller = !opt.smaller || {
+        let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
+        let stand_in = pieces.as_deref().map(|p| (0, p));
+        // (the streams the files archived together hold cost nothing)
+        let free: Vec<usize> = (0..f.streams.len())
+            .filter(|&s| stand_in.is_none_or(|(t, _)| t != s))
+            .filter(|&s| f.streams[s].data.len() >= SHARE_MIN && cx.held_by_others(&f.streams[s].data, d))
+            .collect();
+        cx.enc.smaller_but(f, stand_in, &free, d).expect("slices within their streams")
+    };
     if smaller {
         // `d` is not archived as it is (`f` is, or is part of something larger kept raw)
         cx.enc.forget(d);
@@ -760,12 +775,13 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         .map(|(_, n, _)| std::sync::Mutex::new(by_at.remove(&(data(n).as_ptr() as usize)).unwrap_or_default()))
         .collect();
     cx.ready.borrow_mut().extend(by_at.into_values().flatten());
-    let pre = cx.pre.clone();
+    let (pre, held) = (cx.pre.clone(), cx.held.clone());
     let made = aqr_common::pool::par_map(later.len(), opt.threads, |i| {
         let (_, n, nest) = &later[i];
         let d = data(n);
         let mut own = Cx::of_len(d.len(), opt);
         own.pre = pre.clone();
+        own.held = held.clone();
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         let child = made(d, opt, depth + 1, *nest, &own).filter(|c| !c.f.applies().is_empty());
         (child, own.deferred.into_inner())

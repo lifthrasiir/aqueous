@@ -192,6 +192,17 @@ impl aqr_compress::Source for Gathered {
         let p = &self.contents[c].0;
         fs::read(p).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))
     }
+
+    fn read_range(&self, c: usize, range: std::ops::Range<u64>) -> std::io::Result<Vec<u8>> {
+        use std::io::{Read, Seek};
+        let p = &self.contents[c].0;
+        let at = |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", p.display()));
+        let mut f = fs::File::open(p).map_err(at)?;
+        f.seek(std::io::SeekFrom::Start(range.start)).map_err(at)?;
+        let mut d = Vec::new();
+        f.take(range.end.saturating_sub(range.start)).read_to_end(&mut d).map_err(at)?;
+        Ok(d)
+    }
 }
 
 fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String> {
