@@ -2527,8 +2527,8 @@ Any other import is an [=invalid archive=] failure.
 :: A memory of the |i|-th resource, where |i| is a decimal number without leading zeros.
 : `aqr_input`|k|
 :: A memory of the |k|-th input, where |k| is a decimal number without leading zeros.
-: `aqr_output`
-:: A memory of the output.
+: `aqr_output`|j|
+:: A memory of the |j|-th output, where |j| is a decimal number without leading zeros.
 : [=aqr_request|`aqr_request`=], [=aqr_release|`aqr_release`=], [=aqr_commit|`aqr_commit`=]
 :: Functions of a [=part module=], defined below. A [=whole module=] MUST NOT import them.
 : [=aqr_heartbeat|`aqr_heartbeat`=]
@@ -2540,12 +2540,13 @@ A memory is <dfn>sized to fit</dfn> a length |L| when both its minimum and maxim
 
 To <dfn>apply a module</dfn> |module| given a [=list=] of input [=byte sequences=] |inputs|,
 a [=list=] of resource blocks |resources|, a parameter [=byte sequence=] |params|,
-a [=list=] of declared output sizes and a memory limit:
+a [=list=] of declared output sizes |sizes| and a memory limit:
 
 <ol class=algorithm>
-    1. The number of declared output sizes MUST be 1. Let |size| be the declared output size.
+    1. |sizes| MUST NOT be empty.
     2. Every `aqr_resource`|i| imported MUST satisfy |i| < the number of |resources|,
-        and every `aqr_input`|k| imported MUST satisfy |k| < the number of |inputs|.
+        every `aqr_input`|k| imported MUST satisfy |k| < the number of |inputs|,
+        and every `aqr_output`|j| imported MUST satisfy |j| < the number of |sizes|.
     3. Create the memories imported, each initially zero-filled:
         * The [=working memory=] has the minimum size of its import type.
         * The memory of the parameters is [=sized to fit=] the length of |params|, and holds |params| from offset 0.
@@ -2553,24 +2554,22 @@ a [=list=] of declared output sizes and a memory limit:
         * The memory of the |k|-th input is [=sized to fit=] the length of |inputs|[|k|].
             If |module| is a [=whole module=], it holds |inputs|[|k|] from offset 0.
             Otherwise let |W|<sub>|k|</sub> be its size in bytes and the <dfn>visible range</dfn> of the |k|-th input be [0, 0).
-        * The memory of the output is [=sized to fit=] |size|.
-            If |module| is a [=part module=], let |W|<sub>out</sub> be its size in bytes.
-    4. Let |output| be an empty [=byte sequence=].
+        * The memory of the |j|-th output is [=sized to fit=] |sizes|[|j|].
+            If |module| is a [=part module=], let |W|<sub>out,|j|</sub> be its size in bytes.
+    4. Let |outputs| be a [=list=] of as many empty [=byte sequences=] as |sizes|.
     5. If the total size of the memories in bytes exceeds the memory limit, return a [=resource failure=].
     6. Instantiate |module| with the memories and the host functions below.
     7. Invoke the [=entry point=] with the arguments of type `i64`, in order:
         the length of |params|, the length of the [=stored content=] of each item of |resources|,
-        the length of each item of |inputs| and |size|.
+        the length of each item of |inputs| and each item of |sizes|.
         The [=entry point=] MUST have these parameters and no results.
         If it traps or any host function below signals an error, return an [=invalid archive=] failure.
         If it exceeds the memory limit or any implementation-defined limit, return a [=resource failure=].
-    8. If |module| is a [=whole module=], set |output| to the first |size| bytes of the memory of the output, if imported,
-        and to |size| zero bytes otherwise.
-    9. The length of |output| MUST be |size|.
-    10. Return a [=list=] containing |output|.
+    8. If |module| is a [=whole module=], set each |outputs|[|j|] to the first |sizes|[|j|] bytes of the memory of the |j|-th output,
+        if imported, and to |sizes|[|j|] zero bytes otherwise.
+    9. The length of each |outputs|[|j|] MUST be |sizes|[|j|].
+    10. Return |outputs|.
 </ol>
-
-Issue: Multiple outputs of a module, which the imports above don't distinguish yet.
 
 Issue: Windows smaller than their data for a [=part module=], i.e. ring buffers,
 which would allow import types with a maximum.
@@ -2583,13 +2582,13 @@ and MUST succeed otherwise if the maximum of the import type of the [=working me
   The size of every memory except the working memory is fixed by the length of its data,
   so the declarations of an application need no windows.
   A module needing a window that depends on its data keeps the bytes in the working memory.
-  The memory of the output of a [=whole module=] can be passed to the module consuming it
-  as the memory of a [=whole module=]'s input, as long as the bytes from offset |size| are zeroed,
+  The memory of an output of a [=whole module=] can be passed to the module consuming it
+  as the memory of a [=whole module=]'s input, as long as the bytes from offset |sizes|[|j|] are zeroed,
   since the result is the same.
 </div>
 
 Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|</sub> denote the [=visible range=] of the |k|-th input,
-|k|, |ptr| and |len| are of type `i32`, and every offset is of type `i64`:
+|k|, |j|, |ptr| and |len| are of type `i32`, and every offset is of type `i64`:
 
 : <dfn>aqr_request</dfn>(|k|, |hi|)
 :: The |k|-th input MUST be imported.
@@ -2599,10 +2598,11 @@ Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|
 : <dfn>aqr_release</dfn>(|k|, |lo|)
 :: The |k|-th input MUST be imported.
     |lo| MUST be in [|lo|<sub>|k|</sub>, |hi|<sub>|k|</sub>]. Set |lo|<sub>|k|</sub> to |lo|.
-: <dfn>aqr_commit</dfn>(|hi|)
-:: The output MUST be imported.
-    |hi| MUST be in [length of |output|, |size|], and |hi| - length of |output| MUST be at most |W|<sub>out</sub>.
-    For each offset |o| in [length of |output|, |hi|), append the byte at |o| % |W|<sub>out</sub> of the memory of the output to |output|.
+: <dfn>aqr_commit</dfn>(|j|, |hi|)
+:: The |j|-th output MUST be imported.
+    |hi| MUST be in [length of |outputs|[|j|], |sizes|[|j|]], and |hi| - length of |outputs|[|j|] MUST be at most |W|<sub>out,|j|</sub>.
+    For each offset |o| in [length of |outputs|[|j|], |hi|), append the byte at |o| % |W|<sub>out,|j|</sub> of the memory of the |j|-th output
+    to |outputs|[|j|].
 : <dfn>aqr_heartbeat</dfn>()
 :: Does nothing.
 : <dfn>aqr_log</dfn>(|ptr|, |len|)
@@ -2615,7 +2615,7 @@ Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|
 A violation of any MUST in host functions is signalled as an error to the module invocation.
 
 <div class=note>
-  The host writes input memories of a [=part module=] only within [=aqr_request=] and reads its output memory only within [=aqr_commit=],
+  The host writes input memories of a [=part module=] only within [=aqr_request=] and reads its output memories only within [=aqr_commit=],
   so the content of every memory depends only on the order of calls made by the module.
   Implementations MAY block in [=aqr_request=] until the requested bytes are available
   and in [=aqr_commit=] until consumers catch up,

@@ -16,7 +16,7 @@ use crate::{Input, Memory};
 ///         let mut at = 0;
 ///         for i in 0..p.count() {
 ///             let r = p.range(i);
-///             Output::copy_from::<Input<0>>(at, r.start, r.end - r.start);
+///             Output::<0>::copy_from::<Input<0>>(at, r.start, r.end - r.start);
 ///             at += r.end - r.start;
 ///         }
 ///     }

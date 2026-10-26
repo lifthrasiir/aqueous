@@ -1,8 +1,8 @@
 //! Rewrites the `aqr_api` imports (see `aqr-api/src/wasm.rs`) into a module of the spec's profile:
 //!
 //! - the memory defined by the linker becomes the working memory `aqr.aqr_memory`;
-//! - `size_M`, `read_M`, `write_M` and `copyout_M` become `memory.size M`, `memory.copy working M`,
-//!   `memory.copy M working` and `memory.copy output M`, with `aqr.aqr_M` imported
+//! - `size_M`, `read_M`, `write_O` and `copy_O_M` become `memory.size M`, `memory.copy working M`,
+//!   `memory.copy O working` and `memory.copy O M` (`O` an output), with `aqr.aqr_M` imported
 //!   (64-bit, minimum 0, no maximum) for each memory `M` used;
 //! - `request`, `release`, `commit`, `heartbeat` and `log` become `aqr.aqr_request` and so on;
 //! - every export but the entry point goes, and so does whatever only they used.
@@ -27,13 +27,20 @@ pub fn is_aqr_module(wasm: &[u8]) -> Result<bool, String> {
     Ok(m.imports.iter().any(|i| i.module == API) || m.exports.iter().any(|e| e.name == WHOLE || e.name == PART))
 }
 
-/// `params`, `output`, `input`k or `resource`i, without leading zeros.
+/// `params`, `output`j, `input`k or `resource`i, without leading zeros.
 fn is_memory_name(name: &str) -> bool {
+    name == "params" || is_output(name) || indexed(name, "input") || indexed(name, "resource")
+}
+
+/// `output`j, without leading zeros.
+fn is_output(name: &str) -> bool {
+    indexed(name, "output")
+}
+
+/// `prefix` and an index without leading zeros.
+fn indexed(name: &str, prefix: &str) -> bool {
     let index = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) && (s == "0" || !s.starts_with('0'));
-    name == "params"
-        || name == "output"
-        || name.strip_prefix("input").is_some_and(index)
-        || name.strip_prefix("resource").is_some_and(index)
+    name.strip_prefix(prefix).is_some_and(index)
 }
 
 enum Op {
@@ -41,7 +48,8 @@ enum Op {
     Size,
     Read,
     Write,
-    CopyOut,
+    /// Into an output, from a memory.
+    Copy(String),
 }
 
 struct Calls<'a> {
@@ -101,15 +109,17 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
             return Err(format!("{API}.{name} is not a function"));
         };
         let (op, mem, params, results): (_, _, &[_], &[_]) = match name.as_str() {
-            "request" | "release" => (Op::Host, "", &[I32, I64], &[]),
-            "commit" => (Op::Host, "", &[I64], &[]),
+            "request" | "release" | "commit" => (Op::Host, "", &[I32, I64], &[]),
             "heartbeat" => (Op::Host, "", &[], &[]),
             "log" => (Op::Host, "", &[I32, I32], &[]),
             _ => match name.split_once('_') {
                 Some(("size", mem)) => (Op::Size, mem, &[], &[I64]),
                 Some(("read", mem)) => (Op::Read, mem, &[I32, I64, I32], &[]),
-                Some(("write", mem @ "output")) => (Op::Write, mem, &[I64, I32, I32], &[]),
-                Some(("copyout", mem)) => (Op::CopyOut, mem, &[I64, I64, I64], &[]),
+                Some(("write", mem)) if is_output(mem) => (Op::Write, mem, &[I64, I32, I32], &[]),
+                Some(("copy", ms)) => match ms.split_once('_') {
+                    Some((out, mem)) if is_output(out) => (Op::Copy(out.to_owned()), mem, &[I64, I64, I64], &[]),
+                    _ => return Err(format!("unknown {API}.{name}")),
+                },
                 _ => return Err(format!("unknown {API}.{name}")),
             },
         };
@@ -133,7 +143,7 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
             Op::Size => MemorySize { memory: memory(&mut m, mem) }.into(),
             Op::Read => MemoryCopy { dst: working, src: memory(&mut m, mem) }.into(),
             Op::Write => MemoryCopy { dst: memory(&mut m, mem), src: working }.into(),
-            Op::CopyOut => MemoryCopy { dst: memory(&mut m, "output"), src: memory(&mut m, mem) }.into(),
+            Op::Copy(out) => MemoryCopy { dst: memory(&mut m, &out), src: memory(&mut m, mem) }.into(),
         };
         calls.insert(func, instr);
     }

@@ -3,24 +3,16 @@
 
 #[link(wasm_import_module = "aqr_api")]
 unsafe extern "C" {
-    #[link_name = "write_output"]
-    fn write_output_(dst: u64, src: *const u8, len: usize);
     #[link_name = "request"]
     fn request_(k: u32, hi: u64);
     #[link_name = "release"]
     fn release_(k: u32, lo: u64);
     #[link_name = "commit"]
-    fn commit_(hi: u64);
+    fn commit_(j: u32, hi: u64);
     #[link_name = "heartbeat"]
     fn heartbeat_();
     #[link_name = "log"]
     fn log_(ptr: *const u8, len: usize);
-}
-
-#[inline]
-pub fn write_output(dst: u64, src: &[u8]) {
-    // `memory.copy output working`, trapping out of bounds.
-    unsafe { write_output_(dst, src.as_ptr(), src.len()) }
 }
 
 #[inline]
@@ -34,8 +26,8 @@ pub fn release(k: u32, lo: u64) {
 }
 
 #[inline]
-pub fn commit(hi: u64) {
-    unsafe { commit_(hi) }
+pub fn commit(j: u32, hi: u64) {
+    unsafe { commit_(j, hi) }
 }
 
 #[inline]
@@ -77,13 +69,40 @@ macro_rules! memory {
                 }
                 unsafe { f(dst.as_mut_ptr(), src, dst.len()) }
             }
+        }
+    };
+}
+pub(crate) use memory;
 
+/// The writing of the `$j`-th output.
+macro_rules! output {
+    ($j:literal) => {
+        impl $crate::Writable for $crate::Output<$j> {
             #[inline]
-            fn copy_to_output(dst: u64, src: u64, len: u64) {
-                // `memory.copy output $name`.
+            fn write(dst: u64, src: &[u8]) {
+                // `memory.copy output$j working`, trapping out of bounds.
                 #[link(wasm_import_module = "aqr_api")]
                 unsafe extern "C" {
-                    #[link_name = concat!("copyout_", $name)]
+                    #[link_name = concat!("write_output", $j)]
+                    fn f(dst: u64, src: *const u8, len: usize);
+                }
+                unsafe { f(dst, src.as_ptr(), src.len()) }
+            }
+        }
+    };
+}
+pub(crate) use output;
+
+/// The copy into the `$j`-th output from the memory `$ty`.
+macro_rules! copy {
+    ($j:literal, $ty:ty, $name:literal, $id:expr) => {
+        impl $crate::CopyTo<$j> for $ty {
+            #[inline]
+            fn copy_to(dst: u64, src: u64, len: u64) {
+                // `memory.copy output$j $name`.
+                #[link(wasm_import_module = "aqr_api")]
+                unsafe extern "C" {
+                    #[link_name = concat!("copy_output", $j, "_", $name)]
                     fn f(dst: u64, src: u64, len: u64);
                 }
                 unsafe { f(dst, src, len) }
@@ -91,7 +110,7 @@ macro_rules! memory {
         }
     };
 }
-pub(crate) use memory;
+pub(crate) use copy;
 
 /// Logs `panicked at FILE:LINE:COLUMN` (with `panic-location`) and traps, without formatting
 /// the message so that no formatting code is linked.

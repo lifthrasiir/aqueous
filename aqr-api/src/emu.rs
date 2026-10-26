@@ -38,7 +38,7 @@ fn failure(what: String) -> Failure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MemId {
     Params,
-    Output,
+    Output(u32),
     Input(u32),
     Resource(u32),
 }
@@ -51,12 +51,13 @@ struct Host {
     params: Vec<u8>,
     resources: Vec<Vec<u8>>,
     inputs: Vec<Vec<u8>>,
-    output: Vec<u8>,
-    /// The data of the inputs and their visible ranges, for a part module.
+    outputs: Vec<Vec<u8>>,
+    /// The data of the inputs and their visible ranges, and the outputs so far, for a part
+    /// module.
     data: Vec<Vec<u8>>,
     visible: Vec<(u64, u64)>,
-    committed: Vec<u8>,
-    size: u64,
+    committed: Vec<Vec<u8>>,
+    sizes: Vec<u64>,
     last_log: Option<Vec<u8>>,
 }
 
@@ -70,14 +71,15 @@ fn sized_to_fit(data: &[u8]) -> Vec<u8> {
     mem
 }
 
-/// Applies the module `entry` to `inputs`, `resources` and `params` with the declared output size `size`.
+/// Applies the module `entry` to `inputs`, `resources` and `params` with the declared output sizes
+/// `sizes`; returns the outputs.
 pub fn apply(
     entry: &Entry,
     inputs: &[&[u8]],
     resources: &[&[u8]],
     params: &[u8],
-    size: u64,
-) -> Result<Vec<u8>, Failure> {
+    sizes: &[u64],
+) -> Result<Vec<Vec<u8>>, Failure> {
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         let prev = panic::take_hook();
@@ -89,17 +91,23 @@ pub fn apply(
     });
 
     let whole = entry.kind == Kind::Whole;
-    let size_usize = usize::try_from(size).map_err(|_| failure("declared output size too large".into()))?;
+    if sizes.is_empty() {
+        return Err(failure("no output".into()));
+    }
+    let sizes_usize = sizes
+        .iter()
+        .map(|&s| usize::try_from(s).map_err(|_| failure("declared output size too large".into())))
+        .collect::<Result<Vec<_>, _>>()?;
     let host = Host {
         kind: entry.kind,
         params: sized_to_fit(params),
         resources: resources.iter().map(|r| sized_to_fit(r)).collect(),
         inputs: inputs.iter().map(|i| if whole { sized_to_fit(i) } else { sized_to_fit(&vec![0; i.len()]) }).collect(),
-        output: sized_to_fit(&vec![0; size_usize]),
+        outputs: sizes_usize.iter().map(|&s| sized_to_fit(&vec![0; s])).collect(),
         data: inputs.iter().map(|i| i.to_vec()).collect(),
         visible: vec![(0, 0); inputs.len()],
-        committed: Vec::new(),
-        size,
+        committed: vec![Vec::new(); sizes.len()],
+        sizes: sizes.to_vec(),
         last_log: None,
     };
     HOST.with_borrow_mut(|h| {
@@ -110,7 +118,7 @@ pub fn apply(
     let mut args = vec![params.len() as u64];
     args.extend(resources.iter().map(|r| r.len() as u64));
     args.extend(inputs.iter().map(|i| i.len() as u64));
-    args.push(size);
+    args.extend(sizes);
     let result = if args.len() != entry.arity {
         Err(failure(format!("entry point takes {} arguments, not {}", entry.arity, args.len())))
     } else {
@@ -129,16 +137,24 @@ pub fn apply(
     let mut host = HOST.with_borrow_mut(|h| h.take()).unwrap();
     result.map_err(|f| Failure { log: host.last_log.take(), ..f })?;
 
-    let output = if whole {
-        host.output.truncate(size_usize);
-        host.output
+    let outputs = if whole {
+        host.outputs
+            .into_iter()
+            .zip(&sizes_usize)
+            .map(|(mut o, &s)| {
+                o.truncate(s);
+                o
+            })
+            .collect()
     } else {
         host.committed
     };
-    if output.len() as u64 != size {
-        return Err(failure(format!("output of {} bytes, not {size}", output.len())));
+    for (j, (o, &size)) in outputs.iter().zip(sizes).enumerate() {
+        if o.len() as u64 != size {
+            return Err(failure(format!("output {j} of {} bytes, not {size}", o.len())));
+        }
     }
-    Ok(output)
+    Ok(outputs)
 }
 
 fn trap(msg: String) -> ! {
@@ -154,7 +170,7 @@ impl Host {
     fn mem(&mut self, id: MemId) -> Result<&mut Vec<u8>, String> {
         match id {
             MemId::Params => Ok(&mut self.params),
-            MemId::Output => Ok(&mut self.output),
+            MemId::Output(j) => self.outputs.get_mut(j as usize).ok_or_else(|| format!("aqr_output{j} imported")),
             MemId::Input(k) => self.inputs.get_mut(k as usize).ok_or_else(|| format!("aqr_input{k} imported")),
             MemId::Resource(i) => self.resources.get_mut(i as usize).ok_or_else(|| format!("aqr_resource{i} imported")),
         }
@@ -187,20 +203,20 @@ pub(crate) mod sys {
         })
     }
 
-    pub fn copy_to_output(id: MemId, dst: u64, src: u64, len: u64) {
+    pub fn copy_to_output(j: u32, id: MemId, dst: u64, src: u64, len: u64) {
         with(|h| {
             let mem = h.mem(id)?;
             let bytes = mem[range(mem.len(), src, len)?].to_vec();
-            let out = &mut h.output;
+            let out = h.mem(MemId::Output(j))?;
             let r = range(out.len(), dst, len)?;
             out[r].copy_from_slice(&bytes);
             Ok(())
         })
     }
 
-    pub fn write_output(dst: u64, src: &[u8]) {
+    pub fn write_output(j: u32, dst: u64, src: &[u8]) {
         with(|h| {
-            let out = &mut h.output;
+            let out = h.mem(MemId::Output(j))?;
             let r = range(out.len(), dst, src.len() as u64)?;
             out[r].copy_from_slice(src);
             Ok(())
@@ -238,16 +254,17 @@ pub(crate) mod sys {
         })
     }
 
-    pub fn commit(hi: u64) {
+    pub fn commit(j: u32, hi: u64) {
         with(|h| {
             h.part("aqr_commit")?;
-            let w = h.output.len() as u64;
-            let len = h.committed.len() as u64;
-            if !(len..=h.size).contains(&hi) || hi - len > w {
-                return Err(format!("aqr_commit({hi}) outside [{len}, {}] or window {w}", h.size));
+            let w = h.mem(MemId::Output(j))?.len() as u64;
+            let (len, size) = (h.committed[j as usize].len() as u64, h.sizes[j as usize]);
+            if !(len..=size).contains(&hi) || hi - len > w {
+                return Err(format!("aqr_commit({j}, {hi}) outside [{len}, {size}] or window {w}"));
             }
             for o in len..hi {
-                h.committed.push(h.output[(o % w) as usize]);
+                let b = h.outputs[j as usize][(o % w) as usize];
+                h.committed[j as usize].push(b);
             }
             Ok(())
         })
@@ -277,12 +294,30 @@ pub(crate) mod sys {
                 fn read(src: u64, dst: &mut [u8]) {
                     $crate::emu::sys::read($id, src, dst)
                 }
-
-                fn copy_to_output(dst: u64, src: u64, len: u64) {
-                    $crate::emu::sys::copy_to_output($id, dst, src, len)
-                }
             }
         };
     }
     pub(crate) use memory;
+
+    macro_rules! output {
+        ($j:literal) => {
+            impl $crate::Writable for $crate::Output<$j> {
+                fn write(dst: u64, src: &[u8]) {
+                    $crate::emu::sys::write_output($j, dst, src)
+                }
+            }
+        };
+    }
+    pub(crate) use output;
+
+    macro_rules! copy {
+        ($j:literal, $ty:ty, $name:literal, $id:expr) => {
+            impl $crate::CopyTo<$j> for $ty {
+                fn copy_to(dst: u64, src: u64, len: u64) {
+                    $crate::emu::sys::copy_to_output($j, $id, dst, src, len)
+                }
+            }
+        };
+    }
+    pub(crate) use copy;
 }

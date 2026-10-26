@@ -14,7 +14,7 @@ aqr_api::entry! {
         let mut key = [0; 256];
         let key = &mut key[..params_len as usize];
         Params::read(0, key);
-        let (w_in, w_out) = (Input::<0>::size(), Output::size());
+        let (w_in, w_out) = (Input::<0>::size(), Output::<0>::size());
         let mut buf = [0; 4096];
         let mut pos = 0;
         while pos < size {
@@ -26,8 +26,8 @@ aqr_api::entry! {
             for (i, b) in chunk.iter_mut().enumerate() {
                 *b ^= key[((pos + i as u64) % params_len) as usize];
             }
-            Output::write(pos % w_out, chunk);
-            Output::commit(pos + n);
+            Output::<0>::write(pos % w_out, chunk);
+            Output::<0>::commit(pos + n);
             aqr_api::heartbeat();
             pos += n;
         }

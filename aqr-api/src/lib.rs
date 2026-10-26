@@ -37,36 +37,49 @@ pub trait Memory: sealed::Sealed {
     fn size() -> u64;
     /// Copies `dst.len()` bytes from offset `src` into `dst`.
     fn read(src: u64, dst: &mut [u8]);
-    #[doc(hidden)]
-    fn copy_to_output(dst: u64, src: u64, len: u64);
+}
+
+/// A memory that the `J`-th output can be copied into from ([`Output::copy_from`]): any.
+#[doc(hidden)]
+pub trait CopyTo<const J: u32>: Memory {
+    fn copy_to(dst: u64, src: u64, len: u64);
+}
+
+/// The `J`-th output, which can be written ([`Output::write`]).
+#[doc(hidden)]
+pub trait Writable: Memory {
+    fn write(dst: u64, src: &[u8]);
 }
 
 /// The memory of the parameters (`aqr_params`).
 pub struct Params;
-/// The memory of the output (`aqr_output`).
-pub struct Output;
+/// The memory of the `J`-th output (`aqr_output`J), for `J` < 16.
+pub struct Output<const J: u32>;
 /// The memory of the `K`-th input (`aqr_input`K), for `K` < 16.
 pub struct Input<const K: u32>;
 /// The memory of the `I`-th resource (`aqr_resource`I), for `I` < 16.
 pub struct Resource<const I: u32>;
 
-impl Output {
+impl<const J: u32> Output<J>
+where
+    Self: Writable,
+{
     /// Copies `src` to offset `dst`.
     #[inline]
     pub fn write(dst: u64, src: &[u8]) {
-        sys::write_output(dst, src)
+        <Self as Writable>::write(dst, src)
     }
 
     /// Copies `len` bytes from offset `src` of `M` to offset `dst`, without the working memory.
     #[inline]
-    pub fn copy_from<M: Memory>(dst: u64, src: u64, len: u64) {
-        M::copy_to_output(dst, src, len)
+    pub fn copy_from<M: CopyTo<J>>(dst: u64, src: u64, len: u64) {
+        M::copy_to(dst, src, len)
     }
 
     /// Appends the bytes up to the offset `hi` of the output (`aqr_commit`). Part modules only.
     #[inline]
     pub fn commit(hi: u64) {
-        sys::commit(hi)
+        sys::commit(J, hi)
     }
 }
 
@@ -107,16 +120,45 @@ use emu::sys;
 #[cfg(target_family = "wasm")]
 use wasm as sys;
 
+/// Every memory, and every copy into an output from one of them.
 macro_rules! memories {
-    ($($ty:ty => $name:literal, $id:expr;)*) => {$(
-        impl sealed::Sealed for $ty {}
-        sys::memory!($ty, $name, $id);
+    ($($ty:ty => $name:literal, $id:expr;)*) => {
+        $(
+            impl sealed::Sealed for $ty {}
+            sys::memory!($ty, $name, $id);
+        )*
+        copies!([$($ty => $name, $id;)*] 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15);
+    };
+}
+
+macro_rules! copies {
+    (@to $j:literal [$($ty:ty => $name:literal, $id:expr;)*]) => {$(
+        sys::copy!($j, $ty, $name, $id);
+    )*};
+    ($mems:tt $($j:literal)*) => {$(
+        sys::output!($j);
+        copies!(@to $j $mems);
     )*};
 }
 
 memories! {
     Params => "params", MemId::Params;
-    Output => "output", MemId::Output;
+    Output<0> => "output0", MemId::Output(0);
+    Output<1> => "output1", MemId::Output(1);
+    Output<2> => "output2", MemId::Output(2);
+    Output<3> => "output3", MemId::Output(3);
+    Output<4> => "output4", MemId::Output(4);
+    Output<5> => "output5", MemId::Output(5);
+    Output<6> => "output6", MemId::Output(6);
+    Output<7> => "output7", MemId::Output(7);
+    Output<8> => "output8", MemId::Output(8);
+    Output<9> => "output9", MemId::Output(9);
+    Output<10> => "output10", MemId::Output(10);
+    Output<11> => "output11", MemId::Output(11);
+    Output<12> => "output12", MemId::Output(12);
+    Output<13> => "output13", MemId::Output(13);
+    Output<14> => "output14", MemId::Output(14);
+    Output<15> => "output15", MemId::Output(15);
     Input<0> => "input0", MemId::Input(0);
     Input<1> => "input1", MemId::Input(1);
     Input<2> => "input2", MemId::Input(2);
@@ -154,13 +196,14 @@ memories! {
 /// Defines the entry point `aqr_apply_whole` or `aqr_apply_part` as `$name::apply`.
 ///
 /// The arguments are the lengths, in order, of the parameters, of each resource and of each input,
-/// and the declared output size, so their number fixes the numbers of the resources and the inputs.
+/// and the declared size of each output, so their number fixes the numbers of the resources, the
+/// inputs and the outputs together (the module tells them apart).
 /// Natively, `$name::ENTRY` is the entry point for [`emu::apply`].
 ///
 /// ```ignore
 /// aqr_api::entry! {
 ///     whole fn copy(params_len, in0_len, size) {
-///         Output::copy_from::<Input<0>>(0, 0, in0_len);
+///         Output::<0>::copy_from::<Input<0>>(0, 0, in0_len);
 ///     }
 /// }
 /// ```

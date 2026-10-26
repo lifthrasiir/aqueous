@@ -9,7 +9,7 @@ aqr_api::entry! {
         let mut at = 0;
         for i in (0..p.count()).rev() {
             let r = p.range(i);
-            Output::copy_from::<Input<0>>(at, r.start, r.end - r.start);
+            Output::<0>::copy_from::<Input<0>>(at, r.start, r.end - r.start);
             at += r.end - r.start;
         }
         assert_eq!(at, size);
@@ -26,9 +26,9 @@ aqr_api::entry! {
                 let mut b = [0];
                 Input::<0>::request(o + 1);
                 Input::<0>::read(o, &mut b);
-                Output::write(at, &b);
+                Output::<0>::write(at, &b);
                 at += 1;
-                Output::commit(at);
+                Output::<0>::commit(at);
             }
         }
     }
@@ -37,18 +37,18 @@ aqr_api::entry! {
 #[test]
 fn whole() {
     let items: [&[u8]; 4] = [b"ab", b"", b"cde", b"f"];
-    assert_eq!(apply(&reversed::ENTRY, &[&pack(&items)], &[], b"", 6).unwrap(), b"fcdeab");
-    assert_eq!(apply(&reversed::ENTRY, &[&pack::<&[u8]>(&[])], &[], b"", 0).unwrap(), b"");
+    assert_eq!(apply(&reversed::ENTRY, &[&pack(&items)], &[], b"", &[6]).unwrap()[0], b"fcdeab");
+    assert_eq!(apply(&reversed::ENTRY, &[&pack::<&[u8]>(&[])], &[], b"", &[0]).unwrap()[0], b"");
     // more ends than a chunk of them
     let many: Vec<Vec<u8>> = (0..100u8).map(|i| vec![i; i as usize % 3]).collect();
     let want: Vec<u8> = many.iter().rev().flatten().copied().collect();
-    assert_eq!(apply(&reversed::ENTRY, &[&pack(&many)], &[], b"", want.len() as u64).unwrap(), want);
+    assert_eq!(apply(&reversed::ENTRY, &[&pack(&many)], &[], b"", &[want.len() as u64]).unwrap()[0], want);
 }
 
 #[test]
 fn part() {
     let items: [&[u8]; 3] = [b"ab", b"", b"cde"];
-    assert_eq!(apply(&joined::ENTRY, &[&pack(&items)], &[], b"", 5).unwrap(), b"abcde");
+    assert_eq!(apply(&joined::ENTRY, &[&pack(&items)], &[], b"", &[5]).unwrap()[0], b"abcde");
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn invalid() {
     bad.extend([count, ends]);
     for b in &bad {
         for entry in [&reversed::ENTRY, &joined::ENTRY] {
-            let Err(Failure { log, .. }) = apply(entry, &[b], &[], b"", 5) else { panic!("{b:?}") };
+            let Err(Failure { log, .. }) = apply(entry, &[b], &[], b"", &[5]) else { panic!("{b:?}") };
             assert_eq!(log.as_deref(), Some(&b"aqr_api: not a packed byte sequence"[..]), "{b:?}");
         }
     }

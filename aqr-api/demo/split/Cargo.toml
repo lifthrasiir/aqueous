@@ -1,0 +1,11 @@
+[package]
+name = "aqr-demo-split"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aqr-api = { path = "../.." }

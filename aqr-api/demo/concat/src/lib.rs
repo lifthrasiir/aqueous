@@ -2,11 +2,11 @@
 
 #![cfg_attr(target_family = "wasm", no_std)]
 
-use aqr_api::{Input, Memory, Output, Params, Resource};
+use aqr_api::{CopyTo, Input, Output, Params, Resource};
 
-fn put<M: Memory>(at: &mut u64, len: u64) {
+fn put<M: CopyTo<0>>(at: &mut u64, len: u64) {
     assert!(len <= M::size());
-    Output::copy_from::<M>(*at, 0, len);
+    Output::<0>::copy_from::<M>(*at, 0, len);
     *at += len;
 }
 

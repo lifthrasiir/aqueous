@@ -10,13 +10,15 @@ function sizedToFit(data, len = data.length) {
     return mem;
 }
 
-/// Returns the output, or throws for an invalid archive failure. `aqr_log` messages go to `logs`.
-export function apply(bytes, { inputs, resources, params, size, logs = [] }) {
+/// Returns the outputs, of the sizes `sizes`, or throws for an invalid archive failure. `aqr_log`
+/// messages go to `logs`.
+export function apply(bytes, { inputs, resources, params, sizes, logs = [] }) {
+    if (sizes.length === 0) throw new Error("no output");
     const mod = new WebAssembly.Module(bytes);
     const whole = WebAssembly.Module.exports(mod).some((e) => e.name === "aqr_apply_whole");
     const entry = whole ? "aqr_apply_whole" : "aqr_apply_part";
     const visible = inputs.map(() => [0, 0]);
-    const committed = [];
+    const committed = sizes.map(() => []);
     const mems = {};
     const host = {
         aqr_request(k, hi) {
@@ -32,11 +34,12 @@ export function apply(bytes, { inputs, resources, params, size, logs = [] }) {
             if (!(visible[k][0] <= lo && lo <= visible[k][1])) throw new Error(`aqr_release(${k}, ${lo})`);
             visible[k][0] = lo;
         },
-        aqr_commit(hi) {
+        aqr_commit(j, hi) {
             hi = Number(hi);
-            const mem = new Uint8Array(mems.aqr_output.buffer), w = mem.length;
-            if (!(committed.length <= hi && hi <= size && hi - committed.length <= w)) throw new Error(`aqr_commit(${hi})`);
-            for (let o = committed.length; o < hi; o++) committed.push(mem[o % w]);
+            if (!mems[`aqr_output${j}`]) throw new Error(`aqr_commit(${j}, ${hi})`);
+            const mem = new Uint8Array(mems[`aqr_output${j}`].buffer), w = mem.length, c = committed[j];
+            if (!(c.length <= hi && hi <= sizes[j] && hi - c.length <= w)) throw new Error(`aqr_commit(${j}, ${hi})`);
+            for (let o = c.length; o < hi; o++) c.push(mem[o % w]);
         },
         aqr_heartbeat() {},
         aqr_log(ptr, len) {
@@ -58,7 +61,7 @@ export function apply(bytes, { inputs, resources, params, size, logs = [] }) {
             continue;
         } else if (n === "aqr_memory") m = new WebAssembly.Memory({ initial: imp.type.minimum });
         else if (n === "aqr_params") m = sizedToFit(params);
-        else if (n === "aqr_output") m = sizedToFit(null, size);
+        else if (n.startsWith("aqr_output")) m = sizedToFit(null, sizes[+n.slice(10)] ?? fail(n));
         else if (n.startsWith("aqr_resource")) m = sizedToFit(resources[+n.slice(12)] ?? fail(n));
         else if (n.startsWith("aqr_input")) {
             const data = inputs[+n.slice(9)] ?? fail(n);
@@ -67,11 +70,14 @@ export function apply(bytes, { inputs, resources, params, size, logs = [] }) {
         aqr[n] = mems[n] = m;
     }
     const instance = new WebAssembly.Instance(mod, { aqr });
-    const args = [params.length, ...resources.map((r) => r.length), ...inputs.map((i) => i.length), size];
+    const args = [params.length, ...resources.map((r) => r.length), ...inputs.map((i) => i.length), ...sizes];
     instance.exports[entry](...args.map(BigInt));
-    const output = whole ? (mems.aqr_output ? new Uint8Array(mems.aqr_output.buffer, 0, size) : new Uint8Array(size)) : Uint8Array.from(committed);
-    if (output.length !== size) throw new Error(`output of ${output.length} bytes, not ${size}`);
-    return output;
+    return sizes.map((size, j) => {
+        const mem = mems[`aqr_output${j}`];
+        const output = whole ? (mem ? new Uint8Array(mem.buffer, 0, size) : new Uint8Array(size)) : Uint8Array.from(committed[j]);
+        if (output.length !== size) throw new Error(`output ${j} of ${output.length} bytes, not ${size}`);
+        return output;
+    });
 }
 
 function fail(what) {

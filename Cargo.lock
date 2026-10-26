@@ -102,6 +102,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-demo-split"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+]
+
+[[package]]
 name = "aqr-demo-xor"
 version = "0.1.0"
 dependencies = [
