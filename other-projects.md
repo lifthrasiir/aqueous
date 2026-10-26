@@ -1197,14 +1197,14 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
   - 압축은 10코어 M4에서 40 MB/s 이상이다.
   - Insighter와 비교하면, 압축률은 가깝게 하고 풀기 속도, 메모리, 랜덤 액세스에서 앞서는 자리이다.
 - **확장 목표**: 2.27 GB 이하(Insighter와 동급).
-  - 열쇠는 PPMd 재현(−205 MB)이다. Insighter에는 없는 몫으로, 그쪽 크기의 9%에 해당한다.
-  - 대신 풀 때 PPMd 1.1 GB를 단일 스트림으로 다시 인코딩해야 하므로, 별도 레벨에서만 켠다.
+  - PPMd 재현(−205 MB)은 Insighter에는 없는 몫이지만 하지 않는다. 한 코어로 약 300 s인 직렬
+    재인코딩이 압축과 풀기 예산을 모두 넘는다(`10gb-todo.md` 5번).
 - 크기 예산(MB, 상당 부분 추정):
 
   | 항목 | 예산 | 근거 |
   |---|---|---|
   | 줄일 수 없는 것 | 580 | PPMd를 뺀 785 MB에서 일부 |
-  | PPMd | 205 → 0 | 재현하는 경우 |
+  | PPMd | 205 | 재현하지 않는다(`10gb-todo.md` 5번) |
   | hg19 | 650–720 | 2비트 packing이면 720, CM이면 650 |
   | enwik9 | 210–250 | enwik8은 접두어 중복 |
   | 그 밖의 텍스트 | 80 | |
@@ -1213,7 +1213,7 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
   | ZIP 잔여 (text8, OpenOffice JAR, picasa의 JPEG 등) | ~100 | |
   | JPEG | 196 | |
   | 그 밖 | ~250 | |
-  | **합계** | **약 2.45–2.65 GB** | PPMd 재현 시 −0.2 GB |
+  | **합계** | **약 2.45–2.65 GB** | PPMd를 그대로 둔 것 |
 
   아래 2번과 4번까지 해야 Insighter와 동급이 된다.
 
