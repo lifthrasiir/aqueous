@@ -19,34 +19,48 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
 
 ## 종류별
 
+2026-10-27, 커밋 `8f2393e`(aqr-wrt까지), 위와 같은 조건. 2,739,268,574 B(2.739 GB), 압축 113.8 s
+(87.9 MB/s), 최대 footprint 9.72 GB; 풀기 23.9 s(418 MB/s), 최대 footprint 8.68 GB(2번 전에는
+4.8 GB). 압축 시간은 같은 바이너리로 잰 앞의 132.5 s보다 짧다(그때는 다른 일과 겹쳤던 것 같다).
+
 | 종류 | 파일 | 원본 MB | 압축 MB | 비율 | 예산 MB |
 |---|---|---|---|---|---|
-| FASTA (hg19) | 93 | 3200 | 971 → 약 707 (aqr-fasta) | 0.30 → 0.22 | 650–720 |
-| ZIP류 (JAR, ODF, EPUB 포함) | 761 | 652 | 608 | 0.93 | 잔여 ~100 |
-| 그 밖의 아카이브 (PPMd, ZPAQ, 7z, LZMA) | 196 | 547 | 544 | 0.99 | 줄일 수 없는 것 580에 포함, PPMd 205 별도 |
-| PE | 2795 | 1189 | 347 | 0.29 | 260–300 |
-| enwik8, enwik9 | 2 | 1100 | 316 | 0.29 | 210–250 |
-| 그 밖 | 7811 | 556 | 252 | 0.45 | ~250 |
-| JPEG | 1480 | 236 | 190 | 0.81 | 196 |
-| 텍스트 | 43202 | 786 | 131 | 0.17 | 80 |
+| FASTA (hg19) | 93 | 3200 | 668 | 0.21 | 650–720 |
+| 그 밖의 아카이브 (PPMd, ZPAQ, 7z, LZMA) | 196 | 547 | 542 | 0.99 | 줄일 수 없는 것 580에 포함, PPMd 205 별도 |
+| ZIP류 (JAR, ODF, EPUB 포함) | 761 | 652 | 359 | 0.55 | 잔여 ~100 |
+| PE | 2795 | 1189 | 346 | 0.29 | 260–300 |
+| 그 밖 | 7811 | 556 | 227 | 0.41 | ~250 |
+| JPEG | 1480 | 236 | 156 | 0.66 | 196 |
+| enwik8, enwik9 | 2 | 1100 | 126 | 0.11 | 210–250 |
+| 텍스트 | 43202 | 786 | 112 | 0.14 | 80 |
 | 이미지 (PNG, GIF, BMP, TIFF, PNM) | 2050 | 116 | 60 | 0.52 | |
-| PDF | 151 | 65 | 52 | 0.80 | |
-| ar | 4514 | 493 | 44 | 0.09 | 30 |
+| PDF | 151 | 65 | 50 | 0.78 | |
+| ar | 4514 | 493 | 45 | 0.09 | 30 |
 | WAV | 52 | 54 | 31 | 0.57 | |
-| tar | 4 | 82 | 13 | 0.16 | |
-| gzip | 2500 | 8 | 8 | 0.96 | |
-| 합계 | 65611 | 9084 | 3568 | 0.39 | 약 2450–2650 |
+| gzip | 2500 | 8 | 8 | 0.92 | |
+| tar | 4 | 82 | 7 | 0.09 | |
+| 합계 | 65611 | 9084 | 2736 | 0.30 | 약 2450–2650 |
+
+- 나눠 가진 블록은 slice한 바이트에 비례해 나누므로, 내용을 공유하는 파일들은 따로 보면
+  안 된다. enwik 묶음(`enwik8`, `enwik9`, `enwik8.zip`, `enwik9.zip`)은 6.9 + 118.7 + 9.5 + 141.4 =
+  276.5 MB이다. 혼자 압축한 `enwik9`(253.5 MB)보다 23 MB 많은데, Info-ZIP `-9`의 profile 6
+  레코드(약 26 MB)와 맞는다. JPEG가 예산 밑인 것도 같은 사진의 baseline/progressive 쌍 덕이다.
+- ZIP류 359 MB 가운데 재현한 것이 296개 541 → 252 MB(그중 enwik 둘과 `silesia.zip`이 188 MB),
+  그대로 둔 것이 465개 110.5 → 107.2 MB이다. 그대로 둔 것은 `text8.zip`(31.3 MB, Info-ZIP `-9`)과
+  `decomp8*.zip` 셋(각 16 MB, 안은 이미 압축된 `archive8.bin`)이 79 MB이고, 나머지는 1 MB 미만인
+  작은 ZIP 460개 남짓, 31 MB이다.
 
 가장 큰 파일들(압축 MB / 원본 MB):
 
-- `2011/www.mattmahoney.net/dc/enwik9.zip` 322.6 / 322.6, 그대로
-- `benchmarks/enwik9` 283.9 / 1000.0
 - `2011/www.mattmahoney.net/dc/enwik9.pmd` 184.0 / 184.0, 그대로
-- `benchmarks/simple/w8002` 100.0 / 100.0, 난수
-- `www.mattmahoney.net/dc/mingw_benchmark.zpaq` 88.3 / 88.3, 그대로
-- `www.mattmahoney.net/dc/silesia.zip` 65.6 / 67.6
-- `2011/www.mattmahoney.net/dc/enwik8.zip` 36.5 / 36.5, `text8.zip` 31.3 / 31.3, 그대로
-- `benchmarks/enwik8` 32.5 / 100.0
+- `2011/www.mattmahoney.net/dc/enwik9.zip` 141.4 / 322.6, `benchmarks/enwik9` 118.7 / 1000.0(위의 묶음)
+- `benchmarks/simple/w8002` 99.3 / 100.0, 난수
+- `www.mattmahoney.net/dc/mingw_benchmark.zpaq` 88.3 / 88.3, `silesia.zpaq` 47.8 / 47.8, 그대로
+- `hg19/chr2.fa` 55.3 / 248.1, `chr1.fa` 51.7 / 254.2
+- `mingw/mingw480/x32-4.8.0-release-win32-sjlj-rev1.7z` 37.1 / 37.1, 그대로
+- `www.mattmahoney.net/dc/silesia.zip` 37.0 / 67.6
+- `2011/www.mattmahoney.net/dc/text8.zip` 31.3 / 31.3, 그대로
+- `2011/www.mattmahoney.net/dc/enwik8.pmd` 21.4 / 21.4, 그대로(`enwik9.pmd`와 나눠 갖지 못한다)
 
 ## 남은 일 (이득이 큰 순)
 
@@ -116,13 +130,13 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
    - 그 밖에 FORMAT.md에 sub-allocator와 cut-off까지 인코더 전체(C로 1,500줄 안팎)를 적어야 하고,
      단독 PPMd var.J 파일은 이 코퍼스 밖에서 거의 볼 수 없다(7z는 var.H, ZIP의 method 98은 var.I).
    - `enwik8.pmd`는 위대로 `enwik9.pmd`의 접두어나 다름없어서 파일 사이의 공유만으로 −21 MB가
-     된다. 지금의 `Held`/`share_slices`가 이를 잡는지는 아직 보지 않았다.
+     된다. 지금은 잡지 못한다(커밋 `8f2393e`에서 21.39 MB 그대로, solid 블록 없음).
 
-1과 2로 2.81 GB이다. 3까지 하면 2.6–2.7 GB이다. 주 목표 2.4 GB에는 4와, 3을 넘는 몫이 더
+1과 2, aqr-bundle, aqr-wrt로 2.739 GB이다. 3을 마저 하면 2.6–2.7 GB이다. 주 목표 2.4 GB에는 4와, 3을 넘는 몫이 더
 필요하다. PPMd 없이는 확장 목표(2.27 GB)의 길이 텍스트와 PE 쪽밖에 없다.
 
 ## 함께 볼 것
 
-- 메모리: 압축 최대 footprint 8.9 GB(배치 크기의 약 7배, 그리고 2번의 큰 묶음), 풀기 footprint
-  4.8 GB(2번 전). 스트리밍을 제대로 구현하며 다시 본다.
+- 메모리: 압축 최대 footprint 9.7 GB(배치 크기의 약 7배, 그리고 2번의 큰 묶음), 풀기 footprint
+  8.7 GB(2번 전 4.8 GB, 목표 2 GB). 스트리밍을 제대로 구현하며 다시 본다.
 - 16 MiB solid 블록 상한은 텍스트에서 약 4%의 손해이다(`other-projects.md`).
