@@ -150,24 +150,40 @@ pub(crate) fn reclaim(mut f: Arc<Formula>) -> Formula {
 }
 
 impl Prevalidator {
-    /// A prevalidator of the formulas made of `file` and of what it holds.
+    /// A prevalidator of the formulas made of `file` and of what it holds: as many evaluated at
+    /// once as there are `threads`.
     pub fn spawn(threads: usize, file: &[u8]) -> Prevalidator {
         let (jobs, rx) = channel::<Job>();
+        let rx = Arc::new(Mutex::new(rx));
+        let workers: Vec<_> = (0..threads.max(1))
+            .map(|_| {
+                let rx = rx.clone();
+                std::thread::spawn(move || {
+                    let mut memo = Memo::default();
+                    loop {
+                        // (the lock is held while waiting for a job only)
+                        let Ok((f, d, at)) = rx.lock().unwrap().recv() else { break };
+                        // the file is not kept again: the outputs of the applications at the top of
+                        // a formula of data in it are where they make it
+                        let r = Recording {
+                            native: Native { threads },
+                            file: at.map_or_else(Vec::new, |at| top(&f.root, at)),
+                            seen: Mutex::default(),
+                        };
+                        let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
+                        drop(f);
+                        if good {
+                            memo.0.extend(r.seen.into_inner().unwrap());
+                        }
+                    }
+                    memo
+                })
+            })
+            .collect();
         let done = std::thread::spawn(move || {
             let mut memo = Memo::default();
-            for (f, d, at) in rx {
-                // the file is not kept again: the outputs of the applications at the top of a
-                // formula of data in it are where they make it
-                let r = Recording {
-                    native: Native { threads },
-                    file: at.map_or_else(Vec::new, |at| top(&f.root, at)),
-                    seen: Mutex::default(),
-                };
-                let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
-                drop(f);
-                if good {
-                    memo.0.extend(r.seen.into_inner().unwrap());
-                }
+            for w in workers {
+                memo.0.extend(w.join().unwrap_or_default().0);
             }
             memo
         });
