@@ -207,7 +207,7 @@ impl aqr_compress::Source for Gathered {
         let at = |e: std::io::Error| std::io::Error::new(e.kind(), format!("{}: {e}", p.display()));
         let mut f = fs::File::open(p).map_err(at)?;
         f.seek(std::io::SeekFrom::Start(range.start)).map_err(at)?;
-        let mut d = Vec::new();
+        let mut d = Vec::with_capacity(range.end.min(self.contents[c].2).saturating_sub(range.start) as usize);
         f.take(range.end.saturating_sub(range.start)).read_to_end(&mut d).map_err(at)?;
         Ok(d)
     }

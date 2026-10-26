@@ -316,7 +316,12 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         Made::Deflated { data, record } => (n + data.len(), r + record.len()),
         _ => (n, r),
     });
-    let (mut data, mut records) = (Vec::with_capacity(sizes.0), Vec::with_capacity(sizes.1));
+    // (the data of a body that is all of it taken as it is)
+    let (mut data, mut records) = (Vec::new(), Vec::with_capacity(sizes.1));
+    let put = |data: &mut Vec<u8>, d: &[u8]| {
+        data.reserve_exact(sizes.0 - data.len());
+        data.extend_from_slice(d);
+    };
     // the kind of each entry's contents, and their end in `data`
     let mut kinds: Vec<(Kind, usize)> = Vec::new();
     let mut locals = locals.iter().zip(made.iter_mut()).zip(crcs);
@@ -325,20 +330,20 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             Rec::Gap(g) => w.gap(g.clone()),
             Rec::Local(_) => {
                 let ((l, m), crc) = locals.next().unwrap();
+                w.local(l, m, crc);
                 match m {
-                    Made::Stored => data.extend_from_slice(&input[l.body.clone()]),
+                    Made::Stored => put(&mut data, &input[l.body.clone()]),
                     Made::Deflated { data: dd, record } => {
-                        data.extend_from_slice(dd);
+                        match dd.len() == sizes.0 {
+                            true => data = std::mem::take(dd),
+                            false => put(&mut data, &std::mem::take(dd)),
+                        }
                         records.extend_from_slice(record);
                     }
                     _ => {}
                 }
                 if matches!(m, Made::Stored | Made::Deflated { .. }) {
                     kinds.push(((opt.kind)(&input[l.name.clone()]), data.len()));
-                }
-                w.local(l, m, crc);
-                if let Made::Deflated { data: dd, .. } = m {
-                    *dd = Vec::new();
                 }
             }
             Rec::Central(c) => w.central(c),
