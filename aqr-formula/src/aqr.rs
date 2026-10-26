@@ -341,7 +341,7 @@ impl Encoder {
             for r in resources {
                 self.resource_block(out, r)?;
             }
-            block(out, FORMULA, &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?);
+            formula_block(out, 1, &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?);
             for s in sliced {
                 self.content_block(out, false, streams[s], f.streams[s].kind == Kind::Compressed)?;
             }
@@ -494,6 +494,13 @@ fn footer(out: &mut impl Out, blocks: usize) {
 /// needed and padding the block to an even length.
 fn block(out: &mut impl Out, ty: u64, data: &[u8]) {
     block_of(out, ty, &[data]);
+}
+
+/// Appends a formula block of `num_outputs` outputs and the compressed formula data `data`.
+fn formula_block(out: &mut impl Out, num_outputs: u64, data: &[u8]) {
+    let mut n = Vec::new();
+    varint::put(&mut n, num_outputs);
+    block_of(out, FORMULA, &[&n, data]);
 }
 
 /// A block of the bytes of `parts` one after the other.
@@ -993,9 +1000,9 @@ pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u
         .iter()
         .map(|leaf| match *leaf {
             Leaf::Stored(_) => Ok(None),
-            Leaf::Formula { data, modules, resources, non_leaf } => {
-                read(&blocks.formulas[data], &env(modules, resources, non_leaf), blocks.non_leaf.len(), &mut used)
-                    .map(Some)
+            Leaf::Formula { outputs, data, modules, resources, non_leaf } => {
+                let env = env(modules, resources, non_leaf);
+                read(&blocks.formulas[data], outputs, &env, blocks.non_leaf.len(), &mut used).map(Some)
             }
         })
         .collect::<Decoded<Vec<_>>>()?;
@@ -1046,9 +1053,10 @@ struct Blocks {
 
 enum Leaf {
     Stored(Vec<u8>),
-    /// The formula data (by index), with the numbers of module and resource blocks before it
-    /// and of non-leaf blocks.
+    /// The number of outputs and the formula data (by index), with the numbers of module and
+    /// resource blocks before it and of non-leaf blocks.
     Formula {
+        outputs: u64,
         data: usize,
         modules: usize,
         resources: usize,
@@ -1115,8 +1123,14 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks> {
             0x60..=0x63 => b.modules.push(decoded(data, true, true)?),
             0x64..=0x67 => b.resources.push(Resource::new(decoded(data, true, true)?)),
             0x70..=0x73 => {
-                b.formulas.push(decoded(data, true, true)?);
+                let mut p = 0;
+                let outputs = leb(data, &mut p)?;
+                if outputs == 0 {
+                    return invalid("a formula block of no outputs");
+                }
+                b.formulas.push(decoded(&data[p..], true, true)?);
                 b.leaves.push(Leaf::Formula {
+                    outputs,
                     data: b.formulas.len() - 1,
                     modules: b.modules.len(),
                     resources: b.resources.len(),
@@ -1308,9 +1322,9 @@ struct Program<'a> {
     modules: Vec<usize>,
 }
 
-/// Formula data `d` read, among `non_leaf` non-leaf blocks, marking those it refers to in
-/// `used`: everything checked that does not depend on the evaluation.
-fn read<'a>(d: &'a [u8], env: &Env, non_leaf: usize, used: &mut [bool]) -> Decoded<Program<'a>> {
+/// Formula data `d` of `outputs` outputs read, among `non_leaf` non-leaf blocks, marking those it
+/// refers to in `used`: everything checked that does not depend on the evaluation.
+fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [bool]) -> Decoded<Program<'a>> {
     let mut r = Reader { d, at: 0 };
     // the non-leaf blocks referenced, by their ordinals among all
     let (mut blocks, mut next) = (Vec::new(), env.first);
@@ -1405,8 +1419,8 @@ fn read<'a>(d: &'a [u8], env: &Env, non_leaf: usize, used: &mut [bool]) -> Decod
     if [b_used, r_used, m_used].iter().any(|u| u.contains(&false)) {
         return invalid("a block listed but not used");
     }
-    if depth != 1 {
-        return invalid(format!("{depth} outputs, not one"));
+    if depth as u64 != outputs {
+        return invalid(format!("{depth} outputs, not {outputs}"));
     }
     blocks.iter().for_each(|&o| used[o] = true);
     Ok(Program { insns, blocks, resources, modules })
@@ -1466,7 +1480,7 @@ impl Contents {
     }
 }
 
-/// The output of formula block `p`, with the non-leaf blocks in `contents`.
+/// The outputs of formula block `p` one after another, with the non-leaf blocks in `contents`.
 fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
     // literals and slices where they are
     let mut stack: Vec<Value> = Vec::new();
@@ -1537,7 +1551,10 @@ fn run(p: Program, env: &Env, contents: &mut Contents) -> Decoded<Vec<u8>> {
             }
         }
     }
-    Ok(contents.take(stack.pop().unwrap()))
+    if stack.len() == 1 {
+        return Ok(contents.take(stack.pop().unwrap()));
+    }
+    Ok(stack.into_iter().map(|v| contents.take(v)).collect::<Vec<_>>().concat())
 }
 
 /// The outputs of application `a` of module block `module`.
@@ -1617,7 +1634,7 @@ mod tests {
     fn formula(data: &[u8], streams: &[&[u8]]) -> Vec<u8> {
         archive(|out| {
             block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&wasm(REV)], 3, 1).unwrap());
-            block(out, FORMULA, &always_compressed(&mut CCtx::create(), &[data], 3, 1).unwrap());
+            formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[data], 3, 1).unwrap());
             streams.iter().for_each(|s| {
                 content_block(out, false, &[s], compressed(&mut CCtx::create(), &[s], 3, 1).unwrap().as_deref())
             });
@@ -2104,6 +2121,21 @@ mod tests {
         assert_eq!(split(&[]), invalid("a split into no items"));
     }
 
+    /// A formula block declares how many outputs it has, as many as its instructions leave and
+    /// at least one; an archive without a metadata block is its outputs one after another.
+    #[test]
+    fn outputs() {
+        // "abcd" split into "a" and "bcd"
+        let split = [0, 0, 0, LITERAL, 4, b'a', b'b', b'c', b'd', SPLIT, 2, 1, 3];
+        let of = |n: u64| {
+            archive(|out| formula_block(out, n, &always_compressed(&mut CCtx::create(), &[&split], 3, 1).unwrap()))
+        };
+        assert_eq!(decode(&of(2), &[]).unwrap(), b"abcd");
+        for n in [0, 1, 3] {
+            assert!(matches!(decode(&of(n), &[]), Err(Failure::Invalid(_))), "{n} outputs");
+        }
+    }
+
     /// A non-leaf block that formula blocks share is there for each of them, as long as any is
     /// to slice it.
     #[test]
@@ -2117,7 +2149,7 @@ mod tests {
         let c = archive(|out| {
             block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&wasm(REV)], 3, 1).unwrap());
             for d in [&first[..], &second] {
-                block(out, FORMULA, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
+                formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
             }
             content_block(out, false, &[b"xyz"], None);
         });

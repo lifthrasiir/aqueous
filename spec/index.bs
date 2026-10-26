@@ -1393,32 +1393,40 @@ File parameters (<dfn>file_param</dfn>) occur for each file (but not for directo
     <tr>
       <th>Name
       <th>Type
+      <th>Conditions
   </thead>
   <tbody>
     <tr>
       <td><dfn>file_dictionary</dfn>
       <td>[=u=]([=meta/num_dictionaries=])
+      <td>
     <tr>
       <td><dfn>file_offset</dfn>
       <td>[=u=]([=meta/previous_metadata_offset=])
+      <td>
+    <tr>
+      <td><dfn>file_output</dfn>
+      <td>[=leb128=]
+      <td>[=If=] [=meta/file_offset=] is odd
   </tbody>
 </table>
 
-[=meta/file_dictionary=] is the dictionary used by the block at [=meta/file_offset=]
+[=meta/file_dictionary=] is the dictionary used by the block that [=meta/file_offset=] refers to
 as a <em>1-based</em> index, or zero if no dictionary is used.
 Therefore [=meta/file_dictionary=] = |k| refers to the block at [=meta/dictionary_offsets=][|k| - 1],
 and [=meta/num_dictionaries=] is the maximum possible value for it.
 A relative offset to the corresponding [=leaf block=], which starts the file's [=parcel=],
-is recorded as [=meta/file_offset=], which can't be zero.
-Multiple files MAY refer to the same leaf block, in which case they have the same content.
+is recorded as [=meta/file_offset=], plus 1 if the file is another output of the block than the output 0.
+The relative offset can't be zero.
+Since every relative offset is even, [=meta/file_offset=] % 2 tells which:
+the <dfn>file output index</dfn> is 0 if [=meta/file_offset=] is even, and [=meta/file_output=] + 1 if it is odd.
+Multiple files MAY refer to the same leaf block and output, in which case they have the same content.
 
 <div class=note>
   This is how an archive stores files with the same content only once,
   including files that were hard links to each other ([[#link-groups]]).
   It costs only a [=meta/file_param=] and an [=meta/entry=] per file.
 </div>
-
-TODO: An output index when the formula block at [=meta/file_offset=] has multiple outputs.
 
 Entry structure (<dfn>entry</dfn>) then occurs for each directory, file and special entry, in this order, and consists of the following:
 
@@ -1569,7 +1577,8 @@ and an optional [=base=] |base|, which is an [=archive value=]:
         and null as [=directory node/extra=], and whose [=archive value/extra=] is an empty map.
     6. If [=archive/blocks=] contain no [[#metadata-block|metadata block]]:
         1. Let |content| be the concatenation of the [=file contents=] of all [=leaf blocks=] in [=archive/blocks=],
-            in the order of appearance.
+            in the order of appearance, each for every output index from 0 in order
+            (all outputs of a formula block, and the only one of a data block).
         2. Return an [=archive value=] whose [=archive value/root=] is a [=file node=]
             with |content| as [=file node/content=], null as [=file node/link group=] and null as [=file node/extra=],
             and whose [=archive value/extra=] is an empty map.
@@ -1628,11 +1637,11 @@ To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata bl
         4. If |k| ≤ |d|, let |node| be a [=directory node=] with an empty map as [=directory node/children=].
         5. Otherwise, if |k| ≤ |f|:
             1. Let |param| be |meta|.[=meta/file_params=][|k| - |d| - 1].
-            2. Let |block| be the block at the relative offset |param|.[=meta/file_offset=] from |metadata block|.
-                It MUST be a [=leaf block=] in |segment|.
+            2. Let |block| be the block at the relative offset |param|.[=meta/file_offset=] - |param|.[=meta/file_offset=] % 2
+                from |metadata block|. It MUST be a [=leaf block=] in |segment|.
             3. If |param|.[=meta/file_dictionary=] is zero, |block| MUST NOT use a dictionary.
                 Otherwise, |block| MUST use the dictionary block at |meta|.[=meta/dictionary_offsets=][|param|.[=meta/file_dictionary=] - 1].
-            4. Let |content| be the [=file content=] of |block|.
+            4. Let |content| be the [=file content=] of |block| for the [=file output index=] of |param|.
                 Its length MUST be |entry|.[=meta/original_size=].
             5. Let |node| be a [=file node=] with |content| as [=file node/content=] and null as [=file node/link group=].
             6. If the [=entry extra=] for the entry |k| has `link-group` with a value |g|,
@@ -1868,11 +1877,11 @@ The stored content of a [=non-leaf item=] is the stored content of the non-leaf 
 or the [=imported content=] of the [=import/import=] supplying it ([[#import-resolution]]).
 A data block using a dictionary uses the dictionary block at [=dblock/dictionary_index=] within the [=segment=].
 
-The <dfn>file content</dfn> of a [=leaf block=] is:
+The <dfn>file content</dfn> of a [=leaf block=] for an output index |i| is:
 
-* Its [=stored content=], if it is a data block;
-* The only output of [=evaluate a formula block|evaluating=] it, if it is a [[#formula-block|formula block]].
-    The formula block MUST have exactly one output, until multiple outputs are specified ([[#formula-evaluation]]).
+* Its [=stored content=], if it is a data block. |i| MUST be 0.
+* The output at the index |i| of [=evaluate a formula block|evaluating=] it, if it is a [[#formula-block|formula block]].
+    |i| MUST be less than its [=formula/num_outputs=].
 
 <h2 id=formulas>
 Formulas</h2>
@@ -1902,6 +1911,10 @@ Its data consists of the following:
       <td>[=leb128=]
       <td>[=If=] [=formula/has_dictionary=]
     <tr>
+      <td><dfn>num_outputs</dfn>
+      <td>[=leb128=]
+      <td>
+    <tr>
       <td><dfn>formula_data</dfn>
       <td>[=block/compressed_data=]
       <td>
@@ -1909,6 +1922,15 @@ Its data consists of the following:
 </table>
 
 If a dictionary is in use, its <em>0-based</em> index is specified as [=formula/dictionary_index=], as in data blocks.
+
+[=formula/num_outputs=] is the number of outputs of the formula block, which MUST be at least 1 ([[#formula-evaluation]]).
+
+<div class=note>
+  Every instruction pops and pushes a number of items that its operands give,
+  so the number of outputs follows from the instructions alone, without applying any module.
+  [=formula/num_outputs=] tells it before [=formula/formula_data=] is decompressed,
+  e.g. to a decompressor checking [=meta/file_output=] or streaming the outputs to the files using them.
+</div>
 [=formula/formula_data=] is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
 
 <div class=note>
@@ -2390,8 +2412,8 @@ To <dfn>evaluate a formula block</dfn> |block|:
     2. Let |stack| be an empty [=list=] of [=byte sequences=].
     3. For each |insn| of [=formula/instructions=] of |data| in order,
         [=execute an instruction|execute=] |insn| on |stack| as described for its [=formula/opcode=] in [[#formula-data]].
-    4. |stack| MUST NOT be empty.
-    5. Return |stack| as the outputs of |block|.
+    4. The number of items of |stack| MUST be [=formula/num_outputs=] of |block|.
+    5. Return |stack| as the outputs of |block|, numbered from 0 in order from the bottom of the stack.
 </ol>
 
 <div class=note>
@@ -2404,8 +2426,6 @@ To <dfn>evaluate a formula block</dfn> |block|:
   A Checksum instruction covering an intermediate byte sequence, such as the output of an Apply instruction,
   can be verified by a decompressor that has computed that byte sequence but not the entire output.
 </div>
-
-Issue: Multiple outputs, in particular how a file selects one of them ([[#metadata-block]]).
 
 <h4 id=packed-byte-sequences>
 Packed byte sequences</h4>

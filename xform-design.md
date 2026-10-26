@@ -352,7 +352,7 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 
 ### 4.6 다중 출력 `apply` [제안]
 
-- `apply`가 출력 k개를 내는 것과 formula 블록 하나가 출력 여럿을 가지는 것은 명세 "Formula data"와 "Formula evaluation" 절에 반영했다. 모듈이 출력 여럿을 내는 ABI(출력마다 메모리 `aqr_output`j, `aqr_commit(j, hi)`, entry 인자의 출력 크기들)도 반영했다. 출력이 하나일 때도 `aqr_output0`이다. 메타데이터의 엔트리가 출력 번호를 기록하는 방법은 아직 TODO이다.
+- `apply`가 출력 k개를 내는 것과 formula 블록 하나가 출력 여럿을 가지는 것은 명세 "Formula data"와 "Formula evaluation" 절에 반영했다. 모듈이 출력 여럿을 내는 ABI(출력마다 메모리 `aqr_output`j, `aqr_commit(j, hi)`, entry 인자의 출력 크기들)도 반영했다. 출력이 하나일 때도 `aqr_output0`이다. formula 블록의 출력 수(헤더의 `num_outputs`), 엔트리가 출력을 고르는 방법(홀수 `file_offset` 뒤의 `file_output`), 메타데이터 블록이 없을 때 출력들을 이어 붙이는 것도 명세에 반영했다.
 - 모듈은 출력별 진입점을 노출해, 출력 하나만 만들 수 있게 한다. 이것은 부분 디코드 진입점(§4.3)과 같은 장치이다.
 - 호스트는 같은 노드의 출력들을 만들 때 모듈 인스턴스와 그 캐시를 재사용할 수 있다. 캐시는 출력에 영향을 주지 않으므로 결정성과 충돌하지 않는다.
 - 인코드 쪽에서는 아카이브 인코더가 파일 집합을 변환 하나에 묶어 넘겨야 한다. 이 경로는 열린 질문이다(§7의 9번).
