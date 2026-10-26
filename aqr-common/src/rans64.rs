@@ -370,7 +370,7 @@ impl Encoder {
 
     /// The hot state; [`Encoder::reserve`] must have made room for the symbols added
     /// through it before [`Encoder::put_back`]. With many contexts (more than
-    /// [`INV_ALL_MAX`]), [`Encoder::local_tracked`] spares [`Encoder::finish`] a pass over
+    /// `INV_ALL_MAX`), [`Encoder::local_tracked`] spares [`Encoder::finish`] a pass over
     /// the symbols.
     #[inline(always)]
     pub fn local(&mut self, t: &Tables) -> EncLocal {

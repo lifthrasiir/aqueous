@@ -11,7 +11,7 @@
 //! left for them ([`par_map`], [`dispatch`]), for work still running to reserve.
 //!
 //! Threads that libraries make on their own count in the pool by the workers reserved for them
-//! and left idle: Zstandard's (aqr-formula) and rayon's ([`rayon_pool`], whose threads are the
+//! and left idle: Zstandard's (aqr-formula) and rayon's (`rayon_pool`, whose threads are the
 //! workers themselves, and one standing for the thread that waits on it).
 
 use std::any::Any;
