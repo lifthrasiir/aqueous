@@ -623,6 +623,20 @@ fn zip_nested() {
     }
 }
 
+/// A ZIP archive cut short in its last entry (a download cut short): its entries are still
+/// recompressed, as a file and found in data.
+#[test]
+fn zip_cut() {
+    let jpeg = fixture("aqr-jpeg/tests/data/gradient.jpg");
+    let t = text(50_000);
+    let d = zip(&[("a.txt", &t, true), ("b.jpg", &jpeg, false), ("c.txt", &t, true)]);
+    let cut = &d[..d.windows(4).rposition(|w| w == b"PK\x03\x04").unwrap() + 200];
+    let f = roundtrip(cut, &all());
+    assert_eq!(modules(&f), [ZIP.name, JPEG.name]);
+    let f = roundtrip(&[&b"some data before "[..], cut].concat(), &all());
+    assert_eq!(modules(&f), [ZIP.name, JPEG.name]);
+}
+
 /// Archives of archives, each level the same archive 16 times like 42.zip, down to a large run
 /// of zeros: each level inflates one of them (the rest are taken again), and the zeros, past
 /// what may be inflated, stay deflated.

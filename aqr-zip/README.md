@@ -42,6 +42,11 @@ The central directory, found from the end, only says where bodies end when the l
 do not, and a record it does not know of may not run over an entry it does (signatures turn up
 in self-extractors' code).
 
+Where an archive is in other data (as aqr-compress finds it), it ends with its end record, or
+else, cut short as downloads often are, with the data: where a whole entry comes first and the
+records follow each other up to one that the data cuts short (`zip::extent`). Without an end
+record, other data right after an entry is not taken for the rest of the archive, nor is it.
+
 ## Bodies that would not pay
 
 With `Options::probe` (aqr-compress gives one at level `mid`), a DEFLATE body of 256 KiB or more
@@ -96,6 +101,7 @@ module test data, Office documents, an APK, a VS Code build and others), on an M
   or pointing nowhere, lying headers, encrypted and other methods, overlapping entries, cuts; the
   inflation limit; a nest like 42.zip; damaged layouts (errors, never panics) and damaged
   archives (still rebuilt).
-- aqr-compress `tests/compress.rs` (`zip_nested`, `zip_nested_like_42`): contents recompressed
-  in turn, archives found in data and in gzip, and six levels of nested archives over 96 MiB of
-  zeros within the budget.
+- aqr-compress `tests/compress.rs` (`zip_nested`, `zip_cut`, `zip_nested_like_42`): contents
+  recompressed in turn, archives found in data and in gzip, an archive cut short, and six levels
+  of nested archives over 96 MiB of zeros within the budget; `src/extent.rs` (`zip_cut`): the
+  fixtures cut at every byte after their first entry.

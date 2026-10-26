@@ -410,6 +410,31 @@ mod tests {
             ends(f, &fixture(path));
         }
         ends(Format::Mp3, &fixture("aqr-mp3/tests/data/free.mp3"));
+        for name in ["py-deflate", "py-stored", "py-stream", "py-zip64", "infozip", "infozip-stream", "go", "ditto"] {
+            ends(Format::Zip, &fixture(&format!("aqr-zip/tests/data/{name}.zip")));
+        }
+    }
+
+    /// A ZIP archive cut short (as downloads are) ends with the data, wherever it is cut after
+    /// its first entry; one cut in its first body, or with other data after an entry where it is
+    /// cut, is not taken (other data in an entry cut short is that of its body, as far as one can
+    /// tell).
+    #[test]
+    fn zip_cut() {
+        for name in ["py-deflate", "py-stored", "py-stream", "py-zip64", "infozip", "infozip-stream", "go", "ditto"] {
+            let file = fixture(&format!("aqr-zip/tests/data/{name}.zip"));
+            let (_, _, recs) = aqr_zip::zip::records(&file);
+            let Some(aqr_zip::zip::Rec::Local(l)) = recs.first() else { panic!("{name}") };
+            let first = l.end();
+            for n in first..file.len() {
+                assert_eq!(extent(Format::Zip, &file[..n]), Some(n), "{name} cut at {n}");
+            }
+            for n in [5, 31, l.body.end - 1] {
+                assert_eq!(extent(Format::Zip, &file[..n]), None, "{name} cut at {n}");
+            }
+            let junk = [&file[..first], b"\0\0\0\0other data, not of the archive"].concat();
+            assert_eq!(extent(Format::Zip, &junk), None, "{name} with other data");
+        }
         // Without an end of its own (cut short): to the end of the data.
         let d = [&fixture("aqr-jpeg/tests/data/prog_script_recode.jpg")[..], b"trailing"].concat();
         assert_eq!(extent(Format::Jpeg, &d), Some(d.len()));

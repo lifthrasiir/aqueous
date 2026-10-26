@@ -426,22 +426,28 @@ pub fn records(d: &[u8]) -> (i64, BTreeMap<usize, Info>, Vec<Rec>) {
 
 /// Bytes of the archive at the start of `d`: as far as its records follow each other without a
 /// gap up to the end of central directory record, or else to the end record found from the end
-/// of `d` whose directory starts with a central header (a gap may hold anything). `None` where
-/// there is neither. The bodies that the directory found from the end of `d` knows of are of the
-/// sizes it says, rather than parsed (as one with a descriptor after it is).
+/// of `d` whose directory starts with a central header (a gap may hold anything), or else to the
+/// end of `d` where its records, a whole local entry first, follow each other up to one that
+/// `d` cuts short ([`cut_at`]): an archive cut short, as downloads are. `None` where there is
+/// none of them. An end record whose comment runs past `d` ends with `d`. The bodies that the
+/// directory found from the end of `d` knows of are of the sizes it says, rather than parsed
+/// (as one with a descriptor after it is).
 pub fn extent(d: &[u8]) -> Option<usize> {
     if !d.starts_with(&LOCAL) {
         return None;
     }
     let (_, map) = directory(d);
-    let mut p = 0;
+    let (mut p, mut last) = (0, None);
     while let Some(r) = record_at(d, p, &map) {
         if let Rec::End { .. } = r {
             return Some(r.end());
         }
         p = r.end();
+        last = Some(r);
     }
-    let (_, cd) = find_end(d)?;
+    let Some((_, cd)) = find_end(d) else {
+        return last.is_some_and(|r| cut_at(d, p, &r)).then_some(d.len());
+    };
     let at = cd.end + 4 + END_FIXED;
     let end = (d[cd.end..cd.end + 4] == END).then(|| at + u16_at(d, at - 2) as usize);
     // after a zip64 end record, the end record follows the locator
@@ -449,5 +455,29 @@ pub fn extent(d: &[u8]) -> Option<usize> {
         let q = memchr::memmem::find(&d[cd.end..], &END)? + cd.end;
         Some(q + 4 + END_FIXED + u16_at(d, q + 20) as usize)
     })
-    .filter(|&e| e <= d.len())
+    .map(|e| e.min(d.len()))
+}
+
+/// Whether the record at `p`, after `last`, is one that `d` cuts short: `d` ends there, or in
+/// a signature, or in the data descriptor of `last` (which it lacks, or has in a shorter form
+/// than the one cut short), or the record runs past `d`. A local entry that is not taken runs
+/// past `d` (its fields, a body of the size its header says, or one whose end is not found), or
+/// else is broken: either way the archive goes on to the end of `d`.
+fn cut_at(d: &[u8], p: usize, last: &Rec) -> bool {
+    let rest = &d[p..];
+    if let Rec::Local(l) = last
+        && l.flags(d) & DESCRIPTOR != 0
+        && l.desc.bytes() + rest.len() < Desc::LongSig.bytes()
+    {
+        return true;
+    }
+    let Some(sig) = rest.first_chunk::<4>() else {
+        return [LOCAL, CENTRAL, END64, LOCATOR, END].iter().any(|s| s.starts_with(rest));
+    };
+    match *sig {
+        // these are not taken only where they run past `d`
+        LOCAL | CENTRAL | LOCATOR | END => true,
+        END64 => rest.get(4..12).is_none_or(|s| u64::from_le_bytes(s.try_into().unwrap()) >= (END64_FIXED - 8) as u64),
+        _ => false,
+    }
 }
