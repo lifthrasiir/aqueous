@@ -46,12 +46,23 @@ impl Signature {
 /// A 64-bit hash of a segment, for telling segments apart.
 fn hash(d: &[u8]) -> u64 {
     let mix = |h: u64, w: u64| (h ^ w).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(31);
-    let words = d.chunks_exact(8);
-    let rest = words.remainder();
-    let mut h = words.fold(d.len() as u64, |h, w| mix(h, u64::from_le_bytes(w.try_into().unwrap())));
-    if !rest.is_empty() {
+    let word = |w: &[u8]| u64::from_le_bytes(w.try_into().unwrap());
+    // four words at a time, each of its own lane (which do not wait for one another)
+    let blocks = d.chunks_exact(32);
+    let rest = blocks.remainder();
+    let mut h = [d.len() as u64, 1, 2, 3];
+    for b in blocks {
+        for (k, h) in h.iter_mut().enumerate() {
+            *h = mix(*h, word(&b[8 * k..8 * k + 8]));
+        }
+    }
+    let mut h = h.into_iter().reduce(mix).unwrap();
+    let words = rest.chunks_exact(8);
+    let tail = words.remainder();
+    h = words.fold(h, |h, w| mix(h, word(w)));
+    if !tail.is_empty() {
         let mut b = [0u8; 8];
-        b[..rest.len()].copy_from_slice(rest);
+        b[..tail.len()].copy_from_slice(tail);
         h = mix(h, u64::from_le_bytes(b));
     }
     h
@@ -67,14 +78,12 @@ impl Sink for Collect {
 
     fn mat(&mut self, len: u16, dist: u16, _: bool) {
         // (the parser checks the distance)
+        // (overlapping, in pieces each as long as what is copied so far)
         let (len, dist) = (len as usize, dist as usize);
-        let from = self.0.len() - dist;
-        if dist >= len {
-            self.0.extend_from_within(from..from + len);
-        } else {
-            for i in 0..len {
-                self.0.push(self.0[from + i]);
-            }
+        let (from, end) = (self.0.len() - dist, self.0.len() + len);
+        while self.0.len() < end {
+            let n = (self.0.len() - from).min(end - self.0.len());
+            self.0.extend_from_within(from..from + n);
         }
     }
 
