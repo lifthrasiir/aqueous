@@ -320,7 +320,8 @@ pub fn run<R: Send>(f: impl FnOnce() -> R + Send) -> R {
 }
 
 /// `f(0..n)` on up to `threads` threads (the calling one and workers reserved), in order. A
-/// panic of `f` is resumed here.
+/// panic of `f` is resumed here. Each worker is given back as soon as there is nothing left
+/// for it to start, for what is still running (a long item's own work) to reserve.
 pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     let next = AtomicUsize::new(0);
     let out: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
@@ -333,24 +334,91 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
             *out[i].lock().unwrap() = Some(f(i));
         }
     };
-    scope(threads.min(n).saturating_sub(1), |s| {
-        let hs: Vec<_> = (0..s.workers()).map(|_| s.spawn(work)).collect();
-        // (another's panic stops the rest: the next index is past them)
-        let mine = catch_unwind(AssertUnwindSafe(work));
-        if mine.is_err() {
+    let mut r = reserve(threads.min(n).saturating_sub(1));
+    // SAFETY: each joined below, before what `work` borrows goes, a panic of the calling
+    // thread's part caught for that
+    let hs: Vec<_> = (0..r.len()).map(|_| unsafe { r.spawn_unchecked(work, None) }).collect();
+    // (another's panic stops the rest: the next index is past them)
+    let mine = catch_unwind(AssertUnwindSafe(work));
+    if mine.is_err() {
+        next.store(n, Ordering::Relaxed);
+    }
+    let mut panic = mine.err();
+    for h in hs {
+        if let Err(p) = h.join() {
             next.store(n, Ordering::Relaxed);
+            panic.get_or_insert(p);
         }
-        for h in hs {
-            if let Err(p) = h.join() {
-                next.store(n, Ordering::Relaxed);
-                resume_unwind(p);
-            }
-        }
-        if let Err(p) = mine {
-            resume_unwind(p);
-        }
-    });
+    }
+    if let Some(p) = panic {
+        resume_unwind(p);
+    }
     out.into_iter().map(|m| m.into_inner().unwrap().expect("every index done")).collect()
+}
+
+/// `f(i, admit(i))` for each `i` of `0..n`, each on a worker of its own, up to `threads − 1`
+/// at once: the calling thread lets them in, in order, as `admit` does (which may wait, as for
+/// memory), each on a worker as one is free, and the worker is given back as `f` returns. So
+/// no thread waits holding a worker, which work still running can reserve (an item's own
+/// threads). On the calling thread alone where `threads` is 1. A panic of `f` stops what is
+/// not let in yet and is resumed here.
+pub fn dispatch<G: Send, R: Send>(
+    n: usize,
+    threads: usize,
+    mut admit: impl FnMut(usize) -> G,
+    f: impl Fn(usize, G) -> R + Sync,
+) -> Vec<R> {
+    if threads <= 1 {
+        return (0..n).map(|i| f(i, admit(i))).collect();
+    }
+    let out: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
+    let (running, done, failed) = (Mutex::new(0usize), Condvar::new(), std::sync::atomic::AtomicBool::new(false));
+    let (out, running, done, failed, f) = (&out, &running, &done, &failed, &f);
+    let p = pool();
+    let mut hs = Vec::new();
+    for (i, slot) in out.iter().enumerate() {
+        if failed.load(Ordering::Relaxed) {
+            break;
+        }
+        let g = admit(i);
+        {
+            let mut r = running.lock().unwrap();
+            while *r >= threads - 1 {
+                r = done.wait(r).unwrap();
+            }
+            *r += 1;
+        }
+        let mut free = p.free.lock().unwrap();
+        while *free == 0 {
+            free = p.freed.wait(free).unwrap();
+        }
+        *free -= 1;
+        drop(free);
+        let job = move || {
+            let r = catch_unwind(AssertUnwindSafe(|| f(i, g)));
+            if r.is_err() {
+                failed.store(true, Ordering::Relaxed);
+            }
+            *running.lock().unwrap() -= 1;
+            done.notify_all();
+            match r {
+                Ok(r) => *slot.lock().unwrap() = Some(r),
+                Err(p) => resume_unwind(p),
+            }
+        };
+        // SAFETY: each joined below, before what `job` borrows goes
+        hs.push(unsafe { Reservation { n: 1 }.spawn_unchecked(job, None) });
+    }
+    let mut panic = None;
+    for h in hs {
+        if let Err(p) = h.join() {
+            panic.get_or_insert(p);
+        }
+    }
+    if let Some(p) = panic {
+        resume_unwind(p);
+    }
+    out.iter().map(|m| m.lock().unwrap().take().expect("every index done")).collect()
 }
 
 /// A rayon thread pool of up to `threads` threads: as many workers of the pool as are free, up
@@ -435,6 +503,91 @@ mod tests {
         );
         assert!(catch_unwind(|| par_map(8, 8, |i| if i == 5 { panic!("five") } else { i })).is_err());
         assert!(run(is_worker));
+    }
+
+    /// The workers of [`par_map`] are given back as they run out of work, for what is still
+    /// running to take (a long item's own threads).
+    #[test]
+    fn par_map_gives_back() {
+        let n = size();
+        if n < 2 {
+            return;
+        }
+        let done = AtomicUsize::new(0);
+        // (on a worker, as everything of aqr is: all of them then the par_map's)
+        let got = run(|| par_map(n, n, |i| {
+            if i > 0 {
+                done.fetch_add(1, Ordering::Relaxed);
+                return 0;
+            }
+            let start = std::time::Instant::now();
+            while start.elapsed().as_secs() < 5 {
+                if done.load(Ordering::Relaxed) == n - 1 {
+                    let r = reserve(1);
+                    if !r.is_empty() {
+                        return r.len();
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            0
+        }));
+        assert_eq!(got[0], 1);
+    }
+
+    /// [`dispatch`]: every item, let in in order and never more than `threads − 1` at once,
+    /// while what runs can reserve the workers left; and a panic resumed.
+    #[test]
+    fn dispatches() {
+        let n = size();
+        let (admitted, at_once, most) = (Mutex::new(Vec::new()), AtomicUsize::new(0), AtomicUsize::new(0));
+        let got = run(|| {
+            dispatch(
+                100,
+                4,
+                |i| admitted.lock().unwrap().push(i),
+                |i, ()| {
+                    let k = at_once.fetch_add(1, Ordering::Relaxed) + 1;
+                    most.fetch_max(k, Ordering::Relaxed);
+                    std::thread::sleep(std::time::Duration::from_micros(200));
+                    at_once.fetch_sub(1, Ordering::Relaxed);
+                    i * 2
+                },
+            )
+        });
+        assert_eq!(got, (0..100).map(|i| i * 2).collect::<Vec<_>>());
+        assert_eq!(*admitted.lock().unwrap(), (0..100).collect::<Vec<_>>());
+        assert!(most.load(Ordering::Relaxed) <= 3.min(n - 1).max(1));
+        // one long item takes the workers the others leave
+        if n >= 3 {
+            let left = AtomicUsize::new(0);
+            let got = run(|| {
+                dispatch(
+                    n,
+                    n,
+                    |_| (),
+                    |i, ()| {
+                        if i > 0 {
+                            left.fetch_add(1, Ordering::Relaxed);
+                            return 0;
+                        }
+                        let start = std::time::Instant::now();
+                        while start.elapsed().as_secs() < 5 {
+                            if left.load(Ordering::Relaxed) == n - 1 {
+                                let r = reserve(n);
+                                if r.len() >= n - 2 {
+                                    return r.len();
+                                }
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        0
+                    },
+                )
+            });
+            assert!(got[0] >= n - 2, "{}", got[0]);
+        }
+        assert!(catch_unwind(|| run(|| dispatch(8, 4, |_| (), |i, ()| if i == 5 { panic!("five") } else { i }))).is_err());
     }
 
     /// A rayon pool leaves no thread a worker of it once dropped: the calling thread, or a

@@ -1361,8 +1361,9 @@ impl Archive<'_, '_> {
             .collect();
         let gate = Gate::new(self.budget);
         let programs: Vec<Mutex<Option<Program>>> = programs.into_iter().map(Mutex::new).collect();
-        let done = aqr_common::pool::par_map(blocks.leaves.len(), threads, |i| {
-            let _admitted = gate.admit(i, weights[i]);
+        // each leaf on a worker of its own, which is given back as it is done, for those still
+        // running to take for their own work (a stream that takes long alone)
+        let done = aqr_common::pool::dispatch(blocks.leaves.len(), threads, |i| gate.admit(weights[i]), |i, _admitted| {
             let outputs = match blocks.leaves[i] {
                 LeafBlock::Stored(d, zstd, checked) => decoded(d, zstd, checked).map(|d| vec![d]),
                 LeafBlock::Formula { modules, resources, non_leaf, .. } => {
@@ -1816,12 +1817,12 @@ fn stored_len(d: &[u8], zstd: bool, checked: bool) -> u64 {
     raw.saturating_sub(at as u64 + 1).saturating_add(delta).saturating_sub(shrink)
 }
 
-/// The leaves let in by [`Archive::set_budget`]: in their order, each once those evaluated
-/// leave room for it.
+/// The leaves let in by [`Archive::set_budget`] (in their order, [`aqr_common::pool::dispatch`]),
+/// each once those evaluated leave room for it.
 struct Gate {
     budget: u64,
-    /// The next leaf to let in, and the weights of those in.
-    state: Mutex<(usize, u64)>,
+    /// The weights of the leaves in.
+    state: Mutex<u64>,
     changed: std::sync::Condvar,
 }
 
@@ -1830,21 +1831,19 @@ struct Admitted<'g>(&'g Gate, u64);
 
 impl Gate {
     fn new(budget: u64) -> Self {
-        Gate { budget, state: Mutex::new((0, 0)), changed: std::sync::Condvar::new() }
+        Gate { budget, state: Mutex::new(0), changed: std::sync::Condvar::new() }
     }
 
-    /// Waits for leaf `i` of weight `w` to be let in. The leaves are asked for in their order
-    /// ([`aqr_common::pool::par_map`]), so that the next one is always waiting or on its way.
-    fn admit(&self, i: usize, w: u64) -> Admitted<'_> {
+    /// Waits for a leaf of weight `w` to be let in: alone, or with those in within the budget.
+    fn admit(&self, w: u64) -> Admitted<'_> {
         if self.budget == u64::MAX {
             return Admitted(self, 0);
         }
         let mut s = self.state.lock().unwrap();
-        while s.0 != i || (s.1 != 0 && s.1.saturating_add(w) > self.budget) {
+        while *s != 0 && s.saturating_add(w) > self.budget {
             s = self.changed.wait(s).unwrap();
         }
-        *s = (i + 1, s.1 + w);
-        self.changed.notify_all();
+        *s += w;
         Admitted(self, w)
     }
 }
@@ -1852,7 +1851,7 @@ impl Gate {
 impl Drop for Admitted<'_> {
     fn drop(&mut self) {
         if self.0.budget != u64::MAX {
-            self.0.state.lock().unwrap().1 -= self.1;
+            *self.0.state.lock().unwrap() -= self.1;
             self.0.changed.notify_all();
         }
     }

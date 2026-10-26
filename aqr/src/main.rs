@@ -41,9 +41,8 @@ struct Args {
 }
 
 /// The bytes of the leaves decoded at once ([`aqr::Archive::set_budget`]). On 10gb (10
-/// threads): 2.65 GB of peak footprint in 26.7 s, against 4.59 GB in 24.0 s without, 3.51 GB in
-/// 25.1 s at 3.5 GB, and 2.55 GB in 37.5 s at 1.5 GB (where the serial rebuild of `enwik9.zip`
-/// starts only once `enwik9` is done).
+/// threads): 2.56 GB of peak footprint in 19.5 s, against 4.1–4.6 GB in 16.6–20.1 s without
+/// (as `enwik9` decodes alone first: `enwik9.zip` and the leaves after it wait for it).
 const DECODE_BUDGET: u64 = 2_000_000_000;
 
 #[global_allocator]
