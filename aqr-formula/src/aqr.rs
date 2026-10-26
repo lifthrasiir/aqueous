@@ -86,15 +86,15 @@ pub fn encode(f: &Formula, checksum: Option<u64>, level: Level) -> Result<Vec<u8
 /// each stream.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
-    /// Each stream uncompressed if incompressible ([`PROBE`]), else at zstd level
-    /// [`MID_BASE`], or:
+    /// Each stream uncompressed if incompressible (`PROBE`), else at zstd level
+    /// `MID_BASE`, or:
     ///
-    /// - at a level of [`MID_HIGHER`] where that saves enough for its time, at [`MID_RATE`]
+    /// - at a level of `MID_HIGHER` where that saves enough for its time, at `MID_RATE`
     ///   bytes per second of compression;
-    /// - at a level of [`MID_LOWER`] where that is smaller by 1/32 at least (beyond what a
+    /// - at a level of `MID_LOWER` where that is smaller by 1/32 at least (beyond what a
     ///   sample may be off by), as it is faster too.
     ///
-    /// Module and formula blocks, and streams shorter than [`MID_SMALL`], are at the base.
+    /// Module and formula blocks, and streams shorter than `MID_SMALL`, are at the base.
     Mid,
     /// Every stream at this zstd level.
     Zstd(i32),
@@ -615,7 +615,7 @@ impl Encoder {
 
     /// About the fewest bytes stream `d` archives to at the level of the encoder, by a sample,
     /// or as soon as it is known to be at most `enough`: for [`Level::Mid`], at the lowest and
-    /// the highest zstd levels it picks from ([`MID_LOWER`], the last of [`MID_HIGHER`]: some
+    /// the highest zstd levels it picks from (`MID_LOWER`, the last of `MID_HIGHER`: some
     /// data, and data of a few hundred KB, which zstd compresses with parameters of its own,
     /// compress better at lower levels), or as it is where they do not compress it. It
     /// compresses the sample at those levels only, the faster first, where picking the level
