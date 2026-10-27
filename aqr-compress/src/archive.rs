@@ -6,7 +6,8 @@
 //! those of pure formats beforehand, as contents are; then each file in a context of its own).
 //!
 //! The files are taken in batches of about [`Options::batch`] bytes, in their order (by
-//! extension, then by name): each batch read ([`Source`]), made, laid out, checked and written
+//! extension, then by name; PE files by likeness, from where the first is, [`lay_alike`]):
+//! each batch read ([`Source`]), made, laid out, checked and written
 //! before the next, so that what is held at once is about a batch's, whatever the files'
 //! (but for the largest file). Files of the same content as one before are stored once. Files
 //! that may hold each other (a file and a ZIP archive or gzip file of it, a file and the start
@@ -32,7 +33,7 @@ use std::sync::Mutex;
 
 use aqr_decompress::{MODULES, Native};
 use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Placed, SegmentWriter, Tree};
-use aqr_formula::probe::Held;
+use aqr_formula::probe::{self, Held};
 use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::{Cx, Once, Options, detect, kind_by_name, nested, place_all, sets, verify};
@@ -172,7 +173,8 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     order.sort_by(|&a, &b| sort_key(src.name(a)).cmp(&sort_key(src.name(b))).then(a.cmp(&b)));
     // the contents that may hold each other together, in the place of the first, a batch never
     // cutting them apart
-    let (group, entries) = together(src, opt)?;
+    let (group, entries, pe) = together(src, opt)?;
+    lay_alike(&mut order, &pe, &group, src, opt)?;
     let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
     order.iter().for_each(|&c| members.entry(group[c]).or_default().push(c));
     let mut batches: Vec<Vec<usize>> = vec![Vec::new()];
@@ -280,16 +282,17 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// same file, longer or shorter). Of the contents of at least [`TOGETHER_MIN`] bytes, which are
 /// read at their start (and the archives at their end, the contents of the sizes of entries
 /// whole); together, no more than [`TOGETHER_MAX`] bytes. Returns them, and the contents found
-/// as entries or members of others.
-fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize>, HashSet<usize>)> {
+/// as entries or members of others, and the PE files.
+fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize>, HashSet<usize>, Vec<usize>)> {
     const HEAD: u64 = 64 << 10;
     // (the end of a ZIP archive holding its central directory, mostly)
     const TAIL: u64 = 1 << 20;
     let n = src.len();
     let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= TOGETHER_MIN).collect();
     // of each: the hash of its start, the CRC-32 and size of the entries it holds, and whether
-    // it is an archive of aqr-bundle's (whose members are known once it is read whole)
-    type Looked = (u64, Vec<(u32, u64)>, bool);
+    // it is an archive of aqr-bundle's (whose members are known once it is read whole) or a PE
+    // file
+    type Looked = (u64, Vec<(u32, u64)>, bool, bool);
     let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<Looked> {
         let (c, size) = (large[i], src.size(large[i]));
         let head = src.read_range(c, 0..HEAD)?;
@@ -305,7 +308,7 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize
         };
         let held = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
         let bundle = format.is_some_and(detect::Format::is_bundle);
-        Ok((xxhash_rust::xxh3::xxh3_64(&head), held, bundle))
+        Ok((xxhash_rust::xxh3::xxh3_64(&head), held, bundle, format == Some(detect::Format::Pe)))
     });
     let mut parent: Vec<usize> = (0..n).collect();
     let mut bytes: Vec<u64> = (0..n).map(|c| src.size(c)).collect();
@@ -329,8 +332,12 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize
     let mut heads: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut sizes: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut by_entry: HashMap<(u32, u64), Vec<usize>> = HashMap::new();
+    let mut pe = Vec::new();
     for (&c, l) in large.iter().zip(looked) {
-        let (head, mut entries, bundle) = l?;
+        let (head, mut entries, bundle, is_pe) = l?;
+        if is_pe {
+            pe.push(c);
+        }
         // (one past what a batch may hold is not put with others)
         if bundle && src.size(c) <= TOGETHER_MAX {
             entries = member_sums(&src.read(c)?, opt.threads);
@@ -364,7 +371,36 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize
         archives.iter().chain(alike).for_each(|&c| join(archives[0], c));
         entries.extend(alike);
     }
-    Ok(((0..n).map(|c| root(&mut parent, c)).collect(), entries))
+    Ok(((0..n).map(|c| root(&mut parent, c)).collect(), entries, pe))
+}
+
+/// Contents `cs` laid in `order` by likeness ([`probe::by_likeness`]), from where the first of
+/// them is, but those put together with others (`group`, [`together`]): PE files, of which
+/// those of a program in several versions, apart by their names, compress far better within a
+/// block of each other (in 10gb, 436.7 → 395.6 MB in blocks of 16 MiB at zstd level 9, of 371.3
+/// MB as one).
+fn lay_alike<S: Source + ?Sized>(
+    order: &mut Vec<usize>,
+    cs: &[usize],
+    group: &[usize],
+    src: &S,
+    opt: &Options,
+) -> io::Result<()> {
+    let mut members = vec![0usize; group.len()];
+    group.iter().for_each(|&g| members[g] += 1);
+    let alone: HashSet<usize> = cs.iter().copied().filter(|&c| members[group[c]] == 1).collect();
+    let these: Vec<usize> = order.iter().copied().filter(|c| alone.contains(c)).collect();
+    if these.len() < 2 {
+        return Ok(());
+    }
+    let likes =
+        aqr_common::pool::par_map(these.len(), opt.threads, |i| src.read(these[i]).map(|d| probe::likeness(&d)));
+    let likes = likes.into_iter().collect::<io::Result<Vec<_>>>()?;
+    let laid: Vec<usize> = probe::by_likeness(&likes).into_iter().map(|i| these[i]).collect();
+    let at = order.iter().position(|c| alone.contains(c)).expect("one of them");
+    order.retain(|c| !alone.contains(c));
+    order.splice(at..at, laid);
+    Ok(())
 }
 
 /// The CRC-32 and size of the files' contents in ar, tar or cpio archive `d`, those of at least

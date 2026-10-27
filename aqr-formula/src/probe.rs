@@ -191,6 +191,93 @@ impl Held {
     }
 }
 
+/// What data is like ([`likeness`]): the least hash of its anchors in each of [`Likeness::BINS`]
+/// bins, by the hash ([`u64::MAX`] where none falls).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Likeness([u64; Likeness::BINS]);
+
+impl Likeness {
+    const BINS: usize = 64;
+
+    /// How many bins two data share: about the fraction of their anchors they share, of 64.
+    #[cfg(test)]
+    fn shared(&self, other: &Likeness) -> usize {
+        self.0.iter().zip(&other.0).filter(|&(a, b)| a == b && *a != u64::MAX).count()
+    }
+}
+
+/// What `d` is like, to put data much alike next to each other (the executables of a program
+/// in several versions, say, which compress far better within a block of each other): a
+/// MinHash of one permutation over its anchors (as in [`Held`], 1 in 64), at about a byte per
+/// cycle.
+pub fn likeness(d: &[u8]) -> Likeness {
+    let mut bins = [u64::MAX; Likeness::BINS];
+    let mut h = 0u64;
+    for &b in d {
+        h = (h << 1).wrapping_add(GEAR[b as usize]);
+        if h >> 58 == 0 {
+            // (SplitMix64's finalizer: the anchors themselves have their top bits zero)
+            let mut v = (h ^ (h >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            v = (v ^ (v >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            v ^= v >> 31;
+            let bin = &mut bins[(v % Likeness::BINS as u64) as usize];
+            *bin = (*bin).min(v);
+        }
+    }
+    Likeness(bins)
+}
+
+/// An order of data `likes` (by index), each data followed by the one most like it of those
+/// left (the first of those as much alike), or else by the first left: from the first, chains
+/// of data alike, in their order where none is like another. A hash that more than
+/// [`BY_LIKENESS_COMMON`] data left have in a bin is not counted: it tells little, and would
+/// take time as the square of the data.
+pub fn by_likeness(likes: &[Likeness]) -> Vec<usize> {
+    let n = likes.len();
+    let mut having: HashMap<(usize, u64), Vec<usize>> = HashMap::new();
+    for (i, l) in likes.iter().enumerate() {
+        for (k, &h) in l.0.iter().enumerate().filter(|&(_, &h)| h != u64::MAX) {
+            having.entry((k, h)).or_default().push(i);
+        }
+    }
+    let (mut left, mut order, mut first) = (vec![true; n], Vec::with_capacity(n), 0);
+    // (the bins each data left shares with the last laid)
+    let (mut shared, mut touched) = (vec![0usize; n], Vec::new());
+    while order.len() < n {
+        while !left[first] {
+            first += 1;
+        }
+        let mut at = first;
+        loop {
+            left[at] = false;
+            order.push(at);
+            for (k, &h) in likes[at].0.iter().enumerate().filter(|&(_, &h)| h != u64::MAX) {
+                let Some(those) = having.get_mut(&(k, h)) else { continue };
+                those.retain(|&j| left[j]);
+                if those.len() > BY_LIKENESS_COMMON {
+                    continue;
+                }
+                for &j in those.iter() {
+                    if shared[j] == 0 {
+                        touched.push(j);
+                    }
+                    shared[j] += 1;
+                }
+            }
+            let next = touched.iter().copied().max_by_key(|&j| (shared[j], std::cmp::Reverse(j)));
+            touched.drain(..).for_each(|j| shared[j] = 0);
+            match next {
+                Some(j) => at = j,
+                None => break,
+            }
+        }
+    }
+    order
+}
+
+/// See [`by_likeness`].
+const BY_LIKENESS_COMMON: usize = 1024;
+
 fn held_anchors(d: &[u8]) -> Vec<u64> {
     let (mut h, mut a) = (0u64, Vec::with_capacity(d.len() >> 12));
     for &b in d {
@@ -241,6 +328,34 @@ mod tests {
         let f = shared(&[&a, &b]);
         assert!(f[0] < 0.01 && f[1] < 0.01, "{f:?}");
         assert_eq!(shared(&[&a]), [0.0]);
+    }
+
+    /// Data much alike (another version of it: edits here and there) laid next to each other,
+    /// the rest in its order.
+    #[test]
+    fn likeness_order() {
+        let noise = |seed: u64, n: usize| {
+            let mut x = seed;
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (x >> 56) as u8
+                })
+                .collect::<Vec<u8>>()
+        };
+        let edited = |d: &[u8], seed: u64| {
+            let mut e = d.to_vec();
+            (0..e.len()).step_by(5000).for_each(|i| e[i] ^= seed as u8 | 1);
+            e
+        };
+        let (a, b, c) = (noise(1, 1 << 20), noise(2, 1 << 20), noise(3, 1 << 20));
+        let (a2, b2, d) = (edited(&a, 7), edited(&b, 9), noise(4, 1 << 20));
+        let likes: Vec<Likeness> = [&a, &b, &c, &a2, &d, &b2].iter().map(|x| likeness(x)).collect();
+        assert!(likes[0].shared(&likes[3]) > 32 && likes[0].shared(&likes[1]) == 0, "{likes:?}");
+        assert_eq!(by_likeness(&likes), [0, 3, 1, 5, 2, 4]);
+        // none alike, and nothing to tell by
+        assert_eq!(by_likeness(&likes[..3]), [0, 1, 2]);
+        assert_eq!(by_likeness(&[likeness(&[]), likeness(b"short"), likes[0].clone()]), [0, 1, 2]);
     }
 
     /// Data held whole (all of a data, or part of it) by another, but not by itself alone;
