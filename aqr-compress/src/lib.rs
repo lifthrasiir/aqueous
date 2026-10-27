@@ -137,8 +137,8 @@ pub struct Options {
     pub description: usize,
     /// The level of the archive of [`compress`] ([`aqr::Encoder`]), and of the formulas sized
     /// for [`Options::smaller`]; and, by its [`Level::scale`], how hard data is recompressed:
-    /// at 1 not at all (zstd alone, whatever [`Options::depth`]), from 7 on DEFLATE as
-    /// [`Options::flate`] tells and with no [`probe`].
+    /// at 0 and 1 not at all (whatever [`Options::depth`]: at 0 every block uncompressed, at 1
+    /// zstd alone), from 7 on DEFLATE as [`Options::flate`] tells and with no [`probe`].
     pub level: Level,
     /// Keep a file raw, or the data where files are found, unless its formula archives
     /// smaller than it does raw ([`aqr::Encoder::smaller`]).
@@ -218,7 +218,7 @@ impl Options {
 
     /// Whether data is recompressed at all ([`Options::level`]).
     pub(crate) fn recompresses(&self) -> bool {
-        self.level != Level::Of(Level::MIN)
+        !matches!(self.level, Level::Of(0 | 1))
     }
 }
 

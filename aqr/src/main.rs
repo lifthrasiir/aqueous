@@ -1,6 +1,6 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l LEVEL] [--depth N] [--batch MIB]
+//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N] [--batch MIB]
 //! [--no-check] [--wasm] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
@@ -10,9 +10,10 @@
 //! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
 //! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
 //!   otherwise).
-//! - `-l`: the level of compression ([`aqr::Level`]), `1` (zstd alone: nothing recompressed)
-//!   to `9`; `low`, `mid` (the default) and `high` are 2, 5 and 8. `zstdN` compresses every
-//!   stream at zstd level `N`, the recompression as at mid.
+//! - `-l`: the level of compression ([`aqr::Level`]), `0` (nothing compressed: uncompressed
+//!   blocks only), `1` (zstd alone: nothing recompressed) to `9`; `low`, `mid` (the default)
+//!   and `high` are 2, 5 and 8. `zstdN` compresses every stream at zstd level `N`, the
+//!   recompression as at mid. `-N` is `-l N`, its digits all one level (`-10` is not `-1 -0`).
 //! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors.
 //! - `--batch` is about the most MiB of files made at once (512 by default), which bounds the
 //!   memory taken by compression (but for a file larger).
@@ -34,7 +35,7 @@ use aqr_compress::{Options, compress_formula, compress_tree_to, detect};
 use aqr_decompress::{Native, Wasm};
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Time, Tree, Value, name_bytes, name_from};
 
-const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l 1-9|low|mid|high|zstdN] [--depth N] \
+const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
      [--batch MIB] [--no-check] [--wasm] INPUT...";
 
 struct Args {
@@ -120,6 +121,8 @@ fn parse() -> Result<Args, String> {
             // -T8 and the like
             s if s.starts_with("-T") => a.opt.threads = s[2..].parse().map_err(|_| "-T takes a number")?,
             s if s.starts_with("-l") => a.opt.level = s[2..].parse()?,
+            // -0 to -9, and whatever level of more digits there may be (one level, not several)
+            s if s[1..].bytes().all(|b| b.is_ascii_digit()) => a.opt.level = s[1..].parse()?,
             s => return Err(format!("unknown option {s}")),
         }
     }

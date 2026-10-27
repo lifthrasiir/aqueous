@@ -32,7 +32,7 @@ use std::ops::Range;
 use std::sync::Mutex;
 
 use aqr_decompress::Native;
-use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Placed, SegmentWriter, Tree};
+use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Level, Placed, SegmentWriter, Tree};
 use aqr_formula::probe::{self, Held};
 use aqr_formula::{Formula, Kind, Module, Node};
 
@@ -609,7 +609,11 @@ fn make<S: Source + ?Sized>(
     }
     let counts: Vec<usize> = leaves.iter().map(|l| l.outputs.len()).collect();
     f.root = Node::Concat(leaves.iter_mut().flat_map(|l| std::mem::take(&mut l.outputs)).collect());
-    f.merge_classes_within(opt.block as u64);
+    // (at level 0 each file a leaf block of its own, uncompressed: no formula block, which
+    // would be Zstandard)
+    if opt.level != Level::STORED {
+        f.merge_classes_within(opt.block as u64);
+    }
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());

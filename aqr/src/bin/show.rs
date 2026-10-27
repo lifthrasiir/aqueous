@@ -29,7 +29,7 @@ fn main() {
         match &*arg {
             "-t" => opt.threads = args.next().and_then(|s| s.parse().ok()).expect("-t THREADS"),
             "-d" => opt.depth = args.next().and_then(|s| s.parse().ok()).expect("-d DEPTH"),
-            "-l" => opt.level = args.next().expect("-l LEVEL").parse().expect("-l 1-9|low|mid|high|zstdN"),
+            "-l" => opt.level = args.next().expect("-l LEVEL").parse().expect("-l 0-9|low|mid|high|zstdN"),
             "-e" => opt.file = Nest::Exact,
             "-r" => opt.shared_resources = true,
             "-m" => opt.shared_modules = true,

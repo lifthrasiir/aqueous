@@ -17,8 +17,8 @@ use aqr_common::varint;
 
 use super::tree::{self, EntryNode, FileParam, Tree};
 use super::{
-    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, MODULE, SWAP, always_compressed, block, footer,
-    footer_with, formula_block,
+    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, MODULE, STORED, SWAP, always_compressed, block, block_of,
+    checksum_of, footer, footer_with, formula_block,
 };
 use crate::{Error, Formula, Module, Node, Resource, Result};
 
@@ -330,7 +330,13 @@ impl SegmentWriter {
         }
         let meta = tree::metadata(t, self.at, &self.module_at, &self.resource_at, &files);
         let mut out = Vec::new();
-        block(&mut out, METADATA_ZSTD, &always_compressed(&mut enc.cctx(), &[&meta], enc.base_level(), enc.threads)?);
+        match enc.base_level() {
+            STORED => {
+                let sum = checksum_of(&[&meta]).to_le_bytes();
+                block_of(&mut out, METADATA_RAW, &[&meta, &sum]);
+            }
+            level => block(&mut out, METADATA_ZSTD, &always_compressed(&mut enc.cctx(), &[&meta], level, enc.threads)?),
+        }
         let metadata = out.len();
         let end = self.at + out.len();
         // (from the start of the footer's fields: after the magic and the size)
@@ -426,7 +432,9 @@ impl Encoder {
     }
 }
 
-/// A metadata block, Zstandard compressed, with a u8 size field.
+/// A metadata block, uncompressed (at [`super::Level::STORED`]) or Zstandard compressed, with a u8
+/// size field.
+const METADATA_RAW: u64 = 0x10;
 const METADATA_ZSTD: u64 = 0x14;
 
 /// What a leaf takes: the streams it slices and the applications of several outputs whose
@@ -603,6 +611,14 @@ mod tests {
         assert_eq!(got, [want[0], want[1], want[2], want[3], want[4], want[5], want[3]]);
         assert_eq!(files.len(), 6);
         assert_eq!(decode(&c, &natives()), super::super::resource("an archive of several files"));
+        // at level 0, of no compressed block but those that are always (formula and module
+        // blocks), and the same files
+        let (stored, _) = Encoder::new(Level::STORED).encode_segment(&seg).unwrap();
+        let types: Vec<u64> = super::super::tests::types(&stored).iter().map(|t| t & !3).collect();
+        assert!(types.contains(&METADATA_RAW) && !types.contains(&METADATA_ZSTD));
+        assert!(!types.contains(&super::super::LEAF_ZSTD) && !types.contains(&super::super::NON_LEAF_ZSTD));
+        let Ok(Value::Tree(_, again)) = decode_value(&stored, &natives()) else { panic!() };
+        assert_eq!(again, files);
 
         // a checksum not that of the output
         let mut bad = leaves.clone();

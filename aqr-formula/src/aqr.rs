@@ -101,9 +101,11 @@ pub fn encode(f: &Formula, checksum: Option<u64>, level: Level) -> Result<Vec<u8
 /// each stream (and how hard aqr-compress recompresses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
-    /// A level from 1 (fastest) to 9 (smallest), [`Level::LOW`], [`Level::MID`] and
-    /// [`Level::HIGH`] being 2, 5 and 8. Each stream is uncompressed if incompressible
-    /// (`PROBE`), else at the base zstd level of the level's [`Pick`], or:
+    /// A level from 0 (fastest) to 9 (smallest), [`Level::LOW`], [`Level::MID`] and
+    /// [`Level::HIGH`] being 2, 5 and 8. At 0 ([`Level::STORED`]) nothing is compressed: every
+    /// block is uncompressed, but for those that are always Zstandard (formula, module and
+    /// resource blocks), which hold raw Zstandard blocks. Otherwise each stream is uncompressed
+    /// if incompressible (`PROBE`), else at the base zstd level of the level's [`Pick`], or:
     ///
     /// - at a higher level of it where that saves enough for its time, at its rate of bytes
     ///   per second of compression;
@@ -120,7 +122,7 @@ pub enum Level {
 
 impl Level {
     /// The fastest of [`Level::Of`].
-    pub const MIN: u8 = 1;
+    pub const MIN: u8 = 0;
     /// The smallest of [`Level::Of`].
     pub const MAX: u8 = 9;
     /// Low: compressing about 3 times as fast as [`Level::MID`] (the archiver's serial paths
@@ -128,6 +130,8 @@ impl Level {
     pub const LOW: Level = Level::Of(2);
     /// The default.
     pub const MID: Level = Level::Of(5);
+    /// Nothing compressed.
+    pub const STORED: Level = Level::Of(0);
     /// High: compressing at 40 MB/s and decoding at 200 MB/s at least, on 10gb.
     pub const HIGH: Level = Level::Of(8);
 
@@ -141,7 +145,7 @@ impl Level {
     }
 }
 
-/// `low`, `mid`, `high`, `1` to `9`, or `zstdN` (zstd level `N`).
+/// `low`, `mid`, `high`, `0` to `9`, or `zstdN` (zstd level `N`).
 impl std::str::FromStr for Level {
     type Err = String;
 
@@ -153,7 +157,7 @@ impl std::str::FromStr for Level {
             _ => match (s.strip_prefix("zstd"), s.parse::<u8>()) {
                 (Some(l), _) => l.parse().map(Level::Zstd).map_err(|_| format!("not a zstd level: {l}")),
                 (None, Ok(n)) if (Level::MIN..=Level::MAX).contains(&n) => Ok(Level::Of(n)),
-                _ => Err(format!("not a level (low, mid, high, 1-9 or zstdN): {s}")),
+                _ => Err(format!("not a level (low, mid, high, 0-9 or zstdN): {s}")),
             },
         }
     }
@@ -204,8 +208,9 @@ impl Pick {
     /// sample of chunks of 64 KiB does not see the matches from afar that a higher level's
     /// larger window finds (10gb: some −21 MB at 5's rate); from 8 on, [`DENSE`] for dense
     /// streams, and at 9 for any where the sample is smaller so.
+    /// (Level 0 compresses nothing, and picks nothing: taken as 1.)
     fn of(level: u8) -> Pick {
-        let n = level.clamp(Level::MIN, Level::MAX);
+        let n = level.clamp(1, Level::MAX);
         Pick {
             // (level 1's speed compared with no other)
             base: if n == 1 { (1, BASE.1) } else { BASE },
@@ -470,6 +475,7 @@ impl Encoder {
     /// The zstd level of the module and formula blocks.
     fn base_level(&self) -> i32 {
         match self.level {
+            Level::STORED => STORED,
             Level::Of(n) => Pick::of(n).base.0,
             Level::Zstd(l) => l,
         }
@@ -904,6 +910,7 @@ impl Encoder {
     /// smaller.
     pub fn least(&self, d: &[u8], enough: usize) -> Result<usize> {
         let levels = match self.level {
+            Level::STORED => return Ok(d.len()),
             Level::Of(n) => {
                 let p = Pick::of(n);
                 [p.lower, &[p.top()]].concat()
@@ -929,6 +936,9 @@ impl Encoder {
     /// at the probe level (zstd level 1): it stores what that saves less than 1/32 of, as
     /// [`Level::Of`] does (the sample is kept, for when it is compressed).
     pub fn compresses(&self, d: &[u8]) -> Result<bool> {
+        if self.level == Level::STORED {
+            return Ok(false);
+        }
         let (k, sample) = (key(&[d]), sampled(&[d]));
         let c = self.trial(k, &sample, PROBE)?;
         let saves = c.as_ref().is_some_and(|c| c.len() < sample.len() - sample.len() / 32);
@@ -1080,6 +1090,7 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
             let c = trial(&sample, l)?.map_or(sample.len(), |c| c.len());
             Ok(Plan::Level(l, scaled(c, sample.len(), n)))
         }
+        Level::STORED => Ok(Plan::Done(None)),
         Level::Of(level) => {
             let p = Pick::of(level);
             let sample = sampled(data);
@@ -1215,9 +1226,45 @@ fn content_block(out: &mut impl Out, leaf: bool, data: &[&[u8]], c: Option<&[u8]
 }
 
 /// The compressed external structure of `data` (Zstandard, XXH64), even where the Zstandard
-/// blocks are longer than `data`: for blocks that are always compressed.
+/// blocks are longer than `data`: for blocks that are always compressed. At level [`STORED`],
+/// raw Zstandard blocks.
 fn always_compressed(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize) -> Result<Vec<u8>> {
-    Ok(external(c, data, level, threads, usize::MAX)?.0)
+    match level {
+        STORED => Ok(stored_external(data)),
+        _ => Ok(external(c, data, level, threads, usize::MAX)?.0),
+    }
+}
+
+/// The zstd level that [`always_compressed`] takes for raw Zstandard blocks (zstd's own level 0
+/// is its default level).
+const STORED: i32 = 0;
+
+/// The largest Zstandard block (RFC 8878, `Block_Maximum_Size`).
+const ZSTD_BLOCK_MAX: usize = 128 << 10;
+
+/// The compressed external structure of `data` (Zstandard, XXH64) of raw Zstandard blocks.
+fn stored_external(data: &[&[u8]]) -> Vec<u8> {
+    let data = data.concat();
+    let chunks: Vec<&[u8]> = match data.len() {
+        0 => vec![&[]],
+        _ => data.chunks(ZSTD_BLOCK_MAX).collect(),
+    };
+    let mut out = Vec::with_capacity(data.len() + 3 * chunks.len() + 16);
+    // longer by the block headers: 0, then by how much
+    out.push(0);
+    varint::put(&mut out, 3 * chunks.len() as u64);
+    // the window descriptor (a mantissa of 0): as large as a block at least (Block_Maximum_Size
+    // is the smaller of the window and 128 KiB), of 1 KiB at least
+    let block = data.len().clamp(1 << 10, ZSTD_BLOCK_MAX);
+    out.push(((block.next_power_of_two().trailing_zeros() - 10) << 3) as u8);
+    for (i, c) in chunks.iter().enumerate() {
+        // Last_Block, Block_Type 0 (raw), Block_Size
+        let head = (c.len() as u32) << 3 | (i + 1 == chunks.len()) as u32;
+        out.extend_from_slice(&head.to_le_bytes()[..3]);
+        out.extend_from_slice(c);
+    }
+    out.extend_from_slice(&checksum_of(&[&data]).to_le_bytes());
+    out
 }
 
 /// Zstandard's jobs of multithreaded compression, and how much of the window each job takes
@@ -2568,6 +2615,24 @@ mod tests {
 
     const SAMPLE: &[u8] = b"hezyxollehyz";
 
+    /// Level 0 compresses nothing: streams in uncompressed blocks, formula and module blocks of
+    /// raw Zstandard blocks, of any size.
+    #[test]
+    fn stored_level() {
+        let c = encode(&sample(), None, Level::STORED).unwrap();
+        assert_eq!(decode(&c, &natives()).unwrap(), SAMPLE);
+        let ts = types(&c);
+        assert!(
+            ts.contains(&(NON_LEAF_RAW + 0)) && !ts.iter().any(|&t| [LEAF_ZSTD, NON_LEAF_ZSTD].contains(&(t & !3)))
+        );
+        let noise = aqr_common::rng::noise(300_000);
+        for n in [0, 1, 1000, 1025, 128 << 10, (128 << 10) + 1, 300_000] {
+            let e = always_compressed(&mut CCtx::create(), &[&noise[..n]], STORED, 1).unwrap();
+            assert_eq!(decoded(&e, true, true).unwrap(), &noise[..n], "{n}");
+            assert!(e.len() <= n + 3 * n.div_ceil(128 << 10).max(1) + 16, "{n}");
+        }
+    }
+
     /// The archive of the blocks `add` appends.
     fn archive(add: impl FnOnce(&mut Vec<u8>)) -> Vec<u8> {
         let mut blocks = Vec::new();
@@ -2592,7 +2657,7 @@ mod tests {
     }
 
     /// Block types of archive `c`.
-    fn types(c: &[u8]) -> Vec<u64> {
+    pub(super) fn types(c: &[u8]) -> Vec<u64> {
         let footer = 6 + 2 + u16::from_le_bytes([c[c.len() - 2], c[c.len() - 1]]) as usize + 2;
         let d = &c[HEADER_MAGIC.len()..c.len() - footer];
         let (mut at, mut out) = (0, Vec::new());
@@ -2834,11 +2899,17 @@ mod tests {
     /// from 8 on are dense streams (text, PE code) as long as a sample at least at [`DENSE`].
     #[test]
     fn levels() {
-        for (s, l) in [("low", Level::LOW), ("mid", Level::Of(5)), ("high", Level::Of(8)), ("1", Level::Of(1))] {
+        for (s, l) in [
+            ("low", Level::LOW),
+            ("mid", Level::Of(5)),
+            ("high", Level::Of(8)),
+            ("1", Level::Of(1)),
+            ("0", Level::STORED),
+        ] {
             assert_eq!(s.parse(), Ok(l));
         }
         assert_eq!("zstd19".parse(), Ok(Level::Zstd(19)));
-        for s in ["0", "10", "zstd", "max"] {
+        for s in ["10", "-1", "zstd", "max"] {
             assert!(s.parse::<Level>().is_err(), "{s}");
         }
         for n in 2..=Level::MAX {
