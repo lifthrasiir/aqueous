@@ -2573,11 +2573,33 @@ with an implementation of its own (e.g. native code) instead of instantiating [=
 as long as the result is indistinguishable from the definition, including [=invalid archive=] failures.
 Such a decompressor needs neither the bytes of the module nor a WebAssembly engine,
 whether the module is given by a [=shorthand block=] or in full.
+A decompressor MAY refuse to apply a module whose [=module hash=] it doesn't know,
+in which case a [=resource failure=] occurs.
 
 <div class=note>
   A compressor can use a [=shorthand block=] for a [=registered module=] to save the size of the module,
   at the cost of an [=unsupported failure=] in a decompressor that doesn't know the entry.
   A module given in full can be read by any decompressor with a WebAssembly engine.
+</div>
+
+<div class=note>
+  A decompressor chooses how to apply each module, and none of the choices requires translating modules to native code.
+  For a module whose [=module hash=] it knows, such as a [=registered module=], it can either:
+
+  * apply an implementation of its own, which is the fastest but has to be made for every module known.
+      Translating the module by automated means (e.g. wasm2c) is preferred to writing it anew,
+      since the result has to be indistinguishable from the module, including its failures; or
+  * instantiate the module with a WebAssembly engine without isolating it,
+      since the hash is strong enough that no other module can have it.
+      This needs only the hash for a module given in full, and the bytes only for a [=shorthand block=].
+
+  For a module whose [=module hash=] it doesn't know, it can either:
+
+  * refuse to apply it, failing with a [=resource failure=]; or
+  * instantiate it with a WebAssembly engine in a sandbox, as untrusted code ([[#security-considerations]]).
+
+  For example, a decompressor with an engine and a sandbox but no native implementations reads every archive,
+  and one with neither an engine nor a sandbox reads every archive whose modules it implements natively.
 </div>
 
 </div>
@@ -4179,7 +4201,8 @@ Security considerations</h2>
 An archive is a container for arbitrary data and doesn't by itself contain active content,
 except for WebAssembly modules ([[#module-execution]]) that a decompressor executes to reconstruct file contents.
 Such modules are run under a deterministic profile without access to anything but their inputs and outputs,
-but a decompressor still has to treat them as untrusted code and isolate them accordingly.
+but a decompressor still has to treat them as untrusted code and isolate them accordingly,
+unless it knows their [=module hash=] ([[#module-block]]).
 Formula blocks and modules can produce outputs far larger than the archive itself,
 and some fields (e.g. [=envelope/lg_work_factor=]) directly control the amount of computation.
 A decompressor is expected to enforce implementation-defined limits and fail with a [=resource failure=] when they are exceeded.
