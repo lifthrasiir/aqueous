@@ -39,9 +39,17 @@ fn files_rebuilt() {
 #[test]
 fn not_lzma() {
     assert!(!formula::starts(b"hello, world, this is not an lzma file"));
-    // headers of other files that 10gb has, by chance of valid properties: dictionaries of 1
-    // and 4 bytes, which no encoder writes (benchmarks/silesia/sao, biblio.dbt of OpenOffice)
-    let sao = [&[0u8, 1, 0, 0, 0, 0, 0, 0, 0xb5, 0xf3, 3, 0, 0, 0][..], &[1, 0, 0, 0, 1, 0, 0, 0][..]].concat();
+    // other files of 10gb, by chance of a valid header: benchmarks/silesia/sao (properties 0, a
+    // dictionary of 16 MiB, 4.3 TB of data; then what is no stream), and OpenOffice's biblio.dbt
+    // (a dictionary of 4 bytes, which no encoder writes)
+    let mut x = 1u64;
+    let rest: Vec<u8> = (0..4096)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 56) as u8
+        })
+        .collect();
+    let sao = [&[0u8, 0, 0, 0, 1, 0, 0, 0, 0xb5, 0xf3, 3, 0, 0, 0][..], &rest].concat();
     let dbt = [&[0x4fu8, 4, 0, 0, 0][..], &[0; 16][..]].concat();
     assert!(!formula::starts(&sao) && !formula::starts(&dbt));
     let (_, mut d) = fixtures().remove(0);

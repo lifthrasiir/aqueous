@@ -308,6 +308,33 @@ pub fn decode(input: &[u8], props: Props, size: Option<u64>, limit: usize) -> Re
     Ok(Decoded { data, packets, marker, used: c.pos })
 }
 
+/// Whether `input` starts like a stream: it decodes to `n` bytes (or as far as it goes, or to
+/// an end marker) without a distance reaching back past the data's start, as other data soon
+/// does.
+pub fn plausible(input: &[u8], props: Props, n: usize) -> bool {
+    let Some(mut c) = Decoder::new(input) else { return false };
+    let mut m = Model::new(props);
+    let mut data = Vec::with_capacity(n + MAX_LEN as usize);
+    while data.len() < n {
+        let pos = data.len();
+        let pk = m.code(&mut c, &data, pos, Packet::LIT);
+        if c.overrun > 0 {
+            return true;
+        }
+        match pk.kind {
+            Kind::Lit => data.push(pk.dist as u8),
+            _ if pk.dist == END => return true,
+            _ => {
+                let Some(src) = pos.checked_sub(pk.dist as usize + 1) else { return false };
+                for j in 0..pk.len as usize {
+                    data.push(data[src + j]);
+                }
+            }
+        }
+    }
+    true
+}
+
 /// An encoder taking packets one by one.
 pub struct StreamEncoder {
     c: Encoder,

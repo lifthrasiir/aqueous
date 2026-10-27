@@ -15,15 +15,15 @@ const LIMIT: usize = 1 << 31;
 
 /// Whether `d` starts like a `.lzma` file: a header of valid properties, a dictionary size as
 /// encoders write it (2^n or 3 × 2^n bytes, 4 KiB at least), a data size that is unknown or below
-/// 2^48, and a stream starting with the zero byte its encoder writes first. Weak still: only for
-/// the start of a file.
+/// 2^48, and a stream that decodes for its first 1 KiB ([`crate::lzma::plausible`]). Only for the
+/// start of a file.
 pub fn starts(d: &[u8]) -> bool {
     let Some(h) = alone::parse(d) else { return false };
     let dict = h.dict;
-    d[alone::HEADER] == 0
-        && dict >= 1 << 12
+    dict >= 1 << 12
         && (dict.is_power_of_two() || dict % 3 == 0 && (dict / 3).is_power_of_two())
         && h.size.is_none_or(|s| s < 1 << 48)
+        && crate::lzma::plausible(&d[alone::HEADER..], h.props, 1 << 10)
 }
 
 /// The data of the `.lzma` file `d` (as far as its stream goes), or None where it does not
