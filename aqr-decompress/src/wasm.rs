@@ -291,6 +291,28 @@ impl std::fmt::Display for Violation {
 
 impl std::error::Error for Violation {}
 
+#[cfg(unix)]
+use crate::cow::Snapshot;
+
+/// The working memory of a spawner at a spawn (copied, without `cow`).
+#[cfg(not(unix))]
+struct Snapshot(Vec<u8>);
+
+#[cfg(not(unix))]
+impl Snapshot {
+    fn new(mem: &[u8]) -> Snapshot {
+        Snapshot(mem.to_vec())
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+
+    fn copy_to(&self, mem: &mut [u8]) {
+        mem.copy_from_slice(&self.0)
+    }
+}
+
 /// The failure of a task, which is the application's as the task is joined.
 #[derive(Debug)]
 struct TaskFailed(Failure);
@@ -313,7 +335,7 @@ struct Budget {
 /// `snapshot`.
 struct Job {
     c: Shared,
-    snapshot: Arc<Vec<u8>>,
+    snapshot: Arc<Snapshot>,
     arg: u32,
     i: u32,
     budget: Arc<Budget>,
@@ -601,15 +623,16 @@ impl Job {
         let c = &*self.c.0;
         let mut store = Store::new(&ENGINE, State::new(self.c.clone(), self.budget.clone(), true));
         store.limiter(|s| s);
-        let pages = (self.snapshot.len() / 65536) as u32;
+        let pages = (self.snapshot.as_slice().len() / 65536) as u32;
         // every memory but the working one empty
         let (instance, _) = instantiate(&mut store, c, &mut |m| match m {
             Mem::Working => (MemoryType::new(pages, c.working.1.map(|m| m as u32)), None),
             _ => (MemoryType::new64(0, Some(0)), None),
         })?;
-        // (over what the data segments wrote)
+        // the working memory a copy of the snapshot (on write where the system can), over
+        // what the data segments wrote
         let w = store.data().working.expect("a working memory");
-        w.data_mut(&mut store).copy_from_slice(&self.snapshot);
+        self.snapshot.copy_to(w.data_mut(&mut store));
         drop(self.snapshot);
         let task = instance.get_typed_func::<(i32, i32), ()>(&mut store, TASK).expect("aqr_task");
         if let Err(e) = task.call(&mut store, (self.arg as i32, self.i as i32)) {
@@ -706,7 +729,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
         HostFn::Spawn => {
             Func::wrap(&mut *store, |mut c: Caller<'_, State>, arg: i32, n: i32| -> wasmtime::Result<i32> {
                 let w = c.data().working.expect("a working memory");
-                let snapshot = Arc::new(w.data(&c).to_vec());
+                let snapshot = Arc::new(Snapshot::new(w.data(&c)));
                 let s = c.data_mut();
                 let n = n as u32;
                 let slots = (0..n)

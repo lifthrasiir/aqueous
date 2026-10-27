@@ -34,6 +34,9 @@ aqr-zip = { path = "../aqr-zip" }
 aqr-sqlite = { path = "../aqr-sqlite" }
 aqr-wrt = { path = "../aqr-wrt" }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 wat = "1"
 

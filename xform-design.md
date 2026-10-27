@@ -634,7 +634,8 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 > **근거: 첫 측정(M4, 2026-10-27).** 48 MB 텍스트(크레이트 소스)를 gzip -6한 8.0 MB를 `aqr -c`하고, 모든 모듈을 wasmtime으로 돌려 풀었다(`aqr-decompress-wasm`, 네이티브와 같은 출력을 확인했다).
 >
 > - flate-recons를 직렬로 두면 0.74–0.77 s였고, 세그먼트 배치(32개)를 task로 돌리면 0.45 s였다. 네이티브(10코어)는 0.15 s이다.
-> - task 하나의 준비(instantiate, 작업 메모리 143 MB 생성과 스냅샷 복사)가 10–13 ms였다. task가 하는 일(세그먼트 하나, 약 1 MiB)과 비슷한 크기이다. 지금은 task마다 memcpy이므로 CoW가 다음 순서이다.
+> - task 하나의 준비(instantiate, 작업 메모리 143 MB 생성과 스냅샷 복사)가 memcpy로는 10–13 ms였다. task가 하는 일(세그먼트 하나, 약 1 MiB)과 비슷한 크기이다.
+> - macOS에서 스냅샷과 task 메모리를 `vm_copy`로 CoW 복사하자, 스냅샷(71–91 MB)이 약 70 µs, task 준비가 0.05–0.9 ms가 되었다. 전체는 0.37–0.41 s이다. flate-recons의 적용이 0.53 s에서 0.14 s로 줄었다. 나머지는 직렬인 wrt-recons(0.11 s)와 두 모듈의 컴파일(0.1 s, 프로세스마다 한 번)이다.
 > - 처음 구현은 비어 있는 워커 수만큼만 워커에 돌리고 나머지를 join하는 스레드에서 차례로 돌렸다. 그러자 0.77 s로 직렬과 같았다. 지금은 예약한 워커들과 join하는 스레드가 아직 시작하지 않은 task를 차례로 가져간다.
 
 **2단계: 채널 [제안].** 파이프라인은 task 사이의 단방향 유한 채널로 표현한다. 이 채널은 보류한 노드 사이의 공유 간선(§4.4)과 같은 KPN 채널이다. 용량은 "이만큼이면 충분하다"는 자원 선언이다.
@@ -657,9 +658,10 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
   - 동기 API로 task마다 OS 스레드를 두고 condvar에서 막는 방법은 더 단순하다. 그러나 중첩 `spawn`이 있으면 스레드 수에 상한이 없다. 또 "워커가 없으면 join 때 돌린다"는 지연 실행이 채널과 섞이면 교착한다. 소비자가 막힌 채 생산자를 돌릴 스레드가 없기 때문이다.
   - fiber 스택은 `async_stack_size`(기본 2 MiB)만큼 task마다 든다. `max_wasm_stack`보다 커야 한다.
   - 교착 판정은 실행기에서 한다. 깨어날 수 있는 future가 없고 실행 중인 것도 없는데, 끝나지 않은 task가 있으면 교착이다.
-- **메모리.** `Config::with_host_memory`로 `MemoryCreator`를 넘겨 호스트가 메모리를 공급한다. 요청한 예약(`reserved_size_in_bytes`)과 가드 크기는 그대로 지킨다.
-  - 작업 메모리 스냅샷은 CoW로 만든다(위의 "묶음으로 둔 이유"). Linux와 Windows에서는 `spawn`마다 memfd(파일 매핑)에 한 번 복사하고 task마다 `MAP_PRIVATE`로 매핑한다. macOS에서는 `mach_vm_remap`(copy)을 쓴다. instantiate가 data segment로 덮은 페이지만 스냅샷에서 다시 복사한다. Rust 모듈이면 수십 KB이다. 지금 구현은 task마다 memcpy한다.
-  - 지금의 루트 적용은 입력 메모리를 `Memory::new` + `data_mut`로 복사한다. 호스트 버퍼를 그대로 가리키는 `LinearMemory`로 주면 이 복사도 없어진다.
+- **메모리.** wasmtime이 만든 메모리를 그대로 쓰고, 내용만 호스트가 채운다.
+  - 작업 메모리 스냅샷은 CoW로 만든다(위의 "묶음으로 둔 이유"). 구현(aqr-decompress `cow`)은 macOS에서 `vm_copy`를 쓴다. 스냅샷은 부모 메모리의 CoW 복사이고, task 메모리는 instantiate한 뒤 wasmtime이 만든 매핑 위에 스냅샷을 `vm_copy`한다. 그 밖의 시스템은 memcpy한다. Linux와 Windows에서는 `spawn`마다 memfd(파일 매핑)에 한 번 복사하고, task마다 그것을 wasmtime의 매핑 위에 `MAP_PRIVATE | MAP_FIXED`로 매핑할 수 있을 것이다(구현하지 않았다).
+  - wasmtime 49의 `Config::with_host_memory`(`MemoryCreator`)는 호스트가 만드는 메모리(`Memory::new`)에 쓰이지 않는다. 문서와 달리 그 경로는 늘 기본 on-demand 할당기를 쓰고, 모듈이 정의하는 메모리에만 쓰인다. 프로파일상 모듈은 메모리를 정의하지 않으므로, 메모리를 만든 뒤 그 매핑을 덮는다.
+  - 루트 적용은 입력 메모리를 `Memory::new` + `data_mut`로 복사한다. 같은 이유로 호스트 버퍼를 그대로 메모리로 줄 수는 없다. 페이지 단위로 정렬된 버퍼라면 같은 `vm_copy`로 복사를 CoW로 바꿀 수 있다.
 - **join과 recv.** 다른 Store의 메모리 사이에서 memcpy 한 번이다. 메시지는 호스트 쪽 큐에 복사해 둔다. 용량 × 메시지 크기가 채널의 메모리이고, 예산에 넣는다.
 - **네이티브 치환.** 해시를 아는 모듈은 지금처럼 네이티브 코드가 aqr-common `pool`로 돈다. 출력은 같다.
 

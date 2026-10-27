@@ -124,6 +124,7 @@ dependencies = [
  "aqr-sqlite",
  "aqr-wrt",
  "aqr-zip",
+ "libc",
  "sha2",
  "wasmparser 0.245.1",
  "wasmtime",
