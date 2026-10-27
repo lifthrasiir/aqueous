@@ -5,10 +5,10 @@
 //! for each resource, the formula block, and a non-leaf block for each stream it slices, in the
 //! order of the streams. A formula of a single slice is a leaf block of its own.
 //!
-//! Until modules are WebAssembly (the spec's "Module execution" is tentative), a module block
-//! holds a Wasm module of custom sections only, one of them ([`NATIVE_SECTION`]) naming the
-//! module (`name@version`), and a [`NativeModule`] stands in for it as a whole module. Its
-//! applications declare no memory limit ([`MEMORY_LIMIT`]).
+//! A module block holds the Wasm module of a [`Module`], which the [`Encoder`] is given
+//! ([`Encoder::with_modules`]), and a [`Runner`] runs it in decoding: natively where it knows
+//! the module, say. Applications declare no memory limit ([`MEMORY_LIMIT`]). [`natives`] runs
+//! modules by [`crate::Modules`], on [`stand_in`]s by default, for tests and measurements.
 //!
 //! [`Encoder`] encodes several formulas, compressing each stream and resource once however
 //! many hold it, at the zstd level that its [`Level`] picks for it, a long one (8 MiB or more)
@@ -36,7 +36,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use aqr_common::varint;
 use xxhash_rust::xxh3::Xxh3;
@@ -56,8 +56,8 @@ const FOOTER_TYPE: u64 = 0x90_5bcb_957d;
 const OVERLAY_FOOTER_TYPE: u64 = 0x7fc;
 const ENCRYPTED_HEADER_TYPE: u64 = 0x155_04dc_a579;
 
-/// The name of the custom section naming the native implementation of a module block.
-pub const NATIVE_SECTION: &str = "aqueous-native";
+/// The name of the custom section naming the module of a [`stand_in`].
+const STAND_IN_SECTION: &str = "aqueous-stand-in";
 /// The memory limit of every application, as no module declares one yet.
 pub const MEMORY_LIMIT: u64 = u64::MAX;
 
@@ -170,9 +170,18 @@ pub struct Encoder {
     cctx: RefCell<CCtx<'static>>,
     /// Whether formulas are sized without their resource blocks ([`Encoder::share_resources`]).
     shared: bool,
+    /// Whether formulas are sized without their module blocks ([`Encoder::share_modules`]).
+    shared_modules: bool,
     /// The resources that formulas are sized without ([`Encoder::hold_resource`]).
     held: RefCell<HashSet<StreamKey>>,
+    /// The Wasm module of each module ([`Encoder::with_modules`]).
+    wasm: WasmOf,
+    /// Module blocks compressed, by their module and level.
+    module_blocks: RefCell<HashMap<(Module, i32), std::rc::Rc<Vec<u8>>>>,
 }
+
+/// The Wasm module of a module, if there is one.
+pub type WasmOf = fn(Module) -> Option<Cow<'static, [u8]>>;
 
 /// A stream's (or resource's) hash and length.
 type StreamKey = (u128, usize);
@@ -217,8 +226,30 @@ impl Encoder {
             trials: RefCell::default(),
             cctx: RefCell::new(CCtx::create()),
             shared: false,
+            shared_modules: false,
             held: RefCell::default(),
+            wasm: |m| Some(Cow::Owned(stand_in(m))),
+            module_blocks: RefCell::default(),
         }
+    }
+
+    /// The encoder writing the Wasm module that `wasm` gives of each module into its module
+    /// block, rather than its [`stand_in`]. Encoding fails on a module that has none.
+    pub fn with_modules(mut self, wasm: WasmOf) -> Encoder {
+        self.wasm = wasm;
+        self.module_blocks.borrow_mut().clear();
+        self
+    }
+
+    /// The data of the module block of `m`, compressed at `level`, once.
+    fn module_block(&self, m: Module, level: i32) -> Result<std::rc::Rc<Vec<u8>>> {
+        if let Some(b) = self.module_blocks.borrow().get(&(m, level)) {
+            return Ok(b.clone());
+        }
+        let wasm = (self.wasm)(m).ok_or_else(|| Error::new(format!("no Wasm module of {m}")))?;
+        let b = std::rc::Rc::new(always_compressed(&mut self.cctx(), &[&wasm], level, self.threads)?);
+        self.module_blocks.borrow_mut().insert((m, level), b.clone());
+        Ok(b)
     }
 
     /// Sizes formulas ([`Encoder::len`], [`Encoder::smaller`]) without their resource blocks,
@@ -226,6 +257,33 @@ impl Encoder {
     /// where they come to nothing per file. For measuring; the archives are the same.
     pub fn share_resources(&mut self) {
         self.shared = true;
+    }
+
+    /// Sizes formulas ([`Encoder::len`], [`Encoder::smaller`]) without their module blocks, as
+    /// in an archive of many files, which has a module block of each module once (whose cost is
+    /// then no one file's). The archives are the same.
+    pub fn share_modules(&mut self) {
+        self.shared_modules = true;
+    }
+
+    /// Whether formulas are sized without their module blocks ([`Encoder::share_modules`]).
+    pub fn shares_modules(&self) -> bool {
+        self.shared_modules
+    }
+
+    /// The bytes of the module blocks in the archive of `f`.
+    fn modules_len(&self, f: &Formula) -> Result<usize> {
+        let mut modules: Vec<Module> = Vec::new();
+        for a in f.applies() {
+            if !modules.contains(&a.module) {
+                modules.push(a.module);
+            }
+        }
+        let mut n = Count(0);
+        for m in modules {
+            block(&mut n, MODULE, &self.module_block(m, self.base_level())?);
+        }
+        Ok(n.0)
     }
 
     /// Sizes formulas without resource `r`, as if the archive held it already: where the
@@ -270,11 +328,12 @@ impl Encoder {
         let mut n = Count(0);
         self.write(f, stand_in, None, &mut n)?;
         let held = self.held.borrow();
+        let modules = if self.shared_modules { self.modules_len(f)? } else { 0 };
         Ok(match self.shared {
             true => n.0 - self.resources_len(f)?,
             false if held.is_empty() => n.0,
             false => n.0 - self.resources_len_of(f, |r| held.contains(&key(&[&r[..]])))?,
-        })
+        } - modules)
     }
 
     /// The length of the archive of `d` as it is, without a checksum (`d` itself not copied).
@@ -387,7 +446,7 @@ impl Encoder {
             }
 
             for &m in &modules {
-                block(out, MODULE, &always_compressed(&mut self.cctx(), &[&wasm(m)], level, self.threads)?);
+                block(out, MODULE, &self.module_block(m, level)?);
             }
             for r in resources {
                 self.resource_block(out, r)?;
@@ -533,8 +592,10 @@ pub fn description_bound(n: &Node) -> usize {
     }
 }
 
-/// A Wasm module of a custom section only, naming `m` in [`NATIVE_SECTION`].
-fn wasm(m: Module) -> Vec<u8> {
+/// A Wasm module of a custom section only, naming `m`: what stands in for its Wasm module where
+/// there is none (in tests, and to size formulas apart from modules), and which [`natives`]
+/// knows `m` by. No other [`Runner`] runs it.
+pub fn stand_in(m: Module) -> Vec<u8> {
     fn custom(w: &mut Vec<u8>, name: &str, payload: &[u8]) {
         let mut s = Vec::new();
         varint::put(&mut s, name.len() as u64);
@@ -545,12 +606,12 @@ fn wasm(m: Module) -> Vec<u8> {
         w.extend_from_slice(&s);
     }
     let mut w = WASM_HEADER.to_vec();
-    custom(&mut w, NATIVE_SECTION, m.to_string().as_bytes());
+    custom(&mut w, STAND_IN_SECTION, m.to_string().as_bytes());
     w
 }
 
-/// The name in [`NATIVE_SECTION`] of Wasm module `w`, if any.
-fn native_name(w: &[u8]) -> Option<&str> {
+/// The name of the module that Wasm module `w` is the [`stand_in`] of, if any.
+pub fn stand_in_name(w: &[u8]) -> Option<&str> {
     let mut at = WASM_HEADER.len();
     if w.get(..at)? != WASM_HEADER {
         return None;
@@ -564,7 +625,7 @@ fn native_name(w: &[u8]) -> Option<&str> {
         if id == 0 {
             let mut p = 0;
             let n = usize::try_from(varint::get(s, &mut p).ok()?).ok()?;
-            if s.get(p..p.checked_add(n)?)? == NATIVE_SECTION.as_bytes() {
+            if s.get(p..p.checked_add(n)?)? == STAND_IN_SECTION.as_bytes() {
                 return std::str::from_utf8(&s[p + n..]).ok();
             }
         }
@@ -1148,7 +1209,8 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
-type Decoded<T> = std::result::Result<T, Failure>;
+/// A result of decoding.
+pub type Decoded<T> = std::result::Result<T, Failure>;
 
 fn invalid<T>(msg: impl Into<String>) -> Decoded<T> {
     Err(Failure::Invalid(msg.into()))
@@ -1158,52 +1220,98 @@ fn resource<T>(msg: impl Into<String>) -> Decoded<T> {
     Err(Failure::Resource(msg.into()))
 }
 
-/// A native implementation standing in for the module blocks naming [`NativeModule::module`].
-pub trait NativeModule: Sync {
-    fn module(&self) -> Module;
-
-    /// The outputs of an application, of `sizes` bytes each: from `inputs`, the resource
-    /// blocks given in order and `params`. The decoder checks the outputs against `sizes`.
-    fn apply(&self, params: &[u8], resources: &[Resource], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>>;
+/// Runs the modules of archives: applies the Wasm module of a module block as the spec's
+/// "apply a module" does, natively where it knows the module, say.
+pub trait Runner: Sync {
+    /// Wasm module `wasm` made ready to apply, once for each module block applied; a failure if
+    /// it is not a module, or cannot be run here.
+    fn load(&self, wasm: &[u8]) -> Decoded<Box<dyn Loaded + '_>>;
 }
 
-/// `modules` run by `m`, as archives apply them: [`crate::Modules::apply`] for one output, else
-/// [`crate::Modules::apply_shared`]. The [`crate::Apply`] that `m` is given has no inputs of its
-/// own (they are the evaluated ones).
-pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + Sync + 'a)) -> Vec<Box<dyn NativeModule + 'a>> {
-    struct Native<'a, M> {
-        module: Module,
-        m: &'a M,
-    }
+/// A module made ready to apply ([`Runner::load`]).
+pub trait Loaded: Send + Sync {
+    /// The outputs of an application, of `sizes` bytes each: from `inputs`, the resource
+    /// blocks given in order and `params`, with the memories of at most `memory_limit` bytes.
+    /// The decoder checks the outputs against `sizes`.
+    fn apply(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &[&[u8]],
+        sizes: &[u64],
+        memory_limit: u64,
+    ) -> Decoded<Vec<Vec<u8>>>;
+}
 
-    impl<M: crate::Modules + Sync> NativeModule for Native<'_, M> {
-        fn module(&self) -> Module {
-            self.module
+/// Runs no module: for archives of none.
+pub struct NoModules;
+
+impl Runner for NoModules {
+    fn load(&self, _: &[u8]) -> Decoded<Box<dyn Loaded + '_>> {
+        resource("no module runs here")
+    }
+}
+
+/// `modules` run by `m` ([`Natives`]), known by their [`stand_in`]s.
+pub fn natives<'a, M: crate::Modules + Sync>(modules: &[Module], m: &'a M) -> Natives<'a, M> {
+    Natives { modules: modules.to_vec(), m, identify: |w| stand_in_name(w).map(str::to_owned) }
+}
+
+/// Modules run by [`crate::Modules`], as archives apply them: [`crate::Modules::apply`] for one
+/// output, else [`crate::Modules::apply_shared`]. The [`crate::Apply`] that `m` is given has no
+/// inputs of its own (they are the evaluated ones). A module block is that of one of them where
+/// its Wasm module is identified as it, by its [`stand_in`] unless [`Natives::identified_by`].
+pub struct Natives<'a, M> {
+    modules: Vec<Module>,
+    m: &'a M,
+    identify: fn(&[u8]) -> Option<String>,
+}
+
+impl<M> Natives<'_, M> {
+    /// The modules known by `identify`, which gives the name of the module of a Wasm module
+    /// (`name@version`).
+    pub fn identified_by(mut self, identify: fn(&[u8]) -> Option<String>) -> Self {
+        self.identify = identify;
+        self
+    }
+}
+
+impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
+    fn load(&self, wasm: &[u8]) -> Decoded<Box<dyn Loaded + '_>> {
+        struct Native<'a, M> {
+            module: Module,
+            m: &'a M,
         }
 
-        fn apply(
-            &self,
-            params: &[u8],
-            resources: &[Resource],
-            inputs: &[&[u8]],
-            sizes: &[u64],
-        ) -> Decoded<Vec<Vec<u8>>> {
-            let a = crate::Apply {
-                module: self.module,
-                resources: resources.to_vec(),
-                params: params.to_vec(),
-                inputs: Vec::new(),
-                len: sizes.iter().sum(),
-            };
-            match sizes {
-                [_] => self.m.apply(&a, inputs).map(|out| vec![out]),
-                _ => self.m.apply_shared(&crate::Shared { apply: a, sizes: sizes.to_vec(), split: false }, inputs),
+        impl<M: crate::Modules + Sync> Loaded for Native<'_, M> {
+            fn apply(
+                &self,
+                params: &[u8],
+                resources: &[Resource],
+                inputs: &[&[u8]],
+                sizes: &[u64],
+                _: u64,
+            ) -> Decoded<Vec<Vec<u8>>> {
+                let a = crate::Apply {
+                    module: self.module,
+                    resources: resources.to_vec(),
+                    params: params.to_vec(),
+                    inputs: Vec::new(),
+                    len: sizes.iter().sum(),
+                };
+                match sizes {
+                    [_] => self.m.apply(&a, inputs).map(|out| vec![out]),
+                    _ => self.m.apply_shared(&crate::Shared { apply: a, sizes: sizes.to_vec(), split: false }, inputs),
+                }
+                .map_err(|e| Failure::Invalid(e.0))
             }
-            .map_err(|e| Failure::Invalid(e.0))
         }
-    }
 
-    modules.iter().map(|&module| Box::new(Native { module, m }) as Box<dyn NativeModule + 'a>).collect()
+        let name = (self.identify)(wasm).ok_or_else(|| Failure::Resource("an unknown module".into()))?;
+        let module = self.modules.iter().copied().find(|m| m.to_string() == name);
+        let module = module.ok_or_else(|| Failure::Resource(format!("no native implementation of {name}")))?;
+        Ok(Box::new(Native { module, m: self.m }))
+    }
 }
 
 /// What an archive holds: a single file (where it has no metadata block), or files in a tree.
@@ -1214,25 +1322,24 @@ pub enum Value {
     Tree(Tree, Vec<Vec<u8>>),
 }
 
-/// The file in archive `c`, an archive without a metadata block, with the modules implemented
-/// by `natives`.
-pub fn decode(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Vec<u8>> {
-    match decode_value(c, natives)? {
+/// The file in archive `c`, an archive without a metadata block, its modules run by `runner`.
+pub fn decode(c: &[u8], runner: &dyn Runner) -> Decoded<Vec<u8>> {
+    match decode_value(c, runner)? {
         Value::File(d) => Ok(d),
         Value::Tree(..) => resource("an archive of several files"),
     }
 }
 
-/// What archive `c` holds, with the modules implemented by `natives`.
-pub fn decode_value(c: &[u8], natives: &[Box<dyn NativeModule + '_>]) -> Decoded<Value> {
-    decode_value_with(c, natives, 1)
+/// What archive `c` holds, its modules run by `runner`.
+pub fn decode_value(c: &[u8], runner: &dyn Runner) -> Decoded<Value> {
+    decode_value_with(c, runner, 1)
 }
 
 /// [`decode_value`], its leaf blocks evaluated at once on up to `threads` threads (the calling
 /// one and workers of [`aqr_common::pool`]). The first failure of a leaf, in their order, is
 /// the archive's.
-pub fn decode_value_with(c: &[u8], natives: &[Box<dyn NativeModule + '_>], threads: usize) -> Decoded<Value> {
-    let a = open(c, natives)?;
+pub fn decode_value_with(c: &[u8], runner: &dyn Runner, threads: usize) -> Decoded<Value> {
+    let a = open(c, runner)?;
     match a.tree() {
         None => {
             let leaves: Mutex<Vec<Option<Vec<Vec<u8>>>>> =
@@ -1272,15 +1379,17 @@ type ContentRef = (usize, usize, u64);
 /// those evaluated at once.
 pub struct Archive<'c, 'n> {
     blocks: Blocks<'c>,
-    natives: &'n [Box<dyn NativeModule + 'n>],
+    runner: &'n dyn Runner,
+    /// The modules loaded, by module block, as they are first applied.
+    loaded: Vec<OnceLock<Decoded<Box<dyn Loaded + 'n>>>>,
     /// The tree, and its contents (each a leaf, an output of it and its size).
     tree: Option<(Tree, Vec<ContentRef>)>,
     /// The bytes of the leaves evaluated at once, by their weights ([`Archive::set_budget`]).
     budget: u64,
 }
 
-/// Archive `c` opened, its modules implemented by `natives`.
-pub fn open<'c, 'n>(c: &'c [u8], natives: &'n [Box<dyn NativeModule + 'n>]) -> Decoded<Archive<'c, 'n>> {
+/// Archive `c` opened, its modules run by `runner`.
+pub fn open<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 'n>> {
     if c.starts_with(&ENCRYPTED_HEADER_MAGIC) {
         return resource("encrypted archives are not supported yet");
     }
@@ -1320,7 +1429,8 @@ pub fn open<'c, 'n>(c: &'c [u8], natives: &'n [Box<dyn NativeModule + 'n>]) -> D
     let outputs: Vec<u64> =
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
     let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
-    Ok(Archive { blocks, natives, tree, budget: u64::MAX })
+    let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
+    Ok(Archive { blocks, runner, loaded, tree, budget: u64::MAX })
 }
 
 impl Archive<'_, '_> {
@@ -1362,8 +1472,9 @@ impl Archive<'_, '_> {
         let env = |modules: usize, resources: usize, first| Env {
             first,
             modules: &blocks.modules[..modules],
+            loaded: &self.loaded[..modules],
             resources: &blocks.resources[..resources],
-            natives: self.natives,
+            runner: self.runner,
         };
         let programs = blocks
             .leaves
@@ -1741,8 +1852,9 @@ struct Env<'a, 'n> {
     /// The ordinal of the first non-leaf block after the formula block.
     first: usize,
     modules: &'a [Vec<u8>],
+    loaded: &'a [OnceLock<Decoded<Box<dyn Loaded + 'n>>>],
     resources: &'a [Resource],
-    natives: &'a [Box<dyn NativeModule + 'n>],
+    runner: &'n dyn Runner,
 }
 
 enum Insn<'a> {
@@ -1762,6 +1874,7 @@ struct Apply<'a> {
     module: usize,
     resources: Vec<usize>,
     params: &'a [u8],
+    memory_limit: u64,
     num_inputs: usize,
     output_sizes: Vec<u64>,
 }
@@ -1951,13 +2064,13 @@ fn read<'a>(d: &'a [u8], outputs: u64, env: &Env, non_leaf: usize, used: &mut [b
                 let res = (0..n).map(|_| r.index(resources.len())).collect::<Decoded<Vec<_>>>()?;
                 res.iter().for_each(|&i| r_used[i] = true);
                 let params = r.bytes()?;
-                let _memory_limit = r.num()?;
+                let memory_limit = r.num()?;
                 let num_inputs = usize::try_from(r.num()?).unwrap_or(usize::MAX);
                 let output_sizes = r.nums()?;
                 if output_sizes.is_empty() {
                     return invalid("an application without outputs");
                 }
-                Insn::Apply(Apply { module, resources: res, params, num_inputs, output_sizes })
+                Insn::Apply(Apply { module, resources: res, params, memory_limit, num_inputs, output_sizes })
             }
             CONCAT => Insn::Concat(r.index(depth + 1)?),
             PACK => Insn::Pack(r.index(depth + 1)?),
@@ -2167,16 +2280,11 @@ fn run(p: Program, env: &Env, contents: &Contents) -> Decoded<Vec<Vec<u8>>> {
 
 /// The outputs of application `a` of module block `module`.
 fn apply(env: &Env, module: usize, a: &Apply, inputs: &[&[u8]], resources: &[Resource]) -> Decoded<Vec<Vec<u8>>> {
-    let w = &env.modules[module];
-    let name = native_name(w).ok_or_else(|| Failure::Resource("Wasm modules are not supported yet".into()))?;
-    let native = env
-        .natives
-        .iter()
-        .find(|n| n.module().to_string() == name)
-        .ok_or_else(|| Failure::Resource(format!("no native implementation of {name}")))?;
-    let outputs = native.apply(a.params, resources, inputs, &a.output_sizes)?;
+    let loaded = env.loaded[module].get_or_init(|| env.runner.load(&env.modules[module]));
+    let loaded = loaded.as_ref().map_err(Failure::clone)?;
+    let outputs = loaded.apply(a.params, resources, inputs, &a.output_sizes, a.memory_limit)?;
     if outputs.len() != a.output_sizes.len() || outputs.iter().zip(&a.output_sizes).any(|(o, &n)| o.len() as u64 != n) {
-        return invalid(format!("{name}: outputs of other sizes than declared"));
+        return invalid(format!("module block {module}: outputs of other sizes than declared"));
     }
     Ok(outputs)
 }
@@ -2193,43 +2301,34 @@ mod tests {
 
     pub(super) const REV: Module = Module { name: "rev", version: 1 };
 
-    /// `rev` reverses the concatenation of its inputs, with parameters 1, 2, 3.
-    struct Rev;
-
-    impl NativeModule for Rev {
-        fn module(&self) -> Module {
-            REV
-        }
-
-        fn apply(&self, params: &[u8], resources: &[Resource], inputs: &[&[u8]], _: &[u64]) -> Decoded<Vec<Vec<u8>>> {
-            assert_eq!((params, resources.len()), (&[1, 2, 3][..], 0));
-            Ok(vec![inputs.concat().into_iter().rev().collect()])
-        }
-    }
-
     pub(super) const CUT: Module = Module { name: "cut", version: 1 };
 
-    /// `cut` cuts the concatenation of its inputs into outputs of the sizes declared.
-    struct Cut;
+    /// `rev` reverses the concatenation of its inputs, with parameters 1, 2, 3; `cut` cuts it
+    /// into outputs of the sizes declared.
+    struct RevCut;
 
-    impl NativeModule for Cut {
-        fn module(&self) -> Module {
-            CUT
+    impl crate::Modules for RevCut {
+        fn apply(&self, a: &crate::Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
+            assert_eq!((a.module, &a.params[..], a.resources.len()), (REV, &[1, 2, 3][..], 0));
+            Ok(inputs.concat().into_iter().rev().collect())
         }
 
-        fn apply(&self, _: &[u8], _: &[Resource], inputs: &[&[u8]], sizes: &[u64]) -> Decoded<Vec<Vec<u8>>> {
+        fn apply_shared(&self, s: &crate::Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+            if s.apply.module != CUT {
+                return Err(Error::new("not cut"));
+            }
             let (all, mut at) = (inputs.concat(), 0);
             let mut next = |n: u64| {
                 let a = at.min(all.len());
                 at += n as usize;
                 all[a..at.min(all.len())].to_vec()
             };
-            Ok(sizes.iter().map(|&n| next(n)).collect())
+            Ok(s.sizes.iter().map(|&n| next(n)).collect())
         }
     }
 
-    pub(super) fn natives() -> Vec<Box<dyn NativeModule>> {
-        vec![Box::new(Rev), Box::new(Cut)]
+    pub(super) fn natives() -> Natives<'static, impl crate::Modules + Sync> {
+        super::natives(&[REV, CUT], &RevCut)
     }
 
     /// Patches in archives: of a slice, and of an output of an application of several outputs
@@ -2320,7 +2419,7 @@ mod tests {
     /// before non-leaf blocks of `streams`.
     fn formula(data: &[u8], streams: &[&[u8]]) -> Vec<u8> {
         archive(|out| {
-            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&wasm(REV)], 3, 1).unwrap());
+            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap());
             formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[data], 3, 1).unwrap());
             streams.iter().for_each(|s| {
                 content_block(out, false, &[s], compressed(&mut CCtx::create(), &[s], 3, 1).unwrap().as_deref())
@@ -2438,18 +2537,18 @@ mod tests {
         for (d, ty) in [(vec![], LEAF_RAW), (b"hello".to_vec(), LEAF_RAW), (vec![7; 100_000], LEAF_ZSTD)] {
             let c = encode(&Formula::raw("a", d.clone()), None, Level::Zstd(3)).unwrap();
             assert_eq!(types(&c), [ty]);
-            assert_eq!(decode(&c, &[]).unwrap(), d);
+            assert_eq!(decode(&c, &NoModules).unwrap(), d);
         }
         let mut f = Formula::raw("a", b"0123456789".to_vec());
         f.root = Node::slice(0, 3, 4);
-        assert_eq!(decode(&encode(&f, None, Level::Zstd(3)).unwrap(), &[]).unwrap(), b"3456");
+        assert_eq!(decode(&encode(&f, None, Level::Zstd(3)).unwrap(), &NoModules).unwrap(), b"3456");
         // The leaf block's checksum is the output's: one given must be it.
         assert!(encode(&f, Some(checksum(b"3456")), Level::Zstd(3)).is_ok());
         assert!(encode(&f, Some(checksum(b"0123")), Level::Zstd(3)).is_err());
         // An empty formula is a formula block.
         let c = encode(&Formula::default(), None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [FORMULA]);
-        assert_eq!(decode(&c, &[]).unwrap(), b"");
+        assert_eq!(decode(&c, &NoModules).unwrap(), b"");
     }
 
     /// A leaf data block may go without a checksum; a non-leaf one may not. A reserved
@@ -2459,10 +2558,13 @@ mod tests {
         let d = vec![7; 1000];
         let c = compressed(&mut CCtx::create(), &[&d], 3, 1).unwrap().unwrap();
         let unchecked = &c[..c.len() - 8];
-        assert_eq!(decode(&archive(|out| block(out, LEAF_RAW & !4, &d)), &[]).unwrap(), d);
-        assert_eq!(decode(&archive(|out| block(out, LEAF_ZSTD & !4, unchecked)), &[]).unwrap(), d);
+        assert_eq!(decode(&archive(|out| block(out, LEAF_RAW & !4, &d)), &NoModules).unwrap(), d);
+        assert_eq!(decode(&archive(|out| block(out, LEAF_ZSTD & !4, unchecked)), &NoModules).unwrap(), d);
         for ty in [0x38, 0x3c, 0x4c] {
-            assert!(matches!(decode(&archive(|out| block(out, ty, &c)), &[]), Err(Failure::Unsupported(_))), "{ty:#x}");
+            assert!(
+                matches!(decode(&archive(|out| block(out, ty, &c)), &NoModules), Err(Failure::Unsupported(_))),
+                "{ty:#x}"
+            );
         }
     }
 
@@ -2471,7 +2573,7 @@ mod tests {
     /// 2 hexadecimal digits), else unsupported, even with an invalid block before it.
     #[test]
     fn block_framing() {
-        let decode = |blocks: &[u8]| decode(&archive(|out| out.extend_from_slice(blocks)), &[]);
+        let decode = |blocks: &[u8]| decode(&archive(|out| out.extend_from_slice(blocks)), &NoModules);
         assert_eq!(decode(b"\x20\x05hello\x00"), Ok(b"hello".to_vec()));
         assert_eq!(decode(b"\x20\x05hello\xaa"), Ok(b"hello".to_vec()));
         assert_eq!(decode(b"\x00\x02\x01\x02\x20\x05hello\x00"), Ok(b"hello".to_vec()));
@@ -2510,7 +2612,7 @@ mod tests {
             let mut b = enc(ty);
             b.resize(b.len() + (1 << (ty % 4)), 0);
             b.resize(b.len().next_multiple_of(2), 0);
-            let r = decode(&archive(|out| out.extend_from_slice(&b)), &[]);
+            let r = decode(&archive(|out| out.extend_from_slice(&b)), &NoModules);
             assert!(matches!(r, Err(Failure::Invalid(_))), "{ty:#x}: {r:?}");
         }
     }
@@ -2525,14 +2627,14 @@ mod tests {
             let types = |c: &[u8]| types(c).into_iter().map(|t| t & !3).collect::<Vec<_>>();
             let c = encode(&f, None, level).unwrap();
             assert_eq!(types(&c), [LEAF_RAW]);
-            assert_eq!(decode(&c, &[]).unwrap(), d);
+            assert_eq!(decode(&c, &NoModules).unwrap(), d);
             let b = f.push("b", d.clone());
             f.root = Node::concat([f.root.clone(), b]);
             // (the bytes of "b" would be kept stored too: they are those of "a")
             f.streams[1].data[0] = 0;
             let c = encode(&f, None, level).unwrap();
             assert_eq!(types(&c), [FORMULA, NON_LEAF_RAW, NON_LEAF_ZSTD]);
-            assert_eq!(decode(&c, &[]).unwrap(), [&d[..], &f.streams[1].data].concat());
+            assert_eq!(decode(&c, &NoModules).unwrap(), [&d[..], &f.streams[1].data].concat());
         }
     }
 
@@ -2542,7 +2644,7 @@ mod tests {
     fn mid_level() {
         let types_at = |d: &[u8], level| {
             let c = encode(&Formula::raw("a", d.to_vec()), None, level).unwrap();
-            assert_eq!(decode(&c, &[]).unwrap(), d);
+            assert_eq!(decode(&c, &NoModules).unwrap(), d);
             (types(&c)[0] & !3, c.len())
         };
         // shrunk at level 1, by less than 1/32 (but more than zstd keeps blocks raw below)
@@ -2578,7 +2680,7 @@ mod tests {
         for level in [Level::Mid, Level::Zstd(3)] {
             let one = Encoder::new(level).encode(&f, None).unwrap();
             assert_eq!(Encoder::with_threads(level, 4).encode(&f, None).unwrap(), one);
-            assert_eq!(decode(&one, &[]).unwrap(), d);
+            assert_eq!(decode(&one, &NoModules).unwrap(), d);
         }
     }
 
@@ -2590,7 +2692,7 @@ mod tests {
         let d = noise.repeat(2);
         let c = encode(&Formula::raw("a", d.clone()), None, Level::Zstd(3)).unwrap();
         assert!(c.len() < noise.len() + (1 << 20), "{}", c.len());
-        assert!(decode(&c, &[]).unwrap() == d);
+        assert!(decode(&c, &NoModules).unwrap() == d);
     }
 
     /// A compressed block decodes into as much memory as it declares (and a byte to tell a
@@ -2780,13 +2882,13 @@ mod tests {
     }
 
     #[test]
-    fn native_names() {
-        assert_eq!(native_name(&wasm(REV)), Some("rev@1"));
+    fn stand_in_names() {
+        assert_eq!(stand_in_name(&stand_in(REV)), Some("rev@1"));
         // after another custom section
-        let other = [&WASM_HEADER[..], &[0, 3, 0, 9, 9], &wasm(REV)[WASM_HEADER.len()..]].concat();
-        assert_eq!(native_name(&other), Some("rev@1"));
-        assert_eq!(native_name(&WASM_HEADER), None);
-        assert_eq!(native_name(&wasm(REV)[..20]), None);
+        let other = [&WASM_HEADER[..], &[0, 3, 0, 9, 9], &stand_in(REV)[WASM_HEADER.len()..]].concat();
+        assert_eq!(stand_in_name(&other), Some("rev@1"));
+        assert_eq!(stand_in_name(&WASM_HEADER), None);
+        assert_eq!(stand_in_name(&stand_in(REV)[..20]), None);
     }
 
     #[test]
@@ -2868,9 +2970,9 @@ mod tests {
         let of = |n: u64| {
             archive(|out| formula_block(out, n, &always_compressed(&mut CCtx::create(), &[&split], 3, 1).unwrap()))
         };
-        assert_eq!(decode(&of(2), &[]).unwrap(), b"abcd");
+        assert_eq!(decode(&of(2), &NoModules).unwrap(), b"abcd");
         for n in [0, 1, 3] {
-            assert!(matches!(decode(&of(n), &[]), Err(Failure::Invalid(_))), "{n} outputs");
+            assert!(matches!(decode(&of(n), &NoModules), Err(Failure::Invalid(_))), "{n} outputs");
         }
     }
 
@@ -2885,7 +2987,7 @@ mod tests {
             [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
         let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
         let c = archive(|out| {
-            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&wasm(REV)], 3, 1).unwrap());
+            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap());
             for d in [&first[..], &second] {
                 formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
             }
@@ -2904,7 +3006,7 @@ mod tests {
             [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
         let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
         let c = archive(|out| {
-            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&wasm(REV)], 3, 1).unwrap());
+            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap());
             for _ in 0..20 {
                 for d in [&first[..], &second] {
                     formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
@@ -2955,7 +3057,8 @@ mod tests {
         for n in 1..c.len() {
             assert!(matches!(decode(&c[..n], &natives()), Err(Failure::Invalid(_))), "{n} bytes");
         }
-        assert_eq!(decode(&c, &[]), resource("no native implementation of rev@1"));
+        assert_eq!(decode(&c, &NoModules), resource("no module runs here"));
+        assert_eq!(decode(&c, &super::natives(&[CUT], &RevCut)), resource("no native implementation of rev@1"));
         // the output checksum
         let bad = encode(&sample(), Some(checksum(SAMPLE) ^ 1), Level::Zstd(3)).unwrap();
         assert_eq!(decode(&bad, &natives()), invalid("output checksum mismatch"));
@@ -2974,7 +3077,7 @@ mod tests {
         assert_eq!(apply(2, &[5]).unwrap(), b"cbcba");
         assert_eq!(apply(3, &[5]), invalid("stack underflow"));
         assert_eq!(apply(2, &[]), invalid("an application without outputs"));
-        assert_eq!(apply(2, &[4]), invalid("rev@1: outputs of other sizes than declared"));
+        assert_eq!(apply(2, &[4]), invalid("module block 0: outputs of other sizes than declared"));
     }
 
     #[test]

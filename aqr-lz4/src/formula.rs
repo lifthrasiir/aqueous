@@ -6,15 +6,15 @@ use aqr_common::varint;
 use aqr_formula::{Formula, Module, Node};
 
 use crate::block::{self, Compressor, MAX_ACCELERATION};
-use crate::{Error, Result, corrupt, frame};
+use crate::frame;
+use crate::module::{BLOCK, FRAME};
+
+pub use crate::module::decode;
 
 pub const MODULE: Module = Module { name: "lz4-recons", version: 1 };
 
 /// Firefox's container: this, the data's length (u32, little endian), then a block.
 pub const MOZLZ4: [u8; 8] = *b"mozLz40\0";
-
-const BLOCK: u8 = 0;
-const FRAME: u8 = 1;
 
 /// Accelerations tried, in order: `LZ4_compress_default` (and the default level of frames)
 /// first, then those of `lz4 --fast` and other common choices.
@@ -88,26 +88,4 @@ fn lz4_frame(d: &[u8]) -> Option<Formula> {
         Node::slice(0, 0, (d.len() - fr.len) as u64),
     ]);
     Some(f)
-}
-
-/// The module: the LZ4 stream of `len` bytes that the compressor of `params` makes of the
-/// single input (see `FORMAT.md`).
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
-    let &[data] = inputs else { return Err(Error("one input wanted")) };
-    let mut p = 1;
-    let a = varint::get(params, &mut p).map_err(|_| corrupt())?;
-    if !(1..=MAX_ACCELERATION as u64).contains(&a) {
-        return Err(corrupt());
-    }
-    let out = match (params.first(), &params[p.min(params.len())..]) {
-        (Some(&BLOCK), []) => Compressor::compress_fast(data, a as u32)?,
-        (Some(&FRAME), &[flg, bd]) if frame::encodable(flg, bd) => {
-            frame::encode(data, flg, bd, a as u32, None)?.expect("nothing expected")
-        }
-        _ => return Err(corrupt()),
-    };
-    if out.len() as u64 != len {
-        return Err(Error("output of another length"));
-    }
-    Ok(out)
 }

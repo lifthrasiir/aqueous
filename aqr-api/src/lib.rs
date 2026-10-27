@@ -14,17 +14,28 @@
 //!
 //! A module defines its entry point with [`entry!`], and takes a list of byte sequences as one
 //! input with [`Packed`].
+//!
+//! The code of a module that also runs natively as a library takes the memories as values,
+//! [`Src`] and [`Dst`]: byte slices natively ([`Bytes`], [`BytesMut`]), and [`Mem`] and [`Out`] that the entry point makes
+//! within the module, reporting an error with [`finish`].
 
 #![cfg_attr(target_family = "wasm", no_std)]
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 #[cfg(not(target_family = "wasm"))]
 pub mod emu;
+mod io;
 mod packed;
 #[cfg(target_family = "wasm")]
 mod wasm;
 #[cfg(not(target_family = "wasm"))]
 use emu::MemId;
 
+pub use io::{Bytes, BytesMut, Dst, Mem, Out, Src, finish};
+#[cfg(feature = "alloc")]
+pub use io::{load, whole};
 pub use packed::Packed;
 
 mod sealed {

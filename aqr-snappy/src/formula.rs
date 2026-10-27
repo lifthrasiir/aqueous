@@ -8,7 +8,8 @@ use aqr_formula::{Formula, Module, Node};
 
 use crate::leveldb::{self, CODE_KEPT, CODE_RAW, CODE_SNAPPY, RAW, SNAPPY};
 use crate::snappy::{self, Hash};
-use crate::{Error, Result, corrupt};
+
+pub use crate::module::{decode, decode_table};
 
 /// A Snappy stream ([`stream`], [`decode`]).
 pub const MODULE: Module = Module { name: "snappy-recons", version: 2 };
@@ -79,25 +80,4 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     let inputs = vec![f.push("ldb/blocks", data), f.push("ldb/layout", layout), f.push("ldb/kept", kept)];
     f.root = Node::apply(TABLE_MODULE, vec![hash as u8], inputs, input.len() as u64);
     Some(f)
-}
-
-/// The module [`MODULE`]: a Snappy stream of `len` bytes (see `FORMAT.md`).
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
-    let (&[h], &[data]) = (params, inputs) else { return Err(corrupt()) };
-    let hash = Hash::from_u8(h).ok_or_else(corrupt)?;
-    of_len(snappy::compress(data, hash)?, len)
-}
-
-/// The module [`TABLE_MODULE`]: a LevelDB table of `len` bytes (see `FORMAT.md`).
-pub fn decode_table(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
-    let (&[h], &[data, layout, kept]) = (params, inputs) else { return Err(corrupt()) };
-    let hash = Hash::from_u8(h).ok_or_else(corrupt)?;
-    of_len(leveldb::build(data, layout, kept, hash)?, len)
-}
-
-fn of_len(out: Vec<u8>, len: u64) -> Result<Vec<u8>> {
-    if out.len() as u64 != len {
-        return Err(Error("output of another length"));
-    }
-    Ok(out)
 }

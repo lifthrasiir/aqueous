@@ -5,8 +5,17 @@ edition = "2024"
 description = "Runs the modules of entry formulas natively, and decompresses Aqueous archives with them"
 publish = false
 
+[features]
+default = ["wasm"]
+# Modules that are not known run as WebAssembly, by Wasmtime.
+wasm = ["dep:wasmtime", "dep:wasmparser"]
+
 [dependencies]
 aqr-formula = { path = "../aqr-formula" }
+aqr-modules = { path = "../aqr-modules" }
+sha2 = "0.10"
+wasmparser = { version = "0.245", optional = true }
+wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
 aqr-bundle = { path = "../aqr-bundle" }
 aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"] }
 aqr-flate = { path = "../aqr-flate" }
@@ -23,3 +32,13 @@ aqr-snappy = { path = "../aqr-snappy" }
 aqr-zip = { path = "../aqr-zip" }
 aqr-sqlite = { path = "../aqr-sqlite" }
 aqr-wrt = { path = "../aqr-wrt" }
+
+[dev-dependencies]
+wat = "1"
+
+# Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
+# directory.
+
+[[example]]
+name = "aqr-decompress-modules"
+path = "examples/modules.rs"

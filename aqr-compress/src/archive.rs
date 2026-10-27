@@ -31,7 +31,7 @@ use std::io::{self, Write};
 use std::ops::Range;
 use std::sync::Mutex;
 
-use aqr_decompress::{MODULES, Native};
+use aqr_decompress::Native;
 use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Placed, SegmentWriter, Tree};
 use aqr_formula::probe::{self, Held};
 use aqr_formula::{Formula, Kind, Module, Node};
@@ -248,7 +248,7 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     let contents: Vec<ContentAt> =
         (0..n).map(|c| at[c].or_else(|| at[r.files[c].same_as?]).expect("every content made")).collect();
     // (an encoder of the metadata block only)
-    let enc = aqr::Encoder::with_threads(opt.level, opt.threads);
+    let enc = aqr::Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
     let (end, _) = w.finish(&enc, tree, &contents).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.0))?;
     out.write_all(&end)?;
     r.len = w.len() + end.len();
@@ -520,6 +520,8 @@ fn make<S: Source + ?Sized>(
     let nopt = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
     let total = files.iter().map(|f| f.len).sum();
     let mut cx = Cx::of_len(total, &nopt);
+    // (the archive has a module block of each module once)
+    cx.enc.share_modules();
     cx.top_sets = Some(opt.set_bytes);
     // (the files known by where their copies are, and taken from the input; and what they
     // hold, a content told by where it is)
@@ -624,7 +626,7 @@ fn check(
     threads: usize,
 ) -> Vec<usize> {
     let c = w.standalone(b);
-    let natives = aqr::natives(&MODULES, m);
+    let natives = aqr_decompress::natives(m);
     // the leaves in the order of their blocks, and of each the files of its outputs
     let mut by_block: Vec<usize> = (0..b.leaf_at.len()).collect();
     by_block.sort_by_key(|&l| b.leaf_at[l]);

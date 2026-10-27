@@ -18,7 +18,7 @@ use aqr_common::varint;
 use super::tree::{self, EntryNode, FileParam, Tree};
 use super::{
     CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, Kind, MODULE, SWAP, always_compressed, block, footer,
-    footer_with, formula_block, wasm,
+    footer_with, formula_block,
 };
 use crate::{Error, Formula, Module, Node, Resource, Result};
 
@@ -223,7 +223,7 @@ impl SegmentWriter {
                 for &m in &uses[i].modules {
                     if !modules.contains(&m) {
                         let at = out.len();
-                        block(out, MODULE, &always_compressed(&mut enc.cctx(), &[&wasm(m)], level, enc.threads)?);
+                        block(out, MODULE, &enc.module_block(m, level)?);
                         b.layout.push((Placed::Module, out.len() - at));
                         b.added.push(at..out.len());
                         modules.push(m);

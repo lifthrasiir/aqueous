@@ -17,13 +17,18 @@ fn modules(f: &Formula) -> Vec<&'static str> {
     f.applies().iter().map(|a| a.module.name).collect()
 }
 
+/// An encoder of the modules aqr-decompress knows.
+fn encoder() -> aqr::Encoder {
+    aqr::Encoder::new(aqr::Level::Mid).with_modules(aqr_decompress::wasm_of)
+}
+
 /// Recompresses `d`, checking that the formula evaluates back to it, also through the
 /// archive.
 fn roundtrip(d: &[u8], opt: &Options) -> Formula {
     let f = recompress(d, opt);
     assert_eq!(f.len(), d.len() as u64);
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
-    let c = aqr::encode(&f, Some(aqr::checksum(d)), aqr::Level::Mid).unwrap();
+    let c = encoder().encode(&f, Some(aqr::checksum(d))).unwrap();
     assert!(decompress(&c, 1).unwrap() == d, "archive does not decompress to the input:\n{f}");
     f
 }
@@ -86,7 +91,7 @@ fn archive_files() {
     let (d, _) = pe();
     assert_eq!(decompress(&compress(&d, &opt), 1).unwrap(), d);
     // The output checksum is verified.
-    let c = aqr::encode(&recompress(&d, &opt), Some(aqr::checksum(&d) ^ 1), aqr::Level::Mid).unwrap();
+    let c = encoder().encode(&recompress(&d, &opt), Some(aqr::checksum(&d) ^ 1)).unwrap();
     assert_eq!(decompress(&c, 1), Err(aqr::Failure::Invalid("output checksum mismatch".into())));
 }
 
@@ -191,8 +196,8 @@ fn lz4_nested() {
     let flac = fixture("aqr-flac/tests/data/s16_f5.flac");
     let f = roundtrip(&mozlz4(&gzip(&flac)), &all());
     assert_eq!(modules(&f), [LZ4.name, FLATE.name, FLAC.name]);
-    // found in data, and archived smaller than raw
-    let d = [text(5000), mozlz4(&records(200_000)), text(5000)].concat();
+    // found in data, and archived smaller than raw, with the module
+    let d = [text(5000), mozlz4(&records(1_000_000)), text(5000)].concat();
     let f = roundtrip(&d, &Options::default());
     assert_eq!(modules(&f), [LZ4.name]);
 }

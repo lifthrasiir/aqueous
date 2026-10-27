@@ -5,9 +5,14 @@ edition = "2024"
 description = "LZ4 blocks and frames rebuilt bit for bit from their data, by liblz4's fast compressor reimplemented"
 publish = false
 
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
 [dependencies]
 aqr-common = { path = "../aqr-common" }
-aqr-formula = { path = "../aqr-formula" }
+aqr-formula = { path = "../aqr-formula", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh32"] }
 
 [dev-dependencies]

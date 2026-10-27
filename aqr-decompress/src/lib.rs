@@ -1,12 +1,20 @@
 //! The modules formulas apply, implemented natively by the recompressors (xform-design.md
 //! §5.7), and [`decompress`] of an Aqueous archive with them ([`aqr_formula::aqr`]).
 //!
-//! Formulas are made by aqr-compress; [`Native`] evaluates them.
+//! Formulas are made by aqr-compress; [`Native`] evaluates them. In archives, a module is its
+//! Wasm module, built from the same code by aqr-modules: [`Native`] runs those it knows (by
+//! their hashes, [`identify`]) natively, and any other as WebAssembly ([`Wasm`], with the
+//! feature `wasm`).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use aqr_exe::arch::{arm64, cil, x86};
-use aqr_formula::aqr::{self, Failure, NativeModule};
+use aqr_formula::Resource;
+use aqr_formula::aqr::{self, Failure, Loaded, Runner};
+use sha2::{Digest, Sha512_256};
+
+#[cfg(feature = "wasm")]
+mod wasm;
 use aqr_formula::{Apply, Error, Module, Modules, Result};
 
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
@@ -134,12 +142,60 @@ const RECONS: [(Module, Decode); 13] = [
 
 /// The file in archive `c`, an archive of a single file.
 pub fn decompress(c: &[u8], threads: usize) -> std::result::Result<Vec<u8>, Failure> {
-    aqr::decode(c, &Native { threads }.modules())
+    aqr::decode(c, &Native { threads })
 }
 
 /// What archive `c` holds: a single file, or a tree of them.
 pub fn decompress_value(c: &[u8], threads: usize) -> std::result::Result<aqr::Value, Failure> {
-    aqr::decode_value_with(c, &Native { threads }.modules(), threads)
+    aqr::decode_value_with(c, &Native { threads }, threads)
+}
+
+/// The module of Wasm module `wasm` among those of this crate, if aqr-modules built it.
+pub fn known(wasm: &[u8]) -> Option<Module> {
+    let hash: [u8; 32] = Sha512_256::digest(wasm).into();
+    match aqr_modules::KNOWN.iter().find(|k| k.sha512_256 == hash) {
+        Some(k) => MODULES.iter().copied().find(|m| m.name == k.name && m.version == k.version),
+        // (until every module is built, the stand-ins of those that are not)
+        None => {
+            let name = aqr::stand_in_name(wasm)?;
+            MODULES.iter().copied().find(|m| m.to_string() == name && built(*m).is_none())
+        }
+    }
+}
+
+fn built(m: Module) -> Option<&'static aqr_modules::Known> {
+    aqr_modules::KNOWN.iter().find(|k| k.name == m.name && k.version == m.version)
+}
+
+/// The name of the module of `wasm` ([`known`]), for [`aqr::Natives::identified_by`].
+pub fn identify(wasm: &[u8]) -> Option<String> {
+    known(wasm).map(|m| m.to_string())
+}
+
+/// The Wasm module of `m` that aqr-modules built, for [`aqr::Encoder::with_modules`].
+pub fn wasm_of(m: Module) -> Option<std::borrow::Cow<'static, [u8]>> {
+    match built(m) {
+        Some(k) => Some(std::borrow::Cow::Borrowed(k.wasm)),
+        // (until every module is built)
+        None => MODULES.contains(&m).then(|| aqr::stand_in(m).into()),
+    }
+}
+
+/// The modules of this crate run by `m` where an archive has those of aqr-modules ([`known`]).
+pub fn natives<M: Modules + Sync>(m: &M) -> aqr::Natives<'_, M> {
+    aqr::natives(&MODULES, m).identified_by(identify)
+}
+
+/// Runs every module as WebAssembly, as the spec defines it, whether known or not.
+#[cfg(feature = "wasm")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Wasm;
+
+#[cfg(feature = "wasm")]
+impl Runner for Wasm {
+    fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
+        wasm::load(wasm, Sha512_256::digest(wasm).into())
+    }
 }
 
 /// Runs every module of this crate natively. The output does not depend on `threads`.
@@ -154,12 +210,43 @@ impl Default for Native {
     }
 }
 
-impl Native {
-    /// Every module, as archives apply them ([`aqr_formula::aqr`]).
-    pub fn modules(&self) -> Vec<Box<dyn NativeModule + '_>> {
-        aqr::natives(&MODULES, self)
-    }
+/// A module run natively.
+struct NativeLoaded<'a> {
+    native: &'a Native,
+    module: Module,
+}
 
+impl Loaded for NativeLoaded<'_> {
+    fn apply(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &[&[u8]],
+        sizes: &[u64],
+        _: u64,
+    ) -> aqr::Decoded<Vec<Vec<u8>>> {
+        let &[len] = sizes else { return Err(Failure::Invalid(format!("{}: {} outputs", self.module, sizes.len()))) };
+        let resources: Vec<&[u8]> = resources.iter().map(|r| &r[..]).collect();
+        let out = self.native.run(self.module, params, &resources, inputs, len);
+        Ok(vec![out.map_err(|e| Failure::Invalid(e.0))?])
+    }
+}
+
+/// The modules of this crate natively where an archive has the Wasm module that aqr-modules
+/// built ([`known`]), and any other module as WebAssembly (with the feature `wasm`).
+impl Runner for Native {
+    fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn Loaded + '_>> {
+        if let Some(module) = known(wasm) {
+            return Ok(Box::new(NativeLoaded { native: self, module }));
+        }
+        #[cfg(feature = "wasm")]
+        return Wasm.load(wasm);
+        #[cfg(not(feature = "wasm"))]
+        Err(Failure::Resource("a module not known, which runs only as WebAssembly (the feature wasm)".into()))
+    }
+}
+
+impl Native {
     /// The output of `m` on `inputs` with `resources` (see [`Modules::apply`]).
     pub fn run(&self, m: Module, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         catch_unwind(AssertUnwindSafe(|| self.run_unchecked(m, params, resources, inputs, len)))

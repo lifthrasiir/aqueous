@@ -30,6 +30,7 @@ members = [
     "aqr-api/demo/xor",
     "aqr-api/demo/split",
     "aqr-ld",
+    "aqr-modules",
 ]
 # flate-zoo is a submodule with a workspace of its own; the benches are standalone, with the
 # checkouts of third_party/ (some of them workspaces of their own).

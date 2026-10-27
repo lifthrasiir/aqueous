@@ -1,0 +1,36 @@
+[package]
+name = "aqr-modules"
+version = "0.1.0"
+edition = "2024"
+description = "The modules of aqr-decompress as Wasm modules: built from the recompressors' code (build.sh), and known by their hashes"
+publish = false
+
+[features]
+# The modules (src/bin), built for wasm32-unknown-unknown by build.sh.
+wasm = []
+
+# Natively, the library is only the modules built; the recompressors are for the Wasm modules.
+[target.'cfg(target_family = "wasm")'.dependencies]
+aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
+aqr-lz4 = { path = "../aqr-lz4", default-features = false }
+aqr-snappy = { path = "../aqr-snappy", default-features = false }
+
+[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
+sha2 = "0.10"
+
+# A binary per module, named after it ('/' as '-').
+
+[[bin]]
+name = "lz4-recons"
+path = "src/bin/lz4-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "snappy-recons"
+path = "src/bin/snappy-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "leveldb-recons"
+path = "src/bin/leveldb-recons.rs"
+required-features = ["wasm"]

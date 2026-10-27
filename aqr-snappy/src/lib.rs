@@ -1,13 +1,16 @@
 //! Snappy recompression: a Snappy stream is rebuilt bit for bit from its data, by Snappy's
 //! compressor reimplemented (`snappy`), so that the data is stored instead. `formula` is the
-//! entry point (see aqr-formula); `FORMAT.md` specifies the module.
+//! entry point (see aqr-formula), with the feature `encode`; `module` is the code of the
+//! modules, which `FORMAT.md` specifies.
 //!
 //! LevelDB tables (`leveldb`), whose blocks Snappy compresses, are rebuilt whole: the contents
 //! of their blocks are stored, and the trailers and the footer derived.
 
 pub mod crc32c;
+#[cfg(feature = "encode")]
 pub mod formula;
 pub mod leveldb;
+pub mod module;
 pub mod snappy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

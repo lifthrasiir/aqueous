@@ -346,7 +346,7 @@ impl Cx {
     /// A context of data of `n` bytes.
     fn of_len(n: usize, opt: &Options) -> Cx {
         let inflate = opt.expansion.saturating_mul(n as u64).saturating_add(EXPANSION_SLACK);
-        let mut enc = Encoder::with_threads(opt.level, opt.threads);
+        let mut enc = Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
         if opt.shared_resources {
             enc.share_resources();
         }
@@ -475,7 +475,7 @@ fn finish(
             hits: Default::default(),
             files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
         };
-        aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m)).is_ok_and(|out| out == d)
+        aqr::decode(c, &aqr_decompress::natives(&m)).is_ok_and(|out| out == d)
     };
     match c {
         Ok(c) if !opt.verify || decodes(&c) => (c, f),
@@ -931,11 +931,15 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         .collect();
     cx.ready.borrow_mut().extend(by_at.into_values().flatten());
     let (pre, held, words, coded_held) = (cx.pre.clone(), cx.held.clone(), cx.words.clone(), cx.coded_held.clone());
+    let shares_modules = cx.enc.shares_modules();
     let once = cx.once.clone();
     let made = aqr_common::pool::par_map(later.len(), opt.threads, |i| {
         let (_, n, nest) = &later[i];
         let d = data(n);
         let mut own = Cx::of_len(d.len(), opt);
+        if shares_modules {
+            own.enc.share_modules();
+        }
         own.pre = pre.clone();
         own.held = held.clone();
         own.share_words(words.clone());
@@ -1517,7 +1521,7 @@ mod tests {
                 hits: Default::default(),
                 files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
             };
-            let out = aqr::decode(c, &aqr::natives(&aqr_decompress::MODULES, &m));
+            let out = aqr::decode(c, &aqr_decompress::natives(&m));
             (out, m.hits.into_inner().unwrap())
         };
         let other = compress(&d[..d.len() - 1], &Options { verify: false, ..opt.clone() });
@@ -1529,7 +1533,7 @@ mod tests {
                 hits: Default::default(),
                 files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
             };
-            aqr::decode(&other, &aqr::natives(&aqr_decompress::MODULES, &m)).unwrap();
+            aqr::decode(&other, &aqr_decompress::natives(&m)).unwrap();
             (m.memo.into_inner().unwrap(), m.hits.into_inner().unwrap())
         };
         assert_eq!(hits, 0);

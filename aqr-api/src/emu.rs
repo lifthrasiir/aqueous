@@ -272,11 +272,13 @@ pub(crate) mod sys {
 
     pub fn heartbeat() {}
 
+    /// Also outside [`apply`](super::apply), where the code of a module runs as a library.
     pub fn log(msg: &[u8]) {
         eprintln!("aqr_log: {}", String::from_utf8_lossy(msg));
-        with(|h| {
-            h.last_log = Some(msg.to_vec());
-            Ok(())
+        super::HOST.with_borrow_mut(|h| {
+            if let Some(h) = h {
+                h.last_log = Some(msg.to_vec());
+            }
         })
     }
 

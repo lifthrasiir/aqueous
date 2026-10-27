@@ -482,13 +482,12 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
     let native = Native { threads: a.opt.threads };
-    let modules = native.modules();
-    let mut archive = aqr::open(&c, &modules).map_err(|e| err(&e))?;
+    let mut archive = aqr::open(&c, &native).map_err(|e| err(&e))?;
     archive.set_budget(DECODE_BUDGET);
     match archive.tree() {
         None => {
             drop(archive);
-            let d = aqr::decode_value_with(&c, &modules, a.opt.threads).map_err(|e| err(&e))?;
+            let d = aqr::decode_value_with(&c, &native, a.opt.threads).map_err(|e| err(&e))?;
             let Value::File(d) = d else { unreachable!("an archive of a single file") };
             write_new(out, &d, a.force)?;
             if !a.quiet {
