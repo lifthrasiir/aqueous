@@ -71,7 +71,7 @@
   - 허용 목록: 메모리(`mmap`, `munmap`, `mprotect`, `madvise`, `mremap`, `brk`), 동기화(`futex`, `sched_yield`), `CLONE_THREAD`가 있는 `clone`, 시그널(wasmtime의 트랩 처리용), 시간, `getrandom`, 자기 프로세스로의 `tgkill`, `PR_SET_NAME`만 허용하는 `prctl`, 읽기만 허용하는 `prlimit64`, fd 3(arena 소켓)에서만 허용하는 `recvmsg`, 그리고 이미 열린 fd에 대한 `read`·`write`·`fstat`·`close`.
   - `clone3`는 인자가 구조체라 필터링할 수 없으므로 `ENOSYS`를 돌려줘 C 라이브러리가 `clone`으로 폴백하게 한다.
   - 그 밖의 호출은 `EPERM`을 돌려주고, 아키텍처가 다르거나 x32 호출이면 프로세스를 죽인다.
-- **[확정]** arena는 memfd이다. 브로커가 크기를 정한 뒤 `F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL`로 봉인한다. 워커에는 fd 3의 socketpair로 `SCM_RIGHTS`를 써서 보낸다. 워커는 seccomp 때문에 어차피 `ftruncate`를 부를 수 없다.
+- **[확정]** arena는 memfd이다. 브로커가 크기를 정한 뒤 `F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_SEAL`로 봉인한다. 워커에는 fd 3의 socketpair로 `SCM_RIGHTS`를 써서 보낸다. 워커는 seccomp 때문에 어차피 `ftruncate`를 부를 수 없다. Linux(aarch64, Lima)에서 `tests/wasm.rs`가 arena로 통과했다. 필터에서 `recvmsg`를 빼면 워커가 arena를 받지 못해 실패하는 것도 확인했다.
 - **[잠정]** OS 수준의 메모리 한도는 아직 없다. 워커 안의 `ResourceLimiter`는 그대로 동작한다. 따라서 남는 위험은 탈취된 경우의 메모리 고갈(DoS)이다.
   > rlimit(`RLIMIT_DATA`)은 스레드 스택과 wasmtime이 실제로 쓰는 부분까지 세므로 여유분을 정하기 어렵다. cgroup v2의 `memory.max`가 맞지만, delegation이 늘 되어 있지는 않다.
 - **[제안]** 심층 방어로 user/pid/net/mount 네임스페이스나 Landlock을 더할 수 있다. 비특권 user ns는 배포판에 따라 막혀 있으므로(Ubuntu 24.04+), 없는 환경에서도 seccomp만으로 동작해야 한다.
