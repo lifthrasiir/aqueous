@@ -435,7 +435,10 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 > - WAH는 결정성을 위해 개발되었다. 테스트 과정에서 GC까지 구현한 full-featured validating interpreter가 되었지만, 압축 포맷에는 GC가 필요 없다. 따라서 포맷용 프로파일은 그보다 훨씬 작게 잡을 수 있다.
 > - **SIMD128은 프로파일에 남긴다.** WAH JIT는 SIMD를 컴파일한다(WAH 8199b6b). 그 전에는 SIMD 명령이 하나라도 있는 모듈이 통째로 인터프리터에서 돌아서, aqr-flate를 `+simd128`로 빌드하면 프로파일 6 재구성이 27배 느려졌다. 지금은 `+simd128` 빌드도 SIMD 없는 빌드와 같은 속도로 돈다(§5.7).
 >   - 잰 두 모듈(aqr-flate, aqr-jpeg)은 `+simd128`로 빌드해도 WAH JIT와 Cranelift 어느 쪽에서도 빨라지지 않았다. 둘 다 SIMD 인트린식이 없어서 컴파일러의 자동 벡터화에만 기대기 때문이다.
->   - 네이티브에서 NEON을 쓰는 aqr-flac의 LMS 단은 SIMD가 들어가야 제 속도가 날 첫 후보이다. 그 경로는 `std::arch::aarch64` 인트린식이라 wasm32에서는 스칼라 경로로 빌드된다. 재려면 simd128 인트린식 경로가 먼저 있어야 한다.
+>   - aqr-raw의 LMS 단(aqr-flac과 PCM)은 네이티브에서 NEON을 쓴다. wasm32에서는 스칼라 경로였고, 그래서 FLAC의 Wasm 해제가 네이티브보다 12배 느렸다. simd128 경로를 두자 63 MB FLAC가 2.25 s에서 0.63 s, PCM 17 MB가 0.28 s에서 0.12 s가 되었다(wasmtime, M4, 출력은 네이티브와 같다).
+>     - 내적은 `i32x4.dot_i16x8_s`로 한다. 합이 NEON의 곱셈-누적과 같이 2^32로 감기므로 예측값이 같다.
+>     - simd128은 그 함수들에만 `target_feature`로 켠다. 모듈 전체를 `+simd128`로 빌드해 보았지만 sqlite, zip, jpeg, gzip, FLAC, PCM 어느 것도 잡음(±5%) 밖으로 달라지지 않았고, 모듈 합계만 0.3% 커졌다.
+>   - 해제 쪽에서 NEON에만 기대던 것은 이것뿐이다. aqr-png와 aqr-raw의 `pixel::neon`은 인코더의 행 창에만 쓰인다.
 > - **relaxed SIMD는 뺀다.** deterministic profile에서는 결과가 정해지지만, 같은 일을 하는 non-relaxed 명령이 있으므로 얻는 것이 없다. 반면 명령마다 "결정적으로는 어떻게 동작하는가"를 따로 알아야 해서 헷갈리고, deterministic profile을 잘못 구현한 엔진에서 결과가 갈릴 여지가 생긴다.
 > - 작업 메모리에서 memory64를 빼는 이유는 성능이다. wasm32에서는 가드 페이지 덕에 경계 검사가 사실상 공짜다.
 > - IEEE 754 기본 연산(사칙, `sqrt`, 변환, 반올림)은 결정적이다. 그러나 libm은 플랫폼마다 마지막 ulp가 다를 수 있다. 게다가 네이티브 빌드는 시스템 libm을, wasm32 빌드는 모듈에 컴파일된 libm을 쓰므로 네이티브 치환의 동치(§5.7)가 깨진다. aqr-jpeg의 DC 예측 가중치가 `cos()`를 쓰고 있었고, 같은 값의 상수 표로 바꿨다.
@@ -873,7 +876,7 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 4. **성능.** aqr-flate와 aqr-jpeg로 측정했다(§5.7). 레퍼런스 디코더는 표준 모듈의 네이티브 치환을 기본으로 하고, 그 밖의 모듈은 JIT, JIT가 없으면 인터프리터로 돌린다. 남은 것은 다음과 같다.
    - fork-join(과 채널)이 최소 요구인지 최적화인지(§5.5). 측정은 모두 1스레드였다.
    - 명세 ABI(memory64 I/O 메모리) 그대로 만든 모듈의 측정. WAH JIT는 memory64를 컴파일한다(WAH 494de0d). 그러나 memory64 접근은 가드 페이지를 켜도 늘 경계 검사를 한다. I/O 메모리는 주로 `memory.copy`로 접근하므로 비용은 작을 것으로 보지만, §5.7의 측정은 단일 wasm32 메모리로 감싼 모듈의 것이라 아직 확인하지 못했다.
-   - SIMD가 이득인 모듈의 측정. WAH JIT는 SIMD를 컴파일하지만(§5.1), aqr-flac의 LMS 단은 NEON 인트린식뿐이라 wasm32용 simd128 경로가 먼저 있어야 잴 수 있다.
+   - SIMD가 이득인 모듈의 측정. wasmtime에서는 aqr-raw의 LMS 단이 simd128 경로로 3.6배 빨라졌다(§5.1). WAH JIT에서는 아직 재지 않았다.
    - 나머지 재압축기(png, mp3, flac, psd, pdf, sqlite, obj, git)의 wasm32 실측. 이들의 판단은 네이티브 프로파일과 두 모듈의 배율에서 미루어 본 것이다.
    - 부동소수점이 많은 모듈(psd의 합성 렌더링, obj)에서 NaN 정규화가 드는 비용. 잰 두 모듈은 거의 정수 연산뿐이다.
    - 네이티브 구현을 같은 소스 빌드로 얻을지, 규범 wasm의 AOT 컴파일로 얻을지. 같은 소스 빌드라면 동치를 어떻게 시험할지(말뭉치에 대한 차등 시험, 퍼징).
