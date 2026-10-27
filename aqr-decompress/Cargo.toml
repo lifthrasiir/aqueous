@@ -6,9 +6,11 @@ description = "Runs the modules of entry formulas natively, and decompresses Aqu
 publish = false
 
 [features]
-default = ["wasm"]
+default = ["wasm", "sandbox"]
 # Modules that are not known run as WebAssembly, by Wasmtime.
 wasm = ["dep:wasmtime", "dep:wasmparser"]
+# ... or so in worker processes locked down by the system (`sandbox`).
+sandbox = ["wasm", "dep:windows-sys"]
 
 [dependencies]
 aqr-common = { path = "../aqr-common" }
@@ -37,11 +39,27 @@ aqr-wrt = { path = "../aqr-wrt" }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }
+
 [dev-dependencies]
 wat = "1"
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target
 # directory.
+
+# A worker of the sandbox, for the tests and for hosts of no worker of their own.
+[[bin]]
+name = "aqr-decompress-worker"
+path = "src/bin/worker.rs"
+required-features = ["sandbox"]
 
 [[example]]
 name = "aqr-decompress-modules"

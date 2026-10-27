@@ -4,7 +4,8 @@
 //! Formulas are made by aqr-compress; [`Native`] evaluates them. In archives, a module is its
 //! Wasm module, built from the same code by aqr-modules: [`Native`] runs those it knows (by
 //! their hashes, [`identify`]) natively, and any other as WebAssembly ([`Wasm`], with the
-//! feature `wasm`).
+//! feature `wasm`), or so in a worker process locked down by the system ([`sandbox`], with the
+//! feature `sandbox`).
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -16,6 +17,8 @@ use sha2::{Digest, Sha512_256};
 mod cow;
 #[cfg(feature = "wasm")]
 mod exec;
+#[cfg(feature = "sandbox")]
+pub mod sandbox;
 #[cfg(feature = "wasm")]
 mod wasm;
 use aqr_formula::{Apply, Error, Module, Modules, Result};

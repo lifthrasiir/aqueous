@@ -59,6 +59,15 @@ static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
     Engine::new(&c).expect("the configuration of Wasmtime")
 });
 
+/// The engine made, and a module compiled: what Wasmtime makes or loads once a process (its
+/// threads of compilation), made before a worker of the sandbox is locked down.
+#[cfg(feature = "sandbox")]
+pub fn warm_up() {
+    // a module of a function of no parameters and results, doing nothing
+    const MODULE: &[u8] = b"\0asm\x01\0\0\0\x01\x04\x01\x60\0\0\x03\x02\x01\0\x0a\x04\x01\x02\0\x0b";
+    Module::new(&ENGINE, MODULE).expect("a module of a function compiled");
+}
+
 /// The modules compiled, by their hashes, kept for the process.
 static COMPILED: LazyLock<Mutex<HashMap<[u8; 32], Shared>>> = LazyLock::new(Default::default);
 

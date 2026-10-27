@@ -1,9 +1,27 @@
 //! The modules as WebAssembly: those aqr-modules built, run natively and by Wasmtime alike, and
-//! the profile and the host functions of the spec.
+//! the profile and the host functions of the spec. Every module run by Wasmtime runs in the
+//! sandbox too (with the feature `sandbox`), and gives the same, failures included.
 
 use aqr_decompress::{MODULES, Native, Wasm, known, wasm_of};
 use aqr_formula::aqr::{self, Encoder, Failure, Level, Loaded, Runner};
 use aqr_formula::{Formula, Module, Node};
+
+/// The workers every module of these tests runs in too.
+#[cfg(feature = "sandbox")]
+static SANDBOX: std::sync::LazyLock<aqr_decompress::sandbox::Sandbox> = std::sync::LazyLock::new(|| {
+    aqr_decompress::sandbox::Sandbox::new(env!("CARGO_BIN_EXE_aqr-decompress-worker"), [""; 0])
+});
+
+/// Archive `c` decoded as WebAssembly ([`Wasm`]), and the same in the sandbox.
+fn decode_wasm(c: &[u8]) -> aqr::Decoded<Vec<u8>> {
+    let w = aqr::decode(c, &Wasm);
+    #[cfg(feature = "sandbox")]
+    {
+        let s = aqr::decode(c, &*SANDBOX);
+        assert!(s == w, "in the sandbox: {:?}, in this process: {:?}", s.err(), w.as_ref().err());
+    }
+    w
+}
 
 fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(format!("{}/../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
@@ -75,7 +93,7 @@ fn pipelines_fail_alike() {
                 let i = s.len() * at / 4;
                 s[i] ^= 0x10;
                 let c = enc.encode(&bad, None).unwrap();
-                let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+                let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
                 assert_eq!(n.is_ok(), w.is_ok(), "{name} stream {k} at {i}: {n:?} {w:?}");
                 if let (Ok(n), Ok(w)) = (n, w) {
                     assert!(n == w, "{name} stream {k} at {i}");
@@ -106,7 +124,7 @@ fn psd_as_wasm() {
         let f = aqr_psd::formula::encode(file, 1).expect("a formula");
         let c = archive.encode(&f, None).unwrap();
         assert!(aqr::decode(&c, &Native::default()).unwrap() == *file, "{k}");
-        let w = aqr::decode(&c, &Wasm);
+        let w = decode_wasm(&c);
         assert!(w.as_ref().is_ok_and(|w| w == file), "{k}: {:?}", w.err());
     }
 }
@@ -143,7 +161,7 @@ fn same_as_wasm() {
     for (name, f, d) in formulas {
         let c = enc.encode(&f, None).unwrap();
         assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{name}");
-        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{name}");
+        assert!(decode_wasm(&c).unwrap() == d, "{name}");
         // damaged inputs fail alike (or give the same)
         let Node::Apply(a) = &f.root else { continue };
         let mut bad = f.clone();
@@ -152,7 +170,7 @@ fn same_as_wasm() {
             let n = s.len() / 2;
             s[n] ^= 1;
             let c = enc.encode(&bad, None).unwrap();
-            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
             assert_eq!(n.is_ok(), w.is_ok(), "{name} ({}): {n:?} {w:?}", a.module);
             if let (Ok(n), Ok(w)) = (n, w) {
                 assert!(n == w, "{name}");
@@ -166,12 +184,24 @@ fn module(wat: &str) -> Vec<u8> {
     wat::parse_str(wat).unwrap()
 }
 
+/// `wat` loaded ([`Wasm`]), and loaded alike in the sandbox.
 fn load(wat: &str) -> aqr::Decoded<Box<dyn Loaded>> {
-    Wasm.load(&module(wat))
+    let m = module(wat);
+    let l = Wasm.load(&m);
+    #[cfg(feature = "sandbox")]
+    assert_eq!(SANDBOX.load(&m).map(drop), l.as_ref().map(drop).map_err(Clone::clone), "in the sandbox");
+    l
 }
 
+/// `wat` applied ([`Wasm`]), and applied alike in the sandbox.
 fn apply(wat: &str, inputs: &[&[u8]], sizes: &[u64], limit: u64) -> aqr::Decoded<Vec<Vec<u8>>> {
-    load(wat)?.apply(b"pp", &[], inputs, sizes, limit)
+    let r = load(wat)?.apply(b"pp", &[], inputs, sizes, limit);
+    #[cfg(feature = "sandbox")]
+    {
+        let s = SANDBOX.load(&module(wat))?.apply(b"pp", &[], inputs, sizes, limit);
+        assert!(s == r, "in the sandbox: {:?}, in this process: {:?}", s.as_ref().err(), r.as_ref().err());
+    }
+    r
 }
 
 const MEMORIES: &str = r#"
@@ -331,6 +361,11 @@ fn unknown_module_runs() {
         .with_modules(|m| (m == REV).then(|| aqr::Wasm { bytes: WASM.get().unwrap().into(), block: None }));
     let c = enc.encode(&f, None).unwrap();
     assert_eq!(aqr::decode(&c, &Native::default()).unwrap(), b"olleh");
+    #[cfg(feature = "sandbox")]
+    {
+        let sandboxed = aqr_decompress::sandbox::Sandboxed { native: Native::default(), sandbox: &SANDBOX };
+        assert_eq!(aqr::decode(&c, &sandboxed).unwrap(), b"olleh");
+    }
     assert!(Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).is_err());
 }
 
