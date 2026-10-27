@@ -8,6 +8,7 @@
 
 use crate::audio::bits::{BitReader, FastBits};
 use crate::audio::rans::{DecLocal, EncLocal};
+use aqr_common::wire::Wire;
 
 /// LMS taps.
 pub const TAPS: usize = 32;
@@ -381,6 +382,17 @@ fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
 pub struct Scale {
     avg: u32,
     pend: u32,
+}
+
+impl aqr_common::wire::Wire for Scale {
+    fn put(&self, out: &mut Vec<u8>) {
+        (self.avg, self.pend).put(out)
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        let (avg, pend) = Wire::get(b)?;
+        Some(Scale { avg, pend })
+    }
 }
 
 impl Default for Scale {

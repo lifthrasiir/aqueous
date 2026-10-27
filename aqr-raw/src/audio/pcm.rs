@@ -540,14 +540,14 @@ fn synth(f: &Frame, fmt: &Format, ch: &mut [Vec<i64>], o: &mut [u8]) {
     }
 }
 
-/// The first stage of [`decode_threads`]: channel assignments and subframe parameters,
-/// and where each frame's samples go.
-fn front<'a>(
-    e: &mut par::Front<'a, impl par::Pass<'a, Vec<&'a mut [u8]>>, Vec<&'a mut [u8]>>,
+/// The first stage of [`decode_threads`]: channel assignments and subframe parameters, and
+/// where each frame's samples go (`place` given the batch's own data and the frame's bytes).
+fn front<'a, X: Default>(
+    e: &mut par::Front<'a, impl par::Pass<'a, X>, X>,
     c: &'a Coded,
     fmt: Format,
     nframes: usize,
-    mut rest: &'a mut [u8],
+    mut place: impl FnMut(&mut X, usize),
 ) -> Result<(), par::Stop<'a>> {
     let mut hdr = Rd::new(&c.streams[S_HDR]);
     let mut sub = Rd::new(&c.streams[S_SUB]);
@@ -562,9 +562,7 @@ fn front<'a>(
             e.unused(f);
             return Err(err.into());
         }
-        let (o, r) = std::mem::take(&mut rest).split_at_mut(n * frame_bytes);
-        rest = r;
-        e.x().push(o);
+        place(e.x(), n * frame_bytes);
         e.push(Item::Frame(f), n * fmt.channels)?;
     }
     Ok(())
@@ -605,7 +603,10 @@ pub fn decode_threads(
     if !len.is_multiple_of(frame_bytes) {
         return Err(Error("length"));
     }
+    #[cfg(target_family = "wasm")]
+    return decode_apart(c, fmt, t, len, out, threads);
     // three stages and a pool of one at least, on workers of the pool
+    #[allow(unreachable_code)]
     let workers = aqr_common::pool::reserve((threads - 1).max(4));
     if workers.len() < 4 {
         return decode(c, fmt, t, len, out);
@@ -631,7 +632,13 @@ pub fn decode_threads(
         }
         sc.spawn(move || {
             if let Some(mut e) = par::Front::new(par::Chans { recycle: &rrx, tx: &tx1 }, Vec::clear) {
-                let r = front(&mut e, c, fmt, nframes, data);
+                let mut rest = data;
+                let place = |x: &mut Vec<_>, n| {
+                    let (o, r) = std::mem::take(&mut rest).split_at_mut(n);
+                    rest = r;
+                    x.push(o);
+                };
+                let r = front(&mut e, c, fmt, nframes, place);
                 e.finish(r);
             }
         });
@@ -666,4 +673,48 @@ pub fn decode_threads(
         }
         Ok(())
     })
+}
+
+/// [`decode_threads`] in WebAssembly: the pipeline of tasks ([`par::apart`]), whose workers
+/// reconstruct the samples of batches, which are appended here in order.
+#[cfg(target_family = "wasm")]
+fn decode_apart(
+    c: &Coded,
+    fmt: Format,
+    t: &Tables,
+    len: usize,
+    out: &mut Vec<u8>,
+    threads: usize,
+) -> Result<(), Error> {
+    let frame_bytes = fmt.frame_bytes();
+    let nframes = len / frame_bytes;
+    out.reserve(len);
+    let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
+    let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
+    let work = |b: &DecBatch<'_, ()>| {
+        let mut ch: Vec<Vec<i64>> = vec![Vec::with_capacity(BLOCK); fmt.channels];
+        let mut bytes = Vec::new();
+        for it in &b.items {
+            match it {
+                Item::Frame(f) => {
+                    let at = bytes.len();
+                    bytes.resize(at + f.block_size * frame_bytes, 0);
+                    synth(f, &fmt, &mut ch, &mut bytes[at..]);
+                }
+                Item::FrameErr(_) | Item::Err(_) => return (bytes, true),
+                Item::Junk(_) => {}
+            }
+        }
+        (bytes, false)
+    };
+    let take = |(bytes, failed): (Vec<u8>, bool), _| match failed {
+        // (an error's message stays in its task)
+        true => Err(Error("residuals")),
+        false => {
+            out.extend_from_slice(&bytes);
+            Ok(())
+        }
+    };
+    let front = |e: &mut _| front(e, c, fmt, nframes, |_: &mut (), _| {});
+    par::apart::run(threads.saturating_sub(3), front, rd, work, take, Error("pipeline"))
 }

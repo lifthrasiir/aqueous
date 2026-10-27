@@ -27,6 +27,64 @@ fn built_modules_known() {
     assert_eq!(known(b"\0asm\x01\0\0\0"), None);
 }
 
+/// A WAV file of 16-bit stereo, 600 000 frames of noisy tones.
+fn wav() -> Vec<u8> {
+    let n: u32 = 600_000;
+    let mut d = Vec::new();
+    d.extend_from_slice(b"RIFF");
+    d.extend_from_slice(&(36 + 4 * n).to_le_bytes());
+    d.extend_from_slice(b"WAVEfmt ");
+    d.extend_from_slice(&16u32.to_le_bytes());
+    d.extend_from_slice(&[1, 0, 2, 0]);
+    d.extend_from_slice(&44100u32.to_le_bytes());
+    d.extend_from_slice(&(44100u32 * 4).to_le_bytes());
+    d.extend_from_slice(&[4, 0, 16, 0]);
+    d.extend_from_slice(b"data");
+    d.extend_from_slice(&(4 * n).to_le_bytes());
+    let mut r = 1u32;
+    for i in 0..n {
+        for c in 0..2 {
+            r = r.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let x = ((i as f64 * (0.01 + 0.003 * c as f64)).sin() * 9000.0) as i32 + (r >> 26) as i32 - 32;
+            d.extend_from_slice(&(x as i16).to_le_bytes());
+        }
+    }
+    d
+}
+
+/// The pipelines of FLAC and PCM (tasks and channels as WebAssembly): every stream of their
+/// formulas damaged in turn fails alike natively and as WebAssembly, or gives the same, and
+/// never waits for ever.
+#[test]
+fn pipelines_fail_alike() {
+    let mut formulas = Vec::new();
+    for t in ["s16_junk.flac", "s32.flac"] {
+        let d = fixture(&format!("aqr-flac/tests/data/{t}"));
+        formulas.push((t, aqr_flac::formula::encode(&d, 1).unwrap()));
+    }
+    formulas.push(("pcm", aqr_raw::formula::encode(&wav(), 1).unwrap()));
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for (name, f) in formulas {
+        for k in 0..f.streams.len() {
+            for at in [1, 2, 3] {
+                let mut bad = f.clone();
+                let s = &mut bad.streams[k].data;
+                if s.is_empty() {
+                    continue;
+                }
+                let i = s.len() * at / 4;
+                s[i] ^= 0x10;
+                let c = enc.encode(&bad, None).unwrap();
+                let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+                assert_eq!(n.is_ok(), w.is_ok(), "{name} stream {k} at {i}: {n:?} {w:?}");
+                if let (Ok(n), Ok(w)) = (n, w) {
+                    assert!(n == w, "{name} stream {k} at {i}");
+                }
+            }
+        }
+    }
+}
+
 /// Formulas of the modules built, archived with them: the same natively and as WebAssembly.
 #[test]
 fn same_as_wasm() {
@@ -49,6 +107,12 @@ fn same_as_wasm() {
         let f = aqr_lz4::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         formulas.push((t.into(), f, d));
     }
+    // FLAC and PCM of more batches of their pipelines than tasks (a batch is 2^16 samples)
+    for t in ["s16_junk.flac", "s24_f8.flac", "c6.flac"] {
+        let d = fixture(&format!("aqr-flac/tests/data/{t}"));
+        formulas.push((t.into(), aqr_flac::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}")), d));
+    }
+    formulas.push(("pcm".into(), aqr_raw::formula::encode(&wav(), 1).expect("pcm"), wav()));
     let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
     for (name, f, d) in formulas {
         let c = enc.encode(&f, None).unwrap();

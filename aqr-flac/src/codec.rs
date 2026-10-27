@@ -372,8 +372,8 @@ fn reset_written(w: &mut Written) {
 }
 
 /// The first stage of [`decode_threads`]: frame headers and subframe parameters, junk.
-fn front<'a>(
-    e: &mut par::Front<'a, impl par::Pass<'a, Written>, Written>,
+fn front<'a, X: Default>(
+    e: &mut par::Front<'a, impl par::Pass<'a, X>, X>,
     c: &'a Coded,
     bps: u32,
 ) -> Result<(), par::Stop<'a>> {
@@ -412,7 +412,10 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
     if c.streams.len() != N_BYTE_STREAMS {
         return Err(Error("stream count"));
     }
+    #[cfg(target_family = "wasm")]
+    return decode_apart(c, t, total_len, out, threads);
     // three stages and a pool of one at least, on workers of the pool
+    #[allow(unreachable_code)]
     let workers = aqr_common::pool::reserve((threads - 1).max(4));
     if workers.len() < 4 {
         return decode(c, t, total_len, out);
@@ -523,4 +526,130 @@ pub fn count(input: &[u8], counts: &mut [Vec<u64>]) {
         p = e;
         rc.frame(&mut f, counts);
     }
+}
+
+/// An item of a batch as a worker of [`decode_apart`] wrote it.
+#[cfg(target_family = "wasm")]
+enum Piece<'a> {
+    Junk(Item<'a>),
+    /// A frame, up to this offset of the batch's bytes, with these bits of long codes.
+    Wrote(usize, u64),
+    /// A frame over [`AHEAD_BUDGET`], to write in order.
+    Again(Frame),
+    Err(Error),
+    FrameErr(Error),
+}
+
+#[cfg(target_family = "wasm")]
+impl aqr_common::wire::Wire for Piece<'_> {
+    fn put(&self, out: &mut Vec<u8>) {
+        match self {
+            Piece::Junk(j) => {
+                out.push(0);
+                j.put(out);
+            }
+            Piece::Wrote(end, used) => {
+                out.push(1);
+                (*end, *used).put(out);
+            }
+            Piece::Again(f) => {
+                out.push(2);
+                f.put(out);
+            }
+            Piece::Err(e) => {
+                out.push(3);
+                e.put(out);
+            }
+            Piece::FrameErr(e) => {
+                out.push(4);
+                e.put(out);
+            }
+        }
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        use aqr_common::wire::Wire;
+        Some(match u8::get(b)? {
+            0 => Piece::Junk(Item::get(b)?),
+            1 => {
+                let (end, used) = Wire::get(b)?;
+                Piece::Wrote(end, used)
+            }
+            2 => Piece::Again(Frame::get(b)?),
+            3 => Piece::Err(Error::get(b)?),
+            4 => Piece::FrameErr(Error::get(b)?),
+            _ => return None,
+        })
+    }
+}
+
+/// [`decode_threads`] in WebAssembly: the pipeline of tasks ([`par::apart`]), whose workers
+/// write the frames of batches (escape checks, Rice coding, CRCs), which are appended here in
+/// order, with the checks of [`decode`].
+#[cfg(target_family = "wasm")]
+fn decode_apart<'a>(
+    c: &'a Coded,
+    t: &'a Tables,
+    total_len: usize,
+    out: &mut Vec<u8>,
+    threads: usize,
+) -> Result<(), Error> {
+    out.reserve(total_len);
+    out.extend_from_slice(&c.streams[S_PREFIX]);
+    let si = decode_start(c)?;
+    let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
+    let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
+    let work = |b: &DecBatch<'a, ()>| -> (Vec<u8>, Vec<Piece<'a>>) {
+        let (mut bytes, mut pieces) = (Vec::new(), Vec::new());
+        for it in &b.items {
+            pieces.push(match it {
+                Item::Junk(j) => Piece::Junk(Item::Junk(j)),
+                Item::Frame(f) => {
+                    if let Err(e) = check_escapes(f) {
+                        pieces.push(Piece::Err(e));
+                        break;
+                    }
+                    match flac::write_frame_bits(f, &mut bytes, AHEAD_BUDGET) {
+                        Some(left) => Piece::Wrote(bytes.len(), AHEAD_BUDGET - left),
+                        None => Piece::Again(f.clone()),
+                    }
+                }
+                Item::FrameErr(e) => Piece::FrameErr(Error(e.0)),
+                Item::Err(e) => Piece::Err(Error(e.0)),
+            });
+        }
+        (bytes, pieces)
+    };
+    let take = |(bytes, pieces): (Vec<u8>, Vec<Piece<'a>>), _| {
+        let mut at = 0;
+        for p in pieces {
+            let budget = (total_len.saturating_sub(out.len()) as u64).saturating_mul(8);
+            match p {
+                Piece::Junk(Item::Junk(j)) => out.extend_from_slice(j),
+                Piece::Junk(_) => unreachable!("junk"),
+                Piece::Wrote(end, used) => {
+                    if out.len() > total_len || used > budget {
+                        return Err(Error("too long"));
+                    }
+                    out.extend_from_slice(&bytes[at..end]);
+                    at = end;
+                }
+                Piece::Again(f) => {
+                    if out.len() > total_len || flac::write_frame_bits(&f, out, budget).is_none() {
+                        return Err(Error("too long"));
+                    }
+                }
+                Piece::FrameErr(e) => {
+                    if out.len() > total_len {
+                        return Err(Error("too long"));
+                    }
+                    return Err(e);
+                }
+                Piece::Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    };
+    let front = |e: &mut _| front(e, c, si.bps);
+    par::apart::run(threads.saturating_sub(3), front, rd, work, take, Error("pipeline"))
 }

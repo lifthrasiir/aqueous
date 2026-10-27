@@ -151,8 +151,8 @@ impl<X: Default> Default for DecBatch<'_, X> {
 pub trait Pass<'a, X> {
     /// A batch to fill, `None` if the pipeline is closed.
     fn next(&mut self) -> Option<DecBatch<'a, X>>;
-    /// Sends `b` down the pipeline; `Err` if it is closed.
-    fn send(&mut self, b: DecBatch<'a, X>) -> Result<(), ()>;
+    /// Sends `b` down the pipeline; whether it is not closed.
+    fn send(&mut self, b: DecBatch<'a, X>) -> bool;
 }
 
 /// Batches sent down a channel and coming back through `recycle`.
@@ -166,8 +166,8 @@ impl<'a, X> Pass<'a, X> for Chans<'_, 'a, X> {
         self.recycle.recv().ok()
     }
 
-    fn send(&mut self, b: DecBatch<'a, X>) -> Result<(), ()> {
-        self.tx.send(b).map_err(drop)
+    fn send(&mut self, b: DecBatch<'a, X>) -> bool {
+        self.tx.send(b).is_ok()
     }
 }
 
@@ -235,7 +235,9 @@ impl<'a, P: Pass<'a, X>, X: Default> Front<'a, P, X> {
         self.samples += samples;
         if self.samples >= BATCH_SAMPLES || self.cur.items.len() >= BATCH_ITEMS {
             let idx = self.cur.idx + 1;
-            self.pass.send(std::mem::take(&mut self.cur)).map_err(|_| Stop::Closed)?;
+            if !self.pass.send(std::mem::take(&mut self.cur)) {
+                return Err(Stop::Closed);
+            }
             self.cur = self.pass.next().ok_or(Stop::Closed)?;
             self.take(idx);
         }
@@ -318,5 +320,229 @@ pub fn lms_stage<'a, X>(rx: Receiver<DecBatch<'a, X>>, tx: SyncSender<DecBatch<'
         if tx.send(b).is_err() || last {
             break;
         }
+    }
+}
+
+/// The pipeline in WebAssembly, of tasks and channels (`aqr_api::task`, `aqr_api::chan`)
+/// rather than threads: the first stage, [`errors_batch`] and [`lms_batch`] each a task, and
+/// `workers` tasks working on the batches in turn (batch `k` on worker `k mod workers`), whose
+/// results the module takes in the same turn, so in order. The batches pass as bytes ([`Wire`]),
+/// and are not recycled.
+///
+/// A stage stops passing batches on after the last one (an error ends the stream), but reads
+/// what comes until its input is closed, so that no stage waits for ever for one that stopped;
+/// and every stage closes its outputs as it ends (a task closes only the channels it sent to).
+#[cfg(target_family = "wasm")]
+pub mod apart {
+    use super::*;
+    use aqr_api::chan::{self, Receiver, Sender};
+    use aqr_common::wire::Wire;
+    use std::sync::Mutex;
+
+    impl Wire for Error {
+        fn put(&self, _: &mut Vec<u8>) {}
+
+        fn get(_: &mut &[u8]) -> Option<Self> {
+            Some(Error("(in a task)"))
+        }
+    }
+
+    impl Wire for crate::audio::frame::Subframe {
+        fn put(&self, out: &mut Vec<u8>) {
+            [self.typ, self.wasted, self.bits, self.order, self.precision, self.shift as u8, self.method, self.porder]
+                .put(out);
+            (self.warm, self.coefs).put(out);
+            self.params.put(out);
+        }
+
+        fn get(b: &mut &[u8]) -> Option<Self> {
+            let [typ, wasted, bits, order, precision, shift, method, porder] = <[u8; 8]>::get(b)?;
+            let (warm, coefs) = Wire::get(b)?;
+            let params = Wire::get(b)?;
+            Some(Self { typ, wasted, bits, order, precision, shift: shift as i8, method, porder, warm, coefs, params })
+        }
+    }
+
+    impl Wire for Frame {
+        fn put(&self, out: &mut Vec<u8>) {
+            self.header.put(out);
+            (self.block_size, self.assign, self.channels, self.bps).put(out);
+            self.sub.put(out);
+            self.res.put(out);
+            self.verbatim.put(out);
+        }
+
+        fn get(b: &mut &[u8]) -> Option<Self> {
+            let header = Wire::get(b)?;
+            let (block_size, assign, channels, bps) = Wire::get(b)?;
+            Some(Frame {
+                header,
+                block_size,
+                assign,
+                channels,
+                bps,
+                sub: Wire::get(b)?,
+                res: Wire::get(b)?,
+                verbatim: Wire::get(b)?,
+            })
+        }
+    }
+
+    /// An item; the bytes of junk as where they are, in the data of the module, which every
+    /// task has at the same place (made before the tasks are spawned, and not written since).
+    impl Wire for Item<'_> {
+        fn put(&self, out: &mut Vec<u8>) {
+            match self {
+                Item::Frame(f) => {
+                    out.push(0);
+                    f.put(out);
+                }
+                Item::Junk(j) => {
+                    out.push(1);
+                    (j.as_ptr() as usize, j.len()).put(out);
+                }
+                Item::FrameErr(_) => out.push(2),
+                Item::Err(_) => out.push(3),
+            }
+        }
+
+        fn get(b: &mut &[u8]) -> Option<Self> {
+            Some(match u8::get(b)? {
+                0 => Item::Frame(Frame::get(b)?),
+                1 => {
+                    let (p, n) = <(usize, usize)>::get(b)?;
+                    // SAFETY: the junk of the data of the module, as `put` took it
+                    Item::Junk(unsafe { std::slice::from_raw_parts(p as *const u8, n) })
+                }
+                2 => Item::FrameErr(Error("(in a task)")),
+                3 => Item::Err(Error("(in a task)")),
+                _ => return None,
+            })
+        }
+    }
+
+    impl Wire for DecBatch<'_, ()> {
+        fn put(&self, out: &mut Vec<u8>) {
+            (self.idx, self.last).put(out);
+            self.items.put(out);
+            self.sc0.put(out);
+        }
+
+        fn get(b: &mut &[u8]) -> Option<Self> {
+            let (idx, last) = Wire::get(b)?;
+            Some(DecBatch { idx, last, items: Wire::get(b)?, sc0: Wire::get(b)?, x: () })
+        }
+    }
+
+    fn send<T: Wire>(tx: &Sender, v: &T) {
+        let mut m = Vec::new();
+        v.put(&mut m);
+        tx.send(&m);
+    }
+
+    fn recv<T: Wire>(rx: &Receiver) -> Option<T> {
+        let m = rx.recv()?;
+        let mut s = &m[..];
+        Some(T::get(&mut s).filter(|_| s.is_empty()).expect("a message of the pipeline"))
+    }
+
+    /// The first stage's batches, sent as they are filled.
+    pub struct Out(Sender);
+
+    impl<'a> Pass<'a, ()> for Out {
+        fn next(&mut self) -> Option<DecBatch<'a, ()>> {
+            Some(DecBatch::default())
+        }
+
+        fn send(&mut self, b: DecBatch<'a, ()>) -> bool {
+            send(&self.0, &b);
+            true
+        }
+    }
+
+    /// Runs the pipeline: `front` fills the batches, then they go through the error and LMS
+    /// stages (`rd`), then `work` makes of each a `W` on a worker, which `take` takes in order
+    /// (with whether the batch was the last) until it returns `Err` or the last one comes.
+    pub fn run<'a, 'r, W: Wire, E>(
+        workers: usize,
+        front: impl Fn(&mut Front<'a, Out, ()>) -> Result<(), Stop<'a>> + Sync,
+        rd: ResDecoder<'r>,
+        work: impl Fn(&DecBatch<'a, ()>) -> W + Sync,
+        mut take: impl FnMut(W, bool) -> Result<(), E>,
+        closed: E,
+    ) -> Result<(), E>
+    where
+        ResDecoder<'r>: Send,
+    {
+        let workers = workers.max(1);
+        let cap = 2;
+        let (c1, c2) = (chan::channel(cap), chan::channel(cap));
+        let c3: Vec<_> = (0..workers).map(|_| chan::channel(cap)).collect();
+        let c4: Vec<_> = (0..workers).map(|_| chan::channel(cap)).collect();
+        let rd = Mutex::new(Some(rd));
+        let task = |i: usize, _: &mut Vec<u8>| match i {
+            0 => {
+                if let Some(mut e) = Front::new(Out(c1.0), |_| {}) {
+                    let r = front(&mut e);
+                    e.finish(r);
+                }
+                c1.0.close();
+            }
+            1 => {
+                let mut rd = rd.lock().unwrap().take().expect("the residual decoder");
+                let mut done = false;
+                while let Some(mut b) = recv::<DecBatch<()>>(&c1.1) {
+                    if !done {
+                        done = errors_batch(&mut rd, &mut b);
+                        send(&c2.0, &b);
+                    }
+                }
+                c2.0.close();
+            }
+            2 => {
+                let mut ld = LmsDecoder::default();
+                let (mut k, mut done) = (0, false);
+                while let Some(mut b) = recv::<DecBatch<()>>(&c2.1) {
+                    if !done {
+                        lms_batch(&mut ld, &mut b);
+                        done = b.last;
+                        send(&c3[k % workers].0, &b);
+                        k += 1;
+                    }
+                }
+                c3.iter().for_each(|c| c.0.close());
+            }
+            _ => {
+                let j = i - 3;
+                while let Some(b) = recv::<DecBatch<()>>(&c3[j].1) {
+                    send(&c4[j].0, &(b.last, work(&b)));
+                }
+                c4[j].0.close();
+            }
+        };
+        let tasks = aqr_api::task::spawn(3 + workers, &task);
+        let (mut r, mut k) = (Ok(()), 0);
+        let mut open = vec![true; workers];
+        loop {
+            let Some((last, w)) = recv::<(bool, W)>(&c4[k % workers].1) else {
+                open[k % workers] = false;
+                r = Err(closed);
+                break;
+            };
+            k += 1;
+            r = take(w, last);
+            if r.is_err() || last {
+                break;
+            }
+        }
+        // (what is left read, in the same turn, for the stages to end)
+        while open.contains(&true) {
+            if open[k % workers] && c4[k % workers].1.recv().is_none() {
+                open[k % workers] = false;
+            }
+            k += 1;
+        }
+        drop(tasks);
+        r
     }
 }

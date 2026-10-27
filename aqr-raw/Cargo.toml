@@ -14,3 +14,7 @@ encode = ["dep:aqr-formula", "aqr-common/zstd"]
 [dependencies]
 aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula", optional = true }
+
+# Tasks and channels for the pipelines (`audio::par::apart`) in the modules of aqr-modules.
+[target.'cfg(target_family = "wasm")'.dependencies]
+aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
