@@ -5,9 +5,10 @@
 //!
 //! [`Probe::pays`] tells from estimates instead: the record's (the recompressor's own, on a
 //! sample say), and the fewest bytes the data may archive in at the level of the archive
-//! ([`Encoder::least`]), what other data archived with it holds too ([`shared`]) and the files
-//! in it that would be recompressed in turn counted as nothing (what they come to is not told
-//! without recompressing them). What is turned down would not have paid; what is taken may
+//! ([`Encoder::least`], by a sample), what it repeats from farther than the sample shows
+//! ([`repeated`]), what other data archived with it holds too ([`shared`]) and the files in it
+//! that would be recompressed in turn counted as nothing (what they come to is not told without
+//! recompressing them). What is turned down would not have paid; what is taken may
 //! still not, and is then dropped as before.
 
 use std::collections::HashMap;
@@ -53,8 +54,9 @@ impl Probe {
     /// Whether recompressing a stream of `coded` bytes, which does not compress, into a record
     /// of about `record()` bytes (asked only where needed; `None` where it cannot be told) and
     /// `data` of `kind` may pay: whether they may archive in at least 1/32 less than the
-    /// stream, the fraction `shared()` of the data held by other data archived with it as well
-    /// ([`shared`]; asked only where needed) counted as nothing, by `enc` (an encoder at
+    /// stream, what the data repeats from afar ([`repeated`]) and the fraction `shared()` of it
+    /// held by other data archived with it as well ([`shared`]; asked only where needed)
+    /// counted as nothing, by `enc` (an encoder at
     /// [`Probe::level`], which keeps what it compressed of the data for archiving it, and
     /// drops it where it turns it down).
     pub fn pays(
@@ -80,12 +82,15 @@ impl Probe {
         }
         let Ok(archived) = enc.least(data, enough) else { return true };
         let pays = |free: f64| archived as f64 * (1.0 - free.min(1.0)) <= enough as f64;
-        // (else what other data holds, and the files, asked only where they would make the
-        // difference)
+        // (else what the data repeats from afar, what other data holds, and the files, asked
+        // only where they would make the difference)
         let pays = pays(0.0) || {
-            let shared = shared().clamp(0.0, 1.0);
-            let files = || first.unwrap_or_else(|| (self.scan)(data)) as f64 / data.len().max(1) as f64;
-            shared > 0.0 && pays(shared) || scanned && pays(shared + files())
+            let own = repeated(data);
+            own > 0.0 && pays(own) || {
+                let shared = 1.0 - (1.0 - own) * (1.0 - shared().clamp(0.0, 1.0));
+                let files = || first.unwrap_or_else(|| (self.scan)(data)) as f64 / data.len().max(1) as f64;
+                shared > own && pays(shared) || scanned && pays(shared + files())
+            }
         };
         if !pays {
             enc.forget(data);
@@ -125,6 +130,41 @@ pub fn shared(datas: &[&[u8]]) -> Vec<f64> {
         }
     }
     anchors.iter().map(|a| a.iter().filter(|h| owner[h] == MANY).count() as f64 / a.len().max(1) as f64).collect()
+}
+
+/// Bytes of the pieces [`repeated`] cuts data into: those of the chunks a sample of data is
+/// made of ([`Encoder::least`]).
+const PIECE: usize = crate::aqr::SAMPLE / crate::aqr::SAMPLE_CHUNKS;
+
+/// About the fraction of `d` that repeats what comes earlier in it, from farther than a sample
+/// of it shows but within the window it is archived in: by anchors as in [`shared`], those of
+/// each piece of [`PIECE`] bytes that an earlier piece has, counted where they first come in
+/// the piece (a repeat within a piece, the sample shows). Nothing for data that a sample is all
+/// of. A pass over the data, at about a byte per cycle.
+pub fn repeated(d: &[u8]) -> f64 {
+    if d.len() <= crate::aqr::SAMPLE {
+        return 0.0;
+    }
+    // (zstd's own at level 9 for data that is not long, else one of all of it)
+    let window = if d.len() > crate::aqr::LONG { 1 << crate::aqr::WINDOW_LOG_MAX } else { 4 << 20 };
+    // each anchor with the last piece that has it
+    let mut seen: HashMap<u64, usize> = HashMap::new();
+    let (mut h, mut total, mut afar) = (0u64, 0usize, 0usize);
+    for (k, piece) in d.chunks(PIECE).enumerate() {
+        let mut own = Vec::new();
+        for &b in piece {
+            h = (h << 1).wrapping_add(GEAR[b as usize]);
+            if h & 0xff == 0 {
+                total += 1;
+                if !own.contains(&h) {
+                    afar += seen.get(&h).is_some_and(|&j| (k - j) * PIECE <= window) as usize;
+                    own.push(h);
+                }
+            }
+        }
+        own.into_iter().for_each(|a| _ = seen.insert(a, k));
+    }
+    afar as f64 / total.max(1) as f64
 }
 
 /// What the data archived together holds (the files of a batch, say), to tell whether data
@@ -328,6 +368,31 @@ mod tests {
         let f = shared(&[&a, &b]);
         assert!(f[0] < 0.01 && f[1] < 0.01, "{f:?}");
         assert_eq!(shared(&[&a]), [0.0]);
+    }
+
+    /// Data repeating itself farther than a sample of it shows (a stream of files in several
+    /// versions, say) may pay: its repeats cost nothing, as they archive in a window of all of
+    /// it. Data that does not, does not.
+    #[test]
+    fn pays_for_repeats_afar() {
+        let noise = |seed: u64, n: usize| {
+            let mut x = seed;
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (x >> 56) as u8
+                })
+                .collect::<Vec<u8>>()
+        };
+        let probe = Probe::flat(Level::Mid);
+        let enc = Encoder::new(Level::Mid);
+        let pays = |d: &[u8]| probe.pays(&enc, 5 << 20, || Some(0), d, || 0.0, Kind::Unknown);
+        let a = noise(1, 3 << 20);
+        assert!(pays(&[&a[..], &a[..]].concat()));
+        assert!(!pays(&[&a[..], &noise(2, 3 << 20)[..]].concat()));
+        // (a piece repeating within itself, which a sample shows, is no more)
+        let runs: Vec<u8> = (0..128).flat_map(|i| noise(i, 2000).repeat(32)).collect();
+        assert!(repeated(&runs) < 0.05, "{}", repeated(&runs));
     }
 
     /// Data much alike (another version of it: edits here and there) laid next to each other,

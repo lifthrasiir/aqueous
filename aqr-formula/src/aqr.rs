@@ -136,8 +136,8 @@ const MID_RATE: f64 = 1e6;
 const MID_SMALL: usize = 64 << 10;
 /// [`Level::Mid`] picks the level by this many bytes of the stream, in [`SAMPLE_CHUNKS`]
 /// chunks spread evenly over it (or by the whole stream if no longer).
-const SAMPLE: usize = 1 << 20;
-const SAMPLE_CHUNKS: usize = 16;
+pub(crate) const SAMPLE: usize = 1 << 20;
+pub(crate) const SAMPLE_CHUNKS: usize = 16;
 
 /// What an [`Encoder`] makes of a stream: compressed already ([`compressed`]), or to be
 /// compressed at a zstd level, to about so many bytes (by a sample).
@@ -1086,11 +1086,11 @@ const ZSTD_JOB: u32 = 16 << 20;
 
 /// Bytes of data above which it is compressed with long-distance matching, over a window of
 /// all of it up to [`WINDOW_LOG_MAX`].
-const LONG: usize = 8 << 20;
+pub(crate) const LONG: usize = 8 << 20;
 
 /// The largest window, as a power of two, that every decoder takes (spec, "Zstandard
 /// compression method").
-const WINDOW_LOG_MAX: u32 = 27;
+pub(crate) const WINDOW_LOG_MAX: u32 = 27;
 const ZSTD_OVERLAP: u32 = 9;
 
 /// The compressed external structure of `data` (Zstandard, XXH64), unless the Zstandard
