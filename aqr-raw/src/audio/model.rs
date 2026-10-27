@@ -178,6 +178,136 @@ mod neon {
     }
 }
 
+/// [`neon`] in SIMD128 (of the profile of the modules, enabled here alone). The dot product
+/// is `i32x4.dot_i16x8_s`'s: its sums wrap as NEON's multiply-accumulates do, so that the
+/// predictions are the same.
+#[cfg(target_family = "wasm")]
+mod simd {
+    use super::*;
+    use core::arch::wasm32::*;
+
+    /// An [`Lms`] in registers.
+    pub struct Regs {
+        w: [v128; 4],
+        h: [v128; 4],
+        u0: [v128; 4],
+        u1: [v128; 4],
+        /// The newest input and the last history vector without it.
+        last: i32,
+        hm: v128,
+        sh: u32,
+    }
+
+    /// The four vectors from `p`.
+    #[target_feature(enable = "simd128")]
+    unsafe fn ld(p: *const i16) -> [v128; 4] {
+        // SAFETY: as the callers make sure, 32 values from `p`
+        unsafe { core::array::from_fn(|k| v128_load(p.add(8 * k) as *const v128)) }
+    }
+
+    impl Regs {
+        #[target_feature(enable = "simd128")]
+        pub fn load(st: &Lms) -> Regs {
+            const _: () = assert!(DELAY == 2 && TAPS == 32);
+            // SAFETY: the arrays are of 32 values
+            let (w, h, u0, u1) =
+                unsafe { (ld(st.w.as_ptr()), ld(st.h.as_ptr()), ld(st.u[0].as_ptr()), ld(st.u[1].as_ptr())) };
+            Regs {
+                w,
+                u0,
+                u1,
+                last: i16x8_extract_lane::<7>(h[3]) as i32,
+                hm: i16x8_replace_lane::<7>(h[3], 0),
+                h,
+                sh: st.in_shift,
+            }
+        }
+
+        #[target_feature(enable = "simd128")]
+        pub fn store(&self, st: &mut Lms) {
+            let stv = |p: *mut i16, v: &[v128; 4]| {
+                for (k, v) in v.iter().enumerate() {
+                    // SAFETY: the arrays are of 32 values
+                    unsafe { v128_store(p.add(8 * k) as *mut v128, *v) }
+                }
+            };
+            stv(st.w.as_mut_ptr(), &self.w);
+            stv(st.h.as_mut_ptr(), &self.h);
+            stv(st.u[0].as_mut_ptr(), &self.u0);
+            stv(st.u[1].as_mut_ptr(), &self.u1);
+        }
+
+        #[target_feature(enable = "simd128")]
+        pub fn step<const DEC: bool>(&mut self, v: &mut i32) {
+            let (w, h) = (&mut self.w, &mut self.h);
+            let a = i32x4_add(
+                i32x4_add(i32x4_dot_i16x8(w[0], h[0]), i32x4_dot_i16x8(w[1], h[1])),
+                i32x4_add(i32x4_dot_i16x8(w[2], h[2]), i32x4_dot_i16x8(w[3], self.hm)),
+            );
+            let older = (i32x4_extract_lane::<0>(a).wrapping_add(i32x4_extract_lane::<1>(a)))
+                .wrapping_add(i32x4_extract_lane::<2>(a).wrapping_add(i32x4_extract_lane::<3>(a)));
+            let acc = older.wrapping_add(i16x8_extract_lane::<7>(w[3]) as i32 * self.last);
+            let p = (acc >> W_SHIFT) << self.sh;
+            let (x, e) = if DEC { ((*v).wrapping_add(p), *v) } else { (*v, (*v).wrapping_sub(p)) };
+            *v = if DEC { x } else { e };
+            // Apply the oldest pending step; queue this sample's.
+            let sg = i16x8_splat(((e > 0) as i16 - (e < 0) as i16) * MU);
+            let (one, mone) = (i16x8_splat(1), i16x8_splat(-1));
+            for k in 0..4 {
+                w[k] = i16x8_add(w[k], self.u0[k]);
+                self.u0[k] = self.u1[k];
+                let s = i16x8_min(i16x8_max(h[k], mone), one);
+                self.u1[k] = i16x8_mul(s, sg);
+            }
+            let xn = (x >> self.sh).clamp(-32768, 32767) as i16;
+            let next = |a: v128, b: v128| i16x8_shuffle::<1, 2, 3, 4, 5, 6, 7, 8>(a, b);
+            self.hm = next(h[3], i16x8_splat(0));
+            *h = [next(h[0], h[1]), next(h[1], h[2]), next(h[2], h[3]), next(h[3], i16x8_splat(xn))];
+            self.last = xn as i32;
+        }
+    }
+
+    #[target_feature(enable = "simd128")]
+    pub fn run<const DEC: bool>(st: &mut Lms, buf: &mut [i32]) {
+        let mut r = Regs::load(st);
+        for v in buf.iter_mut() {
+            r.step::<DEC>(v);
+        }
+        r.store(st);
+    }
+
+    #[target_feature(enable = "simd128")]
+    pub fn run2<const DEC: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
+        let n = a.len().min(b.len());
+        let mut ra = Regs::load(sa);
+        let mut rb = Regs::load(sb);
+        for (x, y) in a[..n].iter_mut().zip(b[..n].iter_mut()) {
+            ra.step::<DEC>(x);
+            rb.step::<DEC>(y);
+        }
+        for x in &mut a[n..] {
+            ra.step::<DEC>(x);
+        }
+        for y in &mut b[n..] {
+            rb.step::<DEC>(y);
+        }
+        ra.store(sa);
+        rb.store(sb);
+    }
+}
+
+#[cfg(target_family = "wasm")]
+fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
+    // SAFETY: SIMD128 is of the profile of the modules (an engine without it does not run them)
+    unsafe { simd::run::<DEC>(st, buf) }
+}
+
+#[cfg(target_family = "wasm")]
+pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
+    // SAFETY: as in `lms_run`
+    unsafe { simd::run2::<DEC>(sa, a, sb, b) }
+}
+
 #[cfg(target_arch = "aarch64")]
 fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
     let mut r = neon::Regs::load(st);
@@ -213,13 +343,13 @@ pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &m
     rb.store(sb);
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(any(target_arch = "aarch64", target_family = "wasm")))]
 pub(crate) fn lms_run2_in<const DEC: bool, const PIPE: bool>(sa: &mut Lms, a: &mut [i32], sb: &mut Lms, b: &mut [i32]) {
     lms_run::<DEC, PIPE>(sa, a);
     lms_run::<DEC, PIPE>(sb, b);
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(any(target_arch = "aarch64", target_family = "wasm")))]
 fn lms_run<const DEC: bool, const PIPE: bool>(st: &mut Lms, buf: &mut [i32]) {
     let sh = st.in_shift;
     for v in buf.iter_mut() {
