@@ -32,6 +32,8 @@ pub struct Options {
     pub threads: usize,
     /// The aqr-flate profile of the records.
     pub profile: u16,
+    /// With an adaptive profile, whether to try zlib emulation ([`aqr_flate::Options::zlib`]).
+    pub zlib: bool,
     /// The most bytes of data that DEFLATE bodies may inflate to, all together; the bodies past
     /// it, those of the highest ratios first, are kept as they are.
     pub limit: u64,
@@ -54,6 +56,7 @@ impl Default for Options {
         Options {
             threads: 1,
             profile: aqr_flate::DEFAULT_PROFILE,
+            zlib: true,
             limit: u64::MAX,
             kind: |_| Kind::Unknown,
             probe: None,
@@ -134,7 +137,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let candidates: Vec<usize> = (0..locals.len())
         .filter(|&i| made[i].is_none() && locals[i].method(input) == DEFLATED && flags(locals[i]) & ENCRYPTED == 0)
         .collect();
-    let fopt = aqr_flate::Options { profile: opt.profile, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
+    let fopt = aqr_flate::Options { zlib: opt.zlib, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
     // The bodies of `jobs` made from their data, each refused of more than it is given; None
     // where one has more. They are parsed first, the large ones' records estimated where there
     // is a probe; those are probed, what the other entries of their kind hold of their data

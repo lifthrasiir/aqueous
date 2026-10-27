@@ -20,7 +20,7 @@ fn module(a: &Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
 /// `d` as an archive of its formula; None if it is not coded.
 fn pack(d: &[u8]) -> Option<Vec<u8>> {
     let f = formula::encode(d, 0)?;
-    Some(aqr::encode(&f, Some(aqr::checksum(d)), Level::Mid).expect("archive encoding failed"))
+    Some(aqr::encode(&f, Some(aqr::checksum(d)), Level::MID).expect("archive encoding failed"))
 }
 
 fn unpack(c: &[u8]) -> Result<Vec<u8>, String> {

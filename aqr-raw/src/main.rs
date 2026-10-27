@@ -72,7 +72,7 @@ fn bench(args: &[String]) {
             let t = Instant::now();
             let g = encode(&src);
             bf = bf.min(t.elapsed().as_secs_f64());
-            c = g.map(|g| aqr::encode(&g, Some(aqr::checksum(&src)), Level::Mid).expect("archive"));
+            c = g.map(|g| aqr::encode(&g, Some(aqr::checksum(&src)), Level::MID).expect("archive"));
             bc = bc.min(t.elapsed().as_secs_f64());
         }
         let Some(c) = c else {

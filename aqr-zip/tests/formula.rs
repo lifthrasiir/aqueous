@@ -476,7 +476,7 @@ fn probed() {
         entry("small", rng.bytes(100_000)),
     ];
     let d = archive(es).bytes();
-    let probe = aqr_formula::probe::Probe::flat(aqr_formula::aqr::Level::Mid);
+    let probe = aqr_formula::probe::Probe::flat(aqr_formula::aqr::Level::MID);
     let bodies = |probe| roundtrip_with(&d, &Options { probe, ..Options::default() }).1;
     assert_eq!(bodies(None), [Body::Deflated; 3]);
     assert_eq!(bodies(Some(probe)), [Body::Kept, Body::Deflated, Body::Deflated]);

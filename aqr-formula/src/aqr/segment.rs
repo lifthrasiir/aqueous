@@ -17,7 +17,7 @@ use aqr_common::varint;
 
 use super::tree::{self, EntryNode, FileParam, Tree};
 use super::{
-    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, Kind, MODULE, SWAP, always_compressed, block, footer,
+    CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, MODULE, SWAP, always_compressed, block, footer,
     footer_with, formula_block,
 };
 use crate::{Error, Formula, Module, Node, Resource, Result};
@@ -192,10 +192,8 @@ impl SegmentWriter {
         // the streams compressed at once, then laid out
         let mut written = vec![false; f.streams.len()];
         uses.iter().for_each(|u| u.streams.iter().for_each(|&st| written[st] = true));
-        let todo: Vec<&[u8]> = (0..f.streams.len())
-            .filter(|&st| written[st] && f.streams[st].kind != Kind::Compressed)
-            .map(|st| &f.streams[st].data[..])
-            .collect();
+        let todo: Vec<&crate::Stream> =
+            (0..f.streams.len()).filter(|&st| written[st]).map(|st| &f.streams[st]).collect();
         enc.precompress(&todo)?;
 
         let level = enc.base_level();
@@ -259,8 +257,8 @@ impl SegmentWriter {
                 match data_leaf(i) {
                     Some(stream) => {
                         let data: &[u8] = stream.map_or(&[], |st| &f.streams[st].data);
-                        let stored = stream.is_some_and(|st| f.streams[st].kind == Kind::Compressed);
-                        enc.content_block(out, true, &[data], stored)?;
+                        let how = stream.map_or(How::Usual, |st| enc.how(&f.streams[st]));
+                        enc.content_block(out, true, &[data], how)?;
                         b.layout.push((Placed::Data(i), out.len() - at));
                     }
                     None => {
@@ -273,8 +271,7 @@ impl SegmentWriter {
             }
             for &st in &streams {
                 let at = out.len();
-                let stored = f.streams[st].kind == Kind::Compressed;
-                enc.content_block(out, false, &[&f.streams[st].data], stored)?;
+                enc.content_block(out, false, &[&f.streams[st].data], enc.how(&f.streams[st]))?;
                 b.layout.push((Placed::NonLeaf(st), out.len() - at));
             }
             non_leaf += streams.len() as u64;

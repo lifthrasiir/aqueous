@@ -59,7 +59,7 @@ fn data_files() {
         assert_eq!(a.len, c.len as u64);
         // Smaller than the input as archives; an archive also holds the tables (about 2.4 KB
         // compressed, once).
-        let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::Mid).unwrap().len();
+        let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::MID).unwrap().len();
         assert!(n < d.len() + 2400, "{name}: {n} >= {} + 2400", d.len());
     }
 }

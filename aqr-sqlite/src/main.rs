@@ -85,7 +85,7 @@ fn main() {
 fn pack(src: &[u8], opt: &Options) -> Option<(Vec<u8>, Vec<usize>)> {
     let f = formula::encode_with(src, opt)?;
     let raw = f.streams.iter().map(|s| s.data.len()).collect();
-    Some((aqr::encode(&f, Some(aqr::checksum(src)), Level::Mid).expect("archive"), raw))
+    Some((aqr::encode(&f, Some(aqr::checksum(src)), Level::MID).expect("archive"), raw))
 }
 
 fn bench(args: &[String]) {

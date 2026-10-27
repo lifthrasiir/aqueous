@@ -140,9 +140,9 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"lzma" | b"tlz" => format(Format::Lzma),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
-        b"7z" | b"xz" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv"
-        | b"webm" | b"ogg" | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif"
-        | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
+        b"7z" | b"xz" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm"
+        | b"ogg" | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl"
+        | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => Kind::Text,
         b"ttf" | b"otf" | b"ttc" | b"cff" | b"pfb" => Kind::Font,

@@ -384,8 +384,8 @@ mod tests {
                 })
                 .collect::<Vec<u8>>()
         };
-        let probe = Probe::flat(Level::Mid);
-        let enc = Encoder::new(Level::Mid);
+        let probe = Probe::flat(Level::MID);
+        let enc = Encoder::new(Level::MID);
         let pays = |d: &[u8]| probe.pays(&enc, 5 << 20, || Some(0), d, || 0.0, Kind::Unknown);
         let a = noise(1, 3 << 20);
         assert!(pays(&[&a[..], &a[..]].concat()));

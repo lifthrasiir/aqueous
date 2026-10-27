@@ -136,7 +136,9 @@ pub struct Options {
     /// fewest bytes per byte of their description are kept raw. By default no limit.
     pub description: usize,
     /// The level of the archive of [`compress`] ([`aqr::Encoder`]), and of the formulas sized
-    /// for [`Options::smaller`].
+    /// for [`Options::smaller`]; and, by its [`Level::scale`], how hard data is recompressed:
+    /// at 1 not at all (zstd alone, whatever [`Options::depth`]), from 7 on DEFLATE as
+    /// [`Options::flate`] tells and with no [`probe`].
     pub level: Level,
     /// Keep a file raw, or the data where files are found, unless its formula archives
     /// smaller than it does raw ([`aqr::Encoder::smaller`]).
@@ -199,6 +201,27 @@ impl Nest {
     }
 }
 
+impl Options {
+    /// The aqr-flate profile that DEFLATE streams (of gzip, zlib and ZIP) are rebuilt with, and
+    /// whether it tries zlib emulation: up to level 6, the default profile; from 7 on, the
+    /// adaptive one with chain rules (enwik8 by Info-ZIP `-9`, 10 threads: a record of 0.41% of
+    /// the data rather than 2.6%, split at 86 MB/s rather than 214, joined at 196 MB/s rather
+    /// than 349); at 9, with zlib emulation too (3 KB, but split serially at 29 MB/s, and
+    /// joined at 37 MB/s on a thread: `enwik9.zip` alone some 27 s of decoding).
+    pub fn flate(&self) -> (u16, bool) {
+        match self.level.scale() {
+            ..7 => (aqr_flate::DEFAULT_PROFILE, true),
+            7 | 8 => (aqr_flate::ADAPTIVE, false),
+            _ => (aqr_flate::ADAPTIVE, true),
+        }
+    }
+
+    /// Whether data is recompressed at all ([`Options::level`]).
+    pub(crate) fn recompresses(&self) -> bool {
+        self.level != Level::Of(Level::MIN)
+    }
+}
+
 impl Default for Options {
     fn default() -> Options {
         Options {
@@ -208,7 +231,7 @@ impl Default for Options {
             contents: CONTENTS.to_vec(),
             file: Nest::Scan,
             description: usize::MAX,
-            level: Level::Mid,
+            level: Level::MID,
             smaller: true,
             expansion: 32,
             shared_resources: false,
@@ -516,7 +539,7 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: 
 pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
     let text = how == Nest::As(Format::Text) || how == Nest::Scan && detect(d) == Some(Format::Text);
     match how {
-        _ if depth >= opt.depth => None,
+        _ if depth >= opt.depth || !opt.recompresses() => None,
         Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
         // text as aqr-wrt tells of it alone (not [`smaller`]), so that the same text is taken
         // alike wherever it is; else scanned as other data is, or kept raw where named as text
@@ -662,12 +685,16 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     (format == Format::Text || smaller(&f, None, d, opt, cx)).then_some(f)
 }
 
-/// Unless [`Options::smaller`] is off, what tells whether recompressing a stream may pay,
-/// for its data `depth` formats deep: at the level of the archive, files looked for as
-/// [`Nest::of`] tells (scanned, unless nested formats would go deeper than allowed). An ar,
-/// tar or cpio archive is scanned for the files in it, as it gains nothing itself; text is
-/// told by its data, as aqr-wrt takes no more than a tenth off it.
+/// Unless [`Options::smaller`] is off, or the level is 7 or more (DEFLATE always rebuilt, a few
+/// seconds of 10gb), what tells whether recompressing a stream may pay, for its data `depth`
+/// formats deep: at the level of the archive, files looked for as [`Nest::of`] tells (scanned,
+/// unless nested formats would go deeper than allowed). An ar, tar or cpio archive is scanned
+/// for the files in it, as it gains nothing itself; text is told by its data, as aqr-wrt takes
+/// no more than a tenth off it.
 pub(crate) fn probe(opt: &Options, depth: u32) -> Option<Probe> {
+    if opt.level.scale() >= 7 {
+        return None;
+    }
     let look = |kind| match Nest::Scan.of(kind) {
         None | Some(Nest::As(Format::Text)) => Look::No,
         Some(Nest::As(f)) if !f.is_bundle() => Look::Whole,
@@ -1554,6 +1581,44 @@ mod tests {
         let (n, applies) = deconstructed(&gz("text.txt", &text, 1), false);
         assert_eq!(n, 1);
         assert!(applies > 0);
+    }
+
+    /// Level 1 recompresses nothing; from 7 on, DEFLATE streams are always deconstructed (no
+    /// probe), with the adaptive profile.
+    #[test]
+    fn levels() {
+        let gz = |name: &str, d: &[u8], level| {
+            let mut z = flate2::GzBuilder::new().filename(name).write(Vec::new(), flate2::Compression::new(level));
+            std::io::Write::write_all(&mut z, d).unwrap();
+            z.finish().unwrap()
+        };
+        let made = |d: &[u8], level| {
+            DECONSTRUCTED.with(|n| n.set(0));
+            // (sized without the module blocks, as among many files)
+            let f = recompress(d, &Options { level, shared_modules: true, ..Options::default() });
+            let profile = f
+                .streams
+                .iter()
+                .find(|s| s.class == "flate/record")
+                .map(|s| aqr_flate::record_profile(&s.data).unwrap());
+            (DECONSTRUCTED.with(Cell::get), profile)
+        };
+        let noise = gz("noise.mp4", &aqr_common::rng::noise(300_000), 6);
+        let text: Vec<u8> =
+            (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
+        // (DEFLATE at level 1 leaves much to the archive)
+        let text = gz("text.txt", &text, 1);
+        for level in [Level::Of(1), Level::LOW, Level::MID, Level::Of(7), Level::HIGH, Level::Of(9)] {
+            let n = level.scale();
+            // (noise turned down by the probe, or else after it is deconstructed)
+            assert_eq!(made(&noise, level).0, (n >= 7) as usize, "{level:?}");
+            let profile = match n {
+                1 => None,
+                ..7 => Some(aqr_flate::DEFAULT_PROFILE),
+                _ => Some(aqr_flate::ADAPTIVE),
+            };
+            assert_eq!(made(&text, level), ((n > 1) as usize, profile), "{level:?}");
+        }
     }
 
     /// The formulas recompressors make are evaluated beforehand: decoding the archive takes

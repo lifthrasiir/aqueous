@@ -8,8 +8,11 @@ use aqr_formula::Formula;
 use crate::{Cx, Options, kind_by_name};
 
 pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    let (profile, zlib) = opt.flate();
     let zopt = aqr_zip::formula::Options {
         threads: opt.threads,
+        profile,
+        zlib,
         limit: cx.inflate_left(),
         kind: kind_by_name,
         probe: crate::probe(opt, depth),

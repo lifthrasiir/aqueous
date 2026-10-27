@@ -495,8 +495,11 @@ const WORDS_MIN: usize = 256 << 10;
 
 /// The dictionary of the text of a batch ([`Cx::words`]): of the files that are text (at least
 /// [`aqr_wrt::formula::MIN_LEN`] bytes, but those kept raw), where they are [`WORDS_MIN`]
-/// bytes in all.
+/// bytes in all and are recompressed at all ([`Options::level`]).
 fn words(regions: &[&[u8]], files: &[File], raw: &HashSet<usize>, opt: &Options) -> Option<aqr_wrt::formula::Shared> {
+    if !opt.recompresses() {
+        return None;
+    }
     let texts: Vec<&[u8]> = (0..files.len())
         .filter(|k| !raw.contains(k) && aqr_wrt::formula::starts(regions[*k]))
         .map(|k| regions[k])
@@ -540,7 +543,8 @@ fn make<S: Source + ?Sized>(
     // (the files known by where their copies are, and taken from the input; and what they
     // hold, a content told by where it is)
     let regions: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-    cx.held = Some(std::sync::Arc::new(Held::of(&regions, opt.threads)));
+    // (nothing to tell where nothing is recompressed)
+    cx.held = opt.recompresses().then(|| std::sync::Arc::new(Held::of(&regions, opt.threads)));
     cx.share_words(words(&regions, files, raw, opt).map(std::sync::Arc::new));
     // (the text of a file found in another coded once, for both)
     cx.once = std::sync::Arc::new(Once::of(

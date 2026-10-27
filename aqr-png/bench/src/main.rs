@@ -102,7 +102,7 @@ fn measure_once(tool: &str, file: &Path) -> Res {
             let Some(f) = aqr_png::formula::encode(&src, 1) else {
                 return Res { out: src.len(), c: thread_cpu() - t0, d: 0.0, ok: true };
             };
-            let c = aqr::encode(&f, Some(aqr::checksum(&src)), aqr::Level::Mid).expect("archive");
+            let c = aqr::encode(&f, Some(aqr::checksum(&src)), aqr::Level::MID).expect("archive");
             let t1 = thread_cpu();
             let d = aqr::decode(&c, &natives);
             let t2 = thread_cpu();

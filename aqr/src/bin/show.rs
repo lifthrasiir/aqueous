@@ -1,7 +1,7 @@
 //! Compresses files into archives, as aqr-compress does (verification included), and
 //! decompresses them back.
 //!
-//! usage: aqr-show [-t THREADS] [-d DEPTH] [-l mid|ZSTD_LEVEL] [-e] [-r] [-m] [-f] FILE...
+//! usage: aqr-show [-t THREADS] [-d DEPTH] [-l LEVEL] [-e] [-r] [-m] [-f] FILE...
 //!
 //! For each file: the detected format, the modules applied, the stream bytes by class, and the
 //! archive (of level `-l`, by default mid), the bytes of its resource blocks among them, with
@@ -29,12 +29,7 @@ fn main() {
         match &*arg {
             "-t" => opt.threads = args.next().and_then(|s| s.parse().ok()).expect("-t THREADS"),
             "-d" => opt.depth = args.next().and_then(|s| s.parse().ok()).expect("-d DEPTH"),
-            "-l" => {
-                opt.level = match args.next().expect("-l mid|ZSTD_LEVEL") {
-                    l if l == "mid" => aqr::Level::Mid,
-                    l => aqr::Level::Zstd(l.parse().expect("-l mid|ZSTD_LEVEL")),
-                }
-            }
+            "-l" => opt.level = args.next().expect("-l LEVEL").parse().expect("-l 1-9|low|mid|high|zstdN"),
             "-e" => opt.file = Nest::Exact,
             "-r" => opt.shared_resources = true,
             "-m" => opt.shared_modules = true,

@@ -125,7 +125,7 @@ fn bench(args: &[String]) {
         for _ in 0..iters {
             let t = Instant::now();
             let f = encode(&d, o.raw, threads);
-            let c = f.as_ref().map(|f| aqr::encode(f, Some(aqr::checksum(&d)), aqr::Level::Mid).unwrap());
+            let c = f.as_ref().map(|f| aqr::encode(f, Some(aqr::checksum(&d)), aqr::Level::MID).unwrap());
             best_c = best_c.min(t.elapsed().as_secs_f64());
             coded = f.zip(c);
         }

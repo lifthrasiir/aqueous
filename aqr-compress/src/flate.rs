@@ -102,10 +102,12 @@ fn wrap(
     depth: u32,
     cx: &Cx,
 ) -> Option<Formula> {
+    let (profile, zlib) = opt.flate();
     let fopt = aqr_flate::Options {
         threads: opt.threads,
         max_data: usize::try_from(cx.inflate_left()).unwrap_or(usize::MAX),
-        ..Default::default()
+        zlib,
+        ..aqr_flate::Options::for_profile(profile).ok()?
     };
     let parsed = Parsed::head(d.get(start..)?, &fopt).ok()?;
     let raw = start..start + parsed.len();

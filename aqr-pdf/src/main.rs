@@ -85,7 +85,7 @@ fn main() {
 
 /// The archive of `file`'s formula.
 fn archive(f: &Formula, file: &[u8]) -> Vec<u8> {
-    aqr::encode(f, Some(aqr::checksum(file)), Level::Mid).expect("an archive")
+    aqr::encode(f, Some(aqr::checksum(file)), Level::MID).expect("an archive")
 }
 
 /// The file in archive `c`, with `threads` threads for this module.

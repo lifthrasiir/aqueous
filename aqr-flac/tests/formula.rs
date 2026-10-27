@@ -48,7 +48,7 @@ fn data_files() {
         // These should all be coded, and smaller than the input as archives; an archive
         // also holds the tables (2306 bytes compressed, once).
         let f = formula::encode(&d, 1).unwrap();
-        let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::Mid).unwrap().len();
+        let n = aqr::encode(&f, Some(aqr::checksum(&d)), aqr::Level::MID).unwrap().len();
         assert!(n < d.len() + 2400, "{name}: {n} >= {} + 2400", d.len());
     }
 }

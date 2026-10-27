@@ -19,7 +19,7 @@ fn modules(f: &Formula) -> Vec<&'static str> {
 
 /// An encoder of the modules aqr-decompress knows.
 fn encoder() -> aqr::Encoder {
-    aqr::Encoder::new(aqr::Level::Mid).with_modules(aqr_decompress::wasm_of)
+    aqr::Encoder::new(aqr::Level::MID).with_modules(aqr_decompress::wasm_of)
 }
 
 /// Recompresses `d`, checking that the formula evaluates back to it, also through the
@@ -747,7 +747,7 @@ fn zip_png_set() {
     // not kept as they are (as verification failing would)
     let c = compress(&d, &all());
     assert!(decompress(&c, 1).unwrap() == d);
-    let raw = aqr::encode(&Formula::raw("raw", d.clone()), None, aqr::Level::Mid).unwrap().len();
+    let raw = aqr::encode(&Formula::raw("raw", d.clone()), None, aqr::Level::MID).unwrap().len();
     // (without the module blocks, which an archive of more files has once)
     let mut ms: Vec<_> = f.applies().iter().map(|a| a.module).collect();
     ms.dedup();

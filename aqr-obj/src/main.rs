@@ -119,7 +119,7 @@ fn bench(args: &[String]) {
                 coded = false;
                 break;
             };
-            c = aqr::encode(&fm, Some(aqr::checksum(&src)), Level::Mid).expect("archive");
+            c = aqr::encode(&fm, Some(aqr::checksum(&src)), Level::MID).expect("archive");
             bc = bc.min(clock(opt.threads) - t);
         }
         if !coded {

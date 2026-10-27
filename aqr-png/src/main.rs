@@ -47,7 +47,7 @@ fn main() {
         for _ in 0..if only == 'd' { 1 } else { iters } {
             let t = Instant::now();
             c = formula::encode(&src, threads)
-                .map(|g| aqr::encode(&g, Some(aqr::checksum(&src)), Level::Mid).expect("archive"));
+                .map(|g| aqr::encode(&g, Some(aqr::checksum(&src)), Level::MID).expect("archive"));
             bc = bc.min(t.elapsed().as_secs_f64());
         }
         let Some(c) = c else {
