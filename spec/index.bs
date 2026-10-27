@@ -1,7 +1,8 @@
 <h1>Aqueous Archive Format</h1>
 <pre class=metadata>
 Shortname: aqueous
-Status: LS
+Status: LD
+Text Macro: LONGSTATUS Editor's Draft
 Boilerplate: omit feedback-header, omit conformance
 Editor: Kang Seonghoon, https://mearie.org/
 Repository: https://github.com/lifthrasiir/aqueous/
@@ -4493,8 +4494,9 @@ Each entry has the following fields:</p>
 <dd>The [=registered hash=], i.e. the [=module hash=] of the module,
 written as 64 lowercase hexadecimal digits.</dd>
 <dt>Name</dt>
-<dd>A short name of the module for humans, which has no effect on the format.
-Different versions of a module have the same name and different hashes.</dd>
+<dd>A short name of the module for humans, which has no effect on the format,
+written as the name of the module and its version joined by `@` (e.g. `flate-set@1`).
+Different versions of a module have the same name before `@` and different hashes.</dd>
 <dt>Data</dt>
 <dd>The bytes of the module, being [=module/wasm_module=] of a module block ([[#module-block]]),
 which MUST be valid as such and deposited with the registration.</dd>
@@ -4511,9 +4513,118 @@ An entry is never shared with the Aqueous Dictionaries Registry ([[#dictionaries
 even when both have the same data.</p>
 
 <p>The initial contents of the registry are the modules built by the reference implementation of this document,
-each under its name there with the hash of the module built.</p>
+as follows:</p>
 
-Issue: The initial entries are to be listed once the modules of the reference implementation are finalized.
+<table class=data>
+  <thead>
+    <tr>
+      <th>Hash
+      <th>Name
+      <th>Reference
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>30ebd39ea3f768f06cf4d3e79872666d6923eb8e608ed5878bcc86c040179a21</code>
+      <td>bundle-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-bundle/FORMAT.md">aqr-bundle/FORMAT.md</a>
+    <tr>
+      <td><code>d75932d0797f5b7b078b82be8a2c0b3ef624d3ac84ff579fb4cc0853ced6133f</code>
+      <td>exe-recons/arm64@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>
+    <tr>
+      <td><code>b9d311242e48c4e487dfd046171b91a51a4ec0ec0f241263229a65ddadfb899a</code>
+      <td>exe-recons/cil@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>
+    <tr>
+      <td><code>f5ceceece1de6f707fc514c2a02c75c56017934faf93bf7413ffaf3a33a0acae</code>
+      <td>exe-recons/x86@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>
+    <tr>
+      <td><code>f15b8d3355fc8929c25d263b6b752516a3e675cbd476ee5933f6900a8cb9718b</code>
+      <td>fasta-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fasta/FORMAT.md">aqr-fasta/FORMAT.md</a>
+    <tr>
+      <td><code>b270a49116ef95000f31f5e28d3d5994b9e2ba23008e2d8af51a55ef7ed663a7</code>
+      <td>flac-recons@3
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-flac/FORMAT.md">aqr-flac/FORMAT.md</a>
+    <tr>
+      <td><code>076b6d2f1f7f045706d8a7a9955ffde46d6b4d609f651d7b70c2ed9698a0982e</code>
+      <td>flate-set@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-flate/FORMAT.md">aqr-flate/FORMAT.md</a>
+    <tr>
+      <td><code>2a04858deb554db54aeb020dd876929f88380dfb35970761433f0731344533f2</code>
+      <td>jpeg-recons@2
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-jpeg/FORMAT.md">aqr-jpeg/FORMAT.md</a>
+    <tr>
+      <td><code>68c5dc67a0535a0d2d6c46ffa74940daf5d8a9c2f362e514c5bec98b3088f6c6</code>
+      <td>leveldb-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-snappy/FORMAT.md">aqr-snappy/FORMAT.md</a>
+    <tr>
+      <td><code>d1c9ec7cd6d507c6cc0974074cbeb7b6af0eeddca3bf37d7183fb85a4b898c4e</code>
+      <td>lz4-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-lz4/FORMAT.md">aqr-lz4/FORMAT.md</a>
+    <tr>
+      <td><code>75ba5c9a68f2ba9e84a41a14bfad04c79becb1ce7c7b0789f9f2693e54611e80</code>
+      <td>lzma-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-lzma/FORMAT.md">aqr-lzma/FORMAT.md</a>
+    <tr>
+      <td><code>b382acbe0a55d2b387ace2f8ddcae3ccc80b1001d0a4bb47e1dd6f17e175a6c4</code>
+      <td>lzo-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-lzo/FORMAT.md">aqr-lzo/FORMAT.md</a>
+    <tr>
+      <td><code>0b8c9a726ef4be2ee980afc369902691d10fccaf160b0d672ebb45d62978fa8c</code>
+      <td>mp3-recons@5
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-mp3/FORMAT.md">aqr-mp3/FORMAT.md</a>
+    <tr>
+      <td><code>f305c2ea1b1d0742ebd98642980883d4ba83d7853a9288a509e1cbe4151152fe</code>
+      <td>pcm-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-raw/FORMAT.md">aqr-raw/FORMAT.md</a>
+    <tr>
+      <td><code>81be25de122eef1c04177cf3fb1fd60f213fa5dc345fce97041e5fcdfdc986e1</code>
+      <td>pdf-recons@2
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-pdf/FORMAT.md">aqr-pdf/FORMAT.md</a>
+    <tr>
+      <td><code>d7f470ef89dfe18b940eb5aca2e96b55014b2bc5183b0e809421478c41afff2f</code>
+      <td>png-against@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-png/FORMAT.md">aqr-png/FORMAT.md</a>
+    <tr>
+      <td><code>ceb64d5bff227270028d078ad82668545d669bfce57dec19a566544f33f0201c</code>
+      <td>png-recons@3
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-png/FORMAT.md">aqr-png/FORMAT.md</a>
+    <tr>
+      <td><code>a768a54a827e33a3d804dac732717e0269d1cba63689beefeb6d0218e4728e9d</code>
+      <td>png-set@2
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-png/FORMAT.md">aqr-png/FORMAT.md</a>
+    <tr>
+      <td><code>946311bc554ece1ce8153ec662dce02d99bb6110838db94679a5faeec88f6ddd</code>
+      <td>psd-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-psd/FORMAT.md">aqr-psd/FORMAT.md</a>
+    <tr>
+      <td><code>99c859fce0c3faaa78c864b87e25ce33ae184fbc9a7f71688e0982c49ddaf9f5</code>
+      <td>raster-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-raw/FORMAT.md">aqr-raw/FORMAT.md</a>
+    <tr>
+      <td><code>6e967dac1072db4e3ab21cd10103b0773253bc24e64b7a94aa8519de42bd02db</code>
+      <td>snappy-recons@2
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-snappy/FORMAT.md">aqr-snappy/FORMAT.md</a>
+    <tr>
+      <td><code>1d5e4cdab89b3ccd790d713a9ec507f35b2f52cd58d6732c1ede1a835926e89d</code>
+      <td>sqlite-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-sqlite/FORMAT.md">aqr-sqlite/FORMAT.md</a>
+    <tr>
+      <td><code>78114341a3981b9b877f74beff267c6fcb83f23e7106d344107fbc178dab3117</code>
+      <td>wrt-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-wrt/FORMAT.md">aqr-wrt/FORMAT.md</a>
+    <tr>
+      <td><code>81d24d8f7a2a2a6e1595dcce91dcf888d6afbc3d072d98b6b395b8aacbb9e7ac</code>
+      <td>zip-recons@3
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-zip/FORMAT.md">aqr-zip/FORMAT.md</a>
+  </tbody>
+</table>
+
+Issue: The initial entries are not yet fixed.
+Their modules and the documents describing them may still change before the first version of this document,
+and an entry changed until then is replaced in this table, not added as a new version.
 
 <h2 id=zip-conversion>
 Converting from ZIP</h2>
