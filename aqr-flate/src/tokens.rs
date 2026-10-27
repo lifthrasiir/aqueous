@@ -304,7 +304,7 @@ impl Rule {
 
     /// The predicted token at `p` and its class (1 if the table offered a candidate).
     #[inline(always)]
-    pub fn predict<T: Search>(&self, t: &mut T, d: &[u8], p: usize) -> (Token, usize) {
+    pub fn predict(&self, t: &mut dyn Search, d: &[u8], p: usize) -> (Token, usize) {
         let lit = Token::Lit(d[p]);
         match self.kind {
             Kind::Literals => (lit, 0),
@@ -465,68 +465,51 @@ pub fn code_range<C: Corr>(
     rule: Rule,
     range: &Range,
     actual: Option<&[Token]>,
-    out: Option<&mut Vec<Token>>,
-) -> Result<usize> {
-    match rule.kind {
-        Kind::Search => {}
-        Kind::Chain => {
-            let t = ChainTable::new(d, range.pos, range.end, rule.depth, rule.nice);
-            return code_with(c, t, d, rule, range, actual, out);
-        }
-        _ => return code_with(c, NoTable, d, rule, range, actual, out),
-    }
-    let inner = (rule.inner != INNER_ALL).then_some(rule.inner as usize);
-    macro_rules! go {
-        ($w:literal, $k:literal, $l:literal) => {
-            code_with(
-                c,
-                Table::<$w, $k, $l>::new(rule.long, inner, range.pos, range.end, rule.rank),
-                d,
-                rule,
-                range,
-                actual,
-                out,
-            )
-        };
-    }
-    macro_rules! by_long {
-        ($w:literal, $k:literal) => {
-            if rule.long > 0 {
-                go!($w, $k, true)
-            } else {
-                go!($w, $k, false)
-            }
-        };
-    }
-    macro_rules! by_key {
-        ($w:literal) => {
-            if rule.key == 4 {
-                by_long!($w, 4)
-            } else {
-                by_long!($w, 3)
-            }
-        };
-    }
-    match rule.ways {
-        1 => by_key!(1),
-        2 => by_key!(2),
-        4 => by_key!(4),
-        _ => by_key!(8),
-    }
-}
-
-/// One function per table type: inlining all of them into [`code_range`] made a function of
-/// hundreds of KB in wasm, which compilers handle poorly, for no gain (it runs once per range).
-#[inline(never)]
-fn code_with<C: Corr, T: Search>(
-    c: &mut C,
-    mut t: T,
-    d: &[u8],
-    rule: Rule,
-    range: &Range,
-    actual: Option<&[Token]>,
     mut out: Option<&mut Vec<Token>>,
 ) -> Result<usize> {
+    // The table is `dyn`: its own methods are what is specialized (by its shape), not this
+    // loop for every table shape and coder (a few calls per token cost little next to
+    // searching).
+    let mut t: Box<dyn Search> = match rule.kind {
+        Kind::Search => {
+            let inner = (rule.inner != INNER_ALL).then_some(rule.inner as usize);
+            let (long, start, end) = (rule.long, range.pos, range.end);
+            macro_rules! table {
+                ($w:literal, $k:literal, $l:literal) => {
+                    Box::new(Table::<$w, $k, $l>::new(long, inner, start, end, rule.rank))
+                };
+            }
+            macro_rules! by_long {
+                ($w:literal, $k:literal) => {
+                    if long > 0 {
+                        table!($w, $k, true)
+                    } else {
+                        table!($w, $k, false)
+                    }
+                };
+            }
+            macro_rules! by_key {
+                ($w:literal) => {
+                    if rule.key == 4 {
+                        by_long!($w, 4)
+                    } else {
+                        by_long!($w, 3)
+                    }
+                };
+            }
+            match rule.ways {
+                1 => by_key!(1),
+                2 => by_key!(2),
+                4 => by_key!(4),
+                _ => by_key!(8),
+            }
+        }
+        Kind::Chain => Box::new(ChainTable::new(
+            d, range.pos, range.end, rule.depth, rule.nice,
+        )),
+        _ => Box::new(NoTable),
+    };
+    let t = &mut *t;
     let n = d.len().min(range.end);
     let mut p = range.pos;
     let skip0 = range.skips.partition_point(|s| s.0 < range.first);
@@ -545,7 +528,7 @@ fn code_with<C: Corr, T: Search>(
         let (pred, class) = match c.predict(d, p, actual.map(|a| a[k])) {
             Some(t) => (t, 2),
             None => {
-                let (pred, class) = rule.predict(&mut t, d, p);
+                let (pred, class) = rule.predict(t, d, p);
                 if c.lookahead()
                     && let Token::Match { .. } = pred
                 {
@@ -559,7 +542,7 @@ fn code_with<C: Corr, T: Search>(
                 (pred, class)
             }
         };
-        let tok = c.token(&mut t, d, p, pred, class, actual.map(|a| a[k]))?;
+        let tok = c.token(t, d, p, pred, class, actual.map(|a| a[k]))?;
         c.commit(p, tok);
         t.token(d, p, tok.span());
         p += tok.span();

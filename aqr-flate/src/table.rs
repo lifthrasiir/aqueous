@@ -228,11 +228,26 @@ impl Cands for MultiChain {
     }
 }
 
-pub struct Table<const W: usize, const K: usize, const L: bool> {
+/// A table with `W` entries per bucket of the first table, keyed by `K` bytes (3 or 4), with a
+/// second table if `L`: the searches, insertions and ranking walks, the work per byte or per
+/// miss, are specialized by its shape (each parameter matters for speed); the rest is
+/// [`Core`]'s, the same for all.
+pub struct Table<const W: usize, const K: usize, const L: bool>(Core);
+
+/// The state of a [`Table`], whatever its shape.
+struct Core {
     bits: u32,
     /// Left shift keeping the second table's key bytes.
     lshift: u32,
-    t: Vec<[u32; W]>,
+    /// Bytes of the first table's key (3 or 4).
+    key: usize,
+    /// Whether there is a second table.
+    long: bool,
+    /// [`Core::ensure`] for the table's shape (for [`Core`]'s own methods).
+    ensure_fn: fn(&mut Core, &[u8], usize),
+    /// The first table: `ways` entries per bucket, bucket after bucket.
+    ways: usize,
+    t: Vec<u32>,
     t2: Vec<[u32; LW]>,
     /// Token-driven insertion: starts, and the inside of matches up to this long.
     inner: Option<usize>,
@@ -285,6 +300,16 @@ pub fn common(d: &[u8], a: usize, p: usize, max: usize) -> usize {
     l
 }
 
+/// The mask of a first table's key of `key` bytes, on 4 bytes.
+const fn mask_of(key: usize) -> u32 {
+    if key == 3 { 0xff_ffff } else { u32::MAX }
+}
+
+#[inline(always)]
+const fn mask<const K: usize>() -> u32 {
+    mask_of(K)
+}
+
 #[inline(always)]
 fn push<const W: usize>(b: &mut [u32; W], v: u32) {
     let mut n = [v; W];
@@ -293,22 +318,43 @@ fn push<const W: usize>(b: &mut [u32; W], v: u32) {
 }
 
 impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
-    const MASK: u32 = if K == 3 { 0xff_ffff } else { u32::MAX };
-
-    /// A table for coding tokens from `start` on, below `end`: with every position inserted,
-    /// the window before `start` is inserted first. Short ranges get smaller tables (it
-    /// matters for their setup, not for collisions).
+    /// A table for coding tokens from `start` on, below `end`, with a second table keyed by
+    /// `long` bytes (if `L`): with every position inserted, the window before `start` is
+    /// inserted first. Short ranges get smaller tables (it matters for their setup, not for
+    /// collisions).
     pub fn new(long: u8, inner: Option<usize>, start: usize, end: usize, rank: bool) -> Self {
+        debug_assert!(L == (long > 0));
+        let ensure = |c: &mut Core, d: &[u8], p: usize| c.ensure::<W, K, L>(d, p);
+        Table(Core::new(W, K, long, ensure, inner, start, end, rank))
+    }
+}
+
+impl Core {
+    fn new(
+        ways: usize,
+        key: usize,
+        long: u8,
+        ensure_fn: fn(&mut Core, &[u8], usize),
+        inner: Option<usize>,
+        start: usize,
+        end: usize,
+        rank: bool,
+    ) -> Self {
         let span = end.saturating_sub(start.saturating_sub(WINDOW)).max(1);
         let bits = span
             .next_power_of_two()
             .trailing_zeros()
             .clamp(MIN_BITS, HASH_BITS);
-        Table {
+        let own = key != 3 || inner.is_some();
+        Core {
             bits,
             lshift: 64 - 8 * long as u32,
-            t: vec![[0; W]; 1 << bits],
-            t2: vec![[0; LW]; if L { 1 << bits } else { 0 }],
+            key,
+            long: long > 0,
+            ensure_fn,
+            ways,
+            t: vec![0; ways << bits],
+            t2: vec![[0; LW]; if long > 0 { 1 << bits } else { 0 }],
             inner,
             next: start.saturating_sub(WINDOW),
             last_start: usize::MAX,
@@ -319,8 +365,8 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
             } else {
                 vec![]
             },
-            own: K != 3 || inner.is_some(),
-            heads: if rank && (K != 3 || inner.is_some()) {
+            own,
+            heads: if rank && own {
                 vec![0; 1 << bits]
             } else {
                 vec![]
@@ -334,11 +380,25 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
         (k.wrapping_mul(0x9e37_79b1) >> (32 - bits)) as usize
     }
 
-    /// The first table's bucket of `p` (`p + K <= d.len()`).
+    /// The first table's bucket of `p` (`p + key <= d.len()`).
     #[inline(always)]
     fn h1(&self, d: &[u8], p: usize) -> usize {
         if p + 8 <= d.len() {
-            Self::hash(load32(d, p) & Self::MASK, self.bits)
+            Self::hash(load32(d, p) & mask_of(self.key), self.bits)
+        } else {
+            let k = d[p..p + self.key]
+                .iter()
+                .rev()
+                .fold(0u32, |a, &b| a << 8 | b as u32);
+            Self::hash(k, self.bits)
+        }
+    }
+
+    /// [`Core::h1`] on the per-byte paths.
+    #[inline(always)]
+    fn h1k<const K: usize>(&self, d: &[u8], p: usize) -> usize {
+        if p + 8 <= d.len() {
+            Self::hash(load32(d, p) & mask::<K>(), self.bits)
         } else {
             let k = d[p..p + K]
                 .iter()
@@ -364,34 +424,54 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
         (k.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> (64 - bits)) as usize
     }
 
+    /// Bucket `h` of the first table, of `W` (its `ways`) entries.
     #[inline(always)]
-    fn insert(&mut self, d: &[u8], p: usize) {
+    fn bucket<const W: usize>(t: &[u32], h: usize) -> &[u32; W] {
+        &t.as_chunks::<W>().0[h]
+    }
+
+    #[inline(always)]
+    fn bucket_mut<const W: usize>(t: &mut [u32], h: usize) -> &mut [u32; W] {
+        &mut t.as_chunks_mut::<W>().0[h]
+    }
+
+    /// Bucket `h` of the first table, whatever its `ways`.
+    fn bucket_any(&self, h: usize) -> &[u32] {
+        &self.t[h * self.ways..(h + 1) * self.ways]
+    }
+
+    #[inline(always)]
+    fn insert<const W: usize, const K: usize, const L: bool>(&mut self, d: &[u8], p: usize) {
         self.memo.0 = usize::MAX;
         if p + 8 <= d.len() {
-            self.insert_run(d, p, p + 1);
+            self.insert_run::<W, K, L>(d, p, p + 1);
             return;
         }
         if p + K > d.len() {
             return;
         }
         let v = p as u32 + 1;
-        let h = self.h1(d, p);
-        let b = &mut self.t[h];
+        let h = self.h1k::<K>(d, p);
+        let b = Self::bucket_mut::<W>(&mut self.t, h);
         if !self.prev.is_empty() && !self.own {
             let n = self.prev.len();
             self.prev[p & (n - 1)] = b[0];
         }
         push(b, v);
-        if L && p + 8 <= d.len() {
-            push(&mut self.t2[Self::h2(d, p, self.bits, self.lshift)], v);
-        }
     }
 
     /// Walks the chain of `p` (past the first table's entries if it is that table's),
     /// closest first and within the window, calling `f` on each position until it returns
     /// false.
-    fn walk(&mut self, d: &[u8], p: usize, limit: usize, mut f: impl FnMut(usize) -> bool) {
-        self.ensure(d, p);
+    #[inline(always)]
+    fn walk<const W: usize, const K: usize, const L: bool>(
+        &mut self,
+        d: &[u8],
+        p: usize,
+        limit: usize,
+        mut f: impl FnMut(usize) -> bool,
+    ) {
+        self.ensure::<W, K, L>(d, p);
         if self.prev.is_empty() || p + K > d.len() {
             return;
         }
@@ -406,7 +486,10 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
             }
             (self.heads[Self::h3(d, p, self.bits)] as usize, 0)
         } else {
-            (self.t[self.h1(d, p)][0] as usize, W)
+            (
+                Self::bucket::<W>(&self.t, self.h1k::<K>(d, p))[0] as usize,
+                W,
+            )
         };
         let (mut seen, mut steps) = (0, 0);
         while e > 0 && steps < limit {
@@ -429,21 +512,31 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
 
     /// Makes every position before `p` searchable (every-position policy).
     #[inline(always)]
-    fn ensure(&mut self, d: &[u8], p: usize) {
+    fn ensure<const W: usize, const K: usize, const L: bool>(&mut self, d: &[u8], p: usize) {
         if self.inner.is_none() && self.next < p {
             self.memo.0 = usize::MAX;
             let fast = p.min(d.len().saturating_sub(7)).max(self.next);
-            self.insert_run(d, self.next, fast);
+            self.insert_run::<W, K, L>(d, self.next, fast);
             for q in fast..p {
-                self.insert(d, q);
+                self.insert::<W, K, L>(d, q);
             }
             self.next = p;
         }
     }
 
+    /// [`Core::ensure`] off the per-byte paths.
+    fn ensure_any(&mut self, d: &[u8], p: usize) {
+        (self.ensure_fn)(self, d, p)
+    }
+
     /// Inserts the positions `from..to`, which have 8 bytes after them.
     #[inline(always)]
-    fn insert_run(&mut self, d: &[u8], from: usize, to: usize) {
+    fn insert_run<const W: usize, const K: usize, const L: bool>(
+        &mut self,
+        d: &[u8],
+        from: usize,
+        to: usize,
+    ) {
         debug_assert!(to <= d.len().saturating_sub(7) || from >= to);
         let chain = !self.prev.is_empty() && !self.own;
         let (bits, lshift) = (self.bits, self.lshift);
@@ -451,7 +544,7 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
         let ring = prev.len().wrapping_sub(1);
         for q in from..to {
             let v = q as u32 + 1;
-            let b = &mut t[Self::hash(load32(d, q) & Self::MASK, bits)];
+            let b = Self::bucket_mut::<W>(t, Self::hash(load32(d, q) & mask::<K>(), bits));
             if chain {
                 prev[q & ring] = b[0];
             }
@@ -463,21 +556,23 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
     }
 
     /// The best of `bucket`'s candidates at `p` (where 8 bytes are left): the longest, the
-    /// most recent on ties, given the best so far. Lengths are first measured on 8 bytes
-    /// without branching; only candidates matching all 8 are measured further.
+    /// most recent on ties, given the best so far, of at least `key` bytes. Lengths are first
+    /// measured on 8 bytes without branching; only candidates matching all 8 are measured
+    /// further.
     #[inline(always)]
     fn best_of<const N: usize>(
         d: &[u8],
         p: usize,
         window: usize,
         max: usize,
+        key: usize,
         bucket: &[u32; N],
         best: (usize, usize),
     ) -> (usize, usize) {
         // Candidates as length << 32 | !distance: the greatest is the best.
-        let key = |l: usize, dist: usize| (l as u64) << 32 | (!(dist as u32)) as u64;
+        let order = |l: usize, dist: usize| (l as u64) << 32 | (!(dist as u32)) as u64;
         let x = load64(d, p);
-        let mut top = if best.0 > 0 { key(best.0, best.1) } else { 0 };
+        let mut top = if best.0 > 0 { order(best.0, best.1) } else { 0 };
         let mut long = 0u32;
         for (i, &e) in bucket.iter().enumerate() {
             let c = (e as usize).wrapping_sub(1);
@@ -485,16 +580,16 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
             // An invalid entry reads position 0 and is masked out.
             let cc = if ok { c } else { 0 };
             let l8 = ((load64(d, cc) ^ x).trailing_zeros() / 8) as usize;
-            let l = if ok && l8 >= K { l8.min(max) } else { 0 };
+            let l = if ok && l8 >= key { l8.min(max) } else { 0 };
             long |= ((l == 8) as u32) << i;
-            let k = if l > 0 { key(l, p - cc) } else { 0 };
+            let k = if l > 0 { order(l, p - cc) } else { 0 };
             top = top.max(k);
         }
         while long != 0 {
             let i = long.trailing_zeros() as usize;
             long &= long - 1;
             let c = bucket[i] as usize - 1;
-            top = top.max(key(common(d, c, p, max), p - c));
+            top = top.max(order(common(d, c, p, max), p - c));
         }
         if top == 0 {
             (0, 0)
@@ -504,23 +599,29 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
     }
 
     #[inline(always)]
-    fn search_uncached(&self, d: &[u8], p: usize, window: usize, max: usize) -> (usize, usize) {
-        if p + K > d.len() {
+    fn search_uncached<const W: usize, const K: usize, const L: bool>(
+        &self,
+        d: &[u8],
+        p: usize,
+        window: usize,
+        max: usize,
+    ) -> (usize, usize) {
+        let key = K;
+        if p + key > d.len() {
             return (0, 0);
         }
+        let bucket = Self::bucket::<W>(&self.t, self.h1k::<K>(d, p));
         if p + 8 <= d.len() {
-            let mut best = Self::best_of(d, p, window, max, &self.t[self.h1(d, p)], (0, 0));
+            let mut best = Self::best_of(d, p, window, max, key, bucket, (0, 0));
             if L {
                 let b2 = &self.t2[Self::h2(d, p, self.bits, self.lshift)];
-                best = Self::best_of(d, p, window, max, b2, best);
+                best = Self::best_of(d, p, window, max, key, b2, best);
             }
             return if best.0 < 3 { (0, 0) } else { best };
         }
+        // The last few positions (no second table there).
         let (mut best, mut dist) = (0, 0);
-        let fast = p + 8 <= d.len();
-        let kp = if fast { load32(d, p) & Self::MASK } else { 0 };
-        let bucket = self.t[self.h1(d, p)];
-        for e in bucket {
+        for &e in bucket {
             if e == 0 {
                 break;
             }
@@ -531,12 +632,7 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
             if p - c > window {
                 break;
             }
-            let same = if fast {
-                load32(d, c) & Self::MASK == kp
-            } else {
-                d[c..c + K] == d[p..p + K]
-            };
-            if !same || (best > 0 && d[c + best] != d[p + best]) {
+            if d[c..c + key] != d[p..p + key] || (best > 0 && d[c + best] != d[p + best]) {
                 continue;
             }
             let l = common(d, c, p, max);
@@ -547,44 +643,24 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
                 }
             }
         }
-        if L && fast {
-            for e in self.t2[Self::h2(d, p, self.bits, self.lshift)] {
-                if e == 0 {
-                    break;
-                }
-                let c = e as usize - 1;
-                if c >= p || p - c > window {
-                    continue;
-                }
-                if best > 0 && d[c + best] != d[p + best] {
-                    continue;
-                }
-                let l = common(d, c, p, max);
-                if l > best || (l == best && l > 0 && p - c < dist) {
-                    (best, dist) = (l, p - c);
-                    if l == max {
-                        break;
-                    }
-                }
-            }
-        }
         if best < 3 { (0, 0) } else { (best, dist) }
     }
 }
 
-impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
+impl Cands for Core {
     fn entries(&mut self, d: &[u8], p: usize) -> Vec<usize> {
-        self.ensure(d, p);
-        if p + K > d.len() {
+        self.ensure_any(d, p);
+        if p + self.key > d.len() {
             return vec![];
         }
-        let mut v: Vec<usize> = self.t[self.h1(d, p)]
+        let mut v: Vec<usize> = self
+            .bucket_any(self.h1(d, p))
             .iter()
             .map(|&e| e as usize)
             .filter(|&e| e > 0 && e - 1 < p)
             .map(|e| e - 1)
             .collect();
-        if L && p + 8 <= d.len() {
+        if self.long && p + 8 <= d.len() {
             for e in self.t2[Self::h2(d, p, self.bits, self.lshift)] {
                 let e = e as usize;
                 if e > 0 && e - 1 < p && !v.contains(&(e - 1)) {
@@ -599,9 +675,39 @@ impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
         !self.prev.is_empty()
     }
 
+    fn index_of(&mut self, d: &[u8], p: usize, dist: usize) -> Option<usize> {
+        if self.long || dist > p {
+            return self.entries(d, p).iter().position(|&c| p - c == dist);
+        }
+        // One table: the entries before `p` in order, without collecting them.
+        self.ensure_any(d, p);
+        if p + self.key > d.len() {
+            return None;
+        }
+        let target = (p - dist) as u32 + 1;
+        self.bucket_any(self.h1(d, p))
+            .iter()
+            .filter(|&&e| e > 0 && (e as usize - 1) < p)
+            .position(|&e| e == target)
+    }
+}
+
+impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
+    fn entries(&mut self, d: &[u8], p: usize) -> Vec<usize> {
+        self.0.entries(d, p)
+    }
+
+    fn index_of(&mut self, d: &[u8], p: usize, dist: usize) -> Option<usize> {
+        self.0.index_of(d, p, dist)
+    }
+
+    fn ranked(&self) -> bool {
+        self.0.ranked()
+    }
+
     fn rank(&mut self, d: &[u8], p: usize, len: usize, dist: usize, limit: usize) -> Option<usize> {
         let (mut r, mut found) = (0, None);
-        self.walk(d, p, limit, |c| {
+        self.0.walk::<W, K, L>(d, p, limit, |c| {
             if p - c >= dist {
                 // Chains go back in order: past the target, it is not there.
                 found = (p - c == dist).then_some(r);
@@ -622,7 +728,7 @@ impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
         limit: usize,
     ) -> Option<usize> {
         let (mut r, mut found) = (0, None);
-        self.walk(d, p, limit, |c| {
+        self.0.walk::<W, K, L>(d, p, limit, |c| {
             if d[c + len - 1] == d[p + len - 1] && common(d, c, p, len) >= len {
                 if r == rank {
                     found = Some(p - c);
@@ -634,37 +740,22 @@ impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
         });
         found
     }
-
-    fn index_of(&mut self, d: &[u8], p: usize, dist: usize) -> Option<usize> {
-        if L || dist > p {
-            return self.entries(d, p).iter().position(|&c| p - c == dist);
-        }
-        // One table: the entries before `p` in order, without collecting them.
-        self.ensure(d, p);
-        if p + K > d.len() {
-            return None;
-        }
-        let target = (p - dist) as u32 + 1;
-        self.t[self.h1(d, p)]
-            .iter()
-            .filter(|&&e| e > 0 && (e as usize - 1) < p)
-            .position(|&e| e == target)
-    }
 }
 
 impl<const W: usize, const K: usize, const L: bool> Search for Table<W, K, L> {
     #[inline(always)]
     fn search(&mut self, d: &[u8], p: usize, window: usize) -> (usize, usize) {
+        let t = &mut self.0;
         let max = (d.len() - p).min(MAX_MATCH);
         if max < 3 {
             return (0, 0);
         }
-        self.ensure(d, p);
-        if (self.memo.0, self.memo.1) == (p, window) {
-            return self.memo.2;
+        t.ensure::<W, K, L>(d, p);
+        if (t.memo.0, t.memo.1) == (p, window) {
+            return t.memo.2;
         }
-        let r = self.search_uncached(d, p, window, max);
-        self.memo = (p, window, r);
+        let r = t.search_uncached::<W, K, L>(d, p, window, max);
+        t.memo = (p, window, r);
         r
     }
 
@@ -674,29 +765,32 @@ impl<const W: usize, const K: usize, const L: bool> Search for Table<W, K, L> {
         if max < 3 {
             return (0, 0);
         }
-        self.search_uncached(d, p, window, max)
+        self.0.search_uncached::<W, K, L>(d, p, window, max)
     }
 
     #[inline(always)]
     fn token_start(&mut self, d: &[u8], p: usize) {
-        if self.inner.is_some() && self.last_start != p {
-            self.insert(d, p);
-            self.last_start = p;
+        let t = &mut self.0;
+        if t.inner.is_some() && t.last_start != p {
+            t.insert::<W, K, L>(d, p);
+            t.last_start = p;
         }
     }
 
     #[inline(always)]
     fn token(&mut self, d: &[u8], p: usize, len: usize) {
-        let Some(inner) = self.inner else {
+        let t = &mut self.0;
+        let Some(inner) = t.inner else {
             return;
         };
         self.token_start(d, p);
+        let t = &mut self.0;
         if len > 1 && len <= inner {
-            self.memo.0 = usize::MAX;
+            t.memo.0 = usize::MAX;
             let fast = (p + len).min(d.len().saturating_sub(7)).max(p + 1);
-            self.insert_run(d, p + 1, fast);
+            t.insert_run::<W, K, L>(d, p + 1, fast);
             for q in fast..p + len {
-                self.insert(d, q);
+                t.insert::<W, K, L>(d, q);
             }
         }
     }
