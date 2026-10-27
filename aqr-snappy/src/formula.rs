@@ -1,6 +1,7 @@
-//! aqr-snappy as a module of entry formulas (see aqr-formula): a Snappy stream compressed from
-//! its data, or a LevelDB table rebuilt from the contents of its blocks. `FORMAT.md` specifies
-//! it. The data, and the contents of the blocks, may be recompressed in turn.
+//! aqr-snappy as modules of entry formulas (see aqr-formula): a Snappy stream compressed from
+//! its data ([`MODULE`]), and a LevelDB table rebuilt from the contents of its blocks
+//! ([`TABLE_MODULE`]). `FORMAT.md` specifies them. The data, and the contents of the blocks,
+//! may be recompressed in turn.
 
 use aqr_common::varint;
 use aqr_formula::{Formula, Module, Node};
@@ -9,15 +10,16 @@ use crate::leveldb::{self, CODE_KEPT, CODE_RAW, CODE_SNAPPY, RAW, SNAPPY};
 use crate::snappy::{self, Hash};
 use crate::{Error, Result, corrupt};
 
-pub const MODULE: Module = Module { name: "snappy-recons", version: 1 };
+/// A Snappy stream ([`stream`], [`decode`]).
+pub const MODULE: Module = Module { name: "snappy-recons", version: 2 };
 
-const STREAM: u8 = 0;
-const TABLE: u8 = 1;
+/// A LevelDB table ([`encode`], [`decode_table`]).
+pub const TABLE_MODULE: Module = Module { name: "leveldb-recons", version: 1 };
 
 /// The application of the module making the Snappy stream of `len` bytes that `data` compresses
 /// into by `hash`.
 pub fn stream(hash: Hash, data: Node, len: u64) -> Node {
-    Node::apply(MODULE, vec![STREAM, hash as u8], vec![data], len)
+    Node::apply(MODULE, vec![hash as u8], vec![data], len)
 }
 
 /// The hash that compresses `data` into `stream`, if any does.
@@ -75,19 +77,25 @@ pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
     }
     let mut f = Formula::default();
     let inputs = vec![f.push("ldb/blocks", data), f.push("ldb/layout", layout), f.push("ldb/kept", kept)];
-    f.root = Node::apply(MODULE, vec![TABLE, hash as u8], inputs, input.len() as u64);
+    f.root = Node::apply(TABLE_MODULE, vec![hash as u8], inputs, input.len() as u64);
     Some(f)
 }
 
-/// The module: a Snappy stream or a LevelDB table of `len` bytes (see `FORMAT.md`).
+/// The module [`MODULE`]: a Snappy stream of `len` bytes (see `FORMAT.md`).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
-    let &[kind, h] = params else { return Err(corrupt()) };
+    let (&[h], &[data]) = (params, inputs) else { return Err(corrupt()) };
     let hash = Hash::from_u8(h).ok_or_else(corrupt)?;
-    let out = match (kind, inputs) {
-        (STREAM, &[data]) => snappy::compress(data, hash)?,
-        (TABLE, &[data, layout, kept]) => leveldb::build(data, layout, kept, hash)?,
-        _ => return Err(corrupt()),
-    };
+    of_len(snappy::compress(data, hash)?, len)
+}
+
+/// The module [`TABLE_MODULE`]: a LevelDB table of `len` bytes (see `FORMAT.md`).
+pub fn decode_table(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
+    let (&[h], &[data, layout, kept]) = (params, inputs) else { return Err(corrupt()) };
+    let hash = Hash::from_u8(h).ok_or_else(corrupt)?;
+    of_len(leveldb::build(data, layout, kept, hash)?, len)
+}
+
+fn of_len(out: Vec<u8>, len: u64) -> Result<Vec<u8>> {
     if out.len() as u64 != len {
         return Err(Error("output of another length"));
     }

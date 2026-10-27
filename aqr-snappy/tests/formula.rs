@@ -1,12 +1,16 @@
 use aqr_formula::{Apply, Formula, Node};
-use aqr_snappy::formula::{self, MODULE};
+use aqr_snappy::formula::{self, MODULE, TABLE_MODULE};
 use aqr_snappy::leveldb;
 use aqr_snappy::snappy::{self, Hash};
 
 fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
-        assert_eq!(a.module, MODULE);
-        formula::decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.to_string()))
+        let decode = match a.module {
+            MODULE => formula::decode,
+            TABLE_MODULE => formula::decode_table,
+            m => panic!("module {m}"),
+        };
+        decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.to_string()))
     })
 }
 
@@ -60,7 +64,7 @@ fn tables_of_snappy() {
         let f = formula::encode(&t, 1).unwrap_or_else(|| panic!("{name}: no formula"));
         assert!(eval(&f).unwrap() == t, "{name}");
         let a = application(&f);
-        assert_eq!(a.params, [1, hash as u8], "{name}");
+        assert_eq!((a.module, &a.params[..]), (TABLE_MODULE, &[hash as u8][..]), "{name}");
         // the block by the other hash is kept, as it is
         let kept = &f.streams[2].data;
         assert_eq!(kept.is_empty(), !name.starts_with("odd"), "{name}");
@@ -119,13 +123,15 @@ fn corrupt_inputs() {
         }
     }
     let data = b"0123456789".repeat(100);
-    for params in [&[][..], &[0], &[0, 2], &[2, 0], &[0, 0, 0]] {
+    for params in [&[][..], &[2], &[0, 0]] {
         assert!(formula::decode(params, &[&data], 100, 1).is_err(), "{params:?}");
+        assert!(formula::decode_table(params, &[&data[..20], &[10, 0, 10, 0], b""], 100, 1).is_err(), "{params:?}");
     }
-    assert!(formula::decode(&[0, 0], &[&data, &data], 100, 1).is_err());
-    assert!(formula::decode(&[1, 0], &[&data], 100, 1).is_err());
+    assert!(formula::decode(&[0], &[&data, &data], 100, 1).is_err());
+    assert!(formula::decode(&[0], &[&data[..20], &[10, 0, 10, 0], b""], 100, 1).is_err());
+    assert!(formula::decode_table(&[0], &[&data], 100, 1).is_err());
     for layout in [&[][..], &[10, 0], &[10, 0, 10, 0], &[200, 1, 10, 0], &[4, 2], &[4, 3, 4, 0], &[0x80]] {
-        assert!(formula::decode(&[1, 0], &[&data[..20], layout, b""], 100, 1).is_err(), "{layout:?}");
+        assert!(formula::decode_table(&[0], &[&data[..20], layout, b""], 100, 1).is_err(), "{layout:?}");
     }
     for _ in 0..3000 {
         let n = xorshift(&mut r) as usize % 64;

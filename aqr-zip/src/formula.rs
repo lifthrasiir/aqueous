@@ -1,6 +1,7 @@
-//! aqr-zip as a module of entry formulas (see aqr-formula): a ZIP archive rebuilt from the
-//! contents of its entries, the DEFLATE streams by aqr-flate. `FORMAT.md` specifies it. The
-//! contents may be recompressed in turn.
+//! aqr-zip as modules of entry formulas (see aqr-formula): a ZIP archive rebuilt from the
+//! contents of its entries, the DEFLATE streams by aqr-flate ([`MODULE`]), or of an archive
+//! without them ([`STORED_MODULE`]). `FORMAT.md` specifies them. The contents may be
+//! recompressed in turn.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -15,7 +16,11 @@ use crate::layout::{self, Made, Writer};
 use crate::zip::{self, DEFLATED, ENCRYPTED, Rec, STORED};
 use crate::{Error, Result, corrupt};
 
-pub const MODULE: Module = Module { name: "zip-recons", version: 1 };
+/// An archive of a deflated body at least, with aqr-flate's model data ([`decode`]).
+pub const MODULE: Module = Module { name: "zip-recons", version: 2 };
+
+/// An archive without deflated bodies, of no resources ([`decode_stored`]).
+pub const STORED_MODULE: Module = Module { name: "zip-stored", version: 1 };
 
 /// Bodies shorter than this are not looked for among earlier ones.
 const SAME_MIN: usize = 16;
@@ -366,7 +371,10 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     {
         return None;
     }
-    let resources = if records.is_empty() { Vec::new() } else { aqr_flate::formula::resources(opt.profile).ok()? };
+    let (module, resources) = match records.is_empty() {
+        true => (STORED_MODULE, Vec::new()),
+        false => (MODULE, aqr_flate::formula::resources(opt.profile).ok()?),
+    };
     let mut f = Formula::default();
     let mut inputs = vec![
         f.push("raw", Vec::new()),
@@ -375,7 +383,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         f.push("zip/kept", kept),
     ];
     inputs[0] = f.push_by_kind(0, data, &kinds, "zip", OWN_MIN);
-    f.root = Node::apply_with(MODULE, resources, Vec::new(), inputs, input.len() as u64);
+    f.root = Node::apply_with(module, resources, Vec::new(), inputs, input.len() as u64);
     Some(Encoded { formula: f, inflated })
 }
 
@@ -384,10 +392,33 @@ fn locals_bodies<'a>(recs: &'a [Rec], d: &'a [u8]) -> impl Iterator<Item = &'a [
     recs.iter().filter_map(move |r| if let Rec::Local(l) = r { Some(&d[l.body.clone()]) } else { None })
 }
 
-/// The module: the archive of `len` bytes rebuilt from `inputs`, the data, the records, the
-/// layout and the bytes kept, with `resources`, aqr-flate's model data of the records' profile
-/// (none where there is no record).
+/// The module [`MODULE`]: the archive of `len` bytes rebuilt from `inputs`, the data, the
+/// records, the layout and the bytes kept, with `resources`, aqr-flate's model data of the
+/// records' profile.
 pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    if resources.len() != 2 {
+        return Err(Error("resources not those of the records"));
+    }
+    rebuild(params, resources, inputs, len, threads)
+}
+
+/// The module [`STORED_MODULE`]: [`decode`] of an archive without deflated bodies, so without
+/// records or resources.
+pub fn decode_stored(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    rebuild(params, &[], inputs, len, threads)
+}
+
+/// The output of `a`, an application of either module, on `inputs`.
+pub fn apply(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> Result<Vec<u8>> {
+    let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
+    match a.module {
+        MODULE => decode(&a.params, &res, inputs, a.len, threads),
+        STORED_MODULE if res.is_empty() => decode_stored(&a.params, inputs, a.len, threads),
+        _ => Err(corrupt()),
+    }
+}
+
+fn rebuild(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let (&[], &[data, records, layout, kept]) = (params, inputs) else { return Err(corrupt()) };
     let jobs = layout::jobs(layout, data, records)?;
     let flate = |e: aqr_flate::Error| match e {

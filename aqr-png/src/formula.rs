@@ -1,18 +1,21 @@
 //! aqr-png as modules of entry formulas (see aqr-formula): [`decode`] on three inputs, the
-//! skeleton, the index and the records of the images, and no parameters; or on four, the last
-//! the reference file that records may be coded against. And [`decode_set`], of sets of files
-//! each coded against an earlier one, of an output per file. See FORMAT.md, *Formula module*
-//! and *Sets of files*.
+//! skeleton, the index and the records of the images, and no parameters; [`decode_against`] on
+//! a fourth, the reference file that records may be coded against. And [`decode_set`], of sets
+//! of files each coded against an earlier one, the files one after another. See FORMAT.md,
+//! *Formula module* and *Sets of files*.
 
 use crate::codec::{self, Parts, References, Skeleton};
 use crate::{Result, corrupt};
 use aqr_common::varint;
 use aqr_formula::{Apply, Formula, Kind, Module, Node, packed};
 
-pub const MODULE: Module = Module { name: "png-recons", version: 2 };
+pub const MODULE: Module = Module { name: "png-recons", version: 3 };
+
+/// The module of a file coded against a reference file ([`encode_against`], [`decode_against`]).
+pub const AGAINST_MODULE: Module = Module { name: "png-against", version: 1 };
 
 /// The module of sets of files ([`encode_set`], [`decode_set`]).
-pub const SET_MODULE: Module = Module { name: "png-set", version: 1 };
+pub const SET_MODULE: Module = Module { name: "png-set", version: 2 };
 
 /// The class of the stream that [`encode_against`] puts the reference file in.
 pub const REFERENCE: &str = "png/reference";
@@ -24,9 +27,9 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 }
 
 /// [`encode`] with the images coded against those of `reference` (a similar PNG file, such
-/// as a variant of the picture) where that makes them smaller. The application's last input
-/// is then `reference` itself, a stream of class [`REFERENCE`] for the caller to put a node
-/// giving the file in place of.
+/// as a variant of the picture) where that makes them smaller. The application is then of
+/// [`AGAINST_MODULE`], its last input `reference` itself, a stream of class [`REFERENCE`] for
+/// the caller to put a node giving the file in place of.
 pub fn encode_against(input: &[u8], reference: &[u8], threads: usize) -> Option<Formula> {
     formula(input, threads, Some(reference))
 }
@@ -85,28 +88,34 @@ fn formula(input: &[u8], threads: usize, reference: Option<&[u8]>) -> Option<For
         f.push("png/index", index),
         f.push_as("png/records", Kind::Compressed, records),
     ];
-    if let Some(r) = reference.filter(|_| against) {
-        inputs.push(f.push(REFERENCE, r.to_vec()));
-    }
-    f.root = Node::apply(MODULE, Vec::new(), inputs, input.len() as u64);
+    let module = match reference.filter(|_| against) {
+        Some(r) => {
+            inputs.push(f.push(REFERENCE, r.to_vec()));
+            AGAINST_MODULE
+        }
+        None => MODULE,
+    };
+    f.root = Node::apply(module, Vec::new(), inputs, input.len() as u64);
     Some(f)
 }
 
 /// The module: the file of `len` bytes rebuilt from `inputs`, the skeleton, the index (the
-/// length of each image's record, as varints) and the records, and the reference file if
-/// there is a fourth.
+/// length of each image's record, as varints) and the records.
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    let (sk, index, records, reference) = match (params, inputs) {
-        (&[], &[sk, index, records]) => (sk, index, records, None),
-        (&[], &[sk, index, records, r]) => (sk, index, records, Some(r)),
-        _ => return Err(corrupt()),
-    };
-    Ok(rebuild(sk, index, records, reference.map(codec::references).as_ref(), len, threads, false)?.0)
+    let (&[], &[sk, index, records]) = (params, inputs) else { return Err(corrupt()) };
+    Ok(rebuild(sk, index, records, None, len, threads, false)?.0)
+}
+
+/// The module of a file coded against a reference file: [`decode`] with the reference file as
+/// a fourth input.
+pub fn decode_against(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    let (&[], &[sk, index, records, reference]) = (params, inputs) else { return Err(corrupt()) };
+    Ok(rebuild(sk, index, records, Some(&codec::references(reference)), len, threads, false)?.0)
 }
 
 /// The formula of `files`, each coded against its parent (`parents[i]`, before it, or none):
-/// an application of [`SET_MODULE`] of an output per file, its root the outputs one after
-/// another (each for the caller to put where its file is). `None` where a file gives no
+/// an application of [`SET_MODULE`] split into the files ([`Formula::split`]), its root the
+/// files one after another (each for the caller to put where its file is). `None` where a file gives no
 /// formula of its own ([`encode`]). `parents` must be as long as `files`, each before its
 /// file. `alone` (as long, or empty) are the files' formulas of [`encode`] where known, which
 /// are not made again: those of the files without a parent are taken as they are, and the
@@ -135,6 +144,7 @@ pub fn encode_set(
     let mut params = vec![];
     varint::put(&mut params, files.len() as u64);
     parents.iter().for_each(|p| varint::put(&mut params, p.map_or(0, |p| p as u64 + 1)));
+    files.iter().for_each(|d| varint::put(&mut params, d.len() as u64));
     let mut f = Formula::default();
     let (mut sks, mut indexes, mut records) = (vec![], vec![], vec![]);
     for p in parts {
@@ -145,20 +155,22 @@ pub fn encode_set(
     }
     let inputs = vec![Node::pack(sks), Node::pack(indexes), Node::pack(records)];
     let a = Apply { module: SET_MODULE, resources: vec![], params, inputs, len: 0 };
-    let outputs = f.share(a, files.iter().map(|d| d.len() as u64).collect());
+    let outputs = f.split(a, files.iter().map(|d| d.len() as u64).collect());
     f.root = Node::Concat(outputs);
     Some(f)
 }
 
-/// The module of sets: the files of `sizes` bytes rebuilt from `inputs`, the packed
-/// skeletons, indexes and records of the files, each against the output of its parent as the
-/// parameters give them.
-pub fn decode_set(params: &[u8], inputs: &[&[u8]], sizes: &[u64], threads: usize) -> Result<Vec<Vec<u8>>> {
+/// The module of sets: the files rebuilt from `inputs`, the packed skeletons, indexes and
+/// records of the files, each against its parent as the parameters give them with its size,
+/// one after another in `len` bytes.
+pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let mut at = 0;
-    let n = codec::get_varint(params, &mut at)? as usize;
-    if n != sizes.len() {
+    let n = codec::get_varint(params, &mut at)?;
+    // (each parameter takes a byte at least)
+    if n > params.len() as u64 {
         return Err(corrupt());
     }
+    let n = n as usize;
     let mut parents = Vec::with_capacity(n);
     for i in 0..n {
         parents.push(match codec::get_varint(params, &mut at)? {
@@ -166,6 +178,10 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], sizes: &[u64], threads: usize
             p if p as usize <= i => Some(p as usize - 1),
             _ => return Err(corrupt()),
         });
+    }
+    let sizes = (0..n).map(|_| codec::get_varint(params, &mut at)).collect::<Result<Vec<u64>>>()?;
+    if sizes.iter().try_fold(0u64, |a, &s| a.checked_add(s)) != Some(len) {
+        return Err(corrupt());
     }
     let &[sks, indexes, records] = inputs else { return Err(corrupt()) };
     fn unpack(p: &[u8], n: usize) -> Result<Vec<&[u8]>> {
@@ -200,7 +216,9 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], sizes: &[u64], threads: usize
             (out[i], refs[i]) = (Some(f), r);
         }
     }
-    Ok(out.into_iter().map(Option::unwrap).collect())
+    let mut all = Vec::with_capacity(len as usize);
+    out.into_iter().for_each(|f| all.extend_from_slice(&f.unwrap()));
+    Ok(all)
 }
 
 /// The file of `len` bytes of the skeleton `sk`, the index and the records, against the images

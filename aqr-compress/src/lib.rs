@@ -42,7 +42,7 @@
 //! aqr-pdf the streams of a PDF file by what they are.
 //!
 //! Contents that are PNG files of the same geometry and alike (variants of a picture, with
-//! layers shown or hidden) are coded against each other, as one set of an output per file
+//! layers shown or hidden) are coded against each other, as one set split into the files
 //! (`sets`), where that is smaller than coding them alone.
 //!
 //! A file that a scan finds but its recompressor turns down is looked into by its parts where
@@ -107,7 +107,7 @@ pub use archive::{Archived, FileReport, Input, Report, Solid, Source, compress_t
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 
-use aqr_decompress::{BUNDLE, FLATE, LZ4, Native, SNAPPY, ZIP};
+use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, Native, SNAPPY, ZIP, ZIP_STORED};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
@@ -226,12 +226,14 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`SNAPPY`],
-/// [`ZIP`] and [`BUNDLE`], scanned.
-pub const CONTENTS: [Content; 5] = [
+/// [`LEVELDB`], [`ZIP`], [`ZIP_STORED`] and [`BUNDLE`], scanned.
+pub const CONTENTS: [Content; 7] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: SNAPPY, input: 0, nest: Nest::Scan },
+    Content { module: LEVELDB, input: 0, nest: Nest::Scan },
     Content { module: ZIP, input: 0, nest: Nest::Scan },
+    Content { module: ZIP_STORED, input: 0, nest: Nest::Scan },
     Content { module: BUNDLE, input: 0, nest: Nest::Scan },
 ];
 

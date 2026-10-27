@@ -278,12 +278,14 @@ fn reference_inputs_fail_cleanly() {
     let f = formula::encode_against(&variant, &base, 1).unwrap();
     let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     let len = variant.len() as u64;
-    assert!(formula::decode(&[], &inputs, len, 1).unwrap() == variant);
+    assert!(formula::decode_against(&[], &inputs, len, 1).unwrap() == variant);
+    assert!(formula::decode_against(&[], &inputs[..3], len, 1).is_err());
     assert!(formula::decode(&[], &inputs[..3], len, 1).is_err());
-    assert!(formula::decode(&[], &[inputs[0], inputs[1], inputs[2], inputs[3], inputs[3]], len, 1).is_err());
-    assert!(formula::decode(&[], &[inputs[0], inputs[1], inputs[2], b"not a png"], len, 1).is_err());
+    assert!(formula::decode(&[], &inputs, len, 1).is_err());
+    assert!(formula::decode_against(&[], &[inputs[0], inputs[1], inputs[2], inputs[3], inputs[3]], len, 1).is_err());
+    assert!(formula::decode_against(&[], &[inputs[0], inputs[1], inputs[2], b"not a png"], len, 1).is_err());
     let other = picture(200, 150, 6, 10, None);
-    let _ = formula::decode(&[], &[inputs[0], inputs[1], inputs[2], &other], len, 1);
+    let _ = formula::decode_against(&[], &[inputs[0], inputs[1], inputs[2], &other], len, 1);
     let mut x = 1u32;
     for i in 0..1500 {
         x = x.wrapping_mul(1103515245).wrapping_add(12345);
@@ -293,7 +295,7 @@ fn reference_inputs_fail_cleanly() {
         let at = (x as usize >> 4) % copies[k].len();
         copies[k][at] ^= 1 << (i % 8);
         let refs: Vec<&[u8]> = copies.iter().map(|c| &c[..]).collect();
-        let _ = formula::decode(&[], &refs, len, 1);
+        let _ = formula::decode_against(&[], &refs, len, 1);
     }
 }
 
@@ -304,19 +306,14 @@ impl aqr_formula::Modules for Set {
     fn apply(&self, a: &aqr_formula::Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
         let r = match a.module {
             formula::MODULE => formula::decode(&a.params, inputs, a.len, self.0),
-            _ => formula::decode_set(&a.params, inputs, &[a.len], self.0).map(|mut o| o.remove(0)),
+            formula::AGAINST_MODULE => formula::decode_against(&a.params, inputs, a.len, self.0),
+            _ => formula::decode_set(&a.params, inputs, a.len, self.0),
         };
         r.map_err(|e| aqr_formula::Error::new(e.to_string()))
     }
-
-    fn apply_shared(&self, s: &aqr_formula::Shared, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<Vec<u8>>> {
-        assert_eq!(s.apply.module, formula::SET_MODULE);
-        formula::decode_set(&s.apply.params, inputs, &s.sizes, self.0)
-            .map_err(|e| aqr_formula::Error::new(e.to_string()))
-    }
 }
 
-/// Variants of a picture, each coded against the one before: an output each, far smaller than
+/// Variants of a picture, each coded against the one before: split each, far smaller than
 /// coded alone, the same on any thread count, evaluated and through an archive.
 #[test]
 fn set_of_variants() {
@@ -331,6 +328,7 @@ fn set_of_variants() {
     let f = formula::encode_set(&refs, &parents, &[], 1).expect("coded");
     let Node::Concat(outputs) = &f.root else { panic!() };
     assert_eq!(outputs.len(), 4);
+    assert!(f.shared[0].split);
     assert!(f.eval(&Set(1)).unwrap() == files.concat());
     // the same from the formulas of the files alone, not made again
     let alone: Vec<_> = files.iter().map(|d| formula::encode(d, 1)).collect();
@@ -348,7 +346,7 @@ fn set_of_variants() {
     outputs.reverse();
     let want: Vec<u8> = files.iter().rev().flatten().copied().collect();
     let c = aqr_formula::aqr::encode(&g, None, aqr_formula::aqr::Level::Zstd(3)).unwrap();
-    let natives = aqr_formula::aqr::natives(&[formula::MODULE, formula::SET_MODULE], &Set(1));
+    let natives = aqr_formula::aqr::natives(&[formula::MODULE, formula::AGAINST_MODULE, formula::SET_MODULE], &Set(1));
     assert!(aqr_formula::aqr::decode(&c, &natives).unwrap() == want);
     // a file that is not a PNG file gives no set
     assert!(formula::encode_set(&[&files[0], b"not a png"], &[None, Some(0)], &[], 1).is_none());
@@ -372,14 +370,19 @@ fn set_inputs_fail_cleanly() {
         .map(|n| Formula { streams: f.streams.clone(), root: n.clone(), shared: vec![] }.eval(&Set(1)).unwrap())
         .collect();
     let ins: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
-    let (params, sizes) = (&s.apply.params[..], &s.sizes[..]);
-    assert!(formula::decode_set(params, &ins, sizes, 1).unwrap() == files);
-    assert!(formula::decode_set(params, &ins, &sizes[..1], 1).is_err());
-    assert!(formula::decode_set(params, &ins[..2], sizes, 1).is_err());
-    // the second's parent itself, or none (its records need one)
-    assert!(formula::decode_set(&[2, 0, 2], &ins, sizes, 1).is_err());
-    assert!(formula::decode_set(&[2, 0, 0], &ins, sizes, 1).is_err());
-    assert!(formula::decode_set(&[2, 0, 1, 0], &ins, sizes, 1).is_err());
+    let (params, len) = (&s.apply.params[..], s.apply.len);
+    assert!(formula::decode_set(params, &ins, len, 1).unwrap() == files.concat());
+    assert!(formula::decode_set(params, &ins, len - 1, 1).is_err());
+    assert!(formula::decode_set(params, &ins[..2], len, 1).is_err());
+    // the second's parent itself, or none (its records need one); parameters left over; sizes
+    // of another sum
+    let sizes = &params[3..];
+    assert!(formula::decode_set(&[&[2, 0, 2], sizes].concat(), &ins, len, 1).is_err());
+    assert!(formula::decode_set(&[&[2, 0, 0], sizes].concat(), &ins, len, 1).is_err());
+    assert!(formula::decode_set(&[params, &[0]].concat(), &ins, len, 1).is_err());
+    let mut swapped = [&[2, 0, 1][..], sizes].concat();
+    swapped[3] ^= 1;
+    assert!(formula::decode_set(&swapped, &ins, len, 1).is_err());
     let mut x = 1u32;
     for i in 0..1000 {
         x = x.wrapping_mul(1103515245).wrapping_add(12345);
@@ -388,6 +391,6 @@ fn set_inputs_fail_cleanly() {
         let at = (x as usize >> 4) % copies[k].len();
         copies[k][at] ^= 1 << (i % 8);
         let refs: Vec<&[u8]> = copies.iter().map(|c| &c[..]).collect();
-        let _ = formula::decode_set(params, &refs, sizes, 1);
+        let _ = formula::decode_set(params, &refs, len, 1);
     }
 }

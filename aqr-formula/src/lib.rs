@@ -9,7 +9,8 @@
 //! - `apply`: a [`Module`] (a pure function of its inputs, resources and parameters) applied
 //!   to nodes, declaring the size of its output;
 //! - `output`: an output of an application of several outputs, [`Shared`], which the formula
-//!   lists apart and whose every output is taken by exactly one `output` node;
+//!   lists apart and whose every output is taken by exactly one `output` node: an output of
+//!   the module, or one split from its only output by the sizes declared;
 //! - `patch`: a [`patch`] of a node against another one, its source.
 //!
 //! Streams are not placed yet: the archive encoder lays them out into non-leaf blocks, and
@@ -178,6 +179,10 @@ pub struct Shared {
     pub apply: Apply,
     /// Bytes of each output.
     pub sizes: Vec<u64>,
+    /// Whether the module outputs the concatenation of the outputs, which a Split instruction
+    /// separates ([`Formula::split`]), for a number of outputs that varies between applications;
+    /// otherwise each is an output of the module ([`Formula::share`]).
+    pub split: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -339,11 +344,21 @@ impl Formula {
 
     /// Adds the application `a` of outputs of `sizes` bytes (its `len` set to their sum),
     /// returning the outputs to be placed in the formula, each once.
-    pub fn share(&mut self, mut a: Apply, sizes: Vec<u64>) -> Vec<Node> {
+    pub fn share(&mut self, a: Apply, sizes: Vec<u64>) -> Vec<Node> {
+        self.push_shared(a, sizes, false)
+    }
+
+    /// [`Formula::share`] for a module of one output, the concatenation of the outputs of
+    /// `sizes` bytes, which are split from it.
+    pub fn split(&mut self, a: Apply, sizes: Vec<u64>) -> Vec<Node> {
+        self.push_shared(a, sizes, true)
+    }
+
+    fn push_shared(&mut self, mut a: Apply, sizes: Vec<u64>, split: bool) -> Vec<Node> {
         a.len = sizes.iter().sum();
         let shared = self.shared.len();
         let outputs = sizes.iter().enumerate().map(|(index, &len)| Node::Output { shared, index, len }).collect();
-        self.shared.push(Shared { apply: a, sizes });
+        self.shared.push(Shared { apply: a, sizes, split });
         outputs
     }
 
@@ -825,7 +840,7 @@ impl fmt::Display for Formula {
             writeln!(f)
         }
         for (i, s) in self.shared.iter().enumerate() {
-            write!(f, "shared #{i} {}", s.apply.module)?;
+            write!(f, "shared #{i} {}{}", s.apply.module, if s.split { " split" } else { "" })?;
             s.sizes.iter().try_for_each(|n| write!(f, " {n}"))?;
             attrs(&s.apply, f)?;
             s.apply.inputs.iter().try_for_each(|n| node(self, n, 1, f))?;
@@ -839,10 +854,23 @@ pub trait Modules {
     /// The output of `a` on `inputs`, the evaluated `a.inputs` (with `a.resources`).
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>>;
 
-    /// The outputs of `s` on `inputs`, the evaluated `s.apply.inputs`: by default those of a
-    /// module of one output, by [`Modules::apply`].
+    /// The outputs of `s` on `inputs`, the evaluated `s.apply.inputs`: by default those split
+    /// from the output of [`Modules::apply`] ([`Shared::split`]), or that output if `s` has one.
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
         match s.sizes[..] {
+            _ if s.split => {
+                let all = self.apply(&s.apply, inputs)?;
+                if all.len() as u64 != s.apply.len {
+                    return Err(Error::new(format!(
+                        "{} made {} bytes, not {}",
+                        s.apply.module,
+                        all.len(),
+                        s.apply.len
+                    )));
+                }
+                let mut rest = &all[..];
+                Ok(s.sizes.iter().map(|&n| rest.split_off(..n as usize).unwrap().to_vec()).collect())
+            }
             [_] => Ok(vec![self.apply(&s.apply, inputs)?]),
             _ => Err(Error::new(format!("{}: {} outputs", s.apply.module, s.sizes.len()))),
         }
@@ -1037,6 +1065,13 @@ mod tests {
         c.compact();
         assert_eq!(c.eval(&RevCut).unwrap(), b"efghhabcd");
         assert_eq!(c.streams[0].data, b"abcdefgh");
+
+        // split from the one output of a module
+        let mut s = Formula::raw("a", b"abcdefgh".to_vec());
+        let rev = Apply { module: REV, resources: vec![], params: vec![], inputs: vec![s.root.clone()], len: 0 };
+        let [x, y] = <[Node; 2]>::try_from(s.split(rev, vec![5, 3])).unwrap();
+        s.root = Node::concat([y, x]);
+        assert_eq!(s.eval(&Rev).unwrap(), b"cbahgfed");
     }
 
     /// A patch of a slice against another one, shown.

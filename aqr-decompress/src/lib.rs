@@ -7,7 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use aqr_exe::arch::{arm64, cil, x86};
 use aqr_formula::aqr::{self, Failure, NativeModule};
-use aqr_formula::{Apply, Error, Module, Modules, Result, Shared};
+use aqr_formula::{Apply, Error, Module, Modules, Result};
 
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; inputs: the streams of
@@ -31,15 +31,21 @@ pub const FLATE: Module = aqr_flate::formula::MODULE;
 /// and the compressor's settings; inputs: the data.
 pub const LZ4: Module = aqr_lz4::formula::MODULE;
 
-/// Snappy's compressor on data, for a Snappy stream, or on the contents of the blocks of a
-/// LevelDB table, for the table. Parameters: the kind and the compressor's hash; inputs: the
-/// data, or the contents, the layout and the blocks kept of the table.
+/// Snappy's compressor on data, for a Snappy stream. Parameters: the compressor's hash; inputs:
+/// the data.
 pub const SNAPPY: Module = aqr_snappy::formula::MODULE;
 
+/// Snappy's compressor on the contents of the blocks of a LevelDB table, for the table.
+/// Parameters: the compressor's hash; inputs: the contents, the layout and the blocks kept.
+pub const LEVELDB: Module = aqr_snappy::formula::TABLE_MODULE;
+
 /// A ZIP archive rebuilt from the contents of its entries, its DEFLATE bodies by aqr-flate.
-/// Resources: aqr-flate's model data of the records' profile, or none; inputs: the contents,
+/// Resources: aqr-flate's model data of the records' profile; inputs: the contents,
 /// the records, the layout and the bytes kept.
 pub const ZIP: Module = aqr_zip::formula::MODULE;
+/// A ZIP archive without deflated bodies, rebuilt from the contents of its entries. Inputs: the
+/// contents, the records (none), the layout and the bytes kept.
+pub const ZIP_STORED: Module = aqr_zip::formula::STORED_MODULE;
 
 /// An ar, tar or cpio archive rebuilt from the contents of its members. Inputs: the contents
 /// and the layout.
@@ -49,7 +55,9 @@ pub const BUNDLE: Module = aqr_bundle::formula::MODULE;
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
 pub const PNG: Module = aqr_png::formula::MODULE;
-/// Sets of PNG files coded against each other, of an output per file.
+/// A PNG file coded against a reference file.
+pub const PNG_AGAINST: Module = aqr_png::formula::AGAINST_MODULE;
+/// Sets of PNG files coded against each other, the files one after another.
 pub const PNG_SET: Module = aqr_png::formula::SET_MODULE;
 pub const JPEG: Module = aqr_jpeg::formula::MODULE;
 pub const MP3: Module = aqr_mp3::formula::MODULE;
@@ -69,8 +77,29 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 20] = [
-    X86, ARM64, CIL, FLATE, LZ4, SNAPPY, ZIP, BUNDLE, PNG, PNG_SET, JPEG, MP3, FLAC, PSD, PDF, SQLITE, FASTA, WRT, PCM,
+pub const MODULES: [Module; 23] = [
+    X86,
+    ARM64,
+    CIL,
+    FLATE,
+    LZ4,
+    SNAPPY,
+    LEVELDB,
+    ZIP,
+    ZIP_STORED,
+    BUNDLE,
+    PNG,
+    PNG_AGAINST,
+    PNG_SET,
+    JPEG,
+    MP3,
+    FLAC,
+    PSD,
+    PDF,
+    SQLITE,
+    FASTA,
+    WRT,
+    PCM,
     RASTER,
 ];
 
@@ -87,8 +116,10 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 11] = [
+const RECONS: [(Module, Decode); 13] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
+    (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
+    (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
     (JPEG, |p, r, i, n, t| none(r).and_then(|_| aqr_jpeg::formula::decode(p, i, n, t).map_err(msg))),
     (MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(msg)),
     (FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(msg)),
@@ -179,14 +210,17 @@ impl Native {
         } else if m == SNAPPY {
             none(resources)?;
             aqr_snappy::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == LEVELDB {
+            none(resources)?;
+            aqr_snappy::formula::decode_table(params, inputs, len, threads).map_err(msg)
         } else if m == ZIP {
             aqr_zip::formula::decode(params, resources, inputs, len, threads).map_err(msg)
+        } else if m == ZIP_STORED {
+            none(resources)?;
+            aqr_zip::formula::decode_stored(params, inputs, len, threads).map_err(msg)
         } else if m == BUNDLE {
             none(resources)?;
             aqr_bundle::formula::decode(params, inputs, len, threads).map_err(msg)
-        } else if m == PNG_SET {
-            none(resources)?;
-            Ok(aqr_png::formula::decode_set(params, inputs, &[len], threads).map_err(msg)?.remove(0))
         } else if let Some((_, decode)) = RECONS.iter().find(|r| r.0 == m) {
             decode(params, resources, inputs, len, threads)
         } else {
@@ -195,40 +229,9 @@ impl Native {
     }
 }
 
-impl Native {
-    /// The outputs of `m` on `inputs` with `resources`, of `sizes` bytes (see
-    /// [`Modules::apply_shared`]).
-    pub fn run_shared(
-        &self,
-        m: Module,
-        params: &[u8],
-        resources: &[&[u8]],
-        inputs: &[&[u8]],
-        sizes: &[u64],
-    ) -> Result<Vec<Vec<u8>>> {
-        let run = || -> std::result::Result<Vec<Vec<u8>>, String> {
-            if m == PNG_SET {
-                none(resources)?;
-                aqr_png::formula::decode_set(params, inputs, sizes, self.threads.max(1)).map_err(msg)
-            } else {
-                Err(format!("{} outputs", sizes.len()))
-            }
-        };
-        catch_unwind(AssertUnwindSafe(run))
-            .unwrap_or_else(|_| Err("panicked".into()))
-            .map_err(|e| Error::new(format!("{m}: {e}")))
-    }
-}
-
 impl Modules for Native {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
         let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
         self.run(a.module, &a.params, &resources, inputs, a.len)
-    }
-
-    fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
-        let a = &s.apply;
-        let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
-        self.run_shared(a.module, &a.params, &resources, inputs, &s.sizes)
     }
 }

@@ -75,9 +75,8 @@ fn main() {
             }
         }
         let ins: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-        let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
         let start = Instant::now();
-        let ok = formula::decode(&a.params, &res, &ins, a.len, threads).is_ok_and(|o| o == d);
+        let ok = formula::apply(a, &ins, threads).is_ok_and(|o| o == d);
         dec_secs += start.elapsed().as_secs_f64();
         made += d.len();
         if !ok {

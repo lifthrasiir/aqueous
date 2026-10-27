@@ -3,8 +3,8 @@ use std::io::Write;
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, BUNDLE, FLAC, FLATE, JPEG, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SNAPPY, SQLITE, WRT, X86, ZIP,
-    decompress,
+    ARM64, BUNDLE, FLAC, FLATE, JPEG, LEVELDB, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE, WRT, X86, ZIP,
+    ZIP_STORED, decompress,
 };
 use aqr_formula::aqr;
 
@@ -201,7 +201,7 @@ fn lz4_nested() {
 fn leveldb_tables() {
     for t in ["table-mul", "table-crc", "mixed-mul", "odd-crc"] {
         let d = fixture(&format!("aqr-snappy/tests/data/{t}.ldb"));
-        assert_eq!(modules(&roundtrip(&d, &all())), [SNAPPY.name], "{t}");
+        assert_eq!(modules(&roundtrip(&d, &all())), [LEVELDB.name], "{t}");
     }
     // known by its end: not found in data, where it would be cut there
     let d = fixture("aqr-snappy/tests/data/table-mul.ldb");
@@ -740,8 +740,9 @@ fn zip_nested_like_42() {
     let t = std::time::Instant::now();
     let f = roundtrip(&level, &opt);
     assert!(t.elapsed().as_secs() < 60);
-    // five levels of archives, and nothing inflated as much as the zeros
-    assert_eq!(modules(&f), [ZIP.name; 6]);
+    // five levels of archives (the innermost of stored entries), and nothing inflated as much
+    // as the zeros
+    assert_eq!(modules(&f), [ZIP.name, ZIP.name, ZIP.name, ZIP.name, ZIP.name, ZIP_STORED.name]);
     let inflated: usize = f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum();
     assert!(inflated < 64 << 20, "{inflated}");
     // with room for it, the zeros are inflated too
@@ -907,5 +908,5 @@ fn bundles_not_deeper() {
     let z = zip(&[("a.jpg", &jpeg, false), ("b.txt", &text(3000), false)]);
     let d = gzip_named(&tar(&[("x.zip", &z)]), "x.tar");
     let f = roundtrip(&d, &Options { smaller: false, ..Options::default() });
-    assert_eq!(modules(&f), [FLATE.name, BUNDLE.name, ZIP.name, JPEG.name], "{f}");
+    assert_eq!(modules(&f), [FLATE.name, BUNDLE.name, ZIP_STORED.name, JPEG.name], "{f}");
 }

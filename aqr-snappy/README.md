@@ -12,13 +12,14 @@ python3 aqr-snappy/scripts/gen-fixtures.py MUL_LIB CRC_LIB             # tests/d
 ```
 
 ```rust
-use aqr_snappy::formula::{self, MODULE};
+use aqr_snappy::formula::{self, TABLE_MODULE};
 // None where the file is not a LevelDB table, or none of its blocks is Snappy's
 let f = formula::encode(&table, 1).unwrap();
-// `f` rebuilds `table` when evaluated with `formula::decode` as the module `MODULE`
+// `f` rebuilds `table` when evaluated with `formula::decode_table` as the module `TABLE_MODULE`
 ```
 
-`FORMAT.md` specifies the module `snappy-recons`, with the compressor in full.
+`FORMAT.md` specifies the modules `snappy-recons` and `leveldb-recons`, with the compressor in
+full.
 
 ## The hash
 

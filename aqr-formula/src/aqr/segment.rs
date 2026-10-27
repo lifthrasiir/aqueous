@@ -405,11 +405,7 @@ impl Encoder {
         let mut e =
             Emit { ordinals: &local, modules: &u.modules, resources: &own_resources, out: &mut data, stack: vec![] };
         for &i in &u.shared {
-            let s = &f.shared[i];
-            s.apply.inputs.iter().for_each(|n| e.node(n));
-            e.apply(&s.apply, &s.sizes);
-            let k = e.stack.len() - s.sizes.len();
-            (0..s.sizes.len()).for_each(|j| e.stack[k + j] = Some((i, j)));
+            e.shared(i, &f.shared[i]);
         }
         leaf.outputs.iter().for_each(|n| e.node(n));
         debug_assert!(e.stack.iter().all(Option::is_none) && e.stack.len() == leaf.outputs.len());

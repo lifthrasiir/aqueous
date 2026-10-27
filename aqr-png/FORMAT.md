@@ -412,25 +412,28 @@ matches the layout lists and 285 for other matches of length 258) and 32 distanc
 
 ## Formula module
 
-The module is `png-recons`, version 2, in `formula::encode`, `formula::encode_against` and
-`formula::decode`. Its output is the PNG file, whose length the application gives. The file
-is rebuilt as in [Rebuilding the file](#rebuilding-the-file), from the skeleton and the image
-records.
+The module is `png-recons`, version 3, in `formula::encode` and `formula::decode`; and
+`png-against`, version 1, in `formula::encode_against` and `formula::decode_against`, for a file
+coded against a reference file. Its output is the PNG file, whose length the application gives.
+The file is rebuilt as in [Rebuilding the file](#rebuilding-the-file), from the skeleton and the
+image records.
 
 **Parameters**: none (empty). A module application with parameters is invalid.
 
-**Inputs**: three or four, in this order. Any other count is invalid.
+**Inputs**: three for `png-recons`, four for `png-against`, in this order. Any other count is
+invalid.
 
 | slot | class | content |
 |---|---|---|
 | 0 | `png/skeleton` | the [skeleton](#skeleton) |
 | 1 | `png/index` | for each image in order, the length of its record: a varint |
 | 2 | `png/records` | the [image records](#image-records), concatenated in order, without length prefixes |
-| 3 | `png/reference`, or any node | the [reference file](#references), if any |
+| 3 | `png/reference`, or any node | the [reference file](#references), for `png-against` |
 
 `formula::encode_against` puts the reference file in a stream of its own, for the caller to
 replace with whatever node gives it (the output of the reference's own application, say).
-It gives the fourth input only if a record is of kind 2.
+It gives an application of `png-against` only if a record is of kind 2, and of `png-recons`
+otherwise.
 
 The images are those that the skeleton gives. The index has one varint per image and ends
 exactly there; the records fill slot 2 exactly. Each record is the byte 0 and the payload,
@@ -448,16 +451,18 @@ the overhead of the slots).
 
 ## Sets of files
 
-The module `png-set`, version 1, in `formula::encode_set` and `formula::decode_set`, rebuilds
-several PNG files at once, each coded against an earlier one (variants of a picture, say). It
-has an output per file, whose sizes the application gives.
+The module `png-set`, version 2, in `formula::encode_set` and `formula::decode_set`, rebuilds
+several PNG files at once, each coded against an earlier one (variants of a picture, say). Its
+output is the files one after another, whose length the application gives; a Split instruction
+separates them by the sizes the formula declares, which are those of the parameters.
 
 **Parameters**:
 
 | field | |
 |---|---|
-| varint | `n`, the number of files, which must be the number of outputs |
+| varint | `n`, the number of files |
 | `n` varints | for each file `i`, 0 if it has no parent, else its parent's index plus 1, which must be at most `i` |
+| `n` varints | for each file `i`, its size; the sizes must add up to the length of the output |
 
 The parameters must end exactly there.
 
@@ -470,12 +475,13 @@ the items of file `i` being:
 | 1 | the index of file `i`, as slot 1 of `png-recons` |
 | 2 | the records of file `i`, as slot 2 of `png-recons` |
 
-Output `i` is file `i`, rebuilt as `png-recons` rebuilds a file from its slots 0 to 2, with
-its parent's file (output `p`, rebuilt before it) as the [reference file](#references) if it
-has a parent `p`, and none otherwise. It must have the size the application gives.
+File `i` is rebuilt as `png-recons` rebuilds a file from its slots 0 to 2, or as
+`png-against` with its parent's file (file `p`, rebuilt before it) as the
+[reference file](#references) if it has a parent `p`. It must have the size the parameters
+give.
 
-`formula::encode_set` gives an application of `png-set` with the files' slots as streams of
-the classes of `png-recons`, and a root of its outputs one after another, for the caller to
-put each where its file is. It codes every record against the parent's image where that makes
+`formula::encode_set` gives an application of `png-set` split into the files, with the files'
+slots as streams of the classes of `png-recons`, and a root of the files one after another, for
+the caller to put each where its file is. It codes every record against the parent's image where that makes
 it smaller (as `formula::encode_against`), and gives no formula if a file does not have one of
 its own.

@@ -377,10 +377,7 @@ impl Encoder {
             let mut e =
                 Emit { ordinals: &ordinals, modules: &modules, resources: &resources, out: &mut data, stack: vec![] };
             for (i, s) in f.shared.iter().enumerate() {
-                s.apply.inputs.iter().for_each(|n| e.node(n));
-                e.apply(&s.apply, &s.sizes);
-                let k = e.stack.len() - s.sizes.len();
-                (0..s.sizes.len()).for_each(|j| e.stack[k + j] = Some((i, j)));
+                e.shared(i, s);
             }
             e.node(&f.root);
             debug_assert_eq!(e.stack, [None]);
@@ -470,6 +467,23 @@ impl Emit<'_> {
     }
 
     /// The Apply instruction of `a` (its inputs pushed), of outputs of `sizes`.
+    /// The instructions pushing the outputs of `s`, the `i`-th application of several outputs.
+    fn shared(&mut self, i: usize, s: &crate::Shared) {
+        s.apply.inputs.iter().for_each(|n| self.node(n));
+        if s.split {
+            self.apply(&s.apply, &[s.apply.len]);
+            self.out.push(SPLIT);
+            varint::put(self.out, s.sizes.len() as u64);
+            s.sizes.iter().for_each(|&n| varint::put(self.out, n));
+            self.stack.pop();
+            self.stack.extend(s.sizes.iter().map(|_| None));
+        } else {
+            self.apply(&s.apply, &s.sizes);
+        }
+        let k = self.stack.len() - s.sizes.len();
+        (0..s.sizes.len()).for_each(|j| self.stack[k + j] = Some((i, j)));
+    }
+
     fn apply(&mut self, a: &crate::Apply, sizes: &[u64]) {
         let out = &mut *self.out;
         out.push(APPLY);
@@ -1183,7 +1197,7 @@ pub fn natives<'a>(modules: &[Module], m: &'a (impl crate::Modules + Sync + 'a))
             };
             match sizes {
                 [_] => self.m.apply(&a, inputs).map(|out| vec![out]),
-                _ => self.m.apply_shared(&crate::Shared { apply: a, sizes: sizes.to_vec() }, inputs),
+                _ => self.m.apply_shared(&crate::Shared { apply: a, sizes: sizes.to_vec(), split: false }, inputs),
             }
             .map_err(|e| Failure::Invalid(e.0))
         }
@@ -2264,6 +2278,20 @@ mod tests {
         let mut twice = f.clone();
         twice.root = Node::concat([twice.root.clone(), Node::Output { shared: 0, index: 0, len: 3 }]);
         assert!(encode(&twice, None, Level::Zstd(3)).is_err());
+    }
+
+    /// Outputs split from the one output of a module (Split instructions), taken as those of
+    /// several outputs are.
+    #[test]
+    fn split_outputs() {
+        let mut f = Formula::default();
+        let a = f.push("a", b"abcdefgh".to_vec());
+        let rev = crate::Apply { module: REV, resources: vec![], params: vec![1, 2, 3], inputs: vec![a], len: 0 };
+        let [o0, o1, o2] = <[Node; 3]>::try_from(f.split(rev, vec![3, 0, 5])).unwrap();
+        f.root = Node::concat([o2, Node::slice(0, 0, 1), o1, o0]);
+        assert!(f.to_string().starts_with("shared #0 rev@1 split 3 0 5"));
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
+        assert_eq!(decode(&c, &natives()).unwrap(), b"edcbaahgf");
     }
 
     fn sample() -> Formula {

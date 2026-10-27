@@ -13,8 +13,7 @@ fn fixture(name: &str) -> Vec<u8> {
 fn decode(f: &Formula, threads: usize) -> aqr_zip::Result<Vec<u8>> {
     let Node::Apply(a) = &f.root else { panic!("not an application") };
     let ins: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-    let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
-    formula::decode(&a.params, &res, &ins, a.len, threads)
+    formula::apply(a, &ins, threads)
 }
 
 /// Encodes `d`, checking that the module gives it back, and how the bodies are made.
@@ -591,8 +590,7 @@ fn contents_by_kind() {
     // the same archive, and the same data as without kinds
     let Node::Apply(a) = &f.root else { panic!() };
     let module = |a: &aqr_formula::Apply, ins: &[&[u8]]| {
-        let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
-        formula::decode(&a.params, &res, ins, a.len, 1).map_err(|e| aqr_formula::Error::new(format!("{e:?}")))
+        formula::apply(a, ins, 1).map_err(|e| aqr_formula::Error::new(format!("{e:?}")))
     };
     assert!(f.eval(&module).unwrap() == d);
     let plain = formula::encode_with(&d, &Options::default()).unwrap().formula;

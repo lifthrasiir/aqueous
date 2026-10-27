@@ -20,7 +20,7 @@ let f = formula::encode(&archive, 8).unwrap();
 // `f` rebuilds `archive` when evaluated with `formula::decode` as the module `MODULE`
 ```
 
-`FORMAT.md` specifies the module `zip-recons`.
+`FORMAT.md` specifies the modules `zip-recons` and `zip-stored`.
 
 ## What it takes
 

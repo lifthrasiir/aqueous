@@ -1,13 +1,13 @@
-# The `snappy-recons` module
+# The `snappy-recons` and `leveldb-recons` modules
 
-This document specifies the module `snappy-recons` of aqr-formula entry formulas. The module
-rebuilds a Snappy stream from its data, or a LevelDB table from the contents of its blocks. Its
-Snappy streams are what Snappy 1.2.2 gives at its default level (`snappy::RawCompress`,
-`snappy_compress`). The document is meant to be complete: an implementation of the module can
+This document specifies the modules `snappy-recons` and `leveldb-recons` of aqr-formula entry
+formulas. The former rebuilds a Snappy stream from its data, the latter a LevelDB table from the
+contents of its blocks. Their Snappy streams are what Snappy 1.2.2 gives at its default level (`snappy::RawCompress`,
+`snappy_compress`). The document is meant to be complete: an implementation of the modules can
 be written from it alone. Sections marked *(encoder)* describe the choices this implementation
-makes when it builds formulas; the module does not depend on them.
+makes when it builds formulas; the modules do not depend on them.
 
-The module is a compressor, so the algorithm itself is normative. The output must match Snappy
+The modules are compressors, so the algorithm itself is normative. The output must match Snappy
 to the byte. Since 1.1.10, Snappy hashes differently depending on how it was built: with the
 CRC-32C instruction where the target has one (SSE4.2, ARMv8 with CRC), or by multiplication
 otherwise. Both hashes are specified here (§3.2).
@@ -15,7 +15,7 @@ otherwise. Both hashes are specified here (§3.2).
 Contents:
 
 1. [Conventions](#1-conventions)
-2. [The module](#2-the-module)
+2. [The modules](#2-the-modules)
 3. [Snappy streams](#3-snappy-streams)
 4. [LevelDB tables](#4-leveldb-tables)
 5. [Encoding](#5-encoding-encoder) *(encoder)*
@@ -38,24 +38,24 @@ Contents:
   that of LevelDB's `doc/table_format.md`. This document only says which of the valid
   encodings is produced.
 
-## 2. The module
+## 2. The modules
 
-- **Module**: name `snappy-recons`, version 1.
-- **Params**: exactly 2 bytes.
+- **Modules**: name `snappy-recons`, version 2, for a Snappy stream; name `leveldb-recons`,
+  version 1, for a LevelDB table.
+- **Params**: exactly 1 byte.
 
   ```text
-  u8      kind          0: a Snappy stream, 1: a LevelDB table
   u8      hash          0: multiplication, 1: CRC-32C (§3.2)
   ```
 
 - **Resources**: none.
 - **Inputs**:
-  - kind 0: exactly one, the data `D`;
-  - kind 1: exactly three, `data` (the contents of the blocks rebuilt), `layout` and `kept`
-    (the blocks kept as they are), as §4.2 defines them. Their classes are `ldb/blocks`,
+  - `snappy-recons`: exactly one, the data `D`;
+  - `leveldb-recons`: exactly three, `data` (the contents of the blocks rebuilt), `layout` and
+    `kept` (the blocks kept as they are), as §4.2 defines them. Their classes are `ldb/blocks`,
     `ldb/layout` and `ldb/kept`.
-- **Output**: for kind 0, `snappy(D)` of §3. For kind 1, the table of §4. Its length must be
-  the `len` the application declares.
+- **Output**: for `snappy-recons`, `snappy(D)` of §3. For `leveldb-recons`, the table of §4.
+  Its length must be the `len` the application declares.
 
 ## 3. Snappy streams
 
@@ -166,13 +166,13 @@ metaindex and the index.
 The contents of the blocks (`data`) are recompressed in turn by aqr-compress. A LevelDB table
 is known by its end, so aqr-compress takes one only as a whole file, or as the whole of what it
 recompresses, never found in the middle of data. `formula::stream` makes an application of
-kind 0, and `formula::find_hash` finds the hash for one.
+`snappy-recons`, and `formula::find_hash` finds the hash for one.
 
 ## 6. Validation
 
-The module fails if:
+A module fails if:
 
-- the params are not 2 bytes of known values, or the inputs are not as many as the kind takes;
+- the params are not 1 byte of a known value, or the inputs are not as many as it takes;
 - `|D|` is `2^32` or more;
 - `layout` is malformed: a truncated varint or code, an unknown code, `n` past the end of `data`
   or `kept`, fewer than two blocks, or `data` or `kept` not used up;

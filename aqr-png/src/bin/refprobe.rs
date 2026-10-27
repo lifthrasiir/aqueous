@@ -190,7 +190,8 @@ fn against(b: &Image, a: &Image) -> (usize, f64, f64) {
     let enc = t.elapsed().as_secs_f64();
     let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
     let t = std::time::Instant::now();
-    let out = aqr_png::formula::decode(&[], &inputs, fb.len() as u64, 1).expect("decodes");
+    let decode = if inputs.len() == 4 { aqr_png::formula::decode_against } else { aqr_png::formula::decode };
+    let out = decode(&[], &inputs, fb.len() as u64, 1).expect("decodes");
     let dec = t.elapsed().as_secs_f64();
     assert!(out == fb, "{} against {} does not round trip", b.path.display(), a.path.display());
     let rec = f.streams.iter().find(|s| s.class == "png/records").unwrap().data.len();

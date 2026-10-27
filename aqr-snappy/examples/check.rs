@@ -46,12 +46,12 @@ fn main() {
         };
         rebuilt += 1;
         let Node::Apply(a) = &f.root else { unreachable!() };
-        hashes[a.params[1] as usize] += 1;
+        hashes[a.params[0] as usize] += 1;
         kept_bytes += f.streams[2].data.len();
         zstd_inputs += f.streams.iter().map(|s| zstd(&s.data)).sum::<usize>();
         let ins: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         let start = Instant::now();
-        formula::decode(&a.params, &ins, a.len, 1).unwrap();
+        formula::decode_table(&a.params, &ins, a.len, 1).unwrap();
         secs += start.elapsed().as_secs_f64();
         made += d.len();
     }

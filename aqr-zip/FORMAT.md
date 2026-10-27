@@ -1,7 +1,8 @@
-# The `zip-recons` module
+# The `zip-recons` and `zip-stored` modules
 
-This document specifies the module `zip-recons` of aqr-formula entry formulas. The module
-rebuilds a ZIP archive bit for bit from the contents of its entries, its DEFLATE bodies by
+This document specifies the modules `zip-recons` and `zip-stored` of aqr-formula entry
+formulas. They are one module but for the resources, so the document speaks of "the module".
+The module rebuilds a ZIP archive bit for bit from the contents of its entries, its DEFLATE bodies by
 aqr-flate, and a *layout* holding the rest of the archive. The layout keeps every byte of the
 headers, but each fixed field is stored as its XOR with a prediction from the contents and
 from the records before it, so that whatever a writer put there is kept exactly and what
@@ -13,7 +14,7 @@ builds formulas; the module does not depend on them.
 Contents:
 
 1. [Conventions](#1-conventions)
-2. [The module](#2-the-module)
+2. [The modules](#2-the-modules)
 3. [The layout](#3-the-layout)
 4. [Predictions](#4-predictions)
 5. [Encoding](#5-encoding-encoder) *(encoder)*
@@ -51,14 +52,15 @@ Contents:
   the values, in order, into the data from its start, as long as the next value fits entirely.
   The block headers are never coded, so the zip64 data is found the same way before and after.
 
-## 2. The module
+## 2. The modules
 
-- **Module**: name `zip-recons`, version 1.
+- **Modules**: name `zip-recons`, version 2, for an archive with a deflated body (§3.2) at
+  least; name `zip-stored`, version 1, for one without.
 - **Params**: none (empty).
-- **Resources**: none, or the two resources of aqr-flate's module `flate-recons` for the
-  profile of the records: the catalog's rules, then the default models or the priors
-  (aqr-flate's `FORMAT.md`, "Resources"). They are required when the layout has a deflated
-  body (§3.2), and then all records must be of that one profile.
+- **Resources**: for `zip-recons`, the two resources of aqr-flate's module `flate-recons` for
+  the profile of the records: the catalog's rules, then the default models or the priors
+  (aqr-flate's `FORMAT.md`, "Resources"). All records must be of that one profile. For
+  `zip-stored`, none.
 - **Inputs**: exactly four:
   1. `data` (class `raw`): the contents of the stored and deflated bodies, in order;
   2. `records` (class `flate/record`): the aqr-flate records of the deflated bodies, in order;
@@ -251,9 +253,10 @@ from the end of the data.
 
 The module fails if:
 
-- the params are not empty, the inputs are not four, or the resources are neither none nor two;
-- there are resources and no deflated body, or a deflated body and no resources, or records of
-  different profiles;
+- the params are not empty, the inputs are not four, or the resources are not two for
+  `zip-recons`;
+- `zip-recons` has no deflated body, or `zip-stored` has one, or the records are of different
+  profiles;
 - the layout is malformed: a truncated varint or field, an unknown tag, body, descriptor form or
   `same` bit, a name, extra field or comment longer than 65535 bytes, a `ref` naming no earlier
   entry, `same` without a local entry, `k` of 0 or past the first entry, or a range past the end
