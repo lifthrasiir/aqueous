@@ -243,3 +243,78 @@ fn unknown_module_runs() {
     assert_eq!(aqr::decode(&c, &Native::default()).unwrap(), b"olleh");
     assert!(Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).is_err());
 }
+
+/// The imports of tasks.
+const TASKS: &str = r#"
+    (import "aqr" "aqr_spawn" (func $spawn (param i32 i32) (result i32)))
+    (import "aqr" "aqr_result" (func $result (param i32 i32)))
+    (import "aqr" "aqr_join" (func $join (param i32 i32) (result i32)))
+    (import "aqr" "aqr_take" (func $take (param i32 i32 i32 i32)))
+"#;
+
+/// A task per byte of the input, each giving the byte plus 1 and zeroing it in its copy of the
+/// working memory; the output is their results, then the input as the module has it (as it was).
+fn incr(entry_tail: &str) -> String {
+    format!(
+        r#"(module {MEMORIES} {TASKS}
+            (func (export "aqr_task") (param $arg i32) (param $i i32)
+                ;; the other memories are empty to tasks
+                (if (i64.ne (memory.size 2) (i64.const 0)) (then unreachable))
+                (if (i32.eq (i32.load8_u (i32.add (local.get $arg) (local.get $i))) (i32.const 0x21))
+                    (then unreachable))
+                (i32.store8 (i32.add (i32.const 0x8000) (local.get $i))
+                    (i32.add (i32.load8_u (i32.add (local.get $arg) (local.get $i))) (i32.const 1)))
+                (i32.store8 (i32.add (local.get $arg) (local.get $i)) (i32.const 0))
+                (call $result (i32.add (i32.const 0x8000) (local.get $i)) (i32.const 1)))
+            (func (export "aqr_apply_whole") (param i64) (param $n i64) (param i64)
+                (local $h i32) (local $i i32)
+                (memory.copy 0 2 (i32.const 0x100) (i64.const 0) (i32.wrap_i64 (local.get $n)))
+                (local.set $h (call $spawn (i32.const 0x100) (i32.wrap_i64 (local.get $n))))
+                (loop $next (if (i32.lt_u (local.get $i) (i32.wrap_i64 (local.get $n))) (then
+                    (if (i32.ne (call $join (local.get $h) (local.get $i)) (i32.const 1)) (then unreachable))
+                    (call $take (local.get $h) (local.get $i) (i32.add (i32.const 0x4000) (local.get $i)) (i32.const 1))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br $next))))
+                (memory.copy 3 0 (i64.const 0) (i32.const 0x4000) (i32.wrap_i64 (local.get $n)))
+                (memory.copy 3 0 (local.get $n) (i32.const 0x100) (i32.wrap_i64 (local.get $n)))
+                {entry_tail}))"#
+    )
+}
+
+/// Tasks: each of a copy of the working memory at the spawn, giving back only its result; their
+/// failures, violations and memory.
+#[test]
+fn tasks() {
+    let ok = incr("");
+    assert_eq!(apply(&ok, &[b"abc"], &[6], u64::MAX).unwrap(), [b"bcdabc"]);
+    assert_eq!(apply(&ok, &[b""], &[0], u64::MAX).unwrap(), [b""]);
+    let many: Vec<u8> = (0..200u8).map(|b| b % 32 + 64).collect();
+    let want: Vec<u8> = many.iter().map(|b| b + 1).chain(many.iter().copied()).collect();
+    assert_eq!(apply(&ok, &[&many], &[400], u64::MAX).unwrap(), [want]);
+    // a task trapping ('!'), as the application does
+    invalid(apply(&ok, &[b"a!c"], &[6], u64::MAX), "trap");
+    // the memory of the tasks counts: 4 pages for the module's memories, and one per task
+    assert!(apply(&ok, &[b"a"], &[2], 5 << 16).is_ok());
+    assert!(matches!(apply(&ok, &[b"a"], &[2], 4 << 16), Err(Failure::Resource(_))));
+
+    // results taken but for one, a result outside a task, a take before the join
+    let skip = incr("")
+        .replace("(i32.lt_u (local.get $i) (i32.wrap_i64 (local.get $n)))", "(i32.lt_u (local.get $i) (i32.const 1))");
+    invalid(apply(&skip, &[b"ab"], &[4], u64::MAX), "tasks not taken");
+    invalid(apply(&incr("(call $result (i32.const 0) (i32.const 1))"), &[b"a"], &[2], u64::MAX), "outside a task");
+    let early = incr("").replace(
+        "(if (i32.ne (call $join",
+        "(call $take (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0)) (if (i32.ne (call $join",
+    );
+    invalid(apply(&early, &[b"a"], &[2], u64::MAX), "not joined");
+
+    // the profile: tasks need aqr_task, and nothing starts
+    invalid(load(&incr("").replace(r#"(export "aqr_task")"#, "")), "without aqr_task");
+    invalid(
+        load(
+            r#"(module (import "aqr" "aqr_memory" (memory 1)) (func $s) (start $s)
+            (func (export "aqr_apply_whole") (param i64 i64 i64)))"#,
+        ),
+        "start",
+    );
+}

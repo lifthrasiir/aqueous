@@ -11,6 +11,7 @@ default = ["wasm"]
 wasm = ["dep:wasmtime", "dep:wasmparser"]
 
 [dependencies]
+aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula" }
 aqr-modules = { path = "../aqr-modules" }
 sha2 = "0.10"
@@ -42,3 +43,7 @@ wat = "1"
 [[example]]
 name = "aqr-decompress-modules"
 path = "examples/modules.rs"
+
+[[example]]
+name = "aqr-decompress-wasm"
+path = "examples/wasm.rs"

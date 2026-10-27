@@ -13,6 +13,14 @@ unsafe extern "C" {
     fn heartbeat_();
     #[link_name = "log"]
     fn log_(ptr: *const u8, len: usize);
+    #[link_name = "spawn"]
+    fn spawn_(rec: *const u8, n: u32) -> u32;
+    #[link_name = "result"]
+    fn result_(ptr: *const u8, len: usize);
+    #[link_name = "join"]
+    fn join_(h: u32, i: u32) -> u32;
+    #[link_name = "take"]
+    fn take_(h: u32, i: u32, dst: *mut u8, len: usize);
 }
 
 #[inline]
@@ -38,6 +46,47 @@ pub fn heartbeat() {
 #[inline]
 pub fn log(msg: &[u8]) {
     unsafe { log_(msg.as_ptr(), msg.len()) }
+}
+
+#[cfg(feature = "alloc")]
+#[inline]
+pub fn spawn(rec: &crate::task::Record, n: usize) -> u32 {
+    let n = u32::try_from(n).unwrap_or_else(|_| trap());
+    unsafe { spawn_(rec as *const crate::task::Record as *const u8, n) }
+}
+
+#[cfg(feature = "alloc")]
+#[inline]
+pub fn result(out: &[u8]) {
+    unsafe { result_(out.as_ptr(), out.len()) }
+}
+
+#[cfg(feature = "alloc")]
+#[inline]
+pub fn join(h: u32, i: usize) -> usize {
+    unsafe { join_(h, i as u32) as usize }
+}
+
+#[cfg(feature = "alloc")]
+#[inline]
+pub fn take(h: u32, i: usize, dst: &mut [u8]) {
+    unsafe { take_(h, i as u32, dst.as_mut_ptr(), dst.len()) }
+}
+
+/// The body of `aqr_task`, which `aqr-ld` makes of it (see [`crate::task`]); a trap without
+/// tasks (the feature `alloc`).
+#[doc(hidden)]
+#[inline]
+pub unsafe fn task_body(rec: *const u8, i: u32) {
+    #[cfg(feature = "alloc")]
+    unsafe {
+        crate::task::body(rec as *const crate::task::Record, i as usize)
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        let _ = (rec, i);
+        trap()
+    }
 }
 
 #[inline]

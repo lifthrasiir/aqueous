@@ -84,6 +84,35 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// As the error of a task (reconstruction on WebAssembly): `Invalid`'s message is not kept.
+impl aqr_common::wire::Wire for Error {
+    fn put(&self, out: &mut Vec<u8>) {
+        match self {
+            Error::Truncated => out.push(0),
+            Error::Invalid(_) => out.push(1),
+            Error::Corrupt => out.push(2),
+            Error::Inconsistent => out.push(3),
+            Error::Param(m) => {
+                out.push(4);
+                m.put(out);
+            }
+            Error::Limit => out.push(5),
+        }
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        Some(match u8::get(b)? {
+            0 => Error::Truncated,
+            1 => Error::Invalid("(in a task)"),
+            2 => Error::Corrupt,
+            3 => Error::Inconsistent,
+            4 => Error::Param(String::get(b)?),
+            5 => Error::Limit,
+            _ => return None,
+        })
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// The number of threads reconstruction uses by default: the available parallelism.
@@ -1974,9 +2003,13 @@ pub fn reconstruct_into(
     // where the last segment's data ends
     let mut end = 0;
     let batch = 4 * threads;
+    // (as tasks on WebAssembly)
     let decode_batch = |s0: usize| {
         let s1 = (s0 + batch).min(segs.len());
-        (s0, par_map(s1 - s0, threads, |j| decode(s0 + j)))
+        (
+            s0,
+            aqr_common::pool::par_map_apart(s1 - s0, threads, |j| decode(s0 + j)),
+        )
     };
     // the next batch is decoded while the blocks of this one are written (before them, on a
     // single thread)

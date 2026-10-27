@@ -66,6 +66,7 @@ dependencies = [
 name = "aqr-common"
 version = "0.1.0"
 dependencies = [
+ "aqr-api",
  "libc",
  "rayon",
  "zstd",
@@ -105,6 +106,7 @@ name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
  "aqr-bundle",
+ "aqr-common",
  "aqr-exe",
  "aqr-fasta",
  "aqr-flac",

@@ -365,6 +365,26 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
     out.into_iter().map(|m| m.into_inner().unwrap().expect("every index done")).collect()
 }
 
+/// [`par_map`] of work whose items, on WebAssembly, run as tasks of the module (`aqr_api::task`)
+/// rather than on workers: each item on a copy of the memory as it is now, of which only its
+/// result comes back, as bytes. So `f` has no effect but its result there. On the calling
+/// thread alone where `threads` is 1 or `n` is.
+pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
+    #[cfg(target_family = "wasm")]
+    if threads > 1 && n > 1 {
+        let g = |i: usize, out: &mut Vec<u8>| f(i).put(out);
+        let mut t = aqr_api::task::spawn(n, &g);
+        return (0..n)
+            .map(|i| {
+                let b = t.join(i);
+                let mut s = &b[..];
+                R::get(&mut s).filter(|_| s.is_empty()).expect("the result of a task")
+            })
+            .collect();
+    }
+    par_map(n, threads, f)
+}
+
 /// `f(i, admit(i))` for each `i` of `0..n`, each on a worker of its own, up to `threads − 1`
 /// at once: the calling thread lets them in, in order, as `admit` does (which may wait, as for
 /// memory), each on a worker as one is free, and the worker is given back as `f` returns. So

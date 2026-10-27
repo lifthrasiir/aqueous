@@ -17,6 +17,31 @@ pub enum Token {
     },
 }
 
+impl aqr_common::wire::Wire for Token {
+    fn put(&self, out: &mut Vec<u8>) {
+        match *self {
+            Token::Lit(b) => out.extend_from_slice(&[0, b]),
+            Token::Match { len, dist, alt258 } => {
+                out.push(1 + alt258 as u8);
+                len.put(out);
+                dist.put(out);
+            }
+        }
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        Some(match u8::get(b)? {
+            0 => Token::Lit(u8::get(b)?),
+            t @ (1 | 2) => Token::Match {
+                len: u16::get(b)?,
+                dist: u16::get(b)?,
+                alt258: t == 2,
+            },
+            _ => return None,
+        })
+    }
+}
+
 impl Token {
     /// Number of bytes this token produces.
     pub fn span(self) -> usize {

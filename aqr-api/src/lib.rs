@@ -28,8 +28,11 @@ extern crate alloc;
 pub mod emu;
 mod io;
 mod packed;
+#[cfg(feature = "alloc")]
+pub mod task;
 #[cfg(target_family = "wasm")]
-mod wasm;
+#[doc(hidden)]
+pub mod wasm;
 #[cfg(not(target_family = "wasm"))]
 use emu::MemId;
 
@@ -282,6 +285,14 @@ macro_rules! entry {
             #[cfg(target_family = "wasm")]
             #[unsafe(export_name = $export)]
             pub extern "C" fn apply($($arg: u64),*) $body
+
+            // The body of the tasks' entry point `aqr_task`, which aqr-ld makes of it (and
+            // drops where the module spawns none).
+            #[cfg(target_family = "wasm")]
+            #[unsafe(export_name = "aqr_task_body")]
+            extern "C" fn task(rec: *const u8, i: u32) {
+                unsafe { $crate::wasm::task_body(rec, i) }
+            }
 
             // Natively a Rust function, so that a trap (panic) unwinds into `emu::apply`.
             #[cfg(not(target_family = "wasm"))]

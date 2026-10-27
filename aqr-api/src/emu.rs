@@ -4,6 +4,9 @@
 //! A trap is a panic, which [`apply`] catches as a [`Failure`]; so are the violations of
 //! the host functions, which the spec signals as errors to the invocation.
 //! `aqr_log` messages go to stderr, and the last one to the [`Failure`].
+//!
+//! Tasks ([`crate::task`]) run as they are spawned, on the calling thread, with every memory
+//! but the working one empty to them and the functions of part modules a violation.
 
 use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
@@ -59,6 +62,9 @@ struct Host {
     committed: Vec<Vec<u8>>,
     sizes: Vec<u64>,
     last_log: Option<Vec<u8>>,
+    /// How deep within tasks the code runs, and the empty memory they see.
+    task: u32,
+    empty: Vec<u8>,
 }
 
 thread_local! {
@@ -109,6 +115,8 @@ pub fn apply(
         committed: vec![Vec::new(); sizes.len()],
         sizes: sizes.to_vec(),
         last_log: None,
+        task: 0,
+        empty: Vec::new(),
     };
     HOST.with_borrow_mut(|h| {
         assert!(h.is_none(), "nested emu::apply");
@@ -168,6 +176,10 @@ fn with<R>(f: impl FnOnce(&mut Host) -> Result<R, String>) -> R {
 
 impl Host {
     fn mem(&mut self, id: MemId) -> Result<&mut Vec<u8>, String> {
+        if self.task > 0 {
+            self.empty.clear();
+            return Ok(&mut self.empty);
+        }
         match id {
             MemId::Params => Ok(&mut self.params),
             MemId::Output(j) => self.outputs.get_mut(j as usize).ok_or_else(|| format!("aqr_output{j} imported")),
@@ -177,7 +189,13 @@ impl Host {
     }
 
     fn part(&self, func: &str) -> Result<(), String> {
-        if self.kind == Kind::Whole { Err(format!("whole module imports {func}")) } else { Ok(()) }
+        if self.kind == Kind::Whole {
+            Err(format!("whole module imports {func}"))
+        } else if self.task > 0 {
+            Err(format!("{func} in a task"))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -271,6 +289,28 @@ pub(crate) mod sys {
     }
 
     pub fn heartbeat() {}
+
+    /// Runs the `n` tasks of `rec` now, within the application if any.
+    #[cfg(feature = "alloc")]
+    pub fn spawn(rec: &crate::task::Record, n: usize) -> Vec<Option<Vec<u8>>> {
+        let within = |d: i32| {
+            super::HOST.with_borrow_mut(|h| {
+                if let Some(h) = h {
+                    h.task = h.task.wrapping_add_signed(d)
+                }
+            })
+        };
+        within(1);
+        // (out of the task again however it ends)
+        struct Out<F: Fn(i32)>(F);
+        impl<F: Fn(i32)> Drop for Out<F> {
+            fn drop(&mut self) {
+                (self.0)(-1)
+            }
+        }
+        let _out = Out(within);
+        (0..n).map(|i| Some(rec.call(i))).collect()
+    }
 
     /// Also outside [`apply`](super::apply), where the code of a module runs as a library.
     pub fn log(msg: &[u8]) {

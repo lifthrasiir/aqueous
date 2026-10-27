@@ -4,18 +4,26 @@
 //! - `size_M`, `read_M`, `write_O` and `copy_O_M` become `memory.size M`, `memory.copy working M`,
 //!   `memory.copy O working` and `memory.copy O M` (`O` an output), with `aqr.aqr_M` imported
 //!   (64-bit, minimum 0, no maximum) for each memory `M` used;
-//! - `request`, `release`, `commit`, `heartbeat` and `log` become `aqr.aqr_request` and so on;
-//! - every export but the entry point goes, and so does whatever only they used.
+//! - `request`, `release`, `commit`, `heartbeat`, `log`, `spawn`, `result`, `join` and `take`
+//!   become `aqr.aqr_request` and so on;
+//! - where the module spawns tasks, `aqr_task` is exported: it sets the stack pointer below the
+//!   spawning frame (the record its first argument points to, aligned down to 16) and calls
+//!   `aqr_task_body` (`aqr-api`'s);
+//! - every other export but the entry point goes, and so does whatever only they used.
 
 use std::collections::HashMap;
 
-use walrus::ir::{Instr, InstrLocId, MemoryCopy, MemorySize, VisitorMut, dfs_pre_order_mut};
-use walrus::{ExportItem, FunctionId, ImportKind, MemoryId, Module, ModuleConfig, ValType};
+use walrus::ir::{BinaryOp, Instr, InstrLocId, MemoryCopy, MemorySize, VisitorMut, dfs_pre_order_mut};
+use walrus::{
+    ExportItem, FunctionBuilder, FunctionId, GlobalKind, ImportKind, MemoryId, Module, ModuleConfig, ValType,
+};
 use wasmparser::{Validator, WasmFeatures};
 
 const API: &str = "aqr_api";
 const WHOLE: &str = "aqr_apply_whole";
 const PART: &str = "aqr_apply_part";
+const TASK: &str = "aqr_task";
+const TASK_BODY: &str = "aqr_task_body";
 
 fn parse(wasm: &[u8]) -> Result<Module, String> {
     ModuleConfig::new().parse(wasm).map_err(|e| e.to_string())
@@ -111,7 +119,9 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
         let (op, mem, params, results): (_, _, &[_], &[_]) = match name.as_str() {
             "request" | "release" | "commit" => (Op::Host, "", &[I32, I64], &[]),
             "heartbeat" => (Op::Host, "", &[], &[]),
-            "log" => (Op::Host, "", &[I32, I32], &[]),
+            "log" | "result" => (Op::Host, "", &[I32, I32], &[]),
+            "spawn" | "join" => (Op::Host, "", &[I32, I32], &[I32]),
+            "take" => (Op::Host, "", &[I32, I32, I32, I32], &[]),
             _ => match name.split_once('_') {
                 Some(("size", mem)) => (Op::Size, mem, &[], &[I64]),
                 Some(("read", mem)) => (Op::Read, mem, &[I32, I64, I32], &[]),
@@ -135,7 +145,7 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
                 let i = m.imports.get_mut(id);
                 i.module = "aqr".into();
                 i.name = format!("aqr_{name}");
-                if name != "heartbeat" && name != "log" {
+                if matches!(name.as_str(), "request" | "release" | "commit") {
                     part_funcs.push(i.name.clone());
                 }
                 continue;
@@ -158,9 +168,14 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     }
 
     let mut entry = None;
+    let mut task_body = None;
     let exports: Vec<_> = m.exports.iter().map(|e| (e.id(), e.name.clone(), e.item)).collect();
     for (id, name, item) in exports {
         match item {
+            ExportItem::Function(func) if name == TASK_BODY => {
+                task_body = Some(func);
+                m.exports.delete(id);
+            }
             ExportItem::Function(func) if name == WHOLE || name == PART => {
                 if entry.replace((name.clone(), func)).is_some() {
                     return Err(format!("both {WHOLE} and {PART} exported"));
@@ -179,6 +194,9 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     if entry == WHOLE && !part_funcs.is_empty() {
         return Err(format!("whole module imports {}", part_funcs.join(", ")));
     }
+    if m.imports.iter().any(|i| i.module == "aqr" && i.name == "aqr_spawn") {
+        task(&mut m, task_body)?;
+    }
 
     walrus::passes::gc::run(&mut m);
     if let Some(i) = m.imports.iter().find(|i| i.module == API) {
@@ -193,4 +211,34 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
         .validate_all(&wasm)
         .map_err(|e| format!("invalid output: {e}"))?;
     Ok(wasm)
+}
+
+/// Exports `aqr_task`, calling `body` (`aqr_task_body`) on the stack below the record of the
+/// spawn: the frames of the module that spawned the task, which what it runs borrows from, are
+/// above it.
+fn task(m: &mut Module, body: Option<FunctionId>) -> Result<(), String> {
+    use ValType::I32;
+    let body = body.ok_or(format!("tasks spawned without {TASK_BODY}"))?;
+    let ty = m.types.get(m.funcs.get(body).ty());
+    if ty.params() != [I32, I32] || !ty.results().is_empty() {
+        return Err(format!("{TASK_BODY} has the type {:?} -> {:?}", ty.params(), ty.results()));
+    }
+    // the stack pointer: the one mutable global of the linker's output
+    let sp = match m.globals.iter().filter(|g| g.mutable).map(|g| (g.id(), g.ty, &g.kind)).collect::<Vec<_>>()[..] {
+        [(sp, I32, GlobalKind::Local(_))] => sp,
+        _ => return Err("not exactly one mutable global, the stack pointer".into()),
+    };
+    let (rec, i) = (m.locals.add(I32), m.locals.add(I32));
+    let mut b = FunctionBuilder::new(&mut m.types, &[I32, I32], &[]);
+    b.func_body()
+        .local_get(rec)
+        .i32_const(-16)
+        .binop(BinaryOp::I32And)
+        .global_set(sp)
+        .local_get(rec)
+        .local_get(i)
+        .call(body);
+    let f = b.finish(vec![rec, i], &mut m.funcs);
+    m.exports.add(TASK, f);
+    Ok(())
 }

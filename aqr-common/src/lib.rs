@@ -11,6 +11,7 @@
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
 //! - [`pool`]: the pool of threads every thread of the process runs on.
 //! - [`packed`]: packed byte sequences, a list of them as one.
+//! - [`wire`]: values as bytes, for the results of tasks on WebAssembly.
 
 pub mod mem;
 pub mod msb;
@@ -20,6 +21,7 @@ pub mod rans32;
 pub mod rans64;
 pub mod rng;
 pub mod varint;
+pub mod wire;
 
 /// Malformed input; `.0` says what was wrong. The crates convert it into their own error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

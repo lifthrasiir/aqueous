@@ -606,23 +606,36 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 - 결과는 스케줄과 무관하다. task가 다른 task와 주고받는 것은 join 결과와 채널 메시지뿐이고, 둘 다 프로그램 순서로 정해진 지점에서만 받는다(KPN). 호스트는 task를 순차, 병렬, 지연 실행 어느 쪽으로든 돌릴 수 있다. 채널이 없으면 순차 실행도 된다.
 - 세그먼트 구조는 필터의 메타데이터 안에 있으므로 엔트리 식으로 끌어올리지 않는다.
 
-**1단계: fork-join.**
+**1단계: fork-join [구현].** aqr-api(`task`), aqr-ld, aqr-decompress(wasmtime)에 들어가 있고, flate-recons가 세그먼트 배치를 task로 디코드한다.
 
-- import는 다음과 같다(이름은 모두 `aqr_`가 붙는다. 인자는 `i32`).
-  - `spawn(arg) -> h`: task를 하나 만든다. `h`는 이 task 안에서 만든 순서대로 매긴 번호이다.
-  - `result(ptr, len)`: task 안에서 부른다. 작업 메모리의 바이트열을 결과로 정한다. 다시 부르면 바꾸고, 부르지 않으면 빈 결과이다.
-  - `join(h, dst, cap) -> len`: task `h`가 끝날 때까지 기다리고 결과의 길이를 돌려준다. `len ≤ cap`이면 결과를 `dst`에 복사하고 `h`를 닫는다. 아니면 아무것도 복사하지 않는다. 그러면 호출자가 버퍼를 늘려 다시 부른다.
-- task는 모듈의 export `aqr_task(arg)`를 호출하는 새 인스턴스이다.
+- import는 다음과 같다(이름은 모두 `aqr_`가 붙는다. 인자와 결과는 `i32`).
+  - `spawn(arg, n) -> h`: task `n`개를 만든다. 모두 같은 스냅샷에서 시작한다. `h`는 이 인스턴스 안에서 부른 순서대로 매긴 번호이다.
+  - `result(ptr, len)`: task 안에서만 부른다. 작업 메모리의 바이트열을 결과로 정한다. 다시 부르면 바꾸고, 부르지 않으면 빈 결과이다.
+  - `join(h, i) -> len`: task `i`가 끝날 때까지 기다리고 결과의 길이를 돌려준다. task가 실패했으면 적용이 그 실패로 끝난다.
+  - `take(h, i, dst, len)`: join한 task의 결과 앞 `len` 바이트를 `dst`에 복사하고 task를 닫는다. `len`이 결과보다 길면 위반이다. `len = 0`이면 결과를 버린다.
+- task는 새 인스턴스이고, 모듈의 export `aqr_task(arg, i)`를 호출한다.
   - **작업 메모리:** `spawn` 시점의 부모 작업 메모리와 같은 크기, 같은 내용이다. 순서는 "instantiate한 뒤 내용을 스냅샷으로 덮는다"로 정의한다. 이렇게 해야 active data segment가 부모가 바꾼 `.data`를 되돌리지 않는다.
-  - **global:** 초깃값이다. 부모의 global은 복사하지 않는다. 엔진에 export되지 않은 global을 읽는 API가 없기 때문이다(wasmtime). 스택 포인터는 툴체인이 처리한다. aqr-ld가 만드는 `aqr_task`가 `arg`가 가리키는 기록에서 부모의 SP를 읽어 `__stack_pointer`로 설정한다. 그러면 클로저가 빌린 부모의 스택 프레임이 task의 스택 아래에 그대로 남는다.
+  - **global:** 초깃값이다. 부모의 global은 복사하지 않는다. 엔진에 export되지 않은 global을 읽는 API가 없기 때문이다(wasmtime). 스택 포인터는 툴체인이 처리한다. aqr-ld가 만드는 `aqr_task`는 `__stack_pointer`를 `arg & -16`으로 놓고 aqr-api의 `aqr_task_body`를 부른다. `arg`는 `spawn`하는 프레임의 스택에 놓인 기록(task가 부를 함수와 클로저)이므로, 부모의 스택 프레임과 클로저가 빌린 것은 모두 task의 스택 위쪽에 그대로 남는다. aqr-ld는 스택 포인터를 "링커 출력의 유일한 mutable global"로 찾는다.
   - **start 함수:** 프로파일에서 금지한다. task마다 다시 실행될 이유가 없다.
-  - **params, 입력, 리소스 메모리:** 부모와 같은 내용이다. 이 메모리들에 쓰는 명령(대상이 이 메모리인 store, `memory.fill`, `memory.init`, `memory.copy`)은 검증에서 거부한다. 정적으로 검사할 수 있고, aqr-ld 출력은 이미 읽기만 한다. 그래서 호스트는 이 메모리를 모든 task가 읽기 전용으로 공유할 수 있다.
-  - **출력 메모리:** 크기 0이다. task가 출력에 쓰면 범위 밖 접근이라 trap한다. 출력은 부모만 쓴다. 조각을 나눠 만드는 경우(mp3 조립, jpeg 청크)는 `join`의 `dst`를 최종 위치로 주면 복사가 한 번으로 끝난다.
-  - **import:** `request`, `release`, `commit`은 task에서 부르면 위반이다. 창은 부모의 것이다. `heartbeat`, `log`, `spawn`, `join`은 쓸 수 있다. task 안에서 다시 `spawn`할 수도 있다(mp3의 helper 안의 테이블 구축).
-- 모든 `spawn`은 같은 task 안에서 `join`으로 닫혀야 한다. 닫히지 않은 task를 둔 채 task나 entry point가 끝나면 위반이다. 버려진 task가 trap하는지가 스케줄에 따라 갈리지 않게 하기 위해서이다.
-- 어느 task든 trap하면 적용 전체가 invalid archive로 실패한다.
-- **메모리.** 예산(§5.2)은 살아 있는 모든 task의 메모리 합계에 걸린다. 공유하는 I/O 메모리는 한 번만 센다. 이 합계는 스케줄에 따라 다르지만, 넘으면 자원 실패일 뿐 의미론이 갈리지는 않는다. `memory.grow`는 넘을 때 -1을 돌려주지 않고 자원 실패가 되기 때문이다. 인코더는 "닫히지 않은 task가 모두 최대 크기로 동시에 있다"는 가정으로 예산을 잡는다.
+  - **나머지 메모리:** params, 리소스, 입력, 출력 모두 크기 0이다. task가 읽거나 쓰면 범위 밖 접근이라 trap한다. task가 쓰는 데이터는 작업 메모리에 있어야 한다. 지금의 모듈은 `aqr_api::whole`이 모든 입력을 작업 메모리로 읽어 두므로 이미 그렇다. 결과를 최종 위치에 두려면 `take`의 `dst`를 그 위치로 준다.
+  - **import:** `request`, `release`, `commit`은 task에서 부르면 위반이다. 창은 부모의 것이다. `heartbeat`, `log`, `spawn`, `join`, `take`는 쓸 수 있다. task 안에서 다시 `spawn`할 수도 있다(mp3의 helper 안의 테이블 구축).
+- 모든 task는 `spawn`한 인스턴스 안에서 `take`로 닫혀야 한다. 닫히지 않은 task를 둔 채 task나 entry point가 끝나면 위반이다. 버려진 task가 trap하는지가 스케줄에 따라 갈리지 않게 하기 위해서이다.
+- 어느 task든 trap하면 적용 전체가 실패한다. 실패의 종류는 그 task의 것이다(invalid archive 또는 자원 실패).
+- **메모리.** 예산(§5.2)은 살아 있는 모든 인스턴스의 메모리 합계에 걸린다. 이 합계는 스케줄에 따라 다르지만, 넘으면 자원 실패일 뿐 의미론이 갈리지는 않는다. `memory.grow`는 넘을 때 -1을 돌려주지 않고 자원 실패가 되기 때문이다. 인코더는 "닫히지 않은 task가 모두 최대 크기로 동시에 있다"는 가정으로 예산을 잡는다.
 - 각 task가 4 GiB 작업 메모리를 따로 가지므로, 이 장치는 wasm32 한계에 대한 대응도 겸한다. 다만 task는 부모의 힙 전체를 물려받으므로, 무거운 상태는 부모가 만들지 말고 task가 만들어야 효과가 있다.
+- **나중에 풀 수 있는 것.** 나머지 메모리를 비우는 규칙은 나중에 "부모와 같은 내용, 읽기 전용"으로 넓힐 수 있다. 지금 그 메모리를 읽는 모듈은 trap하므로 유효한 아카이브가 없고, 넓혀도 기존 아카이브의 의미가 바뀌지 않는다. 넓힐 때는 그 메모리들에 쓰는 명령(대상이 이 메모리인 store, `memory.fill`, `memory.init`, `memory.copy`)을 검증에서 거부해야 공유가 결정적이다. 부분형 모듈의 입력 창은 따로 정해야 한다.
+
+> **근거: `spawn`을 묶음으로 둔 이유.** 스냅샷 비용은 작업 메모리 크기에 비례한다. CoW로 줄일 수 있는지는 플랫폼마다 다르다.
+>
+> - macOS는 `mach_vm_remap`(copy)이나 `vm_copy`로 익명 메모리의 임의 구간을 CoW로 복제한다.
+> - Linux에는 익명 private 메모리를 fork 없이 CoW로 스냅샷하는 방법이 없다. 부모 메모리를 memfd에 `MAP_SHARED`로 두면 부모가 이후에 쓴 것이 task에 보이고, `MAP_PRIVATE`로 두면 부모가 쓴 페이지가 파일에 없다. 그래서 "spawn마다 memfd에 한 번 복사하고, task마다 그것을 `MAP_PRIVATE`로 매핑"이 현실적인 최선이다. Windows도 같다(`FILE_MAP_COPY`).
+> - 묶음이면 복사가 task마다가 아니라 `spawn`마다 한 번이 된다. par-map 꼴의 병렬성은 모두 묶음으로 나온다.
+>
+> **근거: 첫 측정(M4, 2026-10-27).** 48 MB 텍스트(크레이트 소스)를 gzip -6한 8.0 MB를 `aqr -c`하고, 모든 모듈을 wasmtime으로 돌려 풀었다(`aqr-decompress-wasm`, 네이티브와 같은 출력을 확인했다).
+>
+> - flate-recons를 직렬로 두면 0.74–0.77 s였고, 세그먼트 배치(32개)를 task로 돌리면 0.45 s였다. 네이티브(10코어)는 0.15 s이다.
+> - task 하나의 준비(instantiate, 작업 메모리 143 MB 생성과 스냅샷 복사)가 10–13 ms였다. task가 하는 일(세그먼트 하나, 약 1 MiB)과 비슷한 크기이다. 지금은 task마다 memcpy이므로 CoW가 다음 순서이다.
+> - 처음 구현은 비어 있는 워커 수만큼만 워커에 돌리고 나머지를 join하는 스레드에서 차례로 돌렸다. 그러자 0.77 s로 직렬과 같았다. 지금은 예약한 워커들과 join하는 스레드가 아직 시작하지 않은 task를 차례로 가져간다.
 
 **2단계: 채널 [제안].** 파이프라인은 task 사이의 단방향 유한 채널로 표현한다. 이 채널은 보류한 노드 사이의 공유 간선(§4.4)과 같은 KPN 채널이다. 용량은 "이만큼이면 충분하다"는 자원 선언이다.
 
@@ -638,24 +651,26 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 **wasmtime 구현.** 레퍼런스 디코더의 Wasm 경로(aqr-decompress)를 기준으로 적는다. WAH는 이것에 맞춰 고친다(§5.4의 재시도 의미론).
 
 - **task = Store 하나.** `Engine`과 `Module`은 공유하고, task마다 Store와 `Instance`를 만든다. Store는 `Send`이므로 어느 스레드에서든 돌릴 수 있다.
+- 1단계(지금 구현)는 동기 API로 충분하다. task끼리 기다리지 않으므로, `spawn` 때 비어 있는 워커들과 join하는 스레드가 시작하지 않은 task를 차례로 가져가면 된다. 아래의 비동기 실행은 채널을 넣을 때 필요하다.
 - **비동기 실행.** `Config::async_support(true)`로 켜고, `Instance::new_async`와 `call_async`로 task를 future로 만든다. `join`, `send`, `recv`는 `func_wrap_async`로 정의하고, 준비되지 않았으면 pending을 돌려준다. 그러면 task는 fiber(자기 스택) 위에서 멈춘다.
   - task 수와 OS 스레드 수가 분리된다. 실행기는 aqr-common `pool`의 워커 위에서 깨어난 future를 poll한다. fork-join만 쓰는 task도 스레드를 따로 잡지 않는다.
   - 동기 API로 task마다 OS 스레드를 두고 condvar에서 막는 방법은 더 단순하다. 그러나 중첩 `spawn`이 있으면 스레드 수에 상한이 없다. 또 "워커가 없으면 join 때 돌린다"는 지연 실행이 채널과 섞이면 교착한다. 소비자가 막힌 채 생산자를 돌릴 스레드가 없기 때문이다.
   - fiber 스택은 `async_stack_size`(기본 2 MiB)만큼 task마다 든다. `max_wasm_stack`보다 커야 한다.
   - 교착 판정은 실행기에서 한다. 깨어날 수 있는 future가 없고 실행 중인 것도 없는데, 끝나지 않은 task가 있으면 교착이다.
 - **메모리.** `Config::with_host_memory`로 `MemoryCreator`를 넘겨 호스트가 메모리를 공급한다. 요청한 예약(`reserved_size_in_bytes`)과 가드 크기는 그대로 지킨다.
-  - 작업 메모리 스냅샷은 CoW로 만든다. Linux에서는 memfd에 부모 메모리를 두고 `MAP_PRIVATE`로 매핑하고, macOS에서는 `mach_vm_remap`(copy)을 쓴다. instantiate가 data segment로 덮은 페이지만 스냅샷에서 다시 복사한다. Rust 모듈이면 수십 KB이다. CoW 없이 memcpy해도 의미는 같지만, 작업 메모리가 크면 spawn이 비싸다.
-  - 읽기 전용 I/O 메모리는 부모의 버퍼를 그대로 가리키는 `LinearMemory`로 준다. 쓰기는 검증이 막으므로 복사하지 않는다.
-  - 지금의 `Memory::new` + `data_mut` 복사(입력 메모리)도 이 방식으로 바꾸면 루트 적용에서도 입력 복사가 없어진다.
+  - 작업 메모리 스냅샷은 CoW로 만든다(위의 "묶음으로 둔 이유"). Linux와 Windows에서는 `spawn`마다 memfd(파일 매핑)에 한 번 복사하고 task마다 `MAP_PRIVATE`로 매핑한다. macOS에서는 `mach_vm_remap`(copy)을 쓴다. instantiate가 data segment로 덮은 페이지만 스냅샷에서 다시 복사한다. Rust 모듈이면 수십 KB이다. 지금 구현은 task마다 memcpy한다.
+  - 지금의 루트 적용은 입력 메모리를 `Memory::new` + `data_mut`로 복사한다. 호스트 버퍼를 그대로 가리키는 `LinearMemory`로 주면 이 복사도 없어진다.
 - **join과 recv.** 다른 Store의 메모리 사이에서 memcpy 한 번이다. 메시지는 호스트 쪽 큐에 복사해 둔다. 용량 × 메시지 크기가 채널의 메모리이고, 예산에 넣는다.
 - **네이티브 치환.** 해시를 아는 모듈은 지금처럼 네이티브 코드가 aqr-common `pool`로 돈다. 출력은 같다.
 
 **aqr-api 쪽(ABI가 아니라 라이브러리).**
 
-- aqr-common `pool`의 `par_map`, `scope`, `Handle::join`에 대응하는 trait을 하나 둔다(§5.7의 par-map trait). 네이티브에서는 `pool`, Wasm에서는 `spawn`/`join`이다. 채널은 `sync_channel` 꼴로 감싼다.
-- task 결과와 메시지는 바이트로 직렬화한다. 결과가 힙 구조체인 경우가 많다(flate `Vec<Token>`, rans64 alias 표, sqlite 키와 순열, mp3 rANS 디코더). 대부분 POD 슬라이스여서 bytemuck 수준이면 된다.
+- aqr-api `task::spawn(n, &f)`이 `f(i, &mut out)`을 task로 돌리고, `Tasks::join(i)`이 결과 바이트를 준다. 네이티브 에뮬레이션(`emu`)은 spawn할 때 호출 스레드에서 차례로 돌린다. 작업 메모리 밖의 메모리가 비어 있다는 규칙도 흉내 낸다.
+- aqr-common `pool::par_map_apart`가 `par_map`의 자리를 맡는다(§5.7의 par-map trait). 네이티브에서는 `par_map`이고, Wasm에서는 항목마다 task이다. 결과는 aqr-common `wire::Wire`로 바이트가 된다. 결과가 힙 구조체인 경우가 많아서이다(flate `Vec<Token>`, rans64 alias 표, sqlite 키와 순열, mp3 rANS 디코더). 오류의 `&'static str` 같은 것은 넘어가지 않으므로 메시지만 잃는다. 어느 쪽이든 실패이다.
+- 그 밖의 `par_map`, `scope`는 Wasm에서 워커가 없으므로 직렬이다. 옮기려면 결과를 `Wire`로 만들고 `par_map_apart`로 바꾼다. 채널은 `sync_channel` 꼴로 감쌀 것이다.
+- 모듈 바이너리는 스레드 수를 상수로 준다(flate-recons는 8). 출력은 그 수와 무관하고, 정해지는 것은 배치 크기(그래서 task 수와 메모리)뿐이다.
 - `OnceLock` 표는 `spawn` 전에 부모가 만들어 두면 스냅샷으로 물려받는다(flate 모델, mp3 huff 디코더, flac CRC, raw residual 표, rans64 디코드 표). task 안에서 처음 만들면 task마다 다시 만든다.
-- 지금 Wasm 빌드의 `pool`은 워커가 없다. `reserve`는 늘 빈 예약이고, `run`과 `dispatch`는 호출 스레드에서 돈다. 그래서 `threads`가 1보다 커도 직렬 경로로 내려간다.
+- Wasm 빌드의 `pool`은 워커가 없다. `reserve`는 늘 빈 예약이고, `run`과 `dispatch`는 호출 스레드에서 돈다. 그래서 `threads`가 1보다 커도 `par_map_apart` 밖은 직렬 경로로 내려간다.
 
 > **근거: 현재 해제 경로가 쓰는 동시성 수단(2026-10).** 모듈 바이너리는 모두 스레드 1로 부르므로(aqr-jpeg는 0: rayon이 호출 스레드에서 돈다) Wasm에서는 아래가 하나도 쓰이지 않는다. 네이티브에서 스레드가 여럿일 때의 것이다.
 >

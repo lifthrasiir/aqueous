@@ -17,5 +17,9 @@ rayon = ["dep:rayon"]
 zstd = { version = "0.13", optional = true }
 rayon = { version = "1.12", optional = true }
 
+# Tasks for `pool::par_map_apart` (in the modules of aqr-modules).
+[target.'cfg(target_family = "wasm")'.dependencies]
+aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
