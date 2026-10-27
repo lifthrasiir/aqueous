@@ -125,8 +125,10 @@ pub struct Reservation {
 }
 
 /// Reserves up to `want` workers of those free, without waiting for any.
+#[inline]
 pub fn reserve(want: usize) -> Reservation {
-    if want == 0 {
+    // (none without threads, which leaves out the code that would run on them)
+    if want == 0 || !THREADS {
         return Reservation { n: 0 };
     }
     let mut free = pool().free.lock().unwrap();
@@ -138,6 +140,9 @@ pub fn reserve(want: usize) -> Reservation {
 impl Reservation {
     /// The workers left to spawn on.
     pub fn len(&self) -> usize {
+        if !THREADS {
+            return 0;
+        }
         self.n
     }
 
@@ -292,11 +297,15 @@ pub fn scope_in<'env, R>(mut r: Reservation, f: impl for<'scope> FnOnce(&'scope 
 impl<'scope> Scope<'scope, '_> {
     /// The workers of the scope: so many things spawned run at once.
     pub fn workers(&self) -> usize {
+        if !THREADS {
+            return 0;
+        }
         self.state.workers.lock().unwrap().all
     }
 
     /// Runs `f` on a worker of the scope, once one is idle. Panics where the scope has none.
     pub fn spawn<T: Send + 'scope>(&'scope self, f: impl FnOnce() -> T + Send + 'scope) -> Handle<'scope, T> {
+        assert!(THREADS, "a scope of no workers");
         let mut w = self.state.workers.lock().unwrap();
         assert!(w.all > 0, "a scope of no workers");
         while w.idle == 0 {
