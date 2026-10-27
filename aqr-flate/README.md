@@ -176,7 +176,7 @@ all 924 streams, one thread, on an M4:
   at small memLevels writes many stored blocks, each with its length coded up front.
 
 As gzip files through `aqr-show` (one thread, level `mid`; see the
-[top-level README](../README.md#how-it-was-measured), ratios tentative), the four gzip files at
+[file formats overview](../docs/file-formats.md#how-it-was-measured), ratios tentative), the four gzip files at
 hand (4.2 MB) come to 0.932 (zstd -3: 0.977) at 16 MB/s compressing and 58 MB/s decompressing;
 two of them (Unicode data files) are kept as they are.
 

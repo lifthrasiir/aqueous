@@ -1,4 +1,4 @@
-//! Verification of the archive that [`compress`](crate::compress) makes (xform-design.md §6):
+//! Verification of the archive that [`compress`](crate::compress) makes (docs/xform-design.md §6):
 //! it is decoded, and must give the file back. The applications of modules are evaluated
 //! beforehand, on threads of their own while the file is still recompressed: each formula a
 //! recompressor makes is evaluated as it is made ([`Prevalidator`]), and where it gives what it

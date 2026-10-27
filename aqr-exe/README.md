@@ -51,7 +51,7 @@ for image in macho::images(&file).unwrap_or_default() {  // each architecture of
 
 ## Results
 
-Measured on 2026-10-24 as in the [top-level README](../README.md#how-it-was-measured)
+Measured on 2026-10-24 as in the [file formats overview](../docs/file-formats.md#how-it-was-measured)
 (Apple M4, one thread), through `aqr-show`: each file archived at level `mid` with its
 round-trip check, then extracted. Ratios are tentative, since the decoder modules are not in
 the archives yet. Memory is the peak RSS of that process (input, archive and output included)

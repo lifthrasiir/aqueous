@@ -1,4 +1,4 @@
-//! Entry formulas (xform-design.md §4.2): what a recompressor makes of a file, as an
+//! Entry formulas (docs/xform-design.md §4.2): what a recompressor makes of a file, as an
 //! expression over the data it extracted rather than one opaque byte string.
 //!
 //! A [`Formula`] is a tree of [`Node`]s over [`Stream`]s:

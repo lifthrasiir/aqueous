@@ -1,4 +1,4 @@
-//! The modules formulas apply, implemented natively by the recompressors (xform-design.md
+//! The modules formulas apply, implemented natively by the recompressors (docs/xform-design.md
 //! §5.7), and [`decompress`] of an Aqueous archive with them ([`aqr_formula::aqr`]).
 //!
 //! Formulas are made by aqr-compress; [`Native`] evaluates them. In archives, a module is its

@@ -2154,7 +2154,7 @@ The candidate is a second list of [=non-leaf items=] preceding the formula block
 where the instructions of another formula block are copied when its output is needed, instead of referring to the output.
 It requires a bound on the distance of such a reference declared before the referenced blocks,
 so that a streaming decompressor knows which blocks to retain,
-and a way to locate a preceding block without reading the segment from its beginning (`xform-design.md` §7).
+and a way to locate a preceding block without reading the segment from its beginning (`docs/xform-design.md` §7).
 
 [=formula/formula_data=] is not randomly accessible,
 and a decompressor is expected to read and decompress it in its entirety before evaluating any part of the formula.
@@ -2617,7 +2617,7 @@ which is supplied to modules by formula blocks referencing it ([[#formula-data]]
 <h3 id=module-execution>
 Module execution</h3>
 
-Issue: This section is tentative and follows `xform-design.md` §5.
+Issue: This section is tentative and follows `docs/xform-design.md` §5.
 
 A module is a WebAssembly module [[!WASM-CORE-3]] stored as [=module/wasm_module=],
 instantiated and invoked through the embedding interface defined in the Appendix of [[!WASM-CORE-3]].
@@ -3214,7 +3214,7 @@ A decompressor MUST NOT use the [=emirror/mirrored_fields=] of a mirrored header
   and the overhead stays at 117 bytes per 64 chunks, about 0.003%, for large archives.
 </div>
 
-Issue: The interval of 64 encrypted chunks follows the tentative distance of 4 MiB in [[#mirror-block]] and changes with it (`recovery-design.md` §5.5).
+Issue: The interval of 64 encrypted chunks follows the tentative distance of 4 MiB in [[#mirror-block]] and changes with it (`docs/recovery-design.md` §5.5).
 
 The [=age payload=] MUST decrypt into a valid unencrypted archive ([[#unencrypted-archive]]),
 either a [=standalone archive=] or an [=overlay archive=],
@@ -3581,7 +3581,7 @@ by at least 4096 bytes, so that they never share an aligned 4 KiB unit of the un
 and SHOULD separate them by at least 4 MiB (4,194,304 bytes) when possible.
 
 Issue: The recommended distances are tentative, pending the measurement of burst lengths of latent sector errors
-(`recovery-design.md` §8, R1).
+(`docs/recovery-design.md` §8, R1).
 The interval between mirrored headers in an encrypted archive ([[#encrypted-archive]]) changes with the latter distance.
 
 A damaged encrypted chunk fails to authenticate as a whole,
@@ -3610,13 +3610,13 @@ Repair</h3>
   locating the target block with [=mirror/target_offset=] alone.
 </div>
 
-Issue: The repair process is to be specified in this section (`recovery-design.md` §5.6).
+Issue: The repair process is to be specified in this section (`docs/recovery-design.md` §5.6).
 
 Issue: Repairing an encrypted archive with mirror blocks or mirrored headers requires decrypting
 the encrypted chunks after one that fails to authenticate, which a standard age implementation doesn't do.
 This is to be specified with the repair process as a separate step producing the decrypted bytes,
 where bytes of such chunks are marked as erasures and the interpretation of an archive stays unchanged
-(`recovery-design.md` §5.6).
+(`docs/recovery-design.md` §5.6).
 
 <div class=note>
   A repaired encrypted chunk can't be encrypted again with the original file key and [=envelope/payload_nonce=]

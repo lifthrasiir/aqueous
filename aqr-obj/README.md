@@ -37,7 +37,7 @@ included) over the input size.
 | threejs | 4 | 4.3 | 0.119 | 0.262 | 98.2 MB/s | 280.6 MB/s |
 | all | 22 | 403 | **0.097** | 0.242 | **121 MB/s** | **324 MB/s** |
 
-The files are taken as for every crate (the top-level README), files over 300 MB left out.
+The files are taken as for every crate (`docs/file-formats.md`), files over 300 MB left out.
 Memory, with one process per file, is 24 MB + 3.1× the file (a linear fit).
 `aqr-obj bench` reports the size of an archive of the formula (`formula::encode`,
 then `aqr_formula::aqr::encode`) and the speed of making and decoding it. The other

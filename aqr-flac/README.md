@@ -11,7 +11,7 @@ directions. Compression ratio is pursued only where it does not cost that.
 ## Results
 
 Measured on 2026-10-23 at `2abe944` on an Apple M4, one thread, through `aqr-show` (see the
-[top-level README](../README.md#how-it-was-measured)): each file archived at level `mid` with
+[file formats overview](../docs/file-formats.md#how-it-was-measured)): each file archived at level `mid` with
 its round-trip check, then extracted. Ratios are tentative, since the decoder modules are not
 in the archives yet. Memory is the peak RSS of that process (input, archive and output
 included) over the input size.

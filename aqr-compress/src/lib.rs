@@ -1,4 +1,4 @@
-//! Recompression of a file into an entry formula (xform-design.md §4.2, §6): [`detect`] picks
+//! Recompression of a file into an entry formula (docs/xform-design.md §4.2, §6): [`detect`] picks
 //! the recompressor by the magic bytes of a file, and [`recompress`] runs it on each file found,
 //! giving a [`Formula`] rather than bytes.
 //!
