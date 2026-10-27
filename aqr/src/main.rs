@@ -1,12 +1,15 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l mid|ZSTD_LEVEL] [--depth N] [--batch MIB]
-//! [--no-check] INPUT...
+//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l mid|ZSTD_LEVEL] [--depth N] [--batch MIB]
+//! [--no-check] [--wasm] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
 //!   archive (several of them, or a directory, as entries of their names).
 //! - `-d` (the default as `unaqr`): each archive into its name without `.aqr`, or `-o`.
+//! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
+//! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
+//!   otherwise).
 //! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors.
 //! - `--batch` is about the most MiB of files made at once (512 by default), which bounds the
 //!   memory taken by compression (but for a file larger).
@@ -25,14 +28,17 @@ use std::process::ExitCode;
 use std::time::{Instant, UNIX_EPOCH};
 
 use aqr_compress::{Options, compress_formula, compress_tree_to, detect};
-use aqr_decompress::Native;
+use aqr_decompress::{Native, Wasm};
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Time, Tree, Value, name_bytes, name_from};
 
-const USAGE: &str = "usage: aqr [-c | -d] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l mid|ZSTD_LEVEL] [--depth N] [--batch MIB] \
-     [--no-check] INPUT...";
+const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l mid|ZSTD_LEVEL] [--depth N] \
+     [--batch MIB] [--no-check] [--wasm] INPUT...";
 
 struct Args {
     decompress: bool,
+    /// Decompressing, but nothing written.
+    test: bool,
+    wasm: bool,
     output: Option<PathBuf>,
     force: bool,
     quiet: bool,
@@ -73,6 +79,8 @@ fn parse() -> Result<Args, String> {
     let unaqr = me.file_stem().is_some_and(|s| s.to_string_lossy().starts_with("unaqr"));
     let mut a = Args {
         decompress: unaqr,
+        test: false,
+        wasm: false,
         output: None,
         force: false,
         quiet: false,
@@ -93,6 +101,8 @@ fn parse() -> Result<Args, String> {
             "--" => only_inputs = true,
             "-c" | "--compress" => a.decompress = false,
             "-d" | "--decompress" => a.decompress = true,
+            "-t" | "--test" => (a.decompress, a.test) = (true, true),
+            "--wasm" => a.wasm = true,
             "-o" => a.output = Some(value("-o")?.into()),
             "-f" | "--force" => a.force = true,
             "-q" | "--quiet" => a.quiet = true,
@@ -474,7 +484,9 @@ fn decompress_all(a: &Args) -> Result<(), String> {
 }
 
 fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
-    output(out, a.force)?;
+    if !a.test {
+        output(out, a.force)?;
+    }
     let start = Instant::now();
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     let file = fs::File::open(input).map_err(|e| err(&e))?;
@@ -482,34 +494,57 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
     let native = Native { threads: a.opt.threads };
-    let mut archive = aqr::open(&c, &native).map_err(|e| err(&e))?;
+    let runner: &dyn aqr::Runner = if a.wasm { &Wasm } else { &native };
+    let mut archive = aqr::open(&c, runner).map_err(|e| err(&e))?;
     archive.set_budget(DECODE_BUDGET);
     match archive.tree() {
         None => {
             drop(archive);
-            let d = aqr::decode_value_with(&c, &native, a.opt.threads).map_err(|e| err(&e))?;
+            let d = aqr::decode_value_with(&c, runner, a.opt.threads).map_err(|e| err(&e))?;
             let Value::File(d) = d else { unreachable!("an archive of a single file") };
-            write_new(out, &d, a.force)?;
+            if !a.test {
+                write_new(out, &d, a.force)?;
+            }
             if !a.quiet {
-                summary_d(input, out, 1, d.len() as u64, start);
+                summary_d(input, (!a.test).then_some(out), 1, d.len() as u64, start);
+            }
+        }
+        Some(t) if a.test => {
+            let (n, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicU64::new(0));
+            let files = t.entries.iter().fold(vec![0; archive.contents_len()], |mut f, e| {
+                if let EntryNode::File(c) = e.node {
+                    f[c] += 1;
+                }
+                f
+            });
+            archive
+                .contents(a.opt.threads, |c, d| {
+                    n.fetch_add(files[c], std::sync::atomic::Ordering::Relaxed);
+                    total.fetch_add(files[c] as u64 * d.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                    Ok(())
+                })
+                .map_err(|e| err(&e))?;
+            if !a.quiet {
+                summary_d(input, None, n.into_inner(), total.into_inner(), start);
             }
         }
         Some(t) => {
             let (n, total) = extract(t, &archive, a.opt.threads, out, a.force, a.quiet)?;
             if !a.quiet {
-                summary_d(input, out, n, total, start);
+                summary_d(input, Some(out), n, total, start);
             }
         }
     }
     Ok(())
 }
 
-fn summary_d(input: &Path, out: &Path, files: usize, total: u64, start: Instant) {
+/// The summary of an archive decoded into `out` (`None`: tested).
+fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: Instant) {
     let t = start.elapsed().as_secs_f64();
+    let to = out.map_or(" (tested)".into(), |o| format!(" -> {}", o.display()));
     eprintln!(
-        "{} -> {}: {files} file{}, {} in {t:.2} s, {:.1} MB/s",
+        "{}{to}: {files} file{}, {} in {t:.2} s, {:.1} MB/s",
         input.display(),
-        out.display(),
         if files == 1 { "" } else { "s" },
         size(total as f64),
         total as f64 / 1e6 / t.max(1e-9)
