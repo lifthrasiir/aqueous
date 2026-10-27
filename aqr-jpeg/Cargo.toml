@@ -9,10 +9,14 @@ default = ["encode"]
 encode = ["dep:aqr-formula"]
 
 [dependencies]
-aqr-common = { path = "../aqr-common", features = ["rayon"] }
+aqr-common = { path = "../aqr-common" }
 memchr = "2"
-rayon = "1.12.0"
 aqr-formula = { path = "../aqr-formula", optional = true }
+
+# (in WebAssembly, `par` runs in order on the calling thread)
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+aqr-common = { path = "../aqr-common", features = ["rayon"] }
+rayon = "1.12.0"
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

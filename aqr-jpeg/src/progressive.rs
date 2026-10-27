@@ -898,7 +898,7 @@ fn valid_script_len(j: &Jpeg) -> usize {
 pub fn decode_all(j: &Jpeg, d: &[u8], out: &mut Vec<Coefs>, clean: &mut Clean) -> Result<Vec<ScanInfo>, Error> {
     let n = valid_script_len(j);
     let mut res: Vec<Option<(Canon, u32)>> = Vec::new();
-    if rayon::current_num_threads() > 1 && n > 1 {
+    if crate::par::current_num_threads() > 1 && n > 1 {
         res = decode_concurrent(j, n, d, out);
         // a failed scan: the outcome must be that of decoding in order up to the failure,
         // which the concurrent decoding may have overwritten
@@ -994,8 +994,8 @@ fn decode_concurrent(j: &Jpeg, n: usize, d: &[u8], out: &mut Vec<Coefs>) -> Vec<
     let progress: Vec<[AtomicUsize; 4]> = (0..n).map(|_| Default::default()).collect();
     let next = AtomicUsize::new(0);
     let res: Vec<std::sync::Mutex<Option<(Canon, u32)>>> = (0..n).map(|_| Default::default()).collect();
-    rayon::scope(|sc| {
-        for _ in 0..rayon::current_num_threads().min(n) {
+    crate::par::scope(|sc| {
+        for _ in 0..crate::par::current_num_threads().min(n) {
             sc.spawn(|_| {
                 loop {
                     let k = next.fetch_add(1, Ordering::Relaxed);

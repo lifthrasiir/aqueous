@@ -1122,8 +1122,8 @@ fn decode_scan<const NAT: bool>(j: &Jpeg, s: &Scan, clean: &Clean, out: &mut [Co
         }
     }
     let blocks_per_mcu: usize = ctx.layout.iter().map(|&(_, h, v)| h * v).sum();
-    let chunks = if rayon::current_num_threads() > 1 {
-        (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(rayon::current_num_threads() * 4)
+    let chunks = if crate::par::current_num_threads() > 1 {
+        (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(crate::par::current_num_threads() * 4)
     } else {
         1
     };
@@ -1203,7 +1203,7 @@ type ScanResult = Result<(Checks, Option<Truncation>), Error>;
 /// Restart intervals in parallel: chunks of whole intervals. Only for scans whose RST markers
 /// are all present; a truncation can then only happen in the last interval (last chunk).
 fn decode_intervals<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanResult> {
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     let nseg = c.nmcu.div_ceil(c.ri);
     let k = chunks.min(nseg);
     let res: Vec<(Checks, End)> = (0..k)
@@ -1340,14 +1340,14 @@ fn spec_dbg(why: &str) {
 }
 
 fn decode_speculative<const NAT: bool>(c: &Ctx, chunks: usize) -> Option<ScanResult> {
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     let bpm: usize = c.layout.iter().map(|&(_, h, v)| h * v).sum();
     let bounds: Vec<usize> = (0..=chunks).map(|i| i * c.data_len / chunks).collect();
     let mut outs: Vec<SpecOut> = SPEC.with(|s| std::mem::take(&mut *s.borrow_mut()));
     outs.resize_with(chunks, SpecOut::default);
     let t0 = std::time::Instant::now();
     // chunk 0 for real (until the first MCU start in chunk 1), the others speculatively
-    let ((mut chk, mut br, mut pred, mut m, e0), ()) = rayon::join(
+    let ((mut chk, mut br, mut pred, mut m, e0), ()) = crate::par::join(
         || {
             let mut chk = Checks::default();
             let (mut br, mut pred, mut m) = (Br { buf: 0, cnt: 0, pos: 0 }, [0; 4], 0);
@@ -1515,7 +1515,7 @@ pub(crate) fn decode_striped(
     take: impl Fn(usize) -> Vec<Coefs> + Sync,
     put: impl Fn(usize, Vec<Coefs>) + Sync,
 ) -> Option<ScanInfo> {
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     let rejected = ScanInfo { standard: false, ..Default::default() };
     let mut dct = Vec::new();
     let mut act = Vec::new();
@@ -1626,7 +1626,7 @@ pub(crate) fn decode_striped(
     // windows of stripes decoded in parallel from their located starts, with DC predictions
     // relative to each stripe's start, then rebased in order
     let located = |bits: Vec<usize>| -> Option<Checks> {
-        let w = rayon::current_num_threads();
+        let w = crate::par::current_num_threads();
         let mut chk = Checks::default();
         let mut end = [0i32; 4]; // predictions after the previous stripe
         for (wi, win) in ranges.chunks(w).enumerate() {
@@ -1674,7 +1674,7 @@ pub(crate) fn decode_striped(
         }
         Some(chk)
     };
-    let threads = rayon::current_num_threads();
+    let threads = crate::par::current_num_threads();
     let bpm: usize = c.layout.iter().map(|&(_, h, v)| h * v).sum();
     let chunks = (nmcu * bpm / CHUNK_BLOCKS).min(threads * 4);
     // Ok(outcome), Err(()) to start over serially
@@ -1811,7 +1811,7 @@ fn skim(c: &Ctx, from: usize, to: usize, o: &mut Skim) {
 /// (into `skip`) only follows each chunk boundary until it meets an MCU start that chunk's
 /// speculative decoder saw. None where that fails.
 fn locate(c: &Ctx, skip: &[CompPtr], starts: &[usize], chunks: usize) -> Option<Vec<usize>> {
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     // positions within a chunk are kept as u32
     if c.data_len / chunks >= 1 << 28 {
         return None;
@@ -1827,7 +1827,7 @@ fn locate(c: &Ctx, skip: &[CompPtr], starts: &[usize], chunks: usize) -> Option<
         }
     };
     // chunk 0 for real (until the first MCU start in chunk 1), the others speculatively
-    let ((mut br, mut m, e0), ()) = rayon::join(
+    let ((mut br, mut m, e0), ()) = crate::par::join(
         || {
             let (mut br, mut pred, mut m) = (Br { buf: 0, cnt: 0, pos: 0 }, [0; 4], 0);
             let e = c.run_in::<false, true>(skip, &mut br, &mut pred, &mut m, c.nmcu, false, &mut chk, |b, mm| {
@@ -2000,7 +2000,7 @@ pub fn encode_scan(j: &Jpeg, s: &Scan, info: &ScanInfo, coefs: &[Coefs], out: &m
     let layout = scan_layout(j, s);
     let nmcu = s.mcux * s.mcuy;
     let blocks_per_mcu: usize = layout.iter().map(|&(_, h, v)| h * v).sum();
-    let chunks = (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(rayon::current_num_threads() * 4);
+    let chunks = (nmcu * blocks_per_mcu / CHUNK_BLOCKS).min(crate::par::current_num_threads() * 4);
     if chunks >= 2 && info.truncated.is_none() {
         return encode_chunked(s, info, coefs, out, &layout, &dct, &act, chunks);
     }
@@ -2133,7 +2133,7 @@ fn encode_chunked(
     act: &[EncTable],
     chunks: usize,
 ) -> Result<(), Error> {
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     let nmcu = s.mcux * s.mcuy;
     let ri = if s.ri > 0 { s.ri } else { nmcu };
     let nseg = nmcu.div_ceil(ri);
@@ -2426,7 +2426,7 @@ pub(crate) fn encode_striped(
     ranges: &[(usize, usize)],
     fill: impl Fn(usize, &mut Vec<Coefs>) -> Result<(), Error> + Sync,
 ) -> Result<Vec<Vec<u8>>, Error> {
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     let mut dct = Vec::new();
     let mut act = Vec::new();
     for sc in &s.comps {

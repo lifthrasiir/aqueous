@@ -9,5 +9,6 @@ pub mod formula;
 pub mod jpeg;
 pub mod model;
 pub mod module;
+mod par;
 pub mod progressive;
 pub mod variant;

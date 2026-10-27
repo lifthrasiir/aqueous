@@ -446,7 +446,7 @@ pub(crate) fn decode_core<'a>(
     fast::decode_whole(&j, &t, &stripes, coefs)?;
     // scans are re-emitted independently of each other (in parallel; sequential scans are also
     // split internally, see `jpeg::encode_scan`)
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     let coefs = &*coefs;
     let scans: Vec<Option<Vec<u8>>> = j
         .scans

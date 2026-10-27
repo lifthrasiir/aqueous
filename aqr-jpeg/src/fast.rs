@@ -1313,7 +1313,7 @@ impl Modeller {
     /// The tables and the stripes' rANS words, once every stripe is modelled; with the seconds
     /// spent on each.
     pub(crate) fn finish(self) -> (Encoded, f64, f64) {
-        use rayon::prelude::*;
+        use crate::par::prelude::*;
         let t0 = Instant::now();
         let hist = self.hist.into_inner().unwrap();
         let (freq, plan) = normalize(&hist);
@@ -1341,7 +1341,7 @@ impl Modeller {
 
 /// `coefs` must be in zigzag order (`jpeg::Order::Zigzag`), with nonzero masks.
 pub fn encode(j: &Jpeg, coefs: &[Coefs]) -> (Encoded, Phases) {
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     let ns = stripe_count(j);
     let m = Modeller::new(j, ns);
     let t0 = Instant::now();
@@ -1411,7 +1411,7 @@ pub(crate) fn decode_whole(
     stripes: &[(&[u8], &[u8])],
     out: &mut Vec<Coefs>,
 ) -> Result<(), Error> {
-    use rayon::prelude::*;
+    use crate::par::prelude::*;
     let ns = stripes.len();
     check_stripes(j, ns)?;
     out.resize_with(j.comps.len(), Coefs::default);

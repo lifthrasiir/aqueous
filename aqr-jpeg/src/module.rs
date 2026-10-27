@@ -46,8 +46,14 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
 }
 
 /// Runs `f` on a rayon pool of up to `threads` threads of aqr-common's pool, or as it is if 0
-/// or within a rayon pool already.
+/// or within a rayon pool already (or in WebAssembly, where there is no rayon).
 pub(crate) fn in_pool<R: Send>(threads: usize, f: impl FnOnce() -> R + Send) -> R {
+    #[cfg(target_family = "wasm")]
+    return {
+        let _ = threads;
+        f()
+    };
+    #[cfg(not(target_family = "wasm"))]
     match (threads > 0).then(|| aqr_common::pool::rayon_pool(threads)).flatten() {
         Some(pool) => pool.install(f),
         None => f(),
