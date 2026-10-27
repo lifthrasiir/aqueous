@@ -53,8 +53,8 @@ for image in macho::images(&file).unwrap_or_default() {  // each architecture of
 
 Measured on 2026-10-24 as in the [file formats overview](../docs/file-formats.md#how-it-was-measured)
 (Apple M4, one thread), through `aqr-show`: each file archived at level `mid` with its
-round-trip check, then extracted. Ratios are tentative, since the decoder modules are not in
-the archives yet. Memory is the peak RSS of that process (input, archive and output included)
+round-trip check, then extracted. Ratios are tentative, since the decoder modules were not in
+the archives then. Memory is the peak RSS of that process (input, archive and output included)
 over the input size, with macOS's cache of freed large blocks on, as for every crate. The files are copies, kept in `corpus/` (`manifest.tsv`, with their
 hashes and original paths), of those on a Windows 11 machine.
 

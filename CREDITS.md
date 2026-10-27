@@ -1,6 +1,7 @@
 # Credits
 
-Aqueous is meant for the public domain. No code in it is taken from other projects, except
+Aqueous is dedicated to the public domain (MIT-0 where that is not possible, see
+`LICENSE.txt`). No code in it is taken from other projects, except
 where a file says so (tables generated from public-domain sources). The projects below are
 where its ideas, or the behaviour it reproduces, come from.
 

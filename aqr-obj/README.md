@@ -25,8 +25,8 @@ verification is stored whole.
 ## Results
 
 Measured on 2026-10-24 at `da98d11` on an Apple M4, one thread, with `aqr-obj bench -t 1`
-(aqr-obj is not in aqr-compress yet). Ratios are tentative, since the decoder modules are not
-in the archives yet. Memory is the peak RSS of the process (input, archive and output
+(aqr-obj is not in aqr-compress yet). Ratios are tentative, since the decoder modules were not
+in the archives then. Memory is the peak RSS of the process (input, archive and output
 included) over the input size.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress |

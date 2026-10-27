@@ -20,8 +20,9 @@ with stronger models, and rebuilds the original files bit for bit on extraction.
   as changes to another.
 
 The format is specified in [`spec/index.bs`](spec/index.bs) (an Editor's Draft, not yet
-fixed). Aqueous is meant for the public domain; see [`CREDITS.md`](CREDITS.md) for
-the projects its ideas come from.
+fixed). Aqueous is dedicated to the public domain, or under MIT-0 where that is not possible
+([`LICENSE.txt`](LICENSE.txt)); see [`CREDITS.md`](CREDITS.md) for the projects its ideas
+come from.
 
 ## Sneak peek
 
@@ -48,8 +49,9 @@ Compression includes the round-trip check of every file. Some formats alone, as
 | text (enwik9) | 0.253 | 0.312 |
 | FASTA (hg19) | 0.218 | 0.309 |
 
-All figures are tentative: the decoder modules are not embedded in archives yet. How they were
-measured, and the formats taken or not yet taken, are in
+The 10 GB archive includes its decoder modules. The figures by format are tentative: they were
+measured before the modules were embedded in archives. How they were measured, and the
+formats taken or not yet taken, are in
 [`docs/file-formats.md`](docs/file-formats.md).
 
 ## Building

@@ -28,8 +28,8 @@ and the design is argued in `xform-design.md`.
     in it (and files kept raw where they do not pay for them). Best: in the limit of many
     files per archive, Σ (archive − resources) / Σ input, the formulas taken where they pay
     without them (`aqr-show -r`). One figure where the two agree to three decimals (no
-    resources, or a few KB). **Tentative**: the actual decoder modules (Wasm) are not embedded
-    yet, and will add their blocks.
+    resources, or a few KB). **Tentative**: the actual decoder modules (Wasm) were not embedded
+    when these were measured, and will add their blocks.
   - **zstd -3**: the same files under `zstd -3`, for reference.
   - **Speed**: Σ input / Σ time, MB/s. Compression covers recompression, archive coding and
     the check; decompression covers archive decoding and rebuilding.
