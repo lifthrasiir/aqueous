@@ -546,7 +546,7 @@ pub fn build(layout: &[u8], data: &[u8], kept: &[u8], bodies: &[&[u8]], len: u64
 /// [`build`], with an output of at most `len` bytes.
 pub fn assemble(layout: &[u8], data: &[u8], kept: &[u8], bodies: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out: Vec<u8> = Vec::with_capacity(len.min(1 << 32));
+    let mut out: Vec<u8> = Vec::with_capacity(len.min(u32::MAX as usize));
     // Bytes are added only where they fit within `len`.
     let room =
         |out: &Vec<u8>, n: usize| if n <= len - out.len() { Ok(()) } else { Err(Error("output past its length")) };

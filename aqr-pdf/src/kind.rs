@@ -1,5 +1,6 @@
 //! What a stream holds and how it is encoded, from its dictionary.
 
+#[cfg(feature = "encode")]
 use aqr_formula::Kind;
 
 use crate::lex::Obj;
@@ -35,6 +36,7 @@ impl Class {
 
     /// What the decoded data of streams of the class is, for whoever recompresses it in turn:
     /// content is anything not recognised as well, and data anything an embedded file is.
+    #[cfg(feature = "encode")]
     pub fn kind(self) -> Kind {
         match self {
             Class::Image => Kind::Pixels,
@@ -75,6 +77,7 @@ pub fn class(d: &Obj) -> Class {
 /// the class is ([`Class::kind`]) where FlateDecode is its only filter, else what the next
 /// filter decodes: a JPEG file for DCTDecode, compressed data for the other image codecs, and
 /// anything for the rest.
+#[cfg(feature = "encode")]
 pub fn inflated_kind(c: Class, d: &Obj) -> Kind {
     let f = d.get(b"Filter").map(Obj::names).unwrap_or_default();
     match f.get(1) {

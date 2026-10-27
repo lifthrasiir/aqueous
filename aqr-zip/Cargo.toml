@@ -5,10 +5,15 @@ edition = "2024"
 description = "ZIP archives rebuilt bit for bit from the contents of their entries, by aqr-flate, with their headers derived"
 publish = false
 
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the modules alone (`module`).
+encode = ["dep:aqr-formula", "aqr-flate/encode"]
+
 [dependencies]
 aqr-common = { path = "../aqr-common" }
-aqr-formula = { path = "../aqr-formula" }
-aqr-flate = { path = "../aqr-flate" }
+aqr-formula = { path = "../aqr-formula", optional = true }
+aqr-flate = { path = "../aqr-flate", default-features = false }
 crc32fast = "1.5"
 memchr = "2"
 

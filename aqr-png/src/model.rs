@@ -86,7 +86,7 @@ impl Geometry {
             pad = pad.max(rs + bpp);
         }
         // Far beyond any PNG a decoder would accept, and keeps the arithmetic in range.
-        if at > 1 << 40 {
+        if at as u64 > 1 << 40 {
             return None;
         }
         Some(Geometry { passes, bpp, len: at, raw_len: at2, pad: pad + 8 })

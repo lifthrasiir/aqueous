@@ -3,11 +3,16 @@ name = "aqr-jpeg"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
 [dependencies]
 aqr-common = { path = "../aqr-common", features = ["rayon"] }
 memchr = "2"
 rayon = "1.12.0"
-aqr-formula = { path = "../aqr-formula" }
+aqr-formula = { path = "../aqr-formula", optional = true }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.

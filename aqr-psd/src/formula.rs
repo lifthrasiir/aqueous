@@ -6,8 +6,10 @@
 //! their bytes are the third input, which the formula fills with the children's formulas.
 
 use crate::codec::{self, Par};
-use crate::psd::{Compression, Error, Result};
+use crate::psd::Compression;
 use aqr_formula::{Apply, Formula, Kind, Module, Node, Region};
+
+pub use crate::module::decode;
 
 pub const MODULE: Module = Module { name: "psd-recons", version: 1 };
 
@@ -96,17 +98,6 @@ pub(crate) fn encode_at(input: &[u8], depth: usize, par: &Par) -> Option<Formula
     let model = f.push("psd/model", parts.model);
     f.root = Node::apply(MODULE, Vec::new(), vec![head, skeleton, embedded, model], input.len() as u64);
     Some(f)
-}
-
-/// The module: the file of `len` bytes rebuilt from `inputs`, the head, the skeleton (the
-/// bytes outside the spans), the embedded files (their bytes one after another, in file
-/// order) and the model stream. `threads` is the number of threads to decode with (the same bytes whatever
-/// the number).
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    let (&[], &[head, skeleton, embedded, model]) = (params, inputs) else {
-        return Err(Error("bad parameters or inputs".into()));
-    };
-    codec::decode_formula(head, skeleton, embedded, model, len, threads)
 }
 
 /// Runs the modules a formula of this module has in it (this one, aqr-png and aqr-jpeg).

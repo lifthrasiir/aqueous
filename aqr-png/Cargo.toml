@@ -5,11 +5,16 @@ edition = "2024"
 description = "Lossless PNG recompression: bit-exact reconstruction from a smaller representation"
 publish = false
 
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the modules alone (`module`).
+encode = ["dep:aqr-formula", "aqr-flate/encode", "aqr-raw/encode"]
+
 [dependencies]
 aqr-common = { path = "../aqr-common" }
-aqr-formula = { path = "../aqr-formula" }
-aqr-flate = { path = "../aqr-flate" }
-aqr-raw = { path = "../aqr-raw" }
+aqr-formula = { path = "../aqr-formula", optional = true }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+aqr-raw = { path = "../aqr-raw", default-features = false }
 crc32fast = "1.5"
 
 [dev-dependencies]

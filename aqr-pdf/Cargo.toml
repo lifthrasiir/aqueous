@@ -5,19 +5,27 @@ edition = "2024"
 description = "Lossless PDF recompression: bit-exact reconstruction from a smaller representation"
 publish = false
 
+[features]
+default = ["encode"]
+# The formulas (`formula`, `encode`); without it, the code of the module alone (`module`).
+encode = [
+    "dep:aqr-formula", "dep:zstd", "dep:rayon", "aqr-common/rayon", "aqr-flate/encode", "aqr-jpeg/encode",
+    "aqr-png/encode", "aqr-raw/encode",
+]
+
 [dependencies]
-aqr-common = { path = "../aqr-common", features = ["rayon"] }
-aqr-formula = { path = "../aqr-formula" }
-aqr-flate = { path = "../aqr-flate" }
-aqr-jpeg = { path = "../aqr-jpeg" }
-aqr-png = { path = "../aqr-png" }
-aqr-raw = { path = "../aqr-raw" }
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula", optional = true }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
+aqr-png = { path = "../aqr-png", default-features = false }
+aqr-raw = { path = "../aqr-raw", default-features = false }
 memchr = "2"
-zstd = "0.13"
+zstd = { version = "0.13", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 simd-adler32 = "0.3"
 crc32fast = "1.5"
-rayon = "1.12"
+rayon = { version = "1.12", optional = true }
 
 [dev-dependencies]
 flate-zoo = { path = "../flate-zoo" }

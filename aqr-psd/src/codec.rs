@@ -21,6 +21,7 @@ use crate::packbits::{self, Encoder};
 use crate::psd::{self, Compression, Error, Psd, Result};
 use crate::rows::{self, PlaneRows};
 use aqr_common::varint;
+#[cfg(feature = "encode")]
 use aqr_formula::Formula;
 
 #[track_caller]
@@ -103,6 +104,7 @@ fn par_map<T: Send, R: Send>(threads: usize, items: Vec<T>, f: impl Fn(T) -> R +
     aqr_common::pool::par_map(n, threads, |i| f(items[i].lock().unwrap().take().expect("each item once")))
 }
 
+#[cfg(feature = "encode")]
 fn nested_compress(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Formula> {
     let t0 = std::time::Instant::now();
     let r = nested_compress_(codec, data, depth, par);
@@ -117,6 +119,7 @@ fn nested_compress(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option
     r
 }
 
+#[cfg(feature = "encode")]
 fn nested_compress_(codec: Codec, data: &[u8], depth: usize, par: &Par) -> Option<Formula> {
     let f = match codec {
         Codec::Psd => crate::formula::encode_at(data, depth + 1, par)?,
@@ -377,6 +380,7 @@ fn hint_pays(psd: &Psd, d: &[u8], sp: &Span, planes: usize) -> bool {
 }
 
 /// Spans, groups and coded embedded files of a parsed file.
+#[cfg(feature = "encode")]
 fn plan<'a>(psd: &Psd, d: &'a [u8], depth: usize, par: &Par) -> (Vec<Planned<'a>>, Vec<GroupDef>, Vec<Formula>) {
     let mut spans: Vec<Planned> = Vec::new();
     let mut groups = Vec::new();
@@ -665,7 +669,7 @@ struct Head<'a> {
 /// positions in the output.
 fn get_head(src: &[u8], total: usize) -> Result<Head<'_>> {
     let mut at = 0;
-    if total > 1 << 42 {
+    if total as u64 > 1 << 42 {
         return Err(corrupt());
     }
     let n = get_usize(src, &mut at)?;
@@ -1187,6 +1191,7 @@ fn code_pixels<'a>(
 }
 
 /// A file coded, in the pieces a formula is laid out from.
+#[cfg(feature = "encode")]
 struct Coded<'a> {
     spans: Vec<Span<'a>>,
     groups: Vec<GroupDef>,
@@ -1201,6 +1206,7 @@ struct Coded<'a> {
     symbols: usize,
 }
 
+#[cfg(feature = "encode")]
 fn code_file<'a>(file: &'a [u8], depth: usize, par: &Par) -> Option<Coded<'a>> {
     let t0 = std::time::Instant::now();
     let psd = psd::parse(file).ok()?;
@@ -1242,6 +1248,7 @@ fn code_file<'a>(file: &'a [u8], depth: usize, par: &Par) -> Option<Coded<'a>> {
 }
 
 /// The streams of a formula for `file`: [`crate::formula`] lays them out.
+#[cfg(feature = "encode")]
 pub(crate) struct FormulaParts {
     pub head: Vec<u8>,
     pub skeleton: Vec<u8>,
@@ -1252,6 +1259,7 @@ pub(crate) struct FormulaParts {
 
 /// Codes `file` for the formula module; None where it cannot be parsed or has no pixel
 /// data or embedded file to take out.
+#[cfg(feature = "encode")]
 pub(crate) fn formula_parts(file: &[u8], depth: usize, par: &Par) -> Option<FormulaParts> {
     let c = code_file(file, depth, par)?;
     let mut head = Vec::new();

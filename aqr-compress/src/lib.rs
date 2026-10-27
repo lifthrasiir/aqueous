@@ -1327,7 +1327,8 @@ mod tests {
         d.extend_from_slice(&at.to_le_bytes());
         d.extend_from_slice(&[0, 0]);
         PURE.with(|n| n.set(0));
-        let f = recompress(&d, &Options { threads: 1, ..Options::default() });
+        // (the modules the archive's anyway)
+        let f = recompress(&d, &Options { threads: 1, shared_modules: true, ..Options::default() });
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert_eq!(PURE.with(Cell::get), 2);
         assert!(f.eval(&Native::default()).unwrap() == d);
@@ -1453,7 +1454,7 @@ mod tests {
         ];
         let d = stored_zip(&[("a.png", &files[0]), ("b.png", &files[1]), ("c.png", &files[2])]);
         PURE.with(|n| n.set(0));
-        let f = recompress(&d, &Options { threads: 1, ..Options::default() });
+        let f = recompress(&d, &Options { threads: 1, shared_modules: true, ..Options::default() });
         assert_eq!(f.shared.len(), 1);
         assert_eq!(f.shared[0].sizes.len(), 3);
         assert_eq!(PURE.with(Cell::get), 1);
@@ -1471,7 +1472,7 @@ mod tests {
         ];
         let d = stored_zip(&[("a.png", &files[0]), ("b.png", &files[1]), ("c.png", &files[2])]);
         COPY.with(|c| c.set(true));
-        let (c, f) = compress_formula(&d, &Options { threads: 2, ..Options::default() });
+        let (c, f) = compress_formula(&d, &Options { threads: 2, shared_modules: true, ..Options::default() });
         COPY.with(|c| c.set(false));
         assert_eq!(f.shared.len(), 1);
         assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
@@ -1749,7 +1750,7 @@ mod tests {
         ];
         let data = |n: usize| [fakes[..n].concat(), vec![0; 10000], jpeg.clone()].concat();
         let found = |d: &[u8]| {
-            let opt = Options::default();
+            let opt = Options { shared_modules: true, ..Options::default() };
             scan_with(d, None, &opt, 0, 0, &Cx::new(d, &opt)).map_or(0, |m| m.f.applies().len())
         };
         assert_eq!(found(&data(1)), 1);

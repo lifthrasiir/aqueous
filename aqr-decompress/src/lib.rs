@@ -152,14 +152,8 @@ pub fn decompress_value(c: &[u8], threads: usize) -> std::result::Result<aqr::Va
 /// The module of Wasm module `wasm` among those of this crate, if aqr-modules built it.
 pub fn known(wasm: &[u8]) -> Option<Module> {
     let hash: [u8; 32] = Sha512_256::digest(wasm).into();
-    match aqr_modules::KNOWN.iter().find(|k| k.sha512_256 == hash) {
-        Some(k) => MODULES.iter().copied().find(|m| m.name == k.name && m.version == k.version),
-        // (until every module is built, the stand-ins of those that are not)
-        None => {
-            let name = aqr::stand_in_name(wasm)?;
-            MODULES.iter().copied().find(|m| m.to_string() == name && built(*m).is_none())
-        }
-    }
+    let k = aqr_modules::KNOWN.iter().find(|k| k.sha512_256 == hash)?;
+    MODULES.iter().copied().find(|m| m.name == k.name && m.version == k.version)
 }
 
 /// The Wasm module of `m` that aqr-modules built, if it did.
@@ -175,11 +169,8 @@ pub fn identify(wasm: &[u8]) -> Option<String> {
 /// The Wasm module of `m` that aqr-modules built, for [`aqr::Encoder::with_modules`].
 pub fn wasm_of(m: Module) -> Option<aqr::Wasm> {
     use std::borrow::Cow;
-    match built(m) {
-        Some(k) => Some(aqr::Wasm { bytes: Cow::Borrowed(k.wasm), block: Some(Cow::Borrowed(k.block)) }),
-        // (until every module is built)
-        None => MODULES.contains(&m).then(|| aqr::Wasm { bytes: aqr::stand_in(m).into(), block: None }),
-    }
+    let k = built(m)?;
+    Some(aqr::Wasm { bytes: Cow::Borrowed(k.wasm), block: Some(Cow::Borrowed(k.block)) })
 }
 
 /// The modules of this crate run by `m` where an archive has those of aqr-modules ([`known`]).

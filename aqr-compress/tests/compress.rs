@@ -30,11 +30,8 @@ fn roundtrip(d: &[u8], opt: &Options) -> Formula {
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
     let c = encoder().encode(&f, Some(aqr::checksum(d))).unwrap();
     assert!(decompress(&c, 1).unwrap() == d, "archive does not decompress to the input:\n{f}");
-    // (until every module is built, of those that are)
-    if f.applies().iter().all(|a| aqr_decompress::built(a.module).is_some()) {
-        let w = aqr::decode(&c, &aqr_decompress::Wasm);
-        assert!(w.as_ref().is_ok_and(|w| w == d), "archive does not decompress as WebAssembly: {:?}\n{f}", w.err());
-    }
+    let w = aqr::decode(&c, &aqr_decompress::Wasm);
+    assert!(w.as_ref().is_ok_and(|w| w == d), "archive does not decompress as WebAssembly: {:?}\n{f}", w.err());
     f
 }
 
@@ -728,9 +725,14 @@ fn zip_png_set() {
     let c = compress(&d, &all());
     assert!(decompress(&c, 1).unwrap() == d);
     let raw = aqr::encode(&Formula::raw("raw", d.clone()), None, aqr::Level::Mid).unwrap().len();
-    assert!(c.len() * 10 < raw * 9, "{} against {raw}", c.len());
-    // the same where the files coded alone would not pay (as this noise does not)
-    let f = roundtrip(&d, &Options::default());
+    // (without the module blocks, which an archive of more files has once)
+    let mut ms: Vec<_> = f.applies().iter().map(|a| a.module).collect();
+    ms.dedup();
+    let modules: usize = ms.iter().map(|&m| aqr_decompress::built(m).unwrap().block.len()).sum();
+    assert!((c.len() - modules) * 10 < raw * 9, "{} against {raw}", c.len() - modules);
+    // the same where the files coded alone would not pay (as this noise does not), the
+    // modules the archive's anyway
+    let f = roundtrip(&d, &Options { shared_modules: true, ..Options::default() });
     assert_eq!(f.shared.len(), 1);
     assert_eq!(f.shared[0].sizes.len(), 3);
 }

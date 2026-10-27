@@ -633,7 +633,7 @@ pub fn stand_in(m: Module) -> Vec<u8> {
 }
 
 /// The name of the module that Wasm module `w` is the [`stand_in`] of, if any.
-pub fn stand_in_name(w: &[u8]) -> Option<&str> {
+fn stand_in_name(w: &[u8]) -> Option<&str> {
     let mut at = WASM_HEADER.len();
     if w.get(..at)? != WASM_HEADER {
         return None;

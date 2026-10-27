@@ -5,12 +5,17 @@ edition = "2024"
 description = "Lossless PSD/PSB recompression: bit-exact reconstruction from a smaller representation"
 publish = false
 
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula", "aqr-flate/encode", "aqr-png/encode", "aqr-jpeg/encode"]
+
 [dependencies]
 aqr-common = { path = "../aqr-common" }
-aqr-flate = { path = "../aqr-flate" }
-aqr-png = { path = "../aqr-png" }
-aqr-jpeg = { path = "../aqr-jpeg" }
-aqr-formula = { path = "../aqr-formula" }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+aqr-png = { path = "../aqr-png", default-features = false }
+aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
+aqr-formula = { path = "../aqr-formula", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

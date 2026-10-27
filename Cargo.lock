@@ -249,12 +249,17 @@ dependencies = [
  "aqr-fasta",
  "aqr-flac",
  "aqr-flate",
+ "aqr-jpeg",
  "aqr-lz4",
  "aqr-mp3",
+ "aqr-pdf",
+ "aqr-png",
+ "aqr-psd",
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
  "aqr-wrt",
+ "aqr-zip",
  "sha2",
 ]
 

@@ -6,10 +6,15 @@
 //! let formula = aqr_psd::formula::encode(&psd, 1); // None where there is nothing to take out
 //! ```
 
+// The code of the module alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
+
 pub mod codec;
 pub mod composite;
+#[cfg(feature = "encode")]
 pub mod formula;
 pub mod model;
+pub mod module;
 pub mod packbits;
 pub mod pixels;
 pub mod psd;

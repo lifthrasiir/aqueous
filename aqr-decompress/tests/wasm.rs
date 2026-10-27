@@ -9,10 +9,13 @@ fn fixture(path: &str) -> Vec<u8> {
     std::fs::read(format!("{}/../{path}", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
 
-/// Every module built is one of this crate, of its version (else it is stale), and known by
-/// its bytes.
+/// Every module of this crate is built, of its version (else it is stale), and known by its
+/// bytes.
 #[test]
 fn built_modules_known() {
+    for m in MODULES {
+        assert!(aqr_decompress::built(m).is_some(), "{m}: not built");
+    }
     for k in aqr_modules::KNOWN {
         let m = MODULES.iter().find(|m| m.name == k.name);
         assert_eq!(m.map(|m| m.version), Some(k.version), "{}: run aqr-modules/build.sh", k.name);
