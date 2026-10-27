@@ -9,8 +9,12 @@
 //!   their headers and trailers kept in the formula as they are.
 
 #![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
+// The code of the modules alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
 
 pub mod audio;
 pub mod container;
+#[cfg(feature = "encode")]
 pub mod formula;
 pub mod image;
+pub mod module;

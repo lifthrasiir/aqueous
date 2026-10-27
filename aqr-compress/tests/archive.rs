@@ -155,7 +155,8 @@ fn files_given_back() {
     let files = sample();
     let (c, r) = archived(&files, &Options::default());
     let total: usize = files.iter().map(|f| f.1.len()).sum();
-    assert!(c.len() < total / 3, "{} of {total}", c.len());
+    // (the archive's own bytes apart, the modules of the formulas among them)
+    assert!(c.len() - r.overhead < total / 3, "{} of {total}", c.len() - r.overhead);
     // the text files solid, the same content once, the PNG files a set, the others recompressed
     // (the first of the same contents in the order of the files: same.txt)
     assert!(r.solid.iter().any(|s| [0, 2, 3].iter().all(|c| s.contents.contains(c))), "{:?}", r.solid);

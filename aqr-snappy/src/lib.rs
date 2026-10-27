@@ -6,6 +6,8 @@
 //! LevelDB tables (`leveldb`), whose blocks Snappy compresses, are rebuilt whole: the contents
 //! of their blocks are stored, and the trailers and the footer derived.
 
+// The code of the modules alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod crc32c;
 #[cfg(feature = "encode")]
 pub mod formula;

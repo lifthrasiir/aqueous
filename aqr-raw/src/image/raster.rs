@@ -36,8 +36,8 @@ impl Format {
         (1..=4).contains(&self.channels)
             && self.width > 0
             && self.height > 0
-            && self.width.checked_mul(self.channels).is_some_and(|r| r <= self.stride && r < 1 << 32)
-            && self.len().is_some_and(|l| l < 1 << 48)
+            && self.width.checked_mul(self.channels).is_some_and(|r| r <= self.stride && (r as u64) < 1 << 32)
+            && self.len().is_some_and(|l| (l as u64) < 1 << 48)
     }
 
     /// The format as bytes: varints of the width, the height and the row padding

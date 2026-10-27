@@ -119,9 +119,9 @@ fn archive_size_fallback() {
     assert!(compress(&d, &opt).len() < d.len() + 100);
     let d = [text(10_000), gzip(&noise(200_000)), text(10_000)].concat();
     assert!(modules(&roundtrip(&d, &opt)).is_empty());
-    // what does shrink is still recompressed
+    // what does shrink is still recompressed (where its module is the archive's anyway)
     let d = [gzip(&noise(200_000)), gzip(&text(100_000))].concat();
-    assert_eq!(modules(&roundtrip(&d, &opt)), [FLATE.name]);
+    assert_eq!(modules(&roundtrip(&d, &Options { shared_modules: true, ..opt.clone() })), [FLATE.name]);
     // Files found that each archive smaller, but not all together.
     let d = fixture("aqr-jpeg/tests/data/gradient.jpg").repeat(100);
     assert!(modules(&roundtrip(&d, &opt)).is_empty());
@@ -528,7 +528,7 @@ fn scan_weak() {
     // (The MP3 alone archives no smaller than raw, with the tables of its module.)
     let f = roundtrip(&d, &Options { smaller: false, ..Options::default() });
     assert_eq!(modules(&f), [FLATE.name, MP3.name], "{f}");
-    let f = roundtrip(&d, &Options::default());
+    let f = roundtrip(&d, &Options { shared_modules: true, ..Options::default() });
     assert_eq!(modules(&f), [FLATE.name], "{f}");
     // A wrong checksum is no zlib stream.
     let mut z = zlib(&t, 6);

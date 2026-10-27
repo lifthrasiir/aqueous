@@ -5,6 +5,12 @@ edition = "2024"
 description = "Uncompressed sampled data, PCM audio and raster images: their models as a library, and as modules of entry formulas with the trivial containers (WAV, AIFF, BMP, PNM) taken apart"
 publish = false
 
+[features]
+default = ["encode"]
+# The formulas (`formula`) and the built-in tables; without it, the code of the modules alone
+# (`module`).
+encode = ["dep:aqr-formula", "aqr-common/zstd"]
+
 [dependencies]
-aqr-common = { path = "../aqr-common", features = ["zstd"] }
-aqr-formula = { path = "../aqr-formula" }
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula", optional = true }

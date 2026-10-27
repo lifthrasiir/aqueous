@@ -757,8 +757,7 @@ impl DecLocal {
 }
 
 /// Frequency tables as data: a layout id (u32 LE), then every context's frequencies (u16 LE);
-/// built into a binary compressed with zstd.
-#[cfg(feature = "zstd")]
+/// built into a binary compressed with zstd (the feature `zstd`).
 pub mod builtin {
     /// Identifies a context layout (FNV-1a over `vals`).
     pub fn layout_id(vals: impl IntoIterator<Item = u32>) -> u32 {
@@ -781,16 +780,19 @@ pub mod builtin {
     }
 
     /// Serialises tables for layout `id` (the file form).
+    #[cfg(feature = "zstd")]
     pub fn to_bytes(id: u32, f: &[Vec<u16>]) -> Vec<u8> {
         compress(&to_raw(id, f))
     }
 
     /// The file form of the uncompressed form `raw`, whatever its layout.
+    #[cfg(feature = "zstd")]
     pub fn compress(raw: &[u8]) -> Vec<u8> {
         zstd::bulk::compress(raw, 19).unwrap()
     }
 
     /// The uncompressed form in the file `data`.
+    #[cfg(feature = "zstd")]
     pub fn decompress(data: &[u8]) -> Option<Vec<u8>> {
         if data.is_empty() {
             return None;
@@ -827,6 +829,7 @@ pub mod builtin {
     }
 
     /// [`parse`] of the file `data`.
+    #[cfg(feature = "zstd")]
     pub fn from_bytes(data: &[u8], id: u32, alphabets: impl IntoIterator<Item = usize>) -> Option<Vec<Vec<u16>>> {
         parse(&decompress(data)?, id, alphabets)
     }

@@ -10,10 +10,7 @@ pub mod raster;
 use crate::container::{self, Found, Layout};
 use aqr_formula::{Formula, Node};
 
-#[derive(Debug)]
-pub struct Error(pub String);
-
-pub type Result<T> = std::result::Result<T, Error>;
+pub use crate::module::{Error, Result};
 
 /// Stream classes of a container's bytes around its samples.
 pub const HEADER: &str = "raw/header";

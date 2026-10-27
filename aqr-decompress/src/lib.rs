@@ -173,11 +173,12 @@ pub fn identify(wasm: &[u8]) -> Option<String> {
 }
 
 /// The Wasm module of `m` that aqr-modules built, for [`aqr::Encoder::with_modules`].
-pub fn wasm_of(m: Module) -> Option<std::borrow::Cow<'static, [u8]>> {
+pub fn wasm_of(m: Module) -> Option<aqr::Wasm> {
+    use std::borrow::Cow;
     match built(m) {
-        Some(k) => Some(std::borrow::Cow::Borrowed(k.wasm)),
+        Some(k) => Some(aqr::Wasm { bytes: Cow::Borrowed(k.wasm), block: Some(Cow::Borrowed(k.block)) }),
         // (until every module is built)
-        None => MODULES.contains(&m).then(|| aqr::stand_in(m).into()),
+        None => MODULES.contains(&m).then(|| aqr::Wasm { bytes: aqr::stand_in(m).into(), block: None }),
     }
 }
 

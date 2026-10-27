@@ -6,6 +6,8 @@
 //! Two containers are taken: Firefox's `mozlz4` (one block) and LZ4 frames with independent
 //! blocks.
 
+// The code of the modules alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod block;
 #[cfg(feature = "encode")]
 pub mod formula;

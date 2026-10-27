@@ -5,11 +5,12 @@
 //! frequency tables. Inputs: the three byte streams (channel assignments, subframe
 //! parameters, warm-up samples), the rANS words (u32 LE) and the two raw bit streams.
 
-use super::{Error, Result};
 use crate::audio::pcm::{self, Format, N_BYTE_STREAMS};
-use crate::audio::residual::{self, Coded};
+use crate::audio::residual;
 use aqr_formula::{Formula, Kind, Module, Node, Resource};
 use std::sync::OnceLock;
+
+pub use crate::module::pcm::decode;
 
 pub const MODULE: Module = Module { name: "pcm-recons", version: 1 };
 
@@ -43,33 +44,4 @@ pub fn apply(f: &mut Formula, samples: &[u8], fmt: Format, threads: usize) -> Op
     let slots = c.streams.into_iter().chain([words, raw0, raw1]);
     let inputs = slots.zip(CLASSES).map(|(s, (class, kind))| f.push_as(class, kind, s)).collect();
     Some(Node::apply_with(MODULE, vec![resource()], fmt.to_bytes().to_vec(), inputs, samples.len() as u64))
-}
-
-/// The module: the `len` bytes of samples from `params` (their format), `resources` (the
-/// tables) and `inputs` (the streams).
-pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    let corrupt = |s: &str| Error(format!("corrupt: {s}"));
-    let fmt = Format::from_bytes(params).ok_or_else(|| corrupt("params"))?;
-    let [res] = resources else { return Err(corrupt("resources")) };
-    let t = residual::tables_from(res).ok_or_else(|| corrupt("tables"))?;
-    let [streams @ .., words, raw0, raw1] = inputs else { return Err(corrupt("inputs")) };
-    if streams.len() != N_BYTE_STREAMS || words.len() % 4 != 0 {
-        return Err(corrupt("inputs"));
-    }
-    // No output is larger than 64 times its coded form.
-    let coded_len = inputs.iter().map(|i| i.len() as u64).sum::<u64>();
-    if len > coded_len.saturating_mul(64) + (1 << 20) {
-        return Err(Error("length".into()));
-    }
-    let c = Coded {
-        streams: streams.iter().map(|s| s.to_vec()).collect(),
-        words: words.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect(),
-        raw: [raw0.to_vec(), raw1.to_vec()],
-    };
-    let mut out = Vec::new();
-    pcm::decode_threads(&c, fmt, &t, len as usize, &mut out, threads).map_err(|e| corrupt(e.0))?;
-    if out.len() as u64 != len {
-        return Err(corrupt("length"));
-    }
-    Ok(out)
 }

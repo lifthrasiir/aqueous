@@ -11,7 +11,6 @@ CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER="$PWD/target/release/aqr-ld" \
     cargo build --profile release-wasm --target wasm32-unknown-unknown -p aqr-modules -F wasm --bins
 built=target/wasm32-unknown-unknown/release-wasm
 modules=$(cargo run -q --release -p aqr-decompress --example aqr-decompress-modules)
-rm -f aqr-modules/wasm/*.wasm
 known=aqr-modules/src/known.rs
 {
     echo "// Made by build.sh."
@@ -31,9 +30,18 @@ known=aqr-modules/src/known.rs
         echo "        version: $2,"
         echo "        sha512_256: hex(\"$sum\"),"
         echo "        wasm: include_bytes!(\"../wasm/$bin.wasm\"),"
+        echo "        block: include_bytes!(\"../wasm/$bin.block\"),"
         echo "    },"
     done
     echo "];"
 } > "$known.new"
+# the data of their module blocks, compressed once
+cargo run -q --release -p aqr-decompress --example aqr-decompress-modules -- aqr-modules/wasm/*.wasm
 mv "$known.new" "$known"
+# (made before the crates compiled above, which it would not rebuild by its time)
+touch "$known"
+# (the files of modules no longer built; the others were overwritten, as known.rs had them)
+for f in aqr-modules/wasm/*.wasm aqr-modules/wasm/*.block; do
+    [ -e "aqr-modules/src/bin/$(basename "${f%.*}").rs" ] || rm -f "$f"
+done
 ls -l aqr-modules/wasm

@@ -17,7 +17,9 @@ fn built_modules_known() {
         let m = MODULES.iter().find(|m| m.name == k.name);
         assert_eq!(m.map(|m| m.version), Some(k.version), "{}: run aqr-modules/build.sh", k.name);
         assert_eq!(known(k.wasm), m.copied());
-        assert_eq!(wasm_of(*m.unwrap()).as_deref(), Some(k.wasm));
+        let w = wasm_of(*m.unwrap()).unwrap();
+        assert_eq!((&w.bytes[..], w.block.as_deref()), (k.wasm, Some(k.block)));
+        assert!(aqr::module_block_data(k.wasm).unwrap() == k.block, "{}: run aqr-modules/build.sh", k.name);
     }
     assert_eq!(known(b"\0asm\x01\0\0\0"), None);
 }
@@ -232,7 +234,8 @@ fn unknown_module_runs() {
     let mut f = Formula::default();
     let a = f.push("a", b"hello".to_vec());
     f.root = Node::apply(REV, b"pp".to_vec(), vec![a], 5);
-    let enc = Encoder::new(Level::Zstd(3)).with_modules(|m| (m == REV).then(|| WASM.get().unwrap().into()));
+    let enc = Encoder::new(Level::Zstd(3))
+        .with_modules(|m| (m == REV).then(|| aqr::Wasm { bytes: WASM.get().unwrap().into(), block: None }));
     let c = enc.encode(&f, None).unwrap();
     assert_eq!(aqr::decode(&c, &Native::default()).unwrap(), b"olleh");
     assert!(Encoder::new(Level::Zstd(3)).with_modules(wasm_of).encode(&f, None).is_err());

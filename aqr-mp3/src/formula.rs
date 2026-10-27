@@ -2,19 +2,15 @@
 //! [`MODULE`] on ten input slots, the streams of the coded form ([`crate::codec::Coded`])
 //! stored raw, and no parameters. FORMAT.md specifies it.
 
-use crate::codec::{self, N_BYTE_STREAMS};
+use crate::codec::{self};
 use crate::par;
 use aqr_formula::{Formula, Kind, Module, Node, Resource};
 use std::sync::OnceLock;
 
+use crate::module::SLOTS;
+pub use crate::module::{Error, decode};
+
 pub const MODULE: Module = Module { name: "mp3-recons", version: 5 };
-
-#[derive(Debug)]
-pub struct Error(pub String);
-
-/// Slots: the eight byte streams of the coded form, then the rANS words (u32 LE) and the raw
-/// bits.
-const SLOTS: usize = N_BYTE_STREAMS + 2;
 
 /// Classes of the slots, and their kinds: the side information, the rANS words and the raw
 /// bits do not compress.
@@ -53,43 +49,4 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 pub fn resource() -> Resource {
     static R: OnceLock<Resource> = OnceLock::new();
     R.get_or_init(|| Resource::new(codec::builtin_raw().clone())).clone()
-}
-
-/// The module: the file of `len` bytes rebuilt from the ten `inputs` and the `resources` (the
-/// tables), with `threads` threads (the same output whatever the number).
-pub fn decode(
-    params: &[u8],
-    resources: &[&[u8]],
-    inputs: &[&[u8]],
-    len: u64,
-    threads: usize,
-) -> Result<Vec<u8>, Error> {
-    let corrupt = |m: &str| Error(format!("corrupt: {m}"));
-    if !params.is_empty() {
-        return Err(corrupt("params"));
-    }
-    let [res] = resources else { return Err(corrupt("resources")) };
-    // The built-in tables, built once for the process, unless the resource is another.
-    let own;
-    let t = if *res == &codec::builtin_raw()[..] {
-        codec::tables()
-    } else {
-        own = codec::tables_from(res).ok_or_else(|| corrupt("tables"))?;
-        &own
-    };
-    let &[.., words, raw] = inputs else { return Err(corrupt("inputs")) };
-    if inputs.len() != SLOTS || words.len() % 4 != 0 {
-        return Err(corrupt("inputs"));
-    }
-    let total: usize = inputs.iter().map(|s| s.len()).sum();
-    let streams: [&[u8]; N_BYTE_STREAMS] = std::array::from_fn(|i| inputs[i]);
-    let out = if threads <= 1 || total < par::PAR_MIN {
-        codec::decode_parts(t, len, &streams, words, raw).map_err(|e| corrupt(e.0))?
-    } else {
-        par::decode(t, len, &streams, words, raw, threads).map_err(|e| corrupt(e.0))?
-    };
-    if out.len() as u64 != len {
-        return Err(corrupt("length"));
-    }
-    Ok(out)
 }

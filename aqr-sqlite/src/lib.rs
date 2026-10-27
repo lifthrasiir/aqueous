@@ -2,6 +2,8 @@
 //! rebuilt from them bit for bit. `formula` is the entry point (a module of aqr-formula).
 
 #![allow(clippy::needless_range_loop)]
+// The code of the modules alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
 
 #[cfg(feature = "encode")]
 pub mod formula;

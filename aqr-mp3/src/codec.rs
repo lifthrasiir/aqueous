@@ -17,6 +17,7 @@ use std::sync::{Arc, OnceLock};
 
 /// The built-in model (see `train`), or one uniform table per alphabet size if none is built
 /// in.
+#[cfg(feature = "encode")]
 static BUILTIN: &[u8] = include_bytes!("../model/builtin.bin");
 
 /// The built-in tables (what the encoder codes with).
@@ -26,9 +27,17 @@ pub fn tables() -> &'static Tables {
 }
 
 /// The built-in model in its uncompressed form: the module's resource.
+#[cfg(feature = "encode")]
 pub fn builtin_raw() -> &'static Arc<[u8]> {
     static R: OnceLock<Arc<[u8]>> = OnceLock::new();
     R.get_or_init(|| builtin::decompress(BUILTIN).unwrap_or_else(|| Model::uniform().to_raw()).into())
+}
+
+/// Without the feature `encode` (in the module, which takes the model as its resource), no
+/// model is built in, for nothing is to be encoded.
+#[cfg(not(feature = "encode"))]
+pub fn builtin_raw() -> &'static Arc<[u8]> {
+    panic!("the built-in model is of the feature encode")
 }
 
 /// Frames per run of the rANS stream: the coder restarts before every frame whose index is a
@@ -118,12 +127,14 @@ impl Model {
     }
 
     /// The file form (for the built-in model file).
+    #[cfg(feature = "encode")]
     pub fn to_bytes(&self) -> Vec<u8> {
         builtin::compress(&self.to_raw())
     }
 }
 
 /// The frequencies of every context in the built-in model, if any (for tools).
+#[cfg(feature = "encode")]
 pub fn builtin_freqs_pub() -> Option<Vec<Vec<u16>>> {
     Some(Model::parse(&builtin::decompress(BUILTIN)?)?.freqs())
 }

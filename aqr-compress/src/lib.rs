@@ -147,6 +147,9 @@ pub struct Options {
     /// Size formulas without their resources ([`aqr::Encoder::share_resources`]), as for an
     /// archive of many files sharing them: for measuring what they come to in the limit.
     pub shared_resources: bool,
+    /// Size formulas without their module blocks ([`aqr::Encoder::share_modules`]), as an
+    /// archive of several files does ([`compress_tree`]), whose modules are written once.
+    pub shared_modules: bool,
     /// Of an archive of several files ([`compress_tree`]): the most bytes of a non-leaf block
     /// that files share (one stream longer is a block of its own), which a file read alone
     /// may have to decompress.
@@ -208,6 +211,7 @@ impl Default for Options {
             smaller: true,
             expansion: 32,
             shared_resources: false,
+            shared_modules: false,
             block: 16 << 20,
             set_bytes: 64 << 20,
             batch: 512 << 20,
@@ -349,6 +353,9 @@ impl Cx {
         let mut enc = Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
         if opt.shared_resources {
             enc.share_resources();
+        }
+        if opt.shared_modules {
+            enc.share_modules();
         }
         Cx {
             enc,
@@ -1684,7 +1691,7 @@ mod tests {
             assert!(detect::starts(&d[at..]) == Some(Format::Mp3) && extent(Format::Mp3, &d[at..]).is_some());
         }
         TRIED.with(|t| t.borrow_mut().clear());
-        let f = recompress(&d, &Options::default());
+        let f = recompress(&d, &Options { smaller: false, ..Options::default() });
         let tried = TRIED.with(|t| t.borrow().clone());
         assert!(tried.contains(&Format::Psd), "{tried:?}");
         assert!(!tried.contains(&Format::Mp3), "{tried:?}");

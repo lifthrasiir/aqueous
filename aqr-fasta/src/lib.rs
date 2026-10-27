@@ -4,6 +4,8 @@
 //! ([`fasta`]). `formula` is the entry point (a module of aqr-formula); `FORMAT.md`
 //! specifies it.
 
+// The code of the modules alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod bases;
 pub mod fasta;
 #[cfg(feature = "encode")]

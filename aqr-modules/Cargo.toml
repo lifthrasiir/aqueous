@@ -15,7 +15,11 @@ aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] 
 aqr-bundle = { path = "../aqr-bundle", default-features = false }
 aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"] }
 aqr-fasta = { path = "../aqr-fasta", default-features = false }
+aqr-flac = { path = "../aqr-flac", default-features = false }
+aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-lz4 = { path = "../aqr-lz4", default-features = false }
+aqr-mp3 = { path = "../aqr-mp3", default-features = false }
+aqr-raw = { path = "../aqr-raw", default-features = false }
 aqr-snappy = { path = "../aqr-snappy", default-features = false }
 aqr-sqlite = { path = "../aqr-sqlite", default-features = false }
 aqr-wrt = { path = "../aqr-wrt", default-features = false }
@@ -73,4 +77,29 @@ required-features = ["wasm"]
 [[bin]]
 name = "wrt-recons"
 path = "src/bin/wrt-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "flate-recons"
+path = "src/bin/flate-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "pcm-recons"
+path = "src/bin/pcm-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "raster-recons"
+path = "src/bin/raster-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "mp3-recons"
+path = "src/bin/mp3-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "flac-recons"
+path = "src/bin/flac-recons.rs"
 required-features = ["wasm"]

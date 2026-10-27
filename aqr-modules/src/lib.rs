@@ -21,6 +21,8 @@ pub struct Known {
     /// SHA-512/256 of [`Known::wasm`], as the spec hashes.
     pub sha512_256: [u8; 32],
     pub wasm: &'static [u8],
+    /// The data of its module block, made by `aqr_formula::aqr::module_block_data`.
+    pub block: &'static [u8],
 }
 
 /// The bytes of `s`, hexadecimal digits.

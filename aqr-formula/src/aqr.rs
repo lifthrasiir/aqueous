@@ -180,8 +180,26 @@ pub struct Encoder {
     module_blocks: RefCell<HashMap<(Module, i32), std::rc::Rc<Vec<u8>>>>,
 }
 
-/// The Wasm module of a module, if there is one.
-pub type WasmOf = fn(Module) -> Option<Cow<'static, [u8]>>;
+/// The Wasm module of a module, if there is one ([`Encoder::with_modules`]).
+pub type WasmOf = fn(Module) -> Option<Wasm>;
+
+/// A Wasm module as an encoder writes it: its bytes, and the data of its module block where
+/// made beforehand ([`module_block_data`]), which is then written as it is.
+#[derive(Debug, Clone)]
+pub struct Wasm {
+    pub bytes: Cow<'static, [u8]>,
+    pub block: Option<Cow<'static, [u8]>>,
+}
+
+/// The zstd level of the module blocks made beforehand: modules are made once and archived
+/// often.
+const MODULE_LEVEL: i32 = 22;
+
+/// The data of the module block of Wasm module `wasm`, compressed at the highest level, to be
+/// made once ([`Wasm::block`]).
+pub fn module_block_data(wasm: &[u8]) -> Result<Vec<u8>> {
+    always_compressed(&mut CCtx::create(), &[wasm], MODULE_LEVEL, 1)
+}
 
 /// A stream's (or resource's) hash and length.
 type StreamKey = (u128, usize);
@@ -228,13 +246,14 @@ impl Encoder {
             shared: false,
             shared_modules: false,
             held: RefCell::default(),
-            wasm: |m| Some(Cow::Owned(stand_in(m))),
+            wasm: |m| Some(Wasm { bytes: Cow::Owned(stand_in(m)), block: None }),
             module_blocks: RefCell::default(),
         }
     }
 
     /// The encoder writing the Wasm module that `wasm` gives of each module into its module
-    /// block, rather than its [`stand_in`]. Encoding fails on a module that has none.
+    /// block (the data made beforehand where there is, else compressed at the level of the
+    /// formula blocks), rather than its [`stand_in`]. Encoding fails on a module that has none.
     pub fn with_modules(mut self, wasm: WasmOf) -> Encoder {
         self.wasm = wasm;
         self.module_blocks.borrow_mut().clear();
@@ -247,7 +266,10 @@ impl Encoder {
             return Ok(b.clone());
         }
         let wasm = (self.wasm)(m).ok_or_else(|| Error::new(format!("no Wasm module of {m}")))?;
-        let b = std::rc::Rc::new(always_compressed(&mut self.cctx(), &[&wasm], level, self.threads)?);
+        let b = std::rc::Rc::new(match wasm.block {
+            Some(b) => b.into_owned(),
+            None => always_compressed(&mut self.cctx(), &[&wasm.bytes], level, self.threads)?,
+        });
         self.module_blocks.borrow_mut().insert((m, level), b.clone());
         Ok(b)
     }

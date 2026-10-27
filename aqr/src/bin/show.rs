@@ -1,14 +1,15 @@
 //! Compresses files into archives, as aqr-compress does (verification included), and
 //! decompresses them back.
 //!
-//! usage: aqr-show [-t THREADS] [-d DEPTH] [-l mid|ZSTD_LEVEL] [-e] [-r] [-f] FILE...
+//! usage: aqr-show [-t THREADS] [-d DEPTH] [-l mid|ZSTD_LEVEL] [-e] [-r] [-m] [-f] FILE...
 //!
 //! For each file: the detected format, the modules applied, the stream bytes by class, and the
 //! archive (of level `-l`, by default mid), the bytes of its resource blocks among them, with
 //! the speeds of compressing it (recompression, the archive and its verification) and of
 //! decompressing it; `-e` takes each file as one file of the format it starts like rather than
 //! scanning it, `-r` decides whether formulas pay without their resources (as in an archive of
-//! many files sharing them; the archive still holds them), and `-f` prints the formula itself.
+//! many files sharing them; the archive still holds them), `-m` likewise without their modules,
+//! and `-f` prints the formula itself.
 
 use std::time::Instant;
 
@@ -36,6 +37,7 @@ fn main() {
             }
             "-e" => opt.file = Nest::Exact,
             "-r" => opt.shared_resources = true,
+            "-m" => opt.shared_modules = true,
             "-f" => tree = true,
             _ => files.push(arg),
         }

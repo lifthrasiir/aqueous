@@ -10,6 +10,7 @@ use aqr_common::varint;
 use std::sync::OnceLock;
 
 /// The built-in frequency tables (see `train`), or flat ones if none are built in.
+#[cfg(feature = "encode")]
 static BUILTIN: &[u8] = include_bytes!("../../model/audio.bin");
 
 #[derive(Debug)]
@@ -27,8 +28,16 @@ pub fn tables() -> &'static Tables {
 }
 
 /// The built-in tables in their uncompressed form: the module's resource.
+#[cfg(feature = "encode")]
 pub fn builtin_raw() -> Vec<u8> {
     builtin::decompress(BUILTIN).unwrap_or_else(|| builtin::to_raw(layout_id(), &default_freqs()))
+}
+
+/// Without the feature `encode` (in the modules, which take the tables as their resource), no
+/// tables are built in, for nothing is to be encoded.
+#[cfg(not(feature = "encode"))]
+pub fn builtin_raw() -> Vec<u8> {
+    panic!("the built-in tables are of the feature encode")
 }
 
 /// The tables in the uncompressed form `raw`, if they are valid for the layout.
@@ -38,6 +47,7 @@ pub fn tables_from(raw: &[u8]) -> Option<Tables> {
 }
 
 /// Geometric-like tables for when nothing is built in.
+#[cfg(feature = "encode")]
 fn default_freqs() -> Vec<Vec<u16>> {
     (0..model::N_CTX)
         .map(|_| {
@@ -50,6 +60,7 @@ fn default_freqs() -> Vec<Vec<u16>> {
 }
 
 /// Serialises frequency tables (for the built-in model file).
+#[cfg(feature = "encode")]
 pub fn freqs_to_bytes(f: &[Vec<u16>]) -> Vec<u8> {
     builtin::to_bytes(layout_id(), f)
 }

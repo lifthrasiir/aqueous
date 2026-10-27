@@ -26,17 +26,21 @@
 //! - corrections: static codes (profiles 0-9), or adaptive binary arithmetic coding with
 //!   lookahead and zlib emulation ([`adapt`], profiles from [`ADAPTIVE`] on).
 
+// The code of the modules alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod adapt;
 mod arith;
 pub mod bits;
 pub mod code;
 pub mod deflate;
 pub mod detect;
+#[cfg(feature = "encode")]
 pub mod formula;
 pub mod header;
 pub mod huffman;
 pub mod inflate;
 pub mod matchfind;
+pub mod module;
 #[doc(hidden)]
 pub mod table;
 pub mod tokens;

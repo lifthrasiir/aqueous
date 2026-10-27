@@ -8,7 +8,9 @@ use crate::bits;
 use crate::flac::{self, ESCAPE, Frame};
 use crate::rans::Tables;
 use aqr_raw::audio::par::{self, DecBatch, EncBatch, Item};
-pub use aqr_raw::audio::residual::{Coded, Error, Rd, freqs_to_bytes, layout_id, put_varint, tables};
+#[cfg(feature = "encode")]
+pub use aqr_raw::audio::residual::freqs_to_bytes;
+pub use aqr_raw::audio::residual::{Coded, Error, Rd, layout_id, put_varint, tables};
 use aqr_raw::audio::residual::{LmsEncoder, ResCounter, ResDecoder, ResEncoder, get_subframes, put_subframes};
 use std::sync::mpsc::sync_channel;
 

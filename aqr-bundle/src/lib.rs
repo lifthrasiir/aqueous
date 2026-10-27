@@ -9,6 +9,8 @@
 //! so whatever the writer did is kept exactly. `ar`, `tar` and `cpio` read the archives into
 //! members, with whatever lies between or after them kept as gaps.
 
+// The code of the modules alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod ar;
 pub mod cpio;
 #[cfg(feature = "encode")]

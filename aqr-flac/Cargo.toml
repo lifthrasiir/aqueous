@@ -3,11 +3,17 @@ name = "aqr-flac"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["encode"]
+# The formulas (`formula`) and the built-in model; without it, the code of the module alone
+# (`module`).
+encode = ["dep:aqr-formula", "aqr-common/zstd", "aqr-raw/encode"]
+
 [dependencies]
-aqr-common = { path = "../aqr-common", features = ["zstd"] }
+aqr-common = { path = "../aqr-common" }
 memchr = "2"
-aqr-formula = { path = "../aqr-formula" }
-aqr-raw = { path = "../aqr-raw" }
+aqr-formula = { path = "../aqr-formula", optional = true }
+aqr-raw = { path = "../aqr-raw", default-features = false }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
