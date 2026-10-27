@@ -1,0 +1,18 @@
+[package]
+name = "aqr-lzma"
+version = "0.1.0"
+edition = "2024"
+description = "LZMA streams split into their data and a record of the parse, and rebuilt bit for bit"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula", optional = true }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.

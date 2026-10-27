@@ -15,6 +15,7 @@ members = [
     "aqr-git",
     "aqr-jpeg",
     "aqr-lz4",
+    "aqr-lzma",
     "aqr-mp3",
     "aqr-obj",
     "aqr-pdf",

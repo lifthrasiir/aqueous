@@ -245,6 +245,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-lzma"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+]
+
+[[package]]
 name = "aqr-modules"
 version = "0.1.0"
 dependencies = [
