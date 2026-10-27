@@ -269,6 +269,13 @@ fn whole() {
     assert_eq!(apply(&cat, &[&[7; 70_000]], &[70_002], u64::MAX).unwrap()[0].len(), 70_002);
     invalid(apply(&cat, &[b"abc"], &[4], u64::MAX), "unreachable");
     invalid(apply(&cat, &[b"abc"], &[4], u64::MAX), "failed");
+    // an access out of bounds, of a 32-bit memory: a fault on its guard pages, caught
+    let oob = format!(
+        r#"(module {MEMORIES}
+            (func (export "aqr_apply_whole") (param i64 i64 i64)
+                (drop (i32.load (i32.const 0x20000)))))"#
+    );
+    invalid(apply(&oob, &[b"abc"], &[5], u64::MAX), "out of bounds");
     // the entry point's arity is that of the application
     invalid(apply(&cat, &[b"abc", b""], &[5], u64::MAX), "parameters");
     invalid(apply(&cat, &[], &[5], u64::MAX), "parameters");

@@ -9,7 +9,6 @@ use std::ffi::OsString;
 use std::fs::File;
 use std::io;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 /// A worker.
 pub struct Child(std::process::Child);
@@ -20,14 +19,7 @@ impl Child {
     }
 
     pub fn exit_code(&mut self) -> Option<i64> {
-        use std::os::unix::process::ExitStatusExt;
-        for _ in 0..100 {
-            if let Some(s) = self.0.try_wait().ok()? {
-                return Some(s.code().map_or_else(|| -(s.signal().unwrap_or(0) as i64), i64::from));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        None
+        super::unix::exit_code(|| self.0.try_wait())
     }
 }
 
@@ -39,16 +31,7 @@ impl Drop for Child {
 }
 
 pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(Child, File, File)> {
-    let mut c = Command::new(program)
-        .args(args)
-        .env_clear()
-        .current_dir("/")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let to = File::from(std::os::fd::OwnedFd::from(c.stdin.take().expect("the input")));
-    let from = File::from(std::os::fd::OwnedFd::from(c.stdout.take().expect("the output")));
+    let (c, to, from) = super::unix::spawn(program, args)?;
     Ok((Child(c), to, from))
 }
 

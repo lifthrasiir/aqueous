@@ -9,12 +9,8 @@
 //!   made unable to reach anything but its standard input and output, before it reads anything
 //!   of an archive.
 //!
-//! Systems without these (macOS so far) have the worker refuse to start (`unsupported`), as a
-//! worker that is not locked down would protect from nothing.
-//!
-//! macOS would lock the worker down with Seatbelt (`sandbox_init_with_parameters`, a profile
-//! of `(deny default)`), with Wasmtime's traps on signals or its Mach exception ports allowed
-//! for, and limit the memory as the decoder watches the worker's footprint.
+//! Systems without these have the worker refuse to start (`unsupported`), as a worker that is
+//! not locked down would protect from nothing.
 
 use std::fs::File;
 use std::io;
@@ -29,9 +25,17 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{Child, lockdown, spawn};
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::{Child, lockdown, spawn};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix;
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 mod unsupported;
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 pub use unsupported::{Child, lockdown, spawn};
 
 /// The standard input and output of the worker, for the messages.

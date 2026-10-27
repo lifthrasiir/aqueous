@@ -14,11 +14,11 @@
 - `aqr-decompress/src/sandbox/mod.rs`: 공개 API(`Sandbox`, `Sandboxed`, `worker_main`)와 브로커 쪽 워커 관리.
 - `aqr-decompress/src/sandbox/proto.rs`: 브로커와 워커 사이의 메시지.
 - `aqr-decompress/src/sandbox/worker.rs`: 워커의 초기화, 봉쇄, 요청 루프.
-- `aqr-decompress/src/sandbox/os/`: OS별 `spawn`·`Child`·`lockdown`. `windows.rs`, `linux.rs`, 그 밖의 시스템은 `unsupported.rs`.
+- `aqr-decompress/src/sandbox/os/`: OS별 `spawn`·`Child`·`lockdown`. `windows.rs`, `linux.rs`, `macos.rs`(Linux와 공유하는 기동과 종료 코드는 `unix.rs`), 그 밖의 시스템은 `unsupported.rs`.
 - `aqr-decompress/src/bin/worker.rs`: 참고용 helper 바이너리 `aqr-decompress-worker`.
 - `aqr-decompress/src/wasm.rs`: 모듈 실행(`load`, `Shared::apply`)과 워커 봉쇄 전의 `warm_up`.
 - `aqr-decompress/tests/wasm.rs`: 모든 load/apply/decode를 샌드박스에서도 실행해 결과(실패 포함)가 같은지 확인한다.
-- `aqr-decompress/tests/sandbox.rs`: 봉쇄(파일·프로세스·네트워크 접근 거부)와 기동 실패.
+- `aqr-decompress/tests/sandbox.rs`: 봉쇄(파일·프로세스·네트워크 접근 거부)와 기동 실패. macOS의 메모리 감시는 `os/macos.rs`의 단위 테스트가 확인한다.
 - `aqr-decompress/examples/wasm.rs`: 네이티브, in-process Wasm, 샌드박스의 시간 비교.
 
 ---
@@ -68,33 +68,40 @@
 - **[제안]** 심층 방어로 user/pid/net/mount 네임스페이스나 Landlock을 더할 수 있다. 비특권 user ns는 배포판에 따라 막혀 있으므로(Ubuntu 24.04+), 없는 환경에서도 seccomp만으로 동작해야 한다.
 - **[제안]** 부모가 죽은 뒤 워커를 정리하는 일은 파이프 EOF에 맡긴다. `PR_SET_PDEATHSIG`는 프로세스가 아니라 워커를 띄운 스레드가 끝날 때 신호를 보내므로, 스레드가 오가는 호스트에서는 워커가 엉뚱하게 죽는다.
 
-### 2.3 macOS와 그 밖의 시스템
+### 2.3 macOS
 
-- **[확정]** 지금은 `os/unsupported.rs`가 워커 시작을 거부한다(`io::ErrorKind::Unsupported`). 그래서 `Sandbox`는 resource 실패를 낸다.
-- **[제안]** macOS는 `os/macos.rs`를 추가해 같은 인터페이스(`spawn`, `Child::limit_memory`, `Child::exit_code`, `lockdown`)를 구현한다.
-  - 봉쇄는 Seatbelt(`sandbox_init_with_parameters`)로 한다. 문서상 deprecated지만 Chromium과 Firefox가 지금도 쓴다. 프로필은 `(deny default)`에 필요한 `sysctl-read`와 자기 task에 대한 Mach 연산 정도만 연다.
-  - wasmtime은 macOS에서 기본으로 Mach exception port로 트랩을 받는다. 샌드박스 아래에서 동작하는지 확인하고, 안 되면 `Config::macos_use_mach_ports(false)`로 시그널 방식으로 바꾼다 *(확인 필요)*.
-  - hardened runtime으로 서명할 때는 JIT를 위한 entitlement가 필요하다 *(확인 필요)*.
-  - 메모리 한도는 브로커가 `proc_pid_rusage`의 `phys_footprint`를 보고 넘으면 죽이는 방식으로 건다.
+- **[확정]** 워커는 스스로 봉쇄한다. fd 3 이상을 전부 닫고(`proc_pidinfo(PROC_PIDLISTFDS)`로 열린 것을 나열한다), Seatbelt 프로필 `(version 1) (deny default)`를 `sandbox_init_with_parameters`로 건다. 문서상 deprecated이고 헤더에도 없지만(`sandbox_init`은 이름 있는 프로필만 받는다), Chromium과 Firefox가 지금도 쓴다.
+  - 허용하는 것이 하나도 없다. 프로필은 시스템이 검사하는 연산(파일, 소켓, 프로세스, Mach 서비스 lookup, sysctl 등)만 막고, 메모리, 스레드, 시그널, 자기 task의 Mach 포트, 이미 열린 fd는 검사 대상이 아니기 때문이다. Linux의 seccomp처럼 시스템 호출 단위로 걸러야 할 것이 없다.
+  - 위반은 sandboxd가 시스템 로그에 남긴다. 탈출한 코드의 흔적이 되므로 `(with no-log)`는 쓰지 않는다.
+- **[확정]** wasmtime의 기본 트랩 처리(Mach exception port)는 샌드박스 아래에서도 동작한다. `unreachable`과 32비트 메모리의 guard page 접근(`EXC_BAD_ACCESS`)이 모두 in-process와 같은 실패가 된다(`tests/wasm.rs`의 `whole`). 따라서 `Config::macos_use_mach_ports(false)`는 필요 없다. Cranelift의 코드도 그대로 실행 가능해진다. 서명하지 않았거나 ad-hoc으로 서명한 실행 파일에서 확인했다.
+- **[확정]** 메모리 한도는 브로커가 건다. 워커마다 감시 스레드를 두고, 10 ms마다 `proc_pid_rusage`의 `ri_phys_footprint`(시스템이 그 프로세스의 메모리로 세는 양)를 보다가 한도를 넘으면 죽인다. 한도의 값은 Windows와 같다(요청의 메모리 한도 + 전송 바이트 + 여유분 1 GiB). 감시 스레드는 `Child`를 약한 참조로만 들고 있어서 `Child`가 버려지면 끝난다.
+  > kill은 pid가 아니라 `std::process::Child`를 통해 보낸다. 이미 wait한 자식에게는 std가 신호를 보내지 않으므로, pid가 재사용돼도 엉뚱한 프로세스를 죽이지 않는다. footprint는 재사용된 pid의 것을 읽을 수 있지만 읽기만 하므로 해가 없다.
+  > 폴링이므로 10 ms 사이에 한도를 크게 넘을 수는 있다. 막으려는 것은 탈취된 워커가 메모리를 고갈시키는 DoS이므로 이 정도로 충분하다. 커널이 강제하는 수단(`task_set_phys_footprint_limit`, jetsam 한도)은 비공개이거나 특권이 필요하다.
+- **[제안]** hardened runtime으로 서명한 실행 파일에서는 JIT를 위한 entitlement(`com.apple.security.cs.allow-jit`, 또는 wasmtime이 `MAP_JIT`를 쓰지 않는다면 `allow-unsigned-executable-memory`)가 필요할 것이다 *(확인 필요)*. 배포 형태가 정해질 때 확인한다.
+
+### 2.4 그 밖의 시스템
+
+- **[확정]** `os/unsupported.rs`가 워커 시작을 거부한다(`io::ErrorKind::Unsupported`). 그래서 `Sandbox`는 resource 실패를 낸다.
 
 ## 3. 검증과 측정
 
-- **[확정]** 동치성은 `tests/wasm.rs`로 확인한다. 기존 테스트 11개의 모든 load/apply/decode를 샌드박스에서도 실행해 결과와 실패 메시지가 같은지 본다. tasks, channels, deadlock, 메모리 한도, 프로파일 위반, 손상된 아카이브가 포함된다. Windows와 Linux(WSL2) 모두 통과했다.
+- **[확정]** 동치성은 `tests/wasm.rs`로 확인한다. 기존 테스트 11개의 모든 load/apply/decode를 샌드박스에서도 실행해 결과와 실패 메시지가 같은지 본다. tasks, channels, deadlock, 메모리 한도, 프로파일 위반, 손상된 아카이브가 포함된다. Windows, Linux(WSL2), macOS 모두 통과했다.
 - **[확정]** 봉쇄는 `tests/sandbox.rs`의 `locked_down`으로 확인한다. 워커에게 파일 읽기, 파일 쓰기, 프로세스 생성, loopback 연결을 시킨다(`Sandbox::probe`).
   - Windows에서는 앞의 셋이 ACCESS_DENIED이고, 소켓은 `WSAStartup`부터 실패한다(std가 이를 panic으로 처리한다).
-  - Linux에서는 넷 다 `EPERM`이다.
-  - `RevertToSelf`나 seccomp를 빼면 이 테스트가 실패하는 것도 확인했다.
+  - Linux와 macOS에서는 넷 다 `EPERM`이다.
+  - `RevertToSelf`, seccomp, Seatbelt를 빼면 이 테스트가 실패하는 것도 확인했다. macOS의 메모리 감시 테스트(`memory_limited`)도 kill을 빼면 실패한다.
   > 처음에는 요청 루프가 pool 스레드에서 돌아서, `RevertToSelf`를 빼도 테스트가 통과했다. impersonation이 걸린 메인 스레드를 아무도 건드리지 않았기 때문이다. 탈출한 코드가 메인 스레드를 가로채면 그 토큰을 쓸 수 있으므로, 요청 루프를 메인 스레드로 옮겼다.
-- **[확정]** 비용 항목. Windows, release, 2026-10에 측정했다. Linux는 재지 않았다.
+- **[확정]** 비용 항목. release, 2026-10에 Windows와 macOS(Apple Silicon)에서 측정했다. Linux는 재지 않았다. macOS의 모듈 컴파일은 따로 재지 않았다.
 
-  | 항목 | 비용 | 단위 |
-  |---|---|---|
-  | 워커 기동(spawn, 봉쇄, 워밍업) | 약 7 ms. 실행 파일을 처음 띄울 때만 약 160 ms | 워커마다 |
-  | 모듈 컴파일 | flate 84 ms, jpeg 35 ms, mp3 16 ms | 워커 × 모듈마다 |
-  | `apply` 왕복 | 약 36 µs 추가(57 µs, in-process는 21 µs) | `apply`마다 |
-  | 바이트 전달 | 입력 1 MiB와 출력 1 MiB를 합쳐 약 0.4 ms | 입력 + 출력 바이트 |
+  | 항목 | Windows | macOS | 단위 |
+  |---|---|---|---|
+  | 워커 기동(spawn, 봉쇄, 워밍업) | 약 7 ms. 실행 파일을 처음 띄울 때만 약 160 ms | 약 7 ms. 처음만 약 140 ms | 워커마다 |
+  | 모듈 컴파일 | flate 84 ms, jpeg 35 ms, mp3 16 ms | | 워커 × 모듈마다 |
+  | `apply` 왕복 | 약 36 µs 추가(57 µs, in-process는 21 µs) | 약 11 µs 추가(39 µs, in-process는 28 µs) | `apply`마다 |
+  | 바이트 전달 | 입력 1 MiB와 출력 1 MiB를 합쳐 약 0.4 ms | 약 0.19 ms 추가(0.35 ms, in-process는 0.16 ms) | 입력 + 출력 바이트 |
 
   > 64 MB 텍스트를 gzip한 아카이브(출력 17.8 MB)를 `Sandbox`로 디코딩하면 0.78–0.94초가 걸렸다. in-process Wasm은 0.76–0.78초였다. 차이의 대부분은 고정비(기동과 flate 컴파일, 약 90 ms)이고, 바이트 전달은 약 5 ms이다.
+  > macOS에서 저장소의 텍스트로 만든 같은 크기의 아카이브(출력 18.8 MB)는 `Sandbox`로 1.10–1.19초, in-process Wasm으로 1.00–1.05초였다. 새로 빌드한 실행 파일을 처음 띄울 때는 1.72초였다. 시스템이 처음 실행되는 바이너리를 검사하는 비용으로 보인다 *(확인 필요)*.
 - **[확정]** 바이트당 비용은 모듈의 처리 속도에 비례해 커진다. Wasm 처리 속도가 R MB/s인 해제 모듈이라면 비율이 대략 `0.25 × R / 1000`이다. 20–30 MB/s에서 1% 미만이고, 500 MB/s에서 약 12%, 1–2 GB/s에서 25–50%가 된다. `Sandboxed`에서는 빠른 모듈 대부분이 알려진 모듈이라 네이티브로 돌지만, 외부의 빠른 모듈과 `Sandbox`(전부 Wasm)에서는 이 비용을 문다.
 
 ## 4. 다음에 할 일
@@ -123,7 +130,6 @@
 ### 4.3 그 밖
 
 - **[제안]** aqr CLI에 연결한다. 숨은 워커 인자로 자기 자신을 다시 실행하게 하고, `--sandbox`(또는 기본값)로 외부 모듈을 샌드박스에서 돌린다. 기본값으로 할지는 정해야 한다.
-- **[제안]** 2.3의 macOS 백엔드.
 - **[제안]** 2.2의 Linux 메모리 한도.
 - **[제안]** 워커의 stderr를 길이 제한을 두고 브로커가 받아 실패 메시지에 붙인다. 지금은 워커가 panic하면 종료 코드만 남는다. 단말에 그대로 내보내면 이스케이프 시퀀스 주입이 가능하므로 그렇게 하지 않는다.
 - **[제안]** 실행 시간 제한. in-process에도 없으므로 동작을 바꾸지 않으려고 넣지 않았다. 필요하면 브로커에서 벽시계나 CPU 시간 기준으로 워커를 죽이는 방식이 된다.
