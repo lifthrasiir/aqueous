@@ -13,6 +13,9 @@
 //! Threads that libraries make on their own count in the pool by the workers reserved for them
 //! and left idle: Zstandard's (aqr-formula) and rayon's (`rayon_pool`, whose threads are the
 //! workers themselves, and one standing for the thread that waits on it).
+//!
+//! On WebAssembly, which has no threads, the pool has no workers: nothing is reserved, and
+//! everything runs on the calling thread (the modules of aqr-modules, whatever their threads).
 
 use std::any::Any;
 use std::collections::VecDeque;
@@ -23,6 +26,9 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 /// Bytes of stack of a worker: as much as a main thread has, for the work [`run`] moves there.
 const STACK: usize = 16 << 20;
+
+/// Whether there are threads to make workers of.
+const THREADS: bool = !cfg!(target_family = "wasm");
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
 
@@ -51,7 +57,7 @@ pub fn init(n: usize) -> bool {
 }
 
 /// The number of workers of the pool: those that [`init`] asked for, else as many as the
-/// machine has threads.
+/// machine has threads (none on WebAssembly).
 pub fn size() -> usize {
     pool().size
 }
@@ -64,6 +70,7 @@ pub fn is_worker() -> bool {
 fn pool() -> &'static Pool {
     POOL.get_or_init(|| {
         let size = match SIZE.load(Ordering::Relaxed) {
+            _ if !THREADS => 0,
             0 => std::thread::available_parallelism().map_or(1, |n| n.get()),
             n => n,
         };
@@ -303,9 +310,9 @@ impl<'scope> Scope<'scope, '_> {
 }
 
 /// `f` on a worker of the pool, waiting for one to be free; on the calling thread itself where
-/// it is a worker already. Its panic is resumed here.
+/// it is a worker already, or there are no threads. Its panic is resumed here.
 pub fn run<R: Send>(f: impl FnOnce() -> R + Send) -> R {
-    if is_worker() {
+    if is_worker() || !THREADS {
         return f();
     }
     let p = pool();
@@ -362,15 +369,15 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
 /// at once: the calling thread lets them in, in order, as `admit` does (which may wait, as for
 /// memory), each on a worker as one is free, and the worker is given back as `f` returns. So
 /// no thread waits holding a worker, which work still running can reserve (an item's own
-/// threads). On the calling thread alone where `threads` is 1. A panic of `f` stops what is
-/// not let in yet and is resumed here.
+/// threads). On the calling thread alone where `threads` is 1, or there are no threads. A panic
+/// of `f` stops what is not let in yet and is resumed here.
 pub fn dispatch<G: Send, R: Send>(
     n: usize,
     threads: usize,
     mut admit: impl FnMut(usize) -> G,
     f: impl Fn(usize, G) -> R + Sync,
 ) -> Vec<R> {
-    if threads <= 1 {
+    if threads <= 1 || !THREADS {
         return (0..n).map(|i| f(i, admit(i))).collect();
     }
     let out: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
