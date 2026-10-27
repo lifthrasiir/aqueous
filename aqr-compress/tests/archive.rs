@@ -298,6 +298,71 @@ fn lzma_held_once() {
     }
 }
 
+/// A PE32+ image of x86-64 code: calls to a few functions and loads, of constants at random
+/// from `seed`, `n` of each.
+fn pe(n: u32, seed: u64) -> Vec<u8> {
+    let mut x = seed;
+    let mut code = Vec::new();
+    for i in 0..n {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let at = code.len() as i32;
+        // mov [rsp+8], rbx; call f(i % 5); mov rax, [rip+d]; add rsp, k; ret; int3
+        code.extend_from_slice(&[0x48, 0x89, 0x5c, 0x24, 0x08, 0xe8]);
+        code.extend_from_slice(&((i % 5) as i32 * 0x40 - at - 10).to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x8b, 0x05]);
+        code.extend_from_slice(&((x >> 40) as i32 % 0x10000 - at - 17).to_le_bytes());
+        code.extend_from_slice(&[0x48, 0x83, 0xc4, (x >> 56) as u8, 0xc3, 0xcc]);
+    }
+    let mut d = vec![0u8; 0x200];
+    d[..2].copy_from_slice(b"MZ");
+    d[0x3c] = 0x40;
+    d[0x40..0x44].copy_from_slice(b"PE\0\0");
+    d[0x44..0x46].copy_from_slice(&0x8664u16.to_le_bytes());
+    d[0x46] = 1; // sections
+    d[0x54] = 0x70; // optional header size
+    let opt = 0x58;
+    d[opt..opt + 2].copy_from_slice(&0x20bu16.to_le_bytes());
+    d[opt + 0x18..opt + 0x20].copy_from_slice(&0x1_4000_0000u64.to_le_bytes());
+    let sec = opt + 0x70;
+    d[sec..sec + 5].copy_from_slice(b".text");
+    d[sec + 12..sec + 16].copy_from_slice(&0x1000u32.to_le_bytes());
+    d[sec + 16..sec + 20].copy_from_slice(&(code.len() as u32).to_le_bytes());
+    d[sec + 20..sec + 24].copy_from_slice(&0x200u32.to_le_bytes());
+    d[sec + 36..sec + 40].copy_from_slice(&0x6000_0020u32.to_le_bytes());
+    d.extend_from_slice(&code);
+    d
+}
+
+/// PE files and a `.tar.lzma` of them: the tar archive taken as aqr-bundle's, its members' streams
+/// stored once with the files', though as they are not the files' bytes the archive would not
+/// seem to pay for itself (it does not, alone).
+#[test]
+fn lzma_of_pe_files_held_once() {
+    // (versions of a program, a byte apart: the tar archive raw compresses as well as its
+    // members apart, and costs less)
+    let base = pe(60_000, 7);
+    let members: Vec<(String, Vec<u8>)> = (0..4)
+        .map(|k| {
+            let mut d = base.clone();
+            d[0x1000 + 997 * k] ^= 0x55;
+            (format!("b/p{k}.exe"), d)
+        })
+        .collect();
+    let refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    let tlz = aqr_lzma::greedy::alone(&tar(&refs));
+    assert!(tlz.len() > 256 << 10, "{}", tlz.len());
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let files: Vec<(&str, Vec<u8>)> = members.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+    let (alone, r) = archived(&files, &opt);
+    let alone = alone.len() - r.overhead;
+    let all = [&files[..], &[("p/b.tar.lzma", tlz.clone())]].concat();
+    let (c, r) = archived(&all, &opt);
+    let names: Vec<&str> = r.files[4].modules.iter().map(|m| m.name).collect();
+    assert_eq!(names, ["lzma-recons", "bundle-recons", "exe-recons/x86"], "{:?}", r.files[4]);
+    let c = c.len() - r.overhead;
+    assert!(c < alone + alone / 50, "{c} of {alone} alone");
+}
+
 /// A ZIP archive of a single entry `name` of `data`, its body `deflated`.
 fn zip_of(name: &str, data: &[u8], deflated: &[u8]) -> Vec<u8> {
     let mut common = Vec::new();

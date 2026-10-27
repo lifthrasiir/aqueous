@@ -272,8 +272,9 @@ pub(crate) struct Cx {
     words: Option<Arc<aqr_wrt::formula::Shared>>,
     /// The text coded with [`Cx::words`] of data the files archived together hold, by its
     /// length and hash: the text that holds it codes to what holds this, so that it costs
-    /// nothing as that data does ([`smaller`]). Shared with the contexts of the files and
-    /// contents made apart.
+    /// nothing as that data does ([`smaller`]). So are the streams of the members of an ar, tar
+    /// or cpio archive that they hold ([`Cx::note_bundled`]). Shared with the contexts of the
+    /// files and contents made apart.
     coded_held: Arc<std::sync::Mutex<HashSet<(usize, u64)>>>,
     /// The text of the files of an archive that others hold as contents, coded once ([`Once`]).
     /// Shared with the contexts of the files made apart.
@@ -420,7 +421,17 @@ impl Cx {
         }
     }
 
-    /// Whether `data` is text noted by [`Cx::note_coded`].
+    /// Notes the streams of formula `f` of an ar, tar or cpio archive that the files archived
+    /// together hold ([`Cx::coded_held`]), but its own (its headers): those of its members, which
+    /// are the files', so that what holds the archive costs nothing for them either.
+    fn note_bundled(&self, f: &Formula) {
+        let mut held = self.coded_held.lock().unwrap();
+        for s in f.streams.iter().filter(|s| !s.class.starts_with("bundle/") && !s.data.is_empty()) {
+            held.insert(stream_key(&s.data));
+        }
+    }
+
+    /// Whether `data` is a stream noted by [`Cx::note_coded`] or [`Cx::note_bundled`].
     fn coded_held(&self, data: &[u8]) -> bool {
         let held = self.coded_held.lock().unwrap();
         !held.is_empty() && held.contains(&stream_key(data))
@@ -686,8 +697,17 @@ fn files_len(d: &[u8]) -> usize {
 
 /// Unless [`Options::smaller`] is off, whether formula `f` of `d` archives smaller than `d`
 /// raw, its stream 0 the bytes of `gaps` of `d` if given ([`Made`]).
+///
+/// An ar, tar or cpio archive (alone, or found by a scan) that the files archived together hold
+/// is taken whatever its size: its members' formulas are theirs, whose streams are stored once
+/// ([`Formula::share_slices`]), though they cost in full here (the streams of a member that is a
+/// PE file, say, are not its bytes, which the files are held by).
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
-    let smaller = !opt.smaller || {
+    let bundled = f.applies().iter().any(|a| a.module == BUNDLE) && cx.held_by_others(d, d);
+    if bundled {
+        cx.note_bundled(f);
+    }
+    let smaller = !opt.smaller || bundled || {
         let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
         let stand_in = pieces.as_deref().map(|p| (0, p));
         // (the streams the files archived together hold cost nothing)
