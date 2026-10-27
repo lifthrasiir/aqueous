@@ -14,13 +14,14 @@ pub const MODULE: Module = Module { name: "lzma-recons", version: 1 };
 const LIMIT: usize = 1 << 31;
 
 /// Whether `d` starts like a `.lzma` file: a header of valid properties, a dictionary size as
-/// encoders write it (2^n or 3 × 2^n bytes), a data size that is unknown or below 2^48, and a
-/// stream starting with the zero byte its encoder writes first. Weak still: only for the start
-/// of a file.
+/// encoders write it (2^n or 3 × 2^n bytes, 4 KiB at least), a data size that is unknown or below
+/// 2^48, and a stream starting with the zero byte its encoder writes first. Weak still: only for
+/// the start of a file.
 pub fn starts(d: &[u8]) -> bool {
     let Some(h) = alone::parse(d) else { return false };
     let dict = h.dict;
     d[alone::HEADER] == 0
+        && dict >= 1 << 12
         && (dict.is_power_of_two() || dict % 3 == 0 && (dict / 3).is_power_of_two())
         && h.size.is_none_or(|s| s < 1 << 48)
 }

@@ -39,6 +39,11 @@ fn files_rebuilt() {
 #[test]
 fn not_lzma() {
     assert!(!formula::starts(b"hello, world, this is not an lzma file"));
+    // headers of other files that 10gb has, by chance of valid properties: dictionaries of 1
+    // and 4 bytes, which no encoder writes (benchmarks/silesia/sao, biblio.dbt of OpenOffice)
+    let sao = [&[0u8, 1, 0, 0, 0, 0, 0, 0, 0xb5, 0xf3, 3, 0, 0, 0][..], &[1, 0, 0, 0, 1, 0, 0, 0][..]].concat();
+    let dbt = [&[0x4fu8, 4, 0, 0, 0][..], &[0; 16][..]].concat();
+    assert!(!formula::starts(&sao) && !formula::starts(&dbt));
     let (_, mut d) = fixtures().remove(0);
     d[alone::HEADER] = 1;
     assert!(!formula::starts(&d) && formula::encode(&d, 1).is_none());
