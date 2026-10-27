@@ -9,7 +9,9 @@
 //! - where the module spawns tasks, `aqr_task` is exported: it sets the stack pointer below the
 //!   spawning frame (the record its first argument points to, aligned down to 16) and calls
 //!   `aqr_task_body` (`aqr-api`'s);
-//! - every other export but the entry point goes, and so does whatever only they used.
+//! - every other export but the entry point goes, and so does whatever only they used;
+//! - what only panics need goes (see `trim`), and so do the custom sections: names, producers
+//!   (walrus's too), the linker's relocations.
 
 use std::collections::HashMap;
 
@@ -26,7 +28,12 @@ const TASK: &str = "aqr_task";
 const TASK_BODY: &str = "aqr_task_body";
 
 fn parse(wasm: &[u8]) -> Result<Module, String> {
-    ModuleConfig::new().parse(wasm).map_err(|e| e.to_string())
+    // (the names parsed still, for `trim`)
+    ModuleConfig::new()
+        .generate_name_section(std::env::var_os("AQR_LD_NAMES").is_some())
+        .generate_producers_section(false)
+        .parse(wasm)
+        .map_err(|e| e.to_string())
 }
 
 /// Whether the module imports `aqr_api` or exports an entry point.
@@ -83,6 +90,7 @@ impl VisitorMut for Calls<'_> {
 pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     use ValType::{I32, I64};
 
+    let relocs = crate::trim::relocs(wasm)?;
     let mut m = parse(wasm)?;
 
     let working = match m.memories.iter().map(|mem| mem.id()).collect::<Vec<_>>()[..] {
@@ -202,7 +210,12 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
         task(&mut m, task_body)?;
     }
 
+    crate::trim::trim(&mut m, relocs.as_ref(), working)?;
     walrus::passes::gc::run(&mut m);
+    let customs: Vec<_> = m.customs.iter().map(|(id, _)| id).collect();
+    for id in customs {
+        m.customs.delete(id);
+    }
     if let Some(i) = m.imports.iter().find(|i| i.module == API) {
         return Err(format!("{API}.{} used other than by a call", i.name));
     }
