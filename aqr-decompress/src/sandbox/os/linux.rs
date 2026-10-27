@@ -38,6 +38,7 @@ pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(Child, File, File
 // The filter's instructions (linux/filter.h, linux/seccomp.h).
 const LD_W_ABS: u16 = (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16;
 const JEQ_K: u16 = (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16;
+#[cfg(target_arch = "x86_64")]
 const JGE_K: u16 = (libc::BPF_JMP | libc::BPF_JGE | libc::BPF_K) as u16;
 const JSET_K: u16 = (libc::BPF_JMP | libc::BPF_JSET | libc::BPF_K) as u16;
 const RET_K: u16 = (libc::BPF_RET | libc::BPF_K) as u16;

@@ -85,10 +85,10 @@
 
 ## 3. 검증과 측정
 
-- **[확정]** 동치성은 `tests/wasm.rs`로 확인한다. 기존 테스트 11개의 모든 load/apply/decode를 샌드박스에서도 실행해 결과와 실패 메시지가 같은지 본다. tasks, channels, deadlock, 메모리 한도, 프로파일 위반, 손상된 아카이브가 포함된다. Windows, Linux(WSL2), macOS 모두 통과했다.
+- **[확정]** 동치성은 `tests/wasm.rs`로 확인한다. 기존 테스트 11개의 모든 load/apply/decode를 샌드박스에서도 실행해 결과와 실패 메시지가 같은지 본다. tasks, channels, deadlock, 메모리 한도, 프로파일 위반, 손상된 아카이브가 포함된다. Windows, Linux(WSL2의 x86_64와 Lima의 aarch64), macOS 모두 통과했다.
 - **[확정]** 봉쇄는 `tests/sandbox.rs`의 `locked_down`으로 확인한다. 워커에게 파일 읽기, 파일 쓰기, 프로세스 생성, loopback 연결을 시킨다(`Sandbox::probe`).
   - Windows에서는 앞의 셋이 ACCESS_DENIED이고, 소켓은 `WSAStartup`부터 실패한다(std가 이를 panic으로 처리한다).
-  - Linux와 macOS에서는 넷 다 `EPERM`이다.
+  - Linux(x86_64, aarch64)와 macOS에서는 넷 다 `EPERM`이다.
   - `RevertToSelf`, seccomp, Seatbelt를 빼면 이 테스트가 실패하는 것도 확인했다. macOS의 메모리 감시 테스트(`memory_limited`)도 kill을 빼면 실패한다.
   > 처음에는 요청 루프가 pool 스레드에서 돌아서, `RevertToSelf`를 빼도 테스트가 통과했다. impersonation이 걸린 메인 스레드를 아무도 건드리지 않았기 때문이다. 탈출한 코드가 메인 스레드를 가로채면 그 토큰을 쓸 수 있으므로, 요청 루프를 메인 스레드로 옮겼다.
 - **[확정]** 비용 항목. release, 2026-10에 Windows와 macOS(Apple Silicon)에서 측정했다. Linux는 재지 않았다. macOS의 모듈 컴파일은 따로 재지 않았다.
