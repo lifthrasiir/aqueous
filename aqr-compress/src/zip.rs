@@ -20,7 +20,6 @@ pub(crate) fn zip(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formul
             let except = h.owner(d);
             (h, except)
         }),
-        ..aqr_zip::formula::Options::default()
     };
     let e = aqr_zip::formula::encode_with(d, &zopt)?;
     cx.inflate(e.inflated);

@@ -281,8 +281,11 @@ pub struct Encoder {
     /// The Wasm module of each module ([`Encoder::with_modules`]).
     wasm: WasmOf,
     /// Module blocks compressed, by their module and level.
-    module_blocks: RefCell<HashMap<(Module, i32), std::rc::Rc<Vec<u8>>>>,
+    module_blocks: RefCell<HashMap<(Module, i32), ModuleBlock>>,
 }
+
+/// A module block compressed, shared by the formulas that have it.
+type ModuleBlock = std::rc::Rc<Vec<u8>>;
 
 /// The Wasm module of a module, if there is one ([`Encoder::with_modules`]).
 pub type WasmOf = fn(Module) -> Option<Wasm>;
@@ -2622,9 +2625,7 @@ mod tests {
         let c = encode(&sample(), None, Level::STORED).unwrap();
         assert_eq!(decode(&c, &natives()).unwrap(), SAMPLE);
         let ts = types(&c);
-        assert!(
-            ts.contains(&(NON_LEAF_RAW + 0)) && !ts.iter().any(|&t| [LEAF_ZSTD, NON_LEAF_ZSTD].contains(&(t & !3)))
-        );
+        assert!(ts.contains(&NON_LEAF_RAW) && !ts.iter().any(|&t| [LEAF_ZSTD, NON_LEAF_ZSTD].contains(&(t & !3))));
         let noise = aqr_common::rng::noise(300_000);
         for n in [0, 1, 1000, 1025, 128 << 10, (128 << 10) + 1, 300_000] {
             let e = always_compressed(&mut CCtx::create(), &[&noise[..n]], STORED, 1).unwrap();

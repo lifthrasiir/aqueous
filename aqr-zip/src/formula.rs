@@ -306,7 +306,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     };
     // the kind of each entry's contents and their end, of the stored and the deflated; the
     // lengths of each deflated body's data and record, and what flate-set derives of it
-    let (mut stored_kinds, mut kinds): (Vec<(Kind, usize)>, Vec<(Kind, usize)>) = (Vec::new(), Vec::new());
+    let (mut stored_kinds, mut kinds) = (Vec::<(Kind, usize)>::new(), Vec::<(Kind, usize)>::new());
     let (mut lens, mut derived) = (Vec::new(), Vec::new());
     let mut locals = locals.iter().zip(made.iter_mut()).zip(crcs);
     for r in &recs {
