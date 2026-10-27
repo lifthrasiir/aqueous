@@ -400,6 +400,9 @@ impl<'a, B: Backend> Adaptive<'a, B> {
 }
 
 impl<B: Backend> Corr for Adaptive<'_, B> {
+    // (its own work per token outweighs a few calls through the table)
+    const SPECIALIZED: bool = false;
+
     #[inline(always)]
     fn predict(&mut self, _: &[u8], p: usize, actual: Option<Token>) -> Option<Token> {
         if let Some(r) = &mut self.replay {

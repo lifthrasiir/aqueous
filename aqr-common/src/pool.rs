@@ -305,7 +305,9 @@ impl<'scope> Scope<'scope, '_> {
 
     /// Runs `f` on a worker of the scope, once one is idle. Panics where the scope has none.
     pub fn spawn<T: Send + 'scope>(&'scope self, f: impl FnOnce() -> T + Send + 'scope) -> Handle<'scope, T> {
-        assert!(THREADS, "a scope of no workers");
+        if !THREADS {
+            panic!("a scope of no workers");
+        }
         let mut w = self.state.workers.lock().unwrap();
         assert!(w.all > 0, "a scope of no workers");
         while w.idle == 0 {

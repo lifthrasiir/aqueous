@@ -68,6 +68,8 @@ pub trait Search: Cands {
     fn token_start(&mut self, d: &[u8], p: usize);
     /// Records a token of `len` bytes at `p`.
     fn token(&mut self, d: &[u8], p: usize, len: usize);
+    /// As [`Cands`] (for code generic over tables, `dyn` ones included).
+    fn cands(&mut self) -> &mut dyn Cands;
 }
 
 /// No table (rules that do not search).
@@ -88,6 +90,9 @@ impl Search for NoTable {
     }
     fn token_start(&mut self, _: &[u8], _: usize) {}
     fn token(&mut self, _: &[u8], _: usize, _: usize) {}
+    fn cands(&mut self) -> &mut dyn Cands {
+        self
+    }
 }
 
 /// The table of [`super::tokens::Kind::Chain`]: exact chains of every position, which need
@@ -147,6 +152,10 @@ impl Search for ChainTable {
     fn token_start(&mut self, _: &[u8], _: usize) {}
 
     fn token(&mut self, _: &[u8], _: usize, _: usize) {}
+
+    fn cands(&mut self) -> &mut dyn Cands {
+        self
+    }
 }
 
 /// Configurations a [`MultiChain`] searches at once, at most.
@@ -330,6 +339,7 @@ impl<const W: usize, const K: usize, const L: bool> Table<W, K, L> {
 }
 
 impl Core {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         ways: usize,
         key: usize,
@@ -793,5 +803,9 @@ impl<const W: usize, const K: usize, const L: bool> Search for Table<W, K, L> {
                 t.insert::<W, K, L>(d, q);
             }
         }
+    }
+
+    fn cands(&mut self) -> &mut dyn Cands {
+        self
     }
 }
