@@ -4,8 +4,8 @@
 //! - `size_M`, `read_M`, `write_O` and `copy_O_M` become `memory.size M`, `memory.copy working M`,
 //!   `memory.copy O working` and `memory.copy O M` (`O` an output), with `aqr.aqr_M` imported
 //!   (64-bit, minimum 0, no maximum) for each memory `M` used;
-//! - `request`, `release`, `commit`, `heartbeat`, `log`, `spawn`, `result`, `join` and `take`
-//!   become `aqr.aqr_request` and so on;
+//! - `request`, `release`, `commit`, `heartbeat`, `log`, `spawn`, `result`, `join`, `take`,
+//!   `chan`, `send`, `recv` and `close` become `aqr.aqr_request` and so on;
 //! - where the module spawns tasks, `aqr_task` is exported: it sets the stack pointer below the
 //!   spawning frame (the record its first argument points to, aligned down to 16) and calls
 //!   `aqr_task_body` (`aqr-api`'s);
@@ -122,6 +122,10 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
             "log" | "result" => (Op::Host, "", &[I32, I32], &[]),
             "spawn" | "join" => (Op::Host, "", &[I32, I32], &[I32]),
             "take" => (Op::Host, "", &[I32, I32, I32, I32], &[]),
+            "chan" => (Op::Host, "", &[I32], &[I32]),
+            "send" => (Op::Host, "", &[I32, I32, I32], &[]),
+            "recv" => (Op::Host, "", &[I32, I32, I32], &[I32]),
+            "close" => (Op::Host, "", &[I32], &[]),
             _ => match name.split_once('_') {
                 Some(("size", mem)) => (Op::Size, mem, &[], &[I64]),
                 Some(("read", mem)) => (Op::Read, mem, &[I32, I64, I32], &[]),

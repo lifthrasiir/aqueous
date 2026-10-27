@@ -15,6 +15,8 @@ use sha2::{Digest, Sha512_256};
 #[cfg(all(feature = "wasm", unix))]
 mod cow;
 #[cfg(feature = "wasm")]
+mod exec;
+#[cfg(feature = "wasm")]
 mod wasm;
 use aqr_formula::{Apply, Error, Module, Modules, Result};
 

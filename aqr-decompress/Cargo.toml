@@ -16,7 +16,7 @@ aqr-formula = { path = "../aqr-formula" }
 aqr-modules = { path = "../aqr-modules" }
 sha2 = "0.10"
 wasmparser = { version = "0.245", optional = true }
-wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation"] }
+wasmtime = { version = "49", optional = true, default-features = false, features = ["cranelift", "runtime", "std", "parallel-compilation", "async"] }
 aqr-bundle = { path = "../aqr-bundle" }
 aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"] }
 aqr-flate = { path = "../aqr-flate" }

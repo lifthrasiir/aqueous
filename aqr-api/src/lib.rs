@@ -24,6 +24,8 @@
 #[cfg(feature = "alloc")]
 extern crate alloc;
 
+#[cfg(feature = "alloc")]
+pub mod chan;
 #[cfg(not(target_family = "wasm"))]
 pub mod emu;
 mod io;

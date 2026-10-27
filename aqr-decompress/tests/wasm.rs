@@ -318,3 +318,102 @@ fn tasks() {
         "start",
     );
 }
+
+/// The imports of channels.
+const CHANS: &str = r#"
+    (import "aqr" "aqr_chan" (func $chan (param i32) (result i32)))
+    (import "aqr" "aqr_send" (func $send (param i32 i32 i32)))
+    (import "aqr" "aqr_recv" (func $recv (param i32 i32 i32) (result i32)))
+    (import "aqr" "aqr_close" (func $close (param i32)))
+"#;
+
+/// The input through a pipeline of tasks and channels of 2 messages, a byte a message: task 0
+/// sends each byte plus 1 to channel 0 and closes it, task 1 sends each it receives from channel
+/// 0 plus 1 to channel 1 and closes it, which the module receives into the output. `before` runs before the tasks are
+/// spawned, `after` after.
+fn piped(before: &str, after: &str) -> String {
+    format!(
+        r#"(module {MEMORIES} {TASKS} {CHANS}
+            (func (export "aqr_task") (param $arg i32) (param $i i32)
+                (local $k i32) (local $n i32) (local $c0 i32) (local $c1 i32)
+                (local.set $c0 (i32.load (local.get $arg)))
+                (local.set $c1 (i32.load offset=4 (local.get $arg)))
+                (local.set $n (i32.load offset=8 (local.get $arg)))
+                (if (i32.eqz (local.get $i))
+                    (then
+                        (loop $next (if (i32.lt_u (local.get $k) (local.get $n)) (then
+                            (i32.store8 (i32.const 0x9000)
+                                (i32.add (i32.load8_u offset=12 (i32.add (local.get $arg) (local.get $k))) (i32.const 1)))
+                            (call $send (local.get $c0) (i32.const 0x9000) (i32.const 1))
+                            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+                            (br $next))))
+                        ;; (an end closes only a channel it sent to: not one of no message)
+                        (call $close (local.get $c0)))
+                    (else
+                        (loop $next
+                            (if (i32.eq (call $recv (local.get $c0) (i32.const 0x9000) (i32.const 1)) (i32.const 1)) (then
+                                (i32.store8 (i32.const 0x9000) (i32.add (i32.load8_u (i32.const 0x9000)) (i32.const 1)))
+                                (call $send (local.get $c1) (i32.const 0x9000) (i32.const 1))
+                                (br $next))))
+                        (call $close (local.get $c1)))))
+            (func (export "aqr_apply_whole") (param i64) (param $n i64) (param i64)
+                (local $h i32) (local $o i32) (local $r i32)
+                (i32.store (i32.const 0x100) (call $chan (i32.const 2)))
+                (i32.store (i32.const 0x104) (call $chan (i32.const 2)))
+                (i32.store (i32.const 0x108) (i32.wrap_i64 (local.get $n)))
+                (memory.copy 0 2 (i32.const 0x10c) (i64.const 0) (i32.wrap_i64 (local.get $n)))
+                {before}
+                (local.set $h (call $spawn (i32.const 0x100) (i32.const 2)))
+                {after}
+                (loop $next
+                    (local.set $r (call $recv (i32.load (i32.const 0x104)) (i32.add (i32.const 0x4000) (local.get $o)) (i32.const 1)))
+                    (if (i32.ge_s (local.get $r) (i32.const 0)) (then
+                        (local.set $o (i32.add (local.get $o) (local.get $r)))
+                        (br $next))))
+                (drop (call $join (local.get $h) (i32.const 0)))
+                (drop (call $join (local.get $h) (i32.const 1)))
+                (call $take (local.get $h) (i32.const 0) (i32.const 0) (i32.const 0))
+                (call $take (local.get $h) (i32.const 1) (i32.const 0) (i32.const 0))
+                (memory.copy 3 0 (i64.const 0) (i32.const 0x4000) (local.get $o))))"#
+    )
+}
+
+/// Channels between tasks: a pipeline, its senders and receivers waiting on each other; too
+/// small a buffer; the ends of a channel; a deadlock.
+#[test]
+fn channels() {
+    let ok = piped("", "");
+    assert_eq!(apply(&ok, &[b"abc"], &[3], u64::MAX).unwrap(), [b"cde"]);
+    assert_eq!(apply(&ok, &[b""], &[0], u64::MAX).unwrap(), [b""]);
+    let many: Vec<u8> = (0..3000u32).map(|i| (i % 200) as u8).collect();
+    let want: Vec<u8> = many.iter().map(|b| b + 2).collect();
+    for _ in 0..20 {
+        assert_eq!(apply(&ok, &[&many], &[3000], u64::MAX).unwrap(), std::slice::from_ref(&want));
+    }
+    // a message longer than the buffer stays, its length told
+    let small = piped(
+        "",
+        "(if (i32.ne (call $recv (i32.load (i32.const 0x104)) (i32.const 0x4000) (i32.const 0)) (i32.const 1)) (then unreachable))",
+    );
+    assert_eq!(apply(&small, &[b"ab"], &[2], u64::MAX).unwrap(), [b"cd"]);
+    // the module sending to the channel the task 0 sends to
+    let two = piped("(call $send (i32.load (i32.const 0x100)) (i32.const 0x10c) (i32.const 1))", "");
+    invalid(apply(&two, &[b"ab"], &[2], u64::MAX), "two instances");
+    // the module receiving from the channel the task 1 receives from
+    let two = piped("", "(drop (call $recv (i32.load (i32.const 0x100)) (i32.const 0x4000) (i32.const 1)))");
+    invalid(apply(&two, &[b"ab"], &[2], u64::MAX), "two instances");
+    // waiting for a channel nobody sends to
+    let dead = format!(
+        r#"(module {MEMORIES} {TASKS} {CHANS}
+            (func (export "aqr_task") (param i32 i32))
+            (func (export "aqr_apply_whole") (param i64 i64 i64)
+                (drop (call $recv (call $chan (i32.const 1)) (i32.const 0) (i32.const 0)))))"#
+    );
+    invalid(apply(&dead, &[b""], &[0], u64::MAX), "deadlock");
+    // a task waiting so, joined
+    let dead = piped("(i32.store (i32.const 0x108) (i32.const 0))", "").replace(
+        "(call $close (local.get $c1))",
+        "(drop (call $recv (call $chan (i32.const 1)) (i32.const 0) (i32.const 0)))",
+    );
+    invalid(apply(&dead, &[b"ab"], &[0], u64::MAX), "deadlock");
+}

@@ -5,8 +5,10 @@
 //! the host functions, which the spec signals as errors to the invocation.
 //! `aqr_log` messages go to stderr, and the last one to the [`Failure`].
 //!
-//! Tasks ([`crate::task`]) run as they are spawned, on the calling thread, with every memory
-//! but the working one empty to them and the functions of part modules a violation.
+//! Tasks ([`crate::task`]) run on threads of their own from their spawn, with every memory but
+//! the working one empty to them and the functions of part modules a violation; a task's trap is
+//! resumed where it is joined. Channels ([`crate::chan`]) are queues between them, whose ends
+//! are threads; there is no telling a deadlock, but for a trap after 30 s of waiting.
 
 use std::cell::RefCell;
 use std::panic::{self, AssertUnwindSafe};
@@ -169,6 +171,82 @@ fn trap(msg: String) -> ! {
     panic::panic_any(Trap(msg))
 }
 
+/// The host of a task of an application of `kind`.
+fn task_host(kind: Kind) -> Host {
+    Host {
+        kind,
+        params: Vec::new(),
+        resources: Vec::new(),
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        data: Vec::new(),
+        visible: Vec::new(),
+        committed: Vec::new(),
+        sizes: Vec::new(),
+        last_log: None,
+        task: 1,
+        empty: Vec::new(),
+    }
+}
+
+/// A channel: its messages queued, and the threads at its ends as they first use them.
+#[cfg(feature = "alloc")]
+struct Chan {
+    cap: usize,
+    msgs: std::collections::VecDeque<Vec<u8>>,
+    closed: bool,
+    sender: Option<std::thread::ThreadId>,
+    receiver: Option<std::thread::ThreadId>,
+}
+
+/// The channels of the process, and their changes.
+#[cfg(feature = "alloc")]
+static CHANS: std::sync::Mutex<Vec<Chan>> = std::sync::Mutex::new(Vec::new());
+#[cfg(feature = "alloc")]
+static CHANGED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// The channel `c`, with `f` (which may wait for a change of the channels and return `None`
+/// to wait again).
+#[cfg(feature = "alloc")]
+fn with_chan<R>(c: u32, mut f: impl FnMut(&mut Chan) -> Result<Option<R>, String>) -> R {
+    let mut chans = CHANS.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        let r = match chans.get_mut(c as usize) {
+            Some(ch) => f(ch),
+            None => Err(format!("channel {c} not made")),
+        };
+        match r {
+            Ok(Some(r)) => {
+                CHANGED.notify_all();
+                return r;
+            }
+            Ok(None) => {
+                let (g, t) =
+                    CHANGED.wait_timeout(chans, std::time::Duration::from_secs(30)).unwrap_or_else(|e| e.into_inner());
+                if t.timed_out() {
+                    drop(g);
+                    trap(format!("channel {c} waited for 30 s: a deadlock?"));
+                }
+                chans = g;
+            }
+            Err(msg) => {
+                drop(chans);
+                trap(msg)
+            }
+        }
+    }
+}
+
+/// Takes the end `end` of a channel for the calling thread.
+#[cfg(feature = "alloc")]
+fn end_of(end: &mut Option<std::thread::ThreadId>, what: &str) -> Result<(), String> {
+    let me = std::thread::current().id();
+    match *end.get_or_insert(me) == me {
+        true => Ok(()),
+        false => Err(format!("{what} by two instances")),
+    }
+}
+
 fn with<R>(f: impl FnOnce(&mut Host) -> Result<R, String>) -> R {
     let r = HOST.with_borrow_mut(|h| f(h.as_mut().expect("aqr_api used outside emu::apply")));
     r.unwrap_or_else(|msg| trap(msg))
@@ -290,26 +368,96 @@ pub(crate) mod sys {
 
     pub fn heartbeat() {}
 
-    /// Runs the `n` tasks of `rec` now, within the application if any.
+    /// Starts the `n` tasks of `rec`, each on a thread of its own, within the application if
+    /// any.
+    ///
+    /// # Safety
+    /// What `rec` refers to outlives the threads (joined as `Tasks` are dropped).
     #[cfg(feature = "alloc")]
-    pub fn spawn(rec: &crate::task::Record, n: usize) -> Vec<Option<Vec<u8>>> {
-        let within = |d: i32| {
-            super::HOST.with_borrow_mut(|h| {
-                if let Some(h) = h {
-                    h.task = h.task.wrapping_add_signed(d)
-                }
+    pub unsafe fn spawn(rec: &crate::task::Record, n: usize) -> Vec<Option<std::thread::JoinHandle<Vec<u8>>>> {
+        struct Send(crate::task::Record);
+        // SAFETY: the closure `rec` refers to is `Sync`, and outlives the threads
+        unsafe impl std::marker::Send for Send {}
+        let kind = super::HOST.with_borrow(|h| h.as_ref().map(|h| h.kind));
+        (0..n)
+            .map(|i| {
+                let rec = Send(rec.clone());
+                Some(std::thread::spawn(move || {
+                    let rec = rec;
+                    super::HOST.with_borrow_mut(|h| *h = kind.map(super::task_host));
+                    // (the channels it sent to closed as it ends, however it does)
+                    struct End;
+                    impl Drop for End {
+                        fn drop(&mut self) {
+                            let me = std::thread::current().id();
+                            let mut chans = super::CHANS.lock().unwrap_or_else(|e| e.into_inner());
+                            chans.iter_mut().filter(|c| c.sender == Some(me)).for_each(|c| c.closed = true);
+                            super::CHANGED.notify_all();
+                        }
+                    }
+                    let _end = End;
+                    rec.0.call(i)
+                }))
             })
-        };
-        within(1);
-        // (out of the task again however it ends)
-        struct Out<F: Fn(i32)>(F);
-        impl<F: Fn(i32)> Drop for Out<F> {
-            fn drop(&mut self) {
-                (self.0)(-1)
+            .collect()
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn chan(cap: u32) -> u32 {
+        let mut chans = super::CHANS.lock().unwrap_or_else(|e| e.into_inner());
+        chans.push(super::Chan {
+            cap: cap as usize,
+            msgs: Default::default(),
+            closed: false,
+            sender: None,
+            receiver: None,
+        });
+        (chans.len() - 1) as u32
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn send(c: u32, msg: &[u8]) {
+        let mut msg = Some(msg.to_vec());
+        super::with_chan(c, |ch| {
+            super::end_of(&mut ch.sender, "sending")?;
+            if ch.closed {
+                return Err(format!("aqr_send({c}) after closing"));
             }
+            if ch.msgs.len() >= ch.cap {
+                return Ok(None);
+            }
+            ch.msgs.push_back(msg.take().unwrap());
+            Ok(Some(()))
+        })
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn recv(c: u32, dst: &mut [u8]) -> i32 {
+        let msg = super::with_chan(c, |ch| {
+            super::end_of(&mut ch.receiver, "receiving")?;
+            Ok(match ch.msgs.front() {
+                None if ch.closed => Some(Err(-1)),
+                None => None,
+                Some(m) if m.len() > dst.len() => Some(Err(m.len() as i32)),
+                Some(_) => Some(Ok(ch.msgs.pop_front().unwrap())),
+            })
+        });
+        match msg {
+            Ok(m) => {
+                dst[..m.len()].copy_from_slice(&m);
+                m.len() as i32
+            }
+            Err(n) => n,
         }
-        let _out = Out(within);
-        (0..n).map(|i| Some(rec.call(i))).collect()
+    }
+
+    #[cfg(feature = "alloc")]
+    pub fn close(c: u32) {
+        super::with_chan(c, |ch| {
+            super::end_of(&mut ch.sender, "sending")?;
+            ch.closed = true;
+            Ok(Some(()))
+        })
     }
 
     /// Also outside [`apply`](super::apply), where the code of a module runs as a library.

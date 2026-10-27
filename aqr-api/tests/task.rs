@@ -1,7 +1,7 @@
 #![cfg(feature = "alloc")]
 
 use aqr_api::emu::apply;
-use aqr_api::{Input, Memory, Output, task};
+use aqr_api::{Input, Memory, Output, chan, task};
 
 aqr_api::entry! {
     // `input0` with each 1000-byte chunk reversed, by a task per chunk
@@ -63,4 +63,52 @@ fn memories_empty_to_tasks() {
 #[test]
 fn nested_tasks() {
     assert_eq!(apply(&nested::ENTRY, &[b""], &[], b"", &[2]).unwrap(), [vec![2, 0]]);
+}
+
+aqr_api::entry! {
+    // `input0` through two tasks and channels of 2 messages, a byte a message: each adds 1
+    whole fn piped(params_len, in0_len, size) {
+        let mut data = vec![0; in0_len as usize];
+        Input::<0>::read(0, &mut data);
+        let ((tx0, rx0), (tx1, rx1)) = (chan::channel(2), chan::channel(2));
+        let f = |i: usize, _: &mut Vec<u8>| {
+            if i == 0 {
+                data.iter().for_each(|b| tx0.send(&[b + 1]));
+                // (it may send nothing)
+                tx0.close();
+            } else {
+                while let Some(m) = rx0.recv() {
+                    tx1.send(&[m[0] + 1]);
+                }
+                tx1.close();
+            }
+        };
+        let _t = task::spawn(2, &f);
+        let mut at = 0;
+        while let Some(m) = rx1.recv() {
+            Output::<0>::write(at, &m);
+            at += 1;
+        }
+    }
+}
+
+aqr_api::entry! {
+    // the module sending to the channel its task sends to
+    whole fn two_senders(params_len, in0_len, size) {
+        let (tx, rx) = chan::channel(4);
+        tx.send(b"a");
+        let f = |_: usize, _: &mut Vec<u8>| tx.send(b"b");
+        task::spawn(1, &f).join(0);
+        rx.recv();
+    }
+}
+
+#[test]
+fn channels() {
+    let data: Vec<u8> = (0..2000u32).map(|i| (i % 200) as u8).collect();
+    let want: Vec<u8> = data.iter().map(|b| b + 2).collect();
+    assert_eq!(apply(&piped::ENTRY, &[&data], &[], b"", &[data.len() as u64]).unwrap(), [want]);
+    assert_eq!(apply(&piped::ENTRY, &[b""], &[], b"", &[0]).unwrap(), [b""]);
+    let e = apply(&two_senders::ENTRY, &[b""], &[], b"", &[1]).unwrap_err();
+    assert!(e.what.contains("two instances"), "{e:?}");
 }

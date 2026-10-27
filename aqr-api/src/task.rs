@@ -7,9 +7,11 @@
 //! reaches the module but `out`: not even what it changes through shared references (atomics,
 //! cells), which natively it would.
 //!
+//! Tasks may run at once, and talk through channels ([`crate::chan`]).
+//!
 //! On WebAssembly a task is a new instance of the module, which `aqr-ld`'s `aqr_task` starts on
 //! the stack below the spawning frame, so that what `f` borrows from it is there. Natively
-//! ([`emu`](crate::emu)) the tasks run as they are spawned, on the calling thread.
+//! ([`emu`](crate::emu)) each task runs on a thread of its own from its spawn.
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -17,6 +19,7 @@ use core::marker::PhantomData;
 /// The function of the tasks, as [`spawn`] gives it to them.
 #[doc(hidden)]
 #[repr(C)]
+#[derive(Clone)]
 pub struct Record {
     run: unsafe fn(*const (), usize, &mut Vec<u8>),
     data: *const (),
@@ -58,7 +61,7 @@ pub struct Tasks<'a> {
     #[cfg(target_family = "wasm")]
     handle: u32,
     #[cfg(not(target_family = "wasm"))]
-    results: Vec<Option<Vec<u8>>>,
+    threads: Vec<Option<std::thread::JoinHandle<Vec<u8>>>>,
     taken: Vec<bool>,
     _f: PhantomData<&'a ()>,
 }
@@ -74,8 +77,9 @@ pub fn spawn<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(n: usize, f: &'a F) -> 
     };
     #[cfg(not(target_family = "wasm"))]
     let rec = Record { run: run::<F>, data: f as *const F as *const () };
+    // SAFETY: `f` outlives the threads, joined as the tasks are dropped
     #[cfg(not(target_family = "wasm"))]
-    let t = Tasks { results: crate::sys::spawn(&rec, n), taken: alloc::vec![false; n], _f: PhantomData };
+    let t = Tasks { threads: unsafe { crate::sys::spawn(&rec, n) }, taken: alloc::vec![false; n], _f: PhantomData };
     t
 }
 
@@ -109,8 +113,9 @@ impl Tasks<'_> {
             crate::sys::take(self.handle, i, &mut out);
             out
         }
+        // (a trap resumed here)
         #[cfg(not(target_family = "wasm"))]
-        self.results[i].take().expect("a result")
+        self.threads[i].take().expect("a task").join().unwrap_or_else(|p| std::panic::resume_unwind(p))
     }
 }
 
@@ -123,6 +128,13 @@ impl Drop for Tasks<'_> {
                 {
                     crate::sys::join(self.handle, i);
                     crate::sys::take(self.handle, i, &mut []);
+                }
+                // (a trap resumed here, unless already unwinding)
+                #[cfg(not(target_family = "wasm"))]
+                if let Err(p) = self.threads[i].take().expect("a task").join()
+                    && !std::thread::panicking()
+                {
+                    std::panic::resume_unwind(p)
                 }
             }
         }

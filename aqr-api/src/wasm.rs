@@ -21,6 +21,14 @@ unsafe extern "C" {
     fn join_(h: u32, i: u32) -> u32;
     #[link_name = "take"]
     fn take_(h: u32, i: u32, dst: *mut u8, len: usize);
+    #[link_name = "chan"]
+    fn chan_(cap: u32) -> u32;
+    #[link_name = "send"]
+    fn send_(c: u32, ptr: *const u8, len: usize);
+    #[link_name = "recv"]
+    fn recv_(c: u32, dst: *mut u8, cap: usize) -> i32;
+    #[link_name = "close"]
+    fn close_(c: u32);
 }
 
 #[inline]
@@ -71,6 +79,26 @@ pub fn join(h: u32, i: usize) -> usize {
 #[inline]
 pub fn take(h: u32, i: usize, dst: &mut [u8]) {
     unsafe { take_(h, i as u32, dst.as_mut_ptr(), dst.len()) }
+}
+
+#[inline]
+pub fn chan(cap: u32) -> u32 {
+    unsafe { chan_(cap) }
+}
+
+#[inline]
+pub fn send(c: u32, msg: &[u8]) {
+    unsafe { send_(c, msg.as_ptr(), msg.len()) }
+}
+
+#[inline]
+pub fn recv(c: u32, dst: &mut [u8]) -> i32 {
+    unsafe { recv_(c, dst.as_mut_ptr(), dst.len()) }
+}
+
+#[inline]
+pub fn close(c: u32) {
+    unsafe { close_(c) }
 }
 
 /// The body of `aqr_task`, which `aqr-ld` makes of it (see [`crate::task`]); a trap without

@@ -7,14 +7,20 @@
 //! part of it.
 //!
 //! Tasks (`aqr_spawn`) are instances of their own, of a copy of the working memory at the
-//! spawn and empty other memories. The workers of aqr-common's pool free at the spawn run
-//! them, each taking the next one not started, and so does the thread joining one not started.
-//! The memory limit is over all the memories of the application.
+//! spawn and empty other memories, which channels (`aqr_chan`) link. Every instance runs on a
+//! fiber (`call_async`), and the instances waiting (joining a task, sending to a full channel or
+//! receiving from an empty one) leave their threads to the others: those of [`Exec`], the thread
+//! applying the module and workers of aqr-common's pool. Where every instance waits, the
+//! application is an invalid archive (a deadlock). The memory limit is over all the memories of
+//! the application, and the messages queued in its channels.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::collections::{HashMap, VecDeque};
+use std::future::poll_fn;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::task::{Poll, Waker};
 
-use aqr_common::pool;
+use crate::exec::{Exec, Stopped};
 
 use aqr_formula::Resource;
 use aqr_formula::aqr::{Failure, Loaded};
@@ -82,6 +88,10 @@ enum HostFn {
     Result,
     Join,
     Take,
+    Chan,
+    Send,
+    Recv,
+    Close,
 }
 
 enum Import {
@@ -149,6 +159,10 @@ fn func_of(name: &str) -> Option<(HostFn, &'static [wp::ValType], &'static [wp::
         "aqr_result" => (HostFn::Result, &[I32, I32], &[]),
         "aqr_join" => (HostFn::Join, &[I32, I32], &[I32]),
         "aqr_take" => (HostFn::Take, &[I32, I32, I32, I32], &[]),
+        "aqr_chan" => (HostFn::Chan, &[I32], &[I32]),
+        "aqr_send" => (HostFn::Send, &[I32, I32, I32], &[]),
+        "aqr_recv" => (HostFn::Recv, &[I32, I32, I32], &[I32]),
+        "aqr_close" => (HostFn::Close, &[I32], &[]),
         _ => return None,
     })
 }
@@ -325,68 +339,88 @@ impl std::fmt::Display for TaskFailed {
 
 impl std::error::Error for TaskFailed {}
 
-/// The memory limit of an application, and the size of the memories of all its instances.
-struct Budget {
+/// What the instances of an application share.
+struct App {
     limit: u64,
+    /// The size of the memories of all the instances and of the messages queued.
     total: Mutex<u64>,
+    exec: Arc<Exec>,
+    chans: Mutex<Vec<Chan>>,
+    /// The identity of the next task (0 is the application's instance).
+    next: AtomicU64,
+    /// The failure of a task, which ends the application.
+    failed: Mutex<Option<Failure>>,
+}
+
+impl App {
+    /// Adds `add` bytes to the total and takes `sub` from it, unless it would exceed the limit.
+    fn account(&self, add: u64, sub: u64) -> wasmtime::Result<()> {
+        let mut total = self.total.lock().unwrap();
+        let t = (*total - sub).checked_add(add).filter(|&t| t <= self.limit);
+        *total = t.ok_or(OverLimit)?;
+        Ok(())
+    }
+}
+
+/// A channel: its messages queued, and the instances at its ends (by identity), as they first
+/// use them.
+struct Chan {
+    cap: usize,
+    msgs: VecDeque<Vec<u8>>,
+    closed: bool,
+    sender: Option<u64>,
+    receiver: Option<u64>,
+    /// The instances waiting to send (a message taken) and to receive (one sent, or closing).
+    sending: Vec<Waker>,
+    receiving: Vec<Waker>,
+}
+
+/// A task, as the instance that spawned it sees it.
+#[derive(Default)]
+struct Cell(Mutex<Spawned>);
+
+#[derive(Default)]
+struct Spawned {
+    /// Its result, once it is done (taken with it).
+    result: Option<Decoded<Vec<u8>>>,
+    joined: bool,
+    /// The instances waiting for it.
+    waiting: Vec<Waker>,
+}
+
+impl Cell {
+    /// The task done, with `r`.
+    fn finish(&self, r: Decoded<Vec<u8>>) {
+        let mut c = self.0.lock().unwrap();
+        c.result = Some(r);
+        let waiting = std::mem::take(&mut c.waiting);
+        drop(c);
+        wake(waiting);
+    }
+}
+
+/// Wakes `wakers`, with no lock held: waking or dropping a waker may drop an instance, which
+/// closes its channels.
+fn wake(wakers: Vec<Waker>) {
+    wakers.into_iter().for_each(Waker::wake);
 }
 
 /// What a task runs: `aqr_task(arg, i)` in an instance of `c` whose working memory is
 /// `snapshot`.
 struct Job {
     c: Shared,
+    app: Arc<App>,
     snapshot: Arc<Snapshot>,
     arg: u32,
     i: u32,
-    budget: Arc<Budget>,
-}
-
-/// A task spawned, until its result is taken.
-enum Slot {
-    Pending(Job),
-    Running,
-    Done(Decoded<Vec<u8>>),
-    Taken,
-}
-
-/// The tasks of a spawn.
-struct Batch {
-    slots: Mutex<Vec<Slot>>,
-    done: Condvar,
-}
-
-impl Batch {
-    /// Runs task `i` if it is not started yet, and returns whether it was.
-    fn run(&self, i: usize) -> bool {
-        let mut slots = self.slots.lock().unwrap();
-        if !matches!(slots[i], Slot::Pending(_)) {
-            return false;
-        }
-        let Slot::Pending(job) = std::mem::replace(&mut slots[i], Slot::Running) else { unreachable!() };
-        drop(slots);
-        let r = job.run();
-        self.slots.lock().unwrap()[i] = Slot::Done(r);
-        self.done.notify_all();
-        true
-    }
-
-    /// What a worker does: the tasks not started, in order, until there is none.
-    fn work(&self) {
-        let mut i = 0;
-        loop {
-            let next = self.slots.lock().unwrap().iter().skip(i).position(|s| matches!(s, Slot::Pending(_)));
-            let Some(k) = next else { break };
-            i += k;
-            self.run(i);
-        }
-    }
 }
 
 /// What the host functions of an instance work on.
 struct State {
     c: Shared,
-    budget: Arc<Budget>,
-    /// The bytes of the memories of this instance, in `budget`.
+    app: Arc<App>,
+    id: u64,
+    /// The bytes of the memories of this instance, in the total of `app`.
     mine: u64,
     working: Option<Memory>,
     /// The data of the inputs of a part module, their memories and visible ranges.
@@ -397,15 +431,17 @@ struct State {
     /// Whether the instance is a task, and its result.
     task: bool,
     result: Vec<u8>,
-    /// The tasks spawned, by handle.
-    spawned: Vec<Arc<Batch>>,
+    /// The tasks spawned, by handle; taken where `None`.
+    spawned: Vec<Vec<Option<Arc<Cell>>>>,
 }
 
 impl State {
-    fn new(c: Shared, budget: Arc<Budget>, task: bool) -> State {
+    fn new(c: Shared, app: Arc<App>, task: bool) -> State {
+        let id = if task { app.next.fetch_add(1, Ordering::Relaxed) } else { 0 };
         State {
             c,
-            budget,
+            app,
+            id,
             mine: 0,
             working: None,
             inputs: Vec::new(),
@@ -419,21 +455,31 @@ impl State {
 
     /// Whether a task spawned is yet to be taken.
     fn untaken(&self) -> bool {
-        self.spawned.iter().any(|b| b.slots.lock().unwrap().iter().any(|s| !matches!(s, Slot::Taken)))
+        self.spawned.iter().flatten().any(Option::is_some)
+    }
+
+    /// The task `i` of handle `h`, not taken.
+    fn cell(&self, h: i32, i: i32) -> Option<Arc<Cell>> {
+        self.spawned.get(h as u32 as usize)?.get(i as u32 as usize)?.clone()
     }
 }
 
 impl Drop for State {
+    /// The memories given back, and the channels this instance sends to closed.
     fn drop(&mut self) {
-        *self.budget.total.lock().unwrap() -= self.mine;
+        let _ = self.app.account(0, self.mine);
+        let mut waiting = Vec::new();
+        for ch in self.app.chans.lock().unwrap().iter_mut().filter(|ch| ch.sender == Some(self.id)) {
+            ch.closed = true;
+            waiting.append(&mut ch.receiving);
+        }
+        wake(waiting);
     }
 }
 
 impl ResourceLimiter for State {
     fn memory_growing(&mut self, current: usize, desired: usize, _: Option<usize>) -> wasmtime::Result<bool> {
-        let mut total = self.budget.total.lock().unwrap();
-        let t = (*total - current as u64).checked_add(desired as u64).filter(|&t| t <= self.budget.limit);
-        *total = t.ok_or(OverLimit)?;
+        self.app.account(desired as u64, current as u64)?;
         self.mine = self.mine - current as u64 + desired as u64;
         Ok(true)
     }
@@ -471,10 +517,10 @@ fn failure(store: &Store<State>, e: wasmtime::Error) -> Failure {
 
 /// Instantiates `c` in `store` with the memories of the types and data `mem` gives, and the
 /// host functions; returns the instance and the memories of the outputs.
-fn instantiate<'a>(
+async fn instantiate<'a>(
     store: &mut Store<State>,
     c: &Compiled,
-    mem: &mut dyn FnMut(Mem) -> (MemoryType, Option<&'a [u8]>),
+    mem: &mut (dyn FnMut(Mem) -> (MemoryType, Option<&'a [u8]>) + Send),
 ) -> Decoded<(Instance, Vec<Option<Memory>>)> {
     let over = |e: wasmtime::Error| match e.downcast_ref::<OverLimit>() {
         Some(_) => Failure::Resource("memory limit exceeded".into()),
@@ -511,11 +557,12 @@ fn instantiate<'a>(
             Import::Func(f) => Extern::Func(host(store, f)),
         });
     }
-    let instance =
-        Instance::new(&mut *store, &c.module, &externs).map_err(|e| match e.downcast_ref::<OverLimit>() {
+    let instance = Instance::new_async(&mut *store, &c.module, &externs).await.map_err(|e| {
+        match e.downcast_ref::<OverLimit>() {
             Some(_) => Failure::Resource("memory limit exceeded".into()),
             None => Failure::Invalid(format!("not instantiated: {e}")),
-        })?;
+        }
+    })?;
     Ok((instance, outputs))
 }
 
@@ -568,47 +615,62 @@ impl Loaded for Shared {
         // do the references to them in it. (Tasks have none of them.)
         let data: Vec<&'static [u8]> =
             inputs.iter().map(|i| unsafe { std::slice::from_raw_parts(i.as_ptr(), i.len()) }).collect();
-        let budget = Arc::new(Budget { limit: memory_limit, total: Mutex::new(0) });
-        let mut state = State::new(self.clone(), budget, false);
+        let exec = Exec::new();
+        let app = Arc::new(App {
+            limit: memory_limit,
+            total: Mutex::new(0),
+            exec: exec.clone(),
+            chans: Mutex::default(),
+            next: AtomicU64::new(1),
+            failed: Mutex::default(),
+        });
+        let mut state = State::new(self.clone(), app.clone(), false);
         state.inputs = data.iter().map(|&d| (d, None, 0, 0)).collect();
         state.outputs = sizes.iter().map(|&s| (Vec::new(), None, s)).collect();
         let mut store = Store::new(&ENGINE, state);
         store.limiter(|s| s);
 
-        // the memories, holding their data
-        let (instance, outputs) = instantiate(&mut store, c, &mut |m| match m {
-            Mem::Working => (MemoryType::new(c.working.0 as u32, c.working.1.map(|m| m as u32)), None),
-            Mem::Params => sized(params.len() as u64, Some(params)),
-            Mem::Resource(i) => sized(resources[i as usize].len() as u64, Some(&resources[i as usize])),
-            Mem::Input(k) => {
-                let d = inputs[k as usize];
-                sized(d.len() as u64, (!c.part).then_some(d))
+        let run = async move {
+            // the memories, holding their data
+            let (instance, outputs) = instantiate(&mut store, c, &mut |m| match m {
+                Mem::Working => (MemoryType::new(c.working.0 as u32, c.working.1.map(|m| m as u32)), None),
+                Mem::Params => sized(params.len() as u64, Some(params)),
+                Mem::Resource(i) => sized(resources[i as usize].len() as u64, Some(&resources[i as usize])),
+                Mem::Input(k) => {
+                    let d = inputs[k as usize];
+                    sized(d.len() as u64, (!c.part).then_some(d))
+                }
+                Mem::Output(j) => sized(sizes[j as usize], None),
+            })
+            .await?;
+            let entry = instance.get_func(&mut store, if c.part { PART } else { WHOLE }).expect("the entry point");
+            let mut args = vec![Val::I64(params.len() as i64)];
+            args.extend(resources.iter().map(|r| Val::I64(r.len() as i64)));
+            args.extend(inputs.iter().map(|i| Val::I64(i.len() as i64)));
+            args.extend(sizes.iter().map(|&s| Val::I64(s as i64)));
+            if let Err(e) = entry.call_async(&mut store, &args, &mut []).await {
+                return Err(failure(&store, e));
             }
-            Mem::Output(j) => sized(sizes[j as usize], None),
-        })?;
-        let entry = instance.get_func(&mut store, if c.part { PART } else { WHOLE }).expect("the entry point");
-        let mut args = vec![Val::I64(params.len() as i64)];
-        args.extend(resources.iter().map(|r| Val::I64(r.len() as i64)));
-        args.extend(inputs.iter().map(|i| Val::I64(i.len() as i64)));
-        args.extend(sizes.iter().map(|&s| Val::I64(s as i64)));
-        if let Err(e) = entry.call(&mut store, &args, &mut []) {
-            return Err(failure(&store, e));
-        }
-        if store.data().untaken() {
-            return invalid("tasks not taken");
-        }
-
-        let outs: Vec<Vec<u8>> = if c.part {
-            std::mem::take(&mut store.data_mut().outputs).into_iter().map(|o| o.0).collect()
-        } else {
-            outputs
-                .iter()
-                .zip(sizes)
-                .map(|(m, &s)| match m {
-                    Some(m) => m.data(&store)[..s as usize].to_vec(),
-                    None => vec![0; s as usize],
-                })
-                .collect()
+            if store.data().untaken() {
+                return invalid("tasks not taken");
+            }
+            Ok(if c.part {
+                std::mem::take(&mut store.data_mut().outputs).into_iter().map(|o| o.0).collect::<Vec<_>>()
+            } else {
+                outputs
+                    .iter()
+                    .zip(sizes)
+                    .map(|(m, &s)| match m {
+                        Some(m) => m.data(&store)[..s as usize].to_vec(),
+                        None => vec![0; s as usize],
+                    })
+                    .collect()
+            })
+        };
+        let outs = match exec.block_on(run) {
+            Ok(outs) => outs?,
+            Err(Stopped::Stopped) => return Err(app.failed.lock().unwrap().take().expect("a task failed")),
+            Err(Stopped::Deadlock) => return invalid("a deadlock: every instance waits"),
         };
         if outs.iter().zip(sizes).any(|(o, &s)| o.len() as u64 != s) {
             return invalid("outputs of other sizes than declared");
@@ -619,23 +681,24 @@ impl Loaded for Shared {
 
 impl Job {
     /// Runs the task, giving its result.
-    fn run(self) -> Decoded<Vec<u8>> {
+    async fn run(self) -> Decoded<Vec<u8>> {
         let c = &*self.c.0;
-        let mut store = Store::new(&ENGINE, State::new(self.c.clone(), self.budget.clone(), true));
+        let mut store = Store::new(&ENGINE, State::new(self.c.clone(), self.app.clone(), true));
         store.limiter(|s| s);
         let pages = (self.snapshot.as_slice().len() / 65536) as u32;
         // every memory but the working one empty
         let (instance, _) = instantiate(&mut store, c, &mut |m| match m {
             Mem::Working => (MemoryType::new(pages, c.working.1.map(|m| m as u32)), None),
             _ => (MemoryType::new64(0, Some(0)), None),
-        })?;
+        })
+        .await?;
         // the working memory a copy of the snapshot (on write where the system can), over
         // what the data segments wrote
         let w = store.data().working.expect("a working memory");
         self.snapshot.copy_to(w.data_mut(&mut store));
         drop(self.snapshot);
         let task = instance.get_typed_func::<(i32, i32), ()>(&mut store, TASK).expect("aqr_task");
-        if let Err(e) = task.call(&mut store, (self.arg as i32, self.i as i32)) {
+        if let Err(e) = task.call_async(&mut store, (self.arg as i32, self.i as i32)).await {
             return Err(failure(&store, e));
         }
         if store.data().untaken() {
@@ -655,7 +718,33 @@ fn sized(len: u64, data: Option<&[u8]>) -> (MemoryType, Option<&[u8]>) {
 fn working_range(c: &Caller<'_, State>, at: i32, len: i32) -> Option<(Memory, std::ops::Range<usize>)> {
     let w = c.data().working?;
     let (at, len) = (at as u32 as usize, len as u32 as usize);
-    (at + len <= w.data_size(c)).then_some((w, at..at + len))
+    (at.checked_add(len)? <= w.data_size(c)).then_some((w, at..at + len))
+}
+
+/// The channel `c` of the application, with `f`, which leaves the wakers to wake once the
+/// channels are unlocked in its second argument: a violation if there is none.
+fn with_chan<R>(
+    c: &Caller<'_, State>,
+    ch: i32,
+    f: impl FnOnce(&mut Chan, &mut Vec<Waker>) -> wasmtime::Result<R>,
+) -> wasmtime::Result<R> {
+    let mut waiting = Vec::new();
+    let mut chans = c.data().app.chans.lock().unwrap();
+    let r = match chans.get_mut(ch as u32 as usize) {
+        Some(chan) => f(chan, &mut waiting),
+        None => violation(format!("channel {ch} not made")),
+    };
+    drop(chans);
+    wake(waiting);
+    r
+}
+
+/// Takes the end `end` of a channel for the instance `id`: a violation if another has it.
+fn end_of(end: &mut Option<u64>, id: u64, what: &str) -> wasmtime::Result<()> {
+    match *end.get_or_insert(id) == id {
+        true => Ok(()),
+        false => violation(format!("{what} by two instances")),
+    }
 }
 
 /// The host function `f`.
@@ -731,21 +820,26 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                 let w = c.data().working.expect("a working memory");
                 let snapshot = Arc::new(Snapshot::new(w.data(&c)));
                 let s = c.data_mut();
-                let n = n as u32;
-                let slots = (0..n)
+                let cells: Vec<Option<Arc<Cell>>> = (0..n as u32)
                     .map(|i| {
-                        let (c, budget) = (s.c.clone(), s.budget.clone());
-                        Slot::Pending(Job { c, snapshot: snapshot.clone(), arg: arg as u32, i, budget })
+                        let cell = Arc::new(Cell::default());
+                        let job =
+                            Job { c: s.c.clone(), app: s.app.clone(), snapshot: snapshot.clone(), arg: arg as u32, i };
+                        let (done, app) = (cell.clone(), s.app.clone());
+                        s.app.exec.spawn(async move {
+                            let r = job.run().await;
+                            // (a task failing fails the application at once: those waiting for
+                            // it through channels would wait for ever)
+                            if let Err(f) = &r {
+                                app.failed.lock().unwrap().get_or_insert_with(|| f.clone());
+                                app.exec.stop();
+                            }
+                            done.finish(r)
+                        });
+                        Some(cell)
                     })
                     .collect();
-                let batch = Arc::new(Batch { slots: Mutex::new(slots), done: Condvar::new() });
-                // (the thread joining them one of the workers)
-                let mut workers = pool::reserve(n.saturating_sub(1) as usize);
-                while !workers.is_empty() {
-                    let b = batch.clone();
-                    drop(workers.spawn(move || b.work()));
-                }
-                s.spawned.push(batch);
+                s.spawned.push(cells);
                 Ok((s.spawned.len() - 1) as i32)
             })
         }
@@ -760,42 +854,144 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
             c.data_mut().result = bytes;
             Ok(())
         }),
-        HostFn::Join => Func::wrap(&mut *store, |c: Caller<'_, State>, h: i32, i: i32| -> wasmtime::Result<i32> {
-            let (h, i) = (h as u32 as usize, i as u32 as usize);
-            let Some(b) = c.data().spawned.get(h).filter(|b| i < b.slots.lock().unwrap().len()).cloned() else {
-                return violation(format!("aqr_join({h}, {i}) of no task"));
-            };
-            b.run(i);
-            let mut slots = b.slots.lock().unwrap();
-            loop {
-                match &slots[i] {
-                    Slot::Running => slots = b.done.wait(slots).unwrap(),
-                    Slot::Done(Ok(r)) => return Ok(r.len() as i32),
-                    Slot::Done(Err(f)) => return Err(wasmtime::Error::new(TaskFailed(f.clone()))),
-                    Slot::Taken => return violation(format!("aqr_join({h}, {i}) of a task taken")),
-                    Slot::Pending(_) => unreachable!("run above"),
-                }
-            }
+        HostFn::Join => Func::wrap_async(&mut *store, |c: Caller<'_, State>, (h, i): (i32, i32)| {
+            Box::new(async move {
+                let Some(cell) = c.data().cell(h, i) else {
+                    return violation(format!("aqr_join({h}, {i}) of no task, or one taken"));
+                };
+                poll_fn(|cx| {
+                    let mut st = cell.0.lock().unwrap();
+                    match &st.result {
+                        None => {
+                            st.waiting.push(cx.waker().clone());
+                            Poll::Pending
+                        }
+                        Some(Ok(r)) => {
+                            let len = r.len() as i32;
+                            st.joined = true;
+                            Poll::Ready(Ok(len))
+                        }
+                        Some(Err(f)) => Poll::Ready(Err(wasmtime::Error::new(TaskFailed(f.clone())))),
+                    }
+                })
+                .await
+            })
         }),
         HostFn::Take => Func::wrap(
             &mut *store,
             |mut c: Caller<'_, State>, h: i32, i: i32, dst: i32, len: i32| -> wasmtime::Result<()> {
-                let (hu, iu) = (h as u32 as usize, i as u32 as usize);
-                let Some(b) = c.data().spawned.get(hu).filter(|b| iu < b.slots.lock().unwrap().len()).cloned() else {
-                    return violation(format!("aqr_take({h}, {i}) of no task"));
-                };
-                let mut slots = b.slots.lock().unwrap();
-                if !matches!(slots[iu], Slot::Done(Ok(_))) {
+                let joined = c.data().cell(h, i).filter(|cell| cell.0.lock().unwrap().joined);
+                let Some(cell) = joined else {
                     return violation(format!("aqr_take({h}, {i}) of a task not joined, or taken"));
-                }
-                let Slot::Done(Ok(r)) = std::mem::replace(&mut slots[iu], Slot::Taken) else { unreachable!() };
-                drop(slots);
+                };
+                let r = match cell.0.lock().unwrap().result.take() {
+                    Some(Ok(r)) => r,
+                    _ => unreachable!("joined"),
+                };
                 let Some((w, range)) = working_range(&c, dst, len).filter(|_| len as u32 as usize <= r.len()) else {
                     return violation(format!("aqr_take({h}, {i}, {dst}, {len}) out of bounds"));
                 };
                 w.data_mut(&mut c)[range].copy_from_slice(&r[..len as u32 as usize]);
+                c.data_mut().spawned[h as u32 as usize][i as u32 as usize] = None;
                 Ok(())
             },
         ),
+        HostFn::Chan => Func::wrap(&mut *store, |c: Caller<'_, State>, cap: i32| -> wasmtime::Result<i32> {
+            if cap <= 0 {
+                return violation(format!("aqr_chan({cap})"));
+            }
+            let mut chans = c.data().app.chans.lock().unwrap();
+            chans.push(Chan {
+                cap: cap as usize,
+                msgs: VecDeque::new(),
+                closed: false,
+                sender: None,
+                receiver: None,
+                sending: Vec::new(),
+                receiving: Vec::new(),
+            });
+            Ok((chans.len() - 1) as i32)
+        }),
+        HostFn::Send => Func::wrap_async(&mut *store, |c: Caller<'_, State>, (ch, ptr, len): (i32, i32, i32)| {
+            Box::new(async move {
+                let Some((w, r)) = working_range(&c, ptr, len) else {
+                    return violation(format!("aqr_send({ch}, {ptr}, {len}) out of bounds"));
+                };
+                let mut msg = Some(w.data(&c)[r].to_vec());
+                let (id, app) = (c.data().id, c.data().app.clone());
+                poll_fn(|cx| {
+                    let r = with_chan(&c, ch, |chan, waiting| {
+                        end_of(&mut chan.sender, id, "sending")?;
+                        if chan.closed {
+                            return violation(format!("aqr_send({ch}) after closing"));
+                        }
+                        if chan.msgs.len() >= chan.cap {
+                            chan.sending.push(cx.waker().clone());
+                            return Ok(false);
+                        }
+                        let m = msg.take().unwrap();
+                        app.account(m.len() as u64, 0)?;
+                        chan.msgs.push_back(m);
+                        waiting.append(&mut chan.receiving);
+                        Ok(true)
+                    });
+                    match r {
+                        Ok(false) => Poll::Pending,
+                        Ok(true) => Poll::Ready(Ok(())),
+                        Err(e) => Poll::Ready(Err(e)),
+                    }
+                })
+                .await
+            })
+        }),
+        HostFn::Recv => Func::wrap_async(&mut *store, |mut c: Caller<'_, State>, (ch, dst, cap): (i32, i32, i32)| {
+            Box::new(async move {
+                let (id, app) = (c.data().id, c.data().app.clone());
+                let msg = poll_fn(|cx| {
+                    let r = with_chan(&c, ch, |chan, waiting| {
+                        end_of(&mut chan.receiver, id, "receiving")?;
+                        let Some(m) = chan.msgs.front() else {
+                            if chan.closed {
+                                return Ok(Some(Err(-1)));
+                            }
+                            chan.receiving.push(cx.waker().clone());
+                            return Ok(None);
+                        };
+                        if m.len() > cap as u32 as usize {
+                            return Ok(Some(Err(m.len() as i32)));
+                        }
+                        let m = chan.msgs.pop_front().unwrap();
+                        app.account(0, m.len() as u64)?;
+                        waiting.append(&mut chan.sending);
+                        Ok(Some(Ok(m)))
+                    });
+                    match r {
+                        Ok(None) => Poll::Pending,
+                        Ok(Some(m)) => Poll::Ready(Ok(m)),
+                        Err(e) => Poll::Ready(Err(e)),
+                    }
+                })
+                .await?;
+                // (too long a message left queued, or none to come)
+                let m = match msg {
+                    Ok(m) => m,
+                    Err(n) => return Ok(n),
+                };
+                let Some((w, range)) = working_range(&c, dst, m.len() as i32) else {
+                    return violation(format!("aqr_recv({ch}, {dst}) out of bounds"));
+                };
+                w.data_mut(&mut c)[range].copy_from_slice(&m);
+                Ok(m.len() as i32)
+            })
+        }),
+        HostFn::Close => Func::wrap(&mut *store, |c: Caller<'_, State>, ch: i32| -> wasmtime::Result<()> {
+            let id = c.data().id;
+            with_chan(&c, ch, |chan, waiting| {
+                end_of(&mut chan.sender, id, "sending")?;
+                chan.closed = true;
+                waiting.append(&mut chan.receiving);
+                Ok(())
+            })
+        }),
     }
 }
