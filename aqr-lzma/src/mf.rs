@@ -150,7 +150,8 @@ pub struct Mf<'a> {
 impl<'a> Mf<'a> {
     /// A match finder for matches at most `reach` back (LZMA's dictionary size).
     pub fn new(d: &'a [u8], reach: usize) -> Self {
-        let ring = (reach + 1).min(d.len().max(1)).next_power_of_two();
+        // (saturating: a dictionary of 2^32 − 1 bytes on 32 bits)
+        let ring = reach.saturating_add(1).min(d.len().max(1)).next_power_of_two();
         Mf {
             d,
             reach,

@@ -179,6 +179,38 @@ fn same_as_wasm() {
     }
 }
 
+/// `.lzma` files natively and as WebAssembly alike, and their records damaged in turn failing
+/// alike (or giving the same).
+#[test]
+fn lzma_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for t in ["text-p6", "binary-p9e", "runs-dict4k", "empty-p6"] {
+        let d = fixture(&format!("aqr-lzma/tests/data/{t}.lzma"));
+        let f = aqr_lzma::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        let r = f.streams.iter().position(|s| s.class == "lzma/record").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[r].data;
+            // (of the same length: the formula's nodes tell it)
+            let at = s.len() * k / 8;
+            if k == 7 {
+                s[at..].fill(0xff);
+            } else if at < s.len() {
+                s[at] ^= 1 << k;
+            }
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{t} ({k})");
+            }
+        }
+    }
+}
+
 /// A module written by hand, of `wat`.
 fn module(wat: &str) -> Vec<u8> {
     wat::parse_str(wat).unwrap()

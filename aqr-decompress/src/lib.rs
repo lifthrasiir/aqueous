@@ -46,6 +46,10 @@ pub const FLATE: Module = aqr_flate::formula::MODULE;
 /// and the compressor's settings; inputs: the data.
 pub const LZ4: Module = aqr_lz4::formula::MODULE;
 
+/// aqr-lzma reconstruction of LZMA streams, one after another, from their data and records.
+/// Inputs: the data, the records and the index cutting them into the streams'.
+pub const LZMA: Module = aqr_lzma::formula::MODULE;
+
 /// Snappy's compressor on data, for a Snappy stream. Parameters: the compressor's hash; inputs:
 /// the data.
 pub const SNAPPY: Module = aqr_snappy::formula::MODULE;
@@ -89,12 +93,13 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 22] = [
+pub const MODULES: [Module; 23] = [
     X86,
     ARM64,
     CIL,
     FLATE,
     LZ4,
+    LZMA,
     SNAPPY,
     LEVELDB,
     ZIP,
@@ -273,6 +278,9 @@ impl Native {
         } else if m == LZ4 {
             none(resources)?;
             aqr_lz4::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == LZMA {
+            none(resources)?;
+            aqr_lzma::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == SNAPPY {
             none(resources)?;
             aqr_snappy::formula::decode(params, inputs, len, threads).map_err(msg)
