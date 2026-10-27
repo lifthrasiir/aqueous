@@ -172,6 +172,7 @@ fn trap(msg: String) -> ! {
 }
 
 /// The host of a task of an application of `kind`.
+#[cfg(feature = "alloc")]
 fn task_host(kind: Kind) -> Host {
     Host {
         kind,
