@@ -1634,12 +1634,13 @@ fn decode_group(
     let mut buf = Vec::with_capacity(w + w / 64 + 8);
     let timing = std::env::var_os("PSDR_STATS").is_some();
     let mut t = [0f64; 4];
-    let mut clock = std::time::Instant::now();
+    // (the clock read only if timing: WebAssembly has none)
+    let mut clock = timing.then(std::time::Instant::now);
     let mut lap = |i: usize, t: &mut [f64; 4]| {
-        if timing {
+        if let Some(clock) = &mut clock {
             let now = std::time::Instant::now();
-            t[i] += (now - clock).as_secs_f64();
-            clock = now;
+            t[i] += (now - *clock).as_secs_f64();
+            *clock = now;
         }
     };
     for _ in 0..h {

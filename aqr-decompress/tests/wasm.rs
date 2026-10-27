@@ -85,6 +85,32 @@ fn pipelines_fail_alike() {
     }
 }
 
+#[path = "../../aqr-psd/tests/common/mod.rs"]
+mod psd;
+
+/// PSD files of the shapes of aqr-psd's tests, the same natively and as WebAssembly (whose
+/// decoding of a group once called `Instant::now`, which WebAssembly has not).
+#[test]
+fn psd_as_wasm() {
+    use aqr_psd::packbits::{self, Encoder as Rle};
+    use psd::{layers, psd};
+    let enc = Rle::Photoshop { phase: 77, period: 368 };
+    let files = [
+        psd(300, 40, &layers(300, 40, true), packbits::NO_TILES, 0, &[]),
+        psd(260, 35, &layers(260, 35, false), Rle::Greedy { min_run: 3, split_rest: true }, 0, &[0]),
+        psd(800, 400, &layers(800, 400, true), enc, 3, &[]),
+        psd::hinted_file(300, 200),
+    ];
+    let archive = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for (k, file) in files.iter().enumerate() {
+        let f = aqr_psd::formula::encode(file, 1).expect("a formula");
+        let c = archive.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == *file, "{k}");
+        let w = aqr::decode(&c, &Wasm);
+        assert!(w.as_ref().is_ok_and(|w| w == file), "{k}: {:?}", w.err());
+    }
+}
+
 /// Formulas of the modules built, archived with them: the same natively and as WebAssembly.
 #[test]
 fn same_as_wasm() {
