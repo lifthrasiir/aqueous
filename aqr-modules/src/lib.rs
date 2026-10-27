@@ -5,6 +5,8 @@
 //!
 //! Each binary defines the entry point with [`whole!`], on all the bytes of the memories.
 
+#![cfg_attr(target_family = "wasm", no_std)]
+
 #[cfg(not(target_family = "wasm"))]
 mod known;
 

@@ -6,7 +6,9 @@
 
 pub mod bases;
 pub mod fasta;
+#[cfg(feature = "encode")]
 pub mod formula;
+pub mod module;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

@@ -6,8 +6,9 @@
 
 use aqr_formula::{Formula, Kind, Module, Node, Resource};
 
-use crate::words::{self, Dictionary};
-use crate::{Result, corrupt};
+use crate::words::Dictionary;
+
+pub use crate::module::decode;
 
 pub const MODULE: Module = Module { name: "wrt-recons", version: 1 };
 
@@ -108,17 +109,10 @@ fn coded(input: &[u8], shared: &Shared, threads: usize) -> Formula {
     f
 }
 
-/// The module: the text of `len` bytes from `resources` (the dictionary) and `inputs` (the
-/// coded text); no parameters.
-pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
-    let (&[], &[dict], &[text]) = (params, resources, inputs) else { return Err(corrupt()) };
-    let len = usize::try_from(len).map_err(|_| corrupt())?;
-    words::decode(dict, text, len)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Result;
 
     fn eval(f: &Formula, len: usize) -> Result<Vec<u8>> {
         let Node::Apply(a) = &f.root else { panic!() };

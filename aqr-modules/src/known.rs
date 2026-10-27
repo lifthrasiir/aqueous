@@ -4,6 +4,36 @@ use crate::{Known, hex};
 
 pub const KNOWN: &[Known] = &[
     Known {
+        name: "bundle-recons",
+        version: 1,
+        sha512_256: hex("bbc7c2fe555b47daa46972c1134eb6f6194dd8dd9121a8a8fc0304d750c290ec"),
+        wasm: include_bytes!("../wasm/bundle-recons.wasm"),
+    },
+    Known {
+        name: "exe-recons/arm64",
+        version: 1,
+        sha512_256: hex("aca13f6a077f774cf7bf09958107fba9c2b18acc3124f85546f276ba99f79f8b"),
+        wasm: include_bytes!("../wasm/exe-recons-arm64.wasm"),
+    },
+    Known {
+        name: "exe-recons/cil",
+        version: 1,
+        sha512_256: hex("60c9ba86dd9703e4d15f380d56f67ce19eb5c049dc3764249ea1379268f7a663"),
+        wasm: include_bytes!("../wasm/exe-recons-cil.wasm"),
+    },
+    Known {
+        name: "exe-recons/x86",
+        version: 1,
+        sha512_256: hex("a1ea0ea64d862da852bb136fb84fc4b89b068f2f82bce94e4aac76cba40d07fd"),
+        wasm: include_bytes!("../wasm/exe-recons-x86.wasm"),
+    },
+    Known {
+        name: "fasta-recons",
+        version: 1,
+        sha512_256: hex("f27010d3bdb1104d4de58b4ce9b986253d071df0435018c1ab2ee6b53721c76c"),
+        wasm: include_bytes!("../wasm/fasta-recons.wasm"),
+    },
+    Known {
         name: "leveldb-recons",
         version: 1,
         sha512_256: hex("790d7155f6ca4df0e91f92631edc92a34c040ed2c787872d7d327fa0a23a478d"),
@@ -12,7 +42,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lz4-recons",
         version: 1,
-        sha512_256: hex("0e75353bbf3545811a461aa98e54f87c31d4581e4934464ff65671db1b8620ea"),
+        sha512_256: hex("ac0172301001a9931711440ffd77ef69adbfd1dcc3bf07b3178c58f48f9a9b19"),
         wasm: include_bytes!("../wasm/lz4-recons.wasm"),
     },
     Known {
@@ -20,5 +50,17 @@ pub const KNOWN: &[Known] = &[
         version: 2,
         sha512_256: hex("90c46a690886d086ef2fb16d8dc63524644cf634d35c82108ac561ec087c9159"),
         wasm: include_bytes!("../wasm/snappy-recons.wasm"),
+    },
+    Known {
+        name: "sqlite-recons",
+        version: 1,
+        sha512_256: hex("337242fb846d6bce96e53a8d88f680c14429c840c08f24146514b7002e5c0993"),
+        wasm: include_bytes!("../wasm/sqlite-recons.wasm"),
+    },
+    Known {
+        name: "wrt-recons",
+        version: 1,
+        sha512_256: hex("f0037bf9eac72f246193a071b186046b28c01d0dca03cf71cebf12f8daa66783"),
+        wasm: include_bytes!("../wasm/wrt-recons.wasm"),
     },
 ];

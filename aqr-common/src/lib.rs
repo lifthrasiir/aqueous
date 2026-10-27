@@ -10,9 +10,11 @@
 //!   large-allocation probes, peak RSS.
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
 //! - [`pool`]: the pool of threads every thread of the process runs on.
+//! - [`packed`]: packed byte sequences, a list of them as one.
 
 pub mod mem;
 pub mod msb;
+pub mod packed;
 pub mod pool;
 pub mod rans32;
 pub mod rans64;

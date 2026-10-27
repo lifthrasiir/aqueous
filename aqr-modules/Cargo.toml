@@ -12,8 +12,13 @@ wasm = []
 # Natively, the library is only the modules built; the recompressors are for the Wasm modules.
 [target.'cfg(target_family = "wasm")'.dependencies]
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
+aqr-bundle = { path = "../aqr-bundle", default-features = false }
+aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"] }
+aqr-fasta = { path = "../aqr-fasta", default-features = false }
 aqr-lz4 = { path = "../aqr-lz4", default-features = false }
 aqr-snappy = { path = "../aqr-snappy", default-features = false }
+aqr-sqlite = { path = "../aqr-sqlite", default-features = false }
+aqr-wrt = { path = "../aqr-wrt", default-features = false }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
 sha2 = "0.10"
@@ -33,4 +38,39 @@ required-features = ["wasm"]
 [[bin]]
 name = "leveldb-recons"
 path = "src/bin/leveldb-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "exe-recons-x86"
+path = "src/bin/exe-recons-x86.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "exe-recons-arm64"
+path = "src/bin/exe-recons-arm64.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "exe-recons-cil"
+path = "src/bin/exe-recons-cil.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bundle-recons"
+path = "src/bin/bundle-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "fasta-recons"
+path = "src/bin/fasta-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "sqlite-recons"
+path = "src/bin/sqlite-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "wrt-recons"
+path = "src/bin/wrt-recons.rs"
 required-features = ["wasm"]

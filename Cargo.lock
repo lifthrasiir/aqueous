@@ -244,8 +244,13 @@ name = "aqr-modules"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-bundle",
+ "aqr-exe",
+ "aqr-fasta",
  "aqr-lz4",
  "aqr-snappy",
+ "aqr-sqlite",
+ "aqr-wrt",
  "sha2",
 ]
 

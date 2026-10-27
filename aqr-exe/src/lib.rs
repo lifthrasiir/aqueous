@@ -14,4 +14,6 @@ unsafe fn panic(_: &core::panic::PanicInfo) -> ! {
 
 pub mod arch;
 pub mod format;
+#[cfg(feature = "decode")]
+pub mod module;
 mod util;

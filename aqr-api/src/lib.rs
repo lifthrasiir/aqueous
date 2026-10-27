@@ -66,7 +66,7 @@ pub trait Writable: Memory {
 pub struct Params;
 /// The memory of the `J`-th output (`aqr_output`J), for `J` < 16.
 pub struct Output<const J: u32>;
-/// The memory of the `K`-th input (`aqr_input`K), for `K` < 16.
+/// The memory of the `K`-th input (`aqr_input`K), for `K` < 64.
 pub struct Input<const K: u32>;
 /// The memory of the `I`-th resource (`aqr_resource`I), for `I` < 16.
 pub struct Resource<const I: u32>;
@@ -186,6 +186,54 @@ memories! {
     Input<13> => "input13", MemId::Input(13);
     Input<14> => "input14", MemId::Input(14);
     Input<15> => "input15", MemId::Input(15);
+    Input<16> => "input16", MemId::Input(16);
+    Input<17> => "input17", MemId::Input(17);
+    Input<18> => "input18", MemId::Input(18);
+    Input<19> => "input19", MemId::Input(19);
+    Input<20> => "input20", MemId::Input(20);
+    Input<21> => "input21", MemId::Input(21);
+    Input<22> => "input22", MemId::Input(22);
+    Input<23> => "input23", MemId::Input(23);
+    Input<24> => "input24", MemId::Input(24);
+    Input<25> => "input25", MemId::Input(25);
+    Input<26> => "input26", MemId::Input(26);
+    Input<27> => "input27", MemId::Input(27);
+    Input<28> => "input28", MemId::Input(28);
+    Input<29> => "input29", MemId::Input(29);
+    Input<30> => "input30", MemId::Input(30);
+    Input<31> => "input31", MemId::Input(31);
+    Input<32> => "input32", MemId::Input(32);
+    Input<33> => "input33", MemId::Input(33);
+    Input<34> => "input34", MemId::Input(34);
+    Input<35> => "input35", MemId::Input(35);
+    Input<36> => "input36", MemId::Input(36);
+    Input<37> => "input37", MemId::Input(37);
+    Input<38> => "input38", MemId::Input(38);
+    Input<39> => "input39", MemId::Input(39);
+    Input<40> => "input40", MemId::Input(40);
+    Input<41> => "input41", MemId::Input(41);
+    Input<42> => "input42", MemId::Input(42);
+    Input<43> => "input43", MemId::Input(43);
+    Input<44> => "input44", MemId::Input(44);
+    Input<45> => "input45", MemId::Input(45);
+    Input<46> => "input46", MemId::Input(46);
+    Input<47> => "input47", MemId::Input(47);
+    Input<48> => "input48", MemId::Input(48);
+    Input<49> => "input49", MemId::Input(49);
+    Input<50> => "input50", MemId::Input(50);
+    Input<51> => "input51", MemId::Input(51);
+    Input<52> => "input52", MemId::Input(52);
+    Input<53> => "input53", MemId::Input(53);
+    Input<54> => "input54", MemId::Input(54);
+    Input<55> => "input55", MemId::Input(55);
+    Input<56> => "input56", MemId::Input(56);
+    Input<57> => "input57", MemId::Input(57);
+    Input<58> => "input58", MemId::Input(58);
+    Input<59> => "input59", MemId::Input(59);
+    Input<60> => "input60", MemId::Input(60);
+    Input<61> => "input61", MemId::Input(61);
+    Input<62> => "input62", MemId::Input(62);
+    Input<63> => "input63", MemId::Input(63);
     Resource<0> => "resource0", MemId::Resource(0);
     Resource<1> => "resource1", MemId::Resource(1);
     Resource<2> => "resource2", MemId::Resource(2);

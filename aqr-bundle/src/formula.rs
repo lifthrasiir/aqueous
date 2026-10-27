@@ -5,7 +5,9 @@
 use aqr_formula::{Formula, Kind, Module, Node};
 
 use crate::layout::{self, Rec, Role, Writer};
-use crate::{Result, ar, corrupt, cpio, tar};
+use crate::{ar, cpio, tar};
+
+pub use crate::module::decode;
 
 pub const MODULE: Module = Module { name: "bundle-recons", version: 1 };
 
@@ -111,10 +113,4 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     inputs[0] = f.push_by_kind(0, data, &kinds, "bundle", opt.own);
     f.root = Node::apply(MODULE, Vec::new(), inputs, input.len() as u64);
     Some(f)
-}
-
-/// The module: the archive of `len` bytes rebuilt from `inputs`, the contents and the layout.
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
-    let (&[], &[data, layout]) = (params, inputs) else { return Err(corrupt()) };
-    layout::build(layout, data, len)
 }

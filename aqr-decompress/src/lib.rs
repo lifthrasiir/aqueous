@@ -8,7 +8,6 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use aqr_exe::arch::{arm64, cil, x86};
 use aqr_formula::Resource;
 use aqr_formula::aqr::{self, Failure, Loaded, Runner};
 use sha2::{Digest, Sha512_256};
@@ -163,7 +162,8 @@ pub fn known(wasm: &[u8]) -> Option<Module> {
     }
 }
 
-fn built(m: Module) -> Option<&'static aqr_modules::Known> {
+/// The Wasm module of `m` that aqr-modules built, if it did.
+pub fn built(m: Module) -> Option<&'static aqr_modules::Known> {
     aqr_modules::KNOWN.iter().find(|k| k.name == m.name && k.version == m.version)
 }
 
@@ -265,30 +265,13 @@ impl Native {
         let threads = self.threads.max(1);
         if m == X86 {
             none(resources)?;
-            let (Some(p), Ok(streams)) = (params.first_chunk::<10>(), <[&[u8]; x86::NUM_STREAMS]>::try_from(inputs))
-            else {
-                return Err("bad parameters or inputs".into());
-            };
-            let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
-            x86::decode(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0).ok_or_else(|| "corrupt".into())
+            aqr_exe::module::x86(params, inputs, len).map_err(str::to_owned)
         } else if m == ARM64 {
             none(resources)?;
-            let (Some(p), Ok(streams), Ok(len)) =
-                (params.first_chunk::<8>(), <[&[u8]; arm64::NUM_STREAMS]>::try_from(inputs), usize::try_from(len))
-            else {
-                return Err("bad parameters or inputs".into());
-            };
-            arm64::decode(streams, u64::from_le_bytes(*p), len).ok_or_else(|| "corrupt".into())
+            aqr_exe::module::arm64(params, inputs, len).map_err(str::to_owned)
         } else if m == CIL {
             none(resources)?;
-            let (Some(p), Ok(streams), Ok(len)) =
-                (params.first_chunk::<8>(), <[&[u8]; cil::NUM_STREAMS]>::try_from(inputs), usize::try_from(len))
-            else {
-                return Err("bad parameters or inputs".into());
-            };
-            let (origin, meta) =
-                (u32::from_le_bytes(p[..4].try_into().unwrap()), u32::from_le_bytes(p[4..].try_into().unwrap()));
-            cil::decode(streams, origin, meta as usize, len).ok_or_else(|| "corrupt".into())
+            aqr_exe::module::cil(params, inputs, len).map_err(str::to_owned)
         } else if m == FLATE {
             aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)
         } else if m == LZ4 {

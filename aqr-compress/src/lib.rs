@@ -1480,18 +1480,19 @@ mod tests {
             std::io::Write::write_all(&mut z, d).unwrap();
             z.finish().unwrap()
         };
-        let deconstructed = |d: &[u8]| {
+        let deconstructed = |d: &[u8], smaller| {
             DECONSTRUCTED.with(|n| n.set(0));
-            let f = recompress(d, &Options::default());
+            let f = recompress(d, &Options { smaller, ..Options::default() });
             (DECONSTRUCTED.with(Cell::get), f.applies().len())
         };
         // (named as compressed data, which is not scanned for files)
         let noise = aqr_common::rng::noise(300_000);
-        assert_eq!(deconstructed(&gz("noise.mp4", &noise, 6)), (0, 0));
+        assert_eq!(deconstructed(&gz("noise.mp4", &noise, 6), true), (0, 0));
         // DEFLATE at level 1 leaves much to the archive
         let text: Vec<u8> =
             (0..30000).flat_map(|i| format!("line {} of the text\n", i * 7 % 1000).into_bytes()).collect();
-        let (n, applies) = deconstructed(&gz("text.txt", &text, 1));
+        // (kept however large it archives with its modules)
+        let (n, applies) = deconstructed(&gz("text.txt", &text, 1), false);
         assert_eq!(n, 1);
         assert!(applies > 0);
     }

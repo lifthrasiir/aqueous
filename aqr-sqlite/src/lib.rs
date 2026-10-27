@@ -3,8 +3,10 @@
 
 #![allow(clippy::needless_range_loop)]
 
+#[cfg(feature = "encode")]
 pub mod formula;
 pub mod index;
+pub mod module;
 pub mod page;
 pub mod par;
 pub mod record;

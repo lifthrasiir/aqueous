@@ -30,6 +30,11 @@ fn roundtrip(d: &[u8], opt: &Options) -> Formula {
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
     let c = encoder().encode(&f, Some(aqr::checksum(d))).unwrap();
     assert!(decompress(&c, 1).unwrap() == d, "archive does not decompress to the input:\n{f}");
+    // (until every module is built, of those that are)
+    if f.applies().iter().all(|a| aqr_decompress::built(a.module).is_some()) {
+        let w = aqr::decode(&c, &aqr_decompress::Wasm);
+        assert!(w.as_ref().is_ok_and(|w| w == d), "archive does not decompress as WebAssembly: {:?}\n{f}", w.err());
+    }
     f
 }
 
@@ -91,7 +96,7 @@ fn archive_files() {
     let (d, _) = pe();
     assert_eq!(decompress(&compress(&d, &opt), 1).unwrap(), d);
     // The output checksum is verified.
-    let c = encoder().encode(&recompress(&d, &opt), Some(aqr::checksum(&d) ^ 1)).unwrap();
+    let c = encoder().encode(&recompress(&d, &all()), Some(aqr::checksum(&d) ^ 1)).unwrap();
     assert_eq!(decompress(&c, 1), Err(aqr::Failure::Invalid("output checksum mismatch".into())));
 }
 
@@ -293,8 +298,8 @@ fn pe_of(machine: u16, code: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
 fn pe_sections() {
     let (d, code) = pe();
     // The data after the sections, scanned, is a stream of its own.
-    assert_eq!(modules(&roundtrip(&d, &Options::default())), [X86.name]);
-    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    assert_eq!(modules(&roundtrip(&d, &all())), [X86.name]);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
     assert_eq!(modules(&f), [X86.name]);
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts.len(), 3);
@@ -353,8 +358,8 @@ fn macho(cputype: u32, code: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
 #[test]
 fn macho_sections() {
     let (d, code) = macho(CPU_TYPE_X86_64, &x86_64_code());
-    assert_eq!(modules(&roundtrip(&d, &Options::default())), [X86.name]);
-    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    assert_eq!(modules(&roundtrip(&d, &all())), [X86.name]);
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
     assert_eq!(modules(&f), [X86.name]);
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts.len(), 3);
@@ -382,31 +387,31 @@ fn macho_universal() {
     d.extend_from_slice(&x86);
     d.resize(at[1], 0);
     d.extend_from_slice(&arm);
-    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
     assert_eq!(modules(&f), [X86.name, ARM64.name]);
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts[0], Node::slice(0, 0, (at[0] + code.start) as u64));
     let mut wrapped = text(3000);
     wrapped.extend_from_slice(&d);
     wrapped.extend_from_slice(&text(3000));
-    assert_eq!(modules(&roundtrip(&wrapped, &Options::default())), [X86.name, ARM64.name]);
+    assert_eq!(modules(&roundtrip(&wrapped, &all())), [X86.name, ARM64.name]);
     // a PowerPC image in place of the ARM64 one
     let mut ppc = d.clone();
     ppc[8 + 20..8 + 24].copy_from_slice(&18u32.to_be_bytes());
     ppc[at[1]..at[1] + 4].copy_from_slice(&[0xfe, 0xed, 0xfa, 0xcf]);
-    assert_eq!(modules(&roundtrip(&ppc, &Options { file: Nest::Exact, ..Options::default() })), [X86.name]);
+    assert_eq!(modules(&roundtrip(&ppc, &Options { file: Nest::Exact, ..all() })), [X86.name]);
 }
 
 /// An ARM64 image is filtered as ARM64 code, and one of another machine (ARM) not at all.
 #[test]
 fn pe_machines() {
     let (d, code) = pe_of(0xaa64, &arm64_code());
-    let f = roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() });
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
     assert_eq!(modules(&f), [ARM64.name]);
     let Node::Concat(parts) = &f.root else { panic!("{f}") };
     assert_eq!(parts[1].len(), code.len() as u64);
     let (d, _) = pe_of(0x1c4, &arm64_code());
-    assert!(modules(&roundtrip(&d, &Options { file: Nest::Exact, ..Options::default() })).is_empty());
+    assert!(modules(&roundtrip(&d, &Options { file: Nest::Exact, ..all() })).is_empty());
 }
 
 /// A PDF of streams, by their dictionary entries and data.

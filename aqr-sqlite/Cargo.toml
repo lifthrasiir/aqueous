@@ -7,9 +7,12 @@ publish = false
 
 [dependencies]
 aqr-common = { path = "../aqr-common" }
-aqr-formula = { path = "../aqr-formula" }
+aqr-formula = { path = "../aqr-formula", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
 # Heap use at phase marks, to stderr.
 memprof = ["aqr-common/memprof"]

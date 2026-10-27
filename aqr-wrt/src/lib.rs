@@ -6,7 +6,9 @@
 //! word's code as a literal. `formula` is the entry point (a module of aqr-formula); `FORMAT.md`
 //! specifies it.
 
+#[cfg(feature = "encode")]
 pub mod formula;
+pub mod module;
 pub mod words;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
