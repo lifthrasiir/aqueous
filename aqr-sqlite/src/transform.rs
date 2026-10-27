@@ -702,15 +702,16 @@ fn rebuild<S: Sink>(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], out: &mut S, t
     };
     let tables: Vec<usize> = (0..ng).filter(|&t| !by_table[t].is_empty()).collect();
     if threads > 1 && !tables.is_empty() {
-        // Tables in parallel, then every index's order in parallel.
-        let mut res = crate::par::map(threads, ng, &tables, || (Vec::new(), Vec::new()), |(c, sc), t| scan(t, c, sc));
+        // Tables in parallel, then every index's order in parallel (as tasks on WebAssembly).
+        let mut res =
+            crate::par::map_apart(threads, ng, &tables, || (Vec::new(), Vec::new()), |(c, sc), t| scan(t, c, sc));
         for &t in &tables {
             for (&i, keys) in by_table[t].iter().zip(res[t].take().unwrap()?) {
                 ctxs[i] = Some(RefCtx { keys, perm: Vec::new() });
             }
         }
         let idxs: Vec<usize> = (0..ng).filter(|&i| ctxs[i].is_some()).collect();
-        let perms = crate::par::map(
+        let perms = crate::par::map_apart(
             threads,
             ng,
             &idxs,

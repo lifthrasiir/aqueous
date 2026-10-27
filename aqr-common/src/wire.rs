@@ -120,6 +120,19 @@ impl<T: Wire, E: Wire> Wire for Result<T, E> {
     }
 }
 
+impl<T: Wire, const N: usize> Wire for [T; N] {
+    fn put(&self, out: &mut Vec<u8>) {
+        for x in self {
+            x.put(out);
+        }
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        let v: Vec<T> = (0..N).map(|_| T::get(b)).collect::<Option<_>>()?;
+        v.try_into().ok()
+    }
+}
+
 macro_rules! tuples {
     ($(($($x:ident)*))*) => {$(
         impl<$($x: Wire),*> Wire for ($($x,)*) {
@@ -163,6 +176,8 @@ mod tests {
         round(Some(String::from("aé")));
         round(Ok::<_, String>((vec![vec![1u32], vec![]], 5usize)));
         round(Err::<u8, _>(String::from("bad")));
+        round(vec![[1u8, 2, 3], [4, 5, 6]]);
+        round(([-1i16; 64], [7i32; 4]));
         assert_eq!(bool::get(&mut &[2][..]), None);
         // a length beyond the bytes
         assert_eq!(Vec::<u8>::get(&mut &[255, 255, 255, 255, 255, 255, 255, 127][..]), None);

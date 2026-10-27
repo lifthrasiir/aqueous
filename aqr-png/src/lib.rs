@@ -38,6 +38,29 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// As the error of a task (decoding on WebAssembly): `Unsupported`'s message is not kept.
+impl aqr_common::wire::Wire for Error {
+    fn put(&self, out: &mut Vec<u8>) {
+        match self {
+            Error::Unsupported(_) => out.push(0),
+            Error::Corrupt => out.push(1),
+            Error::Flate(e) => {
+                out.push(2);
+                e.put(out);
+            }
+        }
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        Some(match u8::get(b)? {
+            0 => Error::Unsupported("(in a task)"),
+            1 => Error::Corrupt,
+            2 => Error::Flate(aqr_flate::Error::get(b)?),
+            _ => return None,
+        })
+    }
+}
+
 impl From<aqr_common::Corrupt> for Error {
     #[track_caller]
     fn from(_: aqr_common::Corrupt) -> Self {

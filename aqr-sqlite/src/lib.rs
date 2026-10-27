@@ -26,6 +26,15 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// As the error of a task (decoding on WebAssembly): the message is not kept.
+impl aqr_common::wire::Wire for Error {
+    fn put(&self, _: &mut Vec<u8>) {}
+
+    fn get(_: &mut &[u8]) -> Option<Self> {
+        Some(Error("(in a task)"))
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cold]

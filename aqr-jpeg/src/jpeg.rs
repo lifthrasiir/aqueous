@@ -19,6 +19,7 @@
 //! Supported here: sequential Huffman JPEGs (SOF0/SOF1, 8-bit), any number of scans as long as
 //! each component is coded by exactly one scan. Progressive files: see `progressive`.
 
+use aqr_common::wire::Wire;
 use std::fmt;
 
 pub const FAST_BITS: u32 = 12;
@@ -35,6 +36,16 @@ pub(crate) const KEEP_BYTES: usize = 16 << 20;
 
 #[derive(Debug)]
 pub struct Error(pub String);
+
+impl Wire for Error {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.0.put(out)
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        Some(Error(String::get(b)?))
+    }
+}
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str(&self.0)
@@ -2308,6 +2319,18 @@ struct BitStr {
     n: usize,
 }
 
+impl Wire for BitStr {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.buf.put(out);
+        self.n.put(out);
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        let (buf, n) = Wire::get(b)?;
+        Some(BitStr { buf, n })
+    }
+}
+
 impl BitStr {
     fn of(mut w: BitOut) -> BitStr {
         w.reserve(16);
@@ -2372,6 +2395,23 @@ struct Part {
     end: [i32; 4],
 }
 
+/// As the result of a task (on WebAssembly).
+impl Wire for Part {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.head.put(out);
+        self.mid.put(out);
+        self.brk.put(out);
+        self.body.put(out);
+        (self.rst, self.end).put(out);
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        let (head, mid) = (Wire::get(b)?, Wire::get(b)?);
+        let (brk, body, rst, end) = Wire::get(b)?;
+        Some(Part { head, mid, brk, body, rst, end })
+    }
+}
+
 /// Re-emit a sequential scan that codes every component stripe by stripe, returning its bytes
 /// in pieces: `fill(k, buffers)` puts the coefficients of stripe k (MCUs `ranges[k]`, whole MCU
 /// rows, in order, covering the scan) into the buffers, and only a stripe per worker is held at
@@ -2412,69 +2452,60 @@ pub(crate) fn encode_striped(
     let ranges: Vec<(usize, usize)> =
         ranges.iter().take_while(|r| r.0 < emit).map(|&(m0, m1)| (m0, m1.min(emit))).collect();
     let pool = std::sync::Mutex::new(Vec::<Vec<Coefs>>::new());
-    let parts: Vec<Part> = ranges
-        .par_iter()
-        .enumerate()
-        .map(|(k, &(m0, m1))| {
-            let mut b = pool.lock().unwrap().pop().unwrap_or_default();
-            fill(k, &mut b)?;
-            let head = m0 % ri != 0;
-            // the first restart boundary from m0 on
-            let r1 = if head { (m0 / ri + 1) * ri } else { m0 };
-            let mut pred = [0i32; 4];
-            let mut part =
-                Part { head: Vec::new(), mid: BitStr::default(), brk: false, body: None, rst: 0, end: [0; 4] };
-            let mut ends = Vec::new();
-            if head {
-                let (mx, my) = (m0 % s.mcux, m0 / s.mcux);
-                for (si, &(ci, ch, cv)) in layout.iter().enumerate() {
-                    let o = &b[ci];
-                    for v in 0..cv {
-                        for h in 0..ch {
-                            let Some(bi) = o.index(mx * ch + h, my * cv + v) else {
-                                return err("block outside the component");
-                            };
-                            part.head.push((o.blocks[bi], o.masks[bi]));
-                            pred[si] = o.blocks[bi][0] as i32;
-                        }
+    let part = |k: usize| -> Result<Part, Error> {
+        let (m0, m1) = ranges[k];
+        let mut b = pool.lock().unwrap().pop().unwrap_or_default();
+        fill(k, &mut b)?;
+        let head = m0 % ri != 0;
+        // the first restart boundary from m0 on
+        let r1 = if head { (m0 / ri + 1) * ri } else { m0 };
+        let mut pred = [0i32; 4];
+        let mut part = Part { head: Vec::new(), mid: BitStr::default(), brk: false, body: None, rst: 0, end: [0; 4] };
+        let mut ends = Vec::new();
+        if head {
+            let (mx, my) = (m0 % s.mcux, m0 / s.mcux);
+            for (si, &(ci, ch, cv)) in layout.iter().enumerate() {
+                let o = &b[ci];
+                for v in 0..cv {
+                    for h in 0..ch {
+                        let Some(bi) = o.index(mx * ch + h, my * cv + v) else {
+                            return err("block outside the component");
+                        };
+                        part.head.push((o.blocks[bi], o.masks[bi]));
+                        pred[si] = o.blocks[bi][0] as i32;
                     }
                 }
-                if m0 + 1 < r1.min(m1) {
-                    let mut w = BitOut::new();
-                    encode_mcus(
-                        s,
-                        &b,
-                        &layout,
-                        &dct,
-                        &act,
-                        &mut w,
-                        (m0 + 1, r1.min(m1)),
-                        pad_zero,
-                        &mut pred,
-                        &mut ends,
-                    )?;
-                    part.mid = BitStr::of(w);
-                }
-                part.brk = r1 < m1 || (r1 == m1 && brk_at(m1));
-                part.rst = r1 / ri - 1;
-            } else {
-                part.rst = m0 / ri;
             }
-            if r1 < m1 {
+            if m0 + 1 < r1.min(m1) {
                 let mut w = BitOut::new();
-                pred = [0; 4];
-                encode_mcus(s, &b, &layout, &dct, &act, &mut w, (r1, m1), pad_zero, &mut pred, &mut ends)?;
-                if brk_at(m1) {
-                    w.pad(pad_zero);
-                    ends.push(w.pos);
-                }
-                part.body = Some((BitStr::of(w), ends));
+                encode_mcus(s, &b, &layout, &dct, &act, &mut w, (m0 + 1, r1.min(m1)), pad_zero, &mut pred, &mut ends)?;
+                part.mid = BitStr::of(w);
             }
-            part.end = pred;
-            pool.lock().unwrap().push(b);
-            Ok(part)
-        })
-        .collect::<Result<_, Error>>()?;
+            part.brk = r1 < m1 || (r1 == m1 && brk_at(m1));
+            part.rst = r1 / ri - 1;
+        } else {
+            part.rst = m0 / ri;
+        }
+        if r1 < m1 {
+            let mut w = BitOut::new();
+            pred = [0; 4];
+            encode_mcus(s, &b, &layout, &dct, &act, &mut w, (r1, m1), pad_zero, &mut pred, &mut ends)?;
+            if brk_at(m1) {
+                w.pad(pad_zero);
+                ends.push(w.pos);
+            }
+            part.body = Some((BitStr::of(w), ends));
+        }
+        part.end = pred;
+        pool.lock().unwrap().push(b);
+        Ok(part)
+    };
+    // (as tasks on WebAssembly, where rayon has no threads)
+    let parts: Vec<Part> = if cfg!(target_family = "wasm") {
+        aqr_common::pool::par_map_apart(ranges.len(), ranges.len(), part).into_iter().collect::<Result<_, Error>>()?
+    } else {
+        (0..ranges.len()).into_par_iter().map(part).collect::<Result<_, Error>>()?
+    };
     drop(pool);
     // the heads, and the bits (<= 7) each part's first byte takes from what precedes it
     let mut heads = Vec::with_capacity(parts.len());

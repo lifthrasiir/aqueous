@@ -65,7 +65,8 @@ pub fn decode_set(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> 
         let level: Vec<usize> = (0..n).filter(|&i| depth[i] == d).collect();
         let workers = threads.min(level.len()).max(1);
         let inner = (threads / workers).max(1);
-        let files = codec::par_map(level.len(), workers, |k| {
+        // (as tasks on WebAssembly)
+        let files = aqr_common::pool::par_map_apart(level.len(), workers, |k| {
             let (i, r) = (level[k], parents[level[k]].and_then(|p| refs[p].as_ref()));
             rebuild(sks[i], indexes[i], records[i], r, sizes[i], inner, is_parent[i])
         });

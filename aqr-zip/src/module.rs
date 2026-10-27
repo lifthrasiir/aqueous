@@ -1,6 +1,7 @@
 //! The code of the modules (see `formula`, and FORMAT.md), which needs no aqr-formula, so that
 //! aqr-modules builds it into their Wasm modules.
 
+use aqr_common::wire::Wire;
 use aqr_flate::{ADAPTIVE, Coding, ModelData};
 
 use crate::layout;
@@ -24,6 +25,41 @@ pub(crate) fn par_jobs<T: Sync, R: Send>(
     let done = par_map(&order, threads, |&i| f(&items[i], if size(&items[i]) >= LARGE { threads } else { 1 }));
     let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
     for (i, r) in order.into_iter().zip(done) {
+        out[i] = Some(r);
+    }
+    out.into_iter().map(Option::unwrap).collect()
+}
+
+/// [`par_jobs`] whose jobs run as tasks on WebAssembly (`aqr_common::pool::par_map_apart`):
+/// those of at least [`LARGE`] a task each, the others together, a task for each [`LARGE`] of
+/// them or so (a task costs an instance).
+pub(crate) fn par_jobs_apart<T: Sync, R: Send + Wire>(
+    items: &[T],
+    size: impl Fn(&T) -> usize + Sync,
+    threads: usize,
+    f: impl Fn(&T, usize) -> R + Sync,
+) -> Vec<R> {
+    if !cfg!(target_family = "wasm") {
+        return par_jobs(items, size, threads, f);
+    }
+    let mut order: Vec<usize> = (0..items.len()).collect();
+    order.sort_by_key(|&i| std::cmp::Reverse(size(&items[i])));
+    let mut groups = Vec::new();
+    let mut k = 0;
+    while k < order.len() {
+        let (start, mut sum) = (k, 0);
+        while k < order.len() && (k == start || sum + size(&items[order[k]]) <= LARGE) {
+            sum += size(&items[order[k]]);
+            k += 1;
+        }
+        groups.push(start..k);
+    }
+    let done = aqr_common::pool::par_map_apart(groups.len(), threads, |g| {
+        let job = |&i: &usize| f(&items[i], if size(&items[i]) >= LARGE { threads } else { 1 });
+        order[groups[g].clone()].iter().map(job).collect::<Vec<R>>()
+    });
+    let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
+    for (&i, r) in order.iter().zip(done.into_iter().flatten()) {
         out[i] = Some(r);
     }
     out.into_iter().map(Option::unwrap).collect()
@@ -70,7 +106,8 @@ fn rebuild(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threa
                 models = aqr_flate::module::models_from_bytes(coding).map_err(flate)?;
                 ModelData { rules: &rules, coding: Coding::Static(&models) }
             };
-            par_jobs(
+            // (as tasks on WebAssembly)
+            par_jobs_apart(
                 &jobs,
                 |(d, _)| d.len(),
                 threads,

@@ -463,7 +463,8 @@ impl<'a> Skeleton<'a> {
         let payloads = if threads > 1 && imgs.len() > 1 {
             let workers = threads.min(imgs.len());
             let inner = (threads / workers).max(1);
-            let res = par_map(imgs.len(), workers, |i| image_payload(i, inner));
+            // (as tasks on WebAssembly)
+            let res = aqr_common::pool::par_map_apart(imgs.len(), workers, |i| image_payload(i, inner));
             res.into_iter().collect::<Result<Vec<_>>>()?
         } else {
             (0..imgs.len()).map(|i| image_payload(i, threads)).collect::<Result<Vec<_>>>()?

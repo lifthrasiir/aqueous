@@ -11,6 +11,19 @@ pub struct Ihdr {
     pub interlace: u8,
 }
 
+impl aqr_common::wire::Wire for Ihdr {
+    fn put(&self, out: &mut Vec<u8>) {
+        (self.width, self.height).put(out);
+        [self.depth, self.color, self.compression, self.filter, self.interlace].put(out);
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        let (width, height) = <(u32, u32)>::get(b)?;
+        let [depth, color, compression, filter, interlace] = <[u8; 5]>::get(b)?;
+        Some(Ihdr { width, height, depth, color, compression, filter, interlace })
+    }
+}
+
 pub const SIGNATURE: [u8; 8] = *b"\x89PNG\r\n\x1a\n";
 
 #[derive(Debug, Clone, Copy)]

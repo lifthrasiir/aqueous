@@ -8,6 +8,7 @@
 //! consecutive entries, so most ranks cost nothing.
 
 use crate::record::{int_value, is_int, parse, st_size};
+use aqr_common::wire::Wire;
 use std::cmp::Ordering;
 
 /// SQLite's order of an integer and a real.
@@ -110,6 +111,31 @@ pub struct Keys<'a> {
     /// Whether the row has all indexed columns.
     pub ok: Vec<bool>,
     pub rowids: std::borrow::Cow<'a, [i64]>,
+}
+
+/// The decoder's keys (copied out), as the result of a task (on WebAssembly).
+impl Wire for Keys<'static> {
+    fn put(&self, out: &mut Vec<u8>) {
+        debug_assert!(self.rows.is_empty());
+        self.map.put(out);
+        self.vals.put(out);
+        self.bytes.put(out);
+        self.rb.put(out);
+        self.ok.put(out);
+        self.rowids.to_vec().put(out);
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        Some(Keys {
+            map: Wire::get(b)?,
+            vals: Wire::get(b)?,
+            rows: &[],
+            bytes: Wire::get(b)?,
+            rb: Wire::get(b)?,
+            ok: Wire::get(b)?,
+            rowids: std::borrow::Cow::Owned(Wire::get(b)?),
+        })
+    }
 }
 
 impl<'a> Keys<'a> {

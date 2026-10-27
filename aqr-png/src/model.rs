@@ -23,6 +23,7 @@
 
 use crate::filter;
 use crate::rans::{self, BitR, BitW, Decoder, Tables};
+use aqr_common::wire::Wire;
 use aqr_flate::deflate::Token;
 use aqr_flate::huffman::{DIST_BASE, DIST_EXTRA, LEN_BASE, LEN_EXTRA};
 use aqr_flate::inflate::{self, Sink};
@@ -143,6 +144,17 @@ pub struct Reference {
     /// Positions, increasing, and the tokens starting there (matches without `alt258`).
     pos: Vec<u32>,
     tokens: Vec<Token>,
+}
+
+impl aqr_common::wire::Wire for Reference {
+    fn put(&self, out: &mut Vec<u8>) {
+        self.pos.put(out);
+        self.tokens.put(out);
+    }
+
+    fn get(b: &mut &[u8]) -> Option<Self> {
+        Some(Reference { pos: Wire::get(b)?, tokens: Wire::get(b)? })
+    }
 }
 
 impl Reference {

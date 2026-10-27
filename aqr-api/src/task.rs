@@ -66,12 +66,28 @@ pub struct Tasks<'a> {
 /// Spawns `n` tasks running `f(i, out)` for `i` in `0..n`, all on one copy of the working
 /// memory. Trapping in one fails the application.
 pub fn spawn<'a, F: Fn(usize, &mut Vec<u8>) + Sync + 'a>(n: usize, f: &'a F) -> Tasks<'a> {
-    let rec = Record { run: run::<F>, data: f as *const F as *const () };
     #[cfg(target_family = "wasm")]
-    let t = Tasks { handle: crate::sys::spawn(&rec, n), taken: alloc::vec![false; n], _f: PhantomData };
+    let t = Tasks {
+        handle: spawn_record(run::<F>, f as *const F as *const (), n),
+        taken: alloc::vec![false; n],
+        _f: PhantomData,
+    };
+    #[cfg(not(target_family = "wasm"))]
+    let rec = Record { run: run::<F>, data: f as *const F as *const () };
     #[cfg(not(target_family = "wasm"))]
     let t = Tasks { results: crate::sys::spawn(&rec, n), taken: alloc::vec![false; n], _f: PhantomData };
     t
+}
+
+/// `aqr_spawn` of the record of `run` and `data`, which this frame holds: never inlined, so
+/// that the frame is below those of its callers, whose data the tasks (whose stack starts
+/// below the record) find as they were. (The record within a caller's frame could be above
+/// some of its data, which the tasks' frames would then overwrite.)
+#[cfg(target_family = "wasm")]
+#[inline(never)]
+fn spawn_record(run: unsafe fn(*const (), usize, &mut Vec<u8>), data: *const (), n: usize) -> u32 {
+    let rec = Record { run, data };
+    crate::sys::spawn(core::hint::black_box(&rec), n)
 }
 
 impl Tasks<'_> {

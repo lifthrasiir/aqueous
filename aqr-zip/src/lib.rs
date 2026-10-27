@@ -28,6 +28,15 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// As the error of a task (decoding on WebAssembly): the message is not kept.
+impl aqr_common::wire::Wire for Error {
+    fn put(&self, _: &mut Vec<u8>) {}
+
+    fn get(_: &mut &[u8]) -> Option<Self> {
+        Some(Error("(in a task)"))
+    }
+}
+
 impl From<aqr_common::Corrupt> for Error {
     fn from(_: aqr_common::Corrupt) -> Self {
         corrupt()
