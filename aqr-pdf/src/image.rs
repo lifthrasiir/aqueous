@@ -134,7 +134,7 @@ fn chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
     let start = out.len();
     out.extend_from_slice(kind);
     out.extend_from_slice(data);
-    let crc = crc32fast::hash(&out[start..]);
+    let crc = aqr_common::crc32::hash(&out[start..]);
     out.extend_from_slice(&crc.to_be_bytes());
 }
 

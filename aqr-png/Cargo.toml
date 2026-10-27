@@ -15,9 +15,9 @@ aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula", optional = true }
 aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-raw = { path = "../aqr-raw", default-features = false }
-crc32fast = "1.5"
 
 [dev-dependencies]
+crc32fast = "1.5"
 flate-zoo = { path = "../flate-zoo" }
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so

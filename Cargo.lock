@@ -67,6 +67,7 @@ name = "aqr-common"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "crc32fast",
  "libc",
  "rayon",
  "zstd",
@@ -303,7 +304,6 @@ dependencies = [
  "aqr-jpeg",
  "aqr-png",
  "aqr-raw",
- "crc32fast",
  "flate-zoo",
  "flate2",
  "memchr",

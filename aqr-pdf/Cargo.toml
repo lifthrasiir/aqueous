@@ -24,7 +24,6 @@ memchr = "2"
 zstd = { version = "0.13", optional = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 simd-adler32 = "0.3"
-crc32fast = "1.5"
 rayon = { version = "1.12", optional = true }
 
 [dev-dependencies]

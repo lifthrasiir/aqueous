@@ -12,7 +12,9 @@
 //! - [`pool`]: the pool of threads every thread of the process runs on.
 //! - [`packed`]: packed byte sequences, a list of them as one.
 //! - [`wire`]: values as bytes, for the results of tasks on WebAssembly.
+//! - [`crc32`]: CRC-32, without its tables in the modules.
 
+pub mod crc32;
 pub mod mem;
 pub mod msb;
 pub mod packed;

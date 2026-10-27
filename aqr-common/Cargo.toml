@@ -21,5 +21,8 @@ rayon = { version = "1.12", optional = true }
 [target.'cfg(target_family = "wasm")'.dependencies]
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
 
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+crc32fast = "1.5"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

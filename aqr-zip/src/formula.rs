@@ -283,8 +283,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     }
     let mut made: Vec<Made> = made.into_iter().map(Option::unwrap).collect();
     let crcs = par_map(&made.iter().zip(&locals).collect::<Vec<_>>(), opt.threads, |(m, l)| match m {
-        Made::Stored => crc32fast::hash(&input[l.body.clone()]),
-        Made::Deflated { data, .. } => crc32fast::hash(data),
+        Made::Stored => aqr_common::crc32::hash(&input[l.body.clone()]),
+        Made::Deflated { data, .. } => aqr_common::crc32::hash(data),
         _ => 0,
     });
 

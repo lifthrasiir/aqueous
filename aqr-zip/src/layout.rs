@@ -568,13 +568,13 @@ pub fn assemble(layout: &[u8], data: &[u8], kept: &[u8], bodies: &[&[u8]], len: 
                     0 => {
                         let b = &data[take(data, &mut dp, r.varint()?)?];
                         let n = b.len() as u64;
-                        (Body::Stored, b, None, Entry { crc: crc32fast::hash(b), csize: n, usize: n })
+                        (Body::Stored, b, None, Entry { crc: aqr_common::crc32::hash(b), csize: n, usize: n })
                     }
                     1 => {
                         let b = &data[take(data, &mut dp, r.varint()?)?];
                         r.varint()?;
                         let s = *bodies.next().ok_or_else(corrupt)?;
-                        let entry = Entry { crc: crc32fast::hash(b), csize: s.len() as u64, usize: b.len() as u64 };
+                        let entry = Entry { crc: aqr_common::crc32::hash(b), csize: s.len() as u64, usize: b.len() as u64 };
                         (Body::Deflated, s, None, entry)
                     }
                     2 => {

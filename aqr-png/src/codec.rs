@@ -42,7 +42,7 @@ pub(crate) fn get_bytes<'a>(src: &'a [u8], at: &mut usize, n: usize) -> Result<&
 }
 
 fn chunk_crc(kind: &[u8; 4], data: &[u8]) -> u32 {
-    let mut h = crc32fast::Hasher::new();
+    let mut h = aqr_common::crc32::Hasher::new();
     h.update(kind);
     h.update(data);
     h.finalize()

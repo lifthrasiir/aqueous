@@ -14,7 +14,6 @@ encode = ["dep:aqr-formula", "aqr-flate/encode"]
 aqr-common = { path = "../aqr-common" }
 aqr-formula = { path = "../aqr-formula", optional = true }
 aqr-flate = { path = "../aqr-flate", default-features = false }
-crc32fast = "1.5"
 memchr = "2"
 
 [dev-dependencies]
