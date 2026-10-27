@@ -13,7 +13,7 @@
 //!   `view(token, len)` in the worker, which maps it (a `Mapping`).
 //!
 //! Systems without these have the worker refuse to start (`unsupported`), as a worker that is
-//! not locked down would protect from nothing.
+//! not locked down would protect from nothing. (`SUPPORTED` of the sandbox lists the others.)
 
 use std::fs::File;
 use std::io;

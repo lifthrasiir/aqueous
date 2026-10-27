@@ -43,6 +43,10 @@ const ARENA_FROM: u64 = 1 << 16;
 /// The shortest arena made.
 const ARENA_MIN: u64 = 1 << 20;
 
+/// Whether this system locks workers down; where it does not, no worker starts (a resource
+/// failure of any module run in one).
+pub const SUPPORTED: bool = cfg!(any(windows, target_os = "linux", target_os = "macos"));
+
 /// Serves the decoder that started this process as its worker, then exits: the whole of the
 /// worker program, or the part of the host's that its arguments for workers lead to.
 pub fn worker_main() -> ! {

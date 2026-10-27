@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N] [--batch MIB]
-//! [--no-check] [--wasm] INPUT...
+//! [--no-check] [--wasm] [--no-sandbox] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -10,6 +10,11 @@
 //! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
 //! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
 //!   otherwise).
+//! - `--no-sandbox`: in decoding, the modules not known run in this process. By default they
+//!   run in worker processes locked down by the system ([`aqr_decompress::sandbox`]; every
+//!   module with `--wasm`), started once the first of them is loaded, a sandbox for each
+//!   archive. Where the system cannot lock workers down, they do not run but with
+//!   `--no-sandbox` (the known ones with `--wasm` in this process).
 //! - `-l`: the level of compression ([`aqr::Level`]), `0` (nothing compressed: uncompressed
 //!   blocks only), `1` (zstd alone: nothing recompressed) to `9`; `low`, `mid` (the default)
 //!   and `high` are 2, 5 and 8. `zstdN` compresses every stream at zstd level `N`, the
@@ -29,20 +34,26 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::OnceLock;
 use std::time::{Instant, UNIX_EPOCH};
 
 use aqr_compress::{Options, compress_formula, compress_tree_to, detect};
-use aqr_decompress::{Native, Wasm};
-use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Time, Tree, Value, name_bytes, name_from};
+use aqr_decompress::{Native, Wasm, sandbox};
+use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, Value, name_bytes, name_from};
 
 const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
-     [--batch MIB] [--no-check] [--wasm] INPUT...";
+     [--batch MIB] [--no-check] [--wasm] [--no-sandbox] INPUT...";
+
+/// The argument (the only one) that this program is run with as a worker of the sandbox.
+const SANDBOX_WORKER: &str = "--sandbox-worker";
 
 struct Args {
     decompress: bool,
     /// Decompressing, but nothing written.
     test: bool,
     wasm: bool,
+    /// The modules not known (all, with `wasm`) run in a sandbox.
+    sandbox: bool,
     output: Option<PathBuf>,
     force: bool,
     quiet: bool,
@@ -59,6 +70,10 @@ const DECODE_BUDGET: u64 = 2_000_000_000;
 static ALLOC: aqr_common::mem::Mapped = aqr_common::mem::Mapped;
 
 fn main() -> ExitCode {
+    // before anything else, as the worker's standard input and output are its messages
+    if std::env::args_os().nth(1).is_some_and(|a| a == SANDBOX_WORKER) {
+        sandbox::worker_main();
+    }
     let args = match parse() {
         Ok(a) => a,
         Err(e) => {
@@ -85,6 +100,7 @@ fn parse() -> Result<Args, String> {
         decompress: unaqr,
         test: false,
         wasm: false,
+        sandbox: true,
         output: None,
         force: false,
         quiet: false,
@@ -107,6 +123,7 @@ fn parse() -> Result<Args, String> {
             "-d" | "--decompress" => a.decompress = true,
             "-t" | "--test" => (a.decompress, a.test) = (true, true),
             "--wasm" => a.wasm = true,
+            "--no-sandbox" => a.sandbox = false,
             "-o" => a.output = Some(value("-o")?.into()),
             "-f" | "--force" => a.force = true,
             "-q" | "--quiet" => a.quiet = true,
@@ -492,8 +509,9 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
     // (mapped, so that what is read of it is the system's to drop)
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
-    let native = Native { threads: a.opt.threads };
-    let runner: &dyn aqr::Runner = if a.wasm { &Wasm } else { &native };
+    let decoder =
+        Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
+    let runner: &dyn aqr::Runner = &decoder;
     let mut archive = aqr::open(&c, runner).map_err(|e| err(&e))?;
     archive.set_budget(DECODE_BUDGET);
     match archive.tree() {
@@ -535,6 +553,35 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// The runner of an archive's modules: those known natively (as WebAssembly with `wasm`), and
+/// the others in a sandbox of this archive's, made as the first of them is loaded (or in this
+/// process, without a sandbox). Where the system cannot lock workers down, the known ones are
+/// never sandboxed and the others fail.
+struct Decoder {
+    native: Native,
+    wasm: bool,
+    sandbox: Option<OnceLock<Result<sandbox::Sandbox, String>>>,
+}
+
+impl aqr::Runner for Decoder {
+    fn load(&self, wasm: &[u8]) -> aqr::Decoded<Box<dyn aqr::Loaded + '_>> {
+        let sandboxed = aqr_decompress::known(wasm).is_none() || self.wasm && sandbox::SUPPORTED;
+        let Some(s) = self.sandbox.as_ref().filter(|_| sandboxed) else {
+            return if self.wasm { Wasm.load(wasm) } else { self.native.load(wasm) };
+        };
+        let s = s.get_or_init(|| match sandbox::SUPPORTED {
+            true => sandbox::Sandbox::current_exe([SANDBOX_WORKER]).map_err(|e| e.to_string()),
+            false => Err("this system does not lock workers down (--no-sandbox to run the modules not known in \
+                 this process)"
+                .into()),
+        });
+        match s {
+            Ok(s) => s.load(wasm),
+            Err(e) => Err(Failure::Resource(format!("no sandbox: {e}"))),
+        }
+    }
 }
 
 /// The summary of an archive decoded into `out` (`None`: tested).
