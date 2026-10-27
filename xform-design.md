@@ -625,26 +625,24 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 > - macOS에서 스냅샷과 task 메모리를 `vm_copy`로 CoW 복사하자, 스냅샷(71–91 MB)이 약 70 µs, task 준비가 0.05–0.9 ms가 되었다. 전체는 0.37–0.41 s이다. flate-recons의 적용이 0.53 s에서 0.14 s로 줄었다. 나머지는 직렬인 wrt-recons(0.11 s)와 두 모듈의 컴파일(0.1 s, 프로세스마다 한 번)이다.
 > - 처음 구현은 비어 있는 워커 수만큼만 워커에 돌리고 나머지를 join하는 스레드에서 차례로 돌렸다. 그러자 0.77 s로 직렬과 같았다. 지금은 예약한 워커들과 join하는 스레드가 아직 시작하지 않은 task를 차례로 가져간다.
 
-**2단계: 채널 [제안].** 파이프라인은 task 사이의 단방향 유한 채널로 표현한다. 이 채널은 보류한 노드 사이의 공유 간선(§4.4)과 같은 KPN 채널이다. 용량은 "이만큼이면 충분하다"는 자원 선언이다.
+**2단계: 채널 [구현].** 명세 "Module execution"의 "Tasks"에 반영했다(`aqr_chan`, `aqr_send`, `aqr_recv`, `aqr_close`, 교착, task 하나의 실패가 곧 적용의 실패). aqr-api(`chan`), aqr-ld, aqr-decompress(wasmtime)에 들어가 있다. 아직 채널을 쓰는 모듈은 없다. 명세에 없는 것은 다음과 같다.
 
-- import는 다음과 같다.
-  - `chan(cap) -> c`: 메시지 `cap`개를 담는 채널을 만든다. 번호는 적용 안에서 만든 순서대로 매긴다. 만든 뒤 `spawn`한 task는 그 번호를 물려받는다.
-  - `send(c, ptr, len)`: 메시지를 복사해 넣는다. 가득 차 있으면 기다린다.
-  - `recv(c, dst, cap) -> len`: 메시지가 올 때까지 기다린다. `len ≤ cap`이면 꺼내서 복사하고, 아니면 그대로 둔 채 길이만 돌려준다. 채널이 닫혔고 비었으면 -1이다.
-  - `close(c)`: 보내는 쪽을 닫는다. 보내는 task가 끝나면 저절로 닫힌다.
-- 한쪽 끝은 한 task만 쓴다(SPSC). 두 번째 task가 같은 끝을 쓰면 위반이다. 각 task의 호출 순서는 스케줄과 무관하므로, 이 위반도 모든 스케줄에서 일어난다.
-- `try_recv`, select, 받는 쪽 닫기는 두지 않는다. 셋 다 결과가 도착 시점에 따라 달라진다. 받는 쪽이 먼저 끝나면, 보내는 쪽은 결국 가득 찬 채널에서 막힌다. 그러면 아래의 교착이나 미닫힘 위반이 된다.
-- 모든 task가 `recv`, `send`, `join` 중 하나에서 막혀 있으면 교착이다. 교착은 결정적이므로 invalid archive이다.
+- 채널은 보류한 노드 사이의 공유 간선(§4.4)과 같은 KPN 채널이다. 용량은 "이만큼이면 충분하다"는 자원 선언이다.
+- `try_recv`, select, 받는 쪽 닫기는 두지 않는다. 셋 다 결과가 도착 시점에 따라 달라진다. 받는 쪽이 먼저 끝나면, 보내는 쪽은 결국 가득 찬 채널에서 막힌다. 그러면 교착이 된다.
+- **task의 실패는 바로 적용의 실패이다.** 1단계에서는 join할 때 실패가 드러나도 충분했다. 채널이 있으면, 실패한 task를 기다리던 다른 task가 영원히 기다리다 교착이 된다. 그러면 자원 실패가 invalid archive로 바뀐다. 실패하는 task의 집합은 KPN이므로 스케줄과 무관하다. 여럿이 실패할 때 어느 것을 보고하는지만 갈린다.
+- **끝날 때 닫히는 것은 보낸 적이 있는 채널뿐이다.** 끝은 처음 쓰는 인스턴스의 것이므로, 아무것도 보내지 않은 task는 그 채널의 송신자가 아니다. 그래서 보낼 것이 없을 수도 있는 task는 직접 닫아야 한다. 아니면 받는 쪽이 영원히 기다린다(빈 입력에서 잘 드러난다). aqr-api의 `Sender`는 drop할 때 닫지 않는다. 생성자(spawn하는 쪽)가 task에 넘긴 끝의 사본을 늘 쥐고 있어서, drop할 때 닫으면 생성자가 송신자가 되어 버리기 때문이다.
 
 **wasmtime 구현.** 레퍼런스 디코더의 Wasm 경로(aqr-decompress)를 기준으로 적는다. WAH는 이것에 맞춰 고친다(§5.4의 재시도 의미론).
 
 - **task = Store 하나.** `Engine`과 `Module`은 공유하고, task마다 Store와 `Instance`를 만든다. Store는 `Send`이므로 어느 스레드에서든 돌릴 수 있다.
-- 1단계(지금 구현)는 동기 API로 충분하다. task끼리 기다리지 않으므로, `spawn` 때 비어 있는 워커들과 join하는 스레드가 시작하지 않은 task를 차례로 가져가면 된다. 아래의 비동기 실행은 채널을 넣을 때 필요하다.
-- **비동기 실행.** `Config::async_support(true)`로 켜고, `Instance::new_async`와 `call_async`로 task를 future로 만든다. `join`, `send`, `recv`는 `func_wrap_async`로 정의하고, 준비되지 않았으면 pending을 돌려준다. 그러면 task는 fiber(자기 스택) 위에서 멈춘다.
-  - task 수와 OS 스레드 수가 분리된다. 실행기는 aqr-common `pool`의 워커 위에서 깨어난 future를 poll한다. fork-join만 쓰는 task도 스레드를 따로 잡지 않는다.
+- **비동기 실행.** wasmtime의 기능 `async`를 켜고(49에서는 `Config::async_support`가 아무 일도 하지 않는다), 모든 인스턴스를 `Instance::new_async`와 `call_async`로 돌린다. `join`, `send`, `recv`는 `Func::wrap_async`이고, 조건이 서지 않았으면 pending을 돌려준다. 그러면 인스턴스는 fiber(자기 스택) 위에서 멈춘다.
+  - 실행기(aqr-decompress `exec`)는 적용하는 스레드와 aqr-common `pool`의 워커들이 깨어난 future를 poll하는 것이다. 큐에 쌓인 것이 돕는 워커보다 많으면 빈 워커를 하나 더 예약한다. 워커는 큐가 비면 풀로 돌아간다. task 수와 OS 스레드 수가 분리된다.
+  - 큐가 비었고 poll 중인 스레드도 없는데 첫 future가 끝나지 않았으면 교착이다. 깨우는 일은 poll 안에서만 일어나기 때문이다.
   - 동기 API로 task마다 OS 스레드를 두고 condvar에서 막는 방법은 더 단순하다. 그러나 중첩 `spawn`이 있으면 스레드 수에 상한이 없다. 또 "워커가 없으면 join 때 돌린다"는 지연 실행이 채널과 섞이면 교착한다. 소비자가 막힌 채 생산자를 돌릴 스레드가 없기 때문이다.
-  - fiber 스택은 `async_stack_size`(기본 2 MiB)만큼 task마다 든다. `max_wasm_stack`보다 커야 한다.
-  - 교착 판정은 실행기에서 한다. 깨어날 수 있는 future가 없고 실행 중인 것도 없는데, 끝나지 않은 task가 있으면 교착이다.
+  - fiber 스택은 `async_stack_size`(기본 2 MiB)만큼, poll된 적이 있는 인스턴스마다 든다.
+  - 1단계의 측정은 비동기로 바꾼 뒤에도 같거나 조금 나았다(zip 0.18 → 0.15 s, jpeg 0.117 → 0.105 s).
+- **잠금과 깨우기.** waker를 깨우거나 버리면 마지막 참조가 사라진 인스턴스가 drop될 수 있고, 인스턴스의 drop은 송신자인 채널을 닫으려고 채널을 잠근다. 그래서 채널이나 task 칸을 잠근 채로 깨우지 않는다. 깨울 waker를 모았다가 잠금을 푼 뒤에 깨운다. 처음 구현은 이 재진입으로 멈췄다(`channels` 시험의 두 송신자 경우).
+- **순환 참조.** 기다리는 future는 자기가 남긴 waker로만 붙잡혀 있고, 그 waker는 그 future가 쥔 Store가 닿는 채널이나 task 칸에 있다. 그래서 교착이나 실패로 끝난 적용의 인스턴스들은 저절로 풀리지 않는다. 실행기가 만든 future를 모두 약한 참조로 기억했다가, 끝날 때 남은 것을 drop한다.
 - **메모리.** wasmtime이 만든 메모리를 그대로 쓰고, 내용만 호스트가 채운다.
   - 작업 메모리 스냅샷은 CoW로 만든다(위의 "묶음으로 둔 이유"). 구현(aqr-decompress `cow`)은 macOS에서 `vm_copy`를 쓴다. 스냅샷은 부모 메모리의 CoW 복사이고, task 메모리는 instantiate한 뒤 wasmtime이 만든 매핑 위에 스냅샷을 `vm_copy`한다. 그 밖의 시스템은 memcpy한다. Linux와 Windows에서는 `spawn`마다 memfd(파일 매핑)에 한 번 복사하고, task마다 그것을 wasmtime의 매핑 위에 `MAP_PRIVATE | MAP_FIXED`로 매핑할 수 있을 것이다(구현하지 않았다).
   - wasmtime 49의 `Config::with_host_memory`(`MemoryCreator`)는 호스트가 만드는 메모리(`Memory::new`)에 쓰이지 않는다. 문서와 달리 그 경로는 늘 기본 on-demand 할당기를 쓰고, 모듈이 정의하는 메모리에만 쓰인다. 프로파일상 모듈은 메모리를 정의하지 않으므로, 메모리를 만든 뒤 그 매핑을 덮는다.

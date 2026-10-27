@@ -2558,6 +2558,8 @@ Any other import is an [=invalid archive=] failure.
 :: A function defined below.
 : [=aqr_spawn|`aqr_spawn`=], [=aqr_result|`aqr_result`=], [=aqr_join|`aqr_join`=], [=aqr_take|`aqr_take`=]
 :: Functions of [=tasks=], defined in [[#tasks]].
+: [=aqr_chan|`aqr_chan`=], [=aqr_send|`aqr_send`=], [=aqr_recv|`aqr_recv`=], [=aqr_close|`aqr_close`=]
+:: Functions of [=channels=], defined in [[#tasks]].
 : [=aqr_log|`aqr_log`=]
 :: The diagnostic function, defined below.
 
@@ -2583,7 +2585,8 @@ a [=list=] of declared output sizes |sizes| and a memory limit:
             If |module| is a [=part module=], let |W|<sub>out,|j|</sub> be its size in bytes.
     4. Let |outputs| be a [=list=] of as many empty [=byte sequences=] as |sizes|.
     5. If the total size of the memories in bytes exceeds the memory limit, return a [=resource failure=].
-        The memory limit applies to the total size of the memories of the application, those of its [=tasks=] included.
+        The memory limit applies to the total size of the memories of the application, those of its [=tasks=] included,
+        and of the messages queued in its [=channels=].
     6. Instantiate |module| with the memories and the host functions below.
     7. Invoke the [=entry point=] with the arguments of type `i64`, in order:
         the length of |params|, the length of the [=stored content=] of each item of |resources|,
@@ -2591,7 +2594,8 @@ a [=list=] of declared output sizes |sizes| and a memory limit:
         The [=entry point=] MUST have these parameters and no results.
         If it traps or any host function below signals an error, return an [=invalid archive=] failure.
         If it exceeds the memory limit or any implementation-defined limit, return a [=resource failure=].
-        If a [=task=] it joins fails, return the failure of the task.
+        If any [=task=] of the application fails, return its failure (that of any of them if several fail).
+        If every instance of the application [=waits=], return an [=invalid archive=] failure.
         Once it returns, every [=task=] it spawned MUST be [=task/taken=].
     8. If |module| is a [=whole module=], set each |outputs|[|j|] to the first |sizes|[|j|] bytes of the memory of the |j|-th output,
         if imported, and to |sizes|[|j|] zero bytes otherwise.
@@ -2603,7 +2607,7 @@ Issue: Windows smaller than their data for a [=part module=], i.e. ring buffers,
 which would allow import types with a maximum.
 
 A `memory.grow` instruction exceeds the memory limit when the total size of the memories of the application,
-those of its [=tasks=] included, would exceed it,
+those of its [=tasks=] and the messages queued in its [=channels=] included, would exceed it,
 and MUST succeed otherwise if the maximum of the import type of the [=working memory=] allows.
 
 <div class=note>
@@ -2662,6 +2666,13 @@ each instance has a [=list=] of handles, initially empty, each of which is a [=l
 A task is either running, done (with a result), failed (with an [=invalid archive=] failure or a [=resource failure=]),
 or <dfn for=task>taken</dfn>.
 
+A <dfn>channel</dfn> links instances of an application: a [=queue=] of messages ([=byte sequences=]) of at most its <dfn for=channel>capacity</dfn>,
+whether it is <dfn for=channel>closed</dfn>, and its <dfn for=channel>sender</dfn> and <dfn for=channel>receiver</dfn>,
+instances initially none.
+The application has a [=list=] of channels, initially empty.
+When an instance ends (returns or fails), every channel of which it is the sender is closed.
+An instance <dfn>waits</dfn> while it is within [=aqr_join=], [=aqr_send=] or [=aqr_recv=] and the condition it waits for does not hold.
+
 To <dfn>run a task</dfn> given a [=byte sequence=] |S|, |arg| and |i|:
 
 <ol class=algorithm>
@@ -2672,7 +2683,6 @@ To <dfn>run a task</dfn> given a [=byte sequence=] |S|, |arg| and |i|:
     3. Invoke the [=task entry point=] with |arg| and |i|.
         If it traps or any host function signals an error, the task fails with an [=invalid archive=] failure.
         If it exceeds the memory limit or any implementation-defined limit, the task fails with a [=resource failure=].
-        If a task it joins fails, the task fails with the failure of that task.
     4. Once it returns, every task it spawned MUST be [=task/taken=], or the task fails with an [=invalid archive=] failure.
     5. The task is done, with the result last set by [=aqr_result=], or an empty [=byte sequence=] if none.
 </ol>
@@ -2698,10 +2708,38 @@ where |arg|, |n|, |h|, |i|, |ptr|, |dst| and |len| are of type `i32`, unsigned:
     and |dst| + |len| MUST be at most the size of the [=working memory=] of |I|.
     Copy the first |len| bytes of its result to the [=working memory=] of |I| from the offset |dst|, and the task is [=task/taken=].
 
+The host functions of channels are defined as follows, where |c|, |ptr|, |dst|, |len| and |cap| are of type `i32`, unsigned,
+the channel |C| is the |c|-th (from 0) of the application, which MUST exist,
+and taking an end of |C| for |I| means: if that end is none, set it to |I|; otherwise it MUST be |I|.
+
+: <dfn>aqr_chan</dfn>(|cap|)
+:: |cap| MUST be at least 1.
+    Append to the channels of the application a new channel of [=channel/capacity=] |cap|, and return its index.
+: <dfn>aqr_send</dfn>(|c|, |ptr|, |len|)
+:: Take the [=channel/sender=] of |C| for |I|.
+    |C| MUST NOT be [=channel/closed=], and |ptr| + |len| MUST be at most the size of the [=working memory=] of |I|.
+    Wait until fewer messages than the [=channel/capacity=] of |C| are queued,
+    and then enqueue the |len| bytes of the [=working memory=] of |I| from the offset |ptr|.
+: <dfn>aqr_recv</dfn>(|c|, |dst|, |cap|)
+:: Take the [=channel/receiver=] of |C| for |I|.
+    Wait until a message is queued or |C| is [=channel/closed=].
+    If no message is queued, return &minus;1 (0xFFFFFFFF).
+    Otherwise let |M| be the first message.
+    If the length of |M| exceeds |cap|, return it, leaving |M| queued.
+    Otherwise |dst| + the length of |M| MUST be at most the size of the [=working memory=] of |I|;
+    dequeue |M|, copy it to the [=working memory=] of |I| from the offset |dst|, and return its length.
+: <dfn>aqr_close</dfn>(|c|)
+:: Take the [=channel/sender=] of |C| for |I|, and close |C|.
+
 <div class=note>
-  A task shares nothing with the instance that spawned it but the copy of the working memory it starts with and the result it gives back,
+  A task shares nothing with the instance that spawned it but the copy of the working memory it starts with, the result it gives back
+  and the messages of the channels whose ends they are,
+  and each end of a channel is an instance's: the instances are a Kahn process network,
   so the outputs do not depend on when, in what order or how many at once the tasks run.
-  Implementations MAY run a task at any time between its spawn and its join, including within [=aqr_join=], on any thread.
+  Implementations MAY run a task at any time from its spawn and on any thread,
+  as long as an instance waiting does not keep the others from running.
+  A channel is closed by its sender ending only if it sent to it or closed it,
+  so an instance that may send no message to a channel closes it itself.
   Every memory but the working memory is empty to a task, so the data a task works on is in the working memory;
   its globals are those of a new instance.
   The tasks of a spawn start from the same copy, which implementations MAY share between them by copying on write.
@@ -2711,7 +2749,6 @@ where |arg|, |n|, |h|, |i|, |ptr|, |dst| and |len| are of type `i32`, unsigned:
 Issue: Whether the memories other than the working memory, read-only, should be visible to tasks,
 which would require rejecting the instructions writing them; and the windows of a [=part module=] in tasks.
 
-Issue: Channels between tasks, bounded and with blocking receives, for pipelines.
 
 <h2 id=overlays>
 Overlay archives and imports</h2>
