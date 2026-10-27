@@ -365,6 +365,7 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
   - 7-Zip 버전 사이의 인코더 변화는 확인하지 못했다.
 - 7-Zip-zstd(https://github.com/mcmilk/7-Zip-zstd): LZMA2 레벨 1–9를 Fast LZMA2로 바꾸므로 같은 `.7z`라도 출력이 다르다.
 - LZMA 재압축기의 공개 사례는 찾지 못했다.
+- 2026-10-27: 10gb의 mingw `*.tar.lzma` 123개(2011년)는 XZ Utils 5.8.4의 `xz --format=lzma -6`으로 다시 압축하면 모두 바이트가 같다. 위의 "5.x는 한 가족"을 뒷받침한다. Aqueous는 그래도 인코더를 재현하지 않고 parse를 레코드로 적어 재구성한다(aqr-lzma, 레코드는 스트림의 13–18%, 11절).
 
 ### LZX, XPRESS, LZMS [분석]
 
@@ -429,7 +430,7 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 | LZ4 옛 가족(1.8.1 이하) | 옛 번들 | 낮음(fixture 추가) | liblz4 이력 | 중간 |
 | LZF | Redis, Krita | 낮음 | liblzf | 중간 |
 | LZO1X-1, LZO-RLE | 커널, 펌웨어, Procreate | 낮음–중간 | miniLZO, 커널(GPL) | 중간 |
-| liblzma normal, 7-Zip LZMA | 패키지, 7z, OTA, SWF, Unity | 중간–높음(수천 줄) | xz(0BSD), lzma-sdk-rs | 중간 |
+| liblzma normal, 7-Zip LZMA | 패키지, 7z, OTA, SWF, Unity | 재현 대신 parse의 레코드(aqr-lzma, LZMA1과 `.lzma`는 완료) | xz(0BSD), lzma-sdk-rs | LZMA2(xz)와 7z 컨테이너 |
 | LZX(CAB, WIM, CHM) | Windows 설치·업데이트 | 높음(닫힌 인코더) | wimlib(다른 인코더) | 중간(파싱 기반) |
 | GDeflate | DirectStorage 에셋 | 낮음(swizzle만) | MS(MIT) | 낮음 |
 | LZO1X-999 | 옛 게임 | 중간–높음 | LZO(GPL) | 낮음 |
@@ -440,11 +441,11 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 ### Aqueous에 대한 시사점
 
 - **aqr-lz4의 다음 걸음은 HC와 legacy frame이다.** 같은 소스 계보이고, 커널, initramfs, squashfs 같은 큰 대상을 연다. 버전 가족은 1.7.3, 1.8.1, 1.8.2에서 바뀌었다는 NEWS의 근거가 있으니, 여러 버전으로 fixture를 만들어 겹치는 가족부터 잰다.
-- **README의 xz 평가("많은 버전")는 다시 볼 만하다.** git 이력상 liblzma 인코더는 2012년 이후 출력이 거의 안 바뀌었고, 변수는 설정이다. 다만 README가 지적한 "이미 강한 코더라 얻을 것이 적다"는 그대로이다. 이득은 안쪽 내용(tar, 실행 파일, PNG)과 solid 중복 제거에서 나온다. 그러니 aqr-exe와 tar 다음이 합리적이다.
+- **README의 xz 평가("많은 버전")는 다시 볼 만하다.** git 이력상 liblzma 인코더는 2012년 이후 출력이 거의 안 바뀌었고, 변수는 설정이다. 다만 README가 지적한 "이미 강한 코더라 얻을 것이 적다"는 그대로이다. 이득은 안쪽 내용(tar, 실행 파일, PNG)과 solid 중복 제거에서 나온다. 그러니 aqr-exe와 tar 다음이 합리적이다. 그 순서대로 aqr-exe, aqr-bundle 다음에 aqr-lzma가 들어갔고, 10gb의 이득(−38.8 MB)은 모두 tar 멤버가 설치된 파일과 공유되어 나왔다.
 - **zstd는 같은 버전이면 빌드 사이에 결정적이다**(`ZSTD_isDeterministicBuild`). 1.5.x 최신 판의 레벨 1–4(fast, dfast)만 포팅하는 것이 aqr-lz4 방식의 연장이다. 입력이 이미 zstd인 경우가 늘고 있어 장기적으로 큰 영역이다.
 - **LZX와 Oodle은 재현보다 파싱 기반을 먼저 검토한다.** 비트스트림은 공개 디코더로 규명되어 있으므로, aqr-mp3나 aqr-jpeg처럼 심볼 스트림을 파싱해 엔트로피 층만 더 나은 모델로 바꾸고 Huffman·tANS 표 선택만 저장할 수 있다. 다만 원본 바이트를 내려면 결국 인코더의 엔트로피 단계를 재현해야 하므로, 표 구성 규칙이 결정적인지가 관건이다(미검증). Oodle은 ooz의 라이선스 때문에 클린룸이 필요하다.
 - **GDeflate는 값싼 보너스이다**(swizzle 역변환 뒤 aqr-flate). LZF와 LZO1X-1은 Snappy 수준의 작은 작업이고, README가 이미 Krita, Procreate, Redis로 가치를 인정했다.
-- fixture로 확인할 것: lz4 1.9.x와 1.10.0 fast의 동일성, 커널 lzo1x_1과 miniLZO의 동일성, lz4-java(Minecraft)의 출력, 7-Zip 버전 사이의 LZMA 인코더 변화.
+- fixture로 확인할 것: lz4 1.9.x와 1.10.0 fast의 동일성, 커널 lzo1x_1과 miniLZO의 동일성, lz4-java(Minecraft)의 출력.
 
 
 ## 4. JPEG
@@ -1114,11 +1115,12 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 - 압축 파일의 내용물이 다른 곳에 그대로 있는 경우:
   - `enwik9.zip`(322.6 MB)과 `enwik8.zip`의 내용은 `benchmarks/enwik9`, `enwik8`이다. `silesia.zip`의 12개 항목은 `benchmarks/silesia/*`와 같다.
     - 이 ZIP들은 Info-ZIP 2.3(NTFS, "maximum")이 만들었다. enwik8.zip의 본문과 silesia.zip의 `xml` 항목은 flate-zoo의 `infozip:level=9`와 비트 단위로 같다. `xml`은 `gzip:level=9`와도 같다.
-    - aqr-flate는 이 인코더를 에뮬레이션하지 않는다. aqr-zip의 기본 profile 6에서는 그래서 enwik8.zip과 text8.zip이 그대로 남고, silesia.zip은 67.6 → 66.1 MB에 그치며 그중 34.6 MB를 그대로 둔다. 다만 profile 10의 체인 규칙만으로도 enwik8.zip의 본문은 0.41%의 레코드로 재현된다(2026-10-26, `10gb-todo.md`). flate-zoo로 Info-ZIP -9는 enwik8에서 2.9 s(35 MB/s, zlib -9와 같다)이므로, enwik9.zip을 한 코어로 다시 만들면 약 30 s가 걸린다.
+    - aqr-flate는 이 인코더를 에뮬레이션하지 않는다. aqr-zip의 기본 profile 6으로 혼자 압축하면 enwik8.zip과 text8.zip이 그대로 남고, silesia.zip은 67.6 → 66.1 MB에 그친다(2026-10-26). 아카이브에서는 내용을 가진 파일과 한 배치에 모여 profile 6으로 재현되고(레코드는 내용의 2.6%), text8.zip만 그대로 남는다(`10gb-todo.md` 2번, 8번). 다만 profile 10의 체인 규칙만으로도 enwik8.zip의 본문은 0.41%의 레코드로 재현된다(2026-10-26, `10gb-todo.md`). flate-zoo로 Info-ZIP -9는 enwik8에서 2.9 s(35 MB/s, zlib -9와 같다)이므로, enwik9.zip을 한 코어로 다시 만들면 약 30 s가 걸린다.
   - `benchmarks/gimp.tar`(78.7 MB)는 `benchmarks/gimp-2.0.0`(파일 4,143개)을 그대로 tar로 묶은 것이다.
   - `enwik8`은 `enwik9`의 앞 100 MB와 같다.
-  - mingw의 `*.tar.lzma`(117개, 72 MB, LZMA-alone, 사전 8 MiB)를 풀면 설치된 파일과 SHA-1이 같다(`cc1.exe`로 확인했다).
-  - `mingw_benchmark.zpaq`(88 MB)는 `mingw44`를, `silesia.zpaq`(48 MB)는 silesia를 담는다.
+  - mingw의 `*.tar.lzma`(123개, 같은 내용을 빼면 117개, 73.1 MB, LZMA-alone, 사전 8 MiB)는 XZ Utils `-6`의 출력과 바이트가 같고, 멤버 421 MB가 모두 설치된 파일과 SHA-1이 같다.
+  - `mingw/mingw480/x32-4.8.0-release-win32-sjlj-rev1.7z`(37.1 MB)를 풀면 374 MB가 `mingw480` 트리와 같다. 폴더 0(23.4 MB)은 LZMA, 폴더 1(13.6 MB)은 BCJ2와 LZMA이다.
+  - `mingw_benchmark.zpaq`(88 MB)를 풀면 `mingw44`와 똑같고, `silesia.zpaq`(48 MB)는 silesia를 담는다. 둘 다 CM이다(zpaq 7.15로 한 코어에서 8.8 MB/s, 3.8 MB/s에 풀린다).
   - `enwik9.pmd`(184.0 MB)와 `enwik8.pmd`(21.4 MB)는 Shkarin의 PPMd var.J(order 10, 256 MB, restore method 1)이다. 결정적이고 소스가 공개되어 있으며, 원본이 아카이브 안에 있다.
 - 줄일 수 없는 것:
   - 파일별 zstd -3으로 3% 넘게 줄지 않는 고유 파일은 1.60 GB이다. 그중 ZIP류가 613 MB, JPEG가 173 MB, PNG·GIF가 30 MB, 나머지가 785 MB이다.
@@ -1136,20 +1138,8 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 
 ### aqueous의 현재 위치
 
-- aqr-compress는 파일 하나를 받는다. 디렉토리를 받는 압축기는 아직 없다(aqr-git은 git 작업 트리 전용이다).
-- 고유 파일을 `aqr-show -t 1`(level mid)로 하나씩 압축했다. 괄호 안은 파일별 zstd -3이다.
-  - PE 2,795개: 472 MB (555 MB)
-  - JPEG: 196 MB (231 MB)
-  - HTML(enwik8/9 포함): 330 MB (361 MB). enwik9 하나는 283.9 MB이다.
-  - BMP: 29 MB (48 MB)
-  - WAV: 31 MB (49 MB)
-  - PDF: 52 MB (55 MB)
-  - PNG: 18 MB (21 MB)
-  - gzip 2,501개: 8.2 MB (8.4 MB)
-  - ZIP(enwik9.zip 제외): 309 MB로 거의 줄지 않는다.
-  - ar와 tar는 그대로 남는다.
-- 같은 파일만 빼고 파일마다 이렇게 하면 약 3.87 GB로, zpaq보다 크다.
-- 가장 큰 단일 항목인 FASTA는 chr21(49.1 MB, 염기 3,510만 개)에서 비교했다.
+- `aqr`가 디렉토리를 통째로 압축한다(배치, 종류별 블록, 같은 파일 제거, 파일 사이의 공유). 2026-10-27(커밋 `d84deff`)에 10gb는 2.630 GB, 압축 136 s(73 MB/s), 풀기 19.2 s(521 MB/s, 최대 footprint 2.84 GB)이다. 종류별 결과와 남은 일은 `10gb-todo.md`에 있다.
+- 가장 큰 단일 항목인 FASTA는 aqr-fasta를 만들기 전에 chr21(49.1 MB, 염기 3,510만 개)에서 비교했다. aqr-fasta는 hg19 전체를 3.24 GB → 706.6 MB로 줄인다.
 
   | 방법 | 크기 |
   |---|---|
@@ -1205,40 +1195,37 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
   |---|---|---|
   | 줄일 수 없는 것 | 580 | PPMd를 뺀 785 MB에서 일부 |
   | PPMd | 205 | 재현하지 않는다(`10gb-todo.md` 5번) |
-  | hg19 | 650–720 | 2비트 packing이면 720, CM이면 650 |
-  | enwik9 | 210–250 | enwik8은 접두어 중복 |
-  | 그 밖의 텍스트 | 80 | |
-  | PE | 260–300 | aqr-exe와 버킷을 합친 효과는 아직 재지 않았다 |
-  | ar | 30 | |
+  | hg19 | 650–720 | 2비트 packing이면 720, CM이면 650. 지금 668(aqr-fasta) |
+  | enwik9 | 210–250 | enwik8은 접두어 중복. 지금 혼자 234.4(aqr-wrt) |
+  | 그 밖의 텍스트 | 80 | 지금 106 |
+  | PE | 260–300 | 지금 290(aqr-exe, 종류별 블록, 유사도 정렬) |
+  | ar | 30 | 지금 42 |
   | ZIP 잔여 (text8, OpenOffice JAR, picasa의 JPEG 등) | ~100 | |
-  | JPEG | 196 | |
+  | JPEG | 196 | 지금 156(같은 사진의 쌍을 공유) |
   | 그 밖 | ~250 | |
   | **합계** | **약 2.45–2.65 GB** | PPMd를 그대로 둔 것 |
 
-  아래 2번과 4번까지 해야 Insighter와 동급이 된다.
+  지금의 값은 `10gb-todo.md`의 종류별 표(2026-10-27)이다. 아래 2번과 4번까지 해야 Insighter와 동급이 된다고 봤는데, 둘을 하고도 2.630 GB이다.
 
 ### 우선순위
 
-1. **디렉토리 아카이버와 종류별 버킷.**
-   - 트리 순회, 메타데이터, 같은 파일 제거를 하고, 재압축한 스트림을 종류와 이름순으로 16 MiB 안팎의 프레임에 담는다. 버킷마다 zstd 레벨을 고른다.
-   - 위 측정으로 PE, 텍스트, ar에서만 약 −400 MB이다. 작은 파일 51k개를 묶는 효과도 여기에 들어간다.
+상태는 2026-10-27이다. 자세한 것은 `10gb-todo.md`이다.
+
+1. **[완료] 디렉토리 아카이버와 종류별 버킷.**
+   - 트리 순회, 메타데이터, 같은 파일 제거를 하고, 재압축한 스트림을 종류와 이름순(PE는 유사도순)으로 16 MiB 안팎의 블록에 담는다. 블록마다 zstd 레벨을 고른다(level mid).
    - Insighter의 ADPT 교훈대로, 같은 내용이면 같은 출력이 나오는 변환만 버킷에 넣는다.
-2. **내용물 단위의 전역 중복 제거.**
-   - formula의 `slice`는 이미 다른 블록의 해제된 바이트를 가리킬 수 있다. 그래서 REP식 긴 반복을 slice로 바꾸는 것은 형식을 고치지 않고 들어간다(10절의 장거리 중복 제거).
-   - 재압축으로 드러난 내용물(ZIP 항목, tar 멤버)끼리도 비교한다.
-   - 큰 DEFLATE 스트림을 profile 10으로 재현하고(Info-ZIP과 gzip -9 에뮬레이션은 레코드를 0.4%에서 거의 0으로 줄일 뿐이다), aqr-zip의 probe가 아카이브 전체에 이미 있는 내용물을 비용 0으로 보게 한다. 합쳐서 enwik9.zip, enwik8.zip, silesia.zip으로 약 −420 MB이다.
+2. **[대부분 완료] 내용물 단위의 전역 중복 제거: −458 MB**(그 뒤 `gimp.tar`, JPEG 쌍, LZMA로 더).
+   - 서로 담을 수 있는 파일을 한 배치에 모으고(`together`), 배치가 이미 가진 내용물은 probe가 비용 0으로 본다(`Held`). 스트림을 만든 뒤 slice끼리 나눠 갖는다(`Formula::share_slices`). 형식은 고치지 않았다.
+   - 큰 DEFLATE 스트림은 profile 6으로 재현한다. Info-ZIP `-9`의 레코드(내용의 2.6%, `enwik9.zip` 약 26 MB)를 줄이는 에뮬레이션은 쪼개기가 직렬이라 남겨 두었다.
    - Insighter는 이 몫을 preflate로 이미 가져간다.
-3. **FASTA.**
-   - 2비트 packing과 대소문자·N run 분리에 가벼운 문맥 모델을 더한다(−270~−340 MB).
-   - 염색체별로 병렬화할 수 있다. 큰 염색체는 청크로 나눈다.
-4. **텍스트 전처리 모듈** (xwrt식 단어 치환). enwik9에서 Insighter는 198–210 MB, aqueous의 level mid는 284 MB이다. 레벨만으로는 메울 수 없다.
-5. **풀기의 직렬 경로.**
-   - 가장 긴 것은 enwik9.zip 재구성(한 코어로 약 30 s), PPMd, chr1(254 MB)이다. Insighter의 2분 풀기도 이것 때문일 것이다.
-   - 블록 단위의 병렬 DEFLATE 재인코딩이 풀기 목표의 전제이다.
-   - aqr-zip이 enwik9.zip에서 쓰는 피크 4.5 GB도 메모리 목표에 걸린다.
+3. **[완료] FASTA: −264 MB.** aqr-fasta(order-9 문맥 모델과 rANS)로 hg19가 706.6 MB이다.
+4. **[완료] 텍스트 전처리** (aqr-wrt, xwrt식 단어 치환). 혼자 압축한 enwik9은 284 → 234.4 MB이다. Insighter는 198–210 MB이다. 레벨을 함께 올리면 줄어든다(시제품에서 zstd -19 `--long`으로 205.7 MB, `10gb-todo.md` 3번).
+5. **[대부분 완료] 풀기의 직렬 경로.**
+   - DEFLATE 재구성은 세그먼트 단위로 병렬이고, `enwik9.zip`이 7.5 s이다. 10gb 전체의 풀기는 19.2 s이다.
+   - 풀기의 최대 footprint는 2.84 GB로 목표(2 GB)를 넘는다.
 6. **작은 항목.**
-   - tar(gimp.tar −12 MB)
-   - ar와 COFF 오브젝트(x86 필터와 COFF 테이블, −15~−25 MB 추정)
+   - [완료] tar(`gimp.tar`와 그 파일들 −11.3 MB), LZMA(mingw의 `.tar.lzma`, −38.8 MB)
+   - ar와 COFF 오브젝트(x86 필터와 COFF 테이블, 지금 예산보다 12 MB 크다)
    - GIF와 TIFF의 LZW
    - 10gb 밖에서는 Insighter가 하는 bz2, SZDD, LZX, CAB, CHM, OLE, ISO도 있다.
 
@@ -1247,4 +1234,4 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 - GB 단위의 solid와 임시 파일을 쓰는 풀기: R5, R6과 충돌하고, 16 MiB 프레임의 손해는 4%이다.
 - FastLZMA2나 PPMd 백엔드: zstd -19와 xz의 차이가 1.5%이다.
 - solid JPEG: 이 코퍼스에서는 이득이 없다.
-- LZMA, 7z, ZPAQ 재현: 내용물이 아카이브 안에 있어도 인코더를 다시 돌려야 한다. ZPAQ는 CM이라 풀 때 그만큼 느리다.
+- LZMA 인코더의 재현: 대신 parse를 레코드로 적는다(aqr-lzma). 레코드가 스트림의 13–18%여도 내용물이 다른 곳에 있으면 이득이다. 7z는 컨테이너와 BCJ2가 남았다. ZPAQ는 CM이라 다시 부호화하는 데 푸는 만큼 들지만, 모델이 블록 헤더에 실려 있어 다시 볼 만하다(`10gb-todo.md` 7번).
