@@ -606,24 +606,11 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 - 결과는 스케줄과 무관하다. task가 다른 task와 주고받는 것은 join 결과와 채널 메시지뿐이고, 둘 다 프로그램 순서로 정해진 지점에서만 받는다(KPN). 호스트는 task를 순차, 병렬, 지연 실행 어느 쪽으로든 돌릴 수 있다. 채널이 없으면 순차 실행도 된다.
 - 세그먼트 구조는 필터의 메타데이터 안에 있으므로 엔트리 식으로 끌어올리지 않는다.
 
-**1단계: fork-join [구현].** aqr-api(`task`), aqr-ld, aqr-decompress(wasmtime)에 들어가 있고, flate-recons가 세그먼트 배치를 task로 디코드한다.
+**1단계: fork-join [구현].** 명세 "Module execution"의 "Tasks"에 반영했다(`aqr_spawn`, `aqr_result`, `aqr_join`, `aqr_take`, task entry point `aqr_task`, start 함수 금지, 메모리 한도). aqr-api(`task`), aqr-ld, aqr-decompress(wasmtime)에 들어가 있다. 모듈 쪽에서는 flate-recons의 세그먼트 배치, sqlite-recons의 테이블 첫 패스와 인덱스 순서, zip-recons의 항목, png-recons·png-against의 이미지, png-set의 깊이별 파일, jpeg-recons의 stripe가 task로 돈다. 명세에 없는 툴체인 쪽 약속은 다음과 같다.
 
-- import는 다음과 같다(이름은 모두 `aqr_`가 붙는다. 인자와 결과는 `i32`).
-  - `spawn(arg, n) -> h`: task `n`개를 만든다. 모두 같은 스냅샷에서 시작한다. `h`는 이 인스턴스 안에서 부른 순서대로 매긴 번호이다.
-  - `result(ptr, len)`: task 안에서만 부른다. 작업 메모리의 바이트열을 결과로 정한다. 다시 부르면 바꾸고, 부르지 않으면 빈 결과이다.
-  - `join(h, i) -> len`: task `i`가 끝날 때까지 기다리고 결과의 길이를 돌려준다. task가 실패했으면 적용이 그 실패로 끝난다.
-  - `take(h, i, dst, len)`: join한 task의 결과 앞 `len` 바이트를 `dst`에 복사하고 task를 닫는다. `len`이 결과보다 길면 위반이다. `len = 0`이면 결과를 버린다.
-- task는 새 인스턴스이고, 모듈의 export `aqr_task(arg, i)`를 호출한다.
-  - **작업 메모리:** `spawn` 시점의 부모 작업 메모리와 같은 크기, 같은 내용이다. 순서는 "instantiate한 뒤 내용을 스냅샷으로 덮는다"로 정의한다. 이렇게 해야 active data segment가 부모가 바꾼 `.data`를 되돌리지 않는다.
-  - **global:** 초깃값이다. 부모의 global은 복사하지 않는다. 엔진에 export되지 않은 global을 읽는 API가 없기 때문이다(wasmtime). 스택 포인터는 툴체인이 처리한다. aqr-ld가 만드는 `aqr_task`는 `__stack_pointer`를 `arg & -16`으로 놓고 aqr-api의 `aqr_task_body`를 부른다. `arg`는 `spawn`하는 프레임의 스택에 놓인 기록(task가 부를 함수와 클로저)이므로, 부모의 스택 프레임과 클로저가 빌린 것은 모두 task의 스택 위쪽에 그대로 남는다. aqr-ld는 스택 포인터를 "링커 출력의 유일한 mutable global"로 찾는다.
-  - **start 함수:** 프로파일에서 금지한다. task마다 다시 실행될 이유가 없다.
-  - **나머지 메모리:** params, 리소스, 입력, 출력 모두 크기 0이다. task가 읽거나 쓰면 범위 밖 접근이라 trap한다. task가 쓰는 데이터는 작업 메모리에 있어야 한다. 지금의 모듈은 `aqr_api::whole`이 모든 입력을 작업 메모리로 읽어 두므로 이미 그렇다. 결과를 최종 위치에 두려면 `take`의 `dst`를 그 위치로 준다.
-  - **import:** `request`, `release`, `commit`은 task에서 부르면 위반이다. 창은 부모의 것이다. `heartbeat`, `log`, `spawn`, `join`, `take`는 쓸 수 있다. task 안에서 다시 `spawn`할 수도 있다(mp3의 helper 안의 테이블 구축).
-- 모든 task는 `spawn`한 인스턴스 안에서 `take`로 닫혀야 한다. 닫히지 않은 task를 둔 채 task나 entry point가 끝나면 위반이다. 버려진 task가 trap하는지가 스케줄에 따라 갈리지 않게 하기 위해서이다.
-- 어느 task든 trap하면 적용 전체가 실패한다. 실패의 종류는 그 task의 것이다(invalid archive 또는 자원 실패).
-- **메모리.** 예산(§5.2)은 살아 있는 모든 인스턴스의 메모리 합계에 걸린다. 이 합계는 스케줄에 따라 다르지만, 넘으면 자원 실패일 뿐 의미론이 갈리지는 않는다. `memory.grow`는 넘을 때 -1을 돌려주지 않고 자원 실패가 되기 때문이다. 인코더는 "닫히지 않은 task가 모두 최대 크기로 동시에 있다"는 가정으로 예산을 잡는다.
-- 각 task가 4 GiB 작업 메모리를 따로 가지므로, 이 장치는 wasm32 한계에 대한 대응도 겸한다. 다만 task는 부모의 힙 전체를 물려받으므로, 무거운 상태는 부모가 만들지 말고 task가 만들어야 효과가 있다.
-- **나중에 풀 수 있는 것.** 나머지 메모리를 비우는 규칙은 나중에 "부모와 같은 내용, 읽기 전용"으로 넓힐 수 있다. 지금 그 메모리를 읽는 모듈은 trap하므로 유효한 아카이브가 없고, 넓혀도 기존 아카이브의 의미가 바뀌지 않는다. 넓힐 때는 그 메모리들에 쓰는 명령(대상이 이 메모리인 store, `memory.fill`, `memory.init`, `memory.copy`)을 검증에서 거부해야 공유가 결정적이다. 부분형 모듈의 입력 창은 따로 정해야 한다.
+- **스택 포인터.** 새 인스턴스의 global은 초깃값이므로, aqr-ld가 만드는 `aqr_task`가 `__stack_pointer`를 `arg & -16`으로 놓고 aqr-api의 `aqr_task_body`를 부른다. aqr-ld는 스택 포인터를 "링커 출력의 유일한 mutable global"로 찾는다.
+- **기록의 위치.** `arg`는 aqr-api가 인라인되지 않는 함수(`spawn_record`)의 프레임에 둔 기록(task가 부를 함수와 클로저)이다. 그 프레임은 호출자들의 프레임보다 아래에 있으므로, 클로저가 빌린 것은 모두 task의 스택 위쪽에 그대로 남는다. 처음에는 기록을 `spawn` 안에 두었다. 그러자 `spawn`이 인라인된 호출자 프레임에서 기록보다 아래에 놓인 지역 변수(sqlite의 `by_table`, zip의 `records`)를 task의 스택이 덮어써서, sqlite, zip, jpeg가 Wasm에서 실패했다. aqr-compress의 `zip_png_set`이 잡았다. flate는 프레임 배치가 우연히 맞았다.
+- **인스턴스 수.** task 하나가 인스턴스 하나이므로 작은 일은 묶는다. zip은 2 MiB 이상인 항목을 하나씩, 나머지는 2 MiB 남짓씩 묶어 task로 돌린다.
 
 > **근거: `spawn`을 묶음으로 둔 이유.** 스냅샷 비용은 작업 메모리 크기에 비례한다. CoW로 줄일 수 있는지는 플랫폼마다 다르다.
 >

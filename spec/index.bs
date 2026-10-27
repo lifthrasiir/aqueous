@@ -2525,11 +2525,14 @@ It MUST conform to the following profile, or an [=invalid archive=] failure occu
     That is, tail calls, extended constant expressions, typed function references, garbage collection,
     exception handling, relaxed SIMD, 64-bit tables and a 64-bit [=working memory=] are not allowed.
 * Imported tables are not allowed.
+* It has no start function.
 * It defines no memory, and imports each memory at most once.
 * Every `memory.grow` instruction targets the [=working memory=].
 * The import type of every memory other than the [=working memory=] has 64-bit addresses, the minimum 0 and no maximum.
 * It exports exactly one of the functions `aqr_apply_whole` and `aqr_apply_part`, the <dfn>entry point</dfn>.
     The module is a <dfn>whole module</dfn> in the former case and a <dfn>part module</dfn> in the latter.
+* If it imports [=aqr_spawn|`aqr_spawn`=], it exports the function `aqr_task`, the <dfn>task entry point</dfn>,
+    which has two parameters of type `i32` and no results.
 
 Issue: Whether the guaranteed limit of 2<sup>27</sup> bytes (128 MiB) for the Zstandard `Window_Size` ([[#zstandard-compression-method]])
 should also apply to the memory limit.
@@ -2553,6 +2556,8 @@ Any other import is an [=invalid archive=] failure.
 :: Functions of a [=part module=], defined below. A [=whole module=] MUST NOT import them.
 : [=aqr_heartbeat|`aqr_heartbeat`=]
 :: A function defined below.
+: [=aqr_spawn|`aqr_spawn`=], [=aqr_result|`aqr_result`=], [=aqr_join|`aqr_join`=], [=aqr_take|`aqr_take`=]
+:: Functions of [=tasks=], defined in [[#tasks]].
 : [=aqr_log|`aqr_log`=]
 :: The diagnostic function, defined below.
 
@@ -2578,6 +2583,7 @@ a [=list=] of declared output sizes |sizes| and a memory limit:
             If |module| is a [=part module=], let |W|<sub>out,|j|</sub> be its size in bytes.
     4. Let |outputs| be a [=list=] of as many empty [=byte sequences=] as |sizes|.
     5. If the total size of the memories in bytes exceeds the memory limit, return a [=resource failure=].
+        The memory limit applies to the total size of the memories of the application, those of its [=tasks=] included.
     6. Instantiate |module| with the memories and the host functions below.
     7. Invoke the [=entry point=] with the arguments of type `i64`, in order:
         the length of |params|, the length of the [=stored content=] of each item of |resources|,
@@ -2585,6 +2591,8 @@ a [=list=] of declared output sizes |sizes| and a memory limit:
         The [=entry point=] MUST have these parameters and no results.
         If it traps or any host function below signals an error, return an [=invalid archive=] failure.
         If it exceeds the memory limit or any implementation-defined limit, return a [=resource failure=].
+        If a [=task=] it joins fails, return the failure of the task.
+        Once it returns, every [=task=] it spawned MUST be [=task/taken=].
     8. If |module| is a [=whole module=], set each |outputs|[|j|] to the first |sizes|[|j|] bytes of the memory of the |j|-th output,
         if imported, and to |sizes|[|j|] zero bytes otherwise.
     9. The length of each |outputs|[|j|] MUST be |sizes|[|j|].
@@ -2594,7 +2602,8 @@ a [=list=] of declared output sizes |sizes| and a memory limit:
 Issue: Windows smaller than their data for a [=part module=], i.e. ring buffers,
 which would allow import types with a maximum.
 
-A `memory.grow` instruction exceeds the memory limit when the total size of the memories would exceed it,
+A `memory.grow` instruction exceeds the memory limit when the total size of the memories of the application,
+those of its [=tasks=] included, would exceed it,
 and MUST succeed otherwise if the maximum of the import type of the [=working memory=] allows.
 
 <div class=note>
@@ -2608,7 +2617,8 @@ and MUST succeed otherwise if the maximum of the import type of the [=working me
 </div>
 
 Host functions are defined as follows, where |lo|<sub>|k|</sub> and |hi|<sub>|k|</sub> denote the [=visible range=] of the |k|-th input,
-|k|, |j|, |ptr| and |len| are of type `i32`, and every offset is of type `i64`:
+|k|, |j|, |ptr| and |len| are of type `i32`, and every offset is of type `i64`.
+Called by a [=task=], [=aqr_request=], [=aqr_release=] and [=aqr_commit=] signal an error.
 
 : <dfn>aqr_request</dfn>(|k|, |hi|)
 :: The |k|-th input MUST be imported.
@@ -2642,7 +2652,66 @@ A violation of any MUST in host functions is signalled as an error to the module
   as long as the result is indistinguishable from this definition.
 </div>
 
-Issue: Deterministic fork-join (`spawn`) and channels between tasks.
+<h4 id=tasks>
+Tasks</h4>
+
+A <dfn>task</dfn> is an instance of the module of its own,
+run on a copy of the [=working memory=] of the instance that spawns it and giving back a [=byte sequence=], its <dfn for=task>result</dfn>.
+The application's instance and every task are the instances of the application;
+each instance has a [=list=] of handles, initially empty, each of which is a [=list=] of the tasks spawned at once.
+A task is either running, done (with a result), failed (with an [=invalid archive=] failure or a [=resource failure=]),
+or <dfn for=task>taken</dfn>.
+
+To <dfn>run a task</dfn> given a [=byte sequence=] |S|, |arg| and |i|:
+
+<ol class=algorithm>
+    1. Create the memories imported:
+        the [=working memory=] has |S|.length / 65536 pages and the maximum of its import type,
+        and every other memory has the minimum and maximum 0.
+    2. Instantiate the module with the memories and the host functions, and then set the content of the working memory to |S|.
+    3. Invoke the [=task entry point=] with |arg| and |i|.
+        If it traps or any host function signals an error, the task fails with an [=invalid archive=] failure.
+        If it exceeds the memory limit or any implementation-defined limit, the task fails with a [=resource failure=].
+        If a task it joins fails, the task fails with the failure of that task.
+    4. Once it returns, every task it spawned MUST be [=task/taken=], or the task fails with an [=invalid archive=] failure.
+    5. The task is done, with the result last set by [=aqr_result=], or an empty [=byte sequence=] if none.
+</ol>
+
+The host functions of tasks are defined as follows, for the instance |I| calling them,
+where |arg|, |n|, |h|, |i|, |ptr|, |dst| and |len| are of type `i32`, unsigned:
+
+: <dfn>aqr_spawn</dfn>(|arg|, |n|)
+:: Let |S| be the content of the [=working memory=] of |I|.
+    Append to the handles of |I| a [=list=] of |n| new tasks, the |i|-th (from 0) of which is to [=run a task=] given |S|, |arg| and |i|,
+    and return the index of that list among the handles of |I|.
+: <dfn>aqr_result</dfn>(|ptr|, |len|)
+:: |I| MUST be a task, and |ptr| + |len| MUST be at most the size of its [=working memory=].
+    Set the result of |I| to the |len| bytes of its [=working memory=] from the offset |ptr|.
+: <dfn>aqr_join</dfn>(|h|, |i|)
+:: The |i|-th task of the |h|-th handle of |I| MUST exist and not be [=task/taken=].
+    Wait until it is done or failed.
+    If it failed, the instance |I| fails with its failure.
+    Otherwise return the length of its result.
+: <dfn>aqr_take</dfn>(|h|, |i|, |dst|, |len|)
+:: The |i|-th task of the |h|-th handle of |I| MUST be done (joined),
+    |len| MUST be at most the length of its result,
+    and |dst| + |len| MUST be at most the size of the [=working memory=] of |I|.
+    Copy the first |len| bytes of its result to the [=working memory=] of |I| from the offset |dst|, and the task is [=task/taken=].
+
+<div class=note>
+  A task shares nothing with the instance that spawned it but the copy of the working memory it starts with and the result it gives back,
+  so the outputs do not depend on when, in what order or how many at once the tasks run.
+  Implementations MAY run a task at any time between its spawn and its join, including within [=aqr_join=], on any thread.
+  Every memory but the working memory is empty to a task, so the data a task works on is in the working memory;
+  its globals are those of a new instance.
+  The tasks of a spawn start from the same copy, which implementations MAY share between them by copying on write.
+  Whether the memory limit is exceeded may depend on how many tasks are running at once, which only decides a [=resource failure=].
+</div>
+
+Issue: Whether the memories other than the working memory, read-only, should be visible to tasks,
+which would require rejecting the instructions writing them; and the windows of a [=part module=] in tasks.
+
+Issue: Channels between tasks, bounded and with blocking receives, for pipelines.
 
 <h2 id=overlays>
 Overlay archives and imports</h2>
