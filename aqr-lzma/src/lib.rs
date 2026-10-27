@@ -11,6 +11,7 @@ pub mod alone;
 pub mod arith;
 #[cfg(feature = "encode")]
 pub mod formula;
+pub mod greedy;
 pub mod lzma;
 pub mod mf;
 pub mod module;

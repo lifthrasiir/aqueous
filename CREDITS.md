@@ -27,6 +27,9 @@ own terms; the code is written from that description, not from the encoder's cod
   coefficients, and **packJPG** / **brunsli**: modelling JPEG coefficients, in aqr-jpeg.
 - **packMP3** (Matthias Stirner): modelling MP3's Huffman-coded data, in aqr-mp3.
 - **XWRT** (Przemysław Skibiński): word replacement for text, in aqr-wrt.
+- **LZMA** (Igor Pavlov; the LZMA SDK's specification, public domain): the format, in aqr-lzma,
+  whose records predict a parse by the matches a binary-tree match finder offers (the nearest of
+  each length).
 - **lpaq** and **PAQ** (Matt Mahoney and others): the style of binary arithmetic coding and
   context mixing.
 - **ryg_rans** (Fabian Giesen): rANS coding and division by a reciprocal, in aqr-common and

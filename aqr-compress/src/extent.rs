@@ -18,6 +18,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Gzip => gzip_deflate(d).map(|r| r.end + 8),
         Format::Zlib => zlib_deflate(d).map(|r| r.end + 4),
         Format::Lz4 => aqr_lz4::formula::extent(d),
+        Format::Lzma => Some(d.len()),
         Format::Png => png(d),
         Format::Jpeg => jpeg(d),
         Format::Mp3 => mp3(d),

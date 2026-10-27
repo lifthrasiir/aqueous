@@ -19,6 +19,8 @@ pub enum Format {
     Zlib,
     /// mozlz4 file or LZ4 frame (aqr-lz4 on its stream).
     Lz4,
+    /// `.lzma` file (aqr-lzma on its stream), known by its header: not looked for in other data.
+    Lzma,
     Png,
     Jpeg,
     Mp3,
@@ -49,12 +51,13 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 20] = [
+    pub const ALL: [Format; 21] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
         Format::Zlib,
         Format::Lz4,
+        Format::Lzma,
         Format::Png,
         Format::Jpeg,
         Format::Mp3,
@@ -79,6 +82,7 @@ impl Format {
             Format::Gzip => "gzip",
             Format::Zlib => "zlib",
             Format::Lz4 => "lz4",
+            Format::Lzma => "lzma",
             Format::Png => "png",
             Format::Jpeg => "jpeg",
             Format::Mp3 => "mp3",
@@ -133,9 +137,10 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
+        b"lzma" | b"tlz" => format(Format::Lzma),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
-        b"7z" | b"xz" | b"lzma" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv"
+        b"7z" | b"xz" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv"
         | b"webm" | b"ogg" | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif"
         | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
@@ -208,6 +213,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Cpio)
     } else if start && aqr_bundle::tar::starts(d) {
         Some(Format::Tar)
+    } else if start && aqr_lzma::formula::starts(d) {
+        Some(Format::Lzma)
     } else if start && aqr_wrt::formula::starts(d) {
         Some(Format::Text)
     } else {

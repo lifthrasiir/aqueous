@@ -233,6 +233,71 @@ fn held_once() {
     assert!(c.len() < alone.len() * 3 / 2, "{} of {} alone, in batches", c.len(), alone.len());
 }
 
+/// Words at random, `n` bytes of them from `seed`.
+fn words(n: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed;
+    let words = ["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dogs", "and", "cats"];
+    let mut data = Vec::new();
+    while data.len() < n {
+        x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        write!(data, "{} {} ", words[(x >> 60) as usize % 10], (x >> 40) % 1000).unwrap();
+    }
+    data
+}
+
+/// A ustar header of `name` for a body of `n` bytes.
+fn tar_header(name: &str, n: usize) -> Vec<u8> {
+    let mut h = vec![0u8; 512];
+    h[..name.len()].copy_from_slice(name.as_bytes());
+    h[100..108].copy_from_slice(b"0000644\0");
+    h[124..136].copy_from_slice(format!("{n:011o}\0").as_bytes());
+    h[136..148].copy_from_slice(b"14123456701\0");
+    h[156] = b'0';
+    h[257..265].copy_from_slice(b"ustar\x0000");
+    let sum: u32 = h.iter().map(|&b| b as u32).sum::<u32>() + 8 * b' ' as u32;
+    h[148..156].copy_from_slice(format!("{sum:06o}\0 ").as_bytes());
+    h
+}
+
+fn tar(files: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut d = Vec::new();
+    for (name, body) in files {
+        d.extend(tar_header(name, body.len()));
+        d.extend_from_slice(body);
+        d.resize(d.len().next_multiple_of(512), 0);
+    }
+    d.resize(d.len() + 10240 - d.len() % 10240, 0);
+    d
+}
+
+/// Files, a `.tar.lzma` of them and a `.lzma` of one: the streams rebuilt from data taken from
+/// the files (the archive's members, the file), so that the files are stored once, in a batch
+/// together however small the batches.
+#[test]
+fn lzma_held_once() {
+    let members: Vec<(String, Vec<u8>)> = (0..3).map(|k| (format!("m/f{k}.txt"), words(1_000_000, k))).collect();
+    let refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    let tlz = aqr_lzma::greedy::alone(&tar(&refs));
+    let lz = aqr_lzma::greedy::alone(&members[0].1);
+    assert!(tlz.len() > 256 << 10 && lz.len() > 256 << 10);
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let files: Vec<(&str, Vec<u8>)> = members.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+    let (alone, r) = archived(&files, &opt);
+    // (of the files, without the modules' blocks)
+    let alone = alone.len() - r.overhead;
+    let all = [&files[..], &[("p/m.tar.lzma", tlz.clone()), ("p/f0.txt.lzma", lz.clone())]].concat();
+    for opt in [opt.clone(), Options { batch: 1 << 20, ..opt.clone() }] {
+        let (c, r) = archived(&all, &opt);
+        // (the report's files in the order of the contents)
+        for k in [3, 4] {
+            assert!(r.files[k].modules.iter().any(|m| m.name == "lzma-recons"), "{}: {:?}", all[k].0, r.files[k]);
+        }
+        // (records of a greedy parse, and the tar archive's headers: small)
+        let c = c.len() - r.overhead;
+        assert!(c < alone + alone / 100, "{c} of {alone} alone");
+    }
+}
+
 /// A ZIP archive of a single entry `name` of `data`, its body `deflated`.
 fn zip_of(name: &str, data: &[u8], deflated: &[u8]) -> Vec<u8> {
     let mut common = Vec::new();

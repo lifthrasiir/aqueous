@@ -278,7 +278,8 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// or gzip file and the contents of its entries (of the CRC-32 and size that its central
 /// directory or its trailer tells; and other archives with such entries), an ar, tar or cpio
 /// archive and the contents of its members (read whole, one at a time, for their CRC-32; those
-/// of at least [`MEMBER_MIN`] bytes), and contents that start alike (their first 64 KiB; the
+/// of at least [`MEMBER_MIN`] bytes), a `.lzma` file and those of what its stream holds (decoded
+/// whole, [`lzma_sums`]), and contents that start alike (their first 64 KiB; the
 /// same file, longer or shorter). Of the contents of at least [`TOGETHER_MIN`] bytes, which are
 /// read at their start (and the archives at their end, the contents of the sizes of entries
 /// whole); together, no more than [`TOGETHER_MAX`] bytes. Returns them, and the contents found
@@ -306,7 +307,10 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize
             }
             _ => Vec::new(),
         };
-        let held = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
+        let mut held: Vec<(u32, u64)> = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
+        if format == Some(detect::Format::Lzma) && size <= TOGETHER_MAX {
+            held.extend(lzma_sums(&src.read(c)?));
+        }
         let bundle = format.is_some_and(detect::Format::is_bundle);
         Ok((xxhash_rust::xxh3::xxh3_64(&head), held, bundle, format == Some(detect::Format::Pe)))
     });
@@ -401,6 +405,16 @@ fn lay_alike<S: Source + ?Sized>(
     order.retain(|c| !alone.contains(c));
     order.splice(at..at, laid);
     Ok(())
+}
+
+/// What the stream of `.lzma` file `d` holds, as [`together`] takes it: the CRC-32 and size of
+/// the members of an ar, tar or cpio archive ([`member_sums`]), or else of all of its data.
+fn lzma_sums(d: &[u8]) -> Vec<(u32, u64)> {
+    match aqr_lzma::formula::data(d) {
+        Some(data) if detect(&data).is_some_and(detect::Format::is_bundle) => member_sums(&data, 1),
+        Some(data) if data.len() as u64 >= MEMBER_MIN => vec![(crc32fast::hash(&data), data.len() as u64)],
+        _ => Vec::new(),
+    }
 }
 
 /// The CRC-32 and size of the files' contents in ar, tar or cpio archive `d`, those of at least

@@ -59,7 +59,8 @@ The tests of damaged and random records catch an overflow only in a debug build
 
 ## Status
 
-The module `lzma-recons` and the formulas of `.lzma` files (`formula`) are done. Still to
-come: its Wasm build, `.lzma` files in aqr-compress (with the members of a tar archive in one
-shared with other files), 7z archives, and 7z's BCJ2, which the other folder of that 7z goes
+The module `lzma-recons` (natively and as a Wasm module of aqr-modules) and `.lzma` files in
+aqr-compress are done: in an archive of several files, a `.lzma` file is put in a batch with
+the files its stream holds (the members of a tar archive, or the whole), so that their data is
+stored once. Still to come: 7z archives, and 7z's BCJ2, which the other folder of that 7z goes
 through.
