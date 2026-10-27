@@ -2573,7 +2573,7 @@ with an implementation of its own (e.g. native code) instead of instantiating [=
 as long as the result is indistinguishable from the definition, including [=invalid archive=] failures.
 Such a decompressor needs neither the bytes of the module nor a WebAssembly engine,
 whether the module is given by a [=shorthand block=] or in full.
-A decompressor MAY refuse to apply a module whose [=module hash=] it doesn't know,
+A decompressor MAY refuse to apply a module as its [=conformance level=] allows ([[#conformance-levels]]),
 in which case a [=resource failure=] occurs.
 
 <div class=note>
@@ -2584,7 +2584,7 @@ in which case a [=resource failure=] occurs.
 
 <div class=note>
   A decompressor chooses how to apply each module, and none of the choices requires translating modules to native code.
-  For a module whose [=module hash=] it knows, such as a [=registered module=], it can either:
+  For a module whose [=module hash=] it knows, such as a [=registered module=] at [=level 1=], it can either:
 
   * apply an implementation of its own, which is the fastest but has to be made for every module known.
       Translating the module by automated means (e.g. wasm2c) is preferred to writing it anew,
@@ -2595,11 +2595,11 @@ in which case a [=resource failure=] occurs.
 
   For a module whose [=module hash=] it doesn't know, it can either:
 
-  * refuse to apply it, failing with a [=resource failure=]; or
+  * refuse to apply it, failing with a [=resource failure=], unless it is at [=level 2=]; or
   * instantiate it with a WebAssembly engine in a sandbox, as untrusted code ([[#security-considerations]]).
 
-  For example, a decompressor with an engine and a sandbox but no native implementations reads every archive,
-  and one with neither an engine nor a sandbox reads every archive whose modules it implements natively.
+  For example, a decompressor at [=level 1=] needs neither an engine nor a sandbox if it implements every registered module natively,
+  and one at [=level 2=] needs both but no native implementation.
 </div>
 
 </div>
@@ -3366,6 +3366,8 @@ An archive conforms to the <dfn>archival profile</dfn> when the content of every
 
 * Every [=leaf block|leaf=] [[#data-block|data block]] has a [=checksum_method=] other than None.
 * Every [[#formula-block|formula block]] declares an [=output checksum=].
+* The archive is a [=standalone archive=].
+* No block is a [=shorthand block=] ([[#registered-blocks]]).
 
 A conforming compressor producing an archive for long-term preservation SHOULD conform to the archival profile.
 A tool verifying an archive SHOULD report whether it conforms to the archival profile.
@@ -3374,6 +3376,10 @@ A tool verifying an archive SHOULD report whether it conforms to the archival pr
   Other blocks always have checksums, so an archive conforming to the archival profile
   detects any damage to the content of a file by its decompression alone.
   Whether an archive conforms can be determined from block types and formula blocks, without decompressing data blocks.
+  An archive conforming to the archival profile depends on nothing outside itself, neither a [=base=] nor the registries,
+  so that it can be read by a decompressor at [=level 2=] ([[#conformance-levels]]) that knows no registry entry.
+  It may still use modules not registered,
+  which a decompressor at a lower level may refuse to apply.
 </div>
 
 <h3 id=mirror-block>
@@ -4167,6 +4173,35 @@ Everything else in this specification is normative.
 The key words MAY, MUST, MUST NOT, RECOMMENDED, SHOULD and SHOULD NOT in this specification
 are to be interpreted as described in BCP 14 [[!RFC2119]] [[!RFC8174]]
 when, and only when, they appear in all capitals, as shown here.
+
+<h3 id=conformance-levels>
+Conformance levels</h3>
+
+A conforming decompressor has a <dfn>conformance level</dfn>,
+one of the following according to the modules ([[#modules]]) it applies:
+
+: <dfn>Level 0</dfn>
+:: Applies no module.
+: <dfn>Level 1</dfn>
+:: Applies every [=registered module=], i.e. every module whose [=module hash=] is the [=registered hash=]
+    of an entry of the Aqueous Modules Registry ([[#modules-registry]]), and no other module.
+: <dfn>Level 2</dfn>
+:: Applies every module.
+
+A decompressor at [=level 0=] or [=level 1=] MAY refuse to apply a module that its level doesn't include,
+in which case a [=resource failure=] occurs.
+A decompressor at [=level 2=] MUST NOT refuse to apply a module,
+though it may still fail with a [=resource failure=] when a module exceeds its limits.
+A level doesn't change any other requirement on a decompressor,
+e.g. a decompressor at [=level 0=] still reads formula blocks without [[#insn-apply|Apply instructions]].
+
+<div class=note>
+  A decompressor at [=level 0=] or [=level 1=] never runs untrusted code.
+  A module registered after a decompressor at [=level 1=] was made is not known to it,
+  which results in an [=unsupported failure=] if the module is given by a [=shorthand block=]
+  and in a [=resource failure=] otherwise, until the decompressor is updated.
+  See [[#module-block]] for how each level can apply its modules.
+</div>
 
 <h3 id=partial-access>
 Partial access</h3>
