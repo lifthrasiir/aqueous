@@ -3,6 +3,10 @@
 //!
 //! The decoder reads what a worker writes as untrusted: a length is checked against what it
 //! can be before anything of it is allocated.
+//!
+//! The inputs and outputs of a large application are in the worker's arena instead, at the
+//! places [`layout`] gives (the arena the decoder made and sent last, or one sent with the
+//! request: [`ARENA`], [`NEW_ARENA`]); those of a small one in the messages ([`INLINE`]).
 
 use std::io::{self, Read, Write};
 
@@ -17,6 +21,32 @@ pub const READY: &[u8; 8] = b"AQRSBX\x01\x01";
 pub const LOAD: u8 = 1;
 pub const APPLY: u8 = 2;
 pub const PROBE: u8 = 3;
+
+/// Where the inputs and outputs of an application are.
+pub const INLINE: u8 = 0;
+pub const ARENA: u8 = 1;
+/// ... in a new arena, of its length and the token of [`os::Child::share`](super::os).
+pub const NEW_ARENA: u8 = 2;
+
+/// The alignment of the inputs and outputs in an arena.
+pub const ALIGN: u64 = 1 << 16;
+
+/// An arena longer is used for one application only, so that a large one leaves no memory
+/// held after it.
+pub const KEEP: u64 = 256 << 20;
+
+/// The places of byte strings of `lens` in an arena, each aligned to [`ALIGN`], and the length
+/// of the arena they take; `None` where it overflows.
+pub fn layout(lens: impl IntoIterator<Item = u64>) -> Option<(Vec<std::ops::Range<u64>>, u64)> {
+    let mut end = 0u64;
+    let mut places = Vec::new();
+    for len in lens {
+        let at = end.checked_next_multiple_of(ALIGN)?;
+        end = at.checked_add(len)?;
+        places.push(at..end);
+    }
+    Some((places, end.checked_next_multiple_of(ALIGN)?))
+}
 
 /// The answers: done, or failed (of a [`Failure`]).
 const OK: u8 = 0;

@@ -333,6 +333,31 @@ fn part() {
     invalid(apply(&early, &[&d[..60_000]], &[1], u64::MAX), "aqr_request");
 }
 
+/// Large inputs and outputs (in the sandbox's arenas, as it grows them and uses them again),
+/// and small ones about them; failing, and sizes declared beyond the memory limit.
+#[test]
+fn large() {
+    let cat = format!(
+        r#"(module {MEMORIES}
+            (func (export "aqr_apply_whole") (param $p i64) (param $i i64) (param $o i64)
+                (if (i64.ne (local.get $o) (i64.add (local.get $p) (local.get $i))) (then unreachable))
+                (memory.copy 3 2 (i64.const 0) (i64.const 0) (local.get $i))
+                (memory.copy 3 1 (local.get $i) (i64.const 0) (local.get $p))))"#
+    );
+    let d: Vec<u8> = (0..3u32 << 20).map(|i| (i * 7 + (i >> 13)) as u8).collect();
+    let cat_of = |n: usize| [&d[..n], b"pp"].concat();
+    // about where they go in the arena (inputs and outputs of 64 KiB together)
+    for n in [32 * 1024 - 2, 32 * 1024 - 1, 32 * 1024, 3 << 20, 1 << 20, 100, 2 << 20] {
+        let out = apply(&cat, &[&d[..n]], &[n as u64 + 2], u64::MAX).unwrap();
+        assert!(out == [cat_of(n)], "{n}");
+    }
+    invalid(apply(&cat, &[&d[..1 << 20]], &[1 << 20], u64::MAX), "unreachable");
+    assert!(apply(&cat, &[&d[..1 << 20]], &[(1 << 20) + 2], u64::MAX).unwrap() == [cat_of(1 << 20)]);
+    // checked before anything is made
+    let r = apply(&cat, &[b"abc"], &[1 << 50], 1 << 30);
+    assert!(matches!(r, Err(Failure::Resource(ref m)) if m.contains("memory limit")), "{r:?}");
+}
+
 /// Modules not of the profile.
 #[test]
 fn profile() {

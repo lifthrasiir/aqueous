@@ -1,16 +1,21 @@
 //! Workers on macOS, locked down by Seatbelt (the sandbox of `sandbox_init_with_parameters`,
 //! deprecated in name but what Chromium and Firefox still lock their content processes with):
-//! of no descriptors but their standard input, output and error, and a profile denying
+//! of no descriptors but their standard input, output and error and the socket of arenas, and a
+//! profile denying
 //! everything that the system checks (files, sockets, processes, Mach services, sysctls).
 //! What the profile does not check, memory and threads and the task's own Mach ports (which
 //! Wasmtime's traps are taken on), goes on.
 //!
 //! The memory is limited by the decoder, which watches the worker's footprint (what the system
 //! counts against a process for its memory, `phys_footprint`) and kills it beyond the limit.
+//!
+//! Arenas are POSIX shared memory, unlinked as soon as they are made (sized once, as macOS
+//! sizes them: the worker cannot resize them).
 
-use std::ffi::{CStr, OsString, c_char};
+use std::ffi::{CStr, CString, OsString, c_char};
 use std::fs::File;
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -19,8 +24,11 @@ use std::time::Duration;
 /// How often the footprint of a worker is looked at.
 const WATCHED: Duration = Duration::from_millis(10);
 
-/// A worker, its footprint watched by a thread of its own as long as it is kept.
-pub struct Child(Arc<Watched>);
+pub use super::unix::{Arena, Mapping, view};
+
+/// A worker, its footprint watched by a thread of its own as long as it is kept, and the
+/// socket of its arenas.
+pub struct Child(Arc<Watched>, OwnedFd);
 
 struct Watched {
     child: Mutex<std::process::Child>,
@@ -33,6 +41,10 @@ impl Child {
     pub fn limit_memory(&self, bytes: u64) -> io::Result<()> {
         self.0.limit.store(bytes, Ordering::Relaxed);
         Ok(())
+    }
+
+    pub fn share(&mut self, arena: &Arena) -> io::Result<u64> {
+        super::unix::share(&self.1, arena)
     }
 
     pub fn exit_code(&mut self) -> Option<i64> {
@@ -50,14 +62,41 @@ impl Drop for Child {
 }
 
 pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(Child, File, File)> {
-    let (c, to, from) = super::unix::spawn(program, args)?;
+    let (c, to, from, socket) = super::unix::spawn(program, args)?;
     let w = Arc::new(Watched { pid: c.id() as libc::pid_t, child: Mutex::new(c), limit: AtomicU64::new(u64::MAX) });
     let weak = Arc::downgrade(&w);
     // a worker that is not watched is not started
     let started = std::thread::Builder::new().name("aqr-sandbox-watch".into()).spawn(move || watch(weak));
-    let child = Child(w);
+    let child = Child(w, socket);
     started?;
     Ok((child, to, from))
+}
+
+/// An arena of `len` bytes.
+pub fn arena(len: usize) -> io::Result<Arena> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // of a name of 31 bytes at most (PSHMNAMLEN), of no other's
+    let name = format!("/aqr.{}.{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    let name = CString::new(name).expect("a name of no NUL");
+    // SAFETY: of the name, terminated
+    let fd =
+        unsafe { libc::shm_open(name.as_ptr(), libc::O_RDWR | libc::O_CREAT | libc::O_EXCL, 0o600 as libc::c_uint) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor just made, and the name it was made of
+    let fd = unsafe {
+        libc::shm_unlink(name.as_ptr());
+        OwnedFd::from_raw_fd(fd)
+    };
+    // SAFETY: of the descriptor
+    unsafe {
+        libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC);
+        if libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) < 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Arena::of(fd, len)
 }
 
 /// The worker of `w` killed once its footprint is beyond its limit, until it is dropped.
@@ -92,7 +131,7 @@ unsafe extern "C" {
 }
 
 pub fn lockdown() -> io::Result<()> {
-    close_from(3)?;
+    close_from(super::unix::SOCKET + 1)?;
     let parameters = [std::ptr::null()];
     let mut error = std::ptr::null_mut();
     // SAFETY: the profile and the parameters (none) are terminated, and the error is freed

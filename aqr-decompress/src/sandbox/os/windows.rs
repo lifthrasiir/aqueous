@@ -12,6 +12,9 @@
 //! integrity), to load the libraries of the system, and gives it up ([`lockdown`]) once it
 //! loaded them.
 //! Wasmtime makes code executable as it compiles it, so dynamic code is not prohibited.
+//!
+//! Arenas are sections of the paging file, of no name, their handles duplicated into the
+//! worker (which maps and closes them).
 
 use std::ffi::{OsStr, OsString, c_void};
 use std::fs::File;
@@ -22,7 +25,10 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
-use windows_sys::Win32::Foundation::{HANDLE, HANDLE_FLAG_INHERIT, SetHandleInformation, WAIT_OBJECT_0};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
+    WAIT_OBJECT_0,
+};
 use windows_sys::Win32::Security::{
     CreateRestrictedToken, CreateWellKnownSid, DISABLE_MAX_PRIVILEGE, DuplicateTokenEx, GetLengthSid,
     GetTokenInformation, IsTokenRestricted, RevertToSelf, SECURITY_MAX_SID_SIZE, SID_AND_ATTRIBUTES,
@@ -35,6 +41,10 @@ use windows_sys::Win32::System::JobObjects::{
     JOB_OBJECT_LIMIT_DIE_ON_UNHANDLED_EXCEPTION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     JOBOBJECT_BASIC_UI_RESTRICTIONS, JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectBasicUIRestrictions,
     JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
+};
+use windows_sys::Win32::System::Memory::{
+    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
+    UnmapViewOfFile,
 };
 use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_UILIMIT_ALL, SE_GROUP_INTEGRITY};
 use windows_sys::Win32::System::Threading::{
@@ -90,6 +100,25 @@ pub struct Child {
 impl Child {
     pub fn limit_memory(&self, bytes: u64) -> io::Result<()> {
         set_limits(&self.job, Some(bytes))
+    }
+
+    /// `arena` given to the worker: the handle it has of it.
+    pub fn share(&mut self, arena: &Arena) -> io::Result<u64> {
+        let mut theirs = null_mut();
+        // SAFETY: of the section's handle and the worker's process, into which it is duplicated
+        let r = unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                arena.section.as_raw_handle(),
+                self.process.as_raw_handle(),
+                &mut theirs,
+                FILE_MAP_READ | FILE_MAP_WRITE,
+                0,
+                0,
+            )
+        };
+        check(r, "the arena given")?;
+        Ok(theirs as usize as u64)
     }
 
     pub fn exit_code(&mut self) -> Option<i64> {
@@ -415,6 +444,73 @@ pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(Child, File, File
         return Err(e);
     }
     Ok((Child { process, job }, File::from(OwnedHandle::from(to)), File::from(OwnedHandle::from(from))))
+}
+
+/// A view of a section, readable and writable.
+pub struct Mapping {
+    ptr: *mut u8,
+    len: usize,
+}
+
+// SAFETY: the view is of no thread's
+unsafe impl Send for Mapping {}
+
+impl Mapping {
+    /// `len` bytes of `section` mapped.
+    fn new(section: HANDLE, len: usize) -> io::Result<Mapping> {
+        // SAFETY: a new view, of nothing of this process's
+        let v = unsafe { MapViewOfFile(section, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, len) };
+        if v.Value.is_null() {
+            return Err(last_error("the arena mapped"));
+        }
+        Ok(Mapping { ptr: v.Value.cast(), len })
+    }
+
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        // SAFETY: the view made
+        unsafe { UnmapViewOfFile(MEMORY_MAPPED_VIEW_ADDRESS { Value: self.ptr.cast() }) };
+    }
+}
+
+/// A section made by the decoder, and its view.
+pub struct Arena {
+    section: OwnedHandle,
+    pub map: Mapping,
+}
+
+/// An arena of `len` bytes (at least one).
+pub fn arena(len: usize) -> io::Result<Arena> {
+    let len64 = len.max(1) as u64;
+    // SAFETY: a new section of the paging file, of no name
+    let h = unsafe {
+        CreateFileMappingW(INVALID_HANDLE_VALUE, null(), PAGE_READWRITE, (len64 >> 32) as u32, len64 as u32, null())
+    };
+    if h.is_null() {
+        return Err(last_error("the arena"));
+    }
+    let section = owned(h);
+    let map = Mapping::new(section.as_raw_handle(), len)?;
+    Ok(Arena { section, map })
+}
+
+/// The arena of the handle `token` ([`Child::share`]), `len` bytes of it mapped, the handle
+/// closed.
+pub fn view(token: u64, len: usize) -> io::Result<Mapping> {
+    let h = token as usize as HANDLE;
+    let m = Mapping::new(h, len);
+    // SAFETY: of the handle the decoder gave this process
+    unsafe { CloseHandle(h) };
+    m
 }
 
 /// The impersonation [`spawn`] began given up, leaving the worker to its locked-down token.

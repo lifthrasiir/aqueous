@@ -34,7 +34,8 @@ pub fn serve() -> io::Result<()> {
 }
 
 fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
-    let mut loaded: HashMap<[u8; 32], Box<dyn Loaded>> = HashMap::new();
+    let mut loaded: HashMap<[u8; 32], wasm::Shared> = HashMap::new();
+    let mut arena: Option<os::Mapping> = None;
     loop {
         let mut tag = [0];
         if r.read(&mut tag)? == 0 {
@@ -44,7 +45,7 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
             LOAD => {
                 let hash = get_hash(r)?;
                 let bytes = get_bytes(r, u64::MAX)?;
-                let l = aqr_common::pool::run(|| wasm::load(&bytes, hash)).map(|l| {
+                let l = aqr_common::pool::run(|| wasm::compiled(&bytes, hash)).map(|l| {
                     loaded.insert(hash, l);
                 });
                 put_result(w, &l)?;
@@ -55,25 +56,67 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
                 let n = get_count(r, u64::MAX)?;
                 let resources =
                     (0..n).map(|_| get_bytes(r, u64::MAX).map(Resource::new)).collect::<io::Result<Vec<_>>>()?;
+                let place = get_u8(r)?;
+                if place > NEW_ARENA {
+                    return Err(violation(format!("inputs and outputs placed as {place}")));
+                }
+                if place == NEW_ARENA {
+                    let len = get_u64(r)?;
+                    let token = get_u64(r)?;
+                    // the last one unmapped first, so that both are never held
+                    drop(arena.take());
+                    arena = Some(os::view(token, usize::try_from(len).map_err(|_| violation("an arena too long"))?)?);
+                }
                 let n = get_count(r, u64::MAX)?;
-                let inputs = (0..n).map(|_| get_bytes(r, u64::MAX)).collect::<io::Result<Vec<_>>>()?;
+                let inputs = match place {
+                    INLINE => Inputs::Inline((0..n).map(|_| get_bytes(r, u64::MAX)).collect::<io::Result<_>>()?),
+                    _ => Inputs::Arena((0..n).map(|_| get_u64(r)).collect::<io::Result<_>>()?),
+                };
                 let n = get_count(r, u64::MAX)?;
                 let sizes = (0..n).map(|_| get_u64(r)).collect::<io::Result<Vec<_>>>()?;
                 let limit = get_u64(r)?;
-                let inputs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
-                let out = match loaded.get(&hash) {
-                    Some(l) => aqr_common::pool::run(|| l.apply(&params, &resources, &inputs, &sizes, limit)),
-                    None => Err(Failure::Resource("a module not loaded in the worker".into())),
+                let Some(l) = loaded.get(&hash) else {
+                    put_result(w, &Err(Failure::Resource("a module not loaded in the worker".into())))?;
+                    w.flush()?;
+                    continue;
                 };
-                match out {
-                    Ok(outs) => {
-                        put_result(w, &Ok(()))?;
-                        put_u64(w, outs.len() as u64)?;
-                        for o in &outs {
-                            put_bytes(w, o)?;
+                match inputs {
+                    Inputs::Inline(inputs) => {
+                        let inputs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
+                        match aqr_common::pool::run(|| l.apply(&params, &resources, &inputs, &sizes, limit)) {
+                            Ok(outs) => {
+                                put_result(w, &Ok(()))?;
+                                put_u64(w, outs.len() as u64)?;
+                                for o in &outs {
+                                    put_bytes(w, o)?;
+                                }
+                            }
+                            Err(f) => put_result(w, &Err(f))?,
                         }
                     }
-                    Err(f) => put_result(w, &Err(f))?,
+                    Inputs::Arena(lens) => {
+                        let a = arena.as_ref().ok_or_else(|| violation("no arena"))?;
+                        let places = layout(lens.iter().chain(&sizes).copied())
+                            .filter(|&(_, len)| len <= a.len() as u64)
+                            .ok_or_else(|| violation("outside the arena"))?
+                            .0;
+                        let (i, o) = places.split_at(lens.len());
+                        let at = |p: &std::ops::Range<u64>| {
+                            (a.as_ptr().wrapping_add(p.start as usize), (p.end - p.start) as usize)
+                        };
+                        // SAFETY: the places are apart and within the arena, which the decoder
+                        // leaves alone until it is answered
+                        let inputs: Vec<&[u8]> =
+                            i.iter().map(at).map(|(p, n)| unsafe { std::slice::from_raw_parts(p, n) }).collect();
+                        let mut outs: Vec<&mut [u8]> =
+                            o.iter().map(at).map(|(p, n)| unsafe { std::slice::from_raw_parts_mut(p, n) }).collect();
+                        let res =
+                            aqr_common::pool::run(|| l.apply_into(&params, &resources, &inputs, &mut outs, limit));
+                        put_result(w, &res)?;
+                        if a.len() as u64 > KEEP {
+                            arena = None;
+                        }
+                    }
                 }
             }
             PROBE => {
@@ -90,6 +133,12 @@ fn requests(r: &mut impl Read, w: &mut impl Write) -> io::Result<()> {
         }
         w.flush()?;
     }
+}
+
+/// The inputs of an application: of the request, or the lengths of those in the arena.
+enum Inputs {
+    Inline(Vec<Vec<u8>>),
+    Arena(Vec<u64>),
 }
 
 /// What a module escaping the engine would try, each `"<what>: ok"` or the error (or panic,

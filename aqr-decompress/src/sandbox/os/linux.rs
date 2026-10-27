@@ -1,6 +1,9 @@
 //! Workers on Linux, locked down by seccomp: of no new privileges, no descriptors but their
-//! standard input, output and error, and system calls only for memory, threads, signals and
-//! time (no files, sockets or processes). Every thread of the worker is filtered alike.
+//! standard input, output and error and the socket of arenas, and system calls only for
+//! memory, threads, signals and time (no files, sockets or processes), and arenas received.
+//! Every thread of the worker is filtered alike.
+//!
+//! Arenas are memfds, sealed at their sizes (and the worker cannot resize them anyway).
 //!
 //! The memory is not limited by the system yet: an rlimit would count the threads' stacks and
 //! what Wasmtime reserves, and cgroups are not always delegated.
@@ -8,14 +11,21 @@
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::Path;
 
-/// A worker.
-pub struct Child(std::process::Child);
+pub use super::unix::{Arena, Mapping, view};
+
+/// A worker, and the socket of its arenas.
+pub struct Child(std::process::Child, OwnedFd);
 
 impl Child {
     pub fn limit_memory(&self, _: u64) -> io::Result<()> {
         Ok(())
+    }
+
+    pub fn share(&mut self, arena: &Arena) -> io::Result<u64> {
+        super::unix::share(&self.1, arena)
     }
 
     pub fn exit_code(&mut self) -> Option<i64> {
@@ -31,8 +41,26 @@ impl Drop for Child {
 }
 
 pub fn spawn(program: &Path, args: &[OsString]) -> io::Result<(Child, File, File)> {
-    let (c, to, from) = super::unix::spawn(program, args)?;
-    Ok((Child(c), to, from))
+    let (c, to, from, socket) = super::unix::spawn(program, args)?;
+    Ok((Child(c, socket), to, from))
+}
+
+/// An arena of `len` bytes.
+pub fn arena(len: usize) -> io::Result<Arena> {
+    // SAFETY: of the name, terminated
+    let fd = unsafe { libc::memfd_create(c"aqr-arena".as_ptr(), libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the descriptor just made
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    let seals = libc::F_SEAL_SHRINK | libc::F_SEAL_GROW | libc::F_SEAL_SEAL;
+    // SAFETY: of the descriptor
+    unsafe {
+        os_check(libc::ftruncate(fd.as_raw_fd(), len as libc::off_t) as libc::c_long, "the arena sized")?;
+        os_check(libc::fcntl(fd.as_raw_fd(), libc::F_ADD_SEALS, seals) as libc::c_long, "the arena sealed")?;
+    }
+    Arena::of(fd, len)
 }
 
 // The filter's instructions (linux/filter.h, linux/seccomp.h).
@@ -123,7 +151,8 @@ impl Filter {
 }
 
 /// The filter: the calls of [`ALLOWED`], threads (not processes) cloned, signals to this
-/// process, its name set and its limits read; everything else fails.
+/// process, messages received on the socket of arenas, its name set and its limits read;
+/// everything else fails.
 fn filter() -> Filter {
     let mut f = Filter(Vec::new());
     f.load(ARCH);
@@ -152,6 +181,13 @@ fn filter() -> Filter {
     f.when(libc::SYS_tgkill, |f| {
         f.load(arg(0));
         f.op(JEQ_K, 0, 1, pid);
+        f.ret(ALLOW);
+        f.ret(errno(libc::EPERM));
+    });
+    // arenas, of the socket alone
+    f.when(libc::SYS_recvmsg, |f| {
+        f.load(arg(0));
+        f.op(JEQ_K, 0, 1, super::unix::SOCKET as u32);
         f.ret(ALLOW);
         f.ret(errno(libc::EPERM));
     });
@@ -186,8 +222,9 @@ pub fn lockdown() -> io::Result<()> {
     // SAFETY: system calls of no pointers but the filter's, which outlives the call
     unsafe {
         os_check(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) as libc::c_long, "no new privileges")?;
-        if libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) < 0 {
-            for fd in 3..1024 {
+        let past = super::unix::SOCKET as u32 + 1;
+        if libc::syscall(libc::SYS_close_range, past, u32::MAX, 0u32) < 0 {
+            for fd in past as i32..1024 {
                 libc::close(fd);
             }
         }

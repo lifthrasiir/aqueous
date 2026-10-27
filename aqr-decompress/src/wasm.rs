@@ -73,7 +73,7 @@ static COMPILED: LazyLock<Mutex<HashMap<[u8; 32], Shared>>> = LazyLock::new(Defa
 
 /// A module compiled, as [`load`] gives it.
 #[derive(Clone)]
-struct Shared(Arc<Compiled>);
+pub(crate) struct Shared(Arc<Compiled>);
 
 /// A memory imported by a module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,12 +122,17 @@ struct Compiled {
 
 /// `wasm`, of SHA-512/256 `hash`, checked against the profile and compiled (once a process).
 pub fn load(wasm: &[u8], hash: [u8; 32]) -> Decoded<Box<dyn Loaded>> {
+    Ok(Box::new(compiled(wasm, hash)?))
+}
+
+/// [`load`], of the module itself (for [`Shared::apply_into`]).
+pub(crate) fn compiled(wasm: &[u8], hash: [u8; 32]) -> Decoded<Shared> {
     if let Some(c) = COMPILED.lock().unwrap().get(&hash) {
-        return Ok(Box::new(c.clone()));
+        return Ok(c.clone());
     }
     let c = Shared(Arc::new(compile(wasm)?));
     COMPILED.lock().unwrap().insert(hash, c.clone());
-    Ok(Box::new(c))
+    Ok(c)
 }
 
 /// `name` as `prefix` and an index without leading zeros.
@@ -424,6 +429,13 @@ struct Job {
     i: u32,
 }
 
+/// An output of an application: the caller's buffer, of the size declared.
+struct Output {
+    buf: &'static mut [u8],
+    memory: Option<Memory>,
+    done: u64,
+}
+
 /// What the host functions of an instance work on.
 struct State {
     c: Shared,
@@ -434,8 +446,8 @@ struct State {
     working: Option<Memory>,
     /// The data of the inputs of a part module, their memories and visible ranges.
     inputs: Vec<(&'static [u8], Option<Memory>, u64, u64)>,
-    /// The outputs of a part module so far, with their memories and declared sizes.
-    outputs: Vec<(Vec<u8>, Option<Memory>, u64)>,
+    /// The outputs, their memories and (of a part module) the bytes committed so far.
+    outputs: Vec<Output>,
     last_log: Option<Vec<u8>>,
     /// Whether the instance is a task, and its result.
     task: bool,
@@ -555,7 +567,7 @@ async fn instantiate<'a>(
                     }
                     Mem::Output(j) => {
                         if let Some(o) = s.outputs.get_mut(j as usize) {
-                            o.1 = Some(memory);
+                            o.memory = Some(memory);
                             outputs[j as usize] = Some(memory);
                         }
                     }
@@ -584,6 +596,41 @@ impl Loaded for Shared {
         sizes: &[u64],
         memory_limit: u64,
     ) -> Decoded<Vec<Vec<u8>>> {
+        self.check(params, resources, inputs, sizes, memory_limit)?;
+        // (zeroed by the system as they are written, as a copy out of the memories would be)
+        let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0; s as usize]).collect();
+        let mut bufs: Vec<&mut [u8]> = outs.iter_mut().map(|o| &mut o[..]).collect();
+        self.run(params, resources, inputs, &mut bufs, memory_limit)?;
+        Ok(outs)
+    }
+}
+
+impl Shared {
+    /// [`Loaded::apply`], the outputs written into `outs` (of the sizes declared), every byte
+    /// of them where it succeeds.
+    pub(crate) fn apply_into(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &[&[u8]],
+        outs: &mut [&mut [u8]],
+        memory_limit: u64,
+    ) -> Decoded<()> {
+        let sizes: Vec<u64> = outs.iter().map(|o| o.len() as u64).collect();
+        self.check(params, resources, inputs, &sizes, memory_limit)?;
+        self.run(params, resources, inputs, outs, memory_limit)
+    }
+
+    /// The application checked against the module and the memory limit, before anything of it
+    /// is made.
+    fn check(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &[&[u8]],
+        sizes: &[u64],
+        memory_limit: u64,
+    ) -> Decoded<()> {
         let c = &*self.0;
         if sizes.is_empty() {
             return invalid("no output");
@@ -619,11 +666,29 @@ impl Loaded for Shared {
         if total > memory_limit as u128 {
             return Err(Failure::Resource("memory limit exceeded".into()));
         }
+        Ok(())
+    }
 
-        // SAFETY: the inputs outlive the store, which is dropped within this function, and so
-        // do the references to them in it. (Tasks have none of them.)
+    /// The application [`check`](Shared::check)ed, its outputs into `outs`.
+    fn run(
+        &self,
+        params: &[u8],
+        resources: &[Resource],
+        inputs: &[&[u8]],
+        outs: &mut [&mut [u8]],
+        memory_limit: u64,
+    ) -> Decoded<()> {
+        let c = &*self.0;
+        let sizes: Vec<u64> = outs.iter().map(|o| o.len() as u64).collect();
+        let sizes = &sizes[..];
+
+        // SAFETY: the inputs and outputs outlive the store, which is dropped within this
+        // function, and so do the references to them in it; the outputs are not reached but by
+        // it meanwhile. (Tasks have none of them.)
         let data: Vec<&'static [u8]> =
             inputs.iter().map(|i| unsafe { std::slice::from_raw_parts(i.as_ptr(), i.len()) }).collect();
+        let bufs: Vec<&'static mut [u8]> =
+            outs.iter_mut().map(|o| unsafe { std::slice::from_raw_parts_mut(o.as_mut_ptr(), o.len()) }).collect();
         let exec = Exec::new();
         let app = Arc::new(App {
             limit: memory_limit,
@@ -635,7 +700,7 @@ impl Loaded for Shared {
         });
         let mut state = State::new(self.clone(), app.clone(), false);
         state.inputs = data.iter().map(|&d| (d, None, 0, 0)).collect();
-        state.outputs = sizes.iter().map(|&s| (Vec::new(), None, s)).collect();
+        state.outputs = bufs.into_iter().map(|buf| Output { buf, memory: None, done: 0 }).collect();
         let mut store = Store::new(&ENGINE, state);
         store.limiter(|s| s);
 
@@ -663,28 +728,29 @@ impl Loaded for Shared {
             if store.data().untaken() {
                 return invalid("tasks not taken");
             }
-            Ok(if c.part {
-                std::mem::take(&mut store.data_mut().outputs).into_iter().map(|o| o.0).collect::<Vec<_>>()
+            if c.part {
+                if store.data().outputs.iter().any(|o| o.done != o.buf.len() as u64) {
+                    return invalid("outputs of other sizes than declared");
+                }
             } else {
-                outputs
-                    .iter()
-                    .zip(sizes)
-                    .map(|(m, &s)| match m {
-                        Some(m) => m.data(&store)[..s as usize].to_vec(),
-                        None => vec![0; s as usize],
-                    })
-                    .collect()
-            })
+                for (j, m) in outputs.iter().enumerate() {
+                    match m {
+                        Some(m) => {
+                            let (m, state) = m.data_and_store_mut(&mut store);
+                            let buf = &mut *state.outputs[j].buf;
+                            buf.copy_from_slice(&m[..buf.len()]);
+                        }
+                        None => store.data_mut().outputs[j].buf.fill(0),
+                    }
+                }
+            }
+            Ok(())
         };
-        let outs = match exec.block_on(run) {
-            Ok(outs) => outs?,
-            Err(Stopped::Stopped) => return Err(app.failed.lock().unwrap().take().expect("a task failed")),
-            Err(Stopped::Deadlock) => return invalid("a deadlock: every instance waits"),
-        };
-        if outs.iter().zip(sizes).any(|(o, &s)| o.len() as u64 != s) {
-            return invalid("outputs of other sizes than declared");
+        match exec.block_on(run) {
+            Ok(r) => r,
+            Err(Stopped::Stopped) => Err(app.failed.lock().unwrap().take().expect("a task failed")),
+            Err(Stopped::Deadlock) => invalid("a deadlock: every instance waits"),
         }
-        Ok(outs)
     }
 }
 
@@ -800,7 +866,8 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
             Func::wrap(&mut *store, move |mut c: Caller<'_, State>, j: i32, hi: i64| -> wasmtime::Result<()> {
                 part(&c, "aqr_commit")?;
                 let (j, hi) = (j as u32 as usize, hi as u64);
-                let Some((done, Some(mem), size)) = c.data().outputs.get(j).map(|o| (o.0.len() as u64, o.1, o.2))
+                let Some((done, Some(mem), size)) =
+                    c.data().outputs.get(j).map(|o| (o.done, o.memory, o.buf.len() as u64))
                 else {
                     return violation(format!("aqr_commit({j}) of an output not imported"));
                 };
@@ -809,10 +876,16 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                     return violation(format!("aqr_commit({j}, {hi}) outside [{done}, {size}] or window {w}"));
                 }
                 let (m, state) = mem.data_and_store_mut(&mut c);
-                let out = &mut state.outputs[j].0;
-                for o in done..hi {
-                    out.push(m[(o % w) as usize]);
+                let out = &mut state.outputs[j];
+                // the window's bytes from `done`, wrapping at its end
+                let mut at = done;
+                while at < hi {
+                    let from = (at % w) as usize;
+                    let n = (hi - at).min(w - from as u64) as usize;
+                    out.buf[at as usize..][..n].copy_from_slice(&m[from..from + n]);
+                    at += n as u64;
                 }
+                out.done = hi;
                 Ok(())
             })
         }

@@ -36,6 +36,13 @@ use proto::*;
 /// it ([`os::Child::limit_memory`]): of its code, its stacks and the modules it compiled.
 const OVERHEAD: u64 = 1 << 30;
 
+/// The bytes of inputs and outputs from which an application has them in the worker's arena,
+/// not in the messages.
+const ARENA_FROM: u64 = 1 << 16;
+
+/// The shortest arena made.
+const ARENA_MIN: u64 = 1 << 20;
+
 /// Serves the decoder that started this process as its worker, then exits: the whole of the
 /// worker program, or the part of the host's that its arguments for workers lead to.
 pub fn worker_main() -> ! {
@@ -173,12 +180,14 @@ impl Runner for Sandboxed<'_> {
     }
 }
 
-/// A worker started, its input and output, and the modules it loaded.
+/// A worker started, its input and output, the modules it loaded and the arena it was given
+/// last.
 struct Worker {
     child: os::Child,
     to: BufWriter<File>,
     from: BufReader<File>,
     loaded: HashSet<[u8; 32]>,
+    arena: Option<os::Arena>,
 }
 
 impl Worker {
@@ -189,6 +198,7 @@ impl Worker {
             to: BufWriter::with_capacity(1 << 16, to),
             from: BufReader::with_capacity(1 << 16, from),
             loaded: HashSet::new(),
+            arena: None,
         };
         w.to.write_all(HELLO)?;
         put_u64(&mut w.to, s.threads.unwrap_or_else(aqr_common::pool::size).max(1) as u64)?;
@@ -236,6 +246,15 @@ impl Worker {
             + resources.iter().map(|r| r.len() as u64).sum::<u64>()
             + inputs.iter().map(|i| i.len() as u64).sum::<u64>();
         self.child.limit_memory(OVERHEAD.saturating_add(memory_limit).saturating_add(sent))?;
+        // the inputs and outputs in the arena where they are many and fit in the memories (else
+        // the application fails before any of them is made)
+        let lens = inputs.iter().map(|i| i.len() as u64).chain(sizes.iter().copied());
+        let placed = match layout(lens) {
+            Some((places, len)) if (ARENA_FROM..=memory_limit).contains(&len) => {
+                self.arena_for(len)?.map(|new| (places, new))
+            }
+            _ => None,
+        };
         let w = &mut self.to;
         put_u8(w, APPLY)?;
         w.write_all(&hash)?;
@@ -244,9 +263,31 @@ impl Worker {
         for r in resources {
             put_bytes(w, r)?;
         }
-        put_u64(w, inputs.len() as u64)?;
-        for i in inputs {
-            put_bytes(w, i)?;
+        match &placed {
+            None => {
+                put_u8(w, INLINE)?;
+                put_u64(w, inputs.len() as u64)?;
+                for i in inputs {
+                    put_bytes(w, i)?;
+                }
+            }
+            Some((places, new)) => {
+                match new {
+                    Some(token) => {
+                        put_u8(w, NEW_ARENA)?;
+                        put_u64(w, self.arena.as_ref().expect("the arena").map.len() as u64)?;
+                        put_u64(w, *token)?;
+                    }
+                    None => put_u8(w, ARENA)?,
+                }
+                put_u64(w, inputs.len() as u64)?;
+                let base = self.arena.as_ref().expect("the arena").map.as_ptr();
+                for (i, p) in inputs.iter().zip(places) {
+                    put_u64(w, i.len() as u64)?;
+                    // SAFETY: the place is within the arena, as `arena_for` made it
+                    unsafe { std::ptr::copy_nonoverlapping(i.as_ptr(), base.add(p.start as usize), i.len()) };
+                }
+            }
         }
         put_u64(w, sizes.len() as u64)?;
         for &s in sizes {
@@ -254,10 +295,38 @@ impl Worker {
         }
         put_u64(w, memory_limit)?;
         w.flush()?;
-        if let Err(f) = get_result(&mut self.from)? {
-            return Ok(Err(f));
+        let r = get_result(&mut self.from)?;
+        let outs = match (&placed, r) {
+            (_, Err(f)) => Err(f),
+            (None, Ok(())) => self.outputs(sizes).map(Ok)?,
+            (Some((places, _)), Ok(())) => {
+                let base = self.arena.as_ref().expect("the arena").map.as_ptr();
+                // read once each, as the worker may write them still
+                Ok(places[inputs.len()..]
+                    .iter()
+                    .map(|p| {
+                        let n = (p.end - p.start) as usize;
+                        let mut o = Vec::with_capacity(n);
+                        // SAFETY: the place is within the arena; the bytes copied are the
+                        // vector's, of its capacity
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(base.add(p.start as usize), o.as_mut_ptr(), n);
+                            o.set_len(n);
+                        }
+                        o
+                    })
+                    .collect())
+            }
+        };
+        // as the worker does
+        if placed.is_some() && self.arena.as_ref().is_some_and(|a| a.map.len() as u64 > KEEP) {
+            self.arena = None;
         }
-        // the outputs, of the sizes declared (as the worker checked them)
+        Ok(outs)
+    }
+
+    /// The outputs of the sizes declared, in the answer (as the worker checked them).
+    fn outputs(&mut self, sizes: &[u64]) -> io::Result<Vec<Vec<u8>>> {
         let n = get_count(&mut self.from, sizes.len() as u64)?;
         if n != sizes.len() {
             return Err(violation(format!("{n} outputs of {}", sizes.len())));
@@ -270,6 +339,22 @@ impl Worker {
             }
             outs.push(o);
         }
-        Ok(Ok(outs))
+        Ok(outs)
+    }
+
+    /// An arena of `len` bytes at least, the last one or a new one given to the worker (of the
+    /// token to send it with); `None` where none can be made, so that the application is in
+    /// the messages.
+    fn arena_for(&mut self, len: u64) -> io::Result<Option<Option<u64>>> {
+        if self.arena.as_ref().is_some_and(|a| a.map.len() as u64 >= len) {
+            return Ok(Some(None));
+        }
+        // the last one unmapped first, so that both are never held
+        self.arena = None;
+        let size = if len <= KEEP { len.next_power_of_two().max(ARENA_MIN) } else { len };
+        let Some(a) = usize::try_from(size).ok().and_then(|s| os::arena(s).ok()) else { return Ok(None) };
+        let token = self.child.share(&a)?;
+        self.arena = Some(a);
+        Ok(Some(Some(token)))
     }
 }
