@@ -30,6 +30,10 @@ own terms; the code is written from that description, not from the encoder's cod
 - **LZMA** (Igor Pavlov; the LZMA SDK's specification, public domain): the format, in aqr-lzma,
   whose records predict a parse by the matches a binary-tree match finder offers (the nearest of
   each length).
+- **LZO** (Markus F.X.J. Oberhumer; GPL): the LZO1X stream format, in aqr-lzo, written from the
+  Linux kernel's description of it (`Documentation/staging/lzo.rst`, Willy Tarreau and Dave
+  Rodgman) and from liblzo2's and lzop's output used as black boxes, without LZO's code; the
+  lzop file structure from libarchive's reader (BSD).
 - **lpaq** and **PAQ** (Matt Mahoney and others): the style of binary arithmetic coding and
   context mixing.
 - **ryg_rans** (Fabian Giesen): rANS coding and division by a reciprocal, in aqr-common and

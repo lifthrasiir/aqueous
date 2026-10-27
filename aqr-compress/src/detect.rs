@@ -21,6 +21,8 @@ pub enum Format {
     Lz4,
     /// `.lzma` file (aqr-lzma on its stream), known by its header: not looked for in other data.
     Lzma,
+    /// lzop file (aqr-lzo on its LZO1X streams).
+    Lzo,
     Png,
     Jpeg,
     Mp3,
@@ -51,13 +53,14 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 21] = [
+    pub const ALL: [Format; 22] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
         Format::Zlib,
         Format::Lz4,
         Format::Lzma,
+        Format::Lzo,
         Format::Png,
         Format::Jpeg,
         Format::Mp3,
@@ -83,6 +86,7 @@ impl Format {
             Format::Zlib => "zlib",
             Format::Lz4 => "lz4",
             Format::Lzma => "lzma",
+            Format::Lzo => "lzo",
             Format::Png => "png",
             Format::Jpeg => "jpeg",
             Format::Mp3 => "mp3",
@@ -138,6 +142,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"tar" => format(Format::Tar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
         b"lzma" | b"tlz" => format(Format::Lzma),
+        b"lzo" | b"tzo" => format(Format::Lzo),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" | b"xz" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm"
@@ -191,6 +196,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::MachO)
     } else if aqr_lz4::formula::starts(d) {
         Some(Format::Lz4)
+    } else if aqr_lzo::formula::starts(d) {
+        Some(Format::Lzo)
     } else if at(0, b"PK\x03\x04") {
         Some(Format::Zip)
     } else if at(0, &[0x1f, 0x8b, 8]) {
@@ -225,7 +232,7 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
 /// Whether a file of a format [`starts`] finds may start with bytes `a`, `b`.
 const fn pair(a: u8, b: u8) -> bool {
     match a {
-        0x89 => b == b'P',
+        0x89 => b == b'P' || b == b'L',
         b'%' => b == b'P',
         b'f' => b == b'L',
         b'R' => b == b'I',
@@ -285,7 +292,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         return None;
     }
     let likely = match d[0] {
-        0x89 => d.starts_with(b"\x89PNG"),
+        0x89 => d.starts_with(b"\x89PNG") || d.starts_with(&aqr_lzo::lzop::MAGIC),
         b'%' => d.starts_with(b"%PDF-"),
         b'8' => d.starts_with(b"8BPS") || zlib_header(d, false),
         b'f' => d.starts_with(b"fLaC"),
@@ -382,6 +389,7 @@ mod tests {
             (b"\x1f\x8b", 0),
             (b"mozLz4", 0),
             (b"\x04\x22", 0),
+            (b"\x89LZO", 0),
             (b"PK", 0),
             (b"\x78\x9c", 0),
             (b"\x78\xda", 0),

@@ -48,7 +48,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("4d55fa4843b5dfb27471a21534e4b0d0f91d80ed6f28a056626eeb6300ae5cad"),
+        sha512_256: hex("076b6d2f1f7f045706d8a7a9955ffde46d6b4d609f651d7b70c2ed9698a0982e"),
         wasm: include_bytes!("../wasm/flate-set.wasm"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
@@ -76,9 +76,16 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzma-recons",
         version: 1,
-        sha512_256: hex("ec9fb91b44a0c3ca7a4a4a0c375af75dfec49df6e02c07be4f7aa392fc0181f8"),
+        sha512_256: hex("75ba5c9a68f2ba9e84a41a14bfad04c79becb1ce7c7b0789f9f2693e54611e80"),
         wasm: include_bytes!("../wasm/lzma-recons.wasm"),
         block: include_bytes!("../wasm/lzma-recons.block"),
+    },
+    Known {
+        name: "lzo-recons",
+        version: 1,
+        sha512_256: hex("b382acbe0a55d2b387ace2f8ddcae3ccc80b1001d0a4bb47e1dd6f17e175a6c4"),
+        wasm: include_bytes!("../wasm/lzo-recons.wasm"),
+        block: include_bytes!("../wasm/lzo-recons.block"),
     },
     Known {
         name: "mp3-recons",
@@ -125,7 +132,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("415140566eee4e7a551c7f0c9cfc3a604b6e40beea1e038053f22c779dbfa40d"),
+        sha512_256: hex("946311bc554ece1ce8153ec662dce02d99bb6110838db94679a5faeec88f6ddd"),
         wasm: include_bytes!("../wasm/psd-recons.wasm"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
@@ -160,7 +167,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "zip-recons",
         version: 3,
-        sha512_256: hex("8b89531e9f9d64bc7574eb75f5718a9c5c293249494b9ecaea61e6fa31ade85e"),
+        sha512_256: hex("81d24d8f7a2a2a6e1595dcce91dcf888d6afbc3d072d98b6b395b8aacbb9e7ac"),
         wasm: include_bytes!("../wasm/zip-recons.wasm"),
         block: include_bytes!("../wasm/zip-recons.block"),
     },

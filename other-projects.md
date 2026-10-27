@@ -394,6 +394,7 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
   - miniLZO는 LZO1X-1 압축기와 해제기만 담고, LZO1X-999(최적 파서, 레벨 1–9)는 따로이다.
   - 커널 `lib/lzo/lzo1x_compress.c`는 miniLZO에서 왔다. 5.1의 LZO-RLE는 0 런을 RLE로 쓰는 다른 비트스트림이고, 34 KiB 이상 입력의 모호성 버그 때문에 압축기만 고쳐진 적이 있다. 커널판과 miniLZO의 출력이 같은지는 확인하지 못했다.
   - 쓰이는 곳: zram, UBIFS, JFFS2, btrfs, 커널 이미지, 임베디드 펌웨어, Procreate, 옛 게임.
+  - 2026-10-28: aqr-lzo가 압축기를 재현하지 않고 데이터와 parse의 레코드로 나눈다(변종이 많고 GPL이라). LZO1X-1의 거리는 99.9%가 "앞 매치 안이 아닌 위치 중 그 길이의 가장 가까운 것"이라 레코드가 스트림의 3.5–4.6%, LZO1X-999는 2–6%이다(aqr-lzo README).
 - LZF(liblzf, Marc Lehmann, Redis 번들 `lzf_c.c`, 약 300줄):
   - `VERY_FAST`, `ULTRA_FAST`, `HLOG`, `STRICT_ALIGN`, `INIT_HTAB` 매크로가 출력을 바꾼다. 번들마다 설정이 달라 후보 가족을 차례로 시도해야 한다.
   - 쓰이는 곳: Redis RDB, Krita, Perl `Compress::LZF`.
@@ -429,11 +430,11 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 | zstd 레벨 1–4(1.5.x 한두 판) | 패키지, 커널, HTTP, OCI, 게임 | 중간(버전별 분기) | libzstd | 높음 |
 | LZ4 옛 가족(1.8.1 이하) | 옛 번들 | 낮음(fixture 추가) | liblz4 이력 | 중간 |
 | LZF | Redis, Krita | 낮음 | liblzf | 중간 |
-| LZO1X-1, LZO-RLE | 커널, 펌웨어, Procreate | 낮음–중간 | miniLZO, 커널(GPL) | 중간 |
+| LZO1X-1, LZO-RLE | 커널, 펌웨어, Procreate | 재현 대신 parse의 레코드(aqr-lzo, LZO1X와 lzop 파일은 완료; GPL이라 코드 없이) | 커널 `lzo.rst`, liblzo2를 블랙박스로 | LZO-RLE와 lzop 밖의 스트림 |
 | liblzma normal, 7-Zip LZMA | 패키지, 7z, OTA, SWF, Unity | 재현 대신 parse의 레코드(aqr-lzma, LZMA1과 `.lzma`는 완료) | xz(0BSD), lzma-sdk-rs | LZMA2(xz)와 7z 컨테이너 |
 | LZX(CAB, WIM, CHM) | Windows 설치·업데이트 | 높음(닫힌 인코더) | wimlib(다른 인코더) | 중간(파싱 기반) |
 | GDeflate | DirectStorage 에셋 | 낮음(swizzle만) | MS(MIT) | 낮음 |
-| LZO1X-999 | 옛 게임 | 중간–높음 | LZO(GPL) | 낮음 |
+| LZO1X-999 | 옛 게임 | aqr-lzo의 레코드(스트림의 2–6%) | 위와 같음 | 완료(lzop) |
 | zstd 레벨 5 이상, 멀티스레드 | 패키지 | 높음 | libzstd | 낮음 |
 | LZMS, XPRESS Huffman | ESD, 프리페치 | 높음 | wimlib, ms-compress | 낮음 |
 | Oodle | AAA `.pak` | 매우 높음 | 디코더뿐 | 낮음(재현), 파싱 기반은 검토 |

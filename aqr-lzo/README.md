@@ -54,6 +54,11 @@ Speeds are of the data. Every stream was rebuilt.
   depend on its hash table's collisions and its skipping over literals.
 - LZO1X-999's matches are the nearest ones of their lengths; what is left is its parse.
 
+Through `aqr` (10 threads, level mid, with its check), the Silesia files as `lzop -3` files
+(101.0 MB) archive to 62.84 MB in 6.5 s, and as `lzop -9` files (76.3 MB) to 62.62 MB in 7.8 s;
+`zstd -3` of the same files gives 84.85 and 70.44 MB, and the original files archive to 57.83 MB.
+Testing the archives (`aqr -t`) takes 1.1 s, and 1.9 s for the second with the modules as Wasm.
+
 ## Tests
 
 ```sh
@@ -65,6 +70,9 @@ python3 -I scripts/gen-fixtures.py        # rewrites tests/data (needs liblzo2 a
 
 ## Status
 
-Taken: lzop files. Not yet: LZO1X streams in other containers (the Linux kernel's images and
-initramfs are lzop files; squashfs, UBIFS, btrfs and zram hold raw streams), LZO-RLE, and the
-other LZO formats (LZO1, LZO1A-1C, LZO1F, LZO1Y, LZO1Z, LZO2A).
+The module `lzo-recons` (natively and as a Wasm module of aqr-modules) and lzop files in
+aqr-compress (at the start of a file or found in other data) are done.
+
+Not yet: LZO1X streams in other containers (the Linux kernel's images and initramfs are lzop
+files; squashfs, UBIFS, btrfs and zram hold raw streams), LZO-RLE, and the other LZO formats
+(LZO1, LZO1A-1C, LZO1F, LZO1Y, LZO1Z, LZO2A).

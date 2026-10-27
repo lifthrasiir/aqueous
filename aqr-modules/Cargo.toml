@@ -20,6 +20,7 @@ aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
 aqr-lz4 = { path = "../aqr-lz4", default-features = false }
 aqr-lzma = { path = "../aqr-lzma", default-features = false }
+aqr-lzo = { path = "../aqr-lzo", default-features = false }
 aqr-mp3 = { path = "../aqr-mp3", default-features = false }
 aqr-pdf = { path = "../aqr-pdf", default-features = false }
 aqr-png = { path = "../aqr-png", default-features = false }
@@ -43,6 +44,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "lzma-recons"
 path = "src/bin/lzma-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "lzo-recons"
+path = "src/bin/lzo-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

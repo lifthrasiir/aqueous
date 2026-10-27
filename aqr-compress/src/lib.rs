@@ -9,6 +9,7 @@
 //!   record).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
 //! - `.lzma` files: the header sliced around aqr-lzma on the data and record of the stream.
+//! - lzop files: the headers sliced around aqr-lzo on the data and records of the streams.
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
 //!   DEFLATE streams by aqr-flate) with its headers derived.
@@ -108,7 +109,7 @@ pub use archive::{Archived, FileReport, Input, Report, Solid, Source, compress_t
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 
-use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, Native, SNAPPY, ZIP};
+use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZO, Native, SNAPPY, ZIP};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
@@ -254,11 +255,12 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`LZMA`],
-/// [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], scanned.
-pub const CONTENTS: [Content; 7] = [
+/// [`LZO`], [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], scanned.
+pub const CONTENTS: [Content; 8] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: LZMA, input: 0, nest: Nest::Scan },
+    Content { module: LZO, input: 0, nest: Nest::Scan },
     Content { module: SNAPPY, input: 0, nest: Nest::Scan },
     Content { module: LEVELDB, input: 0, nest: Nest::Scan },
     Content { module: ZIP, input: 0, nest: Nest::Scan },
@@ -1241,6 +1243,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
     Some(match format {
         Format::Lz4 => aqr_lz4::formula::encode,
         Format::Lzma => aqr_lzma::formula::encode,
+        Format::Lzo => aqr_lzo::formula::encode,
         Format::Png => aqr_png::formula::encode,
         Format::Jpeg => aqr_jpeg::formula::encode,
         Format::Mp3 => aqr_mp3::formula::encode,

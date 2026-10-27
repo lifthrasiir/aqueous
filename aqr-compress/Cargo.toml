@@ -17,6 +17,7 @@ aqr-flac = { path = "../aqr-flac" }
 aqr-jpeg = { path = "../aqr-jpeg" }
 aqr-lz4 = { path = "../aqr-lz4" }
 aqr-lzma = { path = "../aqr-lzma" }
+aqr-lzo = { path = "../aqr-lzo" }
 aqr-mp3 = { path = "../aqr-mp3" }
 aqr-pdf = { path = "../aqr-pdf" }
 aqr-png = { path = "../aqr-png" }

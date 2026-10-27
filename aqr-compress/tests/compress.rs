@@ -3,8 +3,8 @@ use std::io::Write;
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, BUNDLE, FLAC, FLATE, JPEG, LEVELDB, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE, WRT, X86, ZIP,
-    decompress,
+    ARM64, BUNDLE, FLAC, FLATE, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE, WRT, X86,
+    ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -223,6 +223,19 @@ fn lz4_nested() {
     let d = [text(5000), mozlz4(&records(1_000_000)), text(5000)].concat();
     let f = roundtrip(&d, &Options::default());
     assert_eq!(modules(&f), [LZ4.name]);
+}
+
+#[test]
+fn lzop_files() {
+    for t in ["big.1", "big.9", "mixed.9"] {
+        let d = fixture(&format!("aqr-lzo/tests/data/{t}.lzo"));
+        assert_eq!(modules(&roundtrip(&d, &all())), [LZO.name], "{t}");
+    }
+    // found in data
+    let d = [text(5000), fixture("aqr-lzo/tests/data/big.9.lzo"), text(5000)].concat();
+    assert_eq!(modules(&roundtrip(&d, &all())), [LZO.name]);
+    // nothing to rebuild
+    assert!(modules(&roundtrip(&fixture("aqr-lzo/tests/data/empty.3.lzo"), &all())).is_empty());
 }
 
 #[test]

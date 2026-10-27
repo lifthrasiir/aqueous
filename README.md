@@ -10,7 +10,7 @@ and the design is argued in `xform-design.md`.
 - Through `aqr-show` (`aqr/src/bin/show.rs`): each file is archived (recompression, archive
   coding and the round-trip check) at level `mid`, then extracted.
   - aqr-obj is not wired into aqr-compress yet, and was measured with `aqr-obj bench`.
-  - aqr-git, aqr-lz4 and aqr-snappy: see their rows.
+  - aqr-git, aqr-lz4, aqr-lzo and aqr-snappy: see their rows.
 - aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above;
   aqr-mp3's ratio and speed again on 2026-10-25; aqr-flate's speed on 2026-10-25, its memory
   not re-measured),
@@ -86,6 +86,7 @@ reservoir is rebuilt.
 | gzip, zlib | aqr-flate | 4 files, 4 MB | 0.932 | 0.977 | 16 | 58 | 34 MB + 35.6× | a small sample; 2 of 4 not coded, and since 2026-10-25 not deconstructed either (a probe of what the stream may gain): 6.7 and 8.0 to 50 and 33 MB/s. 153 gzip files of this machine (280 MB): 0.881 at 9.0 MB/s (README of aqr-flate). Per-stream figures on 924 streams are in aqr-flate's README |
 | ZIP | aqr-zip | 5 files, 327 MB | 0.954 | 0.998 | 8 | 23 | 48 MB + 13.8× | dominated by enwik9.zip (322 MB, 1 GB of text: 4.5 GB peak); two Python wheels come to 0.76. Since 2026-10-25 large bodies are rebuilt only where a probe says they may pay: 76 ZIP files of this machine (267 MB: wheels, JARs, Office files, Go modules, test corpora) 0.7799 -> 0.7795 at 10.8 -> 12.6 MB/s (README of aqr-zip) |
 | mozlz4, LZ4 frames | aqr-lz4 | a Firefox profile (README) | −9 to −18% against `zstd -3` of the files, −57% solid | | | 650–1150 (the compressor) | not measured | no sample on this machine; liblz4 1.10.0's fast compressor reproduced exactly |
+| lzop files (LZO1X) | aqr-lzo | Silesia (12 files) through `lzop -3` and `-9`, 101.0 and 76.3 MB (README) | 0.622 and 0.821 | 0.840 and 0.923 | 16 and 10 (`aqr`, 10 threads) | 94 and 41 (`-t`, 10 threads; the second as Wasm) | 13.5× (`aqr` peak) | measured 2026-10-28 with `aqr`, not `aqr-show`; the original files archive to 57.8 MB: the records (4.5% and 6.1% of the streams) are most of the rest. No compressor reproduced: data + record of the parse |
 | ar, tar, cpio | aqr-bundle | the 10gb corpus (README) | 2810.8 → 2775.0 MB for all of it | | | 6600 (the module) | 28000 (the module) | not measured | measured with `aqr` and `aqr-bundle-check`, not `aqr-show`: an archive alone gains nothing, its files are recompressed by their formats and shared with the same files archived along (`gimp.tar` and its files −11.3 MB); ar archives of objects +1.0 MB |
 | LevelDB tables (Snappy) | aqr-snappy | 33 tables of a Chrome profile, 13.3 MB (README) | −30.5% against `zstd -3` | | | 315 (tables rebuilt) | not measured | both hashes of Snappy 1.2.2 |
 | git checkouts | aqr-git | 15 repositories, 1196 MB (README) | 0.452 (with zstd -19) | 0.651 (`tar \| zstd -19 --long=27`) | 87–117 | 135–750 | 0.1–2.1× beyond input and output (the largest object is the floor) | directories, measured outside `aqr-show`; `-A` (every zlib stream rebuilt): 0.255 at 25–49 MB/s |
