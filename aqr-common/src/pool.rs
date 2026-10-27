@@ -480,6 +480,24 @@ pub fn rayon_pool(threads: usize) -> Option<rayon::ThreadPool> {
         .ok()
 }
 
+/// The pool to a test alone, once all its workers are free: the tests of the crate using the
+/// pool take turns, as their checks of what the workers do assume that no other test holds any.
+/// (A worker reserved for a rayon pool, `rayon_pool`, is given back as its thread ends, after
+/// the pool is dropped.)
+#[cfg(test)]
+pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
+    static TURN: Mutex<()> = Mutex::new(());
+    let turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
+    let p = pool();
+    let mut free = p.free.lock().unwrap();
+    while *free < p.size {
+        let (f, waited) = p.freed.wait_timeout(free, std::time::Duration::from_secs(10)).unwrap();
+        assert!(!waited.timed_out(), "workers of the pool still reserved");
+        free = f;
+    }
+    turn
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +507,7 @@ mod tests {
     /// than the pool's workers reserved.
     #[test]
     fn scopes() {
+        let _turn = exclusive();
         let n = size();
         let data: Vec<usize> = (0..1000).collect();
         let sums = par_map(10, 4, |i| data[i * 100..(i + 1) * 100].iter().sum::<usize>());
@@ -538,6 +557,7 @@ mod tests {
     /// running to take (a long item's own threads).
     #[test]
     fn par_map_gives_back() {
+        let _turn = exclusive();
         let n = size();
         if n < 2 {
             return;
@@ -570,6 +590,7 @@ mod tests {
     /// while what runs can reserve the workers left; and a panic resumed.
     #[test]
     fn dispatches() {
+        let _turn = exclusive();
         let n = size();
         let (admitted, at_once, most) = (Mutex::new(Vec::new()), AtomicUsize::new(0), AtomicUsize::new(0));
         let got = run(|| {
@@ -629,6 +650,7 @@ mod tests {
     #[test]
     fn rayon_pools() {
         use rayon::prelude::*;
+        let _turn = exclusive();
         let sum = |p: Option<rayon::ThreadPool>| {
             let f = || (0..100_000u64).into_par_iter().sum::<u64>();
             p.map_or_else(f, |p| p.install(f))

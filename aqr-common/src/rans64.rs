@@ -879,6 +879,8 @@ mod tests {
 
     #[test]
     fn prepare_dec_threads() {
+        // (the pool to this test alone, see `pool::exclusive`)
+        let _turn = crate::pool::exclusive();
         // Many contexts, some repeated (shared tables), mixed and equal alphabet sizes.
         for sizes in [&[2usize, 5, 16, 200, 256][..], &[72][..]] {
             let mut freqs = Vec::new();
