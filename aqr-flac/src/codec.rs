@@ -372,7 +372,11 @@ fn reset_written(w: &mut Written) {
 }
 
 /// The first stage of [`decode_threads`]: frame headers and subframe parameters, junk.
-fn front<'a>(e: &mut par::Front<'a, '_, Written>, c: &'a Coded, bps: u32) -> Result<(), par::Stop<'a>> {
+fn front<'a>(
+    e: &mut par::Front<'a, impl par::Pass<'a, Written>, Written>,
+    c: &'a Coded,
+    bps: u32,
+) -> Result<(), par::Stop<'a>> {
     let mut layout = Rd::new(&c.streams[S_LAYOUT]);
     let mut junk = Rd::new(&c.streams[S_JUNK]);
     let mut hdr = Rd::new(&c.streams[S_HDR]);
@@ -431,7 +435,7 @@ pub fn decode_threads(c: &Coded, t: &Tables, total_len: usize, out: &mut Vec<u8>
             rtx.send(B::default()).expect("channel");
         }
         sc.spawn(move || {
-            if let Some(mut e) = par::Front::new(&rrx, &tx1, reset_written) {
+            if let Some(mut e) = par::Front::new(par::Chans { recycle: &rrx, tx: &tx1 }, reset_written) {
                 let r = front(&mut e, c, si.bps);
                 e.finish(r);
             }

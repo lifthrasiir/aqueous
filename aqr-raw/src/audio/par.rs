@@ -147,14 +147,37 @@ impl<X: Default> Default for DecBatch<'_, X> {
     }
 }
 
+/// How the first stage passes its batches on.
+pub trait Pass<'a, X> {
+    /// A batch to fill, `None` if the pipeline is closed.
+    fn next(&mut self) -> Option<DecBatch<'a, X>>;
+    /// Sends `b` down the pipeline; `Err` if it is closed.
+    fn send(&mut self, b: DecBatch<'a, X>) -> Result<(), ()>;
+}
+
+/// Batches sent down a channel and coming back through `recycle`.
+pub struct Chans<'r, 'a, X> {
+    pub recycle: &'r Receiver<DecBatch<'a, X>>,
+    pub tx: &'r SyncSender<DecBatch<'a, X>>,
+}
+
+impl<'a, X> Pass<'a, X> for Chans<'_, 'a, X> {
+    fn next(&mut self) -> Option<DecBatch<'a, X>> {
+        self.recycle.recv().ok()
+    }
+
+    fn send(&mut self, b: DecBatch<'a, X>) -> Result<(), ()> {
+        self.tx.send(b).map_err(drop)
+    }
+}
+
 /// Fills batches with items, in order, and sends them down the pipeline (the first stage
-/// of decoding). Batches come back through `recycle`.
-pub struct Front<'a, 'r, X> {
+/// of decoding), through `P`.
+pub struct Front<'a, P, X> {
     cur: DecBatch<'a, X>,
     free: Vec<Frame>,
     samples: usize,
-    recycle: &'r Receiver<DecBatch<'a, X>>,
-    tx: &'r SyncSender<DecBatch<'a, X>>,
+    pass: P,
     reset: fn(&mut X),
 }
 
@@ -170,14 +193,10 @@ impl<'a> From<Error> for Stop<'a> {
     }
 }
 
-impl<'a, 'r, X: Default> Front<'a, 'r, X> {
+impl<'a, P: Pass<'a, X>, X: Default> Front<'a, P, X> {
     /// `None` if the pipeline is closed already.
-    pub fn new(
-        recycle: &'r Receiver<DecBatch<'a, X>>,
-        tx: &'r SyncSender<DecBatch<'a, X>>,
-        reset: fn(&mut X),
-    ) -> Option<Self> {
-        let mut f = Front { cur: recycle.recv().ok()?, free: Vec::new(), samples: 0, recycle, tx, reset };
+    pub fn new(mut pass: P, reset: fn(&mut X)) -> Option<Self> {
+        let mut f = Front { cur: pass.next()?, free: Vec::new(), samples: 0, pass, reset };
         f.take(0);
         Some(f)
     }
@@ -216,8 +235,8 @@ impl<'a, 'r, X: Default> Front<'a, 'r, X> {
         self.samples += samples;
         if self.samples >= BATCH_SAMPLES || self.cur.items.len() >= BATCH_ITEMS {
             let idx = self.cur.idx + 1;
-            self.tx.send(std::mem::take(&mut self.cur)).map_err(|_| Stop::Closed)?;
-            self.cur = self.recycle.recv().map_err(|_| Stop::Closed)?;
+            self.pass.send(std::mem::take(&mut self.cur)).map_err(|_| Stop::Closed)?;
+            self.cur = self.pass.next().ok_or(Stop::Closed)?;
             self.take(idx);
         }
         Ok(())
@@ -231,59 +250,70 @@ impl<'a, 'r, X: Default> Front<'a, 'r, X> {
             Err(Stop::Closed) => return,
         }
         self.cur.last = true;
-        let _ = self.tx.send(self.cur);
+        let _ = self.pass.send(self.cur);
     }
 }
 
-/// The error decoding stage: [`ResDecoder::errors`] on each frame. At the end of the
-/// stream it checks the rANS stream ([`ResDecoder::finish`]).
-pub fn errors_stage<'a, X>(mut rd: ResDecoder<'a>, rx: Receiver<DecBatch<'a, X>>, tx: SyncSender<DecBatch<'a, X>>) {
-    for mut b in rx {
-        b.sc0.clear();
-        let mut failed = false;
-        for i in 0..b.items.len() {
-            match &mut b.items[i] {
-                Item::Frame(f) => match rd.errors(f) {
-                    Ok(sc) => b.sc0.push(sc),
-                    Err(e) => {
-                        b.items[i] = Item::FrameErr(e);
-                        b.items.truncate(i + 1);
-                        failed = true;
-                        break;
-                    }
-                },
-                Item::Junk(_) => {}
-                Item::FrameErr(_) | Item::Err(_) => {
+/// [`ResDecoder::errors`] on each frame of `b`, and at the end of the stream the check of the
+/// rANS stream ([`ResDecoder::finish`]); whether `b` is the last batch (an error stops the
+/// stream, the items after it dropped).
+pub fn errors_batch<X>(rd: &mut ResDecoder<'_>, b: &mut DecBatch<'_, X>) -> bool {
+    b.sc0.clear();
+    let mut failed = false;
+    for i in 0..b.items.len() {
+        match &mut b.items[i] {
+            Item::Frame(f) => match rd.errors(f) {
+                Ok(sc) => b.sc0.push(sc),
+                Err(e) => {
+                    b.items[i] = Item::FrameErr(e);
+                    b.items.truncate(i + 1);
                     failed = true;
                     break;
                 }
+            },
+            Item::Junk(_) => {}
+            Item::FrameErr(_) | Item::Err(_) => {
+                failed = true;
+                break;
             }
         }
-        if b.last
-            && !failed
-            && let Err(e) = rd.finish()
-        {
-            b.items.push(Item::Err(e));
+    }
+    if b.last
+        && !failed
+        && let Err(e) = rd.finish()
+    {
+        b.items.push(Item::Err(e));
+    }
+    b.last |= failed;
+    b.last
+}
+
+/// [`LmsDecoder::frame`] on each frame of `b`.
+pub fn lms_batch<X>(ld: &mut LmsDecoder, b: &mut DecBatch<'_, X>) {
+    let mut k = 0;
+    for it in &mut b.items {
+        if let Item::Frame(f) = it {
+            ld.frame(f, &b.sc0[k]);
+            k += 1;
         }
-        let last = b.last || failed;
-        b.last = last;
+    }
+}
+
+/// The error decoding stage: [`errors_batch`] on each batch.
+pub fn errors_stage<'a, X>(mut rd: ResDecoder<'a>, rx: Receiver<DecBatch<'a, X>>, tx: SyncSender<DecBatch<'a, X>>) {
+    for mut b in rx {
+        let last = errors_batch(&mut rd, &mut b);
         if tx.send(b).is_err() || last {
             break;
         }
     }
 }
 
-/// The LMS decoding stage ([`LmsDecoder`]).
+/// The LMS decoding stage: [`lms_batch`] on each batch.
 pub fn lms_stage<'a, X>(rx: Receiver<DecBatch<'a, X>>, tx: SyncSender<DecBatch<'a, X>>) {
     let mut ld = LmsDecoder::default();
     for mut b in rx {
-        let mut k = 0;
-        for it in &mut b.items {
-            if let Item::Frame(f) = it {
-                ld.frame(f, &b.sc0[k]);
-                k += 1;
-            }
-        }
+        lms_batch(&mut ld, &mut b);
         let last = b.last;
         if tx.send(b).is_err() || last {
             break;

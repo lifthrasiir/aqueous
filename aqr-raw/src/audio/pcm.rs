@@ -543,7 +543,7 @@ fn synth(f: &Frame, fmt: &Format, ch: &mut [Vec<i64>], o: &mut [u8]) {
 /// The first stage of [`decode_threads`]: channel assignments and subframe parameters,
 /// and where each frame's samples go.
 fn front<'a>(
-    e: &mut par::Front<'a, '_, Vec<&'a mut [u8]>>,
+    e: &mut par::Front<'a, impl par::Pass<'a, Vec<&'a mut [u8]>>, Vec<&'a mut [u8]>>,
     c: &'a Coded,
     fmt: Format,
     nframes: usize,
@@ -630,7 +630,7 @@ pub fn decode_threads(
             rtx.send(B::default()).expect("channel");
         }
         sc.spawn(move || {
-            if let Some(mut e) = par::Front::new(&rrx, &tx1, Vec::clear) {
+            if let Some(mut e) = par::Front::new(par::Chans { recycle: &rrx, tx: &tx1 }, Vec::clear) {
                 let r = front(&mut e, c, fmt, nframes, data);
                 e.finish(r);
             }
