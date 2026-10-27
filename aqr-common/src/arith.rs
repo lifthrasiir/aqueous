@@ -1,4 +1,5 @@
-//! Carry-less binary arithmetic coding (32-bit), and adaptive bits for the record.
+//! Carry-less binary arithmetic coding (32-bit), and adaptive bits: the records of aqr-lzma and
+//! aqr-lzo.
 
 pub struct ArithEncoder {
     x1: u32,

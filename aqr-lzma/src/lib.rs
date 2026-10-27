@@ -8,7 +8,7 @@
 // The code of the modules alone uses only part of the rest.
 #![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod alone;
-pub mod arith;
+pub use aqr_common::arith;
 #[cfg(feature = "encode")]
 pub mod formula;
 pub mod greedy;

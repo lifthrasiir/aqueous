@@ -16,6 +16,7 @@ members = [
     "aqr-jpeg",
     "aqr-lz4",
     "aqr-lzma",
+    "aqr-lzo",
     "aqr-mp3",
     "aqr-obj",
     "aqr-pdf",
