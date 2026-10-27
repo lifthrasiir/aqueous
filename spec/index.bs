@@ -80,8 +80,9 @@ Import blocks read byte ranges of files in the base, which formulas can patch,
 so that an overlay archive works as an update or a delta of the base.
 
 The whole archive may be encrypted with a passphrase using age [[AGE]] ([[#encrypted-archive]]).
-Checksums cover every block except, optionally, leaf data blocks, and mirror blocks hold copies of the blocks
-whose damage would affect many files ([[#recovery]]).
+Checksums cover every block except, optionally, leaf data blocks,
+and except shorthand blocks, which name registered dictionaries and modules by their hashes ([[#registered-blocks]]).
+Mirror blocks hold copies of the blocks whose damage would affect many files ([[#recovery]]).
 Metadata that is not necessary to read the files, such as timestamps, comments and permissions,
 is encoded in CBOR and may be ignored by a decompressor ([[#optional-metadata]], [[#extraction]]).
 
@@ -294,9 +295,10 @@ which is one of the following:
     or an [=import/import=] can't be resolved in the given base ([[#import-resolution]]).
     It is a property of the input and the base, and all conforming decompressors agree on it.
 * An <dfn>unsupported failure</dfn> occurs when the input contains a block of a [=critical=] type
-    not defined by this specification ([[#reserved-blocks]]).
-    It is a property of the input and the version of this specification,
-    and all conforming decompressors implementing the same version agree on it.
+    not defined by this specification ([[#reserved-blocks]]),
+    or a [=shorthand block=] whose [=registered hash=] the decompressor doesn't know ([[#registered-blocks]]).
+    It is a property of the input, the version of this specification and the registry entries known,
+    and all conforming decompressors implementing the same version and knowing the same entries agree on it.
 
 <div class=note>
   An unsupported failure tells that a decompressor implementing a newer version may be able to interpret the input,
@@ -452,7 +454,11 @@ Block types of 2 hexadecimal digits are as follows:
       <td>Yes
       <td>Reserved
     <tr>
-      <td>50<sub>16</sub>&nbsp;—&nbsp;57<sub>16</sub>
+      <td>50<sub>16</sub>
+      <td>Yes
+      <td>[[#dictionary-block]], as a [=shorthand block=] ([[#registered-blocks]])
+    <tr>
+      <td>51<sub>16</sub>&nbsp;—&nbsp;57<sub>16</sub>
       <td>Yes
       <td>[[#dictionary-block]]
     <tr>
@@ -460,7 +466,11 @@ Block types of 2 hexadecimal digits are as follows:
       <td>Yes
       <td>[[#import-block]]
     <tr>
-      <td>60<sub>16</sub>&nbsp;—&nbsp;63<sub>16</sub>
+      <td>60<sub>16</sub>
+      <td>Yes
+      <td>[[#module-block]], as a [=shorthand block=] ([[#registered-blocks]])
+    <tr>
+      <td>61<sub>16</sub>&nbsp;—&nbsp;63<sub>16</sub>
       <td>Yes
       <td>[[#module-block]]
     <tr>
@@ -1268,6 +1278,49 @@ and a streaming decompressor never has to retain a formula block beyond its parc
   </figcaption>
 </figure>
 
+<h4 id=registered-blocks>
+Registered dictionaries and modules</h4>
+
+A <dfn>registered dictionary</dfn> is an entry of the Aqueous Dictionaries Registry ([[#dictionaries-registry]]),
+and a <dfn>registered module</dfn> is an entry of the Aqueous Modules Registry ([[#modules-registry]]).
+Each entry is identified by its <dfn>registered hash</dfn>,
+the SHA-512/256 hash [[!FIPS180-4]] of its bytes:
+the [=decoded data=] of a dictionary block for a registered dictionary ([[#dictionary-block]]),
+and [=module/wasm_module=] for a registered module ([[#module-block]]).
+
+Block 50<sub>16</sub> (a dictionary block) and block 60<sub>16</sub> (a module block) are <dfn>shorthand blocks</dfn>.
+The [=block/data=] of a shorthand block is a [=registered hash=] alone, 32 bytes long,
+instead of [=checksummed Zstandard data=],
+and the shorthand block stands for a block of the same kind whose decoded data is the bytes of that entry:
+
+* [=block/size=] MUST be 32.
+* The [=registered hash=] of block 50<sub>16</sub> MUST be that of a [=registered dictionary=],
+    which also gives [=dict/has_entropy_tables=],
+    and that of block 60<sub>16</sub> MUST be that of a [=registered module=].
+* If the decompressor doesn't know the entry of the [=registered hash=] in the corresponding registry,
+    an [=unsupported failure=] occurs ([[#interpretation]]).
+* A shorthand block is otherwise the same as the dictionary or module block it stands for,
+    e.g. in indexing, [[#block-order|block order]] and [[#mirror-block|mirror blocks]].
+
+The two registries share the hash function but not the entries,
+and a shorthand block is resolved only against the registry of its own kind.
+Knowing an entry of one registry never makes a decompressor know an entry of the other:
+in particular, the hash of a registered module in block 50<sub>16</sub> doesn't denote a dictionary of the module's bytes,
+unless the same bytes are separately registered as a dictionary, in which case they are two unrelated entries.
+
+A shorthand block has no checksum, and the [=registered hash=] is only looked up and never verified.
+Therefore damage to the hash can't be distinguished from a hash that was never registered,
+and both result in an [=unsupported failure=] rather than an [=invalid archive=] failure.
+
+<div class=note>
+  Registry entries are never modified or removed, so a [=registered hash=] keeps denoting the same bytes,
+  and a decompressor may know only some of the entries.
+  Keeping the registries apart lets a decompressor carry a native implementation of a registered module
+  ([[#module-block]]) instead of its bytes, which it couldn't if the hash could also denote a dictionary.
+  A damaged hash is found as unknown with an overwhelming probability,
+  and a [[#mirror-block|mirror block]] of the shorthand block can recover it.
+</div>
+
 <h3 id=metadata-block>
 Metadata block</h3>
 
@@ -1567,7 +1620,9 @@ and an optional [=base=] |base|, which is an [=archive value=]:
             or an [=invalid archive=] failure is returned.
     2. If |input| parses as the unencrypted archive structure ([[#unencrypted-archive]]) in its entirety,
         with [=block/data=] of every block taken as a [=byte sequence=] without parsing,
-        and the type of any of [=archive/blocks=] is [=critical=] and not defined by this specification,
+        and either the type of any of [=archive/blocks=] is [=critical=] and not defined by this specification,
+        or any of [=archive/blocks=] is a [=shorthand block=] of 32 bytes of [=block/data=]
+        whose [=registered hash=] the decompressor doesn't know ([[#registered-blocks]]),
         return an [=unsupported failure=].
     3. Parse |input| as the unencrypted archive structure ([[#unencrypted-archive]]) in its entirety.
         If it fails to parse, return an [=invalid archive=] failure.
@@ -1788,7 +1843,8 @@ Dictionary block</h3>
 
 Blocks 50<sub>16</sub> through 57<sub>16</sub> are **dictionary blocks**,
 whose [=block/type=] is <code>0101&thinsp;0|t||ss|</code> in binary ([[#block-types]]).
-Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
+Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]),
+except that block 50<sub>16</sub> is a [=shorthand block=] for a [=registered dictionary=] ([[#registered-blocks]]).
 
 <div dfn-for=dict>
 
@@ -2476,7 +2532,8 @@ Module block</h3>
 
 Blocks 60<sub>16</sub> through 63<sub>16</sub> are **module blocks**,
 whose [=block/type=] is <code>0110&thinsp;00|ss|</code> in binary ([[#block-types]]).
-Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]).
+Their data is [=checksummed Zstandard data=] ([[#shared-external-structure]]),
+except that block 60<sub>16</sub> is a [=shorthand block=] for a [=registered module=] ([[#registered-blocks]]).
 
 The internal structure after decompression is as follows:
 
@@ -2495,7 +2552,32 @@ The internal structure after decompression is as follows:
   </tbody>
 </table>
 
-TODO: The WebAssembly profile, the module interface and the identification by a hash.
+[=module/wasm_module=] is a WebAssembly module in the binary format [[!WASM-CORE-3]],
+i.e. the content of an ordinary `.wasm` file, starting with the magic `00 61 73 6D` and the version `01 00 00 00`
+(hexadecimal) and spanning the whole decoded data.
+It MUST decode and validate as a module of the features allowed in [[#module-execution]],
+and MUST conform to the profile and the interface given there;
+otherwise an [=invalid archive=] failure occurs.
+In short, the module defines no memory of its own and imports every memory and host function from the module name `aqr`,
+has no start function, and exports a single [=entry point=] that the host invokes once per application.
+Custom sections are allowed and don't affect the result.
+The format adds nothing around the module, so that the decoded data can be inspected and run by any WebAssembly tool,
+and a module block for a [=registered module=] has the same [=module/wasm_module=] as the entry.
+
+The <dfn>module hash</dfn> of a module block is the SHA-512/256 hash [[!FIPS180-4]] of its [=module/wasm_module=],
+which is also the [=registered hash=] of a [=registered module=] ([[#registered-blocks]]).
+Since every application of a module depends only on [=module/wasm_module=] and its arguments ([[#module-execution]]),
+a decompressor MAY apply a module whose [=module hash=] it knows
+with an implementation of its own (e.g. native code) instead of instantiating [=module/wasm_module=],
+as long as the result is indistinguishable from the definition, including [=invalid archive=] failures.
+Such a decompressor needs neither the bytes of the module nor a WebAssembly engine,
+whether the module is given by a [=shorthand block=] or in full.
+
+<div class=note>
+  A compressor can use a [=shorthand block=] for a [=registered module=] to save the size of the module,
+  at the cost of an [=unsupported failure=] in a decompressor that doesn't know the entry.
+  A module given in full can be read by any decompressor with a WebAssembly engine.
+</div>
 
 </div>
 
@@ -3140,10 +3222,15 @@ The following table summarizes every checksum defined by this specification:
   <tbody>
     <tr>
       <td>[[#metadata-block|Metadata]], [[#dictionary-block|dictionary]], [[#import-block|import]],
-        [[#module-block|module]] and [[#resource-block|resource blocks]]
+        [[#module-block|module]] and [[#resource-block|resource blocks]], except [=shorthand blocks=]
       <td>XXH64
       <td>[=Decoded data=]
       <td>Always
+    <tr>
+      <td>[=Shorthand blocks=]
+      <td>None (the [=registered hash=] identifies the entry but is not checked)
+      <td>
+      <td>Never
     <tr>
       <td>Non-leaf [[#data-block|data blocks]]
       <td>XXH64
@@ -4334,6 +4421,99 @@ Quantization Interval</h3>
 quantization-interval = ~time / ~duration / [ 2*2 ~time/~duration ]
 $$ETIME-ELECTIVE //= (-14: quantization-interval)
 </pre>
+
+<h3 id=dictionaries-registry>
+Aqueous Dictionaries Registry</h3>
+
+<p>This document requests IANA to create a new registry titled "Aqueous Dictionaries",
+listing the [=registered dictionaries=] that a [=shorthand block=] of type 50<sub>16</sub> can refer to ([[#registered-blocks]]).
+New entries are assigned with the Specification Required policy ([[RFC8126]], section 4.6).
+Each entry has the following fields:</p>
+
+<dl>
+<dt>Hash</dt>
+<dd>The [=registered hash=], i.e. the SHA-512/256 hash [[!FIPS180-4]] of the dictionary's bytes,
+written as 64 lowercase hexadecimal digits.</dd>
+<dt>Name</dt>
+<dd>A short name of the dictionary for humans, which has no effect on the format.</dd>
+<dt>Entropy Tables</dt>
+<dd>Whether the dictionary has entropy tables, i.e. the value of [=dict/has_entropy_tables=].</dd>
+<dt>Data</dt>
+<dd>The bytes of the dictionary, being the [=decoded data=] of a dictionary block ([[#dictionary-block]]),
+which MUST be valid as such and deposited with the registration.</dd>
+<dt>Reference</dt>
+<dd>The document describing the dictionary and its intended use.</dd>
+</dl>
+
+<p>The designated expert verifies that the hash matches the data and that no entry has the same hash.
+An entry, once registered, MUST NOT be modified or removed,
+since archives refer to it only by its hash.
+An entry is never shared with the Aqueous Modules Registry ([[#modules-registry]]),
+even when both have the same data.</p>
+
+<p>The initial contents of the registry are as follows:</p>
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Hash
+      <th>Name
+      <th>Entropy Tables
+      <th>Reference
+  </thead>
+  <tbody>
+    <tr>
+      <td><var>TBD</var>
+      <td>text
+      <td><var>TBD</var>
+      <td>This document
+    <tr>
+      <td><var>TBD</var>
+      <td>modules
+      <td><var>TBD</var>
+      <td>This document
+  </tbody>
+</table>
+
+<p>The dictionary "text" is intended for general text,
+and the dictionary "modules" is intended for module blocks given in full ([[#module-block]]).</p>
+
+Issue: The data and the hashes of the initial dictionaries are yet to be made.
+
+<h3 id=modules-registry>
+Aqueous Modules Registry</h3>
+
+<p>This document requests IANA to create a new registry titled "Aqueous Modules",
+listing the [=registered modules=] that a [=shorthand block=] of type 60<sub>16</sub> can refer to ([[#registered-blocks]]).
+New entries are assigned with the Specification Required policy ([[RFC8126]], section 4.6).
+Each entry has the following fields:</p>
+
+<dl>
+<dt>Hash</dt>
+<dd>The [=registered hash=], i.e. the [=module hash=] of the module,
+written as 64 lowercase hexadecimal digits.</dd>
+<dt>Name</dt>
+<dd>A short name of the module for humans, which has no effect on the format.
+Different versions of a module have the same name and different hashes.</dd>
+<dt>Data</dt>
+<dd>The bytes of the module, being [=module/wasm_module=] of a module block ([[#module-block]]),
+which MUST be valid as such and deposited with the registration.</dd>
+<dt>Reference</dt>
+<dd>The document describing the transformation that the module reverses, its inputs, resources and parameters,
+and preferably the source code from which the module was built.</dd>
+</dl>
+
+<p>The designated expert verifies that the hash matches the data, that no entry has the same hash,
+and that the module conforms to [[#module-execution]].
+An entry, once registered, MUST NOT be modified or removed,
+since archives refer to it only by its hash.
+An entry is never shared with the Aqueous Dictionaries Registry ([[#dictionaries-registry]]),
+even when both have the same data.</p>
+
+<p>The initial contents of the registry are the modules built by the reference implementation of this document,
+each under its name there with the hash of the module built.</p>
+
+Issue: The initial entries are to be listed once the modules of the reference implementation are finalized.
 
 <h2 id=zip-conversion>
 Converting from ZIP</h2>
