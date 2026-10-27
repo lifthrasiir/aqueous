@@ -517,23 +517,25 @@ mod tests {
         }
         let done = AtomicUsize::new(0);
         // (on a worker, as everything of aqr is: all of them then the par_map's)
-        let got = run(|| par_map(n, n, |i| {
-            if i > 0 {
-                done.fetch_add(1, Ordering::Relaxed);
-                return 0;
-            }
-            let start = std::time::Instant::now();
-            while start.elapsed().as_secs() < 5 {
-                if done.load(Ordering::Relaxed) == n - 1 {
-                    let r = reserve(1);
-                    if !r.is_empty() {
-                        return r.len();
-                    }
+        let got = run(|| {
+            par_map(n, n, |i| {
+                if i > 0 {
+                    done.fetch_add(1, Ordering::Relaxed);
+                    return 0;
                 }
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
-            0
-        }));
+                let start = std::time::Instant::now();
+                while start.elapsed().as_secs() < 5 {
+                    if done.load(Ordering::Relaxed) == n - 1 {
+                        let r = reserve(1);
+                        if !r.is_empty() {
+                            return r.len();
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                0
+            })
+        });
         assert_eq!(got[0], 1);
     }
 
@@ -589,7 +591,9 @@ mod tests {
             });
             assert!(got[0] >= n - 2, "{}", got[0]);
         }
-        assert!(catch_unwind(|| run(|| dispatch(8, 4, |_| (), |i, ()| if i == 5 { panic!("five") } else { i }))).is_err());
+        assert!(
+            catch_unwind(|| run(|| dispatch(8, 4, |_| (), |i, ()| if i == 5 { panic!("five") } else { i }))).is_err()
+        );
     }
 
     /// A rayon pool leaves no thread a worker of it once dropped: the calling thread, or a

@@ -40,7 +40,8 @@ fn files_held_once() {
     let files = [("a.txt", text(n, 1)), ("b.txt", text(n, 2)), ("c.bin", noise(n, 3))];
     let mut tree = Tree::default();
     for (c, (name, _)) in files.iter().enumerate() {
-        let e = Entry { parent: None, name: name.as_bytes().to_vec(), node: EntryNode::File(c), extra: Extra::default() };
+        let e =
+            Entry { parent: None, name: name.as_bytes().to_vec(), node: EntryNode::File(c), extra: Extra::default() };
         tree.entries.push(e);
     }
     let inputs: Vec<Input> = files.iter().map(|(name, d)| Input { name: name.as_bytes(), data: d }).collect();
@@ -49,7 +50,12 @@ fn files_held_once() {
     let (r, used) = peak(|| compress_tree_to(&tree, &inputs[..], &opt, &mut out).unwrap());
     assert!(r.unverified.is_empty() && !r.files[0].modules.is_empty());
     let total = 3 * n;
-    println!("{:.1} MB of files: peak {:.1} MB ({:.2}x)", total as f64 / 1e6, used as f64 / 1e6, used as f64 / total as f64);
+    println!(
+        "{:.1} MB of files: peak {:.1} MB ({:.2}x)",
+        total as f64 / 1e6,
+        used as f64 / 1e6,
+        used as f64 / total as f64
+    );
     // the files read (once), and what is made of them: each text coded, and decoded again to
     // verify it (both at once), the blocks and the archive decoded (a copy of the files
     // besides: 6.6 times a file over them)

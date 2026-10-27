@@ -1388,16 +1388,21 @@ impl Archive<'_, '_> {
         let programs: Vec<Mutex<Option<Program>>> = programs.into_iter().map(Mutex::new).collect();
         // each leaf on a worker of its own, which is given back as it is done, for those still
         // running to take for their own work (a stream that takes long alone)
-        let done = aqr_common::pool::dispatch(blocks.leaves.len(), threads, |i| gate.admit(weights[i]), |i, _admitted| {
-            let outputs = match blocks.leaves[i] {
-                LeafBlock::Stored(d, zstd, checked) => decoded(d, zstd, checked).map(|d| vec![d]),
-                LeafBlock::Formula { modules, resources, non_leaf, .. } => {
-                    let p = programs[i].lock().unwrap().take().expect("each leaf once");
-                    run(p, &env(modules, resources, non_leaf), &contents)
-                }
-            };
-            f(i, outputs)
-        });
+        let done = aqr_common::pool::dispatch(
+            blocks.leaves.len(),
+            threads,
+            |i| gate.admit(weights[i]),
+            |i, _admitted| {
+                let outputs = match blocks.leaves[i] {
+                    LeafBlock::Stored(d, zstd, checked) => decoded(d, zstd, checked).map(|d| vec![d]),
+                    LeafBlock::Formula { modules, resources, non_leaf, .. } => {
+                        let p = programs[i].lock().unwrap().take().expect("each leaf once");
+                        run(p, &env(modules, resources, non_leaf), &contents)
+                    }
+                };
+                f(i, outputs)
+            },
+        );
         done.into_iter().collect()
     }
 

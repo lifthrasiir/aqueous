@@ -270,7 +270,9 @@ mod tests {
     #[test]
     fn mapped() {
         let a = Mapped;
-        for (from, to) in [(100, 5 << 20), (3 << 20, 9 << 20), (9 << 20, 2 << 20), (2 << 20, 1000), (MAPPED_MIN, MAPPED_MIN + 1)] {
+        for (from, to) in
+            [(100, 5 << 20), (3 << 20, 9 << 20), (9 << 20, 2 << 20), (2 << 20, 1000), (MAPPED_MIN, MAPPED_MIN + 1)]
+        {
             let l = Layout::from_size_align(from, 8).unwrap();
             // SAFETY: blocks of these layouts, written and read within them
             unsafe {

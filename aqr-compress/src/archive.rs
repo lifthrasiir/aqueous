@@ -637,9 +637,9 @@ fn check(
         let l = by_block[i];
         let mut bad = bad.lock().unwrap();
         match outputs {
-            Ok(outputs) => {
-                bad.extend(of_leaf[l].iter().filter(|&&(o, k)| !outputs.get(o).is_some_and(|d| files[k].is(d))).map(|&(_, k)| k))
-            }
+            Ok(outputs) => bad.extend(
+                of_leaf[l].iter().filter(|&&(o, k)| !outputs.get(o).is_some_and(|d| files[k].is(d))).map(|&(_, k)| k),
+            ),
             Err(_) => bad.extend(of_leaf[l].iter().map(|&(_, k)| k)),
         }
         Ok(())

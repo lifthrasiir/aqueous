@@ -1265,9 +1265,6 @@ mod tests {
     /// The lengths of the texts given to aqr-wrt, on any thread.
     pub(crate) static TEXTS: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
-    thread_local! {
-    }
-
     /// An ar, tar or cpio archive is worth what the files in it are: a probe counts them, not
     /// the archive, and scans data of its kind.
     #[test]
@@ -1332,7 +1329,8 @@ mod tests {
         let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"];
         while t.len() < 1_000_003 {
             x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            std::io::Write::write_fmt(&mut t, format_args!("{} {} ", words[(x >> 61) as usize], (x >> 40) % 1000)).unwrap();
+            std::io::Write::write_fmt(&mut t, format_args!("{} {} ", words[(x >> 61) as usize], (x >> 40) % 1000))
+                .unwrap();
         }
         t.truncate(1_000_003);
         let zip = stored_zip(&[("t.txt", &t)]);
