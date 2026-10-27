@@ -883,6 +883,52 @@ fn fasta() {
     assert_eq!(aqr_compress::kind_by_name(b"x/chr1.fa"), aqr_formula::Kind::Format("fasta"));
 }
 
+/// A DDS file of BC1 blocks of a smooth picture, `w` × `h` with `mips` mipmaps.
+fn dds_file(w: u32, h: u32, mips: u32) -> Vec<u8> {
+    let mut d = b"DDS ".to_vec();
+    for v in [124, 0x2_1007, h, w, 0, 0, mips] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d.resize(76, 0);
+    for v in [32u32, 4] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d.extend_from_slice(b"DXT1");
+    d.resize(108, 0);
+    d.extend_from_slice(&0x40_1008u32.to_le_bytes());
+    d.resize(128, 0);
+    for m in 0..mips {
+        let (bw, bh) = ((w >> m).max(1).div_ceil(4), (h >> m).max(1).div_ceil(4));
+        for by in 0..bh {
+            for bx in 0..bw {
+                let c1 = ((bx * 31 / bw) << 11 | (by * 63 / bh) << 5 | (m * 4)) as u16;
+                d.extend_from_slice(&(c1 + 0x0821).to_le_bytes());
+                d.extend_from_slice(&c1.to_le_bytes());
+                let i = (bx * 7 + by * 13 + bx * by) as usize;
+                d.extend_from_slice(&[0x00, 0x55, 0xaa, 0xff, 0x1b, 0xe4][i % 6..][..1].repeat(4));
+            }
+        }
+    }
+    d
+}
+
+/// A DDS texture goes to aqr-tex, by its start or its name, and is found in other data. A large
+/// one is coded in stripes, decoded apart (as tasks of the Wasm module).
+#[test]
+fn dds() {
+    let d = dds_file(64, 64, 7);
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), ["bcn-recons"]);
+    let mut other = vec![0x5a; 1000];
+    other.extend_from_slice(&d);
+    other.extend_from_slice(&[0x5a; 1000]);
+    let f = roundtrip(&other, &all());
+    assert_eq!(modules(&f), ["bcn-recons"]);
+    assert_eq!(aqr_compress::kind_by_name(b"x/tex.DDS"), aqr_formula::Kind::Format("dds"));
+    let f = roundtrip(&dds_file(1024, 1024, 2), &all());
+    assert_eq!(modules(&f), ["bcn-recons"]);
+}
+
 /// Text goes to aqr-wrt where that pays: a whole file of text bytes, and data of a name telling
 /// text (a gzip member's); not text that is short, or has other bytes, or of no words.
 #[test]

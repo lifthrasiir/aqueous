@@ -25,6 +25,7 @@ members = [
     "aqr-raw",
     "aqr-snappy",
     "aqr-sqlite",
+    "aqr-tex",
     "aqr-wrt",
     "aqr-zip",
     "aqr-api",

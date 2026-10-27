@@ -36,6 +36,7 @@ aqr-raw = { path = "../aqr-raw" }
 aqr-snappy = { path = "../aqr-snappy" }
 aqr-zip = { path = "../aqr-zip" }
 aqr-sqlite = { path = "../aqr-sqlite" }
+aqr-tex = { path = "../aqr-tex" }
 aqr-wrt = { path = "../aqr-wrt" }
 
 [target.'cfg(unix)'.dependencies]

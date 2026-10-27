@@ -4582,6 +4582,10 @@ as follows:</p>
   </thead>
   <tbody>
     <tr>
+      <td><code>d084284fbb3eaaac8e96ffb974f364d8bf9d5ea5b25bf4e236bc032369463578</code>
+      <td>bcn-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-tex/FORMAT.md">aqr-tex/FORMAT.md</a>
+    <tr>
       <td><code>30ebd39ea3f768f06cf4d3e79872666d6923eb8e608ed5878bcc86c040179a21</code>
       <td>bundle-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-bundle/FORMAT.md">aqr-bundle/FORMAT.md</a>
@@ -4654,7 +4658,7 @@ as follows:</p>
       <td>png-set@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-png/FORMAT.md">aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>946311bc554ece1ce8153ec662dce02d99bb6110838db94679a5faeec88f6ddd</code>
+      <td><code>415140566eee4e7a551c7f0c9cfc3a604b6e40beea1e038053f22c779dbfa40d</code>
       <td>psd-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-psd/FORMAT.md">aqr-psd/FORMAT.md</a>
     <tr>

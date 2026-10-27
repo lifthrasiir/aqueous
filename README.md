@@ -6,11 +6,11 @@ machine can afford: JPEG's and MP3's Huffman codes, deflate in PNG, ZIP, PDF and
 Snappy in browser profiles and databases. Aqueous undoes that compression, codes the contents
 with stronger models, and rebuilds the original files bit for bit on extraction.
 
-- **Recompressors** for about twenty format families: images (PNG, JPEG, PSD, BMP and PNM),
-  audio (MP3, FLAC, WAV, AIFF), documents and data (PDF, SQLite, text, FASTA, Wavefront OBJ),
-  containers and general-purpose compression (gzip and zlib, ZIP, LZ4, LZO, LZMA, Snappy, tar,
-  ar and cpio, git checkouts) and executables (PE and Mach-O). Each lives in its own `aqr-*`
-  crate, with a `FORMAT.md` describing what it stores.
+- **Recompressors** for about twenty format families: images (PNG, JPEG, PSD, BMP and PNM,
+  BCn textures in DDS), audio (MP3, FLAC, WAV, AIFF), documents and data (PDF, SQLite, text,
+  FASTA, Wavefront OBJ), containers and general-purpose compression (gzip and zlib, ZIP, LZ4,
+  LZO, LZMA, Snappy, tar, ar and cpio, git checkouts) and executables (PE and Mach-O). Each
+  lives in its own `aqr-*` crate, with a `FORMAT.md` describing what it stores.
 - **Self-describing archives.** A file's content is a *formula*, a small stack-machine program
   over stored blocks, which applies WebAssembly modules to undo what the compressor did. A
   decompressor needs no knowledge of the formats inside; known modules run natively, unknown

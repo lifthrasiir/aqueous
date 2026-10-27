@@ -17,7 +17,7 @@
 //!   members with their sizes and checksums derived.
 //! - Text, a whole file of text bytes or data of a name telling text: aqr-wrt, its words and
 //!   markup replaced by codes of a dictionary of its own.
-//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, PDF, SQLite and FASTA: the recompressor's own formula,
+//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, DDS, PDF, SQLite and FASTA: the recompressor's own formula,
 //!   its module applied to its streams, and files it embeds (PDF's DEFLATE streams and images,
 //!   PSD's and JPEG's embedded files) applied to theirs (see aqr-decompress for the modules).
 //!
@@ -1250,6 +1250,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Flac => aqr_flac::formula::encode,
         Format::Raw => aqr_raw::formula::encode,
         Format::Psd => aqr_psd::formula::encode,
+        Format::Dds => aqr_tex::formula::encode,
         Format::Pdf => aqr_pdf::formula::encode,
         Format::Sqlite => aqr_sqlite::formula::encode,
         Format::LevelDb => aqr_snappy::formula::encode,

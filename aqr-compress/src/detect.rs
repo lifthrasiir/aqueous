@@ -32,6 +32,8 @@ pub enum Format {
     Raw,
     /// PSD or PSB.
     Psd,
+    /// DDS texture (aqr-tex): BC1 to BC5 blocks, or uncompressed pixels (aqr-raw's module).
+    Dds,
     Pdf,
     Sqlite,
     /// LevelDB table (aqr-snappy on its blocks), known by its end.
@@ -53,7 +55,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 22] = [
+    pub const ALL: [Format; 23] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -67,6 +69,7 @@ impl Format {
         Format::Flac,
         Format::Raw,
         Format::Psd,
+        Format::Dds,
         Format::Pdf,
         Format::Sqlite,
         Format::LevelDb,
@@ -93,6 +96,7 @@ impl Format {
             Format::Flac => "flac",
             Format::Raw => "raw",
             Format::Psd => "psd",
+            Format::Dds => "dds",
             Format::Pdf => "pdf",
             Format::Sqlite => "sqlite",
             Format::LevelDb => "leveldb",
@@ -134,6 +138,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"flac" => format(Format::Flac),
         b"wav" | b"aif" | b"aiff" | b"aifc" | b"bmp" | b"pgm" | b"ppm" | b"pnm" | b"pam" => format(Format::Raw),
         b"psd" | b"psb" => format(Format::Psd),
+        b"dds" => format(Format::Dds),
         b"pdf" => format(Format::Pdf),
         b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
         b"sqlite" | b"sqlite3" => format(Format::Sqlite),
@@ -190,6 +195,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Jpeg)
     } else if mp3_header(d) {
         Some(Format::Mp3)
+    } else if aqr_tex::dds::starts(d) {
+        Some(Format::Dds)
     } else if pe(d) {
         Some(Format::Pe)
     } else if aqr_exe::format::macho::starts(d) {
@@ -238,6 +245,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'R' => b == b'I',
         b'F' => b == b'O',
         b'I' => b == b'D',
+        b'D' => b == b'D',
         0xff => b == 0xd8 || b & 0xe0 == 0xe0,
         b'M' => b == b'Z',
         // Mach-O, little-endian (32- or 64-bit), and universal
@@ -299,6 +307,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'R' => d.starts_with(b"RIFF"),
         b'F' => d.starts_with(b"FORM"),
         b'I' => d.starts_with(b"ID3"),
+        b'D' => aqr_tex::dds::starts(d),
         0xff => true,
         b'M' => d.starts_with(b"MZ"),
         0xce | 0xcf => d.starts_with(&[d[0], 0xfa, 0xed, 0xfe]),

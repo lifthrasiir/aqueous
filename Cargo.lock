@@ -96,6 +96,7 @@ dependencies = [
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-tex",
  "aqr-wrt",
  "aqr-zip",
  "crc32fast",
@@ -127,6 +128,7 @@ dependencies = [
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-tex",
  "aqr-wrt",
  "aqr-zip",
  "libc",
@@ -285,6 +287,7 @@ dependencies = [
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",
+ "aqr-tex",
  "aqr-wrt",
  "aqr-zip",
  "sha2",
@@ -385,6 +388,17 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "xxhash-rust",
+]
+
+[[package]]
+name = "aqr-tex"
+version = "0.1.0"
+dependencies = [
+ "aqr-api",
+ "aqr-common",
+ "aqr-formula",
+ "aqr-raw",
+ "zstd",
 ]
 
 [[package]]

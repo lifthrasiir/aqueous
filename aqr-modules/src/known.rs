@@ -4,6 +4,13 @@ use crate::{Known, hex};
 
 pub const KNOWN: &[Known] = &[
     Known {
+        name: "bcn-recons",
+        version: 1,
+        sha512_256: hex("d084284fbb3eaaac8e96ffb974f364d8bf9d5ea5b25bf4e236bc032369463578"),
+        wasm: include_bytes!("../wasm/bcn-recons.wasm"),
+        block: include_bytes!("../wasm/bcn-recons.block"),
+    },
+    Known {
         name: "bundle-recons",
         version: 1,
         sha512_256: hex("30ebd39ea3f768f06cf4d3e79872666d6923eb8e608ed5878bcc86c040179a21"),
@@ -132,7 +139,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("946311bc554ece1ce8153ec662dce02d99bb6110838db94679a5faeec88f6ddd"),
+        sha512_256: hex("415140566eee4e7a551c7f0c9cfc3a604b6e40beea1e038053f22c779dbfa40d"),
         wasm: include_bytes!("../wasm/psd-recons.wasm"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },

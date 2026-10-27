@@ -26,6 +26,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Flac => Some(flac_frames(d)),
         Format::Raw => raw(d),
         Format::Psd => psd(d),
+        Format::Dds => aqr_tex::dds::detect(d).map(|f| f.start + f.data.len() as usize),
         Format::Pdf => Some(pdf(d)),
         Format::Sqlite => sqlite(d),
         Format::LevelDb => Some(d.len()),

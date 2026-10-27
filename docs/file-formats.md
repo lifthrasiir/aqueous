@@ -51,6 +51,7 @@ and the design is argued in `xform-design.md`.
 | JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
 | BMP, PGM, PPM, PAM | aqr-raw | 17 files, 53 MB | 0.228 | 0.421 | 71 | 303 | 21 MB + 5.5× | 8-bit samples; not a sample of real files (PNGs of aqr-png's corpus converted, README of aqr-raw). 16-bit and RLE images are not taken |
 | PSD, PSB | aqr-psd | 56 files, 439 MB | 0.330 | 0.555 | 45 | 127 | 28 MB + 5.4× | pixels coded in 8-bit documents only; aqr-psd itself takes a few MB besides its streams, the rest is the archive's (a file kept raw is scanned by the parts aqr-psd tells) |
+| DDS (BC1–BC5) | aqr-tex | 1274 files, 402 MB | 0.347 | 0.495 | 23 | 20 | not measured | measured 2026-10-28 on a Ryzen 7 9700X with `aqr-tex-bench` (the module a thread, not `aqr-show`), on a sample of The Crew's textures; all 52,181 of them (16.4 GB): 0.325 against zstd -19's 0.403 (README of aqr-tex). Large surfaces are coded in stripes decoded at once: the largest files (2.8–5.6 MB), one at a time, 23 → 97 MB/s on 16 threads. Uncompressed DDS goes to aqr-raw's `raster-recons`; BC6H, BC7 and KTX are not taken yet |
 
 ### Audio
 
@@ -281,7 +282,7 @@ container is TIFF/EXIF.
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
-| BCn textures (DXT1–5, BC7): DDS, KTX, inside engine bundles | most of a game's install size | fixed-rate block compression, no entropy coding | endpoints and indices split into streams and predicted (the lossless side of crunch and Oodle Texture) | |
+| BC6H and BC7 textures; KTX, KTX2, engine bundles | most of a game's install size | fixed-rate block compression, no entropy coding (BC7 and BC6H: modes and partitions) | as aqr-tex does BC1–BC5 in DDS | aqr-tex |
 | Unity AssetBundle | Unity games | LZ4 (chunked) or LZMA | the LZ4 chunks reproduced | aqr-lz4 |
 | Unreal `.pak` with zlib | Unreal Engine 4 games (before Oodle) | zlib per compression block | the zlib blocks | aqr-flate |
 | Bethesda BSA, BA2 | Skyrim, Fallout | zlib or LZ4 per file | the zlib and LZ4 | aqr-flate, aqr-lz4 |

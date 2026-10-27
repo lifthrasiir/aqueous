@@ -1,0 +1,33 @@
+[package]
+name = "aqr-tex"
+version = "0.1.0"
+edition = "2024"
+description = "Block-compressed textures (BC1 to BC5) rebuilt bit for bit from their endpoints and indices, coded by context models in the pixel domain, and the DDS container around them"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`, uncompressed pixels by aqr-raw's module); without it, the code of
+# the module alone (`module`).
+encode = ["dep:aqr-formula", "dep:aqr-raw"]
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula", optional = true }
+aqr-raw = { path = "../aqr-raw", optional = true }
+
+# Tasks for the stripes of a texture (`texture`) in the module of aqr-modules.
+[target.'cfg(target_family = "wasm")'.dependencies]
+aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+aqr-formula = { path = "../aqr-formula" }
+aqr-raw = { path = "../aqr-raw" }
+zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-tex-bench"
+path = "examples/bench.rs"

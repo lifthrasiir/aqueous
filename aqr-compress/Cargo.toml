@@ -25,6 +25,7 @@ aqr-psd = { path = "../aqr-psd" }
 aqr-raw = { path = "../aqr-raw" }
 aqr-snappy = { path = "../aqr-snappy" }
 aqr-sqlite = { path = "../aqr-sqlite" }
+aqr-tex = { path = "../aqr-tex" }
 aqr-wrt = { path = "../aqr-wrt" }
 aqr-zip = { path = "../aqr-zip" }
 crc32fast = "1.5"
