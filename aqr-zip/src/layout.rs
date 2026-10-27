@@ -315,10 +315,7 @@ impl<'a> Writer<'a> {
         self.layout.extend_from_slice(&[LOCAL, body as u8]);
         match made {
             Made::Stored => varint::put(&mut self.layout, n),
-            Made::Deflated { data, record } => {
-                varint::put(&mut self.layout, data.len() as u64);
-                varint::put(&mut self.layout, record.len() as u64);
-            }
+            Made::Deflated { .. } => {}
             Made::Kept { crc, usize } => {
                 varint::put(&mut self.layout, n);
                 self.layout.extend_from_slice(&crc.to_le_bytes());
@@ -454,43 +451,7 @@ fn take(d: &[u8], p: &mut usize, n: u64) -> Result<Range<usize>> {
     Ok(r)
 }
 
-/// The deflated bodies that a layout makes, in order: the ranges of their data and records.
-pub fn jobs(layout: &[u8], data: &[u8], records: &[u8]) -> Result<Vec<(Range<usize>, Range<usize>)>> {
-    let mut out = Vec::new();
-    let mut r = Reader { d: layout, at: 0 };
-    r.varint()?;
-    let (mut dp, mut rp) = (0, 0);
-    while r.at < layout.len() {
-        let tag = r.u8()?;
-        if tag == LOCAL {
-            match r.u8()? {
-                0 => {
-                    take(data, &mut dp, r.varint()?)?;
-                }
-                1 => {
-                    let d = take(data, &mut dp, r.varint()?)?;
-                    out.push((d, take(records, &mut rp, r.varint()?)?));
-                }
-                2 => {
-                    r.varint()?;
-                    r.take(4)?;
-                    r.varint()?;
-                }
-                3 => {
-                    r.varint()?;
-                }
-                _ => return Err(corrupt()),
-            }
-        }
-        skip(&mut r, tag)?;
-    }
-    if dp != data.len() || rp != records.len() {
-        return Err(corrupt());
-    }
-    Ok(out)
-}
-
-/// Skips the rest of a record of `tag` after what [`jobs`] reads of it.
+/// Skips the rest of a record of `tag` after its tag and, of a local entry, its body.
 fn skip(r: &mut Reader, tag: u8) -> Result<()> {
     match tag {
         GAP => {
@@ -533,18 +494,41 @@ fn skip(r: &mut Reader, tag: u8) -> Result<()> {
     Ok(())
 }
 
-/// The archive of `len` bytes that `layout` makes from `data`, `kept` and `bodies`, the deflated
-/// bodies in order (those that [`jobs`] lists).
-pub fn build(layout: &[u8], data: &[u8], kept: &[u8], bodies: &[&[u8]], len: u64) -> Result<Vec<u8>> {
-    let out = assemble(layout, data, kept, bodies, len)?;
+/// Bytes that flate-set derives of each deflated body ([`deflated`]).
+pub const DERIVED: usize = 20;
+
+/// The deflated bodies in `flate` (what flate-set gives with what it derives of them, or
+/// nothing where there are none), `n` of them: each body with the CRC-32 and size of its data.
+pub fn deflated(flate: &[u8], n: usize) -> Result<Vec<(&[u8], Entry)>> {
+    let at = n.checked_mul(DERIVED).and_then(|d| flate.len().checked_sub(d)).ok_or_else(corrupt)?;
+    let (mut streams, derived) = flate.split_at(at);
+    let mut out = Vec::with_capacity(n);
+    for d in derived.chunks_exact(DERIVED) {
+        let u64_at = |i: usize| u64::from_le_bytes(d[i..i + 8].try_into().unwrap());
+        let csize = usize::try_from(u64_at(12)).ok().filter(|&c| c <= streams.len()).ok_or_else(corrupt)?;
+        let (body, rest) = streams.split_at(csize);
+        streams = rest;
+        out.push((body, Entry { crc: u32_at(d, 0), csize: csize as u64, usize: u64_at(4) }));
+    }
+    if !streams.is_empty() {
+        return Err(corrupt());
+    }
+    Ok(out)
+}
+
+/// The archive of `len` bytes that `layout` makes from `data` (the contents of the stored
+/// bodies), `flate` (the deflated bodies, [`deflated`]) and `kept`.
+pub fn build(layout: &[u8], data: &[u8], flate: &[u8], kept: &[u8], len: u64) -> Result<Vec<u8>> {
+    let n = bodies(layout)?.iter().filter(|&&b| b == Body::Deflated).count();
+    let out = assemble(layout, data, &deflated(flate, n)?, kept, len)?;
     if out.len() as u64 != len {
         return Err(Error("output of another length"));
     }
     Ok(out)
 }
 
-/// [`build`], with an output of at most `len` bytes.
-pub fn assemble(layout: &[u8], data: &[u8], kept: &[u8], bodies: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+/// [`build`], with the deflated bodies given and an output of at most `len` bytes.
+pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u8], len: u64) -> Result<Vec<u8>> {
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out: Vec<u8> = Vec::with_capacity(len.min(u32::MAX as usize));
     // Bytes are added only where they fit within `len`.
@@ -571,10 +555,7 @@ pub fn assemble(layout: &[u8], data: &[u8], kept: &[u8], bodies: &[&[u8]], len: 
                         (Body::Stored, b, None, Entry { crc: aqr_common::crc32::hash(b), csize: n, usize: n })
                     }
                     1 => {
-                        let b = &data[take(data, &mut dp, r.varint()?)?];
-                        r.varint()?;
-                        let s = *bodies.next().ok_or_else(corrupt)?;
-                        let entry = Entry { crc: aqr_common::crc32::hash(b), csize: s.len() as u64, usize: b.len() as u64 };
+                        let &(s, entry) = bodies.next().ok_or_else(corrupt)?;
                         (Body::Deflated, s, None, entry)
                     }
                     2 => {
@@ -723,10 +704,7 @@ pub fn bodies(layout: &[u8]) -> Result<Vec<Body>> {
                 [Body::Stored, Body::Deflated, Body::Kept, Body::Same].get(b as usize).copied().ok_or_else(corrupt)?,
             );
             match b {
-                1 => {
-                    r.varint()?;
-                    r.varint()?;
-                }
+                1 => {}
                 2 => {
                     r.varint()?;
                     r.take(4)?;

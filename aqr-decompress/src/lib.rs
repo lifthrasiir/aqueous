@@ -37,8 +37,9 @@ pub const ARM64: Module = Module { name: "exe-recons/arm64", version: 1 };
 /// the streams of [`cil::STREAM_NAMES`].
 pub const CIL: Module = Module { name: "exe-recons/cil", version: 1 };
 
-/// aqr-flate reconstruction of a raw DEFLATE stream. Resources: the model data of the record's
-/// profile; inputs: the data and the record.
+/// aqr-flate reconstruction of raw DEFLATE streams, one after another, and what is derived of
+/// them (CRC-32 and sizes, by its parameters). Resources: the model data of the records'
+/// profile; inputs: the data, the records and the index cutting them into the streams'.
 pub const FLATE: Module = aqr_flate::formula::MODULE;
 
 /// liblz4's fast compressor on data, for an LZ4 block or frame. Parameters: the kind of stream
@@ -53,13 +54,10 @@ pub const SNAPPY: Module = aqr_snappy::formula::MODULE;
 /// Parameters: the compressor's hash; inputs: the contents, the layout and the blocks kept.
 pub const LEVELDB: Module = aqr_snappy::formula::TABLE_MODULE;
 
-/// A ZIP archive rebuilt from the contents of its entries, its DEFLATE bodies by aqr-flate.
-/// Resources: aqr-flate's model data of the records' profile; inputs: the contents,
-/// the records, the layout and the bytes kept.
+/// A ZIP archive rebuilt from the contents of its entries. Inputs: the contents of the stored
+/// bodies, the deflated bodies with what [`FLATE`] derives of them, the layout and the bytes
+/// kept.
 pub const ZIP: Module = aqr_zip::formula::MODULE;
-/// A ZIP archive without deflated bodies, rebuilt from the contents of its entries. Inputs: the
-/// contents, the records (none), the layout and the bytes kept.
-pub const ZIP_STORED: Module = aqr_zip::formula::STORED_MODULE;
 
 /// An ar, tar or cpio archive rebuilt from the contents of its members. Inputs: the contents
 /// and the layout.
@@ -91,7 +89,7 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 23] = [
+pub const MODULES: [Module; 22] = [
     X86,
     ARM64,
     CIL,
@@ -100,7 +98,6 @@ pub const MODULES: [Module; 23] = [
     SNAPPY,
     LEVELDB,
     ZIP,
-    ZIP_STORED,
     BUNDLE,
     PNG,
     PNG_AGAINST,
@@ -283,10 +280,8 @@ impl Native {
             none(resources)?;
             aqr_snappy::formula::decode_table(params, inputs, len, threads).map_err(msg)
         } else if m == ZIP {
-            aqr_zip::formula::decode(params, resources, inputs, len, threads).map_err(msg)
-        } else if m == ZIP_STORED {
             none(resources)?;
-            aqr_zip::formula::decode_stored(params, inputs, len, threads).map_err(msg)
+            aqr_zip::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == BUNDLE {
             none(resources)?;
             aqr_bundle::formula::decode(params, inputs, len, threads).map_err(msg)

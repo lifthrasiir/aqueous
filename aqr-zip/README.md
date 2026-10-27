@@ -2,8 +2,9 @@
 
 ZIP recompression. An archive is rebuilt bit for bit from the contents of its entries, so the
 archive stores the contents instead: they compress better, and are recompressed in turn (a JPEG
-or a gzip in a ZIP is found as such). DEFLATE bodies are rebuilt by aqr-flate from the data and
-a record. Everything else is kept in a *layout*, with every fixed field stored as its XOR with a
+or a gzip in a ZIP is found as such). DEFLATE bodies are rebuilt from the data and a record by
+aqr-flate's module (`flate-set`, one application for all of them), whose output the module
+takes with the CRC-32 and sizes it derives, so `zip-recons` itself has no DEFLATE code. Everything else is kept in a *layout*, with every fixed field stored as its XOR with a
 prediction: CRCs, sizes, offsets and what the central directory repeats of the local headers
 cost nothing when they are what they should be, and are kept exactly when they are not.
 
@@ -17,10 +18,10 @@ python3 aqr-zip/scripts/make-42.py OUT.zip         # 42.zip's levels without its
 use aqr_zip::formula::{self, MODULE};
 // None where there is no local entry
 let f = formula::encode(&archive, 8).unwrap();
-// `f` rebuilds `archive` when evaluated with `formula::decode` as the module `MODULE`
+// `f` rebuilds `archive` when evaluated with `formula::apply` (`MODULE` and aqr-flate's)
 ```
 
-`FORMAT.md` specifies the modules `zip-recons` and `zip-stored`.
+`FORMAT.md` specifies the module `zip-recons`.
 
 ## What it takes
 

@@ -107,7 +107,7 @@ pub use archive::{Archived, FileReport, Input, Report, Solid, Source, compress_t
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 
-use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, Native, SNAPPY, ZIP, ZIP_STORED};
+use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, Native, SNAPPY, ZIP};
 use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
@@ -230,14 +230,13 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`SNAPPY`],
-/// [`LEVELDB`], [`ZIP`], [`ZIP_STORED`] and [`BUNDLE`], scanned.
-pub const CONTENTS: [Content; 7] = [
+/// [`LEVELDB`], [`ZIP`] and [`BUNDLE`], scanned.
+pub const CONTENTS: [Content; 6] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: SNAPPY, input: 0, nest: Nest::Scan },
     Content { module: LEVELDB, input: 0, nest: Nest::Scan },
     Content { module: ZIP, input: 0, nest: Nest::Scan },
-    Content { module: ZIP_STORED, input: 0, nest: Nest::Scan },
     Content { module: BUNDLE, input: 0, nest: Nest::Scan },
 ];
 
@@ -727,8 +726,7 @@ fn scan_with(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: 
     let found = find(d, first, opt, depth, slack, cx)?;
     // each file with the data before it, and the data after the last and the whole
     let around = description_bound(&Node::slice(0, u64::MAX, d.len() as u64));
-    let sizes: Vec<_> =
-        found.iter().map(|(_, n, child)| (*n, description_bound(&child.root).saturating_add(around))).collect();
+    let sizes: Vec<_> = found.iter().map(|(_, n, child)| (*n, bound_of(child).saturating_add(around))).collect();
     let keep = fit(around + 11, &sizes, opt.description);
 
     // the data between the files cut out of `d` once put in place
@@ -890,7 +888,9 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, 
     }
     let (prepared, plan) = prepare(f, opt, depth, cx);
     let mut children = Vec::new();
-    contents(&f.root, f, opt, depth, cx, &mut children);
+    for n in shared_nodes(f).iter().chain([&f.root]) {
+        contents(n, f, opt, depth, cx, &mut children);
+    }
     make_later(f, opt, depth, cx, &mut children);
     // (those not taken: the contents' own nested contents make and take their own)
     let mut ready = cx.ready.borrow_mut();
@@ -902,11 +902,11 @@ fn nested(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> Option<(Contents, 
     let sizes: Vec<_> = children
         .iter()
         .map(|(slice, child)| match child {
-            Some(c) => (slice.len() as usize, description_bound(&c.f.root).saturating_sub(description_bound(slice))),
+            Some(c) => (slice.len() as usize, bound_of(&c.f).saturating_sub(description_bound(slice))),
             None => (0, 0),
         })
         .collect();
-    let keep = fit(description_bound(&f.root), &sizes, opt.description);
+    let keep = fit(bound_of(f), &sizes, opt.description);
     if plan.is_empty() && !children.iter().zip(&keep).any(|((_, child), &keep)| keep && child.is_some()) {
         return None;
     }
@@ -975,6 +975,8 @@ enum Placed {
 /// ([`sets::sets`], whose formulas are `None` in `children`); the bytes left without a slice
 /// are dropped.
 fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>, opt: &Options) {
+    // (the applications of several outputs [`nested`] looked into, not those of the sets)
+    let own = f.shared.len();
     let mut outputs: Vec<Option<Node>> = (0..children.len()).map(|_| None).collect();
     for s in sets {
         let Node::Concat(outs) = f.embed(s.f) else { unreachable!("a set's root is its outputs") };
@@ -984,7 +986,7 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
         Some(o) => Some(Placed::Node(o)),
         None => c.map(Placed::Made),
     });
-    // (of the applications of several outputs too, which are not looked into)
+    // (of the applications of several outputs too)
     let mut slices = vec![0; f.streams.len()];
     f.visit(&mut |n| {
         if let &Node::Slice { stream, .. } = n
@@ -993,10 +995,34 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
             *n += 1;
         }
     });
+    let mut children = children.into_iter();
+    for i in 0..own {
+        let inputs = std::mem::take(&mut f.shared[i].apply.inputs);
+        let mut n = Node::apply(f.shared[i].apply.module, Vec::new(), inputs, 0);
+        place(&mut n, f, &slices, opt, &mut children);
+        let Node::Apply(a) = n else { unreachable!("an application") };
+        f.shared[i].apply.inputs = a.inputs;
+    }
     let mut root = std::mem::replace(&mut f.root, Node::Concat(Vec::new()));
-    place(&mut root, f, &slices, opt, &mut children.into_iter());
+    place(&mut root, f, &slices, opt, &mut children);
     f.root = root;
     f.compact();
+}
+
+/// The applications of several outputs of `f`, as nodes: what is below them comes before the
+/// root, wherever contents are looked for.
+fn shared_nodes(f: &Formula) -> Vec<Node> {
+    f.shared.iter().map(|s| Node::Apply(Box::new(s.apply.clone()))).collect()
+}
+
+/// [`description_bound`] of all of `f`: its root, and its applications of several outputs with
+/// their sizes.
+fn bound_of(f: &Formula) -> usize {
+    let shared = f.shared.iter().zip(shared_nodes(f)).map(|(s, n)| {
+        let sizes: usize = s.sizes.iter().map(|&n| aqr_common::varint::len(n)).sum();
+        description_bound(&n) + 1 + aqr_common::varint::len(s.sizes.len() as u64) + sizes
+    });
+    description_bound(&f.root) + shared.sum::<usize>()
 }
 
 /// The contents below node `n` of `f`, in order: each slice, and its formula where it has any
@@ -1186,7 +1212,9 @@ fn pure_encode(format: Format) -> Option<Encode> {
 /// a parent are not made but left out of the contents ([`Cx::skip`]).
 fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usize, Format)>, sets::Plan) {
     let mut jobs = Vec::new();
-    pure_contents(&f.root, None, f, opt, &mut jobs);
+    for n in shared_nodes(f).iter().chain([&f.root]) {
+        pure_contents(n, None, f, opt, &mut jobs);
+    }
     if jobs.len() < 2 {
         return Default::default();
     }

@@ -366,6 +366,7 @@ pub fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formul
     }
     f.streams[F_META].data = meta;
     let mut inputs = vec![f.push("pdf/table", table), f.push("pdf/skeleton", skel), f.push("pdf/raw", raw)];
+    let deflate = aqr_flate::formula::streams(&mut f, deflate).expect("records of known profiles");
     inputs.extend([Node::pack(deflate), Node::pack(png), Node::pack(jpeg)]);
     for (part, (name, kind)) in toks.into_iter().zip(TOK_CLASSES) {
         inputs.push(f.push_as(name, kind, part));
@@ -638,11 +639,12 @@ struct Pool {
 
 /// The formula being built: the pools of the classes' own kinds and metadata are its first
 /// streams (`F_POOL`, `F_META`, filled at the end), then the images' formulas and the pools of
-/// other kinds as they come; and the nodes of the slots that hold the items' rebuilt DEFLATE
-/// streams, PNG files and JPEG files.
+/// other kinds as they come; the DEFLATE streams that aqr-flate's module rebuilds for the slots
+/// that hold them (in applications of a profile each, split into them); and the nodes of the
+/// slots that hold the items' PNG files and JPEG files.
 pub(crate) struct Parts {
     pub f: Formula,
-    pub deflate: Vec<Node>,
+    pub deflate: Vec<aqr_flate::formula::Item>,
     pub png: Vec<Node>,
     pub jpeg: Vec<Node>,
 }
@@ -733,8 +735,8 @@ impl Sections {
                 let pool = Node::slice(p.stream, p.data.len() as u64, plain.len() as u64);
                 let record = Node::slice(F_META, self.meta.len() as u64, m.len() as u64);
                 let profile = aqr_flate::record_profile(&m).expect("a record");
-                let deflate = aqr_flate::formula::apply(profile, pool, record, head.deflate as u64);
-                self.fm.deflate.push(deflate.expect("a record of a known profile"));
+                let (data, record) = ((pool, plain.len()), (record, m.len()));
+                self.fm.deflate.push(aqr_flate::formula::Item { profile, data, record, len: head.deflate as u64 });
                 self.pools[c].data.extend_from_slice(&plain);
                 self.meta.extend_from_slice(&m);
                 (FULL, len, m.len())

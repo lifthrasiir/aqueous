@@ -1,20 +1,20 @@
-# The `zip-recons` and `zip-stored` modules
+# The `zip-recons` module
 
-This document specifies the modules `zip-recons` and `zip-stored` of aqr-formula entry
-formulas. They are one module but for the resources, so the document speaks of "the module".
-The module rebuilds a ZIP archive bit for bit from the contents of its entries, its DEFLATE bodies by
-aqr-flate, and a *layout* holding the rest of the archive. The layout keeps every byte of the
+This document specifies the module `zip-recons` of aqr-formula entry formulas. The module
+rebuilds a ZIP archive bit for bit from the contents of its entries, its DEFLATE bodies (which
+an application of aqr-flate's module `flate-set` gives it, with their CRC-32 and sizes), and a
+*layout* holding the rest of the archive. The layout keeps every byte of the
 headers, but each fixed field is stored as its XOR with a prediction from the contents and
 from the records before it, so that whatever a writer put there is kept exactly and what
-follows from the rest costs zero bytes. The document is meant to be complete together with
-aqr-flate's `FORMAT.md` (the records): an implementation of the module can be written from
-them alone. Sections marked *(encoder)* describe the choices this implementation makes when it
+follows from the rest costs zero bytes. The module itself runs no DEFLATE code: an implementation of
+it can be written from this document alone, and aqr-flate's `FORMAT.md` specifies the
+application giving its second input. Sections marked *(encoder)* describe the choices this implementation makes when it
 builds formulas; the module does not depend on them.
 
 Contents:
 
 1. [Conventions](#1-conventions)
-2. [The modules](#2-the-modules)
+2. [The module](#2-the-module)
 3. [The layout](#3-the-layout)
 4. [Predictions](#4-predictions)
 5. [Encoding](#5-encoding-encoder) *(encoder)*
@@ -52,24 +52,30 @@ Contents:
   the values, in order, into the data from its start, as long as the next value fits entirely.
   The block headers are never coded, so the zip64 data is found the same way before and after.
 
-## 2. The modules
+## 2. The module
 
-- **Modules**: name `zip-recons`, version 2, for an archive with a deflated body (§3.2) at
-  least; name `zip-stored`, version 1, for one without.
+- **Module**: name `zip-recons`, version 3.
 - **Params**: none (empty).
-- **Resources**: for `zip-recons`, the two resources of aqr-flate's module `flate-recons` for
-  the profile of the records: the catalog's rules, then the default models or the priors
-  (aqr-flate's `FORMAT.md`, "Resources"). All records must be of that one profile. For
-  `zip-stored`, none.
+- **Resources**: none.
 - **Inputs**: exactly four:
-  1. `data` (class `raw`): the contents of the stored and deflated bodies, in order;
-  2. `records` (class `flate/record`): the aqr-flate records of the deflated bodies, in order;
+  1. `data`: the contents of the stored bodies, in order;
+  2. `deflated`: the deflated bodies one after another, then for each in order, 20 bytes:
+     `le32` the CRC-32 of its data, `le64` the length of its data, `le64` the length of the
+     body. Empty where there is no deflated body;
   3. `layout` (class `zip/layout`): §3;
   4. `kept` (class `zip/kept`): the gaps and the bodies kept as they are, in order.
 - **Output**: the archive of §3. Its length must be the `len` the application declares.
 
-`data` is what the entries hold, as it is; it is a content of the application and may be
-recompressed in turn.
+With `n` deflated bodies in the layout (§3.2), the last `20n` bytes of `deflated` are the
+table, and the bytes before it are cut into the bodies by the lengths it gives, which must use
+them up exactly.
+
+The encoder gives `data` as the contents themselves, slices of streams of class `raw` (or
+`zip/<kind>`, §5); it is a content of the application and may be recompressed in turn. It gives
+`deflated` as an application of aqr-flate's module `flate-set` with params `[1]` (aqr-flate's
+`FORMAT.md`, "Formula module"), which outputs exactly that: the streams, then the CRC-32 and
+lengths of each. Its data is the contents of the deflated bodies (a content too), its records
+a stream of class `flate/record`, and its index one of class `flate/index`.
 
 ## 3. The layout
 
@@ -99,9 +105,7 @@ fields in the layout:
 ```text
 u8      body          0: stored, 1: deflated, 2: kept, 3: same
 body 0: varint n      the body is the next n bytes of data
-body 1: varint n      the next n bytes of data, D
-        varint r      the next r bytes of records, R: the body is aqr-flate's stream
-                      rebuilt from D and R
+body 1: (nothing)     the body is the next deflated body (§2)
 body 2: varint n      the body is the next n bytes of kept
         le32 crc      the entry's CRC-32 and uncompressed size (§3.4)
         varint size
@@ -146,7 +150,7 @@ its fields are predicted.
 | body | CRC-32 | compressed size | uncompressed size |
 |---|---|---|---|
 | stored | crc32 of its data | `n` | `n` |
-| deflated | crc32 of `D` | length of the body | `n` |
+| deflated | as the table gives it (§2) | length of the body | as the table gives it |
 | kept | as given | `n` | as given |
 | same | that of the entry whose body it takes | | |
 
@@ -241,8 +245,12 @@ its offset `clip32` of the offset of `start(q)`, comment length `c`. Then `count
   data, then inflated in order of their expansion, the least first, while they fit: past it, the
   most expanding (zip bombs, 42.zip's zeros) are kept as they are, and cost no memory.
 - `base` is the base found. The layout is checked by building the archive from it with the
-  bodies as they are, without aqr-flate, which must give the input; else there is no formula.
-  An archive without a local entry has none either.
+  deflated bodies as they are, without aqr-flate, which must give the input; else there is no
+  formula. An archive without a local entry has none either.
+- The contents are streams by the kind of each entry's name (`Options::kind`): those of unknown
+  kinds in `raw`, the others in `zip/<kind>`, the stored bodies' and the deflated bodies' apart
+  (so each kind has up to two streams). The data and records of the deflated bodies go to one
+  application of `flate-set`, of `Options::profile`.
 
 aqr-compress gives the limit as what is left of its budget for the whole file
 (`Options::expansion`), and recompresses `data` in turn. An archive is found in data at a local
@@ -253,14 +261,12 @@ from the end of the data.
 
 The module fails if:
 
-- the params are not empty, the inputs are not four, or the resources are not two for
-  `zip-recons`;
-- `zip-recons` has no deflated body, or `zip-stored` has one, or the records are of different
-  profiles;
+- the params are not empty, the inputs are not four, or there are resources;
 - the layout is malformed: a truncated varint or field, an unknown tag, body, descriptor form or
   `same` bit, a name, extra field or comment longer than 65535 bytes, a `ref` naming no earlier
   entry, `same` without a local entry, `k` of 0 or past the first entry, or a range past the end
-  of `data`, `records` or `kept`;
-- `data`, `records` or `kept` is not used up exactly;
-- aqr-flate fails on a deflated body;
+  of `data` or `kept`;
+- `deflated` is shorter than its table, or its bodies run past the bytes before the table or
+  do not use them up exactly;
+- `data` or `kept` is not used up exactly;
 - the output is not `len` bytes long.

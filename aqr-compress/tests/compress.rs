@@ -4,7 +4,7 @@ use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
     ARM64, BUNDLE, FLAC, FLATE, JPEG, LEVELDB, LZ4, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE, WRT, X86, ZIP,
-    ZIP_STORED, decompress,
+    decompress,
 };
 use aqr_formula::aqr;
 
@@ -95,6 +95,27 @@ fn archive_files() {
     // The output checksum is verified.
     let c = encoder().encode(&recompress(&d, &all()), Some(aqr::checksum(&d) ^ 1)).unwrap();
     assert_eq!(decompress(&c, 1), Err(aqr::Failure::Invalid("output checksum mismatch".into())));
+}
+
+/// A gzip member's trailer is derived by aqr-flate's module where it is right, and kept as it
+/// is where it is not.
+#[test]
+fn gzip_trailer() {
+    let opt = all();
+    let d = gzip(&text(100_000));
+    let trailer = |f: &Formula| f.streams.iter().find(|s| s.class == "gzip").unwrap().data.len();
+    let f = roundtrip(&d, &opt);
+    let Node::Concat(parts) = &f.root else { panic!("{f}") };
+    let Node::Apply(a) = &parts[1] else { panic!("{f}") };
+    assert_eq!(a.params, [2]);
+    let header = trailer(&f);
+    for at in [d.len() - 8, d.len() - 1] {
+        let mut wrong = d.clone();
+        wrong[at] ^= 1;
+        let f = roundtrip(&wrong, &opt);
+        assert_eq!(modules(&f), [FLATE.name]);
+        assert_eq!(trailer(&f), header + 8);
+    }
 }
 
 #[test]
@@ -448,12 +469,13 @@ fn pdf_nested() {
         ("/Filter /LZWDecode", text(1_000_000)),
     ]);
     let f = roundtrip(&d, &all());
-    assert_eq!(modules(&f), [PDF.name, FLATE.name, FLATE.name, FLAC.name], "{f}");
+    // (the two FlateDecode streams one application, the FLAC file found in its data)
+    assert_eq!(modules(&f), [PDF.name, FLAC.name, FLATE.name], "{f}");
     // The FLAC file, the only data of its class, is not left in a pool beside its formula.
     let classes = |f: &Formula| f.streams.iter().map(|s| s.class.to_string()).collect::<Vec<_>>();
     assert!(!classes(&f).contains(&"pdf/pool-data".into()), "{f}");
     let f = roundtrip(&d, &Options { depth: 1, ..all() });
-    assert_eq!(modules(&f), [PDF.name, FLATE.name, FLATE.name]);
+    assert_eq!(modules(&f), [PDF.name, FLATE.name]);
     assert!(classes(&f).contains(&"pdf/pool-data".into()), "{f}");
 }
 
@@ -623,7 +645,8 @@ fn zip_nested() {
     let gz = gzip(&t);
     let d = zip(&[("a.txt", &t, true), ("b.flac", &flac, true), ("c.jpg", &jpeg, false), ("d.gz", &gz, false)]);
     let f = roundtrip(&d, &all());
-    assert_eq!(modules(&f), [ZIP.name, FLAC.name, JPEG.name, FLATE.name]);
+    // (the deflated bodies, the FLAC file among them, given the archive by aqr-flate's module)
+    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name, FLATE.name, FLAC.name]);
     // found in data, and in data inflated from a gzip member
     let f = roundtrip(&[&b"some data before "[..], &d, b" and after"].concat(), &all());
     assert_eq!(modules(&f)[0], ZIP.name);
@@ -640,7 +663,7 @@ fn zip_nested() {
     // archives written by tools
     for name in ["py-stream.zip", "infozip.zip", "go.zip", "ditto.zip", "bsdtar.zip"] {
         let f = roundtrip(&fixture(&format!("aqr-zip/tests/data/{name}")), &all());
-        assert_eq!(modules(&f), [ZIP.name], "{name}");
+        assert_eq!(modules(&f), [ZIP.name, FLATE.name], "{name}");
     }
 }
 
@@ -653,9 +676,9 @@ fn zip_cut() {
     let d = zip(&[("a.txt", &t, true), ("b.jpg", &jpeg, false), ("c.txt", &t, true)]);
     let cut = &d[..d.windows(4).rposition(|w| w == b"PK\x03\x04").unwrap() + 200];
     let f = roundtrip(cut, &all());
-    assert_eq!(modules(&f), [ZIP.name, JPEG.name]);
+    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name]);
     let f = roundtrip(&[&b"some data before "[..], cut].concat(), &all());
-    assert_eq!(modules(&f), [ZIP.name, JPEG.name]);
+    assert_eq!(modules(&f), [ZIP.name, JPEG.name, FLATE.name]);
 }
 
 /// An RGBA PNG file of a picture of `w` x `h` (noise, rows filtered with Sub), with the pixels
@@ -752,9 +775,10 @@ fn zip_nested_like_42() {
     let t = std::time::Instant::now();
     let f = roundtrip(&level, &opt);
     assert!(t.elapsed().as_secs() < 60);
-    // five levels of archives (the innermost of stored entries), and nothing inflated as much
-    // as the zeros
-    assert_eq!(modules(&f), [ZIP.name, ZIP.name, ZIP.name, ZIP.name, ZIP.name, ZIP_STORED.name]);
+    // five levels of archives (each in the deflated body of the one before, the innermost of
+    // stored entries), and nothing inflated as much as the zeros
+    let levels = [ZIP.name, FLATE.name].repeat(5);
+    assert_eq!(modules(&f), [&levels[..], &[ZIP.name]].concat());
     let inflated: usize = f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum();
     assert!(inflated < 64 << 20, "{inflated}");
     // with room for it, the zeros are inflated too
@@ -810,7 +834,7 @@ fn kinds() {
         ("e.bin", &gz(70_000), false),
     ]);
     let f = roundtrip(&d, &all());
-    assert_eq!(modules(&f), [ZIP.name, FLAC.name, FLATE.name, FLATE.name, FLATE.name], "{f}");
+    assert_eq!(modules(&f), [ZIP.name, FLATE.name, FLATE.name, FLATE.name, FLATE.name, FLAC.name], "{f}");
     // Pixels are not looked into, embedded files are, and what an image's filter after
     // FlateDecode decodes is taken as such: a JPEG file for DCTDecode.
     let jpeg = fixture("aqr-jpeg/tests/data/gradient.jpg");
@@ -826,7 +850,7 @@ fn kinds() {
             ("/Filter /LZWDecode", text(1_000_000)),
         ]);
         let f = roundtrip(&d, &all());
-        let want: Vec<&str> = [PDF.name, FLATE.name, FLATE.name].into_iter().chain(found).collect();
+        let want: Vec<&str> = [PDF.name].into_iter().chain(found).chain([FLATE.name]).collect();
         assert_eq!(modules(&f), want, "{dict}: {f}");
     }
 }
@@ -920,5 +944,5 @@ fn bundles_not_deeper() {
     let z = zip(&[("a.jpg", &jpeg, false), ("b.txt", &text(3000), false)]);
     let d = gzip_named(&tar(&[("x.zip", &z)]), "x.tar");
     let f = roundtrip(&d, &Options { smaller: false, ..Options::default() });
-    assert_eq!(modules(&f), [FLATE.name, BUNDLE.name, ZIP_STORED.name, JPEG.name], "{f}");
+    assert_eq!(modules(&f), [FLATE.name, BUNDLE.name, ZIP.name, JPEG.name], "{f}");
 }

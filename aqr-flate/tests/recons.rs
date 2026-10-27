@@ -386,7 +386,7 @@ fn formula_module_takes_its_resources() {
         let res = formula::resources(profile).unwrap();
         let res: Vec<&[u8]> = res.iter().map(|r| &r[..]).collect();
         let decode =
-            |res: &[&[u8]]| formula::decode(&[], res, &[&data, &meta], raw.len() as u64, 1);
+            |res: &[&[u8]]| formula::decode(&[], res, &[&data, &meta, &[]], raw.len() as u64, 1);
         assert_eq!(decode(&res).unwrap(), raw, "profile {profile}");
         // Too few, and the coding of the other kind of profile.
         assert!(decode(&res[..1]).is_err());
@@ -412,6 +412,75 @@ fn formula_module_takes_its_resources() {
         bad[1] = 9;
         assert!(decode(&[&bad, res[1]]).is_err());
     }
+}
+
+/// The formula module rebuilds several streams of a profile, one after another, then what its
+/// parameters derive of them; and fails on records of another profile, on an index of other
+/// lengths and on any other length.
+#[test]
+fn formula_module_of_several_streams() {
+    use aqr_flate::formula::{self, Derived};
+    let inputs: Vec<Vec<u8>> = vec![
+        include_bytes!("../src/zlib.rs").to_vec(),
+        Vec::new(),
+        include_bytes!("../src/lib.rs").repeat(3),
+    ];
+    let raws: Vec<Vec<u8>> = inputs
+        .iter()
+        .map(|d| {
+            "zlib:level=6"
+                .parse::<flate_zoo::Encoder>()
+                .unwrap()
+                .compress(d)
+                .unwrap()
+        })
+        .collect();
+    let profile = aqr_flate::DEFAULT_PROFILE;
+    let opts = aqr_flate::Options::for_profile(profile).unwrap();
+    let parts: Vec<(Vec<u8>, Vec<u8>)> = raws
+        .iter()
+        .map(|r| aqr_flate::deconstruct_with(r, &opts).unwrap())
+        .collect();
+    let data: Vec<u8> = parts.iter().flat_map(|p| p.0.clone()).collect();
+    let records: Vec<u8> = parts.iter().flat_map(|p| p.1.clone()).collect();
+    let lens: Vec<(usize, usize)> = parts.iter().map(|p| (p.0.len(), p.1.len())).collect();
+    let index = formula::index(&lens);
+    let res = formula::resources(profile).unwrap();
+    let res: Vec<&[u8]> = res.iter().map(|r| &r[..]).collect();
+    let all = raws.concat();
+    for derived in [Derived::None, Derived::Zip, Derived::Gzip] {
+        let mut want = all.clone();
+        for (d, r) in inputs.iter().zip(&raws) {
+            derived.put(d, r.len(), &mut want);
+        }
+        let decode = |index: &[u8], len: usize| {
+            formula::decode(
+                &derived.params(),
+                &res,
+                &[&data, &records, index],
+                len as u64,
+                4,
+            )
+        };
+        assert_eq!(decode(&index, want.len()).unwrap(), want);
+        assert!(decode(&index, want.len() + 1).is_err());
+        assert!(decode(&formula::index(&lens[..2]), want.len()).is_err());
+        assert!(decode(&[], want.len()).is_err());
+    }
+    // A gzip member's trailer: the check value of CRC-32, and the length.
+    let mut t = Vec::new();
+    Derived::Gzip.put(b"123456789", 0, &mut t);
+    assert_eq!(t, [0x26, 0x39, 0xf4, 0xcb, 9, 0, 0, 0]);
+    // Records of another profile.
+    let other = aqr_flate::Options::for_profile(aqr_flate::ADAPTIVE).unwrap();
+    let mut mixed = parts[0].1.clone();
+    mixed.extend_from_slice(&parts[1].1);
+    let last = aqr_flate::deconstruct_with(&raws[2], &other).unwrap().1;
+    mixed.extend_from_slice(&last);
+    let mut lens = lens;
+    lens[2].1 = last.len();
+    let index = formula::index(&lens);
+    assert!(formula::decode(&[], &res, &[&data, &mixed, &index], all.len() as u64, 1).is_err());
 }
 
 /// Coding under several chain rules at once (`tokens::code_chains`, one walk of each chain

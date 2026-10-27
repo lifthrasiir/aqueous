@@ -1,6 +1,6 @@
 //! Which ZIP archives in files the module rebuilds, what that is worth, and how fast: entries
-//! by how their bodies are made, zstd -3 of the archives and of the module's inputs, and the
-//! encoder's and module's speeds. Only these totals are printed, never names or contents
+//! by how their bodies are made, zstd -3 of the archives and of the formulas' streams, and the
+//! encoder's and modules' speeds (aqr-zip's and aqr-flate's). Only these totals are printed, never names or contents
 //! (`-v` adds a line per archive, by its index).
 //!
 //! ```sh
@@ -10,7 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use aqr_formula::Node;
+use aqr_formula::Apply;
 use aqr_zip::formula;
 use aqr_zip::layout::{self, Body};
 
@@ -63,7 +63,6 @@ fn main() {
         };
         enc_secs += start.elapsed().as_secs_f64();
         rebuilt += 1;
-        let Node::Apply(a) = &f.root else { unreachable!() };
         let n = kinds(&f.streams[2].data);
         (0..4).for_each(|i| entries[i] += n[i]);
         let zs: Vec<usize> = f.streams.iter().map(|s| zstd(&s.data)).collect();
@@ -74,9 +73,11 @@ fn main() {
                 None => classes.push((s.class.to_string(), s.data.len(), *z)),
             }
         }
-        let ins: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         let start = Instant::now();
-        let ok = formula::apply(a, &ins, threads).is_ok_and(|o| o == d);
+        let module = |a: &Apply, ins: &[&[u8]]| {
+            formula::apply(a, ins, threads).map_err(|e| aqr_formula::Error::new(format!("{e:?}")))
+        };
+        let ok = f.eval(&module).is_ok_and(|o| o == d);
         dec_secs += start.elapsed().as_secs_f64();
         made += d.len();
         if !ok {

@@ -46,11 +46,11 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/flac-recons.block"),
     },
     Known {
-        name: "flate-recons",
+        name: "flate-set",
         version: 1,
-        sha512_256: hex("fc46f48f78aa9245cfa5f5141126708d214b69ee8aae1b96e5c06e989ff8f58a"),
-        wasm: include_bytes!("../wasm/flate-recons.wasm"),
-        block: include_bytes!("../wasm/flate-recons.block"),
+        sha512_256: hex("ed012c37473560448c38810d9fbd9d39d3ffe353462b6490de8bada7cb7d7130"),
+        wasm: include_bytes!("../wasm/flate-set.wasm"),
+        block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
         name: "jpeg-recons",
@@ -152,16 +152,9 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "zip-recons",
-        version: 2,
-        sha512_256: hex("d50e0abddb630ef722d3c6633d8054122ce046ab716f3223d6ec13bce516168c"),
+        version: 3,
+        sha512_256: hex("e63dbb2c77f4fa9bd251ac5fe6990bbbc4e41037926549c757ae5d62d8a5b1bd"),
         wasm: include_bytes!("../wasm/zip-recons.wasm"),
         block: include_bytes!("../wasm/zip-recons.block"),
-    },
-    Known {
-        name: "zip-stored",
-        version: 1,
-        sha512_256: hex("5cddf7f05f53320df77ea0e934dbe3097063866045a9ba7ae84f778300291d2a"),
-        wasm: include_bytes!("../wasm/zip-stored.wasm"),
-        block: include_bytes!("../wasm/zip-stored.block"),
     },
 ];

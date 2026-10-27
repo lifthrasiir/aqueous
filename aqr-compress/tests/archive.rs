@@ -164,7 +164,7 @@ fn files_given_back() {
     assert_eq!(sets(&r), [vec![5, 6, 7]]);
     let names = |c: usize| r.files[c].modules.iter().map(|m| m.name).collect::<Vec<_>>();
     // (its text coded by aqr-wrt)
-    assert_eq!(names(8), ["flate-recons", "wrt-recons"]);
+    assert_eq!(names(8), ["flate-set", "wrt-recons"]);
     assert_eq!(names(9), ["jpeg-recons"]);
     let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
     assert!(

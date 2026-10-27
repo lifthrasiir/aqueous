@@ -1,13 +1,14 @@
-//! aqr-flate as a module of entry formulas (see aqr-formula): [`reconstruct_with`] on two
-//! inputs, the data and the record, and no parameters. Its two resources are the model data
-//! of the record's profile, in binary (FORMAT.md, "Resources"): the rules of the catalog, then
-//! the default models or the priors.
+//! aqr-flate as a module of entry formulas (see aqr-formula): [`reconstruct_with`] on three
+//! inputs, the data and the records of streams of one profile and the index cutting them, which
+//! it gives one after another, then what its parameters derive of them ([`Derived`]). Its two resources
+//! are the model data of the records' profile, in binary (FORMAT.md, "Resources"): the rules of
+//! the catalog, then the default models or the priors.
 //!
 //! [`reconstruct_with`]: crate::reconstruct_with
 
 use std::sync::OnceLock;
 
-use aqr_formula::{Module, Node, Resource};
+use aqr_formula::{Apply, Formula, Module, Node, Resource};
 
 use crate::adapt::Priors;
 use crate::code::{self};
@@ -15,23 +16,105 @@ use crate::tokens::{FIELDS, Rule};
 use crate::{ADAPTIVE, Coding, Result};
 
 use crate::module::RULE_BYTES;
-pub use crate::module::{decode, models_from_bytes, priors_from_bytes, rules_from_bytes};
+pub use crate::module::{
+    Derived, decode, index, models_from_bytes, priors_from_bytes, rules_from_bytes,
+};
 
 pub const MODULE: Module = Module {
-    name: "flate-recons",
+    name: "flate-set",
     version: 1,
 };
 
-/// The application rebuilding a DEFLATE stream of `len` bytes from `data` and `record`
-/// (what [`crate::deconstruct`] gives with `profile`).
-pub fn apply(profile: u16, data: Node, record: Node, len: u64) -> Result<Node> {
-    Ok(Node::apply_with(
-        MODULE,
-        resources(profile)?,
-        Vec::new(),
-        vec![data, record],
+/// The application rebuilding streams of `profile` from `data` and `records` (what
+/// [`crate::deconstruct`] gives, one after another) as `index` cuts them ([`index`]), of `len`
+/// bytes with `derived` after them.
+pub fn apply(
+    profile: u16,
+    data: Node,
+    records: Node,
+    index: Node,
+    len: u64,
+    derived: Derived,
+) -> Result<Apply> {
+    Ok(Apply {
+        module: MODULE,
+        resources: resources(profile)?,
+        params: derived.params(),
+        inputs: vec![data, records, index],
         len,
-    ))
+    })
+}
+
+/// The application rebuilding a single stream of `len` bytes from `data` and `record`, with
+/// `derived` after it.
+pub fn apply_one(
+    profile: u16,
+    data: Node,
+    record: Node,
+    len: u64,
+    derived: Derived,
+) -> Result<Node> {
+    let len = len + derived.bytes() as u64;
+    let a = apply(
+        profile,
+        data,
+        record,
+        Node::Concat(Vec::new()),
+        len,
+        derived,
+    )?;
+    Ok(Node::Apply(Box::new(a)))
+}
+
+/// A DEFLATE stream of `len` bytes to rebuild from data and a record of `profile`, of these
+/// nodes and lengths.
+pub struct Item {
+    pub profile: u16,
+    pub data: (Node, usize),
+    pub record: (Node, usize),
+    pub len: u64,
+}
+
+/// The streams of `items` in `f`, in order: by profile, the outputs of an application split
+/// into them (or the application itself, for a single stream), their indexes streams of class
+/// `flate/index`.
+pub fn streams(f: &mut Formula, items: Vec<Item>) -> Result<Vec<Node>> {
+    let mut profiles: Vec<u16> = items.iter().map(|i| i.profile).collect();
+    profiles.sort_unstable();
+    profiles.dedup();
+    let mut out: Vec<Option<Node>> = (0..items.len()).map(|_| None).collect();
+    let mut groups: Vec<(Vec<usize>, Vec<Item>)> =
+        profiles.iter().map(|_| Default::default()).collect();
+    for (k, item) in items.into_iter().enumerate() {
+        let g = &mut groups[profiles.binary_search(&item.profile).unwrap()];
+        g.0.push(k);
+        g.1.push(item);
+    }
+    for (&p, (at, items)) in profiles.iter().zip(groups) {
+        if let [one] = &items[..] {
+            let (data, record) = (one.data.0.clone(), one.record.0.clone());
+            out[at[0]] = Some(apply_one(p, data, record, one.len, Derived::None)?);
+            continue;
+        }
+        let lens: Vec<(usize, usize)> = items.iter().map(|i| (i.data.1, i.record.1)).collect();
+        let sizes: Vec<u64> = items.iter().map(|i| i.len).collect();
+        let index = f.push("flate/index", crate::module::index(&lens));
+        // (the data of each a content of its own, so not merged)
+        let (data, records): (Vec<Node>, Vec<Node>) =
+            items.into_iter().map(|i| (i.data.0, i.record.0)).unzip();
+        let a = apply(
+            p,
+            Node::Concat(data),
+            Node::concat(records),
+            index,
+            sizes.iter().sum(),
+            Derived::None,
+        )?;
+        for (k, n) in at.into_iter().zip(f.split(a, sizes)) {
+            out[k] = Some(n);
+        }
+    }
+    Ok(out.into_iter().map(Option::unwrap).collect())
 }
 
 /// The resources of a profile: its built-in model data in binary.

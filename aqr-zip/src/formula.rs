@@ -1,12 +1,13 @@
-//! aqr-zip as modules of entry formulas (see aqr-formula): a ZIP archive rebuilt from the
-//! contents of its entries, the DEFLATE streams by aqr-flate ([`MODULE`]), or of an archive
-//! without them ([`STORED_MODULE`]). `FORMAT.md` specifies them. The contents may be
-//! recompressed in turn.
+//! aqr-zip as a module of entry formulas (see aqr-formula): a ZIP archive rebuilt from the
+//! contents of its entries ([`MODULE`]), its DEFLATE streams given by an application of
+//! aqr-flate's module (`flate-set`) with what that derives of them (CRC-32 and sizes).
+//! `FORMAT.md` specifies it. The contents may be recompressed in turn.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
+use aqr_flate::formula::Derived;
 use aqr_flate::{Hints, Parsed};
 use aqr_formula::aqr::Encoder;
 use aqr_formula::probe::{self, Held, Probe};
@@ -16,14 +17,12 @@ use crate::layout::{self, Made, Writer};
 use crate::zip::{self, DEFLATED, ENCRYPTED, Rec, STORED};
 use crate::{Result, corrupt};
 
-pub use crate::module::{decode, decode_stored};
+pub use crate::module::decode;
 use crate::module::{par_jobs, par_map};
 
-/// An archive of a deflated body at least, with aqr-flate's model data ([`decode`]).
-pub const MODULE: Module = Module { name: "zip-recons", version: 2 };
-
-/// An archive without deflated bodies, of no resources ([`decode_stored`]).
-pub const STORED_MODULE: Module = Module { name: "zip-stored", version: 1 };
+/// An archive rebuilt from the contents of its entries, the deflated bodies given by aqr-flate's
+/// module ([`decode`]).
+pub const MODULE: Module = Module { name: "zip-recons", version: 3 };
 
 /// Bodies shorter than this are not looked for among earlier ones.
 const SAME_MIN: usize = 16;
@@ -289,21 +288,23 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     });
 
     let mut w = Writer::new(input, base);
-    // the data and records of all the bodies, of the size they take, each body's dropped once
-    // in place
-    let sizes = made.iter().zip(&locals).fold((0, 0), |(n, r), (m, l)| match m {
-        Made::Stored => (n + l.body.len(), r),
-        Made::Deflated { data, record } => (n + data.len(), r + record.len()),
-        _ => (n, r),
+    // The contents of the stored bodies and the data of the deflated ones apart, each of the
+    // size they take, each body's dropped once in place; the records one after another.
+    let sizes = made.iter().zip(&locals).fold((0, 0, 0), |(s, n, r), (m, l)| match m {
+        Made::Stored => (s + l.body.len(), n, r),
+        Made::Deflated { data, record } => (s, n + data.len(), r + record.len()),
+        _ => (s, n, r),
     });
     // (the data of a body that is all of it taken as it is)
-    let (mut data, mut records) = (Vec::new(), Vec::with_capacity(sizes.1));
-    let put = |data: &mut Vec<u8>, d: &[u8]| {
-        data.reserve_exact(sizes.0 - data.len());
+    let (mut stored, mut data, mut records) = (Vec::new(), Vec::new(), Vec::with_capacity(sizes.2));
+    let put = |data: &mut Vec<u8>, d: &[u8], size: usize| {
+        data.reserve_exact(size - data.len());
         data.extend_from_slice(d);
     };
-    // the kind of each entry's contents, and their end in `data`
-    let mut kinds: Vec<(Kind, usize)> = Vec::new();
+    // the kind of each entry's contents and their end, of the stored and the deflated; the
+    // lengths of each deflated body's data and record, and what flate-set derives of it
+    let (mut stored_kinds, mut kinds): (Vec<(Kind, usize)>, Vec<(Kind, usize)>) = (Vec::new(), Vec::new());
+    let (mut lens, mut derived) = (Vec::new(), Vec::new());
     let mut locals = locals.iter().zip(made.iter_mut()).zip(crcs);
     for r in &recs {
         match r {
@@ -311,19 +312,25 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             Rec::Local(_) => {
                 let ((l, m), crc) = locals.next().unwrap();
                 w.local(l, m, crc);
+                let kind = (opt.kind)(&input[l.name.clone()]);
                 match m {
-                    Made::Stored => put(&mut data, &input[l.body.clone()]),
+                    Made::Stored => {
+                        put(&mut stored, &input[l.body.clone()], sizes.0);
+                        stored_kinds.push((kind, stored.len()));
+                    }
                     Made::Deflated { data: dd, record } => {
-                        match dd.len() == sizes.0 {
+                        lens.push((dd.len(), record.len()));
+                        derived.extend_from_slice(&crc.to_le_bytes());
+                        derived.extend_from_slice(&(dd.len() as u64).to_le_bytes());
+                        derived.extend_from_slice(&(l.body.len() as u64).to_le_bytes());
+                        match dd.len() == sizes.1 {
                             true => data = std::mem::take(dd),
-                            false => put(&mut data, &std::mem::take(dd)),
+                            false => put(&mut data, &std::mem::take(dd), sizes.1),
                         }
                         records.extend_from_slice(record);
+                        kinds.push((kind, data.len()));
                     }
                     _ => {}
-                }
-                if matches!(m, Made::Stored | Made::Deflated { .. }) {
-                    kinds.push(((opt.kind)(&input[l.name.clone()]), data.len()));
                 }
             }
             Rec::Central(c) => w.central(c),
@@ -335,30 +342,46 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let (layout, kept) = (w.layout, w.kept);
     // The layout must give the archive back with the bodies as they are: a check of everything
     // but aqr-flate, which is cheap.
-    let jobs = layout::jobs(&layout, &data, &records).ok()?;
-    let deflated: Vec<&[u8]> = made
+    let mut flate: Vec<u8> = made
         .iter()
         .zip(locals_bodies(&recs, input))
         .filter_map(|(m, b)| matches!(m, Made::Deflated { .. }).then_some(b))
+        .flatten()
+        .copied()
         .collect();
-    if jobs.len() != deflated.len()
-        || layout::build(&layout, &data, &kept, &deflated, input.len() as u64).ok().as_deref() != Some(input)
-    {
+    let flate_len = flate.len() + derived.len();
+    flate.extend_from_slice(&derived);
+    if layout::build(&layout, &stored, &flate, &kept, input.len() as u64).ok().as_deref() != Some(input) {
         return None;
     }
-    let (module, resources) = match records.is_empty() {
-        true => (STORED_MODULE, Vec::new()),
-        false => (MODULE, aqr_flate::formula::resources(opt.profile).ok()?),
-    };
+    drop(flate);
+    // (the inputs the first streams, the kinds' after them)
     let mut f = Formula::default();
-    let mut inputs = vec![
-        f.push("raw", Vec::new()),
-        f.push("flate/record", records),
-        f.push("zip/layout", layout),
-        f.push("zip/kept", kept),
-    ];
-    inputs[0] = f.push_by_kind(0, data, &kinds, "zip", OWN_MIN);
-    f.root = Node::apply_with(module, resources, Vec::new(), inputs, input.len() as u64);
+    f.push("raw", Vec::new());
+    f.push("raw", Vec::new());
+    let (layout, kept) = (f.push("zip/layout", layout), f.push("zip/kept", kept));
+    let flate = match lens.is_empty() {
+        true => None,
+        false => {
+            let records = f.push("flate/record", records);
+            let index = match aqr_flate::formula::index(&lens) {
+                i if i.is_empty() => Node::Concat(Vec::new()),
+                i => f.push("flate/index", i),
+            };
+            Some((records, index))
+        }
+    };
+    let stored = f.push_by_kind(0, stored, &stored_kinds, "zip", OWN_MIN);
+    let flate = match flate {
+        None => Node::Concat(Vec::new()),
+        Some((records, index)) => {
+            let data = f.push_by_kind(1, data, &kinds, "zip", OWN_MIN);
+            let a =
+                aqr_flate::formula::apply(opt.profile, data, records, index, flate_len as u64, Derived::Zip).ok()?;
+            Node::Apply(Box::new(a))
+        }
+    };
+    f.root = Node::apply(MODULE, Vec::new(), vec![stored, flate, layout, kept], input.len() as u64);
     Some(Encoded { formula: f, inflated })
 }
 
@@ -367,12 +390,13 @@ fn locals_bodies<'a>(recs: &'a [Rec], d: &'a [u8]) -> impl Iterator<Item = &'a [
     recs.iter().filter_map(move |r| if let Rec::Local(l) = r { Some(&d[l.body.clone()]) } else { None })
 }
 
-/// The output of `a`, an application of either module, on `inputs`.
+/// The output of `a`, an application of [`MODULE`] or of aqr-flate's, on `inputs`.
 pub fn apply(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> Result<Vec<u8>> {
     let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
     match a.module {
-        MODULE => decode(&a.params, &res, inputs, a.len, threads),
-        STORED_MODULE if res.is_empty() => decode_stored(&a.params, inputs, a.len, threads),
+        MODULE if res.is_empty() => decode(&a.params, inputs, a.len, threads),
+        aqr_flate::formula::MODULE => aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads)
+            .map_err(|_| crate::Error("DEFLATE stream not rebuilt")),
         _ => Err(corrupt()),
     }
 }

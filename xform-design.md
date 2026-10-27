@@ -345,6 +345,15 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 > - 인코더가 스트림마다 *크기 + λ·시간*을 최소화하는 모드를 고른다. 시간은 파일 크기 / (1.1 × 목표 속도)라는 예산 안에 들어야 한다.
 > - 측정치도 png와 같은 결론이다. 모든 FlateDecode 스트림을 aqr-flate로 합성하면 CC 표본에서 0.810에 29 / 55 MB/s이다. 예산을 건 기본 계획(바이트 기준으로 raw가 절반, 그다음 jpeg, tok 순)은 0.864에 157 / 186 MB/s이다. aqr-flate는 *평문* 기준으로 60–270 MB/s에 재구성하는데, PDF 스트림은 풀면 2–12배로 커지기 때문이다.
 >
+> **근거: aqr-zip은 합성으로 바꿨다(2026-10-27).** zip-recons가 본문마다 aqr-flate를 불렀으므로 flate 코드가 zip-recons와 flate-recons에 중복되어 있었다(블록 97.4 KB 중 약 80 KB).
+>
+> - flate-recons를 `flate-set`으로 바꿨다. 한 프로파일의 스트림 여럿을 데이터·레코드를 이어 붙인 것과 그 길이의 색인(varint)으로 받아 이어서 내고, 파라미터에 따라 각 스트림의 파생값(ZIP: CRC-32·원래 길이·스트림 길이, gzip: 트레일러)을 뒤에 붙인다. 스트림이 하나면 색인은 비운다. 2 MiB 이상인 스트림은 세그먼트 병렬, 작은 것들은 2 MiB 남짓씩 묶어 task로 돈다(전에는 zip-recons가 하던 일).
+> - zip-recons(3)는 flate-set의 출력을 통째로 입력 하나로 받아 파생값 표로 잘라 쓴다. 그래서 Split도, 엔트리별 노드도 없다. 엔트리마다 Pack 항목을 두면 식 기술이 엔트리당 5–10 B 늘어서 색인 쪽을 택했다. 파생값을 모듈이 내므로 공유(§4.4) 없이 CRC를 저장하지 않는다. zip-stored는 zip-recons에 합쳤다(본문이 없으면 빈 입력).
+> - gzip은 트레일러가 맞으면 flate-set이 만든다(8 B). aqr-pdf의 full 모드는 스트림마다 `apply` 하나이던 것을 프로파일마다 flate-set 하나와 Split으로 바꿨다. aqr-compress는 Split되는 `apply`의 입력에서도 내용물을 찾는다.
+> - 블록: zip-recons 97.4 → 17.7 KB, flate-recons 85.5 → flate-set 89.8 KB. flate-set이 커진 것은 바깥 task 묶음 때문이다(그 정렬을 Wasm에서 빼서 2.5 KB, 재구성 호출을 하나로 모아 0.8 KB, task 결과를 `Option`으로 0.5 KB 줄인 뒤).
+> - M4에서 `aqr` 단일 파일. ZIP만 있는 아카이브는 모듈 둘(107.5 KB)이 되어 10 KB 커진다(src.zip 923.6 → 933.7 KB). 엔트리가 많으면 레이아웃의 본문별 varint 둘이 빠져 그보다 많이 준다(crates.zip, 엔트리 10 769개: 14.684 → 14.659 MB). ZIP과 flate를 쓰는 PDF가 함께 있으면 75 KB 준다(1.661 → 1.586 MB). 디코드 시간은 잡음 안이다(crates.zip 네이티브 0.334 → 0.339 s, Wasm 0.60 s 그대로; 881026.zip 네이티브 0.143 → 0.145 s, Wasm 0.55 → 0.58 s).
+> - aqr-png는 그대로 융합이다. png-recons는 aqr-flate의 레코드를 쓰지 않고 토큰을 픽셀 문맥으로 코딩하므로 떼어 낼 flate 노드가 없다.
+>
 > **근거: 코드 중복의 현황.**
 >
 > - png, psd, pdf가 각각 flate를 품고, psd와 pdf는 png와 jpeg까지 품는다.
@@ -609,11 +618,11 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 - 결과는 스케줄과 무관하다. task가 다른 task와 주고받는 것은 join 결과와 채널 메시지뿐이고, 둘 다 프로그램 순서로 정해진 지점에서만 받는다(KPN). 호스트는 task를 순차, 병렬, 지연 실행 어느 쪽으로든 돌릴 수 있다. 채널이 없으면 순차 실행도 된다.
 - 세그먼트 구조는 필터의 메타데이터 안에 있으므로 엔트리 식으로 끌어올리지 않는다.
 
-**1단계: fork-join [구현].** 명세 "Module execution"의 "Tasks"에 반영했다(`aqr_spawn`, `aqr_result`, `aqr_join`, `aqr_take`, task entry point `aqr_task`, start 함수 금지, 메모리 한도). aqr-api(`task`), aqr-ld, aqr-decompress(wasmtime)에 들어가 있다. 모듈 쪽에서는 flate-recons의 세그먼트 배치, sqlite-recons의 테이블 첫 패스와 인덱스 순서, zip-recons의 항목, png-recons·png-against의 이미지, png-set의 깊이별 파일, jpeg-recons의 stripe가 task로 돈다. 명세에 없는 툴체인 쪽 약속은 다음과 같다.
+**1단계: fork-join [구현].** 명세 "Module execution"의 "Tasks"에 반영했다(`aqr_spawn`, `aqr_result`, `aqr_join`, `aqr_take`, task entry point `aqr_task`, start 함수 금지, 메모리 한도). aqr-api(`task`), aqr-ld, aqr-decompress(wasmtime)에 들어가 있다. 모듈 쪽에서는 flate-set의 스트림과 세그먼트 배치, sqlite-recons의 테이블 첫 패스와 인덱스 순서, png-recons·png-against의 이미지, png-set의 깊이별 파일, jpeg-recons의 stripe가 task로 돈다. 명세에 없는 툴체인 쪽 약속은 다음과 같다.
 
 - **스택 포인터.** 새 인스턴스의 global은 초깃값이므로, aqr-ld가 만드는 `aqr_task`가 `__stack_pointer`를 `arg & -16`으로 놓고 aqr-api의 `aqr_task_body`를 부른다. aqr-ld는 스택 포인터를 "링커 출력의 유일한 mutable global"로 찾는다.
 - **기록의 위치.** `arg`는 aqr-api가 인라인되지 않는 함수(`spawn_record`)의 프레임에 둔 기록(task가 부를 함수와 클로저)이다. 그 프레임은 호출자들의 프레임보다 아래에 있으므로, 클로저가 빌린 것은 모두 task의 스택 위쪽에 그대로 남는다. 처음에는 기록을 `spawn` 안에 두었다. 그러자 `spawn`이 인라인된 호출자 프레임에서 기록보다 아래에 놓인 지역 변수(sqlite의 `by_table`, zip의 `records`)를 task의 스택이 덮어써서, sqlite, zip, jpeg가 Wasm에서 실패했다. aqr-compress의 `zip_png_set`이 잡았다. flate는 프레임 배치가 우연히 맞았다.
-- **인스턴스 수.** task 하나가 인스턴스 하나이므로 작은 일은 묶는다. zip은 2 MiB 이상인 항목을 하나씩, 나머지는 2 MiB 남짓씩 묶어 task로 돌린다.
+- **인스턴스 수.** task 하나가 인스턴스 하나이므로 작은 일은 묶는다. flate-set은 데이터가 2 MiB 이상인 스트림을 하나씩, 나머지는 2 MiB 남짓씩 묶어 task로 돌린다.
 
 > **근거: `spawn`을 묶음으로 둔 이유.** 스냅샷 비용은 작업 메모리 크기에 비례한다. CoW로 줄일 수 있는지는 플랫폼마다 다르다.
 >
@@ -698,7 +707,7 @@ patch(s, d)[a:b]      = patch(s, d)를 b까지 평가한 출력의 [a:b]
 - aqr-api `task::spawn(n, &f)`이 `f(i, &mut out)`을 task로 돌리고, `Tasks::join(i)`이 결과 바이트를 준다. 네이티브 에뮬레이션(`emu`)은 spawn할 때 호출 스레드에서 차례로 돌린다. 작업 메모리 밖의 메모리가 비어 있다는 규칙도 흉내 낸다.
 - aqr-common `pool::par_map_apart`가 `par_map`의 자리를 맡는다(§5.7의 par-map trait). 네이티브에서는 `par_map`이고, Wasm에서는 항목마다 task이다. 결과는 aqr-common `wire::Wire`로 바이트가 된다. 결과가 힙 구조체인 경우가 많아서이다(flate `Vec<Token>`, rans64 alias 표, sqlite 키와 순열, mp3 rANS 디코더). 오류의 `&'static str` 같은 것은 넘어가지 않으므로 메시지만 잃는다. 어느 쪽이든 실패이다.
 - 그 밖의 `par_map`, `scope`는 Wasm에서 워커가 없으므로 직렬이다. 옮기려면 결과를 `Wire`로 만들고 `par_map_apart`로 바꾼다. 채널은 `sync_channel` 꼴로 감쌀 것이다.
-- 모듈 바이너리는 스레드 수를 상수로 준다(flate-recons는 8). 출력은 그 수와 무관하고, 정해지는 것은 배치 크기(그래서 task 수와 메모리)뿐이다.
+- 모듈 바이너리는 스레드 수를 상수로 준다(flate-set은 8). 출력은 그 수와 무관하고, 정해지는 것은 배치 크기(그래서 task 수와 메모리)뿐이다.
 - `OnceLock` 표는 `spawn` 전에 부모가 만들어 두면 스냅샷으로 물려받는다(flate 모델, mp3 huff 디코더, flac CRC, raw residual 표, rans64 디코드 표). task 안에서 처음 만들면 task마다 다시 만든다.
 - Wasm 빌드의 `pool`은 워커가 없다. `reserve`는 늘 빈 예약이고, `run`과 `dispatch`는 호출 스레드에서 돈다. 그래서 `threads`가 1보다 커도 `par_map_apart` 밖은 직렬 경로로 내려간다.
 

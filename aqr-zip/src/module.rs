@@ -1,11 +1,9 @@
-//! The code of the modules (see `formula`, and FORMAT.md), which needs no aqr-formula, so that
-//! aqr-modules builds it into their Wasm modules.
-
-use aqr_common::wire::Wire;
-use aqr_flate::{ADAPTIVE, Coding, ModelData};
+//! The code of the module (see `formula`, and FORMAT.md), which needs no aqr-formula, so that
+//! aqr-modules builds it into its Wasm module; and the encoder's helpers to run jobs in
+//! parallel.
 
 use crate::layout;
-use crate::{Error, Result, corrupt};
+use crate::{Result, corrupt};
 
 /// Bytes from which a DEFLATE stream gets threads of its own: two of aqr-flate's segments.
 const LARGE: usize = 2 << 20;
@@ -30,100 +28,15 @@ pub(crate) fn par_jobs<T: Sync, R: Send>(
     out.into_iter().map(Option::unwrap).collect()
 }
 
-/// [`par_jobs`] whose jobs run as tasks on WebAssembly (`aqr_common::pool::par_map_apart`):
-/// those of at least [`LARGE`] a task each, the others together, a task for each [`LARGE`] of
-/// them or so (a task costs an instance).
-pub(crate) fn par_jobs_apart<T: Sync, R: Send + Wire>(
-    items: &[T],
-    size: impl Fn(&T) -> usize + Sync,
-    threads: usize,
-    f: impl Fn(&T, usize) -> R + Sync,
-) -> Vec<R> {
-    if !cfg!(target_family = "wasm") {
-        return par_jobs(items, size, threads, f);
-    }
-    let mut order: Vec<usize> = (0..items.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(size(&items[i])));
-    let mut groups = Vec::new();
-    let mut k = 0;
-    while k < order.len() {
-        let (start, mut sum) = (k, 0);
-        while k < order.len() && (k == start || sum + size(&items[order[k]]) <= LARGE) {
-            sum += size(&items[order[k]]);
-            k += 1;
-        }
-        groups.push(start..k);
-    }
-    let done = aqr_common::pool::par_map_apart(groups.len(), threads, |g| {
-        let job = |&i: &usize| f(&items[i], if size(&items[i]) >= LARGE { threads } else { 1 });
-        order[groups[g].clone()].iter().map(job).collect::<Vec<R>>()
-    });
-    let mut out: Vec<Option<R>> = (0..items.len()).map(|_| None).collect();
-    for (&i, r) in order.iter().zip(done.into_iter().flatten()) {
-        out[i] = Some(r);
-    }
-    out.into_iter().map(Option::unwrap).collect()
-}
-
 /// `f` on every element of `items`, on up to `threads` threads.
 pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     aqr_common::pool::par_map(items.len(), threads, |i| f(&items[i]))
 }
 
-/// The module [`MODULE`]: the archive of `len` bytes rebuilt from `inputs`, the data, the
-/// records, the layout and the bytes kept, with `resources`, aqr-flate's model data of the
-/// records' profile.
-pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    if resources.len() != 2 {
-        return Err(Error("resources not those of the records"));
-    }
-    rebuild(params, resources, inputs, len, threads)
-}
-
-/// The module [`STORED_MODULE`]: [`decode`] of an archive without deflated bodies, so without
-/// records or resources.
-pub fn decode_stored(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    rebuild(params, &[], inputs, len, threads)
-}
-
-fn rebuild(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    let (&[], &[data, records, layout, kept]) = (params, inputs) else { return Err(corrupt()) };
-    let jobs = layout::jobs(layout, data, records)?;
-    let flate = |e: aqr_flate::Error| match e {
-        aqr_flate::Error::Corrupt => Error("corrupt record"),
-        _ => Error("DEFLATE stream not rebuilt"),
-    };
-    let bodies: Vec<Vec<u8>> = match (resources, jobs.first()) {
-        (_, None) if resources.is_empty() => Vec::new(),
-        (&[rules, coding], Some((_, r0))) => {
-            let profile = aqr_flate::record_profile(&records[r0.clone()]).map_err(flate)?;
-            let rules = aqr_flate::module::rules_from_bytes(rules).map_err(flate)?;
-            let (models, priors);
-            let model = if profile >= ADAPTIVE {
-                priors = aqr_flate::module::priors_from_bytes(coding).map_err(flate)?;
-                ModelData { rules: &rules, coding: Coding::Adaptive(&priors) }
-            } else {
-                models = aqr_flate::module::models_from_bytes(coding).map_err(flate)?;
-                ModelData { rules: &rules, coding: Coding::Static(&models) }
-            };
-            // (as tasks on WebAssembly)
-            par_jobs_apart(
-                &jobs,
-                |(d, _)| d.len(),
-                threads,
-                |(d, r), per| {
-                    let rec = &records[r.clone()];
-                    if aqr_flate::record_profile(rec).map_err(flate)? != profile {
-                        return Err(Error("records of another profile"));
-                    }
-                    aqr_flate::reconstruct_with(&data[d.clone()], rec, model, per).map_err(flate)
-                },
-            )
-            .into_iter()
-            .collect::<Result<_>>()?
-        }
-        _ => return Err(Error("resources not those of the records")),
-    };
-    let bodies: Vec<&[u8]> = bodies.iter().map(|b| &b[..]).collect();
-    layout::build(layout, data, kept, &bodies, len)
+/// The module [`MODULE`]: the archive of `len` bytes rebuilt from `inputs`: the contents of
+/// the stored bodies, the deflated bodies with what aqr-flate's module derives of them
+/// (`layout::deflated`), the layout and the bytes kept.
+pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
+    let (&[], &[data, flate, layout, kept]) = (params, inputs) else { return Err(corrupt()) };
+    layout::build(layout, data, flate, kept, len)
 }

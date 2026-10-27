@@ -9,11 +9,11 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
 }
 
-/// The module's output from the formula's inputs.
-fn decode(f: &Formula, threads: usize) -> aqr_zip::Result<Vec<u8>> {
-    let Node::Apply(a) = &f.root else { panic!("not an application") };
-    let ins: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
-    formula::apply(a, &ins, threads)
+/// The formula's output, by the modules of aqr-zip and aqr-flate.
+fn decode(f: &Formula, threads: usize) -> aqr_formula::Result<Vec<u8>> {
+    f.eval(&|a: &aqr_formula::Apply, ins: &[&[u8]]| {
+        formula::apply(a, ins, threads).map_err(|e| aqr_formula::Error::new(format!("{e:?}")))
+    })
 }
 
 /// Encodes `d`, checking that the module gives it back, and how the bodies are made.
@@ -500,7 +500,7 @@ fn nested_like_42() {
     let (f, b) = roundtrip_with(&level, &Options::default());
     assert_eq!(b[0], Body::Deflated);
     assert_eq!(count(&b, Body::Same), 15);
-    assert_eq!(f.streams[0].data.len(), {
+    assert_eq!(f.streams[1].data.len(), {
         let z = aqr_zip::zip::records(&level).2;
         let aqr_zip::zip::Rec::Local(l) = &z[0] else { panic!() };
         aqr_zip::zip::deflate_len(&level[l.body.clone()]).unwrap().1
@@ -515,7 +515,7 @@ fn damaged_inputs() {
     let mut rng = Rng::new(3);
     for i in 0..2000 {
         let mut g = f.clone();
-        let s = &mut g.streams[[2, 2, 2, 0, 1, 3][i % 6]].data;
+        let s = &mut g.streams[[2, 2, 2, 1, 4, 3][i % 6]].data;
         if s.is_empty() {
             continue;
         }
@@ -556,7 +556,8 @@ fn damaged_archives() {
 }
 
 /// The contents of the entries are a stream for each kind their names give, sliced in order,
-/// the unknown ones in `raw`; the inputs stay the first four streams.
+/// the unknown ones in `raw`, of the stored bodies and of the deflated apart; the inputs stay
+/// the first streams.
 #[test]
 fn contents_by_kind() {
     use aqr_formula::Kind;
@@ -576,17 +577,22 @@ fn contents_by_kind() {
         classes,
         [
             ("raw", Kind::Unknown),
-            ("flate/record", Kind::Unknown),
+            ("raw", Kind::Unknown),
             ("zip/layout", Kind::Unknown),
             ("zip/kept", Kind::Unknown),
+            ("flate/record", Kind::Unknown),
+            ("flate/index", Kind::Unknown),
+            ("zip/text", Kind::Text),
+            ("zip/png", Kind::Format("png")),
             ("zip/text", Kind::Text),
             ("zip/png", Kind::Format("png")),
         ]
     );
     let text_len = |n| text(n).len();
     // (b.txt is a.txt again, taken as the same body)
-    assert_eq!(f.streams[4].data.len(), text_len(30_000) + text_len(4000));
-    assert_eq!(f.streams[5].data.len(), text_len(2000) + 3000);
+    assert_eq!(f.streams[6].data.len() + f.streams[8].data.len(), text_len(30_000) + text_len(4000));
+    assert_eq!(f.streams[7].data.len() + f.streams[9].data.len(), text_len(2000) + 3000);
+    assert_eq!(f.streams[7].data.len(), 3000);
     // the same archive, and the same data as without kinds
     let Node::Apply(a) = &f.root else { panic!() };
     let module = |a: &aqr_formula::Apply, ins: &[&[u8]]| {
@@ -601,5 +607,7 @@ fn contents_by_kind() {
     };
     let Node::Apply(p) = &plain.root else { panic!() };
     assert!(data(&f, &a.inputs[0]) == data(&plain, &p.inputs[0]));
-    assert!(plain.streams.len() == 4 && f.streams[1..4] == plain.streams[1..4]);
+    let (Node::Apply(fa), Node::Apply(pa)) = (&a.inputs[1], &p.inputs[1]) else { panic!() };
+    assert!(data(&f, &fa.inputs[0]) == data(&plain, &pa.inputs[0]));
+    assert!(plain.streams.len() == 6 && f.streams[2..6] == plain.streams[2..6]);
 }

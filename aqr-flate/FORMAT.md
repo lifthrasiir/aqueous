@@ -952,10 +952,13 @@ tables. `deconstruct` keeps to tighter limits; see [Domain](#domain).
 ## Formula module
 
 The same representation as a module of entry formulas (`aqr-formula`), in
-`formula::apply` and `formula::decode`. The module is `flate-recons`, version 1. Its output
-is the DEFLATE stream with its trailing bytes, whose length the application gives, rebuilt as
-in [Rebuilding the stream](#rebuilding-the-stream), with the model data of its
-[resources](#resources) in place of the profile's files.
+`formula::apply` and `formula::decode`. The module is `flate-set`, version 1. It rebuilds one
+or more DEFLATE streams of one profile, each with its trailing bytes, as in
+[Rebuilding the stream](#rebuilding-the-stream), with the model data of its
+[resources](#resources) in place of the profile's files. Its output is the streams one after
+another, then what its parameters derive of each (below). A container cuts it into the
+streams by their lengths, which it knows (a Split instruction of the formula), or takes it
+whole and cuts it itself (aqr-zip, by the lengths derived).
 
 ### Domain
 
@@ -974,8 +977,8 @@ It must also be within the limits of a record: `N < 2^32 − 1`, at most 2^30 tr
 decoder's bound in [Implementation limits](#implementation-limits), which allows another
 `8(b + 1)`, so that it holds whatever precedes the block count.
 
-`deconstruct` rejects any other input. A formula holds such input as it is rather than as an
-application of this module.
+`deconstruct` rejects any other input. A formula holds such input as it is rather than as a
+stream of this module.
 
 **Every stream in the domain has a record**, in every profile and with every rule. For
 instance, with the rule `literals` (in the catalog or in full):
@@ -992,23 +995,39 @@ instance, with the rule `literals` (in the catalog or in full):
 
 ### Parameters and inputs
 
-**Parameters**: none (empty).
+**Parameters**: what is derived of each stream, after all of them:
 
-**Inputs**: exactly two, in this order.
+| params | for each stream, in order |
+|---|---|
+| none (empty) | nothing |
+| `01` | the CRC-32 of its data (u32), the length of its data (u64), the length of the stream (u64): 20 bytes, what a ZIP archive's headers say of an entry |
+| `02` | the CRC-32 of its data (u32), the length of its data mod 2^32 (u32): 8 bytes, a gzip member's trailer |
+
+The CRC-32 is ZIP's and gzip's (reflected polynomial `0xEDB88320`, register set to
+`0xFFFFFFFF` and inverted at the end).
+
+**Inputs**: exactly three, in this order.
 
 | slot | content | already compressed |
 |---|---|---|
-| 0 | the data `D` | no: whatever the stream held (text, image rows, …) |
-| 1 | the [record](#the-record): the profile (u16) and the body | mostly: the corrections are rANS or arithmetic coded, and the main and header streams pack their fields in bits; general-purpose compression gains little |
+| 0 | the data `D` of every stream, one after another | no: whatever the streams held (text, image rows, …) |
+| 1 | the [records](#the-record) of every stream, one after another: each the profile (u16) and the body | mostly: the corrections are rANS or arithmetic coded, and the main and header streams pack their fields in bits; general-purpose compression gains little |
+| 2 | the index: for each stream, the length of its data and the length of its record (varints); or empty, for a single stream of all the data and all the records | |
 
-The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`
-and `flate/record` in aqr-compress, slices of `pdf/pool-<class>` and `pdf/meta` in
-aqr-pdf).
+The index cuts the data and the records into the streams', which it must use up exactly. All
+the records must be of the same profile. The streams are rebuilt independently of each other
+(in parallel, the module gives each of at least 2 MiB of data threads of its own and runs
+smaller ones side by side).
 
-The module fails on any parameters, any other count of inputs or resources, an invalid
-resource or record that it detects, or a rebuilt stream whose length is not the
-application's declared output size. The specification ("Module execution") makes such a
-failure an invalid archive failure.
+The module has no classes of its own: the maker of the formula names the inputs (e.g. `raw`,
+`flate/record` and `flate/index` in aqr-compress and aqr-zip, slices of `pdf/pool-<class>`
+and `pdf/meta` in aqr-pdf).
+
+The module fails on any other parameters, any other count of inputs or resources, an index
+that does not cut the data and records exactly (a truncated varint, a length past what is
+left, bytes left over), records of different profiles, an invalid resource or record that it
+detects, or an output whose length is not the application's declared output size. The
+specification ("Module execution") makes such a failure an invalid archive failure.
 
 ### Resources
 

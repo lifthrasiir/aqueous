@@ -1,6 +1,7 @@
 //! gzip and zlib: the container sliced around aqr-flate on its DEFLATE stream, whose
 //! data is a content of the application, recompressed in turn (composition, §4.5): gzip's of
-//! the kind of its name, if it has one ([`kind_by_name`]).
+//! the kind of its name, if it has one ([`kind_by_name`]). A gzip member's trailer is derived
+//! by aqr-flate's module, where it is right.
 //!
 //! The stream is parsed once, and deconstructed only where that may pay
 //! ([`aqr_formula::probe`]): what it saves comes from its data compressing better than DEFLATE
@@ -9,7 +10,7 @@
 
 use std::ops::Range;
 
-use aqr_decompress::FLATE;
+use aqr_flate::formula::Derived;
 use aqr_flate::inflate::{self, Sink};
 use aqr_flate::{Hints, Parsed};
 use aqr_formula::{Formula, Kind, Node};
@@ -129,18 +130,30 @@ fn wrap(
     #[cfg(test)]
     crate::tests::DECONSTRUCTED.with(|n| n.set(n.get() + 1));
     let (data, record, _) = parsed.deconstruct(&fopt, hints).ok()?;
-    let resources = aqr_flate::formula::resources(fopt.profile).ok()?;
     if record.len() >= raw.len() {
         return None;
     }
+    // a gzip member's trailer as aqr-flate's module derives it, where it is that
+    let derived = match class {
+        "gzip" => {
+            let mut t = Vec::new();
+            Derived::Gzip.put(&data, raw.len(), &mut t);
+            match d.get(raw.end..raw.end + 8) == Some(&t[..]) {
+                true => Derived::Gzip,
+                false => Derived::None,
+            }
+        }
+        _ => Derived::None,
+    };
+    let rest = raw.end + derived.bytes();
     let mut f = Formula::default();
-    f.push(class, [&d[..raw.start], &d[raw.end..]].concat());
+    f.push(class, [&d[..raw.start], &d[rest..]].concat());
     let record = f.push("flate/record", record);
     let data = f.push_as("raw", kind, data);
     f.root = Node::concat([
         Node::slice(0, 0, raw.start as u64),
-        Node::apply_with(FLATE, resources, vec![], vec![data, record], raw.len() as u64),
-        Node::slice(0, raw.start as u64, (d.len() - raw.end) as u64),
+        aqr_flate::formula::apply_one(fopt.profile, data, record, raw.len() as u64, derived).ok()?,
+        Node::slice(0, raw.start as u64, (d.len() - rest) as u64),
     ]);
     Some(f)
 }
