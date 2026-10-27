@@ -65,7 +65,7 @@ fn same_natively() {
 fn errors_logged() {
     assert!(native(b"|", &[b"res"], &[b"ab", b""], 7).is_err());
     let Err(Failure { log, .. }) = apply(&mixed::ENTRY, &[b"ab", b""], &[b"res"], b"|", &[7]) else { panic!() };
-    assert_eq!(log.as_deref(), Some(&b"\"not of the size declared\""[..]));
+    assert_eq!(log.as_deref(), Some(&b"not of the size declared"[..]));
     // past the length declared, though within the memory: as natively
     let Err(Failure { log, .. }) = apply(&mixed::ENTRY, &[b"ab", b""], &[b"res"], b"|", &[5]) else { panic!() };
     assert_eq!(log.as_deref(), Some(&b"aqr_api: out of bounds"[..]));

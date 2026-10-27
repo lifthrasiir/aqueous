@@ -7,6 +7,12 @@ use crate::par;
 #[derive(Debug)]
 pub struct Error(pub String);
 
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Slots: the eight byte streams of the coded form, then the rANS words (u32 LE) and the raw
 /// bits.
 pub(crate) const SLOTS: usize = N_BYTE_STREAMS + 2;

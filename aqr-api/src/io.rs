@@ -218,11 +218,12 @@ pub fn whole<S: Src, D: Dst<S>, E>(
     Ok(())
 }
 
-/// Returns if `r` is `Ok`; else logs the error and traps, as a module fails.
-pub fn finish<E: fmt::Debug>(r: Result<(), E>) {
+/// Returns if `r` is `Ok`; else logs the error and traps, as a module fails. The error is
+/// displayed, not debugged: `Debug` escapes strings, which takes Unicode tables in.
+pub fn finish<E: fmt::Display>(r: Result<(), E>) {
     if let Err(e) = r {
         let mut msg = Msg { buf: [0; 512], len: 0 };
-        let _ = write!(msg, "{e:?}");
+        let _ = write!(msg, "{e}");
         crate::log(&msg.buf[..msg.len]);
         crate::trap()
     }
