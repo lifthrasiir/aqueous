@@ -4598,8 +4598,8 @@ as follows:</p>
       <td>exe-recons/cil@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>
     <tr>
-      <td><code>f5ceceece1de6f707fc514c2a02c75c56017934faf93bf7413ffaf3a33a0acae</code>
-      <td>exe-recons/x86@1
+      <td><code>81cfd768b794a2565ec5150ec5a139805bef9e7d824a77e2bc94550e85a85542</code>
+      <td>exe-recons/x86@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>
     <tr>
       <td><code>f15b8d3355fc8929c25d263b6b752516a3e675cbd476ee5933f6900a8cb9718b</code>

@@ -26,7 +26,7 @@ use aqr_formula::{Apply, Error, Module, Modules, Result};
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; inputs: the streams of
 /// [`x86::STREAM_NAMES`].
-pub const X86: Module = Module { name: "exe-recons/x86", version: 1 };
+pub const X86: Module = Module { name: "exe-recons/x86", version: 2 };
 
 /// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
 /// inputs: the streams of [`arm64::STREAM_NAMES`].

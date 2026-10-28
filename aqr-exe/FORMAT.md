@@ -5,8 +5,9 @@ This document specifies the module `exe-recons/x86` of aqr-formula entry formula
 [`exe-recons/cil`](#the-exe-reconscil-module) after it. The x86 module rebuilds a section
 of x86 or x86-64 machine code from streams that a disfilter split it into:
 instructions are parsed, and their fields (opcodes, ModR/M and SIB bytes, prefixes,
-displacements, immediates, jump and call targets, addresses) go to streams of their own, which
-compress better apart than interleaved. Relative targets become absolute, so that repeated
+displacements, immediates, jump and call targets, addresses) go to streams by what they are,
+which compress better apart than interleaved; fields that the opcodes around them tell best
+(REX bits, 8-bit immediates) or that are rare stay with the opcodes. Relative targets become absolute, so that repeated
 calls and references to one place look alike; calls to recent targets become indices into a
 move-to-front cache; padding between functions and jump tables are recognised. The document is
 meant to be complete: an implementation of the module can be written from it alone. Sections
@@ -42,7 +43,7 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `exe-recons/x86`, version 1.
+- **Module**: name `exe-recons/x86`, version 2.
 - **Params**: exactly 10 bytes.
 
   ```text
@@ -52,36 +53,31 @@ Contents:
   ```
 
 - **Resources**: none.
-- **Inputs**: exactly 46, the streams of §3 in order. Each is of class `x86/NAME` (`x86/OP`,
-  `x86/DISP8_R0`, ...).
+- **Inputs**: exactly 13, the streams of §3 in order. Each is of class `x86/NAME` (`x86/OP`,
+  `x86/SIB`, ...).
 - **Output**: the code of §5. Its length must be the `len` the application declares.
 
 ## 3. Streams
 
 | # | name | contents |
 |---|---|---|
-| 0 | `OP` | the instruction stream: prefixes, map bytes, opcodes, ModR/M bytes, markers (§5.2), escaped bytes and jump table counts |
-| 1 | `EVEX` | the third byte of EVEX prefixes, rearranged |
-| 2 | `VEX` | the payload byte of VEX and EVEX prefixes, rearranged |
-| 3 | `REX` | REX bits: of REX and REX2 prefixes, and those of VEX and EVEX |
-| 4 | `SIB` | SIB bytes |
-| 5 | `CALL_IDX` | call cache indices (§5.4) |
-| 6–13 | `DISP8_R0` … `DISP8_R7` | 8-bit displacements, by the ModR/M `rm` field |
-| 14 | `DISP16` | 16-bit displacements |
-| 15 | `DISP32` | 32-bit displacements |
-| 16 | `JUMP8` | 8-bit relative jumps, as they are |
-| 17 | `JUMP16` | 16-bit relative jumps and absolute far jump offsets, as they are |
-| 18 | `JUMP32` | 32-bit jump targets in x86-32: absolute (`le32`) |
-| 19 | `JUMP64` | 32-bit jump targets in x86-64: absolute (`le64`) |
-| 20–23 | `IMM8`, `IMM16`, `IMM32`, `IMM64` | immediates |
-| 24–26 | `ADDR16`, `ADDR32`, `ADDR64` | absolute addresses; in x86-64, the targets of RIP-relative operands (`le64`) |
-| 27 | `CALL32` | call targets missing from the cache in x86-32 (`le32`) |
-| 28 | `CALL64` | call targets missing from the cache in x86-64 (`le64`) |
-| 29 | `JUMPTAB64` | entries of x86-64 jump tables, as they are (`le64`) |
-| 30–45 | `PAD0` … `PAD15` | padding after control transfers, by the low 4 bits of its address |
+| 0 | `OP` | the instruction stream: prefixes, map bytes, opcodes, ModR/M bytes, markers (§5.2), escaped bytes and jump table counts; the bytes of VEX and EVEX prefixes and REX bits (§5.2); 8-, 16- and 64-bit immediates; 16-bit displacements, addresses and jumps; padding records (§5.5) |
+| 1 | `SIB` | SIB bytes |
+| 2 | `CALL_IDX` | call cache indices (§5.4) |
+| 3 | `DISP8_SP` | 8-bit displacements from `rsp` (`esp`), with an index or not |
+| 4 | `DISP8_BP` | 8-bit displacements from `rbp` (`ebp`) |
+| 5 | `DISP8` | other 8-bit displacements without an index |
+| 6 | `DISP8_IDX` | other 8-bit displacements with an index |
+| 7 | `DISP32` | 32-bit displacements |
+| 8 | `JUMP8` | 8-bit relative jumps, as they are |
+| 9 | `JUMP` | 32-bit jump targets, absolute: `le32` in x86-32, `le64` in x86-64; absolute far jump offsets (`le32`); entries of x86-64 jump tables, as they are (`le64`) |
+| 10 | `IMM32` | 32-bit immediates |
+| 11 | `ADDR` | 32- and 64-bit absolute addresses; in x86-64, the targets of RIP-relative operands (`le64`) |
+| 12 | `CALL` | call targets missing from the cache: `le32` in x86-32, `le64` in x86-64 |
 
-All 46 are always present, possibly empty. Bytes left in any stream when decoding ends are
-ignored.
+All 13 are always present, possibly empty. Bytes left in any stream when decoding ends are
+ignored. A field is read from the next bytes of its stream, whatever fields came before them:
+`OP` holds its fields in the order §5 reads them.
 
 ## 4. Opcode classes
 
@@ -206,12 +202,12 @@ By `b`:
 
 - `F4` (escape): read a byte from `OP` and append it. Empty `P`.
 - `F1` (jump table): read `c` from `OP`; `c + 1` entries follow. In x86-64, copy 8 bytes from
-  `JUMPTAB64` per entry. In x86-32, read a call target per entry (§5.4) and append it as
+  `JUMP` per entry. In x86-32, read a call target per entry (§5.4) and append it as
   `le32`. `P` is kept.
-- `C4`, `C5`, `62` (VEX3, VEX2, EVEX): read from `EVEX` (EVEX only), then from `VEX`, then
-  from `REX`, then the next byte `b` from `OP`; continue below with this prefix.
-- `0F` (REX) and `D5` (REX2), in x86-64 only (an error in x86-32): read a byte from `REX`,
-  then the next byte `b` from `OP`; continue below with this prefix.
+- `C4`, `C5`, `62` (VEX3, VEX2, EVEX): read from `OP` the EVEX byte (EVEX only), then the
+  VEX byte, then the REX byte, then the next byte `b`; continue below with this prefix.
+- `0F` (REX) and `D5` (REX2), in x86-64 only (an error in x86-32): read the REX byte from
+  `OP`, then the next byte `b`; continue below with this prefix.
 - Anything else: an instruction without such a prefix, continued below.
 
 Then the opcode: if `b` is `40`–`4F`, the map is `m = b − 40` and the opcode the next byte
@@ -225,12 +221,12 @@ Then the opcode: if `b` is `40`–`4F`, the map is `m = b − 40` and the opcode
 ### 5.3 Instructions
 
 1. **Prefix and opcode bytes.** By the prefix:
-   - VEX3: with `v` the `VEX` byte and `r` the `REX` byte, an error unless `v ≥ 80`,
+   - VEX3: with `v` the VEX byte and `r` the REX byte, an error unless `v ≥ 80`,
      `r < 10` and `m < 16`. Append `C4`, `((~r & 7) << 5) | m`, `((r & 8) << 4) | (v & 7F)`,
      `op`.
    - VEX2: an error unless `v ≥ 80`, `r & FB = 0` and `m = 1`. Append `C5`,
      `((~r & 4) << 5) | (v & 7F)`, `op`.
-   - EVEX: with `e` the `EVEX` byte, an error unless `e & 28 = 0`, `r < 80` and `m < 8`.
+   - EVEX: with `e` the EVEX byte, an error unless `e & 28 = 0`, `r < 80` and `m < 8`.
      Append `62`, then
      `x = ((~r & 7) << 5) | ((~r >> 2) & 10) | ((~r >> 1) & 08) | m`,
      `y = ((r & 8) << 4) | (v & 7B) | ((~r >> 3) & 04)`,
@@ -241,9 +237,10 @@ Then the opcode: if `b` is `40`–`4F`, the map is `m = b − 40` and the opcode
 
    The opcode bytes, by `m`: `op` for 0, `0F op` for 1, `0F 38 op` for 2, `0F 3A op` for 3;
    any other map is an error here (they come with VEX or EVEX only).
-2. **State.** Take `P` as the instruction's prefixes and empty it. With `r` the `REX` byte of
-   the instruction (0 if none), **REX.W** is `r & 8 ≠ 0`. The opcode `m:op` adjusts:
-   - `0:9A`, `0:EA`, `0:C8`: copy 2 bytes from `IMM16` first (the segment of a far pointer,
+2. **State.** Take `P` as the instruction's prefixes and empty it. With `r` the REX byte of
+   the instruction (0 if none), **REX.W** is `r & 8 ≠ 0`, **REX.X** `r & 2 ≠ 0` and **REX.B**
+   `r & 1 ≠ 0`. The opcode `m:op` adjusts:
+   - `0:9A`, `0:EA`, `0:C8`: copy 2 bytes from `OP` first (the segment of a far pointer,
      or `ENTER`'s 16-bit operand).
    - `0:F6`, `0:F7`, `4:F6`, `4:F7`: if the `reg` field (bits 5–3) of the next byte of `OP`,
      its ModR/M, is 2 or more, the class is `R_` (an error if `OP` is empty).
@@ -260,13 +257,13 @@ Then the opcode: if `b` is `40`–`4F`, the map is `m = b − 40` and the opcode
 
      | condition | what is appended |
      |---|---|
-     | `mod = 0`, addr16, `rm = 6` | 2 bytes copied from `ADDR16` |
+     | `mod = 0`, addr16, `rm = 6` | 2 bytes copied from `OP` |
      | `mod = 0`, addr16, other `rm` | nothing |
-     | `mod = 0`, `rm = 5`, x86-64 | `le32` of `A − (address + 4 + d)`, truncated, for `A` read as `le64` from `ADDR64` |
-     | `mod = 0`, `rm = 5`, x86-32 | 4 bytes copied from `ADDR32` |
+     | `mod = 0`, `rm = 5`, x86-64 | `le32` of `A − (address + 4 + d)`, truncated, for `A` read as `le64` from `ADDR` |
+     | `mod = 0`, `rm = 5`, x86-32 | 4 bytes copied from `ADDR` |
      | `mod = 0`, `S & 7 = 5` | 4 bytes copied from `DISP32` |
-     | `mod = 1` | 1 byte copied from `DISP8_R<rm>` |
-     | `mod = 2`, addr16 | 2 bytes copied from `DISP16` |
+     | `mod = 1` | 1 byte copied from the stream of the table below |
+     | `mod = 2`, addr16 | 2 bytes copied from `OP` |
      | `mod = 2` | 4 bytes copied from `DISP32` |
      | otherwise | nothing |
 
@@ -274,29 +271,42 @@ Then the opcode: if `b` is `40`–`4F`, the map is `m = b − 40` and the opcode
      the size of the immediate still to come: 1 for `N1`, 2 for `N4` with `66` in `P`, 4 for
      `N4` without, and 0 for any other class (`N2` too). The result is the RIP-relative
      displacement whose target is `A`.
+
+     The stream of an 8-bit displacement, by the first row that holds:
+
+     | condition | stream | (as in) |
+     |---|---|---|
+     | addr16 | `DISP8` | `[bp+si+d8]` |
+     | `rm = 4`, `S & 7 = 4`, not REX.B | `DISP8_SP` | `[rsp+d8]`, `[rsp+rcx*2+d8]` |
+     | `rm = 4`, `(S >> 3) & 7 ≠ 4` or REX.X | `DISP8_IDX` | `[rcx+rdx*4+d8]`, `[rcx+r12+d8]` |
+     | `rm = 5`, not REX.B | `DISP8_BP` | `[rbp+d8]` |
+     | otherwise | `DISP8` | `[rcx+d8]`, `[r12+d8]`, `[r13+d8]` |
+
+     (The bits that REX2 and EVEX add for registers 16 to 31 are not looked at.)
 5. **The operand**, by the class:
-   - `J4`, in x86-32 with `66` in `P`: copy 2 bytes from `JUMP16`.
+   - `J4`, in x86-32 with `66` in `P`: copy 2 bytes from `OP`.
    - `J4` otherwise: the target `T` is, for `0:E8` (`CALL`), a call target (§5.4); for others
-     a `le64` from `JUMP64` in x86-64 or a `le32` from `JUMP32` in x86-32. Append the `le32`
+     a `le64` from `JUMP` in x86-64 or a `le32` from `JUMP` in x86-32. Append the `le32`
      of `T − (address + 4)`, truncated, `address` being that of its first byte.
-   - `A_`: `n` bytes copied from `ADDR16`, `ADDR32` or `ADDR64` for `n` = 2, 4 or 8. For
+   - `A_`: `n` bytes copied from `OP` for `n` = 2, or from `ADDR` for `n` = 4 or 8. For
      `0:EA`, `n` is 2 with `66` in `P` and 4 without; for the others, `n` is 4 in x86-32 and
      8 in x86-64, halved with `67` in `P`.
-   - `JA`: in x86-32 with `66` in `P`, 2 bytes copied from `JUMP16`; otherwise 4 bytes copied
-     from `JUMP32`.
+   - `JA`: in x86-32 with `66` in `P`, 2 bytes copied from `OP`; otherwise 4 bytes copied
+     from `JUMP`.
    - `J1`: 1 byte copied from `JUMP8`.
    - `N_`: nothing.
    - `N1`, `N2`, `N4`, `NZ`: `NZ` without REX.W is `N4`; then `N4` with `66` in `P` is `N2`.
-     Copy 1, 2, 4 or 8 bytes (`N1`, `N2`, `N4`, `NZ`) from `IMM8`, `IMM16`, `IMM32` or
-     `IMM64`.
+     Copy 1, 2, 4 or 8 bytes (`N1`, `N2`, `N4`, `NZ`), from `IMM32` for 4 and from `OP`
+     otherwise.
 
-The `REX` byte of a VEX or EVEX prefix carries its W bit as bit 3 too, so REX.W reads it.
+The REX byte of a VEX or EVEX prefix carries its W, X and B bits as bits 3, 1 and 0, as that
+of a REX or REX2 prefix does, so REX.W, REX.X and REX.B read them.
 
 ### 5.4 The call cache
 
 The cache holds 256 `u64` entries, all 0 at the start. A **call target** is read thus: read
 an index `i` from `CALL_IDX`. If `i < FF`, the target is entry `i`. If `i = FF`, it is a
-`le64` from `CALL64` in x86-64, or a `le32` from `CALL32` in x86-32 (zero-extended). Then the
+`le64` from `CALL` in x86-64, or a `le32` from `CALL` in x86-32 (zero-extended). Then the
 target moves to the front: entries `0 … i−1` move to `1 … i` (for `FF`, entries `0 … FE` move
 to `1 … FF` and the last one is dropped), and entry 0 becomes the target.
 
@@ -304,8 +314,13 @@ Calls and the entries of x86-32 jump tables share the cache.
 
 ### 5.5 Padding records
 
-The stream is `PAD<a & F>`, `a` being the address of the next output byte. Read a length `n`
-from it and copy `n` bytes from it; repeat while `n = FF`. A record can be empty (`00`).
+A record is read from `OP`, `a` being the address of the next output byte. By its first byte:
+
+- `00`: nothing.
+- `01`: `16 − (a & F)` bytes `CC` are appended (16 where `a` is a multiple of 16).
+- `02`: one byte `CC` is appended.
+- `03`: read a length `n` and copy `n` bytes, from `OP`; repeat while `n = FF`.
+- anything else: an error.
 
 A record follows every instruction that sets `pad`, even the last one of the section.
 
@@ -320,8 +335,9 @@ position:
    for zero bytes at the start, then for any number of `CC`, `90`, `66 90`, `0F 1F 00`,
    `0F 1F 40 xx`, `0F 1F 44 00 xx`, `66 0F 1F 44 00 xx`, `0F 1F 80 xx xx xx xx`,
    `0F 1F 84 00 xx xx xx xx`, and the latter with one to three `66` before it. What matched
-   (possibly nothing) goes to its record in chunks of 255 bytes, each after `FF`, then the
-   rest after its length.
+   (possibly nothing) is written as `00` if nothing, `01` if all `CC` up to the next
+   multiple of 16, `02` if a single `CC`, and otherwise as `03`, then the bytes in chunks of
+   255, each after `FF`, then the rest after its length.
 2. **Jump tables**, of at least 3 entries, up to the sentinel. In x86-32, at any position: a
    run of `le32` values within the section's addresses, `[origin, origin + length − 1]`. In
    x86-64, at addresses that are multiples of 8: a run of `le64` values within
@@ -342,7 +358,7 @@ position:
      map 0 (which would read as markers).
    - A 1-byte prefix is written alone and added to `P`.
    - The remaining fields go to the streams of §5.3. Relative targets are made absolute:
-     `JUMP64` and `ADDR64` hold the 64-bit address, `JUMP32` the 32-bit one. A call target
+     `JUMP` and `ADDR` hold the 64-bit address in x86-64, `JUMP` the 32-bit one in x86-32. A call target
      already in the cache is written as its index; otherwise `FF` and the target, and the
      cache is updated as in §5.4 either way.
 4. When the original bytes are used up, an instruction may have run into the sentinel: the
@@ -351,7 +367,7 @@ position:
 
 `aqr_exe::format::pe::locate_code` lists the sections of a PE32 or PE32+ image with
 `IMAGE_SCN_CNT_CODE` (`0x20`), at `ImageBase + VirtualAddress`, stored at `PointerToRawData`
-for `SizeOfRawData` bytes. The machine type is not checked. aqr-compress (`src/pe.rs`) applies
+for `SizeOfRawData` bytes. The machine type is not checked. aqr-compress (`src/exe.rs`) applies
 the module to each such section that lies within the file and after the previous one, cut to
 the file, with `mode` from the image's magic. The rest of the image is one stream of class
 `pe`, sliced around the sections. aqr-compress keeps the image raw if the formula would not
@@ -362,8 +378,9 @@ archive smaller.
 The module fails if:
 
 - the params are not 10 bytes long (this implementation ignores trailing bytes), or there are
-  resources, or not exactly 46 inputs;
-- a stream runs out where a byte is to be read or copied;
+  resources, or not exactly 13 inputs;
+- a stream runs out where a byte is to be read or copied, or a padding record starts with a
+  byte above `03`;
 - an opcode is of class `XX`, a map is above 3 without a VEX or EVEX prefix, a REX or REX2
   marker appears in x86-32, or the bits of a prefix fail the checks of §5.3;
 - `out` is shorter than `sentinel` at the end, or the output is not `len` bytes long.

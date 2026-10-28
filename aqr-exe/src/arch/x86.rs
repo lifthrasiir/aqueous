@@ -358,29 +358,88 @@ macro_rules! define_streams {
     );
 }
 
+// Fields of several sizes share a stream (size 0, not checked).
 define_streams! {
-    ST_OP 8,
-    ST_EVEX 8, ST_VEX 8, ST_REX 8, ST_SIB 8,
+    ST_OP 0,
+    ST_SIB 8,
     ST_CALL_IDX 8,
-
-    ST_DISP8_R0 8, ST_DISP8_R1 8, ST_DISP8_R2 8, ST_DISP8_R3 8,
-    ST_DISP8_R4 8, ST_DISP8_R5 8, ST_DISP8_R6 8, ST_DISP8_R7 8,
-    ST_DISP16 16, ST_DISP32 32,
-
-    ST_JUMP8 8, ST_JUMP16 16, ST_JUMP32 32, ST_JUMP64 64,
-    ST_IMM8 8, ST_IMM16 16, ST_IMM32 32, ST_IMM64 64,
-    ST_ADDR16 16, ST_ADDR32 32, ST_ADDR64 64,
-    ST_CALL32 32, ST_CALL64 64,
-    ST_JUMPTAB64 64,
-
-    ST_PAD0 0, ST_PAD1 0, ST_PAD2 0, ST_PAD3 0, ST_PAD4 0, ST_PAD5 0, ST_PAD6 0, ST_PAD7 0,
-    ST_PAD8 0, ST_PAD9 0, ST_PAD10 0, ST_PAD11 0, ST_PAD12 0, ST_PAD13 0, ST_PAD14 0, ST_PAD15 0,
+    ST_DISP8_SP 8, ST_DISP8_BP 8, ST_DISP8 8, ST_DISP8_IDX 8,
+    ST_DISP32 32,
+    ST_JUMP8 8, ST_JUMP 0,
+    ST_IMM32 32,
+    ST_ADDR 0,
+    ST_CALL 0,
 }
 
+// The fields kept with others: in `OP` those that the opcodes around them tell best (REX bits
+// above all) or that are rare, and the 32- and 64-bit forms of a field together (a section
+// has one mode).
 const ST_MODRM: usize = ST_OP;
-const ST_AJUMP16: usize = ST_JUMP16;
-const ST_AJUMP32: usize = ST_JUMP32;
+const ST_EVEX: usize = ST_OP;
+const ST_VEX: usize = ST_OP;
+const ST_REX: usize = ST_OP;
+const ST_IMM8: usize = ST_OP;
+const ST_IMM16: usize = ST_OP;
+const ST_IMM64: usize = ST_OP;
+const ST_DISP16: usize = ST_OP;
+const ST_ADDR16: usize = ST_OP;
+const ST_JUMP16: usize = ST_OP;
+const ST_AJUMP16: usize = ST_OP;
 const ST_JUMPTAB_COUNT: usize = ST_OP;
+const ST_PAD: usize = ST_OP;
+const ST_JUMP32: usize = ST_JUMP;
+const ST_JUMP64: usize = ST_JUMP;
+const ST_AJUMP32: usize = ST_JUMP;
+const ST_JUMPTAB64: usize = ST_JUMP;
+const ST_ADDR32: usize = ST_ADDR;
+const ST_ADDR64: usize = ST_ADDR;
+const ST_CALL32: usize = ST_CALL;
+const ST_CALL64: usize = ST_CALL;
+
+/// The stream of an absolute address of `1 << lgn` bytes (`lgn` from 1 to 3).
+const fn addr_stream(lgn: usize) -> usize {
+    if lgn == 1 {
+        ST_ADDR16
+    } else {
+        ST_ADDR
+    }
+}
+
+/// The stream of an immediate of `1 << lgn` bytes (`lgn` from 0 to 3).
+const fn imm_stream(lgn: usize) -> usize {
+    match lgn {
+        0 => ST_IMM8,
+        1 => ST_IMM16,
+        2 => ST_IMM32,
+        _ => ST_IMM64,
+    }
+}
+
+/// The stream of an 8-bit displacement, by the ModR/M `rm` field, the SIB byte (0 if none) and
+/// the instruction's REX byte (0 if none; bit 0 is REX.B and bit 1 REX.X in every prefix):
+/// `[rsp+...]`, `[rbp+...]`, and of other bases those with an index apart.
+const fn disp8_stream(rm: u8, sib: u8, rex: u8, addr16: bool) -> usize {
+    let (b, x) = (rex & 1 != 0, rex & 2 != 0);
+    match rm {
+        _ if addr16 => ST_DISP8,
+        4 if sib & 7 == 4 && !b => ST_DISP8_SP,
+        4 if (sib >> 3) & 7 != 4 || x => ST_DISP8_IDX,
+        5 if !b => ST_DISP8_BP,
+        _ => ST_DISP8,
+    }
+}
+
+/// Padding records (§5.5 of FORMAT.md): none, `CC` up to the next multiple of 16 of the
+/// address (16 bytes from one), a single `CC`, or the bytes in chunks of their lengths.
+const PAD_NONE: u8 = 0;
+const PAD_FILL: u8 = 1;
+const PAD_INT3: u8 = 2;
+const PAD_BYTES: u8 = 3;
+
+/// The bytes of [`PAD_FILL`] at `addr`.
+const fn pad_fill_len(addr: u64) -> usize {
+    16 - (addr & 0xf) as usize
+}
 
 #[cfg(feature = "encode")]
 #[derive(Debug)]
@@ -778,21 +837,28 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
 
             // Try to skip any padding.
             if pad {
-                let stream = ST_PAD0 + (origin & 0xf) as usize;
-
                 let pad_size = scan_pad(&code[..code.len() - slack]);
                 let mut padding;
                 (padding, code) = code.split_at(pad_size);
-                origin += pad_size as u64;
-
-                while padding.len() >= 0xff {
-                    let chunk;
-                    (chunk, padding) = padding.split_at(0xff);
-                    st.put8(stream, 0xff);
-                    st.copy(stream, chunk);
+                let int3 = padding.iter().all(|&b| b == 0xcc);
+                if pad_size == 0 {
+                    st.put8(ST_PAD, PAD_NONE);
+                } else if int3 && pad_size == pad_fill_len(origin) {
+                    st.put8(ST_PAD, PAD_FILL);
+                } else if int3 && pad_size == 1 {
+                    st.put8(ST_PAD, PAD_INT3);
+                } else {
+                    st.put8(ST_PAD, PAD_BYTES);
+                    while padding.len() >= 0xff {
+                        let chunk;
+                        (chunk, padding) = padding.split_at(0xff);
+                        st.put8(ST_PAD, 0xff);
+                        st.copy(ST_PAD, chunk);
+                    }
+                    st.put8(ST_PAD, padding.len() as u8);
+                    st.copy(ST_PAD, padding);
                 }
-                st.put8(stream, padding.len() as u8);
-                st.copy(stream, padding);
+                origin += pad_size as u64;
 
                 if false {
                     // Speculatively record the next instruction as a call target.
@@ -937,7 +1003,7 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
             };
 
             let copy = |n: usize, streams: &mut EncodedStreams, st: usize| {
-                debug_assert_eq!(STREAM_SIZES[st], n);
+                debug_assert!(STREAM_SIZES[st] == 0 || STREAM_SIZES[st] == n);
                 streams.copy(st, &code[i.get()..i.get() + n]);
                 i.set(i.get() + n);
             };
@@ -1064,7 +1130,7 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
                     }
                     0 if sib & 7 == 5 => copy(32 / 8, &mut st, ST_DISP32), // [reg*scale+disp32]
                     // [reg+disp8] or [reg*scale+disp8]
-                    1 => copy(8 / 8, &mut st, ST_DISP8_R0 + base as usize),
+                    1 => copy(8 / 8, &mut st, disp8_stream(base, sib, rex, addr16)),
                     2 if addr16 => copy(16 / 8, &mut st, ST_DISP16), // [regs+disp16]
                     2 => copy(32 / 8, &mut st, ST_DISP32),           // [reg+disp32]
                     _ => {}
@@ -1093,7 +1159,7 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
 
                 A_ => {
                     let lgn = addr_lgn(op, prefixes, is64);
-                    copy(1 << lgn, &mut st, (ST_ADDR16 - 1) + lgn);
+                    copy(1 << lgn, &mut st, addr_stream(lgn));
                 }
 
                 JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_AJUMP16),
@@ -1110,7 +1176,7 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
                         flags = N2;
                     }
                     let lgn = (flags - N1) as usize;
-                    copy(1 << lgn, &mut st, ST_IMM8 + lgn);
+                    copy(1 << lgn, &mut st, imm_stream(lgn));
                 }
             }
 
@@ -1131,7 +1197,7 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
     // The decoder expects a padding record after every padding-followed instruction,
     // even when the input ends right there.
     if pad {
-        st.put8(ST_PAD0 + (origin & 0xf) as usize, 0);
+        st.put8(ST_PAD, PAD_NONE);
     }
 
     st.sentinel_size = (SENTINEL - left) as u8;
@@ -1233,7 +1299,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
         if_trace_decode! {
             print!("({}:", &STREAM_NAMES[st][3..]);
         }
-        let (head, tail) = streams[st].get().split_at(n);
+        let (head, tail) = streams[st].get().split_at_checked(n)?;
         if_trace_decode! {
             for &b in head {
                 print!("{:02X}", b);
@@ -1262,13 +1328,18 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
         }
 
         if pad {
-            let stream = ST_PAD0 + ((origin as usize + code.len()) & 0xf);
-            loop {
-                let pad_size = read8(stream)?;
-                copy(pad_size as usize, &mut code, stream)?;
-                if pad_size < 0xff {
-                    break;
-                }
+            match read8(ST_PAD)? {
+                PAD_NONE => {}
+                PAD_FILL => code.resize(code.len() + pad_fill_len(pc.get()), 0xcc),
+                PAD_INT3 => code.push(0xcc),
+                PAD_BYTES => loop {
+                    let pad_size = read8(ST_PAD)?;
+                    copy(pad_size as usize, &mut code, ST_PAD)?;
+                    if pad_size < 0xff {
+                        break;
+                    }
+                },
+                _ => return None,
             }
 
             if false {
@@ -1395,7 +1466,9 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
             }
 
             // F6/F7: TEST E,I (/0-1) vs. NOT/NEG/[I]MUL/[I]DIV E (/2-7)
-            OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2 if modrm_reg(streams[ST_MODRM].get()[0]) >= 2 => {
+            OP_GRP3_1 | OP_GRP3_2 | OP_MAP4_GRP3_1 | OP_MAP4_GRP3_2
+                if modrm_reg(*streams[ST_MODRM].get().first()?) >= 2 =>
+            {
                 flags = R_;
             }
 
@@ -1450,7 +1523,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
                 // [reg*scale+disp32]
                 0 if sib & 7 == 5 => copy(32 / 8, &mut code, ST_DISP32)?,
                 // [reg+disp8] or [reg*scale+disp8]
-                1 => copy(8 / 8, &mut code, ST_DISP8_R0 + base as usize)?,
+                1 => copy(8 / 8, &mut code, disp8_stream(base, sib, rex, addr16))?,
                 2 if addr16 => copy(16 / 8, &mut code, ST_DISP16)?, // [regs+disp16]
                 2 => copy(32 / 8, &mut code, ST_DISP32)?,           // [reg+disp32]
                 _ => {}
@@ -1473,7 +1546,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
 
             A_ => {
                 let lgn = addr_lgn(op, prefixes, is64);
-                copy(1 << lgn, &mut code, (ST_ADDR16 - 1) + lgn)?;
+                copy(1 << lgn, &mut code, addr_stream(lgn))?;
             }
 
             JA if has_jump16(prefixes, is64) => copy(16 / 8, &mut code, ST_AJUMP16)?,
@@ -1490,7 +1563,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
                     flags = N2;
                 }
                 let lgn = (flags - N1) as usize;
-                copy(1 << lgn, &mut code, ST_IMM8 + lgn)?;
+                copy(1 << lgn, &mut code, imm_stream(lgn))?;
             }
         }
     }
@@ -2156,5 +2229,97 @@ mod tests {
             .unwrap_or_else(|e| panic!("Failed boundary addresses: {}", e));
 
         println!("All jump table tests passed!");
+    }
+
+    /// The index of the stream of this name (without `ST_`).
+    fn stream_index(name: &str) -> usize {
+        STREAM_NAMES.iter().position(|n| n.strip_prefix("ST_") == Some(name)).unwrap_or_else(|| panic!("no {name}"))
+    }
+
+    #[test]
+    fn test_stream_layout() {
+        let names: Vec<_> = STREAM_NAMES.iter().map(|n| n.strip_prefix("ST_").unwrap()).collect();
+        assert_eq!(
+            names,
+            [
+                "OP",
+                "SIB",
+                "CALL_IDX",
+                "DISP8_SP",
+                "DISP8_BP",
+                "DISP8",
+                "DISP8_IDX",
+                "DISP32",
+                "JUMP8",
+                "JUMP",
+                "IMM32",
+                "ADDR",
+                "CALL",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_disp8_streams() {
+        let code = [
+            0x8b, 0x44, 0x24, 0x08, // MOV EAX, [RSP+8]
+            0x8b, 0x44, 0x4c, 0x04, // MOV EAX, [RSP+RCX*2+4]
+            0x8b, 0x45, 0xf8, // MOV EAX, [RBP-8]
+            0x8b, 0x41, 0x10, // MOV EAX, [RCX+10h]
+            0x41, 0x8b, 0x44, 0x24, 0x18, // MOV EAX, [R12+18h]
+            0x41, 0x8b, 0x45, 0x28, // MOV EAX, [R13+28h]
+            0x8b, 0x44, 0x91, 0x20, // MOV EAX, [RCX+RDX*4+20h]
+            0x42, 0x8b, 0x44, 0x21, 0x30, // MOV EAX, [RCX+R12+30h]
+        ];
+        let st = encode(&code, 0x1000, true).unwrap();
+        let of = |name| &st.streams()[stream_index(name)][..];
+        assert_eq!(of("DISP8_SP"), [0x08, 0x04]);
+        assert_eq!(of("DISP8_BP"), [0xf8]);
+        assert_eq!(of("DISP8"), [0x10, 0x18, 0x28]);
+        assert_eq!(of("DISP8_IDX"), [0x20, 0x30]);
+        roundtrip_test(&code, 0x1000, true).unwrap();
+        // x86-32, and 16-bit addressing (all in DISP8)
+        let code = [0x8b, 0x44, 0x24, 0x08, 0x8b, 0x45, 0xf8, 0x67, 0x8b, 0x44, 0x04, 0x67, 0x8b, 0x46, 0x06];
+        let st = encode(&code, 0x1000, false).unwrap();
+        let of = |name| &st.streams()[stream_index(name)][..];
+        assert_eq!((of("DISP8_SP"), of("DISP8_BP"), of("DISP8")), (&[0x08][..], &[0xf8][..], &[0x04, 0x06][..]));
+        roundtrip_test(&code, 0x1000, false).unwrap();
+    }
+
+    #[test]
+    fn test_padding_records() {
+        // RET at 0x1000, filled with CC to 0x1010; RET, one CC; RET, two NOPs; RET, nothing
+        let mut code = vec![0xc3];
+        code.extend([0xcc; 15]);
+        code.extend([0xc3, 0xcc, 0xc3, 0x90, 0x90, 0xc3, 0x31, 0xc0]);
+        code.extend([0x90; 16]);
+        let st = encode(&code, 0x1000, true).unwrap();
+        let op = &st.streams()[stream_index("OP")];
+        assert_eq!(op[..12], [0xc3, 1, 0xc3, 2, 0xc3, 3, 2, 0x90, 0x90, 0xc3, 0, 0x31]);
+        roundtrip_test(&code, 0x1000, true).unwrap();
+
+        // the fill of an aligned address is 16 bytes; a record of FF bytes in chunks
+        let mut code = vec![0xc3];
+        code.extend([0xcc; 16]);
+        code.push(0xc3);
+        code.extend([0x90; 300]);
+        code.push(0x31);
+        code.extend([0xc0; 16]);
+        let st = encode(&code, 0x0fff, true).unwrap();
+        assert_eq!(st.streams()[stream_index("OP")][..5], [0xc3, 1, 0xc3, 3, 0xff]);
+        roundtrip_test(&code, 0x0fff, true).unwrap();
+        roundtrip_test(&code, 0x1000, false).unwrap();
+
+        let streams = |op: &'static [u8]| {
+            DecodedStreams::new(0x1000, 0, array::from_fn(|i| if i == stream_index("OP") { op } else { &[][..] }))
+        };
+        let out = decode(&streams(&[0xc3, 1, 0xc3, 2, 0xc3, 3, 0xff]), true);
+        assert_eq!(out, None, "a record running out");
+        assert_eq!(decode(&streams(&[0xc3, 4]), true), None, "no such record");
+        let out = decode(&streams(&[0xc3, 1, 0xc3, 2, 0xc3, 3, 2, 0x66, 0x90, 0xc3, 0]), true).unwrap();
+        let mut expected = vec![0xc3];
+        expected.extend([0xcc; 15]);
+        expected.extend([0xc3, 0xcc, 0xc3, 0x66, 0x90, 0xc3]);
+        assert_eq!(out, expected);
     }
 }

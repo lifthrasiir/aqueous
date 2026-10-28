@@ -3,8 +3,8 @@
 Machine code recompression, of the executable sections of PE images and Mach-O images (thin or
 in a universal file), and of the metadata and IL of .NET images, each rebuilt bit for bit:
 
-- x86 and x86-64: a disfilter splits the code into 46 streams by instruction field, with
-  relative targets made absolute.
+- x86 and x86-64: a disfilter splits the code into 13 streams by instruction field, with
+  relative targets made absolute and the padding between functions coded.
 - ARM64: the instructions stay in one stream of big-endian words, with the targets of `BL`
   and `ADRP` made absolute, and the offsets of local branches taken out of them to streams
   of their own.
@@ -73,6 +73,13 @@ hashes and original paths), of those on a Windows 11 machine.
 | sample, .NET coded | 82 | 90.7 | 0.320 | 0.380 | 28.4 MB/s | 465 MB/s | |
 | sample, not coded | 39 | 25.1 | 0.292 | 0.298 | 30.2 MB/s | 2013 MB/s | |
 | large | 11 | 1528.6 | **0.306** | 0.383 | **58.2 MB/s** | **348 MB/s** | 0.76–1.01 of the sample's fit |
+
+The table is of `exe-recons/x86@1`, 46 streams. Its 13 streams of version 2 (`REX` and
+other fields that the opcodes tell, or rare ones, within `OP`; 8-bit displacements by their
+base register; padding records coded) were measured on 2026-10-28 on a Ryzen 7 9700X through
+`aqr-show -t 16` against version 1 at once, the decoder modules in the archives: sample
+0.3215 → 0.3160 (−1.7%; its 150 files of x86 code −2.1%, those under 1 MB −2.5%), large
+0.2901 → 0.2832 (−2.4%), 3 files larger by 0.3–1.3% (x86-32).
 
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
 archiving no smaller: 27 .NET assemblies (24 satellite assemblies of resources alone;
