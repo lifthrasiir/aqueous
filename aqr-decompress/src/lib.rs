@@ -13,7 +13,7 @@ use aqr_formula::Resource;
 use aqr_formula::aqr::{self, Failure, Loaded, Runner};
 use sha2::{Digest, Sha512_256};
 
-#[cfg(all(feature = "wasm", unix))]
+#[cfg(feature = "wasm")]
 mod cow;
 #[cfg(feature = "wasm")]
 mod exec;

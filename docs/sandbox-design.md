@@ -60,7 +60,7 @@
 - **[확정]** 워커는 사용자와 접근 권한이 같은 restricted 토큰(사용자의 모든 SID와 RESTRICTED를 restricting SID로 둔 것, low integrity)을 impersonate한 상태로 시작한다. 이 토큰으로 시스템 라이브러리를 로드하고, 초기화가 끝나면 `RevertToSelf`로 내려놓는다. 프로세스 토큰이 restricted가 아니면, 즉 샌드박스 밖에서 실행됐으면 워커는 서비스를 거부한다.
   > 초기 토큰이 restricted가 아니면 커널이 impersonation을 거부한다(`STATUS_BAD_IMPERSONATION_LEVEL`, 0xC00000A5). restricted 프로세스는 restricted 토큰만 impersonate할 수 있다.
 - **[확정]** 메모리 한도는 job의 프로세스 메모리 한도(commit 기준)로 건다. 값은 요청의 메모리 한도에 전송 바이트와 여유분 1 GiB를 더한 것이다. wasmtime의 가상 주소 예약은 commit이 아니므로 이 한도와 부딪히지 않는다.
-- **[잠정]** arena는 pagefile 기반의 이름 없는 section이다. 브로커가 `DuplicateHandle`로 워커 프로세스에 `FILE_MAP_READ | FILE_MAP_WRITE` 핸들을 만들고, 그 값을 메시지로 알린다. 워커는 매핑한 뒤 핸들을 닫는다. section은 크기를 바꿀 수 없다. 크로스 컴파일(windows-gnu)과 clippy만 확인했고 Windows에서 실행해 보지는 않았다.
+- **[확정]** arena는 pagefile 기반의 이름 없는 section이다. 브로커가 `DuplicateHandle`로 워커 프로세스에 `FILE_MAP_READ | FILE_MAP_WRITE` 핸들을 만들고, 그 값을 메시지로 알린다. 워커는 매핑한 뒤 핸들을 닫는다. section은 크기를 바꿀 수 없다. Windows에서 `tests/wasm.rs`가 arena로 통과했다. 워커의 `os::view`가 실패하게 하면 `large`가 실패하는 것도 확인했다(브로커 쪽에서 arena를 만들지 못하면 조용히 메시지로 보내므로, 통과만으로는 arena를 썼는지 알 수 없다).
 - **[확정]** ACG(동적 코드 금지)는 걸 수 없다. Cranelift가 프로세스 안에서 코드를 실행 가능하게 만들기 때문이다. 걸려면 컴파일을 다른 프로세스로 빼야 하는데(Edge의 out-of-process JIT), 비용에 비해 얻는 것이 적다.
 - **[제안]** CET 강제 모드는 확인하지 않았다. wasmtime은 트랩에서 복귀할 때 컨텍스트의 RIP를 바꾸므로 shadow stack과 충돌할 수 있다 *(확인 필요)*.
 - **[제안]** 초기화 뒤에 integrity를 untrusted로 더 내리는 것(Chromium의 delayed integrity)은 아직 하지 않았다.
@@ -109,11 +109,13 @@
   | 모듈 컴파일 | flate 84 ms, jpeg 35 ms, mp3 16 ms | | 워커 × 모듈마다 |
   | `apply` 왕복 | 약 36 µs 추가(57 µs, in-process는 21 µs) | 약 11 µs 추가(39 µs, in-process는 28 µs) | `apply`마다 |
   | 바이트 전달(파이프) | 입력 1 MiB와 출력 1 MiB를 합쳐 약 0.4 ms | 약 0.19 ms 추가(0.35 ms, in-process는 0.16 ms) | 입력 + 출력 바이트 |
-  | 바이트 전달(arena) | | 1 MiB + 1 MiB에 약 0.05 ms 추가(0.22 ms, in-process는 0.17 ms). 16 MiB + 16 MiB에 0.7 ms, 64 MiB + 64 MiB에 2.5 ms 추가 | 입력 + 출력 바이트 |
+  | 바이트 전달(arena) | 1 MiB + 1 MiB에 약 0.07 ms 추가(0.55 ms, in-process는 0.49 ms). 16 MiB + 16 MiB에 1.4 ms, 64 MiB + 64 MiB에 5.7 ms 추가 | 1 MiB + 1 MiB에 약 0.05 ms 추가(0.22 ms, in-process는 0.17 ms). 16 MiB + 16 MiB에 0.7 ms, 64 MiB + 64 MiB에 2.5 ms 추가 | 입력 + 출력 바이트 |
 
   > 64 MB 텍스트를 gzip한 아카이브(출력 17.8 MB)를 `Sandbox`로 디코딩하면 0.78–0.94초가 걸렸다. in-process Wasm은 0.76–0.78초였다. 차이의 대부분은 고정비(기동과 flate 컴파일, 약 90 ms)이고, 바이트 전달은 약 5 ms이다.
   > macOS에서 저장소의 텍스트로 만든 같은 크기의 아카이브(출력 18.8 MB)는 `Sandbox`로 1.10–1.19초, in-process Wasm으로 1.00–1.05초였다. 새로 빌드한 실행 파일을 처음 띄울 때는 1.72초였다. 시스템이 처음 실행되는 바이너리를 검사하는 비용으로 보인다 *(확인 필요)*.
   > arena를 둔 뒤 macOS에서 같은 아카이브는 `Sandbox`로 0.64–0.67초, in-process Wasm으로 0.62–0.64초였다. 앞의 측정보다 전체가 빠른 것은 기계가 한가했기 때문이다.
+  > arena를 둔 뒤 Windows(16스레드)에서 저장소의 텍스트를 반복한 48 MB를 gzip -6한 아카이브(출력 13.9 MB)는 `Sandbox`로 0.77초(처음 띄울 때 0.92초), in-process Wasm으로 0.72–0.73초, 네이티브로 0.22–0.24초였다. Wasm 쪽 시간의 상당 부분은 샌드박스와 무관한 task 메모리 복사였고, 이를 CoW로 바꾼 뒤에는 `Sandbox` 0.63–0.65초, Wasm 0.59–0.61초이다(§4.1).
+  > Windows의 arena 비용(MiB당 약 0.044 ms)은 macOS(약 0.02 ms)의 두 배쯤이다. in-process 쪽도 64 MiB를 복사하는 모듈이 21 ms 걸린다. 새로 commit한 페이지의 첫 접근(page fault)이 macOS보다 비싼 것으로 보인다 *(확인 필요)*.
 - **[확정]** 바이트당 비용은 모듈의 처리 속도에 비례해 커진다. 파이프로 보낼 때는 Wasm 처리 속도가 R MB/s인 해제 모듈이라면 비율이 대략 `0.25 × R / 1000`이었다. 20–30 MB/s에서 1% 미만이고, 500 MB/s에서 약 12%, 1–2 GB/s에서 25–50%이다. arena로 보내면 macOS에서 MiB(입력 + 출력)당 0.30 ms이던 것이 0.04 ms가 되었다. 1 GB/s 모듈로 쳐도 4% 안팎이다.
 
 ## 4. 다음에 할 일
@@ -123,7 +125,15 @@
 - **[확정]** 공유 영역(arena)과 `apply_into`는 구현했다(§1, §2). 남은 것은 아래이다.
 - **[제안]** Linux에서는 arena를 wasm 메모리 위에 겹쳐 매핑해 워커 쪽 복사도 없앤다. 입력은 `MAP_PRIVATE|MAP_FIXED`로, 전체 모듈의 출력은 `MAP_SHARED|MAP_FIXED`로 매핑한다. 전체 모듈의 출력 영역은 요청 전에 브로커가 `fallocate(PUNCH_HOLE)`로 0으로 만든다. 새 wasm 메모리가 0이어야 하기 때문이다. 배치는 이미 64 KiB에 맞춰져 있다. 이것은 xform-design.md에 적어 둔 task 스냅샷의 CoW 방안과 같은 기법이다.
   > 그러면 추가 복사(in-process 대비)가 Linux에서 0회가 된다. 지금은 방향마다 1회이다. Windows는 wasmtime이 메모리를 placeholder 없이 예약하고, `MemoryCreator`가 호스트가 만드는 메모리에는 쓰이지 않으므로 매핑을 바꿀 수 없다. macOS는 `mach_vm_remap`으로 가능할 수도 있다 *(확인 필요)*.
-- **[제안]** Windows에서 `tests/wasm.rs`(특히 `large`)를 돌리고 비용을 다시 잰다.
+- **[확정]** Windows에서 `tests/wasm.rs`(`large` 포함)가 통과했고 비용을 다시 쟀다(§2.1, §3).
+- **[확정]** Windows의 task 메모리 CoW. 샌드박스만의 일은 아니지만(in-process Wasm도 같다), Windows에서 가장 큰 남은 비용이었다. 그때까지 Windows와 Linux는 `spawn`마다 스냅샷을 복사하고 task마다 그것을 새 작업 메모리에 memcpy했다(xform-design.md의 `cow`).
+  > 측정(Windows, 16스레드, §3의 48 MB gzip 아카이브): flate-set의 `spawn` 두 번(task 32개와 14개)에서 스냅샷이 75 MB와 111 MB였고, 만드는 데 9 ms와 17 ms가 걸렸다. task 하나의 memcpy는 30–97 ms로, macOS에서 잰 10–13 ms보다 훨씬 길다. 동시에 page fault를 내는 스레드가 많을수록 길어졌다. task 46개를 합치면 2.25 s(스레드 시간)이고, 적용 0.72초 중 상당 부분이다. 스냅샷 페이지의 35%(18400개 중 6409개)는 0이었다.
+  > 0인 페이지를 건너뛰게 하자(아래 둘째 길, 구현했다) task 하나가 9–42 ms, 합이 1.10 s가 되었다. 건너뛴 페이지보다 많이 줄어든 것은 page fault끼리 덜 다투기 때문으로 보인다. 전체는 Wasm 0.69–0.72초, `Sandbox` 0.73–0.75초이다.
+  > Linux와 달리 wasmtime의 매핑 위에 view를 덮을 수 없다. wasmtime 49의 Windows `Mmap`은 `VirtualAlloc(MEM_RESERVE)`로 예약하고(placeholder가 아니다), drop에서 `VirtualFree(base, 0, MEM_RELEASE)`가 성공한다고 assert한다. 예약의 일부만 풀 수도 없다. 호스트가 만드는 메모리(`Memory::new`)는 `OnDemandInstanceAllocator::default()`로 만들어 `MemoryCreator`를 거치지 않는다.
+  > 두 가지를 했다.
+  > - **[확정]** Windows에서는 작업 메모리를 placeholder 위에 만들고 스냅샷의 view로 바꾼다(`cow/win.rs`). 모듈은 그대로 두고, 같은 타입의 메모리 하나만 정의해 `m`으로 export하는 작은 모듈(`memory_module`)을 같은 Store에 instantiate해 그 메모리를 `aqr_memory` import로 넘긴다. 모듈이 정의한 메모리이므로 `Config::with_host_memory`의 `cow::Creator`가 만든다. `Creator`는 예약 전체(guard 포함)를 `VirtualAlloc2(MEM_RESERVE_PLACEHOLDER)`로 잡고, 키울 때마다 그 뒤쪽 placeholder를 쪼개 commit한다. 스냅샷은 pagefile section이고, 0이 아닌 페이지만 거기에 복사한다. task는 instantiate한 뒤 작업 메모리를 스냅샷 크기로 키우고, 그 조각들을 `VirtualFree(MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER)`로 placeholder로 되돌려 합친 뒤 section의 view(`MapViewOfFile3(MEM_REPLACE_PLACEHOLDER, PAGE_WRITECOPY)`)로 바꾼다. section이나 view를 만들지 못하면 memcpy로 돌아간다. 처음에는 import를 정의로 바꾸도록 모듈을 고쳐 쓰는 방법을 생각했지만, 메모리 인덱스가 밀려 코드 전체를 다시 인코딩해야 한다.
+  > - 측정(같은 아카이브): task 하나의 준비가 0.02–0.6 ms, 46개의 합이 7 ms가 되었다(memcpy로는 1.10 s). 스냅샷은 section에 쓰느라 15 ms와 23 ms로 조금 느려졌다. 전체는 Wasm 0.59–0.61초, `Sandbox` 0.63–0.65초(처음 띄울 때 0.82초)이다. 샌드박스 워커 안에서도 view가 만들어진다(봉쇄된 토큰으로도 이름 없는 section을 만들 수 있다). `tests/wasm.rs`가 in-process와 샌드박스 모두에서 이 길을 거치는 것을, view를 만들지 못한 경우를 panic으로 바꿔 확인했다.
+  > - **[확정]** 0인 페이지를 건너뛴다. 스냅샷을 만들 때 0이 아닌 4 KiB 페이지만 복사하고 그 구간을 기록해 두고, task마다 그 구간만 복사한다. 새 메모리는 0이지만 instantiate가 data segment를 쓰므로, 적재할 때 구한 data segment의 끝(`Compiled::clean`)까지는 전부 복사한다(`tests/wasm.rs`의 `tasks_over_data`). 모든 시스템에서 쓰이고, macOS는 `vm_copy`가 되면 그쪽이 먼저이다.
 - **[제안]** resource(`Resource`, `Arc<[u8]>`)는 지금처럼 메시지로 보낸다. 크기가 대개 작기 때문이다 *(확인 필요: flate 모델 데이터의 크기)*.
 
 ### 4.2 컴파일과 워커 관리

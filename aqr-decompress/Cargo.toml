@@ -8,9 +8,9 @@ publish = false
 [features]
 default = ["wasm", "sandbox"]
 # Modules that are not known run as WebAssembly, by Wasmtime.
-wasm = ["dep:wasmtime", "dep:wasmparser"]
+wasm = ["dep:wasmtime", "dep:wasmparser", "dep:windows-sys"]
 # ... or so in worker processes locked down by the system (`sandbox`).
-sandbox = ["wasm", "dep:windows-sys"]
+sandbox = ["wasm"]
 
 [dependencies]
 aqr-common = { path = "../aqr-common" }

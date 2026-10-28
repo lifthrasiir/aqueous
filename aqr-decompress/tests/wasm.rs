@@ -539,6 +539,31 @@ fn tasks() {
     );
 }
 
+/// A task's working memory is the spawner's, not what the data segments wrote: a page they
+/// wrote, zeroed before the spawn, is of zeros to the task, and a page written past them is of
+/// what was written.
+#[test]
+fn tasks_over_data() {
+    let m = format!(
+        r#"(module {MEMORIES} {TASKS}
+            (data (memory 0) (i32.const 0x2000) "xyz")
+            (func (export "aqr_task") (param $arg i32) (param $i i32)
+                (i32.store8 (i32.const 0x8000) (i32.load8_u (i32.const 0x2001)))
+                (i32.store8 (i32.const 0x8001) (i32.load8_u (i32.const 0x9000)))
+                (call $result (i32.const 0x8000) (i32.const 2)))
+            (func (export "aqr_apply_whole") (param i64) (param i64) (param i64)
+                (local $h i32)
+                (if (i32.ne (i32.load8_u (i32.const 0x2001)) (i32.const 0x79)) (then unreachable))
+                (memory.fill 0 (i32.const 0x2000) (i32.const 0) (i32.const 0x1000))
+                (i32.store8 (i32.const 0x9000) (i32.const 7))
+                (local.set $h (call $spawn (i32.const 0) (i32.const 1)))
+                (if (i32.ne (call $join (local.get $h) (i32.const 0)) (i32.const 2)) (then unreachable))
+                (call $take (local.get $h) (i32.const 0) (i32.const 0x4000) (i32.const 2))
+                (memory.copy 3 0 (i64.const 0) (i32.const 0x4000) (i32.const 2))))"#
+    );
+    assert_eq!(apply(&m, &[b""], &[2], u64::MAX).unwrap(), [[0, 7]]);
+}
+
 /// The imports of channels.
 const CHANS: &str = r#"
     (import "aqr" "aqr_chan" (func $chan (param i32) (result i32)))

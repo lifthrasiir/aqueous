@@ -56,6 +56,9 @@ static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
         .wasm_custom_page_sizes(false)
         .wasm_stack_switching(false)
         .cranelift_nan_canonicalization(true);
+    // the working memories (as defined by `Compiled::working_module`) copied on write over
+    #[cfg(windows)]
+    c.with_host_memory(Arc::new(crate::cow::Creator));
     Engine::new(&c).expect("the configuration of Wasmtime")
 });
 
@@ -115,6 +118,12 @@ struct Compiled {
     imports: Vec<Import>,
     /// The working memory's minimum and maximum, in pages.
     working: (u64, Option<u64>),
+    /// Where the working memory is of zeros from once instantiated: the end of the data
+    /// segments written into it (`u64::MAX` where not known).
+    clean: u64,
+    /// A module defining a memory of the working memory's type (exported as `m`), the working
+    /// memories made as it defines them where they are to be made so (of `cow::Creator`).
+    working_module: Option<Module>,
     part: bool,
     /// The number of parameters of the entry point.
     arity: usize,
@@ -191,6 +200,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     let (mut imports, mut working, mut entry, mut task) = (Vec::new(), None, None, None);
     let mut memories: Vec<Mem> = Vec::new();
     let mut grows_other = false;
+    let mut clean = 0u64;
     for payload in wp::Parser::new(0).parse_all(wasm) {
         match payload.map_err(bad)? {
             wp::Payload::TypeSection(r) => {
@@ -259,6 +269,23 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
                     }
                 }
             }
+            wp::Payload::DataSection(r) => {
+                for d in r {
+                    let d = d.map_err(bad)?;
+                    let wp::DataKind::Active { memory_index, offset_expr } = d.kind else { continue };
+                    if memories.get(memory_index as usize) != Some(&Mem::Working) {
+                        continue;
+                    }
+                    let mut ops = offset_expr.get_operators_reader();
+                    let end = match (ops.read(), ops.read()) {
+                        (Ok(wp::Operator::I32Const { value }), Ok(wp::Operator::End)) => {
+                            value as u32 as u64 + d.data.len() as u64
+                        }
+                        _ => u64::MAX,
+                    };
+                    clean = clean.max(end);
+                }
+            }
             wp::Payload::CodeSectionEntry(body) => {
                 let mut ops = body.get_operators_reader().map_err(bad)?;
                 while !ops.eof() {
@@ -292,7 +319,41 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
         }
     }
     let module = Module::new(&ENGINE, wasm).map_err(|e| Failure::Invalid(format!("not compiled: {e}")))?;
-    Ok(Compiled { module, imports, working, part, arity: ft.params().len() })
+    let working_module = if cfg!(windows) {
+        let m = Module::new(&ENGINE, memory_module(working));
+        Some(m.map_err(|e| Failure::Resource(format!("the working memory not compiled: {e}")))?)
+    } else {
+        None
+    };
+    Ok(Compiled { module, imports, working, clean, working_module, part, arity: ft.params().len() })
+}
+
+/// A module defining a memory of 32 bits of `limits` (in pages), exported as `m`.
+fn memory_module((min, max): (u64, Option<u64>)) -> Vec<u8> {
+    fn leb(v: &mut Vec<u8>, mut n: u64) {
+        loop {
+            let b = (n & 0x7f) as u8;
+            n >>= 7;
+            v.push(if n == 0 { b } else { b | 0x80 });
+            if n == 0 {
+                return;
+            }
+        }
+    }
+    let mut limits = vec![max.is_some() as u8];
+    leb(&mut limits, min);
+    if let Some(max) = max {
+        leb(&mut limits, max);
+    }
+    let mut m = b"\0asm\x01\0\0\0".to_vec();
+    // the memory section: one memory
+    m.push(5);
+    leb(&mut m, 1 + limits.len() as u64);
+    m.push(1);
+    m.extend(limits);
+    // the export section: memory 0 as `m`
+    m.extend([7, 5, 1, 1, b'm', 2, 0]);
+    m
 }
 
 /// The memory limit of an application, as the memories are made and grown.
@@ -319,27 +380,7 @@ impl std::fmt::Display for Violation {
 
 impl std::error::Error for Violation {}
 
-#[cfg(unix)]
 use crate::cow::Snapshot;
-
-/// The working memory of a spawner at a spawn (copied, without `cow`).
-#[cfg(not(unix))]
-struct Snapshot(Vec<u8>);
-
-#[cfg(not(unix))]
-impl Snapshot {
-    fn new(mem: &[u8]) -> Snapshot {
-        Snapshot(mem.to_vec())
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-
-    fn copy_to(&self, mem: &mut [u8]) {
-        mem.copy_from_slice(&self.0)
-    }
-}
 
 /// The failure of a task, which is the application's as the task is joined.
 #[derive(Debug)]
@@ -553,7 +594,10 @@ async fn instantiate<'a>(
         externs.push(match *i {
             Import::Memory(m) => {
                 let (ty, init) = mem(m);
-                let memory = Memory::new(&mut *store, ty).map_err(over)?;
+                let memory = match (m, &c.working_module) {
+                    (Mem::Working, Some(wm)) => defined(store, wm, ty.minimum()).await.map_err(over)?,
+                    _ => Memory::new(&mut *store, ty).map_err(over)?,
+                };
                 if let Some(d) = init {
                     memory.data_mut(&mut *store)[..d.len()].copy_from_slice(d);
                 }
@@ -585,6 +629,17 @@ async fn instantiate<'a>(
         }
     })?;
     Ok((instance, outputs))
+}
+
+/// A memory of `pages` pages, as the module `wm` ([`memory_module`]) defines it.
+async fn defined(store: &mut Store<State>, wm: &Module, pages: u64) -> wasmtime::Result<Memory> {
+    let i = Instance::new_async(&mut *store, wm, &[]).await?;
+    let m = i.get_memory(&mut *store, "m").expect("the memory defined");
+    let have = m.size(&*store);
+    if pages > have {
+        m.grow(&mut *store, pages - have)?;
+    }
+    Ok(m)
 }
 
 impl Loaded for Shared {
@@ -770,7 +825,7 @@ impl Job {
         // the working memory a copy of the snapshot (on write where the system can), over
         // what the data segments wrote
         let w = store.data().working.expect("a working memory");
-        self.snapshot.copy_to(w.data_mut(&mut store));
+        self.snapshot.copy_to(w.data_mut(&mut store), usize::try_from(c.clean).unwrap_or(usize::MAX));
         drop(self.snapshot);
         let task = instance.get_typed_func::<(i32, i32), ()>(&mut store, TASK).expect("aqr_task");
         if let Err(e) = task.call_async(&mut store, (self.arg as i32, self.i as i32)).await {
