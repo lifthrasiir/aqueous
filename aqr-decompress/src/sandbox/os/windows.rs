@@ -50,7 +50,7 @@ use windows_sys::Win32::System::Memory::{
     UnmapViewOfFile,
 };
 use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
-use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_UILIMIT_ALL, SE_GROUP_INTEGRITY};
+use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_UILIMIT_ALL, JOB_OBJECT_UILIMIT_IME, SE_GROUP_INTEGRITY};
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, DETACHED_PROCESS,
     DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetCurrentProcess, GetExitCodeProcess,
@@ -180,7 +180,9 @@ fn job() -> io::Result<OwnedHandle> {
     }
     let job = owned(h);
     set_limits(&job, None)?;
-    let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: JOB_OBJECT_UILIMIT_ALL };
+    // (the IME's of Windows 10 on: Windows 7 takes no restriction it does not know)
+    let all = if version().0 >= 10 { JOB_OBJECT_UILIMIT_ALL } else { JOB_OBJECT_UILIMIT_ALL & !JOB_OBJECT_UILIMIT_IME };
+    let ui = JOBOBJECT_BASIC_UI_RESTRICTIONS { UIRestrictionsClass: all };
     // SAFETY: of the job's handle and the restrictions above
     let r = unsafe {
         SetInformationJobObject(
