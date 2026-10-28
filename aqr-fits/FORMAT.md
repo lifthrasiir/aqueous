@@ -61,6 +61,9 @@ after the HDUs (a slice of `fits/data`). Data of 2048 bytes or more is
   and heap) as it is (a slice of `fits/data`);
 
 and else as it is: a slice of `fits/text` for an ASCII table, of `fits/data` otherwise.
+Neither image module is applied where its output would be over 256 × (its coded inputs' bytes +
+64), which the modules take for corrupt (such data is left to the archive), nor
+`fits-recons-rice` to an image of over 64 × its data unit's bytes + 2^20 pixels.
 
 ## 3. Arithmetic coding
 

@@ -62,7 +62,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "fits-recons-rice",
         version: 1,
-        sha512_256: hex("46a3dabcae48c67c11fe0b933c271542aa0d1296d259e64cba8b28ff35c4fb62"),
+        sha512_256: hex("cb4b79bff495da6236fb0c03bb7b9eb7dcc194495f81887b1e20cdb68d5161fe"),
         wasm: include_bytes!("../wasm/fits-recons-rice.wasm"),
         block: include_bytes!("../wasm/fits-recons-rice.block"),
     },

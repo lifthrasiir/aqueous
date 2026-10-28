@@ -4614,7 +4614,7 @@ as follows:</p>
       <td>fits-recons-image@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fits/FORMAT.md">aqr-fits/FORMAT.md</a>
     <tr>
-      <td><code>46a3dabcae48c67c11fe0b933c271542aa0d1296d259e64cba8b28ff35c4fb62</code>
+      <td><code>cb4b79bff495da6236fb0c03bb7b9eb7dcc194495f81887b1e20cdb68d5161fe</code>
       <td>fits-recons-rice@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fits/FORMAT.md">aqr-fits/FORMAT.md</a>
     <tr>

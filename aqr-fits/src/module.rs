@@ -91,6 +91,13 @@ fn order(x: u32, bits: u32) -> u32 {
     x ^ (sign.wrapping_neg() & ((1u64 << (bits - 1)) - 1) as u32)
 }
 
+/// Whether `n` bytes or pixels of output may come of `coded` bytes: not more than 256 times
+/// them and 64, which keeps a small input from claiming a large output. The encoder leaves
+/// whatever codes smaller to the archive.
+pub fn within(n: u64, coded: usize) -> bool {
+    n <= (coded as u64 + 64) * 256
+}
+
 /// `fits-recons-image`: the data of an image of `len` bytes from `params` ([`Pixels`]) and `inputs`
 /// (the model's coded part and raw bits).
 pub fn image(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
@@ -98,7 +105,7 @@ pub fn image(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[model, raw] = inputs else { return Err(corrupt()) };
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     // (no more pixels than 64 a byte coded)
-    if len % p.bytes() != 0 || len as u64 > (model.len() as u64 + raw.len() as u64 + 64) * 64 * 4 {
+    if len % p.bytes() != 0 || !within(len as u64, model.len() + raw.len()) {
         return Err(corrupt());
     }
     let mut numbers = vec![0u32; len / p.bytes()];
@@ -118,8 +125,7 @@ pub fn rice(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let &[rows, residue, rebuilt, codes, model, raw] = inputs else { return Err(corrupt()) };
     let rebuilt = bitmap(rebuilt, l.rows as usize)?;
     let pixels = l.pixels().ok_or_else(corrupt)?;
-    // (no more pixels than 64 a byte coded)
-    if pixels > (model.len() as u64 + raw.len() as u64 + 64) * 64 * 4 {
+    if !within(pixels, model.len() + raw.len()) {
         return Err(corrupt());
     }
     let (mut d, spans) = tiled::layout(&l, rows, residue, &rebuilt).ok_or_else(corrupt)?;

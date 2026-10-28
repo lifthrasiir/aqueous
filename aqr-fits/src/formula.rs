@@ -127,8 +127,9 @@ fn pixels_node(f: &mut Formula, d: &[u8], mut p: Pixels) -> Option<Vec<Node>> {
     p.shift = p.zero_bits(&pixels);
     let c;
     (p.mode, c) = image::encode_best(&p.numbers(&pixels), p.shape(), None);
+    let coded = c.model.len() + c.raw.len();
     // (zstd at a low level stands for what the archive does with the data as it is)
-    if c.model.len() + c.raw.len() >= zstd::bulk::compress(d, 3).map_or(d.len(), |z| z.len()) {
+    if !module::within(d.len() as u64, coded) || coded >= zstd::bulk::compress(d, 3).map_or(d.len(), |z| z.len()) {
         return None;
     }
     let inputs =
@@ -137,6 +138,11 @@ fn pixels_node(f: &mut Formula, d: &[u8], mut p: Pixels) -> Option<Vec<Node>> {
 }
 
 fn rice(f: &mut Formula, d: &[u8], l: &Layout) -> Option<Vec<Node>> {
+    // (Rice codes a constant block of 32 pixels in 5 bits: a header claiming far more pixels
+    // than that is not taken, nor its image held)
+    if l.pixels()? > 64 * d.len() as u64 + (1 << 20) {
+        return None;
+    }
     let p = tiled::split(d, l)?;
     if !p.rebuilt.iter().any(|&r| r) {
         return None;
@@ -146,6 +152,9 @@ fn rice(f: &mut Formula, d: &[u8], l: &Layout) -> Option<Vec<Node>> {
     let known = (!coded.iter().all(|&c| c)).then(|| coded.iter().map(|&c| !c).collect::<Vec<_>>());
     let shape = image::Shape { width: l.width(), bits: l.rice.bits(), signed: l.rice.bytepix > 1 };
     let (mode, c) = image::encode_best(&p.image, shape, known.as_deref());
+    if !module::within(p.image.len() as u64, c.model.len() + c.raw.len()) {
+        return None;
+    }
     let codes = tiled::encode_codes(l, &p.rebuilt, &p.image, &p.codes);
     let inputs = vec![
         f.push_as("fits/rows", Kind::Table, p.rows),
@@ -238,6 +247,22 @@ mod tests {
             }
         }
         d
+    }
+
+    /// An image of a plane, which codes to almost nothing, still evaluates (it is left to the
+    /// archive where the modules would take it for corrupt).
+    #[test]
+    fn plane_image() {
+        let (w, h) = (1024, 1024);
+        let mut d = header(&[kv("SIMPLE", "T"), kv("BITPIX", 16), kv("NAXIS", 2), kv("NAXIS1", w), kv("NAXIS2", h)]);
+        for y in 0..h {
+            for x in 0..w {
+                d.extend(((x * 3 + y * 5) as i16).to_be_bytes());
+            }
+        }
+        pad(&mut d);
+        let f = encode(&d, 1).unwrap();
+        assert!(eval(&f).unwrap() == d);
     }
 
     #[test]
