@@ -1056,6 +1056,13 @@ impl Encoder {
     }
 
     fn smaller_of(&self, f: &Formula, stand_in: Option<(usize, &[&[u8]])>, free: &[usize], d: &[u8]) -> Result<bool> {
+        // (the last of the work on `d`, told as its streams and `d` are compressed)
+        let streams =
+            f.streams.iter().enumerate().filter(|(_, s)| self.how(s) != How::Stored).map(|(i, s)| match stand_in {
+                Some((t, pieces)) if t == i => total(pieces),
+                _ => s.data.len(),
+            });
+        let _sweep = Swept::over(aqr_common::progress::Sweep::new(d, (streams.sum::<usize>() + d.len()) as u64));
         let mut n = self.len_with(f, stand_in)?;
         if !matches!((&f.root, &f.shared[..]), (Node::Slice { .. }, [])) {
             for &s in free {
@@ -1092,6 +1099,34 @@ impl Encoder {
         Ok(n < self.raw_len(d)?)
     }
 }
+
+thread_local! {
+    /// The work that the data compressed on this thread is told of as ([`Swept`]).
+    static SWEEP: RefCell<Option<aqr_common::progress::Sweep>> = const { RefCell::new(None) };
+}
+
+/// The data compressed on this thread told of as a sweep, until dropped ([`external`]); the one
+/// before, if any, then as it was.
+struct Swept(Option<aqr_common::progress::Sweep>);
+
+impl Swept {
+    fn over(s: aqr_common::progress::Sweep) -> Swept {
+        Swept(SWEEP.with(|t| t.borrow_mut().replace(s)))
+    }
+}
+
+impl Drop for Swept {
+    fn drop(&mut self) {
+        SWEEP.with(|t| *t.borrow_mut() = self.0.take());
+    }
+}
+
+/// The output that Zstandard is given at a time where it is told of how far it is ([`Swept`]),
+/// so that it hands back now and then, for data of more than [`SWEPT_MIN`] bytes: up to 512
+/// KiB, Zstandard compresses on the calling thread, which makes other output with less room
+/// than it may take.
+const SWEPT_WINDOW: usize = 256 << 10;
+const SWEPT_MIN: usize = 1 << 20;
 
 thread_local! {
     /// The Zstandard context of a thread compressing streams for [`Encoder::precompress`].
@@ -1376,17 +1411,33 @@ fn external(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usiz
     let bound = zstd_safe::compress_bound(len).saturating_add(8);
     let room = size.saturating_add(size / 8).saturating_add(4096).saturating_add(8);
     let mut frame = Vec::with_capacity(room.min(bound));
+    // (told of, the bytes compressed so far after each call, and the output a window at a time
+    // where Zstandard's workers make it: on this thread, it depends on the room it has)
+    let swept = SWEEP.with(|s| s.borrow().is_some());
+    let windowed = swept && len > SWEPT_MIN;
+    let (mut window, mut told) = (Vec::with_capacity(if windowed { SWEPT_WINDOW } else { 0 }), 0);
     for i in 0..pieces.len().max(1) {
         let (piece, last) = (pieces.get(i).copied().unwrap_or_default(), i + 1 >= pieces.len());
         let end = if last { ZSTD_EndDirective::ZSTD_e_end } else { ZSTD_EndDirective::ZSTD_e_continue };
         let mut input = InBuffer::around(piece);
         loop {
-            if frame.len() == frame.capacity() {
-                frame.reserve_exact(bound.saturating_sub(frame.len()).max(4096));
+            let left = if windowed {
+                window.clear();
+                let left = c.compress_stream2(&mut OutBuffer::around(&mut window), &mut input, end).map_err(zstd)?;
+                frame.extend_from_slice(&window);
+                left
+            } else {
+                if frame.len() == frame.capacity() {
+                    frame.reserve_exact(bound.saturating_sub(frame.len()).max(4096));
+                }
+                let pos = frame.len();
+                c.compress_stream2(&mut OutBuffer::around_pos(&mut frame, pos), &mut input, end).map_err(zstd)?
+            };
+            if swept {
+                let consumed = c.get_frame_progression().consumed;
+                SWEEP.with(|s| s.borrow_mut().as_mut().map(|s| s.add(consumed.saturating_sub(told))));
+                told = consumed;
             }
-            let pos = frame.len();
-            let left =
-                c.compress_stream2(&mut OutBuffer::around_pos(&mut frame, pos), &mut input, end).map_err(zstd)?;
             if if last { left == 0 } else { input.pos() == piece.len() } {
                 break;
             }
@@ -3052,6 +3103,61 @@ mod tests {
         for (d, level, threads) in runs {
             let fresh = compressed(&mut CCtx::create(), &[d], level, threads).unwrap();
             assert_eq!(compressed(&mut c, &[d], level, threads).unwrap(), fresh, "level {level}, {threads} threads");
+        }
+    }
+
+    /// Data of any size compresses the same where it is told of ([`Swept`]), given little room
+    /// as well as plenty: on the calling thread (up to 512 KiB, where Zstandard does not take
+    /// workers) the output depends on the room it has.
+    #[test]
+    fn swept_alike() {
+        let text = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../../spec/index.bs")).unwrap();
+        let mut rng = aqr_common::rng::Rng::new(1);
+        let mut d = Vec::new();
+        // (text and noise, in runs of either)
+        while d.len() < 3 << 20 {
+            let at = rng.below(text.len() as u64 - 65536) as usize;
+            let run = 1 << (8 + rng.below(9));
+            match rng.below(2) {
+                0 => d.extend_from_slice(&text[at..at + run]),
+                _ => d.extend((0..run).map(|_| rng.below(256) as u8)),
+            }
+        }
+        let file = vec![0u8; 1000];
+        let _watch = aqr_common::progress::watch(&file, |_| {});
+        for n in [50_000, 410_649, 600_000, 3 << 20] {
+            for (level, threads) in [(1, 1), (9, 1), (3, 4)] {
+                for size in [usize::MAX, n / 8] {
+                    let one = compressed_to(&mut CCtx::create(), &[&d[..n]], level, threads, size).unwrap();
+                    let swept = Swept::over(aqr_common::progress::Sweep::new(&file, n as u64));
+                    let two = compressed_to(&mut CCtx::create(), &[&d[..n]], level, threads, size).unwrap();
+                    drop(swept);
+                    assert!(one == two, "{n} bytes at level {level}, {threads} threads, room for {size}");
+                }
+            }
+        }
+    }
+
+    /// A stream compresses the same where it is told of ([`Swept`]), a window of output at a
+    /// time: all of it told, in parts.
+    #[test]
+    fn swept() {
+        let mut rng = aqr_common::rng::Rng::new(1);
+        let d: Vec<u8> =
+            (0..2 * ZSTD_JOB as usize + 12345).map(|i| if i % 3 == 0 { rng.below(256) as u8 } else { b'a' }).collect();
+        let job = ZSTD_JOB as usize;
+        for pieces in [vec![&d[..]], vec![&d[..job], &d[job..]], vec![&d[..5], &d[5..job + 1], &d[job + 1..]]] {
+            let one = compressed(&mut CCtx::create(), &pieces, 3, 4).unwrap();
+            let file = vec![0u8; 1000];
+            let told = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let t = told.clone();
+            let _watch = aqr_common::progress::watch(&file, move |r| t.lock().unwrap().push(r));
+            let swept = Swept::over(aqr_common::progress::Sweep::new(&file, d.len() as u64));
+            assert_eq!(compressed(&mut CCtx::create(), &pieces, 3, 4).unwrap(), one);
+            drop(swept);
+            let told = told.lock().unwrap();
+            assert!(told.len() > 2 && told.windows(2).all(|w| w[0].end == w[1].start), "{told:?}");
+            assert_eq!((told[0].start, told.last().unwrap().end), (0, 1000));
         }
     }
 

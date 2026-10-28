@@ -77,10 +77,39 @@ pub fn alias(d: &[u8], of: &[u8]) -> Watch {
 
 /// Tells that the work on `part` of some data is done.
 pub fn done(part: &[u8]) {
-    if COUNT.load(Ordering::Relaxed) == 0 || part.is_empty() {
+    done_at(part.as_ptr() as usize..part.as_ptr() as usize + part.len());
+}
+
+/// Work on some data told as it goes, as done with the data from its start in proportion: the
+/// last of the work on it, which tells nothing of where in it it is (compressing what was made
+/// of it, say). What was told of it before is not told again, so it fills in what is left.
+pub struct Sweep {
+    at: Range<usize>,
+    total: u64,
+    done: u64,
+}
+
+impl Sweep {
+    /// Of `d`, `total` of work (in any unit).
+    pub fn new(d: &[u8], total: u64) -> Sweep {
+        Sweep { at: d.as_ptr() as usize..d.as_ptr() as usize + d.len(), total, done: 0 }
+    }
+
+    /// `n` more of the work done.
+    pub fn add(&mut self, n: u64) {
+        let len = self.at.len() as u128;
+        let to = |done: u64| self.at.start + (done.min(self.total) as u128 * len / self.total.max(1) as u128) as usize;
+        let from = to(self.done);
+        self.done = self.done.saturating_add(n);
+        done_at(from..to(self.done));
+    }
+}
+
+/// [`done`] of the data at the addresses `at`.
+fn done_at(mut at: Range<usize>) {
+    if COUNT.load(Ordering::Relaxed) == 0 || at.is_empty() {
         return;
     }
-    let mut at = part.as_ptr() as usize..part.as_ptr() as usize + part.len();
     let sink = {
         let w = WATCHED.read().unwrap();
         let mut depth = 0;
@@ -134,8 +163,14 @@ mod tests {
         done(&[1, 2, 3]);
         drop((b, a));
         done(&made);
+        // the rest swept, a third of it at a time (the first third told of again)
+        let mut s = Sweep::new(&file[600..], 30);
+        s.add(10);
+        s.add(0);
+        s.add(25);
         drop(w);
         done(&file);
-        assert_eq!(*told.lock().unwrap(), [0..10, 300..400, 550..750, 500..1000]);
+        s.add(10);
+        assert_eq!(*told.lock().unwrap(), [0..10, 300..400, 550..750, 500..1000, 600..733, 733..1000]);
     }
 }
