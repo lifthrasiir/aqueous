@@ -37,6 +37,13 @@ own terms; the code is written from that description, not from the encoder's cod
   lzop file structure from libarchive's reader (BSD).
 - **lpaq** and **PAQ** (Matt Mahoney and others): the style of binary arithmetic coding and
   context mixing.
+- **FITS** (the IAU FITS Working Group's FITS Standard 4.0) and its tiled image compression
+  (William Pence, Richard White, Rob Seaman and others): the format, in aqr-fits, written from
+  the Standard; the Rice tiles' layout checked against fpack and funpack (cfitsio, NASA) used
+  as black boxes, whose code is not used. The encoders' choice of a block's code is not
+  reproduced but kept.
+- **LOCO-I** (Marcelo Weinberger, Gadiel Seroussi, Guillermo Sapiro): the median predictor and
+  the bias correction by context, in aqr-fits's pixel model.
 - **ryg_rans** (Fabian Giesen): rANS coding and division by a reciprocal, in aqr-common and
   elsewhere.
 

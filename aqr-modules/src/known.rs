@@ -53,6 +53,27 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/fasta-recons.block"),
     },
     Known {
+        name: "fits-recons-image",
+        version: 1,
+        sha512_256: hex("8a816a214de0b8077d0e5a2686e0515c9fd68a0068cf4b2d4467c2104726c816"),
+        wasm: include_bytes!("../wasm/fits-recons-image.wasm"),
+        block: include_bytes!("../wasm/fits-recons-image.block"),
+    },
+    Known {
+        name: "fits-recons-rice",
+        version: 1,
+        sha512_256: hex("c8694b5b57d410e8a907fc1ffc608f934a017914b1c3dc98cb1517c469f2ad29"),
+        wasm: include_bytes!("../wasm/fits-recons-rice.wasm"),
+        block: include_bytes!("../wasm/fits-recons-rice.block"),
+    },
+    Known {
+        name: "fits-recons-table",
+        version: 1,
+        sha512_256: hex("c25884adc026793bca3729098d4adc0d10cc9015b5094e9b2a2d2043d10bc80f"),
+        wasm: include_bytes!("../wasm/fits-recons-table.wasm"),
+        block: include_bytes!("../wasm/fits-recons-table.block"),
+    },
+    Known {
         name: "flac-recons",
         version: 3,
         sha512_256: hex("6206529b733fcc76f115f80f003cee937bd04c7bf4b96366ed4b64991406f265"),

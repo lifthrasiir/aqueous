@@ -48,6 +48,8 @@ pub enum Format {
     /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
     /// data.
     Fasta,
+    /// FITS file (aqr-fits), known by its primary header.
+    Fits,
     /// Wavefront OBJ file (aqr-obj), a whole file known by its text: not looked for in other
     /// data, nor by its name, which object files (COFF, OMF) have too.
     Obj,
@@ -63,7 +65,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 26] = [
+    pub const ALL: [Format; 27] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -85,6 +87,7 @@ impl Format {
         Format::Zip,
         Format::GitPack,
         Format::Fasta,
+        Format::Fits,
         Format::Obj,
         Format::Ar,
         Format::Tar,
@@ -115,6 +118,7 @@ impl Format {
             Format::Zip => "zip",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
+            Format::Fits => "fits",
             Format::Obj => "obj",
             Format::Ar => "ar",
             Format::Tar => "tar",
@@ -158,6 +162,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
         b"sqlite" | b"sqlite3" => format(Format::Sqlite),
         b"fa" | b"fasta" | b"fna" | b"ffn" | b"fas" => format(Format::Fasta),
+        b"fits" | b"fit" | b"fts" | b"fz" => format(Format::Fits),
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
@@ -240,6 +245,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     {
         // Two bytes are too weak a signature to look for in other data.
         Some(Format::Raw)
+    } else if aqr_fits::formula::starts(d) {
+        Some(Format::Fits)
     } else if start && aqr_fasta::formula::starts(d) {
         Some(Format::Fasta)
     } else if start && aqr_obj::formula::starts(d) {
@@ -281,6 +288,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'C' => b == b'S',
         b'!' => b == b'<',
         b'0' => b == b'7',
+        b'S' => b == b'I',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -342,6 +350,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'C' => d.starts_with(b"CSFCHUNK"),
         b'!' => d.starts_with(aqr_bundle::ar::MAGIC),
         b'0' => d.starts_with(b"07070"),
+        b'S' => aqr_fits::formula::starts(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,
@@ -429,6 +438,7 @@ mod tests {
             (b"\x78\xda", 0),
             (b"!<", 0),
             (b"07", 0),
+            (b"SI", 0),
             (b"\x48\x89", 0),
         ] {
             assert!(pairs(d[0], d[1]), "{d:x?}");

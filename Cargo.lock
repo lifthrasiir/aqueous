@@ -97,6 +97,7 @@ dependencies = [
  "aqr-decompress",
  "aqr-exe",
  "aqr-fasta",
+ "aqr-fits",
  "aqr-flac",
  "aqr-flate",
  "aqr-formula",
@@ -131,6 +132,7 @@ dependencies = [
  "aqr-common",
  "aqr-exe",
  "aqr-fasta",
+ "aqr-fits",
  "aqr-flac",
  "aqr-flate",
  "aqr-formula",
@@ -192,6 +194,15 @@ dependencies = [
 
 [[package]]
 name = "aqr-fasta"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-fits"
 version = "0.1.0"
 dependencies = [
  "aqr-common",
@@ -293,6 +304,7 @@ dependencies = [
  "aqr-clip",
  "aqr-exe",
  "aqr-fasta",
+ "aqr-fits",
  "aqr-flac",
  "aqr-flate",
  "aqr-git",

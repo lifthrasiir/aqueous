@@ -96,6 +96,11 @@ pub const BCN: Module = aqr_tex::formula::MODULE;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 pub const FASTA: Module = aqr_fasta::formula::MODULE;
+/// The data of a FITS file's HDUs (aqr-fits): an image, a tile-compressed image of Rice tiles,
+/// the rows of a binary table.
+pub const FITS_IMAGE: Module = aqr_fits::formula::IMAGE;
+pub const FITS_RICE: Module = aqr_fits::formula::RICE;
+pub const FITS_TABLE: Module = aqr_fits::formula::TABLE;
 pub const OBJ: Module = aqr_obj::formula::MODULE;
 /// Text of words and markup replaced by codes of a dictionary (aqr-wrt). Resources: the
 /// dictionary; inputs: the coded text.
@@ -108,7 +113,7 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 28] = [
+pub const MODULES: [Module; 31] = [
     X86,
     ARM64,
     CIL,
@@ -133,6 +138,9 @@ pub const MODULES: [Module; 28] = [
     PDF,
     SQLITE,
     FASTA,
+    FITS_IMAGE,
+    FITS_RICE,
+    FITS_TABLE,
     OBJ,
     WRT,
     PCM,
@@ -152,7 +160,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 16] = [
+const RECONS: [(Module, Decode); 19] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
     (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
@@ -165,6 +173,9 @@ const RECONS: [(Module, Decode); 16] = [
     (PDF, |p, r, i, n, t| none(r).and_then(|_| aqr_pdf::formula::decode(p, i, n, t).map_err(msg))),
     (SQLITE, |p, r, i, n, t| none(r).and_then(|_| aqr_sqlite::formula::decode(p, i, n, t).map_err(msg))),
     (FASTA, |p, r, i, n, t| none(r).and_then(|_| aqr_fasta::formula::decode(p, i, n, t).map_err(msg))),
+    (FITS_IMAGE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_image(p, i, n).map_err(msg))),
+    (FITS_RICE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_rice(p, i, n).map_err(msg))),
+    (FITS_TABLE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_table(p, i, n).map_err(msg))),
     (OBJ, |p, r, i, n, t| none(r).and_then(|_| aqr_obj::formula::decode(p, i, n, t).map_err(msg))),
     (WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(msg)),
     (PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(msg)),

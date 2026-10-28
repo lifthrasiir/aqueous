@@ -34,6 +34,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Zip => aqr_zip::zip::extent(d),
         Format::GitPack => aqr_git::pack::extent(d),
         Format::Fasta | Format::Obj | Format::Text => Some(d.len()),
+        Format::Fits => aqr_fits::formula::extent(d),
         Format::Ar => bundle(aqr_bundle::formula::Format::Ar, d),
         Format::Tar => bundle(aqr_bundle::formula::Format::Tar, d),
         Format::Cpio => bundle(aqr_bundle::formula::Format::Cpio, d),

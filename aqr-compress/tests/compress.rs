@@ -899,6 +899,56 @@ fn fasta() {
     assert_eq!(aqr_compress::kind_by_name(b"x/chr1.fa"), aqr_formula::Kind::Format("fasta"));
 }
 
+/// A FITS file of a 16-bit image and a binary table, `n` × `n` pixels and rows.
+fn fits_file(n: usize) -> Vec<u8> {
+    let header = |cards: &[String]| {
+        let mut h: Vec<u8> = cards.iter().flat_map(|c| format!("{c:<80}").into_bytes()).collect();
+        h.extend(format!("{:<80}", "END").bytes());
+        h.resize(h.len().next_multiple_of(2880), b' ');
+        h
+    };
+    let kv = |k: &str, v: &dyn std::fmt::Display| format!("{k:<8}= {v:>20}");
+    let mut d = header(&[kv("SIMPLE", &"T"), kv("BITPIX", &16), kv("NAXIS", &2), kv("NAXIS1", &n), kv("NAXIS2", &n)]);
+    let noise = noise(n * n);
+    for y in 0..n {
+        for x in 0..n {
+            d.extend(((x * 5 + y * 3) as i16 + (noise[y * n + x] % 16) as i16 - 1000).to_be_bytes());
+        }
+    }
+    d.resize(d.len().next_multiple_of(2880), 0);
+    d.extend(header(&[
+        kv("XTENSION", &"'BINTABLE'"),
+        kv("BITPIX", &8),
+        kv("NAXIS", &2),
+        kv("NAXIS1", &12),
+        kv("NAXIS2", &n),
+        kv("PCOUNT", &0),
+        kv("GCOUNT", &1),
+        kv("TFIELDS", &2),
+        kv("TFORM1", &"'J       '"),
+        kv("TFORM2", &"'D       '"),
+    ]));
+    for r in 0..n {
+        d.extend((r as i32 * 4).to_be_bytes());
+        d.extend((r as f64 / 3.0).to_be_bytes());
+    }
+    d.resize(d.len().next_multiple_of(2880), 0);
+    d
+}
+
+/// A FITS file goes to aqr-fits, by its start (at the start of a file or in other data) or its
+/// name.
+#[test]
+fn fits() {
+    let d = fits_file(200);
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), ["fits-recons-image", "fits-recons-table"]);
+    let f = roundtrip(&[&text(5000)[..], &d, b"after"].concat(), &all());
+    assert_eq!(modules(&f), ["fits-recons-image", "fits-recons-table"]);
+    assert_eq!(aqr_compress::kind_by_name(b"x/m31.fits"), aqr_formula::Kind::Format("fits"));
+    assert_eq!(aqr_compress::kind_by_name(b"x/m31.fits.fz"), aqr_formula::Kind::Format("fits"));
+}
+
 /// A Wavefront OBJ file of a grid of `n` × `n` vertices, its normals and faces.
 fn obj_file(n: usize) -> Vec<u8> {
     let mut d = b"# grid\nmtllib grid.mtl\no grid\n".to_vec();

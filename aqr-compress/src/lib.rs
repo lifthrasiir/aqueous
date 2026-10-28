@@ -20,8 +20,8 @@
 //!   members with their sizes and checksums derived.
 //! - Text, a whole file of text bytes or data of a name telling text: aqr-wrt, its words and
 //!   markup replaced by codes of a dictionary of its own.
-//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA and
-//!   Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
+//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, FITS
+//!   and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
 //!   applied to its streams, and files it embeds (PDF's DEFLATE streams and images, PSD's and
 //!   JPEG's embedded files, Clip Studio Paint's database) applied to theirs (see aqr-decompress
 //!   for the modules).
@@ -1299,6 +1299,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Sqlite => aqr_sqlite::formula::encode,
         Format::LevelDb => aqr_snappy::formula::encode,
         Format::Fasta => aqr_fasta::formula::encode,
+        Format::Fits => aqr_fits::formula::encode,
         Format::Obj => aqr_obj::formula::encode,
         Format::Text => aqr_wrt::formula::encode,
         _ => return None,

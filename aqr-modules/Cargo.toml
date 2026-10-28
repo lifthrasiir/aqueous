@@ -16,6 +16,7 @@ aqr-bundle = { path = "../aqr-bundle", default-features = false }
 aqr-clip = { path = "../aqr-clip", default-features = false }
 aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"] }
 aqr-fasta = { path = "../aqr-fasta", default-features = false }
+aqr-fits = { path = "../aqr-fits", default-features = false }
 aqr-flac = { path = "../aqr-flac", default-features = false }
 aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-git = { path = "../aqr-git", default-features = false }
@@ -88,6 +89,21 @@ required-features = ["wasm"]
 [[bin]]
 name = "fasta-recons"
 path = "src/bin/fasta-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "fits-recons-image"
+path = "src/bin/fits-recons-image.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "fits-recons-rice"
+path = "src/bin/fits-recons-rice.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "fits-recons-table"
+path = "src/bin/fits-recons-table.rs"
 required-features = ["wasm"]
 
 [[bin]]
