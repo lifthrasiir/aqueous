@@ -63,6 +63,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-clip"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "aqr-psd",
+ "aqr-raw",
+ "aqr-sqlite",
+ "flate2",
+]
+
+[[package]]
 name = "aqr-common"
 version = "0.1.0"
 dependencies = [

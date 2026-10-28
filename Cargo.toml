@@ -4,6 +4,7 @@ members = [
     "aqr",
     "aqr-common",
     "aqr-bundle",
+    "aqr-clip",
     "aqr-formula",
     "aqr-num",
     "aqr-compress",
