@@ -46,7 +46,7 @@ use std::time::{Instant, UNIX_EPOCH};
 mod stop;
 mod view;
 
-use aqr_compress::{Options, compress_formula_as, compress_tree_to, detect, kind_by_name};
+use aqr_compress::{Options, compress_formula_telling, compress_tree_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, Value, name_bytes, name_from};
 
@@ -261,8 +261,16 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         && meta(input)?.is_file()
     {
         let d = fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        let name = os_bytes(input.as_os_str());
+        let kind = kind_by_name(&name);
+        let g = Gathered {
+            tree: Tree::default(),
+            contents: vec![(input.clone(), name, d.len() as u64)],
+            skipped: Vec::new(),
+        };
+        let view = view::View::new(&g, bars(), false);
         // (of the kind its name tells, as a file in an archive of many)
-        let (c, f) = compress_formula_as(&d, kind_by_name(&os_bytes(input.as_os_str())), &a.opt);
+        let (c, f) = viewed(a, &view, |tell| compress_formula_telling(&d, kind, &a.opt, tell));
         write_whole(out, a.force, |w| w.write_all(&c))?;
         if !a.quiet && a.verbose {
             let modules: Vec<String> = f.applies().iter().map(|m| m.module.to_string()).collect();
@@ -306,33 +314,44 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
             eprintln!("skipped {s}");
         }
     }
-    // (a bar on a terminal, drawn again now and then; with -v, the log as the files are written)
-    let view = view::View::new(&g, std::io::stderr().is_terminal() && view::takes_escapes(), a.verbose);
-    let done = std::sync::atomic::AtomicBool::new(false);
+    // (with -v, the log as the files are written)
+    let view = view::View::new(&g, bars(), a.verbose);
     // written as it is made
     let r = write_whole(out, a.force, |file| {
         let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
-        std::thread::scope(|s| {
-            if !a.quiet && view.bars() {
-                s.spawn(|| {
-                    while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                        std::thread::park_timeout(std::time::Duration::from_millis(250));
-                        view.tick();
-                    }
-                });
-            }
-            let quiet = |_: aqr_compress::Event| {};
-            let tell: &(dyn Fn(aqr_compress::Event) + Sync) = if a.quiet { &quiet } else { &|e| view.tell(e) };
-            let r = compress_tree_to(&g.tree, &g, &a.opt, &mut w, tell).and_then(|r| w.flush().map(|_| r));
-            done.store(true, std::sync::atomic::Ordering::Relaxed);
-            r
-        })
+        viewed(a, &view, |tell| compress_tree_to(&g.tree, &g, &a.opt, &mut w, tell).and_then(|r| w.flush().map(|_| r)))
     })?;
     if !a.quiet {
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
         summary(out, g.contents.len(), r.read as usize, r.len, start);
     }
     Ok(())
+}
+
+/// Whether the bar is drawn: on a terminal that takes it.
+fn bars() -> bool {
+    std::io::stderr().is_terminal() && view::takes_escapes()
+}
+
+/// `work` done telling `view` how far it is (nothing, with -q), and the bar drawn again now and
+/// then (for the time a file takes) until it is done.
+fn viewed<T>(a: &Args, view: &view::View, work: impl FnOnce(&(dyn Fn(aqr_compress::Event) + Sync)) -> T) -> T {
+    let done = std::sync::atomic::AtomicBool::new(false);
+    std::thread::scope(|s| {
+        if !a.quiet && view.bars() {
+            s.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::park_timeout(std::time::Duration::from_millis(250));
+                    view.tick();
+                }
+            });
+        }
+        let quiet = |_: aqr_compress::Event| {};
+        let tell: &(dyn Fn(aqr_compress::Event) + Sync) = if a.quiet { &quiet } else { &|e| view.tell(e) };
+        let r = work(tell);
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        r
+    })
 }
 
 fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {

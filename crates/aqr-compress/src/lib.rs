@@ -488,7 +488,7 @@ pub fn recompress(d: &[u8], opt: &Options) -> Formula {
 
 /// `d` as an archive, with the checksum of `d`.
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
-    compress_with(d, Kind::Unknown, opt, false).0
+    compress_with(d, Kind::Unknown, opt, false, None).0
 }
 
 /// [`compress`], with the formula the archive holds: that of `d` raw where it was not verified.
@@ -499,24 +499,63 @@ pub fn compress_formula(d: &[u8], opt: &Options) -> (Vec<u8>, Formula) {
 /// [`compress_formula`] of a file of `kind`, as its name tells ([`kind_by_name`]), as a file in
 /// an archive of many is taken.
 pub fn compress_formula_as(d: &[u8], kind: Kind, opt: &Options) -> (Vec<u8>, Formula) {
-    let (c, f) = compress_with(d, kind, opt, true);
+    let (c, f) = compress_with(d, kind, opt, true, None);
+    (c, f.expect("kept"))
+}
+
+/// [`compress_formula_as`], telling `tell` how far it is as [`compress_tree_to`] does, of `d` as
+/// content 0 in a batch of its own (the compression told only once it is encoded, and once it
+/// is verified).
+pub fn compress_formula_telling(
+    d: &[u8],
+    kind: Kind,
+    opt: &Options,
+    tell: &(dyn Fn(Event) + Sync),
+) -> (Vec<u8>, Formula) {
+    let (tracker, notes) = progress::Tracker::new(vec![d.len() as u64]);
+    let (c, f) = std::thread::scope(|s| {
+        s.spawn(|| tracker.run(tell));
+        // (the notes gone with it, the tracker done)
+        compress_with(d, kind, opt, true, Some(notes))
+    });
     (c, f.expect("kept"))
 }
 
 /// [`compress`] of a file of `kind`, with the formula of the archive where it is to be `kept`:
-/// else it is dropped before the archive is verified.
-fn compress_with(d: &[u8], kind: Kind, opt: &Options, kept: bool) -> (Vec<u8>, Option<Formula>) {
+/// else it is dropped before the archive is verified. Where there are `notes`, it is told of as
+/// a batch of content 0.
+fn compress_with(
+    d: &[u8],
+    kind: Kind,
+    opt: &Options,
+    kept: bool,
+    notes: Option<progress::Notes>,
+) -> (Vec<u8>, Option<Formula>) {
+    use progress::Note;
+    let note = |n: Note| {
+        if let Some(notes) = &notes {
+            notes.send(n)
+        }
+    };
+    note(Note::Batch { bytes: d.len() as u64, verify: opt.verify });
+    note(Note::Started(0));
+    let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
     let mut cx = Cx::new(d, opt);
     cx.pre = opt.verify.then(|| Arc::new(verify::Prevalidator::spawn(opt.threads, &[d])));
     let f = recompress_at(d, opt, 0, kind, &cx);
+    drop(watch);
+    note(Note::Ended(0));
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
-    finish(f, d, opt, &cx, memo, kept)
+    let r = finish(f, d, opt, &cx, memo, kept, notes.as_ref());
+    note(Note::Written);
+    r
 }
 
 /// The archive of formula `f` of `d`; with [`Options::verify`], decoded and compared with `d`
 /// (the outputs of applications in `memo` taken from there), and where it is not `d` (a
 /// module's bug), the archive of `d` raw instead. The formula is returned where `kept`; what is
-/// no longer needed (the formula, the streams compressed) is dropped before the decoding.
+/// no longer needed (the formula, the streams compressed) is dropped before the decoding. The
+/// `notes` are told of it encoded and verified.
 fn finish(
     mut f: Formula,
     d: &[u8],
@@ -524,11 +563,14 @@ fn finish(
     cx: &Cx,
     memo: verify::Memo,
     kept: bool,
+    notes: Option<&progress::Notes>,
 ) -> (Vec<u8>, Option<Formula>) {
+    use progress::Note;
     // the streams of a class together, as they compress smaller
     f.merge_classes();
     let sum = Some(aqr::checksum(d));
     let c = cx.enc.encode(&f, sum);
+    notes.inspect(|n| n.send(Note::Encoded(1, 1)));
     cx.enc.clear();
     let f = kept.then_some(f);
     let decodes = |c: &[u8]| {
@@ -538,7 +580,9 @@ fn finish(
             hits: Default::default(),
             files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
         };
-        aqr::decode(c, &aqr_decompress::natives(&m)).is_ok_and(|out| out == d)
+        let decodes = aqr::decode(c, &aqr_decompress::natives(&m)).is_ok_and(|out| out == d);
+        notes.inspect(|n| n.send(Note::Verified(d.len() as u64)));
+        decodes
     };
     match c {
         Ok(c) if !opt.verify || decodes(&c) => (c, f),
@@ -1920,12 +1964,13 @@ mod tests {
         let raw = aqr::encode(&Formula::raw("raw", d.clone()), Some(aqr::checksum(&d)), opt.level).unwrap();
         // a leaf, whose checksum is not the output's, is not encoded at all
         assert_eq!(
-            finish(wrong.clone(), &d, &Options { verify: false, ..opt.clone() }, &cx, Default::default(), false).0,
+            finish(wrong.clone(), &d, &Options { verify: false, ..opt.clone() }, &cx, Default::default(), false, None)
+                .0,
             raw
         );
         // two slices: the archive has the output's checksum
         wrong.root = Node::Concat(vec![Node::slice(0, 0, 100), Node::slice(0, 100, d.len() as u64 - 100)]);
-        assert_eq!(finish(wrong.clone(), &d, &opt, &cx, Default::default(), false).0, raw);
+        assert_eq!(finish(wrong.clone(), &d, &opt, &cx, Default::default(), false, None).0, raw);
         // a module that fails
         let fails = Formula {
             streams: vec![aqr_formula::Stream {
@@ -1937,11 +1982,11 @@ mod tests {
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
             shared: vec![],
         };
-        assert_eq!(finish(fails, &d, &opt, &cx, Default::default(), false).0, raw);
+        assert_eq!(finish(fails, &d, &opt, &cx, Default::default(), false, None).0, raw);
         // without verification, as it is
         let opt = Options { verify: false, ..opt };
         assert_eq!(
-            aqr_decompress::decompress(&finish(wrong, &d, &opt, &cx, Default::default(), false).0, 1),
+            aqr_decompress::decompress(&finish(wrong, &d, &opt, &cx, Default::default(), false, None).0, 1),
             Err(aqr::Failure::Invalid("output checksum mismatch".into()))
         );
     }

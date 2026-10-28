@@ -209,8 +209,8 @@ pub fn takes_escapes() -> bool {
 fn bar(s: &State, slow: Option<String>) -> Vec<String> {
     let share = |(done, total): (u64, u64)| if total == 0 { 0.0 } else { (done as f64 / total as f64).min(1.0) };
     let (p, a, c) = (share(s.probe), share(s.analysis), share(s.compression));
-    // (nothing to look at: the probe done)
-    let p = if s.probe.1 == 0 && (s.analysis.0 > 0 || s.compression.0 > 0) { 1.0 } else { p };
+    // (nothing to look at once a batch is begun, as for a file alone: the probe done)
+    let p = if s.probe.1 == 0 && (s.analysis.1 > 0 || s.compression.1 > 0) { 1.0 } else { p };
     let cells = |x: f64| ((x * CELLS as f64).floor() as usize).min(CELLS);
     let (cp, ca, cc) = (cells(p.max(a).max(c)), cells(a.max(c)), cells(c));
     let mut b = String::with_capacity(CELLS);
