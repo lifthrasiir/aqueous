@@ -9,16 +9,15 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   figures are `figures/*.pik` with their SVGs committed. Pushes to `main` deploy it to GitHub
   Pages (`.github/workflows/spec.yml`).
 - `docs/` — design documents, mostly in Korean: `10gb-todo.md` (what is left for the 10 GB
-  benchmark), `file-formats.md` (measurements by format), `*-design.md`. Don't repeat in a
-  design document what the spec already says; point to the spec. Where they disagree, the
-  spec wins.
+  benchmark), `file-formats.md` (measurements by format), `*-design.md`.
 - Core crates
   - `aqr` — the CLI (`aqr -c/-t/-d`).
-  - `aqr-formula` — entry formulas (stack-machine programs) and the archive structure.
+  - `aqr-formula` — entry formulas (stack-machine programs) and the archive structure
+    (`src/aqr.rs`: the archive encoder and decoder).
   - `aqr-compress` — picks a recompressor by magic bytes, makes the formula, stores the archive.
   - `aqr-decompress` — runs the formulas' modules natively and extracts archives.
-  - `aqr-common` — shared parts: varints, rANS, bit I/O, heap accounting. `aqr-num` — numbers
-    printed as text.
+  - `aqr-common` — shared parts: varints, rANS, bit I/O, heap accounting, the task pool.
+    `aqr-num` — numbers printed as text.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper.
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
@@ -35,26 +34,96 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 ## Development notes
 
 - Test with `cargo rt -p <crate>` (`.cargo/config.toml`: `cargo test --profile release-test`,
-  optimised without the fat LTO of `-r`). Codec tests in debug builds are very slow. Timings
-  (`--ignored` tests) still want `-r`. Test the crates you changed rather than the whole
-  workspace.
+  optimised without the fat LTO of `-r`). Codec tests in debug builds are very slow (a debug
+  `cargo test --workspace` once ran over 12 minutes). Timings (`--ignored` tests) still want
+  `-r`. Test the crates you changed rather than the whole workspace; for the archive encoder
+  and decoder that is aqr-formula, aqr-compress and aqr-decompress. Stream long output with
+  `rg --line-buffered` rather than through `sort`, which hides progress.
 - Format with the `rustfmt.toml`s (width 120).
-- After changing code that goes into modules (a recompressor's reconstruction path and the
-  like), rebuild them with `aqr-modules/build.sh` so that the hashes in `known.rs` and the
-  table in `spec/index.bs` match. If you don't rebuild, say so in the commit message.
+- Cache the results of measurements taking over a minute in `cache/`.
+- Measure peak memory (`/usr/bin/time -l`) on runs over big inputs.
+- Benchmark zstd at level 3 or below, never 19 (far too slow); cached results at 19 may still
+  be cited.
 - Performance in numbers: measure speed and size before and after, and record them in the
-  commit message. Prefer `dyn` over generics off the hot paths; monomorphize only where a
-  measurement shows the gain.
-- Cache the results of measurements taking over a minute in `cache/`. Compare against zstd at
-  level 3 or below (never 19).
-- Don't look at GPL code (LZO, for one): implement clean-room from specifications and
-  black-box testing only.
-- Never stage a change of the `flate-zoo` submodule pointer.
-- The disk is small: `cargo clean` `target/` now and then after big runs.
+  commit message.
+- Monomorphize (generics, const generics) only where it is needed and a measurement shows it
+  is hot; elsewhere use `dyn`. Generic copies bloat the Wasm modules that ship in archives.
+  Compare "instructions retired" (`/usr/bin/time -l`) of interleaved A/B binaries rather than
+  wall-clock. For example, aqr-flate's table shapes and the token loop of Player/Recorder stay
+  specialized (4–8% each otherwise), while Adaptive uses `dyn Search`
+  (`Corr::SPECIALIZED = false`).
+- On big streams prefer structural wins (sharing, probe-guided selection) to slower coding;
+  slow modes such as aqr-flate's profile 10 belong to a separate high level, never to big
+  streams by default.
+- Don't look at GPL code: for LZO, only public specifications (the kernel's
+  `Documentation/staging/lzo.rst`, libarchive's BSD lzop reader) are read, and liblzo2 and
+  lzop are used only as black-box oracles for fixtures. Never read LZO, miniLZO or the kernel's
+  compressor sources, nor the installed lzo headers.
+- Private data (browser profiles and the like) is measured by the user; don't copy it.
+- Design documents: don't repeat what `spec/index.bs` already says; point to the spec section
+  or drop the text. Where they disagree, the spec is the newer source; fix the document.
 
-## Commits
+## Modules
 
-**Commit on your own after each substantial step. Never push.**
+Archives carry real Wasm modules built from the recompressors' code; native decoding is an
+optimization picked by hash.
+
+- Codec crates: feature `encode` (default) brings in `formula`, aqr-formula, zstd and rayon;
+  `module.rs` is the decoding code without aqr-formula. Natively they stay plain libraries.
+- aqr-modules: one `[[bin]]` per module (never one module doing several things). `build.sh`
+  builds them through aqr-ld and writes `wasm/*.wasm`, `*.block` (the module blocks' data),
+  `src/known.rs` (name, version, SHA-512/256) and the registry's table in `spec/index.bs`.
+- **After changing any code a module links, rerun `aqr-modules/build.sh`** and commit the
+  results; a test in aqr-decompress catches stale ones. If you don't rebuild, say so in the
+  commit message.
+- aqr-decompress: a known hash runs natively, anything else in wasmtime.
+- No variable arity: use Split and separate modules (png-against, leveldb-recons, …).
+- Model data (aqr-flate's) is a resource, not embedded in the module.
+- Threads in Wasm: fork-join tasks (`aqr_spawn`/`aqr_join`/`aqr_take`; `aqr_common::pool::
+  par_map_apart` with `wire::Wire`) and channels (flac/pcm pipelines); the spec's "Module
+  execution" has the rules, `docs/xform-design.md` the design. The spawn record must stay in a
+  never-inlined frame (`spawn_record`), or the task's stack clobbers the caller's locals. Other
+  `par_map`/`scope` uses run serially in Wasm. Port a pipeline only when its speedup is worth
+  the module's growth; report both (png, psd and mp3 were measured and not ported).
+- Size: aqr-ld trims modules itself (prefer automating in aqr-ld over toolchain flags);
+  `AQR_LD_NAMES=1` keeps the name section for size debugging. Module error types must
+  implement `Display` (`Debug` of `&str` pulls in core's Unicode tables).
+- Module bytes are a per-archive cost that dominates small archives. Planned: built-in
+  dictionaries in the spec (u8-sized module blocks as hash references, dictionary blocks as
+  references to a built-in dictionary; two 64 KiB dictionaries, module and text, about 60 KB
+  in all). A text dictionary needs natural language as well as code; a trained dictionary's
+  entropy tables hurt CJK, so the compressor must be able to use it as raw content too.
+
+## Project notes
+
+- aqr-formula's decoder (`defined()` in `src/aqr.rs`) does not accept import blocks 58–5F,
+  though the spec has them. Implement them together with import resolution and overlays when
+  extraction work starts, not by just adding them to `defined()`.
+- Near-duplicate files (variant sets, from 差分 PNG sets): reference coding in aqr-png,
+  multi-output formulas (`Node::Output`, `Node::Patch`), png-set and generic per-class
+  patches (`Formula::merge_classes`) are done (`docs/xform-design.md` §4.6). Left: a byte bound
+  on the dependency closure of top-level entries for random access; aqr-flate rebuilding of the
+  ZIPs' deflated entries (not worth it unless profile 10 gets much faster).
+- aqr-lzma: the goal is deduplicating contents, not the best recompression; a record of about
+  14% at a reasonable speed is fine. What is left is in `docs/10gb-todo.md` item 6.
+- aqr-lzo: a record of the parse rather than emulation, as LZO has many encoders. Left (its
+  README's Status): raw LZO1X in other containers, LZO-RLE, LZO1X-1's hash table start.
+- aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
+  multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
+  Firefox's mozlz4 is liblz4's `LZ4_compress_default`.
+- aqr-git is the pack recompressor `git-pack-recons`, at aqr-flate's profile as aqr-compress
+  picks it. Left: `.idx`/`.rev` (need object ids, so several outputs), the archive's 16 MiB
+  solid-block bound, pack blobs in `together`.
+
+## Working copy and commits
+
+Other sessions often work in the same working copy at the same time.
+
+- Stage explicit paths only; never `git commit -a` or `git add .`/`-A`.
+- Never stage the `flate-zoo` submodule pointer, nor its hunk in `Cargo.lock`. For
+  `Cargo.lock`, stage only your own hunks.
+
+**Commit on your own after each substantial step, one commit per coherent step. Never push.**
 
 **Write messages in the usual git format: a short summary on the first line, one blank line,
 then the details.** The history so far has settled on cramming a paragraph of several hundred
