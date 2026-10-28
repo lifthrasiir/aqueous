@@ -576,6 +576,13 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx:
 /// [`recompress_at`], unless `d` is kept raw; the data that a scan keeps between files is not
 /// cut out of `d` yet.
 pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
+    let m = made_alone(d, opt, depth, how, cx);
+    // (where `d` is part of a file, that part is done)
+    aqr_common::progress::done(d);
+    m
+}
+
+fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
     let text = how == Nest::As(Format::Text) || how == Nest::Scan && is_text(detect(d));
     match how {
         _ if depth >= opt.depth || !opt.recompresses() => None,
@@ -711,7 +718,9 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         }
         false => opt,
     };
+    let watches = told_as_second_half(&shared, d);
     let children = nested(&shared, opt, depth, cx);
+    drop(watches);
     // (where the data put off is, as the formula may be a copy once reclaimed)
     let bases: Vec<usize> = shared.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
     let mut f = verify::reclaim(shared);
@@ -734,6 +743,26 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     }
     // (text as aqr-wrt tells, see [`made`])
     (format == Format::Text || smaller(&f, None, d, opt, cx)).then_some(f)
+}
+
+/// Tells of the work on the streams of `f` that are data of their own (not of `d`, the data
+/// `f` is of), as their contents are made in turn ([`nested`]), as of the second half of `d`,
+/// each stream its share by size: the first is the formula's own, as far as its recompressor
+/// tells ([`aqr_common::progress`]).
+fn told_as_second_half(f: &Formula, d: &[u8]) -> Vec<aqr_common::progress::Watch> {
+    let within = |s: &[u8]| d.as_ptr_range().contains(&s.as_ptr());
+    let own: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).filter(|s| !s.is_empty() && !within(s)).collect();
+    let total: usize = own.iter().map(|s| s.len()).sum();
+    let (half, rest) = (d.len() / 2, d.len() - d.len() / 2);
+    let at = |n: usize| half + (n as u128 * rest as u128 / total.max(1) as u128) as usize;
+    let mut n = 0;
+    own.iter()
+        .map(|s| {
+            let part = &d[at(n)..at(n + s.len())];
+            n += s.len();
+            aqr_common::progress::alias(s, part)
+        })
+        .collect()
 }
 
 /// Unless [`Options::smaller`] is off, or the level is 7 or more (DEFLATE always rebuilt, a few

@@ -7,7 +7,8 @@
 //!
 //! [`compress_tree_to`]: crate::compress_tree_to
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -38,6 +39,12 @@ pub enum Event<'a> {
     /// Content `c` being recompressed, or done with (it may be taken up again).
     Started(usize),
     Ended(usize),
+    /// Of content `c` being recompressed, the bytes of it done (as far as the recompressors
+    /// tell: [`aqr_common::progress`]).
+    Reached {
+        content: usize,
+        done: u64,
+    },
     /// A batch written: its contents (those stored once with another's too), and what became of
     /// all written so far.
     Written {
@@ -60,6 +67,8 @@ pub(crate) enum Note {
     /// Of the batch: contents (by index) started and ended, and analysis done with all.
     Started(usize),
     Ended(usize),
+    /// Of the batch: a part of a content done.
+    Done(usize, std::ops::Range<u64>),
     Analyzed,
     /// Of the batch: the streams compressed (bytes done of all), and bytes of files verified.
     Encoded(u64, u64),
@@ -87,11 +96,24 @@ impl Notes {
 
 /// The contents of a batch by where their data is, for the analysis to tell them by.
 pub(crate) struct Files {
-    pub notes: Notes,
-    pub by_at: HashMap<usize, usize>,
+    notes: Notes,
+    by_at: HashMap<usize, usize>,
+    /// Their data watched, for how far the work on each is.
+    _watches: Vec<aqr_common::progress::Watch>,
 }
 
 impl Files {
+    /// Of contents `(c, d)`, `c` by its data `d`.
+    pub fn of<'a>(notes: &Notes, contents: impl IntoIterator<Item = (usize, &'a [u8])>) -> Files {
+        let (mut by_at, mut watches) = (HashMap::new(), Vec::new());
+        for (c, d) in contents {
+            by_at.insert(d.as_ptr() as usize, c);
+            let notes = notes.clone();
+            watches.push(aqr_common::progress::watch(d, move |r| notes.send(Note::Done(c, r))));
+        }
+        Files { notes: notes.clone(), by_at, _watches: watches }
+    }
+
     /// Content `c` at `at` started (`end` false) or ended; nothing for data that is no file's.
     pub fn tell(&self, at: *const u8, end: bool) {
         if let Some(&c) = self.by_at.get(&(at as usize)) {
@@ -120,6 +142,9 @@ impl Tracker {
         // where the batch began, its bytes and whether it is verified, and within it
         let (mut base, mut bytes, mut verify) = (0u64, 0u64, false);
         let mut ended: HashSet<usize> = HashSet::new();
+        // the parts done of the contents not ended yet, and the bytes of them all
+        let mut reached: HashMap<usize, Parts> = HashMap::new();
+        let mut partly = 0u64;
         let (mut analyzed, mut encoded, mut verified) = (0u64, 0.0f64, 0u64);
         let compression = |encoded: f64, verified: u64, bytes: u64, verify: bool| -> u64 {
             // (encoding and verifying half each)
@@ -139,6 +164,8 @@ impl Tracker {
                 Note::Batch { bytes: b, verify: v } => {
                     (bytes, verify) = (b, v);
                     ended.clear();
+                    reached.clear();
+                    partly = 0;
                     (analyzed, encoded, verified) = (0, 0.0, 0);
                     tell(Event::Analysis { done: base, total });
                     tell(Event::Compression { done: base, total });
@@ -147,12 +174,27 @@ impl Tracker {
                 Note::Ended(c) => {
                     tell(Event::Ended(c));
                     if ended.insert(c) {
+                        partly -= reached.remove(&c).map_or(0, |p| p.len);
                         analyzed = (analyzed + self.sizes[c]).min(bytes);
-                        tell(Event::Analysis { done: base + analyzed, total });
+                        tell(Event::Analysis { done: base + (analyzed + partly).min(bytes), total });
                     }
                 }
+                Note::Done(c, r) => {
+                    if ended.contains(&c) {
+                        continue;
+                    }
+                    let p = reached.entry(c).or_default();
+                    let more = p.add(r.start..r.end.min(self.sizes[c]));
+                    if more == 0 {
+                        continue;
+                    }
+                    partly += more;
+                    tell(Event::Reached { content: c, done: p.len });
+                    tell(Event::Analysis { done: base + (analyzed + partly).min(bytes), total });
+                }
                 Note::Analyzed => {
-                    analyzed = bytes;
+                    (analyzed, partly) = (bytes, 0);
+                    reached.clear();
                     tell(Event::Analysis { done: base + analyzed, total });
                 }
                 Note::Encoded(done, all) => {
@@ -171,5 +213,59 @@ impl Tracker {
                 }
             }
         }
+    }
+}
+
+/// Parts of a content, as ranges apart.
+#[derive(Default)]
+struct Parts {
+    /// By start, the end.
+    ranges: BTreeMap<u64, u64>,
+    /// Bytes of them all.
+    len: u64,
+}
+
+impl Parts {
+    /// Adds `r`, giving the bytes it adds.
+    fn add(&mut self, r: Range<u64>) -> u64 {
+        if r.is_empty() {
+            return 0;
+        }
+        let (mut start, mut end) = (r.start, r.end);
+        // (those it touches merged into it)
+        if let Some((&s, &e)) = self.ranges.range(..=start).next_back()
+            && e >= start
+        {
+            start = s;
+            end = end.max(e);
+        }
+        let before = self.len;
+        let touched: Vec<(u64, u64)> = self.ranges.range(start..=end).map(|(&s, &e)| (s, e)).collect();
+        for (s, e) in touched {
+            self.ranges.remove(&s);
+            self.len -= e - s;
+            end = end.max(e);
+        }
+        self.ranges.insert(start, end);
+        self.len += end - start;
+        self.len - before
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parts() {
+        let mut p = Parts::default();
+        assert_eq!(p.add(10..20), 10);
+        assert_eq!(p.add(30..40), 10);
+        assert_eq!(p.add(15..18), 0);
+        assert_eq!(p.add(18..32), 10);
+        assert_eq!(p.add(0..5), 5);
+        assert_eq!(p.add(5..5), 0);
+        assert_eq!(p.add(0..50), 15);
+        assert_eq!((p.len, p.ranges.len()), (50, 1));
     }
 }

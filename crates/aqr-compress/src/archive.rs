@@ -598,8 +598,8 @@ fn make<S: Source + ?Sized>(
     ));
     cx.pre = opt.verify.then(|| std::sync::Arc::new(verify::Prevalidator::spawn(opt.threads, &regions)));
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
-    let by_at = bases.iter().zip(files).map(|(&at, file)| (at, file.c)).collect();
-    cx.files = Some(std::sync::Arc::new(Files { notes: notes.clone(), by_at }));
+    let contents = files.iter().zip(&f.streams).map(|(file, s)| (file.c, &s.data[..]));
+    cx.files = Some(std::sync::Arc::new(Files::of(notes, contents)));
     let mut taken = HashSet::new();
     if let Some((mut children, plan)) = nested(&f, &nopt, 0, &cx) {
         let sets = sets::sets(&f, &mut children, &plan, &nopt, 0, &cx);

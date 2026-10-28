@@ -173,6 +173,9 @@ fn wrap(
     }
     #[cfg(test)]
     crate::tests::DECONSTRUCTED.with(|n| n.set(n.get() + 1));
+    // (the coding of the stream told of as the first half of it: the second is its data's, made
+    // in turn, [`crate::recompress_with`])
+    let _watch = aqr_common::progress::alias(parsed.data(), &d[raw.start..raw.start + raw.len() / 2]);
     let (data, record, _) = parsed.deconstruct(&fopt, hints).ok()?;
     if record.len() >= raw.len() {
         return None;

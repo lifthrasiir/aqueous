@@ -338,7 +338,13 @@ impl Dictionary {
         if pieces.len() == 1 {
             return self.encode_piece(d);
         }
-        aqr_common::pool::par_map(pieces.len(), threads, |i| self.encode_piece(pieces[i])).concat()
+        // (each piece told of as done: [`aqr_common::progress`])
+        aqr_common::pool::par_map(pieces.len(), threads, |i| {
+            let text = self.encode_piece(pieces[i]);
+            aqr_common::progress::done(pieces[i]);
+            text
+        })
+        .concat()
     }
 
     fn encode_piece(&self, d: &[u8]) -> Vec<u8> {

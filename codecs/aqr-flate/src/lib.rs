@@ -475,7 +475,10 @@ fn code_streamed(
     use std::sync::{Mutex, mpsc};
     let code = |i: usize, toks: &[Token]| {
         let mut rec = tokens::Recorder::default();
-        tokens::code_range(&mut rec, &f.data, rule, &ranges[i], Some(toks), None).map(|_| rec)
+        let mut t = Ticking::new(&mut rec, f, &ranges[i], (0, &ONCE));
+        tokens::code_range(&mut t, &f.data, rule, &ranges[i], Some(toks), None)?;
+        t.end();
+        Ok(rec)
     };
     let serial = || {
         let mut done = Vec::with_capacity(ranges.len());
@@ -550,7 +553,25 @@ fn split_parsed(raw: &[u8], cuts: &[usize], send: impl FnMut(usize, Vec<Token>))
     r.map(|_| ())
 }
 
+/// Which pass of how many a coding of a stream is, for [`Flat::tell`]: the number may come
+/// down as the coding goes.
+type Pass<'a> = (usize, &'a std::sync::atomic::AtomicUsize);
+
+/// The pass of a stream coded once.
+static ONCE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
 impl Flat {
+    /// Tells that `part` of the data is coded in pass `pass` ([`aqr_common::progress`]): as
+    /// that share of the data, each pass of several taking its own.
+    fn tell(&self, part: std::ops::Range<usize>, pass: Pass) {
+        let (n, of) = (
+            self.data.len(),
+            pass.1.load(std::sync::atomic::Ordering::Relaxed).max(1),
+        );
+        let at = |p: usize| ((pass.0 * n + p.min(n)) / of).min(n);
+        aqr_common::progress::done(&self.data[at(part.start)..at(part.end)]);
+    }
+
     /// The parsed stream with its blocks' tokens in place.
     fn stream_with_tokens(&self) -> Stream {
         let mut stream = self.stream.clone();
@@ -841,6 +862,83 @@ impl tokens::Corr for Warm<'_> {
     }
 }
 
+/// Bytes of data between the parts a [`Ticking`] tells of.
+const TICK: usize = 1 << 20;
+
+/// A coder of a segment telling of the data it has coded ([`Flat::tell`]) every [`TICK`]
+/// bytes, and the rest at [`Ticking::end`].
+struct Ticking<'a, C> {
+    c: &'a mut C,
+    f: &'a Flat,
+    pass: Pass<'a>,
+    from: usize,
+    next: usize,
+    end: usize,
+}
+
+impl<'a, C: tokens::Corr> Ticking<'a, C> {
+    fn new(c: &'a mut C, f: &'a Flat, r: &Range, pass: Pass<'a>) -> Self {
+        Ticking {
+            c,
+            f,
+            pass,
+            from: r.pos,
+            next: r.pos + TICK,
+            end: r.end,
+        }
+    }
+
+    fn end(self) {
+        self.f.tell(self.from..self.end, self.pass);
+    }
+}
+
+impl<C: tokens::Corr> tokens::Corr for Ticking<'_, C> {
+    #[inline(always)]
+    fn token(
+        &mut self,
+        t: &mut dyn table::Cands,
+        d: &[u8],
+        p: usize,
+        pred: Token,
+        class: usize,
+        actual: Option<Token>,
+    ) -> Result<Token> {
+        if p >= self.next {
+            self.f.tell(self.from..p, self.pass);
+            (self.from, self.next) = (p, p + TICK);
+        }
+        self.c.token(t, d, p, pred, class, actual)
+    }
+
+    #[inline(always)]
+    fn predict(&mut self, d: &[u8], p: usize, actual: Option<Token>) -> Option<Token> {
+        self.c.predict(d, p, actual)
+    }
+
+    #[inline(always)]
+    fn commit(&mut self, p: usize, tok: Token) {
+        self.c.commit(p, tok)
+    }
+
+    #[inline(always)]
+    fn skip(&mut self, end: usize) {
+        self.c.skip(end)
+    }
+
+    #[inline(always)]
+    fn lookahead(&self) -> bool {
+        self.c.lookahead()
+    }
+
+    #[inline(always)]
+    fn next_len(&mut self, len: usize) {
+        self.c.next_len(len)
+    }
+
+    const SPECIALIZED: bool = C::SPECIALIZED;
+}
+
 /// The runs of tokens that [`inflate::parse_segments_head`] would keep, of a stream parsed
 /// with all of them.
 fn chunks_of(f: &Flat) -> Vec<inflate::Chunk> {
@@ -903,6 +1001,8 @@ fn deconstruct_parsed(
         secs: [secs_headers, secs_rule],
     } = chosen;
     let threads = opts.threads.max(1);
+    // (the coding of the data told of as that of the stream)
+    let _watch = aqr_common::progress::alias(&f.data, raw);
     let profile = opts.profile;
     let catalog = &profile_catalog(profile)?.0;
     let adaptive = profile >= ADAPTIVE;
@@ -999,7 +1099,9 @@ fn deconstruct_parsed(
                 let mut rec = tokens::Recorder::default();
                 let r = &ranges[i];
                 let actual = &f.tokens[r.first..r.first + r.count];
-                tokens::code_range(&mut rec, &f.data, rule, r, Some(actual), None)?;
+                let mut t = Ticking::new(&mut rec, &f, r, (0, &ONCE));
+                tokens::code_range(&mut t, &f.data, rule, r, Some(actual), None)?;
+                t.end();
                 Ok(rec)
             })
             .into_iter()
@@ -1105,12 +1207,32 @@ fn choose_adaptive<'a>(
         && crate::detect::plausible(stream, &f.data, p, hints)
     {
         let zr = zlib_ranges(f, p, &ranges);
-        let segs = code_adaptive(f, rule, Some(p), None, priors, &zr, threads, collect)?;
+        let segs = code_adaptive(
+            f,
+            rule,
+            Some(p),
+            None,
+            priors,
+            &zr,
+            threads,
+            collect,
+            (0, &ONCE),
+        )?;
         if segs.iter().all(|s| s.misses == 0) {
             // In a short stream the rule may predict as well, without zlib's parameters (ties
             // go to the rule, as below).
             if f.data.len() < HINT_RULE_BELOW {
-                let alone = code_adaptive(f, rule, None, None, priors, &ranges, threads, collect)?;
+                let alone = code_adaptive(
+                    f,
+                    rule,
+                    None,
+                    None,
+                    priors,
+                    &ranges,
+                    threads,
+                    collect,
+                    (0, &ONCE),
+                )?;
                 if size(&alone) <= size(&segs) {
                     return Ok(AdaptiveChoice {
                         rule,
@@ -1130,7 +1252,22 @@ fn choose_adaptive<'a>(
     }
     // The rule alone, the chain rule and zlib's parameters are worked out independently, at
     // once given threads.
-    let alone = || code_adaptive(f, rule, None, None, priors, &ranges, threads, collect);
+    // (told of as the first of two passes while zlib's parameters may be found: the stream is
+    // coded again with them)
+    let passes = std::sync::atomic::AtomicUsize::new(if stream.is_some() { 2 } else { 1 });
+    let alone = || {
+        code_adaptive(
+            f,
+            rule,
+            None,
+            None,
+            priors,
+            &ranges,
+            threads,
+            collect,
+            (0, &passes),
+        )
+    };
     let chain = || -> Result<Option<(Rule, Vec<AdaptiveSeg>)>> {
         if !opts.chain {
             return Ok(None);
@@ -1140,11 +1277,27 @@ fn choose_adaptive<'a>(
         };
         let segs = match coded {
             Some(segs) => segs,
-            None => code_adaptive(f, chain, None, None, priors, &ranges, threads, collect)?,
+            None => code_adaptive(
+                f,
+                chain,
+                None,
+                None,
+                priors,
+                &ranges,
+                threads,
+                collect,
+                (0, &passes),
+            )?,
         };
         Ok(Some((chain, segs)))
     };
-    let params = || stream.as_ref().and_then(|s| zlib_params(s, &f.data, hints));
+    let params = || {
+        let p = stream.as_ref().and_then(|s| zlib_params(s, &f.data, hints));
+        if p.is_none() {
+            passes.store(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        p
+    };
     let (alone, chain, params) = if threads > 1 {
         fn join<T>(h: aqr_common::pool::Handle<'_, T>) -> T {
             h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
@@ -1190,6 +1343,7 @@ fn choose_adaptive<'a>(
         &ranges,
         threads,
         collect,
+        (1, &passes),
     )?;
     if size(&segs) < size(&best.segs) {
         best = AdaptiveChoice {
@@ -1356,7 +1510,7 @@ struct AdaptiveSeg {
 /// resumes the emulation from its state where the previous one ended, if it can be resumed
 /// there (and was not lost on the way); segments are then coded one after another. A single
 /// segment is coded with the emulation `followed` gives, if any (from the parameters'
-/// detection), rather than a new one.
+/// detection), rather than a new one. How far it is is told as pass `pass.0` of `pass.1`.
 #[allow(clippy::too_many_arguments)]
 fn code_adaptive<'a>(
     f: &'a Flat,
@@ -1367,6 +1521,7 @@ fn code_adaptive<'a>(
     ranges: &[Range],
     threads: usize,
     collect: bool,
+    pass: Pass,
 ) -> Result<Vec<AdaptiveSeg>> {
     // Segment `i`, coded with `a` (from checkpoint `cp` if not the first).
     let finish = |mut a: adapt::Adaptive<'a, adapt::Enc>, i: usize, cp: Option<Checkpoint>| {
@@ -1375,7 +1530,9 @@ fn code_adaptive<'a>(
             a.seen = Some(vec![[0; 2]; adapt::NUM]);
         }
         let actual = &f.tokens[r.first..r.first + r.count];
-        tokens::code_range(&mut a, &f.data, rule, r, Some(actual), None)?;
+        let mut t = Ticking::new(&mut a, f, r, pass);
+        tokens::code_range(&mut t, &f.data, rule, r, Some(actual), None)?;
+        t.end();
         let emu = a.take_emulator();
         let seg = AdaptiveSeg {
             cp,

@@ -3,7 +3,8 @@
 //!
 //! The bar overlays the three phases, each of which is never ahead of the one before: the probe
 //! (`-`, files looked at), the analysis (`=`, bytes recompressed) and the compression (`#`, bytes
-//! compressed and verified). Below it, the file recompressed the longest, where that is long.
+//! compressed and verified). Below it, the file recompressed the longest, where that is long,
+//! and how far it is where its recompressors tell.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -36,8 +37,9 @@ struct State {
     probe: (u64, u64),
     analysis: (u64, u64),
     compression: (u64, u64),
-    /// The contents being recompressed, since when.
+    /// The contents being recompressed, since when, and the bytes reached of each.
     working: HashMap<usize, Instant>,
+    reached: HashMap<usize, u64>,
     /// Lines of the bar drawn last.
     drawn: usize,
     /// The solid blocks, sets and contents kept raw logged so far.
@@ -61,7 +63,11 @@ impl<'g> View<'g> {
             Event::Analysis { done, total } => s.analysis = (done, total),
             Event::Compression { done, total } => s.compression = (done, total),
             Event::Started(c) => _ = s.working.entry(c).or_insert_with(Instant::now),
-            Event::Ended(c) => _ = s.working.remove(&c),
+            Event::Ended(c) => {
+                s.working.remove(&c);
+                s.reached.remove(&c);
+            }
+            Event::Reached { content, done } => _ = s.reached.insert(content, done),
             Event::Written { contents, report } => {
                 let lines = if self.log { self.log(contents, report, &mut s.logged) } else { Vec::new() };
                 self.draw(&mut s, &lines);
@@ -162,11 +168,16 @@ impl<'g> View<'g> {
         lines
     }
 
-    /// The file recompressed the longest, and how long, where it is [`SLOW`].
+    /// The file recompressed the longest, how long and how far it is, where it is [`SLOW`].
     fn slowest(&self, s: &State) -> Option<String> {
         let (&c, since) = s.working.iter().min_by_key(|(_, t)| **t)?;
         let t = since.elapsed();
-        (t >= SLOW).then(|| format!("{}, {} s", self.g.contents[c].0.display(), t.as_secs()))
+        let (path, len) = (self.g.contents[c].0.display(), self.g.contents[c].2);
+        let far = match s.reached.get(&c) {
+            Some(&n) if len > 0 => format!(", {}%", (100 * n / len).min(99)),
+            _ => String::new(),
+        };
+        (t >= SLOW).then(|| format!("{path}, {} s{far}", t.as_secs()))
     }
 }
 

@@ -10,6 +10,7 @@
 //!   large-allocation probes, peak RSS.
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
 //! - [`pool`]: the pool of threads every thread of the process runs on.
+//! - [`progress`]: how far the work on data is, told by the parts of it done.
 //! - [`packed`]: packed byte sequences, a list of them as one.
 //! - [`wire`]: values as bytes, for the results of tasks on WebAssembly.
 //! - [`crc32`]: CRC-32, without its tables in the modules.
@@ -23,6 +24,7 @@ pub mod mem;
 pub mod msb;
 pub mod packed;
 pub mod pool;
+pub mod progress;
 pub mod rans32;
 pub mod rans64;
 pub mod rng;
