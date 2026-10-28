@@ -13,7 +13,7 @@
 
 use std::time::Instant;
 
-use aqr_compress::{Nest, Options, classes, compress_formula, detect};
+use aqr_compress::{Nest, Options, classes, compress_formula_as, detect, kind_by_name};
 use aqr_decompress::decompress;
 use aqr_formula::aqr;
 
@@ -62,7 +62,7 @@ fn show(files: &[String], opt: &Options, tree: bool) -> bool {
         let mb = d.len() as f64 / 1e6;
         let format = detect(&d).map_or("-", |f| f.name());
         let start = Instant::now();
-        let (c, f) = compress_formula(&d, opt);
+        let (c, f) = compress_formula_as(&d, kind_by_name(path.as_bytes()), opt);
         let pack = start.elapsed().as_secs_f64();
         let start = Instant::now();
         let unpacked = decompress(&c, opt.threads);

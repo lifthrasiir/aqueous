@@ -37,7 +37,7 @@ use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::time::{Instant, UNIX_EPOCH};
 
-use aqr_compress::{Options, compress_formula, compress_tree_to, detect};
+use aqr_compress::{Options, compress_formula_as, compress_tree_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, Value, name_bytes, name_from};
 
@@ -248,7 +248,8 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         && meta(input)?.is_file()
     {
         let d = fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
-        let (c, f) = compress_formula(&d, &a.opt);
+        // (of the kind its name tells, as a file in an archive of many)
+        let (c, f) = compress_formula_as(&d, kind_by_name(&os_bytes(input.as_os_str())), &a.opt);
         write_new(out, &c, a.force)?;
         if !a.quiet {
             let modules: Vec<String> = f.applies().iter().map(|m| m.module.to_string()).collect();

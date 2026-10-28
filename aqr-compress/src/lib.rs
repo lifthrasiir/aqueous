@@ -476,26 +476,32 @@ fn stream_key(d: &[u8]) -> (usize, u64) {
 
 /// `d` as a formula, with the recompressor for its format if any takes it.
 pub fn recompress(d: &[u8], opt: &Options) -> Formula {
-    recompress_at(d, opt, 0, opt.file, &Cx::new(d, opt))
+    recompress_at(d, opt, 0, Kind::Unknown, &Cx::new(d, opt))
 }
 
 /// `d` as an archive, with the checksum of `d`.
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
-    compress_with(d, opt, false).0
+    compress_with(d, Kind::Unknown, opt, false).0
 }
 
 /// [`compress`], with the formula the archive holds: that of `d` raw where it was not verified.
 pub fn compress_formula(d: &[u8], opt: &Options) -> (Vec<u8>, Formula) {
-    let (c, f) = compress_with(d, opt, true);
+    compress_formula_as(d, Kind::Unknown, opt)
+}
+
+/// [`compress_formula`] of a file of `kind`, as its name tells ([`kind_by_name`]), as a file in
+/// an archive of many is taken.
+pub fn compress_formula_as(d: &[u8], kind: Kind, opt: &Options) -> (Vec<u8>, Formula) {
+    let (c, f) = compress_with(d, kind, opt, true);
     (c, f.expect("kept"))
 }
 
-/// [`compress`], with the formula of the archive where it is to be `kept`: else it is dropped
-/// before the archive is verified.
-fn compress_with(d: &[u8], opt: &Options, kept: bool) -> (Vec<u8>, Option<Formula>) {
+/// [`compress`] of a file of `kind`, with the formula of the archive where it is to be `kept`:
+/// else it is dropped before the archive is verified.
+fn compress_with(d: &[u8], kind: Kind, opt: &Options, kept: bool) -> (Vec<u8>, Option<Formula>) {
     let mut cx = Cx::new(d, opt);
     cx.pre = opt.verify.then(|| Arc::new(verify::Prevalidator::spawn(opt.threads, &[d])));
-    let f = recompress_at(d, opt, 0, opt.file, &cx);
+    let f = recompress_at(d, opt, 0, kind, &cx);
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
     finish(f, d, opt, &cx, memo, kept)
 }
@@ -538,13 +544,22 @@ fn finish(
 }
 
 /// [`recompress`] for data `depth` formats deep, within `cx`.
-/// Data kept raw is of [`Kind::Text`] where it is text (as [`made`] tells), so archived as text.
-pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Formula {
-    made(d, opt, depth, how, cx).map_or_else(
+/// A file of `kind` is recompressed as [`Options::file`] and the kind tell ([`Nest::of`]), as a
+/// file in an archive of many is, but for a format: that is looked for as in a file of no kind,
+/// as a scan finds the file the data starts with, and what is in it where that is turned down
+/// (which [`Nest::As`] does only by [`regions`]). Data kept raw is of the kind, or of
+/// [`Kind::Text`] where it is text (as [`made`] tells), so archived as text.
+pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx: &Cx) -> Formula {
+    let how = match kind {
+        Kind::Format(_) => Some(opt.file),
+        kind => opt.file.of(kind),
+    };
+    how.and_then(|how| made(d, opt, depth, how, cx)).map_or_else(
         || {
-            let text = how == Nest::As(Format::Text) || detect(d) == Some(Format::Text);
+            let text = how == Some(Nest::As(Format::Text))
+                || matches!(kind, Kind::Unknown | Kind::Format(_)) && detect(d) == Some(Format::Text);
             let mut f = Formula::default();
-            f.root = f.push_as("raw", if text { Kind::Text } else { Kind::Unknown }, d.to_vec());
+            f.root = f.push_as("raw", if text { Kind::Text } else { kind }, d.to_vec());
             f
         },
         |m| m.cut(d),
@@ -1700,6 +1715,31 @@ mod tests {
         let f = recompress(&text, &Options::default());
         assert!(f.applies().is_empty());
         assert_eq!(f.streams[0].kind, Kind::Text);
+
+        // a file alone of a kind by its name, as one in an archive of many: text too short for
+        // aqr-wrt by a name of text, compressed data stored
+        let opt = Options { verify: false, ..Options::default() };
+        let short = &text[..100_000];
+        assert_eq!(detect(short), None);
+        for (name, kind) in [(&b"short.txt"[..], Kind::Text), (b"short.log", Kind::Text), (b"short", Kind::Unknown)] {
+            let (c, f) = compress_formula_as(short, kind_by_name(name), &opt);
+            assert_eq!(f.streams[0].kind, kind, "{}", String::from_utf8_lossy(name));
+            assert_eq!(
+                aqr::decode(&c, &aqr_decompress::natives(&aqr_decompress::Native { threads: 1 })).unwrap(),
+                short
+            );
+        }
+        let noise = aqr_common::rng::noise(100_000);
+        let (_, f) = compress_formula_as(&noise, kind_by_name(b"movie.mp4"), &opt);
+        assert_eq!(f.streams[0].kind, Kind::Compressed);
+        // but a format by its name is looked for as in a file of no name, as a scan finds what
+        // the file starts with (and what is in it where that is turned down)
+        let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let gz = z.finish().unwrap();
+        let opt = Options { smaller: false, ..opt };
+        let (_, f) = compress_formula_as(&gz, kind_by_name(b"named.png"), &opt);
+        assert!(!f.applies().is_empty());
     }
 
     /// The formulas recompressors make are evaluated beforehand: decoding the archive takes
@@ -1714,7 +1754,7 @@ mod tests {
         let opt = Options { smaller: false, ..Options::default() };
         let mut cx = Cx::new(&d, &opt);
         cx.pre = Some(Arc::new(verify::Prevalidator::spawn(2, &[&d])));
-        let f = recompress_at(&d, &opt, 0, opt.file, &cx);
+        let f = recompress_at(&d, &opt, 0, Kind::Unknown, &cx);
         let memo = verify::Prevalidator::finish_shared(cx.pre.take().unwrap());
         assert!(!f.applies().is_empty());
         // the DEFLATE stream is not kept again, but known to be the file's
