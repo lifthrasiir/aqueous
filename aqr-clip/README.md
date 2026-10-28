@@ -95,7 +95,11 @@ On one thread inflating takes 11.8 s and deflating 22 s on top of the model (zli
 streams themselves are made again by `aqr_clip::zlib` (aqr-flate's emulation of zlib 1.3's
 compressor at level 1, memLevel 9): all 111,515 of them byte for byte, in 74.5 thread seconds
 on 16 threads (zlib-rs 47 s), the decode then 13.1 s wall with the check. With 16
-threads a thread runs at about half its speed alone (SMT).
+threads a thread runs at about half its speed alone (SMT). Since then it is aqr-flate's
+`zlib::compress` (zlib's deflate_fast run on its own rather than driven token by token) with
+aqr-common's Adler-32: on an M4 (10 cores, `speed -t 10 -b 64 -u`, the 13 files), deflating
+takes 18.6 thread seconds rather than 30.0 (24.0 with `compress` alone), every stream still
+byte for byte.
 
 `static` (`src/static.rs`) is the same model in symbols of static tables per chunk of 2^20
 symbols (rANS, as aqr-psd), the list a ring with a hash index instead of a list moved to front.
