@@ -28,14 +28,18 @@
 //! The log (to standard error) tells, for each file, what it was taken for, the modules its
 //! formula applies and the bytes of the archive that are its; the files stored together in a
 //! block (solid) or coded against each other (sets); the files of the same content as another.
+//! It is written a batch at a time, as the files are; on a terminal, below it, a bar of how far
+//! the archive is ([`view`]).
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::Write;
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::time::{Instant, UNIX_EPOCH};
+
+mod view;
 
 use aqr_compress::{Options, compress_formula_as, compress_tree_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
@@ -286,10 +290,32 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     if g.tree.entries.is_empty() {
         return Err(format!("nothing to archive in {}", inputs[0].display()));
     }
+    if !a.quiet {
+        for s in &g.skipped {
+            eprintln!("skipped {s}");
+        }
+    }
     // written as it is made: removed where it is not made to the end
     let file = create(out, a.force)?;
     let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
-    let r = compress_tree_to(&g.tree, &g, &a.opt, &mut w).and_then(|r| w.flush().map(|_| r));
+    // (the log as the files are written, and a bar on a terminal, drawn again now and then)
+    let view = view::View::new(&g, std::io::stderr().is_terminal());
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let r = std::thread::scope(|s| {
+        if !a.quiet && view.bars() {
+            s.spawn(|| {
+                while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                    std::thread::park_timeout(std::time::Duration::from_millis(250));
+                    view.tick();
+                }
+            });
+        }
+        let quiet = |_: aqr_compress::Event| {};
+        let tell: &(dyn Fn(aqr_compress::Event) + Sync) = if a.quiet { &quiet } else { &|e| view.tell(e) };
+        let r = compress_tree_to(&g.tree, &g, &a.opt, &mut w, tell).and_then(|r| w.flush().map(|_| r));
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        r
+    });
     let r = match r {
         Ok(r) => r,
         Err(e) => {
@@ -299,10 +325,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         }
     };
     if !a.quiet {
-        for s in &g.skipped {
-            eprintln!("skipped {s}");
-        }
-        log(&g, &r);
+        eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
         summary(out, g.contents.len(), r.read as usize, r.len, start);
     }
     Ok(())
@@ -319,68 +342,6 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
         percent(len as f64, total as f64),
         total as f64 / 1e6 / t.max(1e-9)
     );
-}
-
-/// The log of an archive of `g`: a line a file, then the solid blocks, the sets and the
-/// contents stored once.
-fn log(g: &Gathered, r: &aqr_compress::Report) {
-    let path = |c: usize| g.contents[c].0.display().to_string();
-    let mut solid_of: Vec<Vec<usize>> = vec![Vec::new(); g.contents.len()];
-    for (i, s) in r.solid.iter().enumerate() {
-        s.contents.iter().for_each(|&c| solid_of[c].push(i + 1));
-    }
-    let mut set_of = vec![None; g.contents.len()];
-    for (i, s) in r.sets.iter().enumerate() {
-        s.iter().for_each(|&c| set_of[c] = Some(i + 1));
-    }
-    for (c, f) in r.files.iter().enumerate() {
-        let len = f.len as f64;
-        let what = match f.same_as {
-            Some(s) => format!("same as {}", path(s)),
-            None => {
-                let modules: Vec<String> = f.modules.iter().map(|m| m.to_string()).collect();
-                let mut what = format!(
-                    "{}, {}, {} -> {} ({})",
-                    f.format.unwrap_or("-"),
-                    if modules.is_empty() { "kept as it is".into() } else { modules.join(" ") },
-                    size(len),
-                    size(f.archived),
-                    percent(f.archived, len)
-                );
-                if let Some(s) = set_of[c] {
-                    what += &format!(", set #{s}");
-                }
-                if !solid_of[c].is_empty() {
-                    let ids: Vec<String> = solid_of[c].iter().map(|i| format!("#{i}")).collect();
-                    what += &format!(", solid {}", ids.join(" "));
-                }
-                what
-            }
-        };
-        eprintln!("{}: {what}", path(c));
-    }
-    for (i, s) in r.solid.iter().enumerate() {
-        let files: Vec<String> = s.contents.iter().map(|&c| path(c)).collect();
-        eprintln!(
-            "solid #{}: {} ({}), {} -> {} ({}), {} files: {}",
-            i + 1,
-            s.class,
-            s.kind,
-            size(s.len as f64),
-            size(s.archived as f64),
-            percent(s.archived as f64, s.len as f64),
-            files.len(),
-            files.join(" ")
-        );
-    }
-    for (i, s) in r.sets.iter().enumerate() {
-        let files: Vec<String> = s.iter().map(|&c| path(c)).collect();
-        eprintln!("set #{}: {} files coded against each other: {}", i + 1, files.len(), files.join(" "));
-    }
-    for &c in &r.unverified {
-        eprintln!("{}: kept as it is, its formula not giving it back", path(c));
-    }
-    eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
 }
 
 /// Gathers `path` as an entry `name` in `parent` (`None`: the root).

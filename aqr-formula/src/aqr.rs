@@ -282,7 +282,13 @@ pub struct Encoder {
     wasm: WasmOf,
     /// Module blocks compressed, by their module and level.
     module_blocks: RefCell<HashMap<(Module, i32), ModuleBlock>>,
+    /// Told of the streams compressed at once ([`Encoder::on_precompress`]).
+    progress: Option<Progress>,
 }
+
+/// What [`Encoder::precompress`] tells as it compresses: the bytes of the streams compressed so
+/// far, of all of them, from any of its threads.
+pub type Progress = std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 /// A module block compressed, shared by the formulas that have it.
 type ModuleBlock = std::rc::Rc<Vec<u8>>;
@@ -356,7 +362,14 @@ impl Encoder {
             held: RefCell::default(),
             wasm: |m| Some(Wasm::Bytes(Cow::Owned(stand_in(m)))),
             module_blocks: RefCell::default(),
+            progress: None,
         }
+    }
+
+    /// Tells `progress` of the streams that [`Encoder::precompress`] compresses (none: tells
+    /// nothing).
+    pub fn on_precompress(&mut self, progress: Option<Progress>) {
+        self.progress = progress;
     }
 
     /// The encoder writing the Wasm module that `wasm` gives of each module into its module
@@ -989,16 +1002,22 @@ impl Encoder {
                 .collect()
         };
         let level = self.level;
+        let total = todo.iter().map(|t| t.0.len() as u64).sum();
+        let (done, progress) = (std::sync::atomic::AtomicU64::new(0), self.progress.as_deref());
         let made = aqr_common::pool::par_map(todo.len(), self.threads, |i| -> Result<(StreamKey, Compressed)> {
             let (d, how) = todo[i];
-            THREAD_CCTX.with(|c| {
+            let made = THREAD_CCTX.with(|c| {
                 let c = &mut c.borrow_mut();
                 let c = match plan_by(level, how, &[d], &mut |sample, l| compressed(c, &[sample.unwrap_or(d)], l, 1))? {
                     Plan::Done(c) => c,
                     Plan::Level(l, size) => compressed_to(c, &[d], l, 1, size)?,
                 };
                 Ok((key_how(&[d], how), c))
-            })
+            });
+            if let Some(p) = progress {
+                p(done.fetch_add(d.len() as u64, std::sync::atomic::Ordering::Relaxed) + d.len() as u64, total);
+            }
+            made
         });
         let mut kept = self.streams.borrow_mut();
         for m in made {

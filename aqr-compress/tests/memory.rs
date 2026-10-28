@@ -47,7 +47,7 @@ fn files_held_once() {
     let inputs: Vec<Input> = files.iter().map(|(name, d)| Input { name: name.as_bytes(), data: d }).collect();
     let opt = Options { threads: 4, ..Options::default() };
     let mut out = Vec::with_capacity(4 * n);
-    let (r, used) = peak(|| compress_tree_to(&tree, &inputs[..], &opt, &mut out).unwrap());
+    let (r, used) = peak(|| compress_tree_to(&tree, &inputs[..], &opt, &mut out, &|_| {}).unwrap());
     assert!(r.unverified.is_empty() && !r.files[0].modules.is_empty());
     let total = 3 * n;
     println!(

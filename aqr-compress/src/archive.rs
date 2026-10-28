@@ -36,6 +36,7 @@ use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Level, Placed, SegmentWrite
 use aqr_formula::probe::{self, Held};
 use aqr_formula::{Formula, Kind, Module, Node};
 
+use crate::progress::{Event, Files, Note, Notes, Tracker};
 use crate::{Cx, Once, Options, detect, kind_by_name, nested, place_all, sets, verify};
 
 /// Streams shorter than this are put together with those of their class and kind without
@@ -155,26 +156,43 @@ pub struct Solid {
 /// [`EntryNode::File`]: aqr::EntryNode::File
 pub fn compress_tree(tree: &Tree, contents: &[Input], opt: &Options) -> Archived {
     let mut archive = Vec::new();
-    let report = compress_tree_to(tree, contents, opt, &mut archive).expect("no failure but of the tree");
+    let report = compress_tree_to(tree, contents, opt, &mut archive, &|_| {}).expect("no failure but of the tree");
     Archived { archive, report }
 }
 
 /// The archive of `tree`, whose files are of the contents of `src`, written to `out` as it is
-/// made, with what became of the files. Fails where a content cannot be read or the archive
-/// written, and on a tree the spec does not allow.
+/// made, with what became of the files; telling `tell` how far it is ([`Event`]). Fails where a
+/// content cannot be read or the archive written, and on a tree the spec does not allow.
 pub fn compress_tree_to<S: Source + ?Sized>(
     tree: &Tree,
     src: &S,
     opt: &Options,
     out: &mut dyn Write,
+    tell: &(dyn Fn(Event) + Sync),
+) -> io::Result<Report> {
+    let (tracker, notes) = Tracker::new((0..src.len()).map(|c| src.size(c)).collect());
+    std::thread::scope(|s| {
+        s.spawn(|| tracker.run(tell));
+        // (the notes gone with it, the tracker done)
+        compress_tree_noting(tree, src, opt, out, notes, tell)
+    })
+}
+
+fn compress_tree_noting<S: Source + ?Sized>(
+    tree: &Tree,
+    src: &S,
+    opt: &Options,
+    out: &mut dyn Write,
+    notes: Notes,
+    tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
     let n = src.len();
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| sort_key(src.name(a)).cmp(&sort_key(src.name(b))).then(a.cmp(&b)));
     // the contents that may hold each other together, in the place of the first, a batch never
     // cutting them apart
-    let (group, entries, pe) = together(src, opt)?;
-    lay_alike(&mut order, &pe, &group, src, opt)?;
+    let (group, entries, pe) = together(src, opt, &notes)?;
+    lay_alike(&mut order, &pe, &group, src, opt, &notes)?;
     let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
     order.iter().for_each(|&c| members.entry(group[c]).or_default().push(c));
     let mut batches: Vec<Vec<usize>> = vec![Vec::new()];
@@ -196,6 +214,8 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     let mut at: Vec<Option<ContentAt>> = vec![None; n];
     let mut r = Report { files: vec![FileReport::default(); n], ..Report::default() };
     for batch in &batches {
+        let bytes = batch.iter().map(|&c| src.size(c)).sum();
+        notes.send(Note::Batch { bytes, verify: opt.verify });
         let read = aqr_common::pool::par_map(batch.len(), opt.threads, |i| {
             let d = src.read(batch[i])?;
             let hash = xxhash_rust::xxh3::xxh3_128(&d);
@@ -217,16 +237,19 @@ pub fn compress_tree_to<S: Source + ?Sized>(
             }
         }
         if files.is_empty() {
+            notes.send(Note::Written);
+            tell(Event::Written { contents: batch, report: &r });
             continue;
         }
         let mut raw = HashSet::new();
         let made = loop {
-            let made = make(&w, &files, data, &raw, src, opt);
+            let made = make(&w, &files, data, &raw, src, opt, &notes);
             let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
             if bad.is_empty() {
                 break made;
             }
             raw.extend(bad);
+            notes.send(Note::Batch { bytes, verify: opt.verify });
             data = reread(src, &files, opt.threads)?;
         };
         out.write_all(&made.batch.bytes)?;
@@ -244,6 +267,8 @@ pub fn compress_tree_to<S: Source + ?Sized>(
         }
         r.sets.extend(made.sets.iter().map(|s| global(s)));
         r.unverified.extend(raw.iter().map(|&k| files[k].c));
+        notes.send(Note::Written);
+        tell(Event::Written { contents: batch, report: &r });
     }
     let contents: Vec<ContentAt> =
         (0..n).map(|c| at[c].or_else(|| at[r.files[c].same_as?]).expect("every content made")).collect();
@@ -285,12 +310,17 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// read at their start (and the archives at their end, the contents of the sizes of entries
 /// whole); together, no more than [`TOGETHER_MAX`] bytes. Returns them, and the contents found
 /// as entries or members of others, and the PE files.
-fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize>, HashSet<usize>, Vec<usize>)> {
+fn together<S: Source + ?Sized>(
+    src: &S,
+    opt: &Options,
+    notes: &Notes,
+) -> io::Result<(Vec<usize>, HashSet<usize>, Vec<usize>)> {
     const HEAD: u64 = 64 << 10;
     // (the end of a ZIP archive holding its central directory, mostly)
     const TAIL: u64 = 1 << 20;
     let n = src.len();
     let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= TOGETHER_MIN).collect();
+    notes.send(Note::More(large.len() as u64));
     // of each: the hash of its start, the CRC-32 and size of the entries it holds, and whether
     // it is an archive of aqr-bundle's (whose members are known once it is read whole) or a PE
     // file
@@ -317,6 +347,7 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize
             held.extend(lzma_sums(&src.read(c)?));
         }
         let bundle = format.is_some_and(detect::Format::is_bundle);
+        notes.send(Note::Looked);
         Ok((xxhash_rust::xxh3::xxh3_64(&head), held, bundle, format == Some(detect::Format::Pe)))
     });
     let mut parent: Vec<usize> = (0..n).collect();
@@ -368,8 +399,12 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize
         w.dedup();
         w
     };
-    let sums =
-        aqr_common::pool::par_map(wanted.len(), opt.threads, |i| src.read(wanted[i]).map(|d| crc32fast::hash(&d)));
+    notes.send(Note::More(wanted.len() as u64));
+    let sums = aqr_common::pool::par_map(wanted.len(), opt.threads, |i| {
+        let sum = src.read(wanted[i]).map(|d| crc32fast::hash(&d));
+        notes.send(Note::Looked);
+        sum
+    });
     let mut by_sum: HashMap<(u32, u64), Vec<usize>> = HashMap::new();
     for (&c, sum) in wanted.iter().zip(sums) {
         by_sum.entry((sum?, src.size(c))).or_default().push(c);
@@ -394,6 +429,7 @@ fn lay_alike<S: Source + ?Sized>(
     group: &[usize],
     src: &S,
     opt: &Options,
+    notes: &Notes,
 ) -> io::Result<()> {
     let mut members = vec![0usize; group.len()];
     group.iter().for_each(|&g| members[g] += 1);
@@ -402,8 +438,12 @@ fn lay_alike<S: Source + ?Sized>(
     if these.len() < 2 {
         return Ok(());
     }
-    let likes =
-        aqr_common::pool::par_map(these.len(), opt.threads, |i| src.read(these[i]).map(|d| probe::likeness(&d)));
+    notes.send(Note::More(these.len() as u64));
+    let likes = aqr_common::pool::par_map(these.len(), opt.threads, |i| {
+        let like = src.read(these[i]).map(|d| probe::likeness(&d));
+        notes.send(Note::Looked);
+        like
+    });
     let likes = likes.into_iter().collect::<io::Result<Vec<_>>>()?;
     let laid: Vec<usize> = probe::by_likeness(&likes).into_iter().map(|i| these[i]).collect();
     let at = order.iter().position(|c| alone.contains(c)).expect("one of them");
@@ -525,6 +565,7 @@ fn make<S: Source + ?Sized>(
     raw: &HashSet<usize>,
     src: &S,
     opt: &Options,
+    notes: &Notes,
 ) -> Made {
     // a formula of the files as the contents of its streams, each a file of its own
     let mut f = Formula::default();
@@ -557,6 +598,8 @@ fn make<S: Source + ?Sized>(
     ));
     cx.pre = opt.verify.then(|| std::sync::Arc::new(verify::Prevalidator::spawn(opt.threads, &regions)));
     let bases: Vec<usize> = f.streams.iter().map(|s| s.data.as_ptr() as usize).collect();
+    let by_at = bases.iter().zip(files).map(|(&at, file)| (at, file.c)).collect();
+    cx.files = Some(std::sync::Arc::new(Files { notes: notes.clone(), by_at }));
     let mut taken = HashSet::new();
     if let Some((mut children, plan)) = nested(&f, &nopt, 0, &cx) {
         let sets = sets::sets(&f, &mut children, &plan, &nopt, 0, &cx);
@@ -579,6 +622,8 @@ fn make<S: Source + ?Sized>(
         deferred.into_iter().filter(|(at, _)| !taken.contains(at)).for_each(|(_, j)| pre.send(j));
     }
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
+    cx.files = None;
+    notes.send(Note::Analyzed);
 
     // a leaf for each file, or for each set of them
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
@@ -623,6 +668,7 @@ fn make<S: Source + ?Sized>(
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());
 
+    cx.enc.on_precompress(Some(notes.encoding()));
     let batch = w.batch(&cx.enc, &f, &leaves).expect("slices within their streams");
     drop(cx);
     let (reports, solid, sets) = report(&f, &leaves, &batch.layout, files, &at);
@@ -635,7 +681,7 @@ fn make<S: Source + ?Sized>(
             hits: Default::default(),
             files: &|k, range: Range<usize>| src.read_range(files[k].c, range.start as u64..range.end as u64).ok(),
         };
-        check(w, &batch, files, &at, &m, opt.threads)
+        check(w, &batch, files, &at, &m, opt.threads, notes)
     } else {
         Vec::new()
     };
@@ -651,6 +697,7 @@ fn check(
     at: &[(usize, usize)],
     m: &verify::Cached,
     threads: usize,
+    notes: &Notes,
 ) -> Vec<usize> {
     let c = w.standalone(b);
     let natives = aqr_decompress::natives(m);
@@ -664,6 +711,7 @@ fn check(
     let Ok(a) = aqr::open(&c, &natives) else { return all() };
     let r = a.each_leaf(threads, |i, outputs| {
         let l = by_block[i];
+        notes.send(Note::Verified(of_leaf[l].iter().map(|&(_, k)| files[k].len as u64).sum()));
         let mut bad = bad.lock().unwrap();
         match outputs {
             Ok(outputs) => bad.extend(

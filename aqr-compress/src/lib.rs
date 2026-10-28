@@ -101,6 +101,7 @@ mod exe;
 mod extent;
 mod flate;
 mod git;
+mod progress;
 mod sets;
 mod verify;
 mod zip;
@@ -115,6 +116,7 @@ pub use aqr_formula::{Formula, Kind, Module, Node, Region};
 pub use archive::{Archived, FileReport, Input, Report, Solid, Source, compress_tree, compress_tree_to};
 pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
+pub use progress::Event;
 
 use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZO, Native, SNAPPY, ZIP};
 use aqr_formula::Stream;
@@ -311,6 +313,9 @@ pub(crate) struct Cx {
     /// The text of the files of an archive that others hold as contents, coded once ([`Once`]).
     /// Shared with the contexts of the files made apart.
     once: Arc<Once>,
+    /// The files of an archive (the contents of a formula 0 formats deep), to tell as they are
+    /// made. Not shared with the contexts of the files.
+    files: Option<Arc<progress::Files>>,
 }
 
 /// Text coded once, for the files of an archive that other files of it hold as the contents of
@@ -404,6 +409,7 @@ impl Cx {
             words: None,
             coded_held: Default::default(),
             once: Default::default(),
+            files: None,
         }
     }
 
@@ -1034,6 +1040,7 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
     let (pre, held, words, coded_held) = (cx.pre.clone(), cx.held.clone(), cx.words.clone(), cx.coded_held.clone());
     let shares_modules = cx.enc.shares_modules();
     let once = cx.once.clone();
+    let files = cx.files.as_deref();
     let made = aqr_common::pool::par_map(later.len(), opt.threads, |i| {
         let (_, n, nest) = &later[i];
         let d = data(n);
@@ -1047,7 +1054,9 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         own.coded_held = coded_held.clone();
         own.once = once.clone();
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
+        files.inspect(|f| f.tell(d.as_ptr(), false));
         let child = made(d, opt, depth + 1, *nest, &own).filter(|c| !c.f.applies().is_empty());
+        files.inspect(|f| f.tell(d.as_ptr(), true));
         (child, own.deferred.into_inner())
     });
     for ((at, ..), (child, deferred)) in later.into_iter().zip(made) {
@@ -1341,7 +1350,13 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     let inner = (opt.threads / workers).max(1);
     let words = cx.words.as_deref();
     let once = &*cx.once;
-    let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, opt, inner, words, once).flatten());
+    let files = cx.files.as_deref();
+    let made = sets::par_map(jobs.len(), workers, |i| {
+        files.inspect(|f| f.tell(jobs[i].1.as_ptr(), false));
+        let made = pure(jobs[i].0, jobs[i].1, opt, inner, words, once).flatten();
+        files.inspect(|f| f.tell(jobs[i].1.as_ptr(), true));
+        made
+    });
     let mut ready = cx.ready.borrow_mut();
     let keys: Vec<_> = jobs.iter().map(|&(format, d, _)| (d.as_ptr() as usize, d.len(), format)).collect();
     for (&k, f) in keys.iter().zip(made) {
