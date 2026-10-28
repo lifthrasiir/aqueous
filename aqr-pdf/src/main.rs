@@ -36,7 +36,7 @@ fn clock(threads: usize) -> f64 {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: aqr-pdf bench [-t THREADS] [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...\n       aqr-pdf fuzz [-n ROUNDS] [-r SEED] FILE..."
+        "usage: aqr-pdf bench [-t THREADS] [-n ITERS] [-s MB/S] [-l LEVEL] [-p PROFILE] [-Z] [-V] [-T] [-F] [-P] [-v] FILE...\n       aqr-pdf fuzz [-n ROUNDS] [-r SEED] FILE..."
     );
     std::process::exit(2);
 }
@@ -58,6 +58,8 @@ fn options(args: &[String]) -> (Options, usize, bool, u64, Vec<String>) {
             "-T" => o.tok = false,
             "-F" => o.full = false,
             "-P" => o.png = false,
+            "-p" => o.profile = val().parse().unwrap_or_else(|_| usage()),
+            "-Z" => o.zlib = false,
             "-v" => verbose = true,
             "-r" => seed = val().parse().unwrap_or_else(|_| usage()),
             _ => rest.push(a.clone()),

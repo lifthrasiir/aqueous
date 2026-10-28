@@ -9,7 +9,7 @@ writing, Huffman header coding, its fast representation), images through
 
 ```sh
 cargo build --release
-aqr-pdf bench [-t N] [-n ITERS] [-s MB/S] [-l LEVEL] [-V] [-T] [-F] [-P] [-v] FILE...   # formula and .aqr: ratio, CPU-time speed, per-mode sizes
+aqr-pdf bench [-t N] [-n ITERS] [-s MB/S] [-l LEVEL] [-p PROFILE] [-Z] [-V] [-T] [-F] [-P] [-v] FILE...   # formula and .aqr: ratio, CPU-time speed, per-mode sizes
 aqr-pdf fuzz [-n ROUNDS] [-r SEED] FILE...            # mutated files, formulas and archives
 ```
 
@@ -24,7 +24,8 @@ The formula is a file of the Aqueous archives (`.aqr`) through aqr-formula, as a
 makes it. `-t` is the number of threads (`bench`: 1 by default, timed in CPU time with one
 thread and wall time with more), `-s` is the speed target (`inf`: no limit), `-l` is the zstd
 level the encoder measures the table, skeleton and pools at to judge whether the formula pays,
-`-V` verifies by evaluating the formula (and on a mismatch codes the file again without
+`-p` is aqr-flate's profile of the full mode's records (6 by default; `-Z` turns off zlib
+emulation with an adaptive profile), `-V` verifies by evaluating the formula (and on a mismatch codes the file again without
 models), `-T`/`-F`/`-P` turn off the token, full and PNG modes. Any input is accepted; what is
 not a PDF goes through as skeleton.
 
@@ -51,6 +52,9 @@ The speed target (100 MB/s of PDF file single-threaded on an Apple
 M4, both ways) binds: everything coded costs more per byte than the budget allows on average,
 so the ratio is what fits in it, and the target is met per file, not just per set: the budget
 is per file (below) and planned with a 10% margin for the scatter of the estimates.
+aqr-compress keeps the target and profile 6 up to level 6; from level 7 on it lifts the
+target and takes aqr-flate's adaptive profile, as for DEFLATE elsewhere (on the cmz test
+set's `irs_p17.pdf`, 3.09 MB: 2.80 MB at level 8 before, 2.26 MB after; 1.99 MB at 9).
 
 ## How
 

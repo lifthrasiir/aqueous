@@ -635,7 +635,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     let prepared = ready.is_some();
     let f = match ready {
         Some(f) => f,
-        None => pure(format, d, opt.threads, cx.words.as_deref(), &cx.once).unwrap_or_else(|| {
+        None => pure(format, d, opt, opt.threads, cx.words.as_deref(), &cx.once).unwrap_or_else(|| {
             catch_unwind(AssertUnwindSafe(|| match format {
                 Format::Pe => exe::pe(d),
                 Format::MachO => exe::macho(d),
@@ -1217,13 +1217,14 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
 
 /// The formula that the recompressor of `format` makes of `d` (its `formula` module, see its
 /// FORMAT.md), if it makes one, where it is a function of `d` alone (it looks for no files in
-/// its data, and takes nothing of a budget): `None` for the other formats. Whether coding pays
-/// off is the recompressor's call: the streams are not compressed yet, so their size says
-/// little. The formula is the same whatever `threads` is. Text is coded with `words` where
-/// given ([`Cx::words`]), and as `once` tells.
+/// its data, and takes nothing of a budget) and of the level of `opt`: `None` for the other
+/// formats. Whether coding pays off is the recompressor's call: the streams are not compressed
+/// yet, so their size says little. The formula is the same whatever `threads` is. Text is coded
+/// with `words` where given ([`Cx::words`]), and as `once` tells; PDF as [`pdf_options`] tells.
 fn pure(
     format: Format,
     d: &[u8],
+    opt: &Options,
     threads: usize,
     words: Option<&aqr_wrt::formula::Shared>,
     once: &Once,
@@ -1238,12 +1239,23 @@ fn pure(
         }
         catch_unwind(AssertUnwindSafe(|| match (format, words) {
             (Format::Text, Some(w)) => aqr_wrt::formula::encode_with(d, w, threads),
+            (Format::Pdf, _) => aqr_pdf::formula::encode_with(d, &pdf_options(opt, threads)),
             _ => encode(d, threads),
         }))
         .ok()
         .flatten()
     };
     Some(if format == Format::Text { once.code(d, code) } else { code() })
+}
+
+/// aqr-pdf's options at the level of `opt`: the records of its DEFLATE streams of the profile
+/// that [`Options::flate`] tells, and from level 7 on with no time budget, as DEFLATE is always
+/// rebuilt there ([`probe`]).
+fn pdf_options(opt: &Options, threads: usize) -> aqr_pdf::encode::Options {
+    let (profile, zlib) = opt.flate();
+    let default = aqr_pdf::encode::Options::default();
+    let speed = if opt.level.scale() >= 7 { f64::INFINITY } else { default.speed };
+    aqr_pdf::encode::Options { speed, profile, zlib, threads, ..default }
 }
 
 /// Whether `format` is one of [`pure`].
@@ -1300,7 +1312,7 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     let inner = (opt.threads / workers).max(1);
     let words = cx.words.as_deref();
     let once = &*cx.once;
-    let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, inner, words, once).flatten());
+    let made = sets::par_map(jobs.len(), workers, |i| pure(jobs[i].0, jobs[i].1, opt, inner, words, once).flatten());
     let mut ready = cx.ready.borrow_mut();
     let keys: Vec<_> = jobs.iter().map(|&(format, d, _)| (d.as_ptr() as usize, d.len(), format)).collect();
     for (&k, f) in keys.iter().zip(made) {
@@ -1640,6 +1652,40 @@ mod tests {
                 _ => Some(aqr_flate::ADAPTIVE),
             };
             assert_eq!(made(&text, level), ((n > 1) as usize, profile), "{level:?}");
+        }
+    }
+
+    /// PDF files at the archive's level: the records of their DEFLATE streams of aqr-flate's
+    /// profile as [`Options::flate`] tells, and from level 7 on with no time budget (every
+    /// FlateDecode stream inflated, none in the token mode or raw).
+    #[test]
+    fn pdf_levels() {
+        let mut rng = aqr_common::rng::Rng::new(1);
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        for i in 0..200 {
+            let content: String = (0..200)
+                .map(|_| format!("BT /F1 12 Tf {} {} Td (w{}) Tj ET\n", rng.below(600), rng.below(800), rng.below(50)))
+                .collect();
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            std::io::Write::write_all(&mut z, content.as_bytes()).unwrap();
+            let z = z.finish().unwrap();
+            pdf.extend_from_slice(
+                format!("{} 0 obj\n<< /Length {} /Filter /FlateDecode >>\nstream\n", i + 1, z.len()).as_bytes(),
+            );
+            pdf.extend_from_slice(&z);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        pdf.extend_from_slice(b"trailer\n<< /Size 201 >>\n%%EOF\n");
+        assert_eq!(detect(&pdf), Some(Format::Pdf));
+        for level in [Level::MID, Level::HIGH] {
+            let f = recompress(&pdf, &Options { level, shared_modules: true, ..Options::default() });
+            let stream = |class: &str| &f.streams.iter().find(|s| s.class == class).expect(class).data;
+            // (none at mid, where the budget leaves them all to the token mode)
+            let profile = aqr_flate::record_profile(stream("pdf/meta")).ok();
+            let want = Options { level, ..Options::default() }.flate().0;
+            assert!(profile.is_none_or(|p| p == want) && (level == Level::MID || profile.is_some()), "{level:?}");
+            let raw_or_tok = !stream("pdf/raw").is_empty() || !stream("pdf/tok-symbols").is_empty();
+            assert_eq!(raw_or_tok, level == Level::MID, "{level:?}");
         }
     }
 

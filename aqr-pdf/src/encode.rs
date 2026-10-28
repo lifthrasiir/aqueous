@@ -43,6 +43,10 @@ pub struct Options {
     pub full: bool,
     /// Images with PNG predictors through aqr-png.
     pub png: bool,
+    /// The aqr-flate profile of the full mode's records, and with an adaptive profile, whether
+    /// to try zlib emulation ([`aqr_flate::Options::zlib`]).
+    pub profile: u16,
+    pub zlib: bool,
     /// Threads (1: the items one after the other on the calling thread), the others workers of
     /// aqr-common's pool. The output does not depend on it.
     pub threads: usize,
@@ -50,7 +54,17 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { speed: 100.0, verify: false, level: 9, tok: true, full: true, png: true, threads: 1 }
+        Options {
+            speed: 100.0,
+            verify: false,
+            level: 9,
+            tok: true,
+            full: true,
+            png: true,
+            profile: aqr_flate::DEFAULT_PROFILE,
+            zlib: true,
+            threads: 1,
+        }
     }
 }
 
@@ -291,11 +305,13 @@ fn plan(file: &[u8], opts: &Options, st: &mut Stats) -> (Vec<Item>, usize) {
 fn code_items(
     file: &[u8],
     items: &[Item],
+    opts: &Options,
     st: &mut Stats,
     pool: &Option<rayon::ThreadPool>,
     b: &mut Sections,
 ) -> Option<()> {
-    let fr_opts = aqr_flate::Options { threads: 1, ..Default::default() };
+    let fr_opts =
+        aqr_flate::Options { threads: 1, zlib: opts.zlib, ..aqr_flate::Options::for_profile(opts.profile).ok()? };
     match pool {
         None => {
             for (i, it) in items.iter().enumerate() {
@@ -342,7 +358,7 @@ pub fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formul
     let (items, skel_len) = plan(file, opts, st);
     let pool = pool(opts.threads);
     let mut b = Sections::new(skel_len, items.len());
-    code_items(file, &items, st, &pool, &mut b)?;
+    code_items(file, &items, opts, st, &pool, &mut b)?;
     let Sections { table, mut skel, raw, meta, tokens, pools, at, fm, .. } = b;
     skel.extend_from_slice(&file[at..]);
     let (toks, _) = tokens.finish();
