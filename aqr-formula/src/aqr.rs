@@ -111,8 +111,8 @@ pub enum Level {
     ///   per second of compression;
     /// - at a lower level of it where that is smaller by 1/32 at least (beyond what a sample
     ///   may be off by), as it is faster too;
-    /// - at its dense level, where it has one, if of PE code or text ([`Encoder::how`]) and
-    ///   no shorter than a sample.
+    /// - at its dense level, where it has one, if of PE code or text ([`Encoder::how`]): if
+    ///   longer than a sample, always; else where that is smaller.
     ///
     /// Module and formula blocks, and streams shorter than `SMALL`, are at the base.
     Of(u8),
@@ -1114,10 +1114,15 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
             let level = pick(&p, sample.len(), lens[0], higher, lower);
             let best = tried.into_iter().find(|t| t.0 == level).expect("a level tried");
             let size = scaled(len(&best.1), sample.len(), n);
-            // (dense data as large as a sample at least, at the dense level above any picked)
+            // (dense data at the dense level above any picked: where larger than a sample, as
+            // a sample does not tell; else where it is smaller, as the sample is all of it)
             match p.dense {
                 Some(dense) if how == How::Dense && sample.len() < n && level >= p.base.0 => {
                     Ok(Plan::Level(dense, size))
+                }
+                Some(dense) if how == How::Dense && sample.len() == n && level >= p.base.0 => {
+                    let c = trial(&sample, dense)?;
+                    Ok(Plan::Done(if len(&c) < len(&best.1) { c } else { best.1 }))
                 }
                 _ if sample.len() == n => Ok(Plan::Done(best.1)),
                 _ => Ok(Plan::Level(best.0, size)),
@@ -2897,7 +2902,8 @@ mod tests {
     }
 
     /// Levels by name and number; the zstd levels picked from grow with the level, and only
-    /// from 8 on are dense streams (text, PE code) as long as a sample at least at [`DENSE`].
+    /// from 8 on are dense streams (text, PE code) at [`DENSE`] (one no longer than a sample
+    /// where that is smaller).
     #[test]
     fn levels() {
         for (s, l) in [
@@ -2946,8 +2952,13 @@ mod tests {
             assert_eq!(at(&long, How::Dense) == DENSE, dense, "{level:?}");
             // (at 9, picked from as any other)
             assert_eq!(at(&long, How::Usual) == DENSE, level == Level::Of(9), "{level:?}");
-            // not shorter than a sample
-            assert_eq!(at(&text, How::Dense), 0);
+            // no longer than a sample: compressed whole, at the dense level where smaller so
+            let Plan::Done(Some(c)) = enc.plan(key(&[&text]), &[&text], How::Dense).unwrap() else {
+                panic!("{level:?}: not compressed whole")
+            };
+            let at_dense = compressed(&mut enc.cctx(), &[&text], DENSE, 1).unwrap().unwrap();
+            assert!(at_dense.len() < c.len() || dense, "{level:?}: {} vs {}", at_dense.len(), c.len());
+            assert_eq!(c == at_dense, dense, "{level:?}");
         }
         // archived dense, and smaller so
         let f = |kind| {
