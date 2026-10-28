@@ -14,7 +14,7 @@
 //!
 //! With runs ([`Model::new`]), a tile first says whether it is all zeros or one pixel all over
 //! (then coded as a new one), and where the row above equals the left pixel from above on for
-//! [`RUN_LOOK`] pixels (in the first row, where the pixel before the left one equals it), the
+//! `RUN_LOOK` pixels (in the first row, where the pixel before the left one equals it), the
 //! pixels equal to it from there on in the row are coded at once: whether as many as the
 //! stretch above (in the first row, up to the end of the row), else how many (an Elias-gamma
 //! code). The pixel that ends a run is coded as above, the left one not tried.

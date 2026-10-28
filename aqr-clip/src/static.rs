@@ -1,4 +1,4 @@
-//! The model of [`crate::flat`] (with `Escape::Med`, runs and tile kinds) in symbols of static
+//! The model of [`crate::dynamic`] (with `Escape::Med`, runs and tile kinds) in symbols of static
 //! tables, coded with rANS a chunk at a time as aqr-psd's model is: what was a sequence of
 //! adaptive bits is one symbol of a byte alphabet in a table chosen by the same contexts.
 //!

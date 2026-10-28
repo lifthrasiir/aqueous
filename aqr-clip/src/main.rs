@@ -3,9 +3,9 @@
 //! - `aqr-clip stat FILE...`: the chunks, the block data, and the tiles by layout and class.
 //! - `aqr-clip bench [-t THREADS] [-b TILES] [-c] FILE...`: the tiles of each layout and class
 //!   coded by every model at hand, a batch of `-b` tiles (256) at a time, and what a file would
-//!   come to with the best of them. `-c` decodes the flat model's streams and compares.
-//! - `aqr-clip speed [-t THREADS] [-b TILES] [-m flat|fast] FILE...`: the flat model with runs
-//!   (adaptive bits, or `fast`: static tables) alone, as a
+//!   come to with the best of them. `-c` decodes the dynamic model's streams and compares.
+//! - `aqr-clip speed [-t THREADS] [-b TILES] [-m dynamic|static] FILE...`: the model of whole pixels
+//!   with runs (`dynamic`: adaptive bits, `static`: static tables) alone, as a
 //!   module would run it: batches of `-b` tiles (256) of a layout in file order, each a stream
 //!   of its own (the model anew), coded on `-t` threads; then decoded, the tiles deflated again
 //!   (zlib level 1) and compared. Wall times, and thread times by step.
@@ -19,16 +19,16 @@
 //!   apart from the 4 interleaved samples);
 //! - `psd`: aqr-psd's pixel model, a group of B, G, R and the alpha plane per tile and the fourth
 //!   sample as a plane of its own;
-//! - `flat`: [`aqr_clip::flat`] with [`Escape::Left`], `hyb` with [`Escape::Med`], `run` with
-//!   [`Escape::Med`], runs and tile kinds.
+//! - `dyn-l`: [`aqr_clip::dynamic`] with [`Escape::Left`], `dyn-m` with [`Escape::Med`], `dyn`
+//!   with [`Escape::Med`], runs and tile kinds.
 //!
 //! The file's estimate: each class by its best model (zero tiles free, constant ones their
 //! pixel), the SQLite database by aqr-sqlite, and everything else (block headers, tables,
 //! external data of other kinds) through the archive.
 
-use aqr_clip::flat::{self, Escape, Model};
+use aqr_clip::dynamic::{self, Escape, Model};
 use aqr_clip::tile::{self, AREA, Class, Layout, SIDE};
-use aqr_clip::{clip, fast};
+use aqr_clip::{clip, r#static};
 use aqr_common::arith::{ArithDecoder, ArithEncoder};
 use aqr_formula::Formula;
 use aqr_formula::aqr::{self, Level};
@@ -41,7 +41,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: aqr-clip stat FILE...\n       aqr-clip bench [-t THREADS] [-b TILES] [-c] FILE...\n       aqr-clip speed [-t THREADS] [-b TILES] [-m flat|fast] FILE..."
+        "usage: aqr-clip stat FILE...\n       aqr-clip bench [-t THREADS] [-b TILES] [-c] FILE...\n       aqr-clip speed [-t THREADS] [-b TILES] [-m dynamic|static] FILE..."
     );
     std::process::exit(2);
 }
@@ -173,13 +173,13 @@ struct Sizes {
     px_gen: usize,
     raw: usize,
     psd: usize,
-    flat: usize,
-    hyb: usize,
-    run: usize,
-    /// Seconds of the flat model's encoder.
-    flat_s: f64,
-    hyb_s: f64,
-    run_s: f64,
+    dyn_l: usize,
+    dyn_m: usize,
+    dynamic: usize,
+    /// Seconds of the dynamic models' encoders.
+    dyn_l_s: f64,
+    dyn_m_s: f64,
+    dynamic_s: f64,
     psd_s: f64,
 }
 
@@ -191,12 +191,12 @@ impl std::ops::AddAssign for Sizes {
         self.px_gen += o.px_gen;
         self.raw += o.raw;
         self.psd += o.psd;
-        self.flat += o.flat;
-        self.hyb += o.hyb;
-        self.run += o.run;
-        self.flat_s += o.flat_s;
-        self.hyb_s += o.hyb_s;
-        self.run_s += o.run_s;
+        self.dyn_l += o.dyn_l;
+        self.dyn_m += o.dyn_m;
+        self.dynamic += o.dynamic;
+        self.dyn_l_s += o.dyn_l_s;
+        self.dyn_m_s += o.dyn_m_s;
+        self.dynamic_s += o.dynamic_s;
         self.psd_s += o.psd_s;
     }
 }
@@ -207,7 +207,7 @@ impl Sizes {
         match c {
             Class::Zero => 0,
             Class::Const => self.tiles * samples,
-            _ => self.raw.min(self.psd).min(self.flat).min(self.hyb).min(self.run).min(self.px_gen),
+            _ => self.raw.min(self.psd).min(self.dyn_l).min(self.dyn_m).min(self.dynamic).min(self.px_gen),
         }
     }
 }
@@ -254,9 +254,9 @@ fn psd_size(l: Layout, tiles: &[Vec<u8>]) -> usize {
     out.len()
 }
 
-fn flat_size(l: Layout, tiles: &[Vec<u8>], escape: Escape, runs: bool, check: bool) -> usize {
+fn dynamic_size(l: Layout, tiles: &[Vec<u8>], escape: Escape, runs: bool, check: bool) -> usize {
     let mut m = Model::new(escape, runs);
-    let mut e = flat::Enc(ArithEncoder::new(Vec::new()));
+    let mut e = dynamic::Enc(ArithEncoder::new(Vec::new()));
     let mut px = Vec::with_capacity(AREA);
     for t in tiles {
         tile::pixels(l, t, &mut px);
@@ -265,13 +265,13 @@ fn flat_size(l: Layout, tiles: &[Vec<u8>], escape: Escape, runs: bool, check: bo
     let coded = e.0.finish();
     if check {
         let mut m = Model::new(escape, runs);
-        let mut dec = flat::Dec(ArithDecoder::new(&coded));
+        let mut dec = dynamic::Dec(ArithDecoder::new(&coded));
         let (mut px, mut t2) = (vec![0u64; AREA], Vec::new());
         for t in tiles {
             px.iter_mut().for_each(|p| *p = 0);
             m.tile(&mut dec, l, &mut px);
             tile::unpixels(l, &px, &mut t2);
-            assert!(t2 == *t, "flat model: a tile decoded otherwise");
+            assert!(t2 == *t, "dynamic model: a tile decoded otherwise");
         }
     }
     coded.len()
@@ -299,14 +299,14 @@ fn batch(l: Layout, zs: &[&[u8]], check: bool) -> Sizes {
     s.psd = psd_size(l, &tiles);
     s.psd_s = t.elapsed().as_secs_f64();
     let t = Instant::now();
-    s.flat = flat_size(l, &tiles, Escape::Left, false, check);
-    s.flat_s = t.elapsed().as_secs_f64();
+    s.dyn_l = dynamic_size(l, &tiles, Escape::Left, false, check);
+    s.dyn_l_s = t.elapsed().as_secs_f64();
     let t = Instant::now();
-    s.hyb = flat_size(l, &tiles, Escape::Med, false, check);
-    s.hyb_s = t.elapsed().as_secs_f64();
+    s.dyn_m = dynamic_size(l, &tiles, Escape::Med, false, check);
+    s.dyn_m_s = t.elapsed().as_secs_f64();
     let t = Instant::now();
-    s.run = flat_size(l, &tiles, Escape::Med, true, check);
-    s.run_s = t.elapsed().as_secs_f64();
+    s.dynamic = dynamic_size(l, &tiles, Escape::Med, true, check);
+    s.dynamic_s = t.elapsed().as_secs_f64();
     s
 }
 
@@ -346,7 +346,7 @@ fn bench(args: &[String]) {
     let (mut t_in, mut t_est, mut t_sql, mut t_other) = (0, 0, 0, 0);
     println!(
         "{:28} {:5} {:5} {:>7} {:>11} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7} {:>7}",
-        "file", "lay", "class", "tiles", "zlib", "zl/gen", "px/gen", "raw", "psd", "flat", "hyb", "run"
+        "file", "lay", "class", "tiles", "zlib", "zl/gen", "px/gen", "raw", "psd", "dyn-l", "dyn-m", "dyn"
     );
     for path in &files {
         let d = std::fs::read(path).expect("read");
@@ -383,9 +383,9 @@ fn bench(args: &[String]) {
                 s.px_gen as f64 / z,
                 s.raw as f64 / z,
                 s.psd as f64 / z,
-                s.flat as f64 / z,
-                s.hyb as f64 / z,
-                s.run as f64 / z
+                s.dyn_l as f64 / z,
+                s.dyn_m as f64 / z,
+                s.dynamic as f64 / z
             );
             est += s.best(*c, l.samples());
             *all.entry((*l, *c)).or_default() += *s;
@@ -413,7 +413,7 @@ fn bench(args: &[String]) {
     for ((l, c), s) in &all {
         let z = s.zlib as f64;
         println!(
-            "  {:5} {:5} {:7} {:11} {:7.3} {:7.3} {:7.3} {:7.3} {:7.3} {:7.3} {:7.3}  psd {:.0}, flat {:.0}, hyb {:.0}, run {:.0} MB/s (inflated, a thread)",
+            "  {:5} {:5} {:7} {:11} {:7.3} {:7.3} {:7.3} {:7.3} {:7.3} {:7.3} {:7.3}  psd {:.0}, dyn-l {:.0}, dyn-m {:.0}, dyn {:.0} MB/s (inflated, a thread)",
             l.name(),
             c.name(),
             s.tiles,
@@ -422,29 +422,29 @@ fn bench(args: &[String]) {
             s.px_gen as f64 / z,
             s.raw as f64 / z,
             s.psd as f64 / z,
-            s.flat as f64 / z,
-            s.hyb as f64 / z,
-            s.run as f64 / z,
+            s.dyn_l as f64 / z,
+            s.dyn_m as f64 / z,
+            s.dynamic as f64 / z,
             (s.tiles * l.bytes()) as f64 / s.psd_s / 1e6,
-            (s.tiles * l.bytes()) as f64 / s.flat_s / 1e6,
-            (s.tiles * l.bytes()) as f64 / s.hyb_s / 1e6,
-            (s.tiles * l.bytes()) as f64 / s.run_s / 1e6
+            (s.tiles * l.bytes()) as f64 / s.dyn_l_s / 1e6,
+            (s.tiles * l.bytes()) as f64 / s.dyn_m_s / 1e6,
+            (s.tiles * l.bytes()) as f64 / s.dynamic_s / 1e6
         );
         tot += *s;
         best += s.best(*c, l.samples());
     }
     let z = tot.zlib as f64;
     println!(
-        "  tiles: zlib {} -> zl/gen {} ({:.3}), px/gen {:.3}, raw {:.3}, psd {:.3}, flat {:.3}, hyb {:.3}, run {:.3}, best by class {} ({:.3})",
+        "  tiles: zlib {} -> zl/gen {} ({:.3}), px/gen {:.3}, raw {:.3}, psd {:.3}, dyn-l {:.3}, dyn-m {:.3}, dyn {:.3}, best by class {} ({:.3})",
         tot.zlib,
         tot.zl_gen,
         tot.zl_gen as f64 / z,
         tot.px_gen as f64 / z,
         tot.raw as f64 / z,
         tot.psd as f64 / z,
-        tot.flat as f64 / z,
-        tot.hyb as f64 / z,
-        tot.run as f64 / z,
+        tot.dyn_l as f64 / z,
+        tot.dyn_m as f64 / z,
+        tot.dynamic as f64 / z,
         best,
         best as f64 / z
     );
@@ -471,15 +471,15 @@ fn lap(t: &mut Instant) -> f64 {
 }
 
 fn speed(args: &[String]) {
-    let (mut threads, mut per, mut fast, mut files) = (1, 256, false, Vec::new());
+    let (mut threads, mut per, mut stat, mut files) = (1, 256, false, Vec::new());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-t" => threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-b" => per = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-m" => match it.next().map(String::as_str) {
-                Some("flat") => fast = false,
-                Some("fast") => fast = true,
+                Some("dynamic") => stat = false,
+                Some("static") => stat = true,
                 _ => usage(),
             },
             _ => files.push(a.clone()),
@@ -510,8 +510,8 @@ fn speed(args: &[String]) {
         let tiles: Vec<Vec<u8>> = zs.iter().map(|z| inflate(z, l.bytes()).expect("inflate")).collect();
         let inflate = lap(&mut c);
         let mut px = Vec::with_capacity(AREA);
-        let out = if fast {
-            let (mut m, mut r) = (fast::Model::default(), fast::Recorder::default());
+        let out = if stat {
+            let (mut m, mut r) = (r#static::Model::default(), r#static::Recorder::default());
             for t in &tiles {
                 tile::pixels(l, t, &mut px);
                 m.tile(&mut r, l, &mut px);
@@ -521,7 +521,7 @@ fn speed(args: &[String]) {
             out
         } else {
             let mut m = Model::new(Escape::Med, true);
-            let mut e = flat::Enc(ArithEncoder::new(Vec::new()));
+            let mut e = dynamic::Enc(ArithEncoder::new(Vec::new()));
             for t in &tiles {
                 tile::pixels(l, t, &mut px);
                 m.tile(&mut e, l, &mut px);
@@ -543,8 +543,8 @@ fn speed(args: &[String]) {
             tile::unpixels(l, px, &mut t);
             tiles.push(t);
         };
-        if fast {
-            let (mut m, mut p) = (fast::Model::default(), fast::Player::new(&coded[i].0));
+        if stat {
+            let (mut m, mut p) = (r#static::Model::default(), r#static::Player::new(&coded[i].0));
             for _ in zs {
                 m.tile(&mut p, l, &mut px);
                 push(&px);
@@ -552,7 +552,7 @@ fn speed(args: &[String]) {
             assert!(p.finish(), "a stream not consumed exactly");
         } else {
             let mut m = Model::new(Escape::Med, true);
-            let mut d = flat::Dec(ArithDecoder::new(&coded[i].0));
+            let mut d = dynamic::Dec(ArithDecoder::new(&coded[i].0));
             for _ in zs {
                 m.tile(&mut d, l, &mut px);
                 push(&px);

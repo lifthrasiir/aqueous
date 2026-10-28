@@ -6,7 +6,8 @@ and models for the tiles measured. No formula yet.
 ```sh
 cargo build --release
 aqr-clip stat FILE...                          # chunks, block data, tiles by layout and class
-aqr-clip bench [-t N] [-b TILES] [-c] FILE...  # tiles by every model; -c checks the flat model's round trip
+aqr-clip bench [-t N] [-b TILES] [-c] FILE...  # tiles by every model; -c checks the dynamic models' round trip
+aqr-clip speed [-t N] [-b TILES] [-m dynamic|static] FILE...  # one model as a module would run it
 ```
 
 ## Format
@@ -31,9 +32,9 @@ off 13 files of 2019–2025.
 
 Measured on 2026-10-28 on a Windows machine, 16 threads, with `aqr-clip bench -t 16 -c` on 13
 files (926 MB, 775 MB of it zlib streams; 32 GB once inflated). Ratios are to the zlib bytes of
-each group of tiles. Every stream of the flat models decodes back to its tiles (`-c`).
+each group of tiles. Every stream of the dynamic models decodes back to its tiles (`-c`).
 
-| tiles | count | zlib MB | as now (zl/gen) | px/gen | aqr-raw | aqr-psd | flat | hyb | run |
+| tiles | count | zlib MB | as now (zl/gen) | px/gen | aqr-raw | aqr-psd | dyn-l | dyn-m | dyn |
 |---|---|---|---|---|---|---|---|---|---|
 | colour, all zero | 20,011 | 29.1 | 0.000 | 0.007 | 0.002 | 0.132 | 0.004 | 0.004 | **0.000** |
 | colour, one pixel | 24,242 | 39.0 | 0.001 | 0.021 | 0.003 | 0.121 | 0.004 | 0.004 | **0.000** |
@@ -46,8 +47,8 @@ each group of tiles. Every stream of the flat models decodes back to its tiles (
 | all tiles | | 774.9 | 0.826 | 0.617 | 0.506 | 0.490 | 0.402 | **0.352** | 0.357 |
 
 - *as now*: the zlib streams through the archive (level mid), which is what aqr does with a
-  `.clip` file today; *px/gen*: the inflated tiles through the archive; *flat*, *hyb*, *run*:
-  the flat model (below) with `Escape::Left`, with `Escape::Med`, and with `Escape::Med`,
+  `.clip` file today; *px/gen*: the inflated tiles through the archive; *dyn-l*, *dyn-m*, *dyn*:
+  the dynamic model (below) with `Escape::Left`, with `Escape::Med`, and with `Escape::Med`,
   runs and tile kinds.
 - Whole files, each class by its best model, the database by aqr-sqlite and the rest through
   the archive: **926 MB → 312 MB (0.337)**, against 672 MB (0.726) through `aqr-show` as it
@@ -64,13 +65,13 @@ files, 926 MB.
 
 | model | tiles / zlib | encode, 16 threads | decode, 16 threads (the check included) | model alone, one thread (encode / decode) |
 |---|---|---|---|---|
-| `flat` (adaptive bits) | **0.357** | 9.9 s (93 MB/s) | 12.8 s | 14.8 / 17.8 MB/s |
-| `fast` (static tables) | 0.384 | **7.6 s (122 MB/s)** | **8.3 s** | 21.4 / 30.3 MB/s |
+| `dynamic` (adaptive bits) | **0.357** | 9.9 s (93 MB/s) | 12.8 s | 14.8 / 17.8 MB/s |
+| `static` (static tables) | 0.384 | **7.6 s (122 MB/s)** | **8.3 s** | 21.4 / 30.3 MB/s |
 
 On one thread inflating takes 11.8 s and deflating 22 s on top of the model. With 16
 threads a thread runs at about half its speed alone (SMT).
 
-`fast` (`src/fast.rs`) is the same model in symbols of static tables per chunk of 2^20
+`static` (`src/static.rs`) is the same model in symbols of static tables per chunk of 2^20
 symbols (rANS, as aqr-psd), the list a ring with a hash index instead of a list moved to front.
 It is 7.8% larger: not its tables (5.2 MB of 298 MB) but the adaptivity it gives up; smaller
 chunks code the symbols smaller (2^15: −7%) and the tables larger (+6 MB on one file).
@@ -80,7 +81,7 @@ chunks code the symbols smaller (2^15: −7%) and the tables larger (+6 MB on on
 Inflated bytes a second, a thread (the encoder; every model of a batch runs on the same
 thread, 16 at once, so these are lower than alone):
 
-| tiles | aqr-psd | hyb | run |
+| tiles | aqr-psd | dyn-m | dyn |
 |---|---|---|---|
 | colour, zero or one pixel | ~950 | ~135 | 1300–1500 |
 | colour, ≤16 | 711 | 139 | 551 |
@@ -88,7 +89,7 @@ thread, 16 at once, so these are lower than alone):
 | colour, more | 199 | 39 | 47 |
 | one plane | 300–1300 | 25–30 | 56–450 |
 
-## The flat model (`src/flat.rs`)
+## The dynamic model (`src/dynamic.rs`)
 
 A pixel is coded whole (all its samples at once): whether it copies its left, upper, upper
 right or upper left neighbour; else its place in a list of recent pixels; else its samples.
@@ -109,7 +110,7 @@ catch whole.
 
 ## Next steps
 
-- `fast`: the size back without its adaptivity (tables coded against the last chunk's, so
+- `static`: the size back without its adaptivity (tables coded against the last chunk's, so
   that chunks can be small; richer contexts).
 - A deflater making zlib 1.3's level 1, memLevel 9 streams exactly, for the decoder.
 - Neighbouring tiles as context (the block grid is in the database), mipmaps predicted from
