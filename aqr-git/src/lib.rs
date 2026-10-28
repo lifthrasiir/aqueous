@@ -171,8 +171,7 @@ fn walk(
         let path = format!("{prefix}{name}");
         let ft = e.file_type()?;
         if ft.is_symlink() {
-            use std::os::unix::ffi::OsStrExt;
-            links.push((path, std::fs::read_link(e.path())?.as_os_str().as_bytes().to_vec()));
+            links.push((path, link_bytes(&std::fs::read_link(e.path())?)));
         } else if ft.is_dir() {
             walk(&e.path(), format!("{path}/"), files, links)?;
         } else if ft.is_file() {
@@ -180,6 +179,18 @@ fn walk(
         }
     }
     Ok(())
+}
+
+/// The target of a symlink as git has it: its bytes on Unix, else `/`-separated.
+#[cfg(unix)]
+fn link_bytes(target: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    target.as_os_str().as_bytes().to_vec()
+}
+
+#[cfg(not(unix))]
+fn link_bytes(target: &Path) -> Vec<u8> {
+    target.to_string_lossy().replace('\\', "/").into_bytes()
 }
 
 /// Deconstructs a set of files (paths relative, `/`-separated).

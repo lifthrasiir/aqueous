@@ -663,6 +663,7 @@ impl Loaded for Shared {
 impl Shared {
     /// [`Loaded::apply`], the outputs written into `outs` (of the sizes declared), every byte
     /// of them where it succeeds.
+    #[cfg(feature = "sandbox")]
     pub(crate) fn apply_into(
         &self,
         params: &[u8],

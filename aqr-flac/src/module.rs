@@ -35,7 +35,7 @@ pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, th
     }
     let c = Coded {
         streams: streams.iter().map(|s| s.to_vec()).collect(),
-        words: words.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect(),
+        words: words.as_chunks::<4>().0.iter().map(|&w| u32::from_le_bytes(w)).collect(),
         raw: [raw0.to_vec(), raw1.to_vec()],
     };
     let mut out = Vec::new();

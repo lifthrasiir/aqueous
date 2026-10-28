@@ -138,9 +138,8 @@ fn autocorr(w: &[f64], max_lag: usize) -> [f64; 33] {
     for (lag, rl) in r.iter_mut().enumerate().take(max_lag + 1) {
         let (a, b) = (&w[lag..], &w[..w.len() - lag]);
         let mut acc = [0f64; 8];
-        let (ca, cb) = (a.chunks_exact(8), b.chunks_exact(8));
-        let (ra, rb) = (ca.remainder(), cb.remainder());
-        for (x, y) in ca.zip(cb) {
+        let ((ca, ra), (cb, rb)) = (a.as_chunks::<8>(), b.as_chunks::<8>());
+        for (x, y) in ca.iter().zip(cb) {
             for k in 0..8 {
                 acc[k] += x[k] * y[k];
             }

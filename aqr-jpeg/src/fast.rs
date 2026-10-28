@@ -978,7 +978,7 @@ fn rans_encode(syms: &[u16], t: &Tables) -> Vec<u32> {
                 rans_room(&mut buf, &mut w, c.len() + 8);
                 p = buf.as_mut_ptr();
             }
-            for g in c.chunks_exact(4).rev() {
+            for g in c.as_chunks::<4>().0.iter().rev() {
                 rans_put(&mut x3, enc(g[3]), p, &mut w);
                 rans_put(&mut x2, enc(g[2]), p, &mut w);
                 rans_put(&mut x1, enc(g[1]), p, &mut w);
@@ -1235,7 +1235,7 @@ impl Walked {
         let mut b = 0;
         for &(nb, cc) in &self.comps {
             let pos: &[u16; 63] = AC_POS[cc][1..].try_into().unwrap();
-            for (&last, idx) in self.last[b..b + nb].iter().zip(self.idx[2 * b..2 * (b + nb)].chunks_exact(2)) {
+            for (&last, idx) in self.last[b..b + nb].iter().zip(self.idx[2 * b..2 * (b + nb)].as_chunks::<2>().0) {
                 let last = last as usize;
                 out[n] = idx[0];
                 let dst: &mut [u16; 63] = (&mut out[n + 1..n + 64]).try_into().unwrap();
@@ -1371,7 +1371,7 @@ fn decode_rows<'a>(
     // notices: pad the rANS words (<= 1 per symbol, <= 65 symbols per block) and raw bits.
     let nw = words.len() / 4;
     let mut src = Vec::with_capacity(nw + SRC_PAD);
-    src.extend(words.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())));
+    src.extend(words.as_chunks::<4>().0.iter().map(|&c| u32::from_le_bytes(c)));
     src.resize(nw + SRC_PAD, 0);
     let mut rb = Vec::with_capacity(raw.len() + RAW_PAD);
     rb.extend_from_slice(raw);

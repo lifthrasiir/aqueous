@@ -62,10 +62,9 @@ fn main() {
             })
             .unwrap_or_else(|e| die(e));
             for (p, t) in &u.symlinks {
-                use std::os::unix::ffi::OsStrExt;
                 let path = root.join(p);
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap_or_else(|e| die(e));
-                std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(t), &path).unwrap_or_else(|e| die(e));
+                symlink(t, &path).unwrap_or_else(|e| die(e));
             }
         }
         Some("x") if args.len() == 3 => {
@@ -166,4 +165,16 @@ fn bench(args: &[String]) {
     if fails > 0 {
         std::process::exit(1);
     }
+}
+
+/// A symlink at `at` to `target`, as git has it (its bytes on Unix, else `/`-separated).
+#[cfg(unix)]
+fn symlink(target: &[u8], at: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(target), at)
+}
+
+#[cfg(windows)]
+fn symlink(target: &[u8], at: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(String::from_utf8_lossy(target).replace('/', "\\"), at)
 }

@@ -161,6 +161,8 @@ mod tests {
     /// Checks against the C library's `%.*g`.
     #[test]
     fn gen_matches_libc() {
+        // (inline in the headers of the UCRT, its symbol only in this library)
+        #[cfg_attr(target_env = "msvc", link(name = "legacy_stdio_definitions"))]
         unsafe extern "C" {
             fn snprintf(buf: *mut u8, n: usize, fmt: *const u8, ...) -> i32;
         }

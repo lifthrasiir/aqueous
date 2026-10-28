@@ -131,7 +131,7 @@ pub fn unpack(src: &[u8]) -> Result<Unpacked> {
     if !rest.len().is_multiple_of(8) {
         return Err(corrupt());
     }
-    let hashes = rest.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+    let hashes = rest.as_chunks::<8>().0.iter().map(|&c| u64::from_le_bytes(c)).collect();
     Ok(Unpacked { streams, symlinks, hashes })
 }
 

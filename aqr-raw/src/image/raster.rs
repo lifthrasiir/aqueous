@@ -176,12 +176,14 @@ fn put_chunk(syms: &[(u8, u8)], out: &mut Vec<u8>) {
         h[t as usize * 256 + v as usize] += 1;
     }
     let mut w = BitW::default();
-    let used: Vec<bool> = h.chunks_exact(256).map(|c| c.iter().any(|&x| x > 0)).collect();
+    let used: Vec<bool> = h.as_chunks::<256>().0.iter().map(|c| c.iter().any(|&x| x > 0)).collect();
     for &u in &used {
         w.bits(1, u as u32);
     }
     let freqs: Vec<Vec<u32>> = h
-        .chunks_exact(256)
+        .as_chunks::<256>()
+        .0
+        .iter()
         .zip(&used)
         .map(|(c, &u)| if u { rans32::write_table::<PROB_BITS, false>(&mut w, c) } else { vec![1 << PROB_BITS] })
         .collect();

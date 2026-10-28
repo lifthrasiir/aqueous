@@ -52,7 +52,7 @@ fn choose_styles(src: &[u8], st: &mut [Style; 4], unit: &mut bool) {
     }
     // Normals of length 1 within rounding.
     let (mut nvn, mut nunit) = (0, 0);
-    for t in toks[2].chunks_exact(3) {
+    for t in toks[2].as_chunks::<3>().0 {
         let x: Vec<f64> = t.iter().filter_map(|t| std::str::from_utf8(t.1).ok()?.parse().ok()).collect();
         if x.len() == 3 {
             nvn += 1;

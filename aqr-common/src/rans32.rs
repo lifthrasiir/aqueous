@@ -487,8 +487,8 @@ impl<const MSB: bool> BitW<MSB> {
 
     /// Appends the bits `w` wrote.
     pub fn append(&mut self, w: &BitW<MSB>) {
-        for c in w.out.chunks_exact(4) {
-            self.bits(32, u32::from_le_bytes(c.try_into().unwrap()));
+        for &c in w.out.as_chunks::<4>().0 {
+            self.bits(32, u32::from_le_bytes(c));
         }
         self.bits(w.n, w.acc as u32);
     }

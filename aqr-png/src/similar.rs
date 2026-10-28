@@ -48,8 +48,7 @@ fn hash(d: &[u8]) -> u64 {
     let mix = |h: u64, w: u64| (h ^ w).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(31);
     let word = |w: &[u8]| u64::from_le_bytes(w.try_into().unwrap());
     // four words at a time, each of its own lane (which do not wait for one another)
-    let blocks = d.chunks_exact(32);
-    let rest = blocks.remainder();
+    let (blocks, rest) = d.as_chunks::<32>();
     let mut h = [d.len() as u64, 1, 2, 3];
     for b in blocks {
         for (k, h) in h.iter_mut().enumerate() {
@@ -57,9 +56,8 @@ fn hash(d: &[u8]) -> u64 {
         }
     }
     let mut h = h.into_iter().reduce(mix).unwrap();
-    let words = rest.chunks_exact(8);
-    let tail = words.remainder();
-    h = words.fold(h, |h, w| mix(h, word(w)));
+    let (words, tail) = rest.as_chunks::<8>();
+    h = words.iter().fold(h, |h, w| mix(h, word(w)));
     if !tail.is_empty() {
         let mut b = [0u8; 8];
         b[..tail.len()].copy_from_slice(tail);

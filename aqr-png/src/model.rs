@@ -523,9 +523,9 @@ fn unfilter_part<const BPP: usize>(
     if px > 0 {
         let mut a: [u8; BPP] = row[x..x + BPP].try_into().unwrap();
         let mut c: [u8; BPP] = up[x..x + BPP].try_into().unwrap();
-        let rows = row[BPP + x..BPP + x + px * BPP].chunks_exact_mut(BPP);
-        let ds = d[x..x + px * BPP].chunks_exact(BPP);
-        let ups = up[BPP + x..BPP + x + px * BPP].chunks_exact(BPP);
+        let rows = row[BPP + x..BPP + x + px * BPP].as_chunks_mut::<BPP>().0.iter_mut();
+        let ds = d[x..x + px * BPP].as_chunks::<BPP>().0.iter();
+        let ups = up[BPP + x..BPP + x + px * BPP].as_chunks::<BPP>().0.iter();
         match ft {
             1 => {
                 for (o, f) in rows.zip(ds) {

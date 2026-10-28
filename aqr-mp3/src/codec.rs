@@ -94,7 +94,7 @@ impl Model {
         if !raw.len().is_multiple_of(2) {
             return None;
         }
-        let mut words = raw.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]]));
+        let mut words = raw.as_chunks::<2>().0.iter().map(|b| u16::from_le_bytes([b[0], b[1]]));
         let k = words.next()? as usize;
         let map: Vec<u16> = words.by_ref().take(model::N_CTX).collect();
         if map.len() != model::N_CTX {

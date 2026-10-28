@@ -43,8 +43,8 @@ pub fn update32(crc: u32, data: u32) -> u32 {
 
 /// `crc` updated by `d`, without inversions.
 fn update(mut crc: u32, d: &[u8]) -> u32 {
-    let mut chunks = d.chunks_exact(8);
-    for c in &mut chunks {
+    let (chunks, rest) = d.as_chunks::<8>();
+    for c in chunks {
         let lo = crc ^ u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
         crc = TABLES[7][(lo & 0xff) as usize]
             ^ TABLES[6][(lo >> 8 & 0xff) as usize]
@@ -55,7 +55,7 @@ fn update(mut crc: u32, d: &[u8]) -> u32 {
             ^ TABLES[1][c[6] as usize]
             ^ TABLES[0][c[7] as usize];
     }
-    for &b in chunks.remainder() {
+    for &b in rest {
         crc = crc >> 8 ^ TABLES[0][((crc ^ b as u32) & 0xff) as usize];
     }
     crc

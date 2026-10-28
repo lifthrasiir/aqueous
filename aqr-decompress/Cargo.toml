@@ -72,3 +72,4 @@ path = "examples/modules.rs"
 [[example]]
 name = "aqr-decompress-wasm"
 path = "examples/wasm.rs"
+required-features = ["wasm"]

@@ -116,11 +116,11 @@ impl BitWriter {
     /// Appends what another writer produced (see [`BitWriter::into_parts`]) at the current
     /// bit position.
     pub fn append(&mut self, out: &[u8], acc: u64, nacc: u32) {
-        let mut words = out.chunks_exact(4);
-        for c in &mut words {
-            self.bits(32, u32::from_le_bytes(c.try_into().unwrap()));
+        let (words, rest) = out.as_chunks::<4>();
+        for &c in words {
+            self.bits(32, u32::from_le_bytes(c));
         }
-        for &b in words.remainder() {
+        for &b in rest {
             self.bits(8, b as u32);
         }
         self.bits(nacc, acc as u32);

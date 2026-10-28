@@ -14,7 +14,9 @@ pub fn rules_from_bytes(d: &[u8]) -> Result<Vec<Rule>> {
     if !d.len().is_multiple_of(RULE_BYTES) {
         return Err(Error::Corrupt);
     }
-    d.chunks_exact(RULE_BYTES)
+    d.as_chunks::<RULE_BYTES>()
+        .0
+        .iter()
         .map(|b| {
             let u16_at = |i: usize| u16::from_le_bytes([b[i], b[i + 1]]);
             let kind = match b[0] {
@@ -53,7 +55,7 @@ pub fn models_from_bytes(d: &[u8]) -> Result<Box<[code::Model; FIELDS]>> {
         return Err(Error::Corrupt);
     }
     let mut models = Vec::with_capacity(FIELDS);
-    for q in d.chunks_exact(ALPHABET) {
+    for q in d.as_chunks::<ALPHABET>().0 {
         models.push(code::Model::from_qs(q).ok_or(Error::Corrupt)?);
     }
     Ok(models
@@ -72,8 +74,10 @@ pub fn priors_from_bytes(d: &[u8]) -> Result<Priors> {
         return Err(Error::Corrupt);
     }
     let p1 = p1
-        .chunks_exact(2)
-        .map(|b| u16::from_le_bytes([b[0], b[1]]))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| u16::from_le_bytes(b))
         .collect();
     Ok(Priors { p1, n: n.to_vec() })
 }

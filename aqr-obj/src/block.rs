@@ -35,11 +35,11 @@ impl Hasher for KeyHasher {
     #[inline]
     fn write(&mut self, b: &[u8]) {
         let mut h = self.0;
-        let mut c = b.chunks_exact(8);
-        for w in &mut c {
-            h = (h.rotate_left(5) ^ u64::from_le_bytes(w.try_into().unwrap())).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+        let (c, rest) = b.as_chunks::<8>();
+        for &w in c {
+            h = (h.rotate_left(5) ^ u64::from_le_bytes(w)).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
         }
-        for &x in c.remainder() {
+        for &x in rest {
             h = (h.rotate_left(5) ^ x as u64).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
         }
         self.0 = h;

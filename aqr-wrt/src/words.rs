@@ -130,12 +130,12 @@ struct Fx(u64);
 
 impl Hasher for Fx {
     fn write(&mut self, b: &[u8]) {
-        let mut chunks = b.chunks_exact(8);
-        for c in &mut chunks {
-            self.add(u64::from_le_bytes(c.try_into().unwrap()));
+        let (chunks, rest) = b.as_chunks::<8>();
+        for &c in chunks {
+            self.add(u64::from_le_bytes(c));
         }
         let mut last = [0; 8];
-        last[..chunks.remainder().len()].copy_from_slice(chunks.remainder());
+        last[..rest.len()].copy_from_slice(rest);
         self.add(u64::from_le_bytes(last));
     }
 

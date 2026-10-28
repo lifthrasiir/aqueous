@@ -181,7 +181,14 @@ impl<R: std::io::Read + std::io::Seek> Image<'_, R> {
         }
         let num_sections = to_u32(&rtr[12..16]);
         let sections = self.read(rtr_rva + 16, num_sections.checked_mul(12)?)?;
-        Some(sections.chunks_exact(12).map(|s| (to_u32(&s[0..4]), to_u32(&s[4..8]), to_u32(&s[8..12]))).collect())
+        Some(
+            sections
+                .as_chunks::<12>()
+                .0
+                .iter()
+                .map(|s| (to_u32(&s[0..4]), to_u32(&s[4..8]), to_u32(&s[8..12])))
+                .collect(),
+        )
     }
 
     /// The extents `(RVA, file offset, size)` of the native code of a ReadyToRun image of
@@ -192,7 +199,8 @@ impl<R: std::io::Read + std::io::Seek> Image<'_, R> {
         let (_, funcs_rva, funcs_size) = self.ready_to_run(clr)?.into_iter().find(|s| s.0 == 102)?; // READYTORUN_SECTION_RUNTIME_FUNCTIONS
                                                                                                     // RUNTIME_FUNCTION of x86-64: begin, end, unwind data
         let funcs = self.read(funcs_rva, funcs_size / 12 * 12)?;
-        let mut funcs: Vec<(u32, u32)> = funcs.chunks_exact(12).map(|f| (to_u32(&f[0..4]), to_u32(&f[4..8]))).collect();
+        let mut funcs: Vec<(u32, u32)> =
+            funcs.as_chunks::<12>().0.iter().map(|f| (to_u32(&f[0..4]), to_u32(&f[4..8]))).collect();
         funcs.sort_unstable();
 
         let mut extents: Vec<(u32, u32)> = Vec::new();

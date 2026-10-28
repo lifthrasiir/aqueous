@@ -2,6 +2,8 @@
 //! the profile and the host functions of the spec. Every module run by Wasmtime runs in the
 //! sandbox too (with the feature `sandbox`), and gives the same, failures included.
 
+#![cfg(feature = "wasm")]
+
 use aqr_decompress::{MODULES, Native, Wasm, known, wasm_of};
 use aqr_formula::aqr::{self, Encoder, Failure, Level, Loaded, Runner};
 use aqr_formula::{Formula, Module, Node};

@@ -29,7 +29,7 @@ fn mix<S: Src, D: Dst<S>>(params: &S, resources: &[S], inputs: &[S], out: &mut D
     if at > 0 {
         out.read(0, &mut first);
     }
-    if at != out.len() || first == [b'!'] { Err("not of the size declared") } else { Ok(()) }
+    if at != out.len() || first == *b"!" { Err("not of the size declared") } else { Ok(()) }
 }
 
 aqr_api::entry! {

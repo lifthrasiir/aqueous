@@ -609,7 +609,7 @@ impl<'a> Decoder<'a> {
     pub fn from_le_bytes(t: &'a Tables, bytes: &[u8]) -> Decoder<'a> {
         assert!(bytes.len().is_multiple_of(4));
         let mut src = Vec::with_capacity((bytes.len() / 4).max(2 * LANES) + SRC_PAD);
-        src.extend(bytes.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())));
+        src.extend(bytes.as_chunks::<4>().0.iter().map(|&w| u32::from_le_bytes(w)));
         Decoder::from_vec(t, src)
     }
 
@@ -817,7 +817,7 @@ pub mod builtin {
         let mut out = Vec::new();
         for n in alphabets {
             let end = p.checked_add(n.checked_mul(2)?)?;
-            let f: Vec<u16> = raw.get(p..end)?.chunks_exact(2).map(|b| u16::from_le_bytes([b[0], b[1]])).collect();
+            let f: Vec<u16> = raw.get(p..end)?.as_chunks::<2>().0.iter().map(|&b| u16::from_le_bytes(b)).collect();
             // What `Tables::new` requires.
             if f.contains(&0) || f.iter().map(|&x| x as u32).sum::<u32>() != super::PROB_SCALE {
                 return None;

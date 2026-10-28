@@ -196,12 +196,13 @@ fn jpeg_blocks(h: &[u8]) -> Option<u64> {
     let width = u16::from_be_bytes([*h.get(3)?, *h.get(4)?]) as u64;
     let n = *h.get(5)? as usize;
     let comps = h.get(6..6 + 3 * n)?;
-    let samp = |c: &[u8]| ((c[1] >> 4).max(1) as u64, (c[1] & 15).max(1) as u64);
-    let hmax = comps.chunks_exact(3).map(|c| samp(c).0).max()?;
-    let vmax = comps.chunks_exact(3).map(|c| samp(c).1).max()?;
+    let comps = comps.as_chunks::<3>().0;
+    let samp = |c: &[u8; 3]| ((c[1] >> 4).max(1) as u64, (c[1] & 15).max(1) as u64);
+    let hmax = comps.iter().map(|c| samp(c).0).max()?;
+    let vmax = comps.iter().map(|c| samp(c).1).max()?;
     Some(
         comps
-            .chunks_exact(3)
+            .iter()
             .map(|c| {
                 let (hs, vs) = samp(c);
                 (width * hs).div_ceil(8 * hmax) * (height * vs).div_ceil(8 * vmax)

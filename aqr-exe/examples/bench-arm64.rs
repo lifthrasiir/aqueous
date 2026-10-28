@@ -22,9 +22,9 @@ fn zstd(d: &[u8], level: i32) -> usize {
 /// xz's ARM64 BCJ: BL and ADRP (within +-512 MiB in xz; all here) with absolute targets.
 fn bcj(code: &[u8], origin: u64) -> Vec<u8> {
     let mut out = code.to_vec();
-    for (k, w) in out.chunks_exact_mut(4).enumerate() {
+    for (k, w) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
         let pc = origin.wrapping_add(4 * k as u64);
-        let mut x = u32::from_le_bytes(w.try_into().unwrap());
+        let mut x = u32::from_le_bytes(*w);
         if x >> 26 == 0x25 {
             x = 0x9400_0000 | (x.wrapping_add((pc >> 2) as u32) & 0x03ff_ffff);
         } else if x & 0x9f00_0000 == 0x9000_0000 {

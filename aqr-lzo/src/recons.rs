@@ -308,7 +308,7 @@ fn walk(side: &mut impl Side, d: &[u8], parse: &mut Parse, encoding: bool, skip:
         let (len, dist) = (want.len as usize, want.dist as usize);
         // Which pair: the first from the longest whose length is at least the match's.
         let j_want = if encoding {
-            pairs.iter().rev().take_while(|&&(l, _)| l >= len).count().checked_sub(1).map_or(m, |j| j)
+            pairs.iter().rev().take_while(|&&(l, _)| l >= len).count().checked_sub(1).unwrap_or(m)
         } else {
             0
         };

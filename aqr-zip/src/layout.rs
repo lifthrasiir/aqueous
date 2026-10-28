@@ -503,7 +503,7 @@ pub fn deflated(flate: &[u8], n: usize) -> Result<Vec<(&[u8], Entry)>> {
     let at = n.checked_mul(DERIVED).and_then(|d| flate.len().checked_sub(d)).ok_or_else(corrupt)?;
     let (mut streams, derived) = flate.split_at(at);
     let mut out = Vec::with_capacity(n);
-    for d in derived.chunks_exact(DERIVED) {
+    for d in derived.as_chunks::<DERIVED>().0 {
         let u64_at = |i: usize| u64::from_le_bytes(d[i..i + 8].try_into().unwrap());
         let csize = usize::try_from(u64_at(12)).ok().filter(|&c| c <= streams.len()).ok_or_else(corrupt)?;
         let (body, rest) = streams.split_at(csize);

@@ -629,7 +629,9 @@ impl Encoder {
                     }
                 }
                 let e: f64 = v
-                    .chunks_exact(LIT_ALPHA)
+                    .as_chunks::<LIT_ALPHA>()
+                    .0
+                    .iter()
                     .map(|c| c.iter().copied().filter(|&x| x > 0))
                     .map(|mut c| match c.next() {
                         None => 0.0,

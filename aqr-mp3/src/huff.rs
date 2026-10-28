@@ -327,7 +327,7 @@ pub fn encode_coefs(h: Header, g: &Granule, coefs: &[i32; 576], quads: usize, w:
         let lin = LINBITS[ts] as u32;
         let pairs = &coefs[line..line + 2 * n];
         if lin == 0 {
-            for p in pairs.chunks_exact(2) {
+            for p in pairs.as_chunks::<2>().0 {
                 let (a, b) = (p[0], p[1]);
                 let (x, y) = (a.unsigned_abs(), b.unsigned_abs());
                 let e = codes[(x * 16 + y) as usize & 255];
@@ -338,7 +338,7 @@ pub fn encode_coefs(h: Header, g: &Granule, coefs: &[i32; 576], quads: usize, w:
                 w.put(bits, (e & 31) + sa + sb);
             }
         } else {
-            for p in pairs.chunks_exact(2) {
+            for p in pairs.as_chunks::<2>().0 {
                 let (a, b) = (p[0], p[1]);
                 let (ma, mb) = (a.unsigned_abs(), b.unsigned_abs());
                 let (x, y) = (ma.min(15), mb.min(15));
@@ -358,7 +358,7 @@ pub fn encode_coefs(h: Header, g: &Granule, coefs: &[i32; 576], quads: usize, w:
         line += 2 * n;
     }
     let tab = if g.count1table { &COUNT1B } else { &COUNT1A };
-    for q in coefs[line..line + 4 * quads].chunks_exact(4) {
+    for q in coefs[line..line + 4 * quads].as_chunks::<4>().0 {
         let sym = (q[0] != 0) as usize * 8 + (q[1] != 0) as usize * 4 + (q[2] != 0) as usize * 2 + (q[3] != 0) as usize;
         let e = tab[sym];
         let mut bits = (e >> 5) as u64;

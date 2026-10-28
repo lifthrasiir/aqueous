@@ -67,9 +67,9 @@ fn run_starts(d: &[u8], p: usize) -> Option<usize> {
     let pad = h.padding() as usize;
     let mut q = p + h.prefix_len();
     while q + 4 <= d.len() && q < p + MAX_FREE {
-        q = match memchr::memchr(0xff, &d[q..(p + MAX_FREE).min(d.len())]) {
-            Some(i) => q + i,
-            None => return None,
+        q = {
+            let i = memchr::memchr(0xff, &d[q..(p + MAX_FREE).min(d.len())])?;
+            q + i
         };
         if q + 4 > d.len() {
             return None;

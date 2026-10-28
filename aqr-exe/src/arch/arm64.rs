@@ -119,10 +119,10 @@ mod encode {
     pub fn encode(code: &[u8], origin: u64) -> EncodedStreams {
         let mut st: [Vec<u8>; NUM_STREAMS] = array::from_fn(|_| Vec::new());
         st[CODE].reserve(code.len());
-        let words = code.chunks_exact(4);
-        st[TAIL].extend_from_slice(words.remainder());
-        for (k, w) in words.enumerate() {
-            let mut w = u32::from_le_bytes(w.try_into().unwrap());
+        let (words, tail) = code.as_chunks::<4>();
+        st[TAIL].extend_from_slice(tail);
+        for (k, &w) in words.iter().enumerate() {
+            let mut w = u32::from_le_bytes(w);
             let pc = origin.wrapping_add(4 * k as u64);
             match kind(w) {
                 Kind::Other => {}

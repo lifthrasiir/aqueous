@@ -209,9 +209,9 @@ fn common_slices(a: &[u8], b: &[u8]) -> usize {
     let max = a.len().min(b.len());
     let (a, b) = (&a[..max], &b[..max]);
     let mut l = 0;
-    for (x, y) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
-        let x = u64::from_le_bytes(x.try_into().unwrap());
-        let y = u64::from_le_bytes(y.try_into().unwrap());
+    for (&x, &y) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
+        let x = u64::from_le_bytes(x);
+        let y = u64::from_le_bytes(y);
         if x != y {
             return l + ((x ^ y).trailing_zeros() / 8) as usize;
         }

@@ -41,8 +41,8 @@ pub fn crc16(d: &[u8]) -> u16 {
         t
     });
     let mut c = 0u16;
-    let mut ch = d.chunks_exact(8);
-    for b in &mut ch {
+    let (ch, rest) = d.as_chunks::<8>();
+    for b in ch {
         let hi = c ^ u16::from_be_bytes([b[0], b[1]]);
         c = t[7][(hi >> 8) as usize]
             ^ t[6][(hi & 0xff) as usize]
@@ -53,7 +53,7 @@ pub fn crc16(d: &[u8]) -> u16 {
             ^ t[1][b[6] as usize]
             ^ t[0][b[7] as usize];
     }
-    for &b in ch.remainder() {
+    for &b in rest {
         c = c << 8 ^ t[0][((c >> 8) as u8 ^ b) as usize];
     }
     c

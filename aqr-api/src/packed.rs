@@ -41,8 +41,8 @@ impl<M: Memory> Packed<M> {
         while i < count {
             let n = (count - i).min(32) as usize;
             M::read(8 * (i + 1), &mut buf[..8 * n]);
-            for e in buf[..8 * n].chunks_exact(8) {
-                let e = u64::from_le_bytes(e.try_into().unwrap());
+            for &e in buf[..8 * n].as_chunks::<8>().0 {
+                let e = u64::from_le_bytes(e);
                 if e < last {
                     invalid();
                 }

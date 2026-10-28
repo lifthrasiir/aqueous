@@ -561,7 +561,7 @@ fn rans_encode(syms: &[u32], m: &Model) -> Vec<u32> {
             _ => rans_put(&mut x2, e, &mut out),
         }
     }
-    for g in syms[..full].chunks_exact(4).rev() {
+    for g in syms[..full].as_chunks::<4>().0.iter().rev() {
         rans_put(&mut x3, &m.enc[g[3] as usize], &mut out);
         rans_put(&mut x2, &m.enc[g[2] as usize], &mut out);
         rans_put(&mut x1, &m.enc[g[1] as usize], &mut out);
