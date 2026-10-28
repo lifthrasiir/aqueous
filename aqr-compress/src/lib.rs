@@ -538,8 +538,17 @@ fn finish(
 }
 
 /// [`recompress`] for data `depth` formats deep, within `cx`.
+/// Data kept raw is of [`Kind::Text`] where it is text (as [`made`] tells), so archived as text.
 pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Formula {
-    made(d, opt, depth, how, cx).map_or_else(|| Formula::raw("raw", d.to_vec()), |m| m.cut(d))
+    made(d, opt, depth, how, cx).map_or_else(
+        || {
+            let text = how == Nest::As(Format::Text) || detect(d) == Some(Format::Text);
+            let mut f = Formula::default();
+            f.root = f.push_as("raw", if text { Kind::Text } else { Kind::Unknown }, d.to_vec());
+            f
+        },
+        |m| m.cut(d),
+    )
 }
 
 /// [`recompress_at`], unless `d` is kept raw; the data that a scan keeps between files is not
@@ -1632,6 +1641,19 @@ mod tests {
             };
             assert_eq!(made(&text, level), ((n > 1) as usize, profile), "{level:?}");
         }
+    }
+
+    /// A file of text that aqr-wrt does not take is kept raw as text, archived as text is
+    /// (dense from level 8 on).
+    #[test]
+    fn text_kept_raw() {
+        // (of no words, which aqr-wrt would take)
+        let text: Vec<u8> = (0..40000).flat_map(|i| format!("{i}: {}\n", i * 7).into_bytes()).collect();
+        assert!(text.len() >= aqr_wrt::formula::MIN_LEN);
+        assert_eq!(detect(&text), Some(Format::Text));
+        let f = recompress(&text, &Options::default());
+        assert!(f.applies().is_empty());
+        assert_eq!(f.streams[0].kind, Kind::Text);
     }
 
     /// The formulas recompressors make are evaluated beforehand: decoding the archive takes
