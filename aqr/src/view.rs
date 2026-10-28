@@ -1,5 +1,5 @@
-//! What an archive being made shows on standard error: the log of the files, a batch at a time
-//! as they are written, and on a terminal a bar of how far it is below it.
+//! What an archive being made shows on standard error: on a terminal a bar of how far it is,
+//! and where asked, above it the log of the files, a batch at a time as they are written.
 //!
 //! The bar overlays the three phases, each of which is never ahead of the one before: the probe
 //! (`-`, files looked at), the analysis (`=`, bytes recompressed) and the compression (`#`, bytes
@@ -25,8 +25,9 @@ const SLOW: Duration = Duration::from_secs(2);
 
 pub struct View<'g> {
     g: &'g Gathered,
-    /// Whether the bar is drawn (standard error a terminal).
+    /// Whether the bar is drawn (standard error a terminal), and the files logged.
     bar: bool,
+    log: bool,
     state: Mutex<State>,
 }
 
@@ -44,8 +45,8 @@ struct State {
 }
 
 impl<'g> View<'g> {
-    pub fn new(g: &'g Gathered, bar: bool) -> View<'g> {
-        View { g, bar, state: Mutex::default() }
+    pub fn new(g: &'g Gathered, bar: bool, log: bool) -> View<'g> {
+        View { g, bar, log, state: Mutex::default() }
     }
 
     /// Whether the bar is drawn.
@@ -62,7 +63,7 @@ impl<'g> View<'g> {
             Event::Started(c) => _ = s.working.entry(c).or_insert_with(Instant::now),
             Event::Ended(c) => _ = s.working.remove(&c),
             Event::Written { contents, report } => {
-                let lines = self.log(contents, report, &mut s.logged);
+                let lines = if self.log { self.log(contents, report, &mut s.logged) } else { Vec::new() };
                 self.draw(&mut s, &lines);
             }
             _ => {}

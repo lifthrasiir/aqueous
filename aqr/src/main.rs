@@ -1,6 +1,6 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N] [--batch MIB]
+//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N] [--batch MIB]
 //! [--no-check] [--wasm] [--no-sandbox] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
@@ -19,17 +19,19 @@
 //!   blocks only), `1` (zstd alone: nothing recompressed) to `9`; `low`, `mid` (the default)
 //!   and `high` are 2, 5 and 8. `zstdN` compresses every stream at zstd level `N`, the
 //!   recompression as at mid. `-N` is `-l N`, its digits all one level (`-10` is not `-1 -0`).
-//! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors.
+//! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors; `-v` logs
+//!   each file archived too (below).
 //! - `--batch` is about the most MiB of files made at once (512 by default), which bounds the
 //!   memory taken by compression (but for a file larger).
 //! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
 //!   the pool of threads that everything runs on ([`aqr_common::pool`]), this work itself too.
 //!
-//! The log (to standard error) tells, for each file, what it was taken for, the modules its
-//! formula applies and the bytes of the archive that are its; the files stored together in a
-//! block (solid) or coded against each other (sets); the files of the same content as another.
-//! It is written a batch at a time, as the files are; on a terminal, below it, a bar of how far
-//! the archive is ([`view`]).
+//! Compressing, standard error has the summary of the archive at the end, and on a terminal a
+//! bar of how far it is ([`view`]) until then. With `-v`, a log above the bar tells, for each
+//! file, what it was taken for, the modules its formula applies and the bytes of the archive
+//! that are its; the files stored together in a block (solid) or coded against each other
+//! (sets); the files of the same content as another. It is written a batch at a time, as the
+//! files are.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -45,7 +47,7 @@ use aqr_compress::{Options, compress_formula_as, compress_tree_to, detect, kind_
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, Value, name_bytes, name_from};
 
-const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
+const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
      [--batch MIB] [--no-check] [--wasm] [--no-sandbox] INPUT...";
 
 /// The argument (the only one) that this program is run with as a worker of the sandbox.
@@ -61,6 +63,8 @@ struct Args {
     output: Option<PathBuf>,
     force: bool,
     quiet: bool,
+    /// Logging each file archived.
+    verbose: bool,
     opt: Options,
     inputs: Vec<PathBuf>,
 }
@@ -108,6 +112,7 @@ fn parse() -> Result<Args, String> {
         output: None,
         force: false,
         quiet: false,
+        verbose: false,
         opt: Options { threads: 0, ..Options::default() },
         inputs: Vec::new(),
     };
@@ -131,6 +136,7 @@ fn parse() -> Result<Args, String> {
             "-o" => a.output = Some(value("-o")?.into()),
             "-f" | "--force" => a.force = true,
             "-q" | "--quiet" => a.quiet = true,
+            "-v" | "--verbose" => a.verbose = true,
             "-T" => a.opt.threads = value("-T")?.parse().map_err(|_| "-T takes a number")?,
             "-l" => a.opt.level = value("-l")?.parse()?,
             "--depth" => a.opt.depth = value("--depth")?.parse().map_err(|_| "--depth takes a number")?,
@@ -255,7 +261,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         // (of the kind its name tells, as a file in an archive of many)
         let (c, f) = compress_formula_as(&d, kind_by_name(&os_bytes(input.as_os_str())), &a.opt);
         write_new(out, &c, a.force)?;
-        if !a.quiet {
+        if !a.quiet && a.verbose {
             let modules: Vec<String> = f.applies().iter().map(|m| m.module.to_string()).collect();
             let format = detect(&d).map_or("-", |f| f.name());
             eprintln!(
@@ -267,6 +273,8 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
                 size(c.len() as f64),
                 percent(c.len() as f64, d.len() as f64)
             );
+        }
+        if !a.quiet {
             summary(out, 1, d.len(), c.len(), start);
         }
         return Ok(());
@@ -298,8 +306,8 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     // written as it is made: removed where it is not made to the end
     let file = create(out, a.force)?;
     let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
-    // (the log as the files are written, and a bar on a terminal, drawn again now and then)
-    let view = view::View::new(&g, std::io::stderr().is_terminal());
+    // (a bar on a terminal, drawn again now and then; with -v, the log as the files are written)
+    let view = view::View::new(&g, std::io::stderr().is_terminal(), a.verbose);
     let done = std::sync::atomic::AtomicBool::new(false);
     let r = std::thread::scope(|s| {
         if !a.quiet && view.bars() {
