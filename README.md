@@ -64,3 +64,8 @@ target/release/aqr -d out.aqr                     # extract
 ```
 
 The workspace's tests are slow in debug builds; run them with `cargo test -r`.
+
+## Disclaimer
+
+This project makes heavy use of LLM-based coding agents. A human set the ideas and the goals;
+AI did the implementation and the experiments.
