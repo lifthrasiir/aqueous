@@ -9,6 +9,8 @@
 //!   module would run it: batches of `-b` tiles (256) of a layout in file order, each a stream
 //!   of its own (the model anew), coded on `-t` threads; then decoded, the tiles deflated again
 //!   ([`aqr_clip::zlib`]) and both compared with the file. Wall times, and thread times by step.
+//! - `aqr-clip formula [-t THREADS] FILE...`: each file's formula (`clip-recons`), its streams,
+//!   the archive at level mid, and the formula evaluated back and compared.
 //!
 //! Models, by the bytes they code a batch to:
 //!
@@ -41,7 +43,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: aqr-clip stat FILE...\n       aqr-clip bench [-t THREADS] [-b TILES] [-c] FILE...\n       aqr-clip speed [-t THREADS] [-b TILES] [-m dynamic|static] FILE..."
+        "usage: aqr-clip stat FILE...\n       aqr-clip bench [-t THREADS] [-b TILES] [-c] FILE...\n       aqr-clip speed [-t THREADS] [-b TILES] [-m dynamic|static] FILE...\n       aqr-clip formula [-t THREADS] FILE..."
     );
     std::process::exit(2);
 }
@@ -52,6 +54,7 @@ fn main() {
         Some("stat") => args[1..].iter().for_each(|f| stat(f)),
         Some("bench") => bench(&args[1..]),
         Some("speed") => speed(&args[1..]),
+        Some("formula") => formula(&args[1..]),
         _ => usage(),
     }
 }
@@ -596,4 +599,45 @@ fn speed(args: &[String]) {
         mb(total(&dec, |s| s.model)),
         total(&dec, |s| s.deflate)
     );
+}
+
+fn formula(args: &[String]) {
+    let (mut threads, mut files) = (1, Vec::new());
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "-t" => threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            _ => files.push(a.clone()),
+        }
+    }
+    let modules = |a: &aqr_formula::Apply, inputs: &[&[u8]]| {
+        aqr_clip::formula::apply(a, inputs, threads).map_err(aqr_formula::Error::new)
+    };
+    let (mut tin, mut tout) = (0usize, 0usize);
+    for path in &files {
+        let d = std::fs::read(path).expect("read");
+        let t = Instant::now();
+        let Some(f) = aqr_clip::formula::encode(&d, threads) else {
+            println!("{path}: no formula");
+            continue;
+        };
+        let enc = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let archive = aqr::encode(&f, None, Level::MID).expect("archive").len();
+        let arc = t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let back = f.eval(&modules).expect("eval");
+        let dec = t.elapsed().as_secs_f64();
+        assert!(back == d, "{path}: evaluated otherwise");
+        let streams: Vec<String> = f.streams.iter().map(|s| format!("{} {}", s.class, s.data.len())).collect();
+        println!(
+            "{path}: {} -> {archive} ({:.3}); encode {enc:.2} s, archive {arc:.2} s, decode {dec:.2} s; {}",
+            d.len(),
+            archive as f64 / d.len() as f64,
+            streams.join(", ")
+        );
+        tin += d.len();
+        tout += archive;
+    }
+    println!("all: {tin} -> {tout} ({:.3})", tout as f64 / tin as f64);
 }
