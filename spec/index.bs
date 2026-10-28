@@ -4590,6 +4590,10 @@ as follows:</p>
       <td>bundle-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-bundle/FORMAT.md">aqr-bundle/FORMAT.md</a>
     <tr>
+      <td><code>26fb3a64a824ebae678422c63fc80920566dc9441c4c103bc7ae3aed28ee61ee</code>
+      <td>clip-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-clip/FORMAT.md">aqr-clip/FORMAT.md</a>
+    <tr>
       <td><code>d75932d0797f5b7b078b82be8a2c0b3ef624d3ac84ff579fb4cc0853ced6133f</code>
       <td>exe-recons/arm64@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>

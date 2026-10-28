@@ -26,6 +26,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Flac => Some(flac_frames(d)),
         Format::Raw => raw(d),
         Format::Psd => psd(d),
+        Format::Clip => clip(d),
         Format::Dds => aqr_tex::dds::detect(d).map(|f| f.start + f.data.len() as usize),
         Format::Pdf => Some(pdf(d)),
         Format::Sqlite => sqlite(d),
@@ -309,6 +310,12 @@ fn id3v1(d: &[u8]) -> usize {
 
 /// The header, the three sections given by their lengths, and the image data where it is raw
 /// or RLE.
+/// A Clip Studio Paint file: the size its header gives.
+fn clip(d: &[u8]) -> Option<usize> {
+    let n = u64be(d, 8)?;
+    (n >= 24).then(|| clamp(d, n))
+}
+
 fn psd(d: &[u8]) -> Option<usize> {
     let psb = match u16be(d, 4)? {
         1 => false,
@@ -536,6 +543,17 @@ mod tests {
         let d = [&first[..], b"%PDF-1.4\n%%EOF\n"].concat();
         assert_eq!(extent(Format::Pdf, &d), Some(first.len()));
         assert_eq!(extent(Format::Pdf, b"%PDF-1.7\n1 0 obj"), Some(16));
+    }
+
+    #[test]
+    fn clip() {
+        let mut d = b"CSFCHUNK".to_vec();
+        d.extend(64u64.to_be_bytes());
+        d.extend(24u64.to_be_bytes());
+        d.resize(80, 0);
+        ends(Format::Clip, &d[..64]);
+        d[15] = 16;
+        assert_eq!(extent(Format::Clip, &d), None);
     }
 
     #[test]

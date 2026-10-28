@@ -83,6 +83,9 @@ pub const JPEG: Module = aqr_jpeg::formula::MODULE;
 pub const MP3: Module = aqr_mp3::formula::MODULE;
 pub const FLAC: Module = aqr_flac::formula::MODULE;
 pub const PSD: Module = aqr_psd::formula::MODULE;
+/// A Clip Studio Paint file: its skeleton, its tiles coded and their zlib streams made again,
+/// and its database (an application of aqr-sqlite's module).
+pub const CLIP: Module = aqr_clip::formula::MODULE;
 /// The blocks of a BC1 to BC5 texture of a layout (its params), for a DDS file's header around
 /// them or for any recompressor that finds them (aqr-tex).
 pub const BCN: Module = aqr_tex::formula::MODULE;
@@ -100,7 +103,7 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 25] = [
+pub const MODULES: [Module; 26] = [
     X86,
     ARM64,
     CIL,
@@ -119,6 +122,7 @@ pub const MODULES: [Module; 25] = [
     MP3,
     FLAC,
     PSD,
+    CLIP,
     BCN,
     PDF,
     SQLITE,
@@ -141,7 +145,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 14] = [
+const RECONS: [(Module, Decode); 15] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
     (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
@@ -149,6 +153,7 @@ const RECONS: [(Module, Decode); 14] = [
     (MP3, |p, r, i, n, t| aqr_mp3::formula::decode(p, r, i, n, t).map_err(msg)),
     (FLAC, |p, r, i, n, t| aqr_flac::formula::decode(p, r, i, n, t).map_err(msg)),
     (PSD, |p, r, i, n, t| none(r).and_then(|_| aqr_psd::formula::decode(p, i, n, t).map_err(msg))),
+    (CLIP, |p, r, i, n, t| none(r).and_then(|_| aqr_clip::formula::decode(p, i, n, t).map_err(msg))),
     (BCN, |p, r, i, n, t| none(r).and_then(|_| aqr_tex::formula::decode(p, i, n, t).map_err(msg))),
     (PDF, |p, r, i, n, t| none(r).and_then(|_| aqr_pdf::formula::decode(p, i, n, t).map_err(msg))),
     (SQLITE, |p, r, i, n, t| none(r).and_then(|_| aqr_sqlite::formula::decode(p, i, n, t).map_err(msg))),

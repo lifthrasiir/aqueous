@@ -108,6 +108,23 @@ fn pipelines_fail_alike() {
 #[path = "../../aqr-psd/tests/common/mod.rs"]
 mod psd;
 
+#[path = "../../aqr-clip/tests/common/mod.rs"]
+mod clip;
+
+/// Clip Studio Paint files, their batches of tiles decoded as tasks: the same natively and as
+/// WebAssembly.
+#[test]
+fn clip_as_wasm() {
+    let archive = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for (k, file) in [clip::sample(0), clip::sample(150)].iter().enumerate() {
+        let f = aqr_clip::formula::encode(file, 1).expect("a formula");
+        let c = archive.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == *file, "{k}");
+        let w = decode_wasm(&c);
+        assert!(w.as_ref().is_ok_and(|w| w == file), "{k}: {:?}", w.err());
+    }
+}
+
 /// PSD files of the shapes of aqr-psd's tests, the same natively and as WebAssembly (whose
 /// decoding of a group once called `Instant::now`, which WebAssembly has not).
 #[test]

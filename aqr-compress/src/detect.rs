@@ -32,6 +32,8 @@ pub enum Format {
     Raw,
     /// PSD or PSB.
     Psd,
+    /// Clip Studio Paint file (aqr-clip), known by its header.
+    Clip,
     /// DDS texture (aqr-tex): BC1 to BC5 blocks, or uncompressed pixels (aqr-raw's module).
     Dds,
     Pdf,
@@ -55,7 +57,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 23] = [
+    pub const ALL: [Format; 24] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -69,6 +71,7 @@ impl Format {
         Format::Flac,
         Format::Raw,
         Format::Psd,
+        Format::Clip,
         Format::Dds,
         Format::Pdf,
         Format::Sqlite,
@@ -96,6 +99,7 @@ impl Format {
             Format::Flac => "flac",
             Format::Raw => "raw",
             Format::Psd => "psd",
+            Format::Clip => "clip",
             Format::Dds => "dds",
             Format::Pdf => "pdf",
             Format::Sqlite => "sqlite",
@@ -138,6 +142,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"flac" => format(Format::Flac),
         b"wav" | b"aif" | b"aiff" | b"aifc" | b"bmp" | b"pgm" | b"ppm" | b"pnm" | b"pam" => format(Format::Raw),
         b"psd" | b"psb" => format(Format::Psd),
+        b"clip" => format(Format::Clip),
         b"dds" => format(Format::Dds),
         b"pdf" => format(Format::Pdf),
         b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
@@ -184,6 +189,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Pdf)
     } else if at(0, b"8BPS") {
         Some(Format::Psd)
+    } else if at(0, b"CSFCHUNK") {
+        Some(Format::Clip)
     } else if at(0, b"fLaC") {
         Some(Format::Flac)
     } else if at(0, b"RIFF") && at(8, b"WAVE") || at(0, b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC")) {
@@ -255,6 +262,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'm' => b == b'o',
         0x04 => b == 0x22,
         b'P' => b == b'K',
+        b'C' => b == b'S',
         b'!' => b == b'<',
         b'0' => b == b'7',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
@@ -315,6 +323,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         0x1f => d.starts_with(&[0x1f, 0x8b]),
         b'm' | 0x04 => aqr_lz4::formula::starts(d),
         b'P' => d.starts_with(b"PK\x03\x04"),
+        b'C' => d.starts_with(b"CSFCHUNK"),
         b'!' => d.starts_with(aqr_bundle::ar::MAGIC),
         b'0' => d.starts_with(b"07070"),
         // zlib's CMF: DEFLATE with a window of at most 32K
@@ -452,6 +461,7 @@ mod tests {
             (&b"photo.JPG"[..], Kind::Format("jpeg")),
             (b"dir.d/sub\\song.flac", Kind::Format("flac")),
             (b"a/b/places.sqlite", Kind::Format("sqlite")),
+            (b"art/page0001.CLIP", Kind::Format("clip")),
             (b"lib.tar.gz", Kind::Format("gzip")),
             (b"movie.mp4", Kind::Compressed),
             (b"notes.txt", Kind::Text),
@@ -497,6 +507,7 @@ mod tests {
             (b"%PDF-1.7\n", Some(Format::Pdf)),
             (b"8BPS\0\x01", Some(Format::Psd)),
             (b"8BPS\0\x02", Some(Format::Psd)),
+            (b"CSFCHUNK\0\0\0\0", Some(Format::Clip)),
             (b"fLaC\0\0\0\x22", Some(Format::Flac)),
             (b"RIFF\0\0\0\0WAVEfmt ", Some(Format::Raw)),
             (b"FORM\0\0\0\0AIFCFVER", Some(Format::Raw)),

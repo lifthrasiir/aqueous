@@ -91,6 +91,7 @@ name = "aqr-compress"
 version = "0.1.0"
 dependencies = [
  "aqr-bundle",
+ "aqr-clip",
  "aqr-common",
  "aqr-decompress",
  "aqr-exe",
@@ -123,6 +124,7 @@ name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
  "aqr-bundle",
+ "aqr-clip",
  "aqr-common",
  "aqr-exe",
  "aqr-fasta",
@@ -285,6 +287,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-api",
  "aqr-bundle",
+ "aqr-clip",
  "aqr-exe",
  "aqr-fasta",
  "aqr-flac",

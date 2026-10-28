@@ -3,8 +3,8 @@ use std::io::Write;
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, BUNDLE, FLAC, FLATE, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE, WRT, X86,
-    ZIP, decompress,
+    ARM64, BUNDLE, CLIP, FLAC, FLATE, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE,
+    WRT, X86, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -809,6 +809,22 @@ fn sqlite_db(sql: &str) -> Option<Vec<u8>> {
     let d = std::fs::read(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
     Some(d)
+}
+
+#[path = "../../aqr-clip/tests/common/mod.rs"]
+mod clip;
+
+/// A Clip Studio Paint file by its header: its tiles and database by clip-recons, the stream zlib
+/// would not make (stored blocks) left in the skeleton and taken there by aqr-flate.
+#[test]
+fn clip_whole() {
+    let f = roundtrip(&clip::sample(70), &all());
+    let m = modules(&f);
+    assert_eq!(m[0], CLIP.name, "{m:?}");
+    assert!(m.iter().all(|&n| n == CLIP.name || n == FLATE.name), "{m:?}");
+    // looked for in other data too, by its header and size
+    let inside = [&b"some data before "[..], &clip::sample(0), b"and after"].concat();
+    assert!(modules(&roundtrip(&inside, &all())).contains(&CLIP.name));
 }
 
 #[test]

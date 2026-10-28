@@ -17,9 +17,10 @@
 //!   members with their sizes and checksums derived.
 //! - Text, a whole file of text bytes or data of a name telling text: aqr-wrt, its words and
 //!   markup replaced by codes of a dictionary of its own.
-//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, DDS, PDF, SQLite and FASTA: the recompressor's own formula,
-//!   its module applied to its streams, and files it embeds (PDF's DEFLATE streams and images,
-//!   PSD's and JPEG's embedded files) applied to theirs (see aqr-decompress for the modules).
+//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite and FASTA: the
+//!   recompressor's own formula, its module applied to its streams, and files it embeds (PDF's
+//!   DEFLATE streams and images, PSD's and JPEG's embedded files, Clip Studio Paint's database)
+//!   applied to theirs (see aqr-decompress for the modules).
 //!
 //! In whatever formula a recompressor gives, the data that its applications take as it is
 //! ([`Options::contents`], by default that of a DEFLATE stream, of gzip, zlib or PDF, and
@@ -1250,6 +1251,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Flac => aqr_flac::formula::encode,
         Format::Raw => aqr_raw::formula::encode,
         Format::Psd => aqr_psd::formula::encode,
+        Format::Clip => aqr_clip::formula::encode,
         Format::Dds => aqr_tex::formula::encode,
         Format::Pdf => aqr_pdf::formula::encode,
         Format::Sqlite => aqr_sqlite::formula::encode,

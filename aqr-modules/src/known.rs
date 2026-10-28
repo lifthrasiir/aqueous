@@ -18,6 +18,13 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/bundle-recons.block"),
     },
     Known {
+        name: "clip-recons",
+        version: 1,
+        sha512_256: hex("26fb3a64a824ebae678422c63fc80920566dc9441c4c103bc7ae3aed28ee61ee"),
+        wasm: include_bytes!("../wasm/clip-recons.wasm"),
+        block: include_bytes!("../wasm/clip-recons.block"),
+    },
+    Known {
         name: "exe-recons/arm64",
         version: 1,
         sha512_256: hex("d75932d0797f5b7b078b82be8a2c0b3ef624d3ac84ff579fb4cc0853ced6133f"),

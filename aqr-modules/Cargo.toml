@@ -13,6 +13,7 @@ wasm = []
 [target.'cfg(target_family = "wasm")'.dependencies]
 aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] }
 aqr-bundle = { path = "../aqr-bundle", default-features = false }
+aqr-clip = { path = "../aqr-clip", default-features = false }
 aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"] }
 aqr-fasta = { path = "../aqr-fasta", default-features = false }
 aqr-flac = { path = "../aqr-flac", default-features = false }
@@ -155,6 +156,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "psd-recons"
 path = "src/bin/psd-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "clip-recons"
+path = "src/bin/clip-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

@@ -365,7 +365,7 @@ impl Model {
                     let len = if C::DECODES { 0 } else { px[i..i + left].iter().take_while(|&&p| p == w).count() };
                     let t = (y > 0) as usize * 4 + (above == left) as usize * 2 + self.last_full as usize;
                     let full = c.sym(FULL + t, (len == above) as u8) == 1;
-                    let len = if full { above } else { (c.sym(LENGTH + t, len as u8) as usize).min(left - 1) };
+                    let len = if full { above } else { (c.sym(LENGTH + t, len as u8) as usize).min(left) };
                     self.last_full = full;
                     px[i..i + len].fill(w);
                     self.modes[i..i + len].fill(0);

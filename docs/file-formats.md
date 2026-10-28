@@ -51,6 +51,7 @@ and the design is argued in `xform-design.md`.
 | JPEG | aqr-jpeg | 96 files, 186 MB | 0.785 | 0.913 | 39 | 82 | 28 MB + 8.2× | sequential files are coded a stripe at a time: a 1.3 MB 7680×4320 file takes 54 MB. Progressive ones still hold their coefficients whole: 259 MB for a 1.4 MB one of that size |
 | BMP, PGM, PPM, PAM | aqr-raw | 17 files, 53 MB | 0.228 | 0.421 | 71 | 303 | 21 MB + 5.5× | 8-bit samples; not a sample of real files (PNGs of aqr-png's corpus converted, README of aqr-raw). 16-bit and RLE images are not taken |
 | PSD, PSB | aqr-psd | 56 files, 439 MB | 0.330 | 0.555 | 45 | 127 | 28 MB + 5.4× | pixels coded in 8-bit documents only; aqr-psd itself takes a few MB besides its streams, the rest is the archive's (a file kept raw is scanned by the parts aqr-psd tells) |
+| Clip Studio Paint (`.clip`) | aqr-clip | 13 files, 926 MB | 0.344 | 0.760 | 32 | 81 | not measured | measured 2026-10-28 on a Ryzen 7 9700X with `aqr-show -t 16` (16 threads, not one); the tiles (zlib level 1, memLevel 9, all made again exactly) by a model of whole pixels in batches of 64 decoded as tasks, the database by aqr-sqlite, the rest (13 MB of one file's 3D data) by the archive; aqr as it was: 0.726. A held-out file came to 0.437 (README of aqr-clip). The database's PNG preview is not recompressed |
 | DDS (BC1–BC5) | aqr-tex | 1274 files, 402 MB | 0.347 | 0.495 | 23 | 20 | not measured | measured 2026-10-28 on a Ryzen 7 9700X with `aqr-tex-bench` (the module a thread, not `aqr-show`), on a sample of The Crew's textures; all 52,181 of them (16.4 GB): 0.325 against zstd -19's 0.403 (README of aqr-tex). Large surfaces are coded in stripes decoded at once: the largest files (2.8–5.6 MB), one at a time, 23 → 97 MB/s on 16 threads. Uncompressed DDS goes to aqr-raw's `raster-recons`; BC6H, BC7 and KTX are not taken yet |
 
 ### Audio
@@ -110,6 +111,7 @@ reservoir is rebuilt.
 | aqr-raw | 16-bit images (PNM, PAM, then TIFF and DICOM); float audio, CAF, W64, RF64; a layout with the pixel data other recompressors hand over, so that aqr-compress sends it to `raster-recons` |
 | aqr-pdf | default JPEG tables for small images; files encrypted with an empty user password; ASCII85 and DCT chains; cross-reference tables rebuilt |
 | aqr-psd | 16- and 32-bit data, ZIP channels, other colour modes; effects and adjustment layers rendered |
+| aqr-clip | speed of one thread (the model of busy tiles); neighbouring tiles and mipmaps as context; the database's PNG preview through aqr-png; the 3D data |
 | aqr-sqlite | memory (chunked processing); WAL and rollback journals; WITHOUT ROWID secondary indexes |
 | aqr-obj | wiring into aqr-compress; compression speed of `%.17g` files; connectivity of faces in random order; `.mtl` |
 | aqr-zip | DEFLATE only; other methods (bzip2, LZMA, AES) are kept |
@@ -175,7 +177,6 @@ container is TIFF/EXIF.
 | OpenEXR | VFX, rendering | per block: ZIP (zlib after a predictor and byte split), PIZ (wavelet, then Huffman), RLE, and lossy ones | ZIP blocks through aqr-flate; PIZ's Huffman recoded | aqr-flate |
 | GIMP XCF | image editing | tiles in RLE or zlib | the zlib tiles; the RLE reproduced | aqr-flate |
 | Krita (`.kra`), Procreate | digital painting | ZIP of layer tiles compressed with LZF (Krita) or LZO (Procreate) | LZF and LZO encoders reproduced (both simple and open), then a pixel model | aqr-zip, aqr-lz4's approach |
-| Clip Studio Paint (`.clip`) | illustration, comics | an SQLite database plus chunks of zlib-compressed tile data | the zlib chunks, the database | aqr-sqlite, aqr-flate |
 | ICNS, MNG, JNG, SVGZ | macOS icons, animations, vector images | PNG, JPEG or JPEG 2000 inside; a PackBits variant (old ICNS); gzip (SVGZ) | the embedded files through their recompressors | aqr-png, aqr-jpeg, aqr-flate |
 | ASTC, ETC2, PVRTC textures | mobile games | fixed-rate blocks, no entropy coding | as BCn (below) | |
 

@@ -1,14 +1,31 @@
 # aqr-clip
 
-Clip Studio Paint files (`.clip`), research stage: the container and its tiles taken apart,
-and models for the tiles measured. No formula yet.
+Lossless Clip Studio Paint (`.clip`) recompression: the module `clip-recons` (FORMAT.md). The
+tiles of a file's layers are coded by a model of whole pixels and their zlib streams made again
+exactly; its SQLite database goes to aqr-sqlite; the rest is kept as it is.
+
+```rust
+let f = aqr_clip::formula::encode(&file, threads);      // None where it is not a .clip file
+```
 
 ```sh
 cargo build --release
+aqr-clip formula [-t N] FILE...                # the formula, its archive at level mid, evaluated back
 aqr-clip stat FILE...                          # chunks, block data, tiles by layout and class
 aqr-clip bench [-t N] [-b TILES] [-c] FILE...  # tiles by every model; -c checks the dynamic models' round trip
 aqr-clip speed [-t N] [-b TILES] [-m dynamic|static] FILE...  # one model as a module would run it
 ```
+
+## Results
+
+Measured on 2026-10-28 on a Ryzen 7 9700X through `aqr-show -t 16` (16 threads), each file
+archived at level `mid` with its round-trip check, then extracted; the decoder modules are in
+the archives (25 KB for `clip-recons`).
+
+| set | files | MB | ratio | zstd -3 | aqr before | compress | decompress |
+|---|---|---|---|---|---|---|---|
+| the 13 files below | 13 | 926 | **0.344** | 0.760 | 0.726 | 32 MB/s | 81 MB/s |
+| a held-out file (`aqr-clip bench` estimate, before wiring) | 1 | 14.1 | 0.437 | | 0.763 | | |
 
 ## Format
 
