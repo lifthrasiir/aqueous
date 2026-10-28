@@ -63,7 +63,8 @@ target/release/aqr -t out.aqr                     # test
 target/release/aqr -d out.aqr                     # extract
 ```
 
-The workspace's tests are slow in debug builds; run them with `cargo test -r`.
+The workspace's tests are slow in debug builds; run them with `cargo rt` (`cargo test --profile
+release-test`: optimised, without the fat LTO of `-r` that made the build take minutes).
 
 ## Disclaimer
 

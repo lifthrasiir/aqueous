@@ -57,6 +57,21 @@ debug = true
 [profile.release.package.aqr-raw]
 debug = true
 
+# For the tests (`cargo rt`, an alias of `cargo test --profile release-test`): optimised, as the
+# tests are slow otherwise, but without the fat LTO and the single codegen unit with which every
+# test binary linking wasmtime took minutes. The timings (`--ignored` tests) still want `-r`.
+[profile.release-test]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+debug = "line-tables-only"
+
+# Its generated lowering does not split into codegen units: 80 s on the critical path at
+# opt-level 1 or 3, 20 s at 0; the tests compile little Wasm with it (+2 s of 65 s).
+[profile.release-test.package.cranelift-codegen]
+opt-level = 0
+
 # aqr-exe as a Wasm module (aqr-exe/build-wasm.bat).
 [profile.release-wasm]
 inherits = "release"
