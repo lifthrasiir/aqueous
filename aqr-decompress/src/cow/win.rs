@@ -2,6 +2,8 @@
 //! memories modules define, which the working memories of `wasm` are made as), so that the
 //! accessible part of one can be given back to a placeholder and replaced by a view of a
 //! snapshot (a section of the paging file, [`Section`]) mapped copied on write ([`map_over`]).
+//! Placeholders are of Windows 10 1803 on: their functions are looked up ([`available`]), so that
+//! the decoder starts on systems before it too (whose working memories are copied).
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -10,17 +12,69 @@ use std::ptr::{null, null_mut};
 use std::sync::{Arc, LazyLock, Mutex};
 
 use wasmtime::{LinearMemory, MemoryCreator, MemoryType};
-use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleA, GetProcAddress};
 use windows_sys::Win32::System::Memory::{
-    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT, MEM_RELEASE, MEM_REPLACE_PLACEHOLDER, MEM_RESERVE,
-    MEM_RESERVE_PLACEHOLDER, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, MapViewOfFile3, PAGE_NOACCESS, PAGE_READWRITE,
-    PAGE_WRITECOPY, UnmapViewOfFile, UnmapViewOfFile2, VirtualAlloc2, VirtualFree,
+    CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEM_COMMIT, MEM_EXTENDED_PARAMETER, MEM_RELEASE,
+    MEM_REPLACE_PLACEHOLDER, MEM_RESERVE, MEM_RESERVE_PLACEHOLDER, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+    PAGE_NOACCESS, PAGE_READWRITE, PAGE_WRITECOPY, UnmapViewOfFile, VirtualFree,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
+use windows_sys::core::BOOL;
 
 // (of VirtualFree, not in windows-sys)
 const MEM_COALESCE_PLACEHOLDERS: u32 = 0x1;
 const MEM_PRESERVE_PLACEHOLDER: u32 = 0x2;
+
+// The functions of placeholders (memoryapi.h), of kernelbase.dll.
+type VirtualAlloc2 =
+    unsafe extern "system" fn(HANDLE, *const c_void, usize, u32, u32, *mut MEM_EXTENDED_PARAMETER, u32) -> *mut c_void;
+type MapViewOfFile3 = unsafe extern "system" fn(
+    HANDLE,
+    HANDLE,
+    *const c_void,
+    u64,
+    usize,
+    u32,
+    u32,
+    *mut MEM_EXTENDED_PARAMETER,
+    u32,
+) -> MEMORY_MAPPED_VIEW_ADDRESS;
+type UnmapViewOfFile2 = unsafe extern "system" fn(HANDLE, MEMORY_MAPPED_VIEW_ADDRESS, u32) -> BOOL;
+/// A function as GetProcAddress gives it.
+type Proc = unsafe extern "system" fn() -> isize;
+
+struct Placeholders {
+    virtual_alloc2: VirtualAlloc2,
+    map_view_of_file3: MapViewOfFile3,
+    unmap_view_of_file2: UnmapViewOfFile2,
+}
+
+static PLACEHOLDERS: LazyLock<Option<Placeholders>> = LazyLock::new(|| {
+    // SAFETY: of a library every process has loaded; the functions found are of the types above
+    unsafe {
+        let m = GetModuleHandleA(c"kernelbase.dll".as_ptr().cast());
+        if m.is_null() {
+            return None;
+        }
+        let f = |name: &std::ffi::CStr| GetProcAddress(m, name.as_ptr().cast());
+        Some(Placeholders {
+            virtual_alloc2: std::mem::transmute::<Proc, VirtualAlloc2>(f(c"VirtualAlloc2")?),
+            map_view_of_file3: std::mem::transmute::<Proc, MapViewOfFile3>(f(c"MapViewOfFile3")?),
+            unmap_view_of_file2: std::mem::transmute::<Proc, UnmapViewOfFile2>(f(c"UnmapViewOfFile2")?),
+        })
+    }
+});
+
+/// Whether the system has placeholders, which [`Creator`] makes its memories of.
+pub fn available() -> bool {
+    PLACEHOLDERS.is_some()
+}
+
+/// The functions of placeholders, of a memory of [`Creator`] (made only where [`available`]).
+fn placeholders() -> &'static Placeholders {
+    PLACEHOLDERS.as_ref().expect("the functions of placeholders")
+}
 
 /// The granularity of placeholders, as of allocations (that of wasm pages too).
 const GRAIN: usize = 1 << 16;
@@ -97,7 +151,7 @@ impl Pieces {
     unsafe fn commit(&mut self, at: usize, len: usize) -> bool {
         // SAFETY: of the placeholder
         let p = unsafe {
-            VirtualAlloc2(
+            (placeholders().virtual_alloc2)(
                 GetCurrentProcess(),
                 at as *const c_void,
                 len,
@@ -124,7 +178,7 @@ impl Pieces {
             // SAFETY: of the piece, made by `commit` or `map_over`
             let ok = unsafe {
                 if p.view {
-                    UnmapViewOfFile2(
+                    (placeholders().unmap_view_of_file2)(
                         GetCurrentProcess(),
                         MEMORY_MAPPED_VIEW_ADDRESS { Value: p.at as *mut c_void },
                         MEM_PRESERVE_PLACEHOLDER,
@@ -216,7 +270,7 @@ unsafe impl MemoryCreator for Creator {
         let total = capacity + guard.next_multiple_of(GRAIN);
         // SAFETY: a new placeholder
         let base = unsafe {
-            VirtualAlloc2(
+            (placeholders().virtual_alloc2)(
                 GetCurrentProcess(),
                 null(),
                 total,
@@ -263,7 +317,7 @@ pub fn map_over(s: &Section, mem: &mut [u8]) -> Mapped {
         if !m.release() {
             panic!("a memory given back: {}", std::io::Error::last_os_error());
         }
-        let v = MapViewOfFile3(
+        let v = (placeholders().map_view_of_file3)(
             s.handle.as_raw_handle(),
             GetCurrentProcess(),
             base as *const c_void,

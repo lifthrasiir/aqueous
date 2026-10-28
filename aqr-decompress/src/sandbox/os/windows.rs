@@ -5,7 +5,9 @@
 //! - in a job of no other process, no UI, killed with the job's handle (the decoder's), and of
 //!   the memory the decoder limits it to;
 //! - of the mitigations that keep it off win32k, fonts and images not of the system, and from
-//!   starting processes.
+//!   starting processes, as the system knows them ([`Attributes::new`]): before Windows 10 1709
+//!   the job alone keeps it from starting processes; Windows 8 and 8.1 keep it off win32k but
+//!   not fonts and images; Windows 7 has none of them.
 //!
 //! The worker starts impersonating a token of the user's access (restricted by all its SIDs, as
 //! a restricted process impersonates only restricted tokens; of no privileges, of low
@@ -25,6 +27,7 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr::{null, null_mut};
 
+use windows_sys::Wdk::System::SystemServices::RtlGetVersion;
 use windows_sys::Win32::Foundation::{
     CloseHandle, DuplicateHandle, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, SetHandleInformation,
     WAIT_OBJECT_0,
@@ -46,6 +49,7 @@ use windows_sys::Win32::System::Memory::{
     CreateFileMappingW, FILE_MAP_READ, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile, PAGE_READWRITE,
     UnmapViewOfFile,
 };
+use windows_sys::Win32::System::SystemInformation::OSVERSIONINFOW;
 use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_UILIMIT_ALL, SE_GROUP_INTEGRITY};
 use windows_sys::Win32::System::Threading::{
     CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, CreateProcessAsUserW, DETACHED_PROCESS,
@@ -57,7 +61,8 @@ use windows_sys::Win32::System::Threading::{
 };
 use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
 
-// The mitigations (winbase.h), always on.
+// The mitigations (winbase.h), as the system knows them: of Windows 8 on, then of Windows 10
+// 1607 on.
 const STRICT_HANDLE_CHECKS: u64 = 1 << 24;
 const WIN32K_SYSTEM_CALL_DISABLE: u64 = 1 << 28;
 const EXTENSION_POINT_DISABLE: u64 = 1 << 32;
@@ -65,16 +70,19 @@ const FONT_DISABLE: u64 = 1 << 48;
 const IMAGE_LOAD_NO_REMOTE: u64 = 1 << 52;
 const IMAGE_LOAD_NO_LOW_LABEL: u64 = 1 << 56;
 const IMAGE_LOAD_PREFER_SYSTEM32: u64 = 1 << 60;
-const MITIGATIONS: [u64; 2] = [
-    STRICT_HANDLE_CHECKS
-        | WIN32K_SYSTEM_CALL_DISABLE
-        | EXTENSION_POINT_DISABLE
-        | FONT_DISABLE
-        | IMAGE_LOAD_NO_REMOTE
-        | IMAGE_LOAD_NO_LOW_LABEL
-        | IMAGE_LOAD_PREFER_SYSTEM32,
-    0,
-];
+const MITIGATIONS_8: u64 = STRICT_HANDLE_CHECKS | WIN32K_SYSTEM_CALL_DISABLE | EXTENSION_POINT_DISABLE;
+const MITIGATIONS_10: [u64; 2] =
+    [MITIGATIONS_8 | FONT_DISABLE | IMAGE_LOAD_NO_REMOTE | IMAGE_LOAD_NO_LOW_LABEL | IMAGE_LOAD_PREFER_SYSTEM32, 0];
+
+/// The version of the system (major, minor, build), as it is (of no manifest's compatibility).
+fn version() -> (u32, u32, u32) {
+    // SAFETY: plain data
+    let mut v: OSVERSIONINFOW = unsafe { zeroed() };
+    v.dwOSVersionInfoSize = size_of::<OSVERSIONINFOW>() as u32;
+    // SAFETY: into the structure above, of its size
+    unsafe { RtlGetVersion(&mut v) };
+    (v.dwMajorVersion, v.dwMinorVersion, v.dwBuildNumber)
+}
 
 fn last_error(what: &str) -> io::Error {
     let e = io::Error::last_os_error();
@@ -337,6 +345,7 @@ fn wide(s: &OsStr) -> Vec<u16> {
 struct Attributes {
     list: Vec<u64>,
     handles: [HANDLE; 2],
+    mitigations: [u64; 2],
     child_policy: u32,
 }
 
@@ -345,9 +354,18 @@ impl Attributes {
         let mut len = 0;
         // SAFETY: asks the length only
         unsafe { InitializeProcThreadAttributeList(null_mut(), 3, 0, &mut len) };
+        let v = version();
+        // (the bytes of the mitigations the system knows, of the policy of children whether it does)
+        let (mitigations, n) = match v {
+            (10.., _, 14393..) => (MITIGATIONS_10, size_of::<[u64; 2]>()),
+            (10.., _, _) | (6, 2.., _) => ([MITIGATIONS_8, 0], size_of::<u64>()),
+            _ => ([0; 2], 0),
+        };
+        let children = v >= (10, 0, 16299);
         let mut a = Box::new(Attributes {
             list: vec![0; len.div_ceil(8)],
             handles,
+            mitigations,
             child_policy: PROCESS_CREATION_CHILD_PROCESS_RESTRICTED,
         });
         let list = a.list();
@@ -359,8 +377,12 @@ impl Attributes {
                 check(UpdateProcThreadAttribute(list, 0, attr as usize, v, n, null_mut(), null()), "an attribute")
             };
             set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, a.handles.as_ptr() as *const c_void, size_of::<[HANDLE; 2]>())?;
-            set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, MITIGATIONS.as_ptr() as *const c_void, size_of::<[u64; 2]>())?;
-            set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &a.child_policy as *const u32 as *const c_void, 4)?;
+            if n > 0 {
+                set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, a.mitigations.as_ptr() as *const c_void, n)?;
+            }
+            if children {
+                set(PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY, &a.child_policy as *const u32 as *const c_void, 4)?;
+            }
         }
         Ok(a)
     }

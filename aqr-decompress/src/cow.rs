@@ -14,7 +14,7 @@ use std::ops::Range;
 #[cfg(windows)]
 mod win;
 #[cfg(windows)]
-pub use win::Creator;
+pub use win::{Creator, available as placeholders};
 
 /// The pages of zeros skipped are of this many bytes.
 const PAGE: usize = 4096;

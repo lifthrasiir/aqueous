@@ -56,9 +56,12 @@ static ENGINE: LazyLock<Engine> = LazyLock::new(|| {
         .wasm_custom_page_sizes(false)
         .wasm_stack_switching(false)
         .cranelift_nan_canonicalization(true);
-    // the working memories (as defined by `Compiled::working_module`) copied on write over
+    // the working memories (as defined by `Compiled::working_module`) copied on write over,
+    // where the system has placeholders (else copied)
     #[cfg(windows)]
-    c.with_host_memory(Arc::new(crate::cow::Creator));
+    if crate::cow::placeholders() {
+        c.with_host_memory(Arc::new(crate::cow::Creator));
+    }
     Engine::new(&c).expect("the configuration of Wasmtime")
 });
 

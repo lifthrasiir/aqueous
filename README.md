@@ -66,6 +66,10 @@ target/release/aqr -d out.aqr                     # extract
 The workspace's tests are slow in debug builds; run them with `cargo rt` (`cargo test --profile
 release-test`: optimised, without the fat LTO of `-r` that made the build take minutes).
 
+Rust's `x86_64-pc-windows-msvc` targets Windows 10 on; for Windows 7 and 8, build with
+`cargo +nightly win7 -p aqr` (the tier-3 `x86_64-win7-windows-msvc`, std built with it and the C
+runtime linked statically) into `target/x86_64-win7-windows-msvc/release`.
+
 ## Disclaimer
 
 This project makes heavy use of LLM-based coding agents. A human set the ideas and the goals;
