@@ -83,6 +83,7 @@ dependencies = [
  "crc32fast",
  "libc",
  "rayon",
+ "simd-adler32",
  "zstd",
 ]
 
@@ -99,6 +100,7 @@ dependencies = [
  "aqr-flac",
  "aqr-flate",
  "aqr-formula",
+ "aqr-git",
  "aqr-jpeg",
  "aqr-lz4",
  "aqr-lzma",
@@ -132,6 +134,7 @@ dependencies = [
  "aqr-flac",
  "aqr-flate",
  "aqr-formula",
+ "aqr-git",
  "aqr-jpeg",
  "aqr-lz4",
  "aqr-lzma",
@@ -231,11 +234,9 @@ version = "0.1.0"
 dependencies = [
  "aqr-common",
  "aqr-flate",
- "crc32fast",
- "flate-zoo",
+ "aqr-formula",
  "flate2",
  "sha1",
- "xxhash-rust",
  "zstd",
 ]
 
@@ -294,6 +295,7 @@ dependencies = [
  "aqr-fasta",
  "aqr-flac",
  "aqr-flate",
+ "aqr-git",
  "aqr-jpeg",
  "aqr-lz4",
  "aqr-lzma",

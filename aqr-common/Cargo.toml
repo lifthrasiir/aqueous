@@ -23,6 +23,7 @@ aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] 
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 crc32fast = "1.5"
+simd-adler32 = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

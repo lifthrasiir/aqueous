@@ -13,6 +13,9 @@
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
 //!   DEFLATE streams by aqr-flate) with its headers derived.
+//! - git packs: aqr-git, rebuilding the pack from the data of its objects (the zlib streams by
+//!   aqr-flate) with its headers, checksums and trailer derived; the blobs' data is found again
+//!   where the files checked out are archived along with it.
 //! - ar, tar and cpio archives: aqr-bundle, rebuilding the archive from the contents of its
 //!   members with their sizes and checksums derived.
 //! - Text, a whole file of text bytes or data of a name telling text: aqr-wrt, its words and
@@ -96,6 +99,7 @@ mod detect;
 mod exe;
 mod extent;
 mod flate;
+mod git;
 mod sets;
 mod verify;
 mod zip;
@@ -629,6 +633,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
                 Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
                 Format::Zip => zip::zip(d, opt, depth, cx),
+                Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Ar | Format::Tar | Format::Cpio => bundle::bundle(d),
                 _ => unreachable!("a pure format"),
             }))

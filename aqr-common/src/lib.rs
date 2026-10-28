@@ -13,8 +13,10 @@
 //! - [`packed`]: packed byte sequences, a list of them as one.
 //! - [`wire`]: values as bytes, for the results of tasks on WebAssembly.
 //! - [`crc32`]: CRC-32, without its tables in the modules.
+//! - [`adler32`]: Adler-32 (of zlib).
 //! - [`arith`]: binary arithmetic coding with adaptive bits (the records of aqr-lzma, aqr-lzo).
 
+pub mod adler32;
 pub mod arith;
 pub mod crc32;
 pub mod mem;

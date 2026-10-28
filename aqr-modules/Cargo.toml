@@ -18,6 +18,7 @@ aqr-exe = { path = "../aqr-exe", default-features = false, features = ["decode"]
 aqr-fasta = { path = "../aqr-fasta", default-features = false }
 aqr-flac = { path = "../aqr-flac", default-features = false }
 aqr-flate = { path = "../aqr-flate", default-features = false }
+aqr-git = { path = "../aqr-git", default-features = false }
 aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
 aqr-lz4 = { path = "../aqr-lz4", default-features = false }
 aqr-lzma = { path = "../aqr-lzma", default-features = false }
@@ -147,6 +148,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "png-set"
 path = "src/bin/png-set.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "git-pack-recons"
+path = "src/bin/git-pack-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

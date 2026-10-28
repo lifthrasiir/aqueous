@@ -2,36 +2,27 @@
 name = "aqr-git"
 version = "0.1.0"
 edition = "2024"
-description = "Lossless recompression of git checkouts: the working tree and .git rebuilt bit for bit from interconnected streams"
+description = "git packs rebuilt bit for bit from their objects' data, the zlib streams by aqr-flate, with headers, checksums and the trailer derived"
 publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula", "aqr-flate/encode"]
 
 [dependencies]
 aqr-common = { path = "../aqr-common" }
-aqr-flate = { path = "../aqr-flate" }
-flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
-sha1 = "0.10"
-crc32fast = "1.5"
-zstd = { version = "0.13", features = ["zstdmt"] }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
+aqr-formula = { path = "../aqr-formula", optional = true }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+sha1 = { version = "0.10", default-features = false }
 
 [dev-dependencies]
-flate-zoo = { path = "../flate-zoo" }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+zstd = "0.13"
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
 # that names do not collide in the workspace's target directory.
 
 [[example]]
-name = "aqr-git-calib"
-path = "examples/calib.rs"
-
-[[example]]
-name = "aqr-git-dump"
-path = "examples/dump.rs"
-
-[[example]]
-name = "aqr-git-emucost"
-path = "examples/emucost.rs"
-
-[[example]]
-name = "aqr-git-prof"
-path = "examples/prof.rs"
+name = "aqr-git-check"
+path = "examples/check.rs"

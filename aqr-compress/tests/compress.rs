@@ -933,6 +933,39 @@ fn obj() {
     assert_eq!(aqr_compress::kind_by_name(b"x/mesh.obj"), aqr_formula::Kind::Unknown);
 }
 
+/// A git pack of `objects` (type and data), each a zlib stream at level 6, with its trailer.
+fn git_pack(objects: &[(u8, Vec<u8>)]) -> Vec<u8> {
+    let mut d = b"PACK\0\0\0\x02".to_vec();
+    d.extend_from_slice(&(objects.len() as u32).to_be_bytes());
+    for (t, data) in objects {
+        aqr_git::pack::put_header(*t, data.len() as u64, &mut d);
+        d.extend_from_slice(&zlib(data, 6));
+    }
+    let sum = aqr_git::pack::sha1(&d);
+    d.extend_from_slice(&sum);
+    d
+}
+
+/// A git pack goes to aqr-git, its zlib streams to aqr-flate, at the start of a file only.
+#[test]
+fn git_pack_file() {
+    let objects: Vec<(u8, Vec<u8>)> = (0..40)
+        .map(|i| match i % 4 {
+            0 => (1, format!("tree {i:040x}\nauthor A <a@b> 0 +0000\n\ncommit {i}\n").into_bytes()),
+            _ => (3, prose(500 + i * 37)),
+        })
+        .collect();
+    let d = git_pack(&objects);
+    assert_eq!(aqr_compress::detect(&d), Some(aqr_compress::Format::GitPack));
+    assert_eq!(aqr_compress::extent(aqr_compress::Format::GitPack, &d), Some(d.len()));
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f)[..2], ["git-pack-recons", "flate-set"]);
+    // (not looked for in other data)
+    let mut x = b"some bytes first".to_vec();
+    x.extend_from_slice(&d);
+    assert!(!modules(&recompress(&x, &all())).contains(&"git-pack-recons"));
+}
+
 /// A DDS file of BC1 blocks of a smooth picture, `w` × `h` with `mips` mipmaps.
 fn dds_file(w: u32, h: u32, mips: u32) -> Vec<u8> {
     let mut d = b"DDS ".to_vec();

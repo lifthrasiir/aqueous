@@ -298,6 +298,30 @@ fn lzma_held_once() {
     }
 }
 
+/// A file and the git loose object of it (a zlib stream of `blob <size>\0` and the file): the
+/// object's data is the file after its header, stored once, in a batch together however small
+/// the batches.
+#[test]
+fn git_loose_object_held_once() {
+    let data = words(1_000_000, 7);
+    let mut object = format!("blob {}\0", data.len()).into_bytes();
+    object.extend_from_slice(&data);
+    let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+    z.write_all(&object).unwrap();
+    let loose = z.finish().unwrap();
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let (alone, r) = archived(&[("w/words.txt", data.clone())], &opt);
+    let alone = alone.len() - r.overhead;
+    let files = [("w/words.txt", data), (".git/objects/12/3456", loose)];
+    for opt in [opt.clone(), Options { batch: 1 << 20, ..opt.clone() }] {
+        let (c, r) = archived(&files, &opt);
+        assert!(r.files[1].modules.iter().any(|m| m.name == "flate-set"), "{:?}", r.files[1]);
+        // (and the stream's record: flate2's zlib-rs does not write zlib's own streams)
+        let c = c.len() - r.overhead;
+        assert!(c < alone * 5 / 4, "{c} of {alone} alone");
+    }
+}
+
 /// A PE32+ image of x86-64 code: calls to a few functions and loads, of constants at random
 /// from `seed`, `n` of each.
 fn pe(n: u32, seed: u64) -> Vec<u8> {

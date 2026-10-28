@@ -92,6 +92,9 @@ pub enum Derived {
     Zip = 1,
     /// The CRC-32 (u32) and the length mod 2^32 (u32) of the data: a gzip member's trailer.
     Gzip = 2,
+    /// The Adler-32 of the data (u32, big endian: a zlib stream's trailer), the length of the
+    /// data (u64) and the length of the stream (u64): what a git pack's entries need.
+    Zlib = 3,
 }
 
 impl Derived {
@@ -108,6 +111,7 @@ impl Derived {
             [] => Ok(Derived::None),
             [1] => Ok(Derived::Zip),
             [2] => Ok(Derived::Gzip),
+            [3] => Ok(Derived::Zlib),
             _ => Err(Error::Corrupt),
         }
     }
@@ -116,23 +120,27 @@ impl Derived {
     pub fn bytes(self) -> usize {
         match self {
             Derived::None => 0,
-            Derived::Zip => 20,
+            Derived::Zip | Derived::Zlib => 20,
             Derived::Gzip => 8,
         }
     }
 
     /// Appends what is derived of `data` and `stream` (rebuilt from it) to `out`.
     pub fn put(self, data: &[u8], stream: usize, out: &mut Vec<u8>) {
-        if self == Derived::None {
-            return;
-        }
-        out.extend_from_slice(&aqr_common::crc32::hash(data).to_le_bytes());
         match self {
-            Derived::Zip => {
+            Derived::None => {}
+            Derived::Zip | Derived::Zlib => {
+                out.extend_from_slice(&match self {
+                    Derived::Zip => aqr_common::crc32::hash(data).to_le_bytes(),
+                    _ => aqr_common::adler32::hash(data).to_be_bytes(),
+                });
                 out.extend_from_slice(&(data.len() as u64).to_le_bytes());
                 out.extend_from_slice(&(stream as u64).to_le_bytes());
             }
-            _ => out.extend_from_slice(&(data.len() as u32).to_le_bytes()),
+            Derived::Gzip => {
+                out.extend_from_slice(&aqr_common::crc32::hash(data).to_le_bytes());
+                out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            }
         }
     }
 }

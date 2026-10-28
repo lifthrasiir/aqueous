@@ -11,11 +11,7 @@ pub fn zlib_header(b: &[u8]) -> bool {
         && (b[0] as u16 * 256 + b[1] as u16).is_multiple_of(31)
 }
 
-pub fn adler32(d: &[u8]) -> u32 {
-    let mut a = simd_adler32::Adler32::new();
-    a.write(d);
-    a.finish()
-}
+pub use aqr_common::adler32::hash as adler32;
 
 /// The shape of a FlateDecode stream's data, from a parse that keeps nothing.
 #[derive(Debug, Clone, Copy)]

@@ -31,7 +31,9 @@ pub(crate) fn gzip(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx)
 /// as it is.
 pub(crate) fn zlib(d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     let checked = |data: &[u8], end: usize| {
-        d.get(end..).and_then(|t| t.first_chunk()).is_some_and(|&s| adler32(data) == u32::from_be_bytes(s))
+        d.get(end..)
+            .and_then(|t| t.first_chunk())
+            .is_some_and(|&s| aqr_common::adler32::hash(data) == u32::from_be_bytes(s))
     };
     let hints = Hints::zlib_header([d[0], d[1]]);
     wrap("zlib", d, 2, checked, contents, &hints, opt, depth, cx)
@@ -81,10 +83,50 @@ fn gzip_start(d: &[u8]) -> Option<usize> {
 /// The DEFLATE stream of the zlib stream at the start of `d`, with its checksum after it.
 /// Two bytes of header are a weak sign: the checksum confirms.
 pub(crate) fn zlib_deflate(d: &[u8]) -> Option<Range<usize>> {
+    zlib_inflated(d).map(|z| z.0)
+}
+
+/// [`zlib_deflate`], with the data.
+fn zlib_inflated(d: &[u8]) -> Option<(Range<usize>, Vec<u8>)> {
     let mut data = Data(Vec::new());
     let end = 2 + inflate(d.get(2..)?, &mut data)?;
     let sum = u32::from_be_bytes(*d.get(end..)?.first_chunk()?);
-    (adler32(&data.0) == sum).then_some(2..end)
+    (aqr_common::adler32::hash(&data.0) == sum).then_some((2..end, data.0))
+}
+
+/// Bytes of the header of a git object at the start of `data` (`blob`, `tree`, `commit` or
+/// `tag`, a space, the size of the rest in decimal, a NUL), as a loose object's zlib stream
+/// holds it, if it is one.
+pub(crate) fn git_object_header(data: &[u8]) -> Option<usize> {
+    let sp = data.iter().take(7).position(|&b| b == b' ')?;
+    if !matches!(&data[..sp], b"blob" | b"tree" | b"commit" | b"tag") {
+        return None;
+    }
+    let digits = &data[sp + 1..];
+    let n = digits.iter().take(21).position(|&b| b == 0)?;
+    let size = std::str::from_utf8(&digits[..n]).ok()?;
+    let h = sp + 2 + n;
+    // (git's own decimal: no sign, no leading zero)
+    let canonical =
+        !size.is_empty() && size.bytes().all(|b| b.is_ascii_digit()) && (size == "0" || !size.starts_with('0'));
+    (canonical && size.parse::<u64>().ok()? == (data.len() - h) as u64).then_some(h)
+}
+
+/// The CRC-32 and size of the data of the git object that `d` is a loose object of (a zlib
+/// stream of its header and data), if it is one of at least `min` bytes: what the file checked
+/// out of a blob is. `d` is inflated only where its first bytes inflate to such a header.
+pub(crate) fn git_loose_sum(head: &[u8], d: impl FnOnce() -> Option<Vec<u8>>, min: u64) -> Option<(u32, u64)> {
+    let mut start = Data(Vec::new());
+    let _ = inflate(head.get(2..)?, &mut start);
+    let sp = start.0.iter().take(7).position(|&b| b == b' ')?;
+    let n = start.0[sp + 1..].iter().take(21).position(|&b| b == 0)?;
+    let size: u64 = std::str::from_utf8(&start.0[sp + 1..][..n]).ok()?.parse().ok()?;
+    if size < min || !matches!(&start.0[..sp], b"blob" | b"tree" | b"commit" | b"tag") {
+        return None;
+    }
+    let (_, data) = zlib_inflated(&d()?)?;
+    let h = git_object_header(&data)?;
+    Some((aqr_common::crc32::hash(&data[h..]), size))
 }
 
 /// `d` with aqr-flate on the DEFLATE stream from `start`, its data of `kind` (`depth` formats
@@ -149,9 +191,26 @@ fn wrap(
     };
     let rest = raw.end + derived.bytes();
     let mut f = Formula::default();
-    f.push(class, [&d[..raw.start], &d[rest..]].concat());
+    // A git object's header, of a loose object, is with the container's bytes: the rest is a
+    // slice of its own, which the archive finds where it is a file too, checked out, and takes
+    // as a file of its format (text, say, which the header hid).
+    let git = if class == "zlib" { git_object_header(&data) } else { None };
+    let mut outside = [&d[..raw.start], &d[rest..]].concat();
+    if let Some(h) = git {
+        outside.extend_from_slice(&data[..h]);
+    }
+    let around = outside.len() as u64 - git.unwrap_or(0) as u64;
+    f.push(class, outside);
     let record = f.push("flate/record", record);
-    let data = f.push_as("raw", kind, data);
+    let data = match git {
+        Some(h) => {
+            let mut data = data;
+            data.drain(..h);
+            let body = f.push_as("raw", kind, data);
+            Node::concat([Node::slice(0, around, h as u64), body])
+        }
+        None => f.push_as("raw", kind, data),
+    };
     f.root = Node::concat([
         Node::slice(0, 0, raw.start as u64),
         aqr_flate::formula::apply_one(fopt.profile, data, record, raw.len() as u64, derived).ok()?,
@@ -195,16 +254,16 @@ impl Sink for Data {
     }
 }
 
-fn adler32(d: &[u8]) -> u32 {
-    let (mut a, mut b) = (1u32, 0u32);
-    // The most bytes before `b` can overflow.
-    for c in d.chunks(5552) {
-        for &x in c {
-            a += x as u32;
-            b += a;
+#[cfg(test)]
+mod tests {
+    use super::git_object_header;
+
+    #[test]
+    fn git_object_headers() {
+        assert_eq!(git_object_header(b"blob 3\0abc"), Some(7));
+        assert_eq!(git_object_header(b"commit 0\0"), Some(9));
+        for d in [&b"blob 4\0abc"[..], b"blob 03\0abc", b"blob +3\0abc", b"blob 3abc", b"blub 3\0abc", b"blob \0"] {
+            assert_eq!(git_object_header(d), None, "{d:?}");
         }
-        a %= 65521;
-        b %= 65521;
     }
-    b << 16 | a
 }

@@ -71,6 +71,10 @@ pub const ZIP: Module = aqr_zip::formula::MODULE;
 /// and the layout.
 pub const BUNDLE: Module = aqr_bundle::formula::MODULE;
 
+/// A git pack rebuilt from the data of its entries. Inputs: the entries' DEFLATE streams with
+/// what [`FLATE`] derives of them, the layout and the bytes kept.
+pub const GIT_PACK: Module = aqr_git::formula::MODULE;
+
 // A recompressor as a module of its own (its `formula` module, see its FORMAT.md), rebuilding
 // a file from its inputs. Files embedded in the file are in the formula as applications of
 // their own modules.
@@ -104,7 +108,7 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 27] = [
+pub const MODULES: [Module; 28] = [
     X86,
     ARM64,
     CIL,
@@ -116,6 +120,7 @@ pub const MODULES: [Module; 27] = [
     LEVELDB,
     ZIP,
     BUNDLE,
+    GIT_PACK,
     PNG,
     PNG_AGAINST,
     PNG_SET,
@@ -313,6 +318,9 @@ impl Native {
         } else if m == BUNDLE {
             none(resources)?;
             aqr_bundle::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == GIT_PACK {
+            none(resources)?;
+            aqr_git::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if let Some((_, decode)) = RECONS.iter().find(|r| r.0 == m) {
             decode(params, resources, inputs, len, threads)
         } else {

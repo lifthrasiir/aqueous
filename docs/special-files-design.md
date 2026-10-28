@@ -17,7 +17,7 @@ Aqueous 아카이브 모델에 symbolic link, hard link, device 파일 같은 �
 - `spec/index.bs` §Archive model, §Metadata block, §Optional metadata(`link-group`), §Extraction: 이 설계를 반영한 곳.
 - `zip-extras-design.md` §3.4, §5, §6의 3번: 0x000d와 0x756e의 부분 흡수, `unix-mode`의 `S_IFMT` 문제.
 - `xform-design.md` §4.1: "경로, 심링크, 파일별 체크섬, 같은 내용 파일의 중복 제거는 아카이브의 것이다."
-- `aqr-git/src/container.rs`: 자체 컨테이너에 symlink 목록을 따로 두고 있다. 모듈 형태로 옮기면 이 목록은 아카이브가 맡아야 한다.
+- 이전의 aqr-git(`aqr-git/src/container.rs`)은 자체 컨테이너에 symlink 목록을 따로 두었다. 2026-10-28에 팩 모듈로 바뀌어 symlink는 아카이브가 맡는다.
 
 ---
 
@@ -50,7 +50,7 @@ symlink가 없으면 깨지는 흔한 트리:
 모델에 symlink가 없으면 compressor가 고를 수 있는 길은 셋뿐이고, 모두 나쁘다.
 
 1. **따라간다.** 링크 대상의 내용을 복사한다. 의미가 바뀌고, 순환이 생길 수 있으며, 아카이브 대상 트리 바깥의 내용이 딸려 들어온다.
-2. **버린다.** 정보 손실이다. aqr-git이 자체 컨테이너에 symlink 목록을 따로 둔 것도 이것을 피하려는 것이다.
+2. **버린다.** 정보 손실이다. 이전의 aqr-git이 자체 컨테이너에 symlink 목록을 따로 둔 것도 이것을 피하려는 것이었다.
 3. **Info-ZIP처럼 흉내 낸다.** 내용을 대상 경로로 하고 `unix-mode`에 `S_IFLNK`를 넣는다. §4.1에서 기각한다.
 
 다른 주류 포맷도 모두 symlink를 지원하므로 tar, ZIP, RAR, 7z에서 변환할 때 손실 없이 옮기려면 필요하다.
@@ -292,7 +292,7 @@ FIFO와 device는 사정이 다르다.
 
 ### 6.8 그 밖
 
-- **formula와 모듈.** 링크 대상은 metadata block에 인라인으로 있으므로 formula와 관계없다. `xform-design.md` §4.1의 "심링크는 아카이브의 것" 경계와 맞는다. aqr-git을 모듈 형태로 옮길 때 자체 symlink 목록을 이것으로 대신한다.
+- **formula와 모듈.** 링크 대상은 metadata block에 인라인으로 있으므로 formula와 관계없다. `xform-design.md` §4.1의 "심링크는 아카이브의 것" 경계와 맞는다. (이전의 aqr-git이 따로 두던 symlink 목록도 이것이 대신한다.)
 - **복구.** 링크 대상은 metadata block 안에 있으므로 mirror block이 함께 보호한다. hard link 그룹이 leaf block 하나를 공유하면 그 블록의 손상이 그룹 전체에 미친다. 이것은 중복 제거 일반과 같다.
 - **이름 없는 단일 파일 아카이브**(metadata block 없음)는 영향을 받지 않는다.
 
@@ -334,4 +334,4 @@ FIFO와 device는 사정이 다르다.
 
 - [ ] **I1.** compressor에서 symlink, hard link(`link-group`과 leaf block 공유), FIFO, device를 수집한다.
 - [ ] **I2.** decompressor의 해제 경로에 §6.4의 규칙을 넣는다. 대소문자 구분이 없는 파일 시스템에서 링크와 디렉터리가 충돌하는 시험을 포함한다.
-- [ ] **I3.** aqr-git을 모듈 형태로 옮길 때 자체 symlink 목록을 link node로 대신한다.
+- [x] **I3.** aqr-git을 모듈 형태로 옮길 때 자체 symlink 목록을 link node로 대신한다(2026-10-28: aqr-git이 팩 모듈이 되어 목록 자체가 없어졌다).

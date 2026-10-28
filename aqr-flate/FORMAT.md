@@ -1002,9 +1002,11 @@ instance, with the rule `literals` (in the catalog or in full):
 | none (empty) | nothing |
 | `01` | the CRC-32 of its data (u32), the length of its data (u64), the length of the stream (u64): 20 bytes, what a ZIP archive's headers say of an entry |
 | `02` | the CRC-32 of its data (u32), the length of its data mod 2^32 (u32): 8 bytes, a gzip member's trailer |
+| `03` | the Adler-32 of its data (u32, big endian, as a zlib stream's trailer), the length of its data (u64), the length of the stream (u64): 20 bytes, what a git pack's entries need |
 
 The CRC-32 is ZIP's and gzip's (reflected polynomial `0xEDB88320`, register set to
-`0xFFFFFFFF` and inverted at the end).
+`0xFFFFFFFF` and inverted at the end), the Adler-32 zlib's (RFC 1950). Integers are little
+endian but for the Adler-32.
 
 **Inputs**: exactly three, in this order.
 

@@ -276,7 +276,8 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// For each content of `src`, the first of those that may hold each other (where the archive
 /// stores what they share once, [`Formula::share_slices`], only within a batch): a ZIP archive
 /// or gzip file and the contents of its entries (of the CRC-32 and size that its central
-/// directory or its trailer tells; and other archives with such entries), an ar, tar or cpio
+/// directory or its trailer tells; and other archives with such entries), a git loose object
+/// and the file of its data (inflated whole where its header tells a large one), an ar, tar or cpio
 /// archive and the contents of its members (read whole, one at a time, for their CRC-32; those
 /// of at least [`MEMBER_MIN`] bytes), a `.lzma` file and those of what its stream holds (decoded
 /// whole, [`lzma_sums`]), and contents that start alike (their first 64 KiB; the
@@ -304,6 +305,10 @@ fn together<S: Source + ?Sized>(src: &S, opt: &Options) -> io::Result<(Vec<usize
                 let t = src.read_range(c, size - 8..size)?;
                 let word = |p: usize| u32::from_le_bytes(t[p..p + 4].try_into().expect("4 bytes"));
                 vec![(word(0), word(4) as u64)]
+            }
+            // a git loose object (inflated whole where its header tells a large object)
+            Some(detect::Format::Zlib) if size <= TOGETHER_MAX => {
+                crate::flate::git_loose_sum(&head, || src.read(c).ok(), TOGETHER_MIN).into_iter().collect()
             }
             _ => Vec::new(),
         };

@@ -13,6 +13,7 @@ aqr-bundle = { path = "../aqr-bundle" }
 aqr-exe = { path = "../aqr-exe", default-features = false, features = ["encode"] }
 aqr-flate = { path = "../aqr-flate" }
 aqr-fasta = { path = "../aqr-fasta" }
+aqr-git = { path = "../aqr-git" }
 aqr-flac = { path = "../aqr-flac" }
 aqr-jpeg = { path = "../aqr-jpeg" }
 aqr-lz4 = { path = "../aqr-lz4" }

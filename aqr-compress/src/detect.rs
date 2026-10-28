@@ -42,6 +42,9 @@ pub enum Format {
     LevelDb,
     /// ZIP archive (aqr-zip, and aqr-flate on its DEFLATE bodies).
     Zip,
+    /// git pack (aqr-git, and aqr-flate on its entries' zlib streams), a whole file: not
+    /// looked for in other data.
+    GitPack,
     /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
     /// data.
     Fasta,
@@ -60,7 +63,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 25] = [
+    pub const ALL: [Format; 26] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -80,6 +83,7 @@ impl Format {
         Format::Sqlite,
         Format::LevelDb,
         Format::Zip,
+        Format::GitPack,
         Format::Fasta,
         Format::Obj,
         Format::Ar,
@@ -109,6 +113,7 @@ impl Format {
             Format::Sqlite => "sqlite",
             Format::LevelDb => "leveldb",
             Format::Zip => "zip",
+            Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
             Format::Obj => "obj",
             Format::Ar => "ar",
@@ -219,6 +224,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Lzo)
     } else if at(0, b"PK\x03\x04") {
         Some(Format::Zip)
+    } else if start && aqr_git::pack::starts(d) {
+        Some(Format::GitPack)
     } else if at(0, &[0x1f, 0x8b, 8]) {
         Some(Format::Gzip)
     } else if zlib_header(d, start) {
