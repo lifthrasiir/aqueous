@@ -21,12 +21,12 @@ aqr-clip speed [-t N] [-b TILES] [-m dynamic|static] FILE...  # one model as a m
 Measured on 2026-10-28 on a Ryzen 7 9700X through `aqr-show -t 16` (16 threads), each file
 archived at level `mid` with its round-trip check, then extracted; the decoder modules are in
 the archives (26 KB for `clip-recons`). Repeated tiles as references took the 13 files from
-0.344 to 0.340, 32 to 35 MB/s and 81 to 91 MB/s; the held-out file was measured before them.
+0.344 to 0.340, 32 to 35 MB/s and 81 to 91 MB/s, and the held-out file from 0.499 to 0.454.
 
 | set | files | MB | ratio | zstd -3 | aqr before | compress | decompress |
 |---|---|---|---|---|---|---|---|
 | the 13 files below | 13 | 926 | **0.340** | 0.760 | 0.726 | 35 MB/s | 91 MB/s |
-| a held-out file | 1 | 14.1 | 0.499 | | 0.763 | 20 MB/s | 47 MB/s |
+| a held-out file | 1 | 14.1 | 0.454 | | 0.763 | 20 MB/s | 47 MB/s |
 
 The held-out file was not looked at before it was measured. Its tiles of few colours repeat
 across the file: through the archive their inflated bytes come to 0.041 (16 colours or fewer)
