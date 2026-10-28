@@ -9,12 +9,11 @@ use aqr_formula::Formula;
 use crate::{Cx, Options};
 
 pub(crate) fn pack(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
-    // (the streams are zlib's, all of the same settings: emulated whatever the level, they
-    // take next to no record)
+    let (profile, zlib) = opt.flate();
     let gopt = aqr_git::formula::Options {
         threads: opt.threads,
-        profile: aqr_flate::ADAPTIVE,
-        zlib: true,
+        profile,
+        zlib,
         limit: cx.inflate_left(),
         probe: crate::probe(opt, depth),
         held: cx.held.clone().map(|h| {

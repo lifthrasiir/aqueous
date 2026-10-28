@@ -69,11 +69,14 @@ fn layout_of(f: &Formula) -> &[u8] {
     &f.streams.iter().find(|s| s.class == "git-pack/layout").unwrap().data
 }
 
-/// Encodes `d` (adaptive, with zlib emulation, as aqr-compress does), checks that the module
-/// gives it back, and returns the formula and the entries' tags.
+/// Encodes `d` (aqr-flate's default profile, as aqr-compress does below level 7), checks that
+/// the module gives it back, and returns the formula and the entries' tags.
 fn roundtrip(d: &[u8]) -> (Formula, Vec<u8>) {
-    let opt = Options { profile: aqr_flate::ADAPTIVE, zlib: true, threads: 4, ..Options::default() };
-    let f = formula::encode_with(d, &opt).expect("encoded").formula;
+    roundtrip_with(d, &Options { threads: 4, ..Options::default() })
+}
+
+fn roundtrip_with(d: &[u8], opt: &Options) -> (Formula, Vec<u8>) {
+    let f = formula::encode_with(d, opt).expect("encoded").formula;
     for threads in [1, 4] {
         assert!(decode(&f, threads).unwrap() == d, "not rebuilt");
     }
@@ -99,12 +102,15 @@ fn ofs_deltas() {
     history(&d, 15);
     git(&d, &["gc", "-q", "--aggressive"]);
     let p = pack(&d);
-    let (f, tags) = roundtrip(&p);
+    let (_, tags) = roundtrip(&p);
     assert_eq!(rebuilt(&tags), tags.len(), "every entry rebuilt");
     assert!(of_type(&tags, 6) > 10, "{tags:?}");
     assert!(tags.iter().all(|t| t & HEADER_KEPT == 0), "git's own headers derived");
-    // the zlib settings found once and emulated exactly: next to no record
-    assert!(record_bytes(&f) < tags.len() * 12, "{} B of records for {} entries", record_bytes(&f), tags.len());
+    // with the adaptive profile (aqr-compress's from level 7), the zlib settings found once
+    // and emulated exactly: next to no record
+    let opt = Options { profile: aqr_flate::ADAPTIVE, zlib: true, threads: 4, ..Options::default() };
+    let (g, _) = roundtrip_with(&p, &opt);
+    assert!(record_bytes(&g) < tags.len() * 12, "{} B of records for {} entries", record_bytes(&g), tags.len());
     std::fs::remove_dir_all(&d).unwrap();
 }
 
@@ -157,7 +163,7 @@ fn limit_keeps_entries() {
     history(&d, 10);
     git(&d, &["gc", "-q"]);
     let p = pack(&d);
-    let opt = Options { profile: aqr_flate::ADAPTIVE, zlib: true, limit: 6_000, ..Options::default() };
+    let opt = Options { limit: 6_000, ..Options::default() };
     let e = formula::encode_with(&p, &opt).expect("encoded");
     assert!(e.inflated <= 6_000);
     assert!(decode(&e.formula, 1).unwrap() == p);

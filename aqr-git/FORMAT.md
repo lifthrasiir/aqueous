@@ -99,9 +99,11 @@ taken as it is.
   Adler-32 is right; aqr-flate takes the stream; and its record is shorter than the stream and
   16 bytes. Others are kept. Streams of 256 KiB or more are rebuilt only where a probe tells
   that it may pay, the data held by other files archived along with it counted as nothing.
-- git writes every object with the same zlib settings: those of the 8 largest streams are
-  found by aqr-flate on its own, and the most frequent of them given as a hint for the others,
-  which are emulated exactly where they predict every token (a record of a few bytes).
+- The records are of the profile the encoder is given (aqr-compress: aqr-flate's default
+  below level 7, its adaptive profile with zlib emulation from 7 on). git writes every object
+  with the same zlib settings: with zlib emulation, those of the 8 largest streams are found by
+  aqr-flate on its own, and the most frequent of them given as a hint for the others, which are
+  emulated exactly where they predict every token (a record of a few bytes).
 - The data of an entry of 256 KiB or more is a slice of its own (recompressed as a file, and
   found again where the same file is archived along with the pack); the rest go together by
   kind.
