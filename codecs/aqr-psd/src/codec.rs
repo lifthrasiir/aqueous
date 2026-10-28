@@ -863,6 +863,41 @@ fn join<T>(h: aqr_common::pool::Handle<'_, T>) -> T {
     h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
 }
 
+/// How far a group is coded, told of its planes' bytes in the file in proportion to the rows
+/// ([`aqr_common::progress`]), a 64th of them at a time.
+struct Told<'a> {
+    planes: Vec<&'a [u8]>,
+    h: usize,
+    at: usize,
+}
+
+impl<'a> Told<'a> {
+    fn new(d: &'a [u8], spans: &[Span], g: &GroupDef, h: usize) -> Told<'a> {
+        let planes = g
+            .planes
+            .iter()
+            .map(|&(s, p)| {
+                let (sp, n) = (&spans[s], spans[s].planes.max(1));
+                let at = |p: usize| sp.start + (sp.end - sp.start) * p / n;
+                &d[at(p)..at(p + 1)]
+            })
+            .collect();
+        Told { planes, h, at: 0 }
+    }
+
+    /// Rows up to `y` coded.
+    fn rows(&mut self, y: usize) {
+        if y < self.h && y - self.at < self.h.div_ceil(64) {
+            return;
+        }
+        let at = |d: &[u8], y: usize| d.len() * y / self.h.max(1);
+        for d in &self.planes {
+            aqr_common::progress::done(&d[at(d, self.at)..at(d, y)]);
+        }
+        self.at = y;
+    }
+}
+
 /// Codes the rows of group `g`, straight from the file `d`; returns per plane the rows its
 /// span's encoder does not reproduce (for RLE spans that are not copies).
 fn encode_group(
@@ -903,6 +938,7 @@ fn encode_group(
         hint = Some(RowRenderer::new(&hpsd, prefix, &mut composite::Report::default()).ok()?);
     }
     let mut gc = GroupCoder::new(w, n, g.has_alpha, known, g.same_as.clone());
+    let mut told = Told::new(d, spans, g, h);
     // (the reader on a worker of the pool, if one is free)
     let reader = (threads > 1 && w * h * n >= PIPE_MIN).then(|| aqr_common::pool::reserve(1));
     if let Some(reader) = reader.filter(|r| !r.is_empty()) {
@@ -911,7 +947,7 @@ fn encode_group(
             .iter()
             .map(|&(s, _)| if let Coding::Rle { encoder, .. } = spans[s].coding { Some(encoder) } else { None })
             .collect();
-        return encode_rows_piped(reader, rec, &mut gc, readers, hint, &encoders, w, h);
+        return encode_rows_piped(reader, rec, &mut gc, readers, hint, &encoders, w, h, &mut told);
     }
     let mut hint_rows = vec![vec![0u8; w]; if g.hinted { n } else { 0 }];
     let mut rows = vec![vec![0u8; w]; n];
@@ -961,6 +997,7 @@ fn encode_group(
         lap(2, &mut t);
         gc.code_row(rec, &mut rows, hint.as_ref().map(|_| &mut hint_rows[..]));
         lap(3, &mut t);
+        told.rows(y + 1);
     }
     if timing {
         ENC_TIMES.add(t);
@@ -980,6 +1017,7 @@ fn encode_rows_piped<'a>(
     encoders: &[Option<Encoder>],
     w: usize,
     h: usize,
+    told: &mut Told,
 ) -> Option<Vec<Vec<usize>>> {
     let n = readers.len();
     let per = pipe_rows(w, h, n);
@@ -1049,7 +1087,7 @@ fn encode_rows_piped<'a>(
         let mut hint_rows = vec![vec![0u8; w]; hn];
         let mut t_model = 0f64;
         let mut ok = true;
-        for _ in 0..h.div_ceil(per) {
+        for i in 0..h.div_ceil(per) {
             let Ok(mut b) = full_rx.recv() else {
                 ok = false;
                 break;
@@ -1077,6 +1115,7 @@ fn encode_rows_piped<'a>(
                     std::mem::swap(a, c);
                 }
             }
+            told.rows((i * per + b.len).min(h));
             // (The reader is gone after the last batch.)
             let _ = free_tx.send(b);
         }
