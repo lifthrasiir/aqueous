@@ -19,14 +19,19 @@ let f = formula::encode(&obj, 1 /* threads */).unwrap();
 // `f` rebuilds `obj` when evaluated with `formula::decode` as the module `MODULE`.
 ```
 
+aqr-compress takes a file as OBJ by its text (`formula::starts`: its first 64 KiB are text of
+statements, three vertices or more), not by the name `.obj`, which object files (COFF, OMF)
+have too. Without the default feature `encode`, the crate is the module's code alone
+(`module`), which aqr-modules builds into the Wasm module `obj-recons`.
+
 Any input is accepted: lines that do not parse are kept as text, and a block that fails
 verification is stored whole.
 
 ## Results
 
 Measured on 2026-10-24 at `da98d11` on an Apple M4, one thread, with `aqr-obj bench -t 1`
-(aqr-obj is not in aqr-compress yet). Ratios are tentative, since the decoder modules were not
-in the archives then. Memory is the peak RSS of the process (input, archive and output
+(before aqr-obj was wired into aqr-compress). Ratios are tentative, since the decoder modules
+were not in the archives then. Memory is the peak RSS of the process (input, archive and output
 included) over the input size.
 
 | set | files | MB | ratio | zstd -3 | compress | decompress |

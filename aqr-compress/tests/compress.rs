@@ -899,6 +899,40 @@ fn fasta() {
     assert_eq!(aqr_compress::kind_by_name(b"x/chr1.fa"), aqr_formula::Kind::Format("fasta"));
 }
 
+/// A Wavefront OBJ file of a grid of `n` × `n` vertices, its normals and faces.
+fn obj_file(n: usize) -> Vec<u8> {
+    let mut d = b"# grid\nmtllib grid.mtl\no grid\n".to_vec();
+    for y in 0..n {
+        for x in 0..n {
+            let h = ((x * 7 + y * 3) % 11) as f64 / 40.0;
+            d.extend_from_slice(format!("v {:.6} {:.6} {:.6}\n", x as f64 / 8.0, h, y as f64 / 8.0).as_bytes());
+        }
+    }
+    d.extend_from_slice(b"vn 0 1 0\nusemtl stone\ns 1\n");
+    for y in 1..n {
+        for x in 1..n {
+            let (a, b) = ((y - 1) * n + x, y * n + x);
+            d.extend_from_slice(format!("f {a}//1 {}//1 {}//1 {b}//1\n", a + 1, b + 1).as_bytes());
+        }
+    }
+    d
+}
+
+/// A Wavefront OBJ file goes to aqr-obj, by its text: not an object file (COFF) of the same
+/// extension, which its name does not tell apart.
+#[test]
+fn obj() {
+    let d = obj_file(120);
+    assert_eq!(aqr_compress::detect(&d), Some(aqr_compress::Format::Obj));
+    let f = roundtrip(&d, &Options::default());
+    assert_eq!(modules(&f), ["obj-recons"]);
+    let mut coff = vec![0x64, 0x86, 2, 0, 0, 0, 0, 0, 0x40, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0];
+    coff.extend_from_slice(b".text\0\0\0");
+    coff.extend_from_slice(&d);
+    assert_eq!(aqr_compress::detect(&coff), None);
+    assert_eq!(aqr_compress::kind_by_name(b"x/mesh.obj"), aqr_formula::Kind::Unknown);
+}
+
 /// A DDS file of BC1 blocks of a smooth picture, `w` × `h` with `mips` mipmaps.
 fn dds_file(w: u32, h: u32, mips: u32) -> Vec<u8> {
     let mut d = b"DDS ".to_vec();

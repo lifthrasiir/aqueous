@@ -2,17 +2,91 @@
 //! blocks, one input slot per kind of stream across blocks, with an index of the blocks.
 //! `FORMAT.md` specifies it. The archive compresses the slots, and checksums the output.
 
+use crate::ans;
 use crate::block::{self, NSTREAMS};
-use crate::codec::{self, AC_STREAMS, M_ANS, M_STORED, MAX_BLOCK, Options, Stored, Streams};
-use crate::varint::{Rd, put_uv};
-use crate::{Result, ans, corrupt};
+use crate::codec::{self, AC_STREAMS, MAX_BLOCK, Options, Streams};
+use crate::varint::put_uv;
 use aqr_formula::{Formula, Module, Node};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
+pub use crate::module::decode;
+
 pub const MODULE: Module = Module { name: "obj-recons", version: 1 };
 
-/// Input slots: the index, the blocks stored whole, then one per stream of `block`.
-const NINPUTS: usize = 2 + NSTREAMS;
+/// Statement keywords of OBJ files (the specification's, those of its free-form geometry
+/// included), the comment aside.
+const STATEMENTS: [&[u8]; 37] = [
+    b"v",
+    b"vt",
+    b"vn",
+    b"vp",
+    b"f",
+    b"l",
+    b"p",
+    b"g",
+    b"o",
+    b"s",
+    b"mg",
+    b"usemtl",
+    b"mtllib",
+    b"usemap",
+    b"maps",
+    b"lod",
+    b"bevel",
+    b"c_interp",
+    b"d_interp",
+    b"shadow_obj",
+    b"trace_obj",
+    b"cstype",
+    b"deg",
+    b"bmat",
+    b"step",
+    b"curv",
+    b"curv2",
+    b"surf",
+    b"parm",
+    b"trim",
+    b"hole",
+    b"scrv",
+    b"sp",
+    b"end",
+    b"con",
+    b"call",
+    b"csh",
+];
+
+/// Whether `d` starts like a Wavefront OBJ file: in its first 64 KiB (its whole lines), text
+/// only, of statements, comments and blank lines, but one line in 32 at most, with three vertices
+/// (`v` and at least three numbers) or more. An object file of the same extension (COFF, OMF)
+/// is binary, and does not.
+pub fn starts(d: &[u8]) -> bool {
+    let head = &d[..d.len().min(64 << 10)];
+    let head = match head.len() < d.len() {
+        true => &head[..head.iter().rposition(|&b| b == b'\n').map_or(0, |p| p + 1)],
+        false => head,
+    };
+    if head.iter().any(|&b| b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r') || b == 0x7f) {
+        return false;
+    }
+    let (mut known, mut other, mut verts) = (0usize, 0usize, 0usize);
+    for line in head.split(|&b| b == b'\n') {
+        let mut words = line.split(|&b| matches!(b, b' ' | b'\t' | b'\r')).filter(|w| !w.is_empty());
+        let Some(kw) = words.next() else { continue };
+        if kw.starts_with(b"#") {
+            continue;
+        }
+        if !STATEMENTS.contains(&kw) {
+            other += 1;
+            continue;
+        }
+        known += 1;
+        let number = |w: &[u8]| std::str::from_utf8(w).is_ok_and(|w| w.parse::<f64>().is_ok());
+        if kw == b"v" && words.take(3).filter(|w| number(w)).count() == 3 {
+            verts += 1;
+        }
+    }
+    verts >= 3 && other * 32 <= known
+}
 
 /// A block as coded: stored whole, or its streams.
 enum Blk<'a> {
@@ -123,52 +197,4 @@ fn encode_blocks(input: &[u8], opt: &Options) -> Option<Formula> {
     }
     f.root = Node::apply(MODULE, Vec::new(), inputs, input.len() as u64);
     Some(f)
-}
-
-/// The module: the OBJ file of `len` bytes from `inputs` (see `FORMAT.md`), no parameters.
-pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    let (&[], [index, whole, slots @ ..]) = (params, inputs) else { return Err(corrupt()) };
-    if inputs.len() != NINPUTS {
-        return Err(corrupt());
-    }
-    let mut ix = Rd::new(index);
-    let (mut wp, mut sp) = (0usize, [0usize; NSTREAMS]);
-    let mut next = |left: usize| -> Result<(usize, Stored)> {
-        let v = ix.uv();
-        let n = (v >> 1) as usize;
-        if ix.overrun() || n == 0 || n > MAX_BLOCK || n > left {
-            return Err(corrupt());
-        }
-        if v & 1 == 0 {
-            let d = whole.get(wp..wp + n).ok_or_else(corrupt)?;
-            wp += n;
-            return Ok((n, Stored::Whole(d)));
-        }
-        let mut s = Box::new([(0, 0, &[][..]); NSTREAMS]);
-        for (i, e) in s.iter_mut().enumerate() {
-            let v = ix.uv();
-            if v == 0 {
-                continue;
-            }
-            let raw = (v >> 1) as usize;
-            let m = if v & 1 == 1 { M_ANS } else { M_STORED };
-            let c = if m == M_ANS { ix.uv() as usize } else { raw };
-            if raw == 0 || raw > 8 * n + 64 || (m == M_ANS && !AC_STREAMS[i]) {
-                return Err(corrupt());
-            }
-            *e = (raw, m, slots[i].get(sp[i]..sp[i].saturating_add(c)).ok_or_else(corrupt)?);
-            sp[i] += c;
-        }
-        if ix.overrun() {
-            return Err(corrupt());
-        }
-        Ok((n, Stored::Coded(s)))
-    };
-    let total = inputs.iter().map(|i| i.len()).sum::<usize>();
-    let mut out = Vec::with_capacity((len as usize).min(total.saturating_mul(64)));
-    codec::decode_blocks(&mut next, len as usize, &mut out, threads)?;
-    if !ix.done() || wp != whole.len() || sp.iter().zip(slots).any(|(&p, s)| p != s.len()) {
-        return Err(corrupt());
-    }
-    Ok(out)
 }

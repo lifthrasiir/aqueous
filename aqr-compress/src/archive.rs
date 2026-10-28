@@ -494,14 +494,14 @@ struct Made {
 const WORDS_MIN: usize = 256 << 10;
 
 /// The dictionary of the text of a batch ([`Cx::words`]): of the files that are text (at least
-/// [`aqr_wrt::formula::MIN_LEN`] bytes, but those kept raw), where they are [`WORDS_MIN`]
-/// bytes in all and are recompressed at all ([`Options::level`]).
+/// [`aqr_wrt::formula::MIN_LEN`] bytes, but those kept raw and OBJ files, which aqr-obj takes),
+/// where they are [`WORDS_MIN`] bytes in all and are recompressed at all ([`Options::level`]).
 fn words(regions: &[&[u8]], files: &[File], raw: &HashSet<usize>, opt: &Options) -> Option<aqr_wrt::formula::Shared> {
     if !opt.recompresses() {
         return None;
     }
     let texts: Vec<&[u8]> = (0..files.len())
-        .filter(|k| !raw.contains(k) && aqr_wrt::formula::starts(regions[*k]))
+        .filter(|k| !raw.contains(k) && aqr_wrt::formula::starts(regions[*k]) && !aqr_obj::formula::starts(regions[*k]))
         .map(|k| regions[k])
         .collect();
     if texts.iter().map(|t| t.len()).sum::<usize>() < WORDS_MIN {

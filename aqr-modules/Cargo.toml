@@ -23,6 +23,7 @@ aqr-lz4 = { path = "../aqr-lz4", default-features = false }
 aqr-lzma = { path = "../aqr-lzma", default-features = false }
 aqr-lzo = { path = "../aqr-lzo", default-features = false }
 aqr-mp3 = { path = "../aqr-mp3", default-features = false }
+aqr-obj = { path = "../aqr-obj", default-features = false }
 aqr-pdf = { path = "../aqr-pdf", default-features = false }
 aqr-png = { path = "../aqr-png", default-features = false }
 aqr-psd = { path = "../aqr-psd", default-features = false }
@@ -86,6 +87,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "fasta-recons"
 path = "src/bin/fasta-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "obj-recons"
+path = "src/bin/obj-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

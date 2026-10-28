@@ -1,11 +1,15 @@
 //! Lossless Wavefront OBJ recompression: an OBJ file is split into streams that are stored
 //! smaller, and restored bit for bit. `formula` is the entry point (see aqr-formula).
 
+// The code of the modules alone uses only part of the rest.
+#![cfg_attr(not(feature = "encode"), allow(unused))]
 pub mod ans;
 pub mod block;
 pub mod codec;
 mod corner;
+#[cfg(feature = "encode")]
 pub mod formula;
+pub mod module;
 mod recent;
 pub mod style;
 pub mod varint;

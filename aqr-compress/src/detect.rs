@@ -45,6 +45,9 @@ pub enum Format {
     /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
     /// data.
     Fasta,
+    /// Wavefront OBJ file (aqr-obj), a whole file known by its text: not looked for in other
+    /// data, nor by its name, which object files (COFF, OMF) have too.
+    Obj,
     /// ar archive (aqr-bundle).
     Ar,
     /// tar archive (aqr-bundle), known by its first header's checksum: not looked for in other
@@ -57,7 +60,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 24] = [
+    pub const ALL: [Format; 25] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -78,6 +81,7 @@ impl Format {
         Format::LevelDb,
         Format::Zip,
         Format::Fasta,
+        Format::Obj,
         Format::Ar,
         Format::Tar,
         Format::Cpio,
@@ -106,6 +110,7 @@ impl Format {
             Format::LevelDb => "leveldb",
             Format::Zip => "zip",
             Format::Fasta => "fasta",
+            Format::Obj => "obj",
             Format::Ar => "ar",
             Format::Tar => "tar",
             Format::Cpio => "cpio",
@@ -228,6 +233,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Raw)
     } else if start && aqr_fasta::formula::starts(d) {
         Some(Format::Fasta)
+    } else if start && aqr_obj::formula::starts(d) {
+        Some(Format::Obj)
     } else if aqr_bundle::ar::starts(d) {
         Some(Format::Ar)
     } else if (start || d.starts_with(b"07070")) && aqr_bundle::cpio::starts(d) {
@@ -471,6 +478,8 @@ mod tests {
             (b"fonts/a.otf", Kind::Font),
             (b"fonts/a.woff", Kind::Unknown),
             (b"setup.exe", Kind::Unknown),
+            // a Wavefront OBJ file or an object file
+            (b"mesh.obj", Kind::Unknown),
             (b".png", Kind::Unknown),
             (b"dir.png/file", Kind::Unknown),
             (b"README", Kind::Unknown),

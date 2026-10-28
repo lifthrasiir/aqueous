@@ -71,6 +71,31 @@ fn none_cases() {
     assert!(formula::encode_with(&b"v 1 2 3\n".repeat(1000), &opt).is_none());
 }
 
+/// What starts like an OBJ file: statements and comments with three vertices or more, not
+/// text of other lines, nor an object file of the same extension.
+#[test]
+fn starts() {
+    let mesh = "# made by hand\nmtllib a.mtl\no cube\nv 1 2 3\nv  4.5 -6 7e-3\r\nv 1 1 1\nvn 0 0 1\nf 1//1 2//1 3//1\n";
+    assert!(formula::starts(mesh.as_bytes()));
+    assert!(formula::starts(format!("\u{feff}{}", mesh.repeat(100)).as_bytes()));
+    // the head cut at its last line's end
+    let long = format!("{}v 1 2", "v 1 2 3\n".repeat(20000));
+    assert!(formula::starts(long.as_bytes()));
+    for d in [
+        "v 1 2 3\nv 4 5 6\nf 1 2 1\n".to_string(),
+        "v a b c\nv d e f\nv g h i\n".to_string(),
+        format!("{mesh}it is not\nall\nof one\nkind\n"),
+        format!("{mesh}\0"),
+        String::new(),
+    ] {
+        assert!(!formula::starts(d.as_bytes()), "{d:?}");
+    }
+    // COFF of x86-64, with its section headers
+    let mut coff = vec![0x64, 0x86, 2, 0, 0, 0, 0, 0, 0x40, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0];
+    coff.extend_from_slice(b".text\0\0\0");
+    assert!(!formula::starts(&coff));
+}
+
 #[test]
 fn structure() {
     let src = b"v 1 2 3\nv 1 2 3\nf 1 2 -1\n# hi\n";

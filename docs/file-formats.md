@@ -9,7 +9,7 @@ and the design is argued in `xform-design.md`.
 - 2026-10-23, Apple M4, one thread (`-t 1`), at commit `2abe944`.
 - Through `aqr-show` (`aqr/src/bin/show.rs`): each file is archived (recompression, archive
   coding and the round-trip check) at level `mid`, then extracted.
-  - aqr-obj is not wired into aqr-compress yet, and was measured with `aqr-obj bench`.
+  - aqr-obj was measured with `aqr-obj bench` before it was wired into aqr-compress.
   - aqr-git, aqr-lz4, aqr-lzo and aqr-snappy: see their rows.
 - aqr-jpeg, aqr-png, aqr-psd and aqr-mp3 were re-measured on 2026-10-24 (otherwise as above;
   aqr-mp3's ratio and speed again on 2026-10-25; aqr-flate's speed on 2026-10-25, its memory
@@ -79,7 +79,7 @@ reservoir is rebuilt.
 | SQLite 3 | aqr-sqlite | 88 files, 324 MB | 0.227 | 0.366 | 48 | 368 | 24 MB + 6.7× | |
 | Text (words, XML markup) | aqr-wrt | enwik9, 1 GB (README) | 0.253 | 0.312 | 148 | 291 | not measured | measured 2026-10-26 with `aqr` (10 threads) on enwik9 alone, not `aqr-show`; text of 256 KiB or more. The 10gb corpus −35.8 MB (README) |
 | FASTA (nucleotides) | aqr-fasta | hg19, 93 files, 3.2 GB (README) | 0.218 | 0.309 | 170 | 133 (753 through `aqr`, files at once) | not measured | measured 2026-10-26 with `aqr-fasta-bench` (chr1) and `aqr` (hg19 of the 10gb corpus), not `aqr-show`; zstd -3 file by file |
-| Wavefront OBJ | aqr-obj | 22 files, 403 MB | 0.097 | 0.242 | 121 | 324 | 24 MB + 3.1× | `aqr-obj bench`; not in aqr-compress yet. Files over 300 MB left out |
+| Wavefront OBJ | aqr-obj | 22 files, 403 MB | 0.097 | 0.242 | 121 | 324 | 24 MB + 3.1× | `aqr-obj bench`, before the wiring. Files over 300 MB left out. Through `aqr` (all threads, 2026-10-28): c3d 67.5 → 9.99 MB (19.94 before the wiring), threejs 6.0 → 0.83 MB (1.50). Taken by its text, not by the name `.obj` (object files) |
 
 ### Containers and general-purpose compression
 
@@ -113,7 +113,7 @@ reservoir is rebuilt.
 | aqr-psd | 16- and 32-bit data, ZIP channels, other colour modes; effects and adjustment layers rendered |
 | aqr-clip | speed of one thread (the model of busy tiles); neighbouring tiles and mipmaps as context; the database's PNG preview through aqr-png; the 3D data |
 | aqr-sqlite | memory (chunked processing); WAL and rollback journals; WITHOUT ROWID secondary indexes |
-| aqr-obj | wiring into aqr-compress; compression speed of `%.17g` files; connectivity of faces in random order; `.mtl` |
+| aqr-obj | compression speed of `%.17g` files; connectivity of faces in random order; `.mtl` |
 | aqr-zip | DEFLATE only; other methods (bzip2, LZMA, AES) are kept |
 | aqr-bundle | members sliced from the archive's bytes rather than copied (the memory of `.tar.gz`); COFF objects of ar archives (aqr-exe); old GNU sparse files; tar archives found in other data |
 
