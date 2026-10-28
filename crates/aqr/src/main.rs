@@ -20,7 +20,9 @@
 //!   and `high` are 2, 5 and 8. `zstdN` compresses every stream at zstd level `N`, the
 //!   recompression as at mid. `-N` is `-l N`, its digits all one level (`-10` is not `-1 -0`).
 //! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors; `-v` logs
-//!   each file archived too (below).
+//!   each file archived too (below). An archive, or a single file decompressed, is written as
+//!   `OUTPUT.PID.part` and renamed once done: removed where it fails or the process is stopped
+//!   ([`stop`]), an output there before left as it was.
 //! - `--batch` is about the most MiB of files made at once (512 by default), which bounds the
 //!   memory taken by compression (but for a file larger).
 //! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
@@ -41,6 +43,7 @@ use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::time::{Instant, UNIX_EPOCH};
 
+mod stop;
 mod view;
 
 use aqr_compress::{Options, compress_formula_as, compress_tree_to, detect, kind_by_name};
@@ -260,7 +263,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         let d = fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
         // (of the kind its name tells, as a file in an archive of many)
         let (c, f) = compress_formula_as(&d, kind_by_name(&os_bytes(input.as_os_str())), &a.opt);
-        write_new(out, &c, a.force)?;
+        write_whole(out, a.force, |w| w.write_all(&c))?;
         if !a.quiet && a.verbose {
             let modules: Vec<String> = f.applies().iter().map(|m| m.module.to_string()).collect();
             let format = detect(&d).map_or("-", |f| f.name());
@@ -303,35 +306,28 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
             eprintln!("skipped {s}");
         }
     }
-    // written as it is made: removed where it is not made to the end
-    let file = create(out, a.force)?;
-    let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
     // (a bar on a terminal, drawn again now and then; with -v, the log as the files are written)
     let view = view::View::new(&g, std::io::stderr().is_terminal() && view::takes_escapes(), a.verbose);
     let done = std::sync::atomic::AtomicBool::new(false);
-    let r = std::thread::scope(|s| {
-        if !a.quiet && view.bars() {
-            s.spawn(|| {
-                while !done.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::park_timeout(std::time::Duration::from_millis(250));
-                    view.tick();
-                }
-            });
-        }
-        let quiet = |_: aqr_compress::Event| {};
-        let tell: &(dyn Fn(aqr_compress::Event) + Sync) = if a.quiet { &quiet } else { &|e| view.tell(e) };
-        let r = compress_tree_to(&g.tree, &g, &a.opt, &mut w, tell).and_then(|r| w.flush().map(|_| r));
-        done.store(true, std::sync::atomic::Ordering::Relaxed);
-        r
-    });
-    let r = match r {
-        Ok(r) => r,
-        Err(e) => {
-            drop(w);
-            let _ = fs::remove_file(out);
-            return Err(format!("{}: {e}", out.display()));
-        }
-    };
+    // written as it is made
+    let r = write_whole(out, a.force, |file| {
+        let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
+        std::thread::scope(|s| {
+            if !a.quiet && view.bars() {
+                s.spawn(|| {
+                    while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                        std::thread::park_timeout(std::time::Duration::from_millis(250));
+                        view.tick();
+                    }
+                });
+            }
+            let quiet = |_: aqr_compress::Event| {};
+            let tell: &(dyn Fn(aqr_compress::Event) + Sync) = if a.quiet { &quiet } else { &|e| view.tell(e) };
+            let r = compress_tree_to(&g.tree, &g, &a.opt, &mut w, tell).and_then(|r| w.flush().map(|_| r));
+            done.store(true, std::sync::atomic::Ordering::Relaxed);
+            r
+        })
+    })?;
     if !a.quiet {
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
         summary(out, g.contents.len(), r.read as usize, r.len, start);
@@ -446,6 +442,50 @@ fn write_new(path: &Path, d: &[u8], force: bool) -> Result<(), String> {
     create(path, force)?.write_all(d).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Writes a new file `path` (or one in place of it, where `force`) by `write`: under a name of
+/// its own beside it, renamed once it is written (so that `path` is never written in part),
+/// removed where it is not (`write` failing, or the process stopped: [`stop`]).
+fn write_whole<T>(
+    path: &Path,
+    force: bool,
+    write: impl FnOnce(&mut fs::File) -> std::io::Result<T>,
+) -> Result<T, String> {
+    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
+    let mut name = path.file_name().ok_or(format!("{}: not a file's name", path.display()))?.to_owned();
+    name.push(format!(".{}.part", std::process::id()));
+    let part = path.with_file_name(name);
+    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|e| err(&part, e))?;
+    let stop = stop::removing(&part);
+    let r = write(&mut file).map_err(|e| err(path, e)).and_then(|t| {
+        drop(file);
+        place(&part, path, force)?;
+        Ok(t)
+    });
+    if r.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    drop(stop);
+    r
+}
+
+/// Moves `from` to `to`, over a file there only where `force`.
+fn place(from: &Path, to: &Path, force: bool) -> Result<(), String> {
+    let err = |e: std::io::Error| format!("{}: {e}", to.display());
+    if force {
+        return fs::rename(from, to).map_err(err);
+    }
+    // (a link failing where `to` is, which a rename would replace)
+    match fs::hard_link(from, to) {
+        Ok(()) => fs::remove_file(from).map_err(err),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(format!("{} exists (-f to overwrite)", to.display()))
+        }
+        // (no links on the file system: whether it is there checked just before)
+        Err(_) if fs::symlink_metadata(to).is_err() => fs::rename(from, to).map_err(err),
+        Err(e) => Err(err(e)),
+    }
+}
+
 /// A new file `path` (or one in place of it, where `force`).
 fn create(path: &Path, force: bool) -> Result<fs::File, String> {
     let err = |e: std::io::Error| format!("{}: {e}", path.display());
@@ -490,7 +530,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
             let d = aqr::decode_value_with(&c, runner, a.opt.threads).map_err(|e| err(&e))?;
             let Value::File(d) = d else { unreachable!("an archive of a single file") };
             if !a.test {
-                write_new(out, &d, a.force)?;
+                write_whole(out, a.force, |w| w.write_all(&d))?;
             }
             if !a.quiet {
                 summary_d(input, (!a.test).then_some(out), 1, d.len() as u64, start);

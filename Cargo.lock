@@ -43,6 +43,7 @@ dependencies = [
  "aqr-compress",
  "aqr-decompress",
  "aqr-formula",
+ "libc",
  "memmap2",
  "windows-sys",
 ]
