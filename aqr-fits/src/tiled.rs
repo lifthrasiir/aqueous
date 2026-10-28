@@ -389,11 +389,11 @@ const CODE_TREE: usize = 32;
 /// its block the shortest ([`rice::shortest`]). The image is known when they are decoded.
 pub fn encode_codes(l: &Layout, rebuilt: &[bool], image: &[u32], codes: &[u8]) -> Vec<u8> {
     let mut ac = ArithEncoder::new(Vec::new());
-    let mut m = vec![[Bit::default(); CODE_TREE]; CODE_TREE];
+    let mut m = vec![Bit::default(); CODE_TREE * CODE_TREE];
     let mut c = codes.iter();
     blocks(l, rebuilt, image, |b| {
         let code = *c.next()? as usize;
-        let tree = &mut m[rice::shortest(b, l.rice) as usize];
+        let tree = &mut m[rice::shortest(b, l.rice) as usize * CODE_TREE..][..CODE_TREE];
         let mut node = 1;
         for i in (0..5).rev() {
             let bit = (code >> i) & 1 != 0;
@@ -409,10 +409,10 @@ pub fn encode_codes(l: &Layout, rebuilt: &[bool], image: &[u32], codes: &[u8]) -
 /// The codes of [`encode_codes`].
 pub fn decode_codes(l: &Layout, rebuilt: &[bool], image: &[u32], coded: &[u8]) -> Option<Vec<u8>> {
     let mut ac = ArithDecoder::new(coded);
-    let mut m = vec![[Bit::default(); CODE_TREE]; CODE_TREE];
+    let mut m = vec![Bit::default(); CODE_TREE * CODE_TREE];
     let mut codes = Vec::new();
     blocks(l, rebuilt, image, |b| {
-        let tree = &mut m[rice::shortest(b, l.rice) as usize];
+        let tree = &mut m[rice::shortest(b, l.rice) as usize * CODE_TREE..][..CODE_TREE];
         let mut node = 1;
         for _ in 0..5 {
             let bit = ac.decode(tree[node].p1());

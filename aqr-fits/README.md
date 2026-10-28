@@ -50,7 +50,7 @@ Left:
 - Images whose values are a sparse set (photographic plates' calibrations) would gain from
   coding the values' ranks.
 - Float images are left as they are where the model does not pay (most of them).
-- The modules' blocks (13 and 22 KB for image and Rice) outweigh the gains on small files.
+- The modules' blocks (6.5 and 12.6 KB for image and Rice) outweigh the gains on small files.
 - `GZIP_1`, `GZIP_2`, `HCOMPRESS_1` and `PLIO_1` tiles are kept as they are, and so are
   compressed tables (§10.3).
 

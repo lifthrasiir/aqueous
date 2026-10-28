@@ -53,7 +53,9 @@ const BIAS: usize = 9 * 9 * 9;
 /// The state of the model, alike on both sides.
 struct Model {
     s: Shape,
-    len: Vec<[Bit; LEN_TREE]>,
+    /// Trees of the lengths, by activity: `LEN_TREE` bits each (flat, which keeps the
+    /// modules from unrolling their initialisation).
+    len: Vec<Bit>,
     /// The bit after the leading one, by length and activity (coarse).
     second: Vec<Bit>,
     /// Sum of errors and count, per context.
@@ -94,7 +96,7 @@ impl Model {
     fn new(s: Shape) -> Model {
         Model {
             s,
-            len: vec![[Bit::default(); LEN_TREE]; ACT],
+            len: vec![Bit::default(); LEN_TREE * ACT],
             second: vec![Bit::default(); 33 * 12],
             bias: vec![(0, 0); BIAS],
             elen: [vec![0; s.width + 2], vec![0; s.width + 2]],
@@ -188,7 +190,7 @@ pub fn encode(image: &[u32], s: Shape, known: Option<&[bool]>) -> Coded {
             let z = m.residual(row[x], &pr);
             if !known.is_some_and(|k| k[y * s.width + x]) {
                 let n = len_of(z as u64);
-                let tree = &mut m.len[pr.act];
+                let tree = &mut m.len[pr.act * LEN_TREE..][..LEN_TREE];
                 let mut node = 1;
                 for i in (0..6).rev() {
                     let bit = (n >> i) & 1 != 0;
@@ -224,7 +226,7 @@ pub fn decode(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>) ->
         for x in 0..row.len() {
             let pr = m.predict(row, up, x);
             let z = if !known.is_some_and(|k| k[y * s.width + x]) {
-                let tree = &mut m.len[pr.act];
+                let tree = &mut m.len[pr.act * LEN_TREE..][..LEN_TREE];
                 let mut node = 1;
                 for _ in 0..6 {
                     let bit = ac.decode(tree[node].p1());
