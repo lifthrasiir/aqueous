@@ -4,7 +4,7 @@
 //! right after a mismatch.
 
 use crate::deflate::{Block, Body, DynHeader, Token};
-use crate::header::zlib_header;
+use crate::header::{freqs, zlib_header_of};
 use crate::huffman::{self, RleOp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -212,8 +212,8 @@ struct Job {
     active: bool,
 }
 
-/// Slack behind the window: the longest match plus a word.
-const SLACK: usize = 272;
+/// Slack behind the window: the longest match plus two words.
+const SLACK: usize = 280;
 
 /// The window, the chains and the data fed so far.
 #[derive(Clone)]
@@ -319,18 +319,54 @@ impl<'a> Window<'a> {
     #[inline(always)]
     fn common(&self, x: usize) -> usize {
         let c = self.cursor;
+        // Fixed-size views, so that the loop needs no bounds checks.
+        let xs: &[u8; 274] = self.buf[x..x + 274].try_into().unwrap();
+        let cs: &[u8; 274] = self.buf[c..c + 274].try_into().unwrap();
         let mut n = 3;
         while n < 258 {
-            let a = u64::from_le_bytes(self.buf[x + n..x + n + 8].try_into().unwrap());
-            let b = u64::from_le_bytes(self.buf[c + n..c + n + 8].try_into().unwrap());
+            let a = u128::from_le_bytes(xs[n..n + 16].try_into().unwrap());
+            let b = u128::from_le_bytes(cs[n..n + 16].try_into().unwrap());
             let d = a ^ b;
             if d != 0 {
                 n += (d.trailing_zeros() / 8) as usize;
                 break;
             }
-            n += 8;
+            n += 16;
         }
         n.min(258)
+    }
+
+    /// One search from `h`: the best length (2 if none) and its source.
+    #[inline(always)]
+    fn walk1(&self, h: usize, mut budget: usize, stop: usize) -> (usize, usize) {
+        let c = self.cursor;
+        let floor = c.saturating_sub(self.max_dist);
+        let buf = &self.buf[..];
+        let (mut best, mut src) = (2, 0);
+        let mut x = h;
+        loop {
+            if buf[x + best] == buf[c + best]
+                && buf[x + best - 1] == buf[c + best - 1]
+                && buf[x] == buf[c]
+                && buf[x + 1] == buf[c + 1]
+            {
+                let len = self.common(x);
+                if len > best {
+                    best = len;
+                    src = x;
+                    if len >= stop {
+                        break;
+                    }
+                }
+            }
+            budget -= 1;
+            let next = self.links[x & (self.w - 1)] as usize;
+            if budget == 0 || next <= floor {
+                break;
+            }
+            x = next;
+        }
+        (best, src)
     }
 
     /// Searches the chain from `h` for the cursor on behalf of all `jobs` at once, each as
@@ -879,6 +915,78 @@ impl<'a> Emulator<'a> {
         self.e.commit(actual)
     }
 
+    /// Runs the parser on its own, as zlib does: pushes the tokens it emits next to `out`
+    /// until `out` holds `limit` of them (false) or the data ends (true). As [`predict`] and
+    /// [`commit`] of each predicted token would, but faster for deflate_fast (levels 1-3).
+    ///
+    /// [`predict`]: Emulator::predict
+    /// [`commit`]: Emulator::commit
+    pub fn run(&mut self, out: &mut Vec<Token>, limit: usize) -> bool {
+        if self.e.kind != Kind::Greedy || self.e.lanes[0].pending.is_some() {
+            while out.len() < limit {
+                let Some((_, t)) = self.predict() else {
+                    return true;
+                };
+                let ok = self.commit(t);
+                debug_assert!(ok);
+                out.push(t);
+            }
+            return false;
+        }
+        let e = &mut self.e;
+        let l = &e.lanes[0];
+        let (chain, nice, lazy) = (l.chain, l.nice, l.lazy);
+        let ended = loop {
+            if out.len() >= limit {
+                break false;
+            }
+            if e.finished {
+                break true;
+            }
+            if e.win.ahead < 262 {
+                e.refill();
+                if e.win.ahead == 0 {
+                    e.finished = true;
+                    break true;
+                }
+            }
+            let win = &mut e.win;
+            let (c, a) = (win.cursor, win.ahead);
+            let mut len = 0;
+            let mut src = 0;
+            if a >= 3 {
+                let h = win.chain(c);
+                if h != 0 && c.wrapping_sub(h) <= win.max_dist {
+                    (len, src) = win.walk1(h, chain, nice.min(a));
+                    len = len.min(a);
+                }
+            }
+            if len >= 3 {
+                out.push(Token::Match {
+                    len: len as u16,
+                    dist: (c - src) as u16,
+                    alt258: false,
+                });
+                win.ahead -= len;
+                if len <= lazy && win.ahead >= 3 {
+                    for _ in 0..len - 1 {
+                        win.cursor += 1;
+                        win.chain(win.cursor);
+                    }
+                    win.cursor += 1;
+                } else {
+                    win.cursor += len;
+                }
+            } else {
+                out.push(Token::Lit(win.buf[c]));
+                win.ahead -= 1;
+                win.cursor += 1;
+            }
+        };
+        e.lanes[0].len = 0;
+        ended
+    }
+
     /// `skip_to(end)`: false where it fails.
     pub fn skip_to(&mut self, end: usize) -> bool {
         while let Some((q, t)) = self.predict() {
@@ -901,25 +1009,15 @@ impl<'a> Emulator<'a> {
 /// Whether zlib's `_tr_flush_block` would rather use fixed than dynamic codes for `tokens`
 /// (Z_FIXED aside): fixed when `static_lenb <= opt_lenb`.
 pub fn zlib_prefers_fixed(tokens: &[Token]) -> bool {
-    let (opt, stat) = zlib_lenb(tokens, &zlib_header(tokens));
+    let (lf, df) = freqs(tokens);
+    let (opt, stat) = zlib_lenb(&lf, &df, &zlib_header_of(&lf, &df));
     stat <= opt
 }
 
 /// zlib's `opt_lenb` and `static_lenb`: the sizes in bytes of the block with dynamic and with
-/// fixed codes, as `_tr_flush_block` computes them.
-fn zlib_lenb(tokens: &[Token], h: &DynHeader) -> (i64, i64) {
-    let mut lf = [0u64; 288];
-    let mut df = [0u64; 32];
-    lf[256] = 1;
-    for &t in tokens {
-        match t {
-            Token::Lit(b) => lf[b as usize] += 1,
-            Token::Match { len, dist, alt258 } => {
-                lf[257 + if alt258 { 27 } else { huffman::len_code(len) }] += 1;
-                df[huffman::dist_code(dist)] += 1;
-            }
-        }
-    }
+/// fixed codes, as `_tr_flush_block` computes them, for a block whose [`freqs`] are `lf` and
+/// `df`.
+fn zlib_lenb(lf: &[u32; 288], df: &[u32; 32], h: &DynHeader) -> (i64, i64) {
     let fixed_lit = huffman::fixed_lit_lens();
     let (mut opt, mut stat) = (0i64, 0i64);
     // gen_bitlen's accounting; symbols zlib forced into a tree count with frequency 1 and
@@ -946,11 +1044,11 @@ fn zlib_lenb(tokens: &[Token], h: &DynHeader) -> (i64, i64) {
         } else {
             0
         };
-        add(lf[n], l, Some(fixed_lit[n]), x);
+        add(lf[n] as u64, l, Some(fixed_lit[n]), x);
     }
     for (n, &l) in h.dist_lens().iter().enumerate() {
         add(
-            df[n],
+            df[n] as u64,
             l,
             Some(5),
             huffman::DIST_EXTRA.get(n).copied().unwrap_or(0),
@@ -989,8 +1087,23 @@ pub fn zlib_block(e: &mut Emulator, start: usize) -> Option<Block> {
             }
         }
     };
-    let header = zlib_header(&tokens);
-    let (opt_lenb, static_lenb) = zlib_lenb(&tokens, &header);
+    let (lf, df) = freqs(&tokens);
+    Some(flush_block(e, start, end, tokens, &lf, &df, last))
+}
+
+/// `_tr_flush_block`'s choice between stored, fixed and dynamic for the block of `tokens`,
+/// data `start..end`, whose [`freqs`] are `lf` and `df`, as the emulator `e` stands after them.
+fn flush_block(
+    e: &Emulator,
+    start: usize,
+    end: usize,
+    tokens: Vec<Token>,
+    lf: &[u32; 288],
+    df: &[u32; 32],
+    last: bool,
+) -> Block {
+    let header = zlib_header_of(lf, df);
+    let (opt_lenb, static_lenb) = zlib_lenb(lf, df, &header);
     let mut opt = opt_lenb;
     if static_lenb <= opt || e.params().strategy == Strategy::Fixed {
         opt = static_lenb;
@@ -1007,7 +1120,36 @@ pub fn zlib_block(e: &mut Emulator, start: usize) -> Option<Block> {
     } else {
         Body::Dynamic { header, tokens }
     };
-    Some(Block { last, body })
+    Block { last, body }
+}
+
+/// `data` compressed as zlib 1.3.1 does with parameters `p` in one `deflate(Z_FINISH)` call,
+/// as a raw DEFLATE stream (without the zlib header and Adler-32); `None` for invalid
+/// parameters.
+pub fn compress(data: &[u8], p: Params) -> Option<Vec<u8>> {
+    if !p.valid() {
+        return None;
+    }
+    let mut e = Emulator::new(data, p);
+    let limit = p.block_tokens();
+    let mut w = crate::write::Writer::new(data.len() / 4 + 64);
+    let mut start = 0;
+    loop {
+        let mut tokens = Vec::with_capacity(limit.min(data.len() - start + 1));
+        let last = e.run(&mut tokens, limit);
+        let (lf, df) = freqs(&tokens);
+        let end = start + tokens.iter().map(|t| t.span()).sum::<usize>();
+        let b = flush_block(&e, start, end, tokens, &lf, &df, last);
+        let toks = match &b.body {
+            Body::Fixed { tokens } | Body::Dynamic { tokens, .. } => &tokens[..],
+            Body::Stored { .. } => &[],
+        };
+        w.block(&b, toks, data).ok()?;
+        start = end;
+        if last {
+            return w.finish(0, &[]).ok();
+        }
+    }
 }
 
 /// An emulation that has followed a stream's first tokens (in [`crate::detect`]): what it

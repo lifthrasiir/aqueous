@@ -55,6 +55,51 @@ fn zlib_inputs() -> Vec<Vec<u8>> {
     ]
 }
 
+/// [`aqr_flate::zlib::compress`] writes what zlib writes, byte for byte, at the levels of
+/// deflate_fast in particular (its free run), with memLevel 9 as Clip Studio Paint has it.
+#[test]
+fn zlib_compress_is_exact() {
+    use aqr_flate::zlib::{Params, Strategy};
+    let mut inputs = zlib_inputs();
+    inputs.push(vec![]);
+    // Tiles as a painting has them: mostly empty, flat strokes, a gradient.
+    let mut tile = vec![0u8; 1 << 20];
+    for (i, px) in tile.chunks_mut(4).enumerate() {
+        let (x, y) = (i % 256, i / 256);
+        if (x / 37 + y / 53) % 5 == 1 {
+            px.copy_from_slice(&[200, 40, 90, 255]);
+        } else if y % 512 > 400 {
+            px.copy_from_slice(&[x as u8, y as u8, 0, (x ^ y) as u8]);
+        }
+    }
+    inputs.push(tile);
+    let zlib = flate_zoo::backend("zlib").unwrap();
+    let mut failures = vec![];
+    for (level, strategy, wbits, mem) in (1..=9)
+        .flat_map(|l| [(l, 0, 15, 8), (l, 0, 15, 9), (l, 0, 10, 1)])
+        .chain([(1, 1, 15, 9), (1, 4, 15, 9), (2, 0, 12, 9), (3, 0, 15, 7)])
+    {
+        let enc = flate_zoo::Encoder::new(zlib)
+            .set("level", level)
+            .and_then(|e| e.set("strategy", strategy))
+            .and_then(|e| e.set("wbits", wbits))
+            .and_then(|e| e.set("mem", mem))
+            .unwrap();
+        let p = Params {
+            level: level as u8,
+            strategy: Strategy::ALL[strategy as usize],
+            wbits: wbits as u8,
+            mem: mem as u8,
+        };
+        for input in &inputs {
+            if aqr_flate::zlib::compress(input, p) != Some(enc.compress(input).unwrap()) {
+                failures.push(format!("{p} on {} bytes", input.len()));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
 /// The emulation reproduces every token of real zlib output (all levels, strategies, window
 /// sizes and memory levels), and its block size rule holds.
 #[test]
@@ -96,7 +141,8 @@ fn zlib_emulation_is_exact() {
                     break;
                 }
             }
-            let regenerated = generated == stream.blocks;
+            let regenerated =
+                generated == stream.blocks && aqr_flate::zlib::compress(&input, p) == Some(raw);
             match d {
                 Some(d) if d.misses == 0 && blocks_ok && regenerated => {}
                 _ => failures.push(format!(

@@ -104,6 +104,14 @@ RAYON_NUM_THREADS=1 cargo run --release --features train --bin aqr-flate-train -
   the lazy levels insert every position, so the rest of the state follows from the data).
   deflate_fast (levels 1-3) cannot be resumed, since its hash chains depend on the tokens, so
   such a stream is one segment.
+- **zlib as a compressor**: `zlib::compress(data, params)` writes what zlib 1.3.1 writes in one
+  `deflate(Z_FINISH)` call (raw DEFLATE), byte for byte, for containers whose streams are known
+  to be zlib's with fixed parameters (Clip Studio Paint's tiles: level 1, windowBits 15,
+  memLevel 9). The emulator runs on its own there (`Emulator::run`; deflate_fast without
+  `predict` and `commit`), and each block's frequencies serve both its header and
+  `_tr_flush_block`'s choice. At level 1, memLevel 9, on 256 KiB chunks, one thread on an M4:
+  photos and screenshots (123.4 MB) 334 MB/s against zlib's 305 MB/s (227 MB/s driving the
+  emulator block by block), flat synthetic tiles (104.9 MB) 2,011 MB/s against 1,626.
 - **Detection** (`detect`): a cheap check of whether a stream can come from zlib, on the idea
   of preflate's estimator. It checks that every dynamic header is exactly zlib's, that full
   blocks hold `2^(mem+6) - 1` tokens (which gives memLevel), the maximum distance (which

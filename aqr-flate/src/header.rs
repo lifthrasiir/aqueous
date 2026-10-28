@@ -201,7 +201,12 @@ impl Default for Recipe {
 /// The dynamic block header zlib writes for `tokens`.
 pub fn zlib_header(tokens: &[Token]) -> DynHeader {
     let (lf, df) = freqs(tokens);
-    build(Recipe::default(), &lf, &df).expect("zlib's candidates always exist")
+    zlib_header_of(&lf, &df)
+}
+
+/// [`zlib_header`] of the tokens whose [`freqs`] are `lf` and `df`.
+pub fn zlib_header_of(lf: &[u32], df: &[u32]) -> DynHeader {
+    build(Recipe::default(), lf, df).expect("zlib's candidates always exist")
 }
 
 /// The header `recipe` makes for a block (HLIT, HDIST and HCLEN as encoders set them).
