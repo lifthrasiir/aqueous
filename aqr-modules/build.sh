@@ -1,7 +1,9 @@
 #!/bin/sh
 # Builds the modules (src/bin) through aqr-ld into wasm/, and src/known.rs from them, with the
-# versions of aqr-decompress's modules. Nothing else is rebuilt from them: the bytes kept are
-# the modules (a toolchain giving other bytes makes other modules, of other hashes).
+# versions of aqr-decompress's modules, as well as the spec's table of the registry's initial
+# contents (the crate of a module's document from the first line of its source). Nothing else
+# is rebuilt from them: the bytes kept are the modules (a toolchain giving other bytes makes
+# other modules, of other hashes).
 set -eu
 cd "$(dirname "$0")/.."
 cargo build --release -p aqr-ld
@@ -12,6 +14,9 @@ CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_LINKER="$PWD/target/release/aqr-ld" \
 built=target/wasm32-unknown-unknown/release-wasm
 modules=$(cargo run -q --release -p aqr-decompress --example aqr-decompress-modules)
 known=aqr-modules/src/known.rs
+spec=spec/index.bs
+rows="$known.rows"
+: > "$rows"
 {
     echo "// Made by build.sh."
     echo
@@ -32,12 +37,30 @@ known=aqr-modules/src/known.rs
         echo "        wasm: include_bytes!(\"../wasm/$bin.wasm\"),"
         echo "        block: include_bytes!(\"../wasm/$bin.block\"),"
         echo "    },"
+        crate=$(head -1 "$src" | sed -n 's/^\/\/!.*(\(aqr-[a-z0-9-]*\)).*/\1/p')
+        [ -n "$crate" ] || { echo "build.sh: no crate in the first line of $src" >&2; exit 1; }
+        {
+            echo "    <tr>"
+            echo "      <td><code>$sum</code>"
+            echo "      <td>$1@$2"
+            echo "      <td><a href=\"https://github.com/lifthrasiir/aqueous/blob/main/$crate/FORMAT.md\">$crate/FORMAT.md</a>"
+        } >> "$rows"
     done
     echo "];"
 } > "$known.new"
 # the data of their module blocks, compressed once
 cargo run -q --release -p aqr-decompress --example aqr-decompress-modules -- aqr-modules/wasm/*.wasm
 mv "$known.new" "$known"
+# (the rows of the first table after the registry's heading replaced)
+awk -v rows="$rows" '
+    /^<h3 id=modules-registry>/ { sect = 1 }
+    sect == 1 && /^  <tbody>$/ { print; while ((getline line < rows) > 0) print line; sect = 2; skip = 1; next }
+    skip && /^  <\/tbody>$/ { skip = 0 }
+    !skip { print }
+    END { if (sect != 2) { print "build.sh: no table of the modules registry in the spec" > "/dev/stderr"; exit 1 } }
+' "$spec" > "$spec.new"
+mv "$spec.new" "$spec"
+rm "$rows"
 # (made before the crates compiled above, which it would not rebuild by its time)
 touch "$known"
 # (the files of modules no longer built; the others were overwritten, as known.rs had them)
