@@ -115,7 +115,11 @@ pub(crate) fn git_object_header(data: &[u8]) -> Option<usize> {
 /// The CRC-32 and size of the data of the git object that `d` is a loose object of (a zlib
 /// stream of its header and data), if it is one of at least `min` bytes: what the file checked
 /// out of a blob is. `d` is inflated only where its first bytes inflate to such a header.
-pub(crate) fn git_loose_sum(head: &[u8], d: impl FnOnce() -> Option<Vec<u8>>, min: u64) -> Option<(u32, u64)> {
+pub(crate) fn git_loose_sum(
+    head: &[u8],
+    d: impl FnOnce() -> Option<aqr_formula::Bytes>,
+    min: u64,
+) -> Option<(u32, u64)> {
     let mut start = Data(Vec::new());
     let _ = inflate(head.get(2..)?, &mut start);
     let sp = start.0.iter().take(7).position(|&b| b == b' ')?;

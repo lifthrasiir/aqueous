@@ -46,7 +46,7 @@ fn main() {
             if s.kind == Kind::Compressed {
                 by.get_mut(&*s.class).unwrap().1 += s.data.len();
             } else {
-                classes.entry(&s.class).or_default().extend(&s.data);
+                classes.entry(&s.class).or_default().extend_from_slice(&s.data);
             }
         }
         for (c, data) in &classes {

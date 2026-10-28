@@ -111,7 +111,7 @@ fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize,
     }
     parts.push(Node::slice(0, rest.len() as u64, (d.len() - at) as u64));
     rest.extend_from_slice(&d[at..]);
-    f.streams[0].data = rest;
+    f.streams[0].data = rest.into();
     f.root = Node::concat(parts);
     Some(f)
 }
@@ -172,7 +172,7 @@ fn cil_apply(
         parts.push(Node::slice(rest_stream, kept.len() as u64, (r.end - at) as u64));
         kept.extend_from_slice(&section[at..r.end]);
     }
-    f.streams[rest_stream].data = kept;
+    f.streams[rest_stream].data = kept.into();
     f.streams[rest_stream].content = true;
     inputs[0] = Node::concat(parts);
     let params = [rva.to_le_bytes(), (meta as u32).to_le_bytes()].concat();

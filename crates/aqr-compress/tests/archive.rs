@@ -242,6 +242,41 @@ fn held_once_of(words: [&str; 10], module: &str) {
     assert!(c.len() < alone.len() * 3 / 2, "{} of {} alone, in batches", c.len(), alone.len());
 }
 
+/// Contents read as bytes shared (files mapped into memory, as `aqr` reads them): the same
+/// archive as of contents copied, the shared bytes cut, compacted and merged as those are.
+#[test]
+fn shared_contents() {
+    struct Shared(Vec<(String, std::sync::Arc<Vec<u8>>)>);
+    impl aqr_compress::Source for Shared {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+        fn name(&self, c: usize) -> &[u8] {
+            self.0[c].0.as_bytes()
+        }
+        fn size(&self, c: usize) -> u64 {
+            self.0[c].1.len() as u64
+        }
+        fn read(&self, c: usize) -> std::io::Result<aqr_formula::Bytes> {
+            Ok(aqr_formula::Bytes::shared(self.0[c].1.clone()))
+        }
+    }
+    let data = words(3 << 20, 1);
+    let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(9));
+    e.write_all(&data).unwrap();
+    let zip = zip_of("words", &data, &e.finish().unwrap());
+    let mut files = sample();
+    files.extend([("w/words", data.clone()), ("w/words.gz", gzip(&data)), ("w/words.zip", zip)]);
+    for opt in [Options::default(), Options { batch: 1 << 20, block: 1 << 20, ..Options::default() }] {
+        let (copied, _) = archived(&files, &opt);
+        let (tree, contents) = tree_of(&files);
+        let src = Shared(contents.into_iter().map(|(n, d)| (n, std::sync::Arc::new(d))).collect());
+        let mut shared = Vec::new();
+        aqr_compress::compress_tree_to(&tree, &src, &opt, &mut shared, &|_| {}).unwrap();
+        assert!(shared == copied, "{} bytes, not {}", shared.len(), copied.len());
+    }
+}
+
 /// Words at random, `n` bytes of them from `seed`.
 fn words(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed;

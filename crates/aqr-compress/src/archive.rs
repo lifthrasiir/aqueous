@@ -34,7 +34,7 @@ use std::sync::Mutex;
 use aqr_decompress::Native;
 use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Level, Placed, SegmentWriter, Tree};
 use aqr_formula::probe::{self, Held};
-use aqr_formula::{Formula, Kind, Module, Node};
+use aqr_formula::{Bytes, Formula, Kind, Module, Node};
 
 use crate::progress::{Event, Files, Note, Notes, Tracker};
 use crate::{Cx, Once, Options, detect, kind_by_name, nested, place_all, sets, verify};
@@ -64,7 +64,9 @@ pub trait Source: Sync {
     /// Bytes of content `c`, as it is to be read (for the batches: it may be read otherwise).
     fn size(&self, c: usize) -> u64;
 
-    fn read(&self, c: usize) -> io::Result<Vec<u8>>;
+    /// The bytes of content `c`, best shared rather than copied (a file mapped into memory,
+    /// [`Bytes::shared`]): they are held as long as its batch is made.
+    fn read(&self, c: usize) -> io::Result<Bytes>;
 
     /// Bytes `range` of content `c` (those within it), for a look at its start or its end.
     fn read_range(&self, c: usize, range: Range<u64>) -> io::Result<Vec<u8>> {
@@ -87,8 +89,8 @@ impl Source for [Input<'_>] {
         self[c].data.len() as u64
     }
 
-    fn read(&self, c: usize) -> io::Result<Vec<u8>> {
-        Ok(self[c].data.to_vec())
+    fn read(&self, c: usize) -> io::Result<Bytes> {
+        Ok(self[c].data.to_vec().into())
     }
 
     fn read_range(&self, c: usize, range: Range<u64>) -> io::Result<Vec<u8>> {
@@ -511,7 +513,7 @@ impl File {
 }
 
 /// The data of `files` read again from `src`, failing where it is no longer what it was.
-fn reread<S: Source + ?Sized>(src: &S, files: &[File], threads: usize) -> io::Result<Vec<Vec<u8>>> {
+fn reread<S: Source + ?Sized>(src: &S, files: &[File], threads: usize) -> io::Result<Vec<Bytes>> {
     aqr_common::pool::par_map(files.len(), threads, |k| {
         let d = src.read(files[k].c)?;
         match files[k].is(&d) {
@@ -561,7 +563,7 @@ fn words(regions: &[&[u8]], files: &[File], raw: &HashSet<usize>, opt: &Options)
 fn make<S: Source + ?Sized>(
     w: &SegmentWriter,
     files: &[File],
-    data: Vec<Vec<u8>>,
+    data: Vec<Bytes>,
     raw: &HashSet<usize>,
     src: &S,
     opt: &Options,

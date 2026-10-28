@@ -515,7 +515,7 @@ fn damaged_inputs() {
     let mut rng = Rng::new(3);
     for i in 0..2000 {
         let mut g = f.clone();
-        let s = &mut g.streams[[2, 2, 2, 1, 4, 3][i % 6]].data;
+        let s = g.streams[[2, 2, 2, 1, 4, 3][i % 6]].data.to_mut();
         if s.is_empty() {
             continue;
         }

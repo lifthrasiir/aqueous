@@ -116,14 +116,14 @@ fn corrupt_streams_are_errors_not_panics() {
         let mut cases: Vec<Vec<u8>> = vec![Vec::new(), s.data[..n / 2].to_vec(), [&s.data[..], &[1, 2, 3]].concat()];
         for at in [0, 1, n / 3, n / 2, n.saturating_sub(1)] {
             if at < n {
-                let mut d = s.data.clone();
+                let mut d = s.data.to_vec();
                 d[at] ^= 0x5a;
                 cases.push(d);
             }
         }
         for d in cases {
             let mut g = f.clone();
-            g.streams[k].data = d;
+            g.streams[k].data = d.into();
             let r = std::panic::catch_unwind(|| g.eval(&modules(3)));
             assert!(r.is_ok(), "stream {} ({}) panicked", k, s.class);
         }

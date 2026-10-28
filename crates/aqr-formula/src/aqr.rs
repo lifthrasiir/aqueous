@@ -2764,7 +2764,10 @@ mod tests {
         }
         // Streams without slices have no blocks.
         let mut f = sample();
-        f.streams.insert(0, Stream { class: "unused".into(), kind: Kind::Unknown, content: false, data: vec![1; 100] });
+        f.streams.insert(
+            0,
+            Stream { class: "unused".into(), kind: Kind::Unknown, content: false, data: vec![1; 100].into() },
+        );
         f.root.slices_mut(&mut |s, _, _| *s += 1);
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert_eq!(types(&c), [MODULE, FORMULA, NON_LEAF_RAW, NON_LEAF_RAW]);
@@ -3008,7 +3011,7 @@ mod tests {
             class: class.into(),
             kind,
             content: false,
-            data: d.to_vec(),
+            data: d.to_vec().into(),
         };
         for (level, dense) in [(Level::MID, false), (Level::Of(7), false), (Level::HIGH, true), (Level::Of(9), true)] {
             let enc = Encoder::new(level);
@@ -3211,7 +3214,7 @@ mod tests {
         let whole = Formula {
             streams: vec![
                 f.streams[0].clone(),
-                Stream { class: "b".into(), kind: Kind::Unknown, content: false, data: d.to_vec() },
+                Stream { class: "b".into(), kind: Kind::Unknown, content: false, data: d.to_vec().into() },
             ],
             ..f.clone()
         };

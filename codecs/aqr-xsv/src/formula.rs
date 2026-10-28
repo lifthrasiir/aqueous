@@ -306,7 +306,7 @@ mod tests {
         let Node::Apply(a) = &f.root else { panic!() };
         let mut rng = aqr_common::rng::Rng::new(5);
         for _ in 0..20000 {
-            let mut streams: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.clone()).collect();
+            let mut streams: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
             let k = rng.below(streams.len() as u64) as usize;
             if streams[k].is_empty() {
                 continue;

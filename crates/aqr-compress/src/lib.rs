@@ -119,9 +119,9 @@ pub use extent::extent;
 pub use progress::Event;
 
 use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZO, Native, SNAPPY, ZIP};
-use aqr_formula::Stream;
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
+use aqr_formula::{Bytes, Stream};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -679,14 +679,19 @@ impl Made {
         if let Some(gaps) = gaps {
             let mut data = Vec::with_capacity(gaps.iter().map(Range::len).sum());
             gaps.into_iter().for_each(|g| data.extend_from_slice(&d[g]));
-            f.streams[0].data = data;
+            f.streams[0].data = data.into();
         }
         f
     }
 
-    /// [`Made::cut`] out of `d` itself, in place.
-    fn cut_from(self, mut d: Vec<u8>) -> Formula {
+    /// [`Made::cut`] out of `d` itself, in place where it is its own (a copy of what is kept,
+    /// where it is shared: a file mapped, not to be copied whole).
+    fn cut_from(self, d: Bytes) -> Formula {
+        if d.is_shared() {
+            return self.cut(&d);
+        }
         let Made { mut f, gaps } = self;
+        let mut d = d.into_vec();
         if let Some(gaps) = gaps {
             let mut at = 0;
             for g in gaps {
@@ -698,7 +703,7 @@ impl Made {
             }
             d.truncate(at);
             d.shrink_to_fit();
-            f.streams[0].data = d;
+            f.streams[0].data = d.into();
         }
         f
     }
@@ -1977,7 +1982,7 @@ mod tests {
                 class: "raw".into(),
                 kind: Kind::Unknown,
                 content: false,
-                data: vec![1, 2, 3],
+                data: vec![1, 2, 3].into(),
             }],
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
             shared: vec![],

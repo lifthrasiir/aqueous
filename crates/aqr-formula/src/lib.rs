@@ -61,7 +61,139 @@ pub struct Stream {
     /// representation of the recompressor's own: whoever takes the formula may recompress its
     /// slices in turn wherever they are (aqr-compress, as it does an application's content).
     pub content: bool,
-    pub data: Vec<u8>,
+    pub data: Bytes,
+}
+
+/// The bytes of a [`Stream`]: its own, or shared with whoever else holds them (a file mapped
+/// into memory, which the system may drop and read again as it likes, rather than a copy of
+/// it). Changing them makes them its own first.
+#[derive(Clone)]
+pub struct Bytes(Repr);
+
+#[derive(Clone)]
+enum Repr {
+    Owned(Vec<u8>),
+    Shared(Arc<dyn AsRef<[u8]> + Send + Sync>),
+}
+
+impl Bytes {
+    pub fn shared(data: Arc<dyn AsRef<[u8]> + Send + Sync>) -> Bytes {
+        Bytes(Repr::Shared(data))
+    }
+
+    /// Whether the bytes are shared rather than its own: changing them would copy them all.
+    pub fn is_shared(&self) -> bool {
+        matches!(self.0, Repr::Shared(_))
+    }
+
+    /// The bytes as its own, copied first where they are shared.
+    pub fn to_mut(&mut self) -> &mut Vec<u8> {
+        if let Repr::Shared(d) = &self.0 {
+            self.0 = Repr::Owned(d.as_ref().as_ref().to_vec());
+        }
+        let Repr::Owned(v) = &mut self.0 else { unreachable!() };
+        v
+    }
+
+    pub fn into_vec(self) -> Vec<u8> {
+        match self.0 {
+            Repr::Owned(v) => v,
+            Repr::Shared(d) => d.as_ref().as_ref().to_vec(),
+        }
+    }
+
+    pub fn extend_from_slice(&mut self, d: &[u8]) {
+        self.to_mut().extend_from_slice(d)
+    }
+
+    pub fn truncate(&mut self, len: usize) {
+        if len < self.len() {
+            self.to_mut().truncate(len)
+        }
+    }
+
+    pub fn shrink_to_fit(&mut self) {
+        if let Repr::Owned(v) = &mut self.0 {
+            v.shrink_to_fit()
+        }
+    }
+}
+
+// (bytes shared are only read)
+impl std::panic::UnwindSafe for Bytes {}
+impl std::panic::RefUnwindSafe for Bytes {}
+
+impl Default for Bytes {
+    fn default() -> Bytes {
+        Bytes(Repr::Owned(Vec::new()))
+    }
+}
+
+impl From<Vec<u8>> for Bytes {
+    fn from(v: Vec<u8>) -> Bytes {
+        Bytes(Repr::Owned(v))
+    }
+}
+
+impl From<Bytes> for Vec<u8> {
+    fn from(b: Bytes) -> Vec<u8> {
+        b.into_vec()
+    }
+}
+
+impl std::ops::Deref for Bytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        match &self.0 {
+            Repr::Owned(v) => v,
+            Repr::Shared(d) => d.as_ref().as_ref(),
+        }
+    }
+}
+
+impl AsRef<[u8]> for Bytes {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl std::ops::DerefMut for Bytes {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        self.to_mut()
+    }
+}
+
+impl PartialEq for Bytes {
+    fn eq(&self, other: &Bytes) -> bool {
+        **self == **other
+    }
+}
+
+impl Eq for Bytes {}
+
+impl PartialEq<[u8]> for Bytes {
+    fn eq(&self, other: &[u8]) -> bool {
+        **self == *other
+    }
+}
+
+impl<const N: usize> PartialEq<&[u8; N]> for Bytes {
+    fn eq(&self, other: &&[u8; N]) -> bool {
+        **self == other[..]
+    }
+}
+
+impl PartialEq<Vec<u8>> for Bytes {
+    fn eq(&self, other: &Vec<u8>) -> bool {
+        **self == other[..]
+    }
+}
+
+impl fmt::Debug for Bytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&**self, f)
+    }
 }
 
 /// What a recompressor knows of a stream's bytes, for whoever takes them as data to recompress
@@ -322,18 +454,18 @@ impl Formula {
     }
 
     /// Adds a stream of [`Kind::Unknown`], returning a slice of all of it.
-    pub fn push(&mut self, class: impl Into<Cow<'static, str>>, data: Vec<u8>) -> Node {
+    pub fn push(&mut self, class: impl Into<Cow<'static, str>>, data: impl Into<Bytes>) -> Node {
         self.push_as(class, Kind::Unknown, data)
     }
 
     /// Adds a stream of `kind`, returning a slice of all of it.
-    pub fn push_as(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: Vec<u8>) -> Node {
-        self.push_stream(Stream { class: class.into(), kind, content: false, data })
+    pub fn push_as(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: impl Into<Bytes>) -> Node {
+        self.push_stream(Stream { class: class.into(), kind, content: false, data: data.into() })
     }
 
     /// Adds a stream of `kind` that is [`Stream::content`], returning a slice of all of it.
-    pub fn push_content(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: Vec<u8>) -> Node {
-        self.push_stream(Stream { class: class.into(), kind, content: true, data })
+    pub fn push_content(&mut self, class: impl Into<Cow<'static, str>>, kind: Kind, data: impl Into<Bytes>) -> Node {
+        self.push_stream(Stream { class: class.into(), kind, content: true, data: data.into() })
     }
 
     fn push_stream(&mut self, s: Stream) -> Node {
@@ -422,18 +554,28 @@ impl Formula {
                     _ => merged.push((a, b, 0)),
                 }
             }
-            // in place: the bytes kept only move towards the start
-            let (mut data, mut at) = (s.data, 0);
+            let mut at = 0;
             for m in &mut merged {
-                let (a, b) = (m.0 as usize, m.1 as usize);
-                if a != at {
-                    data.copy_within(a..b, at);
-                }
-                m.2 = at as u64;
-                at += b - a;
+                m.2 = at;
+                at += m.1 - m.0;
             }
-            data.truncate(at);
-            data.shrink_to_fit();
+            let data = if s.data.is_shared() && at < s.data.len() as u64 {
+                // (bytes shared copied only as far as they are kept)
+                let mut d = Vec::with_capacity(at as usize);
+                merged.iter().for_each(|m| d.extend_from_slice(&s.data[m.0 as usize..m.1 as usize]));
+                d.into()
+            } else {
+                // in place: the bytes kept only move towards the start
+                let mut data = s.data;
+                for m in &merged {
+                    if m.0 != m.2 {
+                        data.copy_within(m.0 as usize..m.1 as usize, m.2 as usize);
+                    }
+                }
+                data.truncate(at as usize);
+                data.shrink_to_fit();
+                data
+            };
             *r = merged;
             streams.push(Stream { data, ..s });
         }
@@ -612,7 +754,7 @@ impl Formula {
             && ends.iter().scan(0, |s, &(_, e)| Some(e - std::mem::replace(s, e))).all(|n| n < own)
         {
             let len = data.len() as u64;
-            self.streams[raw].data = data;
+            self.streams[raw].data = data.into();
             return Node::slice(raw, 0, len);
         }
         // the stream of each kind, by its first entry
@@ -646,7 +788,7 @@ impl Formula {
         }
         data.truncate(at);
         data.shrink_to_fit();
-        self.streams[raw].data = data;
+        self.streams[raw].data = data.into();
         let base = self.streams.len() - 1;
         for (kind, d) in order.into_iter().zip(of_kind).skip(1) {
             let class: Cow<'static, str> = match kind {
@@ -984,6 +1126,12 @@ mod tests {
         let mut c = f.clone();
         c.compact();
         assert_eq!(c.eval(&Rev), f.eval(&Rev));
+        // shared bytes: only those kept copied, the same as of its own
+        let mut s = f.clone();
+        s.streams[0].data = Bytes::shared(Arc::new(b"0123456789".to_vec()));
+        s.compact();
+        assert!(!s.streams[0].data.is_shared());
+        assert_eq!(s, c);
         // The slice past the end of "b" keeps it whole; the slice of no stream stays so.
         assert_eq!(
             c.streams.iter().map(|s| (&*s.class, &s.data[..])).collect::<Vec<_>>(),

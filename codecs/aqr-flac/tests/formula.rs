@@ -88,7 +88,7 @@ fn corrupt_inputs() {
     let (_, d) = files().into_iter().next().unwrap();
     let f = formula::encode(&d, 1).unwrap();
     let a = f.applies()[0];
-    let ins: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.clone()).collect();
+    let ins: Vec<Vec<u8>> = f.streams.iter().map(|s| s.data.to_vec()).collect();
     let run = |p: &[u8], i: &[Vec<u8>], len: u64| {
         let r: Vec<&[u8]> = i.iter().map(|v| &v[..]).collect();
         let _ = formula::decode(p, &[&a.resources[0][..]], &r, len, 1);

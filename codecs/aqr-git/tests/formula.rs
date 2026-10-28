@@ -190,7 +190,7 @@ fn corrupt_inputs_fail_cleanly() {
     };
     let (layout, kept) = (layout_of(&f).to_vec(), f.streams.iter().find(|s| s.class == "git-pack/kept").unwrap());
     let len = p.len() as u64;
-    let inputs = [deflated, layout, kept.data.clone()];
+    let inputs = [deflated, layout, kept.data.to_vec()];
     for k in 0..3 {
         let mut ins = inputs.clone();
         for i in (0..ins[k].len()).step_by(1.max(ins[k].len() / 200)) {

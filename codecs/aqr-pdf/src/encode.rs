@@ -378,9 +378,9 @@ pub fn try_formula(file: &[u8], opts: &Options, st: &mut Stats) -> Option<Formul
             None => zipped.iter().map(zlen).sum(),
         };
     for p in pools {
-        f.streams[p.stream].data = p.data;
+        f.streams[p.stream].data = p.data.into();
     }
-    f.streams[F_META].data = meta;
+    f.streams[F_META].data = meta.into();
     let mut inputs = vec![f.push("pdf/table", table), f.push("pdf/skeleton", skel), f.push("pdf/raw", raw)];
     let deflate = aqr_flate::formula::streams(&mut f, deflate).expect("records of known profiles");
     inputs.extend([Node::pack(deflate), Node::pack(png), Node::pack(jpeg)]);

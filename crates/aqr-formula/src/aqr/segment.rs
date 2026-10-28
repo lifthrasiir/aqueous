@@ -128,8 +128,12 @@ impl SegmentWriter {
     /// not used), to follow those so far. Fails on slices out of their streams and on outputs
     /// not taken once each (by one leaf).
     pub fn batch(&self, enc: &Encoder, f: &Formula, leaves: &[Leaf]) -> Result<Batch> {
-        let mut check = f.clone();
-        check.root = Node::Concat(leaves.iter().flat_map(|l| l.outputs.iter().cloned()).collect());
+        // (the streams are looked at in `f`: not copied)
+        let check = Formula {
+            streams: Vec::new(),
+            root: Node::Concat(leaves.iter().flat_map(|l| l.outputs.iter().cloned()).collect()),
+            shared: f.shared.clone(),
+        };
         check.check_outputs()?;
         for (i, l) in leaves.iter().enumerate() {
             if l.outputs.is_empty() || l.sums.len() != l.outputs.len() {

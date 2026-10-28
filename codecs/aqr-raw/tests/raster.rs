@@ -151,7 +151,7 @@ fn corrupt_inputs() {
         .inputs
         .iter()
         .map(|n| match n {
-            Node::Slice { stream, .. } => f.streams[*stream].data.clone(),
+            Node::Slice { stream, .. } => f.streams[*stream].data.to_vec(),
             _ => panic!(),
         })
         .collect();

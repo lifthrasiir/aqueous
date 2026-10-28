@@ -48,6 +48,7 @@ mod view;
 
 use aqr_compress::{Options, compress_formula_telling, compress_tree_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
+use aqr_formula::Bytes;
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, Value, name_bytes, name_from};
 
 const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
@@ -235,9 +236,9 @@ impl aqr_compress::Source for Gathered {
         self.contents[c].2
     }
 
-    fn read(&self, c: usize) -> std::io::Result<Vec<u8>> {
+    fn read(&self, c: usize) -> std::io::Result<Bytes> {
         let p = &self.contents[c].0;
-        fs::read(p).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))
+        read_file(p).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))
     }
 
     fn read_range(&self, c: usize, range: std::ops::Range<u64>) -> std::io::Result<Vec<u8>> {
@@ -252,6 +253,29 @@ impl aqr_compress::Source for Gathered {
     }
 }
 
+/// Files of at least this many bytes are mapped into memory rather than read ([`read_file`]):
+/// of fewer, a copy costs less than a mapping.
+const MAP_MIN: u64 = 64 << 10;
+
+/// The bytes of file `p`: mapped into memory (where it is of at least [`MAP_MIN`] bytes), so
+/// that what is read of it is the system's to drop and read again rather than the heap's,
+/// and let go of when the bytes are dropped.
+fn read_file(p: &Path) -> std::io::Result<Bytes> {
+    use std::io::Read;
+    let mut f = fs::File::open(p)?;
+    let len = f.metadata()?.len();
+    if len < MAP_MIN {
+        let mut d = Vec::with_capacity(len as usize);
+        f.read_to_end(&mut d)?;
+        return Ok(d.into());
+    }
+    // SAFETY: the file is not to change while it is archived; where it does, the archive's
+    // verification (or a reread, [`aqr_compress::Source`]) tells, but for a file cut short,
+    // which a read past its end then stops
+    let m = unsafe { memmap2::Mmap::map(&f) }?;
+    Ok(Bytes::shared(std::sync::Arc::new(m)))
+}
+
 fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String> {
     output(out, a.force)?;
     let start = Instant::now();
@@ -260,7 +284,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     if let [input] = inputs
         && meta(input)?.is_file()
     {
-        let d = fs::read(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        let d = read_file(input).map_err(|e| format!("{}: {e}", input.display()))?;
         let name = os_bytes(input.as_os_str());
         let kind = kind_by_name(&name);
         let g = Gathered {

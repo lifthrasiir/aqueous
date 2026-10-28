@@ -107,7 +107,7 @@ fn corrupt_inputs() {
         .inputs
         .iter()
         .map(|n| match n {
-            aqr_formula::Node::Slice { stream, .. } => f.streams[*stream].data.clone(),
+            aqr_formula::Node::Slice { stream, .. } => f.streams[*stream].data.to_vec(),
             _ => panic!(),
         })
         .collect();
