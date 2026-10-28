@@ -290,12 +290,13 @@ type ModuleBlock = std::rc::Rc<Vec<u8>>;
 /// The Wasm module of a module, if there is one ([`Encoder::with_modules`]).
 pub type WasmOf = fn(Module) -> Option<Wasm>;
 
-/// A Wasm module as an encoder writes it: its bytes, and the data of its module block where
-/// made beforehand ([`module_block_data`]), which is then written as it is.
-#[derive(Debug, Clone)]
-pub struct Wasm {
-    pub bytes: Cow<'static, [u8]>,
-    pub block: Option<Cow<'static, [u8]>>,
+/// A Wasm module as an encoder writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Wasm {
+    /// Its bytes, compressed into its module block.
+    Bytes(Cow<'static, [u8]>),
+    /// The data of its module block made beforehand ([`module_block_data`]), written as it is.
+    Block(Cow<'static, [u8]>),
 }
 
 /// The zstd level of the module blocks made beforehand: modules are made once and archived
@@ -303,7 +304,7 @@ pub struct Wasm {
 const MODULE_LEVEL: i32 = 22;
 
 /// The data of the module block of Wasm module `wasm`, compressed at the highest level, to be
-/// made once ([`Wasm::block`]).
+/// made once ([`Wasm::Block`]).
 pub fn module_block_data(wasm: &[u8]) -> Result<Vec<u8>> {
     always_compressed(&mut CCtx::create(), &[wasm], MODULE_LEVEL, 1)
 }
@@ -353,7 +354,7 @@ impl Encoder {
             shared: false,
             shared_modules: false,
             held: RefCell::default(),
-            wasm: |m| Some(Wasm { bytes: Cow::Owned(stand_in(m)), block: None }),
+            wasm: |m| Some(Wasm::Bytes(Cow::Owned(stand_in(m)))),
             module_blocks: RefCell::default(),
         }
     }
@@ -373,9 +374,9 @@ impl Encoder {
             return Ok(b.clone());
         }
         let wasm = (self.wasm)(m).ok_or_else(|| Error::new(format!("no Wasm module of {m}")))?;
-        let b = std::rc::Rc::new(match wasm.block {
-            Some(b) => b.into_owned(),
-            None => always_compressed(&mut self.cctx(), &[&wasm.bytes], level, self.threads)?,
+        let b = std::rc::Rc::new(match wasm {
+            Wasm::Block(b) => b.into_owned(),
+            Wasm::Bytes(w) => always_compressed(&mut self.cctx(), &[&w], level, self.threads)?,
         });
         self.module_blocks.borrow_mut().insert((m, level), b.clone());
         Ok(b)

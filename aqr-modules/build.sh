@@ -34,7 +34,6 @@ rows="$known.rows"
         echo "        name: \"$1\","
         echo "        version: $2,"
         echo "        sha512_256: hex(\"$sum\"),"
-        echo "        wasm: include_bytes!(\"../wasm/$bin.wasm\"),"
         echo "        block: include_bytes!(\"../wasm/$bin.block\"),"
         echo "    },"
         crate=$(head -1 "$src" | sed -n 's/^\/\/!.*(\(aqr-[a-z0-9-]*\)).*/\1/p')

@@ -217,7 +217,7 @@ pub fn identify(wasm: &[u8]) -> Option<String> {
 pub fn wasm_of(m: Module) -> Option<aqr::Wasm> {
     use std::borrow::Cow;
     let k = built(m)?;
-    Some(aqr::Wasm { bytes: Cow::Borrowed(k.wasm), block: Some(Cow::Borrowed(k.block)) })
+    Some(aqr::Wasm::Block(Cow::Borrowed(k.block)))
 }
 
 /// The modules of this crate run by `m` where an archive has those of aqr-modules ([`known`]).

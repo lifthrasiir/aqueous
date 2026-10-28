@@ -18,11 +18,19 @@ pub use known::KNOWN;
 pub struct Known {
     pub name: &'static str,
     pub version: u16,
-    /// SHA-512/256 of [`Known::wasm`], as the spec hashes.
+    /// SHA-512/256 of the module ([`Known::read_wasm`]), as the spec hashes.
     pub sha512_256: [u8; 32],
-    pub wasm: &'static [u8],
-    /// The data of its module block, made by `aqr_formula::aqr::module_block_data`.
+    /// The data of its module block, made by `aqr_formula::aqr::module_block_data`: all that
+    /// binaries hold of the module (the module itself would add 3 MB to them).
     pub block: &'static [u8],
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl Known {
+    /// The module, from `wasm/` (for tests and tools run in the source tree).
+    pub fn read_wasm(&self) -> std::io::Result<Vec<u8>> {
+        std::fs::read(format!("{}/wasm/{}.wasm", env!("CARGO_MANIFEST_DIR"), self.name.replace('/', "-")))
+    }
 }
 
 /// The bytes of `s`, hexadecimal digits.
