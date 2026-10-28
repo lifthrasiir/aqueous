@@ -307,7 +307,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     let file = create(out, a.force)?;
     let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
     // (a bar on a terminal, drawn again now and then; with -v, the log as the files are written)
-    let view = view::View::new(&g, std::io::stderr().is_terminal(), a.verbose);
+    let view = view::View::new(&g, std::io::stderr().is_terminal() && view::takes_escapes(), a.verbose);
     let done = std::sync::atomic::AtomicBool::new(false);
     let r = std::thread::scope(|s| {
         if !a.quiet && view.bars() {

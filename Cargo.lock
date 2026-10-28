@@ -44,6 +44,7 @@ dependencies = [
  "aqr-decompress",
  "aqr-formula",
  "memmap2",
+ "windows-sys",
 ]
 
 [[package]]

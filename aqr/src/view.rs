@@ -170,6 +170,30 @@ impl<'g> View<'g> {
     }
 }
 
+/// Whether standard error, a terminal, takes the escape sequences that the bar is drawn with:
+/// on Windows, a console once it is told to (Windows 10 on), or a pseudo-terminal such as
+/// mintty's (not a console).
+pub fn takes_escapes() -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::System::Console::{
+            ENABLE_VIRTUAL_TERMINAL_PROCESSING, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, SetConsoleMode,
+        };
+        // SAFETY: a handle of the process's own, and a mode written to a local.
+        unsafe {
+            let h = GetStdHandle(STD_ERROR_HANDLE);
+            let mut mode = 0;
+            if GetConsoleMode(h, &mut mode) == 0 {
+                return true;
+            }
+            mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0
+                || SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING) != 0
+        }
+    }
+    #[cfg(not(windows))]
+    true
+}
+
 /// The lines of the bar of `s`, and the file taking long, if any.
 fn bar(s: &State, slow: Option<String>) -> Vec<String> {
     let share = |(done, total): (u64, u64)| if total == 0 { 0.0 } else { (done as f64 / total as f64).min(1.0) };
