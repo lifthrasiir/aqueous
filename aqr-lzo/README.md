@@ -62,7 +62,7 @@ Testing the archives (`aqr -t`) takes 1.1 s, and 1.9 s for the second with the m
 ## Tests
 
 ```sh
-cargo test -r                             # fixtures, random parses, damaged records
+cargo rt                                  # fixtures, random parses, damaged records
 python3 -I scripts/gen-fixtures.py        # rewrites tests/data (needs liblzo2 and lzop)
 ```
 

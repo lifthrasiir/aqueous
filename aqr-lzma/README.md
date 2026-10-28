@@ -50,7 +50,7 @@ performance cores); with 10, the per-thread figures halve and the wall time stay
 ## Tests
 
 ```sh
-cargo test -r                      # fixtures of XZ Utils, streams without end marker, damaged records
+cargo rt                           # fixtures of XZ Utils, streams without end marker, damaged records
 python3 -I scripts/gen-fixtures.py # rewrites tests/data (needs xz)
 ```
 
