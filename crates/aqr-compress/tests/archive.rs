@@ -277,6 +277,42 @@ fn shared_contents() {
     }
 }
 
+/// A content not read as it is (a file cut short while mapped): the archive fails, whether its
+/// batch is written or, of the same content as another, not.
+#[test]
+fn not_intact() {
+    struct Cut(Vec<(String, Vec<u8>)>, usize);
+    impl aqr_compress::Source for Cut {
+        fn len(&self) -> usize {
+            self.0.len()
+        }
+        fn name(&self, c: usize) -> &[u8] {
+            self.0[c].0.as_bytes()
+        }
+        fn size(&self, c: usize) -> u64 {
+            self.0[c].1.len() as u64
+        }
+        fn read(&self, c: usize) -> std::io::Result<aqr_formula::Bytes> {
+            Ok(self.0[c].1.clone().into())
+        }
+        fn intact(&self, c: usize) -> std::io::Result<()> {
+            match c == self.1 {
+                true => Err(std::io::Error::other("cut")),
+                false => Ok(()),
+            }
+        }
+    }
+    let files = sample();
+    let (tree, contents) = tree_of(&files);
+    let src = Cut(contents, 0);
+    let mut out = Vec::new();
+    assert!(aqr_compress::compress_tree_to(&tree, &src, &Options::default(), &mut out, &|_| {}).is_err());
+    // (t1.txt, the same as same.txt, in a batch of its own)
+    let opt = Options { batch: 1, ..Options::default() };
+    let src = Cut(src.0, 1);
+    assert!(aqr_compress::compress_tree_to(&tree, &src, &opt, &mut out, &|_| {}).is_err());
+}
+
 /// Words at random, `n` bytes of them from `seed`.
 fn words(n: usize, seed: u64) -> Vec<u8> {
     let mut x = seed;

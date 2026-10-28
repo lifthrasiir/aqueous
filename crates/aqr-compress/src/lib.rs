@@ -101,6 +101,7 @@ mod exe;
 mod extent;
 mod flate;
 mod git;
+pub mod mapped;
 mod progress;
 mod sets;
 mod verify;

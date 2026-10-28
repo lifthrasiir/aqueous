@@ -46,6 +46,7 @@ use std::time::{Instant, UNIX_EPOCH};
 mod stop;
 mod view;
 
+use aqr_compress::mapped::Mapper;
 use aqr_compress::{Options, compress_formula_telling, compress_tree_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
@@ -220,6 +221,8 @@ struct Gathered {
     /// kind) and its size as gathered.
     contents: Vec<(PathBuf, Vec<u8>, u64)>,
     skipped: Vec<String>,
+    /// What the files are read by, mapped into memory.
+    mapper: Mapper,
 }
 
 /// The files of `Gathered`, read as their batch is made.
@@ -238,7 +241,7 @@ impl aqr_compress::Source for Gathered {
 
     fn read(&self, c: usize) -> std::io::Result<Bytes> {
         let p = &self.contents[c].0;
-        read_file(p).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))
+        self.mapper.read(p).map_err(|e| std::io::Error::new(e.kind(), format!("{}: {e}", p.display())))
     }
 
     fn read_range(&self, c: usize, range: std::ops::Range<u64>) -> std::io::Result<Vec<u8>> {
@@ -251,50 +254,38 @@ impl aqr_compress::Source for Gathered {
         f.take(range.end.saturating_sub(range.start)).read_to_end(&mut d).map_err(at)?;
         Ok(d)
     }
-}
 
-/// Files of at least this many bytes are mapped into memory rather than read ([`read_file`]):
-/// of fewer, a copy costs less than a mapping.
-const MAP_MIN: u64 = 64 << 10;
-
-/// The bytes of file `p`: mapped into memory (where it is of at least [`MAP_MIN`] bytes), so
-/// that what is read of it is the system's to drop and read again rather than the heap's,
-/// and let go of when the bytes are dropped.
-fn read_file(p: &Path) -> std::io::Result<Bytes> {
-    use std::io::Read;
-    let mut f = fs::File::open(p)?;
-    let len = f.metadata()?.len();
-    if len < MAP_MIN {
-        let mut d = Vec::with_capacity(len as usize);
-        f.read_to_end(&mut d)?;
-        return Ok(d.into());
+    fn intact(&self, c: usize) -> std::io::Result<()> {
+        let p = &self.contents[c].0;
+        match self.mapper.cut(p) {
+            true => Err(std::io::Error::other(format!("{}: cut short while archived", p.display()))),
+            false => Ok(()),
+        }
     }
-    // SAFETY: the file is not to change while it is archived; where it does, the archive's
-    // verification (or a reread, [`aqr_compress::Source`]) tells, but for a file cut short,
-    // which a read past its end then stops
-    let m = unsafe { memmap2::Mmap::map(&f) }?;
-    Ok(Bytes::shared(std::sync::Arc::new(m)))
 }
 
 fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String> {
     output(out, a.force)?;
     let start = Instant::now();
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
+    let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
     // a single file: an archive of the file alone
     if let [input] = inputs
         && meta(input)?.is_file()
     {
-        let d = read_file(input).map_err(|e| format!("{}: {e}", input.display()))?;
+        let d = mapper.read(input).map_err(|e| format!("{}: {e}", input.display()))?;
         let name = os_bytes(input.as_os_str());
         let kind = kind_by_name(&name);
         let g = Gathered {
             tree: Tree::default(),
             contents: vec![(input.clone(), name, d.len() as u64)],
             skipped: Vec::new(),
+            mapper,
         };
         let view = view::View::new(&g, bars(), false);
         // (of the kind its name tells, as a file in an archive of many)
         let (c, f) = viewed(a, &view, |tell| compress_formula_telling(&d, kind, &a.opt, tell));
+        aqr_compress::Source::intact(&g, 0).map_err(|e| e.to_string())?;
         write_whole(out, a.force, |w| w.write_all(&c))?;
         if !a.quiet && a.verbose {
             let modules: Vec<String> = f.applies().iter().map(|m| m.module.to_string()).collect();
@@ -315,7 +306,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         return Ok(());
     }
 
-    let mut g = Gathered { tree: Tree::default(), contents: Vec::new(), skipped: Vec::new() };
+    let mut g = Gathered { tree: Tree::default(), contents: Vec::new(), skipped: Vec::new(), mapper };
     match inputs {
         // a directory alone: its entries at the root
         [dir] => {

@@ -74,6 +74,14 @@ pub trait Source: Sync {
         let end = (range.end as usize).min(d.len());
         Ok(d[(range.start as usize).min(end)..end].to_vec())
     }
+
+    /// Fails where content `c` may not have been read as it is: where it changed while read
+    /// (a file cut short while mapped, [`crate::mapped::Mapper::cut`]). Asked of the contents
+    /// of each batch before it is written, those of the same content as others among them.
+    fn intact(&self, c: usize) -> io::Result<()> {
+        let _ = c;
+        Ok(())
+    }
 }
 
 impl Source for [Input<'_>] {
@@ -239,6 +247,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
             }
         }
         if files.is_empty() {
+            batch.iter().try_for_each(|&c| src.intact(c))?;
             notes.send(Note::Written);
             tell(Event::Written { contents: batch, report: &r });
             continue;
@@ -250,10 +259,13 @@ fn compress_tree_noting<S: Source + ?Sized>(
             if bad.is_empty() {
                 break made;
             }
+            // (not given back as it was not read as it is: told so, not made again)
+            batch.iter().try_for_each(|&c| src.intact(c))?;
             raw.extend(bad);
             notes.send(Note::Batch { bytes, verify: opt.verify });
             data = reread(src, &files, opt.threads)?;
         };
+        batch.iter().try_for_each(|&c| src.intact(c))?;
         out.write_all(&made.batch.bytes)?;
         w.commit(&made.batch);
         for (k, file) in files.iter().enumerate() {

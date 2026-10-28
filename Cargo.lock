@@ -122,6 +122,8 @@ dependencies = [
  "aqr-zip",
  "crc32fast",
  "flate2",
+ "libc",
+ "memmap2",
  "xxhash-rust",
  "zstd",
 ]
