@@ -6,7 +6,8 @@ module completely enough to reimplement both directions.
 
 A `.clip` file holds its layers as 256×256 tiles, each a zlib stream. The tiles that zlib 1.3
 at level 1, memLevel 9 makes again exactly are taken out and coded by a model of whole pixels
-with adaptive binary arithmetic coding; the decoder makes their zlib streams again. The SQLite
+with adaptive binary arithmetic coding, a tile equal to an earlier one by a reference to it; the
+decoder makes their zlib streams again. The SQLite
 database the file holds is coded by its own recompressor. The rest of the file, the
 *skeleton*, is kept as it is.
 
@@ -66,35 +67,45 @@ There is no checksum to test.
 | slot | class | content |
 |---|---|---|
 | 0 | `clip/skeleton` | the original without the modelled tiles' zlib streams and without the database's bytes |
-| 1 | `clip/index` | the runs of modelled blocks, then the byte length of each batch's stream (3.2) |
+| 1 | `clip/index` | the runs of modelled blocks, the repeated tiles, then the byte length of each batch's stream (3.2) |
 | 2 | `clip/tiles` | the batches' streams, one after another (sections 6, 7) |
 | 3 | `clip/database` (or the database's own formula) | the body of the `SQLi` chunk, or nothing where there is none |
 
 ### 3.2 Index
 
-varints: `nruns`, then `nruns` run lengths `r[0 .. nruns]`, then one length per batch (3.4).
-The runs cover the *eligible* blocks (4.3) in file order: `r[0]` modelled, then `r[1]` not
-modelled, and so on alternately; an eligible block past the runs is not modelled. `nruns`
-greater than the bytes of the index is invalid, and so is anything after the batch lengths.
+varints: `nruns`, then `nruns` run lengths `r[0 .. nruns]`; `nrefs`, then `nrefs` pairs
+`gap`, `back`; then one length per batch (3.4).
+
+- The runs cover the *eligible* blocks (4.3) in file order: `r[0]` modelled, then `r[1]` not
+  modelled, and so on alternately; an eligible block past the runs is not modelled.
+- The pairs name the *repeated* tiles among the modelled tiles, numbered in file order from 0:
+  the first is tile `gap`, each next one `gap` tiles after the one before plus one (a tile number
+  past the last tile is invalid). The other modelled tiles are *distinct*, numbered in file
+  order from 0. A repeated tile is the distinct tile `back` places before the next distinct
+  number at that point: `back` must be at least 1 and at most the distinct tiles before it, and
+  that tile must be of the same layout.
+- `nruns` or `nrefs` greater than the bytes of the index is invalid, and so is anything after
+  the batch lengths.
 
 ### 3.3 Steps
 
 1. Walk the skeleton (section 4) with the runs: the walk gives the sequence of *pieces*:
    `Keep(n)` (bytes of the skeleton), `Tile(layout, n)` (a modelled tile whose zlib stream has
    `n` bytes) and `Database(n)`.
-2. Form the batches (3.4) of the `Tile` pieces, read the batch lengths, and split `clip/tiles`
-   by them: their sum must be its length.
+2. Read the repeated tiles (3.2), form the batches (3.4) of the distinct tiles, read the batch
+   lengths, and split `clip/tiles` by them: their sum must be its length.
 3. Decode each batch (section 7) and make each of its tiles' zlib streams (section 8). Batches
    are independent and may be decoded at once.
 4. Output the pieces in order: for `Keep(n)` the next `n` bytes of the skeleton, for
-   `Tile(l, n)` the tile's zlib stream, which must be `n` bytes, for `Database(n)` the
+   `Tile(l, n)` the zlib stream of the tile (of the distinct tile it repeats, for a repeated
+   one), which must be `n` bytes, for `Database(n)` the
    database input, which must be `n` bytes. All of the skeleton must be used, and the output
    must be `total` bytes.
 
 ### 3.4 Batches
 
-Number the modelled tiles in file order. For each layout in the order colour, one plane, two
-planes (5.1): its tiles in file order, `batch` at a time (the last batch of a layout may hold
+Take the distinct tiles (3.2) in file order. For each layout in the order colour, one plane,
+two planes (5.1): its distinct tiles in file order, `batch` at a time (the last batch of a layout may hold
 fewer). The batches come in that order, and so do their lengths in the index and their streams
 in `clip/tiles`.
 
@@ -282,6 +293,8 @@ The reference encoder (`formula::encode`):
 - Walks the original (section 4), every eligible block a candidate. A candidate is modelled
   where it inflates to `len` bytes and section 8 makes its zlib stream again exactly; the
   runs record which.
+- A modelled tile whose zlib stream equals an earlier modelled tile's is a reference to the
+  first of them.
 - `batch` is 64: batches are decoded as tasks of their own; the size costs next to nothing.
 - Codes each batch with the model, the encoder's choices being:
   - a run's full bit is 1 where the pixels equal to `w` from `i` on, up to `left`, are exactly

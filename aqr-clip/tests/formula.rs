@@ -50,13 +50,27 @@ fn every_kind_of_part() {
     let skeleton = stream(&f, "clip/skeleton");
     assert!(skeleton.len() > 5000 + stored_zlib(&tile(Layout::Color, 3)).len());
     let modelled: usize =
+        // (the repeats' streams leave the skeleton too)
         [(Layout::Color, 1), (Layout::Color, 2), (Layout::One, 4), (Layout::One, 5), (Layout::Two, 6)]
             .iter()
+            .chain(&[(Layout::Color, 2), (Layout::One, 4), (Layout::Color, 1)])
             .map(|&(l, k)| aqr_clip::zlib::deflate(&tile(l, k)).unwrap().len())
             .sum();
     assert_eq!(skeleton.len(), file.len() - modelled - stream(&f, "clip/database").len());
     // the database, no SQLite database, is content of its format
     assert!(stream(&f, "clip/database").starts_with(b"not a database"));
+}
+
+/// A tile repeated is a reference to its first: the tiles' streams hardly grow.
+#[test]
+fn repeated_tiles_are_references() {
+    let one = |n: usize| {
+        let blocks: Vec<Block> = (0..n).map(|_| made(Layout::Color, 7)).collect();
+        check(&clip_file(&[external(1, &block_data(&blocks))], None))
+    };
+    let (f1, f50) = (one(1), one(50));
+    assert_eq!(stream(&f50, "clip/tiles"), stream(&f1, "clip/tiles"));
+    assert!(stream(&f50, "clip/index").len() < 120);
 }
 
 #[test]

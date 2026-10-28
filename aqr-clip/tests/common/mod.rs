@@ -164,13 +164,16 @@ pub fn made(l: Layout, seed: u32) -> Block {
 }
 
 /// A file of every kind of part: tiles of the three layouts, empty blocks, a stream zlib would
-/// not make, `colour` more colour tiles, external data of another kind, and a database.
+/// not make, tiles repeated, `colour` more colour tiles, external data of another kind, and a
+/// database.
 pub fn sample(colour: u32) -> Vec<u8> {
     let mut a = vec![made(Layout::Color, 1), Block::Empty, made(Layout::Color, 2)];
     a.push(Block::Tile(Layout::Color, stored_zlib(&tile(Layout::Color, 3))));
     a.push(made(Layout::One, 4));
     a.extend((0..colour).map(|k| made(Layout::Color, 100 + k)));
-    let b = vec![made(Layout::One, 5), Block::Empty, made(Layout::Two, 6)];
+    // repeats of tiles before, in this block data and in another
+    a.extend([made(Layout::Color, 2), made(Layout::One, 4)]);
+    let b = vec![made(Layout::One, 5), Block::Empty, made(Layout::Two, 6), made(Layout::Color, 1)];
     let mut other = b"\x14\0\0\0CLIP_STUDIO_3D_DATA2".to_vec();
     other.extend((0..5000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 24) as u8));
     let db = [&b"not a database, but where one is "[..], &[3u8; 3000]].concat();

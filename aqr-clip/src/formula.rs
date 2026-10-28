@@ -3,11 +3,12 @@
 //! it takes it, else the database as content of that format).
 
 use crate::dynamic::{self, Escape, Model};
-use crate::module::{self, Piece, batches, layouts, pieces};
+use crate::module::{self, Piece, batches, layouts, pieces, sources};
 use crate::tile::{self, AREA, Layout};
 use aqr_common::arith::ArithEncoder;
 use aqr_common::{pool, varint};
 use aqr_formula::{Apply, Formula, Kind, Module, Node};
+use std::collections::HashMap;
 
 pub use crate::module::decode;
 
@@ -73,8 +74,22 @@ fn encode_at(input: &[u8], threads: usize) -> Option<Formula> {
         }
         *runs.last_mut().unwrap() += 1;
     }
+    // a tile equal to an earlier one (the same stream) is a reference to it
     let modelled: Vec<&[u8]> = found.iter().zip(&ok).filter(|(_, ok)| **ok).map(|(f, _)| f.1).collect();
-    let bs = batches(&layouts(&ps), BATCH);
+    let mut first: HashMap<&[u8], usize> = HashMap::new();
+    let (mut refs, mut distinct) = (Vec::new(), Vec::new());
+    for (i, &z) in modelled.iter().enumerate() {
+        match first.get(z) {
+            Some(&d) => refs.push((i, distinct.len() - d)),
+            None => {
+                first.insert(z, distinct.len());
+                distinct.push(z);
+            }
+        }
+    }
+    let (layouts_of, _) = sources(&layouts(&ps), &refs).ok()?;
+    let modelled = distinct;
+    let bs = batches(&layouts_of, BATCH);
     let streams = pool::par_map(bs.len(), threads, |b| {
         let (l, places) = &bs[b];
         let mut m = Model::new(Escape::Med, true);
@@ -90,6 +105,13 @@ fn encode_at(input: &[u8], threads: usize) -> Option<Formula> {
     varint::put(&mut index, runs.len() as u64);
     for &r in &runs {
         varint::put(&mut index, r as u64);
+    }
+    varint::put(&mut index, refs.len() as u64);
+    let mut next = 0;
+    for &(i, back) in &refs {
+        varint::put(&mut index, (i - next) as u64);
+        varint::put(&mut index, back as u64);
+        next = i + 1;
     }
     for s in &streams {
         varint::put(&mut index, s.len() as u64);

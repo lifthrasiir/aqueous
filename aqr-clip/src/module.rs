@@ -2,8 +2,8 @@
 //! aqr-formula, so that aqr-modules builds it into its Wasm module.
 //!
 //! A file is rebuilt from its skeleton (the file without the zlib streams of the tiles that are
-//! modelled and without the database), the tiles (coded by [`crate::dynamic`] in batches) and
-//! the database. The skeleton is walked by the sizes it keeps ([`pieces`]): the walk is the
+//! modelled and without the database), the tiles (coded by [`crate::dynamic`] in batches, a tile
+//! equal to an earlier one a reference to it) and the database. The skeleton is walked by the sizes it keeps ([`pieces`]): the walk is the
 //! same over the file (to make the skeleton) and over the skeleton (to rebuild the file).
 
 use crate::dynamic::{self, Escape, Model};
@@ -207,11 +207,36 @@ pub fn layouts(pieces: &[Piece]) -> Vec<Layout> {
     pieces.iter().filter_map(|p| if let Piece::Tile(l, _) = p { Some(*l) } else { None }).collect()
 }
 
+/// The distinct tiles among modelled tiles of layouts `all` (file order), given the references
+/// `refs` (in order: a tile's place, and how many distinct tiles back the one it repeats is):
+/// their layouts, and for every tile the distinct tile it is or repeats.
+pub fn sources(all: &[Layout], refs: &[(usize, usize)]) -> Result<(Vec<Layout>, Vec<usize>)> {
+    let (mut distinct, mut srcs) = (Vec::new(), Vec::with_capacity(all.len()));
+    let mut refs = refs.iter().peekable();
+    for (i, &l) in all.iter().enumerate() {
+        match refs.next_if(|r| r.0 == i) {
+            Some(&(_, back)) => {
+                let d = distinct.len().checked_sub(back).filter(|_| back > 0).ok_or_else(|| invalid("reference"))?;
+                if distinct[d] != l {
+                    return Err(invalid("reference"));
+                }
+                srcs.push(d);
+            }
+            None => {
+                srcs.push(distinct.len());
+                distinct.push(l);
+            }
+        }
+    }
+    Ok((distinct, srcs))
+}
+
 /// Largest batch.
 pub const MAX_BATCH: usize = 1 << 16;
 
 /// The module: the file of `len` bytes from the skeleton, the index (the runs of modelled and
-/// kept blocks, then the bytes of each batch's stream), the tiles' streams and the database;
+/// kept blocks, the repeated tiles, then the bytes of each batch's stream), the tiles' streams
+/// and the database;
 /// the parameter is the tiles a batch holds. `threads`: the batches decoded at once (the same
 /// bytes whatever the number).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
@@ -245,7 +270,21 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         on
     };
     let pieces = pieces(skeleton, false, &mut flags)?;
-    let bs = batches(&layouts(&pieces), per);
+    let all = layouts(&pieces);
+    // the references: where (the tiles skipped since the last) and to which distinct tile back
+    let nrefs = num(index, &mut at)?;
+    if nrefs > index.len() {
+        return Err(invalid("index"));
+    }
+    let mut refs = Vec::with_capacity(nrefs);
+    let mut next = 0usize;
+    for _ in 0..nrefs {
+        let p = next.checked_add(num(index, &mut at)?).filter(|&p| p < all.len()).ok_or_else(|| invalid("index"))?;
+        refs.push((p, num(index, &mut at)?));
+        next = p + 1;
+    }
+    let (distinct, srcs) = sources(&all, &refs)?;
+    let bs = batches(&distinct, per);
     let lens: Vec<usize> = (0..bs.len()).map(|_| num(index, &mut at)).collect::<Result<_>>()?;
     if at != index.len() {
         return Err(invalid("index"));
@@ -262,8 +301,8 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
     let streams = pool::par_map_apart(bs.len(), threads, |b| {
         decode_batch(bs[b].0, bs[b].1.len(), &tiles[starts[b]..starts[b] + lens[b]])
     });
-    // each modelled tile's stream, by its place in file order
-    let mut zs: Vec<&[u8]> = vec![&[]; layouts(&pieces).len()];
+    // each distinct tile's stream, by its place among them
+    let mut zs: Vec<&[u8]> = vec![&[]; distinct.len()];
     for ((_, places), st) in bs.iter().zip(&streams) {
         let st = st.as_ref().ok_or_else(|| invalid("tiles"))?;
         for (&i, z) in places.iter().zip(st) {
@@ -279,10 +318,11 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
                 s += n;
             }
             Piece::Tile(_, n) => {
-                if zs[t].len() != n {
+                let z = zs[srcs[t]];
+                if z.len() != n {
                     return Err(invalid("a tile's stream"));
                 }
-                out.extend_from_slice(zs[t]);
+                out.extend_from_slice(z);
                 t += 1;
             }
             Piece::Database(n) => {

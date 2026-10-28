@@ -20,11 +20,12 @@ aqr-clip speed [-t N] [-b TILES] [-m dynamic|static] FILE...  # one model as a m
 
 Measured on 2026-10-28 on a Ryzen 7 9700X through `aqr-show -t 16` (16 threads), each file
 archived at level `mid` with its round-trip check, then extracted; the decoder modules are in
-the archives (25 KB for `clip-recons`).
+the archives (26 KB for `clip-recons`). Repeated tiles as references took the 13 files from
+0.344 to 0.340, 32 to 35 MB/s and 81 to 91 MB/s; the held-out file was measured before them.
 
 | set | files | MB | ratio | zstd -3 | aqr before | compress | decompress |
 |---|---|---|---|---|---|---|---|
-| the 13 files below | 13 | 926 | **0.344** | 0.760 | 0.726 | 32 MB/s | 81 MB/s |
+| the 13 files below | 13 | 926 | **0.340** | 0.760 | 0.726 | 35 MB/s | 91 MB/s |
 | a held-out file | 1 | 14.1 | 0.499 | | 0.763 | 20 MB/s | 47 MB/s |
 
 The held-out file was not looked at before it was measured. Its tiles of few colours repeat
@@ -135,10 +136,9 @@ catch whole.
 
 ## Next steps
 
-- Tiles equal to an earlier one of their file: 54.7% of the 111,515 tiles with data, 12.1% of
-  the zlib bytes (most of them empty or one colour). As references (`speed -u`): the tiles
-  276.3 -> 272.4 MB (-1.4%), encoding 9.7 -> 8.4 s and decoding 12.2 -> 9.2 s on 16 threads
-  (half the bytes to model, and the streams copied rather than deflated).
+- Tiles alike but not equal (54.7% of the tiles with data are equal to an earlier one of their
+  file, 12.1% of the zlib bytes: references now): an earlier tile (the same block of another
+  layer) as context.
 
 - `static`: the size back without its adaptivity (tables coded against the last chunk's, so
   that chunks can be small; richer contexts).
