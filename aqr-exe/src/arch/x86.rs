@@ -230,38 +230,73 @@ const REX_MARKER: u8 = 0x0f;
 const JUMPTAB: u8 = 0xf1;
 const ESC: u8 = 0xf4;
 
-#[inline(always)]
-fn lookup_opcode(op: u8, map: u8, is64: bool) -> u8 {
-    const OPCODES: [u16; 256] = {
-        let mut tab = [0u16; 256];
+/// The classes of the opcodes of maps 0, 1, 4 and 7, and of map 0 in x86-64: the resource of
+/// the module (§4 of FORMAT.md), so that opcodes can be added without another version of it.
+/// The encoder parses by [`Opcodes::BUILTIN`]; the decoder by those it is given.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Opcodes([[u8; 256]; 5]);
+
+impl Opcodes {
+    /// The bytes of the resource: the five tables one after another.
+    pub const LEN: usize = 5 * 256;
+
+    /// This implementation's tables.
+    pub const BUILTIN: Opcodes = {
+        let mut tabs = [OPCODES0, OPCODES1, OPCODES4, OPCODES7, OPCODES0];
         let mut i = 0;
         while i < 256 {
-            assert!(OPCODES0[i] | OPCODES1[i] | OPCODES4[i] | OPCODES7[i] < 16);
-            tab[i] =
-                OPCODES0[i] as u16 | (OPCODES1[i] as u16) << 4 | (OPCODES4[i] as u16) << 8 | (OPCODES7[i] as u16) << 12;
+            if OPCODES0_I64[i >> 5] >> (i & 31) & 1 == 1 {
+                tabs[4][i] = XX;
+            }
             i += 1;
         }
-
-        // Override escape codes.
         assert!(OPCODES0[ESC as usize] == N_);
         assert!(OPCODES0[JUMPTAB as usize] == N_);
-        tab[ESC as usize] = tab[ESC as usize] & !0xf | XX as u16;
-        tab[JUMPTAB as usize] = tab[JUMPTAB as usize] & !0xf | XX as u16;
-
-        tab
+        Opcodes::markers(tabs)
     };
 
-    const MAP_FLAGS: [u8; 16] = [0x20, 0x24, R_, R1, 0x28, R_, R_, 0x2c, XX, XX, XX, XX, XX, XX, XX, XX];
-
-    if map == 0 && is64 && OPCODES0_I64[op as usize >> 5] >> (op as u32 & 31) & 1 == 1 {
-        XX
-    } else {
-        let map_flags = MAP_FLAGS[map as usize];
-        if map_flags < 0x20 {
-            map_flags
-        } else {
-            (OPCODES[op as usize] >> (map_flags & 0x1f)) as u8 & 15
+    /// The tables of a resource, unless it is not [`Opcodes::LEN`] bytes, a byte is no class,
+    /// or the class `BP` is anywhere but at the 1-byte prefixes in map 0.
+    pub fn from_resource(r: &[u8]) -> Option<Opcodes> {
+        let r: &[u8; Self::LEN] = r.try_into().ok()?;
+        let tabs: [[u8; 256]; 5] = array::from_fn(|t| *r[t * 256..].first_chunk().unwrap());
+        for (t, tab) in tabs.iter().enumerate() {
+            for (op, &k) in tab.iter().enumerate() {
+                let map0 = t == 0 || t == 4;
+                if k >= 16 || k == BP && !(map0 && PREFIXES.contains(&(op as u8))) {
+                    return None;
+                }
+            }
         }
+        Some(Opcodes::markers(tabs))
+    }
+
+    pub fn to_resource(&self) -> Vec<u8> {
+        self.0.as_flattened().to_vec()
+    }
+
+    /// `tabs` with the markers of map 0 invalid (`XX`), whatever they say.
+    const fn markers(mut tabs: [[u8; 256]; 5]) -> Opcodes {
+        tabs[0][ESC as usize] = XX;
+        tabs[0][JUMPTAB as usize] = XX;
+        tabs[4][ESC as usize] = XX;
+        tabs[4][JUMPTAB as usize] = XX;
+        Opcodes(tabs)
+    }
+
+    #[inline(always)]
+    fn class(&self, op: u8, map: u8, is64: bool) -> u8 {
+        let t = match map {
+            0 if is64 => 4,
+            0 => 0,
+            1 => 1,
+            4 => 2,
+            7 => 3,
+            2 | 5 | 6 => return R_,
+            3 => return R1,
+            _ => return XX,
+        };
+        self.0[t][op as usize]
     }
 }
 
@@ -326,12 +361,14 @@ const fn modrm_imm_size(flags: u8, prefixes: u32) -> usize {
     }
 }
 
+/// The 1-byte prefixes, the only opcodes of class `BP`.
+const PREFIXES: [u8; 11] = [0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65, 0x66, 0x67, 0xf0, 0xf2, 0xf3];
+
 const _: () = {
-    let prefixes = [0x26, 0x2e, 0x36, 0x3e, 0x64, 0x65, 0x66, 0x67, 0xf0, 0xf2, 0xf3];
     let mut bitset = 0;
     let mut i = 0;
-    while i < prefixes.len() {
-        let b = prefixes[i];
+    while i < PREFIXES.len() {
+        let b = PREFIXES[i];
         bitset |= 1u32 << prefix_hash(b);
         assert!(OPCODES0[b as usize] == BP);
         i += 1;
@@ -806,6 +843,7 @@ impl CallCache {
 #[cfg(feature = "encode")]
 #[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
 pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStreams> {
+    let opcodes = &Opcodes::BUILTIN;
     let mut st = EncodedStreams::new(origin);
 
     let mut call_cache = CallCache::new();
@@ -1011,7 +1049,7 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
             let rel_to_abs =
                 |addr: u32, delta: usize| (origin + (i.get() + delta) as u64).wrapping_add(addr as i32 as u64);
 
-            let mut flags = lookup_opcode(op, map, is64);
+            let mut flags = opcodes.class(op, map, is64);
 
             // In x86-32 these can be regular opcodes (LES/LDS/BOUND/AAD), but the decoder
             // would see them as *VEX/REX2 prefixes in the ST_OP stream, so they have to be escaped.
@@ -1233,8 +1271,14 @@ impl<'a> From<&'a EncodedStreams> for DecodedStreams<'a> {
 
 #[cfg(feature = "decode")]
 #[export_name = "disfilter_decode"]
-#[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
 pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
+    decode_with(streams, is64, &Opcodes::BUILTIN)
+}
+
+/// [`decode`] by the opcode classes of `opcodes` (the module's resource).
+#[cfg(feature = "decode")]
+#[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
+pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes) -> Option<Vec<u8>> {
     let origin = streams.origin;
     let sentinel_size = streams.sentinel_size;
     let streams = streams.streams.each_ref().map(|stream| Cell::new(&stream[..]));
@@ -1397,7 +1441,7 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
             map = 0;
         }
 
-        let mut flags = lookup_opcode(op, map, is64);
+        let mut flags = opcodes.class(op, map, is64);
         if flags == XX {
             fatal!("invalid opcode");
         } else if flags == BP {
@@ -2229,6 +2273,39 @@ mod tests {
             .unwrap_or_else(|e| panic!("Failed boundary addresses: {}", e));
 
         println!("All jump table tests passed!");
+    }
+
+    #[test]
+    fn test_opcodes_resource() {
+        let r = Opcodes::BUILTIN.to_resource();
+        assert_eq!(r.len(), Opcodes::LEN);
+        assert_eq!(Opcodes::from_resource(&r), Some(Opcodes::BUILTIN));
+        // map 0 of x86-64 apart: PUSH ES is invalid there
+        assert_eq!((r[0x06], r[4 * 256 + 0x06]), (N_, XX));
+        // the markers are XX whatever the resource says
+        let mut other = r.clone();
+        other[0xf1] = N_;
+        other[4 * 256 + 0xf4] = N_;
+        assert_eq!(Opcodes::from_resource(&other), Some(Opcodes::BUILTIN));
+
+        assert_eq!(Opcodes::from_resource(&r[1..]), None, "too short");
+        let bad = |i: usize, v: u8| {
+            let mut r = r.clone();
+            r[i] = v;
+            Opcodes::from_resource(&r)
+        };
+        assert_eq!(bad(0x90, 16), None, "not a class");
+        assert_eq!(bad(0x90, BP), None, "a prefix class at no prefix");
+        assert_eq!(bad(256 + 0x66, BP), None, "a prefix class out of map 0");
+        assert!(bad(0x66, N_).is_some(), "a prefix taken as an opcode");
+
+        // the decoder reads by the tables it is given: URDMSR (map 7 F8, ModR/M then imm32)
+        // as an opcode of no operand leaves its ModR/M and immediate to be read as opcodes
+        let code = [0x62, 0xf7, 0x7f, 0x08, 0xf8, 0xc0, 0x01, 0x02, 0x03, 0x04, 0x90];
+        let st = encode(&code, 0x1000, true).unwrap();
+        assert_eq!(decode(&(&st).into(), true).as_deref(), Some(&code[..]));
+        let other = bad(3 * 256 + 0xf8, N_).unwrap();
+        assert_ne!(decode_with(&(&st).into(), true, &other).as_deref(), Some(&code[..]));
     }
 
     /// The index of the stream of this name (without `ST_`).

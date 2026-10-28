@@ -43,7 +43,7 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `exe-recons/x86`, version 2.
+- **Module**: name `exe-recons/x86`, version 3.
 - **Params**: exactly 10 bytes.
 
   ```text
@@ -52,7 +52,9 @@ Contents:
   u8      mode          0: x86-32, otherwise x86-64
   ```
 
-- **Resources**: none.
+- **Resources**: exactly one, the opcode classes of §4: 1280 bytes, five tables of 256 class
+  codes (§4), one byte for each opcode `00`–`FF` in order: map 0 in x86-32, maps 1, 4 and 7,
+  and map 0 in x86-64.
 - **Inputs**: exactly 13, the streams of §3 in order. Each is of class `x86/NAME` (`x86/OP`,
   `x86/SIB`, ...).
 - **Output**: the code of §5. Its length must be the `len` the application declares.
@@ -106,16 +108,27 @@ A class has ModR/M when its code is 9 or more (`XX` and `BP` are dealt with befo
 operand after ModR/M is then of the class whose code is the low two bits of the code (`R1` →
 `N1`, `R4` and `M3` → `N4`, `R_` → `N_`, `M2` → `N2`).
 
-`class(m, op)`, in mode x86-32 or x86-64:
+`class(m, op)`, in mode x86-32 or x86-64, with `R` the resource:
 
-- map 0: table 0, but `XX` for `F1` and `F4` (the markers of §5.2), and in x86-64 also `XX`
-  for `06 07 0E 0F 16 17 1E 27 2F 37 3F 40`–`4F` `60 61 62 82 9A C4 C5 CE D4 D5 D6 EA`;
-- map 1: table 1;
+- map 0: `R[op]` in x86-32, `R[1024 + op]` in x86-64, but `XX` for `F1` and `F4` (the markers
+  of §5.2) whatever the resource holds;
+- map 1: `R[256 + op]`;
 - maps 2, 5 and 6: `R_`;
 - map 3: `R1`;
-- map 4: table 4;
-- map 7: `R4` for `F8`, `XX` otherwise;
+- map 4: `R[512 + op]`;
+- map 7: `R[768 + op]`;
 - maps 8 to 15: `XX`.
+
+The resource is what an encoder parsed by, so opcodes are added to it without a new version of
+the module: a decoder takes whatever valid resource it is given (§7), never tables of its own.
+
+*Informative, up to the prefixes below:* the tables that follow are this
+implementation's resource (`aqr_exe::arch::x86::Opcodes::BUILTIN`), to show what one looks
+like. They may change, as opcodes are added, and an archive holds the ones it was made with:
+table 0 for map 0 in x86-32; the same in x86-64 but `XX` for
+`06 07 0E 0F 16 17 1E 27 2F 37 3F 40`–`4F` `60 61 62 82 9A C4 C5 CE D4 D5 D6 EA`; tables 1 and
+4 for maps 1 and 4; and for map 7, `R4` for `F8` and `XX` otherwise. Its `F1` and `F4` of map 0
+are `XX`.
 
 Table 0 (legacy map 0, one-byte opcodes):
 
@@ -180,8 +193,11 @@ Table 4 (EVEX map 4, APX):
 | Ex | XX | XX | XX | XX | XX | XX | XX | XX | XX | XX | XX | XX | XX | XX | XX | XX |
 | Fx | R_ | R_ | R_ | XX | R_ | R_ | R1 | R4 | R_ | R_ | XX | XX | XX | XX | R_ | R_ |
 
-The **prefixes** are the `BP` bytes of table 0: `26 2E 36 3E 64 65 66 67 F0 F2 F3`. The set
-`P` of prefixes seen since the last instruction is what "with `66`" and the like refer to.
+*(End of the informative tables.)*
+
+The **prefixes** are `26 2E 36 3E 64 65 66 67 F0 F2 F3`, the only opcodes that the resource
+may give the class `BP`, in map 0 only. The set `P` of prefixes seen since the last instruction
+is what "with `66`" and the like refer to.
 
 ## 5. Decoding
 
@@ -369,16 +385,18 @@ position:
 `IMAGE_SCN_CNT_CODE` (`0x20`), at `ImageBase + VirtualAddress`, stored at `PointerToRawData`
 for `SizeOfRawData` bytes. The machine type is not checked. aqr-compress (`src/exe.rs`) applies
 the module to each such section that lies within the file and after the previous one, cut to
-the file, with `mode` from the image's magic. The rest of the image is one stream of class
-`pe`, sliced around the sections. aqr-compress keeps the image raw if the formula would not
-archive smaller.
+the file, with `mode` from the image's magic and `Opcodes::BUILTIN` as the resource. The rest
+of the image is one stream of class `pe`, sliced around the sections. aqr-compress keeps the
+image raw if the formula would not archive smaller.
 
 ## 7. Validation
 
 The module fails if:
 
-- the params are not 10 bytes long (this implementation ignores trailing bytes), or there are
-  resources, or not exactly 13 inputs;
+- the params are not 10 bytes long (this implementation ignores trailing bytes), there is not
+  exactly one resource, or not exactly 13 inputs;
+- the resource is not 1280 bytes long, holds a byte above `0F` (no class), or gives the class
+  `BP` to an opcode other than a prefix of map 0 (§4);
 - a stream runs out where a byte is to be read or copied, or a padding record starts with a
   byte above `03`;
 - an opcode is of class `XX`, a map is above 3 without a VEX or EVEX prefix, a REX or REX2

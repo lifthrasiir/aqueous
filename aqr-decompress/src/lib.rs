@@ -24,9 +24,9 @@ mod wasm;
 use aqr_formula::{Apply, Error, Module, Modules, Result};
 
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
-/// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; inputs: the streams of
-/// [`x86::STREAM_NAMES`].
-pub const X86: Module = Module { name: "exe-recons/x86", version: 2 };
+/// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
+/// (`x86::Opcodes`); inputs: the streams of [`x86::STREAM_NAMES`].
+pub const X86: Module = Module { name: "exe-recons/x86", version: 3 };
 
 /// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
 /// inputs: the streams of [`arm64::STREAM_NAMES`].
@@ -275,8 +275,7 @@ impl Native {
     ) -> std::result::Result<Vec<u8>, String> {
         let threads = self.threads.max(1);
         if m == X86 {
-            none(resources)?;
-            aqr_exe::module::x86(params, inputs, len).map_err(str::to_owned)
+            aqr_exe::module::x86(params, resources, inputs, len).map_err(str::to_owned)
         } else if m == ARM64 {
             none(resources)?;
             aqr_exe::module::arm64(params, inputs, len).map_err(str::to_owned)

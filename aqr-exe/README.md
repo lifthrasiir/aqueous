@@ -79,7 +79,9 @@ other fields that the opcodes tell, or rare ones, within `OP`; 8-bit displacemen
 base register; padding records coded) were measured on 2026-10-28 on a Ryzen 7 9700X through
 `aqr-show -t 16` against version 1 at once, the decoder modules in the archives: sample
 0.3215 → 0.3160 (−1.7%; its 150 files of x86 code −2.1%, those under 1 MB −2.5%), large
-0.2901 → 0.2832 (−2.4%), 3 files larger by 0.3–1.3% (x86-32).
+0.2901 → 0.2832 (−2.4%), 3 files larger by 0.3–1.3% (x86-32). Version 3 takes the opcode
+classes as its resource (1280 bytes), so that opcodes can be added without another version:
+582 B more for an archive of one file, 248 B of them the resource block.
 
 All files round-trip. The files not coded (no `exe-recons`) were kept raw, their formulas
 archiving no smaller: 27 .NET assemblies (24 satellite assemblies of resources alone;

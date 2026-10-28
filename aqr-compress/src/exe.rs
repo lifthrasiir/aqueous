@@ -7,11 +7,12 @@
 //! e.g. for the images among the resources.
 
 use std::io::Cursor;
+use std::sync::OnceLock;
 
 use aqr_decompress::{ARM64, CIL, X86};
 use aqr_exe::arch::{arm64, cil, x86};
 use aqr_exe::format::{macho, pe::locate_code};
-use aqr_formula::{Formula, Kind, Node};
+use aqr_formula::{Formula, Kind, Node, Resource};
 
 /// The code a section holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,7 +126,7 @@ fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch) -> Option<No
             let inputs = std::iter::zip(st.streams(), x86::STREAM_NAMES)
                 .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.clone()))
                 .collect();
-            Node::apply(X86, params, inputs, size)
+            Node::apply_with(X86, vec![x86_resource()], params, inputs, size)
         }
         Arch::Arm64 => {
             let st = arm64::encode(section, va);
@@ -176,6 +177,12 @@ fn cil_apply(
     inputs[0] = Node::concat(parts);
     let params = [rva.to_le_bytes(), (meta as u32).to_le_bytes()].concat();
     Some(Node::apply(CIL, params, inputs, section.len() as u64))
+}
+
+/// The resource of [`X86`]: the opcode classes the encoder parses by.
+fn x86_resource() -> Resource {
+    static R: OnceLock<Resource> = OnceLock::new();
+    R.get_or_init(|| Resource::new(x86::Opcodes::BUILTIN.to_resource())).clone()
 }
 
 /// The parameters of [`X86`].
