@@ -4,7 +4,7 @@ use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
     ARM64, BUNDLE, CLIP, FLAC, FLATE, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE,
-    WRT, X86, XSV, ZIP, decompress,
+    WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -1076,6 +1076,15 @@ fn text_words() {
     assert!(modules(&roundtrip(&d[..200_000], &all())).is_empty());
     assert!(modules(&roundtrip(&[&d[..], b"\0"].concat(), &all())).is_empty());
     assert!(modules(&roundtrip(&text(400_000), &all())).is_empty());
+    // text of Hangul by its own module
+    let mut d = Vec::new();
+    for i in 0.. {
+        if d.len() >= 400_000 {
+            break;
+        }
+        writeln!(d, "{i}번째 줄: 날쌘 갈색 여우가 게으른 개 {}마리를 뛰어넘는다", i * 7 % 13).unwrap();
+    }
+    assert_eq!(modules(&roundtrip(&d, &all())), [WRT_HANGUL.name]);
 }
 
 /// A ustar header of `name` for a body of `n` bytes.

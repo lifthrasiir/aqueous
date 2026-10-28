@@ -128,6 +128,11 @@ path = "src/bin/wrt-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "wrt-recons-hangul"
+path = "src/bin/wrt-recons-hangul.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "flate-set"
 path = "src/bin/flate-set.rs"
 required-features = ["wasm"]

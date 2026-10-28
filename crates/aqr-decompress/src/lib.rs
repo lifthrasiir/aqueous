@@ -107,6 +107,9 @@ pub const XSV: Module = aqr_xsv::formula::MODULE;
 /// Text of words and markup replaced by codes of a dictionary (aqr-wrt). Resources: the
 /// dictionary; inputs: the coded text.
 pub const WRT: Module = aqr_wrt::formula::MODULE;
+/// Text of Hangul, its syllables in two bytes and its words replaced by codes of a dictionary
+/// (aqr-wrt). Resources: the dictionary; inputs: the coded text, in the pieces of the params.
+pub const WRT_HANGUL: Module = aqr_wrt::formula::HANGUL;
 
 /// aqr-raw's samples of a layout (their params), for the trivial containers around them or
 /// for any recompressor that finds them: PCM audio (resources: the residual model's tables,
@@ -115,7 +118,7 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 32] = [
+pub const MODULES: [Module; 33] = [
     X86,
     ARM64,
     CIL,
@@ -146,6 +149,7 @@ pub const MODULES: [Module; 32] = [
     OBJ,
     XSV,
     WRT,
+    WRT_HANGUL,
     PCM,
     RASTER,
 ];
@@ -163,7 +167,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 20] = [
+const RECONS: [(Module, Decode); 21] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
     (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
@@ -182,6 +186,7 @@ const RECONS: [(Module, Decode); 20] = [
     (OBJ, |p, r, i, n, t| none(r).and_then(|_| aqr_obj::formula::decode(p, i, n, t).map_err(msg))),
     (XSV, |p, r, i, n, t| none(r).and_then(|_| aqr_xsv::formula::decode(p, i, n, t).map_err(msg))),
     (WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(msg)),
+    (WRT_HANGUL, |p, r, i, n, t| aqr_wrt::formula::decode_hangul(p, r, i, n, t).map_err(msg)),
     (PCM, |p, r, i, n, t| aqr_raw::formula::pcm::decode(p, r, i, n, t).map_err(msg)),
     (RASTER, |p, r, i, n, t| none(r).and_then(|_| aqr_raw::formula::raster::decode(p, i, n, t).map_err(msg))),
 ];

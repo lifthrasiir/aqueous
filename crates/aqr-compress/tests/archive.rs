@@ -208,8 +208,16 @@ fn batches() {
 /// a block, which are not solid, and in batches smaller than each).
 #[test]
 fn held_once() {
+    held_once_of(["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dogs", "and", "cats"], "wrt-recons");
+    // (text of Hangul by its own module)
+    held_once_of(
+        ["사람은", "나는", "한국어로", "글을", "쓴다", "그리고", "읽는다", "말이다", "또", "개는"],
+        "wrt-recons-hangul",
+    );
+}
+
+fn held_once_of(words: [&str; 10], module: &str) {
     let mut x = 1u64;
-    let words = ["the", "quick", "brown", "fox", "jumps", "over", "lazy", "dogs", "and", "cats"];
     let mut data = Vec::new();
     while data.len() < 3 << 20 {
         x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -226,6 +234,7 @@ fn held_once() {
     let files = [("w/words", data), ("w/words.gz", gz), ("w/words.zip", zip)];
     let (c, r) = archived(&files, &opt);
     assert!(!r.files[1].modules.is_empty() && !r.files[2].modules.is_empty(), "{r:?}");
+    assert!(r.files[0].modules.iter().any(|m| m.name == module), "{r:?}");
     // (their records not small: rules fit miniz's streams less well than zlib's)
     assert!(c.len() < alone.len() * 3 / 2, "{} of {} alone", c.len(), alone.len());
     // in batches of less than each, kept together

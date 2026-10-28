@@ -4698,6 +4698,10 @@ as follows:</p>
       <td>sqlite-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-sqlite/FORMAT.md">codecs/aqr-sqlite/FORMAT.md</a>
     <tr>
+      <td><code>46a1e89ed82d1585732dc8ac52d78d472618feb5ed715d9b943aa141dac1d4c2</code>
+      <td>wrt-recons-hangul@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wrt/FORMAT.md">codecs/aqr-wrt/FORMAT.md</a>
+    <tr>
       <td><code>78114341a3981b9b877f74beff267c6fcb83f23e7106d344107fbc178dab3117</code>
       <td>wrt-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wrt/FORMAT.md">codecs/aqr-wrt/FORMAT.md</a>

@@ -6,6 +6,11 @@ replaced by codes of one to three bytes. A word's code takes the space before it
 before it tell its case. This is a word replacing transform after XWRT. zstd then finds more
 and shorter matches, and codes a word's code as one literal.
 
+Text of Hangul (Korean) goes to a module of its own, `wrt-recons-hangul` (FORMAT.md §6): its
+syllables are coded in two bytes rather than UTF-8's three, and its words of Hangul (each a run
+of syllables with the space before it) by codes of a dictionary. ASCII letters are no words
+there, and Korean words are no letters to `wrt-recons`, which left such text as it was.
+
 - **Dictionary**: the texts of a batch of the archive share one (aqr-compress). Text that
   holds other text then codes to what holds the other's code, so a file and the same file in
   an archive, or a file and its start, are still stored once.
@@ -30,6 +35,22 @@ Measured 2026-10-26 on an Apple M4 (10 cores), through `aqr` at level `mid`.
   - Coding a text of more than 16 MiB is spread over threads, in pieces that end with LF;
     the coded text is the same.
   - Decoding is one pass per text. That is what `enwik9` alone waits for (2.3 s).
+
+Text of Hangul, measured 2026-10-29 on the same machine through `aqr -5`: 512 MiB from the
+middle of the namuwiki dump of 2021-03-01 (JSON of one line, 72% of its bytes above 0x7F).
+
+| | before | after | compress | decompress |
+|---|---|---|---|---|
+| 512 MiB of namuwiki | 164.68 MB | 145.77 MB (−11.5%) | 5.80 → 3.07 s | 0.56 → 0.42 s |
+
+- zstd picks level 9 for both. The coded text is 248 MB, so zstd has less to do: 143 → 105 G
+  instructions in all, with the module's coding. At `-l zstd12` it is 140.21 MB in 4.4 s.
+- The dictionary takes 3.2 MB at zstd -9 (694,348 entries).
+- The module counts about 390 MB/s and codes about 230 MB/s on a thread, and decodes about
+  560 MB/s; it does all three in pieces of 16 MiB on threads of their own. The pieces end
+  before an ASCII byte other than a space (JSON need not have LF), and the module's params
+  tell where.
+- Peak memory 2.20 → 2.23 GB.
 
 zstd at fixed levels (`aqr-wrt-bench`, each text with its own dictionary, the dictionary
 compressed counted):

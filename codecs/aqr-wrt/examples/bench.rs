@@ -3,7 +3,7 @@
 //! For each text file: its size by zstd (at `LEVEL`, by default 9; with `LONG` set, with long
 //! distance matching and a window of 2^27) as it is and as the dictionary and the text coded
 //! (each alone), the module's encoding and decoding speeds (of the file's bytes, on `THREADS`
-//! threads, by default 1), and that it decodes back.
+//! threads, by default 1; text of Hangul decoded on as many), and that it decodes back.
 
 use std::time::Instant;
 
@@ -34,7 +34,13 @@ fn main() {
         let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         let dict = &a.resources[0];
         let t = Instant::now();
-        let out = aqr_wrt::formula::decode(&a.params, &[dict], &inputs, d.len() as u64, 1).unwrap();
+        let out = match a.module {
+            aqr_wrt::formula::HANGUL => {
+                aqr_wrt::formula::decode_hangul(&a.params, &[dict], &inputs, d.len() as u64, threads)
+            }
+            _ => aqr_wrt::formula::decode(&a.params, &[dict], &inputs, d.len() as u64, 1),
+        }
+        .unwrap();
         let dt = t.elapsed().as_secs_f64();
         assert!(out == d, "{path}: not given back");
         let before = zstd(&d, level, long);

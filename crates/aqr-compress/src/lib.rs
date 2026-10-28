@@ -441,10 +441,10 @@ impl Cx {
         self.held.as_ref().is_some_and(|h| h.holds(data, h.owner(within)))
     }
 
-    /// Codes the text archived with `words` ([`Cx::words`]), its resource sized as nothing.
+    /// Codes the text archived with `words` ([`Cx::words`]), their resources sized as nothing.
     pub(crate) fn share_words(&mut self, words: Option<Arc<aqr_wrt::formula::Shared>>) {
-        if let Some(w) = &words {
-            self.enc.hold_resource(&w.resource);
+        for r in words.iter().flat_map(|w| w.resources()) {
+            self.enc.hold_resource(r);
         }
         self.words = words;
     }
@@ -453,7 +453,7 @@ impl Cx {
     /// with [`Cx::words`] and the files archived together hold `d`.
     fn note_coded(&self, f: &Formula, d: &[u8]) {
         let Some(w) = &self.words else { return };
-        let shared = f.applies().iter().any(|a| a.resources.first() == Some(&w.resource));
+        let shared = f.applies().iter().any(|a| a.resources.first().is_some_and(|r| w.resources().any(|w| w == r)));
         if shared && f.streams.len() == 1 && self.held_by_others(d, d) {
             self.coded_held.lock().unwrap().insert(stream_key(&f.streams[0].data));
         }

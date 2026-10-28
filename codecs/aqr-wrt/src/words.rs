@@ -252,7 +252,7 @@ pub struct Dictionary {
 /// Data longer than this is counted and coded in pieces of about as many bytes, each ending
 /// with LF (or the data), on threads of their own: no token holds LF, so that the pieces code
 /// to the same bytes as the whole.
-const PIECE: usize = 16 << 20;
+pub(crate) const PIECE: usize = 16 << 20;
 
 /// `d` in pieces ([`PIECE`]).
 fn pieces(d: &[u8]) -> Vec<&[u8]> {

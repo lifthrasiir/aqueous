@@ -3,13 +3,15 @@
 //! character references) that the texts use most, in a dictionary (of a text's own, or shared by
 //! the texts archived together), and the text with them replaced, a word taking the space before
 //! it and its case in flags ([`words`]). zstd then finds more and shorter matches, and codes a
-//! word's code as a literal. `formula` is the entry point (a module of aqr-formula); `FORMAT.md`
-//! specifies it.
+//! word's code as a literal. Text of Hangul has a module of its own ([`hangul`]): its syllables
+//! in two bytes, and its words of Hangul replaced by codes. `formula` is the entry point (the
+//! modules of aqr-formula); `FORMAT.md` specifies them.
 
 // The code of the modules alone uses only part of the rest.
 #![cfg_attr(not(feature = "encode"), allow(unused))]
 #[cfg(feature = "encode")]
 pub mod formula;
+pub mod hangul;
 pub mod module;
 pub mod words;
 
