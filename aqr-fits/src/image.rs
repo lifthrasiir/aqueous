@@ -306,7 +306,7 @@ pub fn encode_as(image: &[u32], s: Shape, known: Option<&[bool]>, mode: Mode) ->
                 return None;
             }
             let v: Vec<i64> = image.iter().map(|&x| s.value(x)).collect();
-            Some(crate::pyramid::encode(&v, s.width, image.len() / s.width))
+            Some(crate::pyramid::encode(v, s.width, image.len() / s.width))
         }
     }
 }

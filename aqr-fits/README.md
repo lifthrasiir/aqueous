@@ -45,6 +45,9 @@ quantised floats).
 
 For reference, `xz -9e` makes 1237472, 250564 and 24088 bytes of the three cmz files.
 Compression of the corpus took 13.5 s (2.3 before), decompression 4.4 s (0.6).
+The largest file, the Legacy Survey's (11.1 MB, a 3600×3600 image as a pyramid), takes 299 MB
+at peak to compress and 285 MB to decompress (`/usr/bin/time -l`): the pyramid holds its
+levels as 64-bit numbers.
 
 ## Status
 

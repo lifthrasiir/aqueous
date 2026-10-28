@@ -335,23 +335,38 @@ fn border_pred(v: &[i64], l: &Level, x: usize, y: usize, pred: &mut i64) {
 
 /// The cost of a level's bands at a phase, as the sum of the coefficients' bit lengths.
 fn cost(v: &[i64], l: &Level) -> u64 {
-    let b = transform(v, l);
-    b.c.iter().flatten().map(|&c| 2 * (64 - zigzag(c).leading_zeros()) as u64 + 1).sum()
+    let (bw, bh) = l.blocks();
+    let bits = |c: i64| 2 * (64 - zigzag(c).leading_zeros()) as u64 + 1;
+    let mut sum = 0;
+    for i in 0..bh {
+        let r0 = (l.py + 2 * i) * l.w + l.px;
+        let r1 = r0 + l.w;
+        for j in 0..bw {
+            let (a00, a01, a10, a11) = (v[r0 + 2 * j], v[r0 + 2 * j + 1], v[r1 + 2 * j], v[r1 + 2 * j + 1]);
+            let hc = a11 - a10 - a01 + a00;
+            let p = hc & 1;
+            sum += bits(hc) + bits((a11 + a10 - a01 - a00 - p) >> 1) + bits((a11 - a10 + a01 - a00 - p) >> 1);
+        }
+    }
+    sum
 }
 
 /// Codes the `w` × `h` values `v`.
-pub fn encode(v: &[i64], w: usize, h: usize) -> Coded {
+pub fn encode(v: Vec<i64>, w: usize, h: usize) -> Coded {
     assert_eq!(v.len(), w * h);
-    // the levels, from the finest
+    // the levels, from the finest: each its bands (without the next level's values) and the
+    // differences of its border's values from their predictions
     let mut levels: Vec<(Level, Bands, Vec<i64>)> = Vec::new();
-    let mut cur = v.to_vec();
+    let mut cur = v;
     let (mut cw, mut ch) = (w, h);
     while splits(cw, ch, levels.len()) {
         let l = (0..4).map(|p| Level { w: cw, h: ch, px: p & 1, py: p >> 1 }).min_by_key(|l| cost(&cur, l)).unwrap();
-        let b = transform(&cur, &l);
-        let next = b.next.clone();
+        let mut b = transform(&cur, &l);
+        let mut edge = Vec::new();
+        border(&cur, &l, |at, pred| edge.push(cur[at].wrapping_sub(pred)));
+        cur = std::mem::take(&mut b.next);
         (cw, ch) = l.blocks();
-        levels.push((l, b, std::mem::replace(&mut cur, next)));
+        levels.push((l, b, edge));
     }
     let mut e = Encoder { m: Models::new(), ac: ArithEncoder::new(Vec::new()), raw: bits::Writer::default() };
     // the phases, from the finest level, then the last level's values, by their differences
@@ -370,21 +385,20 @@ pub fn encode(v: &[i64], w: usize, h: usize) -> Coded {
     }
     // the levels, from the coarsest: bands, border
     for lv in (0..levels.len()).rev() {
-        let (l, b, values) = &levels[lv];
+        let (l, b, edge) = &levels[lv];
         let up = levels.get(lv + 1).map(|(l, b, _)| (l, b));
-        let (bw, _) = l.blocks();
-        for k in 0..b.next.len() {
+        let (bw, bh) = l.blocks();
+        for k in 0..bw * bh {
             for band in 0..3 {
                 let ctx = coef_ctx(b, band, k, bw, lv, parent(k, bw, up, band));
                 e.put(ctx, mant_ctx(band, lv), b.c[band][k]);
             }
         }
         let mut prev = 0u64;
-        border(values, l, |at, pred| {
-            let d = values[at].wrapping_sub(pred);
+        for &d in edge {
             e.put(BORDER + bucket(prev), MANT_BORDER, d);
             prev = d.unsigned_abs();
-        });
+        }
     }
     Coded { model: e.ac.finish(), raw: e.raw.finish() }
 }
@@ -457,7 +471,7 @@ mod tests {
             for spread in [1u64, 30, 1 << 20, 1 << 40] {
                 let v: Vec<i64> =
                     (0..w * h).map(|i| (i as i64 * 3) + rng.below(spread) as i64 - (spread / 2) as i64).collect();
-                let c = encode(&v, w, h);
+                let c = encode(v.clone(), w, h);
                 assert_eq!(decode(&c, w, h).unwrap(), v, "{w}x{h} {spread}");
             }
         }
