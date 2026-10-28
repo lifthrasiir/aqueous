@@ -1,0 +1,26 @@
+[package]
+name = "aqr-lz4"
+version = "0.1.0"
+edition = "2024"
+description = "LZ4 blocks and frames rebuilt bit for bit from their data, by liblz4's fast compressor reimplemented"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+xxhash-rust = { version = "0.8", features = ["xxh32"] }
+
+[dev-dependencies]
+zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-lz4-check"
+path = "examples/check.rs"

@@ -1,0 +1,66 @@
+[package]
+name = "aqr-pdf"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless PDF recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`, `encode`); without it, the code of the module alone (`module`).
+encode = [
+    "dep:aqr-formula", "dep:zstd", "dep:rayon", "aqr-common/rayon", "aqr-flate/encode", "aqr-jpeg/encode",
+    "aqr-png/encode", "aqr-raw/encode",
+]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
+aqr-png = { path = "../aqr-png", default-features = false }
+aqr-raw = { path = "../aqr-raw", default-features = false }
+memchr = "2"
+zstd = { version = "0.13", optional = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+simd-adler32 = "0.3"
+rayon = { version = "1.12", optional = true }
+
+[dev-dependencies]
+flate-zoo = { path = "../../flate-zoo" }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-pdf-expansion"
+path = "examples/expansion.rs"
+
+[[example]]
+name = "aqr-pdf-fails"
+path = "examples/fails.rs"
+
+[[example]]
+name = "aqr-pdf-filters"
+path = "examples/filters.rs"
+
+[[example]]
+name = "aqr-pdf-images"
+path = "examples/images.rs"
+
+[[example]]
+name = "aqr-pdf-memprobe"
+path = "examples/memprobe.rs"
+
+[[example]]
+name = "aqr-pdf-skel"
+path = "examples/skel.rs"
+
+[[example]]
+name = "aqr-pdf-survey"
+path = "examples/survey.rs"
+
+[[example]]
+name = "aqr-pdf-tokens"
+path = "examples/tokens.rs"

@@ -17,7 +17,7 @@ Aqueous 아카이브 모델에 symbolic link, hard link, device 파일 같은 �
 - `spec/index.bs` §Archive model, §Metadata block, §Optional metadata(`link-group`), §Extraction: 이 설계를 반영한 곳.
 - `zip-extras-design.md` §3.4, §5, §6의 3번: 0x000d와 0x756e의 부분 흡수, `unix-mode`의 `S_IFMT` 문제.
 - `xform-design.md` §4.1: "경로, 심링크, 파일별 체크섬, 같은 내용 파일의 중복 제거는 아카이브의 것이다."
-- 이전의 aqr-git(`aqr-git/src/container.rs`)은 자체 컨테이너에 symlink 목록을 따로 두었다. 2026-10-28에 팩 모듈로 바뀌어 symlink는 아카이브가 맡는다.
+- 이전의 aqr-git(`codecs/aqr-git/src/container.rs`)은 자체 컨테이너에 symlink 목록을 따로 두었다. 2026-10-28에 팩 모듈로 바뀌어 symlink는 아카이브가 맡는다.
 
 ---
 

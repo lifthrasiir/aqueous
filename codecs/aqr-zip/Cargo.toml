@@ -1,0 +1,29 @@
+[package]
+name = "aqr-zip"
+version = "0.1.0"
+edition = "2024"
+description = "ZIP archives rebuilt bit for bit from the contents of their entries, by aqr-flate, with their headers derived"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the modules alone (`module`).
+encode = ["dep:aqr-formula", "aqr-flate/encode"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+memchr = "2"
+
+[dev-dependencies]
+crc32fast = "1.5"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-zip-check"
+path = "examples/check.rs"

@@ -1,0 +1,31 @@
+[package]
+name = "aqr-flate"
+version = "0.1.0"
+edition = "2024"
+description = "DEFLATE stream deconstruction into data and predicted corrections, and bit-exact reconstruction"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+# The training and evaluation tool (`aqr-flate-train`), which drives real encoders
+# through flate-zoo.
+train = ["dep:flate-zoo", "dep:rayon"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+flate-zoo = { path = "../../flate-zoo", optional = true }
+rayon = { version = "1.12.0", optional = true }
+
+[dev-dependencies]
+flate-zoo = { path = "../../flate-zoo" }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[bin]]
+name = "aqr-flate-train"
+path = "src/bin/train.rs"
+required-features = ["train"]

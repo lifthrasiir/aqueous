@@ -1,0 +1,58 @@
+[package]
+name = "aqr-psd"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless PSD/PSB recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula", "aqr-flate/encode", "aqr-png/encode", "aqr-jpeg/encode"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+aqr-png = { path = "../aqr-png", default-features = false }
+aqr-jpeg = { path = "../aqr-jpeg", default-features = false }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[bin]]
+name = "aqr-psd-stat"
+path = "src/bin/psdstat.rs"
+
+[[bin]]
+name = "aqr-psd-research"
+path = "src/bin/psdx.rs"
+
+[[example]]
+name = "aqr-psd-chan"
+path = "examples/chan.rs"
+
+[[example]]
+name = "aqr-psd-diff"
+path = "examples/diff.rs"
+
+[[example]]
+name = "aqr-psd-modelbench"
+path = "examples/modelbench.rs"
+
+[[example]]
+name = "aqr-psd-pbbench"
+path = "examples/pbbench.rs"
+
+[[example]]
+name = "aqr-psd-recbench"
+path = "examples/recbench.rs"
+
+[[example]]
+name = "aqr-psd-renderbench"
+path = "examples/renderbench.rs"
+
+[[example]]
+name = "aqr-psd-rlediff"
+path = "examples/rlediff.rs"

@@ -1,5 +1,7 @@
 /target
 /third_party/
 /.venv
-/aqr-*/corpus/
-/aqr-*/cache/
+/crates/*/corpus/
+/codecs/*/corpus/
+/crates/*/cache/
+/codecs/*/cache/

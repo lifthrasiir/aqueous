@@ -4584,131 +4584,131 @@ as follows:</p>
     <tr>
       <td><code>d084284fbb3eaaac8e96ffb974f364d8bf9d5ea5b25bf4e236bc032369463578</code>
       <td>bcn-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-tex/FORMAT.md">aqr-tex/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tex/FORMAT.md">codecs/aqr-tex/FORMAT.md</a>
     <tr>
       <td><code>30ebd39ea3f768f06cf4d3e79872666d6923eb8e608ed5878bcc86c040179a21</code>
       <td>bundle-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-bundle/FORMAT.md">aqr-bundle/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bundle/FORMAT.md">codecs/aqr-bundle/FORMAT.md</a>
     <tr>
-      <td><code>9e6fa187a0e2001ad29b625e9ebdc8b96f8fa9720dee920e95a5338e47e25f36</code>
+      <td><code>3e9ec58f73f263448c249e90e333e691f5c6f881880ba9d7f562e778d64b4357</code>
       <td>clip-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-clip/FORMAT.md">aqr-clip/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-clip/FORMAT.md">codecs/aqr-clip/FORMAT.md</a>
     <tr>
       <td><code>6a9359342d4e3712baeb3d615ce0bc39a3283412da430f4c3098e2a71560e48d</code>
       <td>exe-recons/arm64@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md">codecs/aqr-exe/FORMAT.md</a>
     <tr>
-      <td><code>3ca9270c8e48046ab88d1cad5f6eb1475c17cb7e329b661ec5dbf2a65f25a8fd</code>
+      <td><code>7b22bbac03ed25bd765b8d27207f6ddd9d14bd4a683b3046e27af801202f4d2a</code>
       <td>exe-recons/cil@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md">codecs/aqr-exe/FORMAT.md</a>
     <tr>
       <td><code>2517aa3a4adf0c7bed4175c71dd6cb6928820c2a33038a8ffcf93d21d9e7c509</code>
       <td>exe-recons/x86@3
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-exe/FORMAT.md">aqr-exe/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md">codecs/aqr-exe/FORMAT.md</a>
     <tr>
       <td><code>f15b8d3355fc8929c25d263b6b752516a3e675cbd476ee5933f6900a8cb9718b</code>
       <td>fasta-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fasta/FORMAT.md">aqr-fasta/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fasta/FORMAT.md">codecs/aqr-fasta/FORMAT.md</a>
     <tr>
-      <td><code>9a24a421dbd7ae5cb60593ae3d639764657fc8c58a74876444e2f4df0652b501</code>
+      <td><code>3944fa75e9f3991a741c305f7e410cfdb2b73b17f57691da9de94cd142fbf968</code>
       <td>fits-recons-image@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fits/FORMAT.md">aqr-fits/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fits/FORMAT.md">codecs/aqr-fits/FORMAT.md</a>
     <tr>
-      <td><code>cb4b79bff495da6236fb0c03bb7b9eb7dcc194495f81887b1e20cdb68d5161fe</code>
+      <td><code>4433f4e59eca939357f8d3c5821b7ba887b38f27c7c9c438dedcfb40bcf6b796</code>
       <td>fits-recons-rice@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fits/FORMAT.md">aqr-fits/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fits/FORMAT.md">codecs/aqr-fits/FORMAT.md</a>
     <tr>
       <td><code>c25884adc026793bca3729098d4adc0d10cc9015b5094e9b2a2d2043d10bc80f</code>
       <td>fits-recons-table@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fits/FORMAT.md">aqr-fits/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fits/FORMAT.md">codecs/aqr-fits/FORMAT.md</a>
     <tr>
       <td><code>6206529b733fcc76f115f80f003cee937bd04c7bf4b96366ed4b64991406f265</code>
       <td>flac-recons@3
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-flac/FORMAT.md">aqr-flac/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md">codecs/aqr-flac/FORMAT.md</a>
     <tr>
-      <td><code>d8c0a4ed3daa0763906b8292e48167c9bba708bf4bf3ab9cf7035bd58cedc7ea</code>
+      <td><code>f25690cf1aeea8b98fbf94bf766dc53f064339ff58362ca62124105d3ecd9660</code>
       <td>flate-set@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-flate/FORMAT.md">aqr-flate/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md">codecs/aqr-flate/FORMAT.md</a>
     <tr>
       <td><code>17849cd2f570cd4ff266e6c7c7e7656954fff0b7b53a032682e630874b1d27e3</code>
       <td>git-pack-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-git/FORMAT.md">aqr-git/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-git/FORMAT.md">codecs/aqr-git/FORMAT.md</a>
     <tr>
-      <td><code>bdbeae21d9035ece1bc14e6dfee467ac323f9406b0d78c86b017f36241a8c74e</code>
+      <td><code>9222740c7c4dd5796639b3dead61cfa35acc5d766b4347a62b6667cea3cc9c93</code>
       <td>jpeg-recons@2
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-jpeg/FORMAT.md">aqr-jpeg/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-jpeg/FORMAT.md">codecs/aqr-jpeg/FORMAT.md</a>
     <tr>
       <td><code>a9272277b48740f1ca514cbf6a053031e73152aa2d47a29adb60317ac6d51bc7</code>
       <td>leveldb-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-snappy/FORMAT.md">aqr-snappy/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-snappy/FORMAT.md">codecs/aqr-snappy/FORMAT.md</a>
     <tr>
       <td><code>d1c9ec7cd6d507c6cc0974074cbeb7b6af0eeddca3bf37d7183fb85a4b898c4e</code>
       <td>lz4-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-lz4/FORMAT.md">aqr-lz4/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lz4/FORMAT.md">codecs/aqr-lz4/FORMAT.md</a>
     <tr>
       <td><code>75ba5c9a68f2ba9e84a41a14bfad04c79becb1ce7c7b0789f9f2693e54611e80</code>
       <td>lzma-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-lzma/FORMAT.md">aqr-lzma/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzma/FORMAT.md">codecs/aqr-lzma/FORMAT.md</a>
     <tr>
       <td><code>b382acbe0a55d2b387ace2f8ddcae3ccc80b1001d0a4bb47e1dd6f17e175a6c4</code>
       <td>lzo-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-lzo/FORMAT.md">aqr-lzo/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzo/FORMAT.md">codecs/aqr-lzo/FORMAT.md</a>
     <tr>
-      <td><code>e509302b1a4f24eef7ef7c28fcf9ff083578fe3670a030f61b572f08d210ed8b</code>
+      <td><code>57a624b911608583a899696341843976301146b0b0da8e1e9bdcb2e89738c47a</code>
       <td>mp3-recons@5
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-mp3/FORMAT.md">aqr-mp3/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-mp3/FORMAT.md">codecs/aqr-mp3/FORMAT.md</a>
     <tr>
       <td><code>ac352c74b976c0ea52ac3854b1c841d97cf6ebc44d37794263ebae88bf0349e1</code>
       <td>obj-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-obj/FORMAT.md">aqr-obj/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-obj/FORMAT.md">codecs/aqr-obj/FORMAT.md</a>
     <tr>
-      <td><code>7ced999c389e0aa234aea59e890ffac292cec0e1acb77c1918b4df791fc125a3</code>
+      <td><code>591e72d7837d7a00ba59a5caaab58b801dd2e067c521ae54928990440cd9f258</code>
       <td>pcm-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-raw/FORMAT.md">aqr-raw/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-raw/FORMAT.md">codecs/aqr-raw/FORMAT.md</a>
     <tr>
       <td><code>59b6c21e5ce4e15f567b6af7af919ce474ecfdfe0317b1c5a24a2ebd1069a428</code>
       <td>pdf-recons@2
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-pdf/FORMAT.md">aqr-pdf/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdf/FORMAT.md">codecs/aqr-pdf/FORMAT.md</a>
     <tr>
-      <td><code>99cf42581dad0745303a924a9220ee4dbb98cad2d93485d5ba5ae0adcac5ac2b</code>
+      <td><code>c7d9509c6d6f797bc0d15128aa1fc601adff3ab8275c80a35b529ade447a2b74</code>
       <td>png-against@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-png/FORMAT.md">aqr-png/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>c989530d21e2b482e93dda8baf23827e3dccf1e35a7880830cc665a53b1b433b</code>
+      <td><code>9e8ba5c1f49ab437a08df2f1f929d4a6982c75526751a63d386d7a7d489070b4</code>
       <td>png-recons@3
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-png/FORMAT.md">aqr-png/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>cf881c57de0f4d6b182f82383c3a715874b6233a4873d03a10b62a8d7a46e20a</code>
+      <td><code>8d2bbdc58e3c155e250f51a4e086e700284db5514c760226ad873eeb3b11c303</code>
       <td>png-set@2
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-png/FORMAT.md">aqr-png/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>415140566eee4e7a551c7f0c9cfc3a604b6e40beea1e038053f22c779dbfa40d</code>
+      <td><code>e297ad1ba0727f63efa794f3dc0dfe66ff21317940426a213b4af80aeae5a5df</code>
       <td>psd-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-psd/FORMAT.md">aqr-psd/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-psd/FORMAT.md">codecs/aqr-psd/FORMAT.md</a>
     <tr>
       <td><code>99c859fce0c3faaa78c864b87e25ce33ae184fbc9a7f71688e0982c49ddaf9f5</code>
       <td>raster-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-raw/FORMAT.md">aqr-raw/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-raw/FORMAT.md">codecs/aqr-raw/FORMAT.md</a>
     <tr>
       <td><code>6e967dac1072db4e3ab21cd10103b0773253bc24e64b7a94aa8519de42bd02db</code>
       <td>snappy-recons@2
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-snappy/FORMAT.md">aqr-snappy/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-snappy/FORMAT.md">codecs/aqr-snappy/FORMAT.md</a>
     <tr>
-      <td><code>1d5e4cdab89b3ccd790d713a9ec507f35b2f52cd58d6732c1ede1a835926e89d</code>
+      <td><code>59dae448a09ce4abb3d1a0fcfd9349e6cfac35ac651c6362cc5274fe1cd1cd85</code>
       <td>sqlite-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-sqlite/FORMAT.md">aqr-sqlite/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-sqlite/FORMAT.md">codecs/aqr-sqlite/FORMAT.md</a>
     <tr>
       <td><code>78114341a3981b9b877f74beff267c6fcb83f23e7106d344107fbc178dab3117</code>
       <td>wrt-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-wrt/FORMAT.md">aqr-wrt/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wrt/FORMAT.md">codecs/aqr-wrt/FORMAT.md</a>
     <tr>
       <td><code>928d51f81c0b917f2cd38519d76703eeaae67766d2d41e3f117204382ce6979f</code>
       <td>xsv-recons@1
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-xsv/FORMAT.md">aqr-xsv/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-xsv/FORMAT.md">codecs/aqr-xsv/FORMAT.md</a>
     <tr>
-      <td><code>426ac8c63718fcf83795ff7dd1e590c3cc9420cc82c3bfd1b23a04cb00ac2dbf</code>
+      <td><code>63150a666d6cb14bf9162a5f353343612b2cfc2a4111f5d4b2a15324598d91cc</code>
       <td>zip-recons@3
-      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-zip/FORMAT.md">aqr-zip/FORMAT.md</a>
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-zip/FORMAT.md">codecs/aqr-zip/FORMAT.md</a>
   </tbody>
 </table>
 

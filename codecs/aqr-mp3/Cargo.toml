@@ -1,0 +1,46 @@
+[package]
+name = "aqr-mp3"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["encode"]
+# The formulas (`formula`) and the built-in model; without it, the code of the module alone
+# (`module`).
+encode = ["dep:aqr-formula", "aqr-common/zstd"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+memchr = "2"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[bin]]
+name = "aqr-mp3-train"
+path = "src/bin/train.rs"
+
+[[example]]
+name = "aqr-mp3-ctxdist"
+path = "examples/ctxdist.rs"
+
+[[example]]
+name = "aqr-mp3-init"
+path = "examples/init.rs"
+
+[[example]]
+name = "aqr-mp3-memprobe"
+path = "examples/memprobe.rs"
+
+[[example]]
+name = "aqr-mp3-hot"
+path = "examples/hot.rs"
+
+[[example]]
+name = "aqr-mp3-perfile"
+path = "examples/perfile.rs"
+
+[[example]]
+name = "aqr-mp3-phases"
+path = "examples/phases.rs"

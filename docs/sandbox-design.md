@@ -11,15 +11,15 @@
 
 관련 코드:
 
-- `aqr-decompress/src/sandbox/mod.rs`: 공개 API(`Sandbox`, `Sandboxed`, `worker_main`)와 브로커 쪽 워커 관리.
-- `aqr-decompress/src/sandbox/proto.rs`: 브로커와 워커 사이의 메시지.
-- `aqr-decompress/src/sandbox/worker.rs`: 워커의 초기화, 봉쇄, 요청 루프.
-- `aqr-decompress/src/sandbox/os/`: OS별 `spawn`·`Child`·`lockdown`. `windows.rs`, `linux.rs`, `macos.rs`(Linux와 공유하는 기동과 종료 코드는 `unix.rs`), 그 밖의 시스템은 `unsupported.rs`.
-- `aqr-decompress/src/bin/worker.rs`: 참고용 helper 바이너리 `aqr-decompress-worker`.
-- `aqr-decompress/src/wasm.rs`: 모듈 실행(`load`, `Shared::apply`)과 워커 봉쇄 전의 `warm_up`.
-- `aqr-decompress/tests/wasm.rs`: 모든 load/apply/decode를 샌드박스에서도 실행해 결과(실패 포함)가 같은지 확인한다.
-- `aqr-decompress/tests/sandbox.rs`: 봉쇄(파일·프로세스·네트워크 접근 거부)와 기동 실패. macOS의 메모리 감시는 `os/macos.rs`의 단위 테스트가 확인한다.
-- `aqr-decompress/examples/wasm.rs`: 네이티브, in-process Wasm, 샌드박스의 시간 비교.
+- `crates/aqr-decompress/src/sandbox/mod.rs`: 공개 API(`Sandbox`, `Sandboxed`, `worker_main`)와 브로커 쪽 워커 관리.
+- `crates/aqr-decompress/src/sandbox/proto.rs`: 브로커와 워커 사이의 메시지.
+- `crates/aqr-decompress/src/sandbox/worker.rs`: 워커의 초기화, 봉쇄, 요청 루프.
+- `crates/aqr-decompress/src/sandbox/os/`: OS별 `spawn`·`Child`·`lockdown`. `windows.rs`, `linux.rs`, `macos.rs`(Linux와 공유하는 기동과 종료 코드는 `unix.rs`), 그 밖의 시스템은 `unsupported.rs`.
+- `crates/aqr-decompress/src/bin/worker.rs`: 참고용 helper 바이너리 `aqr-decompress-worker`.
+- `crates/aqr-decompress/src/wasm.rs`: 모듈 실행(`load`, `Shared::apply`)과 워커 봉쇄 전의 `warm_up`.
+- `crates/aqr-decompress/tests/wasm.rs`: 모든 load/apply/decode를 샌드박스에서도 실행해 결과(실패 포함)가 같은지 확인한다.
+- `crates/aqr-decompress/tests/sandbox.rs`: 봉쇄(파일·프로세스·네트워크 접근 거부)와 기동 실패. macOS의 메모리 감시는 `os/macos.rs`의 단위 테스트가 확인한다.
+- `crates/aqr-decompress/examples/wasm.rs`: 네이티브, in-process Wasm, 샌드박스의 시간 비교.
 
 ---
 
@@ -146,7 +146,7 @@
 
 ### 4.3 그 밖
 
-- **[확정]** aqr CLI에 연결했다(`aqr/src/main.rs`의 `Decoder`). 봉쇄할 수 있는 시스템(`sandbox::SUPPORTED`)에서는 기본값으로, 알려지지 않은 모듈(`--wasm`이면 모든 모듈)을 샌드박스에서 돌린다. `Sandbox`는 아카이브마다 하나이고, 그런 모듈이 처음 load될 때 만들어진다. 워커는 aqr 자신을 숨은 인자 `--sandbox-worker`로 다시 실행한 것이다. `--no-sandbox`는 in-process로 돌린다. 그 밖의 시스템에서는 알려지지 않은 모듈이 `--no-sandbox` 없이는 실패한다(알려진 모듈은 `--wasm`이어도 in-process).
+- **[확정]** aqr CLI에 연결했다(`crates/aqr/src/main.rs`의 `Decoder`). 봉쇄할 수 있는 시스템(`sandbox::SUPPORTED`)에서는 기본값으로, 알려지지 않은 모듈(`--wasm`이면 모든 모듈)을 샌드박스에서 돌린다. `Sandbox`는 아카이브마다 하나이고, 그런 모듈이 처음 load될 때 만들어진다. 워커는 aqr 자신을 숨은 인자 `--sandbox-worker`로 다시 실행한 것이다. `--no-sandbox`는 in-process로 돌린다. 그 밖의 시스템에서는 알려지지 않은 모듈이 `--no-sandbox` 없이는 실패한다(알려진 모듈은 `--wasm`이어도 in-process).
 - **[제안]** 2.2의 Linux 메모리 한도.
 - **[제안]** 워커의 stderr를 길이 제한을 두고 브로커가 받아 실패 메시지에 붙인다. 지금은 워커가 panic하면 종료 코드만 남는다. 단말에 그대로 내보내면 이스케이프 시퀀스 주입이 가능하므로 그렇게 하지 않는다.
 - **[제안]** 실행 시간 제한. in-process에도 없으므로 동작을 바꾸지 않으려고 넣지 않았다. 필요하면 브로커에서 벽시계나 CPU 시간 기준으로 워커를 죽이는 방식이 된다.

@@ -1,0 +1,36 @@
+[package]
+name = "aqr-png"
+version = "0.1.0"
+edition = "2024"
+description = "Lossless PNG recompression: bit-exact reconstruction from a smaller representation"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the modules alone (`module`).
+encode = ["dep:aqr-formula", "aqr-flate/encode", "aqr-raw/encode"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+aqr-raw = { path = "../aqr-raw", default-features = false }
+
+[dev-dependencies]
+crc32fast = "1.5"
+flate-zoo = { path = "../../flate-zoo" }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[bin]]
+name = "aqr-png-probe"
+path = "src/bin/probe.rs"
+
+[[bin]]
+name = "aqr-png-ransbench"
+path = "src/bin/ransbench.rs"
+
+[[bin]]
+name = "aqr-png-refprobe"
+path = "src/bin/refprobe.rs"

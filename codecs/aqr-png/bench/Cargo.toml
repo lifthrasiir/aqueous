@@ -1,0 +1,20 @@
+[package]
+name = "aqr-png-bench"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Compares aqr-png with preflate-rs, precomp, paq8px and generic compressors"
+
+# Standalone: needs the workspace's third_party/ checkouts and builds of fetch.sh.
+[workspace]
+
+[dependencies]
+aqr-png = { path = ".." }
+aqr-formula = { path = "../../../crates/aqr-formula" }
+preflate-container = { path = "../../../third_party/preflate-rs/container" }
+libc = "0.2"
+
+[profile.release]
+debug = 1
+lto = "fat"
+codegen-units = 1

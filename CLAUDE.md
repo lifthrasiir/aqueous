@@ -10,7 +10,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   Pages (`.github/workflows/spec.yml`).
 - `docs/` — design documents, mostly in Korean: `10gb-todo.md` (what is left for the 10 GB
   benchmark), `file-formats.md` (measurements by format), `*-design.md`.
-- Core crates
+- `crates/` — the core crates
   - `aqr` — the CLI (`aqr -c/-t/-d`).
   - `aqr-formula` — entry formulas (stack-machine programs) and the archive structure
     (`src/aqr.rs`: the archive encoder and decoder).
@@ -21,10 +21,11 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper.
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
-- Recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite, git, lz4, lzma,
-  lzo, snappy, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle, …), each with a `README.md`
-  and a `FORMAT.md` describing what it stores. `aqr-flate` underlies everything that uses
-  DEFLATE.
+- `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
+  git, lz4, lzma, lzo, snappy, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle, …), each
+  with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a `FORMAT.md`
+  belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace takes both
+  directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
 - `corpus/` and `cache/` under a crate are gitignored local data (test inputs, cached results
   of slow measurements).
 - `flate-zoo/` — a submodule (a workspace of its own). `third_party/` — reference checkouts,
@@ -73,9 +74,9 @@ optimization picked by hash.
 - aqr-modules: one `[[bin]]` per module (never one module doing several things). `build.sh`
   builds them through aqr-ld and writes `wasm/*.wasm`, `*.block` (the module blocks' data),
   `src/known.rs` (name, version, SHA-512/256) and the registry's table in `spec/index.bs`.
-- **After changing any code a module links, rerun `aqr-modules/build.sh`** and commit the
-  results; a test in aqr-decompress catches stale ones. If you don't rebuild, say so in the
-  commit message.
+- **After changing any code a module links, rerun `crates/aqr-modules/build.sh`** and commit
+  the results; a test in aqr-decompress catches stale ones. If you don't rebuild, say so in
+  the commit message.
 - aqr-decompress: a known hash runs natively, anything else in wasmtime.
 - No variable arity: use Split and separate modules (png-against, leveldb-recons, …).
 - Model data (aqr-flate's) is a resource, not embedded in the module.

@@ -7,7 +7,7 @@ and the design is argued in `xform-design.md`.
 ## How it was measured
 
 - 2026-10-23, Apple M4, one thread (`-t 1`), at commit `2abe944`.
-- Through `aqr-show` (`aqr/src/bin/show.rs`): each file is archived (recompression, archive
+- Through `aqr-show` (`crates/aqr/src/bin/show.rs`): each file is archived (recompression, archive
   coding and the round-trip check) at level `mid`, then extracted.
   - aqr-obj was measured with `aqr-obj bench` before it was wired into aqr-compress.
   - aqr-git, aqr-lz4, aqr-lzo and aqr-snappy: see their rows.

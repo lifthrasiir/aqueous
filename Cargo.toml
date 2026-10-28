@@ -1,46 +1,15 @@
 [workspace]
 resolver = "3"
 members = [
-    "aqr",
-    "aqr-common",
-    "aqr-bundle",
-    "aqr-clip",
-    "aqr-formula",
-    "aqr-num",
-    "aqr-compress",
-    "aqr-decompress",
-    "aqr-exe",
-    "aqr-fasta",
-    "aqr-fits",
-    "aqr-flac",
-    "aqr-flate",
-    "aqr-git",
-    "aqr-jpeg",
-    "aqr-lz4",
-    "aqr-lzma",
-    "aqr-lzo",
-    "aqr-mp3",
-    "aqr-obj",
-    "aqr-pdf",
-    "aqr-png",
-    "aqr-psd",
-    "aqr-raw",
-    "aqr-snappy",
-    "aqr-sqlite",
-    "aqr-tex",
-    "aqr-wrt",
-    "aqr-xsv",
-    "aqr-zip",
-    "aqr-api",
-    "aqr-api/demo/concat",
-    "aqr-api/demo/xor",
-    "aqr-api/demo/split",
-    "aqr-ld",
-    "aqr-modules",
+    "crates/*",
+    "crates/aqr-api/demo/concat",
+    "crates/aqr-api/demo/xor",
+    "crates/aqr-api/demo/split",
+    "codecs/*",
 ]
 # flate-zoo is a submodule with a workspace of its own; the benches are standalone, with the
 # checkouts of third_party/ (some of them workspaces of their own).
-exclude = ["flate-zoo", "third_party", "aqr-flate/bench", "aqr-png/bench"]
+exclude = ["flate-zoo", "third_party", "codecs/aqr-flate/bench", "codecs/aqr-png/bench"]
 
 [profile.release]
 debug = 1

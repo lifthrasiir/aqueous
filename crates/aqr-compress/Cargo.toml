@@ -1,0 +1,52 @@
+[package]
+name = "aqr-compress"
+version = "0.1.0"
+edition = "2024"
+description = "Picks the recompressor for a file by its magic bytes, gives the result as an entry formula, and stores it as an Aqueous archive"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../aqr-common" }
+aqr-formula = { path = "../aqr-formula" }
+aqr-decompress = { path = "../aqr-decompress" }
+aqr-bundle = { path = "../../codecs/aqr-bundle" }
+aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["encode"] }
+aqr-flate = { path = "../../codecs/aqr-flate" }
+aqr-fasta = { path = "../../codecs/aqr-fasta" }
+aqr-fits = { path = "../../codecs/aqr-fits" }
+aqr-git = { path = "../../codecs/aqr-git" }
+aqr-flac = { path = "../../codecs/aqr-flac" }
+aqr-jpeg = { path = "../../codecs/aqr-jpeg" }
+aqr-lz4 = { path = "../../codecs/aqr-lz4" }
+aqr-lzma = { path = "../../codecs/aqr-lzma" }
+aqr-lzo = { path = "../../codecs/aqr-lzo" }
+aqr-mp3 = { path = "../../codecs/aqr-mp3" }
+aqr-pdf = { path = "../../codecs/aqr-pdf" }
+aqr-png = { path = "../../codecs/aqr-png" }
+aqr-obj = { path = "../../codecs/aqr-obj" }
+aqr-psd = { path = "../../codecs/aqr-psd" }
+aqr-clip = { path = "../../codecs/aqr-clip" }
+aqr-raw = { path = "../../codecs/aqr-raw" }
+aqr-snappy = { path = "../../codecs/aqr-snappy" }
+aqr-sqlite = { path = "../../codecs/aqr-sqlite" }
+aqr-tex = { path = "../../codecs/aqr-tex" }
+aqr-wrt = { path = "../../codecs/aqr-wrt" }
+aqr-xsv = { path = "../../codecs/aqr-xsv" }
+aqr-zip = { path = "../../codecs/aqr-zip" }
+crc32fast = "1.5"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+zstd = "0.13"
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-compress-memprobe"
+path = "examples/memprobe.rs"
+
+[[example]]
+name = "aqr-compress-classprobe"
+path = "examples/classprobe.rs"
