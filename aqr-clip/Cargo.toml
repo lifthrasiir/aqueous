@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 aqr-common = { path = "../aqr-common" }
+aqr-flate = { path = "../aqr-flate", default-features = false }
 aqr-formula = { path = "../aqr-formula" }
 aqr-psd = { path = "../aqr-psd" }
 aqr-raw = { path = "../aqr-raw" }

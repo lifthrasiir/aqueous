@@ -67,6 +67,7 @@ name = "aqr-clip"
 version = "0.1.0"
 dependencies = [
  "aqr-common",
+ "aqr-flate",
  "aqr-formula",
  "aqr-psd",
  "aqr-raw",

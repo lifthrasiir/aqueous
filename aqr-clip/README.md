@@ -68,7 +68,10 @@ files, 926 MB.
 | `dynamic` (adaptive bits) | **0.357** | 9.9 s (93 MB/s) | 12.8 s | 14.8 / 17.8 MB/s |
 | `static` (static tables) | 0.384 | **7.6 s (122 MB/s)** | **8.3 s** | 21.4 / 30.3 MB/s |
 
-On one thread inflating takes 11.8 s and deflating 22 s on top of the model. With 16
+On one thread inflating takes 11.8 s and deflating 22 s on top of the model (zlib-rs). The
+streams themselves are made again by `aqr_clip::zlib` (aqr-flate's emulation of zlib 1.3's
+compressor at level 1, memLevel 9): all 111,515 of them byte for byte, in 74.5 thread seconds
+on 16 threads (zlib-rs 47 s), the decode then 13.1 s wall with the check. With 16
 threads a thread runs at about half its speed alone (SMT).
 
 `static` (`src/static.rs`) is the same model in symbols of static tables per chunk of 2^20
@@ -112,7 +115,6 @@ catch whole.
 
 - `static`: the size back without its adaptivity (tables coded against the last chunk's, so
   that chunks can be small; richer contexts).
-- A deflater making zlib 1.3's level 1, memLevel 9 streams exactly, for the decoder.
 - Neighbouring tiles as context (the block grid is in the database), mipmaps predicted from
   the layer they come from.
 - The PNG preview of the database through aqr-png, `BlockSize` derived from the blocks.

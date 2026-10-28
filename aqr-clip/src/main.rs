@@ -8,7 +8,7 @@
 //!   with runs (`dynamic`: adaptive bits, `static`: static tables) alone, as a
 //!   module would run it: batches of `-b` tiles (256) of a layout in file order, each a stream
 //!   of its own (the model anew), coded on `-t` threads; then decoded, the tiles deflated again
-//!   (zlib level 1) and compared. Wall times, and thread times by step.
+//!   ([`aqr_clip::zlib`]) and both compared with the file. Wall times, and thread times by step.
 //!
 //! Models, by the bytes they code a batch to:
 //!
@@ -559,13 +559,13 @@ fn speed(args: &[String]) {
             }
         }
         let model = lap(&mut c);
-        let again: usize = tiles.iter().map(|t| deflate1(t).len()).sum();
+        let again: Vec<Vec<u8>> = tiles.iter().map(|t| aqr_clip::zlib::deflate(t).expect("deflate")).collect();
         let deflate = lap(&mut c);
         // (the check is not timed)
-        for (t, z) in tiles.iter().zip(zs) {
+        for ((t, z), a) in tiles.iter().zip(zs).zip(&again) {
             assert!(*t == inflate(z, l.bytes()).unwrap(), "a tile decoded otherwise");
+            assert!(a == z, "a zlib stream made otherwise");
         }
-        std::hint::black_box(again);
         Steps { inflate: 0.0, model, deflate }
     });
     let dec_wall = t.elapsed().as_secs_f64();
@@ -596,19 +596,4 @@ fn speed(args: &[String]) {
         mb(total(&dec, |s| s.model)),
         total(&dec, |s| s.deflate)
     );
-}
-
-/// `t` deflated as zlib at level 1 (zlib-rs, memLevel 8: not the stream of the file, but its
-/// speed).
-fn deflate1(t: &[u8]) -> Vec<u8> {
-    use flate2::{Compress, Compression, FlushCompress, Status};
-    let mut out = Vec::with_capacity(t.len() / 4 + 64);
-    let mut c = Compress::new(Compression::new(1), true);
-    loop {
-        let before = c.total_in() as usize;
-        match c.compress_vec(&t[before..], &mut out, FlushCompress::Finish).expect("deflate") {
-            Status::StreamEnd => return out,
-            _ => out.reserve(out.capacity()),
-        }
-    }
 }
