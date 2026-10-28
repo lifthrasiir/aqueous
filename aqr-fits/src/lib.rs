@@ -11,6 +11,7 @@ pub mod fits;
 pub mod formula;
 pub mod image;
 pub mod module;
+pub mod pyramid;
 pub mod rice;
 pub mod table;
 pub mod tiled;

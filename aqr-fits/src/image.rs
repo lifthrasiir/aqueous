@@ -26,12 +26,12 @@ impl Shape {
     }
 
     #[inline(always)]
-    fn value(&self, x: u32) -> i64 {
+    pub fn value(&self, x: u32) -> i64 {
         if self.signed { ((x << (32 - self.bits)) as i32 >> (32 - self.bits)) as i64 } else { x as i64 }
     }
 
     #[inline(always)]
-    fn mask(&self) -> u32 {
+    pub fn mask(&self) -> u32 {
         u32::MAX >> (32 - self.bits)
     }
 }
@@ -47,6 +47,8 @@ pub struct Coded {
 const ACT: usize = 48;
 /// Lengths of a residual in bits, 0 to 32, as a tree of 6 bits.
 const LEN_TREE: usize = 64;
+/// Bits after a residual's leading one that are coded with adaptive bits, at most.
+const MODELLED: u32 = 1;
 /// Contexts of the bias correction.
 const BIAS: usize = 9 * 9 * 9;
 
@@ -56,7 +58,8 @@ struct Model {
     /// Trees of the lengths, by activity: `LEN_TREE` bits each (flat, which keeps the
     /// modules from unrolling their initialisation).
     len: Vec<Bit>,
-    /// The bit after the leading one, by length and activity (coarse).
+    /// The bits after the leading one ([`MODELLED`] of them at most), by activity (coarse),
+    /// length and the bits before.
     second: Vec<Bit>,
     /// Sum of errors and count, per context.
     bias: Vec<(i64, i32)>,
@@ -97,7 +100,7 @@ impl Model {
         Model {
             s,
             len: vec![Bit::default(); LEN_TREE * ACT],
-            second: vec![Bit::default(); 33 * 12],
+            second: vec![Bit::default(); (12 * 33) << MODELLED],
             bias: vec![(0, 0); BIAS],
             elen: [vec![0; s.width + 2], vec![0; s.width + 2]],
             noise: 16,
@@ -199,11 +202,17 @@ pub fn encode(image: &[u32], s: Shape, known: Option<&[bool]>) -> Coded {
                     node = node * 2 + bit as usize;
                 }
                 if n >= 2 {
-                    let bit = (z >> (n - 2)) & 1 != 0;
-                    let s2 = &mut m.second[n as usize * 12 + pr.act / 4];
-                    ac.encode(bit, s2.p1());
-                    s2.update(bit);
-                    raw.put(z, n - 2);
+                    let modelled = (n - 1).min(MODELLED);
+                    let base = ((pr.act / 4) * 33 + n as usize) << MODELLED;
+                    let mut node = 1;
+                    for i in 0..modelled {
+                        let bit = (z >> (n - 2 - i)) & 1 != 0;
+                        let s2 = &mut m.second[base | node];
+                        ac.encode(bit, s2.p1());
+                        s2.update(bit);
+                        node = node * 2 + bit as usize;
+                    }
+                    raw.put(z, n - 1 - modelled);
                 }
             }
             m.update(row[x], x, z, &pr);
@@ -241,10 +250,17 @@ pub fn decode(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>) ->
                     0 => 0,
                     1 => 1,
                     _ => {
-                        let s2 = &mut m.second[n as usize * 12 + pr.act / 4];
-                        let bit = ac.decode(s2.p1());
-                        s2.update(bit);
-                        (2 | bit as u32) << (n - 2) | raw.get(n - 2)
+                        let modelled = (n - 1).min(MODELLED);
+                        let base = ((pr.act / 4) * 33 + n as usize) << MODELLED;
+                        let mut node = 1usize;
+                        for _ in 0..modelled {
+                            let s2 = &mut m.second[base | node];
+                            let bit = ac.decode(s2.p1());
+                            s2.update(bit);
+                            node = node * 2 + bit as usize;
+                        }
+                        let rest = n - 1 - modelled;
+                        (node as u32) << rest | raw.get(rest)
                     }
                 };
                 row[x] = m.pixel(z, &pr);
@@ -260,6 +276,81 @@ pub fn decode(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>) ->
         return Err(crate::corrupt());
     }
     Ok(())
+}
+
+/// How an image is coded: by prediction (this module's model) or as a pyramid
+/// ([`crate::pyramid`]), which takes whole rows and no known pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Predict = 0,
+    Pyramid = 1,
+}
+
+impl Mode {
+    pub fn from_byte(b: u8) -> Option<Mode> {
+        match b {
+            0 => Some(Mode::Predict),
+            1 => Some(Mode::Pyramid),
+            _ => None,
+        }
+    }
+}
+
+/// Codes the pixels of `image` but those `known` in `mode`; None where the mode does not take
+/// the image.
+pub fn encode_as(image: &[u32], s: Shape, known: Option<&[bool]>, mode: Mode) -> Option<Coded> {
+    match mode {
+        Mode::Predict => Some(encode(image, s, known)),
+        Mode::Pyramid => {
+            if known.is_some() || !image.len().is_multiple_of(s.width) {
+                return None;
+            }
+            let v: Vec<i64> = image.iter().map(|&x| s.value(x)).collect();
+            Some(crate::pyramid::encode(&v, s.width, image.len() / s.width))
+        }
+    }
+}
+
+/// Decodes into `image` the pixels of [`encode_as`] in `mode`.
+pub fn decode_as(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>, mode: Mode) -> crate::Result<()> {
+    match mode {
+        Mode::Predict => decode(c, s, image, known),
+        Mode::Pyramid => {
+            if known.is_some() || !image.len().is_multiple_of(s.width) {
+                return Err(crate::corrupt());
+            }
+            let v = crate::pyramid::decode(c, s.width, image.len() / s.width)?;
+            for (p, v) in image.iter_mut().zip(v) {
+                *p = v as u32 & s.mask();
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Pixels of the sample [`encode_best`] tries the modes on.
+const SAMPLE: usize = 1 << 20;
+
+/// The mode that codes `image` the smaller, tried on its first rows (about [`SAMPLE`]
+/// pixels), and the image coded so.
+pub fn encode_best(image: &[u32], s: Shape, known: Option<&[bool]>) -> (Mode, Coded) {
+    let size = |c: &Coded| c.model.len() + c.raw.len();
+    let rows = (SAMPLE / s.width).max(4) * s.width;
+    if rows < image.len() {
+        let sample = &image[..rows];
+        let k = known.map(|k| &k[..rows]);
+        let predict = encode(sample, s, k);
+        let mode = match encode_as(sample, s, k, Mode::Pyramid) {
+            Some(p) if size(&p) < size(&predict) => Mode::Pyramid,
+            _ => Mode::Predict,
+        };
+        return (mode, encode_as(image, s, known, mode).unwrap());
+    }
+    let predict = encode(image, s, known);
+    match encode_as(image, s, known, Mode::Pyramid) {
+        Some(p) if size(&p) < size(&predict) => (Mode::Pyramid, p),
+        _ => (Mode::Predict, predict),
+    }
 }
 
 #[cfg(test)]

@@ -55,14 +55,14 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "fits-recons-image",
         version: 1,
-        sha512_256: hex("7c7e70bf63ac3b602d534e410a8e329cf0bcca65884cf7d0162dab181e7dacf0"),
+        sha512_256: hex("34a73e6ce70d2b8eef95f8f6ac1d6a4a87bb02cd3dd38c1a5f3b99e2d5b94ee1"),
         wasm: include_bytes!("../wasm/fits-recons-image.wasm"),
         block: include_bytes!("../wasm/fits-recons-image.block"),
     },
     Known {
         name: "fits-recons-rice",
         version: 1,
-        sha512_256: hex("c17c830356ded93c07c4d97d013e7bbc8cb486a396ba6b5eccd7b0b70732e861"),
+        sha512_256: hex("46a3dabcae48c67c11fe0b933c271542aa0d1296d259e64cba8b28ff35c4fb62"),
         wasm: include_bytes!("../wasm/fits-recons-rice.wasm"),
         block: include_bytes!("../wasm/fits-recons-rice.block"),
     },

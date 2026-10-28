@@ -117,12 +117,14 @@ fn pixels(h: &Header) -> Option<Pixels> {
         return None;
     }
     let axes = h.axes("NAXIS")?;
-    let p = Pixels { width: usize::try_from(*axes.first()?).ok()?, bitpix: i8::try_from(h.int("BITPIX")?).ok()? };
+    let width = usize::try_from(*axes.first()?).ok()?;
+    let p = Pixels { width, bitpix: i8::try_from(h.int("BITPIX")?).ok()?, mode: image::Mode::Predict };
     p.valid().then_some(p)
 }
 
-fn pixels_node(f: &mut Formula, d: &[u8], p: Pixels) -> Option<Vec<Node>> {
-    let c = image::encode(&p.numbers(d), p.shape(), None);
+fn pixels_node(f: &mut Formula, d: &[u8], mut p: Pixels) -> Option<Vec<Node>> {
+    let c;
+    (p.mode, c) = image::encode_best(&p.numbers(d), p.shape(), None);
     // (zstd at a low level stands for what the archive does with the data as it is)
     if c.model.len() + c.raw.len() >= zstd::bulk::compress(d, 3).map_or(d.len(), |z| z.len()) {
         return None;
@@ -139,9 +141,9 @@ fn rice(f: &mut Formula, d: &[u8], l: &Layout) -> Option<Vec<Node>> {
     }
     let spans = tiled::spans(l, &p.rows)?;
     let coded = tiled::pixels_kept(d, l, &spans, &p.rebuilt, &mut vec![0; p.image.len()]);
-    let known: Vec<bool> = coded.iter().map(|&c| !c).collect();
+    let known = (!coded.iter().all(|&c| c)).then(|| coded.iter().map(|&c| !c).collect::<Vec<_>>());
     let shape = image::Shape { width: l.width(), bits: l.rice.bits(), signed: l.rice.bytepix > 1 };
-    let c = image::encode(&p.image, shape, Some(&known));
+    let (mode, c) = image::encode_best(&p.image, shape, known.as_deref());
     let codes = tiled::encode_codes(l, &p.rebuilt, &p.image, &p.codes);
     let inputs = vec![
         f.push_as("fits/rows", Kind::Table, p.rows),
@@ -151,7 +153,9 @@ fn rice(f: &mut Formula, d: &[u8], l: &Layout) -> Option<Vec<Node>> {
         f.push_as("fits/model", Kind::Compressed, c.model),
         f.push_as("fits/raw", Kind::Compressed, c.raw),
     ];
-    Some(vec![Node::apply(RICE, l.to_bytes(), inputs, d.len() as u64)])
+    let mut params = l.to_bytes();
+    params.push(mode as u8);
+    Some(vec![Node::apply(RICE, params, inputs, d.len() as u64)])
 }
 
 /// A binary table's rows through `fits-table`, its heap as it is.

@@ -3,9 +3,14 @@
 FITS files rebuilt bit for bit (`FORMAT.md`), HDU by HDU:
 
 - integer images (`BITPIX` 8, 16, 32) and float images (−32, where that pays) coded by a pixel
-  model: a median predictor with a bias correction, the residuals' lengths in bits in a
-  context of the activity around them by adaptive binary arithmetic coding, their lower bits
-  as they are;
+  model, in one of two modes, whichever codes a sample of the image the smaller:
+  - by prediction: a median predictor with a bias correction, the residuals' lengths in bits
+    in a context of the activity around them by adaptive binary arithmetic coding, their lower
+    bits as they are;
+  - as a pyramid of 2×2 blocks' sums and differences (an H-transform), each level at the
+    phase that codes it the best, the coefficients in contexts of their neighbours and parent,
+    their bits after the leading one learnt by band and level: images that went through
+    hcompress (the Digitized Sky Survey's) code to a third of what prediction gives;
 - tile-compressed images of Rice tiles (fpack's `RICE_1`, quantised floats included), their
   pixels taken out and coded by the same model, the tiles' streams rebuilt from them and from
   the codes of their blocks, which are kept (coded in the context of the shortest code);
@@ -29,24 +34,27 @@ quantised floats).
 
 | | before | after |
 |---|---|---|
-| all, 96.2 MB | 68.83 MB (0.715) | 63.37 MB (0.658) |
-| AIA (27, Rice tiles) | 1.000 | 0.951 |
+| all, 96.2 MB | 68.83 MB (0.715) | 56.24 MB (0.584) |
+| AIA (27, Rice tiles) | 1.000 | 0.937 |
+| DSS (6, 16-bit) | 0.505 | 0.172 |
+| DSS through fpack (6, Rice tiles) | 0.685 | 0.261 |
 | Kepler (10, tables) | 0.591 | 0.307 |
-| cmz: AIA20240101_0000_0171.fits | 1258594 | 1197140 |
-| cmz: dss_orion_10arcmin.fits | 342640 | 340940 |
+| cmz: AIA20240101_0000_0171.fits | 1258594 | 1190578 |
+| cmz: dss_orion_10arcmin.fits | 342640 | 146858 |
 | cmz: kplr011904151-2009131105131_llc.fits | 35644 | 28002 |
 
-Compression of the corpus took 9.0 s (2.3 before), decompression 3.2 s (0.6).
+For reference, `xz -9e` makes 1237472, 250564 and 24088 bytes of the three cmz files.
+Compression of the corpus took 13.5 s (2.3 before), decompression 4.4 s (0.6).
 
 ## Status
 
 Left:
 
-- The pixel model is plain; AIA's tiles go to 0.95 of their Rice streams. A blend of
+- The prediction mode is plain; AIA's tiles go to 0.95 of their Rice streams. A blend of
   predictors and better contexts are the next step.
-- Digitized Sky Survey images were H-transform coded (hcompress) before they were
-  distributed: their 2×2 blocks' coefficients, at the right offset, have half the entropy of
-  the pixels' residuals. The model does not see it, and zstd does better on them for now.
+- The pyramid does not reproduce hcompress's own quantisation, which would make the DSS's
+  coefficients exact multiples; it learns their values by band and level instead.
+- Both modes are tried on a sample, which doubles the time of an image's coding.
 - Images whose values are a sparse set (photographic plates' calibrations) would gain from
   coding the values' ranks.
 - Float images are left as they are where the model does not pay (most of them).

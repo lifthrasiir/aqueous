@@ -15,10 +15,11 @@ Contents:
 2. [The formula](#2-the-formula-encoder) *(encoder)*
 3. [Arithmetic coding](#3-arithmetic-coding)
 4. [The pixel model](#4-the-pixel-model)
-5. [`fits-recons-image`](#5-fits-recons-image)
-6. [Rice tiles](#6-rice-tiles)
-7. [`fits-recons-rice`](#7-fits-recons-rice)
-8. [`fits-recons-table`](#8-fits-recons-table)
+5. [The pyramid](#5-the-pyramid)
+6. [`fits-recons-image`](#6-fits-recons-image)
+7. [Rice tiles](#7-rice-tiles)
+8. [`fits-recons-rice`](#8-fits-recons-rice)
+9. [`fits-recons-table`](#9-fits-recons-table)
 
 ## 1. Conventions
 
@@ -49,13 +50,13 @@ The formula is the concatenation, for each HDU, of its header (a slice of the st
 `fits/header`, text), its data, and its padding (a slice of `fits/padding`); then the bytes
 after the HDUs (a slice of `fits/data`). Data of 2048 bytes or more is
 
-- an application of `fits-recons-rice` (§7) for a tile-compressed image (§10.1) of
+- an application of `fits-recons-rice` (§8) for a tile-compressed image (§10.1) of
   `ZCMPTYPE = 'RICE_1'` (or `'RICE_ONE'`) whose tiles are in the heap in order, at least one
   of them rebuilt;
-- an application of `fits-recons-image` (§5) for the image of a primary or `IMAGE` HDU (no
+- an application of `fits-recons-image` (§6) for the image of a primary or `IMAGE` HDU (no
   random groups, `PCOUNT = 0`, `GCOUNT = 1`) of `BITPIX` 8, 16, 32 or −32, where the coded
   streams are smaller than the data through zstd at level 3;
-- an application of `fits-recons-table` (§8) for the rows of a binary table of two rows or
+- an application of `fits-recons-table` (§9) for the rows of a binary table of two rows or
   more and 2048 bytes or more, whose fields fit `NAXIS1`, followed by the rest of the data (gap
   and heap) as it is (a slice of `fits/data`);
 
@@ -86,11 +87,16 @@ bit first, bit `i` with the adaptive bit numbered by the bits above it (`m = 1`,
 
 ## 4. The pixel model
 
-The model codes an image of pixels of `B` bits, signed or not (§1), in rows of `W` pixels (the
-last row perhaps shorter), row by row and in each row from the left. Some pixels may be
-*known* (§7): the decoder has them already; they are not coded but are taken through the model
-all the same. The output is two streams: `model`, an arithmetic code (§3), and `raw`, MSB-first
-bits.
+An image is coded in one of two *modes*: 0, by prediction (this section), or 1, as a pyramid
+(§5), which takes no known pixels and whole rows only. *(encoder)* Both are tried on the
+image's first rows (about 2^20 pixels, all of them for a smaller image), and the smaller is
+taken.
+
+In mode 0, the model codes an image of pixels of `B` bits, signed or not (§1), in rows of
+`W` pixels (the last row perhaps shorter), row by row and in each row from the left. Some
+pixels may be *known* (§8): the decoder has them already; they are not coded but are taken
+through the model all the same. The output is two streams: `model`, an arithmetic code (§3),
+and `raw`, MSB-first bits.
 
 **State**, all fresh at the start of the image:
 
@@ -147,23 +153,88 @@ read before they are written).
 At the end, the arithmetic decoder must not have read past its stream (§3), nor the raw bits
 past theirs.
 
-## 5. `fits-recons-image`
+## 5. The pyramid
+
+In mode 1 the image, `W` × `H` values (§1, `H` its rows), is taken apart level by level into
+the sums and differences of 2×2 blocks, an H-transform: images that went through one with
+quantised coefficients (hcompress's, as the Digitized Sky Survey's) have coefficients of a
+few values each. Values and coefficients are signed 64-bit integers, wrapping.
+
+**Levels.** Level 0 is the image. A level of `w` × `h` values (`w`, `h` ≥ 4, and fewer than 24
+levels before it) at phase `(px, py)` (each 0 or 1) has blocks of `bw = floor((w − px) / 2)` ×
+`bh = floor((h − py) / 2)`: block `(i, j)` is the values at rows `py + 2i`, `py + 2i + 1` and
+columns `px + 2j`, `px + 2j + 1`, `a00 a01` over `a10 a11`. The values outside the blocks are
+the level's *border*. Of a block,
+
+```text
+hx = a11 + a10 − a01 − a00     hy = a11 − a10 + a01 − a00     hc = a11 − a10 − a01 + a00
+h0 = a00 + a01 + a10 + a11     p = hc & 1
+c0 = hc,  c1 = (hx − p) >> 1,  c2 = (hy − p) >> 1             (its three coefficients)
+```
+
+and `h0 >> 2` is the value of the next level's `(j, i)`, a level of `bw` × `bh`. The levels end
+at the first that is not taken apart (a side under 4, or 24 levels); it is the *top*. Back, of
+a block from `c0`, `c1`, `c2` and the next level's value `m`:
+
+```text
+hx = 2 c1 + p,  hy = 2 c2 + p,  h0 = 4 m + ((hx + hy − hc) mod 4)       (mod: 0 to 3)
+a00 = (h0 − hx − hy + hc) >> 2    a01 = (h0 − hx + hy − hc) >> 2
+a10 = (h0 + hx − hy − hc) >> 2    a11 = (h0 + hx + hy + hc) >> 2
+```
+
+*(encoder)* A level's phase is the one of the smallest sum of `2 bitlen(zigzag(c)) + 1` over its
+coefficients, the first of (0, 0), (1, 0), (0, 1), (1, 1) on a tie.
+
+**Numbers.** Every number `v` is coded in a context `ctx` and a context `mctx`: `z` its zigzag
+(64 bits), `n = bitlen(z)` with the tree of 6 bits `len[ctx]`; for `n ≥ 2`, the bits of `z`
+after its leading one, highest first: the first `min(n − 1, 10)` with the adaptive bits
+`mant[mctx][min(n, 23)]` (a tree: numbered by the bits before them, from 1), the others raw,
+in `raw`, MSB first. State, fresh at the start: `len[264]` trees of 6 bits, `mant[26][24]`
+trees of 10 bits, two adaptive bits `phase`.
+
+```text
+bucket(t) = min(23, bitlen(t) if bitlen(t) < 2 else 2 bitlen(t) − 1 + ((t >> (bitlen(t) − 2)) & 1))
+```
+
+**Order.** The phases of the levels, from level 0: `px` with `phase[0]`, `py` with `phase[1]`.
+Then the top's values in order, each as its difference from the one before (0 before the
+first), in `ctx = 240 + bucket(|d|)` of the difference `d` before it (0 at first), `mctx = 25`.
+Then each level from the one below the top down to level 0:
+
+- its blocks in order (`k = i × bw + j`), of each `c0`, `c1`, `c2` in order: coefficient `cb`
+  in `ctx = (b × 3 + min(level, 2)) × 24 + bucket(t)` and `mctx = b × 8 + min(level, 7)`,
+  where `t` is the sum of `|cb|` of the blocks left of it and above it (where they are), of
+  `|c|` of the block's coefficients before it, and twice `|cb|` of its *parent*: at the level
+  above (none for the top, nor for a level above with no blocks), the block
+  `(min(floor(max(i − py', 0) / 2), bh' − 1), min(floor(max(j − px', 0) / 2), bw' − 1))` of its
+  phase `(px', py')` and blocks `bw'` × `bh'`;
+- the level's values in its blocks then follow (above);
+- its border's values in order, each as its difference from its prediction, in `ctx = 216 +
+  bucket(|d|)` of the difference `d` of the border value before it (0 at first), `mctx = 24`.
+  The prediction of the value at `(x, y)` is the value below it if that is in a block, else the
+  value above, else the value left, else the value right if in a block, else 0.
+
+At the end, the decoder must not have read past `model` (§3) nor past `raw`. A value `v` is the
+pixel `v` wrapping in `B` bits.
+
+## 6. `fits-recons-image`
 
 - **Module**: name `fits-recons-image`, version 1.
-- **Params**: `varint W` (the width, at least 1), then `u8 BITPIX` as a signed byte: 8, 16,
-  32 or −32. Nothing else may follow.
+- **Params**: `varint W` (the width, at least 1), `u8 BITPIX` as a signed byte (8, 16, 32 or
+  −32), then `u8 mode` (0 or 1, §4). Nothing else may follow.
 - **Resources**: none.
-- **Inputs**: `model` and `raw` (§4).
+- **Inputs**: `model` and `raw` (§4, §5).
 - **Output**: the image's data, of the declared length, a multiple of `|BITPIX| / 8`: its
   pixels big-endian, of `B = |BITPIX|` bits, signed but for `BITPIX = 8`. For `BITPIX = −32`
   (IEEE floats), the pixel the model codes for bits `f` is `f ^ ((f >> 31 as signed) >> 1 as
   unsigned)`: the other bits of a negative float flipped, which orders the floats as the
   signed numbers (and is its own inverse).
 
-The pixels are those of §4 with `W`, none known. A length of more than 256 × (the inputs'
+The pixels are those of §4 or §5 with `W`, none known; for mode 1 the length must be of whole
+rows. A length of more than 256 × (the inputs'
 bytes + 64) is an error.
 
-## 6. Rice tiles
+## 7. Rice tiles
 
 A tile of `RICE_1` (§10.4.1) is a stream of MSB-first bits for `N` pixels of `BYTEPIX` = 1, 2
 or 4 bytes (`B` = 8 × `BYTEPIX` bits) in blocks of `BS` pixels (the last one perhaps shorter):
@@ -190,15 +261,15 @@ then zero bits to the end of the byte. Codes over `RAW` are an error; so is, dec
 difference that is not 0 for `z_0`, or that is `2^B` or more, or a block read past the end of
 the stream. An encoder may pick any code for
 a block that codes it (0 only for zero differences), and this crate keeps the codes as they
-are (§7).
+are (§8).
 
-## 7. `fits-recons-rice`
+## 8. `fits-recons-rice`
 
 - **Module**: name `fits-recons-rice`, version 1.
 - **Params**, varints:
 
   ```text
-  BYTEPIX, BS                  of the tiles (§6): BYTEPIX 1, 2 or 4; 1 ≤ BS ≤ 65536
+  BYTEPIX, BS                  of the tiles (§7): BYTEPIX 1, 2 or 4; 1 ≤ BS ≤ 65536
   D                            the image's axes, 1 to 999
   D times: Z_k, T_k            ZNAXISk and ZTILEk, each at least 1
   R, M                         bytes of a row of the table, and its rows (NAXIS1, NAXIS2)
@@ -207,10 +278,10 @@ are (§7).
   H, L                         the heap's offset in the data unit (THEAP), and its bytes
   ```
 
-  Nothing else may follow. `M` must be the number of tiles, the product of `ceil(Z_k / T_k)`;
-  `R × M ≤ H ≤ L`; `F` plus the descriptor's bytes (8 for P, 16 for Q) at most `R`; the
-  image's pixels, the product of `Z_k`, fewer than 2^40, and a tile's fewer than 2^32. `L` is
-  the declared length.
+  then `u8 mode` (0 or 1, §4). Nothing else may follow. `M` must be the number of tiles, the
+  product of `ceil(Z_k / T_k)`; `R × M ≤ H ≤ L`; `F` plus the descriptor's bytes (8 for P, 16
+  for Q) at most `R`; the image's pixels, the product of `Z_k`, fewer than 2^40, and a tile's
+  fewer than 2^32. `L` is the declared length.
 - **Resources**: none.
 - **Inputs**: `rows`, `residue`, `rebuilt`, `codes`, `model`, `raw`.
 - **Output**: the data unit, `L` bytes.
@@ -232,10 +303,10 @@ whether the tile's stream is rebuilt. The data unit is the table, then the bytes
 to `L` in which the streams of the rebuilt tiles are cut out, those being `residue` (which
 must be used up exactly).
 
-**Pixels.** Each tile not rebuilt whose stream is not empty and decodes as a stream of §6
+**Pixels.** Each tile not rebuilt whose stream is not empty and decodes as a stream of §7
 (`N` the tile's pixels, `BYTEPIX`, `BS`) gives its pixels to the image; the other pixels of
 tiles not rebuilt are 0. These are the known pixels of §4; the pixels of the rebuilt tiles are
-decoded from `model` and `raw`. An image of more than 256 × (the bytes of `model` and `raw`
+decoded from `model` and `raw` in the mode (mode 1 only where no pixel is known). An image of more than 256 × (the bytes of `model` and `raw`
 + 64) pixels is an error.
 
 **Codes.** `codes` is an arithmetic code (§3) of the codes of the blocks of the rebuilt tiles,
@@ -245,10 +316,10 @@ fewest bits: 0 if they are all 0; else, of RAW (`|block| × B` bits) and the cod
 `k` = 0 to RAW − 2 (`Σ (floor(z / 2^k) + 1 + k)` bits), the one of the fewest bits, RAW on a
 tie with it and else the smallest.
 
-**Rebuilding.** Each rebuilt tile's stream is the stream of §6 of its pixels with its codes; it
+**Rebuilding.** Each rebuilt tile's stream is the stream of §7 of its pixels with its codes; it
 must be of the length its descriptor gives, and it goes in its place. Every code must be used.
 
-## 8. `fits-recons-table`
+## 9. `fits-recons-table`
 
 - **Module**: name `fits-recons-table`, version 1.
 - **Params**: `varint M`, the rows; then, for each column of a row, in order, `varint len` (its

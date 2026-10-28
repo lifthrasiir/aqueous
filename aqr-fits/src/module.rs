@@ -1,7 +1,7 @@
 //! The code of the modules (see `formula`, and FORMAT.md), which needs no aqr-formula, so that
 //! aqr-modules builds it into their Wasm modules.
 
-use crate::image::{self, Coded, Shape};
+use crate::image::{self, Coded, Mode, Shape};
 use crate::table::{self, Column};
 use crate::tiled::{self, Layout};
 use crate::{Error, Result, corrupt};
@@ -14,6 +14,7 @@ use aqr_common::varint;
 pub struct Pixels {
     pub width: usize,
     pub bitpix: i8,
+    pub mode: Mode,
 }
 
 impl Pixels {
@@ -29,20 +30,21 @@ impl Pixels {
         Shape { width: self.width, bits: self.bytes() as u32 * 8, signed: self.bitpix != 8 }
     }
 
-    /// The params: a varint of the width, then `BITPIX` as a byte.
+    /// The params: a varint of the width, then `BITPIX` as a byte, then the mode.
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut v = Vec::new();
         varint::put(&mut v, self.width as u64);
         v.push(self.bitpix as u8);
+        v.push(self.mode as u8);
         v
     }
 
     pub fn from_bytes(b: &[u8]) -> Option<Pixels> {
         let mut at = 0;
         let width = usize::try_from(varint::get(b, &mut at).ok()?).ok()?;
-        let (&bitpix, rest) = b.get(at..)?.split_first()?;
-        let p = Pixels { width, bitpix: bitpix as i8 };
-        (rest.is_empty() && p.valid()).then_some(p)
+        let &[bitpix, mode] = b.get(at..)? else { return None };
+        let p = Pixels { width, bitpix: bitpix as i8, mode: Mode::from_byte(mode)? };
+        p.valid().then_some(p)
     }
 
     /// The numbers of data `d`, whole pixels.
@@ -88,7 +90,7 @@ pub fn image(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     }
     let mut numbers = vec![0u32; len / p.bytes()];
     let c = Coded { model: model.to_vec(), raw: raw.to_vec() };
-    image::decode(&c, p.shape(), &mut numbers, None)?;
+    image::decode_as(&c, p.shape(), &mut numbers, None, p.mode)?;
     Ok(p.data(&numbers))
 }
 
@@ -97,7 +99,9 @@ pub fn image(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
 /// and raw bits).
 pub fn rice(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let mut at = 0;
-    let l = Layout::from_bytes(params, &mut at).filter(|l| l.len == len && at == params.len()).ok_or_else(corrupt)?;
+    let l = Layout::from_bytes(params, &mut at).filter(|l| l.len == len).ok_or_else(corrupt)?;
+    let &[mode] = &params[at..] else { return Err(corrupt()) };
+    let mode = Mode::from_byte(mode).ok_or_else(corrupt)?;
     let &[rows, residue, rebuilt, codes, model, raw] = inputs else { return Err(corrupt()) };
     let rebuilt = bitmap(rebuilt, l.rows as usize)?;
     let pixels = l.pixels().ok_or_else(corrupt)?;
@@ -110,7 +114,8 @@ pub fn rice(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let coded = tiled::pixels_kept(&d, &l, &spans, &rebuilt, &mut image);
     let shape = Shape { width: l.width(), bits: l.rice.bits(), signed: l.rice.bytepix > 1 };
     let c = Coded { model: model.to_vec(), raw: raw.to_vec() };
-    image::decode(&c, shape, &mut image, Some(&coded.iter().map(|&c| !c).collect::<Vec<_>>()))?;
+    let known = (!coded.iter().all(|&c| c)).then(|| coded.iter().map(|&c| !c).collect::<Vec<_>>());
+    image::decode_as(&c, shape, &mut image, known.as_deref(), mode)?;
     let codes = tiled::decode_codes(&l, &rebuilt, &image, codes).ok_or_else(corrupt)?;
     tiled::rebuild(&mut d, &l, &spans, &rebuilt, &image, &codes).ok_or(Error("tiles"))?;
     Ok(d)
