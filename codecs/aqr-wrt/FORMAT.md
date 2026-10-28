@@ -131,8 +131,9 @@ The output ends where the coded text does, and its length must be the declared o
     one replaced are written before it, a special byte among them preceded by ESC.
   - For a word, a space that ends those bytes is dropped. If there is no such space, NOSP is
     written. After that comes CAP or UP for its case.
-  - A text longer than 16 MiB is coded in pieces of about 16 MiB, each ending with LF, on
-    threads of their own. As no token holds LF, the pieces code to the same bytes as the whole.
+  - A text longer than 16 MiB is coded in pieces of about 16 MiB on threads of their own, each
+    ending with a byte that is neither a space nor in any token (such as LF, `"` or `,`). The
+    pieces then code to the same bytes as the whole, minified JSON among them.
 - **What is taken.**
   - Text of at least 256 KiB in which at most 1 in 1000 bytes are not text bytes. Text bytes
     are the printable ones, tab, CR, LF, form feed, and every byte from 0x80 on.

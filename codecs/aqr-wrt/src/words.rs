@@ -250,18 +250,24 @@ pub struct Dictionary {
 }
 
 /// Data longer than this is counted and coded in pieces of about as many bytes, each ending
-/// with LF (or the data), on threads of their own: no token holds LF, so that the pieces code
-/// to the same bytes as the whole.
+/// with a byte that no token holds ([`apart`]; or the data), on threads of their own, so that
+/// the pieces code to the same bytes as the whole.
 pub(crate) const PIECE: usize = 16 << 20;
+
+/// Whether `c` is neither in any token nor a space: the tokens of what follows it are found as
+/// they would be from there, and a word just after it is not preceded by a space.
+fn apart(c: u8) -> bool {
+    !name_byte(c) && !matches!(c, b'<' | b'>' | b'/' | b'&' | b'#' | b';' | b' ')
+}
 
 /// `d` in pieces ([`PIECE`]).
 fn pieces(d: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut at = 0;
     while d.len() - at > PIECE {
-        let Some(lf) = d[at + PIECE..].iter().position(|&b| b == b'\n') else { break };
-        out.push(&d[at..at + PIECE + lf + 1]);
-        at += PIECE + lf + 1;
+        let Some(e) = d[at + PIECE..].iter().position(|&b| apart(b)) else { break };
+        out.push(&d[at..at + PIECE + e + 1]);
+        at += PIECE + e + 1;
     }
     out.push(&d[at..]);
     out
@@ -666,9 +672,12 @@ mod tests {
     fn pieces_as_whole() {
         let line = "Some words, and <b>some</b> MORE words &amp; others\n";
         let mut d = line.repeat((PIECE * 5 / 2) / line.len()).into_bytes();
-        // (a piece without LF)
+        // (a line of minified JSON, cut where no token is)
+        let json = r#"{"t":"Some words","u":"</b>&amp;&#38;","v":"x"},"#;
+        d.extend_from_slice(&json.repeat((PIECE * 3 / 2) / json.len()).into_bytes());
+        // (a piece that cannot be cut)
         d.extend_from_slice(&b"the end ".repeat(PIECE / 4));
-        assert!(pieces(&d).len() == 3 && pieces(&d).concat() == d);
+        assert!(pieces(&d).len() == 4 && pieces(&d).concat() == d);
         let one = Dictionary::of(&[&d], 1).unwrap();
         let four = Dictionary::of(&[&d], 4).unwrap();
         assert_eq!(one.to_bytes(), four.to_bytes());

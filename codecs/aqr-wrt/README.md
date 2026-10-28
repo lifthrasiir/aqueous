@@ -32,8 +32,8 @@ Measured 2026-10-26 on an Apple M4 (10 cores), through `aqr` at level `mid`.
   text taken leaves the blocks of the text kept as it is.
 - Peak memory is 9.7 GB, against 8.2 GB before.
 - The module codes 110 MB/s and decodes about 400 MB/s on a thread (`aqr-wrt-bench`, enwik8).
-  - Coding a text of more than 16 MiB is spread over threads, in pieces that end with LF;
-    the coded text is the same.
+  - Coding a text of more than 16 MiB is spread over threads, in pieces that end with a
+    byte no token holds (LF, `"`, `,`, …), so minified JSON too; the coded text is the same.
   - Decoding is one pass per text. That is what `enwik9` alone waits for (2.3 s).
 
 Text of Hangul, measured 2026-10-29 on the same machine through `aqr -5`: 512 MiB from the
