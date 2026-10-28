@@ -135,6 +135,11 @@ catch whole.
 
 ## Next steps
 
+- Tiles equal to an earlier one of their file: 54.7% of the 111,515 tiles with data, 12.1% of
+  the zlib bytes (most of them empty or one colour). As references (`speed -u`): the tiles
+  276.3 -> 272.4 MB (-1.4%), encoding 9.7 -> 8.4 s and decoding 12.2 -> 9.2 s on 16 threads
+  (half the bytes to model, and the streams copied rather than deflated).
+
 - `static`: the size back without its adaptivity (tables coded against the last chunk's, so
   that chunks can be small; richer contexts).
 - Neighbouring tiles as context (the block grid is in the database), mipmaps predicted from

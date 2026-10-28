@@ -4,7 +4,8 @@
 //! - `aqr-clip bench [-t THREADS] [-b TILES] [-c] FILE...`: the tiles of each layout and class
 //!   coded by every model at hand, a batch of `-b` tiles (256) at a time, and what a file would
 //!   come to with the best of them. `-c` decodes the dynamic model's streams and compares.
-//! - `aqr-clip speed [-t THREADS] [-b TILES] [-m dynamic|static] FILE...`: the model of whole pixels
+//! - `aqr-clip speed [-t THREADS] [-b TILES] [-m dynamic|static] [-u] FILE...` (`-u`: a tile equal to
+//!   one before it in its file not coded, its reference counted apart): the model of whole pixels
 //!   with runs (`dynamic`: adaptive bits, `static`: static tables) alone, as a
 //!   module would run it: batches of `-b` tiles (256) of a layout in file order, each a stream
 //!   of its own (the model anew), coded on `-t` threads; then decoded, the tiles deflated again
@@ -43,7 +44,7 @@ use std::time::Instant;
 
 fn usage() -> ! {
     eprintln!(
-        "usage: aqr-clip stat FILE...\n       aqr-clip bench [-t THREADS] [-b TILES] [-c] FILE...\n       aqr-clip speed [-t THREADS] [-b TILES] [-m dynamic|static] FILE...\n       aqr-clip formula [-t THREADS] FILE..."
+        "usage: aqr-clip stat FILE...\n       aqr-clip bench [-t THREADS] [-b TILES] [-c] FILE...\n       aqr-clip speed [-t THREADS] [-b TILES] [-m dynamic|static] [-u] FILE...\n       aqr-clip formula [-t THREADS] FILE..."
     );
     std::process::exit(2);
 }
@@ -474,12 +475,13 @@ fn lap(t: &mut Instant) -> f64 {
 }
 
 fn speed(args: &[String]) {
-    let (mut threads, mut per, mut stat, mut files) = (1, 256, false, Vec::new());
+    let (mut threads, mut per, mut stat, mut unique, mut files) = (1, 256, false, false, Vec::new());
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "-t" => threads = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
             "-b" => per = it.next().and_then(|s| s.parse().ok()).unwrap_or_else(|| usage()),
+            "-u" => unique = true,
             "-m" => match it.next().map(String::as_str) {
                 Some("dynamic") => stat = false,
                 Some("static") => stat = true,
@@ -492,9 +494,23 @@ fn speed(args: &[String]) {
     let all: Vec<Parts> = data.iter().map(|d| parts(d).expect("not a .clip file")).collect();
     // batches of a layout, in file order
     let mut jobs: Vec<(Layout, Vec<&[u8]>)> = Vec::new();
+    // with -u, a tile equal to one before it in its file is a reference to it: the varint of the
+    // number of distinct tiles back, counted apart
+    let (mut dups, mut dup_zlib, mut refs) = (0usize, 0usize, 0usize);
     for p in &all {
         let mut by: BTreeMap<Layout, Vec<&[u8]>> = BTreeMap::new();
+        let mut seen: std::collections::HashMap<&[u8], usize> = std::collections::HashMap::new();
         for f in &p.found {
+            if unique {
+                let n = seen.len();
+                if let Some(&k) = seen.get(f.zlib) {
+                    dups += 1;
+                    dup_zlib += f.zlib.len();
+                    refs += 1 + (usize::BITS - (n - k).leading_zeros()) as usize / 7;
+                    continue;
+                }
+                seen.insert(f.zlib, n);
+            }
             by.entry(f.layout).or_default().push(f.zlib);
         }
         for (l, zs) in by {
@@ -586,6 +602,14 @@ fn speed(args: &[String]) {
         size as f64 / zlib as f64,
         heads.into_inner()
     );
+    if unique {
+        println!(
+            "repeated tiles: {dups}, {dup_zlib} bytes of zlib, as references about {refs} bytes: all tiles {} -> {} ({:.3})",
+            zlib + dup_zlib,
+            size + refs,
+            (size + refs) as f64 / (zlib + dup_zlib) as f64
+        );
+    }
     println!(
         "encode: {enc_wall:.2} s wall ({:.1} MB/s of input); thread times: inflate {:.1} s, model {:.1} s ({:.1} MB/s of input a thread)",
         mb(enc_wall),
