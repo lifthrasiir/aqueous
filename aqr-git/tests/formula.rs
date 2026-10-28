@@ -77,6 +77,9 @@ fn roundtrip(d: &[u8]) -> (Formula, Vec<u8>) {
 
 fn roundtrip_with(d: &[u8], opt: &Options) -> (Formula, Vec<u8>) {
     let f = formula::encode_with(d, opt).expect("encoded").formula;
+    // (made a stream at a time, the same)
+    let g = formula::encode_with(d, &Options { window: 1, ..opt.clone() }).expect("encoded").formula;
+    assert!(f == g, "made otherwise in windows of a stream");
     for threads in [1, 4] {
         assert!(decode(&f, threads).unwrap() == d, "not rebuilt");
     }

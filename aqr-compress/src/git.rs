@@ -20,6 +20,7 @@ pub(crate) fn pack(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formu
             let except = h.owner(d);
             (h, except)
         }),
+        ..Default::default()
     };
     let e = aqr_git::formula::encode_with(d, &gopt)?;
     cx.inflate(e.inflated);

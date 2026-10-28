@@ -4,7 +4,8 @@
 //! it. The data may be recompressed in turn: of each kind of object a stream, where the archive
 //! finds the files checked out again among the blobs.
 
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use aqr_flate::formula::Derived;
 use aqr_flate::{Hints, Parsed, zlib};
@@ -40,6 +41,9 @@ pub struct Options {
     /// of: the probe counts the data held by the others as nothing (a blob is the file checked
     /// out), as the archive stores it once.
     pub held: Option<(Arc<Held>, Option<usize>)>,
+    /// About the bytes of streams made at once, in order (but the largest few and the probed),
+    /// whose data and records are held until put in place: by default [`WINDOW`].
+    pub window: usize,
 }
 
 impl Default for Options {
@@ -51,6 +55,7 @@ impl Default for Options {
             limit: u64::MAX,
             probe: None,
             held: None,
+            window: WINDOW,
         }
     }
 }
@@ -67,6 +72,9 @@ pub const OWN_MIN: usize = 256 << 10;
 
 /// Streams whose zlib settings are found first, the largest, for the others.
 const SAMPLES: usize = 8;
+
+/// [`Options::window`] by default.
+pub const WINDOW: usize = 64 << 20;
 
 /// Bytes from which a stream gets threads of its own: two of aqr-flate's segments.
 const LARGE: usize = 2 << 20;
@@ -99,13 +107,17 @@ fn kind(t: u8) -> Kind {
     }
 }
 
-/// An entry's stream parsed: its data made, and the record estimated where it is probed.
-type Job<'a> = Option<(Parsed<'a>, Option<usize>, aqr_flate::Options)>;
+/// An entry's stream made: its data and record, and the zlib settings emulation found.
+type Made = Option<(Vec<u8>, Vec<u8>, Option<zlib::Params>)>;
 
 /// The formula rebuilding the pack `input`, or None where it is not one (or no entry is
 /// rebuilt). The entries whose data their headers tell fit in [`Options::limit`], that
 /// inflate to as much, whose Adler-32 is right and that aqr-flate takes are rebuilt from their
 /// data; the rest are kept as they are.
+///
+/// Each entry is parsed and deconstructed at once, so that what is held is what is made (a
+/// pack of 222 MB has 817k entries and 490 MB of data); the options, which hold aqr-flate's
+/// catalog, are shared.
 pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let entries = pack::entries(input)?;
     let end = entries.last().map_or(HEADER, Entry::end);
@@ -121,105 +133,125 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             })
         })
         .collect();
-    let fopt = aqr_flate::Options { zlib: opt.zlib, ..aqr_flate::Options::for_profile(opt.profile).ok()? };
-    let fopt = |threads: usize, max: u64| aqr_flate::Options {
-        threads,
-        max_data: usize::try_from(max).unwrap_or(usize::MAX),
-        ..fopt.clone()
+    let base = aqr_flate::Options {
+        zlib: opt.zlib,
+        // (each entry is held to its header's size below; this bounds what a lying one inflates)
+        max_data: usize::try_from(opt.limit).unwrap_or(usize::MAX),
+        ..aqr_flate::Options::for_profile(opt.profile).ok()?
     };
-    let probed = |i: usize| opt.probe.is_some() && entries[i].deflate.len() >= PROBE_MIN;
+    let fopts =
+        [aqr_flate::Options { threads: 1, ..base.clone() }, aqr_flate::Options { threads: opt.threads, ..base }];
+    let fopt = |threads: usize| &fopts[(threads > 1) as usize];
     let size = |&(i, _): &(usize, u64)| entries[i].deflate.len();
-    // (each with its options, made once: they hold the profile's catalog)
-    let mut parsed: Vec<Job> = par_jobs(&jobs, size, opt.threads, |&(i, max), threads| {
+    // its stream parsed, if its data is as its header and Adler-32 tell
+    let parse = |j: usize, threads: usize| {
+        let (i, max) = jobs[j];
         let e = &entries[i];
-        let fopt = fopt(threads, max);
-        let p = Parsed::new(&input[e.deflate.clone()], &fopt).ok()?;
+        let p = Parsed::new(&input[e.deflate.clone()], fopt(threads)).ok()?;
         let sum = u32::from_be_bytes(input[e.deflate.end..e.end()].try_into().unwrap());
-        if p.data().len() as u64 != max || aqr_common::adler32::hash(p.data()) != sum {
-            return None;
-        }
-        let record = if probed(i) { p.estimate(&fopt).ok() } else { None };
-        Some((p, record, fopt))
-    });
-    if let Some(probe) = &opt.probe {
-        let enc = Encoder::with_threads(probe.level, opt.threads);
-        for (j, p) in parsed.iter_mut().enumerate() {
-            let i = jobs[j].0;
-            let Some((q, record, _)) = p else { continue };
-            let held = || opt.held.as_ref().is_some_and(|(h, except)| h.holds(q.data(), *except)) as u8 as f64;
-            if probed(i) && !probe.pays(&enc, entries[i].deflate.len(), || *record, q.data(), held, kind(entries[i].t))
-            {
-                *p = None;
-            }
-        }
-    }
-    let parsed: Vec<Mutex<Job>> = parsed.into_iter().map(Mutex::new).collect();
-    // git writes every object with the same zlib settings: those of a few of the largest
-    // streams are tried first on the others (taken where they predict every token).
-    let mut order: Vec<usize> = (0..jobs.len()).filter(|&j| parsed[j].lock().unwrap().is_some()).collect();
-    order.sort_by_key(|&j| (std::cmp::Reverse(size(&jobs[j])), j));
-    let (first, rest) = order.split_at(order.len().min(SAMPLES));
-    let make = |j: usize, params: Option<zlib::Params>| {
-        let (p, _, fopt) = parsed[j].lock().unwrap().take()?;
+        (p.data().len() as u64 == max && aqr_common::adler32::hash(p.data()) == sum).then_some(p)
+    };
+    let make = |j: usize, p: Parsed, threads: usize, params: Option<zlib::Params>| -> Made {
         let e = &entries[jobs[j].0];
         let hints = Hints { params, ..Hints::zlib_header(e.zlib(input)) };
-        let (data, record, report) = p.deconstruct(&fopt, &hints).ok()?;
+        let (data, record, report) = p.deconstruct(fopt(threads), &hints).ok()?;
         // (tiny records are much alike, so that they compress well together)
         (record.len() < e.deflate.len() + 16).then_some((data, record, report.zlib))
     };
-    // (on as many threads as they were parsed for: the sizes are the same)
-    let sampled = par_jobs(first, |&j| size(&jobs[j]), opt.threads, |&j, _| make(j, None));
-    let mut seen: Vec<(zlib::Params, usize)> = Vec::new();
-    for p in sampled.iter().flatten().filter_map(|m| m.2) {
-        match seen.iter_mut().find(|s| s.0 == p) {
-            Some(s) => s.1 += 1,
-            None => seen.push((p, 1)),
-        }
-    }
-    let params = seen.iter().max_by_key(|s| s.1).map(|s| s.0);
-    let others = par_jobs(rest, |&j| size(&jobs[j]), opt.threads, |&j, _| make(j, params));
-    let mut made: Vec<Option<(Vec<u8>, Vec<u8>)>> = (0..entries.len()).map(|_| None).collect();
-    for (&j, m) in first.iter().chain(rest).zip(sampled.into_iter().chain(others)) {
-        made[jobs[j].0] = m.map(|m| (m.0, m.1));
-    }
-    if made.iter().all(Option::is_none) {
-        return None;
-    }
-
-    let mut w = Writer::new(&input[..HEADER]);
-    let sizes = made.iter().flatten().fold((0, 0), |(d, r), m| (d + m.0.len(), r + m.1.len()));
-    let (mut data, mut records) = (Vec::with_capacity(sizes.0), Vec::with_capacity(sizes.1));
-    // the kind of each entry's data and its end; the lengths of each rebuilt stream's data and
-    // record; the streams, with what flate-set derives of them after them
-    let (mut kinds, mut lens) = (Vec::<(Kind, usize)>::new(), Vec::new());
-    let (mut flate, mut derived) = (Vec::new(), Vec::new());
-    for (e, m) in entries.iter().zip(&mut made) {
-        match m.take() {
-            None => w.kept(&input[e.header.start..e.end()]),
-            Some((d, r)) => {
-                w.rebuilt(e.t, d.len() as u64, &input[e.header.clone()], &input[e.base.clone()], e.zlib(input));
-                Derived::Zlib.put(&d, e.deflate.len(), &mut derived);
-                flate.extend_from_slice(&input[e.deflate.clone()]);
-                lens.push((d.len(), r.len()));
-                match d.len() == sizes.0 {
-                    true => data = d,
-                    false => data.extend_from_slice(&d),
-                }
-                records.extend_from_slice(&r);
-                kinds.push((kind(e.t), data.len()));
+    // The large streams, where there is a probe, one at a time, as it tells: and only where it
+    // may pay (the probe's encoder is of one thread).
+    let probed = |j: usize| opt.probe.is_some() && size(&jobs[j]) >= PROBE_MIN;
+    // (made apart from the others: a few)
+    let mut early: HashMap<usize, Made> = HashMap::new();
+    if let Some(probe) = &opt.probe {
+        let enc = Encoder::with_threads(probe.level, opt.threads);
+        for j in (0..jobs.len()).filter(|&j| probed(j)) {
+            let threads = if size(&jobs[j]) >= LARGE { opt.threads } else { 1 };
+            let Some(p) = parse(j, threads) else { continue };
+            let e = &entries[jobs[j].0];
+            let held = || opt.held.as_ref().is_some_and(|(h, except)| h.holds(p.data(), *except)) as u8 as f64;
+            let record = || p.estimate(fopt(threads)).ok();
+            if probe.pays(&enc, e.deflate.len(), record, p.data(), held, kind(e.t)) {
+                early.insert(j, make(j, p, threads, None));
             }
         }
+    }
+    // git writes every object with the same zlib settings: those of a few of the largest
+    // streams are tried first on the others (taken where they predict every token).
+    let mut order: Vec<usize> = (0..jobs.len()).filter(|&j| !probed(j)).collect();
+    order.sort_by_key(|&j| (std::cmp::Reverse(size(&jobs[j])), j));
+    order.truncate(SAMPLES);
+    let run = |js: &[usize], params: Option<zlib::Params>| {
+        par_jobs(js, |&j| size(&jobs[j]), opt.threads, |&j, threads| make(j, parse(j, threads)?, threads, params))
+    };
+    let mut seen: Vec<(zlib::Params, usize)> = Vec::new();
+    for (&j, m) in order.iter().zip(run(&order, None)) {
+        if let Some(p) = m.as_ref().and_then(|m| m.2) {
+            match seen.iter_mut().find(|s| s.0 == p) {
+                Some(s) => s.1 += 1,
+                None => seen.push((p, 1)),
+            }
+        }
+        early.insert(j, m);
+    }
+    let params = seen.iter().max_by_key(|s| s.1).map(|s| s.0);
+
+    // The others made a window at a time, in order, and put in place as they are made.
+    let mut w = Writer::new(&input[..HEADER]);
+    let declared = jobs.iter().map(|j| j.1).sum::<u64>();
+    let mut data = Vec::with_capacity(usize::try_from(declared).unwrap_or(0));
+    let mut records = Vec::new();
+    // the kind of each entry's data and its end; the lengths of each rebuilt stream's data and
+    // record; what flate-set derives of each
+    let (mut kinds, mut lens, mut derived) = (Vec::<(Kind, usize)>::new(), Vec::new(), Vec::new());
+    // (and the bytes of the streams)
+    let mut streams = 0;
+    let (mut next, mut at) = (0, 0);
+    while at < entries.len() {
+        let start = next;
+        let mut bytes = 0;
+        while next < jobs.len() && (next == start || bytes < opt.window) {
+            bytes += size(&jobs[next]);
+            next += 1;
+        }
+        let todo: Vec<usize> = (start..next).filter(|&j| !probed(j) && !early.contains_key(&j)).collect();
+        let mut made: HashMap<usize, Made> = todo.iter().copied().zip(run(&todo, params)).collect();
+        let until = jobs.get(next).map_or(entries.len(), |j| j.0);
+        let mut j = start;
+        for (i, e) in entries.iter().enumerate().take(until).skip(at) {
+            let m = match jobs.get(j) {
+                Some(&(ji, _)) if ji == i => {
+                    j += 1;
+                    early.remove(&(j - 1)).or_else(|| made.remove(&(j - 1))).flatten()
+                }
+                _ => None,
+            };
+            match m {
+                None => w.kept(&input[e.header.start..e.end()]),
+                Some((d, r, _)) => {
+                    w.rebuilt(e.t, d.len() as u64, &input[e.header.clone()], &input[e.base.clone()], e.zlib(input));
+                    Derived::Zlib.put(&d, e.deflate.len(), &mut derived);
+                    streams += e.deflate.len();
+                    lens.push((d.len(), r.len()));
+                    data.extend_from_slice(&d);
+                    records.extend_from_slice(&r);
+                    kinds.push((kind(e.t), data.len()));
+                }
+            }
+        }
+        at = until;
+    }
+    if lens.is_empty() {
+        return None;
     }
     let trailer = input.get(end..end + ID).is_some_and(|t| *t == pack::sha1(&input[..end]));
     let (layout, kept) = w.finish(trailer, &input[if trailer { end + ID } else { end }..]);
     // The layout must give the pack back with the streams as they are: a check of everything
     // but aqr-flate, which is cheap.
-    let flate_len = flate.len() + derived.len();
-    flate.extend_from_slice(&derived);
-    if crate::layout::build(&layout, &flate, &kept, input.len() as u64).ok().as_deref() != Some(input) {
+    if !crate::layout::check(&layout, &derived, &kept, input) {
         return None;
     }
-    drop(flate);
+    let flate_len = streams + derived.len();
     let inflated = data.len() as u64;
     // (the input the first stream, the kinds' after the others)
     let mut f = Formula::default();

@@ -69,7 +69,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "git-pack-recons",
         version: 1,
-        sha512_256: hex("1c2d5ef769504c97588680ec96e213111f97d5c6b5e48bf7113e4a2c5ef9507f"),
+        sha512_256: hex("17849cd2f570cd4ff266e6c7c7e7656954fff0b7b53a032682e630874b1d27e3"),
         wasm: include_bytes!("../wasm/git-pack-recons.wasm"),
         block: include_bytes!("../wasm/git-pack-recons.block"),
     },

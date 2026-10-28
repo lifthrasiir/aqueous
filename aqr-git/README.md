@@ -57,17 +57,17 @@ container: the whole checkout in ten streams, zstd once over each):
 | `aqr`, packs at aqr-flate's adaptive profile (zlib emulated) | 514.7 MB | 0.430 |
 | former aqr-git, `-A` (every zlib stream rebuilt, zstd -19) | 304.8 MB | 0.255 |
 
-| repository | input | `aqr` | adaptive | former, `-l 3` | former, default | compress / decompress |
-|---|---|---|---|---|---|---|
-| pyre | 664.9 MB | 326.3 MB | 302.8 MB | 327.1 MB | 313.5 MB | 13.4 / 126 MB/s |
-| SaturnTranslatorInternal | 142.9 MB | 50.3 MB | 47.6 MB | 49.1 MB | 44.1 MB | 27.3 / 265 MB/s |
-| wah | 125.6 MB | 22.1 MB | 21.8 MB | 61.0 MB | 36.7 MB | 20.7 / 172 MB/s |
-| loupe | 119.0 MB | 50.8 MB | 50.8 MB | 49.4 MB | 49.4 MB | 75.3 / 248 MB/s |
-| unison | 59.6 MB | 37.3 MB | 35.9 MB | 35.0 MB | 33.3 MB | 23.7 / 86 MB/s |
-| aqueous | 38.7 MB | 31.4 MB | 31.3 MB | 32.7 MB | 32.4 MB | 24.2 / 277 MB/s |
-| sudachi.rs | 20.1 MB | 14.9 MB | 14.6 MB | 18.1 MB | 17.8 MB | 12.7 / 96 MB/s |
-| wasm3-rs | 12.0 MB | 6.4 MB | 6.2 MB | 7.9 MB | 7.7 MB | 14.0 / 109 MB/s |
-| duc | 9.0 MB | 1.9 MB | 1.9 MB | 5.8 MB | 4.5 MB | 22.5 / 180 MB/s |
+| repository | input | `aqr` | adaptive | former, `-l 3` | former, default | compress / decompress | peak RSS |
+|---|---|---|---|---|---|---|---|
+| pyre | 664.9 MB | 326.3 MB | 302.8 MB | 327.1 MB | 313.5 MB | 20.3 / 126 MB/s | 7.09 GB |
+| SaturnTranslatorInternal | 142.9 MB | 50.3 MB | 47.6 MB | 49.1 MB | 44.1 MB | 30.9 / 265 MB/s | 1.41 GB |
+| wah | 125.6 MB | 22.1 MB | 21.8 MB | 61.0 MB | 36.7 MB | 20.7 / 174 MB/s | 1.98 GB |
+| loupe | 119.0 MB | 50.8 MB | 50.8 MB | 49.4 MB | 49.4 MB | 73.9 / 372 MB/s | 0.75 GB |
+| unison | 59.6 MB | 37.3 MB | 35.9 MB | 35.0 MB | 33.3 MB | 22.7 / 86 MB/s | 0.86 GB |
+| aqueous | 38.7 MB | 31.4 MB | 31.3 MB | 32.7 MB | 32.4 MB | 24.1 / 277 MB/s | 0.53 GB |
+| sudachi.rs | 20.1 MB | 14.9 MB | 14.6 MB | 18.1 MB | 17.8 MB | 13.1 / 101 MB/s | 0.39 GB |
+| wasm3-rs | 12.0 MB | 6.4 MB | 6.2 MB | 7.9 MB | 7.7 MB | 16.0 / 109 MB/s | 0.21 GB |
+| duc | 9.0 MB | 1.9 MB | 1.9 MB | 5.8 MB | 4.5 MB | 21.9 / 180 MB/s | 0.22 GB |
 
 The six smallest (0.003-1.5 MB in all 3.9 MB) come to 1.72 MB, against 1.43 MB: the archive's
 blocks of the modules they need weigh on them.
@@ -84,7 +84,14 @@ blocks of the modules they need weigh on them.
   at zstd -3); at the adaptive one with zlib emulation (`-p 10 -z`) 7.9 / 18.8 MB/s on one
   thread, 24.5 / 88 MB/s on 10, the records 254 KB (79 KB) for 23,721 entries and 105.7 MB of
   data. Through `aqr` on all 15, where the rest takes most of the time, the adaptive profile
-  took 75.1 s and 8.43 s against 69.8 s and 8.29 s, for 28.4 MB less.
+  took 75.1 s and 8.43 s against 69.8 s and 8.29 s, for 28.4 MB less (both before the
+  encoder made entries a window at a time: now 52.4 s at the default profile).
+- Memory: each entry's stream is parsed and deconstructed at once, a window of 64 MiB of
+  streams at a time put in place in order, and the encoder's check of the layout compares with
+  the pack as it goes. pyre's pack of 222 MB (817k entries, 490 MB of data) took 22 GB at first
+  (a parse and a copy of aqr-flate's options held for every entry); its archive now peaks at
+  2.48 GB of heap (3.9 GB resident), set by the archive's verification, not the encoder (1.0
+  GB). The rest of pyre (265 MB) peaks at 2.0 GB.
 - A loose object's data is its header and the blob: aqr-compress keeps the header with the
   container's bytes, so that the blob is a slice of its own, found where it is a file checked
   out (and in the same batch, `together`), and taken as a file of its format (text, a gzip
