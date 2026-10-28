@@ -34,6 +34,7 @@ aqr-snappy = { path = "../aqr-snappy", default-features = false }
 aqr-sqlite = { path = "../aqr-sqlite", default-features = false }
 aqr-tex = { path = "../aqr-tex", default-features = false }
 aqr-wrt = { path = "../aqr-wrt", default-features = false }
+aqr-xsv = { path = "../aqr-xsv", default-features = false }
 aqr-zip = { path = "../aqr-zip", default-features = false }
 
 [target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
@@ -109,6 +110,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "obj-recons"
 path = "src/bin/obj-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "xsv-recons"
+path = "src/bin/xsv-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

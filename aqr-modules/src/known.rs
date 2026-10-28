@@ -83,7 +83,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("efaae4c32b21f363e5d545de8a1fccbeba2859d9ec1f8e85192c37be997abb32"),
+        sha512_256: hex("d8c0a4ed3daa0763906b8292e48167c9bba708bf4bf3ab9cf7035bd58cedc7ea"),
         wasm: include_bytes!("../wasm/flate-set.wasm"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
@@ -181,7 +181,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("946311bc554ece1ce8153ec662dce02d99bb6110838db94679a5faeec88f6ddd"),
+        sha512_256: hex("415140566eee4e7a551c7f0c9cfc3a604b6e40beea1e038053f22c779dbfa40d"),
         wasm: include_bytes!("../wasm/psd-recons.wasm"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
@@ -212,6 +212,13 @@ pub const KNOWN: &[Known] = &[
         sha512_256: hex("78114341a3981b9b877f74beff267c6fcb83f23e7106d344107fbc178dab3117"),
         wasm: include_bytes!("../wasm/wrt-recons.wasm"),
         block: include_bytes!("../wasm/wrt-recons.block"),
+    },
+    Known {
+        name: "xsv-recons",
+        version: 1,
+        sha512_256: hex("928d51f81c0b917f2cd38519d76703eeaae67766d2d41e3f117204382ce6979f"),
+        wasm: include_bytes!("../wasm/xsv-recons.wasm"),
+        block: include_bytes!("../wasm/xsv-recons.block"),
     },
     Known {
         name: "zip-recons",

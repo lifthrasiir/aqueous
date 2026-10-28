@@ -79,6 +79,7 @@ reservoir is rebuilt.
 | SQLite 3 | aqr-sqlite | 88 files, 324 MB | 0.227 | 0.366 | 48 | 368 | 24 MB + 6.7× | |
 | Text (words, XML markup) | aqr-wrt | enwik9, 1 GB (README) | 0.253 | 0.312 | 148 | 291 | not measured | measured 2026-10-26 with `aqr` (10 threads) on enwik9 alone, not `aqr-show`; text of 256 KiB or more. The 10gb corpus −35.8 MB (README) |
 | FASTA (nucleotides) | aqr-fasta | hg19, 93 files, 3.2 GB (README) | 0.218 | 0.309 | 170 | 133 (753 through `aqr`, files at once) | not measured | measured 2026-10-26 with `aqr-fasta-bench` (chr1) and `aqr` (hg19 of the 10gb corpus), not `aqr-show`; zstd -3 file by file |
+| Delimited tables (CSV, TSV, USV) | aqr-xsv | 10 files, 11.7 MB (README) | 0.792 of `zstd -3` (streams through zstd -3) | | 39–479 | 584–1219 | not measured | measured 2026-10-28 with `aqr-xsv-bench`, not `aqr-show`: GPS logs 0.41 of zstd -3, cmz's `airport-codes.csv` 0.82 (2.74 → 2.32 MB through `aqr`), perl's `UnicodeData.txt` 0.91. Taken by its text before aqr-wrt. The 10gb corpus −1.71 MB (85 files; README) |
 | Wavefront OBJ | aqr-obj | 22 files, 403 MB | 0.097 | 0.242 | 121 | 324 | 24 MB + 3.1× | `aqr-obj bench`, before the wiring. Files over 300 MB left out. Through `aqr` (all threads, 2026-10-28): c3d 67.5 → 9.99 MB (19.94 before the wiring), threejs 6.0 → 0.83 MB (1.50). Taken by its text, not by the name `.obj` (object files) |
 
 ### Containers and general-purpose compression
@@ -113,6 +114,7 @@ reservoir is rebuilt.
 | aqr-psd | 16- and 32-bit data, ZIP channels, other colour modes; effects and adjustment layers rendered |
 | aqr-clip | speed of one thread (the model of busy tiles); neighbouring tiles and mipmaps as context; the database's PNG preview through aqr-png; the 3D data |
 | aqr-sqlite | memory (chunked processing); WAL and rollback journals; WITHOUT ROWID secondary indexes |
+| aqr-xsv | numbers within text fields (coordinates, dates, times); hexadecimal fields; numbers coded better than varints |
 | aqr-obj | compression speed of `%.17g` files; connectivity of faces in random order; `.mtl` |
 | aqr-zip | DEFLATE only; other methods (bzip2, LZMA, AES) are kept |
 | aqr-bundle | members sliced from the archive's bytes rather than copied (the memory of `.tar.gz`); COFF objects of ar archives (aqr-exe); old GNU sparse files; tar archives found in other data |

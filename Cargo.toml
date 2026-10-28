@@ -29,6 +29,7 @@ members = [
     "aqr-sqlite",
     "aqr-tex",
     "aqr-wrt",
+    "aqr-xsv",
     "aqr-zip",
     "aqr-api",
     "aqr-api/demo/concat",

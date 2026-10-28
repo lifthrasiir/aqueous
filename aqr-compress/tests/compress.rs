@@ -4,7 +4,7 @@ use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
     ARM64, BUNDLE, CLIP, FLAC, FLATE, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE,
-    WRT, X86, ZIP, decompress,
+    WRT, X86, XSV, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -211,8 +211,9 @@ fn mozlz4(d: &[u8]) -> Vec<u8> {
 
 #[test]
 fn lz4_nested() {
+    // (its records, a line each of four fields between commas, taken as a table)
     let f = roundtrip(&fixture("aqr-lz4/tests/data/f64k.lz4"), &all());
-    assert_eq!(modules(&f), [LZ4.name]);
+    assert_eq!(modules(&f), [LZ4.name, XSV.name]);
     // linked blocks are not reproduced
     assert!(modules(&roundtrip(&fixture("aqr-lz4/tests/data/f64k-linked.lz4"), &all())).is_empty());
 

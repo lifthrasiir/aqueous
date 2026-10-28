@@ -4626,7 +4626,7 @@ as follows:</p>
       <td>flac-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-flac/FORMAT.md">aqr-flac/FORMAT.md</a>
     <tr>
-      <td><code>efaae4c32b21f363e5d545de8a1fccbeba2859d9ec1f8e85192c37be997abb32</code>
+      <td><code>d8c0a4ed3daa0763906b8292e48167c9bba708bf4bf3ab9cf7035bd58cedc7ea</code>
       <td>flate-set@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-flate/FORMAT.md">aqr-flate/FORMAT.md</a>
     <tr>
@@ -4682,7 +4682,7 @@ as follows:</p>
       <td>png-set@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-png/FORMAT.md">aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>946311bc554ece1ce8153ec662dce02d99bb6110838db94679a5faeec88f6ddd</code>
+      <td><code>415140566eee4e7a551c7f0c9cfc3a604b6e40beea1e038053f22c779dbfa40d</code>
       <td>psd-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-psd/FORMAT.md">aqr-psd/FORMAT.md</a>
     <tr>
@@ -4701,6 +4701,10 @@ as follows:</p>
       <td><code>78114341a3981b9b877f74beff267c6fcb83f23e7106d344107fbc178dab3117</code>
       <td>wrt-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-wrt/FORMAT.md">aqr-wrt/FORMAT.md</a>
+    <tr>
+      <td><code>928d51f81c0b917f2cd38519d76703eeaae67766d2d41e3f117204382ce6979f</code>
+      <td>xsv-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-xsv/FORMAT.md">aqr-xsv/FORMAT.md</a>
     <tr>
       <td><code>426ac8c63718fcf83795ff7dd1e590c3cc9420cc82c3bfd1b23a04cb00ac2dbf</code>
       <td>zip-recons@3

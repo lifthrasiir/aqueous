@@ -31,6 +31,7 @@ aqr-snappy = { path = "../aqr-snappy" }
 aqr-sqlite = { path = "../aqr-sqlite" }
 aqr-tex = { path = "../aqr-tex" }
 aqr-wrt = { path = "../aqr-wrt" }
+aqr-xsv = { path = "../aqr-xsv" }
 aqr-zip = { path = "../aqr-zip" }
 crc32fast = "1.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

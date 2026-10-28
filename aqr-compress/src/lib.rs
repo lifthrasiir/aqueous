@@ -18,8 +18,9 @@
 //!   where the files checked out are archived along with it.
 //! - ar, tar and cpio archives: aqr-bundle, rebuilding the archive from the contents of its
 //!   members with their sizes and checksums derived.
-//! - Text, a whole file of text bytes or data of a name telling text: aqr-wrt, its words and
-//!   markup replaced by codes of a dictionary of its own.
+//! - Text, a whole file of text bytes or data of a name telling text: a delimited table (CSV,
+//!   TSV, USV and the like) by aqr-xsv, its fields stored column by column, where it takes it;
+//!   else aqr-wrt, its words and markup replaced by codes of a dictionary of its own.
 //! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, FITS
 //!   and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
 //!   applied to its streams, and files it embeds (PDF's DEFLATE streams and images, PSD's and
@@ -557,7 +558,7 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx:
     how.and_then(|how| made(d, opt, depth, how, cx)).map_or_else(
         || {
             let text = how == Some(Nest::As(Format::Text))
-                || matches!(kind, Kind::Unknown | Kind::Format(_)) && detect(d) == Some(Format::Text);
+                || matches!(kind, Kind::Unknown | Kind::Format(_)) && is_text(detect(d));
             let mut f = Formula::default();
             f.root = f.push_as("raw", if text { Kind::Text } else { kind }, d.to_vec());
             f
@@ -569,13 +570,14 @@ pub(crate) fn recompress_at(d: &[u8], opt: &Options, depth: u32, kind: Kind, cx:
 /// [`recompress_at`], unless `d` is kept raw; the data that a scan keeps between files is not
 /// cut out of `d` yet.
 pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option<Made> {
-    let text = how == Nest::As(Format::Text) || how == Nest::Scan && detect(d) == Some(Format::Text);
+    let text = how == Nest::As(Format::Text) || how == Nest::Scan && is_text(detect(d));
     match how {
         _ if depth >= opt.depth || !opt.recompresses() => None,
         Nest::Exact => detect(d).and_then(|format| recompress_as(format, d, opt, depth, cx)).map(Made::from),
-        // text as aqr-wrt tells of it alone (not [`smaller`]), so that the same text is taken
-        // alike wherever it is; else scanned as other data is, or kept raw where named as text
-        _ if text => match recompress_as(Format::Text, d, opt, depth, cx) {
+        // a table where aqr-xsv takes it (and it is [`smaller`]); else text as aqr-wrt tells of
+        // it alone (not [`smaller`]), so that the same text is taken alike wherever it is; else
+        // scanned as other data is, or kept raw where named as text
+        _ if text => match table(d, opt, depth, cx).or_else(|| recompress_as(Format::Text, d, opt, depth, cx)) {
             Some(f) => Some(Made::from(f)),
             None if how == Nest::Scan => {
                 scan(d, None, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
@@ -587,6 +589,16 @@ pub(crate) fn made(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> O
             scan(d, Some(format), opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
         }
     }
+}
+
+/// Whether data detected as `format` is text: taken as a table, else as text ([`made`]).
+fn is_text(format: Option<Format>) -> bool {
+    matches!(format, Some(Format::Text | Format::Xsv))
+}
+
+/// `d`, text, as a table if aqr-xsv takes it (and the formula is [`smaller`]).
+fn table(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    aqr_xsv::formula::starts(d).then(|| recompress_as(Format::Xsv, d, opt, depth, cx)).flatten()
 }
 
 /// A formula of data, its stream 0 perhaps yet to be cut out of the data: the bytes of `gaps`,
@@ -1301,6 +1313,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Fasta => aqr_fasta::formula::encode,
         Format::Fits => aqr_fits::formula::encode,
         Format::Obj => aqr_obj::formula::encode,
+        Format::Xsv => aqr_xsv::formula::encode,
         Format::Text => aqr_wrt::formula::encode,
         _ => return None,
     })

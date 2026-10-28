@@ -36,6 +36,7 @@ aqr-png = { path = "../aqr-png" }
 aqr-psd = { path = "../aqr-psd" }
 aqr-clip = { path = "../aqr-clip" }
 aqr-obj = { path = "../aqr-obj" }
+aqr-xsv = { path = "../aqr-xsv" }
 aqr-raw = { path = "../aqr-raw" }
 aqr-snappy = { path = "../aqr-snappy" }
 aqr-zip = { path = "../aqr-zip" }

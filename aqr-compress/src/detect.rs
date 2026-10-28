@@ -60,12 +60,15 @@ pub enum Format {
     Tar,
     /// cpio archive (aqr-bundle); of the binary forms, not looked for in other data.
     Cpio,
+    /// Delimited text table (aqr-xsv): CSV, TSV, USV and the like, a whole file known by its
+    /// text: not looked for in other data.
+    Xsv,
     /// Text (aqr-wrt), a whole file of text bytes only: not looked for in other data.
     Text,
 }
 
 impl Format {
-    pub const ALL: [Format; 27] = [
+    pub const ALL: [Format; 28] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -92,6 +95,7 @@ impl Format {
         Format::Ar,
         Format::Tar,
         Format::Cpio,
+        Format::Xsv,
         Format::Text,
     ];
 
@@ -123,6 +127,7 @@ impl Format {
             Format::Ar => "ar",
             Format::Tar => "tar",
             Format::Cpio => "cpio",
+            Format::Xsv => "xsv",
             Format::Text => "text",
         }
     }
@@ -259,6 +264,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Tar)
     } else if start && aqr_lzma::formula::starts(d) {
         Some(Format::Lzma)
+    } else if start && aqr_xsv::formula::starts(d) {
+        Some(Format::Xsv)
     } else if start && aqr_wrt::formula::starts(d) {
         Some(Format::Text)
     } else {

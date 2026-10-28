@@ -116,6 +116,7 @@ dependencies = [
  "aqr-sqlite",
  "aqr-tex",
  "aqr-wrt",
+ "aqr-xsv",
  "aqr-zip",
  "crc32fast",
  "flate2",
@@ -152,6 +153,7 @@ dependencies = [
  "aqr-sqlite",
  "aqr-tex",
  "aqr-wrt",
+ "aqr-xsv",
  "aqr-zip",
  "libc",
  "sha2",
@@ -322,6 +324,7 @@ dependencies = [
  "aqr-sqlite",
  "aqr-tex",
  "aqr-wrt",
+ "aqr-xsv",
  "aqr-zip",
  "sha2",
 ]
@@ -440,6 +443,17 @@ version = "0.1.0"
 dependencies = [
  "aqr-common",
  "aqr-formula",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-xsv"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "aqr-num",
+ "memchr",
  "zstd",
 ]
 
