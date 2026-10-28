@@ -57,7 +57,10 @@ Left:
 - Both modes are tried on a sample, which doubles the time of an image's coding.
 - Images whose values are a sparse set (photographic plates' calibrations) would gain from
   coding the values' ranks.
-- Float images are left as they are where the model does not pay (most of them).
+- Float images are left as they are where the model does not pay (most of them: noise in full
+  mantissas). SDSS's frames (mantissas cut to 9 bits, sky around zero) would want their own
+  mode: an exact fixed-point form (MED residuals of 10.0 bits a pixel against zstd's 12.4)
+  coded with each residual's trailing zeros first, as the precision follows the exponent.
 - The modules' blocks (6.5 and 12.6 KB for image and Rice) outweigh the gains on small files.
 - `GZIP_1`, `GZIP_2`, `HCOMPRESS_1` and `PLIO_1` tiles are kept as they are, and so are
   compressed tables (§10.3).

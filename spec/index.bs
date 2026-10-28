@@ -4610,7 +4610,7 @@ as follows:</p>
       <td>fasta-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fasta/FORMAT.md">aqr-fasta/FORMAT.md</a>
     <tr>
-      <td><code>34a73e6ce70d2b8eef95f8f6ac1d6a4a87bb02cd3dd38c1a5f3b99e2d5b94ee1</code>
+      <td><code>9a24a421dbd7ae5cb60593ae3d639764657fc8c58a74876444e2f4df0652b501</code>
       <td>fits-recons-image@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/aqr-fits/FORMAT.md">aqr-fits/FORMAT.md</a>
     <tr>

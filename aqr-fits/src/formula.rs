@@ -118,13 +118,15 @@ fn pixels(h: &Header) -> Option<Pixels> {
     }
     let axes = h.axes("NAXIS")?;
     let width = usize::try_from(*axes.first()?).ok()?;
-    let p = Pixels { width, bitpix: i8::try_from(h.int("BITPIX")?).ok()?, mode: image::Mode::Predict };
+    let p = Pixels { width, bitpix: i8::try_from(h.int("BITPIX")?).ok()?, mode: image::Mode::Predict, shift: 0 };
     p.valid().then_some(p)
 }
 
 fn pixels_node(f: &mut Formula, d: &[u8], mut p: Pixels) -> Option<Vec<Node>> {
+    let pixels = p.pixels(d);
+    p.shift = p.zero_bits(&pixels);
     let c;
-    (p.mode, c) = image::encode_best(&p.numbers(d), p.shape(), None);
+    (p.mode, c) = image::encode_best(&p.numbers(&pixels), p.shape(), None);
     // (zstd at a low level stands for what the archive does with the data as it is)
     if c.model.len() + c.raw.len() >= zstd::bulk::compress(d, 3).map_or(d.len(), |z| z.len()) {
         return None;
@@ -230,7 +232,8 @@ mod tests {
                     8 => d.push(v as u8),
                     16 => d.extend((v as i16 - 300).to_be_bytes()),
                     32 => d.extend((v as i32 * 1000).to_be_bytes()),
-                    _ => d.extend((v as f32 * 0.37).to_be_bytes()),
+                    // (of 9 bits of mantissa, as SDSS's frames)
+                    _ => d.extend(((v as f32 * 0.37).to_bits() & !0x3fff).to_be_bytes()),
                 }
             }
         }

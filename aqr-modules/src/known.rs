@@ -55,7 +55,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "fits-recons-image",
         version: 1,
-        sha512_256: hex("34a73e6ce70d2b8eef95f8f6ac1d6a4a87bb02cd3dd38c1a5f3b99e2d5b94ee1"),
+        sha512_256: hex("9a24a421dbd7ae5cb60593ae3d639764657fc8c58a74876444e2f4df0652b501"),
         wasm: include_bytes!("../wasm/fits-recons-image.wasm"),
         block: include_bytes!("../wasm/fits-recons-image.block"),
     },

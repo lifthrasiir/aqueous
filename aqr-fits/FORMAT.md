@@ -33,8 +33,8 @@ Contents:
   0, −1, 1, −2, … to 0, 1, 2, 3, …; its inverse `(z >> 1) ^ −(z & 1)`.
 - **MSB-first bits**: a stream of bytes read from the first, each from its highest bit; past
   its end, it reads zeros. A writer pads the last byte with zero bits.
-- A *pixel* is a number of `B` = 8, 16 or 32 bits, held as its bits. Its *value* is the
-  number as unsigned for `B` = 8 and as signed otherwise.
+- A *pixel* of the model is a number of `B` bits (1 to 32), held as its bits. Its *value* is
+  the number as unsigned or as signed (sign-extended from bit `B − 1`), as the image says.
 
 ## 2. The formula *(encoder)*
 
@@ -221,14 +221,17 @@ pixel `v` wrapping in `B` bits.
 
 - **Module**: name `fits-recons-image`, version 1.
 - **Params**: `varint W` (the width, at least 1), `u8 BITPIX` as a signed byte (8, 16, 32 or
-  −32), then `u8 mode` (0 or 1, §4). Nothing else may follow.
+  −32), `u8 mode` (0 or 1, §4), then `u8 S`, the low bits that are zero in every pixel (less
+  than `|BITPIX|`). Nothing else may follow.
 - **Resources**: none.
 - **Inputs**: `model` and `raw` (§4, §5).
 - **Output**: the image's data, of the declared length, a multiple of `|BITPIX| / 8`: its
-  pixels big-endian, of `B = |BITPIX|` bits, signed but for `BITPIX = 8`. For `BITPIX = −32`
-  (IEEE floats), the pixel the model codes for bits `f` is `f ^ ((f >> 31 as signed) >> 1 as
-  unsigned)`: the other bits of a negative float flipped, which orders the floats as the
-  signed numbers (and is its own inverse).
+  pixels big-endian. The model's pixels are of `B = |BITPIX| − S` bits, signed but for
+  `BITPIX = 8`: of the data's pixel of bits `f`, `g = f >> S`, and for `BITPIX = −32` (IEEE
+  floats) `g` with its bits below bit `B − 1` flipped where that bit is set, which orders the
+  floats as the signed numbers (and is its own inverse). The data's pixel is `g << S` back.
+  *(encoder)* `S` is the number of trailing zero bits of the OR of all pixels, at most
+  `|BITPIX| − 1`.
 
 The pixels are those of §4 or §5 with `W`, none known; for mode 1 the length must be of whole
 rows. A length of more than 256 × (the inputs'

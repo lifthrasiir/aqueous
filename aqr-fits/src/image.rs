@@ -15,14 +15,14 @@ use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Shape {
     pub width: usize,
-    /// Bits of a pixel: 8, 16 or 32.
+    /// Bits of a pixel, 1 to 32.
     pub bits: u32,
     pub signed: bool,
 }
 
 impl Shape {
     pub fn valid(&self) -> bool {
-        self.width > 0 && matches!(self.bits, 8 | 16 | 32)
+        self.width > 0 && (1..=32).contains(&self.bits)
     }
 
     #[inline(always)]
