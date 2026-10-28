@@ -25,7 +25,12 @@ the archives (25 KB for `clip-recons`).
 | set | files | MB | ratio | zstd -3 | aqr before | compress | decompress |
 |---|---|---|---|---|---|---|---|
 | the 13 files below | 13 | 926 | **0.344** | 0.760 | 0.726 | 32 MB/s | 81 MB/s |
-| a held-out file (`aqr-clip bench` estimate, before wiring) | 1 | 14.1 | 0.437 | | 0.763 | | |
+| a held-out file | 1 | 14.1 | 0.499 | | 0.763 | 20 MB/s | 47 MB/s |
+
+The held-out file was not looked at before it was measured. Its tiles of few colours repeat
+across the file: through the archive their inflated bytes come to 0.041 (16 colours or fewer)
+and 0.291 (256 or fewer) of their zlib bytes, the model of whole pixels, which codes each tile
+on its own, 0.414 and 0.607 (`aqr-clip bench`; with the best model of each class, 0.437).
 
 ## Format
 
