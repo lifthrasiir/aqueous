@@ -43,6 +43,9 @@ middle of the namuwiki dump of 2021-03-01 (JSON of one line, 72% of its bytes ab
 |---|---|---|---|---|
 | 512 MiB of namuwiki | 164.68 MB | 145.77 MB (−11.5%) | 5.80 → 3.07 s | 0.56 → 0.42 s |
 
+- The whole dump (8.83 GB), on a Ryzen 7 9700X: 2,565,721,176 → 2,237,433,596 bytes (−12.8%),
+  compressed in 57.54 s against 64 s before.
+
 - zstd picks level 9 for both. The coded text is 248 MB, so zstd has less to do: 143 → 105 G
   instructions in all, with the module's coding. At `-l zstd12` it is 140.21 MB in 4.4 s.
 - The dictionary takes 3.2 MB at zstd -9 (694,348 entries).
