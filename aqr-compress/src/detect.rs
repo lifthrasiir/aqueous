@@ -169,7 +169,9 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         | b"ogg" | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl"
         | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
-        b"txt" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => Kind::Text,
+        b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => {
+            Kind::Text
+        }
         b"ttf" | b"otf" | b"ttc" | b"cff" | b"pfb" => Kind::Font,
         _ => Kind::Unknown,
     }
@@ -479,6 +481,7 @@ mod tests {
             (b"lib.tar.gz", Kind::Format("gzip")),
             (b"movie.mp4", Kind::Compressed),
             (b"notes.txt", Kind::Text),
+            (b"var/log/access.log", Kind::Text),
             (b"scan.BMP", Kind::Format("raw")),
             (b"take.wav", Kind::Format("raw")),
             (b"sky.tga", Kind::Pixels),
