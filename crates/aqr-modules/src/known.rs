@@ -126,7 +126,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzo-recons",
         version: 1,
-        sha512_256: hex("0edc34a54b7db5bb6968b7e44293b5a00efe955576a1df8d5a69d2121fc63312"),
+        sha512_256: hex("88d1abe44c2ff42ecaffa3b983ba7271d67d6a0015d67621bfde47589bbecb5c"),
         block: include_bytes!("../wasm/lzo-recons.block"),
     },
     Known {

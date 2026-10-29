@@ -21,6 +21,8 @@ pub const SKIP: u8 = 1;
 
 const NONE: u32 = u32::MAX;
 const RING: usize = 1 << 16;
+/// Bytes of the match finder's rings.
+pub const MF_BYTES: u64 = (4 * RING * 4) as u64;
 
 /// Bucket of a run of literals: its bit length, at most 7.
 #[inline]
@@ -271,9 +273,16 @@ impl Side for Dec<'_> {
     }
 }
 
-/// Walks the parse over `d`, coding it (`parse` given) or decoding it (`parse` filled in),
-/// as the side is.
-fn walk(side: &mut impl Side, d: &[u8], parse: &mut Parse, encoding: bool, skip: bool) -> Result<()> {
+/// Walks the parse over `d`, coding it (`parse` given) or decoding it (`parse` filled in, or its
+/// matches given to `sink` as they come, with whether the first run is short), as the side is.
+fn walk(
+    side: &mut impl Side,
+    d: &[u8],
+    parse: &mut Parse,
+    encoding: bool,
+    skip: bool,
+    mut sink: Option<&mut dyn FnMut(&Match, bool)>,
+) -> Result<()> {
     let mut mf = Mf::new(d);
     let mut ctx = Ctx::new();
     let mut pairs = Vec::with_capacity(DEPTH + 1);
@@ -374,6 +383,8 @@ fn walk(side: &mut impl Side, d: &[u8], parse: &mut Parse, encoding: bool, skip:
             if got != want {
                 return Err(Error("match not coded"));
             }
+        } else if let Some(s) = &mut sink {
+            s(&got, parse.first_short);
         } else {
             parse.matches.push(got);
         }
@@ -420,7 +431,7 @@ pub struct Split {
 pub fn record(data: &[u8], parse: &Parse, mode: u8) -> Result<(Vec<u8>, [f64; CATS])> {
     let mut e = Enc { c: ArithEncoder::new(vec![mode]), cost: [0.0; CATS] };
     let mut p = parse.clone();
-    walk(&mut e, data, &mut p, true, mode & SKIP != 0)?;
+    walk(&mut e, data, &mut p, true, mode & SKIP != 0, None)?;
     if p != *parse {
         return Err(Error("parse not coded"));
     }
@@ -455,20 +466,38 @@ pub fn split(s: &[u8], limit: usize) -> Result<Split> {
 
 /// The parse that `record` codes over `data`.
 pub fn parse(data: &[u8], record: &[u8]) -> Result<Parse> {
+    let mut p = Parse::default();
+    decode(data, record, &mut p, None)?;
+    Ok(p)
+}
+
+/// The parse of `record` over `data` decoded into `p` (its matches given to `sink` instead, if
+/// one is given).
+fn decode(data: &[u8], record: &[u8], p: &mut Parse, sink: Option<&mut dyn FnMut(&Match, bool)>) -> Result<()> {
     let (&mode, record) = record.split_first().ok_or_else(corrupt)?;
     if mode & !SKIP != 0 {
         return Err(corrupt());
     }
     let mut dec = Dec { c: ArithDecoder::new(record) };
-    let mut p = Parse::default();
-    walk(&mut dec, data, &mut p, false, mode & SKIP != 0)?;
+    walk(&mut dec, data, p, false, mode & SKIP != 0, sink)?;
     if dec.c.overrun() {
         return Err(corrupt());
     }
-    Ok(p)
+    Ok(())
 }
 
 /// The stream that `data` and `record` rebuild.
 pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
-    Ok(lzo1x::encode(data, &parse(data, record)?))
+    let mut out = Vec::with_capacity(data.len() / 2 + 16);
+    join_onto(data, record, &mut out)?;
+    Ok(out)
+}
+
+/// [`join`] appended to `out`, written as the parse is decoded (which is not held).
+pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
+    let mut w = lzo1x::Writer::new(data, out);
+    let mut p = Parse::default();
+    decode(data, record, &mut p, Some(&mut |m, first_short| w.push(m, first_short)))?;
+    w.finish(p.tail, p.first_short);
+    Ok(())
 }

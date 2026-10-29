@@ -222,16 +222,41 @@ fn put_lits(out: &mut Vec<u8>, data: &[u8], at: usize, lits: u32, s_at: Option<u
 /// [`short_fits`] or [`long_fits`] as their forms say.
 pub fn encode(data: &[u8], parse: &Parse) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len() / 2 + 16);
-    let mut at = 0;
-    let mut s_at = None;
-    for (i, m) in parse.matches.iter().enumerate() {
-        if i == 0 && parse.first_short {
+    let mut w = Writer::new(data, &mut out);
+    for m in &parse.matches {
+        w.push(m, parse.first_short);
+    }
+    w.finish(parse.tail, parse.first_short);
+    out
+}
+
+/// A stream over `data` appended to a vector a match at a time, as [`encode`] writes it of a
+/// parse: so that a parse need not be held to be written.
+pub struct Writer<'a> {
+    data: &'a [u8],
+    out: &'a mut Vec<u8>,
+    /// Where the data and the instructions written are, the last match's instruction.
+    at: usize,
+    s_at: Option<usize>,
+    first: bool,
+}
+
+impl<'a> Writer<'a> {
+    pub fn new(data: &'a [u8], out: &'a mut Vec<u8>) -> Writer<'a> {
+        Writer { data, out, at: 0, s_at: None, first: true }
+    }
+
+    /// Appends the match `m` after its literals; `first_short` as [`Parse::first_short`] (known
+    /// by the first match).
+    pub fn push(&mut self, m: &Match, first_short: bool) {
+        let (data, out) = (self.data, &mut *self.out);
+        if std::mem::take(&mut self.first) && first_short {
             out.push(17 + m.lits as u8);
             out.extend_from_slice(&data[..m.lits as usize]);
         } else {
-            put_lits(&mut out, data, at, m.lits, s_at);
+            put_lits(out, data, self.at, m.lits, self.s_at);
         }
-        at += m.lits as usize;
+        self.at += m.lits as usize;
         let d = m.dist;
         match m.form {
             Form::Short if m.len <= 3 && state(m.lits) != 0 && !(m.len == 3 && d <= 2048) => {
@@ -244,24 +269,28 @@ pub fn encode(data: &[u8], parse: &Parse) -> Vec<u8> {
                 out.extend_from_slice(&[(op | (d & 7) << 2) as u8, (d >> 3) as u8]);
             }
             Form::Long if d <= 16384 => {
-                put_len(&mut out, 0x20, m.len - 2, 31);
+                put_len(out, 0x20, m.len - 2, 31);
                 out.extend_from_slice(&(((d - 1) << 2) as u16).to_le_bytes());
             }
             Form::Long => {
                 let d = d - 16384;
-                put_len(&mut out, 0x10 | (d >> 11 & 8) as u8, m.len - 2, 7);
+                put_len(out, 0x10 | (d >> 11 & 8) as u8, m.len - 2, 7);
                 out.extend_from_slice(&(((d & 0x3fff) << 2) as u16).to_le_bytes());
             }
         }
-        s_at = Some(out.len() - 2);
-        at += m.len as usize;
+        self.s_at = Some(out.len() - 2);
+        self.at += m.len as usize;
     }
-    if parse.matches.is_empty() && parse.first_short {
-        out.push(17 + parse.tail as u8);
-        out.extend_from_slice(&data[..parse.tail as usize]);
-    } else {
-        put_lits(&mut out, data, at, parse.tail, s_at);
+
+    /// Appends the literals after the last match, `tail` of them, and the end.
+    pub fn finish(self, tail: u32, first_short: bool) {
+        let (data, out) = (self.data, self.out);
+        if self.first && first_short {
+            out.push(17 + tail as u8);
+            out.extend_from_slice(&data[..tail as usize]);
+        } else {
+            put_lits(out, data, self.at, tail, self.s_at);
+        }
+        out.extend_from_slice(&END);
     }
-    out.extend_from_slice(&END);
-    out
 }

@@ -4677,7 +4677,7 @@ as follows:</p>
       <td>lzma-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzma/FORMAT.md">codecs/aqr-lzma/FORMAT.md</a>
     <tr>
-      <td><code>0edc34a54b7db5bb6968b7e44293b5a00efe955576a1df8d5a69d2121fc63312</code>
+      <td><code>88d1abe44c2ff42ecaffa3b983ba7271d67d6a0015d67621bfde47589bbecb5c</code>
       <td>lzo-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzo/FORMAT.md">codecs/aqr-lzo/FORMAT.md</a>
     <tr>
