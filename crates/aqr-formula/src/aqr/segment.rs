@@ -295,6 +295,33 @@ impl SegmentWriter {
         out
     }
 
+    /// [`SegmentWriter::standalone`], of the bytes of `b` taken rather than copied: they are
+    /// back in `b` once the archive is given to [`SegmentWriter::give_back`].
+    pub fn take_standalone(&self, b: &mut Batch) -> Vec<u8> {
+        let front = HEADER_MAGIC.len() + self.prefix.len();
+        let mut out = std::mem::take(&mut b.bytes);
+        let n = out.len();
+        out.reserve(front + 32);
+        out.resize(n + front, 0);
+        out.copy_within(..n, front);
+        out[..HEADER_MAGIC.len()].copy_from_slice(&HEADER_MAGIC);
+        out[HEADER_MAGIC.len()..front].copy_from_slice(&self.prefix);
+        let blocks = out.len() - HEADER_MAGIC.len();
+        footer(&mut out, blocks);
+        out
+    }
+
+    /// The bytes of `b` back from `archive`, its [`SegmentWriter::take_standalone`].
+    pub fn give_back(&self, b: &mut Batch, mut archive: Vec<u8>) {
+        let front = HEADER_MAGIC.len() + self.prefix.len();
+        // (the footer's fields are as long as its last two bytes tell)
+        let fields = u16::from_le_bytes(archive[archive.len() - 2..].try_into().unwrap()) as usize;
+        let n = archive.len() - front - (FOOTER_MAGIC.len() + 4 + fields);
+        archive.copy_within(front..front + n, 0);
+        archive.truncate(n);
+        b.bytes = archive;
+    }
+
     /// Takes batch `b` as written after the blocks so far.
     pub fn commit(&mut self, b: &Batch) {
         for r in &b.added {
@@ -525,9 +552,15 @@ mod tests {
             vec![Leaf { outputs: vec![rev(vec![a.clone(), b.clone()])], sums: vec![None] }],
             vec![Leaf { outputs: vec![rev(vec![b, a])], sums: vec![Some(checksum(b"ollehzyx"))] }],
         ] {
-            let batch = w.batch(&enc, &f, &leaves).unwrap();
+            let mut batch = w.batch(&enc, &f, &leaves).unwrap();
             let want = if at.is_empty() { &b"zyxolleh"[..] } else { b"ollehzyx" };
             assert_eq!(decode(&w.standalone(&batch), &natives()).unwrap(), want);
+            // (alike of the batch's bytes taken, which are given back)
+            let (bytes, alone) = (batch.bytes.clone(), w.standalone(&batch));
+            let c = w.take_standalone(&mut batch);
+            assert!(c == alone && batch.bytes.is_empty());
+            w.give_back(&mut batch, c);
+            assert!(batch.bytes == bytes);
             assert_eq!(batch.layout.iter().filter(|p| p.0 == Placed::Module).count(), at.is_empty() as usize);
             w.commit(&batch);
             out.extend_from_slice(&batch.bytes);

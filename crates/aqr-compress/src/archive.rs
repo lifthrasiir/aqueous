@@ -716,7 +716,7 @@ fn make<S: Source + ?Sized>(
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());
 
     cx.enc.on_precompress(Some(notes.encoding()));
-    let batch = w.batch(&cx.enc, &f, &leaves).expect("slices within their streams");
+    let mut batch = w.batch(&cx.enc, &f, &leaves).expect("slices within their streams");
     drop(cx);
     let (reports, solid, sets) = report(&f, &leaves, &batch.layout, files, &at);
     drop(f);
@@ -728,7 +728,7 @@ fn make<S: Source + ?Sized>(
             hits: Default::default(),
             files: &|k, range: Range<usize>| src.read_range(files[k].c, range.start as u64..range.end as u64).ok(),
         };
-        check(w, &batch, files, &at, &m, opt.threads, notes)
+        check(w, &mut batch, files, &at, &m, opt.threads, notes)
     } else {
         Vec::new()
     };
@@ -739,6 +739,22 @@ fn make<S: Source + ?Sized>(
 /// alone with the modules of `m`, do not give back: all of them where it does not decode.
 fn check(
     w: &SegmentWriter,
+    b: &mut Batch,
+    files: &[File],
+    at: &[(usize, usize)],
+    m: &verify::Cached,
+    threads: usize,
+    notes: &Notes,
+) -> Vec<usize> {
+    // (the batch's bytes in the archive decoded, rather than a copy of them)
+    let c = w.take_standalone(b);
+    let bad = check_in(&c, b, files, at, m, threads, notes);
+    w.give_back(b, c);
+    bad
+}
+
+fn check_in(
+    c: &[u8],
     b: &Batch,
     files: &[File],
     at: &[(usize, usize)],
@@ -746,7 +762,6 @@ fn check(
     threads: usize,
     notes: &Notes,
 ) -> Vec<usize> {
-    let c = w.standalone(b);
     let natives = aqr_decompress::natives(m);
     // the leaves in the order of their blocks, and of each the files of its outputs
     let mut by_block: Vec<usize> = (0..b.leaf_at.len()).collect();
@@ -755,7 +770,7 @@ fn check(
     at.iter().enumerate().for_each(|(k, &(l, o))| of_leaf[l].push((o, k)));
     let bad = Mutex::new(Vec::new());
     let all = || (0..files.len()).collect();
-    let Ok(a) = aqr::open(&c, &natives) else { return all() };
+    let Ok(a) = aqr::open(c, &natives) else { return all() };
     let r = a.each_leaf(threads, |i, outputs| {
         let l = by_block[i];
         notes.send(Note::Verified(of_leaf[l].iter().map(|&(_, k)| files[k].len as u64).sum()));
