@@ -11,7 +11,7 @@ const MAX_WINDOWS: usize = 8;
 /// Small tables: windows over the whole file, records up to FINE_K.
 const FINE_WINDOW: usize = 1 << 12;
 const FINE_K: usize = 64;
-const MAX_FINE_WINDOWS: usize = 1024;
+const MAX_FINE_WINDOWS: usize = 256;
 /// How far a region grows from a small window.
 const FINE_SPAN: usize = 1 << 18;
 /// How far a region grows from a big window.

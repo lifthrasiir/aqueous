@@ -41,10 +41,14 @@ file's thread:
 |---|---|---|
 | `scripts/rec_bench.py` (numpy, 10 processes) | 605 | 0.967 |
 | this crate, as ported (85a8610) | 106.9 | 0.967 |
-| this crate | 8.6 | 0.969 |
+| this crate | 7.1 | 0.968 |
 
-On one thread, 6.6 s (17.4 MB/s; the 58.7 MB ELF at 44 MB/s, a 1.7 MB libc at 3.6 MB/s).
-Peak RSS 579 MB (the prototype's: 4.8 GB).
+On one thread, 5.3 s (21.5 MB/s); the five files over 5 MB at 27.9 MB/s (the 58.7 MB ELF at
+53 MB/s), a 1.7 MB libc at 3.7 MB/s. Peak RSS 527 MB (the prototype's: 4.8 GB).
+
+Fewer candidates do not pay: at most 32 regions of fixed-size records (two from each seed);
+16 or 8 save 10% or 19% of the time and give 0.974 or 0.976 (python3.12 0.943 -> 0.956,
+0.969), one region a seed 6% and 0.974.
 
 ## Usage
 
