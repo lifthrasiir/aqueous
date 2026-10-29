@@ -10,7 +10,20 @@ use std::sync::OnceLock;
 use crate::module::SLOTS;
 pub use crate::module::{Error, decode};
 
-pub const MODULE: Module = Module::new("mp3-recons", 5);
+pub const MODULE: Module = Module::new("mp3-recons", 5).with_memory(memory);
+
+/// The memory of the module: the inputs and the file; the rANS words, the raw bits and the
+/// tail bits, raw granules and gaps copied (padded); the frames (about 124 bytes each on 32 bits,
+/// one for 4 bytes of the headers at least) and the runs and junk (of the segments); the
+/// reservoir (1 MiB, 2 MiB at most); and the tables the resource expands to (about 21 times the
+/// built-in one's 131 KB, measured as WebAssembly).
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[segs, _, hdr, _, tail, raw_gr, gaps, _, words, raw] = u.inputs else { return None };
+    let &[res] = u.resources else { return None };
+    let copies = words + raw + tail + raw_gr + gaps + 4 * 64;
+    let frames = 31 * hdr + 24 * segs;
+    Some(u.whole(copies + frames + (2 << 20) + 24 * res, 10))
+}
 
 /// Classes of the slots, and their kinds: the side information, the rANS words and the raw
 /// bits do not compress.
