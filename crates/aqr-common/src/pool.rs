@@ -8,7 +8,9 @@
 //! block (a pipeline of stages) runs its stages at once, never waiting for a worker: nothing
 //! waits for a worker but [`run`], which moves work onto the pool from outside it, and
 //! [`dispatch`], which waits holding none. Workers go back to the pool as soon as nothing is
-//! left for them ([`par_map`], [`dispatch`]), for work still running to reserve.
+//! left for them ([`par_map`], [`dispatch`]), for work still running to reserve. A [`par_map`]
+//! that got fewer workers than it would take is **open** until its items are all started: a
+//! worker given back joins the first open one with items left, before it goes back free.
 //!
 //! Threads that libraries make on their own count in the pool by the workers reserved for them
 //! and left idle: Zstandard's (aqr-formula) and rayon's (`rayon_pool`, whose threads are the
@@ -110,12 +112,81 @@ fn work() {
     }
 }
 
-fn release(n: usize) {
+/// Gives back `n` workers: each to an open [`par_map`] with items left, else free.
+fn release(mut n: usize) {
+    while THREADS && n > 0 && join_open() {
+        n -= 1;
+    }
     if n > 0 {
         let p = pool();
         *p.free.lock().unwrap() += n;
         p.freed.notify_all();
     }
+}
+
+/// A [`par_map`] open to workers given back: its work (the items left), how many more workers
+/// may join it, and those running it.
+struct Open {
+    id: usize,
+    /// `par_map`'s `work`, its lifetime erased: run only while the map is in [`OPEN`] or
+    /// counted in `running`, which the map waits for before it returns.
+    work: Erased,
+    /// Whether items are left (`next < n` of the map).
+    left: Erased,
+    room: usize,
+    state: Arc<OpenState>,
+}
+
+#[derive(Default)]
+struct OpenState {
+    running: Mutex<usize>,
+    done: Condvar,
+    panic: Mutex<Option<Box<dyn Any + Send>>>,
+}
+
+/// A borrowed closure as a raw pointer, its lifetime erased (see [`Open::work`]).
+#[derive(Clone, Copy)]
+struct Erased(*const (dyn Fn() -> bool + Sync));
+
+// SAFETY: the closure is Sync, and only called while it lives (see `Open::work`)
+unsafe impl Send for Erased {}
+
+impl Erased {
+    /// # Safety
+    /// The closure must still live.
+    unsafe fn call(self) -> bool {
+        // SAFETY: as the caller makes sure
+        unsafe { (*self.0)() }
+    }
+}
+
+static OPEN: Mutex<Vec<Open>> = Mutex::new(Vec::new());
+static OPEN_ID: AtomicUsize = AtomicUsize::new(0);
+
+/// Puts a worker given back on the first open [`par_map`] with items left; whether there was
+/// one.
+fn join_open() -> bool {
+    let (work, state) = {
+        let mut open = OPEN.lock().unwrap();
+        // SAFETY: the map is in OPEN, so its closures live
+        let Some(o) = open.iter_mut().find(|o| o.room > 0 && unsafe { o.left.call() }) else { return false };
+        o.room -= 1;
+        *o.state.running.lock().unwrap() += 1;
+        (o.work, o.state.clone())
+    };
+    let p = pool();
+    p.jobs.lock().unwrap().push_back(Box::new(move || {
+        // SAFETY: counted in `running`, which the map waits for
+        let r = catch_unwind(AssertUnwindSafe(|| unsafe { work.call() }));
+        if let Err(e) = r {
+            state.panic.lock().unwrap().get_or_insert(e);
+        }
+        *state.running.lock().unwrap() -= 1;
+        state.done.notify_all();
+        release(1);
+    }));
+    p.queued.notify_one();
+    true
 }
 
 /// Workers reserved: free until spawned on ([`Reservation::spawn`]), given back as what runs on
@@ -354,16 +425,52 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
             *out[i].lock().unwrap() = Some(f(i));
         }
     };
-    let mut r = reserve(threads.min(n).saturating_sub(1));
+    let want = threads.min(n).saturating_sub(1);
+    let mut r = reserve(want);
     // SAFETY: each joined below, before what `work` borrows goes, a panic of the calling
     // thread's part caught for that
     let hs: Vec<_> = (0..r.len()).map(|_| unsafe { r.spawn_unchecked(work, None) }).collect();
+    // (open to workers given back meanwhile, as many as it lacks)
+    let helped = || {
+        work();
+        true
+    };
+    let left = || next.load(Ordering::Relaxed) < n;
+    let open = (THREADS && want > hs.len()).then(|| {
+        let id = OPEN_ID.fetch_add(1, Ordering::Relaxed);
+        let state = Arc::new(OpenState::default());
+        // SAFETY: (lifetimes erased) the map leaves OPEN and waits for those running it below,
+        // before `work` and `left` go
+        let erase = |c: &(dyn Fn() -> bool + Sync)| unsafe {
+            Erased(std::mem::transmute::<*const (dyn Fn() -> bool + Sync + '_), *const (dyn Fn() -> bool + Sync)>(c))
+        };
+        OPEN.lock().unwrap().push(Open {
+            id,
+            work: erase(&helped),
+            left: erase(&left),
+            room: want - hs.len(),
+            state: state.clone(),
+        });
+        (id, state)
+    });
     // (another's panic stops the rest: the next index is past them)
     let mine = catch_unwind(AssertUnwindSafe(work));
     if mine.is_err() {
         next.store(n, Ordering::Relaxed);
     }
     let mut panic = mine.err();
+    if let Some((id, state)) = open {
+        OPEN.lock().unwrap().retain(|o| o.id != id);
+        let mut running = state.running.lock().unwrap();
+        while *running > 0 {
+            running = state.done.wait(running).unwrap();
+        }
+        drop(running);
+        if let Some(p) = state.panic.lock().unwrap().take() {
+            next.store(n, Ordering::Relaxed);
+            panic.get_or_insert(p);
+        }
+    }
     for h in hs {
         if let Err(p) = h.join() {
             next.store(n, Ordering::Relaxed);
@@ -513,6 +620,51 @@ pub(crate) fn exclusive() -> std::sync::MutexGuard<'static, ()> {
 mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
+
+    /// A par_map started while the others hold every worker gets those they give back: its
+    /// items run on several threads, in order in the result; a panic on a worker that joined
+    /// it is resumed by it.
+    #[test]
+    fn workers_given_back_join_open_maps() {
+        let _turn = exclusive();
+        let size = size();
+        if size < 2 {
+            return;
+        }
+        let threads = Mutex::new(std::collections::HashSet::new());
+        // (the calling thread and every worker)
+        let out = par_map(size + 1, size + 1, |i| {
+            if i > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                return vec![];
+            }
+            par_map(64, size, |j| {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                threads.lock().unwrap().insert(std::thread::current().id());
+                j
+            })
+        });
+        assert_eq!(out[0], (0..64).collect::<Vec<_>>());
+        assert!(threads.lock().unwrap().len() > 1, "only the calling thread ran the inner items");
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            par_map(size + 1, size + 1, |i| {
+                if i > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    return;
+                }
+                par_map(64, size, |j| {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    if j == 40 {
+                        panic!("item 40");
+                    }
+                });
+            })
+        }));
+        assert!(r.is_err());
+        // (every worker back)
+        drop(_turn);
+        drop(exclusive());
+    }
 
     /// Work that borrows, a pipeline of stages blocking on each other, panics; never more
     /// than the pool's workers reserved.
