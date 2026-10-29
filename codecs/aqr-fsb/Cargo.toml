@@ -13,6 +13,7 @@ encode = ["dep:aqr-formula"]
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-vorbis = { path = "../aqr-vorbis" }
 
 [dev-dependencies]
 aqr-formula = { path = "../../crates/aqr-formula" }

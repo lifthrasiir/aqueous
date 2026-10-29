@@ -34,7 +34,30 @@ pub struct Layout {
     /// Each sample's data, from its offset to the next sample's (or to the end of the data), so
     /// with its padding; one after another from `head`.
     pub samples: Vec<Range<usize>>,
+    /// What each sample's header tells.
+    pub headers: Vec<Header>,
 }
+
+/// What a sample's header tells: its channels (those of the header's code, or of a channels
+/// chunk) and its chunks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Header {
+    pub channels: usize,
+    /// Each chunk's type and its bytes (after its word) in the bank.
+    pub chunks: Vec<(u32, Range<usize>)>,
+}
+
+impl Header {
+    /// The bytes of the first chunk of type `kind`.
+    pub fn chunk<'a>(&self, d: &'a [u8], kind: u32) -> Option<&'a [u8]> {
+        self.chunks.iter().find(|c| c.0 == kind).map(|c| &d[c.1.clone()])
+    }
+}
+
+/// The chunk types read here.
+pub const CHUNK_CHANNELS: u32 = 1;
+/// A Vorbis sample's: the CRC-32 of its setup header, then (optionally) a seek table.
+pub const CHUNK_VORBIS: u32 = 11;
 
 impl Layout {
     /// The layout of the bank at the start of `d`, or None where it is not one: the magic, a
@@ -58,20 +81,28 @@ impl Layout {
             return None;
         }
         let mut offsets = Vec::with_capacity(n.min(headers / 8));
+        let mut infos = Vec::with_capacity(n.min(headers / 8));
         let mut p = header;
         for _ in 0..n {
             let h = u64::from_le_bytes(d.get(p..p + 8)?.try_into().ok()?);
             p += 8;
             offsets.push(((h >> 7) & ((1 << 27) - 1)) as usize * 32);
+            let mut info = Header { channels: [1, 2, 6, 8][(h >> 5 & 3) as usize], chunks: Vec::new() };
             let mut more = h & 1 != 0;
             while more {
                 let c = word(p)?;
                 more = c & 1 != 0;
+                let start = p + 4;
                 p = p.checked_add(4 + ((c >> 1) & 0xFF_FFFF) as usize)?;
                 if p > header + headers {
                     return None;
                 }
+                info.chunks.push((c >> 25, start..p));
+                if c >> 25 == CHUNK_CHANNELS && p > start {
+                    info.channels = d[start] as usize;
+                }
             }
+            infos.push(info);
         }
         if p != header + headers || offsets[0] != 0 || offsets.windows(2).any(|w| w[0] > w[1]) || offsets[n - 1] > data
         {
@@ -79,7 +110,7 @@ impl Layout {
         }
         let ends = offsets[1..].iter().copied().chain([data]);
         let samples = offsets.iter().zip(ends).map(|(&s, e)| head + s..head + e).collect();
-        Some(Layout { codec: Codec::of(mode), head, samples })
+        Some(Layout { codec: Codec::of(mode), head, samples, headers: infos })
     }
 
     /// The bank's bytes: to the end of its data.

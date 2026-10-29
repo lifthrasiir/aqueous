@@ -44,14 +44,10 @@ fn layout_of_banks() {
     let d = bank(15, &[64, 96, 32], 20);
     let l = Layout::of(&d).unwrap();
     let head = 0x3C + 8 * 3 + 8 + 20;
-    assert_eq!(
-        l,
-        Layout {
-            codec: Codec::Vorbis,
-            head,
-            samples: vec![head..head + 64, head + 64..head + 160, head + 160..head + 192]
-        }
-    );
+    assert_eq!((l.codec, l.head), (Codec::Vorbis, head));
+    assert_eq!(l.samples, [head..head + 64, head + 64..head + 160, head + 160..head + 192]);
+    assert_eq!(l.headers.iter().map(|h| (h.channels, h.chunks.len())).collect::<Vec<_>>(), [(1, 1), (1, 0), (1, 0)]);
+    assert_eq!(l.headers[0].chunk(&d, 2), Some(&44100u32.to_le_bytes()[..]));
     assert_eq!(extent(&d), Some(d.len()));
     assert_eq!(Layout::of(&bank(7, &[32], 0)).unwrap().codec, Codec::ImaAdpcm);
     assert_eq!(Layout::of(&bank(17, &[32], 0)).unwrap().codec, Codec::Other(17));
