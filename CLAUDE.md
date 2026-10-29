@@ -40,8 +40,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   `-r`. Test the crates you changed rather than the whole workspace; for the archive encoder
   and decoder that is aqr-formula, aqr-compress and aqr-decompress. Stream long output with
   `rg --line-buffered` rather than through `sort`, which hides progress.
-- Run the release `aqr` with `cargo aqr <args>…` (crates/aqr-bincache): it keeps each binary by
-  a hash of its sources, so a rebuild for a source tree already built is skipped.
+- **Build and run the release `aqr` only through `cargo aqr <args>…`** (crates/aqr-bincache),
+  never `cargo build -p aqr`, `cargo run -p aqr` or `target/release/aqr` directly: it builds
+  as needed and keeps each binary by a hash of its sources, so a rebuild for a source tree
+  already built is skipped and earlier binaries stay at hand.
   `cargo aqr +` lists the kept binaries; `cargo aqr +<id> <args>…` runs an earlier one, e.g. as
   the "before" of a comparison.
 - Format with the `rustfmt.toml`s (width 120).
