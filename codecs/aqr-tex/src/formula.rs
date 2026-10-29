@@ -66,19 +66,20 @@ pub fn apply(f: &mut Formula, blocks: &[u8], l: &Layout, threads: usize) -> Opti
 /// The memory of the module, on its 8 tasks (the slots), walking the layers as
 /// [`texture::decode`] does.
 ///
-/// The instance holds, besides its inputs (`Usage::base`) and the blocks (the output, made at its
-/// size) the models: 6 of them, `Models::new`'s tables of 4-byte bits (the colours' 20692, the
-/// values' 34552 each, the alpha's 4624) and two caches of recent endpoints (the keys 64 KiB, the
-/// Fenwick tree 64 KiB and the hash table of 32768 buckets, 288 KiB, with the old table as it
-/// grows: 150 KiB). From the smallest mipmap of a layer up it holds the planes of the surface
-/// before (`pp` bytes a block: 16 a channel, 4 channels in BC2 and BC3, 3 in BC1, 2 in BC5, 1 in
-/// BC4). A surface of one stripe adds the planes upsampled from them and its own, the
-/// upsampling's rows (u16 a channel; as the planes are, of the rows the surface needs), and its keys
-/// and choices (5 bytes a block). A surface of more stripes copies the models, and then each
-/// stripe but the first is a task of the instance as it is when it spawns (a copy of the
-/// high-water mark of everything before, the layers before included, at most 8 at once) with
-/// another copy of the models, the stripe's blocks and the copy that comes back, and what a
-/// surface of its size takes; the instance codes the first stripe, then holds all the others'
+/// The instance holds, besides its inputs (`Usage::base`) the models: 6 of them, `Models::new`'s
+/// tables of 4-byte bits (the colours' 20692, the values' 34552 each, the alpha's 4624) and two
+/// caches of recent endpoints (the keys 64 KiB, the Fenwick tree 64 KiB and the hash table of
+/// 32768 buckets, 288 KiB, with the old table as it grows: 150 KiB). It holds each surface's
+/// blocks once made, and in the end copies them all into the output. From the smallest mipmap of
+/// a layer up it holds the planes of the surface before (`pp` bytes a block: 16 a channel, 4
+/// channels in BC2 and BC3, 3 in BC1, 2 in BC5, 1 in BC4). A surface of one stripe adds its
+/// blocks, the planes upsampled from them and its own, the upsampling's rows (u16 a channel; as
+/// the planes are, of the rows the surface needs), and its keys and choices (5 bytes a block). A
+/// surface of more stripes copies the models, and then each stripe but the first is a task of the
+/// instance as it is when it spawns (a copy of the high-water mark of everything before, the
+/// layers before included, at most 8 at once), changing its copy of the models, with the
+/// stripe's blocks and the copy that comes back, and what a surface of its size takes; the
+/// instance then makes the surface's blocks and codes the first stripe, then holds the others'
 /// blocks, the planes of the stripes (not for the largest mipmap), and the planes stacked.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let l = Layout::from_bytes(u.params)?;
@@ -86,15 +87,17 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     // (the models: the bits, and the caches of recent endpoints)
     let models = 4 * (20692 + 2 * 34552 + 4624) + 2 * (65536 + 65540 + 294928 + 150000) + 4096;
     let len = u.output();
-    let base = u.base() + lg(len) + models;
+    let base = u.base() + models;
     let surfaces: Vec<_> = l.mip_surfaces().collect();
-    // the instance's high-water mark, and the most of the instance and its tasks
-    let (mut hw, mut peak) = (base, base);
-    for _ in 0..l.layers.min(2) {
+    // the instance's high-water mark, and the most of the instance and its tasks; the surfaces'
+    // blocks held
+    let (mut hw, mut peak, mut held) = (base, base, 0);
+    for _ in 0..l.layers {
         // the planes of the surface before
         let mut prev = 0u64;
         for (m, sf) in surfaces.iter().enumerate().rev() {
             let blocks = sf.blocks() as u64;
+            let size = lg(blocks * bb);
             let n = texture::stripes(sf.blocks());
             // the rows of the planes upsampled from the surface before, and of the stripe
             let before = surfaces.get(m + 1).map_or(0, |s| s.bh as u64 * 4);
@@ -106,34 +109,37 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
                 2 * pp * px + across + 5 * px
             };
             if n == 1 {
-                let live = base + prev;
+                let live = base + held + prev + size;
                 hw = hw.max(live);
                 peak = peak.max(live + work(sf.bh as u64));
+                held += size;
                 prev = pp * blocks;
-                hw = hw.max(base + prev);
+                hw = hw.max(base + held + prev);
                 continue;
             }
-            let copy = live_with_copy(base + prev, models);
+            let copy = live_with_copy(base + held + prev, models);
             hw = hw.max(copy);
             let top = texture::rows(0, n, sf.bh).len() as u64;
             let mut tasks: Vec<u64> = (1..n)
                 .map(|i| {
                     let rows = texture::rows(i, n, sf.bh).len() as u64;
                     let b = rows * sf.bw as u64 * bb;
-                    hw + models + 2 * b + work(rows)
+                    hw + 2 * b + work(rows)
                 })
                 .collect();
-            let here = copy + work(top);
+            let here = copy + size + work(top);
             peak = peak.max(here + top_sum(&mut tasks, 8));
             hw = hw.max(here);
             // the stripes' blocks got and the planes
-            let after = copy + (blocks - top * sf.bw as u64) * bb + 2 * pp * blocks;
+            let after = copy + size + (blocks - top * sf.bw as u64) * bb + 2 * pp * blocks;
             peak = peak.max(after);
             hw = hw.max(after);
+            held += size;
             prev = pp * blocks;
         }
     }
-    Some(peak.max(hw) + 16 * aqr_formula::PAGE)
+    // the surfaces copied into the output
+    Some(peak.max(hw).max(base + held + lg(len)) + 16 * aqr_formula::PAGE)
 }
 
 fn live_with_copy(live: u64, models: u64) -> u64 {

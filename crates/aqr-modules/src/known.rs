@@ -6,7 +6,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "bcn-recons",
         version: 1,
-        sha512_256: hex("caca82f410e08aec7048aa663fb5fc4d376394b44b4ad89f4373dd8053427f1c"),
+        sha512_256: hex("641019b2e30ee53d19759131bf900865bf8bd026d1e5d1c4c2d33de12395c6f8"),
         block: include_bytes!("../wasm/bcn-recons.block"),
     },
     Known {

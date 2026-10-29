@@ -189,24 +189,30 @@ trait Sides: Sync {
     fn done(&self, s: Self::S, b: &[u8]) -> Vec<u8>;
 }
 
-/// Walks the blocks of `l` in `blocks` (given when encoding, filled in when decoding): the
-/// first stripes by `main`, the others by `sides`, `back` taking what comes back of each.
+/// Walks the blocks of `l` (`blocks` when encoding, which takes every choice from them; zeros
+/// filled in when decoding): the first stripes by `main`, the others by `sides`, `back` taking
+/// what comes back of each into its rows of the surface; `done` takes each surface's blocks, in
+/// the order of the walk. A surface's blocks are made after its stripes coded apart are started
+/// (so that, as tasks, they do not copy them).
 fn walk<X: Sides>(
     main: &mut X::S,
     sides: &X,
     l: &Layout,
-    blocks: &mut [u8],
+    blocks: Option<&[u8]>,
     threads: usize,
     mut back: impl FnMut(usize, Vec<u8>, &mut [u8]) -> Result<()>,
+    mut done: impl FnMut(Vec<u8>),
 ) -> Result<()> {
     let (f, bb) = (l.format, l.format.block_bytes());
     let mut models = Models::new(f);
     let surfaces: Vec<_> = l.mip_surfaces().collect();
     let layer: usize = surfaces.iter().map(|s| s.blocks() * bb).sum();
+    // (stripes as tasks have a copy of the memory of their own, the models' copy theirs to change)
+    let own = cfg!(target_family = "wasm") && threads > 1;
     let mut next = 1;
-    for blocks in blocks.chunks_exact_mut(layer) {
+    for k in 0..l.layers as usize {
         let mut ends = Vec::with_capacity(surfaces.len());
-        let mut at = 0;
+        let mut at = k * layer;
         for sf in &surfaces {
             at += sf.blocks() * bb;
             ends.push(at);
@@ -214,34 +220,53 @@ fn walk<X: Sides>(
         let mut prev = Planes::default();
         for (m, (sf, &end)) in surfaces.iter().zip(&ends).enumerate().rev() {
             let (bw, bh) = (sf.bw, sf.bh);
-            let b = &mut blocks[end - sf.blocks() * bb..end];
+            let size = sf.blocks() * bb;
+            let src = blocks.map(|b| &b[end - size..end]);
+            let make = |r: std::ops::Range<usize>| match src {
+                Some(b) => b[r].to_vec(),
+                None => vec![0; r.len()],
+            };
             let n = stripes(sf.blocks());
             if n == 1 {
-                prev = stripe(main, &mut models, f, b, (bw, bh), &prev.upsampled(bw, 0..bh))?;
+                let mut b = make(0..size);
+                prev = stripe(main, &mut models, f, &mut b, (bw, bh), &prev.upsampled(bw, 0..bh))?;
+                done(b);
                 continue;
             }
-            let top = rows(0, n, bh).end;
-            let (first, rest) = b.split_at_mut(top * bw * bb);
-            let (copy, coarse, rest_ro) = (models.clone(), &prev, &*rest);
+            let rows0 = rows(0, n, bh).end;
+            let top = rows0 * bw * bb;
+            let (copy, coarse) = (std::sync::Mutex::new(models.clone()), &prev);
             let job = |i: usize| -> Vec<u8> {
                 let r = rows(i + 1, n, bh);
-                let at = (r.start - top) * bw * bb;
-                let mut b = rest_ro[at..at + r.len() * bw * bb].to_vec();
-                let mut m = copy.clone();
+                let at = r.start * bw * bb;
+                let mut b = make(at..at + r.len() * bw * bb);
+                let (mut g, mut mine);
+                let m: &mut Models = if own {
+                    g = copy.lock().unwrap();
+                    &mut g
+                } else {
+                    mine = copy.lock().unwrap().clone();
+                    &mut mine
+                };
                 let Ok(mut s) = sides.side(next + i) else { return vec![] };
-                match stripe(&mut s, &mut m, f, &mut b, (bw, r.len()), &coarse.upsampled(bw, r)) {
+                match stripe(&mut s, m, f, &mut b, (bw, r.len()), &coarse.upsampled(bw, r)) {
                     Ok(_) => sides.done(s, &b),
                     Err(_) => vec![],
                 }
             };
             let (main, models) = (&mut *main, &mut models);
-            let here = || stripe(main, models, f, first, (bw, top), &coarse.upsampled(bw, 0..top));
-            let (outs, mine) = apart(n - 1, threads, job, here);
+            let here = || {
+                let mut b = make(0..size);
+                let p = stripe(main, models, f, &mut b[..top], (bw, rows0), &coarse.upsampled(bw, 0..rows0));
+                (b, p)
+            };
+            let (outs, (mut b, mine)) = apart(n - 1, threads, job, here);
+            drop(copy);
             let mut planes = vec![mine?];
-            let mut at = 0;
+            let mut at = top;
             for (i, out) in outs.into_iter().enumerate() {
                 let r = rows(i + 1, n, bh);
-                let chunk = &mut rest[at..at + r.len() * bw * bb];
+                let chunk = &mut b[at..at + r.len() * bw * bb];
                 back(next + i, out, chunk)?;
                 // (the largest mipmap's planes predict nothing)
                 if m > 0 {
@@ -251,6 +276,7 @@ fn walk<X: Sides>(
             }
             next += n - 1;
             prev = Planes::stack(planes);
+            done(b);
         }
     }
     Ok(())
@@ -301,20 +327,25 @@ impl<'a> Sides for Decoders<'a> {
 pub fn encode(l: &Layout, blocks: &[u8], threads: usize) -> (Vec<u8>, Vec<u8>, [u64; CATS]) {
     assert_eq!(blocks.len() as u64, l.len());
     let mut main = Enc::new();
-    let mut b = blocks.to_vec();
     let mut streams = vec![vec![]; apart_streams(l) + 1];
     let mut cost = [0u64; CATS];
-    // (the encoder's blocks are given, and every choice is taken from them)
-    walk(&mut main, &Encoders, l, &mut b, threads, |j, mut out, _| {
-        let tally = out.split_off(out.len() - TALLY);
-        for (i, c) in cost.iter_mut().enumerate() {
-            *c += u64::from_le_bytes(tally[8 * i..8 * i + 8].try_into().unwrap());
-        }
-        streams[j] = out;
-        Ok(())
-    })
+    walk(
+        &mut main,
+        &Encoders,
+        l,
+        Some(blocks),
+        threads,
+        |j, mut out, _| {
+            let tally = out.split_off(out.len() - TALLY);
+            for (i, c) in cost.iter_mut().enumerate() {
+                *c += u64::from_le_bytes(tally[8 * i..8 * i + 8].try_into().unwrap());
+            }
+            streams[j] = out;
+            Ok(())
+        },
+        drop,
+    )
     .expect("the encoder codes any blocks");
-    debug_assert!(b == blocks);
     for (c, x) in cost.iter_mut().zip(main.cost) {
         *c += x;
     }
@@ -336,19 +367,37 @@ pub fn decode(l: &Layout, main: &[u8], apart: &[u8], threads: usize) -> Result<V
     if streams.len() != n + 1 {
         return Err(corrupt());
     }
-    let mut b = vec![0; len];
     let mut main = Dec { c: ArithDecoder::new(streams[0]) };
     let sides = Decoders(streams);
-    walk(&mut main, &sides, l, &mut b, threads, |_, out, chunk| {
-        // (a stripe that failed gives nothing)
-        if out.len() != chunk.len() {
-            return Err(corrupt());
-        }
-        chunk.copy_from_slice(&out);
-        Ok(())
-    })?;
+    // (each layer's surfaces from the smallest)
+    let mut surfaces = Vec::new();
+    walk(
+        &mut main,
+        &sides,
+        l,
+        None,
+        threads,
+        |_, out, chunk| {
+            // (a stripe that failed gives nothing)
+            if out.len() != chunk.len() {
+                return Err(corrupt());
+            }
+            chunk.copy_from_slice(&out);
+            Ok(())
+        },
+        |b| surfaces.push(b),
+    )?;
     if main.c.overrun() {
         return Err(corrupt());
+    }
+    let mut b = Vec::with_capacity(len);
+    let per = l.mip_surfaces().count();
+    let mut surfaces = surfaces.into_iter();
+    for _ in 0..l.layers {
+        let layer: Vec<_> = surfaces.by_ref().take(per).collect();
+        for s in layer.into_iter().rev() {
+            b.extend_from_slice(&s);
+        }
     }
     Ok(b)
 }

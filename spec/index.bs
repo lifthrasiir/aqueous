@@ -4597,7 +4597,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
   </thead>
   <tbody>
     <tr>
-      <td><code>caca82f410e08aec7048aa663fb5fc4d376394b44b4ad89f4373dd8053427f1c</code>
+      <td><code>641019b2e30ee53d19759131bf900865bf8bd026d1e5d1c4c2d33de12395c6f8</code>
       <td>bcn-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcn-recons.wasm" title="crates/aqr-modules/wasm/bcn-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tex/FORMAT.md" title="codecs/aqr-tex/FORMAT.md">R</a>
