@@ -13,8 +13,14 @@ const FINE_WINDOW: usize = 1 << 12;
 const FINE_K: usize = 64;
 const MAX_FINE_WINDOWS: usize = 1024;
 /// How far a region grows from a small window.
-const FINE_SPAN: usize = 1 << 20;
+const FINE_SPAN: usize = 1 << 18;
+/// How far a region grows from a big window.
+const SPAN: usize = 1 << 22;
 const MAX_REGIONS: usize = 32;
+/// The records a phase is judged on.
+const PHASE_ROWS: usize = 256;
+/// The record sizes of a window measured: those of the most equal bytes (and their divisors).
+const SCAN_KS: usize = 8;
 /// The least score of a byte against the column models: one value the models have not seen
 /// does not end a region.
 const CLIP: f64 = -4.0;
@@ -24,6 +30,9 @@ const CLIP: f64 = -4.0;
 /// column models (one per position mod k) is summed byte by byte as the adaptive models code
 /// them: the symbols' terms by their counts, undone afterwards, and the models' terms (which
 /// depend only on how many bytes each column holds) at once.
+///
+/// Only a few k are so measured: those at which the window's bytes equal the bytes k before
+/// most often (records repeat their constant and slowly changing bytes), and their divisors.
 pub fn scan_window(a: &[u8], max_k: usize, counts: &mut Vec<u16>) -> (usize, f64, f64) {
     let t = kt::tables();
     let n = a.len();
@@ -41,7 +50,16 @@ pub fn scan_window(a: &[u8], max_k: usize, counts: &mut Vec<u16>) -> (usize, f64
         c0[b as usize] += 1;
     }
     let mut best = (base, 1);
-    for k in 2..=top {
+    let mut by_eq: Vec<(usize, usize)> =
+        (2..=top).map(|k| (a[k..].iter().zip(a).filter(|(x, y)| x == y).count(), k)).collect();
+    let cut = by_eq.len().min(SCAN_KS);
+    if cut > 0 {
+        by_eq.select_nth_unstable_by(cut - 1, |x, y| y.cmp(x));
+    }
+    let mut ks: Vec<usize> = by_eq[..cut].iter().flat_map(|&(_, k)| (2..=k).filter(move |d| k % d == 0)).collect();
+    ks.sort_unstable();
+    ks.dedup();
+    for k in ks {
         let mut bits = models(k);
         for chunk in a.chunks(k) {
             for (col, &b) in chunk.iter().enumerate() {
@@ -196,7 +214,7 @@ fn refine_phase(data: &[u8], s: usize, e: usize, k: usize) -> usize {
         if p % a != 0 || p >= e {
             continue;
         }
-        let nrec = ((e - p) / k).min(2048);
+        let nrec = ((e - p) / k).min(PHASE_ROWS);
         if nrec < MIN_RECORDS {
             continue;
         }
@@ -252,14 +270,14 @@ pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
         return Vec::new();
     }
     for wo in linspace(n - wlen, MAX_WINDOWS.min((n / wlen).max(1))) {
-        scan(wo, wlen, MAX_K, None, &mut found);
+        scan(wo, wlen, MAX_K, Some(SPAN), &mut found);
     }
     if n >= 2 * FINE_WINDOW {
         for wo in linspace(n - FINE_WINDOW, MAX_FINE_WINDOWS.min(n / FINE_WINDOW)) {
             scan(wo, FINE_WINDOW, FINE_K, Some(FINE_SPAN), &mut found);
         }
     }
-    found.sort_by(|a, b| {
+    found.sort_unstable_by(|a, b| {
         (b.gain, b.s, b.e, b.k, b.wo, b.wlen).partial_cmp(&(a.gain, a.s, a.e, a.k, a.wo, a.wlen)).unwrap()
     });
     let mut seeds: Vec<&Found> = Vec::new();
@@ -284,7 +302,7 @@ pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
             }
         }
     }
-    regions.sort();
+    regions.sort_unstable();
     regions.dedup();
     regions
 }

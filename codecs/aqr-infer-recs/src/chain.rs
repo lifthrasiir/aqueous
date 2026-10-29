@@ -30,12 +30,20 @@ const STEPS: usize = 32;
 const COLS: usize = 16;
 /// Chains of a span are screened on 8 entries and 8 columns, these kept.
 const SCREEN: usize = 512;
+/// The next fields a chain is followed to from its first: the places most like it.
+const NEXT_DELTAS: usize = 2;
+/// A chain of fields is scored on FIELD_COLS bytes from FIELD_BACK before its fields (where
+/// its entries' fixed parts are, the field being anywhere in them), screened on every 4th.
+const FIELD_BACK: i64 = 64;
+const FIELD_COLS: usize = 80;
 /// The best of them are ranked on this many entries, and FOLLOW_KEEP followed to the end.
 const FOLLOW_SAMPLE: usize = 4096;
 const FOLLOW_KEEP: usize = 8;
+/// The bytes of a chain's first entries its rotation and head are chosen on.
+const SAMPLE: usize = 1 << 18;
 
 /// A hypothesis: entries from p0, the length at d of kind KINDS[kind], plus b, aligned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Rule {
     pub d: usize,
     pub kind: usize,
@@ -93,6 +101,20 @@ impl Ord for Score {
     }
 }
 
+/// The value of a field kind at p, which is within data.
+#[inline]
+fn read(data: &[u8], p: usize, kind: usize) -> u32 {
+    let (w, big, mask) = KINDS[kind];
+    let v = match (w, big) {
+        (1, _) => data[p] as u32,
+        (2, false) => u16::from_le_bytes([data[p], data[p + 1]]) as u32,
+        (2, true) => u16::from_be_bytes([data[p], data[p + 1]]) as u32,
+        (_, false) => u32::from_le_bytes(data[p..p + 4].try_into().unwrap()),
+        (_, true) => u32::from_be_bytes(data[p..p + 4].try_into().unwrap()),
+    };
+    v & mask
+}
+
 fn byte(data: &[u8], i: usize) -> u8 {
     *data.get(i).unwrap_or(&0)
 }
@@ -101,18 +123,40 @@ fn byte(data: &[u8], i: usize) -> u8 {
 /// column by column, than with bytes a multiple of 8 into the entry before: runs of zeros,
 /// text or periodic data (code) agree either way, and score nothing.
 pub fn score(data: &[u8], p: &[usize], ncols: usize) -> f64 {
+    score_at(data, p, 0, ncols)
+}
+
+/// How many of the bytes around two fields (every 4th from FIELD_BACK before them) are equal.
+fn like(span: &[u8], f0: usize, f1: usize) -> usize {
+    (0..FIELD_COLS as i64)
+        .step_by(4)
+        .filter(|&j| {
+            let (a, b) = (f0 as i64 - FIELD_BACK + j, f1 as i64 - FIELD_BACK + j);
+            a >= 0 && byte(span, a as usize) == byte(span, b as usize)
+        })
+        .count()
+}
+
+/// [`score`] of the bytes from `back` before each of p.
+fn score_at(data: &[u8], p: &[usize], back: i64, ncols: usize) -> f64 {
+    score_cols(data, p, back, ncols, 1)
+}
+
+/// [`score`] of ncols bytes `stride` apart from `back` before each of p.
+fn score_cols(data: &[u8], p: &[usize], back: i64, ncols: usize, stride: usize) -> f64 {
     if p.len() < 2 {
         return 0.0;
     }
+    let at = |i: i64| if i < 0 { 0 } else { byte(data, i as usize) };
     let (mut same, mut ctrl) = (0usize, 0usize);
     for i in 1..p.len() {
         let l = ((p[i] - p[i - 1]) / 8).max(1);
         let u = 1 + ((i - 1) * 7919) % l;
-        let c = p[i - 1] + 8 * u;
-        for j in 0..ncols {
-            let x = byte(data, p[i] + j);
-            same += (x == byte(data, p[i - 1] + j)) as usize;
-            ctrl += (x == byte(data, c + j)) as usize;
+        let (q, r, c) = (p[i] as i64 - back, p[i - 1] as i64 - back, (p[i - 1] + 8 * u) as i64 - back);
+        for j in (0..(ncols * stride) as i64).step_by(stride) {
+            let x = at(q + j);
+            same += (x == at(r + j)) as usize;
+            ctrl += (x == at(c + j)) as usize;
         }
     }
     (same as f64 - ctrl as f64) / ((p.len() - 1) * ncols) as f64
@@ -138,110 +182,105 @@ pub fn follow(data: &[u8], p0: usize, r: &Rule, limit: Option<usize>) -> Vec<usi
     out
 }
 
-/// Chains whose entries hold together, starting within the span at `at`, best first:
-/// (score, entry starts, rule).
+/// Chains whose entries hold together, with a length field within `fields` bytes of the
+/// span at `at`, best first: (score, entry starts, rule).
 ///
-/// Every rule is followed from every start for STEPS entries; a chain dies when an entry is
-/// shorter than its length field or leaves the span, and chains of one length are fixed
-/// records, left to the column scan. The chains of each d are screened, scored, and the best
-/// 16 kept. The best of all are ranked on their first entries, followed through the whole
-/// file, and those that end with the same lengths are one (the one whose first entries score
-/// best); the rest are ranked by their score times their entries.
-fn find(
-    data: &[u8],
-    at: usize,
-    max_d: usize,
-    starts: impl Iterator<Item = usize> + Clone,
-) -> Vec<(f64, Vec<usize>, Rule)> {
+/// A chain follows its length fields: from a field at f, the next is align_up(b + v, align)
+/// after it, wherever in the entry the field is (an entry starting d before its field gives
+/// the same chain, rotated). So every rule but d is followed from every field position for
+/// STEPS entries, scored around the fields (FIELD_BACK bytes before them, FIELD_COLS in all); a
+/// chain dies when it leaves the span, and chains of one length are fixed records, left to
+/// the column scan. The best start at their fields (`rotate` settles where they start). They
+/// are then ranked on their first entries, followed through
+/// the whole file, and those that end with the same lengths are one (the one whose first
+/// entries score best); the rest are ranked by their score times their entries.
+fn find(data: &[u8], at: usize, fields: usize) -> Vec<(f64, Vec<usize>, Rule)> {
     let span = &data[at..(at + SPAN).min(data.len())];
     let n = span.len();
-    // each kind's value at every position of the span (zero past its end)
-    let tables: Vec<Vec<u32>> = (0..KINDS.len())
-        .map(|kind| {
-            let r = Rule { d: 0, kind, b: 0, align: 1 };
-            (0..n).map(|p| r.value(span, p) as u32).collect()
-        })
-        .collect();
-    let mut found: HashMap<Vec<usize>, (f64, usize, Rule)> = HashMap::new();
-    let mut lanes: Vec<([usize; STEPS + 1], usize, Rule, f64)> = Vec::new();
+    let mut lanes: Vec<([usize; STEPS + 1], Rule, f64)> = Vec::new();
     // the screen scores of the chains kept so far, the least on top: a chain that scores below
     // the least of SCREEN of them after 8 entries would not be kept at the end either
     let mut screen: BinaryHeap<Reverse<Score>> = BinaryHeap::new();
-    for d in 0..max_d {
-        lanes.clear();
-        screen.clear();
-        for p0 in starts.clone().filter(|&p| p < n) {
-            for (kind, tab) in tables.iter().enumerate() {
-                // no entry is shorter than its length
-                if p0 + d + KINDS[kind].0 > n || p0 + tab[p0 + d] as usize > n {
+    for f0 in 0..fields.min(n) {
+        for (kind, &(w, _, _)) in KINDS.iter().enumerate() {
+            let tab = |p: usize| read(span, p, kind);
+            // no entry is shorter than its length
+            if f0 + w > n || f0 + tab(f0) as usize > n {
+                continue;
+            }
+            // where the next field may be: f0 + v0 + δ, δ = align_up(b + v0) − v0; the δ at
+            // which the next entry's bytes around its field are most like these
+            let v0 = tab(f0) as usize;
+            let mut deltas = [(0usize, 0usize); NEXT_DELTAS];
+            for delta in 0..=MAX_B + 7 {
+                let f1 = f0 + v0 + delta;
+                if f1 + w > n {
+                    break;
+                }
+                if f1 + tab(f1) as usize > n {
                     continue;
                 }
-                for b in 0..=MAX_B {
-                    for align in ALIGNS {
-                        let r = Rule { d, kind, b, align };
-                        let w = r.width();
-                        let mut pos = [0usize; STEPS + 1];
-                        pos[0] = p0;
-                        let (mut p, mut alive, mut varied) = (p0, true, false);
-                        let mut first = 0;
-                        let mut s8 = 0.0;
-                        for step in 0..STEPS {
-                            if step == 8 {
-                                s8 = score(span, &pos[..9], 8);
-                                if screen.len() == SCREEN && s8 < screen.peek().unwrap().0.0 {
-                                    alive = false;
-                                    break;
-                                }
-                            }
-                            if p + d + w > n {
+                let sim = like(span, f0, f1);
+                if let Some(i) = deltas.iter().position(|&(s, _)| sim > s) {
+                    deltas.copy_within(i..NEXT_DELTAS - 1, i + 1);
+                    deltas[i] = (sim, delta);
+                }
+            }
+            let rules = deltas.iter().filter(|d| d.0 > 0).flat_map(|&(_, delta)| {
+                ALIGNS.into_iter().flat_map(move |align| {
+                    (0..=MAX_B)
+                        .filter(move |&b| (b + v0).div_ceil(align) * align - v0 == delta)
+                        .map(move |b| (b, align))
+                })
+            });
+            for (b, align) in rules {
+                {
+                    let mut pos = [0usize; STEPS + 1];
+                    pos[0] = f0;
+                    let (mut f, mut alive, mut varied) = (f0, true, false);
+                    let mut first = 0;
+                    let mut s8 = 0.0;
+                    for step in 0..STEPS {
+                        if step == 8 {
+                            s8 = score_cols(span, &pos[..9], FIELD_BACK, FIELD_COLS / 4, 4);
+                            if screen.len() == SCREEN && s8 < screen.peek().unwrap().0.0 {
                                 alive = false;
                                 break;
                             }
-                            let l = (b + tab[p + d] as usize).div_ceil(align) * align;
-                            if l < d + w || p + l > n {
-                                alive = false;
-                                break;
-                            }
-                            if step == 0 {
-                                first = l;
-                            } else if l != first {
-                                varied = true;
-                            }
-                            p += l;
-                            pos[step + 1] = p;
                         }
-                        if alive && varied {
-                            lanes.push((pos, p0, r, s8));
-                            screen.push(Reverse(Score(s8)));
-                            if screen.len() > SCREEN {
-                                screen.pop();
-                            }
+                        let l = (b + tab(f) as usize).div_ceil(align) * align;
+                        if l < w || f + l + w > n {
+                            alive = false;
+                            break;
+                        }
+                        if step == 0 {
+                            first = l;
+                        } else if l != first {
+                            varied = true;
+                        }
+                        f += l;
+                        pos[step + 1] = f;
+                    }
+                    if alive && varied {
+                        lanes.push((pos, Rule { d: 0, kind, b, align }, s8));
+                        screen.push(Reverse(Score(s8)));
+                        if screen.len() > SCREEN {
+                            screen.pop();
                         }
                     }
                 }
             }
         }
-        if lanes.len() > SCREEN {
-            let mut s: Vec<(f64, usize)> = lanes.iter().enumerate().map(|(i, l)| (-l.3, i)).collect();
-            s.select_nth_unstable_by(SCREEN, |a, b| a.partial_cmp(b).unwrap());
-            let keep: Vec<usize> = s[..SCREEN].iter().map(|x| x.1).collect();
-            lanes = keep.into_iter().map(|i| lanes[i]).collect();
-        }
-        let mut scored: Vec<(f64, usize)> =
-            lanes.iter().enumerate().map(|(i, l)| (score(span, &l.0, COLS), i)).collect();
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap().then(a.1.cmp(&b.1)));
-        for &(sc, i) in scored.iter().take(16) {
-            let (pos, p0, r, _) = &lanes[i];
-            let key: Vec<usize> = pos.iter().map(|p| p + d).collect();
-            let e = found.entry(key).or_insert((-1.0, 0, *r));
-            if sc > e.0 {
-                *e = (sc, at + p0, *r);
-            }
-        }
     }
+    if lanes.len() > SCREEN {
+        lanes.select_nth_unstable_by(SCREEN, |x, y| y.2.total_cmp(&x.2));
+        lanes.truncate(SCREEN);
+    }
+    // the entries start at their fields until `rotate` moves them
+    let mut hyps: Vec<(f64, usize, Rule)> =
+        lanes.iter().map(|(pos, r, _)| (score_at(span, pos, FIELD_BACK, FIELD_COLS), at + pos[0], *r)).collect();
     // through the whole file
-    let mut hyps: Vec<(f64, usize, Rule)> = found.into_values().collect();
-    hyps.sort_by(|a, b| {
+    hyps.sort_unstable_by(|a, b| {
         let k = |h: &(f64, usize, Rule)| (h.0, h.1, h.2.d, h.2.kind, h.2.b, h.2.align);
         k(b).partial_cmp(&k(a)).unwrap()
     });
@@ -253,7 +292,8 @@ fn find(
             (score(data, &p, COLS) * (p.len() - 1) as f64, p0, r)
         })
         .collect();
-    screened.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    // stable: ties keep the order of hyps
+    screened.sort_by(|a, b| b.0.total_cmp(&a.0));
     let mut chains: HashMap<Vec<usize>, (f64, f64, Vec<usize>, Rule)> = HashMap::new();
     for &(_, p0, r) in screened.iter().take(FOLLOW_KEEP) {
         let p = follow(data, p0, &r, None);
@@ -270,9 +310,14 @@ fn find(
         }
     }
     let mut ranked: Vec<(f64, Vec<usize>, Rule)> = chains.into_values().map(|c| (c.1, c.2, c.3)).collect();
-    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    ranked.sort_unstable_by(by_score);
     ranked.retain(|c| c.0 > 0.0);
     ranked
+}
+
+/// Chains best first; out of a HashMap, so ties go by where they start and their rule.
+fn by_score(a: &(f64, Vec<usize>, Rule), b: &(f64, Vec<usize>, Rule)) -> std::cmp::Ordering {
+    b.0.total_cmp(&a.0).then(a.1[0].cmp(&b.1[0])).then(a.2.cmp(&b.2)).then(a.1.len().cmp(&b.1.len()))
 }
 
 /// The lengths of a chain's last entries: the same under rotation and for copies of the length.
@@ -303,6 +348,13 @@ fn extend_back(data: &[u8], mut p: Vec<usize>, r: &Rule) -> Vec<usize> {
     p
 }
 
+/// The first entries of a chain, up to 2048 of them and SAMPLE bytes, on which its rotation
+/// and head are chosen.
+fn sample(p: &[usize]) -> &[usize] {
+    let end = p.partition_point(|&q| q <= p[0] + SAMPLE).max(3);
+    &p[..end.min(p.len()).min(2049)]
+}
+
 /// The heads (h bytes of each entry from p, transposed) and the tails, one after another.
 fn heads_tails(data: &[u8], p: &[usize], h: usize, out: &mut Vec<u8>) {
     out.clear();
@@ -324,12 +376,12 @@ fn heads_tails(data: &[u8], p: &[usize], h: usize, out: &mut Vec<u8>) {
 /// (a chain found from inside the entries often starts at the file's start, or near it).
 fn rotate(data: &[u8], p: Vec<usize>, r: Rule) -> (Vec<usize>, Rule) {
     let lmin = p.windows(2).map(|w| w[1] - w[0]).min().unwrap();
-    let h = if r.b >= 8 { r.b.min(lmin) } else { lmin };
+    let h = if r.b >= 8 { r.b.min(lmin) } else { lmin.min(MAX_B) };
     let (d, w) = (r.d as i64, r.width() as i64);
     let moved = |q: &[usize], x: i64| -> Vec<usize> {
         q.iter().map(|&s| s as i64 - x).filter(|&s| 0 <= s && s <= data.len() as i64).map(|s| s as usize).collect()
     };
-    let q = &p[..p.len().min(2050)];
+    let q = sample(&p);
     let mut best = (usize::MAX, 0i64);
     let mut buf = Vec::new();
     for x in -d..=h as i64 - d - w {
@@ -373,9 +425,9 @@ pub fn choose_head(data: &[u8], p: &[usize], r: &Rule) -> usize {
         .into_iter()
         .filter(|&h| least <= h && h <= most)
         .collect();
-    widths.sort();
+    widths.sort_unstable();
     widths.dedup();
-    let q = &p[..p.len().min(2049)];
+    let q = sample(p);
     let mut buf = Vec::new();
     let mut best = (usize::MAX, least);
     for h in widths {
@@ -391,8 +443,7 @@ pub fn chains(data: &[u8]) -> Vec<(Vec<usize>, Rule)> {
     let ats = if n > SPAN / 4 { linspace_end(n, WINDOWS) } else { vec![0] };
     let mut best: HashMap<Vec<usize>, (f64, Vec<usize>, Rule)> = HashMap::new();
     for at in ats {
-        let found =
-            if at == 0 { find(data, 0, 64, (0..=256).step_by(4)) } else { find(data, at, 32, (0..=128).step_by(4)) };
+        let found = if at == 0 { find(data, 0, 320) } else { find(data, at, 160) };
         for c in found.into_iter().take(3) {
             let key = tail_key(&c.1);
             if best.get(&key).is_none_or(|b| c.0 > b.0) {
@@ -401,11 +452,14 @@ pub fn chains(data: &[u8]) -> Vec<(Vec<usize>, Rule)> {
         }
     }
     let mut ranked: Vec<_> = best.into_values().collect();
-    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    ranked.sort_unstable_by(by_score);
     let mut out = Vec::new();
     for (_, p, r) in ranked.into_iter().take(6) {
         let p = extend_back(data, p, &r);
-        let (p, r) = rotate(data, p, r);
+        let (mut p, r) = rotate(data, p, r);
+        // entries the chain left out as long as they started at their fields
+        let more = follow(data, *p.last().unwrap(), &r, None);
+        p.extend_from_slice(&more[1..]);
         let p = trim(data, p);
         if p.len() > MIN_RECORDS {
             out.push((p, r));

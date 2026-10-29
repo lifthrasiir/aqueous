@@ -2,6 +2,8 @@
 //! as it is, against the record before or against an earlier field of the record, and written
 //! as byte planes (least significant first), one field after another.
 
+use std::collections::HashMap;
+
 use crate::{kt, zcost};
 
 /// How a field's values are coded.
@@ -37,10 +39,12 @@ pub enum Cost {
 
 /// Records up to this size also try fields against earlier fields of their width.
 pub const REF_K: usize = 128;
+/// How far back in the record those fields are.
+const REF_BACK: usize = 32;
 /// The description of a field, which breaks ties towards fewer, wider fields.
 const FIELD_BITS: f64 = 16.0;
 /// Fields are chosen on 4 runs of this many records spread over the records.
-pub const FIELD_ROWS: usize = 1024;
+pub const FIELD_ROWS: usize = 256;
 
 /// The field (`off`, `width`, `big`) of each record of m (rows of k bytes).
 fn values(m: &[u8], k: usize, off: usize, width: usize, big: bool) -> Vec<u64> {
@@ -154,16 +158,24 @@ pub fn split(m: &[u8], k: usize, cost: Cost, refs: bool) -> (Vec<Field>, f64, f6
     let m = sample(m, k);
     let m = &m[..];
     let n = m.len() / k;
-    let mut buf = Vec::new();
-    let mut cost_of = |f: &Field| {
-        buf.clear();
-        planes(&code(&values(m, k, f.off, f.width, f.big), m, k, f), f.width, &mut buf);
-        match cost {
-            Cost::Kt => kt::plane_bits(&buf, n),
-            Cost::Zstd => zcost::plane_bits(&buf),
+    let mut scratch = Scratch { counts: [0; 256], coded: Vec::with_capacity(n), buf: Vec::new() };
+    // the values of the fields of each width and endianness at each offset, kept where fields
+    // refer to them
+    let refs = refs && k <= REF_K;
+    let mut cache: HashMap<(usize, usize, bool), Vec<u64>> = HashMap::new();
+    let mut values_of = |off: usize, width: usize, big: bool| -> Vec<u64> {
+        if refs {
+            cache.entry((off, width, big)).or_insert_with(|| values(m, k, off, width, big)).clone()
+        } else {
+            values(m, k, off, width, big)
         }
     };
-    let raw: Vec<f64> = (0..k).map(|off| cost_of(&Field { off, width: 1, big: false, how: How::Raw })).collect();
+    let raw: Vec<f64> = (0..k)
+        .map(|off| {
+            let v = values_of(off, 1, false);
+            scratch.cost(&v, None, 1, How::Raw, cost)
+        })
+        .collect();
     let mut best = vec![f64::INFINITY; k + 1];
     let mut back: Vec<Option<Field>> = vec![None; k + 1];
     best[0] = 0.0;
@@ -178,17 +190,22 @@ pub fn split(m: &[u8], k: usize, cost: Cost, refs: bool) -> (Vec<Field>, f64, f6
             if o + w > k {
                 break;
             }
-            for big in if w == 1 { &[false][..] } else { &[false, true][..] } {
-                let mut hows = vec![How::Delta, How::Xor];
-                if refs && k <= REF_K && w > 1 && o >= w {
-                    for r in 0..=o - w {
-                        hows.extend([How::Sub(r), How::XorRef(r)]);
-                    }
+            for big in if w == 1 { [false].as_slice() } else { [false, true].as_slice() } {
+                let v = values_of(o, w, *big);
+                for how in [How::Delta, How::Xor] {
+                    cands.push((
+                        Field { off: o, width: w, big: *big, how },
+                        scratch.cost(&v, None, w, how, cost) + FIELD_BITS,
+                    ));
                 }
-                for how in hows {
-                    let f = Field { off: o, width: w, big: *big, how };
-                    let c = cost_of(&f) + FIELD_BITS;
-                    cands.push((f, c));
+                if refs && w > 1 && o >= w {
+                    for r in o.saturating_sub(REF_BACK)..=o - w {
+                        let rv = values_of(r, w, *big);
+                        for how in [How::Sub(r), How::XorRef(r)] {
+                            let c = scratch.cost(&v, Some(&rv), w, how, cost) + FIELD_BITS;
+                            cands.push((Field { off: o, width: w, big: *big, how }, c));
+                        }
+                    }
                 }
             }
         }
@@ -210,6 +227,52 @@ pub fn split(m: &[u8], k: usize, cost: Cost, refs: bool) -> (Vec<Field>, f64, f6
     fields.reverse();
     let bits = best[k] - FIELD_BITS * fields.len() as f64;
     (fields, bits, raw.iter().sum())
+}
+
+/// What the costs of the fields are counted in, kept from field to field.
+struct Scratch {
+    counts: [u32; 256],
+    coded: Vec<u64>,
+    buf: Vec<u8>,
+}
+
+impl Scratch {
+    /// The cost of values v of a width coded (against refs for the fields that refer).
+    fn cost(&mut self, v: &[u64], refs: Option<&[u64]>, width: usize, how: How, cost: Cost) -> f64 {
+        let mk = mask(width);
+        self.coded.clear();
+        match how {
+            How::Raw => self.coded.extend_from_slice(v),
+            How::Delta | How::Xor => {
+                let mut prev = 0u64;
+                self.coded.extend(v.iter().map(|&x| {
+                    let t = if how == How::Delta { x.wrapping_sub(prev) & mk } else { x ^ prev };
+                    prev = x;
+                    t
+                }));
+            }
+            How::Sub(_) => self.coded.extend(v.iter().zip(refs.unwrap()).map(|(&x, &y)| x.wrapping_sub(y) & mk)),
+            How::XorRef(_) => self.coded.extend(v.iter().zip(refs.unwrap()).map(|(&x, &y)| x ^ y)),
+        }
+        match cost {
+            Cost::Kt => {
+                let mut bits = 0.0;
+                for i in 0..width {
+                    self.counts.fill(0);
+                    for &x in &self.coded {
+                        self.counts[(x >> (8 * i)) as u8 as usize] += 1;
+                    }
+                    bits += kt::bits(&self.counts);
+                }
+                bits
+            }
+            Cost::Zstd => {
+                self.buf.clear();
+                planes(&self.coded, width, &mut self.buf);
+                zcost::plane_bits(&self.buf)
+            }
+        }
+    }
 }
 
 /// The fields in a line: `delta32@0 raw@4-7 sub@8:16@12 …`.

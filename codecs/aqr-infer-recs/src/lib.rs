@@ -20,7 +20,7 @@ use fields::{Cost, Field};
 /// The fewest records a region holds.
 pub const MIN_RECORDS: usize = 16;
 /// Candidates are judged on themselves and this much around them.
-const LOCAL_CONTEXT: usize = 1 << 20;
+const LOCAL_CONTEXT: usize = 1 << 18;
 
 /// `count` points over [0, last], rounded down, without repeats: numpy's `linspace`.
 pub(crate) fn linspace(last: usize, count: usize) -> Vec<usize> {
@@ -64,7 +64,7 @@ pub enum Form {
 impl Region {
     pub fn fixed(data: &[u8], start: usize, k: usize, count: usize) -> Region {
         let m = &data[start..start + k * count];
-        let (fields, _, _) = fields::split(m, k, Cost::Zstd, true);
+        let (fields, _, _) = fields::split(m, k, Cost::Kt, true);
         Region { start, end: start + k * count, count, shape: Shape::Fixed { k }, fields }
     }
 
@@ -75,7 +75,7 @@ impl Region {
         let head =
             head.map_or_else(|| chain::choose_head(data, &starts, &rule), |h| h.min(lmin).max(rule.d + rule.width()));
         let heads = Self::heads(data, &starts, head);
-        let (fields, _, _) = fields::split(&heads, head, Cost::Zstd, true);
+        let (fields, _, _) = fields::split(&heads, head, Cost::Kt, true);
         let (start, end) = (starts[0], *starts.last().unwrap());
         Region { start, end, count: starts.len() - 1, shape: Shape::Entries { rule, head, starts }, fields }
     }
@@ -192,7 +192,7 @@ fn local_size(data: &[u8], taken: &[(usize, usize, &[u8])], s: usize, e: usize) 
         }
     }
     let mut sorted: Vec<_> = taken.iter().filter(|t| t.0 < hi && lo < t.1).collect();
-    sorted.sort_by_key(|t| t.0);
+    sorted.sort_unstable_by_key(|t| t.0);
     let mut parts: Vec<&[u8]> = Vec::new();
     let mut at = lo;
     for &&(cs, ce, form) in &sorted {
@@ -225,7 +225,7 @@ pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
     };
     let alone: Vec<i64> = (0..cands.len()).map(|i| *gains(i, &[]).iter().max().unwrap()).collect();
     let mut byend: Vec<usize> = (0..cands.len()).filter(|&i| alone[i] > 0).collect();
-    byend.sort_by_key(|&i| cands[i].end);
+    byend.sort_unstable_by_key(|&i| (cands[i].end, i));
     let ends: Vec<usize> = byend.iter().map(|&i| cands[i].end).collect();
     let before = |j: usize, i: usize| ends[..j].partition_point(|&e| e <= cands[i].start);
     let mut sum = vec![0i64; byend.len() + 1];
@@ -245,7 +245,7 @@ pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
         }
     }
     let mut order: Vec<usize> = (0..cands.len()).collect();
-    order.sort_by_key(|&i| (!picked[i], -alone[i], i));
+    order.sort_unstable_by_key(|&i| (!picked[i], -alone[i], i));
 
     let mut taken: Vec<(usize, Form, i64)> = Vec::new();
     let mut lines = Vec::new();
@@ -275,7 +275,7 @@ pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
     }
     let mut out: Vec<Choice> =
         taken.iter().map(|&(i, form, gain)| Choice { region: cands[i].clone(), form, gain }).collect();
-    out.sort_by_key(|c| c.region.start);
+    out.sort_unstable_by_key(|c| c.region.start);
     (out, lines)
 }
 

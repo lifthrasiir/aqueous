@@ -1,8 +1,9 @@
-//! usage: aqr-infer-recs-bench [-j THREADS] [-v] FILE...
+//! usage: aqr-infer-recs-bench [-j THREADS] [-v] [-t] FILE...
 //!
 //! For each file: zstd -3 of it, and of it with the regions inferred in their forms (each
 //! checked to restore), and the CPU time of the inference (of its thread: the files run on
 //! THREADS threads, all the cores by default). As `scripts/rec_bench.py`, for comparison.
+//! `-v` prints the candidates, `-t` the CPU time of each step of the inference.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,13 +21,31 @@ struct Row {
     got: usize,
     cpu: f64,
     lines: Vec<String>,
+    steps: [f64; 5],
 }
 
 fn bench(path: &str) -> Row {
     let data = std::fs::read(path).unwrap();
     let z0 = aqr_infer_recs::zstd_size(&data);
+    let mut steps = [0.0; 5];
     let t = thread_cpu();
-    let (choices, lines) = aqr_infer_recs::choose(&data, aqr_infer_recs::candidates(&data));
+    let mut lap = |i: usize, from: &mut f64| {
+        let now = thread_cpu();
+        steps[i] = now - *from;
+        *from = now;
+    };
+    let mut at = t;
+    let chains = aqr_infer_recs::chain::chains(&data);
+    lap(0, &mut at);
+    let tables = aqr_infer_recs::fixed::find(&data);
+    lap(1, &mut at);
+    let mut cands: Vec<aqr_infer_recs::Region> =
+        chains.into_iter().map(|(p, r)| aqr_infer_recs::Region::entries(&data, p, r, None)).collect();
+    lap(2, &mut at);
+    cands.extend(tables.into_iter().map(|(s, k, n)| aqr_infer_recs::Region::fixed(&data, s, k, n)));
+    lap(3, &mut at);
+    let (choices, lines) = aqr_infer_recs::choose(&data, cands);
+    lap(4, &mut at);
     let cpu = thread_cpu() - t;
     for c in &choices {
         let r = &c.region;
@@ -35,13 +54,14 @@ fn bench(path: &str) -> Row {
     }
     let got = aqr_infer_recs::zstd_size(&aqr_infer_recs::apply(&data, &choices));
     let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
-    Row { name, n: data.len(), z0, got, cpu, lines }
+    Row { name, n: data.len(), z0, got, cpu, lines, steps }
 }
 
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let mut threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     let mut verbose = false;
+    let mut timed = false;
     while let Some(a) = args.first().cloned() {
         match a.as_str() {
             "-j" => {
@@ -50,6 +70,10 @@ fn main() {
             }
             "-v" => {
                 verbose = true;
+                args.remove(0);
+            }
+            "-t" => {
+                timed = true;
                 args.remove(0);
             }
             _ => break,
@@ -86,8 +110,15 @@ fn main() {
                             r.cpu,
                             r.n as f64 / 1e6 / r.cpu
                         );
+                        if timed {
+                            let s = r.steps;
+                            println!(
+                                "  chains {:.2}, tables {:.2}, entries' fields {:.2}, records' fields {:.2}, choice {:.2}",
+                                s[0], s[1], s[2], s[3], s[4]
+                            );
+                        }
                         if verbose {
-                            for l in r.lines.iter().filter(|l| !l.ends_with("overlaps")) {
+                            for l in &r.lines {
                                 println!("{l}");
                             }
                         }
