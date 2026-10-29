@@ -55,11 +55,13 @@ fn main() {
 /// The estimate of the module `k` of what `a` took, in bytes.
 fn estimate(k: &aqr_modules::Known, a: &aqr_decompress::Applied) -> Option<u64> {
     let m = aqr_decompress::MODULES.iter().find(|m| m.name == k.name && m.version == k.version)?;
+    let contents: Vec<&[u8]> = a.contents.iter().map(|c| &c[..]).collect();
     let usage = aqr_formula::Usage {
         params: &a.params_data,
         resources: &a.resources,
         inputs: &a.inputs,
         outputs: &a.sizes,
+        contents: &contents,
         initial_pages: aqr_decompress::initial_pages(&k.read_wasm().ok()?)?,
     };
     Some(m.memory_usage_in_pages(&usage)? * aqr_formula::PAGE)

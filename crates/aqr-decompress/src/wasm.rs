@@ -888,6 +888,7 @@ impl Shared {
                 params_data: params.to_vec(),
                 resources: resources.iter().map(|r| r.len() as u64).collect(),
                 inputs: inputs.iter().map(|i| i.len() as u64).collect(),
+                contents: inputs.iter().map(|i| i.to_vec()).collect(),
                 sizes: sizes.to_vec(),
                 imported,
                 working: app.peak.load(Ordering::Relaxed).saturating_sub(imported),
@@ -922,8 +923,9 @@ pub struct Applied {
     pub hash: [u8; 32],
     /// The lengths of the parameters, the resources' contents, the inputs and the outputs.
     pub params: u64,
-    /// The parameters themselves.
+    /// The parameters themselves, and the inputs.
     pub params_data: Vec<u8>,
+    pub contents: Vec<Vec<u8>>,
     pub resources: Vec<u64>,
     pub inputs: Vec<u64>,
     pub sizes: Vec<u64>,

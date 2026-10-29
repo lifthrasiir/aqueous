@@ -54,6 +54,9 @@ pub struct Usage<'a> {
     pub resources: &'a [u64],
     pub inputs: &'a [u64],
     pub outputs: &'a [u64],
+    /// The inputs themselves (which whoever declares the memory limit has), for what their
+    /// headers and indexes tell of the buffers the module makes.
+    pub contents: &'a [&'a [u8]],
     /// The pages of the working memory as the module is instantiated (its data and stack).
     pub initial_pages: u64,
 }
@@ -79,9 +82,9 @@ impl Usage<'_> {
     /// inputs (`aqr_api::whole`) and gives back its outputs from vectors of their sizes, taking
     /// `extra` bytes besides in `buffers` large allocations: all but the small allocations, for
     /// which there is [`SMALL`], and a page for each large one (the allocator's, as it grows the
-    /// memory for it).
+    /// memory for it), of the inputs and outputs those of a page at least.
     pub fn whole(&self, extra: u64, buffers: u64) -> u64 {
-        let large = 1 + self.resources.len() + self.inputs.len() + self.outputs.len();
+        let large = [self.resources, self.inputs, self.outputs].concat().iter().filter(|&&n| n >= PAGE).count();
         self.initial() + self.copied() + self.output() + extra + (large as u64 + buffers) * PAGE + SMALL
     }
 }

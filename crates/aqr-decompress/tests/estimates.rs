@@ -25,11 +25,13 @@ fn estimates_hold() {
         for a in applied {
             let Some(k) = aqr_modules::KNOWN.iter().find(|k| k.sha512_256 == a.hash) else { continue };
             let Some(m) = MODULES.iter().find(|m| m.name == k.name && m.version == k.version) else { continue };
+            let contents: Vec<&[u8]> = a.contents.iter().map(|c| &c[..]).collect();
             let usage = Usage {
                 params: &a.params_data,
                 resources: &a.resources,
                 inputs: &a.inputs,
                 outputs: &a.sizes,
+                contents: &contents,
                 initial_pages: aqr_decompress::initial_pages(&k.read_wasm().unwrap()).unwrap(),
             };
             let Some(pages) = m.memory_usage_in_pages(&usage) else { continue };
