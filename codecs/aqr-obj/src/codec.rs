@@ -89,6 +89,8 @@ fn unpack(b: &Stored, streams: &mut Streams, out: &mut Vec<u8>) -> Result<()> {
                 if raw == 0 {
                     continue;
                 }
+                // (each stream as long as its longest, not twice that as it grows)
+                s.reserve_exact(raw);
                 if m == M_STORED {
                     s.extend_from_slice(d);
                 } else if !ans::decode(d, raw, s) {
@@ -120,6 +122,7 @@ pub(crate) fn decode_blocks<'a>(
     while done < len {
         out.clear();
         let (n, b) = next(len - done)?;
+        out.reserve_exact(n);
         unpack(&b, &mut streams, &mut out)?;
         if matches!(b, Stored::Coded(_)) && !dec.decode(&streams, &mut out) {
             return Err(corrupt());

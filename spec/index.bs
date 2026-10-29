@@ -4685,7 +4685,7 @@ as follows:</p>
       <td>mp3-recons@5
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-mp3/FORMAT.md">codecs/aqr-mp3/FORMAT.md</a>
     <tr>
-      <td><code>ac352c74b976c0ea52ac3854b1c841d97cf6ebc44d37794263ebae88bf0349e1</code>
+      <td><code>7802fa7cd30c778f5a28f6928c14e4facd2f7bfa16d0559f8f3d9001625b78d3</code>
       <td>obj-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-obj/FORMAT.md">codecs/aqr-obj/FORMAT.md</a>
     <tr>
