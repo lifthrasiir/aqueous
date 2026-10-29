@@ -318,6 +318,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     // lengths of each deflated body's data and record, and what flate-set derives of it
     let (mut stored_kinds, mut kinds) = (Vec::<(Kind, usize)>::new(), Vec::<(Kind, usize)>::new());
     let (mut lens, mut derived) = (Vec::new(), Vec::new());
+    // (the deflated bodies as they are, for the check below)
+    let mut deflated = Vec::new();
     let mut locals = locals.iter().zip(made.iter_mut()).zip(crcs);
     for r in &recs {
         match r {
@@ -336,6 +338,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                         derived.extend_from_slice(&crc.to_le_bytes());
                         derived.extend_from_slice(&(dd.len() as u64).to_le_bytes());
                         derived.extend_from_slice(&(l.body.len() as u64).to_le_bytes());
+                        let entry = layout::Entry { crc, csize: l.body.len() as u64, usize: dd.len() as u64 };
+                        deflated.push((&input[l.body.clone()], entry));
                         match dd.len() == sizes.1 {
                             true => data = std::mem::take(dd),
                             false => put(&mut data, &std::mem::take(dd), sizes.1),
@@ -354,20 +358,13 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     }
     let (layout, kept) = (w.layout, w.kept);
     // The layout must give the archive back with the bodies as they are: a check of everything
-    // but aqr-flate, which is cheap.
-    let mut flate: Vec<u8> = made
-        .iter()
-        .zip(locals_bodies(&recs, input))
-        .filter_map(|(m, b)| matches!(m, Made::Deflated { .. }).then_some(b))
-        .flatten()
-        .copied()
-        .collect();
-    let flate_len = flate.len() + derived.len();
-    flate.extend_from_slice(&derived);
-    if layout::build(&layout, &stored, &flate, &kept, input.len() as u64).ok().as_deref() != Some(input) {
+    // but aqr-flate, which is cheap (compared with the archive as it is made, not kept).
+    let flate_len = deflated.iter().map(|b| b.0.len()).sum::<usize>() + derived.len();
+    let mut check = aqr_common::out::Check::new(input);
+    if layout::assemble_into(&layout, &stored, &deflated, &kept, input.len(), &mut check).is_err() || !check.same() {
         return None;
     }
-    drop(flate);
+    drop(deflated);
     // (the inputs the first streams, the kinds' after them)
     let mut f = Formula::default();
     f.push("raw", Vec::new());
@@ -396,11 +393,6 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     };
     f.root = Node::apply(MODULE, Vec::new(), vec![stored, flate, layout, kept], input.len() as u64);
     Some(Encoded { formula: f, inflated })
-}
-
-/// The bodies of the local entries of `recs`, in order.
-fn locals_bodies<'a>(recs: &'a [Rec], d: &'a [u8]) -> impl Iterator<Item = &'a [u8]> + 'a {
-    recs.iter().filter_map(move |r| if let Rec::Local(l) = r { Some(&d[l.body.clone()]) } else { None })
 }
 
 /// The output of `a`, an application of [`MODULE`] or of aqr-flate's, on `inputs`.

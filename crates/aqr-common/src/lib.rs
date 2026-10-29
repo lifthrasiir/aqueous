@@ -16,12 +16,14 @@
 //! - [`crc32`]: CRC-32, without its tables in the modules.
 //! - [`adler32`]: Adler-32 (of zlib).
 //! - [`arith`]: binary arithmetic coding with adaptive bits (the records of aqr-lzma, aqr-lzo).
+//! - [`out`]: output made in order, into a vector or compared with what it should be.
 
 pub mod adler32;
 pub mod arith;
 pub mod crc32;
 pub mod mem;
 pub mod msb;
+pub mod out;
 pub mod packed;
 pub mod pool;
 pub mod progress;

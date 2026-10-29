@@ -4,6 +4,7 @@
 
 use std::ops::Range;
 
+use aqr_common::out::Out;
 use aqr_common::varint;
 
 use crate::zip::{
@@ -531,9 +532,22 @@ pub fn build(layout: &[u8], data: &[u8], flate: &[u8], kept: &[u8], len: u64) ->
 pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u8], len: u64) -> Result<Vec<u8>> {
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out: Vec<u8> = Vec::with_capacity(len.min(u32::MAX as usize));
+    assemble_into(layout, data, bodies, kept, len, &mut out)?;
+    Ok(out)
+}
+
+/// [`assemble`] into `out` (an output of at most `len` bytes).
+pub fn assemble_into(
+    layout: &[u8],
+    data: &[u8],
+    bodies: &[(&[u8], Entry)],
+    kept: &[u8],
+    len: usize,
+    out: &mut dyn Out,
+) -> Result<()> {
     // Bytes are added only where they fit within `len`.
     let room =
-        |out: &Vec<u8>, n: usize| if n <= len - out.len() { Ok(()) } else { Err(Error("output past its length")) };
+        |out: &dyn Out, n: usize| if n <= len - out.len() { Ok(()) } else { Err(Error("output past its length")) };
     let mut r = Reader { d: layout, at: 0 };
     let mut st = State::new(varint::unzz(r.varint()?));
     let (mut dp, mut kp) = (0, 0);
@@ -543,8 +557,8 @@ pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u
         match r.u8()? {
             GAP => {
                 let k = take(kept, &mut kp, r.varint()?)?;
-                room(&out, k.len())?;
-                out.extend_from_slice(&kept[k]);
+                room(out, k.len())?;
+                out.put(&kept[k]);
             }
             LOCAL => {
                 // the body, from an input or from the archive so far, and its entry
@@ -589,23 +603,23 @@ pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u
                 let dx = r.take(desc.fields())?;
                 dfields.iter_mut().zip(dx).for_each(|(a, b)| *a ^= b);
                 let blen = within.as_ref().map_or(body.len(), |w| w.len());
-                room(&out, 30 + name.len() + extra.len())?;
-                out.extend_from_slice(&zip::LOCAL);
-                out.extend_from_slice(&fixed);
+                room(out, 30 + name.len() + extra.len())?;
+                out.put(&zip::LOCAL);
+                out.put(&fixed);
                 let name_at = out.len();
-                out.extend_from_slice(name);
-                out.extend_from_slice(&extra);
+                out.put(name);
+                out.put(&extra);
                 let body_at = out.len();
-                room(&out, blen)?;
+                room(out, blen)?;
                 match within {
-                    Some(w) => out.extend_from_within(w),
-                    None => out.extend_from_slice(body),
+                    Some(w) => out.put_within(w),
+                    None => out.put(body),
                 }
-                room(&out, desc.bytes())?;
+                room(out, desc.bytes())?;
                 if desc.sig() {
-                    out.extend_from_slice(&zip::DESC);
+                    out.put(&zip::DESC);
                 }
-                out.extend_from_slice(&dfields);
+                out.put(&dfields);
                 st.local = fixed;
                 st.seen.push(Seen {
                     pos,
@@ -629,11 +643,11 @@ pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u
                     return Err(corrupt());
                 }
                 let name = match s {
-                    Some(s) if same & 1 != 0 => out[s.name.clone()].to_vec(),
+                    Some(s) if same & 1 != 0 => out.out(s.name.clone()).to_vec(),
                     _ => r.bytes(0xffff)?.to_vec(),
                 };
                 let mut extra = match s {
-                    Some(s) if same & 2 != 0 => out[s.extra.clone()].to_vec(),
+                    Some(s) if same & 2 != 0 => out.out(s.extra.clone()).to_vec(),
                     _ => r.bytes(0xffff)?.to_vec(),
                 };
                 let comment = r.bytes(0xffff)?;
@@ -647,39 +661,39 @@ pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u
                     xor_zip64(&mut extra, &st.central_zip64(local, &fixed));
                 }
                 let n = 4 + CENTRAL_FIXED + name.len() + extra.len() + comment.len();
-                room(&out, n)?;
-                out.extend_from_slice(&zip::CENTRAL);
-                out.extend_from_slice(&fixed);
-                out.extend_from_slice(&name);
-                out.extend_from_slice(&extra);
-                out.extend_from_slice(comment);
+                room(out, n)?;
+                out.put(&zip::CENTRAL);
+                out.put(&fixed);
+                out.put(&name);
+                out.put(&extra);
+                out.put(comment);
                 st.after_central(local, pos, &fixed, n);
             }
             END64 => {
                 let ext = r.bytes(u64::MAX)?;
                 let mut fixed = [0; END64_FIXED];
                 xor_into(&mut fixed, r.take(END64_FIXED)?, &st.end64(pos, ext.len()));
-                room(&out, 4 + END64_FIXED + ext.len())?;
-                out.extend_from_slice(&zip::END64);
-                out.extend_from_slice(&fixed);
-                out.extend_from_slice(ext);
+                room(out, 4 + END64_FIXED + ext.len())?;
+                out.put(&zip::END64);
+                out.put(&fixed);
+                out.put(ext);
                 st.end64 = Some(pos);
             }
             LOCATOR => {
                 let mut fixed = [0; LOCATOR_FIXED];
                 xor_into(&mut fixed, r.take(LOCATOR_FIXED)?, &st.locator());
-                room(&out, 4 + LOCATOR_FIXED)?;
-                out.extend_from_slice(&zip::LOCATOR);
-                out.extend_from_slice(&fixed);
+                room(out, 4 + LOCATOR_FIXED)?;
+                out.put(&zip::LOCATOR);
+                out.put(&fixed);
             }
             END => {
                 let comment = r.bytes(0xffff)?;
                 let mut fixed = [0; END_FIXED];
                 xor_into(&mut fixed, r.take(END_FIXED)?, &st.end(pos, comment.len()));
-                room(&out, 4 + END_FIXED + comment.len())?;
-                out.extend_from_slice(&zip::END);
-                out.extend_from_slice(&fixed);
-                out.extend_from_slice(comment);
+                room(out, 4 + END_FIXED + comment.len())?;
+                out.put(&zip::END);
+                out.put(&fixed);
+                out.put(comment);
                 st.after_end();
             }
             _ => return Err(corrupt()),
@@ -688,7 +702,7 @@ pub fn assemble(layout: &[u8], data: &[u8], bodies: &[(&[u8], Entry)], kept: &[u
     if dp != data.len() || kp != kept.len() || bodies.next().is_some() {
         return Err(corrupt());
     }
-    Ok(out)
+    Ok(())
 }
 
 /// How the bodies of the local entries of a layout are made, in order.
