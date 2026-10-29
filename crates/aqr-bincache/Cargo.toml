@@ -1,0 +1,6 @@
+[package]
+name = "aqr-bincache"
+version = "0.1.0"
+edition = "2024"
+description = "Builds and runs aqr, keeping each release binary by a hash of the sources it was built from"
+publish = false

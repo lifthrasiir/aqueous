@@ -1,6 +1,10 @@
 [alias]
 # The tests, optimised without LTO (Cargo.toml, profile.release-test).
 rt = "test --profile release-test"
+# The release `aqr`, built unless a binary of the same sources is kept, then run with the
+# arguments; `cargo aqr +` lists the kept binaries, `cargo aqr +<id> …` runs one
+# (crates/aqr-bincache).
+aqr = "run -q -p aqr-bincache --"
 # For Windows 7 and 8 (`cargo +nightly win7 -p aqr`): std built for the target (tier 3) of the
 # systems before Windows 10, the C runtime linked statically (no redistributable to install).
 win7 = "build --release --target x86_64-win7-windows-msvc -Zbuild-std"
