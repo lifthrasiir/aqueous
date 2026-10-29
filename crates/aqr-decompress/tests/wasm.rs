@@ -740,9 +740,9 @@ fn slotted(waiting: Option<usize>) -> String {
 fn task_slots() {
     let input: Vec<u8> = (0..16).map(|b| b + 0x41).collect();
     let all = slotted(None);
-    // 4 pages for the module's memories and 1 a task running (16 at once would take 20), with
-    // room for what the sandbox's worker takes past that (1 or 2 pages, not yet understood)
-    let limit = (4 + 8 + 3) << 16;
+    // 4 pages for the module's memories, 1 a task running and the messages queued (16 tasks at
+    // once would take 20 pages)
+    let limit = (4 + 8) << 16 | 0x100;
     assert_eq!(apply(&all, &[&input], &[16], limit).unwrap(), [input.clone()]);
     assert_eq!(apply(&slotted(Some(7)), &[&input[..8]], &[8], u64::MAX).unwrap(), [&input[..8]]);
     invalid(apply(&slotted(Some(8)), &[&input[..9]], &[9], u64::MAX), "deadlock");
