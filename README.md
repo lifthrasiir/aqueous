@@ -63,12 +63,15 @@ target/release/aqr -t out.aqr                     # test
 target/release/aqr -d out.aqr                     # extract
 ```
 
+For binaries to distribute, build with `cargo build --profile dist -p aqr` (into `target/dist`):
+fat LTO, a few minutes for 0.3–0.7% fewer instructions than `-r`.
+
 The workspace's tests are slow in debug builds; run them with `cargo rt` (`cargo test --profile
 release-test`: optimised and incremental).
 
 Rust's `x86_64-pc-windows-msvc` targets Windows 10 on; for Windows 7 and 8, build with
 `cargo +nightly win7 -p aqr` (the tier-3 `x86_64-win7-windows-msvc`, std built with it and the C
-runtime linked statically) into `target/x86_64-win7-windows-msvc/release`.
+runtime linked statically) into `target/x86_64-win7-windows-msvc/dist`.
 
 ## Disclaimer
 

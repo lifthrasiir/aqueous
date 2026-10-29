@@ -42,11 +42,17 @@ debug = "line-tables-only"
 [profile.release-test.package.cranelift-codegen]
 opt-level = 0
 
-# The Wasm modules (crates/aqr-modules/build.sh, aqr-exe/build-wasm.bat): fat LTO and one
-# codegen unit for small modules, and for their bytes (hence hashes) to stay as they were.
-[profile.release-wasm]
+# Binaries for distribution (`cargo build --profile dist -p aqr`, `cargo win7`): fat LTO and one
+# codegen unit for the last 0.3-0.7% of instructions (profile.release has the numbers).
+[profile.dist]
 inherits = "release"
-debug = false
-strip = true
 lto = "fat"
 codegen-units = 1
+
+# The Wasm modules (crates/aqr-modules/build.sh, aqr-exe/build-wasm.bat): fat LTO and one
+# codegen unit as in dist, for small modules and for their bytes (hence hashes) to stay as they
+# were.
+[profile.release-wasm]
+inherits = "dist"
+debug = false
+strip = true
