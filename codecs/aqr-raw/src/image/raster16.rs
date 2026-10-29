@@ -293,7 +293,7 @@ pub fn decode(coded: &[u8], pad: &[u8], f: Format, out: &mut Vec<u8>) -> Result<
     if pad.len() != pb * f.height {
         return Err(Error("padding"));
     }
-    out.reserve(f.len().unwrap().min(coded.len().saturating_mul(16) + pad.len() + (1 << 20)));
+    out.reserve(f.len().unwrap());
     let per = chunk_rows(&f);
     let (mut prev, mut cur) = (vec![0u16; rs], vec![0u16; rs]);
     let (mut res_prev, mut res_cur) = (vec![0u16; rs], vec![0u16; rs]);

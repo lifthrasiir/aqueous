@@ -226,9 +226,9 @@ pub fn decode(coded: &[u8], pad: &[u8], f: Format, out: &mut Vec<u8>) -> Result<
     if pad.len() != (f.stride - f.row_bytes()) * f.height {
         return Err(Error("padding"));
     }
-    // A flat image takes next to nothing, so the length is not bounded by the coded data:
-    // room for it is made as it is decoded, beyond what a typical image would take.
-    out.reserve(len.min(coded.len().saturating_mul(16) + pad.len() + (1 << 20)));
+    // (all of it at once, as the output the module gives back is of it anyway: a flat image,
+    // which takes next to nothing coded, grows no vector twice as large)
+    out.reserve(len);
     match f.channels {
         1 => decode_bpp::<1>(coded, pad, &f, out),
         2 => decode_bpp::<2>(coded, pad, &f, out),

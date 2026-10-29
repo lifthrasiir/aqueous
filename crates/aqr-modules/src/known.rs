@@ -180,13 +180,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "raster-recons-16",
         version: 1,
-        sha512_256: hex("51b2ca61e9665e4f1227d7368c4d1254b497b8b359112ba1a7525a74882bed5a"),
+        sha512_256: hex("cb0f12a5a24d451e9c2ba996d47f3f5f6586d6b3ec9ec0e842a52f4bf1e4f3cc"),
         block: include_bytes!("../wasm/raster-recons-16.block"),
     },
     Known {
         name: "raster-recons",
         version: 1,
-        sha512_256: hex("e7c781107e2dca30cd44763acf0279ef8f7e73c2397e3cf183bb3ccaeacae381"),
+        sha512_256: hex("0f77bdf94f1fd11542160d25cc26737c01b68c5f557c885d0cda0a88e092738e"),
         block: include_bytes!("../wasm/raster-recons.block"),
     },
     Known {
