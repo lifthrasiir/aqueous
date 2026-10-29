@@ -14,7 +14,8 @@ mkdir -p $s
 data=/Volumes/Data
 codecs=$root/codecs
 
-cargo build -q --release -p aqr -p aqr-decompress --example aqr-decompress-memory
+cargo build -q --release -p aqr
+cargo build -q --release -p aqr-decompress --example aqr-decompress-memory
 aqr=$root/target/release/aqr
 memory=$root/target/release/examples/aqr-decompress-memory
 
