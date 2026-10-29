@@ -30,6 +30,7 @@ Usage (from the root): .venv/bin/python scripts/rec_probe.py [-v] [--layout S:K:
 """
 
 import argparse
+import bisect
 import math
 import sys
 from multiprocessing import Pool
@@ -41,6 +42,11 @@ ALPHA = 1 / 16  # the adaptive models' prior count per symbol
 WINDOW = 1 << 16
 MAX_K = 1024
 MAX_WINDOWS = 8
+FINE_WINDOW = 1 << 12  # small tables: windows over the whole file, records up to FINE_K
+FINE_K = 64
+MAX_FINE_WINDOWS = 4096
+FINE_SPAN = 1 << 20  # how far a region grows from a small window
+MAX_REGIONS = 32
 MIN_RECORDS = 16
 FIELD_BITS = 16  # the description of a field, which breaks ties towards fewer, wider fields
 
@@ -96,12 +102,18 @@ def scan_window(a, max_k):
     return best[1], (base - best[0]) / n, base / n
 
 
-def grow_region(data, k, wo, wlen, rounds=4):
+def grow_region(data, k, wo, wlen, rounds=4, span=None):
     """The region of records of size k grown from the window at wo: (start, end, gain in bits).
 
     The column models are refitted on the region found and the region grown again, as a window
     alone misses values that drift along the file (counters, timestamps). Each byte's score is
-    clipped below, so that one value the models have not seen does not end the region."""
+    clipped below, so that one value the models have not seen does not end the region. With
+    span, the region stays within that many bytes of the window."""
+    base = 0
+    if span is not None:
+        base = max(0, wo - span)
+        data = data[base:wo + wlen + span]
+        wo -= base
     n = len(data)
     bg = np.bincount(data, minlength=256).astype(np.float64)
     lpbg = np.log2((bg + ALPHA) / (bg.sum() + 256 * ALPHA))
@@ -122,7 +134,67 @@ def grow_region(data, k, wo, wlen, rounds=4):
         if (ns, ne) == (s, e):
             break
         s, e = ns, ne
-    return s, e, float(gain[e])
+    return base + s, base + e, float(gain[e])
+
+
+def grow_fields(data, k, p, seed, span, rounds=3):
+    """The region of records of size k starting at p (mod k) around the rows of seed (start,
+    end), with each record coded by fields: (start, end).
+
+    Order-0 columns cannot tell a sorted table from the bytes after it (offsets that rise
+    look like any other bytes), so the region found by them can run on. Here the fields of
+    the seed's records (split with deltas and xors) code each record against the record
+    before, and a record scores the code length of its bytes under the order-0 model of the
+    file less that of its fields' planes under column models, refitted on the region."""
+    n = len(data)
+    lo = p - (p - max(0, seed[0] - span)) // k * k
+    nrec = (min(n, seed[1] + span) - lo) // k
+    m = data[lo:lo + nrec * k].reshape(nrec, k)
+    r0, r1 = (seed[0] - lo + k - 1) // k, (seed[1] - lo) // k
+    if r1 - r0 < MIN_RECORDS:
+        return seed
+    fields, _, _ = split_fields(m[r0:r1], plane_bits, refs=False)
+    t = np.concatenate([to_planes(xform(field_values(m, o, w, big), w, how), w) for o, w, big, how in fields], axis=1)
+    t = t.astype(np.int64)
+    bg = np.bincount(data, minlength=256).astype(np.float64)
+    lpbg = np.log2((bg + ALPHA) / (bg.sum() + 256 * ALPHA))
+    raw = lpbg[m].sum(axis=1)
+    cols = np.arange(t.shape[1])[None, :] * 256
+    s, e = r0, r1
+    for _ in range(rounds):
+        col = np.bincount((cols + t[s:e]).ravel(), minlength=t.shape[1] * 256).reshape(-1, 256)
+        pcol = np.log2((col + ALPHA) / (col.sum(axis=1, keepdims=True) + 256 * ALPHA))
+        score = np.maximum(pcol.ravel()[cols + t] - lpbg[m], -4.0).sum(axis=1)
+        pre = np.concatenate([[0.0], np.cumsum(score)])
+        lo_at = np.maximum.accumulate(np.where(pre == np.minimum.accumulate(pre), np.arange(nrec + 1), 0))
+        ne = int(np.argmax(pre - pre[lo_at]))
+        ns = int(lo_at[ne])
+        if (ns, ne) == (s, e):
+            break
+        s, e = ns, ne
+    del raw
+    return lo + s * k, lo + e * k
+
+
+def refine_phase(data, s, e, k, limit=2048):
+    """Where the records of a region really start: the region's edges are found byte by byte,
+    and a record's first bytes (zeros, say) may fit the model of another column. Records
+    start aligned (to the largest power of 2 up to 8 that divides k) near s; of those starts,
+    the one whose records split into fields at the least cost."""
+    a = math.gcd(k, 8)
+    if k > FINE_K:
+        return s
+    best = (math.inf, s)
+    for p in range(max(0, s - k + 1), s + k):
+        if p % a:
+            continue
+        nrec = min((e - p) // k, limit)
+        if nrec < MIN_RECORDS:
+            continue
+        m = data[p:p + nrec * k].reshape(nrec, k)
+        _, bits, _ = split_fields(m, plane_bits, refs=False)
+        best = min(best, (bits / nrec, p))
+    return best[1]
 
 
 # -- fields
@@ -174,7 +246,7 @@ def unxform(t, w, how, m=None, big=False):
     return out
 
 
-def split_fields(m, cost):
+def split_fields(m, cost, refs=True):
     """Fields of the records m (n × k): [(offset, width, big, how)] by DP over the code length."""
     n, k = m.shape
     raw1 = [cost(m[:, o:o + 1]) for o in range(k)]
@@ -190,7 +262,7 @@ def split_fields(m, cost):
             for big in ((False,) if w == 1 else (False, True)):
                 v = field_values(m, o, w, big)
                 hows = ['delta', 'xor']
-                if k <= REF_K and w > 1:
+                if refs and k <= REF_K and w > 1:
                     hows += [(op, r) for r in range(o - w + 1) for op in ('sub', 'xor')]
                 for how in hows:
                     cands.append(((o, w, big, how), cost(to_planes(xform(v, w, how, m, big), w)) + FIELD_BITS))
@@ -245,6 +317,9 @@ def describe(fields):
 TLV_SPAN = 1 << 20  # where chains are looked for: the start of the file
 TLV_STARTS = range(0, 257, 4)
 TLV_STEPS = 32
+TLV_WINDOWS = 16  # spans over the file; past its start, looked at with the smaller search below
+TLV_WINDOW_D = 32
+TLV_WINDOW_STARTS = range(0, 129, 4)
 TLV_COLS = 16  # the entries' leading bytes that score a chain
 TLV_KINDS = [(1, False, 0xFF)] + [(2, big, mask) for big in (False, True) for mask in (0xFFFF, 0x7FFF, 0x0FFF)] \
     + [(4, big, 0xFFFFFFFF) for big in (False, True)]
@@ -267,7 +342,7 @@ def entry_length(v, b, align):
     return (b + v + align - 1) // align * align
 
 
-def find_chains(data, max_d=64, max_b=64, verbose=False):
+def find_chains(data, at=0, max_d=64, starts=TLV_STARTS, max_b=64, verbose=False):
     """Hypotheses (p0, d, kind, b, align) whose chains of entries hold together, best first.
 
     Each hypothesis says that an entry starting at p holds at p + d a length v (a field kind)
@@ -278,11 +353,11 @@ def find_chains(data, max_d=64, max_b=64, verbose=False):
 
     The best chains of the span are then followed through the whole file; those that end
     with the same lengths are one (the one whose first entries score best), and the rest are
-    ranked by their score times their entries."""
-    span = data[:TLV_SPAN]
+    ranked by their score times their entries. The chains start within the span at `at`."""
+    span = data[at:at + TLV_SPAN]
     n = len(span)
     tables = int_tables(span)
-    starts = np.array([p for p in TLV_STARTS if p < n], dtype=np.int64)
+    starts = np.array([p for p in starts if p < n], dtype=np.int64)
     kinds = np.arange(len(TLV_KINDS))
     widths = np.array([w for w, _, _ in TLV_KINDS])
     bs = np.arange(max_b + 1)
@@ -299,8 +374,7 @@ def find_chains(data, max_d=64, max_b=64, verbose=False):
         lens = []
         alive = np.ones(len(pos), dtype=bool)
         for _ in range(TLV_STEPS):
-            at = np.minimum(pos + d, n - 1)
-            v = tables[kind, at]
+            v = tables[kind, np.minimum(pos + d, n - 1)]
             L = entry_length(v, b, al)
             alive &= (L >= d + w) & (pos + d + w <= n) & (pos + L <= n)
             pos = np.where(alive, pos + L, pos)
@@ -326,7 +400,7 @@ def find_chains(data, max_d=64, max_b=64, verbose=False):
             key = tuple(P[:, i] + d)
             sc = float(agree[i])
             if sc > found.get(key, (-1,))[0]:
-                found[key] = (sc, int(p0[lane[i]]), d, int(kind[lane[i]]), int(b[lane[i]]), int(al[lane[i]]))
+                found[key] = (sc, at + int(p0[lane[i]]), d, int(kind[lane[i]]), int(b[lane[i]]), int(al[lane[i]]))
     # through the whole file
     padded = np.concatenate([data, np.zeros(TLV_COLS, dtype=np.uint8)])
     chains = {}
@@ -374,6 +448,26 @@ def follow(data, p0, d, kind, b, al):
     return np.array(out, dtype=np.int64)
 
 
+def extend_back(data, P, d, kind, b, al, reach=4096):
+    """The chain extended before its first entry: while some q < P[0] (within reach) holds an
+    entry ending at P[0], the nearest such q. Chains are found from wherever a window falls,
+    often inside the entries."""
+    w = TLV_KINDS[kind][0]
+    out = []
+    p = int(P[0])
+    while p > 0:
+        lo = max(0, p - reach)
+        tab = int_tables(data[lo:p + d + w])[kind]
+        q = np.arange(lo, p)
+        L = entry_length(tab[q - lo + d], b, al)
+        ok = np.flatnonzero((q + L == p) & (L >= d + w))
+        if not len(ok):
+            break
+        p = int(q[ok[-1]])
+        out.append(p)
+    return np.concatenate([np.array(out[::-1], dtype=np.int64), P]) if out else P
+
+
 def rotate_chain(data, P, d, w, b, limit=2048):
     """The chain moved back by x bytes (its length field at d + x) where it codes best.
 
@@ -383,7 +477,7 @@ def rotate_chain(data, P, d, w, b, limit=2048):
     which only an LZ coder sees. So each rotation is coded with zstd, on the first entries,
     with the heads (b bytes) transposed."""
     Q = P[:limit + 1]
-    L = np.diff(Q)
+    L = np.diff(P)
     H = int(min(b if b >= 8 else L.min(), L.min()))
     best = (math.inf, 0)
     for x in range(-d, min(H - d - w, int(P[0])) + 1):
@@ -412,11 +506,26 @@ def trim_chain(data, P, cols=TLV_COLS):
     return P[s:e + 1]
 
 
-def tlv_parts(data, P, d, kind, b, al, cost):
+def choose_head(data, P, least, b, limit=2048):
+    """How many leading bytes of each entry to take as its head: the length field says where
+    the variable part ends, not where it starts. Of a few widths up to the shortest entry
+    (and b), the one that codes best with zstd on the first entries, heads transposed."""
+    Q = P[:limit + 1]
+    most = int(np.diff(P).min())  # a head never runs into the next entry
+    widths = sorted({h for h in (least, min(b, most), 8, 12, 16, 20, 24, 32, 48, 64) if least <= h <= most})
+    best = (math.inf, least)
+    for H in widths:
+        heads = data[Q[:-1, None] + np.arange(H)]
+        tails = b''.join(data[p + H:q].tobytes() for p, q in zip(Q[:-1].tolist(), Q[1:].tolist()))
+        best = min(best, (len(_zc.compress(heads.T.tobytes() + tails)), H))
+    return best[1]
+
+
+def tlv_parts(data, P, d, kind, b, al, cost, head=None):
     """The forms of the entries P: their fixed heads (n × H) and their tails, one after another."""
     w = TLV_KINDS[kind][0]
     L = np.diff(P)
-    H = int(max(d + w, min(b, L.min())))
+    H = int(max(d + w, min(head, L.min()))) if head else choose_head(data, P, d + w, b)
     heads = data[P[:-1, None] + np.arange(H)]
     tails = b''.join(data[p + H:q].tobytes() for p, q in zip(P[:-1].tolist(), P[1:].tolist()))
     fields, _, _ = split_fields(heads, cost)
@@ -441,63 +550,124 @@ def tlv_parts(data, P, d, kind, b, al, cost):
 
 
 def find_regions(data, max_k, verbose):
+    """Regions of fixed-size records: (start, k, records), not overlapping.
+
+    Big windows (a few, k up to max_k) find big tables; small windows over the whole file
+    (k up to FINE_K) find small ones, each grown only within FINE_SPAN, and skipped where a
+    region of the same k already holds them."""
     n = len(data)
-    wlen = min(WINDOW, n)
-    count = min(MAX_WINDOWS, max(1, n // wlen))
-    starts = sorted({int(x) for x in np.linspace(0, n - wlen, count)})
     found = []
-    for wo in starts:
+
+    def scan(wo, wlen, max_k, span):
         a = data[wo:wo + wlen]
         k, gain, h0 = scan_window(a, max_k)
-        if verbose:
+        if any(s <= wo and wo + wlen <= e and k == fk for _, s, e, fk, _, _ in found):
+            return
+        if verbose and span is None:
             print(f'  window {wo:#x}: H0 {h0:.2f}, k {k}, gain {gain:.3f} bit/B', file=sys.stderr)
         if k == 1 or gain < 0.05 or h0 > 7.8:
-            continue
-        s, e, g = grow_region(data, k, wo, wlen)
-        found.append((g, s, e, k))
-    # non-overlapping, best gain first
-    regions = []
-    for g, s, e, k in sorted(found, reverse=True):
-        nrec = (e - s) // k
-        if nrec < MIN_RECORDS:
-            continue
-        e = s + nrec * k
-        if all(e <= rs or s >= rs + rn * rk for rs, rk, rn in regions):
-            regions.append((s, k, nrec))
+            return
+        s, e, g = grow_region(data, k, wo, wlen, span=span)
+        if (e - s) // k >= MIN_RECORDS:
+            found.append((g, s, e, k, wo, wlen))
+
+    wlen = min(WINDOW, n)
+    for wo in sorted({int(x) for x in np.linspace(0, n - wlen, min(MAX_WINDOWS, max(1, n // wlen)))}):
+        scan(wo, wlen, max_k, None)
+    if n >= 2 * FINE_WINDOW:
+        count = min(MAX_FINE_WINDOWS, n // FINE_WINDOW)
+        for wo in sorted({int(x) for x in np.linspace(0, n - FINE_WINDOW, count)}):
+            scan(wo, FINE_WINDOW, FINE_K, FINE_SPAN)
+    # by gain, without duplicates; overlaps are for zstd to settle
+    regions = set()
+    seeds = []
+    for f in sorted(found, reverse=True):
+        g, s, e, k = f[:4]
+        # the same table found from several windows
+        if not any(k == x[3] and min(e, x[2]) - max(s, x[1]) > max(e - s, x[2] - x[1]) // 2 for x in seeds):
+            seeds.append(f)
+    for g, s, e, k, wo, wlen in seeds[:MAX_REGIONS]:
+        s = refine_phase(data, s, e, k)
+        spans = [(s, e)] + ([grow_fields(data, k, s, (wo, wo + wlen), FINE_SPAN)] if k <= FINE_K else [])
+        for s, e in spans:
+            if (e - s) // k >= MIN_RECORDS:
+                regions.add((s, k, (e - s) // k))
     return sorted(regions)
 
 
-def probe(args):
-    path, layout, max_k, cost, verbose = args
-    cost = zbits if cost == 'zstd' else plane_bits
-    data = np.fromfile(path, dtype=np.uint8)
-    z0 = len(_zc.compress(data.tobytes()))
-    # candidates: (start, end, label, forms)
-    cands = []
-    if not layout:
-        for sc, P, d, kind, b, al in find_chains(data, verbose=verbose)[:3]:
-            P, d = rotate_chain(data, P, d, TLV_KINDS[kind][0], b)
-            P = trim_chain(data, P)
-            if len(P) > MIN_RECORDS:
-                cands.append((int(P[0]), int(P[-1]), f'entries ×{len(P) - 1}', tlv_parts(data, P, d, kind, b, al, cost)))
-    for s, k, nrec in [layout] if layout else find_regions(data, max_k, verbose):
-        m = data[s:s + nrec * k].reshape(nrec, k)
-        fields, _, _ = split_fields(m, cost)
-        planes = encode_fields(m, fields)
-        assert np.array_equal(decode_fields(planes, fields, nrec, k), m), 'fields do not invert'
-        cands.append((s, s + nrec * k, f'{k}×{nrec}', {'raw': m.tobytes(), 'bytes': m.T.tobytes(),
-                      'fields': b''.join(p.tobytes() for p in planes), 'desc': describe(fields)}))
+def fixed_cand(data, s, k, nrec, cost=zbits):
+    """A candidate region of nrec records of k bytes at s: {s, e, label, shape, forms}."""
+    m = data[s:s + nrec * k].reshape(nrec, k)
+    fields, _, _ = split_fields(m, cost)
+    planes = encode_fields(m, fields)
+    assert np.array_equal(decode_fields(planes, fields, nrec, k), m), 'fields do not invert'
+    return {'s': s, 'e': s + nrec * k, 'label': f'{k}×{nrec}', 'shape': ('fixed', k),
+            'forms': {'raw': m.tobytes(), 'bytes': m.T.tobytes(), 'fields': b''.join(p.tobytes() for p in planes),
+                      'desc': describe(fields)}}
 
-    # each candidate alone, then greedily from the best, each in the form that makes the whole
-    # file smallest among those chosen before
-    alone = [min(size(data, [(s, e, f, forms)]) for f in ('bytes', 'fields')) for s, e, _, forms in cands]
-    cands = [c for _, c in sorted(zip(alone, cands), key=lambda x: x[0])]
+
+def tlv_cand(data, P, d, kind, b, al, cost=zbits, head=None):
+    """A candidate region of the entries starting at P[:-1] (P[-1] where the last ends)."""
+    return {'s': int(P[0]), 'e': int(P[-1]), 'label': f'entries ×{len(P) - 1}', 'shape': ('tlv', P),
+            'forms': tlv_parts(data, P, d, kind, b, al, cost, head)}
+
+
+def auto_cands(data, max_k=MAX_K, cost=zbits, verbose=False):
+    cands = []
+    chains = {}
+    n = len(data)
+    ats = sorted({int(x) for x in np.linspace(0, n, TLV_WINDOWS + 1)[:-1]}) if n > TLV_SPAN // 4 else [0]
+    for at in ats:
+        kw = {} if at == 0 else {'max_d': TLV_WINDOW_D, 'starts': TLV_WINDOW_STARTS}
+        for c in find_chains(data, at, verbose=verbose, **kw)[:3]:
+            key = tuple(np.diff(c[1][-9:]).tolist())
+            if c[0] > chains.get(key, (-math.inf,))[0]:
+                chains[key] = c
+    for sc, P, d, kind, b, al in sorted(chains.values(), key=lambda c: -c[0])[:6]:
+        P = extend_back(data, P, d, kind, b, al)
+        P, d = rotate_chain(data, P, d, TLV_KINDS[kind][0], b)
+        P = trim_chain(data, P)
+        if len(P) > MIN_RECORDS:
+            cands.append(tlv_cand(data, P, d, kind, b, al, cost))
+    for s, k, nrec in find_regions(data, max_k, verbose):
+        cands.append(fixed_cand(data, s, k, nrec, cost))
+    return cands
+
+
+def choose(data, cands, z0):
+    """The candidates to take, and in which form: (size, chosen, report lines).
+
+    Each is measured alone (its best form, the whole file under zstd -3). Gains of regions
+    apart roughly add up, so the set apart with the largest sum of gains is found first
+    (weighted interval scheduling: one big region of a little gain must not shut out the
+    tables it overlaps). Those, from the best, and then the rest, from the best, are taken
+    where they still make the whole file smaller among those taken before."""
+    alone = [min(size(data, [(c['s'], c['e'], f, c['forms'])]) for f in ('bytes', 'fields')) for c in cands]
+    gain = [z0 - a for a in alone]
+    byend = sorted((i for i in range(len(cands)) if gain[i] > 0), key=lambda i: cands[i]['e'])
+    ends = [cands[i]['e'] for i in byend]
+    best_sum = [0] * (len(byend) + 1)
+    for j, i in enumerate(byend):
+        prev = bisect.bisect_right(ends, cands[i]['s'], 0, j)
+        best_sum[j + 1] = max(best_sum[j], best_sum[prev] + gain[i])
+    picked, j = set(), len(byend)
+    while j > 0:
+        i = byend[j - 1]
+        prev = bisect.bisect_right(ends, cands[i]['s'], 0, j - 1)
+        if best_sum[prev] + gain[i] >= best_sum[j - 1] and best_sum[j] == best_sum[prev] + gain[i]:
+            picked.add(i)
+            j = prev
+        else:
+            j -= 1
+    order = sorted(picked, key=lambda i: alone[i]) + sorted(set(range(len(cands))) - picked, key=lambda i: alone[i])
     chosen, best, lines = [], z0, []
-    for s, e, label, forms in cands:
-        if any(s < ce and cs < e for cs, ce, _, _ in chosen):
+    for c in (cands[i] for i in order):
+        s, e, label, forms = c['s'], c['e'], c['label'], c['forms']
+        if any(s < x['e'] and x['s'] < e for x in chosen):
             lines.append(f'  {s:#x}..{e:#x} {label}: overlaps')
             continue
-        sizes = {f: size(data, chosen + [(s, e, f, forms)]) for f in ('bytes', 'fields')}
+        sizes = {f: size(data, [(x['s'], x['e'], x['form'], x['forms']) for x in chosen] + [(s, e, f, forms)])
+                 for f in ('bytes', 'fields')}
         f = min(sizes, key=sizes.get)
         lines.append(f'  {s:#x}..{e:#x} {label} ({(e - s) / len(data):.1%}):'
                      f' bytes {sizes["bytes"] - best:+}, fields {sizes["fields"] - best:+}'
@@ -505,7 +675,17 @@ def probe(args):
         lines.append(f'    {forms["desc"]}')
         if sizes[f] < best:
             best = sizes[f]
-            chosen.append((s, e, f, forms))
+            chosen.append(dict(c, form=f))
+    return best, chosen, lines
+
+
+def probe(args):
+    path, layout, max_k, cost, verbose = args
+    cost = zbits if cost == 'zstd' else plane_bits
+    data = np.fromfile(path, dtype=np.uint8)
+    z0 = len(_zc.compress(data.tobytes()))
+    cands = [fixed_cand(data, *layout, cost)] if layout else auto_cands(data, max_k, cost, verbose)
+    best, _, lines = choose(data, cands, z0)
     return '\n'.join([f'{path}: {len(data)} B, zstd -3 {z0} -> {best} ({best / z0:.3f})'] + lines)
 
 
