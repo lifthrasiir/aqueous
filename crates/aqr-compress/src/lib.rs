@@ -645,9 +645,10 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
             }
             None => None,
         },
-        // else its tables of records, if any
+        // else its samples after a header telling their size, or its tables of records, if any
         Nest::Scan => scan(d, None, opt, depth, cx)
             .filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
+            .or_else(|| recompress_as(Format::Sized, d, opt, depth, cx).map(Made::from))
             .or_else(|| records(d, opt, depth, cx)),
         Nest::As(format) => {
             scan(d, Some(format), opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
@@ -1416,6 +1417,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Obj => aqr_obj::formula::encode,
         Format::Xsv => aqr_xsv::formula::encode,
         Format::Text => aqr_wrt::formula::encode,
+        Format::Sized => aqr_raw::formula::encode_sized,
         Format::Records => aqr_infer_recs::formula::encode,
         _ => return None,
     })

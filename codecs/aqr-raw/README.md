@@ -8,17 +8,19 @@ ways round:
   them: aqr-flac codes the residuals of FLAC frames with the audio model
   ([`audio`](src/audio)), aqr-png the pixels behind DEFLATE's literals with the pixel model
   ([`image::pixel`](src/image/pixel.rs)), and aqr-pdf shares the pixel model's predictor.
-- **As modules of entry formulas** ([`formula`](src/formula)): `pcm-recons` and
-  `raster-recons` each give the samples of a layout (their params) from the coded streams,
-  and nothing else. A file is the concatenation of its container's bytes before the samples,
-  the application, and its bytes after them, so the container's own bytes are kept as they
-  are and never derived. [`container`](src/container.rs) takes the trivial containers apart
-  (WAV, AIFF, BMP, PNM), and a recompressor that finds samples in a format of its own applies
-  the modules the same way (`formula::apply`).
+- **As modules of entry formulas** ([`formula`](src/formula)): `pcm-recons`, `raster-recons`
+  and `raster-recons-16` (16-bit samples) each give the samples of a layout (their params)
+  from the coded streams, and nothing else. A file is the concatenation of its container's
+  bytes before the samples, the application, and its bytes after them, so the container's own
+  bytes are kept as they are and never derived. [`container`](src/container.rs) takes the
+  trivial containers apart (WAV, AIFF, BMP, PNM, uncompressed TIFF, DICOM), and finds 16-bit
+  samples after a header that tells their size in data of no format (`container::sized`). A
+  recompressor that finds samples in a format of its own applies the modules the same way
+  (`formula::apply`).
 
 The format is specified in [FORMAT.md](FORMAT.md). A new container is a parser that finds the
 samples and their layout ([`container::Found`](src/container.rs)); a new kind of sample
-(16-bit images, float audio) is a layout and a model.
+(float audio) is a layout and a model.
 
 ## Results
 
@@ -45,6 +47,13 @@ for byte (the header and trailer are slices of the formula now, where they were 
 the module). The conformance files of `codec-corpus` (176 BMP and PNM
 files, valid and not) round-trip; 97 of them are not coded (fewer than 8 bits per pixel, RLE,
 16-bit or ASCII samples).
+
+16-bit rasters (2026-10-29, M4, one thread, `aqr-raw bench`): silesia's `x-ray` (1900 × 2230,
+12-bit, after a header of its own, 8.47 MB) 0.421 and `mr` (DICOM, 19 frames of 512 × 512,
+9.97 MB) 0.203, at 115 and 174 MB/s, decoded at 171 and 205 MB/s; zstd -3 0.718 and 0.355
+(as archives of aqr before: 0.497 and 0.273, mostly aqr-infer-recs' transpose). Six of the
+eight uncompressed TIFF files of the Waterloo set (7.26 MB) come to 2.93 MB from 3.94 MB; the
+two synthetic ones (`frymire`, `serrano`) code larger and are kept as they were.
 
 ## Usage
 
@@ -77,7 +86,8 @@ let node = formula::apply(&mut its_formula, samples, layout, 1);
 | `src/audio/pcm.rs` | Interleaved PCM: sample formats, the block LPC encoder, decoding |
 | `src/image/pixel.rs` | The pixel model: MED, channel decorrelation, activity buckets (scalar and NEON) |
 | `src/image/raster.rs` | Raw rasters: the coder of 8-bit rows of 1 to 4 channels |
-| `src/container.rs` | WAV, AIFF / AIFC, BMP, PNM: where the samples are, and their layout |
+| `src/image/raster16.rs` | Raw rasters of 16-bit samples: MED or mean prediction per chunk, tokens by rANS and raw bits |
+| `src/container.rs` | WAV, AIFF / AIFC, BMP, PNM, TIFF, DICOM, and samples after a header telling their size: where the samples are, and their layout |
 | `src/formula/` | The modules `pcm-recons` and `raster-recons`, and formulas of containers |
 | `model/audio.bin` | The residual model's built-in tables (trained by `aqr-flac-train`) |
 | `tests/pcm.rs`, `tests/data` | WAV / AIFF / AIFC files and headerless PCM: round trips on threads, junk, cuts, corrupted inputs, the resource |

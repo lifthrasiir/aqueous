@@ -166,9 +166,15 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {
+        name: "raster-recons-16",
+        version: 1,
+        sha512_256: hex("51b2ca61e9665e4f1227d7368c4d1254b497b8b359112ba1a7525a74882bed5a"),
+        block: include_bytes!("../wasm/raster-recons-16.block"),
+    },
+    Known {
         name: "raster-recons",
         version: 1,
-        sha512_256: hex("99c859fce0c3faaa78c864b87e25ce33ae184fbc9a7f71688e0982c49ddaf9f5"),
+        sha512_256: hex("e7c781107e2dca30cd44763acf0279ef8f7e73c2397e3cf183bb3ccaeacae381"),
         block: include_bytes!("../wasm/raster-recons.block"),
     },
     Known {

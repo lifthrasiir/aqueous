@@ -1,6 +1,7 @@
 # aqr-raw format
 
-This document specifies the modules `pcm-recons` and `raster-recons` of entry formulas
+This document specifies the modules `pcm-recons`, `raster-recons` and `raster-recons-16` of
+entry formulas
 (`aqr_raw::formula`), which give uncompressed samples back from their coded streams, and
 how the encoder takes the trivial containers around such samples apart. It is meant to be
 complete: a decoder, and an encoder whose output a decoder accepts, can be written from it
@@ -20,7 +21,8 @@ Contents:
 5. [rANS](#5-rans)
 6. [`pcm-recons`](#6-pcm-recons)
 7. [`raster-recons`](#7-raster-recons)
-8. [Containers](#8-containers-encoder) *(encoder)*
+8. [`raster-recons-16`](#8-raster-recons-16)
+9. [Containers](#9-containers-encoder) *(encoder)*
 9. [Appendix A: built-in frequency tables](#appendix-a-built-in-frequency-tables)
 
 ## 1. Conventions
@@ -48,13 +50,14 @@ Each module gives the samples of one layout, the module's params, and nothing el
 output is exactly the samples, `len` bytes. A file that holds samples in a trivial
 container is, in its formula, the concatenation of its bytes before the samples (a slice
 of a stream of class `raw/header`), the module's application, and its bytes after them
-(class `raw/trailer`), either of the two left out where empty (§8). A recompressor that
+(class `raw/trailer`), either of the two left out where empty (§9). A recompressor that
 finds samples inside a format of its own applies the modules the same way.
 
 | module | version | output | params | resources | inputs |
 |---|---|---|---|---|---|
 | `pcm-recons` | 1 | interleaved integer PCM samples | the sample format (§6.1) | the frequency tables (Appendix A) | 6 (§6.1) |
 | `raster-recons` | 1 | rows of 8-bit samples | the raster layout (§7.1) | none | 2 (§7.1) |
+| `raster-recons-16` | 1 | rows of 16-bit samples | the raster layout (§8.1) | none | 2 (§8.1) |
 
 ## 3. Frames
 
@@ -560,9 +563,86 @@ A decoder should reject params outside §7.1, a `len` other than the raster's, a
 inputs other than two, padding of another length than `pad × height`, a chunk cut short or
 not read exactly (§7.4), tables that do not parse, and bytes after the last chunk.
 
-## 8. Containers *(encoder)*
+## 8. `raster-recons-16`
 
-### 8.1 Taking a container apart
+### 8.1 The module
+
+**Params**: the layout: `varint width`, `varint height`, `varint pad`, then two bytes,
+`channels` and `big` (0 or 1). The raster is `height` rows of `stride = 2 × width × channels
++ pad` bytes: the row's samples, pixels of `channels` interleaved 16-bit samples, each
+big-endian if `big` is 1 and little-endian if 0, then `pad` bytes of padding. It must have
+`width ≥ 1`, `height ≥ 1`, `channels` in 1..4, `2 × width × channels < 2^32` and
+`stride × height < 2^48`, and nothing may follow `big`. `len` must be `stride × height`.
+
+**Resources**: none.
+
+**Inputs**: two slots:
+
+| # | Class | Content |
+|---|---|---|
+| 0 | `raster16/coded` | the coded samples, as chunks of rows (§8.3) |
+| 1 | `raster16/padding` | the padding of every row, in row order: `pad × height` bytes |
+
+The output is, row by row, the row's samples then its padding.
+
+### 8.2 The model
+
+`rs = width × channels`. The samples are coded in order, row by row, each row from its first
+sample; sample `x` of a row is of channel `ch = x mod channels`. `v(y, x)` is the value of
+sample `x` of row `y`, and the neighbours of a sample, within its channel, are:
+
+- `W = v(y, x − channels)` where `x ≥ channels`; else `v(y − 1, x)` where `y > 0`; else 0;
+- `N = v(y − 1, x)`, `NW = v(y − 1, x − channels)` (`N` where `x < channels`) and
+  `NE = v(y − 1, x + channels)` (`N` where `x + channels ≥ rs`), all three `W` where `y = 0`.
+
+A chunk's predictor (§8.3) is MED, `median(W, N, W + N − NW)` (as §7.2's), or the mean,
+`(W + N + 1) >> 1`. The residual is `e = (v − pred) mod 2^16`; `mag(e)` is the magnitude of
+`e` read as signed 16 bits, and 0 outside the raster (`x < channels` or `y = 0`). The context
+of a sample is `32 × min(ch, 3) + min(2l + h, 31)`, where `a = |W − NW| + |N − NW| + |N − NE|
++ mag(e(y, x − channels)) + mag(e(y − 1, x)) + 1`, `l = floor_log2(a)` and `h` is bit `l − 1`
+of `a` (0 where `l = 0`).
+
+The residual is coded as `z = zz16(e)` (16-bit zigzag): a **token** `t` from the context's
+table, then raw bits. If `z < 16`, `t = z` and no bits follow. Otherwise, with `l =
+floor_log2(z)` (4..15), `t = 16 + 2(l − 4) +` bit `l − 1` of `z`, and the `l − 1` bits of `z`
+below that bit follow as raw bits. Decoding: `z = t` for `t < 16`; otherwise, with `l = (t −
+16) / 2 + 4`, `z = (2 + ((t − 16) mod 2)) << (l − 1)` plus the raw bits. Then `v = (pred +
+unzz16(z)) mod 2^16`. There are 40 tokens.
+
+### 8.3 Chunks and entropy coding
+
+The rows are cut into chunks of `R = max(1, floor(2^21 / rs))` rows, the last of the
+remaining rows if any; as in §7.3, the model's state carries across chunks and the tables
+are the chunk's own. Input 0 is the chunks one after the other, nothing after the last. A
+chunk is:
+
+| field | |
+|---|---|
+| byte | the predictor: 0 for MED, 1 for the mean |
+| varint | length of the tables |
+| varint | length of the token stream |
+| varint | length of the raw bits |
+| bytes | the tables, the token stream, the raw bits |
+
+There are 128 tables of 40 tokens each. The tables and the token stream are coded as in
+§7.4 (aqr-png's *Tables* and *Symbol stream*), decoding the chunk's `R × rs` tokens in
+coding order. The raw bits are an LSB-first bit stream (the first bit is bit 0 of byte 0; a
+value's least significant bit comes first), each sample's bits after its token, padded with
+zero bits to a whole byte; it must be exactly as long as the chunk's bits need.
+
+*(encoder)* The encoder takes, for each chunk, the predictor of the smaller sum of `mag(e)`
+over the chunk, MED where they are equal.
+
+### 8.4 Validation
+
+A decoder should reject params outside §8.1, a `len` other than the raster's, a number of
+inputs other than two, padding of another length than `pad × height`, a predictor byte
+other than 0 or 1, a token of 40 or more, a chunk cut short or its streams not read exactly,
+tables that do not parse, and bytes after the last chunk.
+
+## 9. Containers *(encoder)*
+
+### 9.1 Taking a container apart
 
 The encoder recognises the containers below by their headers. The samples are the bytes
 `[start, start + n)` of the file, where the header says; the formula is
@@ -573,7 +653,7 @@ A container whose samples are not all in the file, or that holds none, is not co
 Headerless samples of a layout given to the encoder are taken from the start of the
 input; for PCM, a partial sample frame at the end is the trailer.
 
-### 8.2 WAV and AIFF
+### 9.2 WAV and AIFF
 
 - **WAV**: `RIFF` at 0 and `WAVE` at 8, then chunks from offset 12 (id, `u32le` length,
   body padded to an even length). A `fmt ` chunk (length ≥ 16) must be PCM: format tag 1,
@@ -593,7 +673,7 @@ input; for PCM, a partial sample frame at the end is the trailer.
   cut to whole sample frames.
 
 
-### 8.3 BMP
+### 9.3 BMP
 
 `BM` at 0, `u32le` at 10 the offset of the pixel data, `u32le` at 14 the size of the
 information header. With size 12 (OS/2), the width, height, planes and bits per pixel are
@@ -605,7 +685,7 @@ either way). Taken are 8 bits per pixel with compression 0 (palette indices, 1 c
 24 with compression 0 (3 channels) and 32 with compression 0 or 3 (bit fields; 4
 channels). Rows are padded to a multiple of 4 bytes, and there are `|height|` of them.
 
-### 8.4 PNM
+### 9.4 PNM
 
 `P5` (PGM, 1 channel), `P6` (PPM, 3 channels) or `P7` (PAM). For `P5` and `P6`, the width,
 the height and the maximum value follow as decimal numbers (at most 9 digits), each after
@@ -615,6 +695,52 @@ before the samples. For `P7`, the header is lines up to and including `ENDHDR` (
 read. The maximum value must be below 256 (8-bit samples) and the width and height at
 least 1. The rows are not padded. Only the first image of a file is taken: any others are
 in the trailer.
+
+### 9.5 TIFF
+
+`II*\0` (little-endian) or `MM\0*` (big-endian) at 0, the offset of the first IFD at 4. Of
+that IFD (the first image; any others are in the header or the trailer), the tags are read
+as SHORT or LONG values: ImageWidth (256) and ImageLength (257), both required, at least 1;
+SamplesPerPixel (277), 1..4, 1 where absent; BitsPerSample (258), one value of 8 for each
+sample (where absent, one sample of 1 bit: not taken); Compression (259) and
+PlanarConfiguration (284), 1 or absent. The strips (StripOffsets 273 and StripByteCounts
+279, as many of each) must follow one another in the file, each where the one before ends,
+and hold `width × height × channels` bytes in all. The samples are `raster-recons`', without
+padding, from the first strip.
+
+### 9.6 DICOM
+
+A file with `DICM` at 128 has its file meta information from 132: explicit VR little-endian
+elements of group 2, the first `(0002,0000)` of VR `UL`, whose value is the length of the
+rest of them. Its transfer syntax `(0002,0010)` (a NUL at the end dropped) must be
+`1.2.840.10008.1.2` (implicit VR little-endian) or `1.2.840.10008.1.2.1` (explicit VR
+little-endian), and the data set follows the meta information. A file without `DICM` at 128
+whose first `u16le` is 8 and whose `u32le` at 4 is below 256 is taken as a data set from 0,
+in implicit VR little-endian.
+
+The data set's elements are read in order: a `u16le` group, a `u16le` element, then for
+implicit VRs a `u32le` length; for explicit VRs two bytes of VR, then a `u32le` length after
+two reserved bytes for `OB OD OF OL OV OW SQ SV UC UN UR UT UV`, a `u16le` length otherwise;
+then the value. An element of undefined length (`FFFFFFFF`) is not taken. Read are, of group
+`0028`, samples per pixel (`0002`, 1 where absent), planar configuration (`0006`, must be 0),
+number of frames (`0008`, a decimal string, spaces and NULs around it dropped; 1 where
+absent), rows (`0010`), columns (`0011`) and bits allocated (`0100`, 8 or 16), as `u16le`
+values but the frames. The value of the pixel data `(7FE0,0010)` must be `rows × frames ×
+columns × samples × bits / 8` bytes long and is the samples, the frames one under another:
+`raster-recons`' of width `columns`, height `rows × frames` and `samples` channels for 8
+bits, `raster-recons-16`'s, little-endian, for 16.
+
+### 9.7 Samples after a header telling their size
+
+Data in which aqr-compress's scan finds no file is taken as `raster-recons-16`'s samples of
+one channel where two numbers one after the other in its first KiB, at an even offset `p`,
+16- or 32-bit (`w` bytes each) of either endianness, `A` and `B` from 16 to `2^20 − 1`,
+leave a header of `h = length − 2AB` bytes with `p + 2w ≤ h ≤ 4096` (the numbers within
+it). Of all such readings, with `A` or `B` as the width and the samples of either
+endianness, taken is the one whose samples differ least from their left and upper
+neighbours, on average over every `max(1, floor(height / 64))`-th row from the second; they
+must differ less from them than from the samples half a row apart (`x` and `(x + floor(width
+/ 2)) mod width`) in the same rows. The header is the `h` bytes before the samples.
 
 ## Appendix A: built-in frequency tables
 

@@ -68,3 +68,23 @@ pub mod raster {
         Ok(out)
     }
 }
+
+/// `raster-recons-16`.
+pub mod raster16 {
+    use super::{Error, Result};
+    use crate::image::raster16::{self, Format};
+
+    /// The module: the raster of `len` bytes from `params` (its layout) and `inputs` (the coded
+    /// samples and the padding).
+    pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+        let corrupt = |s: &str| Error(format!("corrupt: {s}"));
+        let fmt = Format::from_bytes(params).ok_or_else(|| corrupt("params"))?;
+        let &[coded, pad] = inputs else { return Err(corrupt("inputs")) };
+        if fmt.len() != Some(len as usize) || usize::try_from(len).is_err() {
+            return Err(corrupt("length"));
+        }
+        let mut out = Vec::new();
+        raster16::decode(coded, pad, fmt, &mut out).map_err(|e| corrupt(e.0))?;
+        Ok(out)
+    }
+}

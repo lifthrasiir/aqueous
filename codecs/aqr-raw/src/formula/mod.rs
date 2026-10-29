@@ -1,11 +1,12 @@
-//! aqr-raw as modules of entry formulas (see aqr-formula): `pcm-recons` ([`pcm`]) and
-//! `raster-recons` ([`raster`]) each give the samples of a layout, their params, from their
+//! aqr-raw as modules of entry formulas (see aqr-formula): `pcm-recons` ([`pcm`]),
+//! `raster-recons` ([`raster`]) and `raster-recons-16` ([`raster16`]) each give the samples of a layout, their params, from their
 //! coded streams. A container is its header and trailer, as they are, around the
 //! application ([`encode`]); a recompressor that finds samples in a format of its own puts
 //! them into its formula the same way ([`apply`]). FORMAT.md describes the modules in full.
 
 pub mod pcm;
 pub mod raster;
+pub mod raster16;
 
 use crate::container::{self, Found, Layout};
 use aqr_formula::{Formula, Node};
@@ -20,6 +21,13 @@ pub const TRAILER: &str = "raw/trailer";
 /// is not one, or where its samples are not coded.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let found = std::panic::catch_unwind(|| container::detect(input)).ok()??;
+    encode_found(input, &found, threads)
+}
+
+/// The formula of `input`, data of no format, as 16-bit samples after a header that tells their
+/// size ([`container::sized`]). None where it is not, or where its samples are not coded.
+pub fn encode_sized(input: &[u8], threads: usize) -> Option<Formula> {
+    let found = std::panic::catch_unwind(|| container::sized(input)).ok()??;
     encode_found(input, &found, threads)
 }
 
@@ -49,6 +57,7 @@ pub fn encode_samples(input: &[u8], layout: Layout, threads: usize) -> Option<Fo
     let len = match layout {
         Layout::Pcm(f) if f.valid() => input.len() - input.len() % f.frame_bytes(),
         Layout::Raster(f) => f.len().filter(|&l| l <= input.len())?,
+        Layout::Raster16(f) => f.len().filter(|&l| l <= input.len())?,
         _ => return None,
     };
     encode_found(input, &Found { name: "raw", layout, start: 0, len }, threads)
@@ -60,5 +69,6 @@ pub fn apply(f: &mut Formula, samples: &[u8], layout: Layout, threads: usize) ->
     match layout {
         Layout::Pcm(fmt) => pcm::apply(f, samples, fmt, threads),
         Layout::Raster(fmt) => raster::apply(f, samples, fmt),
+        Layout::Raster16(fmt) => raster16::apply(f, samples, fmt),
     }
 }

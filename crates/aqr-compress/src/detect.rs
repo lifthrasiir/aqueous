@@ -27,8 +27,8 @@ pub enum Format {
     Jpeg,
     Mp3,
     Flac,
-    /// Uncompressed samples in a trivial container (aqr-raw): WAV or AIFF anywhere, BMP or
-    /// PNM at the start of a file.
+    /// Uncompressed samples in a trivial container (aqr-raw): WAV or AIFF anywhere, BMP, PNM,
+    /// TIFF or DICOM at the start of a file.
     Raw,
     /// PSD or PSB.
     Psd,
@@ -65,13 +65,16 @@ pub enum Format {
     Xsv,
     /// Text (aqr-wrt), a whole file of text bytes only: not looked for in other data.
     Text,
+    /// 16-bit samples after a header telling their size (aqr-raw's `sized`), in data in which a
+    /// scan finds no file: of no magic bytes, never detected.
+    Sized,
     /// Tables of records and chains of entries (aqr-infer-recs) in data in which a scan finds no
     /// file: of no magic bytes, never detected.
     Records,
 }
 
 impl Format {
-    pub const ALL: [Format; 29] = [
+    pub const ALL: [Format; 30] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -100,6 +103,7 @@ impl Format {
         Format::Cpio,
         Format::Xsv,
         Format::Text,
+        Format::Sized,
         Format::Records,
     ];
 
@@ -133,6 +137,7 @@ impl Format {
             Format::Cpio => "cpio",
             Format::Xsv => "xsv",
             Format::Text => "text",
+            Format::Sized => "sized",
             Format::Records => "records",
         }
     }
@@ -164,7 +169,9 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"jpg" | b"jpeg" | b"jpe" | b"jfif" => format(Format::Jpeg),
         b"mp3" => format(Format::Mp3),
         b"flac" => format(Format::Flac),
-        b"wav" | b"aif" | b"aiff" | b"aifc" | b"bmp" | b"pgm" | b"ppm" | b"pnm" | b"pam" => format(Format::Raw),
+        b"wav" | b"aif" | b"aiff" | b"aifc" | b"bmp" | b"pgm" | b"ppm" | b"pnm" | b"pam" | b"dcm" => {
+            format(Format::Raw)
+        }
         b"psd" | b"psb" => format(Format::Psd),
         b"clip" => format(Format::Clip),
         b"dds" => format(Format::Dds),
@@ -250,10 +257,10 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     } else if aqr_snappy::leveldb::is_table(d) {
         Some(Format::LevelDb)
     } else if start
-        && (at(0, b"BM") || at(0, b"P5") || at(0, b"P6") || at(0, b"P7"))
+        && ([&b"BM"[..], b"P5", b"P6", b"P7", b"II*\0", b"MM\0*", &[8, 0]].iter().any(|m| at(0, m)) || at(128, b"DICM"))
         && aqr_raw::container::detect(d).is_some()
     {
-        // Two bytes are too weak a signature to look for in other data.
+        // Two bytes (or DICOM's group 8) are too weak a signature to look for in other data.
         Some(Format::Raw)
     } else if aqr_fits::formula::starts(d) {
         Some(Format::Fits)

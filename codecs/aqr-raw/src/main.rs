@@ -50,16 +50,18 @@ fn bench(args: &[String]) {
         let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
         let r = if a.module == formula::pcm::MODULE {
             formula::pcm::decode(&a.params, &res, inputs, a.len, threads)
+        } else if a.module == formula::raster16::MODULE {
+            formula::raster16::decode(&a.params, inputs, a.len)
         } else {
             raster::decode(&a.params, inputs, a.len, threads)
         };
         r.map_err(|e| aqr_formula::Error::new(e.0))
     };
-    let natives = aqr::natives(&[formula::pcm::MODULE, raster::MODULE], &apply);
+    let natives = aqr::natives(&[formula::pcm::MODULE, raster::MODULE, formula::raster16::MODULE], &apply);
     let encode = |d: &[u8]| -> Option<Formula> {
         match raw {
             Some(l) => formula::encode_samples(d, l, threads),
-            None => formula::encode(d, threads),
+            None => formula::encode(d, threads).or_else(|| formula::encode_sized(d, threads)),
         }
     };
     let (mut tin, mut tout, mut tf, mut tc, mut td) = (0f64, 0f64, 0f64, 0f64, 0f64);
@@ -120,7 +122,7 @@ fn bench(args: &[String]) {
 fn info(files: &[String]) {
     for f in files {
         let d = std::fs::read(f).expect("read");
-        match container::detect(&d) {
+        match container::detect(&d).or_else(|| container::sized(&d)) {
             Some(c) => {
                 println!("{f}: {}, {:?}, samples at {}, {} of {} bytes", c.name, c.layout, c.start, c.len, d.len())
             }

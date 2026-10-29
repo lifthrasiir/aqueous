@@ -164,6 +164,11 @@ path = "src/bin/raster-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "raster-recons-16"
+path = "src/bin/raster-recons-16.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "bcn-recons"
 path = "src/bin/bcn-recons.rs"
 required-features = ["wasm"]
