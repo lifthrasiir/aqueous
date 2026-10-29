@@ -47,8 +47,10 @@ fn main() -> ExitCode {
     }
 }
 
+/// The workspace's root, spelled as Cargo spells the paths of dep-info (not canonicalized, which
+/// on Windows gives a `\\?\` path no dep-info path starts with).
 fn root() -> PathBuf {
-    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../..")).canonicalize().unwrap()
+    Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).unwrap().to_path_buf()
 }
 
 fn cache() -> PathBuf {
@@ -126,28 +128,14 @@ fn build(env: &str) -> Result<PathBuf> {
 /// their crates and the files every build reads.
 fn dep_info(path: &Path) -> Result<BTreeSet<String>> {
     let text = fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let deps = text.lines().next().and_then(|l| l.split_once(": ")).map_or("", |(_, d)| d);
     let root = root();
     let mut paths = BTreeSet::new();
     let add = |paths: &mut BTreeSet<String>, p: &Path| {
         let p = p.strip_prefix(&root).unwrap_or(p);
         paths.insert(p.to_string_lossy().replace('\\', "/"));
     };
-    let mut word = String::new();
-    let mut chars = deps.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => word.extend(chars.next()),
-            ' ' => {
-                if !word.is_empty() {
-                    add(&mut paths, Path::new(&std::mem::take(&mut word)));
-                }
-            }
-            c => word.push(c),
-        }
-    }
-    if !word.is_empty() {
-        add(&mut paths, Path::new(&word));
+    for dep in deps(&text) {
+        add(&mut paths, Path::new(&dep));
     }
     let crates: BTreeSet<PathBuf> = paths
         .iter()
@@ -169,11 +157,35 @@ fn dep_info(path: &Path) -> Result<BTreeSet<String>> {
     Ok(paths)
 }
 
+/// The prerequisites of the first rule of a dep-info file, unescaped.
+fn deps(text: &str) -> Vec<String> {
+    let deps = text.lines().next().and_then(|l| l.split_once(": ")).map_or("", |(_, d)| d);
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = deps.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            // Cargo escapes only spaces; any other backslash is a Windows path separator.
+            '\\' if chars.as_str().starts_with(' ') => word.extend(chars.next()),
+            ' ' => {
+                if !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+            }
+            c => word.push(c),
+        }
+    }
+    if !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
 /// What changes a build besides the files: the toolchain and the environment.
 fn environment() -> Result<String> {
     let rustc = std::env::var_os("RUSTC").unwrap_or("rustc".into());
     let out = Command::new(rustc).current_dir(root()).arg("-vV").output().map_err(|e| format!("rustc: {e}"))?;
-    let mut text = String::from("aqr-bincache 1\n");
+    let mut text = String::from("aqr-bincache 2\n");
     text += &String::from_utf8_lossy(&out.stdout);
     let mut vars: Vec<(String, String)> = std::env::vars()
         .filter(|(k, _)| {
@@ -264,7 +276,8 @@ fn commit(paths: &BTreeSet<String>, blobs: &BTreeMap<String, String>) -> Result<
         .filter_map(|l| l.split_once('\t'))
         .filter_map(|(meta, path)| Some((path, meta.split(' ').nth(2)?)))
         .collect();
-    let dirty = paths.iter().any(|p| p.starts_with('/') || committed.get(&p[..]).is_none_or(|id| *id != blobs[p]));
+    let dirty =
+        paths.iter().any(|p| Path::new(p).is_absolute() || committed.get(&p[..]).is_none_or(|id| *id != blobs[p]));
     Ok(format!("commit={hash}\ndirty={}\nsubject={subject}\n", dirty as u8))
 }
 
@@ -386,5 +399,21 @@ fn run(dir: &Path, args: &[OsString]) -> Result<ExitCode> {
     {
         let status = cmd.status().map_err(|e| format!("{}: {e}", dir.display()))?;
         Ok(ExitCode::from(status.code().unwrap_or(1) as u8))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::deps;
+
+    #[test]
+    fn deps_unescape_spaces_only() {
+        let text = r"C:\w\target\release\aqr.exe: C:\w\a\src\lib.rs C:\w\my\ dir\b.rs
+
+C:\w\a\src\lib.rs:
+";
+        assert_eq!(deps(text), [r"C:\w\a\src\lib.rs", r"C:\w\my dir\b.rs"]);
+        let text = r"/w/target/release/aqr: /w/a/src/lib.rs /w/my\ dir/b.rs";
+        assert_eq!(deps(text), ["/w/a/src/lib.rs", "/w/my dir/b.rs"]);
     }
 }
