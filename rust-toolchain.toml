@@ -1,0 +1,6 @@
+# The modules' bytes (and hashes) depend on the toolchain: crates/aqr-modules/build.sh builds
+# them with this one.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
