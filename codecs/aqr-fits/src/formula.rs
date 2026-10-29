@@ -16,7 +16,13 @@ pub use crate::module::{image as decode_image, rice as decode_rice, table as dec
 
 pub const IMAGE: Module = Module::new("fits-recons-image", 1);
 pub const RICE: Module = Module::new("fits-recons-rice", 1);
-pub const TABLE: Module = Module::new("fits-recons-table", 1);
+pub const TABLE: Module = Module::new("fits-recons-table", 1).with_memory(table_memory);
+
+/// The memory of `fits-recons-table`: the planes and the rows, and the columns (a varint and a
+/// byte of the params at least each, 12 bytes on 32 bits, their vector doubling).
+fn table_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.whole(3 * 12 * u.params.len() as u64 / 2, 1))
+}
 
 /// Data smaller than this is kept as it is.
 const MIN_DATA: usize = 2048;

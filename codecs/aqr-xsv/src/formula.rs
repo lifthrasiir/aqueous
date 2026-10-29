@@ -11,7 +11,14 @@ use crate::table::{Dialect, K_NEW, K_NUM, K_TEXT, MAX_COLUMNS, P_DELTA, P_RAW};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("xsv-recons", 1);
+pub const MODULE: Module = Module::new("xsv-recons", 1).with_memory(memory);
+
+/// The memory of the module: the streams and the file, and the columns' state (about 64 bytes
+/// each on 32 bits, one for 5 bytes of `columns` at least).
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[_, _, columns, ..] = u.inputs else { return None };
+    Some(u.whole(64 * (columns / 5 + 1), 1))
+}
 
 /// The names of the inputs' streams, in order.
 pub const STREAM_NAMES: [&str; 7] = ["layout", "raw", "columns", "types", "text", "nums", "desc"];

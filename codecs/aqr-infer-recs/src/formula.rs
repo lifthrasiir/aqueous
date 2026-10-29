@@ -15,8 +15,21 @@ use crate::{Choice, Shape, fields};
 
 pub use crate::module::{Field, How, decode_entries, decode_fields};
 
-pub const FIELDS: Module = Module::new("recs-fields", 1);
-pub const ENTRIES: Module = Module::new("recs-entries", 1);
+pub const FIELDS: Module = Module::new("recs-fields", 1).with_memory(fields_memory);
+pub const ENTRIES: Module = Module::new("recs-entries", 1).with_memory(entries_memory);
+
+/// The memory of `recs-fields`: the planes and the records, the fields (of the params), and the
+/// values of the field a field refers to, 8 bytes a record, one field at a time.
+fn fields_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let (n, _, fields) = crate::module::parse_fields(u.params).ok()?;
+    let refs = fields.iter().any(|f| matches!(f.how, crate::module::How::Sub(_) | crate::module::How::XorRef(_)));
+    Some(u.whole(if refs { 8 * n as u64 } else { 0 } + 24 * fields.len() as u64, 2))
+}
+
+/// The memory of `recs-entries`: the heads and tails, and the entries.
+fn entries_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.whole(0, 0))
+}
 
 /// A file shorter than this is not looked into.
 pub const MIN_LEN: usize = 16 << 10;
