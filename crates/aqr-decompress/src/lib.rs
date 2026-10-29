@@ -37,7 +37,27 @@ pub const ARM64: Module = Module::new("exe-recons/arm64", 1).with_memory(exe);
 /// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
 /// section's RVA and the offset of the metadata root in it (u32 each, little endian); inputs:
 /// the streams of [`cil::STREAM_NAMES`].
-pub const CIL: Module = Module::new("exe-recons/cil", 1);
+pub const CIL: Module = Module::new("exe-recons/cil", 1).with_memory(cil);
+
+/// The memory of [`CIL`]: the whole of it, with what the decoder keeps besides the output: the
+/// root's stream headers (16 bytes each, at least 12 bytes of the metadata stream per header);
+/// per method body (at most one per byte of the body positions' stream), its range among those
+/// taken (8 bytes) and its position (4), vectors grown by pushes (three times while they
+/// grow); the column of a table's values (4 bytes a row, at most as many rows as the tables'
+/// stream has bytes and the output has, the vector resized from the last table's, so three
+/// times the most while it grows); and the tokens' caches of the 256 tables (16 bytes at
+/// least each; 4 bytes a token at most, four times that with the blocks left as they grow, and
+/// a token takes a byte of the inputs; 512 KiB in all at most).
+fn cil(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    // (the streams META = 1, TABLES = 6 and BODYPOS = 9 of `aqr_exe::arch::cil`)
+    let (&meta, &tables, &bodies) = (u.inputs.get(1)?, u.inputs.get(6)?, u.inputs.get(9)?);
+    let output = u.output();
+    let roots = 16 * (meta / 12 + 1);
+    let method_bodies = 3 * (8 + 4) * (bodies + 8);
+    let column = 3 * 4 * tables.min(output);
+    let caches = 256 * 16 + (16 * u.inputs.iter().sum::<u64>()).min(512 << 10);
+    Some(u.whole(roots + method_bodies + column + caches, 8))
+}
 
 /// aqr-exe's base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
 /// multiples of (u8); inputs: the streams of [`reloc::STREAM_NAMES`].
