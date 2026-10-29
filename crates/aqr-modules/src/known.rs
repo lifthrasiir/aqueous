@@ -95,8 +95,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "ima-recons",
-        version: 1,
-        sha512_256: hex("bd3ef6d18f20408c4875b8333a4c50a644bbd8988796f1569d4d12019b4f4df9"),
+        version: 2,
+        sha512_256: hex("e97c4d613eed9f7c94a1c8a5e582380f3bd52a9fb7bd0cb27ad98b237341d8bd"),
         block: include_bytes!("../wasm/ima-recons.block"),
     },
     Known {

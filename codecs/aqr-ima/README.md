@@ -4,7 +4,8 @@ IMA ADPCM blocks as a record of their headers and nibbles, and back bit for bit:
 FSB5 banks, through aqr-fsb) and Microsoft's IMA ADPCM (of WAV files) alike, by their channels and
 bytes per channel. The module `ima-recons` rebuilds whole blocks; `FORMAT.md` specifies it.
 
-The record is a binary arithmetic code of adaptive bits in contexts of the IMA decoder's state:
+The record is a binary arithmetic code of adaptive bits (shifts growing with what each has seen)
+in contexts of the IMA decoder's state:
 - a channel equal to the one before in a block (FMOD's stereo is often two equal channels) is
   one decision;
 - a header against the state its channel ended the block before at: the index as that one's
@@ -12,5 +13,5 @@ The record is a binary arithmetic code of adaptive bits in contexts of the IMA d
 - each nibble by a tree of 4 bits, in a context of the step index, the nibble before, and the
   other channel's nibble at the same place.
 
-Any bytes of whole blocks come back. On The Crew's FSB5 banks the record is 58.2% of the blocks
-(xz -9e: about 67%); one thread encodes about 23 MB/s and decodes about 20 MB/s.
+Any bytes of whole blocks come back. On The Crew's FSB5 banks the record is 57.8% of the blocks
+(xz -9e: about 67%); one thread encodes about 33 MB/s and decodes about 25 MB/s.

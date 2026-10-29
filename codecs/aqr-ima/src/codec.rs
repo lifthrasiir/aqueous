@@ -6,7 +6,7 @@
 //! each byte's low nibble first. Xbox ADPCM (FSB5's) has 36 bytes per channel; Microsoft's IMA
 //! ADPCM (WAV) as many as its block alignment gives.
 
-use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
+use aqr_common::arith::{ArithDecoder, ArithEncoder};
 
 use crate::{Error, Result};
 
@@ -50,24 +50,51 @@ impl State {
     }
 }
 
+/// An adaptive bit: the probability of a 1 (16 bits) and how many bits it has seen; each bit
+/// coded moves the probability a 2^-shift of the way to it, the shift growing with the count
+/// ([`SHIFTS`]) so that it learns fast, then steadily. It stays within 1 and 65535.
+#[derive(Debug, Clone, Copy)]
+struct Bit {
+    p: u16,
+    n: u8,
+}
+
+/// The shift of a bit after each count of bits seen (the last for any more).
+const SHIFTS: [u8; 16] = [1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 6];
+
+impl Default for Bit {
+    fn default() -> Self {
+        Bit { p: 1 << 15, n: 0 }
+    }
+}
+
+impl Bit {
+    #[inline(always)]
+    fn update(&mut self, b: bool) {
+        let (p, sh) = (self.p as i32, SHIFTS[self.n as usize] as u32);
+        self.p = if b { p + ((65535 - p) >> sh) } else { p - ((p - 1) >> sh) } as u16;
+        self.n += (self.n < 15) as u8;
+    }
+}
+
 /// Codes decisions: the encoder codes `b` and returns it, the decoder returns what it decodes.
 trait Coder {
     fn bit(&mut self, k: &mut Bit, b: bool) -> bool;
 }
 
 impl Coder for ArithEncoder {
-    #[inline]
+    #[inline(always)]
     fn bit(&mut self, k: &mut Bit, b: bool) -> bool {
-        self.encode(b, k.p1());
+        self.encode(b, k.p as u32);
         k.update(b);
         b
     }
 }
 
 impl Coder for ArithDecoder<'_> {
-    #[inline]
+    #[inline(always)]
     fn bit(&mut self, k: &mut Bit, _: bool) -> bool {
-        let b = self.decode(k.p1());
+        let b = self.decode(k.p as u32);
         k.update(b);
         b
     }
@@ -115,7 +142,8 @@ impl Model {
     }
 
     /// A value of `n` bits as a tree of counters `t` (of `2^n` of them), most significant first.
-    fn tree(c: &mut dyn Coder, t: &mut [Bit], n: u32, v: u32) -> u32 {
+    #[inline(always)]
+    fn tree<C: Coder>(c: &mut C, t: &mut [Bit], n: u32, v: u32) -> u32 {
         let mut node = 1usize;
         for i in (0..n).rev() {
             let b = c.bit(&mut t[node], v >> i & 1 == 1);
@@ -126,7 +154,7 @@ impl Model {
 
     /// A channel's header (`h`: its 4 bytes; any where decoding), against its state at the end of
     /// the block before.
-    fn header(&mut self, c: &mut dyn Coder, end: Option<State>, h: [u8; 4]) -> [u8; 4] {
+    fn header<C: Coder>(&mut self, c: &mut C, end: Option<State>, h: [u8; 4]) -> [u8; 4] {
         let b = bucket(end);
         // the step index: the end's plus 1, or as it is
         let next = end.map_or(0, |s| s.idx as u32 + 1);
@@ -187,7 +215,7 @@ impl Layout {
 
 /// Codes the blocks of `d` (whole blocks of `l`) with `c`, writing them to `out` (decoding;
 /// encoding gives `d` back).
-fn code(cod: &mut dyn Coder, l: Layout, d: Option<&[u8]>, blocks: usize, out: &mut Vec<u8>) {
+fn code<C: Coder>(cod: &mut C, l: Layout, d: Option<&[u8]>, blocks: usize, out: &mut Vec<u8>) {
     let (ch, bs, n) = (l.channels, l.block(), l.nibbles());
     let mut m = Model::new(ch);
     let mut end: Vec<Option<State>> = vec![None; ch];

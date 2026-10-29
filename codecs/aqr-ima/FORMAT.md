@@ -9,7 +9,7 @@ The document is normative and complete: the module can be implemented from it al
 marked *informative* describe the encoder's choices; a decoder needs none of them.
 
 External reference: aqr-lzo's FORMAT.md §5.1 (codecs/aqr-lzo), for the binary arithmetic code
-and its adaptive bits.
+(its adaptive bits are not those of this format: §4).
 
 Contents:
 
@@ -58,7 +58,7 @@ i = clamp(i + [−1, −1, −1, −1, 2, 4, 6, 8][v & 7], 0, 88)
 
 ## 3. The module
 
-- **Module**: name `ima-recons`, version 1.
+- **Module**: name `ima-recons`, version 2.
 - **Params**: `varint C`, `varint B` (as §2 requires; `B` at most 2^20). Nothing after.
 - **Resources**: none.
 - **Inputs**: exactly 1: `record` (class `ima/record`), §4.
@@ -66,8 +66,11 @@ i = clamp(i + [−1, −1, −1, −1, 2, 4, 6, 8][v & 7], 0, 88)
 
 ## 4. The record
 
-The record is one binary arithmetic code with adaptive bits (aqr-lzo §5.1), all of them fresh
-at its start; a decoder that reads more than 4 bytes past its end fails. A value of `n` bits by a
+The record is one binary arithmetic code (aqr-lzo §5.1) of **adaptive bits**, all of them fresh
+at its start; a decoder that reads more than 4 bytes past its end fails. An adaptive bit has a
+probability `p1` of a 1 (16 bits, initially 32768) and a count `n` (initially 0); a decision is
+coded with `p1`, then with `s = [1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 5, 5, 5, 6][n]`: `p1 += (65535
+− p1) >> s` for a 1, `p1 −= (p1 − 1) >> s` for a 0, and `n` grows by 1 while below 15. A value of `n` bits by a
 **tree** `t` is coded highest bit first, bit `k` with `t[m]`, `m = 1` then `2m + bit`.
 
 For each block in order, for each channel `c` in order (its **end** the decoder state at the end
@@ -105,5 +108,6 @@ predictor (mostly within two steps), and its index is the end's plus one (all bu
 blocks); the reserved byte is 0; half of its stereo blocks have equal channels.
 
 Measured on The Crew's FSB5 banks (aqr-fsb's tool, one thread on Windows), 817 samples of 300
-banks, 100.2 MB of blocks: the record is 58.17% of them, encoded at 23.4 MB/s and decoded at
-20.2 MB/s. (xz -9e gives about 67% of such data.)
+banks, 100.2 MB of blocks: the record is 57.80% of them, encoded at 32.6 MB/s and decoded at
+25.0 MB/s. (xz -9e gives about 67% of such data.) Version 1 had aqr-lzo's adaptive bits (a
+rate of 1/(n + 1.5) by a table and a multiplication): 58.17%, 23.4 and 20.2 MB/s.
