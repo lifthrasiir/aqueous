@@ -4718,7 +4718,7 @@ as follows:</p>
       <td>snappy-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-snappy/FORMAT.md">codecs/aqr-snappy/FORMAT.md</a>
     <tr>
-      <td><code>59dae448a09ce4abb3d1a0fcfd9349e6cfac35ac651c6362cc5274fe1cd1cd85</code>
+      <td><code>dd8fe49f1d26ac0007ebe59a7f210f8f4e5132554ab362d8623fb208270433b3</code>
       <td>sqlite-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-sqlite/FORMAT.md">codecs/aqr-sqlite/FORMAT.md</a>
     <tr>

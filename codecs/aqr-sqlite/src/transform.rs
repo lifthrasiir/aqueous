@@ -540,13 +540,33 @@ trait Sink {
     fn zeros(&mut self, at: usize, n: usize);
 }
 
-/// Into the output (zeroed when allocated).
-struct Writer(Vec<u8>);
+/// Into the output of `len` bytes, zeroed as it is allocated: at the first page written, so
+/// after the first passes (whose tasks, on WebAssembly, copy the memory as it is then).
+struct Writer {
+    out: Vec<u8>,
+    len: usize,
+}
+
+impl Writer {
+    #[inline]
+    fn out(&mut self) -> &mut Vec<u8> {
+        if self.out.len() != self.len {
+            self.alloc();
+        }
+        &mut self.out
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn alloc(&mut self) {
+        self.out = vec![0; self.len];
+    }
+}
 
 impl Sink for Writer {
     #[inline]
     fn put(&mut self, at: usize, b: &[u8]) {
-        self.0[at..at + b.len()].copy_from_slice(b);
+        self.out()[at..at + b.len()].copy_from_slice(b);
     }
     fn zeros(&mut self, _: usize, _: usize) {}
 }
@@ -602,9 +622,10 @@ pub fn decode_threads(g: &Geom, len: usize, s: &[impl AsRef<[u8]>], threads: usi
     if s.len() != NSTREAMS || s[S_KIND].as_ref().len() != g.npages || len % g.psize > s[S_RAW].as_ref().len() {
         return Err(corrupt());
     }
-    let mut w = Writer(vec![0u8; len]);
+    let mut w = Writer { out: Vec::new(), len };
     rebuild(g, len, s, &mut w, threads)?;
-    Ok(w.0)
+    w.out();
+    Ok(w.out)
 }
 
 /// Whether the streams rebuild `src` exactly, without allocating a copy of it.
