@@ -123,9 +123,43 @@ impl Layout {
     }
 }
 
-/// Whether `d` starts with an FSB5 bank ([`Layout::of`]).
+/// Whether `d` starts like an FSB5 bank, as far as it goes (the head of a file, the data
+/// perhaps not there): the magic, a version of 0 or 1, at least one sample, and the samples'
+/// headers within `d` as [`Layout::of`] takes them (each with its chunks, the offsets in order
+/// from 0 within the data; where `d` holds them all, taking exactly their declared size).
 pub fn starts(d: &[u8]) -> bool {
-    Layout::of(d).is_some()
+    let word = |p: usize| Some(u32::from_le_bytes(d.get(p..p + 4)?.try_into().ok()?));
+    let header = match (d.get(..4), word(4)) {
+        (Some(b"FSB5"), Some(0)) => 0x40,
+        (Some(b"FSB5"), Some(1)) => 0x3C,
+        _ => return false,
+    };
+    let (Some(n), Some(headers), Some(data)) = (word(8), word(12), word(20)) else { return false };
+    let (n, headers, data) = (n as usize, headers as usize, data as usize);
+    let end = header + headers;
+    if n == 0 || headers < 8 * n || d.len() < header + 8 {
+        return false;
+    }
+    let (mut p, mut last) = (header, 0);
+    for i in 0..n {
+        let Some(h) = d.get(p..p + 8).map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes"))) else { return true };
+        p += 8;
+        let offset = ((h >> 7) & ((1 << 27) - 1)) as usize * 32;
+        if (i == 0 && offset != 0) || offset < last || offset > data {
+            return false;
+        }
+        last = offset;
+        let mut more = h & 1 != 0;
+        while more {
+            let Some(c) = word(p) else { return true };
+            more = c & 1 != 0;
+            p += 4 + ((c >> 1) & 0xFF_FFFF) as usize;
+            if p > end {
+                return false;
+            }
+        }
+    }
+    p == end
 }
 
 /// The bytes of the bank at the start of `d`.

@@ -59,6 +59,24 @@ fn layout_of_banks() {
     assert_eq!(sample_sums(&d, 64).iter().map(|s| s.1).collect::<Vec<_>>(), [64, 96]);
 }
 
+/// A bank is known by its start alone (the head of a file, as aqr-compress looks at it for the
+/// samples files share), though its data is not there.
+#[test]
+fn known_by_its_start() {
+    let d = bank(15, &[64, 96, 32], 20);
+    let head = 0x3C + 8 * 3 + 8 + 20;
+    for n in [0x3C + 8, head, head + 10, d.len() - 1] {
+        assert!(starts(&d[..n]), "{n}");
+        assert!(Layout::of(&d[..n]).is_none());
+    }
+    // but not by its magic alone, nor with sample headers that do not parse
+    assert!(!starts(&d[..0x3C]));
+    let mut e = d.clone();
+    e[0x3C + 16] = 0xff;
+    e[0x3C + 17] = 0xff;
+    assert!(!starts(&e[..head]));
+}
+
 #[test]
 fn not_banks() {
     let d = bank(15, &[64, 96], 4);
@@ -68,12 +86,13 @@ fn not_banks() {
         e[at] = v;
         e
     };
-    // magic, version, no samples, sample headers' size, data past the end
+    // magic, version, no samples, sample headers' size; data past the end (a bank's start, but
+    // no layout)
     assert!(!starts(&corrupt(0, b'G')));
     assert!(!starts(&corrupt(4, 2)));
     assert!(!starts(&corrupt(8, 0)));
     assert!(!starts(&corrupt(12, 30)));
-    assert!(!starts(&d[..d.len() - 1]));
+    assert!(Layout::of(&d[..d.len() - 1]).is_none() && extent(&d[..d.len() - 1]).is_none());
     // offsets out of order (the second sample's before the first's end is fine; before 0 is not)
     let mut e = d.clone();
     let p = 0x3C + 8 + 8;
