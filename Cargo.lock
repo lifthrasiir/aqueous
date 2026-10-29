@@ -475,6 +475,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-vorbis"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+]
+
+[[package]]
 name = "aqr-wrt"
 version = "0.1.0"
 dependencies = [

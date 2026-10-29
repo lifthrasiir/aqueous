@@ -1,0 +1,9 @@
+[package]
+name = "aqr-vorbis"
+version = "0.1.0"
+edition = "2024"
+description = "Vorbis audio packets parsed to the codebook entries and fields they code, and written back bit for bit"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
