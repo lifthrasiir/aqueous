@@ -16,6 +16,7 @@ aqr-bundle = { path = "../../codecs/aqr-bundle", default-features = false }
 aqr-clip = { path = "../../codecs/aqr-clip", default-features = false }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
 aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
+aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = false }
 aqr-fits = { path = "../../codecs/aqr-fits", default-features = false }
 aqr-flac = { path = "../../codecs/aqr-flac", default-features = false }
 aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
@@ -91,6 +92,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "bundle-recons"
 path = "src/bin/bundle-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "gnu-gettext-recons"
+path = "src/bin/gnu-gettext-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

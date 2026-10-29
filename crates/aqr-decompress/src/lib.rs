@@ -100,6 +100,10 @@ pub const BCN: Module = aqr_tex::formula::MODULE;
 pub const PDF: Module = aqr_pdf::formula::MODULE;
 pub const SQLITE: Module = aqr_sqlite::formula::MODULE;
 pub const FASTA: Module = aqr_fasta::formula::MODULE;
+
+/// aqr-gnu-gettext's `.mo` files from the file without its tables and the NULs in its strings.
+/// Parameters: where the strings start; no resources.
+pub const GNU_GETTEXT: Module = aqr_gnu_gettext::formula::MODULE;
 /// The data of a FITS file's HDUs (aqr-fits): an image, a tile-compressed image of Rice tiles,
 /// the rows of a binary table.
 pub const FITS_IMAGE: Module = aqr_fits::formula::IMAGE;
@@ -128,7 +132,7 @@ pub const RECS_FIELDS: Module = aqr_infer_recs::formula::FIELDS;
 pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 37] = [
+pub const MODULES: [Module; 38] = [
     X86,
     ARM64,
     CIL,
@@ -154,6 +158,7 @@ pub const MODULES: [Module; 37] = [
     PDF,
     SQLITE,
     FASTA,
+    GNU_GETTEXT,
     FITS_IMAGE,
     FITS_RICE,
     FITS_TABLE,
@@ -181,7 +186,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 24] = [
+const RECONS: [(Module, Decode); 25] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
     (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
@@ -194,6 +199,7 @@ const RECONS: [(Module, Decode); 24] = [
     (PDF, |p, r, i, n, t| none(r).and_then(|_| aqr_pdf::formula::decode(p, i, n, t).map_err(msg))),
     (SQLITE, |p, r, i, n, t| none(r).and_then(|_| aqr_sqlite::formula::decode(p, i, n, t).map_err(msg))),
     (FASTA, |p, r, i, n, t| none(r).and_then(|_| aqr_fasta::formula::decode(p, i, n, t).map_err(msg))),
+    (GNU_GETTEXT, |p, r, i, n, _| none(r).and_then(|_| aqr_gnu_gettext::formula::decode(p, i, n).map_err(msg))),
     (FITS_IMAGE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_image(p, i, n).map_err(msg))),
     (FITS_RICE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_rice(p, i, n).map_err(msg))),
     (FITS_TABLE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_table(p, i, n).map_err(msg))),

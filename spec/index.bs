@@ -4630,13 +4630,17 @@ as follows:</p>
       <td>flac-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md">codecs/aqr-flac/FORMAT.md</a>
     <tr>
-      <td><code>f25690cf1aeea8b98fbf94bf766dc53f064339ff58362ca62124105d3ecd9660</code>
+      <td><code>8ee9ec2f9867810df98bf8bb1e69785964c6897ba51412a364928256abf55f98</code>
       <td>flate-set@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md">codecs/aqr-flate/FORMAT.md</a>
     <tr>
       <td><code>17849cd2f570cd4ff266e6c7c7e7656954fff0b7b53a032682e630874b1d27e3</code>
       <td>git-pack-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-git/FORMAT.md">codecs/aqr-git/FORMAT.md</a>
+    <tr>
+      <td><code>04372842501e11c7b00cb9318413f5e2e60b208b4b51a316514d22c16491784a</code>
+      <td>gnu-gettext-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-gnu-gettext/FORMAT.md">codecs/aqr-gnu-gettext/FORMAT.md</a>
     <tr>
       <td><code>9222740c7c4dd5796639b3dead61cfa35acc5d766b4347a62b6667cea3cc9c93</code>
       <td>jpeg-recons@2

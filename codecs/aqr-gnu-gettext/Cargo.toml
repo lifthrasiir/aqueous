@@ -1,0 +1,18 @@
+[package]
+name = "aqr-gnu-gettext"
+version = "0.1.0"
+edition = "2024"
+description = "GNU gettext message catalogs (.mo) rebuilt bit for bit from their strings: the tables of lengths and offsets and the hash table derived"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+[dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }

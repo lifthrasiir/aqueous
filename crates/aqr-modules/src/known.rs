@@ -78,7 +78,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("f25690cf1aeea8b98fbf94bf766dc53f064339ff58362ca62124105d3ecd9660"),
+        sha512_256: hex("8ee9ec2f9867810df98bf8bb1e69785964c6897ba51412a364928256abf55f98"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -86,6 +86,12 @@ pub const KNOWN: &[Known] = &[
         version: 1,
         sha512_256: hex("17849cd2f570cd4ff266e6c7c7e7656954fff0b7b53a032682e630874b1d27e3"),
         block: include_bytes!("../wasm/git-pack-recons.block"),
+    },
+    Known {
+        name: "gnu-gettext-recons",
+        version: 1,
+        sha512_256: hex("04372842501e11c7b00cb9318413f5e2e60b208b4b51a316514d22c16491784a"),
+        block: include_bytes!("../wasm/gnu-gettext-recons.block"),
     },
     Known {
         name: "jpeg-recons",

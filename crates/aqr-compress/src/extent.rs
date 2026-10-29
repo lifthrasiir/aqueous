@@ -33,6 +33,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::LevelDb => Some(d.len()),
         Format::Zip => aqr_zip::zip::extent(d),
         Format::GitPack => aqr_git::pack::extent(d),
+        Format::GnuGettext => aqr_gnu_gettext::formula::extent(d),
         Format::Fasta | Format::Obj | Format::Xsv | Format::Text | Format::Sized | Format::Records => Some(d.len()),
         Format::Fits => aqr_fits::formula::extent(d),
         Format::Ar => bundle(aqr_bundle::formula::Format::Ar, d),

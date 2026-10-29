@@ -48,6 +48,8 @@ pub enum Format {
     /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
     /// data.
     Fasta,
+    /// GNU gettext message catalog, `.mo` (aqr-gnu-gettext), known by its magic and header.
+    GnuGettext,
     /// FITS file (aqr-fits), known by its primary header.
     Fits,
     /// Wavefront OBJ file (aqr-obj), a whole file known by its text: not looked for in other
@@ -74,7 +76,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 30] = [
+    pub const ALL: [Format; 31] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -96,6 +98,7 @@ impl Format {
         Format::Zip,
         Format::GitPack,
         Format::Fasta,
+        Format::GnuGettext,
         Format::Fits,
         Format::Obj,
         Format::Ar,
@@ -130,6 +133,7 @@ impl Format {
             Format::Zip => "zip",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
+            Format::GnuGettext => "gnu-gettext",
             Format::Fits => "fits",
             Format::Obj => "obj",
             Format::Ar => "ar",
@@ -179,6 +183,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
         b"sqlite" | b"sqlite3" => format(Format::Sqlite),
         b"fa" | b"fasta" | b"fna" | b"ffn" | b"fas" => format(Format::Fasta),
+        b"mo" | b"gmo" => format(Format::GnuGettext),
         b"fits" | b"fit" | b"fts" | b"fz" => format(Format::Fits),
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
@@ -262,6 +267,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     {
         // Two bytes (or DICOM's group 8) are too weak a signature to look for in other data.
         Some(Format::Raw)
+    } else if aqr_gnu_gettext::formula::starts(d) {
+        Some(Format::GnuGettext)
     } else if aqr_fits::formula::starts(d) {
         Some(Format::Fits)
     } else if start && aqr_fasta::formula::starts(d) {
