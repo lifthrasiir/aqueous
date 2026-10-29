@@ -534,6 +534,53 @@ fn lzma_of_pe_files_held_once() {
     assert!(c < alone + alone / 50, "{c} of {alone} alone");
 }
 
+/// Binary data of no format: a header, `n` records of 20 bytes (a counter from `seed`, a time
+/// rising by about 1000, a byte of four values), and a trailer.
+fn table(n: usize, seed: u32) -> Vec<u8> {
+    let mut d = b"TABL".to_vec();
+    d.extend((0..300).map(|i| (i * 131 % 251) as u8));
+    let mut t = 1_700_000_000_000u64 + seed as u64;
+    for i in 0..n {
+        t += 900 + (i * 7919 % 200) as u64;
+        d.extend((seed + i as u32).to_le_bytes());
+        d.extend(t.to_le_bytes());
+        d.extend([[1, 2, 7, 30][i * 31 % 4], 0, 0, 0, 0, 0, 0, 0]);
+    }
+    d.extend(b"END!");
+    d
+}
+
+/// PE files, a table of records and a `.tar.lzma` of them with a member of its own, too large
+/// for the files to be taken as holding the tar archive: still rebuilt, as the members' streams
+/// are those of the files' formulas (not their bytes), stored once.
+#[test]
+fn lzma_of_files_mostly_held_once() {
+    let base = pe(60_000, 7);
+    let mut files: Vec<(String, Vec<u8>)> = (0..3)
+        .map(|k| {
+            let mut d = base.clone();
+            d[0x1000 + 997 * k] ^= 0x55;
+            (format!("b/p{k}.exe"), d)
+        })
+        .collect();
+    files.push(("b/t.bin".into(), table(20_000, 1000)));
+    let own = text(40_000, 3);
+    let mut refs: Vec<(&str, &[u8])> = files.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    refs.push(("b/own.txt", &own));
+    let tlz = aqr_lzma::greedy::alone(&tar(&refs));
+    let files: Vec<(&str, Vec<u8>)> = files.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let (alone, r) = archived(&files, &opt);
+    let alone = alone.len() - r.overhead;
+    let all = [&files[..], &[("p/b.tar.lzma", tlz.clone())]].concat();
+    let (c, r) = archived(&all, &opt);
+    let names: Vec<&str> = r.files[4].modules.iter().map(|m| m.name).collect();
+    assert!(names.starts_with(&["lzma-recons", "bundle-recons"]), "{:?}", r.files[4]);
+    // (and the member of its own)
+    let c = c.len() - r.overhead;
+    assert!(c < alone + alone / 20, "{c} of {alone} alone");
+}
+
 /// A ZIP archive of a single entry `name` of `data`, its body `deflated`.
 fn zip_of(name: &str, data: &[u8], deflated: &[u8]) -> Vec<u8> {
     let mut common = Vec::new();
