@@ -35,7 +35,7 @@ use std::collections::hash_map::Entry as MapEntry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use aqr_common::varint;
@@ -1629,36 +1629,21 @@ pub fn decode_value(c: &[u8], runner: &dyn Runner) -> Decoded<Value> {
 /// one and workers of [`aqr_common::pool`]). The first failure of a leaf, in their order, is
 /// the archive's.
 pub fn decode_value_with(c: &[u8], runner: &dyn Runner, threads: usize) -> Decoded<Value> {
-    let a = open(c, runner)?;
-    match a.tree() {
-        None => {
-            let leaves: Mutex<Vec<Option<Vec<Vec<u8>>>>> =
-                Mutex::new((0..a.blocks.leaves.len()).map(|_| None).collect());
-            a.leaves(threads, |i, outputs| {
-                leaves.lock().unwrap()[i] = Some(outputs);
-                Ok(())
-            })?;
-            // the first leaf as it is
-            let mut out = Vec::new();
-            for d in leaves.into_inner().unwrap().into_iter().flatten().flatten() {
-                if out.is_empty() {
-                    out = d;
-                } else {
-                    out.extend_from_slice(&d);
-                }
-            }
-            Ok(Value::File(out))
-        }
-        Some(t) => {
-            let files: Mutex<Vec<Vec<u8>>> = Mutex::new(vec![Vec::new(); a.contents_len()]);
-            a.contents(threads, |c, d| {
-                files.lock().unwrap()[c] = d;
-                Ok(())
-            })?;
-            Ok(Value::Tree(t.clone(), files.into_inner().unwrap()))
-        }
-    }
+    open(c, runner)?.value(threads)
 }
+
+/// How far [`Archive::each_leaf`] is, as it tells [`Archive::on_progress`]: the bytes of the
+/// data blocks decompressed (as they are in the archive, whether Zstandard data or not), and of
+/// the leaves' outputs evaluated, each of all of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reached {
+    pub decompressed: (u64, u64),
+    pub evaluated: (u64, u64),
+}
+
+/// What is told of [`Reached`], from any of the threads evaluating the leaves (not always in
+/// order: a later call may tell less).
+pub type Telling = Arc<dyn Fn(Reached) + Send + Sync>;
 
 /// A content of a tree: its leaf, its output of it and its size.
 type ContentRef = (usize, usize, u64);
@@ -1676,6 +1661,8 @@ pub struct Archive<'c, 'n> {
     tree: Option<(Tree, Vec<ContentRef>)>,
     /// The bytes of the leaves evaluated at once, by their weights ([`Archive::set_budget`]).
     budget: u64,
+    /// Told how far the evaluation is ([`Archive::on_progress`]).
+    tell: Option<Telling>,
 }
 
 /// Archive `c` opened, its modules run by `runner`.
@@ -1720,7 +1707,7 @@ pub fn open<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
     let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
-    Ok(Archive { blocks, runner, loaded, tree, budget: u64::MAX })
+    Ok(Archive { blocks, runner, loaded, tree, budget: u64::MAX, tell: None })
 }
 
 impl Archive<'_, '_> {
@@ -1735,6 +1722,11 @@ impl Archive<'_, '_> {
     /// application as it is made), short of what modules take within. None by default.
     pub fn set_budget(&mut self, bytes: u64) {
         self.budget = bytes;
+    }
+
+    /// Tells `tell` how far the evaluation of the leaves is as it goes (none: tells nothing).
+    pub fn on_progress(&mut self, tell: Option<Telling>) {
+        self.tell = tell;
     }
 
     /// The number of contents of the tree's files.
@@ -1788,17 +1780,31 @@ impl Archive<'_, '_> {
                 }
             }
         }
+        // by leaf, its weight and the bytes of its outputs
+        let (weights, lens): (Vec<u64>, Vec<u64>) = (blocks.leaves.iter().zip(&programs))
+            .map(|(leaf, p)| match (leaf, p) {
+                (&LeafBlock::Stored(d, zstd, checked), _) => {
+                    let n = stored_len(d, zstd, checked);
+                    (n, n)
+                }
+                (_, Some(p)) => p.weight(),
+                _ => (0, 0),
+            })
+            .unzip();
+        let stored = blocks.leaves.iter().map(|l| if let &LeafBlock::Stored(d, ..) = l { d.len() as u64 } else { 0 });
+        let data_len = stored.sum::<u64>() + blocks.non_leaf.iter().map(|(d, _)| d.len() as u64).sum::<u64>();
+        let tally = Tally {
+            tell: self.tell.as_deref(),
+            decompressed: AtomicU64::new(0),
+            evaluated: AtomicU64::new(0),
+            totals: (data_len, lens.iter().sum()),
+        };
+        tally.add(0, 0);
         let contents = Contents {
             refs: refs.into_iter().map(AtomicUsize::new).collect(),
             data: blocks.non_leaf.iter().map(|&(d, zstd)| Mutex::new(Slot::Raw(d, zstd))).collect(),
+            tally: &tally,
         };
-        let weights: Vec<u64> = (blocks.leaves.iter().zip(&programs))
-            .map(|(leaf, p)| match (leaf, p) {
-                (&LeafBlock::Stored(d, zstd, checked), _) => stored_len(d, zstd, checked),
-                (_, Some(p)) => p.weight(),
-                _ => 0,
-            })
-            .collect();
         let gate = Gate::new(self.budget);
         let programs: Vec<Mutex<Option<Program>>> = programs.into_iter().map(Mutex::new).collect();
         // each leaf on a worker of its own, which is given back as it is done, for those still
@@ -1809,16 +1815,53 @@ impl Archive<'_, '_> {
             |i| gate.admit(weights[i]),
             |i, _admitted| {
                 let outputs = match blocks.leaves[i] {
-                    LeafBlock::Stored(d, zstd, checked) => decoded(d, zstd, checked).map(|d| vec![d]),
+                    LeafBlock::Stored(raw, zstd, checked) => {
+                        let d = decoded(raw, zstd, checked);
+                        tally.add(raw.len() as u64, 0);
+                        d.map(|d| vec![d])
+                    }
                     LeafBlock::Formula { modules, resources, non_leaf, .. } => {
                         let p = programs[i].lock().unwrap().take().expect("each leaf once");
                         run(p, &env(modules, resources, non_leaf), &contents)
                     }
                 };
+                tally.add(0, lens[i]);
                 f(i, outputs)
             },
         );
         done.into_iter().collect()
+    }
+
+    /// What the archive holds, its leaves evaluated as [`Archive::leaves`] does.
+    pub fn value(&self, threads: usize) -> Decoded<Value> {
+        match self.tree() {
+            None => {
+                let leaves: Mutex<Vec<Option<Vec<Vec<u8>>>>> =
+                    Mutex::new((0..self.blocks.leaves.len()).map(|_| None).collect());
+                self.leaves(threads, |i, outputs| {
+                    leaves.lock().unwrap()[i] = Some(outputs);
+                    Ok(())
+                })?;
+                // the first leaf as it is
+                let mut out = Vec::new();
+                for d in leaves.into_inner().unwrap().into_iter().flatten().flatten() {
+                    if out.is_empty() {
+                        out = d;
+                    } else {
+                        out.extend_from_slice(&d);
+                    }
+                }
+                Ok(Value::File(out))
+            }
+            Some(t) => {
+                let files: Mutex<Vec<Vec<u8>>> = Mutex::new(vec![Vec::new(); self.contents_len()]);
+                self.contents(threads, |c, d| {
+                    files.lock().unwrap()[c] = d;
+                    Ok(())
+                })?;
+                Ok(Value::Tree(t.clone(), files.into_inner().unwrap()))
+            }
+        }
     }
 
     /// Evaluates every leaf as [`Archive::leaves`] does, giving `f` each content of the tree
@@ -2221,8 +2264,9 @@ struct Program<'a> {
 
 impl Program<'_> {
     /// The most bytes on the stack at once (with the inputs and outputs of an instruction as it
-    /// runs both), as the sizes the program tells: the weight of its leaf ([`Archive::set_budget`]).
-    fn weight(&self) -> u64 {
+    /// runs both), as the sizes the program tells: the weight of its leaf ([`Archive::set_budget`]);
+    /// and the bytes on it at the end, its outputs.
+    fn weight(&self) -> (u64, u64) {
         let (mut st, mut on, mut most) = (Vec::<u64>::new(), 0u64, 0u64);
         let pop = |st: &mut Vec<u64>, on: &mut u64, n: usize| -> u64 {
             let taken: u64 = st.drain(st.len().saturating_sub(n)..).sum();
@@ -2247,7 +2291,7 @@ impl Program<'_> {
             on = on.saturating_add(out);
             st.extend(outs);
         }
-        most
+        (most, on)
     }
 }
 
@@ -2423,9 +2467,30 @@ enum Item<'a> {
 
 /// The non-leaf blocks as formula blocks are evaluated (several at once), each with the slices
 /// of it yet to be evaluated or on a stack: once there are none, it is dropped.
-struct Contents<'c> {
+struct Contents<'c, 't> {
     data: Vec<Mutex<Slot<'c>>>,
     refs: Vec<AtomicUsize>,
+    /// Told of the blocks as they are decoded.
+    tally: &'t Tally<'t>,
+}
+
+/// How far the leaves' evaluation is, told as it goes where it is to be ([`Archive::on_progress`]).
+struct Tally<'t> {
+    tell: Option<&'t (dyn Fn(Reached) + Send + Sync)>,
+    decompressed: AtomicU64,
+    evaluated: AtomicU64,
+    /// Of all the data blocks and of all the outputs.
+    totals: (u64, u64),
+}
+
+impl Tally<'_> {
+    /// So many more bytes of the data blocks decompressed and of the outputs evaluated, told.
+    fn add(&self, decompressed: u64, evaluated: u64) {
+        let Some(tell) = self.tell else { return };
+        let d = self.decompressed.fetch_add(decompressed, Ordering::Relaxed) + decompressed;
+        let e = self.evaluated.fetch_add(evaluated, Ordering::Relaxed) + evaluated;
+        tell(Reached { decompressed: (d, self.totals.0), evaluated: (e, self.totals.1) });
+    }
 }
 
 /// A non-leaf block: its data as it is in the archive (and whether it is Zstandard data) until
@@ -2436,12 +2501,14 @@ enum Slot<'c> {
     Gone,
 }
 
-impl Contents<'_> {
+impl Contents<'_, '_> {
     /// The data of block `o`, while any slice of it is to be evaluated: decoded the first time.
     fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
         let mut s = self.data[o].lock().unwrap();
         if let Slot::Raw(d, zstd) = *s {
-            *s = Slot::Decoded(Arc::new(decoded(d, zstd, true)?));
+            let decoded = decoded(d, zstd, true);
+            self.tally.add(d.len() as u64, 0);
+            *s = Slot::Decoded(Arc::new(decoded?));
         }
         match &*s {
             Slot::Decoded(d) => Ok(d.clone()),
@@ -3437,6 +3504,43 @@ mod tests {
             content_block(out, false, &[b"xyz"], None);
         });
         assert_eq!(decode(&c, &natives()).unwrap(), b"zyyxzxyz");
+    }
+
+    /// The evaluation tells how far it is: nothing at first, then each block decoded and each
+    /// leaf evaluated, up to all the data blocks' bytes and all the outputs'.
+    #[test]
+    fn progress() {
+        let mut apply = vec![APPLY, 0, 0, 3, 1, 2, 3];
+        varint::put(&mut apply, MEMORY_LIMIT);
+        apply.extend_from_slice(&[2, 1, 4]);
+        let first =
+            [&[1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2][..], &apply, &[SLICE, 0, 2, 1, CONCAT, 2]].concat();
+        let second = [1, 0, 0, 0, SLICE, 0, 0, 3];
+        let c = archive(|out| {
+            block(out, MODULE, &always_compressed(&mut CCtx::create(), &[&stand_in(REV)], 3, 1).unwrap());
+            for _ in 0..3 {
+                for d in [&first[..], &second] {
+                    formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
+                }
+                content_block(out, false, &[b"xyz"], None);
+            }
+            content_block(out, true, &[b"uv"], None);
+        });
+        let natives = natives();
+        let mut a = open(&c, &natives).unwrap();
+        let told = Arc::new(Mutex::new(Vec::new()));
+        let t = told.clone();
+        a.on_progress(Some(Arc::new(move |r| t.lock().unwrap().push(r))));
+        assert_eq!(a.value(2).unwrap(), Value::File([&b"zyyxzxyz".repeat(3)[..], b"uv"].concat()));
+        let told = told.lock().unwrap();
+        // (the blocks' data with its checksum, and the outputs)
+        let totals = (3 * (3 + 8) + 2 + 8, 3 * 8 + 2);
+        // (at first, each non-leaf block, each formula leaf, the stored leaf decoded and evaluated)
+        assert_eq!(told.len(), 1 + 3 + 6 + 2);
+        assert_eq!(told[0], Reached { decompressed: (0, totals.0), evaluated: (0, totals.1) });
+        let most = told.iter().fold((0, 0), |m, r| (m.0.max(r.decompressed.0), m.1.max(r.evaluated.0)));
+        assert_eq!(most, totals);
+        assert!(told.iter().all(|r| (r.decompressed.1, r.evaluated.1) == totals));
     }
 
     /// Leaves evaluated within a budget, even of one at a time, give what they give without.

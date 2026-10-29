@@ -33,7 +33,8 @@
 //! file, what it was taken for, the modules its formula applies and the bytes of the archive
 //! that are its; the files stored together in a block (solid) or coded against each other
 //! (sets); the files of the same content as another. It is written a batch at a time, as the
-//! files are.
+//! files are. Decompressing (and testing), there is a bar too, of the blocks decompressed and
+//! the files evaluated ([`view::Decoding`]).
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -51,6 +52,7 @@ use aqr_compress::{Options, compress_formula_telling, compress_tree_to, detect, 
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, Value, name_bytes, name_from};
+use view::Ticking;
 
 const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
      [--batch MIB] [--no-check] [--wasm] [--no-sandbox] INPUT...";
@@ -348,12 +350,22 @@ fn bars() -> bool {
     std::io::stderr().is_terminal() && view::takes_escapes()
 }
 
-/// `work` done telling `view` how far it is (nothing, with -q), and the bar drawn again now and
-/// then (for the time a file takes) until it is done.
+/// `work` done telling `view` how far it is (nothing, with -q), its bar drawn as [`ticking`].
 fn viewed<T>(a: &Args, view: &view::View, work: impl FnOnce(&(dyn Fn(aqr_compress::Event) + Sync)) -> T) -> T {
+    ticking(a, view, || {
+        let quiet = |_: aqr_compress::Event| {};
+        let tell: &(dyn Fn(aqr_compress::Event) + Sync) = if a.quiet { &quiet } else { &|e| view.tell(e) };
+        work(tell)
+    })
+}
+
+/// `work` done with `view`'s bar drawn again now and then (for the time a file takes) until it
+/// is done, and once more then (none, with -q).
+fn ticking<T>(a: &Args, view: &dyn view::Ticking, work: impl FnOnce() -> T) -> T {
     let done = std::sync::atomic::AtomicBool::new(false);
+    let bars = !a.quiet && view.bars();
     std::thread::scope(|s| {
-        if !a.quiet && view.bars() {
+        if bars {
             s.spawn(|| {
                 while !done.load(std::sync::atomic::Ordering::Relaxed) {
                     std::thread::park_timeout(std::time::Duration::from_millis(250));
@@ -361,10 +373,11 @@ fn viewed<T>(a: &Args, view: &view::View, work: impl FnOnce(&(dyn Fn(aqr_compres
                 }
             });
         }
-        let quiet = |_: aqr_compress::Event| {};
-        let tell: &(dyn Fn(aqr_compress::Event) + Sync) = if a.quiet { &quiet } else { &|e| view.tell(e) };
-        let r = work(tell);
+        let r = work();
         done.store(true, std::sync::atomic::Ordering::Relaxed);
+        if bars {
+            view.tick();
+        }
         r
     })
 }
@@ -557,11 +570,18 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
     let mut archive = aqr::open(&c, runner).map_err(|e| err(&e))?;
-    archive.set_budget(DECODE_BUDGET);
+    let view = std::sync::Arc::new(view::Decoding::new(bars()));
+    if !a.quiet && view.bars() {
+        let view = view.clone();
+        archive.on_progress(Some(std::sync::Arc::new(move |r| view.tell(r))));
+    }
+    // (of a single file, the leaves all held for the file anyway)
+    if archive.tree().is_some() {
+        archive.set_budget(DECODE_BUDGET);
+    }
     match archive.tree() {
         None => {
-            drop(archive);
-            let d = aqr::decode_value_with(&c, runner, a.opt.threads).map_err(|e| err(&e))?;
+            let d = ticking(a, &*view, || archive.value(a.opt.threads)).map_err(|e| err(&e))?;
             let Value::File(d) = d else { unreachable!("an archive of a single file") };
             if !a.test {
                 write_whole(out, a.force, |w| w.write_all(&d))?;
@@ -578,19 +598,20 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
                 }
                 f
             });
-            archive
-                .contents(a.opt.threads, |c, d| {
+            ticking(a, &*view, || {
+                archive.contents(a.opt.threads, |c, d| {
                     n.fetch_add(files[c], std::sync::atomic::Ordering::Relaxed);
                     total.fetch_add(files[c] as u64 * d.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     Ok(())
                 })
-                .map_err(|e| err(&e))?;
+            })
+            .map_err(|e| err(&e))?;
             if !a.quiet {
                 summary_d(input, None, n.into_inner(), total.into_inner(), start);
             }
         }
         Some(t) => {
-            let (n, total) = extract(t, &archive, a.opt.threads, out, a.force, a.quiet)?;
+            let (n, total) = ticking(a, &*view, || extract(t, &archive, a.opt.threads, out, a.force, a.quiet))?;
             if !a.quiet {
                 summary_d(input, Some(out), n, total, start);
             }

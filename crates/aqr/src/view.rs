@@ -5,6 +5,10 @@
 //! (`-`, files looked at), the analysis (`=`, bytes recompressed) and the compression (`#`, bytes
 //! compressed and verified). Below it, the file recompressed the longest, where that is long,
 //! and how far it is where its recompressors tell.
+//!
+//! An archive being decoded has a bar of two ([`Decoding`]): the decompression (`=`, bytes of
+//! the data blocks as they are in the archive) and the evaluation (`#`, bytes of the leaves'
+//! outputs: the files).
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -12,6 +16,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use aqr_compress::{Event, Report};
+use aqr_formula::aqr::Reached;
 
 use crate::{Gathered, percent, size};
 
@@ -205,26 +210,100 @@ pub fn takes_escapes() -> bool {
     true
 }
 
+/// What an archive being decoded shows on standard error: on a terminal, a bar of how far it is.
+pub struct Decoding {
+    bar: bool,
+    /// How far it is (the most told of each), and whether the bar is drawn.
+    state: Mutex<(Option<Reached>, bool)>,
+}
+
+impl Decoding {
+    pub fn new(bar: bool) -> Decoding {
+        Decoding { bar, state: Mutex::default() }
+    }
+
+    pub fn tell(&self, r: Reached) {
+        let mut s = self.state.lock().unwrap();
+        // (told from several threads, not always in order)
+        let most = |a: (u64, u64), b: (u64, u64)| (a.0.max(b.0), b.1);
+        s.0 = Some(match s.0 {
+            Some(o) => Reached {
+                decompressed: most(o.decompressed, r.decompressed),
+                evaluated: most(o.evaluated, r.evaluated),
+            },
+            None => r,
+        });
+    }
+}
+
+impl Ticking for Decoding {
+    fn bars(&self) -> bool {
+        self.bar
+    }
+
+    /// Draws the bar again, in place of the one drawn last (none until anything is told).
+    fn tick(&self) {
+        let mut s = self.state.lock().unwrap();
+        let Some(r) = s.0 else { return };
+        // (the totals known from the start: none, nothing to do)
+        let share = |(done, total)| if total == 0 { 1.0 } else { share((done, total)) };
+        let (d, e) = (share(r.decompressed), share(r.evaluated));
+        let what = format!("{}% of {}, {}% decompressed", pc(e), size(r.evaluated.1 as f64), pc(d));
+        let line = fit(&format!("[{}] {what}", cells(&[('=', d), ('#', e)])), WIDTH);
+        // (to the start of the line drawn last, and all after it cleared)
+        let text = format!("{}{line}\n", if s.1 { "\x1b[1F\x1b[J" } else { "" });
+        s.1 = true;
+        let mut out = std::io::stderr().lock();
+        _ = out.write_all(text.as_bytes());
+        _ = out.flush();
+    }
+}
+
+/// What has a bar drawn again now and then, as long as it is at work.
+pub trait Ticking: Sync {
+    /// Whether the bar is drawn.
+    fn bars(&self) -> bool;
+    fn tick(&self);
+}
+
+impl Ticking for View<'_> {
+    fn bars(&self) -> bool {
+        self.bars()
+    }
+
+    fn tick(&self) {
+        self.tick()
+    }
+}
+
+/// The share `done` is of `total` (none of nothing), at most all.
+fn share((done, total): (u64, u64)) -> f64 {
+    if total == 0 { 0.0 } else { (done as f64 / total as f64).min(1.0) }
+}
+
+/// A share as a percentage, 100% only where it is all.
+fn pc(x: f64) -> f64 {
+    (100.0 * x).floor()
+}
+
+/// The cells of a bar of `phases` overlaid, each a character and its share: each phase shown as
+/// far as it or any after it is, those after it over it.
+fn cells(phases: &[(char, f64)]) -> String {
+    let cells = |x: f64| ((x * CELLS as f64).floor() as usize).min(CELLS);
+    let ends: Vec<usize> =
+        (0..phases.len()).map(|i| cells(phases[i..].iter().map(|p| p.1).fold(0.0, f64::max))).collect();
+    (0..CELLS).map(|i| (0..phases.len()).rev().find(|&k| i < ends[k]).map_or(' ', |k| phases[k].0)).collect()
+}
+
 /// The lines of the bar of `s`, and the file taking long, if any.
 fn bar(s: &State, slow: Option<String>) -> Vec<String> {
-    let share = |(done, total): (u64, u64)| if total == 0 { 0.0 } else { (done as f64 / total as f64).min(1.0) };
     let (p, a, c) = (share(s.probe), share(s.analysis), share(s.compression));
     // (nothing to look at once a batch is begun, as for a file alone: the probe done)
     let p = if s.probe.1 == 0 && (s.analysis.1 > 0 || s.compression.1 > 0) { 1.0 } else { p };
-    let cells = |x: f64| ((x * CELLS as f64).floor() as usize).min(CELLS);
-    let (cp, ca, cc) = (cells(p.max(a).max(c)), cells(a.max(c)), cells(c));
-    let mut b = String::with_capacity(CELLS);
-    b.extend((0..CELLS).map(|i| match i {
-        i if i < cc => '#',
-        i if i < ca => '=',
-        i if i < cp => '-',
-        _ => ' ',
-    }));
+    let b = cells(&[('-', p), ('=', a), ('#', c)]);
     let what = if p < 1.0 {
         format!("probing {}/{} files", s.probe.0, s.probe.1)
     } else {
-        // (100% only where it is all)
-        let pc = |x: f64| (100.0 * x).floor();
         format!("{}% of {}, {}% analyzed", pc(c), size(s.compression.1.max(s.analysis.1) as f64), pc(a))
     };
     let mut lines = vec![fit(&format!("[{b}] {what}"), WIDTH)];
