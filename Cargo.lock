@@ -146,6 +146,7 @@ dependencies = [
  "aqr-formula",
  "aqr-git",
  "aqr-gnu-gettext",
+ "aqr-ima",
  "aqr-infer-recs",
  "aqr-jpeg",
  "aqr-lz4",
@@ -257,6 +258,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-common",
  "aqr-formula",
+ "aqr-ima",
  "aqr-vorbis",
 ]
 
@@ -357,6 +359,7 @@ dependencies = [
  "aqr-flate",
  "aqr-git",
  "aqr-gnu-gettext",
+ "aqr-ima",
  "aqr-infer-recs",
  "aqr-jpeg",
  "aqr-lz4",

@@ -113,6 +113,9 @@ pub const OBJ: Module = aqr_obj::formula::MODULE;
 /// aqr-vorbis's Vorbis packets (each after its 16-bit length) from the stream's setup header and
 /// the record of their values. Parameters: the channels and block sizes; no resources.
 pub const VORBIS: Module = aqr_vorbis::formula::MODULE;
+/// aqr-ima's IMA ADPCM blocks from the record of their headers and nibbles. Parameters: the
+/// channels and bytes per channel; no resources.
+pub const IMA: Module = aqr_ima::formula::MODULE;
 /// A delimited text table (CSV, TSV, USV and the like) from its columns (aqr-xsv).
 pub const XSV: Module = aqr_xsv::formula::MODULE;
 /// Text of words and markup replaced by codes of a dictionary (aqr-wrt). Resources: the
@@ -135,7 +138,7 @@ pub const RECS_FIELDS: Module = aqr_infer_recs::formula::FIELDS;
 pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 39] = [
+pub const MODULES: [Module; 40] = [
     X86,
     ARM64,
     CIL,
@@ -167,6 +170,7 @@ pub const MODULES: [Module; 39] = [
     FITS_TABLE,
     OBJ,
     VORBIS,
+    IMA,
     XSV,
     WRT,
     WRT_HANGUL,
@@ -190,7 +194,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 26] = [
+const RECONS: [(Module, Decode); 27] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
     (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
@@ -209,6 +213,7 @@ const RECONS: [(Module, Decode); 26] = [
     (FITS_TABLE, |p, r, i, n, _| none(r).and_then(|_| aqr_fits::formula::decode_table(p, i, n).map_err(msg))),
     (OBJ, |p, r, i, n, t| none(r).and_then(|_| aqr_obj::formula::decode(p, i, n, t).map_err(msg))),
     (VORBIS, |p, r, i, n, _| none(r).and_then(|_| aqr_vorbis::formula::decode(p, i, n).map_err(msg))),
+    (IMA, |p, r, i, n, _| none(r).and_then(|_| aqr_ima::formula::decode(p, i, n).map_err(msg))),
     (XSV, |p, r, i, n, t| none(r).and_then(|_| aqr_xsv::formula::decode(p, i, n, t).map_err(msg))),
     (WRT, |p, r, i, n, t| aqr_wrt::formula::decode(p, r, i, n, t).map_err(msg)),
     (WRT_HANGUL, |p, r, i, n, t| aqr_wrt::formula::decode_hangul(p, r, i, n, t).map_err(msg)),

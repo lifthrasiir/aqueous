@@ -1,3 +1,6 @@
+//! `aqr-fsb ima FILE...|-`: the IMA ADPCM samples of FSB5 banks through aqr-ima's record and back,
+//! its size and speed.
+//!
 //! `aqr-fsb vorbis FILE...` (or `-` for the files' names on standard input): the Vorbis samples of FSB5 banks parsed to the values their
 //! packets code (aqr-vorbis), with their setups from the database, and written back; what the
 //! packets' bits code, by field.
@@ -111,15 +114,53 @@ fn sample(s: &mut Stats, setup: &Setup, data: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// `aqr-fsb ima`: each IMA ADPCM sample's whole blocks (Xbox ADPCM, 36 bytes a channel) through
+/// the record and back.
+fn ima(files: &[String]) {
+    let (mut data, mut record, mut samples, mut failed) = (0u64, 0u64, 0, 0);
+    let (mut te, mut td) = (0f64, 0f64);
+    for f in files {
+        let d = std::fs::read(f).unwrap_or_else(|e| panic!("{f}: {e}"));
+        let Some(l) = Layout::of(&d).filter(|l| l.codec == Codec::ImaAdpcm) else { continue };
+        for (range, h) in l.samples.iter().zip(&l.headers) {
+            let Some(layout) = aqr_ima::codec::Layout::new(h.channels, 36) else { continue };
+            let s = &d[range.clone()];
+            let t = Instant::now();
+            let (used, r) = aqr_ima::codec::encode(layout, s);
+            te += t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let back = aqr_ima::codec::decode(layout, &r, used);
+            td += t.elapsed().as_secs_f64();
+            samples += 1;
+            if back.as_deref() != Ok(&s[..used]) {
+                failed += 1;
+                eprintln!("{f}: a sample not decoded back");
+            }
+            data += used as u64;
+            record += r.len() as u64;
+        }
+    }
+    println!(
+        "{samples} samples ({failed} failed), {:.3} MB of blocks -> {:.3} MB ({:.2}%); encoding {:.1} MB/s, decoding {:.1} MB/s",
+        data as f64 / 1e6,
+        record as f64 / 1e6,
+        100.0 * record as f64 / data.max(1) as f64,
+        data as f64 / 1e6 / te,
+        data as f64 / 1e6 / td
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let Some((cmd, files)) = args.split_first().filter(|(c, _)| *c == "vorbis") else {
-        eprintln!("usage: aqr-fsb vorbis FILE... | -");
+    let Some((cmd, files)) = args.split_first().filter(|(c, _)| *c == "vorbis" || *c == "ima") else {
+        eprintln!("usage: aqr-fsb vorbis|ima FILE... | -");
         std::process::exit(2);
     };
-    let _ = cmd;
     let files: Vec<String> =
         if files == ["-"] { std::io::stdin().lines().map(|l| l.expect("a name")).collect() } else { files.to_vec() };
+    if cmd == "ima" {
+        return ima(&files);
+    }
     let db = setups::database().expect("the database");
     let mut s = Stats::default();
     let t = Instant::now();

@@ -8,11 +8,13 @@ skeletons that uses CRC-32's affinity (meet in the middle over the residues' end
 
 `fsb5` reads a bank's layout (its head, then each sample's data and header), and `formula`
 splits a bank into a stream per sample, the Vorbis samples rebuilt by aqr-vorbis's module from
-the records of their packets' values with their setups from the database.
+the records of their packets' values with their setups from the database, the IMA ADPCM samples
+by aqr-ima's from the records of their blocks.
 
 ```sh
 aqr-fsb vorbis FILE... | -    # Vorbis samples parsed, written back, recoded; bits by field
+aqr-fsb ima FILE... | -       # IMA ADPCM samples recoded and back; size and speed
 ```
 
-`FORMAT.md` specifies the database, the assembly and the search (§3–5), the split (§7) and the
-Vorbis samples (§8).
+`FORMAT.md` specifies the database, the assembly and the search (§3–5), the split (§7), the
+Vorbis samples (§8) and the IMA ADPCM samples (§9).

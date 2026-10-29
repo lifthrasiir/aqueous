@@ -94,6 +94,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/gnu-gettext-recons.block"),
     },
     Known {
+        name: "ima-recons",
+        version: 1,
+        sha512_256: hex("bd3ef6d18f20408c4875b8333a4c50a644bbd8988796f1569d4d12019b4f4df9"),
+        block: include_bytes!("../wasm/ima-recons.block"),
+    },
+    Known {
         name: "jpeg-recons",
         version: 2,
         sha512_256: hex("9222740c7c4dd5796639b3dead61cfa35acc5d766b4347a62b6667cea3cc9c93"),

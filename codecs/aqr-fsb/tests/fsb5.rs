@@ -198,3 +198,25 @@ fn vorbis_samples_through_the_module() {
     d[at..at + 4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
     assert!(formula::encode(&d, 1).unwrap().applies().is_empty());
 }
+
+#[test]
+fn ima_adpcm_samples_through_the_module() {
+    // two samples of whole blocks and some bytes after them (stereo: 72 bytes a block; samples
+    // of 32-byte units), and one of no whole block, kept as it is
+    let mut d = bank(7, &[72 * 4 + 64, 72 * 3 + 8, 32], 4);
+    let code = 1u64 << 5;
+    for i in 0..3 {
+        let p = 0x3C + 8 * i + if i > 0 { 8 } else { 0 };
+        let h = u64::from_le_bytes(d[p..p + 8].try_into().unwrap()) | code;
+        d[p..p + 8].copy_from_slice(&h.to_le_bytes());
+    }
+    let f = formula::encode(&d, 2).unwrap();
+    assert_eq!(f.applies().len(), 2);
+    let out = f
+        .eval(&|a: &Apply, inputs: &[&[u8]]| {
+            assert_eq!(a.module, aqr_ima::formula::MODULE);
+            aqr_ima::formula::decode(&a.params, inputs, a.len).map_err(|e| aqr_formula::Error::new(e.0))
+        })
+        .unwrap();
+    assert_eq!(out, d);
+}

@@ -24,6 +24,7 @@ Contents:
 6. [How the database was made](#6-how-the-database-was-made-informative) *(informative)*
 7. [FSB5 banks](#7-fsb5-banks-encoder) *(encoder)*
 8. [Vorbis samples](#8-vorbis-samples-encoder) *(encoder)*
+9. [IMA ADPCM samples](#9-ima-adpcm-samples-encoder) *(encoder)*
 
 ## 1. Conventions
 
@@ -206,10 +207,10 @@ the bytes before the data (class `fsb5/head`), a stream per sample's data (class
 follows the bank in the input (`fsb5/tail`), if anything.
 
 aqr-compress finds banks by their header, anywhere in data (and by the extension `.fsb`), takes a
-bank to the end of its data, and puts banks that share samples of 256 KiB or more (by their
+bank to the end of its data, and puts banks that share samples of 16 KiB or more (by their
 CRC-32 and size) in one batch, where the samples' streams they share are stored once. A bank's
-formula is taken only where it is smaller than the bank, so not for banks of no Vorbis samples
-taken (§8).
+formula is taken only where it is smaller than the bank, so not for banks of no samples taken
+(§8, §9).
 
 ## 8. Vorbis samples (encoder)
 
@@ -223,3 +224,10 @@ and gives the packets to aqr-vorbis's module `vorbis-recons` (codecs/aqr-vorbis/
 which takes them up to the length of 0: the sample is then that module's output and a stream of
 what follows (class `fsb5/vorbis-end`). A sample whose setup is not found, or whose packets do not
 parse under it, is kept as it is.
+
+## 9. IMA ADPCM samples (encoder)
+
+A sample of codec 7 is Xbox ADPCM: blocks of 36 bytes per channel (its header's channels), then
+its padding. `encode` gives its whole blocks to aqr-ima's module `ima-recons`
+(codecs/aqr-ima/FORMAT.md): the sample is then that module's output and a stream of what follows
+(class `fsb5/ima-end`). A sample of no whole block is kept as it is.

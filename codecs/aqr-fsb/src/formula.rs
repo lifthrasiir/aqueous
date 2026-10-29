@@ -1,7 +1,8 @@
 //! aqr-fsb as formulas (see aqr-formula): an FSB5 bank as its head and its samples' data, each a
 //! stream of its own (FORMAT.md §7), so that the samples banks share are stored once and the
 //! samples of a codec are compressed together. Vorbis samples whose setup the database has are
-//! rebuilt by aqr-vorbis's module from the record of their packets' values (§8).
+//! rebuilt by aqr-vorbis's module from the record of their packets' values (§8), IMA ADPCM
+//! samples by aqr-ima's from the record of their blocks (§9).
 
 use aqr_formula::{Formula, Node};
 use aqr_vorbis::setup::Ident;
@@ -13,6 +14,8 @@ pub use crate::fsb5::{extent, sample_sums, starts};
 
 /// FMOD's Vorbis block sizes.
 const BLOCKSIZES: [usize; 2] = [256, 2048];
+/// Bytes of an Xbox ADPCM block per channel.
+const XBOX_ADPCM: usize = 36;
 
 /// The class of the streams of samples of `codec`.
 fn class(codec: Codec) -> &'static str {
@@ -45,11 +48,15 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let samples = aqr_common::pool::par_map(l.samples.len(), threads, |i| {
         let data = &input[l.samples[i].clone()];
         let mut f = Formula::default();
-        let made = if l.codec == Codec::Vorbis { vorbis(&mut f, input, &l.headers[i], data) } else { None };
+        let made = match l.codec {
+            Codec::Vorbis => vorbis(&mut f, input, &l.headers[i], data),
+            Codec::ImaAdpcm => aqr_ima::codec::Layout::new(l.headers[i].channels, XBOX_ADPCM)
+                .and_then(|layout| aqr_ima::formula::blocks(&mut f, layout, data)),
+            _ => None,
+        };
+        let end = if l.codec == Codec::Vorbis { "fsb5/vorbis-end" } else { "fsb5/ima-end" };
         f.root = match made {
-            Some((node, used)) if used < data.len() => {
-                Node::concat([node, f.push("fsb5/vorbis-end", data[used..].to_vec())])
-            }
+            Some((node, used)) if used < data.len() => Node::concat([node, f.push(end, data[used..].to_vec())]),
             Some((node, _)) => node,
             None => f.push(class(l.codec), data.to_vec()),
         };

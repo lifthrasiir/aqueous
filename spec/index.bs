@@ -4642,6 +4642,10 @@ as follows:</p>
       <td>gnu-gettext-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-gnu-gettext/FORMAT.md">codecs/aqr-gnu-gettext/FORMAT.md</a>
     <tr>
+      <td><code>bd3ef6d18f20408c4875b8333a4c50a644bbd8988796f1569d4d12019b4f4df9</code>
+      <td>ima-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-ima/FORMAT.md">codecs/aqr-ima/FORMAT.md</a>
+    <tr>
       <td><code>9222740c7c4dd5796639b3dead61cfa35acc5d766b4347a62b6667cea3cc9c93</code>
       <td>jpeg-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-jpeg/FORMAT.md">codecs/aqr-jpeg/FORMAT.md</a>
