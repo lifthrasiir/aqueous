@@ -1,0 +1,26 @@
+[package]
+name = "aqr-lzx"
+version = "0.1.0"
+edition = "2024"
+description = "LZX chunks (as WIM files hold them) split into their data and a record of the parse, and rebuilt bit for bit"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+[dev-dependencies]
+memmap2 = "0.9"
+sha1 = { version = "0.10", default-features = false }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-lzx-check"
+path = "examples/check.rs"

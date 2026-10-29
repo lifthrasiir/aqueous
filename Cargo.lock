@@ -372,6 +372,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-lzx"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "memmap2",
+ "sha1",
+]
+
+[[package]]
 name = "aqr-modules"
 version = "0.1.0"
 dependencies = [
