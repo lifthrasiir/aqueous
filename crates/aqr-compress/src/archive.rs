@@ -300,6 +300,11 @@ fn compress_tree_noting<S: Source + ?Sized>(
 /// ([`together`]), as [`Held`] is.
 const TOGETHER_MIN: u64 = Held::MIN as u64;
 
+/// Samples of FSB5 banks of at least this many bytes tell banks that hold each other: a bank and
+/// its patches share many samples of tens of KiB (of The Crew's, 44 of 46 MB of Vorbis samples
+/// repeated, against 27 MB of samples of 256 KiB or more).
+const FSB_SAMPLE_MIN: u64 = 16 << 10;
+
 /// Members of ar, tar and cpio archives of at least this many bytes are looked for among the
 /// contents ([`together`]): the files of a tar archive are mostly small.
 const MEMBER_MIN: u64 = 4 << 10;
@@ -363,7 +368,7 @@ fn together<S: Source + ?Sized>(
         }
         // (banks sharing samples: a bank and its patches)
         if format == Some(detect::Format::Fsb5) && size <= TOGETHER_MAX {
-            held.extend(aqr_fsb::fsb5::sample_sums(&src.read(c)?, TOGETHER_MIN));
+            held.extend(aqr_fsb::fsb5::sample_sums(&src.read(c)?, FSB_SAMPLE_MIN));
         }
         let bundle = format.is_some_and(detect::Format::is_bundle);
         notes.send(Note::Looked);
