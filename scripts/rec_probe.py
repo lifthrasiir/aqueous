@@ -44,9 +44,15 @@ MAX_K = 1024
 MAX_WINDOWS = 8
 FINE_WINDOW = 1 << 12  # small tables: windows over the whole file, records up to FINE_K
 FINE_K = 64
-MAX_FINE_WINDOWS = 4096
+MAX_FINE_WINDOWS = 1024
 FINE_SPAN = 1 << 20  # how far a region grows from a small window
 MAX_REGIONS = 32
+# speed: what is measured on samples (None: on everything)
+LOCAL_CONTEXT = 1 << 20  # candidates are judged on themselves and this much around them
+FIELD_ROWS = 1024  # fields are chosen on 4 runs of this many records spread over the region
+CHAIN_SCREEN = 512  # chains of a span are screened on 8 entries and 8 columns, these kept
+FOLLOW_SAMPLE = 4096  # the best of them on this many entries, and FOLLOW_KEEP followed to the end
+FOLLOW_KEEP = 8
 MIN_RECORDS = 16
 FIELD_BITS = 16  # the description of a field, which breaks ties towards fewer, wider fields
 
@@ -246,8 +252,19 @@ def unxform(t, w, how, m=None, big=False):
     return out
 
 
+def sample_rows(m):
+    """FIELD_ROWS records from each of 4 places over m (all of m if that is not fewer)."""
+    n = len(m)
+    if not FIELD_ROWS or n <= 4 * FIELD_ROWS:
+        return m
+    starts = np.linspace(0, n - FIELD_ROWS, 4).astype(np.int64)
+    return np.concatenate([m[a:a + FIELD_ROWS] for a in starts])
+
+
 def split_fields(m, cost, refs=True):
-    """Fields of the records m (n × k): [(offset, width, big, how)] by DP over the code length."""
+    """Fields of the records m (n × k): [(offset, width, big, how)] by DP over the code length,
+    measured on sample_rows(m)."""
+    m = sample_rows(m)
     n, k = m.shape
     raw1 = [cost(m[:, o:o + 1]) for o in range(k)]
     best = [0.0] + [math.inf] * k
@@ -395,6 +412,9 @@ def find_chains(data, at=0, max_d=64, starts=TLV_STARTS, max_b=64, verbose=False
         lane = keep[varied]
         if not len(lane):
             continue
+        if CHAIN_SCREEN and P.shape[1] > CHAIN_SCREEN:
+            top = np.argsort(-chain_score(padded, P[:9], 8))[:CHAIN_SCREEN]
+            P, lane = P[:, top], lane[top]
         agree = chain_score(padded, P)
         for i in np.argsort(-agree)[:16]:
             key = tuple(P[:, i] + d)
@@ -404,7 +424,14 @@ def find_chains(data, at=0, max_d=64, starts=TLV_STARTS, max_b=64, verbose=False
     # through the whole file
     padded = np.concatenate([data, np.zeros(TLV_COLS, dtype=np.uint8)])
     chains = {}
-    for _, p0, d, kind, b, al in sorted(found.values(), reverse=True)[:64]:
+    hyps = sorted(found.values(), reverse=True)[:64]
+    if FOLLOW_SAMPLE:
+        # screened on their first entries, then the best followed through the file
+        def screen(h):
+            P = follow(data, *h[1:], limit=FOLLOW_SAMPLE)
+            return float(chain_score(padded, P[:, None])[0]) * (len(P) - 1)
+        hyps = sorted(hyps, key=screen, reverse=True)[:FOLLOW_KEEP]
+    for _, p0, d, kind, b, al in hyps:
         P = follow(data, p0, d, kind, b, al)
         sample = P[np.unique(np.linspace(0, len(P) - 1, min(len(P), 4097)).astype(np.int64))]
         per = float(chain_score(padded, sample[:, None])[0])
@@ -421,19 +448,20 @@ def find_chains(data, at=0, max_d=64, starts=TLV_STARTS, max_b=64, verbose=False
     return [r for r in ranked if r[0] > 0]
 
 
-def chain_score(padded, P):
+def chain_score(padded, P, ncols=TLV_COLS):
     """How much more often consecutive entries of chains P (entries × chains) agree in their
     leading bytes, column by column, than with bytes a multiple of 8 into the entry before:
     runs of zeros, text or periodic data (code) agree either way, and score nothing."""
-    cols = padded[P[:, :, None] + np.arange(TLV_COLS)]  # entries × chains × cols
+    cols = padded[P[:, :, None] + np.arange(ncols)]  # entries × chains × cols
     L = np.maximum(np.diff(P, axis=0) // 8, 1)
     u = 1 + (np.arange(len(L))[:, None] * 7919) % L
-    ctrl = padded[(P[:-1] + 8 * u)[:, :, None] + np.arange(TLV_COLS)]
+    ctrl = padded[(P[:-1] + 8 * u)[:, :, None] + np.arange(ncols)]
     return (cols[1:] == cols[:-1]).mean(axis=(0, 2)) - (cols[1:] == ctrl).mean(axis=(0, 2))
 
 
-def follow(data, p0, d, kind, b, al):
-    """Entry starts from p0 for as long as the entries hold, ending with where the last ends."""
+def follow(data, p0, d, kind, b, al, limit=None):
+    """Entry starts from p0 for as long as the entries hold (at most limit of them), ending with
+    where the last ends."""
     w, big, mask = TLV_KINDS[kind]
     n = len(data)
     out = [p0]
@@ -445,6 +473,8 @@ def follow(data, p0, d, kind, b, al):
             break
         p += L
         out.append(p)
+        if limit and len(out) > limit:
+            break
     return np.array(out, dtype=np.int64)
 
 
@@ -637,13 +667,21 @@ def auto_cands(data, max_k=MAX_K, cost=zbits, verbose=False):
 def choose(data, cands, z0):
     """The candidates to take, and in which form: (size, chosen, report lines).
 
-    Each is measured alone (its best form, the whole file under zstd -3). Gains of regions
-    apart roughly add up, so the set apart with the largest sum of gains is found first
-    (weighted interval scheduling: one big region of a little gain must not shut out the
-    tables it overlaps). Those, from the best, and then the rest, from the best, are taken
-    where they still make the whole file smaller among those taken before."""
-    alone = [min(size(data, [(c['s'], c['e'], f, c['forms'])]) for f in ('bytes', 'fields')) for c in cands]
-    gain = [z0 - a for a in alone]
+    Each is measured alone (its best form; under zstd -3, on itself and LOCAL_CONTEXT around
+    it, or the whole file). Gains of regions apart roughly add up, so the set apart with the
+    largest sum of gains is found first (weighted interval scheduling: one big region of a
+    little gain must not shut out the tables it overlaps). Those, from the best, and then the
+    rest, from the best, are taken where they still make it smaller among those taken before.
+    The size returned is z0 less the gains so measured."""
+    def taken(chosen):
+        return [(x['s'], x['e'], x['form'], x['forms']) for x in chosen]
+
+    def gains(c, chosen):
+        before = size(data, taken(chosen), c['s'], c['e'])
+        return {f: before - size(data, taken(chosen) + [(c['s'], c['e'], f, c['forms'])], c['s'], c['e'])
+                for f in ('bytes', 'fields')}
+
+    gain = [max(gains(c, []).values()) for c in cands]
     byend = sorted((i for i in range(len(cands)) if gain[i] > 0), key=lambda i: cands[i]['e'])
     ends = [cands[i]['e'] for i in byend]
     best_sum = [0] * (len(byend) + 1)
@@ -654,27 +692,25 @@ def choose(data, cands, z0):
     while j > 0:
         i = byend[j - 1]
         prev = bisect.bisect_right(ends, cands[i]['s'], 0, j - 1)
-        if best_sum[prev] + gain[i] >= best_sum[j - 1] and best_sum[j] == best_sum[prev] + gain[i]:
+        if best_sum[j] == best_sum[prev] + gain[i]:
             picked.add(i)
             j = prev
         else:
             j -= 1
-    order = sorted(picked, key=lambda i: alone[i]) + sorted(set(range(len(cands))) - picked, key=lambda i: alone[i])
+    order = sorted(picked, key=lambda i: -gain[i]) + sorted(set(range(len(cands))) - picked, key=lambda i: -gain[i])
     chosen, best, lines = [], z0, []
     for c in (cands[i] for i in order):
         s, e, label, forms = c['s'], c['e'], c['label'], c['forms']
         if any(s < x['e'] and x['s'] < e for x in chosen):
             lines.append(f'  {s:#x}..{e:#x} {label}: overlaps')
             continue
-        sizes = {f: size(data, [(x['s'], x['e'], x['form'], x['forms']) for x in chosen] + [(s, e, f, forms)])
-                 for f in ('bytes', 'fields')}
-        f = min(sizes, key=sizes.get)
+        g = gains(c, chosen)
+        f = max(g, key=g.get)
         lines.append(f'  {s:#x}..{e:#x} {label} ({(e - s) / len(data):.1%}):'
-                     f' bytes {sizes["bytes"] - best:+}, fields {sizes["fields"] - best:+}'
-                     f'{"" if sizes[f] < best else ", left"}')
+                     f' bytes {-g["bytes"]:+}, fields {-g["fields"]:+}{"" if g[f] > 0 else ", left"}')
         lines.append(f'    {forms["desc"]}')
-        if sizes[f] < best:
-            best = sizes[f]
+        if g[f] > 0:
+            best -= g[f]
             chosen.append(dict(c, form=f))
     return best, chosen, lines
 
@@ -689,12 +725,21 @@ def probe(args):
     return '\n'.join([f'{path}: {len(data)} B, zstd -3 {z0} -> {best} ({best / z0:.3f})'] + lines)
 
 
-def size(data, chosen):
-    out, at = [], 0
-    for s, e, f, forms in sorted(chosen, key=lambda c: c[0]):
-        out += [data[at:s].tobytes(), forms[f]]
-        at = e
-    out.append(data[at:].tobytes())
+def size(data, chosen, s=None, e=None):
+    """zstd -3 of the file with the regions chosen (start, end, form, forms) in their forms; of
+    [s, e) and LOCAL_CONTEXT around it if given, widened to hold whole the regions it meets."""
+    lo, hi = 0, len(data)
+    if s is not None and LOCAL_CONTEXT is not None:
+        lo, hi = max(0, s - LOCAL_CONTEXT), min(len(data), e + LOCAL_CONTEXT)
+        for cs, ce, _, _ in chosen:
+            if cs < hi and lo < ce:
+                lo, hi = min(lo, cs), max(hi, ce)
+    out, at = [], lo
+    for cs, ce, f, forms in sorted(chosen, key=lambda c: c[0]):
+        if cs < hi and lo < ce:
+            out += [data[at:cs].tobytes(), forms[f]]
+            at = ce
+    out.append(data[at:hi].tobytes())
     return len(_zc.compress(b''.join(out)))
 
 
