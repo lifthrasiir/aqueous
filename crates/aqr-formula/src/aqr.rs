@@ -7,8 +7,9 @@
 //!
 //! A module block holds the Wasm module of a [`Module`], which the [`Encoder`] is given
 //! ([`Encoder::with_modules`]), and a [`Runner`] runs it in decoding: natively where it knows
-//! the module, say. Applications declare no memory limit ([`MEMORY_LIMIT`]). [`natives`] runs
-//! modules by [`crate::Modules`], on [`stand_in`]s by default, for tests and measurements.
+//! the module, say. Applications declare the memory limit of [`crate::Apply::memory_limit`]
+//! (set by [`crate::Formula::declare_memory`]). [`natives`] runs modules by
+//! [`crate::Modules`], on [`stand_in`]s by default, for tests and measurements.
 //!
 //! [`Encoder`] encodes several formulas, compressing each stream and resource once however
 //! many hold it, at the zstd level that its [`Level`] picks for it, a long one (8 MiB or more)
@@ -58,8 +59,9 @@ const ENCRYPTED_HEADER_TYPE: u64 = 0x155_04dc_a579;
 
 /// The name of the custom section naming the module of a [`stand_in`].
 const STAND_IN_SECTION: &str = "aqueous-stand-in";
-/// The memory limit of every application, as no module declares one yet.
-pub const MEMORY_LIMIT: u64 = u64::MAX;
+/// The largest memory limit, of an application declaring none ([`crate::NO_LIMIT`]): what the
+/// instruction bounds are made for.
+pub const MEMORY_LIMIT: u64 = crate::NO_LIMIT;
 
 // Block types with a u8 size field, all with checksums; `+ 0..=3` widens the size field.
 const LEAF_RAW: u64 = 0x24;
@@ -313,6 +315,11 @@ const MODULE_LEVEL: i32 = 22;
 /// made once ([`Wasm::Block`]).
 pub fn module_block_data(wasm: &[u8]) -> Result<Vec<u8>> {
     always_compressed(&mut CCtx::create(), &[wasm], MODULE_LEVEL, 1)
+}
+
+/// The Wasm module of the data of its module block ([`module_block_data`]).
+pub fn module_of_block_data(d: &[u8]) -> Option<Vec<u8>> {
+    decoded(d, true, true).ok()
 }
 
 /// A stream's (or resource's) hash and length.
@@ -713,7 +720,7 @@ impl Emit<'_> {
         }
         varint::put(out, a.params.len() as u64);
         out.extend_from_slice(&a.params);
-        varint::put(out, MEMORY_LIMIT);
+        varint::put(out, a.memory_limit);
         varint::put(out, a.inputs.len() as u64);
         varint::put(out, sizes.len() as u64);
         sizes.iter().for_each(|&n| varint::put(out, n));
@@ -1580,7 +1587,7 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
                 resources: &[Resource],
                 inputs: &[&[u8]],
                 sizes: &[u64],
-                _: u64,
+                memory_limit: u64,
             ) -> Decoded<Vec<Vec<u8>>> {
                 let a = crate::Apply {
                     module: self.module,
@@ -1588,6 +1595,7 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
                     params: params.to_vec(),
                     inputs: Vec::new(),
                     len: sizes.iter().sum(),
+                    memory_limit,
                 };
                 match sizes {
                     [_] => self.m.apply(&a, inputs).map(|out| vec![out]),
@@ -2728,7 +2736,14 @@ mod tests {
         let mut f = Formula::default();
         let a = f.push("a", noise.clone());
         let d = f.push_as("d", Kind::Compressed, crate::patch::make(&noise[..6000], &target, 3).unwrap());
-        let cut = crate::Apply { module: CUT, resources: vec![], params: vec![], inputs: vec![a], len: 0 };
+        let cut = crate::Apply {
+            module: CUT,
+            resources: vec![],
+            params: vec![],
+            inputs: vec![a],
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+        };
         let [o0, o1] = <[Node; 2]>::try_from(f.share(cut, vec![6000, 4000])).unwrap();
         f.root = Node::concat([o1, Node::patch(o0, d, 6000)]);
         let want = [&noise[6000..], &target[..]].concat();
@@ -2750,7 +2765,14 @@ mod tests {
     fn shared_outputs() {
         let mut f = Formula::default();
         let a = f.push("a", b"abcdefgh".to_vec());
-        let cut = |inputs| crate::Apply { module: CUT, resources: vec![], params: vec![], inputs, len: 0 };
+        let cut = |inputs| crate::Apply {
+            module: CUT,
+            resources: vec![],
+            params: vec![],
+            inputs,
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+        };
         let [o0, o1] = <[Node; 2]>::try_from(f.share(cut(vec![a]), vec![3, 5])).unwrap();
         let [p0, p1] = <[Node; 2]>::try_from(f.share(cut(vec![o1, Node::slice(0, 0, 2)]), vec![1, 6])).unwrap();
         f.root = Node::concat([p1, Node::slice(0, 7, 1), o0, Node::apply(REV, vec![1, 2, 3], vec![p0], 1)]);
@@ -2772,7 +2794,14 @@ mod tests {
     fn split_outputs() {
         let mut f = Formula::default();
         let a = f.push("a", b"abcdefgh".to_vec());
-        let rev = crate::Apply { module: REV, resources: vec![], params: vec![1, 2, 3], inputs: vec![a], len: 0 };
+        let rev = crate::Apply {
+            module: REV,
+            resources: vec![],
+            params: vec![1, 2, 3],
+            inputs: vec![a],
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+        };
         let [o0, o1, o2] = <[Node; 3]>::try_from(f.split(rev, vec![3, 0, 5])).unwrap();
         f.root = Node::concat([o2, Node::slice(0, 0, 1), o1, o0]);
         assert!(f.to_string().starts_with("shared #0 rev@1 split 3 0 5"));

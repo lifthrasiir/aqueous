@@ -6,7 +6,9 @@
 //!
 //! Columns: the module, m (the outputs' bytes), I (the parameters', resources' and inputs'
 //! bytes), the peak of the working memories, that peak over m, and the module's estimate of it
-//! (`Module::memory_usage_in_pages`, in bytes) over the peak, `!` where it is below the peak.
+//! (`Module::memory_usage_in_pages`, in bytes) over the peak, `!` where it is below the peak;
+//! and the memory limit declared over the total (the peak and the memories imported), `-` for
+//! none.
 
 use aqr_decompress::Wasm;
 use aqr_formula::aqr;
@@ -19,7 +21,7 @@ fn main() {
         // (the workers of the pool, which poll the tasks with the calling thread)
         aqr_common::pool::init(t.saturating_sub(1).max(1));
     }
-    println!("{:<22} {:>12} {:>12} {:>12} {:>7} {:>7}", "module", "m", "I", "working", "w/m", "est/w");
+    println!("{:<22} {:>12} {:>12} {:>12} {:>7} {:>7} {:>7}", "module", "m", "I", "working", "w/m", "est/w", "lim/t");
     for f in args {
         let c = std::fs::read(&f).unwrap_or_else(|e| panic!("{f}: {e}"));
         aqr_decompress::record_applications(true);
@@ -39,8 +41,12 @@ fn main() {
                 Some(e) => format!("{:>7.2}{}", e as f64 / a.working as f64, if e < a.working { "!" } else { "" }),
                 None => format!("{:>7}", "-"),
             };
+            let lim = match a.limit {
+                u64::MAX => format!("{:>7}", "-"),
+                l => format!("{:>7.2}", l as f64 / (a.working + a.imported) as f64),
+            };
             println!(
-                "  {:<20} {:>12} {:>12} {:>12} {:>7.2} {est}{}",
+                "  {:<20} {:>12} {:>12} {:>12} {:>7.2} {est} {lim}{}",
                 name,
                 m,
                 i,

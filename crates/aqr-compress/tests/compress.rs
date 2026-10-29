@@ -1210,3 +1210,26 @@ fn bundles_not_deeper() {
     let f = roundtrip(&d, &Options { smaller: false, ..Options::default() });
     assert_eq!(modules(&f), [FLATE.name, BUNDLE.name, ZIP.name, JPEG.name], "{f}");
 }
+
+/// The archive declares each application's memory limit from its module's estimate, and the
+/// modules run as WebAssembly within it: a FLAC file (a pipeline of tasks) and a JPEG, kept
+/// recompressed however small, with verification on and off (the limits worked out by the
+/// prevalidation, or of their own).
+#[test]
+fn memory_declared() {
+    let files = [fixture("codecs/aqr-flac/tests/data/s16_f5.flac"), fixture("codecs/aqr-jpeg/tests/data/gradient.jpg")];
+    for d in &files {
+        for verify in [true, false] {
+            let c = compress(d, &Options { verify, ..all() });
+            aqr_decompress::record_applications(true);
+            let out = aqr::decode(&c, &aqr_decompress::Wasm);
+            let applied = aqr_decompress::record_applications(false);
+            assert!(out.as_ref().is_ok_and(|o| o == d), "{:?}", out.err());
+            assert!(!applied.is_empty(), "no application");
+            for a in applied {
+                assert!(a.limit != u64::MAX, "no limit declared");
+                assert!(a.limit >= a.working + a.imported, "{} < {} + {}", a.limit, a.working, a.imported);
+            }
+        }
+    }
+}

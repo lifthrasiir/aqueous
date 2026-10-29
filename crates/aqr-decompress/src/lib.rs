@@ -274,6 +274,21 @@ pub fn built(m: Module) -> Option<&'static aqr_modules::Known> {
     aqr_modules::KNOWN.iter().find(|k| k.name == m.name && k.version == m.version)
 }
 
+/// The pages of the working memory of the Wasm module of `m` (aqr-modules') as it is
+/// instantiated, for its memory estimate ([`aqr_formula::Usage::initial_pages`]); read once.
+#[cfg(feature = "wasm")]
+pub fn initial_pages_of(m: Module) -> Option<u64> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static PAGES: Mutex<Option<HashMap<(&str, u16), Option<u64>>>> = Mutex::new(None);
+    let k = built(m)?;
+    let mut pages = PAGES.lock().unwrap();
+    *pages
+        .get_or_insert_with(HashMap::new)
+        .entry((k.name, k.version))
+        .or_insert_with(|| aqr_formula::aqr::module_of_block_data(k.block).and_then(|wasm| wasm::initial_pages(&wasm)))
+}
+
 /// The name of the module of `wasm` ([`known`]), for [`aqr::Natives::identified_by`].
 pub fn identify(wasm: &[u8]) -> Option<String> {
     known(wasm).map(|m| m.to_string())

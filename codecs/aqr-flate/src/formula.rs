@@ -429,9 +429,7 @@ fn groups(sizes: &[u64]) -> Vec<Group> {
 /// complete (see [`Stream::run`]). Then the streams, and the output made (or made larger).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let derived = Derived::from_params(u.params).ok()?;
-    let [data, records, index] = u.contents else {
-        return None;
-    };
+    let [data, records, index] = u.all_contents()?;
     let items = cut_items(data, records, index)?;
     let k = items.len() as u64;
     let l = u.output().checked_sub(k * derived.bytes() as u64)?;
@@ -520,6 +518,7 @@ pub fn apply(
         params: derived.params(),
         inputs: vec![data, records, index],
         len,
+        memory_limit: aqr_formula::NO_LIMIT,
     })
 }
 
@@ -704,7 +703,7 @@ mod tests {
                 resources: &[],
                 inputs: &[d.len() as u64, r.len() as u64, 0],
                 outputs: &[raw.len() as u64],
-                contents: &[&d, &r, &[]],
+                contents: &vec![&d[..], &r[..], &[][..]],
                 initial_pages: 20,
             };
             let est = memory(&u).expect("an estimate");

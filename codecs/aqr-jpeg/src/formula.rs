@@ -42,9 +42,9 @@ const BLOCK: u64 = 136;
 ///   thread, each coded in chunks (parts of twice the bytes, the shifted bits, pieces; the
 ///   progressive encoder's lists), the scans held until the output is made of them.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let ([progressive @ (0 | 1)], [head, embedded, cut, info, scans, _, lens, _, _]) = (u.params, u.contents) else {
-        return None;
-    };
+    let ([progressive @ (0 | 1)], 9) = (u.params, u.inputs.len()) else { return None };
+    let c = |k| u.content(k);
+    let (head, embedded, cut, info, scans, lens) = (c(0)?, c(1)?, c(2)?, c(3)?, c(4)?, c(6)?);
     let mut p = 0;
     let entries = codec::parse_entries(head, &mut p).ok()?;
     let items = aqr_common::packed::unpack(embedded)?;

@@ -142,7 +142,8 @@ pub fn encode_set(
         records.push(f.push_as("png/records", Kind::Compressed, recs));
     }
     let inputs = vec![Node::pack(sks), Node::pack(indexes), Node::pack(records)];
-    let a = Apply { module: SET_MODULE, resources: vec![], params, inputs, len: 0 };
+    let a =
+        Apply { module: SET_MODULE, resources: vec![], params, inputs, len: 0, memory_limit: aqr_formula::NO_LIMIT };
     let outputs = f.split(a, files.iter().map(|d| d.len() as u64).collect());
     f.root = Node::Concat(outputs);
     Some(f)
@@ -153,7 +154,7 @@ pub fn encode_set(
 
 /// The memory of `png-recons`: [`rebuild`] of the file in the memory as it is started.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let (&[], &[sk, index, records]) = (u.params, u.contents) else { return None };
+    let (&[], Some([sk, index, records])) = (u.params, u.all_contents()) else { return None };
     let f = File::parse(sk, index, records, false)?;
     Some(slack(rebuild(&f, u.base(), THREADS, u.output()).peak))
 }
@@ -161,7 +162,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 /// The memory of `png-against`: the same after the reference file's images are parsed
 /// ([`references_memory`]), whose references the tasks copy.
 fn memory_against(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let (&[], &[sk, index, records, reference]) = (u.params, u.contents) else { return None };
+    let (&[], Some([sk, index, records, reference])) = (u.params, u.all_contents()) else { return None };
     let f = File::parse(sk, index, records, false)?;
     Some(slack(rebuild(&f, u.base() + references_memory(reference)?, THREADS, u.output()).peak))
 }
@@ -175,7 +176,7 @@ fn memory_against(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 /// are made, and the files and references as they are got); each task is a copy of the memory
 /// it spawns from (the high-water mark of all that came before) and what [`rebuild`] adds.
 fn memory_set(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[sks, indexes, records] = u.contents else { return None };
+    let [sks, indexes, records] = u.all_contents()?;
     let mut at = 0;
     let n = codec::get_varint(u.params, &mut at).ok()?;
     if n > u.params.len() as u64 {
@@ -682,7 +683,7 @@ mod tests {
             resources: &[],
             inputs: &[sk.len() as u64, index.len() as u64, records.len() as u64],
             outputs: &[file.len() as u64],
-            contents: &[sk, index, records],
+            contents: &vec![sk, index, records],
             initial_pages: 17,
         };
         let est = memory(&u).expect("an estimate");
@@ -698,7 +699,7 @@ mod tests {
             resources: &[],
             inputs: &[sk.len() as u64, index.len() as u64, records.len() as u64, reference.len() as u64],
             outputs: &[other.len() as u64],
-            contents: &[sk, index, records, reference],
+            contents: &vec![sk, index, records, reference],
             initial_pages: 17,
         };
         let against = memory_against(&u).expect("an estimate");

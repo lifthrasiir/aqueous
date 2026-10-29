@@ -647,6 +647,7 @@ fn make<S: Source + ?Sized>(
     }
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
     cx.files = None;
+    crate::memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     notes.send(Note::Analyzed);
 
     // a leaf for each file, or for each set of them

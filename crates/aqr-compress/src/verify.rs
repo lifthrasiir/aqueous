@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
+use crate::memory::{self, Limits};
 use aqr_decompress::Native;
 use aqr_formula::{Apply, Formula, Modules, Node, Result, Shared};
 use xxhash_rust::xxh3::Xxh3;
@@ -44,9 +45,10 @@ enum Output {
     File(usize, Range<usize>),
 }
 
-/// Outputs of applications, by [`key`].
+/// Outputs of applications, by [`key`]; and their memory limits, worked out as they are run
+/// ([`crate::memory`]).
 #[derive(Default)]
-pub(crate) struct Memo(HashMap<Key, Output>);
+pub(crate) struct Memo(HashMap<Key, Output>, pub Limits);
 
 impl Memo {
     /// Bytes of the outputs kept.
@@ -62,6 +64,7 @@ struct Recording {
     native: Native,
     file: Vec<(usize, usize, Range<usize>)>,
     seen: Mutex<Vec<(Key, Output)>>,
+    limits: Mutex<Limits>,
     /// Outputs of applications run beforehand, by address ([`ahead`]).
     ahead: Mutex<HashMap<usize, Vec<u8>>>,
 }
@@ -78,12 +81,23 @@ impl Modules for Recording {
             None => Output::Bytes(Arc::new(out.clone())),
         };
         self.seen.lock().unwrap().push((key(a, inputs), kept));
+        self.limit(a, &[a.len], inputs);
         Ok(out)
     }
 
     // (not kept)
     fn apply_shared(&self, s: &Shared, inputs: &[&[u8]]) -> Result<Vec<Vec<u8>>> {
+        self.limit(&s.apply, &s.sizes, inputs);
         self.native.apply_shared(s, inputs)
+    }
+}
+
+impl Recording {
+    /// The memory limit of `a` of outputs of `sizes` on `inputs`, kept.
+    fn limit(&self, a: &Apply, sizes: &[u64], inputs: &[&[u8]]) {
+        let lens: Vec<u64> = inputs.iter().map(|i| i.len() as u64).collect();
+        let l = memory::limit(a, &lens, sizes, &inputs.to_vec());
+        self.limits.lock().unwrap().put(memory::shape(a, &lens), l);
     }
 }
 
@@ -207,7 +221,9 @@ impl Prevalidator {
         let eval = move || {
             let mut m = Memo::default();
             evaluate(j.0, threads, &mut m);
-            memo.lock().unwrap().0.extend(m.0);
+            let mut memo = memo.lock().unwrap();
+            memo.0.extend(m.0);
+            memo.1.extend(m.1);
         };
         let mut worker = aqr_common::pool::reserve(1);
         match worker.is_empty() {
@@ -239,12 +255,14 @@ fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
         native,
         file: at.map_or_else(Vec::new, |(i, at)| top(&f.root, i, at)),
         seen: Mutex::default(),
+        limits: Mutex::default(),
         ahead,
     };
     let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
     drop(f);
     if good {
         memo.0.extend(r.seen.into_inner().unwrap());
+        memo.1.extend(r.limits.into_inner().unwrap());
     }
 }
 

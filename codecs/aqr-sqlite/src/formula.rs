@@ -168,10 +168,8 @@ fn grown_by_pushes(n: u64) -> u64 {
 /// (a task starts as another ends), each on its copy of `W` as it was at the spawn, and a page
 /// of slack for each large vector.
 fn memory(u: &Usage<'_>) -> Option<u64> {
-    if u.contents.len() != NSTREAMS {
-        return None;
-    }
-    let (gs, overflow) = groups(u.contents)?;
+    let s: [&[u8]; NSTREAMS] = u.all_contents()?;
+    let (gs, overflow) = groups(&s)?;
     let mut r = Rd::new(u.params);
     let (psize, usable) = (r.usize().ok()? as u64, r.usize().ok()? as u64);
     let len = u.output();

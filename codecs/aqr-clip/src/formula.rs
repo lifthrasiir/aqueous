@@ -48,7 +48,7 @@ const TOKENS: u64 = 32767;
 /// With one batch there are no tasks (the spawner decodes it) nor bytes. The output is made at
 /// its size after them, with the references to the distinct tiles (8 bytes each).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[skeleton, index, _, _] = u.contents else { return None };
+    let (4, Some(skeleton), Some(index)) = (u.inputs.len(), u.content(0), u.content(1)) else { return None };
     let mut at = 0;
     let per =
         varint::get(u.params, &mut at).ok().filter(|&p| at == u.params.len() && (1..=MAX_BATCH as u64).contains(&p))?;

@@ -105,6 +105,7 @@ mod extent;
 mod flate;
 mod git;
 pub mod mapped;
+mod memory;
 mod progress;
 mod sets;
 mod verify;
@@ -572,6 +573,7 @@ fn finish(
     use progress::Note;
     // the streams of a class together, as they compress smaller
     f.merge_classes();
+    memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     let sum = Some(aqr::checksum(d));
     let c = cx.enc.encode(&f, sum);
     notes.inspect(|n| n.send(Note::Encoded(1, 1)));

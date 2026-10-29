@@ -553,7 +553,14 @@ mod tests {
         f.push("solid", b"0123456789".to_vec());
         let solid = |start, len| Node::slice(1, start, len);
         let x = f.push_as("x", Kind::Compressed, b"hello".to_vec());
-        let cut = Apply { module: CUT, resources: vec![], params: vec![], inputs: vec![solid(2, 6)], len: 0 };
+        let cut = Apply {
+            module: CUT,
+            resources: vec![],
+            params: vec![],
+            inputs: vec![solid(2, 6)],
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+        };
         let outs = f.share(cut, vec![2, 4]);
         let rev = Node::apply(REV, vec![1, 2, 3], vec![x, solid(0, 2)], 7);
         let leaf = |outputs: Vec<Node>, sums: Vec<Option<u64>>| Leaf { outputs, sums };

@@ -88,6 +88,11 @@ optimization picked by hash.
   `aqr_task_slots`, which aqr-ld checks), its code given N as its threads. Other
   `par_map`/`scope` uses run serially in Wasm. Port a pipeline only when its speedup is worth
   the module's growth; report both (png, psd and mp3 were measured and not ported).
+- Memory: each Module carries an estimate of its working memory (`Module::new(..).with_memory`
+  in the codec's `formula.rs`; `docs/arena-design.md`), from which aqr-compress declares each
+  application's `apply_memory_limit` (`crates/aqr-compress/src/memory.rs`). Changing what a
+  module allocates means changing its estimate; aqr-decompress's ignored test `estimates_hold`
+  checks them against the samples of `scripts/module-memory.sh`.
 - Size: aqr-ld trims modules itself (prefer automating in aqr-ld over toolchain flags);
   `AQR_LD_NAMES=1` keeps the name section for size debugging. Module error types must
   implement `Display` (`Debug` of `&str` pulls in core's Unicode tables).

@@ -17,7 +17,7 @@ pub const MODULE: Module = Module::new("flac-recons", 3).with_memory(memory);
 /// block (STREAMINFO's maximum block size) of all its channels.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let &[.., words, raw0, raw1] = u.inputs else { return None };
-    let prefix = u.contents.get(codec::S_PREFIX)?;
+    let prefix = u.content(codec::S_PREFIX)?;
     let (si, _) = crate::flac::parse_metadata(prefix)?;
     // (STREAMINFO is the first block: its maximum block size 2 bytes in)
     let at = prefix.windows(4).position(|w| w == b"fLaC")? + 8;

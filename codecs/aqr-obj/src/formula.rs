@@ -21,7 +21,7 @@ pub const MODULE: Module = Module::new("obj-recons", 1).with_memory(memory);
 /// the template stream at most (in all blocks) up to 4 MiB, a vector twice that at most, and
 /// their keys (8 bytes each, a byte each at least).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let &[index, ..] = u.contents else { return None };
+    let index = u.content(0)?;
     let (mut ix, mut block, mut streams) = (crate::varint::Rd::new(index), 0u64, [0u64; NSTREAMS]);
     let mut tpl = 0u64;
     while !ix.done() {

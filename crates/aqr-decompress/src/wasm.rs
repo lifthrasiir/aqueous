@@ -891,6 +891,7 @@ impl Shared {
                 contents: inputs.iter().map(|i| i.to_vec()).collect(),
                 sizes: sizes.to_vec(),
                 imported,
+                limit: memory_limit,
                 working: app.peak.load(Ordering::Relaxed).saturating_sub(imported),
                 ok: r.is_ok(),
             });
@@ -931,6 +932,8 @@ pub struct Applied {
     pub sizes: Vec<u64>,
     /// The bytes of the memories imported but the working memory, which are made at the start.
     pub imported: u64,
+    /// The memory limit declared.
+    pub limit: u64,
     /// The peak of everything else in the memory limit's total: the working memories of the
     /// application's instance and of its tasks, and the messages queued in its channels.
     pub working: u64,

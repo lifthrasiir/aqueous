@@ -87,8 +87,14 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let record = f.push_as("lzo/record", Kind::Compressed, records);
     let index = f.push("lzo/index", index(&lens.iter().map(|&(d, r, _)| (d, r)).collect::<Vec<_>>()));
     let input_data = Node::concat(inputs.iter().map(|&(a, n)| Node::slice(1, a as u64, n as u64)));
-    let a =
-        Apply { module: MODULE, resources: vec![], params: vec![], inputs: vec![input_data, record, index], len: 0 };
+    let a = Apply {
+        module: MODULE,
+        resources: vec![],
+        params: vec![],
+        inputs: vec![input_data, record, index],
+        len: 0,
+        memory_limit: aqr_formula::NO_LIMIT,
+    };
     let mut outputs: Vec<Option<Node>> =
         f.split(a, lens.iter().map(|&(_, _, s)| s as u64).collect()).into_iter().map(Some).collect();
     f.root = Node::concat(pieces.into_iter().map(|p| match p {

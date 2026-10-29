@@ -72,7 +72,12 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     use crate::rans::BitR;
     use crate::tok::{DIST_ALPHA, LIT_ALPHA};
     use crate::varint::Reader;
-    let &[table, _, _, deflate, png, jpeg, layout, tb, st, raw, headers] = u.contents else { return None };
+    if u.inputs.len() != 11 {
+        return None;
+    }
+    let c = |k| u.content(k);
+    let (table, deflate, png, jpeg) = (c(0)?, c(3)?, c(4)?, c(5)?);
+    let (layout, tb, st, raw, headers) = (c(6)?, c(7)?, c(8)?, c(9)?, c(10)?);
     let len = u.output();
     let slots: u64 = [deflate, png, jpeg]
         .iter()

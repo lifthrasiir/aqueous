@@ -150,6 +150,7 @@ P = W_main + Σ_태스크 (W_spawn + 태스크의 계획 버퍼) + 채널 메시
 
 1. `Module::memory_usage_in_pages`를 이미 정확한 용량을 쓰는 모듈들(exe, xsv, fasta, zip, git, pdf, png, …)부터 만든다.
    하네스에 상한 열과 검증 테스트를 더한다.
-3. 인코더가 `apply_memory_limit`를 선언하게 한다. 지금은 `aqr-formula`의 `MEMORY_LIMIT` 상수다.
+3. 인코더가 `apply_memory_limit`를 선언한다(aqr-compress `memory.rs`): import 메모리 + 추정 × 5/4 + 1 MiB.
+   prevalidation이 적용을 돌리며 실제 입력으로 계산하고, 그러지 못한 것은 아카이브를 쓰기 전에 입력을 필요한 만큼만 만들어 계산한다.
 4. 아레나가 필요한 곳(위 후보)에 bump-scope를 넣는다. aqr-common에서 `no_std` Wasm 빌드와 모듈 크기를 먼저 확인한다.
    기반 할당자는 영역 하나만 내주는 것으로 한다.

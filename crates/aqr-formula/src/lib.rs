@@ -47,7 +47,7 @@ pub struct Module {
 }
 
 /// What an application gives its module, for its memory estimate ([`Module::memory_usage_in_pages`]).
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy)]
 pub struct Usage<'a> {
     pub params: &'a [u8],
     /// The lengths of the resources' contents, the inputs and the outputs.
@@ -55,13 +55,13 @@ pub struct Usage<'a> {
     pub inputs: &'a [u64],
     pub outputs: &'a [u64],
     /// The inputs themselves (which whoever declares the memory limit has), for what their
-    /// headers and indexes tell of the buffers the module makes.
-    pub contents: &'a [&'a [u8]],
+    /// headers and indexes tell of the buffers the module makes: made as they are asked for.
+    pub contents: &'a dyn Contents,
     /// The pages of the working memory as the module is instantiated (its data and stack).
     pub initial_pages: u64,
 }
 
-impl Usage<'_> {
+impl<'a> Usage<'a> {
     /// Bytes of the parameters, the resources and the inputs: what `aqr_api::whole` copies into
     /// the working memory.
     pub fn copied(&self) -> u64 {
@@ -71,6 +71,23 @@ impl Usage<'_> {
     /// Bytes of the outputs.
     pub fn output(&self) -> u64 {
         self.outputs.iter().sum()
+    }
+
+    /// The `k`-th input ([`Usage::contents`]).
+    pub fn content(&self, k: usize) -> Option<&'a [u8]> {
+        self.contents.input(k)
+    }
+
+    /// The first `N` inputs, of `N` in all.
+    pub fn all_contents<const N: usize>(&self) -> Option<[&'a [u8]; N]> {
+        if self.inputs.len() != N {
+            return None;
+        }
+        let mut out = [&[][..]; N];
+        for (k, o) in out.iter_mut().enumerate() {
+            *o = self.content(k)?;
+        }
+        Some(out)
     }
 
     /// Bytes of the working memory as it is instantiated.
@@ -100,6 +117,18 @@ impl Usage<'_> {
 /// Bytes of an [`Estimate`] for the small allocations of a module (of no more than a few KiB in
 /// all, whatever the input).
 pub const SMALL: u64 = 64 << 10;
+
+/// The inputs of an application, as an estimate reads them ([`Usage::contents`]).
+pub trait Contents {
+    /// The `k`-th input; None where there is none, or it could not be made.
+    fn input(&self, k: usize) -> Option<&[u8]>;
+}
+
+impl Contents for Vec<&[u8]> {
+    fn input(&self, k: usize) -> Option<&[u8]> {
+        self.get(k).copied()
+    }
+}
 
 /// A module's memory estimate: the bytes that the working memories of an application take at
 /// most, of its instance and its tasks, with the messages queued in its channels (the memory
@@ -424,7 +453,13 @@ pub struct Apply {
     pub inputs: Vec<Node>,
     /// Bytes of the output.
     pub len: u64,
+    /// The memory limit its instruction declares ([`NO_LIMIT`] until [`Formula::declare_memory`]
+    /// sets it).
+    pub memory_limit: u64,
 }
+
+/// The memory limit of an application declaring none.
+pub const NO_LIMIT: u64 = u64::MAX;
 
 impl Node {
     pub fn slice(stream: usize, start: u64, len: u64) -> Node {
@@ -461,7 +496,7 @@ impl Node {
     }
 
     pub fn apply_with(module: Module, resources: Vec<Resource>, params: Vec<u8>, inputs: Vec<Node>, len: u64) -> Node {
-        Node::Apply(Box::new(Apply { module, resources, params, inputs, len }))
+        Node::Apply(Box::new(Apply { module, resources, params, inputs, len, memory_limit: NO_LIMIT }))
     }
 
     /// The output of `patch`, of `len` bytes, against `source` ([`patch::make`]).
@@ -980,6 +1015,60 @@ impl Formula {
         Ok(self.bytes(&self.root, m, &outputs)?.into_owned())
     }
 
+    /// Sets every application's memory limit ([`Apply::memory_limit`]) to what `limit` gives of
+    /// it and its inputs, which are made (by `m`) only as `limit` reads them. Fails where it gives
+    /// none, or an input asked for cannot be made.
+    pub fn declare_memory<M: Modules>(
+        &mut self,
+        m: &M,
+        limit: &dyn Fn(&Apply, &dyn Contents) -> Option<u64>,
+    ) -> Result<()> {
+        fn visit<'f>(n: &'f Node, out: &mut Vec<&'f Apply>) {
+            match n {
+                Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| visit(n, out)),
+                Node::Patch(p) => [&p.source, &p.patch].into_iter().for_each(|n| visit(n, out)),
+                Node::Apply(a) => {
+                    out.push(a);
+                    a.inputs.iter().for_each(|n| visit(n, out));
+                }
+                Node::Slice { .. } | Node::Output { .. } => {}
+            }
+        }
+        fn visit_mut(n: &mut Node, limits: &mut impl Iterator<Item = u64>) {
+            match n {
+                Node::Concat(ns) | Node::Pack(ns) => ns.iter_mut().for_each(|n| visit_mut(n, limits)),
+                Node::Patch(p) => [&mut p.source, &mut p.patch].into_iter().for_each(|n| visit_mut(n, limits)),
+                Node::Apply(a) => {
+                    a.memory_limit = limits.next().expect("a limit for each application");
+                    a.inputs.iter_mut().for_each(|n| visit_mut(n, limits));
+                }
+                Node::Slice { .. } | Node::Output { .. } => {}
+            }
+        }
+        let limits = {
+            let mut applies = Vec::new();
+            for s in &self.shared {
+                applies.push(&s.apply);
+                s.apply.inputs.iter().for_each(|n| visit(n, &mut applies));
+            }
+            visit(&self.root, &mut applies);
+            let ev = Lazy { f: &*self, m, outputs: std::cell::RefCell::new(Vec::new()) };
+            let limits = applies.iter().map(|a| {
+                let inputs =
+                    Inputs { ev: &ev, nodes: &a.inputs, made: a.inputs.iter().map(|_| Default::default()).collect() };
+                limit(a, &inputs).ok_or_else(|| Error::new(format!("no memory limit for {}", a.module)))
+            });
+            limits.collect::<Result<Vec<u64>>>()?
+        };
+        let mut limits = limits.into_iter();
+        for s in &mut self.shared {
+            s.apply.memory_limit = limits.next().expect("a limit for each application");
+            s.apply.inputs.iter_mut().for_each(|n| visit_mut(n, &mut limits));
+        }
+        visit_mut(&mut self.root, &mut limits);
+        Ok(())
+    }
+
     fn eval_into(&self, n: &Node, m: &impl Modules, outputs: &[Vec<Vec<u8>>], out: &mut Vec<u8>) -> Result<()> {
         match n {
             Node::Concat(ns) => ns.iter().try_for_each(|n| self.eval_into(n, m, outputs, out)),
@@ -1030,6 +1119,56 @@ impl Formula {
                 Ok(Cow::Owned(out))
             }
         }
+    }
+}
+
+/// The nodes of a formula made as they are asked for ([`Formula::declare_memory`]), with the
+/// outputs of the applications of several outputs made so far, in order.
+struct Lazy<'f, M> {
+    f: &'f Formula,
+    m: &'f M,
+    outputs: std::cell::RefCell<Vec<Vec<Vec<u8>>>>,
+}
+
+impl<M: Modules> Lazy<'_, M> {
+    fn bytes(&self, n: &Node) -> Option<Vec<u8>> {
+        fn last_output(n: &Node) -> Option<usize> {
+            match n {
+                Node::Concat(ns) | Node::Pack(ns) => ns.iter().filter_map(last_output).max(),
+                Node::Patch(p) => last_output(&p.source).max(last_output(&p.patch)),
+                Node::Apply(a) => a.inputs.iter().filter_map(last_output).max(),
+                &Node::Output { shared, .. } => Some(shared),
+                Node::Slice { .. } => None,
+            }
+        }
+        if let Some(last) = last_output(n) {
+            while self.outputs.borrow().len() <= last {
+                let made = {
+                    let o = self.outputs.borrow();
+                    let s = self.f.shared.get(o.len())?;
+                    let inputs =
+                        s.apply.inputs.iter().map(|n| self.f.bytes(n, self.m, &o)).collect::<Result<Vec<_>>>().ok()?;
+                    let inputs: Vec<&[u8]> = inputs.iter().map(|i| &**i).collect();
+                    self.m.apply_shared(s, &inputs).ok()?
+                };
+                self.outputs.borrow_mut().push(made);
+            }
+        }
+        let o = self.outputs.borrow();
+        self.f.bytes(n, self.m, &o).ok().map(Cow::into_owned)
+    }
+}
+
+/// The inputs of an application, made as they are asked for.
+struct Inputs<'e, 'f, M> {
+    ev: &'e Lazy<'f, M>,
+    nodes: &'e [Node],
+    made: Vec<std::cell::OnceCell<Option<Vec<u8>>>>,
+}
+
+impl<M: Modules> Contents for Inputs<'_, '_, M> {
+    fn input(&self, k: usize) -> Option<&[u8]> {
+        self.made.get(k)?.get_or_init(|| self.ev.bytes(&self.nodes[k])).as_deref()
     }
 }
 
@@ -1277,7 +1416,7 @@ mod tests {
     }
 
     fn cut(inputs: Vec<Node>) -> Apply {
-        Apply { module: CUT, resources: vec![], params: vec![], inputs, len: 0 }
+        Apply { module: CUT, resources: vec![], params: vec![], inputs, len: 0, memory_limit: crate::NO_LIMIT }
     }
 
     /// Outputs of applications of several outputs, taken by the root and by later ones; shown,
@@ -1313,7 +1452,14 @@ mod tests {
 
         // split from the one output of a module
         let mut s = Formula::raw("a", b"abcdefgh".to_vec());
-        let rev = Apply { module: REV, resources: vec![], params: vec![], inputs: vec![s.root.clone()], len: 0 };
+        let rev = Apply {
+            module: REV,
+            resources: vec![],
+            params: vec![],
+            inputs: vec![s.root.clone()],
+            len: 0,
+            memory_limit: crate::NO_LIMIT,
+        };
         let [x, y] = <[Node; 2]>::try_from(s.split(rev, vec![5, 3])).unwrap();
         s.root = Node::concat([y, x]);
         assert_eq!(s.eval(&Rev).unwrap(), b"cbahgfed");

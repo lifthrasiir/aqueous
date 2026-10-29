@@ -35,7 +35,8 @@ pub const MODULE: Module = Module::new("psd-recons", 1).with_memory(memory);
 ///   but by the worst case (a block of 10 bits, 1.7 KiB): where there is one, the estimate is
 ///   None.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    let (&[], &[head, skeleton, _, model]) = (u.params, u.contents) else { return None };
+    let (&[], 4) = (u.params, u.inputs.len()) else { return None };
+    let (head, skeleton, model) = (u.content(0)?, u.content(1)?, u.content(3)?);
     let total = usize::try_from(u.output()).ok().filter(|&t| t as u64 <= u32::MAX as u64)?;
     let h = Head::parse(head, total)?;
     let n_spans = h.spans.len() as u64;
