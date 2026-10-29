@@ -85,3 +85,8 @@ path = "examples/modules.rs"
 name = "aqr-decompress-wasm"
 path = "examples/wasm.rs"
 required-features = ["wasm"]
+
+[[example]]
+name = "aqr-decompress-memory"
+path = "examples/memory.rs"
+required-features = ["wasm"]

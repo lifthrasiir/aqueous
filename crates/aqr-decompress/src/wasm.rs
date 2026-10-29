@@ -130,6 +130,8 @@ struct Compiled {
     part: bool,
     /// The number of parameters of the entry point.
     arity: usize,
+    /// SHA-512/256 of the module.
+    hash: [u8; 32],
 }
 
 /// `wasm`, of SHA-512/256 `hash`, checked against the profile and compiled (once a process).
@@ -142,7 +144,7 @@ pub(crate) fn compiled(wasm: &[u8], hash: [u8; 32]) -> Decoded<Shared> {
     if let Some(c) = COMPILED.lock().unwrap().get(&hash) {
         return Ok(c.clone());
     }
-    let c = Shared(Arc::new(compile(wasm)?));
+    let c = Shared(Arc::new(Compiled { hash, ..compile(wasm)? }));
     COMPILED.lock().unwrap().insert(hash, c.clone());
     Ok(c)
 }
@@ -328,7 +330,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     } else {
         None
     };
-    Ok(Compiled { module, imports, working, clean, working_module, part, arity: ft.params().len() })
+    Ok(Compiled { module, imports, working, clean, working_module, part, arity: ft.params().len(), hash: [0; 32] })
 }
 
 /// A module defining a memory of 32 bits of `limits` (in pages), exported as `m`.
@@ -402,6 +404,8 @@ struct App {
     limit: u64,
     /// The size of the memories of all the instances and of the messages queued.
     total: Mutex<u64>,
+    /// The largest `total` so far.
+    peak: AtomicU64,
     exec: Arc<Exec>,
     chans: Mutex<Vec<Chan>>,
     /// The identity of the next task (0 is the application's instance).
@@ -416,6 +420,7 @@ impl App {
         let mut total = self.total.lock().unwrap();
         let t = (*total - sub).checked_add(add).filter(|&t| t <= self.limit);
         *total = t.ok_or(OverLimit)?;
+        self.peak.fetch_max(*total, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -708,24 +713,26 @@ impl Shared {
                 return invalid("a memory imported beyond those given");
             }
         }
-        let pages = |len: u64| len.div_ceil(65536);
-        let total: u128 = c
-            .imports
-            .iter()
-            .map(|i| match *i {
-                Import::Memory(Mem::Working) => c.working.0 as u128,
-                Import::Memory(Mem::Params) => pages(params.len() as u64) as u128,
-                Import::Memory(Mem::Resource(i)) => pages(resources[i as usize].len() as u64) as u128,
-                Import::Memory(Mem::Input(k)) => pages(inputs[k as usize].len() as u64) as u128,
-                Import::Memory(Mem::Output(j)) => pages(sizes[j as usize]) as u128,
-                Import::Func(_) => 0,
-            })
-            .sum::<u128>()
-            * 65536;
+        let total = self.imported(params, resources, inputs, sizes) + c.working.0 as u128 * 65536;
         if total > memory_limit as u128 {
             return Err(Failure::Resource("memory limit exceeded".into()));
         }
         Ok(())
+    }
+
+    /// The bytes of the memories imported but the working memory, as the application makes them.
+    fn imported(&self, params: &[u8], resources: &[Resource], inputs: &[&[u8]], sizes: &[u64]) -> u128 {
+        let pages = |len: u64| len.div_ceil(65536) as u128;
+        let pages: u128 = (self.0.imports.iter())
+            .map(|i| match *i {
+                Import::Memory(Mem::Params) => pages(params.len() as u64),
+                Import::Memory(Mem::Resource(i)) => pages(resources[i as usize].len() as u64),
+                Import::Memory(Mem::Input(k)) => pages(inputs[k as usize].len() as u64),
+                Import::Memory(Mem::Output(j)) => pages(sizes[j as usize]),
+                Import::Memory(Mem::Working) | Import::Func(_) => 0,
+            })
+            .sum();
+        pages * 65536
     }
 
     /// The application [`check`](Shared::check)ed, its outputs into `outs`.
@@ -752,6 +759,7 @@ impl Shared {
         let app = Arc::new(App {
             limit: memory_limit,
             total: Mutex::new(0),
+            peak: AtomicU64::new(0),
             exec: exec.clone(),
             chans: Mutex::default(),
             next: AtomicU64::new(1),
@@ -805,12 +813,58 @@ impl Shared {
             }
             Ok(())
         };
-        match exec.block_on(run) {
+        let r = match exec.block_on(run) {
             Ok(r) => r,
             Err(Stopped::Stopped) => Err(app.failed.lock().unwrap().take().expect("a task failed")),
             Err(Stopped::Deadlock) => invalid("a deadlock: every instance waits"),
+        };
+        if let Some(log) = APPLIED.lock().unwrap().as_mut() {
+            let imported = self.imported(params, resources, inputs, sizes) as u64;
+            log.push(Applied {
+                hash: c.hash,
+                params: params.len() as u64,
+                resources: resources.iter().map(|r| r.len() as u64).collect(),
+                inputs: inputs.iter().map(|i| i.len() as u64).collect(),
+                sizes: sizes.to_vec(),
+                imported,
+                working: app.peak.load(Ordering::Relaxed).saturating_sub(imported),
+                ok: r.is_ok(),
+            });
         }
+        r
     }
+}
+
+/// An application of a module, as [`record_applications`] keeps them: what it was given and
+/// the largest size its memories reached.
+#[derive(Debug, Clone)]
+pub struct Applied {
+    /// SHA-512/256 of the module.
+    pub hash: [u8; 32],
+    /// The lengths of the parameters, the resources' contents, the inputs and the outputs.
+    pub params: u64,
+    pub resources: Vec<u64>,
+    pub inputs: Vec<u64>,
+    pub sizes: Vec<u64>,
+    /// The bytes of the memories imported but the working memory, which are made at the start.
+    pub imported: u64,
+    /// The peak of everything else in the memory limit's total: the working memories of the
+    /// application's instance and of its tasks, and the messages queued in its channels.
+    pub working: u64,
+    pub ok: bool,
+}
+
+static APPLIED: Mutex<Option<Vec<Applied>>> = Mutex::new(None);
+
+/// Starts keeping the applications run from now on (`true`), or stops (`false`); returns those
+/// kept so far, for measuring the memory of modules.
+pub fn record_applications(on: bool) -> Vec<Applied> {
+    let mut a = APPLIED.lock().unwrap();
+    let kept = a.take().unwrap_or_default();
+    if on {
+        *a = Some(Vec::new());
+    }
+    kept
 }
 
 impl Job {
