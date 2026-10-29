@@ -42,6 +42,11 @@ impl Corners {
         Corners(vec![])
     }
 
+    /// Room for the vertices of a file of `n` lines at most, so that the table is not grown.
+    pub(crate) fn reserve(&mut self, n: usize) {
+        self.0.reserve_exact(n.min(CORNERS));
+    }
+
     #[inline]
     pub(crate) fn get(&self, v: i64) -> Option<&Corner> {
         let c = self.0.get(v as usize % CORNERS)?;

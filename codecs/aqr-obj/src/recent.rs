@@ -51,6 +51,11 @@ impl Recent {
         Recent { ring: vec![], table: if table { vec![0; RECENT] } else { vec![] } }
     }
 
+    /// Room for the lines of a file of `n` lines at most, so that the ring is not grown.
+    pub(crate) fn reserve(&mut self, n: usize) {
+        self.ring.reserve_exact(n.min(RECENT));
+    }
+
     #[inline]
     pub(crate) fn get(&self, line: u64) -> Option<&Entry> {
         let e = self.ring.get(line as usize % RECENT)?;

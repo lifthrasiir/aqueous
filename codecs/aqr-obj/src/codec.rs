@@ -115,23 +115,24 @@ pub(crate) fn decode_blocks<'a>(
     if !workers.is_empty() {
         return decode_par(workers, next, len, w, threads);
     }
-    let mut out = Vec::new();
+    // (each block decoded onto `w` itself)
     let mut done = 0;
     let mut dec = block::Decoder::default();
+    // (a line takes 2 bytes at least)
+    dec.reserve(len / 2);
     let mut streams = new_streams();
+    let start = w.len();
     while done < len {
-        out.clear();
         let (n, b) = next(len - done)?;
-        out.reserve_exact(n);
-        unpack(&b, &mut streams, &mut out)?;
-        if matches!(b, Stored::Coded(_)) && !dec.decode(&streams, &mut out) {
+        w.reserve(n);
+        unpack(&b, &mut streams, w)?;
+        if matches!(b, Stored::Coded(_)) && !dec.decode(&streams, w) {
             return Err(corrupt());
         }
-        if out.len() != n {
-            return Err(corrupt());
-        }
-        w.extend_from_slice(&out);
         done += n;
+        if w.len() - start != done {
+            return Err(corrupt());
+        }
     }
     Ok(())
 }

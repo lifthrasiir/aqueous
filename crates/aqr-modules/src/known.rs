@@ -150,7 +150,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "obj-recons",
         version: 1,
-        sha512_256: hex("7802fa7cd30c778f5a28f6928c14e4facd2f7bfa16d0559f8f3d9001625b78d3"),
+        sha512_256: hex("efdbfcea30d60a31719940a4b9580164275500d9c8ec57e3c3a1af9ba3a89081"),
         block: include_bytes!("../wasm/obj-recons.block"),
     },
     Known {

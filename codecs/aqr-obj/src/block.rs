@@ -932,6 +932,12 @@ pub struct DecMark {
 }
 
 impl Decoder {
+    /// Reserves the rings of recent lines and the corners for a file of `n` lines at most.
+    pub fn reserve(&mut self, n: usize) {
+        self.recent.iter_mut().for_each(|r| r.reserve(n));
+        self.corners.reserve(n);
+    }
+
     pub fn mark(&self) -> DecMark {
         DecMark { st: self.st, ntpl: self.tpls.len(), narena: self.arena.len() }
     }

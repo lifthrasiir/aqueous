@@ -14,20 +14,18 @@ pub use crate::module::decode;
 pub const MODULE: Module = Module::new("obj-recons", 1).with_memory(memory);
 
 /// The memory of the module, a block at a time: the inputs and the file (reserved for 64 times
-/// the inputs at most, doubling past that); each stream as long as its longest in a block, and
-/// the longest block, as the index tells (twice, the old held as one grows); and the decoder's
-/// state, half again as its vectors grow: three rings of recent lines and the corners, of the
-/// lines seen at most (half the file) up to 2^16 of 40 bytes each; and the templates' bytes, of
+/// the inputs at most, doubling past that, each block decoded onto it); each stream as long as
+/// its longest in a block, as the index tells (twice, the old held as one grows); and the decoder's
+/// state: three rings of recent lines and the corners, reserved for the lines of the file at most
+/// (half the file) up to 2^16 of 40 bytes each; and, half again as its vectors grow, the templates' bytes, of
 /// the template stream at most (in all blocks) up to 4 MiB, a vector twice that at most, and
 /// their keys (8 bytes each, a byte each at least).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let index = u.content(0)?;
-    let (mut ix, mut block, mut streams) = (crate::varint::Rd::new(index), 0u64, [0u64; NSTREAMS]);
+    let (mut ix, mut streams) = (crate::varint::Rd::new(index), [0u64; NSTREAMS]);
     let mut tpl = 0u64;
     while !ix.done() {
-        let v = ix.uv();
-        block = block.max(v >> 1);
-        if v & 1 == 1 {
+        if ix.uv() & 1 == 1 {
             for (i, s) in streams.iter_mut().enumerate() {
                 let v = ix.uv();
                 *s = (*s).max(v >> 1);
@@ -48,8 +46,8 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let growth = if reserved < m { 2 * m } else { 0 };
     let lines = (m / 2).min(1 << 16);
     let arena = tpl.min(4 << 20);
-    let state = 3 * (4 * lines * 40 + 2 * arena + 8 * arena.min(1 << 16)) / 2;
-    Some(u.whole(growth + 2 * (block + streams.iter().sum::<u64>()) + state, 2 + NSTREAMS as u64 + 7))
+    let state = 4 * lines * 40 + 3 * (2 * arena + 8 * arena.min(1 << 16)) / 2;
+    Some(u.whole(growth + 2 * streams.iter().sum::<u64>() + state, 1 + NSTREAMS as u64 + 7))
 }
 
 /// Statement keywords of OBJ files (the specification's, those of its free-form geometry
