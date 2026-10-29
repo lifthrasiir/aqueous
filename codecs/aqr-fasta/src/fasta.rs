@@ -8,6 +8,9 @@
 
 use aqr_common::varint;
 
+use crate::bases::Packed;
+#[cfg(feature = "encode")]
+use crate::bases::Packer;
 use crate::{Result, corrupt};
 
 /// A FASTA file's parts.
@@ -28,7 +31,7 @@ pub struct Parts {
     /// since the last run (varint), its length (varint) and its letter, in upper case.
     pub other: Vec<u8>,
     /// The bases, 0 to 3 for A, C, G and T.
-    pub bases: Vec<u8>,
+    pub bases: Packed,
 }
 
 /// [`Parts`] borrowed, as a module's inputs are.
@@ -94,90 +97,106 @@ const CLASS: [u8; 256] = {
 
 /// The parts of FASTA file `d`, or `None` where it is not one this crate takes (see the module
 /// docs).
+#[cfg(feature = "encode")]
 pub fn parse(d: &[u8]) -> Option<Parts> {
-    if d.first() != Some(&b'>') || d.contains(&b'\r') {
+    if d.first() != Some(&b'>') || memchr::memchr(b'\r', d).is_some() {
         return None;
     }
     let final_newline = d.last() == Some(&b'\n');
     let body = if final_newline { &d[..d.len() - 1] } else { d };
-    // the records: a header, then lines
-    let lines: Vec<&[u8]> = body.split(|&b| b == b'\n').collect();
+    // the lines, gone through as they are (not listed: a line of a chromosome is 61 bytes), each
+    // with where it starts
+    let lines = || {
+        let mut at = 0;
+        let mut ends = memchr::memchr_iter(b'\n', body).chain([body.len()]);
+        std::iter::from_fn(move || {
+            let end = ends.next()?;
+            let l = (at, &body[at..end]);
+            at = end + 1;
+            Some(l)
+        })
+    };
     let mut widths = std::collections::HashMap::<usize, u64>::new();
-    for l in &lines {
+    for (_, l) in lines() {
         if l.first() != Some(&b'>') {
             *widths.entry(l.len()).or_default() += 1;
         }
     }
     let width = widths.iter().max_by_key(|&(&w, &n)| (n, w)).map_or(0, |(&w, _)| w) as u64;
-    let mut p = Parts { width, final_newline, bases: Vec::with_capacity(d.len()), ..Parts::default() };
-    let mut i = 0;
+    let mut p = Parts { width, final_newline, ..Parts::default() };
+    let mut bases = Packer::with_capacity(d.len());
     let (mut upper, mut run, mut letters) = (true, 0u64, 0u64);
     // the other letters' current run: its letter and length, and the bases before it
     let (mut other, mut olen, mut gap, mut runs) = (0u8, 0u64, 0u64, 0u64);
-    while i < lines.len() {
-        let h = lines[i];
+    let mut lines = lines().peekable();
+    while let Some((_, h)) = lines.next() {
         if h.first() != Some(&b'>') {
             return None;
         }
         p.headers.extend_from_slice(&h[1..]);
         p.headers.push(b'\n');
-        i += 1;
-        let start = i;
-        while i < lines.len() && lines[i].first() != Some(&b'>') {
-            i += 1;
+        // the sequence's lines up to the next header: how many, their letters, and whether all
+        // but the last (not empty) are of the width; and where they are in the body
+        let (mut count, mut n, mut regular, mut last) = (0u64, 0u64, width > 0, 0usize);
+        let mut seq = 0..0;
+        while let Some((at, l)) = lines.next_if(|l| l.1.first() != Some(&b'>')) {
+            regular &= count == 0 || last as u64 == width;
+            (count, n, last) = (count + 1, n + l.len() as u64, l.len());
+            seq = if count == 1 { at..at + l.len() } else { seq.start..at + l.len() };
         }
-        let seq = &lines[start..i];
-        let n: u64 = seq.iter().map(|l| l.len() as u64).sum();
+        regular &= last > 0 && count == n.div_ceil(width.max(1));
         varint::put(&mut p.layout, n);
-        let regular = width > 0 && seq.len() as u64 == n.div_ceil(width) && {
-            let (last, rest) = seq.split_last().map_or((&[][..], &[][..]), |(l, r)| (*l, r));
-            rest.iter().all(|l| l.len() as u64 == width) && !last.is_empty()
-        };
-        if regular || seq.is_empty() {
+        if regular || count == 0 {
             p.layout.push(0);
         } else {
             p.layout.push(1);
-            varint::put(&mut p.layout, seq.len() as u64);
-            seq.iter().for_each(|l| varint::put(&mut p.layout, l.len() as u64));
+            varint::put(&mut p.layout, count);
+            body[seq.clone()].split(|&b| b == b'\n').for_each(|l| varint::put(&mut p.layout, l.len() as u64));
         }
-        for l in seq {
-            for &c in *l {
-                let k = CLASS[c as usize];
-                if k == NOT_A_LETTER {
-                    return None;
+        for &c in &body[seq] {
+            let k = CLASS[c as usize];
+            // (mostly: a base of the case of the run, after no other letter)
+            if (k ^ if upper { 0 } else { LOWER }) < 4 && olen == 0 {
+                bases.push(k);
+                (run, gap) = (run + 1, gap + 1);
+                continue;
+            }
+            if k == NOT_A_LETTER {
+                if c == b'\n' {
+                    continue;
                 }
-                let up = k & LOWER == 0;
-                if up != upper {
-                    varint::put(&mut p.case, run);
-                    (upper, run) = (up, 0);
+                return None;
+            }
+            let up = k & LOWER == 0;
+            if up != upper {
+                varint::put(&mut p.case, run);
+                (upper, run) = (up, 0);
+            }
+            run += 1;
+            match k & !LOWER {
+                b @ 0..4 => {
+                    if olen > 0 {
+                        varint::put(&mut p.other, gap);
+                        varint::put(&mut p.other, olen);
+                        p.other.push(other);
+                        (olen, gap, runs) = (0, 0, runs + 1);
+                    }
+                    bases.push(b);
+                    gap += 1;
                 }
-                run += 1;
-                let u = c.to_ascii_uppercase();
-                match k & !LOWER {
-                    b @ 0..4 => {
-                        if olen > 0 {
-                            varint::put(&mut p.other, gap);
-                            varint::put(&mut p.other, olen);
-                            p.other.push(other);
-                            (olen, gap, runs) = (0, 0, runs + 1);
-                        }
-                        p.bases.push(b);
-                        gap += 1;
+                _ if olen > 0 && c.to_ascii_uppercase() == other => olen += 1,
+                _ => {
+                    if olen > 0 {
+                        varint::put(&mut p.other, gap);
+                        varint::put(&mut p.other, olen);
+                        p.other.push(other);
+                        (gap, runs) = (0, runs + 1);
                     }
-                    _ if olen > 0 && u == other => olen += 1,
-                    _ => {
-                        if olen > 0 {
-                            varint::put(&mut p.other, gap);
-                            varint::put(&mut p.other, olen);
-                            p.other.push(other);
-                            (gap, runs) = (0, runs + 1);
-                        }
-                        (other, olen) = (u, 1);
-                    }
+                    (other, olen) = (c.to_ascii_uppercase(), 1);
                 }
             }
-            letters += l.len() as u64;
         }
+        letters += n;
     }
     if olen > 0 {
         varint::put(&mut p.other, gap);
@@ -190,6 +209,7 @@ pub fn parse(d: &[u8]) -> Option<Parts> {
     if runs > letters / 64 + 16 {
         return None;
     }
+    p.bases = bases.finish();
     Some(p)
 }
 
@@ -359,8 +379,9 @@ mod tests {
     fn back(d: &[u8]) {
         let p = parse(d).unwrap_or_else(|| panic!("not taken: {:?}", String::from_utf8_lossy(d)));
         assert_eq!(bases_len(&p.layout, &p.other).unwrap(), p.bases.len() as u64);
-        assert_eq!(build(p.view(), p.bases.iter().copied(), d.len()).unwrap(), d, "{p:?}");
-        assert!(build(p.view(), p.bases.iter().copied(), d.len() + 1).is_err());
+        let bases = || p.bases.iter(0..p.bases.len());
+        assert_eq!(build(p.view(), bases(), d.len()).unwrap(), d, "{p:?}");
+        assert!(build(p.view(), bases(), d.len() + 1).is_err());
     }
 
     #[test]
@@ -372,6 +393,7 @@ mod tests {
         back(b">x");
         back(b">a\nACG\nACGT\nA\n>b\nNNNN\nNNNN\nNA\n");
         back(b">a\nACGT\nACGT\nAC\n>b\nAC\nGT\nAC\n");
+        back(b">a\nACGT\nACGT\nACGTAC\n>b\nACGT\n\nACGT\n");
         let mut big = b">chr\n".to_vec();
         for i in 0..1000 {
             // (N in long runs, as in assemblies)

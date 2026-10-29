@@ -58,14 +58,104 @@ fn model() -> Vec<[u16; 4]> {
     vec![[16384; 4]; CONTEXTS]
 }
 
+/// Bases packed four to a byte, the first in the low bits: what the encoder holds of a file's.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Packed {
+    bytes: Vec<u8>,
+    len: usize,
+}
+
+impl Packed {
+    /// Room for `n` bases.
+    pub fn with_capacity(n: usize) -> Packed {
+        Packed { bytes: Vec::with_capacity(n.div_ceil(4)), len: 0 }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, b: u8) {
+        let shift = 2 * (self.len & 3);
+        if shift == 0 {
+            self.bytes.push(b & 3);
+        } else {
+            *self.bytes.last_mut().unwrap() |= (b & 3) << shift;
+        }
+        self.len += 1;
+    }
+
+    /// Bases `r`, 0 to 3 each.
+    pub fn iter(&self, r: std::ops::Range<usize>) -> impl Iterator<Item = u8> + '_ {
+        r.map(|i| self.bytes[i / 4] >> (2 * (i & 3)) & 3)
+    }
+}
+
+/// Packs bases as they come, four at a time.
+pub struct Packer {
+    p: Packed,
+    /// The bases not yet in, from the low bits, and how many.
+    word: u8,
+    n: u32,
+}
+
+impl Packer {
+    /// Room for `n` bases.
+    pub fn with_capacity(n: usize) -> Packer {
+        Packer { p: Packed::with_capacity(n), word: 0, n: 0 }
+    }
+
+    #[inline(always)]
+    pub fn push(&mut self, b: u8) {
+        self.word |= (b & 3) << (2 * self.n);
+        self.n += 1;
+        if self.n == 4 {
+            self.p.bytes.push(self.word);
+            self.p.len += 4;
+            (self.word, self.n) = (0, 0);
+        }
+    }
+
+    pub fn finish(mut self) -> Packed {
+        if self.n > 0 {
+            self.p.bytes.push(self.word);
+            self.p.len += self.n as usize;
+        }
+        self.p
+    }
+}
+
+impl FromIterator<u8> for Packed {
+    fn from_iter<I: IntoIterator<Item = u8>>(bases: I) -> Packed {
+        let mut p = Packed::default();
+        bases.into_iter().for_each(|b| p.push(b));
+        p
+    }
+}
+
+/// Bases coded at a time by [`encode`]: the model is run over all of them first, kept at the
+/// start of each such chunk, then over each chunk again, from the last, as the coder goes
+/// backward (the next chunk's on a worker of the pool while this one's is coded, where one is
+/// free). A chunk's symbols take 4 bytes a base, a model kept [`MODEL_BYTES`]: of chr1 of hg19
+/// (225 M bases), 2 × 34 MB and 55 MB, where the symbols of all the bases took 0.9 GB.
+const CHUNK: usize = 8 << 20;
+
 /// The coded form of bases `s`.
-pub fn encode(s: &[u8]) -> Vec<u8> {
-    let mut t = model();
-    // the model forward, the coder backward: the start and frequency of each base
-    let mut syms: Vec<(u16, u16)> = Vec::with_capacity(s.len());
-    let mut h = 0usize;
-    for &b in s {
-        let b = (b & 3) as usize;
+pub fn encode(s: &Packed) -> Vec<u8> {
+    encode_in(s, CHUNK)
+}
+
+/// The start and frequency of each base of `s` in `r` ([`encode`]), the model `t` going on from
+/// context `h`, into `syms`.
+fn symbols(s: &Packed, r: std::ops::Range<usize>, t: &mut [[u16; 4]], mut h: usize, syms: &mut Vec<(u16, u16)>) {
+    syms.clear();
+    for b in s.iter(r) {
+        let b = b as usize;
         let p = &mut t[h & (CONTEXTS - 1)];
         let f = freqs(p);
         let start: u32 = f[..b].iter().sum();
@@ -73,7 +163,25 @@ pub fn encode(s: &[u8]) -> Vec<u8> {
         update(p, b);
         h = h << 2 | b;
     }
-    drop(t);
+}
+
+/// [`encode`], the bases coded `chunk` at a time.
+fn encode_in(s: &Packed, chunk: usize) -> Vec<u8> {
+    let n = s.len();
+    let last = n.saturating_sub(1) / chunk * chunk;
+    // the model at the start of each chunk, and the context there; the last one's is where the
+    // model is left
+    let mut t = model();
+    let mut kept: Vec<(Vec<[u16; 4]>, usize)> = Vec::with_capacity(last / chunk);
+    let mut h = 0usize;
+    for (i, b) in s.iter(0..last).enumerate() {
+        if i % chunk == 0 {
+            kept.push((t.clone(), h));
+        }
+        let b = b as usize;
+        update(&mut t[h & (CONTEXTS - 1)], b);
+        h = h << 2 | b;
+    }
     // (x / freq by a multiplication: the same quotient, as in ryg_rans)
     let rcp: Vec<(u32, u32)> = (0..=1u64 << SCALE)
         .map(|f| match f {
@@ -85,23 +193,54 @@ pub fn encode(s: &[u8]) -> Vec<u8> {
         })
         .collect();
     let mut x = LOW;
-    let mut out = Vec::with_capacity(s.len() / 4 + 8);
-    for &(start, freq) in syms.iter().rev() {
-        let (start, freq) = (start as u32, freq as u32);
-        let max = ((LOW >> SCALE) << 8) * freq;
-        while x >= max {
-            out.push(x as u8);
-            x >>= 8;
+    let mut out = Vec::with_capacity(n / 4 + 8);
+    // the chunks from the last, the coder backward
+    let mut syms = Vec::with_capacity(chunk.min(n));
+    symbols(s, last..n, &mut t, h, &mut syms);
+    drop(t);
+    let mut spare = Vec::new();
+    let mut start = last;
+    aqr_common::pool::scope(1, |sc| {
+        loop {
+            // the chunk before's symbols, on a worker if there is one, else once this one's are coded
+            let before = kept.pop().map(|(mut t, h)| {
+                start -= chunk;
+                let (r, mut syms) = (start..start + chunk, std::mem::take(&mut spare));
+                move || {
+                    syms.reserve(chunk);
+                    symbols(s, r, &mut t, h, &mut syms);
+                    syms
+                }
+            });
+            let (mut later, mut now) = (None, None);
+            match before {
+                Some(job) if sc.workers() > 0 => now = Some(sc.spawn(job)),
+                job => later = job,
+            }
+            for &(start, freq) in syms.iter().rev() {
+                let (start, freq) = (start as u32, freq as u32);
+                let max = ((LOW >> SCALE) << 8) * freq;
+                while x >= max {
+                    out.push(x as u8);
+                    x >>= 8;
+                }
+                // x + start + q * (2^SCALE - freq), q = x / freq: (q << SCALE) + x % freq + start
+                x = if freq == 1 {
+                    (x << SCALE) + start
+                } else {
+                    let (r, shift) = rcp[freq as usize];
+                    let q = (((x as u64 * r as u64) >> 32) as u32) >> shift;
+                    x + start + q * ((1 << SCALE) - freq)
+                };
+            }
+            let next = match (now, later) {
+                (Some(h), _) => h.join().unwrap_or_else(|p| std::panic::resume_unwind(p)),
+                (None, Some(job)) => job(),
+                (None, None) => break,
+            };
+            spare = std::mem::replace(&mut syms, next);
         }
-        // x + start + q * (2^SCALE - freq), q = x / freq: (q << SCALE) + x % freq + start
-        x = if freq == 1 {
-            (x << SCALE) + start
-        } else {
-            let (r, shift) = rcp[freq as usize];
-            let q = (((x as u64 * r as u64) >> 32) as u32) >> shift;
-            x + start + q * ((1 << SCALE) - freq)
-        };
-    }
+    });
     out.extend_from_slice(&x.to_le_bytes());
     out.reverse();
     out
@@ -197,8 +336,12 @@ mod tests {
             // (and a repetitive one, which codes small)
             let r: Vec<u8> = (0..n).map(|i| ((i * 7 / 3) % 4) as u8).collect();
             for s in [s, r] {
-                let c = encode(&s);
+                let c = encode(&s.iter().copied().collect());
                 assert_eq!(decode(&c, s.len()).unwrap(), s);
+                // (coded a chunk at a time alike, of a whole number of chunks too)
+                for chunk in [1, n / 7 + 1, n / 2, n].into_iter().filter(|&c| c > 0 && n / c < 64) {
+                    assert!(encode_in(&s.iter().copied().collect(), chunk) == c, "{n} by {chunk}");
+                }
                 assert!(decode(&c, s.len() + 1).is_err());
                 if !c.is_empty() {
                     assert!(decode(&c[..c.len() - 1], s.len()).is_err());
@@ -206,6 +349,6 @@ mod tests {
             }
         }
         let r: Vec<u8> = (0..100_000).map(|i| ((i * 7 / 3) % 4) as u8).collect();
-        assert!(encode(&r).len() < 1000);
+        assert!(encode(&r.into_iter().collect()).len() < 1000);
     }
 }

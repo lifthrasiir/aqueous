@@ -8,11 +8,12 @@ publish = false
 [features]
 default = ["encode"]
 # The formulas (`formula`); without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula"]
+encode = ["dep:aqr-formula", "dep:memchr"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+memchr = { version = "2", optional = true }
 
 [dev-dependencies]
 zstd = "0.13"

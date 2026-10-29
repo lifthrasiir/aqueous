@@ -30,8 +30,15 @@ Measured 2026-10-26 on an Apple M4 (10 cores), on hg19 (93 chromosome files of t
 - The bases are decoded as the file is built, never held: a file decodes in its own size and
   the coded bases. Held, they took as much again (10gb decompression 8.66 → 7.49 GB of peak
   footprint, ten chromosomes decoded at once).
+- Encoding holds the bases packed four to a byte and codes them 8 Mbase at a time, from the
+  last chunk, the model kept at the start of each (2 MiB a chunk): chr1 takes about 0.25 GB
+  where it took 1.3 GB (the lines listed, a byte a base, and the start and frequency of every
+  base, 4 bytes each). The model runs twice over all but the last chunk, the second time for
+  the chunk before on a worker while this one is coded, where one is free: chr1 parses in
+  0.32 s (0.41 before) and codes in 0.98 s on two threads (1.38 on one; 1.17 before, one).
 - The archive's batches (512 MB) hold few chromosomes each, which keeps compression to two
-  or three cores; the module itself encodes at 170 MB/s a thread.
+  or three cores; the module itself encodes at 194 MB/s (chr1 and chr10, two threads where
+  free; 170 before, one thread).
 
 ## Tests
 

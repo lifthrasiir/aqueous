@@ -217,6 +217,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-common",
  "aqr-formula",
+ "memchr",
  "zstd",
 ]
 
