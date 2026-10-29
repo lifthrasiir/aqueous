@@ -11,7 +11,249 @@ use aqr_formula::{Apply, Formula, Kind, Module, Node, Region};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("psd-recons", 1);
+pub const MODULE: Module = Module::new("psd-recons", 1).with_memory(memory);
+
+/// What the module holds at most besides its inputs and the file (the output, made at its size),
+/// for the head (the spans and groups, read as `codec::get_head` does, with sizes for their
+/// structures on 32 bits: 96 bytes a span, 32 a group, and the vectors of a span's planes, rows
+/// not reproduced, a group's planes and equal planes, the last grown by pushes: three times) and:
+/// - the stream's chunk: the decoding tables of the 402 contexts and the unused one (3 KiB
+///   each), the old ones held while the new are made, with the chunk's frequencies (1 KiB
+///   each), at most as many as the stream has bits;
+/// - the group in hand, the largest: per plane its row, the coder's four rows and the hint's if
+///   hinted, a row a PackBits plane for the sink's previous one, each the width and a vector's
+///   header, then a byte buffer of the width grown to twice (three times in all), and the
+///   plane's slots (192 bytes);
+/// - for a hinted group, the file's layers as parsed up to the composite (rebuilt here from the
+///   skeleton, the spans zeroed) and the renderer: its lists (512 bytes a layer, 16 for each of
+///   at most three operations, kept three times), the rows of the canvas a group level needs (4
+///   bytes a pixel, a level for each group divider and one more), five row buffers of the widest
+///   channel (three times, as they grow), the clipping row, and each channel of a drawn layer
+///   that is not RLE or raw as a plane (`rows::PlaneRows::channel`), whole: those of no
+///   compression field (shorter than two bytes) at their size. A channel of ZIP is inflated
+///   whole with its tokens and per-block statistics, which the compressed bytes do not bound
+///   but by the worst case (a block of 10 bits, 1.7 KiB): where there is one, the estimate is
+///   None.
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let (&[], &[head, skeleton, _, model]) = (u.params, u.contents) else { return None };
+    let total = usize::try_from(u.output()).ok().filter(|&t| t as u64 <= u32::MAX as u64)?;
+    let h = Head::parse(head, total)?;
+    let n_spans = h.spans.len() as u64;
+    let mut peak = (0u64, 0u64);
+    for g in &h.groups {
+        let (bytes, buffers) = g.memory(&h, skeleton)?;
+        peak = (peak.0.max(bytes), peak.1.max(buffers));
+    }
+    // (the stream's chunk: 402 tables of the model and the unused one)
+    let used = (crate::model::TABLES as u64).min(8 * model.len() as u64) + 1;
+    let player = 2 * used * (2048 + 1024) + used * (1024 + 16) + 3 * 12 * 512 + 2 * crate::model::TABLES as u64;
+    let state = h.bytes + n_spans + 4 * n_spans + player + peak.0;
+    Some(u.whole(state, 32 + peak.1))
+}
+
+/// The head stream's parts that take memory.
+struct Head {
+    spans: Vec<HeadSpan>,
+    groups: Vec<HeadGroup>,
+    /// Bytes of the structures made of it.
+    bytes: u64,
+}
+
+struct HeadSpan {
+    start: usize,
+    end: usize,
+    w: usize,
+    h: usize,
+    kind: u8,
+}
+
+struct HeadGroup {
+    /// The span of the first plane.
+    span: usize,
+    planes: usize,
+    hinted: bool,
+    /// The planes of PackBits spans that are written.
+    rle: usize,
+}
+
+/// The number of items a vector holds, made with capacity `n` up to `1 << 16` and then grown
+/// by pushes: with room for three times that, the old blocks being held.
+fn grown(n: u64) -> u64 {
+    if n <= 1 << 16 { n } else { 3 * n }
+}
+
+impl Head {
+    fn parse(src: &[u8], total: usize) -> Option<Head> {
+        let mut at = 0;
+        let num = |at: &mut usize| -> Option<usize> { usize::try_from(aqr_common::varint::get(src, at).ok()?).ok() };
+        let byte = |at: &mut usize| -> Option<u8> {
+            let b = *src.get(*at)?;
+            *at += 1;
+            Some(b)
+        };
+        let n = num(&mut at)?;
+        let mut spans: Vec<HeadSpan> = Vec::new();
+        let (mut pos, mut bytes) = (0usize, 0u64);
+        for _ in 0..n {
+            let gap = num(&mut at)?;
+            let len = num(&mut at)?;
+            let start = pos.checked_add(gap)?;
+            let end = start.checked_add(len).filter(|&e| e <= total)?;
+            pos = end;
+            let kind = byte(&mut at)?;
+            let (w, h) = match kind {
+                0 | 2 | 4 => {
+                    let planes = num(&mut at)?;
+                    if planes > 64 {
+                        return None;
+                    }
+                    let (w, h) = (num(&mut at)?, num(&mut at)?);
+                    if kind != 0 {
+                        // (the encoder: a tag, and up to two numbers)
+                        match byte(&mut at)? {
+                            0 => {
+                                num(&mut at)?;
+                                num(&mut at)?;
+                            }
+                            1 | 2 => {
+                                num(&mut at)?;
+                            }
+                            _ => return None,
+                        }
+                        for _ in 0..planes {
+                            num(&mut at)?;
+                        }
+                        let ne = num(&mut at)?;
+                        for _ in 0..ne {
+                            num(&mut at)?;
+                            let bl = num(&mut at)?;
+                            at = at.checked_add(bl).filter(|&a| a <= src.len())?;
+                        }
+                        bytes += 4 * planes as u64 + 12 * grown(ne as u64);
+                    }
+                    (w, h)
+                }
+                16 => (0, 0),
+                32 => {
+                    let of = num(&mut at)?;
+                    let s = spans.get(of)?;
+                    (s.w, s.h)
+                }
+                _ => return None,
+            };
+            spans.push(HeadSpan { start, end, w, h, kind });
+        }
+        bytes += 96 * grown(n as u64) + 8 * n as u64;
+        let ng = num(&mut at)?;
+        let mut groups = Vec::new();
+        for _ in 0..ng {
+            let np = num(&mut at)?;
+            let flags = byte(&mut at)?;
+            if np == 0 || np > 64 || flags > 3 {
+                return None;
+            }
+            let (mut first, mut rle) = (usize::MAX, 0);
+            for _ in 0..np {
+                let s = num(&mut at)?;
+                num(&mut at)?;
+                num(&mut at)?;
+                let sp = spans.get(s)?;
+                if first == usize::MAX {
+                    first = s;
+                }
+                rle += matches!(sp.kind, 2 | 4) as usize;
+            }
+            // (planes 8 bytes, equal planes 8, the latter pushed: room for twice, three times)
+            bytes += 32 * 3 + 8 * np as u64 + 3 * 8 * (np as u64 * 2 + 4);
+            groups.push(HeadGroup { span: first, planes: np, hinted: flags & 2 != 0, rle });
+        }
+        bytes += 32 * grown(ng as u64);
+        (at == src.len()).then_some(Head { spans, groups, bytes })
+    }
+}
+
+impl HeadGroup {
+    /// The memory of decoding the group, and its large allocations: see [`memory`].
+    fn memory(&self, h: &Head, skeleton: &[u8]) -> Option<(u64, u64)> {
+        let (n, w) = (self.planes as u64, h.spans[self.span].w as u64);
+        // (the rows, the coder's four, the hint's if hinted, and a sink's previous row if PackBits)
+        let rows =
+            (5 + self.hinted as u64) * n * (w + 12) + self.rle as u64 * (w + 12) + 3 * (w + w / 64 + 8) + n * 192;
+        let large = |bytes: u64| (bytes >= aqr_formula::PAGE) as u64;
+        let mut buffers = ((6 + self.hinted as u64) * n + self.rle as u64 + 1) * large(w);
+        let mut bytes = rows;
+        if self.hinted {
+            let (b, l) = self.hint(h, skeleton)?;
+            bytes += b;
+            buffers += l;
+        }
+        Some((bytes, buffers))
+    }
+
+    /// The memory of the hint of a hinted group, from the layers: see [`memory`].
+    fn hint(&self, h: &Head, skeleton: &[u8]) -> Option<(u64, u64)> {
+        use crate::psd::Compression;
+        let split = h.spans[self.span].start;
+        // (the file up to the composite: the skeleton in the gaps, the spans zero)
+        let mut prefix = vec![0u8; split];
+        let (mut prev, mut at) = (0, 0);
+        for s in h.spans.iter().take_while(|s| s.start <= split) {
+            let gap = prefix.get_mut(prev..s.start)?;
+            gap.copy_from_slice(skeleton.get(at..at + gap.len())?);
+            at += gap.len();
+            prev = s.end;
+            if s.start == split {
+                break;
+            }
+        }
+        let psd = crate::psd::parse(&prefix).ok()?;
+        let layers = &psd.layer_info.layers;
+        if psd.depth != 8 || psd.mode != 3 {
+            return None;
+        }
+        let l = layers.len() as u64;
+        let (mut dividers, mut widest, mut full, mut full_n) = (0u64, 0u64, 0u64, 0u64);
+        for ly in layers {
+            let section = ly
+                .tag(b"lsct")
+                .and_then(|t| prefix.get(t.data.start..t.data.start + 4))
+                .map_or(0, |b| u32::from_be_bytes(b.try_into().unwrap()));
+            dividers += (section == 3) as u64;
+            let find = |id: i16| ly.channels.iter().position(|c| c.id == id);
+            let (Some(r), Some(g), Some(b)) = (find(0), find(1), find(2)) else { continue };
+            if ly.rect.width() == 0 || ly.rect.height() == 0 || matches!(section, 1..=3) {
+                continue;
+            }
+            let mask = ly.mask.as_ref().filter(|m| m.flags & 2 == 0).and_then(|_| find(-2));
+            for j in [Some(r), Some(g), Some(b), find(-1), mask].into_iter().flatten() {
+                let c = &ly.channels[j];
+                widest = widest.max(c.width);
+                match c.compression(&prefix) {
+                    Some(Compression::Zip | Compression::ZipPred) => return None,
+                    None => {
+                        full += c.width * c.height;
+                        full_n += 1;
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+        let psd_bytes = std::mem::size_of::<crate::psd::Psd>() as u64
+            + layers
+                .iter()
+                .map(|ly| {
+                    (std::mem::size_of::<crate::psd::Layer>() + ly.name.len() + ly.channels.len() * 32) as u64
+                        + 3 * (ly.tags.len() * std::mem::size_of::<crate::psd::Tag>()) as u64
+                })
+                .sum::<u64>()
+            + 3 * (psd.resources.len() * std::mem::size_of::<crate::psd::Resource>()) as u64
+            + 3 * (psd.global_tags.len() * std::mem::size_of::<crate::psd::Tag>()) as u64;
+        let w = h.spans[self.span].w as u64;
+        let levels = dividers + 1;
+        let renderer = 5 * l + 512 * l + 3 * 16 * 3 * l + levels * (4 * w + 20) + 3 * 20 * levels + 5 * 3 * widest + w;
+        Some((psd_bytes + renderer + full, full_n + levels + 8))
+    }
+}
 
 /// The formula giving `input`, or `None` where it is not coded: not a PSD/PSB
 /// that can be parsed, or no pixel data or embedded file to take out.
