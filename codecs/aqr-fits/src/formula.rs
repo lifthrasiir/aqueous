@@ -14,14 +14,95 @@ use crate::tiled::{self, Layout};
 
 pub use crate::module::{image as decode_image, rice as decode_rice, table as decode_table};
 
-pub const IMAGE: Module = Module::new("fits-recons-image", 1);
-pub const RICE: Module = Module::new("fits-recons-rice", 1);
+pub const IMAGE: Module = Module::new("fits-recons-image", 1).with_memory(image_memory);
+pub const RICE: Module = Module::new("fits-recons-rice", 1).with_memory(rice_memory);
 pub const TABLE: Module = Module::new("fits-recons-table", 1).with_memory(table_memory);
 
 /// The memory of `fits-recons-table`: the planes and the rows, and the columns (a varint and a
 /// byte of the params at least each, 12 bytes on 32 bits, their vector doubling).
 fn table_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.whole(3 * 12 * u.params.len() as u64 / 2, 1))
+}
+
+/// Bytes of the prediction model's tables ([`image`]'s `Model`, a `Bit` 4 bytes, a bias entry 16
+/// on 32 bits): 64 × 48 + 396 × 2 bits and 729 entries; its two rows of residuals' lengths are
+/// counted apart.
+const PREDICT_MODEL: u64 = 4 * (64 * 48 + 12 * 33 * 2) + 16 * 729;
+
+/// Bytes of the pyramid's models (`pyramid::Models`): (216 + 24 + 24) × 64 + 26 × 24 × 1024 bits
+/// of 4 bytes.
+const PYRAMID_MODELS: u64 = 4 * (264 * 64 + 26 * 24 * 1024);
+
+/// What the pyramid decoder (`pyramid::decode`) holds at most besides its models, of an image
+/// of `n` pixels, `w` wide: the values of the first level (8 bytes each), its bands (three
+/// quarters of that and the next level's values, a quarter), the bands of the next level kept
+/// as the parent (a quarter in all), and the list of border values (at most `2 (w + h)`, 16
+/// bytes each on 32 bits, the vector grown by pushes, its old blocks held: three times). Each
+/// level's are allocated anew, the coarser ones freed in blocks too small for the finer: all of
+/// them at most, a third more than the first level's.
+fn pyramid_state(n: u64, w: u64) -> u64 {
+    let border = n.min(2 * (w + n.div_ceil(w)));
+    4 * 8 * (n + n + n / 4) / 3 + 48 * border
+}
+
+/// The memory of `fits-recons-image`, from the pixels `n` (the output over a pixel's bytes): the
+/// numbers (4 bytes each) and the copies of the model and the raw bits (`Coded`); then by the
+/// mode, the prediction model with the rows of residuals' lengths (a byte each, two rows of
+/// the width plus 2), or the pyramid's state (`pyramid_state`) and models. The output is made
+/// from the numbers, after.
+fn image_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let p = Pixels::from_bytes(u.params)?;
+    let [model, raw] = u.inputs[..] else { return None };
+    let n = u.output() / p.bytes() as u64;
+    let w = p.width as u64;
+    let state = match p.mode {
+        image::Mode::Predict => PREDICT_MODEL + 2 * (w + 2),
+        image::Mode::Pyramid => PYRAMID_MODELS + pyramid_state(n, w),
+    };
+    Some(u.whole(4 * n + model + raw + state, 16))
+}
+
+/// The memory of `fits-recons-rice`, from the layout: with `P` pixels, `R` tiles, `T` pixels
+/// in the largest tile and `U` runs in it, `K` codes at most (a block of `block` pixels each and
+/// one more per tile) and `S` bytes in the longest stream (told by the rows). Throughout, the
+/// bitmap of the rebuilt tiles (`R`) and the spans (8 bytes a tile, collected without a size
+/// hint: three times); the image (4 `P`), which pixels are coded (`P`), the copies of the
+/// model and the raw bits (`Coded`); then by phase, the largest of
+/// - tiles not rebuilt decoded into the image: the runs (8 bytes each, grown by pushes: three
+///   times) and the tile (4 `T` pixels and `T` codes at most);
+/// - the pixels decoded: the pixels not known (`P`, with prediction), and by the mode the
+///   prediction model with the rows of lengths, or the pyramid's (`pyramid_state`) with its
+///   models;
+/// - the codes decoded: the codes (three times `K`), the runs, and the block's pixels and
+///   differences (4 bytes each, grown by extensions: three times a vector of a tile);
+/// - the tiles' streams written: the same codes and runs, the pixels (three times 4 `T`), the
+///   differences (4 `T`) and the stream written by pushes (three times `S`).
+fn rice_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let mut at = 0;
+    let l = Layout::from_bytes(u.params, &mut at)?;
+    let &[mode] = &u.params[at..] else { return None };
+    let mode = image::Mode::from_byte(mode)?;
+    let &[rows, _, _, _, model, raw] = &u.inputs[..] else { return None };
+    let table = u.contents.first()?;
+    if table.len() as u64 != rows {
+        return None;
+    }
+    let (p, r) = (l.pixels()?, l.rows);
+    let w = l.width() as u64;
+    let size = |k: usize| l.tile[k].min(l.dims[k]);
+    let t: u64 = (0..l.dims.len()).map(size).product();
+    let runs: u64 = (1..l.dims.len()).map(size).product();
+    let k = p / l.rice.block as u64 + r;
+    let s = (0..r as usize).map(|i| l.span(table, i).map_or(0, |s| s.len as u64)).max().unwrap_or(0);
+    let base = r + 3 * 8 * r + 4 * p + p + model + raw;
+    let tiles = 3 * 8 * runs;
+    let decoding = match mode {
+        image::Mode::Predict => p + PREDICT_MODEL + 2 * (w + 2),
+        image::Mode::Pyramid => PYRAMID_MODELS + pyramid_state(p, w),
+    };
+    let peak =
+        [tiles + 5 * t, decoding, p + 3 * k + tiles + 2 * 3 * 4 * t, p + 3 * k + tiles + 3 * 4 * t + 4 * t + 3 * s];
+    Some(u.whole(base + peak.into_iter().max()?, 24))
 }
 
 /// Data smaller than this is kept as it is.
