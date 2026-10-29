@@ -115,7 +115,13 @@ pub const CODE_KEPT: u8 = 2;
 /// Table rebuilt from `data` (the contents of blocks rebuilt), `layout` and `kept` (blocks
 /// kept as they are), compressing by `hash`.
 pub fn build(data: &[u8], layout: &[u8], kept: &[u8], hash: Hash) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(data.len() / 2 + kept.len() + FOOTER);
+    build_in(data, layout, kept, hash, usize::MAX)
+}
+
+/// [`build`] into a vector of `capacity` bytes at first (the length expected, where it is
+/// known).
+pub fn build_in(data: &[u8], layout: &[u8], kept: &[u8], hash: Hash, capacity: usize) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(capacity.min(data.len() / 2 + kept.len() + FOOTER));
     let (mut lp, mut dp, mut kp) = (0, 0, 0);
     let mut last = [(0, 0); 2];
     let mut blocks = 0usize;
@@ -135,7 +141,7 @@ pub fn build(data: &[u8], layout: &[u8], kept: &[u8], hash: Hash) -> Result<Vec<
                 RAW
             }
             CODE_SNAPPY => {
-                out.extend_from_slice(&snappy::compress(&data[take(data, &mut dp, n)?], hash)?);
+                snappy::compress_onto(&data[take(data, &mut dp, n)?], hash, &mut out)?;
                 SNAPPY
             }
             CODE_KEPT => {

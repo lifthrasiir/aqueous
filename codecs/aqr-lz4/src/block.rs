@@ -257,7 +257,13 @@ impl Compressor {
     /// `block(src, acceleration)` of FORMAT.md §3.3: `src` in a block, with a fresh state and
     /// no limit. Fails only where `src` is longer than [`MAX_INPUT`].
     pub fn compress_fast(src: &[u8], acceleration: u32) -> Result<Vec<u8>> {
-        let mut out = Vec::with_capacity(bound(src.len()));
+        Compressor::compress_fast_in(src, acceleration, bound(src.len()))
+    }
+
+    /// [`Compressor::compress_fast`] into a vector of `capacity` bytes at first (the length
+    /// expected, where it is known).
+    pub fn compress_fast_in(src: &[u8], acceleration: u32, capacity: usize) -> Result<Vec<u8>> {
+        let mut out = Vec::with_capacity(capacity.min(bound(src.len())));
         Compressor::default().compress_into(src, usize::MAX, acceleration, &mut out)?;
         Ok(out)
     }

@@ -111,11 +111,24 @@ pub fn encodable(flg: u8, bd: u8) -> bool {
 /// must be [`encodable`]) at the fast level of `acceleration`. With `expect`, None where the
 /// frame is not that, found a block at a time.
 pub fn encode(data: &[u8], flg: u8, bd: u8, acceleration: u32, expect: Option<&[u8]>) -> Result<Option<Vec<u8>>> {
+    encode_in(data, flg, bd, acceleration, expect, usize::MAX)
+}
+
+/// [`encode`] into a vector of `capacity` bytes at first (the length expected, where it is
+/// known).
+pub fn encode_in(
+    data: &[u8],
+    flg: u8,
+    bd: u8,
+    acceleration: u32,
+    expect: Option<&[u8]>,
+    capacity: usize,
+) -> Result<Option<Vec<u8>>> {
     if !encodable(flg, bd) {
         return Err(Error("LZ4 frame descriptor not supported"));
     }
     let max = block_max(bd).unwrap();
-    let mut out = Vec::with_capacity(header_len(flg) + data.len() + data.len() / max * 8 + 12);
+    let mut out = Vec::with_capacity(capacity.min(header_len(flg) + data.len() + data.len() / max * 8 + 12));
     out.extend_from_slice(&MAGIC);
     out.extend_from_slice(&[flg, bd]);
     if flg & CONTENT_SIZE != 0 {

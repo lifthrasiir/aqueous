@@ -1272,19 +1272,19 @@ impl<'a> From<&'a EncodedStreams> for DecodedStreams<'a> {
 #[cfg(feature = "decode")]
 #[export_name = "disfilter_decode"]
 pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
-    decode_with(streams, is64, &Opcodes::BUILTIN)
+    decode_with(streams, is64, &Opcodes::BUILTIN, 0)
 }
 
 /// [`decode`] by the opcode classes of `opcodes` (the module's resource).
 #[cfg(feature = "decode")]
 #[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
-pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes) -> Option<Vec<u8>> {
+pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes, capacity: usize) -> Option<Vec<u8>> {
     let origin = streams.origin;
     let sentinel_size = streams.sentinel_size;
     let streams = streams.streams.each_ref().map(|stream| Cell::new(&stream[..]));
 
     let pc = Cell::new(origin);
-    let mut code = Vec::new();
+    let mut code = Vec::with_capacity(capacity);
 
     let read8 = |st: usize| {
         if_trace_decode! {
@@ -2305,7 +2305,7 @@ mod tests {
         let st = encode(&code, 0x1000, true).unwrap();
         assert_eq!(decode(&(&st).into(), true).as_deref(), Some(&code[..]));
         let other = bad(3 * 256 + 0xf8, N_).unwrap();
-        assert_ne!(decode_with(&(&st).into(), true, &other).as_deref(), Some(&code[..]));
+        assert_ne!(decode_with(&(&st).into(), true, &other, 0).as_deref(), Some(&code[..]));
     }
 
     /// The index of the stream of this name (without `ST_`).

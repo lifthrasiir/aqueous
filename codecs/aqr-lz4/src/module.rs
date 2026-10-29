@@ -19,10 +19,12 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Res
     if !(1..=MAX_ACCELERATION as u64).contains(&a) {
         return Err(corrupt());
     }
+    // (the output no larger than `len` but where it is not that output)
+    let cap = usize::try_from(len).unwrap_or(usize::MAX);
     let out = match (params.first(), &params[p.min(params.len())..]) {
-        (Some(&BLOCK), []) => Compressor::compress_fast(data, a as u32)?,
+        (Some(&BLOCK), []) => Compressor::compress_fast_in(data, a as u32, cap)?,
         (Some(&FRAME), &[flg, bd]) if frame::encodable(flg, bd) => {
-            frame::encode(data, flg, bd, a as u32, None)?.expect("nothing expected")
+            frame::encode_in(data, flg, bd, a as u32, None, cap)?.expect("nothing expected")
         }
         _ => return Err(corrupt()),
     };

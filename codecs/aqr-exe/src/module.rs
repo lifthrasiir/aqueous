@@ -23,7 +23,9 @@ pub fn x86(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Re
         return Err("bad resources");
     };
     let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
-    of_len(x86::decode_with(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0, &opcodes), len)
+    // (no larger but where it is not the output)
+    let cap = usize::try_from(len).unwrap_or(usize::MAX);
+    of_len(x86::decode_with(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0, &opcodes, cap), len)
 }
 
 /// The ARM64 filter on a code section. Parameters: the origin (u64, little endian); inputs:

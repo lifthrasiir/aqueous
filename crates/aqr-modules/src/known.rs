@@ -42,7 +42,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "exe-recons/x86",
         version: 3,
-        sha512_256: hex("2517aa3a4adf0c7bed4175c71dd6cb6928820c2a33038a8ffcf93d21d9e7c509"),
+        sha512_256: hex("7d11c15482190e15bdaef0b1206151ea75bf0aad3092136e6c25e4f8931ca257"),
         block: include_bytes!("../wasm/exe-recons-x86.block"),
     },
     Known {
@@ -108,13 +108,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "leveldb-recons",
         version: 1,
-        sha512_256: hex("a9272277b48740f1ca514cbf6a053031e73152aa2d47a29adb60317ac6d51bc7"),
+        sha512_256: hex("987cf097113c1744fc5c4152d2c2a0690f9bf7619050ecdf83dde7194e3dd1a7"),
         block: include_bytes!("../wasm/leveldb-recons.block"),
     },
     Known {
         name: "lz4-recons",
         version: 1,
-        sha512_256: hex("d1c9ec7cd6d507c6cc0974074cbeb7b6af0eeddca3bf37d7183fb85a4b898c4e"),
+        sha512_256: hex("fd1cad1d213fa4842374deb2b699034867b3de8133ab6b2595a5f5653f9f2368"),
         block: include_bytes!("../wasm/lz4-recons.block"),
     },
     Known {
@@ -204,7 +204,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "snappy-recons",
         version: 2,
-        sha512_256: hex("6e967dac1072db4e3ab21cd10103b0773253bc24e64b7a94aa8519de42bd02db"),
+        sha512_256: hex("672c1f43cc0d93e5bd5dc733f7fa890ff37bb3b796c338198a21ed67b5bbe14d"),
         block: include_bytes!("../wasm/snappy-recons.block"),
     },
     Known {

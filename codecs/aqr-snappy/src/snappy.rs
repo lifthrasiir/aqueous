@@ -108,17 +108,29 @@ fn length(src: &[u8], p: &mut usize) -> Result<u32> {
 
 /// The stream that `snappy::RawCompress` makes of `src`, hashing by `hash`.
 pub fn compress(src: &[u8], hash: Hash) -> Result<Vec<u8>> {
+    compress_in(src, hash, usize::MAX)
+}
+
+/// [`compress`] into a vector of `capacity` bytes at first (the length expected, where it is
+/// known).
+pub fn compress_in(src: &[u8], hash: Hash, capacity: usize) -> Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(capacity.min(32 + src.len() + src.len() / 6));
+    compress_onto(src, hash, &mut out)?;
+    Ok(out)
+}
+
+/// [`compress`] appended to `out`.
+pub fn compress_onto(src: &[u8], hash: Hash, out: &mut Vec<u8>) -> Result<()> {
     let n = u32::try_from(src.len()).map_err(|_| Error("input too long for Snappy"))?;
-    let mut out = Vec::with_capacity(32 + src.len() + src.len() / 6);
-    aqr_common::varint::put(&mut out, n as u64);
+    aqr_common::varint::put(out, n as u64);
     let mut table = vec![0u16; table_size(src.len().min(FRAGMENT))];
     for f in src.chunks(FRAGMENT) {
         match hash {
-            Hash::Mul => fragment::<false>(f, &mut table, &mut out),
-            Hash::Crc => fragment::<true>(f, &mut table, &mut out),
+            Hash::Mul => fragment::<false>(f, &mut table, out),
+            Hash::Crc => fragment::<true>(f, &mut table, out),
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// Entries of the table for a fragment of `n` bytes (`CalculateTableSize`).
