@@ -56,7 +56,8 @@ pub enum Field {
     },
 }
 
-/// Where [`walk`] gets values. A None ends the walk (end-of-packet).
+/// Where [`walk`] gets values. A None ends the walk (end-of-packet). An entry must be one of the
+/// book's used entries.
 pub trait Source {
     /// An `n`-bit field.
     fn bits(&mut self, f: Field, n: u32) -> Option<u32>;
@@ -95,10 +96,7 @@ impl From<Error> for Stop {
 
 fn walk_or_short(s: &Setup, src: &mut dyn Source) -> std::result::Result<(), Stop> {
     let bits = |src: &mut dyn Source, f, n| src.bits(f, n).ok_or(Stop::Short);
-    let entry = |src: &mut dyn Source, f, book: usize| {
-        let e = src.entry(f, book).ok_or(Stop::Short)?;
-        if s.codebooks[book].used(e) { Ok(e) } else { Err(Stop::Bad(Error("codebook entry"))) }
-    };
+    let entry = |src: &mut dyn Source, f, book: usize| src.entry(f, book).ok_or(Stop::Short);
     if bits(src, Field::Type, 1)? != 0 {
         return Err(Error("not an audio packet").into());
     }
@@ -176,19 +174,18 @@ fn residue(
     }
     let classbook = &s.codebooks[r.classbook];
     let per_word = classbook.dims;
-    let mut classes = vec![vec![0usize; parts + per_word]; skip.len()];
+    // each vector's partitions' classes, one row per vector
+    let row = parts + per_word;
+    let mut classes = vec![0u8; row * skip.len()];
     for pass in 0..8 {
         let mut part = 0;
         while part < parts {
             if pass == 0 {
-                for (v, cl) in classes.iter_mut().enumerate().filter(|(v, _)| !skip[*v]) {
+                for v in (0..skip.len()).filter(|&v| !skip[v]) {
                     let e = src.entry(Field::Class { submap, v, part }, r.classbook).ok_or(Stop::Short)?;
-                    if !classbook.used(e) {
-                        return Err(Error("codebook entry").into());
-                    }
                     let mut t = e as usize;
                     for i in (0..per_word).rev() {
-                        cl[part + i] = t % r.classifications;
+                        classes[v * row + part + i] = (t % r.classifications) as u8;
                         t /= r.classifications;
                     }
                 }
@@ -198,15 +195,12 @@ fn residue(
                     break;
                 }
                 for v in (0..skip.len()).filter(|&v| !skip[v]) {
-                    let class = classes[v][part];
+                    let class = classes[v * row + part] as usize;
                     let Some(book) = r.books[class][pass] else { continue };
                     let dims = s.codebooks[book].dims;
                     let reads = if r.kind == 0 { r.partition / dims } else { r.partition.div_ceil(dims) };
                     for k in 0..reads {
-                        let e = src.entry(Field::Vq { submap, v, part, pass, class, k }, book).ok_or(Stop::Short)?;
-                        if !s.codebooks[book].used(e) {
-                            return Err(Error("codebook entry").into());
-                        }
+                        src.entry(Field::Vq { submap, v, part, pass, class, k }, book).ok_or(Stop::Short)?;
                     }
                 }
                 part += 1;

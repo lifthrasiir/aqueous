@@ -27,28 +27,46 @@ impl<'a> Reader<'a> {
         self.data.is_empty()
     }
 
+    /// The bits left.
+    pub fn left(&self) -> usize {
+        self.len() - self.pos
+    }
+
+    /// The next 57 bits (zeros past the end), not read.
+    #[inline]
+    pub fn peek(&self) -> u64 {
+        let at = self.pos >> 3;
+        let w = match self.data.get(at..at + 8) {
+            Some(b) => u64::from_le_bytes(b.try_into().expect("8 bytes")),
+            None => {
+                let mut b = [0u8; 8];
+                let rest = self.data.get(at..).unwrap_or(&[]);
+                b[..rest.len()].copy_from_slice(rest);
+                u64::from_le_bytes(b)
+            }
+        };
+        w >> (self.pos & 7)
+    }
+
+    /// Skips `n` bits (within the packet).
+    #[inline]
+    pub fn skip(&mut self, n: usize) {
+        self.pos += n;
+    }
+
     pub fn bit(&mut self) -> Option<u32> {
-        let b = *self.data.get(self.pos >> 3)? >> (self.pos & 7) & 1;
-        self.pos += 1;
-        Some(b as u32)
+        self.bits(1)
     }
 
     /// An `n`-bit value (n ≤ 32), or None where fewer than `n` bits are left (nothing read).
+    #[inline]
     pub fn bits(&mut self, n: u32) -> Option<u32> {
-        if self.pos + n as usize > self.len() {
+        if n as usize > self.left() {
             return None;
         }
-        let mut v = 0u64;
-        let (mut got, mut at) = (0, self.pos);
-        while got < n {
-            let take = (8 - (at & 7) as u32).min(n - got);
-            let b = (self.data[at >> 3] >> (at & 7)) as u64 & ((1 << take) - 1);
-            v |= b << got;
-            got += take;
-            at += take as usize;
-        }
-        self.pos = at;
-        Some(v as u32)
+        let v = if n == 0 { 0 } else { (self.peek() & ((1u64 << n) - 1)) as u32 };
+        self.pos += n as usize;
+        Some(v)
     }
 
     /// Back to bit `pos`.
@@ -61,7 +79,8 @@ impl<'a> Reader<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct Writer {
     data: Vec<u8>,
-    pos: usize,
+    acc: u64,
+    n: u32,
 }
 
 impl Writer {
@@ -71,26 +90,31 @@ impl Writer {
 
     /// The bits written.
     pub fn pos(&self) -> usize {
-        self.pos
+        self.data.len() * 8 + self.n as usize
     }
 
     pub fn bit(&mut self, b: u32) {
-        if self.pos & 7 == 0 {
-            self.data.push(0);
-        }
-        *self.data.last_mut().expect("a byte") |= ((b & 1) as u8) << (self.pos & 7);
-        self.pos += 1;
+        self.bits(b & 1, 1);
     }
 
     /// The low `n` bits of `v` (n ≤ 32).
+    #[inline]
     pub fn bits(&mut self, v: u32, n: u32) {
-        for i in 0..n {
-            self.bit(v >> i & 1);
+        let v = if n == 32 { v as u64 } else { (v as u64) & ((1u64 << n) - 1) };
+        self.acc |= v << self.n;
+        self.n += n;
+        while self.n >= 8 {
+            self.data.push(self.acc as u8);
+            self.acc >>= 8;
+            self.n -= 8;
         }
     }
 
     /// The bytes, the last padded with zero bits.
-    pub fn finish(self) -> Vec<u8> {
+    pub fn finish(mut self) -> Vec<u8> {
+        if self.n > 0 {
+            self.data.push(self.acc as u8);
+        }
         self.data
     }
 }

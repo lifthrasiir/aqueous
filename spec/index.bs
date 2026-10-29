@@ -4718,8 +4718,8 @@ as follows:</p>
       <td>sqlite-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-sqlite/FORMAT.md">codecs/aqr-sqlite/FORMAT.md</a>
     <tr>
-      <td><code>f3066c956b6f1280df43c8e6e69b450a375328cd37d8ca37a1b26dade7d536a8</code>
-      <td>vorbis-recons@1
+      <td><code>f55260a42f0b18656125b6a279980004f9abab0e448ac7e9c56fb51d4e5c9383</code>
+      <td>vorbis-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-vorbis/FORMAT.md">codecs/aqr-vorbis/FORMAT.md</a>
     <tr>
       <td><code>46a1e89ed82d1585732dc8ac52d78d472618feb5ed715d9b943aa141dac1d4c2</code>

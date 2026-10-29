@@ -1,410 +1,328 @@
-//! The model of a stream's packet values, for coding them with a binary arithmetic coder in place
-//! of their Huffman codes. One model per stream, fed the packets in order.
+//! What each of a stream's packet values is coded as: a symbol of a **key** (the table it is coded
+//! with), the keys chosen by the value's role, its book and a context of the values before it
+//! (FORMAT.md §6). The encoder and the decoder keep the same [`Contexts`].
 //!
-//! - A residue VQ entry of a lookup-1 book is coded digit by digit (each dimension's value), a
-//!   digit as decisions (zero, sign, magnitude in unary), each predicted by a mixer of the
-//!   book's own code (its probabilities factorised over the digits) and counters in contexts of
-//!   the coefficients around: those before it in frequency, at its frequency in the previous
-//!   packet of its block size and in the previous pass, and in the vector before (another
-//!   channel). Decisions the book's code leaves no choice in are not coded.
-//! - Any other entry is coded bit by bit down its book's tree, each node a counter starting at
-//!   the probability the code gives it.
-//! - A field of bits is coded as a binary tree of its value, a counter per node and kind.
+//! - A codebook entry is coded by its **rank**, the entries in order of codeword length (then
+//!   entry number); ranks past 254 are an escape (255) and the rank less 255 in the book's next
+//!   **chunk**, and so on, as the tables hold up to 256 symbols.
+//! - A residue VQ entry's key has a context of the magnitude of the entry before it in its vector
+//!   and pass (in the packet). A floor's or a classword's, of the value of the same field in the
+//!   previous packet of its block size. A field of bits (`n` of them) is coded whole as a symbol of 2^n,
+//!   in a context of the same where it is a floor's.
 
-use crate::cm::{Apm, Coder, Counter, Mixer, Stretch, p16};
 use crate::packet::Field;
-use crate::setup::{Child, Codebook, Setup, lookup1_values};
+use crate::setup::{Codebook, Setup, lookup1_values};
 
-/// The weight of a codeword of `len` bits: 2^(40 − len).
-fn weight(len: u8) -> u64 {
-    1 << (40 - len as u32)
+/// The most symbols of a table.
+pub const ALPHABET: usize = 256;
+/// The escape symbol of a chunk with more ranks after it.
+pub const ESCAPE: u32 = 255;
+
+/// The roles of entries, by their contexts' count.
+const ROLES: [usize; 4] = [VQ_CONTEXTS, VALUE_CONTEXTS, VALUE_CONTEXTS, VALUE_CONTEXTS];
+const ROLE_VQ: usize = 0;
+const ROLE_MASTER: usize = 1;
+const ROLE_Y: usize = 2;
+const ROLE_CLASS: usize = 3;
+/// A VQ entry's: the magnitude of the entry before, 0..=3 (or 4 for none).
+const VQ_CONTEXTS: usize = 5;
+/// A floor value's or classword's: the previous packet's, 0..=15 (or 16 for none).
+const VALUE_CONTEXTS: usize = 17;
+/// Fields, and the contexts of each: type, mode, window, nonzero (previous 0, 1 or none), Y[0]
+/// and Y[1] (the previous's value shifted right by 3, at most 31, or none: 32).
+const FIELDS: [usize; 6] = [1, 1, 1, 3, 33, 33];
+/// Fields are of up to 8 bits (Vorbis I has no wider one an audio packet reads).
+pub const FIELD_BITS: usize = 8;
+
+/// A book's ranks.
+#[derive(Debug, Clone)]
+pub struct Ranks {
+    /// Each entry's rank (u32::MAX unused).
+    pub rank: Vec<u32>,
+    /// Each rank's entry.
+    pub entry: Vec<u32>,
 }
 
-/// A lookup-1 book as digits: per digit and value of the digits before it (as a number), the
-/// weights of the code's entries of each value of the digit.
-struct Digits {
-    q: usize,
-    dims: usize,
-    /// `rows[j][prefix]`: the weight of each value of digit j.
-    rows: Vec<Vec<Vec<u64>>>,
-}
+impl Ranks {
+    fn of(b: &Codebook) -> Ranks {
+        let mut entry: Vec<u32> = (0..b.entries() as u32).filter(|&e| b.used(e)).collect();
+        entry.sort_by_key(|&e| (b.lengths[e as usize], e));
+        let mut rank = vec![u32::MAX; b.entries()];
+        for (r, &e) in entry.iter().enumerate() {
+            rank[e as usize] = r as u32;
+        }
+        Ranks { rank, entry }
+    }
 
-impl Digits {
-    fn of(b: &Codebook) -> Option<Digits> {
-        b.lookup.as_ref().filter(|l| l.kind == 1)?;
-        let (q, dims) = (lookup1_values(b.entries(), b.dims), b.dims);
-        if !(2..=64).contains(&q) || q.checked_pow(dims as u32)? > b.entries() {
-            return None;
-        }
-        let mut rows: Vec<Vec<Vec<u64>>> = (0..dims).map(|j| vec![vec![0; q]; q.pow(j as u32)]).collect();
-        for (e, &len) in b.lengths.iter().enumerate() {
-            if len == 0 {
-                continue;
-            }
-            // entries past q^dims have no digits (and an inexact lookup1 never has them used)
-            if e >= q.pow(dims as u32) {
-                return None;
-            }
-            let (mut t, mut prefix, mut scale) = (e, 0, 1);
-            for row in rows.iter_mut() {
-                let d = t % q;
-                t /= q;
-                row[prefix][d] += weight(len);
-                prefix += d * scale;
-                scale *= q;
-            }
-        }
-        Some(Digits { q, dims, rows })
+    /// The chunks of `n` ranks: in each but the last, the first 255 and an escape.
+    pub fn chunks(n: usize) -> usize {
+        if n <= ALPHABET { 1 } else { 1 + Ranks::chunks(n - (ALPHABET - 1)) }
+    }
+
+    /// Chunk `c`'s alphabet, of a book of `n` ranks.
+    pub fn alphabet(n: usize, c: usize) -> usize {
+        (n - c * (ALPHABET - 1)).min(ALPHABET)
     }
 }
 
-/// Counters of a binary tree: the node of a decision is the prefix of decisions made, from 1.
-#[derive(Clone)]
-struct Tree {
-    nodes: Vec<Counter>,
+/// The keys of a stream's setup, numbered: per book, each role's contexts of its chunk 0; then
+/// per book its later chunks; then per field and bit count its contexts. And each key's default
+/// table: its book chunk's (weighted by the code) or flat (a field).
+#[derive(Debug, Clone)]
+pub struct Keys {
+    pub ranks: Vec<Ranks>,
+    /// Each book's chunks.
+    pub chunks: Vec<usize>,
+    role_base: Vec<[u32; 4]>,
+    chunk_base: Vec<u32>,
+    field_base: Vec<[u32; FIELD_BITS + 1]>,
+    /// Each key's default table, an index into `defaults`.
+    pub default: Vec<u32>,
+    /// The default tables' weights.
+    pub defaults: Vec<Vec<u64>>,
+    /// Each key's alphabet.
+    pub alphabet: Vec<u16>,
 }
 
-impl Tree {
-    fn new(bits: u32) -> Tree {
-        Tree { nodes: vec![Counter::default(); 1 << bits] }
-    }
-
-    /// Codes `v` (of `n` bits, its most significant first).
-    fn code(&mut self, c: &mut dyn Coder, n: u32, v: u32) -> u32 {
-        let mut node = 1usize;
-        let mut out = 0;
-        let last = self.nodes.len() - 1;
-        for i in (0..n).rev() {
-            let k = &mut self.nodes[node.min(last)];
-            let b = c.code(p16(k.p12()), v >> i & 1 == 1);
-            k.update(b);
-            out = out << 1 | b as u32;
-            if node < self.nodes.len() / 2 {
-                node = node * 2 + b as usize;
+impl Keys {
+    pub fn of(setup: &Setup) -> Keys {
+        let ranks: Vec<Ranks> = setup.codebooks.iter().map(Ranks::of).collect();
+        let (mut default, mut defaults, mut alphabet) = (Vec::new(), Vec::new(), Vec::new());
+        let mut chunk_default = Vec::new();
+        for (b, r) in setup.codebooks.iter().zip(&ranks) {
+            let n = r.entry.len().max(1);
+            chunk_default.push(defaults.len() as u32);
+            for c in 0..Ranks::chunks(n) {
+                let lo = c * (ALPHABET - 1);
+                let w: Vec<u64> = (0..Ranks::alphabet(n, c))
+                    .map(|i| {
+                        let escape = i == ALPHABET - 1 && lo + ALPHABET < n + 1 && Ranks::chunks(n) > c + 1;
+                        let ws =
+                            if escape { &r.entry[lo + i..] } else { r.entry.get(lo + i..lo + i + 1).unwrap_or(&[]) };
+                        ws.iter().map(|&e| weight(b.lengths[e as usize])).sum::<u64>().max(1)
+                    })
+                    .collect();
+                defaults.push(w);
             }
         }
-        out
-    }
-}
-
-/// A book's tree of codewords as counters, each starting at the probability the code gives its
-/// node.
-struct Book {
-    counters: Vec<[Counter; 1]>,
-}
-
-impl Book {
-    fn of(b: &Codebook) -> Book {
-        // the weight below each node
-        fn below(b: &Codebook, node: usize, w: &mut [u64]) -> u64 {
-            let mut t = 0;
-            for bit in 0..2 {
-                t += match b.child(node, bit) {
-                    Child::None => 0,
-                    Child::Entry(e) => weight(b.lengths[e as usize]),
-                    Child::Node(n) => below(b, n, w),
-                };
+        let mut role_base = Vec::new();
+        for (b, r) in ranks.iter().enumerate() {
+            let size = Ranks::alphabet(r.entry.len().max(1), 0) as u16;
+            let mut bases = [0u32; 4];
+            for (role, &contexts) in ROLES.iter().enumerate() {
+                bases[role] = default.len() as u32;
+                default.extend(std::iter::repeat_n(chunk_default[b], contexts));
+                alphabet.extend(std::iter::repeat_n(size, contexts));
             }
-            w[node] = t;
-            t
+            role_base.push(bases);
         }
-        let mut w = vec![0u64; b.nodes()];
-        if b.nodes() > 0 {
-            below(b, 0, &mut w);
+        let mut chunk_base = Vec::new();
+        for (b, r) in ranks.iter().enumerate() {
+            chunk_base.push(default.len() as u32);
+            let n = r.entry.len().max(1);
+            for c in 1..Ranks::chunks(n) {
+                default.push(chunk_default[b] + c as u32);
+                alphabet.push(Ranks::alphabet(n, c) as u16);
+            }
         }
-        let side = |node: usize, bit: u32| match b.child(node, bit) {
-            Child::None => 0,
-            Child::Entry(e) => weight(b.lengths[e as usize]),
-            Child::Node(n) => w[n],
-        };
-        let counters = (0..b.nodes())
+        let flat: Vec<u32> = (1..=FIELD_BITS)
             .map(|n| {
-                let (w0, w1) = (side(n, 0), side(n, 1));
-                [Counter::at(((w1 as u128 * 65536) / (w0 + w1).max(1) as u128) as u32, 12)]
+                defaults.push(vec![1; 1 << n]);
+                (defaults.len() - 1) as u32
             })
             .collect();
-        Book { counters }
+        let mut field_base = Vec::new();
+        for &contexts in &FIELDS {
+            let mut bases = [0u32; FIELD_BITS + 1];
+            for n in 1..=FIELD_BITS {
+                bases[n] = default.len() as u32;
+                default.extend(std::iter::repeat_n(flat[n - 1], contexts));
+                alphabet.extend(std::iter::repeat_n(1u16 << n, contexts));
+            }
+            field_base.push(bases);
+        }
+        let chunks = ranks.iter().map(|r| Ranks::chunks(r.entry.len())).collect();
+        Keys { ranks, chunks, role_base, chunk_base, field_base, default, defaults, alphabet }
+    }
+
+    pub fn len(&self) -> usize {
+        self.default.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.default.is_empty()
+    }
+
+    /// The key of chunk `c` (> 0) of book `book`.
+    pub fn chunk(&self, book: usize, c: usize) -> u32 {
+        self.chunk_base[book] + c as u32 - 1
     }
 }
 
-/// Context tables' size (each).
-const TABLE: usize = 1 << 16;
-/// APM contexts' count (each).
-const APMS: usize = 1 << 12;
-/// An unknown coefficient, in the tables of magnitudes.
-const UNKNOWN: u8 = 255;
-
-fn hash(v: u64) -> usize {
-    (v.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 48) as usize & (TABLE - 1)
-}
-
-fn bucket(m: u8) -> u64 {
-    match m {
-        UNKNOWN => 4,
-        0..=2 => m as u64,
-        _ => 3,
-    }
-}
-
-/// The model of a stream.
-pub struct Model<'s> {
-    setup: &'s Setup,
-    stretch: Stretch,
-    digits: std::rc::Rc<[Option<Digits>]>,
-    books: Vec<Book>,
-    vq: [Vec<Counter>; 3],
-    apms: [Apm; 3],
-    mixer: Mixer<8>,
-    fields: Vec<Tree>,
-    /// The packet's mode, once read.
-    mode: usize,
-    /// This packet's coefficients' magnitudes, per (vector, pass), by frequency; and the
-    /// previous packet's of each block size.
-    cur: Vec<Vec<u8>>,
-    prev: [Vec<Vec<u8>>; 2],
+/// The weight of a codeword of `len` bits: 2^(32 − len).
+fn weight(len: u8) -> u64 {
+    1 << (32 - len as u32)
 }
 
 const PASSES: usize = 8;
+const NONE8: u8 = 255;
+const NONE16: u16 = u16::MAX;
 
-/// The mixer's learning rate.
-const RATE: i32 = 10;
+/// The values a stream's packets have coded so far, as the contexts need them.
+pub struct Contexts<'s> {
+    setup: &'s Setup,
+    keys: &'s Keys,
+    /// Each lookup-1 book's entries' magnitudes (the sum of the distances of the entry's values'
+    /// indices from the centre, at most 254), 0 for other books.
+    mags: Vec<Vec<u8>>,
+    long: usize,
+    mode: usize,
+    vectors: usize,
+    /// Per block size, the last value of each floor field and classword, by slot.
+    last: [Vec<u16>; 2],
+    /// Per (vector, pass), the magnitude of the entry before in this packet.
+    before: Vec<u8>,
+    /// The (vector, pass) of the VQ entry whose key was asked last.
+    pending: usize,
+}
 
-impl<'s> Model<'s> {
-    pub fn new(setup: &'s Setup) -> Self {
-        let vectors = setup.ident.channels.max(1);
-        Model {
+impl<'s> Contexts<'s> {
+    pub fn new(setup: &'s Setup, keys: &'s Keys) -> Self {
+        let mags = setup
+            .codebooks
+            .iter()
+            .map(|b| {
+                let q = lookup1_values(b.entries(), b.dims.max(1)).max(1);
+                if b.lookup.as_ref().is_none_or(|l| l.kind != 1) {
+                    return vec![0; b.entries()];
+                }
+                (0..b.entries())
+                    .map(|e| {
+                        let mut t = e;
+                        let mut m = 0usize;
+                        for _ in 0..b.dims {
+                            m += (2 * (t % q)).abs_diff(q - 1) / 2;
+                            t /= q;
+                        }
+                        m.min(254) as u8
+                    })
+                    .collect()
+            })
+            .collect();
+        let vectors = setup.ident.channels;
+        Contexts {
             setup,
-            stretch: Stretch::default(),
-            digits: setup.codebooks.iter().map(Digits::of).collect::<Vec<_>>().into(),
-            books: setup.codebooks.iter().map(Book::of).collect(),
-            vq: [vec![Counter::default(); TABLE], vec![Counter::default(); TABLE], vec![Counter::default(); TABLE]],
-            apms: [Apm::new(APMS, 6), Apm::new(APMS, 6), Apm::new(APMS, 6)],
-            mixer: Mixer::new(16, [1 << 14, 0, 0, 0, 1 << 14, 1 << 14, 1 << 14, 0], RATE),
-            fields: vec![Tree::new(9); 6],
+            keys,
+            mags,
+            long: 0,
             mode: 0,
-            cur: vec![Vec::new(); vectors * PASSES],
-            prev: [vec![Vec::new(); vectors * PASSES], vec![Vec::new(); vectors * PASSES]],
+            vectors,
+            last: [Vec::new(), Vec::new()],
+            before: vec![NONE8; vectors * PASSES],
+            pending: 0,
         }
     }
 
-    /// Ends a packet: its coefficients become the previous packet's of its block size.
-    pub fn end_packet(&mut self) {
-        let long = self.setup.modes.get(self.mode).is_some_and(|m| m.blockflag) as usize;
-        for (p, c) in self.prev[long].iter_mut().zip(self.cur.iter_mut()) {
-            if !c.is_empty() {
-                std::mem::swap(p, c);
-                c.clear();
-            }
-        }
+    fn get_last(&self, slot: usize) -> u16 {
+        self.last[self.long].get(slot).copied().unwrap_or(NONE16)
     }
 
-    /// Codes field `f` of `n` bits, `v` its value (any where decoding).
-    pub fn bits(&mut self, c: &mut dyn Coder, f: Field, n: u32, v: u32) -> u32 {
-        let kind = match f {
-            Field::Type => 0,
-            Field::Mode => 1,
-            Field::Window => 2,
-            Field::Nonzero { .. } => 3,
-            Field::Y01 { i: 0, .. } => 4,
-            _ => 5,
+    fn set_last(&mut self, slot: usize, v: u32) {
+        let l = &mut self.last[self.long];
+        if l.len() <= slot {
+            l.resize(slot + 1, NONE16);
+        }
+        l[slot] = v.min(NONE16 as u32 - 1) as u16;
+    }
+
+    /// The key of field `f` of `n` bits (1 to 8).
+    pub fn field_key(&self, f: Field, n: u32) -> u32 {
+        let (kind, ctx) = match f {
+            Field::Type => (0, 0),
+            Field::Mode => (1, 0),
+            Field::Window => (2, 0),
+            Field::Nonzero { ch } => (3, (self.get_last(slot_nonzero(ch)) as u32).min(2)),
+            Field::Y01 { ch, i } => match self.get_last(slot_y01(ch, i)) {
+                NONE16 => (4 + i, 32),
+                v => (4 + i, (v as u32 >> 3).min(31)),
+            },
+            _ => (0, 0),
         };
-        let v = self.fields[kind].code(c, n, v);
-        if f == Field::Mode {
-            self.mode = v as usize;
-            for m in &mut self.cur {
-                m.clear();
+        self.keys.field_base[kind][n as usize] + ctx
+    }
+
+    /// Records field `f`'s value `v`.
+    pub fn field(&mut self, f: Field, v: u32) {
+        match f {
+            Field::Mode => {
+                self.mode = v as usize;
+                self.long = self.setup.modes.get(self.mode).is_some_and(|m| m.blockflag) as usize;
+                self.before.fill(NONE8);
             }
-        }
-        v
-    }
-
-    /// Codes entry `e` of book `book` read as field `f` (any `e` where decoding).
-    pub fn entry(&mut self, c: &mut dyn Coder, f: Field, book: usize, e: u32) -> u32 {
-        if let Field::Vq { submap, v, part, pass, k, .. } = f
-            && self.digits[book].is_some()
-        {
-            return self.vq_entry(c, book, submap, v, part, pass, k, e);
-        }
-        self.tree_entry(c, book, e)
-    }
-
-    fn tree_entry(&mut self, c: &mut dyn Coder, book: usize, e: u32) -> u32 {
-        let b = &self.setup.codebooks[book];
-        let (code, len) =
-            (b.codewords.get(e as usize).copied().unwrap_or(0), b.lengths.get(e as usize).copied().unwrap_or(0));
-        let mut node = 0;
-        let mut depth = 0;
-        loop {
-            let (c0, c1) = (b.child(node, 0), b.child(node, 1));
-            // a node of one way is no choice
-            let bit = if c0 == Child::None {
-                true
-            } else if c1 == Child::None {
-                false
-            } else {
-                let want = depth < len as u32 && code >> (len as u32 - 1 - depth) & 1 == 1;
-                let k = &mut self.books[book].counters[node][0];
-                let bit = c.code(p16(k.p12()), want);
-                k.update(bit);
-                bit
-            };
-            depth += 1;
-            match b.child(node, bit as u32) {
-                Child::Entry(e) => return e,
-                Child::Node(n) => node = n,
-                Child::None => return 0,
-            }
+            Field::Nonzero { ch } => self.set_last(slot_nonzero(ch), v),
+            Field::Y01 { ch, i } => self.set_last(slot_y01(ch, i), v),
+            _ => {}
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn vq_entry(
-        &mut self,
-        c: &mut dyn Coder,
-        book: usize,
-        submap: usize,
-        v: usize,
-        part: usize,
-        pass: usize,
-        k: usize,
-        e: u32,
-    ) -> u32 {
-        let s = self.setup;
-        let mode = &s.modes[self.mode];
-        let map = &s.mappings[mode.mapping];
-        let r = &s.residues[map.submaps[submap].1];
-        let dims = s.codebooks[book].dims;
-        let (q, ndig) = {
-            let d = self.digits[book].as_ref().expect("digits");
-            (d.q, d.dims)
+    /// The key of chunk 0 of an entry of book `book` read as `f`.
+    pub fn entry_key(&mut self, f: Field, book: usize) -> u32 {
+        let base = &self.keys.role_base[book];
+        let value = |slot: usize| match self.get_last(slot) {
+            NONE16 => 16,
+            v => (v as u32).min(15),
         };
-        let half = q / 2;
-        let long = mode.blockflag as usize;
-        let n = s.ident.blocksizes[long] / 2;
-        let size = if r.kind == 2 { n * map.mux.iter().filter(|&&m| m == submap).count() } else { n };
-        let slot = v * PASSES + pass;
-        if self.cur[slot].is_empty() {
-            self.cur[slot] = vec![UNKNOWN; size];
-        }
-        let base = r.begin + part * r.partition;
-        let step = r.partition / dims;
-        let (mut t, mut prefix, mut scale, mut out) = (e as usize, 0, 1, 0usize);
-        for j in 0..ndig {
-            let want = t % q;
-            t /= q;
-            let freq = if r.kind == 0 { base + k + j * step } else { base + k * dims + j };
-            let at = |m: &Vec<u8>, i: usize| m.get(i).copied().unwrap_or(UNKNOWN);
-            let cur = &self.cur[slot];
-            let f1 = if freq > 0 { bucket(at(cur, freq - 1)) } else { 5 };
-            let f2 = if freq > 1 { bucket(at(cur, freq - 2)) } else { 5 };
-            let pp = bucket(at(&self.prev[long][slot], freq));
-            let pv = if pass > 0 { bucket(at(&self.cur[slot - 1], freq)) } else { 5 };
-            let nb = if v > 0 { bucket(at(&self.cur[slot - PASSES], freq)) } else { 5 };
-            let band = (freq * 8 / r.end.max(1)).min(7) as u64;
-            let ctx = [
-                (book as u64) << 32 | (j as u64) << 24 | f1 << 8 | f2,
-                1 << 60 | (book as u64) << 32 | pp << 8 | pv,
-                2 << 60 | (book as u64) << 32 | nb << 8 | band,
-            ];
-            let digits = self.digits.clone();
-            let row = &digits[book].as_ref().expect("digits").rows[j][prefix];
-            let total: u64 = row.iter().sum();
-            let d = self.digit(c, row, total, half, ctx, pass, want);
-            out += d * scale;
-            prefix += d * scale;
-            scale *= q;
-            let m = (d as i32 - half as i32).unsigned_abs().min(254) as u8;
-            if let Some(x) = self.cur[slot].get_mut(freq) {
-                *x = m;
+        match f {
+            Field::Vq { v, pass, .. } => {
+                self.pending = v.min(self.vectors - 1) * PASSES + pass;
+                base[ROLE_VQ]
+                    + match self.before[self.pending] {
+                        NONE8 => 4,
+                        m => m.min(3) as u32,
+                    }
             }
-        }
-        out as u32
-    }
-
-    /// Codes a digit of the values weighted `row` (`total` their sum, `half` the centre).
-    #[allow(clippy::too_many_arguments)]
-    fn digit(
-        &mut self,
-        c: &mut dyn Coder,
-        row: &[u64],
-        total: u64,
-        half: usize,
-        ctx: [u64; 3],
-        pass: usize,
-        want: usize,
-    ) -> usize {
-        let wz = row[half];
-        // zero?
-        if self.decide(c, wz, total - wz, 0, ctx, pass, want == half) {
-            return half;
-        }
-        let neg: u64 = row[..half].iter().sum();
-        let pos: u64 = row[half + 1..].iter().sum();
-        let negative = self.decide(c, neg, pos, 1, ctx, pass, want < half);
-        let at = |m: usize| if negative { half - m } else { half + m };
-        let mut m = 1;
-        loop {
-            let eq = row[at(m)];
-            let beyond: u64 = (m + 1..=half).map(|x| row[at(x)]).sum();
-            if !self.decide(
-                c,
-                beyond,
-                eq,
-                2 + (m - 1).min(5),
-                ctx,
-                pass,
-                (want as i64 - half as i64).unsigned_abs() as usize > m,
-            ) {
-                return at(m);
-            }
-            m += 1;
+            Field::Master { ch, part } => base[ROLE_MASTER] + value(slot_master(ch, part)),
+            Field::Y { ch, i } => base[ROLE_Y] + value(slot_y(ch, i)),
+            Field::Class { submap, v, part } => base[ROLE_CLASS] + value(self.slot_class(submap, v, part)),
+            _ => base[ROLE_MASTER] + 16,
         }
     }
 
-    /// Codes a decision whose code gives `w1` to yes and `w0` to no; a decision of no choice is
-    /// not coded.
-    #[allow(clippy::too_many_arguments)]
-    fn decide(
-        &mut self,
-        c: &mut dyn Coder,
-        w1: u64,
-        w0: u64,
-        node: usize,
-        ctx: [u64; 3],
-        pass: usize,
-        want: bool,
-    ) -> bool {
-        if w0 == 0 || w1 == 0 {
-            return w1 > 0;
-        }
-        // (weights cut to 50 bits, so that the product fits)
-        let cut = (64 - (w0 + w1).leading_zeros()).saturating_sub(50);
-        let (w0, w1) = (w0 >> cut, w1 >> cut);
-        let prior = (w1 * 4096 / (w0 + w1).max(1)) as i32;
-        let idx: [usize; 3] = std::array::from_fn(|i| hash(ctx[i] ^ (node as u64) << 16));
-        let st = &self.stretch;
-        let sp = st.get(prior);
-        let a: [i32; 3] = std::array::from_fn(|i| st.get(self.apms[i].p(sp, idx[i] & (APMS - 1))));
-        let inputs = [
-            sp,
-            st.get(self.vq[0][idx[0]].p12()),
-            st.get(self.vq[1][idx[1]].p12()),
-            st.get(self.vq[2][idx[2]].p12()),
-            a[0],
-            a[1],
-            a[2],
-            256,
-        ];
-        let set = node * 2 + (pass > 0) as usize;
-        let p = self.mixer.mix(set, inputs);
-        let bit = c.code(p16(p), want);
-        self.mixer.update(bit);
-        for apm in &mut self.apms {
-            apm.update(bit);
-        }
-        for (t, &i) in self.vq.iter_mut().zip(&idx) {
-            t[i].update(bit);
-        }
-        bit
+    fn slot_class(&self, submap: usize, v: usize, part: usize) -> usize {
+        CLASS_SLOTS + (submap * self.vectors + v) * 1024 + part.min(1023)
     }
+
+    /// Records entry `e` of book `book` read as `f`, after its key was asked.
+    pub fn entry(&mut self, f: Field, book: usize, e: u32) {
+        match f {
+            Field::Vq { .. } => self.before[self.pending] = self.mags[book].get(e as usize).copied().unwrap_or(0),
+            Field::Master { ch, part } => self.set_last(slot_master(ch, part), e),
+            Field::Y { ch, i } => self.set_last(slot_y(ch, i), e),
+            Field::Class { submap, v, part } => {
+                let slot = self.slot_class(submap, v, part);
+                self.set_last(slot, e)
+            }
+            _ => {}
+        }
+    }
+}
+
+// The slots of floor fields in `last`: per channel 128 of them (nonzero, Y[0], Y[1], 32 master
+// entries, 93 Y values); then the classwords', per (submap, vector) 1024.
+const CLASS_SLOTS: usize = 256 * 128;
+
+fn slot_nonzero(ch: usize) -> usize {
+    ch * 128
+}
+
+fn slot_y01(ch: usize, i: usize) -> usize {
+    ch * 128 + 1 + i
+}
+
+fn slot_master(ch: usize, part: usize) -> usize {
+    ch * 128 + 3 + part.min(31)
+}
+
+fn slot_y(ch: usize, i: usize) -> usize {
+    ch * 128 + 35 + i.min(92)
 }

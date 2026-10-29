@@ -28,7 +28,16 @@ pub struct Codebook {
     pub codewords: Vec<u32>,
     /// The decoding tree: per node, its two children ([`LEAF`] | entry, a node, or [`NONE`]).
     tree: Vec<[u32; 2]>,
+    /// Each entry's codeword in the order it is packed (its first bit lowest).
+    packed: Vec<u32>,
+    /// Decoding by the next [`FAST`] bits (as packed): an entry and its length (`entry | len <<
+    /// 24`), the node reached past them ([`LEAF`] clear, `NODE`), or nothing ([`NONE`] as `u32::MAX`).
+    fast: Vec<u32>,
 }
+
+/// The bits [`Codebook::read`] looks up at once.
+const FAST: u32 = 10;
+const FAST_NODE: u32 = 1 << 30;
 
 /// What a bit of a codeword leads to in a codebook's decoding tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +122,13 @@ impl Codebook {
             return Err(bad("codebook dimensions"));
         }
         let (codewords, tree) = assign(&lengths)?;
-        Ok(Codebook { dims, lengths, lookup, codewords, tree })
+        let packed: Vec<u32> = codewords
+            .iter()
+            .zip(&lengths)
+            .map(|(&c, &l)| if l == 0 { 0 } else { c.reverse_bits() >> (32 - l as u32) })
+            .collect();
+        let fast = fast_table(&tree);
+        Ok(Codebook { dims, lengths, lookup, codewords, tree, packed, fast })
     }
 
     pub fn entries(&self) -> usize {
@@ -122,9 +137,26 @@ impl Codebook {
 
     /// Reads an entry's codeword; None at the end of the packet (`r` then where it was) or on a
     /// path no entry has.
+    #[inline]
     pub fn read(&self, r: &mut Reader) -> Option<u32> {
+        let t = self.fast[(r.peek() & ((1 << FAST) - 1)) as usize];
+        if t == u32::MAX {
+            return None;
+        }
+        if t & FAST_NODE == 0 {
+            let len = (t >> 24) as usize;
+            if len > r.left() {
+                return None;
+            }
+            r.skip(len);
+            return Some(t & 0xFF_FFFF);
+        }
+        if (FAST as usize) > r.left() {
+            return None;
+        }
         let start = r.pos();
-        let mut node = 0;
+        r.skip(FAST as usize);
+        let mut node = (t & !FAST_NODE) as usize;
         loop {
             let Some(b) = r.bit() else {
                 r.seek(start);
@@ -142,11 +174,9 @@ impl Codebook {
     }
 
     /// Writes entry `e`'s codeword.
+    #[inline]
     pub fn write(&self, e: u32, w: &mut crate::bits::Writer) {
-        let (code, len) = (self.codewords[e as usize], self.lengths[e as usize] as u32);
-        for i in (0..len).rev() {
-            w.bit(code >> i & 1);
-        }
+        w.bits(self.packed[e as usize], self.lengths[e as usize] as u32);
     }
 
     /// The decoding tree's nodes (the root is node 0).
@@ -167,6 +197,30 @@ impl Codebook {
     pub fn used(&self, e: u32) -> bool {
         self.lengths.get(e as usize).is_some_and(|&l| l > 0)
     }
+}
+
+/// The table of [`Codebook::fast`] from the decoding tree.
+fn fast_table(tree: &[[u32; 2]]) -> Vec<u32> {
+    let mut t = vec![u32::MAX; 1 << FAST];
+    for (idx, slot) in t.iter_mut().enumerate() {
+        let mut node = 0usize;
+        for depth in 0..FAST {
+            match tree[node][(idx >> depth) & 1] {
+                NONE => break,
+                c if c & LEAF != 0 => {
+                    *slot = (c & !LEAF) | (depth + 1) << 24;
+                    break;
+                }
+                c => {
+                    node = c as usize;
+                    if depth + 1 == FAST {
+                        *slot = FAST_NODE | node as u32;
+                    }
+                }
+            }
+        }
+    }
+    t
 }
 
 /// The codewords of §3.2.1: in entry order, each used entry takes the lowest codeword of its

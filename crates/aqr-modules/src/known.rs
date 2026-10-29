@@ -209,8 +209,8 @@ pub const KNOWN: &[Known] = &[
     },
     Known {
         name: "vorbis-recons",
-        version: 1,
-        sha512_256: hex("f3066c956b6f1280df43c8e6e69b450a375328cd37d8ca37a1b26dade7d536a8"),
+        version: 2,
+        sha512_256: hex("f55260a42f0b18656125b6a279980004f9abab0e448ac7e9c56fb51d4e5c9383"),
         block: include_bytes!("../wasm/vorbis-recons.block"),
     },
     Known {

@@ -56,6 +56,7 @@ struct Stats {
     coded: u64,
     t_encode: f64,
     t_decode: f64,
+    t_parse: f64,
     samples: usize,
     no_setup: usize,
     failed: usize,
@@ -88,7 +89,9 @@ fn sample(s: &mut Stats, setup: &Setup, data: &[u8]) -> Result<(), String> {
         }
         let p = data.get(at + 2..at + 2 + n).ok_or("packet past the sample")?;
         at += 2 + n;
+        let t = Instant::now();
         let parsed = packet::parse(setup, p).map_err(|e| e.to_string())?;
+        s.t_parse += t.elapsed().as_secs_f64();
         let back = packet::write(setup, &parsed).map_err(|e| e.to_string())?;
         if back != p {
             return Err("packet not written back".into());
@@ -162,12 +165,13 @@ fn main() {
         );
     }
     println!(
-        "  record: {:.3} MB of {:.3} MB of packets ({:.2}%); encoding {:.1} s, decoding {:.1} s",
+        "  record: {:.3} MB of {:.3} MB of packets ({:.2}%); encoding {:.1} s, decoding {:.1} s, parsing alone {:.1} s",
         s.record as f64 / 1e6,
         s.coded as f64 / 1e6,
         100.0 * s.record as f64 / s.coded as f64,
         s.t_encode,
-        s.t_decode
+        s.t_decode,
+        s.t_parse
     );
     println!(
         "  {:8} {:6.2}%; length prefixes {:.2}% of the bytes",

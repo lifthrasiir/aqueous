@@ -6,7 +6,6 @@
 #![cfg_attr(not(feature = "encode"), allow(unused))]
 
 pub mod bits;
-pub mod cm;
 pub mod codec;
 #[cfg(feature = "encode")]
 pub mod formula;
