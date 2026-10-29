@@ -254,6 +254,7 @@ name = "aqr-fsb"
 version = "0.1.0"
 dependencies = [
  "aqr-common",
+ "aqr-formula",
 ]
 
 [[package]]

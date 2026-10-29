@@ -6,4 +6,7 @@ the header it was encoded with. So far the crate has the Vorbis setup database
 skeleton and `end`s, and finds the setup of a CRC-32: by its row, or by a search over all
 skeletons that uses CRC-32's affinity (meet in the middle over the residues' ends).
 
-`FORMAT.md` specifies the database, the assembly and the search (§3–5).
+`fsb5` reads a bank's layout (its head, then each sample's data), and `formula` splits a bank
+into a stream per sample; aqr-compress does not use it until a sample recompressor does.
+
+`FORMAT.md` specifies the database, the assembly and the search (§3–5), and the split (§7).

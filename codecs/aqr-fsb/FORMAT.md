@@ -4,7 +4,8 @@ FMOD's FSB5 sound banks store Vorbis streams without their setup headers: a samp
 CRC-32 of the setup it was encoded with, and FMOD's runtime supplies the header. Recompressing
 such a stream needs the header, so aqr-fsb carries a database from which every setup FMOD is
 known to use is assembled, looked up by its CRC-32. This document describes the database (§3),
-how a setup is assembled from it (§4) and found by a CRC-32 (§5).
+how a setup is assembled from it (§4) and found by a CRC-32 (§5), and how a bank is split into its
+samples (§7).
 
 The document is normative and complete: an implementation can be written from it alone.
 Sections marked *informative* describe how the database was made; a reader of it needs none of
@@ -21,6 +22,7 @@ Contents:
 4. [Assembling a setup](#4-assembling-a-setup)
 5. [Finding a setup by its CRC-32](#5-finding-a-setup-by-its-crc-32)
 6. [How the database was made](#6-how-the-database-was-made-informative) *(informative)*
+7. [FSB5 banks](#7-fsb5-banks-encoder) *(encoder)*
 
 ## 1. Conventions
 
@@ -177,3 +179,31 @@ as found in libvorbis's output (Xiph.Org's codebooks among them).
 The database has 480 codebooks (69,374 bytes), 7 floors, 32 residues, 4 mappings and 2 modes,
 32 skeletons and 260 rows, 76,133 bytes in all. Of the rows, 197 are setups unmodified
 libvorbis makes and 63 only the changed one; all 161 of vgmstream's table are among them.
+
+## 7. FSB5 banks (encoder)
+
+How `aqr_fsb::formula::encode` splits a bank; no module is involved, so nothing here binds a
+decoder.
+
+A bank starts with a header: the magic `FSB5`, then little-endian 32-bit words: the version (0
+or 1), the number of samples, the bytes of the samples' headers, of the names, and of the
+samples' data, and the codec (`mode`: 2 16-bit PCM, 7 IMA ADPCM, 11 MPEG, 15 Vorbis, among
+others). The header is 0x40 bytes in version 0 and 0x3C in version 1; the samples' headers,
+the names and the data follow it in that order, and the bank ends with the data.
+
+A sample's header is a little-endian 64-bit word, of which bit 0 tells that chunks follow and
+bits 7 to 33 are the sample's offset in the data in units of 32 bytes; each chunk is a 32-bit
+word, of which bit 0 tells that another follows and bits 1 to 24 are the bytes of the chunk
+after the word. A sample's data runs from its offset to the next sample's, or to the end of the
+data, padding included.
+
+`encode` takes a bank whose version is 0 or 1, with at least one sample, whose samples' headers
+take exactly their declared bytes, whose first offset is 0, whose offsets are in order within
+the data, and whose data is within the input. Its formula is the concatenation of a stream of
+the bytes before the data (class `fsb5/head`), a stream per sample's data (class `fsb5/vorbis`,
+`fsb5/ima-adpcm`, `fsb5/pcm16`, `fsb5/mpeg` or `fsb5/data` by the codec), and a stream of what
+follows the bank in the input (`fsb5/tail`), if anything.
+
+*Status.* aqr-compress does not use the formula yet: a formula without a module is not smaller
+than its file, and so is not taken. It is meant to carry the samples' recompressors (Vorbis
+through aqr-vorbis, IMA ADPCM), under which the samples banks share are also stored once.

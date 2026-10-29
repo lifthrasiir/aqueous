@@ -2,8 +2,17 @@
 name = "aqr-fsb"
 version = "0.1.0"
 edition = "2024"
-description = "FMOD's FSB5 sound banks: the Vorbis setup headers they leave out, rebuilt from a database"
+description = "FMOD's FSB5 sound banks: split into their samples; the Vorbis setup headers they leave out, rebuilt from a database"
 publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone.
+encode = ["dep:aqr-formula"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+[dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
