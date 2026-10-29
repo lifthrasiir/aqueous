@@ -369,7 +369,9 @@ impl Once {
         let mut slot = slot.lock().unwrap();
         match std::mem::replace(&mut *slot, Slot::Taken) {
             Slot::Empty => {
-                let f = code();
+                let mut f = code();
+                // (kept without a copy of its streams)
+                f.iter_mut().flat_map(|f| &mut f.streams).for_each(|s| s.data.share());
                 *slot = Slot::Kept(f.clone());
                 if d.len() > Self::LARGE {
                     self.copies.lock().unwrap().insert((d.as_ptr() as usize, d.len()));

@@ -212,6 +212,14 @@ impl Bytes {
         matches!(self.0, Repr::Shared(_))
     }
 
+    /// The bytes shared from now on, without a copy: a clone shares them rather than copies
+    /// them.
+    pub fn share(&mut self) {
+        if let Repr::Owned(v) = &mut self.0 {
+            self.0 = Repr::Shared(Arc::new(std::mem::take(v)));
+        }
+    }
+
     /// The bytes as its own, copied first where they are shared.
     pub fn to_mut(&mut self) -> &mut Vec<u8> {
         if let Repr::Shared(d) = &self.0 {
@@ -1576,6 +1584,18 @@ mod tests {
         let classes: Vec<_> = f.streams.iter().map(|s| (&*s.class, s.data.len())).collect();
         assert_eq!(classes, [("a", 80), ("b", 40), ("c", 100), ("d", 8), ("e", 20), ("o", 1), ("z", 4), ("q", 80)]);
         assert!(matches!(&f.root, Node::Concat(ns) if ns.last() == Some(&Node::slice(2, 90, 20))));
+    }
+
+    /// Bytes shared are cloned without a copy, and copied once changed.
+    #[test]
+    fn shared_bytes() {
+        let mut b = Bytes::from(vec![1, 2, 3]);
+        let at = b.as_ptr();
+        b.share();
+        let mut c = b.clone();
+        assert!(b.is_shared() && c.as_ptr() == at && *c == [1, 2, 3]);
+        c[0] = 4;
+        assert!(!c.is_shared() && *b == [1, 2, 3] && *c == [4, 2, 3]);
     }
 
     /// Outputs not taken once each, of other sizes, or taken by an application before theirs.
