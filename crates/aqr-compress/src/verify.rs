@@ -59,11 +59,15 @@ impl Memo {
 }
 
 /// Runs the modules, keeping the output of every application by its key: as a range of a
-/// file for the applications in `file` (by address, with the file's index and the range).
+/// file for the applications in `file` (by address, with the file's index and the range), else
+/// the bytes themselves once the evaluation is done with them ([`Modules::keep`]), rather than
+/// a copy as they are made.
 struct Recording {
     native: Native,
     file: Vec<(usize, usize, Range<usize>)>,
     seen: Mutex<Vec<(Key, Output)>>,
+    /// The keys of the applications whose outputs are to be kept, by address.
+    keys: Mutex<HashMap<usize, Key>>,
     limits: Mutex<Limits>,
     /// Outputs of applications run beforehand, by address ([`ahead`]).
     ahead: Mutex<HashMap<usize, Vec<u8>>>,
@@ -76,13 +80,18 @@ impl Modules for Recording {
             Some(out) => out,
             None => self.native.apply(a, inputs)?,
         };
-        let kept = match self.file.iter().find(|(at, ..)| std::ptr::addr_eq(a, *at as *const Apply)) {
-            Some((_, i, range)) => Output::File(*i, range.clone()),
-            None => Output::Bytes(Arc::new(out.clone())),
-        };
-        self.seen.lock().unwrap().push((key(a, inputs), kept));
+        match self.file.iter().find(|(at, ..)| std::ptr::addr_eq(a, *at as *const Apply)) {
+            Some((_, i, range)) => self.seen.lock().unwrap().push((key(a, inputs), Output::File(*i, range.clone()))),
+            None => _ = self.keys.lock().unwrap().insert(a as *const Apply as usize, key(a, inputs)),
+        }
         self.limit(a, &[a.len], inputs);
         Ok(out)
+    }
+
+    fn keep(&self, a: &Apply, out: Vec<u8>) {
+        if let Some(k) = self.keys.lock().unwrap().remove(&(a as *const Apply as usize)) {
+            self.seen.lock().unwrap().push((k, Output::Bytes(Arc::new(out))));
+        }
     }
 
     // (not kept)
@@ -292,10 +301,20 @@ fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
         native,
         file: at.map_or_else(Vec::new, |(i, at)| top(&f.root, i, at)),
         seen: Mutex::default(),
+        keys: Mutex::default(),
         limits: Mutex::default(),
         ahead,
     };
-    let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
+    let good = match f.eval(&r) {
+        Ok(out) if hash(&out) == d => {
+            // (the output of the formula, where it is an application's)
+            if let Node::Apply(a) = &f.root {
+                r.keep(a, out);
+            }
+            true
+        }
+        _ => false,
+    };
     drop(f);
     if good {
         memo.0.extend(r.seen.into_inner().unwrap());

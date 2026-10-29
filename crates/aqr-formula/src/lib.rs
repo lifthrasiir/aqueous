@@ -1012,8 +1012,8 @@ impl Formula {
         let mut outputs: Vec<Vec<Vec<u8>>> = Vec::with_capacity(self.shared.len());
         for s in &self.shared {
             let inputs = s.apply.inputs.iter().map(|n| self.bytes(n, m, &outputs)).collect::<Result<Vec<_>>>()?;
-            let inputs: Vec<&[u8]> = inputs.iter().map(|i| &**i).collect();
-            let out = m.apply_shared(s, &inputs)?;
+            let out = m.apply_shared(s, &inputs.iter().map(|i| &**i).collect::<Vec<_>>())?;
+            keep_all(m, &s.apply.inputs, inputs);
             if out.len() != s.sizes.len() || out.iter().zip(&s.sizes).any(|(o, &n)| o.len() as u64 != n) {
                 return Err(Error::new(format!("{} made outputs of other sizes than {:?}", s.apply.module, s.sizes)));
             }
@@ -1081,7 +1081,9 @@ impl Formula {
         match n {
             Node::Concat(ns) => ns.iter().try_for_each(|n| self.eval_into(n, m, outputs, out)),
             _ => {
-                out.extend_from_slice(&self.bytes(n, m, outputs)?);
+                let b = self.bytes(n, m, outputs)?;
+                out.extend_from_slice(&b);
+                keep_all(m, [n], [b]);
                 Ok(())
             }
         }
@@ -1115,17 +1117,33 @@ impl Formula {
             &Node::Output { shared, index, .. } => Ok(Cow::Borrowed(&outputs[shared][index])),
             Node::Patch(p) => {
                 let (source, patch) = (self.bytes(&p.source, m, outputs)?, self.bytes(&p.patch, m, outputs)?);
-                Ok(Cow::Owned(patch::apply(&source, &patch, p.len)?))
+                let out = patch::apply(&source, &patch, p.len)?;
+                keep_all(m, [&p.source, &p.patch], [source, patch]);
+                Ok(Cow::Owned(out))
             }
             Node::Apply(a) => {
                 let inputs = a.inputs.iter().map(|n| self.bytes(n, m, outputs)).collect::<Result<Vec<_>>>()?;
-                let inputs: Vec<&[u8]> = inputs.iter().map(|i| &**i).collect();
-                let out = m.apply(a, &inputs)?;
+                let out = m.apply(a, &inputs.iter().map(|i| &**i).collect::<Vec<_>>())?;
+                keep_all(m, &a.inputs, inputs);
                 if out.len() as u64 != a.len {
                     return Err(Error::new(format!("{} made {} bytes, not {}", a.module, out.len(), a.len)));
                 }
                 Ok(Cow::Owned(out))
             }
+        }
+    }
+}
+
+/// The outputs of the applications among `nodes` in `made` (the bytes of each) given back to
+/// `m` ([`Modules::keep`]).
+fn keep_all<'a, 'n>(
+    m: &impl Modules,
+    nodes: impl IntoIterator<Item = &'n Node>,
+    made: impl IntoIterator<Item = Cow<'a, [u8]>>,
+) {
+    for (n, b) in nodes.into_iter().zip(made) {
+        if let (Node::Apply(a), Cow::Owned(out)) = (n, b) {
+            m.keep(a, out);
         }
     }
 }
@@ -1239,6 +1257,13 @@ impl fmt::Display for Formula {
 pub trait Modules {
     /// The output of `a` on `inputs`, the evaluated `a.inputs` (with `a.resources`).
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>>;
+
+    /// The output `a` gave, once the evaluation ([`Formula::eval`]) is done with it: the
+    /// application it is an input of has been applied, or it is put in its place. Dropped by
+    /// default.
+    fn keep(&self, a: &Apply, out: Vec<u8>) {
+        let _ = (a, out);
+    }
 
     /// The outputs of `s` on `inputs`, the evaluated `s.apply.inputs`: by default those split
     /// from the output of [`Modules::apply`] ([`Shared::split`]), or that output if `s` has one.
