@@ -18,7 +18,7 @@ const FINE_SPAN: usize = 1 << 18;
 const SPAN: usize = 1 << 22;
 const MAX_REGIONS: usize = 32;
 /// The records a phase is judged on.
-const PHASE_ROWS: usize = 256;
+const PHASE_ROWS: usize = 64;
 /// The record sizes of a window measured: those of the most equal bytes (and their divisors).
 const SCAN_KS: usize = 8;
 /// The least score of a byte against the column models: one value the models have not seen
@@ -125,7 +125,15 @@ pub fn grow_region(data: &[u8], k: usize, wo: usize, wlen: usize, span: Option<u
 /// window's records (deltas and xors) code each record against the record before, and a
 /// record scores the code length of its bytes under the order-0 model of the file less that
 /// of its fields' planes under column models, refitted on the region.
-pub fn grow_fields(data: &[u8], k: usize, p: usize, seed: (usize, usize), span: usize) -> (usize, usize) {
+/// `bg` is the order-0 model of the file ([`kt::order0_log2`]).
+pub fn grow_fields(
+    data: &[u8],
+    bg: &[f64; 256],
+    k: usize,
+    p: usize,
+    seed: (usize, usize),
+    span: usize,
+) -> (usize, usize) {
     let (k_, p_) = (k as i64, p as i64);
     let floor = seed.0.saturating_sub(span) as i64;
     let lo = (p_ - (p_ - floor).div_euclid(k_) * k_) as usize;
@@ -155,7 +163,6 @@ pub fn grow_fields(data: &[u8], k: usize, p: usize, seed: (usize, usize), span: 
             col += 1;
         }
     }
-    let bg = kt::order0_log2(data);
     let (mut s, mut e) = (r0, r1);
     let mut counts = vec![0u32; k * 256];
     for _ in 0..3 {
@@ -290,11 +297,12 @@ pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
         }
     }
     let mut regions = Vec::new();
+    let bg = kt::order0_log2(data);
     for f in seeds.iter().take(MAX_REGIONS) {
         let s = refine_phase(data, f.s, f.e, f.k);
         let mut spans = vec![(s, f.e)];
         if f.k <= FINE_K {
-            spans.push(grow_fields(data, f.k, s, (f.wo, f.wo + f.wlen), FINE_SPAN));
+            spans.push(grow_fields(data, &bg, f.k, s, (f.wo, f.wo + f.wlen), FINE_SPAN));
         }
         for (s, e) in spans {
             if e > s && (e - s) / f.k >= MIN_RECORDS {

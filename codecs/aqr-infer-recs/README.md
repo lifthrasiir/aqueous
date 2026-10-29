@@ -20,7 +20,7 @@ prototype; `scripts/rec_oracle.py` measures the prototype against the layouts of
   adaptive order-0 models on a sample of the records. A region is written as its fields'
   planes (or its bytes transposed), then the tails.
 - **Choice** ([`choose`](src/lib.rs)): each candidate measured alone under zstd -3 (on itself
-  and 256 KiB around it), the set apart with the largest sum of gains by weighted interval
+  and 64 KiB around it, on its first MiB), the set apart with the largest sum of gains by weighted interval
   scheduling, then each checked in context.
 
 ## Status
@@ -28,8 +28,8 @@ prototype; `scripts/rec_oracle.py` measures the prototype against the layouts of
 A library and a bench; no module and no formula yet, so no `FORMAT.md`. `Region::restore`
 inverts a form from what a decoder would know (the shape, the count, the fields).
 
-The inference takes 0.1 to 3 s a file (on one thread), mostly a constant: the window scan
-and the growth of the regions found (`fixed`), and the choice's zstd on the candidates.
+The inference takes 0.03 to 1.3 s a file (on one thread), mostly a constant: the window scan
+and the growth of the regions found (`fixed`), and the chain search.
 
 ## Results
 
@@ -41,9 +41,10 @@ file's thread:
 |---|---|---|
 | `scripts/rec_bench.py` (numpy, 10 processes) | 605 | 0.967 |
 | this crate, as ported (85a8610) | 106.9 | 0.967 |
-| this crate | 16.3 | 0.969 |
+| this crate | 8.6 | 0.969 |
 
-On one thread, 13.1 s (8.8 MB/s). Peak RSS 729 MB (the prototype's: 4.8 GB).
+On one thread, 6.6 s (17.4 MB/s; the 58.7 MB ELF at 44 MB/s, a 1.7 MB libc at 3.6 MB/s).
+Peak RSS 579 MB (the prototype's: 4.8 GB).
 
 ## Usage
 

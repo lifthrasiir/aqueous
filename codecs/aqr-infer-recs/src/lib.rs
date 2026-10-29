@@ -20,7 +20,9 @@ use fields::{Cost, Field};
 /// The fewest records a region holds.
 pub const MIN_RECORDS: usize = 16;
 /// Candidates are judged on themselves and this much around them.
-const LOCAL_CONTEXT: usize = 1 << 18;
+const LOCAL_CONTEXT: usize = 1 << 16;
+/// Candidates are judged on their first records, up to this many bytes.
+const JUDGE: usize = 1 << 20;
 
 /// `count` points over [0, last], rounded down, without repeats: numpy's `linspace`.
 pub(crate) fn linspace(last: usize, count: usize) -> Vec<usize> {
@@ -82,6 +84,25 @@ impl Region {
 
     fn heads(data: &[u8], starts: &[usize], head: usize) -> Vec<u8> {
         starts[..starts.len() - 1].iter().flat_map(|&s| &data[s..s + head]).copied().collect()
+    }
+
+    /// The region's first records, as many as fit in `bytes` (MIN_RECORDS at least).
+    pub fn prefix(&self, bytes: usize) -> Region {
+        if self.end - self.start <= bytes {
+            return self.clone();
+        }
+        let (count, shape) = match &self.shape {
+            Shape::Fixed { k } => ((bytes / k).max(MIN_RECORDS).min(self.count), self.shape.clone()),
+            Shape::Entries { rule, head, starts } => {
+                let n = starts.partition_point(|&s| s <= self.start + bytes).max(MIN_RECORDS + 1).min(starts.len());
+                (n - 1, Shape::Entries { rule: *rule, head: *head, starts: starts[..n].to_vec() })
+            }
+        };
+        let end = match &shape {
+            Shape::Fixed { k } => self.start + k * count,
+            Shape::Entries { starts, .. } => *starts.last().unwrap(),
+        };
+        Region { start: self.start, end, count, shape, fields: self.fields.clone() }
     }
 
     /// The record size, or the entries' head size.
@@ -206,21 +227,25 @@ fn local_size(data: &[u8], taken: &[(usize, usize, &[u8])], s: usize, e: usize) 
 
 /// The candidates to take, and in which form, with a line on each (as the prototype prints).
 ///
-/// Each is measured alone (its best form). Gains of regions apart roughly add up, so the set
+/// Each is measured alone (its best form; on its first JUDGE bytes, the gain scaled to its
+/// size). Gains of regions apart roughly add up, so the set
 /// apart with the largest sum of gains is found first (weighted interval scheduling: one big
 /// region of a little gain must not shut out the tables it overlaps). Those, from the best,
 /// and then the rest, from the best, are taken where they still make it smaller among those
 /// taken before.
 pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
+    // a region is judged on its first JUDGE bytes, its gains scaled to its size
+    let judged: Vec<Region> = cands.iter().map(|c| c.prefix(JUDGE)).collect();
     let forms: Vec<[Vec<u8>; 2]> =
-        cands.iter().map(|c| [c.render(data, Form::Bytes), c.render(data, Form::Fields)]).collect();
+        judged.iter().map(|c| [c.render(data, Form::Bytes), c.render(data, Form::Fields)]).collect();
     let gains = |i: usize, taken: &[(usize, usize, &[u8])]| -> [i64; 2] {
-        let c = &cands[i];
+        let c = &judged[i];
+        let scale = (cands[i].end - cands[i].start) as f64 / (c.end - c.start) as f64;
         let before = local_size(data, taken, c.start, c.end) as i64;
         std::array::from_fn(|f| {
             let mut t = taken.to_vec();
             t.push((c.start, c.end, &forms[i][f]));
-            before - local_size(data, &t, c.start, c.end) as i64
+            ((before - local_size(data, &t, c.start, c.end) as i64) as f64 * scale) as i64
         })
     };
     let alone: Vec<i64> = (0..cands.len()).map(|i| *gains(i, &[]).iter().max().unwrap()).collect();
@@ -257,7 +282,7 @@ pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
             continue;
         }
         let t: Vec<(usize, usize, &[u8])> =
-            taken.iter().map(|&(t, f, _)| (cands[t].start, cands[t].end, &forms[t][f as usize][..])).collect();
+            taken.iter().map(|&(t, f, _)| (judged[t].start, judged[t].end, &forms[t][f as usize][..])).collect();
         let g = gains(i, &t);
         let f = if g[1] > g[0] { 1 } else { 0 };
         lines.push(format!(

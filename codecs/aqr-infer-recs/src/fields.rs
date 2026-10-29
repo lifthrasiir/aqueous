@@ -43,8 +43,10 @@ pub const REF_K: usize = 128;
 const REF_BACK: usize = 32;
 /// The description of a field, which breaks ties towards fewer, wider fields.
 const FIELD_BITS: f64 = 16.0;
-/// Fields are chosen on 4 runs of this many records spread over the records.
+/// Fields are chosen on 4 runs of this many records spread over the records, or fewer of big
+/// records: FIELD_BYTES in all.
 pub const FIELD_ROWS: usize = 256;
+const FIELD_BYTES: usize = 1 << 16;
 
 /// The field (`off`, `width`, `big`) of each record of m (rows of k bytes).
 fn values(m: &[u8], k: usize, off: usize, width: usize, big: bool) -> Vec<u64> {
@@ -141,13 +143,15 @@ pub fn decode(planes: &[u8], n: usize, k: usize, fields: &[Field]) -> Option<Vec
 /// FIELD_ROWS records from each of 4 places over m (all of m if that is not fewer).
 pub fn sample(m: &[u8], k: usize) -> std::borrow::Cow<'_, [u8]> {
     let n = m.len() / k;
-    if n <= 4 * FIELD_ROWS {
+    // fewer of big records: about FIELD_BYTES in all
+    let rows = (FIELD_BYTES / k / 4).clamp(16, FIELD_ROWS);
+    if n <= 4 * rows {
         return m.into();
     }
-    let mut out = Vec::with_capacity(4 * FIELD_ROWS * k);
+    let mut out = Vec::with_capacity(4 * rows * k);
     for i in 0..4 {
-        let a = (n - FIELD_ROWS) * i / 3;
-        out.extend_from_slice(&m[a * k..(a + FIELD_ROWS) * k]);
+        let a = (n - rows) * i / 3;
+        out.extend_from_slice(&m[a * k..(a + rows) * k]);
     }
     out.into()
 }
@@ -199,7 +203,8 @@ pub fn split(m: &[u8], k: usize, cost: Cost, refs: bool) -> (Vec<Field>, f64, f6
                     ));
                 }
                 if refs && w > 1 && o >= w {
-                    for r in o.saturating_sub(REF_BACK)..=o - w {
+                    // fields of a width lie a multiple of it apart, whatever the records' phase
+                    for r in (o.saturating_sub(REF_BACK)..=o - w).filter(|r| (o - r) % w == 0) {
                         let rv = values_of(r, w, *big);
                         for how in [How::Sub(r), How::XorRef(r)] {
                             let c = scratch.cost(&v, Some(&rv), w, how, cost) + FIELD_BITS;

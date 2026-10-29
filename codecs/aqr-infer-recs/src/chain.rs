@@ -24,7 +24,7 @@ const MAX_B: usize = 64;
 
 /// Where chains are looked for: spans over the file, the first at its start.
 const SPAN: usize = 1 << 20;
-const WINDOWS: usize = 16;
+const WINDOWS: usize = 8;
 const STEPS: usize = 32;
 /// The entries' leading bytes that score a chain.
 const COLS: usize = 16;
@@ -397,7 +397,7 @@ fn rotate(data: &[u8], p: Vec<usize>, r: Rule) -> (Vec<usize>, Rule) {
 }
 
 /// The run of entries whose leading bytes fit the column models of the first ones.
-fn trim(data: &[u8], p: Vec<usize>) -> Vec<usize> {
+fn trim(data: &[u8], bg: &[f64; 256], p: Vec<usize>) -> Vec<usize> {
     let lead = |q: usize, j: usize| byte(data, q + j) as usize;
     let mut counts = vec![0u32; COLS * 256];
     let fit = (p.len() - 1).min(256);
@@ -407,7 +407,6 @@ fn trim(data: &[u8], p: Vec<usize>) -> Vec<usize> {
         }
     }
     let lp = kt::column_log2(&counts, fit);
-    let bg = kt::order0_log2(data);
     let scores = p[..p.len() - 1]
         .iter()
         .map(|&q| (0..COLS).map(|j| (lp[j * 256 + lead(q, j)] - bg[lead(q, j)]).max(-4.0)).sum());
@@ -454,13 +453,14 @@ pub fn chains(data: &[u8]) -> Vec<(Vec<usize>, Rule)> {
     let mut ranked: Vec<_> = best.into_values().collect();
     ranked.sort_unstable_by(by_score);
     let mut out = Vec::new();
+    let bg = kt::order0_log2(data);
     for (_, p, r) in ranked.into_iter().take(6) {
         let p = extend_back(data, p, &r);
         let (mut p, r) = rotate(data, p, r);
         // entries the chain left out as long as they started at their fields
         let more = follow(data, *p.last().unwrap(), &r, None);
         p.extend_from_slice(&more[1..]);
-        let p = trim(data, p);
+        let p = trim(data, &bg, p);
         if p.len() > MIN_RECORDS {
             out.push((p, r));
         }
