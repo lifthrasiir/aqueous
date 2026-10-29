@@ -4694,7 +4694,7 @@ as follows:</p>
       <td>png-set@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>e297ad1ba0727f63efa794f3dc0dfe66ff21317940426a213b4af80aeae5a5df</code>
+      <td><code>0e04bbf105c680af27c18865587bd24b3ae2b48e7481cb8cb1df130296b641df</code>
       <td>psd-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-psd/FORMAT.md">codecs/aqr-psd/FORMAT.md</a>
     <tr>

@@ -125,8 +125,8 @@ fn clip_as_wasm() {
     }
 }
 
-/// PSD files of the shapes of aqr-psd's tests, the same natively and as WebAssembly (whose
-/// decoding of a group once called `Instant::now`, which WebAssembly has not).
+/// PSD and PSB files of the shapes of aqr-psd's tests, the same natively and as WebAssembly
+/// (whose decoding of a group once called `Instant::now`, which WebAssembly has not).
 #[test]
 fn psd_as_wasm() {
     use aqr_psd::packbits::{self, Encoder as Rle};
@@ -137,6 +137,8 @@ fn psd_as_wasm() {
         psd(260, 35, &layers(260, 35, false), Rle::Greedy { min_run: 3, split_rest: true }, 0, &[0]),
         psd(800, 400, &layers(800, 400, true), enc, 3, &[]),
         psd::hinted_file(300, 200),
+        // (counts of 4 bytes, once checked by a shift past the width of a 32-bit usize)
+        psd::psb(300, 40, enc),
     ];
     let archive = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
     for (k, file) in files.iter().enumerate() {

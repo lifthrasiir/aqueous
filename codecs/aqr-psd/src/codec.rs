@@ -1418,6 +1418,8 @@ impl RowSink<'_> {
     /// Writes the count of the row of `n` bytes just written, and moves to the next row.
     fn count(&mut self, out: &mut [u8], n: usize) -> Result<()> {
         if self.count_bytes > 0 {
+            // (in u64: 4-byte counts would shift a 32-bit usize by all its width)
+            let n = n as u64;
             if n >> (8 * self.count_bytes).min(63) != 0 {
                 return Err(corrupt());
             }

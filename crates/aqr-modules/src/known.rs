@@ -174,7 +174,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("e297ad1ba0727f63efa794f3dc0dfe66ff21317940426a213b4af80aeae5a5df"),
+        sha512_256: hex("0e04bbf105c680af27c18865587bd24b3ae2b48e7481cb8cb1df130296b641df"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {

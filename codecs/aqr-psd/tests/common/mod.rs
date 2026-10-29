@@ -26,6 +26,11 @@ pub fn be32(o: &mut Vec<u8>, v: u32) {
 /// PackBits data of `rows` rows of `w` bytes: counts, then rows. `mangle` (if not 0)
 /// re-encodes every `mangle`th row from row 1 on all as literals, which no known encoder does.
 pub fn rle(data: &[u8], w: usize, enc: Encoder, mangle: usize) -> Vec<u8> {
+    rle_counted(data, w, enc, mangle, 2)
+}
+
+/// [`rle`] with counts of `count_bytes` bytes (4 in PSB files).
+pub fn rle_counted(data: &[u8], w: usize, enc: Encoder, mangle: usize, count_bytes: usize) -> Vec<u8> {
     let rows = data.len() / w;
     let mut enc_rows: Vec<Vec<u8>> = Vec::new();
     for r in 0..rows {
@@ -43,7 +48,7 @@ pub fn rle(data: &[u8], w: usize, enc: Encoder, mangle: usize) -> Vec<u8> {
     }
     let mut o = Vec::new();
     for e in &enc_rows {
-        be16(&mut o, e.len() as u16);
+        o.extend_from_slice(&(e.len() as u32).to_be_bytes()[4 - count_bytes..]);
     }
     for e in &enc_rows {
         o.extend_from_slice(e);
@@ -155,6 +160,29 @@ pub fn psd(width: usize, height: usize, layers: &[Layer], enc: Encoder, mangle: 
         planes.extend(image(width, height, 77 + k));
     }
     o.extend_from_slice(&rle(&planes, width, enc, 0));
+    o
+}
+
+/// A PSB file (version 2) of no layers: its composite alone, RLE with counts of 4 bytes.
+pub fn psb(width: usize, height: usize, enc: Encoder) -> Vec<u8> {
+    let mut o = Vec::new();
+    o.extend_from_slice(b"8BPS");
+    be16(&mut o, 2);
+    o.extend_from_slice(&[0; 6]);
+    be16(&mut o, 3);
+    be32(&mut o, height as u32);
+    be32(&mut o, width as u32);
+    be16(&mut o, 8);
+    be16(&mut o, 3);
+    be32(&mut o, 0); // color mode data
+    be32(&mut o, 0); // image resources
+    o.extend_from_slice(&[0; 8]); // layer and mask information, 8 bytes long in PSB
+    be16(&mut o, 1);
+    let mut planes = Vec::new();
+    for k in 0..3 {
+        planes.extend(image(width, height, 77 + k));
+    }
+    o.extend_from_slice(&rle_counted(&planes, width, enc, 0, 4));
     o
 }
 
