@@ -35,7 +35,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 ## Development notes
 
 - Test with `cargo rt -p <crate>` (`.cargo/config.toml`: `cargo test --profile release-test`,
-  optimised without the fat LTO of `-r`). Codec tests in debug builds are very slow (a debug
+  optimised and incremental). Codec tests in debug builds are very slow (a debug
   `cargo test --workspace` once ran over 12 minutes). Timings (`--ignored` tests) still want
   `-r`. Test the crates you changed rather than the whole workspace; for the archive encoder
   and decoder that is aqr-formula, aqr-compress and aqr-decompress. Stream long output with

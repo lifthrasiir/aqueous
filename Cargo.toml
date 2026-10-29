@@ -11,10 +11,12 @@ members = [
 # checkouts of third_party/ (some of them workspaces of their own).
 exclude = ["flate-zoo", "third_party", "codecs/aqr-flate/bench", "codecs/aqr-png/bench"]
 
+# Thin-local LTO and 16 codegen units (Cargo's defaults) rather than fat LTO and one unit: on an
+# M4 the build of `aqr` from scratch 148 -> 73 s, after touching aqr-flate 113 -> 20 s, after
+# touching aqr 98 -> 1.5 s; 10gb compressed +0.7% instructions retired, tested +0.3%, the same
+# wall-clock within noise (thin LTO: +0.4% and +0.3%, but 31 s after touching aqr).
 [profile.release]
 debug = 1
-lto = "fat"
-codegen-units = 1
 
 [profile.release.package.aqr-flac]
 debug = true
@@ -29,12 +31,9 @@ debug = true
 debug = true
 
 # For the tests (`cargo rt`, an alias of `cargo test --profile release-test`): optimised, as the
-# tests are slow otherwise, but without the fat LTO and the single codegen unit with which every
-# test binary linking wasmtime took minutes. The timings (`--ignored` tests) still want `-r`.
+# tests are slow otherwise, and incremental. The timings (`--ignored` tests) still want `-r`.
 [profile.release-test]
 inherits = "release"
-lto = false
-codegen-units = 16
 incremental = true
 debug = "line-tables-only"
 
@@ -43,8 +42,11 @@ debug = "line-tables-only"
 [profile.release-test.package.cranelift-codegen]
 opt-level = 0
 
-# aqr-exe as a Wasm module (aqr-exe/build-wasm.bat).
+# The Wasm modules (crates/aqr-modules/build.sh, aqr-exe/build-wasm.bat): fat LTO and one
+# codegen unit for small modules, and for their bytes (hence hashes) to stay as they were.
 [profile.release-wasm]
 inherits = "release"
 debug = false
 strip = true
+lto = "fat"
+codegen-units = 1
