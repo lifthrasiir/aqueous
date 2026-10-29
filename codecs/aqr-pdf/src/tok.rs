@@ -199,7 +199,7 @@ fn coarse(slot: usize, res: u8, t: usize) -> usize {
     }
 }
 
-fn slot_tables(slot: usize, res: u8) -> usize {
+pub(crate) fn slot_tables(slot: usize, res: u8) -> usize {
     if slot == PIXEL { [PIX_CTX, ACT, 8, 1][res as usize] } else { res_tables(res) }
 }
 
@@ -256,7 +256,7 @@ fn copy_match(d: &mut [u8], o: usize, dist: usize, len: usize) {
 }
 
 /// Room after the data for overlapping copies.
-const SLACK: usize = 16;
+pub(crate) const SLACK: usize = 16;
 
 /// The parts of the coded form.
 pub const PARTS: usize = 5;
@@ -268,9 +268,9 @@ fn tiles(px: Pixels) -> bool {
 
 /// Bytes of data a window keeps behind its position when it slides: a match goes at most
 /// 32 KiB back, the pixel model a row, a pixel and a byte (MED of the byte before).
-const WINDOW: usize = 1 << 15;
+pub(crate) const WINDOW: usize = 1 << 15;
 /// Bytes a window moves on by at least before it slides.
-const STEP: usize = 1 << 18;
+pub(crate) const STEP: usize = 1 << 18;
 
 /// A stream's data as it is made, from `off` on: `data[..o]`, then room. It slides once it
 /// holds `keep` bytes of history and `STEP` (or `keep`) more, the bytes that leave it summed
@@ -761,7 +761,7 @@ impl LitModel for Pix {
 }
 
 /// Tokens decoded at a time, the window having room for all their data.
-const CHUNK: usize = 1 << 10;
+pub(crate) const CHUNK: usize = 1 << 10;
 
 /// One stream's decoding state, its data in a window.
 struct Cursor<'s, 'a> {
