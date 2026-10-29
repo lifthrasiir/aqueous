@@ -4,15 +4,17 @@
 //! A large saving needs records over a large part of the file, so windows spread evenly over
 //! it find them: a structure over 15% of the file escapes 18 windows with a chance under 5%.
 //! Each window gets the record size its bytes repeat at most (as `fixed::scan_window`), and is
-//! compressed with zstd as it is, transposed by that size and split into fields; the windows'
-//! savings, over their compressed sizes, estimate the file's.
+//! compressed with zstd as it is, transposed by that size and split into fields (with their
+//! floats lifted, where they have any); the windows' savings, over their compressed sizes,
+//! estimate the file's.
 //!
 //! The estimate is low (on the oracle corpus, 0.6–4% where the inference saves 3–9%, as it
 //! misses what small tables and chains of entries save), but it tells large savings: the five
 //! files saving 10% or more, 13–47%, are estimated at 6.2–50%; no other above 7.5%.
 
 use crate::fields::{self, Cost};
-use crate::{fixed, zcost};
+use crate::module::lifted_width;
+use crate::{fixed, floats, zcost};
 
 /// Windows of WINDOW bytes, PROBES of them over the file (the file itself if not larger).
 const WINDOW: usize = 1 << 13;
@@ -58,7 +60,20 @@ pub fn estimate(data: &[u8]) -> Estimate {
         let (fl, _, _) = fields::split(m, k, Cost::Kt, false);
         let mut f = fields::encode(m, k, &fl);
         f.extend_from_slice(&a[rows * k..]);
-        let zt = zcost::len(&[&t]).min(zcost::len(&[&f]));
+        let mut zt = zcost::len(&[&t]).min(zcost::len(&[&f]));
+        // and with their floats lifted, where they have any
+        let (p, fl) = floats::find(m, k, s);
+        if !fl.is_empty() {
+            let rows = (w - p) / k;
+            let m = &a[p..p + rows * k];
+            let fl = floats::widths(m, k, &fl);
+            let (l, k2) = (floats::lift(m, k, &fl), lifted_width(k, &fl));
+            let (ff, _, _) = fields::split(&l, k2, Cost::Kt, false);
+            let mut f = a[..p].to_vec();
+            f.extend(fields::encode(&l, k2, &ff));
+            f.extend_from_slice(&a[p + rows * k..]);
+            zt = zt.min(zcost::len(&[&f]));
+        }
         if zt < z {
             hits += 1;
             after += zt;

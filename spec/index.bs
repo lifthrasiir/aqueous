@@ -4772,6 +4772,10 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/recs-fields.wasm" title="crates/aqr-modules/wasm/recs-fields.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-infer-recs/FORMAT.md" title="codecs/aqr-infer-recs/FORMAT.md">R</a>
     <tr>
+      <td><code>3aa7f7762db624b2411cc72381ceea58cbd398c62438cec4b08ed59110f2e439</code>
+      <td>recs-floats@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-infer-recs/FORMAT.md">codecs/aqr-infer-recs/FORMAT.md</a>
+    <tr>
       <td><code>672c1f43cc0d93e5bd5dc733f7fa890ff37bb3b796c338198a21ed67b5bbe14d</code>
       <td>snappy-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/snappy-recons.wasm" title="crates/aqr-modules/wasm/snappy-recons.wasm">D</a>

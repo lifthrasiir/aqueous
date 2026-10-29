@@ -279,3 +279,164 @@ pub fn decode_entries(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u
     }
     Ok(out)
 }
+
+// -- recs-floats
+
+/// A float field of a record (an f32 or f64 at `off`) whose values are a whole q times k (or
+/// q over k), give or take a few units in the last place: stored as q, `wq` bytes, and that
+/// difference, `wr` bytes, both little-endian two's complement.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Float {
+    pub off: usize,
+    /// An f64, else an f32.
+    pub wide: bool,
+    pub big: bool,
+    /// q / k, else q × k.
+    pub div: bool,
+    pub k: f64,
+    pub wq: usize,
+    pub wr: usize,
+}
+
+impl Float {
+    pub fn width(&self) -> usize {
+        if self.wide { 8 } else { 4 }
+    }
+
+    /// The bits of q × k (or q / k) in the field's precision, as an ordered integer
+    /// ([`ordered`]). A NaN (of a k that is none, or 0 / 0) is the quiet NaN of no payload, as
+    /// Wasm leaves a NaN's sign and payload open.
+    pub fn base(&self, q: i64) -> u64 {
+        let y = if self.div { q as f64 / self.k } else { q as f64 * self.k };
+        let b = match (y.is_nan(), self.wide) {
+            (true, true) => 0x7FF8_0000_0000_0000,
+            (true, false) => 0x7FC0_0000,
+            (false, true) => y.to_bits(),
+            (false, false) => (y as f32).to_bits() as u64,
+        };
+        ordered(b, self.wide)
+    }
+
+    /// The field's bits from q and the difference r.
+    pub fn value(&self, q: i64, r: i64) -> u64 {
+        let o = self.base(q).wrapping_add(r as u64) & mask(self.width());
+        ordered(o, self.wide)
+    }
+}
+
+/// The bits of a float of a width as an integer that rises with the float (-0.0 right below
+/// 0.0, the negatives below it), wrapping in the width: an involution.
+pub fn ordered(b: u64, wide: bool) -> u64 {
+    let sign = if wide { 1 << 63 } else { 1 << 31 };
+    if b & sign != 0 { b ^ (sign - 1) } else { b }
+}
+
+/// The first `w` bytes of `b`, little-endian, sign-extended (0 for no bytes).
+fn signed(b: &[u8], w: usize) -> i64 {
+    if w == 0 {
+        return 0;
+    }
+    let v = b[..w].iter().rev().fold(0u64, |v, &x| v << 8 | x as u64);
+    let sh = 64 - 8 * w as u32;
+    ((v << sh) as i64) >> sh
+}
+
+/// The bytes of a record whose floats are lifted to q and r.
+pub fn lifted_width(k: usize, floats: &[Float]) -> usize {
+    k + floats.iter().map(|f| f.wq + f.wr).sum::<usize>() - floats.iter().map(|f| f.width()).sum::<usize>()
+}
+
+/// The params of `recs-floats`: n records of k bytes, by their floats (in order, apart).
+pub fn floats_params(n: usize, k: usize, floats: &[Float]) -> Vec<u8> {
+    let mut p = Vec::new();
+    for v in [n, k, floats.len()] {
+        varint::put(&mut p, v as u64);
+    }
+    for f in floats {
+        varint::put(&mut p, f.off as u64);
+        let wr = if f.wr == 0 { 0 } else { 1 + f.wr.trailing_zeros() as u8 };
+        p.push(f.wide as u8 | (f.big as u8) << 1 | (f.div as u8) << 2 | (f.wq.trailing_zeros() as u8) << 3 | wr << 5);
+        p.extend(f.k.to_le_bytes());
+    }
+    p
+}
+
+/// The records, the record size and the floats of `recs-floats`' params, checked: the floats
+/// lie in order within the record, apart, each difference no wider than its float.
+pub fn parse_floats(p: &[u8]) -> Result<(usize, usize, Vec<Float>)> {
+    let mut at = 0;
+    let get = |at: &mut usize| {
+        varint::get(p, at).map_err(|_| corrupt()).and_then(|v| usize::try_from(v).map_err(|_| corrupt()))
+    };
+    let (n, k, count) = (get(&mut at)?, get(&mut at)?, get(&mut at)?);
+    if count > k / 4 {
+        return Err(corrupt());
+    }
+    let mut floats = Vec::with_capacity(count);
+    let mut end = 0;
+    for _ in 0..count {
+        let off = get(&mut at)?;
+        let c = *p.get(at).ok_or_else(corrupt)?;
+        let kb = p.get(at + 1..at + 9).ok_or_else(corrupt)?;
+        at += 9;
+        let wr = match c >> 5 {
+            0 => 0,
+            x @ 1..=4 => 1 << (x - 1),
+            _ => return Err(corrupt()),
+        };
+        let f = Float {
+            off,
+            wide: c & 1 != 0,
+            big: c & 2 != 0,
+            div: c & 4 != 0,
+            k: f64::from_le_bytes(kb.try_into().unwrap()),
+            wq: 1 << (c >> 3 & 3),
+            wr,
+        };
+        if off < end || off.checked_add(f.width()).is_none_or(|e| e > k) || f.wr > f.width() {
+            return Err(corrupt());
+        }
+        end = off + f.width();
+        floats.push(f);
+    }
+    if at != p.len() {
+        return Err(corrupt());
+    }
+    Ok((n, k, floats))
+}
+
+/// The n records of k bytes back from their lifted records (None if not exactly).
+pub fn unlift(lifted: &[u8], n: usize, k: usize, floats: &[Float]) -> Option<Vec<u8>> {
+    let k2 = lifted_width(k, floats);
+    if n.checked_mul(k2)? != lifted.len() {
+        return None;
+    }
+    let mut m = Vec::with_capacity(n.checked_mul(k)?);
+    for r in lifted.chunks_exact(k2.max(1)).take(n) {
+        let mut at = 0;
+        let mut from = 0;
+        for f in floats {
+            m.extend_from_slice(&r[at..at + f.off - from]);
+            at += f.off - from;
+            let q = signed(&r[at..], f.wq);
+            let d = signed(&r[at + f.wq..], f.wr);
+            at += f.wq + f.wr;
+            let v = f.value(q, d);
+            let w = f.width();
+            m.extend((0..w).map(|j| (v >> (8 * if f.big { w - 1 - j } else { j })) as u8));
+            from = f.off + w;
+        }
+        m.extend_from_slice(&r[at..]);
+    }
+    Some(m)
+}
+
+/// The module `recs-floats`: the records of `params` from their lifted records.
+pub fn decode_floats(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let &[lifted] = inputs else { return Err(corrupt()) };
+    let (n, k, floats) = parse_floats(params)?;
+    if n.checked_mul(k).is_none_or(|l| l as u64 != len) {
+        return Err(corrupt());
+    }
+    unlift(lifted, n, k, &floats).ok_or_else(corrupt)
+}

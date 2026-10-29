@@ -2,7 +2,8 @@
 
 use crate::chain::{self, Rule};
 use crate::fields::{self, Cost, Field};
-use crate::{fixed, probe, zcost};
+use crate::module::{Float, lifted_width, unlift};
+use crate::{fixed, floats, probe, zcost};
 
 use crate::MIN_RECORDS;
 use crate::module::How;
@@ -21,13 +22,15 @@ pub enum Shape {
     Entries { rule: Rule, head: usize, starts: Vec<usize> },
 }
 
-/// A region of records and how its fields are coded.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A region of records and how its fields are coded: the fields of the records with their
+/// floats lifted ([`floats`]), where there are any.
+#[derive(Clone, Debug, PartialEq)]
 pub struct Region {
     pub start: usize,
     pub end: usize,
     pub count: usize,
     pub shape: Shape,
+    pub floats: Vec<Float>,
     pub fields: Vec<Field>,
 }
 
@@ -41,10 +44,34 @@ pub enum Form {
 }
 
 impl Region {
+    /// Records of k bytes from start, or in the phase their floats keep whole: the records
+    /// that hold the bytes from start on (the region's edges are found to a few bytes).
     pub fn fixed(data: &[u8], start: usize, k: usize, count: usize) -> Region {
+        let end = start + k * count;
+        let (phase, fl) = floats::find(&data[start..end], k, start);
+        let mut floats = Vec::new();
+        let (mut start, mut count) = (start, count);
+        if !fl.is_empty() {
+            // the whole records within, and the two the region holds a part of where their floats
+            // lift as those within do (not a header's, say)
+            let (mut s, mut n) = (start + phase, (end - start - phase) / k);
+            if n >= MIN_RECORDS {
+                floats = floats::widths(&data[s..s + n * k], k, &fl);
+            }
+            if !floats.is_empty() {
+                if phase > 0 && s >= k && floats::fits(&data[s - k..s], &floats) {
+                    (s, n) = (s - k, n + 1);
+                }
+                let e = s + n * k;
+                if e < end && e + k <= data.len() && floats::fits(&data[e..e + k], &floats) {
+                    n += 1;
+                }
+                (start, count) = (s, n);
+            }
+        }
         let m = &data[start..start + k * count];
-        let (fields, _, _) = fields::split(m, k, Cost::Kt, true);
-        Region { start, end: start + k * count, count, shape: Shape::Fixed { k }, fields }
+        let (fields, _, _) = fields::split(&floats::lift(m, k, &floats), lifted_width(k, &floats), Cost::Kt, true);
+        Region { start, end: start + k * count, count, shape: Shape::Fixed { k }, floats, fields }
     }
 
     /// Entries starting at `starts` (the last where the last ends), with a head of `head`
@@ -56,7 +83,8 @@ impl Region {
         let heads = Self::heads(data, &starts, head);
         let (fields, _, _) = fields::split(&heads, head, Cost::Kt, true);
         let (start, end) = (starts[0], *starts.last().unwrap());
-        Region { start, end, count: starts.len() - 1, shape: Shape::Entries { rule, head, starts }, fields }
+        let count = starts.len() - 1;
+        Region { start, end, count, shape: Shape::Entries { rule, head, starts }, floats: Vec::new(), fields }
     }
 
     fn heads(data: &[u8], starts: &[usize], head: usize) -> Vec<u8> {
@@ -79,7 +107,7 @@ impl Region {
             Shape::Fixed { k } => self.start + k * count,
             Shape::Entries { starts, .. } => *starts.last().unwrap(),
         };
-        Region { start: self.start, end, count, shape, fields: self.fields.clone() }
+        Region { start: self.start, end, count, shape, floats: self.floats.clone(), fields: self.fields.clone() }
     }
 
     /// The record size, or the entries' head size.
@@ -99,6 +127,9 @@ impl Region {
 
     pub fn describe(&self) -> String {
         match &self.shape {
+            Shape::Fixed { .. } if !self.floats.is_empty() => {
+                format!("{}; lifted: {}", floats::describe(&self.floats), fields::describe(&self.fields))
+            }
             Shape::Fixed { .. } => fields::describe(&self.fields),
             Shape::Entries { rule, head, .. } => {
                 format!("head {head} B, {}: {}", rule.describe(), fields::describe(&self.fields))
@@ -140,7 +171,9 @@ impl Region {
                 }
                 t
             }
-            Form::Fields => fields::encode(&m, k, &self.fields),
+            Form::Fields => {
+                fields::encode(&floats::lift(&m, k, &self.floats), lifted_width(k, &self.floats), &self.fields)
+            }
         };
         if let Some(starts) = tails {
             for w in starts.windows(2) {
@@ -154,6 +187,8 @@ impl Region {
     /// entries' starts), the count and the fields. None if the form is not one.
     pub fn restore(&self, form: Form, src: &[u8]) -> Option<Vec<u8>> {
         let (k, n) = (self.width(), self.count);
+        // the bytes the records take in the form
+        let used = n * if form == Form::Fields { lifted_width(k, &self.floats) } else { k };
         let m = match form {
             Form::Bytes => {
                 let t = src.get(..n * k)?;
@@ -165,10 +200,14 @@ impl Region {
                 }
                 m
             }
-            Form::Fields => fields::decode(src.get(..n * k)?, n, k, &self.fields)?,
+            Form::Fields => {
+                let k2 = lifted_width(k, &self.floats);
+                let l = fields::decode(src.get(..n * k2)?, n, k2, &self.fields)?;
+                if self.floats.is_empty() { l } else { unlift(&l, n, k, &self.floats)? }
+            }
         };
         let Shape::Entries { rule, .. } = &self.shape else {
-            return (src.len() == n * k).then_some(m);
+            return (src.len() == used).then_some(m);
         };
         let mut out = Vec::with_capacity(src.len());
         let mut at = n * k;
@@ -199,8 +238,37 @@ pub fn candidates(data: &[u8], chains: bool) -> Vec<Region> {
         true => chain::chains(data).into_iter().map(|(p, r)| Region::entries(data, p, r, None)).collect(),
         false => Vec::new(),
     };
-    out.extend(fixed::find(data).into_iter().map(|(s, k, n)| Region::fixed(data, s, k, n)));
+    out.extend(tables(data, fixed::find(data)));
     out
+}
+
+/// The regions of the tables `found` ([`fixed::find`]), and of those of a k found apart.
+pub fn tables(data: &[u8], found: Vec<(usize, usize, usize)>) -> Vec<Region> {
+    let mut tables: Vec<Region> = found.into_iter().map(|(s, k, n)| Region::fixed(data, s, k, n)).collect();
+    let mut out = Vec::new();
+    // tables of a k in the same phase found apart (grown from windows only so far), as one
+    // where they cover most of it: it is judged on its first records alone
+    let mut groups: Vec<(usize, usize, Vec<(usize, usize)>)> = Vec::new();
+    for t in &tables {
+        let k = t.width();
+        match groups.iter_mut().find(|g| g.0 == k && g.1 == t.start % k) {
+            Some(g) => g.2.push((t.start, t.end)),
+            None => groups.push((k, t.start % k, vec![(t.start, t.end)])),
+        }
+    }
+    for (k, _, mut spans) in groups {
+        spans.sort_unstable();
+        let (s, mut e, mut covered) = (spans[0].0, spans[0].0, 0);
+        for &(a, b) in &spans {
+            covered += b.saturating_sub(a.max(e));
+            e = e.max(b);
+        }
+        if spans.len() > 1 && 4 * covered >= 3 * (e - s) && !tables.iter().any(|t| t.start == s && t.end == e) {
+            out.push(Region::fixed(data, s, k, (e - s) / k));
+        }
+    }
+    tables.extend(out);
+    tables
 }
 
 /// zstd -3 of data's [s, e) and LOCAL_CONTEXT around it, with the regions taken in their forms

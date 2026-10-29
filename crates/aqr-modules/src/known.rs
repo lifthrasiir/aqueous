@@ -214,6 +214,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/recs-fields.block"),
     },
     Known {
+        name: "recs-floats",
+        version: 1,
+        sha512_256: hex("3aa7f7762db624b2411cc72381ceea58cbd398c62438cec4b08ed59110f2e439"),
+        block: include_bytes!("../wasm/recs-floats.block"),
+    },
+    Known {
         name: "snappy-recons",
         version: 2,
         sha512_256: hex("672c1f43cc0d93e5bd5dc733f7fa890ff37bb3b796c338198a21ed67b5bbe14d"),

@@ -166,13 +166,15 @@ pub const PCM: Module = aqr_raw::formula::pcm::MODULE;
 pub const RASTER: Module = aqr_raw::formula::raster::MODULE;
 pub const RASTER_16: Module = aqr_raw::formula::raster16::MODULE;
 /// Records from the byte planes of their fields, a transpose for any recompressor to apply to
-/// records of a fixed size, and entries from their heads and tails by the lengths in the heads
-/// (aqr-infer-recs, which finds them in files of unknown formats). No resources.
+/// records of a fixed size, entries from their heads and tails by the lengths in the heads, and
+/// records' floats from the whole numbers they are multiples of (aqr-infer-recs, which finds
+/// them in files of unknown formats). No resources.
 pub const RECS_FIELDS: Module = aqr_infer_recs::formula::FIELDS;
 pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
+pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 42] = [
+pub const MODULES: [Module; 43] = [
     X86,
     ARM64,
     CIL,
@@ -215,6 +217,7 @@ pub const MODULES: [Module; 42] = [
     RASTER_16,
     RECS_FIELDS,
     RECS_ENTRIES,
+    RECS_FLOATS,
 ];
 
 /// A module's `decode`: params, resources, inputs, output length and threads.
@@ -230,7 +233,7 @@ fn none(r: &[&[u8]]) -> std::result::Result<(), String> {
 }
 
 /// The recompressors' own modules, by their `decode`.
-const RECONS: [(Module, Decode); 28] = [
+const RECONS: [(Module, Decode); 29] = [
     (PNG, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode(p, i, n, t).map_err(msg))),
     (PNG_AGAINST, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_against(p, i, n, t).map_err(msg))),
     (PNG_SET, |p, r, i, n, t| none(r).and_then(|_| aqr_png::formula::decode_set(p, i, n, t).map_err(msg))),
@@ -259,6 +262,7 @@ const RECONS: [(Module, Decode); 28] = [
     (RASTER_16, |p, r, i, n, _| none(r).and_then(|_| aqr_raw::formula::raster16::decode(p, i, n).map_err(msg))),
     (RECS_FIELDS, |p, r, i, n, _| none(r).and_then(|_| aqr_infer_recs::formula::decode_fields(p, i, n).map_err(msg))),
     (RECS_ENTRIES, |p, r, i, n, _| none(r).and_then(|_| aqr_infer_recs::formula::decode_entries(p, i, n).map_err(msg))),
+    (RECS_FLOATS, |p, r, i, n, _| none(r).and_then(|_| aqr_infer_recs::formula::decode_floats(p, i, n).map_err(msg))),
 ];
 
 /// The file in archive `c`, an archive of a single file.

@@ -158,6 +158,11 @@ path = "src/bin/recs-entries.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "recs-floats"
+path = "src/bin/recs-floats.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "sqlite-recons"
 path = "src/bin/sqlite-recons.rs"
 required-features = ["wasm"]

@@ -2,7 +2,7 @@
 //! region taken restores.
 
 use aqr_formula::{Formula, Node};
-use aqr_infer_recs::formula::{self, ENTRIES, FIELDS};
+use aqr_infer_recs::formula::{self, ENTRIES, FIELDS, FLOATS};
 use aqr_infer_recs::{Choice, Shape, apply, candidates, choose, infer, zstd_size};
 
 struct Rng(u64);
@@ -42,6 +42,7 @@ fn eval(f: &Formula, n: &Node) -> Vec<u8> {
             match a.module {
                 m if m == FIELDS => formula::decode_fields(&a.params, &inputs, a.len).unwrap(),
                 m if m == ENTRIES => formula::decode_entries(&a.params, &inputs, a.len).unwrap(),
+                m if m == FLOATS => formula::decode_floats(&a.params, &inputs, a.len).unwrap(),
                 m => panic!("{m:?}"),
             }
         }
@@ -114,4 +115,42 @@ fn packets() {
     let Shape::Entries { rule, head, .. } = &c.region.shape else { panic!("{}", c.region.label()) };
     assert_eq!((c.region.start, c.region.count, *head), (24, n, 16), "{}", c.region.describe());
     assert!(rule.d == 8 || rule.d == 12, "{}", c.region.describe());
+}
+
+/// A catalogue: a 28-byte header, then 40000 stars of 28 bytes (right ascension and declination
+/// in 1 ms of time and 0.01″ as f64 radians, each by a constant of its own, a spectral type,
+/// a magnitude in 0.01, and proper motions in 0.0001 s and 0.001″ a year as f32 radians), in
+/// zones of declination, each sorted by right ascension, as the SAO catalogue's binary is.
+#[test]
+fn catalogue() {
+    let mut rng = Rng(3);
+    let n = 40000u64;
+    let mut data: Vec<u8> = Vec::new();
+    for v in [0u32, 1, n as u32, 0, 1, 1, 28] {
+        data.extend(v.to_le_bytes());
+    }
+    let types: [&[u8; 2]; 6] = [b"A0", b"F2", b"K0", b"G5", b"  ", b"B9"];
+    for zone in 0..8u64 {
+        let mut ras: Vec<u64> = (0..n / 8).map(|_| rng.below(86_400_000)).collect();
+        ras.sort_unstable();
+        for ra in ras {
+            let dec = (zone as i64 * 10 - 40) * 360_000 + rng.below(3_600_000) as i64;
+            data.extend((ra as f64 / 3_600_000.0 * 15.0 * 0.0174532925199433).to_le_bytes());
+            data.extend((dec as f64 * (std::f64::consts::PI / 64_800_000.0)).to_le_bytes());
+            data.extend(types[rng.below(6) as usize]);
+            data.extend((600 + rng.below(400) as i16).to_le_bytes());
+            let pm = |rng: &mut Rng, unit: f64| ((rng.below(2000) as f64 - 1000.0) * unit) as f32;
+            data.extend(pm(&mut rng, std::f64::consts::PI / 432_000_000.0).to_le_bytes());
+            data.extend(pm(&mut rng, std::f64::consts::PI / 648_000_000.0).to_le_bytes());
+        }
+    }
+    let choices = infer(&data);
+    check(&data, &choices);
+    let r = &choices.iter().max_by_key(|c| c.region.end - c.region.start).unwrap().region;
+    assert_eq!((r.start, r.count), (28, n as usize), "{} {}", r.label(), r.describe());
+    assert_eq!(r.floats.len(), 4, "{}", r.describe());
+    // the floats lifted save most of what is left
+    let before = zstd_size(&data);
+    let after = zstd_size(&apply(&data, &choices));
+    assert!(after * 2 < before, "{before} -> {after}: {}", r.describe());
 }

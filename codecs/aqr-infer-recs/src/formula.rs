@@ -2,21 +2,24 @@
 //! its regions, as they are, around the regions' applications. A table of fixed-size records
 //! is an application of `recs-fields`, the records from the byte planes of their fields; a chain
 //! of entries an application of `recs-entries` to the heads (an application of `recs-fields`)
-//! and the tails. `recs-fields` is a transpose of any records, which other recompressors may
-//! apply to theirs as well. FORMAT.md describes the modules in full.
+//! and the tails. Floats lifted to whole numbers ([`crate::floats`]) are put back by
+//! `recs-floats`, applied to the records `recs-fields` makes. `recs-fields` is a transpose of
+//! any records, which other recompressors may apply to theirs as well. FORMAT.md describes the
+//! modules in full.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use aqr_formula::{Formula, Module, Node};
 
-use crate::module::{entries_params, fields_params};
-use crate::{Choice, Shape, fields};
+use crate::module::{entries_params, fields_params, floats_params, lifted_width};
+use crate::{Choice, Form, Shape, fields, floats};
 
-pub use crate::module::{Field, How, decode_entries, decode_fields};
+pub use crate::module::{Field, Float, How, decode_entries, decode_fields, decode_floats};
 
 pub const FIELDS: Module = Module::new("recs-fields", 1).with_memory(fields_memory);
 pub const ENTRIES: Module = Module::new("recs-entries", 1).with_memory(entries_memory);
+pub const FLOATS: Module = Module::new("recs-floats", 1).with_memory(floats_memory);
 
 /// The memory of `recs-fields`: the planes and the records, the fields (of the params), and the
 /// values of the field a field refers to, 8 bytes a record, one field at a time.
@@ -28,6 +31,11 @@ fn fields_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 
 /// The memory of `recs-entries`: the heads and tails, and the entries.
 fn entries_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.whole(0, 0))
+}
+
+/// The memory of `recs-floats`: the lifted records and the records.
+fn floats_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.whole(0, 0))
 }
 
@@ -108,8 +116,13 @@ pub fn formula(d: &[u8], choices: &[Choice]) -> Formula {
         let fl = r.fields_of(c.form);
         let (records, tails) = r.records(d);
         let k = r.width();
-        let planes = f.push("recs/planes", fields::encode(&records, k, &fl));
-        let recs = Node::apply(FIELDS, fields_params(r.count, k, &fl), vec![planes], records.len() as u64);
+        let lifts = if c.form == Form::Fields { &r.floats[..] } else { &[] };
+        let (lifted, k2) = (floats::lift(&records, k, lifts), lifted_width(k, lifts));
+        let planes = f.push("recs/planes", fields::encode(&lifted, k2, &fl));
+        let mut recs = Node::apply(FIELDS, fields_params(r.count, k2, &fl), vec![planes], lifted.len() as u64);
+        if !lifts.is_empty() {
+            recs = Node::apply(FLOATS, floats_params(r.count, k, lifts), vec![recs], records.len() as u64);
+        }
         parts.push(match (&r.shape, tails) {
             (Shape::Entries { rule, head, .. }, Some(tails)) => {
                 let tails = f.push("recs/tails", tails);

@@ -16,6 +16,13 @@ prototype; `scripts/rec_oracle.py` measures the prototype against the layouts of
   fixes entries only up to where they start) and trimmed. Each entry's head (a width chosen
   by zstd) is a record; its tail follows. `infer` does not look for them: on the data of the
   10 GB corpus that the estimate lets through, they saved 0.04% more for a third of the time.
+- **Floats** ([`floats`](src/floats.rs)): f64s and f32s of the records whose values are whole
+  multiples of a scale (numbers written in decimal and stored in other units: 0.01″ and 1 ms
+  of time as radians, say), at any offset and phase of the record. The scale is found from the
+  values' gaps and refined by least squares; each float is lifted to its whole number q and
+  the difference, a few units in the last place, from q × k (or q / k), which the fields then
+  code (a delta for q, say). The region is moved to the phase that keeps the floats whole, and
+  tables of the same records found apart are tried as one.
 - **Fields** ([`fields`](src/fields.rs)): DP over the record, each field raw, a delta or xor
   against the record before, or a difference or xor against an earlier field, costed by
   adaptive order-0 models on a sample of the records. A region is written as its fields'
@@ -27,8 +34,9 @@ prototype; `scripts/rec_oracle.py` measures the prototype against the layouts of
 ## Status
 
 The modules `recs-fields` (records from the byte planes of their fields: a transpose any
-recompressor may apply to records of a fixed size) and `recs-entries` (entries from their
-heads and tails) are specified in [FORMAT.md](FORMAT.md); [`module`](src/module.rs) is their
+recompressor may apply to records of a fixed size), `recs-entries` (entries from their heads
+and tails) and `recs-floats` (records' floats from their whole numbers and differences) are
+specified in [FORMAT.md](FORMAT.md); [`module`](src/module.rs) is their
 code, and [`formula`](src/formula.rs) makes the formula of a file. aqr-compress tries it on
 data in which a scan finds no file, where the quick estimate tells 5% at least (below).
 
@@ -80,6 +88,12 @@ silesia, ghostscript, VideoLAN; 135.6 MB): 63.8 -> 16.7 s for 0.799 -> 0.794. Pe
 Fewer candidates do not pay: at most 32 regions of fixed-size records (two from each seed);
 16 or 8 save 10% or 19% of the time and give 0.974 or 0.976 (python3.12 0.943 -> 0.956,
 0.969), one region a seed 6% and 0.974.
+
+Floats: the SAO star catalogue's binary (`sao`, 7.25 MB: 258,997 stars of 28 bytes, right
+ascension and declination as f64 radians, proper motions as f32 radians a year) is 0.432 of
+zstd -3 inferred (0.856 without floats, and its estimate, 0.976, turned it down); aqr -c
+5,272,411 -> 2,356,779 B (xz -9e: 4,425,672). The floats' differences from q × k are 2.5
+bits (the catalogue's converter used its own constants), q's deltas most of the rest.
 
 ## Usage
 

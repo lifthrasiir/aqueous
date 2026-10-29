@@ -5,11 +5,13 @@
 //! entries each holding its own length ([`chain`]). The records (or the entries' heads) are
 //! split into fields ([`fields`]), each coded as it is, against the record before or against
 //! an earlier field, and written as byte planes, field by field; the entries' tails follow.
+//! Floats of the records that are whole multiples of a scale are lifted to those whole numbers
+//! first ([`floats`]).
 //! A region is taken only where zstd -3 gets the file smaller ([`choose`]), and the inference is
 //! run only where a quick estimate tells a large saving ([`probe`]). It is the port of
 //! `scripts/rec_probe.py`, the prototype. `formula` is the entry point (the modules
-//! `recs-fields` and `recs-entries` of aqr-formula, whose code is `module`); `FORMAT.md`
-//! specifies them.
+//! `recs-fields`, `recs-entries` and `recs-floats` of aqr-formula, whose code is `module`);
+//! `FORMAT.md` specifies them.
 
 #![cfg_attr(not(feature = "encode"), allow(unused))]
 
@@ -19,6 +21,8 @@ pub mod chain;
 pub mod fields;
 #[cfg(feature = "encode")]
 pub mod fixed;
+#[cfg(feature = "encode")]
+pub mod floats;
 #[cfg(feature = "encode")]
 pub mod formula;
 #[cfg(feature = "encode")]

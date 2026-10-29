@@ -52,7 +52,7 @@ fn bench(path: &str, chains: bool) -> Row {
     let mut cands: Vec<aqr_infer_recs::Region> =
         chains.into_iter().map(|(p, r)| aqr_infer_recs::Region::entries(&data, p, r, None)).collect();
     lap(2, &mut at);
-    cands.extend(tables.into_iter().map(|(s, k, n)| aqr_infer_recs::Region::fixed(&data, s, k, n)));
+    cands.extend(aqr_infer_recs::tables(&data, tables));
     lap(3, &mut at);
     let (choices, lines) = aqr_infer_recs::choose(&data, cands);
     lap(4, &mut at);
