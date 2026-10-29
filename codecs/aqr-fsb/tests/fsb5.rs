@@ -1,6 +1,5 @@
-//! FSB5 banks: their layout, and the formula of their head and samples giving them back. Banks
-//! made here, and those of the directory `AQR_FSB_CORPUS` names, where it is set (local data,
-//! never in the repository: game banks are not ours to distribute).
+//! FSB5 banks made here: their layout, and the formula of their head and samples giving them
+//! back.
 
 use aqr_formula::{Apply, Formula};
 use aqr_fsb::formula;
@@ -100,22 +99,4 @@ fn formula_gives_banks_back() {
         assert_eq!(eval(&formula::encode(&longer, 1).unwrap()), longer);
     }
     assert!(formula::encode(b"FSB5", 1).is_none());
-}
-
-#[test]
-fn corpus() {
-    let Some(dir) = std::env::var_os("AQR_FSB_CORPUS") else { return };
-    let dir = std::fs::read_dir(dir).unwrap();
-    let mut n = 0;
-    for e in dir.flatten() {
-        let d = std::fs::read(e.path()).unwrap();
-        if !starts(&d) {
-            continue;
-        }
-        let l = Layout::of(&d).unwrap();
-        assert_eq!(l.len(), d.len(), "{:?}", e.path());
-        assert_eq!(eval(&formula::encode(&d, 1).unwrap()), d);
-        n += 1;
-    }
-    eprintln!("{n} banks of AQR_FSB_CORPUS");
 }

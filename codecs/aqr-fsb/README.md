@@ -10,6 +10,3 @@ skeletons that uses CRC-32's affinity (meet in the middle over the residues' end
 into a stream per sample; aqr-compress does not use it until a sample recompressor does.
 
 `FORMAT.md` specifies the database, the assembly and the search (§3–5), and the split (§7).
-
-Tests take banks of a local corpus from the directory `AQR_FSB_CORPUS` names, if set; game banks
-are not distributed with the repository.
