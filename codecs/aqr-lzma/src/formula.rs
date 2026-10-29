@@ -8,7 +8,17 @@ use crate::{alone, recons};
 
 pub use crate::module::{decode, index};
 
-pub const MODULE: Module = Module::new("lzma-recons", 1);
+pub const MODULE: Module = Module::new("lzma-recons", 1).with_memory(memory);
+
+/// The memory of the module, a stream rebuilt at a time: the inputs and the streams; the match
+/// finder's chains, 12 bytes a byte of the data at most (their rings no longer than it) and their
+/// heads (12.5 MiB); the literal model, 6 MiB at most (lc + lp up to 12); and the encoder's
+/// output, reserved for a quarter of the data and growing twice at a time.
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[data, ..] = u.inputs else { return None };
+    let m = u.output();
+    Some(u.whole(12 * data + (25 << 19) + (6 << 20) + (data / 4).max(3 * m), 6))
+}
 
 /// The most data a stream is decoded to.
 const LIMIT: usize = 1 << 31;
