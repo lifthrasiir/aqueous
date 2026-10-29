@@ -24,6 +24,7 @@ aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = 
 aqr-flate = { path = "../../codecs/aqr-flate" }
 aqr-fasta = { path = "../../codecs/aqr-fasta" }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }
+aqr-vorbis = { path = "../../codecs/aqr-vorbis" }
 aqr-fits = { path = "../../codecs/aqr-fits" }
 aqr-git = { path = "../../codecs/aqr-git" }
 aqr-flac = { path = "../../codecs/aqr-flac" }

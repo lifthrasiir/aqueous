@@ -23,6 +23,7 @@ Contents:
 5. [Finding a setup by its CRC-32](#5-finding-a-setup-by-its-crc-32)
 6. [How the database was made](#6-how-the-database-was-made-informative) *(informative)*
 7. [FSB5 banks](#7-fsb5-banks-encoder) *(encoder)*
+8. [Vorbis samples](#8-vorbis-samples-encoder) *(encoder)*
 
 ## 1. Conventions
 
@@ -204,6 +205,21 @@ the bytes before the data (class `fsb5/head`), a stream per sample's data (class
 `fsb5/ima-adpcm`, `fsb5/pcm16`, `fsb5/mpeg` or `fsb5/data` by the codec), and a stream of what
 follows the bank in the input (`fsb5/tail`), if anything.
 
-*Status.* aqr-compress does not use the formula yet: a formula without a module is not smaller
-than its file, and so is not taken. It is meant to carry the samples' recompressors (Vorbis
-through aqr-vorbis, IMA ADPCM), under which the samples banks share are also stored once.
+aqr-compress finds banks by their header, anywhere in data (and by the extension `.fsb`), takes a
+bank to the end of its data, and puts banks that share samples of 256 KiB or more (by their
+CRC-32 and size) in one batch, where the samples' streams they share are stored once. A bank's
+formula is taken only where it is smaller than the bank, so not for banks of no Vorbis samples
+taken (§8).
+
+## 8. Vorbis samples (encoder)
+
+A Vorbis sample's data is its packets, each after its 16-bit length (little-endian), then a
+length of 0 and padding (or nothing, where the packets fill it). Its Vorbis chunk (type 11)
+starts with the CRC-32 of its setup header; its block sizes are 256 and 2048 samples; its channels
+are its header's (FMOD codes more than two with a mono setup).
+
+`encode` finds the setup by the CRC-32 (a row, else each candidate of the search in turn, §5)
+and gives the packets to aqr-vorbis's module `vorbis-recons` (codecs/aqr-vorbis/FORMAT.md),
+which takes them up to the length of 0: the sample is then that module's output and a stream of
+what follows (class `fsb5/vorbis-end`). A sample whose setup is not found, or whose packets do not
+parse under it, is kept as it is.

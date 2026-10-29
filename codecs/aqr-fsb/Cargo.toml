@@ -17,3 +17,4 @@ aqr-vorbis = { path = "../aqr-vorbis" }
 
 [dev-dependencies]
 aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-common = { path = "../../crates/aqr-common" }

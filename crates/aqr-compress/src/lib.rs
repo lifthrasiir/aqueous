@@ -1414,6 +1414,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::LevelDb => aqr_snappy::formula::encode,
         Format::Fasta => aqr_fasta::formula::encode,
         Format::GnuGettext => aqr_gnu_gettext::formula::encode,
+        Format::Fsb5 => aqr_fsb::formula::encode,
         Format::Fits => aqr_fits::formula::encode,
         Format::Obj => aqr_obj::formula::encode,
         Format::Xsv => aqr_xsv::formula::encode,

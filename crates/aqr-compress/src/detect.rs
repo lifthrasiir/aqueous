@@ -34,6 +34,8 @@ pub enum Format {
     Psd,
     /// Clip Studio Paint file (aqr-clip), known by its header.
     Clip,
+    /// FMOD FSB5 sound bank (aqr-fsb), known by its header and samples' headers.
+    Fsb5,
     /// DDS texture (aqr-tex): BC1 to BC5 blocks, or uncompressed pixels (aqr-raw's module).
     Dds,
     Pdf,
@@ -76,7 +78,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 31] = [
+    pub const ALL: [Format; 32] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -91,6 +93,7 @@ impl Format {
         Format::Raw,
         Format::Psd,
         Format::Clip,
+        Format::Fsb5,
         Format::Dds,
         Format::Pdf,
         Format::Sqlite,
@@ -126,6 +129,7 @@ impl Format {
             Format::Raw => "raw",
             Format::Psd => "psd",
             Format::Clip => "clip",
+            Format::Fsb5 => "fsb5",
             Format::Dds => "dds",
             Format::Pdf => "pdf",
             Format::Sqlite => "sqlite",
@@ -178,6 +182,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         }
         b"psd" | b"psb" => format(Format::Psd),
         b"clip" => format(Format::Clip),
+        b"fsb" => format(Format::Fsb5),
         b"dds" => format(Format::Dds),
         b"pdf" => format(Format::Pdf),
         b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
@@ -230,6 +235,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Psd)
     } else if at(0, b"CSFCHUNK") {
         Some(Format::Clip)
+    } else if aqr_fsb::fsb5::starts(d) {
+        Some(Format::Fsb5)
     } else if at(0, b"fLaC") {
         Some(Format::Flac)
     } else if at(0, b"RIFF") && at(8, b"WAVE") || at(0, b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC")) {
@@ -299,7 +306,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'%' => b == b'P',
         b'f' => b == b'L',
         b'R' => b == b'I',
-        b'F' => b == b'O',
+        b'F' => b == b'O' || b == b'S',
         b'I' => b == b'D',
         b'D' => b == b'D',
         0xff => b == 0xd8 || b & 0xe0 == 0xe0,

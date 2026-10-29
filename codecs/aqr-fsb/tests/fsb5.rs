@@ -96,3 +96,86 @@ fn formula_gives_banks_back() {
     }
     assert!(formula::encode(b"FSB5", 1).is_none());
 }
+
+/// Writes a packet of random values of `setup`, as the walk asks for them (floors mostly used).
+struct Random<'a> {
+    setup: &'a aqr_vorbis::setup::Setup,
+    rng: aqr_common::rng::Rng,
+    w: aqr_vorbis::bits::Writer,
+}
+
+impl aqr_vorbis::packet::Source for Random<'_> {
+    fn bits(&mut self, f: aqr_vorbis::packet::Field, n: u32) -> Option<u32> {
+        use aqr_vorbis::packet::Field;
+        let v = match f {
+            Field::Type => 0,
+            Field::Mode => self.rng.below(self.setup.modes.len() as u64) as u32,
+            Field::Nonzero { .. } => (self.rng.below(4) > 0) as u32,
+            _ => self.rng.below(1 << n) as u32,
+        };
+        self.w.bits(v, n);
+        Some(v)
+    }
+
+    fn entry(&mut self, _: aqr_vorbis::packet::Field, book: usize) -> Option<u32> {
+        let b = &self.setup.codebooks[book];
+        let used: Vec<u32> = (0..b.entries() as u32).filter(|&e| b.used(e)).collect();
+        let e = used[self.rng.below(used.len() as u64) as usize];
+        b.write(e, &mut self.w);
+        Some(e)
+    }
+}
+
+/// A Vorbis bank of one sample of `channels` (1, 2 or 6) and `packets` random packets, of the
+/// database's setup of CRC-32 `crc`: framed packets, a length of 0, padding to 32 bytes.
+fn vorbis_bank(crc: u32, channels: usize, packets: u64) -> Vec<u8> {
+    let db = aqr_fsb::setups::database().unwrap();
+    let setup = db.assemble_row(db.row(crc).unwrap()).unwrap();
+    let ident = aqr_vorbis::setup::Ident { channels, blocksizes: [256, 2048] };
+    let s = aqr_vorbis::setup::Setup::parse(&setup, ident).unwrap();
+    let mut data = Vec::new();
+    for seed in 0..packets {
+        let mut r = Random { setup: &s, rng: aqr_common::rng::Rng::new(seed), w: aqr_vorbis::bits::Writer::new() };
+        aqr_vorbis::packet::walk(&s, &mut r).unwrap();
+        let p = r.w.finish();
+        data.extend_from_slice(&(p.len() as u16).to_le_bytes());
+        data.extend_from_slice(&p);
+    }
+    data.extend_from_slice(&[0, 0]);
+    data.resize(data.len().next_multiple_of(32), 0);
+    let mut headers = Vec::new();
+    let code = [1, 2, 6].iter().position(|&c| c == channels).unwrap() as u64;
+    headers.extend_from_slice(&(1u64 | 9 << 1 | code << 5 | 1000 << 34).to_le_bytes());
+    headers.extend_from_slice(&(11u32 << 25 | 4 << 1).to_le_bytes());
+    headers.extend_from_slice(&crc.to_le_bytes());
+    let mut d = b"FSB5".to_vec();
+    for v in [1, 1, headers.len() as u32, 0, data.len() as u32, 15] {
+        d.extend_from_slice(&v.to_le_bytes());
+    }
+    d.resize(0x3C, 0);
+    d.extend_from_slice(&headers);
+    d.extend_from_slice(&data);
+    d
+}
+
+#[test]
+fn vorbis_samples_through_the_module() {
+    // mono, stereo (coupled), and six channels of a mono setup, as FMOD codes them
+    for (crc, channels) in [(0x632b1fac, 1), (0x988e56d5, 2), (0x632b1fac, 6)] {
+        let d = vorbis_bank(crc, channels, 40);
+        let f = formula::encode(&d, 2).unwrap();
+        assert_eq!(f.applies().len(), 1);
+        let out = f
+            .eval(&|a: &Apply, inputs: &[&[u8]]| {
+                assert_eq!(a.module, aqr_vorbis::formula::MODULE);
+                aqr_vorbis::formula::decode(&a.params, inputs, a.len).map_err(|e| aqr_formula::Error::new(e.0))
+            })
+            .unwrap();
+        assert_eq!(out, d);
+    }
+    // a CRC-32 the database does not have: the sample is kept as it is
+    let mut d = vorbis_bank(0x632b1fac, 1, 5);
+    let at = 0x3C + 12;
+    d[at..at + 4].copy_from_slice(&0x1234_5678u32.to_le_bytes());
+    assert!(formula::encode(&d, 1).unwrap().applies().is_empty());
+}

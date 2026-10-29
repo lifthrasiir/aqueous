@@ -52,6 +52,10 @@ impl Source for Count<'_> {
 
 #[derive(Default)]
 struct Stats {
+    record: u64,
+    coded: u64,
+    t_encode: f64,
+    t_decode: f64,
     samples: usize,
     no_setup: usize,
     failed: usize,
@@ -65,6 +69,17 @@ struct Stats {
 }
 
 fn sample(s: &mut Stats, setup: &Setup, data: &[u8]) -> Result<(), String> {
+    let t = Instant::now();
+    let (used, record) = aqr_vorbis::codec::encode(setup, data).ok_or("not encoded")?;
+    s.t_encode += t.elapsed().as_secs_f64();
+    let t = Instant::now();
+    let back = aqr_vorbis::codec::decode(setup, &record, used).map_err(|e| e.to_string())?;
+    s.t_decode += t.elapsed().as_secs_f64();
+    if back != data[..used] {
+        return Err("record not decoded back".into());
+    }
+    s.record += record.len() as u64;
+    s.coded += used as u64;
     let mut at = 0;
     while at + 2 <= data.len() {
         let n = u16::from_le_bytes([data[at], data[at + 1]]) as usize;
@@ -100,11 +115,8 @@ fn main() {
         std::process::exit(2);
     };
     let _ = cmd;
-    let files: Vec<String> = if files == ["-"] {
-        std::io::stdin().lines().map(|l| l.expect("a name")).collect()
-    } else {
-        files.to_vec()
-    };
+    let files: Vec<String> =
+        if files == ["-"] { std::io::stdin().lines().map(|l| l.expect("a name")).collect() } else { files.to_vec() };
     let db = setups::database().expect("the database");
     let mut s = Stats::default();
     let t = Instant::now();
@@ -149,6 +161,14 @@ fn main() {
             s.bits[k] as f64 / s.values[k].max(1) as f64
         );
     }
+    println!(
+        "  record: {:.3} MB of {:.3} MB of packets ({:.2}%); encoding {:.1} s, decoding {:.1} s",
+        s.record as f64 / 1e6,
+        s.coded as f64 / 1e6,
+        100.0 * s.record as f64 / s.coded as f64,
+        s.t_encode,
+        s.t_decode
+    );
     println!(
         "  {:8} {:6.2}%; length prefixes {:.2}% of the bytes",
         "tail",

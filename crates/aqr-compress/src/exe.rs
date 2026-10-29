@@ -161,7 +161,7 @@ fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch) -> Option<No
         }
         Arch::Table(TableKind::Rising { width, fields }) => {
             let k = width * fields;
-            if section.len() % k != 0 {
+            if !section.len().is_multiple_of(k) {
                 return None;
             }
             let fl: Vec<_> =

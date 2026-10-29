@@ -208,6 +208,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/sqlite-recons.block"),
     },
     Known {
+        name: "vorbis-recons",
+        version: 1,
+        sha512_256: hex("f3066c956b6f1280df43c8e6e69b450a375328cd37d8ca37a1b26dade7d536a8"),
+        block: include_bytes!("../wasm/vorbis-recons.block"),
+    },
+    Known {
         name: "wrt-recons-hangul",
         version: 1,
         sha512_256: hex("46a1e89ed82d1585732dc8ac52d78d472618feb5ed715d9b943aa141dac1d4c2"),
