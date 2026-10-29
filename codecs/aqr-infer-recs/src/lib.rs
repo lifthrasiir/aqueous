@@ -12,6 +12,7 @@ pub mod chain;
 pub mod fields;
 pub mod fixed;
 pub mod kt;
+pub mod probe;
 mod zcost;
 
 use chain::Rule;
@@ -307,6 +308,12 @@ pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
 /// The regions to take in data, sorted.
 pub fn infer(data: &[u8]) -> Vec<Choice> {
     choose(data, candidates(data)).0
+}
+
+/// The regions to take in data, if a quick estimate ([`probe::estimate`]) says they may save
+/// at least `least` of its zstd size: None (in tens of ms) where it does not.
+pub fn infer_if(data: &[u8], least: f64) -> Option<Vec<Choice>> {
+    (probe::estimate(data).saves >= least).then(|| infer(data))
 }
 
 /// The file with the regions taken in their forms.

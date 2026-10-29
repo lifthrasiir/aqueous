@@ -31,6 +31,26 @@ inverts a form from what a decoder would know (the shape, the count, the fields)
 The inference takes 0.03 to 1.3 s a file (on one thread), mostly a constant: the window scan
 and the growth of the regions found (`fixed`), and the chain search.
 
+## Giving up early
+
+[`probe::estimate`](src/probe.rs) estimates in 3–100 ms what the inference may save: 48
+windows of 8 KiB over the file, each at the record size its bytes repeat at, compressed as
+they are, transposed and split into fields. A saving of 10% of a file needs records over much
+of it, which the windows find; [`infer_if`](src/lib.rs) infers only where the estimate is at
+least a given saving. The estimate is low where the saving is small (it misses small tables
+and chains of entries), so a threshold gives up some of those:
+
+| estimate at least | files inferred | zstd -3 of the files | CPU s |
+|---|---|---|---|
+| (always infer) | 17/17 | 0.954 | 8.08 |
+| 1/32 | 8/17 | 0.975 | 3.87 |
+| 0.05 | 6/17 | 0.981 | 2.80 |
+| 0.10 | 5/17 | 0.984 | 1.91 |
+
+(One thread; the oracle corpus and six more files: the prototype's struct.bin and pcap.bin,
+macOS's DataDetectors cache, two ResponseKit files and SFNS.ttf. The five files saving 10%
+or more, 13–58%, are estimated at 6.2–50%, all above 0.05; no other is above 7.5%.)
+
 ## Results
 
 On an M4, `aqr-infer-recs-bench` on 11 files (114.6 MB: ELF and Mach-O binaries, a font, a
