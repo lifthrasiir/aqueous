@@ -77,6 +77,9 @@ pub struct Chunk {
     pub at: Range<usize>,
     pub mask: u32,
     pub dataset: usize,
+    /// Its place among the chunks found, which are found in the order of their indexes: that of
+    /// their offsets in the dataset.
+    pub seq: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -709,7 +712,8 @@ impl<'a> Walk<'a> {
         if a == UNDEF || size == 0 || end > self.d.len() {
             return None;
         }
-        self.chunks.push(Chunk { at: start..end, mask, dataset: k });
+        let seq = self.chunks.len();
+        self.chunks.push(Chunk { at: start..end, mask, dataset: k, seq });
         Some(())
     }
 

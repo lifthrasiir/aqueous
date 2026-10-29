@@ -27,6 +27,7 @@ aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }
 aqr-vorbis = { path = "../../codecs/aqr-vorbis" }
 aqr-ima = { path = "../../codecs/aqr-ima" }
 aqr-fits = { path = "../../codecs/aqr-fits" }
+aqr-hdf5 = { path = "../../codecs/aqr-hdf5" }
 aqr-git = { path = "../../codecs/aqr-git" }
 aqr-flac = { path = "../../codecs/aqr-flac" }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg" }

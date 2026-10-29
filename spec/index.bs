@@ -4672,6 +4672,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/gnu-gettext-recons.wasm" title="crates/aqr-modules/wasm/gnu-gettext-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-gnu-gettext/FORMAT.md" title="codecs/aqr-gnu-gettext/FORMAT.md">R</a>
     <tr>
+      <td><code>cdd9a30f1116f6353e909d9be3acb15b8d3fc83847e6fce6c411fd35ad12ef20</code>
+      <td>hdf5-recons-float@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/hdf5-recons-float.wasm" title="crates/aqr-modules/wasm/hdf5-recons-float.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-hdf5/FORMAT.md" title="codecs/aqr-hdf5/FORMAT.md">R</a>
+    <tr>
       <td><code>8cac476b42906e38a2356829e851368e0f50d7a9e19fcaf1a5c1f37ea53a0f81</code>
       <td>ima-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/ima-recons.wasm" title="crates/aqr-modules/wasm/ima-recons.wasm">D</a>

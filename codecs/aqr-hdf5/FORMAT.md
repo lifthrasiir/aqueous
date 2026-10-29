@@ -1,30 +1,37 @@
 # aqr-hdf5 format
 
-This document specifies how aqr-hdf5 takes an HDF5 file apart into an aqr-formula entry
-formula, and what the formula stores. aqr-hdf5 has no module of its own: the formula is the
-file's bytes, with the DEFLATE streams of its deflated chunks given by applications of
-aqr-flate's module `flate-set` (aqr-flate's `FORMAT.md`, "Formula module"). Everything here
-but §1 is the encoder's choice *(encoder)*; a decoder needs only aqr-formula and `flate-set`.
+This document specifies the module `hdf5-recons-float` of aqr-formula entry formulas, and how
+aqr-hdf5 takes an HDF5 file apart around it. The formula is the file's bytes, with the DEFLATE
+streams of its deflated chunks given by applications of aqr-flate's module `flate-set`
+(aqr-flate's `FORMAT.md`, "Formula module"), and the data of chunks of floats by
+`hdf5-recons-float` (§4, §5). It is meant to be complete: an implementation of the module can
+be written from it alone. Sections marked *(encoder)* describe the choices this
+implementation makes when it builds formulas; the module does not depend on them.
 
 HDF5 itself is the HDF5 File Format Specification, version 3.0, cited by its sections.
 
-## 1. The formula
+## 1. The formula *(encoder)*
 
-Three streams:
+The streams:
 
-- `hdf5/meta`: the bytes of the file outside the rebuilt DEFLATE streams, in order: the
-  superblock, object headers, B-trees, heaps, data not deflated, chunks not rebuilt, and of
+- `hdf5/meta`: the Fletcher-32 checksums of chunks of floats where it is before deflate (4
+  bytes each, §4), then the bytes of the file outside the rebuilt DEFLATE streams, in order:
+  the superblock, object headers, B-trees, heaps, data not deflated, chunks not rebuilt, and of
   each rebuilt chunk its zlib header (2 bytes), Adler-32 (4 bytes) and, where Fletcher-32
   follows deflate, that checksum (4 bytes);
-- `hdf5/data` (kind `table`): the data of the rebuilt chunks, inflated, one after another
+- `hdf5/data` (kind `table`): the data of the other rebuilt chunks, inflated, one after another
   in the order of the file;
-- `flate/record`: their aqr-flate records, likewise.
+- `flate/record`: the aqr-flate records of the rebuilt chunks, likewise;
+- `hdf5/float-coefs` (kind `table`), `hdf5/float-model` and `hdf5/float-raw` (kind
+  `compressed`): the inputs of the applications of `hdf5-recons-float`, one after another.
 
 The root is the concatenation of slices of `hdf5/meta` and of the rebuilt streams in the order
 of the file. The streams are given by `flate-set` as aqr-flate's `formula::streams` groups
 them: by profile, one application for each profile (split into its streams, the lengths of
 each stream's data and record in a stream of class `flate/index`), or the application alone
-where it rebuilds one stream.
+where it rebuilds one stream. A stream's data is a slice of `hdf5/data`, or for a chunk of
+floats an output of an application of `hdf5-recons-float` (split into the dataset's chunks),
+followed by its Fletcher-32 where that is before deflate.
 
 ## 2. What is read *(encoder)*
 
@@ -78,3 +85,81 @@ filter `i` not applied). A chunk is rebuilt where
 
 aqr-flate's settings of zlib (with an adaptive profile) are found first on the 8 largest
 chunks and tried first on the others, as the chunks of a file are deflated alike.
+
+## 4. Chunks of floats *(encoder)*
+
+A dataset's rebuilt chunks are coded by the float model (§5) together, in the order of its
+index (that of their offsets in the dataset), where
+
+- its datatype is floating-point of 4 or 8 bytes (§IV.A.2.d, class 1), not shared;
+- every one of them went through the same filters before deflate, which are none, shuffle,
+  Fletcher-32, or shuffle then Fletcher-32, the shuffle of the datatype's bytes (its client
+  data); its data is the dataset's chunk size (and 4 bytes of Fletcher-32);
+- they hold 1024 samples at least, and the model codes them in fewer bytes than zstd at
+  level 3 does the samples (little endian, one after another), and within what the module
+  takes (§5.3).
+
+The shift is the number of low bits that are zero in every sample, at most the sample's bits
+less 8; the order is 32.
+
+## 5. `hdf5-recons-float`
+
+- **Module**: name `hdf5-recons-float`, version 1.
+- **Params**: varints of `chunks` and `elements` (at least 1), then a byte of flags (1: the
+  samples are binary64, else binary32; 2: big endian; 4: shuffled; the other bits zero), a
+  byte `shift` (less than the sample's bits) and a byte `order` (at most 32).
+- **Resources**: none.
+- **Inputs**: exactly three: `coefs`, `model` and `raw`.
+- **Output**: `chunks` chunks of `elements` samples each, `n = chunks × elements` samples in
+  all, of `s` bytes (8 or 4) each; its length must be `n × s`, which the application declares.
+
+### 5.1 Samples
+
+A sample is `s × 8` bits, `B = s × 8 − shift` of them coded: its bits shifted right by `shift`
+(the bits shifted out are zero). Its *value* is the IEEE 754 binary64 or binary32 number of
+its bits, as binary64. Its *ordinal* `o` is of its `B` bits `b`: where bit `B − 1` is set,
+`~b` in `B` bits, else `b` with bit `B − 1` set (the order of the values, a bijection on `B`
+bits).
+
+The samples are in blocks of 65536 (the last perhaps shorter). `coefs` holds, for each block
+in order, `order` coefficients `w[0..order]` as binary64 little endian: its length must be
+`ceil(n / 65536) × order × 8`.
+
+The prediction of sample `i` of block `w`: `p = 0`, then for `k` from 0 to `order − 1`, where
+`i ≥ k + 1`, `p = p + w[k] × x[i − k − 1]` (binary64 arithmetic, round to nearest, each
+product rounded, then the sum; `x` the values of the samples before). For binary32 samples
+`p` is then rounded to binary32. Where `p` is finite, its ordinal (of its bits shifted right
+by `shift`) is the prediction `q`; else `q` is the ordinal of sample `i − 1`, or for sample 0
+that of 0.
+
+A sample's ordinal is `o = q + d` (wrapping, in `B` bits), `d` given by `z`, the zigzag of `d`
+in `B` bits (`d = (z >> 1) ^ −(z & 1)`).
+
+### 5.2 Coding
+
+`model` is a binary arithmetic code (the 32-bit coder of aqr-fits' `FORMAT.md`, §3) of
+adaptive bits: a probability `p1` of 16 bits, at first 32768, updated after each bit by
+`p1 += ((65535 or 0) − p1) × r >> 16` (arithmetic shift), `r = ⌊131072 / (2u + 3)⌋` for its
+`u`-th use (from 0, `u` at most 30), and clamped to 32..65504.
+
+For each sample in order, its `z` is read:
+
+1. Its length `L = bitlen(z)`: 7 bits, most significant first, of a binary tree (node 1, then
+   `2 × node + bit`) of adaptive bits by context `c = ⌊(2 L1 + L2 + L3 + 2) / 4⌋`, `L1`, `L2`,
+   `L3` the lengths of the three samples before (0 before the first). `L` must be at most `B`.
+2. `L = 0`: `z = 0`; `L = 1`: `z = 1`. Else `z` has its bit `L − 1` set, and below it,
+   `t = min(2, L − 1)` bits from the highest, of a binary tree of adaptive bits by `L`, then
+   the other `L − 1 − t` bits from `raw` (MSB first, zeros past its end), highest first.
+
+### 5.3 Validation
+
+The params must be as above and the output's length `n × s`, at most 64 × (the bytes of
+`model` and `raw` + 64); `coefs` must be as long as §5.1 tells; a length `L` over `B` is an
+error, and so are reading more than 4 bytes past the end of `model` and past the end of
+`raw`.
+
+### 5.4 The chunks
+
+Each chunk's samples (`elements` of them, in order) are written with their bytes in the byte
+order of the flags; where shuffled, as HDF5's shuffle filter lays them out: the first byte of
+every sample, then the second of every sample, and so on.

@@ -20,6 +20,7 @@ aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = fa
 aqr-vorbis = { path = "../../codecs/aqr-vorbis", default-features = false }
 aqr-ima = { path = "../../codecs/aqr-ima", default-features = false }
 aqr-fits = { path = "../../codecs/aqr-fits", default-features = false }
+aqr-hdf5 = { path = "../../codecs/aqr-hdf5", default-features = false }
 aqr-flac = { path = "../../codecs/aqr-flac", default-features = false }
 aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
 aqr-git = { path = "../../codecs/aqr-git", default-features = false }
@@ -129,6 +130,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "fits-recons-table"
 path = "src/bin/fits-recons-table.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "hdf5-recons-float"
+path = "src/bin/hdf5-recons-float.rs"
 required-features = ["wasm"]
 
 [[bin]]

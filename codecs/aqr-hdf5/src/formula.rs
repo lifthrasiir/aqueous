@@ -8,9 +8,32 @@ use std::ops::Range;
 
 use aqr_flate::formula::Item;
 use aqr_flate::{Hints, Parsed, zlib};
-use aqr_formula::{Formula, Kind, Node};
+use aqr_formula::{Apply, Formula, Kind, Module, Node};
 
-use crate::hdf5::{self, DEFLATE, FLETCHER32, File};
+use crate::float;
+use crate::hdf5::{self, DEFLATE, FLETCHER32, FLOAT as FLOATS, File, SHUFFLE};
+use crate::module::{self, Floats};
+
+/// The chunks of a dataset of floats from the float model's coded parts ([`module::float`]).
+pub const FLOAT: Module = Module::new("hdf5-recons-float", 1).with_memory(float_memory);
+
+/// Bytes of the float model's tables (`float::Model`: 65 × 128 and 65 × 4 bits of 4 bytes).
+const FLOAT_MODEL: u64 = 4 * (65 * 128 + 65 * 4);
+
+/// The memory of `hdf5-recons-float`, from the samples `n` (the output over a sample's bytes):
+/// the values, their integers of the floats' order and the samples' bits (8 bytes each), and
+/// the model's tables; the output is made from the bits, after.
+fn float_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let p = Floats::from_bytes(u.params)?;
+    let n = p.samples()? as u64;
+    Some(u.whole(3 * 8 * n + FLOAT_MODEL + 8 * float::MAX_ORDER as u64, 4))
+}
+
+/// Samples of a dataset fewer than this are not coded by the float model.
+const MIN_FLOATS: usize = 1024;
+
+/// The order of the float model's predictor.
+const FLOAT_ORDER: u8 = 32;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -19,6 +42,8 @@ pub struct Options {
     pub profile: u16,
     /// With an adaptive profile, whether to try zlib emulation ([`aqr_flate::Options::zlib`]).
     pub zlib: bool,
+    /// Whether datasets of floats are coded by the float model ([`FLOAT`]).
+    pub floats: bool,
     /// The most bytes of data that the chunks may inflate to, all together, by the sizes of
     /// their datasets' chunks: the chunks past it are kept as they are.
     pub limit: u64,
@@ -26,7 +51,7 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Options {
-        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, zlib: true, limit: u64::MAX }
+        Options { threads: 1, profile: aqr_flate::DEFAULT_PROFILE, zlib: true, floats: true, limit: u64::MAX }
     }
 }
 
@@ -72,18 +97,22 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 }
 
 /// A chunk whose DEFLATE stream may be rebuilt: the stream, its zlib header, and the bytes of
-/// data its dataset's chunks have before filtering (where its filters keep that).
+/// data its dataset's chunks have before filtering (where its filters keep that); the chunk,
+/// and where its filters before deflate are shuffle and Fletcher-32 (each perhaps, in that
+/// order), whether they are there.
 struct Job {
     deflate: Range<usize>,
     header: [u8; 2],
     size: Option<u64>,
+    chunk: usize,
+    before: Option<(bool, bool)>,
 }
 
 /// The chunks of `file` in `input` whose last filter is deflate (but for Fletcher-32 after it),
 /// within `limit` bytes of data all together.
 fn jobs(input: &[u8], file: &File, mut limit: u64) -> Vec<Job> {
     let mut out = Vec::new();
-    for c in &file.chunks {
+    for (i, c) in file.chunks.iter().enumerate() {
         let ds = &file.datasets[c.dataset];
         let active: Vec<u16> = ds.active(c.mask).map(|f| f.id).collect();
         let Some(k) = active.iter().position(|&id| id == DEFLATE) else { continue };
@@ -109,7 +138,14 @@ fn jobs(input: &[u8], file: &File, mut limit: u64) -> Vec<Job> {
             continue;
         }
         limit -= cost;
-        out.push(Job { deflate: c.at.start + 2..c.at.end - 4 - tail, header: [d[0], d[1]], size });
+        let before = match before {
+            [] => Some((false, false)),
+            [SHUFFLE] => Some((true, false)),
+            [FLETCHER32] => Some((false, true)),
+            [SHUFFLE, FLETCHER32] => Some((true, true)),
+            _ => None,
+        };
+        out.push(Job { deflate: c.at.start + 2..c.at.end - 4 - tail, header: [d[0], d[1]], size, chunk: i, before });
     }
     out
 }
@@ -179,6 +215,12 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     f.push_as("hdf5/data", Kind::Table, Vec::new());
     f.push("flate/record", Vec::new());
     let (mut meta, mut data, mut records) = (Vec::new(), Vec::new(), Vec::new());
+    // the data of the chunks of floats coded, by job (the Fletcher-32 of their data first in
+    // the meta stream)
+    let coded = match opt.floats {
+        true => floats(&mut f, &file, &jobs, &made, &mut meta),
+        false => HashMap::new(),
+    };
     let mut items = Vec::new();
     // the parts of the root: slices of the meta stream, or (as None) the next item's stream
     let mut parts: Vec<Option<Node>> = Vec::new();
@@ -193,12 +235,17 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         parts.push(None);
         items.push(Item {
             profile,
-            data: (Node::slice(DATA, data.len() as u64, d.len() as u64), d.len()),
+            data: match coded.get(&j) {
+                Some(n) => (n.clone(), d.len()),
+                None => (Node::slice(DATA, data.len() as u64, d.len() as u64), d.len()),
+            },
             record: (Node::slice(RECORDS, records.len() as u64, r.len() as u64), r.len()),
             len: job.deflate.len() as u64,
         });
         inflated += d.len() as u64;
-        data.extend_from_slice(&d);
+        if !coded.contains_key(&j) {
+            data.extend_from_slice(&d);
+        }
         records.extend_from_slice(&r);
         at = job.deflate.end;
     }
@@ -217,6 +264,117 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         parts.into_iter().filter_map(|p| p.or_else(|| streams.next())).filter(|n| !n.is_empty()).collect();
     f.root = Node::concat(parts);
     Some(Encoded { formula: f, inflated, chunks })
+}
+
+/// The data of the chunks that the float model codes, by job, as nodes of `f`: of each dataset
+/// of floats (binary32 or binary64) whose chunks were made and filtered alike (shuffle and
+/// Fletcher-32 at most before deflate), of [`MIN_FLOATS`] samples at least, where the model
+/// codes them smaller than zstd at level 3 does. Their chunks are the outputs of an application
+/// of [`FLOAT`], each followed by its Fletcher-32 where that is before deflate (in `meta`).
+fn floats(
+    f: &mut Formula,
+    file: &File,
+    jobs: &[Job],
+    made: &HashMap<usize, Made>,
+    meta: &mut Vec<u8>,
+) -> HashMap<usize, Node> {
+    let mut out = HashMap::new();
+    let mut by: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (j, job) in jobs.iter().enumerate() {
+        if job.before.is_some() && made.get(&j).is_some_and(Option::is_some) {
+            by.entry(file.chunks[job.chunk].dataset).or_default().push(j);
+        }
+    }
+    let mut sets: Vec<(usize, Vec<usize>)> = by.into_iter().collect();
+    sets.sort_unstable();
+    let mut streams: Option<[usize; 3]> = None;
+    for (k, mut js) in sets {
+        let ds = &file.datasets[k];
+        let Some(t) = ds.dtype.filter(|t| t.class == FLOATS && matches!(t.size, 4 | 8)) else { continue };
+        let Some(bytes) = ds.chunk_bytes().and_then(|n| usize::try_from(n).ok()) else { continue };
+        let (shuffle, fletcher) = jobs[js[0]].before.unwrap();
+        // (shuffle of the element's bytes, as HDF5 sets it)
+        let shuffled = ds.filters.iter().find(|f| f.id == SHUFFLE).map(|f| f.client.first() == Some(&t.size));
+        if js.iter().any(|&j| jobs[j].before != Some((shuffle, fletcher)))
+            || bytes % t.size as usize != 0
+            || shuffle && shuffled != Some(true)
+        {
+            continue;
+        }
+        js.sort_by_key(|&j| file.chunks[jobs[j].chunk].seq);
+        let p = Floats {
+            chunks: js.len() as u64,
+            elements: (bytes / t.size as usize) as u64,
+            wide: t.size == 8,
+            be: t.be,
+            shuffle,
+            shift: 0,
+            order: FLOAT_ORDER,
+        };
+        let mut bits = Vec::with_capacity(p.samples().unwrap_or(0));
+        for &j in &js {
+            let d = &made[&j].as_ref().unwrap().0;
+            p.samples_of(&d[..bytes], &mut bits);
+        }
+        if bits.len() < MIN_FLOATS {
+            continue;
+        }
+        // the low bits zero in every sample, all but 8 at most
+        let or = bits.iter().fold(0, |a, b| a | b);
+        let p = Floats { shift: or.trailing_zeros().min(8 * p.bytes() as u32 - 8) as u8, ..p };
+        let c = float::encode(&bits, p.wide, p.shift as u32, p.order as usize);
+        let plain: Vec<u8> = bits.iter().flat_map(|&b| b.to_le_bytes()[..p.bytes()].to_vec()).collect();
+        let zstd = zstd::bulk::compress(&plain, 3).map_or(plain.len(), |z| z.len());
+        // (and not more output than the module takes of so few bytes)
+        if c.coefs.len() + c.model.len() + c.raw.len() >= zstd
+            || !module::within(plain.len() as u64, c.model.len() + c.raw.len())
+        {
+            continue;
+        }
+        let s = *streams.get_or_insert_with(|| {
+            let mut push = |class: &'static str, kind| match f.push_as(class, kind, Vec::new()) {
+                Node::Slice { stream, .. } => stream,
+                _ => unreachable!(),
+            };
+            [
+                push("hdf5/float-coefs", Kind::Table),
+                push("hdf5/float-model", Kind::Compressed),
+                push("hdf5/float-raw", Kind::Compressed),
+            ]
+        });
+        let inputs = [c.coefs, c.model, c.raw]
+            .into_iter()
+            .zip(s)
+            .map(|(v, s)| {
+                let mut d = std::mem::take(&mut f.streams[s].data).into_vec();
+                let at = d.len() as u64;
+                d.extend_from_slice(&v);
+                f.streams[s].data = d.into();
+                Node::slice(s, at, v.len() as u64)
+            })
+            .collect();
+        let a = Apply {
+            module: FLOAT,
+            resources: Vec::new(),
+            params: p.to_bytes(),
+            inputs,
+            len: p.len().unwrap(),
+            memory_limit: aqr_formula::NO_LIMIT,
+        };
+        for (&j, o) in js.iter().zip(f.split(a, vec![bytes as u64; js.len()])) {
+            let n = match fletcher {
+                true => {
+                    let d = &made[&j].as_ref().unwrap().0;
+                    let at = meta.len() as u64;
+                    meta.extend_from_slice(&d[bytes..]);
+                    Node::concat([o, Node::slice(0, at, 4)])
+                }
+                false => o,
+            };
+            out.insert(j, n);
+        }
+    }
+    out
 }
 
 /// `f(item, threads)` on every element of `items`, by `threads` threads, the largest by `size`
@@ -239,10 +397,11 @@ fn par_jobs<T: Sync, R: Send>(
     out.into_iter().map(Option::unwrap).collect()
 }
 
-/// The output of `a`, an application of aqr-flate's module, on `inputs`.
+/// The output of `a`, an application of [`FLOAT`] or of aqr-flate's module, on `inputs`.
 pub fn apply(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> Result<Vec<u8>, String> {
     let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
     match a.module {
+        m if m == FLOAT && res.is_empty() => module::float(&a.params, inputs, a.len).map_err(|e| e.to_string()),
         m if m == aqr_flate::formula::MODULE => aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads)
             .map_err(|_| "DEFLATE stream not rebuilt".to_string()),
         _ => Err("not a module of aqr-hdf5's".to_string()),

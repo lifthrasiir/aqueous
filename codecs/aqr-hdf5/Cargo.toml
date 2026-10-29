@@ -8,12 +8,13 @@ publish = false
 [features]
 default = ["encode"]
 # The formulas (`formula`).
-encode = ["dep:aqr-formula", "aqr-flate/encode"]
+encode = ["dep:aqr-formula", "dep:zstd", "aqr-flate/encode"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 aqr-flate = { path = "../aqr-flate", default-features = false }
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
 aqr-formula = { path = "../../crates/aqr-formula" }

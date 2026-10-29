@@ -94,6 +94,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/gnu-gettext-recons.block"),
     },
     Known {
+        name: "hdf5-recons-float",
+        version: 1,
+        sha512_256: hex("cdd9a30f1116f6353e909d9be3acb15b8d3fc83847e6fce6c411fd35ad12ef20"),
+        block: include_bytes!("../wasm/hdf5-recons-float.block"),
+    },
+    Known {
         name: "ima-recons",
         version: 2,
         sha512_256: hex("8cac476b42906e38a2356829e851368e0f50d7a9e19fcaf1a5c1f37ea53a0f81"),

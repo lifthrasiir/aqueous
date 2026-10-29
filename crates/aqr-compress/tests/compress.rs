@@ -3,7 +3,7 @@ use std::io::Write;
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, BUNDLE, CLIP, FLAC, FLATE, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER,
+    ARM64, BUNDLE, CLIP, FLAC, FLATE, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER,
     RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
 };
 use aqr_formula::aqr;
@@ -1079,19 +1079,20 @@ fn git_pack_file() {
     assert!(!modules(&recompress(&x, &all())).contains(&"git-pack-recons"));
 }
 
-/// An HDF5 file goes to aqr-hdf5, its deflated chunks to aqr-flate, also in other data.
+/// An HDF5 file goes to aqr-hdf5, its deflated chunks to aqr-flate (a dataset of floats by
+/// aqr-hdf5's float model), also in other data.
 #[test]
 fn hdf5_file() {
     let d = fixture("codecs/aqr-hdf5/tests/data/sb0.h5");
     assert_eq!(aqr_compress::detect(&d), Some(aqr_compress::Format::Hdf5));
     assert_eq!(aqr_compress::extent(aqr_compress::Format::Hdf5, &d), Some(d.len()));
-    assert_eq!(modules(&roundtrip(&d, &all())), ["flate-set"]);
+    assert_eq!(modules(&roundtrip(&d, &all())), [HDF5_FLOAT.name, FLATE.name]);
     let x = [&b"some bytes first"[..], &d, b"and after"].concat();
-    assert_eq!(modules(&roundtrip(&x, &all())), ["flate-set"]);
+    assert_eq!(modules(&roundtrip(&x, &all())), [HDF5_FLOAT.name, FLATE.name]);
     // after a user block, at the start of a file
     let d = fixture("codecs/aqr-hdf5/tests/data/userblock.h5");
     assert_eq!(aqr_compress::detect(&d), Some(aqr_compress::Format::Hdf5));
-    assert_eq!(modules(&roundtrip(&d, &all())), ["flate-set"]);
+    assert_eq!(modules(&roundtrip(&d, &all())), [FLATE.name]);
 }
 
 /// A DDS file of BC1 blocks of a smooth picture, `w` × `h` with `mips` mipmaps.
