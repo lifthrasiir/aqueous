@@ -4626,7 +4626,7 @@ as follows:</p>
       <td>fits-recons-table@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fits/FORMAT.md">codecs/aqr-fits/FORMAT.md</a>
     <tr>
-      <td><code>6206529b733fcc76f115f80f003cee937bd04c7bf4b96366ed4b64991406f265</code>
+      <td><code>75db43caafe58df62ca8f792af2ce69dc43d939deaaefc83a0fb6869a2489995</code>
       <td>flac-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md">codecs/aqr-flac/FORMAT.md</a>
     <tr>
@@ -4674,7 +4674,7 @@ as follows:</p>
       <td>obj-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-obj/FORMAT.md">codecs/aqr-obj/FORMAT.md</a>
     <tr>
-      <td><code>591e72d7837d7a00ba59a5caaab58b801dd2e067c521ae54928990440cd9f258</code>
+      <td><code>6b1d76b66c0f2bac49815f1e6573ca41fd9ac3a64e184a4fb32016ae21d0980c</code>
       <td>pcm-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-raw/FORMAT.md">codecs/aqr-raw/FORMAT.md</a>
     <tr>

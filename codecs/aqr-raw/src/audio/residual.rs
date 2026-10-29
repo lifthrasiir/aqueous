@@ -7,6 +7,7 @@ use crate::audio::frame::{self, ESCAPE, Frame, SUB_CONSTANT, SUB_LPC, SUB_VERBAT
 use crate::audio::model::{self, Lms};
 use crate::audio::rans::{self, Tables, builtin};
 use aqr_common::varint;
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 /// The built-in frequency tables (see `train`), or flat ones if none are built in.
@@ -65,11 +66,23 @@ pub fn freqs_to_bytes(f: &[Vec<u16>]) -> Vec<u8> {
     builtin::to_bytes(layout_id(), f)
 }
 
-/// The coded form of a file.
-pub struct Coded {
-    pub streams: Vec<Vec<u8>>,
-    pub words: Vec<u32>,
-    pub raw: [Vec<u8>; 2],
+/// The coded form of a file: what the coder made, or the inputs of a module as they are.
+pub struct Coded<'a> {
+    pub streams: Vec<Cow<'a, [u8]>>,
+    /// The rANS words, as u32 LE.
+    pub words: Cow<'a, [u8]>,
+    pub raw: [Cow<'a, [u8]>; 2],
+}
+
+impl Coded<'_> {
+    /// Of what a coder made: the byte streams, the rANS words and the raw bit streams.
+    pub fn new(streams: Vec<Vec<u8>>, words: Vec<u32>, raw: [Vec<u8>; 2]) -> Coded<'static> {
+        Coded {
+            streams: streams.into_iter().map(Cow::Owned).collect(),
+            words: Cow::Owned(words.iter().flat_map(|w| w.to_le_bytes()).collect()),
+            raw: raw.map(Cow::Owned),
+        }
+    }
 }
 
 pub use varint::{put as put_varint, unzz, zz};
@@ -357,15 +370,24 @@ pub struct ResDecoder<'a> {
 }
 
 impl<'a> ResDecoder<'a> {
-    /// `raw` padded (see [`bits::padded`]).
-    pub fn new(t: &'a Tables, words: &[u32], raw: &'a [Vec<u8>; 2]) -> Result<Self, Error> {
-        if t.flat_log() != Some(model::FLAT_LOG) {
-            return Err(Error("tables"));
+    /// Whether `t` are tables a decoder takes ([`ResDecoder::new`] fails where not).
+    pub fn takes(t: &Tables) -> Result<(), Error> {
+        match t.flat_log() == Some(model::FLAT_LOG) {
+            true => Ok(()),
+            false => Err(Error("tables")),
+        }
+    }
+
+    /// `words` as u32 LE (a multiple of 4 bytes), `raw` padded (see [`bits::padded`]).
+    pub fn new(t: &'a Tables, words: &[u8], raw: &'a [Vec<u8>; 2]) -> Result<Self, Error> {
+        Self::takes(t)?;
+        if !words.len().is_multiple_of(4) {
+            return Err(Error("words"));
         }
         Ok(ResDecoder {
             lms: vec![Lms::default(); frame::MAX_CHANNELS],
             avg: [model::Scale::default(); frame::MAX_CHANNELS],
-            dec: rans::Decoder::new(t, words),
+            dec: rans::Decoder::from_le_bytes(t, words),
             raw_len: [raw[0].len(), raw[1].len()],
             raw: [BitReader::new(&raw[0], 0), BitReader::new(&raw[1], 0)],
         })

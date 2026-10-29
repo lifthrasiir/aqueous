@@ -372,7 +372,7 @@ pub fn count(d: &[u8], fmt: Format, counts: &mut [Vec<u64>]) {
 }
 
 /// Encodes the samples `d`, whole sample frames of `fmt`.
-pub fn encode(d: &[u8], fmt: Format) -> Option<Coded> {
+pub fn encode(d: &[u8], fmt: Format) -> Option<Coded<'static>> {
     if !fmt.valid() || !d.len().is_multiple_of(fmt.frame_bytes()) {
         return None;
     }
@@ -385,13 +385,13 @@ pub fn encode(d: &[u8], fmt: Format) -> Option<Coded> {
         re.frame(f);
     });
     let (words, raw) = re.finish();
-    Some(Coded { streams: s, words, raw })
+    Some(Coded::new(s, words, raw))
 }
 
 /// [`encode`] with `threads` threads: a pool makes the frames of the blocks ahead (stereo
 /// choice, LPC, residuals); one thread takes them in order through the LMS stage, and this
 /// one codes them. The same output.
-pub fn encode_threads(d: &[u8], fmt: Format, threads: usize) -> Option<Coded> {
+pub fn encode_threads(d: &[u8], fmt: Format, threads: usize) -> Option<Coded<'static>> {
     if threads <= 1 {
         return encode(d, fmt);
     }
@@ -476,7 +476,7 @@ pub fn encode_threads(d: &[u8], fmt: Format, threads: usize) -> Option<Coded> {
         drop(jtx);
         let s = lms.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
         let (words, raw) = re.finish();
-        Some(Coded { streams: s, words, raw })
+        Some(Coded::new(s, words, raw))
     })
 }
 
@@ -687,9 +687,11 @@ fn decode_apart(
 ) -> Result<(), Error> {
     let frame_bytes = fmt.frame_bytes();
     let nframes = len / frame_bytes;
-    out.reserve(len);
-    let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
-    let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
+    ResDecoder::takes(t)?;
+    let errors = |f: &mut dyn FnMut(&mut ResDecoder<'_>)| {
+        let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
+        f(&mut ResDecoder::new(t, &c.words, &raw_buf).expect("tables checked"))
+    };
     let work = |b: &DecBatch<'_, ()>| {
         let mut ch: Vec<Vec<i64>> = vec![Vec::with_capacity(BLOCK); fmt.channels];
         let mut bytes = Vec::new();
@@ -710,10 +712,12 @@ fn decode_apart(
         // (an error's message stays in its task)
         true => Err(Error("residuals")),
         false => {
+            // (once the tasks are spawned, which copy the memory as it is then)
+            out.reserve(len.saturating_sub(out.len()));
             out.extend_from_slice(&bytes);
             Ok(())
         }
     };
     let front = |e: &mut _| front(e, c, fmt, nframes, |_: &mut (), _| {});
-    par::apart::run(threads.saturating_sub(3), front, rd, work, take, Error("pipeline"))
+    par::apart::run(threads.saturating_sub(3), front, errors, work, take, Error("pipeline"))
 }

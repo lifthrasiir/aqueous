@@ -261,7 +261,7 @@ fn info(args: &[String]) {
                     "{path}: FLAC, {} bytes, streams {}, {} rANS words, {} + {} raw bytes",
                     d.len(),
                     sz.join(" "),
-                    c.words.len(),
+                    c.words.len() / 4,
                     c.raw[0].len(),
                     c.raw[1].len()
                 );

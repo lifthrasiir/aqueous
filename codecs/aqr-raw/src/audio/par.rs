@@ -461,25 +461,23 @@ pub mod apart {
     }
 
     /// Runs the pipeline: `front` fills the batches, then they go through the error and LMS
-    /// stages (`rd`), then `work` makes of each a `W` on a worker, which `take` takes in order
-    /// (with whether the batch was the last) until it returns `Err` or the last one comes.
-    pub fn run<'a, 'r, W: Wire, E>(
+    /// stages (`errors` running its argument on the residual decoder, which it makes in the
+    /// stage's task: what it holds is then in that task's memory alone), then `work` makes of
+    /// each a `W` on a worker, which `take` takes in order (with whether the batch was the
+    /// last) until it returns `Err` or the last one comes.
+    pub fn run<'a, W: Wire, E>(
         workers: usize,
         front: impl Fn(&mut Front<'a, Out, ()>) -> Result<(), Stop<'a>> + Sync,
-        rd: ResDecoder<'r>,
+        errors: impl Fn(&mut dyn FnMut(&mut ResDecoder<'_>)) + Sync,
         work: impl Fn(&DecBatch<'a, ()>) -> W + Sync,
         mut take: impl FnMut(W, bool) -> Result<(), E>,
         closed: E,
-    ) -> Result<(), E>
-    where
-        ResDecoder<'r>: Send,
-    {
+    ) -> Result<(), E> {
         let workers = workers.max(1);
         let cap = 2;
         let (c1, c2) = (chan::channel(cap), chan::channel(cap));
         let c3: Vec<_> = (0..workers).map(|_| chan::channel(cap)).collect();
         let c4: Vec<_> = (0..workers).map(|_| chan::channel(cap)).collect();
-        let rd = Mutex::new(Some(rd));
         let task = |i: usize, _: &mut Vec<u8>| match i {
             0 => {
                 if let Some(mut e) = Front::new(Out(c1.0), |_| {}) {
@@ -489,14 +487,15 @@ pub mod apart {
                 c1.0.close();
             }
             1 => {
-                let mut rd = rd.lock().unwrap().take().expect("the residual decoder");
-                let mut done = false;
-                while let Some(mut b) = recv::<DecBatch<()>>(&c1.1) {
-                    if !done {
-                        done = errors_batch(&mut rd, &mut b);
-                        send(&c2.0, &b);
+                errors(&mut |rd| {
+                    let mut done = false;
+                    while let Some(mut b) = recv::<DecBatch<()>>(&c1.1) {
+                        if !done {
+                            done = errors_batch(rd, &mut b);
+                            send(&c2.0, &b);
+                        }
                     }
-                }
+                });
                 c2.0.close();
             }
             2 => {

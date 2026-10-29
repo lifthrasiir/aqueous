@@ -153,7 +153,7 @@ impl<'a> Splitter<'a> {
 }
 
 /// Encodes a FLAC file; `None` if it has no FLAC stream.
-pub fn encode(input: &[u8]) -> Option<Coded> {
+pub fn encode(input: &[u8]) -> Option<Coded<'static>> {
     let mut s: Vec<Vec<u8>> = vec![Vec::new(); N_BYTE_STREAMS];
     let mut sp = Splitter::new(input, &mut s)?;
     let mut re = ResEncoder::new(input.len());
@@ -163,12 +163,12 @@ pub fn encode(input: &[u8]) -> Option<Coded> {
     }
     sp.finish(&mut s);
     let (words, raw) = re.finish();
-    Some(Coded { streams: s, words, raw })
+    Some(Coded::new(s, words, raw))
 }
 
 /// [`encode`] with `threads` threads: the frames are parsed here, the LMS stage and the
 /// coding run on two other threads, frames passed in batches. The same output.
-pub fn encode_threads(input: &[u8], threads: usize) -> Option<Coded> {
+pub fn encode_threads(input: &[u8], threads: usize) -> Option<Coded<'static>> {
     if threads <= 1 {
         return encode(input);
     }
@@ -226,7 +226,7 @@ pub fn encode_threads(input: &[u8], threads: usize) -> Option<Coded> {
         }
         drop(ltx);
         let (words, raw) = coder.join().unwrap_or_else(|p| std::panic::resume_unwind(p));
-        Some(Coded { streams: s, words, raw })
+        Some(Coded::new(s, words, raw))
     })
 }
 
@@ -594,11 +594,13 @@ fn decode_apart<'a>(
     out: &mut Vec<u8>,
     threads: usize,
 ) -> Result<(), Error> {
-    out.reserve(total_len);
     out.extend_from_slice(&c.streams[S_PREFIX]);
     let si = decode_start(c)?;
-    let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
-    let rd = ResDecoder::new(t, &c.words, &raw_buf)?;
+    ResDecoder::takes(t)?;
+    let errors = |f: &mut dyn FnMut(&mut ResDecoder<'_>)| {
+        let raw_buf = [bits::padded(&c.raw[0]), bits::padded(&c.raw[1])];
+        f(&mut ResDecoder::new(t, &c.words, &raw_buf).expect("tables checked"))
+    };
     let work = |b: &DecBatch<'a, ()>| -> (Vec<u8>, Vec<Piece<'a>>) {
         let (mut bytes, mut pieces) = (Vec::new(), Vec::new());
         for it in &b.items {
@@ -621,6 +623,8 @@ fn decode_apart<'a>(
         (bytes, pieces)
     };
     let take = |(bytes, pieces): (Vec<u8>, Vec<Piece<'a>>), _| {
+        // (once the tasks are spawned, which copy the memory as it is then)
+        out.reserve(total_len.saturating_sub(out.len()));
         let mut at = 0;
         for p in pieces {
             let budget = (total_len.saturating_sub(out.len()) as u64).saturating_mul(8);
@@ -651,5 +655,5 @@ fn decode_apart<'a>(
         Ok(())
     };
     let front = |e: &mut _| front(e, c, si.bps);
-    par::apart::run(threads.saturating_sub(3), front, rd, work, take, Error("pipeline"))
+    par::apart::run(threads.saturating_sub(3), front, errors, work, take, Error("pipeline"))
 }

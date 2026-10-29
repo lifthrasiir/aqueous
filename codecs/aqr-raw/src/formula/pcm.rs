@@ -8,6 +8,7 @@
 use crate::audio::pcm::{self, Format, N_BYTE_STREAMS};
 use crate::audio::residual;
 use aqr_formula::{Formula, Kind, Module, Node, Resource};
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 pub use crate::module::pcm::decode;
@@ -39,9 +40,8 @@ pub fn apply(f: &mut Formula, samples: &[u8], fmt: Format, threads: usize) -> Op
         return None;
     }
     let c = std::panic::catch_unwind(|| pcm::encode_threads(samples, fmt, threads)).ok()??;
-    let words = c.words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let [raw0, raw1] = c.raw;
-    let slots = c.streams.into_iter().chain([words, raw0, raw1]);
+    let slots = c.streams.into_iter().chain([c.words, raw0, raw1]).map(Cow::into_owned);
     let inputs = slots.zip(CLASSES).map(|(s, (class, kind))| f.push_as(class, kind, s)).collect();
     Some(Node::apply_with(MODULE, vec![resource()], fmt.to_bytes().to_vec(), inputs, samples.len() as u64))
 }

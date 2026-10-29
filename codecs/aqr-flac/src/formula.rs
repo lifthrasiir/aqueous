@@ -7,6 +7,7 @@
 
 use crate::codec::{self, N_BYTE_STREAMS};
 use aqr_formula::{Formula, Kind as StreamKind, Module, Node, Resource};
+use std::borrow::Cow;
 
 pub use crate::module::{Error, Result, decode};
 
@@ -31,9 +32,8 @@ const CLASSES: [(&str, StreamKind); N_BYTE_STREAMS + 3] = [
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let c = std::panic::catch_unwind(|| codec::encode_threads(input, threads)).ok()??;
     let mut f = Formula::default();
-    let words = c.words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let [raw0, raw1] = c.raw;
-    let slots = c.streams.into_iter().chain([words, raw0, raw1]);
+    let slots = c.streams.into_iter().chain([c.words, raw0, raw1]).map(Cow::into_owned);
     let inputs = slots.zip(CLASSES).map(|(s, (class, kind))| f.push_as(class, kind, s)).collect();
     f.root = Node::apply_with(MODULE, vec![resource()], Vec::new(), inputs, input.len() as u64);
     Some(f)

@@ -17,6 +17,7 @@ pub mod pcm {
     use super::{Error, Result};
     use crate::audio::pcm::{self, Format, N_BYTE_STREAMS};
     use crate::audio::residual::{self, Coded};
+    use std::borrow::Cow;
 
     /// The module: the `len` bytes of samples from `params` (their format), `resources` (the
     /// tables) and `inputs` (the streams).
@@ -34,10 +35,11 @@ pub mod pcm {
         if len > coded_len.saturating_mul(64) + (1 << 20) {
             return Err(Error("length".into()));
         }
+        // (the inputs as they are: whatever is in memory when the tasks are spawned is copied)
         let c = Coded {
-            streams: streams.iter().map(|s| s.to_vec()).collect(),
-            words: words.as_chunks::<4>().0.iter().map(|&w| u32::from_le_bytes(w)).collect(),
-            raw: [raw0.to_vec(), raw1.to_vec()],
+            streams: streams.iter().map(|&s| Cow::Borrowed(s)).collect(),
+            words: Cow::Borrowed(words),
+            raw: [Cow::Borrowed(raw0), Cow::Borrowed(raw1)],
         };
         let mut out = Vec::new();
         pcm::decode_threads(&c, fmt, &t, len as usize, &mut out, threads).map_err(|e| corrupt(e.0))?;

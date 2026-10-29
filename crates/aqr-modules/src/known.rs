@@ -72,7 +72,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flac-recons",
         version: 3,
-        sha512_256: hex("6206529b733fcc76f115f80f003cee937bd04c7bf4b96366ed4b64991406f265"),
+        sha512_256: hex("75db43caafe58df62ca8f792af2ce69dc43d939deaaefc83a0fb6869a2489995"),
         block: include_bytes!("../wasm/flac-recons.block"),
     },
     Known {
@@ -144,7 +144,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "pcm-recons",
         version: 1,
-        sha512_256: hex("591e72d7837d7a00ba59a5caaab58b801dd2e067c521ae54928990440cd9f258"),
+        sha512_256: hex("6b1d76b66c0f2bac49815f1e6573ca41fd9ac3a64e184a4fb32016ae21d0980c"),
         block: include_bytes!("../wasm/pcm-recons.block"),
     },
     Known {
