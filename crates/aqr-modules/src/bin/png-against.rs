@@ -3,4 +3,4 @@
 
 #![no_main]
 
-aqr_modules::whole!(inputs [in0: 0, in1: 1, in2: 2, in3: 3], |p, _, i, len| aqr_png::module::decode_against(p, i, len, 8));
+aqr_modules::whole!(slots 8, inputs [in0: 0, in1: 1, in2: 2, in3: 3], |p, _, i, len, threads| aqr_png::module::decode_against(p, i, len, threads));

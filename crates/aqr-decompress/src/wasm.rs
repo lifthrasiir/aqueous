@@ -36,6 +36,8 @@ type Decoded<T> = std::result::Result<T, Failure>;
 const WHOLE: &str = "aqr_apply_whole";
 const PART: &str = "aqr_apply_part";
 const TASK: &str = "aqr_task";
+/// The custom section of a module's task slots.
+const TASK_SLOTS: &str = "aqr_task_slots";
 
 fn invalid<T>(msg: impl Into<String>) -> Decoded<T> {
     Err(Failure::Invalid(msg.into()))
@@ -130,6 +132,8 @@ struct Compiled {
     part: bool,
     /// The number of parameters of the entry point.
     arity: usize,
+    /// Its task slots: how many of the tasks an instance spawns run at once (0 without tasks).
+    slots: usize,
     /// SHA-512/256 of the module.
     hash: [u8; 32],
 }
@@ -206,6 +210,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     let mut memories: Vec<Mem> = Vec::new();
     let mut grows_other = false;
     let mut clean = 0u64;
+    let mut slots = Vec::new();
     for payload in wp::Parser::new(0).parse_all(wasm) {
         match payload.map_err(bad)? {
             wp::Payload::TypeSection(r) => {
@@ -291,6 +296,7 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
                     clean = clean.max(end);
                 }
             }
+            wp::Payload::CustomSection(c) if c.name() == TASK_SLOTS => slots.push(c.data().to_vec()),
             wp::Payload::CodeSectionEntry(body) => {
                 let mut ops = body.get_operators_reader().map_err(bad)?;
                 while !ops.eof() {
@@ -316,13 +322,24 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     if parts && !part {
         return invalid("a whole module importing functions of part modules");
     }
-    if imports.iter().any(|i| matches!(i, Import::Func(HostFn::Spawn))) {
+    let spawns = imports.iter().any(|i| matches!(i, Import::Func(HostFn::Spawn)));
+    if spawns {
         let ft = task.and_then(|f| funcs.get(f as usize)).and_then(|&t| types.get(t as usize));
         let Some(ft) = ft else { return invalid(format!("tasks spawned without {TASK}")) };
         if ft.params() != [wp::ValType::I32, wp::ValType::I32] || !ft.results().is_empty() {
             return invalid(format!("{TASK} of another type"));
         }
     }
+    let slots = match (spawns, &slots[..]) {
+        (true, [d]) => match d[..] {
+            [n @ 1..=64] => n as usize,
+            _ => return invalid(format!("{TASK_SLOTS} not a byte from 1 to 64")),
+        },
+        (true, []) => return invalid(format!("tasks spawned without {TASK_SLOTS}")),
+        (true, _) => return invalid(format!("{TASK_SLOTS} more than once")),
+        (false, []) => 0,
+        (false, _) => return invalid(format!("{TASK_SLOTS} without tasks")),
+    };
     let module = Module::new(&ENGINE, wasm).map_err(|e| Failure::Invalid(format!("not compiled: {e}")))?;
     let working_module = if cfg!(windows) {
         let m = Module::new(&ENGINE, memory_module(working));
@@ -330,7 +347,8 @@ fn compile(wasm: &[u8]) -> Decoded<Compiled> {
     } else {
         None
     };
-    Ok(Compiled { module, imports, working, clean, working_module, part, arity: ft.params().len(), hash: [0; 32] })
+    let arity = ft.params().len();
+    Ok(Compiled { module, imports, working, clean, working_module, part, arity, slots, hash: [0; 32] })
 }
 
 /// A module defining a memory of 32 bits of `limits` (in pages), exported as `m`.
@@ -468,9 +486,6 @@ fn wake(wakers: Vec<Waker>) {
     wakers.into_iter().for_each(Waker::wake);
 }
 
-/// The tasks running at most of those an instance spawns (the spec's task slots).
-const TASK_SLOTS: usize = 8;
-
 /// The tasks an instance spawned: how many are running, and those to start as they end, in the
 /// order spawned. A task to start is not an instance yet: it has no memory, and is not one that
 /// waits (so where those running all wait, it is a deadlock).
@@ -480,10 +495,10 @@ struct Slots(Mutex<(usize, VecDeque<Boxed>)>);
 type Boxed = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
 
 impl Slots {
-    /// Runs `task` on `exec` once a slot is free.
-    fn start(self: &Arc<Self>, exec: &Arc<Exec>, task: Boxed) {
+    /// Runs `task` on `exec` once one of the `slots` is free.
+    fn start(self: &Arc<Self>, exec: &Arc<Exec>, slots: usize, task: Boxed) {
         let mut s = self.0.lock().unwrap();
-        if s.0 < TASK_SLOTS {
+        if s.0 < slots {
             s.0 += 1;
             drop(s);
             self.run(exec, task);
@@ -1078,7 +1093,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                             }
                             done.finish(r)
                         });
-                        s.slots.start(&s.app.exec, task);
+                        s.slots.start(&s.app.exec, s.c.0.slots, task);
                         Some(cell)
                     })
                     .collect();

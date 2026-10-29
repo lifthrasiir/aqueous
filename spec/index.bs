@@ -2637,7 +2637,9 @@ It MUST conform to the following profile, or an [=invalid archive=] failure occu
 * It exports exactly one of the functions `aqr_apply_whole` and `aqr_apply_part`, the <dfn>entry point</dfn>.
     The module is a <dfn>whole module</dfn> in the former case and a <dfn>part module</dfn> in the latter.
 * If it imports [=aqr_spawn|`aqr_spawn`=], it exports the function `aqr_task`, the <dfn>task entry point</dfn>,
-    which has two parameters of type `i32` and no results.
+    which has two parameters of type `i32` and no results,
+    and it has exactly one custom section named `aqr_task_slots`, whose content is one byte from 1 to 64, its [=task slots=].
+    Otherwise it has no custom section of that name.
 
 Issue: Whether the guaranteed limit of 2<sup>27</sup> bytes (128 MiB) for the Zstandard `Window_Size` ([[#zstandard-compression-method]])
 should also apply to the memory limit.
@@ -2771,8 +2773,8 @@ each instance has a [=list=] of handles, initially empty, each of which is a [=l
 A task is either pending, running, done (with a result), failed (with an [=invalid archive=] failure or a [=resource failure=]),
 or <dfn for=task>taken</dfn>.
 
-Of the tasks an instance spawns, at most 8 (the <dfn>task slots</dfn>) are running at once.
-A task is pending from its spawn until it is started; whenever fewer than 8 of the tasks its instance spawned are running,
+Of the tasks an instance spawns, at most as many as the module's <dfn>task slots</dfn> (its custom section `aqr_task_slots`) are running at once.
+A task is pending from its spawn until it is started; whenever fewer of the tasks its instance spawned are running than the [=task slots=],
 the first of them pending, in the order they were spawned (by handle, then by index), is started:
 it is running from then, and [=run a task|runs=].
 A running task stops running when it is done or failed.
@@ -2852,7 +2854,7 @@ and taking an end of |C| for |I| means: if that end is none, set it to |I|; othe
   as long as an instance waiting does not keep the others from running.
   The [=task slots=] bound the memory of an application, its memory limit included:
   a pending task holds no memory under the limit (what implementations keep of |S| for it is their own),
-  and an application that needs more than 8 of an instance's tasks at once, such as a pipeline of 9 stages,
+  and an application that needs more of an instance's tasks at once than the [=task slots=], such as a pipeline of more stages,
   is an [=invalid archive=] whenever its running instances all wait for one that is pending.
   The tasks an instance spawns start in the order it spawned them, whatever the others do,
   so whether that happens does not depend on when the tasks run either.
@@ -4595,7 +4597,7 @@ as follows:</p>
   </thead>
   <tbody>
     <tr>
-      <td><code>d084284fbb3eaaac8e96ffb974f364d8bf9d5ea5b25bf4e236bc032369463578</code>
+      <td><code>caca82f410e08aec7048aa663fb5fc4d376394b44b4ad89f4373dd8053427f1c</code>
       <td>bcn-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-tex/FORMAT.md">codecs/aqr-tex/FORMAT.md</a>
     <tr>
@@ -4603,7 +4605,7 @@ as follows:</p>
       <td>bundle-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bundle/FORMAT.md">codecs/aqr-bundle/FORMAT.md</a>
     <tr>
-      <td><code>3e9ec58f73f263448c249e90e333e691f5c6f881880ba9d7f562e778d64b4357</code>
+      <td><code>8531516a33c8327cd7423dc838e88edcb16d520f1a621f2b47eda75f27de8922</code>
       <td>clip-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-clip/FORMAT.md">codecs/aqr-clip/FORMAT.md</a>
     <tr>
@@ -4639,11 +4641,11 @@ as follows:</p>
       <td>fits-recons-table@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-fits/FORMAT.md">codecs/aqr-fits/FORMAT.md</a>
     <tr>
-      <td><code>75db43caafe58df62ca8f792af2ce69dc43d939deaaefc83a0fb6869a2489995</code>
+      <td><code>568697ef4a3d656873eaf79124c4910134f1fd5c27368cff151f4be592eae8bd</code>
       <td>flac-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md">codecs/aqr-flac/FORMAT.md</a>
     <tr>
-      <td><code>de0802ed7fca44e297a0baa0cc40c56af4f3e70f7cd3792d9b4f0b9d1616319d</code>
+      <td><code>9d3e8b19692ad0949412eeb156b0ababceb2c032b9bb90ee2ff33b4788fbdf7c</code>
       <td>flate-set@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md">codecs/aqr-flate/FORMAT.md</a>
     <tr>
@@ -4659,7 +4661,7 @@ as follows:</p>
       <td>ima-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-ima/FORMAT.md">codecs/aqr-ima/FORMAT.md</a>
     <tr>
-      <td><code>9222740c7c4dd5796639b3dead61cfa35acc5d766b4347a62b6667cea3cc9c93</code>
+      <td><code>211a60941bbf02f93c8631eac928329c5df633aeea60a60dce24bea161a537e6</code>
       <td>jpeg-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-jpeg/FORMAT.md">codecs/aqr-jpeg/FORMAT.md</a>
     <tr>
@@ -4687,7 +4689,7 @@ as follows:</p>
       <td>obj-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-obj/FORMAT.md">codecs/aqr-obj/FORMAT.md</a>
     <tr>
-      <td><code>6b1d76b66c0f2bac49815f1e6573ca41fd9ac3a64e184a4fb32016ae21d0980c</code>
+      <td><code>94de97052f0648d4a46838cff795de9fa50d54f0fed1d9626d4468daefddb91b</code>
       <td>pcm-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-raw/FORMAT.md">codecs/aqr-raw/FORMAT.md</a>
     <tr>
@@ -4695,15 +4697,15 @@ as follows:</p>
       <td>pdf-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdf/FORMAT.md">codecs/aqr-pdf/FORMAT.md</a>
     <tr>
-      <td><code>c7b87c97d4bf43517d75c559e15e0a28e2c9842b5fdf1f82c9156099e30c5983</code>
+      <td><code>874cc85df19af27651e5b9904298a068eda45f331778958f84dbd8966c42bb26</code>
       <td>png-against@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>0e71a6af9800a3f99bc9e42bb16d090c4e4fb429b22efdcfda577cf25a8e282f</code>
+      <td><code>ff7fddf83d8f02aed7d9e00dfcd6536c657674093e56f235526a7e15a632ddd1</code>
       <td>png-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>6b41c62d399820a0ef4597dabeaf7b002fe9572cb17253028d0db91806a83607</code>
+      <td><code>e9255925acd09473d6c3456e9213635af299edbe66aef6ef21f065d31a504884</code>
       <td>png-set@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
@@ -4731,7 +4733,7 @@ as follows:</p>
       <td>snappy-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-snappy/FORMAT.md">codecs/aqr-snappy/FORMAT.md</a>
     <tr>
-      <td><code>dd8fe49f1d26ac0007ebe59a7f210f8f4e5132554ab362d8623fb208270433b3</code>
+      <td><code>fdfd0dfefc7da381bfd33e7e5a4e338d08a11a88e68616c6077d279fe9072801</code>
       <td>sqlite-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-sqlite/FORMAT.md">codecs/aqr-sqlite/FORMAT.md</a>
     <tr>

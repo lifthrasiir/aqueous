@@ -3,4 +3,4 @@
 
 #![no_main]
 
-aqr_modules::whole!(inputs [in0: 0, in1: 1], |p, _, i, len| aqr_tex::module::decode(p, i, len, 8));
+aqr_modules::whole!(slots 8, inputs [in0: 0, in1: 1], |p, _, i, len, threads| aqr_tex::module::decode(p, i, len, threads));

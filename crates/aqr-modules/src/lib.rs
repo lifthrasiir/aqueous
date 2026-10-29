@@ -53,11 +53,29 @@ pub const fn hex<const N: usize>(s: &str) -> [u8; N] {
     out
 }
 
+/// The content of the custom section `aqr_task_slots` of `n` task slots (the spec, "Tasks"), which
+/// [`whole!`]'s `slots` defines: from 1 to 64.
+pub const fn task_slots(n: u32) -> [u8; 1] {
+    assert!(n >= 1 && n <= 64, "task slots from 1 to 64");
+    [n as u8]
+}
+
 /// The entry point of a whole module running `$f`, code taking byte slices (see
 /// `aqr_api::whole`), on the parameters, the resources and the inputs: each resource and input
-/// named with its index, as `inputs [data: 0, layout: 1]`.
+/// named with its index, as `inputs [data: 0, layout: 1]`. A module spawning tasks gives its task
+/// slots first, as `slots 8,` (the custom section `aqr_task_slots`, which `aqr-ld` keeps only in
+/// a module spawning tasks), and `$f` takes them as a fifth argument, the threads of the code.
 #[macro_export]
 macro_rules! whole {
+    (slots $n:literal, $($rest:tt)*) => {
+        #[unsafe(link_section = "aqr_task_slots")]
+        #[used]
+        static AQR_TASK_SLOTS: [u8; 1] = $crate::task_slots($n);
+        $crate::whole!(@slots $n, $($rest)*);
+    };
+    (@slots $n:literal, $(resources [$($r:ident: $ri:literal),* $(,)?])? $(inputs [$($i:ident: $ii:literal),* $(,)?])?, $f:expr) => {
+        $crate::whole!($(resources [$($r: $ri),*])? $(inputs [$($i: $ii),*])?, |p, r, i, len| ($f)(p, r, i, len, $n));
+    };
     ($(resources [$($r:ident: $ri:literal),* $(,)?])? $(inputs [$($i:ident: $ii:literal),* $(,)?])?, $f:expr) => {
         aqr_api::entry! {
             whole fn apply(params_len, $($($r,)*)? $($($i,)*)? size) {

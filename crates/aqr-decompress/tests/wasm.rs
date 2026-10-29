@@ -487,6 +487,7 @@ fn unknown_module_runs() {
 
 /// The imports of tasks.
 const TASKS: &str = r#"
+    (@custom "aqr_task_slots" "\08")
     (import "aqr" "aqr_spawn" (func $spawn (param i32 i32) (result i32)))
     (import "aqr" "aqr_result" (func $result (param i32 i32)))
     (import "aqr" "aqr_join" (func $join (param i32 i32) (result i32)))
@@ -731,9 +732,10 @@ fn slotted(waiting: Option<usize>) -> String {
     )
 }
 
-/// At most 8 of the tasks an instance spawns run at once, the others started in order as they
-/// end: 16 tasks waiting for their messages fit in the memory of 8, and 8 tasks waiting for a
-/// ninth never see it start (a deadlock), as 8 waiting for an eighth do.
+/// At most as many of the tasks an instance spawns as the module's task slots (8 here) run at
+/// once, the others started in order as they end: 16 tasks waiting for their messages fit in the
+/// memory of 8, and 8 tasks waiting for a ninth never see it start (a deadlock), as 7 waiting for
+/// an eighth do; with 2 slots, 2 tasks waiting for a third do not.
 #[test]
 fn task_slots() {
     let input: Vec<u8> = (0..16).map(|b| b + 0x41).collect();
@@ -744,4 +746,30 @@ fn task_slots() {
     assert_eq!(apply(&all, &[&input], &[16], limit).unwrap(), [input.clone()]);
     assert_eq!(apply(&slotted(Some(7)), &[&input[..8]], &[8], u64::MAX).unwrap(), [&input[..8]]);
     invalid(apply(&slotted(Some(8)), &[&input[..9]], &[9], u64::MAX), "deadlock");
+    let two = |w| slotted(w).replace(r#""aqr_task_slots" "\08""#, r#""aqr_task_slots" "\02""#);
+    assert_eq!(apply(&two(Some(1)), &[&input[..2]], &[2], u64::MAX).unwrap(), [&input[..2]]);
+    invalid(apply(&two(Some(2)), &[&input[..3]], &[3], u64::MAX), "deadlock");
+    assert_eq!(apply(&two(None), &[&input], &[16], u64::MAX).unwrap(), [input.clone()]);
+}
+
+/// The task slots of a module: one custom section of one byte from 1 to 64 where it spawns
+/// tasks, none where it does not.
+#[test]
+fn task_slots_declared() {
+    let ok = slotted(None);
+    let with = |data: &str| ok.replace(r#""aqr_task_slots" "\08""#, &format!(r#""aqr_task_slots" "{data}""#));
+    invalid(load(&ok.replace(r#"(@custom "aqr_task_slots" "\08")"#, "")), "aqr_task_slots");
+    invalid(load(&with("\\00")), "aqr_task_slots");
+    invalid(load(&with("\\41")), "aqr_task_slots");
+    invalid(load(&with("\\08\\00")), "aqr_task_slots");
+    invalid(load(&with("\\88")), "aqr_task_slots");
+    invalid(
+        load(&format!("{ok}").replacen("(module", r#"(module (@custom "aqr_task_slots" "\08")"#, 1)),
+        "aqr_task_slots",
+    );
+    invalid(load(&with("\\c0\\00")), "aqr_task_slots");
+    assert!(load(&with("\\40")).is_ok());
+    let plain = r#"(module (import "aqr" "aqr_memory" (memory 1)) (@custom "aqr_task_slots" "\08")
+        (func (export "aqr_apply_whole") (param i64)))"#;
+    invalid(load(plain), "aqr_task_slots");
 }

@@ -83,7 +83,9 @@ optimization picked by hash.
 - Threads in Wasm: fork-join tasks (`aqr_spawn`/`aqr_join`/`aqr_take`; `aqr_common::pool::
   par_map_apart` with `wire::Wire`) and channels (flac/pcm pipelines); the spec's "Module
   execution" has the rules, `docs/xform-design.md` the design. The spawn record must stay in a
-  never-inlined frame (`spawn_record`), or the task's stack clobbers the caller's locals. Other
+  never-inlined frame (`spawn_record`), or the task's stack clobbers the caller's locals. A module
+  spawning tasks declares its task slots with `whole!(slots N, …)` (the custom section
+  `aqr_task_slots`, which aqr-ld checks), its code given N as its threads. Other
   `par_map`/`scope` uses run serially in Wasm. Port a pipeline only when its speedup is worth
   the module's growth; report both (png, psd and mp3 were measured and not ported).
 - Size: aqr-ld trims modules itself (prefer automating in aqr-ld over toolchain flags);

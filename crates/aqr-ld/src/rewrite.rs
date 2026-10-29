@@ -11,7 +11,9 @@
 //!   `aqr_task_body` (`aqr-api`'s);
 //! - every other export but the entry point goes, and so does whatever only they used;
 //! - what only panics need goes (see `trim`), and so do the custom sections: names, producers
-//!   (walrus's too), the linker's relocations.
+//!   (walrus's too), the linker's relocations; but for `aqr_task_slots` (the task slots, that
+//!   `aqr-modules`'s `whole!` defines), which a module spawning tasks has once, of one byte from 1
+//!   to 64, and one that spawns none loses.
 
 use std::collections::HashMap;
 
@@ -26,6 +28,7 @@ const WHOLE: &str = "aqr_apply_whole";
 const PART: &str = "aqr_apply_part";
 const TASK: &str = "aqr_task";
 const TASK_BODY: &str = "aqr_task_body";
+const TASK_SLOTS: &str = "aqr_task_slots";
 
 fn parse(wasm: &[u8]) -> Result<Module, String> {
     // (the names parsed still, for `trim`)
@@ -206,7 +209,8 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     if entry == WHOLE && !part_funcs.is_empty() {
         return Err(format!("whole module imports {}", part_funcs.join(", ")));
     }
-    if m.imports.iter().any(|i| i.module == "aqr" && i.name == "aqr_spawn") {
+    let spawns = m.imports.iter().any(|i| i.module == "aqr" && i.name == "aqr_spawn");
+    if spawns {
         task(&mut m, task_body)?;
     }
 
@@ -215,6 +219,16 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
     let customs: Vec<_> = m.customs.iter().map(|(id, _)| id).collect();
     for id in customs {
         m.customs.delete(id);
+    }
+    // (as the linker wrote it: sections of one name from several objects are one, concatenated)
+    let slots = task_slots(wasm)?;
+    match (spawns, slots) {
+        (true, Some(n @ 1..=64)) => {
+            m.customs.add(walrus::RawCustomSection { name: TASK_SLOTS.into(), data: vec![n] });
+        }
+        (true, Some(_)) => return Err(format!("{TASK_SLOTS} not a byte from 1 to 64 (two of them?)")),
+        (true, None) => return Err(format!("tasks spawned without {TASK_SLOTS} (whole!'s slots)")),
+        (false, _) => {}
     }
     if let Some(i) = m.imports.iter().find(|i| i.module == API) {
         return Err(format!("{API}.{} used other than by a call", i.name));
@@ -228,6 +242,23 @@ pub fn rewrite(wasm: &[u8]) -> Result<Vec<u8>, String> {
         .validate_all(&wasm)
         .map_err(|e| format!("invalid output: {e}"))?;
     Ok(wasm)
+}
+
+/// The byte of the custom section [`TASK_SLOTS`] of `wasm`, if it has one; 0 where it is not a
+/// single byte.
+fn task_slots(wasm: &[u8]) -> Result<Option<u8>, String> {
+    let mut found = None;
+    for p in wasmparser::Parser::new(0).parse_all(wasm) {
+        if let wasmparser::Payload::CustomSection(c) = p.map_err(|e| e.to_string())?
+            && c.name() == TASK_SLOTS
+        {
+            found = Some(match (found, c.data()) {
+                (None, &[n]) => n,
+                _ => 0,
+            });
+        }
+    }
+    Ok(found)
 }
 
 /// Exports `aqr_task`, calling `body` (`aqr_task_body`) on the stack below the record of the
