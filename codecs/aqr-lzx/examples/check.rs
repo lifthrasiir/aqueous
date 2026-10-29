@@ -1,9 +1,10 @@
 //! The LZX chunks of a WIM file: whether each is read and written back bit for bit, the
 //! resources' SHA-1, and what the chunks are made of. The WIM may be a range of a file (a WIM
-//! in a disc image).
+//! in a disc image). With `-r`, each resource is split into its data and record and rebuilt
+//! (`-s K`: every K-th resource only): the record's bytes by what they code, and speeds.
 //!
 //! ```sh
-//! cargo run --release -p aqr-lzx --example aqr-lzx-check -- FILE [OFFSET LEN]
+//! cargo run --release -p aqr-lzx --example aqr-lzx-check -- [-r] [-s K] FILE [OFFSET LEN]
 //! ```
 
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
@@ -46,7 +47,17 @@ fn chunks<'a>(w: &'a [u8], r: &Res) -> Vec<(&'a [u8], usize)> {
 }
 
 fn main() {
-    let a: Vec<String> = std::env::args().skip(1).collect();
+    let mut a: Vec<String> = std::env::args().skip(1).collect();
+    let record = a.iter().any(|x| x == "-r");
+    a.retain(|x| x != "-r");
+    let every = match a.iter().position(|x| x == "-s") {
+        Some(i) => {
+            let k = a[i + 1].parse().unwrap();
+            a.drain(i..i + 2);
+            k
+        }
+        None => 1,
+    };
     let file = std::fs::File::open(&a[0]).unwrap();
     let m = unsafe { memmap2::Mmap::map(&file).unwrap() };
     let (off, len) = match a.len() {
@@ -129,5 +140,83 @@ fn main() {
         uncompressed.into_inner(),
         trailing.into_inner(),
         tail.into_inner()
+    );
+    if !record {
+        return;
+    }
+    // the records
+    let picked: Vec<&Res> = res.iter().step_by(every).collect();
+    let next = AtomicUsize::new(0);
+    let totals = std::sync::Mutex::new((0usize, 0usize, 0usize, [0f64; aqr_lzx::recons::CATS], 0f64, 0f64, 0usize));
+    let start = std::time::Instant::now();
+    std::thread::scope(|s| {
+        for _ in 0..threads {
+            s.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, Relaxed);
+                    let Some(r) = picked.get(i) else { break };
+                    let cs = chunks(w, r);
+                    let t = std::time::Instant::now();
+                    let sp = aqr_lzx::recons::split(&cs);
+                    let enc = t.elapsed().as_secs_f64();
+                    let mut tot = totals.lock().unwrap();
+                    let Ok(sp) = sp else {
+                        tot.6 += 1;
+                        eprintln!("not split: resource of {} bytes: {:?}", r.orig, sp.err());
+                        continue;
+                    };
+                    drop(tot);
+                    let t = std::time::Instant::now();
+                    let back = aqr_lzx::recons::join(&sp.data, &sp.record);
+                    let dec = t.elapsed().as_secs_f64();
+                    let comp: usize = cs.iter().map(|c| c.0.len()).sum();
+                    let whole = back.as_ref().is_ok_and(|b| {
+                        b.len() == comp
+                            && cs
+                                .iter()
+                                .scan(0, |at, c| {
+                                    let s = &b[*at..*at + c.0.len()];
+                                    *at += c.0.len();
+                                    Some(s == c.0)
+                                })
+                                .all(|x| x)
+                    });
+                    let mut tot = totals.lock().unwrap();
+                    if !whole {
+                        tot.6 += 1;
+                        eprintln!("not rebuilt: resource of {} bytes: {:?}", r.orig, back.err());
+                    }
+                    tot.0 += comp;
+                    tot.1 += sp.record.len();
+                    tot.2 += sp.data.len();
+                    for k in 0..aqr_lzx::recons::CATS {
+                        tot.3[k] += sp.cost[k] / 8.0;
+                    }
+                    tot.4 += enc;
+                    tot.5 += dec;
+                }
+            });
+        }
+    });
+    let (comp, rec, data, cost, enc, dec, bad) = totals.into_inner().unwrap();
+    println!(
+        "records of {} resources in {:.1} s: {} bytes of chunks, data {}, record {} ({:.2}% of the chunks), {} not rebuilt",
+        picked.len(),
+        start.elapsed().as_secs_f64(),
+        comp,
+        data,
+        rec,
+        rec as f64 / comp as f64 * 100.0,
+        bad
+    );
+    println!(
+        "record by what it codes: kinds {:.0}, lengths {:.0}, offsets {:.0}, trees {:.0}, the rest {:.0}; split {:.1} MB/s, join {:.1} MB/s a thread",
+        cost[0],
+        cost[1],
+        cost[2],
+        cost[3],
+        cost[4],
+        data as f64 / enc / 1e6,
+        data as f64 / dec / 1e6
     );
 }

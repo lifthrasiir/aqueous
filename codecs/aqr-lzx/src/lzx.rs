@@ -193,6 +193,11 @@ pub struct BitW {
 }
 
 impl BitW {
+    /// A writer going on after `out`, at a word's start.
+    pub fn new(out: Vec<u8>) -> BitW {
+        BitW { out, acc: 0, n: 0 }
+    }
+
     #[inline]
     pub fn bits(&mut self, k: u32, v: u32) {
         debug_assert!(k <= 16 && (k == 16 || v < 1 << k));
@@ -562,6 +567,7 @@ pub fn write_onto(data: &[u8], parse: &Parse, w: &mut BitW) -> Option<()> {
             }
             UNCOMPRESSED => {
                 let pad = 16 - w.partial();
+                ((b.align_bits as u32) < 1 << pad).then_some(())?;
                 w.bits(pad, b.align_bits as u32);
                 b.reps.iter().for_each(|r| w.out.extend_from_slice(&r.to_le_bytes()));
                 reps = b.reps;
