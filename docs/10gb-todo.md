@@ -206,9 +206,12 @@ Matt Mahoney의 10 GB 벤치마크(`/tmp/testdata/10gb`, 파일 79,431개, 10.00
        19.8 MB). 같은 꼴의 `mingw470-x32`의 `gcc-core-4.7.0`은 9.98 → 5.23 MB로 재구성된다.
        - 멤버 753개가 모두 `mingw461` 트리의 파일과 같고, aqr-lzma 자체(`aqr-lzma bench`)는 이
          스트림을 레코드 12.4%로 문제없이 쪼개고 합친다. 그러니 aqr-compress 쪽의 판정이다.
-       - `cargo aqr -c -v /tmp/testdata/10gb/mingw/mingw461`(148 MB, 11 s)로 재현된다. 남아 있는
-         가장 오래된 바이너리(`a9471cb`)에서도 그대로 남으므로 `d84deff`..`a9471cb` 사이의 일이다
-         (bisect하지 않았다). 형제 파일의 몫으로 보면 고쳐서 −4.7 MB 남짓이다.
+       - `cargo aqr -c -v /tmp/testdata/10gb/mingw/mingw461`(148 MB, 11 s)로 재현된다. bisect하면
+         (`987c901`, 곧 rebase된 `d84deff`가 good) 첫 bad는 aqr-infer-recs를 붙인 `a21a5a2`이다.
+         그 직전 `142354f`에서는 이 파일이 4.18 MB이다.
+       - 그 커밋에서 `mingw461`만 압축한 크기가 23.31 → 31.53 MB(+8.2 MB, 압축 9.9 → 18.6 s)로
+         는다(`ed0869f`에서 30.92 MB). 이 파일의 몫(+5.7 MB)보다 크므로 다른 파일도 손해를 본다.
+         10gb 전체로는 추론의 이득(−19 MB)이 이것을 덮었다. 원인은 아직 보지 않았다.
      - 7z(37.1 MB): 컨테이너 파서. 폴더 0(23.4 MB, LZMA)은 레코드 4.3 MB로 재구성되고, 폴더
        1(13.6 MB)은 BCJ2를 거친다.
      - 시간: match finder(`longest`)가 대부분이다. 탐색 깊이 16 → 4는 레코드 +6%이다. 받지 않을
