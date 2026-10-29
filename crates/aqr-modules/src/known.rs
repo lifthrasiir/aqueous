@@ -78,19 +78,19 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("ab03696cd64628064067c21c10981973d0242678b304f5adf5471e5feb381aca"),
+        sha512_256: hex("3a04eefd1872c0b85e8fffe911f665d0198a77b57a8b49cbb1eba692678c33f6"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
         name: "git-pack-index-recons",
         version: 1,
-        sha512_256: hex("a870720c5bd2c32248dceb5dd0098e99117c252b2a541a2933df155464d8bea8"),
+        sha512_256: hex("41713d0d1126965f0bee9e3fb41c65ea51794a09b3e7d7b3bb0fe65c1fb4d5de"),
         block: include_bytes!("../wasm/git-pack-index-recons.block"),
     },
     Known {
         name: "git-pack-recons",
         version: 1,
-        sha512_256: hex("8de96ff114cf1746e7fe70b380d47d009392a1f711f5b2032a790127f7ea22e2"),
+        sha512_256: hex("e11e13bdb6c991349408d800451b1a8a57f738e9b6f414202afc4544aadc2dfe"),
         block: include_bytes!("../wasm/git-pack-recons.block"),
     },
     Known {
@@ -102,7 +102,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "hdf5-recons-float",
         version: 1,
-        sha512_256: hex("cdd9a30f1116f6353e909d9be3acb15b8d3fc83847e6fce6c411fd35ad12ef20"),
+        sha512_256: hex("db906762e7ea55dbf42d68cc53a685d6e633b72ec8248085f99a881e156502d4"),
         block: include_bytes!("../wasm/hdf5-recons-float.block"),
     },
     Known {
