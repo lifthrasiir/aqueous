@@ -1974,8 +1974,13 @@ pub fn reconstruct_with(
     model: ModelData,
     threads: usize,
 ) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(data.len() / 2 + 64);
+    // (reserved as the first bytes come: on WebAssembly, after the first segments' tasks are
+    // spawned, which copy the memory as it is then)
+    let mut out = Vec::new();
     reconstruct_into(data, meta, model, threads, &mut |b| {
+        if out.capacity() == 0 {
+            out.reserve(data.len() / 2 + 64);
+        }
         out.extend_from_slice(b)
     })?;
     Ok(out)

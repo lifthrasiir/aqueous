@@ -4630,7 +4630,7 @@ as follows:</p>
       <td>flac-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md">codecs/aqr-flac/FORMAT.md</a>
     <tr>
-      <td><code>8ee9ec2f9867810df98bf8bb1e69785964c6897ba51412a364928256abf55f98</code>
+      <td><code>de0802ed7fca44e297a0baa0cc40c56af4f3e70f7cd3792d9b4f0b9d1616319d</code>
       <td>flate-set@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md">codecs/aqr-flate/FORMAT.md</a>
     <tr>
