@@ -77,7 +77,7 @@ A **part list** is a varint count, then that many parts. A **part** is a varint 
 number of its bits, then the bit string in ⌈n/8⌉ bytes (§1). Parts are numbered from 0 in their
 list. Within a list no two parts are equal.
 
-A residue part has bits 40 to 63 (its `end`, §4.1) zero.
+A residue part has at least 88 bits, and its bits 40 to 63 (its `end`, §4.1) are zero.
 
 A **skeleton** is five id lists, in the order codebooks, floors, residues, mappings, modes. An
 id list is a varint count, then that many varints, each the number of a part of that kind.
@@ -89,9 +89,11 @@ skeleton's residue list, in its order. Rows are sorted by CRC-32, ascending, and
 the same CRC-32. A row's CRC-32 is that of the setup it assembles (§4); a reader may check it.
 
 A reader rejects a database that breaks any of the above: a wrong magic or version, a varint
-that does not end within the file, a part, skeleton or row that runs past the end, an id or
-skeleton number out of range, counts out of range, an `end` of 2^24 or more, or bytes after the
-last row.
+that does not end within the file, a part, skeleton or row that runs past the end, a part whose
+last byte has nonzero unused bits, two equal parts in a list, a residue part under 88 bits or
+with a nonzero `end`, an id or skeleton number out of range, counts out of range, an `end` of
+2^24 or more, or bytes after the last row. Part-list, skeleton and row counts have no bound of
+their own beyond what the file holds.
 
 ## 4. Assembling a setup
 
@@ -148,9 +150,9 @@ length. CRC-32 is affine over equal-length messages: crc(a ⊕ b) = crc(a) ⊕ c
 with 0ⁿ the zero message of that length. So with x₀ the skeleton assembled with all ends zero,
 and Dᵢ(e) the CRC-32 of the message that is zero but for e at residue i's end field, minus
 crc(0ⁿ), the CRC-32 of the setup with ends eᵢ is crc(x₀) ⊕ D₀(e₀) ⊕ D₁(e₁) ⊕ …, each Dᵢ
-linear in e (the XOR of its values at e's set bits). For two residues: tabulate D₁ over its
-candidates in a map, and for each e₀ look up crc(x₀) ⊕ D₀(e₀) ⊕ target. Every database skeleton
-has one or two residues.
+linear in e (the XOR of its values at e's set bits). Meet in the middle: tabulate the XOR of
+the Dᵢ of some residues over their candidates in a map, and for each combination of the others
+look up crc(x₀) ⊕ their Dᵢ ⊕ target. Every database skeleton has one or two residues.
 
 ## 6. How the database was made (informative)
 
