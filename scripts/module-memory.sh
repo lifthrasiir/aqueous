@@ -45,6 +45,12 @@ samples() {
     copy photo.png $codecs/aqr-png/corpus/codec-corpus/clic2025/training/5dbdb989cf026f7ab3dd7167d7fc0fe2.png
     copy anim.png $codecs/aqr-png/corpus/codec-corpus/image-rs/test-images/png/apng/ball.png
     make flat.png 'magick -size 8000x6000 gradient:white-gray90 -depth 8 $out'
+    # variants of a picture (png-set), as a container's files
+    make set.tar 'local v=$dir/set; mkdir -p $v &&
+        magick -seed 1 -size 2000x1500 plasma:fractal -blur 0x3 $v/base.png &&
+        magick $v/base.png -fill red -draw "rectangle 100,100 400,300" $v/v1.png &&
+        magick $v/base.png -fill blue -draw "circle 1000,700 1200,900" $v/v2.png &&
+        tar cf $out -C $v base.png v1.png v2.png'
     make photo.jpg 'magick $s/photo.png -quality 90 $out'
     make photo-prog.jpg 'magick $s/photo.png -quality 90 -interlace JPEG $out'
     make big.jpg 'magick $s/photo.png -resize 4000x3000! -quality 90 $out'
