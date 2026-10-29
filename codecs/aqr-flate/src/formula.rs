@@ -10,6 +10,9 @@ use std::sync::OnceLock;
 
 use aqr_formula::{Apply, Formula, Module, Node, Resource};
 
+use crate::Shape;
+use crate::tokens::Kind;
+
 use crate::adapt::Priors;
 use crate::code::{self};
 use crate::tokens::{FIELDS, Rule};
@@ -20,7 +23,485 @@ pub use crate::module::{
     Derived, decode, index, models_from_bytes, priors_from_bytes, rules_from_bytes,
 };
 
-pub const MODULE: Module = Module::new("flate-set", 1);
+pub const MODULE: Module = Module::new("flate-set", 1).with_memory(memory);
+
+/// Bytes of a rule in a catalog resource, and a rule in memory (`RULE_BYTES` and the fields of
+/// [`Rule`] on 32 bits, rounded up).
+const RULE_MEM: u64 = 24;
+
+/// Bytes a token takes: [`Token`](crate::deflate::Token) has `len` and `dist` (u16), a flag and a tag.
+const TOKEN: u64 = 6;
+
+/// Bytes of data from which a stream gets threads (as `module::LARGE`), and how many tasks of an
+/// instance run at once (the module's slots).
+const LARGE: u64 = 2 << 20;
+const SLOTS: usize = 8;
+
+/// Slack for the large allocations of a task, and the small ones.
+const TASK_SLACK: u64 = 4 * aqr_formula::PAGE + aqr_formula::SMALL;
+
+/// A byte count `a + l * L`, `L` being the bytes of the streams made (`l` times the share of one
+/// stream in them: the sum of the streams' is at most `L`).
+#[derive(Clone, Copy, Default)]
+struct Lin {
+    a: u64,
+    l: u64,
+}
+
+impl Lin {
+    fn of(a: u64) -> Lin {
+        Lin { a, l: 0 }
+    }
+
+    fn l(l: u64) -> Lin {
+        Lin { a: 0, l }
+    }
+
+    fn add(self, o: Lin) -> Lin {
+        Lin {
+            a: self.a + o.a,
+            l: self.l + o.l,
+        }
+    }
+
+    fn mul(self, k: u64) -> Lin {
+        Lin {
+            a: self.a * k,
+            l: self.l * k,
+        }
+    }
+
+    fn max(self, o: Lin) -> Lin {
+        Lin {
+            a: self.a.max(o.a),
+            l: self.l.max(o.l),
+        }
+    }
+
+    fn eval(self, l: u64) -> u64 {
+        self.a.saturating_add(self.l.saturating_mul(l))
+    }
+}
+
+/// The cut of `data` and `records` by `index` (as `module::cut`), the two of each stream.
+fn cut_items<'a>(
+    data: &'a [u8],
+    records: &'a [u8],
+    index: &[u8],
+) -> Option<Vec<(&'a [u8], &'a [u8])>> {
+    if index.is_empty() {
+        return Some(vec![(data, records)]);
+    }
+    let (mut at, mut d, mut r) = (0, data, records);
+    let mut out = Vec::new();
+    while at < index.len() {
+        let mut take = |from: &mut &'a [u8]| {
+            let n = usize::try_from(crate::code::get_varint(index, &mut at).ok()?).ok()?;
+            let (a, b) = from.split_at_checked(n)?;
+            *from = b;
+            Some(a)
+        };
+        out.push((take(&mut d)?, take(&mut r)?));
+    }
+    (d.is_empty() && r.is_empty()).then_some(out)
+}
+
+/// A segment of a record: tokens, and the data from its start to the next one's.
+struct Seg {
+    count: u64,
+    pos: u64,
+    end: u64,
+    /// Whether it has a zlib emulator (the first, or resumed).
+    emu: bool,
+}
+
+/// What of a stream's record the memory depends on (read as `reconstruct_into` does).
+struct Stream {
+    /// Bytes of data.
+    n: u64,
+    rule: Rule,
+    adaptive: bool,
+    /// The zlib emulator's window bits and memory level.
+    zlib: Option<(u8, u8)>,
+    blocks: u64,
+    stored: u64,
+    /// The most tokens of a block, and of all.
+    largest: u64,
+    tokens: u64,
+    trailing: u64,
+    segs: Vec<Seg>,
+}
+
+impl Stream {
+    fn parse(n: u64, meta: &[u8], profile: u16) -> Option<Stream> {
+        use crate::code::{get_usize, get_varint};
+        let m = crate::profile_data(profile).ok()?;
+        let nn = usize::try_from(n).ok()?;
+        let adaptive = profile >= crate::ADAPTIVE;
+        let mut at = 2;
+        let main_len = get_varint(meta, &mut at).ok()? as usize;
+        let hdr_len = get_varint(meta, &mut at).ok()? as usize;
+        let main = meta.get(at..at.checked_add(main_len)?)?;
+        at += main_len;
+        at = at.checked_add(hdr_len)?;
+        let r = &mut crate::bits::BitReader::new(main);
+        let rule = if r.bits(1).ok()? == 1 {
+            *m.rules.get(get_usize(r, 1 << 16).ok()?)?
+        } else {
+            Rule::read(r).ok()?
+        };
+        let layout = crate::read_blocks(r, nn).ok()?;
+        let mut zlib = None;
+        if adaptive {
+            if r.bits(1).ok()? == 1 {
+                r.bits(4).ok()?;
+                r.bits(3).ok()?;
+                zlib = Some((r.bits(3).ok()? as u8 + 9, r.bits(4).ok()? as u8));
+            }
+        } else if let Coding::Static(defaults) = m.coding {
+            for d in defaults {
+                crate::code::Model::read(r, d).ok()?;
+            }
+        }
+        let nseg = get_usize(r, nn + 1).ok()?;
+        let mut segs = Vec::with_capacity(nseg);
+        let mut first = 0;
+        for i in 0..nseg {
+            let count = get_usize(r, nn).ok()?;
+            if !adaptive {
+                get_usize(r, count).ok()?;
+                get_usize(r, count).ok()?;
+            }
+            let pos = if i > 0 { get_usize(r, nn).ok()? } else { 0 };
+            let len = get_usize(r, meta.len()).ok()?;
+            let cp = matches!(zlib, Some((wbits, _)) if i > 0 && r.bits(1).ok()? == 1 && {
+                // (the checkpoint's fields: see get_checkpoint)
+                let ws = 1usize << wbits;
+                r.bits(1).ok()?;
+                get_usize(r, nn).ok()?;
+                get_usize(r, 2 * ws).ok()?;
+                get_usize(r, 2 * ws).ok()?;
+                let length = 2 + get_usize(r, crate::matchfind::MAX_MATCH).ok()?;
+                if length > 2 {
+                    get_usize(r, ws).ok()?;
+                }
+                true
+            });
+            at = at.checked_add(len)?;
+            segs.push(Seg {
+                count: count as u64,
+                pos: pos as u64,
+                end: n,
+                emu: zlib.is_some() && (i == 0 || cp),
+            });
+            first += count;
+        }
+        for i in 1..segs.len() {
+            segs[i - 1].end = segs[i].pos;
+        }
+        let total = first;
+        if at != meta.len() {
+            return None;
+        }
+        // (the blocks' token counts, the remaining ones for the block that takes them)
+        let fixed: usize = layout
+            .blocks
+            .iter()
+            .map(|b| match b {
+                Shape::Coded { count: Some(c), .. } => *c,
+                _ => 0,
+            })
+            .sum();
+        let rest = total.checked_sub(fixed)?;
+        let (mut largest, mut stored) = (0, 0);
+        for b in &layout.blocks {
+            match *b {
+                Shape::Stored { .. } => stored += 1,
+                Shape::Coded { count, .. } => largest = largest.max(count.unwrap_or(rest)),
+            }
+        }
+        Some(Stream {
+            n,
+            rule,
+            adaptive,
+            zlib,
+            blocks: layout.blocks.len() as u64,
+            stored,
+            largest: largest as u64,
+            tokens: total as u64,
+            trailing: layout.trailing.len() as u64,
+            segs,
+        })
+    }
+
+    /// Bytes of the table, chain or emulator and the contexts that decoding segment `s` makes
+    /// (`code_range`, `Emulator`, `Adaptive::new`).
+    fn decoder(&self, s: &Seg) -> u64 {
+        const WINDOW: u64 = 32768;
+        let rule = &self.rule;
+        let table = match rule.kind {
+            Kind::Literals | Kind::Runs => 0,
+            Kind::Search => {
+                let span = s.end.saturating_sub(s.pos.saturating_sub(WINDOW)).max(1);
+                let bits = span.next_power_of_two().trailing_zeros().clamp(10, 15);
+                let own = rule.key != 3 || rule.inner != crate::tokens::INNER_ALL;
+                let mut entries = (rule.ways as u64) << bits;
+                if rule.long > 0 {
+                    entries += 1 << bits;
+                }
+                if rule.rank {
+                    entries += (1 << 16).min((span + 1).next_power_of_two());
+                    if own {
+                        entries += 1 << bits;
+                    }
+                }
+                4 * entries
+            }
+            Kind::Chain => {
+                // Matcher::single_range: the links, and the heads of Heads::new
+                let first = s.pos.saturating_sub(WINDOW);
+                let span = (s.end + 8192 + 1).min(self.n).saturating_sub(first);
+                let heads = if span > 1 << 22 {
+                    4 << 24
+                } else {
+                    let keys = span.saturating_sub(2);
+                    let slots = (4 * keys).min(1 << 22).max(2 * keys);
+                    8 << slots.next_power_of_two().max(1024).trailing_zeros()
+                };
+                4 * (2 * (1u64 << 17)).min(self.n + 1) + heads
+            }
+        };
+        let emu = match self.zlib {
+            Some((wbits, mem)) if s.emu => {
+                let w = 1u64 << wbits.clamp(9, 15);
+                // the window's buffer, heads (u16) and links (u16), and the lane
+                2 * w + 280 + 2 * (1 << (mem.clamp(1, 9) as u32 + 7)) + 2 * w + 256
+            }
+            _ => 0,
+        };
+        // (the contexts' probabilities and counts)
+        let model = if self.adaptive {
+            3 * crate::adapt::NUM as u64
+        } else {
+            0
+        };
+        table + emu + model
+    }
+
+    /// Bytes of the encoding of the result of a task of segment `s`: a literal takes 2 and a
+    /// match, which covers 3 bytes of data at least, 5.
+    fn encoded(&self, s: &Seg) -> u64 {
+        let (c, d) = (s.count, s.end.saturating_sub(s.pos));
+        16 + 2 * c + 3 * c.min(d.saturating_sub(c) / 2)
+    }
+
+    /// The growth of a task of segment `s`: the decoder and the tokens, then the tokens and their
+    /// encoding (pushed: three times); the decoder is dropped before, the memory it had maybe not
+    /// reused.
+    fn task(&self, s: &Seg) -> u64 {
+        self.decoder(s) + TOKEN * s.count + 3 * self.encoded(s) + TASK_SLACK
+    }
+
+    /// The memory of the instance that decodes the stream, from the memory it has at the start
+    /// (`w0`), on `threads` threads.
+    fn run(&self, w0: Lin, threads: usize) -> Lin {
+        let t = threads > 1;
+        let batch = 4 * threads;
+        let n = self.n;
+        // the layout (grown by pushes beyond 2^16 blocks), the counts, the skips, the segments, the
+        // models (static), the writer
+        let grow = if self.blocks > 1 << 16 { 3 } else { 1 };
+        let stat = 12 * grow * self.blocks
+            + 4 * self.blocks
+            + 24 * self.stored
+            + 64 * self.segs.len() as u64
+            + self.trailing
+            + if self.adaptive {
+                0
+            } else {
+                9 * std::mem::size_of::<crate::code::Model>() as u64
+            }
+            + (n / 2).min(1 << 20)
+            + 64
+            + aqr_formula::SMALL;
+        let me = w0.add(Lin::of(stat));
+        let nready = self.blocks.min(1 << 12);
+        // the largest batch's tokens
+        let batches: Vec<&[Seg]> = self.segs.chunks(batch).collect();
+        let tokens = |b: &[Seg]| b.iter().map(|s| s.count).sum::<u64>();
+        let results = |b: &[Seg]| TOKEN * tokens(b) + 24 * b.len() as u64;
+        let most = batches.iter().map(|b| tokens(b)).max().unwrap_or(0);
+        // the pending tokens (pushed: three times, but a single segment's are made at their size)
+        let round = self.tokens.min(2 * self.largest + most);
+        let pending = Lin::of(if self.segs.len() > 1 {
+            3 * TOKEN * round
+        } else {
+            TOKEN * self.tokens
+        });
+        // the output, reserved at the first piece and grown by pushes (the old and new one held
+        // with the piece: at most five times the stream)
+        let out0 = Lin::of(n / 2 + 64);
+        // the blocks written, the writer(s): the output so far (twice its stream) and, as pushes
+        // grew it, the writer's bytes (three times), and each run's on threads (as many again);
+        // the piece taken, copied to the output
+        let ready = 3600 * nready;
+        let write = if t {
+            Lin {
+                a: 6 * (TOKEN * round + 16 * nready) + ready,
+                l: 6,
+            }
+        } else {
+            Lin {
+                a: 3 * (TOKEN * self.largest + 16) + ready,
+                l: 3,
+            }
+        };
+        let late = write.max(Lin::l(5));
+        let merge = Lin::of(batches.iter().map(|b| results(b)).max().unwrap_or(0));
+        let mut peak = me.add(out0).add(pending).add(late.max(merge));
+        for (b, segs) in batches.iter().enumerate() {
+            // the memory a batch's tasks copy: with the results of the one before, the output
+            // reserved and, from the third batch, the earlier writing and pending tokens
+            let mut sp = me;
+            if b >= 1 {
+                sp = sp.add(Lin::of(results(batches[b - 1]))).add(out0);
+            }
+            if b >= 2 {
+                sp = sp.add(pending).add(late);
+            }
+            if t && segs.len() > 1 {
+                let mut costs: Vec<u64> = segs.iter().map(|s| self.task(s)).collect();
+                costs.sort_unstable_by(|a, b| b.cmp(a));
+                let k = costs.len().min(SLOTS);
+                let grown: u64 = costs[..k].iter().sum();
+                peak = peak.max(sp.add(sp.mul(k as u64)).add(Lin::of(grown)));
+            } else {
+                let work = segs
+                    .iter()
+                    .map(|s| self.decoder(s) + TOKEN * s.count)
+                    .max()
+                    .unwrap_or(0);
+                peak = peak.max(sp.add(Lin::of(results(segs) + work)));
+            }
+        }
+        peak
+    }
+}
+
+/// A group of the streams `par_jobs` runs together (a task each), and whether it is a large one.
+struct Group {
+    items: Vec<usize>,
+    large: bool,
+}
+
+/// The groups of streams with data of `sizes` bytes, as `par_jobs` makes them on WebAssembly.
+fn groups(sizes: &[u64]) -> Vec<Group> {
+    let large = |i: &usize| sizes[*i] >= LARGE;
+    let order: Vec<usize> = (0..sizes.len())
+        .filter(large)
+        .chain((0..sizes.len()).filter(|i| !large(i)))
+        .collect();
+    let mut out = Vec::new();
+    let mut k = 0;
+    while k < order.len() {
+        let (start, mut sum) = (k, 0);
+        while k < order.len() && (k == start || sum + sizes[order[k]] <= LARGE) {
+            sum += sizes[order[k]];
+            k += 1;
+        }
+        out.push(Group {
+            items: order[start..k].to_vec(),
+            large: sizes[order[start]] >= LARGE,
+        });
+    }
+    out
+}
+
+/// What the module holds at most besides its inputs and output: see [`Lin`] and the code.
+///
+/// The instance holds the cut streams, the rules, the models or priors and the lists of
+/// `par_jobs` (pushed: three times). The groups of streams run as tasks (more than one of them)
+/// or in the instance: those of small streams on one thread, one after another with the earlier
+/// ones' results held and then their encoding (three times); a large one a stream on its own, with
+/// threads, which decodes its segments a batch of 32 at a time as tasks that copy its memory, each
+/// with the table or chain its rule makes for the segment, the zlib emulator or the contexts, the
+/// tokens, and their encoding, and merges the tokens of a batch in `pending` and writes the blocks
+/// complete (see [`Stream::run`]). Then the streams, and the output made (or made larger).
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let derived = Derived::from_params(u.params).ok()?;
+    let [data, records, index] = u.contents else {
+        return None;
+    };
+    let items = cut_items(data, records, index)?;
+    let k = items.len() as u64;
+    let l = u.output().checked_sub(k * derived.bytes() as u64)?;
+    let profile = crate::record_profile(items[0].1).ok()?;
+    let streams = items
+        .iter()
+        .map(|&(d, r)| Stream::parse(d.len() as u64, r, profile))
+        .collect::<Option<Vec<_>>>()?;
+    let m = crate::profile_data(profile).ok()?;
+    let sizes: Vec<u64> = streams.iter().map(|s| s.n).collect();
+    let groups = groups(&sizes);
+    // the instance: the items, the rules, the models (static, a vector made then boxed) or the
+    // priors, the sizes, and the order and groups (pushed)
+    let model = match m.coding {
+        Coding::Static(_) => 9 * std::mem::size_of::<crate::code::Model>() as u64,
+        Coding::Adaptive(_) => 3 * crate::adapt::NUM as u64,
+    };
+    let lists = 3 * 16 * k
+        + 3 * RULE_MEM * m.rules.len() as u64
+        + model
+        + 4 * k
+        + 3 * 4 * k
+        + 3 * 8 * groups.len() as u64;
+    let mem = u.base() + lists + 2 * aqr_formula::PAGE;
+    let mut peak = Lin::of(mem);
+    let total_n: u64 = sizes.iter().sum();
+    // (the data's share of the streams' bytes if reserved: half of it, 64 more)
+    let caps = Lin {
+        a: total_n / 2 + 64 * k,
+        l: 2,
+    };
+    let threads = |g: &Group| if g.large { SLOTS } else { 1 };
+    // a group's streams in turn, the earlier ones' bytes held, then the result's encoding
+    let group = |g: &Group, w0: Lin| {
+        let mut held = Lin::default();
+        let mut peak = Lin::default();
+        for &i in &g.items {
+            let r = streams[i].run(w0.add(held), threads(g));
+            peak = peak.max(r);
+            held = Lin::l(1);
+        }
+        peak.max(
+            w0.add(Lin::of(3 * (9 * g.items.len() as u64 + 16)))
+                .add(Lin::l(4)),
+        )
+    };
+    if groups.len() == 1 {
+        // (in the instance, the cap of the streams' vectors as `reconstruct_with` leaves it)
+        peak = peak.max(group(&groups[0], Lin::of(mem)));
+        peak = peak.max(Lin::of(mem).add(caps).add(Lin {
+            a: derived.bytes() as u64 * k,
+            l: 1,
+        }));
+    } else {
+        // each group a task of the instance's memory, up to SLOTS at once; those with most bytes
+        let mut tasks: Vec<Lin> = groups.iter().map(|g| group(g, Lin::of(mem))).collect();
+        tasks.sort_unstable_by(|a, b| b.a.cmp(&a.a));
+        let sum = tasks
+            .iter()
+            .take(SLOTS)
+            .fold(Lin::default(), |s, t| s.add(Lin::of(t.a)))
+            .add(Lin::l(
+                tasks.iter().take(SLOTS).map(|t| t.l).max().unwrap_or(0),
+            ));
+        peak = peak.max(Lin::of(mem).add(sum).add(Lin::l(1)));
+        // the streams, the output and an encoding
+        peak = peak.max(Lin::of(mem).add(Lin { a: 32 * k, l: 3 }));
+    }
+    Some(peak.eval(l))
+}
 
 /// The application rebuilding streams of `profile` from `data` and `records` (what
 /// [`crate::deconstruct`] gives, one after another) as `index` cuts them ([`index`]), of `len`
@@ -189,5 +670,45 @@ mod tests {
         // Profiles share the default models, and 9 and 10 the catalog.
         assert_eq!(resources(0).unwrap()[1], resources(9).unwrap()[1]);
         assert_eq!(resources(9).unwrap()[0], resources(10).unwrap()[0]);
+    }
+
+    /// The record is read as `reconstruct_into` reads it, and the estimate covers the real work.
+    #[test]
+    fn memory_reads_records() {
+        use crate::{Options, deconstruct_with, zlib};
+        let mut data = Vec::new();
+        let mut x = 12345u32;
+        while data.len() < 700_000 {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let w = (x >> 16) % 400;
+            data.extend_from_slice(format!("word{w} ").as_bytes());
+        }
+        let p = zlib::Params {
+            level: 6,
+            strategy: zlib::Strategy::Default,
+            wbits: 15,
+            mem: 8,
+        };
+        let raw = zlib::compress(&data, p).unwrap();
+        for profile in [3u16, crate::ADAPTIVE] {
+            let mut o = Options::for_profile(profile).unwrap();
+            o.segment = 100_000;
+            o.threads = 1;
+            let (d, r) = deconstruct_with(&raw, &o).unwrap();
+            let s = Stream::parse(d.len() as u64, &r, profile).expect("the record");
+            assert!(s.segs.len() > 3, "{}", s.segs.len());
+            assert_eq!(s.segs.iter().map(|g| g.count).sum::<u64>(), s.tokens);
+            assert_eq!(s.segs.last().unwrap().end, d.len() as u64);
+            let u = aqr_formula::Usage {
+                params: &[],
+                resources: &[],
+                inputs: &[d.len() as u64, r.len() as u64, 0],
+                outputs: &[raw.len() as u64],
+                contents: &[&d, &r, &[]],
+                initial_pages: 20,
+            };
+            let est = memory(&u).expect("an estimate");
+            assert!(est > u.base() + raw.len() as u64, "{est}");
+        }
     }
 }
