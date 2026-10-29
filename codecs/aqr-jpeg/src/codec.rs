@@ -20,8 +20,8 @@ use std::borrow::Cow;
 
 /// scan flags (progressive scans use only the first two)
 const F_PAD_ZERO: u8 = 1;
-const F_RAW: u8 = 2;
-const F_TRUNCATED: u8 = 4;
+pub(crate) const F_RAW: u8 = 2;
+pub(crate) const F_TRUNCATED: u8 = 4;
 const F_BOUNDARY: u8 = 8;
 /// nesting limit for embedded JPEGs (main image = depth 0)
 const MAX_DEPTH: u32 = 3;

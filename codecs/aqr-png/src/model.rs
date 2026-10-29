@@ -643,27 +643,32 @@ struct St<'g> {
 
 /// The buffers' sizes, and when they are moved on (see [`St::slide`]).
 #[derive(Clone, Copy)]
-struct Win {
+pub(crate) struct Win {
     /// Data bytes kept before the position: the farthest match and a row and a pixel.
     keep: usize,
     /// The data buffer's offset, and the raw buffer's, beyond which to move on: with room
     /// for a stored block, a row or a match, and the raw rows of as many bytes.
     blim: usize,
     rlim: usize,
-    buf: usize,
-    raw: usize,
+    pub(crate) buf: usize,
+    pub(crate) raw: usize,
 }
 
 /// Data bytes per move of the windows.
-const WINDOW: usize = 1 << 20;
+pub(crate) const WINDOW: usize = 1 << 20;
 
 impl Win {
     /// The buffers of `g` for `n` bytes of data: whole, or windows of them for large data.
     fn new(g: &Geometry, n: usize, image: bool) -> Win {
+        let (min, step) = window_sizes();
+        Win::of(g, n, image, min, step)
+    }
+
+    /// [`Win::new`] with windows of `step` bytes for data of more than `min` bytes.
+    pub(crate) fn of(g: &Geometry, n: usize, image: bool, min: usize, step: usize) -> Win {
         let raw_len = if image { g.raw_len } else { 0 };
         // The data, and the overshoot of a match's copy.
         let whole = Win { keep: 0, blim: usize::MAX, rlim: usize::MAX, buf: g.pad + n + 16, raw: raw_len };
-        let (min, step) = window_sizes();
         if n <= min {
             return whole;
         }

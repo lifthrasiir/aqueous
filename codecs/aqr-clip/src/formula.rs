@@ -20,13 +20,11 @@ pub const BATCH: usize = 64;
 /// Task slots of the module (its bin's `whole!(slots 8, ..)`): batches running at once.
 const SLOTS: usize = 8;
 
-/// Bytes of a [`Model`] on 32 bits: 4-byte bits, 4 x 128 of copies, 10 x 256 of samples, 329
-/// Elias-gamma codes of 156 and the list of 257 pixels.
-const MODEL: u64 = 4 * (4 * 128 + 5 + 10 * 256 + 329 * 156) + 8 * (dynamic::LIST as u64 + 1);
+/// Bytes of a [`Model`].
+const MODEL: u64 = dynamic::MODEL_BYTES as u64;
 
-/// The window, heads and links of zlib's emulator ([`crate::zlib::PARAMS`]: windowBits 15 and
-/// memLevel 9) and its other state.
-const EMULATOR: u64 = 2 * 32768 + 280 + 2 * 65536 + 2 * 32768 + 1024;
+/// The window, heads and links of zlib's emulator ([`crate::zlib::PARAMS`]) and its other state.
+const EMULATOR: u64 = aqr_flate::zlib::emulator_bytes(crate::zlib::PARAMS.wbits, crate::zlib::PARAMS.mem) + 1024;
 
 /// Tokens of a block (6 bytes each).
 const TOKENS: u64 = 32767;

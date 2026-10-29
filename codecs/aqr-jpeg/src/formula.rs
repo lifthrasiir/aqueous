@@ -17,11 +17,11 @@ pub const MODULE: Module = Module::new("jpeg-recons", 2).with_memory(memory);
 /// Tasks of an instance that run at once (the module's slots).
 const SLOTS: usize = 8;
 
-/// Bytes of the decoding tables (`fast::Tables`, `N_SYM` = 32672 symbols: 4 bytes of the
-/// decoder's `cum | freq << 16` and 4 of its lookup table each) with what `read_tables` and
+/// Bytes of the decoding tables (`fast::Tables`, `N_SYM` symbols: 4 bytes of the decoder's
+/// `cum | freq << 16` and 4 of its lookup table each) with what `read_tables` and
 /// `build_tables` hold while they are made (the frequencies and cumulative sums, 2 bytes a
 /// symbol each), and slack.
-const TABLES: u64 = 520 << 10;
+const TABLES: u64 = 12 * fast::N_SYM as u64 + (140 << 10);
 
 /// Bytes of a block of coefficients and its mask.
 const BLOCK: u64 = 136;
@@ -72,13 +72,13 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     for k in 0..j.scans.len() {
         let f = *info.get(p)?;
         p += 1;
-        if f & 2 != 0 {
+        if f & codec::F_RAW != 0 {
             first_raw |= k == 0;
             slices += 1;
             continue;
         }
         get(info, &mut p)?;
-        if f & 4 != 0 {
+        if f & codec::F_TRUNCATED != 0 {
             let mcus = get(info, &mut p)?;
             get(info, &mut p)?;
             if k == 0 {

@@ -588,22 +588,8 @@ impl Image {
 /// The buffers of the data and the raw rows for `n` bytes of data of `g`: whole, or the windows
 /// of `model::Win::new` (the sizes of Wasm, where they are not set by the environment).
 fn window(g: &model::Geometry, n: u64, image: bool) -> (u64, u64) {
-    const WINDOW: u64 = 1 << 20;
-    const ROOM: u64 = 258 + 16;
-    let raw_len = if image { g.raw_len as u64 } else { 0 };
-    let whole = (g.pad as u64 + n + 16, raw_len);
-    if n <= 4 * WINDOW {
-        return whole;
-    }
-    let rs = g.passes.iter().map(|p| p.rs as u64).max().unwrap_or(0);
-    let rs2 = g.passes.iter().map(|p| p.rs2 as u64).max().unwrap_or(0);
-    let keep = 32768 + rs + 16;
-    let room = rs.max(65536) + ROOM;
-    let buf = g.pad as u64 + keep + WINDOW + room;
-    let rroom = 2 * room + 10 * (rs2 + 8) + 256;
-    let rkeep = 2 * rs2 + 16;
-    let raw = if image { rkeep + 2 * (keep + WINDOW) + rroom } else { 0 };
-    if buf >= whole.0 || (image && raw >= raw_len) { whole } else { (buf, raw) }
+    let w = model::Win::of(g, usize::try_from(n).unwrap_or(usize::MAX), image, 4 * model::WINDOW, model::WINDOW);
+    (w.buf as u64, w.raw as u64)
 }
 
 /// What [`rebuild`] makes of a file.

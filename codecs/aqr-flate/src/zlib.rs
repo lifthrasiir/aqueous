@@ -787,6 +787,23 @@ impl<'a> Engine<'a> {
     }
 }
 
+/// Bytes an [`Emulator`] of window bits `wbits` and memory level `mem` takes: the window's
+/// buffer (twice the window), its heads and links (u16 each) and its lane.
+pub const fn emulator_bytes(wbits: u8, mem: u8) -> u64 {
+    let w = 1u64 << clamp(wbits, 9, 15);
+    2 * w + 280 + 2 * (1 << (clamp(mem, 1, 9) as u32 + 7)) + 2 * w + 256
+}
+
+const fn clamp(x: u8, lo: u8, hi: u8) -> u8 {
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
 /// The emulator of FORMAT.md, "zlib emulation".
 #[derive(Clone)]
 pub struct Emulator<'a> {

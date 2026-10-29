@@ -272,11 +272,7 @@ impl Stream {
             }
         };
         let emu = match self.zlib {
-            Some((wbits, mem)) if s.emu => {
-                let w = 1u64 << wbits.clamp(9, 15);
-                // the window's buffer, heads (u16) and links (u16), and the lane
-                2 * w + 280 + 2 * (1 << (mem.clamp(1, 9) as u32 + 7)) + 2 * w + 256
-            }
+            Some((wbits, mem)) if s.emu => crate::zlib::emulator_bytes(wbits, mem),
             _ => 0,
         };
         // (the contexts' probabilities and counts)

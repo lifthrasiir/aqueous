@@ -31,7 +31,7 @@ const N_DC: usize = 2 * 9 * DC_SUB; // alphabet 16
 const NZ_BASE: usize = 0;
 const AC_BASE: usize = NZ_BASE + N_NZ * 64;
 const DC_BASE: usize = AC_BASE + N_AC * 16;
-const N_SYM: usize = DC_BASE + N_DC * 16;
+pub(crate) const N_SYM: usize = DC_BASE + N_DC * 16;
 
 const fn bucket(x: u32, edges: &[u32]) -> u32 {
     let mut n = 0;

@@ -4,6 +4,7 @@
 
 use crate::index::ROWID;
 use crate::page::K_OVF;
+use crate::record::{MIN_REP, R_RAW, T_BLOB, T_BLOB_REP, T_TEXT, T_TEXT_REP};
 use crate::transform::{self, NSTREAMS, S_DIR, S_GRP, S_KIND, S_REC, STREAM_NAMES};
 use crate::varint::{Rd, put_uv};
 use aqr_formula::{Formula, Module, Node, PAGE, Usage};
@@ -45,21 +46,23 @@ impl Group {
 }
 
 /// The largest value of a column and the sizes of all its values together, from its tags and
-/// lengths: 8 bytes for those that are not text or blobs (record.rs: tags 3 and 4 are a text and
-/// a blob of the next length, 6 and 7 the one of the distinct ones that many places back, the
-/// distinct ones being those of two bytes at least).
+/// lengths: 8 bytes for those that are not text or blobs (a text or blob is of the next length,
+/// or a repeat: the one of the distinct ones that many places back, the distinct ones being
+/// those of `MIN_REP` bytes at least).
 fn column(mut tag: Rd, mut len: Rd) -> Option<(u64, u64)> {
     let (mut distinct, mut most, mut sum) = (Vec::new(), 0, 0);
     while !tag.at_end() {
         let size = match tag.u8().ok()? {
-            3 | 4 => {
+            T_TEXT | T_BLOB => {
                 let n = len.uv().ok()?;
-                if n >= 2 {
+                if n >= MIN_REP as u64 {
                     distinct.push(n);
                 }
                 n
             }
-            6 | 7 => *distinct.len().checked_sub(len.usize().ok()?.checked_add(1)?).and_then(|i| distinct.get(i))?,
+            T_TEXT_REP | T_BLOB_REP => {
+                *distinct.len().checked_sub(len.usize().ok()?.checked_add(1)?).and_then(|i| distinct.get(i))?
+            }
             _ => 8,
         };
         most = most.max(size);
@@ -108,8 +111,8 @@ fn groups(s: &[&[u8]]) -> Option<(Vec<Group>, u64)> {
         let mut g = Group { index, cols, rows: 0, values, raw_max: 0, raw_sum: 0, leaves: 0 };
         while !rec.at_end() {
             g.rows += 1;
-            // (record.rs: 0 is a raw record, followed by its length)
-            if rec.uv().ok()? == 0 {
+            // (a raw record is followed by its length)
+            if rec.uv().ok()? == R_RAW {
                 let n = rec.usize().ok()? as u64;
                 g.raw_max = g.raw_max.max(n);
                 g.raw_sum += n;

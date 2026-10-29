@@ -134,13 +134,13 @@ pub fn predict(keys: &Keys, r: usize, fmt4: bool, out: &mut Vec<u8>) {
 const T_NULL: u8 = 0;
 const T_INT: u8 = 1;
 const T_REAL: u8 = 2;
-const T_TEXT: u8 = 3;
-const T_BLOB: u8 = 4;
+pub(crate) const T_TEXT: u8 = 3;
+pub(crate) const T_BLOB: u8 = 4;
 /// A real that is a float exactly (4 bytes in `real`).
 const T_F32: u8 = 5;
 /// Text or blob equal to an earlier one of the column (its id in `len`).
-const T_TEXT_REP: u8 = 6;
-const T_BLOB_REP: u8 = 7;
+pub(crate) const T_TEXT_REP: u8 = 6;
+pub(crate) const T_BLOB_REP: u8 = 7;
 /// 16 + serial type: an integer with a serial type SQLite would not pick.
 const T_ODD_INT: u8 = 16;
 /// 32 + e: a real that is m / 10^e (m in the integers).
@@ -196,7 +196,7 @@ fn decimal(bits: u64) -> Option<(i64, u8)> {
 }
 
 // Record codes.
-const R_RAW: u64 = 0;
+pub(crate) const R_RAW: u64 = 0;
 const R_REF: u64 = 1;
 const R_COLS: u64 = 2;
 
@@ -239,7 +239,7 @@ impl Hasher for IdHasher {
 
 /// Text and blob values this long or longer that appeared before in their column are
 /// coded as the id of the earlier value.
-const MIN_REP: usize = 2;
+pub(crate) const MIN_REP: usize = 2;
 
 #[derive(Default)]
 pub struct GroupEnc {
