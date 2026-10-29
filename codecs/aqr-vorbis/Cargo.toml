@@ -2,8 +2,14 @@
 name = "aqr-vorbis"
 version = "0.1.0"
 edition = "2024"
-description = "Vorbis audio packets parsed to the codebook entries and fields they code, and written back bit for bit"
+description = "Vorbis audio packets parsed to the values they code, the values coded under a context-mixing model, and the packets rebuilt bit for bit"
 publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }

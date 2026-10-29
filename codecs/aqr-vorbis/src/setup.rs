@@ -30,6 +30,14 @@ pub struct Codebook {
     tree: Vec<[u32; 2]>,
 }
 
+/// What a bit of a codeword leads to in a codebook's decoding tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Child {
+    None,
+    Node(usize),
+    Entry(u32),
+}
+
 const LEAF: u32 = 1 << 31;
 const NONE: u32 = 0;
 
@@ -138,6 +146,20 @@ impl Codebook {
         let (code, len) = (self.codewords[e as usize], self.lengths[e as usize] as u32);
         for i in (0..len).rev() {
             w.bit(code >> i & 1);
+        }
+    }
+
+    /// The decoding tree's nodes (the root is node 0).
+    pub fn nodes(&self) -> usize {
+        self.tree.len()
+    }
+
+    /// Where bit `b` leads from node `node`: another node, an entry, or nowhere.
+    pub fn child(&self, node: usize, b: u32) -> Child {
+        match self.tree[node][b as usize] {
+            NONE => Child::None,
+            c if c & LEAF != 0 => Child::Entry(c & !LEAF),
+            c => Child::Node(c as usize),
         }
     }
 
