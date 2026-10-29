@@ -9,7 +9,7 @@ use crate::{ar, cpio, tar};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "bundle-recons", version: 1 };
+pub const MODULE: Module = Module::new("bundle-recons", 1);
 
 /// The archives this crate takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

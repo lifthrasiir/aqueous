@@ -11,7 +11,7 @@ use aqr_formula::{Apply, Formula, Kind, Module, Node, Region};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "psd-recons", version: 1 };
+pub const MODULE: Module = Module::new("psd-recons", 1);
 
 /// The formula giving `input`, or `None` where it is not coded: not a PSD/PSB
 /// that can be parsed, or no pixel data or embedded file to take out.

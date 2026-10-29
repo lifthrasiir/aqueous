@@ -8,7 +8,7 @@ use crate::{alone, recons};
 
 pub use crate::module::{decode, index};
 
-pub const MODULE: Module = Module { name: "lzma-recons", version: 1 };
+pub const MODULE: Module = Module::new("lzma-recons", 1);
 
 /// The most data a stream is decoded to.
 const LIMIT: usize = 1 << 31;

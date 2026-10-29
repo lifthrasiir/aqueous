@@ -12,7 +12,7 @@ use crate::texture;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "bcn-recons", version: 1 };
+pub const MODULE: Module = Module::new("bcn-recons", 1);
 
 /// Stream classes of a DDS file's bytes around its data, and of its surfaces kept as they are.
 pub const HEADER: &str = "dds/header";

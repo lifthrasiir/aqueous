@@ -8,7 +8,7 @@ use aqr_formula::{Formula, Module, Node};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "sqlite-recons", version: 1 };
+pub const MODULE: Module = Module::new("sqlite-recons", 1);
 
 #[derive(Clone, Copy, Debug)]
 pub struct Options {

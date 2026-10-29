@@ -22,7 +22,7 @@ use crate::module::{par_jobs, par_map};
 
 /// An archive rebuilt from the contents of its entries, the deflated bodies given by aqr-flate's
 /// module ([`decode`]).
-pub const MODULE: Module = Module { name: "zip-recons", version: 3 };
+pub const MODULE: Module = Module::new("zip-recons", 3);
 
 /// Bodies shorter than this are not looked for among earlier ones.
 const SAME_MIN: usize = 16;
@@ -397,8 +397,8 @@ fn locals_bodies<'a>(recs: &'a [Rec], d: &'a [u8]) -> impl Iterator<Item = &'a [
 pub fn apply(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> Result<Vec<u8>> {
     let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
     match a.module {
-        MODULE if res.is_empty() => decode(&a.params, inputs, a.len, threads),
-        aqr_flate::formula::MODULE => aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads)
+        m if m == MODULE && res.is_empty() => decode(&a.params, inputs, a.len, threads),
+        m if m == aqr_flate::formula::MODULE => aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads)
             .map_err(|_| crate::Error("DEFLATE stream not rebuilt")),
         _ => Err(corrupt()),
     }

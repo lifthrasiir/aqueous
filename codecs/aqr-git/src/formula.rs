@@ -21,7 +21,7 @@ pub use crate::module::decode;
 
 /// A pack rebuilt from the data of its entries, the DEFLATE streams given by aqr-flate's module
 /// ([`decode`]).
-pub const MODULE: Module = Module { name: "git-pack-recons", version: 1 };
+pub const MODULE: Module = Module::new("git-pack-recons", 1);
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -293,8 +293,8 @@ fn par_jobs<T: Sync, R: Send>(
 pub fn apply(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> Result<Vec<u8>> {
     let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
     match a.module {
-        MODULE if res.is_empty() => decode(&a.params, inputs, a.len, threads),
-        aqr_flate::formula::MODULE => aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads)
+        m if m == MODULE && res.is_empty() => decode(&a.params, inputs, a.len, threads),
+        m if m == aqr_flate::formula::MODULE => aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads)
             .map_err(|_| crate::Error("DEFLATE stream not rebuilt")),
         _ => Err(corrupt()),
     }

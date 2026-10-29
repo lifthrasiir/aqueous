@@ -34,11 +34,10 @@ fn main() {
         let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         let dict = &a.resources[0];
         let t = Instant::now();
-        let out = match a.module {
-            aqr_wrt::formula::HANGUL => {
-                aqr_wrt::formula::decode_hangul(&a.params, &[dict], &inputs, d.len() as u64, threads)
-            }
-            _ => aqr_wrt::formula::decode(&a.params, &[dict], &inputs, d.len() as u64, 1),
+        let out = if a.module == aqr_wrt::formula::HANGUL {
+            aqr_wrt::formula::decode_hangul(&a.params, &[dict], &inputs, d.len() as u64, threads)
+        } else {
+            aqr_wrt::formula::decode(&a.params, &[dict], &inputs, d.len() as u64, 1)
         }
         .unwrap();
         let dt = t.elapsed().as_secs_f64();

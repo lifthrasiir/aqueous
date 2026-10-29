@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "clip-recons", version: 1 };
+pub const MODULE: Module = Module::new("clip-recons", 1);
 
 /// Tiles a batch holds: a stream each, decoded on a thread of its own.
 pub const BATCH: usize = 64;

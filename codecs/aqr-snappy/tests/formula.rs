@@ -6,8 +6,8 @@ use aqr_snappy::snappy::{self, Hash};
 fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
         let decode = match a.module {
-            MODULE => formula::decode,
-            TABLE_MODULE => formula::decode_table,
+            m if m == MODULE => formula::decode,
+            m if m == TABLE_MODULE => formula::decode_table,
             m => panic!("module {m}"),
         };
         decode(&a.params, inputs, a.len, 1).map_err(|e| aqr_formula::Error::new(e.to_string()))

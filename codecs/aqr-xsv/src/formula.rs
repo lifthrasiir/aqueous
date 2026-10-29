@@ -11,7 +11,7 @@ use crate::table::{Dialect, K_NEW, K_NUM, K_TEXT, MAX_COLUMNS, P_DELTA, P_RAW};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "xsv-recons", version: 1 };
+pub const MODULE: Module = Module::new("xsv-recons", 1);
 
 /// The names of the inputs' streams, in order.
 pub const STREAM_NAMES: [&str; 7] = ["layout", "raw", "columns", "types", "text", "nums", "desc"];

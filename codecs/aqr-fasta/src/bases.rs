@@ -51,6 +51,9 @@ fn prefetch(p: *const [u16; 4]) {
     let _ = p;
 }
 
+/// Bytes of the model.
+pub const MODEL_BYTES: u64 = (CONTEXTS * 8) as u64;
+
 fn model() -> Vec<[u16; 4]> {
     vec![[16384; 4]; CONTEXTS]
 }

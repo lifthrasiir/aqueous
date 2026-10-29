@@ -8,7 +8,15 @@ use crate::mo;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "gnu-gettext-recons", version: 1 };
+pub const MODULE: Module = Module::new("gnu-gettext-recons", 1).with_memory(memory);
+
+/// The memory of the module: the inputs and the file; the strings' places, 8 bytes each (on
+/// 32 bits) and a NUL's varint at least each in `nuls`, and the originals, 4 bytes each; and the
+/// hash table, no larger than the parts of the file derived.
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[rest, nuls] = u.inputs else { return None };
+    Some(u.whole(12 * nuls + u.output().saturating_sub(rest), 3))
+}
 
 /// Whether `d` starts like a `.mo` file: the magic, and a header of tables in order.
 pub fn starts(d: &[u8]) -> bool {

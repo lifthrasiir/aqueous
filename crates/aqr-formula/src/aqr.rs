@@ -2686,9 +2686,9 @@ mod tests {
         pub(super) static COMPRESSED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 
-    pub(super) const REV: Module = Module { name: "rev", version: 1 };
+    pub(super) const REV: Module = Module::new("rev", 1);
 
-    pub(super) const CUT: Module = Module { name: "cut", version: 1 };
+    pub(super) const CUT: Module = Module::new("cut", 1);
 
     /// `rev` reverses the concatenation of its inputs, with parameters 1, 2, 3; `cut` cuts it
     /// into outputs of the sizes declared.
@@ -2881,7 +2881,7 @@ mod tests {
     /// Each resource has a block, before the formula block, however many applications take it.
     #[test]
     fn resources() {
-        const PRE: Module = Module { name: "pre", version: 1 };
+        const PRE: Module = Module::new("pre", 1);
         // `pre` puts its resources before its inputs.
         let pre = |a: &crate::Apply, i: &[&[u8]]| {
             assert_eq!(a.module, PRE);

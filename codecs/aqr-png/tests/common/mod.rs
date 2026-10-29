@@ -10,8 +10,8 @@ pub use flate_zoo::{Encoder, Sweep, backend, backends, presets_of};
 pub fn modules(threads: usize) -> impl Fn(&aqr_formula::Apply, &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
     move |a, inputs| {
         let decode = match a.module {
-            aqr_png::formula::MODULE => aqr_png::formula::decode,
-            aqr_png::formula::AGAINST_MODULE => aqr_png::formula::decode_against,
+            m if m == aqr_png::formula::MODULE => aqr_png::formula::decode,
+            m if m == aqr_png::formula::AGAINST_MODULE => aqr_png::formula::decode_against,
             m => panic!("module {m}"),
         };
         decode(&a.params, inputs, a.len, threads).map_err(|e| aqr_formula::Error::new(e.to_string()))

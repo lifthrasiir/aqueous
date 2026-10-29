@@ -13,7 +13,7 @@ use aqr_formula::{Apply, Formula, Module};
 
 pub use crate::module::{DUP, FULL, JPEG, MODES, NMODES, PNG, RAW, TOK, decode};
 
-pub const MODULE: Module = Module { name: "pdf-recons", version: 2 };
+pub const MODULE: Module = Module::new("pdf-recons", 2);
 
 /// The formula giving `input`, or `None` where the formula would not be smaller than `input`
 /// (or no item is coded). `threads` as in [`Options::threads`].

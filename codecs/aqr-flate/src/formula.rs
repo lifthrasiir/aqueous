@@ -20,10 +20,7 @@ pub use crate::module::{
     Derived, decode, index, models_from_bytes, priors_from_bytes, rules_from_bytes,
 };
 
-pub const MODULE: Module = Module {
-    name: "flate-set",
-    version: 1,
-};
+pub const MODULE: Module = Module::new("flate-set", 1);
 
 /// The application rebuilding streams of `profile` from `data` and `records` (what
 /// [`crate::deconstruct`] gives, one after another) as `index` cuts them ([`index`]), of `len`

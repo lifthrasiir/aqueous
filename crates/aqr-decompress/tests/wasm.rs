@@ -467,7 +467,7 @@ fn unknown_module_runs() {
                         (local.set $o (i64.add (local.get $o) (i64.const 1)))
                         (br $next))))))"#
     ));
-    const REV: Module = Module { name: "rev", version: 1 };
+    const REV: Module = Module::new("rev", 1);
     static WASM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
     WASM.set(rev).unwrap();
     let mut f = Formula::default();

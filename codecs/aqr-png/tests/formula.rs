@@ -305,8 +305,8 @@ struct Set(usize);
 impl aqr_formula::Modules for Set {
     fn apply(&self, a: &aqr_formula::Apply, inputs: &[&[u8]]) -> aqr_formula::Result<Vec<u8>> {
         let r = match a.module {
-            formula::MODULE => formula::decode(&a.params, inputs, a.len, self.0),
-            formula::AGAINST_MODULE => formula::decode_against(&a.params, inputs, a.len, self.0),
+            m if m == formula::MODULE => formula::decode(&a.params, inputs, a.len, self.0),
+            m if m == formula::AGAINST_MODULE => formula::decode_against(&a.params, inputs, a.len, self.0),
             _ => formula::decode_set(&a.params, inputs, a.len, self.0),
         };
         r.map_err(|e| aqr_formula::Error::new(e.to_string()))

@@ -27,6 +27,8 @@ const FRAGMENT: usize = 1 << 16;
 /// Entries of the table of a fragment, at least and at most.
 const MIN_TABLE: usize = 1 << 8;
 const MAX_TABLE: usize = 1 << 15;
+/// Bytes of the largest table.
+pub const TABLE_BYTES: u64 = (MAX_TABLE * 2) as u64;
 /// Bytes at the end of a fragment that the search does not reach (`kInputMarginBytes`).
 const MARGIN: usize = 15;
 

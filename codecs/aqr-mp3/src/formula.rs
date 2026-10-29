@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use crate::module::SLOTS;
 pub use crate::module::{Error, decode};
 
-pub const MODULE: Module = Module { name: "mp3-recons", version: 5 };
+pub const MODULE: Module = Module::new("mp3-recons", 5);
 
 /// Classes of the slots, and their kinds: the side information, the rANS words and the raw
 /// bits do not compress.

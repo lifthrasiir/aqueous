@@ -23,25 +23,31 @@ pub mod sandbox;
 mod wasm;
 use aqr_formula::{Apply, Error, Module, Modules, Result};
 #[cfg(feature = "wasm")]
-pub use wasm::{Applied, record_applications};
+pub use wasm::{Applied, initial_pages, record_applications};
 
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
 /// (`x86::Opcodes`); inputs: the streams of [`x86::STREAM_NAMES`].
-pub const X86: Module = Module { name: "exe-recons/x86", version: 3 };
+pub const X86: Module = Module::new("exe-recons/x86", 3).with_memory(exe);
 
 /// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
 /// inputs: the streams of [`arm64::STREAM_NAMES`].
-pub const ARM64: Module = Module { name: "exe-recons/arm64", version: 1 };
+pub const ARM64: Module = Module::new("exe-recons/arm64", 1).with_memory(exe);
 
 /// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
 /// section's RVA and the offset of the metadata root in it (u32 each, little endian); inputs:
 /// the streams of [`cil::STREAM_NAMES`].
-pub const CIL: Module = Module { name: "exe-recons/cil", version: 1 };
+pub const CIL: Module = Module::new("exe-recons/cil", 1);
 
 /// aqr-exe's base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
 /// multiples of (u8); inputs: the streams of [`reloc::STREAM_NAMES`].
-pub const PE_RELOC: Module = Module { name: "exe-recons/pe-reloc", version: 1 };
+pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 1).with_memory(exe);
+
+/// The memory of aqr-exe's x86, ARM64 and relocation filters: the streams and the output, and
+/// the small (the x86 opcode classes and call cache).
+fn exe(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    Some(u.whole(0, 0))
+}
 
 /// aqr-flate reconstruction of raw DEFLATE streams, one after another, and what is derived of
 /// them (CRC-32 and sizes, by its parameters). Resources: the model data of the records'

@@ -12,7 +12,7 @@ use aqr_formula::{Formula, Kind, Module, Node};
 pub use crate::module::decode;
 use crate::module::in_pool;
 
-pub const MODULE: Module = Module { name: "jpeg-recons", version: 2 };
+pub const MODULE: Module = Module::new("jpeg-recons", 2);
 
 /// what a formula costs beyond its streams, for deciding whether coding an embedded JPEG pays off
 const OVERHEAD: usize = 8;

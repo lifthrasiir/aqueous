@@ -15,8 +15,8 @@ use crate::{Choice, Shape, fields};
 
 pub use crate::module::{Field, How, decode_entries, decode_fields};
 
-pub const FIELDS: Module = Module { name: "recs-fields", version: 1 };
-pub const ENTRIES: Module = Module { name: "recs-entries", version: 1 };
+pub const FIELDS: Module = Module::new("recs-fields", 1);
+pub const ENTRIES: Module = Module::new("recs-entries", 1);
 
 /// A file shorter than this is not looked into.
 pub const MIN_LEN: usize = 16 << 10;

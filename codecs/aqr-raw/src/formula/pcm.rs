@@ -13,7 +13,7 @@ use std::sync::OnceLock;
 
 pub use crate::module::pcm::decode;
 
-pub const MODULE: Module = Module { name: "pcm-recons", version: 1 };
+pub const MODULE: Module = Module::new("pcm-recons", 1);
 
 /// Classes of the input slots, and their kinds: the rANS words and the raw bits do not
 /// compress.

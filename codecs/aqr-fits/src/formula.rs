@@ -14,9 +14,9 @@ use crate::tiled::{self, Layout};
 
 pub use crate::module::{image as decode_image, rice as decode_rice, table as decode_table};
 
-pub const IMAGE: Module = Module { name: "fits-recons-image", version: 1 };
-pub const RICE: Module = Module { name: "fits-recons-rice", version: 1 };
-pub const TABLE: Module = Module { name: "fits-recons-table", version: 1 };
+pub const IMAGE: Module = Module::new("fits-recons-image", 1);
+pub const RICE: Module = Module::new("fits-recons-rice", 1);
+pub const TABLE: Module = Module::new("fits-recons-table", 1);
 
 /// Data smaller than this is kept as it is.
 const MIN_DATA: usize = 2048;
@@ -200,9 +200,9 @@ mod tests {
     fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
         f.eval(&|a: &Apply, inputs: &[&[u8]]| {
             let r = match a.module {
-                IMAGE => decode_image(&a.params, inputs, a.len),
-                RICE => decode_rice(&a.params, inputs, a.len),
-                TABLE => decode_table(&a.params, inputs, a.len),
+                m if m == IMAGE => decode_image(&a.params, inputs, a.len),
+                m if m == RICE => decode_rice(&a.params, inputs, a.len),
+                m if m == TABLE => decode_table(&a.params, inputs, a.len),
                 m => panic!("{m}"),
             };
             r.map_err(|e| aqr_formula::Error::new(e.0))

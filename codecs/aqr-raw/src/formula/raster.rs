@@ -9,7 +9,7 @@ use aqr_formula::{Formula, Kind, Module, Node};
 
 pub use crate::module::raster::decode;
 
-pub const MODULE: Module = Module { name: "raster-recons", version: 1 };
+pub const MODULE: Module = Module::new("raster-recons", 1);
 
 /// The application giving `samples` (exactly the raster of `fmt`), its inputs pushed to `f`.
 /// None where the layout is not taken, or where the coder panics.

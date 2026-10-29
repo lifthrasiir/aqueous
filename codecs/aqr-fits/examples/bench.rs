@@ -9,9 +9,9 @@ use std::time::Instant;
 fn eval(f: &Formula) -> Vec<u8> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
         let r = match a.module {
-            IMAGE => formula::decode_image(&a.params, inputs, a.len),
-            RICE => formula::decode_rice(&a.params, inputs, a.len),
-            TABLE => formula::decode_table(&a.params, inputs, a.len),
+            m if m == IMAGE => formula::decode_image(&a.params, inputs, a.len),
+            m if m == RICE => formula::decode_rice(&a.params, inputs, a.len),
+            m if m == TABLE => formula::decode_table(&a.params, inputs, a.len),
             m => panic!("{m}"),
         };
         r.map_err(|e| aqr_formula::Error::new(e.0))

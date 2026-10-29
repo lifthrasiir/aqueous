@@ -106,6 +106,8 @@ pub fn end(src: &[u8], n: usize) -> Option<usize> {
 
 /// Entries of the table of FORMAT.md §3.1.
 const TABLE: usize = 8192;
+/// Bytes of the table.
+pub const TABLE_BYTES: u64 = (TABLE * 4) as u64;
 
 /// Where the bytes of a block go: a vector, or a reference they are compared against.
 trait Sink {

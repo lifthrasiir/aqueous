@@ -11,7 +11,7 @@ use std::borrow::Cow;
 
 pub use crate::module::{Error, Result, decode};
 
-pub const MODULE: Module = Module { name: "flac-recons", version: 3 };
+pub const MODULE: Module = Module::new("flac-recons", 3);
 
 /// Classes of the input slots, and their kinds: the rANS words and the raw bits do not
 /// compress.

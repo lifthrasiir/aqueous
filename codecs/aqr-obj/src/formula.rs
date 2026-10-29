@@ -11,7 +11,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "obj-recons", version: 1 };
+pub const MODULE: Module = Module::new("obj-recons", 1);
 
 /// Statement keywords of OBJ files (the specification's, those of its free-form geometry
 /// included), the comment aside.

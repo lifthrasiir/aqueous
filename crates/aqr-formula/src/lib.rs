@@ -37,11 +37,97 @@ use std::fmt;
 use std::sync::Arc;
 
 /// A module, by name and version of its input format. Eventually a Wasm module identified by
-/// its hash; a native implementation stands in for it (§5.7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// its hash; a native implementation stands in for it (§5.7). It is its name and version (as
+/// equal and hashed); `memory` estimates the memory of its applications.
+#[derive(Debug, Clone, Copy)]
 pub struct Module {
     pub name: &'static str,
     pub version: u16,
+    pub memory: Option<Estimate>,
+}
+
+/// What an application gives its module, for its memory estimate ([`Module::memory_usage_in_pages`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Usage<'a> {
+    pub params: &'a [u8],
+    /// The lengths of the resources' contents, the inputs and the outputs.
+    pub resources: &'a [u64],
+    pub inputs: &'a [u64],
+    pub outputs: &'a [u64],
+    /// The pages of the working memory as the module is instantiated (its data and stack).
+    pub initial_pages: u64,
+}
+
+impl Usage<'_> {
+    /// Bytes of the parameters, the resources and the inputs: what `aqr_api::whole` copies into
+    /// the working memory.
+    pub fn copied(&self) -> u64 {
+        self.params.len() as u64 + self.resources.iter().sum::<u64>() + self.inputs.iter().sum::<u64>()
+    }
+
+    /// Bytes of the outputs.
+    pub fn output(&self) -> u64 {
+        self.outputs.iter().sum()
+    }
+
+    /// Bytes of the working memory as it is instantiated.
+    pub fn initial(&self) -> u64 {
+        self.initial_pages * PAGE
+    }
+
+    /// The [`Estimate`] of a module that spawns no tasks, copies its parameters, resources and
+    /// inputs (`aqr_api::whole`) and gives back its outputs from vectors of their sizes, taking
+    /// `extra` bytes besides in `buffers` large allocations: all but the small allocations, for
+    /// which there is [`SMALL`], and a page for each large one (the allocator's, as it grows the
+    /// memory for it).
+    pub fn whole(&self, extra: u64, buffers: u64) -> u64 {
+        let large = 1 + self.resources.len() + self.inputs.len() + self.outputs.len();
+        self.initial() + self.copied() + self.output() + extra + (large as u64 + buffers) * PAGE + SMALL
+    }
+}
+
+/// Bytes of an [`Estimate`] for the small allocations of a module (of no more than a few KiB in
+/// all, whatever the input).
+pub const SMALL: u64 = 64 << 10;
+
+/// A module's memory estimate: the bytes that the working memories of an application take at
+/// most, of its instance and its tasks, with the messages queued in its channels (the memory
+/// limit less the other memories); None where it cannot tell.
+pub type Estimate = fn(&Usage<'_>) -> Option<u64>;
+
+/// Bytes of a page of WebAssembly memory.
+pub const PAGE: u64 = 65536;
+
+impl Module {
+    /// The module `name@version`, of no memory estimate.
+    pub const fn new(name: &'static str, version: u16) -> Module {
+        Module { name, version, memory: None }
+    }
+
+    /// The module estimating its memory by `memory`.
+    pub const fn with_memory(self, memory: Estimate) -> Module {
+        Module { memory: Some(memory), ..self }
+    }
+
+    /// The pages that the working memories of an application of `usage` take at most, which
+    /// the module may take to be there (see [`Estimate`]); None where it has no estimate.
+    pub fn memory_usage_in_pages(&self, usage: &Usage<'_>) -> Option<u64> {
+        Some((self.memory?)(usage)?.div_ceil(PAGE))
+    }
+}
+
+impl PartialEq for Module {
+    fn eq(&self, other: &Module) -> bool {
+        (self.name, self.version) == (other.name, other.version)
+    }
+}
+
+impl Eq for Module {}
+
+impl std::hash::Hash for Module {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (self.name, self.version).hash(h);
+    }
 }
 
 impl fmt::Display for Module {
@@ -1049,7 +1135,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 mod tests {
     use super::*;
 
-    const REV: Module = Module { name: "rev", version: 1 };
+    const REV: Module = Module::new("rev", 1);
 
     /// `rev` reverses the concatenation of its inputs.
     struct Rev;
@@ -1158,7 +1244,7 @@ mod tests {
         assert_eq!(f.streams[0].data.as_ptr(), whole);
     }
 
-    const CUT: Module = Module { name: "cut", version: 1 };
+    const CUT: Module = Module::new("cut", 1);
 
     /// `rev`, and `cut`, cutting the concatenation of its inputs into its outputs.
     struct RevCut;

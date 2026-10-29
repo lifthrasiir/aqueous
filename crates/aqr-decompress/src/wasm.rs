@@ -885,6 +885,7 @@ impl Shared {
             log.push(Applied {
                 hash: c.hash,
                 params: params.len() as u64,
+                params_data: params.to_vec(),
                 resources: resources.iter().map(|r| r.len() as u64).collect(),
                 inputs: inputs.iter().map(|i| i.len() as u64).collect(),
                 sizes: sizes.to_vec(),
@@ -897,6 +898,22 @@ impl Shared {
     }
 }
 
+/// The pages of the working memory of `wasm` as it is instantiated: the minimum of its import
+/// (the module's data and stack), for its memory estimate ([`aqr_formula::Usage`]).
+pub fn initial_pages(wasm: &[u8]) -> Option<u64> {
+    for p in wp::Parser::new(0).parse_all(wasm) {
+        if let wp::Payload::ImportSection(r) = p.ok()? {
+            for i in r.into_imports() {
+                let i = i.ok()?;
+                if let (Some(Mem::Working), wp::TypeRef::Memory(m)) = (memory_of(i.name), i.ty) {
+                    return Some(m.initial);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// An application of a module, as [`record_applications`] keeps them: what it was given and
 /// the largest size its memories reached.
 #[derive(Debug, Clone)]
@@ -905,6 +922,8 @@ pub struct Applied {
     pub hash: [u8; 32],
     /// The lengths of the parameters, the resources' contents, the inputs and the outputs.
     pub params: u64,
+    /// The parameters themselves.
+    pub params_data: Vec<u8>,
     pub resources: Vec<u64>,
     pub inputs: Vec<u64>,
     pub sizes: Vec<u64>,

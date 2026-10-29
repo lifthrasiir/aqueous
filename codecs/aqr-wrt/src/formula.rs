@@ -13,8 +13,8 @@ use crate::words::Dictionary;
 
 pub use crate::module::{decode, decode_hangul};
 
-pub const MODULE: Module = Module { name: "wrt-recons", version: 1 };
-pub const HANGUL: Module = Module { name: "wrt-recons-hangul", version: 1 };
+pub const MODULE: Module = Module::new("wrt-recons", 1);
+pub const HANGUL: Module = Module::new("wrt-recons-hangul", 1);
 
 /// The names of the inputs' streams, in order.
 pub const STREAM_NAMES: [&str; 1] = ["text"];
@@ -175,7 +175,7 @@ mod tests {
         let resources: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
         let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         match a.module {
-            HANGUL => decode_hangul(&a.params, &resources, &inputs, len as u64, 2),
+            m if m == HANGUL => decode_hangul(&a.params, &resources, &inputs, len as u64, 2),
             _ => decode(&a.params, &resources, &inputs, len as u64, 1),
         }
     }

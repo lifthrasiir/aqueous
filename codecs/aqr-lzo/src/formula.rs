@@ -8,7 +8,7 @@ use crate::{lzop, recons};
 
 pub use crate::module::{decode, index};
 
-pub const MODULE: Module = Module { name: "lzo-recons", version: 1 };
+pub const MODULE: Module = Module::new("lzo-recons", 1);
 
 /// Whether `d` starts like an lzop file whose structure holds ([`lzop::parse`]).
 pub fn starts(d: &[u8]) -> bool {
