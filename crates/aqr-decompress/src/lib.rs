@@ -41,22 +41,21 @@ pub const CIL: Module = Module::new("exe-recons/cil", 1).with_memory(cil);
 
 /// The memory of [`CIL`]: the whole of it, with what the decoder keeps besides the output: the
 /// root's stream headers (16 bytes each, at least 12 bytes of the metadata stream per header);
-/// per method body (at most one per byte of the body positions' stream), its range among those
-/// taken (8 bytes) and its position (4), vectors grown by pushes (three times while they
-/// grow); the column of a table's values (4 bytes a row, at most as many rows as the tables'
-/// stream has bytes and the output has, the vector resized from the last table's, so three
-/// times the most while it grows); and the tokens' caches of the 256 tables (16 bytes at
-/// least each; 4 bytes a token at most, four times that with the blocks left as they grow, and
-/// a token takes a byte of the inputs; 512 KiB in all at most).
+/// per method body (one per varint of the body positions' stream, counted), its range among
+/// those taken (8 bytes) and its position (4), and the ranges of the root's streams; the column
+/// of a table's values (4 bytes a row, reserved for the largest table: at most as many rows as
+/// the tables' stream has bytes and the output has); and the tokens' caches of the 256 tables
+/// (24 bytes each, and 1 KiB of each table a token is of, at most one a token's table byte).
 fn cil(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    // (the streams META = 1, TABLES = 6 and BODYPOS = 9 of `aqr_exe::arch::cil`)
-    let (&meta, &tables, &bodies) = (u.inputs.get(1)?, u.inputs.get(6)?, u.inputs.get(9)?);
+    use aqr_exe::arch::cil::{BODYPOS, META, TABLES, TOKT};
+    let (&meta, &tables, &tokt) = (u.inputs.get(META)?, u.inputs.get(TABLES)?, u.inputs.get(TOKT)?);
+    let bodies = u.content(BODYPOS)?.iter().filter(|&&b| b < 0x80).count() as u64;
     let output = u.output();
     let roots = 16 * (meta / 12 + 1);
-    let method_bodies = 3 * (8 + 4) * (bodies + 8);
-    let column = 3 * 4 * tables.min(output);
-    let caches = 256 * 16 + (16 * u.inputs.iter().sum::<u64>()).min(512 << 10);
-    Some(u.whole(roots + method_bodies + column + caches, 8))
+    let method_bodies = (8 + 4) * bodies + 8 * (meta / 12 + 2);
+    let column = 4 * tables.min(output);
+    let caches = 256 * 24 + 1024 * tokt.min(256);
+    Some(u.whole(roots + method_bodies + column + caches, 4))
 }
 
 /// aqr-exe's base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are

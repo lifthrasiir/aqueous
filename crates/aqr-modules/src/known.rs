@@ -30,7 +30,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "exe-recons/cil",
         version: 1,
-        sha512_256: hex("7b22bbac03ed25bd765b8d27207f6ddd9d14bd4a683b3046e27af801202f4d2a"),
+        sha512_256: hex("4c658a3821b8bd424af6bb7ebc888a710bc27423e85dd333727e0496324af032"),
         block: include_bytes!("../wasm/exe-recons-cil.block"),
     },
     Known {

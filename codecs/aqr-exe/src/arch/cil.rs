@@ -20,7 +20,8 @@ macro_rules! define_streams {
     );
 
     (@$c:tt $i:ident $($t:tt)*) => (
-        #[allow(dead_code)] const $i: usize = $c;
+        /// A stream, by its index.
+        pub const $i: usize = $c;
         define_streams! { @(1 + $c) $($t)* }
     );
 
@@ -310,6 +311,10 @@ impl Tokens {
 
     fn insert(&mut self, table: u8, rid: u32) {
         let c = &mut self.cache[table as usize];
+        // (a table's cache made at its size as its first token comes)
+        if c.capacity() == 0 {
+            c.reserve_exact(CACHE + 1);
+        }
         c.insert(0, rid);
         c.truncate(CACHE);
     }
@@ -756,10 +761,12 @@ mod decode {
     pub fn decode(streams: [&[u8]; NUM_STREAMS], origin: u32, meta: usize, len: usize) -> Option<Vec<u8>> {
         let mut s = streams;
         let mut out = vec![0u8; len];
-        let mut taken = Vec::new();
+        // (the method bodies: one a position, which is a varint)
+        let nbodies = s[BODYPOS].iter().filter(|&&b| b < 0x80).count();
 
         // the metadata root, the heaps and the tables' header
         let (root_len, streams) = parse_root(s[META])?;
+        let mut taken = Vec::with_capacity(1 + streams.len() + nbodies);
         let root = take(&mut s[META], root_len)?;
         out.get_mut(meta..meta.checked_add(root_len)?)?.copy_from_slice(root);
         taken.push((meta, meta + root_len));
@@ -788,7 +795,7 @@ mod decode {
 
         // the method bodies
         let mut tokens = Tokens::new();
-        let mut bodies = Vec::new();
+        let mut bodies = Vec::with_capacity(nbodies);
         let mut at = 0usize;
         while !s[BODYPOS].is_empty() {
             let b = at.checked_add(varint(&mut s[BODYPOS])? as usize)?;
@@ -840,7 +847,7 @@ mod decode {
         // the tables' columns
         if let Some((mut p, t)) = tables {
             let mut last_body: i64 = -1;
-            let mut vals = Vec::new();
+            let mut vals = Vec::with_capacity(t.rows.iter().copied().max().unwrap_or(0) as usize);
             for (table, w) in t.widths.iter().enumerate() {
                 let row: usize = w.iter().sum();
                 let nr = t.rows[table] as usize;
