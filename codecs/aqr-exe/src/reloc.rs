@@ -5,6 +5,7 @@
 use alloc::vec::Vec;
 
 /// Bytes of a block's header: the page's RVA and the block's size (`le32` each).
+#[cfg(feature = "encode")]
 const HEADER: usize = 8;
 
 /// The streams of the module: the RVAs' differences (varints) and the types (a byte each).
