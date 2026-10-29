@@ -62,11 +62,17 @@ struct Recording {
     native: Native,
     file: Vec<(usize, usize, Range<usize>)>,
     seen: Mutex<Vec<(Key, Output)>>,
+    /// Outputs of applications run beforehand, by address ([`ahead`]).
+    ahead: Mutex<HashMap<usize, Vec<u8>>>,
 }
 
 impl Modules for Recording {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
-        let out = self.native.apply(a, inputs)?;
+        let early = self.ahead.lock().unwrap().remove(&(a as *const Apply as usize));
+        let out = match early {
+            Some(out) => out,
+            None => self.native.apply(a, inputs)?,
+        };
         let kept = match self.file.iter().find(|(at, ..)| std::ptr::addr_eq(a, *at as *const Apply)) {
             Some((_, i, range)) => Output::File(*i, range.clone()),
             None => Output::Bytes(Arc::new(out.clone())),
@@ -227,16 +233,54 @@ impl Prevalidator {
 /// gives what it stands for. The file is not kept again: the outputs of the applications at
 /// the top of a formula of data in it are where they make it.
 fn evaluate((f, d, at): Job, threads: usize, memo: &mut Memo) {
+    let native = Native { threads };
+    let ahead = Mutex::new(ahead(&f, &native, threads));
     let r = Recording {
-        native: Native { threads },
+        native,
         file: at.map_or_else(Vec::new, |(i, at)| top(&f.root, i, at)),
         seen: Mutex::default(),
+        ahead,
     };
     let good = f.eval(&r).is_ok_and(|out| hash(&out) == d);
     drop(f);
     if good {
         memo.0.extend(r.seen.into_inner().unwrap());
     }
+}
+
+/// The applications of `f` among what its root concatenates whose inputs are slices of its
+/// streams, run at once on up to `threads` threads (those that fail left out), by address:
+/// the evaluation of a formula is in turn, and a file of many applications (an FSB5 bank of
+/// many Vorbis samples) would run them all on one thread.
+fn ahead(f: &Formula, native: &Native, threads: usize) -> HashMap<usize, Vec<u8>> {
+    let mut applies = Vec::new();
+    let mut walk = vec![&f.root];
+    while let Some(n) = walk.pop() {
+        match n {
+            Node::Concat(ns) => walk.extend(ns),
+            Node::Apply(a) => {
+                let inputs: Option<Vec<&[u8]>> = a
+                    .inputs
+                    .iter()
+                    .map(|i| match *i {
+                        Node::Slice { stream, start, len } => {
+                            f.streams.get(stream)?.data.get(start as usize..)?.get(..len as usize)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if let Some(inputs) = inputs {
+                    applies.push((&**a, inputs));
+                }
+            }
+            _ => {}
+        }
+    }
+    if applies.len() < 2 {
+        return HashMap::new();
+    }
+    let outs = aqr_common::pool::par_map(applies.len(), threads, |i| native.apply(applies[i].0, &applies[i].1).ok());
+    applies.iter().zip(outs).filter_map(|((a, _), o)| Some((*a as *const Apply as usize, o?))).collect()
 }
 
 /// The applications at the top of `n`, by address, with the ranges of their outputs in file

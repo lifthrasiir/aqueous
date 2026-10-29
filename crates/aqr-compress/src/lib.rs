@@ -1444,7 +1444,9 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     jobs.retain(|j| !(j.0 == Format::Png && skip.contains(&(j.1.as_ptr() as usize, j.1.len()))));
     cx.skip.borrow_mut().extend(skip);
     let workers = opt.threads.min(jobs.len()).max(1);
-    let inner = (opt.threads / workers).max(1);
+    // (each may take all: the pool gives it the workers free, and those given back as the
+    // others finish)
+    let inner = opt.threads;
     let words = cx.words.as_deref();
     let once = &*cx.once;
     let files = cx.files.as_deref();
