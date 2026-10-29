@@ -1,0 +1,19 @@
+[package]
+name = "aqr-iso"
+version = "0.1.0"
+edition = "2024"
+description = "ISO 9660 and UDF images taken apart into the contents of their files and the rest, without a module"
+publish = false
+
+[dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
+
+[dev-dependencies]
+zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-iso-check"
+path = "examples/check.rs"

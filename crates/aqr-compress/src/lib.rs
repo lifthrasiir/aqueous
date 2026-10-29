@@ -474,7 +474,7 @@ impl Cx {
     /// together hold ([`Cx::coded_held`]), but its own (its headers): those of its members, which
     /// are the files', so that what holds the archive costs nothing for them either.
     fn note_bundled(&self, f: &Formula) {
-        self.note_streams(f, |s| !s.class.starts_with("bundle/"));
+        self.note_streams(f, |s| !bundle::own_class(&s.class));
     }
 
     /// Notes the streams of formula `f` of data that the files archived together hold
@@ -766,6 +766,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Ar | Format::Tar | Format::Cpio => bundle::bundle(d),
+                Format::Iso => bundle::iso(d),
                 _ => unreachable!("a pure format"),
             }))
             .ok()
@@ -892,12 +893,17 @@ fn files_len(d: &[u8]) -> usize {
 /// ([`Formula::share_slices`]), though they cost in full here (the streams of a member that is a
 /// PE file, say, are not its bytes, which the files are held by). The streams of the formula
 /// taken of other data the files hold cost nothing for what holds that data ([`Cx::note_held`]).
+/// An ISO 9660 or UDF image is taken whatever its size too: its formula is its own bytes, cut
+/// into the files and the rest, which cost no more apart (and comparing would compress all of
+/// an image twice, a DVD's 3 GB). So is a scan's formula whose files are all of the data, each
+/// of them compared already (or text, not compared: [`made`]).
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
-    let bundled = f.applies().iter().any(|a| a.module == BUNDLE) && cx.held_by_others(d, d);
+    let bundled = bundle::bundles(f) && cx.held_by_others(d, d);
     if bundled {
         cx.note_bundled(f);
     }
-    let smaller = !opt.smaller || bundled || {
+    let covered = gaps.is_some_and(|g| g.iter().all(Range::is_empty));
+    let smaller = !opt.smaller || bundled || covered || bundle::is_iso(f) || {
         let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
         let stand_in = pieces.as_deref().map(|p| (0, p));
         // (the streams the files archived together hold cost nothing)
@@ -1283,9 +1289,8 @@ fn content_slices(
                 out.push((n.clone(), None));
                 return;
             }
-            // (the files of an archive made later, at once)
-            if depth == 0
-                && cx.top_sets.is_some()
+            // (the files of an archive made later, at once, and so are those of an image)
+            if (depth == 0 && cx.top_sets.is_some() || bundle::is_iso(f))
                 && let Some(nest) = s.and_then(|s| nest.of(s.kind)).filter(|_| d.is_some())
             {
                 cx.later.borrow_mut().push((out.len(), n.clone(), nest));

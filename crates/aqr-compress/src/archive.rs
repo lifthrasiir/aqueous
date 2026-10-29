@@ -582,8 +582,8 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// or gzip file and the contents of its entries (of the CRC-32 and size that its central
 /// directory or its trailer tells; and other archives with such entries), a git loose object
 /// and the file of its data (inflated whole where its header tells a large one), an ar, tar or cpio
-/// archive and the contents of its members (read whole, one at a time, for their CRC-32; those
-/// of at least [`MEMBER_MIN`] bytes), a git pack and its indexes (by name and the pack's
+/// archive or ISO 9660 or UDF image and the contents of its members (read whole, one at a time,
+/// for their CRC-32; those of at least [`MEMBER_MIN`] bytes), a git pack and its indexes (by name and the pack's
 /// trailer, of any size), a `.lzma` file and those of what its stream holds (decoded
 /// whole, [`lzma_sums`]), FSB5 banks and those of their samples (read whole, by the samples'
 /// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB; the
@@ -603,7 +603,7 @@ fn together<S: Source + ?Sized>(
     let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= TOGETHER_MIN).collect();
     notes.send(Note::More(large.len() as u64));
     // of each: the hash of its start, the CRC-32 and size of the entries it holds, and whether
-    // it is an archive of aqr-bundle's (whose members are known once it is read whole) or a PE
+    // it only bundles files (whose members are known once it is read whole) or is a PE
     // file
     type Looked = (u64, Vec<(u32, u64)>, bool, bool);
     let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<Looked> {
@@ -768,17 +768,20 @@ fn lzma_sums(d: &[u8]) -> Vec<(u32, u64)> {
     }
 }
 
-/// The CRC-32 and size of the files' contents in ar, tar or cpio archive `d`, those of at least
-/// [`MEMBER_MIN`] bytes.
+/// The CRC-32 and size of the files' contents in ar, tar or cpio archive or ISO 9660 or UDF
+/// image `d`, those of at least [`MEMBER_MIN`] bytes.
 fn member_sums(d: &[u8], threads: usize) -> Vec<(u32, u64)> {
     use aqr_bundle::{formula, layout::Role};
-    let recs = formula::detect(d).and_then(|f| formula::records(f, d)).unwrap_or_default();
-    let bodies: Vec<&[u8]> = recs
-        .iter()
-        .filter_map(|r| r.body())
-        .filter(|b| b.role == Role::File && b.span.len() as u64 >= MEMBER_MIN)
-        .map(|b| &d[b.span.clone()])
-        .collect();
+    let spans: Vec<std::ops::Range<usize>> = match aqr_iso::starts(d) {
+        true => {
+            aqr_iso::pieces(d, &aqr_iso::files(d)).into_iter().filter(|p| p.file.is_some()).map(|p| p.span).collect()
+        }
+        false => {
+            let recs = formula::detect(d).and_then(|f| formula::records(f, d)).unwrap_or_default();
+            recs.iter().filter_map(|r| r.body()).filter(|b| b.role == Role::File).map(|b| b.span.clone()).collect()
+        }
+    };
+    let bodies: Vec<&[u8]> = spans.into_iter().filter(|s| s.len() as u64 >= MEMBER_MIN).map(|s| &d[s]).collect();
     aqr_common::pool::par_map(bodies.len(), threads, |i| (crc32fast::hash(bodies[i]), bodies[i].len() as u64))
 }
 

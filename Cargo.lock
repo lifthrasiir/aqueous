@@ -112,6 +112,7 @@ dependencies = [
  "aqr-gnu-gettext",
  "aqr-hdf5",
  "aqr-infer-recs",
+ "aqr-iso",
  "aqr-jpeg",
  "aqr-lz4",
  "aqr-lzma",
@@ -315,6 +316,14 @@ dependencies = [
  "aqr-formula",
  "libc",
  "xxhash-rust",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-iso"
+version = "0.1.0"
+dependencies = [
+ "aqr-formula",
  "zstd",
 ]
 

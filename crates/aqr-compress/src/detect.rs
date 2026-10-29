@@ -67,6 +67,9 @@ pub enum Format {
     Tar,
     /// cpio archive (aqr-bundle); of the binary forms, not looked for in other data.
     Cpio,
+    /// ISO 9660 or UDF image (aqr-iso), known by the descriptor at sector 16: at the start of
+    /// data only.
+    Iso,
     /// Delimited text table (aqr-xsv): CSV, TSV, USV and the like, a whole file known by its
     /// text: not looked for in other data.
     Xsv,
@@ -81,7 +84,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 33] = [
+    pub const ALL: [Format; 34] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -111,6 +114,7 @@ impl Format {
         Format::Ar,
         Format::Tar,
         Format::Cpio,
+        Format::Iso,
         Format::Xsv,
         Format::Text,
         Format::Sized,
@@ -148,6 +152,7 @@ impl Format {
             Format::Ar => "ar",
             Format::Tar => "tar",
             Format::Cpio => "cpio",
+            Format::Iso => "iso",
             Format::Xsv => "xsv",
             Format::Text => "text",
             Format::Sized => "sized",
@@ -155,9 +160,9 @@ impl Format {
         }
     }
 
-    /// Whether it is an archive of aqr-bundle's, which only bundles files.
+    /// Whether it only bundles files: an archive of aqr-bundle's, or an image of aqr-iso's.
     pub fn is_bundle(self) -> bool {
-        matches!(self, Format::Ar | Format::Tar | Format::Cpio)
+        matches!(self, Format::Ar | Format::Tar | Format::Cpio | Format::Iso)
     }
 
     /// The format of [`Format::name`] `name`, as [`Kind::Format`] names it.
@@ -198,6 +203,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"h5" | b"hdf5" | b"he5" | b"h5ad" | b"nwb" => format(Format::Hdf5),
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
+        b"iso" => format(Format::Iso),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
         b"lzma" | b"tlz" => format(Format::Lzma),
         b"lzo" | b"tzo" => format(Format::Lzo),
@@ -233,6 +239,9 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     let at = |p: usize, m: &[u8]| d.get(p..p + m.len()) == Some(m);
     if at(0, b"\x89PNG\r\n\x1a\n") {
         Some(Format::Png)
+    } else if start && aqr_iso::starts(d) {
+        // (before the others: a hybrid image starts with a boot sector, or anything)
+        Some(Format::Iso)
     } else if sqlite_header(d) {
         Some(Format::Sqlite)
     } else if at(0, b"%PDF-") {

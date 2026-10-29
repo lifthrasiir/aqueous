@@ -18,6 +18,7 @@ aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }
 aqr-fits = { path = "../../codecs/aqr-fits" }
 aqr-git = { path = "../../codecs/aqr-git" }
 aqr-hdf5 = { path = "../../codecs/aqr-hdf5" }
+aqr-iso = { path = "../../codecs/aqr-iso" }
 aqr-flac = { path = "../../codecs/aqr-flac" }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg" }
 aqr-lz4 = { path = "../../codecs/aqr-lz4" }
