@@ -234,11 +234,17 @@ fn par_jobs<R: Send + aqr_common::wire::Wire>(
     out.into_iter().map(Option::unwrap).collect()
 }
 
-/// [`crate::reconstruct_with`], called once in the code (the module's tasks and the module
+/// [`crate::reconstruct_sized`], called once in the code (the module's tasks and the module
 /// itself run the same jobs).
 #[inline(never)]
-fn rebuild(data: &[u8], record: &[u8], model: ModelData, threads: usize) -> Result<Vec<u8>> {
-    crate::reconstruct_with(data, record, model, threads)
+fn rebuild(
+    data: &[u8],
+    record: &[u8],
+    model: ModelData,
+    threads: usize,
+    cap: usize,
+) -> Result<Vec<u8>> {
+    crate::reconstruct_sized(data, record, model, threads, cap)
 }
 
 /// The module: the streams rebuilt from `inputs`, their data and their records (all of one
@@ -279,9 +285,16 @@ pub fn decode(
         }
     };
     let sizes: Vec<usize> = items.iter().map(|i| i.0.len()).collect();
+    // (a stream alone is the output, of a known length: but no more than its data and record
+    // could make, a token of 6 bytes at most taking one of data at least, for a corrupt length;
+    // others are reserved half their data's)
+    let cap = |i: usize| match items.len() {
+        1 => len.min(8 * (sizes[0] + items[0].1.len()) as u64 + 64) as usize,
+        _ => sizes[i] / 2 + 64,
+    };
     // (which failure it was is not kept: less code in the module's tasks)
     let mut streams = par_jobs(&sizes, threads, |i, per| {
-        rebuild(items[i].0, items[i].1, model, per).ok()
+        rebuild(items[i].0, items[i].1, model, per, cap(i)).ok()
     })
     .into_iter()
     .collect::<Option<Vec<Vec<u8>>>>()

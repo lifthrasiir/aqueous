@@ -1974,16 +1974,7 @@ pub fn reconstruct_with(
     model: ModelData,
     threads: usize,
 ) -> Result<Vec<u8>> {
-    // (reserved as the first bytes come: on WebAssembly, after the first segments' tasks are
-    // spawned, which copy the memory as it is then)
-    let mut out = Vec::new();
-    reconstruct_into(data, meta, model, threads, &mut |b| {
-        if out.capacity() == 0 {
-            out.reserve(data.len() / 2 + 64);
-        }
-        out.extend_from_slice(b)
-    })?;
-    Ok(out)
+    reconstruct_sized(data, meta, model, threads, data.len() / 2 + 64)
 }
 
 /// [`reconstruct_with`], the stream given to `sink` in pieces, in order, as it is written:
@@ -1997,6 +1988,30 @@ pub fn reconstruct_into(
     threads: usize,
     sink: &mut dyn FnMut(&[u8]),
 ) -> Result<()> {
+    rebuild(data, meta, model, threads, Ok(sink)).map(drop)
+}
+
+/// [`reconstruct_with`], written into a vector reserved for `cap` bytes as the first are
+/// written (on WebAssembly, after the first segments' tasks are spawned, which copy the memory
+/// as it is then): of `cap` bytes exactly where the stream is that long.
+pub fn reconstruct_sized(
+    data: &[u8],
+    meta: &[u8],
+    model: ModelData,
+    threads: usize,
+    cap: usize,
+) -> Result<Vec<u8>> {
+    rebuild(data, meta, model, threads, Err(cap))
+}
+
+/// [`reconstruct_into`] given `Ok(sink)`, else [`reconstruct_sized`] given `Err(cap)`.
+fn rebuild(
+    data: &[u8],
+    meta: &[u8],
+    model: ModelData,
+    threads: usize,
+    mut to: core::result::Result<&mut dyn FnMut(&[u8]), usize>,
+) -> Result<Vec<u8>> {
     let threads = threads.max(1);
     let n = data.len();
     let profile = record_profile(meta)?;
@@ -2156,7 +2171,12 @@ pub fn reconstruct_into(
 
     let hr = &mut BitReader::new(hdrs);
     let mut recipe = header::Recipe::default();
-    let mut w = write::Writer::new((data.len() / 2).min(1 << 20) + 64);
+    let mut w = write::Writer::new(match to {
+        Ok(_) => (data.len() / 2).min(1 << 20) + 64,
+        Err(_) => 0,
+    });
+    // (the room to reserve before writing, if not yet)
+    let mut cap = to.as_ref().err().copied();
     let nb = layout.blocks.len();
     let mut shapes = layout.blocks.into_iter();
     // tokens decoded (from token `base` on), the next block (from token `k` on)
@@ -2165,6 +2185,14 @@ pub fn reconstruct_into(
     // where the last segment's data ends
     let mut end = 0;
     let batch = 4 * threads;
+    // the most tokens pending at once: under twice the largest block's left after writing (or
+    // drained), and a batch's (reserved at the first, after the first batch's tasks are spawned)
+    let most = segs
+        .chunks(batch)
+        .map(|b| b.iter().map(|s| s.1).sum::<usize>())
+        .max()
+        .unwrap_or(0);
+    let round = total.min(2 * counts.iter().copied().max().unwrap_or(0) + most);
     // (as tasks on WebAssembly)
     let decode_batch = |s0: usize| {
         let s1 = (s0 + batch).min(segs.len());
@@ -2205,6 +2233,9 @@ pub fn reconstruct_into(
                         return Err(Error::Corrupt);
                     }
                     decoded += t.len();
+                    if pending.capacity() == 0 {
+                        pending.reserve_exact(round);
+                    }
                     pending.extend_from_slice(&t);
                     end = p;
                 }
@@ -2244,10 +2275,15 @@ pub fn reconstruct_into(
                         r,
                     ));
                 }
+                if let Some(c) = cap.take() {
+                    w.reserve(c);
+                }
                 w.blocks(&blocks, &pending, data, threads)
                     .map_err(|_| Error::Corrupt)?;
             }
-            sink(&w.take());
+            if let Ok(sink) = &mut to {
+                sink(&w.take());
+            }
             if k - base > pending.len() / 2 {
                 pending.drain(..k - base);
                 base = k;
@@ -2266,11 +2302,19 @@ pub fn reconstruct_into(
     if end != n || bi != nb {
         return Err(Error::Corrupt);
     }
-    sink(
-        &w.finish(layout.tail_pad, &layout.trailing)
-            .map_err(|_| Error::Corrupt)?,
-    );
-    Ok(())
+    if let Some(c) = cap {
+        w.reserve(c);
+    }
+    let rest = w
+        .finish(layout.tail_pad, &layout.trailing)
+        .map_err(|_| Error::Corrupt)?;
+    match to {
+        Ok(sink) => {
+            sink(&rest);
+            Ok(vec![])
+        }
+        Err(_) => Ok(rest),
+    }
 }
 
 /// `f(0..n)` on up to `threads` threads, in order.

@@ -290,6 +290,12 @@ impl Writer {
         self.pos += w.pos;
     }
 
+    /// Reserves room for `n` bytes in all (written or not), exactly.
+    pub fn reserve(&mut self, n: usize) {
+        let out = &mut self.w.out;
+        out.reserve_exact(n.saturating_sub(out.len()));
+    }
+
     /// The bytes written so far and not yet taken (a few bits may be held back).
     pub fn take(&mut self) -> Vec<u8> {
         let cap = self.w.out.capacity().min(1 << 20);

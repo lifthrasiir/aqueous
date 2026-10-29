@@ -4607,7 +4607,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bundle-recons.wasm" title="crates/aqr-modules/wasm/bundle-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bundle/FORMAT.md" title="codecs/aqr-bundle/FORMAT.md">R</a>
     <tr>
-      <td><code>8531516a33c8327cd7423dc838e88edcb16d520f1a621f2b47eda75f27de8922</code>
+      <td><code>22d53ec145ad54b9d448d2898733d0a9c80d6b5c65843f063105c2ce418fd7ea</code>
       <td>clip-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/clip-recons.wasm" title="crates/aqr-modules/wasm/clip-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-clip/FORMAT.md" title="codecs/aqr-clip/FORMAT.md">R</a>
@@ -4657,7 +4657,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flac-recons.wasm" title="crates/aqr-modules/wasm/flac-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md" title="codecs/aqr-flac/FORMAT.md">R</a>
     <tr>
-      <td><code>9d3e8b19692ad0949412eeb156b0ababceb2c032b9bb90ee2ff33b4788fbdf7c</code>
+      <td><code>ab03696cd64628064067c21c10981973d0242678b304f5adf5471e5feb381aca</code>
       <td>flate-set@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flate-set.wasm" title="crates/aqr-modules/wasm/flate-set.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md" title="codecs/aqr-flate/FORMAT.md">R</a>
@@ -4687,7 +4687,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/ima-recons.wasm" title="crates/aqr-modules/wasm/ima-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-ima/FORMAT.md" title="codecs/aqr-ima/FORMAT.md">R</a>
     <tr>
-      <td><code>211a60941bbf02f93c8631eac928329c5df633aeea60a60dce24bea161a537e6</code>
+      <td><code>7aac7ec3e4a6a767e39ebd1a80207c0ac6fd8fee86b06bff0c42a8a953b58dd0</code>
       <td>jpeg-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/jpeg-recons.wasm" title="crates/aqr-modules/wasm/jpeg-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-jpeg/FORMAT.md" title="codecs/aqr-jpeg/FORMAT.md">R</a>
@@ -4732,17 +4732,17 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/pdf-recons.wasm" title="crates/aqr-modules/wasm/pdf-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdf/FORMAT.md" title="codecs/aqr-pdf/FORMAT.md">R</a>
     <tr>
-      <td><code>874cc85df19af27651e5b9904298a068eda45f331778958f84dbd8966c42bb26</code>
+      <td><code>4edd704b14df1ff93c21b1163854f8556db44e49362b475994fe4f69000e50ff</code>
       <td>png-against@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/png-against.wasm" title="crates/aqr-modules/wasm/png-against.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md" title="codecs/aqr-png/FORMAT.md">R</a>
     <tr>
-      <td><code>ff7fddf83d8f02aed7d9e00dfcd6536c657674093e56f235526a7e15a632ddd1</code>
+      <td><code>ee9e23829cdd4636043dfda7857526b2b3a182a8a325c062a5f2bf4301fad2c3</code>
       <td>png-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/png-recons.wasm" title="crates/aqr-modules/wasm/png-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md" title="codecs/aqr-png/FORMAT.md">R</a>
     <tr>
-      <td><code>e9255925acd09473d6c3456e9213635af299edbe66aef6ef21f065d31a504884</code>
+      <td><code>e2ccea71a9d63817d324de0ea26e8611ed3024077b4fdd4f3974f2f60f224389</code>
       <td>png-set@2
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/png-set.wasm" title="crates/aqr-modules/wasm/png-set.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md" title="codecs/aqr-png/FORMAT.md">R</a>
@@ -4777,7 +4777,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/snappy-recons.wasm" title="crates/aqr-modules/wasm/snappy-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-snappy/FORMAT.md" title="codecs/aqr-snappy/FORMAT.md">R</a>
     <tr>
-      <td><code>fdfd0dfefc7da381bfd33e7e5a4e338d08a11a88e68616c6077d279fe9072801</code>
+      <td><code>e7c8fe5d73b0b6622d2ae584cfdf8c1043aea33738e8c449d069e61a8b76addc</code>
       <td>sqlite-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/sqlite-recons.wasm" title="crates/aqr-modules/wasm/sqlite-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-sqlite/FORMAT.md" title="codecs/aqr-sqlite/FORMAT.md">R</a>

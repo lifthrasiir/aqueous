@@ -4,6 +4,10 @@
 /// A value that is put as bytes and got back from them.
 pub trait Wire: Sized {
     fn put(&self, out: &mut Vec<u8>);
+    /// Bytes that `put` writes, or fewer (0 where not worked out): reserved before it.
+    fn size(&self) -> usize {
+        0
+    }
     /// The value at the start of `b`, which moves past it; `None` if `b` is not one.
     fn get(b: &mut &[u8]) -> Option<Self>;
 }
@@ -21,6 +25,10 @@ macro_rules! ints {
                 out.extend_from_slice(&self.to_le_bytes());
             }
 
+            fn size(&self) -> usize {
+                size_of::<$t>()
+            }
+
             fn get(b: &mut &[u8]) -> Option<Self> {
                 Some(<$t>::from_le_bytes(take(b, size_of::<$t>())?.try_into().unwrap()))
             }
@@ -35,6 +43,10 @@ impl Wire for usize {
         (*self as u64).put(out)
     }
 
+    fn size(&self) -> usize {
+        8
+    }
+
     fn get(b: &mut &[u8]) -> Option<Self> {
         u64::get(b)?.try_into().ok()
     }
@@ -43,6 +55,10 @@ impl Wire for usize {
 impl Wire for bool {
     fn put(&self, out: &mut Vec<u8>) {
         out.push(*self as u8)
+    }
+
+    fn size(&self) -> usize {
+        1
     }
 
     fn get(b: &mut &[u8]) -> Option<Self> {
@@ -68,6 +84,10 @@ impl Wire for String {
         out.extend_from_slice(self.as_bytes());
     }
 
+    fn size(&self) -> usize {
+        8 + self.len()
+    }
+
     fn get(b: &mut &[u8]) -> Option<Self> {
         let n = usize::get(b)?;
         String::from_utf8(take(b, n)?.to_vec()).ok()
@@ -80,6 +100,10 @@ impl<T: Wire> Wire for Vec<T> {
         for x in self {
             x.put(out);
         }
+    }
+
+    fn size(&self) -> usize {
+        8 + self.iter().map(T::size).sum::<usize>()
     }
 
     fn get(b: &mut &[u8]) -> Option<Self> {
@@ -101,6 +125,10 @@ impl<T: Wire> Wire for Option<T> {
         }
     }
 
+    fn size(&self) -> usize {
+        1 + self.as_ref().map_or(0, T::size)
+    }
+
     fn get(b: &mut &[u8]) -> Option<Self> {
         Some(if bool::get(b)? { Some(T::get(b)?) } else { None })
     }
@@ -112,6 +140,13 @@ impl<T: Wire, E: Wire> Wire for Result<T, E> {
         match self {
             Ok(x) => x.put(out),
             Err(e) => e.put(out),
+        }
+    }
+
+    fn size(&self) -> usize {
+        1 + match self {
+            Ok(x) => x.size(),
+            Err(e) => e.size(),
         }
     }
 
@@ -127,6 +162,10 @@ impl<T: Wire, const N: usize> Wire for [T; N] {
         }
     }
 
+    fn size(&self) -> usize {
+        self.iter().map(T::size).sum()
+    }
+
     fn get(b: &mut &[u8]) -> Option<Self> {
         let v: Vec<T> = (0..N).map(|_| T::get(b)).collect::<Option<_>>()?;
         v.try_into().ok()
@@ -140,6 +179,12 @@ macro_rules! tuples {
             fn put(&self, out: &mut Vec<u8>) {
                 let ($($x,)*) = self;
                 $($x.put(out);)*
+            }
+
+            #[allow(non_snake_case)]
+            fn size(&self) -> usize {
+                let ($($x,)*) = self;
+                0 $(+ $x.size())*
             }
 
             fn get(b: &mut &[u8]) -> Option<Self> {
@@ -158,6 +203,7 @@ mod tests {
     fn round<T: Wire + PartialEq + std::fmt::Debug>(x: T) {
         let mut b = Vec::new();
         x.put(&mut b);
+        assert_eq!(x.size(), b.len());
         let mut s = &b[..];
         assert_eq!(T::get(&mut s), Some(x));
         assert!(s.is_empty());

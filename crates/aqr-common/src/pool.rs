@@ -490,7 +490,11 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
 pub fn par_map_apart<R: Send + crate::wire::Wire>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync) -> Vec<R> {
     #[cfg(target_family = "wasm")]
     if threads > 1 && n > 1 {
-        let g = |i: usize, out: &mut Vec<u8>| f(i).put(out);
+        let g = |i: usize, out: &mut Vec<u8>| {
+            let r = f(i);
+            out.reserve_exact(r.size());
+            r.put(out)
+        };
         let mut t = aqr_api::task::spawn(n, &g);
         return (0..n)
             .map(|i| {

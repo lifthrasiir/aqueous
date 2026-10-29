@@ -288,28 +288,27 @@ impl Stream {
         table + emu + model
     }
 
-    /// Bytes of the encoding of the result of a task of segment `s`: a literal takes 2 and a
-    /// match, which covers 3 bytes of data at least, 5.
+    /// Bytes of the encoding of the result of a task of segment `s` (reserved): a literal takes 2
+    /// and a match, which covers 3 bytes of data at least, 5.
     fn encoded(&self, s: &Seg) -> u64 {
         let (c, d) = (s.count, s.end.saturating_sub(s.pos));
         16 + 2 * c + 3 * c.min(d.saturating_sub(c) / 2)
     }
 
     /// The growth of a task of segment `s`: the decoder and the tokens, then the tokens and their
-    /// encoding (pushed: three times); the decoder is dropped before, the memory it had maybe not
-    /// reused.
+    /// encoding; the decoder is dropped before, the memory it had maybe not reused.
     fn task(&self, s: &Seg) -> u64 {
-        self.decoder(s) + TOKEN * s.count + 3 * self.encoded(s) + TASK_SLACK
+        self.decoder(s) + TOKEN * s.count + self.encoded(s) + TASK_SLACK
     }
 
     /// The memory of the instance that decodes the stream, from the memory it has at the start
-    /// (`w0`), on `threads` threads.
-    fn run(&self, w0: Lin, threads: usize) -> Lin {
+    /// (`w0`), on `threads` threads; `alone` where it is the output, reserved at its length.
+    fn run(&self, w0: Lin, threads: usize, alone: bool) -> Lin {
         let t = threads > 1;
         let batch = 4 * threads;
         let n = self.n;
         // the layout (grown by pushes beyond 2^16 blocks), the counts, the skips, the segments, the
-        // models (static), the writer
+        // models (static)
         let grow = if self.blocks > 1 << 16 { 3 } else { 1 };
         let stat = 12 * grow * self.blocks
             + 4 * self.blocks
@@ -321,8 +320,6 @@ impl Stream {
             } else {
                 9 * std::mem::size_of::<crate::code::Model>() as u64
             }
-            + (n / 2).min(1 << 20)
-            + 64
             + aqr_formula::SMALL;
         let me = w0.add(Lin::of(stat));
         let nready = self.blocks.min(1 << 12);
@@ -331,43 +328,40 @@ impl Stream {
         let tokens = |b: &[Seg]| b.iter().map(|s| s.count).sum::<u64>();
         let results = |b: &[Seg]| TOKEN * tokens(b) + 24 * b.len() as u64;
         let most = batches.iter().map(|b| tokens(b)).max().unwrap_or(0);
-        // the pending tokens (pushed: three times, but a single segment's are made at their size)
+        // the pending tokens, reserved for the most at once
         let round = self.tokens.min(2 * self.largest + most);
-        let pending = Lin::of(if self.segs.len() > 1 {
-            3 * TOKEN * round
-        } else {
-            TOKEN * self.tokens
-        });
-        // the output, reserved at the first piece and grown by pushes (the old and new one held
-        // with the piece: at most five times the stream)
-        let out0 = Lin::of(n / 2 + 64);
-        // the blocks written, the writer(s): the output so far (twice its stream) and, as pushes
-        // grew it, the writer's bytes (three times), and each run's on threads (as many again);
-        // the piece taken, copied to the output
-        let ready = 3600 * nready;
-        let write = if t {
-            Lin {
-                a: 6 * (TOKEN * round + 16 * nready) + ready,
-                l: 6,
-            }
-        } else {
-            Lin {
-                a: 3 * (TOKEN * self.largest + 16) + ready,
+        let pending = Lin::of(TOKEN * round);
+        // the writer's output, reserved as it first writes: the stream alone, or half the data and
+        // grown by pushes (the old and new one held: three times the stream)
+        let out = match alone {
+            true => Lin::l(1),
+            false => Lin {
+                a: n / 2 + 64,
                 l: 3,
-            }
+            },
         };
-        let late = write.max(Lin::l(5));
+        // and the blocks written (a few thousand at a time); on threads, runs of them by writers
+        // of their own, grown by pushes (a token is 6 bytes at most, as TOKEN), appended
+        let ready = 3600 * nready;
+        let runs = Lin::of(
+            ready
+                + if t {
+                    3 * (TOKEN * round + 16 * nready)
+                } else {
+                    0
+                },
+        );
         let merge = Lin::of(batches.iter().map(|b| results(b)).max().unwrap_or(0));
-        let mut peak = me.add(out0).add(pending).add(late.max(merge));
+        let mut peak = me.add(pending).add(out).add(runs.max(merge));
         for (b, segs) in batches.iter().enumerate() {
-            // the memory a batch's tasks copy: with the results of the one before, the output
-            // reserved and, from the third batch, the earlier writing and pending tokens
+            // the memory a batch's tasks copy: with the results of the one before and, from the
+            // third batch, the pending tokens, the output and the earlier writing
             let mut sp = me;
             if b >= 1 {
-                sp = sp.add(Lin::of(results(batches[b - 1]))).add(out0);
+                sp = sp.add(Lin::of(results(batches[b - 1])));
             }
             if b >= 2 {
-                sp = sp.add(pending).add(late);
+                sp = sp.add(pending).add(out).add(runs);
             }
             if t && segs.len() > 1 {
                 let mut costs: Vec<u64> = segs.iter().map(|s| self.task(s)).collect();
@@ -422,7 +416,7 @@ fn groups(sizes: &[u64]) -> Vec<Group> {
 /// The instance holds the cut streams, the rules, the models or priors and the lists of
 /// `par_jobs` (pushed: three times). The groups of streams run as tasks (more than one of them)
 /// or in the instance: those of small streams on one thread, one after another with the earlier
-/// ones' results held and then their encoding (three times); a large one a stream on its own, with
+/// ones' results held and then their encoding; a large one a stream on its own, with
 /// threads, which decodes its segments a batch of 32 at a time as tasks that copy its memory, each
 /// with the table or chain its rule makes for the segment, the zlib emulator or the contexts, the
 /// tokens, and their encoding, and merges the tokens of a batch in `pending` and writes the blocks
@@ -462,27 +456,32 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
         l: 2,
     };
     let threads = |g: &Group| if g.large { SLOTS } else { 1 };
+    // (a stream alone is reserved at the output's length)
+    let alone = k == 1;
     // a group's streams in turn, the earlier ones' bytes held, then the result's encoding
     let group = |g: &Group, w0: Lin| {
         let mut held = Lin::default();
         let mut peak = Lin::default();
         for &i in &g.items {
-            let r = streams[i].run(w0.add(held), threads(g));
+            let r = streams[i].run(w0.add(held), threads(g), alone);
             peak = peak.max(r);
             held = Lin::l(1);
         }
         peak.max(
-            w0.add(Lin::of(3 * (9 * g.items.len() as u64 + 16)))
-                .add(Lin::l(4)),
+            w0.add(Lin::of(9 * g.items.len() as u64 + 16))
+                .add(Lin::l(2)),
         )
     };
     if groups.len() == 1 {
-        // (in the instance, the cap of the streams' vectors as `reconstruct_with` leaves it)
+        // (in the instance, the cap of the streams' vectors as `reconstruct_sized` leaves it,
+        // and the output; a stream alone the output itself)
         peak = peak.max(group(&groups[0], Lin::of(mem)));
-        peak = peak.max(Lin::of(mem).add(caps).add(Lin {
-            a: derived.bytes() as u64 * k,
-            l: 1,
-        }));
+        if !alone {
+            peak = peak.max(Lin::of(mem).add(caps).add(Lin {
+                a: derived.bytes() as u64 * k,
+                l: 1,
+            }));
+        }
     } else {
         // each group a task of the instance's memory, up to SLOTS at once; those with most bytes
         let mut tasks: Vec<Lin> = groups.iter().map(|g| group(g, Lin::of(mem))).collect();

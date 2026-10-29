@@ -29,6 +29,13 @@ impl aqr_common::wire::Wire for Token {
         }
     }
 
+    fn size(&self) -> usize {
+        match self {
+            Token::Lit(_) => 2,
+            Token::Match { .. } => 5,
+        }
+    }
+
     fn get(b: &mut &[u8]) -> Option<Self> {
         Some(match u8::get(b)? {
             0 => Token::Lit(u8::get(b)?),
