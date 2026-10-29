@@ -25,11 +25,8 @@ const HEADER: u64 = 1408;
 /// dynamic block's header and the end of block).
 const TOKEN: u64 = 6;
 const BLOCK_BITS: u64 = 640 + 16;
-/// The window's `STEP`, `WINDOW`, tokens decoded at a time (258 bytes each) and `SLACK`.
-const STEP: u64 = tok::STEP as u64;
+/// The window's `WINDOW`.
 const WINDOW: u64 = tok::WINDOW as u64;
-const CHUNK_BYTES: u64 = 258 * tok::CHUNK as u64;
-const SLACK: u64 = tok::SLACK as u64;
 
 /// The bytes of a `Vec` of `n` elements of `size` bytes grown by pushes from empty (at the
 /// moment it grows last: the old block and the new, twice and then half again).
@@ -61,12 +58,10 @@ fn reserved(mut cap: u64, size: u64, adds: impl Iterator<Item = (u64, u64)>) -> 
 /// `lut` and 512 symbols of 4 bytes of `fc` each, or fewer without a literal table; and its
 /// `ctx`); and the most any one token stream takes: its blocks (96 bytes each and 1408 of
 /// header for each dynamic one, the layout read to know), its matches sent as 284 + 31, the
-/// window (a stream's data slides: three times its largest length, `min(2 (plain + 16), keep
-/// + max(STEP, keep) + 258 KiB + 16)`, the old block held while it grows), the tokens of a
-/// block (6 bytes, the growth simulated over the blocks' counts), and the DEFLATE writer (it
-/// holds the whole stream: 64 KiB and the growth simulated, each block taking at most 6 bytes
-/// a token and 656 for the header and the end, 6 for a stored block's, the sum capped by the
-/// file's length).
+/// window (reserved: `tok::Window::most`), the tokens of the largest block (6 bytes each,
+/// reserved), and the DEFLATE writer (each block's bytes moved to the file as it is written:
+/// 64 KiB and the growth simulated, a block taking at most 6 bytes a token and 16 after the
+/// header's 656, 6 for a stored block's).
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     use crate::kind::CLASSES;
     use crate::rans::BitR;
@@ -211,18 +206,12 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
             return None;
         }
         let keep = px.map_or(WINDOW, |(bpp, stride)| WINDOW.max(stride.saturating_add(bpp + 1)));
-        let far = keep.saturating_add(STEP.max(keep));
-        let window = 3 * far.saturating_add(CHUNK_BYTES + SLACK).min(2 * (plain + SLACK));
-        let tokens = reserved(0, TOKEN, blocks.iter().filter(|b| !b.0).map(|&(_, n)| (0, n)));
-        let mut at = 0u64;
+        let window = tok::Window::most(limit(keep)?, limit(plain)?) as u64;
+        let tokens = TOKEN * blocks.iter().filter(|b| !b.0).map(|b| b.1).max().unwrap_or(0);
         let writer = reserved(
             1 << 16,
             1,
-            blocks.iter().map(|&(stored, n)| {
-                let before = at.min(len);
-                at += if stored { n + 6 } else { TOKEN * n + BLOCK_BITS };
-                (before, if stored { n + 6 } else { TOKEN * n + BLOCK_BITS })
-            }),
+            blocks.iter().map(|&(stored, n)| if stored { (0, n + 6) } else { (BLOCK_BITS, TOKEN * n + 16) }),
         );
         let total = blocks.len() as u64 * BLOCK + dynamic * HEADER + 4 * nalts + window + tokens + writer;
         if total > worst {

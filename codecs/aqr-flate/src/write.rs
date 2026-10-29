@@ -296,6 +296,13 @@ impl Writer {
         out.reserve_exact(n.saturating_sub(out.len()));
     }
 
+    /// Moves the bytes written so far (not the bits held back) to the end of `out`, keeping
+    /// the room they took.
+    pub fn drain_into(&mut self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.w.out);
+        self.w.out.clear();
+    }
+
     /// The bytes written so far and not yet taken (a few bits may be held back).
     pub fn take(&mut self) -> Vec<u8> {
         let cap = self.w.out.capacity().min(1 << 20);

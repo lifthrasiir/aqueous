@@ -286,15 +286,24 @@ pub struct Window {
 }
 
 impl Window {
-    /// A window for data laid out as `px` if given.
-    pub fn new(px: Option<Pixels>) -> Window {
+    /// A window for data laid out as `px` if given, of `plain` bytes at most if given (the room
+    /// for them, or for the most it holds before it slides, reserved).
+    pub fn new(px: Option<Pixels>, plain: Option<usize>) -> Window {
+        let keep = px.map_or(WINDOW, |p| WINDOW.max(p.stride.saturating_add(p.bpp + 1)));
         Window {
-            data: vec![],
+            data: Vec::with_capacity(plain.map_or(0, |p| Window::most(keep, p))),
             off: 0,
             o: 0,
-            keep: px.map_or(WINDOW, |p| WINDOW.max(p.stride.saturating_add(p.bpp + 1))),
+            keep,
             adler: simd_adler32::Adler32::new(),
         }
+    }
+
+    /// Bytes a window keeping `keep` holds at most, of data of `plain` bytes: before it slides
+    /// and a chunk's more, and the room after the data.
+    pub(crate) fn most(keep: usize, plain: usize) -> usize {
+        let far = keep.saturating_add(STEP.max(keep));
+        plain.min(far.saturating_add(258 * CHUNK)).saturating_add(SLACK)
     }
 
     /// Room for `n` more bytes; whether the window slid first.
@@ -315,10 +324,13 @@ impl Window {
             self.off += cut;
             self.o = self.keep;
         }
-        // grown by doubling, up to what it holds before it slides
+        // grown by doubling, up to what it holds before it slides; to the room reserved where
+        // that is enough
         let need = self.o + n + SLACK;
         if self.data.len() < need {
-            self.data.resize(need.max((2 * self.data.len()).min(far + n + SLACK)), 0);
+            let cap = self.data.capacity();
+            let to = need.max((2 * self.data.len()).min(far + n + SLACK));
+            self.data.resize(if need <= cap { to.min(cap) } else { to }, 0);
         }
         slide
     }
@@ -391,7 +403,7 @@ impl Part {
         Ok(Part {
             slot: if px.is_some() { PIXEL } else { c as usize },
             px,
-            win: Window::new(px),
+            win: Window::new(px, None),
             syms: vec![],
             raw: BitW::default(),
             raw_bits: 0,
@@ -884,9 +896,10 @@ impl<'a> Cursor<'_, 'a> {
 /// A block's symbol frequencies, as [`header::read_freqs`] takes them.
 type Freqs = ([u32; 288], [u32; 32]);
 
-/// Rebuilds the blocks of a stream through `cur` into `w`, with the literal model `m`: each
+/// Rebuilds the blocks of a stream through `cur` by `w` onto `out`, with the literal model `m`: each
 /// block is written once its tokens are decoded, the matches at `alts` (token indices) sent
 /// as 284 + 31, and the dynamic Huffman headers read against the blocks' frequencies.
+#[allow(clippy::too_many_arguments)]
 fn rebuild<M: LitModel>(
     cur: &mut Cursor,
     m: &mut M,
@@ -895,13 +908,16 @@ fn rebuild<M: LitModel>(
     headers: &mut BitReader,
     recipe: &mut Recipe,
     w: &mut Writer,
+    out: &mut Vec<u8>,
 ) -> Result<()> {
-    let mut tokens = Vec::new();
+    // (room for the most tokens of a block)
+    let mut tokens = Vec::with_capacity(blocks.iter().map(|b| b.1).max().unwrap_or(0));
     let (mut t0, mut alts) = (0, alts.iter().copied().peekable());
     for (b, n) in blocks {
         if let Body::Stored { .. } = b.body {
             let at = cur.stored(*n, m)?;
             w.block_of(b, &[], &cur.win.data[at..at + *n]).map_err(|_| Error::Corrupt)?;
+            w.drain_into(out);
             continue;
         }
         let (mut lf, df) = cur.tokens(*n, m, &mut tokens)?;
@@ -917,6 +933,7 @@ fn rebuild<M: LitModel>(
             *header = header::read_freqs(headers, &lf, &df, recipe).map_err(|_| Error::Corrupt)?;
         }
         w.block_of(b, &tokens, &[]).map_err(|_| Error::Corrupt)?;
+        w.drain_into(out);
         t0 += *n;
     }
     // every listed match is one
@@ -1070,17 +1087,18 @@ impl<'a> DecoderState<'a> {
             cx: &self.ctx[slot],
             dec: self.dec,
             raw: &mut self.raw,
-            win: Window::new(px),
+            win: Window::new(px, Some(plain)),
             plain,
         };
-        // (a writer of its own: it reserves room for a block's tokens at the worst)
+        // (a writer of its own, as it reserves room for a block's tokens at the worst: each
+        // block's bytes then moved to `out`)
         let mut w = Writer::new(1 << 16);
         let (headers, recipe) = (&mut self.headers, &mut self.recipe);
         match px {
-            None => rebuild(&mut cur, &mut Prev(0), &mut blocks, &alts, headers, recipe, &mut w)?,
+            None => rebuild(&mut cur, &mut Prev(0), &mut blocks, &alts, headers, recipe, &mut w, out)?,
             Some(px) => {
                 let mut m = Pix { px, col: 0, ch: 0, after: false, last: Cell::new((usize::MAX, 0)) };
-                rebuild(&mut cur, &mut m, &mut blocks, &alts, headers, recipe, &mut w)?
+                rebuild(&mut cur, &mut m, &mut blocks, &alts, headers, recipe, &mut w, out)?
             }
         }
         let (dec, adler) = cur.finish()?;

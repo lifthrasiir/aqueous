@@ -571,7 +571,7 @@ fn code_item(file: &[u8], it: &Item, fr_opts: &aqr_flate::Options) -> Done {
                     Some((l, p.data_len(), p.finish(), Some(p)))
                 }),
                 _ => {
-                    let mut w = tok::Window::new(None);
+                    let mut w = tok::Window::new(None, None);
                     let l = inflate::parse_into(raw, usize::MAX, &mut w).ok();
                     l.map(|l| (l, w.data_len(), w.finish(), None))
                 }
