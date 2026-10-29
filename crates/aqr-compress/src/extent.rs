@@ -211,6 +211,7 @@ fn raw(d: &[u8]) -> Option<usize> {
     let size = match d.first_chunk::<4>()? {
         b"RIFF" => u32le(d, 4)?,
         b"FORM" => u32be(d, 4)?,
+        b"II*\0" | b"MM\0*" => return aqr_raw::container::tiff_extent(d),
         _ => return aqr_raw::container::detect(d).map(|c| c.start + c.len),
     };
     // A size of 0 is that of a stream written without seeking back.
@@ -558,6 +559,61 @@ mod tests {
         ends(Format::Clip, &d[..64]);
         d[15] = 16;
         assert_eq!(extent(Format::Clip, &d), None);
+    }
+
+    /// An uncompressed TIFF file of 4 × 2 RGB pixels and a thumbnail (its second IFD), its
+    /// IFDs after the pixels and its description last, as `big`-endian or not.
+    fn tiff_file(big: bool) -> Vec<u8> {
+        let u16b = |v: u16| if big { v.to_be_bytes() } else { v.to_le_bytes() };
+        let u32b = |v: u32| if big { v.to_be_bytes() } else { v.to_le_bytes() };
+        // (tag, type, count, the value or its offset)
+        let ifd = |entries: &[(u16, u16, u32, u32)], next: u32| {
+            let mut d = u16b(entries.len() as u16).to_vec();
+            for &(tag, ty, count, v) in entries {
+                d.extend(u16b(tag));
+                d.extend(u16b(ty));
+                d.extend(u32b(count));
+                d.extend(if ty == 3 && count == 1 { [u16b(v as u16), [0; 2]].concat() } else { u32b(v).to_vec() });
+            }
+            d.extend(u32b(next));
+            d
+        };
+        let mut d = [if big { &b"MM\0*"[..] } else { b"II*\0" }, &u32b(32)].concat();
+        d.extend((0..24).map(|i| i as u8 * 7)); // the pixels, at 8
+        let first = ifd(
+            &[
+                (256, 3, 1, 4),
+                (257, 3, 1, 2),
+                (258, 3, 3, 158),
+                (259, 3, 1, 1),
+                (262, 3, 1, 2),
+                (270, 2, 9, 232),
+                (273, 4, 1, 8),
+                (277, 3, 1, 3),
+                (279, 4, 1, 24),
+                (284, 3, 1, 1),
+            ],
+            164,
+        );
+        d.extend(first); // at 32
+        [8u16, 8, 8].iter().for_each(|&b| d.extend(u16b(b))); // at 158
+        d.extend(ifd(&[(256, 3, 1, 2), (257, 3, 1, 1), (259, 3, 1, 1), (273, 4, 1, 230), (279, 4, 1, 2)], 0)); // at 164
+        d.extend([1, 2]); // the thumbnail, at 230
+        d.extend(b"an image\0"); // at 232
+        d
+    }
+
+    /// A TIFF file ends past its IFDs and what they point to, wherever they are in the file.
+    #[test]
+    fn tiff() {
+        for big in [false, true] {
+            let d = tiff_file(big);
+            assert_eq!(d.len(), 241);
+            ends(Format::Raw, &d);
+            assert!(aqr_raw::container::detect(&d).is_some(), "big {big}");
+            // Cut short in an IFD: to the end of the data.
+            assert_eq!(extent(Format::Raw, &d[..100]), Some(100), "big {big}");
+        }
     }
 
     #[test]

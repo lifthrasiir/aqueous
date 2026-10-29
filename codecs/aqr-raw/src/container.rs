@@ -205,32 +205,11 @@ fn pnm(d: &[u8]) -> Option<Found> {
 /// interleaved, in strips one after another in the file. The rest of the file (other images
 /// too) is kept as it is.
 fn tiff(d: &[u8]) -> Option<Found> {
-    let big = match d.get(0..4)? {
-        b"II*\0" => false,
-        b"MM\0*" => true,
-        _ => return None,
-    };
-    let u16_at = |p| if big { u16be(d, p) } else { u16le(d, p) };
-    let u32_at = |p| if big { u32be(d, p) } else { u32le(d, p) };
-    let ifd = u32_at(4)?;
-    let n = u16_at(ifd)?;
-    // (type, count, the value or its offset) of a tag, and its values
-    let entry = |tag: usize| {
-        (0..n)
-            .map(|i| ifd + 2 + 12 * i)
-            .find(|&e| u16_at(e) == Some(tag))
-            .and_then(|e| Some((u16_at(e + 2)?, u32_at(e + 4)?, e + 8)))
-    };
-    let values = |tag: usize| -> Option<Vec<usize>> {
-        let (ty, count, at) = entry(tag)?;
-        let size = match ty {
-            3 => 2,
-            4 => 4,
-            _ => return None,
-        };
-        let at = if size * count > 4 { u32_at(at)? } else { at };
-        (0..count).map(|i| if size == 2 { u16_at(at + 2 * i) } else { u32_at(at + 4 * i) }).collect()
-    };
+    let t = Tiff::new(d)?;
+    let ifd = t.u32(4)?;
+    t.u16(ifd)?;
+    let entry = |tag: usize| t.entries(ifd).find(|e| e.tag == tag);
+    let values = |tag: usize| t.values(entry(tag)?);
     let one = |tag: usize, default: Option<usize>| match values(tag) {
         Some(v) => (v.len() == 1).then(|| v[0]),
         None if entry(tag).is_none() => default,
@@ -253,6 +232,117 @@ fn tiff(d: &[u8]) -> Option<Found> {
     let f = raster::Format { width: w, height: h, channels, stride };
     (counts.iter().sum::<usize>() == f.len()?).then_some(())?;
     raster_found("tiff", d, f, *offsets.first()?)
+}
+
+/// The most IFDs that [`tiff_extent`] follows (a chain of them may loop).
+const TIFF_IFDS: usize = 1024;
+
+/// Where the TIFF file at the start of `d` ends: past its header, its IFDs (the chain of them,
+/// and the SubIFDs, Exif, GPS and interoperability IFDs below them), the values they point to,
+/// and the data of the strips, tiles and JPEG interchange format they tell. An IFD not all in
+/// `d` (a file cut short) ends it with `d`; data past `d` are clamped to it. None where `d` is
+/// not a TIFF file.
+pub fn tiff_extent(d: &[u8]) -> Option<usize> {
+    let t = Tiff::new(d)?;
+    let mut end = 8;
+    let mut todo = vec![t.u32(4)?];
+    let mut seen = Vec::new();
+    while let Some(ifd) = todo.pop() {
+        if ifd == 0 || seen.contains(&ifd) || seen.len() == TIFF_IFDS {
+            continue;
+        }
+        seen.push(ifd);
+        let Some(next) = t.u16(ifd).and_then(|n| t.u32(ifd + 2 + 12 * n).map(|v| (ifd + 6 + 12 * n, v))) else {
+            return Some(d.len());
+        };
+        end = end.max(next.0);
+        todo.push(next.1);
+        let entries: Vec<_> = t.entries(ifd).collect();
+        let values = |tag: usize| entries.iter().find(|e| e.tag == tag).and_then(|&e| t.values(e));
+        for &e in &entries {
+            if let Some(len) = Tiff::size(e.ty).map(|s| s.saturating_mul(e.count))
+                && len > 4
+            {
+                end = end.max(t.u32(e.at).map_or(d.len(), |at| at.saturating_add(len)));
+            }
+            if [330, 34665, 34853, 40965].contains(&e.tag) {
+                todo.extend(t.values(e).unwrap_or_default());
+            }
+        }
+        // (offsets, byte counts) of strips, tiles, free space and JPEG interchange format
+        for (offsets, counts) in [(273, 279), (324, 325), (288, 289), (513, 514)] {
+            if let (Some(o), Some(c)) = (values(offsets), values(counts)) {
+                end = o.iter().zip(&c).map(|(o, c)| o.saturating_add(*c)).fold(end, usize::max);
+            }
+        }
+    }
+    Some(end.min(d.len()))
+}
+
+/// A TIFF file's fields, of its byte order.
+#[derive(Clone, Copy)]
+struct Tiff<'a> {
+    d: &'a [u8],
+    big: bool,
+}
+
+/// An entry of an IFD: its tag, the type and count of its values, and where they are (or their
+/// offset, where they are more than 4 bytes).
+#[derive(Clone, Copy)]
+struct TiffEntry {
+    tag: usize,
+    ty: usize,
+    count: usize,
+    at: usize,
+}
+
+impl<'a> Tiff<'a> {
+    fn new(d: &'a [u8]) -> Option<Self> {
+        let big = match d.get(0..4)? {
+            b"II*\0" => false,
+            b"MM\0*" => true,
+            _ => return None,
+        };
+        Some(Tiff { d, big })
+    }
+
+    fn u16(self, p: usize) -> Option<usize> {
+        if self.big { u16be(self.d, p) } else { u16le(self.d, p) }
+    }
+
+    fn u32(self, p: usize) -> Option<usize> {
+        if self.big { u32be(self.d, p) } else { u32le(self.d, p) }
+    }
+
+    /// The entries of the IFD at `ifd` that are in the file.
+    fn entries(self, ifd: usize) -> impl Iterator<Item = TiffEntry> {
+        (0..self.u16(ifd).unwrap_or(0)).map_while(move |i| {
+            let e = ifd + 2 + 12 * i;
+            Some(TiffEntry { tag: self.u16(e)?, ty: self.u16(e + 2)?, count: self.u32(e + 4)?, at: e + 8 })
+        })
+    }
+
+    /// The bytes of a value of type `ty`, of those of TIFF 6.0 and IFD (13).
+    fn size(ty: usize) -> Option<usize> {
+        Some(match ty {
+            1 | 2 | 6 | 7 => 1,
+            3 | 8 => 2,
+            4 | 9 | 11 | 13 => 4,
+            5 | 10 | 12 => 8,
+            _ => return None,
+        })
+    }
+
+    /// The values of `e`, of SHORT, LONG or IFD.
+    fn values(self, e: TiffEntry) -> Option<Vec<usize>> {
+        let size = match e.ty {
+            3 => 2,
+            4 | 13 => 4,
+            _ => return None,
+        };
+        let at = if size * e.count > 4 { self.u32(e.at)? } else { e.at };
+        (0..e.count).map(|i| if size == 2 { self.u16(at + 2 * i) } else { self.u32(at + 4 * i) }).collect()
+    }
 }
 
 /// 16-bit raster samples at `start`, if the file holds all of them.
