@@ -63,6 +63,12 @@ pub trait Source {
     fn bits(&mut self, f: Field, n: u32) -> Option<u32>;
     /// An entry of codebook `book`.
     fn entry(&mut self, f: Field, book: usize) -> Option<u32>;
+    /// The `reads` VQ entries of book `book` of a partition, in order (`f` a [`Field::Vq`] of `k`
+    /// 0): [`Source::entry`] of each, unless a source does them at once. Whether all were given.
+    fn vq(&mut self, f: Field, book: usize, reads: usize) -> bool {
+        let Field::Vq { submap, v, part, pass, class, .. } = f else { return false };
+        (0..reads).all(|k| self.entry(Field::Vq { submap, v, part, pass, class, k }, book).is_some())
+    }
 }
 
 /// How a walk ended.
@@ -199,8 +205,8 @@ fn residue(
                     let Some(book) = r.books[class][pass] else { continue };
                     let dims = s.codebooks[book].dims;
                     let reads = if r.kind == 0 { r.partition / dims } else { r.partition.div_ceil(dims) };
-                    for k in 0..reads {
-                        src.entry(Field::Vq { submap, v, part, pass, class, k }, book).ok_or(Stop::Short)?;
+                    if !src.vq(Field::Vq { submap, v, part, pass, class, k: 0 }, book, reads) {
+                        return Err(Stop::Short);
                     }
                 }
                 part += 1;

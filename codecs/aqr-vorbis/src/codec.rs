@@ -107,7 +107,36 @@ struct Gather<'a, 'k> {
     values: usize,
 }
 
+impl Gather<'_, '_> {
+    /// Puts entry `e` of book `book` as symbols from key `key` of its chunk 0.
+    #[inline(always)]
+    fn put(&mut self, book: usize, mut key: u32, e: u32) {
+        let (mut r, mut c) = (self.keys.ranks[book].rank[e as usize], 0);
+        while r >= ESCAPE && c + 1 < self.keys.chunks[book] {
+            self.syms.push((key, ESCAPE as u16));
+            r -= ESCAPE;
+            c += 1;
+            key = self.keys.chunk(book, c);
+        }
+        self.syms.push((key, r as u16));
+    }
+}
+
 impl Source for Gather<'_, '_> {
+    fn vq(&mut self, f: Field, book: usize, reads: usize) -> bool {
+        let Field::Vq { v, pass, .. } = f else { return false };
+        let (base, slot) = self.cx.vq_run(book, v, pass);
+        let cb = &self.setup.codebooks[book];
+        for _ in 0..reads {
+            let Some(e) = cb.read(&mut self.r) else { return false };
+            let key = base + self.cx.vq_key(slot);
+            self.put(book, key, e);
+            self.cx.vq_entry(book, slot, e);
+            self.values += 1;
+        }
+        true
+    }
+
     fn bits(&mut self, f: Field, n: u32) -> Option<u32> {
         // (a field of no bits is kept, not coded)
         if n == 0 {
@@ -123,17 +152,8 @@ impl Source for Gather<'_, '_> {
 
     fn entry(&mut self, f: Field, book: usize) -> Option<u32> {
         let e = self.setup.codebooks[book].read(&mut self.r)?;
-        let mut key = self.cx.entry_key(f, book);
-        let ranks = &self.keys.ranks[book];
-        let chunks = self.keys.chunks[book];
-        let (mut r, mut c) = (ranks.rank[e as usize], 0);
-        while r >= ESCAPE && c + 1 < chunks {
-            self.syms.push((key, ESCAPE as u16));
-            r -= ESCAPE;
-            c += 1;
-            key = self.keys.chunk(book, c);
-        }
-        self.syms.push((key, r as u16));
+        let key = self.cx.entry_key(f, book);
+        self.put(book, key, e);
         self.cx.entry(f, book, e);
         self.values += 1;
         Some(e)
@@ -267,7 +287,48 @@ impl Emit<'_, '_> {
     }
 }
 
+impl Emit<'_, '_> {
+    /// An entry of book `book` from key `key` of its chunk 0, written; None where its rank is
+    /// past the book's.
+    #[inline(always)]
+    fn get(&mut self, book: usize, mut key: u32) -> Option<u32> {
+        let chunks = self.keys.chunks[book];
+        let (mut r, mut c) = (0u32, 0);
+        loop {
+            let s = self.dec.get(self.map[key as usize] as usize);
+            if s == ESCAPE && c + 1 < chunks {
+                r += ESCAPE;
+                c += 1;
+                key = self.keys.chunk(book, c);
+                continue;
+            }
+            r += s;
+            break;
+        }
+        let e = *self.keys.ranks[book].entry.get(r as usize)?;
+        self.setup.codebooks[book].write(e, &mut self.w);
+        Some(e)
+    }
+}
+
 impl Source for Emit<'_, '_> {
+    fn vq(&mut self, f: Field, book: usize, reads: usize) -> bool {
+        let Field::Vq { v, pass, .. } = f else { return false };
+        let (base, slot) = self.cx.vq_run(book, v, pass);
+        for _ in 0..reads {
+            if !self.take() {
+                return false;
+            }
+            let key = base + self.cx.vq_key(slot);
+            let Some(e) = self.get(book, key) else {
+                self.bad = true;
+                return false;
+            };
+            self.cx.vq_entry(book, slot, e);
+        }
+        true
+    }
+
     fn bits(&mut self, f: Field, n: u32) -> Option<u32> {
         if n == 0 {
             self.cx.field(f, 0);
@@ -286,26 +347,11 @@ impl Source for Emit<'_, '_> {
         if !self.take() {
             return None;
         }
-        let ranks = &self.keys.ranks[book];
-        let chunks = self.keys.chunks[book];
-        let mut key = self.cx.entry_key(f, book);
-        let (mut r, mut c) = (0u32, 0);
-        loop {
-            let s = self.dec.get(self.map[key as usize] as usize);
-            if s == ESCAPE && c + 1 < chunks {
-                r += ESCAPE;
-                c += 1;
-                key = self.keys.chunk(book, c);
-                continue;
-            }
-            r += s;
-            break;
-        }
-        let Some(&e) = ranks.entry.get(r as usize) else {
+        let key = self.cx.entry_key(f, book);
+        let Some(e) = self.get(book, key) else {
             self.bad = true;
             return None;
         };
-        self.setup.codebooks[book].write(e, &mut self.w);
         self.cx.entry(f, book, e);
         Some(e)
     }

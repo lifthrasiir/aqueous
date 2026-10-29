@@ -292,6 +292,29 @@ impl<'s> Contexts<'s> {
         CLASS_SLOTS + (submap * self.vectors + v) * 1024 + part.min(1023)
     }
 
+    /// For VQ entries of book `book` of vector `v` and pass `pass`: the key of their chunk 0 at
+    /// context 0, and their (vector, pass) slot; then [`Contexts::vq_key`] and
+    /// [`Contexts::vq_entry`] of each in turn.
+    #[inline]
+    pub fn vq_run(&self, book: usize, v: usize, pass: usize) -> (u32, usize) {
+        (self.keys.role_base[book][ROLE_VQ], v.min(self.vectors - 1) * PASSES + pass)
+    }
+
+    /// The context of the next VQ entry of slot `slot` (of [`Contexts::vq_run`]).
+    #[inline(always)]
+    pub fn vq_key(&self, slot: usize) -> u32 {
+        match self.before[slot] {
+            NONE8 => 4,
+            m => m.min(3) as u32,
+        }
+    }
+
+    /// Records VQ entry `e` of book `book` of slot `slot`.
+    #[inline(always)]
+    pub fn vq_entry(&mut self, book: usize, slot: usize, e: u32) {
+        self.before[slot] = self.mags[book].get(e as usize).copied().unwrap_or(0);
+    }
+
     /// Records entry `e` of book `book` read as `f`, after its key was asked.
     pub fn entry(&mut self, f: Field, book: usize, e: u32) {
         match f {
