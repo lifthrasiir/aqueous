@@ -1,0 +1,19 @@
+[package]
+name = "aqr-ima"
+version = "0.1.0"
+edition = "2024"
+description = "IMA ADPCM blocks (Xbox and Microsoft layouts) as a record of their headers and nibbles under an adaptive model, and back bit for bit"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+[dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-common = { path = "../../crates/aqr-common" }

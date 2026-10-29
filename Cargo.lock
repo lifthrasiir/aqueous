@@ -281,6 +281,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-ima"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+]
+
+[[package]]
 name = "aqr-infer-recs"
 version = "0.1.0"
 dependencies = [
