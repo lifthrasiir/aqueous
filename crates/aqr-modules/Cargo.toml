@@ -20,6 +20,7 @@ aqr-fits = { path = "../../codecs/aqr-fits", default-features = false }
 aqr-flac = { path = "../../codecs/aqr-flac", default-features = false }
 aqr-flate = { path = "../../codecs/aqr-flate", default-features = false }
 aqr-git = { path = "../../codecs/aqr-git", default-features = false }
+aqr-infer-recs = { path = "../../codecs/aqr-infer-recs", default-features = false }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg", default-features = false }
 aqr-lz4 = { path = "../../codecs/aqr-lz4", default-features = false }
 aqr-lzma = { path = "../../codecs/aqr-lzma", default-features = false }
@@ -115,6 +116,16 @@ required-features = ["wasm"]
 [[bin]]
 name = "xsv-recons"
 path = "src/bin/xsv-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "recs-fields"
+path = "src/bin/recs-fields.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "recs-entries"
+path = "src/bin/recs-entries.rs"
 required-features = ["wasm"]
 
 [[bin]]

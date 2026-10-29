@@ -5,10 +5,18 @@ edition = "2024"
 description = "Tables of records inferred in files of unknown formats (fixed-size records, entries with a length field) and their fields transposed"
 publish = false
 
+[features]
+default = ["encode"]
+# The inference and the formulas (`formula`); without it, the code of the modules alone (`module`).
+encode = ["dep:aqr-formula", "dep:zstd"]
+
 [dependencies]
-zstd = "0.13"
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
 libc = "0.2"
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
@@ -17,3 +25,4 @@ libc = "0.2"
 [[example]]
 name = "aqr-infer-recs-bench"
 path = "examples/bench.rs"
+required-features = ["encode"]

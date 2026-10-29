@@ -166,6 +166,18 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/raster-recons.block"),
     },
     Known {
+        name: "recs-entries",
+        version: 1,
+        sha512_256: hex("df80c12c9ad47bc6cd4f66d39a7ac02e124777a1a5a3a3e84eba79d569864f31"),
+        block: include_bytes!("../wasm/recs-entries.block"),
+    },
+    Known {
+        name: "recs-fields",
+        version: 1,
+        sha512_256: hex("03fae1c3201f91c5b8512b43d0d261a19ab5568f280233df170b7026e90e5275"),
+        block: include_bytes!("../wasm/recs-fields.block"),
+    },
+    Known {
         name: "snappy-recons",
         version: 2,
         sha512_256: hex("6e967dac1072db4e3ab21cd10103b0773253bc24e64b7a94aa8519de42bd02db"),
@@ -198,7 +210,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "zip-recons",
         version: 3,
-        sha512_256: hex("63150a666d6cb14bf9162a5f353343612b2cfc2a4111f5d4b2a15324598d91cc"),
+        sha512_256: hex("cf27ace7b59ee295880fc7dcaf1716e5b690680c07da990bda5a856db58c1858"),
         block: include_bytes!("../wasm/zip-recons.block"),
     },
 ];

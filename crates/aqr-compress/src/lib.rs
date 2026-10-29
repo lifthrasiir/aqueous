@@ -21,6 +21,9 @@
 //! - Text, a whole file of text bytes or data of a name telling text: a delimited table (CSV,
 //!   TSV, USV and the like) by aqr-xsv, its fields stored column by column, where it takes it;
 //!   else aqr-wrt, its words and markup replaced by codes of a dictionary of its own.
+//! - Data in which a scan finds no file (an ELF image, the rest of an executable, data of no
+//!   format): aqr-infer-recs, its tables of records and chains of entries transposed by their
+//!   fields, where a quick estimate tells they may save 5% at least and they do.
 //! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, FITS
 //!   and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
 //!   applied to its streams, and files it embeds (PDF's DEFLATE streams and images, PSD's and
@@ -642,11 +645,21 @@ fn made_alone(d: &[u8], opt: &Options, depth: u32, how: Nest, cx: &Cx) -> Option
             }
             None => None,
         },
-        Nest::Scan => scan(d, None, opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx)),
+        // else its tables of records, if any
+        Nest::Scan => scan(d, None, opt, depth, cx)
+            .filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
+            .or_else(|| records(d, opt, depth, cx)),
         Nest::As(format) => {
             scan(d, Some(format), opt, depth, cx).filter(|m| smaller(&m.f, m.gaps.as_deref(), d, opt, cx))
         }
     }
+}
+
+/// `d`, data in which a scan finds no file, as its tables of records and chains of entries
+/// where aqr-infer-recs takes them (a quick estimate telling they may save 5% at least) and the
+/// formula is [`smaller`].
+fn records(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Made> {
+    recompress_as(Format::Records, d, opt, depth, cx).map(Made::from)
 }
 
 /// Whether data detected as `format` is text: taken as a table, else as text ([`made`]).
@@ -1403,6 +1416,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Obj => aqr_obj::formula::encode,
         Format::Xsv => aqr_xsv::formula::encode,
         Format::Text => aqr_wrt::formula::encode,
+        Format::Records => aqr_infer_recs::formula::encode,
         _ => return None,
     })
 }
@@ -1852,12 +1866,23 @@ mod tests {
         assert!(!f.applies().is_empty());
     }
 
+    /// Bytes of 16 values in no order (of an LCG): DEFLATE takes 4 bits off each.
+    fn unruled(n: usize) -> Vec<u8> {
+        let mut x = 1u64;
+        (0..n)
+            .map(|_| {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                0x80 | (x >> 60) as u8
+            })
+            .collect()
+    }
+
     /// The formulas recompressors make are evaluated beforehand: decoding the archive takes
     /// every application's output from the memo, and runs the module where it is not there.
     #[test]
     fn verified_beforehand() {
-        // (of no words, which aqr-wrt would take)
-        let text: Vec<u8> = (0..20000).flat_map(|i| format!("{i}: {}\n", i * 7).into_bytes()).collect();
+        // (of no records, which aqr-infer-recs would take, nor words, which aqr-wrt would)
+        let text = unruled(240_000);
         let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
         std::io::Write::write_all(&mut z, &text).unwrap();
         let d = z.finish().unwrap();
@@ -1902,8 +1927,8 @@ mod tests {
     /// application that is not a content too; one of another stream is not.
     #[test]
     fn content_streams() {
-        // (of no words, which aqr-wrt would take)
-        let text: Vec<u8> = (0..20000).flat_map(|i| format!("{i}: {}\n", i * 7).into_bytes()).collect();
+        // (of no records, which aqr-infer-recs would take, nor words, which aqr-wrt would)
+        let text = unruled(240_000);
         let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
         std::io::Write::write_all(&mut z, &text).unwrap();
         let d = [&b"header "[..], &z.finish().unwrap()].concat();

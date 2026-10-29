@@ -25,8 +25,11 @@ prototype; `scripts/rec_oracle.py` measures the prototype against the layouts of
 
 ## Status
 
-A library and a bench; no module and no formula yet, so no `FORMAT.md`. `Region::restore`
-inverts a form from what a decoder would know (the shape, the count, the fields).
+The modules `recs-fields` (records from the byte planes of their fields: a transpose any
+recompressor may apply to records of a fixed size) and `recs-entries` (entries from their
+heads and tails) are specified in [FORMAT.md](FORMAT.md); [`module`](src/module.rs) is their
+code, and [`formula`](src/formula.rs) makes the formula of a file. aqr-compress tries it on
+data in which a scan finds no file, where the quick estimate tells 5% at least (below).
 
 The inference takes 0.03 to 1.3 s a file (on one thread), mostly a constant: the window scan
 and the growth of the regions found (`fixed`), and the chain search.

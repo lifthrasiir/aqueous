@@ -1,6 +1,8 @@
 //! Files of known layouts (as `scripts/rec_synth.py` makes): the layout is found, and every
 //! region taken restores.
 
+use aqr_formula::{Formula, Node};
+use aqr_infer_recs::formula::{self, ENTRIES, FIELDS};
 use aqr_infer_recs::{Choice, Shape, apply, infer, zstd_size};
 
 struct Rng(u64);
@@ -25,6 +27,26 @@ fn check(data: &[u8], choices: &[Choice]) {
         assert_eq!(back.as_deref(), Some(&data[r.start..r.end]), "{} does not restore", r.label());
     }
     assert!(zstd_size(&apply(data, choices)) < zstd_size(data));
+    let f = formula::formula(data, choices);
+    assert_eq!(eval(&f, &f.root), data);
+}
+
+/// The output of node n of formula f, by the modules' code.
+fn eval(f: &Formula, n: &Node) -> Vec<u8> {
+    match n {
+        Node::Slice { stream, start, len } => f.streams[*stream].data[*start as usize..(start + len) as usize].to_vec(),
+        Node::Concat(parts) => parts.iter().flat_map(|p| eval(f, p)).collect(),
+        Node::Apply(a) => {
+            let inputs: Vec<Vec<u8>> = a.inputs.iter().map(|i| eval(f, i)).collect();
+            let inputs: Vec<&[u8]> = inputs.iter().map(|i| &i[..]).collect();
+            match a.module {
+                m if m == FIELDS => formula::decode_fields(&a.params, &inputs, a.len).unwrap(),
+                m if m == ENTRIES => formula::decode_entries(&a.params, &inputs, a.len).unwrap(),
+                m => panic!("{m:?}"),
+            }
+        }
+        n => panic!("{n:?}"),
+    }
 }
 
 /// A 316-byte header, 30000 records of 20 bytes (u32 counting up, u64 time in ms rising by

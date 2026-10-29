@@ -65,10 +65,13 @@ pub enum Format {
     Xsv,
     /// Text (aqr-wrt), a whole file of text bytes only: not looked for in other data.
     Text,
+    /// Tables of records and chains of entries (aqr-infer-recs) in data in which a scan finds no
+    /// file: of no magic bytes, never detected.
+    Records,
 }
 
 impl Format {
-    pub const ALL: [Format; 28] = [
+    pub const ALL: [Format; 29] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -97,6 +100,7 @@ impl Format {
         Format::Cpio,
         Format::Xsv,
         Format::Text,
+        Format::Records,
     ];
 
     pub fn name(self) -> &'static str {
@@ -129,6 +133,7 @@ impl Format {
             Format::Cpio => "cpio",
             Format::Xsv => "xsv",
             Format::Text => "text",
+            Format::Records => "records",
         }
     }
 

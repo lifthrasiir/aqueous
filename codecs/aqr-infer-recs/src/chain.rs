@@ -5,20 +5,9 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::kt::{self, best_run};
+pub use crate::module::{KINDS, Rule};
 use crate::{MIN_RECORDS, zcost};
 
-/// The field kinds a length is read as: (width, big-endian, mask).
-pub const KINDS: [(usize, bool, u32); 9] = [
-    (1, false, 0xFF),
-    (2, false, 0xFFFF),
-    (2, false, 0x7FFF),
-    (2, false, 0x0FFF),
-    (2, true, 0xFFFF),
-    (2, true, 0x7FFF),
-    (2, true, 0x0FFF),
-    (4, false, 0xFFFF_FFFF),
-    (4, true, 0xFFFF_FFFF),
-];
 const ALIGNS: [usize; 3] = [1, 4, 8];
 const MAX_B: usize = 64;
 
@@ -41,47 +30,6 @@ const FOLLOW_SAMPLE: usize = 4096;
 const FOLLOW_KEEP: usize = 8;
 /// The bytes of a chain's first entries its rotation and head are chosen on.
 const SAMPLE: usize = 1 << 18;
-
-/// A hypothesis: entries from p0, the length at d of kind KINDS[kind], plus b, aligned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Rule {
-    pub d: usize,
-    pub kind: usize,
-    pub b: usize,
-    pub align: usize,
-}
-
-impl Rule {
-    pub fn width(&self) -> usize {
-        KINDS[self.kind].0
-    }
-
-    /// The length field at p (zero past the end of data).
-    pub fn value(&self, data: &[u8], p: usize) -> u64 {
-        let (w, big, mask) = KINDS[self.kind];
-        let at = |i: usize| *data.get(p + self.d + i).unwrap_or(&0) as u64;
-        let v = if big { (0..w).fold(0, |v, i| v << 8 | at(i)) } else { (0..w).rev().fold(0, |v, i| v << 8 | at(i)) };
-        v & mask as u64
-    }
-
-    /// The length of the entry at p.
-    pub fn length(&self, data: &[u8], p: usize) -> usize {
-        let a = self.align as u64;
-        ((self.b as u64 + self.value(data, p)).div_ceil(a) * a) as usize
-    }
-
-    pub fn describe(&self) -> String {
-        let (w, big, mask) = KINDS[self.kind];
-        format!(
-            "length at {} as {}{}&{mask:#x}, +{} align {}",
-            self.d,
-            if big { "be" } else { "le" },
-            8 * w,
-            self.b,
-            self.align
-        )
-    }
-}
 
 /// A score, ordered.
 #[derive(PartialEq)]

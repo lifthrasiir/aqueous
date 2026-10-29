@@ -38,6 +38,7 @@ aqr-clip = { path = "../../codecs/aqr-clip" }
 aqr-obj = { path = "../../codecs/aqr-obj" }
 aqr-xsv = { path = "../../codecs/aqr-xsv" }
 aqr-raw = { path = "../../codecs/aqr-raw" }
+aqr-infer-recs = { path = "../../codecs/aqr-infer-recs" }
 aqr-snappy = { path = "../../codecs/aqr-snappy" }
 aqr-zip = { path = "../../codecs/aqr-zip" }
 aqr-sqlite = { path = "../../codecs/aqr-sqlite" }

@@ -3,8 +3,8 @@ use std::io::Write;
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, BUNDLE, CLIP, FLAC, FLATE, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER, SQLITE,
-    WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
+    ARM64, BUNDLE, CLIP, FLAC, FLATE, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER,
+    RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -17,6 +17,13 @@ fn modules(f: &Formula) -> Vec<&'static str> {
     f.applies().iter().map(|a| a.module.name).collect()
 }
 
+/// [`modules`] but aqr-infer-recs', which may take tables of records anywhere in data of no
+/// format (the rest of an executable, a database not at the start of the data, the contents of
+/// a format): the formats.
+fn formats(f: &Formula) -> Vec<&'static str> {
+    modules(f).into_iter().filter(|&m| m != RECS_FIELDS.name && m != RECS_ENTRIES.name).collect()
+}
+
 /// An encoder of the modules aqr-decompress knows.
 fn encoder() -> aqr::Encoder {
     aqr::Encoder::new(aqr::Level::MID).with_modules(aqr_decompress::wasm_of)
@@ -26,13 +33,19 @@ fn encoder() -> aqr::Encoder {
 /// archive.
 fn roundtrip(d: &[u8], opt: &Options) -> Formula {
     let f = recompress(d, opt);
+    check(d, &f);
+    f
+}
+
+/// Checks that formula `f` evaluates back to `d`, also through the archive (natively and as
+/// WebAssembly).
+fn check(d: &[u8], f: &Formula) {
     assert_eq!(f.len(), d.len() as u64);
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
-    let c = encoder().encode(&f, Some(aqr::checksum(d))).unwrap();
+    let c = encoder().encode(f, Some(aqr::checksum(d))).unwrap();
     assert!(decompress(&c, 1).unwrap() == d, "archive does not decompress to the input:\n{f}");
     let w = aqr::decode(&c, &aqr_decompress::Wasm);
     assert!(w.as_ref().is_ok_and(|w| w == d), "archive does not decompress as WebAssembly: {:?}\n{f}", w.err());
-    f
 }
 
 /// Options keeping every formula, however large it archives: for what is recompressed.
@@ -226,11 +239,59 @@ fn lz4_nested() {
     assert_eq!(modules(&f), [LZ4.name]);
 }
 
+/// Binary data of no format: a header, `n` records of 20 bytes (a counter, a time rising by
+/// about 1000, a byte of four values), and a trailer.
+fn table(n: usize) -> Vec<u8> {
+    let mut d = b"TABL".to_vec();
+    d.extend((0..300).map(|i| (i * 131 % 251) as u8));
+    let mut t = 1_700_000_000_000u64;
+    for i in 0..n {
+        t += 900 + (i * 7919 % 200) as u64;
+        d.extend((1000 + i as u32).to_le_bytes());
+        d.extend(t.to_le_bytes());
+        d.extend([[1, 2, 7, 30][i * 31 % 4], 0, 0, 0, 0, 0, 0, 0]);
+    }
+    d.extend(b"END!");
+    d
+}
+
+/// Binary data of no format: entries of a 16-byte head (a time, the length of the payload
+/// twice) and a payload of text.
+fn entries(n: usize) -> Vec<u8> {
+    let mut d = vec![0xd4, 0xc3, 0xb2, 0xa1, 2, 0, 4, 0];
+    let (mut sec, mut usec) = (1_700_000_000u32, 0u32);
+    for i in 0..n {
+        let len = 60 + i * 7919 % 300;
+        usec += (i * 104729 % 4000) as u32;
+        (sec, usec) = (sec + usec / 1_000_000, usec % 1_000_000);
+        for v in [sec, usec, len as u32, len as u32] {
+            d.extend(v.to_le_bytes());
+        }
+        let p = format!("GET /item/{i} HTTP/1.1\r\nHost: example{}\r\n\r\n", i % 7);
+        d.extend(p.bytes().cycle().take(len));
+    }
+    d
+}
+
+#[test]
+fn records_of_no_format() {
+    // a table of fixed-size records, its fields as planes
+    let f = roundtrip(&table(20_000), &Options::default());
+    assert_eq!(modules(&f), [RECS_FIELDS.name]);
+    // entries by their lengths, their heads as planes (the quick estimate looks at tables of
+    // records only, and turns them down)
+    let d = entries(3_000);
+    assert!(modules(&roundtrip(&d, &all())).is_empty());
+    let f = aqr_infer_recs::formula::formula(&d, &aqr_infer_recs::infer(&d));
+    check(&d, &f);
+    assert_eq!(modules(&f), [RECS_ENTRIES.name, RECS_FIELDS.name]);
+}
+
 #[test]
 fn lzop_files() {
     for t in ["big.1", "big.9", "mixed.9"] {
         let d = fixture(&format!("codecs/aqr-lzo/tests/data/{t}.lzo"));
-        assert_eq!(modules(&roundtrip(&d, &all())), [LZO.name], "{t}");
+        assert_eq!(formats(&roundtrip(&d, &all())), [LZO.name], "{t}");
     }
     // found in data
     let d = [text(5000), fixture("codecs/aqr-lzo/tests/data/big.9.lzo"), text(5000)].concat();
@@ -431,7 +492,7 @@ fn macho_universal() {
     let mut ppc = d.clone();
     ppc[8 + 20..8 + 24].copy_from_slice(&18u32.to_be_bytes());
     ppc[at[1]..at[1] + 4].copy_from_slice(&[0xfe, 0xed, 0xfa, 0xcf]);
-    assert_eq!(modules(&roundtrip(&ppc, &Options { file: Nest::Exact, ..all() })), [X86.name]);
+    assert_eq!(formats(&roundtrip(&ppc, &Options { file: Nest::Exact, ..all() })), [X86.name]);
 }
 
 /// An ARM64 image is filtered as ARM64 code, and one of another machine (ARM) not at all.
@@ -822,6 +883,7 @@ fn clip_whole() {
     let f = roundtrip(&clip::sample(70), &all());
     let m = modules(&f);
     assert_eq!(m[0], CLIP.name, "{m:?}");
+    let m = formats(&f);
     assert!(m.iter().all(|&n| n == CLIP.name || n == FLATE.name), "{m:?}");
     // looked for in other data too, by its header and size
     let inside = [&b"some data before "[..], &clip::sample(0), b"and after"].concat();
@@ -836,7 +898,7 @@ fn sqlite_whole() {
     let Some(db) = sqlite_db(sql) else { return };
     assert_eq!(modules(&roundtrip(&db, &all())), [SQLITE.name]);
     // a database is a whole file: not looked for in the middle of data
-    assert!(modules(&roundtrip(&[&b"some data before "[..], &db].concat(), &all())).is_empty());
+    assert!(formats(&roundtrip(&[&b"some data before "[..], &db].concat(), &all())).is_empty());
 }
 
 /// What recompressors know of their data refines what is made of it: the data of a gzip member

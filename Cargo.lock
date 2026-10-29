@@ -104,6 +104,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-git",
+ "aqr-infer-recs",
  "aqr-jpeg",
  "aqr-lz4",
  "aqr-lzma",
@@ -142,6 +143,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-git",
+ "aqr-infer-recs",
  "aqr-jpeg",
  "aqr-lz4",
  "aqr-lzma",
@@ -261,6 +263,8 @@ dependencies = [
 name = "aqr-infer-recs"
 version = "0.1.0"
 dependencies = [
+ "aqr-common",
+ "aqr-formula",
  "libc",
  "zstd",
 ]
@@ -322,6 +326,7 @@ dependencies = [
  "aqr-flac",
  "aqr-flate",
  "aqr-git",
+ "aqr-infer-recs",
  "aqr-jpeg",
  "aqr-lz4",
  "aqr-lzma",

@@ -4,29 +4,9 @@
 
 use std::collections::HashMap;
 
+pub use crate::module::{Field, How};
+use crate::module::{mask, values};
 use crate::{kt, zcost};
-
-/// How a field's values are coded.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum How {
-    Raw,
-    /// Less the field of the record before (the first record less 0).
-    Delta,
-    /// Xor the field of the record before.
-    Xor,
-    /// Less the field of the same width at this offset of the record.
-    Sub(usize),
-    /// Xor the field of the same width at this offset of the record.
-    XorRef(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Field {
-    pub off: usize,
-    pub width: usize,
-    pub big: bool,
-    pub how: How,
-}
 
 /// What a field's planes cost while the fields are chosen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,24 +27,6 @@ const FIELD_BITS: f64 = 16.0;
 /// records: FIELD_BYTES in all.
 pub const FIELD_ROWS: usize = 256;
 const FIELD_BYTES: usize = 1 << 16;
-
-/// The field (`off`, `width`, `big`) of each record of m (rows of k bytes).
-fn values(m: &[u8], k: usize, off: usize, width: usize, big: bool) -> Vec<u64> {
-    m.chunks_exact(k)
-        .map(|r| {
-            let b = &r[off..off + width];
-            if big {
-                b.iter().fold(0, |v, &x| v << 8 | x as u64)
-            } else {
-                b.iter().rev().fold(0, |v, &x| v << 8 | x as u64)
-            }
-        })
-        .collect()
-}
-
-fn mask(width: usize) -> u64 {
-    if width == 8 { !0 } else { (1 << (8 * width)) - 1 }
-}
 
 /// The values v of field f coded.
 fn code(v: &[u64], m: &[u8], k: usize, f: &Field) -> Vec<u64> {
@@ -107,37 +69,9 @@ pub fn encode(m: &[u8], k: usize, fields: &[Field]) -> Vec<u8> {
     out
 }
 
-/// The n records of k bytes back from the planes of their fields (None if too short).
+/// The n records of k bytes back from the planes of their fields (None if not exactly).
 pub fn decode(planes: &[u8], n: usize, k: usize, fields: &[Field]) -> Option<Vec<u8>> {
-    let mut m = vec![0u8; n * k];
-    let mut at = 0;
-    for f in fields {
-        let p = planes.get(at..at + n * f.width)?;
-        at += n * f.width;
-        let mk = mask(f.width);
-        let refs = match f.how {
-            How::Sub(r) | How::XorRef(r) => values(&m, k, r, f.width, f.big),
-            _ => Vec::new(),
-        };
-        let mut prev = 0u64;
-        for i in 0..n {
-            let t = (0..f.width).fold(0u64, |t, j| t | (p[j * n + i] as u64) << (8 * j));
-            let v = match f.how {
-                How::Raw => t,
-                How::Delta => t.wrapping_add(prev) & mk,
-                How::Xor => t ^ prev,
-                How::Sub(_) => t.wrapping_add(refs[i]) & mk,
-                How::XorRef(_) => t ^ refs[i],
-            };
-            prev = v;
-            let r = &mut m[i * k + f.off..i * k + f.off + f.width];
-            for (j, b) in r.iter_mut().enumerate() {
-                let sh = if f.big { 8 * (f.width - 1 - j) } else { 8 * j };
-                *b = (v >> sh) as u8;
-            }
-        }
-    }
-    Some(m)
+    crate::module::decode_planes(planes, n, k, fields)
 }
 
 /// FIELD_ROWS records from each of 4 places over m (all of m if that is not fewer).

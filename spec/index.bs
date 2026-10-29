@@ -4690,6 +4690,14 @@ as follows:</p>
       <td>raster-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-raw/FORMAT.md">codecs/aqr-raw/FORMAT.md</a>
     <tr>
+      <td><code>df80c12c9ad47bc6cd4f66d39a7ac02e124777a1a5a3a3e84eba79d569864f31</code>
+      <td>recs-entries@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-infer-recs/FORMAT.md">codecs/aqr-infer-recs/FORMAT.md</a>
+    <tr>
+      <td><code>03fae1c3201f91c5b8512b43d0d261a19ab5568f280233df170b7026e90e5275</code>
+      <td>recs-fields@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-infer-recs/FORMAT.md">codecs/aqr-infer-recs/FORMAT.md</a>
+    <tr>
       <td><code>6e967dac1072db4e3ab21cd10103b0773253bc24e64b7a94aa8519de42bd02db</code>
       <td>snappy-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-snappy/FORMAT.md">codecs/aqr-snappy/FORMAT.md</a>
@@ -4710,7 +4718,7 @@ as follows:</p>
       <td>xsv-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-xsv/FORMAT.md">codecs/aqr-xsv/FORMAT.md</a>
     <tr>
-      <td><code>63150a666d6cb14bf9162a5f353343612b2cfc2a4111f5d4b2a15324598d91cc</code>
+      <td><code>cf27ace7b59ee295880fc7dcaf1716e5b690680c07da990bda5a856db58c1858</code>
       <td>zip-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-zip/FORMAT.md">codecs/aqr-zip/FORMAT.md</a>
   </tbody>
