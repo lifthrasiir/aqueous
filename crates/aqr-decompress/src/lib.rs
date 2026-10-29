@@ -37,6 +37,10 @@ pub const ARM64: Module = Module { name: "exe-recons/arm64", version: 1 };
 /// the streams of [`cil::STREAM_NAMES`].
 pub const CIL: Module = Module { name: "exe-recons/cil", version: 1 };
 
+/// aqr-exe's base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
+/// multiples of (u8); inputs: the streams of [`reloc::STREAM_NAMES`].
+pub const PE_RELOC: Module = Module { name: "exe-recons/pe-reloc", version: 1 };
+
 /// aqr-flate reconstruction of raw DEFLATE streams, one after another, and what is derived of
 /// them (CRC-32 and sizes, by its parameters). Resources: the model data of the records'
 /// profile; inputs: the data, the records and the index cutting them into the streams'.
@@ -123,10 +127,11 @@ pub const RECS_FIELDS: Module = aqr_infer_recs::formula::FIELDS;
 pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 35] = [
+pub const MODULES: [Module; 36] = [
     X86,
     ARM64,
     CIL,
+    PE_RELOC,
     FLATE,
     LZ4,
     LZMA,
@@ -324,6 +329,9 @@ impl Native {
         } else if m == CIL {
             none(resources)?;
             aqr_exe::module::cil(params, inputs, len).map_err(str::to_owned)
+        } else if m == PE_RELOC {
+            none(resources)?;
+            aqr_exe::module::reloc(params, inputs, len).map_err(str::to_owned)
         } else if m == FLATE {
             aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)
         } else if m == LZ4 {

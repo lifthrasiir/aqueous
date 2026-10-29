@@ -134,6 +134,135 @@ pub fn locate_code<R: std::io::Read + std::io::Seek>(f: &mut R) -> std::io::Resu
     Ok(Code { machine, is64, sections, cli })
 }
 
+/// A table of a PE image that aqr-compress codes by its layout: `len` bytes at `off` in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Table {
+    pub off: usize,
+    pub len: usize,
+    pub kind: TableKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableKind {
+    /// The base relocations (data directory 5), for [`crate::reloc`].
+    Reloc,
+    /// Records of `fields` little-endian numbers of `width` bytes each, which mostly rise from
+    /// one record to the next: RVAs and ordinals.
+    Rising { width: usize, fields: usize },
+}
+
+/// The tables of the PE image `d` that [`Table`] describes, those in its stored data: the base
+/// relocations; the export address table, the name pointers and the ordinals; the import
+/// lookup and address tables (those that touch in the file as one); the runtime functions
+/// (data directory 3) of x86-64 and ARM64. Empty where `d` is no PE image. In no order; they may
+/// overlap each other or the code.
+pub fn tables(d: &[u8]) -> Vec<Table> {
+    let mut t = Vec::new();
+    let _ = (|| -> Option<()> {
+        let get = |at: usize, n: usize| d.get(at..at.checked_add(n)?);
+        let u16_at = |at: usize| get(at, 2).map(to_u16);
+        let u32_at = |at: usize| get(at, 4).map(to_u32);
+        let pe = u32_at(0x3c)? as usize;
+        if get(0, 2)? != b"MZ" || get(pe, 4)? != b"PE\0\0" {
+            return None;
+        }
+        let machine = u16_at(pe + 4)?;
+        let num_sections = u16_at(pe + 6)? as usize;
+        let opt = pe + 0x18;
+        let opt_size = u16_at(pe + 0x14)? as usize;
+        let (is64, num_dirs_at) = match u16_at(opt)? {
+            0x10b => (false, 0x5c),
+            0x20b => (true, 0x6c),
+            _ => return None,
+        };
+        let num_dirs = (u32_at(opt + num_dirs_at)? as usize).min(16).min(opt_size.saturating_sub(num_dirs_at + 4) / 8);
+        let dir = |i: usize| -> Option<(u32, u32)> {
+            (i < num_dirs).then_some(())?;
+            let at = opt + num_dirs_at + 4 + 8 * i;
+            Some((u32_at(at)?, u32_at(at + 4)?)).filter(|&(rva, size)| rva != 0 && size != 0)
+        };
+        // (RVA, file offset, stored size) of each section
+        let headers: Vec<(u32, u32, u32)> = (0..num_sections)
+            .map_while(|i| {
+                let h = get(opt + opt_size + 40 * i, 40)?;
+                Some((to_u32(&h[12..16]), to_u32(&h[20..24]), to_u32(&h[16..20])))
+            })
+            .collect();
+        // the file offset of `size` bytes at `rva`, where whole within a section's stored data
+        // and within `d`
+        let at = |rva: u32, size: usize| -> Option<usize> {
+            let &(s_rva, s_off, _) = headers.iter().find(|&&(s_rva, _, s_size)| {
+                rva.checked_sub(s_rva)
+                    .is_some_and(|o| (o as usize).checked_add(size).is_some_and(|e| e <= s_size as usize))
+            })?;
+            let off = s_off as usize + (rva - s_rva) as usize;
+            get(off, size).map(|_| off)
+        };
+        let mut push = |off: Option<usize>, len: usize, kind: TableKind| {
+            if let Some(off) = off.filter(|_| len > 0) {
+                t.push(Table { off, len, kind });
+            }
+        };
+
+        if let Some((rva, size)) = dir(5) {
+            push(at(rva, size as usize), size as usize, TableKind::Reloc);
+        }
+        if let Some((rva, _)) = dir(0) {
+            if let Some(e) = at(rva, 40) {
+                let (functions, names) = (u32_at(e + 20)? as usize, u32_at(e + 24)? as usize);
+                let rising = |width| TableKind::Rising { width, fields: 1 };
+                push(at(u32_at(e + 28)?, functions * 4), functions * 4, rising(4));
+                push(at(u32_at(e + 32)?, names * 4), names * 4, rising(4));
+                push(at(u32_at(e + 36)?, names * 2), names * 2, rising(2));
+            }
+        }
+        if let Some((rva, _)) = dir(1) {
+            let w = if is64 { 8 } else { 4 };
+            let mut thunks: Vec<(usize, usize)> = Vec::new();
+            for k in 0.. {
+                let Some(i) = at(rva.wrapping_add(20 * k), 20) else { break };
+                let (lookup, address) = (u32_at(i)?, u32_at(i + 16)?);
+                if lookup == 0 && address == 0 {
+                    break;
+                }
+                // each array of thunks up to its zero, with it
+                for rva in [lookup, address].into_iter().filter(|&r| r != 0) {
+                    let Some(start) = at(rva, w) else { continue };
+                    let n = d[start..].chunks_exact(w).position(|c| c.iter().all(|&b| b == 0));
+                    if let Some(n) = n.filter(|&n| at(rva, (n + 1) * w).is_some()) {
+                        thunks.push((start, start + (n + 1) * w));
+                    }
+                }
+            }
+            thunks.sort_unstable();
+            thunks.dedup();
+            let mut merged: Vec<(usize, usize)> = Vec::new();
+            for (s, e) in thunks {
+                match merged.last_mut() {
+                    Some(last) if s <= last.1 && (s - last.0) % w == 0 => last.1 = last.1.max(e),
+                    _ => merged.push((s, e)),
+                }
+            }
+            for (s, e) in merged {
+                push(Some(s), e - s, TableKind::Rising { width: w, fields: 1 });
+            }
+        }
+        if let Some((rva, size)) = dir(3) {
+            let k = match machine {
+                0x8664 => 12,
+                0xaa64 => 8,
+                _ => 0,
+            };
+            if k > 0 {
+                let len = size as usize / k * k;
+                push(at(rva, len), len, TableKind::Rising { width: 4, fields: k / 4 });
+            }
+        }
+        Some(())
+    })();
+    t
+}
+
 /// A PE image being read, its sections' `(RVA, file offset, stored size)` known.
 struct Image<'a, R> {
     r: &'a mut R,

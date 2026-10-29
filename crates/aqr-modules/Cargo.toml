@@ -74,6 +74,11 @@ path = "src/bin/exe-recons-x86.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "exe-recons-pe-reloc"
+path = "src/bin/exe-recons-pe-reloc.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "exe-recons-arm64"
 path = "src/bin/exe-recons-arm64.rs"
 required-features = ["wasm"]

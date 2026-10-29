@@ -1,8 +1,9 @@
 # The `exe-recons/x86` module
 
 This document specifies the module `exe-recons/x86` of aqr-formula entry formulas, and
-[`exe-recons/arm64`](#the-exe-reconsarm64-module) and
-[`exe-recons/cil`](#the-exe-reconscil-module) after it. The x86 module rebuilds a section
+[`exe-recons/arm64`](#the-exe-reconsarm64-module),
+[`exe-recons/cil`](#the-exe-reconscil-module) and
+[`exe-recons/pe-reloc`](#the-exe-reconspe-reloc-module) after it. The x86 module rebuilds a section
 of x86 or x86-64 machine code from streams that a disfilter split it into:
 instructions are parsed, and their fields (opcodes, ModR/M and SIB bytes, prefixes,
 displacements, immediates, jump and call targets, addresses) go to streams by what they are,
@@ -684,3 +685,70 @@ The module fails if:
 - `Valid` has a bit above `2C`, or the tables' rows run past their stream;
 - the ranges taken overlap or are not within `out`;
 - any stream has bytes left once the output is `len` bytes long.
+
+# The `exe-recons/pe-reloc` module
+
+This part specifies the module `exe-recons/pe-reloc`, which rebuilds the base relocations of a
+PE image (data directory 5, the `.reloc` section; the PE/COFF specification's "The .reloc
+Section"). They are blocks, one for each 4 KiB page that has relocations: the page's RVA and
+the block's size (`le32` each), then entries of `le16`, a type in the high 4 bits and an offset
+in the page in the low 12, padded with zero entries to a multiple of 4 bytes. The module keeps
+only the entries, as the RVAs they point at, each the difference from the one before; the
+headers and the padding follow from them. The conventions of §1 hold.
+
+## R1. The module
+
+- **Module**: name `exe-recons/pe-reloc`, version 1.
+- **Params**: exactly 1 byte, `a`, from 2 to 12: the blocks' sizes are multiples of `2^a`.
+- **Resources**: none.
+- **Inputs**: exactly 2, the streams of §R2 in order, of classes `pe-reloc/RVAS` and
+  `pe-reloc/TYPES`.
+- **Output**: the relocations of §R3, `len` bytes long.
+
+## R2. Streams
+
+| # | name | contents |
+|---|---|---|
+| 0 | `RVAS` | for each entry, a `varint` (unsigned LEB128, at most 5 bytes, below 2^32): its RVA less the RVA of the entry before (of 0 before the first), wrapping in 32 bits |
+| 1 | `TYPES` | for each entry, its type, one byte below 16 |
+
+## R3. Decoding
+
+`r = 0`. For each byte `t` of `TYPES`, in order: read a `varint` `v` from `RVAS`, and
+`r ← (r + v) mod 2^32`. With `p = r & FFFFF000`, if there is no block yet or the open one is of
+another page than `p`, close the open one (below) and open one of page `p`: append `le32 p` and
+4 bytes for its size. Append the entry, `le16 (t << 12) | (r & FFF)`.
+
+Once the types are used up, close the open block, if any. To close a block: append zero bytes
+until the length of `out` is a multiple of `2^a`, then write the block's size (from its page's
+`le32` to the end of `out`) as its `le32` after the page.
+
+## R4. Validation
+
+The module fails if:
+
+- the params are not 1 byte from 2 to 12, or there are resources, or not exactly 2 inputs;
+- `RVAS` runs out, a `varint` is longer than 5 bytes or not below 2^32, or a type is 16 or more;
+- `RVAS` has bytes left once the types are used up;
+- the output is not `len` bytes long.
+
+## R5. Encoding *(encoder)*
+
+`aqr_exe::reloc::encode` takes the relocations and `a`. It reads each block's entries but the
+padding (the fewest entries that a block of its size holds by §R3, the rest zero), writes them
+as above, and fails where decoding does not give the relocations back: blocks of one page in a
+row, an empty block, a page not at a multiple of 4 KiB, or bytes after the last block. A
+nonzero entry in the padding, or more padding than `a` asks, is kept as entries of type 0.
+
+aqr-compress takes the relocations where `aqr_exe::format::pe::tables` finds them in the stored
+data of a section and outside the code, trying `a` = 3, then 2 (blocks padded to 8 bytes are
+also valid padded to 4, with more entries). It also takes the image's other tables there by
+`recs-fields` (aqr-infer-recs' FORMAT.md), each number a field of delta coding: the export
+address table, the name pointers and the ordinals; the import lookup and address tables (those
+that touch in the file as one); the runtime functions of x86-64 (12 bytes, 3 fields) and ARM64
+(8 bytes, 2 fields).
+
+Why this layout (measured on the relocations of the 1,842 distinct PE images of the 10 GB
+corpus, 18.2 MB; zstd -3, all in one): as they are, 8.56 MB; as `recs-fields` of 16-bit deltas
+with the headers apart, 3.93 MB; this module, 3.36 MB. Of the 1,842, 4 do not fit, all with
+an empty block (one of them with bytes after its last block too).

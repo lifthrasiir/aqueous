@@ -13,7 +13,7 @@ use aqr_formula::{Formula, Module, Node};
 use crate::module::{entries_params, fields_params};
 use crate::{Choice, Shape, fields};
 
-pub use crate::module::{decode_entries, decode_fields};
+pub use crate::module::{Field, How, decode_entries, decode_fields};
 
 pub const FIELDS: Module = Module { name: "recs-fields", version: 1 };
 pub const ENTRIES: Module = Module { name: "recs-entries", version: 1 };
@@ -57,6 +57,19 @@ pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
         }
     }?;
     Some(formula(d, &choices))
+}
+
+/// `records`, `k` bytes each, as an application of `recs-fields` by `fields`, their planes a
+/// stream of `class` pushed to `f`: for recompressors whose formats tell their records' fields.
+pub fn apply_fields(
+    f: &mut Formula,
+    class: impl Into<std::borrow::Cow<'static, str>>,
+    records: &[u8],
+    k: usize,
+    fields: &[Field],
+) -> Node {
+    let planes = f.push(class, fields::encode(records, k, fields));
+    Node::apply(FIELDS, fields_params(records.len() / k, k, fields), vec![planes], records.len() as u64)
 }
 
 /// The formula of `d` with the regions `choices` (sorted, apart) in their forms.

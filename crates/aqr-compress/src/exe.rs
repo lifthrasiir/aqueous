@@ -4,17 +4,22 @@
 //! the rest). Of a .NET image, the section holding the metadata goes through the CIL filter,
 //! the native code of a ReadyToRun image within what that keeps as it is. The rest of the file,
 //! and what the CIL filter keeps as it is, are contents (`Stream::content`): scanned in turn,
-//! e.g. for the images among the resources.
+//! e.g. for the images among the resources. Of a PE image, its tables of known layouts outside
+//! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
+//! imports and runtime functions by `recs-fields`, their numbers as deltas.
 
 use std::io::Cursor;
 use std::sync::OnceLock;
 
-use aqr_decompress::{ARM64, CIL, X86};
+use aqr_decompress::{ARM64, CIL, PE_RELOC, X86};
 use aqr_exe::arch::{arm64, cil, x86};
-use aqr_exe::format::{macho, pe::locate_code};
+use aqr_exe::format::macho;
+use aqr_exe::format::pe::{TableKind, locate_code, tables};
+use aqr_exe::reloc;
 use aqr_formula::{Formula, Kind, Node, Resource};
+use aqr_infer_recs::formula::{Field, How};
 
-/// The code a section holds.
+/// What a range of a file holds: code, or a table of a PE image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Arch {
     /// x86-64 if true, else x86-32.
@@ -23,7 +28,11 @@ enum Arch {
     /// .NET metadata and IL, the metadata root at this offset (the virtual address is the
     /// section's RVA).
     Cil(usize),
+    Table(TableKind),
 }
+
+/// Tables shorter than this are left with the rest.
+const MIN_TABLE: usize = 64;
 
 pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
     let code = locate_code(&mut Cursor::new(d)).ok()?;
@@ -48,6 +57,14 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
             sections.push((rva as u64, off, size, Arch::Cil(cli.metadata)));
         }
     }
+    // the tables outside the code
+    let code: Vec<_> = sections.iter().map(|s| s.1..s.1 + s.2).collect();
+    sections.extend(
+        tables(d)
+            .into_iter()
+            .filter(|t| t.len >= MIN_TABLE && !code.iter().any(|c| t.off < c.end && c.start < t.off + t.len))
+            .map(|t| (0, t.off, t.len, Arch::Table(t.kind))),
+    );
     filtered(d, "pe", sections)
 }
 
@@ -65,7 +82,7 @@ pub(crate) fn macho(d: &[u8]) -> Option<Formula> {
 }
 
 /// `d` with each of `sections`, `(virtual address, offset, size, code)` within `d`, through
-/// its filter, and the rest of `d` in a stream of `class`; `None` where none is filtered.
+/// its filter (or a table as its layout tells), and the rest of `d` in a stream of `class`; `None` where none is filtered.
 /// The sections within a CIL section are filtered within what the CIL filter keeps as it is
 /// (where whole within a range of it).
 fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize, Arch)>) -> Option<Formula> {
@@ -134,6 +151,22 @@ fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch) -> Option<No
                 .map(|(s, name)| f.push(format!("arm64/{name}"), s.clone()))
                 .collect();
             Node::apply(ARM64, va.to_le_bytes().to_vec(), inputs, size)
+        }
+        Arch::Table(TableKind::Reloc) => {
+            // (8 first: blocks padded to 8 bytes are valid padded to 4, with more entries)
+            let (align, [rvas, types]) = [3, 2].into_iter().find_map(|a| Some((a, reloc::encode(section, a)?)))?;
+            let inputs = [rvas, types].into_iter().zip(reloc::STREAM_NAMES);
+            let inputs = inputs.map(|(s, name)| f.push(format!("pe-reloc/{name}"), s)).collect();
+            Node::apply(PE_RELOC, vec![align], inputs, size)
+        }
+        Arch::Table(TableKind::Rising { width, fields }) => {
+            let k = width * fields;
+            if section.len() % k != 0 {
+                return None;
+            }
+            let fl: Vec<_> =
+                (0..fields).map(|i| Field { off: i * width, width, big: false, how: How::Delta }).collect();
+            aqr_infer_recs::formula::apply_fields(f, "pe/table", section, k, &fl)
         }
         Arch::Cil(_) => return None,
     })

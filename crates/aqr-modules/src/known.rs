@@ -34,6 +34,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/exe-recons-cil.block"),
     },
     Known {
+        name: "exe-recons/pe-reloc",
+        version: 1,
+        sha512_256: hex("5cc8b375caa7adbeadd5ec65845c6996070f3bab79e6ed5dc4ad8c62756eb60b"),
+        block: include_bytes!("../wasm/exe-recons-pe-reloc.block"),
+    },
+    Known {
         name: "exe-recons/x86",
         version: 3,
         sha512_256: hex("2517aa3a4adf0c7bed4175c71dd6cb6928820c2a33038a8ffcf93d21d9e7c509"),

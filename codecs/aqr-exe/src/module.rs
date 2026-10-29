@@ -1,10 +1,11 @@
-//! The code of the modules of aqr-exe's filters (`exe-recons/x86`, `exe-recons/arm64` and
-//! `exe-recons/cil`, as aqr-decompress names them): the parameters and the inputs checked, then
-//! the section decoded. aqr-modules builds it into their Wasm modules.
+//! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/arm64`, `exe-recons/cil`
+//! and `exe-recons/pe-reloc`, as aqr-decompress names them): the parameters and the inputs
+//! checked, then the section or table decoded. aqr-modules builds it into their Wasm modules.
 
 use alloc::vec::Vec;
 
 use crate::arch::{arm64, cil, x86};
+use crate::reloc;
 
 pub type Result<T> = core::result::Result<T, &'static str>;
 
@@ -48,6 +49,15 @@ pub fn cil(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let (origin, meta) =
         (u32::from_le_bytes(p[..4].try_into().unwrap()), u32::from_le_bytes(p[4..].try_into().unwrap()));
     of_len(cil::decode(streams, origin, meta as usize, n), len)
+}
+
+/// The base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
+/// multiples of (u8, 2 to 12); inputs: the streams of [`reloc::STREAM_NAMES`].
+pub fn reloc(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let (&[align @ 2..=12], &[rvas, types], Ok(n)) = (params, inputs, usize::try_from(len)) else {
+        return Err("bad parameters or inputs");
+    };
+    of_len(reloc::decode(rvas, types, align, n), len)
 }
 
 fn of_len(out: Option<Vec<u8>>, len: u64) -> Result<Vec<u8>> {

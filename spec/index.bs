@@ -4602,6 +4602,10 @@ as follows:</p>
       <td>exe-recons/cil@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md">codecs/aqr-exe/FORMAT.md</a>
     <tr>
+      <td><code>5cc8b375caa7adbeadd5ec65845c6996070f3bab79e6ed5dc4ad8c62756eb60b</code>
+      <td>exe-recons/pe-reloc@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md">codecs/aqr-exe/FORMAT.md</a>
+    <tr>
       <td><code>2517aa3a4adf0c7bed4175c71dd6cb6928820c2a33038a8ffcf93d21d9e7c509</code>
       <td>exe-recons/x86@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md">codecs/aqr-exe/FORMAT.md</a>

@@ -16,4 +16,5 @@ pub mod arch;
 pub mod format;
 #[cfg(feature = "decode")]
 pub mod module;
+pub mod reloc;
 mod util;

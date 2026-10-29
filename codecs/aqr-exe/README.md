@@ -46,8 +46,12 @@ for image in macho::images(&file).unwrap_or_default() {  // each architecture of
 }
 ```
 
+Of a PE image, the tables of known layouts outside the code are taken too: the base
+relocations by a module of their own (the entries' RVAs as deltas, the blocks' headers derived),
+and the export, import and runtime function tables by aqr-infer-recs' `recs-fields`, as deltas.
+
 `FORMAT.md` specifies the modules `exe-recons/x86`, with the opcode tables in full,
-`exe-recons/arm64` and `exe-recons/cil`.
+`exe-recons/arm64`, `exe-recons/cil` and `exe-recons/pe-reloc`.
 
 ## Results
 
