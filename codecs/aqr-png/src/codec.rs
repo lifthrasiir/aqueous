@@ -647,7 +647,7 @@ fn rebuild(
     let most = spans.iter().map(|s| if let Span::Tokens(c) = *s { c } else { 0 }).max().unwrap_or(0);
     let mut emit = Payload::new(streams, alts, headers, len + 6 * most + 64)?;
     // (positions as the reference's are 32-bit)
-    let mut own = (keep && n <= u32::MAX as usize).then(model::Reference::empty);
+    let mut own = (keep && n <= u32::MAX as usize).then(|| model::Reference::with_capacity(ntok));
     // (the writer on a worker of the pool, if one is free)
     let writer = (threads > 1 && n >= PAR_MIN).then(|| aqr_common::pool::reserve(1)).filter(|w| !w.is_empty());
     if let Some(writer) = writer {

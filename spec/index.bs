@@ -4695,15 +4695,15 @@ as follows:</p>
       <td>pdf-recons@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-pdf/FORMAT.md">codecs/aqr-pdf/FORMAT.md</a>
     <tr>
-      <td><code>c7d9509c6d6f797bc0d15128aa1fc601adff3ab8275c80a35b529ade447a2b74</code>
+      <td><code>c7b87c97d4bf43517d75c559e15e0a28e2c9842b5fdf1f82c9156099e30c5983</code>
       <td>png-against@1
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>9e8ba5c1f49ab437a08df2f1f929d4a6982c75526751a63d386d7a7d489070b4</code>
+      <td><code>0e71a6af9800a3f99bc9e42bb16d090c4e4fb429b22efdcfda577cf25a8e282f</code>
       <td>png-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>
-      <td><code>8d2bbdc58e3c155e250f51a4e086e700284db5514c760226ad873eeb3b11c303</code>
+      <td><code>6b41c62d399820a0ef4597dabeaf7b002fe9572cb17253028d0db91806a83607</code>
       <td>png-set@2
       <td><a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-png/FORMAT.md">codecs/aqr-png/FORMAT.md</a>
     <tr>

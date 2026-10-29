@@ -181,9 +181,10 @@ impl Reference {
         Ok(sink.r)
     }
 
-    /// None yet, for [`Reference::span`].
-    pub fn empty() -> Reference {
-        Reference { pos: vec![], tokens: vec![] }
+    /// None yet, for [`Reference::span`] of `tokens` tokens in all (the vectors never grow
+    /// past them, nor hold twice their size as they grow).
+    pub fn with_capacity(tokens: usize) -> Reference {
+        Reference { pos: Vec::with_capacity(tokens), tokens: Vec::with_capacity(tokens) }
     }
 
     /// Adds the tokens `toks` of a span ending at position `end` (none for stored bytes), as
@@ -1886,7 +1887,7 @@ fn decode_bpp<const BPP: usize, const IMAGE: bool, const REF: bool>(
     let mut live = Live { tables: &player.tables, dec: player.dec, raw: player.raw };
     let win = Win::new(g, n, IMAGE);
     let (mut buf, mut raw) = (vec![0u8; win.buf], vec![0u8; win.raw]);
-    let none = Reference::empty();
+    let none = Reference::with_capacity(0);
     let mut fo = Follow::new(reference.unwrap_or(&none));
     decode_loop::<Live, BPP, IMAGE, REF>(&mut live, g, spans, n, win, &mut buf, &mut raw, &mut fo, emit)?;
     if !live.dec.finished() || live.raw.overrun() {
