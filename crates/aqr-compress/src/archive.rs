@@ -722,18 +722,24 @@ fn make<S: Source + ?Sized>(
     drop(f);
 
     let bad = if opt.verify {
-        let m = verify::Cached {
-            native: Native { threads: opt.threads },
-            memo: memo.into(),
-            hits: Default::default(),
-            files: &|k, range: Range<usize>| src.read_range(files[k].c, range.start as u64..range.end as u64).ok(),
-        };
+        let read =
+            |k: usize, range: Range<usize>| src.read_range(files[k].c, range.start as u64..range.end as u64).ok();
+        let mut m = verify::Cached::new(Native { threads: opt.threads }, memo, &read);
+        for (k, f) in files.iter().enumerate() {
+            m.whole.entry(f.len).or_default().push((k, f.hash));
+        }
         check(w, &mut batch, files, &at, &m, opt.threads, notes)
     } else {
         Vec::new()
     };
     Made { batch, at, files: reports, solid, sets, bad }
 }
+
+/// The bytes of the leaves of a batch decoded at once to verify it ([`aqr::Archive::set_budget`]),
+/// as `aqr` decodes an archive: a large leaf waits for others to be done rather than run along
+/// with them (10gb: `enwik9` and `enwik9.zip`, 1.5 GB each), and then takes the output of a module
+/// that is a whole file from the file where the leaf before ran it ([`verify::Cached`]).
+const VERIFY_BUDGET: u64 = 2_000_000_000;
 
 /// The files of batch `b` (by index; each at its leaf and output in `at`) that its blocks, decoded
 /// alone with the modules of `m`, do not give back: all of them where it does not decode.
@@ -770,7 +776,8 @@ fn check_in(
     at.iter().enumerate().for_each(|(k, &(l, o))| of_leaf[l].push((o, k)));
     let bad = Mutex::new(Vec::new());
     let all = || (0..files.len()).collect();
-    let Ok(a) = aqr::open(c, &natives) else { return all() };
+    let Ok(mut a) = aqr::open(c, &natives) else { return all() };
+    a.set_budget(VERIFY_BUDGET);
     let r = a.each_leaf(threads, |i, outputs| {
         let l = by_block[i];
         notes.send(Note::Verified(of_leaf[l].iter().map(|&(_, k)| files[k].len as u64).sum()));

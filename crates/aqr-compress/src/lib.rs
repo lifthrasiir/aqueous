@@ -599,12 +599,8 @@ fn finish(
     cx.enc.clear();
     let f = kept.then_some(f);
     let decodes = |c: &[u8]| {
-        let m = verify::Cached {
-            native: Native { threads: opt.threads },
-            memo: memo.into(),
-            hits: Default::default(),
-            files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
-        };
+        let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
+        let m = verify::Cached::new(Native { threads: opt.threads }, memo, &files);
         let decodes = aqr::decode(c, &aqr_decompress::natives(&m)).is_ok_and(|out| out == d);
         notes.inspect(|n| n.send(Note::Verified(d.len() as u64)));
         decodes
@@ -1928,24 +1924,16 @@ mod tests {
         assert_eq!(memo.bytes(), 0);
         let c = cx.enc.encode(&f, Some(aqr::checksum(&d))).unwrap();
         let decode = |c: &[u8], memo: verify::Memo| {
-            let m = verify::Cached {
-                native: Native { threads: 1 },
-                memo: memo.into(),
-                hits: Default::default(),
-                files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
-            };
+            let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
+            let m = verify::Cached::new(Native { threads: 1 }, memo, &files);
             let out = aqr::decode(c, &aqr_decompress::natives(&m));
             (out, m.hits.into_inner().unwrap())
         };
         let other = compress(&d[..d.len() - 1], &Options { verify: false, ..opt.clone() });
         // another archive's applications are not in it
         let (memo, hits) = {
-            let m = verify::Cached {
-                native: Native { threads: 1 },
-                memo: memo.into(),
-                hits: Default::default(),
-                files: &|_, range: Range<usize>| d.get(range).map(<[u8]>::to_vec),
-            };
+            let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
+            let m = verify::Cached::new(Native { threads: 1 }, memo, &files);
             aqr::decode(&other, &aqr_decompress::natives(&m)).unwrap();
             (m.memo.into_inner().unwrap(), m.hits.into_inner().unwrap())
         };
@@ -1953,6 +1941,35 @@ mod tests {
         assert_eq!(decode(&c, memo), (Ok(d.clone()), f.applies().len()));
         // without the memo, the same, with the modules run
         assert_eq!(decode(&c, Default::default()), (Ok(d.clone()), 0));
+    }
+
+    /// A module run whose output is a whole file is run once: the same application again takes
+    /// the file's bytes, but where the output is not the file.
+    #[test]
+    fn whole_files_run_once() {
+        let text = unruled(240_000);
+        let mut z = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(6));
+        std::io::Write::write_all(&mut z, &text).unwrap();
+        let d = z.finish().unwrap();
+        let opt = Options { smaller: false, ..Options::default() };
+        // (the DEFLATE stream, twice)
+        let mut f = recompress(&d, &opt);
+        let a = Node::Apply(Box::new(f.applies()[0].clone()));
+        f.root = a.clone();
+        let d = f.eval(&Native::default()).unwrap();
+        f.root = Node::concat([a.clone(), a]);
+        let c = Cx::new(&d, &opt).enc.encode(&f, None).unwrap();
+        for (file, read) in [(d.clone(), 1), ([&d[..10], &[!d[10]], &d[11..]].concat(), 0)] {
+            let reads = std::sync::atomic::AtomicUsize::new(0);
+            let files = |_: usize, range: Range<usize>| {
+                reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                file.get(range).map(<[u8]>::to_vec)
+            };
+            let mut m = verify::Cached::new(Native { threads: 1 }, Default::default(), &files);
+            m.whole.insert(file.len(), vec![(0, xxhash_rust::xxh3::xxh3_128(&file))]);
+            assert!(aqr::decode(&c, &aqr_decompress::natives(&m)).unwrap() == [&d[..], &d[..]].concat());
+            assert_eq!(reads.into_inner(), read);
+        }
     }
 
     /// A slice of a stream that is content is scanned wherever it is, as an input of an

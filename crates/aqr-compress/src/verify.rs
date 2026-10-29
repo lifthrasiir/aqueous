@@ -105,26 +105,63 @@ impl Recording {
 /// that are. An output is taken out of the memo when it is used: decoding an archive evaluates
 /// an application once. `files` gives a range of a file (by index) that the formulas evaluated
 /// beforehand are of, where it can (else the module is run).
+///
+/// The output of a module run that is a whole file of [`Cached::whole`] (by its length and
+/// XXH3-128) is that file's bytes: the same application again (10gb: `enwik9` coded once, for
+/// the file and the entry of `enwik9.zip`, each a leaf of its own) takes them from `files`
+/// rather than running the module again.
 pub(crate) struct Cached<'a> {
     pub native: Native,
     pub memo: Mutex<Memo>,
     pub hits: Mutex<usize>,
     pub files: &'a (dyn Fn(usize, Range<usize>) -> Option<Vec<u8>> + Sync),
+    /// The files by their lengths: each its index and XXH3-128.
+    pub whole: HashMap<usize, Vec<(usize, u128)>>,
+    /// The applications run whose outputs are whole files, by key: the file's index.
+    ran: Mutex<HashMap<Key, usize>>,
+}
+
+impl<'a> Cached<'a> {
+    pub fn new(native: Native, memo: Memo, files: &'a (dyn Fn(usize, Range<usize>) -> Option<Vec<u8>> + Sync)) -> Self {
+        Cached {
+            native,
+            memo: memo.into(),
+            hits: Default::default(),
+            files,
+            whole: HashMap::new(),
+            ran: Default::default(),
+        }
+    }
 }
 
 impl Modules for Cached<'_> {
     fn apply(&self, a: &Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
-        let hit = self.memo.lock().unwrap().0.remove(&key(a, inputs));
+        let k = key(a, inputs);
+        let hit = self.memo.lock().unwrap().0.remove(&k);
         if hit.is_some() {
             *self.hits.lock().unwrap() += 1;
         }
+        let file = |i: usize, range: Range<usize>| match (self.files)(i, range) {
+            Some(d) => Ok(d),
+            None => self.native.apply(a, inputs),
+        };
         match hit {
             Some(Output::Bytes(out)) => Ok(Arc::try_unwrap(out).unwrap_or_else(|out| out.to_vec())),
-            Some(Output::File(i, range)) => match (self.files)(i, range) {
-                Some(d) => Ok(d),
-                None => self.native.apply(a, inputs),
-            },
-            None => self.native.apply(a, inputs),
+            Some(Output::File(i, range)) => file(i, range),
+            None => {
+                let ran = self.ran.lock().unwrap().get(&k).copied();
+                if let Some(i) = ran {
+                    return file(i, 0..a.len as usize);
+                }
+                let out = self.native.apply(a, inputs)?;
+                if let Some(of_len) = self.whole.get(&out.len()) {
+                    let h = hash(&out);
+                    if let Some(&(i, _)) = of_len.iter().find(|f| f.1 == h) {
+                        self.ran.lock().unwrap().insert(k, i);
+                    }
+                }
+                Ok(out)
+            }
         }
     }
 
