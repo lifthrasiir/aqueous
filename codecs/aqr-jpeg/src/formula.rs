@@ -132,7 +132,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
         // whole: every component's blocks, the words and raw bytes of a stripe, then the scans
         let blocks: u64 = j.comps.iter().map(|c| (c.bw * c.bh) as u64 * BLOCK + 36).sum();
         let pad = stripes.iter().map(|&(w, r)| w + r).max().unwrap_or(0) + 320 + 256;
-        let decode = blocks + pad + (16 + 16 * nc) * ns as u64 + 24 * ns as u64;
+        let decode = pad + (16 + 16 * nc) * ns as u64 + 24 * ns as u64;
         // a scan: chunks' parts (twice their bytes, three times as grown), pieces, shifted bits
         // and the scan; the progressive encoder's lists (32768 of 16 bytes) and its rows
         let work = 6 * scan + 3 * 32 + (512 << 10) + 3 * 1024 * nc;
@@ -146,19 +146,21 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let nr = ranges.len() as u64;
     let bpm: u64 = j.comps.iter().map(|c| if nc == 1 { 1 } else { (c.h * c.v) as u64 }).sum();
     let nseg = nmcu.div_ceil(if s.ri > 0 { s.ri as u64 } else { nmcu });
-    // parts' bytes and the structures, then the pieces, a part's bits (three times) and the output
-    let parts = 2 * (scan + 16 * nr) + 136 * bpm * nr + 12 * nseg + 64 * nr;
+    // parts' bytes (their bits as tasks give them back) and the structures, then the pieces, a
+    // part's bits (three times) and the output
+    let parts = scan + 32 * nr + 136 * bpm * nr + 12 * nseg + 64 * nr;
     let after = parts + scan + scan / 64 + 16 * nr + 3 * (scan + 32) + out;
     let mut peak = m0 + after;
     // a stripe's task: the rows, the padded words and raw bytes (while decoding), and its bits
-    // (while coding, held while the result is made)
+    // (while coding, grown to twice them zero-filled: three times as the last grows, or the
+    // result of their bytes made besides)
     let mut grown: Vec<u64> = (0..ranges.len())
         .map(|k| held(k) + stripes[k].0 + stripes[k].1 + 320 + 256 + 12 * nseg.div_ceil(nr.max(1)) + 136 * bpm)
         .collect();
     grown.sort_unstable_by(|a, b| b.cmp(a));
     let k = grown.len().min(SLOTS) as u64;
     if ranges.len() > 1 {
-        peak = peak.max(m0 + k * m0 + grown.iter().take(SLOTS).sum::<u64>() + 8 * (scan + 16 * nr));
+        peak = peak.max(m0 + k * m0 + grown.iter().take(SLOTS).sum::<u64>() + 3 * (scan + 32 * nr));
     } else {
         peak = peak.max(m0 + grown.first().copied().unwrap_or(0) + 3 * (scan + 32));
     }

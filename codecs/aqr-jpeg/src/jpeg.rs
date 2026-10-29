@@ -2319,10 +2319,17 @@ struct BitStr {
     n: usize,
 }
 
+/// (the bytes up to the bits' last and the 8 spare: not the room `BitOut` grew)
 impl Wire for BitStr {
     fn put(&self, out: &mut Vec<u8>) {
-        self.buf.put(out);
+        let b = self.kept();
+        b.len().put(out);
+        out.extend_from_slice(b);
         self.n.put(out);
+    }
+
+    fn size(&self) -> usize {
+        8 + self.kept().len() + 8
     }
 
     fn get(b: &mut &[u8]) -> Option<Self> {
@@ -2340,6 +2347,11 @@ impl BitStr {
         }
         BitStr { n: w.pos * 8 + w.n as usize, buf: w.buf }
     }
+    /// The bytes of the bits, and 8 spare.
+    fn kept(&self) -> &[u8] {
+        &self.buf[..(self.n / 8 + 9).min(self.buf.len())]
+    }
+
     /// The last `k` (<= 8) bits.
     fn tail(&self, k: u32) -> u32 {
         let at = self.n - k as usize;
@@ -2403,6 +2415,10 @@ impl Wire for Part {
         self.brk.put(out);
         self.body.put(out);
         (self.rst, self.end).put(out);
+    }
+
+    fn size(&self) -> usize {
+        self.head.size() + self.mid.size() + 1 + self.body.size() + 8 + 16
     }
 
     fn get(b: &mut &[u8]) -> Option<Self> {
@@ -2497,7 +2513,10 @@ pub(crate) fn encode_striped(
             part.body = Some((BitStr::of(w), ends));
         }
         part.end = pred;
-        pool.lock().unwrap().push(b);
+        // (a task's own, dropped before its result is made)
+        if !cfg!(target_family = "wasm") {
+            pool.lock().unwrap().push(b);
+        }
         Ok(part)
     };
     // (as tasks on WebAssembly, where rayon has no threads)
