@@ -1,0 +1,19 @@
+[package]
+name = "aqr-infer-recs"
+version = "0.1.0"
+edition = "2024"
+description = "Tables of records inferred in files of unknown formats (fixed-size records, entries with a length field) and their fields transposed"
+publish = false
+
+[dependencies]
+zstd = "0.13"
+
+[dev-dependencies]
+libc = "0.2"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-infer-recs-bench"
+path = "examples/bench.rs"

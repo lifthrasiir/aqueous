@@ -258,6 +258,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-infer-recs"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-jpeg"
 version = "0.1.0"
 dependencies = [
