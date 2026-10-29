@@ -8,7 +8,7 @@ use crate::{codec, module};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "vorbis-recons", version: 2 };
+pub const MODULE: Module = Module::new("vorbis-recons", 2);
 
 /// The node rebuilding the packets at the start of `data` (each after its 16-bit length, up to
 /// the end of `data` or a length of 0) of a stream of `ident` and setup header `setup`, and the

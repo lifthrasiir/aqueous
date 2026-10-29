@@ -96,7 +96,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "ima-recons",
         version: 2,
-        sha512_256: hex("e97c4d613eed9f7c94a1c8a5e582380f3bd52a9fb7bd0cb27ad98b237341d8bd"),
+        sha512_256: hex("8cac476b42906e38a2356829e851368e0f50d7a9e19fcaf1a5c1f37ea53a0f81"),
         block: include_bytes!("../wasm/ima-recons.block"),
     },
     Known {
@@ -216,7 +216,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "vorbis-recons",
         version: 2,
-        sha512_256: hex("e7e8fb71c736338142a9afd9354b87b67b0dad950fd250a0b2f18d5250e538d7"),
+        sha512_256: hex("3ac92678e2aad46f7f9d12b9b951ec970b8e2ed039acc25f61e834d4410a0f80"),
         block: include_bytes!("../wasm/vorbis-recons.block"),
     },
     Known {
@@ -240,7 +240,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "zip-recons",
         version: 3,
-        sha512_256: hex("cf27ace7b59ee295880fc7dcaf1716e5b690680c07da990bda5a856db58c1858"),
+        sha512_256: hex("63150a666d6cb14bf9162a5f353343612b2cfc2a4111f5d4b2a15324598d91cc"),
         block: include_bytes!("../wasm/zip-recons.block"),
     },
 ];

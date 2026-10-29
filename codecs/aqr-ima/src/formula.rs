@@ -8,7 +8,7 @@ use crate::module;
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module { name: "ima-recons", version: 2 };
+pub const MODULE: Module = Module::new("ima-recons", 2);
 
 /// The node rebuilding the whole blocks of `l` at the start of `data`, and the bytes it takes;
 /// None where there is no whole block.
