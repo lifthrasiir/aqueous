@@ -11,7 +11,19 @@ use std::borrow::Cow;
 
 pub use crate::module::{Error, Result, decode};
 
-pub const MODULE: Module = Module::new("flac-recons", 3);
+pub const MODULE: Module = Module::new("flac-recons", 3).with_memory(memory);
+
+/// The memory of the module: aqr-raw's `pipeline_memory` of frames of the stream's largest
+/// block (STREAMINFO's maximum block size) of all its channels.
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[.., words, raw0, raw1] = u.inputs else { return None };
+    let prefix = u.contents.get(codec::S_PREFIX)?;
+    let (si, _) = crate::flac::parse_metadata(prefix)?;
+    // (STREAMINFO is the first block: its maximum block size 2 bytes in)
+    let at = prefix.windows(4).position(|w| w == b"fLaC")? + 8;
+    let max = u16::from_be_bytes(prefix.get(at + 2..at + 4)?.try_into().ok()?) as u64;
+    Some(aqr_raw::formula::pcm::pipeline_memory(u, max * si.channels as u64, u64::MAX, words, raw0 + raw1))
+}
 
 /// Classes of the input slots, and their kinds: the rANS words and the raw bits do not
 /// compress.

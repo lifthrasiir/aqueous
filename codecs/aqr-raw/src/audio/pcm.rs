@@ -22,7 +22,7 @@ const S_WARM: usize = 2;
 pub const N_BYTE_STREAMS: usize = 3;
 
 /// Samples per block.
-const BLOCK: usize = 4096;
+pub const BLOCK: usize = 4096;
 /// Highest LPC order and coefficient precision.
 const MAX_ORDER: usize = 16;
 const PRECISION: u32 = 14;

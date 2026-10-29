@@ -84,8 +84,16 @@ impl Usage<'_> {
     /// which there is [`SMALL`], and a page for each large one (the allocator's, as it grows the
     /// memory for it), of the inputs and outputs those of a page at least.
     pub fn whole(&self, extra: u64, buffers: u64) -> u64 {
-        let large = [self.resources, self.inputs, self.outputs].concat().iter().filter(|&&n| n >= PAGE).count();
-        self.initial() + self.copied() + self.output() + extra + (large as u64 + buffers) * PAGE + SMALL
+        let large = self.outputs.iter().filter(|&&n| n >= PAGE).count() as u64;
+        self.base() + self.output() + extra + (large + buffers) * PAGE
+    }
+
+    /// The working memory of a module that copies its parameters, resources and inputs
+    /// (`aqr_api::whole`) as it starts (before its outputs and its own buffers), with the pages of
+    /// slack of the large ones and [`SMALL`]: what its tasks copy where it spawns them first.
+    pub fn base(&self) -> u64 {
+        let large = [self.resources, self.inputs].concat().iter().filter(|&&n| n >= PAGE).count() as u64;
+        self.initial() + self.copied() + large * PAGE + SMALL
     }
 }
 
