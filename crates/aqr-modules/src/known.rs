@@ -82,9 +82,15 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
+        name: "git-pack-index-recons",
+        version: 1,
+        sha512_256: hex("a870720c5bd2c32248dceb5dd0098e99117c252b2a541a2933df155464d8bea8"),
+        block: include_bytes!("../wasm/git-pack-index-recons.block"),
+    },
+    Known {
         name: "git-pack-recons",
         version: 1,
-        sha512_256: hex("17849cd2f570cd4ff266e6c7c7e7656954fff0b7b53a032682e630874b1d27e3"),
+        sha512_256: hex("8de96ff114cf1746e7fe70b380d47d009392a1f711f5b2032a790127f7ea22e2"),
         block: include_bytes!("../wasm/git-pack-recons.block"),
     },
     Known {

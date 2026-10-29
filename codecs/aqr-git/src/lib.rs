@@ -6,13 +6,15 @@
 //! zlib streams of their own, and a blob's data is the file checked out, which the archive
 //! finds again once the pack's data is laid bare. Only the entries' headers that follow from
 //! their data, the zlib headers and checksums and the pack's trailer are derived (`layout`);
-//! `pack` reads a pack into its entries.
+//! `pack` reads a pack into its entries. A pack's index and reverse index follow from it and
+//! the ids of its entries (`index`).
 
 // The code of the module alone uses only part of the rest.
 #![cfg_attr(not(feature = "encode"), allow(unused))]
 
 #[cfg(feature = "encode")]
 pub mod formula;
+pub mod index;
 pub mod layout;
 pub mod module;
 pub mod pack;

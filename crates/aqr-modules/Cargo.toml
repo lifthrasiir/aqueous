@@ -228,6 +228,11 @@ path = "src/bin/git-pack-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "git-pack-index-recons"
+path = "src/bin/git-pack-index-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "zip-recons"
 path = "src/bin/zip-recons.rs"
 required-features = ["wasm"]

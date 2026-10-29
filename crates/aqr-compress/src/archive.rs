@@ -323,7 +323,8 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// directory or its trailer tells; and other archives with such entries), a git loose object
 /// and the file of its data (inflated whole where its header tells a large one), an ar, tar or cpio
 /// archive and the contents of its members (read whole, one at a time, for their CRC-32; those
-/// of at least [`MEMBER_MIN`] bytes), a `.lzma` file and those of what its stream holds (decoded
+/// of at least [`MEMBER_MIN`] bytes), a git pack and its indexes (by name and the pack's
+/// trailer, of any size), a `.lzma` file and those of what its stream holds (decoded
 /// whole, [`lzma_sums`]), FSB5 banks and those of their samples (read whole, by the samples'
 /// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB; the
 /// same file, longer or shorter). Of the contents of at least [`TOGETHER_MIN`] bytes, which are
@@ -415,6 +416,27 @@ fn together<S: Source + ?Sized>(
     }
     for cs in heads.values().filter(|cs| (2..=8).contains(&cs.len())) {
         cs.iter().for_each(|&c| join(cs[0], c));
+    }
+    // a git pack and its index and reverse index, by the pack's trailer that theirs repeat
+    // ([`crate::git::sets`])
+    let git: Vec<(usize, u64)> = (0..n)
+        .filter_map(|c| {
+            let name = src.name(c);
+            let back = if name.ends_with(b".pack") { 20 } else { 40 };
+            let git = [&b".pack"[..], b".idx", b".rev"].iter().any(|e| name.ends_with(e));
+            (git && src.size(c) >= back).then(|| (c, src.size(c) - back))
+        })
+        .collect();
+    if git.len() > 1 {
+        let trailers = aqr_common::pool::par_map(git.len(), opt.threads, |i| {
+            let (c, at) = git[i];
+            src.read_range(c, at..at + 20)
+        });
+        let mut by_trailer: HashMap<Vec<u8>, usize> = HashMap::new();
+        for (&(c, _), t) in git.iter().zip(trailers) {
+            let first = *by_trailer.entry(t?).or_insert(c);
+            join(first, c);
+        }
     }
     let wanted: Vec<usize> = {
         let mut w: Vec<usize> =

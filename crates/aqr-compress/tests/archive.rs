@@ -402,6 +402,73 @@ fn git_loose_object_held_once() {
     }
 }
 
+/// A git repository's one pack with its index and reverse index, of a history of files that
+/// change a little each commit (made with the git CLI).
+fn git_pack_files() -> [Vec<u8>; 3] {
+    let dir = std::env::temp_dir().join(format!("aqr-compress-test-{}-pack", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=T", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false"])
+            .args(args)
+            .current_dir(&dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q"]);
+    for c in 0..12 {
+        std::fs::write(dir.join("a.txt"), text(20_000 + c * 100, c)).unwrap();
+        std::fs::write(dir.join(format!("b{}.txt", c % 3)), text(5_000, c * 3)).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", &format!("commit {c}")]);
+    }
+    git(&["-c", "pack.writeReverseIndex=true", "repack", "-q", "-a", "-d"]);
+    let packs = dir.join(".git/objects/pack");
+    let file = |ext: &str| {
+        let mut e = std::fs::read_dir(&packs).unwrap().map(|e| e.unwrap().path());
+        std::fs::read(e.find(|p| p.extension().is_some_and(|x| x == ext)).unwrap()).unwrap()
+    };
+    let files = [file("pack"), file("idx"), file("rev")];
+    std::fs::remove_dir_all(&dir).unwrap();
+    files
+}
+
+/// A git pack with its index and reverse index: a set, of which only the ids of the indexes are
+/// stored, in a batch together however small the batches.
+#[test]
+fn git_pack_with_indexes() {
+    let [pack, idx, rev] = git_pack_files();
+    let files = [
+        ("a.txt", text(30_000, 1)),
+        ("objects/pack/pack-1.idx", idx.clone()),
+        ("objects/pack/pack-1.pack", pack.clone()),
+        ("objects/pack/pack-1.rev", rev.clone()),
+    ];
+    let n = u32::from_be_bytes(pack[8..12].try_into().unwrap()) as f64;
+    let alone = |f: &(&str, Vec<u8>)| archived(std::slice::from_ref(f), &Options::default()).1.files[0].archived;
+    let alone: f64 = files[1..].iter().map(alone).sum();
+    for opt in [Options::default(), Options { batch: 1, ..Options::default() }] {
+        let (_, r) = archived(&files, &opt);
+        assert_eq!(sets(&r), [vec![1, 2, 3]]);
+        assert!(r.files[2].modules.iter().any(|m| m.name == "git-pack-index-recons"), "{:?}", r.files[2]);
+        // (of the indexes, the ids: 20 bytes an entry, against a compressed 37 alone)
+        let set: f64 = r.files[1..].iter().map(|f| f.archived).sum();
+        assert!(set + 10.0 * n < alone, "{set} of {alone} alone, {n} entries");
+    }
+    // an index not of the pack is archived as it is
+    let mut other = idx.clone();
+    other[8 + 1024] ^= 1;
+    let (_, r) = archived(&[("p.idx", other), ("p.pack", pack.clone())], &Options::default());
+    assert!(sets(&r).is_empty());
+    // without the reverse index
+    let (_, r) = archived(&[("p.idx", idx), ("p.pack", pack)], &Options::default());
+    assert_eq!(sets(&r), [vec![0, 1]]);
+}
+
 /// A PE32+ image of x86-64 code: calls to a few functions and loads, of constants at random
 /// from `seed`, `n` of each.
 fn pe(n: u32, seed: u64) -> Vec<u8> {

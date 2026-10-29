@@ -42,6 +42,9 @@ samples() {
     make src.tar 'git ls-files -z codecs/aqr-flate | xargs -0 tar cf $out'
     copy zip.zip $codecs/aqr-zip/corpus/881026.zip
     copy git.pack $codecs/aqr-git/corpus/local/aqueous/.git/objects/pack/pack-d45a1b85c3d4567983098805e604a5afab43e22e.pack
+    # (the pack with its index and reverse index: git-pack-index-recons)
+    make git.d 'local p=$codecs/aqr-git/corpus/local/aqueous/.git/objects/pack/pack-d45a1b85c3d4567983098805e604a5afab43e22e;
+        mkdir $out && cp $p.pack $p.idx $out && { [[ ! -e $p.rev ]] || cp $p.rev $out; }'
     copy photo.png $codecs/aqr-png/corpus/codec-corpus/clic2025/training/5dbdb989cf026f7ab3dd7167d7fc0fe2.png
     copy anim.png $codecs/aqr-png/corpus/codec-corpus/image-rs/test-images/png/apng/ball.png
     make flat.png 'magick -size 8000x6000 gradient:white-gray90 -depth 8 $out'

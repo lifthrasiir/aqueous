@@ -172,22 +172,36 @@ impl Out for Check<'_> {
 /// after another, then [`DERIVED`] bytes for each: the Adler-32 of its data, big endian, the
 /// length of its data and the length of the stream) and `kept`.
 pub fn build(layout: &[u8], deflated: &[u8], kept: &[u8], len: u64) -> Result<Vec<u8>> {
+    build_with(layout, deflated, kept, len, 0, None)
+}
+
+/// [`build`] into a vector of `more` bytes of room past the pack, and where `starts` is given,
+/// the offset of each entry pushed to it, then that of the end of the entries.
+pub fn build_with(
+    layout: &[u8],
+    deflated: &[u8],
+    kept: &[u8],
+    len: u64,
+    more: usize,
+    starts: Option<&mut Vec<usize>>,
+) -> Result<Vec<u8>> {
     let rebuilt = tags(layout)?.iter().filter(|&&t| t & REBUILT != 0).count();
     let table_at = deflated.len().checked_sub(rebuilt.checked_mul(DERIVED).ok_or_else(corrupt)?).ok_or_else(corrupt)?;
     let cap = usize::try_from(len).map_err(|_| corrupt())?;
-    let mut out = Vec::with_capacity(cap.min(kept.len() + deflated.len() + layout.len() * 4 + ID));
-    build_into(layout, Some(&deflated[..table_at]), &deflated[table_at..], kept, len, &mut out)?;
+    let mut out = Vec::with_capacity(cap.min(kept.len() + deflated.len() + layout.len() * 4 + ID).saturating_add(more));
+    build_into(layout, Some(&deflated[..table_at]), &deflated[table_at..], kept, len, &mut out, starts)?;
     Ok(out)
 }
 
 /// Whether `layout`, `table` (what [`build`] takes after the streams) and `kept` give `pack`
 /// back with the streams taken as they are in it: all but aqr-flate's part, without a copy.
 pub fn check(layout: &[u8], table: &[u8], kept: &[u8], pack: &[u8]) -> bool {
-    build_into(layout, None, table, kept, pack.len() as u64, &mut Check { want: pack, at: 0 }).is_ok()
+    build_into(layout, None, table, kept, pack.len() as u64, &mut Check { want: pack, at: 0 }, None).is_ok()
 }
 
 /// [`build`] into `out`, of `streams` (or, where not given, of what `out` has there) and
-/// `table` (their [`DERIVED`] bytes each, all of it).
+/// `table` (their [`DERIVED`] bytes each, all of it); the entries' offsets pushed to `starts`
+/// as [`build_with`] does.
 fn build_into(
     layout: &[u8],
     streams: Option<&[u8]>,
@@ -195,6 +209,7 @@ fn build_into(
     kept: &[u8],
     len: u64,
     out: &mut impl Out,
+    mut starts: Option<&mut Vec<usize>>,
 ) -> Result<()> {
     let mut l = Bytes(layout);
     let mut k = Bytes(kept);
@@ -204,7 +219,13 @@ fn build_into(
     let mut header = Vec::with_capacity(10);
     out.put(k.take(HEADER)?)?;
     let mut zlib = ZLIB_FIRST;
+    if let Some(s) = &mut starts {
+        s.reserve(n + 1);
+    }
     for &tag in tags {
+        if let Some(s) = &mut starts {
+            s.push(out.so_far().len());
+        }
         if tag & REBUILT == 0 {
             if tag != 0 {
                 return Err(corrupt());
@@ -243,6 +264,9 @@ fn build_into(
             None => out.skip(stream)?,
         }
         out.put(adler)?;
+    }
+    if let Some(s) = &mut starts {
+        s.push(out.so_far().len());
     }
     match l.take(1)? {
         [TRAILER_DERIVED] => {

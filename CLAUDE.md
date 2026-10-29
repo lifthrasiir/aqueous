@@ -126,8 +126,9 @@ optimization picked by hash.
   multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
   Firefox's mozlz4 is liblz4's `LZ4_compress_default`.
 - aqr-git is the pack recompressor `git-pack-recons`, at aqr-flate's profile as aqr-compress
-  picks it. Left: `.idx`/`.rev` (need object ids, so several outputs), the archive's 16 MiB
-  solid-block bound, pack blobs in `together`.
+  picks it; a pack with its `.idx`/`.rev` is a set (`git-pack-index-recons`, only the ids
+  stored). Left: deriving the ids (resolving every delta), `multi-pack-index` from the indexes,
+  the archive's 16 MiB solid-block bound, pack blobs in `together`.
 
 ## Working copy and commits
 

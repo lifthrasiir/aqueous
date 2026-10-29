@@ -4,11 +4,14 @@
 //! contents (`-v` adds a line per pack, by its index).
 //!
 //! ```sh
-//! cargo run --release -p aqr-git --example aqr-git-check -- [-v] [-t THREADS] [-p PROFILE] [-z] FILE_OR_DIR...
+//! cargo run --release -p aqr-git --example aqr-git-check -- [-v] [-t THREADS] [-p PROFILE] [-z] [-i] FILE_OR_DIR...
 //! ```
 //!
 //! `-p`: aqr-flate's profile of the records (by default its default); `-z`: zlib emulation
-//! (adaptive profiles); `-d DIR`: each formula's streams written to `DIR/<index>.<n>.<class>`.
+//! (adaptive profiles); `-d DIR`: each formula's streams written to `DIR/<index>.<n>.<class>`;
+//! `-i`: each pack with its index and reverse index next to it (`.idx`, `.rev`), where there
+//! are, as `encode_index` takes them (the streams' bytes then of these formulas; the zstd
+//! totals of the packs and indexes).
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -26,7 +29,7 @@ fn walk(p: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn main() {
-    let (mut paths, mut verbose, mut dump) = (Vec::new(), false, None::<PathBuf>);
+    let (mut paths, mut verbose, mut dump, mut index) = (Vec::new(), false, None::<PathBuf>, false);
     let mut opt = Options { zlib: false, ..Options::default() };
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -36,12 +39,15 @@ fn main() {
             "-p" => opt.profile = args.next().unwrap().parse().unwrap(),
             "-z" => opt.zlib = true,
             "-d" => dump = Some(args.next().unwrap().into()),
+            "-i" => index = true,
             _ => walk(Path::new(&a), &mut paths),
         }
     }
     let zstd = |d: &[u8]| zstd::bulk::compress(d, 3).unwrap().len();
     let (mut packs, mut bytes, mut zstd_in, mut zstd_out, mut enc_secs, mut dec_secs) = (0, 0, 0, 0, 0.0, 0.0);
     let mut classes: Vec<(String, usize, usize)> = Vec::new();
+    // indexes taken, their bytes, and the seconds of encode_index and of decoding
+    let (mut indexes, mut index_bytes, mut index_secs, mut index_dec_secs) = (0, 0, 0.0, 0.0);
     for (k, p) in paths.iter().enumerate() {
         let Ok(d) = std::fs::read(p) else { continue };
         if !aqr_git::pack::starts(&d) {
@@ -62,12 +68,43 @@ fn main() {
             }
             continue;
         };
-        let start = Instant::now();
-        let out = f.eval(&|a: &aqr_formula::Apply, ins: &[&[u8]]| {
-            formula::apply(a, ins, opt.threads).map_err(|e| aqr_formula::Error::new(e.to_string()))
-        });
-        dec_secs += start.elapsed().as_secs_f64();
-        assert!(out.ok().as_deref() == Some(&d[..]), "#{k} not rebuilt");
+        let eval = |f: &aqr_formula::Formula| {
+            let start = Instant::now();
+            let out = f.eval(&|a: &aqr_formula::Apply, ins: &[&[u8]]| {
+                formula::apply(a, ins, opt.threads).map_err(|e| aqr_formula::Error::new(e.to_string()))
+            });
+            (out.ok(), start.elapsed().as_secs_f64())
+        };
+        let (out, secs) = eval(&f);
+        dec_secs += secs;
+        assert!(out.as_deref() == Some(&d[..]), "#{k} not rebuilt");
+        let mut f = f;
+        let sibling = |ext: &str| std::fs::read(p.with_extension(ext)).ok();
+        if index && let Some(idx) = sibling("idx") {
+            let rev = sibling("rev");
+            let start = Instant::now();
+            let g = formula::encode_index(f.clone(), &d, &idx, rev.as_deref(), opt.threads);
+            index_secs += start.elapsed().as_secs_f64();
+            let both = [&idx[..], rev.as_deref().unwrap_or_default()].concat();
+            let zb = zstd(&both);
+            zstd_in += zb;
+            match g {
+                Some(g) => {
+                    let (out, secs) = eval(&g);
+                    index_dec_secs += secs;
+                    assert!(out.as_deref() == Some(&[&d[..], &both].concat()[..]), "#{k}: indexes not rebuilt");
+                    indexes += 1;
+                    index_bytes += both.len();
+                    f = g;
+                }
+                None => {
+                    zstd_out += zb;
+                    if verbose {
+                        println!("#{k}: indexes not taken");
+                    }
+                }
+            }
+        }
         let mut z = 0;
         for (n, s) in f.streams.iter().enumerate() {
             if let Some(dir) = &dump {
@@ -94,6 +131,11 @@ fn main() {
         bytes as f64 / enc_secs / 1e6,
         bytes as f64 / dec_secs / 1e6
     );
+    if index {
+        println!(
+            "{indexes} indexes taken, {index_bytes} B; encode_index {index_secs:.2} s, decoding with them {index_dec_secs:.2} s"
+        );
+    }
     classes.sort_by_key(|c| std::cmp::Reverse(c.2));
     for (c, n, z) in classes {
         println!("  {c}: {n} B, zstd {z}");

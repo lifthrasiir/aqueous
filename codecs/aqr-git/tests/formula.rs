@@ -207,3 +207,107 @@ fn corrupt_inputs_fail_cleanly() {
     }
     std::fs::remove_dir_all(&d).unwrap();
 }
+
+/// The repository's one pack with its index and reverse index (where there is one).
+fn pack_with_index(dir: &Path) -> (Vec<u8>, Vec<u8>, Option<Vec<u8>>) {
+    let p = pack(dir);
+    let name = |ext: &str| {
+        let sum: String = p[p.len() - 20..].iter().map(|b| format!("{b:02x}")).collect();
+        dir.join(format!(".git/objects/pack/pack-{sum}.{ext}"))
+    };
+    (p.clone(), std::fs::read(name("idx")).unwrap(), std::fs::read(name("rev")).ok())
+}
+
+/// The formula of a pack with its indexes, checked to give them back one after another.
+fn roundtrip_index(p: &[u8], idx: &[u8], rev: Option<&[u8]>) -> Formula {
+    let f = formula::encode_index(roundtrip(p).0, p, idx, rev, 4).expect("encoded");
+    let want = [p, idx, rev.unwrap_or_default()].concat();
+    assert!(decode(&f, 1).unwrap() == want, "not rebuilt");
+    f
+}
+
+#[test]
+fn index_and_reverse_index() {
+    let d = tmp("index");
+    history(&d, 15);
+    git(&d, &["-c", "pack.writeReverseIndex=true", "repack", "-q", "-a", "-d"]);
+    let (p, idx, rev) = pack_with_index(&d);
+    let rev = rev.expect("a reverse index");
+    let n = u32::from_be_bytes(p[8..12].try_into().unwrap()) as usize;
+    let f = roundtrip_index(&p, &idx, Some(&rev));
+    // of the indexes, only the ids are stored
+    let ids: Vec<_> = f.streams.iter().filter(|s| s.class == "git-pack/ids").collect();
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids[0].data.len(), 20 * n);
+    assert_eq!(f.shared.len(), 1);
+    assert_eq!(f.shared[0].sizes, [p.len(), idx.len(), rev.len()].map(|n| n as u64));
+    // without a reverse index
+    roundtrip_index(&p, &idx, None);
+    // indexes that are not the pack's, or not as git writes them, are not taken
+    let pack_formula = roundtrip(&p).0;
+    let not = |idx: &[u8], rev: Option<&[u8]>| formula::encode_index(pack_formula.clone(), &p, idx, rev, 1).is_none();
+    for at in [8, 8 + 1024, idx.len() - 50, idx.len() - 30, idx.len() - 1] {
+        let mut i = idx.clone();
+        i[at] ^= 1;
+        assert!(not(&i, Some(&rev)), "index changed at {at}");
+    }
+    for at in [0, 12, rev.len() - 30, rev.len() - 1] {
+        let mut r = rev.clone();
+        r[at] ^= 1;
+        assert!(not(&idx, Some(&r)), "reverse index changed at {at}");
+    }
+    assert!(not(&idx[..idx.len() - 1], None));
+    assert!(not(&rev, None));
+    // of another pack
+    let e = tmp("index-other");
+    history(&e, 4);
+    git(&e, &["repack", "-q", "-a", "-d"]);
+    let (_, other, _) = pack_with_index(&e);
+    assert!(not(&other, None));
+    std::fs::remove_dir_all(&d).unwrap();
+    std::fs::remove_dir_all(&e).unwrap();
+}
+
+#[test]
+fn index_corrupt_inputs_fail_cleanly() {
+    let d = tmp("index-corrupt");
+    history(&d, 5);
+    git(&d, &["-c", "pack.writeReverseIndex=true", "repack", "-q", "-a", "-d"]);
+    let (p, idx, rev) = pack_with_index(&d);
+    let rev = rev.unwrap();
+    let f = roundtrip_index(&p, &idx, Some(&rev));
+    let a = &f.shared[0].apply;
+    let inputs: Vec<Vec<u8>> = a
+        .inputs
+        .iter()
+        .map(|n| {
+            let mut g = f.clone();
+            (g.root, g.shared) = (n.clone(), Vec::new());
+            decode(&g, 1).unwrap()
+        })
+        .collect();
+    let len = a.len;
+    let run = |params: &[u8], ins: &[Vec<u8>]| {
+        let refs: Vec<&[u8]> = ins.iter().map(|i| &i[..]).collect();
+        aqr_git::module::decode_index(params, &refs, len, 1)
+    };
+    assert!(run(&a.params, &inputs).unwrap() == [&p[..], &idx, &rev].concat());
+    // the ids changed: other indexes, as long
+    let mut ins = inputs.clone();
+    ins[3][7] ^= 1;
+    assert_eq!(run(&a.params, &ins).unwrap().len() as u64, len);
+    // params other than the flags and the pack's length, ids not of whole entries
+    let mut more = a.params.clone();
+    more.push(0);
+    for params in [&[][..], &[2, 0][..], &a.params[..1], &more] {
+        assert!(run(params, &inputs).is_err(), "{params:?}");
+    }
+    let mut no_rev = a.params.clone();
+    no_rev[0] = 0;
+    assert!(run(&no_rev, &inputs).is_err());
+    ins = inputs.clone();
+    ins[3].pop();
+    assert!(run(&a.params, &ins).is_err());
+    assert!(run(&a.params, &inputs[..3]).is_err());
+    std::fs::remove_dir_all(&d).unwrap();
+}

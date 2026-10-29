@@ -17,7 +17,7 @@ use crate::layout::Writer;
 use crate::pack::{self, BLOB, COMMIT, Entry, HEADER, ID, TAG, TREE};
 use crate::{Result, corrupt};
 
-pub use crate::module::decode;
+pub use crate::module::{decode, decode_index};
 
 /// A pack rebuilt from the data of its entries, the DEFLATE streams given by aqr-flate's module
 /// ([`decode`]).
@@ -31,6 +31,22 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let reserved = kept + deflated + 4 * layout + ID as u64;
     let growth = if reserved < u.output() { 2 * u.output() } else { 0 };
     Some(u.whole(growth, 1))
+}
+
+/// A pack with its index and reverse index after it ([`decode_index`]): the pack as
+/// [`MODULE`] makes it, the indexes of the ids of its entries.
+pub const INDEX_MODULE: Module = Module::new("git-pack-index-recons", 1).with_memory(index_memory);
+
+/// The memory of [`INDEX_MODULE`]: [`MODULE`]'s, the indexes reserved past the pack and made
+/// apart, the entries' offsets, and their order and places.
+fn index_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[deflated, layout, kept, ids] = u.inputs else { return None };
+    let mut at = 1;
+    let pack = aqr_common::varint::get(u.params, &mut at).ok()?;
+    let more = u.output().checked_sub(pack)?;
+    let reserved = kept + deflated + 4 * layout + ID as u64 + more;
+    let growth = if reserved < u.output() { 2 * u.output() } else { 0 };
+    Some(u.whole(growth + more + ids / ID as u64 * 16, 4))
 }
 
 #[derive(Debug, Clone)]
@@ -278,6 +294,58 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     Some(Encoded { formula: f, inflated })
 }
 
+/// The ids of the entries of pack `pack` in order, where its index `idx` and reverse index
+/// `rev` (where there is one) are what [`INDEX_MODULE`] makes of them; else None. The
+/// entries are parsed on up to `threads` threads.
+pub fn index_ids(pack: &[u8], idx: &[u8], rev: Option<&[u8]>, threads: usize) -> Option<Vec<u8>> {
+    let mut starts = crate::index::starts(idx)?;
+    starts.push(pack::entries_end(pack, &starts, threads)?);
+    crate::index::ids(pack, &starts, idx, rev)
+}
+
+/// Whether `f` is the formula of a pack of `len` bytes, [`encode_with`]'s.
+pub fn is_pack(f: &Formula, len: usize) -> bool {
+    matches!(&f.root, Node::Apply(a) if a.module == MODULE && a.len == len as u64)
+}
+
+/// `pack_formula` (a pack's, [`is_pack`]) with the index of `idx_len` bytes and the reverse
+/// index of `rev_len` (where there is one) of the ids `ids` ([`index_ids`]) after the pack,
+/// [`INDEX_MODULE`]'s outputs one after another.
+pub fn with_index(pack_formula: Formula, ids: Vec<u8>, idx_len: usize, rev_len: Option<usize>) -> Formula {
+    let mut f = pack_formula;
+    let Node::Apply(a) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else {
+        panic!("not a pack's formula")
+    };
+    let mut a = *a;
+    assert!(a.module == MODULE, "not a pack's formula");
+    let pack_len = a.len;
+    let ids = f.push_as("git-pack/ids", Kind::Compressed, ids);
+    a.module = INDEX_MODULE;
+    a.params = vec![if rev_len.is_some() { crate::module::WITH_REV } else { 0 }];
+    aqr_common::varint::put(&mut a.params, pack_len);
+    a.inputs.push(ids);
+    let sizes = [Some(pack_len as usize), Some(idx_len), rev_len].into_iter().flatten().map(|n| n as u64).collect();
+    f.root = Node::Concat(f.split(a, sizes));
+    f
+}
+
+/// The formula of pack `pack` with its index `idx` and reverse index `rev` (where there is
+/// one) of `pack_formula` (the pack's own, [`encode_with`]'s), as [`with_index`] makes it,
+/// where [`index_ids`] takes them; else None.
+pub fn encode_index(
+    pack_formula: Formula,
+    pack: &[u8],
+    idx: &[u8],
+    rev: Option<&[u8]>,
+    threads: usize,
+) -> Option<Formula> {
+    if !is_pack(&pack_formula, pack.len()) {
+        return None;
+    }
+    let ids = index_ids(pack, idx, rev, threads)?;
+    Some(with_index(pack_formula, ids, idx.len(), rev.map(<[u8]>::len)))
+}
+
 /// `f(item, threads)` on every element of `items`, by `threads` threads, the largest by `size`
 /// first: those of at least [`LARGE`] with all of them (aqr-flate codes segments in parallel,
 /// but parses a stream on one), the others with one each, all side by side, so that the small
@@ -304,6 +372,7 @@ pub fn apply(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> Result
     let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
     match a.module {
         m if m == MODULE && res.is_empty() => decode(&a.params, inputs, a.len, threads),
+        m if m == INDEX_MODULE && res.is_empty() => decode_index(&a.params, inputs, a.len, threads),
         m if m == aqr_flate::formula::MODULE => aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads)
             .map_err(|_| crate::Error("DEFLATE stream not rebuilt")),
         _ => Err(corrupt()),

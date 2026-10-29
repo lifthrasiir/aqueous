@@ -12,6 +12,9 @@
 //! them, so that sets of those are cut to a bound of bytes ([`Cx::set_limit`]): along the
 //! order of the tree, each piece a set of its own, whose members with a parent in another one
 //! have none.
+//!
+//! git packs with their indexes are sets too ([`crate::git::sets`]), of no bound: an index
+//! takes its pack to decode.
 
 use std::collections::{HashMap, HashSet};
 
@@ -119,7 +122,7 @@ fn records(f: &Formula) -> usize {
 /// The sets of the contents `children` of `f` (each its slice and its formula), a formula of
 /// data `depth` formats deep, whose formulas they take out of `children`: those of `plan`
 /// (whose members with a parent have no formula), and those of the other PNG files coded
-/// alone whose set codes smaller.
+/// alone whose set codes smaller; and the packs with their indexes ([`crate::git::sets`]).
 pub(crate) fn sets(
     f: &Formula,
     children: &mut [(Node, Option<Made>)],
@@ -207,6 +210,7 @@ pub(crate) fn sets(
         };
         out.push(Set { f: set, members });
     }
+    out.extend(crate::git::sets(f, children, opt));
     out
 }
 

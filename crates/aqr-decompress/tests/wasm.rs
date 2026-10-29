@@ -178,6 +178,11 @@ fn same_as_wasm() {
         formulas.push((t.into(), aqr_flac::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}")), d));
     }
     formulas.push(("pcm".into(), aqr_raw::formula::encode(&wav(), 1).expect("pcm"), wav()));
+    // a git pack with its index and reverse index after it
+    let [pack, idx, rev] = ["pack", "idx", "rev"].map(|e| fixture(&format!("codecs/aqr-git/tests/data/small.{e}")));
+    let f = aqr_git::formula::encode(&pack, 1).expect("pack");
+    let f = aqr_git::formula::encode_index(f, &pack, &idx, Some(&rev), 1).expect("indexes");
+    formulas.push(("git pack".into(), f, [pack, idx, rev].concat()));
     let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
     for (name, f, d) in formulas {
         let c = enc.encode(&f, None).unwrap();

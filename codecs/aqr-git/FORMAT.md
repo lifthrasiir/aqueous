@@ -1,6 +1,7 @@
-# The `git-pack-recons` module
+# The `git-pack-recons` and `git-pack-index-recons` modules
 
-This document specifies the module `git-pack-recons` of aqr-formula entry formulas. The module
+This document specifies the module `git-pack-recons` of aqr-formula entry formulas, and
+`git-pack-index-recons`, the pack with its index and reverse index (§6). The module
 rebuilds a git pack bit for bit from the DEFLATE streams of its entries (which an application
 of aqr-flate's module `flate-set` gives it, with the Adler-32 and sizes of their data), and a
 *layout* holding the rest of the pack. What follows from the data (the entries' headers, the
@@ -17,6 +18,7 @@ Contents:
 3. [The layout](#3-the-layout)
 4. [Encoding](#4-encoding-encoder)
 5. [Validation](#5-validation)
+6. [The pack with its indexes](#6-the-pack-with-its-indexes)
 
 ## 1. Conventions
 
@@ -116,3 +118,50 @@ failure, on params, resources or inputs other than §2's; a layout or `kept` tha
 a layout not used up; a tag of other bits than §3's; a `deflated` shorter than its table or not
 cut exactly by it; a stream length that does not fit; a `trailer` other than 0 and 1; or an
 output whose length is not `len`.
+
+## 6. The pack with its indexes
+
+A pack's index (`.idx`, version 2) and reverse index (`.rev`, version 1) (`gitformat-pack`)
+follow from the pack and the ids of its entries: only the ids are stored, in the order of the
+entries in the pack.
+
+- **Module**: name `git-pack-index-recons`, version 1.
+- **Params**: a byte of flags, of which only bit 0 (*with reverse index*) may be set, then a
+  varint `P`, using up the params.
+- **Resources**: none.
+- **Inputs**: exactly four: `deflated`, `layout` and `kept` as §2's, then `ids` (class
+  `git-pack/ids`): `20n` bytes for some `n`, the ids of the entries in their order.
+- **Output**: the pack of §3 of `P` bytes (`len` §3's) with the offsets `s_0, ..., s_(m-1)` of
+  its entries in order and the offset `s_m` after the last (where the trailer starts, derived
+  or not); then the index; then, *with reverse index*, the reverse index. `m` must be `n`, and
+  `s_m + 20` at most `P`. Its length must be the `len` the application declares.
+
+Let `id_j` be the `j`-th 20 bytes of `ids`, `t` the 20 bytes of the pack from `s_m` (its
+trailer), and `π` the entries `0, ..., n-1` sorted by `id_j` in byte order, of the same id in
+their order (a stable sort). All numbers are big endian. The index is:
+
+1. `FF 74 4F 63 00 00 00 02`;
+2. for each byte value `b` from 0 to 255, the count of entries whose id starts with a byte of at
+   most `b` (4 bytes);
+3. `id_j` for each `j` in the order `π`;
+4. for each `j` in the order `π`, the CRC-32 (ISO 3309, as zlib's) of the pack's bytes from
+   `s_j` to `s_(j+1)` (4 bytes);
+5. for each `j` in the order `π`, `s_j` (4 bytes) if it is at most `7FFFFFFF`; else
+   `80000000` plus the count of entries before `j` in the order `π` at an offset past
+   `7FFFFFFF`;
+6. `s_j` (8 bytes) of each entry at an offset past `7FFFFFFF`, in the order `π`;
+7. `t`, then `sha1` of everything before it in the index.
+
+The reverse index is `52 49 44 58 00 00 00 01 00 00 00 01` (`RIDX`, version 1, SHA-1), then for
+each entry `j` in the pack's order its place in `π` (4 bytes, from 0), then `t`, then `sha1` of
+everything before it in the reverse index.
+
+The module fails, besides on what §5 lists for the pack, on params other than the above, an
+`ids` whose length is not `20m`, or an output whose length is not `len`.
+
+*(encoder)* The index is taken where it is of version 2 and its offsets, sorted, are where
+entries start: the first at 12, and each entry, parsed as §4 does, ending where the next one
+starts (each on its own, in parallel). The ids are read off it by those offsets; it is taken
+only where it is the index above of them (and the reverse index, where there is one, the
+reverse index above), else the files are archived as they are. aqr-compress finds a pack's
+indexes among the files archived along with it by the pack's trailer, which theirs repeat.

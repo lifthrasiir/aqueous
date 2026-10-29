@@ -13,7 +13,8 @@ entries' headers from the sizes of their data, the zlib headers and checksums, a
 trailer (SHA-1), and keeps what is not what git writes as it is.
 
 ```sh
-cargo run --release -p aqr-git --example aqr-git-check -- [-v] [-t N] [-p PROFILE] [-z] [-d DIR] FILE_OR_DIR...
+cargo run --release -p aqr-git --example aqr-git-check -- [-v] [-t N] [-p PROFILE] [-z] [-i] [-d DIR] FILE_OR_DIR...
+sh codecs/aqr-git/scripts/gen-fixtures.sh    # tests/data, with the git CLI
 ```
 
 ```rust
@@ -23,7 +24,8 @@ let f = formula::encode(&pack, 8).unwrap();
 // `f` rebuilds `pack` when evaluated with `formula::apply` (`MODULE` and aqr-flate's)
 ```
 
-`FORMAT.md` specifies the module `git-pack-recons`.
+`FORMAT.md` specifies the module `git-pack-recons`, and `git-pack-index-recons`: the pack with
+its index and reverse index after it, of which only the ids of the entries are stored.
 
 ## The rest of a checkout
 
@@ -37,9 +39,23 @@ for any files:
   their own for blobs of 256 KiB or more), and loose objects' data the same way.
 - **Files of the same content**, paths, symlinks, per-file checksums: the archive's.
 
-Not taken (yet): `.idx` and `.rev` files, which follow from their pack but only with every
-object's id (SHA-1 of the resolved objects, deltas applied): they stay as they are (the ids do
-not compress). SHA-256 repositories (ids of 32 bytes in ref-deltas) are not taken as packs.
+- **`.idx` and `.rev` files** (index version 2, reverse index version 1) follow from their
+  pack and the ids of its entries: aqr-compress finds them by the pack's trailer, which they
+  repeat, and codes the three as a set (`git-pack-index-recons`), storing only the ids in the
+  order of the pack. The CRC-32s, offsets, fan-out table, reverse index and checksums are
+  derived.
+
+Not taken (yet): the ids themselves, which follow from the objects (SHA-1 of each resolved,
+deltas applied) but at the cost of resolving every delta chain as `git index-pack` does; the
+`multi-pack-index`, which follows from the indexes (it compressed against the raw `.idx` files
+before, and no longer does); `commit-graph`. SHA-256 repositories (ids of 32 bytes in
+ref-deltas) are not taken as packs.
+
+On the 62 packs of 35 local repositories (592 MB, `aqr-git-check -t 10 -i`), every index and
+reverse index was taken: 29.6 MB of them, about 28.4 MB at zstd -3, become 18.48 MB of ids
+(incompressible). Finding them took 0.92 s on 10 threads (the entries parsed again, each at the
+offset the index tells, to check that they are where the layout puts them), against 13.2 s for
+the packs; decoding 7.95 s against 7.39 s.
 
 ## Results
 

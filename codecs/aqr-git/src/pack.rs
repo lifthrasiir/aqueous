@@ -115,24 +115,50 @@ pub fn entries(d: &[u8]) -> Option<Vec<Entry>> {
     let mut out = Vec::with_capacity(n.min(d.len() / 8));
     let mut p = HEADER;
     for _ in 0..n {
-        let h = header_len(d.get(p..)?)?;
-        let t = header_type(&d[p..])?;
-        let b = p + h;
-        let z = b + match t {
-            COMMIT | TREE | BLOB | TAG => 0,
-            OFS_DELTA => ofs_len(d.get(b..)?)?,
-            REF_DELTA => ID,
-            _ => return None,
-        };
-        if !zlib_header(*d.get(z..)?.first_chunk()?) {
-            return None;
-        }
-        let end = z + 2 + aqr_flate::inflate::parse_head(d.get(z + 2..)?, usize::MAX, &mut Skip).ok()?.end;
-        d.get(end..end + 4)?;
-        out.push(Entry { t, header: p..b, base: b..z, deflate: z + 2..end });
-        p = end + 4;
+        let e = entry_at(d, p)?;
+        p = e.end();
+        out.push(e);
     }
     Some(out)
+}
+
+/// The entry at `p` of `d`.
+#[cfg(feature = "encode")]
+fn entry_at(d: &[u8], p: usize) -> Option<Entry> {
+    let h = header_len(d.get(p..)?)?;
+    let t = header_type(&d[p..])?;
+    let b = p + h;
+    let z = b + match t {
+        COMMIT | TREE | BLOB | TAG => 0,
+        OFS_DELTA => ofs_len(d.get(b..)?)?,
+        REF_DELTA => ID,
+        _ => return None,
+    };
+    if !zlib_header(*d.get(z..)?.first_chunk()?) {
+        return None;
+    }
+    let end = z + 2 + aqr_flate::inflate::parse_head(d.get(z + 2..)?, usize::MAX, &mut Skip).ok()?.end;
+    d.get(end..end + 4)?;
+    Some(Entry { t, header: p..b, base: b..z, deflate: z + 2..end })
+}
+
+/// Where the entries of the pack at the start of `d` end, where they start at `at` (as an
+/// index tells, in order): those [`entries`] finds, each parsed on its own on up to `threads`
+/// threads. None where they are not.
+#[cfg(feature = "encode")]
+pub fn entries_end(d: &[u8], at: &[usize], threads: usize) -> Option<usize> {
+    if !starts(d) || count(d)? as usize != at.len() || at.first().is_some_and(|&p| p != HEADER) {
+        return None;
+    }
+    let ends = aqr_common::pool::par_map(at.len(), threads, |j| entry_at(d, at[j]).map(|e| e.end()));
+    let mut end = HEADER;
+    for (&p, e) in at.iter().zip(ends) {
+        if p != end {
+            return None;
+        }
+        end = e?;
+    }
+    Some(end)
 }
 
 /// Bytes of the pack at the start of `d`: its entries and its trailer (where there is room for

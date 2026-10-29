@@ -4662,7 +4662,12 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flate-set.wasm" title="crates/aqr-modules/wasm/flate-set.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md" title="codecs/aqr-flate/FORMAT.md">R</a>
     <tr>
-      <td><code>17849cd2f570cd4ff266e6c7c7e7656954fff0b7b53a032682e630874b1d27e3</code>
+      <td><code>a870720c5bd2c32248dceb5dd0098e99117c252b2a541a2933df155464d8bea8</code>
+      <td>git-pack-index-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/git-pack-index-recons.wasm" title="crates/aqr-modules/wasm/git-pack-index-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-git/FORMAT.md" title="codecs/aqr-git/FORMAT.md">R</a>
+    <tr>
+      <td><code>8de96ff114cf1746e7fe70b380d47d009392a1f711f5b2032a790127f7ea22e2</code>
       <td>git-pack-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/git-pack-recons.wasm" title="crates/aqr-modules/wasm/git-pack-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-git/FORMAT.md" title="codecs/aqr-git/FORMAT.md">R</a>
