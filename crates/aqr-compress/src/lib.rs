@@ -20,6 +20,7 @@
 //!   their data, the rest of the file sliced around them.
 //! - ar, tar and cpio archives: aqr-bundle, rebuilding the archive from the contents of its
 //!   members with their sizes and checksums derived.
+//! - ISO 9660 and UDF images: aqr-iso, the image cut into its files' contents and the rest.
 //! - Text, a whole file of text bytes or data of a name telling text: a delimited table (CSV,
 //!   TSV, USV and the like) by aqr-xsv, its fields stored column by column, where it takes it;
 //!   else aqr-wrt, its words and markup replaced by codes of a dictionary of its own.
@@ -1575,6 +1576,25 @@ mod tests {
         let probe = probe(&Options::default(), 0).unwrap();
         assert_eq!((probe.look)(Kind::Format("tar")), Look::Scan);
         assert_eq!((probe.look)(Kind::Format("jpeg")), Look::Whole);
+    }
+
+    /// An ISO 9660 or UDF image is taken apart into its files, recompressed in turn: a JPEG file
+    /// in it by aqr-jpeg.
+    #[test]
+    fn images_taken_apart() {
+        let fixture = |p: &str| std::fs::read(format!("{}/../../{p}", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        let z = fixture("codecs/aqr-iso/tests/data/udf201.iso.zst");
+        let mut d = zstd::stream::decode_all(&z[..]).unwrap();
+        let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
+        let files = aqr_iso::files(&d);
+        let at = files.iter().find(|f| f.name == b"bin/data.bin").unwrap().extents[0].start;
+        d[at..at + jpeg.len()].copy_from_slice(&jpeg);
+        assert_eq!(detect(&d), Some(Format::Iso));
+        // (the modules the archive's anyway)
+        let f = recompress(&d, &Options { shared_modules: true, ..Options::default() });
+        assert!(f.streams.iter().any(|s| s.class == aqr_iso::formula::REST));
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(f.eval(&Native::default()).unwrap() == d);
     }
 
     /// The contents of pure formats are made beforehand, each once: those of a ZIP archive's

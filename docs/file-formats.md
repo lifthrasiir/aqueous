@@ -92,6 +92,7 @@ reservoir is rebuilt.
 | mozlz4, LZ4 frames | aqr-lz4 | a Firefox profile (README) | −9 to −18% against `zstd -3` of the files, −57% solid | | | 650–1150 (the compressor) | not measured | no sample on this machine; liblz4 1.10.0's fast compressor reproduced exactly |
 | lzop files (LZO1X) | aqr-lzo | Silesia (12 files) through `lzop -3` and `-9`, 101.0 and 76.3 MB (README) | 0.622 and 0.821 | 0.840 and 0.923 | 16 and 10 (`aqr`, 10 threads) | 94 and 41 (`-t`, 10 threads; the second as Wasm) | 13.5× (`aqr` peak) | measured 2026-10-28 with `aqr`, not `aqr-show`; the original files archive to 57.8 MB: the records (4.5% and 6.1% of the streams) are most of the rest. No compressor reproduced: data + record of the parse |
 | ar, tar, cpio | aqr-bundle | the 10gb corpus (README) | 2810.8 → 2775.0 MB for all of it | | | 6600 (the module) | 28000 (the module) | not measured | measured with `aqr` and `aqr-bundle-check`, not `aqr-show`: an archive alone gains nothing, its files are recompressed by their formats and shared with the same files archived along (`gimp.tar` and its files −11.3 MB); ar archives of objects +1.0 MB |
+| ISO 9660, UDF images | aqr-iso | a Windows Server 2008 R2 DVD, 3.17 GB (README) | 2777.6 → 2776.9 MB | | 177 (`aqr`, all threads) | | 1.82 GB peak for 3.17 GB (2.04 before) | measured 2026-10-30 with `aqr`; no module (the image is its files' contents and the rest); 89% of the DVD is `install.wim` (LZX), which it gives as a file of its own |
 | LevelDB tables (Snappy) | aqr-snappy | 33 tables of a Chrome profile, 13.3 MB (README) | −30.5% against `zstd -3` | | | 315 (tables rebuilt) | not measured | both hashes of Snappy 1.2.2 |
 | git checkouts | aqr-git (packs), aqr-flate (loose objects), the archive (the rest) | 15 repositories, 1196 MB (README) | 0.454 (0.430 from level 7: aqr-flate's adaptive profile) | 0.651 (`tar \| zstd -19 --long=27`) | 23 (`aqr`, 10 threads) | 142 (`aqr -t`, 10 threads) | peak RSS 0.2–7.1 GB (pyre, 665 MB, 10.7×) | directories, measured with `aqr` 2026-10-28, not `aqr-show`; the former aqr-git (its own container) came to 0.452, 0.255 with every zlib stream rebuilt and all the packs' data in one stream (here in solid blocks of 16 MiB) |
 
@@ -119,6 +120,7 @@ reservoir is rebuilt.
 | aqr-obj | compression speed of `%.17g` files; connectivity of faces in random order; `.mtl` |
 | aqr-zip | DEFLATE only; other methods (bzip2, LZMA, AES) are kept |
 | aqr-bundle | members sliced from the archive's bytes rather than copied (the memory of `.tar.gz`); COFF objects of ar archives (aqr-exe); old GNU sparse files; tar archives found in other data |
+| aqr-iso | UDF's metadata partition (2.50, Blu-ray); raw 2352-byte sectors (EDC/ECC); the files' contents sliced from the image rather than copied; WIM (LZX) recompression for the install images |
 
 ## Worth doing
 

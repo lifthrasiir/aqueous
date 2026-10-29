@@ -28,7 +28,7 @@ impl Volume {
     /// Byte of logical block `lbn` of partition reference `part`.
     fn at(&self, part: u16, lbn: u32) -> Option<usize> {
         let start = (*self.parts.get(part as usize)?)?;
-        Some((start + lbn as usize).checked_mul(SECTOR)?)
+        (start + lbn as usize).checked_mul(SECTOR)
     }
 }
 
@@ -186,7 +186,7 @@ fn entry(d: &[u8], vol: &Volume, icb: Long) -> Option<Entry> {
 /// which) as UTF-8.
 fn name(id: &[u8]) -> Vec<u8> {
     let s: String = match id.split_first() {
-        Some((16, r)) => char::decode_utf16(r.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])))
+        Some((16, r)) => char::decode_utf16(r.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)))
             .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
             .collect(),
         Some((_, r)) => r.iter().map(|&b| b as char).collect(),

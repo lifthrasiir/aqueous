@@ -83,7 +83,7 @@ fn walk(d: &[u8], root: &[u8], block: usize, ucs2: bool, out: &mut Vec<File>) {
 /// A file identifier as a name: UCS-2 to UTF-8, without its version (`;1`) or a trailing dot.
 fn name(id: &[u8], ucs2: bool) -> Vec<u8> {
     let mut s = match ucs2 {
-        true => char::decode_utf16(id.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])))
+        true => char::decode_utf16(id.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)))
             .map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER))
             .collect::<String>()
             .into_bytes(),
