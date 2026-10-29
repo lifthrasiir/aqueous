@@ -54,6 +54,9 @@ pub enum Format {
     GnuGettext,
     /// FITS file (aqr-fits), known by its primary header.
     Fits,
+    /// HDF5 file (aqr-hdf5, and aqr-flate on its deflated chunks), known by its superblock;
+    /// after a user block, at the start of a file only.
+    Hdf5,
     /// Wavefront OBJ file (aqr-obj), a whole file known by its text: not looked for in other
     /// data, nor by its name, which object files (COFF, OMF) have too.
     Obj,
@@ -78,7 +81,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 32] = [
+    pub const ALL: [Format; 33] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -103,6 +106,7 @@ impl Format {
         Format::Fasta,
         Format::GnuGettext,
         Format::Fits,
+        Format::Hdf5,
         Format::Obj,
         Format::Ar,
         Format::Tar,
@@ -139,6 +143,7 @@ impl Format {
             Format::Fasta => "fasta",
             Format::GnuGettext => "gnu-gettext",
             Format::Fits => "fits",
+            Format::Hdf5 => "hdf5",
             Format::Obj => "obj",
             Format::Ar => "ar",
             Format::Tar => "tar",
@@ -190,6 +195,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"fa" | b"fasta" | b"fna" | b"ffn" | b"fas" => format(Format::Fasta),
         b"mo" | b"gmo" => format(Format::GnuGettext),
         b"fits" | b"fit" | b"fts" | b"fz" => format(Format::Fits),
+        b"h5" | b"hdf5" | b"he5" | b"h5ad" | b"nwb" => format(Format::Hdf5),
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
@@ -278,6 +284,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::GnuGettext)
     } else if aqr_fits::formula::starts(d) {
         Some(Format::Fits)
+    } else if aqr_hdf5::formula::starts(d) || start && aqr_hdf5::formula::after_user_block(d) {
+        Some(Format::Hdf5)
     } else if start && aqr_fasta::formula::starts(d) {
         Some(Format::Fasta)
     } else if start && aqr_obj::formula::starts(d) {
@@ -302,7 +310,7 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
 /// Whether a file of a format [`starts`] finds may start with bytes `a`, `b`.
 const fn pair(a: u8, b: u8) -> bool {
     match a {
-        0x89 => b == b'P' || b == b'L',
+        0x89 => b == b'P' || b == b'L' || b == b'H',
         b'%' => b == b'P',
         b'f' => b == b'L',
         b'R' => b == b'I',
@@ -365,7 +373,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         return None;
     }
     let likely = match d[0] {
-        0x89 => d.starts_with(b"\x89PNG") || d.starts_with(&aqr_lzo::lzop::MAGIC),
+        0x89 => d.starts_with(b"\x89PNG") || d.starts_with(&aqr_lzo::lzop::MAGIC) || aqr_hdf5::formula::starts(d),
         b'%' => d.starts_with(b"%PDF-"),
         b'8' => d.starts_with(b"8BPS") || zlib_header(d, false),
         b'f' => d.starts_with(b"fLaC"),

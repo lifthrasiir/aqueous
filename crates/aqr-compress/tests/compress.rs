@@ -1079,6 +1079,21 @@ fn git_pack_file() {
     assert!(!modules(&recompress(&x, &all())).contains(&"git-pack-recons"));
 }
 
+/// An HDF5 file goes to aqr-hdf5, its deflated chunks to aqr-flate, also in other data.
+#[test]
+fn hdf5_file() {
+    let d = fixture("codecs/aqr-hdf5/tests/data/sb0.h5");
+    assert_eq!(aqr_compress::detect(&d), Some(aqr_compress::Format::Hdf5));
+    assert_eq!(aqr_compress::extent(aqr_compress::Format::Hdf5, &d), Some(d.len()));
+    assert_eq!(modules(&roundtrip(&d, &all())), ["flate-set"]);
+    let x = [&b"some bytes first"[..], &d, b"and after"].concat();
+    assert_eq!(modules(&roundtrip(&x, &all())), ["flate-set"]);
+    // after a user block, at the start of a file
+    let d = fixture("codecs/aqr-hdf5/tests/data/userblock.h5");
+    assert_eq!(aqr_compress::detect(&d), Some(aqr_compress::Format::Hdf5));
+    assert_eq!(modules(&roundtrip(&d, &all())), ["flate-set"]);
+}
+
 /// A DDS file of BC1 blocks of a smooth picture, `w` × `h` with `mips` mipmaps.
 fn dds_file(w: u32, h: u32, mips: u32) -> Vec<u8> {
     let mut d = b"DDS ".to_vec();

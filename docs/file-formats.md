@@ -231,7 +231,7 @@ container is TIFF/EXIF.
 | NIfTI (`.nii.gz`) | neuroimaging | a gzip of the whole volume | the gzip, then a 3D model of the voxels | aqr-flate |
 | mzML, mzXML | mass spectrometry | XML with base64 arrays of floats, optionally zlib | base64 and zlib undone, the m/z and intensity arrays modelled | aqr-flate |
 | FITS (`fpack`) | astronomy | Rice coding of 32-pixel blocks; uncompressed images and binary tables | taken by aqr-fits (Rice tiles rebuilt from their pixels, images and tables modelled); hcompress, GZIP tiles and better pixel models left (its README) | aqr-fits |
-| HDF5, NetCDF-4 | climate, simulation | shuffle filter and deflate per chunk | DEFLATE recompressed per chunk | aqr-flate |
+| HDF5, NetCDF-4 | climate, simulation | shuffle filter and deflate per chunk | taken by aqr-hdf5 (deflated chunks rebuilt by aqr-flate); models of the data (floats, integer images), LZF and Blosc chunks left (its README) | aqr-hdf5, aqr-flate |
 | ROOT | particle physics (CERN) | baskets in zlib, LZ4, LZMA or zstd | the zlib and LZ4 baskets | aqr-flate, aqr-lz4 |
 | GRIB2, simple packing | weather | integers packed at a fixed width | unpacked, then a predictive model | |
 | SEG-Y | seismic surveys | uncompressed traces of IBM or IEEE floats | a trace model | |

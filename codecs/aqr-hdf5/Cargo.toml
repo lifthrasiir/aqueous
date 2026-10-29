@@ -1,0 +1,27 @@
+[package]
+name = "aqr-hdf5"
+version = "0.1.0"
+edition = "2024"
+description = "HDF5 files rebuilt bit for bit: the deflated chunks of their datasets rebuilt by aqr-flate from their data"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`).
+encode = ["dep:aqr-formula", "aqr-flate/encode"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+aqr-flate = { path = "../aqr-flate", default-features = false }
+
+[dev-dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }
+zstd = "0.13"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-hdf5-check"
+path = "examples/check.rs"

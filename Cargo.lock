@@ -110,6 +110,7 @@ dependencies = [
  "aqr-fsb",
  "aqr-git",
  "aqr-gnu-gettext",
+ "aqr-hdf5",
  "aqr-infer-recs",
  "aqr-jpeg",
  "aqr-lz4",
@@ -284,6 +285,16 @@ version = "0.1.0"
 dependencies = [
  "aqr-common",
  "aqr-formula",
+]
+
+[[package]]
+name = "aqr-hdf5"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-flate",
+ "aqr-formula",
+ "zstd",
 ]
 
 [[package]]
