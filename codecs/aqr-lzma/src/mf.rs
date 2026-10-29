@@ -16,7 +16,8 @@ pub const LONG: usize = 16;
 /// Positions by a hash of their next `K` bytes, the newest first.
 struct Chain<const K: usize> {
     head: Vec<u32>,
-    /// The position before each in its chain, by position modulo the ring's size.
+    /// The position before each in its chain, by position modulo the ring's size: as many as
+    /// there are positions where the data is shorter than the ring.
     prev: Vec<u32>,
     mask: usize,
     /// How far back a candidate may be.
@@ -27,8 +28,9 @@ struct Chain<const K: usize> {
 }
 
 impl<const K: usize> Chain<K> {
-    fn new(ring: usize, reach: usize) -> Self {
-        Chain { head: vec![NONE; 1 << HASH_BITS], prev: vec![NONE; ring], mask: ring - 1, reach, found: vec![] }
+    fn new(ring: usize, len: usize, reach: usize) -> Self {
+        let prev = vec![NONE; ring.min(len.max(1))];
+        Chain { head: vec![NONE; 1 << HASH_BITS], prev, mask: ring - 1, reach, found: vec![] }
     }
 
     #[inline]
@@ -157,9 +159,9 @@ impl<'a> Mf<'a> {
             reach,
             head2: vec![NONE; 1 << 16],
             head3: vec![NONE; 1 << HASH3_BITS],
-            short: Chain::new(ring, reach),
-            mid: Chain::new(ring, reach),
-            long: Chain::new(ring, reach),
+            short: Chain::new(ring, d.len(), reach),
+            mid: Chain::new(ring, d.len(), reach),
+            long: Chain::new(ring, d.len(), reach),
             next: 0,
             found_at: usize::MAX,
         }

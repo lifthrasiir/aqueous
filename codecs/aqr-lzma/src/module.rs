@@ -50,12 +50,30 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
         return Err(corrupt());
     }
     let streams = cut(data, records, index)?;
-    let outs = aqr_common::pool::par_map(streams.len(), threads, |i| recons::join(streams[i].0, streams[i].1));
-    let mut out = Vec::with_capacity(usize::try_from(len).map_err(|_| corrupt())?);
-    for o in outs {
-        out.extend_from_slice(&o.ok_or_else(corrupt)?);
+    let join = |i: usize| recons::join(streams[i].0, streams[i].1).ok_or_else(corrupt);
+    let len = usize::try_from(len).map_err(|_| corrupt())?;
+    let mut out = Vec::new();
+    if threads <= 1 || cfg!(target_family = "wasm") {
+        // (each appended as it is rebuilt, not all held at once, the output reserved after the
+        // first, whose match finder is then freed; a stream alone as it is)
+        for i in 0..streams.len() {
+            let o = join(i)?;
+            match (i, streams.len()) {
+                (0, 1) => out = o,
+                (0, _) => {
+                    out.reserve_exact(len);
+                    out.extend_from_slice(&o);
+                }
+                _ => out.extend_from_slice(&o),
+            }
+        }
+    } else {
+        out.reserve_exact(len);
+        for o in aqr_common::pool::par_map(streams.len(), threads, join) {
+            out.extend_from_slice(&o?);
+        }
     }
-    if out.len() as u64 != len {
+    if out.len() != len {
         return Err(Error("output of another length"));
     }
     Ok(out)
