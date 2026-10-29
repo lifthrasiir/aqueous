@@ -1,10 +1,15 @@
 //! LZX chunks, as WIM files hold them, split into their data and a record of their parse, and
 //! rebuilt bit for bit, so that the data is stored instead. Microsoft's encoder is not
-//! reproduced: the record codes its parse given the data. `lzx` reads and writes chunks.
+//! reproduced: the record codes its parse given the data (`recons`). `lzx` reads and writes
+//! chunks; `formula` is the entry point (see aqr-formula), with the feature `encode`; `module`
+//! is the code of the module, which `FORMAT.md` specifies.
 
 // The code of the modules alone uses only part of the rest.
 #![cfg_attr(not(feature = "encode"), allow(unused))]
+#[cfg(feature = "encode")]
+pub mod formula;
 pub mod lzx;
+pub mod module;
 pub mod recons;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

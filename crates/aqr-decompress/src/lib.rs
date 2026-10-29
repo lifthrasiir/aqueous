@@ -85,6 +85,11 @@ pub const LZMA: Module = aqr_lzma::formula::MODULE;
 /// Inputs: the data, the records and the index cutting them into the streams'.
 pub const LZO: Module = aqr_lzo::formula::MODULE;
 
+/// aqr-lzx reconstruction of streams of LZX chunks (as WIM files hold them), one after another,
+/// from their data and records. Inputs: the data, the records and the index cutting them into
+/// the streams'.
+pub const LZX: Module = aqr_lzx::formula::MODULE;
+
 /// Snappy's compressor on data, for a Snappy stream. Parameters: the compressor's hash; inputs:
 /// the data.
 pub const SNAPPY: Module = aqr_snappy::formula::MODULE;
@@ -174,7 +179,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 43] = [
+pub const MODULES: [Module; 44] = [
     X86,
     ARM64,
     CIL,
@@ -183,6 +188,7 @@ pub const MODULES: [Module; 43] = [
     LZ4,
     LZMA,
     LZO,
+    LZX,
     SNAPPY,
     LEVELDB,
     ZIP,
@@ -419,6 +425,9 @@ impl Native {
         } else if m == LZO {
             none(resources)?;
             aqr_lzo::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == LZX {
+            none(resources)?;
+            aqr_lzx::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == SNAPPY {
             none(resources)?;
             aqr_snappy::formula::decode(params, inputs, len, threads).map_err(msg)

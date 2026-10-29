@@ -268,3 +268,21 @@ fn empty_stream() {
     assert!(sp.data.is_empty());
     assert_eq!(recons::join(&sp.data, &sp.record).unwrap(), Vec::<u8>::new());
 }
+
+/// Writes `tests/data/greedy.chunks`, a stream of this test's chunks for other crates' tests
+/// (aqr-decompress runs the module on it as WebAssembly): each chunk its data's length and its
+/// bytes' length (u32 little-endian), then its bytes.
+#[test]
+#[ignore]
+fn write_fixture() {
+    let mut rng = Rng::new(5);
+    let (_, chunks) = stream(&mut rng, 3 * CHUNK + 1234);
+    let mut out = Vec::new();
+    for (c, n) in &chunks {
+        out.extend_from_slice(&(*n as u32).to_le_bytes());
+        out.extend_from_slice(&(c.len() as u32).to_le_bytes());
+        out.extend_from_slice(c);
+    }
+    std::fs::create_dir_all(format!("{}/tests/data", env!("CARGO_MANIFEST_DIR"))).unwrap();
+    std::fs::write(format!("{}/tests/data/greedy.chunks", env!("CARGO_MANIFEST_DIR")), out).unwrap();
+}

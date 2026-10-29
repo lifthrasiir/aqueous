@@ -34,6 +34,7 @@ aqr-jpeg = { path = "../../codecs/aqr-jpeg" }
 aqr-lz4 = { path = "../../codecs/aqr-lz4" }
 aqr-lzma = { path = "../../codecs/aqr-lzma" }
 aqr-lzo = { path = "../../codecs/aqr-lzo" }
+aqr-lzx = { path = "../../codecs/aqr-lzx" }
 aqr-mp3 = { path = "../../codecs/aqr-mp3" }
 aqr-pdf = { path = "../../codecs/aqr-pdf" }
 aqr-png = { path = "../../codecs/aqr-png" }

@@ -268,6 +268,55 @@ fn lzo_same_as_wasm() {
     }
 }
 
+/// LZX chunks (aqr-lzx's fixture, of its test encoder) natively and as WebAssembly alike, in
+/// one stream and in two, and their records damaged in turn failing alike (or giving the same).
+#[test]
+fn lzx_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let d = fixture("codecs/aqr-lzx/tests/data/greedy.chunks");
+    let (mut chunks, mut at) = (Vec::new(), 0);
+    while at < d.len() {
+        let n = u32::from_le_bytes(d[at..at + 4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(d[at + 4..at + 8].try_into().unwrap()) as usize;
+        chunks.push((&d[at + 8..at + 8 + len], n));
+        at += 8 + len;
+    }
+    let whole: Vec<u8> = chunks.iter().flat_map(|c| c.0.iter().copied()).collect();
+    for streams in [vec![chunks.clone()], vec![chunks[..1].to_vec(), chunks[1..].to_vec()]] {
+        let mut f = Formula::default();
+        f.push("raw", Vec::new());
+        let mut parts = Vec::new();
+        for (s, sp) in streams.iter().zip(aqr_lzx::formula::split(&streams, 1)) {
+            let sp = sp.unwrap();
+            let len: u64 = s.iter().map(|c| c.0.len() as u64).sum();
+            let at = f.streams[0].data.len() as u64;
+            f.streams[0].data.extend_from_slice(&sp.data);
+            parts.push((Node::slice(0, at, sp.data.len() as u64), sp.record, len));
+        }
+        f.root = Node::concat(aqr_lzx::formula::apply(&mut f, parts));
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == whole);
+        assert!(decode_wasm(&c).unwrap() == whole);
+        let r = f.streams.iter().position(|s| s.class == "lzx/record").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[r].data;
+            let at = s.len() * k / 8;
+            if k == 7 {
+                s[at..].fill(0xff);
+            } else if at < s.len() {
+                s[at] ^= 1 << k;
+            }
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{k}");
+            }
+        }
+    }
+}
+
 /// A module written by hand, of `wat`.
 fn module(wat: &str) -> Vec<u8> {
     wat::parse_str(wat).unwrap()

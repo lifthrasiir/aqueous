@@ -142,6 +142,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/lzo-recons.block"),
     },
     Known {
+        name: "lzx-recons",
+        version: 1,
+        sha512_256: hex("5112ff56c5df04c23b1a733bd2599428555a9eb9be6a698df7bb24fa3a1a90fd"),
+        block: include_bytes!("../wasm/lzx-recons.block"),
+    },
+    Known {
         name: "mp3-recons",
         version: 5,
         sha512_256: hex("d54625a5cecbb3a1400c7204b5a57285f143d4d84a82800f4ff44e135040bf17"),
