@@ -13,8 +13,26 @@ use crate::words::Dictionary;
 
 pub use crate::module::{decode, decode_hangul};
 
-pub const MODULE: Module = Module::new("wrt-recons", 1);
-pub const HANGUL: Module = Module::new("wrt-recons-hangul", 1);
+pub const MODULE: Module = Module::new("wrt-recons", 1).with_memory(memory);
+pub const HANGUL: Module = Module::new("wrt-recons-hangul", 1).with_memory(memory_hangul);
+
+/// The memory of [`MODULE`]: the whole of it with the dictionary parsed (`D` bytes of resource,
+/// copied once more into the parsed dictionary), and the list of entries (12 bytes each, at most
+/// `D / 2` of them, a vector grown by pushes: three times its final length while it grows).
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[dict] = u.resources else { return None };
+    Some(u.whole(dict + 3 * 12 * (dict / 2), 8))
+}
+
+/// The memory of [`HANGUL`]: as [`memory`], with entries of 8 bytes; and, per piece of the
+/// parameters (two varints at least, so `P / 2` of them at most), its pair of lengths (8 bytes
+/// in a vector grown by pushes, three times while it grows), its job (a mutex around two
+/// slices, 24) and the mutex of its result in the pool (24) and the result (8).
+fn memory_hangul(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[dict] = u.resources else { return None };
+    let pieces = u.params.len() as u64 / 2 + 1;
+    Some(u.whole(dict + 3 * 8 * (dict / 2) + pieces * (3 * 8 + 24 + 24 + 8), 8))
+}
 
 /// The names of the inputs' streams, in order.
 pub const STREAM_NAMES: [&str; 1] = ["text"];
