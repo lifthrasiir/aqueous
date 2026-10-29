@@ -2768,8 +2768,15 @@ A <dfn>task</dfn> is an instance of the module of its own,
 run on a copy of the [=working memory=] of the instance that spawns it and giving back a [=byte sequence=], its <dfn for=task>result</dfn>.
 The application's instance and every task are the instances of the application;
 each instance has a [=list=] of handles, initially empty, each of which is a [=list=] of the tasks spawned at once.
-A task is either running, done (with a result), failed (with an [=invalid archive=] failure or a [=resource failure=]),
+A task is either pending, running, done (with a result), failed (with an [=invalid archive=] failure or a [=resource failure=]),
 or <dfn for=task>taken</dfn>.
+
+Of the tasks an instance spawns, at most 8 (the <dfn>task slots</dfn>) are running at once.
+A task is pending from its spawn until it is started; whenever fewer than 8 of the tasks its instance spawned are running,
+the first of them pending, in the order they were spawned (by handle, then by index), is started:
+it is running from then, and [=run a task|runs=].
+A running task stops running when it is done or failed.
+A pending task is not yet an instance of the application: it has no memories, and it does not [=wait=].
 
 A <dfn>channel</dfn> links instances of an application: a [=queue=] of messages ([=byte sequences=]) of at most its <dfn for=channel>capacity</dfn>,
 whether it is <dfn for=channel>closed</dfn>, and its <dfn for=channel>sender</dfn> and <dfn for=channel>receiver</dfn>,
@@ -2797,8 +2804,8 @@ where |arg|, |n|, |h|, |i|, |ptr|, |dst| and |len| are of type `i32`, unsigned:
 
 : <dfn>aqr_spawn</dfn>(|arg|, |n|)
 :: Let |S| be the content of the [=working memory=] of |I|.
-    Append to the handles of |I| a [=list=] of |n| new tasks, the |i|-th (from 0) of which is to [=run a task=] given |S|, |arg| and |i|,
-    and return the index of that list among the handles of |I|.
+    Append to the handles of |I| a [=list=] of |n| new pending tasks, the |i|-th (from 0) of which is to [=run a task=] given |S|, |arg| and |i|
+    once it is started (as the [=task slots=] allow), and return the index of that list among the handles of |I|.
 : <dfn>aqr_result</dfn>(|ptr|, |len|)
 :: |I| MUST be a task, and |ptr| + |len| MUST be at most the size of its [=working memory=].
     Set the result of |I| to the |len| bytes of its [=working memory=] from the offset |ptr|.
@@ -2841,8 +2848,14 @@ and taking an end of |C| for |I| means: if that end is none, set it to |I|; othe
   and the messages of the channels whose ends they are,
   and each end of a channel is an instance's: the instances are a Kahn process network,
   so the outputs do not depend on when, in what order or how many at once the tasks run.
-  Implementations MAY run a task at any time from its spawn and on any thread,
+  Implementations MAY run a task at any time from its start and on any thread,
   as long as an instance waiting does not keep the others from running.
+  The [=task slots=] bound the memory of an application, its memory limit included:
+  a pending task holds no memory under the limit (what implementations keep of |S| for it is their own),
+  and an application that needs more than 8 of an instance's tasks at once, such as a pipeline of 9 stages,
+  is an [=invalid archive=] whenever its running instances all wait for one that is pending.
+  The tasks an instance spawns start in the order it spawned them, whatever the others do,
+  so whether that happens does not depend on when the tasks run either.
   A channel is closed by its sender ending only if it sent to it or closed it,
   so an instance that may send no message to a channel closes it itself.
   Every memory but the working memory is empty to a task, so the data a task works on is in the working memory;

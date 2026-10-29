@@ -468,6 +468,50 @@ fn wake(wakers: Vec<Waker>) {
     wakers.into_iter().for_each(Waker::wake);
 }
 
+/// The tasks running at most of those an instance spawns (the spec's task slots).
+const TASK_SLOTS: usize = 8;
+
+/// The tasks an instance spawned: how many are running, and those to start as they end, in the
+/// order spawned. A task to start is not an instance yet: it has no memory, and is not one that
+/// waits (so where those running all wait, it is a deadlock).
+#[derive(Default)]
+struct Slots(Mutex<(usize, VecDeque<Boxed>)>);
+
+type Boxed = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>;
+
+impl Slots {
+    /// Runs `task` on `exec` once a slot is free.
+    fn start(self: &Arc<Self>, exec: &Arc<Exec>, task: Boxed) {
+        let mut s = self.0.lock().unwrap();
+        if s.0 < TASK_SLOTS {
+            s.0 += 1;
+            drop(s);
+            self.run(exec, task);
+        } else {
+            s.1.push_back(task);
+        }
+    }
+
+    /// Runs `task`, which holds a slot, and then the next to start in its slot.
+    fn run(self: &Arc<Self>, exec: &Arc<Exec>, task: Boxed) {
+        let (slots, ex) = (self.clone(), exec.clone());
+        exec.spawn(async move {
+            task.await;
+            let next = {
+                let mut s = slots.0.lock().unwrap();
+                let next = s.1.pop_front();
+                if next.is_none() {
+                    s.0 -= 1;
+                }
+                next
+            };
+            if let Some(next) = next {
+                slots.run(&ex, next);
+            }
+        });
+    }
+}
+
 /// What a task runs: `aqr_task(arg, i)` in an instance of `c` whose working memory is
 /// `snapshot`.
 struct Job {
@@ -503,6 +547,8 @@ struct State {
     result: Vec<u8>,
     /// The tasks spawned, by handle; taken where `None`.
     spawned: Vec<Vec<Option<Arc<Cell>>>>,
+    /// The tasks spawned running, and those to start.
+    slots: Arc<Slots>,
 }
 
 impl State {
@@ -520,6 +566,7 @@ impl State {
             task,
             result: Vec::new(),
             spawned: Vec::new(),
+            slots: Arc::default(),
         }
     }
 
@@ -1021,7 +1068,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                         let job =
                             Job { c: s.c.clone(), app: s.app.clone(), snapshot: snapshot.clone(), arg: arg as u32, i };
                         let (done, app) = (cell.clone(), s.app.clone());
-                        s.app.exec.spawn(async move {
+                        let task = Box::pin(async move {
                             let r = job.run().await;
                             // (a task failing fails the application at once: those waiting for
                             // it through channels would wait for ever)
@@ -1031,6 +1078,7 @@ fn host(store: &mut Store<State>, f: HostFn) -> Func {
                             }
                             done.finish(r)
                         });
+                        s.slots.start(&s.app.exec, task);
                         Some(cell)
                     })
                     .collect();

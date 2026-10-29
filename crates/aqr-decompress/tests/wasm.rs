@@ -683,3 +683,65 @@ fn channels() {
     );
     invalid(apply(&dead, &[b"ab"], &[0], u64::MAX), "deadlock");
 }
+
+/// A task per byte of the input, task `i` receiving its byte from channel `i` (which the module
+/// sends to after the spawn) and giving it back; the tasks of `waiting` (none if `None`) wait
+/// instead for a message from the last task, which sends one to each of them.
+fn slotted(waiting: Option<usize>) -> String {
+    let wait = match waiting {
+        None => String::new(),
+        Some(w) => format!(
+            r#"(if (i32.lt_u (local.get $i) (i32.const {w}))
+                    (then (drop (call $recv (i32.add (i32.const 0x40) (local.get $i)) (i32.const 0x8000) (i32.const 1)))))
+                (if (i32.eq (local.get $i) (i32.const {w}))
+                    (then (loop $next (if (i32.lt_u (local.get $k) (i32.const {w})) (then
+                        (call $send (i32.add (i32.const 0x40) (local.get $k)) (i32.const 0x8000) (i32.const 1))
+                        (local.set $k (i32.add (local.get $k) (i32.const 1)))
+                        (br $next))))))"#
+        ),
+    };
+    format!(
+        r#"(module {MEMORIES} {TASKS} {CHANS}
+            (func (export "aqr_task") (param $arg i32) (param $i i32)
+                (local $k i32)
+                {wait}
+                (drop (call $recv (local.get $i) (i32.const 0x8000) (i32.const 1)))
+                (call $result (i32.const 0x8000) (i32.const 1)))
+            (func (export "aqr_apply_whole") (param i64) (param $n i64) (param i64)
+                (local $h i32) (local $i i32)
+                (memory.copy 0 2 (i32.const 0x100) (i64.const 0) (i32.wrap_i64 (local.get $n)))
+                ;; channels 0 to 0x7f: the inputs' and those of the waiting
+                (loop $next (if (i32.lt_u (local.get $i) (i32.const 0x80)) (then
+                    (drop (call $chan (i32.const 1)))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br $next))))
+                (local.set $h (call $spawn (i32.const 0) (i32.wrap_i64 (local.get $n))))
+                (local.set $i (i32.const 0))
+                (loop $next (if (i32.lt_u (local.get $i) (i32.wrap_i64 (local.get $n))) (then
+                    (call $send (local.get $i) (i32.add (i32.const 0x100) (local.get $i)) (i32.const 1))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br $next))))
+                (local.set $i (i32.const 0))
+                (loop $next (if (i32.lt_u (local.get $i) (i32.wrap_i64 (local.get $n))) (then
+                    (drop (call $join (local.get $h) (local.get $i)))
+                    (call $take (local.get $h) (local.get $i) (i32.add (i32.const 0x4000) (local.get $i)) (i32.const 1))
+                    (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                    (br $next))))
+                (memory.copy 3 0 (i64.const 0) (i32.const 0x4000) (i32.wrap_i64 (local.get $n)))))"#
+    )
+}
+
+/// At most 8 of the tasks an instance spawns run at once, the others started in order as they
+/// end: 16 tasks waiting for their messages fit in the memory of 8, and 8 tasks waiting for a
+/// ninth never see it start (a deadlock), as 8 waiting for an eighth do.
+#[test]
+fn task_slots() {
+    let input: Vec<u8> = (0..16).map(|b| b + 0x41).collect();
+    let all = slotted(None);
+    // 4 pages for the module's memories and 1 a task running (16 at once would take 20), with
+    // room for what the sandbox's worker takes past that (1 or 2 pages, not yet understood)
+    let limit = (4 + 8 + 3) << 16;
+    assert_eq!(apply(&all, &[&input], &[16], limit).unwrap(), [input.clone()]);
+    assert_eq!(apply(&slotted(Some(7)), &[&input[..8]], &[8], u64::MAX).unwrap(), [&input[..8]]);
+    invalid(apply(&slotted(Some(8)), &[&input[..9]], &[9], u64::MAX), "deadlock");
+}
