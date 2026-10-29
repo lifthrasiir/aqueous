@@ -250,6 +250,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-fsb"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+]
+
+[[package]]
 name = "aqr-git"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,9 @@
+[package]
+name = "aqr-fsb"
+version = "0.1.0"
+edition = "2024"
+description = "FMOD's FSB5 sound banks: the Vorbis setup headers they leave out, rebuilt from a database"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
