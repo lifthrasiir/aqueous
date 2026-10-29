@@ -191,10 +191,14 @@ pub struct Choice {
     pub gain: i64,
 }
 
-/// The candidate regions of a file: chains of entries, then tables of fixed-size records.
-pub fn candidates(data: &[u8]) -> Vec<Region> {
-    let mut out: Vec<Region> =
-        chain::chains(data).into_iter().map(|(p, r)| Region::entries(data, p, r, None)).collect();
+/// The candidate regions of a file: tables of fixed-size records, and with `chains` chains of
+/// entries before them. [`infer`] looks for tables alone: on the data of the 10 GB corpus that
+/// the quick estimate lets through, chains saved 0.04% more for a third of the time.
+pub fn candidates(data: &[u8], chains: bool) -> Vec<Region> {
+    let mut out: Vec<Region> = match chains {
+        true => chain::chains(data).into_iter().map(|(p, r)| Region::entries(data, p, r, None)).collect(),
+        false => Vec::new(),
+    };
     out.extend(fixed::find(data).into_iter().map(|(s, k, n)| Region::fixed(data, s, k, n)));
     out
 }
@@ -302,7 +306,7 @@ pub fn choose(data: &[u8], cands: Vec<Region>) -> (Vec<Choice>, Vec<String>) {
 
 /// The regions to take in data, sorted.
 pub fn infer(data: &[u8]) -> Vec<Choice> {
-    choose(data, candidates(data)).0
+    choose(data, candidates(data, false)).0
 }
 
 /// The regions to take in data, if a quick estimate ([`probe::estimate`]) says they may save

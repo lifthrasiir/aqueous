@@ -1,9 +1,10 @@
-//! usage: aqr-infer-recs-bench [-j THREADS] [-v] [-t] FILE...
+//! usage: aqr-infer-recs-bench [-j THREADS] [-v] [-t] [-c] FILE...
 //!
 //! For each file: zstd -3 of it, and of it with the regions inferred in their forms (each
 //! checked to restore), and the CPU time of the inference (of its thread: the files run on
 //! THREADS threads, all the cores by default). As `scripts/rec_bench.py`, for comparison.
-//! `-v` prints the candidates, `-t` the CPU time of each step of the inference. Last, what
+//! `-v` prints the candidates, `-t` the CPU time of each step of the inference, `-c` looks
+//! for chains of entries too (as [`aqr_infer_recs::infer`] does not). Last, what
 //! giving up early would have given ([`aqr_infer_recs::infer_if`]): for thresholds on the
 //! quick estimate, the files' sizes and the time with the files below them left as they are.
 
@@ -30,7 +31,7 @@ struct Row {
     probe: (aqr_infer_recs::probe::Estimate, f64),
 }
 
-fn bench(path: &str) -> Row {
+fn bench(path: &str, chains: bool) -> Row {
     let data = std::fs::read(path).unwrap();
     let z0 = aqr_infer_recs::zstd_size(&data);
     let t = thread_cpu();
@@ -44,7 +45,7 @@ fn bench(path: &str) -> Row {
         *from = now;
     };
     let mut at = t;
-    let chains = aqr_infer_recs::chain::chains(&data);
+    let chains = if chains { aqr_infer_recs::chain::chains(&data) } else { Vec::new() };
     lap(0, &mut at);
     let tables = aqr_infer_recs::fixed::find(&data);
     lap(1, &mut at);
@@ -72,6 +73,7 @@ fn main() {
 
     let mut verbose = false;
     let mut timed = false;
+    let mut chains = false;
     while let Some(a) = args.first().cloned() {
         match a.as_str() {
             "-j" => {
@@ -84,6 +86,10 @@ fn main() {
             }
             "-t" => {
                 timed = true;
+                args.remove(0);
+            }
+            "-c" => {
+                chains = true;
                 args.remove(0);
             }
             _ => break,
@@ -104,7 +110,7 @@ fn main() {
                     if i >= args.len() {
                         break;
                     }
-                    let row = bench(&args[i]);
+                    let row = bench(&args[i], chains);
                     rows.lock().unwrap()[i] = Some(row);
                     // in order, as the rows come
                     let mut p = printed.lock().unwrap();

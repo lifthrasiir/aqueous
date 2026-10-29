@@ -30,11 +30,13 @@ Contents:
 ## 2. The formula *(encoder)*
 
 A file of 16 KiB or more that no recompressor takes, and in which a scan finds no file of a
-format, is looked into for *regions*: tables of records of a fixed size, and chains of entries
-each holding its length. The search is the inference of the crate (README); it is run only
-where a quick estimate says the regions may save at least 5% of the file's size under zstd at
-level 3 (48 windows of 8 KiB over the file, each transposed by the record size its bytes repeat
-at most and split into fields, against the windows as they are). A region is taken where it
+format, is looked into for *regions*: tables of records of a fixed size. The search is the
+inference of the crate (README); it is run only where a quick estimate says the regions may
+save at least 5% of the file's size under zstd at level 3 (48 windows of 8 KiB over the file,
+each transposed by the record size its bytes repeat at most and split into fields, against the
+windows as they are). The crate also finds chains of entries each holding its length, which
+`recs-entries` rebuilds; the encoder does not look for them (on the data of the 10 GB corpus
+they saved little for much time), but a formula may hold them. A region is taken where it
 makes the file smaller under zstd at level 3, judged on its first MiB and 64 KiB around it.
 
 The formula is the concatenation of the bytes before the first region, the first region's
@@ -42,8 +44,9 @@ application, the bytes up to the next region, and so on, and the bytes after the
 bytes between the regions are slices of the stream `recs/raw`, all of them one after another.
 
 - A table of records is an application of `recs-fields` (§3) to a stream `recs/planes`.
-- A chain of entries is an application of `recs-entries` (§4) to the heads, an application of
-  `recs-fields` to a stream `recs/planes`, and the tails, a stream `recs/tails`.
+- A chain of entries (where looked for) is an application of `recs-entries` (§4) to the heads,
+  an application of `recs-fields` to a stream `recs/planes`, and the tails, a stream
+  `recs/tails`.
 
 The fields are chosen by dynamic programming over the record, on a sample of the records
 (about 64 KiB of them, from four places), each field's cost the order-0 code length of its

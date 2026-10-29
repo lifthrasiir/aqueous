@@ -52,9 +52,10 @@ pub fn estimate(data: &[u8]) -> Estimate {
             t.extend((0..rows).map(|i| a[i * k + j]));
         }
         t.extend_from_slice(&a[rows * k..]);
-        // the records' fields, or their bytes transposed, whichever is smaller
+        // the records' fields (not against each other, which costs much and tells little), or
+        // their bytes transposed, whichever is smaller
         let m = &a[..rows * k];
-        let (fl, _, _) = fields::split(m, k, Cost::Kt, true);
+        let (fl, _, _) = fields::split(m, k, Cost::Kt, false);
         let mut f = fields::encode(m, k, &fl);
         f.extend_from_slice(&a[rows * k..]);
         let zt = zcost::len(&[&t]).min(zcost::len(&[&f]));

@@ -282,7 +282,7 @@ fn records_of_no_format() {
     // records only, and turns them down)
     let d = entries(3_000);
     assert!(modules(&roundtrip(&d, &all())).is_empty());
-    let f = aqr_infer_recs::formula::formula(&d, &aqr_infer_recs::infer(&d));
+    let f = aqr_infer_recs::formula::formula(&d, &aqr_infer_recs::choose(&d, aqr_infer_recs::candidates(&d, true)).0);
     check(&d, &f);
     assert_eq!(modules(&f), [RECS_ENTRIES.name, RECS_FIELDS.name]);
 }

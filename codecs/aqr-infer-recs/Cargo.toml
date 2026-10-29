@@ -8,11 +8,12 @@ publish = false
 [features]
 default = ["encode"]
 # The inference and the formulas (`formula`); without it, the code of the modules alone (`module`).
-encode = ["dep:aqr-formula", "dep:zstd"]
+encode = ["dep:aqr-formula", "dep:xxhash-rust", "dep:zstd"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+xxhash-rust = { version = "0.8", features = ["xxh3"], optional = true }
 zstd = { version = "0.13", optional = true }
 
 [dev-dependencies]

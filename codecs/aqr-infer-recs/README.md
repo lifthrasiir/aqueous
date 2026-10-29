@@ -14,7 +14,8 @@ prototype; `scripts/rec_oracle.py` measures the prototype against the layouts of
   them there: b and alignment); scored by how consecutive entries agree column by column
   against a control; the best followed through the file, extended backwards, rotated (a chain
   fixes entries only up to where they start) and trimmed. Each entry's head (a width chosen
-  by zstd) is a record; its tail follows.
+  by zstd) is a record; its tail follows. `infer` does not look for them: on the data of the
+  10 GB corpus that the estimate lets through, they saved 0.04% more for a third of the time.
 - **Fields** ([`fields`](src/fields.rs)): DP over the record, each field raw, a delta or xor
   against the record before, or a difference or xor against an earlier field, costed by
   adaptive order-0 models on a sample of the records. A region is written as its fields'
@@ -31,28 +32,32 @@ heads and tails) are specified in [FORMAT.md](FORMAT.md); [`module`](src/module.
 code, and [`formula`](src/formula.rs) makes the formula of a file. aqr-compress tries it on
 data in which a scan finds no file, where the quick estimate tells 5% at least (below).
 
-The inference takes 0.03 to 1.3 s a file (on one thread), mostly a constant: the window scan
-and the growth of the regions found (`fixed`), and the chain search.
+The inference takes 0.01 to 0.5 s a file (on one thread), mostly a constant: the window scan
+and the growth of the regions found (`fixed`), the fields, and the choice's zstd.
 
 ## Giving up early
 
-[`probe::estimate`](src/probe.rs) estimates in 3–100 ms what the inference may save: 48
+[`probe::estimate`](src/probe.rs) estimates in 2–50 ms what the inference may save: 48
 windows of 8 KiB over the file, each at the record size its bytes repeat at, compressed as
-they are, transposed and split into fields. A saving of 10% of a file needs records over much
+they are, transposed and split into fields (not against each other). A saving of 10% of a file needs records over much
 of it, which the windows find; [`infer_if`](src/lib.rs) infers only where the estimate is at
 least a given saving. The estimate is low where the saving is small (it misses small tables
 and chains of entries), so a threshold gives up some of those:
 
 | estimate at least | files inferred | zstd -3 of the files | CPU s |
 |---|---|---|---|
-| (always infer) | 17/17 | 0.954 | 8.08 |
-| 1/32 | 8/17 | 0.975 | 3.87 |
-| 0.05 | 6/17 | 0.981 | 2.80 |
-| 0.10 | 5/17 | 0.984 | 1.91 |
+| (always infer) | 17/17 | 0.964 | 2.99 |
+| 1/32 | 8/17 | 0.975 | 1.70 |
+| 0.05 | 6/17 | 0.982 | 1.35 |
+| 0.10 | 5/17 | 0.985 | 1.02 |
 
 (One thread; the oracle corpus and six more files: the prototype's struct.bin and pcap.bin,
 macOS's DataDetectors cache, two ResponseKit files and SFNS.ttf. The five files saving 10%
 or more, 13–58%, are estimated at 6.2–50%, all above 0.05; no other is above 7.5%.)
+
+aqr-compress infers at 0.05. On the 10 GB corpus that is 17,716 estimates (3.1 GB of data:
+contents are estimated where they are found) and 2,350 inferences (717 MB), a quarter of them
+of data met before, whose regions are kept by its hash.
 
 ## Results
 
@@ -64,10 +69,13 @@ file's thread:
 |---|---|---|
 | `scripts/rec_bench.py` (numpy, 10 processes) | 605 | 0.967 |
 | this crate, as ported (85a8610) | 106.9 | 0.967 |
-| this crate | 7.1 | 0.968 |
+| this crate, before the 10 GB corpus (9f7d085) | 7.1 | 0.968 |
 
-On one thread, 5.3 s (21.5 MB/s); the five files over 5 MB at 27.9 MB/s (the 58.7 MB ELF at
-53 MB/s), a 1.7 MB libc at 3.7 MB/s. Peak RSS 527 MB (the prototype's: 4.8 GB).
+On one thread, 5.3 s then (21.5 MB/s), 1.77 s now (64.7 MB/s) for 0.974, or 3.57 s for 0.972
+looking for chains of entries too (`-c`). What the inference was cut down to was measured on
+the 332 inputs that aqr-compress inferred in a quarter of the 10 GB corpus (mingw470-x32,
+silesia, ghostscript, VideoLAN; 135.6 MB): 63.8 -> 16.7 s for 0.799 -> 0.794. Peak RSS 527 MB
+(the prototype's: 4.8 GB).
 
 Fewer candidates do not pay: at most 32 regions of fixed-size records (two from each seed);
 16 or 8 save 10% or 19% of the time and give 0.974 or 0.976 (python3.12 0.943 -> 0.956,

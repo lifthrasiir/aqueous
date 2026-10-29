@@ -5,6 +5,9 @@
 //! and the tails. `recs-fields` is a transpose of any records, which other recompressors may
 //! apply to theirs as well. FORMAT.md describes the modules in full.
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use aqr_formula::{Formula, Module, Node};
 
 use crate::module::{entries_params, fields_params};
@@ -22,14 +25,38 @@ pub const MIN_LEN: usize = 16 << 10;
 /// less, the inference would save little if anything, and it is not run.
 pub const LEAST: f64 = 0.05;
 
+/// The regions inferred in data, by its hash and length (None where the estimate turned it down
+/// or none was taken): the same data is often met again (the same object files in archives of
+/// several versions of a library, say), a quarter of the inferences on the 10 GB corpus.
+type Known = HashMap<(u64, usize), Option<Arc<Vec<Choice>>>>;
+
+/// The most data [`Known`] holds, before it is cleared.
+const MAX_KNOWN: usize = 1 << 16;
+
 /// The formula of `d` with the regions of records inferred in it, where the quick estimate says
 /// they may save [`LEAST`] at least and some are taken; None otherwise. On one thread.
 pub fn encode(d: &[u8], _threads: usize) -> Option<Formula> {
+    static KNOWN: Mutex<Option<Known>> = Mutex::new(None);
     if d.len() < MIN_LEN {
         return None;
     }
-    let choices = std::panic::catch_unwind(|| crate::infer_if(d, LEAST)).ok()??;
-    (!choices.is_empty()).then(|| formula(d, &choices))
+    let key = (xxhash_rust::xxh3::xxh3_64(d), d.len());
+    let known = KNOWN.lock().unwrap().as_ref().and_then(|k| k.get(&key).cloned());
+    let choices = match known {
+        Some(c) => c,
+        None => {
+            let c = std::panic::catch_unwind(|| crate::infer_if(d, LEAST)).ok().flatten();
+            let c = c.filter(|c| !c.is_empty()).map(Arc::new);
+            let mut k = KNOWN.lock().unwrap();
+            let k = k.get_or_insert_with(HashMap::new);
+            if k.len() >= MAX_KNOWN {
+                k.clear();
+            }
+            k.insert(key, c.clone());
+            c
+        }
+    }?;
+    Some(formula(d, &choices))
 }
 
 /// The formula of `d` with the regions `choices` (sorted, apart) in their forms.

@@ -5,22 +5,26 @@ use crate::fields::{self, Cost};
 use crate::kt::{self, best_run};
 use crate::{MIN_RECORDS, linspace};
 
+/// Big tables: a window of WINDOW bytes for each WINDOW_EVERY of the file (MAX_WINDOWS at most,
+/// one at least), records up to MAX_K.
 const WINDOW: usize = 1 << 16;
-pub const MAX_K: usize = 1024;
+const WINDOW_EVERY: usize = 1 << 19;
+pub const MAX_K: usize = 256;
 const MAX_WINDOWS: usize = 8;
 /// Small tables: windows over the whole file, records up to FINE_K.
 const FINE_WINDOW: usize = 1 << 12;
 const FINE_K: usize = 64;
-const MAX_FINE_WINDOWS: usize = 256;
+const MAX_FINE_WINDOWS: usize = 64;
 /// How far a region grows from a small window.
 const FINE_SPAN: usize = 1 << 18;
 /// How far a region grows from a big window.
 const SPAN: usize = 1 << 22;
 const MAX_REGIONS: usize = 32;
-/// The records a phase is judged on.
-const PHASE_ROWS: usize = 64;
-/// The record sizes of a window measured: those of the most equal bytes (and their divisors).
+/// The record sizes of a window measured: those of the most equal bytes (and their divisors),
+/// counted on its first quarter.
 const SCAN_KS: usize = 8;
+/// The times a region is grown, its models refitted on the last.
+const ROUNDS: usize = 2;
 /// The least score of a byte against the column models: one value the models have not seen
 /// does not end a region.
 const CLIP: f64 = -4.0;
@@ -50,8 +54,9 @@ pub fn scan_window(a: &[u8], max_k: usize, counts: &mut Vec<u16>) -> (usize, f64
         c0[b as usize] += 1;
     }
     let mut best = (base, 1);
+    let q = &a[..(n / 4).max(2 * top + 1).min(n)];
     let mut by_eq: Vec<(usize, usize)> =
-        (2..=top).map(|k| (a[k..].iter().zip(a).filter(|(x, y)| x == y).count(), k)).collect();
+        (2..=top).map(|k| (q[k..].iter().zip(q).filter(|(x, y)| x == y).count(), k)).collect();
     let cut = by_eq.len().min(SCAN_KS);
     if cut > 0 {
         by_eq.select_nth_unstable_by(cut - 1, |x, y| y.cmp(x));
@@ -95,7 +100,7 @@ pub fn grow_region(data: &[u8], k: usize, wo: usize, wlen: usize, span: Option<u
     let mut llr = vec![0.0f64; k * 256];
     // the column of position i: (i - wo) mod k
     let phase = (k - wo % k) % k;
-    for _ in 0..4 {
+    for _ in 0..ROUNDS {
         counts.fill(0);
         for (i, &b) in data[s..e].iter().enumerate() {
             counts[(s + i + phase) % k * 256 + b as usize] += 1;
@@ -204,37 +209,14 @@ pub fn grow_fields(
     (lo + s * k, lo + e * k)
 }
 
-/// Where the records of a region really start: the region's edges are found byte by byte, and
-/// a record's first bytes (zeros, say) may fit the model of another column. Records start
-/// aligned (to the largest power of 2 up to 8 that divides k) near s; of those starts, the one
-/// whose records split into fields at the least cost. Starts a field apart often cost the
-/// same (8-byte fields of a 24-byte record stay whole in three phases): s itself, where the
-/// byte-wise edge fell, is taken if it costs within 0.5% of the least.
-fn refine_phase(data: &[u8], s: usize, e: usize, k: usize) -> usize {
-    if k > FINE_K {
-        return s;
-    }
+/// Where the records of a region start: its byte-wise edge, down to where records are aligned
+/// (to the largest power of 2 up to 8 that divides k). A record's first bytes (zeros, say) may
+/// fit the model of another column, so the edge may be off by a field; the fields of the
+/// records stay whole in either phase (8-byte fields of a 24-byte record do in three), which
+/// cost about the same.
+fn phase(s: usize, k: usize) -> usize {
     let a = gcd(k, 8);
-    let mut best = (f64::INFINITY, s);
-    let mut at_s = f64::INFINITY;
-    for p in (s + 1).saturating_sub(k)..s + k {
-        if p % a != 0 || p >= e {
-            continue;
-        }
-        let nrec = ((e - p) / k).min(PHASE_ROWS);
-        if nrec < MIN_RECORDS {
-            continue;
-        }
-        let (_, bits, _) = fields::split(&data[p..p + nrec * k], k, Cost::Kt, false);
-        let x = bits / nrec as f64;
-        if p == s {
-            at_s = x;
-        }
-        if x < best.0 {
-            best = (x, p);
-        }
-    }
-    if at_s <= best.0 * 1.005 { s } else { best.1 }
+    s / a * a
 }
 
 fn gcd(a: usize, b: usize) -> usize {
@@ -276,7 +258,7 @@ pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
     if wlen == 0 {
         return Vec::new();
     }
-    for wo in linspace(n - wlen, MAX_WINDOWS.min((n / wlen).max(1))) {
+    for wo in linspace(n - wlen, (n / WINDOW_EVERY).clamp(1, MAX_WINDOWS)) {
         scan(wo, wlen, MAX_K, Some(SPAN), &mut found);
     }
     if n >= 2 * FINE_WINDOW {
@@ -299,7 +281,7 @@ pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
     let mut regions = Vec::new();
     let bg = kt::order0_log2(data);
     for f in seeds.iter().take(MAX_REGIONS) {
-        let s = refine_phase(data, f.s, f.e, f.k);
+        let s = if f.k <= FINE_K { phase(f.s, f.k) } else { f.s };
         let mut spans = vec![(s, f.e)];
         if f.k <= FINE_K {
             spans.push(grow_fields(data, &bg, f.k, s, (f.wo, f.wo + f.wlen), FINE_SPAN));
@@ -311,6 +293,18 @@ pub fn find(data: &[u8]) -> Vec<(usize, usize, usize)> {
         }
     }
     regions.sort_unstable();
-    regions.dedup();
-    regions
+    // regions of the same k over nearly the same bytes (one by its columns, the other by its
+    // fields, or from two seeds) are one
+    let mut kept: Vec<(usize, usize, usize)> = Vec::new();
+    for r in regions {
+        let (s, e) = (r.0, r.0 + r.1 * r.2);
+        let same = kept.iter().any(|x| {
+            let (xs, xe) = (x.0, x.0 + x.1 * x.2);
+            x.1 == r.1 && 20 * e.min(xe).saturating_sub(s.max(xs)) >= 19 * (e - s).max(xe - xs)
+        });
+        if !same {
+            kept.push(r);
+        }
+    }
+    kept
 }
