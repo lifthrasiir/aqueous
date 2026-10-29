@@ -1641,9 +1641,20 @@ pub struct Reached {
     pub evaluated: (u64, u64),
 }
 
-/// What is told of [`Reached`], from any of the threads evaluating the leaves (not always in
-/// order: a later call may tell less).
-pub type Telling = Arc<dyn Fn(Reached) + Send + Sync>;
+/// What [`Archive::each_leaf`] tells as it goes ([`Archive::on_progress`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// How far it is, as each data block is decoded and each leaf evaluated.
+    Reached(Reached),
+    /// Leaf `i` (by its index among the leaf blocks) being evaluated, then done with (its outputs
+    /// taken by the caller too).
+    Started(usize),
+    Ended(usize),
+}
+
+/// What is told of the [`Step`]s, from any of the threads evaluating the leaves (not always in
+/// order: a later [`Step::Reached`] may tell less).
+pub type Telling = Arc<dyn Fn(Step) + Send + Sync>;
 
 /// A content of a tree: its leaf, its output of it and its size.
 type ContentRef = (usize, usize, u64);
@@ -1734,6 +1745,16 @@ impl Archive<'_, '_> {
         self.tree.as_ref().map_or(0, |t| t.1.len())
     }
 
+    /// The number of leaf blocks.
+    pub fn leaves_len(&self) -> usize {
+        self.blocks.leaves.len()
+    }
+
+    /// The leaf (by its index among the leaf blocks) of content `c` of the tree.
+    pub fn leaf_of(&self, c: usize) -> Option<usize> {
+        self.tree.as_ref()?.1.get(c).map(|r| r.0)
+    }
+
     /// Evaluates every leaf, at once on up to `threads` threads, giving `f` each one's outputs
     /// (by its index among the leaf blocks) as it is evaluated. The first failure, in the order
     /// of the leaves, is returned (as is one of `f`); the others may have been given theirs.
@@ -1814,6 +1835,7 @@ impl Archive<'_, '_> {
             threads,
             |i| gate.admit(weights[i]),
             |i, _admitted| {
+                tally.step(Step::Started(i));
                 let outputs = match blocks.leaves[i] {
                     LeafBlock::Stored(raw, zstd, checked) => {
                         let d = decoded(raw, zstd, checked);
@@ -1826,7 +1848,9 @@ impl Archive<'_, '_> {
                     }
                 };
                 tally.add(0, lens[i]);
-                f(i, outputs)
+                let r = f(i, outputs);
+                tally.step(Step::Ended(i));
+                r
             },
         );
         done.into_iter().collect()
@@ -2476,7 +2500,7 @@ struct Contents<'c, 't> {
 
 /// How far the leaves' evaluation is, told as it goes where it is to be ([`Archive::on_progress`]).
 struct Tally<'t> {
-    tell: Option<&'t (dyn Fn(Reached) + Send + Sync)>,
+    tell: Option<&'t (dyn Fn(Step) + Send + Sync)>,
     decompressed: AtomicU64,
     evaluated: AtomicU64,
     /// Of all the data blocks and of all the outputs.
@@ -2489,7 +2513,13 @@ impl Tally<'_> {
         let Some(tell) = self.tell else { return };
         let d = self.decompressed.fetch_add(decompressed, Ordering::Relaxed) + decompressed;
         let e = self.evaluated.fetch_add(evaluated, Ordering::Relaxed) + evaluated;
-        tell(Reached { decompressed: (d, self.totals.0), evaluated: (e, self.totals.1) });
+        tell(Step::Reached(Reached { decompressed: (d, self.totals.0), evaluated: (e, self.totals.1) }));
+    }
+
+    fn step(&self, s: Step) {
+        if let Some(tell) = self.tell {
+            tell(s);
+        }
     }
 }
 
@@ -3535,6 +3565,21 @@ mod tests {
         let told = told.lock().unwrap();
         // (the blocks' data with its checksum, and the outputs)
         let totals = (3 * (3 + 8) + 2 + 8, 3 * 8 + 2);
+        // each leaf started and ended once, and told of between
+        let (mut started, mut ended) = (vec![0; 7], vec![0; 7]);
+        for s in told.iter() {
+            match *s {
+                Step::Started(i) => started[i] += 1,
+                Step::Ended(i) => {
+                    assert_eq!(started[i], 1, "{i} ended before it started");
+                    ended[i] += 1;
+                }
+                _ => {}
+            }
+        }
+        assert_eq!((started, ended), (vec![1; 7], vec![1; 7]));
+        let told: Vec<Reached> =
+            told.iter().filter_map(|s| if let Step::Reached(r) = s { Some(*r) } else { None }).collect();
         // (at first, each non-leaf block, each formula leaf, the stored leaf decoded and evaluated)
         assert_eq!(told.len(), 1 + 3 + 6 + 2);
         assert_eq!(told[0], Reached { decompressed: (0, totals.0), evaluated: (0, totals.1) });

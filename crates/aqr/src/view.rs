@@ -8,7 +8,7 @@
 //!
 //! An archive being decoded has a bar of two ([`Decoding`]): the decompression (`=`, bytes of
 //! the data blocks as they are in the archive) and the evaluation (`#`, bytes of the leaves'
-//! outputs: the files).
+//! outputs: the files), and below it the file evaluated the longest, where that is long.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -16,7 +16,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use aqr_compress::{Event, Report};
-use aqr_formula::aqr::Reached;
+use aqr_formula::aqr::{Reached, Step};
 
 use crate::{Gathered, percent, size};
 
@@ -213,26 +213,43 @@ pub fn takes_escapes() -> bool {
 /// What an archive being decoded shows on standard error: on a terminal, a bar of how far it is.
 pub struct Decoding {
     bar: bool,
-    /// How far it is (the most told of each), and whether the bar is drawn.
-    state: Mutex<(Option<Reached>, bool)>,
+    /// By leaf, what it is shown as where it takes long: the files of it.
+    names: Vec<String>,
+    state: Mutex<Decoded>,
+}
+
+#[derive(Default)]
+struct Decoded {
+    /// How far it is (the most told of each).
+    reached: Option<Reached>,
+    /// The leaves being evaluated, since when.
+    working: HashMap<usize, Instant>,
+    /// Lines of the bar drawn last.
+    drawn: usize,
 }
 
 impl Decoding {
-    pub fn new(bar: bool) -> Decoding {
-        Decoding { bar, state: Mutex::default() }
+    pub fn new(bar: bool, names: Vec<String>) -> Decoding {
+        Decoding { bar, names, state: Mutex::default() }
     }
 
-    pub fn tell(&self, r: Reached) {
+    pub fn tell(&self, step: Step) {
         let mut s = self.state.lock().unwrap();
-        // (told from several threads, not always in order)
-        let most = |a: (u64, u64), b: (u64, u64)| (a.0.max(b.0), b.1);
-        s.0 = Some(match s.0 {
-            Some(o) => Reached {
-                decompressed: most(o.decompressed, r.decompressed),
-                evaluated: most(o.evaluated, r.evaluated),
-            },
-            None => r,
-        });
+        match step {
+            Step::Reached(r) => {
+                // (told from several threads, not always in order)
+                let most = |a: (u64, u64), b: (u64, u64)| (a.0.max(b.0), b.1);
+                s.reached = Some(match s.reached {
+                    Some(o) => Reached {
+                        decompressed: most(o.decompressed, r.decompressed),
+                        evaluated: most(o.evaluated, r.evaluated),
+                    },
+                    None => r,
+                });
+            }
+            Step::Started(i) => _ = s.working.insert(i, Instant::now()),
+            Step::Ended(i) => _ = s.working.remove(&i),
+        }
     }
 }
 
@@ -241,18 +258,30 @@ impl Ticking for Decoding {
         self.bar
     }
 
-    /// Draws the bar again, in place of the one drawn last (none until anything is told).
+    /// Draws the bar again, in place of the one drawn last (none until anything is told), and
+    /// below it the leaf evaluated the longest, where that is [`SLOW`].
     fn tick(&self) {
         let mut s = self.state.lock().unwrap();
-        let Some(r) = s.0 else { return };
+        let Some(r) = s.reached else { return };
         // (the totals known from the start: none, nothing to do)
         let share = |(done, total)| if total == 0 { 1.0 } else { share((done, total)) };
         let (d, e) = (share(r.decompressed), share(r.evaluated));
         let what = format!("{}% of {}, {}% decompressed", pc(e), size(r.evaluated.1 as f64), pc(d));
-        let line = fit(&format!("[{}] {what}", cells(&[('=', d), ('#', e)])), WIDTH);
-        // (to the start of the line drawn last, and all after it cleared)
-        let text = format!("{}{line}\n", if s.1 { "\x1b[1F\x1b[J" } else { "" });
-        s.1 = true;
+        let mut lines = vec![fit(&format!("[{}] {what}", cells(&[('=', d), ('#', e)])), WIDTH)];
+        if let Some((&i, since)) = s.working.iter().min_by_key(|(_, t)| **t)
+            && since.elapsed() >= SLOW
+        {
+            let name = self.names.get(i).map_or("", |n| n.as_str());
+            let name = if name.is_empty() { format!("leaf #{}", i + 1) } else { name.into() };
+            lines.push(format!("  {}", fit(&format!("{name}, {} s", since.elapsed().as_secs()), WIDTH - 2)));
+        }
+        let mut text = String::new();
+        if s.drawn > 0 {
+            // (to the start of the bar's first line, and all after it cleared)
+            text += &format!("\x1b[{}F\x1b[J", s.drawn);
+        }
+        lines.iter().for_each(|l| text += &format!("{l}\n"));
+        s.drawn = lines.len();
         let mut out = std::io::stderr().lock();
         _ = out.write_all(text.as_bytes());
         _ = out.flush();

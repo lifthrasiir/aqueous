@@ -570,7 +570,8 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
     let mut archive = aqr::open(&c, runner).map_err(|e| err(&e))?;
-    let view = std::sync::Arc::new(view::Decoding::new(bars()));
+    let names = if !a.quiet && bars() { leaf_names(&archive, out) } else { Vec::new() };
+    let view = std::sync::Arc::new(view::Decoding::new(bars(), names));
     if !a.quiet && view.bars() {
         let view = view.clone();
         archive.on_progress(Some(std::sync::Arc::new(move |r| view.tell(r))));
@@ -618,6 +619,33 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// By leaf of `archive` (decoded into `out`), the files of it as they are shown where it takes
+/// long: the first by its path in the archive, and how many more.
+fn leaf_names(archive: &aqr::Archive, out: &Path) -> Vec<String> {
+    let Some(t) = archive.tree() else { return vec![out.display().to_string(); archive.leaves_len()] };
+    let mut files: Vec<(Option<PathBuf>, usize)> = vec![(None, 0); archive.leaves_len()];
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(t.entries.len());
+    for e in &t.entries {
+        let name = os_from(name_bytes(&e.name).0);
+        let path = e.parent.map_or_else(|| PathBuf::from(&name), |p| paths[p].join(&name));
+        if let EntryNode::File(c) = e.node
+            && let Some(f) = archive.leaf_of(c).and_then(|l| files.get_mut(l))
+        {
+            f.0.get_or_insert_with(|| path.clone());
+            f.1 += 1;
+        }
+        paths.push(path);
+    }
+    files
+        .into_iter()
+        .map(|(first, n)| match (first, n) {
+            (Some(p), 1) => p.display().to_string(),
+            (Some(p), n) => format!("{} and {} more files", p.display(), n - 1),
+            _ => String::new(),
+        })
+        .collect()
 }
 
 /// The runner of an archive's modules: those known natively (as WebAssembly with `wasm`), and
