@@ -21,7 +21,17 @@ pub use crate::module::decode;
 
 /// A pack rebuilt from the data of its entries, the DEFLATE streams given by aqr-flate's module
 /// ([`decode`]).
-pub const MODULE: Module = Module::new("git-pack-recons", 1);
+pub const MODULE: Module = Module::new("git-pack-recons", 1).with_memory(memory);
+
+/// The memory of the module: the inputs and the pack, reserved for the bytes the inputs give
+/// at most and growing past them (twice at a time, the old and new held at once) where that is
+/// less than the pack.
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[deflated, layout, kept] = u.inputs else { return None };
+    let reserved = kept + deflated + 4 * layout + ID as u64;
+    let growth = if reserved < u.output() { 2 * u.output() } else { 0 };
+    Some(u.whole(growth, 1))
+}
 
 #[derive(Debug, Clone)]
 pub struct Options {

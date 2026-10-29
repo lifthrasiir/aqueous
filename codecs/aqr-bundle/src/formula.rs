@@ -9,7 +9,14 @@ use crate::{ar, cpio, tar};
 
 pub use crate::module::decode;
 
-pub const MODULE: Module = Module::new("bundle-recons", 1);
+pub const MODULE: Module = Module::new("bundle-recons", 1).with_memory(memory);
+
+/// The memory of the module: the inputs and the archive, and a header copied out of the layout
+/// at a time.
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[_, layout] = u.inputs else { return None };
+    Some(u.whole(layout, 1))
+}
 
 /// The archives this crate takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

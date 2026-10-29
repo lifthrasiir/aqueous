@@ -22,7 +22,17 @@ use crate::module::{par_jobs, par_map};
 
 /// An archive rebuilt from the contents of its entries, the deflated bodies given by aqr-flate's
 /// module ([`decode`]).
-pub const MODULE: Module = Module::new("zip-recons", 3);
+pub const MODULE: Module = Module::new("zip-recons", 3).with_memory(memory);
+
+/// The memory of the module: the inputs and the archive; for each entry (a byte of the layout
+/// at least), its body's kind and what the predictions keep of a local header (about 96 bytes
+/// on 32 bits), both vectors growing twice at a time; for each deflated body (`DERIVED` bytes
+/// of `flate` each), its place and entry; and a name and an extra field copied at a time.
+fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let &[_, flate, layout, _] = u.inputs else { return None };
+    let deflated = layout.min(flate / layout::DERIVED as u64);
+    Some(u.whole(3 * (96 + 1) * layout + 32 * deflated + 2 * 0xffff, 4))
+}
 
 /// Bodies shorter than this are not looked for among earlier ones.
 const SAME_MIN: usize = 16;
