@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::sync::{PoisonError, RwLock};
 
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
@@ -24,6 +25,11 @@ fn formats(f: &Formula) -> Vec<&'static str> {
     modules(f).into_iter().filter(|&m| m != RECS_FIELDS.name && m != RECS_ENTRIES.name).collect()
 }
 
+/// Taken to read by [`check`] as it runs an archive as WebAssembly, and to write by
+/// [`memory_declared`] as it records the applications run (which the recording takes from
+/// every thread): an archive of [`encoder`] declares no limits.
+static WASM: RwLock<()> = RwLock::new(());
+
 /// An encoder of the modules aqr-decompress knows.
 fn encoder() -> aqr::Encoder {
     aqr::Encoder::new(aqr::Level::MID).with_modules(aqr_decompress::wasm_of)
@@ -44,7 +50,10 @@ fn check(d: &[u8], f: &Formula) {
     assert!(f.eval(&Native::default()).unwrap() == d, "formula does not evaluate to the input:\n{f}");
     let c = encoder().encode(f, Some(aqr::checksum(d))).unwrap();
     assert!(decompress(&c, 1).unwrap() == d, "archive does not decompress to the input:\n{f}");
-    let w = aqr::decode(&c, &aqr_decompress::Wasm);
+    let w = {
+        let _shared = WASM.read().unwrap_or_else(PoisonError::into_inner);
+        aqr::decode(&c, &aqr_decompress::Wasm)
+    };
     assert!(w.as_ref().is_ok_and(|w| w == d), "archive does not decompress as WebAssembly: {:?}\n{f}", w.err());
 }
 
@@ -1237,9 +1246,11 @@ fn memory_declared() {
     for d in &files {
         for verify in [true, false] {
             let c = compress(d, &Options { verify, ..all() });
+            let alone = WASM.write().unwrap_or_else(PoisonError::into_inner);
             aqr_decompress::record_applications(true);
             let out = aqr::decode(&c, &aqr_decompress::Wasm);
             let applied = aqr_decompress::record_applications(false);
+            drop(alone);
             assert!(out.as_ref().is_ok_and(|o| o == d), "{:?}", out.err());
             assert!(!applied.is_empty(), "no application");
             for a in applied {
