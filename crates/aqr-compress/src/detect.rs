@@ -23,6 +23,9 @@ pub enum Format {
     Lzma,
     /// `.xz` file (aqr-lzma on the LZMA2 streams of its blocks), known by its stream header.
     Xz,
+    /// PPMd var. J file (aqr-ppmd: its header cut off, no module), known by its header:
+    /// not looked for in other data.
+    Ppmd,
     /// lzop file (aqr-lzo on its LZO1X streams).
     Lzo,
     Png,
@@ -92,7 +95,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 37] = [
+    pub const ALL: [Format; 38] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -100,6 +103,7 @@ impl Format {
         Format::Lz4,
         Format::Lzma,
         Format::Xz,
+        Format::Ppmd,
         Format::Lzo,
         Format::Png,
         Format::Jpeg,
@@ -141,6 +145,7 @@ impl Format {
             Format::Lz4 => "lz4",
             Format::Lzma => "lzma",
             Format::Xz => "xz",
+            Format::Ppmd => "ppmd",
             Format::Lzo => "lzo",
             Format::Png => "png",
             Format::Jpeg => "jpeg",
@@ -222,6 +227,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
         b"lzma" | b"tlz" => format(Format::Lzma),
         b"xz" | b"txz" => format(Format::Xz),
+        b"pmd" => format(Format::Ppmd),
         b"lzo" | b"tzo" => format(Format::Lzo),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
@@ -331,6 +337,9 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Tar)
     } else if start && aqr_lzma::formula::starts(d) {
         Some(Format::Lzma)
+    } else if start && aqr_ppmd::starts(d) {
+        // (four bytes are too weak a signature to look for in other data)
+        Some(Format::Ppmd)
     } else if start && aqr_xsv::formula::starts(d) {
         Some(Format::Xsv)
     } else if start && aqr_wrt::formula::starts(d) {

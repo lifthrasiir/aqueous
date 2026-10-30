@@ -1022,14 +1022,16 @@ fn files_len(d: &[u8]) -> usize {
 /// each, and their data compresses better together (by far more than the records cost, where
 /// it is not compressed already; where it is, the records are small); comparing took 14 of
 /// 24 s of a boot.wim of 169 MB. So is a scan's formula whose files are all of the data, each
-/// of them compared already (or text, not compared: [`made`]).
+/// of them compared already (or text, not compared: [`made`]). So is a PPMd file's, its header
+/// cut off ([`takes_place`]), which costs no more apart: a file whose data starts another's
+/// is stored once only where both are cut alike.
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
     let bundled = bundle::bundles(f) && cx.held_by_others(d, d);
     if bundled {
         cx.note_bundled(f);
     }
     let covered = gaps.is_some_and(|g| g.iter().all(Range::is_empty));
-    let smaller = !opt.smaller || bundled || covered || bundle::files_apart(f) || {
+    let smaller = !opt.smaller || bundled || covered || bundle::files_apart(f) || aqr_ppmd::formula::is(f) || {
         let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
         let stand_in = pieces.as_deref().map(|p| (0, p));
         // (the streams the files archived together hold cost nothing)
@@ -1302,7 +1304,7 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         own.once = once.clone();
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         files.inspect(|f| f.tell(d.as_ptr(), false));
-        let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| !c.f.applies().is_empty());
+        let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| takes_place(&c.f));
         child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
         files.inspect(|f| f.tell(d.as_ptr(), true));
         (child, own.deferred.into_inner())
@@ -1311,6 +1313,13 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         children[at].1 = child;
         cx.deferred.borrow_mut().extend(deferred);
     }
+}
+
+/// Whether formula `f` of a content takes the place of its slice ([`nested`]): one of
+/// applications, or aqr-ppmd's, which only cuts the header off the data, so that the data is
+/// stored once where another file starts with it.
+fn takes_place(f: &Formula) -> bool {
+    !f.applies().is_empty() || aqr_ppmd::formula::is(f)
 }
 
 /// Contents, each its slice and its formula where it has one ([`nested`]).
@@ -1426,7 +1435,7 @@ fn content_slices(
                 return;
             }
             let child = s.zip(d).and_then(|(s, d)| made(d, opt, depth + 1, nest.of(s.kind)?, cx));
-            out.push((n.clone(), child.filter(|c| !c.f.applies().is_empty())));
+            out.push((n.clone(), child.filter(|c| takes_place(&c.f))));
         }
         Node::Concat(ns) | Node::Pack(ns) => ns.iter().for_each(|n| content_slices(n, nest, f, opt, depth, cx, out)),
         Node::Apply(_) => contents(n, f, opt, depth, cx, out),
@@ -1586,6 +1595,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Sized => aqr_raw::formula::encode_sized,
         Format::Records => aqr_infer_recs::formula::encode,
         Format::Wim => aqr_wim::formula::encode,
+        Format::Ppmd => aqr_ppmd::formula::encode,
         _ => return None,
     })
 }

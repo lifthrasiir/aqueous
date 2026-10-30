@@ -1,7 +1,7 @@
 # 10gb 코퍼스: 남은 일
 
-Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpaq를 `/tmp/testdata/10gb`에
-푼 것, 파일 79,431개, 10.00 GB)를 `aqr`로 압축한 결과와 남은 일을 적는다. 끝낸 일의 자세한 경과와
+Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpaq를 `~/tmp/10gb`에
+푼 것(`/tmp`는 정리 작업이 지운다), 파일 79,431개, 10.00 GB)를 `aqr`로 압축한 결과와 남은 일을 적는다. 끝낸 일의 자세한 경과와
 측정은 커밋 메시지와 이 문서의 git 이력에 있다.
 
 ## 목표
@@ -39,7 +39,7 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
 ## 측정
 
 2026-10-30, Apple M4(10코어), 커밋 `ffb9393`(README의 수치). 압축은 `cargo aqr -c -f -o OUT
-/tmp/testdata/10gb`(모든 스레드, level mid, 배치 512 MB, 검증 포함), 풀기는 `cargo aqr -t OUT`(아무것도
+~/tmp/10gb`(모든 스레드, level mid, 배치 512 MB, 검증 포함), 풀기는 `cargo aqr -t OUT`(아무것도
 쓰지 않는다)이고, `/usr/bin/time -l`로 쟀다. 시간은 재기마다 ±5% 남짓 흔들린다.
 
 - **2,583,686,326 B(2.584 GB)**, 압축 162.4 s(62 MB/s, 명령어 7.45 T), 최대 footprint 3.52 GB.
@@ -110,6 +110,11 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
    baseline/progressive 쌍 −15.2 MB). 서로 담을 수 있는 파일을 한 배치에 모으고(`together`), 배치가
    가진 내용은 probe가 공짜로 보며(`probe::Held`), 스트림을 만든 뒤 slice끼리 나눠 갖는다
    (`Formula::share_slices`).
+   - 비슷한 파일(머리가 다르거나 고친 사본): `together`가 머리 64 KiB를 내용으로 자른 조각(평균
+     2 KiB)을 둘 이상 나눠 가진 파일도 묶고(−1.83 MB), PE는 비슷한 것의 사슬만 첫 파일 자리로
+     옮긴다(−1.22 MB). 미리 잰 상한(다른 배치의 짝에 대한 `zstd -3 --patch-from`, 13.5 MB)이 크게
+     빗나갔는데, 그런 파일 대부분이 자기 배치에 이미 다른 버전을 가졌기 때문이다. PE 밖의 파일까지
+     사슬로 옮기는 것은 이득이 없었다(−0.06 MB; 이름순이 이미 같은 이름의 버전들을 붙여 둔다).
    - 남은 것: 재현의 레코드. Info-ZIP `-9`는 profile 6에서 내용의 2.6%(`enwik9.zip` 약 26 MB)이다.
      enwik8을 Info-ZIP `-9`로 만든 스트림(2026-10-26, 10스레드):
 
@@ -148,7 +153,7 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
    (var.J는 32비트 포인터로 메모리를 세므로 7-Zip의 Ppmd8처럼 32비트 오프셋으로 옮겨야 한다), 같은
    설정의 Ppmd8이 M4 한 코어에서 3.6–3.9 MB/s라 두 파일을 다시 인코딩하는 데 약 300 s가 걸리고
    restore method 1은 나눌 수 없다. 압축과 풀기 예산을 이것 하나로 넘는다. 단독 PPMd var.J 파일은
-   이 코퍼스 밖에서 거의 볼 수 없다.
+   이 코퍼스 밖에서 거의 볼 수 없다. 다만 `enwik8.pmd`는 헤더를 떼어 `enwik9.pmd`와 나눠 갖는다(8번).
 6. **[대부분 완료] LZMA: −38.8 MB**(aqr-lzma, `.tar.lzma`를 그 멤버와 같은 설치된 파일과 함께).
    `7c73922`이 aqr-infer-recs가 들인 퇴행(`gcc-core-4.6.1`이 그대로 남았다)을 고쳐 −15.9 MB가 더
    되었다. 7z(aqr-7z, BCJ2는 aqr-bcj)는 통째로 재구성되어 `mingw480`에서 84.45 → 55.36 MB(−29.1 MB)이다
@@ -176,10 +181,9 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
      붙이면 된다. 저널링 포맷의 조각 나누기와 pcomp 전처리(LZ77, E8E9)의 정방향 변환이 위험하다.
      libzpaq로 각 블록의 데이터를 그 블록의 헤더로 다시 압축해 견주는 실험이 먼저이다.
 8. **작은 것들.**
-   - `enwik8.pmd`(−21 MB): `enwik9.pmd`와 본문이 22바이트 헤더 뒤로 거의 같은데, 헤더의 12–15바이트
-     (타임스탬프로 보인다)와 파일 이름이 달라서 `together`의 "앞 64 KiB가 같은 파일"에 걸리지 않는다.
-     헤더 뒤(예: 4 KiB부터)의 64 KiB로 두 번째 키를 두면 된다. 이어서 `share_slices`가 PPMd 본문을
-     나눠 갖는지도 봐야 한다.
+   - [완료] `enwik8.pmd`: −21.39 MB. 둘은 헤더의 시각과 이름, `enwik8.pmd`의 마지막 8바이트만
+     다르다. `together`가 머리 64 KiB를 내용으로 자른 조각(`probe::chunks`)으로 둘을 한 배치에 넣고,
+     aqr-ppmd가 헤더를 떼어 본문이 같은 바이트로 시작하게 하므로 `share_slices`가 나눠 갖는다.
    - `text8.zip`(−5.5 MB): 푼 `text8`은 혼자 aqr-wrt로 23.1 MB이고, profile 6의 레코드는 2.6 MB
      남짓이다. 그런데 그대로 남는다. wrt 없이 견주기 때문으로 보인다(확인하지 않았다).
    - GIF와 TIFF의 LZW.
@@ -201,8 +205,8 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
    시간: 같은 바이트가 중첩 단계마다 다시 추정되는 것(추정한 데이터 3.1 GB는 원본 바이트보다
    많다)을 막거나, 위 형식들이 데이터를 먼저 가져가게 하면 압축 CPU가 준다.
 
-지금 2.584 GB이다. 주 목표 2.4 GB까지 184 MB가 남는다. 확실한 편인 것(2번의 에뮬레이션, 3번, 4번,
-6번의 나머지, 8번)이 합쳐 150 MB 남짓이고, 그 밖에는 7번(ZPAQ)이 크다. PPMd 없이는 확장 목표에
+지금 2.558 GB이다(2026-10-30, aqr-ppmd 뒤 2,557,815,082 B). 주 목표 2.4 GB까지 158 MB가 남는다.
+확실한 편인 것(2번의 에뮬레이션, 3번, 4번, 6번의 나머지, 8번의 나머지)이 합쳐 130 MB 남짓이고, 그 밖에는 7번(ZPAQ)이 크다. PPMd 없이는 확장 목표에
 못 미친다.
 
 ## 메모리

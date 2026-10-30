@@ -30,6 +30,7 @@ aqr-mp3 = { path = "../../codecs/aqr-mp3" }
 aqr-pdf = { path = "../../codecs/aqr-pdf" }
 aqr-png = { path = "../../codecs/aqr-png" }
 aqr-obj = { path = "../../codecs/aqr-obj" }
+aqr-ppmd = { path = "../../codecs/aqr-ppmd" }
 aqr-psd = { path = "../../codecs/aqr-psd" }
 aqr-clip = { path = "../../codecs/aqr-clip" }
 aqr-raw = { path = "../../codecs/aqr-raw" }

@@ -266,6 +266,29 @@ fn raw_held_once() {
     assert!(c.len() < (4 << 20) + (64 << 10), "{} bytes", c.len());
 }
 
+/// A PPMd var. J file of `data` as file `name` of time `time` (order 10, 256 MB, restore
+/// method 1), its data as it is.
+fn ppmd(name: &str, time: u32, data: &[u8]) -> Vec<u8> {
+    let mut d = vec![0x8f, 0xaf, 0xac, 0x84, 0x20, 0, 0, 0, 0xf9, 0x9f];
+    d.extend_from_slice(&(name.len() as u16 | 1 << 14).to_le_bytes());
+    d.extend_from_slice(&time.to_le_bytes());
+    d.extend_from_slice(name.as_bytes());
+    d.extend_from_slice(data);
+    d
+}
+
+/// Two PPMd files of the same text, the one's a part of the other's (but for the end of its
+/// data), of other names and times: the shorter's data is stored once, in the longer's.
+#[test]
+fn ppmd_held_once() {
+    let body = noise(3 << 20, 3);
+    let short = [&body[..1 << 20], &noise(8, 4)[..]].concat();
+    let files =
+        [("dc/enwik8.pmd", ppmd("enwik8", 0x356f_3c17, &short)), ("dc/enwik9.pmd", ppmd("enwik9", 0x3566_b6e4, &body))];
+    let (c, r) = archived(&files, &Options::default());
+    assert!(c.len() < (3 << 20) + (64 << 10), "{} bytes, {r:?}", c.len());
+}
+
 /// Two files alike but for their starts (another header, a few bytes longer), with a file
 /// apart between them: in a batch together however small the batches, the archive about as
 /// small as in one.

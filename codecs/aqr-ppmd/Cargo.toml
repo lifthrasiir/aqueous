@@ -1,0 +1,9 @@
+[package]
+name = "aqr-ppmd"
+version = "0.1.0"
+edition = "2024"
+description = "PPMd var. J files taken apart into their header and their data, without a module"
+publish = false
+
+[dependencies]
+aqr-formula = { path = "../../crates/aqr-formula" }

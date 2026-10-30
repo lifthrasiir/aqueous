@@ -140,6 +140,7 @@ dependencies = [
  "aqr-obj",
  "aqr-pdf",
  "aqr-png",
+ "aqr-ppmd",
  "aqr-psd",
  "aqr-raw",
  "aqr-snappy",
@@ -500,6 +501,13 @@ dependencies = [
  "aqr-raw",
  "crc32fast",
  "flate-zoo",
+]
+
+[[package]]
+name = "aqr-ppmd"
+version = "0.1.0"
+dependencies = [
+ "aqr-formula",
 ]
 
 [[package]]
