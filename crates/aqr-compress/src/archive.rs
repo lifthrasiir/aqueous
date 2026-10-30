@@ -392,6 +392,11 @@ impl Pipe {
     /// What the helper does until the archive is written: lets in and analyzes a batch on a
     /// worker of the pool as one is free, where there is room for one.
     fn help<S: Source + ?Sized>(&self, cx: &Ctx<S>) {
+        // (none with a pool of one worker, which makes the archive: waiting for it to be free,
+        // the helper would hold up the end of the archive, which waits for the helper)
+        if aqr_common::pool::size() < 2 {
+            return;
+        }
         loop {
             {
                 let mut st = self.state.lock().unwrap();
