@@ -645,12 +645,16 @@ fn dist_index(t: &mut dyn Cands, d: &[u8], p: usize, dist: usize) -> u32 {
     t.index_of(d, p, dist).map_or(0, |i| i as u32 + 1)
 }
 
+/// A miss's end in [`Recorder::ops`], plus its class (field numbers are below).
+const MISS: u8 = 0x80;
+
 /// Records the corrections while deconstructing.
 pub struct Recorder {
-    /// The payload fields of every miss, (field, value).
-    vals: Vec<(u8, u32)>,
-    /// Per miss: class, gap before it, end of its payload in `vals`.
-    log: Vec<(u8, u32, u32)>,
+    /// The payload fields of every miss as a field number and the value (a varint), each miss
+    /// ended by [`MISS`] with its class and the gap before it (a varint): all segments' are
+    /// held until the models are chosen, which takes 2-3 bytes a field rather than 8 and 12
+    /// (of enwik9.zip, about 1 GB).
+    ops: Vec<u8>,
     pub counts: [Counts; FIELDS],
     /// Per class.
     pub misses: [usize; 2],
@@ -664,8 +668,7 @@ pub struct Recorder {
 impl Default for Recorder {
     fn default() -> Self {
         Recorder {
-            vals: vec![],
-            log: vec![],
+            ops: vec![],
             counts: Default::default(),
             misses: [0; 2],
             hits: [0; 2],
@@ -679,34 +682,54 @@ impl Recorder {
     #[inline]
     fn put(&mut self, f: usize, v: u32) {
         if !self.count_only {
-            self.vals.push((f as u8, v));
+            self.ops.push(f as u8);
+            aqr_common::varint::put(&mut self.ops, v as u64);
         }
         self.counts[f].add(v);
+    }
+
+    /// The payload fields of every miss, (field, value), and per miss its class, the gap before
+    /// it and the end of its payload among them.
+    #[allow(clippy::type_complexity)]
+    fn decoded(&self) -> (Vec<(u8, u32)>, Vec<(u8, u32, u32)>) {
+        let (mut vals, mut log) = (Vec::new(), Vec::new());
+        let mut at = 0;
+        while at < self.ops.len() {
+            let op = self.ops[at];
+            at += 1;
+            let v = aqr_common::varint::get(&self.ops, &mut at).expect("recorded") as u32;
+            match op {
+                MISS.. => log.push((op - MISS, v, vals.len() as u32)),
+                f => vals.push((f, v)),
+            }
+        }
+        (vals, log)
     }
 
     /// The values coded with the given models, in the order [`Player`] reads them: the first
     /// gap of each class, then every miss's payload followed by the gap to the next miss of
     /// its class.
     pub fn write(&self, models: &[code::Model; FIELDS]) -> Vec<u8> {
+        let (vals, log) = self.decoded();
         let mut w = code::Writer::default();
         // The next miss of the same class, for every miss.
-        let mut next = vec![usize::MAX; self.log.len()];
+        let mut next = vec![usize::MAX; log.len()];
         let mut last = [usize::MAX; 2];
-        for (i, &(c, ..)) in self.log.iter().enumerate().rev() {
+        for (i, &(c, ..)) in log.iter().enumerate().rev() {
             next[i] = last[c as usize];
             last[c as usize] = i;
         }
         for i in last.into_iter().filter(|&i| i != usize::MAX) {
-            let (c, g, _) = self.log[i];
+            let (c, g, _) = log[i];
             w.put(&models[GAP + c as usize], g);
         }
         let mut start = 0;
-        for (i, &(_, _, end)) in self.log.iter().enumerate() {
-            for &(f, v) in &self.vals[start..end as usize] {
+        for (i, &(_, _, end)) in log.iter().enumerate() {
+            for &(f, v) in &vals[start..end as usize] {
                 w.put(&models[f as usize], v);
             }
             start = end as usize;
-            if let Some(&(c, g, _)) = self.log.get(next[i]) {
+            if let Some(&(c, g, _)) = log.get(next[i]) {
                 w.put(&models[GAP + c as usize], g);
             }
         }
@@ -760,7 +783,8 @@ impl Recorder {
         }
         self.payload(t, d, p, pred, class, a);
         if !self.count_only {
-            self.log.push((class as u8, gap, self.vals.len() as u32));
+            self.ops.push(MISS + class as u8);
+            aqr_common::varint::put(&mut self.ops, gap as u64);
         }
         Ok(a)
     }
