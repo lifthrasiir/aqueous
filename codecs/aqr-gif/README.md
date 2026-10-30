@@ -69,7 +69,7 @@ one of codec-corpus, and a file named `.gif` that is not one (a Perl module's ta
 - The model codes 3.5 megapixels a second of a dithered photograph on one thread, 6 of a map of
   flat colors and 15 of an animation (a pixel equal to the one on its left is a single bit), and
   decodes a fifth slower. Its tables are 4 slots of 16 bits a pixel, up to 32 MB for 0.5
-  megapixels and more; the module's working memory is 73 MB for an image of 4 megapixels.
+  megapixels and more; the module's working memory is 69 MB for an image of 4 megapixels.
 - Records are 0.50 of the LZW data of all 521 files of `corpus/` (also the encoders' files
   of `corpus/enc`, made as `scripts/gen-fixtures.py` makes its own from four larger pictures:
   0.27 for ffmpeg's animation to 0.69 for an icon of 32 by 32).
@@ -92,6 +92,12 @@ the other 485 files of `corpus/10gb`, 91 G and 78 G at first):
 | contexts of W, N and of W, N, NE, NNE dropped (the image before's is W, N where there is none); mixers of 16 lanes of `i32`, vectorized, weights within ±8 | +0.24% | −43% | −43% |
 | first, whether the index is W's | +0.42% | −15% | −42% |
 | tables of 2^21 slots at most, 4 a pixel; the APM's contexts one for 8 pixels | +0.43% (the animation of `corpus/misc` +2.9%) | ±0 | ±0 |
+
+Then the APM (an adaptive probability map over the mix, by the context of W and N and the
+bit's node) was dropped, measured on Windows (x86-64) on the 106 GIF files of aqr-asar's corpus
+that are coded: records +0.65% (22.77 -> 22.92 MB; the fixtures' +0.08%), 89 -> 76 s on one
+thread. A bit's time is a chain of dependent steps rather than arithmetic: tables of 2^16 slots
+gave −7%, the mixers in AVX2 nothing.
 
 Left out: a single mixer (+0.6%, −14%), and the W bit gated by how often pixels were W's (larger
 at every threshold: the tree's tables learn from both cases).

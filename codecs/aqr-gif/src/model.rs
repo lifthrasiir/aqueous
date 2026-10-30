@@ -168,11 +168,6 @@ const RATE_MIX: i32 = 4;
 /// The weights at first, and at most, over 2^16.
 const W0: i32 = 6554;
 const W_MAX: i32 = (1 << 19) - 1;
-/// Contexts of the APM at most (fewer for fewer pixels), its rate (a shift) and its weight in
-/// the result, over 4.
-const APM_BITS: u32 = 16;
-const APM_RATE: u32 = 5;
-const APM_WEIGHT: i32 = 2;
 
 /// 65536 / (n + 1.5).
 const RATE: [u32; LIMIT + 1] = {
@@ -188,25 +183,11 @@ const RATE: [u32; LIMIT + 1] = {
 /// A slot at first: a probability of 1/2, no uses.
 const SLOT0: u16 = 2048 << 4;
 
-/// The APM's values at first, of each of the 33: each held less this (wrapping), so that the APM
-/// starts as zeros.
-const APM0: [u16; 33] = {
-    let mut t = [0; 33];
-    let mut j = 0;
-    while j < 33 {
-        t[j] = (squash(j as i32 * 128 - 2048) * 16) as u16;
-        j += 1;
-    }
-    t
-};
-
 /// No neighbour there.
 const NONE: u32 = 256;
 
 pub struct Model {
-    stretch: Vec<i16>,
-    /// [`stretch`](Model::stretch) of the probabilities as the slots hold them (exclusive-or
-    /// [`SLOT0`]).
+    /// stretch(p) of the probabilities as the slots hold them (exclusive-or [`SLOT0`]).
     stretch_slot: Vec<i16>,
     /// The tables of each context, one after another: slots of a 12-bit probability over a 4-bit
     /// count of its uses, each held exclusive-or [`SLOT0`] (its value at first), so that the
@@ -216,9 +197,6 @@ pub struct Model {
     base: [usize; INPUTS],
     mask: [u32; INPUTS],
     weights: Vec<[i32; LANES]>,
-    /// The refinement of the mix (an APM): by a context, 33 probabilities over the stretched mix.
-    apm: Vec<u16>,
-    apm_mask: usize,
     /// The last image's indices on the screen, [`NONE`] where it did not cover.
     canvas: Vec<u16>,
     screen: (usize, usize),
@@ -246,11 +224,6 @@ fn table_bits(pixels: u64) -> [u32; INPUTS] {
     SMALL_BITS.map(|s| b.min(s))
 }
 
-/// Bits of the APM's contexts for `pixels` pixels.
-fn apm_bits(pixels: u64) -> u32 {
-    (64 - (pixels / 8).leading_zeros()).clamp(8, APM_BITS)
-}
-
 /// The screen, where its canvas is not too large.
 fn canvas_of(screen: (usize, usize)) -> (usize, usize) {
     if screen.0 * screen.1 <= 1 << 26 { screen } else { (0, 0) }
@@ -270,7 +243,6 @@ impl Model {
         let mut w0 = [0; LANES];
         w0[..INPUTS].fill(W0);
         Model {
-            stretch: stretch_table(),
             stretch_slot: {
                 let t = stretch_table();
                 (0..4096).map(|p| t[p ^ (SLOT0 >> 4) as usize]).collect()
@@ -279,8 +251,6 @@ impl Model {
             base,
             mask: bits.map(|b| (1 << (b - 4)) - 1),
             weights: vec![w0; SETS],
-            apm: vec![0; 33 << apm_bits(pixels)],
-            apm_mask: (1 << apm_bits(pixels)) - 1,
             canvas: vec![NONE as u16; screen.0 * screen.1],
             screen,
         }
@@ -290,21 +260,13 @@ impl Model {
     pub fn bytes(pixels: u64, screen: (usize, usize)) -> u64 {
         let screen = canvas_of(screen);
         let slots: usize = table_bits(pixels).iter().map(|&b| 1 << b).sum();
-        (slots * 2 + (66 << apm_bits(pixels)) + 2 * screen.0 * screen.1 + 4 * SETS * LANES + 8192) as u64
+        (slots * 2 + 2 * screen.0 * screen.1 + 4 * SETS * LANES + 8192) as u64
     }
 
-    /// Codes a bit (`want`, the encoder's) of the slots `idx`, the mixers' weight sets `set1` and
-    /// `set2` and the APM's context `apm` (a hash), and gives it.
+    /// Codes a bit (`want`, the encoder's) of the slots `idx` and the mixers' weight sets `set1`
+    /// and `set2`, and gives it.
     #[inline(never)]
-    fn bit(
-        &mut self,
-        c: &mut impl Coder,
-        idx: &[usize; INPUTS],
-        set1: usize,
-        set2: usize,
-        apm: u32,
-        want: bool,
-    ) -> bool {
+    fn bit(&mut self, c: &mut impl Coder, idx: &[usize; INPUTS], set1: usize, set2: usize, want: bool) -> bool {
         let mut st = [0i32; LANES];
         for j in 0..INPUTS {
             // SAFETY: a slot is within its table's bucket (of 16 slots).
@@ -318,19 +280,9 @@ impl Model {
         }
         let (dot1, dot2) = ((dot1 >> 6).clamp(-4095, 4095), (dot2 >> 6).clamp(-4095, 4095));
         let (p1, p2) = (squash(dot1), squash(dot2));
-        let pr = squash((dot1 + dot2) / 2);
-        // the APM: interpolated between the two nearest of the stretched mix
-        let sx = self.stretch[pr as usize] as i32 + 2048;
-        let (lo, wt) = ((sx >> 7) as usize, sx & 127);
-        let a = (apm as usize & self.apm_mask) * 33 + lo;
-        let (e0, e1) = (self.apm[a].wrapping_add(APM0[lo]) as i32, self.apm[a + 1].wrapping_add(APM0[lo + 1]) as i32);
-        let pa = (e0 * (128 - wt) + e1 * wt) >> 11;
-        let pf = ((pr * APM_WEIGHT + pa * (4 - APM_WEIGHT)) >> 2).clamp(1, 4095);
-        let v = c.code((pf as u32) << 4 | 8, want, Cat::Pixels);
+        let pr = squash((dot1 + dot2) / 2).clamp(1, 4095);
+        let v = c.code((pr as u32) << 4 | 8, want, Cat::Pixels);
         let target = if v { 65535 } else { 0 };
-        for (j, e, f) in [(0, e0, 128 - wt), (1, e1, wt)] {
-            self.apm[a + j] = ((e + (((target - e) * f) >> (7 + APM_RATE))) as u16).wrapping_sub(APM0[lo + j]);
-        }
         // the weights, towards the bit
         let (e1, e2) = ((((v as i32) << 12) - p1) * RATE_MIX, (((v as i32) << 12) - p2) * RATE_MIX);
         for (set, e) in [(set1, e1), (set2, e2)] {
@@ -390,7 +342,6 @@ impl Model {
             h[7] = hash(hash(9, up), wv);
             h[8] = hash(10, grad);
             h[9] = hash(hash(11, up), n);
-            let ha = hash(12, wv | n << 9);
             let differ =
                 (wv != n) as usize + (nw != wv && nw != n) as usize + (ne != wv && ne != n && ne != nw) as usize;
             let want = px[i] as u32;
@@ -400,7 +351,7 @@ impl Model {
             for j in 0..INPUTS {
                 bucket[j] = self.base[j] + ((hash(h[j], 1) & self.mask[j]) << 4) as usize;
             }
-            if wv != NONE && self.bit(c, &bucket, 0, NODES + 8 * 4 + differ, hash(ha, 0), want == wv) {
+            if wv != NONE && self.bit(c, &bucket, 0, NODES + 8 * 4 + differ, want == wv) {
                 px[i] = wv as u8;
             } else {
                 let mut node = 1u32;
@@ -415,7 +366,7 @@ impl Model {
                     }
                     let idx = bucket.map(|b| b + sub);
                     let set2 = NODES + depth.min(7) as usize * 4 + differ;
-                    let v = self.bit(c, &idx, node as usize, set2, hash(ha, node), want >> b & 1 != 0);
+                    let v = self.bit(c, &idx, node as usize, set2, want >> b & 1 != 0);
                     node = node << 1 | v as u32;
                     sub = sub << 1 | v as usize;
                 }
