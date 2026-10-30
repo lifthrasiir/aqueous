@@ -26,15 +26,15 @@ come from.
 
 ## Sneak peek
 
-Matt Mahoney's 10 GB benchmark (79,431 files, 10.00 GB), on an Apple M4 (10 cores),
-2026-10-27, at commit `d84deff`:
+Matt Mahoney's 10 GB benchmark (79,431 files, 10.00 GB), on an Apple M4 (10 cores): `aqr` on
+2026-10-30 at commit `ffb9393`, the others on 2026-10-27:
 
 | method | size | compression | decompression |
 |---|---|---|---|
 | `tar \| zstd -3 -T10` | 4.68 GB | 33 s | |
 | `tar \| zstd -3 -T10 --long=31` | 4.17 GB | 36 s | |
 | zpaq 7.15 | 3.70 GB | | |
-| **`aqr`** (level `mid`) | **2.630 GB** | 136 s (73 MB/s) | 19.2 s (521 MB/s, 2.84 GB peak) |
+| **`aqr`** (level `mid`) | **2.584 GB** | 162 s (62 MB/s, 3.5 GB peak) | 22.6 s (443 MB/s, 2.9 GB peak) |
 
 Compression includes the round-trip check of every file. Some formats alone, as
 `archive / input` against `zstd -3` of the same files:
