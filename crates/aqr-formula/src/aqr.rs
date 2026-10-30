@@ -264,6 +264,9 @@ pub struct Encoder {
     threads: usize,
     /// Compressed streams (as [`compressed`] gives) by their [`StreamKey`].
     streams: RefCell<HashMap<StreamKey, Option<Vec<u8>>>>,
+    /// Whether the streams compressed are kept in [`Encoder::streams`] (not while
+    /// [`Encoder::encode_pieces`] writes).
+    keep: std::cell::Cell<bool>,
     /// Compressed resources by their [`StreamKey`].
     resources: RefCell<HashMap<StreamKey, Vec<u8>>>,
     /// The archived lengths ([`Encoder::raw_len`]) of streams forgotten compressed
@@ -363,6 +366,7 @@ impl Encoder {
             level,
             threads: threads.max(1),
             streams: RefCell::default(),
+            keep: std::cell::Cell::new(true),
             resources: RefCell::default(),
             raw_lens: RefCell::default(),
             trials: RefCell::default(),
@@ -532,6 +536,19 @@ impl Encoder {
         Ok(out)
     }
 
+    /// [`Encoder::encode`] of `f` whose streams' bytes are those of `pieces` (each the
+    /// concatenation of its pieces; the bytes of `f`'s own streams not read), as
+    /// [`crate::Formula::merged`] gives them. The blocks are compressed as they are written and
+    /// not kept, but those compressed already (which are let go).
+    pub fn encode_pieces(&self, f: &Formula, pieces: &[Vec<&[u8]>], checksum: Option<u64>) -> Result<Vec<u8>> {
+        let streams: Vec<&[&[u8]]> = pieces.iter().map(|p| &p[..]).collect();
+        let mut out = Vec::new();
+        self.keep.set(false);
+        let r = self.write_streams(f, &streams, checksum, &mut out);
+        self.keep.set(true);
+        r.map(|_| out)
+    }
+
     /// [`Encoder::encode`] into `out`, with the stream of `stand_in` (by index) its bytes rather
     /// than its data.
     fn write(
@@ -541,8 +558,6 @@ impl Encoder {
         checksum: Option<u64>,
         out: &mut impl Out,
     ) -> Result<()> {
-        // of the module and formula blocks
-        let level = self.base_level();
         let data: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         let streams: Vec<&[&[u8]]> = (0..data.len())
             .map(|s| match stand_in {
@@ -550,6 +565,19 @@ impl Encoder {
                 _ => std::slice::from_ref(&data[s]),
             })
             .collect();
+        self.write_streams(f, &streams, checksum, out)
+    }
+
+    /// [`Encoder::write`] of `f` whose streams' bytes are `streams` (each in pieces).
+    fn write_streams(
+        &self,
+        f: &Formula,
+        streams: &[&[&[u8]]],
+        checksum: Option<u64>,
+        out: &mut impl Out,
+    ) -> Result<()> {
+        // of the module and formula blocks
+        let level = self.base_level();
         f.check_outputs()?;
         let mut slices = Ok(());
         f.visit(&mut |n| {
@@ -965,6 +993,24 @@ impl Encoder {
     /// compressed already).
     fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[&[u8]], how: How) -> Result<()> {
         let mut streams = self.streams.borrow_mut();
+        // (written once and not kept: compressed now, or let go where it was kept)
+        if !self.keep.get() {
+            let c = match streams.remove(&key_how(data, how)) {
+                Some(c) => c,
+                None => {
+                    drop(streams);
+                    match match how {
+                        How::Stored => Plan::Done(None),
+                        _ => self.plan(key(data), data, how)?,
+                    } {
+                        Plan::Done(c) => c,
+                        Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
+                    }
+                }
+            };
+            content_block(out, leaf, data, c.as_deref());
+            return Ok(());
+        }
         let c = match streams.entry(key_how(data, how)) {
             MapEntry::Occupied(e) => e.into_mut(),
             MapEntry::Vacant(e) => {
@@ -3131,6 +3177,35 @@ mod tests {
         let mut twice = f.clone();
         twice.root = Node::concat([twice.root.clone(), Node::Output { shared: 0, index: 0, len: 3 }]);
         assert!(encode(&twice, None, Level::Zstd(3)).is_err());
+    }
+
+    /// Streams merged by class without moving their bytes ([`crate::Formula::merged`]) archive
+    /// as those merged ([`crate::Formula::merge_classes`]), byte for byte, the merged stream
+    /// over several blocks too; and the encoder keeps none of the blocks it wrote.
+    #[test]
+    fn merged_in_pieces() {
+        let mut f = Formula::default();
+        let noise: Vec<u8> = (0..3 * BLOCK as u32 / 2).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        let a = f.push("a", noise[..BLOCK].to_vec());
+        let b = f.push("b", b"elsewhere".to_vec());
+        let a2 = f.push("a", noise[BLOCK..].to_vec());
+        let a3 = f.push("a", b"third".to_vec());
+        let rev = Node::apply(REV, vec![1, 2, 3], vec![Node::slice(2, 10, 100)], 100);
+        f.root = Node::concat([a, Node::slice(2, 5, BLOCK as u64 / 2 - 5), b, rev, a3, a2]);
+        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+        let sum = Some(checksum(&want));
+        let mut whole = f.clone();
+        whole.merge_classes();
+        let enc = Encoder::new(Level::Zstd(1));
+        let one = enc.encode(&whole, sum).unwrap();
+        let (merged, groups) = f.merged();
+        assert_eq!(groups, [vec![0, 2, 3], vec![1]]);
+        let pieces: Vec<Vec<&[u8]>> =
+            groups.iter().map(|g| g.iter().map(|&i| &f.streams[i].data[..]).collect()).collect();
+        let enc = Encoder::new(Level::Zstd(1));
+        assert!(enc.encode_pieces(&merged, &pieces, sum).unwrap() == one);
+        assert!(enc.streams.borrow().is_empty());
+        assert!(decode(&one, &natives()).unwrap() == want);
     }
 
     /// A stream of more than [`BLOCK`] bytes is several non-leaf blocks: slices within one,

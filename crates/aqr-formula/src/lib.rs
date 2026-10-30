@@ -826,44 +826,99 @@ impl Formula {
     /// [`Formula::merge_classes`], into streams of `limit` bytes at most: a stream that would
     /// take one past it starts another of its class and kind (one longer is left as it is).
     pub fn merge_classes_within(&mut self, limit: u64) {
+        let (to, groups) = self.merge_plan(limit);
+        let mut old: Vec<Option<Stream>> = std::mem::take(&mut self.streams).into_iter().map(Some).collect();
+        let mut streams = Vec::with_capacity(groups.len());
+        for g in &groups {
+            let mut first = old[g[0]].take().expect("a stream in one group");
+            if g.len() > 1 {
+                // (of its length at once, the others let go as they are copied)
+                let total: usize = g.iter().map(|&i| old[i].as_ref().map_or(first.data.len(), |s| s.data.len())).sum();
+                let data = first.data.to_mut();
+                data.reserve_exact(total - data.len());
+                for &i in &g[1..] {
+                    data.extend_from_slice(&old[i].take().expect("a stream in one group").data);
+                }
+            }
+            streams.push(first);
+        }
+        self.remap(&to, groups.len());
+        self.streams = streams;
+    }
+
+    /// [`Formula::merge_classes`] without moving the bytes: the formula of the streams merged
+    /// (their bytes empty), and of each of its streams, those of `self` it is the concatenation
+    /// of, in order.
+    pub fn merged(&self) -> (Formula, Vec<Vec<usize>>) {
+        let (to, groups) = self.merge_plan(u64::MAX);
+        let streams = groups
+            .iter()
+            .map(|g| {
+                let s = &self.streams[g[0]];
+                Stream { class: s.class.clone(), kind: s.kind, content: s.content, data: Bytes::default() }
+            })
+            .collect();
+        let mut f = Formula { streams: Vec::new(), root: self.root.clone(), shared: self.shared.clone() };
+        f.remap(&to, groups.len());
+        f.streams = streams;
+        (f, groups)
+    }
+
+    /// Of each stream, the merged stream it goes to and where in it, and of each merged
+    /// stream, the streams it is made of ([`Formula::merge_classes_within`]).
+    fn merge_plan(&self, limit: u64) -> (Vec<(usize, u64)>, Vec<Vec<usize>>) {
         let n = self.streams.len();
         let lens: Vec<u64> = self.streams.iter().map(|s| s.data.len() as u64).collect();
         let mut past = vec![false; n];
-        self.slices_mut(&mut |&mut s, &mut a, &mut l| {
-            if let Some(p) = past.get_mut(s) {
-                *p |= a.checked_add(l).is_none_or(|e| e > lens[s]);
-            }
-        });
+        let mut visit = |n: &Node| {
+            n.visit(&mut |n| {
+                if let &Node::Slice { stream, start, len } = n
+                    && let Some(p) = past.get_mut(stream)
+                {
+                    *p |= start.checked_add(len).is_none_or(|e| e > lens[stream]);
+                }
+            })
+        };
+        self.shared.iter().flat_map(|s| &s.apply.inputs).for_each(&mut visit);
+        visit(&self.root);
         let mut to = vec![(0usize, 0u64); n];
         let mut firsts: Vec<(Cow<'static, str>, Kind, usize)> = Vec::new();
-        let mut streams: Vec<Stream> = Vec::with_capacity(n);
-        for (i, s) in std::mem::take(&mut self.streams).into_iter().enumerate() {
+        let (mut groups, mut glens): (Vec<Vec<usize>>, Vec<u64>) = (Vec::with_capacity(n), Vec::with_capacity(n));
+        for (i, s) in self.streams.iter().enumerate() {
             let alike = s.kind != Kind::Compressed && !s.content && !past[i];
             match firsts.iter_mut().find(|f| alike && f.0 == s.class && f.1 == s.kind) {
-                Some(&mut (_, _, j)) if (streams[j].data.len() + s.data.len()) as u64 <= limit => {
-                    to[i] = (j, streams[j].data.len() as u64);
-                    streams[j].data.extend_from_slice(&s.data);
+                Some(&mut (_, _, j)) if glens[j] + lens[i] <= limit => {
+                    to[i] = (j, glens[j]);
+                    groups[j].push(i);
+                    glens[j] += lens[i];
                 }
                 Some(first) => {
-                    first.2 = streams.len();
-                    to[i] = (streams.len(), 0);
-                    streams.push(s);
+                    first.2 = groups.len();
+                    to[i] = (groups.len(), 0);
+                    groups.push(vec![i]);
+                    glens.push(lens[i]);
                 }
                 None => {
                     if alike {
-                        firsts.push((s.class.clone(), s.kind, streams.len()));
+                        firsts.push((s.class.clone(), s.kind, groups.len()));
                     }
-                    to[i] = (streams.len(), 0);
-                    streams.push(s);
+                    to[i] = (groups.len(), 0);
+                    groups.push(vec![i]);
+                    glens.push(lens[i]);
                 }
             }
         }
-        let new = streams.len();
+        (to, groups)
+    }
+
+    /// Slices of stream `s` made slices of stream `to[s].0` from `to[s].1` on; of a stream past
+    /// them, of the same past `new` merged streams.
+    fn remap(&mut self, to: &[(usize, u64)], new: usize) {
+        let n = to.len();
         self.slices_mut(&mut |s, a, _| match to.get(*s) {
             Some(&(j, o)) => (*s, *a) = (j, *a + o),
             None => *s = *s - n + new,
         });
-        self.streams = streams;
     }
 
     /// Bytes of the output, as declared.

@@ -593,11 +593,14 @@ fn finish(
     notes: Option<&progress::Notes>,
 ) -> (Vec<u8>, Option<Formula>) {
     use progress::Note;
-    // the streams of a class together, as they compress smaller
-    f.merge_classes();
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
+    // the streams of a class together, as they compress smaller: as pieces of the streams, not
+    // copied, their blocks compressed as they are written
     let sum = Some(aqr::checksum(d));
-    let c = cx.enc.encode(&f, sum);
+    let (merged, groups) = f.merged();
+    let pieces: Vec<Vec<&[u8]>> = groups.iter().map(|g| g.iter().map(|&i| &f.streams[i].data[..]).collect()).collect();
+    let c = cx.enc.encode_pieces(&merged, &pieces, sum);
+    drop(pieces);
     notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
     cx.enc.clear();
     let f = kept.then_some(f);
