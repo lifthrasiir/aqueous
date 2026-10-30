@@ -70,6 +70,9 @@ pub enum Format {
     /// ISO 9660 or UDF image (aqr-iso), known by the descriptor at sector 16: at the start of
     /// data only.
     Iso,
+    /// WIM file of LZX or of no compression (aqr-wim, and aqr-lzx on its chunks), known by its
+    /// header: at the start of data only.
+    Wim,
     /// Delimited text table (aqr-xsv): CSV, TSV, USV and the like, a whole file known by its
     /// text: not looked for in other data.
     Xsv,
@@ -84,7 +87,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 34] = [
+    pub const ALL: [Format; 35] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -115,6 +118,7 @@ impl Format {
         Format::Tar,
         Format::Cpio,
         Format::Iso,
+        Format::Wim,
         Format::Xsv,
         Format::Text,
         Format::Sized,
@@ -153,6 +157,7 @@ impl Format {
             Format::Tar => "tar",
             Format::Cpio => "cpio",
             Format::Iso => "iso",
+            Format::Wim => "wim",
             Format::Xsv => "xsv",
             Format::Text => "text",
             Format::Sized => "sized",
@@ -204,6 +209,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"ldb" => format(Format::LevelDb),
         b"tar" => format(Format::Tar),
         b"iso" => format(Format::Iso),
+        b"wim" => format(Format::Wim),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
         b"lzma" | b"tlz" => format(Format::Lzma),
         b"lzo" | b"tzo" => format(Format::Lzo),
@@ -242,6 +248,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     } else if start && aqr_iso::starts(d) {
         // (before the others: a hybrid image starts with a boot sector, or anything)
         Some(Format::Iso)
+    } else if start && aqr_wim::wim::starts(d) {
+        Some(Format::Wim)
     } else if sqlite_header(d) {
         Some(Format::Sqlite)
     } else if at(0, b"%PDF-") {

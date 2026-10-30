@@ -21,6 +21,7 @@
 //! - ar, tar and cpio archives: aqr-bundle, rebuilding the archive from the contents of its
 //!   members with their sizes and checksums derived.
 //! - ISO 9660 and UDF images: aqr-iso, the image cut into its files' contents and the rest.
+//! - WIM files of LZX: aqr-wim, the resources' data, the LZX chunks rebuilt by aqr-lzx.
 //! - Text, a whole file of text bytes or data of a name telling text: a delimited table (CSV,
 //!   TSV, USV and the like) by aqr-xsv, its fields stored column by column, where it takes it;
 //!   else aqr-wrt, its words and markup replaced by codes of a dictionary of its own.
@@ -127,7 +128,7 @@ pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 pub use progress::Event;
 
-use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZO, Native, SNAPPY, ZIP};
+use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZO, LZX, Native, SNAPPY, ZIP};
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
 use aqr_formula::{Bytes, Stream};
@@ -273,12 +274,13 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`LZMA`],
-/// [`LZO`], [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], scanned.
-pub const CONTENTS: [Content; 8] = [
+/// [`LZO`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], scanned.
+pub const CONTENTS: [Content; 9] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: LZMA, input: 0, nest: Nest::Scan },
     Content { module: LZO, input: 0, nest: Nest::Scan },
+    Content { module: LZX, input: 0, nest: Nest::Scan },
     Content { module: SNAPPY, input: 0, nest: Nest::Scan },
     Content { module: LEVELDB, input: 0, nest: Nest::Scan },
     Content { module: ZIP, input: 0, nest: Nest::Scan },
@@ -896,7 +898,10 @@ fn files_len(d: &[u8]) -> usize {
 /// taken of other data the files hold cost nothing for what holds that data ([`Cx::note_held`]).
 /// An ISO 9660 or UDF image is taken whatever its size too: its formula is its own bytes, cut
 /// into the files and the rest, which cost no more apart (and comparing would compress all of
-/// an image twice, a DVD's 3 GB). So is a scan's formula whose files are all of the data, each
+/// an image twice, a DVD's 3 GB). So is a WIM file: its LZX chunks are compressed apart, 32 KiB
+/// each, and their data compresses better together (by far more than the records cost, where
+/// it is not compressed already; where it is, the records are small); comparing took 14 of
+/// 24 s of a boot.wim of 169 MB. So is a scan's formula whose files are all of the data, each
 /// of them compared already (or text, not compared: [`made`]).
 fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, cx: &Cx) -> bool {
     let bundled = bundle::bundles(f) && cx.held_by_others(d, d);
@@ -904,7 +909,7 @@ fn smaller(f: &Formula, gaps: Option<&[Range<usize>]>, d: &[u8], opt: &Options, 
         cx.note_bundled(f);
     }
     let covered = gaps.is_some_and(|g| g.iter().all(Range::is_empty));
-    let smaller = !opt.smaller || bundled || covered || bundle::is_iso(f) || {
+    let smaller = !opt.smaller || bundled || covered || bundle::files_apart(f) || {
         let pieces: Option<Vec<&[u8]>> = gaps.map(|gaps| gaps.iter().map(|g| &d[g.clone()]).collect());
         let stand_in = pieces.as_deref().map(|p| (0, p));
         // (the streams the files archived together hold cost nothing)
@@ -1290,8 +1295,9 @@ fn content_slices(
                 out.push((n.clone(), None));
                 return;
             }
-            // (the files of an archive made later, at once, and so are those of an image)
-            if (depth == 0 && cx.top_sets.is_some() || bundle::is_iso(f))
+            // (the files of an archive made later, at once, and so are those of an image or a
+            // WIM file)
+            if (depth == 0 && cx.top_sets.is_some() || bundle::files_apart(f))
                 && let Some(nest) = s.and_then(|s| nest.of(s.kind)).filter(|_| d.is_some())
             {
                 cx.later.borrow_mut().push((out.len(), n.clone(), nest));
@@ -1449,6 +1455,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Text => aqr_wrt::formula::encode,
         Format::Sized => aqr_raw::formula::encode_sized,
         Format::Records => aqr_infer_recs::formula::encode,
+        Format::Wim => aqr_wim::formula::encode,
         _ => return None,
     })
 }

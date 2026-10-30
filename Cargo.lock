@@ -126,6 +126,7 @@ dependencies = [
  "aqr-snappy",
  "aqr-sqlite",
  "aqr-tex",
+ "aqr-wim",
  "aqr-wrt",
  "aqr-xsv",
  "aqr-zip",
