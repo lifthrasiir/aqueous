@@ -28,14 +28,17 @@ Oculus, and games; written by `asar` 0.14 to `@electron/asar` 3, 127,329 files).
   the index. Archives with integrity gain most (Ridibooks 230 → 29 KB, shapez 102 → 15 KB);
   Orca's (4555 of its 4578 files unpacked, their integrity kept) gains nothing.
 - Through `aqr` (all threads, level mid) against the commit before (`18fdaf4`), all 27 archives
-  at once: 714.42 → 726.59 MB (+1.7%), 23.3 → 26.4 s. Each alone: shapez 151.99 → 152.47 MB,
-  Oculus 215.09 → 220.34 MB, Slack 4.52 4.00 → 4.08 MB, Ridibooks 16.02 → 15.71 MB, Discord
-  1.034 → 1.042 MB.
-- The loss is not aqr-asar's: Oculus' files in a tar archive (aqr-bundle) lose as much against
-  the same tar archive scanned (220.34 vs 215.06 MB), though its PNG files alone (63.07 vs
-  65.44 MB) and its other files alone (32.17 vs 32.17 MB) do not. How aqr-compress takes the
-  contents of an archive that only bundles files, when they are many and of many formats, is
-  what is left to look into.
+  at once: 714.42 -> 715.68 MB (+0.2%), 23.3 -> 26.0 s (with aqr-zip's kept bodies as slices of
+  their own, `share_slices` for a file alone, and GIF files not taken as compressed; 726.59 MB
+  before them). Each alone (`cache/per-file-0bf54e2.txt`): Oculus 215.09 -> 212.73 MB (its two
+  APKs share 8.8 MB of deflated entries), Ridibooks 16.02 -> 15.69, Antimatter Dimensions 33.19
+  -> 32.86, shapez 151.99 -> 151.80; but etcher 36.52 -> 38.48, VS Code's `node_modules.asar`
+  9.41 -> 10.27, Dropbox 33.06 -> 33.77, Signal 32.08 -> 32.67, Teams 4.81 -> 5.08.
+- What loses is the contents of many small files by kind (aqr-compress's, as aqr-bundle's): a
+  file alone, the text of its files is a stream apart from the rest, coded by aqr-wrt in pieces
+  without the batch's dictionary, where the archive scanned is one stream compressed solid.
+  Of no kind at all, etcher comes to 36.47 MB, but the 27 archives at once to 724.87 MB: kinds
+  pay in a batch and cost alone. Left to decide.
 
 ## Tests
 
