@@ -16,6 +16,15 @@ use crate::{Error, Result, corrupt};
 /// Pixels of a file at most.
 pub const MAX_PIXELS: u64 = 1 << 28;
 
+/// The encoder gives a file up where, once the images coded hold a quarter of its LZW data
+/// (of 1 Mbit at least), the record has taken more than 5/4 of their bits: the pixels of lossy
+/// encoders (Photoshop's "Lossy") are made to fit LZW's dictionary, and the model codes them
+/// larger. Of the GIF files of 27 asar archives, those the record makes smaller are at most
+/// 1.16 there, those it makes larger 1.22 to 2.2.
+const GIVE_UP_MIN: u64 = 1 << 20;
+const GIVE_UP_AFTER: u64 = 4;
+const GIVE_UP_RATIO: (u64, u64) = (5, 4);
+
 /// An image's data beyond its pixels' values.
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Data {
@@ -504,6 +513,8 @@ fn code(
     let mut model = Model::new(area.min(MAX_PIXELS), screen);
     let mut trie = Trie::new();
     let mut total = 0u64;
+    let lzw = encoding.then(|| data.iter().map(chain_bits).sum::<u64>()).filter(|&b| b >= GIVE_UP_MIN);
+    let mut done = 0;
     let mut from = 0;
     for (i, s) in shapes.iter().enumerate() {
         if !(2..=8).contains(&s.min) {
@@ -529,6 +540,12 @@ fn code(
         walk(c, &mut x, &mut trie, &d.pixels, s.min, &mut d.codes, encoding)?;
         let bits = write(&d.codes, s.min)?.bits();
         code_rest(c, &mut x, bits, &mut d, encoding)?;
+        if let Some(all) = lzw {
+            done += chain_bits(&d);
+            if done >= all / GIVE_UP_AFTER && c.spent() >> 16 > done * GIVE_UP_RATIO.0 / GIVE_UP_RATIO.1 {
+                return Err(Error("the pixels no smaller than their LZW data"));
+            }
+        }
         if let Some(out) = out.as_deref_mut() {
             out.extend_from_slice(&sk[from..s.at]);
             put_chain(&d, s.min, out)?;
@@ -536,6 +553,11 @@ fn code(
         }
     }
     Ok(from)
+}
+
+/// Bits of the sub-blocks of the image of `d`.
+fn chain_bits(d: &Data) -> u64 {
+    8 * (d.sizes.iter().map(|&n| n as u64).sum::<u64>() + d.cut.map_or(0, |(_, n)| n as u64))
 }
 
 /// Writes the chain of the image of `d`, of minimum code size `min`.

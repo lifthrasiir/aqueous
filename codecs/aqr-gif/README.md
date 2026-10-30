@@ -40,6 +40,12 @@ assert_eq!(out, file);
 - Images of other minimum code sizes, and what follows the blocks, stay in the skeleton.
 - aqr-compress takes GIF files at the start of a file and found in other data, up to their
   trailer, by their magic bytes (not by the name `.gif`).
+- Not files whose record, once their images coded hold a quarter of the LZW data (of 1 Mbit at
+  least), has taken more than 5/4 of its bits: the encoder gives them up there rather than at
+  the end. These are the files of lossy encoders (Photoshop's "Lossy"), whose pixels are made
+  to fit LZW's dictionary; the model codes them up to 2.3 times larger than LZW. Of the 117 GIF
+  files of the 27 asar archives of aqr-asar's corpus, 11 of 12 such files are given up, none of
+  the others (at most 1.16 there; the 12th is 1.22).
 
 ## Results
 

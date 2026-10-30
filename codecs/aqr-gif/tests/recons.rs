@@ -250,6 +250,41 @@ fn not_coded() {
 }
 
 #[test]
+fn given_up() {
+    // pixels as lossy encoders make them, strings of LZW's dictionary (here taken at random),
+    // which the model's contexts do not tell
+    let mut rng = Rng::new(3);
+    let mut dict = Dict::new(8);
+    let clear = dict.clear_code() as u16;
+    let (w, h) = (1024u16, 1024u16);
+    let (mut px, mut c, mut prev) = (vec![], vec![clear], None);
+    while px.len() < w as usize * h as usize {
+        let first = clear as usize + 2;
+        let code = if dict.next > first && rng.below(8) != 0 {
+            (first + rng.below((dict.next - first) as u64) as usize) as u16
+        } else {
+            rng.below(clear as u64) as u16
+        };
+        let at = px.len();
+        dict.put(code, &mut px);
+        if let Some(pr) = prev {
+            dict.add(pr, px[at]);
+        }
+        c.push(code);
+        prev = Some(code);
+        if dict.next == CODES {
+            c.push(clear);
+            dict.clear();
+            prev = None;
+        }
+    }
+    c.push(clear + 1);
+    let data = recons::write(&c, 8).unwrap().finish(0);
+    let f = file(w, h, 8, false, &data, &mut || 255);
+    assert_eq!(recons::split(&f).err().map(|e| e.0), Some("the pixels no smaller than their LZW data"));
+}
+
+#[test]
 fn damaged_records() {
     for (name, d) in fixtures() {
         let sp = recons::split(&d).unwrap();

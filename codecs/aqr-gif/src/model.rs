@@ -11,6 +11,11 @@ pub trait Coder {
     /// Codes `v` (the encoder's) of probability `p1`/65536 of being 1, and gives the bit coded.
     fn code(&mut self, p1: u32, v: bool, cat: Cat) -> bool;
 
+    /// Bits coded so far, in 1/65536 of a bit, where the side counts them (the encoder's).
+    fn spent(&self) -> u64 {
+        0
+    }
+
     /// Codes `v` with the adaptive bit `b`.
     #[inline]
     fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool {
@@ -86,6 +91,10 @@ impl Default for Enc {
 }
 
 impl Coder for Enc {
+    fn spent(&self) -> u64 {
+        self.cost.iter().sum()
+    }
+
     #[inline]
     fn code(&mut self, p1: u32, v: bool, cat: Cat) -> bool {
         self.cost[cat as usize] += COST[(if v { p1 } else { 65536 - p1 }).min(65535) as usize] as u64;
