@@ -21,6 +21,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Lzma => Some(d.len()),
         Format::Xz => aqr_lzma::formula::extent_xz(d),
         Format::Lzo => aqr_lzo::formula::extent(d),
+        Format::Bvx => aqr_bvx::formula::extent(d),
         Format::Png => png(d),
         Format::Jpeg => jpeg(d),
         Format::Mp3 => mp3(d),

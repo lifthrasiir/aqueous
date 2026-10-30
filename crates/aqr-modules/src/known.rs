@@ -82,6 +82,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/bundle-recons.block"),
     },
     Known {
+        name: "bvx-recons",
+        version: 1,
+        sha512_256: hex("161bc249cc9b27a55b9006bf9577332c3f6047cc7e74913500cbeb880876e0db"),
+        block: include_bytes!("../wasm/bvx-recons.block"),
+    },
+    Known {
         name: "clip-recons",
         version: 1,
         sha512_256: hex("378506ab4492b2a53b7f589f06020a5f17095dac05d80d2a0e9c11b99130ef6e"),

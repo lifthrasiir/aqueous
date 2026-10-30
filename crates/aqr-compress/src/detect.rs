@@ -28,6 +28,8 @@ pub enum Format {
     Ppmd,
     /// lzop file (aqr-lzo on its LZO1X streams).
     Lzo,
+    /// Stream of Apple's LZFSE and LZVN blocks (aqr-bvx on its data).
+    Bvx,
     Png,
     Jpeg,
     Mp3,
@@ -100,7 +102,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 40] = [
+    pub const ALL: [Format; 41] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -110,6 +112,7 @@ impl Format {
         Format::Xz,
         Format::Ppmd,
         Format::Lzo,
+        Format::Bvx,
         Format::Png,
         Format::Jpeg,
         Format::Mp3,
@@ -154,6 +157,7 @@ impl Format {
             Format::Xz => "xz",
             Format::Ppmd => "ppmd",
             Format::Lzo => "lzo",
+            Format::Bvx => "bvx",
             Format::Png => "png",
             Format::Jpeg => "jpeg",
             Format::Mp3 => "mp3",
@@ -242,6 +246,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"xz" | b"txz" => format(Format::Xz),
         b"pmd" => format(Format::Ppmd),
         b"lzo" | b"tzo" => format(Format::Lzo),
+        b"lzfse" | b"lzvn" => format(Format::Bvx),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
@@ -314,6 +319,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Lz4)
     } else if aqr_lzo::formula::starts(d) {
         Some(Format::Lzo)
+    } else if aqr_bvx::formula::starts(d) {
+        Some(Format::Bvx)
     } else if aqr_lzma::formula::starts_xz(d) {
         Some(Format::Xz)
     } else if at(0, b"PK\x03\x04") {
@@ -392,6 +399,7 @@ const fn pair(a: u8, b: u8) -> bool {
         0xfd => b == b'7',
         b'7' => b == b'z',
         0x00 => b == b'a',
+        b'b' => b == b'v',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -457,6 +465,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         0xfd => aqr_lzma::formula::starts_xz(d),
         b'7' => aqr_7z::formula::starts(d),
         0x00 => aqr_wasm::formula::starts(d),
+        b'b' => aqr_bvx::formula::starts(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,
@@ -546,6 +555,7 @@ mod tests {
             (b"07", 0),
             (b"SI", 0),
             (b"\x48\x89", 0),
+            (b"bvx2", 0),
         ] {
             assert!(pairs(d[0], d[1]), "{d:x?}");
         }

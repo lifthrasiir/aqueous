@@ -131,6 +131,10 @@ pub const BCJ2: Module = aqr_bcj::formula::BCJ2;
 /// Inputs: the data, the records and the index cutting them into the streams'.
 pub const LZO: Module = aqr_lzo::formula::MODULE;
 
+/// aqr-bvx reconstruction of a stream of Apple's LZFSE and LZVN blocks from its data and
+/// record. Inputs: the data and the record.
+pub const BVX: Module = aqr_bvx::formula::MODULE;
+
 /// aqr-lzx reconstruction of streams of LZX chunks (as WIM files hold them), one after another,
 /// from their data and records. Inputs: the data, the records and the index cutting them into
 /// the streams'.
@@ -232,7 +236,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 58] = [
+pub const MODULES: [Module; 60] = [
     X86,
     ARM64,
     ARM64_REMAP,
@@ -254,6 +258,7 @@ pub const MODULES: [Module; 58] = [
     BCJ_DELTA,
     BCJ2,
     LZO,
+    BVX,
     LZX,
     SNAPPY,
     LEVELDB,
@@ -503,6 +508,9 @@ impl Native {
         } else if m == LZO {
             none(resources)?;
             aqr_lzo::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == BVX {
+            none(resources)?;
+            aqr_bvx::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == LZX {
             none(resources)?;
             aqr_lzx::formula::decode(params, inputs, len, threads).map_err(msg)

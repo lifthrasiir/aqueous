@@ -39,6 +39,9 @@ samples() {
     make lzma.d 'mkdir $out && cp $t $s/text.lzma $out'
     make text.lz4 'lz4 -1c $t > $out'
     make text.lzo 'lzop -c $t > $out'
+    # LZFSE of the stream API (bvx-recons), and an asset catalog of LZFSE and LZVN streams
+    make text.lzfse 'compression_tool -encode -a lzfse -i $t -o $out'
+    copy assets.car /System/Applications/Maps.app/Contents/Resources/Assets.car
     make src.tar 'git ls-files -z codecs/aqr-flate | xargs -0 tar cf $out'
     copy zip.zip $codecs/aqr-zip/corpus/881026.zip
     copy git.pack $codecs/aqr-git/corpus/local/aqueous/.git/objects/pack/pack-d45a1b85c3d4567983098805e604a5afab43e22e.pack

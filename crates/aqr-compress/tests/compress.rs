@@ -4,8 +4,8 @@ use std::sync::{PoisonError, RwLock};
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, ASAR, BUNDLE, CLIP, FLAC, FLATE, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF,
-    PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
+    ARM64, ASAR, BUNDLE, BVX, CLIP, FLAC, FLATE, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM,
+    PDF, PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -307,6 +307,20 @@ fn lzop_files() {
     assert_eq!(modules(&roundtrip(&d, &all())), [LZO.name]);
     // nothing to rebuild
     assert!(modules(&roundtrip(&fixture("codecs/aqr-lzo/tests/data/empty.3.lzo"), &all())).is_empty());
+}
+
+#[test]
+fn bvx_streams() {
+    for t in ["text", "words", "icon", "small"] {
+        let d = fixture(&format!("codecs/aqr-bvx/tests/data/{t}.lzfse"));
+        // (the data recompressed in turn where it is text)
+        assert_eq!(modules(&roundtrip(&d, &all()))[0], BVX.name, "{t}");
+    }
+    // found in data, as in an asset catalog
+    let d = [noise(3000), fixture("codecs/aqr-bvx/tests/data/icon.lzfse"), noise(3000)].concat();
+    assert_eq!(formats(&roundtrip(&d, &all())), [BVX.name]);
+    // nothing to rebuild
+    assert!(modules(&roundtrip(&fixture("codecs/aqr-bvx/tests/data/empty.lzfse"), &all())).is_empty());
 }
 
 #[test]

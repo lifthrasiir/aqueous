@@ -39,6 +39,10 @@ own terms; the code is written from that description, not from the encoder's cod
   Linux kernel's description of it (`Documentation/staging/lzo.rst`, Willy Tarreau and Dave
   Rodgman) and from liblzo2's and lzop's output used as black boxes, without LZO's code; the
   lzop file structure from libarchive's reader (BSD).
+- **LZFSE** and **LZVN** (Apple; BSD): the stream formats, the
+  LZFSE compressor's normalization of frequencies and its table of match candidates (which
+  aqr-bvx's record takes as a context), in aqr-bvx, written from the output of Apple's
+  libcompression used as a black box, without the code of Apple's implementation.
 - **lpaq** and **PAQ** (Matt Mahoney and others): the style of binary arithmetic coding and
   context mixing.
 - **FITS** (the IAU FITS Working Group's FITS Standard 4.0) and its tiled image compression

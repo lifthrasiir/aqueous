@@ -235,8 +235,39 @@ Google Chrome 앱 410.70 → 388.10 MB(−5.5%), `aqr` 빌드 셋(10-27, 10-28, 
 
 - `Assets.car`의 LZFSE 렌디션은 대개 앱 아이콘이다. 앱마다 1–1.6 MB(Discord, Blender, Secretive,
   Chrome)로 하나로는 작지만 거의 모든 앱에 있다.
-- 같은 코덱이 decmpfs, `.aar`, `.xip`, DMG(ULFO)에 쓰인다(`file-formats.md`). 참조 구현이 공개되어
-  있어 aqr-lz4, aqr-snappy처럼 인코더를 재현할 수 있다.
+- 같은 코덱이 decmpfs, `.aar`, `.xip`, DMG(ULFO)에 쓰인다(`file-formats.md`).
+
+했다(aqr-bvx, 모듈 `bvx-recons`): `bvx2`/`bvxn`/`bvx-` 블록의 스트림을 데이터와 파스의 기록으로
+나눈다. libcompression의 LZFSE 스트림은 작은 데이터(4096바이트 미만 남짓)에서 LZVN 블록이 되므로
+둘을 함께 다룬다. 인코더를 재현하지는 않았다. 참조 구현(BSD)의 코드는 보지 않고 libcompression을
+블랙박스로만 썼고, 압축기의 후보 테이블(4바이트의 14비트 해시, 4-way 버킷, 모든 위치 삽입)이
+블랙박스 관찰로 맞아떨어져 그것을 기록의 문맥으로 쓴다. 빈도 정규화, 코더 상태, 패딩, 트리플과
+LZVN 명령으로 자르는 법은 압축기 그대로 유도된다(aqr-bvx FORMAT.md). aqr-compress는 카탈로그 안의
+스트림을 스캔으로 찾는다.
+
+`/Applications`의 100 KB 이상 `Assets.car` 36개(272.5 MB; LZFSE 스트림 4,781개 236 MB와 LZVN
+10,200개 10.4 MB, 데이터 3.7 GB):
+
+| | MB |
+|---|---|
+| `zstd -3` | 232.63 |
+| aqr 전 | 220.47 |
+| aqr 후 | 191.11 (−13.3%) |
+
+- 기록은 스트림의 1.5%(LZFSE), 2.5%(LZVN)이다. LZFSE 기록의 85%는 매치가 시작하는지이다.
+- 압축 55.5 s(전 1.7 s), 최대 7.8 GB: 데이터가 카탈로그의 14배로 불어난다. 풀기(`aqr -t`)
+  6.3 s, Wasm으로 8.0 s.
+- 데이터는 4바이트 픽셀(알파가 끝, 투명한 픽셀은 0)이고 zstd로 저장된다. zstd가 LZFSE보다 못한
+  카탈로그(사진, 그러데이션)에서는 스트림을 그대로 둔다.
+
+남은 것:
+
+- 데이터의 이미지 모델: 렌디션의 폭과 픽셀 형식은 카탈로그의 렌디션 헤더에 있을 것이다(보지
+  않았다). LZFSE를 풀고 나면
+  aqr-raw 같은 픽셀 모델이 붙을 자리이고, 남은 이득의 대부분이 여기 있다. 재지 않았다.
+- 큰 데이터의 메모리: 0으로 된 테두리가 많은 아이콘은 수십 배로 불어난다. DEFLATE처럼 팽창
+  예산(`Options::expansion`)에 넣을지 볼 것.
+- decmpfs(리소스 포크나 확장 속성 안의 청크 표), DMG의 ULFO, `.aar`의 청크, 날 LZVN 스트림.
 
 ### 5. Electron의 asar
 

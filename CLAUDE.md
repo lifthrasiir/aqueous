@@ -22,10 +22,10 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, snappy, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle, asar, …), each
-  with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a `FORMAT.md`
-  belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace takes both
-  directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
+  git, lz4, lzma, lzo, bvx, snappy, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle, asar,
+  …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
+  `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace
+  takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
 - `corpus/` and `cache/` under a crate are gitignored local data (test inputs, cached results
   of slow measurements).
 - `flate-zoo/` — a submodule (a workspace of its own). `third_party/` — reference checkouts,
@@ -122,6 +122,10 @@ optimization picked by hash.
   14% at a reasonable speed is fine. What is left is in `docs/10gb-todo.md` item 6.
 - aqr-lzo: a record of the parse rather than emulation, as LZO has many encoders. Left (its
   README's Status): raw LZO1X in other containers, LZO-RLE, LZO1X-1's hash table start.
+- aqr-bvx (Apple's LZFSE and LZVN, `bvx2`/`bvxn` blocks; asset catalogs): a record of the parse,
+  as aqr-lzo, with the LZFSE compressor's table of candidates (14-bit hash, 4 ways) emulated as
+  a context. Apple's lzfse code (BSD) is not read; libcompression is the black box. Left (its
+  README's Status): decmpfs, DMG ULFO, an image model for the data.
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
   multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
   Firefox's mozlz4 is liblz4's `LZ4_compress_default`.
