@@ -81,6 +81,11 @@ pub const LZ4: Module = aqr_lz4::formula::MODULE;
 /// Inputs: the data, the records and the index cutting them into the streams'.
 pub const LZMA: Module = aqr_lzma::formula::MODULE;
 
+/// aqr-lzma reconstruction of the segments of LZMA2 streams (of xz and 7z), one after another,
+/// from their data and records. Inputs: the data, the records and the index cutting them into
+/// the segments'.
+pub const LZMA2: Module = aqr_lzma::formula::LZMA2;
+
 /// aqr-lzo reconstruction of LZO1X streams, one after another, from their data and records.
 /// Inputs: the data, the records and the index cutting them into the streams'.
 pub const LZO: Module = aqr_lzo::formula::MODULE;
@@ -179,7 +184,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 44] = [
+pub const MODULES: [Module; 45] = [
     X86,
     ARM64,
     CIL,
@@ -187,6 +192,7 @@ pub const MODULES: [Module; 44] = [
     FLATE,
     LZ4,
     LZMA,
+    LZMA2,
     LZO,
     LZX,
     SNAPPY,
@@ -422,6 +428,9 @@ impl Native {
         } else if m == LZMA {
             none(resources)?;
             aqr_lzma::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == LZMA2 {
+            none(resources)?;
+            aqr_lzma::formula::decode2(params, inputs, len, threads).map_err(msg)
         } else if m == LZO {
             none(resources)?;
             aqr_lzo::formula::decode(params, inputs, len, threads).map_err(msg)

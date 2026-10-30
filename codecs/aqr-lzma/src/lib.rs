@@ -3,7 +3,8 @@
 //! `formula` is the entry point (see aqr-formula), with the feature `encode`; `module` is the
 //! code of the module, which `FORMAT.md` specifies.
 //!
-//! The container taken is the `.lzma` file (LZMA-alone, `alone`).
+//! LZMA2 streams (`lzma2`) are split by their segments, each standing alone. The containers
+//! taken are the `.lzma` file (LZMA-alone, `alone`) and the `.xz` file (`xz`).
 
 // The code of the modules alone uses only part of the rest.
 #![cfg_attr(not(feature = "encode"), allow(unused))]
@@ -13,10 +14,12 @@ pub use aqr_common::arith;
 pub mod formula;
 pub mod greedy;
 pub mod lzma;
+pub mod lzma2;
 pub mod mf;
 pub mod module;
 pub mod rc;
 pub mod recons;
+pub mod xz;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Error(pub &'static str);

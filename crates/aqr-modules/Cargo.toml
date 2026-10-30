@@ -59,6 +59,11 @@ path = "src/bin/lzma-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "lzma2-recons"
+path = "src/bin/lzma2-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "lzo-recons"
 path = "src/bin/lzo-recons.rs"
 required-features = ["wasm"]

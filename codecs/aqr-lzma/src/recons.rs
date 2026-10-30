@@ -142,13 +142,24 @@ impl Side for Dec<'_> {
     }
 }
 
+/// A place in the data where packets end and none goes past (the start of an LZMA2 chunk), in
+/// order: there the state and the last distances may be reset, and bytes stored as they are
+/// (not coded as packets) skipped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Break {
+    pub at: usize,
+    pub reset: bool,
+    pub stored: usize,
+}
+
 /// Walks the packets of `data` with matches at most `reach` back, coding them (`Some`) or
 /// decoding them (`None`, until the data is covered), and gives each to `emit`. None where
-/// the record does not fit the data.
+/// the record does not fit the data, or a packet goes past a break.
 fn walk<S: Side>(
     s: &mut S,
     data: &[u8],
     reach: usize,
+    breaks: &[Break],
     mut given: Option<&[Packet]>,
     mut emit: impl FnMut(Packet),
 ) -> Option<()> {
@@ -157,15 +168,30 @@ fn walk<S: Side>(
     let (mut state, mut reps) = (0usize, [0u32; 4]);
     let mut pairs = vec![];
     let mut pos = 0;
-    let mut i = 0;
-    while pos < data.len() {
+    let (mut i, mut bi) = (0, 0);
+    loop {
+        while let Some(b) = breaks.get(bi).filter(|b| b.at <= pos) {
+            if b.at < pos {
+                return None;
+            }
+            if b.reset {
+                (state, reps) = (0, [0; 4]);
+            }
+            pos = pos.checked_add(b.stored)?;
+            bi += 1;
+        }
+        if pos >= data.len() {
+            break;
+        }
+        // (packets end at the next break)
+        let end = breaks.get(bi).map_or(data.len(), |b| b.at.min(data.len()));
         let pk = match &mut given {
             Some(g) => *g.get(i)?,
             None => Packet::LIT,
         };
         i += 1;
         mf.advance(pos);
-        let cap = (MAX_LEN as usize).min(data.len() - pos);
+        let cap = (MAX_LEN as usize).min(end - pos);
         let mut rl = [0usize; 4];
         for k in 0..4 {
             if (reps[k] as usize) < pos {
@@ -302,30 +328,30 @@ fn walk<S: Side>(
         emit(pk);
         pos += pk.len as usize;
     }
-    given.is_none_or(|g| g.len() == i).then_some(())
+    (pos == data.len() && bi == breaks.len() && given.is_none_or(|g| g.len() == i)).then_some(())
 }
 
 /// The record of the packets of `data` (from [`crate::lzma::decode`]) for a dictionary of
-/// `dict` bytes, and its cost by [`Cat`] in bits. None where the packets do not cover the data
-/// exactly.
-pub fn deconstruct(data: &[u8], packets: &[Packet], dict: u32) -> Option<(Vec<u8>, [f64; CATS])> {
+/// `dict` bytes, with `breaks` (none for LZMA), and its cost by [`Cat`] in bits. None where the
+/// packets do not cover the data exactly.
+pub fn deconstruct(data: &[u8], packets: &[Packet], dict: u32, breaks: &[Break]) -> Option<(Vec<u8>, [f64; CATS])> {
     let mut e = Enc { c: ArithEncoder::new(vec![]), cost: [0.0; CATS] };
-    walk(&mut e, data, reach(dict), Some(packets), |_| ())?;
+    walk(&mut e, data, reach(dict), breaks, Some(packets), |_| ())?;
     Some((e.c.finish(), e.cost))
 }
 
 /// The packets of `data` from its record, given to `emit` as they come. None where the record
 /// does not fit the data (some packets may have been given by then).
-pub fn reconstruct(data: &[u8], record: &[u8], dict: u32, emit: impl FnMut(Packet)) -> Option<()> {
+pub fn reconstruct(data: &[u8], record: &[u8], dict: u32, breaks: &[Break], emit: impl FnMut(Packet)) -> Option<()> {
     let mut d = Dec { c: ArithDecoder::new(record) };
-    walk(&mut d, data, reach(dict), None, emit)?;
+    walk(&mut d, data, reach(dict), breaks, None, emit)?;
     (!d.c.overrun()).then_some(())
 }
 
 /// The stream of `data` from its record, with the end marker if `marker`.
 pub fn rebuild(data: &[u8], record: &[u8], props: Props, dict: u32, marker: bool) -> Option<Vec<u8>> {
     let mut e = StreamEncoder::new(props, data.len() / 4);
-    reconstruct(data, record, dict, |pk| e.push(data, pk))?;
+    reconstruct(data, record, dict, &[], |pk| e.push(data, pk))?;
     Some(e.finish(data, marker))
 }
 
@@ -354,7 +380,7 @@ pub fn split(input: &[u8], props: Props, dict: u32, size: Option<u64>, limit: us
     if lzma::encode(&dec.data, props, &dec.packets, dec.marker) != input[..dec.used] {
         return Err(lzma::Error::Encoded);
     }
-    let (body, _) = deconstruct(&dec.data, &dec.packets, dict).ok_or(lzma::Error::Corrupt)?;
+    let (body, _) = deconstruct(&dec.data, &dec.packets, dict, &[]).ok_or(lzma::Error::Corrupt)?;
     let mut record = Vec::with_capacity(HEADER + body.len());
     record.push(props.byte());
     record.extend(dict.to_le_bytes());

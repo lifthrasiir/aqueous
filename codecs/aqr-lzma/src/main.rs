@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use aqr_lzma::{alone, lzma, recons};
+use aqr_lzma::{alone, lzma, lzma2, recons, xz};
 
 #[derive(Default, Clone)]
 struct Row {
@@ -20,6 +20,60 @@ struct Row {
     note: &'static str,
 }
 
+/// An `.xz` file: its blocks of LZMA2 alone, the rest counted as record.
+fn run_xz(name: &str, f: &[u8]) -> Row {
+    let mut r = Row { name: name.to_string(), stream: f.len(), ..Default::default() };
+    let Some(st) = xz::parse(f) else {
+        r.note = "not .xz";
+        return r;
+    };
+    let mut taken = 0;
+    for b in st.blocks {
+        let s = &f[b.stream.clone()];
+        let t = Instant::now();
+        let Ok(dec) = lzma2::decode(s, 1 << 32) else {
+            r.note = "corrupt";
+            return r;
+        };
+        r.t_decode += t.elapsed().as_secs_f64();
+        let t = Instant::now();
+        let n = dec.segments.len();
+        for (i, seg) in dec.segments.iter().enumerate() {
+            let last = (i + 1 == n) as usize;
+            if lzma2::encode(&seg.data, &seg.chunks, &seg.packets).as_deref()
+                != Some(&s[seg.span.start..seg.span.end - last])
+            {
+                r.note = "re-encoding differs";
+                return r;
+            }
+        }
+        r.t_encode += t.elapsed().as_secs_f64();
+        for (i, seg) in dec.segments.iter().enumerate() {
+            let t = Instant::now();
+            let Some((record, cost)) = lzma2::deconstruct(seg, b.dict, i + 1 == n) else {
+                r.note = "deconstruct failed";
+                return r;
+            };
+            r.t_split += t.elapsed().as_secs_f64();
+            (0..recons::CATS).for_each(|c| r.cost[c] += cost[c]);
+            r.packets += seg.packets.len();
+            r.data += seg.data.len();
+            r.record += record.len();
+            let t = Instant::now();
+            let ok = lzma2::join(&seg.data, &record).as_deref() == Some(&s[seg.span.clone()]);
+            r.t_join += t.elapsed().as_secs_f64();
+            if !ok {
+                r.note = "round trip failed";
+                return r;
+            }
+        }
+        taken += s.len();
+    }
+    r.record += f.len() - taken;
+    r.ok = true;
+    r
+}
+
 /// A `.lzma` file, or a raw stream as `FILE@OFFSET+LENGTH:PROPS:DICT:SIZE` (decimal; PROPS the
 /// properties byte), as in a 7z folder.
 fn run(arg: &str) -> Row {
@@ -31,6 +85,9 @@ fn run(arg: &str) -> Row {
         (f, alone::Header { props, dict: v[3] as u32, size: Some(v[4]) }, v[0] as usize, (v[0] + v[1]) as usize)
     } else {
         let f = std::fs::read(arg).expect(arg);
+        if xz::starts(&f) {
+            return run_xz(arg, &f);
+        }
         let Some(h) = alone::parse(&f) else {
             r.note = "not .lzma";
             return r;
@@ -56,7 +113,7 @@ fn run(arg: &str) -> Row {
         return r;
     }
     let t = Instant::now();
-    let Some((record, cost)) = recons::deconstruct(&dec.data, &dec.packets, h.dict) else {
+    let Some((record, cost)) = recons::deconstruct(&dec.data, &dec.packets, h.dict, &[]) else {
         r.note = "deconstruct failed";
         return r;
     };
@@ -77,7 +134,7 @@ fn run(arg: &str) -> Row {
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("bench") {
-        eprintln!("usage: aqr-lzma bench [-t THREADS] [-v] FILE...");
+        eprintln!("usage: aqr-lzma bench [-t THREADS] [-v] FILE...   (.lzma or .xz files, or raw LZMA streams)");
         std::process::exit(2);
     }
     args.remove(0);

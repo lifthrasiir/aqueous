@@ -237,6 +237,37 @@ fn lzma_same_as_wasm() {
     }
 }
 
+/// `.xz` files natively and as WebAssembly alike (blocks by one application of several
+/// outputs), and their records damaged in turn failing alike (or giving the same).
+#[test]
+fn xz_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for t in ["crc64", "blocks", "streams"] {
+        let d = fixture(&format!("codecs/aqr-lzma/tests/data/{t}.xz"));
+        let f = aqr_lzma::formula::encode_xz(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        let r = f.streams.iter().position(|s| s.class == "lzma2/record").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[r].data;
+            let at = s.len() * k / 8;
+            if k == 7 {
+                s[at..].fill(0xff);
+            } else if at < s.len() {
+                s[at] ^= 1 << k;
+            }
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{t} ({k})");
+            }
+        }
+    }
+}
+
 /// lzop files natively and as WebAssembly alike, and their records damaged in turn failing alike
 /// (or giving the same).
 #[test]

@@ -1,9 +1,9 @@
-//! The code of the module `lzma-recons` (see `formula`, and `FORMAT.md`), which needs no
-//! aqr-formula, so that aqr-modules builds it into its Wasm module.
+//! The code of the modules `lzma-recons` and `lzma2-recons` (see `formula`, and `FORMAT.md`),
+//! which needs no aqr-formula, so that aqr-modules builds them into their Wasm modules.
 
 use aqr_common::varint;
 
-use crate::{Error, Result, corrupt, recons};
+use crate::{Error, Result, corrupt, lzma2, recons};
 
 /// The index of streams of data and records of `lens` bytes: for each, the two lengths as
 /// varints; empty for a single stream.
@@ -41,16 +41,31 @@ fn cut<'a>(data: &'a [u8], records: &'a [u8], index: &[u8]) -> Result<Vec<(&'a [
     Ok(out)
 }
 
-/// The module: the LZMA streams of `len` bytes in all that the data and records of the inputs
-/// (data, records, index) rebuild, one after another (see `FORMAT.md`). Streams are rebuilt
-/// side by side on up to `threads` threads.
+/// The module `lzma-recons`: the LZMA streams of `len` bytes in all that the data and records of
+/// the inputs (data, records, index) rebuild, one after another (see `FORMAT.md`). Streams are
+/// rebuilt side by side on up to `threads` threads.
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    decode_with(params, inputs, len, threads, recons::join)
+}
+
+/// The module `lzma2-recons`: [`decode`] for the segments of LZMA2 streams.
+pub fn decode2(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    decode_with(params, inputs, len, threads, lzma2::join)
+}
+
+fn decode_with(
+    params: &[u8],
+    inputs: &[&[u8]],
+    len: u64,
+    threads: usize,
+    join: fn(&[u8], &[u8]) -> Option<Vec<u8>>,
+) -> Result<Vec<u8>> {
     let &[data, records, index] = inputs else { return Err(Error("three inputs wanted")) };
     if !params.is_empty() {
         return Err(corrupt());
     }
     let streams = cut(data, records, index)?;
-    let join = |i: usize| recons::join(streams[i].0, streams[i].1).ok_or_else(corrupt);
+    let join = |i: usize| join(streams[i].0, streams[i].1).ok_or_else(corrupt);
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out = Vec::new();
     if threads <= 1 || cfg!(target_family = "wasm") {

@@ -77,3 +77,61 @@ fn streams_by_index() {
     assert!(formula::decode(&[], &[&data, &records, &index], out.len() as u64 - 1, 1).is_err());
     assert!(formula::decode(&[], &[&data, &records], out.len() as u64, 1).is_err());
 }
+
+fn eval_any(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
+    f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+        let decode = if a.module == formula::LZMA2 { formula::decode2 } else { formula::decode };
+        decode(&a.params, inputs, a.len, 2).map_err(|e| aqr_formula::Error::new(e.to_string()))
+    })
+}
+
+/// The `.xz` fixtures (`scripts/gen-fixtures.py`), by name.
+fn xz_fixtures() -> Vec<(String, Vec<u8>)> {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data");
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "xz"))
+        .map(|p| (p.file_stem().unwrap().to_str().unwrap().to_owned(), std::fs::read(&p).unwrap()))
+        .collect();
+    v.sort();
+    assert!(!v.is_empty());
+    v
+}
+
+#[test]
+fn xz_files_rebuilt() {
+    for (name, d) in xz_fixtures() {
+        assert!(formula::starts_xz(&d), "{name}");
+        assert_eq!(formula::extent_xz(&d), Some(d.len()), "{name}");
+        // (no block: nothing to take)
+        if name == "empty" {
+            assert!(formula::encode_xz(&d, 1).is_none() && formula::data_xz(&d).is_none());
+            continue;
+        }
+        let f = formula::encode_xz(&d, 2).unwrap_or_else(|| panic!("{name}"));
+        assert!(eval_any(&f).unwrap() == d, "{name}");
+        // the data, all of it in the formula
+        let data = formula::data_xz(&d).unwrap_or_default();
+        assert_eq!(f.streams[1].data.len(), data.len(), "{name}");
+        if name == "blocks" {
+            assert!(f.shared.len() == 1 && f.shared[0].sizes.len() > 2, "{name}");
+        }
+        // with bytes after it, kept as they are (and not taken as padding: zeros before them
+        // are not the streams')
+        let e = [&d[..], b"\0\0\0\0trailing"].concat();
+        let x = formula::extent_xz(&e).unwrap();
+        assert!(x <= d.len() && d[x..].iter().all(|&b| b == 0), "{name}");
+        let f = formula::encode_xz(&e, 1).unwrap_or_else(|| panic!("{name}"));
+        assert!(eval_any(&f).unwrap() == e, "{name}");
+    }
+}
+
+#[test]
+fn not_xz() {
+    let (_, mut d) = xz_fixtures().into_iter().find(|f| f.0 == "crc64").unwrap();
+    assert!(!formula::starts_xz(b"\xfd7zXZ\0\0\x04 not a header"));
+    // a damaged block header: no block taken
+    d[13] ^= 1;
+    assert!(formula::starts_xz(&d) && formula::encode_xz(&d, 1).is_none());
+}

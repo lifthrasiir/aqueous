@@ -2,8 +2,9 @@
 
 aqr-lzma splits an LZMA stream (LZMA1, as in `.lzma` files and 7z folders) into its
 decompressed **data** and a **record** of the parse its encoder chose. From the data and the
-record the stream is rebuilt bit for bit. This document describes the record, and the
-[formula module](#formula-module) that rebuilds streams from data and records.
+record the stream is rebuilt bit for bit. LZMA2 streams (of `.xz` files and 7z folders) are
+split likewise by their [segments](#lzma2-segments). This document describes the records, and
+the [formula modules](#formula-module) that rebuild streams from data and records.
 
 The record does not reproduce any encoder. It codes the encoder's packets given the data,
 under contexts of what a match finder sees in the data, so that the packets an LZMA encoder
@@ -17,7 +18,7 @@ encoder's choices; a decoder needs none of them.
 External reference: the LZMA format as Igor Pavlov's LZMA SDK specifies it
 (`lzma-specification.txt`, public domain): the properties `lc`, `lp`, `pb`, the range
 decoder, the probability model and the packets. This document only adds the range encoder
-and how a stream ends.
+and how a stream ends. LZMA2's chunks are described [below](#lzma2-segments).
 
 ## Conventions
 
@@ -179,11 +180,16 @@ start of a record.
 
 ### Packets
 
-The body codes the packets in order until they cover `D`. At each position `pos`, with the
-state `s` and `reps` as the stream has them there, after inserting the positions before `pos`:
+The body codes the packets in order until they cover `D`. A record may have **breaks**
+(positions in `D`, in order, from the chunks of an [LZMA2 segment](#lzma2-segments); an LZMA
+stream has none): at a break the state `s` and `reps` become 0 where it resets them, and the
+bytes it stores are skipped (no packet covers them); no packet goes past the next break. At each
+position `pos`, with the state `s` and `reps` as the stream has them there (but for resets at
+breaks: there they become 0), after inserting the positions before `pos`:
 
 ```text
-cap = min(273, N − pos)
+E = the next break after pos, or N
+cap = min(273, E − pos)
 rl[k] = lcp(pos − reps[k] − 1, pos, cap) if reps[k] < pos, else 0      (k = 0 … 3)
 b0 = bucket(rl[0]),  bh = bucket(first(pos)),  brest = bucket(max(rl[1], rl[2], rl[3]))
 
@@ -216,13 +222,59 @@ bit far: 0: d = pos − nearest(pos, n) − 1 (fails where there is none)
 fails unless 0 ≤ d < min(pos, R) and lcp(pos − d − 1, pos, n) ≥ n
 ```
 
-A literal and a short repeat cover 1 byte, the others `n`. The packets must cover `D` exactly
-(the walk ends at `N`); the end marker, if any, follows them.
+A literal and a short repeat cover 1 byte, the others `n`. The packets (and the bytes the breaks
+skip) must cover `D` exactly (the walk ends at `N`, after every break); the end marker, if any,
+follows them.
 
 ## Rebuilding a stream
 
 The packets of the record, then the end marker if its flag says so, encoded as in
 [Encoding](#encoding) with the record's `props`.
+
+## LZMA2 segments
+
+An LZMA2 stream is a sequence of chunks, then a byte 0. A chunk starts with a control byte `c`:
+
+- `c = 1` or `2`: **stored** data: `u` (big-endian u16) and `u + 1` bytes of data, as they are.
+  1 resets the dictionary.
+- `c ≥ 0x80`: an **LZMA chunk**: `u` (21 bits: `c & 0x1F`, then a big-endian u16), `p`
+  (big-endian u16), the properties byte if `c ≥ 0xC0` (with `lc + lp ≤ 4`), then `p + 1` bytes
+  coding the packets of `u + 1` bytes of data: a range coder of its own, started and flushed as
+  in [Encoding](#encoding), without an end marker. Before it, by `(c >> 5) & 3`: 0 nothing is
+  reset; 1 the state (the probabilities, `s` and `reps`) is reset; 2 that, with the properties
+  given; 3 that, and the dictionary. Otherwise the model goes on from the chunk before (over
+  stored chunks too, whose data counts as data before the next packets).
+
+Other control bytes do not occur. A chunk resetting the dictionary (`c = 1`, or `c & 0xE0 =
+0xE0`) starts a **segment**: positions (as `pos` is for the position state and the literal
+contexts) count from its start, and no match reaches before it. A stream starts with one.
+
+aqr-lzma takes a segment where it stands alone: its first LZMA chunk gives the properties (as
+7-Zip's decoder wants), no match goes past its chunk, and encoding its packets gives back every
+chunk.
+
+### The record of a segment
+
+```text
+u8      flags    bit 0: the stream's end byte (0) follows the segment; the others 0
+le32    dict     the dictionary size (as in an LZMA record: R = max(dict, 4096))
+varint  n        the number of chunks; then for each:
+  u8      c        its control byte, without the bits of its size: 1, 2, 0x80, 0xA0, 0xC0 or 0xE0
+  varint  len      the bytes of its data, less one: below 2^16 if stored, else below 2^21
+  u8      props    the properties byte, where c ≥ 0xC0
+the body
+```
+
+The first chunk resets the dictionary (`c` is 1 or 0xE0); no other does. The data's length is
+the sum of the chunks'. The body is coded as an LZMA record's (`D` the segment's data), with a
+break at the start of each chunk: resetting the state where `c ≥ 0xA0`, and skipping the data
+of a stored chunk.
+
+**Rebuilding**: the chunks in order, each its header (the control byte with the high bits of
+its size, the sizes, the properties byte) and its bytes: a stored chunk's data, or the packets
+of an LZMA chunk (those of the record within it) encoded through the model as above; then the
+byte 0 where the flag says so. It fails where an LZMA chunk codes in more than 2^16 bytes, or a
+chunk `0x80` or `0xA0` finds no properties before it in the segment.
 
 ## Implementation limits
 
@@ -255,10 +307,17 @@ The module fails on any parameters, any other count of inputs or resources, an i
 does not cut the inputs exactly, a record that fails above, or an output whose length is not
 the application's declared output size.
 
+The module `lzma2-recons`, version 1, is the same for the segments of LZMA2 streams: each
+"stream" above is a segment, from its data and [its record](#the-record-of-a-segment), and the
+output is the segments' bytes one after another (the segments of an LZMA2 stream, then its end
+byte, make the stream). A `.xz` file cuts the output by its blocks' streams, and adds the rest
+of the file around them as it is: its headers, the blocks' padding and checks, the index and
+the footer.
+
 ## Encoder choices (informative)
 
 - `split` decodes the stream, codes its packets as above, and checks that encoding the packets
-  gives back the stream (the decoder's end condition already pins its flush, so this does not
+  gives back the stream (for LZMA2, each segment's chunks) (the decoder's end condition already pins its flush, so this does not
   fail for a stream that decodes).
 - Where a match's distance is not the nearest one, `far_rep` names the last distance nearest
   to it (the first of equals), and the offset is from it.

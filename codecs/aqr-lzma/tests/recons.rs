@@ -66,7 +66,7 @@ fn streams_of_known_size() {
         let s = lzma::encode(&data, props, &packets, false);
         let dec = lzma::decode(&s, props, Some(data.len() as u64), 1 << 24).unwrap();
         assert!(dec.data == data && dec.packets == packets && !dec.marker, "{props:?}");
-        let (record, _) = recons::deconstruct(&data, &packets, dict as u32).unwrap();
+        let (record, _) = recons::deconstruct(&data, &packets, dict as u32, &[]).unwrap();
         assert!(recons::rebuild(&data, &record, props, dict as u32, false).as_deref() == Some(&s[..]), "{props:?}");
     }
 }
