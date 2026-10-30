@@ -3371,9 +3371,12 @@ mod tests {
         let enc = Encoder::new(Level::Zstd(1));
         let one = enc.encode(&whole, sum).unwrap();
         let (merged, groups) = f.merged();
-        assert_eq!(groups, [vec![0, 2, 3], vec![1]]);
-        let pieces: Vec<Vec<&[u8]>> =
-            groups.iter().map(|g| g.iter().map(|&i| &f.streams[i].data[..]).collect()).collect();
+        let whole = |i: usize| (i, 0, f.streams[i].data.len() as u64);
+        assert_eq!(groups, [vec![whole(0), whole(2), whole(3)], vec![whole(1)]]);
+        let pieces: Vec<Vec<&[u8]>> = groups
+            .iter()
+            .map(|g| g.iter().map(|&(i, a, b)| &f.streams[i].data[a as usize..b as usize]).collect())
+            .collect();
         let enc = Encoder::new(Level::Zstd(1));
         assert!(enc.encode_pieces(&merged, &pieces, sum).unwrap() == one);
         assert!(enc.streams.borrow().is_empty());

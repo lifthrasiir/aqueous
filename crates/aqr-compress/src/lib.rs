@@ -683,7 +683,10 @@ fn finish(
     // copied, their blocks compressed as they are written
     let sum = Some(aqr::checksum(d));
     let (merged, groups) = f.merged();
-    let pieces: Vec<Vec<&[u8]>> = groups.iter().map(|g| g.iter().map(|&i| &f.streams[i].data[..]).collect()).collect();
+    let pieces: Vec<Vec<&[u8]>> = groups
+        .iter()
+        .map(|g| g.iter().map(|&(i, a, b)| &f.streams[i].data[a as usize..b as usize]).collect())
+        .collect();
     let n = written(out, |w| cx.enc.encode_pieces_to(&merged, &pieces, sum, w))?;
     drop(pieces);
     notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
