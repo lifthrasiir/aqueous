@@ -104,6 +104,30 @@ pub struct Packer {
     n: u32,
 }
 
+impl Packed {
+    /// `f` of each of bases `r` in order, a byte of them at a time.
+    #[inline(always)]
+    fn each(&self, r: std::ops::Range<usize>, mut f: impl FnMut(usize)) {
+        let (mut i, end) = (r.start, r.end);
+        while i < end && i % 4 != 0 {
+            f((self.bytes[i / 4] >> (2 * (i & 3)) & 3) as usize);
+            i += 1;
+        }
+        while i + 4 <= end {
+            let b = self.bytes[i / 4];
+            f((b & 3) as usize);
+            f((b >> 2 & 3) as usize);
+            f((b >> 4 & 3) as usize);
+            f((b >> 6) as usize);
+            i += 4;
+        }
+        while i < end {
+            f((self.bytes[i / 4] >> (2 * (i & 3)) & 3) as usize);
+            i += 1;
+        }
+    }
+}
+
 impl Packer {
     /// Room for `n` bases.
     pub fn with_capacity(n: usize) -> Packer {
@@ -154,15 +178,14 @@ pub fn encode(s: &Packed) -> Vec<u8> {
 /// context `h`, into `syms`.
 fn symbols(s: &Packed, r: std::ops::Range<usize>, t: &mut [[u16; 4]], mut h: usize, syms: &mut Vec<(u16, u16)>) {
     syms.clear();
-    for b in s.iter(r) {
-        let b = b as usize;
+    s.each(r, |b| {
         let p = &mut t[h & (CONTEXTS - 1)];
         let f = freqs(p);
         let start: u32 = f[..b].iter().sum();
         syms.push((start as u16, f[b] as u16));
         update(p, b);
         h = h << 2 | b;
-    }
+    });
 }
 
 /// [`encode`], the bases coded `chunk` at a time.
@@ -174,13 +197,12 @@ fn encode_in(s: &Packed, chunk: usize) -> Vec<u8> {
     let mut t = model();
     let mut kept: Vec<(Vec<[u16; 4]>, usize)> = Vec::with_capacity(last / chunk);
     let mut h = 0usize;
-    for (i, b) in s.iter(0..last).enumerate() {
-        if i % chunk == 0 {
-            kept.push((t.clone(), h));
-        }
-        let b = b as usize;
-        update(&mut t[h & (CONTEXTS - 1)], b);
-        h = h << 2 | b;
+    for start in (0..last).step_by(chunk) {
+        kept.push((t.clone(), h));
+        s.each(start..start + chunk, |b| {
+            update(&mut t[h & (CONTEXTS - 1)], b);
+            h = h << 2 | b;
+        });
     }
     // (x / freq by a multiplication: the same quotient, as in ryg_rans)
     let rcp: Vec<(u32, u32)> = (0..=1u64 << SCALE)
