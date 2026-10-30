@@ -24,7 +24,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -116,12 +116,31 @@ fn build(env: &str) -> Result<PathBuf> {
     fs::copy(&exe, tmp.join(format!("aqr{EXE}"))).map_err(|e| format!("{}: {e}", exe.display()))?;
     let info = format!("created={}\nmanifest={manifest}\n{}", now(), commit(&paths, &blobs)?);
     fs::write(tmp.join("info"), info).map_err(|e| e.to_string())?;
-    // Another session may have kept the same key meanwhile; theirs is as good.
-    if fs::rename(&tmp, &dir).is_err() {
-        let _ = fs::remove_dir_all(&tmp);
-    }
+    let kept = keep(&tmp, &dir, |from, to| fs::rename(from, to));
     evict()?;
-    Ok(dir)
+    Ok(kept.unwrap_or_else(|| {
+        eprintln!("aqr-bincache: {} not kept; running the binary without keeping it", dir.display());
+        target()
+    }))
+}
+
+/// Moves the binary made in `tmp` to `dir` by `rename`, giving `dir`; tried again for a while
+/// where it fails (on Windows, something holding the directory open for a moment, such as
+/// Dropbox or an antivirus). Gives `dir` where another session kept the same key meanwhile
+/// (theirs is as good), and nothing where it is not there.
+fn keep(tmp: &Path, dir: &Path, rename: impl Fn(&Path, &Path) -> std::io::Result<()>) -> Option<PathBuf> {
+    let kept = || dir.join("info").exists();
+    for wait in [0, 50, 200, 1000] {
+        std::thread::sleep(Duration::from_millis(wait));
+        if rename(tmp, dir).is_ok() {
+            return Some(dir.to_path_buf());
+        }
+        if kept() {
+            break;
+        }
+    }
+    let _ = fs::remove_dir_all(tmp);
+    kept().then(|| dir.to_path_buf())
 }
 
 /// The paths (relative to the root where under it) in a dep-info file, with the manifests of
@@ -352,12 +371,22 @@ fn list() -> Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// How old a `tmp-*` directory of the cache is (by its modification) once it is no build's.
+const STALE: Duration = Duration::from_secs(24 * 60 * 60);
+
 fn evict() -> Result<()> {
     let max = std::env::var("AQR_BINCACHE_MAX").ok().and_then(|m| m.parse().ok()).unwrap_or(16);
     let mut entries = entries();
     entries.sort_by_key(|e| std::cmp::Reverse(e.used));
     for e in entries.drain(max.min(entries.len())..) {
         let _ = fs::remove_dir_all(&e.dir);
+    }
+    // binaries made but not kept (their removal failed), but those of builds going on
+    let stale = |m: fs::Metadata| m.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|a| a > STALE);
+    for entry in fs::read_dir(cache()).map_err(|e| e.to_string())?.flatten() {
+        if entry.file_name().to_string_lossy().starts_with("tmp-") && entry.metadata().is_ok_and(stale) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
     }
     let kept: BTreeSet<&str> = entries.iter().filter_map(|e| e.info.get("manifest")).map(String::as_str).collect();
     for entry in fs::read_dir(cache().join("manifests")).map_err(|e| e.to_string())?.flatten() {
@@ -404,7 +433,71 @@ fn run(dir: &Path, args: &[OsString]) -> Result<ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::deps;
+    use super::{deps, keep};
+    use std::cell::Cell;
+    use std::fs;
+    use std::io;
+    use std::path::{Path, PathBuf};
+
+    /// A directory of its own for test `name`, empty.
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("aqr-bincache-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A binary made in `tmp` under `root`, its info `info`.
+    fn made(root: &Path, info: &str) -> PathBuf {
+        let tmp = root.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("info"), info).unwrap();
+        tmp
+    }
+
+    /// A rename failing the first `n` times (as one of a directory that something holds open for
+    /// a moment, on Windows).
+    fn failing(n: usize) -> impl Fn(&Path, &Path) -> io::Result<()> {
+        let left = Cell::new(n);
+        move |from, to| match left.get() {
+            0 => fs::rename(from, to),
+            k => {
+                left.set(k - 1);
+                Err(io::Error::from(io::ErrorKind::PermissionDenied))
+            }
+        }
+    }
+
+    /// A rename failing for a moment is tried again; one failing for good keeps nothing, rather
+    /// than giving a directory that is not there.
+    #[test]
+    fn kept_only_where_moved() {
+        let root = scratch("moved");
+        let (tmp, dir) = (made(&root, "ours"), root.join("bin"));
+        assert_eq!(keep(&tmp, &dir, failing(2)), Some(dir.clone()));
+        assert_eq!(fs::read_to_string(dir.join("info")).unwrap(), "ours");
+        assert!(!tmp.exists());
+
+        let root = scratch("not-moved");
+        let (tmp, dir) = (made(&root, "ours"), root.join("bin"));
+        assert_eq!(keep(&tmp, &dir, failing(usize::MAX)), None);
+        assert!(!tmp.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Where another session kept the same key meanwhile, its binary is taken.
+    #[test]
+    fn kept_by_another() {
+        let root = scratch("another");
+        let dir = root.join("bin");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("info"), "theirs").unwrap();
+        let tmp = made(&root, "ours");
+        assert_eq!(keep(&tmp, &dir, |from, to| fs::rename(from, to)), Some(dir.clone()));
+        assert_eq!(fs::read_to_string(dir.join("info")).unwrap(), "theirs");
+        assert!(!tmp.exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn deps_unescape_spaces_only() {
