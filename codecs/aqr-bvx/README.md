@@ -56,7 +56,9 @@ The 36 asset catalogs over 100 KB of `/Applications` (272.5 MB; the seven apps o
 55.5 s (1.7 s without: the data is 14 times the catalogs) with a peak of 7.8 GB; testing
 (`aqr -t`) 6.3 s, and 8.0 s with the modules as Wasm. As that is about 4 MB/s, the streams are
 now taken at level 9 only: `aqr -c -l 9` gives 170.57 MB in 146 s (all of level 9 slower too),
-level mid 219.06 MB in 1.2 s. The LZVN streams alone gain nothing at level mid (219.08 MB). The data of some catalogs (photos and gradients, not icons with
+level mid 219.06 MB in 1.2 s. The streams a scan finds in a catalog were made one after another;
+made at once (aqr-compress's `ahead`), `-l 9` takes 74 s, and level 8 with the streams taken
+186.53 MB in 34 s (219.13 MB in 1.25 s without). The LZVN streams alone gain nothing at level mid (219.08 MB). The data of some catalogs (photos and gradients, not icons with
 borders) compresses worse with zstd than LZFSE did, and those streams are kept as they are.
 
 A sample of the same catalogs (corpus/, 756 streams, through `aqr-bvx-check`; every stream

@@ -880,10 +880,11 @@ impl Made {
 /// A stream of LZFSE and LZVN blocks, at level 9 only, if its data (as its blocks' headers
 /// tell) fits in what is left of the budget ([`Options::expansion`]). The data is many times
 /// the streams (14 times in the asset catalogs of /Applications: 3.7 GB of 272.5 MB), and
-/// recompressing them takes 13% off at some 4 MB/s (60 s rather than 1.7 s, peak 7.4 GB). The
-/// LZVN streams there (small data) gain nothing at the default level and are left out too.
+/// recompressing them takes 13% off at some 8 MB/s (34 s at level 8 rather than 1.3 s, peak
+/// 8.2 GB; [`ahead`]). The LZVN streams there (small data) gain nothing at the default level
+/// and are left out too.
 fn bvx(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
-    if opt.level.scale() < 9 {
+    if !bvx_on(opt) {
         return None;
     }
     let (_, n) = aqr_bvx::bvx::extent(d)?;
@@ -891,6 +892,11 @@ fn bvx(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
         return None;
     }
     aqr_bvx::formula::encode(d, opt.threads)
+}
+
+/// Whether LZFSE and LZVN streams are taken at the level of `opt` ([`bvx`]).
+fn bvx_on(opt: &Options) -> bool {
+    opt.level.scale() >= 9
 }
 
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
@@ -1148,6 +1154,7 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
     // would be part of the same (an archive from each of its local headers, MPEG audio from
     // each of its frames), and is not tried.
     let mut turned_down: Vec<(Format, usize)> = Vec::new();
+    let mut made = Ahead::default();
     while p < d.len() {
         // at the start, a file may also be known by its end (a LevelDB table), or be one that
         // is only ever a whole file (a SQLite database)
@@ -1160,7 +1167,13 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
         let mut down = None;
         let child = format.filter(|_| budget > 0).and_then(|format| {
             let n = extent(format, &d[p..]).filter(|&n| n > 0)?;
-            let child = recompress_as(format, &d[p..p + n], opt, depth, cx);
+            if format == Format::Bvx && bvx_on(opt) && !made.0.contains_key(&p) {
+                ahead(d, p, &turned_down, opt, depth, cx, &mut made);
+            }
+            let child = match made.0.remove(&p) {
+                Some(a) => a.take(&d[p..p + n], cx),
+                None => recompress_as(format, &d[p..p + n], opt, depth, cx),
+            };
             if child.is_none() {
                 budget = budget.saturating_sub(n);
                 turned_down.retain(|&(g, _)| g != format);
@@ -1180,12 +1193,101 @@ fn find(d: &[u8], first: Option<Format>, opt: &Options, depth: u32, slack: usize
                     found.extend(inner.into_iter().map(|(q, m, f)| (p + q, m, f)));
                     p += n;
                 }
-                None if p == 0 && first.is_some() => return None,
+                None if p == 0 && first.is_some() => {
+                    made.give_back(cx);
+                    return None;
+                }
                 None => p = detect::next_start(d, p + 1),
             },
         }
     }
+    made.give_back(cx);
     Some(found)
+}
+
+/// LZFSE and LZVN streams made ahead of a scan ([`ahead`]), by where they start: each its
+/// formula, if taken, what is put off of its prevalidation, and the bytes of its data taken
+/// from the budget.
+#[derive(Default)]
+struct Ahead(HashMap<usize, Early>);
+
+struct Early {
+    f: Option<Formula>,
+    deferred: Vec<(usize, verify::Deferred)>,
+    inflated: u64,
+    /// The encoder it was sized with, which keeps the streams compressed for it.
+    enc: Encoder,
+}
+
+impl Early {
+    /// The formula of stream `d`, as [`recompress_as`] would give it in `cx`.
+    fn take(self, d: &[u8], cx: &Cx) -> Option<Formula> {
+        cx.deferred.borrow_mut().extend(self.deferred);
+        // (so that what holds it is sized without compressing its streams again)
+        cx.enc.adopt(self.enc);
+        if self.f.is_some() {
+            cx.enc.forget(d);
+        }
+        self.f
+    }
+}
+
+impl Ahead {
+    /// Gives the budget of the streams the scan did not come to back to `cx`.
+    fn give_back(self, cx: &Cx) {
+        let n: u64 = self.0.values().map(|m| m.inflated).sum();
+        cx.inflate.set(cx.inflate.get() + n);
+    }
+}
+
+/// At most this many streams are made ahead at once ([`ahead`]): a number of its own, not the
+/// threads', so that the budget they take (and the archive) does not depend on the threads.
+const AHEAD: usize = 64;
+
+/// Makes the LZFSE and LZVN streams of `d` from `p` on at once, into `made`, as the scan of
+/// [`find`] would come to them one after another if each is taken: up to [`AHEAD`], up to the
+/// next file of another format, or to a stream whose data does not fit in the budget left (in
+/// the scan's order). Each is made in a context of its own ([`Apart`]), its data taken from
+/// `cx`'s budget beforehand, with no more budget for its contents. An asset catalog holds
+/// thousands of them, which the scan would make one after another (Windows App's of 72 MB, its
+/// data 1.1 GB, at 1.8 threads).
+fn ahead(d: &[u8], p: usize, turned_down: &[(Format, usize)], opt: &Options, depth: u32, cx: &Cx, made: &mut Ahead) {
+    let mut streams = Vec::new();
+    let mut q = p;
+    while q < d.len() && streams.len() < AHEAD {
+        let format = match q == p {
+            true => Some(Format::Bvx),
+            false => detect::starts(&d[q..]),
+        };
+        match format.filter(|f| !turned_down.iter().any(|&(g, end)| g == *f && q < end)) {
+            None => {
+                q = detect::next_start(d, q + 1);
+                continue;
+            }
+            Some(Format::Bvx) => {}
+            Some(_) => break,
+        }
+        let Some(n) = extent(Format::Bvx, &d[q..]).filter(|&n| n > 0) else { break };
+        if !made.0.contains_key(&q) {
+            let Some((_, m)) = aqr_bvx::bvx::extent(&d[q..q + n]) else { break };
+            if !cx.inflate(m) {
+                break;
+            }
+            streams.push((q, n, m));
+        }
+        q += n;
+    }
+    let apart = cx.apart();
+    let out = aqr_common::pool::par_map(streams.len(), opt.threads, |i| {
+        let (q, n, m) = streams[i];
+        let own = apart.cx(n, opt);
+        own.inflate.set(m);
+        let f = recompress_as(Format::Bvx, &d[q..q + n], opt, depth, &own);
+        (f, own.deferred.into_inner(), own.enc)
+    });
+    for ((q, _, inflated), (f, deferred, enc)) in streams.into_iter().zip(out) {
+        made.0.insert(q, Early { f, deferred, inflated, enc });
+    }
 }
 
 /// The files in `d`, a file turned down whose parts are `parts` ([`regions`]), in order: a part
@@ -1324,23 +1426,12 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
     let machos: Vec<&[u8]> =
         later.iter().map(|(_, n, _)| data(n)).filter(|d| aqr_exe::format::macho::starts(d)).collect();
     let remaps = (machos.len() > 1).then(|| Arc::new(exe::plan(&machos, opt.threads, opt.block / 2)));
-    let (pre, held, words, coded_held) = (cx.pre.clone(), cx.held.clone(), cx.words.clone(), cx.coded_held.clone());
-    let shares_modules = cx.enc.shares_modules();
-    let once = cx.once.clone();
+    let apart = Apart { remaps, ..cx.apart() };
     let files = cx.files.as_deref();
     let made = aqr_common::pool::par_map(later.len(), opt.threads, |i| {
         let (_, n, nest) = &later[i];
         let d = data(n);
-        let mut own = Cx::of_len(d.len(), opt);
-        if shares_modules {
-            own.enc.share_modules();
-        }
-        own.pre = pre.clone();
-        own.held = held.clone();
-        own.remaps = remaps.clone();
-        own.share_words(words.clone());
-        own.coded_held = coded_held.clone();
-        own.once = once.clone();
+        let own = apart.cx(d.len(), opt);
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         files.inspect(|f| f.tell(d.as_ptr(), false));
         let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| takes_place(&c.f));
@@ -1351,6 +1442,50 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
     for ((at, ..), (child, deferred)) in later.into_iter().zip(made) {
         children[at].1 = child;
         cx.deferred.borrow_mut().extend(deferred);
+    }
+}
+
+/// What a context of data made apart ([`make_later`], [`ahead`]) shares with the context it is
+/// made from: the prevalidator, what the files archived together hold, their remaps and words,
+/// the text noted and coded once, and whether module blocks are sized.
+struct Apart {
+    pre: Option<Arc<verify::Prevalidator>>,
+    held: Option<Arc<Held>>,
+    remaps: Option<Arc<exe::Remaps>>,
+    words: Option<Arc<aqr_wrt::formula::Shared>>,
+    coded_held: Arc<std::sync::Mutex<HashSet<(usize, u64)>>>,
+    once: Arc<Once>,
+    shares_modules: bool,
+}
+
+impl Cx {
+    fn apart(&self) -> Apart {
+        Apart {
+            pre: self.pre.clone(),
+            held: self.held.clone(),
+            remaps: self.remaps.clone(),
+            words: self.words.clone(),
+            coded_held: self.coded_held.clone(),
+            once: self.once.clone(),
+            shares_modules: self.enc.shares_modules(),
+        }
+    }
+}
+
+impl Apart {
+    /// A context of data of `n` bytes.
+    fn cx(&self, n: usize, opt: &Options) -> Cx {
+        let mut own = Cx::of_len(n, opt);
+        if self.shares_modules {
+            own.enc.share_modules();
+        }
+        own.pre = self.pre.clone();
+        own.held = self.held.clone();
+        own.remaps = self.remaps.clone();
+        own.share_words(self.words.clone());
+        own.coded_held = self.coded_held.clone();
+        own.once = self.once.clone();
+        own
     }
 }
 

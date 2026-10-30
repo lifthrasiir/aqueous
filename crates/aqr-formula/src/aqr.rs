@@ -371,6 +371,17 @@ impl Encoder {
         }
     }
 
+    /// Keeps what `other` (an encoder alike, for data compressed into the same archive) kept of
+    /// the streams, resources and module blocks it compressed, as if compressed here.
+    pub fn adopt(&self, other: Encoder) {
+        self.streams.borrow_mut().extend(other.streams.into_inner());
+        self.resources.borrow_mut().extend(other.resources.into_inner());
+        self.raw_lens.borrow_mut().extend(other.raw_lens.into_inner());
+        self.trials.borrow_mut().extend(other.trials.into_inner());
+        self.levels.borrow_mut().extend(other.levels.into_inner());
+        self.module_blocks.borrow_mut().extend(other.module_blocks.into_inner());
+    }
+
     /// Drops everything kept of the streams and resources compressed.
     pub fn clear(&self) {
         self.streams.borrow_mut().clear();
