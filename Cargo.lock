@@ -49,6 +49,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-7z"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "aqr-lzma",
+ "crc32fast",
+]
+
+[[package]]
 name = "aqr-api"
 version = "0.1.0"
 dependencies = [
@@ -97,6 +107,7 @@ dependencies = [
 name = "aqr-compress"
 version = "0.1.0"
 dependencies = [
+ "aqr-7z",
  "aqr-bundle",
  "aqr-clip",
  "aqr-common",

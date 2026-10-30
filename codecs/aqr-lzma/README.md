@@ -73,5 +73,6 @@ The module `lzma-recons` (natively and as a Wasm module of aqr-modules) and `.lz
 aqr-compress are done: in an archive of several files, a `.lzma` file is put in a batch with
 the files its stream holds (the members of a tar archive, or the whole), so that their data is
 stored once. So are the module `lzma2-recons` and `.xz` files (their blocks of LZMA2 alone),
-which aqr-compress takes alike, anywhere in data too. Still to come: 7z archives, `.xz` blocks of
-other filters (BCJ, delta), and 7z's BCJ2, which the other folder of that 7z goes through.
+which aqr-compress takes alike, anywhere in data too. 7z archives are aqr-7z's, on these modules.
+Still to come: `.xz` blocks of other filters (BCJ, delta), and 7z's BCJ2, which the other folder
+of that 7z goes through.

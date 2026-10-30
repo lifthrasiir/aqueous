@@ -579,9 +579,9 @@ const SLICE_MIN: usize = 1 << 10;
 const TOGETHER_MAX: u64 = 2 << 30;
 
 /// For each content of `src`, the first of those that may hold each other (where the archive
-/// stores what they share once, [`Formula::share_slices`], only within a batch): a ZIP archive
-/// or gzip file and the contents of its entries (of the CRC-32 and size that its central
-/// directory or its trailer tells; and other archives with such entries), a git loose object
+/// stores what they share once, [`Formula::share_slices`], only within a batch): a ZIP archive,
+/// 7z archive or gzip file and the contents of its entries (of the CRC-32 and size that its
+/// central directory, header or trailer tells; and other archives with such entries), a git loose object
 /// and the file of its data (inflated whole where its header tells a large one), an ar, tar or cpio
 /// archive or ISO 9660 or UDF image and the contents of its members (read whole, one at a time,
 /// for their CRC-32; those of at least [`MEMBER_MIN`] bytes), a git pack and its indexes (by name and the pack's
@@ -613,6 +613,10 @@ fn together<S: Source + ?Sized>(
         let format = detect(&head);
         let held = match format {
             Some(detect::Format::Zip) => aqr_zip::zip::entry_sums(&src.read_range(c, size.saturating_sub(TAIL)..size)?),
+            // (its header and the packed stream of an encoded one: at its end, mostly)
+            Some(detect::Format::SevenZip) => aqr_7z::formula::entry_sums(&mut |r| {
+                src.read_range(c, r.clone()).ok().filter(|d| d.len() as u64 == r.end - r.start)
+            }),
             Some(detect::Format::Gzip) => {
                 let t = src.read_range(c, size - 8..size)?;
                 let word = |p: usize| u32::from_le_bytes(t[p..p + 4].try_into().expect("4 bytes"));

@@ -15,6 +15,8 @@
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
 //!   DEFLATE streams by aqr-flate) with its headers derived.
+//! - 7z archives: aqr-7z, rebuilding the folders of LZMA, LZMA2 or Copy alone from the contents
+//!   of the files they hold (by aqr-lzma), the rest of the archive kept.
 //! - git packs: aqr-git, rebuilding the pack from the data of its objects (the zlib streams by
 //!   aqr-flate) with its headers, checksums and trailer derived; the blobs' data is found again
 //!   where the files checked out are archived along with it.
@@ -858,6 +860,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
                 Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
                 Format::Zip => zip::zip(d, opt, depth, cx),
+                Format::SevenZip => sevenz(d, opt),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Ar | Format::Tar | Format::Cpio => bundle::bundle(d),
@@ -1505,6 +1508,14 @@ fn pure(
         .flatten()
     };
     Some(if format == Format::Text { once.code(d, code) } else { code() })
+}
+
+/// aqr-7z's formula, the contents of the files a content of the applications (or of the formula,
+/// those of stored folders), recompressed in turn, each by its kind by its name
+/// ([`kind_by_name`]).
+fn sevenz(d: &[u8], opt: &Options) -> Option<Formula> {
+    let o = aqr_7z::formula::Options { threads: opt.threads, kind: kind_by_name, ..Default::default() };
+    aqr_7z::formula::encode_with(d, &o)
 }
 
 /// aqr-pdf's options at the level of `opt`: the records of its DEFLATE streams of the profile

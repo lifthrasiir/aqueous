@@ -33,6 +33,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Sqlite => sqlite(d),
         Format::LevelDb => Some(d.len()),
         Format::Zip => aqr_zip::zip::extent(d),
+        Format::SevenZip => aqr_7z::formula::extent(d),
         Format::GitPack => aqr_git::pack::extent(d),
         Format::GnuGettext => aqr_gnu_gettext::formula::extent(d),
         Format::Fsb5 => aqr_fsb::fsb5::extent(d),

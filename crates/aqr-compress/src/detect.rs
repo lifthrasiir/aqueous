@@ -46,6 +46,9 @@ pub enum Format {
     LevelDb,
     /// ZIP archive (aqr-zip, and aqr-flate on its DEFLATE bodies).
     Zip,
+    /// 7z archive (aqr-7z, and aqr-lzma on its folders of LZMA or LZMA2), known by its
+    /// signature header.
+    SevenZip,
     /// git pack (aqr-git, and aqr-flate on its entries' zlib streams), a whole file: not
     /// looked for in other data.
     GitPack,
@@ -89,7 +92,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 36] = [
+    pub const ALL: [Format; 37] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -111,6 +114,7 @@ impl Format {
         Format::Sqlite,
         Format::LevelDb,
         Format::Zip,
+        Format::SevenZip,
         Format::GitPack,
         Format::Fasta,
         Format::GnuGettext,
@@ -151,6 +155,7 @@ impl Format {
             Format::Sqlite => "sqlite",
             Format::LevelDb => "leveldb",
             Format::Zip => "zip",
+            Format::SevenZip => "7z",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
             Format::GnuGettext => "gnu-gettext",
@@ -220,9 +225,11 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"lzo" | b"tzo" => format(Format::Lzo),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
-        b"7z" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg"
-        | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2"
-        | b"woff2" => Kind::Compressed,
+        b"7z" => format(Format::SevenZip),
+        b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg" | b"oga"
+        | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => {
+            Kind::Compressed
+        }
         b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => {
             Kind::Text
@@ -290,6 +297,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Xz)
     } else if at(0, b"PK\x03\x04") {
         Some(Format::Zip)
+    } else if aqr_7z::formula::starts(d) {
+        Some(Format::SevenZip)
     } else if start && aqr_git::pack::starts(d) {
         Some(Format::GitPack)
     } else if at(0, &[0x1f, 0x8b, 8]) {
@@ -355,6 +364,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'0' => b == b'7',
         b'S' => b == b'I',
         0xfd => b == b'7',
+        b'7' => b == b'z',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -418,6 +428,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'0' => d.starts_with(b"07070"),
         b'S' => aqr_fits::formula::starts(d),
         0xfd => aqr_lzma::formula::starts_xz(d),
+        b'7' => aqr_7z::formula::starts(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,

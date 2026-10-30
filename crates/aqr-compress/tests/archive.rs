@@ -406,6 +406,27 @@ fn xz_held_once() {
     }
 }
 
+/// Files and a 7z archive of them: the folder rebuilt from the files' contents, stored once, in a
+/// batch together however small the batches.
+#[test]
+fn sevenz_held_once() {
+    let members: Vec<(String, Vec<u8>)> = (0..3).map(|k| (format!("m/f{k}.txt"), words(1_000_000, k))).collect();
+    let refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    let sz = aqr_7z::write::solid(&refs);
+    assert!(sz.len() > 256 << 10);
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let files: Vec<(&str, Vec<u8>)> = members.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+    let (alone, r) = archived(&files, &opt);
+    let alone = alone.len() - r.overhead;
+    let all = [&files[..], &[("p/m.7z", sz.clone())]].concat();
+    for opt in [opt.clone(), Options { batch: 1 << 20, ..opt.clone() }] {
+        let (c, r) = archived(&all, &opt);
+        assert!(r.files[3].modules.iter().any(|m| m.name == "lzma2-recons"), "{:?}", r.files[3]);
+        let c = c.len() - r.overhead;
+        assert!(c < alone + alone / 100, "{c} of {alone} alone");
+    }
+}
+
 /// A file and the git loose object of it (a zlib stream of `blob <size>\0` and the file): the
 /// object's data is the file after its header, stored once, in a batch together however small
 /// the batches.

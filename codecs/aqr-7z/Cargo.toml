@@ -1,0 +1,21 @@
+[package]
+name = "aqr-7z"
+version = "0.1.0"
+edition = "2024"
+description = "7z archives rebuilt bit for bit: their LZMA and LZMA2 folders by aqr-lzma from the files' contents, the rest kept"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-lzma = { path = "../aqr-lzma" }
+
+[dev-dependencies]
+crc32fast = "1.5"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-7z-check"
+path = "examples/check.rs"
