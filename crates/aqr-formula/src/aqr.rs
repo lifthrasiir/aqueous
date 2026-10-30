@@ -658,28 +658,52 @@ impl Emit<'_> {
                 varint::put(self.out, len);
                 self.stack.push(None);
             }
-            Node::Concat(ns) | Node::Pack(ns) => {
+            Node::Concat(ns) => {
+                // (the items so far put together before a part taking an output, so that the
+                // Swaps bringing it up pass one item of each concatenation open, not all its
+                // items: a concatenation of concatenations is the same)
+                let mut pending = 0;
+                for n in ns {
+                    if pending >= 2 && takes_output(n) {
+                        self.concat(CONCAT, pending);
+                        pending = 1;
+                    }
+                    self.node(n);
+                    pending += 1;
+                }
+                self.concat(CONCAT, pending);
+            }
+            Node::Pack(ns) => {
                 ns.iter().for_each(|n| self.node(n));
-                self.out.push(if let Node::Pack(_) = n { PACK } else { CONCAT });
-                varint::put(self.out, ns.len() as u64);
-                self.stack.truncate(self.stack.len() - ns.len());
-                self.stack.push(None);
+                self.concat(PACK, ns.len());
             }
             Node::Apply(a) => {
                 a.inputs.iter().for_each(|n| self.node(n));
                 self.apply(a, &[a.len]);
             }
             &Node::Output { shared, index, .. } => {
-                // up from where it is, the others keeping their order: swapped with the item
-                // above it, then with the next one up and so on
+                // up from where it is, the outputs not taken yet (all below the other items,
+                // which are together at the top) going anywhere below the others: the other
+                // items each a place down, the output nearest them to its place. The top swapped
+                // with each of those items below it in turn, from the top down, then with that
+                // output, then with the one taken.
                 let at = self.stack.iter().rposition(|&o| o == Some((shared, index))).unwrap();
-                let depth = self.stack.len() - 1 - at;
-                for d in 1..=depth {
-                    self.out.push(SWAP);
-                    varint::put(self.out, d as u64);
+                let top = self.stack.len() - 1;
+                if at < top {
+                    let first = (at + 1..=top).find(|&p| self.stack[p].is_none());
+                    debug_assert!(first.is_none_or(|f| self.stack[f..].iter().all(Option::is_none)));
+                    let mut seq: Vec<usize> = first.map_or(Vec::new(), |f| (f..top).rev().collect());
+                    if let Some(f) = first.filter(|&f| f > at + 1) {
+                        seq.push(f - 1);
+                    }
+                    for p in seq.into_iter().chain([at]) {
+                        self.out.push(SWAP);
+                        varint::put(self.out, (top - p) as u64);
+                        self.stack.swap(p, top);
+                    }
                 }
-                self.stack.remove(at);
-                self.stack.push(None);
+                debug_assert_eq!(self.stack[top], Some((shared, index)));
+                self.stack[top] = None;
             }
             Node::Patch(p) => {
                 self.node(&p.source);
@@ -690,6 +714,14 @@ impl Emit<'_> {
                 self.stack.push(None);
             }
         }
+    }
+
+    /// The Concat or Pack instruction `op` of the top `n` items.
+    fn concat(&mut self, op: u8, n: usize) {
+        self.out.push(op);
+        varint::put(self.out, n as u64);
+        self.stack.truncate(self.stack.len() - n);
+        self.stack.push(None);
     }
 
     /// The Apply instruction of `a` (its inputs pushed), of outputs of `sizes`.
@@ -726,6 +758,17 @@ impl Emit<'_> {
         sizes.iter().for_each(|&n| varint::put(out, n));
         self.stack.truncate(self.stack.len() - a.inputs.len());
         self.stack.extend(sizes.iter().map(|_| None));
+    }
+}
+
+/// Whether node `n` takes an output of an application of several outputs.
+fn takes_output(n: &Node) -> bool {
+    match n {
+        Node::Output { .. } => true,
+        Node::Slice { .. } => false,
+        Node::Concat(ns) | Node::Pack(ns) => ns.iter().any(takes_output),
+        Node::Apply(a) => a.inputs.iter().any(takes_output),
+        Node::Patch(p) => takes_output(&p.source) || takes_output(&p.patch),
     }
 }
 
@@ -2817,6 +2860,59 @@ mod tests {
         assert!(f.to_string().starts_with("shared #0 rev@1 split 3 0 5"));
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert_eq!(decode(&c, &natives()).unwrap(), b"edcbaahgf");
+    }
+
+    /// Many outputs of applications taken in order with slices between them, in a concatenation
+    /// in another (as aqr-wim's of a WIM file in an image): the description grows with the
+    /// outputs, not with their square (a Swap for each item above an output took 3,000
+    /// outputs to 13 MB), and the outputs come back where they are.
+    #[test]
+    fn many_outputs() {
+        let mut f = Formula::default();
+        f.push("a", (0..6000u32).map(|i| (i % 251) as u8).collect::<Vec<u8>>());
+        let mut parts = vec![Node::slice(0, 0, 3)];
+        let mut inner = Vec::new();
+        for k in 0..3 {
+            let rev = crate::Apply {
+                module: REV,
+                resources: vec![],
+                params: vec![1, 2, 3],
+                inputs: vec![Node::slice(0, k * 2000, 2000)],
+                len: 0,
+                memory_limit: crate::NO_LIMIT,
+            };
+            for (i, o) in f.split(rev, vec![2; 1000]).into_iter().enumerate() {
+                inner.push(Node::slice(0, i as u64, 1));
+                inner.push(o);
+            }
+        }
+        parts.push(Node::concat(inner));
+        parts.push(Node::slice(0, 5, 2));
+        f.root = Node::concat(parts);
+        let want: Vec<u8> = {
+            let d = &f.streams[0].data;
+            let mut w = d[..3].to_vec();
+            for k in 0..3 {
+                let r: Vec<u8> = d[k * 2000..k * 2000 + 2000].iter().rev().copied().collect();
+                for i in 0..1000 {
+                    w.push(d[i]);
+                    w.extend_from_slice(&r[i * 2..i * 2 + 2]);
+                }
+            }
+            w.extend_from_slice(&d[5..7]);
+            w
+        };
+        let ordinals: Vec<_> = (0..f.streams.len() as u64).map(Some).collect();
+        let mut out = Vec::new();
+        let mut e = Emit { ordinals: &ordinals, modules: &[REV], resources: &[], out: &mut out, stack: vec![] };
+        for (i, s) in f.shared.iter().enumerate() {
+            e.shared(i, s);
+        }
+        e.node(&f.root);
+        assert_eq!(e.stack, [None]);
+        assert!(out.len() < 3000 * 24, "{} bytes of description", out.len());
+        let c = encode(&f, None, Level::Zstd(3)).unwrap();
+        assert!(decode(&c, &natives()).unwrap() == want);
     }
 
     fn sample() -> Formula {
