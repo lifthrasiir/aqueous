@@ -227,6 +227,7 @@ pub(crate) fn reclaim(mut f: Arc<Formula>) -> Formula {
                 return (*shared).clone();
             }
             Err(shared) => {
+                let _w = aqr_common::trace::wait("reclaim");
                 f = shared;
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
@@ -270,6 +271,7 @@ impl Prevalidator {
     pub fn send(&self, j: Deferred) {
         let (memo, threads) = (self.memo.clone(), self.threads);
         let eval = move || {
+            let _s = aqr_common::trace::span("prevalidate");
             let mut m = Memo::default();
             evaluate(j.0, threads, &mut m);
             let mut memo = memo.lock().unwrap();

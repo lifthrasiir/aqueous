@@ -11,6 +11,7 @@
 //! - [`rng`]: deterministic pseudo-random numbers and noise, for tests and benchmarks.
 //! - [`pool`]: the pool of threads every thread of the process runs on.
 //! - [`progress`]: how far the work on data is, told by the parts of it done.
+//! - [`trace`]: what the threads are doing and the heap by what allocated it, sampled.
 //! - [`packed`]: packed byte sequences, a list of them as one.
 //! - [`wire`]: values as bytes, for the results of tasks on WebAssembly.
 //! - [`crc32`]: CRC-32, without its tables in the modules.
@@ -30,6 +31,11 @@ pub mod progress;
 pub mod rans32;
 pub mod rans64;
 pub mod rng;
+#[cfg(not(target_family = "wasm"))]
+pub mod trace;
+#[cfg(target_family = "wasm")]
+#[path = "trace_none.rs"]
+pub mod trace;
 pub mod varint;
 pub mod wire;
 

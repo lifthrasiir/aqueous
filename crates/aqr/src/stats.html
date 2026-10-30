@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>aqr stats</title>
+<!--
+  The page of `aqr --stats=FILE.html` (crates/aqr/src/stats.rs, which has the format of the
+  data): the JSON of the run is put in place of the data below. Another file of the JSON
+  (`--stats=FILE.json`) can be opened or dropped on the page.
+-->
+<style>
+:root {
+  --bg: #fbfbfa; --panel: #ffffff; --fg: #1d1d1f; --muted: #6b6b70; --line: #e3e3e0;
+  --grid: #efefec; --idle: transparent; --wait: #c9c9cf; --accent: #2b6cb0; --sel: rgba(43,108,176,.14);
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif; --mono: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #141416; --panel: #1c1c1f; --fg: #e8e8ea; --muted: #9a9aa2; --line: #303035;
+    --grid: #26262a; --wait: #4a4a52; --accent: #6ea8ff; --sel: rgba(110,168,255,.18);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #141416; --panel: #1c1c1f; --fg: #e8e8ea; --muted: #9a9aa2; --line: #303035;
+  --grid: #26262a; --wait: #4a4a52; --accent: #6ea8ff; --sel: rgba(110,168,255,.18);
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 var(--font); }
+main { max-width: 1400px; margin: 0 auto; padding: 16px; }
+h1 { font-size: 18px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 8px; }
+.sub { color: var(--muted); font-size: 13px; word-break: break-all; }
+.bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 16px; }
+.bar select, .bar button, .bar label.file { font: inherit; padding: 4px 10px; border: 1px solid var(--line);
+  border-radius: 6px; background: var(--panel); color: var(--fg); cursor: pointer; }
+.bar input[type=file] { display: none; }
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.tile { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.tile .k { color: var(--muted); font-size: 12px; }
+.tile .v { font-size: 17px; font-variant-numeric: tabular-nums; }
+.outliers { margin: 10px 0 0; padding-left: 18px; }
+.outliers li { margin: 2px 0; }
+.chart { position: relative; }
+canvas { display: block; width: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+.legend span i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 6px 8px; font-size: 12px; max-width: 520px; box-shadow: 0 4px 16px rgba(0,0,0,.15); display: none; z-index: 10; word-break: break-all; }
+.tip b { font-weight: 600; }
+.hint { color: var(--muted); font-size: 12px; }
+.tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; }
+.scroll { overflow: auto; max-height: 520px; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { padding: 3px 8px; border-bottom: 1px solid var(--grid); text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+th { position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none; color: var(--muted); font-weight: 500; }
+td.l, th.l { text-align: left; }
+td.path { text-align: left; max-width: 520px; overflow: hidden; text-overflow: ellipsis; font-family: var(--mono); font-size: 12px; }
+.sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; }
+.empty { color: var(--muted); padding: 40px; text-align: center; }
+@media (max-width: 600px) { .tables { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>aqr stats</h1>
+  <div class="bar">
+    <select id="run" aria-label="Run"></select>
+    <label class="file">Open JSON…<input type="file" id="file" accept=".json,application/json"></label>
+    <button id="reset">Whole run</button>
+    <span class="hint">Drag across a chart to zoom in; the tables follow the range shown.</span>
+  </div>
+  <div id="app"><div class="empty">No data. Open or drop a file of <code>aqr --stats=FILE.json</code>.</div></div>
+</main>
+<div class="tip" id="tip"></div>
+<script id="data" type="application/json">/*DATA*/null</script>
+<script>
+"use strict";
+const PALETTE = ["#4e79a7","#f28e2b","#59a14f","#e15759","#76b7b2","#edc948","#b07aa1","#ff9da7","#9c755f",
+  "#86bcb6","#d37295","#a0cbe8","#8cd17d","#f1ce63","#fabfd2","#79706e"];
+const $ = (s) => document.querySelector(s);
+const tip = $("#tip");
+let DATA = null, RUN = null, VIEW = null;
+
+const size = (n) => n < 1e3 ? n.toFixed(0) + " B" : n < 1e6 ? (n / 1e3).toFixed(1) + " KB"
+  : n < 1e9 ? (n / 1e6).toFixed(2) + " MB" : (n / 1e9).toFixed(2) + " GB";
+const pc = (a, b) => b ? (100 * a / b).toFixed(1) + "%" : "-";
+const secs = (s) => s < 10 ? s.toFixed(2) + " s" : s.toFixed(1) + " s";
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+/** The run made ready to show: by sample and thread, the stack and item; by stack, its labels. */
+function prepare(r) {
+  const t = r.trace, n = t.at.length, T = t.threads.length;
+  const wait = t.labels.map((l) => l[1]);
+  // by stack: its innermost label of work, the label it waits for (or -1), and its path
+  const work = t.stacks.map((s) => { for (let i = s.length - 1; i >= 0; i--) if (!wait[s[i]]) return s[i]; return -1; });
+  const waits = t.stacks.map((s) => s.length && wait[s[s.length - 1]] ? s[s.length - 1] : -1);
+  const path = t.stacks.map((s) => s.filter((l) => !wait[l]).map((l) => t.labels[l][0]).join(" › "));
+  const dt = new Float64Array(n);
+  for (let i = 0; i < n; i++) dt[i] = i + 1 < n ? t.at[i + 1] - t.at[i] : Math.max(0, Math.min(t.interval, r.seconds - t.at[i]));
+  const stack = new Int32Array(n * T).fill(-1), item = new Int32Array(n * T).fill(-1);
+  for (let i = 0; i < n; i++) {
+    const s = t.samples[i];
+    for (let k = 0; 2 * k < s.length; k++) { stack[i * T + k] = s[2 * k]; item[i * T + k] = s[2 * k + 1]; }
+  }
+  // labels ranked by the time they ran, for their colors
+  const self = new Float64Array(t.labels.length);
+  for (let i = 0; i < n; i++) for (let k = 0; k < T; k++) {
+    const s = stack[i * T + k];
+    if (s >= 0 && waits[s] < 0 && work[s] >= 0) self[work[s]] += dt[i];
+  }
+  const ranked = [...self.keys()].filter((l) => self[l] > 0).sort((a, b) => self[b] - self[a]);
+  const color = new Array(t.labels.length).fill("#999");
+  ranked.forEach((l, i) => color[l] = PALETTE[i % PALETTE.length]);
+  // the threads shown: workers first, then those of work at any time
+  const shown = [...t.threads.keys()].filter((k) => {
+    if (t.threads[k][1]) return true;
+    for (let i = 0; i < n; i++) { const s = stack[i * T + k]; if (s > 0) return true; }
+    return false;
+  }).sort((a, b) => (t.threads[b][1] - t.threads[a][1]) || a - b);
+  return { r, t, n, T, wait, work, waits, path, dt, stack, item, color, ranked, shown, from: 0, to: r.seconds };
+}
+
+function load(data) {
+  if (!data || !data.runs || !data.runs.length) return;
+  DATA = data;
+  const sel = $("#run");
+  sel.innerHTML = data.runs.map((r, i) => `<option value="${i}">${esc(r.mode)}: ${esc(r.input)}</option>`).join("");
+  sel.style.display = data.runs.length > 1 ? "" : "none";
+  show(0);
+}
+
+function show(i) {
+  RUN = prepare(DATA.runs[i]);
+  VIEW = RUN;
+  render();
+}
+
+// --- the page ---
+
+function render() {
+  const v = VIEW, r = v.r, t = v.t;
+  const workers = v.shown.filter((k) => t.threads[k][1]).length || 1;
+  let busy = 0, heapPeak = 0, heapAt = 0, rssPeak = 0;
+  for (let i = 0; i < v.n; i++) {
+    for (const k of v.shown) { const s = v.stack[i * v.T + k]; if (t.threads[k][1] && s > 0 && v.waits[s] < 0) busy += v.dt[i]; }
+    if (t.heap[i] > heapPeak) { heapPeak = t.heap[i]; heapAt = t.at[i]; }
+    rssPeak = Math.max(rssPeak, t.rss[i]);
+  }
+  const total = r.seconds * workers;
+  const archived = r.mode === "compress";
+  const tiles = [
+    ["mode", r.mode], ["time", secs(r.seconds)], ["workers", t.workers + (r.threads !== t.workers ? ` (-T ${r.threads})` : "")],
+    ["busy", pc(busy, total)], ["read", size(r.read)], ["written", size(r.written)],
+    archived ? ["ratio", pc(r.written, r.read)] : ["speed", (r.written / 1e6 / r.seconds).toFixed(1) + " MB/s"],
+    ["heap peak", size(heapPeak) + ` @ ${heapAt.toFixed(1)} s`], ["resident peak", rssPeak ? size(rssPeak) : "-"],
+    ["files", r.contents.length], ["samples", `${v.n} × ${(t.interval * 1000).toFixed(0)} ms`],
+  ];
+  if (r.overhead != null) tiles.splice(7, 0, ["overhead", size(r.overhead)]);
+  $("#app").innerHTML = `
+  <section>
+    <div class="sub">${esc(r.input)}${r.output ? " → " + esc(r.output) : ""}</div>
+    <div class="tiles" style="margin-top:10px">${tiles.map(([k, x]) => `<div class="tile"><div class="k">${k}</div><div class="v">${esc(x)}</div></div>`).join("")}</div>
+  </section>
+  <section>
+    <h2>Threads over time <span class="hint" id="range"></span></h2>
+    <div class="chart"><canvas id="lanes"></canvas></div>
+    <div class="legend" id="legend"></div>
+  </section>
+  <section>
+    <h2>Heap by what allocated it</h2>
+    <div class="chart"><canvas id="mem"></canvas></div>
+    <div class="legend" id="memlegend"></div>
+    <div class="hint">Blocks of 64 KiB or more by the innermost span that allocated them; “small” is the rest of the heap. Memory outside the Rust heap (Zstandard's, WebAssembly memories, mapped files) shows only in the resident set.</div>
+  </section>
+  <div class="tables">
+    <section><h2>Time by label</h2><div class="scroll" id="labels"></div></section>
+    <section><h2>Files by kind</h2><div class="scroll" id="kinds"></div></section>
+  </div>
+  <section><h2>Files by the time they took</h2><div class="scroll" id="files"></div></section>`;
+  drawAll();
+  tables();
+}
+
+// --- charts ---
+
+const LANE = 14, GAP = 2, AXIS = 22, LEFT = 110;
+
+function setup(canvas, height) {
+  const dpr = window.devicePixelRatio || 1, w = canvas.parentElement.clientWidth;
+  canvas.width = Math.round(w * dpr); canvas.height = Math.round(height * dpr);
+  canvas.style.height = height + "px";
+  const g = canvas.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { g, w, h: height };
+}
+
+/** The samples in the range shown, by column of `cols`: [first, end) each. */
+function columns(cols) {
+  const v = VIEW, t = v.t, out = [];
+  let i = 0;
+  for (let c = 0; c < cols; c++) {
+    const a = v.from + (v.to - v.from) * c / cols, b = v.from + (v.to - v.from) * (c + 1) / cols;
+    while (i < v.n && t.at[i] < a) i++;
+    let j = i;
+    while (j < v.n && t.at[j] < b) j++;
+    // (a column of no sample of its own: that before it)
+    out.push(j > i ? [i, j] : i > 0 ? [i - 1, i] : [0, 0]);
+    i = j;
+  }
+  return out;
+}
+
+function axis(g, x0, w, y) {
+  const v = VIEW, span = v.to - v.from;
+  const step = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 30, 60, 120, 300, 600, 1200, 3600].find((s) => span / s <= w / 80) || 7200;
+  g.fillStyle = css("--muted"); g.strokeStyle = css("--grid"); g.font = "11px " + css("--font"); g.textAlign = "center";
+  for (let s = Math.ceil(v.from / step) * step; s <= v.to; s += step) {
+    const x = x0 + (s - v.from) / span * w;
+    g.beginPath(); g.moveTo(x + 0.5, 0); g.lineTo(x + 0.5, y); g.stroke();
+    g.fillText(step < 1 ? s.toFixed(2) : s.toFixed(0) + " s", x, y + 14);
+  }
+}
+
+function drawLanes() {
+  const v = VIEW, t = v.t, rows = v.shown.length;
+  const height = rows * (LANE + GAP) + 3 * LANE + AXIS;
+  const { g, w } = setup($("#lanes"), height), cw = w - LEFT, cols = Math.max(1, Math.floor(cw));
+  const cs = columns(cols), waitColor = css("--wait");
+  axis(g, LEFT, cw, height - AXIS);
+  g.font = "11px " + css("--font"); g.textAlign = "right"; g.textBaseline = "middle";
+  v.shown.forEach((k, row) => {
+    const y = row * (LANE + GAP);
+    g.fillStyle = css("--muted");
+    g.fillText(t.threads[k][0].replace(/^aqr-pool-/, "worker "), LEFT - 6, y + LANE / 2);
+    for (let c = 0; c < cols; c++) {
+      const [a, b] = cs[c];
+      // the state most of the column's samples are in
+      const count = new Map();
+      for (let i = a; i < b; i++) {
+        const s = v.stack[i * v.T + k];
+        const key = s < 0 ? "gone" : s === 0 ? "idle" : v.waits[s] >= 0 ? "wait" : "L" + v.work[s];
+        count.set(key, (count.get(key) || 0) + 1);
+      }
+      let best = "idle", most = 0;
+      for (const [key, m] of count) if (m > most) { best = key; most = m; }
+      if (best === "idle" || best === "gone") continue;
+      g.fillStyle = best === "wait" ? waitColor : v.color[+best.slice(1)];
+      g.fillRect(LEFT + c, y, 1, best === "wait" ? LANE / 2 : LANE);
+    }
+  });
+  // the workers busy, and reserved, as a strip below
+  const y0 = rows * (LANE + GAP) + 4, hh = 3 * LANE - 8, workers = Math.max(1, t.workers);
+  g.fillStyle = css("--muted"); g.fillText("busy / reserved", LEFT - 6, y0 + hh / 2);
+  for (let c = 0; c < cols; c++) {
+    const [a, b] = cs[c];
+    let busy = 0, res = 0, m = 0;
+    for (let i = a; i < b; i++, m++) {
+      res += t.reserved[i];
+      for (const k of v.shown) { const s = v.stack[i * v.T + k]; if (t.threads[k][1] && s > 0 && v.waits[s] < 0) busy++; }
+    }
+    if (!m) continue;
+    const hb = busy / m / workers * hh, hr = res / m / workers * hh;
+    g.fillStyle = css("--grid"); g.fillRect(LEFT + c, y0 + hh - hr, 1, hr);
+    g.fillStyle = css("--accent"); g.fillRect(LEFT + c, y0 + hh - hb, 1, hb);
+  }
+  $("#legend").innerHTML = v.ranked.slice(0, 24).map((l) => `<span><i style="background:${v.color[l]}"></i>${esc(t.labels[l][0])}</span>`).join("")
+    + `<span><i style="background:${waitColor}"></i>waiting (half height)</span>`;
+  $("#range").textContent = `${v.from.toFixed(2)}–${v.to.toFixed(2)} s`;
+  return { cols, cs };
+}
+
+function drawMem() {
+  const v = VIEW, t = v.t, height = 220;
+  const { g, w } = setup($("#mem"), height + AXIS), cw = w - LEFT, cols = Math.max(1, Math.floor(cw));
+  const cs = columns(cols);
+  // the labels holding the most at any time, the rest together
+  const peak = new Map();
+  for (let i = 0; i < v.n; i++) { const b = t.bytes[i]; for (let j = 0; j < b.length; j += 2) peak.set(b[j], Math.max(peak.get(b[j]) || 0, b[j + 1])); }
+  const top = [...peak.keys()].sort((a, b) => peak.get(b) - peak.get(a)).slice(0, 12);
+  let most = 1;
+  for (let i = 0; i < v.n; i++) most = Math.max(most, t.heap[i], t.rss[i]);
+  const y = (n) => height - n / most * (height - 8);
+  axis(g, LEFT, cw, height);
+  g.font = "11px " + css("--font"); g.textAlign = "right"; g.textBaseline = "middle"; g.fillStyle = css("--muted");
+  for (let k = 0; k <= 4; k++) { const n = most * k / 4; g.fillText(size(n), LEFT - 6, y(n)); }
+  const other = "#9a9aa2", small = css("--wait");
+  const color = (l) => v.color[l] !== "#999" ? v.color[l] : PALETTE[(top.indexOf(l) + 7) % PALETTE.length];
+  let rssPath = [];
+  for (let c = 0; c < cols; c++) {
+    const [a, b] = cs[c];
+    // the sample of the most heap in the column
+    let i = a;
+    for (let j = a; j < b; j++) if (t.heap[j] > t.heap[i]) i = j;
+    if (i >= v.n) continue;
+    let at = 0, tracked = 0;
+    const bs = t.bytes[i];
+    const of = new Map();
+    for (let j = 0; j < bs.length; j += 2) { of.set(bs[j], bs[j + 1]); tracked += Math.max(0, bs[j + 1]); }
+    for (const l of top) {
+      const n = Math.max(0, of.get(l) || 0);
+      if (n) { g.fillStyle = color(l); g.fillRect(LEFT + c, y(at + n), 1, y(at) - y(at + n)); at += n; }
+    }
+    const rest = Math.max(0, tracked - at);
+    if (rest) { g.fillStyle = other; g.fillRect(LEFT + c, y(at + rest), 1, y(at) - y(at + rest)); at += rest; }
+    const sm = Math.max(0, t.heap[i] - tracked);
+    if (sm) { g.fillStyle = small; g.fillRect(LEFT + c, y(at + sm), 1, y(at) - y(at + sm)); }
+    let rss = 0;
+    for (let j = a; j < b; j++) rss = Math.max(rss, t.rss[j]);
+    rssPath.push([LEFT + c + 0.5, y(rss)]);
+  }
+  if (rssPath.some((p) => p[1] < height)) {
+    g.strokeStyle = css("--fg"); g.lineWidth = 1; g.beginPath();
+    rssPath.forEach(([x, yy], k) => k ? g.lineTo(x, yy) : g.moveTo(x, yy)); g.stroke();
+  }
+  $("#memlegend").innerHTML = top.map((l) => `<span><i style="background:${color(l)}"></i>${esc(t.labels[l][0] || "(no span)")}</span>`).join("")
+    + `<span><i style="background:${other}"></i>other large</span><span><i style="background:${small}"></i>small</span>`
+    + `<span><i style="background:${css("--fg")};height:2px;vertical-align:3px"></i>resident set</span>`;
+  return { cols, cs, top, color };
+}
+
+let DRAWN = {};
+function drawAll() {
+  DRAWN.lanes = drawLanes();
+  DRAWN.mem = drawMem();
+}
+
+// --- hovering and zooming ---
+
+function sampleAt(canvas, x) {
+  const v = VIEW, cw = canvas.clientWidth - LEFT;
+  if (x < LEFT || cw <= 0) return -1;
+  const s = v.from + (v.to - v.from) * (x - LEFT) / cw;
+  let lo = 0, hi = v.n - 1;
+  while (lo < hi) { const m = (lo + hi + 1) >> 1; if (v.t.at[m] <= s) lo = m; else hi = m - 1; }
+  return lo;
+}
+
+function hover(e) {
+  const v = VIEW;
+  if (!v) return;
+  const c = e.currentTarget, rect = c.getBoundingClientRect(), x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const i = sampleAt(c, x);
+  if (i < 0) { tip.style.display = "none"; return; }
+  const t = v.t;
+  let html = `<b>${t.at[i].toFixed(2)} s</b>`;
+  if (c.id === "lanes") {
+    const row = Math.floor(y / (LANE + GAP));
+    const k = v.shown[row];
+    if (k === undefined) {
+      let busy = 0; for (const k of v.shown) { const s = v.stack[i * v.T + k]; if (t.threads[k][1] && s > 0 && v.waits[s] < 0) busy++; }
+      html += ` · ${busy} busy, ${t.reserved[i]} reserved of ${t.workers}`;
+    } else {
+      const s = v.stack[i * v.T + k], it = v.item[i * v.T + k];
+      html += ` · ${esc(t.threads[k][0])}<br>`;
+      if (s < 0) html += "not running";
+      else if (s === 0) html += "idle";
+      else {
+        html += esc(v.path[s] || "(no span)");
+        if (v.waits[s] >= 0) html += ` <i>waiting for ${esc(t.labels[v.waits[s]][0])}</i>`;
+        const f = v.r.contents[it];
+        if (f) html += `<br>${esc(f.path)} <span class="hint">(${esc(f.kind)}, ${size(f.len)})</span>`;
+      }
+    }
+  } else {
+    const bs = t.bytes[i], parts = [];
+    let tracked = 0;
+    for (let j = 0; j < bs.length; j += 2) { tracked += bs[j + 1]; parts.push([bs[j], bs[j + 1]]); }
+    parts.sort((a, b) => b[1] - a[1]);
+    html += ` · heap ${size(t.heap[i])}${t.rss[i] ? ", resident " + size(t.rss[i]) : ""}<br>`
+      + parts.slice(0, 10).map(([l, n]) => `${esc(t.labels[l][0] || "(no span)")}: ${size(n)}`).join("<br>")
+      + `<br>small: ${size(Math.max(0, t.heap[i] - tracked))}`;
+  }
+  tip.innerHTML = html;
+  tip.style.display = "block";
+  const tw = tip.offsetWidth, th = tip.offsetHeight;
+  tip.style.left = Math.min(window.innerWidth - tw - 8, e.clientX + 14) + "px";
+  tip.style.top = Math.min(window.innerHeight - th - 8, e.clientY + 14) + "px";
+}
+
+let drag = null;
+function down(e) { drag = { c: e.currentTarget, x: e.clientX - e.currentTarget.getBoundingClientRect().left }; }
+function up(e) {
+  if (!drag) return;
+  const c = drag.c, x = e.clientX - c.getBoundingClientRect().left, cw = c.clientWidth - LEFT, v = VIEW;
+  const a = Math.min(drag.x, x), b = Math.max(drag.x, x);
+  drag = null;
+  if (b - a < 4 || cw <= 0) return;
+  const t = (p) => v.from + (v.to - v.from) * Math.max(0, Math.min(1, (p - LEFT) / cw));
+  VIEW = { ...v, from: t(a), to: t(b) };
+  drawAll(); tables();
+}
+document.addEventListener("mousemove", (e) => {
+  if (e.target.tagName === "CANVAS") hover({ currentTarget: e.target, clientX: e.clientX, clientY: e.clientY });
+  else tip.style.display = "none";
+});
+document.addEventListener("mousedown", (e) => { if (e.target.tagName === "CANVAS") { e.preventDefault(); down({ currentTarget: e.target, clientX: e.clientX }); } });
+document.addEventListener("mouseup", up);
+$("#reset").onclick = () => { if (RUN) { VIEW = { ...VIEW, from: 0, to: RUN.r.seconds }; drawAll(); tables(); } };
+window.addEventListener("resize", () => { if (VIEW) drawAll(); });
+
+// --- tables ---
+
+function table(el, cols, rows, sortBy) {
+  let key = sortBy, desc = true;
+  const draw = () => {
+    rows.sort((a, b) => { const x = a[key], y = b[key]; const d = typeof x === "string" ? x.localeCompare(y) : x - y; return desc ? -d : d; });
+    el.innerHTML = `<table><thead><tr>${cols.map((c) => `<th class="${c.l ? "l" : ""}" data-k="${c.k}">${c.t}${c.k === key ? (desc ? " ▾" : " ▴") : ""}</th>`).join("")}</tr></thead><tbody>`
+      + rows.slice(0, 500).map((r) => `<tr>${cols.map((c) => `<td class="${c.path ? "path" : c.l ? "l" : ""}"${c.path ? ` title="${esc(r[c.k])}"` : ""}>${c.f ? c.f(r[c.k], r) : esc(r[c.k])}</td>`).join("")}</tr>`).join("")
+      + `</tbody></table>${rows.length > 500 ? `<div class="hint">${rows.length - 500} more</div>` : ""}`;
+    el.querySelectorAll("th").forEach((th) => th.onclick = () => { const k = th.dataset.k; desc = k === key ? !desc : true; key = k; draw(); });
+  };
+  draw();
+}
+
+function tables() {
+  const v = VIEW, t = v.t, r = v.r;
+  // the samples of the range
+  let a = 0; while (a < v.n && t.at[a] < v.from) a++;
+  let b = a; while (b < v.n && t.at[b] < v.to) b++;
+  // by label: its own time, its time with what it runs within it, and the time waiting under it
+  const self = new Float64Array(t.labels.length), incl = new Float64Array(t.labels.length);
+  const items = new Map();
+  for (let i = a; i < b; i++) for (const k of v.shown) {
+    const s = v.stack[i * v.T + k];
+    if (s <= 0) continue;
+    const dt = v.dt[i], waiting = v.waits[s] >= 0;
+    if (waiting) self[v.waits[s]] += dt; else if (v.work[s] >= 0) self[v.work[s]] += dt;
+    for (const l of new Set(t.stacks[s])) if (!v.wait[l]) incl[l] += waiting ? 0 : dt;
+    const it = v.item[i * v.T + k];
+    if (it >= 0 && !waiting) {
+      const e = items.get(it) || { busy: 0, from: t.at[i], worked: 0, last: -1 };
+      e.busy += dt;
+      // (the seconds it was worked on, by any thread)
+      if (e.last !== i) { e.worked += dt; e.last = i; }
+      items.set(it, e);
+    }
+  }
+  const span = Math.max(1e-9, v.to - v.from);
+  const labels = [...t.labels.keys()].filter((l) => self[l] > 0 || incl[l] > 0).map((l) => ({
+    label: t.labels[l][0] || "(no span)", wait: t.labels[l][1] ? "wait" : "", self: self[l], incl: t.labels[l][1] ? 0 : incl[l],
+    threads: self[l] / span, color: t.labels[l][1] ? css("--wait") : v.color[l],
+  }));
+  table($("#labels"), [
+    { k: "label", t: "label", l: 1, f: (x, row) => `<span class="sw" style="background:${row.color}"></span>${esc(x)}${row.wait ? ' <span class="hint">(waiting)</span>' : ""}` },
+    { k: "self", t: "own s", f: (x) => x.toFixed(2) },
+    { k: "incl", t: "with inner s", f: (x) => x ? x.toFixed(2) : "" },
+    { k: "threads", t: "threads", f: (x) => x.toFixed(2) },
+  ], labels, "self");
+
+  // by kind: the files (not those the same as another), bytes, archived, time
+  const kinds = new Map();
+  r.contents.forEach((c, i) => {
+    if (c.same_as != null) return;
+    const k = kinds.get(c.kind) || { kind: c.kind, files: 0, len: 0, archived: 0, busy: 0 };
+    k.files++; k.len += c.len; k.archived += c.archived || 0;
+    const e = items.get(i); if (e) k.busy += e.busy;
+    kinds.set(c.kind, k);
+  });
+  const bytes = [...kinds.values()].reduce((s, k) => s + k.len, 0) || 1;
+  const kcols = [
+    { k: "kind", t: "kind", l: 1 }, { k: "files", t: "files" }, { k: "len", t: "bytes", f: size },
+    { k: "share", t: "of all", f: (x) => (100 * x).toFixed(1) + "%" },
+  ];
+  if (r.mode === "compress") kcols.push({ k: "archived", t: "archived", f: size }, { k: "ratio", t: "ratio", f: (x) => (100 * x).toFixed(1) + "%" });
+  kcols.push({ k: "busy", t: "thread s", f: (x) => x.toFixed(2) }, { k: "speed", t: "MB/s a thread", f: (x) => isFinite(x) ? x.toFixed(1) : "" });
+  table($("#kinds"), kcols, [...kinds.values()].map((k) => ({ ...k, share: k.len / bytes, ratio: k.len ? k.archived / k.len : 0, speed: k.busy ? k.len / 1e6 / k.busy : Infinity })), "busy");
+
+  const files = [...items.entries()].map(([i, e]) => {
+    const c = r.contents[i] || { path: "#" + i, kind: "-", len: 0 };
+    return { path: c.path, kind: c.kind, len: c.len, archived: c.archived ?? -1, busy: e.busy, worked: e.worked, from: e.from, threads: e.busy / Math.max(1e-9, e.worked) };
+  });
+  const fcols = [{ k: "path", t: "file", l: 1, path: 1 }, { k: "kind", t: "kind", l: 1 }, { k: "len", t: "bytes", f: size }];
+  if (r.mode === "compress") fcols.push({ k: "archived", t: "archived", f: (x) => x < 0 ? "" : size(x) });
+  fcols.push({ k: "busy", t: "thread s", f: (x) => x.toFixed(2) }, { k: "from", t: "from s", f: (x) => x.toFixed(2) },
+    { k: "worked", t: "worked on s", f: (x) => x.toFixed(2) }, { k: "threads", t: "threads", f: (x) => x.toFixed(2) });
+  table($("#files"), fcols, files, "busy");
+}
+
+// --- loading ---
+
+$("#run").onchange = (e) => show(+e.target.value);
+const read = (f) => f.text().then((s) => load(JSON.parse(s))).catch((e) => alert(`${f.name}: ${e}`));
+$("#file").onchange = (e) => e.target.files[0] && read(e.target.files[0]);
+document.addEventListener("dragover", (e) => e.preventDefault());
+document.addEventListener("drop", (e) => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) read(f); });
+load(JSON.parse($("#data").textContent));
+</script>
+</body>
+</html>

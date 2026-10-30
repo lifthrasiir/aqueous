@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] INPUT...
+//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] [--stats[=FILE]] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -37,6 +37,10 @@
 //!   a few MiB each or less) with a dictionary trained for them where it pays.
 //! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
 //!   the pool of threads that everything runs on ([`aqr_common::pool`]), this work itself too.
+//! - `--stats` tells, after each archive made or decoded, what stands out of its files by kind
+//!   and of where the time went, sampled as it ran ([`stats`]); `--stats=FILE.json` writes all
+//!   of it as well, and `--stats=FILE.html` a page showing it (opened on a terminal). Either
+//!   may be given more than once. The sampling slows the work a little.
 //!
 //! Compressing, standard error has the summary of the archive at the end, and on a terminal a
 //! bar of how far it is ([`view`]) until then. With `-v`, a log above the bar tells, for each
@@ -55,6 +59,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 mod meta;
+mod stats;
 mod stop;
 mod view;
 
@@ -67,7 +72,7 @@ use meta::{os_bytes, os_from};
 use view::Ticking;
 
 const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
-     [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] INPUT...";
+     [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] [--stats[=FILE.json|FILE.html]]      INPUT...";
 
 /// The argument (the only one) that this program is run with as a worker of the sandbox.
 const SANDBOX_WORKER: &str = "--sandbox-worker";
@@ -88,6 +93,8 @@ struct Args {
     verbose: bool,
     opt: Options,
     inputs: Vec<PathBuf>,
+    /// What `--stats` asked for.
+    stats: Option<stats::Stats>,
 }
 
 /// The bytes of the leaves decoded at once ([`aqr::Archive::set_budget`]). On 10gb (10
@@ -110,8 +117,17 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // (before the pool is made, for its workers to be sampled)
+    if args.stats.is_some() {
+        aqr_common::trace::enable();
+    }
     aqr_common::pool::init(args.opt.threads);
     let r = aqr_common::pool::run(|| if args.decompress { decompress_all(&args) } else { compress_all(&args) });
+    // (of the archives done, whether or not all are)
+    let r = match args.stats.as_ref().map(|s| s.write(std::io::stderr().is_terminal())) {
+        Some(Err(e)) => r.and(Err(e)),
+        _ => r,
+    };
     match r {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -137,7 +153,9 @@ fn parse() -> Result<Args, String> {
         verbose: false,
         opt: Options { threads: 0, ..Options::default() },
         inputs: Vec::new(),
+        stats: None,
     };
+    let (mut stats, mut stats_to) = (false, Vec::new());
     let mut only_inputs = false;
     while let Some(arg) = argv.next() {
         let s = arg.to_string_lossy();
@@ -171,6 +189,14 @@ fn parse() -> Result<Args, String> {
             "-b" => a.opt.block = size_of(&value("-b")?).ok_or("-b takes a size (64K, 1M, ...)")?.max(1),
             "-D" => a.opt.dictionaries = true,
             "--no-check" => a.opt.verify = false,
+            "--stats" => stats = true,
+            s if s.starts_with("--stats=") => {
+                let to = PathBuf::from(&s["--stats=".len()..]);
+                if !stats::takes(&to) {
+                    return Err("--stats= takes a file named .json or .html".into());
+                }
+                stats_to.push(to);
+            }
             // -T8 and the like
             s if s.starts_with("-T") => a.opt.threads = s[2..].parse().map_err(|_| "-T takes a number")?,
             s if s.starts_with("-l") => a.opt.level = s[2..].parse()?,
@@ -181,6 +207,9 @@ fn parse() -> Result<Args, String> {
     }
     if a.inputs.is_empty() {
         return Err("no input".into());
+    }
+    if stats || !stats_to.is_empty() {
+        a.stats = Some(stats::Stats::new(stats_to));
     }
     if a.opt.threads == 0 {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
@@ -328,6 +357,7 @@ impl aqr_compress::Source for Gathered {
 fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String> {
     output(out, a.force)?;
     let start = Instant::now();
+    let rec = stats::record(a.stats.as_ref());
     // large buffers kept in a file beside the output (gone once done), not on the heap
     let mut opt = a.opt.clone();
     let mut name = out.file_name().ok_or(format!("{}: not a file's name", out.display()))?.to_owned();
@@ -368,10 +398,33 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         if !a.quiet {
             summary(out, 1, d.len(), n, start);
         }
+        if let (Some(s), Some(rec)) = (&a.stats, rec) {
+            let path = input.display().to_string();
+            s.add(stats::Run {
+                mode: "compress",
+                input: path.clone(),
+                output: out.display().to_string(),
+                seconds: start.elapsed().as_secs_f64(),
+                threads: a.opt.threads,
+                read: d.len() as u64,
+                written: n as u64,
+                overhead: None,
+                contents: vec![stats::Content {
+                    path,
+                    kind: detect(&d).map_or("-", |f| f.name()),
+                    len: d.len() as u64,
+                    archived: Some(n as f64),
+                    same_as: None,
+                    modules: f.applies().iter().map(|m| m.module.to_string()).collect(),
+                }],
+                trace: rec.finish(),
+            });
+        }
         return Ok(());
     }
 
     let mut g = Gathered::new(mapper, a.preserve);
+    let gathering = aqr_common::trace::span("gather");
     match inputs {
         // a directory alone: its entries at the root
         [dir] => {
@@ -395,6 +448,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         return Err(format!("nothing to archive in {}", inputs[0].display()));
     }
     g.link_groups();
+    drop(gathering);
     if !a.quiet {
         for s in &g.skipped {
             eprintln!("skipped {s}");
@@ -413,6 +467,30 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         // (the files, as decompressing counts them: not their forks, each hard link)
         let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
         summary(out, files, r.read as usize, r.len, start);
+    }
+    if let (Some(s), Some(rec)) = (&a.stats, rec) {
+        let contents = (r.files.iter().zip(&g.contents))
+            .map(|(f, (p, ..))| stats::Content {
+                path: p.display().to_string(),
+                kind: f.format.unwrap_or("-"),
+                len: f.len,
+                archived: Some(f.archived),
+                same_as: f.same_as,
+                modules: f.modules.iter().map(|m| m.to_string()).collect(),
+            })
+            .collect();
+        s.add(stats::Run {
+            mode: "compress",
+            input: inputs.iter().map(|i| i.display().to_string()).collect::<Vec<_>>().join(" "),
+            output: out.display().to_string(),
+            seconds: start.elapsed().as_secs_f64(),
+            threads: a.opt.threads,
+            read: r.read,
+            written: r.len as u64,
+            overhead: Some(r.overhead as u64),
+            contents,
+            trace: rec.finish(),
+        });
     }
     Ok(())
 }
@@ -603,6 +681,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         output(out, a.force)?;
     }
     let start = Instant::now();
+    let rec = stats::record(a.stats.as_ref());
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
     let file = fs::File::open(input).map_err(|e| err(&e))?;
     // (mapped, so that what is read of it is the system's to drop)
@@ -622,20 +701,36 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
     if archive.tree().is_some() {
         archive.set_budget(DECODE_BUDGET);
     }
-    match archive.tree() {
+    // what is decoded of each content, for --stats (each leaf sampled as of its first content)
+    let seen = stats::Seen::new(archive.contents_len().max(1), rec.is_some());
+    if rec.is_some() && archive.tree().is_some() {
+        let mut items = vec![None; archive.leaves_len()];
+        for c in 0..archive.contents_len() {
+            if let Some(l) = archive.leaf_of(c).and_then(|l| items.get_mut(l)) {
+                l.get_or_insert(c);
+            }
+        }
+        archive.set_items(items);
+    }
+    let (files, total) = match archive.tree() {
         // (written as it is evaluated: a file of parts is not held whole)
         None if a.test => {
-            let n = ticking(a, &*view, || archive.write_file(a.opt.threads, &mut |_: &[u8]| Ok(())))
-                .map_err(|e| err(&e))?;
-            if !a.quiet {
-                summary_d(input, None, 1, n, start);
-            }
+            let n = ticking(a, &*view, || {
+                archive.write_file(a.opt.threads, &mut |d: &[u8]| {
+                    seen.saw(0, d, 0);
+                    Ok(())
+                })
+            })
+            .map_err(|e| err(&e))?;
+            (1, n)
         }
         None => {
             let n = write_whole(out, a.force, |w| {
                 let mut failed = None;
                 let r = ticking(a, &*view, || {
                     archive.write_file(a.opt.threads, &mut |d: &[u8]| {
+                        seen.saw(0, d, 0);
+                        let _s = aqr_common::trace::span("write");
                         w.write_all(d).map_err(|e| {
                             let m = e.to_string();
                             failed = Some(e);
@@ -650,9 +745,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
                     (Err(e), None) => Err(std::io::Error::other(e.to_string())),
                 }
             })?;
-            if !a.quiet {
-                summary_d(input, Some(out), 1, n, start);
-            }
+            (1, n)
         }
         Some(t) if a.test => {
             let (n, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicU64::new(0));
@@ -664,25 +757,63 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
             });
             ticking(a, &*view, || {
                 archive.contents(a.opt.threads, |c, d| {
+                    seen.saw(c, &d, d.len() as u64);
                     n.fetch_add(files[c], std::sync::atomic::Ordering::Relaxed);
                     total.fetch_add(files[c] as u64 * d.len() as u64, std::sync::atomic::Ordering::Relaxed);
                     Ok(())
                 })
             })
             .map_err(|e| err(&e))?;
-            if !a.quiet {
-                summary_d(input, None, n.into_inner(), total.into_inner(), start);
-            }
+            (n.into_inner(), total.into_inner())
         }
         Some(t) => {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
-            let (n, total) = ticking(a, &*view, || extract(t, &archive, a.opt.threads, out, a.force, &ap))?;
-            if !a.quiet {
-                summary_d(input, Some(out), n, total, start);
-            }
+            ticking(a, &*view, || extract(t, &archive, a.opt.threads, out, a.force, &ap, &seen))?
         }
+    };
+    if !a.quiet {
+        summary_d(input, (!a.test).then_some(out), files, total, start);
+    }
+    if let (Some(s), Some(rec)) = (&a.stats, rec) {
+        let mut contents = seen.contents(content_paths(&archive, out));
+        if archive.tree().is_none()
+            && let Some(c) = contents.first_mut()
+        {
+            c.len = total;
+        }
+        s.add(stats::Run {
+            mode: if a.test { "test" } else { "decompress" },
+            input: input.display().to_string(),
+            output: if a.test { String::new() } else { out.display().to_string() },
+            seconds: start.elapsed().as_secs_f64(),
+            threads: a.opt.threads,
+            read: c.len() as u64,
+            written: total,
+            overhead: None,
+            contents,
+            trace: rec.finish(),
+        });
     }
     Ok(())
+}
+
+/// By content of `archive` (decoded into `out`), the path of its first file in the archive (of
+/// a single file, `out`).
+fn content_paths(archive: &aqr::Archive, out: &Path) -> Vec<String> {
+    let Some(t) = archive.tree() else { return vec![out.display().to_string()] };
+    let mut first = vec![None; archive.contents_len()];
+    let mut paths: Vec<PathBuf> = Vec::with_capacity(t.entries.len());
+    for e in &t.entries {
+        let name = os_from(name_bytes(&e.name).0);
+        let path = e.parent.map_or_else(|| PathBuf::from(&name), |p| paths[p].join(&name));
+        if let EntryNode::File(c) = e.node
+            && let Some(f) = first.get_mut(c)
+        {
+            f.get_or_insert_with(|| path.display().to_string());
+        }
+        paths.push(path);
+    }
+    first.into_iter().map(Option::unwrap_or_default).collect()
 }
 
 /// By leaf of `archive` (decoded into `out`), the files of it as they are shown where it takes
@@ -767,6 +898,7 @@ fn extract(
     out: &Path,
     force: bool,
     ap: &meta::Applier,
+    seen: &stats::Seen,
 ) -> Result<(usize, u64), String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     match fs::create_dir(out) {
@@ -841,6 +973,8 @@ fn extract(
     let (n, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicU64::new(0));
     archive
         .contents(threads, |c, d| {
+            seen.saw(c, &d, d.len() as u64);
+            let _s = aqr_common::trace::span("write");
             for &i in &files[c].0 {
                 let fail = |m: String| aqr::Failure::Resource(m);
                 let p = &paths[i];

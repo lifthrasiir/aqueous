@@ -424,6 +424,7 @@ impl Pipe {
 impl Reader {
     /// Batch `i` read, its files but those of contents before it.
     fn read<S: Source + ?Sized>(&mut self, i: usize, cx: &Ctx<S>) -> io::Result<(Lens, Taken)> {
+        let _s = aqr_common::trace::span("read");
         let (src, batch) = (cx.src, &cx.batches[i]);
         let bytes = batch.iter().map(|&c| src.size(c)).sum();
         cx.notes.send(Note::Batch { batch: i, bytes, verify: cx.opt.verify, contents: batch.clone() });
@@ -497,6 +498,7 @@ impl Writer {
             }
             let st = pipe.state.lock().unwrap();
             if st.made[self.next].is_none() && st.failed.is_none() {
+                let _w = aqr_common::trace::wait("batch");
                 drop(pipe.changed.wait(st).unwrap());
             }
         }
@@ -540,7 +542,10 @@ impl Writer {
             part = analyze(i, &files, reread(src, &files, opt.threads)?, &raw, opt, notes);
         };
         batch.iter().try_for_each(|&c| src.intact(c))?;
-        out.write_all(&made.batch.bytes)?;
+        {
+            let _s = aqr_common::trace::span("write");
+            out.write_all(&made.batch.bytes)?;
+        }
         self.w.commit(&made.batch);
         let r = &mut self.r;
         for (k, file) in files.iter().enumerate() {
@@ -607,6 +612,7 @@ fn together<S: Source + ?Sized>(
     opt: &Options,
     notes: &Notes,
 ) -> io::Result<(Vec<usize>, HashSet<usize>, Vec<usize>)> {
+    let _s = aqr_common::trace::span("probe");
     const HEAD: u64 = 64 << 10;
     // (the end of a ZIP archive holding its central directory, mostly)
     const TAIL: u64 = 1 << 20;
@@ -924,6 +930,7 @@ struct Analyzed {
 /// those (by index) in `raw`. The data is the formula's: where it is needed again, to verify
 /// the batch, it is read from the source ([`finish`]).
 fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt: &Options, notes: &Notes) -> Analyzed {
+    let _s = aqr_common::trace::span("analyze");
     // a formula of the files as the contents of its streams, each a file of its own
     let mut f = Formula::default();
     let mut slices = Vec::with_capacity(files.len());
@@ -1043,7 +1050,9 @@ fn finish<S: Source + ?Sized>(
 ) -> Made {
     let Analyzed { f, leaves, at, mut enc, memo } = a;
     enc.on_precompress(Some(notes.encoding(i)));
+    let encoding = aqr_common::trace::span("encode");
     let mut batch = w.batch(&enc, &f, &leaves).expect("slices within their streams");
+    drop(encoding);
     drop(enc);
     let (reports, solid, sets) = report(&f, &leaves, &batch.layout, files, &at);
     drop(f);
@@ -1055,6 +1064,7 @@ fn finish<S: Source + ?Sized>(
         for (k, f) in files.iter().enumerate() {
             m.whole.entry(f.len).or_default().push((k, f.hash));
         }
+        let _s = aqr_common::trace::span("verify");
         check(i, w, &mut batch, files, &at, &m, opt.threads, notes)
     } else {
         Vec::new()
@@ -1109,6 +1119,8 @@ fn check_in(
     let all = || (0..files.len()).collect();
     let Ok(mut a) = aqr::open(c, &natives) else { return all() };
     a.set_budget(VERIFY_BUDGET);
+    // (each leaf told of as of its first file)
+    a.set_items(by_block.iter().map(|&l| of_leaf[l].first().map(|&(_, k)| files[k].c)).collect());
     let r = a.each_leaf(threads, |i, outputs| {
         let l = by_block[i];
         notes.send(Note::Verified(batch, of_leaf[l].iter().map(|&(_, k)| files[k].len as u64).sum()));

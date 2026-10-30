@@ -1685,6 +1685,7 @@ fn external_with<'a>(
     size: usize,
     dict: dict::With<'a>,
 ) -> Result<(Vec<u8>, bool)> {
+    let _s = aqr_common::trace::span("zstd");
     #[cfg(test)]
     tests::COMPRESSED.with(|n| n.set(n.get() + 1));
     let zstd = |e: zstd_safe::ErrorCode| Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)));
@@ -1990,6 +1991,8 @@ pub struct Archive<'c, 'n> {
     budget: u64,
     /// Told how far the evaluation is ([`Archive::on_progress`]).
     tell: Option<Telling>,
+    /// By leaf, the item its evaluation is told of as ([`Archive::set_items`]).
+    items: Vec<Option<usize>>,
 }
 
 /// Archive `c` opened, its modules run by `runner`.
@@ -2034,7 +2037,7 @@ pub fn open<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 
         blocks.leaves.iter().map(|l| if let LeafBlock::Formula { outputs, .. } = l { *outputs } else { 1 }).collect();
     let tree = meta.map(|(at, m)| tree_of(m, at, &blocks, &outputs)).transpose()?;
     let loaded = blocks.modules.iter().map(|_| OnceLock::new()).collect();
-    Ok(Archive { blocks, runner, loaded, tree, budget: u64::MAX, tell: None })
+    Ok(Archive { blocks, runner, loaded, tree, budget: u64::MAX, tell: None, items: Vec::new() })
 }
 
 impl Archive<'_, '_> {
@@ -2054,6 +2057,12 @@ impl Archive<'_, '_> {
     /// Tells `tell` how far the evaluation of the leaves is as it goes (none: tells nothing).
     pub fn on_progress(&mut self, tell: Option<Telling>) {
         self.tell = tell;
+    }
+
+    /// Has the evaluation of each leaf (by its index) told of as of item `items[i]` to
+    /// [`aqr_common::trace`] (a content, say; none past them).
+    pub fn set_items(&mut self, items: Vec<Option<usize>>) {
+        self.items = items;
     }
 
     /// The number of contents of the tree's files.
@@ -2186,8 +2195,13 @@ impl Archive<'_, '_> {
         let done = aqr_common::pool::dispatch(
             blocks.leaves.len(),
             threads,
-            |i| gate.admit(weights[i]),
+            |i| {
+                let _w = aqr_common::trace::wait("budget");
+                gate.admit(weights[i])
+            },
             |i, _admitted| {
+                let (_s, _i) =
+                    (aqr_common::trace::span("leaf"), aqr_common::trace::item(self.items.get(i).copied().flatten()));
                 tally.step(Step::Started(i));
                 let outputs = match blocks.leaves[i] {
                     LeafBlock::Stored(raw, zstd, checked, dict) => {
@@ -2589,6 +2603,7 @@ fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&dict::Diction
 
 /// Zstandard `blocks` of `window` making exactly `size` bytes, with dictionary `dict`.
 fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
+    let _s = aqr_common::trace::span("unzstd");
     let zstd = |e: zstd_safe::ErrorCode| Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)));
     // the frame: a header, then the blocks (not copied after it)
     let head = [ZSTD_MAGIC[0], ZSTD_MAGIC[1], ZSTD_MAGIC[2], ZSTD_MAGIC[3], 0, window];

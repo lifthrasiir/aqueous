@@ -195,6 +195,7 @@ impl Held {
     /// What `datas` hold, of those at least [`Held::INDEX_MIN`] bytes long, hashed on up to
     /// `threads` threads.
     pub fn of(datas: &[&[u8]], threads: usize) -> Held {
+        let _s = aqr_common::trace::span("held");
         let long: Vec<usize> = (0..datas.len()).filter(|&i| datas[i].len() >= Held::INDEX_MIN).collect();
         let found = aqr_common::pool::par_map(long.len(), threads, |j| held_anchors(datas[long[j]]));
         let mut anchors: HashMap<u64, usize> = HashMap::new();

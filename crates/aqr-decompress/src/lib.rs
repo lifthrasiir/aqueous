@@ -482,6 +482,7 @@ impl Runner for Native {
 impl Native {
     /// The output of `m` on `inputs` with `resources` (see [`Modules::apply`]).
     pub fn run(&self, m: Module, params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+        let _s = aqr_common::trace::span(m.name);
         catch_unwind(AssertUnwindSafe(|| self.run_unchecked(m, params, resources, inputs, len)))
             .unwrap_or_else(|_| Err("panicked".into()))
             .map_err(|e| Error::new(format!("{m}: {e}")))

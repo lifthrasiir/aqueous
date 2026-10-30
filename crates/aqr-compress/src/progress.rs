@@ -117,6 +117,11 @@ impl Files {
         Files { notes: notes.clone(), by_at, _watches: watches }
     }
 
+    /// The content at `at`, if any.
+    pub fn content(&self, at: *const u8) -> Option<usize> {
+        self.by_at.get(&(at as usize)).copied()
+    }
+
     /// Content `c` at `at` started (`end` false) or ended; nothing for data that is no file's.
     pub fn tell(&self, at: *const u8, end: bool) {
         if let Some(&c) = self.by_at.get(&(at as usize)) {

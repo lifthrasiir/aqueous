@@ -655,11 +655,14 @@ fn compress_with(
     let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
     let mut cx = Cx::new(d, opt);
     cx.pre = opt.verify.then(|| Arc::new(verify::Prevalidator::spawn(opt.threads, &[d])));
+    let _item = aqr_common::trace::item(Some(0));
+    let analyzing = aqr_common::trace::span("analyze");
     let mut f = recompress_at(d, opt, 0, kind, &cx);
     // (what the file's parts hold of each other, as a batch's files: the same body in two ZIP
     // archives in a tar archive, say)
     f.share_slices(archive::SLICE_MIN);
     drop(watch);
+    drop(analyzing);
     note(Note::Ended(0));
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
     let r = finish(f, d, opt, &cx, memo, kept, notes.as_ref(), out)?;
@@ -701,12 +704,15 @@ fn finish(
         .iter()
         .map(|g| g.iter().map(|&(i, a, b)| &f.streams[i].data[a as usize..b as usize]).collect())
         .collect();
+    let encoding = aqr_common::trace::span("encode");
     let n = written(out, |w| cx.enc.encode_pieces_to(&merged, &pieces, sum, w))?;
+    drop(encoding);
     drop(pieces);
     notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
     cx.enc.clear();
     let f = kept.then_some(f);
     let decodes = |c: &[u8]| {
+        let _s = aqr_common::trace::span("verify");
         let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
         let m = verify::Cached::new(Native { threads: opt.threads }, memo, &files);
         // (compared as it is written out, not held whole: a file of parts streams, see
@@ -908,6 +914,7 @@ fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -
 /// [`recompress_as`], the data of a zlib stream or gzip member (without a name) of kind
 /// `contents`.
 fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    let _s = aqr_common::trace::span(format.name());
     #[cfg(test)]
     tests::TRIED.with(|t| t.borrow_mut().push(format));
     let ready = cx.ready.borrow_mut().remove(&(d.as_ptr() as usize, d.len(), format));
@@ -1434,6 +1441,7 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         let own = apart.cx(d.len(), opt);
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         files.inspect(|f| f.tell(d.as_ptr(), false));
+        let _item = aqr_common::trace::item(files.and_then(|f| f.content(d.as_ptr())));
         let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| takes_place(&c.f));
         child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
         files.inspect(|f| f.tell(d.as_ptr(), true));
@@ -1803,6 +1811,7 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     let files = cx.files.as_deref();
     let made = sets::par_map(jobs.len(), workers, |i| {
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), false));
+        let _item = aqr_common::trace::item(files.and_then(|f| f.content(jobs[i].1.as_ptr())));
         let made = pure(jobs[i].0, jobs[i].1, opt, inner, words, once).flatten();
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), true));
         made

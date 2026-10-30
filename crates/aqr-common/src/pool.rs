@@ -97,6 +97,7 @@ fn pool() -> &'static Pool {
 /// reserved for it, so that one is idle for each.)
 fn work() {
     WORKER.with(|w| w.set(true));
+    crate::trace::register();
     let p = pool();
     loop {
         let job = {
@@ -110,6 +111,13 @@ fn work() {
         };
         job();
     }
+}
+
+/// The workers of the pool reserved or running something, and all of them (none before it is
+/// made).
+#[cfg(not(target_family = "wasm"))]
+pub(crate) fn usage() -> (usize, usize) {
+    POOL.get().map_or((0, 0), |p| (p.size - *p.free.lock().unwrap(), p.size))
 }
 
 /// Gives back `n` workers: each to an open [`par_map`] with items left, else free.
@@ -135,6 +143,8 @@ struct Open {
     left: Erased,
     room: usize,
     state: Arc<OpenState>,
+    /// What the map is of ([`crate::trace`]).
+    cx: Option<crate::trace::Context>,
 }
 
 #[derive(Default)]
@@ -166,16 +176,17 @@ static OPEN_ID: AtomicUsize = AtomicUsize::new(0);
 /// Puts a worker given back on the first open [`par_map`] with items left; whether there was
 /// one.
 fn join_open() -> bool {
-    let (work, state) = {
+    let (work, state, cx) = {
         let mut open = OPEN.lock().unwrap();
         // SAFETY: the map is in OPEN, so its closures live
         let Some(o) = open.iter_mut().find(|o| o.room > 0 && unsafe { o.left.call() }) else { return false };
         o.room -= 1;
         *o.state.running.lock().unwrap() += 1;
-        (o.work, o.state.clone())
+        (o.work, o.state.clone(), o.cx.clone())
     };
     let p = pool();
     p.jobs.lock().unwrap().push_back(Box::new(move || {
+        let _cx = crate::trace::adopt(cx);
         // SAFETY: counted in `running`, which the map waits for
         let r = catch_unwind(AssertUnwindSafe(|| unsafe { work.call() }));
         if let Err(e) = r {
@@ -241,7 +252,10 @@ impl Reservation {
         self.n -= 1;
         let slot = Arc::new(Slot { value: Mutex::new(None), done: Condvar::new(), scope: scope.clone() });
         let s = slot.clone();
+        // (run under the spans of the thread spawning it)
+        let cx = crate::trace::context();
         let job: Box<dyn FnOnce() + Send + 'a> = Box::new(move || {
+            let _cx = crate::trace::adopt(cx);
             let r = catch_unwind(AssertUnwindSafe(f));
             *s.value.lock().unwrap() = Some(r);
             s.done.notify_all();
@@ -297,6 +311,7 @@ pub struct Handle<'a, T> {
 impl<T> Handle<'_, T> {
     /// What it returned, or its panic, once it has.
     pub fn join(self) -> std::thread::Result<T> {
+        let _w = crate::trace::wait("join");
         let mut v = self.slot.value.lock().unwrap();
         loop {
             match v.take() {
@@ -352,12 +367,14 @@ pub fn scope_in<'env, R>(mut r: Reservation, f: impl for<'scope> FnOnce(&'scope 
     };
     let r = catch_unwind(AssertUnwindSafe(|| f(&s)));
     // what is spawned waited for, then the workers given back
+    let wait = crate::trace::wait("join");
     let mut w = s.state.workers.lock().unwrap();
     while w.running > 0 {
         w = s.state.finished.wait(w).unwrap();
     }
     release(w.idle);
     drop(w);
+    drop(wait);
     let panic = s.state.panic.lock().unwrap().take();
     match (r, panic) {
         (Err(p), _) | (Ok(_), Some(p)) => resume_unwind(p),
@@ -381,6 +398,7 @@ impl<'scope> Scope<'scope, '_> {
         }
         let mut w = self.state.workers.lock().unwrap();
         assert!(w.all > 0, "a scope of no workers");
+        let _w = (w.idle == 0).then(|| crate::trace::wait("worker"));
         while w.idle == 0 {
             w = self.state.finished.wait(w).unwrap();
         }
@@ -399,11 +417,13 @@ pub fn run<R: Send>(f: impl FnOnce() -> R + Send) -> R {
     }
     let p = pool();
     let mut free = p.free.lock().unwrap();
+    let w = (*free == 0).then(|| crate::trace::wait("worker"));
     while *free == 0 {
         free = p.freed.wait(free).unwrap();
     }
     *free -= 1;
     drop(free);
+    drop(w);
     let mut r = Reservation { n: 1 };
     // SAFETY: joined before `f`'s borrows end
     let h = unsafe { r.spawn_unchecked(f, None) };
@@ -450,6 +470,7 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
             left: erase(&left),
             room: want - hs.len(),
             state: state.clone(),
+            cx: crate::trace::context(),
         });
         (id, state)
     });
@@ -461,6 +482,7 @@ pub fn par_map<R: Send>(n: usize, threads: usize, f: impl Fn(usize) -> R + Sync)
     let mut panic = mine.err();
     if let Some((id, state)) = open {
         OPEN.lock().unwrap().retain(|o| o.id != id);
+        let _w = crate::trace::wait("join");
         let mut running = state.running.lock().unwrap();
         while *running > 0 {
             running = state.done.wait(running).unwrap();
@@ -532,6 +554,7 @@ pub fn dispatch<G: Send, R: Send>(
             break;
         }
         let g = admit(i);
+        let w = crate::trace::wait("worker");
         {
             let mut r = running.lock().unwrap();
             while *r >= threads - 1 {
@@ -545,6 +568,7 @@ pub fn dispatch<G: Send, R: Send>(
         }
         *free -= 1;
         drop(free);
+        drop(w);
         let job = move || {
             let r = catch_unwind(AssertUnwindSafe(|| f(i, g)));
             if r.is_err() {

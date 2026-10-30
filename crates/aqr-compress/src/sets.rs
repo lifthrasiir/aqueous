@@ -131,6 +131,7 @@ pub(crate) fn sets(
     depth: u32,
     cx: &Cx,
 ) -> Vec<Set> {
+    let _s = aqr_common::trace::span("sets");
     let data = |slice: &Node| -> Option<&[u8]> {
         let &Node::Slice { stream, start, len } = slice else { return None };
         f.streams.get(stream)?.data.get(start as usize..)?.get(..len as usize)

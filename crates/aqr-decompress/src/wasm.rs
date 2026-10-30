@@ -721,6 +721,7 @@ impl Loaded for Shared {
         sizes: &[u64],
         memory_limit: u64,
     ) -> Decoded<Vec<Vec<u8>>> {
+        let _s = aqr_common::trace::span("wasm");
         self.check(params, resources, inputs, sizes, memory_limit)?;
         // (zeroed by the system as they are written, as a copy out of the memories would be)
         let mut outs: Vec<Vec<u8>> = sizes.iter().map(|&s| vec![0; s as usize]).collect();

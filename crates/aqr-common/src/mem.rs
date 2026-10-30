@@ -205,22 +205,22 @@ impl Mapped {
     }
 }
 
-unsafe impl GlobalAlloc for Mapped {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+impl Mapped {
+    unsafe fn raw_alloc(&self, l: Layout) -> *mut u8 {
         #[cfg(unix)]
         if Self::mapped(l) {
             return mapped::map(std::ptr::null_mut(), mapped::round(l.size()));
         }
         unsafe { System.alloc(l) }
     }
-    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+    unsafe fn raw_alloc_zeroed(&self, l: Layout) -> *mut u8 {
         #[cfg(unix)]
         if Self::mapped(l) {
             return mapped::map(std::ptr::null_mut(), mapped::round(l.size()));
         }
         unsafe { System.alloc_zeroed(l) }
     }
-    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+    unsafe fn raw_dealloc(&self, p: *mut u8, l: Layout) {
         #[cfg(unix)]
         if Self::mapped(l) {
             // SAFETY: mapped by `alloc` as of this size, and the caller's no more
@@ -228,7 +228,7 @@ unsafe impl GlobalAlloc for Mapped {
         }
         unsafe { System.dealloc(p, l) }
     }
-    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+    unsafe fn raw_realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
         // SAFETY (all): `l` is the block's layout, `n` its new size, of the same alignment
         let nl = unsafe { Layout::from_size_align_unchecked(n, l.align()) };
         let (old, new) = (Self::mapped(l), Self::mapped(nl));
@@ -254,11 +254,38 @@ unsafe impl GlobalAlloc for Mapped {
                 unsafe { mapped::unmap(more, want - have) };
             }
         }
-        let q = unsafe { self.alloc(nl) };
+        let q = unsafe { self.raw_alloc(nl) };
         if !q.is_null() {
             unsafe { std::ptr::copy_nonoverlapping(p, q, l.size().min(n)) };
-            unsafe { self.dealloc(p, l) };
+            unsafe { self.raw_dealloc(p, l) };
         }
+        q
+    }
+}
+
+/// (The heap counted for [`crate::trace`], once it is on.)
+unsafe impl GlobalAlloc for Mapped {
+    #[inline]
+    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        let p = unsafe { self.raw_alloc(l) };
+        crate::trace::allocated(p, l.size());
+        p
+    }
+    #[inline]
+    unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+        let p = unsafe { self.raw_alloc_zeroed(l) };
+        crate::trace::allocated(p, l.size());
+        p
+    }
+    #[inline]
+    unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
+        crate::trace::freed(p, l.size());
+        unsafe { self.raw_dealloc(p, l) }
+    }
+    #[inline]
+    unsafe fn realloc(&self, p: *mut u8, l: Layout, n: usize) -> *mut u8 {
+        let q = unsafe { self.raw_realloc(p, l, n) };
+        crate::trace::reallocated(p, l.size(), q, n);
         q
     }
 }
