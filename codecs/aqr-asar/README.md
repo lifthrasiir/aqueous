@@ -1,0 +1,44 @@
+# aqr-asar
+
+Electron's asar archives (`app.asar`, `electron.asar`, `node_modules.asar`), rebuilt bit for bit
+from the data after their header (`FORMAT.md`). The header's JSON is kept, but the files' sizes
+and offsets and their SHA-256 integrity (of the whole file and of its 4 MiB blocks, as
+`@electron/asar` writes them) are derived from the data: they are holes in the header, and the
+index holds the sizes and offsets once, as varints. Whatever else the header has (files left
+unpacked, their integrity, links, values written otherwise) is kept as it is, and so are the
+bytes of the data no file tells of (tools that take files out of the header leave them; one
+archive of the corpus has 52 MB of them).
+
+As with aqr-bundle, an archive alone gains little: what it is for is that the files become
+contents of the application, to be recompressed by their formats (PNG files by aqr-png, the
+APKs inside by aqr-zip) and stored once where the same files are archived along with it. Files
+of the same contents in one archive (of at least 1 KiB, common in `node_modules`) are stored
+once.
+
+## How it does
+
+Measured 2026-10-30 on Windows 11 (x86-64), on 27 archives found on one machine (1.83 GB:
+VS Code, Dropbox, Discord ×4, Slack ×2, Signal, Teams, Evernote, MongoDB Compass, balenaEtcher,
+Oculus, and games; written by `asar` 0.14 to `@electron/asar` 3, 127,329 files).
+
+- Every archive is rebuilt (`aqr-asar-check`), the encoder at 950 MB/s and the module at
+  4.1 GB/s natively (most of it SHA-256, of the archives with integrity); as WebAssembly 155
+  MB/s on Ridibooks' archive (73 MB, 4558 files with integrity), against 484 MB/s natively.
+- The headers (9.9 MB) at zstd -3: 2.13 MB as they are, 0.84 MB as the header with holes and
+  the index. Archives with integrity gain most (Ridibooks 230 → 29 KB, shapez 102 → 15 KB);
+  Orca's (4555 of its 4578 files unpacked, their integrity kept) gains nothing.
+- Through `aqr` (all threads, level mid) against the commit before (`18fdaf4`), all 27 archives
+  at once: 714.42 → 726.59 MB (+1.7%), 23.3 → 26.4 s. Each alone: shapez 151.99 → 152.47 MB,
+  Oculus 215.09 → 220.34 MB, Slack 4.52 4.00 → 4.08 MB, Ridibooks 16.02 → 15.71 MB, Discord
+  1.034 → 1.042 MB.
+- The loss is not aqr-asar's: Oculus' files in a tar archive (aqr-bundle) lose as much against
+  the same tar archive scanned (220.34 vs 215.06 MB), though its PNG files alone (63.07 vs
+  65.44 MB) and its other files alone (32.17 vs 32.17 MB) do not. How aqr-compress takes the
+  contents of an archive that only bundles files, when they are many and of many formats, is
+  what is left to look into.
+
+## Tests
+
+`cargo rt -p aqr-asar`, on archives the tests make as `@electron/asar` and the old `asar` write;
+`aqr-asar-check [-v] FILE_OR_DIR...` (whether each archive is rebuilt, zstd -3 of the headers as
+they are and as the module's inputs, speeds).

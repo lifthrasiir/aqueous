@@ -809,18 +809,17 @@ fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
     }
 }
 
-/// The CRC-32 and size of the files' contents in ar, tar or cpio archive or ISO 9660 or UDF
-/// image `d`, those of at least [`MEMBER_MIN`] bytes.
+/// The CRC-32 and size of the files' contents in ar, tar, cpio or asar archive or ISO 9660 or
+/// UDF image `d`, those of at least [`MEMBER_MIN`] bytes.
 fn member_sums(d: &[u8], threads: usize) -> Vec<(u32, u64)> {
     use aqr_bundle::{formula, layout::Role};
-    let spans: Vec<std::ops::Range<usize>> = match aqr_iso::starts(d) {
-        true => {
-            aqr_iso::pieces(d, &aqr_iso::files(d)).into_iter().filter(|p| p.file.is_some()).map(|p| p.span).collect()
-        }
-        false => {
-            let recs = formula::detect(d).and_then(|f| formula::records(f, d)).unwrap_or_default();
-            recs.iter().filter_map(|r| r.body()).filter(|b| b.role == Role::File).map(|b| b.span.clone()).collect()
-        }
+    let spans: Vec<std::ops::Range<usize>> = if aqr_iso::starts(d) {
+        aqr_iso::pieces(d, &aqr_iso::files(d)).into_iter().filter(|p| p.file.is_some()).map(|p| p.span).collect()
+    } else if aqr_asar::starts(d) {
+        aqr_asar::formula::files(d).into_iter().map(|f| f.1).collect()
+    } else {
+        let recs = formula::detect(d).and_then(|f| formula::records(f, d)).unwrap_or_default();
+        recs.iter().filter_map(|r| r.body()).filter(|b| b.role == Role::File).map(|b| b.span.clone()).collect()
     };
     let bodies: Vec<&[u8]> = spans.into_iter().filter(|s| s.len() as u64 >= MEMBER_MIN).map(|s| &d[s]).collect();
     aqr_common::pool::par_map(bodies.len(), threads, |i| (crc32fast::hash(bodies[i]), bodies[i].len() as u64))

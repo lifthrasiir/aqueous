@@ -140,6 +140,10 @@ pub const ZIP: Module = aqr_zip::formula::MODULE;
 /// and the layout.
 pub const BUNDLE: Module = aqr_bundle::formula::MODULE;
 
+/// An asar archive rebuilt from the data after its header. Inputs: the data, the header with
+/// the values that follow from the data left out, and the index of the files.
+pub const ASAR: Module = aqr_asar::formula::MODULE;
+
 /// A git pack rebuilt from the data of its entries. Inputs: the entries' DEFLATE streams with
 /// what [`FLATE`] derives of them, the layout and the bytes kept.
 pub const GIT_PACK: Module = aqr_git::formula::MODULE;
@@ -215,7 +219,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 57] = [
+pub const MODULES: [Module; 58] = [
     X86,
     ARM64,
     CIL,
@@ -241,6 +245,7 @@ pub const MODULES: [Module; 57] = [
     LEVELDB,
     ZIP,
     BUNDLE,
+    ASAR,
     GIT_PACK,
     GIT_PACK_INDEX,
     PNG,
@@ -496,6 +501,9 @@ impl Native {
         } else if m == BUNDLE {
             none(resources)?;
             aqr_bundle::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == ASAR {
+            none(resources)?;
+            aqr_asar::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == GIT_PACK {
             none(resources)?;
             aqr_git::formula::decode(params, inputs, len, threads).map_err(msg)

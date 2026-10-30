@@ -24,6 +24,8 @@
 //!   their data, the rest of the file sliced around them.
 //! - ar, tar and cpio archives: aqr-bundle, rebuilding the archive from the contents of its
 //!   members with their sizes and checksums derived.
+//! - Electron's asar archives: aqr-asar, rebuilding the archive from the data after its header,
+//!   the files' sizes, offsets and SHA-256 integrity derived.
 //! - ISO 9660 and UDF images: aqr-iso, the image cut into its files' contents and the rest.
 //! - WIM files of LZX: aqr-wim, the resources' data, the LZX chunks rebuilt by aqr-lzx.
 //! - Text, a whole file of text bytes or data of a name telling text: a delimited table (CSV,
@@ -40,8 +42,8 @@
 //!
 //! In whatever formula a recompressor gives, the data that its applications take as it is
 //! ([`Options::contents`], by default that of a DEFLATE stream, of gzip, zlib or PDF, and
-//! that of an LZ4, LZMA or LZMA2 stream, of the blocks of a LevelDB table, of the entries of a ZIP archive or
-//! of the members of an ar, tar or cpio archive)
+//! that of an LZ4, LZMA or LZMA2 stream, of the blocks of a LevelDB table, of the entries of a ZIP archive,
+//! of the members of an ar, tar or cpio archive or of the files of an asar archive)
 //! is recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
 //! of the data. So are the slices of a stream that a recompressor gives as data as it is
 //! ([`Stream::content`]: the rest of an executable, around its code), wherever they are.
@@ -56,8 +58,8 @@
 //! taken as a whole by aqr-wrt, and data of [`Kind::Format`] is taken as a file of that format
 //! from its start ([`Nest::As`]).
 //! The contents of an application may be slices of several streams one after the other (a
-//! ZIP archive's entries, by kind), each recompressed by its own kind. aqr-zip and aqr-bundle
-//! give the entries their kinds by their names ([`kind_by_name`]), as gzip's data is by its name, and
+//! ZIP archive's entries, by kind), each recompressed by its own kind. aqr-zip, aqr-bundle and
+//! aqr-asar give the entries their kinds by their names ([`kind_by_name`]), as gzip's data is by its name, and
 //! aqr-pdf the streams of a PDF file by what they are.
 //!
 //! Contents that are PNG files of the same geometry and alike (variants of a picture, with
@@ -135,8 +137,8 @@ pub use extent::extent;
 pub use progress::Event;
 
 use aqr_decompress::{
-    BCJ_ARM, BCJ_ARM_THUMB, BCJ_ARM64, BCJ_DELTA, BCJ_IA64, BCJ_POWERPC, BCJ_RISCV, BCJ_SPARC, BCJ_X86, BCJ2, BUNDLE,
-    FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP,
+    ASAR, BCJ_ARM, BCJ_ARM_THUMB, BCJ_ARM64, BCJ_DELTA, BCJ_IA64, BCJ_POWERPC, BCJ_RISCV, BCJ_SPARC, BCJ_X86, BCJ2,
+    BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP,
 };
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
@@ -294,9 +296,9 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`LZMA`],
-/// [`LZMA2`], [`LZO`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], and that before
-/// the filters of xz and 7z ([`BCJ_X86`] and the others, [`BCJ2`]), scanned.
-pub const CONTENTS: [Content; 20] = [
+/// [`LZMA2`], [`LZO`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`], [`BUNDLE`] and [`ASAR`], and that
+/// before the filters of xz and 7z ([`BCJ_X86`] and the others, [`BCJ2`]), scanned.
+pub const CONTENTS: [Content; 21] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: LZMA, input: 0, nest: Nest::Scan },
@@ -307,6 +309,7 @@ pub const CONTENTS: [Content; 20] = [
     Content { module: LEVELDB, input: 0, nest: Nest::Scan },
     Content { module: ZIP, input: 0, nest: Nest::Scan },
     Content { module: BUNDLE, input: 0, nest: Nest::Scan },
+    Content { module: ASAR, input: 0, nest: Nest::Scan },
     Content { module: BCJ_X86, input: 0, nest: Nest::Scan },
     Content { module: BCJ_POWERPC, input: 0, nest: Nest::Scan },
     Content { module: BCJ_IA64, input: 0, nest: Nest::Scan },
@@ -890,6 +893,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Ar | Format::Tar | Format::Cpio => bundle::bundle(d),
                 Format::Iso => bundle::iso(d),
+                Format::Asar => bundle::asar(d),
                 _ => unreachable!("a pure format"),
             }))
             .ok()

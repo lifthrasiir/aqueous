@@ -22,7 +22,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, snappy, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle, …), each
+  git, lz4, lzma, lzo, snappy, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle, asar, …), each
   with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a `FORMAT.md`
   belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace takes both
   directories by glob, so a new crate needs no entry in the root `Cargo.toml`.

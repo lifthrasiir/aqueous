@@ -83,6 +83,9 @@ pub enum Format {
     /// WIM file of LZX or of no compression (aqr-wim, and aqr-lzx on its chunks), known by its
     /// header: at the start of data only.
     Wim,
+    /// Electron's asar archive (aqr-asar), known by its pickles and the start of its JSON: at the
+    /// start of data only.
+    Asar,
     /// Delimited text table (aqr-xsv): CSV, TSV, USV and the like, a whole file known by its
     /// text: not looked for in other data.
     Xsv,
@@ -97,7 +100,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 39] = [
+    pub const ALL: [Format; 40] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -133,6 +136,7 @@ impl Format {
         Format::Cpio,
         Format::Iso,
         Format::Wim,
+        Format::Asar,
         Format::Xsv,
         Format::Text,
         Format::Sized,
@@ -176,6 +180,7 @@ impl Format {
             Format::Cpio => "cpio",
             Format::Iso => "iso",
             Format::Wim => "wim",
+            Format::Asar => "asar",
             Format::Xsv => "xsv",
             Format::Text => "text",
             Format::Sized => "sized",
@@ -183,9 +188,10 @@ impl Format {
         }
     }
 
-    /// Whether it only bundles files: an archive of aqr-bundle's, or an image of aqr-iso's.
+    /// Whether it only bundles files: an archive of aqr-bundle's or aqr-asar's, or an image of
+    /// aqr-iso's.
     pub fn is_bundle(self) -> bool {
-        matches!(self, Format::Ar | Format::Tar | Format::Cpio | Format::Iso)
+        matches!(self, Format::Ar | Format::Tar | Format::Cpio | Format::Iso | Format::Asar)
     }
 
     /// The format of [`Format::name`] `name`, as [`Kind::Format`] names it.
@@ -229,6 +235,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"tar" => format(Format::Tar),
         b"iso" => format(Format::Iso),
         b"wim" => format(Format::Wim),
+        b"asar" => format(Format::Asar),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
         b"lzma" | b"tlz" => format(Format::Lzma),
         b"xz" | b"txz" => format(Format::Xz),
@@ -273,6 +280,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Iso)
     } else if start && aqr_wim::wim::starts(d) {
         Some(Format::Wim)
+    } else if start && aqr_asar::starts(d) {
+        Some(Format::Asar)
     } else if sqlite_header(d) {
         Some(Format::Sqlite)
     } else if at(0, b"%PDF-") {

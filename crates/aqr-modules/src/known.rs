@@ -4,6 +4,12 @@ use crate::{Known, hex};
 
 pub const KNOWN: &[Known] = &[
     Known {
+        name: "asar-recons",
+        version: 1,
+        sha512_256: hex("7a753a3fd492919e52fef49685bfeaa24703ead307257dc51e54dc235f32f07f"),
+        block: include_bytes!("../wasm/asar-recons.block"),
+    },
+    Known {
         name: "bcj-arm",
         version: 1,
         sha512_256: hex("6ca13cc1b6a8a6903499500a7a86b27252171e828d998fa103cbf1a1c4b5a17e"),

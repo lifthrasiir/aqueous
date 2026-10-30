@@ -67,6 +67,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-asar"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "sha2",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-bcj"
 version = "0.1.0"
 dependencies = [
@@ -116,6 +126,7 @@ name = "aqr-compress"
 version = "0.1.0"
 dependencies = [
  "aqr-7z",
+ "aqr-asar",
  "aqr-bundle",
  "aqr-clip",
  "aqr-common",
@@ -164,6 +175,7 @@ name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
  "aqr-7z",
+ "aqr-asar",
  "aqr-bcj",
  "aqr-bundle",
  "aqr-clip",
@@ -413,6 +425,7 @@ name = "aqr-modules"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-asar",
  "aqr-bcj",
  "aqr-bundle",
  "aqr-clip",

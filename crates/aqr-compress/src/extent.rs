@@ -46,7 +46,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Ar => bundle(aqr_bundle::formula::Format::Ar, d),
         Format::Tar => bundle(aqr_bundle::formula::Format::Tar, d),
         Format::Cpio => bundle(aqr_bundle::formula::Format::Cpio, d),
-        Format::Iso | Format::Wim => Some(d.len()),
+        Format::Iso | Format::Wim | Format::Asar => Some(d.len()),
     }?;
     Some(end.min(d.len()))
 }

@@ -4,8 +4,8 @@ use std::sync::{PoisonError, RwLock};
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, BUNDLE, CLIP, FLAC, FLATE, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG,
-    PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
+    ARM64, ASAR, BUNDLE, CLIP, FLAC, FLATE, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF,
+    PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -1268,6 +1268,30 @@ fn bundles() {
     // (the Mach-O objects of the ar archive by aqr-exe)
     assert_eq!(modules(&f).iter().filter(|&&m| m == BUNDLE.name).count(), 2, "{f}");
     assert_eq!(aqr_compress::kind_by_name(b"x/y.tar"), aqr_formula::Kind::Format("tar"));
+}
+
+/// asar archives go to aqr-asar, and their files to their recompressors by their names.
+#[test]
+fn asar() {
+    let jpeg = fixture("codecs/aqr-jpeg/tests/data/gradient.jpg");
+    let png = picture(64, 48, None);
+    let files: [(&str, &[u8]); 3] = [("a.txt", &text(5000)), ("img/b.jpg", &jpeg), ("img/d.png", &png)];
+    let (mut json, mut data) = (String::from("{\"files\":{"), Vec::new());
+    for (k, (name, body)) in files.iter().enumerate() {
+        let entry = format!("{{\"size\":{},\"offset\":\"{}\"}}", body.len(), data.len());
+        json.push_str(&format!("{}\"{name}\":{entry}", if k > 0 { "," } else { "" }));
+        data.extend_from_slice(body);
+    }
+    json.push_str("}}");
+    let pad = json.len().next_multiple_of(4) - json.len();
+    let c = (4 + json.len() + pad) as u32;
+    let mut d: Vec<u8> = [4, c + 4, c, json.len() as u32].iter().flat_map(|v| v.to_le_bytes()).collect();
+    d.extend_from_slice(json.as_bytes());
+    d.resize(d.len() + pad, 0);
+    d.extend_from_slice(&data);
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), [ASAR.name, JPEG.name, PNG.name], "{f}");
+    assert_eq!(aqr_compress::kind_by_name(b"resources/app.asar"), aqr_formula::Kind::Format("asar"));
 }
 
 /// A bundle does not count as a format deeper: a JPEG file in a ZIP archive in a tar archive in
