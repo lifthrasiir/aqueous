@@ -281,22 +281,32 @@ fn lzx_same_as_wasm() {
         chunks.push((&d[at + 8..at + 8 + len], n));
         at += 8 + len;
     }
-    let whole: Vec<u8> = chunks.iter().flat_map(|c| c.0.iter().copied()).collect();
     for streams in [vec![chunks.clone()], vec![chunks[..1].to_vec(), chunks[1..].to_vec()]] {
+        // (bytes kept before each stream and after the last)
         let mut f = Formula::default();
         f.push("raw", Vec::new());
+        f.push("kept", b"<before><between><after>".to_vec());
         let mut parts = Vec::new();
-        for (s, sp) in streams.iter().zip(aqr_lzx::formula::split(&streams, 1)) {
+        let mut want = Vec::new();
+        for (i, (s, sp)) in streams.iter().zip(aqr_lzx::formula::split(&streams, 1)).enumerate() {
             let sp = sp.unwrap();
-            let len: u64 = s.iter().map(|c| c.0.len() as u64).sum();
             let at = f.streams[0].data.len() as u64;
             f.streams[0].data.extend_from_slice(&sp.data);
-            parts.push((Node::slice(0, at, sp.data.len() as u64), sp.record, len));
+            let kept = if i == 0 { Node::slice(1, 0, 8) } else { Node::slice(1, 8, 9) };
+            want.extend_from_slice(if i == 0 { b"<before>" } else { b"<between>" });
+            s.iter().for_each(|c| want.extend_from_slice(c.0));
+            parts.push(aqr_lzx::formula::Stream {
+                kept,
+                data: Node::slice(0, at, sp.data.len() as u64),
+                record: sp.record,
+            });
         }
-        f.root = Node::concat(aqr_lzx::formula::apply(&mut f, parts));
+        want.extend_from_slice(b"<after>");
+        f.root = aqr_lzx::formula::apply(&mut f, parts, Node::slice(1, 17, 7), want.len() as u64);
+        let whole = &want;
         let c = enc.encode(&f, None).unwrap();
-        assert!(aqr::decode(&c, &Native::default()).unwrap() == whole);
-        assert!(decode_wasm(&c).unwrap() == whole);
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == *whole);
+        assert!(decode_wasm(&c).unwrap() == *whole);
         let r = f.streams.iter().position(|s| s.class == "lzx/record").unwrap();
         for k in 0..8 {
             let mut bad = f.clone();

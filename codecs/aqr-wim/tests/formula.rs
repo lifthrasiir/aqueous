@@ -84,7 +84,8 @@ fn taken_apart_and_given_back() {
     }
 }
 
-/// A chunk of another size than its place says is not taken: its resource is kept whole.
+/// A chunk of another size than its place says is not taken: its resource is kept whole,
+/// among the bytes between the streams.
 #[test]
 fn chunks_not_taken_kept() {
     let mut d = wim(false);
@@ -93,7 +94,22 @@ fn chunks_not_taken_kept() {
     d[208] -= 1;
     let f = formula::encode(&d, 1).expect("a formula");
     assert!(eval(&f) == d);
-    assert!(f.streams.iter().any(|s| s.class == "wim/kept" && !s.data.is_empty()));
+    assert_eq!(f.streams[0].data.len(), 2900);
+    assert!(f.streams[1].data.len() > chunks().iter().map(|c| c.0.len()).sum::<usize>());
+}
+
+/// The formula is applications one after another, each a part of the file as it is, of at
+/// most so much data: no output of several taken apart.
+#[test]
+fn applications_in_order() {
+    let d = wim(true);
+    let f = formula::encode(&d, 1).unwrap();
+    assert!(f.shared.is_empty());
+    let ns = match &f.root {
+        aqr_formula::Node::Concat(ns) => &ns[..],
+        n => std::slice::from_ref(n),
+    };
+    assert!(ns.iter().all(|n| matches!(n, aqr_formula::Node::Apply(_))));
 }
 
 #[test]
