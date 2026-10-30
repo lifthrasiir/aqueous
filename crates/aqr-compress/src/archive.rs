@@ -767,7 +767,7 @@ fn together<S: Source + ?Sized>(
 /// other files than PE files, those alike are mostly next to each other by their names
 /// already.
 fn lay_alike<S: Source + ?Sized>(
-    order: &mut Vec<usize>,
+    order: &mut [usize],
     cs: &[usize],
     group: &[usize],
     src: &S,
