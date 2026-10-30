@@ -12,8 +12,9 @@ pub use crate::module::{decode, index};
 pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("lzx-recons", 1).with_memory(memory);
 
 /// Bytes the module works in besides its inputs and output: a chunk's match finder (chains of
-/// 2 and 3 bytes), its decoding tables (four of 2^16 entries) and its data.
-pub const WORK: u64 = (2 * 65536 + 2 * recons::CHUNK) as u64 * 4 + 4 * 65536 * 4 + recons::CHUNK as u64;
+/// 2 and 3 bytes), its data and its parse (a token at most a byte, of 6 bytes), and 64 KiB for
+/// the rest (contexts, trees).
+pub const WORK: u64 = (2 * 65536 + 2 * recons::CHUNK) as u64 * 4 + 7 * recons::CHUNK as u64 + (64 << 10);
 
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.whole(WORK, 1))

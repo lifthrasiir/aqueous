@@ -217,49 +217,82 @@ impl BitW {
     }
 }
 
-/// A canonical Huffman code of code lengths: codes by symbol, and a table of 2^16 entries of
-/// (symbol, length) to decode.
+/// Bits of the codes a table decodes at once; longer codes are found by their lengths.
+const FAST: u32 = 10;
+
+/// A canonical Huffman code of code lengths: codes by symbol, and to decode, a table of the
+/// codes of at most [`FAST`] bits by their first bits ((symbol, length), 0 for a longer code)
+/// and, for the longer ones, the first code of each length and its symbols in order.
 pub struct Huff {
     pub codes: Vec<u16>,
     table: Vec<u32>,
+    first: [u32; MAX_LEN as usize + 1],
+    count: [u32; MAX_LEN as usize + 1],
+    offset: [u32; MAX_LEN as usize + 1],
+    sorted: Vec<u16>,
 }
 
 impl Huff {
     /// None where the lengths oversubscribe the code.
     pub fn new(lens: &[u8], decode: bool) -> Option<Huff> {
-        let mut codes = vec![0u16; lens.len()];
-        let mut table = if decode { vec![0u32; 1 << 16] } else { Vec::new() };
-        let mut next: u32 = 0;
-        for len in 1..=MAX_LEN {
-            for (s, &l) in lens.iter().enumerate() {
-                if l != len {
-                    continue;
-                }
-                if next >= 1 << len {
-                    return None;
-                }
-                codes[s] = next as u16;
-                if decode {
-                    let span = 1u32 << (16 - len);
-                    let start = next << (16 - len);
-                    table[start as usize..(start + span) as usize].fill((s as u32) << 8 | len as u32);
-                }
-                next += 1;
-            }
-            next <<= 1;
+        let mut count = [0u32; MAX_LEN as usize + 1];
+        for &l in lens {
+            *count.get_mut(l as usize)? += 1;
         }
-        Some(Huff { codes, table })
+        count[0] = 0;
+        let (mut first, mut offset) = ([0u32; MAX_LEN as usize + 1], [0u32; MAX_LEN as usize + 1]);
+        let (mut code, mut at) = (0u32, 0u32);
+        for l in 1..=MAX_LEN as usize {
+            first[l] = code;
+            offset[l] = at;
+            if code + count[l] > 1 << l {
+                return None;
+            }
+            at += count[l];
+            code = (code + count[l]) << 1;
+        }
+        let mut sorted = vec![0u16; at as usize];
+        let mut codes = vec![0u16; lens.len()];
+        let mut next = offset;
+        for (s, &l) in lens.iter().enumerate() {
+            if l > 0 {
+                let l = l as usize;
+                let i = next[l];
+                next[l] += 1;
+                sorted[i as usize] = s as u16;
+                codes[s] = (first[l] + i - offset[l]) as u16;
+            }
+        }
+        let mut table = Vec::new();
+        if decode {
+            table = vec![0u32; 1 << FAST];
+            for (s, &l) in lens.iter().enumerate() {
+                if l > 0 && l as u32 <= FAST {
+                    let start = (codes[s] as usize) << (FAST - l as u32);
+                    table[start..start + (1 << (FAST - l as u32))].fill((s as u32) << 8 | l as u32);
+                }
+            }
+        }
+        Some(Huff { codes, table, first, count, offset, sorted })
     }
 
     /// The next symbol, or None for bits no code starts with.
     #[inline]
     fn decode(&self, r: &mut BitR) -> Option<usize> {
-        let e = self.table[r.peek16() as usize];
-        if e == 0 {
-            return None;
+        let v = r.peek16();
+        let e = self.table[(v >> (16 - FAST)) as usize];
+        if e != 0 {
+            r.skip(e & 0xff);
+            return Some((e >> 8) as usize);
         }
-        r.skip(e & 0xff);
-        Some((e >> 8) as usize)
+        for l in FAST as usize + 1..=MAX_LEN as usize {
+            let code = v >> (16 - l);
+            if code.wrapping_sub(self.first[l]) < self.count[l] {
+                r.skip(l as u32);
+                return Some(self.sorted[(self.offset[l] + code - self.first[l]) as usize] as usize);
+            }
+        }
+        None
     }
 }
 

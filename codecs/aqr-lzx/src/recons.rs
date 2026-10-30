@@ -86,6 +86,11 @@ impl Mf {
         }
     }
 
+    /// A match finder of nothing, for a moment.
+    fn empty() -> Mf {
+        Mf { head2: Vec::new(), prev2: Vec::new(), head3: Vec::new(), prev3: Vec::new(), next: 0 }
+    }
+
     fn reset(&mut self) {
         self.head2.fill(NONE);
         self.head3.fill(NONE);
@@ -414,7 +419,22 @@ pub fn huffman(freqs: &[u32], limit: u8, out: &mut [u8]) {
 /// where stored) or decoding them (written onto `out`), as the side is.
 struct Walker {
     ctx: Ctx,
-    mf: Mf,
+    /// The match finder and a chunk's data, of the thread's last walker (allocated once a
+    /// thread: streams are many, and the allocator slow to find room where much is held).
+    mf: Box<Mf>,
+    d: Vec<u8>,
+}
+
+thread_local! {
+    static SPARE: std::cell::RefCell<Option<(Box<Mf>, Vec<u8>)>> = const { std::cell::RefCell::new(None) };
+}
+
+impl Drop for Walker {
+    fn drop(&mut self) {
+        let mf = std::mem::replace(&mut self.mf, Box::new(Mf::empty()));
+        let d = std::mem::take(&mut self.d);
+        SPARE.with(|s| *s.borrow_mut() = Some((mf, d)));
+    }
 }
 
 /// Where the record is one of an encoder: the chunks' parses to code.
@@ -422,7 +442,9 @@ pub type Chunks = Vec<Option<Parse>>;
 
 impl Walker {
     fn new() -> Walker {
-        Walker { ctx: Ctx::new(), mf: Mf::new() }
+        let (mf, d) =
+            SPARE.with(|s| s.borrow_mut().take()).unwrap_or_else(|| (Box::new(Mf::new()), Vec::with_capacity(CHUNK)));
+        Walker { ctx: Ctx::new(), mf, d }
     }
 
     /// One chunk of data `raw` (as the file holds it): its parse coded or decoded, the chunk
@@ -441,7 +463,9 @@ impl Walker {
             }
             return Ok(());
         }
-        let mut d = raw.to_vec();
+        let mut d = std::mem::take(&mut self.d);
+        d.clear();
+        d.extend_from_slice(raw);
         lzx::e8_encode(&mut d);
         let want = want.map(|w| w.as_ref().expect("a parse"));
         let mut parse = Parse::default();
@@ -596,6 +620,7 @@ impl Walker {
             *out = w.out;
             ok.ok_or_else(corrupt)?;
         }
+        self.d = d;
         Ok(())
     }
 
@@ -876,20 +901,38 @@ pub struct Split {
 /// Splits a stream of chunks: None where a chunk does not read whole, or is not [`CHUNK`]
 /// bytes of data (but the last).
 pub fn split(chunks: &[(&[u8], usize)]) -> Result<Split> {
-    let mut data = Vec::with_capacity(chunks.len() * CHUNK);
+    let mut data = vec![0; data_len(chunks)];
+    let (record, cost) = split_into(chunks, &mut data)?;
+    Ok(Split { data, record, cost })
+}
+
+/// Bytes of the data of a stream of chunks.
+pub fn data_len(chunks: &[(&[u8], usize)]) -> usize {
+    chunks.iter().map(|c| c.1).sum()
+}
+
+/// [`split`] with the data written into `data` (of [`data_len`] bytes), as where a container
+/// holds it all: the record, and its cost by what it codes.
+pub fn split_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<(Vec<u8>, [f64; CATS])> {
+    if data.len() != data_len(chunks) {
+        return Err(Error("data of another length"));
+    }
     let mut parses = Vec::with_capacity(chunks.len());
+    let mut at = 0;
     for (i, &(c, n)) in chunks.iter().enumerate() {
         if n == 0 || n > CHUNK || n < CHUNK && i + 1 < chunks.len() {
             return Err(Error("chunks of another size"));
         }
+        let out = &mut data[at..at + n];
+        at += n;
         if c.len() == n {
-            data.extend_from_slice(c);
+            out.copy_from_slice(c);
             parses.push(None);
             continue;
         }
-        let (mut d, p) = lzx::read(c, n).ok_or(Error("a chunk not read"))?;
-        lzx::e8_decode(&mut d);
-        data.extend_from_slice(&d);
+        let (d, p) = lzx::read(c, n).ok_or(Error("a chunk not read"))?;
+        out.copy_from_slice(&d);
+        lzx::e8_decode(out);
         parses.push(Some(p));
     }
     let mut enc = Enc { c: ArithEncoder::new(Vec::new()), cost: [0.0; CATS] };
@@ -897,8 +940,7 @@ pub fn split(chunks: &[(&[u8], usize)]) -> Result<Split> {
     for (raw, p) in data.chunks(CHUNK).zip(&parses) {
         w.chunk(&mut enc, raw, Some(p), None)?;
     }
-    let cost = enc.cost;
-    Ok(Split { data, record: enc.c.finish(), cost })
+    Ok((enc.c.finish(), enc.cost))
 }
 
 /// The stream that `data` and `record` rebuild.
