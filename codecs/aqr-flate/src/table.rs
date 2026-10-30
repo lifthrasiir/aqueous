@@ -14,6 +14,8 @@ const HASH_BITS: u32 = 15;
 const MIN_BITS: u32 = 10;
 /// Entries per bucket of the second table.
 const LW: usize = 1;
+/// The `W` of [`Core::walk`] and its callers for a table of any shape (its fields telling it).
+const ANY: usize = 0;
 /// Entries of the chain ring (twice the window, so that a link is never overwritten while
 /// its position is within the window of any position searched).
 const CHAIN: usize = 2 * WINDOW;
@@ -240,7 +242,8 @@ impl Cands for MultiChain {
 /// A table with `W` entries per bucket of the first table, keyed by `K` bytes (3 or 4), with a
 /// second table if `L`: the searches, insertions and ranking walks, the work per byte or per
 /// miss, are specialized by its shape (each parameter matters for speed); the rest is
-/// `Core`'s, the same for all.
+/// `Core`'s, the same for all. In Wasm the ranking walks are `Core`'s of any shape, made once:
+/// −54 KB of flate-set (−2.3 KB compressed), and no slower there.
 pub struct Table<const W: usize, const K: usize, const L: bool>(Core);
 
 /// The state of a [`Table`], whatever its shape.
@@ -472,7 +475,7 @@ impl Core {
 
     /// Walks the chain of `p` (past the first table's entries if it is that table's),
     /// closest first and within the window, calling `f` on each position until it returns
-    /// false.
+    /// false. `W` = [`ANY`] walks a table of any shape, by its fields.
     #[inline(always)]
     fn walk<const W: usize, const K: usize, const L: bool>(
         &mut self,
@@ -481,8 +484,14 @@ impl Core {
         limit: usize,
         mut f: impl FnMut(usize) -> bool,
     ) {
-        self.ensure::<W, K, L>(d, p);
-        if self.prev.is_empty() || p + K > d.len() {
+        let any = W == ANY;
+        if !any {
+            self.ensure::<W, K, L>(d, p);
+        } else if self.inner.is_none() && self.next < p {
+            self.ensure_any(d, p);
+        }
+        let key = if any { self.key } else { K };
+        if self.prev.is_empty() || p + key > d.len() {
             return;
         }
         let (mut e, skip) = if self.own {
@@ -495,6 +504,8 @@ impl Core {
                 self.linked += 1;
             }
             (self.heads[Self::h3(d, p, self.bits)] as usize, 0)
+        } else if any {
+            (self.bucket_any(self.h1(d, p))[0] as usize, self.ways)
         } else {
             (
                 Self::bucket::<W>(&self.t, self.h1k::<K>(d, p))[0] as usize,
@@ -655,6 +666,53 @@ impl Core {
         }
         if best < 3 { (0, 0) } else { (best, dist) }
     }
+
+    /// [`Cands::rank`] of a table of shape `W`, `K`, `L` (`W` = [`ANY`]: any).
+    #[inline(always)]
+    fn rank_in<const W: usize, const K: usize, const L: bool>(
+        &mut self,
+        d: &[u8],
+        p: usize,
+        len: usize,
+        dist: usize,
+        limit: usize,
+    ) -> Option<usize> {
+        let (mut r, mut found) = (0, None);
+        self.walk::<W, K, L>(d, p, limit, |c| {
+            if p - c >= dist {
+                // Chains go back in order: past the target, it is not there.
+                found = (p - c == dist).then_some(r);
+                return false;
+            }
+            r += (d[c + len - 1] == d[p + len - 1] && common(d, c, p, len) >= len) as usize;
+            true
+        });
+        found
+    }
+
+    /// [`Cands::select`] of a table of shape `W`, `K`, `L` (`W` = [`ANY`]: any).
+    #[inline(always)]
+    fn select_in<const W: usize, const K: usize, const L: bool>(
+        &mut self,
+        d: &[u8],
+        p: usize,
+        len: usize,
+        rank: usize,
+        limit: usize,
+    ) -> Option<usize> {
+        let (mut r, mut found) = (0, None);
+        self.walk::<W, K, L>(d, p, limit, |c| {
+            if d[c + len - 1] == d[p + len - 1] && common(d, c, p, len) >= len {
+                if r == rank {
+                    found = Some(p - c);
+                    return false;
+                }
+                r += 1;
+            }
+            true
+        });
+        found
+    }
 }
 
 impl Cands for Core {
@@ -700,6 +758,25 @@ impl Cands for Core {
             .filter(|&&e| e > 0 && (e as usize - 1) < p)
             .position(|&e| e == target)
     }
+
+    // (of any shape, made once: what the Wasm modules rank by, for their size; natively each
+    // table ranks by its own shape, see `Table`'s)
+    #[inline(never)]
+    fn rank(&mut self, d: &[u8], p: usize, len: usize, dist: usize, limit: usize) -> Option<usize> {
+        self.rank_in::<ANY, 0, false>(d, p, len, dist, limit)
+    }
+
+    #[inline(never)]
+    fn select(
+        &mut self,
+        d: &[u8],
+        p: usize,
+        len: usize,
+        rank: usize,
+        limit: usize,
+    ) -> Option<usize> {
+        self.select_in::<ANY, 0, false>(d, p, len, rank, limit)
+    }
 }
 
 impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
@@ -716,17 +793,10 @@ impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
     }
 
     fn rank(&mut self, d: &[u8], p: usize, len: usize, dist: usize, limit: usize) -> Option<usize> {
-        let (mut r, mut found) = (0, None);
-        self.0.walk::<W, K, L>(d, p, limit, |c| {
-            if p - c >= dist {
-                // Chains go back in order: past the target, it is not there.
-                found = (p - c == dist).then_some(r);
-                return false;
-            }
-            r += (d[c + len - 1] == d[p + len - 1] && common(d, c, p, len) >= len) as usize;
-            true
-        });
-        found
+        #[cfg(not(target_family = "wasm"))]
+        return self.0.rank_in::<W, K, L>(d, p, len, dist, limit);
+        #[cfg(target_family = "wasm")]
+        return self.0.rank(d, p, len, dist, limit);
     }
 
     fn select(
@@ -737,18 +807,10 @@ impl<const W: usize, const K: usize, const L: bool> Cands for Table<W, K, L> {
         rank: usize,
         limit: usize,
     ) -> Option<usize> {
-        let (mut r, mut found) = (0, None);
-        self.0.walk::<W, K, L>(d, p, limit, |c| {
-            if d[c + len - 1] == d[p + len - 1] && common(d, c, p, len) >= len {
-                if r == rank {
-                    found = Some(p - c);
-                    return false;
-                }
-                r += 1;
-            }
-            true
-        });
-        found
+        #[cfg(not(target_family = "wasm"))]
+        return self.0.select_in::<W, K, L>(d, p, len, rank, limit);
+        #[cfg(target_family = "wasm")]
+        return self.0.select(d, p, len, rank, limit);
     }
 }
 
@@ -806,6 +868,10 @@ impl<const W: usize, const K: usize, const L: bool> Search for Table<W, K, L> {
     }
 
     fn cands(&mut self) -> &mut dyn Cands {
-        self
+        // (in Wasm, `Core`'s: the ranking walks of any shape, made once)
+        #[cfg(target_family = "wasm")]
+        return &mut self.0;
+        #[cfg(not(target_family = "wasm"))]
+        return self;
     }
 }

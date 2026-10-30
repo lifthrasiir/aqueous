@@ -4707,7 +4707,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flac-recons.wasm" title="crates/aqr-modules/wasm/flac-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md" title="codecs/aqr-flac/FORMAT.md">R</a>
     <tr>
-      <td><code>ff3bbd1bfc7a81b3127c96c215a84687888003f0884b35853b4dc67b27a6f985</code>
+      <td><code>d0eac1ce671e3d35d57d1e6e03cd00c3d474540d50f542b09a24d503fb338384</code>
       <td>flate-set@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flate-set.wasm" title="crates/aqr-modules/wasm/flate-set.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md" title="codecs/aqr-flate/FORMAT.md">R</a>
