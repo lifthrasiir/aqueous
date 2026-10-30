@@ -31,6 +31,7 @@ pub mod aqr;
 pub mod packed;
 pub mod patch;
 pub mod probe;
+pub mod store;
 
 use std::borrow::Cow;
 use std::fmt;
@@ -227,6 +228,24 @@ impl Bytes {
         }
         let Repr::Owned(v) = &mut self.0 else { unreachable!() };
         v
+    }
+
+    /// Its first `len` bytes only.
+    pub fn prefix(self, len: usize) -> Bytes {
+        struct Prefix(Arc<dyn AsRef<[u8]> + Send + Sync>, usize);
+        impl AsRef<[u8]> for Prefix {
+            fn as_ref(&self) -> &[u8] {
+                &(*self.0).as_ref()[..self.1]
+            }
+        }
+        match self.0 {
+            Repr::Owned(mut v) => {
+                v.truncate(len);
+                Bytes(Repr::Owned(v))
+            }
+            Repr::Shared(d) if len >= (*d).as_ref().len() => Bytes(Repr::Shared(d)),
+            Repr::Shared(d) => Bytes::shared(Arc::new(Prefix(d, len))),
+        }
     }
 
     pub fn into_vec(self) -> Vec<u8> {

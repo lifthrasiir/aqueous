@@ -1963,7 +1963,7 @@ impl Archive<'_, '_> {
     /// The file of an archive of a single file, written to `sink` as it is evaluated: of a
     /// single leaf, a formula's output that is a concatenation of parts ([`run`]) is not held
     /// whole, but written as each part is made. Returns its length.
-    pub fn write_file(&self, threads: usize, sink: &mut (dyn FnMut(&[u8]) -> Decoded<()> + Send)) -> Decoded<u64> {
+    pub fn write_file(&self, threads: usize, sink: &mut Sink) -> Decoded<u64> {
         if self.tree.is_some() {
             return invalid("an archive of a tree");
         }
@@ -1977,7 +1977,7 @@ impl Archive<'_, '_> {
             n += d.len() as u64;
             sink(d)
         };
-        let streaming: Mutex<&mut (dyn FnMut(&[u8]) -> Decoded<()> + Send)> = Mutex::new(&mut counted);
+        let streaming: Mutex<&mut Sink> = Mutex::new(&mut counted);
         self.each_leaf_into(threads, Some(&streaming), |_, outputs| {
             let mut sink = streaming.lock().unwrap();
             outputs?.iter().try_for_each(|d| sink(d))
@@ -1990,7 +1990,7 @@ impl Archive<'_, '_> {
     fn each_leaf_into(
         &self,
         threads: usize,
-        sink: Option<&Mutex<&mut (dyn FnMut(&[u8]) -> Decoded<()> + Send)>>,
+        sink: Option<&Mutex<&mut Sink>>,
         f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
     ) -> Decoded<()> {
         let blocks = &self.blocks;
@@ -2814,6 +2814,9 @@ impl Contents<'_, '_> {
         }
     }
 }
+
+/// What takes the bytes of a file as it is decoded ([`Archive::write_file`]).
+pub type Sink<'a> = dyn FnMut(&[u8]) -> Decoded<()> + Send + 'a;
 
 /// Where the output of a formula block of one output may be written out as it is evaluated:
 /// the values it is the concatenation of (through Concat instructions, at any depth), each by

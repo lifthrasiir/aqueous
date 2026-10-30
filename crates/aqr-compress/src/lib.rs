@@ -113,6 +113,7 @@ pub mod mapped;
 mod memory;
 mod progress;
 mod sets;
+pub mod spill;
 mod verify;
 mod zip;
 
@@ -183,6 +184,10 @@ pub struct Options {
     /// Of an archive of several files: about the most bytes of files made at once (a file
     /// longer is a batch of its own), which bounds the memory taken.
     pub batch: usize,
+    /// Where large buffers of streams are kept rather than on the heap ([`spill::Spill`], a
+    /// file made there and gone once done; beside the output, as a temporary directory may be
+    /// on another drive): the system writes them out as memory runs short. None by default.
+    pub spill: Option<std::path::PathBuf>,
 }
 
 /// Streams shorter than this are not taken as held by the files archived together ([`Held`]):
@@ -259,6 +264,7 @@ impl Default for Options {
             block: 16 << 20,
             set_bytes: 64 << 20,
             batch: 512 << 20,
+            spill: None,
         }
     }
 }
@@ -565,6 +571,7 @@ fn compress_with(
         }
     };
     note(Note::Batch { batch: 0, bytes: d.len() as u64, verify: opt.verify, contents: vec![0] });
+    let _spill = spilling(opt);
     note(Note::Started(0));
     let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
     let mut cx = Cx::new(d, opt);
@@ -576,6 +583,13 @@ fn compress_with(
     let r = finish(f, d, opt, &cx, memo, kept, notes.as_ref());
     note(Note::Written(0));
     r
+}
+
+/// The spill of [`Options::spill`] as the store of large buffers, while the guard is kept (and
+/// the heap where it cannot be made).
+pub(crate) fn spilling(opt: &Options) -> Option<aqr_formula::store::Guard> {
+    let spill = spill::Spill::create(opt.spill.as_ref()?).ok()?;
+    Some(aqr_formula::store::set(Some(Arc::new(spill))))
 }
 
 /// The archive of formula `f` of `d`; with [`Options::verify`], decoded and compared with `d`
@@ -726,9 +740,14 @@ impl Made {
     fn cut(self, d: &[u8]) -> Formula {
         let Made { mut f, gaps } = self;
         if let Some(gaps) = gaps {
-            let mut data = Vec::with_capacity(gaps.iter().map(Range::len).sum());
-            gaps.into_iter().for_each(|g| data.extend_from_slice(&d[g]));
-            f.streams[0].data = data.into();
+            // (of the store where it is large, see [`Options::spill`])
+            let mut data = aqr_formula::store::Buffer::new(gaps.iter().map(Range::len).sum());
+            let mut at = 0;
+            for g in gaps {
+                data[at..at + g.len()].copy_from_slice(&d[g.clone()]);
+                at += g.len();
+            }
+            f.streams[0].data = data.into_bytes();
         }
         f
     }
@@ -790,6 +809,8 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
             .flatten()
         }),
     }?;
+    let mut f = f;
+    aqr_formula::store::spill_streams(&mut f);
     if format == Format::Text {
         cx.note_coded(&f, d);
     }
@@ -835,6 +856,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
             }
         }
         place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets, opt);
+        aqr_formula::store::spill_streams(&mut f);
     }
     // the contents' put off, but those taken into a set
     let deferred: Vec<_> = cx.deferred.borrow_mut().drain(mark..).collect();
@@ -1196,7 +1218,8 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         own.once = once.clone();
         own.ready.borrow_mut().extend(std::mem::take(&mut *ready[i].lock().unwrap()));
         files.inspect(|f| f.tell(d.as_ptr(), false));
-        let child = made(d, opt, depth + 1, *nest, &own).filter(|c| !c.f.applies().is_empty());
+        let mut child = made(d, opt, depth + 1, *nest, &own).filter(|c| !c.f.applies().is_empty());
+        child.iter_mut().for_each(|c| aqr_formula::store::spill_streams(&mut c.f));
         files.inspect(|f| f.tell(d.as_ptr(), true));
         (child, own.deferred.into_inner())
     });

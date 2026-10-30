@@ -64,7 +64,8 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     let stored = |p: &Part| p.chunks.is_empty();
     let lens: Vec<usize> =
         parts.iter().map(|p| if stored(p) { p.span.len() } else { aqr_lzx::recons::data_len(&p.chunks) }).collect();
-    let mut raw = vec![0u8; lens.iter().sum()];
+    // (of the store where one is set: aqr-compress's spill, see aqr_formula::store)
+    let mut raw = aqr_formula::store::Buffer::new(lens.iter().sum());
     let mut outs: Vec<Mutex<Option<&mut [u8]>>> = Vec::with_capacity(parts.len());
     let mut left = &mut raw[..];
     for &n in &lens {
@@ -144,7 +145,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     }
     close(&mut pieces, &mut rest, &mut f, at, input.len());
     raw.truncate(to);
-    f.streams[0].data = raw.into();
+    f.streams[0].data = raw.into_bytes();
     let nodes: Vec<Node> = pieces
         .into_iter()
         .map(|p| match p {

@@ -1,8 +1,9 @@
 //! Peak heap of archiving each file (recompression, the archive and its verification) and of
 //! extracting it, as aqr-show does them, and the process's peak resident set.
 //!
-//! usage: aqr-compress-memprobe [-t THREADS] [-e] FILE... (`-e` as in aqr-show); `LOG=MB` logs the
-//! allocations of at least that many MB, with where they were made.
+//! usage: aqr-compress-memprobe [-t THREADS] [-e] [-s SPILL] FILE... (`-e` as in aqr-show; `-s`
+//! a spill there, `Options::spill`); `LOG=MB` logs the allocations of at least that many MB,
+//! with where they were made.
 
 use aqr_common::mem::{self, Counting};
 use aqr_compress::{Nest, Options};
@@ -19,6 +20,7 @@ fn main() {
         match &*arg {
             "-t" => opt.threads = args.next().and_then(|s| s.parse().ok()).expect("-t THREADS"),
             "-e" => opt.file = Nest::Exact,
+            "-s" => opt.spill = args.next().map(Into::into),
             _ => files.push(arg),
         }
     }

@@ -110,7 +110,7 @@ fn applications_in_order() {
         .iter()
         .map(|n| match n {
             aqr_formula::Node::Apply(_) => "apply",
-            &aqr_formula::Node::Slice { stream: 0, len, .. } if len == 2900 => "resource",
+            aqr_formula::Node::Slice { stream: 0, len: 2900, .. } => "resource",
             aqr_formula::Node::Slice { stream: 1, .. } => "rest",
             n => panic!("{n:?}"),
         })

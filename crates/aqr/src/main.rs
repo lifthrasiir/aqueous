@@ -269,6 +269,12 @@ impl aqr_compress::Source for Gathered {
 fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String> {
     output(out, a.force)?;
     let start = Instant::now();
+    // large buffers kept in a file beside the output (gone once done), not on the heap
+    let mut opt = a.opt.clone();
+    let mut name = out.file_name().ok_or(format!("{}: not a file's name", out.display()))?.to_owned();
+    name.push(format!(".{}.spill", std::process::id()));
+    opt.spill = Some(out.with_file_name(name));
+    let opt = &opt;
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
     // a single file: an archive of the file alone
@@ -286,7 +292,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         };
         let view = view::View::new(&g, bars(), false);
         // (of the kind its name tells, as a file in an archive of many)
-        let (c, f) = viewed(a, &view, |tell| compress_formula_telling(&d, kind, &a.opt, tell));
+        let (c, f) = viewed(a, &view, |tell| compress_formula_telling(&d, kind, opt, tell));
         aqr_compress::Source::intact(&g, 0).map_err(|e| e.to_string())?;
         write_whole(out, a.force, |w| w.write_all(&c))?;
         if !a.quiet && a.verbose {
@@ -336,7 +342,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     // written as it is made
     let r = write_whole(out, a.force, |file| {
         let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
-        viewed(a, &view, |tell| compress_tree_to(&g.tree, &g, &a.opt, &mut w, tell).and_then(|r| w.flush().map(|_| r)))
+        viewed(a, &view, |tell| compress_tree_to(&g.tree, &g, opt, &mut w, tell).and_then(|r| w.flush().map(|_| r)))
     })?;
     if !a.quiet {
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));

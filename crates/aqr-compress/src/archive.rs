@@ -181,6 +181,7 @@ pub fn compress_tree_to<S: Source + ?Sized>(
     tell: &(dyn Fn(Event) + Sync),
 ) -> io::Result<Report> {
     let (tracker, notes) = Tracker::new((0..src.len()).map(|c| src.size(c)).collect());
+    let _spill = crate::spilling(opt);
     std::thread::scope(|s| {
         s.spawn(|| tracker.run(tell));
         // (the notes gone with it, the tracker done)

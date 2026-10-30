@@ -4,6 +4,7 @@
 
 use std::borrow::Cow;
 
+use aqr_formula::store::Buffer;
 use aqr_formula::{Formula, Kind, Node};
 
 use crate::{File, Piece};
@@ -48,10 +49,11 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
     let mut f = Formula::default();
     f.push_content("raw", Kind::Unknown, Vec::new());
     f.push(REST, Vec::new());
-    // the data of each stream, and the streams by kind
-    let mut data: Vec<Vec<u8>> = vec![Vec::new(), Vec::new()];
+    // the stream of each piece, the streams by kind, and their lengths
+    let mut lens: Vec<usize> = vec![0, 0];
     let mut kinds: Vec<(Kind, usize)> = vec![(Kind::Unknown, RAW_AT)];
     let mut parts = Vec::with_capacity(pieces.len());
+    let mut of = Vec::with_capacity(pieces.len());
     for p in pieces {
         let s = match p.file {
             None => REST_AT,
@@ -65,18 +67,24 @@ pub fn build(input: &[u8], files: &[File], pieces: &[Piece], opt: &Options) -> F
                             kind => format!("iso/{kind}").into(),
                         };
                         f.push_content(class, kind, Vec::new());
-                        data.push(Vec::new());
-                        kinds.push((kind, data.len() - 1));
-                        data.len() - 1
+                        lens.push(0);
+                        kinds.push((kind, lens.len() - 1));
+                        lens.len() - 1
                     }
                 }
             }
         };
-        parts.push(Node::slice(s, data[s].len() as u64, p.span.len() as u64));
-        data[s].extend_from_slice(&input[p.span.clone()]);
+        parts.push(Node::slice(s, lens[s] as u64, p.span.len() as u64));
+        of.push((s, lens[s]));
+        lens[s] += p.span.len();
+    }
+    // (of the store where one is set: aqr-compress's spill, see aqr_formula::store)
+    let mut data: Vec<Buffer> = lens.iter().map(|&n| Buffer::new(n)).collect();
+    for (p, &(s, at)) in pieces.iter().zip(&of) {
+        data[s][at..at + p.span.len()].copy_from_slice(&input[p.span.clone()]);
     }
     for (s, d) in data.into_iter().enumerate() {
-        f.streams[s].data = d.into();
+        f.streams[s].data = d.into_bytes();
     }
     f.root = Node::concat(parts);
     debug_assert_eq!(f.root.len(), input.len() as u64);

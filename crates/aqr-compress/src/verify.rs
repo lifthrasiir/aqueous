@@ -41,7 +41,8 @@ fn key(a: &Apply, inputs: &[&[u8]]) -> Key {
 
 /// An application's output: its bytes, or a range of a file (by index).
 enum Output {
-    Bytes(Arc<Vec<u8>>),
+    /// (of the store where one is set, see [`crate::Options::spill`])
+    Bytes(aqr_formula::Bytes),
     File(usize, Range<usize>),
 }
 
@@ -90,7 +91,11 @@ impl Modules for Recording {
 
     fn keep(&self, a: &Apply, out: Vec<u8>) {
         if let Some(k) = self.keys.lock().unwrap().remove(&(a as *const Apply as usize)) {
-            self.seen.lock().unwrap().push((k, Output::Bytes(Arc::new(out))));
+            // (moved to the store where one is set, see [`crate::Options::spill`])
+            let mut b = aqr_formula::store::Buffer::new(out.len());
+            b.copy_from_slice(&out);
+            drop(out);
+            self.seen.lock().unwrap().push((k, Output::Bytes(b.into_bytes())));
         }
     }
 
@@ -155,7 +160,7 @@ impl Modules for Cached<'_> {
             None => self.native.apply(a, inputs),
         };
         match hit {
-            Some(Output::Bytes(out)) => Ok(Arc::try_unwrap(out).unwrap_or_else(|out| out.to_vec())),
+            Some(Output::Bytes(out)) => Ok(out.into_vec()),
             Some(Output::File(i, range)) => file(i, range),
             None => {
                 let ran = self.ran.lock().unwrap().get(&k).copied();
