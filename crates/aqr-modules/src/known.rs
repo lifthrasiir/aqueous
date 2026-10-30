@@ -4,6 +4,66 @@ use crate::{Known, hex};
 
 pub const KNOWN: &[Known] = &[
     Known {
+        name: "bcj-arm",
+        version: 1,
+        sha512_256: hex("6ca13cc1b6a8a6903499500a7a86b27252171e828d998fa103cbf1a1c4b5a17e"),
+        block: include_bytes!("../wasm/bcj-arm.block"),
+    },
+    Known {
+        name: "bcj-arm64",
+        version: 1,
+        sha512_256: hex("e4e16f0bd138eccbb241717f41cf00264fb723ee2e1bdbf454be1792d5d151ed"),
+        block: include_bytes!("../wasm/bcj-arm64.block"),
+    },
+    Known {
+        name: "bcj-armthumb",
+        version: 1,
+        sha512_256: hex("0efe66d21efac48dd387e69af7f2f1f1daecf059f862bc2d8702d705171d0953"),
+        block: include_bytes!("../wasm/bcj-armthumb.block"),
+    },
+    Known {
+        name: "bcj-delta",
+        version: 1,
+        sha512_256: hex("eb244dca1a97d0aa864b9e1f04ca6a9876d3ff8e480ee4446f09c1ed4f4cdb1f"),
+        block: include_bytes!("../wasm/bcj-delta.block"),
+    },
+    Known {
+        name: "bcj-ia64",
+        version: 1,
+        sha512_256: hex("01a3a81cd83385c1e7147a1796f5479b61aee3197fe54b92de8576089770a65d"),
+        block: include_bytes!("../wasm/bcj-ia64.block"),
+    },
+    Known {
+        name: "bcj-powerpc",
+        version: 1,
+        sha512_256: hex("20baa7c849d586b1ceb8f389d21fdd7828b592000044c65c375783bb76f8f3fc"),
+        block: include_bytes!("../wasm/bcj-powerpc.block"),
+    },
+    Known {
+        name: "bcj-riscv",
+        version: 1,
+        sha512_256: hex("f84430b7f9952ee6696b704b9825cc2b444ac0ad87ab9da165f6c66cf8ce39c4"),
+        block: include_bytes!("../wasm/bcj-riscv.block"),
+    },
+    Known {
+        name: "bcj-sparc",
+        version: 1,
+        sha512_256: hex("db4f3057d52d06b04bd4404473b43ca73753ccd184f1b0af05d32009631463aa"),
+        block: include_bytes!("../wasm/bcj-sparc.block"),
+    },
+    Known {
+        name: "bcj-x86",
+        version: 1,
+        sha512_256: hex("975b68276de3e255196440f029fe4c944f221302ea845dbbc087e12db109a969"),
+        block: include_bytes!("../wasm/bcj-x86.block"),
+    },
+    Known {
+        name: "bcj2",
+        version: 1,
+        sha512_256: hex("9ce596ae96ccd5f35a279db9fa76a05776a77ec9107553e2e18f1c0de6a0fd0e"),
+        block: include_bytes!("../wasm/bcj2.block"),
+    },
+    Known {
         name: "bcn-recons",
         version: 1,
         sha512_256: hex("d0cc34fbe88863358b8005a8a320685077d26c21e36753d95cbf43a53c2d2f08"),

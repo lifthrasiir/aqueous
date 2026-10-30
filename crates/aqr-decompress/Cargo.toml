@@ -32,6 +32,7 @@ aqr-git = { path = "../../codecs/aqr-git" }
 aqr-flac = { path = "../../codecs/aqr-flac" }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg" }
 aqr-lz4 = { path = "../../codecs/aqr-lz4" }
+aqr-bcj = { path = "../../codecs/aqr-bcj" }
 aqr-lzma = { path = "../../codecs/aqr-lzma" }
 aqr-lzo = { path = "../../codecs/aqr-lzo" }
 aqr-lzx = { path = "../../codecs/aqr-lzx" }
@@ -68,6 +69,7 @@ windows-sys = { version = "0.61", optional = true, features = [
 ] }
 
 [dev-dependencies]
+aqr-7z = { path = "../../codecs/aqr-7z" }
 wat = "1"
 
 # Tools are named <crate>-<tool>, so that names do not collide in the workspace's target

@@ -86,6 +86,21 @@ pub const LZMA: Module = aqr_lzma::formula::MODULE;
 /// the segments'.
 pub const LZMA2: Module = aqr_lzma::formula::LZMA2;
 
+/// The filters of xz and 7z (aqr-bcj): a branch converter's encoding of the data (x86, PowerPC,
+/// IA-64, ARM, ARM Thumb, SPARC, ARM64, RISC-V; parameters: the start address, le32 or none),
+/// Delta's (parameters: the distance less one), and BCJ2's main, call and jump streams (inputs:
+/// the data, and the range coder's stream). No resources.
+pub const BCJ_X86: Module = aqr_bcj::formula::X86;
+pub const BCJ_POWERPC: Module = aqr_bcj::formula::POWERPC;
+pub const BCJ_IA64: Module = aqr_bcj::formula::IA64;
+pub const BCJ_ARM: Module = aqr_bcj::formula::ARM;
+pub const BCJ_ARM_THUMB: Module = aqr_bcj::formula::ARM_THUMB;
+pub const BCJ_SPARC: Module = aqr_bcj::formula::SPARC;
+pub const BCJ_ARM64: Module = aqr_bcj::formula::ARM64;
+pub const BCJ_RISCV: Module = aqr_bcj::formula::RISCV;
+pub const BCJ_DELTA: Module = aqr_bcj::formula::DELTA;
+pub const BCJ2: Module = aqr_bcj::formula::BCJ2;
+
 /// aqr-lzo reconstruction of LZO1X streams, one after another, from their data and records.
 /// Inputs: the data, the records and the index cutting them into the streams'.
 pub const LZO: Module = aqr_lzo::formula::MODULE;
@@ -184,7 +199,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 45] = [
+pub const MODULES: [Module; 55] = [
     X86,
     ARM64,
     CIL,
@@ -193,6 +208,16 @@ pub const MODULES: [Module; 45] = [
     LZ4,
     LZMA,
     LZMA2,
+    BCJ_X86,
+    BCJ_POWERPC,
+    BCJ_IA64,
+    BCJ_ARM,
+    BCJ_ARM_THUMB,
+    BCJ_SPARC,
+    BCJ_ARM64,
+    BCJ_RISCV,
+    BCJ_DELTA,
+    BCJ2,
     LZO,
     LZX,
     SNAPPY,
@@ -457,6 +482,9 @@ impl Native {
             aqr_git::formula::decode_index(params, inputs, len, threads).map_err(msg)
         } else if let Some((_, decode)) = RECONS.iter().find(|r| r.0 == m) {
             decode(params, resources, inputs, len, threads)
+        } else if let Some(out) = aqr_bcj::formula::decode(m, params, inputs, len) {
+            none(resources)?;
+            out.map_err(msg)
         } else {
             Err("unknown module".into())
         }

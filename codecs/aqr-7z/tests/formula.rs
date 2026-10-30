@@ -3,6 +3,9 @@ use aqr_formula::{Apply, Formula, Kind, Node};
 
 fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+        if let Some(r) = aqr_bcj::formula::decode(a.module, &a.params, inputs, a.len) {
+            return r.map_err(|e| aqr_formula::Error::new(e.to_string()));
+        }
         let decode = match a.module.name {
             "lzma-recons" => aqr_lzma::formula::decode,
             "lzma2-recons" => aqr_lzma::formula::decode2,
@@ -45,19 +48,18 @@ fn slices(f: &Formula, min: u64) -> Vec<Vec<u8>> {
 
 #[test]
 fn archives_rebuilt() {
-    for (name, d) in fixtures() {
+    for (name, d) in fixtures().into_iter().filter(|f| !f.0.starts_with("filter-")) {
         assert!(formula::starts(&d) && formula::extent(&d) == Some(d.len()), "{name}");
         let opt = Options { threads: 2, kind, ..Options::default() };
         let f = formula::encode_with(&d, &opt).unwrap_or_else(|| panic!("{name}"));
         assert!(eval(&f).unwrap() == d, "{name}");
-        // every file of 1 KiB or more a slice of its own (that of the PE file but in a folder of
-        // BCJ, left as it is)
+        // every file of 1 KiB or more a slice of its own (the PE file's in a folder of BCJ too)
         let sums = formula::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
         assert_eq!(sums.len(), 7, "{name}");
         let own: Vec<u32> = slices(&f, 1024).iter().map(|s| crc32fast::hash(s)).collect();
         let found = sums.iter().filter(|&&(c, n)| n >= 1024 && own.contains(&c)).count();
         let large = sums.iter().filter(|s| s.1 >= 1024).count();
-        assert_eq!(found, large - (name != "copy") as usize, "{name}");
+        assert_eq!(found, large, "{name}");
         // text by its name
         let text: usize = f.streams.iter().filter(|s| s.kind == Kind::Text).map(|s| s.data.len()).sum();
         assert!(text >= 2 * 32768, "{name}");
@@ -67,6 +69,22 @@ fn archives_rebuilt() {
         } else {
             assert!(!f.applies().is_empty(), "{name}");
         }
+    }
+}
+
+/// Archives of a PE file and a text through 7-Zip's other filters: rebuilt from the files.
+#[test]
+fn filters_rebuilt() {
+    let fixtures: Vec<_> = fixtures().into_iter().filter(|f| f.0.starts_with("filter-")).collect();
+    assert_eq!(fixtures.len(), 6);
+    for (name, d) in fixtures {
+        let f = formula::encode(&d, 2).unwrap_or_else(|| panic!("{name}"));
+        assert!(eval(&f).unwrap() == d, "{name}");
+        let sums = formula::entry_sums(&mut |r| d.get(r.start as usize..r.end as usize).map(<[u8]>::to_vec));
+        let own: Vec<u32> = slices(&f, 1024).iter().map(|s| crc32fast::hash(s)).collect();
+        assert!(sums.len() == 2 && sums.iter().all(|s| own.contains(&s.0)), "{name}");
+        let module = if name == "filter-bcj2" { "bcj2" } else { "bcj-" };
+        assert!(f.applies().iter().any(|a| a.module.name.starts_with(module)), "{name}");
     }
 }
 

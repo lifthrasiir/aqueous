@@ -3,7 +3,8 @@
 format, in fast and normal modes and with other literal and position bits; tests/data/*.lzma2:
 raw LZMA2 streams of them (and of an input mixing text with random bytes, for stored chunks and
 several LZMA chunks); tests/data/*.xz: .xz files of every check, of several blocks, of several
-streams with padding between.
+streams with padding between, and of every filter before LZMA2 (of tests/data/filters.bin,
+bytes of which many are those the filters look for).
 
     python3 -I scripts/gen-fixtures.py   # needs xz on the PATH
 """
@@ -60,6 +61,26 @@ XZ = {
     'blocks': ['-T2', '--block-size=64KiB'],
 }
 
+def biased():
+    r = random.Random(3)
+    special = [0xe8, 0xe9, 0x00, 0xff, 0x0f, 0x80, 0x85, 0xeb, 0x94, 0x90, 0x48, 0x40, 0xf0, 0xf8, 0x01, 0x6f,
+               0x17, 0x97, 0xef, 0x10, 0x16, 0x05]
+    return bytes(r.choice(special) if r.random() < 0.6 else r.randrange(256) for _ in range(16384))
+
+FILTERS = {
+    'x86': ['--x86'],
+    'x86-start': ['--x86=start=4096'],
+    'powerpc': ['--powerpc'],
+    'ia64': ['--ia64'],
+    'arm': ['--arm'],
+    'armthumb': ['--armthumb'],
+    'sparc': ['--sparc'],
+    'arm64': ['--arm64'],
+    'riscv': ['--riscv'],
+    'delta': ['--delta=dist=4'],
+    'chain': ['--delta=dist=2', '--x86'],
+}
+
 def xz(data, args):
     return subprocess.run(['xz', '-c'] + args, input=data, capture_output=True, check=True).stdout
 
@@ -81,6 +102,10 @@ def main():
     # two streams with 8 bytes of padding between and 4 after, and an empty file's stream
     write('streams.xz', xz(ins['text'], ['-T1']) + bytes(8) + xz(ins['binary'], ['-T1', '-1']) + bytes(4))
     write('empty.xz', xz(b'', ['-T1']))
+    code = biased()
+    write('filters.bin', code)
+    for v, args in FILTERS.items():
+        write(f'filter-{v}.xz', xz(code, ['-T1'] + args + ['--lzma2=preset=6']))
     for name, data in inputs().items():
         for v, args in VARIANTS.items():
             if name in ('empty', 'one') and v != 'p6':

@@ -268,6 +268,27 @@ fn xz_same_as_wasm() {
     }
 }
 
+/// `.xz` files of filters and 7z archives of BCJ2 and other filters (aqr-bcj's modules)
+/// natively and as WebAssembly alike.
+#[test]
+fn filters_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let mut formulas = Vec::new();
+    for t in ["x86", "powerpc", "ia64", "arm", "armthumb", "sparc", "arm64", "riscv", "delta", "chain"] {
+        let d = fixture(&format!("codecs/aqr-lzma/tests/data/filter-{t}.xz"));
+        formulas.push((t, aqr_lzma::formula::encode_xz(&d, 1).unwrap(), d));
+    }
+    for t in ["bcj2", "arm64", "delta"] {
+        let d = fixture(&format!("codecs/aqr-7z/tests/data/filter-{t}.7z"));
+        formulas.push((t, aqr_7z::formula::encode(&d, 1).unwrap(), d));
+    }
+    for (t, f, d) in formulas {
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+    }
+}
+
 /// lzop files natively and as WebAssembly alike, and their records damaged in turn failing alike
 /// (or giving the same).
 #[test]

@@ -5,6 +5,8 @@
 
 use aqr_formula::{Apply, Formula, Module, Node};
 
+use aqr_bcj::formula::{self as bcj, Filter};
+
 use crate::{alone, lzma2, recons, xz};
 
 pub use crate::module::{decode, decode2, index};
@@ -80,44 +82,78 @@ pub fn extent_xz(d: &[u8]) -> Option<usize> {
     xz::parse(d).map(|s| s.end)
 }
 
-/// The data of the blocks of LZMA2 alone of the `.xz` file `d`, those that decode, one after
-/// another: what [`encode_xz`]'s formula holds as data. None where there is none.
+/// The filters of an `.xz` block before its LZMA2, if aqr-bcj has them all.
+fn filters(b: &xz::Block) -> Option<Vec<Filter>> {
+    b.filters.iter().map(|(id, p)| Filter::from_xz(*id, p)).collect()
+}
+
+/// The data of the blocks of the `.xz` file `d` ending with LZMA2 (after their filters, those
+/// of aqr-bcj), those that decode, one after another: what [`encode_xz`]'s formula holds as
+/// data, mostly. None where there is none.
 pub fn data_xz(d: &[u8]) -> Option<Vec<u8>> {
     let mut data = Vec::new();
     for b in xz::parse(d)?.blocks {
+        let Some(fs) = filters(&b) else { continue };
         let Ok(dec) = lzma2::decode(&d[b.stream], LIMIT - data.len()) else { continue };
-        dec.segments.iter().for_each(|s| data.extend_from_slice(&s.data));
+        let mut x: Vec<u8> = dec.segments.into_iter().flat_map(|s| s.data).collect();
+        fs.iter().rev().for_each(|f| f.decode(&mut x));
+        data.extend_from_slice(&x);
     }
     (!data.is_empty()).then_some(data)
 }
 
-/// The formula rebuilding `input`, an `.xz` file: its blocks of LZMA2 alone (as far as they
+/// The formula rebuilding `input`, an `.xz` file: its blocks ending with LZMA2 (as far as they
 /// split, of [`LIMIT`] bytes of data in all) by one application of [`LZMA2`], an output each,
-/// the rest of the file as it is. None where it is not one or no block splits.
+/// the rest of the file as it is. The data of a block of filters (aqr-bcj's) is that before
+/// them, their modules applied to it, where encoding it gives back the filtered data (else the
+/// filtered data). None where it is not one or no block splits.
 pub fn encode_xz(input: &[u8], threads: usize) -> Option<Formula> {
     let blocks = xz::parse(input)?.blocks;
     // (a block's segments on the threads where it is alone, else the blocks)
     let inner = if blocks.len() == 1 { threads } else { 1 };
     let splits = aqr_common::pool::par_map(blocks.len(), threads, |i| {
         let b = &blocks[i];
-        lzma2::split(&input[b.stream.clone()], b.dict, LIMIT, inner).ok()
+        let fs = filters(b)?;
+        let sp = lzma2::split(&input[b.stream.clone()], b.dict, LIMIT, inner).ok()?;
+        let unfiltered = match fs.is_empty() {
+            true => None,
+            false => {
+                let x: Vec<u8> = sp.iter().flat_map(|x| x.data.iter().copied()).collect();
+                bcj::unfilter(&fs, &x).map(|d| (fs, d))
+            }
+        };
+        Some((sp, unfiltered))
     });
     let (mut container, mut data, mut records, mut lens) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    // the pieces of the file: bytes of the container, or the output of a block
+    // the pieces of the file: bytes of the container, or the output of a block; and the data of
+    // each block taken: its span in the data, and its filters
     let mut pieces: Vec<Result<(usize, usize), usize>> = Vec::new();
+    let mut spans: Vec<(usize, usize, Vec<Filter>)> = Vec::new();
     let (mut sizes, mut at) = (Vec::new(), 0);
     for (b, sp) in blocks.iter().zip(splits) {
-        let Some(sp) = sp.filter(|sp| data.len() + sp.iter().map(|x| x.data.len()).sum::<usize>() <= LIMIT) else {
+        let Some((sp, unfiltered)) =
+            sp.filter(|sp| data.len() + sp.0.iter().map(|x| x.data.len()).sum::<usize>() <= LIMIT)
+        else {
             continue;
         };
         pieces.push(Ok((container.len(), b.stream.start - at)));
         container.extend_from_slice(&input[at..b.stream.start]);
         pieces.push(Err(sizes.len()));
         sizes.push(b.stream.len() as u64);
-        for x in sp {
+        let start = data.len();
+        for x in &sp {
             lens.push((x.data.len(), x.record.len()));
-            data.extend_from_slice(&x.data);
             records.extend_from_slice(&x.record);
+        }
+        match unfiltered {
+            Some((fs, d)) => {
+                data.extend_from_slice(&d);
+                spans.push((start, d.len(), fs));
+            }
+            None => {
+                sp.iter().for_each(|x| data.extend_from_slice(&x.data));
+                spans.push((start, data.len() - start, Vec::new()));
+            }
         }
         at = b.stream.end;
     }
@@ -128,7 +164,10 @@ pub fn encode_xz(input: &[u8], threads: usize) -> Option<Formula> {
     container.extend_from_slice(&input[at..]);
     let mut f = Formula::default();
     f.push("xz", container);
-    let inputs = vec![f.push("raw", data), f.push("lzma2/record", records), f.push("lzma2/index", index(&lens))];
+    f.push("raw", data);
+    let data =
+        Node::concat(spans.into_iter().map(|(a, n, fs)| bcj::apply(&fs, Node::slice(1, a as u64, n as u64), n as u64)));
+    let inputs = vec![data, f.push("lzma2/record", records), f.push("lzma2/index", index(&lens))];
     let mut outputs: Vec<Option<Node>> = match sizes.len() {
         1 => vec![Some(Node::apply(LZMA2, Vec::new(), inputs, sizes[0]))],
         _ => {

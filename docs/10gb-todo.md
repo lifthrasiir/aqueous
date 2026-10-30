@@ -96,7 +96,7 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
 - `benchmarks/simple/w8002` 99.3 / 100.0, 난수
 - `www.mattmahoney.net/dc/mingw_benchmark.zpaq` 88.3 / 88.3, `silesia.zpaq` 47.8 / 47.8, 그대로(7번)
 - `hg19/chr2.fa` 55.3 / 248.1, `chr1.fa` 51.7 / 254.2
-- `mingw/mingw480/x32-4.8.0-release-win32-sjlj-rev1.7z` 37.1 / 37.1, 그대로(6번)
+- `mingw/mingw480/x32-4.8.0-release-win32-sjlj-rev1.7z` 37.1 / 37.1, 그대로(6번; aqr-7z 이후 재지 않았다)
 - `www.mattmahoney.net/dc/silesia.zip` 33.5 / 67.6
 - `2011/www.mattmahoney.net/dc/text8.zip` 31.3 / 31.3, 그대로(8번)
 - `2011/www.mattmahoney.net/dc/enwik8.pmd` 21.4 / 21.4, 그대로(8번)
@@ -151,17 +151,17 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
    이 코퍼스 밖에서 거의 볼 수 없다.
 6. **[대부분 완료] LZMA: −38.8 MB**(aqr-lzma, `.tar.lzma`를 그 멤버와 같은 설치된 파일과 함께).
    `7c73922`이 aqr-infer-recs가 들인 퇴행(`gcc-core-4.6.1`이 그대로 남았다)을 고쳐 −15.9 MB가 더
-   되었다. 7z(aqr-7z)는 `mingw480`에서 84.45 → 68.79 MB(−15.7 MB)이다(10gb 전체로는 재지 않았다).
+   되었다. 7z(aqr-7z, BCJ2는 aqr-bcj)는 통째로 재구성되어 `mingw480`에서 84.45 → 55.36 MB(−29.1 MB)이다
+   (트리만 47.36 MB; 10gb 전체로는 재지 않았다).
    남은 것:
    - `.tar.lzma` 87개(12.2 MB)가 그대로 남는다. 대부분 작아서(tar가 256 KiB 미만) `together`가 보지
      않고 `Held`도 못 본다. 큰 것(`vim` 3.1 MB, `w32api` 1.1 MB)은 tar 전체의 99%가 다른 파일에 있지
      않아서일 것이다(재 보지 않았다).
-   - 7z의 폴더 1(13.6 MB)은 BCJ2를 거쳐 그대로 남는다. 트리 옆에서 7z가 드는 21.43 MB 중 그것과
-     레코드(4.32 MB)를 빼고도 약 3.5 MB가 남는다. 같은 파일 8,238개의 평범한 tar(272.6 MB)도 트리
-     옆에서 17.0 MB가 들어 7z만의 일은 아니다(보지 않았다).
-   - 7z의 폴더 0(250 MB)은 한 스트림이라 한 스레드로 쪼개고 다시 만든다. `mingw480`의 압축이
-     5.6 → 27.8 s, 풀기(`-t`)가 0.3 → 10.9 s, 최대 footprint가 1.44 → 3.34 GB(풀기 0.39 →
-     2.17 GB)가 되었다.
+   - 트리 옆에서 7z가 드는 8.0 MB 중 레코드가 6.51 MB이다. 같은 파일 8,238개의 평범한 tar(272.6 MB)는
+     트리 옆에서 17.0 MB가 든다(공유가 덜 되는 까닭은 보지 않았다).
+   - 7z의 두 폴더(250 MB, 124 MB)는 각각 한 스트림이라 한 스레드로 쪼개고 다시 만든다. `mingw480`의
+     압축이 5.6 → 42.3 s, 풀기(`-t`)가 0.3 → 16.9 s, 최대 footprint가 1.44 → 4.96 GB(풀기 0.39 →
+     2.27 GB)가 되었다. 풀기 시간으로 보아 두 폴더를 차례로 다시 만드는 듯하다(보지 않았다).
    - 시간: match finder(`longest`)가 대부분이다. 탐색 깊이 16 → 4는 레코드 +6%이다. 받지 않을
      파일도 쪼갠 뒤 버린다(19.8 MB 몫).
    - 풀기의 메모리: 재구성마다 사전 크기의 체인 링 3개(8 MiB 사전에 96 MB)가 드는데, leaf의

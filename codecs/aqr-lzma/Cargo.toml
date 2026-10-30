@@ -8,9 +8,10 @@ publish = false
 [features]
 default = ["encode"]
 # The formulas (`formula`); without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula"]
+encode = ["dep:aqr-formula", "dep:aqr-bcj"]
 
 [dependencies]
+aqr-bcj = { path = "../aqr-bcj", optional = true }
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 

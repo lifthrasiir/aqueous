@@ -53,6 +53,9 @@ fn main() {
         enc_secs += start.elapsed().as_secs_f64();
         let start = Instant::now();
         let out = f.eval(&|a: &Apply, inputs: &[&[u8]]| {
+            if let Some(r) = aqr_bcj::formula::decode(a.module, &a.params, inputs, a.len) {
+                return r.map_err(|e| aqr_formula::Error::new(e.to_string()));
+            }
             let decode = if a.module == aqr_lzma::formula::LZMA2 {
                 aqr_lzma::formula::decode2
             } else {
@@ -68,7 +71,7 @@ fn main() {
         }
         rebuilt += 1;
         let (mut p, mut r) = (0, 0);
-        for a in f.applies() {
+        for a in f.applies().into_iter().filter(|a| a.module.name.starts_with("lzma")) {
             p += a.len as usize;
             r += a.inputs[1].len() as usize;
         }

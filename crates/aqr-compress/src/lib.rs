@@ -134,7 +134,10 @@ pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 pub use progress::Event;
 
-use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP};
+use aqr_decompress::{
+    BCJ_ARM, BCJ_ARM_THUMB, BCJ_ARM64, BCJ_DELTA, BCJ_IA64, BCJ_POWERPC, BCJ_RISCV, BCJ_SPARC, BCJ_X86, BCJ2, BUNDLE,
+    FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP,
+};
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
 use aqr_formula::{Bytes, Stream};
@@ -285,8 +288,9 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`LZMA`],
-/// [`LZMA2`], [`LZO`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], scanned.
-pub const CONTENTS: [Content; 10] = [
+/// [`LZMA2`], [`LZO`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], and that before
+/// the filters of xz and 7z ([`BCJ_X86`] and the others, [`BCJ2`]), scanned.
+pub const CONTENTS: [Content; 20] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: LZMA, input: 0, nest: Nest::Scan },
@@ -297,6 +301,16 @@ pub const CONTENTS: [Content; 10] = [
     Content { module: LEVELDB, input: 0, nest: Nest::Scan },
     Content { module: ZIP, input: 0, nest: Nest::Scan },
     Content { module: BUNDLE, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_X86, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_POWERPC, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_IA64, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_ARM, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_ARM_THUMB, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_SPARC, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_ARM64, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_RISCV, input: 0, nest: Nest::Scan },
+    Content { module: BCJ_DELTA, input: 0, nest: Nest::Scan },
+    Content { module: BCJ2, input: 0, nest: Nest::Scan },
 ];
 
 /// What recompressing a file carries along: the encoder sizing formulas, and the bytes that

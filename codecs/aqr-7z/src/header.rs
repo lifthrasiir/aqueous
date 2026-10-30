@@ -91,6 +91,33 @@ impl Folder {
             _ => None,
         }
     }
+
+    /// The first input and output of coder `c` among the folder's.
+    pub fn bases(&self, c: usize) -> (u64, u64) {
+        self.coders[..c].iter().fold((0, 0), |(i, o), c| (i + c.ins, o + c.outs))
+    }
+
+    /// The coder of output `o`.
+    pub fn coder_of_out(&self, o: u64) -> Option<usize> {
+        (0..self.coders.len()).find(|&c| {
+            let (_, base) = self.bases(c);
+            (base..base + self.coders[c].outs).contains(&o)
+        })
+    }
+
+    /// The output of the folder: the output no bind pair takes.
+    pub fn output(&self) -> Option<u64> {
+        (0..self.sizes.len() as u64).find(|o| !self.binds.iter().any(|b| b.1 == *o))
+    }
+
+    /// What input `i` takes: an output of a coder (`Ok`), or the folder's packed stream of that
+    /// index (`Err`).
+    pub fn source(&self, i: u64) -> Option<Result<u64, usize>> {
+        match self.binds.iter().find(|b| b.0 == i) {
+            Some(b) => Some(Ok(b.1)),
+            None => self.packed.iter().position(|&p| p == i).map(Err),
+        }
+    }
 }
 
 /// Streams info: the packed streams (from `pack_pos`, after the signature header), the folders

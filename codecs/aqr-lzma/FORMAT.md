@@ -312,7 +312,8 @@ The module `lzma2-recons`, version 1, is the same for the segments of LZMA2 stre
 output is the segments' bytes one after another (the segments of an LZMA2 stream, then its end
 byte, make the stream). A `.xz` file cuts the output by its blocks' streams, and adds the rest
 of the file around them as it is: its headers, the blocks' padding and checks, the index and
-the footer.
+the footer. A block of filters before LZMA2 has its data under aqr-bcj's modules of them (the
+first filter innermost), where encoding gives back what LZMA2 decodes to.
 
 ## Encoder choices (informative)
 

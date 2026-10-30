@@ -80,8 +80,14 @@ fn streams_by_index() {
 
 fn eval_any(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
     f.eval(&|a: &Apply, inputs: &[&[u8]]| {
-        let decode = if a.module == formula::LZMA2 { formula::decode2 } else { formula::decode };
-        decode(&a.params, inputs, a.len, 2).map_err(|e| aqr_formula::Error::new(e.to_string()))
+        let out = match aqr_bcj::formula::decode(a.module, &a.params, inputs, a.len) {
+            Some(r) => r.map_err(|e| e.to_string()),
+            None if a.module == formula::LZMA2 => {
+                formula::decode2(&a.params, inputs, a.len, 2).map_err(|e| e.to_string())
+            }
+            None => formula::decode(&a.params, inputs, a.len, 2).map_err(|e| e.to_string()),
+        };
+        out.map_err(aqr_formula::Error::new)
     })
 }
 
@@ -145,5 +151,22 @@ fn greedy_xz() {
         assert!(formula::data_xz(&x).unwrap_or_default() == d);
         let f = formula::encode_xz(&x, 1).unwrap();
         assert!(eval_any(&f).unwrap() == x);
+    }
+}
+
+/// `.xz` files of every filter before LZMA2 (XZ Utils'): the data in the formula is that before
+/// the filters, which their modules filter again.
+#[test]
+fn xz_filters() {
+    let code = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/filters.bin")).unwrap();
+    let fixtures: Vec<_> = xz_fixtures().into_iter().filter(|f| f.0.starts_with("filter-")).collect();
+    assert_eq!(fixtures.len(), 11);
+    for (name, d) in fixtures {
+        let f = formula::encode_xz(&d, 1).unwrap_or_else(|| panic!("{name}"));
+        assert!(eval_any(&f).unwrap() == d, "{name}");
+        assert!(f.streams[1].data == code, "{name}: other data");
+        assert!(formula::data_xz(&d).unwrap() == code, "{name}");
+        let filters = f.applies().iter().filter(|a| a.module.name.starts_with("bcj")).count();
+        assert_eq!(filters, if name == "filter-chain" { 2 } else { 1 }, "{name}");
     }
 }

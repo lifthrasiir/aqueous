@@ -27,6 +27,7 @@ aqr-git = { path = "../../codecs/aqr-git", default-features = false }
 aqr-infer-recs = { path = "../../codecs/aqr-infer-recs", default-features = false }
 aqr-jpeg = { path = "../../codecs/aqr-jpeg", default-features = false }
 aqr-lz4 = { path = "../../codecs/aqr-lz4", default-features = false }
+aqr-bcj = { path = "../../codecs/aqr-bcj", default-features = false }
 aqr-lzma = { path = "../../codecs/aqr-lzma", default-features = false }
 aqr-lzo = { path = "../../codecs/aqr-lzo", default-features = false }
 aqr-lzx = { path = "../../codecs/aqr-lzx", default-features = false }
@@ -206,6 +207,56 @@ required-features = ["wasm"]
 [[bin]]
 name = "raster-recons-16"
 path = "src/bin/raster-recons-16.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-x86"
+path = "src/bin/bcj-x86.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-powerpc"
+path = "src/bin/bcj-powerpc.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-ia64"
+path = "src/bin/bcj-ia64.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-arm"
+path = "src/bin/bcj-arm.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-armthumb"
+path = "src/bin/bcj-armthumb.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-sparc"
+path = "src/bin/bcj-sparc.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-arm64"
+path = "src/bin/bcj-arm64.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-riscv"
+path = "src/bin/bcj-riscv.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj-delta"
+path = "src/bin/bcj-delta.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bcj2"
+path = "src/bin/bcj2.rs"
 required-features = ["wasm"]
 
 [[bin]]

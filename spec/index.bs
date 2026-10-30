@@ -4597,6 +4597,56 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
   </thead>
   <tbody>
     <tr>
+      <td><code>6ca13cc1b6a8a6903499500a7a86b27252171e828d998fa103cbf1a1c4b5a17e</code>
+      <td>bcj-arm@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-arm.wasm" title="crates/aqr-modules/wasm/bcj-arm.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>e4e16f0bd138eccbb241717f41cf00264fb723ee2e1bdbf454be1792d5d151ed</code>
+      <td>bcj-arm64@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-arm64.wasm" title="crates/aqr-modules/wasm/bcj-arm64.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>0efe66d21efac48dd387e69af7f2f1f1daecf059f862bc2d8702d705171d0953</code>
+      <td>bcj-armthumb@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-armthumb.wasm" title="crates/aqr-modules/wasm/bcj-armthumb.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>eb244dca1a97d0aa864b9e1f04ca6a9876d3ff8e480ee4446f09c1ed4f4cdb1f</code>
+      <td>bcj-delta@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-delta.wasm" title="crates/aqr-modules/wasm/bcj-delta.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>01a3a81cd83385c1e7147a1796f5479b61aee3197fe54b92de8576089770a65d</code>
+      <td>bcj-ia64@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-ia64.wasm" title="crates/aqr-modules/wasm/bcj-ia64.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>20baa7c849d586b1ceb8f389d21fdd7828b592000044c65c375783bb76f8f3fc</code>
+      <td>bcj-powerpc@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-powerpc.wasm" title="crates/aqr-modules/wasm/bcj-powerpc.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>f84430b7f9952ee6696b704b9825cc2b444ac0ad87ab9da165f6c66cf8ce39c4</code>
+      <td>bcj-riscv@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-riscv.wasm" title="crates/aqr-modules/wasm/bcj-riscv.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>db4f3057d52d06b04bd4404473b43ca73753ccd184f1b0af05d32009631463aa</code>
+      <td>bcj-sparc@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-sparc.wasm" title="crates/aqr-modules/wasm/bcj-sparc.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>975b68276de3e255196440f029fe4c944f221302ea845dbbc087e12db109a969</code>
+      <td>bcj-x86@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj-x86.wasm" title="crates/aqr-modules/wasm/bcj-x86.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
+      <td><code>9ce596ae96ccd5f35a279db9fa76a05776a77ec9107553e2e18f1c0de6a0fd0e</code>
+      <td>bcj2@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcj2.wasm" title="crates/aqr-modules/wasm/bcj2.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bcj/FORMAT.md" title="codecs/aqr-bcj/FORMAT.md">R</a>
+    <tr>
       <td><code>d0cc34fbe88863358b8005a8a320685077d26c21e36753d95cbf43a53c2d2f08</code>
       <td>bcn-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bcn-recons.wasm" title="crates/aqr-modules/wasm/bcn-recons.wasm">D</a>

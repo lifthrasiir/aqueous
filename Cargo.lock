@@ -52,6 +52,7 @@ dependencies = [
 name = "aqr-7z"
 version = "0.1.0"
 dependencies = [
+ "aqr-bcj",
  "aqr-common",
  "aqr-formula",
  "aqr-lzma",
@@ -60,6 +61,13 @@ dependencies = [
 
 [[package]]
 name = "aqr-api"
+version = "0.1.0"
+dependencies = [
+ "aqr-formula",
+]
+
+[[package]]
+name = "aqr-bcj"
 version = "0.1.0"
 dependencies = [
  "aqr-formula",
@@ -153,6 +161,8 @@ dependencies = [
 name = "aqr-decompress"
 version = "0.1.0"
 dependencies = [
+ "aqr-7z",
+ "aqr-bcj",
  "aqr-bundle",
  "aqr-clip",
  "aqr-common",
@@ -372,6 +382,7 @@ dependencies = [
 name = "aqr-lzma"
 version = "0.1.0"
 dependencies = [
+ "aqr-bcj",
  "aqr-common",
  "aqr-formula",
 ]
@@ -399,6 +410,7 @@ name = "aqr-modules"
 version = "0.1.0"
 dependencies = [
  "aqr-api",
+ "aqr-bcj",
  "aqr-bundle",
  "aqr-clip",
  "aqr-exe",

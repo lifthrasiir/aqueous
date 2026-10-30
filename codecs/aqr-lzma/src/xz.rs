@@ -1,6 +1,6 @@
 //! The `.xz` container: streams, each a header, blocks (a header, the output of its filters,
 //! padding and a check of its data), an index of the blocks and a footer, with zeros padding
-//! the streams. The blocks whose only filter is LZMA2 are taken.
+//! the streams. The blocks whose last filter is LZMA2 are taken.
 
 use std::ops::Range;
 
@@ -12,14 +12,16 @@ pub const MAGIC: [u8; 6] = [0xfd, b'7', b'z', b'X', b'Z', 0];
 const FOOTER_MAGIC: [u8; 2] = *b"YZ";
 const HEADER: usize = 12;
 
-/// A block of LZMA2 alone: its LZMA2 stream and dictionary size.
+/// A block ending with LZMA2: its LZMA2 stream and dictionary size, and the filters before it
+/// (ids and properties, the first applied first in encoding).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub stream: Range<usize>,
     pub dict: u32,
+    pub filters: Vec<(u64, Vec<u8>)>,
 }
 
-/// The streams at the start of a file: their blocks of LZMA2 alone, in order, and their end
+/// The streams at the start of a file: their blocks ending with LZMA2, in order, and their end
 /// (with the padding after the last, where the file ends or another stream follows it).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Streams {
@@ -84,8 +86,12 @@ fn block(f: &[u8], at: usize, check: usize) -> Option<(Option<Block>, usize)> {
         (_, Some(n)) => start.checked_add(usize::try_from(n).ok()?)?,
         _ => return None,
     };
-    let lzma2 = match filters[..] {
-        [(0x21, &[b])] => lzma2::dict_size(b).map(|dict| Block { stream: start..stream, dict }),
+    let lzma2 = match filters.split_last() {
+        Some((&(0x21, &[b]), rest)) if rest.iter().all(|f| f.0 != 0x21) => lzma2::dict_size(b).map(|dict| Block {
+            stream: start..stream,
+            dict,
+            filters: rest.iter().map(|&(id, p)| (id, p.to_vec())).collect(),
+        }),
         _ => None,
     };
     let pad = (4 - (stream - at) % 4) % 4;

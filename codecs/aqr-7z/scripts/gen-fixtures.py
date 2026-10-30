@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Writes tests/data/*.7z: deterministic files archived by 7-Zip (7zz) in LZMA2 and LZMA,
 solid and not, with the header encoded and plain, stored, in LZMA2 blocks of 64 KiB (dictionary
-resets). 7-Zip puts the PE file (made up) in a folder of BCJ and LZMA or LZMA2, left as it is.
+resets). 7-Zip puts the PE file (made up) in a folder of BCJ and LZMA or LZMA2. Of that file and
+a text, archives of each other filter (`-mf`): BCJ2, ARM64, ARMT, SPARC, RISC-V and Delta.
 
     python3 -I scripts/gen-fixtures.py   # needs 7zz on the PATH
 """
@@ -54,6 +55,16 @@ VARIANTS = {
     'blocks': ['-m0=LZMA2:d=256k:c=64k', '-mhc=off'],
 }
 
+# (of two files)
+FILTERS = {
+    'bcj2': ['-mf=BCJ2'],
+    'arm64': ['-mf=ARM64'],
+    'armt': ['-mf=ARMT'],
+    'sparc': ['-mf=SPARC'],
+    'riscv': ['-mf=RISCV'],
+    'delta': ['-mf=Delta:4'],
+}
+
 def main():
     os.makedirs(OUT, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmp:
@@ -67,11 +78,13 @@ def main():
         for root, dirs, fs in os.walk(src):
             for n in dirs + fs:
                 os.utime(os.path.join(root, n), (1_600_000_000, 1_600_000_000))
-        for v, args in VARIANTS.items():
+        runs = [(v, args, ['.']) for v, args in VARIANTS.items()]
+        runs += [(f'filter-{v}', args, ['bin/prog.exe', 'docs/words.txt']) for v, args in FILTERS.items()]
+        for v, args, paths in runs:
             out = os.path.join(OUT, f'{v}.7z')
             if os.path.exists(out):
                 os.remove(out)
-            subprocess.run(['7zz', 'a', '-bd', '-mtc=off', '-mta=off', '-mmt=1'] + args + [out, '.'],
+            subprocess.run(['7zz', 'a', '-bd', '-mtc=off', '-mta=off', '-mmt=1'] + args + [out] + paths,
                            cwd=src, check=True, capture_output=True)
 
 if __name__ == '__main__':

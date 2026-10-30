@@ -1,0 +1,21 @@
+[package]
+name = "aqr-bcj"
+version = "0.1.0"
+edition = "2024"
+description = "The filters of xz and 7z (branch converters, Delta, BCJ2) as modules applying their encoders"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the modules alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-bcj-filter"
+path = "examples/filter.rs"

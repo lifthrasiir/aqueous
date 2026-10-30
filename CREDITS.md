@@ -2,7 +2,8 @@
 
 Aqueous is dedicated to the public domain (MIT-0 where that is not possible, see
 `LICENSE.txt`). No code in it is taken from other projects, except
-where a file says so (tables generated from public-domain sources). The projects below are
+where a file says so (tables generated from public-domain sources, and public-domain code
+listed under Code below). The projects below are
 where its ideas, or the behaviour it reproduces, come from.
 
 ## Encoders whose output is reproduced
@@ -33,7 +34,7 @@ own terms; the code is written from that description, not from the encoder's cod
   each length); LZMA2's chunks, in aqr-lzma; the 7z format (the LZMA SDK's `7zFormat.txt`,
   public domain), in aqr-7z, checked against 7-Zip's archives used as black boxes.
 - **XZ Utils** (Lasse Collin and others): the `.xz` format (`xz-file-format.txt`, public
-  domain), in aqr-lzma.
+  domain), in aqr-lzma; its filters used as black boxes for aqr-bcj's tests.
 - **LZO** (Markus F.X.J. Oberhumer; GPL): the LZO1X stream format, in aqr-lzo, written from the
   Linux kernel's description of it (`Documentation/staging/lzo.rst`, Willy Tarreau and Dave
   Rodgman) and from liblzo2's and lzop's output used as black boxes, without LZO's code; the
@@ -49,6 +50,11 @@ own terms; the code is written from that description, not from the encoder's cod
   the bias correction by context, in aqr-fits's pixel model.
 - **ryg_rans** (Fabian Giesen): rANS coding and division by a reciprocal, in aqr-common and
   elsewhere.
+
+## Code
+
+- **LZMA SDK** (Igor Pavlov, public domain): aqr-bcj's filters (the branch converters, Delta,
+  BCJ2's decoder) are ported from its `Bra.c`, `Bra86.c`, `BraIA64.c`, `Delta.c` and `Bcj2.c`.
 
 ## Data
 
