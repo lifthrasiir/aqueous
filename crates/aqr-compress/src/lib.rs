@@ -561,7 +561,7 @@ fn compress_with(
             notes.send(n)
         }
     };
-    note(Note::Batch { bytes: d.len() as u64, verify: opt.verify });
+    note(Note::Batch { batch: 0, bytes: d.len() as u64, verify: opt.verify, contents: vec![0] });
     note(Note::Started(0));
     let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
     let mut cx = Cx::new(d, opt);
@@ -571,7 +571,7 @@ fn compress_with(
     note(Note::Ended(0));
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
     let r = finish(f, d, opt, &cx, memo, kept, notes.as_ref());
-    note(Note::Written);
+    note(Note::Written(0));
     r
 }
 
@@ -595,14 +595,14 @@ fn finish(
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     let sum = Some(aqr::checksum(d));
     let c = cx.enc.encode(&f, sum);
-    notes.inspect(|n| n.send(Note::Encoded(1, 1)));
+    notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
     cx.enc.clear();
     let f = kept.then_some(f);
     let decodes = |c: &[u8]| {
         let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
         let m = verify::Cached::new(Native { threads: opt.threads }, memo, &files);
         let decodes = aqr::decode(c, &aqr_decompress::natives(&m)).is_ok_and(|out| out == d);
-        notes.inspect(|n| n.send(Note::Verified(d.len() as u64)));
+        notes.inspect(|n| n.send(Note::Verified(0, d.len() as u64)));
         decodes
     };
     match c {

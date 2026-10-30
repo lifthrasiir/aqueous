@@ -293,7 +293,7 @@ pub struct Encoder {
 pub type Progress = std::sync::Arc<dyn Fn(u64, u64) + Send + Sync>;
 
 /// A module block compressed, shared by the formulas that have it.
-type ModuleBlock = std::rc::Rc<Vec<u8>>;
+type ModuleBlock = std::sync::Arc<Vec<u8>>;
 
 /// The Wasm module of a module, if there is one ([`Encoder::with_modules`]).
 pub type WasmOf = fn(Module) -> Option<Wasm>;
@@ -389,12 +389,12 @@ impl Encoder {
     }
 
     /// The data of the module block of `m`, compressed at `level`, once.
-    fn module_block(&self, m: Module, level: i32) -> Result<std::rc::Rc<Vec<u8>>> {
+    fn module_block(&self, m: Module, level: i32) -> Result<ModuleBlock> {
         if let Some(b) = self.module_blocks.borrow().get(&(m, level)) {
             return Ok(b.clone());
         }
         let wasm = (self.wasm)(m).ok_or_else(|| Error::new(format!("no Wasm module of {m}")))?;
-        let b = std::rc::Rc::new(match wasm {
+        let b = ModuleBlock::new(match wasm {
             Wasm::Block(b) => b.into_owned(),
             Wasm::Bytes(w) => always_compressed(&mut self.cctx(), &[&w], level, self.threads)?,
         });

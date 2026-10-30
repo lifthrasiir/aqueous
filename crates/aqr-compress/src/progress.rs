@@ -58,23 +58,26 @@ pub(crate) enum Note {
     Looked,
     /// More files to look at.
     More(u64),
-    /// A batch of so many bytes begins (again, where it is made again), its files verified or
-    /// not.
+    /// Batch `batch` of so many bytes, of `contents` (by index), begins (again, where it is made
+    /// again), its files verified or not. Batches are made at once, written in their order.
     Batch {
+        batch: usize,
         bytes: u64,
         verify: bool,
+        contents: Vec<usize>,
     },
-    /// Of the batch: contents (by index) started and ended, and analysis done with all.
+    /// Of a batch: contents (by index) started and ended.
     Started(usize),
     Ended(usize),
-    /// Of the batch: a part of a content done.
+    /// Of a batch: a part of a content done.
     Done(usize, std::ops::Range<u64>),
-    Analyzed,
-    /// Of the batch: the streams compressed (bytes done of all), and bytes of files verified.
-    Encoded(u64, u64),
-    Verified(u64),
-    /// The batch written.
-    Written,
+    /// Batch `n`'s analysis done with all of its contents.
+    Analyzed(usize),
+    /// Of batch `n`: the streams compressed (bytes done of all), and bytes of files verified.
+    Encoded(usize, u64, u64),
+    Verified(usize, u64),
+    /// Batch `n` written.
+    Written(usize),
 }
 
 /// Where the notes go, cheap to clone.
@@ -87,10 +90,10 @@ impl Notes {
         let _ = self.0.send(n);
     }
 
-    /// What the encoder tells of the streams it compresses, as notes.
-    pub fn encoding(&self) -> aqr_formula::aqr::Progress {
+    /// What the encoder tells of the streams of batch `batch` it compresses, as notes.
+    pub fn encoding(&self, batch: usize) -> aqr_formula::aqr::Progress {
         let notes = self.0.clone();
-        Arc::new(move |done, total| _ = notes.send(Note::Encoded(done, total)))
+        Arc::new(move |done, total| _ = notes.send(Note::Encoded(batch, done, total)))
     }
 }
 
@@ -139,17 +142,18 @@ impl Tracker {
     pub fn run(self, tell: &(dyn Fn(Event) + Sync)) {
         let total: u64 = self.sizes.iter().sum();
         let (mut looked, mut to_look) = (0, 0);
-        // where the batch began, its bytes and whether it is verified, and within it
-        let (mut base, mut bytes, mut verify) = (0u64, 0u64, false);
-        let mut ended: HashSet<usize> = HashSet::new();
-        // the parts done of the contents not ended yet, and the bytes of them all
-        let mut reached: HashMap<usize, Parts> = HashMap::new();
-        let mut partly = 0u64;
-        let (mut analyzed, mut encoded, mut verified) = (0u64, 0.0f64, 0u64);
-        let compression = |encoded: f64, verified: u64, bytes: u64, verify: bool| -> u64 {
-            // (encoding and verifying half each)
-            let b = bytes as f64;
-            (if verify { (encoded * b + verified.min(bytes) as f64) / 2.0 } else { encoded * b }) as u64
+        // the bytes of the batches written, the batches being made, and the batch of each of
+        // their contents
+        let mut base = 0u64;
+        let mut runs: HashMap<usize, Run> = HashMap::new();
+        let mut of: HashMap<usize, usize> = HashMap::new();
+        let analysis = |base: u64, runs: &HashMap<usize, Run>| Event::Analysis {
+            done: base + runs.values().map(Run::analysis).sum::<u64>(),
+            total,
+        };
+        let compression = |base: u64, runs: &HashMap<usize, Run>| Event::Compression {
+            done: base + runs.values().map(Run::compression).sum::<u64>(),
+            total,
         };
         for n in self.rx {
             match n {
@@ -161,58 +165,92 @@ impl Tracker {
                     to_look += n;
                     tell(Event::Probe { done: looked, total: to_look.max(looked) });
                 }
-                Note::Batch { bytes: b, verify: v } => {
-                    (bytes, verify) = (b, v);
-                    ended.clear();
-                    reached.clear();
-                    partly = 0;
-                    (analyzed, encoded, verified) = (0, 0.0, 0);
-                    tell(Event::Analysis { done: base, total });
-                    tell(Event::Compression { done: base, total });
+                Note::Batch { batch, bytes, verify, contents } => {
+                    contents.into_iter().for_each(|c| _ = of.insert(c, batch));
+                    runs.insert(batch, Run { bytes, verify, ..Run::default() });
+                    tell(analysis(base, &runs));
+                    tell(compression(base, &runs));
                 }
                 Note::Started(c) => tell(Event::Started(c)),
                 Note::Ended(c) => {
                     tell(Event::Ended(c));
-                    if ended.insert(c) {
-                        partly -= reached.remove(&c).map_or(0, |p| p.len);
-                        analyzed = (analyzed + self.sizes[c]).min(bytes);
-                        tell(Event::Analysis { done: base + (analyzed + partly).min(bytes), total });
+                    let Some(run) = of.get(&c).and_then(|b| runs.get_mut(b)) else { continue };
+                    if run.ended.insert(c) {
+                        run.partly -= run.reached.remove(&c).map_or(0, |p| p.len);
+                        run.analyzed = (run.analyzed + self.sizes[c]).min(run.bytes);
+                        tell(analysis(base, &runs));
                     }
                 }
                 Note::Done(c, r) => {
-                    if ended.contains(&c) {
+                    let Some(run) = of.get(&c).and_then(|b| runs.get_mut(b)) else { continue };
+                    if run.ended.contains(&c) {
                         continue;
                     }
-                    let p = reached.entry(c).or_default();
+                    let p = run.reached.entry(c).or_default();
                     let more = p.add(r.start..r.end.min(self.sizes[c]));
                     if more == 0 {
                         continue;
                     }
-                    partly += more;
-                    tell(Event::Reached { content: c, done: p.len });
-                    tell(Event::Analysis { done: base + (analyzed + partly).min(bytes), total });
+                    run.partly += more;
+                    let done = p.len;
+                    tell(Event::Reached { content: c, done });
+                    tell(analysis(base, &runs));
                 }
-                Note::Analyzed => {
-                    (analyzed, partly) = (bytes, 0);
-                    reached.clear();
-                    tell(Event::Analysis { done: base + analyzed, total });
+                Note::Analyzed(b) => {
+                    let Some(run) = runs.get_mut(&b) else { continue };
+                    (run.analyzed, run.partly) = (run.bytes, 0);
+                    run.reached.clear();
+                    tell(analysis(base, &runs));
                 }
-                Note::Encoded(done, all) => {
-                    encoded = encoded.max(if all == 0 { 1.0 } else { done as f64 / all as f64 });
-                    tell(Event::Compression { done: base + compression(encoded, verified, bytes, verify), total });
+                Note::Encoded(b, done, all) => {
+                    let Some(run) = runs.get_mut(&b) else { continue };
+                    run.encoded = run.encoded.max(if all == 0 { 1.0 } else { done as f64 / all as f64 });
+                    tell(compression(base, &runs));
                 }
-                Note::Verified(b) => {
-                    verified += b;
-                    tell(Event::Compression { done: base + compression(encoded, verified, bytes, verify), total });
+                Note::Verified(b, n) => {
+                    let Some(run) = runs.get_mut(&b) else { continue };
+                    run.verified += n;
+                    tell(compression(base, &runs));
                 }
-                Note::Written => {
-                    base += bytes;
-                    bytes = 0;
-                    tell(Event::Analysis { done: base, total });
-                    tell(Event::Compression { done: base, total });
+                Note::Written(b) => {
+                    base += runs.remove(&b).map_or(0, |r| r.bytes);
+                    of.retain(|_, &mut batch| batch != b);
+                    tell(analysis(base, &runs));
+                    tell(compression(base, &runs));
                 }
             }
         }
+    }
+}
+
+/// How far a batch being made is ([`Tracker::run`]).
+#[derive(Default)]
+struct Run {
+    bytes: u64,
+    verify: bool,
+    ended: HashSet<usize>,
+    /// The parts done of the contents not ended yet, and the bytes of them all.
+    reached: HashMap<usize, Parts>,
+    partly: u64,
+    analyzed: u64,
+    encoded: f64,
+    verified: u64,
+}
+
+impl Run {
+    fn analysis(&self) -> u64 {
+        (self.analyzed + self.partly).min(self.bytes)
+    }
+
+    fn compression(&self) -> u64 {
+        // (encoding and verifying half each)
+        let b = self.bytes as f64;
+        let done = if self.verify {
+            (self.encoded * b + self.verified.min(self.bytes) as f64) / 2.0
+        } else {
+            self.encoded * b
+        };
+        done as u64
     }
 }
 

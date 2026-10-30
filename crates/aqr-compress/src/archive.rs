@@ -7,9 +7,9 @@
 //!
 //! The files are taken in batches of about [`Options::batch`] bytes, in their order (by
 //! extension, then by name; PE files by likeness, from where the first is, [`lay_alike`]):
-//! each batch read ([`Source`]), made, laid out, checked and written
-//! before the next, so that what is held at once is about a batch's, whatever the files'
-//! (but for the largest file). Files of the same content as one before are stored once. Files
+//! each batch read ([`Source`]), made, laid out, checked and written in their order, a batch
+//! made while the one before it still is ([`AHEAD`]), so that what is held at once is about
+//! two batches', whatever the files' (but for the largest file, made alone). Files of the same content as one before are stored once. Files
 //! that may hold each other (a file and a ZIP archive or gzip file of it, a file and the start
 //! of it) are put in one batch ([`together`]), where what their streams share is stored once
 //! ([`Formula::share_slices`]): the recompressors take what the batch holds as costing
@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::ops::Range;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use aqr_decompress::Native;
 use aqr_formula::aqr::{self, Batch, ContentAt, Leaf, Level, Placed, SegmentWriter, Tree};
@@ -218,72 +218,49 @@ fn compress_tree_noting<S: Source + ?Sized>(
         bytes = bytes.saturating_add(size);
     }
 
-    let mut w = SegmentWriter::new();
     out.write_all(SegmentWriter::header())?;
-    let mut first: HashMap<(u128, usize), usize> = HashMap::new();
-    let mut at: Vec<Option<ContentAt>> = vec![None; n];
-    let mut r = Report { files: vec![FileReport::default(); n], ..Report::default() };
-    for batch in &batches {
-        let bytes = batch.iter().map(|&c| src.size(c)).sum();
-        notes.send(Note::Batch { bytes, verify: opt.verify });
-        let read = aqr_common::pool::par_map(batch.len(), opt.threads, |i| {
-            let d = src.read(batch[i])?;
-            let hash = xxhash_rust::xxh3::xxh3_128(&d);
-            Ok::<_, io::Error>((d, hash))
-        });
-        let mut files: Vec<File> = Vec::with_capacity(batch.len());
-        let mut data = Vec::with_capacity(batch.len());
-        for (&c, d) in batch.iter().zip(read) {
-            let (d, hash) = d?;
-            r.read += d.len() as u64;
-            r.files[c].len = d.len() as u64;
-            match first.entry((hash, d.len())) {
-                std::collections::hash_map::Entry::Occupied(e) => r.files[c].same_as = Some(*e.get()),
-                std::collections::hash_map::Entry::Vacant(e) => {
-                    e.insert(c);
-                    files.push(File::of(c, &d, hash, kind_by_name(src.name(c)), entries.contains(&c)));
-                    data.push(d);
-                }
+    let weights: Vec<u64> = batches
+        .iter()
+        .map(|b| {
+            let bytes: u64 = b.iter().map(|&c| src.size(c)).sum();
+            // (one longer than a batch made alone)
+            if bytes > opt.batch as u64 { u64::MAX } else { bytes }
+        })
+        .collect();
+    let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries };
+    let pipe = Pipe {
+        reader: Mutex::new(Reader { first: HashMap::new() }),
+        state: Mutex::new(State {
+            claimed: 0,
+            held: 0,
+            made: (0..batches.len()).map(|_| None).collect(),
+            failed: None,
+            written: false,
+        }),
+        changed: Condvar::new(),
+    };
+    let mut wr = Writer {
+        w: SegmentWriter::new(),
+        at: vec![None; n],
+        r: Report { files: vec![FileReport::default(); n], ..Report::default() },
+        next: 0,
+    };
+    std::thread::scope(|s| {
+        // (a thread of no worker of the pool, which takes one only as one is free: as the
+        // batches being made leave threads idle)
+        s.spawn(|| pipe.help(&cx));
+        // (the helper stopped however this ends, a panic too)
+        struct Done<'a>(&'a Pipe);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                self.0.state.lock().unwrap_or_else(|e| e.into_inner()).written = true;
+                self.0.changed.notify_all();
             }
         }
-        if files.is_empty() {
-            batch.iter().try_for_each(|&c| src.intact(c))?;
-            notes.send(Note::Written);
-            tell(Event::Written { contents: batch, report: &r });
-            continue;
-        }
-        let mut raw = HashSet::new();
-        let made = loop {
-            let made = make(&w, &files, data, &raw, src, opt, &notes);
-            let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
-            if bad.is_empty() {
-                break made;
-            }
-            // (not given back as it was not read as it is: told so, not made again)
-            batch.iter().try_for_each(|&c| src.intact(c))?;
-            raw.extend(bad);
-            notes.send(Note::Batch { bytes, verify: opt.verify });
-            data = reread(src, &files, opt.threads)?;
-        };
-        batch.iter().try_for_each(|&c| src.intact(c))?;
-        out.write_all(&made.batch.bytes)?;
-        w.commit(&made.batch);
-        for (k, file) in files.iter().enumerate() {
-            let (l, o) = made.at[k];
-            at[file.c] = Some(ContentAt { leaf: made.batch.leaf_at[l], output: o, size: file.len as u64 });
-            let f = &made.files[k];
-            let c = file.c;
-            (r.files[c].format, r.files[c].modules, r.files[c].archived) = (f.format, f.modules.clone(), f.archived);
-        }
-        let global = |ks: &[usize]| ks.iter().map(|&k| files[k].c).collect::<Vec<_>>();
-        for s in made.solid {
-            r.solid.push(Solid { contents: global(&s.contents), ..s });
-        }
-        r.sets.extend(made.sets.iter().map(|s| global(s)));
-        r.unverified.extend(raw.iter().map(|&k| files[k].c));
-        notes.send(Note::Written);
-        tell(Event::Written { contents: batch, report: &r });
-    }
+        let _done = Done(&pipe);
+        wr.run(&pipe, &cx, tell, &mut *out)
+    })?;
+    let Writer { w, at, mut r, .. } = wr;
     let contents: Vec<ContentAt> =
         (0..n).map(|c| at[c].or_else(|| at[r.files[c].same_as?]).expect("every content made")).collect();
     // (an encoder of the metadata block only)
@@ -294,6 +271,289 @@ fn compress_tree_noting<S: Source + ?Sized>(
     r.overhead = r.len - r.files.iter().map(|f| f.archived).sum::<f64>().round() as usize;
     r.unverified.sort_unstable();
     Ok(r)
+}
+
+/// Bytes of the batches let in and not yet written, as so many batches' ([`Options::batch`]): a
+/// batch is read and analyzed while the one before it is still analyzed (as its longest files
+/// leave threads idle), encoded or verified. One longer than a batch is made alone. (10gb: of
+/// about 1,550 core-seconds of compression, 815 were idle with a batch at a time.)
+const AHEAD: u64 = 2;
+
+/// What the batches being made share ([`compress_tree_noting`]).
+struct Ctx<'a, S: ?Sized> {
+    src: &'a S,
+    opt: &'a Options,
+    notes: &'a Notes,
+    batches: &'a [Vec<usize>],
+    /// The bytes of each batch, as it is let in ([`AHEAD`]).
+    weights: &'a [u64],
+    /// The contents found as entries or members of others ([`together`]).
+    entries: &'a HashSet<usize>,
+}
+
+/// The batches being made: read in order (under [`Pipe::reader`]) as there is room for them,
+/// each analyzed by the thread making the archive or, as a worker is free, by the helper
+/// ([`Pipe::help`]), and written in order by the thread making the archive ([`Writer::run`]).
+struct Pipe {
+    reader: Mutex<Reader>,
+    state: Mutex<State>,
+    changed: Condvar,
+}
+
+/// The contents read: the first of each hash and length.
+struct Reader {
+    first: HashMap<(u128, usize), usize>,
+}
+
+/// Of each content of a batch read, its bytes and the content before it of the same content.
+type Lens = Vec<(u64, Option<usize>)>;
+
+struct State {
+    /// The batches let in, and the weight of those not yet written.
+    claimed: usize,
+    held: u64,
+    /// The batches analyzed, by index: their files and analysis, or none where nothing is to
+    /// be made of the batch (its files all of contents before it).
+    made: Vec<Option<(Lens, Option<Ready>)>>,
+    failed: Option<io::Error>,
+    /// Whether the archive is written (or failed), for the helper to stop.
+    written: bool,
+}
+
+impl State {
+    /// Whether the next batch to let in has room: those let in and not yet written are none,
+    /// or with it of at most [`AHEAD`] batches' bytes.
+    fn room<S: ?Sized>(&self, cx: &Ctx<S>) -> bool {
+        let w = cx.weights[self.claimed];
+        self.held == 0 || self.held.saturating_add(w) <= (cx.opt.batch as u64).saturating_mul(AHEAD)
+    }
+}
+
+/// The files of a batch read and their data (none: all of contents before it).
+type Taken = Option<(Vec<File>, Vec<Bytes>)>;
+
+/// A batch let in: its index, its contents' [`Lens`], and what is [`Taken`] of it.
+type Claimed = (usize, Lens, Taken);
+
+/// A batch analyzed: its files and their analysis.
+type Ready = (Vec<File>, Analyzed);
+
+impl Pipe {
+    /// Lets in and reads the next batch, where there is one and room for it.
+    fn claim<S: Source + ?Sized>(&self, cx: &Ctx<S>) -> Option<Claimed> {
+        // (read in order: the reader held from letting in to reading)
+        let mut reader = self.reader.lock().unwrap();
+        let i = {
+            let mut st = self.state.lock().unwrap();
+            let i = st.claimed;
+            if st.failed.is_some() || i >= cx.batches.len() {
+                return None;
+            }
+            if !st.room(cx) {
+                return None;
+            }
+            (st.claimed, st.held) = (i + 1, st.held.saturating_add(cx.weights[i]));
+            i
+        };
+        match reader.read(i, cx) {
+            Ok((lens, taken)) => Some((i, lens, taken)),
+            Err(e) => {
+                self.state.lock().unwrap().failed.get_or_insert(e);
+                self.changed.notify_all();
+                None
+            }
+        }
+    }
+
+    /// Analyzes batch `i` of `taken`, for the writer.
+    fn analyze<S: Source + ?Sized>(&self, (i, lens, taken): Claimed, cx: &Ctx<S>) {
+        let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            taken.map(|(files, data)| {
+                let a = analyze(i, &files, data, &HashSet::new(), cx.opt, cx.notes);
+                (files, a)
+            })
+        }));
+        let mut st = self.state.lock().unwrap();
+        match made {
+            Ok(made) => st.made[i] = Some((lens, made)),
+            // (the writer stopped rather than waiting for the batch)
+            Err(p) => {
+                st.failed.get_or_insert(io::Error::other(format!("batch {i} not analyzed: a panic")));
+                drop(st);
+                self.changed.notify_all();
+                std::panic::resume_unwind(p);
+            }
+        }
+        drop(st);
+        self.changed.notify_all();
+    }
+
+    /// What the helper does until the archive is written: lets in and analyzes a batch on a
+    /// worker of the pool as one is free, where there is room for one.
+    fn help<S: Source + ?Sized>(&self, cx: &Ctx<S>) {
+        loop {
+            {
+                let mut st = self.state.lock().unwrap();
+                loop {
+                    if st.written || st.failed.is_some() || st.claimed >= cx.batches.len() {
+                        return;
+                    }
+                    if st.room(cx) {
+                        break;
+                    }
+                    st = self.changed.wait(st).unwrap();
+                }
+            }
+            // (the batch let in only once a worker is free, unless the writer has let it in
+            // meanwhile)
+            aqr_common::pool::run(|| {
+                if let Some(c) = self.claim(cx) {
+                    self.analyze(c, cx);
+                }
+            });
+        }
+    }
+}
+
+impl Reader {
+    /// Batch `i` read, its files but those of contents before it.
+    fn read<S: Source + ?Sized>(&mut self, i: usize, cx: &Ctx<S>) -> io::Result<(Lens, Taken)> {
+        let (src, batch) = (cx.src, &cx.batches[i]);
+        let bytes = batch.iter().map(|&c| src.size(c)).sum();
+        cx.notes.send(Note::Batch { batch: i, bytes, verify: cx.opt.verify, contents: batch.clone() });
+        let read = aqr_common::pool::par_map(batch.len(), cx.opt.threads, |i| {
+            let d = src.read(batch[i])?;
+            let hash = xxhash_rust::xxh3::xxh3_128(&d);
+            Ok::<_, io::Error>((d, hash))
+        });
+        let mut files: Vec<File> = Vec::with_capacity(batch.len());
+        let mut data = Vec::with_capacity(batch.len());
+        let mut lens = Vec::with_capacity(batch.len());
+        for (&c, d) in batch.iter().zip(read) {
+            let (d, hash) = d?;
+            lens.push((d.len() as u64, None));
+            match self.first.entry((hash, d.len())) {
+                std::collections::hash_map::Entry::Occupied(e) => lens.last_mut().unwrap().1 = Some(*e.get()),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(c);
+                    files.push(File::of(c, &d, hash, kind_by_name(src.name(c)), cx.entries.contains(&c)));
+                    data.push(d);
+                }
+            }
+        }
+        Ok((lens, (!files.is_empty()).then_some((files, data))))
+    }
+}
+
+/// The archive written so far, a batch after another in their order.
+struct Writer {
+    w: SegmentWriter,
+    at: Vec<Option<ContentAt>>,
+    r: Report,
+    /// The batch to write next.
+    next: usize,
+}
+
+impl Writer {
+    /// Writes the batches in order: the next as it is analyzed, else analyzing the next to let
+    /// in where there is room for it, else waiting.
+    fn run<S: Source + ?Sized>(
+        &mut self,
+        pipe: &Pipe,
+        cx: &Ctx<S>,
+        tell: &(dyn Fn(Event) + Sync),
+        out: &mut dyn Write,
+    ) -> io::Result<()> {
+        while self.next < cx.batches.len() {
+            let made = {
+                let mut st = pipe.state.lock().unwrap();
+                if let Some(e) = st.failed.take() {
+                    return Err(e);
+                }
+                st.made[self.next].take()
+            };
+            if let Some((lens, made)) = made {
+                let r = self.write(self.next, &lens, made, cx, tell, out);
+                let mut st = pipe.state.lock().unwrap();
+                if let Err(e) = r {
+                    st.failed.get_or_insert(e);
+                    continue;
+                }
+                st.held = st.held.saturating_sub(cx.weights[self.next]);
+                self.next += 1;
+                drop(st);
+                pipe.changed.notify_all();
+                continue;
+            }
+            if let Some(c) = pipe.claim(cx) {
+                pipe.analyze(c, cx);
+                continue;
+            }
+            let st = pipe.state.lock().unwrap();
+            if st.made[self.next].is_none() && st.failed.is_none() {
+                drop(pipe.changed.wait(st).unwrap());
+            }
+        }
+        Ok(())
+    }
+
+    /// Encodes, verifies and writes batch `i` of `made` (its files and analysis): those of its
+    /// files not given back made again kept as they are.
+    fn write<S: Source + ?Sized>(
+        &mut self,
+        i: usize,
+        lens: &Lens,
+        made: Option<Ready>,
+        cx: &Ctx<S>,
+        tell: &(dyn Fn(Event) + Sync),
+        out: &mut dyn Write,
+    ) -> io::Result<()> {
+        let (src, opt, notes, batch) = (cx.src, cx.opt, cx.notes, &cx.batches[i]);
+        for (&c, &(len, same_as)) in batch.iter().zip(lens) {
+            self.r.read += len;
+            (self.r.files[c].len, self.r.files[c].same_as) = (len, same_as);
+        }
+        let Some((files, mut part)) = made else {
+            batch.iter().try_for_each(|&c| src.intact(c))?;
+            notes.send(Note::Written(i));
+            tell(Event::Written { contents: batch, report: &self.r });
+            return Ok(());
+        };
+        let mut raw = HashSet::new();
+        let made = loop {
+            let made = finish(i, &self.w, &files, part, src, opt, notes);
+            let bad: Vec<usize> = made.bad.iter().copied().filter(|k| !raw.contains(k)).collect();
+            if bad.is_empty() {
+                break made;
+            }
+            // (not given back as it was not read as it is: told so, not made again)
+            batch.iter().try_for_each(|&c| src.intact(c))?;
+            raw.extend(bad);
+            let bytes = batch.iter().map(|&c| src.size(c)).sum();
+            notes.send(Note::Batch { batch: i, bytes, verify: opt.verify, contents: batch.clone() });
+            part = analyze(i, &files, reread(src, &files, opt.threads)?, &raw, opt, notes);
+        };
+        batch.iter().try_for_each(|&c| src.intact(c))?;
+        out.write_all(&made.batch.bytes)?;
+        self.w.commit(&made.batch);
+        let r = &mut self.r;
+        for (k, file) in files.iter().enumerate() {
+            let (l, o) = made.at[k];
+            self.at[file.c] = Some(ContentAt { leaf: made.batch.leaf_at[l], output: o, size: file.len as u64 });
+            let f = &made.files[k];
+            let c = file.c;
+            (r.files[c].format, r.files[c].modules, r.files[c].archived) = (f.format, f.modules.clone(), f.archived);
+        }
+        let global = |ks: &[usize]| ks.iter().map(|&k| files[k].c).collect::<Vec<_>>();
+        for s in made.solid {
+            r.solid.push(Solid { contents: global(&s.contents), ..s });
+        }
+        r.sets.extend(made.sets.iter().map(|s| global(s)));
+        r.unverified.extend(raw.iter().map(|&k| files[k].c));
+        notes.send(Note::Written(i));
+        tell(Event::Written { contents: batch, report: r });
+        Ok(())
+    }
 }
 
 /// Contents of at least this many bytes are looked into for others they may hold
@@ -601,18 +861,21 @@ fn words(regions: &[&[u8]], files: &[File], raw: &HashSet<usize>, opt: &Options)
     aqr_wrt::formula::Shared::of(&texts, opt.threads)
 }
 
-/// The batch of `files` (by index, the data of each in `data`), to follow the blocks of `w`,
-/// recompressed but those (by index) in `raw`. The data is the formula's: where it is needed
-/// again, to verify the batch, it is read from `src`.
-fn make<S: Source + ?Sized>(
-    w: &SegmentWriter,
-    files: &[File],
-    data: Vec<Bytes>,
-    raw: &HashSet<usize>,
-    src: &S,
-    opt: &Options,
-    notes: &Notes,
-) -> Made {
+/// A batch analyzed, to be encoded ([`finish`]): its formula, a leaf for each file or set of
+/// them, each file's leaf and output, its encoder, and the outputs of applications evaluated
+/// beforehand.
+struct Analyzed {
+    f: Formula,
+    leaves: Vec<Leaf>,
+    at: Vec<(usize, usize)>,
+    enc: aqr::Encoder,
+    memo: verify::Memo,
+}
+
+/// The formula of batch `i` of `files` (by index, the data of each in `data`), recompressed but
+/// those (by index) in `raw`. The data is the formula's: where it is needed again, to verify
+/// the batch, it is read from the source ([`finish`]).
+fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt: &Options, notes: &Notes) -> Analyzed {
     // a formula of the files as the contents of its streams, each a file of its own
     let mut f = Formula::default();
     let mut slices = Vec::with_capacity(files.len());
@@ -670,7 +933,7 @@ fn make<S: Source + ?Sized>(
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
     cx.files = None;
     crate::memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
-    notes.send(Note::Analyzed);
+    notes.send(Note::Analyzed(i));
 
     // a leaf for each file, or for each set of them
     let Node::Concat(nodes) = std::mem::replace(&mut f.root, Node::Concat(Vec::new())) else { unreachable!() };
@@ -715,9 +978,25 @@ fn make<S: Source + ?Sized>(
     let mut nodes = nodes.into_iter();
     leaves.iter_mut().zip(counts).for_each(|(l, n)| l.outputs = nodes.by_ref().take(n).collect());
 
-    cx.enc.on_precompress(Some(notes.encoding()));
-    let mut batch = w.batch(&cx.enc, &f, &leaves).expect("slices within their streams");
-    drop(cx);
+    let Cx { enc, .. } = cx;
+    Analyzed { f, leaves, at, enc, memo }
+}
+
+/// Batch `i` of `files` of analysis `a`, to follow the blocks of `w`: encoded, and verified
+/// (its files read again from `src`).
+fn finish<S: Source + ?Sized>(
+    i: usize,
+    w: &SegmentWriter,
+    files: &[File],
+    a: Analyzed,
+    src: &S,
+    opt: &Options,
+    notes: &Notes,
+) -> Made {
+    let Analyzed { f, leaves, at, mut enc, memo } = a;
+    enc.on_precompress(Some(notes.encoding(i)));
+    let mut batch = w.batch(&enc, &f, &leaves).expect("slices within their streams");
+    drop(enc);
     let (reports, solid, sets) = report(&f, &leaves, &batch.layout, files, &at);
     drop(f);
 
@@ -728,7 +1007,7 @@ fn make<S: Source + ?Sized>(
         for (k, f) in files.iter().enumerate() {
             m.whole.entry(f.len).or_default().push((k, f.hash));
         }
-        check(w, &mut batch, files, &at, &m, opt.threads, notes)
+        check(i, w, &mut batch, files, &at, &m, opt.threads, notes)
     } else {
         Vec::new()
     };
@@ -743,7 +1022,9 @@ const VERIFY_BUDGET: u64 = 2_000_000_000;
 
 /// The files of batch `b` (by index; each at its leaf and output in `at`) that its blocks, decoded
 /// alone with the modules of `m`, do not give back: all of them where it does not decode.
+#[allow(clippy::too_many_arguments)]
 fn check(
+    i: usize,
     w: &SegmentWriter,
     b: &mut Batch,
     files: &[File],
@@ -754,12 +1035,14 @@ fn check(
 ) -> Vec<usize> {
     // (the batch's bytes in the archive decoded, rather than a copy of them)
     let c = w.take_standalone(b);
-    let bad = check_in(&c, b, files, at, m, threads, notes);
+    let bad = check_in(i, &c, b, files, at, m, threads, notes);
     w.give_back(b, c);
     bad
 }
 
+#[allow(clippy::too_many_arguments)]
 fn check_in(
+    batch: usize,
     c: &[u8],
     b: &Batch,
     files: &[File],
@@ -780,7 +1063,7 @@ fn check_in(
     a.set_budget(VERIFY_BUDGET);
     let r = a.each_leaf(threads, |i, outputs| {
         let l = by_block[i];
-        notes.send(Note::Verified(of_leaf[l].iter().map(|&(_, k)| files[k].len as u64).sum()));
+        notes.send(Note::Verified(batch, of_leaf[l].iter().map(|&(_, k)| files[k].len as u64).sum()));
         let mut bad = bad.lock().unwrap();
         match outputs {
             Ok(outputs) => bad.extend(

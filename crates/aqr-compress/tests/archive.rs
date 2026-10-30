@@ -190,13 +190,16 @@ fn bounded() {
     assert!(r.files.iter().all(|f| f.modules.is_empty()) && !r.solid.is_empty());
 }
 
-/// Files in batches of 30 KB: each batch apart, the same content once across them.
+/// Files in batches of 30 KB: each batch apart, the same content once across them; the same
+/// archive however many threads make them (batches made at once).
 #[test]
 fn batches() {
     let files = sample();
     let (one, _) = archived(&files, &Options::default());
     let (c, r) = archived(&files, &Options { batch: 30_000, ..Options::default() });
     assert_eq!(r.files[1].same_as, Some(3));
+    let (threaded, _) = archived(&files, &Options { batch: 30_000, threads: 4, ..Options::default() });
+    assert!(threaded == c, "{} bytes on 4 threads, {} on one", threaded.len(), c.len());
     // (the text files no longer solid all together)
     assert!(c.len() > one.len() && r.solid.iter().all(|s| s.len <= 2 * 30_000), "{} {}", c.len(), one.len());
     let attributed: f64 = r.files.iter().map(|f| f.archived).sum();
