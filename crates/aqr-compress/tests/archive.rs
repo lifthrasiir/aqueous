@@ -689,14 +689,44 @@ fn arm64_functions(n: usize, pad: usize) -> Vec<u8> {
     w.iter().flat_map(|w| w.to_le_bytes()).collect()
 }
 
+/// x86-64 code at `origin` of `n` functions of 32 bytes, after `pad` bytes of padding: each of
+/// distinct bytes, calling another, taking an address of its own and jumping to the next.
+fn x86_functions(n: usize, pad: usize, origin: u64) -> Vec<u8> {
+    let at = |f: usize| pad + 32 * f;
+    let mut c = vec![0xcc; pad];
+    for f in 0..n {
+        let rel = |c: &Vec<u8>, to: usize| ((to as i64 - (c.len() + 4) as i64) as i32).to_le_bytes();
+        c.extend_from_slice(&[0x55, 0x48, 0x89, 0xe5, 0xe8]); // push rbp; mov rbp, rsp; call
+        let r = rel(&c, at((f * 7919 + 13) % n));
+        c.extend_from_slice(&r);
+        c.extend_from_slice(&[0x48, 0x8d, 0x05]); // lea rax, [rip + data f]
+        let r = (0x1000_0000 + 64 * f as i64) - (origin as i64 + c.len() as i64 + 4);
+        c.extend_from_slice(&(r as i32).to_le_bytes());
+        c.push(0xb9); // mov ecx, f
+        c.extend_from_slice(&(f as u32).to_le_bytes());
+        c.push(0xe9); // jmp the next one
+        let r = rel(&c, at((f + 1) % n));
+        c.extend_from_slice(&r);
+        c.extend_from_slice(&[0x5d, 0xc3]); // pop rbp; ret
+        c.resize(at(f + 1), 0xcc);
+    }
+    c
+}
+
 /// A thin ARM64 Mach-O image of `code` in a section of instructions of its one segment.
 fn macho_arm64(code: &[u8]) -> Vec<u8> {
+    macho(0x0100_000c, code)
+}
+
+/// A thin 64-bit Mach-O image of `cputype`, of `code` in a section of instructions of its one
+/// segment, at 0x1_0000_0200.
+fn macho(cputype: u32, code: &[u8]) -> Vec<u8> {
     let (cmds, at) = (72 + 80, 0x200);
     let mut d = vec![0u8; at];
     let put32 = |d: &mut Vec<u8>, p: usize, v: u32| d[p..p + 4].copy_from_slice(&v.to_le_bytes());
     let put64 = |d: &mut Vec<u8>, p: usize, v: u64| d[p..p + 8].copy_from_slice(&v.to_le_bytes());
     put32(&mut d, 0, 0xfeed_facf);
-    put32(&mut d, 4, 0x0100_000c);
+    put32(&mut d, 4, cputype);
     put32(&mut d, 12, 2); // MH_EXECUTE
     put32(&mut d, 16, 1);
     put32(&mut d, 20, cmds as u32);
@@ -734,6 +764,24 @@ fn arm64_versions_remapped() {
     let mut all = [names(0), names(1)];
     all.sort();
     assert_eq!(all, [["exe-recons/arm64"], ["exe-recons/arm64-remap"]], "{:?}", r.files);
+    let both = both.len() - r.overhead;
+    assert!(both < alone + alone / 10, "{both} of {alone} alone");
+}
+
+/// The same of x86-64 code (`exe-recons/x86-remap`).
+#[test]
+fn x86_versions_remapped() {
+    let code = |pad| macho(0x0100_0007, &x86_functions(40_000, pad, 0x1_0000_0200));
+    let (a, b) = (code(0), code(48));
+    assert!(a.len() > 1 << 20);
+    let opt = Options { block: 2 << 20, ..Options::default() };
+    let (alone, r) = archived(&[("a", a.clone())], &opt);
+    let alone = alone.len() - r.overhead;
+    let (both, r) = archived(&[("a", a), ("b", b)], &opt);
+    let names = |k: usize| -> Vec<&str> { r.files[k].modules.iter().map(|m| m.name).collect() };
+    let mut all = [names(0), names(1)];
+    all.sort();
+    assert_eq!(all, [["exe-recons/x86"], ["exe-recons/x86-remap"]], "{:?}", r.files);
     let both = both.len() - r.overhead;
     assert!(both < alone + alone / 10, "{both} of {alone} alone");
 }

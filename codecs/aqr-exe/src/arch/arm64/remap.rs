@@ -52,7 +52,6 @@ const fn bits(bl: bool) -> u32 {
 mod encode {
     use super::super::{adrp_imm, encode_into, kind, Kind};
     use super::*;
-    use alloc::vec;
     use core::array;
 
     /// The targets of BL (in words) and the pages of ADRP of an image, each as the field the
@@ -64,139 +63,50 @@ mod encode {
         pub stats: Stats,
     }
 
-    /// What [`Remap::new`] found.
-    #[derive(Debug, Default, Clone, Copy)]
-    pub struct Stats {
-        pub functions: [usize; 2],
-        pub matched: usize,
-        /// Words of the reference's functions matched.
-        pub matched_words: usize,
-        pub words: [usize; 2],
-        /// Entries of the maps of BL and ADRP.
-        pub mapped: [usize; 2],
-    }
+    use crate::arch::matching::{self, Code};
+    pub use crate::arch::matching::{Signature, Stats, SAMPLE};
 
-    /// The words of an image's code sections, one after another.
-    struct Words {
-        w: Vec<u32>,
-        pc: Vec<u64>,
-        /// The first word of each section, and the end.
-        starts: Vec<usize>,
-    }
-
-    impl Words {
-        fn new(sections: &[(u64, &[u8])]) -> Words {
-            let (mut w, mut pc, mut starts) = (Vec::new(), Vec::new(), Vec::new());
-            for &(va, code) in sections {
-                if !va.is_multiple_of(4) {
-                    continue;
-                }
-                starts.push(w.len());
-                for (k, x) in code.as_chunks::<4>().0.iter().enumerate() {
-                    w.push(u32::from_le_bytes(*x));
-                    pc.push(va.wrapping_add(4 * k as u64));
-                }
+    /// The code of an image's code sections, one after another, by word ([`matching`]): BL
+    /// targets (space 0) and ADRP pages (space 1) as the filter writes them.
+    fn code(sections: &[(u64, &[u8])]) -> Code<u32> {
+        let (mut w, mut pc, mut starts) = (Vec::new(), Vec::new(), Vec::new());
+        for &(va, code) in sections {
+            if !va.is_multiple_of(4) {
+                continue;
             }
             starts.push(w.len());
-            Words { w, pc, starts }
-        }
-
-        /// The absolute field of word `i` of `k`, BL or ADRP, as the filter makes it.
-        fn field(&self, i: usize, k: Kind) -> u32 {
-            let (w, pc) = (self.w[i], self.pc[i]);
-            match k {
-                Kind::Bl => w.wrapping_add((pc >> 2) as u32) & low(26),
-                _ => adrp_imm(w).wrapping_add((pc >> 12) as u32) & low(21),
+            for (k, x) in code.as_chunks::<4>().0.iter().enumerate() {
+                w.push(u32::from_le_bytes(*x));
+                pc.push(va.wrapping_add(4 * k as u64));
             }
         }
-
-        /// The functions, from each BL target within the code to the next (and from the
-        /// start of each section), as ranges of words with the hash of their words, BL and
-        /// ADRP fields cleared.
-        fn functions(&self) -> Vec<(u64, usize, usize)> {
-            // the sections by address, of the words from their first
-            let mut secs: Vec<(u64, usize, usize)> =
-                self.starts.windows(2).filter(|s| s[0] < s[1]).map(|s| (self.pc[s[0]] >> 2, s[0], s[1])).collect();
-            secs.sort_unstable();
-            let mut cuts: Vec<usize> = self.starts.clone();
-            for i in 0..self.w.len() {
-                if kind(self.w[i]) != Kind::Bl {
-                    continue;
-                }
-                let s = ((self.w[i] << 6) as i32 >> 6) as i64 as u64;
-                let t = (self.pc[i] >> 2).wrapping_add(s);
-                let j = secs.partition_point(|x| x.0 <= t);
-                if let Some(&(at, from, to)) = j.checked_sub(1).map(|j| &secs[j]) {
-                    if t - at < (to - from) as u64 {
-                        cuts.push(from + (t - at) as usize);
+        starts.push(w.len());
+        // the sections by address, of the words from their first
+        let mut secs: Vec<(u64, usize, usize)> =
+            starts.windows(2).filter(|s| s[0] < s[1]).map(|s| (pc[s[0]] >> 2, s[0], s[1])).collect();
+        secs.sort_unstable();
+        let (mut cuts, mut refs) = (starts, Vec::new());
+        for (i, (&w, &pc)) in w.iter().zip(&pc).enumerate() {
+            match kind(w) {
+                Kind::Bl => {
+                    refs.push((i, 0, (w.wrapping_add((pc >> 2) as u32) & low(26)) as u64));
+                    // (a function from where it goes)
+                    let t = (pc >> 2).wrapping_add(((w << 6) as i32 >> 6) as i64 as u64);
+                    let j = secs.partition_point(|x| x.0 <= t);
+                    if let Some(&(at, from, to)) = j.checked_sub(1).map(|j| &secs[j]) {
+                        if t - at < (to - from) as u64 {
+                            cuts.push(from + (t - at) as usize);
+                        }
                     }
                 }
+                Kind::Adrp => refs.push((i, 1, (adrp_imm(w).wrapping_add((pc >> 12) as u32) & low(21)) as u64)),
+                _ => {}
             }
-            cuts.sort_unstable();
-            cuts.dedup();
-            cuts.windows(2)
-                .map(|c| {
-                    let mut h = 0xcbf2_9ce4_8422_2325u64 ^ (c[1] - c[0]) as u64;
-                    for &w in &self.w[c[0]..c[1]] {
-                        h = (h.rotate_left(23) ^ norm(w) as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                    }
-                    (h, c[0], c[1])
-                })
-                .collect()
         }
-    }
-
-    /// The entries of `f` (by hash first) whose hash no other has.
-    fn unique(mut f: Vec<(u64, usize)>) -> Vec<(u64, usize)> {
-        f.sort_unstable();
-        let mut out = Vec::with_capacity(f.len());
-        let mut i = 0;
-        while i < f.len() {
-            let j = i + f[i..].iter().take_while(|x| x.0 == f[i].0).count();
-            if j == i + 1 {
-                out.push(f[i]);
-            }
-            i = j;
-        }
-        out
-    }
-
-    /// Of `votes` (each a value of the reference and one of the image), the image's value
-    /// most voted for each of the reference's, by the reference's.
-    fn majority(votes: &mut [(u32, u32)]) -> Vec<(u32, u32)> {
-        votes.sort_unstable();
-        let mut fwd: Vec<(u32, u32)> = Vec::new();
-        let mut i = 0;
-        while i < votes.len() {
-            let a = votes[i].0;
-            let (mut best, mut n) = ((0, 0), 0);
-            while i < votes.len() && votes[i].0 == a {
-                let j = i + votes[i..].iter().take_while(|v| **v == votes[i]).count();
-                if j - i > n {
-                    (best, n) = (votes[i], j - i);
-                }
-                i = j;
-            }
-            fwd.push(best);
-        }
-        fwd
-    }
-
-    /// Of `fwd` (the reference's values to the image's), the image's values that one value of
-    /// the reference maps to, with it, by the image's.
-    fn inverse(fwd: &[(u32, u32)]) -> Vec<(u32, u32)> {
-        let mut inv: Vec<(u32, u32)> = fwd.iter().map(|&(a, b)| (b, a)).collect();
-        inv.sort_unstable();
-        let mut out = Vec::with_capacity(inv.len());
-        let mut i = 0;
-        while i < inv.len() {
-            let j = i + inv[i..].iter().take_while(|x| x.0 == inv[i].0).count();
-            if j == i + 1 {
-                out.push(inv[i]);
-            }
-            i = j;
-        }
-        out
+        cuts.sort_unstable();
+        cuts.dedup();
+        let starts = cuts[..cuts.len() - 1].iter().map(|&c| (pc[c] >> 2) & low(26) as u64).collect();
+        Code::new(w.iter().map(|&w| norm(w)).collect(), cuts, starts, refs)
     }
 
     /// `w` with its BL or ADRP field cleared.
@@ -208,129 +118,25 @@ mod encode {
         }
     }
 
-    /// Rounds of matching after the first, at most.
-    const ROUNDS: usize = 16;
+    fn of_u64(maps: Vec<Vec<(u64, u64)>>) -> [Vec<(u32, u32)>; 2] {
+        let mut m = maps.into_iter().map(|m| m.into_iter().map(|(b, a)| (b as u32, a as u32)).collect());
+        array::from_fn(|_| m.next().unwrap_or_default())
+    }
 
     impl Remap {
         /// The map of the image of code sections `image` (each its address and its bytes) to
-        /// the reference image `reference`. Functions whose words hash alike and uniquely in
-        /// both, of one length, are matched, and the targets and pages at the same places in
-        /// them vote. Then, in rounds, a function not matched yet is matched to the one that
-        /// its start maps to by the votes so far, or else to the one its matched neighbours'
-        /// shift tells; their words from the start and from the end, alike as far as they go,
-        /// vote. (Asking those to be some share of the words, or aligning the words between
-        /// them, maps fewer.)
+        /// the reference image `reference`, of their functions matched ([`matching::map`]).
         pub fn new(reference: &[(u64, &[u8])], image: &[(u64, &[u8])]) -> Remap {
-            let (a, b) = (Words::new(reference), Words::new(image));
-            let (fa, fb) = (a.functions(), b.functions());
-            let mut stats =
-                Stats { functions: [fa.len(), fb.len()], words: [a.w.len(), b.w.len()], ..Stats::default() };
-            let start = |w: &Words, i: usize| (w.pc[i] >> 2) as u32 & low(26);
-            let mut votes: [Vec<(u32, u32)>; 2] = [Vec::new(), Vec::new()];
-            let vote = |votes: &mut [Vec<(u32, u32)>; 2], i: usize, k: usize| match kind(a.w[i]) {
-                Kind::Bl if kind(b.w[k]) == Kind::Bl => votes[0].push((a.field(i, Kind::Bl), b.field(k, Kind::Bl))),
-                Kind::Adrp if kind(b.w[k]) == Kind::Adrp => {
-                    votes[1].push((a.field(i, Kind::Adrp), b.field(k, Kind::Adrp)))
-                }
-                _ => {}
-            };
-            // of each function of the reference, the one of the image matched
-            let mut pair: Vec<Option<usize>> = vec![None; fa.len()];
-            let mut taken = vec![false; fb.len()];
-            let (ua, ub) = (
-                unique(fa.iter().enumerate().map(|(i, f)| (f.0, i)).collect()),
-                unique(fb.iter().enumerate().map(|(i, f)| (f.0, i)).collect()),
-            );
-            let mut j = 0;
-            for &(h, i) in &ua {
-                while j < ub.len() && ub[j].0 < h {
-                    j += 1;
-                }
-                let Some(&(_, k)) = ub.get(j).filter(|x| x.0 == h && fb[x.1].2 - fb[x.1].1 == fa[i].2 - fa[i].1) else {
-                    continue;
-                };
-                (pair[i], taken[k]) = (Some(k), true);
-                let (a0, a1, b0) = (fa[i].1, fa[i].2, fb[k].1);
-                votes[0].push((start(&a, a0), start(&b, b0)));
-                for (i, k) in (a0..a1).zip(b0..) {
-                    vote(&mut votes, i, k);
-                }
-            }
-            // the functions of the image by their starts
-            let mut by_start: Vec<(u32, usize)> = fb.iter().enumerate().map(|(k, f)| (start(&b, f.1), k)).collect();
-            by_start.sort_unstable();
-            let at = |s: u32| by_start.binary_search_by_key(&s, |x| x.0).ok().map(|j| by_start[j].1);
-            for _ in 0..ROUNDS {
-                let fwd = majority(&mut votes[0]);
-                let shift = |i: usize| pair[i].map(|k| start(&b, fb[k].1).wrapping_sub(start(&a, fa[i].1)) & low(26));
-                // the shift of the last function matched before each, and of the next after
-                let mut before = vec![None; fa.len()];
-                let mut after = vec![None; fa.len()];
-                for i in 1..fa.len() {
-                    before[i] = shift(i - 1).or(before[i - 1]);
-                }
-                for i in (0..fa.len().saturating_sub(1)).rev() {
-                    after[i] = shift(i + 1).or(after[i + 1]);
-                }
-                let mut new = 0;
-                for i in 0..fa.len() {
-                    if pair[i].is_some() {
-                        continue;
-                    }
-                    let (a0, a1) = (fa[i].1, fa[i].2);
-                    let s = start(&a, a0);
-                    let voted = fwd.binary_search_by_key(&s, |x| x.0).ok().map(|j| fwd[j].1);
-                    let near = before[i].filter(|_| before[i] == after[i]).map(|d| s.wrapping_add(d) & low(26));
-                    let Some(k) = voted.or(near).and_then(at).filter(|&k| !taken[k]) else { continue };
-                    let (b0, b1) = (fb[k].1, fb[k].2);
-                    let same = |(i, k): (usize, usize)| norm(a.w[i]) == norm(b.w[k]);
-                    let head = (a0..a1).zip(b0..b1).take_while(|&p| same(p)).count();
-                    let tail = (a0 + head..a1).rev().zip((b0 + head..b1).rev()).take_while(|&p| same(p)).count();
-                    (pair[i], taken[k]) = (Some(k), true);
-                    new += 1;
-                    votes[0].push((s, start(&b, b0)));
-                    for (i, k) in (a0..a0 + head).zip(b0..) {
-                        vote(&mut votes, i, k);
-                    }
-                    for (i, k) in (a1 - tail..a1).zip(b1 - tail..) {
-                        vote(&mut votes, i, k);
-                    }
-                }
-                if new == 0 {
-                    break;
-                }
-            }
-            for (i, p) in pair.iter().enumerate() {
-                if p.is_some() {
-                    stats.matched += 1;
-                    stats.matched_words += fa[i].2 - fa[i].1;
-                }
-            }
-            // (values mapped to themselves too: their flags then go with their neighbours', which
-            // costs less than the maps' entries saved)
-            let maps = votes.map(|mut v| inverse(&majority(&mut v)));
-            stats.mapped = [maps[0].len(), maps[1].len()];
-            Remap { maps, stats }
+            let (maps, stats) = matching::map(&code(reference), &code(image), 2, low(26) as u64);
+            Remap { maps: of_u64(maps), stats }
         }
 
         /// This map composed with `parent`'s, the map of the reference to an image of its own:
         /// to that image's values, which the reference is written in. Values that two of the
         /// image's would map to are left unmapped.
         pub fn compose(self, parent: &Remap) -> Remap {
-            let maps = [0, 1].map(|i| {
-                let mut m: Vec<(u32, u32)> =
-                    self.maps[i].iter().map(|&(b, a)| (b, parent.get(i == 0, a).unwrap_or(a))).collect();
-                m.sort_unstable_by_key(|x| x.1);
-                let mut keep = vec![true; m.len()];
-                for j in 1..m.len() {
-                    if m[j].1 == m[j - 1].1 {
-                        (keep[j - 1], keep[j]) = (false, false);
-                    }
-                }
-                let mut m: Vec<_> = m.into_iter().zip(keep).filter(|x| x.1).map(|x| x.0).collect();
-                m.sort_unstable();
-                m
-            });
+            let maps = self.maps.map(|m| m.into_iter().map(|(b, a)| (b as u64, a as u64)).collect());
+            let maps = of_u64(matching::compose(&maps, |i, a| parent.get(i == 0, a as u32).map(u64::from)));
             let mut stats = self.stats;
             stats.mapped = [maps[0].len(), maps[1].len()];
             Remap { maps, stats }
@@ -348,44 +154,9 @@ mod encode {
         }
     }
 
-    /// A sample of the functions of an image ([`Remap::new`]'s), to tell images alike: the
-    /// hashes of those that hash to a multiple of [`SAMPLE`].
-    #[derive(Debug, Clone)]
-    pub struct Signature(Vec<u64>);
-
-    /// What hashes of [`Signature`]s are multiples of.
-    pub const SAMPLE: u64 = 16;
-
-    impl Signature {
-        pub fn of(image: &[(u64, &[u8])]) -> Signature {
-            let mut h: Vec<u64> =
-                Words::new(image).functions().into_iter().map(|f| f.0).filter(|h| h.is_multiple_of(SAMPLE)).collect();
-            h.sort_unstable();
-            h.dedup();
-            Signature(h)
-        }
-
-        /// The share of the hashes of the larger of the two in both.
-        pub fn alike(&self, other: &Signature) -> f64 {
-            let (a, b) = (&self.0, &other.0);
-            let (mut i, mut j, mut n) = (0, 0, 0);
-            while i < a.len() && j < b.len() {
-                match a[i].cmp(&b[j]) {
-                    core::cmp::Ordering::Less => i += 1,
-                    core::cmp::Ordering::Greater => j += 1,
-                    core::cmp::Ordering::Equal => (i, j, n) = (i + 1, j + 1, n + 1),
-                }
-            }
-            n as f64 / a.len().max(b.len()).max(1) as f64
-        }
-
-        pub fn len(&self) -> usize {
-            self.0.len()
-        }
-
-        pub fn is_empty(&self) -> bool {
-            self.0.is_empty()
-        }
+    /// The [`Signature`] of the image of code sections `image`.
+    pub fn signature(image: &[(u64, &[u8])]) -> Signature {
+        Signature::of(&code(image))
     }
 
     /// The streams of a section, as [`encode`] gives them.
@@ -649,7 +420,7 @@ mod tests {
         // past the first function and its padding, C's words are B's
         let tail = |e: &EncodedStreams, pad: usize| e.streams()[0][4 * (3 + pad)..].to_vec();
         assert_eq!(tail(&eb, 5), tail(&ec, 11));
-        assert!(Signature::of(&sa).alike(&Signature::of(&sc)) > 0.0 || Signature::of(&sa).is_empty());
+        assert!(signature(&sa).alike(&signature(&sc)) > 0.0 || signature(&sa).is_empty());
     }
 
     #[test]

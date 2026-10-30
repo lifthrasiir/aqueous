@@ -1,6 +1,7 @@
 # The `exe-recons/x86` module
 
 This document specifies the module `exe-recons/x86` of aqr-formula entry formulas, and
+[`exe-recons/x86-remap`](#the-exe-reconsx86-remap-module),
 [`exe-recons/arm64`](#the-exe-reconsarm64-module),
 [`exe-recons/arm64-remap`](#the-exe-reconsarm64-remap-module),
 [`exe-recons/cil`](#the-exe-reconscil-module),
@@ -406,6 +407,69 @@ The module fails if:
   marker appears in x86-32, or the bits of a prefix fail the checks of §5.3;
 - `out` is shorter than `sentinel` at the end, or the output is not `len` bytes long.
 
+# The `exe-recons/x86-remap` module
+
+This part specifies the module `exe-recons/x86-remap`, which rebuilds a section of x86 code
+as `exe-recons/x86` does (§2–§7), from the streams of that module and four more, as
+`exe-recons/arm64-remap` does for ARM64 (§M): the targets of some calls and jumps, and some
+RIP-relative addresses, are those of another image (another version of the program), so that
+the streams of code that moved match the other's; a flag per reference tells which, and a map
+of each value so written to the reference's own rebuilds them. The map is over the values that
+the flagged references hold, so the other image is not an input. The conventions of §1 hold.
+
+## N1. The module
+- **Module**: name `exe-recons/x86-remap`, version 1.
+- **Params** and **Resources**: as for `exe-recons/x86` (§2).
+- **Inputs**: exactly 17, the streams of §3 (0–12, each of class `x86/NAME`), then those of §N2.
+- **Output**: the code, `len` bytes long.
+
+## N2. Streams
+
+| # | name | contents |
+|---|---|---|
+| 0–12 | | as in §3 |
+| 13 | `CALLF` | a flag per target of `0:E8` (`CALL`), in order, a bit each, the most significant of each byte first |
+| 14 | `JUMPF` | a flag per target of another `J4` read from `JUMP` (not with `66` in x86-32) |
+| 15 | `ADDRF` | a flag per operand of `mod = 0`, `rm = 5` read from `ADDR` (`[rip+disp32]` in x86-64, `[disp32]` in x86-32) |
+| 16 | `MAP` | the map of the values flagged (§N3) |
+
+## N3. Decoding
+
+`W` is `2^64 − 1` in x86-64 and `2^32 − 1` in x86-32. The **references** are the call targets
+and jump targets `T` of §5.3 step 5 (`J4`, as read from `CALL_IDX`, `CALL` or `JUMP`), and the
+addresses `A` of §5.3 step 4 (`mod = 0`, `rm = 5`, read from `ADDR`); a reference's **field**
+is the 4 bytes it is appended as.
+
+1. **Code.** Decode as §5. As each reference is appended, read the next bit of the flag stream
+   of its kind (`CALLF`, `JUMPF` or `ADDRF`); where it is 1, note its value `v = T & W` (or
+   `A & W`) and where its field is in `out`. Each flag stream must then be read to its last
+   byte, the bits left in it 0.
+2. **Map.** The distinct values noted in ascending order, `v₁ < … < vₘ`: read `m` unsigned
+   LEB128s from `MAP`, of 10 bytes at most (the tenth below 2); with `zᵢ` the `i`-th,
+   `dᵢ = (zᵢ >> 1) XOR −(zᵢ & 1)` (of 64 bits), in x86-32 a value of 32 bits sign-extended,
+   `s₀ = 0` and `sᵢ = (sᵢ₋₁ + dᵢ) & W`. `MAP` must then be read to its end.
+3. **Fields.** To each field noted, of value `vᵢ`, add `sᵢ` modulo `2^32` (as `le32`). The
+   field must be within the output (after the sentinel is dropped).
+
+So a flagged reference's own value is `(vᵢ + sᵢ) & W`, its field the one §5.3 makes of that.
+
+## N4. Validation
+
+The module fails if `exe-recons/x86` would (§7), of streams 0–12, or if there are not exactly
+17 inputs; a flag stream runs out, or is longer than its flags, or its bits after them are not
+0; a LEB128 of `MAP` runs out, is longer than 10 bytes, or is not of 32 bits sign-extended in
+x86-32; `MAP` has bytes left; or a field noted is not within the output.
+
+## N5. Encoding *(encoder)*
+
+`aqr_exe::arch::x86::remap::Remap::new` matches the functions of two images as §M5 does, by
+byte: the code with the fields of the references cleared, cut where calls go (and at the
+sections' starts), the references all of one space (addresses). `remap::encode` flags the
+references the map has whose fields are within the section (not those of the zeros the encoder
+reads past the end, §6) and writes them as the reference's values, the call cache (§5.4) going
+by the values so written. aqr-compress plans the x86 images of Mach-O files with the ARM64 ones
+(§M5), each architecture and mode apart.
+
 # The `exe-recons/arm64` module
 
 This part specifies the module `exe-recons/arm64`, which rebuilds a section of ARM64 (A64)
@@ -572,7 +636,8 @@ image, after Courgette:
   556 KB in place of 172 KB) than their entries in the map.
 
 `remap::encode` writes each `BL` and `ADRP` whose field the map has as the reference's, its
-flag 1. aqr-compress (`exe::plan`) remaps the ARM64 images of the Mach-O files of a batch
+flag 1. aqr-compress (`exe::plan`) remaps the ARM64 images (and the x86 ones, §N5) of the
+Mach-O files of a batch
 whose code is over half the bound of a solid block (so that their code streams are cut into
 pieces, which go with those alike of other streams; shorter streams go one after another as
 their files do, rarely by their parents'): a maximum spanning forest of how alike they are (the share of their

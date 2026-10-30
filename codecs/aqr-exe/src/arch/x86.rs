@@ -840,9 +840,32 @@ impl CallCache {
     }
 }
 
+/// What a reference that the filter makes absolute is ([`encode_with`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ref {
+    /// The target of `CALL rel32`.
+    Call,
+    /// The target of another jump of a 32-bit offset (`JMP`, `Jcc`).
+    Jump,
+    /// `[rip+disp32]` in x86-64, `[disp32]` in x86-32.
+    Address,
+}
+
+#[cfg(feature = "encode")]
+pub fn encode(input: &[u8], origin: u64, is64: bool) -> Option<EncodedStreams> {
+    encode_with(input, origin, is64, &mut |_, _, v| v)
+}
+
+/// [`encode`], each reference of [`Ref`] written as `hook` gives it: of its kind, the address
+/// of its field and its absolute value (of which an address of x86-32 is the low 32 bits).
 #[cfg(feature = "encode")]
 #[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
-pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStreams> {
+pub fn encode_with(
+    input: &[u8],
+    mut origin: u64,
+    is64: bool,
+    hook: &mut dyn FnMut(Ref, u64, u64) -> u64,
+) -> Option<EncodedStreams> {
     let opcodes = &Opcodes::BUILTIN;
     let mut st = EncodedStreams::new(origin);
 
@@ -1156,14 +1179,16 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
                     0 if addr16 && base == 6 => copy(16 / 8, &mut st, ST_ADDR16), // [disp16]
                     0 if addr16 => {}
                     0 if base == 5 => {
+                        let at = origin + i.get() as u64;
                         let addr = fetch32();
                         if is64 {
                             // [eip+disp32] or [rip+disp32]
                             // Note that we haven't fully decoded operands yet, hence a delta.
                             let delta = modrm_imm_size(flags, prefixes);
-                            st.put64(ST_ADDR64, rel_to_abs(addr, delta));
+                            st.put64(ST_ADDR64, hook(Ref::Address, at, rel_to_abs(addr, delta)));
                         } else {
-                            st.put32(ST_ADDR32, addr); // [disp32]
+                            st.put32(ST_ADDR32, hook(Ref::Address, at, addr as u64) as u32);
+                            // [disp32]
                         }
                     }
                     0 if sib & 7 == 5 => copy(32 / 8, &mut st, ST_DISP32), // [reg*scale+disp32]
@@ -1178,7 +1203,10 @@ pub fn encode(input: &[u8], mut origin: u64, is64: bool) -> Option<EncodedStream
             match flags {
                 J4 if has_jump16(prefixes, is64) => copy(16 / 8, &mut st, ST_JUMP16),
                 J4 => {
+                    let at = origin + i.get() as u64;
                     let target = rel_to_abs(fetch32(), 0);
+                    let kind = if op == OP_CALLN { Ref::Call } else { Ref::Jump };
+                    let target = hook(kind, at, target);
                     if op == OP_CALLN {
                         let idx = call_idx(target);
                         if is64 {
@@ -1277,8 +1305,22 @@ pub fn decode(streams: &DecodedStreams<'_>, is64: bool) -> Option<Vec<u8>> {
 
 /// [`decode`] by the opcode classes of `opcodes` (the module's resource).
 #[cfg(feature = "decode")]
-#[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
 pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes, capacity: usize) -> Option<Vec<u8>> {
+    decode_hooked(streams, is64, opcodes, capacity, |_, _, _| Some(()))
+}
+
+/// [`decode_with`], telling `hook` of each reference of [`Ref`] as it is written: its kind,
+/// its value in the streams, and where its field is in the output (before the sentinel is cut
+/// off). Decoding fails where it fails.
+#[cfg(feature = "decode")]
+#[allow(clippy::eq_op)] // `copy(8 / 8, ...)` spells out the bit width
+pub(crate) fn decode_hooked(
+    streams: &DecodedStreams<'_>,
+    is64: bool,
+    opcodes: &Opcodes,
+    capacity: usize,
+    mut hook: impl FnMut(Ref, u64, usize) -> Option<()>,
+) -> Option<Vec<u8>> {
     let origin = streams.origin;
     let sentinel_size = streams.sentinel_size;
     let streams = streams.streams.each_ref().map(|stream| Cell::new(&stream[..]));
@@ -1558,9 +1600,13 @@ pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes, 
                         // [eip+disp32] or [rip+disp32]
                         // Note that we haven't fully decoded operands yet, hence a delta.
                         let delta = modrm_imm_size(flags, prefixes);
-                        abs_to_rel(read64(ST_ADDR64)?, &code, delta + 4) as u32
+                        let v = read64(ST_ADDR64)?;
+                        hook(Ref::Address, v, code.len())?;
+                        abs_to_rel(v, &code, delta + 4) as u32
                     } else {
-                        read32(ST_ADDR32)? // [disp32]
+                        let v = read32(ST_ADDR32)?; // [disp32]
+                        hook(Ref::Address, v as u64, code.len())?;
+                        v
                     };
                     code.extend_from_slice(&addr.to_le_bytes());
                 }
@@ -1584,6 +1630,7 @@ pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes, 
                 } else {
                     read32(ST_JUMP32)? as u64
                 };
+                hook(if op == OP_CALLN { Ref::Call } else { Ref::Jump }, target, code.len())?;
                 let target = abs_to_rel(target, &code, 4) as u32;
                 code.extend_from_slice(&target.to_le_bytes());
             }
@@ -1615,6 +1662,8 @@ pub fn decode_with(streams: &DecodedStreams<'_>, is64: bool, opcodes: &Opcodes, 
     code.truncate(code.len().checked_sub(sentinel_size as usize)?);
     Some(code)
 }
+
+pub mod remap;
 
 #[cfg(all(test, feature = "encode", feature = "decode", not(target_family = "wasm")))]
 mod tests {

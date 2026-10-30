@@ -30,6 +30,20 @@ pub use wasm::{Applied, initial_pages, record_applications};
 /// (`x86::Opcodes`); inputs: the streams of `x86::STREAM_NAMES`.
 pub const X86: Module = Module::new("exe-recons/x86", 3).with_memory(exe);
 
+/// aqr-exe's x86 disfilter on a code section, its references remapped to those of another
+/// image. Parameters and resources as [`X86`]'s; inputs: the streams of
+/// `x86::remap::STREAM_NAMES`.
+pub const X86_REMAP: Module = Module::new("exe-recons/x86-remap", 1).with_memory(x86_remap);
+
+/// The memory of [`X86_REMAP`]: the whole of it, with of each reference flagged (at most one a
+/// flag set, 8 a byte of them) its value and where it is (16 bytes), and the values and their
+/// shifts (8 bytes each).
+fn x86_remap(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    use aqr_exe::arch::x86::remap::{ADDRF, CALLF, JUMPF};
+    let flags = u.inputs.get(CALLF)? + u.inputs.get(JUMPF)? + u.inputs.get(ADDRF)?;
+    Some(u.whole((16 + 8 + 8) * 8 * flags, 4))
+}
+
 /// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
 /// inputs: the streams of `arm64::STREAM_NAMES`.
 pub const ARM64: Module = Module::new("exe-recons/arm64", 1).with_memory(exe);
@@ -236,8 +250,9 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 60] = [
+pub const MODULES: [Module; 61] = [
     X86,
+    X86_REMAP,
     ARM64,
     ARM64_REMAP,
     CIL,
@@ -479,6 +494,8 @@ impl Native {
         let threads = self.threads.max(1);
         if m == X86 {
             aqr_exe::module::x86(params, resources, inputs, len).map_err(str::to_owned)
+        } else if m == X86_REMAP {
+            aqr_exe::module::x86_remap(params, resources, inputs, len).map_err(str::to_owned)
         } else if m == ARM64 {
             none(resources)?;
             aqr_exe::module::arm64(params, inputs, len).map_err(str::to_owned)

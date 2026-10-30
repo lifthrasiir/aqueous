@@ -124,9 +124,15 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/exe-recons-pe-reloc.block"),
     },
     Known {
+        name: "exe-recons/x86-remap",
+        version: 1,
+        sha512_256: hex("bece7e4e32244d537cec7f3f77b90cd510b634f91de8bacba0e8dfff9342b6b3"),
+        block: include_bytes!("../wasm/exe-recons-x86-remap.block"),
+    },
+    Known {
         name: "exe-recons/x86",
         version: 3,
-        sha512_256: hex("c937c916f9b4aac79b3eda76f4fc67c63b77d7122834d8131bd8534f33bf5ae8"),
+        sha512_256: hex("7e123b6372bf3a290d4e7908db76498b2c019eb129997398cdd271305d0ac64e"),
         block: include_bytes!("../wasm/exe-recons-x86.block"),
     },
     Known {

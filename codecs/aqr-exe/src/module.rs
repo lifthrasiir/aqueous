@@ -1,5 +1,5 @@
-//! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/arm64`,
-//! `exe-recons/arm64-remap`, `exe-recons/cil`, `exe-recons/pe-reloc` and
+//! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/x86-remap`,
+//! `exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/cil`, `exe-recons/pe-reloc` and
 //! `exe-recons/macho-symtab`, as aqr-decompress names them): the parameters and the inputs
 //! checked, then the section or table decoded. aqr-modules builds it into their Wasm modules.
 
@@ -27,6 +27,25 @@ pub fn x86(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Re
     // (no larger but where it is not the output)
     let cap = usize::try_from(len).unwrap_or(usize::MAX);
     of_len(x86::decode_with(&x86::DecodedStreams::new(origin, p[8], streams), p[9] != 0, &opcodes, cap), len)
+}
+
+/// The x86 disfilter on a code section, its references remapped to another image's.
+/// Parameters, resources: as [`x86`]; inputs: the streams of [`x86::remap::STREAM_NAMES`].
+pub fn x86_remap(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let (Some(p), Ok(streams)) = (params.first_chunk::<10>(), <[&[u8]; x86::remap::NUM_STREAMS]>::try_from(inputs))
+    else {
+        return Err("bad parameters or inputs");
+    };
+    let Some(opcodes) = (match resources {
+        [r] => x86::Opcodes::from_resource(r),
+        _ => None,
+    }) else {
+        return Err("bad resources");
+    };
+    let origin = u64::from_le_bytes(*p.first_chunk().unwrap());
+    // (no larger but where it is not the output)
+    let cap = usize::try_from(len).unwrap_or(usize::MAX);
+    of_len(x86::remap::decode(origin, p[8], streams, p[9] != 0, &opcodes, cap), len)
 }
 
 /// The ARM64 filter on a code section. Parameters: the origin (u64, little endian); inputs:

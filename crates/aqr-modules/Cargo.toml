@@ -108,6 +108,11 @@ path = "src/bin/exe-recons-macho-symtab.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "exe-recons-x86-remap"
+path = "src/bin/exe-recons-x86-remap.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "exe-recons-arm64"
 path = "src/bin/exe-recons-arm64.rs"
 required-features = ["wasm"]

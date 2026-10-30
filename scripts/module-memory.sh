@@ -109,6 +109,37 @@ def macho(c):
 for name, pad in ((\"a\", 0), (\"b\", 37)):
     open(os.path.join(sys.argv[1], name), \"wb\").write(macho(code(215000, pad)))
 " $out'
+    # the same of x86-64 code (exe-recons/x86-remap): 9.6 MB each, as aqr-compress's test
+    # x86_versions_remapped makes it, the second's functions 48 bytes on
+    make remap86.d 'mkdir $out && py "
+import os, struct, sys
+def code(n, pad, origin):
+    at = lambda f: pad + 32 * f
+    c = bytearray(b\"\\xcc\" * pad)
+    rel = lambda to: struct.pack(\"<i\", to - (len(c) + 4))
+    for f in range(n):
+        c += bytes([0x55, 0x48, 0x89, 0xe5, 0xe8])
+        c += rel(at((f * 7919 + 13) % n))
+        c += bytes([0x48, 0x8d, 0x05])
+        c += struct.pack(\"<I\", (0x10000000 + 64 * f - (origin + len(c) + 4)) & 0xffffffff)
+        c += bytes([0xb9]) + struct.pack(\"<I\", f)
+        c += bytes([0xe9])
+        c += rel(at((f + 1) % n))
+        c += bytes([0x5d, 0xc3])
+        c += b\"\\xcc\" * (at(f + 1) - len(c))
+    return bytes(c)
+def macho(c):
+    h = bytearray(0x200)
+    struct.pack_into(\"<IIIIII\", h, 0, 0xfeedfacf, 0x01000007, 3, 2, 1, 152)
+    size = 0x200 + len(c)
+    struct.pack_into(\"<II16sQQQQ\", h, 32, 0x19, 152, b\"__TEXT\", 0x100000000, size, 0, size)
+    struct.pack_into(\"<I\", h, 32 + 64, 1)
+    struct.pack_into(\"<16s16sQQII\", h, 104, b\"__text\", b\"__TEXT\", 0x100000200, len(c), 0x200, 0)
+    struct.pack_into(\"<I\", h, 104 + 64, 0x80000400)
+    return bytes(h) + c
+for name, pad in ((\"a\", 0), (\"b\", 48)):
+    open(os.path.join(sys.argv[1], name), \"wb\").write(macho(code(300000, pad, 0x100000200)))
+" $out'
     copy paper.pdf $codecs/aqr-pdf/corpus/arxiv/2307.09288.pdf
     copy db.sqlite $codecs/aqr-sqlite/corpus/system/f502b9__ystem_Library_Security_Certificates.bundle_Contents_Resources_ValidProduction_valid.sqlite
     copy image.fits $codecs/aqr-fits/corpus/misc/frame-r-001000-1-0027.fits

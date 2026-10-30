@@ -9,9 +9,10 @@
 //! imports and runtime functions by `recs-fields`, their numbers as deltas. Of a 64-bit Mach-O
 //! image, the symbol table and its string table by `exe-recons/macho-symtab`.
 //!
-//! The ARM64 images of the Mach-O files of an archive alike (other versions of one program) are
-//! planned beforehand ([`plan`]) as a forest, each image's BL and ADRP targets remapped to its
-//! parent's address space, as its parent's are to its own, by `exe-recons/arm64-remap`; so that
+//! The ARM64 and x86 images of the Mach-O files of an archive alike (other versions of one
+//! program) are planned beforehand ([`plan`]) as a forest, each image's targets (of BL and
+//! ADRP; of calls, jumps and RIP-relative addresses) remapped to its parent's address space, as
+//! its parent's are to its own, by `exe-recons/arm64-remap` and `exe-recons/x86-remap`; so that
 //! their code streams match where the code moved, for the pieces of streams of a class put
 //! together (aqr-formula's `merge_plan`).
 
@@ -19,8 +20,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 
-use aqr_decompress::{ARM64, ARM64_REMAP, CIL, MACHO_SYMTAB, PE_RELOC, X86};
-use aqr_exe::arch::arm64::remap::{self, Remap, Signature};
+use aqr_decompress::{ARM64, ARM64_REMAP, CIL, MACHO_SYMTAB, PE_RELOC, X86, X86_REMAP};
 use aqr_exe::arch::{arm64, cil, x86};
 use aqr_exe::format::macho;
 use aqr_exe::format::pe::{TableKind, locate_code, tables};
@@ -31,8 +31,8 @@ use aqr_infer_recs::formula::{Field, How};
 /// What a range of a file holds: code, or a table of a PE image.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Arch {
-    /// x86-64 if true, else x86-32.
-    X86(bool),
+    /// x86-64 if true, else x86-32, of image `k` of the file (as `Arm64`).
+    X86(bool, usize),
     /// Of image `k` of the file (whose remap, if any, is the `k`-th).
     Arm64(usize),
     /// .NET metadata and IL, the metadata root at this offset (the virtual address is the
@@ -60,7 +60,7 @@ const MIN_SYMBOLS: usize = 16 << 10;
 pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
     let code = locate_code(&mut Cursor::new(d)).ok()?;
     let arch = match code.machine {
-        0x14c | 0x8664 => Some(Arch::X86(code.is64)),
+        0x14c | 0x8664 => Some(Arch::X86(code.is64, 0)),
         0xaa64 => Some(Arch::Arm64(0)),
         _ => None,
     };
@@ -91,12 +91,12 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
     filtered(d, "pe", sections, &[])
 }
 
-/// The formula of Mach-O file `d`, its ARM64 images remapped as `remaps` tells (by image).
+/// The formula of Mach-O file `d`, its images remapped as `remaps` tells (by image).
 pub(crate) fn macho(d: &[u8], remaps: &[Option<Arc<Remap>>]) -> Option<Formula> {
     let images = macho::images(d)?;
     let sections = images.iter().enumerate().flat_map(|(k, i)| {
         let arch = match i.cputype {
-            _ if i.is_x86() => Some(Arch::X86(i.is64())),
+            _ if i.is_x86() => Some(Arch::X86(i.is64(), k)),
             macho::CPU_TYPE_ARM64 => Some(Arch::Arm64(k)),
             _ => None,
         };
@@ -110,14 +110,37 @@ pub(crate) fn macho(d: &[u8], remaps: &[Option<Arc<Remap>>]) -> Option<Formula> 
     filtered(d, "macho", sections.chain(symbols).collect(), remaps)
 }
 
-/// Images less alike than this ([`Signature::alike`]) have no parent: builds of aqr a day
+/// Images less alike than this (`Signature::alike`) have no parent: builds of aqr a day
 /// apart are 0.14 to 0.16 alike (their code remapped 33 to 36% smaller against each other),
 /// Chrome's 156.0.8078.49 and .76 0.36, Electron 42 and 43 0.21 (20%), Chromium and Electron
 /// 0.05 (0.7%), programs not related 0.003.
 const MIN_ALIKE: f64 = 0.1;
 
-/// The remaps of the ARM64 images of Mach-O files, by where each file's data is: of each
-/// image of the file, its remap where it has one.
+/// The remap of an image of code of either architecture.
+pub(crate) enum Remap {
+    Arm64(arm64::remap::Remap),
+    X86(x86::remap::Remap),
+}
+
+impl Remap {
+    fn compose(self, parent: &Remap) -> Remap {
+        match (self, parent) {
+            (Remap::Arm64(r), Remap::Arm64(p)) => Remap::Arm64(r.compose(p)),
+            (Remap::X86(r), Remap::X86(p)) => Remap::X86(r.compose(p)),
+            (r, _) => r,
+        }
+    }
+
+    fn is_identity(&self) -> bool {
+        match self {
+            Remap::Arm64(r) => r.is_identity(),
+            Remap::X86(r) => r.is_identity(),
+        }
+    }
+}
+
+/// The remaps of the images of Mach-O files, by where each file's data is: of each image of
+/// the file, its remap where it has one.
 #[derive(Default)]
 pub(crate) struct Remaps(HashMap<usize, Vec<Option<Arc<Remap>>>>);
 
@@ -128,40 +151,67 @@ impl Remaps {
     }
 }
 
-/// The remaps of the ARM64 images of the Mach-O files among `files`: of those of more than
-/// `min` bytes of code, a maximum spanning forest of how alike they are ([`Signature`]), each
-/// image remapped to its parent's, composed with its parent's own. (Streams over half the
+/// The remaps of the ARM64 and x86 images of the Mach-O files among `files`: of those of more
+/// than `min` bytes of code, a maximum spanning forest of how alike they are (`Signature`; not
+/// at all, of different architectures), each image remapped to its parent's, composed with its
+/// parent's own. (Streams over half the
 /// bound of a solid block are cut into pieces put with those alike of other streams; shorter
 /// ones go one after another as their files do, rarely with their parents': remapped, they
 /// cost more.)
 pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
-    // each image: its file, its index in the file and its code sections
+    // each image: its file, its index in the file, its architecture (x86-64, x86-32 or ARM64)
+    // and its code sections
     let mut images = Vec::new();
     for (i, d) in files.iter().enumerate() {
         for (k, image) in macho::images(d).unwrap_or_default().iter().enumerate() {
-            if image.cputype != macho::CPU_TYPE_ARM64 {
-                continue;
-            }
+            let arch = match image.cputype {
+                macho::CPU_TYPE_ARM64 => Arch::Arm64(k),
+                _ if image.is_x86() => Arch::X86(image.is64(), k),
+                _ => continue,
+            };
             let secs: Vec<(u64, &[u8])> =
                 image.sections.iter().map(|&(va, off, size)| (va, &d[off..off + size])).collect();
             if secs.iter().map(|s| s.1.len()).sum::<usize>() > min {
-                images.push((i, k, secs));
+                images.push((i, k, arch, secs));
             }
         }
     }
     if images.len() < 2 {
         return Remaps::default();
     }
-    let signatures = crate::sets::par_map(images.len(), threads, |i| Signature::of(&images[i].2));
+    // (x86 code parsed once, for its signature and its matches)
+    let parsed = crate::sets::par_map(images.len(), threads, |i| match images[i].2 {
+        Arch::X86(is64, _) => Some(x86::remap::Image::new(&images[i].3, is64)),
+        _ => None,
+    });
+    let signatures = crate::sets::par_map(images.len(), threads, |i| match &parsed[i] {
+        Some(image) => image.signature(),
+        None => arm64::remap::signature(&images[i].3),
+    });
     let n = images.len();
+    let same = |i: usize, j: usize| match (images[i].2, images[j].2) {
+        (Arch::X86(a, _), Arch::X86(b, _)) => a == b,
+        (a, b) => std::mem::discriminant(&a) == std::mem::discriminant(&b),
+    };
     let rows = crate::sets::par_map(n, threads, |i| {
-        (0..n).map(|j| if i == j { 1.0 } else { signatures[i].alike(&signatures[j]) }).collect()
+        (0..n)
+            .map(|j| match () {
+                _ if i == j => 1.0,
+                _ if !same(i, j) => 0.0,
+                _ => signatures[i].alike(&signatures[j]),
+            })
+            .collect()
     });
     let (order, parents) = crate::sets::tree(&rows, MIN_ALIKE);
     let raw = crate::sets::par_map(n, threads, |i| {
         let p = parents[i]?;
-        Some(Remap::new(&images[order[p]].2, &images[order[i]].2))
+        let (a, b) = (order[p], order[i]);
+        Some(match (&parsed[a], &parsed[b]) {
+            (Some(a), Some(b)) => Remap::X86(x86::remap::Remap::of(a, b)),
+            _ => Remap::Arm64(arm64::remap::Remap::new(&images[a].3, &images[b].3)),
+        })
     });
+    drop(parsed);
     // (in order, parents first)
     let mut composed: Vec<Option<Arc<Remap>>> = Vec::with_capacity(n);
     for (i, r) in raw.into_iter().enumerate() {
@@ -174,7 +224,7 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
     let mut out: HashMap<usize, Vec<Option<Arc<Remap>>>> = HashMap::new();
     for (i, r) in composed.into_iter().enumerate() {
         let Some(r) = r else { continue };
-        let (file, k, _) = &images[order[i]];
+        let (file, k, ..) = &images[order[i]];
         let v = out.entry(files[*file].as_ptr() as usize).or_default();
         v.resize(v.len().max(k + 1), None);
         v[*k] = Some(r);
@@ -184,7 +234,7 @@ pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
 
 /// `d` with each of `sections`, `(virtual address, offset, size, code)` within `d`, through
 /// its filter (or a table as its layout tells), and the rest of `d` in a stream of `class`; `None` where none is filtered.
-/// The ARM64 images' code is remapped as `remaps` tells.
+/// The images' code is remapped as `remaps` tells.
 /// The sections within a CIL section are filtered within what the CIL filter keeps as it is
 /// (where whole within a range of it).
 fn filtered(
@@ -247,7 +297,16 @@ fn filtered(
 fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch, remaps: &[Option<Arc<Remap>>]) -> Option<Node> {
     let size = section.len() as u64;
     Some(match arch {
-        Arch::X86(is64) => {
+        Arch::X86(is64, k) if let Some(Remap::X86(r)) = remaps.get(k).and_then(Option::as_deref) => {
+            let st = x86::remap::encode(section, va, is64, r)?;
+            let params = x86_params(st.base.origin(), st.base.sentinel_size(), is64);
+            let streams = st.base.streams().iter().chain(st.extra());
+            let inputs = std::iter::zip(streams, x86::remap::STREAM_NAMES)
+                .map(|(s, name)| f.push(format!("x86/{}", name.trim_start_matches("ST_")), s.clone()))
+                .collect();
+            Node::apply_with(X86_REMAP, vec![x86_resource()], params, inputs, size)
+        }
+        Arch::X86(is64, _) => {
             let st = x86::encode(section, va, is64)?;
             let params = x86_params(st.origin(), st.sentinel_size(), is64);
             let inputs = std::iter::zip(st.streams(), x86::STREAM_NAMES)
@@ -255,9 +314,9 @@ fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch, remaps: &[Op
                 .collect();
             Node::apply_with(X86, vec![x86_resource()], params, inputs, size)
         }
-        Arch::Arm64(k) if remaps.get(k).is_some_and(Option::is_some) => {
-            let st = remap::encode(section, va, remaps[k].as_ref().unwrap());
-            let inputs = std::iter::zip(st.streams(), remap::STREAM_NAMES)
+        Arch::Arm64(k) if let Some(Remap::Arm64(r)) = remaps.get(k).and_then(Option::as_deref) => {
+            let st = arm64::remap::encode(section, va, r);
+            let inputs = std::iter::zip(st.streams(), arm64::remap::STREAM_NAMES)
                 .map(|(s, name)| f.push(format!("arm64/{name}"), s.clone()))
                 .collect();
             Node::apply(ARM64_REMAP, va.to_le_bytes().to_vec(), inputs, size)
