@@ -98,18 +98,24 @@ fn chunks_not_taken_kept() {
     assert!(f.streams[1].data.len() > chunks().iter().map(|c| c.0.len()).sum::<usize>());
 }
 
-/// The formula is applications one after another, each a part of the file as it is, of at
-/// most so much data: no output of several taken apart.
+/// The formula is applications one after another, each a part of the file as it is, and the
+/// resource of no compression whole between them: no output of several taken apart.
 #[test]
 fn applications_in_order() {
     let d = wim(true);
     let f = formula::encode(&d, 1).unwrap();
     assert!(f.shared.is_empty());
-    let ns = match &f.root {
-        aqr_formula::Node::Concat(ns) => &ns[..],
-        n => std::slice::from_ref(n),
-    };
-    assert!(ns.iter().all(|n| matches!(n, aqr_formula::Node::Apply(_))));
+    let aqr_formula::Node::Concat(ns) = &f.root else { panic!("not a concatenation") };
+    let kinds: Vec<&str> = ns
+        .iter()
+        .map(|n| match n {
+            aqr_formula::Node::Apply(_) => "apply",
+            &aqr_formula::Node::Slice { stream: 0, len, .. } if len == 2900 => "resource",
+            aqr_formula::Node::Slice { stream: 1, .. } => "rest",
+            n => panic!("{n:?}"),
+        })
+        .collect();
+    assert_eq!(kinds, ["apply", "resource", "rest"]);
 }
 
 #[test]
