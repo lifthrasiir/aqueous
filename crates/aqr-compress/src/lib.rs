@@ -156,7 +156,7 @@ pub struct Options {
     /// The level of the archive of [`compress`] ([`aqr::Encoder`]), and of the formulas sized
     /// for [`Options::smaller`]; and, by its [`Level::scale`], how hard data is recompressed:
     /// at 0 and 1 not at all (whatever [`Options::depth`]: at 0 every block uncompressed, at 1
-    /// zstd alone), from 7 on DEFLATE as [`Options::flate`] tells and with no [`probe`].
+    /// zstd alone), from 7 on DEFLATE as [`Options::flate`] tells and with no `probe`.
     pub level: Level,
     /// Keep a file raw, or the data where files are found, unless its formula archives
     /// smaller than it does raw ([`aqr::Encoder::smaller`]).

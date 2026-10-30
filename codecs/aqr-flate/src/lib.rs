@@ -2004,13 +2004,16 @@ pub fn reconstruct_sized(
     rebuild(data, meta, model, threads, Err(cap))
 }
 
+/// Where [`reconstruct_into`] gives the stream it rebuilds, a piece at a time.
+type Pieces<'a> = &'a mut dyn FnMut(&[u8]);
+
 /// [`reconstruct_into`] given `Ok(sink)`, else [`reconstruct_sized`] given `Err(cap)`.
 fn rebuild(
     data: &[u8],
     meta: &[u8],
     model: ModelData,
     threads: usize,
-    mut to: core::result::Result<&mut dyn FnMut(&[u8]), usize>,
+    mut to: core::result::Result<Pieces, usize>,
 ) -> Result<Vec<u8>> {
     let threads = threads.max(1);
     let n = data.len();

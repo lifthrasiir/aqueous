@@ -452,7 +452,7 @@ const MAX_HEADER: usize = 4096;
 /// Data of no format that is 16-bit samples of one channel after a header telling their size:
 /// two numbers one after the other in the first KiB (16- or 32-bit, either endianness) whose
 /// product, in 16-bit samples, the rest of the data is after a header of at most
-/// [`MAX_HEADER`] bytes past them. Which of the two is the width and the samples' endianness
+/// `MAX_HEADER` bytes past them. Which of the two is the width and the samples' endianness
 /// are those under which neighbouring samples differ least; they must differ less than
 /// samples half a row apart do, as in an image (not in other data).
 pub fn sized(d: &[u8]) -> Option<Found> {
@@ -513,7 +513,7 @@ fn far(d: &[u8], f: &raster16::Format) -> u64 {
 /// (given it and the row before), over rows sampled through the raster, in 1/256.
 fn mean_over_rows(d: &[u8], f: &raster16::Format, pairs: impl Fn(&[i64], &[i64]) -> u64) -> u64 {
     let row = |y: usize| -> Vec<i64> {
-        d[y * f.stride..y * f.stride + f.row_bytes()].chunks_exact(2).map(|b| f.sample(b) as i64).collect()
+        d[y * f.stride..y * f.stride + f.row_bytes()].as_chunks::<2>().0.iter().map(|b| f.sample(b) as i64).collect()
     };
     let rows: Vec<usize> = (1..f.height).step_by((f.height / 64).max(1)).collect();
     let sum: u64 = rows.iter().map(|&y| pairs(&row(y - 1), &row(y))).sum();

@@ -240,7 +240,7 @@ impl Cands for MultiChain {
 /// A table with `W` entries per bucket of the first table, keyed by `K` bytes (3 or 4), with a
 /// second table if `L`: the searches, insertions and ranking walks, the work per byte or per
 /// miss, are specialized by its shape (each parameter matters for speed); the rest is
-/// [`Core`]'s, the same for all.
+/// `Core`'s, the same for all.
 pub struct Table<const W: usize, const K: usize, const L: bool>(Core);
 
 /// The state of a [`Table`], whatever its shape.

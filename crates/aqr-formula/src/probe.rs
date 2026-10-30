@@ -138,7 +138,7 @@ const PIECE: usize = crate::aqr::SAMPLE / crate::aqr::SAMPLE_CHUNKS;
 
 /// About the fraction of `d` that repeats what comes earlier in it, from farther than a sample
 /// of it shows but within the window it is archived in: by anchors as in [`shared`], those of
-/// each piece of [`PIECE`] bytes that an earlier piece has, counted where they first come in
+/// each piece of `PIECE` bytes that an earlier piece has, counted where they first come in
 /// the piece (a repeat within a piece, the sample shows). Nothing for data that a sample is all
 /// of. A pass over the data, at about a byte per cycle.
 pub fn repeated(d: &[u8]) -> f64 {
@@ -231,7 +231,7 @@ impl Held {
     }
 }
 
-/// What data is like ([`likeness`]): the least hash of its anchors in each of [`Likeness::BINS`]
+/// What data is like ([`likeness`]): the least hash of its anchors in each of `Likeness::BINS`
 /// bins, by the hash ([`u64::MAX`] where none falls).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Likeness([u64; Likeness::BINS]);
@@ -270,7 +270,7 @@ pub fn likeness(d: &[u8]) -> Likeness {
 /// An order of data `likes` (by index), each data followed by the one most like it of those
 /// left (the first of those as much alike), or else by the first left: from the first, chains
 /// of data alike, in their order where none is like another. A hash that more than
-/// [`BY_LIKENESS_COMMON`] data left have in a bin is not counted: it tells little, and would
+/// `BY_LIKENESS_COMMON` data left have in a bin is not counted: it tells little, and would
 /// take time as the square of the data.
 pub fn by_likeness(likes: &[Likeness]) -> Vec<usize> {
     let n = likes.len();

@@ -358,7 +358,7 @@ fn floats(
             resources: Vec::new(),
             params: p.to_bytes(),
             inputs,
-            len: p.len().unwrap(),
+            len: p.out_len().unwrap(),
             memory_limit: aqr_formula::NO_LIMIT,
         };
         for (&j, o) in js.iter().zip(f.split(a, vec![bytes as u64; js.len()])) {

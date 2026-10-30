@@ -128,8 +128,8 @@ fn samples(d: &[u8]) -> Vec<&[u8]> {
     }
 }
 
-/// Whether `d` is text of Hangul, coded by [`HANGUL`]: its syllables are at least [`KOREAN`]
-/// of the bytes of its samples ([`samples`]).
+/// Whether `d` is text of Hangul, coded by [`HANGUL`]: its syllables are at least `KOREAN`
+/// of the bytes of its samples (`samples`).
 pub fn korean(d: &[u8]) -> bool {
     let (mut n, mut of) = (0, 0);
     for s in samples(d) {
@@ -140,7 +140,7 @@ pub fn korean(d: &[u8]) -> bool {
 
 /// The formula of text `input` with dictionaries of its own, or `None` where it is shorter than
 /// [`MIN_LEN`], is not [`mostly_text`], has no words or markup often enough, or coding it does
-/// not pay ([`pays`]). Text of Hangul ([`korean`]) is coded by [`HANGUL`], else by [`MODULE`].
+/// not pay (`pays`). Text of Hangul ([`korean`]) is coded by [`HANGUL`], else by [`MODULE`].
 /// It is the same whatever `threads` is.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     if input.len() < MIN_LEN || !mostly_text(input) {
@@ -153,7 +153,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
 
 /// The formula of text `input` with dictionaries `shared`, or `None` where it is shorter than
 /// [`MIN_LEN`], is not [`mostly_text`], `shared` has no dictionary of its kind ([`korean`]) or
-/// coding it does not pay ([`pays`]). It is the same whatever `threads` is.
+/// coding it does not pay (`pays`). It is the same whatever `threads` is.
 pub fn encode_with(input: &[u8], shared: &Shared, threads: usize) -> Option<Formula> {
     if input.len() < MIN_LEN || !mostly_text(input) {
         return None;

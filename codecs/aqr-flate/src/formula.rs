@@ -481,7 +481,7 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     } else {
         // each group a task of the instance's memory, up to SLOTS at once; those with most bytes
         let mut tasks: Vec<Lin> = groups.iter().map(|g| group(g, Lin::of(mem))).collect();
-        tasks.sort_unstable_by(|a, b| b.a.cmp(&a.a));
+        tasks.sort_unstable_by_key(|t| std::cmp::Reverse(t.a));
         let sum = tasks
             .iter()
             .take(SLOTS)

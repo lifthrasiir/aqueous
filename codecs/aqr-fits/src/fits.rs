@@ -30,7 +30,7 @@ impl<'a> Header<'a> {
     }
 
     pub fn cards(&self) -> impl Iterator<Item = &'a [u8]> {
-        self.cards.chunks_exact(CARD)
+        self.cards.as_chunks::<CARD>().0.iter().map(|c| &c[..])
     }
 
     /// The value of the first card of keyword `key`.
@@ -164,7 +164,7 @@ fn hdu(d: &[u8], at: usize, primary: bool) -> Option<Hdu> {
     loop {
         let block = d.get(end..end + BLOCK)?;
         end += BLOCK;
-        if block.chunks_exact(CARD).any(|c| keyword(c) == b"END") {
+        if block.as_chunks::<CARD>().0.iter().any(|c| keyword(c) == b"END") {
             break;
         }
     }

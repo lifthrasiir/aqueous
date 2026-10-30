@@ -2,7 +2,7 @@
 //! a decoder reads them, as far as the bitstream goes (no synthesis).
 //!
 //! [`walk`] runs the decode of one packet against a [`Source`] of values: one reading the packet
-//! ([`parse`]) tells what it codes; one given the values ([`write`]) writes the packet back. A
+//! ([`parse`]) tells what it codes; one given the values ([`fn@write`]) writes the packet back. A
 //! packet is its values, then its tail: the bits after the last value read whole, which are the
 //! padding of the last byte, or where the packet ends inside a field (end-of-packet, §4.3.1),
 //! that field's bits present.
@@ -23,7 +23,7 @@ pub enum Field {
     Nonzero {
         ch: usize,
     },
-    /// Y[0] or Y[1] of channel `ch`'s floor.
+    /// `Y[0]` or `Y[1]` of channel `ch`'s floor.
     Y01 {
         ch: usize,
         i: usize,
@@ -33,7 +33,7 @@ pub enum Field {
         ch: usize,
         part: usize,
     },
-    /// Y[i] of channel `ch`'s floor, coded by a subclass book.
+    /// `Y[i]` of channel `ch`'s floor, coded by a subclass book.
     Y {
         ch: usize,
         i: usize,

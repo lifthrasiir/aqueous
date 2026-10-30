@@ -813,10 +813,10 @@ impl<'a> Payload<'a> {
     }
 }
 
-/// The helpers of the integration tests.
+/// The helpers of the integration tests (for [`crate::formula`]'s tests too).
 #[cfg(test)]
 #[path = "../tests/common/mod.rs"]
-mod common;
+pub(crate) mod common;
 
 #[cfg(test)]
 mod tests {

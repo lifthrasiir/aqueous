@@ -331,7 +331,7 @@ pub fn decode_as(c: &Coded, s: Shape, image: &mut [u32], known: Option<&[bool]>,
 /// Pixels of the sample [`encode_best`] tries the modes on.
 const SAMPLE: usize = 1 << 20;
 
-/// The mode that codes `image` the smaller, tried on its first rows (about [`SAMPLE`]
+/// The mode that codes `image` the smaller, tried on its first rows (about `SAMPLE`
 /// pixels), and the image coded so.
 pub fn encode_best(image: &[u32], s: Shape, known: Option<&[bool]>) -> (Mode, Coded) {
     let size = |c: &Coded| c.model.len() + c.raw.len();

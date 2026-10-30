@@ -227,7 +227,7 @@ pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     encode_with(input, &Options { threads, ..Options::default() })
 }
 
-/// [`encode`] with options.
+/// [`fn@encode`] with options.
 pub fn encode_with(input: &[u8], opts: &Options) -> Option<Formula> {
     encode_stats(input, opts, &mut Stats::default())
 }

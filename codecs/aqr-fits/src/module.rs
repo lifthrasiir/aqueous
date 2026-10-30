@@ -148,7 +148,7 @@ fn bitmap(b: &[u8], n: usize) -> Result<Vec<bool>> {
     Ok((0..n).map(|i| b[i / 8] >> (i % 8) & 1 != 0).collect())
 }
 
-/// The bits of [`bitmap`].
+/// The bits of `bitmap`.
 pub fn to_bitmap(v: &[bool]) -> Vec<u8> {
     let mut b = vec![0u8; v.len().div_ceil(8)];
     for (i, _) in v.iter().enumerate().filter(|x| *x.1) {

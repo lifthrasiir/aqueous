@@ -748,13 +748,13 @@ fn task_slots() {
     // 4 pages for the module's memories, 1 a task running and the messages queued (16 tasks at
     // once would take 20 pages)
     let limit = (4 + 8) << 16 | 0x100;
-    assert_eq!(apply(&all, &[&input], &[16], limit).unwrap(), [input.clone()]);
+    assert_eq!(apply(&all, &[&input], &[16], limit).unwrap(), std::slice::from_ref(&input));
     assert_eq!(apply(&slotted(Some(7)), &[&input[..8]], &[8], u64::MAX).unwrap(), [&input[..8]]);
     invalid(apply(&slotted(Some(8)), &[&input[..9]], &[9], u64::MAX), "deadlock");
     let two = |w| slotted(w).replace(r#""aqr_task_slots" "\08""#, r#""aqr_task_slots" "\02""#);
     assert_eq!(apply(&two(Some(1)), &[&input[..2]], &[2], u64::MAX).unwrap(), [&input[..2]]);
     invalid(apply(&two(Some(2)), &[&input[..3]], &[3], u64::MAX), "deadlock");
-    assert_eq!(apply(&two(None), &[&input], &[16], u64::MAX).unwrap(), [input.clone()]);
+    assert_eq!(apply(&two(None), &[&input], &[16], u64::MAX).unwrap(), std::slice::from_ref(&input));
 }
 
 /// The task slots of a module: one custom section of one byte from 1 to 64 where it spawns
@@ -769,7 +769,7 @@ fn task_slots_declared() {
     invalid(load(&with("\\08\\00")), "aqr_task_slots");
     invalid(load(&with("\\88")), "aqr_task_slots");
     invalid(
-        load(&format!("{ok}").replacen("(module", r#"(module (@custom "aqr_task_slots" "\08")"#, 1)),
+        load(&ok.to_string().replacen("(module", r#"(module (@custom "aqr_task_slots" "\08")"#, 1)),
         "aqr_task_slots",
     );
     invalid(load(&with("\\c0\\00")), "aqr_task_slots");

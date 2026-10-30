@@ -444,7 +444,7 @@ pub fn records(d: &[u8]) -> (i64, BTreeMap<usize, Info>, Vec<Rec>) {
 /// gap up to the end of central directory record, or else to the end record found from the end
 /// of `d` whose directory starts with a central header (a gap may hold anything), or else to the
 /// end of `d` where its records, a whole local entry first, follow each other up to one that
-/// `d` cuts short ([`cut_at`]): an archive cut short, as downloads are. `None` where there is
+/// `d` cuts short (`cut_at`): an archive cut short, as downloads are. `None` where there is
 /// none of them. An end record whose comment runs past `d` ends with `d`. The bodies that the
 /// directory found from the end of `d` knows of are of the sizes it says, rather than parsed
 /// (as one with a descriptor after it is).

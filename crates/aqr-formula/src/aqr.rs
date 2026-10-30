@@ -19,7 +19,7 @@
 //! [`decode`] evaluates such archives, and any other without a metadata block, a dictionary
 //! or an encryption.
 //!
-//! An archive of several files is one segment ([`segment`]): [`Encoder::encode_segment`] lays
+//! An archive of several files is one segment (`segment`): [`Encoder::encode_segment`] lays
 //! out the formulas of the files over streams they may share, with the metadata block of their
 //! [`Tree`], and [`decode_value`] decodes any archive of a segment at most (without
 //! dictionaries, imports or encryption) to its files.
@@ -107,13 +107,13 @@ pub enum Level {
     /// [`Level::HIGH`] being 2, 5 and 8. At 0 ([`Level::STORED`]) nothing is compressed: every
     /// block is uncompressed, but for those that are always Zstandard (formula, module and
     /// resource blocks), which hold raw Zstandard blocks. Otherwise each stream is uncompressed
-    /// if incompressible (`PROBE`), else at the base zstd level of the level's [`Pick`], or:
+    /// if incompressible (`PROBE`), else at the base zstd level of the level's `Pick`, or:
     ///
     /// - at a higher level of it where that saves enough for its time, at its rate of bytes
     ///   per second of compression;
     /// - at a lower level of it where that is smaller by 1/32 at least (beyond what a sample
     ///   may be off by), as it is faster too;
-    /// - at its dense level, where it has one, if of PE code or text ([`Encoder::how`]): if
+    /// - at its dense level, where it has one, if of PE code or text (`Encoder::how`): if
     ///   longer than a sample, always; else where that is smaller.
     ///
     /// Module and formula blocks, and streams shorter than `SMALL`, are at the base.
@@ -994,7 +994,7 @@ impl Encoder {
     /// Compresses `streams` (but those of [`Kind::Compressed`], which are stored as they are)
     /// as [`Encoder::encode`] would, each on a thread of its own (on up to the encoder's
     /// threads, the calling one and workers of [`aqr_common::pool`]), but those of more than
-    /// two of Zstandard's jobs, each on up to [`LARGE_THREADS`] beforehand: for the blocks of
+    /// two of Zstandard's jobs, each on up to `LARGE_THREADS` beforehand: for the blocks of
     /// them written next, the same bytes as one after another.
     pub fn precompress(&self, streams: &[&crate::Stream]) -> Result<()> {
         let todo: Vec<(&[u8], How)> = {

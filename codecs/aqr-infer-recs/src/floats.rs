@@ -382,7 +382,7 @@ mod tests {
             m.extend((cs as f64 / 360000.0 * 0.0174532925199433).to_le_bytes());
             m.extend((i as u32 * 3).to_le_bytes());
             m.extend(((((x >> 40) % 2000) as f32 - 1000.0) / 10.0).to_le_bytes());
-            m.extend(((x >> 20) as u64).to_be_bytes());
+            m.extend((x >> 20).to_be_bytes());
         }
         m
     }

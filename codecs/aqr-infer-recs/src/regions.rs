@@ -248,7 +248,9 @@ pub fn tables(data: &[u8], found: Vec<(usize, usize, usize)>) -> Vec<Region> {
     let mut out = Vec::new();
     // tables of a k in the same phase found apart (grown from windows only so far), as one
     // where they cover most of it: it is judged on its first records alone
-    let mut groups: Vec<(usize, usize, Vec<(usize, usize)>)> = Vec::new();
+    // (of each, the width and start modulo it, and the tables' ranges)
+    type Group = (usize, usize, Vec<(usize, usize)>);
+    let mut groups: Vec<Group> = Vec::new();
     for t in &tables {
         let k = t.width();
         match groups.iter_mut().find(|g| g.0 == k && g.1 == t.start % k) {

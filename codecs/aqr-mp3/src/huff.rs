@@ -74,7 +74,7 @@ pub struct Decoders {
     pub pair: Vec<Option<std::sync::Arc<PairDecoder>>>,
     pub count1a: [u16; 64],
     /// Per table_select, `1 << FL` entries resolving code and signs at once (see
-    /// [`fast_lut`]); empty for missing tables.
+    /// `fast_lut`); empty for missing tables.
     pub fast: Vec<std::sync::Arc<Vec<u16>>>,
 }
 

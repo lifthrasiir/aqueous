@@ -142,7 +142,7 @@ pub(crate) fn place(si: &SideInfo, h: Header, payload: usize, len: usize, end: u
     (start >= end && start + total <= (payload + len) * 8).then_some(start)
 }
 
-/// [`segment`], for benchmarks.
+/// `segment`, for benchmarks.
 pub fn segment_pub(d: &[u8]) -> Segments {
     segment(d)
 }

@@ -1,7 +1,7 @@
 //! The Hangul transform (FORMAT.md, "The module `wrt-recons-hangul`"): Hangul syllables in two
 //! bytes rather than UTF-8's three, and the words of Hangul that the texts use most (with the
 //! space before them) replaced by codes of one to three bytes of a dictionary ([`Dictionary`],
-//! [`decode`]). Text is coded in pieces ([`pieces`]), which decode on threads of their own.
+//! [`decode`]). Text is coded in pieces (`pieces`), which decode on threads of their own.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
@@ -182,7 +182,7 @@ fn count(d: &[u8]) -> (Vec<Counts<'_>>, [u64; 256]) {
 pub struct Dictionary {
     /// The codes of one byte (ASCII, not LF).
     pub one: Vec<u8>,
-    /// How many of [`LEADS`] start codes of two bytes; the rest start codes of three.
+    /// How many of `LEADS` start codes of two bytes; the rest start codes of three.
     pub two: usize,
     /// The entries, in the order of their codes.
     entries: Vec<Box<[u8]>>,

@@ -168,7 +168,7 @@ impl Reader<'_> {
             }
         };
         self.pos += n as usize;
-        (w << (self.pos - n as usize & 7)) >> (64 - n)
+        (w << ((self.pos - n as usize) & 7)) >> (64 - n)
     }
 }
 
@@ -261,8 +261,8 @@ pub fn decode(
     let mut w = vec![0f64; order];
     for (b, start) in (0..n).step_by(BLOCK).enumerate() {
         let end = (start + BLOCK).min(n);
-        for (j, c) in coefs[b * order * 8..][..order * 8].chunks_exact(8).enumerate() {
-            w[j] = f64::from_le_bytes(c.try_into().unwrap());
+        for (wj, c) in w.iter_mut().zip(coefs[b * order * 8..][..order * 8].as_chunks::<8>().0) {
+            *wj = f64::from_le_bytes(*c);
         }
         for i in start..end {
             let tree = &mut m.lengths[context(last)];
@@ -308,6 +308,8 @@ pub fn decode(
 /// The least-squares coefficients of order `order` predicting samples `start..end` of `x`
 /// from those before (the covariance method; samples that are not finite taken as 0, the
 /// values scaled by a power of two, which leaves the coefficients as they are).
+// (the covariance matrix indexed as its formulas are)
+#[allow(clippy::needless_range_loop)]
 pub fn coefficients(x: &[f64], start: usize, end: usize, order: usize) -> Vec<f64> {
     if order == 0 {
         return Vec::new();
@@ -359,6 +361,8 @@ pub fn coefficients(x: &[f64], start: usize, end: usize, order: usize) -> Vec<f6
 }
 
 /// The solution of `a x = b` for a symmetric positive definite `a`.
+// (indexed as the textbook's formulas are)
+#[allow(clippy::needless_range_loop)]
 fn cholesky_solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
     let n = b.len();
     for j in 0..n {
@@ -366,7 +370,7 @@ fn cholesky_solve(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Option<Vec<f64>> {
         for k in 0..j {
             d -= a[j][k] * a[j][k];
         }
-        if !(d > 0.0) {
+        if d.is_nan() || d <= 0.0 {
             return None;
         }
         let d = d.sqrt();

@@ -253,8 +253,8 @@ pub fn tables(d: &[u8]) -> Vec<Table> {
                 0xaa64 => 8,
                 _ => 0,
             };
-            if k > 0 {
-                let len = size as usize / k * k;
+            if let Some(n) = (size as usize).checked_div(k) {
+                let len = n * k;
                 push(at(rva, len), len, TableKind::Rising { width: 4, fields: k / 4 });
             }
         }

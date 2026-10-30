@@ -5,9 +5,9 @@
 //! the host functions, which the spec signals as errors to the invocation.
 //! `aqr_log` messages go to stderr, and the last one to the [`Failure`].
 //!
-//! Tasks ([`crate::task`]) run on threads of their own from their spawn, with every memory but
+//! Tasks (`crate::task`) run on threads of their own from their spawn, with every memory but
 //! the working one empty to them and the functions of part modules a violation; a task's trap is
-//! resumed where it is joined. Channels ([`crate::chan`]) are queues between them, whose ends
+//! resumed where it is joined. Channels (`crate::chan`) are queues between them, whose ends
 //! are threads; there is no telling a deadlock, but for a trap after 30 s of waiting.
 
 use std::cell::RefCell;

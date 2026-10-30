@@ -102,7 +102,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "hdf5-recons-float",
         version: 1,
-        sha512_256: hex("cdd9a30f1116f6353e909d9be3acb15b8d3fc83847e6fce6c411fd35ad12ef20"),
+        sha512_256: hex("ace87cb3af669f164286e24e6d4e58c097a25202c979e3eb7d2db33707498a27"),
         block: include_bytes!("../wasm/hdf5-recons-float.block"),
     },
     Known {

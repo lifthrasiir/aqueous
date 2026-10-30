@@ -31,7 +31,7 @@ impl Floats {
     }
 
     /// The output's bytes, if they fit.
-    pub fn len(&self) -> Option<u64> {
+    pub fn out_len(&self) -> Option<u64> {
         self.chunks.checked_mul(self.elements)?.checked_mul(self.bytes() as u64)
     }
 
@@ -100,7 +100,7 @@ pub fn within(n: u64, coded: usize) -> bool {
 pub fn float(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
     let p = Floats::from_bytes(params).ok_or_else(corrupt)?;
     let &[coefs, model, raw] = inputs else { return Err(corrupt()) };
-    if p.len() != Some(len) || !within(len, model.len() + raw.len()) {
+    if p.out_len() != Some(len) || !within(len, model.len() + raw.len()) {
         return Err(corrupt());
     }
     let n = p.samples().ok_or_else(corrupt)?;

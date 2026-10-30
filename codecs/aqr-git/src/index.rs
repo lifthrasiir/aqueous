@@ -18,7 +18,7 @@ pub const REV_MAGIC: [u8; 12] = [b'R', b'I', b'D', b'X', 0, 0, 0, 1, 0, 0, 0, 1]
 /// Offsets past this are 64-bit ones (git's `off32_limit`).
 const OFF32_LIMIT: u64 = 0x7fff_ffff;
 
-/// Bytes of the index of `n` entries, `large` of them at an offset past [`OFF32_LIMIT`].
+/// Bytes of the index of `n` entries, `large` of them at an offset past `OFF32_LIMIT`.
 pub fn idx_len(n: usize, large: usize) -> usize {
     IDX_MAGIC.len() + 256 * 4 + n * (ID + 8) + large * 8 + 2 * ID
 }

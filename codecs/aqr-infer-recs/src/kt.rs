@@ -48,7 +48,9 @@ pub fn tables() -> &'static Tables {
 pub fn bits(counts: &[u32]) -> f64 {
     let t = tables();
     counts
-        .chunks_exact(256)
+        .as_chunks::<256>()
+        .0
+        .iter()
         .map(|row| {
             let n: u32 = row.iter().sum();
             t.all_sum[n as usize] - row.iter().filter(|&&c| c > 0).map(|&c| t.sym_sum[c as usize]).sum::<f64>()

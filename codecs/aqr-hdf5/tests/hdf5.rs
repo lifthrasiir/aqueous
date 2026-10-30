@@ -79,7 +79,7 @@ fn corrupted() {
 fn float_module_corrupted() {
     let p =
         aqr_hdf5::module::Floats { chunks: 4, elements: 512, wide: true, be: false, shuffle: true, shift: 0, order: 8 };
-    let len = p.len().unwrap();
+    let len = p.out_len().unwrap();
     let coefs = vec![0x3f; 8 * 8];
     for model in [&[][..], &[0xff; 100], &[0x12; 3000]] {
         let raw = vec![0xa5; 5000];

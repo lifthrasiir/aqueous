@@ -211,7 +211,7 @@ pub fn encode(d: &[u8], f: Format) -> Option<Coded> {
     }
     let (rs, rb, bpp) = (f.width * f.channels, f.row_bytes(), f.channels);
     let rows: Vec<Vec<u16>> =
-        d.chunks_exact(f.stride).map(|r| r[..rb].chunks_exact(2).map(|s| f.sample(s)).collect()).collect();
+        d.chunks_exact(f.stride).map(|r| r[..rb].as_chunks::<2>().0.iter().map(|s| f.sample(s)).collect()).collect();
     let mut c = Coded { coded: Vec::with_capacity(d.len() / 2), pad: Vec::new() };
     for r in d.chunks_exact(f.stride) {
         c.pad.extend_from_slice(&r[rb..]);
@@ -262,12 +262,14 @@ fn put_chunk(pred: Pred, syms: &[(u8, u8)], bits: Vec<u8>, out: &mut Vec<u8>) {
         h[t as usize * TOKENS + v as usize] += 1;
     }
     let mut w = BitW::default();
-    let used: Vec<bool> = h.chunks_exact(TOKENS).map(|c| c.iter().any(|&x| x > 0)).collect();
+    let used: Vec<bool> = h.as_chunks::<TOKENS>().0.iter().map(|c| c.iter().any(|&x| x > 0)).collect();
     for &u in &used {
         w.bits(1, u as u32);
     }
     let freqs: Vec<Vec<u32>> = h
-        .chunks_exact(TOKENS)
+        .as_chunks::<TOKENS>()
+        .0
+        .iter()
         .zip(&used)
         .map(|(c, &u)| if u { rans32::write_table::<PROB_BITS, false>(&mut w, c) } else { vec![1 << PROB_BITS] })
         .collect();

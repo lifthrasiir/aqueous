@@ -345,7 +345,7 @@ impl Floor {
         Ok(Floor { partitions, classes, multiplier, rangebits, xs })
     }
 
-    /// The bits of Y[0] and Y[1].
+    /// The bits of `Y[0]` and `Y[1]`.
     pub fn range_bits(&self) -> u32 {
         ilog([256, 128, 86, 64][self.multiplier as usize - 1] - 1)
     }

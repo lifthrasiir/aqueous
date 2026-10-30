@@ -9,7 +9,7 @@ use crate::{ADAPTIVE, Coding, Error, ModelData, Result};
 /// Bytes of a rule in a catalog resource.
 pub(crate) const RULE_BYTES: usize = 18;
 
-/// The rules of [`rules_to_bytes`], which must be valid and none of them a chain rule.
+/// The rules of `rules_to_bytes`, which must be valid and none of them a chain rule.
 pub fn rules_from_bytes(d: &[u8]) -> Result<Vec<Rule>> {
     if !d.len().is_multiple_of(RULE_BYTES) {
         return Err(Error::Corrupt);
@@ -64,7 +64,7 @@ pub fn models_from_bytes(d: &[u8]) -> Result<Box<[code::Model; FIELDS]>> {
         .unwrap_or_else(|_| unreachable!()))
 }
 
-/// The priors of [`priors_to_bytes`], with counts up to [`adapt::LIMIT`].
+/// The priors of `priors_to_bytes`, with counts up to [`adapt::LIMIT`].
 pub fn priors_from_bytes(d: &[u8]) -> Result<Priors> {
     if d.len() != adapt::NUM * 3 {
         return Err(Error::Corrupt);

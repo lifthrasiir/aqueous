@@ -27,16 +27,16 @@ pub use wasm::{Applied, initial_pages, record_applications};
 
 /// aqr-exe's x86 disfilter on a code section. Parameters: the origin (u64, little endian),
 /// the sentinel size (u8) and 1 for x86-64 or 0 for x86-32; resources: the opcode classes
-/// (`x86::Opcodes`); inputs: the streams of [`x86::STREAM_NAMES`].
+/// (`x86::Opcodes`); inputs: the streams of `x86::STREAM_NAMES`.
 pub const X86: Module = Module::new("exe-recons/x86", 3).with_memory(exe);
 
 /// aqr-exe's ARM64 filter on a code section. Parameters: the origin (u64, little endian);
-/// inputs: the streams of [`arm64::STREAM_NAMES`].
+/// inputs: the streams of `arm64::STREAM_NAMES`.
 pub const ARM64: Module = Module::new("exe-recons/arm64", 1).with_memory(exe);
 
 /// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
 /// section's RVA and the offset of the metadata root in it (u32 each, little endian); inputs:
-/// the streams of [`cil::STREAM_NAMES`].
+/// the streams of `cil::STREAM_NAMES`.
 pub const CIL: Module = Module::new("exe-recons/cil", 1).with_memory(cil);
 
 /// The memory of [`CIL`]: the whole of it, with what the decoder keeps besides the output: the
@@ -59,7 +59,7 @@ fn cil(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 }
 
 /// aqr-exe's base relocations of a PE image. Parameters: `log2` of what the blocks' sizes are
-/// multiples of (u8); inputs: the streams of [`reloc::STREAM_NAMES`].
+/// multiples of (u8); inputs: the streams of `reloc::STREAM_NAMES`.
 pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 1).with_memory(exe);
 
 /// The memory of aqr-exe's x86, ARM64 and relocation filters: the streams and the output, and
@@ -293,7 +293,8 @@ pub fn built(m: Module) -> Option<&'static aqr_modules::Known> {
 pub fn initial_pages_of(m: Module) -> Option<u64> {
     use std::collections::HashMap;
     use std::sync::Mutex;
-    static PAGES: Mutex<Option<HashMap<(&str, u16), Option<u64>>>> = Mutex::new(None);
+    type Pages = HashMap<(&'static str, u16), Option<u64>>;
+    static PAGES: Mutex<Option<Pages>> = Mutex::new(None);
     let k = built(m)?;
     let mut pages = PAGES.lock().unwrap();
     *pages

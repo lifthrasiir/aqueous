@@ -82,7 +82,7 @@ fn rice_memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let l = Layout::from_bytes(u.params, &mut at)?;
     let &[mode] = &u.params[at..] else { return None };
     let mode = image::Mode::from_byte(mode)?;
-    let &[rows, _, _, _, model, raw] = &u.inputs[..] else { return None };
+    let &[rows, _, _, _, model, raw] = u.inputs else { return None };
     let table = u.content(0)?;
     if table.len() as u64 != rows {
         return None;

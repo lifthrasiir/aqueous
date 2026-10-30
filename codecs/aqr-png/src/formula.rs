@@ -642,16 +642,11 @@ fn rebuild(file: &File, h0: u64, threads: usize, total: u64) -> Rebuilt {
     Rebuilt { peak, hw, refs: refs * keep as u64, wire_refs }
 }
 
-/// The helpers of the integration tests.
-#[cfg(test)]
-#[path = "../tests/common/mod.rs"]
-mod common;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    use super::common;
+    use crate::codec::common;
 
     fn stream<'a>(f: &'a Formula, class: &str) -> &'a [u8] {
         &f.streams.iter().find(|s| s.class == class).expect("a stream").data

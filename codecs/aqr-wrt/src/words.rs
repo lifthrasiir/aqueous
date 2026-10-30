@@ -1,6 +1,6 @@
 //! The transform (FORMAT.md, "Codes" and "Rebuilding the text"): the bytes of the codes and
 //! flags ([`Layout`]), the dictionary of the text's words and markup, and the text with them
-//! replaced by codes ([`encode`], [`decode`]).
+//! replaced by codes ([`Dictionary::encode`], [`decode`]).
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};

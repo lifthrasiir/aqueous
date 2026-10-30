@@ -6,7 +6,7 @@ use crate::{Result, bases, corrupt};
 use aqr_common::varint;
 
 /// The module: the file of `len` bytes from `params` (the line width, whether it ends with a
-/// line's end) and `inputs` (the streams of [`STREAM_NAMES`]).
+/// line's end) and `inputs` (the streams of `STREAM_NAMES`).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
     let &[headers, layout, case, other, coded] = inputs else { return Err(corrupt()) };
     let mut at = 0;

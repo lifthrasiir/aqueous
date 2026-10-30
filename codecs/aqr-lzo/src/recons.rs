@@ -273,6 +273,9 @@ impl Side for Dec<'_> {
     }
 }
 
+/// Where the matches of a parse decoded go ([`walk`]), with whether the first run is short.
+type Sink<'a> = &'a mut dyn FnMut(&Match, bool);
+
 /// Walks the parse over `d`, coding it (`parse` given) or decoding it (`parse` filled in, or its
 /// matches given to `sink` as they come, with whether the first run is short), as the side is.
 fn walk(
@@ -281,7 +284,7 @@ fn walk(
     parse: &mut Parse,
     encoding: bool,
     skip: bool,
-    mut sink: Option<&mut dyn FnMut(&Match, bool)>,
+    mut sink: Option<Sink>,
 ) -> Result<()> {
     let mut mf = Mf::new(d);
     let mut ctx = Ctx::new();
@@ -473,7 +476,7 @@ pub fn parse(data: &[u8], record: &[u8]) -> Result<Parse> {
 
 /// The parse of `record` over `data` decoded into `p` (its matches given to `sink` instead, if
 /// one is given).
-fn decode(data: &[u8], record: &[u8], p: &mut Parse, sink: Option<&mut dyn FnMut(&Match, bool)>) -> Result<()> {
+fn decode(data: &[u8], record: &[u8], p: &mut Parse, sink: Option<Sink>) -> Result<()> {
     let (&mode, record) = record.split_first().ok_or_else(corrupt)?;
     if mode & !SKIP != 0 {
         return Err(corrupt());

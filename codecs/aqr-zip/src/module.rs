@@ -33,7 +33,7 @@ pub(crate) fn par_map<T: Sync, R: Send>(items: &[T], threads: usize, f: impl Fn(
     aqr_common::pool::par_map(items.len(), threads, |i| f(&items[i]))
 }
 
-/// The module [`MODULE`]: the archive of `len` bytes rebuilt from `inputs`: the contents of
+/// The module `MODULE`: the archive of `len` bytes rebuilt from `inputs`: the contents of
 /// the stored bodies, the deflated bodies with what aqr-flate's module derives of them
 /// (`layout::deflated`), the layout and the bytes kept.
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {

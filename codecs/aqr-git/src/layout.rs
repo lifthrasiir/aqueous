@@ -116,7 +116,7 @@ pub fn tags(layout: &[u8]) -> Result<&[u8]> {
     l.take(n)
 }
 
-/// Where [`build_into`] puts the pack.
+/// Where `build_into` puts the pack.
 pub trait Out {
     fn put(&mut self, b: &[u8]) -> Result<()>;
     /// `n` bytes of a stream that is not given (see [`check`]).

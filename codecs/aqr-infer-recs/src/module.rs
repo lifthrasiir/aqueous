@@ -59,7 +59,7 @@ pub const KINDS: [(usize, bool, u32); 9] = [
     (4, true, 0xFFFF_FFFF),
 ];
 
-/// Entries with a length: at `d` of an entry, a field of kind KINDS[kind] holds v, and the entry
+/// Entries with a length: at `d` of an entry, a field of kind `KINDS[kind]` holds v, and the entry
 /// is align_up(b + v, align) bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Rule {

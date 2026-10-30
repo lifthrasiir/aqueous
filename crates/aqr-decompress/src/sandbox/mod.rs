@@ -1,6 +1,6 @@
 //! Modules run as WebAssembly in worker processes locked down by the system (with the feature
 //! `sandbox`), so that a module escaping Wasmtime finds nothing it could reach: no files, no
-//! network, no other processes ([`os`] for what each system does).
+//! network, no other processes (`os` for what each system does).
 //!
 //! A worker is a program of the host's: the host's own, invoked with arguments it recognizes,
 //! or another one made for it, which calls [`worker_main`] (before anything else, as nothing
