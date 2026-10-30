@@ -152,8 +152,10 @@ pub struct Mf<'a> {
 impl<'a> Mf<'a> {
     /// A match finder for matches at most `reach` back (LZMA's dictionary size).
     pub fn new(d: &'a [u8], reach: usize) -> Self {
-        // (saturating: a dictionary of 2^32 − 1 bytes on 32 bits)
-        let ring = reach.saturating_add(1).min(d.len().max(1)).next_power_of_two();
+        // A ring of `reach` positions at least: a candidate `c` is at least `pos - reach`, and its
+        // slot is taken again only by `c + ring`, which is at least `pos` (not added yet). So a
+        // dictionary of 2^n bytes takes chains of 2^n, not 2^(n+1).
+        let ring = reach.clamp(1, d.len().max(1)).next_power_of_two();
         Mf {
             d,
             reach,
@@ -286,5 +288,28 @@ impl<'a> Mf<'a> {
             self.long.found.clear();
         }
         best.min(cap)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Chains of as many positions as a dictionary of 2^n bytes, which still find the nearest
+    /// match within it, at its very end too (data of a few bytes, longer than the dictionary).
+    #[test]
+    fn rings() {
+        const REACH: usize = 4096;
+        let mut r = aqr_common::rng::Rng::new(3);
+        let d: Vec<u8> = (0..4 * REACH).map(|_| b"ab"[r.below(2) as usize]).collect();
+        let mut mf = Mf::new(&d, REACH);
+        assert_eq!([mf.short.prev.len(), mf.mid.prev.len(), mf.long.prev.len()], [REACH; 3]);
+        for pos in (REACH..d.len() - LONG).step_by(7) {
+            mf.advance(pos);
+            for n in [4, MID, LONG] {
+                let want = (pos - REACH..pos).rev().find(|&c| lcp(&d, c, pos, n) >= n);
+                assert_eq!(mf.nearest(pos, n, usize::MAX), want, "{pos} {n}");
+            }
+        }
     }
 }

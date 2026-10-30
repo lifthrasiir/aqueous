@@ -192,13 +192,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzma-recons",
         version: 1,
-        sha512_256: hex("df21adc75049db79fe38b253339fa980d47f3fa9c94df512a370c2248495fbd9"),
+        sha512_256: hex("a9c7ac784fb0a5d8d00e6a57936d5ba2e2d7160b93b07695e6bf79a0e0d481fe"),
         block: include_bytes!("../wasm/lzma-recons.block"),
     },
     Known {
         name: "lzma2-recons",
         version: 1,
-        sha512_256: hex("9ee4397f0d543756cf9ba4f5cb22fc25628a4e70ce048d8a22b4ac81377fbd5a"),
+        sha512_256: hex("86312eb189e4d70fab0e83494cbae0c1a584bcebdc279b9e7476086093eb7bf4"),
         block: include_bytes!("../wasm/lzma2-recons.block"),
     },
     Known {
