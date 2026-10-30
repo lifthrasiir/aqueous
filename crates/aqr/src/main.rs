@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N] [--batch MIB]
-//! [--no-check] [--wasm] [--no-sandbox] INPUT...
+//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
+//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -25,6 +25,10 @@
 //!   ([`stop`]), an output there before left as it was.
 //! - `--batch` is about the most MiB of files made at once (512 by default), which bounds the
 //!   memory taken by compression (but for a file larger).
+//! - `-B` is `--batch` as a size (512M; `K`, `M` and `G` are KiB, MiB and GiB, a number alone
+//!   bytes). `-b` is the most bytes of a block that files share (16M by default), which a file
+//!   read alone may have to decompress: smaller for faster random access. `-D` compresses the blocks alike of a batch (many of a class of stream, of
+//!   a few MiB each or less) with a dictionary trained for them where it pays.
 //! - `-T` is the number of threads (0, the default: as many as the machine has): the size of
 //!   the pool of threads that everything runs on ([`aqr_common::pool`]), this work itself too.
 //!
@@ -55,7 +59,7 @@ use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, name_
 use view::Ticking;
 
 const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
-     [--batch MIB] [--no-check] [--wasm] [--no-sandbox] INPUT...";
+     [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] INPUT...";
 
 /// The argument (the only one) that this program is run with as a worker of the sandbox.
 const SANDBOX_WORKER: &str = "--sandbox-worker";
@@ -151,6 +155,9 @@ fn parse() -> Result<Args, String> {
                 let mib: usize = value("--batch")?.parse().map_err(|_| "--batch takes a number of MiB")?;
                 a.opt.batch = mib.max(1) << 20;
             }
+            "-B" => a.opt.batch = size_of(&value("-B")?).ok_or("-B takes a size (64M, 1G, ...)")?.max(1),
+            "-b" => a.opt.block = size_of(&value("-b")?).ok_or("-b takes a size (64K, 1M, ...)")?.max(1),
+            "-D" => a.opt.dictionaries = true,
             "--no-check" => a.opt.verify = false,
             // -T8 and the like
             s if s.starts_with("-T") => a.opt.threads = s[2..].parse().map_err(|_| "-T takes a number")?,
@@ -170,6 +177,17 @@ fn parse() -> Result<Args, String> {
         return Err("-o with several archives to decompress".into());
     }
     Ok(a)
+}
+
+/// The bytes of size `s`: a number of bytes, or of KiB, MiB or GiB (`K`, `M`, `G`).
+fn size_of(s: &str) -> Option<usize> {
+    let (n, shift) = match s.as_bytes().last()? {
+        b'K' | b'k' => (&s[..s.len() - 1], 10),
+        b'M' | b'm' => (&s[..s.len() - 1], 20),
+        b'G' | b'g' => (&s[..s.len() - 1], 30),
+        _ => (s, 0),
+    };
+    n.parse::<usize>().ok()?.checked_mul(1 << shift)
 }
 
 /// Bytes of a size, for people.

@@ -10,15 +10,21 @@
 //! nothing of what goes together. A batch is checked alone ([`SegmentWriter::standalone`])
 //! before it is written: its blocks with the module and resource blocks before them make an
 //! archive of a single file, its leaves' outputs one after another.
+//!
+//! The blocks of a batch alike (of a class and kind of stream) may take a dictionary trained
+//! for them ([`super::dict`]), whose block comes before all of the batch's; a batch checked
+//! alone has a stand-in for each dictionary of the batches before it, for the indices of its
+//! own to be those of the segment.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use aqr_common::varint;
 
+use super::dict::Candidate;
 use super::tree::{self, EntryNode, FileParam, Tree};
 use super::{
     CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, MODULE, STORED, SWAP, always_compressed, block, block_of,
-    checksum_of, footer, footer_with, formula_block,
+    block_ranges, checksum_of, dictionary_block, dictionary_stand_in, footer, footer_with, formula_block, key_how,
 };
 use crate::{Error, Formula, Module, Node, Resource, Result};
 
@@ -46,6 +52,7 @@ pub struct Segment<'a> {
 pub enum Placed {
     Module,
     Resource,
+    Dictionary,
     /// The formula block of a leaf (of its batch).
     Formula(usize),
     /// The leaf data block of a leaf, all of a stream.
@@ -66,7 +73,11 @@ pub struct SegmentWriter {
     module_at: Vec<usize>,
     resources: Vec<Resource>,
     resource_at: Vec<usize>,
-    /// The module and resource blocks so far, one after another.
+    dictionary_at: Vec<usize>,
+    /// The dictionary (by index) of each leaf block taking one, by where it is.
+    leaf_dictionary: HashMap<usize, usize>,
+    /// The module and resource blocks so far, one after another, and a stand-in for each
+    /// dictionary block ([`super::dictionary_stand_in`]).
     prefix: Vec<u8>,
 }
 
@@ -80,6 +91,10 @@ pub struct Batch {
     modules: Vec<Module>,
     resources: Vec<Resource>,
     added: Vec<std::ops::Range<usize>>,
+    /// Where its dictionary blocks are in `bytes`, and the dictionary (by index in the
+    /// segment) of each leaf taking one.
+    dictionaries: Vec<usize>,
+    leaf_dictionary: Vec<(usize, usize)>,
 }
 
 /// Where a content of an archive is: the leaf block (where it starts in the archive), its output
@@ -106,6 +121,8 @@ impl SegmentWriter {
             module_at: Vec::new(),
             resources: Vec::new(),
             resource_at: Vec::new(),
+            dictionary_at: Vec::new(),
+            leaf_dictionary: HashMap::new(),
             prefix: Vec::new(),
         }
     }
@@ -208,6 +225,8 @@ impl SegmentWriter {
             modules: Vec::new(),
             resources: Vec::new(),
             added: Vec::new(),
+            dictionaries: Vec::new(),
+            leaf_dictionary: Vec::new(),
         };
         let (mut modules, mut resources): (Vec<Module>, Vec<Resource>) = (self.modules.clone(), self.resources.clone());
         // (the non-leaf blocks counted from the batch's first: only their deltas are stored)
@@ -215,6 +234,35 @@ impl SegmentWriter {
         let mut non_leaf = 0u64;
         let mut done = vec![false; leaves.len()];
         let out = &mut b.bytes;
+
+        // the dictionaries of the blocks alike, before all of the batch's blocks
+        let mut whole = vec![false; f.streams.len()];
+        (0..leaves.len()).for_each(|i| {
+            if let Some(Some(st)) = data_leaf(i) {
+                whole[st] = true;
+            }
+        });
+        let mut candidates = Vec::new();
+        for (st, s) in f.streams.iter().enumerate().filter(|&(st, _)| written[st]) {
+            let (class, how) = ((&*s.class, s.kind), enc.how(s));
+            match whole[st] {
+                true => candidates.push(Candidate { class, data: &s.data, how }),
+                false => {
+                    candidates.extend(block_ranges(s.data.len()).map(|r| Candidate { class, data: &s.data[r], how }))
+                }
+            }
+        }
+        let planned = enc.dictionaries(&candidates)?;
+        drop(candidates);
+        let first_dictionary = self.dictionary_at.len();
+        for d in &planned.blocks {
+            let at = out.len();
+            dictionary_block(out, d);
+            b.layout.push((Placed::Dictionary, out.len() - at));
+            b.dictionaries.push(at);
+        }
+        let dicts = (!planned.is_empty()).then_some((&planned, first_dictionary));
+
         for first in 0..leaves.len() {
             if done[first] {
                 continue;
@@ -266,7 +314,10 @@ impl SegmentWriter {
                     Some(stream) => {
                         let data: &[u8] = stream.map_or(&[], |st| &f.streams[st].data);
                         let how = stream.map_or(How::Usual, |st| enc.how(&f.streams[st]));
-                        enc.content_block(out, true, &[data], how)?;
+                        if let Some(&(d, _)) = planned.used.get(&key_how(&[data], how)) {
+                            b.leaf_dictionary.push((i, first_dictionary + d));
+                        }
+                        enc.content_block(out, true, &[data], how, dicts)?;
                         b.layout.push((Placed::Data(i), out.len() - at));
                     }
                     None => {
@@ -279,7 +330,7 @@ impl SegmentWriter {
             }
             for &st in &streams {
                 let at = out.len();
-                enc.stream_blocks(out, &[&f.streams[st].data], enc.how(&f.streams[st]))?;
+                enc.stream_blocks(out, &[&f.streams[st].data], enc.how(&f.streams[st]), dicts)?;
                 b.layout.push((Placed::NonLeaf(st), out.len() - at));
             }
             non_leaf += blocks;
@@ -349,6 +400,13 @@ impl SegmentWriter {
                 _ => {}
             }
         }
+        for &at in &b.dictionaries {
+            self.dictionary_at.push(self.at + at);
+            dictionary_stand_in(&mut self.prefix);
+        }
+        for &(i, d) in &b.leaf_dictionary {
+            self.leaf_dictionary.insert(b.leaf_at[i], d);
+        }
         self.at += b.bytes.len();
     }
 
@@ -360,10 +418,11 @@ impl SegmentWriter {
         for (i, e) in t.entries.iter().enumerate() {
             if let EntryNode::File(c) = e.node {
                 let c = contents[c];
-                files[i] = Some(FileParam { leaf: c.leaf, output: c.output as u64, size: c.size });
+                let dictionary = self.leaf_dictionary.get(&c.leaf).copied();
+                files[i] = Some(FileParam { leaf: c.leaf, output: c.output as u64, size: c.size, dictionary });
             }
         }
-        let meta = tree::metadata(t, self.at, &self.module_at, &self.resource_at, &files);
+        let meta = tree::metadata(t, self.at, &self.module_at, &self.resource_at, &self.dictionary_at, &files);
         let mut out = Vec::new();
         match enc.base_level() {
             STORED => {
@@ -583,6 +642,88 @@ mod tests {
         out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
         let Ok(Value::Tree(_, files)) = decode_value(&out, &natives()) else { panic!() };
         assert_eq!(files, [b"zyxolleh".to_vec(), b"ollehzyx".to_vec()]);
+    }
+
+    /// A segment of two batches of many small streams alike, of text records of the same
+    /// words, its leaves' outputs one after another, and the dictionaries of each batch.
+    fn alike(enc: &Encoder) -> (Vec<u8>, Vec<Vec<u8>>, Vec<usize>) {
+        let mut rng = aqr_common::rng::Rng::new(7);
+        let words: Vec<Vec<u8>> =
+            (0..300).map(|_| (0..3 + rng.below(6)).map(|_| b'a' + rng.below(26) as u8).collect()).collect();
+        let mut text = |n: usize| {
+            let mut t = Vec::new();
+            while t.len() < n {
+                let w = |rng: &mut aqr_common::rng::Rng| &words[rng.below(words.len() as u64) as usize];
+                t.extend_from_slice(format!("{{\"id\": {}, \"name\": \"", rng.below(100_000)).as_bytes());
+                t.extend_from_slice(w(&mut rng));
+                t.extend_from_slice(b"\", \"tags\": [\"");
+                t.extend_from_slice(w(&mut rng));
+                t.extend_from_slice(b"\"], \"note\": \"");
+                for _ in 0..4 {
+                    t.extend_from_slice(w(&mut rng));
+                    t.push(b' ');
+                }
+                t.extend_from_slice(b"\"}\n");
+            }
+            t
+        };
+        let mut f = Formula::default();
+        let mut w = SegmentWriter::new();
+        let mut out = SegmentWriter::header().to_vec();
+        let (mut contents, mut want, mut dictionaries) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..2 {
+            let mut leaves = Vec::new();
+            // streams of a leaf of their own (leaf data blocks), and streams of two leaves
+            for _ in 0..24 {
+                let d = text(12 << 10);
+                want.push(d.clone());
+                leaves.push(Leaf { outputs: vec![f.push("t", d)], sums: vec![None] });
+            }
+            for _ in 0..8 {
+                let d = text(12 << 10);
+                let (st, half) = (f.streams.len(), d.len() as u64 / 2);
+                want.push(d[..half as usize].to_vec());
+                want.push(d[half as usize..].to_vec());
+                f.push("t", d.clone());
+                for (start, len) in [(0, half), (half, d.len() as u64 - half)] {
+                    leaves.push(Leaf { outputs: vec![Node::slice(st, start, len)], sums: vec![None] });
+                }
+            }
+            let batch = w.batch(enc, &f, &leaves).unwrap();
+            let n = want.len() - leaves.len();
+            assert_eq!(decode(&w.standalone(&batch), &natives()).unwrap(), want[n..].concat());
+            dictionaries.push(batch.layout.iter().filter(|p| p.0 == Placed::Dictionary).count());
+            w.commit(&batch);
+            out.extend_from_slice(&batch.bytes);
+            let sizes = leaves.iter().map(|l| l.outputs[0].len());
+            contents.extend(batch.leaf_at.iter().zip(sizes).map(|(&leaf, size)| ContentAt { leaf, output: 0, size }));
+        }
+        let mut t = Tree::default();
+        for c in 0..contents.len() {
+            t.entries.push(entry(None, &format!("{c}"), EntryNode::File(c)));
+        }
+        out.extend_from_slice(&w.finish(enc, &t, &contents).unwrap().0);
+        (out, want, dictionaries)
+    }
+
+    /// Streams alike, many and small, take a dictionary for each batch, as their leaf data
+    /// blocks (the files' dictionaries in the metadata block) and non-leaf blocks do: the
+    /// second batch's is the segment's second, as where its batch is checked alone (after a
+    /// stand-in for the first). The archive is smaller than without dictionaries.
+    #[test]
+    fn dictionaries() {
+        let enc = Encoder::new(Level::Zstd(3));
+        let (c, want, dictionaries) = alike(&enc);
+        assert_eq!(dictionaries, [1, 1]);
+        let types: Vec<u64> = super::super::tests::types(&c).iter().map(|t| t & !3).collect();
+        for ty in [super::super::DICTIONARY, super::super::LEAF_ZSTD_DICT, super::super::NON_LEAF_ZSTD_DICT] {
+            assert!(types.contains(&ty), "{ty:#x}");
+        }
+        let Ok(Value::Tree(_, files)) = decode_value(&c, &natives()) else { panic!() };
+        assert_eq!(files, want);
+        let (without, again, none) = alike(&Encoder::new(Level::Zstd(3)).with_dictionaries(false));
+        assert!(again == want && none == [0, 0]);
+        assert!(c.len() * 10 < without.len() * 9, "{} against {}", c.len(), without.len());
     }
 
     /// Files of leaves of every kind: of a stream of their own (a leaf data block), solid in a

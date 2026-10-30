@@ -123,8 +123,8 @@ pub struct Report {
     pub solid: Vec<Solid>,
     /// The contents coded against each other, a set each.
     pub sets: Vec<Vec<usize>>,
-    /// Bytes of the archive but for the files': its header and footer, the module, resource and
-    /// metadata blocks.
+    /// Bytes of the archive but for the files': its header and footer, the module, resource,
+    /// dictionary and metadata blocks.
     pub overhead: usize,
     /// The contents kept raw because the archive did not give them back.
     pub unverified: Vec<usize>,
@@ -1154,7 +1154,7 @@ fn report(
                     });
                 }
             }
-            Placed::Module | Placed::Resource | Placed::Metadata => {}
+            Placed::Module | Placed::Resource | Placed::Dictionary | Placed::Metadata => {}
         }
     }
     let mut sets = Vec::new();

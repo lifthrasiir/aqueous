@@ -180,22 +180,24 @@ pub(crate) fn check(t: &Tree, contents: usize) -> Result<(), String> {
 }
 
 /// What a file's parameters in a metadata block point to: a leaf block (by where it starts in
-/// the archive) and its output.
+/// the archive), its output, and the dictionary it takes (by index).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FileParam {
     pub leaf: usize,
     pub output: u64,
     pub size: u64,
+    pub dictionary: Option<usize>,
 }
 
-/// The internal structure of the metadata block at `at` (in the archive), of a segment
-/// without dictionaries of the module and resource blocks at `modules` and `resources`; the
+/// The internal structure of the metadata block at `at` (in the archive), of a segment of the
+/// module, resource and dictionary blocks at `modules`, `resources` and `dictionaries`; the
 /// files' parameters by their entries' indices (`None` for the other entries).
 pub(crate) fn metadata(
     t: &Tree,
     at: usize,
     modules: &[usize],
     resources: &[usize],
+    dictionaries: &[usize],
     files: &[Option<FileParam>],
 ) -> Vec<u8> {
     let number = numbers(t);
@@ -233,10 +235,11 @@ pub(crate) fn metadata(
 
     let mut m = Vec::new();
     varint::put(&mut m, prev);
-    for x in [modules.len(), resources.len(), 0, dirs, nfiles, n - dirs - nfiles, entries.len(), opt.len()] {
+    let counts = [modules.len(), resources.len(), dictionaries.len(), dirs, nfiles, n - dirs - nfiles];
+    for x in counts.into_iter().chain([entries.len(), opt.len()]) {
         varint::put(&mut m, x as u64);
     }
-    for &b in modules.iter().chain(resources) {
+    for &b in modules.iter().chain(resources).chain(dictionaries) {
         put_u(&mut m, prev, (at - b) as u64);
     }
     for &i in &order[1..] {
@@ -245,7 +248,8 @@ pub(crate) fn metadata(
     for &i in &order[dirs..dirs + nfiles] {
         let p = files[i].expect("a file's parameters");
         let offset = (at - p.leaf) as u64;
-        // (no dictionary: zero-sized)
+        // (1-based, zero for none: zero-sized where the segment has no dictionary)
+        put_u(&mut m, dictionaries.len() as u64, p.dictionary.map_or(0, |d| d as u64 + 1));
         put_u(&mut m, prev, offset + (p.output > 0) as u64);
         if p.output > 0 {
             varint::put(&mut m, p.output - 1);
@@ -518,8 +522,9 @@ pub(crate) struct Metadata {
     pub prev: u64,
     pub modules: Vec<u64>,
     pub resources: Vec<u64>,
+    pub dictionaries: Vec<u64>,
     /// Of each entry from 1: its parent's number, its name, and what it is (for a file, the
-    /// relative offset of its leaf block, its output and its size).
+    /// relative offset of its leaf block, its output, its size and its dictionary).
     pub entries: Vec<(usize, Vec<u8>, Read)>,
     pub extras: Vec<Extra>,
 }
@@ -530,6 +535,8 @@ pub(crate) enum Read {
         offset: u64,
         output: u64,
         size: u64,
+        /// 1-based, zero for none.
+        dictionary: u64,
     },
     Link(Vec<u8>),
     /// A special entry this crate does not take, by its kind.
@@ -549,9 +556,6 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
             .ok_or_else(|| super::Failure::Invalid("a count out of range".into()))?;
     }
     let [modules, resources, dictionaries, dirs, files, specials, entries_size, opt_size] = counts;
-    if dictionaries > 0 {
-        return super::resource("dictionaries are not supported yet");
-    }
     let n = dirs + files + specials;
     if n == 0 {
         return invalid("a metadata block of no entries");
@@ -565,6 +569,7 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
     };
     let module_offsets = (0..modules).map(|_| get_u(&mut at, prev)).collect::<Decoded<Vec<_>>>()?;
     let resource_offsets = (0..resources).map(|_| get_u(&mut at, prev)).collect::<Decoded<Vec<_>>>()?;
+    let dictionary_offsets = (0..dictionaries).map(|_| get_u(&mut at, prev)).collect::<Decoded<Vec<_>>>()?;
     let mut parents = vec![0];
     for k in 2..=n {
         let p = get_u(&mut at, dirs as u64)? as usize;
@@ -575,12 +580,13 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
     }
     let mut params = Vec::new();
     for _ in 0..files {
+        let dictionary = get_u(&mut at, dictionaries as u64)?;
         let offset = get_u(&mut at, prev)?;
         let output = match offset % 2 {
             1 => leb(&mut at)?.checked_add(1).ok_or_else(|| super::Failure::Invalid("bad file output".into()))?,
             _ => 0,
         };
-        params.push((offset - offset % 2, output));
+        params.push((offset - offset % 2, output, dictionary));
     }
     let offsets = (2..=n).map(|_| get_u(&mut at, entries_size as u64)).collect::<Decoded<Vec<_>>>()?;
     let entries = d.get(at..at + entries_size).ok_or_else(|| super::Failure::Invalid("truncated entries".into()))?;
@@ -609,8 +615,8 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
             Read::Dir
         } else if k <= dirs + files {
             let size = super::leb(e, &mut q)?;
-            let (offset, output) = params[k - dirs - 1];
-            Read::File { offset, output, size }
+            let (offset, output, dictionary) = params[k - dirs - 1];
+            Read::File { offset, output, size, dictionary }
         } else {
             match super::leb(e, &mut q)? {
                 1 => {
@@ -647,7 +653,14 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
     if p != entries.len() {
         return invalid("bytes after the entries");
     }
-    Ok(Metadata { prev, modules: module_offsets, resources: resource_offsets, entries: out, extras: extras(opt, n)? })
+    Ok(Metadata {
+        prev,
+        modules: module_offsets,
+        resources: resource_offsets,
+        dictionaries: dictionary_offsets,
+        entries: out,
+        extras: extras(opt, n)?,
+    })
 }
 
 #[cfg(test)]

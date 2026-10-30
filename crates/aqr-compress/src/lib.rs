@@ -186,6 +186,11 @@ pub struct Options {
     /// that files share (one stream longer is a block of its own), which a file read alone
     /// may have to decompress.
     pub block: usize,
+    /// Of an archive of several files: compress the blocks alike of a batch (many of a class
+    /// and kind of stream, small ones) with a dictionary trained for them where it pays
+    /// ([`aqr::Encoder::with_dictionaries`]). Off by default; it matters only with blocks of a
+    /// few MiB or less ([`Options::block`]).
+    pub dictionaries: bool,
     /// Of an archive of several files: the most bytes of the files of a set coded against each
     /// other, which a file of it read alone has to decode.
     pub set_bytes: usize,
@@ -270,6 +275,7 @@ impl Default for Options {
             shared_resources: false,
             shared_modules: false,
             block: 16 << 20,
+            dictionaries: false,
             set_bytes: 64 << 20,
             batch: 512 << 20,
             spill: None,
@@ -429,7 +435,9 @@ impl Cx {
     /// A context of data of `n` bytes.
     fn of_len(n: usize, opt: &Options) -> Cx {
         let inflate = opt.expansion.saturating_mul(n as u64).saturating_add(EXPANSION_SLACK);
-        let mut enc = Encoder::with_threads(opt.level, opt.threads).with_modules(aqr_decompress::wasm_of);
+        let mut enc = Encoder::with_threads(opt.level, opt.threads)
+            .with_modules(aqr_decompress::wasm_of)
+            .with_dictionaries(opt.dictionaries);
         if opt.shared_resources {
             enc.share_resources();
         }

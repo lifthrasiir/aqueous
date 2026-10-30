@@ -19,14 +19,16 @@
 //! with long-distance matching over a window of all of it (up to the 128 MiB every decoder
 //! takes); streams of [`Kind::Compressed`] are stored as they are.
 //!
-//! [`decode`] evaluates such archives, and any other without a metadata block, a dictionary
-//! or an encryption.
+//! [`decode`] evaluates such archives, and any other without a metadata block or an
+//! encryption.
 //!
 //! An archive of several files is one segment (`segment`): [`Encoder::encode_segment`] lays
 //! out the formulas of the files over streams they may share, with the metadata block of their
 //! [`Tree`], and [`decode_value`] decodes any archive of a segment at most (without
-//! dictionaries, imports or encryption) to its files.
+//! registered dictionaries, imports or encryption) to its files. The blocks alike of a batch
+//! of its leaves may take a dictionary trained for them ([`dict`]).
 
+mod dict;
 mod segment;
 mod tree;
 
@@ -72,6 +74,12 @@ const LEAF_RAW: u64 = 0x24;
 const LEAF_ZSTD: u64 = 0x2c;
 const NON_LEAF_RAW: u64 = 0x40;
 const NON_LEAF_ZSTD: u64 = 0x44;
+/// Leaf and non-leaf data blocks compressed with a dictionary, and dictionary blocks with entropy
+/// tables.
+const LEAF_ZSTD_DICT: u64 = 0x34;
+const NON_LEAF_ZSTD_DICT: u64 = 0x48;
+const DICTIONARY: u64 = 0x54;
+const DICTIONARY_RAW: u64 = 0x50;
 const MODULE: u64 = 0x60;
 const RESOURCE: u64 = 0x64;
 const FORMULA: u64 = 0x70;
@@ -252,7 +260,7 @@ enum How {
 /// What an [`Encoder`] makes of a stream: compressed already ([`compressed`]), or to be
 /// compressed at a zstd level, to about so many bytes (by a sample).
 enum Plan {
-    Done(Option<Vec<u8>>),
+    Done(Option<Vec<u8>>, i32),
     Level(i32, usize),
 }
 
@@ -293,7 +301,17 @@ pub struct Encoder {
     module_blocks: RefCell<HashMap<(Module, i32), ModuleBlock>>,
     /// Told of the streams compressed at once ([`Encoder::on_precompress`]).
     progress: Option<Progress>,
+    /// The zstd level each stream compressed by [`Encoder::precompress`] was compressed at, by
+    /// its [`StreamKey`] (for the dictionaries of a batch, [`dict`]).
+    levels: RefCell<HashMap<StreamKey, i32>>,
+    /// Whether a batch's blocks alike are compressed with dictionaries trained for them
+    /// ([`Encoder::with_dictionaries`]).
+    trains: bool,
 }
+
+/// The dictionaries of a batch where its blocks take them, and the index of their first in
+/// the segment ([`Encoder::content_block`]).
+type Dicts<'a> = Option<(&'a dict::Planned, usize)>;
 
 /// What [`Encoder::precompress`] tells as it compresses: the bytes of the streams compressed so
 /// far, of all of them, from any of its threads.
@@ -356,6 +374,7 @@ impl Encoder {
     /// Drops everything kept of the streams and resources compressed.
     pub fn clear(&self) {
         self.streams.borrow_mut().clear();
+        self.levels.borrow_mut().clear();
         self.resources.borrow_mut().clear();
         self.raw_lens.borrow_mut().clear();
         self.trials.borrow_mut().clear();
@@ -378,6 +397,8 @@ impl Encoder {
             wasm: |m| Some(Wasm::Bytes(Cow::Owned(stand_in(m)))),
             module_blocks: RefCell::default(),
             progress: None,
+            levels: RefCell::default(),
+            trains: true,
         }
     }
 
@@ -393,6 +414,13 @@ impl Encoder {
     pub fn with_modules(mut self, wasm: WasmOf) -> Encoder {
         self.wasm = wasm;
         self.module_blocks.borrow_mut().clear();
+        self
+    }
+
+    /// The encoder compressing a batch's blocks alike with dictionaries trained for them where
+    /// they pay ([`SegmentWriter::batch`]; [`dict`]), as by default, or not.
+    pub fn with_dictionaries(mut self, on: bool) -> Encoder {
+        self.trains = on;
         self
     }
 
@@ -498,7 +526,7 @@ impl Encoder {
     fn raw_len(&self, d: &[u8]) -> Result<usize> {
         let mut n = Count(0);
         n.put(&HEADER_MAGIC);
-        self.content_block(&mut n, true, &[d], How::Usual)?;
+        self.content_block(&mut n, true, &[d], How::Usual, None)?;
         let blocks = n.0 - HEADER_MAGIC.len();
         footer(&mut n, blocks);
         Ok(n.0)
@@ -615,7 +643,7 @@ impl Encoder {
             if checksum.is_some_and(|c| c != checksum_of(&leaf)) {
                 return Err(Error::new("output checksum not that of the leaf"));
             }
-            self.content_block(out, true, &leaf, self.how(&f.streams[stream]))?;
+            self.content_block(out, true, &leaf, self.how(&f.streams[stream]), None)?;
         } else {
             // the non-leaf block of each stream sliced, by its ordinal
             let mut ordinals = vec![None; f.streams.len()];
@@ -671,7 +699,7 @@ impl Encoder {
             }
             formula_block(out, 1, &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?);
             for s in sliced {
-                self.stream_blocks(out, streams[s], self.how(&f.streams[s]))?;
+                self.stream_blocks(out, streams[s], self.how(&f.streams[s]), None)?;
             }
         }
 
@@ -1028,11 +1056,35 @@ fn block_of(out: &mut impl Out, ty: u64, parts: &[&[u8]]) {
     }
 }
 
+/// Appends a dictionary block of `data` (with entropy tables), compressed.
+fn dictionary_block(out: &mut impl Out, data: &[u8]) {
+    block(out, DICTIONARY, data);
+}
+
+/// Appends a dictionary block standing in for another, where an archive is to have as many
+/// before its own (as a batch alone has, [`SegmentWriter::standalone`]): raw content of 256
+/// bytes, uncompressed, so that it is no shorthand block (spec, "Registered dictionaries and
+/// modules").
+fn dictionary_stand_in(out: &mut impl Out) {
+    let data = stored_external(&[&[0; 256]]);
+    debug_assert!(data.len() >= 0x100);
+    block(out, DICTIONARY_RAW, &data);
+}
+
 impl Encoder {
     /// Appends a compressed or uncompressed (leaf or non-leaf) block of `data`, whichever the
     /// spec allows, compressed as `how` tells (uncompressed where stored, and not kept
-    /// compressed already).
-    fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[&[u8]], how: How) -> Result<()> {
+    /// compressed already), or with a dictionary where `dicts` has it compressed so (the
+    /// dictionaries of a batch, and the index of their first in the segment).
+    fn content_block(&self, out: &mut impl Out, leaf: bool, data: &[&[u8]], how: How, dicts: Dicts) -> Result<()> {
+        if let Some((p, first)) = dicts
+            && let Some((i, c)) = p.used.get(&key_how(data, how))
+        {
+            let mut index = Vec::new();
+            varint::put(&mut index, (first + i) as u64);
+            block_of(out, if leaf { LEAF_ZSTD_DICT } else { NON_LEAF_ZSTD_DICT }, &[&index, c]);
+            return Ok(());
+        }
         let mut streams = self.streams.borrow_mut();
         // (written once and not kept: compressed now, or let go where it was kept)
         if !self.keep.get() {
@@ -1041,10 +1093,10 @@ impl Encoder {
                 None => {
                     drop(streams);
                     match match how {
-                        How::Stored => Plan::Done(None),
+                        How::Stored => Plan::Done(None, STORED),
                         _ => self.plan(key(data), data, how)?,
                     } {
-                        Plan::Done(c) => c,
+                        Plan::Done(c, _) => c,
                         Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
                     }
                 }
@@ -1056,11 +1108,11 @@ impl Encoder {
             MapEntry::Occupied(e) => e.into_mut(),
             MapEntry::Vacant(e) => {
                 let plan = match how {
-                    How::Stored => Plan::Done(None),
+                    How::Stored => Plan::Done(None, STORED),
                     _ => self.plan(key(data), data, how)?,
                 };
                 e.insert(match plan {
-                    Plan::Done(c) => c,
+                    Plan::Done(c, _) => c,
                     Plan::Level(level, size) => compressed_to(&mut self.cctx(), data, level, self.threads, size)?,
                 })
             }
@@ -1069,10 +1121,11 @@ impl Encoder {
         Ok(())
     }
 
-    /// Appends the non-leaf blocks of a stream of `data`: [`BLOCK`] bytes each but the last.
-    fn stream_blocks(&self, out: &mut impl Out, data: &[&[u8]], how: How) -> Result<()> {
+    /// Appends the non-leaf blocks of a stream of `data`: [`BLOCK`] bytes each but the last
+    /// (with a dictionary where `dicts` tells, [`Encoder::content_block`]).
+    fn stream_blocks(&self, out: &mut impl Out, data: &[&[u8]], how: How, dicts: Dicts) -> Result<()> {
         for r in block_ranges(total(data)) {
-            self.content_block(out, false, &cut(data, r.start, r.len()), how)?;
+            self.content_block(out, false, &cut(data, r.start, r.len()), how, dicts)?;
         }
         Ok(())
     }
@@ -1083,20 +1136,23 @@ impl Encoder {
         let mut resources = self.resources.borrow_mut();
         let c = match resources.entry(key(&[r])) {
             MapEntry::Occupied(e) => e.into_mut(),
-            MapEntry::Vacant(e) => {
-                let c = match self.plan(key(&[r]), &[r], How::Usual)? {
-                    Plan::Done(Some(c)) => Some(c),
-                    Plan::Done(None) => None,
-                    Plan::Level(level, size) => compressed_to(&mut self.cctx(), &[r], level, self.threads, size)?,
-                };
-                e.insert(match c {
-                    Some(c) => c,
-                    None => always_compressed(&mut self.cctx(), &[r], self.base_level(), self.threads)?,
-                })
-            }
+            MapEntry::Vacant(e) => e.insert(self.always(r)?),
         };
         block(out, RESOURCE, c);
         Ok(())
+    }
+
+    /// The compressed external structure of `r`, compressed at the level the encoder picks for
+    /// it, or at the base level where it does not compress: for a block always compressed.
+    fn always(&self, r: &[u8]) -> Result<Vec<u8>> {
+        let c = match self.plan(key(&[r]), &[r], How::Usual)? {
+            Plan::Done(c, _) => c,
+            Plan::Level(level, size) => compressed_to(&mut self.cctx(), &[r], level, self.threads, size)?,
+        };
+        match c {
+            Some(c) => Ok(c),
+            None => always_compressed(&mut self.cctx(), &[r], self.base_level(), self.threads),
+        }
     }
 
     /// About the fewest bytes stream `d` archives to at the level of the encoder, by a sample,
@@ -1187,14 +1243,15 @@ impl Encoder {
         let level = self.level;
         let total = todo.iter().map(|t| t.0.len() as u64).sum();
         let (done, progress) = (std::sync::atomic::AtomicU64::new(0), self.progress.as_deref());
-        let one = |(d, how): (&[u8], How), threads: usize| -> Result<(StreamKey, Compressed)> {
+        let one = |(d, how): (&[u8], How), threads: usize| -> Result<(StreamKey, Compressed, i32)> {
             let made = THREAD_CCTX.with(|c| {
                 let c = &mut c.borrow_mut();
-                let c = match plan_by(level, how, &[d], &mut |sample, l| compressed(c, &[sample.unwrap_or(d)], l, 1))? {
-                    Plan::Done(c) => c,
-                    Plan::Level(l, size) => compressed_to(c, &[d], l, threads, size)?,
-                };
-                Ok((key_how(&[d], how), c))
+                let (c, l) =
+                    match plan_by(level, how, &[d], &mut |sample, l| compressed(c, &[sample.unwrap_or(d)], l, 1))? {
+                        Plan::Done(c, l) => (c, l),
+                        Plan::Level(l, size) => (compressed_to(c, &[d], l, threads, size)?, l),
+                    };
+                Ok((key_how(&[d], how), c, l))
             });
             if let Some(p) = progress {
                 p(done.fetch_add(d.len() as u64, std::sync::atomic::Ordering::Relaxed) + d.len() as u64, total);
@@ -1205,10 +1262,11 @@ impl Encoder {
         let threads = self.threads.min(LARGE_THREADS);
         let mut made: Vec<_> = large.into_iter().map(|&t| one(t, threads)).collect();
         made.extend(aqr_common::pool::par_map(small.len(), self.threads, |i| one(*small[i], 1)));
-        let mut kept = self.streams.borrow_mut();
+        let (mut kept, mut levels) = (self.streams.borrow_mut(), self.levels.borrow_mut());
         for m in made {
-            let (k, c) = m?;
+            let (k, c, l) = m?;
             kept.insert(k, c);
+            levels.insert(k, l);
         }
         Ok(())
     }
@@ -1253,7 +1311,7 @@ impl Encoder {
         if !matches!((&f.root, &f.shared[..]), (Node::Slice { .. }, [])) {
             for &s in free {
                 let mut c = Count(0);
-                self.stream_blocks(&mut c, &[&f.streams[s].data], self.how(&f.streams[s]))?;
+                self.stream_blocks(&mut c, &[&f.streams[s].data], self.how(&f.streams[s]), None)?;
                 n = n.saturating_sub(c.0);
             }
         }
@@ -1263,7 +1321,7 @@ impl Encoder {
         }
         if !self.streams.borrow().contains_key(&key(&[d])) {
             let c = match self.plan(key(&[d]), &[d], How::Usual)? {
-                Plan::Done(c) => c,
+                Plan::Done(c, _) => c,
                 Plan::Level(level, estimate) => {
                     if n <= estimate / 2 {
                         return Ok(true);
@@ -1328,23 +1386,23 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
     let mut trial = |sample: &[u8], level| compress(Some(sample), level);
     let n = total(data);
     match level {
-        Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(trial(&data.concat(), l)?)),
+        Level::Zstd(l) if n <= SAMPLE => Ok(Plan::Done(trial(&data.concat(), l)?, l)),
         Level::Zstd(l) => {
             let sample = sampled(data);
             let c = trial(&sample, l)?.map_or(sample.len(), |c| c.len());
             Ok(Plan::Level(l, scaled(c, sample.len(), n)))
         }
-        Level::STORED => Ok(Plan::Done(None)),
+        Level::STORED => Ok(Plan::Done(None, STORED)),
         Level::Of(level) => {
             let p = Pick::of(level);
             let sample = sampled(data);
             let len = |c: &Option<Vec<u8>>| c.as_ref().map_or(sample.len(), Vec::len);
             let probe = trial(&sample, PROBE)?;
             if len(&probe) >= sample.len() - sample.len() / 32 {
-                return Ok(Plan::Done(None));
+                return Ok(Plan::Done(None, STORED));
             }
             if n < SMALL {
-                return Ok(Plan::Done(compress(None, p.base.0)?));
+                return Ok(Plan::Done(compress(None, p.base.0)?, p.base.0));
             }
             let mut tried = Vec::new();
             for level in [p.base.0].into_iter().chain(p.higher.iter().map(|h| h.0)).chain(p.lower.iter().copied()) {
@@ -1363,9 +1421,9 @@ fn plan_by(level: Level, how: How, data: &[&[u8]], compress: &mut Compress) -> R
                 }
                 Some(dense) if how == How::Dense && sample.len() == n && level >= p.base.0 => {
                     let c = trial(&sample, dense)?;
-                    Ok(Plan::Done(if len(&c) < len(&best.1) { c } else { best.1 }))
+                    Ok(if len(&c) < len(&best.1) { Plan::Done(c, dense) } else { Plan::Done(best.1, best.0) })
                 }
-                _ if sample.len() == n => Ok(Plan::Done(best.1)),
+                _ if sample.len() == n => Ok(Plan::Done(best.1, best.0)),
                 _ => Ok(Plan::Level(best.0, size)),
             }
         }
@@ -1603,6 +1661,19 @@ fn compressed_to(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size:
 /// The compressed external structure of `data` as [`compressed_to`] makes it, and whether its
 /// Zstandard blocks are longer than `data`.
 fn external(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usize) -> Result<(Vec<u8>, bool)> {
+    external_with(c, data, level, threads, size, dict::With::None)
+}
+
+/// [`external`], compressed with dictionary `dict` (one a context of a lifetime as long as
+/// `c`'s may refer to).
+fn external_with<'a>(
+    c: &mut CCtx<'a>,
+    data: &[&[u8]],
+    level: i32,
+    threads: usize,
+    size: usize,
+    dict: dict::With<'a>,
+) -> Result<(Vec<u8>, bool)> {
     #[cfg(test)]
     tests::COMPRESSED.with(|n| n.set(n.get() + 1));
     let zstd = |e: zstd_safe::ErrorCode| Error::new(format!("zstd: {}", zstd_safe::get_error_name(e)));
@@ -1632,6 +1703,11 @@ fn external(c: &mut CCtx, data: &[&[u8]], level: i32, threads: usize, size: usiz
         let window = (64 - (len as u64 - 1).leading_zeros()).min(WINDOW_LOG_MAX);
         c.set_parameter(CParameter::WindowLog(window)).map_err(zstd)?;
         c.set_parameter(CParameter::EnableLongDistanceMatching(true)).map_err(zstd)?;
+    }
+    match dict {
+        dict::With::None => {}
+        dict::With::Tables(d) => c.ref_cdict(d).map(drop).map_err(zstd)?,
+        dict::With::Raw(d) => c.ref_prefix(d).map(drop).map_err(zstd)?,
     }
     c.set_pledged_src_size(Some(len as u64)).map_err(zstd)?;
     let pieces: Vec<&[u8]> = data.iter().copied().filter(|p| !p.is_empty()).collect();
@@ -2069,7 +2145,7 @@ impl Archive<'_, '_> {
         // by leaf, its weight and the bytes of its outputs
         let (weights, lens): (Vec<u64>, Vec<u64>) = (blocks.leaves.iter().zip(&programs))
             .map(|(leaf, p)| match (leaf, p) {
-                (&LeafBlock::Stored(d, zstd, checked), _) => {
+                (&LeafBlock::Stored(d, zstd, checked, _), _) => {
                     let n = stored_len(d, zstd, checked);
                     (n, n)
                 }
@@ -2078,7 +2154,7 @@ impl Archive<'_, '_> {
             })
             .unzip();
         let stored = blocks.leaves.iter().map(|l| if let &LeafBlock::Stored(d, ..) = l { d.len() as u64 } else { 0 });
-        let data_len = stored.sum::<u64>() + blocks.non_leaf.iter().map(|(d, _)| d.len() as u64).sum::<u64>();
+        let data_len = stored.sum::<u64>() + blocks.non_leaf.iter().map(|(d, ..)| d.len() as u64).sum::<u64>();
         let tally = Tally {
             tell: self.tell.as_deref(),
             decompressed: AtomicU64::new(0),
@@ -2088,7 +2164,8 @@ impl Archive<'_, '_> {
         tally.add(0, 0);
         let contents = Contents {
             refs: refs.into_iter().map(AtomicUsize::new).collect(),
-            data: blocks.non_leaf.iter().map(|&(d, zstd)| Mutex::new(Slot::Raw(d, zstd))).collect(),
+            data: blocks.non_leaf.iter().map(|&(d, zstd, dict)| Mutex::new(Slot::Raw(d, zstd, dict))).collect(),
+            dictionaries: &blocks.dictionaries,
             tally: &tally,
         };
         let gate = Gate::new(self.budget);
@@ -2102,8 +2179,8 @@ impl Archive<'_, '_> {
             |i, _admitted| {
                 tally.step(Step::Started(i));
                 let outputs = match blocks.leaves[i] {
-                    LeafBlock::Stored(raw, zstd, checked) => {
-                        let d = decoded(raw, zstd, checked);
+                    LeafBlock::Stored(raw, zstd, checked, dict) => {
+                        let d = decoded_with(raw, zstd, checked, dict.map(|d| &blocks.dictionaries[d]));
                         tally.add(raw.len() as u64, 0);
                         d.map(|d| vec![d])
                     }
@@ -2192,8 +2269,11 @@ fn tree_of(
     let to = |offsets: &[u64], at_: &[usize]| {
         offsets.len() == at_.len() && offsets.iter().zip(at_).all(|(&o, &b)| at.checked_sub(o as usize) == Some(b))
     };
-    if !to(&m.modules, &blocks.module_at) || !to(&m.resources, &blocks.resource_at) {
-        return invalid("module or resource offsets not those of the blocks");
+    if !to(&m.modules, &blocks.module_at)
+        || !to(&m.resources, &blocks.resource_at)
+        || !to(&m.dictionaries, &blocks.dictionary_at)
+    {
+        return invalid("module, resource or dictionary offsets not those of the blocks");
     }
     let mut t = Tree { root: m.extras[0], entries: Vec::new() };
     // the tree's index of each entry by number, tombstones (of nothing to remove) left out
@@ -2212,11 +2292,14 @@ fn tree_of(
         }
         let node = match read {
             tree::Read::Dir => EntryNode::Dir,
-            tree::Read::File { offset, output, size } => {
+            tree::Read::File { offset, output, size, dictionary } => {
                 let leaf = at
                     .checked_sub(offset as usize)
                     .and_then(|b| blocks.leaf_at.binary_search(&b).ok())
                     .ok_or_else(|| Failure::Invalid("a file not at a leaf block".into()))?;
+                if blocks.leaf_dictionary[leaf].map_or(0, |d| d as u64 + 1) != dictionary {
+                    return invalid("a file's dictionary not that of its leaf block");
+                }
                 if output >= outputs[leaf] {
                     return invalid("a file of an output its leaf block does not have");
                 }
@@ -2253,26 +2336,26 @@ struct Blocks<'c> {
     leaf_at: Vec<usize>,
     module_at: Vec<usize>,
     resource_at: Vec<usize>,
+    dictionary_at: Vec<usize>,
+    /// The dictionary (by index) of each leaf block, where it takes one.
+    leaf_dictionary: Vec<Option<usize>>,
     /// The metadata blocks, where each starts and its decoded data.
     metadata: Vec<(usize, Vec<u8>)>,
     /// The formula data of the formula blocks.
     formulas: Vec<Vec<u8>>,
-    non_leaf: Vec<(&'c [u8], bool)>,
+    /// The data of each non-leaf block, whether it is Zstandard data, and its dictionary.
+    non_leaf: Vec<(&'c [u8], bool, Option<usize>)>,
     modules: Vec<Vec<u8>>,
     resources: Vec<Resource>,
+    dictionaries: Vec<dict::Dictionary>,
 }
 
 enum LeafBlock<'c> {
-    Stored(&'c [u8], bool, bool),
+    /// Its data, whether it is Zstandard data and whether checked, and its dictionary.
+    Stored(&'c [u8], bool, bool, Option<usize>),
     /// The number of outputs and the formula data (by index), with the numbers of module and
     /// resource blocks before it and of non-leaf blocks.
-    Formula {
-        outputs: u64,
-        data: usize,
-        modules: usize,
-        resources: usize,
-        non_leaf: usize,
-    },
+    Formula { outputs: u64, data: usize, modules: usize, resources: usize, non_leaf: usize },
 }
 
 /// The blocks in `d`; `metadata` tells whether the footer points to a metadata block.
@@ -2282,11 +2365,14 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
         leaf_at: Vec::new(),
         module_at: Vec::new(),
         resource_at: Vec::new(),
+        dictionary_at: Vec::new(),
+        leaf_dictionary: Vec::new(),
         metadata: Vec::new(),
         formulas: Vec::new(),
         non_leaf: Vec::new(),
         modules: Vec::new(),
         resources: Vec::new(),
+        dictionaries: Vec::new(),
     };
     // the generic structure first: a block of an undefined critical type anywhere in it makes
     // the archive unsupported, whatever else is wrong with the other blocks
@@ -2334,15 +2420,25 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
                     return invalid("bad size hint block");
                 }
             }
-            // data blocks: `001k kcss` (leaf) and `0100 kkss` (non-leaf, always checked)
-            0x30..=0x37 | 0x48..=0x4b | 0x50..=0x57 | 0x74..=0x77 => {
-                return resource("dictionaries are not supported yet");
-            }
-            0x20..=0x2f => {
+            // data blocks: `001k kcss` (leaf) and `0100 kkss` (non-leaf, always checked), of a
+            // dictionary where kk is 2
+            0x20..=0x37 => {
+                let (data, dict) = dictionary_of(data, ty & 0x10 != 0, b.dictionaries.len())?;
                 b.leaf_at.push(at);
-                b.leaves.push(LeafBlock::Stored(data, ty & 0x08 != 0, ty & 0x04 != 0));
+                b.leaf_dictionary.push(dict);
+                b.leaves.push(LeafBlock::Stored(data, ty & 0x18 != 0, ty & 0x04 != 0, dict));
             }
-            0x40..=0x47 => b.non_leaf.push((data, ty & 0x04 != 0)),
+            0x40..=0x4b => {
+                let (data, dict) = dictionary_of(data, ty & 0x08 != 0, b.dictionaries.len())?;
+                b.non_leaf.push((data, ty & 0x0c != 0, dict));
+            }
+            // a shorthand block: the hash of a registered dictionary
+            0x50 => return resource("registered dictionaries are not supported yet"),
+            // dictionary blocks: `0101 0tss`
+            0x51..=0x57 => {
+                b.dictionary_at.push(at);
+                b.dictionaries.push(dict::Dictionary::read(decoded(data, true, true)?, ty & 0x04 != 0)?);
+            }
             0x60..=0x63 => {
                 b.module_at.push(at);
                 b.modules.push(decoded(data, true, true)?);
@@ -2351,14 +2447,17 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
                 b.resource_at.push(at);
                 b.resources.push(Resource::new(decoded(data, true, true)?));
             }
-            0x70..=0x73 => {
+            // formula blocks: `0111 0dss`
+            0x70..=0x77 => {
+                let (data, dict) = dictionary_of(data, ty & 0x04 != 0, b.dictionaries.len())?;
                 let mut p = 0;
                 let outputs = leb(data, &mut p)?;
                 if outputs == 0 {
                     return invalid("a formula block of no outputs");
                 }
-                b.formulas.push(decoded(&data[p..], true, true)?);
+                b.formulas.push(decoded_with(&data[p..], true, true, dict.map(|d| &b.dictionaries[d]))?);
                 b.leaf_at.push(at);
+                b.leaf_dictionary.push(dict);
                 b.leaves.push(LeafBlock::Formula {
                     outputs,
                     data: b.formulas.len() - 1,
@@ -2408,8 +2507,27 @@ fn defined(ty: u64) -> bool {
     )
 }
 
+/// The data of a block's data `d` past its dictionary index where it has one (`has`), and the
+/// index: one of the `before` dictionary blocks before it.
+fn dictionary_of(d: &[u8], has: bool, before: usize) -> Decoded<(&[u8], Option<usize>)> {
+    if !has {
+        return Ok((d, None));
+    }
+    let mut at = 0;
+    let i = leb(d, &mut at)?;
+    match usize::try_from(i).ok().filter(|&i| i < before) {
+        Some(i) => Ok((&d[at..], Some(i))),
+        None => invalid("a dictionary index of no dictionary block before"),
+    }
+}
+
 /// The decoded data of a block's data `d`.
 fn decoded(d: &[u8], zstd: bool, checked: bool) -> Decoded<Vec<u8>> {
+    decoded_with(d, zstd, checked, None)
+}
+
+/// [`decoded`], of Zstandard data compressed with dictionary `dict`.
+fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
     let end = d.len().checked_sub(if checked { 8 } else { 0 }).ok_or_else(|| Failure::Invalid("truncated".into()))?;
     let out = if zstd {
         let mut at = 0;
@@ -2422,7 +2540,7 @@ fn decoded(d: &[u8], zstd: bool, checked: bool) -> Decoded<Vec<u8>> {
             .checked_add(delta)
             .and_then(|n| n.checked_sub(shrink))
             .ok_or_else(|| Failure::Invalid("bad size".into()))?;
-        unzstd(window, blocks, size)?
+        unzstd(window, blocks, size, dict)?
     } else {
         d[..end].to_vec()
     };
@@ -2432,13 +2550,18 @@ fn decoded(d: &[u8], zstd: bool, checked: bool) -> Decoded<Vec<u8>> {
     Ok(out)
 }
 
-/// Zstandard `blocks` of `window` making exactly `size` bytes.
-fn unzstd(window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
+/// Zstandard `blocks` of `window` making exactly `size` bytes, with dictionary `dict`.
+fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
     let zstd = |e: zstd_safe::ErrorCode| Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)));
     // the frame: a header, then the blocks (not copied after it)
     let head = [ZSTD_MAGIC[0], ZSTD_MAGIC[1], ZSTD_MAGIC[2], ZSTD_MAGIC[3], 0, window];
     let mut frame = [&head[..], blocks].into_iter();
     let mut dctx = zstd_safe::DCtx::create();
+    match dict {
+        None => {}
+        Some(dict::Dictionary::Raw(d)) => dctx.ref_prefix(d).map(drop).map_err(zstd)?,
+        Some(dict::Dictionary::Tables(d)) => dctx.ref_ddict(d).map(drop).map_err(zstd)?,
+    }
     let mut input = InBuffer::around(frame.next().unwrap());
     // up to one byte more than `size`, to tell a longer output: as much room as that from the
     // start where it can be had, else made as the output comes
@@ -2764,6 +2887,7 @@ enum Item<'a> {
 /// of it yet to be evaluated or on a stack: once there are none, it is dropped.
 struct Contents<'c, 't> {
     data: Vec<Mutex<Slot<'c>>>,
+    dictionaries: &'c [dict::Dictionary],
     refs: Vec<AtomicUsize>,
     /// Told of the blocks as they are decoded.
     tally: &'t Tally<'t>,
@@ -2797,7 +2921,7 @@ impl Tally<'_> {
 /// A non-leaf block: its data as it is in the archive (and whether it is Zstandard data) until
 /// first sliced, then decoded until no slice of it is left.
 enum Slot<'c> {
-    Raw(&'c [u8], bool),
+    Raw(&'c [u8], bool, Option<usize>),
     Decoded(Arc<Vec<u8>>),
     Gone,
 }
@@ -2806,8 +2930,8 @@ impl Contents<'_, '_> {
     /// The data of block `o`, while any slice of it is to be evaluated: decoded the first time.
     fn block(&self, o: usize) -> Decoded<Arc<Vec<u8>>> {
         let mut s = self.data[o].lock().unwrap();
-        if let Slot::Raw(d, zstd) = *s {
-            let decoded = decoded(d, zstd, true);
+        if let Slot::Raw(d, zstd, dict) = *s {
+            let decoded = decoded_with(d, zstd, true, dict.map(|d| &self.dictionaries[d]));
             self.tally.add(d.len() as u64, 0);
             *s = Slot::Decoded(Arc::new(decoded?));
         }
@@ -2970,12 +3094,7 @@ impl Writer<'_, '_> {
 /// The outputs of formula block `p`, with the non-leaf blocks in `contents`. Where `sink` is
 /// given and the output may be streamed ([`streamed`]), it is written to `sink` as its parts
 /// are evaluated, rather than held whole, and no output is returned.
-fn run<'a>(
-    p: Program<'a>,
-    env: &Env,
-    contents: &Contents,
-    sink: Option<&mut Taker<'_>>,
-) -> Decoded<Vec<Vec<u8>>> {
+fn run<'a>(p: Program<'a>, env: &Env, contents: &Contents, sink: Option<&mut Taker<'_>>) -> Decoded<Vec<Vec<u8>>> {
     let plan = sink.is_some().then(|| streamed(&p)).flatten();
     let mut w = match (plan.as_ref(), sink) {
         (Some(plan), Some(sink)) => Some(Writer { plan, sink, next: 0, held: HashMap::new(), hash: Xxh64::new(0) }),
@@ -3768,13 +3887,13 @@ mod tests {
             assert_eq!(enc.how(&s(&long, Kind::Compressed, "raw")), How::Stored);
             let at = |d: &[u8], how| match enc.plan(key(&[d]), &[d], how).unwrap() {
                 Plan::Level(l, _) => l,
-                Plan::Done(_) => 0,
+                Plan::Done(..) => 0,
             };
             assert_eq!(at(&long, How::Dense) == DENSE, dense, "{level:?}");
             // (at 9, picked from as any other)
             assert_eq!(at(&long, How::Usual) == DENSE, level == Level::Of(9), "{level:?}");
             // no longer than a sample: compressed whole, at the dense level where smaller so
-            let Plan::Done(Some(c)) = enc.plan(key(&[&text]), &[&text], How::Dense).unwrap() else {
+            let Plan::Done(Some(c), _) = enc.plan(key(&[&text]), &[&text], How::Dense).unwrap() else {
                 panic!("{level:?}: not compressed whole")
             };
             let at_dense = compressed(&mut enc.cctx(), &[&text], DENSE, 1).unwrap().unwrap();
@@ -4290,8 +4409,6 @@ mod tests {
             match decode(&bad, &natives()) {
                 Ok(d) if d == SAMPLE => same += 1,
                 Err(Failure::Invalid(_)) => failed += 1,
-                // (blocks framed anew by a changed size, one of them using a dictionary)
-                Err(Failure::Resource(m)) if m == "dictionaries are not supported yet" => failed += 1,
                 r => panic!("byte {i}: {r:?}"),
             }
         }
