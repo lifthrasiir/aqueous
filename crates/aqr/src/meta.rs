@@ -9,6 +9,7 @@
 //! On Windows: the times, the file attributes, the kinds of links and the alternate data
 //! streams (as forks); not the extended attributes (EAs) of NTFS, read nor written.
 
+#[cfg(unix)]
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -29,8 +30,12 @@ const USER_FLAGS: u32 = 0xffff;
 /// Reads the metadata of the files archived; the names of users and groups found once each.
 #[derive(Default)]
 pub struct Reader {
+    /// (nothing of Windows read but where asked)
+    #[cfg_attr(windows, allow(dead_code))]
     pub privileged: bool,
+    #[cfg(unix)]
     users: HashMap<u32, Option<Vec<u8>>>,
+    #[cfg(unix)]
     groups: HashMap<u32, Option<Vec<u8>>>,
 }
 

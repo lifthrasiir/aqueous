@@ -10,7 +10,6 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const HIDDEN: u32 = 0x2;
-const READONLY: u32 = 0x1;
 /// `FILE_FLAG_BACKUP_SEMANTICS`, to open directories.
 const BACKUP: u32 = 0x0200_0000;
 /// `FILE_WRITE_ATTRIBUTES`.

@@ -410,7 +410,9 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     })?;
     if !a.quiet {
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
-        summary(out, g.contents.len(), r.read as usize, r.len, start);
+        // (the files, as decompressing counts them: not their forks, each hard link)
+        let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
+        summary(out, files, r.read as usize, r.len, start);
     }
     Ok(())
 }
