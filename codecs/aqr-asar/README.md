@@ -28,12 +28,14 @@ Oculus, and games; written by `asar` 0.14 to `@electron/asar` 3, 127,329 files).
   the index. Archives with integrity gain most (Ridibooks 230 → 29 KB, shapez 102 → 15 KB);
   Orca's (4555 of its 4578 files unpacked, their integrity kept) gains nothing.
 - Through `aqr` (all threads, level mid) against the commit before (`18fdaf4`), all 27 archives
-  at once: 714.42 -> 715.68 MB (+0.2%), 23.3 -> 26.0 s (with aqr-zip's kept bodies as slices of
-  their own, `share_slices` for a file alone, and GIF files not taken as compressed; 726.59 MB
-  before them). Each alone (`cache/per-file-0bf54e2.txt`): Oculus 215.09 -> 212.73 MB (its two
-  APKs share 8.8 MB of deflated entries), Ridibooks 16.02 -> 15.69, Antimatter Dimensions 33.19
-  -> 32.86, shapez 151.99 -> 151.80; but etcher 36.52 -> 38.48, VS Code's `node_modules.asar`
-  9.41 -> 10.27, Dropbox 33.06 -> 33.77, Signal 32.08 -> 32.67, Teams 4.81 -> 5.08.
+  at once: 714.42 -> 697.11 MB (-2.4%), 23.3 -> 107 s (726.59 MB before aqr-zip's kept bodies
+  as slices of their own, `share_slices` for a file alone and GIF files not taken as
+  compressed; 715.68 MB and 26.0 s with them, before aqr-gif, whose model takes most of the
+  time). Each alone (`cache/per-file-0129d9f.txt`, 719.78 -> 706.49 MB): Evernote 57.08 ->
+  51.19 MB, shapez 151.99 -> 147.03, Oculus 215.09 -> 212.73 (its two APKs share 8.8 MB of
+  deflated entries), Dropbox 33.06 -> 31.59, The Devil's Calculator 41.75 -> 40.58 (the GIF
+  files by aqr-gif, in all but Oculus); but etcher 36.52 -> 38.48, VS Code's
+  `node_modules.asar` 9.41 -> 10.27, Signal 32.08 -> 32.67.
 - What loses is the contents of many small files by kind (aqr-compress's, as aqr-bundle's): a
   file alone, the text of its files is a stream apart from the rest, coded by aqr-wrt in pieces
   without the batch's dictionary, where the archive scanned is one stream compressed solid.
