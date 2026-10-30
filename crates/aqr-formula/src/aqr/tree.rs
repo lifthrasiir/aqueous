@@ -1,6 +1,7 @@
 //! The entries of an archive of several files (spec, "Archive model" and "Metadata block"): a
-//! [`Tree`] of directories, files and links, with the optional metadata that this crate knows
-//! of each ([`Extra`]: the modification time and the Unix permissions), and its metadata block.
+//! [`Tree`] of directories, files, links and special nodes, with the optional metadata that this
+//! crate knows of each ([`Extra`]: timestamps, ownership, permissions, flags, extended
+//! attributes and forks), and its metadata block.
 //!
 //! The optional metadata is CBOR: this module writes the little it needs of it, and reads any
 //! well-formed CBOR, taking what it knows and leaving the rest.
@@ -36,24 +37,57 @@ pub enum EntryNode {
     File(usize),
     /// A symbolic link, its target encoded as a name is.
     Link(Vec<u8>),
-    /// A special entry of another kind (`special_kind`: a FIFO, a device or one undefined),
-    /// as an archive decoded holds it; not encoded.
+    Fifo,
+    /// A character device (or a block one, where `block`) of its device number.
+    Device {
+        block: bool,
+        major: u64,
+        minor: u64,
+    },
+    /// A special entry of a kind undefined (`special_kind` beyond 4), as an archive decoded
+    /// holds it; not encoded.
     Special(u64),
 }
 
 /// What an entry has of the optional metadata, as far as this crate knows it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Extra {
+    pub crtime: Option<Time>,
+    pub ctime: Option<Time>,
     pub mtime: Option<Time>,
+    pub atime: Option<Time>,
+    pub arctime: Option<Time>,
+    /// `link-group` (of files alone).
+    pub link_group: Option<i128>,
+    /// `xattrs`: names (as `aqr-text`'s bytes) and values.
+    pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `forks`: names (as `aqr-text`'s bytes) and contents (by index, as [`EntryNode::File`]).
+    pub forks: Vec<(Vec<u8>, usize)>,
+    /// `win-attrs` ([`WIN_ATTRS_ALLOWED`]).
+    pub win_attrs: Option<u32>,
     /// `unix-mode`: the permission bits (0o7777).
     pub mode: Option<u32>,
+    pub uid: Option<u64>,
+    pub gid: Option<u64>,
+    /// `unix-uname` and `unix-gname` (as `aqr-text`'s bytes).
+    pub uname: Option<Vec<u8>>,
+    pub gname: Option<Vec<u8>>,
+    /// `mac-flags` ([`MAC_FLAGS_ALLOWED`]).
+    pub mac_flags: Option<u32>,
 }
 
 impl Extra {
     pub fn is_empty(&self) -> bool {
-        self.mtime.is_none() && self.mode.is_none()
+        *self == Extra::default()
     }
 }
+
+/// The bits `win-attrs` may have: read-only, hidden, system, archive, temporary and not
+/// content-indexed.
+pub const WIN_ATTRS_ALLOWED: u32 = 0x1 | 0x2 | 0x4 | 0x20 | 0x100 | 0x2000;
+/// The bits `mac-flags` may have: `UF_NODUMP`, `UF_IMMUTABLE`, `UF_APPEND`, `UF_OPAQUE`,
+/// `UF_HIDDEN`, `SF_ARCHIVED`, `SF_IMMUTABLE`, `SF_APPEND` and `SF_NOUNLINK`.
+pub const MAC_FLAGS_ALLOWED: u32 = 0xf | 0x8000 | 0x1_0000 | 0x2_0000 | 0x4_0000 | 0x10_0000;
 
 /// A point in time, as seconds and nanoseconds since 1970-01-01T00:00:00Z.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -136,7 +170,7 @@ pub(crate) fn numbers(t: &Tree) -> Vec<usize> {
             let p = match e.node {
                 EntryNode::Dir => 0,
                 EntryNode::File(_) => 1,
-                EntryNode::Link(_) | EntryNode::Special(_) => 2,
+                _ => 2,
             };
             if p == pass {
                 n += 1;
@@ -172,9 +206,35 @@ pub(crate) fn check(t: &Tree, contents: usize) -> Result<(), String> {
             EntryNode::Special(_) => return Err(format!("entry #{i} of a special kind")),
             _ => {}
         }
-        if e.extra.mode.is_some_and(|m| m > 0o7777) {
-            return Err(format!("entry #{i} of a mode beyond its permissions"));
+        if e.extra.link_group.is_some() && !matches!(e.node, EntryNode::File(_)) {
+            return Err(format!("entry #{i} in a link group but not a file"));
         }
+        check_extra(&e.extra, contents).map_err(|m| format!("entry #{i} of {m}"))?;
+    }
+    check_extra(&t.root, contents).map_err(|m| format!("the root of {m}"))
+}
+
+fn check_extra(x: &Extra, contents: usize) -> Result<(), &'static str> {
+    if x.mode.is_some_and(|m| m > 0o7777) {
+        return Err("a mode beyond its permissions");
+    }
+    if x.link_group.is_some_and(|g| !(-(1 << 64)..1 << 64).contains(&g)) {
+        return Err("a link group beyond the integers of CBOR");
+    }
+    if x.win_attrs.is_some_and(|a| a & !WIN_ATTRS_ALLOWED != 0)
+        || x.mac_flags.is_some_and(|f| f & !MAC_FLAGS_ALLOWED != 0)
+    {
+        return Err("attributes or flags not allowed");
+    }
+    fn names<'a>(mut n: impl Iterator<Item = &'a Vec<u8>>) -> bool {
+        let mut seen = std::collections::HashSet::new();
+        n.all(|n| !n.is_empty() && seen.insert(n))
+    }
+    if !names(x.xattrs.iter().map(|a| &a.0)) || !names(x.forks.iter().map(|f| &f.0)) {
+        return Err("an empty or repeated name of an attribute or a fork");
+    }
+    if x.forks.iter().any(|f| f.1 >= contents) {
+        return Err("a fork of no content");
     }
     Ok(())
 }
@@ -190,16 +250,20 @@ pub(crate) struct FileParam {
 }
 
 /// The internal structure of the metadata block at `at` (in the archive), of a segment of the
-/// module, resource and dictionary blocks at `modules`, `resources` and `dictionaries`; the
-/// files' parameters by their entries' indices (`None` for the other entries).
+/// module, resource and dictionary blocks at `modules`, `resources` and `dictionaries`; where
+/// each content is (by [`EntryNode::File`]).
 pub(crate) fn metadata(
     t: &Tree,
     at: usize,
     modules: &[usize],
     resources: &[usize],
     dictionaries: &[usize],
-    files: &[Option<FileParam>],
+    contents: &[FileParam],
 ) -> Vec<u8> {
+    let param = |i: usize| match t.entries[i].node {
+        EntryNode::File(c) => contents[c],
+        _ => unreachable!("a file's parameters"),
+    };
     let number = numbers(t);
     let n = t.entries.len();
     // by number - 1, the entries' indices
@@ -222,16 +286,25 @@ pub(crate) fn metadata(
         entries.push(0);
         match &e.node {
             EntryNode::Dir => {}
-            EntryNode::File(_) => varint::put(&mut entries, files[i].expect("a file's parameters").size),
+            EntryNode::File(_) => varint::put(&mut entries, param(i).size),
             EntryNode::Link(target) => {
                 varint::put(&mut entries, 1);
                 entries.extend_from_slice(target);
                 entries.push(0);
             }
+            EntryNode::Fifo => varint::put(&mut entries, 2),
+            &EntryNode::Device { block, major, minor } => {
+                varint::put(&mut entries, 3 + block as u64);
+                varint::put(&mut entries, major);
+                varint::put(&mut entries, minor);
+            }
             EntryNode::Special(_) => unreachable!("checked"),
         }
     }
-    let opt = optional(t, &order);
+    let opt = optional(t, &order, &|c| {
+        let p = contents[c];
+        [(at - p.leaf) as u64, p.output, p.size]
+    });
 
     let mut m = Vec::new();
     varint::put(&mut m, prev);
@@ -246,7 +319,7 @@ pub(crate) fn metadata(
         put_u(&mut m, dirs as u64, t.entries[i].parent.map_or(0, |p| number[p]) as u64);
     }
     for &i in &order[dirs..dirs + nfiles] {
-        let p = files[i].expect("a file's parameters");
+        let p = param(i);
         let offset = (at - p.leaf) as u64;
         // (1-based, zero for none: zero-sized where the segment has no dictionary)
         put_u(&mut m, dictionaries.len() as u64, p.dictionary.map_or(0, |d| d as u64 + 1));
@@ -280,9 +353,10 @@ fn put_u(out: &mut Vec<u8>, n: u64, v: u64) {
     out.extend_from_slice(&v.to_le_bytes()[..width(n)]);
 }
 
-/// The optional metadata of `t`, its entries in `order`: `entry-extras` where any entry has an
-/// extra, else nothing (an empty map).
-fn optional(t: &Tree, order: &[usize]) -> Vec<u8> {
+/// The optional metadata of `t`, its entries in `order`, its forks' contents where `fork_at`
+/// tells (`aqr-fork`: offset, output and size): `entry-extras` where any entry has an extra,
+/// else nothing (an empty map).
+fn optional(t: &Tree, order: &[usize], fork_at: &dyn Fn(usize) -> [u64; 3]) -> Vec<u8> {
     let extras: Vec<&Extra> = std::iter::once(&t.root).chain(order.iter().map(|&i| &t.entries[i].extra)).collect();
     let Some(last) = extras.iter().rposition(|e| !e.is_empty()) else { return Vec::new() };
     let mut c = Vec::new();
@@ -294,29 +368,113 @@ fn optional(t: &Tree, order: &[usize]) -> Vec<u8> {
             c.push(NULL);
             continue;
         }
-        head(&mut c, 5, e.mtime.is_some() as u64 + e.mode.is_some() as u64);
-        if let Some(t) = e.mtime {
-            int(&mut c, MTIME);
-            match t.nanos {
-                0 => int(&mut c, t.secs as i128),
-                n => {
-                    head(&mut c, 6, TAG_NS);
-                    int(&mut c, t.secs as i128 * 1_000_000_000 + n as i128);
-                }
-            }
-        }
-        if let Some(m) = e.mode {
-            int(&mut c, UNIX_MODE);
-            int(&mut c, m as i128);
-        }
+        extra(&mut c, e, fork_at);
     }
     c
 }
 
+/// An `aqr-entry-extra` of `e`.
+fn extra(out: &mut Vec<u8>, e: &Extra, fork_at: &dyn Fn(usize) -> [u64; 3]) {
+    // (the members, counted as they are written)
+    let mut m = Vec::new();
+    let mut n = 0;
+    let mut key = |m: &mut Vec<u8>, k: i128| {
+        n += 1;
+        int(m, k);
+    };
+    for (k, t) in [(CRTIME, e.crtime), (CTIME, e.ctime), (MTIME, e.mtime), (ATIME, e.atime), (ARCTIME, e.arctime)] {
+        if let Some(t) = t {
+            key(&mut m, k);
+            time_of(&mut m, t);
+        }
+    }
+    if let Some(g) = e.link_group {
+        key(&mut m, LINK_GROUP);
+        int(&mut m, g);
+    }
+    if !e.xattrs.is_empty() {
+        key(&mut m, XATTRS);
+        head(&mut m, 5, e.xattrs.len() as u64);
+        for (name, value) in &e.xattrs {
+            text(&mut m, name);
+            head(&mut m, 2, value.len() as u64);
+            m.extend_from_slice(value);
+        }
+    }
+    if !e.forks.is_empty() {
+        key(&mut m, FORKS);
+        head(&mut m, 5, e.forks.len() as u64);
+        for (name, c) in &e.forks {
+            text(&mut m, name);
+            head(&mut m, 4, 3);
+            fork_at(*c).into_iter().for_each(|v| head(&mut m, 0, v));
+        }
+    }
+    let uints = [(WIN_ATTRS, e.win_attrs.map(u64::from)), (UNIX_MODE, e.mode.map(u64::from)), (UNIX_UID, e.uid)];
+    for (k, v) in uints.into_iter().chain([(UNIX_GID, e.gid)]) {
+        if let Some(v) = v {
+            key(&mut m, k);
+            head(&mut m, 0, v);
+        }
+    }
+    for (k, name) in [(UNIX_UNAME, &e.uname), (UNIX_GNAME, &e.gname)] {
+        if let Some(name) = name {
+            key(&mut m, k);
+            text(&mut m, name);
+        }
+    }
+    if let Some(f) = e.mac_flags {
+        key(&mut m, MAC_FLAGS);
+        head(&mut m, 0, f as u64);
+    }
+    head(out, 5, n);
+    out.extend_from_slice(&m);
+}
+
+/// An `aqr-time` of `t`, at the precision of nanoseconds (that of the file systems whose times
+/// this crate is given); in seconds where those do not fit an integer of CBOR.
+fn time_of(out: &mut Vec<u8>, t: Time) {
+    let ns = t.secs as i128 * 1_000_000_000 + t.nanos as i128;
+    if (-(1i128 << 64)..1i128 << 64).contains(&ns) {
+        head(out, 6, TAG_NS);
+        int(out, ns);
+    } else {
+        int(out, t.secs as i128);
+    }
+}
+
+/// An `aqr-text` of `b`: a text string where it is UTF-8, WTF-8 (tagged) where it is that, and
+/// a byte string otherwise.
+fn text(out: &mut Vec<u8>, b: &[u8]) {
+    if std::str::from_utf8(b).is_ok() {
+        head(out, 3, b.len() as u64);
+    } else {
+        if wtf8(b) {
+            head(out, 6, TAG_WTF8);
+        }
+        head(out, 2, b.len() as u64);
+    }
+    out.extend_from_slice(b);
+}
+
 const ENTRY_EXTRAS: i128 = -2;
+const CRTIME: i128 = -1;
+const CTIME: i128 = -2;
 const MTIME: i128 = -3;
+const ATIME: i128 = -4;
+const ARCTIME: i128 = -5;
+const LINK_GROUP: i128 = -7;
+const XATTRS: i128 = -10;
+const FORKS: i128 = -50;
+const WIN_ATTRS: i128 = -61;
 const UNIX_MODE: i128 = -70;
+const UNIX_UID: i128 = -71;
+const UNIX_GID: i128 = -72;
+const UNIX_UNAME: i128 = -73;
+const UNIX_GNAME: i128 = -74;
+const MAC_FLAGS: i128 = -80;
 const NULL: u8 = 0xf6;
+const TAG_WTF8: u64 = 273;
 /// The tags of `$aqr-instant` and `#6.100`, by their scale in nanoseconds.
 const TAG_NS: u64 = 126;
 const TAG_SCALES: [(u64, i128); 7] = [
@@ -359,14 +517,14 @@ fn int(out: &mut Vec<u8>, v: i128) {
 #[derive(Debug, Clone, PartialEq)]
 enum Cbor {
     Int(i128),
-    Bytes,
-    Text,
+    Bytes(Vec<u8>),
+    Text(Vec<u8>),
     Array(Vec<Cbor>),
     Map(Vec<(Cbor, Cbor)>),
     Tag(u64, Box<Cbor>),
-    /// Simple values (null among them) and floats.
+    /// Simple values (null among them), and floats by their bits (as keys are told apart).
     Simple(u8),
-    Float,
+    Float(u64),
 }
 
 /// Maps and arrays nested deeper than this are not read (a resource failure).
@@ -400,23 +558,28 @@ fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
         (1, Some(v)) => Cbor::Int(-1 - v as i128),
         (2 | 3, Some(n)) => {
             let Some(n) = len(n, *at) else { return bad() };
-            if major == 3 && std::str::from_utf8(&d[*at..*at + n]).is_err() {
+            let b = d[*at..*at + n].to_vec();
+            if major == 3 && std::str::from_utf8(&b).is_err() {
                 return bad();
             }
             *at += n;
-            if major == 2 { Cbor::Bytes } else { Cbor::Text }
+            if major == 2 { Cbor::Bytes(b) } else { Cbor::Text(b) }
         }
         // chunks of the same major type, definite each, up to a break
         (2 | 3, None) => {
+            let mut b = Vec::new();
             while d.get(*at) != Some(&0xff) {
                 let Some(&c) = d.get(*at) else { return bad() };
                 if c >> 5 != major || c & 0x1f == 31 {
                     return bad();
                 }
-                item(d, at, depth + 1)?;
+                match item(d, at, depth + 1)? {
+                    Cbor::Bytes(c) | Cbor::Text(c) => b.extend_from_slice(&c),
+                    _ => unreachable!("a chunk of its major type"),
+                }
             }
             *at += 1;
-            if major == 2 { Cbor::Bytes } else { Cbor::Text }
+            if major == 2 { Cbor::Bytes(b) } else { Cbor::Text(b) }
         }
         (4 | 5, arg) => {
             let n = match arg {
@@ -457,19 +620,26 @@ fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
             0..24 => Cbor::Simple(v as u8),
             // (two-byte simple values below 32 are not well-formed)
             24 if v >= 32 => Cbor::Simple(v as u8),
-            25..28 => Cbor::Float,
+            25..28 => Cbor::Float(v),
             _ => return bad(),
         },
         _ => return bad(),
     })
 }
 
+/// A fork as `forks` refers to it: the relative offset of its leaf block, its output and its
+/// size.
+pub(crate) type ForkRef = (u64, u64, u64);
+
 /// The extras of the entries (from the root, by number) in optional metadata `d`, of `n`
-/// entries besides the root.
-pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<Vec<Extra>> {
+/// entries besides the root; their forks apart, as they refer to them (their extras' `forks`
+/// left empty).
+#[allow(clippy::type_complexity)]
+pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8>, ForkRef)>>)> {
     let mut out = vec![Extra::default(); n + 1];
+    let mut forks = vec![Vec::new(); n + 1];
     if d.is_empty() {
-        return Ok(out);
+        return Ok((out, forks));
     }
     let mut at = 0;
     let top = item(d, &mut at, 0)?;
@@ -477,28 +647,102 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<Vec<Extra>> {
         return invalid("bytes after the optional metadata");
     }
     let Cbor::Map(top) = top else { return invalid("optional metadata not a map") };
-    let Some((_, list)) = top.iter().find(|(k, _)| *k == Cbor::Int(ENTRY_EXTRAS)) else { return Ok(out) };
+    let Some((_, list)) = top.iter().find(|(k, _)| *k == Cbor::Int(ENTRY_EXTRAS)) else { return Ok((out, forks)) };
     let Cbor::Array(list) = list else { return invalid("entry-extras not an array") };
     if list.len() > n + 1 {
         return invalid("more entry-extras than entries");
     }
-    for (e, x) in list.iter().zip(&mut out) {
+    for ((e, x), f) in list.iter().zip(&mut out).zip(&mut forks) {
         match e {
             Cbor::Simple(22) => {}
             Cbor::Map(m) => {
                 for (k, v) in m {
-                    match (k, v) {
-                        (Cbor::Int(MTIME), t) => x.mtime = time(t),
-                        (Cbor::Int(UNIX_MODE), &Cbor::Int(m)) if (0..=0o7777).contains(&m) => x.mode = Some(m as u32),
-                        (Cbor::Int(UNIX_MODE), _) => return invalid("a bad unix-mode"),
-                        _ => {}
+                    if let &Cbor::Int(k) = k {
+                        member(x, f, k, v)?;
                     }
                 }
             }
             _ => return invalid("an entry extra not a map"),
         }
     }
-    Ok(out)
+    Ok((out, forks))
+}
+
+/// Takes member `k` of value `v` of an entry extra into `x` (its forks into `forks`), where it
+/// is one this crate knows.
+fn member(x: &mut Extra, forks: &mut Vec<(Vec<u8>, ForkRef)>, k: i128, v: &Cbor) -> Decoded<()> {
+    let uint = |max: u64| match v {
+        &Cbor::Int(v) if (0..=max as i128).contains(&v) => Ok(v as u64),
+        _ => invalid("a bad unsigned integer in an entry extra"),
+    };
+    // (`aqr-text`s of names, not empty)
+    let name = |c: &Cbor| -> Decoded<Vec<u8>> {
+        match aqr_text(c)? {
+            n if n.is_empty() => invalid("an empty name in an entry extra"),
+            n => Ok(n),
+        }
+    };
+    match k {
+        CRTIME => x.crtime = time(v),
+        CTIME => x.ctime = time(v),
+        MTIME => x.mtime = time(v),
+        ATIME => x.atime = time(v),
+        ARCTIME => x.arctime = time(v),
+        LINK_GROUP => match v {
+            &Cbor::Int(g) => x.link_group = Some(g),
+            _ => return invalid("a bad link-group"),
+        },
+        XATTRS => {
+            let Cbor::Map(m) = v else { return invalid("xattrs not a map") };
+            for (k, v) in m {
+                let Cbor::Bytes(v) = v else { return invalid("an extended attribute not bytes") };
+                x.xattrs.push((name(k)?, v.clone()));
+            }
+        }
+        FORKS => {
+            let Cbor::Map(m) = v else { return invalid("forks not a map") };
+            for (k, v) in m {
+                let r = match v {
+                    Cbor::Array(a) => match a[..] {
+                        [Cbor::Int(o), Cbor::Int(i), Cbor::Int(s)] if o >= 0 && i >= 0 && s >= 0 => {
+                            Some((o as u64, i as u64, s as u64))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let Some(r) = r else { return invalid("a bad fork") };
+                forks.push((name(k)?, r));
+            }
+        }
+        WIN_ATTRS => match uint(u32::MAX as u64)? as u32 {
+            a if a & !WIN_ATTRS_ALLOWED == 0 => x.win_attrs = Some(a),
+            _ => return invalid("win-attrs of bits not allowed"),
+        },
+        UNIX_MODE => x.mode = Some(uint(0o7777)? as u32),
+        UNIX_UID => x.uid = Some(uint(u64::MAX)?),
+        UNIX_GID => x.gid = Some(uint(u64::MAX)?),
+        UNIX_UNAME => x.uname = Some(aqr_text(v)?),
+        UNIX_GNAME => x.gname = Some(aqr_text(v)?),
+        MAC_FLAGS => match uint(u32::MAX as u64)? as u32 {
+            f if f & !MAC_FLAGS_ALLOWED == 0 => x.mac_flags = Some(f),
+            _ => return invalid("mac-flags of bits not allowed"),
+        },
+        _ => {}
+    }
+    Ok(())
+}
+
+/// The bytes of an `aqr-text`.
+fn aqr_text(c: &Cbor) -> Decoded<Vec<u8>> {
+    match c {
+        Cbor::Text(b) | Cbor::Bytes(b) => Ok(b.clone()),
+        Cbor::Tag(TAG_WTF8, b) => match &**b {
+            Cbor::Bytes(b) if wtf8(b) && std::str::from_utf8(b).is_err() => Ok(b.clone()),
+            _ => invalid("a bad WTF-8 text"),
+        },
+        _ => invalid("a bad text in an entry extra"),
+    }
 }
 
 /// The UTC time of an `aqr-time`, where it is a base time this crate reads (else `None`: a
@@ -526,7 +770,9 @@ pub(crate) struct Metadata {
     /// Of each entry from 1: its parent's number, its name, and what it is (for a file, the
     /// relative offset of its leaf block, its output, its size and its dictionary).
     pub entries: Vec<(usize, Vec<u8>, Read)>,
+    /// From the root, by number: the extras, and the forks as they refer to them.
     pub extras: Vec<Extra>,
+    pub forks: Vec<Vec<(Vec<u8>, ForkRef)>>,
 }
 
 pub(crate) enum Read {
@@ -539,7 +785,13 @@ pub(crate) enum Read {
         dictionary: u64,
     },
     Link(Vec<u8>),
-    /// A special entry this crate does not take, by its kind.
+    Fifo,
+    Device {
+        block: bool,
+        major: u64,
+        minor: u64,
+    },
+    /// A special entry this crate does not take (a tombstone or one undefined), by its kind.
     Special(u64),
 }
 
@@ -631,12 +883,12 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
                     q += t + 1;
                     Read::Link(target)
                 }
-                kind @ (0 | 2..=4) => {
-                    if kind >= 3 {
-                        super::leb(e, &mut q)?;
-                        super::leb(e, &mut q)?;
-                    }
-                    Read::Special(kind)
+                0 => Read::Special(0),
+                2 => Read::Fifo,
+                kind @ 3..=4 => {
+                    let major = super::leb(e, &mut q)?;
+                    let minor = super::leb(e, &mut q)?;
+                    Read::Device { block: kind == 4, major, minor }
                 }
                 kind => {
                     q = e.len();
@@ -653,13 +905,15 @@ pub(crate) fn read(d: &[u8]) -> Decoded<Metadata> {
     if p != entries.len() {
         return invalid("bytes after the entries");
     }
+    let (extras, forks) = extras(opt, n)?;
     Ok(Metadata {
         prev,
         modules: module_offsets,
         resources: resource_offsets,
         dictionaries: dictionary_offsets,
         entries: out,
-        extras: extras(opt, n)?,
+        extras,
+        forks,
     })
 }
 
@@ -688,24 +942,37 @@ mod tests {
     #[test]
     fn optional_metadata() {
         let mut t = Tree::default();
-        let x = Extra { mtime: Some(Time { secs: -5, nanos: 7 }), mode: Some(0o755) };
-        for (i, extra) in [Extra::default(), x, Extra { mtime: Some(Time { secs: 1 << 40, nanos: 0 }), mode: None }]
-            .into_iter()
-            .enumerate()
-        {
+        let x = Extra { mtime: Some(Time { secs: -5, nanos: 7 }), mode: Some(0o755), ..Extra::default() };
+        let y = Extra { mtime: Some(Time { secs: 1 << 40, nanos: 0 }), forks: vec![(b"f".to_vec(), 2)], ..x.clone() };
+        for (i, extra) in [Extra::default(), x, y].into_iter().enumerate() {
             let node = EntryNode::File(i);
             t.entries.push(Entry { parent: None, name: vec![b'a' + i as u8], node, extra });
         }
         let order: Vec<usize> = (0..3).collect();
-        let c = optional(&t, &order);
-        let got = extras(&c, 3).unwrap();
-        assert_eq!(got[1..], [t.entries[0].extra, t.entries[1].extra, t.entries[2].extra]);
-        assert_eq!(optional(&Tree { entries: t.entries[..1].to_vec(), ..Tree::default() }, &[0]), b"");
+        let c = optional(&t, &order, &|c| [c as u64 * 2, 0, 9]);
+        let (got, forks) = extras(&c, 3).unwrap();
+        assert_eq!(got[1..3], [t.entries[0].extra.clone(), t.entries[1].extra.clone()]);
+        assert_eq!(got[3], Extra { forks: Vec::new(), ..t.entries[2].extra.clone() });
+        assert_eq!(forks[3], [(b"f".to_vec(), (4, 0, 9))]);
+        // (times always of nanoseconds)
+        assert!(c.windows(2).any(|w| w == [0xd8, 126]));
+        let none = Tree { entries: t.entries[..1].to_vec(), ..Tree::default() };
+        assert_eq!(optional(&none, &[0], &|_| unreachable!()), b"");
         // other keys, tags and indefinite lengths read
         let other = [0xbf, 0x21, 0x9f, 0xa1, 0x22, 0xd8, 0x79, 0x0a, 0xf6, 0xff, 0x01, 0x5f, 0x41, 0x00, 0xff, 0xff];
-        let got = extras(&other, 2).unwrap();
+        let (got, _) = extras(&other, 2).unwrap();
         assert_eq!(got[0].mtime, Some(Time { secs: 20, nanos: 0 }));
+        // texts of each kind, and bad ones
+        let names = [0xa1, 0x21, 0x81, 0xa1, 0x29, 0xa3, 0x61, b'a', 0x40, 0x41, 0xff, 0x40, 0xd9, 0x01, 0x11];
+        let (got, _) = extras(&[&names[..], &[0x43, 0xed, 0xa0, 0x80, 0x40]].concat(), 1).unwrap();
+        let want = [(b"a".to_vec(), vec![]), (b"\xff".to_vec(), vec![]), (b"\xed\xa0\x80".to_vec(), vec![])];
+        assert_eq!(got[0].xattrs, want);
+        assert!(extras(&[&names[..], &[0x41, b'a', 0x40]].concat(), 1).is_err());
+        assert!(extras(&[0xa1, 0x21, 0x81, 0xa1, 0x38, 0x4f, 0x18, 0x20], 1).is_err());
         assert!(extras(&[0xa2, 0x01, 0x00, 0x01, 0x00], 1).is_err());
+        // keys of other contents not duplicates
+        assert!(extras(&[0xa2, 0x61, b'a', 0x00, 0x61, b'b', 0x00], 1).is_ok());
+        assert!(extras(&[0xa2, 0xf9, 0x3c, 0x00, 0x00, 0xf9, 0x40, 0x00, 0x00], 1).is_ok());
         assert!(extras(&[0xa1, 0x21, 0x83, 0xf6, 0xf6, 0xf6], 1).is_err());
     }
 }

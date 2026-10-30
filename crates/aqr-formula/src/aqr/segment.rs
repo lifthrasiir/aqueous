@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use aqr_common::varint;
 
 use super::dict::Candidate;
-use super::tree::{self, EntryNode, FileParam, Tree};
+use super::tree::{self, FileParam, Tree};
 use super::{
     CHECKSUM, Emit, Encoder, FOOTER_MAGIC, HEADER_MAGIC, How, MODULE, STORED, SWAP, always_compressed, block, block_of,
     block_ranges, checksum_of, dictionary_block, dictionary_stand_in, footer, footer_with, formula_block, key_how,
@@ -414,15 +414,14 @@ impl SegmentWriter {
     /// (by [`EntryNode::File`]), and the footer. Fails on a tree the spec does not allow.
     pub fn finish(&self, enc: &Encoder, t: &Tree, contents: &[ContentAt]) -> Result<(Vec<u8>, usize)> {
         tree::check(t, contents.len()).map_err(Error::new)?;
-        let mut files = vec![None; t.entries.len()];
-        for (i, e) in t.entries.iter().enumerate() {
-            if let EntryNode::File(c) = e.node {
-                let c = contents[c];
+        let params: Vec<FileParam> = contents
+            .iter()
+            .map(|c| {
                 let dictionary = self.leaf_dictionary.get(&c.leaf).copied();
-                files[i] = Some(FileParam { leaf: c.leaf, output: c.output as u64, size: c.size, dictionary });
-            }
-        }
-        let meta = tree::metadata(t, self.at, &self.module_at, &self.resource_at, &self.dictionary_at, &files);
+                FileParam { leaf: c.leaf, output: c.output as u64, size: c.size, dictionary }
+            })
+            .collect();
+        let meta = tree::metadata(t, self.at, &self.module_at, &self.resource_at, &self.dictionary_at, &params);
         let mut out = Vec::new();
         match enc.base_level() {
             STORED => {
@@ -598,7 +597,7 @@ mod tests {
     use super::super::{Level, Value, checksum, decode, decode_value, invalid};
     use super::*;
     use crate::{Apply, Kind};
-    use tree::{Entry, Extra, Time};
+    use tree::{Entry, EntryNode, Extra, Time};
 
     fn entry(parent: Option<usize>, name: &str, node: EntryNode) -> Entry {
         Entry { parent, name: name.as_bytes().to_vec(), node, extra: Extra::default() }
@@ -765,7 +764,27 @@ mod tests {
         }
         tree.entries.push(entry(None, "same", EntryNode::File(3)));
         tree.entries.push(entry(Some(1), "link", EntryNode::Link(b"../own".to_vec())));
-        tree.entries[2].extra = Extra { mtime: Some(Time { secs: 1_700_000_000, nanos: 5 }), mode: Some(0o644) };
+        tree.entries.push(entry(None, "fifo", EntryNode::Fifo));
+        tree.entries.push(entry(None, "dev", EntryNode::Device { block: true, major: 1, minor: 1 << 40 }));
+        let t = |secs, nanos| Some(Time { secs, nanos });
+        tree.entries[2].extra = Extra {
+            crtime: t(1_600_000_000, 0),
+            ctime: t(-1, 999_999_999),
+            mtime: t(1_700_000_000, 5),
+            atime: t(1 << 40, 0),
+            arctime: t(0, 1),
+            link_group: Some(-1 << 64),
+            xattrs: vec![(b"com.apple.quarantine".to_vec(), b"0081;".to_vec()), (b"\xff".to_vec(), vec![0; 300])],
+            forks: vec![(b"AFP_Resource".to_vec(), 4), (b"\xed\xa0\x80".to_vec(), 0)],
+            win_attrs: Some(0x2127),
+            mode: Some(0o644),
+            uid: Some(u64::MAX),
+            gid: Some(20),
+            uname: Some(b"\xc1".to_vec()),
+            gname: Some("스태프".into()),
+            mac_flags: Some(0x8000),
+        };
+        tree.entries[11].extra.mode = Some(0o600);
         let seg = Segment { f: &f, leaves: &leaves, tree: &tree, contents: &contents };
         let enc = Encoder::new(Level::Zstd(3));
         let (c, placed) = enc.encode_segment(&seg).unwrap();
@@ -791,11 +810,14 @@ mod tests {
         assert_eq!(t.root, tree.root);
         // in the order of their numbers: directories, files, the link
         let names: Vec<&[u8]> = t.entries.iter().map(|e| &e.name[..]).collect();
-        let want_names: [&[u8]; 10] =
-            [b"d", b"e", b"own", b"solid", b"empty", b"rev", b"cut0", b"cut1", b"same", b"link"];
+        let want_names: [&[u8]; 12] =
+            [b"d", b"e", b"own", b"solid", b"empty", b"rev", b"cut0", b"cut1", b"same", b"link", b"fifo", b"dev"];
         assert_eq!(names, want_names);
         assert_eq!(t.entries[2].extra, tree.entries[2].extra);
         assert_eq!(t.entries[9].node, EntryNode::Link(b"../own".to_vec()));
+        assert_eq!(t.entries[10].node, EntryNode::Fifo);
+        assert_eq!(t.entries[11].node, tree.entries[11].node);
+        assert_eq!(t.entries[11].extra, tree.entries[11].extra);
         assert_eq!(t.entries[9].parent, Some(1));
         let got: Vec<&[u8]> = t
             .entries
@@ -825,6 +847,25 @@ mod tests {
         {
             let mut t = tree.clone();
             t.entries.push(e);
+            assert!(enc.encode_segment(&Segment { tree: &t, ..seg }).is_err());
+        }
+        // extras the spec does not allow
+        let bad: [fn(&mut Extra); 6] = [
+            |x| x.forks.push((b"AFP_Resource".to_vec(), 0)),
+            |x| x.forks.push((Vec::new(), 0)),
+            |x| x.forks[0].1 = 6,
+            |x| x.xattrs.push((b"\xff".to_vec(), Vec::new())),
+            |x| x.mac_flags = Some(0x20),
+            |x| x.win_attrs = Some(0x10),
+        ];
+        for f in bad {
+            let mut t = tree.clone();
+            f(&mut t.entries[2].extra);
+            assert!(enc.encode_segment(&Segment { tree: &t, ..seg }).is_err());
+        }
+        for (i, g) in [(0, 1), (2, 1 << 64)] {
+            let mut t = tree.clone();
+            t.entries[i].extra.link_group = Some(g);
             assert!(enc.encode_segment(&Segment { tree: &t, ..seg }).is_err());
         }
     }

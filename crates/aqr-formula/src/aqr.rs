@@ -33,7 +33,7 @@ mod segment;
 mod tree;
 
 pub use segment::{Batch, ContentAt, Layout, Leaf, Placed, Segment, SegmentWriter};
-pub use tree::{Entry, EntryNode, Extra, Time, Tree, name_bytes, name_from};
+pub use tree::{Entry, EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, Tree, WIN_ATTRS_ALLOWED, name_bytes, name_from};
 
 use std::borrow::Cow;
 use std::cell::{RefCell, RefMut};
@@ -1914,7 +1914,7 @@ impl<M: crate::Modules + Sync> Runner for Natives<'_, M> {
 pub enum Value {
     File(Vec<u8>),
     /// The entries, and the contents of their files (by [`EntryNode::File`]).
-    Tree(Tree, Vec<Vec<u8>>),
+    Tree(Box<Tree>, Vec<Vec<u8>>),
 }
 
 /// The file in archive `c`, an archive without a metadata block, its modules run by `runner`.
@@ -2229,7 +2229,7 @@ impl Archive<'_, '_> {
                     files.lock().unwrap()[c] = d;
                     Ok(())
                 })?;
-                Ok(Value::Tree(t.clone(), files.into_inner().unwrap()))
+                Ok(Value::Tree(Box::new(t.clone()), files.into_inner().unwrap()))
             }
         }
     }
@@ -2275,12 +2275,34 @@ fn tree_of(
     {
         return invalid("module, resource or dictionary offsets not those of the blocks");
     }
-    let mut t = Tree { root: m.extras[0], entries: Vec::new() };
+    let mut refs: Vec<(usize, usize, u64)> = Vec::new();
+    let mut ref_of: HashMap<(usize, usize), usize> = HashMap::new();
+    // the content of output `output` of the leaf block at relative offset `offset`, of `size`
+    // bytes; and the leaf
+    let mut content = |offset: u64, output: u64, size: u64| -> Decoded<(usize, usize)> {
+        let leaf = at
+            .checked_sub(offset as usize)
+            .and_then(|b| blocks.leaf_at.binary_search(&b).ok())
+            .ok_or_else(|| Failure::Invalid("a file or a fork not at a leaf block".into()))?;
+        if output >= outputs[leaf] {
+            return invalid("a file or a fork of an output its leaf block does not have");
+        }
+        let output = output as usize;
+        let c = match ref_of.entry((leaf, output)) {
+            MapEntry::Occupied(c) if refs[*c.get()].2 == size => *c.get(),
+            MapEntry::Occupied(_) => return invalid("files or forks of an output of other sizes"),
+            MapEntry::Vacant(e) => {
+                refs.push((leaf, output, size));
+                *e.insert(refs.len() - 1)
+            }
+        };
+        Ok((c, leaf))
+    };
+    let mut extras = m.extras;
+    let mut t = Tree { root: std::mem::take(&mut extras[0]), entries: Vec::new() };
     // the tree's index of each entry by number, tombstones (of nothing to remove) left out
     let mut index = vec![None; m.entries.len() + 1];
     let mut names = std::collections::HashSet::new();
-    let mut refs: Vec<(usize, usize, u64)> = Vec::new();
-    let mut ref_of: HashMap<(usize, usize), usize> = HashMap::new();
     for (k, (parent, name, read)) in m.entries.into_iter().enumerate() {
         let k = k + 1;
         let parent_index = match parent {
@@ -2293,33 +2315,37 @@ fn tree_of(
         let node = match read {
             tree::Read::Dir => EntryNode::Dir,
             tree::Read::File { offset, output, size, dictionary } => {
-                let leaf = at
-                    .checked_sub(offset as usize)
-                    .and_then(|b| blocks.leaf_at.binary_search(&b).ok())
-                    .ok_or_else(|| Failure::Invalid("a file not at a leaf block".into()))?;
+                let (c, leaf) = content(offset, output, size)?;
                 if blocks.leaf_dictionary[leaf].map_or(0, |d| d as u64 + 1) != dictionary {
                     return invalid("a file's dictionary not that of its leaf block");
                 }
-                if output >= outputs[leaf] {
-                    return invalid("a file of an output its leaf block does not have");
-                }
-                let output = output as usize;
-                let c = match ref_of.entry((leaf, output)) {
-                    MapEntry::Occupied(c) if refs[*c.get()].2 == size => *c.get(),
-                    MapEntry::Occupied(_) => return invalid("files of an output of other sizes"),
-                    MapEntry::Vacant(e) => {
-                        refs.push((leaf, output, size));
-                        *e.insert(refs.len() - 1)
-                    }
-                };
                 EntryNode::File(c)
             }
             tree::Read::Link(target) => EntryNode::Link(target),
-            tree::Read::Special(0) => continue,
+            tree::Read::Fifo => EntryNode::Fifo,
+            tree::Read::Device { block, major, minor } => EntryNode::Device { block, major, minor },
+            tree::Read::Special(0) => {
+                if !extras[k].is_empty() || !m.forks[k].is_empty() {
+                    return invalid("a tombstone of an extra");
+                }
+                continue;
+            }
             tree::Read::Special(kind) => EntryNode::Special(kind),
         };
         index[k] = Some(t.entries.len());
-        t.entries.push(Entry { parent: parent_index, name, node, extra: m.extras[k] });
+        t.entries.push(Entry { parent: parent_index, name, node, extra: std::mem::take(&mut extras[k]) });
+    }
+    // (after the files, so that their contents are numbered as they are)
+    for (k, forks) in m.forks.into_iter().enumerate() {
+        for (name, (offset, output, size)) in forks {
+            let c = content(offset, output, size)?.0;
+            match k {
+                0 => &mut t.root,
+                k => &mut t.entries[index[k].expect("not a tombstone")].extra,
+            }
+            .forks
+            .push((name, c));
+        }
     }
     Ok((t, refs))
 }

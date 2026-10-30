@@ -1,6 +1,6 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
-//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
+//! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
 //! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
@@ -19,6 +19,12 @@
 //!   blocks only), `1` (zstd alone: nothing recompressed) to `9`; `low`, `mid` (the default)
 //!   and `high` are 2, 5 and 8. `zstdN` compresses every stream at zstd level `N`, the
 //!   recompression as at mid. `-N` is `-l N`, its digits all one level (`-10` is not `-1 -0`).
+//! - The metadata of a directory archived is kept ([`meta`]): times, permissions, ownership,
+//!   flags, extended attributes and resource forks, hard links, FIFOs and devices; and applied
+//!   as it is extracted, but what is not commonly kept. `-p` keeps that too: in compressing,
+//!   the status change and backup times; in decompressing, the ownership, the flags only the
+//!   superuser can change, the set-user-ID and set-group-ID bits, FIFOs and devices, and the
+//!   backup times. An archive of a single file has no metadata.
 //! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors; `-v` logs
 //!   each file archived too (below). An archive, or a single file decompressed, is written as
 //!   `OUTPUT.PID.part` and renamed once done: removed where it fails or the process is stopped
@@ -46,8 +52,9 @@ use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::OnceLock;
-use std::time::{Instant, UNIX_EPOCH};
+use std::time::Instant;
 
+mod meta;
 mod stop;
 mod view;
 
@@ -55,10 +62,10 @@ use aqr_compress::mapped::Mapper;
 use aqr_compress::{Options, compress_formula_to, compress_tree_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
-use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, name_bytes, name_from};
+use aqr_formula::aqr::{self, Entry, EntryNode, Failure, Tree, name_bytes, name_from};
 use view::Ticking;
 
-const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
+const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
      [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] INPUT...";
 
 /// The argument (the only one) that this program is run with as a worker of the sandbox.
@@ -73,6 +80,8 @@ struct Args {
     sandbox: bool,
     output: Option<PathBuf>,
     force: bool,
+    /// What is not commonly kept of the metadata kept too ([`meta`]).
+    preserve: bool,
     quiet: bool,
     /// Logging each file archived.
     verbose: bool,
@@ -122,6 +131,7 @@ fn parse() -> Result<Args, String> {
         sandbox: true,
         output: None,
         force: false,
+        preserve: false,
         quiet: false,
         verbose: false,
         opt: Options { threads: 0, ..Options::default() },
@@ -146,6 +156,7 @@ fn parse() -> Result<Args, String> {
             "--no-sandbox" => a.sandbox = false,
             "-o" => a.output = Some(value("-o")?.into()),
             "-f" | "--force" => a.force = true,
+            "-p" | "--preserve" => a.preserve = true,
             "-q" | "--quiet" => a.quiet = true,
             "-v" | "--verbose" => a.verbose = true,
             "-T" => a.opt.threads = value("-T")?.parse().map_err(|_| "-T takes a number")?,
@@ -241,8 +252,37 @@ struct Gathered {
     /// kind) and its size as gathered.
     contents: Vec<(PathBuf, Vec<u8>, u64)>,
     skipped: Vec<String>,
+    /// What could not be read of the metadata.
+    warnings: Vec<String>,
     /// What the files are read by, mapped into memory.
     mapper: Mapper,
+    reader: meta::Reader,
+    /// By inode (device and number) of more links than one, the files (entries) of it.
+    inodes: std::collections::HashMap<(u64, u64), Vec<usize>>,
+}
+
+impl Gathered {
+    fn new(mapper: Mapper, preserve: bool) -> Gathered {
+        Gathered {
+            tree: Tree::default(),
+            contents: Vec::new(),
+            skipped: Vec::new(),
+            warnings: Vec::new(),
+            mapper,
+            reader: meta::Reader::new(preserve),
+            inodes: Default::default(),
+        }
+    }
+
+    /// The link groups of the files of an inode, where there are more than one of it: numbered
+    /// from 0, in the order their inodes were first found.
+    fn link_groups(&mut self) {
+        let mut groups: Vec<&Vec<usize>> = self.inodes.values().filter(|f| f.len() > 1).collect();
+        groups.sort_unstable_by_key(|f| f[0]);
+        for (g, files) in groups.into_iter().enumerate() {
+            files.iter().for_each(|&i| self.tree.entries[i].extra.link_group = Some(g as i128));
+        }
+    }
 }
 
 /// The files of `Gathered`, read as their batch is made.
@@ -302,12 +342,8 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         let d = mapper.read(input).map_err(|e| format!("{}: {e}", input.display()))?;
         let name = os_bytes(input.as_os_str());
         let kind = kind_by_name(&name);
-        let g = Gathered {
-            tree: Tree::default(),
-            contents: vec![(input.clone(), name, d.len() as u64)],
-            skipped: Vec::new(),
-            mapper,
-        };
+        let mut g = Gathered::new(mapper, a.preserve);
+        g.contents.push((input.clone(), name, d.len() as u64));
         let view = view::View::new(&g, bars(), false);
         // (of the kind its name tells, as a file in an archive of many; written as it is made)
         let (n, f) = write_whole(out, a.force, |file| {
@@ -334,12 +370,17 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         return Ok(());
     }
 
-    let mut g = Gathered { tree: Tree::default(), contents: Vec::new(), skipped: Vec::new(), mapper };
+    let mut g = Gathered::new(mapper, a.preserve);
     match inputs {
         // a directory alone: its entries at the root
         [dir] => {
             let m = meta(dir)?;
-            g.tree.root = extra_of(&m);
+            let (x, forks) = g.reader.extra(dir, &m, &mut |w| g.warnings.push(w));
+            g.tree.root = x;
+            for f in forks {
+                g.tree.root.forks.push((f.name, g.contents.len()));
+                g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
+            }
             gather_dir(dir, None, &mut g)?;
         }
         _ => {
@@ -352,10 +393,12 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     if g.tree.entries.is_empty() {
         return Err(format!("nothing to archive in {}", inputs[0].display()));
     }
+    g.link_groups();
     if !a.quiet {
         for s in &g.skipped {
             eprintln!("skipped {s}");
         }
+        g.warnings.iter().for_each(|w| eprintln!("{w}"));
     }
     // (with -v, the log as the files are written)
     let view = view::View::new(&g, bars(), a.verbose);
@@ -421,17 +464,32 @@ fn summary(out: &Path, files: usize, total: usize, len: usize, start: Instant) {
     );
 }
 
-/// Gathers `path` as an entry `name` in `parent` (`None`: the root).
+/// Gathers `path` as an entry `name` in `parent` (`None`: the root). The files of an inode
+/// archived already are of its content (and forks), read once.
 fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) -> Result<(), String> {
     let m = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let name = name_from(&os_bytes(name));
-    let extra = extra_of(&m);
+    let (mut extra, forks) = g.reader.extra(path, &m, &mut |w| g.warnings.push(w));
     let t = m.file_type();
+    let inode = inode_of(&m).filter(|_| t.is_file());
+    let first = inode.and_then(|i| g.inodes.get(&i)).map(|f| f[0]);
+    if let Some(first) = first {
+        extra.forks = g.tree.entries[first].extra.forks.clone();
+    } else {
+        for f in forks {
+            extra.forks.push((f.name, g.contents.len()));
+            g.contents.push((f.path.clone(), os_bytes(f.path.as_os_str()), f.size));
+        }
+    }
     let node = if t.is_dir() {
         EntryNode::Dir
+    } else if let Some(first) = first {
+        g.tree.entries[first].node.clone()
     } else if t.is_file() {
         g.contents.push((path.to_owned(), os_bytes(path.as_os_str()), m.len()));
         EntryNode::File(g.contents.len() - 1)
+    } else if let Some(node) = meta::special(&m) {
+        node
     } else if t.is_symlink() {
         let target = fs::read_link(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let target = name_from(&os_bytes(target.as_os_str()));
@@ -441,9 +499,12 @@ fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) ->
         }
         EntryNode::Link(target)
     } else {
-        g.skipped.push(format!("{} (neither a file, a directory nor a link)", path.display()));
+        g.skipped.push(format!("{} (a socket, or of a kind not known)", path.display()));
         return Ok(());
     };
+    if let Some(i) = inode {
+        g.inodes.entry(i).or_default().push(g.tree.entries.len());
+    }
     g.tree.entries.push(Entry { parent, name, node: node.clone(), extra });
     if node == EntryNode::Dir {
         gather_dir(path, Some(g.tree.entries.len() - 1), g)?;
@@ -465,26 +526,15 @@ fn gather_dir(dir: &Path, parent: Option<usize>, g: &mut Gathered) -> Result<(),
     Ok(())
 }
 
-fn extra_of(m: &fs::Metadata) -> Extra {
-    let mtime = m.modified().ok().map(|t| match t.duration_since(UNIX_EPOCH) {
-        Ok(d) => Time { secs: d.as_secs() as i64, nanos: d.subsec_nanos() },
-        Err(e) => {
-            let d = e.duration();
-            let (s, n) = (d.as_secs() as i64, d.subsec_nanos());
-            if n == 0 { Time { secs: -s, nanos: 0 } } else { Time { secs: -s - 1, nanos: 1_000_000_000 - n } }
-        }
-    });
-    Extra { mtime, mode: mode_of(m) }
-}
-
+/// The inode (device and number) of `m`, where it has more links than one.
 #[cfg(unix)]
-fn mode_of(m: &fs::Metadata) -> Option<u32> {
-    use std::os::unix::fs::PermissionsExt;
-    Some(m.permissions().mode() & 0o7777)
+fn inode_of(m: &fs::Metadata) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    (m.nlink() > 1).then(|| (m.dev(), m.ino()))
 }
 
 #[cfg(not(unix))]
-fn mode_of(_: &fs::Metadata) -> Option<u32> {
+fn inode_of(_: &fs::Metadata) -> Option<(u64, u64)> {
     None
 }
 
@@ -508,11 +558,6 @@ fn os_from(b: &[u8]) -> OsString {
 #[cfg(not(unix))]
 fn os_from(b: &[u8]) -> OsString {
     String::from_utf8_lossy(b).into_owned().into()
-}
-
-/// Writes `d` to a new file `path` (or over one, where `force`).
-fn write_new(path: &Path, d: &[u8], force: bool) -> Result<(), String> {
-    create(path, force)?.write_all(d).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Writes a new file `path` (or one in place of it, where `force`) by `write`: under a name of
@@ -661,7 +706,8 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
             }
         }
         Some(t) => {
-            let (n, total) = ticking(a, &*view, || extract(t, &archive, a.opt.threads, out, a.force, a.quiet))?;
+            let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
+            let (n, total) = ticking(a, &*view, || extract(t, &archive, a.opt.threads, out, a.force, &ap))?;
             if !a.quiet {
                 summary_d(input, Some(out), n, total, start);
             }
@@ -739,27 +785,32 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
     );
 }
 
-/// Extracts tree `t` of `archive` into directory `out`: the directories first, then the files
-/// as their contents are decoded (on up to `threads` threads), then the links (but those
-/// reaching out of `out`), then the times of the directories. Returns the number of files and
-/// their bytes.
+/// Extracts tree `t` of `archive` into directory `out`: the directories, the files (empty, or
+/// hard links to the first of their link group), FIFOs and devices first; then the contents
+/// of the files and their forks as they are decoded (on up to `threads` threads); then the
+/// links (but those reaching out of `out`); then the metadata of all but the directories, and
+/// then that of the directories, the deepest first. Returns the number of files and their
+/// bytes.
 fn extract(
     t: &Tree,
     archive: &aqr::Archive,
     threads: usize,
     out: &Path,
     force: bool,
-    quiet: bool,
+    ap: &meta::Applier,
 ) -> Result<(usize, u64), String> {
     let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     match fs::create_dir(out) {
         Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && out.is_dir()) => return Err(err(out, e)),
         _ => {}
     }
+    let linked = hard_links(t);
     let mut paths: Vec<PathBuf> = Vec::with_capacity(t.entries.len());
+    // by entry, whether it was made (and so is to get its metadata)
+    let mut made = vec![true; t.entries.len()];
     let mut links = Vec::new();
-    // by content, the files of it
-    let mut files: Vec<Vec<usize>> = vec![Vec::new(); archive.contents_len()];
+    // by content, the files written of it (but hard links), and the number of files of it
+    let mut files: Vec<(Vec<usize>, usize)> = vec![(Vec::new(), 0); archive.contents_len()];
     for (i, e) in t.entries.iter().enumerate() {
         let (name, _) = name_bytes(&e.name);
         let parent = e.parent.map_or(out, |p| &paths[p]);
@@ -769,26 +820,75 @@ fn extract(
                 Err(x) if !(force && path.is_dir() && !path.is_symlink()) => return Err(err(&path, x)),
                 _ => {}
             },
-            EntryNode::File(c) => files[*c].push(i),
-            EntryNode::Link(_) => links.push(i),
-            EntryNode::Special(kind) => {
-                if !quiet {
-                    eprintln!("{}: a special entry (kind {kind}), not created", path.display());
+            EntryNode::File(c) => {
+                files[*c].1 += 1;
+                match linked[i] {
+                    Some(j) => {
+                        if force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
+                            fs::remove_file(&path).map_err(|x| err(&path, x))?;
+                        }
+                        fs::hard_link(&paths[j], &path).map_err(|x| err(&path, x))?;
+                    }
+                    None => {
+                        create(&path, force)?;
+                        files[*c].0.push(i);
+                    }
                 }
+            }
+            EntryNode::Link(_) => {
+                links.push(i);
+                made[i] = false;
+            }
+            EntryNode::Fifo | EntryNode::Device { .. } => {
+                if force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
+                    fs::remove_file(&path).map_err(|x| err(&path, x))?;
+                }
+                made[i] = ap.special(&path, &e.node)?;
+            }
+            EntryNode::Special(kind) => {
+                ap.tell(&path, &format!("a special entry (kind {kind}), not created"));
+                made[i] = false;
             }
         }
         paths.push(path);
     }
+    // by content, the forks of it: the entry (`None`: the root) and the fork's index
+    let mut forks: Vec<Vec<(Option<usize>, usize)>> = vec![Vec::new(); archive.contents_len()];
+    let extras = std::iter::once((None, &t.root)).chain(t.entries.iter().enumerate().map(|(i, e)| (Some(i), &e.extra)));
+    for (i, x) in extras {
+        if i.is_none_or(|i| linked[i].is_none()) {
+            x.forks.iter().enumerate().for_each(|(k, f)| forks[f.1].push((i, k)));
+        }
+    }
+    let kind_of = |i: Option<usize>| match i.map(|i| &t.entries[i].node) {
+        None | Some(EntryNode::Dir) => meta::Kind::Dir,
+        Some(EntryNode::File(_)) => meta::Kind::File,
+        Some(EntryNode::Link(_)) => meta::Kind::Link,
+        Some(_) => meta::Kind::Special,
+    };
+    let path_of = |i: Option<usize>| i.map_or(out, |i| &paths[i]);
+    // (the forks of links written once the links are)
+    let later = std::sync::Mutex::new(Vec::new());
     let (n, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicU64::new(0));
     archive
         .contents(threads, |c, d| {
-            for &i in &files[c] {
+            for &i in &files[c].0 {
                 let fail = |m: String| aqr::Failure::Resource(m);
-                write_new(&paths[i], &d, force).map_err(fail)?;
-                set_extra(&paths[i], &t.entries[i].extra).map_err(fail)?;
-                n.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                total.fetch_add(d.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                let p = &paths[i];
+                // (the file made empty already)
+                let mut f = fs::OpenOptions::new().write(true).open(p).map_err(|e| fail(err(p, e)))?;
+                f.write_all(&d).map_err(|e| fail(err(p, e)))?;
             }
+            for &(i, k) in &forks[c] {
+                let (kind, x) = (kind_of(i), i.map_or(&t.root, |i| &t.entries[i].extra));
+                match kind {
+                    meta::Kind::Link => later.lock().unwrap().push((i, k, d.clone())),
+                    _ if i.is_none_or(|i| made[i]) => ap.fork(path_of(i), kind, &x.forks[k].0, &d),
+                    _ => {}
+                }
+            }
+            n.fetch_add(files[c].1, std::sync::atomic::Ordering::Relaxed);
+            total.fetch_add(files[c].1 as u64 * d.len() as u64, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         })
         .map_err(|e| e.to_string())?;
@@ -796,22 +896,51 @@ fn extract(
         let e = &t.entries[i];
         let EntryNode::Link(target) = &e.node else { unreachable!() };
         if escapes(t, i) {
-            eprintln!("{}: a link reaching out of {}, not created", paths[i].display(), out.display());
+            ap.tell(&paths[i], &format!("a link reaching out of {}, not created", out.display()));
             continue;
         }
         if force && fs::symlink_metadata(&paths[i]).is_ok_and(|m| !m.is_dir()) {
             fs::remove_file(&paths[i]).map_err(|x| err(&paths[i], x))?;
         }
         symlink(&os_from(name_bytes(target).0), &paths[i]).map_err(|x| err(&paths[i], x))?;
+        made[i] = true;
     }
-    // the directories' times once nothing more is written in them, the deepest first
-    for (i, e) in t.entries.iter().enumerate().rev() {
-        if e.node == EntryNode::Dir {
-            set_extra(&paths[i], &e.extra)?;
+    for (i, k, d) in later.into_inner().unwrap() {
+        if i.is_some_and(|i| made[i]) {
+            ap.fork(path_of(i), meta::Kind::Link, &t.entries[i.unwrap()].extra.forks[k].0, &d);
         }
     }
-    set_extra(out, &t.root)?;
+    // the metadata of the directories once nothing more is written in them, the deepest first
+    for (i, e) in t.entries.iter().enumerate() {
+        if e.node != EntryNode::Dir && made[i] && linked[i].is_none() {
+            ap.apply(&paths[i], kind_of(Some(i)), &e.extra)?;
+        }
+    }
+    for (i, e) in t.entries.iter().enumerate().rev() {
+        if e.node == EntryNode::Dir {
+            ap.apply(&paths[i], meta::Kind::Dir, &e.extra)?;
+        }
+    }
+    ap.apply(out, meta::Kind::Dir, &t.root)?;
     Ok((n.into_inner(), total.into_inner()))
+}
+
+/// By entry of `t`, the file it is a hard link to: the first of its link group, where the group
+/// is consistent (its files all of a content).
+fn hard_links(t: &Tree) -> Vec<Option<usize>> {
+    let mut groups: std::collections::HashMap<i128, Vec<usize>> = Default::default();
+    for (i, e) in t.entries.iter().enumerate() {
+        if let (Some(g), EntryNode::File(_)) = (e.extra.link_group, &e.node) {
+            groups.entry(g).or_default().push(i);
+        }
+    }
+    let mut to = vec![None; t.entries.len()];
+    for files in groups.values() {
+        if files.iter().all(|&i| t.entries[i].node == t.entries[files[0]].node) {
+            files[1..].iter().for_each(|&i| to[i] = Some(files[0]));
+        }
+    }
+    to
 }
 
 /// Whether link `i` of `t` reaches out of the directory it is extracted into: by an absolute
@@ -883,29 +1012,4 @@ fn symlink(target: &OsStr, at: &Path) -> std::io::Result<()> {
 fn symlink(target: &OsStr, at: &Path) -> std::io::Result<()> {
     let target = PathBuf::from(target.to_string_lossy().replace('/', "\\"));
     std::os::windows::fs::symlink_file(target, at)
-}
-
-/// Applies `extra` to the file or directory at `path`: its permissions, then its time.
-fn set_extra(path: &Path, extra: &Extra) -> Result<(), String> {
-    let err = |e: std::io::Error| format!("{}: {e}", path.display());
-    #[cfg(unix)]
-    if let Some(mode) = extra.mode {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(mode)).map_err(err)?;
-    }
-    if let Some(t) = extra.mtime {
-        let time = match t.secs {
-            s if s >= 0 => UNIX_EPOCH + std::time::Duration::new(s as u64, t.nanos),
-            s => {
-                UNIX_EPOCH - std::time::Duration::from_secs(s.unsigned_abs())
-                    + std::time::Duration::from_nanos(t.nanos as u64)
-            }
-        };
-        let f = fs::File::options().write(!path.is_dir()).read(path.is_dir()).open(path);
-        // (where a file's permissions do not let it be opened, its time is left)
-        if let Ok(f) = f {
-            f.set_modified(time).map_err(err)?;
-        }
-    }
-    Ok(())
 }

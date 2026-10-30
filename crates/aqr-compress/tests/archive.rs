@@ -56,10 +56,10 @@ fn gzip(d: &[u8]) -> Vec<u8> {
     e.finish().unwrap()
 }
 
-/// A tree of `files` (path, data) under directories as their paths tell, with a link; and the
-/// contents, by file.
+/// A tree of `files` (path, data) under directories as their paths tell, with a link, the first
+/// file with a fork and an extended attribute; and the contents, by file (the fork's last).
 fn tree_of(files: &[(&str, Vec<u8>)]) -> (Tree, Vec<(String, Vec<u8>)>) {
-    let mut t = Tree { root: Extra { mtime: None, mode: Some(0o755) }, entries: Vec::new() };
+    let mut t = Tree { root: Extra { mode: Some(0o755), ..Extra::default() }, entries: Vec::new() };
     let mut dirs: Vec<(String, usize)> = Vec::new();
     let mut contents = Vec::new();
     for (path, data) in files {
@@ -77,8 +77,8 @@ fn tree_of(files: &[(&str, Vec<u8>)]) -> (Tree, Vec<(String, Vec<u8>)>) {
                 }
             });
         }
-        let extra =
-            Extra { mtime: Some(Time { secs: 1_700_000_000 + contents.len() as i64, nanos: 1 }), mode: Some(0o644) };
+        let mtime = Some(Time { secs: 1_700_000_000 + contents.len() as i64, nanos: 1 });
+        let extra = Extra { mtime, mode: Some(0o644), ..Extra::default() };
         let name = parts[parts.len() - 1].into();
         t.entries.push(Entry { parent, name, node: EntryNode::File(contents.len()), extra });
         contents.push((path.to_string(), data.clone()));
@@ -89,6 +89,11 @@ fn tree_of(files: &[(&str, Vec<u8>)]) -> (Tree, Vec<(String, Vec<u8>)>) {
         node: EntryNode::Link(b"a/t0.txt".to_vec()),
         extra: Extra::default(),
     });
+    if let Some(e) = t.entries.iter_mut().find(|e| matches!(e.node, EntryNode::File(_))) {
+        e.extra.forks.push((b"AFP_Resource".to_vec(), contents.len()));
+        e.extra.xattrs.push((b"user.x".to_vec(), b"y".to_vec()));
+        contents.push(("fork".into(), b"a fork of a file".repeat(10)));
+    }
     (t, contents)
 }
 
@@ -98,17 +103,29 @@ fn archived(files: &[(&str, Vec<u8>)], opt: &Options) -> (Vec<u8>, aqr_compress:
     let inputs: Vec<Input> = contents.iter().map(|(n, d)| Input { name: n.as_bytes(), data: d }).collect();
     let a = compress_tree(&tree, &inputs, opt);
     let Ok(Value::Tree(t, got)) = decompress_value(&a.archive, 1) else { panic!("not decoded") };
-    let files_of = |t: &Tree| -> Vec<(Vec<u8>, Extra, usize)> {
+    // (the forks apart, by their contents)
+    type Files = Vec<(Vec<u8>, Extra, usize, Vec<(Vec<u8>, usize)>)>;
+    let files_of = |t: &Tree| -> Files {
         t.entries
             .iter()
-            .filter_map(|e| if let EntryNode::File(c) = e.node { Some((e.name.clone(), e.extra, c)) } else { None })
+            .filter_map(|e| match e.node {
+                EntryNode::File(c) => {
+                    let forks = e.extra.forks.clone();
+                    Some((e.name.clone(), Extra { forks: Vec::new(), ..e.extra.clone() }, c, forks))
+                }
+                _ => None,
+            })
             .collect()
     };
     let (want, have) = (files_of(&tree), files_of(&t));
     assert_eq!(want.len(), have.len());
     for (w, h) in want.iter().zip(&have) {
-        assert_eq!((&w.0, w.1), (&h.0, h.1));
+        assert_eq!((&w.0, &w.1), (&h.0, &h.1));
         assert!(contents[w.2].1 == got[h.2], "{} not given back", contents[w.2].0);
+        assert_eq!(w.3.len(), h.3.len());
+        for (wf, hf) in w.3.iter().zip(&h.3) {
+            assert!(wf.0 == hf.0 && contents[wf.1].1 == got[hf.1], "fork {} not given back", contents[wf.1].0);
+        }
     }
     assert_eq!(t.root, tree.root);
     assert!(t.entries.iter().any(|e| e.node == EntryNode::Link(b"a/t0.txt".to_vec())));
@@ -725,5 +742,6 @@ fn large_formulas() {
         [format!("P5\n{w} {h}\n255\n").into_bytes(), aqr_common::rng::Rng::new(seed).bytes(w * h)].concat()
     };
     let (_, r) = archived(&[("a.pgm", pgm(1)), ("b.pgm", pgm(2))], &Options { smaller: false, ..Options::default() });
-    assert!(r.files.iter().all(|f| !f.modules.is_empty()), "{r:?}");
+    // (the fork of the first file last)
+    assert!(r.files[..2].iter().all(|f| !f.modules.is_empty()), "{r:?}");
 }
