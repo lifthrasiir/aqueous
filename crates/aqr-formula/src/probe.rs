@@ -299,12 +299,11 @@ pub fn likeness(d: &[u8]) -> Likeness {
     Likeness(bins)
 }
 
-/// An order of data `likes` (by index), each data followed by the one most like it of those
-/// left (the first of those as much alike), or else by the first left: from the first, chains
-/// of data alike, in their order where none is like another. A hash that more than
-/// `BY_LIKENESS_COMMON` data left have in a bin is not counted: it tells little, and would
-/// take time as the square of the data.
-pub fn by_likeness(likes: &[Likeness]) -> Vec<usize> {
+/// Chains of data `likes` alike (by index), each from the first left, each data followed by the
+/// one most like it of those left (the first of those as much alike): a data like none is a
+/// chain of its own. A hash that more than `BY_LIKENESS_COMMON` data left have in a bin is not
+/// counted: it tells little, and would take time as the square of the data.
+pub fn alike_chains(likes: &[Likeness]) -> Vec<Vec<usize>> {
     let n = likes.len();
     let mut having: HashMap<(usize, u64), Vec<usize>> = HashMap::new();
     for (i, l) in likes.iter().enumerate() {
@@ -312,17 +311,18 @@ pub fn by_likeness(likes: &[Likeness]) -> Vec<usize> {
             having.entry((k, h)).or_default().push(i);
         }
     }
-    let (mut left, mut order, mut first) = (vec![true; n], Vec::with_capacity(n), 0);
+    let (mut left, mut chains, mut laid, mut first) = (vec![true; n], Vec::new(), 0, 0);
     // (the bins each data left shares with the last laid)
     let (mut shared, mut touched) = (vec![0usize; n], Vec::new());
-    while order.len() < n {
+    while laid < n {
         while !left[first] {
             first += 1;
         }
-        let mut at = first;
+        let (mut at, mut chain) = (first, Vec::new());
         loop {
             left[at] = false;
-            order.push(at);
+            chain.push(at);
+            laid += 1;
             for (k, &h) in likes[at].0.iter().enumerate().filter(|&(_, &h)| h != u64::MAX) {
                 let Some(those) = having.get_mut(&(k, h)) else { continue };
                 those.retain(|&j| left[j]);
@@ -343,11 +343,12 @@ pub fn by_likeness(likes: &[Likeness]) -> Vec<usize> {
                 None => break,
             }
         }
+        chains.push(chain);
     }
-    order
+    chains
 }
 
-/// See [`by_likeness`].
+/// See [`alike_chains`].
 const BY_LIKENESS_COMMON: usize = 1024;
 
 fn held_anchors(d: &[u8]) -> Vec<u64> {
@@ -472,10 +473,10 @@ mod tests {
         let (a2, b2, d) = (edited(&a, 7), edited(&b, 9), noise(4, 1 << 20));
         let likes: Vec<Likeness> = [&a, &b, &c, &a2, &d, &b2].iter().map(|x| likeness(x)).collect();
         assert!(likes[0].shared(&likes[3]) > 32 && likes[0].shared(&likes[1]) == 0, "{likes:?}");
-        assert_eq!(by_likeness(&likes), [0, 3, 1, 5, 2, 4]);
+        assert_eq!(alike_chains(&likes), [vec![0, 3], vec![1, 5], vec![2], vec![4]]);
         // none alike, and nothing to tell by
-        assert_eq!(by_likeness(&likes[..3]), [0, 1, 2]);
-        assert_eq!(by_likeness(&[likeness(&[]), likeness(b"short"), likes[0].clone()]), [0, 1, 2]);
+        assert_eq!(alike_chains(&likes[..3]), [[0], [1], [2]]);
+        assert_eq!(alike_chains(&[likeness(&[]), likeness(b"short"), likes[0].clone()]), [[0], [1], [2]]);
     }
 
     /// Data held whole (all of a data, or part of it) by another, but not by itself alone;

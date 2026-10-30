@@ -759,11 +759,13 @@ fn together<S: Source + ?Sized>(
     Ok(((0..n).map(|c| root(&mut parent, c)).collect(), entries, pe))
 }
 
-/// Contents `cs` laid in `order` by likeness ([`probe::by_likeness`]), from where the first of
-/// them is, but those put together with others (`group`, [`together`]): PE files, of which
-/// those of a program in several versions, apart by their names, compress far better within a
-/// block of each other (in 10gb, 436.7 → 395.6 MB in blocks of 16 MiB at zstd level 9, of 371.3
-/// MB as one).
+/// Contents `cs` alike laid next to each other in `order`, each chain of them
+/// ([`probe::alike_chains`]) where its first is, the rest where they are; but those put
+/// together with others (`group`, [`together`]): PE files, of which those of a program in
+/// several versions, apart by their names, compress far better within a block of each other
+/// (in 10gb, 436.7 → 395.6 MB in blocks of 16 MiB at zstd level 9, of 371.3 MB as one). Of
+/// other files than PE files, those alike are mostly next to each other by their names
+/// already.
 fn lay_alike<S: Source + ?Sized>(
     order: &mut Vec<usize>,
     cs: &[usize],
@@ -786,10 +788,13 @@ fn lay_alike<S: Source + ?Sized>(
         like
     });
     let likes = likes.into_iter().collect::<io::Result<Vec<_>>>()?;
-    let laid: Vec<usize> = probe::by_likeness(&likes).into_iter().map(|i| these[i]).collect();
-    let at = order.iter().position(|c| alone.contains(c)).expect("one of them");
-    order.retain(|c| !alone.contains(c));
-    order.splice(at..at, laid);
+    // each chain where its first is, the rest where they are
+    let mut key: HashMap<usize, (usize, usize)> = order.iter().enumerate().map(|(i, &c)| (c, (i, 0))).collect();
+    for chain in probe::alike_chains(&likes) {
+        let at = key[&these[chain[0]]].0;
+        chain.iter().enumerate().skip(1).for_each(|(k, &i)| _ = key.insert(these[i], (at, k)));
+    }
+    order.sort_by_key(|c| key[c]);
     Ok(())
 }
 
