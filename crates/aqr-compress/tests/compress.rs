@@ -1305,6 +1305,15 @@ fn file_alone_shares() {
     assert!(bytes < 2 * body.len(), "{bytes} bytes: {f}");
 }
 
+/// A GIF file is not taken as compressed already, stored as it is: its LZW compresses poorly,
+/// and some writers' far less (Dropbox's animations come to a sixth at zstd -3).
+#[test]
+fn gif_compressed_further() {
+    let t = tar(&[("a.gif", &text(20_000))]);
+    let c = compress(&t, &all());
+    assert!(c.len() < 10_000, "{} bytes", c.len());
+}
+
 /// A bundle does not count as a format deeper: a JPEG file in a ZIP archive in a tar archive in
 /// gzip is recompressed as one in a ZIP archive in gzip is.
 #[test]

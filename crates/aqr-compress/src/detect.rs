@@ -204,8 +204,9 @@ impl Format {
 /// extension, case aside: a file of a format recompressed ([`Kind::Format`]), already
 /// compressed (audio, video, images and archives that no recompressor takes), uncompressed
 /// images (pixels after a header), text or fonts. Anything else is [`Kind::Unknown`],
-/// executables too (an installer has an archive after its image), and WOFF fonts (of zlib
-/// streams).
+/// executables too (an installer has an archive after its image), WOFF fonts (of zlib
+/// streams), and GIF files, whose LZW compresses poorly (some writers' animations come to a
+/// sixth at zstd -3).
 pub fn kind_by_name(name: &[u8]) -> Kind {
     let base = name.rsplit(|&b| b == b'/' || b == b'\\').next().unwrap_or(name);
     let Some(dot) = base.iter().rposition(|&b| b == b'.').filter(|&p| p > 0) else { return Kind::Unknown };
@@ -245,7 +246,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
         b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg" | b"oga"
-        | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => {
+        | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => {
             Kind::Compressed
         }
         b"tga" | b"pbm" => Kind::Pixels,
