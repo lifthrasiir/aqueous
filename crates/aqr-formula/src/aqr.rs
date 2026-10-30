@@ -2,8 +2,11 @@
 //! block.
 //!
 //! [`encode`] lays the formula out as blocks: a module block for each module, a resource block
-//! for each resource, the formula block, and a non-leaf block for each stream it slices, in the
-//! order of the streams. A formula of a single slice is a leaf block of its own.
+//! for each resource, the formula block, and the non-leaf blocks of each stream it slices, in
+//! the order of the streams: a stream of more than [`BLOCK`] bytes is several blocks of that
+//! many, one after another, which a slice over several takes as a concatenation of slices of
+//! each, so that a decoder holds a block at a time rather than the stream (and may read part of
+//! a file). A formula of a single slice is a leaf block of its own.
 //!
 //! A module block holds the Wasm module of a [`Module`], which the [`Encoder`] is given
 //! ([`Encoder::with_modules`]), and a [`Runner`] runs it in decoding: natively where it knows
@@ -175,13 +178,13 @@ const BASE: (i32, f64) = (3, 350e6);
 /// the first three, below as many fewer as it is lower; of level 9 all.
 const HIGHER: [(i32, f64); 4] = [(4, 330e6), (6, 140e6), (9, 100e6), (DENSE, 8.2e6)];
 /// The bytes that [`Level::MID`] would save for a second of compression above [`BASE`]:
-/// level 9 where it saves 0.71% of the data over level 3 (2–3% of what they compress to,
+/// level 9 where it saves 0.71% of the data over level 3 (2??% of what they compress to,
 /// where 10gb's solid blocks save 8% at the median); zstd at 100 MB/s on a core is still far
 /// from all of compression's time.
 const MID_RATE: f64 = 1e6;
 /// The zstd level of dense streams from level 8 ([`Level::HIGH`]) on: level 16 (btultra, 8.2
 /// MB/s on a core; 9 at 89) was smaller than 9 on every block of 1 MiB or more of 10gb's PE
-/// code (0.949 of it at the median, 0.996 at most) and text (0.935, 0.957 at most), about −29
+/// code (0.949 of it at the median, 0.996 at most) and text (0.935, 0.957 at most), about ??9
 /// MB for some 200 s of a core; not so on other data (raw 1.006 at most). Not in estimates
 /// ([`Encoder::least`]): a probe goes by the level picked.
 const DENSE: i32 = 16;
@@ -205,10 +208,10 @@ struct Pick {
 }
 
 impl Pick {
-    /// Level 1: zstd level 1 alone. 2–5: the base, level 1 where smaller, and as many of
+    /// Level 1: zstd level 1 alone. 2??: the base, level 1 where smaller, and as many of
     /// [`HIGHER`] as the level is above 2. From 6 on, the higher level by the sample alone, as a
     /// sample of chunks of 64 KiB does not see the matches from afar that a higher level's
-    /// larger window finds (10gb: some −21 MB at 5's rate); from 8 on, [`DENSE`] for dense
+    /// larger window finds (10gb: some ??1 MB at 5's rate); from 8 on, [`DENSE`] for dense
     /// streams, and at 9 for any where the sample is smaller so.
     /// (Level 0 compresses nothing, and picks nothing: taken as 1.)
     fn of(level: u8) -> Pick {
@@ -574,10 +577,11 @@ impl Encoder {
                     ordinals[stream] = Some(0);
                 }
             });
-            let mut sliced = Vec::new();
+            let (mut sliced, mut next) = (Vec::new(), 0);
             for (s, o) in ordinals.iter_mut().enumerate() {
                 if o.is_some() {
-                    *o = Some(sliced.len() as u64);
+                    *o = Some(next);
+                    next += blocks_in(total(streams[s]));
                     sliced.push(s);
                 }
             }
@@ -594,8 +598,8 @@ impl Encoder {
             }
 
             let mut data = Vec::new();
-            varint::put(&mut data, sliced.len() as u64);
-            sliced.iter().for_each(|_| varint::put(&mut data, 0));
+            varint::put(&mut data, next);
+            (0..next).for_each(|_| varint::put(&mut data, 0));
             for n in [resources.len(), modules.len()] {
                 varint::put(&mut data, n as u64);
                 (0..n).for_each(|i| varint::put(&mut data, i as u64));
@@ -620,7 +624,7 @@ impl Encoder {
             }
             formula_block(out, 1, &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?);
             for s in sliced {
-                self.content_block(out, false, streams[s], self.how(&f.streams[s]))?;
+                self.stream_blocks(out, streams[s], self.how(&f.streams[s]))?;
             }
         }
 
@@ -652,11 +656,20 @@ impl Emit<'_> {
                 self.stack.push(None);
             }
             &Node::Slice { stream, start, len } => {
-                self.out.push(SLICE);
-                varint::put(self.out, self.ordinals[stream].unwrap());
-                varint::put(self.out, start);
-                varint::put(self.out, len);
-                self.stack.push(None);
+                // (a slice of each block it is over, concatenated)
+                let first = self.ordinals[stream].unwrap();
+                let pieces = slice_blocks(start, len);
+                let n = pieces.len();
+                for (k, at, n) in pieces {
+                    self.out.push(SLICE);
+                    varint::put(self.out, first + k);
+                    varint::put(self.out, at);
+                    varint::put(self.out, n);
+                    self.stack.push(None);
+                }
+                if n > 1 {
+                    self.concat(CONCAT, n);
+                }
             }
             Node::Concat(ns) => {
                 // (before a part taking an output, the items so far put together as a counter
@@ -799,7 +812,13 @@ pub fn description_bound(n: &Node) -> usize {
     match n {
         Node::Output { .. } => 1 + 3,
         Node::Patch(p) => description_bound(&p.source) + description_bound(&p.patch) + 1 + varint::len(p.len),
-        &Node::Slice { start, len, .. } => 1 + 3 + varint::len(start) + varint::len(len),
+        &Node::Slice { start, len, .. } => match slice_blocks(start, len)[..] {
+            [(_, at, n)] => 1 + 3 + varint::len(at) + varint::len(n),
+            ref pieces => {
+                let each = 1 + 3 + 2 * varint::len(BLOCK as u64);
+                pieces.len() * each + 1 + varint::len(pieces.len() as u64)
+            }
+        },
         Node::Concat(ns) | Node::Pack(ns) => {
             ns.iter().map(description_bound).sum::<usize>() + 1 + varint::len(ns.len() as u64)
         }
@@ -963,6 +982,14 @@ impl Encoder {
         Ok(())
     }
 
+    /// Appends the non-leaf blocks of a stream of `data`: [`BLOCK`] bytes each but the last.
+    fn stream_blocks(&self, out: &mut impl Out, data: &[&[u8]], how: How) -> Result<()> {
+        for r in block_ranges(total(data)) {
+            self.content_block(out, false, &cut(data, r.start, r.len()), how)?;
+        }
+        Ok(())
+    }
+
     /// Appends a resource block of `r`, compressed at the level the encoder picks for it, or at
     /// the base level where it does not compress: the block is always compressed.
     fn resource_block(&self, out: &mut impl Out, r: &[u8]) -> Result<()> {
@@ -1063,7 +1090,7 @@ impl Encoder {
             let mut seen = std::collections::HashSet::new();
             streams
                 .iter()
-                .map(|s| (&s.data[..], self.how(s)))
+                .flat_map(|s| block_ranges(s.data.len()).map(move |r| (&s.data[r], self.how(s))))
                 .filter(|&(d, how)| {
                     let k = key_how(&[d], how);
                     how != How::Stored && !kept.contains_key(&k) && seen.insert(k)
@@ -1139,7 +1166,7 @@ impl Encoder {
         if !matches!((&f.root, &f.shared[..]), (Node::Slice { .. }, [])) {
             for &s in free {
                 let mut c = Count(0);
-                self.content_block(&mut c, false, &[&f.streams[s].data], self.how(&f.streams[s]))?;
+                self.stream_blocks(&mut c, &[&f.streams[s].data], self.how(&f.streams[s]))?;
                 n = n.saturating_sub(c.0);
             }
         }
@@ -1283,6 +1310,42 @@ fn total(pieces: &[&[u8]]) -> usize {
 }
 
 /// The `len` bytes from `start` of `pieces`, as pieces.
+/// Bytes of a non-leaf block at most: a longer stream is several ([`Encoder::stream_blocks`]),
+/// as the spec has content larger than a unit of random access split into blocks. As large as
+/// the window of long-distance matching (which every decoder takes): of boot.wim's 494 MB of
+/// data, 32 MiB blocks archived 3.1% larger, 64 MiB 2.7%, 128 MiB 0.5%, and decoding held
+/// 0.39, 0.48 and 0.71 GB at most (0.66 GB of a block). 1 MiB in this crate's tests.
+#[cfg(not(test))]
+pub const BLOCK: usize = 128 << 20;
+#[cfg(test)]
+pub const BLOCK: usize = 1 << 20;
+
+/// Non-leaf blocks of a stream of `len` bytes (one at least).
+fn blocks_in(len: usize) -> u64 {
+    len.div_ceil(BLOCK).max(1) as u64
+}
+
+/// The ranges of the non-leaf blocks of a stream of `len` bytes.
+fn block_ranges(len: usize) -> impl Iterator<Item = Range<usize>> {
+    (0..blocks_in(len) as usize).map(move |k| k * BLOCK..((k + 1) * BLOCK).min(len))
+}
+
+/// The pieces of a slice of a stream at `start` of `len` bytes (one at least): of each block
+/// it is over, the block's index in the stream and the start and length in it.
+fn slice_blocks(start: u64, len: u64) -> Vec<(u64, u64, u64)> {
+    let b = BLOCK as u64;
+    if len == 0 {
+        return vec![(start / b, start % b, 0)];
+    }
+    let (first, last) = (start / b, (start + len - 1) / b);
+    (first..=last)
+        .map(|k| {
+            let (s, e) = (start.max(k * b), (start + len).min((k + 1) * b));
+            (k, s - k * b, e - s)
+        })
+        .collect()
+}
+
 fn cut<'a>(pieces: &[&'a [u8]], mut start: usize, mut len: usize) -> Vec<&'a [u8]> {
     let mut out = Vec::new();
     for p in pieces {
@@ -2859,6 +2922,31 @@ mod tests {
         assert!(encode(&twice, None, Level::Zstd(3)).is_err());
     }
 
+    /// A stream of more than [`BLOCK`] bytes is several non-leaf blocks: slices within one,
+    /// over a boundary and of all of it come back, and the archive has a block for each.
+    #[test]
+    fn streams_of_several_blocks() {
+        let mut f = Formula::default();
+        let n = 2 * BLOCK + 1000;
+        let d: Vec<u8> = (0..n as u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        f.push("a", d.clone());
+        let b = BLOCK as u64;
+        let parts = [(5, 10), (b - 3, 7), (2 * b + 10, 990), (0, n as u64), (b, b)];
+        f.root = Node::concat(parts.iter().map(|&(s, l)| Node::slice(0, s, l)));
+        let want: Vec<u8> = parts.iter().flat_map(|&(s, l)| d[s as usize..][..l as usize].to_vec()).collect();
+        assert!(
+            description_bound(&f.root) >= {
+                let ordinals = [Some(0)];
+                let mut out = Vec::new();
+                Emit { ordinals: &ordinals, modules: &[], resources: &[], out: &mut out, stack: vec![] }.node(&f.root);
+                out.len()
+            }
+        );
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+        assert!(decode(&c, &natives()).unwrap() == want);
+        assert_eq!(open(&c, &natives()).unwrap().blocks.non_leaf.len(), 3);
+    }
+
     /// Outputs split from the one output of a module (Split instructions), taken as those of
     /// several outputs are.
     #[test]
@@ -3521,10 +3609,10 @@ mod tests {
                 enc.smaller_with(&f, 1, &pieces, &raw).unwrap(),
                 Encoder::new(level).smaller(&whole, &raw).unwrap()
             );
-            // the stream compressed then is the one archived
+            // the stream compressed then is the one archived (its blocks, and the head)
             enc.forget(&raw);
             assert_eq!(enc.encode(&whole, None).unwrap(), Encoder::new(level).encode(&whole, None).unwrap());
-            assert_eq!(enc.streams.borrow().len(), 2);
+            assert_eq!(enc.streams.borrow().len(), 1 + blocks_in(d.len()) as usize);
         }
     }
 

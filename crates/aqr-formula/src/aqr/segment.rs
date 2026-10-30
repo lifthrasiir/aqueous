@@ -252,7 +252,11 @@ impl SegmentWriter {
                 .into_iter()
                 .collect();
             streams.sort_unstable();
-            streams.iter().enumerate().for_each(|(k, &st)| ordinals[st] = Some(non_leaf + k as u64));
+            let mut blocks = 0;
+            for &st in &streams {
+                ordinals[st] = Some(non_leaf + blocks);
+                blocks += super::blocks_in(f.streams[st].data.len());
+            }
             let refs: Vec<&Resource> = resources.iter().collect();
             for &i in &members {
                 done[i] = true;
@@ -275,10 +279,10 @@ impl SegmentWriter {
             }
             for &st in &streams {
                 let at = out.len();
-                enc.content_block(out, false, &[&f.streams[st].data], enc.how(&f.streams[st]))?;
+                enc.stream_blocks(out, &[&f.streams[st].data], enc.how(&f.streams[st]))?;
                 b.layout.push((Placed::NonLeaf(st), out.len() - at));
             }
-            non_leaf += streams.len() as u64;
+            non_leaf += blocks;
         }
         Ok(b)
     }
@@ -416,16 +420,21 @@ impl Encoder {
         resources: &[&Resource],
     ) -> Vec<u8> {
         let mut data = Vec::new();
-        // the blocks it slices, by their ordinals' deltas, and its own index of each stream
+        // the blocks it slices, by their ordinals' deltas, and its own index of each stream's
+        // first (a stream's blocks one after another)
         let mut sliced: Vec<(u64, usize)> = u.streams.iter().map(|&st| (ordinals[st].unwrap(), st)).collect();
         sliced.sort_unstable();
         let mut local = vec![None; f.streams.len()];
-        varint::put(&mut data, sliced.len() as u64);
-        let mut next = first;
-        for (k, &(o, st)) in sliced.iter().enumerate() {
-            varint::put(&mut data, o - next);
-            next = o + 1;
-            local[st] = Some(k as u64);
+        let all: u64 = sliced.iter().map(|&(_, st)| super::blocks_in(f.streams[st].data.len())).sum();
+        varint::put(&mut data, all);
+        let (mut next, mut k) = (first, 0);
+        for &(o, st) in &sliced {
+            local[st] = Some(k);
+            for b in 0..super::blocks_in(f.streams[st].data.len()) {
+                varint::put(&mut data, o + b - next);
+                next = o + b + 1;
+                k += 1;
+            }
         }
         let own_resources: Vec<&Resource> = u.resources.iter().collect();
         varint::put(&mut data, own_resources.len() as u64);
