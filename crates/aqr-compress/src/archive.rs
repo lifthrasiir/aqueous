@@ -964,10 +964,10 @@ fn analyze(i: usize, files: &[File], data: Vec<Bytes>, raw: &HashSet<usize>, opt
             }
         }
         place_all(&mut f, children.into_iter().map(|c| c.1).collect(), sets, &nopt);
-        // (what the files hold of each other, by what they are taken for: a file and the
-        // same in an archive, both kept as they are)
-        f.share_slices(SLICE_MIN);
     }
+    // (what the files hold of each other, by what they are taken for: a file and the same in
+    // an archive, both kept as they are; files none of which is recompressed too)
+    f.share_slices(SLICE_MIN);
     // (a text formula kept that none took)
     cx.once = Default::default();
     let deferred: Vec<_> = cx.deferred.borrow_mut().drain(..).collect();

@@ -245,6 +245,27 @@ fn held_once_of(words: [&str; 10], module: &str) {
     assert!(c.len() < alone.len() * 3 / 2, "{} of {} alone, in batches", c.len(), alone.len());
 }
 
+/// `n` bytes at random from `seed`, which do not compress.
+fn noise(n: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed;
+    (0..n)
+        .map(|_| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (x >> 56) as u8
+        })
+        .collect()
+}
+
+/// A file that does not compress, and another that starts with it, alone in an archive (no
+/// file recompressed): the first is stored once.
+#[test]
+fn raw_held_once() {
+    let a = noise(3 << 20, 1);
+    let b = [&a[..], &noise(1 << 20, 2)[..]].concat();
+    let (c, _) = archived(&[("a.bin", a), ("b.bin", b)], &Options::default());
+    assert!(c.len() < (4 << 20) + (64 << 10), "{} bytes", c.len());
+}
+
 /// Two files alike but for their starts (another header, a few bytes longer), with a file
 /// apart between them: in a batch together however small the batches, the archive about as
 /// small as in one.
