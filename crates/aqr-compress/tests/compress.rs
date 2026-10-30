@@ -309,18 +309,26 @@ fn lzop_files() {
     assert!(modules(&roundtrip(&fixture("codecs/aqr-lzo/tests/data/empty.3.lzo"), &all())).is_empty());
 }
 
+/// [`all`] at level 9, the only one at which streams of LZFSE and LZVN blocks are taken.
+fn all9() -> Options {
+    Options { level: aqr::Level::Of(9), ..all() }
+}
+
 #[test]
 fn bvx_streams() {
     for t in ["text", "words", "icon", "small"] {
         let d = fixture(&format!("codecs/aqr-bvx/tests/data/{t}.lzfse"));
         // (the data recompressed in turn where it is text)
-        assert_eq!(modules(&roundtrip(&d, &all()))[0], BVX.name, "{t}");
+        assert_eq!(modules(&roundtrip(&d, &all9()))[0], BVX.name, "{t}");
+        // below level 9, kept as they are
+        assert!(!modules(&roundtrip(&d, &Options { level: aqr::Level::HIGH, ..all() })).contains(&BVX.name), "{t}");
     }
     // found in data, as in an asset catalog
     let d = [noise(3000), fixture("codecs/aqr-bvx/tests/data/icon.lzfse"), noise(3000)].concat();
-    assert_eq!(formats(&roundtrip(&d, &all())), [BVX.name]);
+    assert_eq!(formats(&roundtrip(&d, &all9())), [BVX.name]);
+    assert!(formats(&roundtrip(&d, &all())).is_empty());
     // nothing to rebuild
-    assert!(modules(&roundtrip(&fixture("codecs/aqr-bvx/tests/data/empty.lzfse"), &all())).is_empty());
+    assert!(modules(&roundtrip(&fixture("codecs/aqr-bvx/tests/data/empty.lzfse"), &all9())).is_empty());
 }
 
 #[test]
@@ -950,8 +958,8 @@ fn bvx_past_expansion() {
     let mut d = Vec::new();
     plan::join(&data, &p, &mut d).unwrap();
     assert!(d.len() < 1 << 20, "{}", d.len());
-    assert!(modules(&roundtrip(&d, &all())).is_empty());
-    assert_eq!(modules(&roundtrip(&d, &Options { expansion: 1 << 20, ..all() })), [BVX.name]);
+    assert!(modules(&roundtrip(&d, &all9())).is_empty());
+    assert_eq!(modules(&roundtrip(&d, &Options { expansion: 1 << 20, ..all9() })), [BVX.name]);
 }
 
 /// A database made by the sqlite3 tool from `sql` (None without it).

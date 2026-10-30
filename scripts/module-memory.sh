@@ -189,7 +189,7 @@ samples
 names=("$@")
 (( $#names )) || names=($(cd $s && ls | rg -v '\.(aqr|po)$'))
 # samples whose recompressors the lower levels do not try
-high=(lzma.d)
+high=(lzma.d text.lzfse assets.car)
 for n in $names; do
     [[ -f $s/$n.aqr ]] && continue
     level=()

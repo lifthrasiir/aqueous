@@ -35,7 +35,8 @@ assert_eq!(out, stream[..sp.used]);
 ## Where it is
 
 - Asset catalogs (`Assets.car`): renditions of images are LZFSE or LZVN streams, one per
-  image (app icons are most of them). aqr-compress finds them in the catalog by a scan, and
+  image (app icons are most of them). aqr-compress finds them in the catalog by a scan, at
+  level 9 only (the data is many times the streams, and taking them is slow: Results), and
   takes a stream only where its data fits in what is left of the budget that DEFLATE streams
   inflate within (`Options::expansion`: 32 times the file and 64 MiB).
 - `compression_tool`, `.lzfse` files, and LZFSE in other data found by the scan.
@@ -50,10 +51,12 @@ Measured on 2026-10-30 on an Apple M4.
 
 The 36 asset catalogs over 100 KB of `/Applications` (272.5 MB; the seven apps of
 `docs/macos-app-todo.md` and others), holding 4,781 LZFSE streams (236 MB, 3.7 GB of data) and
-10,200 LZVN streams (10.4 MB): `aqr -c` (level mid, all threads) gives 191.11 MB, against
-220.47 MB before (−13.3%) and 232.63 MB by `zstd -3`. Compressing took 55.5 s (1.7 s before:
-the data is 14 times the catalogs) with a peak of 7.8 GB; testing (`aqr -t`) 6.3 s, and 8.0 s
-with the modules as Wasm. The data of some catalogs (photos and gradients, not icons with
+10,200 LZVN streams (10.4 MB): `aqr -c` (all threads) with the streams taken at level mid gave
+191.11 MB, against 220.47 MB without (−13.3%) and 232.63 MB by `zstd -3`. Compressing took
+55.5 s (1.7 s without: the data is 14 times the catalogs) with a peak of 7.8 GB; testing
+(`aqr -t`) 6.3 s, and 8.0 s with the modules as Wasm. As that is about 4 MB/s, the streams are
+now taken at level 9 only: `aqr -c -l 9` gives 170.57 MB in 146 s (all of level 9 slower too),
+level mid 219.06 MB in 1.2 s. The LZVN streams alone gain nothing at level mid (219.08 MB). The data of some catalogs (photos and gradients, not icons with
 borders) compresses worse with zstd than LZFSE did, and those streams are kept as they are.
 
 A sample of the same catalogs (corpus/, 756 streams, through `aqr-bvx-check`; every stream

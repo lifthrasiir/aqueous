@@ -877,9 +877,15 @@ impl Made {
     }
 }
 
-/// A stream of LZFSE and LZVN blocks, if its data (as its blocks' headers tell) fits in what is
-/// left of the budget ([`Options::expansion`]).
+/// A stream of LZFSE and LZVN blocks, at level 9 only, if its data (as its blocks' headers
+/// tell) fits in what is left of the budget ([`Options::expansion`]). The data is many times
+/// the streams (14 times in the asset catalogs of /Applications: 3.7 GB of 272.5 MB), and
+/// recompressing them takes 13% off at some 4 MB/s (60 s rather than 1.7 s, peak 7.4 GB). The
+/// LZVN streams there (small data) gain nothing at the default level and are left out too.
 fn bvx(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    if opt.level.scale() < 9 {
+        return None;
+    }
     let (_, n) = aqr_bvx::bvx::extent(d)?;
     if !cx.inflate(n) {
         return None;
