@@ -4058,9 +4058,13 @@ Each value is the value of the attribute.
 
 A compressor MUST NOT put the following attributes into `xattrs`:
 
-* `com.apple.ResourceFork`, the resource fork of macOS, which goes to `forks` instead ([[#fork-streams]]).
+* The resource fork of macOS (`com.apple.ResourceFork` there), which goes to `forks` instead ([[#fork-streams]]).
 * An attribute only telling how the file system stores the node,
     e.g. `com.apple.decmpfs` of the transparent compression of macOS.
+
+These names are only special on macOS.
+An attribute of the same name from another platform, e.g. an EA of NTFS, is put into `xattrs` as any other,
+though it may not be written on macOS ([[#extraction]]).
 
 <div class=note>
   Extended attributes are small on most platforms:
@@ -4113,11 +4117,12 @@ Forks of platforms map to [=fork names=] as follows:
 * On macOS, the resource fork, i.e. the extended attribute `com.apple.ResourceFork`
     also accessible as the path `file/..namedfork/rsrc`, is the fork named `AFP_Resource`,
     after the stream name that SMB servers use for it (e.g. `vfs_fruit` of Samba).
-    A compressor MUST put the resource fork into `forks` under that name,
-    and SHOULD NOT give a fork named `AFP_Resource` to a node other than a [=file node=].
+    A compressor MUST put the resource fork into `forks` under that name.
     Other extended attributes of macOS go to `xattrs` regardless of their sizes ([[#xattrs]]).
 
-No key of `forks` can be `com.apple.ResourceFork`.
+Any other name from a platform is a fork name as is,
+e.g. an alternate data stream named `com.apple.ResourceFork`, or one named `AFP_Resource` on a directory,
+though such forks may not be written on macOS ([[#extraction]]).
 A compressor SHOULD NOT record how the file system stores a fork, e.g. whether it is sparse or compressed.
 
 <h3 id=windows-extras>Windows-specific metadata</h3>
@@ -4304,12 +4309,17 @@ A decompressor doing so is subject to the following requirements:
     nor flags only the superuser can change, i.e. the `SF_` flags of `mac-flags`, unless explicitly requested.
     When applying the ownership, it SHOULD use `unix-uname` and `unix-gname` where they name a user and a group on the platform,
     and `unix-uid` and `unix-gid` otherwise.
-* It SHOULD write the [=forks=] of a node where the platform allows,
-    as alternate data streams of the same names on Windows,
-    as the extended attribute `com.apple.ResourceFork` for the fork `AFP_Resource` on macOS,
-    and as extended attributes of the same names for other forks elsewhere.
-    A fork not written MUST be reported to the user,
-    and so MUST a fork and an extended attribute in `xattrs` of the same node that would be written to the same attribute.
+* It SHOULD write the [=forks=] of a node where the platform allows:
+    as alternate data streams of the same names on Windows;
+    on macOS, the fork `AFP_Resource` of a [=file node=] as the resource fork (`com.apple.ResourceFork`),
+    and any other fork as an extended attribute of the same name;
+    and elsewhere, as extended attributes of the same names.
+* A fork not written MUST be reported to the user,
+    and so MUST an extended attribute in `xattrs` not written when the decompressor applies `xattrs`.
+    Reasons include a name invalid or reserved on the platform,
+    e.g. `com.apple.ResourceFork` for anything but the resource fork and `AFP_Resource` of a non-file node on macOS,
+    and names conflicting with another fork or attribute of the same node,
+    e.g. a fork and an attribute of the same name on macOS, or names differing only in case on NTFS.
 
 <div class=note>
   The order of applying the metadata of a node matters on common platforms.
