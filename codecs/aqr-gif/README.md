@@ -47,30 +47,48 @@ Measured on 2026-10-31 on an Apple M4.
 
 | set | files | MB | LZW data MB | records MB | aqr before | aqr now | zstd -3 |
 |---|---|---|---|---|---|---|---|
-| GIF files of the 10 GB corpus (`corpus/10gb`) | 488 | 9.247 | 9.044 | 4.653 | 9.127 | 4.776 | 9.072 |
-| other GIF files (`corpus/misc`) | 4 | 1.345 | 1.257 | 0.443 | 1.311 | 0.489 | 1.270 |
+| GIF files of the 10 GB corpus (`corpus/10gb`) | 488 | 9.247 | 9.044 | 4.703 | 9.127 | 4.826 | 9.072 |
+| other GIF files (`corpus/misc`) | 4 | 1.345 | 1.257 | 0.451 | 1.311 | 0.497 | 1.270 |
 
 "aqr before" and "now" are `aqr -c` of the directory (level mid, all threads), at `285e66a` and
 with aqr-gif; "LZW data" is the files less their skeletons. The 488 files are those of
 `~/tmp/10gb` (`docs/10gb-todo.md`) of distinct contents: three photographs of 2.2–2.4 MB
-dithered to 256 colors (their records 3.58 MB of 6.91 MB), and icons and web graphics.
+dithered to 256 colors (their records 3.61 MB of 6.91 MB), and icons and web graphics.
 `corpus/misc` is an animation of 42 frames from an application (1.1 MB), an image of Tk's demos,
 one of codec-corpus, and a file named `.gif` that is not one (a Perl module's table).
 
-- `aqr -c` of `corpus/10gb` took 10.0 s (0.3 s before; 21.7 s of threads, 3 to 4 s of them each
-  photograph's model), with a peak of 1.2 GB (55 MB before); `aqr -t` 2.5 s (1.0 GB), and 7.1 s
-  with the modules as Wasm.
-- The model codes about 2 megapixels a second of 8-bit indices on one thread (4 of an animation
-  of few colors), and as many decoding. Its tables are 8 slots of 16 bits for a pixel, up to
-  4 megapixels (100 MB).
-- Records are 0.49 of the LZW data of all 521 files of `corpus/` (also the encoders' files
+- `aqr -c` of `corpus/10gb` takes 3.4 s (0.3 s before aqr-gif; 13.9 s of threads), with a peak
+  of 0.5 GB (55 MB before); `aqr -t` 1.9 s (0.4 GB), and 2.6 s with the modules as Wasm. Of
+  `corpus/misc`, 2.5 s and 1.4 s (2.0 s as Wasm).
+- The model codes 3.5 megapixels a second of a dithered photograph on one thread, 6 of a map of
+  flat colors and 15 of an animation (a pixel equal to the one on its left is a single bit), and
+  decodes a fifth slower. Its tables are 4 slots of 16 bits a pixel, up to 32 MB for 0.5
+  megapixels and more; the module's working memory is 73 MB for an image of 4 megapixels.
+- Records are 0.50 of the LZW data of all 521 files of `corpus/` (also the encoders' files
   of `corpus/enc`, made as `scripts/gen-fixtures.py` makes its own from four larger pictures:
-  0.28 for ffmpeg's animation to 0.71 for an icon of 32 by 32).
+  0.27 for ffmpeg's animation to 0.69 for an icon of 32 by 32).
 - The codes cost 4.2 KB of the 521 files, most of it the 107 icons of Apache's encoder, which
   defines codes again (§9 of FORMAT.md); the 3 photographs' 1.1 KB.
 
-The module `gif-recons` is 42 KB of Wasm (a block of 14 KB in an archive), which files below
+The module `gif-recons` is 46 KB of Wasm (a block of 14 KB in an archive), which files below
 30 KB or so do not pay for alone.
+
+### Speed against size
+
+The first version of the model (12 contexts, tables of up to 2^22 slots, every index bit by bit)
+gave records 1.1% smaller (4.776 MB for `corpus/10gb`) at about twice the instructions, and a
+peak of 1.2 GB for `aqr -c` of `corpus/10gb`. What was given up, as `aqr-gif-check` measures
+(records of all of `corpus/`, 5.74 MB at first; instructions of the three photographs and of
+the other 485 files of `corpus/10gb`, 91 G and 78 G at first):
+
+| change | records | photographs | other files |
+|---|---|---|---|
+| contexts of W, N and of W, N, NE, NNE dropped (the image before's is W, N where there is none); mixers of 16 lanes of `i32`, vectorized, weights within ±8 | +0.24% | −43% | −43% |
+| first, whether the index is W's | +0.42% | −15% | −42% |
+| tables of 2^21 slots at most, 4 a pixel; the APM's contexts one for 8 pixels | +0.43% (the animation of `corpus/misc` +2.9%) | ±0 | ±0 |
+
+Left out: a single mixer (+0.6%, −14%), and the W bit gated by how often pixels were W's (larger
+at every threshold: the tree's tables learn from both cases).
 
 ## Tests
 

@@ -190,14 +190,35 @@ hash(x, y) = ((x ^ (y × 0x2F0B4F1D)) × 0x9E3779B1, rotated left by 13) × 0x85
 
 ### 5.2 The model's state
 
-- `B = clamp(bitlen(8 × A), 10, 22)`. 12 **tables** of `2^B` **slots** of 16 bits each, each a
-  12-bit probability `p` above a 4-bit count `n`, all initially `p = 2048, n = 0`.
-- Two mixers' **weights**, signed: 288 sets of 12, all initially 6554.
-- The **APM**: `Q = clamp(bitlen(A), 8, 16)`; `2^Q` contexts of 33 values of 16 bits, value `j` of
+- `B = clamp(bitlen(4 × A), 10, 21)`. 10 **tables** of **slots** of 16 bits each, each a 12-bit
+  probability `p` above a 4-bit count `n`, all initially `p = 2048, n = 0`: table 0 of
+  `2^min(B, 8)` slots, table 1 of `2^min(B, 18)`, tables 2 to 9 of `2^B`. A table of `2^b`
+  slots is of `2^(b − 4)` **buckets** of 16 slots.
+- Two mixers' **weights**, signed: 292 sets of 10, all initially 6554.
+- The **APM**: `Q = clamp(bitlen(⌊A / 8⌋), 8, 16)`; `2^Q` contexts of 33 values of 16 bits, value `j` of
   each initially `squash(128 × j − 2048) × 16`.
 - The **canvas**: the screen's `width × height` values, initially 256 each.
 
-### 5.3 An image
+### 5.3 A bit
+
+A bit is coded with a slot of each table (`p_j` the probability of table `j`'s), a set `s1` of
+the first mixer and `s2` of the second, and a context `c` of the APM:
+
+1. `st_j = stretch(p_j)`.
+2. The mixers: `d_m = clamp((Σ_j (st_j × weight[s_m][j] >> 10)) >> 6, −4095, 4095)` (signed),
+   `p_m = squash(d_m)`, and `pr = squash((d_1 + d_2) / 2)`.
+3. The APM: `sx = stretch(pr) + 2048`, `lo = sx >> 7`, `f = sx & 127`; context
+   `a = c & (2^Q − 1)`; `pa = APM[a][lo] × (128 − f) + APM[a][lo + 1] × f >> 11`.
+4. `pf = clamp((2pr + 2pa) >> 2, 1, 4095)`; the bit is coded with `p1 = pf × 16 + 8`.
+5. Updates, with `t = 65535` for a 1 and 0 for a 0:
+   - `APM[a][lo] += (t − APM[a][lo]) × (128 − f) >> 12` and
+     `APM[a][lo + 1] += (t − APM[a][lo + 1]) × f >> 12` (signed);
+   - each `weight[s_m][j] = clamp(weight[s_m][j] + (st_j × (e_m × 4) >> 14), −(2^19 − 1),
+     2^19 − 1)` with `e_m = 4096 × bit − p_m`;
+   - each slot: `p = clamp(p + ((t / 16 − p) × RATE[n] >> 16), 1, 4095)` (signed, `t / 16`
+     being 4095 or 0, `RATE` of §4.1), then `n += 1` where `n < 15`.
+
+### 5.4 An image
 
 Given an image of `k` bits a pixel (its minimum code size), rows of width `w' = max(w, 1)`, at
 `(left, top)`, and colors: `COLOR[v]` is the color of index `v` from the image's colors (red,
@@ -207,44 +228,32 @@ For each pixel `i` in turn, at `x = i mod w'`, `y = ⌊i / w'⌋`, of value `v`:
 
 - **Neighbours**: `W = px[i − 1]` (`x ≥ 1`), `N = px[i − w']` (`y ≥ 1`), `NW = px[i − w' − 1]`
   (`x, y ≥ 1`), `NE = px[i − w' + 1]` (`y ≥ 1`, `x + 1 < w'`), `WW = px[i − 2]` (`x ≥ 2`),
-  `NN = px[i − 2w']` (`y ≥ 2`), `NNE = px[i − 2w' + 1]` (`y ≥ 2`, `x + 1 < w'`); 256 where the
-  condition does not hold. `P` is the canvas at `(left + x, top + y)`, or 256 where that is off the
-  screen.
+  `NN = px[i − 2w']` (`y ≥ 2`); 256 where the condition does not hold. `P` is the canvas at
+  `(left + x, top + y)`, or 256 where that is off the screen.
 - **Colors**: with `cW = COLOR[W]` and so on, for each channel `c` of red, green, blue in turn:
   `mean = mean << 4 | ((2cW + 2cN + cNW + cNE) / 6 >> 4)`, `grad = grad << 4 |
   (clamp(cW + cN − cNW, 0, 255) >> 4)`, `up = up << 3 | ((cN + cNE) / 2 >> 5)`, all from 0.
 - **Contexts**, with `p | q` the bitwise or and `<<` of `u32`:
 
   ```text
-  h0 = 0                                     h6  = hash(hash(6, P), W | N << 9)
-  h1 = hash(1, W)                            h7  = hash(hash(7, W | N << 9), NE | NNE << 9)
-  h2 = hash(2, W | N << 9)                   h8  = hash(8, mean)
-  h3 = hash(hash(3, W | N << 9), NW | NE << 9)   h9  = hash(hash(9, up), W)
-  h4 = hash(hash(4, W | WW << 9), N)         h10 = hash(10, grad)
-  h5 = hash(hash(5, N | NN << 9), NE | NW << 9)  h11 = hash(hash(11, up), N)
+  h0 = 0                                          h5 = hash(hash(6, P), W | N << 9)
+  h1 = hash(1, W)                                 h6 = hash(8, mean)
+  h2 = hash(hash(3, W | N << 9), NW | NE << 9)    h7 = hash(hash(9, up), W)
+  h3 = hash(hash(4, W | WW << 9), N)              h8 = hash(10, grad)
+  h4 = hash(hash(5, N | NN << 9), NE | NW << 9)   h9 = hash(hash(11, up), N)
   ha = hash(12, W | N << 9)
   differ = (W ≠ N) + (NW ≠ W and NW ≠ N) + (NE ≠ W and NE ≠ N and NE ≠ NW)
   ```
 
-- The `k` bits of `v`, from the highest, each at `depth` 0 … `k − 1`, with `node` (initially 1,
-  then `node × 2 + bit`) and `sub` (likewise, but 1 again at each depth that is a multiple of 4):
-  1. At a depth that is a multiple of 4, each table `j`'s **bucket** is
-     `hash(hj, node) & (2^(B − 4) − 1)`, of the slots `16 × bucket` … `16 × bucket + 15`.
-  2. Slot `j` is slot `16 × bucket + sub` of table `j`; `st_j = stretch(p_j)`.
-  3. The mixers: set `s1 = node`, `s2 = 256 + min(depth, 7) × 4 + differ`;
-     `d_m = clamp((Σ_j st_j × weight[s_m][j]) >> 16, −4095, 4095)` (signed, exact), `p_m = squash(d_m)`,
-     and `pr = squash((d_1 + d_2) / 2)`.
-  4. The APM: `sx = stretch(pr) + 2048`, `lo = sx >> 7`, `f = sx & 127`; context
-     `a = hash(ha, node) & (2^Q − 1)`; `pa = APM[a][lo] × (128 − f) + APM[a][lo + 1] × f >> 11`.
-  5. `pf = clamp((2pr + 2pa) >> 2, 1, 4095)`; the bit is coded with `p1 = pf × 16 + 8`.
-  6. Updates, with `t = 65535` for a 1 and 0 for a 0:
-     - `APM[a][lo] += (t − APM[a][lo]) × (128 − f) >> 12` and
-       `APM[a][lo + 1] += (t − APM[a][lo + 1]) × f >> 12` (signed);
-     - each `weight[s_m][j] = clamp(weight[s_m][j] + (st_j × e_m × 4 >> 14), −2^24, 2^24)` with
-       `e_m = 4096 × bit − p_m`;
-     - each slot: `p = clamp(p + ((t / 16 − p) × RATE[n] >> 16), 1, 4095)` (signed, `t / 16`
-       being 4095 or 0, `RATE` of §4.1), then `n += 1` where `n < 15`.
-- `v` is the low `k` bits of the final `node`.
+- Table `j`'s bucket is `hash(hj, 1) & (its buckets − 1)`.
+- Where `W` is not 256, a bit (§5.3), 1 for `v = W`, of slot 0 of each bucket, the sets `s1 = 0`
+  and `s2 = 288 + differ`, and `c = hash(ha, 0)`. If it is 1, the pixel is `W`; nothing more.
+- Else the `k` bits of `v`, from the highest, each at `depth` 0 … `k − 1`, with `node` (initially
+  1, then `node × 2 + bit`) and `sub` (likewise, but 1 again at each depth that is a multiple of
+  4): at a depth that is a nonzero multiple of 4, table `j`'s bucket is `hash(hj, node) & (its
+  buckets − 1)`; the bit (§5.3) is of slot `sub` of each bucket, the sets `s1 = node` and
+  `s2 = 256 + min(depth, 7) × 4 + differ`, and `c = hash(ha, node)`. `v` is the low `k` bits of
+  the final `node`.
 
 After the image's pixels, each pixel `i` sets the canvas at `(left + i mod w', top + ⌊i / w'⌋)`,
 where that is on the screen, to its value.

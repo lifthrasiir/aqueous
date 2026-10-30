@@ -610,7 +610,8 @@ pub fn split(d: &[u8]) -> Result<Split> {
     let mut e = Enc::new();
     let coded = data.len();
     code(&mut e, &sk, &mut at, &mut data, None)?;
-    Ok(Split { skeleton: sk, record: e.c.finish(), coded, images: g.images.len(), cost: e.cost })
+    let cost = e.cost();
+    Ok(Split { skeleton: sk, record: e.c.finish(), coded, images: g.images.len(), cost })
 }
 
 /// The file that `sk` and `record` rebuild, appended to `out`.
