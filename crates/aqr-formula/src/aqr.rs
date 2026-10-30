@@ -945,6 +945,20 @@ pub fn stand_in(m: Module) -> Vec<u8> {
 
 /// The name of the module that Wasm module `w` is the [`stand_in`] of, if any.
 fn stand_in_name(w: &[u8]) -> Option<&str> {
+    std::str::from_utf8(custom_section(w, STAND_IN_SECTION)?).ok()
+}
+
+/// The task slots of Wasm module `w` (its custom section `aqr_task_slots`, the spec's "Tasks"),
+/// 0 where it has none, or not a valid one (which loading it fails on).
+fn task_slots(w: &[u8]) -> u64 {
+    match custom_section(w, "aqr_task_slots") {
+        Some(&[n @ 1..=64]) => n.into(),
+        _ => 0,
+    }
+}
+
+/// The content of the first custom section `name` of Wasm module `w`, if any.
+fn custom_section<'w>(w: &'w [u8], name: &str) -> Option<&'w [u8]> {
     let mut at = WASM_HEADER.len();
     if w.get(..at)? != WASM_HEADER {
         return None;
@@ -958,8 +972,8 @@ fn stand_in_name(w: &[u8]) -> Option<&str> {
         if id == 0 {
             let mut p = 0;
             let n = usize::try_from(varint::get(s, &mut p).ok()?).ok()?;
-            if s.get(p..p.checked_add(n)?)? == STAND_IN_SECTION.as_bytes() {
-                return std::str::from_utf8(&s[p + n..]).ok();
+            if s.get(p..p.checked_add(n)?)? == name.as_bytes() {
+                return Some(&s[p + n..]);
             }
         }
     }
@@ -2047,9 +2061,11 @@ impl Archive<'_, '_> {
     }
 
     /// Has leaves evaluated at once only while their weights add up to at most `bytes` (or one
-    /// alone), taken in their order: the weight of a leaf is the most bytes its evaluation holds
-    /// at once, as its formula tells (its literals and slices, and the inputs and outputs of an
-    /// application as it is made), short of what modules take within. None by default.
+    /// alone), taken in their order but for those of long work on a thread, first, and those
+    /// going before one waiting for room ([`Gate`]): the weight of a leaf is the most bytes its
+    /// evaluation holds at once, as its formula tells (its literals and slices, and the inputs
+    /// and outputs of an application as it is made), short of what modules take within. None by
+    /// default.
     pub fn set_budget(&mut self, bytes: u64) {
         self.budget = bytes;
     }
@@ -2162,17 +2178,28 @@ impl Archive<'_, '_> {
                 }
             }
         }
-        // by leaf, its weight and the bytes of its outputs
-        let (weights, lens): (Vec<u64>, Vec<u64>) = (blocks.leaves.iter().zip(&programs))
-            .map(|(leaf, p)| match (leaf, p) {
+        // by leaf, its weight, the bytes of its outputs and of its work on a thread
+        let slots: Vec<u64> = blocks.modules.iter().map(|w| task_slots(w)).collect();
+        let (mut weights, mut lens, mut serial) = (Vec::new(), Vec::new(), Vec::new());
+        for (leaf, p) in blocks.leaves.iter().zip(&programs) {
+            let (w, l, t) = match (leaf, p) {
                 (&LeafBlock::Stored(d, zstd, checked, _), _) => {
                     let n = stored_len(d, zstd, checked);
-                    (n, n)
+                    (n, n, 0)
                 }
-                (_, Some(p)) => p.weight(),
-                _ => (0, 0),
-            })
-            .unzip();
+                (_, Some(p)) => p.weight(&slots),
+                _ => (0, 0, 0),
+            };
+            weights.push(w);
+            lens.push(l);
+            serial.push(t);
+        }
+        // the leaves of long work on a thread first, the longest first, for it to be done beside
+        // the others; the others in their order
+        let long = |i: &usize| serial[*i] >= LONG_SERIAL;
+        let mut order: Vec<usize> = (0..serial.len()).filter(long).collect();
+        order.sort_by_key(|&i| std::cmp::Reverse(serial[i]));
+        order.extend((0..serial.len()).filter(|i| !long(i)));
         let stored = blocks.leaves.iter().map(|l| if let &LeafBlock::Stored(d, ..) = l { d.len() as u64 } else { 0 });
         let data_len = stored.sum::<u64>() + blocks.non_leaf.iter().map(|(d, ..)| d.len() as u64).sum::<u64>();
         let tally = Tally {
@@ -2188,16 +2215,16 @@ impl Archive<'_, '_> {
             dictionaries: &blocks.dictionaries,
             tally: &tally,
         };
-        let gate = Gate::new(self.budget);
+        let gate = Gate::new(self.budget, &weights, order);
         let programs: Vec<Mutex<Option<Program>>> = programs.into_iter().map(Mutex::new).collect();
         // each leaf on a worker of its own, which is given back as it is done, for those still
         // running to take for their own work (a stream that takes long alone)
-        let done = aqr_common::pool::dispatch(
+        let done = aqr_common::pool::dispatch_any(
             blocks.leaves.len(),
             threads,
-            |i| {
+            || {
                 let _w = aqr_common::trace::wait("budget");
-                gate.admit(weights[i])
+                gate.next()
             },
             |i, _admitted| {
                 let (_s, _i) =
@@ -2734,9 +2761,14 @@ impl Program<'_> {
     /// The most bytes on the stack at once (with the inputs and outputs of an instruction as it
     /// runs both, or an application's memory limit where larger: the working memory of its module,
     /// which a native one takes too), as the sizes the program tells: the weight of its leaf
-    /// ([`Archive::set_budget`]); and the bytes on it at the end, its outputs.
-    fn weight(&self) -> (u64, u64) {
-        let (mut st, mut on, mut most) = (Vec::<u64>::new(), 0u64, 0u64);
+    /// ([`Archive::set_budget`]); and the bytes on it at the end, its outputs. Of a module of
+    /// `slots[m]` task slots (by module block), the limit counts the tasks' copies of the working
+    /// memory as memories of their own, which a native one does not make and Wasm ones share
+    /// (copying on write): an instance's share of it is weighed, as of the instance and as many
+    /// tasks. Third, the bytes of the inputs and outputs of its applications of modules of no
+    /// tasks: of the work that takes a thread, its longest.
+    fn weight(&self, slots: &[u64]) -> (u64, u64, u64) {
+        let (mut st, mut on, mut most, mut serial) = (Vec::<u64>::new(), 0u64, 0u64, 0u64);
         let pop = |st: &mut Vec<u64>, on: &mut u64, n: usize| -> u64 {
             let taken: u64 = st.drain(st.len().saturating_sub(n)..).sum();
             *on -= taken;
@@ -2744,7 +2776,9 @@ impl Program<'_> {
         };
         for insn in &self.insns {
             let limit = match insn {
-                Insn::Apply(a) if a.memory_limit != crate::NO_LIMIT => a.memory_limit,
+                Insn::Apply(a) if a.memory_limit != crate::NO_LIMIT => {
+                    a.memory_limit / (1 + slots[self.modules[a.module]])
+                }
                 _ => 0,
             };
             let (ins, outs): (u64, Vec<u64>) = match insn {
@@ -2760,11 +2794,16 @@ impl Program<'_> {
                 Insn::Nop | Insn::Swap(_) | Insn::Checksum(_) => continue,
             };
             let out: u64 = outs.iter().sum();
+            if let Insn::Apply(a) = insn
+                && slots[self.modules[a.module]] == 0
+            {
+                serial = serial.saturating_add(ins).saturating_add(out);
+            }
             most = most.max(on.saturating_add(ins.saturating_add(out).max(limit)));
             on = on.saturating_add(out);
             st.extend(outs);
         }
-        (most, on)
+        (most, on, serial)
     }
 }
 
@@ -2781,41 +2820,110 @@ fn stored_len(d: &[u8], zstd: bool, checked: bool) -> u64 {
     raw.saturating_sub(at as u64 + 1).saturating_add(delta).saturating_sub(shrink)
 }
 
-/// The leaves let in by [`Archive::set_budget`] (in their order, [`aqr_common::pool::dispatch`]),
-/// each once those evaluated leave room for it.
-struct Gate {
+/// The bytes of work on a thread from which a leaf is evaluated first ([`Program::weight`]).
+const LONG_SERIAL: u64 = 64 << 20;
+
+/// The leaves let in by [`Archive::set_budget`] ([`aqr_common::pool::dispatch_any`]): in an
+/// order (of the leaves' indices), each once those evaluated leave room for it; but while the
+/// first not let in waits, the leaves after it that fit in go before it, up to the budget's bytes
+/// of weights (after which it is let in alone, as those in end), and past [`PASSING`] leaves that
+/// do not at most.
+struct Gate<'w> {
     budget: u64,
-    /// The weights of the leaves in.
-    state: Mutex<u64>,
+    weights: &'w [u64],
+    order: Vec<usize>,
+    state: Mutex<GateState>,
     changed: std::sync::Condvar,
 }
 
-/// A leaf let in, until dropped.
-struct Admitted<'g>(&'g Gate, u64);
+/// How many leaves that do not fit in the leaves going before the first waiting pass at most
+/// ([`Gate`]).
+const PASSING: usize = 64;
 
-impl Gate {
-    fn new(budget: u64) -> Self {
-        Gate { budget, state: Mutex::new(0), changed: std::sync::Condvar::new() }
+struct GateState {
+    /// The weights of the leaves in.
+    on: u64,
+    /// The leaves let in, and the first not (by their places in the order, as below).
+    taken: Vec<bool>,
+    first: usize,
+    /// While it waits: the leaves after it looked at and not let in, the first not looked at,
+    /// and the weights of those let in.
+    skipped: Vec<usize>,
+    scan: usize,
+    passed: u64,
+}
+
+impl GateState {
+    /// A leaf after the first that may go before it, of those that `fits`.
+    fn passing(&mut self, fits: impl Fn(u64, usize) -> bool) -> Option<usize> {
+        let (on, first, taken) = (self.on, self.first, &self.taken);
+        self.skipped.retain(|&i| !taken[i] && i != first);
+        if let Some(k) = self.skipped.iter().position(|&i| fits(on, i)) {
+            return Some(self.skipped.remove(k));
+        }
+        self.scan = self.scan.max(first + 1);
+        while self.skipped.len() < PASSING && self.scan < taken.len() {
+            let i = self.scan;
+            self.scan += 1;
+            if fits(on, i) {
+                return Some(i);
+            }
+            self.skipped.push(i);
+        }
+        None
+    }
+}
+
+/// A leaf let in, until dropped.
+struct Admitted<'g>(&'g Gate<'g>, u64);
+
+impl<'w> Gate<'w> {
+    fn new(budget: u64, weights: &'w [u64], order: Vec<usize>) -> Self {
+        let taken = vec![false; weights.len()];
+        let state = GateState { on: 0, taken, first: 0, skipped: Vec::new(), scan: 0, passed: 0 };
+        Gate { budget, weights, order, state: Mutex::new(state), changed: std::sync::Condvar::new() }
     }
 
-    /// Waits for a leaf of weight `w` to be let in: alone, or with those in within the budget.
-    fn admit(&self, w: u64) -> Admitted<'_> {
-        if self.budget == u64::MAX {
-            return Admitted(self, 0);
-        }
+    /// Waits for a leaf to be let in, and gives its index: the first not let in yet if it fits,
+    /// alone or with those in within the budget, else one after it that does as it may pass.
+    fn next(&self) -> (usize, Admitted<'_>) {
         let mut s = self.state.lock().unwrap();
-        while *s != 0 && s.saturating_add(w) > self.budget {
+        while s.taken.get(s.first) == Some(&true) {
+            s.first += 1;
+        }
+        let first = s.first;
+        if self.budget == u64::MAX {
+            s.taken[first] = true;
+            return (self.order[first], Admitted(self, 0));
+        }
+        let fits = |on: u64, i: usize| on == 0 || on.saturating_add(self.weights[self.order[i]]) <= self.budget;
+        loop {
+            let i = if fits(s.on, first) {
+                s.passed = 0;
+                Some(first)
+            } else if s.passed < self.budget {
+                s.passing(fits)
+            } else {
+                None
+            };
+            if let Some(i) = i {
+                let w = self.weights[self.order[i]];
+                s.taken[i] = true;
+                s.on += w;
+                if i != first {
+                    s.passed = s.passed.saturating_add(w);
+                }
+                return (self.order[i], Admitted(self, w));
+            }
             s = self.changed.wait(s).unwrap();
         }
-        *s += w;
-        Admitted(self, w)
     }
 }
 
 impl Drop for Admitted<'_> {
     fn drop(&mut self) {
         if self.0.budget != u64::MAX {
-            *self.0.state.lock().unwrap() -= self.1;
+            self.0.state.lock().unwrap().on -= self.1;
             self.0.changed.notify_all();
         }
     }
@@ -4456,6 +4564,72 @@ mod tests {
         for b in [1, 6, 1000] {
             assert_eq!(each(Some(b)), all, "{b}");
         }
+    }
+
+    /// `rev`, whose application of parameters 9 waits for the last leaf to start.
+    struct WaitsForLast(Arc<(Mutex<bool>, std::sync::Condvar)>);
+
+    impl crate::Modules for WaitsForLast {
+        fn apply(&self, a: &crate::Apply, inputs: &[&[u8]]) -> Result<Vec<u8>> {
+            if a.params == [9] {
+                let (started, changed) = &*self.0;
+                let s = started.lock().unwrap();
+                let (s, _) = changed.wait_timeout_while(s, std::time::Duration::from_secs(5), |s| !*s).unwrap();
+                if !*s {
+                    return Err(Error::new("the last leaf not let in"));
+                }
+            }
+            Ok(inputs.concat().into_iter().rev().collect())
+        }
+    }
+
+    /// Within a budget, the leaves after one waiting for room that fit go before it, and the
+    /// memory limit of a module of tasks is weighed as an instance's share of it (the rest the
+    /// copies of its working memory): in each archive, the first leaf waits for the last to start.
+    #[test]
+    fn budget_passed() {
+        // `rev` of `params`, declaring `limit`; and a leaf of no application
+        let leaf = |params: u8, limit: u64| {
+            let mut d = vec![1, 0, 0, 1, 0, SLICE, 0, 0, 2, SLICE, 0, 1, 2, APPLY, 0, 0, 1, params];
+            varint::put(&mut d, limit);
+            d.extend_from_slice(&[2, 1, 4, SLICE, 0, 2, 1, CONCAT, 2]);
+            d
+        };
+        let plain = vec![1, 0, 0, 0, SLICE, 0, 0, 3];
+        let run = |module: &[u8], leaves: &[Vec<u8>]| {
+            let c = archive(|out| {
+                block(out, MODULE, &always_compressed(&mut CCtx::create(), &[module], 3, 1).unwrap());
+                for d in leaves {
+                    formula_block(out, 1, &always_compressed(&mut CCtx::create(), &[d], 3, 1).unwrap());
+                }
+                content_block(out, false, &[b"xyz"], None);
+            });
+            let started = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+            let waits = WaitsForLast(started.clone());
+            let natives = super::natives(&[REV], &waits);
+            let mut a = open(&c, &natives).unwrap();
+            a.set_budget(2000);
+            let last = leaves.len() - 1;
+            a.on_progress(Some(Arc::new(move |s| {
+                if matches!(s, Step::Started(i) if i == last) {
+                    *started.0.lock().unwrap() = true;
+                    started.1.notify_all();
+                }
+            })));
+            a.leaves(4, |_, _| Ok(()))
+        };
+        // the second and the third wait for the first to end, and more leaves than PASSING go
+        // before them
+        let mut leaves = vec![leaf(9, 1500), leaf(1, 1800), leaf(1, 1800)];
+        leaves.extend(std::iter::repeat_n(plain.clone(), 2 * PASSING));
+        assert_eq!(run(&stand_in(REV), &leaves), Ok(()));
+        // a module of 8 task slots: an instance and 8 tasks, 1500 bytes each
+        let mut slotted = stand_in(REV);
+        let name = b"aqr_task_slots";
+        slotted.extend_from_slice(&[0, name.len() as u8 + 2, name.len() as u8]);
+        slotted.extend_from_slice(name);
+        slotted.push(8);
+        assert_eq!(run(&slotted, &[leaf(9, 9 * 1500), plain]), Ok(()));
     }
 
     #[test]

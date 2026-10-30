@@ -541,19 +541,45 @@ pub fn dispatch<G: Send, R: Send>(
     mut admit: impl FnMut(usize) -> G,
     f: impl Fn(usize, G) -> R + Sync,
 ) -> Vec<R> {
+    let mut i = 0;
+    dispatch_any(
+        n,
+        threads,
+        || {
+            i += 1;
+            (i - 1, admit(i - 1))
+        },
+        f,
+    )
+}
+
+/// [`dispatch`] of the items in the order `next` lets them in: each call the index of one of
+/// `0..n` not let in yet (and what it was let in with), `n` calls in all.
+pub fn dispatch_any<G: Send, R: Send>(
+    n: usize,
+    threads: usize,
+    mut next: impl FnMut() -> (usize, G),
+    f: impl Fn(usize, G) -> R + Sync,
+) -> Vec<R> {
     if threads <= 1 || !THREADS {
-        return (0..n).map(|i| f(i, admit(i))).collect();
+        let mut out: Vec<Option<R>> = (0..n).map(|_| None).collect();
+        for _ in 0..n {
+            let (i, g) = next();
+            out[i] = Some(f(i, g));
+        }
+        return out.into_iter().map(|r| r.expect("every index done")).collect();
     }
     let out: Vec<Mutex<Option<R>>> = (0..n).map(|_| Mutex::new(None)).collect();
     let (running, done, failed) = (Mutex::new(0usize), Condvar::new(), std::sync::atomic::AtomicBool::new(false));
     let (out, running, done, failed, f) = (&out, &running, &done, &failed, &f);
     let p = pool();
     let mut hs = Vec::new();
-    for (i, slot) in out.iter().enumerate() {
+    for _ in 0..n {
         if failed.load(Ordering::Relaxed) {
             break;
         }
-        let g = admit(i);
+        let (i, g) = next();
+        let slot = &out[i];
         let w = crate::trace::wait("worker");
         {
             let mut r = running.lock().unwrap();
