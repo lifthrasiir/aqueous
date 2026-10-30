@@ -604,7 +604,18 @@ fn finish(
     let decodes = |c: &[u8]| {
         let files = |_: usize, range: Range<usize>| d.get(range).map(<[u8]>::to_vec);
         let m = verify::Cached::new(Native { threads: opt.threads }, memo, &files);
-        let decodes = aqr::decode(c, &aqr_decompress::natives(&m)).is_ok_and(|out| out == d);
+        // (compared as it is written out, not held whole: a file of parts streams, see
+        // `aqr::Archive::write_file`)
+        let runner = aqr_decompress::natives(&m);
+        let mut at = 0;
+        let decodes = aqr::open(c, &runner).is_ok_and(|a| {
+            let written = a.write_file(opt.threads, &mut |p: &[u8]| {
+                let same = d.get(at..at + p.len()) == Some(p);
+                at += p.len();
+                if same { Ok(()) } else { Err(aqr::Failure::Invalid("not the file".into())) }
+            });
+            written.is_ok_and(|n| n == d.len() as u64)
+        });
         notes.inspect(|n| n.send(Note::Verified(0, d.len() as u64)));
         decodes
     };
@@ -1935,6 +1946,26 @@ mod tests {
                 0x80 | (x >> 60) as u8
             })
             .collect()
+    }
+
+    /// A formula whose archive does not give the file back (a module's bug) is not taken: the
+    /// file is archived as it is. So where the output differs only at its end, is shorter or
+    /// longer (verified as it is decoded, part by part).
+    #[test]
+    fn not_given_back_raw() {
+        let d: Vec<u8> = (0..300_000u32).map(|i| (i * 7 % 251) as u8).collect();
+        let opt = Options::default();
+        let mut wrong_end = d.clone();
+        *wrong_end.last_mut().unwrap() ^= 1;
+        for other in [d.clone(), wrong_end, d[..d.len() - 1].to_vec(), [&d[..], b"x"].concat()] {
+            let mut f = Formula::default();
+            f.push("a", other[..1000].to_vec());
+            f.push("b", other[1000..].to_vec());
+            f.root = Node::concat([Node::slice(0, 0, 1000), Node::slice(1, 0, other.len() as u64 - 1000)]);
+            let cx = Cx::new(&d, &opt);
+            let (c, _) = finish(f, &d, &opt, &cx, Default::default(), false, None);
+            assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
+        }
     }
 
     /// The formulas recompressors make are evaluated beforehand: decoding the archive takes
