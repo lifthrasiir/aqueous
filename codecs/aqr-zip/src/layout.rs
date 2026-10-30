@@ -269,6 +269,8 @@ pub struct Writer<'a> {
     st: State,
     pub layout: Vec<u8>,
     pub kept: Vec<u8>,
+    /// Where each piece of `kept` (a gap, a body) ends in it.
+    pub kept_ends: Vec<usize>,
     /// Local entries by position, for central headers to refer to.
     locals: std::collections::HashMap<u64, usize>,
 }
@@ -290,7 +292,7 @@ impl<'a> Writer<'a> {
     pub fn new(d: &'a [u8], base: i64) -> Writer<'a> {
         let mut layout = Vec::new();
         varint::put_signed(&mut layout, base);
-        Writer { d, st: State::new(base), layout, kept: Vec::new(), locals: Default::default() }
+        Writer { d, st: State::new(base), layout, kept: Vec::new(), kept_ends: Vec::new(), locals: Default::default() }
     }
 
     fn bytes(&mut self, r: Range<usize>) {
@@ -302,6 +304,7 @@ impl<'a> Writer<'a> {
         self.layout.push(GAP);
         varint::put(&mut self.layout, r.len() as u64);
         self.kept.extend_from_slice(&self.d[r]);
+        self.kept_ends.push(self.kept.len());
     }
 
     pub fn local(&mut self, l: &zip::Local, made: &Made, crc: u32) {
@@ -322,6 +325,7 @@ impl<'a> Writer<'a> {
                 self.layout.extend_from_slice(&crc.to_le_bytes());
                 varint::put(&mut self.layout, *usize);
                 self.kept.extend_from_slice(&d[l.body.clone()]);
+                self.kept_ends.push(self.kept.len());
             }
             Made::Same(i) => varint::put(&mut self.layout, (self.st.seen.len() - i) as u64),
         }

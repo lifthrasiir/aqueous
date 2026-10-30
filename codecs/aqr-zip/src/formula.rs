@@ -85,6 +85,11 @@ pub const PROBE_MIN: usize = 256 << 10;
 /// known only at its start), and found where the same file is archived along with them.
 pub const OWN_MIN: usize = 256 << 10;
 
+/// Bodies kept as they are of at least this many bytes are slices of their own, so that the
+/// same bodies elsewhere (another build's archive) are found by their slices; they are not
+/// recompressed, so that costs only the slices.
+pub const KEPT_OWN: usize = 1 << 10;
+
 /// [`Options::limit`] for an archive of `n` bytes on its own: 64 MiB, and 32 times the archive.
 pub fn limit(n: usize) -> u64 {
     (64 << 20) + 32 * n as u64
@@ -356,7 +361,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             Rec::End { pos, comment } => w.end(*pos, comment.clone()),
         }
     }
-    let (layout, kept) = (w.layout, w.kept);
+    let (layout, kept, kept_ends) = (w.layout, w.kept, w.kept_ends);
     // The layout must give the archive back with the bodies as they are: a check of everything
     // but aqr-flate, which is cheap (compared with the archive as it is made, not kept).
     let flate_len = deflated.iter().map(|b| b.0.len()).sum::<usize>() + derived.len();
@@ -369,7 +374,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     let mut f = Formula::default();
     f.push("raw", Vec::new());
     f.push("raw", Vec::new());
-    let (layout, kept) = (f.push("zip/layout", layout), f.push("zip/kept", kept));
+    let (layout, kept) = (f.push("zip/layout", layout), own_slices(f.push("zip/kept", kept), &kept_ends));
     let flate = match lens.is_empty() {
         true => None,
         false => {
@@ -393,6 +398,26 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
     };
     f.root = Node::apply(MODULE, Vec::new(), vec![stored, flate, layout, kept], input.len() as u64);
     Some(Encoded { formula: f, inflated })
+}
+
+/// `all`, a slice of a whole stream, as slices of the pieces ending at `ends` of at least
+/// [`KEPT_OWN`] bytes, those shorter one after another being one.
+fn own_slices(all: Node, ends: &[usize]) -> Node {
+    let Node::Slice { stream, .. } = all else { return all };
+    let (mut parts, mut start, mut open) = (Vec::<(usize, usize)>::new(), 0, false);
+    for &end in ends {
+        let small = end - start < KEPT_OWN;
+        match parts.last_mut() {
+            Some(p) if open && small => p.1 = end,
+            _ if end == start => {}
+            _ => parts.push((start, end)),
+        }
+        (open, start) = (small, end);
+    }
+    match parts.len() {
+        0 | 1 => all,
+        _ => Node::Concat(parts.into_iter().map(|(a, b)| Node::slice(stream, a as u64, (b - a) as u64)).collect()),
+    }
 }
 
 /// The output of `a`, an application of [`MODULE`] or of aqr-flate's, on `inputs`.

@@ -395,6 +395,23 @@ fn odd_bodies() {
     assert_eq!(b, [Body::Kept, Body::Kept, Body::Kept, Body::Kept, Body::Kept, Body::Deflated, Body::Kept]);
 }
 
+/// Bodies kept as they are are slices of their own (those of at least 1 KiB), so that the same
+/// body elsewhere (another build's archive in the same tar archive) is found by its slices.
+#[test]
+fn kept_slices() {
+    let (a, b) = (noise(3000), Rng::new(5).bytes(2000));
+    let es = vec![
+        Entry { method: 99, body: Some(a), ..entry("a", text(100)) },
+        Entry { method: 99, body: Some(b"tiny".to_vec()), ..entry("t", text(100)) },
+        Entry { method: 99, body: Some(b), ..entry("b", text(100)) },
+    ];
+    let (f, _) = roundtrip_with(&archive(es).bytes(), &Options::default());
+    let Node::Apply(ap) = &f.root else { panic!("not an application") };
+    let Node::Concat(ns) = &ap.inputs[3] else { panic!("one slice: {:?}", ap.inputs[3]) };
+    let lens: Vec<u64> = ns.iter().map(Node::len).collect();
+    assert!(lens.contains(&3000) && lens.contains(&2000), "{lens:?}");
+}
+
 /// Entries overlapping (a "better zip bomb"): central headers refer to local headers inside
 /// the first entry's body.
 #[test]
