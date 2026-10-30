@@ -993,8 +993,9 @@ impl Encoder {
 
     /// Compresses `streams` (but those of [`Kind::Compressed`], which are stored as they are)
     /// as [`Encoder::encode`] would, each on a thread of its own (on up to the encoder's
-    /// threads, the calling one and workers of [`aqr_common::pool`]), for the blocks of them
-    /// written next: the same bytes as one after another.
+    /// threads, the calling one and workers of [`aqr_common::pool`]), but those of more than
+    /// two of Zstandard's jobs, each on up to [`LARGE_THREADS`] beforehand: for the blocks of
+    /// them written next, the same bytes as one after another.
     pub fn precompress(&self, streams: &[&crate::Stream]) -> Result<()> {
         let todo: Vec<(&[u8], How)> = {
             let kept = self.streams.borrow();
@@ -1011,13 +1012,12 @@ impl Encoder {
         let level = self.level;
         let total = todo.iter().map(|t| t.0.len() as u64).sum();
         let (done, progress) = (std::sync::atomic::AtomicU64::new(0), self.progress.as_deref());
-        let made = aqr_common::pool::par_map(todo.len(), self.threads, |i| -> Result<(StreamKey, Compressed)> {
-            let (d, how) = todo[i];
+        let one = |(d, how): (&[u8], How), threads: usize| -> Result<(StreamKey, Compressed)> {
             let made = THREAD_CCTX.with(|c| {
                 let c = &mut c.borrow_mut();
                 let c = match plan_by(level, how, &[d], &mut |sample, l| compressed(c, &[sample.unwrap_or(d)], l, 1))? {
                     Plan::Done(c) => c,
-                    Plan::Level(l, size) => compressed_to(c, &[d], l, 1, size)?,
+                    Plan::Level(l, size) => compressed_to(c, &[d], l, threads, size)?,
                 };
                 Ok((key_how(&[d], how), c))
             });
@@ -1025,7 +1025,11 @@ impl Encoder {
                 p(done.fetch_add(d.len() as u64, std::sync::atomic::Ordering::Relaxed) + d.len() as u64, total);
             }
             made
-        });
+        };
+        let (large, small): (Vec<_>, Vec<_>) = todo.iter().partition(|t| t.0.len() > 2 * ZSTD_JOB as usize);
+        let threads = self.threads.min(LARGE_THREADS);
+        let mut made: Vec<_> = large.into_iter().map(|&t| one(t, threads)).collect();
+        made.extend(aqr_common::pool::par_map(small.len(), self.threads, |i| one(*small[i], 1)));
         let mut kept = self.streams.borrow_mut();
         for m in made {
             let (k, c) = m?;
@@ -1342,6 +1346,12 @@ fn stored_external(data: &[&[u8]]) -> Vec<u8> {
 /// so that it compresses the same on any; this loses 0.1-0.2% against compressing it in one
 /// piece, at levels 3 and 4.
 const ZSTD_JOB: u32 = 16 << 20;
+
+/// Threads compressing a stream of more than two of Zstandard's jobs in
+/// [`Encoder::precompress`], which the rest would wait for on one (10gb's enwik batch: a stream
+/// of 0.5 GB, 5.3 s at level 9). Each of Zstandard's workers holds a context of the level and
+/// window of its own (all of them, 10, took 0.2-0.3 GB more of 10gb's peak).
+const LARGE_THREADS: usize = 4;
 
 /// Bytes of data above which it is compressed with long-distance matching, over a window of
 /// all of it up to [`WINDOW_LOG_MAX`].
