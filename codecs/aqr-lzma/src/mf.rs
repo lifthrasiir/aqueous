@@ -147,6 +147,9 @@ pub struct Mf<'a> {
     next: usize,
     /// The position the chains' `found` are for.
     found_at: usize,
+    /// The bytes of its chains let in by [`gate`].
+    #[cfg(not(target_arch = "wasm32"))]
+    admitted: usize,
 }
 
 impl<'a> Mf<'a> {
@@ -156,6 +159,8 @@ impl<'a> Mf<'a> {
         // slot is taken again only by `c + ring`, which is at least `pos` (not added yet). So a
         // dictionary of 2^n bytes takes chains of 2^n, not 2^(n+1).
         let ring = reach.clamp(1, d.len().max(1)).next_power_of_two();
+        #[cfg(not(target_arch = "wasm32"))]
+        let admitted = gate::admit(3 * 4 * (ring.min(d.len().max(1)) + (1 << HASH_BITS)));
         Mf {
             d,
             reach,
@@ -166,6 +171,8 @@ impl<'a> Mf<'a> {
             long: Chain::new(ring, d.len(), reach),
             next: 0,
             found_at: usize::MAX,
+            #[cfg(not(target_arch = "wasm32"))]
+            admitted,
         }
     }
 
@@ -288,6 +295,43 @@ impl<'a> Mf<'a> {
             self.long.found.clear();
         }
         best.min(cap)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for Mf<'_> {
+    fn drop(&mut self) {
+        gate::release(self.admitted);
+    }
+}
+
+/// The match finders' chains of a process at once, natively: one that would take them past
+/// [`gate::AT_ONCE`] bytes waits for others to be dropped (one alone is let in whatever its
+/// size), so that streams of large dictionaries split or rebuilt on several threads (the folders
+/// of a 7z archive: 0.8 GB of chains each for 64 MiB) take turns. Only the order of the work
+/// changes. A module, on a thread of its own, has none.
+#[cfg(not(target_arch = "wasm32"))]
+mod gate {
+    use std::sync::{Condvar, Mutex};
+
+    pub const AT_ONCE: usize = 1 << 30;
+
+    static HELD: Mutex<usize> = Mutex::new(0);
+    static FREED: Condvar = Condvar::new();
+
+    /// Waits for `n` bytes to be let in, and gives them back.
+    pub fn admit(n: usize) -> usize {
+        let mut held = HELD.lock().unwrap();
+        while *held > 0 && *held + n > AT_ONCE {
+            held = FREED.wait(held).unwrap();
+        }
+        *held += n;
+        n
+    }
+
+    pub fn release(n: usize) {
+        *HELD.lock().unwrap() -= n;
+        FREED.notify_all();
     }
 }
 
