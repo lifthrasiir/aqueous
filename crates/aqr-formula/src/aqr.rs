@@ -2680,8 +2680,9 @@ struct Program<'a> {
 
 impl Program<'_> {
     /// The most bytes on the stack at once (with the inputs and outputs of an instruction as it
-    /// runs both), as the sizes the program tells: the weight of its leaf ([`Archive::set_budget`]);
-    /// and the bytes on it at the end, its outputs.
+    /// runs both, or an application's memory limit where larger: the working memory of its module,
+    /// which a native one takes too), as the sizes the program tells: the weight of its leaf
+    /// ([`Archive::set_budget`]); and the bytes on it at the end, its outputs.
     fn weight(&self) -> (u64, u64) {
         let (mut st, mut on, mut most) = (Vec::<u64>::new(), 0u64, 0u64);
         let pop = |st: &mut Vec<u64>, on: &mut u64, n: usize| -> u64 {
@@ -2690,6 +2691,10 @@ impl Program<'_> {
             taken
         };
         for insn in &self.insns {
+            let limit = match insn {
+                Insn::Apply(a) if a.memory_limit != crate::NO_LIMIT => a.memory_limit,
+                _ => 0,
+            };
             let (ins, outs): (u64, Vec<u64>) = match insn {
                 Insn::Literal(l) => (0, vec![l.len() as u64]),
                 &Insn::Slice { len, .. } => (0, vec![len]),
@@ -2703,7 +2708,7 @@ impl Program<'_> {
                 Insn::Nop | Insn::Swap(_) | Insn::Checksum(_) => continue,
             };
             let out: u64 = outs.iter().sum();
-            most = most.max(on.saturating_add(ins).saturating_add(out));
+            most = most.max(on.saturating_add(ins.saturating_add(out).max(limit)));
             on = on.saturating_add(out);
             st.extend(outs);
         }
