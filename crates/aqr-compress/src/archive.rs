@@ -575,6 +575,10 @@ const MEMBER_MIN: u64 = 4 << 10;
 /// archive's members of a kind, and the same files of other kinds, apart from it).
 const SLICE_MIN: usize = 1 << 10;
 
+/// Pieces of the starts of more distinct contents than this tell nothing of which are alike
+/// ([`together`]).
+const CHUNK_COMMON: usize = 8;
+
 /// The most bytes of contents put in one batch for holding each other ([`together`]).
 const TOGETHER_MAX: u64 = 2 << 30;
 
@@ -587,10 +591,11 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// for their CRC-32; those of at least [`MEMBER_MIN`] bytes), a git pack and its indexes (by name and the pack's
 /// trailer, of any size), a `.lzma` or `.xz` file and those of what its streams hold
 /// (decoded whole, [`stream_sums`]), FSB5 banks and those of their samples (read whole, by the samples'
-/// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB; the
-/// same file, longer or shorter). Of the contents of at least [`TOGETHER_MIN`] bytes, which are
-/// read at their start (and the archives at their end, the contents of the sizes of entries
-/// whole); together, no more than [`TOGETHER_MAX`] bytes. Returns them, and the contents found
+/// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB, or
+/// two or more of its pieces, [`probe::chunks`]; the same file, longer or shorter, or edited).
+/// Of the contents of at least [`TOGETHER_MIN`] bytes, which are read at their start (and the
+/// archives at their end, the contents of the sizes of entries whole); together, no more than
+/// [`TOGETHER_MAX`] bytes. Returns them, and the contents found
 /// as entries or members of others, and the PE files.
 fn together<S: Source + ?Sized>(
     src: &S,
@@ -603,10 +608,10 @@ fn together<S: Source + ?Sized>(
     let n = src.len();
     let large: Vec<usize> = (0..n).filter(|&c| src.size(c) >= TOGETHER_MIN).collect();
     notes.send(Note::More(large.len() as u64));
-    // of each: the hash of its start, the CRC-32 and size of the entries it holds, and whether
-    // it only bundles files (whose members are known once it is read whole) or is a PE
-    // file
-    type Looked = (u64, Vec<(u32, u64)>, bool, bool);
+    // of each: the hash of its start and those of its start's pieces, the CRC-32 and size of
+    // the entries it holds, and whether it only bundles files (whose members are known once it
+    // is read whole) or is a PE file
+    type Looked = (u64, Vec<u64>, Vec<(u32, u64)>, bool, bool);
     let looked = aqr_common::pool::par_map(large.len(), opt.threads, |i| -> io::Result<Looked> {
         let (c, size) = (large[i], src.size(large[i]));
         let head = src.read_range(c, 0..HEAD)?;
@@ -641,7 +646,8 @@ fn together<S: Source + ?Sized>(
         }
         let bundle = format.is_some_and(detect::Format::is_bundle);
         notes.send(Note::Looked);
-        Ok((xxhash_rust::xxh3::xxh3_64(&head), held, bundle, format == Some(detect::Format::Pe)))
+        let (hash, chunks) = (xxhash_rust::xxh3::xxh3_64(&head), probe::chunks(&head));
+        Ok((hash, chunks, held, bundle, format == Some(detect::Format::Pe)))
     });
     let mut parent: Vec<usize> = (0..n).collect();
     let mut bytes: Vec<u64> = (0..n).map(|c| src.size(c)).collect();
@@ -663,11 +669,14 @@ fn together<S: Source + ?Sized>(
     // entries of the archives (the contents of their sizes told by their CRC-32, of the sizes
     // of few)
     let mut heads: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut by_chunk: HashMap<u64, Vec<usize>> = HashMap::new();
+    // (what tells the same file: its size and start)
+    let mut same: HashMap<usize, (u64, u64)> = HashMap::new();
     let mut sizes: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut by_entry: HashMap<(u32, u64), Vec<usize>> = HashMap::new();
     let mut pe = Vec::new();
     for (&c, l) in large.iter().zip(looked) {
-        let (head, mut entries, bundle, is_pe) = l?;
+        let (head, chunks, mut entries, bundle, is_pe) = l?;
         if is_pe {
             pe.push(c);
         }
@@ -676,6 +685,8 @@ fn together<S: Source + ?Sized>(
             entries = member_sums(&src.read(c)?, opt.threads);
         }
         heads.entry(head).or_default().push(c);
+        chunks.into_iter().for_each(|k| by_chunk.entry(k).or_default().push(c));
+        same.insert(c, (src.size(c), head));
         entries.into_iter().for_each(|e| by_entry.entry(e).or_default().push(c));
     }
     // (of those that may be a member)
@@ -685,6 +696,22 @@ fn together<S: Source + ?Sized>(
     for cs in heads.values().filter(|cs| (2..=8).contains(&cs.len())) {
         cs.iter().for_each(|&c| join(cs[0], c));
     }
+    // and by pieces of their starts, two or more in common ([`probe::chunks`]: the same start
+    // but for some bytes, or shifted), but those that many files have (a common header, the
+    // same stub), which tell little
+    let mut common: HashMap<(usize, usize), u32> = HashMap::new();
+    for cs in by_chunk.values().filter(|cs| (2..=CHUNK_COMMON * 8).contains(&cs.len())) {
+        if cs.iter().map(|c| same[c]).collect::<HashSet<_>>().len() > CHUNK_COMMON {
+            continue;
+        }
+        for (i, &a) in cs.iter().enumerate() {
+            cs[i + 1..].iter().for_each(|&b| *common.entry((a.min(b), a.max(b))).or_default() += 1);
+        }
+    }
+    // (in an order of their own, as joins stop at what a batch may hold)
+    let mut alike: Vec<(usize, usize)> = common.into_iter().filter(|e| e.1 >= 2).map(|e| e.0).collect();
+    alike.sort_unstable();
+    alike.into_iter().for_each(|(a, b)| join(a, b));
     // a git pack and its index and reverse index, by the pack's trailer that theirs repeat
     // ([`crate::git::sets`])
     let git: Vec<(usize, u64)> = (0..n)

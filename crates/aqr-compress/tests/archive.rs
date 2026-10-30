@@ -245,6 +245,26 @@ fn held_once_of(words: [&str; 10], module: &str) {
     assert!(c.len() < alone.len() * 3 / 2, "{} of {} alone, in batches", c.len(), alone.len());
 }
 
+/// Two files alike but for their starts (another header, a few bytes longer), with a file
+/// apart between them: in a batch together however small the batches, the archive about as
+/// small as in one.
+#[test]
+fn alike_put_together() {
+    let data = words(600_000, 3);
+    let edited = [&b"a header of its own, longer\n"[..], &data[40..]].concat();
+    let files = [("a.txt", data.clone()), ("b.txt", words(1 << 20, 4)), ("c.txt", edited)];
+    let (alone, _) = archived(&[("a.txt", data)], &Options::default());
+    let (c, _) = archived(&files, &Options::default());
+    let (apart, _) = archived(&files, &Options { batch: 1 << 20, ..Options::default() });
+    assert!(
+        apart.len() < c.len() + alone.len() / 4,
+        "{} in batches, {} in one, {} alone",
+        apart.len(),
+        c.len(),
+        alone.len()
+    );
+}
+
 /// Contents read as bytes shared (files mapped into memory, as `aqr` reads them): the same
 /// archive as of contents copied, the shared bytes cut, compacted and merged as those are.
 #[test]

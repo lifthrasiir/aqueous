@@ -231,6 +231,38 @@ impl Held {
     }
 }
 
+/// The hashes of the pieces of `d` cut where a gear hash of the last 64 bytes falls in 1 of
+/// 2048 (2 KiB long or so, of 512 bytes to 8 KiB), but those of fewer than 16 distinct
+/// bytes (zeros, padding), sorted: data alike but for some bytes, or shifted by some
+/// (another header), has most of them in common. Of a file's start, to tell files alike.
+pub fn chunks(d: &[u8]) -> Vec<u64> {
+    const MIN: usize = 512;
+    const MAX: usize = 8 << 10;
+    let mut keys = Vec::with_capacity(d.len() / 1024);
+    let mut push = |c: &[u8]| {
+        let mut seen = [false; 256];
+        c.iter().for_each(|&b| seen[b as usize] = true);
+        if seen.iter().filter(|&&s| s).count() >= 16 {
+            keys.push(xxhash_rust::xxh3::xxh3_64(c));
+        }
+    };
+    let (mut start, mut h) = (0, 0u64);
+    for (i, &b) in d.iter().enumerate() {
+        h = (h << 1).wrapping_add(GEAR[b as usize]);
+        let len = i + 1 - start;
+        if (len >= MIN && h >> 53 == 0) || len >= MAX {
+            push(&d[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < d.len() {
+        push(&d[start..]);
+    }
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
 /// What data is like ([`likeness`]): the least hash of its anchors in each of `Likeness::BINS`
 /// bins, by the hash ([`u64::MAX`] where none falls).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -393,6 +425,29 @@ mod tests {
         // (a piece repeating within itself, which a sample shows, is no more)
         let runs: Vec<u8> = (0..128).flat_map(|i| noise(i, 2000).repeat(32)).collect();
         assert!(repeated(&runs) < 0.05, "{}", repeated(&runs));
+    }
+
+    /// Data shifted by some bytes and edited has most pieces in common with the data; other
+    /// data, and runs of a byte, none.
+    #[test]
+    fn chunks_alike() {
+        let noise = |seed: u64, n: usize| {
+            let mut x = seed;
+            (0..n)
+                .map(|_| {
+                    x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    (x >> 56) as u8
+                })
+                .collect::<Vec<u8>>()
+        };
+        let a = noise(1, 64 << 10);
+        let mut b = [&noise(2, 37)[..], &a[..]].concat();
+        b[30_000] ^= 1;
+        let (ka, kb, kc) = (chunks(&a), chunks(&b), chunks(&noise(3, 64 << 10)));
+        let common = |x: &[u64], y: &[u64]| x.iter().filter(|k| y.binary_search(k).is_ok()).count();
+        assert!(ka.len() > 16 && common(&ka, &kb) >= ka.len() - 3, "{} of {}", common(&ka, &kb), ka.len());
+        assert_eq!(common(&ka, &kc), 0);
+        assert!(chunks(&[0u8; 64 << 10]).is_empty());
     }
 
     /// Data much alike (another version of it: edits here and there) laid next to each other,
