@@ -4852,6 +4852,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/vorbis-recons.wasm" title="crates/aqr-modules/wasm/vorbis-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-vorbis/FORMAT.md" title="codecs/aqr-vorbis/FORMAT.md">R</a>
     <tr>
+      <td><code>cd6f7a42e8117c5a748b7fed04f869e5fae0696baecf3ec6cd3b82aa6a6608a2</code>
+      <td>wasm-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wasm-recons.wasm" title="crates/aqr-modules/wasm/wasm-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-wasm/FORMAT.md" title="codecs/aqr-wasm/FORMAT.md">R</a>
+    <tr>
       <td><code>eb8e46fbdbc29ae2605360036762df35a4ae04094ef8dcdc08f40000aa6515e0</code>
       <td>wrt-recons-hangul@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/wrt-recons-hangul.wasm" title="crates/aqr-modules/wasm/wrt-recons-hangul.wasm">D</a>

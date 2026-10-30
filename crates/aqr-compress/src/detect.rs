@@ -58,6 +58,8 @@ pub enum Format {
     /// FASTA file of nucleotide sequences (aqr-fasta), a whole file: not looked for in other
     /// data.
     Fasta,
+    /// WebAssembly module (aqr-wasm), of the binary format's version 1.
+    Wasm,
     /// GNU gettext message catalog, `.mo` (aqr-gnu-gettext), known by its magic and header.
     GnuGettext,
     /// FITS file (aqr-fits), known by its primary header.
@@ -95,7 +97,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 38] = [
+    pub const ALL: [Format; 39] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -121,6 +123,7 @@ impl Format {
         Format::SevenZip,
         Format::GitPack,
         Format::Fasta,
+        Format::Wasm,
         Format::GnuGettext,
         Format::Fits,
         Format::Hdf5,
@@ -163,6 +166,7 @@ impl Format {
             Format::SevenZip => "7z",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
+            Format::Wasm => "wasm",
             Format::GnuGettext => "gnu-gettext",
             Format::Fits => "fits",
             Format::Hdf5 => "hdf5",
@@ -218,6 +222,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"sqlite" | b"sqlite3" => format(Format::Sqlite),
         b"fa" | b"fasta" | b"fna" | b"ffn" | b"fas" => format(Format::Fasta),
         b"mo" | b"gmo" => format(Format::GnuGettext),
+        b"wasm" => format(Format::Wasm),
         b"fits" | b"fit" | b"fts" | b"fz" => format(Format::Fits),
         b"h5" | b"hdf5" | b"he5" | b"h5ad" | b"nwb" => format(Format::Hdf5),
         b"ldb" => format(Format::LevelDb),
@@ -319,6 +324,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     {
         // Two bytes (or DICOM's group 8) are too weak a signature to look for in other data.
         Some(Format::Raw)
+    } else if aqr_wasm::formula::starts(d) {
+        Some(Format::Wasm)
     } else if aqr_gnu_gettext::formula::starts(d) {
         Some(Format::GnuGettext)
     } else if aqr_fits::formula::starts(d) {
@@ -374,6 +381,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'S' => b == b'I',
         0xfd => b == b'7',
         b'7' => b == b'z',
+        0x00 => b == b'a',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -438,6 +446,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'S' => aqr_fits::formula::starts(d),
         0xfd => aqr_lzma::formula::starts_xz(d),
         b'7' => aqr_7z::formula::starts(d),
+        0x00 => aqr_wasm::formula::starts(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,

@@ -310,6 +310,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/vorbis-recons.block"),
     },
     Known {
+        name: "wasm-recons",
+        version: 1,
+        sha512_256: hex("cd6f7a42e8117c5a748b7fed04f869e5fae0696baecf3ec6cd3b82aa6a6608a2"),
+        block: include_bytes!("../wasm/wasm-recons.block"),
+    },
+    Known {
         name: "wrt-recons-hangul",
         version: 1,
         sha512_256: hex("eb8e46fbdbc29ae2605360036762df35a4ae04094ef8dcdc08f40000aa6515e0"),

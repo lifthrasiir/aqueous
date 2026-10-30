@@ -23,6 +23,7 @@ aqr-bundle = { path = "../../codecs/aqr-bundle" }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
 aqr-flate = { path = "../../codecs/aqr-flate" }
 aqr-fasta = { path = "../../codecs/aqr-fasta" }
+aqr-wasm = { path = "../../codecs/aqr-wasm" }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext" }
 aqr-vorbis = { path = "../../codecs/aqr-vorbis" }
 aqr-ima = { path = "../../codecs/aqr-ima" }

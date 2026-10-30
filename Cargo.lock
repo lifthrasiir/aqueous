@@ -146,6 +146,7 @@ dependencies = [
  "aqr-snappy",
  "aqr-sqlite",
  "aqr-tex",
+ "aqr-wasm",
  "aqr-wim",
  "aqr-wrt",
  "aqr-xsv",
@@ -194,6 +195,7 @@ dependencies = [
  "aqr-sqlite",
  "aqr-tex",
  "aqr-vorbis",
+ "aqr-wasm",
  "aqr-wrt",
  "aqr-xsv",
  "aqr-zip",
@@ -439,6 +441,7 @@ dependencies = [
  "aqr-sqlite",
  "aqr-tex",
  "aqr-vorbis",
+ "aqr-wasm",
  "aqr-wrt",
  "aqr-xsv",
  "aqr-zip",
@@ -566,6 +569,15 @@ version = "0.1.0"
 dependencies = [
  "aqr-common",
  "aqr-formula",
+]
+
+[[package]]
+name = "aqr-wasm"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "zstd",
 ]
 
 [[package]]

@@ -41,6 +41,7 @@ aqr-snappy = { path = "../../codecs/aqr-snappy", default-features = false }
 aqr-sqlite = { path = "../../codecs/aqr-sqlite", default-features = false }
 aqr-tex = { path = "../../codecs/aqr-tex", default-features = false }
 aqr-wrt = { path = "../../codecs/aqr-wrt", default-features = false }
+aqr-wasm = { path = "../../codecs/aqr-wasm", default-features = false }
 aqr-xsv = { path = "../../codecs/aqr-xsv", default-features = false }
 aqr-zip = { path = "../../codecs/aqr-zip", default-features = false }
 
@@ -122,6 +123,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "ima-recons"
 path = "src/bin/ima-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "wasm-recons"
+path = "src/bin/wasm-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

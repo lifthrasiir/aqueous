@@ -971,6 +971,18 @@ fn fasta() {
     assert_eq!(aqr_compress::kind_by_name(b"x/chr1.fa"), aqr_formula::Kind::Format("fasta"));
 }
 
+/// A Wasm module goes to aqr-wasm, at the start of a file or within other data.
+#[test]
+fn wasm() {
+    let d = fixture("crates/aqr-modules/wasm/bcj-x86.wasm");
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), ["wasm-recons"]);
+    let inside = [&text(20_000)[..], &d, &text(20_000)].concat();
+    let f = roundtrip(&inside, &all());
+    assert_eq!(modules(&f), ["wasm-recons"], "{f}");
+    assert_eq!(aqr_compress::kind_by_name(b"x/a.wasm"), aqr_formula::Kind::Format("wasm"));
+}
+
 /// A FITS file of a 16-bit image and a binary table, `n` × `n` pixels and rows.
 fn fits_file(n: usize) -> Vec<u8> {
     let header = |cards: &[String]| {
