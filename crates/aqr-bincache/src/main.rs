@@ -271,6 +271,7 @@ fn git(args: &[&str], input: &[u8]) -> Result<String> {
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("git: {e}"))?;
     let mut stdin = child.stdin.take().unwrap();
@@ -279,15 +280,19 @@ fn git(args: &[&str], input: &[u8]) -> Result<String> {
     let out = child.wait_with_output().map_err(|e| format!("git: {e}"))?;
     writer.join().unwrap().map_err(|e| format!("git: {e}"))?;
     if !out.status.success() {
-        return Err(format!("git {} failed", args.join(" ")));
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git {} failed: {}", args.join(" "), err.trim_end()));
     }
     String::from_utf8(out.stdout).map_err(|e| e.to_string())
 }
 
 /// The `commit=`, `dirty=` and `subject=` lines of an info file: HEAD, and whether any file
-/// differs from it.
+/// differs from it. Outside a git working copy (sources from `git archive`), no commit and
+/// dirty: the blob ids are still git's, which `git hash-object` gives anywhere.
 fn commit(paths: &BTreeSet<String>, blobs: &BTreeMap<String, String>) -> Result<String> {
-    let head = git(&["log", "-1", "--format=%h%n%s"], b"")?;
+    let Ok(head) = git(&["log", "-1", "--format=%h%n%s"], b"") else {
+        return Ok("commit=-------\ndirty=1\nsubject=(not a git working copy)\n".into());
+    };
     let (hash, subject) = head.trim_end().split_once('\n').unwrap_or((head.trim_end(), ""));
     let tree = git(&["ls-tree", "-r", "HEAD"], b"")?;
     let committed: BTreeMap<&str, &str> = tree

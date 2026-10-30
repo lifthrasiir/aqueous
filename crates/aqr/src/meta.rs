@@ -47,6 +47,8 @@ pub struct Fork {
 }
 
 impl Reader {
+    // (all of its fields `privileged` on Windows)
+    #[cfg_attr(windows, allow(clippy::needless_update))]
     pub fn new(privileged: bool) -> Reader {
         Reader { privileged, ..Reader::default() }
     }
