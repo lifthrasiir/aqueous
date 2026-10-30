@@ -73,9 +73,10 @@
 //! files of it, the parts of the other kinds are not looked into, and only the bytes no part
 //! tells of (and parts of unknown kind) are scanned. Else the scan goes on from its next byte.
 //!
-//! What DEFLATE streams inflate to, at every depth together, is kept within
-//! [`Options::expansion`] times the file (and 64 MiB): past it, streams are kept as they are,
-//! so that nested archives (42.zip) and bombs cost no more than that.
+//! What DEFLATE streams and streams of LZFSE and LZVN blocks inflate to, at every depth
+//! together, is kept within [`Options::expansion`] times the file (and 64 MiB): past it,
+//! streams are kept as they are, so that nested archives (42.zip) and bombs cost no more than
+//! that.
 //!
 //! Before the formula is archived, its streams of each class and kind are put one after
 //! another in one stream ([`Formula::merge_classes`]), as they are alike: the same
@@ -176,9 +177,9 @@ pub struct Options {
     /// Keep a file raw, or the data where files are found, unless its formula archives
     /// smaller than it does raw ([`aqr::Encoder::smaller`]).
     pub smaller: bool,
-    /// The most bytes of data that DEFLATE streams (of gzip, zlib and ZIP) inflate to, at every
-    /// depth together, as a multiple of the file, on top of [`EXPANSION_SLACK`]: the streams
-    /// past it are kept as they are.
+    /// The most bytes of data that DEFLATE streams (of gzip, zlib and ZIP) and streams of LZFSE
+    /// and LZVN blocks inflate to, at every depth together, as a multiple of the file, on top of
+    /// [`EXPANSION_SLACK`]: the streams past it are kept as they are.
     pub expansion: u64,
     /// Size formulas without their resources ([`aqr::Encoder::share_resources`]), as for an
     /// archive of many files sharing them: for measuring what they come to in the limit.
@@ -211,7 +212,8 @@ pub struct Options {
 /// what they share is found by compressing them solid.
 pub(crate) const SHARE_MIN: usize = 256 << 10;
 
-/// Bytes that DEFLATE streams may inflate to on top of [`Options::expansion`] times the file.
+/// Bytes that DEFLATE, LZFSE and LZVN streams may inflate to on top of [`Options::expansion`]
+/// times the file.
 pub const EXPANSION_SLACK: u64 = 64 << 20;
 
 /// How data is recompressed.
@@ -326,7 +328,7 @@ pub const CONTENTS: [Content; 22] = [
 ];
 
 /// What recompressing a file carries along: the encoder sizing formulas, and the bytes that
-/// DEFLATE streams may still inflate to ([`Options::expansion`]).
+/// DEFLATE, LZFSE and LZVN streams may still inflate to ([`Options::expansion`]).
 pub(crate) struct Cx {
     enc: Encoder,
     inflate: Cell<u64>,
@@ -875,6 +877,16 @@ impl Made {
     }
 }
 
+/// A stream of LZFSE and LZVN blocks, if its data (as its blocks' headers tell) fits in what is
+/// left of the budget ([`Options::expansion`]).
+fn bvx(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let (_, n) = aqr_bvx::bvx::extent(d)?;
+    if !cx.inflate(n) {
+        return None;
+    }
+    aqr_bvx::formula::encode(d, opt.threads)
+}
+
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
 /// formula is [`smaller`]).
 fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
@@ -900,6 +912,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::SevenZip => sevenz(d, opt),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
+                Format::Bvx => bvx(d, opt, cx),
                 Format::Ar | Format::Tar | Format::Cpio => bundle::bundle(d),
                 Format::Iso => bundle::iso(d),
                 Format::Asar => bundle::asar(d),
@@ -1594,7 +1607,6 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Lzma => aqr_lzma::formula::encode,
         Format::Xz => aqr_lzma::formula::encode_xz,
         Format::Lzo => aqr_lzo::formula::encode,
-        Format::Bvx => aqr_bvx::formula::encode,
         Format::Png => aqr_png::formula::encode,
         Format::Jpeg => aqr_jpeg::formula::encode,
         Format::Mp3 => aqr_mp3::formula::encode,

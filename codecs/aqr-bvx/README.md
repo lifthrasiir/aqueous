@@ -35,7 +35,9 @@ assert_eq!(out, stream[..sp.used]);
 ## Where it is
 
 - Asset catalogs (`Assets.car`): renditions of images are LZFSE or LZVN streams, one per
-  image (app icons are most of them). aqr-compress finds them in the catalog by a scan.
+  image (app icons are most of them). aqr-compress finds them in the catalog by a scan, and
+  takes a stream only where its data fits in what is left of the budget that DEFLATE streams
+  inflate within (`Options::expansion`: 32 times the file and 64 MiB).
 - `compression_tool`, `.lzfse` files, and LZFSE in other data found by the scan.
 - Not taken yet: APFS and HFS+ transparent compression (decmpfs: in a resource fork or an
   extended attribute, raw LZVN or LZFSE chunks behind a table), DMG (ULFO, chunks of LZFSE

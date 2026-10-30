@@ -918,6 +918,42 @@ fn zip_nested_like_42() {
     assert!(inflated >= 96 << 20, "{inflated}");
 }
 
+/// An LZFSE stream of 96 MiB of zeros (a few KB), past what may be inflated, stays as it is;
+/// with room for it, it is taken.
+#[test]
+fn bvx_past_expansion() {
+    use aqr_bvx::plan::{self, LMD_LOW, Match, Part, Plan, Seg, Side};
+    let data = vec![0; 96 << 20];
+    let seg = Seg { matches: vec![Match { lits: 1, len: data.len() as u32 - 1, dist: 1 }], tail: 0 };
+    let mut parts = Vec::new();
+    let mut left = plan::triples(&seg).count() as u32;
+    while left > 0 {
+        let n = left.min(aqr_bvx::recons::BLOCK_LMD);
+        let side = Side {
+            freqs: None,
+            lit_start: [0; 4],
+            lmd_start: [0; 3],
+            lit_low: 0,
+            lmd_low: LMD_LOW,
+            pad: vec![],
+            zd: vec![],
+        };
+        parts.push(Part::Lzfse(n, side));
+        left -= n;
+    }
+    let mut p = Plan { parts, segs: vec![seg] };
+    let shapes = plan::shapes(&p).unwrap();
+    for (part, (pad, _)) in p.parts.iter_mut().zip(shapes) {
+        let Part::Lzfse(_, side) = part else { unreachable!() };
+        side.pad = vec![0; pad];
+    }
+    let mut d = Vec::new();
+    plan::join(&data, &p, &mut d).unwrap();
+    assert!(d.len() < 1 << 20, "{}", d.len());
+    assert!(modules(&roundtrip(&d, &all())).is_empty());
+    assert_eq!(modules(&roundtrip(&d, &Options { expansion: 1 << 20, ..all() })), [BVX.name]);
+}
+
 /// A database made by the sqlite3 tool from `sql` (None without it).
 fn sqlite_db(sql: &str) -> Option<Vec<u8>> {
     let path = std::env::temp_dir().join(format!("aqr-compress-test-{}.db", std::process::id()));
