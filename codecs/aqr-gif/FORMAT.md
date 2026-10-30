@@ -195,6 +195,8 @@ hash(x, y) = ((x ^ (y × 0x2F0B4F1D)) × 0x9E3779B1, rotated left by 13) × 0x85
   `2^min(B, 8)` slots, table 1 of `2^min(B, 18)`, tables 2 to 9 of `2^B`. A table of `2^b`
   slots is of `2^(b − 4)` **buckets** of 16 slots.
 - Two mixers' **weights**, signed: 292 sets of 10, all initially 6554.
+- The **flat model**: 128 slots of contexts and a table of 2^16 slots, as the tables' (initially
+  `p = 2048, n = 0`), and its weights `fw`, signed: 128 sets of 3, initially 32770, 32770 and 0.
 - The **canvas**: the screen's `width × height` values, initially 256 each.
 
 ### 5.3 A bit
@@ -212,6 +214,12 @@ the first mixer and `s2` of the second:
    - each slot: `p = clamp(p + ((t / 16 − p) × RATE[n] >> 16), 1, 4095)` (signed, `t / 16`
      being 4095 or 0, `RATE` of §4.1), then `n += 1` where `n < 15`.
 
+A **flat bit** is coded with the flat model's slot `ctx` and slot `t` of its table: `st_0` and
+`st_1` their `stretch(p)`, `st_2 = 256`; `d = clamp((Σ_j (st_j × fw[ctx][j] >> 10)) >> 6, −4095,
+4095)` and `pr = clamp(squash(d), 1, 4095)`; the bit is coded with `p1 = pr × 16 + 8`; then each
+`fw[ctx][j]` is updated as a mixer's weight with `e = 4096 × bit − pr`, and the two slots as the
+tables' are.
+
 ### 5.4 An image
 
 Given an image of `k` bits a pixel (its minimum code size), rows of width `w' = max(w, 1)`, at
@@ -227,6 +235,11 @@ For each pixel `i` in turn, at `x = i mod w'`, `y = ⌊i / w'⌋`, of value `v`:
 - **Colors**: with `cW = COLOR[W]` and so on, for each channel `c` of red, green, blue in turn:
   `mean = mean << 4 | ((2cW + 2cN + cNW + cNE) / 6 >> 4)`, `grad = grad << 4 |
   (clamp(cW + cN − cNW, 0, 255) >> 4)`, `up = up << 3 | ((cN + cNE) / 2 >> 5)`, all from 0.
+- A pixel is **flat** where `W`, `N`, `NW` and `NE` are the same and not 256. Then, with `r` the
+  pixels just before it in its row that are flat and `W`'s (a flat bit of 1),
+  `ctx = (P = W) + 2 (P = 256) + 4 (WW = W) + 8 (NN = W) + 16 min(bitlen(r), 7)` and
+  `t = hash(hash(13, W | P << 9), ctx) >> 16`, a flat bit, 1 for `v = W`. If it is 1, the pixel
+  is `W`; nothing more.
 - **Contexts**, with `p | q` the bitwise or and `<<` of `u32`:
 
   ```text
@@ -239,14 +252,13 @@ For each pixel `i` in turn, at `x = i mod w'`, `y = ⌊i / w'⌋`, of value `v`:
   ```
 
 - Table `j`'s bucket is `hash(hj, 1) & (its buckets − 1)`.
-- Where `W` is not 256, a bit (§5.3), 1 for `v = W`, of slot 0 of each bucket, the sets `s1 = 0`
-  and `s2 = 288 + differ`. If it is 1, the pixel is `W`; nothing more.
+- Where `W` is not 256 and the pixel is not flat, a bit (§5.3), 1 for `v = W`, of slot 0 of each
+  bucket, the sets `s1 = 0` and `s2 = 288 + differ`. If it is 1, the pixel is `W`; nothing more.
 - Else the `k` bits of `v`, from the highest, each at `depth` 0 … `k − 1`, with `node` (initially
   1, then `node × 2 + bit`) and `sub` (likewise, but 1 again at each depth that is a multiple of
   4): at a depth that is a nonzero multiple of 4, table `j`'s bucket is `hash(hj, node) & (its
   buckets − 1)`; the bit (§5.3) is of slot `sub` of each bucket, the sets `s1 = node` and
-  `s2 = 256 + min(depth, 7) × 4 + differ`. `v` is the low `k` bits of
-  the final `node`.
+  `s2 = 256 + min(depth, 7) × 4 + differ`. `v` is the low `k` bits of the final `node`.
 
 After the image's pixels, each pixel `i` sets the canvas at `(left + i mod w', top + ⌊i / w'⌋)`,
 where that is on the screen, to its value.

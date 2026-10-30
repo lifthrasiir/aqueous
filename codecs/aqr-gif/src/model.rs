@@ -1,8 +1,9 @@
 //! The model of an image's pixels, palette indices (`FORMAT.md` §5): first whether an index is
-//! the left one's (most are, but in photographs), else the index bit by bit from the top, each
-//! bit's probability a logistic mix of those of contexts of the neighbouring indices, their
-//! colors and the same pixel of the image before, in tables of hashed slots. Integers only, so
-//! that the module gives the same natively and as Wasm.
+//! the left one's (most are, but in photographs; by a small model of its own where W, N, NW and
+//! NE are the same), else the index bit by bit from the top, each bit's probability a logistic
+//! mix of those of contexts of the neighbouring indices, their colors and the same pixel of the
+//! image before, in tables of hashed slots. Integers only, so that the module gives the same
+//! natively and as Wasm.
 
 use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 
@@ -169,6 +170,13 @@ const RATE_MIX: i32 = 4;
 const W0: i32 = 6554;
 const W_MAX: i32 = (1 << 19) - 1;
 
+/// The model of flat pixels (W, N, NW and NE the same): its contexts (whether P, WW and NN are
+/// W's, whether there is P, and the run of flat pixels of W's before in the row), and the slots
+/// of its table of W and P.
+const FLAT_CTX: usize = 1 << 7;
+const FLAT_BITS: u32 = 16;
+const FLAT_LANES: usize = 4;
+
 /// 65536 / (n + 1.5).
 const RATE: [u32; LIMIT + 1] = {
     let mut r = [0; LIMIT + 1];
@@ -197,6 +205,9 @@ pub struct Model {
     base: [usize; INPUTS],
     mask: [u32; INPUTS],
     weights: Vec<[i32; LANES]>,
+    /// The model of flat pixels: the slots of its contexts, then of its table, and its weights.
+    flat: Vec<u16>,
+    flat_weights: Vec<[i32; FLAT_LANES]>,
     /// The last image's indices on the screen, [`NONE`] where it did not cover.
     canvas: Vec<u16>,
     screen: (usize, usize),
@@ -251,6 +262,8 @@ impl Model {
             base,
             mask: bits.map(|b| (1 << (b - 4)) - 1),
             weights: vec![w0; SETS],
+            flat: vec![0; FLAT_CTX + (1 << FLAT_BITS)],
+            flat_weights: vec![[W0 * 5, W0 * 5, 0, 0]; FLAT_CTX],
             canvas: vec![NONE as u16; screen.0 * screen.1],
             screen,
         }
@@ -260,7 +273,7 @@ impl Model {
     pub fn bytes(pixels: u64, screen: (usize, usize)) -> u64 {
         let screen = canvas_of(screen);
         let slots: usize = table_bits(pixels).iter().map(|&b| 1 << b).sum();
-        (slots * 2 + 2 * screen.0 * screen.1 + 4 * SETS * LANES + 8192) as u64
+        (slots * 2 + 2 * screen.0 * screen.1 + 4 * SETS * LANES + 2 * (FLAT_CTX + (1 << FLAT_BITS)) + 8192) as u64
     }
 
     /// Codes a bit (`want`, the encoder's) of the slots `idx` and the mixers' weight sets `set1`
@@ -302,6 +315,38 @@ impl Model {
         v
     }
 
+    /// Codes whether a flat pixel is W's (`want`, the encoder's) of its context `ctx` and the slot
+    /// `t` of the table, and gives it.
+    #[inline(never)]
+    fn flat_bit(&mut self, c: &mut impl Coder, ctx: usize, t: usize, want: bool) -> bool {
+        let idx = [ctx, FLAT_CTX + t];
+        let st = [
+            self.stretch_slot[(self.flat[idx[0]] >> 4) as usize] as i32,
+            self.stretch_slot[(self.flat[idx[1]] >> 4) as usize] as i32,
+            256,
+            0,
+        ];
+        let wt = &mut self.flat_weights[ctx];
+        let mut dot = 0;
+        for j in 0..FLAT_LANES {
+            dot += (st[j] * wt[j]) >> 10;
+        }
+        let pr = squash((dot >> 6).clamp(-4095, 4095)).clamp(1, 4095);
+        let v = c.code((pr as u32) << 4 | 8, want, Cat::Pixels);
+        let e = (((v as i32) << 12) - pr) * RATE_MIX;
+        for j in 0..FLAT_LANES {
+            wt[j] = (wt[j] + ((st[j] * e) >> 14)).clamp(-W_MAX, W_MAX);
+        }
+        let target = if v { 4095 } else { 0 };
+        for s in idx {
+            let slot = &mut self.flat[s];
+            let (p0, n0) = (((*slot ^ SLOT0) >> 4) as i32, (*slot & 15) as usize);
+            let p1 = (p0 + (((target - p0) * RATE[n0] as i32) >> 16)).clamp(1, 4095);
+            *slot = ((p1 as u16) << 4 | (n0 + (n0 < LIMIT) as usize) as u16) ^ SLOT0;
+        }
+        v
+    }
+
     /// Codes the indices `px` (the encoder's, or filled in) of an image at `at`, row after row.
     pub fn image(&mut self, c: &mut impl Coder, px: &mut [u8], at: &Place<'_>) {
         let w = at.width.max(1);
@@ -314,6 +359,7 @@ impl Model {
         let mut h = [0u32; INPUTS];
         let mut bucket = [0usize; INPUTS];
         let (mut x, mut y) = (0, 0);
+        let mut run = 0u32;
         for i in 0..px.len() {
             // the neighbours: W, N, NW, NE, WW, NN
             let g = |dx: usize, dy: usize, right: bool| -> u32 {
@@ -323,6 +369,28 @@ impl Model {
             let (ww, nn) = (g(2, 0, false), g(0, 2, false));
             let (cx, cy) = (at.left + x, at.top + y);
             let p = if cx < sw && cy < sh { self.canvas[cy * sw + cx] as u32 } else { NONE };
+            let want = px[i] as u32;
+            // where the neighbours are the same (most pixels of graphics), whether the pixel is
+            // W's by a small model of its own, without the contexts of the others
+            let flat = wv != NONE && wv == n && n == nw && nw == ne;
+            if flat {
+                let ctx = (p == wv) as usize
+                    | ((p == NONE) as usize) << 1
+                    | ((ww == wv) as usize) << 2
+                    | ((nn == wv) as usize) << 3
+                    | ((u32::BITS - run.leading_zeros()).min(7) as usize) << 4;
+                let t = (hash(hash(13, wv | p << 9), ctx as u32) >> (32 - FLAT_BITS)) as usize;
+                if self.flat_bit(c, ctx, t, want == wv) {
+                    px[i] = wv as u8;
+                    run += 1;
+                    x += 1;
+                    if x == w {
+                        (x, y, run) = (0, y + 1, 0);
+                    }
+                    continue;
+                }
+            }
+            run = 0;
             // the colors: the mean of the four neighbours (4 bits a channel), the gradient
             // W + N - NW (4 bits), the mean of N and NE (3 bits)
             let (cw, cn, cnw, cne) = (pal[wv as usize], pal[n as usize], pal[nw as usize], pal[ne as usize]);
@@ -344,14 +412,13 @@ impl Model {
             h[9] = hash(hash(11, up), n);
             let differ =
                 (wv != n) as usize + (nw != wv && nw != n) as usize + (ne != wv && ne != n && ne != nw) as usize;
-            let want = px[i] as u32;
             // the slots of a context are in buckets of 16 (of a cache line), the first of the
             // index's first 4 bits, the second of the next 4 under them; the first bucket's
             // slot 0 is whether the pixel is W's
             for j in 0..INPUTS {
                 bucket[j] = self.base[j] + ((hash(h[j], 1) & self.mask[j]) << 4) as usize;
             }
-            if wv != NONE && self.bit(c, &bucket, 0, NODES + 8 * 4 + differ, want == wv) {
+            if wv != NONE && !flat && self.bit(c, &bucket, 0, NODES + 8 * 4 + differ, want == wv) {
                 px[i] = wv as u8;
             } else {
                 let mut node = 1u32;

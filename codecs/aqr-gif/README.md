@@ -97,7 +97,11 @@ Then the APM (an adaptive probability map over the mix, by the context of W and 
 bit's node) was dropped, measured on Windows (x86-64) on the 106 GIF files of aqr-asar's corpus
 that are coded: records +0.65% (22.77 -> 22.92 MB; the fixtures' +0.08%), 89 -> 76 s on one
 thread. A bit's time is a chain of dependent steps rather than arithmetic: tables of 2^16 slots
-gave −7%, the mixers in AVX2 nothing.
+gave −7%, the mixers in AVX2 nothing. Then the pixels whose W, N, NW and NE are the same (88%
+of those files', 99.5% of them W's) were coded by a small model of their own (two slots, of a
+context of whether P, WW and NN are W's and of the run of such pixels, and of W and P hashed,
+mixed), not the 10 contexts: records −0.67% (22.92 -> 22.77 MB; the fixtures' −0.26%), 76 ->
+54 s.
 
 Left out: a single mixer (+0.6%, −14%), and the W bit gated by how often pixels were W's (larger
 at every threshold: the tree's tables learn from both cases).
