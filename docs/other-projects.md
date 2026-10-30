@@ -17,30 +17,30 @@ encode.su에만 첨부된 파일은 받지 않았고, 공개 저장소(GitHub �
 
 ## 요약: 먼저 검토할 것
 
+2026-10-30의 코드베이스 기준이다.
+
 목표:
 
-- 10gb 벤치마크에서는 포맷별 재압축기보다 아카이브 계층(종류별 버킷, 이름순 정렬, 내용물 단위 중복 제거, 버킷별 zstd 레벨)이 더 크다. Insighter(2.27 GB)와 견줄 목표와 예산은 11절.
+- 10gb는 지금 2.584 GB이고, 주 목표는 2.4 GB 이하, Insighter는 2.27 GB이다. 크기 예산과 남은 일은 11절과 `10gb-todo.md`에 있다.
 
 명세와 설계 문서:
 
-- 모듈 식별 해시가 TODO이다(`spec/index.bs`의 `#module-block`). RarVM은 CRC32와 길이로 식별했으니 강한 해시로 정한다(9절).
-- lzip의 xz 비판은 2026-10-25에 명세에 반영했다. 남은 것은 블록 헤더가 손상된 뒤의 재동기화 절차(recovery-design S3)이다(9절).
-- resource failure의 한도가 구현마다 다를 수 있다. 적합성 수준별 최소 한도를 둔다(9절).
-- xform-design.md 62행 "RAR5는 보안과 복잡도 문제로 VM을 없앴다"는 출처가 없다(9절).
+- 블록 헤더가 손상된 뒤 다음 leaf block에서 재동기화하는 절차를 Repair 절(recovery-design S3)에 넣는다(9절).
+- 적합성 수준마다 보장하는 메모리 한도의 하한이 없다(명세 `#module-execution`의 Issue). 지금은 아카이브가 적용마다 선언한 한도(`apply_memory_limit`)와 구현이 정한 한도뿐이다(9절).
 
 크레이트:
 
 - aqr-compress: 헤더 없는 raw deflate를 찾지 않는다. Precomp `-brute`의 거르개가 참고가 된다(2절).
-- aqr-flate: 프로파일 6(1.0 s, 1.15%)과 10(6.2 s, 0.51%) 사이가 비어 있고, 그 자리에 preflate-rs(1.7 s, 0.78%)가 있다. 후처리기(deft4j류)가 만든 스트림의 비율을 잰다(2절).
-- aqr-jpeg: Lepton·brunsli에서 온 후보(가장자리 계수의 경계 연속성 예측, nonzero 개수 분리, 픽셀 영역 DC)는 2026-10-25에 재 보고 모두 기각했다. 가장 나은 가장자리 부호 예측이 −0.60 pp에 속도 −26%/−23%였다(4절).
-- aqr-mp3: packMP3와의 격차는 같은 granule 이웃 문맥, 시간 방향 EMA, 부호 모델 순으로 설명된다. 시간 EMA는 2026-10-25에 넣었다(held-out −0.27 pp, 속도 −1.6%/−3%, mp3-recons 버전 5)(5절).
+- aqr-flate: 프로파일 9(1.0 s, 1.07%)와 10(6.2 s, 0.51%) 사이가 비어 있고, 그 자리에 preflate-rs(1.7 s, 0.78%)가 있다. 후처리기(deft4j류)가 만든 스트림의 비율을 잰다(2절).
+- aqr-mp3: packMP3와의 격차 가운데 남은 후보는 같은 granule 이웃 문맥과 부호 모델이다(5절).
+- aqr-vorbis: FSB5 안의 패킷만 받는다. Ogg 페이지를 재구성하면 `.ogg`가 열린다(5절).
 - aqr-lz4: HC와 legacy frame을 넣으면 커널, initramfs, squashfs가 열린다(3절).
 - aqr-raw: PCM 경로에서 샘플 도메인 LMS 캐스케이드와 Sac식 편향 보정을 시험한다. 래스터는 이미지별 색 변환 선택을 시험한다(5절, 6절).
 - aqr-flac: 가변 블록 크기 표본으로 시험한다(flacoutcpp, flake)(5절).
 - aqr-exe: ELF 지원, RISC-V(xz의 `AUIPC` 쌍에서 출발), ARM64의 `ADRP`와 lo12 묶기, PIC 점프 표, 점프 타깃의 델타 부호화 비교(8절).
 - aqr-pdf: 빈 사용자 암호의 암호화 파일은 공개 도구 중 하는 것이 없다(7절).
 
-새 포맷 후보: Vorbis(balrogg가 8–12%를 입증), ALAC, CD 이미지(ECM식), zstd 레벨 1–4, LZO와 LZF, GIF(인코더 프로파일과 정정).
+새 포맷 후보: ALAC, CD 이미지(ECM식), zstd 레벨 1–4, LZF, GIF(인코더 프로파일과 정정), BC7 텍스처.
 
 ---
 
@@ -231,9 +231,9 @@ encode.su에만 첨부된 파일은 받지 않았고, 공개 저장소(GitHub �
 
 - **파라미터 DB**(xtool): 스트림 지문에서 성공한 파라미터를 기억해 탐색을 건너뛴다. 포맷에는 영향이 없는 인코더 최적화로, 같은 도구가 만든 PDF·ZIP·게임 에셋에서 압축 시간을 줄일 수 있다. aqr-flate가 이미 "앞 스트림의 파라미터 재사용"을 하므로 그것을 실행 간에 유지하는 형태가 된다.
 - **선언적 컨테이너 서술**(xtool INI): 엔진별 컨테이너를 코드 없이 적는다. Aqueous는 컨테이너마다 Rust 크레이트를 짜야 한다. 게임 에셋을 대상으로 삼는다면 작은 기술 언어가 필요해진다(디코드 쪽은 어차피 `slice`와 `concat`이라 인코더 전용이다).
-- **게임 코덱 공백**: Oodle(Kraken, Mermaid, Selkie, Leviathan), LZO, gdeflate. xtool은 Oodle을 DLL 재호출로 풀 뿐이라 결정적 Wasm으로 옮길 수 없다. Aqueous에서는 클린룸 구현이 아니면 불가능하고, LZO와 gdeflate는 aqr-lz4 방식(정확한 재구현)이 맞는다.
-- **패치 허용 임계**(xtool 5%, AntiZ 128 B, Fairytale 64 B): 정확히 재현하지 못하면 패치 크기로 채택을 정한다. aqr-flate는 정정 레코드가 있어 필요 없다. aqr-lz4나 aqr-snappy처럼 "재현 못 하면 그대로 둔다"인 크레이트에는 일반 패치 경로가 하나의 선택지이다.
-- **Fairytale의 revival**: 메모리 예산을 넘는 중간 스트림을 버리고 부모에서 다시 만드는 방식은 eval-design.md의 메모리 설계와 견줄 만하다. 블록별 부분 체크섬(증분 추가용 중복 판정)도 Aqueous에 없다.
+- **게임 코덱 공백**: Oodle(Kraken, Mermaid, Selkie, Leviathan)과 gdeflate. xtool은 Oodle을 DLL 재호출로 풀 뿐이라 결정적 Wasm으로 옮길 수 없다. Aqueous에서는 클린룸 구현이 아니면 불가능하다. gdeflate는 swizzle을 풀면 aqr-flate가 받는다(3절).
+- **패치 허용 임계**(xtool 5%, AntiZ 128 B, Fairytale 64 B): 정확히 재현하지 못하면 패치 크기로 채택을 정한다. aqr-flate, aqr-lzma, aqr-lzo는 레코드가 있어 필요 없다. aqr-lz4나 aqr-snappy처럼 "재현 못 하면 그대로 둔다"인 크레이트에는 일반 패치 경로가 하나의 선택지이다.
+- **Fairytale의 revival**: 메모리 예산을 넘는 중간 스트림을 버리고 부모에서 다시 만드는 방식은 압축기의 메모리 관리와 견줄 만하다. 블록별 부분 체크섬(증분 추가용 중복 판정)도 Aqueous에 없다.
 - Aqueous가 앞선 점: 디코더가 아카이브 안의 결정적 Wasm이라 도구, DLL, zlib 버전에 묶이지 않는다. 포맷은 완결된 아카이브(엔트리, 식, 무결성)이다. 이 그룹은 모두 외부 zlib 바이너리의 동작에 기대므로, zlib 버전이 바뀌면 재현이 깨질 수 있다.
 
 
@@ -338,11 +338,12 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 | 도구 | 정정 | 실패 | 분할 | 결합 |
 |---|---|---|---|---|
 | aqr-flate 프로파일 10 | 0.512% | 0 | 6.2 s | 1.6 s |
+| aqr-flate 프로파일 9 | 1.069% | 0 | 1.0 s | 0.8 s |
 | aqr-flate 프로파일 6 | 1.153% | 0 | 1.0 s | 0.7 s |
 | preflate | 2.378% | 15 | 3.8 s | 3.0 s |
 | preflate-rs | 0.780% | 117 | 1.7 s | 0.8 s |
 
-- 크기는 프로파일 10이 앞서지만 속도는 그렇지 않다. preflate-rs는 0.780%에 분할 1.7 s이다. aqr-flate가 그보다 빠른 정적 프로파일(1.0 s)에서는 정정이 1.5배 크다. 그 사이 영역(예: 2–3 s에 0.6–0.7%)은 비어 있다.
+- 크기는 프로파일 10이 앞서지만 속도는 그렇지 않다. preflate-rs는 0.780%에 분할 1.7 s이다. aqr-flate가 그보다 빠른 프로파일 9(1.0 s)에서는 정정이 1.4배 크다. 그 사이 영역(예: 2–3 s에 0.6–0.7%)은 비어 있다.
 - preflate-rs는 자기가 정확히 모델링하는 인코더(gzip, miniz-oxide, sdefl, zlib-cloudflare, zlib-ng)에서 더 작다(aqr-flate README). 그 해시와 add policy 목록(4K·32K 경계 규칙, Crc32c, Libdeflate4Fast)은 aqr-flate "다음 단계"의 zlib-ng, miniz, Chromium/Cloudflare 에뮬레이션에 바로 참고가 된다. Apache-2.0이므로 귀속을 지키면 코드 참고도 된다.
 - preflate-rs의 13% 거부는 대부분 체인 4096 한계(`NoCompressionCandidates`)이다. 7-Zip, zopfli 같은 출력은 aqr-flate의 체인 규칙과 순위 부호화가 유리한 영역이다.
 - **헤더 없는 raw deflate 탐지가 aqr-compress에 없다.** 지금은 컨테이너(gzip, zlib, ZIP, PNG, PDF)를 거쳐서만 찾는다. Precomp `-brute`의 거르개(BTYPE, 바이트 히스토그램, 2 KiB 부분 inflate와 최소 출력, 실패 위치 기록)는 그대로 비용 모델이 된다. 게임 아카이브나 독자 컨테이너에 쓸모가 있다.
@@ -430,11 +431,10 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 | zstd 레벨 1–4(1.5.x 한두 판) | 패키지, 커널, HTTP, OCI, 게임 | 중간(버전별 분기) | libzstd | 높음 |
 | LZ4 옛 가족(1.8.1 이하) | 옛 번들 | 낮음(fixture 추가) | liblz4 이력 | 중간 |
 | LZF | Redis, Krita | 낮음 | liblzf | 중간 |
-| LZO1X-1, LZO-RLE | 커널, 펌웨어, Procreate | 재현 대신 parse의 레코드(aqr-lzo, LZO1X와 lzop 파일은 완료; GPL이라 코드 없이) | 커널 `lzo.rst`, liblzo2를 블랙박스로 | LZO-RLE와 lzop 밖의 스트림 |
-| liblzma normal, 7-Zip LZMA | 패키지, 7z, OTA, SWF, Unity | 재현 대신 parse의 레코드(aqr-lzma, LZMA1과 `.lzma`는 완료) | xz(0BSD), lzma-sdk-rs | LZMA2(xz)와 7z 컨테이너 |
+| LZO1X 스트림(lzop 밖), LZO-RLE | 커널, squashfs, UBIFS, zram, Procreate | aqr-lzo의 레코드를 다른 컨테이너로(lzop 파일은 완료) | 커널 `lzo.rst`, liblzo2를 블랙박스로 | 중간 |
+| LZMA2(xz), 7z 컨테이너와 BCJ2 | 패키지, 7z, OTA | aqr-lzma의 레코드(LZMA1과 `.lzma`는 완료) | xz(0BSD), lzma-sdk-rs | 중간 |
 | LZX(CAB, WIM, CHM) | Windows 설치·업데이트 | 높음(닫힌 인코더) | wimlib(다른 인코더) | 중간(파싱 기반) |
 | GDeflate | DirectStorage 에셋 | 낮음(swizzle만) | MS(MIT) | 낮음 |
-| LZO1X-999 | 옛 게임 | aqr-lzo의 레코드(스트림의 2–6%) | 위와 같음 | 완료(lzop) |
 | zstd 레벨 5 이상, 멀티스레드 | 패키지 | 높음 | libzstd | 낮음 |
 | LZMS, XPRESS Huffman | ESD, 프리페치 | 높음 | wimlib, ms-compress | 낮음 |
 | Oodle | AAA `.pak` | 매우 높음 | 디코더뿐 | 낮음(재현), 파싱 기반은 검토 |
@@ -442,21 +442,16 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 ### Aqueous에 대한 시사점
 
 - **aqr-lz4의 다음 걸음은 HC와 legacy frame이다.** 같은 소스 계보이고, 커널, initramfs, squashfs 같은 큰 대상을 연다. 버전 가족은 1.7.3, 1.8.1, 1.8.2에서 바뀌었다는 NEWS의 근거가 있으니, 여러 버전으로 fixture를 만들어 겹치는 가족부터 잰다.
-- **README의 xz 평가("많은 버전")는 다시 볼 만하다.** git 이력상 liblzma 인코더는 2012년 이후 출력이 거의 안 바뀌었고, 변수는 설정이다. 다만 README가 지적한 "이미 강한 코더라 얻을 것이 적다"는 그대로이다. 이득은 안쪽 내용(tar, 실행 파일, PNG)과 solid 중복 제거에서 나온다. 그러니 aqr-exe와 tar 다음이 합리적이다. 그 순서대로 aqr-exe, aqr-bundle 다음에 aqr-lzma가 들어갔고, 10gb의 이득(−38.8 MB)은 모두 tar 멤버가 설치된 파일과 공유되어 나왔다.
+- **LZMA의 이득은 안쪽 내용에서 나온다.** liblzma 인코더는 2012년 이후 출력이 거의 안 바뀌었지만, 이미 강한 코더라 다시 부호화해서 얻을 것은 적다. aqr-lzma의 10gb 이득(−38.8 MB)도 모두 tar 멤버가 설치된 파일과 공유되어 나왔다. xz와 7z도 같은 이유로 안쪽이 다른 곳에 있을 때 값어치가 있다.
 - **zstd는 같은 버전이면 빌드 사이에 결정적이다**(`ZSTD_isDeterministicBuild`). 1.5.x 최신 판의 레벨 1–4(fast, dfast)만 포팅하는 것이 aqr-lz4 방식의 연장이다. 입력이 이미 zstd인 경우가 늘고 있어 장기적으로 큰 영역이다.
-- **LZX와 Oodle은 재현보다 파싱 기반을 먼저 검토한다.** 비트스트림은 공개 디코더로 규명되어 있으므로, aqr-mp3나 aqr-jpeg처럼 심볼 스트림을 파싱해 엔트로피 층만 더 나은 모델로 바꾸고 Huffman·tANS 표 선택만 저장할 수 있다. 다만 원본 바이트를 내려면 결국 인코더의 엔트로피 단계를 재현해야 하므로, 표 구성 규칙이 결정적인지가 관건이다(미검증). Oodle은 ooz의 라이선스 때문에 클린룸이 필요하다.
-- **GDeflate는 값싼 보너스이다**(swizzle 역변환 뒤 aqr-flate). LZF와 LZO1X-1은 Snappy 수준의 작은 작업이고, README가 이미 Krita, Procreate, Redis로 가치를 인정했다.
-- fixture로 확인할 것: lz4 1.9.x와 1.10.0 fast의 동일성, 커널 lzo1x_1과 miniLZO의 동일성, lz4-java(Minecraft)의 출력.
+- **LZX와 Oodle은 재현보다 aqr-lzma식 parse 레코드를 먼저 검토한다.** 비트스트림은 공개 디코더로 규명되어 있다. 다만 원본 바이트를 내려면 Huffman·tANS 표도 재현해야 하므로, 표 구성 규칙이 결정적인지가 관건이다(미검증). Oodle은 ooz의 라이선스 때문에 클린룸이 필요하다.
+- **GDeflate는 값싼 보너스이다**(swizzle 역변환 뒤 aqr-flate). LZF는 Snappy 수준의 작은 작업이다(Krita, Redis).
+- fixture로 확인할 것: lz4 1.9.x와 1.10.0 fast의 동일성, lz4-java(Minecraft)의 출력.
 
 
 ## 4. JPEG
 
-기준: aqr-jpeg는 96개 파일(186 MB)에서 0.785, 압축 39 MB/s, 해제 82 MB/s(M4 한 스레드)이다. 모델 "P1"은 다음과 같다.
-
-- 블록당 nonzero 개수를 이웃 개수 문맥으로 코딩한다.
-- AC는 위치와 남은 nonzero 개수 문맥으로 cat만 코딩하고, 부호와 나머지 비트는 raw로 둔다.
-- DC는 위·왼쪽 블록과의 경계 연속성(Lakhani식, 계수 영역)으로 예측하고, 두 예측의 불일치를 문맥으로 쓴다.
-- 파일별 정적 표, 4-way rANS를 쓴다.
+aqr-jpeg의 모델과 수치는 그 README(Design, Tried and dropped)에 있다.
 
 ### packJPG [분석]
 
@@ -517,7 +512,7 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 - 실제 재압축은 HQ 컬러 74장뿐이다. 같은 74장에서 brunsli는 약 279 MB, djaz는 290 MB이다. 원본 크기는 공개되지 않았으나 brunsli의 보통 비율로 보면 350–370 MB이고, 나머지 약 630 MB의 사본이 약 35 MB로 접힌다(추정).
 - 3위 baconjpg는 HQ를 재압축하지 않고 인접 이미지 delta와 RLE만 썼다. 이미지 간 중복을 못 쓰면 paq8px solid도 0.675(670.9 MB), brunsli 단독은 0.765에 그친다. 이 중복은 계수를 재양자화해야 보이기 때문이다.
 - 해제 시간 측정은 한동안 VM의 썸네일 생성과 wall time 측정 때문에 부풀었다가 2023-08에 고쳐졌다(#28–#41).
-- 엔트리 대부분은 이 데이터셋에만 맞춘 것이고, 상위 두 개의 소스와 하드웨어, 스레드 수는 찾지 못했다. aqr-jpeg의 0.785와 비교할 수 없다.
+- 엔트리 대부분은 이 데이터셋에만 맞춘 것이고, 상위 두 개의 소스와 하드웨어, 스레드 수는 찾지 못했다. aqr-jpeg의 비율과 비교할 수 없다.
 
 ### packARC, 그 밖의 JPEG·MP3 도구 [개요]
 
@@ -528,16 +523,7 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 
 ### Aqueous에 대한 시사점
 
-2026-10-25에 아래 후보를 aqr-jpeg에서 재 보았다. 추정은 계수를 실제로 풀어 변형마다 파일별 정적 표 비용(표 비트 + 데이터 비트)을 구한 것으로, 모든 scan이 모델링되는 76개 파일(147.6 MB)에서 실제 출력과 0.13% 안에서 맞았다. pp는 그 입력 크기 기준이다. 실측은 96개 파일에서 `aqr-jpeg bench -j 1`로 했고, 기준은 비율 0.8303, 압축 62.3 MB/s, 해제 66.8 MB/s이다.
-
-- **가장자리 계수(행 0, 열 0)의 경계 연속성 예측.** Lepton, brunsli, paq8px가 모두 갖고 있다. 이득은 cat 문맥보다 **부호**에서 나온다. 예측의 부호 적중률은 예측 크기에 따라 58–73%이고, 반올림한 예측이 0인 구간(가장자리 부호의 25%)에서는 이득이 없다.
-  - cat 문맥 (위치, 남은 개수, 예측 크기 구간): 추정 −0.32 pp. zigzag 순서에서는 가장자리 계수의 예측에 쓰이는 같은 열·행 계수가 모두 뒤에 오므로 이웃 블록만으로 예측하게 된다. AC 문맥 그룹이 약 3배로 늘어난다. 구현하지 않았다.
-  - 부호를 블록의 AC 뒤로 미루면 내부 계수를 다 알므로 순서를 바꾸지 않고 완전 예측을 쓸 수 있다. 가장자리 부호를 모두 rANS로 코딩하면 실측 −0.60 pp(0.8243)였지만 속도는 압축 −26%, 해제 −23%였다. 이웃만으로 예측하면 −0.36 pp이고 속도는 거의 같았다(−25%/−21%). 예측 없이 부호 심볼만 코딩해도(심볼 +21%) −14%/−7%이고, 나머지 비용은 블록마다 nonzero를 도는 경계 합과 문맥 계산이다. 자연 순서로 dense하게 계산하면 자동 벡터화가 되지 않아 더 느렸다. 구간을 거르고 나머지를 raw로 둔 판은 −0.48 pp에 −31%/−30%였다.
-  - 부호를 더한 Lepton식 전면 개편(7×7 먼저, 가장자리 나중)은 추정 −0.88 pp가 최대치이다.
-  - 앞서 기각한 이웃 크기 AC 문맥(−0.22 pp, −6%/−13%)보다 비율 대비 효율이 나빠 기각했다.
-- **7×7과 가장자리의 nonzero 개수 분리**(Lepton, packJPG): 그것만으로는 추정 +0.35 pp로 오히려 나빠진다. 가장자리 예측과 함께일 때만 의미가 있다.
-- **DC 예측**: aqr-jpeg는 이미 블록 안에서 DC를 AC 뒤에 코딩하므로(Lepton과 같다) 버퍼가 필요 없다. 남는 차이인 픽셀 영역 예측(경계 16픽셀의 기울기 외삽, trimmed mean)은 추정 −0.04 pp에 그쳤다.
-- **문맥 맵 클러스터링**(brunsli)은 aqr-jpeg의 그룹별 정밀도와 부모 분포 상속과 같은 문제를 푼다. 새로 얻을 것은 적다.
+- Lepton·brunsli에서 온 후보(가장자리 계수의 경계 연속성 예측과 부호, 7×7과 가장자리의 nonzero 개수 분리, 픽셀 영역 DC)는 2026-10-25에 재 보고 모두 기각했다. 수치는 aqr-jpeg README의 "Tried and dropped"이다. 문맥 맵 클러스터링(brunsli)은 aqr-jpeg의 그룹별 정밀도와 부모 분포 상속과 같은 문제를 푼다.
 - 비권장: Huffman 비트스트림 직접 모델링(paq8px)과 위치별 평면 코딩(packJPG)은 속도와 메모리 목표에 맞지 않는다.
 - aqr-jpeg가 앞선 점: 속도(lepton_jpeg_rust의 약 2–4배), 투기적 병렬 Huffman 디코딩, stripe 단위 메모리, progressive의 인라인 canonical 판정, 퍼징(`mutenc`).
 
@@ -585,22 +571,21 @@ aqr-flate README의 홀드아웃 벤치(공통으로 왕복하는 807개 스트�
 
 ### Aqueous에 대한 시사점
 
-packMP3와의 3 pp 격차를 설명하는 후보(코드 읽기에서 나온 가설이며 정량 검증은 하지 않았다):
+packMP3와의 격차에서 남은 후보(코드 읽기에서 나온 가설이며 정량 검증은 하지 않았다). 시간 방향 이동평균(packMP3의 `ctx_h_abs`)은 2026-10-25에 넣었다(aqr-mp3 README).
 
 1. **같은 granule의 이미 코딩한 이웃.** aqr-mp3는 직렬 의존을 피하려고 일부러 쓰지 않는다. README의 측정으로 직전 쌍이 0.53 pp(디코딩 약 −40%), 두 쌍 전이 0.37 pp(−14%)이다. 격차의 가장 큰 몫으로 보인다.
-2. **시간 방향 지수 이동평균.** packMP3의 `ctx_h_abs`는 여러 granule을 반영한다. 2026-10-25에 넣었다: 직전 granule의 크기를 이력 가중치 1/4의 이동평균으로 바꾸고 쿼드러플 문맥도 그것을 쓴다. held-out FMA 3,489개에서 0.8890 → 0.8864(−0.27 pp), 압축 −1.6%, 복원 −3%. 이동평균을 직전 granule과 별도 차원(3분류)으로 두면 문맥이 3배가 되어 500표 병합에서 오히려 0.5 pp 나빠졌다.
-3. **부호 모델링.** aqr-mp3는 부호를 그대로 복사한다. 이득은 작을 것이다(1 pp 미만 추정). 비트당 이진 코딩이라 속도 비용이 크다.
-4. **심볼 단위.** packMP3는 계수 단위에 인접 계수를 조건으로 두고, aqr-mp3는 쌍 단위 심볼에 문맥을 500표로 병합한다.
-5. **적응 대 정적.** 인코더와 비트레이트가 섞인 코퍼스에서는 적응이 유리할 수 있다. 정적 prior 위에 SSE/APM이나 2입력 믹싱을 얹는 혼합을 시도할 만하다.
-6. 부가정보(1.7%)와 linbits 하위 비트는 3 pp를 설명하지 못한다. packMP3가 `sv_bound`와 region 경계를 명시 저장하는 것은 오히려 손해일 수 있다.
+2. **부호 모델링.** aqr-mp3는 부호를 그대로 복사한다. 이득은 작을 것이다(1 pp 미만 추정). 비트당 이진 코딩이라 속도 비용이 크다.
+3. **심볼 단위.** packMP3는 계수 단위에 인접 계수를 조건으로 두고, aqr-mp3는 쌍 단위 심볼에 문맥을 500표로 병합한다.
+4. **적응 대 정적.** 인코더와 비트레이트가 섞인 코퍼스에서는 적응이 유리할 수 있다. 정적 prior 위에 SSE/APM이나 2입력 믹싱을 얹는 혼합을 시도할 만하다.
+5. 부가정보(1.7%)와 linbits 하위 비트는 격차를 설명하지 못한다. packMP3가 `sv_bound`와 region 경계를 명시 저장하는 것은 오히려 손해일 수 있다.
 
-시도 순서: (a) 시간 EMA 문맥, (b) 채널 1에 채널 0의 인접 쌍 합, (c) 직렬 의존을 허용하는 별도 레벨(`max`)에서 역순 코딩과 부호 모델, (d) 정적 확률 뒤 SSE. 격차가 어디서 오는지는 packMP3를 `tools/compare.sh`의 FMA 402개에 돌려 계수, 부호, 스케일팩터, 부가정보로 나누어 재면 확정할 수 있다.
+시도 순서: (a) 채널 1에 채널 0의 인접 쌍 합, (b) 직렬 의존을 허용하는 별도 레벨(`max`)에서 역순 코딩과 부호 모델, (c) 정적 확률 뒤 SSE. 격차가 어디서 오는지는 packMP3를 `tools/compare.sh`의 FMA 402개에 돌려 계수, 부호, 스케일팩터, 부가정보로 나누어 재면 확정할 수 있다.
 
 Vorbis:
 
-- balrogg가 README "Worth doing"의 Ogg Vorbis 행(8–12%)을 실제 구현으로 뒷받침한다. GPL-3.0이므로 설계만 참고한다.
-- 구조는 aqr-mp3와 같다(디코딩, 심볼 모델링, 정확한 재인코딩). 새로 필요한 것은 셋업 헤더의 코드북 재현, VQ 엔트리의 스칼라 분해, Ogg 페이지와 패킷의 재구성(CRC, 페이지 경계)이다.
-- balrogg는 `-9`에서 5 MB/s 남짓이다. 100 MB/s 목표라면 `-1`–`-2` 수준(정적 표와 얕은 문맥)이 목표 영역이다(추정).
+- aqr-vorbis(Vorbis I 명세만으로 작성)는 FSB5에 담긴 패킷을 받는다. The Crew의 FSB5에서 레코드가 큰 스트림의 90.7%, 작은 스트림의 93.2%이고, 한 스레드로 약 23 MB/s, 21 MB/s이다. balrogg `-1`(90.4%)과 비슷하고 `-9`(88.2%)보다 2 pp 남짓 크다. 표본이 달라 그대로 견줄 수는 없다.
+- `.ogg`에는 Ogg 페이지와 패킷의 재구성(CRC, 페이지 경계, 체인 스트림)이 남았다.
+- balrogg에 있고 aqr-vorbis에 없는 것은 residue의 채널 간 이웃 문맥, 비트 단위 혼합, match model이다. aqr-vorbis는 속도 때문에 CM 대신 정적 표 rANS를 쓴다. balrogg는 GPL-3.0이므로 설계만 참고한다.
 - Opus는 가능하다는 것이 입증되었지만 이득이 3–8%라 후순위이다.
 
 ### 무손실 오디오: 기준
@@ -688,7 +673,6 @@ aqr-flac README의 "Tried and dropped"에 이미 측정된 것들:
   3. TTA(인코더의 결정성을 먼저 확인)
 - **가변 블록 크기 FLAC 확인.** aqr-flac README는 flake와 일부 FFmpeg 설정이 만드는 가변 블록 스트림을 헤더 예측이 처리한다고 하지만, 그런 표본으로 시험했다는 기록은 없다. flacoutcpp와 flake로 표본을 만들어 보면 싸게 확인된다.
 - Monkey's, WavPack, OptimFROG는 README의 판단(남는 것이 적음)이 맞다. 합성까지 하려면 인코더를 비트 단위로 재현해야 한다.
-- aqr-flac의 위치를 정확히 잡으려면 Hydrogenaudio의 최신 비교(Martijn van Beurden)가 필요한데, 이번에는 403으로 받지 못했다.
 
 
 
@@ -750,11 +734,9 @@ aqr-flac README의 "Tried and dropped"에 이미 측정된 것들:
   - 애니메이션에는 이전 프레임 문맥(paq8px)을 쓰고, 팔레트 인덱스에는 인덱스 도메인 문맥(이웃과 같은지, 팔레트 정렬)을 쓴다.
 - **camera RAW.** 공개 선례가 없으므로 aqr-jpeg의 Huffman 디코더를 SOF3로 넓히는 것이 주 작업이다. 재현할 것은 Huffman 표, 예측기 1–7, scan과 restart 구조이다. 모델은 Bayer 평면별 문맥, 2차원 잔차, black level과 비트 깊이의 상한을 쓴다.
   - 구현 순서는 rawspeed의 디코더 목록을 지도로 삼는다. CR2와 DNG(LJpeg, deflate), NEF, ARW2, 그다음 RW2, ORF, PEF, IIQ, RAF이다.
-  - ARW2는 엔트로피 부호화가 없어 이득이 가장 크다(README와 같은 판단). 컨테이너는 TIFF/EXIF이므로 TIFF 파서를 RAW와 TIFF가 함께 쓴다.
-- **텍스처.** 블록 필드(endpoint, selector, 모드)를 스트림으로 나누고 이웃 블록으로 예측하는 것(crunch의 구조)을 직접 모델링한다. BC7Prep의 10%가 범용 LZ 위의 기준선이다.
-  - BC1은 c0 > c1 여부가 모드를 가르므로 순서를 보존해야 한다. BC7은 모드별 가변 비트 필드, 파티션, p-bit를 나눠야 하고, 예약 모드 같은 무효 인코딩도 고려해야 한다.
-  - RDO 텍스처에는 "앞 블록과 같다" 기호가 이득일 것이다(추정). BC7Prep에 특허 출원이 있으니 청구항을 확인해야 한다.
-- 빈 자리: Precomp의 GIF와 PNG는 이미지 모델 없이 LZMA로 보내고, paq8px는 이미지 모델이 있지만 7 KB/s이다(aqr-png README). 빠르면서 이미지 모델을 가진 자리는 비어 있다.
+  - ARW2는 엔트로피 부호화가 없어 이득이 가장 크다(README와 같은 판단). 컨테이너는 TIFF/EXIF이므로 aqr-raw의 TIFF 파서(지금은 비압축만)를 넓혀 함께 쓴다.
+- **텍스처.** BC1–BC5는 aqr-tex가 한다. 남은 것은 BC6H, BC7, KTX이다. BC7은 모드별 가변 비트 필드, 파티션, p-bit를 나눠야 하고, 예약 모드 같은 무효 인코딩도 고려해야 한다. BC7Prep의 10%가 범용 LZ 위의 기준선이고, BC7Prep에 특허 출원이 있으니 청구항을 확인해야 한다.
+- Precomp의 GIF와 PNG는 이미지 모델 없이 LZMA로 보내고, paq8px는 이미지 모델이 있지만 7 KB/s이다(aqr-png README). 빠르면서 이미지 모델을 가진 자리는 aqr-png와 aqr-raw 말고는 비어 있다.
 
 
 ### 무손실 이미지 코덱 [분석, 일부 개요]
@@ -830,9 +812,9 @@ aqr-raw 래스터 모델의 참고로 본다.
 
 ### Aqueous에 대한 시사점
 
-- **aqr-pdf는 Precomp보다 앞선다.** 배울 것이 없다. aqr-pdf의 열린 항목은 이렇게 정리된다.
+- **aqr-pdf는 Precomp보다 앞선다.** 배울 것이 없다. aqr-pdf의 열린 항목(README의 Next steps) 가운데 다른 도구와 견줄 것은 이렇다.
   - 빈 사용자 암호의 암호화 파일: 공개 도구 중 하는 것이 없다. RC4와 AES-CBC(저장된 IV)의 재암호화는 결정적이라 구현이 단순하다. CC의 몇 %에 해당하므로 우선순위가 높다.
-  - DCT 체인: Precomp처럼 필터를 벗긴 뒤 안쪽 JPEG 시작을 찾으면 된다. ASCII85는 줄바꿈 규칙만 기록하면 가역이다.
+  - `[/FlateDecode /DCTDecode]`와 `[/ASCII85Decode /FlateDecode]` 체인: Precomp처럼 필터를 벗긴 뒤 안쪽 JPEG 시작을 찾으면 된다. ASCII85는 줄바꿈 규칙만 기록하면 가역이다.
   - xref 재구성: 공개 선례가 없고 이득은 18 MB 중 0.8 MB이다.
 - **CD 이미지**(README "Worth doing"의 BIN/CUE 행)는 구현 비용이 낮다. EDC/ECC는 결정적이고 수백 줄이며, 불일치 섹터는 리터럴로 폴백하면 된다. 수요도 크다(Redump 덤프).
   - 섹터 모드 분류와 MSF 주소 예측을 하고, 예외는 리터럴 런으로 둔다.
@@ -844,7 +826,7 @@ aqr-raw 래스터 모델의 참고로 본다.
 
 ## 8. 실행 파일
 
-기준: aqr-exe의 x86 disfilter는 명령 필드별 46개 스트림이고 상대 타깃을 절대로 바꾼다. 점프 타깃은 `JUMP32`/`JUMP64`에 절대로 두고, call 타깃은 MTF 캐시를 거치며, 함수 사이 패딩과 점프 표(`JUMPTAB64`, `le64` 그대로)를 알아본다. ARM64는 `BL`과 `ADRP` 타깃을 절대로 바꾸고 지역 분기 오프셋을 스트림으로 뺀다. ELF와 RISC-V는 지원하지 않는다.
+기준: aqr-exe(README)는 PE와 Mach-O의 x86, x86-64, ARM64, CIL을 받는다. x86 disfilter는 명령 필드별 스트림으로 나누고 상대 타깃을 절대로 바꾸며, 함수 사이 패딩을 부호화한다. ARM64는 `BL`과 `ADRP` 타깃을 절대로 바꾸고 지역 분기 오프셋을 스트림으로 뺀다. PE의 재배치는 전용 모듈이, export·import·runtime function 표는 aqr-infer-recs의 `recs-fields`가 맡는다. ELF와 RISC-V는 지원하지 않는다.
 
 ### xz BCJ 필터 [분석]
 
@@ -922,7 +904,7 @@ aqr-raw 래스터 모델의 참고로 본다.
   - `.dynsym`, `.symtab`: aqr-exe의 .NET 표 처리(열 분리, 정렬 열의 델타)를 그대로 쓴다. 문자열은 접두사를 공유한다.
   - `.gnu.hash`, `.hash`: 이름에서 다시 계산할 수 있다.
   - `.eh_frame_hdr`의 정렬 표는 FDE에서 완전히 다시 만들 수 있다. FDE의 `pc_begin`과 `pc_range`는 함수 경계와 연결하면 거의 0비트가 된다(구현이 어렵다).
-- **PIC 점프 표.** gcc/clang PIC의 `lea table(%rip); movslq (table,idx,4); add; jmp *` 표는 `.rodata`에 표 기준 32비트 상대 오프셋으로 있다. `JUMPTAB64`는 절대 `le64`만 가정하므로, ELF와 Mach-O에서는 이 꼴을 알아보아 절대 주소로 바꾸는 것이 이득일 수 있다(실측 필요).
+- **PIC 점프 표.** gcc/clang PIC의 `lea table(%rip); movslq (table,idx,4); add; jmp *` 표는 `.rodata`에 표 기준 32비트 상대 오프셋으로 있다. aqr-exe의 x86-64 점프 표는 절대 `le64` 엔트리만 알아보므로(FORMAT.md §6), ELF와 Mach-O에서는 이 꼴을 알아보아 절대 주소로 바꾸는 것이 이득일 수 있다(실측 필요).
 - **점프 타깃 부호화 비교.** kkrunchy는 앞 점프 타깃과의 차이(zigzag)로, aqr-exe는 절대 타깃으로 저장한다. 함수 안의 지역성을 생각하면 델타가 작을 수 있고, 절대는 반복 일치에 유리하다. 같은 코퍼스에서 비교해 볼 만하다.
 - **ARM64의 `ADRP` 짝.** aqr-exe도 xz처럼 `ADRP`만 절대로 바꾼다. 바로 뒤나 가까이에서 같은 레지스터를 쓰는 `ADD`/`LDR`/`STR`의 lo12를 묶어 전체 주소로 만들면, 같은 전역 변수를 가리키는 참조가 한 값으로 겹친다. xz RISC-V의 `AUIPC` 쌍과 같은 발상이고, ARM64 공개 구현은 찾지 못했다. Linux aarch64 PLT 스텁(`adrp/ldr/add/br`)도 이 꼴이다.
 - **RISC-V.**
@@ -982,33 +964,23 @@ aqr-raw 래스터 모델의 참고로 본다.
 
 ### Aqueous에 대한 시사점
 
-- **RarVM은 xform-design §5.7을 뒷받침한다.** 해시로 식별해 네이티브로 치환하는 것이 실제 생태계에서는 사실상 유일한 실행 경로였다. 해시 동결 표준 모듈만 쓰는 수준 1을 규범으로 두는 방향이 맞다.
-- **모듈 식별 해시를 강한 해시로 정해야 한다.** RAR의 식별자는 CRC32와 길이였다. 명세에서는 아직 TODO이다(`spec/index.bs`의 `#module-block`, "the identification by a hash").
-- **xform-design.md 62행**("RAR5는 보안과 복잡도 문제로 VM을 없앴다")은 출처가 없는 통설이다. 출처를 달거나 표현을 낮춰야 한다.
-- **최소 보장 자원 한도.** 명세의 resource failure는 "선언되었거나 구현이 정한 한도"이다(`spec/index.bs`의 `#semantics`). 이러면 어떤 구현에서는 풀리고 다른 구현에서는 실패하는 아카이브가 생긴다. ZPAQ의 32비트 빌드와 64비트 빌드가 같은 문제를 겪었다. zstd 창의 128 MiB처럼 적합성 수준마다 하한을 두는 편이 낫다(명세 `#module-execution`의 Issue와 같은 맥락).
+- **RarVM은 xform-design §5.7을 뒷받침한다.** 해시로 식별해 네이티브로 치환하는 것이 실제 생태계에서는 사실상 유일한 실행 경로였다. 명세는 이를 SHA-512/256 모듈 해시와 registered module로 정했다(`#module-block`, `#registered-blocks`).
+- **최소 보장 자원 한도.** 이제 아카이브가 적용마다 메모리 한도를 선언하지만(`apply_memory_limit`), 구현이 정한 한도가 그보다 작으면 여전히 resource failure이다(`#semantics`). 그러면 어떤 구현에서는 풀리고 다른 구현에서는 실패하는 아카이브가 생긴다. ZPAQ의 32비트 빌드와 64비트 빌드가 같은 문제를 겪었다. zstd 창의 128 MiB처럼 적합성 수준마다 하한을 두는 편이 낫다(명세 `#module-execution`의 Issue).
 - **JIT 이식성.** ZPAQ 계열은 x86 RWX JIT에 묶여 ARM과 W^X에서 고생했고, paq8pxv의 JIT도 네이티브의 3.9배이다. 인터프리터를 폴백으로, 네이티브 치환을 JIT와 독립으로 둔 xform-design의 결정이 이를 이미 반영한다. 인터프리터, JIT, 네이티브의 결과가 같은지 확인하는 적합성 벡터를 규범 부록에 둘 만하다.
 - **코드 공유.** ZPAQ는 압축기를 블록마다 반복해 싣고, paq8pxv는 소스를 실어 컴파일 동작이 규범이 된다. Aqueous는 Wasm 바이트코드를 규범으로 하고 해시로 식별해 한 번만 두므로 두 문제를 모두 피한다.
 - **OpenZL은 가장 가까운 대응이다.**
   - 같은 점: 압축 때 해소한 그래프를 직렬화하고 디코더는 재생만 한다. 파서(SDDL)는 압축기 전용이다. xform-design §4.2와 같은 결론이다.
   - Aqueous가 다른 점: 새 변환을 Wasm으로 동봉하므로 디코더를 고칠 필요가 없다. OpenZL은 코덱 ID가 라이브러리에 묶이고 포맷도 아직 불안정하다.
   - 참고할 점: Decoding Map의 필드별 전치와 비트 패킹. 파일이 매우 많을 때 formula 블록의 헤더 비용을 재 볼 만하다. "최소 버전 선언"은 표준 모듈 목록을 버전화할 때 일찍 실패하는 신호가 된다.
-  - 메모리 약 10배와 스트리밍 미지원은 범용 DAG 실행기에서 메모리 모델이 어렵다는 증거이다. Aqueous의 노드별 크기 선언과 eval-design의 사전 계산 최고 수위는 그 점에서 강점이다.
-- **조각 단위 중복 제거**(ZPAQ, 평균 64 KB CDC와 SHA-1): Aqueous의 `ref`와 블록 공유는 파일·블록 단위이다. 큰 파일의 여러 버전 사이의 부분 중복은 인코더가 CDC로 블록을 나누어야 잡힌다. 지금은 aqr-git(델타)만 이를 다룬다.
+  - 메모리 약 10배와 스트리밍 미지원은 범용 DAG 실행기에서 메모리 모델이 어렵다는 증거이다. Aqueous의 노드별 크기 선언, 적용마다의 메모리 한도, eval-design의 사전 계산 최고 수위는 그 점에서 강점이다.
+- **조각 단위 중복 제거**(ZPAQ, 평균 64 KB CDC와 SHA-1): Aqueous는 같은 파일, 같은 블록, 그리고 다른 파일이 그대로 가진 내용(`share_slices`)을 나눠 갖는다. 큰 파일의 여러 버전 사이처럼 조금씩 다른 부분 중복은 잡지 못하고, aqr-git(델타)만 이를 다룬다(10절).
 - **포맷 동결의 대가**(zpaqfranz): 목록 비용이 포맷에 박히면 고칠 수 없다. 엔트리 표를 정적 메타데이터 블록으로 둔 결정이 맞다.
 
 ### lzip의 xz 비판과 명세 [분석]
 
-https://www.nongnu.org/lzip/xz_inadequate.html. lzip은 6바이트 헤더(매직, 버전, dict), LZMA 스트림, 고정 폭 트레일러(CRC32, 데이터 크기, 멤버 크기)이고 선택 필드와 패딩이 없다. 멤버마다 매직이 있어 재동기화되고, lziprecover가 손상된 사본 여럿을 합친다. 아래는 2026-10-25에 명세에 반영한 결과이다. 반영 내용은 명세의 해당 절이 기준이다.
+https://www.nongnu.org/lzip/xz_inadequate.html. lzip은 6바이트 헤더(매직, 버전, dict), LZMA 스트림, 고정 폭 트레일러(CRC32, 데이터 크기, 멤버 크기)이고 선택 필드와 패딩이 없다. 멤버마다 매직이 있어 재동기화되고, lziprecover가 손상된 사본 여럿을 합친다.
 
-| 비판 | 대응 | 판정 |
-|---|---|---|
-| 길이·플래그 필드가 보호되지 않아 프레이밍 오류가 난다 | 블록 헤더 CRC는 두지 않는다. 오류 모델(recovery-design §2)에서 흔한 손상은 4 KiB 단위라 CRC는 감지만 하고 재동기화는 돕지 못한다. 감지는 이미 데이터 체크섬이 한다. | 유지. 다음 leaf block에서 metadata의 `file_offset`으로 재동기화하는 절차를 Repair 절(recovery-design S3)에 넣는다. non-leaf block은 순번으로 참조되므로 손상 지점 뒤로 같은 parcel의 위치를 잃는다. |
-| 가변 길이 정수가 뒤 필드의 폭을 바꾼다 | 블록 `type`은 최단 leb128만 허용한다(`#block`). `type % 4`로 size 폭을 정하는 구조는 유지한다. | 해소. 큰 블록은 u64le size로 쓰고 나중에 고치면 되므로 스트리밍 쓰기에 비용이 없다. |
-| 패딩 같은 쓸모없는 필드가 오탐을 만든다 | 패딩과 spacer의 0은 압축기만 지키고 해석에는 영향이 없다(`#block`, `#spacer-block`). mirror의 target 비교에서도 패딩을 뺐다. | 해소. footer 크기 사본이나 size hint 같은 중복 필드는 위치를 찾는 데 쓰이므로 엄격하게 둔다. |
-| 체크 종류를 고를 수 있고 생략할 수 있다 | 체크섬을 생략할 수 있는 것은 leaf data block뿐이다(근거는 `#data-block`의 노트). | 해소. 장기 보존용으로 None을 금지하는 archival profile을 두었다(`#profiles`). |
-| 확장성이 과하고 버전 번호가 없다 | 첫 16진 자리가 0–9인 블록 종류는 critical이라 모르면 unsupported failure이고, A–F는 non-critical이라 모르면 무시한다(`#reserved-blocks`). 기존 할당이 그대로 맞는다: content 계열과 block-like structure는 critical, mirror는 non-critical이다. | 해소. 기능은 블록 단위로 들어오므로 헤더 버전 바이트는 두지 않고, 호환되지 않는 개정은 magic을 바꾼다. 38–3F 같은 정의 구간 안의 예약도 critical이라 새 압축 방식에 쓸 수 있다. 실험 블록(E)은 non-critical이고, 실험을 켠 구현만 critical로 다룬다. |
-| 컨테이너 안의 컨테이너 | 층의 수 자체를 문제 삼는 것은 억지에 가깝다. 층마다 맡은 일이 다르고, lzip의 multimember도 결국 블록 구조이다. 알맹이는 두 층이 같은 정보를 가질 때의 일치 규칙이다. | 해소. data block 안 zstd 블록의 끝과 바깥 크기의 일치를 MUST로 바꿨다(`#zstandard-compression-method`). 나머지 중복 쌍(`original_size`, size hint, footer 크기, formula의 크기 선언)은 이미 MUST이다. 디코더가 무겁다는 점은 설계 목표의 대가이다. |
-| 앞뒤 쓰레기 처리 | Conformance의 아카이브 찾기 알고리즘으로 정했다(`#locating-an-archive`). | 해소. 이어 붙인 아카이브는 첫 것만 찾는다. |
+비판은 2026-10-25에 명세에 반영했다(최단 leb128, 패딩의 해석 무시, archival profile, critical과 non-critical 블록 종류, 층 사이 크기 일치의 MUST, 아카이브 찾기). 남은 것은 블록 헤더 CRC를 두지 않는 대신의 재동기화이다. 다음 leaf block에서 metadata의 `file_offset`으로 재동기화하는 절차를 Repair 절(recovery-design S3)에 넣는다. non-leaf block은 순번으로 참조되므로 손상 지점 뒤로 같은 parcel의 위치를 잃는다.
 
 ### 장기 보관, 재현 가능 아카이브, Wasm 성능 [개요]
 
@@ -1024,11 +996,6 @@ https://www.nongnu.org/lzip/xz_inadequate.html. lzip은 6바이트 헤더(매직
 
 - https://github.com/YadeWira/syc-ModularCompressionTool(보관됨). zstd, srep, xprecomp, zpaqfranz, lz4 같은 외부 압축기를 FreeArc식 `.ini` 체인으로 이어 `.syc`에 쓴다. solid tar, 다중 파트, AES-256-GCM과 ChaCha20-Poly1305, CRC32와 MD5를 지원하고 Windows 전용이다.
 - 아카이브만으로는 풀 수 없고(외부 실행 파일에 의존) 결정성도 없다. Aqueous가 푸는 문제의 반례이다.
-- 스레드 4445("Design of compressor file format")의 주장(고정 크기 헤더, 손상 내성을 위한 매직 재동기화, member 대 block)은 명세의 고정 footer 크기와 미러 블록에 이미 반영되어 있다.
-
-### Aqueous에 대한 시사점(포맷 설계)
-
-- **content block 헤더의 손상 경로.** `type`과 `size`가 보호되지 않으므로, metadata의 `file_offset`으로 다음 leaf block에서 재동기화하는 절차를 recovery-design.md S3에 넣는다.
 
 
 ## 10. 중복 제거와 구조화 데이터
@@ -1038,7 +1005,7 @@ https://www.nongnu.org/lzip/xz_inadequate.html. lzip은 6바이트 헤더(매직
 - srep(Bulat Ziganshin): 공개 소스 저장소를 찾지 못했다. Tridgell식 장거리 LZ로, 사전을 RAM에 두지 않고 블록 해시를 비교해 RAM의 약 10배 크기 파일까지 다룬다고 한다. "future-LZ" 방식은 압축 때 입력을 두 번 읽고, 디코더가 앞으로의 매치에 쓸 데이터를 메모리에 둔다. 같은 저자의 REP는 2 GB RAM에서 최소 512 B 매치, 최대 1 GB 거리까지 찾는다(Wikipedia).
 - eXdupe: 저장소를 찾지 못했다.
 - FastCDC(Rust 구현 https://github.com/nlfiedler/fastcdc-rs, MIT, `src/v2020/mod.rs`): Gear 해시와 `hash & mask == 0`의 컷, 최소 크기 이하에서 컷 건너뛰기, 평균 전후로 마스크를 바꾸는 정규화 청킹을 쓴다. 결정적이다.
-- 지금 Aqueous의 중복 제거는 같은 파일(`ref`)과 같은 블록, aqr-zip의 같은 본문, aqr-git의 델타이다. 그 밖은 zstd 창(최대 128 MiB) 안에서만 잡힌다.
+- 지금 Aqueous의 중복 제거는 같은 파일(`ref`)과 같은 블록, aqr-git의 델타, 그리고 배치 안에서 다른 파일이 그대로 가진 내용이다. 마지막 것은 서로 담을 수 있는 파일을 한 배치에 모으고(`together`, CRC와 크기, 멤버, 앞 64 KiB), 스트림을 만든 뒤 slice끼리 나눠 갖는다(`Formula::share_slices`, `10gb-todo.md` 2번). 그 밖은 zstd 창(최대 128 MiB) 안에서만 잡힌다.
 
 ### 수치와 열 [분석, 일부 개요]
 
@@ -1058,12 +1025,12 @@ https://www.nongnu.org/lzip/xz_inadequate.html. lzip은 6바이트 헤더(매직
 
 ### Aqueous에 대한 시사점
 
-- **장거리 중복 제거**: VM 이미지, 백업 tar, 반복 에셋처럼 zstd 창을 넘는 부분 중복을 지금은 놓친다. 두 가지 방법이 있다.
+- **장거리 중복 제거**: VM 이미지, 백업 tar, 반복 에셋처럼 zstd 창을 넘는 부분 중복은 `together`가 묶지 못하면 놓친다. 두 가지 방법이 있다.
   - REP/srep식 장거리 매치(최소 512 B–4 KB)를 앞단에 두고 (오프셋, 길이)로 바꾼다.
   - FastCDC 청크의 해시 색인을 둔다.
   - 어느 쪽이든 디코더는 복사만 하면 된다. 다만 future-LZ처럼 디코더가 미래 매치용 데이터를 쥐고 있는 방식은 메모리 선형 맞춤과 eval-design의 사전 계산 최고 수위와 충돌하므로, 거리와 메모리 상한을 정해야 한다.
   - 포맷 모델(aqr-obj, aqr-sqlite)이 보기 전에 매치를 빼면 모델의 문맥이 끊긴다. 매치를 레코드 경계에 맞추는 편이 낫다.
-- aqr-num 쪽에서는 ALP의 예외 처리와 FFOR가 정수 열을 단단히 묶는 방식, Pcodec의 모드 체계(IntMult, FloatMult, Dict)가 열 모델 선택의 참고가 된다. Parquet은 Snappy를 푼 뒤 열 값을 BtrBlocks와 ALP식으로 모델링하는 방향이 자연스럽다.
+- aqr-num 쪽에서는 ALP의 예외 처리와 FFOR가 정수 열을 단단히 묶는 방식, Pcodec의 모드 체계(IntMult, FloatMult, Dict)가 열 모델 선택의 참고가 된다. 이진 float에서는 aqr-infer-recs가 레코드의 float 가운데 한 배율의 배수인 것을 정수로 바꾸고(`recs-floats`, ALP와 같은 방향), aqr-hdf5가 float 데이터셋을 선형 예측기로 부호화한다. Parquet은 Snappy를 푼 뒤 열 값을 BtrBlocks와 ALP식으로 모델링하는 방향이 자연스럽다.
 - 3D: meshopt와 Draco로 이미 압축된 glTF는 README의 판단(이미 예측과 엔트로피 부호화됨)대로 두는 것이 맞다. 이득은 날 버퍼의 glTF/GLB, STL, PLY에 있다.
   - STL의 법선은 정점에서 계산되는 경우가 많아 잔차 0을 노릴 수 있다.
   - ASCII PLY는 aqr-num이 바로 적용된다.
@@ -1116,7 +1083,7 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 - 압축 파일의 내용물이 다른 곳에 그대로 있는 경우:
   - `enwik9.zip`(322.6 MB)과 `enwik8.zip`의 내용은 `benchmarks/enwik9`, `enwik8`이다. `silesia.zip`의 12개 항목은 `benchmarks/silesia/*`와 같다.
     - 이 ZIP들은 Info-ZIP 2.3(NTFS, "maximum")이 만들었다. enwik8.zip의 본문과 silesia.zip의 `xml` 항목은 flate-zoo의 `infozip:level=9`와 비트 단위로 같다. `xml`은 `gzip:level=9`와도 같다.
-    - aqr-flate는 이 인코더를 에뮬레이션하지 않는다. aqr-zip의 기본 profile 6으로 혼자 압축하면 enwik8.zip과 text8.zip이 그대로 남고, silesia.zip은 67.6 → 66.1 MB에 그친다(2026-10-26). 아카이브에서는 내용을 가진 파일과 한 배치에 모여 profile 6으로 재현되고(레코드는 내용의 2.6%), text8.zip만 그대로 남는다(`10gb-todo.md` 2번, 8번). 다만 profile 10의 체인 규칙만으로도 enwik8.zip의 본문은 0.41%의 레코드로 재현된다(2026-10-26, `10gb-todo.md`). flate-zoo로 Info-ZIP -9는 enwik8에서 2.9 s(35 MB/s, zlib -9와 같다)이므로, enwik9.zip을 한 코어로 다시 만들면 약 30 s가 걸린다.
+    - Aqueous에서의 처리(profile 6의 레코드, 에뮬레이션의 비용)는 `10gb-todo.md` 2번과 8번이다.
   - `benchmarks/gimp.tar`(78.7 MB)는 `benchmarks/gimp-2.0.0`(파일 4,143개)을 그대로 tar로 묶은 것이다.
   - `enwik8`은 `enwik9`의 앞 100 MB와 같다.
   - mingw의 `*.tar.lzma`(123개, 같은 내용을 빼면 117개, 73.1 MB, LZMA-alone, 사전 8 MiB)는 XZ Utils `-6`의 출력과 바이트가 같고, 멤버 421 MB가 모두 설치된 파일과 SHA-1이 같다.
@@ -1139,7 +1106,7 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 
 ### aqueous의 현재 위치
 
-- `aqr`가 디렉토리를 통째로 압축한다(배치, 종류별 블록, 같은 파일 제거, 파일 사이의 공유). 2026-10-27(커밋 `d84deff`)에 10gb는 2.630 GB, 압축 136 s(73 MB/s), 풀기 19.2 s(521 MB/s, 최대 footprint 2.84 GB)이다. 종류별 결과와 남은 일은 `10gb-todo.md`에 있다.
+- `aqr`가 디렉토리를 통째로 압축한다(배치, 종류별 블록, 같은 파일 제거, 파일 사이의 공유). 2026-10-30(커밋 `ffb9393`, README)에 10gb는 2.584 GB, 압축 162 s(62 MB/s, 최대 footprint 3.5 GB), 풀기 22.6 s(443 MB/s, 2.9 GB)이다. 종류별 결과와 남은 일은 `10gb-todo.md`에 있다.
 - 가장 큰 단일 항목인 FASTA는 aqr-fasta를 만들기 전에 chr21(49.1 MB, 염기 3,510만 개)에서 비교했다. aqr-fasta는 hg19 전체를 3.24 GB → 706.6 MB로 줄인다.
 
   | 방법 | 크기 |
@@ -1184,8 +1151,8 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 
 - **주 목표**:
   - 10gb를 2.4 GB 이하로 줄인다.
-  - 풀기는 200 MB/s 이상, 메모리 2 GB 이하로, 임시 파일 없이 스트리밍하며 파일 단위 랜덤 액세스를 유지한다.
-  - 압축은 10코어 M4에서 40 MB/s 이상이다.
+  - 풀기는 200 MB/s 이상, 메모리 2 GB 이하로, 임시 파일 없이 스트리밍하며 파일 단위 랜덤 액세스를 유지한다. 지금 443 MB/s이고, 최대 footprint 2.9 GB가 넘는다.
+  - 압축은 10코어 M4에서 40 MB/s 이상이다. 지금 62 MB/s이다.
   - Insighter와 비교하면, 압축률은 가깝게 하고 풀기 속도, 메모리, 랜덤 액세스에서 앞서는 자리이다.
 - **확장 목표**: 2.27 GB 이하(Insighter와 동급).
   - PPMd 재현(−205 MB)은 Insighter에는 없는 몫이지만 하지 않는다. 한 코어로 약 300 s인 직렬
@@ -1198,35 +1165,27 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
   | PPMd | 205 | 재현하지 않는다(`10gb-todo.md` 5번) |
   | hg19 | 650–720 | 2비트 packing이면 720, CM이면 650. 지금 668(aqr-fasta) |
   | enwik9 | 210–250 | enwik8은 접두어 중복. 지금 혼자 234.4(aqr-wrt) |
-  | 그 밖의 텍스트 | 80 | 지금 106 |
-  | PE | 260–300 | 지금 290(aqr-exe, 종류별 블록, 유사도 정렬) |
-  | ar | 30 | 지금 42 |
+  | 그 밖의 텍스트 | 80 | 지금 99 |
+  | PE | 260–300 | 지금 277(aqr-exe, 종류별 블록, 유사도 정렬) |
+  | ar | 30 | 지금 41 |
   | ZIP 잔여 (text8, OpenOffice JAR, picasa의 JPEG 등) | ~100 | |
   | JPEG | 196 | 지금 156(같은 사진의 쌍을 공유) |
   | 그 밖 | ~250 | |
   | **합계** | **약 2.45–2.65 GB** | PPMd를 그대로 둔 것 |
 
-  지금의 값은 `10gb-todo.md`의 종류별 표(2026-10-27)이다. 아래 2번과 4번까지 해야 Insighter와 동급이 된다고 봤는데, 둘을 하고도 2.630 GB이다.
+  지금의 값은 `10gb-todo.md`의 종류별 표(2026-10-30, `ed0869f`)이다. 내용물 단위의 공유와 텍스트 전처리까지 하면 Insighter와 동급이 된다고 봤는데, 둘을 하고도 2.584 GB이다.
 
 ### 우선순위
 
-상태는 2026-10-27이다. 자세한 것은 `10gb-todo.md`이다.
+상태는 2026-10-30이다. 디렉토리 아카이버와 종류별 버킷, FASTA(aqr-fasta), 텍스트 전처리(aqr-wrt), tar, LZMA(aqr-lzma), 형식 없는 데이터의 레코드 표(aqr-infer-recs)는 들어갔다. 남은 것의 자세한 것은 `10gb-todo.md`이다.
 
-1. **[완료] 디렉토리 아카이버와 종류별 버킷.**
-   - 트리 순회, 메타데이터, 같은 파일 제거를 하고, 재압축한 스트림을 종류와 이름순(PE는 유사도순)으로 16 MiB 안팎의 블록에 담는다. 블록마다 zstd 레벨을 고른다(level mid).
-   - Insighter의 ADPT 교훈대로, 같은 내용이면 같은 출력이 나오는 변환만 버킷에 넣는다.
-2. **[대부분 완료] 내용물 단위의 전역 중복 제거: −458 MB**(그 뒤 `gimp.tar`, JPEG 쌍, LZMA로 더).
-   - 서로 담을 수 있는 파일을 한 배치에 모으고(`together`), 배치가 이미 가진 내용물은 probe가 비용 0으로 본다(`Held`). 스트림을 만든 뒤 slice끼리 나눠 갖는다(`Formula::share_slices`). 형식은 고치지 않았다.
-   - 큰 DEFLATE 스트림은 profile 6으로 재현한다. Info-ZIP `-9`의 레코드(내용의 2.6%, `enwik9.zip` 약 26 MB)를 줄이는 에뮬레이션은 쪼개기가 직렬이라 남겨 두었다.
-   - Insighter는 이 몫을 preflate로 이미 가져간다.
-3. **[완료] FASTA: −264 MB.** aqr-fasta(order-9 문맥 모델과 rANS)로 hg19가 706.6 MB이다.
-4. **[완료] 텍스트 전처리** (aqr-wrt, xwrt식 단어 치환). 혼자 압축한 enwik9은 284 → 234.4 MB이다. Insighter는 198–210 MB이다. 레벨을 함께 올리면 줄어든다(시제품에서 zstd -19 `--long`으로 205.7 MB, `10gb-todo.md` 3번).
-5. **[대부분 완료] 풀기의 직렬 경로.**
-   - DEFLATE 재구성은 세그먼트 단위로 병렬이고, `enwik9.zip`이 7.5 s이다. 10gb 전체의 풀기는 19.2 s이다.
-   - 풀기의 최대 footprint는 2.84 GB로 목표(2 GB)를 넘는다.
-6. **작은 항목.**
-   - [완료] tar(`gimp.tar`와 그 파일들 −11.3 MB), LZMA(mingw의 `.tar.lzma`, −38.8 MB)
-   - ar와 COFF 오브젝트(x86 필터와 COFF 테이블, 지금 예산보다 12 MB 크다)
+1. **Info-ZIP `-9`의 레코드: −26 MB 남짓.** 큰 DEFLATE 스트림은 profile 6으로 재현하고, 레코드가 내용의 2.6%이다(`enwik9.zip` 약 26 MB). 에뮬레이션은 쪼개기가 직렬이라 남겨 두었다(`10gb-todo.md` 2번). Insighter는 이 몫을 preflate로 가져간다.
+2. **PE와 텍스트의 zstd 레벨: −29 MB 남짓**(레벨 16을 PE와 텍스트 클래스에만, `10gb-todo.md` 3번). 혼자 압축한 enwik9은 234.4 MB이고 Insighter는 198–210 MB이다. 레벨을 함께 올리면 aqr-wrt의 이득이 커진다(시제품에서 zstd -19 `--long`으로 205.7 MB).
+3. **ZPAQ: −136 MB(가능한지는 아직 모른다).** 모델이 블록 헤더에 실려 있어 같은 예측기에 산술 부호기만 붙이면 된다(`10gb-todo.md` 7번).
+4. **풀기의 메모리.** 최대 footprint 2.9 GB가 목표(2 GB)를 넘는다.
+5. **작은 항목.**
+   - ar의 COFF 오브젝트: 해 보았으나 10gb에서 커져서 넣지 않았다(`10gb-todo.md` 4번, 9번).
+   - 7z 컨테이너와 BCJ2(37.1 MB), `enwik8.pmd`와 `enwik9.pmd`의 공유(−21 MB), `text8.zip`(−5.5 MB)
    - GIF와 TIFF의 LZW
    - 10gb 밖에서는 Insighter가 하는 bz2, SZDD, LZX, CAB, CHM, OLE, ISO도 있다.
 
@@ -1235,4 +1194,5 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html)는 10gb.
 - GB 단위의 solid와 임시 파일을 쓰는 풀기: R5, R6과 충돌하고, 16 MiB 프레임의 손해는 4%이다.
 - FastLZMA2나 PPMd 백엔드: zstd -19와 xz의 차이가 1.5%이다.
 - solid JPEG: 이 코퍼스에서는 이득이 없다.
-- LZMA 인코더의 재현: 대신 parse를 레코드로 적는다(aqr-lzma). 레코드가 스트림의 13–18%여도 내용물이 다른 곳에 있으면 이득이다. 7z는 컨테이너와 BCJ2가 남았다. ZPAQ는 CM이라 다시 부호화하는 데 푸는 만큼 들지만, 모델이 블록 헤더에 실려 있어 다시 볼 만하다(`10gb-todo.md` 7번).
+- LZMA 인코더의 재현: 대신 parse를 레코드로 적는다(aqr-lzma). 레코드가 스트림의 13–18%여도 내용물이 다른 곳에 있으면 이득이다.
+- PPMd의 재현(−205 MB): 위의 확장 목표와 같은 이유이다(`10gb-todo.md` 5번).
