@@ -62,6 +62,19 @@ fn cil(u: &aqr_formula::Usage<'_>) -> Option<u64> {
 /// multiples of (u8); inputs: the streams of `reloc::STREAM_NAMES`.
 pub const PE_RELOC: Module = Module::new("exe-recons/pe-reloc", 1).with_memory(exe);
 
+/// aqr-exe's symbol table of a 64-bit Mach-O image, and its string table after it. Parameters:
+/// the number of entries and the first external one (u32 each, little endian), then the string
+/// table's head; inputs: the streams of `symtab::STREAM_NAMES`.
+pub const MACHO_SYMTAB: Module = Module::new("exe-recons/macho-symtab", 1).with_memory(macho_symtab);
+
+/// The memory of [`MACHO_SYMTAB`]: the whole of it, with the decoder's maps of the entries'
+/// values (the addresses, and the values' strings: at most an entry each, about 32 bytes each in
+/// a B-tree's nodes half full) and the strings' offsets (4 bytes each, at most an entry each).
+fn macho_symtab(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let n = u32::from_le_bytes(*u.params.first_chunk()?) as u64;
+    Some(u.whole((2 * 32 + 4) * n, 1))
+}
+
 /// The memory of aqr-exe's x86, ARM64 and relocation filters: the streams and the output, and
 /// the small (the x86 opcode classes and call cache).
 fn exe(u: &aqr_formula::Usage<'_>) -> Option<u64> {
@@ -202,11 +215,12 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 56] = [
+pub const MODULES: [Module; 57] = [
     X86,
     ARM64,
     CIL,
     PE_RELOC,
+    MACHO_SYMTAB,
     FLATE,
     LZ4,
     LZMA,
@@ -450,6 +464,9 @@ impl Native {
         } else if m == PE_RELOC {
             none(resources)?;
             aqr_exe::module::reloc(params, inputs, len).map_err(str::to_owned)
+        } else if m == MACHO_SYMTAB {
+            none(resources)?;
+            aqr_exe::module::macho_symtab(params, inputs, len).map_err(str::to_owned)
         } else if m == FLATE {
             aqr_flate::formula::decode(params, resources, inputs, len, threads).map_err(msg)
         } else if m == LZ4 {

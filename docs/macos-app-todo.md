@@ -297,9 +297,26 @@ aqr이 JS에서 LZMA보다 20–29% 크다. VS Code에서 이 차이를 메우�
 
 ### 7. 기호 테이블
 
-- strip되지 않은 바이너리에서 strtab과 symtab이 Mach-O의 18–29%(zstd -3)이다. nlist를 필드별로
-  나누고 문자열을 front coding하는 것을 생각할 수 있다.
-- 먼저 aqr이 지금 이것을 어떻게 다루는지(`recs-fields`가 잡는지) 확인한다. 위 비중은 zstd 기준이다.
+- strip되지 않은 바이너리에서 strtab과 symtab이 Mach-O의 18–29%(zstd -3)이다.
+- 이전의 aqr은 xz 수준이었다. Windows App 본체 arm64 이미지(56.0 MB)에서 두 표(7.10 + 14.91 MB)가
+  결과 11.42 MB 중 2.08 MB, Secretive 본체에서 427 KB 중 120 KB였다(표를 0으로 지운 이미지와의 차).
+
+했다(`exe-recons/macho-symtab`, aqr-exe FORMAT.md §S): nlist를 필드별로 나누고, 값은 디버그 맵의
+stab(함수마다 `N_BNSYM`, `N_FUN` 둘, `N_ENSYM`)과 앞의 엔트리로 예측하며(함수 크기는 다음 기호
+주소로), 이름은 다음 문자열, 같은 값의 이름, 뒤로의 참조로 적는다. `ld64`의 strtab은 외부 기호를
+먼저 훑은 첫 사용 순서 그대로여서 `n_strx`는 모두 유도되고, 문자열은 그 순서로 front coding한다.
+결과는 aqr-exe README의 Results(Windows App 본체 −6.0%, 앱 −1.9%; Secretive −9.0%, Deskflow −6.0%,
+Blender −2.0%).
+
+남은 것:
+
+- lld의 strtab: 꼬리를 공유하고(문자열 안을 가리키는 `n_strx`) 순서도 다르다. Electron Framework의
+  것이 슬라이스마다 0.9 MB 남짓, Chromium 프레임워크의 것은 작다. WebRTC.framework(4.4–4.6 MB)는
+  외부 기호를 먼저 훑은 순서도, 기호 순서도 아니다.
+- 남은 비용의 대부분은 문자열이다(위 이미지에서 front coding 뒤 zstd -7 1.13 MB, 접미사에 xz -9 0.84
+  MB). C++와 Swift의 맹글링 구조나 텍스트 쪽 백엔드(6)가 다음이다.
+- 외부 기호의 값(이름 순서의 주소)이 기호 표 스트림의 3분의 1이다. 지역 기호와 stab을 먼저 풀면
+  이름으로 예측할 수 있을 것이다(재지 않았다).
 
 ### 8. `deepmap2`
 

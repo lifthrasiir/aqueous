@@ -69,6 +69,8 @@ samples() {
     copy win.dll $codecs/aqr-exe/corpus/sample/C/Windows/System32/mfc140ud.dll
     copy net.dll "$codecs/aqr-exe/corpus/sample/C/Program Files/dotnet/shared/Microsoft.NETCore.App/2.0.6/System.Private.Xml.dll"
     copy mac.bin /usr/bin/vim
+    # a Mach-O binary with its symbols and debug map (exe-recons/macho-symtab): this script's own
+    copy mac-symbols.bin $memory
     copy paper.pdf $codecs/aqr-pdf/corpus/arxiv/2307.09288.pdf
     copy db.sqlite $codecs/aqr-sqlite/corpus/system/f502b9__ystem_Library_Security_Certificates.bundle_Contents_Resources_ValidProduction_valid.sqlite
     copy image.fits $codecs/aqr-fits/corpus/misc/frame-r-001000-1-0027.fits

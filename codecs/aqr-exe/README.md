@@ -50,8 +50,13 @@ Of a PE image, the tables of known layouts outside the code are taken too: the b
 relocations by a module of their own (the entries' RVAs as deltas, the blocks' headers derived),
 and the export, import and runtime function tables by aqr-infer-recs' `recs-fields`, as deltas.
 
+Of a 64-bit Mach-O image, the symbol table and its string table are taken by a module of
+their own (16 KiB at least together): the entries by field, their values predicted from the
+debug map's stabs and from each other, their names as references to the strings, and the
+strings each once, front coded, in the order `ld64` writes them.
+
 `FORMAT.md` specifies the modules `exe-recons/x86`, with the opcode tables in full,
-`exe-recons/arm64`, `exe-recons/cil` and `exe-recons/pe-reloc`.
+`exe-recons/arm64`, `exe-recons/cil`, `exe-recons/pe-reloc` and `exe-recons/macho-symtab`.
 
 ## Results
 
@@ -143,13 +148,35 @@ Through `aqr-show` (level `mid`, 10 threads), VS Code's 34 universal binaries (4
 to 163.2 MB, against 196.0 MB as they are (−16.7%) and 179.1 MB with their x86-64 halves
 alone filtered; VS Code's ZIP (267 MB) to 222.2 MB.
 
-## Limitations
+### Mach-O symbol tables
+
+Measured on 2026-10-30 on an Apple M4 through `aqr -c` (level `mid`), before and after
+`exe-recons/macho-symtab`:
+
+| | before | after | |
+|---|---|---|---|
+| Windows App's main binary, arm64 image (56.0 MB; symbols 7.10 MB, strings 14.91 MB) | 11.42 MB | 10.73 MB | −6.0% |
+| Secretive's main binary, arm64 image (2.37 MB) | 427.5 KB | 412.4 KB | −3.5% |
+| Secretive.app | 3.23 MB | 2.94 MB | −9.0% |
+| Deskflow.app | 19.81 MB | 18.62 MB | −6.0% |
+| Windows App.app | 109.33 MB | 107.20 MB | −1.9% |
+| Blender.app | 242.04 MB | 237.31 MB | −2.0% |
+
+Instructions retired: Windows App 115.9 → 117.5 G (+1.3%); Secretive, Deskflow and Blender
+fewer (29.9 → 20.9, 73.8 → 71.0, 675.3 → 649.9 G), what was scanned and inferred in the rest
+taken by the module. The module block is 5.8 KB.
+
 
 - PE and Mach-O only: no ELF.
 - x86, x86-64 and ARM64 only: images of other machines (32-bit ARM, PowerPC) are kept as
   they are. ARM64 data in code sections (literal pools) is taken as instructions.
 - Mach-O code signatures are kept as they are, though their page hashes follow from the
   image.
+- Mach-O symbol tables are taken only as `ld64` writes them (730 of the 775 of 16 KiB or more
+  in the images under `/Applications`, `/System/Applications`, `/usr/bin` and `/usr/lib` of a
+  Mac on 2026-10-30): not lld's string tables, whose strings share their tails (Chromium,
+  Electron and Rust binaries), nor one whose strings are in another order (WebRTC's) or that
+  holds other data (a .NET single-file bundle). Nor are 32-bit images' tables.
 - .NET: only the section holding the metadata is taken, so IL in other sections is kept as it
   is (one file of the sample). Managed resources are kept as they are (they are most of what
   is left: satellite assemblies, `*.resources.dll`, gain nothing). Of ReadyToRun images, only

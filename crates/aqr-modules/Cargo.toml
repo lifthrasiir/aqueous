@@ -96,6 +96,11 @@ path = "src/bin/exe-recons-pe-reloc.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "exe-recons-macho-symtab"
+path = "src/bin/exe-recons-macho-symtab.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "exe-recons-arm64"
 path = "src/bin/exe-recons-arm64.rs"
 required-features = ["wasm"]

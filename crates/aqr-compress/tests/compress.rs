@@ -4,8 +4,8 @@ use std::sync::{PoisonError, RwLock};
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, BUNDLE, CLIP, FLAC, FLATE, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MP3, Native, PCM, PDF, PNG, PNG_SET, RASTER,
-    RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
+    ARM64, BUNDLE, CLIP, FLAC, FLATE, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM, PDF, PNG,
+    PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -468,6 +468,39 @@ fn macho_sections() {
     assert_eq!(parts[0], Node::slice(0, 0, code.start as u64));
     assert_eq!(parts[1].len(), code.len() as u64);
     assert_eq!(f.streams[0].class, "macho");
+}
+
+/// The symbol table of an image and its string table, after the segment, through
+/// `exe-recons/macho-symtab`, each placed where it was.
+#[test]
+fn macho_symbols() {
+    let (mut d, _) = macho(CPU_TYPE_ARM64, &arm64_code());
+    let n = 1200;
+    let (symoff, stroff) = (d.len(), d.len() + 16 * n);
+    let mut strtab = b" \0".to_vec();
+    for i in 0..n {
+        let x = strtab.len() as u32;
+        strtab.extend_from_slice(format!("_function_{i:05}").as_bytes());
+        strtab.push(0);
+        d.extend_from_slice(&x.to_le_bytes());
+        d.extend_from_slice(&[0x0f, 1, 0, 0]);
+        d.extend_from_slice(&(0x1_0000_0200u64 + 16 * i as u64).to_le_bytes());
+    }
+    strtab.resize(strtab.len().next_multiple_of(8), 0);
+    d.extend_from_slice(&strtab);
+    let c = 32 + 72 + 80;
+    d[16..20].copy_from_slice(&2u32.to_le_bytes());
+    d[20..24].copy_from_slice(&(c as u32 - 32 + 24).to_le_bytes());
+    for (k, v) in [2, 24, symoff as u32, n as u32, stroff as u32, strtab.len() as u32].into_iter().enumerate() {
+        d[c + 4 * k..c + 4 * k + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+    assert_eq!(modules(&f), [ARM64.name, MACHO_SYMTAB.name]);
+    // too short a table is left with the rest
+    let mut short = d.clone();
+    short[c + 12..c + 16].copy_from_slice(&100u32.to_le_bytes());
+    short[c + 20..c + 24].copy_from_slice(&2000u32.to_le_bytes());
+    assert!(!modules(&roundtrip(&short, &Options { file: Nest::Exact, ..all() })).contains(&MACHO_SYMTAB.name));
 }
 
 /// In a universal file, the code of each image is filtered by its architecture, that of

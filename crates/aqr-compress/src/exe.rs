@@ -6,17 +6,18 @@
 //! and what the CIL filter keeps as it is, are contents (`Stream::content`): scanned in turn,
 //! e.g. for the images among the resources. Of a PE image, its tables of known layouts outside
 //! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
-//! imports and runtime functions by `recs-fields`, their numbers as deltas.
+//! imports and runtime functions by `recs-fields`, their numbers as deltas. Of a 64-bit Mach-O
+//! image, the symbol table and its string table by `exe-recons/macho-symtab`.
 
 use std::io::Cursor;
 use std::sync::OnceLock;
 
-use aqr_decompress::{ARM64, CIL, PE_RELOC, X86};
+use aqr_decompress::{ARM64, CIL, MACHO_SYMTAB, PE_RELOC, X86};
 use aqr_exe::arch::{arm64, cil, x86};
 use aqr_exe::format::macho;
 use aqr_exe::format::pe::{TableKind, locate_code, tables};
-use aqr_exe::reloc;
-use aqr_formula::{Formula, Kind, Node, Resource};
+use aqr_exe::{reloc, symtab};
+use aqr_formula::{Apply, Formula, Kind, Node, Resource};
 use aqr_infer_recs::formula::{Field, How};
 
 /// What a range of a file holds: code, or a table of a PE image.
@@ -29,10 +30,23 @@ enum Arch {
     /// section's RVA).
     Cil(usize),
     Table(TableKind),
+    /// The symbol table of a Mach-O image, of its string table at `stroff` of `strsize` bytes,
+    /// its external symbols from `ext` on.
+    Symbols {
+        ext: u32,
+        stroff: usize,
+        strsize: usize,
+    },
+    /// Output `k` of the outputs [`symbols`] made.
+    Output(usize),
 }
 
 /// Tables shorter than this are left with the rest.
 const MIN_TABLE: usize = 64;
+
+/// Symbol tables shorter than this, with their string tables, are left with the rest: the
+/// module would cost more.
+const MIN_SYMBOLS: usize = 16 << 10;
 
 pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
     let code = locate_code(&mut Cursor::new(d)).ok()?;
@@ -78,7 +92,12 @@ pub(crate) fn macho(d: &[u8]) -> Option<Formula> {
         };
         arch.into_iter().flat_map(|a| i.sections.iter().map(move |&(va, off, size)| (va, off, size, a)))
     });
-    filtered(d, "macho", sections.collect())
+    let symbols = images.iter().filter_map(|i| i.symtab).map(|s| {
+        let arch = Arch::Symbols { ext: s.ext, stroff: s.stroff, strsize: s.strsize };
+        (0, s.symoff, s.nsyms as usize * 16, arch)
+    });
+    let symbols = symbols.filter(|s| matches!(s.3, Arch::Symbols { strsize, .. } if s.2 + strsize >= MIN_SYMBOLS));
+    filtered(d, "macho", sections.chain(symbols).collect())
 }
 
 /// `d` with each of `sections`, `(virtual address, offset, size, code)` within `d`, through
@@ -93,6 +112,7 @@ fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize,
 
     let mut f = Formula::default();
     f.push_content(class, Kind::Unknown, Vec::new());
+    let mut outputs = symbols(&mut f, d, &mut sections);
     let (mut rest, mut parts, mut at) = (Vec::new(), Vec::new(), 0);
     for (i, &(va, off, size, arch)) in sections.iter().enumerate() {
         if off < at {
@@ -100,6 +120,7 @@ fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize,
         }
         let section = &d[off..off + size];
         let apply = match arch {
+            Arch::Output(k) => outputs[k].take().expect("an output placed twice"),
             // (where the CIL filter turns the section down, those within it are filtered on
             // their own)
             Arch::Cil(meta) => {
@@ -168,8 +189,55 @@ fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch) -> Option<No
                 (0..fields).map(|i| Field { off: i * width, width, big: false, how: How::Delta }).collect();
             aqr_infer_recs::formula::apply_fields(f, "pe/table", section, k, &fl)
         }
-        Arch::Cil(_) => return None,
+        Arch::Cil(_) | Arch::Symbols { .. } | Arch::Output(_) => return None,
     })
+}
+
+/// The symbol tables among `sections` (`Arch::Symbols`) through `exe-recons/macho-symtab`, each
+/// an application of two outputs, the symbol table and the string table, in `f`: their
+/// sections become `Arch::Output`s of the outputs returned, each to be placed once. Those that
+/// overlap another section (or their own string tables), or that do not fit, are dropped.
+fn symbols(f: &mut Formula, d: &[u8], sections: &mut Vec<(u64, usize, usize, Arch)>) -> Vec<Option<Node>> {
+    let ranges: Vec<_> = sections
+        .iter()
+        .flat_map(|&(_, off, size, arch)| {
+            let strtab = match arch {
+                Arch::Symbols { stroff, strsize, .. } => Some(stroff..stroff + strsize),
+                _ => None,
+            };
+            [Some(off..off + size), strtab].into_iter().flatten()
+        })
+        .collect();
+    let (mut outputs, mut strtabs) = (Vec::new(), Vec::new());
+    sections.retain_mut(|(_, off, size, arch)| {
+        let Arch::Symbols { ext, stroff, strsize } = *arch else { return true };
+        let (sym, str) = (*off..*off + *size, stroff..stroff + strsize);
+        let overlaps = |r: &std::ops::Range<usize>| {
+            r.start < sym.end && sym.start < r.end || r.start < str.end && str.start < r.end
+        };
+        if ranges.iter().filter(|r| overlaps(r)).count() != 2 || sym.start < str.end && str.start < sym.end {
+            return false;
+        }
+        let Some((params, st)) = symtab::encode(&d[sym.clone()], &d[str.clone()], ext) else { return false };
+        let inputs =
+            st.into_iter().zip(symtab::STREAM_NAMES).map(|(s, name)| f.push(format!("macho-sym/{name}"), s)).collect();
+        let a = Apply {
+            module: MACHO_SYMTAB,
+            resources: vec![],
+            params,
+            inputs,
+            len: 0,
+            memory_limit: aqr_formula::NO_LIMIT,
+        };
+        let k = outputs.len();
+        outputs.extend(f.split(a, vec![sym.len() as u64, strsize as u64]).into_iter().map(Some));
+        *arch = Arch::Output(k);
+        strtabs.push((0, stroff, strsize, Arch::Output(k + 1)));
+        true
+    });
+    sections.extend(strtabs);
+    sections.sort_by_key(|s| (s.1, !matches!(s.3, Arch::Cil(_))));
+    outputs
 }
 
 /// `section` at RVA `rva`, its metadata root at `meta`, through the CIL filter, its streams

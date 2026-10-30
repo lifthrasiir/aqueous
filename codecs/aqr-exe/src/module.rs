@@ -1,11 +1,11 @@
-//! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/arm64`, `exe-recons/cil`
-//! and `exe-recons/pe-reloc`, as aqr-decompress names them): the parameters and the inputs
+//! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/arm64`, `exe-recons/cil`,
+//! `exe-recons/pe-reloc` and `exe-recons/macho-symtab`, as aqr-decompress names them): the parameters and the inputs
 //! checked, then the section or table decoded. aqr-modules builds it into their Wasm modules.
 
 use alloc::vec::Vec;
 
 use crate::arch::{arm64, cil, x86};
-use crate::reloc;
+use crate::{reloc, symtab};
 
 pub type Result<T> = core::result::Result<T, &'static str>;
 
@@ -60,6 +60,16 @@ pub fn reloc(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         return Err("bad parameters or inputs");
     };
     of_len(reloc::decode(rvas, types, align, n), len)
+}
+
+/// The symbol table of a 64-bit Mach-O image and its string table after it. Parameters: the
+/// number of entries and the first external one (u32 each, little endian), then the string
+/// table's head; inputs: the streams of [`symtab::STREAM_NAMES`].
+pub fn macho_symtab(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let (Ok(streams), Ok(n)) = (<[&[u8]; symtab::NUM_STREAMS]>::try_from(inputs), usize::try_from(len)) else {
+        return Err("bad parameters or inputs");
+    };
+    of_len(symtab::decode(params, streams, n), len)
 }
 
 fn of_len(out: Option<Vec<u8>>, len: u64) -> Result<Vec<u8>> {

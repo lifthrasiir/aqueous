@@ -94,6 +94,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/exe-recons-cil.block"),
     },
     Known {
+        name: "exe-recons/macho-symtab",
+        version: 1,
+        sha512_256: hex("e1ba2dfaac07bfe9ad73c4b5e35d5c8db3f958456e0f806b9139c2519d65c36f"),
+        block: include_bytes!("../wasm/exe-recons-macho-symtab.block"),
+    },
+    Known {
         name: "exe-recons/pe-reloc",
         version: 1,
         sha512_256: hex("39dd7c5e09f58909fadefddfb308ea3c486408eabfde341814e4adca9e719ef0"),

@@ -17,4 +17,5 @@ pub mod format;
 #[cfg(feature = "decode")]
 pub mod module;
 pub mod reloc;
+pub mod symtab;
 mod util;

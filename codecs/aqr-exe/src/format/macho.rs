@@ -24,6 +24,8 @@ const FAT_MAX_ARCHS: u32 = 45;
 
 const LC_SEGMENT: u32 = 0x1;
 const LC_SEGMENT_64: u32 = 0x19;
+const LC_SYMTAB: u32 = 0x2;
+const LC_DYSYMTAB: u32 = 0xb;
 const LC_CODE_SIGNATURE: u32 = 0x1d;
 
 const SECTION_TYPE: u32 = 0xff;
@@ -44,6 +46,19 @@ pub struct Image {
     /// `(virtual address, file offset, size)` of each section with instructions, cut to the
     /// image, in the order of the load commands. File offsets are in the file, not the image.
     pub sections: Vec<(u64, usize, usize)>,
+    /// The symbol table of a 64-bit image, where whole within the image.
+    pub symtab: Option<Symtab>,
+}
+
+/// The symbol table of an image (`LC_SYMTAB`) and the first of its external symbols
+/// (`LC_DYSYMTAB`'s `iextdefsym`, 0 without one). Offsets are in the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Symtab {
+    pub symoff: usize,
+    pub nsyms: u32,
+    pub stroff: usize,
+    pub strsize: usize,
+    pub ext: u32,
 }
 
 impl Image {
@@ -138,7 +153,12 @@ pub fn images(d: &[u8]) -> Option<Vec<Image>> {
                 .filter_map(|(cputype, offset, size)| {
                     let start = usize::try_from(offset).ok().filter(|&o| o < d.len())?;
                     let end = usize::try_from(offset.saturating_add(size)).map_or(d.len(), |e| e.min(d.len()));
-                    Some(thin(d, start..end).unwrap_or(Image { range: start..end, cputype, sections: Vec::new() }))
+                    Some(thin(d, start..end).unwrap_or(Image {
+                        range: start..end,
+                        cputype,
+                        sections: Vec::new(),
+                        symtab: None,
+                    }))
                 })
                 .collect(),
         );
@@ -158,7 +178,7 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
     let cputype = u32le(m, 4)?;
     let ncmds = u32le(m, 16)?;
     let cmds_end = header + u32le(m, 20)? as usize;
-    let mut sections = Vec::new();
+    let (mut sections, mut symtab, mut ext) = (Vec::new(), None, 0);
     let mut p = header;
     for _ in 0..ncmds {
         let (cmd, size) = (u32le(m, p)?, u32le(m, p + 4)? as usize);
@@ -168,6 +188,22 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
         let (seg_header, sect_size) = match cmd {
             LC_SEGMENT if !wide => (56, 68),
             LC_SEGMENT_64 if wide => (72, 80),
+            LC_SYMTAB if wide && size >= 24 => {
+                let (symoff, nsyms) = (u32le(m, p + 8)?, u32le(m, p + 12)?);
+                let (stroff, strsize) = (u32le(m, p + 16)?, u32le(m, p + 20)?);
+                let within = |off: u32, len: u64| off as u64 + len <= m.len() as u64;
+                if within(symoff, nsyms as u64 * 16) && within(stroff, strsize as u64) {
+                    let (symoff, stroff) = (range.start + symoff as usize, range.start + stroff as usize);
+                    symtab = Some(Symtab { symoff, nsyms, stroff, strsize: strsize as usize, ext: 0 });
+                }
+                p += size;
+                continue;
+            }
+            LC_DYSYMTAB if size >= 80 => {
+                ext = u32le(m, p + 16)?;
+                p += size;
+                continue;
+            }
             _ => {
                 p += size;
                 continue;
@@ -194,7 +230,8 @@ fn thin(d: &[u8], range: Range<usize>) -> Option<Image> {
         }
         p += size;
     }
-    Some(Image { range, cputype, sections })
+    let symtab = symtab.map(|s| Symtab { ext, ..s });
+    Some(Image { range, cputype, sections, symtab })
 }
 
 /// Bytes of the Mach-O file at the start of `d`, as far as its headers tell: the end of its

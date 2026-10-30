@@ -2,8 +2,9 @@
 
 This document specifies the module `exe-recons/x86` of aqr-formula entry formulas, and
 [`exe-recons/arm64`](#the-exe-reconsarm64-module),
-[`exe-recons/cil`](#the-exe-reconscil-module) and
-[`exe-recons/pe-reloc`](#the-exe-reconspe-reloc-module) after it. The x86 module rebuilds a section
+[`exe-recons/cil`](#the-exe-reconscil-module),
+[`exe-recons/pe-reloc`](#the-exe-reconspe-reloc-module) and
+[`exe-recons/macho-symtab`](#the-exe-reconsmacho-symtab-module) after it. The x86 module rebuilds a section
 of x86 or x86-64 machine code from streams that a disfilter split it into:
 instructions are parsed, and their fields (opcodes, ModR/M and SIB bytes, prefixes,
 displacements, immediates, jump and call targets, addresses) go to streams by what they are,
@@ -752,3 +753,131 @@ Why this layout (measured on the relocations of the 1,842 distinct PE images of 
 corpus, 18.2 MB; zstd -3, all in one): as they are, 8.56 MB; as `recs-fields` of 16-bit deltas
 with the headers apart, 3.93 MB; this module, 3.36 MB. Of the 1,842, 4 do not fit, all with
 an empty block (one of them with bytes after its last block too).
+
+# The `exe-recons/macho-symtab` module
+
+This part specifies the module `exe-recons/macho-symtab`, which rebuilds the symbol table of a
+64-bit Mach-O image (the `nlist_64` entries of `LC_SYMTAB`) and its string table. The entries
+go column by column; their values are predicted from the entries before, chiefly from the
+stabs of the debug map, whose functions follow one another; their names are references to
+the strings, most of them the next string or the name of the entry of the same value before;
+and the strings are each written once, front coded, in the order of the string table, which
+is that of their first use when the external entries are taken first. The conventions of §1
+hold.
+
+## S1. The module
+
+- **Module**: name `exe-recons/macho-symtab`, version 1.
+- **Params**: at least 8 bytes.
+
+  ```text
+  le32    n         the number of entries
+  le32    e         the first external entry, at most n: entries are taken from e to n − 1, then from 0 to e − 1
+  u8[]    head      the rest: the head of the string table, at most 252 bytes
+  ```
+
+- **Resources**: none.
+- **Inputs**: exactly 9, the streams of §S2 in order, each of class `macho-sym/NAME`.
+- **Output**: the symbol table, `16n` bytes, then the string table, of `len − 16n` bytes
+  (§S3); `len` is the length the application declares. aqr-compress splits it into the two
+  (a Split instruction) and places each where it is in the image.
+
+## S2. Streams
+
+The streams hold one item for each entry in the order the entries are taken (§S1), but
+`VALUE`, `SIZE`, `BACK` and the strings, which hold items only for some.
+
+| # | name | contents |
+|---|---|---|
+| 0 | `TYPE` | `n_type`, a byte each |
+| 1 | `SECT` | `n_sect`, a byte each |
+| 2 | `DESC` | `n_desc`, a `le16` each |
+| 3 | `VALUE` | for each entry that is not the size of a function, its `n_value` less the prediction (§S3), zigzag coded, as a `varint` |
+| 4 | `SIZE` | the same for the sizes of functions |
+| 5 | `NAME` | a code for `n_strx`, a byte each: 0, the next string; 1, the string of the last entry of the same value; 2, a back reference; `3 + x`, the offset `x` into the head |
+| 6 | `BACK` | for each back reference, the number of strings from the one referenced to the last one so far, less one, as a `varint` |
+| 7 | `PREFIX` | for each string, the bytes it shares at the start with the string before (of none before the first), a byte each, at most 255 |
+| 8 | `SUFFIX` | for each string, the rest of it and a zero byte |
+
+A `varint` is unsigned LEB128 below 2^64, of at most 10 bytes; a zigzag value `z` is the
+difference `(z >> 1) XOR −(z & 1)`, wrapping in 64 bits.
+
+## S3. Decoding
+
+`out` starts as `16n` zero bytes followed by `head`; the offset of a string is its position in
+`out` less `16n`. The state is: `last[t]` for each `t` of 0 to 255 (0 at first), `begin` and
+`size` (0), the set `A` of addresses (empty), the map `V` of values to strings (empty), and
+the strings so far, numbered from 0.
+
+For `k` from 0 to `n − 1`, the entry `i = (e + k) mod n`: read `t` from `TYPE`, `s` from
+`SECT` and `d` from `DESC`. With the key `c = 0E` if `t & E0 = 0` and `t & 0E = 0E` (a
+symbol defined in a section), otherwise `c = t`, predict its value `p`:
+
+| `t` | | prediction | stream |
+|---|---|---|---|
+| `2E` (`N_BNSYM`) | | `begin + size` | `VALUE` |
+| `24` (`N_FUN`) | `s = 0` | the size: `a − begin` for the least `a` of `A` above `begin`, 0 if none | `SIZE` |
+| `24` | `s ≠ 0` | `begin` | `VALUE` |
+| `4E` (`N_ENSYM`) | | `begin` | `VALUE` |
+| any other | | `last[c]` | `VALUE` |
+
+Read the difference from that stream; the value is `v = p + difference`. Then read the code
+of its name from `NAME`:
+
+- 0: read a byte `l` from `PREFIX`, which must be at most the length of the last string
+  (0 before the first). Append the first `l` bytes of the last string to `out`, then the
+  bytes of `SUFFIX` up to and including its next zero byte. That is the next string, without
+  its zero byte; `n_strx` is its offset.
+- 1: `n_strx` is the offset of string `V[v]`, which must exist.
+- 2: read `b` from `BACK`; `n_strx` is the offset of the string `b + 1` before the last one,
+  which must exist.
+- `3 + x`: `x` must be below the length of `head`; `n_strx = x`.
+
+For codes 0 to 2, set `V[v]` to that string. Write the entry at `16i` of `out`: `le32 n_strx`,
+`t`, `s`, `le16 d`, `le64 v`. Then: if `t = 2E`, `begin ← v`; if `t = 24` and `s = 0`,
+`size ← v`; if `c = 0E`, add `v` to `A`; and `last[c] ← v`.
+
+Once all are taken, append zero bytes to `out` up to `len` bytes.
+
+## S4. Validation
+
+The module fails if:
+
+- the params are shorter than 8 bytes, `e` is above `n`, or the head is longer than 252
+  bytes, or there are resources, or not exactly 9 inputs;
+- `TYPE`, `SECT` or `NAME` is not `n` bytes long, or `DESC` not `2n`;
+- a stream runs out, or a `varint` is longer than 10 bytes or not below 2^64, or a string
+  has no zero byte left in `SUFFIX`;
+- a code of `NAME` or a prefix's length is not as §S3 asks, or the string it names does not
+  exist;
+- `out` is ever longer than `len` bytes, or the end of a string is at an offset of 2^32 or
+  more;
+- any of `VALUE`, `SIZE`, `BACK`, `PREFIX` and `SUFFIX` has items left at the end.
+
+## S5. Encoding *(encoder)*
+
+`aqr_exe::symtab::encode` takes the symbol table, the string table and `e`. The head is the
+string table up to the first nonempty string that an entry names (all of it if none does).
+It takes the entries in order and writes them as above, a name as code 1 where the string of
+its value is the same, code 2 for a string named before, and otherwise as the next string,
+which must start where the one before ended; it fails where decoding does not give both
+tables back: a string that no entry names, a name within a string or past the head, a string
+table in another order, or bytes other than zeros after the last string.
+
+aqr-compress takes the symbol table and the string table of each 64-bit image of a Mach-O
+file, with `e` as `iextdefsym` of `LC_DYSYMTAB` (0 without one), where the two are 16 KiB at
+least together, and neither overlaps the other or a section filtered. `ld64` writes the string
+table so: a space and a zero byte, the names of the external entries (defined, then undefined)
+and those of the local ones (with the stabs) in order, each once, then zeros up to a multiple
+of 8 bytes.
+
+Why this layout (measured on the arm64 image of an app's main binary of 56.0 MB, not
+stripped: 443,530 entries, 7.10 MB, of which 210k are the four stabs of a function each, and a
+string table of 14.91 MB, 195,742 strings): through aqr-compress at level `mid`, the two came
+to 2.08 MB of the image's 11.42 MB as they are, and to 1.39 MB with this module (the image to
+10.73 MB, −6.0%). Apart, at zstd -7 (by a prototype of these streams): the symbol table
+1.35 MB as it is, about 0.37 MB as these streams (the stabs' values all but free, the sizes
+3 KB by the addresses after; the values of the external symbols, in the order of their names,
+are a third of it); the strings 1.37 MB as they are, 1.13 MB front coded (xz -9 on the
+suffixes, 0.84 MB). Of the names, 36% are empty (in the head), 44% the next string, 14% that
+of the same value and 6% back references.

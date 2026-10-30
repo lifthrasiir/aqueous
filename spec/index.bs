@@ -4886,6 +4886,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-cil.wasm" title="crates/aqr-modules/wasm/exe-recons-cil.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
     <tr>
+      <td><code>e1ba2dfaac07bfe9ad73c4b5e35d5c8db3f958456e0f806b9139c2519d65c36f</code>
+      <td>exe-recons/macho-symtab@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-macho-symtab.wasm" title="crates/aqr-modules/wasm/exe-recons-macho-symtab.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
+    <tr>
       <td><code>39dd7c5e09f58909fadefddfb308ea3c486408eabfde341814e4adca9e719ef0</code>
       <td>exe-recons/pe-reloc@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-pe-reloc.wasm" title="crates/aqr-modules/wasm/exe-recons-pe-reloc.wasm">D</a>
