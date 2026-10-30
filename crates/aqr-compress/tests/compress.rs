@@ -1294,6 +1294,17 @@ fn asar() {
     assert_eq!(aqr_compress::kind_by_name(b"resources/app.asar"), aqr_formula::Kind::Format("asar"));
 }
 
+/// A file alone shares what its parts hold of each other, as a batch's files do: the same
+/// member twice in a tar archive is stored once.
+#[test]
+fn file_alone_shares() {
+    let body = noise(5000);
+    let t = tar(&[("a.bin", &body), ("b.bin", &body)]);
+    let (_, f) = aqr_compress::compress_formula(&t, &all());
+    let bytes: usize = f.streams.iter().map(|s| s.data.len()).sum();
+    assert!(bytes < 2 * body.len(), "{bytes} bytes: {f}");
+}
+
 /// A bundle does not count as a format deeper: a JPEG file in a ZIP archive in a tar archive in
 /// gzip is recompressed as one in a ZIP archive in gzip is.
 #[test]

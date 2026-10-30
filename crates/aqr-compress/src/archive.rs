@@ -573,7 +573,7 @@ const MEMBER_MIN: u64 = 4 << 10;
 /// Slices shorter than this are not shared with others ([`Formula::share_slices`]): what they
 /// share is found by compressing them solid, or not at all where they are apart (a tar
 /// archive's members of a kind, and the same files of other kinds, apart from it).
-const SLICE_MIN: usize = 1 << 10;
+pub(crate) const SLICE_MIN: usize = 1 << 10;
 
 /// Pieces of the starts of more distinct contents than this tell nothing of which are alike
 /// ([`together`]).

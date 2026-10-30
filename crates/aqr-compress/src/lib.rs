@@ -647,7 +647,10 @@ fn compress_with(
     let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
     let mut cx = Cx::new(d, opt);
     cx.pre = opt.verify.then(|| Arc::new(verify::Prevalidator::spawn(opt.threads, &[d])));
-    let f = recompress_at(d, opt, 0, kind, &cx);
+    let mut f = recompress_at(d, opt, 0, kind, &cx);
+    // (what the file's parts hold of each other, as a batch's files: the same body in two ZIP
+    // archives in a tar archive, say)
+    f.share_slices(archive::SLICE_MIN);
     drop(watch);
     note(Note::Ended(0));
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
