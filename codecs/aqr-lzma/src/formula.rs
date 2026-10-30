@@ -17,13 +17,40 @@ pub const MODULE: Module = Module::new("lzma-recons", 1).with_memory(memory);
 pub const LZMA2: Module = Module::new("lzma2-recons", 1).with_memory(memory);
 
 /// The memory of the module, a stream rebuilt at a time: the inputs and the streams; the match
-/// finder's chains, 12 bytes a byte of the data at most (their rings no longer than it) and their
-/// heads (12.5 MiB); the literal model, 6 MiB at most (lc + lp up to 12); and the encoder's
-/// output, reserved for a quarter of the data and growing twice at a time.
+/// finder's chains, 12 bytes a position of the largest of their rings ([`ring`]) and their heads
+/// (12.5 MiB); the literal model, 6 MiB at most (lc + lp up to 12); and the encoder's output,
+/// reserved for a quarter of the data and growing twice at a time.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let &[data, ..] = u.inputs else { return None };
     let m = u.output();
-    Some(u.whole(12 * data + (25 << 19) + (6 << 20) + (data / 4).max(3 * m), 6))
+    Some(u.whole(12 * ring(u).unwrap_or(data) + (25 << 19) + (6 << 20) + (data / 4).max(3 * m), 6))
+}
+
+/// The positions of the largest ring of the match finders of the streams (FORMAT.md, "Tables"):
+/// by their records' dictionary sizes (after the first byte of an LZMA or a segment's record) and
+/// their data's lengths, as the index cuts them. None where the inputs are not at hand or do not
+/// cut so.
+fn ring(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    let [data, records, index] = u.all_contents::<3>()?;
+    let mut streams = Vec::new();
+    if index.is_empty() {
+        streams.push((data.len(), records));
+    } else {
+        let (mut at, mut r) = (0, records);
+        while at < index.len() {
+            let d = aqr_common::varint::get(index, &mut at).ok()? as usize;
+            let n = aqr_common::varint::get(index, &mut at).ok()? as usize;
+            streams.push((d, r.get(..n)?));
+            r = &r[n..];
+        }
+    }
+    streams
+        .iter()
+        .map(|&(d, r)| {
+            let dict = u32::from_le_bytes(r.get(1..5)?.try_into().ok()?).max(1 << 12) as usize;
+            Some(dict.min(d.max(1)).next_power_of_two() as u64)
+        })
+        .try_fold(1, |most, s| Some(most.max(s?)))
 }
 
 /// The most data a stream is decoded to (and an `.xz` file's streams, in all).

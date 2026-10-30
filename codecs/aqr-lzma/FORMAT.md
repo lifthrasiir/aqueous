@@ -100,7 +100,9 @@ the positions `0 … pos − 1`, inserted in order; it looks no farther back tha
 - `head3[65536]`: by `h3(p) = (k3(p) × 0x9E3779B1, wrapping u32) >> 16`, where
   `k3(p) = D[p] | D[p+1] << 8 | D[p+2] << 16`, for `p + 3 ≤ N`.
 - Three **chains**, of keys `K` = 4, 8 and 16 bytes, for `p + K ≤ N`: `head[2^20]` and a ring
-  `prev[S]`, `S` the least power of 2 at least `min(R + 1, max(N, 1))`. Their hashes:
+  `prev[S]`, `S` the least power of 2 at least `min(R, max(N, 1))` (a candidate is at least
+  `pos − R`, and its entry `c mod S` is taken again only by `c + S ≥ pos`, not inserted yet).
+  Their hashes:
 
   ```text
   K = 4:  x = rd32(p)
