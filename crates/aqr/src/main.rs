@@ -63,6 +63,7 @@ use aqr_compress::{Options, compress_formula_to, compress_tree_to, detect, kind_
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
 use aqr_formula::aqr::{self, Entry, EntryNode, Failure, Tree, name_bytes, name_from};
+use meta::{os_bytes, os_from};
 use view::Ticking;
 
 const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
@@ -471,7 +472,7 @@ fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) ->
     let name = name_from(&os_bytes(name));
     let (mut extra, forks) = g.reader.extra(path, &m, &mut |w| g.warnings.push(w));
     let t = m.file_type();
-    let inode = inode_of(&m).filter(|_| t.is_file());
+    let inode = if t.is_file() { meta::inode(path, &m) } else { None };
     let first = inode.and_then(|i| g.inodes.get(&i)).map(|f| f[0]);
     if let Some(first) = first {
         extra.forks = g.tree.entries[first].extra.forks.clone();
@@ -491,7 +492,7 @@ fn gather(path: &Path, name: &OsStr, parent: Option<usize>, g: &mut Gathered) ->
     } else if let Some(node) = meta::special(&m) {
         node
     } else if t.is_symlink() {
-        let target = fs::read_link(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let target = meta::link_target(fs::read_link(path).map_err(|e| format!("{}: {e}", path.display()))?);
         let target = name_from(&os_bytes(target.as_os_str()));
         if name_bytes(&target).0.is_empty() {
             g.skipped.push(format!("{} (an empty link)", path.display()));
@@ -524,40 +525,6 @@ fn gather_dir(dir: &Path, parent: Option<usize>, g: &mut Gathered) -> Result<(),
         gather(&dir.join(&name), &name, parent, g)?;
     }
     Ok(())
-}
-
-/// The inode (device and number) of `m`, where it has more links than one.
-#[cfg(unix)]
-fn inode_of(m: &fs::Metadata) -> Option<(u64, u64)> {
-    use std::os::unix::fs::MetadataExt;
-    (m.nlink() > 1).then(|| (m.dev(), m.ino()))
-}
-
-#[cfg(not(unix))]
-fn inode_of(_: &fs::Metadata) -> Option<(u64, u64)> {
-    None
-}
-
-#[cfg(unix)]
-fn os_bytes(s: &OsStr) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    s.as_bytes().to_vec()
-}
-
-#[cfg(not(unix))]
-fn os_bytes(s: &OsStr) -> Vec<u8> {
-    s.to_string_lossy().replace('\\', "/").into_bytes()
-}
-
-#[cfg(unix)]
-fn os_from(b: &[u8]) -> OsString {
-    use std::os::unix::ffi::OsStrExt;
-    OsStr::from_bytes(b).to_owned()
-}
-
-#[cfg(not(unix))]
-fn os_from(b: &[u8]) -> OsString {
-    String::from_utf8_lossy(b).into_owned().into()
 }
 
 /// Writes a new file `path` (or one in place of it, where `force`) by `write`: under a name of
@@ -895,14 +862,19 @@ fn extract(
     for i in links {
         let e = &t.entries[i];
         let EntryNode::Link(target) = &e.node else { unreachable!() };
-        if escapes(t, i) {
+        let Some(to) = resolve_link(t, i) else {
             ap.tell(&paths[i], &format!("a link reaching out of {}, not created", out.display()));
             continue;
-        }
+        };
         if force && fs::symlink_metadata(&paths[i]).is_ok_and(|m| !m.is_dir()) {
             fs::remove_file(&paths[i]).map_err(|x| err(&paths[i], x))?;
         }
-        symlink(&os_from(name_bytes(target).0), &paths[i]).map_err(|x| err(&paths[i], x))?;
+        // (on Windows, of the kind recorded, else by what it leads to; spec, "Extraction")
+        let dir = match e.extra.win_link_type {
+            Some(k) => k != 0,
+            None => to.is_some_and(|j| t.entries[j].node == EntryNode::Dir),
+        };
+        symlink(&os_from(name_bytes(target).0), &paths[i], dir).map_err(|x| err(&paths[i], x))?;
         made[i] = true;
     }
     for (i, k, d) in later.into_inner().unwrap() {
@@ -943,10 +915,10 @@ fn hard_links(t: &Tree) -> Vec<Option<usize>> {
     to
 }
 
-/// Whether link `i` of `t` reaches out of the directory it is extracted into: by an absolute
-/// target, or by one that, resolved from the link's directory through the links of the tree,
-/// goes above it.
-fn escapes(t: &Tree, i: usize) -> bool {
+/// Where link `i` of `t` leads, resolved from the link's directory through the links of the
+/// tree: the entry (`None`: none of the tree); `None` where it reaches out of the directory it
+/// is extracted into, by an absolute target or by one going above it.
+fn resolve_link(t: &Tree, i: usize) -> Option<Option<usize>> {
     // the path of an entry, as names from the root
     let path_of = |mut e: Option<usize>| {
         let mut p = Vec::new();
@@ -999,17 +971,20 @@ fn escapes(t: &Tree, i: usize) -> bool {
         }
         Some(at)
     }
-    let EntryNode::Link(target) = &t.entries[i].node else { return false };
-    resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of).is_none()
+    let EntryNode::Link(target) = &t.entries[i].node else { return Some(None) };
+    resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of).map(|p| find(&p))
 }
 
+/// Makes a link to `target` at `at` (on Windows, to a directory where `dir`).
 #[cfg(unix)]
-fn symlink(target: &OsStr, at: &Path) -> std::io::Result<()> {
+fn symlink(target: &OsStr, at: &Path, _: bool) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, at)
 }
 
 #[cfg(windows)]
-fn symlink(target: &OsStr, at: &Path) -> std::io::Result<()> {
-    let target = PathBuf::from(target.to_string_lossy().replace('/', "\\"));
-    std::os::windows::fs::symlink_file(target, at)
+fn symlink(target: &OsStr, at: &Path, dir: bool) -> std::io::Result<()> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    let slash = |c: u16| if c == b'/' as u16 { b'\\' as u16 } else { c };
+    let target = PathBuf::from(OsString::from_wide(&target.encode_wide().map(slash).collect::<Vec<_>>()));
+    if dir { std::os::windows::fs::symlink_dir(target, at) } else { std::os::windows::fs::symlink_file(target, at) }
 }

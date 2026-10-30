@@ -63,6 +63,9 @@ pub struct Extra {
     pub xattrs: Vec<(Vec<u8>, Vec<u8>)>,
     /// `forks`: names (as `aqr-text`'s bytes) and contents (by index, as [`EntryNode::File`]).
     pub forks: Vec<(Vec<u8>, usize)>,
+    /// `win-link-type` (of links alone): a link to a file (0), to a directory (1), or a
+    /// junction (2).
+    pub win_link_type: Option<u8>,
     /// `win-attrs` ([`WIN_ATTRS_ALLOWED`]).
     pub win_attrs: Option<u32>,
     /// `unix-mode`: the permission bits (0o7777).
@@ -209,6 +212,9 @@ pub(crate) fn check(t: &Tree, contents: usize) -> Result<(), String> {
         if e.extra.link_group.is_some() && !matches!(e.node, EntryNode::File(_)) {
             return Err(format!("entry #{i} in a link group but not a file"));
         }
+        if e.extra.win_link_type.is_some() && !matches!(e.node, EntryNode::Link(_)) {
+            return Err(format!("entry #{i} of a link type but not a link"));
+        }
         check_extra(&e.extra, contents).map_err(|m| format!("entry #{i} of {m}"))?;
     }
     check_extra(&t.root, contents).map_err(|m| format!("the root of {m}"))
@@ -217,6 +223,9 @@ pub(crate) fn check(t: &Tree, contents: usize) -> Result<(), String> {
 fn check_extra(x: &Extra, contents: usize) -> Result<(), &'static str> {
     if x.mode.is_some_and(|m| m > 0o7777) {
         return Err("a mode beyond its permissions");
+    }
+    if x.win_link_type.is_some_and(|t| t > 2) {
+        return Err("a link type undefined");
     }
     if x.link_group.is_some_and(|g| !(-(1 << 64)..1 << 64).contains(&g)) {
         return Err("a link group beyond the integers of CBOR");
@@ -410,8 +419,14 @@ fn extra(out: &mut Vec<u8>, e: &Extra, fork_at: &dyn Fn(usize) -> [u64; 3]) {
             fork_at(*c).into_iter().for_each(|v| head(&mut m, 0, v));
         }
     }
-    let uints = [(WIN_ATTRS, e.win_attrs.map(u64::from)), (UNIX_MODE, e.mode.map(u64::from)), (UNIX_UID, e.uid)];
-    for (k, v) in uints.into_iter().chain([(UNIX_GID, e.gid)]) {
+    let uints = [
+        (WIN_LINK_TYPE, e.win_link_type.map(u64::from)),
+        (WIN_ATTRS, e.win_attrs.map(u64::from)),
+        (UNIX_MODE, e.mode.map(u64::from)),
+        (UNIX_UID, e.uid),
+        (UNIX_GID, e.gid),
+    ];
+    for (k, v) in uints {
         if let Some(v) = v {
             key(&mut m, k);
             head(&mut m, 0, v);
@@ -466,6 +481,7 @@ const ARCTIME: i128 = -5;
 const LINK_GROUP: i128 = -7;
 const XATTRS: i128 = -10;
 const FORKS: i128 = -50;
+const WIN_LINK_TYPE: i128 = -60;
 const WIN_ATTRS: i128 = -61;
 const UNIX_MODE: i128 = -70;
 const UNIX_UID: i128 = -71;
@@ -715,6 +731,7 @@ fn member(x: &mut Extra, forks: &mut Vec<(Vec<u8>, ForkRef)>, k: i128, v: &Cbor)
                 forks.push((name(k)?, r));
             }
         }
+        WIN_LINK_TYPE => x.win_link_type = Some(uint(2)? as u8),
         WIN_ATTRS => match uint(u32::MAX as u64)? as u32 {
             a if a & !WIN_ATTRS_ALLOWED == 0 => x.win_attrs = Some(a),
             _ => return invalid("win-attrs of bits not allowed"),

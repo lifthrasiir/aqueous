@@ -5,12 +5,16 @@
 //! What is not commonly kept is read and applied only where asked (`-p`, `privileged`): the
 //! status change and backup times are read then, and the ownership, the superuser's flags and
 //! the set-user-ID and set-group-ID bits applied then.
+//!
+//! On Windows: the times, the file attributes, the kinds of links and the alternate data
+//! streams (as forks); not the extended attributes (EAs) of NTFS, read nor written.
 
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aqr_formula::aqr::{EntryNode, Extra, MAC_FLAGS_ALLOWED, Time};
+use aqr_formula::aqr::{EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, WIN_ATTRS_ALLOWED};
 
 /// The name of the resource fork of macOS among forks (spec, "forks").
 #[cfg(target_os = "macos")]
@@ -46,8 +50,13 @@ impl Reader {
     /// (whose contents the caller gives `Extra::forks`). What cannot be read of it is told by
     /// `warn`.
     pub fn extra(&mut self, path: &Path, m: &fs::Metadata, warn: &mut dyn FnMut(String)) -> (Extra, Vec<Fork>) {
-        let mut x =
-            Extra { mtime: m.modified().ok().map(time_of), crtime: m.created().ok().map(time_of), ..Extra::default() };
+        let time = |t: std::io::Result<std::time::SystemTime>| t.ok().map(time_of);
+        let mut x = Extra {
+            crtime: time(m.created()),
+            mtime: time(m.modified()),
+            atime: time(m.accessed()),
+            ..Extra::default()
+        };
         let mut forks = Vec::new();
         #[cfg(unix)]
         {
@@ -86,8 +95,127 @@ impl Reader {
                 }
             }
         }
-        let _ = (path, &mut forks, MAC_FLAGS_ALLOWED);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::{FileTypeExt, MetadataExt};
+            let a = m.file_attributes() & WIN_ATTRS_ALLOWED;
+            if a != 0 {
+                x.win_attrs = Some(a);
+            }
+            // (a junction taken for a link to a directory)
+            if m.is_symlink() {
+                x.win_link_type = Some(m.file_type().is_symlink_dir() as u8);
+            } else {
+                match os::streams(path) {
+                    Ok(f) => forks = f,
+                    Err(e) => warn(format!("{}: alternate data streams not read: {e}", path.display())),
+                }
+            }
+        }
+        let _ = (path, &mut forks, MAC_FLAGS_ALLOWED, WIN_ATTRS_ALLOWED);
         (x, forks)
+    }
+}
+
+/// The bytes of `s` as an entry name or a link target has them: as they are on Unix, WTF-8 on
+/// Windows (`\` as `/`).
+#[cfg(unix)]
+pub fn os_bytes(s: &OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    s.as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+pub fn os_bytes(s: &OsStr) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+    let mut out = Vec::new();
+    for c in char::decode_utf16(s.encode_wide()) {
+        // (a lone surrogate as UTF-8 would have it, were it a scalar)
+        let c = c.map_or_else(|e| e.unpaired_surrogate() as u32, |c| if c == '\\' { '/' as u32 } else { c as u32 });
+        match c {
+            0..0x80 => out.push(c as u8),
+            0x80..0x800 => out.extend_from_slice(&[0xc0 | (c >> 6) as u8, 0x80 | (c & 0x3f) as u8]),
+            0x800..0x1_0000 => {
+                out.extend_from_slice(&[0xe0 | (c >> 12) as u8, 0x80 | (c >> 6 & 0x3f) as u8, 0x80 | (c & 0x3f) as u8])
+            }
+            _ => out.extend_from_slice(&[
+                0xf0 | (c >> 18) as u8,
+                0x80 | (c >> 12 & 0x3f) as u8,
+                0x80 | (c >> 6 & 0x3f) as u8,
+                0x80 | (c & 0x3f) as u8,
+            ]),
+        }
+    }
+    out
+}
+
+/// The name or path of bytes `b` ([`os_bytes`]; on Windows, WTF-8, else replaced).
+#[cfg(unix)]
+pub fn os_from(b: &[u8]) -> OsString {
+    use std::os::unix::ffi::OsStrExt;
+    OsStr::from_bytes(b).to_owned()
+}
+
+#[cfg(windows)]
+pub fn os_from(b: &[u8]) -> OsString {
+    use std::os::windows::ffi::OsStringExt;
+    let mut wide = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let n = match b[i] {
+            0..0x80 => 1,
+            0xc0..0xe0 => 2,
+            0xe0..0xf0 => 3,
+            _ => 4,
+        };
+        let Some(seq) = b.get(i..i + n).filter(|s| n == 1 || s[1..].iter().all(|&c| c & 0xc0 == 0x80)) else {
+            wide.push(0xfffd);
+            i += 1;
+            continue;
+        };
+        let mut c = if n == 1 { seq[0] as u32 } else { (seq[0] as u32) & (0x7f >> n) };
+        seq[1..].iter().for_each(|&x| c = (c << 6) | (x & 0x3f) as u32);
+        match c {
+            0x1_0000.. => {
+                wide.extend_from_slice(&[0xd800 | ((c - 0x1_0000) >> 10) as u16, 0xdc00 | (c & 0x3ff) as u16])
+            }
+            _ => wide.push(c as u16),
+        }
+        i += n;
+    }
+    OsString::from_wide(&wide)
+}
+
+/// The target of a link as it is archived: on Windows, a Win32 path rather than one of the
+/// object manager's (`\\?\C:\x` as `C:\x`, `\\?\UNC\s\x` as `\\s\x`; spec, "Archive model").
+pub fn link_target(target: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = target.as_os_str().to_string_lossy();
+        for (prefix, to) in [(r"\\?\UNC\", r"\\"), (r"\??\UNC\", r"\\"), (r"\\?\", ""), (r"\??\", "")] {
+            if let Some(rest) = s.strip_prefix(prefix)
+                && !rest.starts_with("Volume{")
+            {
+                return format!("{to}{rest}").into();
+            }
+        }
+    }
+    target
+}
+
+/// The inode of file `path` (of metadata `m`): its device and number, where it has more links
+/// than one.
+pub fn inode(path: &Path, m: &fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let _ = path;
+        (m.nlink() > 1).then(|| (m.dev(), m.ino()))
+    }
+    #[cfg(windows)]
+    {
+        let _ = m;
+        os::inode(path)
     }
 }
 
@@ -178,13 +306,16 @@ impl Applier {
     pub fn apply(&self, path: &Path, kind: Kind, x: &Extra) -> Result<(), String> {
         let err = |e: std::io::Error| format!("{}: {e}", path.display());
         // (the attributes the forks are written as)
-        let forks: Vec<&[u8]> = x.forks.iter().filter_map(|f| os::fork_xattr(kind, &f.0)).collect();
-        for (name, value) in &x.xattrs {
-            let shown = String::from_utf8_lossy(name);
-            if forks.contains(&&name[..]) {
-                self.tell(path, &format!("extended attribute {shown} not written: a fork of the same name"));
-            } else if let Err(e) = os::set_xattr(path, name, value) {
-                self.tell(path, &format!("extended attribute {shown} not written: {e}"));
+        #[cfg(unix)]
+        {
+            let forks: Vec<&[u8]> = x.forks.iter().filter_map(|f| os::fork_xattr(kind, &f.0)).collect();
+            for (name, value) in &x.xattrs {
+                let shown = String::from_utf8_lossy(name);
+                if forks.contains(&&name[..]) {
+                    self.tell(path, &format!("extended attribute {shown} not written: a fork of the same name"));
+                } else if let Err(e) = os::set_xattr(path, name, value) {
+                    self.tell(path, &format!("extended attribute {shown} not written: {e}"));
+                }
             }
         }
         #[cfg(unix)]
@@ -193,11 +324,18 @@ impl Applier {
             let gid = x.gname.as_deref().and_then(os::group_id).or(x.gid.and_then(|g| u32::try_from(g).ok()));
             std::os::unix::fs::lchown(path, uid, gid).map_err(err)?;
         }
+        #[cfg(unix)]
         if let Some(mode) = x.mode {
             let mode = if self.privileged { mode } else { mode & 0o1777 };
             os::set_mode(path, kind, mode).map_err(err)?;
         }
-        os::set_times(path, x).map_err(err)?;
+        os::set_times(path, kind, x).map_err(err)?;
+        // (the attributes after the times, as read-only forbids them; from the mode where there
+        // are none, read-only where the owner cannot write)
+        #[cfg(windows)]
+        if let Some(a) = x.win_attrs.or(x.mode.map(|m| (m & 0o200 == 0) as u32)) {
+            os::set_attrs(path, a).map_err(err)?;
+        }
         #[cfg(target_os = "macos")]
         if let Some(t) = x.crtime.filter(|_| kind != Kind::Link)
             && let Err(e) = os::set_attr_time(path, libc::ATTR_CMN_CRTIME, t)
@@ -365,7 +503,7 @@ mod os {
     }
 
     /// Sets the access and modification times of `path` (not followed) where `x` has them.
-    pub fn set_times(path: &Path, x: &Extra) -> io::Result<()> {
+    pub fn set_times(path: &Path, _: Kind, x: &Extra) -> io::Result<()> {
         if x.atime.is_none() && x.mtime.is_none() {
             return Ok(());
         }
@@ -508,42 +646,140 @@ mod os {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 mod os {
+    use std::ffi::OsString;
+    use std::fs;
     use std::io;
-    use std::path::Path;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use std::os::windows::fs::{FileTimesExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use std::path::{Path, PathBuf};
 
-    use aqr_formula::aqr::{EntryNode, Extra};
+    use aqr_formula::aqr::{EntryNode, Extra, Time};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, FindClose, FindFirstStreamW, FindNextStreamW,
+        FindStreamInfoStandard, GetFileInformationByHandle, SetFileAttributesW, WIN32_FIND_STREAM_DATA,
+    };
 
-    use super::Kind;
+    use super::{Fork, Kind};
 
-    pub fn set_xattr(_: &Path, _: &[u8], _: &[u8]) -> io::Result<()> {
-        Err(io::Error::other("not written on this system"))
+    /// `ERROR_HANDLE_EOF`: no more streams.
+    const NO_MORE: i32 = 38;
+
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str().encode_wide().chain([0]).collect()
     }
 
-    pub fn fork_xattr(_: Kind, _: &[u8]) -> Option<&[u8]> {
-        None
+    /// The path of stream `name` of `path`.
+    fn stream(path: &Path, name: &std::ffi::OsStr) -> PathBuf {
+        let mut p = path.as_os_str().to_owned();
+        p.push(":");
+        p.push(name);
+        p.into()
     }
 
-    pub fn fork(_: &Path, _: Kind, _: &[u8], _: &[u8]) -> io::Result<()> {
-        Err(io::Error::other("not written on this system"))
+    /// The alternate data streams of `path`, as forks (the unnamed one, the content, left out).
+    pub fn streams(path: &Path) -> io::Result<Vec<Fork>> {
+        let w = wide(path);
+        let mut d = WIN32_FIND_STREAM_DATA::default();
+        // SAFETY: a path of a NUL, and data of the level asked
+        let h = unsafe { FindFirstStreamW(w.as_ptr(), FindStreamInfoStandard, (&raw mut d).cast(), 0) };
+        if h == INVALID_HANDLE_VALUE {
+            let e = io::Error::last_os_error();
+            // (none, or a file system of no streams)
+            return if matches!(e.raw_os_error(), Some(NO_MORE) | Some(1)) { Ok(Vec::new()) } else { Err(e) };
+        }
+        let mut out = Vec::new();
+        let r = loop {
+            let n = d.cStreamName.iter().position(|&c| c == 0).unwrap_or(d.cStreamName.len());
+            let full = OsString::from_wide(&d.cStreamName[..n]);
+            // `:NAME:$DATA`
+            let s = full.to_string_lossy();
+            if let Some(name) = d.cStreamName[..n].strip_prefix(&[b':' as u16])
+                && s.ends_with(":$DATA")
+                && name.len() > 6
+            {
+                let name = OsString::from_wide(&name[..name.len() - 6]);
+                let size = d.StreamSize as u64;
+                out.push(Fork { name: super::os_bytes(&name), path: stream(path, &name), size });
+            }
+            // SAFETY: as above
+            if unsafe { FindNextStreamW(h, (&raw mut d).cast()) } == 0 {
+                let e = io::Error::last_os_error();
+                break if e.raw_os_error() == Some(NO_MORE) { Ok(out) } else { Err(e) };
+            }
+        };
+        // SAFETY: the handle found
+        unsafe { FindClose(h) };
+        r
     }
 
-    pub fn set_mode(_: &Path, _: Kind, _: u32) -> io::Result<()> {
-        Ok(())
+    /// The volume and the index of file `path`, where it has more links than one.
+    pub fn inode(path: &Path) -> Option<(u64, u64)> {
+        let f = fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+            .ok()?;
+        let mut i: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: an open handle, and the information of its type
+        if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut i) } == 0 || i.nNumberOfLinks < 2 {
+            return None;
+        }
+        Some((i.dwVolumeSerialNumber as u64, (i.nFileIndexHigh as u64) << 32 | i.nFileIndexLow as u64))
     }
 
-    pub fn set_times(path: &Path, x: &Extra) -> io::Result<()> {
-        let Some(t) = x.mtime else { return Ok(()) };
-        let time = match t.secs {
+    pub fn fork(path: &Path, kind: Kind, name: &[u8], data: &[u8]) -> io::Result<()> {
+        if kind == Kind::Link {
+            return Err(io::Error::other("no streams written to links here"));
+        }
+        fs::write(stream(path, &super::os_from(name)), data)
+    }
+
+    fn system(t: Time) -> std::time::SystemTime {
+        match t.secs {
             s if s >= 0 => std::time::UNIX_EPOCH + std::time::Duration::new(s as u64, t.nanos),
             s => {
                 std::time::UNIX_EPOCH - std::time::Duration::from_secs(s.unsigned_abs())
                     + std::time::Duration::from_nanos(t.nanos as u64)
             }
-        };
-        let f = std::fs::File::options().write(!path.is_dir()).read(path.is_dir()).open(path)?;
-        f.set_modified(time)
+        }
+    }
+
+    /// Sets the creation, access and modification times of `path` (not followed) where `x` has
+    /// them.
+    pub fn set_times(path: &Path, kind: Kind, x: &Extra) -> io::Result<()> {
+        if x.crtime.is_none() && x.atime.is_none() && x.mtime.is_none() {
+            return Ok(());
+        }
+        let link = if kind == Kind::Link { FILE_FLAG_OPEN_REPARSE_POINT } else { 0 };
+        let f = fs::OpenOptions::new()
+            .access_mode(FILE_WRITE_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | link)
+            .open(path)?;
+        let mut t = fs::FileTimes::new();
+        if let Some(c) = x.crtime {
+            t = t.set_created(system(c));
+        }
+        if let Some(a) = x.atime {
+            t = t.set_accessed(system(a));
+        }
+        if let Some(m) = x.mtime {
+            t = t.set_modified(system(m));
+        }
+        f.set_times(t)
+    }
+
+    pub fn set_attrs(path: &Path, attrs: u32) -> io::Result<()> {
+        let attrs = if attrs == 0 { FILE_ATTRIBUTE_NORMAL } else { attrs };
+        // SAFETY: a path of a NUL
+        if unsafe { SetFileAttributesW(wide(path).as_ptr(), attrs) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub fn make_special(_: &Path, _: &EntryNode) -> io::Result<()> {

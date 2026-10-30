@@ -776,6 +776,7 @@ mod tests {
             link_group: Some(-1 << 64),
             xattrs: vec![(b"com.apple.quarantine".to_vec(), b"0081;".to_vec()), (b"\xff".to_vec(), vec![0; 300])],
             forks: vec![(b"AFP_Resource".to_vec(), 4), (b"\xed\xa0\x80".to_vec(), 0)],
+            win_link_type: None,
             win_attrs: Some(0x2127),
             mode: Some(0o644),
             uid: Some(u64::MAX),
@@ -785,6 +786,7 @@ mod tests {
             mac_flags: Some(0x8000),
         };
         tree.entries[11].extra.mode = Some(0o600);
+        tree.entries[9].extra.win_link_type = Some(1);
         let seg = Segment { f: &f, leaves: &leaves, tree: &tree, contents: &contents };
         let enc = Encoder::new(Level::Zstd(3));
         let (c, placed) = enc.encode_segment(&seg).unwrap();
@@ -815,6 +817,7 @@ mod tests {
         assert_eq!(names, want_names);
         assert_eq!(t.entries[2].extra, tree.entries[2].extra);
         assert_eq!(t.entries[9].node, EntryNode::Link(b"../own".to_vec()));
+        assert_eq!(t.entries[9].extra.win_link_type, Some(1));
         assert_eq!(t.entries[10].node, EntryNode::Fifo);
         assert_eq!(t.entries[11].node, tree.entries[11].node);
         assert_eq!(t.entries[11].extra, tree.entries[11].extra);
@@ -866,6 +869,11 @@ mod tests {
         for (i, g) in [(0, 1), (2, 1 << 64)] {
             let mut t = tree.clone();
             t.entries[i].extra.link_group = Some(g);
+            assert!(enc.encode_segment(&Segment { tree: &t, ..seg }).is_err());
+        }
+        for (i, l) in [(2, 1), (9, 3)] {
+            let mut t = tree.clone();
+            t.entries[i].extra.win_link_type = Some(l);
             assert!(enc.encode_segment(&Segment { tree: &t, ..seg }).is_err());
         }
     }
