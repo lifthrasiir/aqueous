@@ -48,7 +48,7 @@ mod stop;
 mod view;
 
 use aqr_compress::mapped::Mapper;
-use aqr_compress::{Options, compress_formula_telling, compress_tree_to, detect, kind_by_name};
+use aqr_compress::{Options, compress_formula_to, compress_tree_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
 use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, name_bytes, name_from};
@@ -291,10 +291,12 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
             mapper,
         };
         let view = view::View::new(&g, bars(), false);
-        // (of the kind its name tells, as a file in an archive of many)
-        let (c, f) = viewed(a, &view, |tell| compress_formula_telling(&d, kind, opt, tell));
-        aqr_compress::Source::intact(&g, 0).map_err(|e| e.to_string())?;
-        write_whole(out, a.force, |w| w.write_all(&c))?;
+        // (of the kind its name tells, as a file in an archive of many; written as it is made)
+        let (n, f) = write_whole(out, a.force, |file| {
+            let r = viewed(a, &view, |tell| compress_formula_to(&d, kind, opt, file, tell))?;
+            aqr_compress::Source::intact(&g, 0)?;
+            Ok(r)
+        })?;
         if !a.quiet && a.verbose {
             let modules: Vec<String> = f.applies().iter().map(|m| m.module.to_string()).collect();
             let format = detect(&d).map_or("-", |f| f.name());
@@ -304,12 +306,12 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
                 format,
                 if modules.is_empty() { "kept as it is".into() } else { modules.join(" ") },
                 size(d.len() as f64),
-                size(c.len() as f64),
-                percent(c.len() as f64, d.len() as f64)
+                size(n as f64),
+                percent(n as f64, d.len() as f64)
             );
         }
         if !a.quiet {
-            summary(out, 1, d.len(), c.len(), start);
+            summary(out, 1, d.len(), n, start);
         }
         return Ok(());
     }
@@ -497,7 +499,8 @@ fn write_new(path: &Path, d: &[u8], force: bool) -> Result<(), String> {
 
 /// Writes a new file `path` (or one in place of it, where `force`) by `write`: under a name of
 /// its own beside it, renamed once it is written (so that `path` is never written in part),
-/// removed where it is not (`write` failing, or the process stopped: [`stop`]).
+/// removed where it is not (`write` failing, or the process stopped: [`stop`]). The file is
+/// opened to be read as well (an archive read back to be verified, [`aqr_compress::Sink`]).
 fn write_whole<T>(
     path: &Path,
     force: bool,
@@ -507,7 +510,8 @@ fn write_whole<T>(
     let mut name = path.file_name().ok_or(format!("{}: not a file's name", path.display()))?.to_owned();
     name.push(format!(".{}.part", std::process::id()));
     let part = path.with_file_name(name);
-    let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&part).map_err(|e| err(&part, e))?;
+    let mut file =
+        fs::OpenOptions::new().read(true).write(true).create_new(true).open(&part).map_err(|e| err(&part, e))?;
     let stop = stop::removing(&part);
     let r = write(&mut file).map_err(|e| err(path, e)).and_then(|t| {
         drop(file);

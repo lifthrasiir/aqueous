@@ -119,7 +119,8 @@ mod zip;
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
-use std::ops::Range;
+use std::io::{self, Seek, Write};
+use std::ops::{Deref, Range};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
@@ -521,7 +522,9 @@ pub fn recompress(d: &[u8], opt: &Options) -> Formula {
 
 /// `d` as an archive, with the checksum of `d`.
 pub fn compress(d: &[u8], opt: &Options) -> Vec<u8> {
-    compress_with(d, Kind::Unknown, opt, false, None).0
+    let mut c = Vec::new();
+    compress_with(d, Kind::Unknown, opt, false, None, &mut c).expect("written to memory");
+    c
 }
 
 /// [`compress`], with the formula the archive holds: that of `d` raw where it was not verified.
@@ -532,26 +535,63 @@ pub fn compress_formula(d: &[u8], opt: &Options) -> (Vec<u8>, Formula) {
 /// [`compress_formula`] of a file of `kind`, as its name tells ([`kind_by_name`]), as a file in
 /// an archive of many is taken.
 pub fn compress_formula_as(d: &[u8], kind: Kind, opt: &Options) -> (Vec<u8>, Formula) {
-    let (c, f) = compress_with(d, kind, opt, true, None);
+    let mut c = Vec::new();
+    let (_, f) = compress_with(d, kind, opt, true, None, &mut c).expect("written to memory");
     (c, f.expect("kept"))
 }
 
-/// [`compress_formula_as`], telling `tell` how far it is as [`compress_tree_to`] does, of `d` as
-/// content 0 in a batch of its own (the compression told only once it is encoded, and once it
-/// is verified).
-pub fn compress_formula_telling(
+/// [`compress_formula_as`] written to `out` as it is made, of the bytes written; telling `tell`
+/// how far it is as [`compress_tree_to`] does, of `d` as content 0 in a batch of its own (the
+/// compression told only once it is encoded, and once it is verified). Fails where `out` does.
+pub fn compress_formula_to(
     d: &[u8],
     kind: Kind,
     opt: &Options,
+    out: &mut dyn Sink,
     tell: &(dyn Fn(Event) + Sync),
-) -> (Vec<u8>, Formula) {
+) -> io::Result<(usize, Formula)> {
     let (tracker, notes) = progress::Tracker::new(vec![d.len() as u64]);
-    let (c, f) = std::thread::scope(|s| {
+    let (n, f) = std::thread::scope(|s| {
         s.spawn(|| tracker.run(tell));
         // (the notes gone with it, the tracker done)
-        compress_with(d, kind, opt, true, Some(notes))
-    });
-    (c, f.expect("kept"))
+        compress_with(d, kind, opt, true, Some(notes), out)
+    })?;
+    Ok((n, f.expect("kept")))
+}
+
+/// Where [`compress_formula_to`] writes an archive: read back to be verified, and written again
+/// from the start where it does not give the file back.
+pub trait Sink: Write {
+    /// The bytes written so far.
+    fn written(&mut self) -> io::Result<Box<dyn Deref<Target = [u8]> + '_>>;
+
+    /// Drops the bytes written, to be written again from the start.
+    fn restart(&mut self) -> io::Result<()>;
+}
+
+impl Sink for Vec<u8> {
+    fn written(&mut self) -> io::Result<Box<dyn Deref<Target = [u8]> + '_>> {
+        Ok(Box::new(&self[..]))
+    }
+
+    fn restart(&mut self) -> io::Result<()> {
+        self.clear();
+        Ok(())
+    }
+}
+
+/// A file written from its start, opened to be read as well (it is mapped to be read back).
+impl Sink for std::fs::File {
+    fn written(&mut self) -> io::Result<Box<dyn Deref<Target = [u8]> + '_>> {
+        // SAFETY: the file is the archive being written, changed by nothing else while it is
+        // read back (the map borrowing the file)
+        Ok(Box::new(unsafe { memmap2::Mmap::map(&*self)? }))
+    }
+
+    fn restart(&mut self) -> io::Result<()> {
+        self.set_len(0)?;
+        self.seek(io::SeekFrom::Start(0)).map(|_| ())
+    }
 }
 
 /// [`compress`] of a file of `kind`, with the formula of the archive where it is to be `kept`:
@@ -563,7 +603,8 @@ fn compress_with(
     opt: &Options,
     kept: bool,
     notes: Option<progress::Notes>,
-) -> (Vec<u8>, Option<Formula>) {
+    out: &mut dyn Sink,
+) -> io::Result<(usize, Option<Formula>)> {
     use progress::Note;
     let note = |n: Note| {
         if let Some(notes) = &notes {
@@ -580,9 +621,9 @@ fn compress_with(
     drop(watch);
     note(Note::Ended(0));
     let memo = cx.pre.take().map(verify::Prevalidator::finish_shared).unwrap_or_default();
-    let r = finish(f, d, opt, &cx, memo, kept, notes.as_ref());
+    let r = finish(f, d, opt, &cx, memo, kept, notes.as_ref(), out)?;
     note(Note::Written(0));
-    r
+    Ok(r)
 }
 
 /// The spill of [`Options::spill`] as the store of large buffers, while the guard is kept (and
@@ -592,11 +633,13 @@ pub(crate) fn spilling(opt: &Options) -> Option<aqr_formula::store::Guard> {
     Some(aqr_formula::store::set(Some(Arc::new(spill))))
 }
 
-/// The archive of formula `f` of `d`; with [`Options::verify`], decoded and compared with `d`
-/// (the outputs of applications in `memo` taken from there), and where it is not `d` (a
-/// module's bug), the archive of `d` raw instead. The formula is returned where `kept`; what is
-/// no longer needed (the formula, the streams compressed) is dropped before the decoding. The
-/// `notes` are told of it encoded and verified.
+/// The archive of formula `f` of `d`, written to `out`, of the bytes written; with
+/// [`Options::verify`], read back, decoded and compared with `d` (the outputs of applications
+/// in `memo` taken from there), and where it is not `d` (a module's bug), the archive of `d` raw
+/// written instead. The formula is returned where `kept`; what is no longer needed (the formula,
+/// the streams compressed) is dropped before the decoding. The `notes` are told of it encoded
+/// and verified. Fails where `out` does.
+#[allow(clippy::too_many_arguments)]
 fn finish(
     mut f: Formula,
     d: &[u8],
@@ -605,7 +648,8 @@ fn finish(
     memo: verify::Memo,
     kept: bool,
     notes: Option<&progress::Notes>,
-) -> (Vec<u8>, Option<Formula>) {
+    out: &mut dyn Sink,
+) -> io::Result<(usize, Option<Formula>)> {
     use progress::Note;
     memory::declare(&mut f, &Native { threads: opt.threads }, &memo.1);
     // the streams of a class together, as they compress smaller: as pieces of the streams, not
@@ -613,7 +657,7 @@ fn finish(
     let sum = Some(aqr::checksum(d));
     let (merged, groups) = f.merged();
     let pieces: Vec<Vec<&[u8]>> = groups.iter().map(|g| g.iter().map(|&i| &f.streams[i].data[..]).collect()).collect();
-    let c = cx.enc.encode_pieces(&merged, &pieces, sum);
+    let n = written(out, |w| cx.enc.encode_pieces_to(&merged, &pieces, sum, w))?;
     drop(pieces);
     notes.inspect(|n| n.send(Note::Encoded(0, 1, 1)));
     cx.enc.clear();
@@ -636,14 +680,26 @@ fn finish(
         notes.inspect(|n| n.send(Note::Verified(0, d.len() as u64)));
         decodes
     };
-    match c {
-        Ok(c) if !opt.verify || decodes(&c) => (c, f),
+    match n {
+        Ok(n) if !opt.verify || decodes(&out.written()?) => Ok((n, f)),
         // a leaf of other bytes than `d` is not encoded with its checksum
         _ => {
-            let raw = Formula::raw("raw", d.to_vec());
-            (cx.enc.encode(&raw, sum).expect("a stream of the whole"), kept.then_some(raw))
+            out.restart()?;
+            // (of the bytes of `d`, not a copy of them, but for the formula kept)
+            let mut raw = Formula::raw("raw", Vec::new());
+            raw.root = Node::slice(0, 0, d.len() as u64);
+            let n = written(out, |w| cx.enc.encode_pieces_to(&raw, &[vec![d]], sum, w))?;
+            Ok((n.expect("a stream of the whole"), kept.then(|| Formula::raw("raw", d.to_vec()))))
         }
     }
+}
+
+/// What `write` writes to `out` (through a buffer), flushed.
+fn written<T>(out: &mut dyn Sink, write: impl FnOnce(&mut dyn Write) -> io::Result<T>) -> io::Result<T> {
+    let mut w = io::BufWriter::with_capacity(1 << 20, out);
+    let t = write(&mut w)?;
+    w.flush()?;
+    Ok(t)
 }
 
 /// [`recompress`] for data `depth` formats deep, within `cx`.
@@ -1989,9 +2045,41 @@ mod tests {
             f.push("b", other[1000..].to_vec());
             f.root = Node::concat([Node::slice(0, 0, 1000), Node::slice(1, 0, other.len() as u64 - 1000)]);
             let cx = Cx::new(&d, &opt);
-            let (c, _) = finish(f, &d, &opt, &cx, Default::default(), false, None);
+            let c = finished(f, &d, &opt, &cx);
             assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
         }
+    }
+
+    /// [`finish`] into memory, of as many bytes as it tells.
+    fn finished(f: Formula, d: &[u8], opt: &Options, cx: &Cx) -> Vec<u8> {
+        let mut c = Vec::new();
+        let (n, _) = finish(f, d, opt, cx, Default::default(), false, None, &mut c).unwrap();
+        assert_eq!(n, c.len());
+        c
+    }
+
+    /// An archive written to a file that does not give the file back is written again over it:
+    /// the archive of the file raw, shorter than it, the file cut to its length.
+    #[test]
+    fn written_again_to_file() {
+        let d = aqr_common::rng::noise(100_000);
+        let opt = Options::default();
+        // (twice as long as the file: given back longer)
+        let mut f = Formula::default();
+        f.push("a", d.clone());
+        f.push("b", d.iter().map(|b| b ^ 0x5a).collect::<Vec<u8>>());
+        let n = d.len() as u64;
+        f.root = Node::concat([Node::slice(0, 0, n), Node::slice(1, 0, n)]);
+        let path = std::env::temp_dir().join(format!("aqr-compress-written-again-{}.aqr", std::process::id()));
+        let mut file =
+            std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path).unwrap();
+        let (n, _) = finish(f, &d, &opt, &Cx::new(&d, &opt), Default::default(), false, None, &mut file).unwrap();
+        drop(file);
+        let c = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(c.len(), n);
+        assert!(c.len() < d.len() + 100);
+        assert!(aqr_decompress::decompress(&c, 1).unwrap() == d);
     }
 
     /// The formulas recompressors make are evaluated beforehand: decoding the archive takes
@@ -2132,14 +2220,10 @@ mod tests {
         wrong.streams[0].data[7] ^= 1;
         let raw = aqr::encode(&Formula::raw("raw", d.clone()), Some(aqr::checksum(&d)), opt.level).unwrap();
         // a leaf, whose checksum is not the output's, is not encoded at all
-        assert_eq!(
-            finish(wrong.clone(), &d, &Options { verify: false, ..opt.clone() }, &cx, Default::default(), false, None)
-                .0,
-            raw
-        );
+        assert_eq!(finished(wrong.clone(), &d, &Options { verify: false, ..opt.clone() }, &cx), raw);
         // two slices: the archive has the output's checksum
         wrong.root = Node::Concat(vec![Node::slice(0, 0, 100), Node::slice(0, 100, d.len() as u64 - 100)]);
-        assert_eq!(finish(wrong.clone(), &d, &opt, &cx, Default::default(), false, None).0, raw);
+        assert_eq!(finished(wrong.clone(), &d, &opt, &cx), raw);
         // a module that fails
         let fails = Formula {
             streams: vec![aqr_formula::Stream {
@@ -2151,11 +2235,11 @@ mod tests {
             root: Node::apply(FLATE, vec![], vec![Node::slice(0, 0, 3), Node::slice(0, 0, 3)], d.len() as u64),
             shared: vec![],
         };
-        assert_eq!(finish(fails, &d, &opt, &cx, Default::default(), false, None).0, raw);
+        assert_eq!(finished(fails, &d, &opt, &cx), raw);
         // without verification, as it is
         let opt = Options { verify: false, ..opt };
         assert_eq!(
-            aqr_decompress::decompress(&finish(wrong, &d, &opt, &cx, Default::default(), false, None).0, 1),
+            aqr_decompress::decompress(&finished(wrong, &d, &opt, &cx), 1),
             Err(aqr::Failure::Invalid("output checksum mismatch".into()))
         );
     }

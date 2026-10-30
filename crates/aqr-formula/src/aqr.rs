@@ -38,6 +38,7 @@ use std::cell::{RefCell, RefMut};
 use std::collections::hash_map::Entry as MapEntry;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -541,12 +542,30 @@ impl Encoder {
     /// [`crate::Formula::merged`] gives them. The blocks are compressed as they are written and
     /// not kept, but those compressed already (which are let go).
     pub fn encode_pieces(&self, f: &Formula, pieces: &[Vec<&[u8]>], checksum: Option<u64>) -> Result<Vec<u8>> {
-        let streams: Vec<&[&[u8]]> = pieces.iter().map(|p| &p[..]).collect();
         let mut out = Vec::new();
+        self.encode_pieces_to(f, pieces, checksum, &mut out).expect("written to memory")?;
+        Ok(out)
+    }
+
+    /// [`Encoder::encode_pieces`] written to `out` as it is made, of the bytes written. Fails
+    /// where `out` does (the archive written in part, nothing more written after the failure),
+    /// else gives what [`Encoder::encode_pieces`] would.
+    pub fn encode_pieces_to(
+        &self,
+        f: &Formula,
+        pieces: &[Vec<&[u8]>],
+        checksum: Option<u64>,
+        out: &mut dyn io::Write,
+    ) -> io::Result<Result<usize>> {
+        let streams: Vec<&[&[u8]]> = pieces.iter().map(|p| &p[..]).collect();
+        let mut w = Writing { out, len: 0, failed: None };
         self.keep.set(false);
-        let r = self.write_streams(f, &streams, checksum, &mut out);
+        let r = self.write_streams(f, &streams, checksum, &mut w);
         self.keep.set(true);
-        r.map(|_| out)
+        match w.failed {
+            Some(e) => Err(e),
+            None => Ok(r.map(|_| w.len)),
+        }
     }
 
     /// [`Encoder::encode`] into `out`, with the stream of `stand_in` (by index) its bytes rather
@@ -921,6 +940,28 @@ impl Out for Vec<u8> {
 
     fn len(&self) -> usize {
         Vec::len(self)
+    }
+}
+
+/// Bytes written to a writer, up to the first failure (and nothing after it).
+struct Writing<'a> {
+    out: &'a mut dyn io::Write,
+    len: usize,
+    failed: Option<io::Error>,
+}
+
+impl Out for Writing<'_> {
+    fn put(&mut self, b: &[u8]) {
+        if self.failed.is_none() {
+            match self.out.write_all(b) {
+                Ok(()) => self.len += b.len(),
+                Err(e) => self.failed = Some(e),
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.len
     }
 }
 
@@ -2818,6 +2859,10 @@ impl Contents<'_, '_> {
 /// What takes the bytes of a file as it is decoded ([`Archive::write_file`]).
 pub type Sink<'a> = dyn FnMut(&[u8]) -> Decoded<()> + Send + 'a;
 
+/// What takes the bytes of an output as it is evaluated ([`run`]): a [`Sink`], not needing to
+/// be sent.
+type Taker<'a> = dyn FnMut(&[u8]) -> Decoded<()> + 'a;
+
 /// Where the output of a formula block of one output may be written out as it is evaluated:
 /// the values it is the concatenation of (through Concat instructions, at any depth), each by
 /// its number (values numbered as they are pushed), in the order of the output.
@@ -2893,7 +2938,7 @@ fn streamed(p: &Program) -> Option<Streamed> {
 /// come before their turn held until it.
 struct Writer<'s, 'w> {
     plan: &'s Streamed,
-    sink: &'w mut dyn FnMut(&[u8]) -> Decoded<()>,
+    sink: &'w mut Taker<'w>,
     next: usize,
     held: HashMap<usize, Vec<u8>>,
     hash: Xxh64,
@@ -2929,7 +2974,7 @@ fn run<'a>(
     p: Program<'a>,
     env: &Env,
     contents: &Contents,
-    sink: Option<&mut dyn FnMut(&[u8]) -> Decoded<()>>,
+    sink: Option<&mut Taker<'_>>,
 ) -> Decoded<Vec<Vec<u8>>> {
     let plan = sink.is_some().then(|| streamed(&p)).flatten();
     let mut w = match (plan.as_ref(), sink) {
