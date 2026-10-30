@@ -1,0 +1,22 @@
+[package]
+name = "aqr-wim"
+version = "0.1.0"
+edition = "2024"
+description = "WIM files taken apart into their resources' data, LZX chunks rebuilt by aqr-lzx, without a module of their own"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-lzx = { path = "../aqr-lzx" }
+
+[dev-dependencies]
+aqr-decompress = { path = "../../crates/aqr-decompress" }
+memmap2 = "0.9"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-wim-check"
+path = "examples/check.rs"

@@ -537,6 +537,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-wim"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-decompress",
+ "aqr-formula",
+ "aqr-lzx",
+ "memmap2",
+]
+
+[[package]]
 name = "aqr-wrt"
 version = "0.1.0"
 dependencies = [
