@@ -22,8 +22,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, bvx, snappy, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle, asar,
-  …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
+  git, lz4, lzma, lzo, bvx, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
+  asar, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
   `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
 - `corpus/` and `cache/` under a crate are gitignored local data (test inputs, cached results
@@ -126,6 +126,10 @@ optimization picked by hash.
   as aqr-lzo, with the LZFSE compressor's table of candidates (14-bit hash, 4 ways) emulated as
   a context. Apple's lzfse code (BSD) is not read; libcompression is the black box. Left (its
   README's Status): decmpfs, DMG ULFO, an image model for the data.
+- aqr-gif: the LZW codes coded given the pixels against the longest match (every encoder seen
+  writes it), the pixels by a context-mixing model of palette indices (lpaq's style; integers
+  only, so Wasm and native agree). Left (its README's Status): frames against the image shown,
+  TIFF's and PDF's LZW.
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
   multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
   Firefox's mozlz4 is liblz4's `LZ4_compress_default`.

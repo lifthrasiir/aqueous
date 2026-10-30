@@ -36,7 +36,7 @@
 //! - Data in which a scan finds no file (an ELF image, the rest of an executable, data of no
 //!   format): aqr-infer-recs, its tables of records and chains of entries transposed by their
 //!   fields, where a quick estimate tells they may save 5% at least and they do.
-//! - PNG, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, FITS
+//! - PNG, GIF, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, FITS
 //!   and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
 //!   applied to its streams, and files it embeds (PDF's DEFLATE streams and images, PSD's and
 //!   JPEG's embedded files, Clip Studio Paint's database) applied to theirs (see aqr-decompress
@@ -1614,6 +1614,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Xz => aqr_lzma::formula::encode_xz,
         Format::Lzo => aqr_lzo::formula::encode,
         Format::Png => aqr_png::formula::encode,
+        Format::Gif => aqr_gif::formula::encode,
         Format::Jpeg => aqr_jpeg::formula::encode,
         Format::Mp3 => aqr_mp3::formula::encode,
         Format::Flac => aqr_flac::formula::encode,

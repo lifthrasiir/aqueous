@@ -351,6 +351,37 @@ fn bvx_same_as_wasm() {
     }
 }
 
+/// GIF files natively and as WebAssembly alike, and their records damaged in turn failing alike
+/// (or giving the same).
+#[test]
+fn gif_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for t in ["im-photo", "im-il-art", "im-anim", "ff-anim", "cut-photo", "dup-box2"] {
+        let d = fixture(&format!("codecs/aqr-gif/tests/data/{t}.gif"));
+        let f = aqr_gif::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{t}");
+        assert!(aqr::decode(&c, &Wasm).unwrap() == d, "{t}");
+        let r = f.streams.iter().position(|s| s.class == "gif/record").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[r].data;
+            let at = s.len() * k / 8;
+            if k == 7 {
+                s[at..].fill(0xff);
+            } else if at < s.len() {
+                s[at] ^= 1 << k;
+            }
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+            assert_eq!(n.is_ok(), w.is_ok(), "{t} ({k}): {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{t} ({k})");
+            }
+        }
+    }
+}
+
 /// LZX chunks (aqr-lzx's fixture, of its test encoder) natively and as WebAssembly alike, in
 /// one stream and in two, and their records damaged in turn failing alike (or giving the same).
 #[test]

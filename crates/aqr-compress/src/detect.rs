@@ -31,6 +31,8 @@ pub enum Format {
     /// Stream of Apple's LZFSE and LZVN blocks (aqr-bvx on its data).
     Bvx,
     Png,
+    /// GIF file (aqr-gif on its images' LZW streams).
+    Gif,
     Jpeg,
     Mp3,
     Flac,
@@ -102,7 +104,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 41] = [
+    pub const ALL: [Format; 42] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -114,6 +116,7 @@ impl Format {
         Format::Lzo,
         Format::Bvx,
         Format::Png,
+        Format::Gif,
         Format::Jpeg,
         Format::Mp3,
         Format::Flac,
@@ -159,6 +162,7 @@ impl Format {
             Format::Lzo => "lzo",
             Format::Bvx => "bvx",
             Format::Png => "png",
+            Format::Gif => "gif",
             Format::Jpeg => "jpeg",
             Format::Mp3 => "mp3",
             Format::Flac => "flac",
@@ -210,7 +214,8 @@ impl Format {
 /// images (pixels after a header), text or fonts. Anything else is [`Kind::Unknown`],
 /// executables too (an installer has an archive after its image), WOFF fonts (of zlib
 /// streams), and GIF files, whose LZW compresses poorly (some writers' animations come to a
-/// sixth at zstd -3).
+/// sixth at zstd -3): aqr-gif takes them by their magic bytes, and those it turns down are
+/// compressed as they are.
 pub fn kind_by_name(name: &[u8]) -> Kind {
     let base = name.rsplit(|&b| b == b'/' || b == b'\\').next().unwrap_or(name);
     let Some(dot) = base.iter().rposition(|&b| b == b'.').filter(|&p| p > 0) else { return Kind::Unknown };
@@ -281,6 +286,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     let at = |p: usize, m: &[u8]| d.get(p..p + m.len()) == Some(m);
     if at(0, b"\x89PNG\r\n\x1a\n") {
         Some(Format::Png)
+    } else if aqr_gif::formula::starts(d) {
+        Some(Format::Gif)
     } else if start && aqr_iso::starts(d) {
         // (before the others: a hybrid image starts with a boot sector, or anything)
         Some(Format::Iso)
@@ -400,6 +407,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'7' => b == b'z',
         0x00 => b == b'a',
         b'b' => b == b'v',
+        b'G' => b == b'I',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -466,6 +474,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'7' => aqr_7z::formula::starts(d),
         0x00 => aqr_wasm::formula::starts(d),
         b'b' => aqr_bvx::formula::starts(d),
+        b'G' => aqr_gif::formula::starts(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,

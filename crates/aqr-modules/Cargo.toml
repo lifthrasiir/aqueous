@@ -18,6 +18,7 @@ aqr-bvx = { path = "../../codecs/aqr-bvx", default-features = false }
 aqr-clip = { path = "../../codecs/aqr-clip", default-features = false }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
 aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
+aqr-gif = { path = "../../codecs/aqr-gif", default-features = false }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = false }
 aqr-vorbis = { path = "../../codecs/aqr-vorbis", default-features = false }
 aqr-ima = { path = "../../codecs/aqr-ima", default-features = false }
@@ -75,6 +76,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "bvx-recons"
 path = "src/bin/bvx-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "gif-recons"
+path = "src/bin/gif-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

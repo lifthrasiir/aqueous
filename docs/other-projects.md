@@ -23,7 +23,7 @@ encode.su 포럼에서 Aqueous와 겹치는 프로젝트를 모으고, 저장소
 - aqr-exe: ELF, RISC-V, ARM64의 `ADRP`와 lo12 묶기, PIC 점프 표, 점프 타깃의 델타 부호화 비교(8절).
 - aqr-pdf: 빈 사용자 암호의 암호화 파일은 공개 도구 중 하는 것이 없다(7절).
 
-새 포맷 후보: ALAC, CD 이미지(ECM식), zstd 레벨 1–4, LZF, GIF(인코더 프로파일과 정정), BC7 텍스처, camera RAW.
+새 포맷 후보: ALAC, CD 이미지(ECM식), zstd 레벨 1–4, LZF, BC7 텍스처, camera RAW. GIF는 aqr-gif가 한다.
 
 ## 1. 범용 재압축기와 아카이버
 
@@ -34,7 +34,7 @@ encode.su 포럼에서 Aqueous와 겹치는 프로젝트를 모으고, 저장소
   - Oodle은 게임이 가져온 DLL을 다시 부를 뿐이다(3절).
 - **Fairytale**(https://github.com/schnaader/fairytale, LGPL-3.0, 2018년에 멈춤): 메모리 예산을 넘는 중간 스트림을 버리고 필요할 때 부모 변환을 다시 돌려 되살린다(`attemptRevival`). 포맷 초안은 블록마다 2바이트 체크섬을 두어 기존 아카이브에 추가할 때 빠르게 중복을 판정한다. 둘 다 Aqueous에 없다.
 - **Insighter**(스레드 4541, 비공개, Zig): 10gb의 견줄 상대이다(`10gb-todo.md`). 파서로 컨테이너(TAR, ISO, ZIP, CAB, CFBF, AR, PDF, CHM, WinHelp)를 깊이 7까지 열고, 전역 중복 제거 뒤 종류별 버킷마다 REP식 장거리 중복 제거나 xwrt식 텍스트 전처리를 거쳐 FastLZMA2에 보낸다.
-  - Aqueous에 없는 재압축: bzip2(어떤 도구가 만든 것이든 된다고 주장), LZW(GIF, TIFF, PDF), SZDD, MSZIP, LZX(작업 중), Base64 복원, 이미지류 데이터의 stride 인지 델타, AoS→SoA 전치.
+  - Aqueous에 없는 재압축: bzip2(어떤 도구가 만든 것이든 된다고 주장), LZW(TIFF, PDF; GIF는 aqr-gif), SZDD, MSZIP, LZX(작업 중), Base64 복원, 이미지류 데이터의 stride 인지 델타, AoS→SoA 전치.
   - 데이터를 너무 바꾸는 적응형 변환(ADPT)은 뒤단의 중복 제거를 망쳐 기본에서 껐다. 같은 내용이면 같은 출력이 나오는 변환만 버킷에 넣어야 한다는 교훈이다.
 
 ## 2. DEFLATE
@@ -117,9 +117,8 @@ aqr-flac의 FLAC 경로에서 이미 잰 것(LMS 캐스케이드, 채널 간 탭
 
 ## 6. 이미지
 
-- **GIF.** Precomp(giflib 인코더를 다시 돌려 다른 곳만 적는다)와 paq8px(clear 위치 하나와 최장 일치가 아닌 위치 목록, 다르면 포기)는 인코더 모델이 하나라 한계가 있다. aqr-flate처럼 인코더의 선택을 프로파일로 두고 예측과 다른 코드만 정정으로 남긴다.
-  - 선택지(flexiGIF 2018.11a의 최적화 옵션이 한눈에 보여 준다): clear 시점(가득 찼을 때, 지연, 중간), 코드 폭이 늘어나는 시점(구현마다 하나씩 어긋난다고 알려져 있다, 미검증), 탐욕 대 lookahead, 첫 clear 생략, 사전 4093 제한.
-  - 코드열을 새 항목·기존 항목·최장 일치 여부의 기호로 두고 픽셀 문맥으로 모델링하면 aqr-png의 LZ77 토큰 모델링과 같은 구조가 된다. 애니메이션에는 이전 프레임 문맥(paq8px), 팔레트 인덱스에는 인덱스 도메인 문맥을 쓴다.
+- **GIF.** [완료] aqr-gif. Precomp(giflib 인코더를 다시 돌려 다른 곳만 적는다)와 paq8px(clear 위치 하나와 최장 일치가 아닌 위치 목록, 다르면 포기)와 달리, 화소가 주어졌을 때 코드열을 최장 일치에 견주어 부호화하므로 어떤 코드열이든 받는다. 본 인코더는 모두 최장 일치에 사전이 가득 차면 clear였다. 남은 것은 그 README의 Status이다.
+  - flexiGIF 2018.11a의 최적화 옵션(clear 시점, 탐욕 대 lookahead, 첫 clear 생략, 사전 4093 제한)이 만드는 코드열도 레코드가 받지만, 최적화된 파일로 비용을 재 보지는 않았다.
 - **camera RAW.** 바이트 정확 RAW 재압축기는 공개 오픈소스에서 찾지 못했다(Rawzor는 상용). aqr-jpeg의 Huffman 디코더를 SOF3로 넓히는 것이 주 작업이다. 재현할 것은 Huffman 표, 예측기 1–7, scan과 restart 구조이고, 모델은 Bayer 평면별 문맥, 2차원 잔차, black level과 비트 깊이의 상한을 쓴다.
   - 구현 순서는 rawspeed(`src/librawspeed/decompressors/`)의 디코더 목록을 지도로 삼는다. CR2와 DNG(LJpeg, deflate), NEF, ARW2, 그다음 RW2, ORF, PEF, IIQ, RAF이다. ARW2는 엔트로피 부호화가 없어 이득이 가장 크다.
   - 컨테이너는 TIFF/EXIF이므로 aqr-raw의 TIFF 파서(지금은 비압축만)를 넓혀 함께 쓴다.

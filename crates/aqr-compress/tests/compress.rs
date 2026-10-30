@@ -4,8 +4,8 @@ use std::sync::{PoisonError, RwLock};
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, ASAR, BUNDLE, BVX, CLIP, FLAC, FLATE, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3, Native, PCM,
-    PDF, PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
+    ARM64, ASAR, BUNDLE, BVX, CLIP, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3, Native,
+    PCM, PDF, PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
 };
 use aqr_formula::aqr;
 
@@ -329,6 +329,20 @@ fn bvx_streams() {
     assert!(formats(&roundtrip(&d, &all())).is_empty());
     // nothing to rebuild
     assert!(modules(&roundtrip(&fixture("codecs/aqr-bvx/tests/data/empty.lzfse"), &all9())).is_empty());
+}
+
+#[test]
+fn gif_files() {
+    for t in ["im-photo", "im-il-art", "im-anim", "ff-anim", "pil4-art", "cut-photo", "dup-box2"] {
+        let d = fixture(&format!("codecs/aqr-gif/tests/data/{t}.gif"));
+        assert_eq!(modules(&roundtrip(&d, &all())), [GIF.name], "{t}");
+    }
+    // found in data, as in a document
+    let (a, b) = (fixture("codecs/aqr-gif/tests/data/sips-art.gif"), fixture("codecs/aqr-gif/tests/data/ff-photo.gif"));
+    let d = [noise(3000), a, noise(2000), b, noise(3000)].concat();
+    assert_eq!(formats(&roundtrip(&d, &all())), [GIF.name, GIF.name]);
+    // not a GIF file but its header
+    assert!(modules(&roundtrip(&[b"GIF89a".as_slice(), &text(3000)].concat(), &all())).is_empty());
 }
 
 #[test]

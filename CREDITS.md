@@ -43,8 +43,11 @@ own terms; the code is written from that description, not from the encoder's cod
   LZFSE compressor's normalization of frequencies and its table of match candidates (which
   aqr-bvx's record takes as a context), in aqr-bvx, written from the output of Apple's
   libcompression used as a black box, without the code of Apple's implementation.
+- **GIF** (CompuServe's GIF89a specification): the container and its LZW, in aqr-gif, whose
+  tests take the output of ImageMagick, ffmpeg, Pillow and macOS's ImageIO used as black boxes.
 - **lpaq** and **PAQ** (Matt Mahoney and others): the style of binary arithmetic coding and
-  context mixing.
+  context mixing (aqr-gif's model of palette indices: hashed contexts in buckets of a nibble,
+  mixers of stretched probabilities, an APM).
 - **FITS** (the IAU FITS Working Group's FITS Standard 4.0) and its tiled image compression
   (William Pence, Richard White, Rob Seaman and others): the format, in aqr-fits, written from
   the Standard; the Rice tiles' layout checked against fpack and funpack (cfitsio, NASA) used

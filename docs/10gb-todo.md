@@ -186,7 +186,8 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
      aqr-ppmd가 헤더를 떼어 본문이 같은 바이트로 시작하게 하므로 `share_slices`가 나눠 갖는다.
    - `text8.zip`(−5.5 MB): 푼 `text8`은 혼자 aqr-wrt로 23.1 MB이고, profile 6의 레코드는 2.6 MB
      남짓이다. 그런데 그대로 남는다. wrt 없이 견주기 때문으로 보인다(확인하지 않았다).
-   - GIF와 TIFF의 LZW.
+   - [완료] GIF: aqr-gif. GIF 파일 488개만 따로 묶으면 9.13 → 4.78 MB(−4.35 MB)이다. 사진 셋
+     (`benchmarks/act-jpeg/*.bmp.gif`)이 그 3/4이다. TIFF의 LZW는 남았다.
 9. **[일부 완료] 형식 없는 데이터의 레코드 표: −19 MB, 형식별 작업으로 더.** aqr-infer-recs가 스캔이
    아무 파일도 찾지 못한 데이터에서 고정 크기 레코드의 표를 찾아 필드별로 전치한다(`recs-fields`).
    효과를 본 파일의 목록은 `scripts/cache/recs-gains-10gb-07c6850.tsv`(gitignore)이다. 형식을 알면

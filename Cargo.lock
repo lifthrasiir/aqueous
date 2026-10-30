@@ -147,6 +147,7 @@ dependencies = [
  "aqr-flate",
  "aqr-formula",
  "aqr-fsb",
+ "aqr-gif",
  "aqr-git",
  "aqr-gnu-gettext",
  "aqr-hdf5",
@@ -196,6 +197,7 @@ dependencies = [
  "aqr-flac",
  "aqr-flate",
  "aqr-formula",
+ "aqr-gif",
  "aqr-git",
  "aqr-gnu-gettext",
  "aqr-hdf5",
@@ -316,6 +318,14 @@ dependencies = [
  "aqr-formula",
  "aqr-ima",
  "aqr-vorbis",
+]
+
+[[package]]
+name = "aqr-gif"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
 ]
 
 [[package]]
@@ -445,6 +455,7 @@ dependencies = [
  "aqr-fits",
  "aqr-flac",
  "aqr-flate",
+ "aqr-gif",
  "aqr-git",
  "aqr-gnu-gettext",
  "aqr-hdf5",

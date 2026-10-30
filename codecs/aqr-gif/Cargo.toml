@@ -1,0 +1,22 @@
+[package]
+name = "aqr-gif"
+version = "0.1.0"
+edition = "2024"
+description = "GIF files' LZW streams rebuilt bit for bit from their pixels, which a context model codes, and a record of the encoder's choices"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-gif-check"
+path = "examples/check.rs"

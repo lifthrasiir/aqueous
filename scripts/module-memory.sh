@@ -58,6 +58,9 @@ samples() {
         magick $v/base.png -fill blue -draw "circle 1000,700 1200,900" $v/v2.png &&
         tar cf $out -C $v base.png v1.png v2.png'
     make photo.jpg 'magick $s/photo.png -quality 90 $out'
+    # a dithered photograph of 4 megapixels (gif-recons' largest tables), and an animation
+    make photo.gif 'magick $s/photo.png -resize 2400x1700! $out'
+    make anim.gif 'ffmpeg -loglevel error -f lavfi -i testsrc=duration=3:size=320x240:rate=10 $out'
     make photo-prog.jpg 'magick $s/photo.png -quality 90 -interlace JPEG $out'
     make big.jpg 'magick $s/photo.png -resize 4000x3000! -quality 90 $out'
     make photo.bmp 'magick $s/photo.png -type TrueColor BMP3:$out'
