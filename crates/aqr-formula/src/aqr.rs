@@ -1911,6 +1911,42 @@ impl Archive<'_, '_> {
         threads: usize,
         f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
     ) -> Decoded<()> {
+        self.each_leaf_into(threads, None, f)
+    }
+
+    /// The file of an archive of a single file, written to `sink` as it is evaluated: of a
+    /// single leaf, a formula's output that is a concatenation of parts ([`run`]) is not held
+    /// whole, but written as each part is made. Returns its length.
+    pub fn write_file(&self, threads: usize, sink: &mut (dyn FnMut(&[u8]) -> Decoded<()> + Send)) -> Decoded<u64> {
+        if self.tree.is_some() {
+            return invalid("an archive of a tree");
+        }
+        let mut n = 0u64;
+        if self.blocks.leaves.len() != 1 {
+            let Value::File(d) = self.value(threads)? else { unreachable!("an archive of a single file") };
+            sink(&d)?;
+            return Ok(d.len() as u64);
+        }
+        let mut counted = |d: &[u8]| {
+            n += d.len() as u64;
+            sink(d)
+        };
+        let streaming: Mutex<&mut (dyn FnMut(&[u8]) -> Decoded<()> + Send)> = Mutex::new(&mut counted);
+        self.each_leaf_into(threads, Some(&streaming), |_, outputs| {
+            let mut sink = streaming.lock().unwrap();
+            outputs?.iter().try_for_each(|d| sink(d))
+        })?;
+        Ok(n)
+    }
+
+    /// [`Archive::each_leaf`], a leaf of a formula written to `sink` as it is evaluated where
+    /// its output may be ([`run`]): `f` given no output of it then.
+    fn each_leaf_into(
+        &self,
+        threads: usize,
+        sink: Option<&Mutex<&mut (dyn FnMut(&[u8]) -> Decoded<()> + Send)>>,
+        f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
+    ) -> Decoded<()> {
         let blocks = &self.blocks;
         // every formula block read first: a non-leaf block is dropped once nothing is to slice it
         let mut used = vec![false; blocks.non_leaf.len()];
@@ -1986,7 +2022,11 @@ impl Archive<'_, '_> {
                     }
                     LeafBlock::Formula { modules, resources, non_leaf, .. } => {
                         let p = programs[i].lock().unwrap().take().expect("each leaf once");
-                        run(p, &env(modules, resources, non_leaf), &contents)
+                        let env = env(modules, resources, non_leaf);
+                        match sink {
+                            Some(sink) => run(p, &env, &contents, Some(&mut **sink.lock().unwrap())),
+                            None => run(p, &env, &contents, None),
+                        }
                     }
                 };
                 tally.add(0, lens[i]);
@@ -2629,6 +2669,8 @@ enum Item<'a> {
     Slice(usize, Arc<Vec<u8>>, Range<usize>),
     Literal(&'a [u8]),
     Bytes(Vec<u8>),
+    /// Of so many bytes written out already ([`Streamed`]).
+    Written(u64),
 }
 
 /// The non-leaf blocks as formula blocks are evaluated (several at once), each with the slices
@@ -2693,6 +2735,7 @@ impl Contents<'_, '_> {
             Item::Slice(_, d, r) => &d[r.clone()],
             Item::Literal(l) => l,
             Item::Bytes(b) => b,
+            Item::Written(_) => unreachable!("a value written out is only concatenated"),
         }
     }
 
@@ -2706,6 +2749,7 @@ impl Contents<'_, '_> {
             }
             Item::Literal(l) => l.to_vec(),
             Item::Bytes(b) => b,
+            Item::Written(_) => unreachable!("a value written out is only concatenated"),
         }
     }
 
@@ -2725,17 +2769,154 @@ impl Contents<'_, '_> {
     }
 }
 
-/// The outputs of formula block `p`, with the non-leaf blocks in `contents`.
-fn run(p: Program, env: &Env, contents: &Contents) -> Decoded<Vec<Vec<u8>>> {
-    // literals and slices where they are
-    let mut stack: Vec<Item> = Vec::new();
+/// Where the output of a formula block of one output may be written out as it is evaluated:
+/// the values it is the concatenation of (through Concat instructions, at any depth), each by
+/// its number (values numbered as they are pushed), in the order of the output.
+struct Streamed {
+    order: HashMap<usize, usize>,
+}
+
+/// [`Streamed`] of program `p`, if it has one output of more than one part, no part read but by
+/// a concatenation (a Checksum instruction but the last one, of the output, say).
+fn streamed(p: &Program) -> Option<Streamed> {
+    enum V {
+        Part,
+        Concat(Vec<usize>),
+    }
+    let (mut vals, mut stack, mut read) = (Vec::new(), Vec::<usize>::new(), HashSet::new());
+    let last = p.insns.len().checked_sub(1)?;
+    let push = |vals: &mut Vec<V>, stack: &mut Vec<usize>, v| {
+        stack.push(vals.len());
+        vals.push(v);
+    };
+    for (i, insn) in p.insns.iter().enumerate() {
+        match insn {
+            Insn::Nop | Insn::Concat(1) => {}
+            Insn::Literal(_) | Insn::Slice { .. } => push(&mut vals, &mut stack, V::Part),
+            &Insn::Swap(d) => {
+                let top = stack.len() - 1;
+                stack.swap(top, top - d);
+            }
+            Insn::Apply(a) => {
+                stack.truncate(stack.len() - a.num_inputs);
+                (0..a.output_sizes.len()).for_each(|_| push(&mut vals, &mut stack, V::Part));
+            }
+            &Insn::Concat(n) => {
+                let parts = stack.split_off(stack.len() - n);
+                push(&mut vals, &mut stack, V::Concat(parts));
+            }
+            &Insn::Pack(n) => {
+                stack.truncate(stack.len() - n);
+                push(&mut vals, &mut stack, V::Part);
+            }
+            Insn::Split(sizes) => {
+                stack.pop();
+                (0..sizes.len()).for_each(|_| push(&mut vals, &mut stack, V::Part));
+            }
+            Insn::Patch(_) => {
+                stack.truncate(stack.len() - 2);
+                push(&mut vals, &mut stack, V::Part);
+            }
+            Insn::Checksum(_) if i == last && stack.len() == 1 => {}
+            Insn::Checksum(_) => {
+                read.insert(*stack.last()?);
+            }
+        }
+    }
+    let &[root] = &stack[..] else { return None };
+    // the parts in order, from the root through its concatenations
+    let (mut order, mut todo) = (HashMap::new(), vec![root]);
+    while let Some(v) = todo.pop() {
+        if read.contains(&v) {
+            return None;
+        }
+        match &vals[v] {
+            V::Concat(parts) => todo.extend(parts.iter().rev()),
+            V::Part => {
+                order.insert(v, order.len());
+            }
+        }
+    }
+    (order.len() > 1).then_some(Streamed { order })
+}
+
+/// Writes the parts of a streamed output ([`Streamed`]) as they come, in order: those that
+/// come before their turn held until it.
+struct Writer<'s, 'w> {
+    plan: &'s Streamed,
+    sink: &'w mut dyn FnMut(&[u8]) -> Decoded<()>,
+    next: usize,
+    held: HashMap<usize, Vec<u8>>,
+    hash: Xxh64,
+}
+
+impl Writer<'_, '_> {
+    fn write(&mut self, d: &[u8]) -> Decoded<()> {
+        self.hash.update(d);
+        (self.sink)(d)
+    }
+
+    /// Part `v` (its number) of bytes `d`, written or held.
+    fn part(&mut self, v: usize, d: &[u8]) -> Decoded<()> {
+        let at = self.plan.order[&v];
+        if at != self.next {
+            self.held.insert(at, d.to_vec());
+            return Ok(());
+        }
+        self.write(d)?;
+        self.next += 1;
+        while let Some(h) = self.held.remove(&self.next) {
+            self.write(&h)?;
+            self.next += 1;
+        }
+        Ok(())
+    }
+}
+
+/// The outputs of formula block `p`, with the non-leaf blocks in `contents`. Where `sink` is
+/// given and the output may be streamed ([`streamed`]), it is written to `sink` as its parts
+/// are evaluated, rather than held whole, and no output is returned.
+fn run<'a>(
+    p: Program<'a>,
+    env: &Env,
+    contents: &Contents,
+    sink: Option<&mut dyn FnMut(&[u8]) -> Decoded<()>>,
+) -> Decoded<Vec<Vec<u8>>> {
+    let plan = sink.is_some().then(|| streamed(&p)).flatten();
+    let mut w = match (plan.as_ref(), sink) {
+        (Some(plan), Some(sink)) => Some(Writer { plan, sink, next: 0, held: HashMap::new(), hash: Xxh64::new(0) }),
+        _ => None,
+    };
+    // literals and slices where they are, each value numbered as [`streamed`] numbers it
+    let mut stack: Vec<Item<'a>> = Vec::new();
+    let mut ids: Vec<usize> = Vec::new();
+    let mut next = 0;
+    // pushes a value: a part of the output streamed is written out
+    let mut push =
+        |stack: &mut Vec<Item<'a>>, ids: &mut Vec<usize>, w: &mut Option<Writer<'_, '_>>, v: Item<'a>| -> Decoded<()> {
+            let id = next;
+            next += 1;
+            let v = match w {
+                Some(w) if w.plan.order.contains_key(&id) => {
+                    let n = contents.get(&v).len() as u64;
+                    w.part(id, contents.get(&v))?;
+                    contents.drop_all(vec![v]);
+                    Item::Written(n)
+                }
+                _ => v,
+            };
+            stack.push(v);
+            ids.push(id);
+            Ok(())
+        };
     for insn in p.insns {
         match insn {
             Insn::Nop => {}
-            Insn::Literal(l) => stack.push(Item::Literal(l)),
+            Insn::Literal(l) => push(&mut stack, &mut ids, &mut w, Item::Literal(l))?,
             Insn::Swap(depth) => {
                 let top = stack.len() - 1;
                 stack.swap(top, top - depth);
+                ids.swap(top, top - depth);
             }
             Insn::Slice { block, start, len } => {
                 let o = p.blocks[block];
@@ -2746,65 +2927,95 @@ fn run(p: Program, env: &Env, contents: &Contents) -> Decoded<Vec<Vec<u8>>> {
                     .and_then(|(s, l)| Some(s..s.checked_add(l)?))
                     .filter(|r| r.end <= d.len())
                     .ok_or_else(|| Failure::Invalid("slice out of its block".into()))?;
-                stack.push(Item::Slice(o, d, r));
+                push(&mut stack, &mut ids, &mut w, Item::Slice(o, d, r))?;
             }
             Insn::Apply(a) => {
                 let inputs = stack.split_off(stack.len() - a.num_inputs);
+                ids.truncate(stack.len());
                 let res: Vec<Resource> = a.resources.iter().map(|&i| env.resources[p.resources[i]].clone()).collect();
                 let bytes: Vec<&[u8]> = inputs.iter().map(|v| contents.get(v)).collect();
                 let outputs = apply(env, p.modules[a.module], &a, &bytes, &res)?;
                 contents.drop_all(inputs);
-                stack.extend(outputs.into_iter().map(Item::Bytes));
+                for o in outputs {
+                    push(&mut stack, &mut ids, &mut w, Item::Bytes(o))?;
+                }
             }
             Insn::Concat(1) => {}
             Insn::Concat(n) => {
                 let parts = stack.split_off(stack.len() - n);
-                let bytes = parts.iter().map(|v| contents.get(v)).collect::<Vec<_>>().concat();
-                contents.drop_all(parts);
-                stack.push(Item::Bytes(bytes));
+                ids.truncate(stack.len());
+                // (parts of the output streamed are all written out, others none)
+                let item = match parts.iter().filter(|v| matches!(v, Item::Written(_))).count() {
+                    0 => {
+                        let bytes = parts.iter().map(|v| contents.get(v)).collect::<Vec<_>>().concat();
+                        contents.drop_all(parts);
+                        Item::Bytes(bytes)
+                    }
+                    k if k == n => {
+                        Item::Written(parts.iter().map(|v| if let Item::Written(m) = v { *m } else { 0 }).sum())
+                    }
+                    _ => unreachable!("a concatenation of parts streamed and not"),
+                };
+                push(&mut stack, &mut ids, &mut w, item)?;
             }
             Insn::Pack(n) => {
                 let parts = stack.split_off(stack.len() - n);
+                ids.truncate(stack.len());
                 let bytes = packed::pack(&parts.iter().map(|v| contents.get(v)).collect::<Vec<_>>());
                 contents.drop_all(parts);
-                stack.push(Item::Bytes(bytes));
+                push(&mut stack, &mut ids, &mut w, Item::Bytes(bytes))?;
             }
             Insn::Split(sizes) => {
                 let x = stack.pop().unwrap();
+                ids.pop();
                 let bytes = contents.get(&x);
                 if sizes.iter().try_fold(0u64, |s, &n| s.checked_add(n)) != Some(bytes.len() as u64) {
                     return invalid("a split into sizes not adding up");
                 }
-                // slices and literals split where they are
+                // slices and literals split where they are (a block's slices counted first, as
+                // any written out is let go)
+                if let Item::Slice(o, ..) = x {
+                    contents.refs[o].fetch_add(sizes.len() - 1, Ordering::Relaxed);
+                }
                 let mut at = 0;
                 for &n in &sizes {
                     let r = at..at + n as usize;
-                    stack.push(match &x {
+                    let item = match &x {
                         Item::Slice(o, d, s) => Item::Slice(*o, d.clone(), s.start + r.start..s.start + r.end),
                         &Item::Literal(l) => Item::Literal(&l[r]),
                         Item::Bytes(b) => Item::Bytes(b[r].to_vec()),
-                    });
+                        Item::Written(_) => unreachable!("a value written out is only concatenated"),
+                    };
+                    push(&mut stack, &mut ids, &mut w, item)?;
                     at += n as usize;
-                }
-                if let Item::Slice(o, ..) = x {
-                    contents.refs[o].fetch_add(sizes.len() - 1, Ordering::Relaxed);
                 }
             }
             Insn::Patch(len) => {
                 let items = stack.split_off(stack.len() - 2);
+                ids.truncate(stack.len());
                 let out = crate::patch::apply(contents.get(&items[0]), contents.get(&items[1]), len)
                     .map_err(|e| Failure::Invalid(e.0))?;
                 contents.drop_all(items);
-                stack.push(Item::Bytes(out));
+                push(&mut stack, &mut ids, &mut w, Item::Bytes(out))?;
             }
             Insn::Checksum(v) => {
-                if checksum(contents.get(stack.last().unwrap())) != v {
+                let sum = match (stack.last().unwrap(), &w) {
+                    (Item::Written(_), Some(w)) => w.hash.digest(),
+                    (top, _) => checksum(contents.get(top)),
+                };
+                if sum != v {
                     return invalid("output checksum mismatch");
                 }
             }
         }
     }
-    Ok(stack.into_iter().map(|v| contents.take(v)).collect())
+    match w {
+        Some(w) => {
+            debug_assert!(w.next == w.plan.order.len() && w.held.is_empty());
+            Ok(Vec::new())
+        }
+        None => Ok(stack.into_iter().map(|v| contents.take(v)).collect()),
+    }
 }
 
 /// The outputs of application `a` of module block `module`.
@@ -2945,6 +3156,37 @@ mod tests {
         let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
         assert!(decode(&c, &natives()).unwrap() == want);
         assert_eq!(open(&c, &natives()).unwrap().blocks.non_leaf.len(), 3);
+    }
+
+    /// A file whose formula is a concatenation (of slices, applications and a concatenation in
+    /// it) is written out part by part, as decoding gives it; its checksum is checked as it is
+    /// written, and a wrong one fails.
+    #[test]
+    fn written_part_by_part() {
+        let mut f = Formula::default();
+        let d: Vec<u8> = (0..3 * BLOCK as u32 + 77).map(|i| (i % 253) as u8).collect();
+        f.push("a", d.clone());
+        let rev = |start, len| Node::apply(REV, vec![1, 2, 3], vec![Node::slice(0, start, len)], len);
+        let inner = Node::concat([Node::slice(0, 5, 100), rev(BLOCK as u64 - 10, 20), Node::slice(0, 0, 3)]);
+        f.root = Node::concat([Node::slice(0, 2 * BLOCK as u64, BLOCK as u64 + 77), inner, rev(7, 1000)]);
+        let want = f.eval(&|_: &crate::Apply, i: &[&[u8]]| Ok(i.concat().into_iter().rev().collect())).unwrap();
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+        let runner = natives();
+        let a = open(&c, &runner).unwrap();
+        let (mut out, mut parts) = (Vec::new(), 0);
+        let n = a
+            .write_file(2, &mut |p: &[u8]| {
+                out.extend_from_slice(p);
+                parts += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert!(out == want && n == want.len() as u64);
+        assert!(parts >= 5, "{parts} parts");
+        // a checksum of something else
+        let c = encode(&f, Some(checksum(b"other")), Level::Zstd(1)).unwrap();
+        let a = open(&c, &runner).unwrap();
+        assert_eq!(a.write_file(2, &mut |_: &[u8]| Ok(())), invalid("output checksum mismatch"));
     }
 
     /// Outputs split from the one output of a module (Split instructions), taken as those of

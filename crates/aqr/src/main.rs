@@ -51,7 +51,7 @@ use aqr_compress::mapped::Mapper;
 use aqr_compress::{Options, compress_formula_telling, compress_tree_to, detect, kind_by_name};
 use aqr_decompress::{Native, Wasm, sandbox};
 use aqr_formula::Bytes;
-use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, Value, name_bytes, name_from};
+use aqr_formula::aqr::{self, Entry, EntryNode, Extra, Failure, Time, Tree, name_bytes, name_from};
 use view::Ticking;
 
 const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
@@ -581,14 +581,35 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         archive.set_budget(DECODE_BUDGET);
     }
     match archive.tree() {
-        None => {
-            let d = ticking(a, &*view, || archive.value(a.opt.threads)).map_err(|e| err(&e))?;
-            let Value::File(d) = d else { unreachable!("an archive of a single file") };
-            if !a.test {
-                write_whole(out, a.force, |w| w.write_all(&d))?;
-            }
+        // (written as it is evaluated: a file of parts is not held whole)
+        None if a.test => {
+            let n = ticking(a, &*view, || archive.write_file(a.opt.threads, &mut |_: &[u8]| Ok(())))
+                .map_err(|e| err(&e))?;
             if !a.quiet {
-                summary_d(input, (!a.test).then_some(out), 1, d.len() as u64, start);
+                summary_d(input, None, 1, n, start);
+            }
+        }
+        None => {
+            let n = write_whole(out, a.force, |w| {
+                let mut failed = None;
+                let r = ticking(a, &*view, || {
+                    archive.write_file(a.opt.threads, &mut |d: &[u8]| {
+                        w.write_all(d).map_err(|e| {
+                            let m = e.to_string();
+                            failed = Some(e);
+                            Failure::Resource(m)
+                        })
+                    })
+                });
+                match (r, failed) {
+                    (_, Some(e)) => Err(e),
+                    (Ok(n), None) => Ok(n),
+                    // (the part written so far removed)
+                    (Err(e), None) => Err(std::io::Error::other(e.to_string())),
+                }
+            })?;
+            if !a.quiet {
+                summary_d(input, Some(out), 1, n, start);
             }
         }
         Some(t) if a.test => {
