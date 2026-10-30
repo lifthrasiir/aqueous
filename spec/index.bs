@@ -1101,6 +1101,15 @@ representing a kind of node not defined by this version of this specification:
 * <dfn for="unknown node">data</dfn>, a [=byte sequence=].
 * <dfn noexport for="unknown node">extra</dfn>, a CBOR data item matching `aqr-entry-extra`, or null.
 
+Every [=file node=], [=directory node=], [=link node=], [=special node=] and [=unknown node=] also has
+<dfn>forks</dfn>, an [=ordered map=] from [=fork names=] to [=byte sequences=],
+which represents named data streams other than the content of a file,
+e.g. resource forks of macOS and alternate data streams of NTFS ([[#fork-streams]]).
+A <dfn>fork name</dfn> is a CBOR data item matching `aqr-text` ([[#comments]]) that is not empty,
+and two fork names are equal if and only if they are identical CBOR data items.
+A node without any fork has an empty map as its [=forks=],
+as does every node created by an algorithm in this specification unless its [=forks=] are given.
+
 The [=archive value/root=] can't be a [=link node=], a [=special node=] or an [=unknown node=].
 
 A <dfn>tombstone</dfn> is a [=struct=] with no [=struct/items=], marking the removal of a node.
@@ -1206,7 +1215,8 @@ Two [=archive values=] are equal if and only if they become identical by some on
 Content blocks</h3>
 
 Any block other than spacer, size hint, metadata, [[#mirror-block|mirror]] and [=ignored blocks=]
-is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]].
+is a <dfn>content block</dfn> which has to be described by a subsequent [[#metadata-block|metadata block]],
+either by its fields or by `forks` in its [[#optional-metadata|optional metadata]] ([[#fork-streams]]).
 A metadata block and all content blocks between the previous metadata block (or the beginning of the archive if none)
 and that metadata block form a <dfn>segment</dfn>.
 As an exception, an archive without a metadata block ([[#unencrypted-archive]]) forms a single segment with no metadata block.
@@ -1684,8 +1694,8 @@ To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata bl
     1. Let |meta| be the [=decoded data=] of |metadata block|, parsed as its internal structure ([[#metadata-block]]).
     2. Let |d| be [=meta/num_directories=], |f| be [=meta/num_directories=] + [=meta/num_files=]
         and |n| be [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] of |meta|.
-    3. Let |nodes| be a [=list=] containing a single [=directory node=]
-        with an empty map as [=directory node/children=] and the [=entry extra=] for the entry 0 as [=directory node/extra=].
+    3. Let |nodes| be a [=list=] containing a single [=directory node=] with an empty map as [=directory node/children=],
+        and [=set the extra and forks=] of it from the [=entry extra=] for the entry 0.
     4. For each |k| in [1, |n|]:
         1. Let |entry| be |meta|.[=meta/entries=][|k| - 1].
         2. Let |name| be the result of [=decode an entry name|decoding=] |entry|.[=meta/entry_name=].
@@ -1714,7 +1724,7 @@ To <dfn>interpret a segment</dfn> |segment| whose metadata block is |metadata bl
             and (|entry|.[=meta/device_major=], |entry|.[=meta/device_minor=]) as [=special node/device=].
         10. Otherwise, let |node| be an [=unknown node=]
             with |entry|.[=meta/special_kind=] as [=unknown node/kind=] and |entry|.[=meta/special_data=] as [=unknown node/data=].
-        11. If |node| is not a [=tombstone=], set the extra of |node| to the [=entry extra=] for the entry |k|.
+        11. If |node| is not a [=tombstone=], [=set the extra and forks=] of |node| from the [=entry extra=] for the entry |k|.
         12. Let |children| be the [=directory node/children=] of |nodes|[|parent|].
             |children|[|name|] MUST NOT [=map/exist=].
         13. Set |children|[|name|] to |node|.
@@ -1729,6 +1739,28 @@ in the segment's optional metadata, where the index 0 corresponds to the root di
 or null if `entry-extras` or such element doesn't exist.
 `entry-extras` MUST NOT have more elements than the entries including the root directory,
 i.e. [=meta/num_directories=] + [=meta/num_files=] + [=meta/num_specials=] + 1.
+
+To <dfn>set the extra and forks</dfn> of a node |node| from an [=entry extra=] |e|:
+
+<ol class=algorithm>
+    1. If |e| is null, set the extra of |node| to null and its [=forks=] to an empty map, and return.
+    2. Set the extra of |node| to |e| without its `forks` member, if any.
+    3. Set the [=forks=] of |node| to an empty map.
+    4. For each |name| → [|offset|, |output|, |size|] of `forks` in |e|, if any:
+        1. Let |block| be the block at the relative offset |offset| from the metadata block of the segment.
+            It MUST be a [=leaf block=] in the segment.
+        2. Let |content| be the [=file content=] of |block| for the output index |output|.
+            Its length MUST be |size|.
+        3. Set |node|.[=forks=][|name|] to |content|.
+</ol>
+
+<div class=note>
+  `forks` refers to blocks by relative offsets, which have no meaning outside the segment,
+  so it is resolved here and never remains in the extra of a node.
+  Unlike [=meta/file_params=], `forks` has no dictionary field:
+  a leaf data block names its dictionary by [=dblock/dictionary_index=] anyway,
+  and [=meta/file_dictionary=] only lets a decompressor fetch the dictionary before reading the block.
+</div>
 
 <h4 id=segment-merging>
 Merging segments</h4>
@@ -1745,7 +1777,8 @@ To <dfn>merge directory nodes</dfn> |later| into |earlier|:
                 and set |earlier|.[=directory node/children=][|name|] to |existing|.
             2. [=Merge directory nodes|Merge=] |node| into |existing|.
         4. Otherwise, set |earlier|.[=directory node/children=][|name|] to |node|.
-    2. If |later|.[=directory node/extra=] is not null, set |earlier|.[=directory node/extra=] to it.
+    2. If |later|.[=directory node/extra=] is not null,
+        set |earlier|.[=directory node/extra=] to it and |earlier|.[=forks=] to |later|.[=forks=].
 </ol>
 
 As a result, a directory appearing in multiple segments has the union of their children,
@@ -1754,7 +1787,7 @@ In particular, a directory replaced by a [=link node=] loses all its descendants
 so no node is a descendant of a [=link node=] in the result.
 A [=tombstone=] removes the node at its path along with its descendants, and does nothing if there is no such node.
 A tombstone is never kept in the result, even under a directory that didn't exist before.
-A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=],
+A directory with a null [=directory node/extra=] in a later segment keeps the existing [=directory node/extra=] and [=forks=],
 which can instead be replaced with an empty map `{}`.
 
 <div class=note>
@@ -3663,8 +3696,11 @@ aqr-entry-extra = {
   aqr-entry-timestamps
   aqr-entry-comment
   aqr-entry-link-group
+  aqr-entry-xattrs
+  aqr-entry-forks
   aqr-entry-windows
   aqr-entry-unix
+  aqr-entry-macos
   aqr-entry-zip
 
     * $$aqr-entry-extra-member  ; For future extensions
@@ -3672,7 +3708,7 @@ aqr-entry-extra = {
 
 $$aqr-entry-extra-member = ()  ; No extension is defined by this specification
 
-; TODO: other extras for round trip
+; Key -8 is reserved for access control lists.
 </pre>
 
 It MUST be a single well-formed CBOR data item [[!RFC8949]] without any following bytes,
@@ -3684,6 +3720,8 @@ The members of `aqr-entry-extra` are grouped by their purposes, and each group i
 Keys of `aqr-entry-extra` from -1 to -59 are platform-neutral.
 Keys from -60 to -69 are specific to Windows, -70 to -79 to Unix, -80 to -89 to macOS, and -90 to -99 to other platforms.
 Keys from -100 are specific to the formats an entry was converted from.
+Key -8 is reserved for access control lists in a future version of this specification,
+and a compressor MUST NOT use it.
 
 <h3 id=timestamps>Timestamps</h3>
 
@@ -4004,13 +4042,90 @@ is not an [=invalid archive=] failure, but has no effect on extraction ([[#extra
   Directory hard links, found in some macOS Time Machine volumes, are not represented.
 </div>
 
+<h3 id=xattrs><code>xattrs</code>: Extended attributes</h3>
+
+<pre class=cddl>
+aqr-entry-xattrs = (
+  ? &(xattrs: -10) => { * aqr-text => bstr }
+)
+</pre>
+
+`xattrs` records the extended attributes of a node, i.e. named values that the file system attaches to it:
+extended attributes of Linux, macOS and BSDs, and extended attributes (EAs) of NTFS.
+Each key is the name of an attribute as the platform gives it, including any namespace prefix
+(e.g. `user.` and `security.` on Linux), and MUST NOT be empty.
+Each value is the value of the attribute.
+
+A compressor MUST NOT put the following attributes into `xattrs`:
+
+* `com.apple.ResourceFork`, the resource fork of macOS, which goes to `forks` instead ([[#fork-streams]]).
+* An attribute only telling how the file system stores the node,
+    e.g. `com.apple.decmpfs` of the transparent compression of macOS.
+
+<div class=note>
+  Extended attributes are small on most platforms:
+  Linux limits a value to 64 KiB, and NTFS limits all EAs of a file to 64 KiB.
+  macOS has no such limit, but its large attributes are mostly resource forks,
+  which are stored as [=forks=] in leaf blocks rather than in the metadata block.
+
+  POSIX access control lists of Linux appear as the attributes `system.posix_acl_access` and `system.posix_acl_default`,
+  and can be put into `xattrs` as is.
+  Key -8 is reserved for access control lists that are not extended attributes, e.g. those of macOS and NTFS;
+  a future version defining it will also decide which takes precedence when both describe the same node.
+</div>
+
+<h3 id=fork-streams><code>forks</code>: Resource forks and alternate data streams</h3>
+
+<pre class=cddl>
+aqr-entry-forks = (
+  ? &(forks: -50) => { * aqr-text => aqr-fork }
+)
+
+aqr-fork = [
+  offset: aqr-seg-offset,
+  output: uint,
+  size: uint,
+]
+
+aqr-seg-offset = uint  ; Relative offset from the metadata block, as in [[#metadata-block]]
+</pre>
+
+`forks` records the [=forks=] of a node, i.e. its named data streams other than the content of a file.
+Each key is a [=fork name=], and each value refers to the content of the fork:
+`offset` is the relative offset to a [=leaf block=] in the same [=segment=],
+measured backward from the beginning of the metadata block as other relative offsets in [[#metadata-block]],
+`output` is an output index of that block, and `size` is the length of the content.
+They are resolved when [=set the extra and forks|setting the forks=] of the node,
+and a leaf block referenced by `forks` is described by the metadata block ([[#content-blocks]]).
+Any number of [=meta/file_params=] and `forks` MAY refer to the same leaf block and output.
+
+<div class=note>
+  Forks are stored in leaf blocks rather than in the metadata block, as files are,
+  because they can be as large as files and hold data worth sharing and recompressing,
+  e.g. fonts and images in classic Mac OS resource forks.
+</div>
+
+Forks of platforms map to [=fork names=] as follows:
+
+* On NTFS, a fork is an alternate data stream of the type `$DATA`,
+    named by the stream name without the type, e.g. `Zone.Identifier` for `file:Zone.Identifier:$DATA`.
+    The unnamed data stream is the content of the file, not a fork.
+* On macOS, the resource fork, i.e. the extended attribute `com.apple.ResourceFork`
+    also accessible as the path `file/..namedfork/rsrc`, is the fork named `AFP_Resource`,
+    after the stream name that SMB servers use for it (e.g. `vfs_fruit` of Samba).
+    A compressor MUST put the resource fork into `forks` under that name,
+    and SHOULD NOT give a fork named `AFP_Resource` to a node other than a [=file node=].
+    Other extended attributes of macOS go to `xattrs` regardless of their sizes ([[#xattrs]]).
+
+No key of `forks` can be `com.apple.ResourceFork`.
+A compressor SHOULD NOT record how the file system stores a fork, e.g. whether it is sparse or compressed.
+
 <h3 id=windows-extras>Windows-specific metadata</h3>
 
 <pre class=cddl>
 aqr-entry-windows = (
   ? &(win-link-type: -60) => &(file: 0, directory: 1, junction: 2)  ; Link nodes only
-
-  ; TODO: file attributes (e.g. ZIP external file attributes)
+  ? &(win-attrs: -61) => uint
 )
 </pre>
 
@@ -4019,6 +4134,35 @@ It has no effect on nodes other than [=link nodes=], and a compressor SHOULD NOT
 "`file`" and "`directory`" denote a symbolic link to a file and to a directory respectively,
 and "`junction`" denotes a junction (a mount point reparse point).
 
+`win-attrs` holds the file attributes of Windows (`FILE_ATTRIBUTE_*`),
+limited to the following bits; any other bit MUST be zero.
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Bit
+      <th>Attribute
+  </thead>
+  <tbody>
+    <tr><td>0x1<td>`FILE_ATTRIBUTE_READONLY`
+    <tr><td>0x2<td>`FILE_ATTRIBUTE_HIDDEN`
+    <tr><td>0x4<td>`FILE_ATTRIBUTE_SYSTEM`
+    <tr><td>0x20<td>`FILE_ATTRIBUTE_ARCHIVE`
+    <tr><td>0x100<td>`FILE_ATTRIBUTE_TEMPORARY`
+    <tr><td>0x2000<td>`FILE_ATTRIBUTE_NOT_CONTENT_INDEXED`
+  </tbody>
+</table>
+
+<div class=note>
+  The other attributes are either given by the archive model,
+  e.g. `FILE_ATTRIBUTE_DIRECTORY`, `FILE_ATTRIBUTE_REPARSE_POINT` and `FILE_ATTRIBUTE_NORMAL` (the absence of any other),
+  or tell how the file system stores the file rather than anything about the file,
+  e.g. `FILE_ATTRIBUTE_SPARSE_FILE`, `FILE_ATTRIBUTE_COMPRESSED`, `FILE_ATTRIBUTE_ENCRYPTED`
+  and `FILE_ATTRIBUTE_INTEGRITY_STREAM`, and the states of cloud files such as `FILE_ATTRIBUTE_OFFLINE`,
+  `FILE_ATTRIBUTE_PINNED` and `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`.
+  The file attributes in the external file attributes of ZIP [[APPNOTE]] map to `win-attrs` in the same way.
+</div>
+
 <h3 id=unix-extras>Unix-specific metadata</h3>
 
 <pre class=cddl>
@@ -4026,15 +4170,56 @@ aqr-entry-unix = (
   ? &(unix-mode: -70) => uint .le 4095  ; Permission bits only (0o7777), without S_IFMT
   ? &(unix-uid: -71) => uint
   ? &(unix-gid: -72) => uint
+  ? &(unix-uname: -73) => aqr-text
+  ? &(unix-gname: -74) => aqr-text
 )
 </pre>
 
 `unix-mode` only holds the permission bits, including the set-user-ID, set-group-ID and sticky bits.
 The kind of an entry is solely determined by its node ([[#archive-model]]), so `unix-mode` never includes the file type bits (`S_IFMT`).
 
-`unix-uid` and `unix-gid` are the numeric user and group IDs of the owner.
+`unix-uid` and `unix-gid` are the numeric user and group IDs of the owner,
+and `unix-uname` and `unix-gname` are the names of that user and group, as `uname` and `gname` of tar.
+An entry MAY have a name without the ID, and vice versa.
 
 Unix metadata from ZIP is discussed in [[#unix-extras-from-zip]].
+
+<h3 id=macos-extras>macOS-specific metadata</h3>
+
+<pre class=cddl>
+aqr-entry-macos = (
+  ? &(mac-flags: -80) => uint
+)
+</pre>
+
+`mac-flags` holds the file flags of macOS (`st_flags`, as set by `chflags`),
+limited to the following bits; any other bit MUST be zero.
+
+<table class=data>
+  <thead>
+    <tr>
+      <th>Bit
+      <th>Flag
+  </thead>
+  <tbody>
+    <tr><td>0x1<td>`UF_NODUMP`
+    <tr><td>0x2<td>`UF_IMMUTABLE`
+    <tr><td>0x4<td>`UF_APPEND`
+    <tr><td>0x8<td>`UF_OPAQUE`
+    <tr><td>0x8000<td>`UF_HIDDEN`
+    <tr><td>0x10000<td>`SF_ARCHIVED`
+    <tr><td>0x20000<td>`SF_IMMUTABLE`
+    <tr><td>0x40000<td>`SF_APPEND`
+    <tr><td>0x100000<td>`SF_NOUNLINK`
+  </tbody>
+</table>
+
+<div class=note>
+  The other flags tell how the file system stores the file (`UF_COMPRESSED`, `SF_DATALESS`),
+  its state on the volume (`UF_TRACKED`),
+  or the protection that the system itself sets (`UF_DATAVAULT`, `SF_RESTRICTED`, `SF_FIRMLINK`).
+  Flags beginning with `SF_` can only be changed by the superuser.
+</div>
 
 <h3 id=zip-extras><code>zip-extras</code>: ZIP extra fields</h3>
 
@@ -4115,7 +4300,26 @@ A decompressor doing so is subject to the following requirements:
     (e.g. due to case insensitivity or Unicode normalization),
     it MUST either fail or report the conflict, and MUST NOT write a later entry through an earlier one.
 * It MAY ignore the extra of any node, e.g. [=file node/extra=] and [=directory node/extra=].
-    It SHOULD NOT apply ownership information such as `unix-uid` and `unix-gid` unless explicitly requested.
+    It SHOULD NOT apply ownership information, i.e. `unix-uid`, `unix-gid`, `unix-uname` and `unix-gname`,
+    nor flags only the superuser can change, i.e. the `SF_` flags of `mac-flags`, unless explicitly requested.
+    When applying the ownership, it SHOULD use `unix-uname` and `unix-gname` where they name a user and a group on the platform,
+    and `unix-uid` and `unix-gid` otherwise.
+* It SHOULD write the [=forks=] of a node where the platform allows,
+    as alternate data streams of the same names on Windows,
+    as the extended attribute `com.apple.ResourceFork` for the fork `AFP_Resource` on macOS,
+    and as extended attributes of the same names for other forks elsewhere.
+    A fork not written MUST be reported to the user,
+    and so MUST a fork and an extended attribute in `xattrs` of the same node that would be written to the same attribute.
+
+<div class=note>
+  The order of applying the metadata of a node matters on common platforms.
+  Changing the owner can clear the set-user-ID and set-group-ID bits, so the owner goes before `unix-mode`.
+  Forks and extended attributes can't be written once the permissions forbid writing, so they also go before `unix-mode`.
+  Writing the content or the children of a directory changes its modification time,
+  so the timestamps of a directory go after all its children.
+  Immutable and append-only flags forbid all of the above, so they go last.
+  Setting `mtime` earlier than `crtime` moves `crtime` back on macOS, so `crtime` goes after `mtime`.
+</div>
 
 <div class=note>
   The archive model can't express a path through a [=link node=] ([[#archive-model]]),

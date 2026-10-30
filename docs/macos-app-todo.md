@@ -322,7 +322,8 @@ aqr이 JS에서 LZMA보다 20–29% 크다. VS Code에서 이 차이를 메우�
 
 ## 보존
 
-압축률이 아니라 충실도의 문제이다. spec과 `aqr`에는 확장 속성이 없다.
+압축률이 아니라 충실도의 문제이다. spec에는 확장 속성(`xattrs`)과 리소스 포크(`forks`)가 들어갔지만(§xattrs,
+§fork-streams) `aqr`은 아직 저장하지 않는다.
 
 - 셸 스크립트처럼 Mach-O가 아닌 서명된 실행 파일은 서명을 `com.apple.cs.*` 확장 속성에 두므로,
   풀고 나면 `codesign --verify`가 실패한다.
