@@ -21,6 +21,8 @@ pub enum Format {
     Lz4,
     /// `.lzma` file (aqr-lzma on its stream), known by its header: not looked for in other data.
     Lzma,
+    /// `.xz` file (aqr-lzma on the LZMA2 streams of its blocks), known by its stream header.
+    Xz,
     /// lzop file (aqr-lzo on its LZO1X streams).
     Lzo,
     Png,
@@ -87,13 +89,14 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 35] = [
+    pub const ALL: [Format; 36] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
         Format::Zlib,
         Format::Lz4,
         Format::Lzma,
+        Format::Xz,
         Format::Lzo,
         Format::Png,
         Format::Jpeg,
@@ -133,6 +136,7 @@ impl Format {
             Format::Zlib => "zlib",
             Format::Lz4 => "lz4",
             Format::Lzma => "lzma",
+            Format::Xz => "xz",
             Format::Lzo => "lzo",
             Format::Png => "png",
             Format::Jpeg => "jpeg",
@@ -212,12 +216,13 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"wim" => format(Format::Wim),
         b"jsonlz4" | b"mozlz4" | b"baklz4" => format(Format::Lz4),
         b"lzma" | b"tlz" => format(Format::Lzma),
+        b"xz" | b"txz" => format(Format::Xz),
         b"lzo" | b"tzo" => format(Format::Lzo),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
-        b"7z" | b"xz" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm"
-        | b"ogg" | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl"
-        | b"jp2" | b"woff2" => Kind::Compressed,
+        b"7z" | b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg"
+        | b"oga" | b"ogv" | b"opus" | b"aac" | b"gif" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2"
+        | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => {
             Kind::Text
@@ -281,6 +286,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Lz4)
     } else if aqr_lzo::formula::starts(d) {
         Some(Format::Lzo)
+    } else if aqr_lzma::formula::starts_xz(d) {
+        Some(Format::Xz)
     } else if at(0, b"PK\x03\x04") {
         Some(Format::Zip)
     } else if start && aqr_git::pack::starts(d) {
@@ -347,6 +354,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'!' => b == b'<',
         b'0' => b == b'7',
         b'S' => b == b'I',
+        0xfd => b == b'7',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -409,6 +417,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'!' => d.starts_with(aqr_bundle::ar::MAGIC),
         b'0' => d.starts_with(b"07070"),
         b'S' => aqr_fits::formula::starts(d),
+        0xfd => aqr_lzma::formula::starts_xz(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,

@@ -9,6 +9,8 @@
 //!   record).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
 //! - `.lzma` files: the header sliced around aqr-lzma on the data and record of the stream.
+//! - `.xz` files: the container sliced around aqr-lzma on the data and records of the LZMA2
+//!   streams of its blocks.
 //! - lzop files: the headers sliced around aqr-lzo on the data and records of the streams.
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
@@ -36,7 +38,7 @@
 //!
 //! In whatever formula a recompressor gives, the data that its applications take as it is
 //! ([`Options::contents`], by default that of a DEFLATE stream, of gzip, zlib or PDF, and
-//! that of an LZ4 or LZMA stream, of the blocks of a LevelDB table, of the entries of a ZIP archive or
+//! that of an LZ4, LZMA or LZMA2 stream, of the blocks of a LevelDB table, of the entries of a ZIP archive or
 //! of the members of an ar, tar or cpio archive)
 //! is recompressed in turn, up to [`Options::depth`] formats deep, and its formula put in place
 //! of the data. So are the slices of a stream that a recompressor gives as data as it is
@@ -130,7 +132,7 @@ pub use detect::{Format, detect, kind_by_name};
 pub use extent::extent;
 pub use progress::Event;
 
-use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZO, LZX, Native, SNAPPY, ZIP};
+use aqr_decompress::{BUNDLE, FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP};
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
 use aqr_formula::{Bytes, Stream};
@@ -281,11 +283,12 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`LZMA`],
-/// [`LZO`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], scanned.
-pub const CONTENTS: [Content; 9] = [
+/// [`LZMA2`], [`LZO`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`] and [`BUNDLE`], scanned.
+pub const CONTENTS: [Content; 10] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: LZMA, input: 0, nest: Nest::Scan },
+    Content { module: LZMA2, input: 0, nest: Nest::Scan },
     Content { module: LZO, input: 0, nest: Nest::Scan },
     Content { module: LZX, input: 0, nest: Nest::Scan },
     Content { module: SNAPPY, input: 0, nest: Nest::Scan },
@@ -1527,6 +1530,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
     Some(match format {
         Format::Lz4 => aqr_lz4::formula::encode,
         Format::Lzma => aqr_lzma::formula::encode,
+        Format::Xz => aqr_lzma::formula::encode_xz,
         Format::Lzo => aqr_lzo::formula::encode,
         Format::Png => aqr_png::formula::encode,
         Format::Jpeg => aqr_jpeg::formula::encode,

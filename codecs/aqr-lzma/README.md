@@ -72,6 +72,6 @@ The tests of damaged and random records catch an overflow only in a debug build
 The module `lzma-recons` (natively and as a Wasm module of aqr-modules) and `.lzma` files in
 aqr-compress are done: in an archive of several files, a `.lzma` file is put in a batch with
 the files its stream holds (the members of a tar archive, or the whole), so that their data is
-stored once. The module `lzma2-recons` and the formula of `.xz` files (its blocks of LZMA2
-alone) are done, not yet taken by aqr-compress. Still to come: 7z archives, `.xz` blocks of
+stored once. So are the module `lzma2-recons` and `.xz` files (their blocks of LZMA2 alone),
+which aqr-compress takes alike, anywhere in data too. Still to come: 7z archives, `.xz` blocks of
 other filters (BCJ, delta), and 7z's BCJ2, which the other folder of that 7z goes through.

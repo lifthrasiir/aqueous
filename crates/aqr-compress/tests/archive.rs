@@ -381,6 +381,31 @@ fn lzma_held_once() {
     }
 }
 
+/// Files, a `.tar.xz` of them and an `.xz` of one: the LZMA2 streams rebuilt from data taken
+/// from the files, so that the files are stored once, in a batch together however small the
+/// batches.
+#[test]
+fn xz_held_once() {
+    let members: Vec<(String, Vec<u8>)> = (0..3).map(|k| (format!("m/f{k}.txt"), words(1_000_000, k))).collect();
+    let refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    let txz = aqr_lzma::greedy::xz(&tar(&refs));
+    let xz = aqr_lzma::greedy::xz(&members[0].1);
+    assert!(txz.len() > 256 << 10 && xz.len() > 256 << 10);
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let files: Vec<(&str, Vec<u8>)> = members.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+    let (alone, r) = archived(&files, &opt);
+    let alone = alone.len() - r.overhead;
+    let all = [&files[..], &[("p/m.tar.xz", txz.clone()), ("p/f0.txt.xz", xz.clone())]].concat();
+    for opt in [opt.clone(), Options { batch: 1 << 20, ..opt.clone() }] {
+        let (c, r) = archived(&all, &opt);
+        for k in [3, 4] {
+            assert!(r.files[k].modules.iter().any(|m| m.name == "lzma2-recons"), "{}: {:?}", all[k].0, r.files[k]);
+        }
+        let c = c.len() - r.overhead;
+        assert!(c < alone + alone / 100, "{c} of {alone} alone");
+    }
+}
+
 /// A file and the git loose object of it (a zlib stream of `blob <size>\0` and the file): the
 /// object's data is the file after its header, stored once, in a batch together however small
 /// the batches.

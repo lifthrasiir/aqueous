@@ -135,3 +135,15 @@ fn not_xz() {
     d[13] ^= 1;
     assert!(formula::starts_xz(&d) && formula::encode_xz(&d, 1).is_none());
 }
+
+#[test]
+fn greedy_xz() {
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i.wrapping_mul(2_654_435_761) >> 27) as u8 + b'a').collect();
+    for d in [&data[..], b"", b"x"] {
+        let x = aqr_lzma::greedy::xz(d);
+        assert_eq!(formula::extent_xz(&x), Some(x.len()));
+        assert!(formula::data_xz(&x).unwrap_or_default() == d);
+        let f = formula::encode_xz(&x, 1).unwrap();
+        assert!(eval_any(&f).unwrap() == x);
+    }
+}

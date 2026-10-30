@@ -585,8 +585,8 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// and the file of its data (inflated whole where its header tells a large one), an ar, tar or cpio
 /// archive or ISO 9660 or UDF image and the contents of its members (read whole, one at a time,
 /// for their CRC-32; those of at least [`MEMBER_MIN`] bytes), a git pack and its indexes (by name and the pack's
-/// trailer, of any size), a `.lzma` file and those of what its stream holds (decoded
-/// whole, [`lzma_sums`]), FSB5 banks and those of their samples (read whole, by the samples'
+/// trailer, of any size), a `.lzma` or `.xz` file and those of what its streams hold
+/// (decoded whole, [`stream_sums`]), FSB5 banks and those of their samples (read whole, by the samples'
 /// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB; the
 /// same file, longer or shorter). Of the contents of at least [`TOGETHER_MIN`] bytes, which are
 /// read at their start (and the archives at their end, the contents of the sizes of entries
@@ -626,7 +626,10 @@ fn together<S: Source + ?Sized>(
         };
         let mut held: Vec<(u32, u64)> = held.into_iter().filter(|e| e.1 >= TOGETHER_MIN).collect();
         if format == Some(detect::Format::Lzma) && size <= TOGETHER_MAX {
-            held.extend(lzma_sums(&src.read(c)?));
+            held.extend(stream_sums(aqr_lzma::formula::data(&src.read(c)?)));
+        }
+        if format == Some(detect::Format::Xz) && size <= TOGETHER_MAX {
+            held.extend(stream_sums(aqr_lzma::formula::data_xz(&src.read(c)?)));
         }
         // (banks sharing samples: a bank and its patches)
         if format == Some(detect::Format::Fsb5) && size <= TOGETHER_MAX {
@@ -759,10 +762,11 @@ fn lay_alike<S: Source + ?Sized>(
     Ok(())
 }
 
-/// What the stream of `.lzma` file `d` holds, as [`together`] takes it: the CRC-32 and size of
-/// the members of an ar, tar or cpio archive ([`member_sums`]), or else of all of its data.
-fn lzma_sums(d: &[u8]) -> Vec<(u32, u64)> {
-    match aqr_lzma::formula::data(d) {
+/// What the data of a `.lzma` or `.xz` file holds (None where it does not decode), as
+/// [`together`] takes it: the CRC-32 and size of the members of an ar, tar or cpio archive
+/// ([`member_sums`]), or else of all of it.
+fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
+    match data {
         Some(data) if detect(&data).is_some_and(detect::Format::is_bundle) => member_sums(&data, 1),
         Some(data) if data.len() as u64 >= MEMBER_MIN => vec![(crc32fast::hash(&data), data.len() as u64)],
         _ => Vec::new(),
