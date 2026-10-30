@@ -659,19 +659,19 @@ impl Emit<'_> {
                 self.stack.push(None);
             }
             Node::Concat(ns) => {
-                // (the items so far put together before a part taking an output, so that the
-                // Swaps bringing it up pass one item of each concatenation open, not all its
-                // items: a concatenation of concatenations is the same)
-                let mut pending = 0;
+                // (before a part taking an output, the items so far put together as a counter
+                // of base [`FOLD`] counts, so that the Swaps bringing the output up pass few
+                // items of each concatenation open, and each byte is copied into few
+                // concatenations: a concatenation of concatenations is the same)
+                let mut levels: Vec<u32> = Vec::new();
                 for n in ns {
-                    if pending >= 2 && takes_output(n) {
-                        self.concat(CONCAT, pending);
-                        pending = 1;
+                    if takes_output(n) {
+                        self.fold(&mut levels);
                     }
                     self.node(n);
-                    pending += 1;
+                    levels.push(0);
                 }
-                self.concat(CONCAT, pending);
+                self.concat(CONCAT, levels.len());
             }
             Node::Pack(ns) => {
                 ns.iter().for_each(|n| self.node(n));
@@ -713,6 +713,21 @@ impl Emit<'_> {
                 self.stack.truncate(self.stack.len() - 2);
                 self.stack.push(None);
             }
+        }
+    }
+
+    /// Puts together the items of a concatenation at the top of the stack, of `levels` (each
+    /// the number of times [`FOLD`] items were put together into it), [`FOLD`] of the same
+    /// level at a time from the top.
+    fn fold(&mut self, levels: &mut Vec<u32>) {
+        while let Some(&top) = levels.last() {
+            let n = levels.iter().rev().take_while(|&&l| l == top).count();
+            if n < FOLD {
+                break;
+            }
+            self.concat(CONCAT, n);
+            levels.truncate(levels.len() - n);
+            levels.push(top + 1);
         }
     }
 
@@ -760,6 +775,9 @@ impl Emit<'_> {
         self.stack.extend(sizes.iter().map(|_| None));
     }
 }
+
+/// Items of a level of a concatenation put together at a time ([`Emit::fold`]).
+const FOLD: usize = 8;
 
 /// Whether node `n` takes an output of an application of several outputs.
 fn takes_output(n: &Node) -> bool {
@@ -2865,7 +2883,8 @@ mod tests {
     /// Many outputs of applications taken in order with slices between them, in a concatenation
     /// in another (as aqr-wim's of a WIM file in an image): the description grows with the
     /// outputs, not with their square (a Swap for each item above an output took 3,000
-    /// outputs to 13 MB), and the outputs come back where they are.
+    /// outputs to 40 MB), nor do the bytes concatenated (each item so far put together before
+    /// each output copied them so), and the outputs come back where they are.
     #[test]
     fn many_outputs() {
         let mut f = Formula::default();
@@ -2910,7 +2929,50 @@ mod tests {
         }
         e.node(&f.root);
         assert_eq!(e.stack, [None]);
-        assert!(out.len() < 3000 * 24, "{} bytes of description", out.len());
+        assert!(out.len() < 3000 * 64, "{} bytes of description", out.len());
+        // the bytes the Concat instructions copy: each of the outputs' a few times
+        let (mut stack, mut copied) = (Vec::new(), 0usize);
+        let mut r = &out[..];
+        while let Some((&op, rest)) = r.split_first() {
+            let mut at = 0;
+            let num = |at: &mut usize| varint::get(rest, at).unwrap() as usize;
+            match op {
+                SLICE => {
+                    let (_, _, len) = (num(&mut at), num(&mut at), num(&mut at));
+                    stack.push(len);
+                }
+                APPLY => {
+                    let (_, nr, np) = (num(&mut at), num(&mut at), num(&mut at));
+                    assert_eq!((nr, np), (0, 3));
+                    at += np;
+                    let (_, ni, no) = (num(&mut at), num(&mut at), num(&mut at));
+                    let sizes: Vec<usize> = (0..no).map(|_| num(&mut at)).collect();
+                    stack.truncate(stack.len() - ni);
+                    stack.extend(sizes);
+                }
+                SPLIT => {
+                    let n = num(&mut at);
+                    let sizes: Vec<usize> = (0..n).map(|_| num(&mut at)).collect();
+                    stack.pop();
+                    stack.extend(sizes);
+                }
+                SWAP => {
+                    let d = num(&mut at);
+                    let top = stack.len() - 1;
+                    stack.swap(top, top - d);
+                }
+                CONCAT => {
+                    let n = num(&mut at);
+                    let len: usize = stack.drain(stack.len() - n..).sum();
+                    copied += len;
+                    stack.push(len);
+                }
+                _ => panic!("{op}"),
+            }
+            r = &rest[at..];
+        }
+        assert_eq!(stack, [want.len()]);
+        assert!(copied < want.len() * 8, "{copied} bytes copied of {}", want.len());
         let c = encode(&f, None, Level::Zstd(3)).unwrap();
         assert!(decode(&c, &natives()).unwrap() == want);
     }
