@@ -2,6 +2,7 @@
 
 This document specifies the module `exe-recons/x86` of aqr-formula entry formulas, and
 [`exe-recons/arm64`](#the-exe-reconsarm64-module),
+[`exe-recons/arm64-remap`](#the-exe-reconsarm64-remap-module),
 [`exe-recons/cil`](#the-exe-reconscil-module),
 [`exe-recons/pe-reloc`](#the-exe-reconspe-reloc-module) and
 [`exe-recons/macho-symtab`](#the-exe-reconsmacho-symtab-module) after it. The x86 module rebuilds a section
@@ -488,6 +489,96 @@ The module fails if:
 - a stream runs out where a byte is to be read;
 - a local branch's field in `CODE` is not 0, or its zigzag value is not below `2^n`;
 - any stream has bytes left once the output is `len` bytes long.
+
+# The `exe-recons/arm64-remap` module
+
+This part specifies the module `exe-recons/arm64-remap`, which rebuilds a section of ARM64
+code as `exe-recons/arm64` does (§A1–§A5), from the streams of that module and four more: the
+targets of some `BL` and pages of some `ADRP` are written in `CODE` as those of another image
+(another version of the program), so that the words of code that moved between the versions
+match the other's; a flag per `BL` and per `ADRP` tells which, and a map of each value so
+written to the instruction's own target rebuilds them. The other image is not an input: the
+map is over the values that the flagged instructions hold. The conventions of §1 hold.
+
+## M1. The module
+- **Module**: name `exe-recons/arm64-remap`, version 1.
+- **Params**: exactly 8 bytes, `le64 origin`, as for `exe-recons/arm64`.
+- **Resources**: none.
+- **Inputs**: exactly 15, the streams of §A2 (0–10, each of class `arm64/NAME`), then those of
+  §M2.
+- **Output**: the section, `len` bytes long.
+
+## M2. Streams
+
+| # | name | contents |
+|---|---|---|
+| 0–10 | | as in §A2 |
+| 11 | `BLF` | a flag per `BL` of `CODE`, in order, a bit each, the most significant of each byte first |
+| 12 | `ADRPF` | a flag per `ADRP` of `CODE`, as `BLF` |
+| 13 | `BLMAP` | the map of the `BL` fields flagged (§M3) |
+| 14 | `ADRPMAP` | the map of the `ADRP` fields flagged |
+
+## M3. Decoding
+
+The **field** of a word of `CODE` matching the row `BL` of §A3 is `w[25:0]` (`n` = 26 bits),
+and that of one matching `ADRP` is `a = w[23:5] · 4 + w[30:29]` (`n` = 21 bits); writing a
+field back sets those bits.
+
+1. **Flags.** For each of the first `floor(len / 4)` words of `CODE` (which must be there)
+   that matches `BL` or `ADRP`, read the next bit of `BLF` or `ADRPF`; where it is 1, note the
+   word's field among the values of `BL` or `ADRP`. Each flag stream must then be read to its
+   last byte, the bits left in it 0.
+2. **Maps.** For `BL`, the distinct values noted in ascending order, `v₁ < … < vₘ`: read `m`
+   unsigned LEB128s from `BLMAP`, of 5 bytes at most and each below `2^n`; with `zᵢ` the
+   `i`-th, `dᵢ = (zᵢ >> 1) XOR −(zᵢ & 1)`, `s₀ = 0` and `sᵢ = (sᵢ₋₁ + dᵢ) & m(n)`, the value `vᵢ`
+   maps to `T(vᵢ) = (vᵢ + sᵢ) & m(n)`. `BLMAP` must then be read to its end. The same for
+   `ADRP`, from `ADRPMAP`.
+3. **Code.** Decode as §A3, but that a word matching `BL` or `ADRP` takes its next flag
+   (in order, as in step 1): where it is 1, its field is first written back as `T(field)`.
+
+So `T(v) − v` is the shift of each value flagged, which the map gives as differences of
+shifts from one value to the next.
+
+## M4. Validation
+
+The module fails if:
+
+- the params are not 8 bytes long, or there are resources, or not exactly 15 inputs;
+- `CODE` is shorter than `floor(len / 4)` words;
+- a flag stream runs out, or is longer than its flags, or its bits after them are not 0;
+- a map's LEB128 runs out or is longer than 5 bytes, its value is not below `2^n`, or the map
+  has bytes left;
+- any of §A5's conditions, of streams 0–10.
+
+## M5. Encoding *(encoder)*
+
+`aqr_exe::arch::arm64::remap::Remap::new` maps an image (its code sections) to a reference
+image, after Courgette:
+
+- **Functions**: the words from each target of a `BL` within the code to the next (and from
+  each section's start), hashed with their `BL` and `ADRP` fields cleared. Those whose hash
+  is the only one of its kind in both images, of one length, are matched; the `BL` targets and
+  `ADRP` pages at the same places in them, and their starts, vote for the reference's value
+  each of the image's goes to.
+- **Rounds** (16 at most, while any are matched): a function of the reference not matched yet
+  is matched to the image's whose start its own maps to by the votes so far, or else to the
+  one its matched neighbours' shift tells where the last matched before it and the first after
+  it moved alike. Their words alike from the start, and from the end, as far as they go, vote.
+  Asking those to be some share of the words, or aligning the words between them (Myers'
+  diff), maps fewer.
+- **The map**: the image's value most voted for each of the reference's; then each of the
+  image's values that one value of the reference maps to. Values mapped to themselves are
+  kept: unflagged, they cost more flags (of an image remapped by aqr-compress below, `BLF`
+  556 KB in place of 172 KB) than their entries in the map.
+
+`remap::encode` writes each `BL` and `ADRP` whose field the map has as the reference's, its
+flag 1. aqr-compress (`exe::plan`) remaps the ARM64 images of the Mach-O files of a batch
+whose code is over half the bound of a solid block (so that their code streams are cut into
+pieces, which go with those alike of other streams; shorter streams go one after another as
+their files do, rarely by their parents'): a maximum spanning forest of how alike they are (the share of their
+functions' hashes, a sixteenth of them sampled, in both; 0.1 at least), each image mapped to
+its parent and that composed with its parent's own map, so that a tree is written in the
+address space of its root. Values that two would map to after composing are left unmapped.
 
 # The `exe-recons/cil` module
 

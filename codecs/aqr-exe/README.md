@@ -17,6 +17,7 @@ in a universal file), and of the metadata and IL of .NET images, each rebuilt bi
 ```sh
 cargo run --release -p aqr-exe --example aqr-exe-bench -- [-l LEVEL] [--no-zstd] [NAME|PATH ...]  # filter round trip, speed, zstd before and after
 cargo run --release -p aqr-exe --example aqr-exe-bench-arm64 -- [-l LEVEL] MACHO...              # the same for ARM64 Mach-O images, against xz's BCJ
+cargo run --release -p aqr-exe --example aqr-exe-bench-remap -- A B                               # B's ARM64 code remapped to A's, against A's
 build-wasm.bat                                                                       # the decoder as a Wasm module
 ```
 
@@ -55,8 +56,18 @@ their own (16 KiB at least together): the entries by field, their values predict
 debug map's stabs and from each other, their names as references to the strings, and the
 strings each once, front coded, in the order `ld64` writes them.
 
+ARM64 code can be coded against another version of it (`arm64::remap`, after Courgette): the
+functions of the two are matched (by the hashes of their words with the `BL` and `ADRP` fields
+cleared, then by the targets matched so far and their neighbours' shifts), and the targets and
+pages of the matched vote for a map of the image's targets to the other's. The `BL` and `ADRP`
+the map takes are written with the other's targets, so that code that moved matches the
+other's, with a flag for each and the shifts of the values so written; the module needs nothing
+of the other image. aqr-compress remaps the ARM64 images of the Mach-O files archived together
+alike, of more than half a solid block of code each.
+
 `FORMAT.md` specifies the modules `exe-recons/x86`, with the opcode tables in full,
-`exe-recons/arm64`, `exe-recons/cil`, `exe-recons/pe-reloc` and `exe-recons/macho-symtab`.
+`exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/cil`, `exe-recons/pe-reloc` and
+`exe-recons/macho-symtab`.
 
 ## Results
 
@@ -166,10 +177,46 @@ Instructions retired: Windows App 115.9 → 117.5 G (+1.3%); Secretive, Deskflow
 fewer (29.9 → 20.9, 73.8 → 71.0, 675.3 → 649.9 G), what was scanned and inferred in the rest
 taken by the module. The module block is 5.8 KB.
 
+### ARM64 code against another version
+
+Measured on 2026-10-30 on an Apple M4. With `aqr-exe-bench-remap`, B's `CODE` stream
+compressed against A's (`zstd -7 --long=28 --patch-from`), as it is and remapped (the flags and
+maps with zstd -19 added):
+
+| A → B | alone | against A | remapped | |
+|---|---|---|---|---|
+| Chrome Framework 156.0.8078.47 → .49, arm64 | 64.13 MB | 33.73 MB | 8.18 MB | −75.8% |
+| Chrome Framework .49 → .76 | 64.15 MB | 45.88 MB | 20.35 MB | −55.6% |
+| Electron Framework 42 (Discord) → 43 (VS Code) | 44.01 MB | 36.72 MB | 29.48 MB | −19.7% |
+| aqr built 10-27 (`880665b`) → 10-28 (`9e610a7`) | 3.57 MB | 2.05 MB | 1.38 MB | −32.7% |
+
+The map takes 1–2 s for Chrome's pair; remapped code encodes at about 900 MB/s and decodes at
+700–800 MB/s (the plain filter: 1604 and 1289). Through `aqr -c` (level `mid`, 10 threads),
+before (the remap left out) and after:
+
+| | before | after | |
+|---|---|---|---|
+| Chrome Framework's three arm64 images (755.1 MB) | 141.91 MB | 119.64 MB | −15.7% |
+| Google Chrome.app (2.28 GB, the three versions of its framework) | 410.70 MB | 388.10 MB | −5.5% |
+| aqr built 10-27, 10-28 and 10-29 (62.0 MB) | 13.47 MB | 12.95 MB | −3.8% |
+| the same, pairs | 9.52, 10.17, 9.94 MB | 9.16, 9.76, 9.47 MB | −3.7%, −4.0%, −4.7% |
+
+Instructions retired: the three images 323.5 → 358.0 G (+10.7%), Chrome.app 1327.1 → 1328.6 G,
+aqr's builds 31.1 → 32.8 G; peak RSS 3.22 → 3.54 GB for the three images. Secretive, Deskflow,
+Windows App, Discord, Blender and Pages have no images alike of that much code, and archive as
+before. The module block is 6.0 KB.
+
+## Limitations
 
 - PE and Mach-O only: no ELF.
 - x86, x86-64 and ARM64 only: images of other machines (32-bit ARM, PowerPC) are kept as
   they are. ARM64 data in code sections (literal pools) is taken as instructions.
+- Code against another version: ARM64 only, not x86-64 (whose halves of universal files are
+  as large); and only images of more than half a solid block of code, whose streams are cut
+  into pieces put with those alike: shorter streams go one after another as their files do,
+  rarely by their parents', where remapping them costs more (Blender's `_ssl` against
+  `_hashlib`, both linking OpenSSL, 11 KB more). The low 12 bits of what follows an `ADRP`
+  (`ADD`, `LDR`) are not remapped.
 - Mach-O code signatures are kept as they are, though their page hashes follow from the
   image.
 - Mach-O symbol tables are taken only as `ld64` writes them (730 of the 775 of 16 KiB or more

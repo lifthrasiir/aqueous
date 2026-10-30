@@ -34,6 +34,19 @@ pub const X86: Module = Module::new("exe-recons/x86", 3).with_memory(exe);
 /// inputs: the streams of `arm64::STREAM_NAMES`.
 pub const ARM64: Module = Module::new("exe-recons/arm64", 1).with_memory(exe);
 
+/// aqr-exe's ARM64 filter on a code section, its BL and ADRP targets remapped to those of
+/// another image. Parameters: the origin (u64, little endian); inputs: the streams of
+/// `arm64::remap::STREAM_NAMES`.
+pub const ARM64_REMAP: Module = Module::new("exe-recons/arm64-remap", 1).with_memory(arm64_remap);
+
+/// The memory of [`ARM64_REMAP`]: the whole of it, with the values flagged (4 bytes each) and
+/// their map (8 bytes each), at most an instruction each that the flags tell (8 a byte of them).
+fn arm64_remap(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    use aqr_exe::arch::arm64::remap::{ADRPF, BLF};
+    let flags = u.inputs.get(BLF)? + *u.inputs.get(ADRPF)?;
+    Some(u.whole((4 + 8) * 8 * flags, 4))
+}
+
 /// aqr-exe's CIL filter on the section holding the metadata of a .NET image. Parameters: the
 /// section's RVA and the offset of the metadata root in it (u32 each, little endian); inputs:
 /// the streams of `cil::STREAM_NAMES`.
@@ -222,6 +235,7 @@ pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 pub const MODULES: [Module; 58] = [
     X86,
     ARM64,
+    ARM64_REMAP,
     CIL,
     PE_RELOC,
     MACHO_SYMTAB,
@@ -463,6 +477,9 @@ impl Native {
         } else if m == ARM64 {
             none(resources)?;
             aqr_exe::module::arm64(params, inputs, len).map_err(str::to_owned)
+        } else if m == ARM64_REMAP {
+            none(resources)?;
+            aqr_exe::module::arm64_remap(params, inputs, len).map_err(str::to_owned)
         } else if m == CIL {
             none(resources)?;
             aqr_exe::module::cil(params, inputs, len).map_err(str::to_owned)

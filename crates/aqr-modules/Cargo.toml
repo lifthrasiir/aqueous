@@ -107,6 +107,11 @@ path = "src/bin/exe-recons-arm64.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "exe-recons-arm64-remap"
+path = "src/bin/exe-recons-arm64-remap.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "exe-recons-cil"
 path = "src/bin/exe-recons-cil.rs"
 required-features = ["wasm"]

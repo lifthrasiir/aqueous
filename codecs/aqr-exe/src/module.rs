@@ -1,5 +1,6 @@
-//! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/arm64`, `exe-recons/cil`,
-//! `exe-recons/pe-reloc` and `exe-recons/macho-symtab`, as aqr-decompress names them): the parameters and the inputs
+//! The code of the modules of aqr-exe (`exe-recons/x86`, `exe-recons/arm64`,
+//! `exe-recons/arm64-remap`, `exe-recons/cil`, `exe-recons/pe-reloc` and
+//! `exe-recons/macho-symtab`, as aqr-decompress names them): the parameters and the inputs
 //! checked, then the section or table decoded. aqr-modules builds it into their Wasm modules.
 
 use alloc::vec::Vec;
@@ -37,6 +38,18 @@ pub fn arm64(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
         return Err("bad parameters or inputs");
     };
     of_len(arm64::decode(streams, u64::from_le_bytes(*p), n), len)
+}
+
+/// The ARM64 filter on a code section, its BL and ADRP targets remapped to another image's.
+/// Parameters: the origin (u64, little endian); inputs: the streams of
+/// [`arm64::remap::STREAM_NAMES`].
+pub fn arm64_remap(params: &[u8], inputs: &[&[u8]], len: u64) -> Result<Vec<u8>> {
+    let (Some(p), Ok(streams), Ok(n)) =
+        (params.first_chunk::<8>(), <[&[u8]; arm64::remap::NUM_STREAMS]>::try_from(inputs), usize::try_from(len))
+    else {
+        return Err("bad parameters or inputs");
+    };
+    of_len(arm64::remap::decode(streams, u64::from_le_bytes(*p), n), len)
 }
 
 /// The CIL filter on the section holding the metadata of a .NET image. Parameters: the

@@ -4881,6 +4881,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/clip-recons.wasm" title="crates/aqr-modules/wasm/clip-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-clip/FORMAT.md" title="codecs/aqr-clip/FORMAT.md">R</a>
     <tr>
+      <td><code>5127a1c02f5577874e8912d472a42703d3f6d2352b894254d1cf033e8a0a9d3f</code>
+      <td>exe-recons/arm64-remap@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-arm64-remap.wasm" title="crates/aqr-modules/wasm/exe-recons-arm64-remap.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-exe/FORMAT.md" title="codecs/aqr-exe/FORMAT.md">R</a>
+    <tr>
       <td><code>5d8f0adf41154e52e1060a57a3facbb938a0d1bf69dfb4a15546420db85fc31c</code>
       <td>exe-recons/arm64@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/exe-recons-arm64.wasm" title="crates/aqr-modules/wasm/exe-recons-arm64.wasm">D</a>

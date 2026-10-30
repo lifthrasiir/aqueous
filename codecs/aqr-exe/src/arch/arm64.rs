@@ -93,6 +93,21 @@ fn retarget(w: u32, k: Kind, pc: u64, sign: u32) -> u32 {
     }
 }
 
+/// The field of BL or ADRP `w` (`k`), the target in words or pages modulo 2^26 or 2^21.
+fn field(w: u32, k: Kind) -> u32 {
+    match k {
+        Kind::Bl => w & low(26),
+        _ => adrp_imm(w),
+    }
+}
+
+fn with_field(w: u32, k: Kind, f: u32) -> u32 {
+    match k {
+        Kind::Bl => (w & !low(26)) | (f & low(26)),
+        _ => with_adrp_imm(w, f),
+    }
+}
+
 /// Bytes of a zigzag coded offset of `bits` bits.
 const fn offset_bytes(bits: u32) -> usize {
     bits.div_ceil(8) as usize
@@ -118,6 +133,18 @@ mod encode {
     /// The streams of the code section `code` whose first byte is at address `origin`.
     pub fn encode(code: &[u8], origin: u64) -> EncodedStreams {
         let mut st: [Vec<u8>; NUM_STREAMS] = array::from_fn(|_| Vec::new());
+        encode_into(&mut st, code, origin, |_, abs| abs);
+        EncodedStreams { streams: st }
+    }
+
+    /// The streams of `code` at `origin` into `st`, the field of each BL and ADRP the one
+    /// `target` gives for it (whether a BL, and its absolute target as [`encode`] makes it).
+    pub(crate) fn encode_into(
+        st: &mut [Vec<u8>; NUM_STREAMS],
+        code: &[u8],
+        origin: u64,
+        mut target: impl FnMut(bool, u32) -> u32,
+    ) {
         st[CODE].reserve(code.len());
         let (words, tail) = code.as_chunks::<4>();
         st[TAIL].extend_from_slice(tail);
@@ -136,22 +163,29 @@ mod encode {
                         s.push((z >> (8 * (n - 1 - b))) as u8);
                     }
                 }
-                k => w = retarget(w, k, pc, 1),
+                k => {
+                    let a = retarget(w, k, pc, 1);
+                    w = with_field(a, k, target(k == Kind::Bl, field(a, k)));
+                }
             }
             st[CODE].extend_from_slice(&w.to_be_bytes());
         }
-        EncodedStreams { streams: st }
     }
 }
 
 #[cfg(feature = "encode")]
 pub use encode::*;
 
+#[cfg(feature = "encode")]
+pub(crate) use encode::encode_into;
+
+pub mod remap;
+
 #[cfg(feature = "decode")]
 mod decode {
     use super::*;
 
-    fn take<'a>(s: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
+    pub(crate) fn take<'a>(s: &mut &'a [u8], n: usize) -> Option<&'a [u8]> {
         let (a, b) = (s.get(..n)?, s.get(n..)?);
         *s = b;
         Some(a)
@@ -188,10 +222,54 @@ mod decode {
         out.extend_from_slice(take(&mut s[TAIL], len % 4)?);
         s.iter().all(|s| s.is_empty()).then_some(out)
     }
+
+    /// The section of `len` bytes at `origin` from streams `s`, read as far as it takes, the
+    /// absolute target of each BL and ADRP the one `target` gives for its field (whether a
+    /// BL, and the field), in order. ([`decode`] is not made of it, which would change the
+    /// module `exe-recons/arm64`.)
+    pub(crate) fn decode_from(
+        s: &mut [&[u8]; NUM_STREAMS],
+        origin: u64,
+        len: usize,
+        mut target: impl FnMut(bool, u32) -> Option<u32>,
+    ) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(len);
+        for k in 0..len / 4 {
+            let mut w = u32::from_be_bytes(take(&mut s[CODE], 4)?.try_into().unwrap());
+            let pc = origin.wrapping_add(4 * k as u64);
+            match kind(w) {
+                Kind::Other => {}
+                Kind::Local { lo, bits, first } => {
+                    if w >> lo & low(bits) != 0 {
+                        return None;
+                    }
+                    let mut z = 0u32;
+                    for st in &mut s[first..first + offset_bytes(bits)] {
+                        z = z << 8 | take(st, 1)?[0] as u32;
+                    }
+                    if z >> bits != 0 {
+                        return None;
+                    }
+                    let v = (z >> 1) ^ (z & 1).wrapping_neg();
+                    w |= (v & low(bits)) << lo;
+                }
+                k => {
+                    let w = with_field(w, k, target(k == Kind::Bl, field(w, k))?);
+                    out.extend_from_slice(&retarget(w, k, pc, u32::MAX).to_le_bytes());
+                    continue;
+                }
+            }
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+        out.extend_from_slice(take(&mut s[TAIL], len % 4)?);
+        Some(out)
+    }
 }
 
 #[cfg(feature = "decode")]
 pub use decode::decode;
+#[cfg(feature = "decode")]
+pub(crate) use decode::{decode_from, take};
 
 #[cfg(test)]
 mod tests {

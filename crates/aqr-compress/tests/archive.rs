@@ -664,6 +664,80 @@ fn lzma_of_pe_files_held_once() {
     assert!(c < alone + alone / 50, "{c} of {alone} alone");
 }
 
+/// ARM64 code of `n` functions of 8 to 14 words, after `pad` words of padding: each of distinct
+/// words, calling another and taking a page of its own.
+fn arm64_functions(n: usize, pad: usize) -> Vec<u8> {
+    let len = |f: usize| 8 + f % 7;
+    let mut at = Vec::with_capacity(n);
+    let mut k = pad;
+    for f in 0..n {
+        at.push(k);
+        k += len(f);
+    }
+    let mut w: Vec<u32> = vec![0xd503_201f; pad];
+    for f in 0..n {
+        let callee = (f * 7919 + 13) % n;
+        w.push(0xa9bf_7bfd); // stp x29, x30, [sp, #-16]!
+        w.push(0x9400_0000 | (at[callee] as u32).wrapping_sub(w.len() as u32) & 0x3ff_ffff);
+        let page = (0x100 + f as u32 / 64).wrapping_sub((w.len() >> 10) as u32);
+        w.push(0x9000_0008 | (page & 3) << 29 | (page >> 2 & 0x7_ffff) << 5); // adrp x8
+        w.push(0xd280_0000 | (f as u32 & 0xffff) << 5 | 9); // movz x9, #f
+        w.push(0xf2a0_0000 | (f as u32 >> 16) << 5 | 9); // movk x9, #f >> 16, lsl 16
+        w.extend((5..len(f) - 1).map(|j| 0x9100_0000 | (j as u32) << 10 | 9 << 5 | 9)); // add x9, x9, #j
+        w.push(0xd65f_03c0); // ret
+    }
+    w.iter().flat_map(|w| w.to_le_bytes()).collect()
+}
+
+/// A thin ARM64 Mach-O image of `code` in a section of instructions of its one segment.
+fn macho_arm64(code: &[u8]) -> Vec<u8> {
+    let (cmds, at) = (72 + 80, 0x200);
+    let mut d = vec![0u8; at];
+    let put32 = |d: &mut Vec<u8>, p: usize, v: u32| d[p..p + 4].copy_from_slice(&v.to_le_bytes());
+    let put64 = |d: &mut Vec<u8>, p: usize, v: u64| d[p..p + 8].copy_from_slice(&v.to_le_bytes());
+    put32(&mut d, 0, 0xfeed_facf);
+    put32(&mut d, 4, 0x0100_000c);
+    put32(&mut d, 12, 2); // MH_EXECUTE
+    put32(&mut d, 16, 1);
+    put32(&mut d, 20, cmds as u32);
+    let size = (at + code.len()) as u64;
+    put32(&mut d, 32, 0x19); // LC_SEGMENT_64
+    put32(&mut d, 36, cmds as u32);
+    d[40..46].copy_from_slice(b"__TEXT");
+    put64(&mut d, 32 + 24, 0x1_0000_0000);
+    put64(&mut d, 32 + 32, size);
+    put64(&mut d, 32 + 48, size);
+    put32(&mut d, 32 + 64, 1);
+    let s = 32 + 72;
+    d[s..s + 6].copy_from_slice(b"__text");
+    d[s + 16..s + 22].copy_from_slice(b"__TEXT");
+    put64(&mut d, s + 32, 0x1_0000_0000 + at as u64);
+    put64(&mut d, s + 40, code.len() as u64);
+    put32(&mut d, s + 48, at as u32);
+    put32(&mut d, s + 64, 0x8000_0400);
+    d.extend_from_slice(code);
+    d
+}
+
+/// Versions of a program whose code moved: one's targets written in the other's address space (`exe-recons/arm64-remap`), so that its code costs little.
+#[test]
+fn arm64_versions_remapped() {
+    // (code of over half a block: of streams cut into pieces, put with those alike)
+    let (a, b) = (macho_arm64(&arm64_functions(26_000, 0)), macho_arm64(&arm64_functions(26_000, 37)));
+    assert!(a.len() > 1 << 20);
+    let opt = Options { block: 2 << 20, ..Options::default() };
+    let (alone, r) = archived(&[("a", a.clone())], &opt);
+    let alone = alone.len() - r.overhead;
+    let (both, r) = archived(&[("a", a), ("b", b)], &opt);
+    let names = |k: usize| -> Vec<&str> { r.files[k].modules.iter().map(|m| m.name).collect() };
+    // (either the root of the two)
+    let mut all = [names(0), names(1)];
+    all.sort();
+    assert_eq!(all, [["exe-recons/arm64"], ["exe-recons/arm64-remap"]], "{:?}", r.files);
+    let both = both.len() - r.overhead;
+    assert!(both < alone + alone / 10, "{both} of {alone} alone");
+}
+
 /// Binary data of no format: a header, `n` records of 20 bytes (a counter from `seed`, a time
 /// rising by about 1000, a byte of four values), and a trailer.
 fn table(n: usize, seed: u32) -> Vec<u8> {

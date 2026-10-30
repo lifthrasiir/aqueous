@@ -346,6 +346,8 @@ pub(crate) struct Cx {
     later: RefCell<Vec<(usize, Node, Nest)>>,
     /// What the files archived together hold ([`Held`]), for an archive of several.
     held: Option<Arc<Held>>,
+    /// The remaps of the ARM64 images of the Mach-O files archived together ([`exe::plan`]).
+    remaps: Option<Arc<exe::Remaps>>,
     /// The dictionary that the text archived together is coded with (aqr-wrt), for an archive
     /// of several: made of the files that are text, so that text holding other text codes to
     /// what holds the other's code. Else each text has its own.
@@ -457,6 +459,7 @@ impl Cx {
             top_sets: None,
             later: Default::default(),
             held: None,
+            remaps: None,
             words: None,
             coded_held: Default::default(),
             once: Default::default(),
@@ -887,7 +890,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         None => pure(format, d, opt, opt.threads, cx.words.as_deref(), &cx.once).unwrap_or_else(|| {
             catch_unwind(AssertUnwindSafe(|| match format {
                 Format::Pe => exe::pe(d),
-                Format::MachO => exe::macho(d),
+                Format::MachO => exe::macho(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d))),
                 Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
                 Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
                 Format::Zip => zip::zip(d, opt, depth, cx),
@@ -1296,6 +1299,9 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         .map(|(_, n, _)| std::sync::Mutex::new(by_at.remove(&(data(n).as_ptr() as usize)).unwrap_or_default()))
         .collect();
     cx.ready.borrow_mut().extend(by_at.into_values().flatten());
+    let machos: Vec<&[u8]> =
+        later.iter().map(|(_, n, _)| data(n)).filter(|d| aqr_exe::format::macho::starts(d)).collect();
+    let remaps = (machos.len() > 1).then(|| Arc::new(exe::plan(&machos, opt.threads, opt.block / 2)));
     let (pre, held, words, coded_held) = (cx.pre.clone(), cx.held.clone(), cx.words.clone(), cx.coded_held.clone());
     let shares_modules = cx.enc.shares_modules();
     let once = cx.once.clone();
@@ -1309,6 +1315,7 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         }
         own.pre = pre.clone();
         own.held = held.clone();
+        own.remaps = remaps.clone();
         own.share_words(words.clone());
         own.coded_held = coded_held.clone();
         own.once = once.clone();

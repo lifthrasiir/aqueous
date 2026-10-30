@@ -88,6 +88,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/clip-recons.block"),
     },
     Known {
+        name: "exe-recons/arm64-remap",
+        version: 1,
+        sha512_256: hex("5127a1c02f5577874e8912d472a42703d3f6d2352b894254d1cf033e8a0a9d3f"),
+        block: include_bytes!("../wasm/exe-recons-arm64-remap.block"),
+    },
+    Known {
         name: "exe-recons/arm64",
         version: 1,
         sha512_256: hex("5d8f0adf41154e52e1060a57a3facbb938a0d1bf69dfb4a15546420db85fc31c"),

@@ -8,11 +8,19 @@
 //! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
 //! imports and runtime functions by `recs-fields`, their numbers as deltas. Of a 64-bit Mach-O
 //! image, the symbol table and its string table by `exe-recons/macho-symtab`.
+//!
+//! The ARM64 images of the Mach-O files of an archive alike (other versions of one program) are
+//! planned beforehand ([`plan`]) as a forest, each image's BL and ADRP targets remapped to its
+//! parent's address space, as its parent's are to its own, by `exe-recons/arm64-remap`; so that
+//! their code streams match where the code moved, for the pieces of streams of a class put
+//! together (aqr-formula's `merge_plan`).
 
+use std::collections::HashMap;
 use std::io::Cursor;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
-use aqr_decompress::{ARM64, CIL, MACHO_SYMTAB, PE_RELOC, X86};
+use aqr_decompress::{ARM64, ARM64_REMAP, CIL, MACHO_SYMTAB, PE_RELOC, X86};
+use aqr_exe::arch::arm64::remap::{self, Remap, Signature};
 use aqr_exe::arch::{arm64, cil, x86};
 use aqr_exe::format::macho;
 use aqr_exe::format::pe::{TableKind, locate_code, tables};
@@ -25,7 +33,8 @@ use aqr_infer_recs::formula::{Field, How};
 enum Arch {
     /// x86-64 if true, else x86-32.
     X86(bool),
-    Arm64,
+    /// Of image `k` of the file (whose remap, if any, is the `k`-th).
+    Arm64(usize),
     /// .NET metadata and IL, the metadata root at this offset (the virtual address is the
     /// section's RVA).
     Cil(usize),
@@ -52,7 +61,7 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
     let code = locate_code(&mut Cursor::new(d)).ok()?;
     let arch = match code.machine {
         0x14c | 0x8664 => Some(Arch::X86(code.is64)),
-        0xaa64 => Some(Arch::Arm64),
+        0xaa64 => Some(Arch::Arm64(0)),
         _ => None,
     };
     let within = |off: u64, size: usize| {
@@ -79,15 +88,16 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
             .filter(|t| t.len >= MIN_TABLE && !code.iter().any(|c| t.off < c.end && c.start < t.off + t.len))
             .map(|t| (0, t.off, t.len, Arch::Table(t.kind))),
     );
-    filtered(d, "pe", sections)
+    filtered(d, "pe", sections, &[])
 }
 
-pub(crate) fn macho(d: &[u8]) -> Option<Formula> {
+/// The formula of Mach-O file `d`, its ARM64 images remapped as `remaps` tells (by image).
+pub(crate) fn macho(d: &[u8], remaps: &[Option<Arc<Remap>>]) -> Option<Formula> {
     let images = macho::images(d)?;
-    let sections = images.iter().flat_map(|i| {
+    let sections = images.iter().enumerate().flat_map(|(k, i)| {
         let arch = match i.cputype {
             _ if i.is_x86() => Some(Arch::X86(i.is64())),
-            macho::CPU_TYPE_ARM64 => Some(Arch::Arm64),
+            macho::CPU_TYPE_ARM64 => Some(Arch::Arm64(k)),
             _ => None,
         };
         arch.into_iter().flat_map(|a| i.sections.iter().map(move |&(va, off, size)| (va, off, size, a)))
@@ -97,14 +107,92 @@ pub(crate) fn macho(d: &[u8]) -> Option<Formula> {
         (0, s.symoff, s.nsyms as usize * 16, arch)
     });
     let symbols = symbols.filter(|s| matches!(s.3, Arch::Symbols { strsize, .. } if s.2 + strsize >= MIN_SYMBOLS));
-    filtered(d, "macho", sections.chain(symbols).collect())
+    filtered(d, "macho", sections.chain(symbols).collect(), remaps)
+}
+
+/// Images less alike than this ([`Signature::alike`]) have no parent: builds of aqr a day
+/// apart are 0.14 to 0.16 alike (their code remapped 33 to 36% smaller against each other),
+/// Chrome's 156.0.8078.49 and .76 0.36, Electron 42 and 43 0.21 (20%), Chromium and Electron
+/// 0.05 (0.7%), programs not related 0.003.
+const MIN_ALIKE: f64 = 0.1;
+
+/// The remaps of the ARM64 images of Mach-O files, by where each file's data is: of each
+/// image of the file, its remap where it has one.
+#[derive(Default)]
+pub(crate) struct Remaps(HashMap<usize, Vec<Option<Arc<Remap>>>>);
+
+impl Remaps {
+    /// The remaps of the images of the file whose data is `d`.
+    pub fn of(&self, d: &[u8]) -> &[Option<Arc<Remap>>] {
+        self.0.get(&(d.as_ptr() as usize)).map_or(&[], |r| r)
+    }
+}
+
+/// The remaps of the ARM64 images of the Mach-O files among `files`: of those of more than
+/// `min` bytes of code, a maximum spanning forest of how alike they are ([`Signature`]), each
+/// image remapped to its parent's, composed with its parent's own. (Streams over half the
+/// bound of a solid block are cut into pieces put with those alike of other streams; shorter
+/// ones go one after another as their files do, rarely with their parents': remapped, they
+/// cost more.)
+pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
+    // each image: its file, its index in the file and its code sections
+    let mut images = Vec::new();
+    for (i, d) in files.iter().enumerate() {
+        for (k, image) in macho::images(d).unwrap_or_default().iter().enumerate() {
+            if image.cputype != macho::CPU_TYPE_ARM64 {
+                continue;
+            }
+            let secs: Vec<(u64, &[u8])> =
+                image.sections.iter().map(|&(va, off, size)| (va, &d[off..off + size])).collect();
+            if secs.iter().map(|s| s.1.len()).sum::<usize>() > min {
+                images.push((i, k, secs));
+            }
+        }
+    }
+    if images.len() < 2 {
+        return Remaps::default();
+    }
+    let signatures = crate::sets::par_map(images.len(), threads, |i| Signature::of(&images[i].2));
+    let n = images.len();
+    let rows = crate::sets::par_map(n, threads, |i| {
+        (0..n).map(|j| if i == j { 1.0 } else { signatures[i].alike(&signatures[j]) }).collect()
+    });
+    let (order, parents) = crate::sets::tree(&rows, MIN_ALIKE);
+    let raw = crate::sets::par_map(n, threads, |i| {
+        let p = parents[i]?;
+        Some(Remap::new(&images[order[p]].2, &images[order[i]].2))
+    });
+    // (in order, parents first)
+    let mut composed: Vec<Option<Arc<Remap>>> = Vec::with_capacity(n);
+    for (i, r) in raw.into_iter().enumerate() {
+        let r = r.map(|r| match parents[i].and_then(|p| composed[p].as_deref()) {
+            Some(p) => r.compose(p),
+            None => r,
+        });
+        composed.push(r.filter(|r| !r.is_identity()).map(Arc::new));
+    }
+    let mut out: HashMap<usize, Vec<Option<Arc<Remap>>>> = HashMap::new();
+    for (i, r) in composed.into_iter().enumerate() {
+        let Some(r) = r else { continue };
+        let (file, k, _) = &images[order[i]];
+        let v = out.entry(files[*file].as_ptr() as usize).or_default();
+        v.resize(v.len().max(k + 1), None);
+        v[*k] = Some(r);
+    }
+    Remaps(out)
 }
 
 /// `d` with each of `sections`, `(virtual address, offset, size, code)` within `d`, through
 /// its filter (or a table as its layout tells), and the rest of `d` in a stream of `class`; `None` where none is filtered.
+/// The ARM64 images' code is remapped as `remaps` tells.
 /// The sections within a CIL section are filtered within what the CIL filter keeps as it is
 /// (where whole within a range of it).
-fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize, Arch)>) -> Option<Formula> {
+fn filtered(
+    d: &[u8],
+    class: &'static str,
+    mut sections: Vec<(u64, usize, usize, Arch)>,
+    remaps: &[Option<Arc<Remap>>],
+) -> Option<Formula> {
     // In file order, a CIL section before those within it; sections overlapping an earlier
     // one are left in the rest.
     sections.retain(|s| s.2 > 0);
@@ -134,7 +222,7 @@ fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize,
                     None => continue,
                 }
             }
-            arch => match code_apply(&mut f, section, va, arch) {
+            arch => match code_apply(&mut f, section, va, arch, remaps) {
                 Some(apply) => apply,
                 None => continue,
             },
@@ -154,8 +242,9 @@ fn filtered(d: &[u8], class: &'static str, mut sections: Vec<(u64, usize, usize,
     Some(f)
 }
 
-/// `section` at `va` through the filter of `arch`, x86 or ARM64, its streams added to `f`.
-fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch) -> Option<Node> {
+/// `section` at `va` through the filter of `arch`, x86 or ARM64 (remapped as `remaps` tells),
+/// its streams added to `f`.
+fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch, remaps: &[Option<Arc<Remap>>]) -> Option<Node> {
     let size = section.len() as u64;
     Some(match arch {
         Arch::X86(is64) => {
@@ -166,7 +255,14 @@ fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch) -> Option<No
                 .collect();
             Node::apply_with(X86, vec![x86_resource()], params, inputs, size)
         }
-        Arch::Arm64 => {
+        Arch::Arm64(k) if remaps.get(k).is_some_and(Option::is_some) => {
+            let st = remap::encode(section, va, remaps[k].as_ref().unwrap());
+            let inputs = std::iter::zip(st.streams(), remap::STREAM_NAMES)
+                .map(|(s, name)| f.push(format!("arm64/{name}"), s.clone()))
+                .collect();
+            Node::apply(ARM64_REMAP, va.to_le_bytes().to_vec(), inputs, size)
+        }
+        Arch::Arm64(_) => {
             let st = arm64::encode(section, va);
             let inputs = std::iter::zip(st.streams(), arm64::STREAM_NAMES)
                 .map(|(s, name)| f.push(format!("arm64/{name}"), s.clone()))
@@ -264,7 +360,7 @@ fn cil_apply(
             if off < at || off + size > r.end {
                 continue;
             }
-            let Some(apply) = code_apply(f, &section[off..off + size], va, arch) else { continue };
+            let Some(apply) = code_apply(f, &section[off..off + size], va, arch, &[]) else { continue };
             parts.push(Node::slice(rest_stream, kept.len() as u64, (off - at) as u64));
             kept.extend_from_slice(&section[at..off]);
             parts.push(apply);

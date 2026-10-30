@@ -71,6 +71,41 @@ samples() {
     copy mac.bin /usr/bin/vim
     # a Mach-O binary with its symbols and debug map (exe-recons/macho-symtab): this script's own
     copy mac-symbols.bin $memory
+    # versions of a program whose code moved (exe-recons/arm64-remap): Mach-O files of 9.4 MB
+    # of ARM64 code each, as aqr-compress's test arm64_versions_remapped makes them, the second's
+    # functions 37 words on
+    make remap.d 'mkdir $out && py "
+import os, struct, sys
+def code(n, pad):
+    ln = lambda f: 8 + f % 7
+    at, k = [], pad
+    for f in range(n):
+        at.append(k)
+        k += ln(f)
+    w = [0xd503201f] * pad
+    for f in range(n):
+        callee = (f * 7919 + 13) % n
+        w.append(0xa9bf7bfd)
+        w.append(0x94000000 | (at[callee] - len(w)) & 0x3ffffff)
+        page = (0x100 + f // 64 - (len(w) >> 10)) & 0x1fffff
+        w.append(0x90000008 | (page & 3) << 29 | (page >> 2 & 0x7ffff) << 5)
+        w.append(0xd2800000 | (f & 0xffff) << 5 | 9)
+        w.append(0xf2a00000 | (f >> 16) << 5 | 9)
+        w.extend(0x91000000 | j << 10 | 9 << 5 | 9 for j in range(5, ln(f) - 1))
+        w.append(0xd65f03c0)
+    return struct.pack(\"<%dI\" % len(w), *w)
+def macho(c):
+    h = bytearray(0x200)
+    struct.pack_into(\"<IIIIII\", h, 0, 0xfeedfacf, 0x0100000c, 0, 2, 1, 152)
+    size = 0x200 + len(c)
+    struct.pack_into(\"<II16sQQQQ\", h, 32, 0x19, 152, b\"__TEXT\", 0x100000000, size, 0, size)
+    struct.pack_into(\"<I\", h, 32 + 64, 1)
+    struct.pack_into(\"<16s16sQQII\", h, 104, b\"__text\", b\"__TEXT\", 0x100000200, len(c), 0x200, 0)
+    struct.pack_into(\"<I\", h, 104 + 64, 0x80000400)
+    return bytes(h) + c
+for name, pad in ((\"a\", 0), (\"b\", 37)):
+    open(os.path.join(sys.argv[1], name), \"wb\").write(macho(code(215000, pad)))
+" $out'
     copy paper.pdf $codecs/aqr-pdf/corpus/arxiv/2307.09288.pdf
     copy db.sqlite $codecs/aqr-sqlite/corpus/system/f502b9__ystem_Library_Security_Certificates.bundle_Contents_Resources_ValidProduction_valid.sqlite
     copy image.fits $codecs/aqr-fits/corpus/misc/frame-r-001000-1-0027.fits

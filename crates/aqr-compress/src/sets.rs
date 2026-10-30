@@ -104,7 +104,7 @@ fn forests(files: &[&[u8]], threads: usize, limit: usize) -> Vec<(Vec<usize>, Ve
         let sig = |i: usize| signatures[group[i]].as_ref().unwrap();
         let n = group.len();
         let rows = par_map(n, threads, |i| (0..n).map(|j| if i == j { 1.0 } else { sig(i).alike(sig(j)) }).collect());
-        let (order, parents) = tree(&rows);
+        let (order, parents) = tree(&rows, MIN_ALIKE);
         for (order, parents) in cut(&order, &parents, |i| files[group[i]].len(), limit) {
             if parents.iter().any(Option::is_some) {
                 out.push((order.into_iter().map(|i| group[i]).collect(), parents));
@@ -216,9 +216,9 @@ pub(crate) fn sets(
 
 /// A maximum spanning forest of `alike` (each row a member's likeness to every member): from
 /// the member most like the others, each joined to the one it is most like, while that is
-/// [`MIN_ALIKE`] at least; else a tree of its own starts. The members in the order of a
+/// `min` at least; else a tree of its own starts. The members in the order of a
 /// depth-first walk (parents first), and the parent of each in that order.
-fn tree(alike: &[Vec<f64>]) -> (Vec<usize>, Vec<Option<usize>>) {
+pub(crate) fn tree(alike: &[Vec<f64>], min: f64) -> (Vec<usize>, Vec<Option<usize>>) {
     let n = alike.len();
     let mut parent = vec![None; n];
     let mut done = vec![false; n];
@@ -226,7 +226,7 @@ fn tree(alike: &[Vec<f64>]) -> (Vec<usize>, Vec<Option<usize>>) {
     let mut roots = Vec::new();
     for _ in 0..n {
         let next = (0..n).filter(|&k| !done[k]).max_by(|&a, &b| best[a].0.total_cmp(&best[b].0)).unwrap();
-        let k = if best[next].0 >= MIN_ALIKE {
+        let k = if best[next].0 >= min {
             parent[next] = Some(best[next].1);
             next
         } else {
@@ -310,7 +310,7 @@ mod tests {
             vec![0.9, 0.5, 1.0, 0.0],
             vec![0.0, 0.1, 0.0, 1.0],
         ];
-        let (order, parents) = tree(&alike);
+        let (order, parents) = tree(&alike, MIN_ALIKE);
         assert_eq!(order, [2, 0, 1, 3]);
         assert_eq!(parents, [None, Some(0), Some(0), None]);
         // cut to 2 bytes of members of a byte each: 1 has no parent in its piece
