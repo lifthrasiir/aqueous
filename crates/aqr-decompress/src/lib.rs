@@ -158,6 +158,11 @@ pub const BZ2: Module = aqr_bz2::formula::MODULE;
 /// the streams'.
 pub const LZX: Module = aqr_lzx::formula::MODULE;
 
+/// A CAB file's MSZIP and stored folders rebuilt from the joined DEFLATE streams of the MSZIP
+/// folders (each its blocks' streams as one) and the stored folders' data. Inputs: the joined
+/// streams, the stored data, the bytes kept (the data blocks' headers) and the index.
+pub const MSZIP: Module = aqr_mszip::formula::MODULE;
+
 /// Snappy's compressor on data, for a Snappy stream. Parameters: the compressor's hash; inputs:
 /// the data.
 pub const SNAPPY: Module = aqr_snappy::formula::MODULE;
@@ -256,7 +261,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 63] = [
+pub const MODULES: [Module; 64] = [
     X86,
     X86_REMAP,
     ARM64,
@@ -282,6 +287,7 @@ pub const MODULES: [Module; 63] = [
     BVX,
     BZ2,
     LZX,
+    MSZIP,
     SNAPPY,
     LEVELDB,
     ZIP,
@@ -544,6 +550,9 @@ impl Native {
         } else if m == LZX {
             none(resources)?;
             aqr_lzx::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == MSZIP {
+            none(resources)?;
+            aqr_mszip::module::decode(params, inputs, len).map_err(msg)
         } else if m == SNAPPY {
             none(resources)?;
             aqr_snappy::formula::decode(params, inputs, len, threads).map_err(msg)

@@ -41,6 +41,7 @@ aqr-bvx = { path = "../../codecs/aqr-bvx" }
 aqr-bz2 = { path = "../../codecs/aqr-bz2" }
 aqr-gif = { path = "../../codecs/aqr-gif" }
 aqr-lzx = { path = "../../codecs/aqr-lzx" }
+aqr-mszip = { path = "../../codecs/aqr-mszip" }
 aqr-mp3 = { path = "../../codecs/aqr-mp3" }
 aqr-pdf = { path = "../../codecs/aqr-pdf" }
 aqr-png = { path = "../../codecs/aqr-png" }

@@ -1,0 +1,28 @@
+[package]
+name = "aqr-mszip"
+version = "0.1.0"
+edition = "2024"
+description = "CAB files taken apart into their files' contents, MSZIP folders rebuilt from their data by aqr-flate"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`, `cab`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula", "dep:aqr-flate"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-flate = { path = "../aqr-flate", optional = true }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+[dev-dependencies]
+aqr-decompress = { path = "../../crates/aqr-decompress" }
+aqr-flate = { path = "../aqr-flate" }
+memmap2 = "0.9"
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-mszip-check"
+path = "examples/check.rs"

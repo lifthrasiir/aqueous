@@ -6,7 +6,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "asar-recons",
         version: 1,
-        sha512_256: hex("7a753a3fd492919e52fef49685bfeaa24703ead307257dc51e54dc235f32f07f"),
+        sha512_256: hex("247be485b15198abd547b17c693c9f61dd5c206010fb071c74f9e9d72d98062f"),
         block: include_bytes!("../wasm/asar-recons.block"),
     },
     Known {
@@ -174,7 +174,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("d0eac1ce671e3d35d57d1e6e03cd00c3d474540d50f542b09a24d503fb338384"),
+        sha512_256: hex("0355718f6297f98da16d552deca2835c72cd783a0e8bf50c6dd0a3454a342495"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -252,7 +252,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("7ccc80894463e230e11941eec03930227eeafa858d7b77667599aedf021270cc"),
+        sha512_256: hex("bf580ab6611b5ec0f264f33f361f52f262319597bc2d70823486295dacb5189f"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {
@@ -260,6 +260,12 @@ pub const KNOWN: &[Known] = &[
         version: 5,
         sha512_256: hex("d54625a5cecbb3a1400c7204b5a57285f143d4d84a82800f4ff44e135040bf17"),
         block: include_bytes!("../wasm/mp3-recons.block"),
+    },
+    Known {
+        name: "mszip-recons",
+        version: 1,
+        sha512_256: hex("5684440219312dbb24c0130c8799d7bab7313f81297d67f479bb3323ef64fe7d"),
+        block: include_bytes!("../wasm/mszip-recons.block"),
     },
     Known {
         name: "obj-recons",
@@ -378,7 +384,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "zip-recons",
         version: 3,
-        sha512_256: hex("56697d982de6ef516be8915e29c1dd306f32090faee15945928d5cb63bcb48d1"),
+        sha512_256: hex("20ca31a2e051852e7815e61beb5c3fb5b065d05f61dbc47a3a0366599da91a7f"),
         block: include_bytes!("../wasm/zip-recons.block"),
     },
 ];

@@ -58,6 +58,8 @@ pub enum Format {
     /// 7z archive (aqr-7z, and aqr-lzma on its folders of LZMA or LZMA2), known by its
     /// signature header.
     SevenZip,
+    /// CAB file (aqr-mszip, and aqr-flate on its MSZIP folders), known by its header.
+    Cab,
     /// git pack (aqr-git, and aqr-flate on its entries' zlib streams), a whole file: not
     /// looked for in other data.
     GitPack,
@@ -106,7 +108,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 43] = [
+    pub const ALL: [Format; 44] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -133,6 +135,7 @@ impl Format {
         Format::LevelDb,
         Format::Zip,
         Format::SevenZip,
+        Format::Cab,
         Format::GitPack,
         Format::Fasta,
         Format::Wasm,
@@ -180,6 +183,7 @@ impl Format {
             Format::LevelDb => "leveldb",
             Format::Zip => "zip",
             Format::SevenZip => "7z",
+            Format::Cab => "cab",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
             Format::Wasm => "wasm",
@@ -260,6 +264,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
+        b"cab" => format(Format::Cab),
         b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg" | b"oga" | b"ogv"
         | b"opus" | b"aac" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
@@ -339,6 +344,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Zip)
     } else if aqr_7z::formula::starts(d) {
         Some(Format::SevenZip)
+    } else if aqr_mszip::formula::starts(d) {
+        Some(Format::Cab)
     } else if start && aqr_git::pack::starts(d) {
         Some(Format::GitPack)
     } else if at(0, &[0x1f, 0x8b, 8]) {
@@ -396,7 +403,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'I' => b == b'D',
         b'D' => b == b'D',
         0xff => b == 0xd8 || b & 0xe0 == 0xe0,
-        b'M' => b == b'Z',
+        b'M' => b == b'Z' || b == b'S',
         // Mach-O, little-endian (32- or 64-bit), and universal
         0xce | 0xcf => b == 0xfa,
         0xca => b == 0xfe,
@@ -466,7 +473,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'I' => d.starts_with(b"ID3"),
         b'D' => aqr_tex::dds::starts(d),
         0xff => true,
-        b'M' => d.starts_with(b"MZ"),
+        b'M' => d.starts_with(b"MZ") || aqr_mszip::formula::starts(d),
         0xce | 0xcf => d.starts_with(&[d[0], 0xfa, 0xed, 0xfe]),
         0xca => d.starts_with(&[0xca, 0xfe, 0xba]),
         0x1f => d.starts_with(&[0x1f, 0x8b]),

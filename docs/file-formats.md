@@ -97,6 +97,7 @@ reservoir is rebuilt.
 | ar, tar, cpio | aqr-bundle | the 10gb corpus (README) | 2810.8 → 2775.0 MB for all of it | | | 6600 (the module) | 28000 (the module) | not measured | measured with `aqr` and `aqr-bundle-check`, not `aqr-show`: an archive alone gains nothing, its files are recompressed by their formats and shared with the same files archived along (`gimp.tar` and its files −11.3 MB); ar archives of objects +1.0 MB |
 | asar (Electron) | aqr-asar | 27 archives of one machine (README) | 714.42 → 697.11 MB for all of them (with aqr-gif) | | | 950 | 4100 (the module) | not measured | an archive alone gains little (headers at zstd -3 2.13 → 0.84 MB); its files are recompressed by their formats; archives of many small files (`node_modules`) lose alone, as their text is a stream apart (aqr-compress's kinds) |
 | ISO 9660, UDF images | aqr-iso | a Windows Server 2008 R2 DVD, 3.17 GB (README) | 2777.6 → 2776.9 MB | | 177 (`aqr`, all threads) | | 1.82 GB peak for 3.17 GB (2.04 before) | measured 2026-10-30 with `aqr`; no module (the image is its files' contents and the rest); 89% of the DVD is `install.wim` (LZX), which it gives as a file of its own |
+| CAB (MSZIP, stored) | aqr-mszip, aqr-flate | 441 CAB files of Windows, 1.80 GB (README) | 1662.7 → 1331.3 MB for all of them | | 23 (`aqr`, all threads) | 84 (`-t`) | 3.92 GB peak footprint (1.29 before) | measured 2026-10-31 with `aqr`; MSZIP folders as one DEFLATE stream each (the blocks joined), rebuilt by aqr-flate (records 4.6% of the streams at profile 6, 1.2% at 10), the files' contents recompressed in turn; LZX folders (586 MB) kept |
 | PPMd var. J (`.pmd`) | aqr-ppmd | the 10gb corpus's two files, 205.4 MB (README) | 2579.2 → 2557.8 MB for all of it | | | | not measured | measured 2026-10-30 with `aqr`, not `aqr-show`; no module (the file is its header and its data): `enwik8.pmd`'s data is stored within `enwik9.pmd`'s, as their texts start alike. PPMd itself is not recoded |
 | LevelDB tables (Snappy) | aqr-snappy | 33 tables of a Chrome profile, 13.3 MB (README) | −30.5% against `zstd -3` | | | 315 (tables rebuilt) | not measured | both hashes of Snappy 1.2.2 |
 | git checkouts | aqr-git (packs), aqr-flate (loose objects), the archive (the rest) | 15 repositories, 1196 MB (README) | 0.454 (0.430 from level 7: aqr-flate's adaptive profile) | 0.651 (`tar \| zstd -19 --long=27`) | 23 (`aqr`, 10 threads) | 142 (`aqr -t`, 10 threads) | peak RSS 0.2–7.1 GB (pyre, 665 MB, 10.7×) | directories, measured with `aqr` 2026-10-28, not `aqr-show`; the former aqr-git (its own container) came to 0.452, 0.255 with every zlib stream rebuilt and all the packs' data in one stream (here in solid blocks of 16 MiB) |
@@ -127,6 +128,7 @@ reservoir is rebuilt.
 | aqr-bundle | members sliced from the archive's bytes rather than copied (the memory of `.tar.gz`); COFF objects of ar archives (aqr-exe); old GNU sparse files; tar archives found in other data |
 | aqr-asar | contents of many small files by kind cost alone and pay in a batch (etcher +1.96 MB alone; of no kind the 27 archives +9.2 MB) |
 | aqr-ppmd | the data decoded and coded again (a few MB/s, `docs/10gb-todo.md` item 5); files of several files past the first; other variants |
+| aqr-mszip | CAB's LZX folders (aqr-lzx: streams of frames, windows up to 2 MiB) and CHM; the data blocks' checksums derived |
 | aqr-iso | UDF's metadata partition (2.50, Blu-ray); raw 2352-byte sectors (EDC/ECC); the files' contents sliced from the image rather than copied; WIM (LZX) recompression for the install images |
 
 ## Worth doing
@@ -274,7 +276,7 @@ container is TIFF/EXIF.
 | LZFSE, LZVN containers | APFS and HFS+ transparent compression (decmpfs), DMG (ULFO), `.aar`, `.xip` | chunks of LZFSE or LZVN behind a table of their own | aqr-bvx takes whole streams (asset catalogs, `.lzfse`); the chunks are raw LZVN or streams behind those tables | aqr-bvx |
 | DMG (UDZO, UDBZ) | macOS distribution | zlib or bzip2 per chunk | the zlib chunks | aqr-flate |
 | xar (`.pkg`) | macOS installers | a zlib table of contents; a payload in gzip'd cpio or pbzx (xz chunks) | the zlib and gzip parts | aqr-flate |
-| CAB (MSZIP), MSI | Windows installers | MSZIP is deflate per block; MSI is CAB inside OLE | MSZIP is easy | aqr-flate |
+| MSI | Windows installers | CAB inside an OLE compound file | the CAB's sectors gathered (aqr-mszip takes CAB files of MSZIP) | aqr-mszip |
 | AppX, MSIX, NuGet | Windows apps, .NET packages | ZIP; AppX adds a block map of SHA-256 hashes | aqr-zip; the block map derived | aqr-zip |
 | squashfs, initramfs, Android sparse images | firmware, Linux distributions | gzip, xz, zstd or lz4 blocks | the gzip and lz4 blocks | aqr-flate, aqr-lz4 |
 | OCI and Docker layers | container registries | tar.gz by Go's `compress/flate` | flate-zoo has Go's encoder already; the tar is aqr-bundle's | aqr-flate, aqr-bundle |

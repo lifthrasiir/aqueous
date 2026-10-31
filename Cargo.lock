@@ -167,6 +167,7 @@ dependencies = [
  "aqr-lzma",
  "aqr-lzo",
  "aqr-mp3",
+ "aqr-mszip",
  "aqr-obj",
  "aqr-pdf",
  "aqr-png",
@@ -220,6 +221,7 @@ dependencies = [
  "aqr-lzx",
  "aqr-modules",
  "aqr-mp3",
+ "aqr-mszip",
  "aqr-obj",
  "aqr-pdf",
  "aqr-png",
@@ -478,6 +480,7 @@ dependencies = [
  "aqr-lzo",
  "aqr-lzx",
  "aqr-mp3",
+ "aqr-mszip",
  "aqr-obj",
  "aqr-pdf",
  "aqr-png",
@@ -501,6 +504,17 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "memchr",
+]
+
+[[package]]
+name = "aqr-mszip"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-decompress",
+ "aqr-flate",
+ "aqr-formula",
+ "memmap2",
 ]
 
 [[package]]

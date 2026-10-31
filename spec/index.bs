@@ -4811,7 +4811,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
   </thead>
   <tbody>
     <tr>
-      <td><code>7a753a3fd492919e52fef49685bfeaa24703ead307257dc51e54dc235f32f07f</code>
+      <td><code>247be485b15198abd547b17c693c9f61dd5c206010fb071c74f9e9d72d98062f</code>
       <td>asar-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/asar-recons.wasm" title="crates/aqr-modules/wasm/asar-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-asar/FORMAT.md" title="codecs/aqr-asar/FORMAT.md">R</a>
@@ -4951,7 +4951,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flac-recons.wasm" title="crates/aqr-modules/wasm/flac-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flac/FORMAT.md" title="codecs/aqr-flac/FORMAT.md">R</a>
     <tr>
-      <td><code>d0eac1ce671e3d35d57d1e6e03cd00c3d474540d50f542b09a24d503fb338384</code>
+      <td><code>0355718f6297f98da16d552deca2835c72cd783a0e8bf50c6dd0a3454a342495</code>
       <td>flate-set@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/flate-set.wasm" title="crates/aqr-modules/wasm/flate-set.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-flate/FORMAT.md" title="codecs/aqr-flate/FORMAT.md">R</a>
@@ -5016,7 +5016,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lzo-recons.wasm" title="crates/aqr-modules/wasm/lzo-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzo/FORMAT.md" title="codecs/aqr-lzo/FORMAT.md">R</a>
     <tr>
-      <td><code>7ccc80894463e230e11941eec03930227eeafa858d7b77667599aedf021270cc</code>
+      <td><code>bf580ab6611b5ec0f264f33f361f52f262319597bc2d70823486295dacb5189f</code>
       <td>lzx-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/lzx-recons.wasm" title="crates/aqr-modules/wasm/lzx-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-lzx/FORMAT.md" title="codecs/aqr-lzx/FORMAT.md">R</a>
@@ -5025,6 +5025,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td>mp3-recons@5
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/mp3-recons.wasm" title="crates/aqr-modules/wasm/mp3-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-mp3/FORMAT.md" title="codecs/aqr-mp3/FORMAT.md">R</a>
+    <tr>
+      <td><code>5684440219312dbb24c0130c8799d7bab7313f81297d67f479bb3323ef64fe7d</code>
+      <td>mszip-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/mszip-recons.wasm" title="crates/aqr-modules/wasm/mszip-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-mszip/FORMAT.md" title="codecs/aqr-mszip/FORMAT.md">R</a>
     <tr>
       <td><code>202ee85ad95b14d43d585720b2642db0df2527d34bf840dd2fb7665b1c23d16d</code>
       <td>obj-recons@1
@@ -5121,7 +5126,7 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/xsv-recons.wasm" title="crates/aqr-modules/wasm/xsv-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-xsv/FORMAT.md" title="codecs/aqr-xsv/FORMAT.md">R</a>
     <tr>
-      <td><code>56697d982de6ef516be8915e29c1dd306f32090faee15945928d5cb63bcb48d1</code>
+      <td><code>20ca31a2e051852e7815e61beb5c3fb5b065d05f61dbc47a3a0366599da91a7f</code>
       <td>zip-recons@3
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/zip-recons.wasm" title="crates/aqr-modules/wasm/zip-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-zip/FORMAT.md" title="codecs/aqr-zip/FORMAT.md">R</a>

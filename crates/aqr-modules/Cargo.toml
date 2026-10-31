@@ -36,6 +36,7 @@ aqr-lzma = { path = "../../codecs/aqr-lzma", default-features = false }
 aqr-lzo = { path = "../../codecs/aqr-lzo", default-features = false }
 aqr-lzx = { path = "../../codecs/aqr-lzx", default-features = false }
 aqr-mp3 = { path = "../../codecs/aqr-mp3", default-features = false }
+aqr-mszip = { path = "../../codecs/aqr-mszip", default-features = false }
 aqr-obj = { path = "../../codecs/aqr-obj", default-features = false }
 aqr-pdf = { path = "../../codecs/aqr-pdf", default-features = false }
 aqr-png = { path = "../../codecs/aqr-png", default-features = false }
@@ -92,6 +93,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "lzx-recons"
 path = "src/bin/lzx-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "mszip-recons"
+path = "src/bin/mszip-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

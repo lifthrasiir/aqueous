@@ -446,6 +446,33 @@ fn lzx_same_as_wasm() {
     }
 }
 
+/// CAB files of MSZIP and stored folders (aqr-mszip's fixtures) natively and as WebAssembly
+/// alike, and their bytes kept damaged in turn failing alike (or giving the same).
+#[test]
+fn mszip_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    for name in ["mixed", "fixed"] {
+        let d = fixture(&format!("codecs/aqr-mszip/tests/data/{name}.cab"));
+        let f = aqr_mszip::formula::encode(&d, 1).unwrap();
+        let c = enc.encode(&f, None).unwrap();
+        assert!(aqr::decode(&c, &Native::default()).unwrap() == d, "{name}");
+        assert!(decode_wasm(&c).unwrap() == d, "{name}");
+        let i = f.streams.iter().position(|s| s.class == "mszip/index").unwrap();
+        for k in 0..8 {
+            let mut bad = f.clone();
+            let s = &mut bad.streams[i].data;
+            let at = s.len() * k / 8;
+            s[at] ^= 1 << k;
+            let c = enc.encode(&bad, None).unwrap();
+            let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+            assert_eq!(n.is_ok(), w.is_ok(), "{name} {k}: {n:?} {w:?}");
+            if let (Ok(n), Ok(w)) = (n, w) {
+                assert!(n == w, "{name} {k}");
+            }
+        }
+    }
+}
+
 /// A module written by hand, of `wat`.
 fn module(wat: &str) -> Vec<u8> {
     wat::parse_str(wat).unwrap()

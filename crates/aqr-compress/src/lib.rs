@@ -944,6 +944,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
                 Format::Zip => zip::zip(d, opt, depth, cx),
                 Format::SevenZip => sevenz(d, opt),
+                Format::Cab => cab(d, opt, cx),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Bvx => bvx(d, opt, cx),
@@ -1798,6 +1799,23 @@ fn sevenz(d: &[u8], opt: &Options) -> Option<Formula> {
     aqr_7z::formula::encode_with(d, &o)
 }
 
+/// aqr-mszip's formula of a CAB file, the contents of the files a content of the applications,
+/// recompressed in turn, each by its kind by its name ([`kind_by_name`]). Its MSZIP folders
+/// inflate within what is left of the budget ([`Options::expansion`]).
+fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let (profile, zlib) = opt.flate();
+    let o = aqr_mszip::formula::Options {
+        threads: opt.threads,
+        profile,
+        zlib,
+        limit: cx.inflate_left(),
+        kind: kind_by_name,
+    };
+    let e = aqr_mszip::formula::encode_with(d, &o)?;
+    cx.inflate(e.inflated);
+    Some(e.formula)
+}
+
 /// aqr-pdf's options at the level of `opt`: the records of its DEFLATE streams of the profile
 /// that [`Options::flate`] tells, and from level 7 on with no time budget, as DEFLATE is always
 /// rebuilt there ([`probe`]).
@@ -1994,6 +2012,20 @@ mod tests {
         // (the modules the archive's anyway)
         let f = recompress(&d, &Options { shared_modules: true, ..Options::default() });
         assert!(f.streams.iter().any(|s| s.class == aqr_iso::formula::REST));
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
+        assert!(f.eval(&Native::default()).unwrap() == d);
+    }
+
+    /// A CAB file's MSZIP folder is taken apart into its files, recompressed in turn: a JPEG file
+    /// in it by aqr-jpeg.
+    #[test]
+    fn cabs_taken_apart() {
+        let d = std::fs::read(format!("{}/../../codecs/aqr-mszip/tests/data/jpeg.cab", env!("CARGO_MANIFEST_DIR")))
+            .unwrap();
+        assert_eq!(detect(&d), Some(Format::Cab));
+        // (the modules the archive's anyway)
+        let f = recompress(&d, &Options { shared_modules: true, ..Options::default() });
+        assert!(f.applies().iter().any(|a| a.module == aqr_decompress::MSZIP));
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert!(f.eval(&Native::default()).unwrap() == d);
     }
