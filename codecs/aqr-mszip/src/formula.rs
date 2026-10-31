@@ -41,6 +41,9 @@ pub struct Options {
     /// What a file's contents are by its name: the contents of each [`Kind`] are a stream of their
     /// own, sliced in order. By default all are unknown.
     pub kind: fn(&[u8]) -> Kind,
+    /// Whether LZX folders are taken (by default, yes): their split is slow (a stream on one
+    /// thread, about 22 MB/s of data) and an LZX CAB alone gains little.
+    pub lzx: bool,
 }
 
 impl Default for Options {
@@ -51,6 +54,7 @@ impl Default for Options {
             zlib: true,
             limit: u64::MAX,
             kind: |_| Kind::Unknown,
+            lzx: true,
         }
     }
 }
@@ -141,7 +145,7 @@ fn make(input: &[u8], c: &Cab, i: usize, max: u64, opt: &Options) -> Option<Made
             let blocks = joined.iter().map(|j| j.blocks).collect();
             (data.len() == f.size()).then_some(Made::Mszip { data, record, blocks, joined: w.out.len() })
         }
-        cab::LZX if f.size() as u64 <= max => {
+        cab::LZX if opt.lzx && f.size() as u64 <= max => {
             let v = aqr_lzx::lzx::Variant::cab((f.type_compress >> 8 & 0x1f) as u8)?;
             let sp = aqr_lzx::recons::split_stream(&payloads.concat(), f.size(), v).ok()?;
             Some(Made::Lzx { data: sp.data, record: sp.record, window_bits: v.window_bits })

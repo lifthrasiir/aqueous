@@ -176,8 +176,9 @@ fn lzx_folder() {
     assert!(f.applies().iter().any(|a| a.module == aqr_lzx::formula::MODULE && a.params == [16]));
     let contents: usize = f.streams.iter().filter(|s| s.class == "raw").map(|s| s.data.len()).sum();
     assert_eq!(contents, n);
-    // past the limit, kept
+    // past the limit, or without LZX folders, kept
     assert!(formula::encode_with(&d, &formula::Options { limit: n as u64 - 1, ..Default::default() }).is_none());
+    assert!(formula::encode_with(&d, &formula::Options { lzx: false, ..Default::default() }).is_none());
 }
 
 /// A number as CHM's directory writes it: 7-bit groups, the high first.

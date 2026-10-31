@@ -271,7 +271,6 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
         b"cab" => format(Format::Cab),
-        b"chm" => format(Format::Chm),
         b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg" | b"oga" | b"ogv"
         | b"opus" | b"aac" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,

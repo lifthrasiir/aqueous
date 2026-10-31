@@ -919,6 +919,16 @@ fn bvx_on(opt: &Options) -> bool {
     opt.level.scale() >= 9
 }
 
+/// Whether LZX streams (CAB's folders, CHM's sections) are taken at the level of `opt`: from
+/// level 9, as they split at about 22 MB/s of data on one thread a stream, and a CAB or CHM file
+/// alone gains little for it (441 CAB files: -1.1% for 73.7 -> 290 s; 139 CHM files: -18.3% for
+/// 3.2 -> 14.8 s). What pays is the files archived along with them (40 LZX CAB files with the
+/// files they hold: -33%).
+/// (CHM files are not known by their names: one known so and turned down would not be scanned.)
+fn lzx_on(opt: &Options) -> bool {
+    opt.level.scale() >= 9
+}
+
 /// `d` as a file of `format`, with its contents nested, if its recompressor takes it (and the
 /// formula is [`smaller`]).
 fn recompress_as(format: Format, d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
@@ -1802,7 +1812,8 @@ fn sevenz(d: &[u8], opt: &Options) -> Option<Formula> {
 
 /// aqr-mszip's formula of a CAB file, the contents of the files a content of the applications,
 /// recompressed in turn, each by its kind by its name ([`kind_by_name`]). Its MSZIP and LZX
-/// folders inflate within what is left of the budget ([`Options::expansion`]).
+/// folders (the latter from level 9, [`lzx_on`]) inflate within what is left of the budget
+/// ([`Options::expansion`]).
 fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let (profile, zlib) = opt.flate();
     let o = aqr_mszip::formula::Options {
@@ -1811,6 +1822,7 @@ fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
         zlib,
         limit: cx.inflate_left(),
         kind: kind_by_name,
+        lzx: lzx_on(opt),
     };
     let e = aqr_mszip::formula::encode_with(d, &o)?;
     cx.inflate(e.inflated);
@@ -1818,8 +1830,12 @@ fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
 }
 
 /// aqr-mszip's formula of a CHM file, the files of its LZX section a content of the application,
-/// recompressed in turn, each by its kind by its name; within what is left of the budget.
+/// recompressed in turn, each by its kind by its name; within what is left of the budget, from
+/// level 9 ([`lzx_on`]).
 fn chm(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    if !lzx_on(opt) {
+        return None;
+    }
     let o = aqr_mszip::formula::Options {
         threads: opt.threads,
         limit: cx.inflate_left(),
@@ -2043,6 +2059,13 @@ mod tests {
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::MSZIP));
         assert!(f.applies().iter().any(|a| a.module == aqr_decompress::JPEG));
         assert!(f.eval(&Native::default()).unwrap() == d);
+    }
+
+    /// LZX streams (CAB's folders, CHM's sections) are taken from level 9 only.
+    #[test]
+    fn lzx_from_level_9() {
+        let at = |level| lzx_on(&Options { level, ..Options::default() });
+        assert!(!at(Level::MID) && !at(Level::HIGH) && at(Level::Of(9)));
     }
 
     /// The contents of pure formats are made beforehand, each once: those of a ZIP archive's

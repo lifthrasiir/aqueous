@@ -6,7 +6,8 @@ LZX folders by aqr-lzx's (`lzx-recons`), its stored folders are their data; a CH
 section is rebuilt by aqr-lzx's module from the section's files. The rest of the file is kept as
 it is. What it is for is the files: each file's contents are a content of the archive,
 recompressed by their formats (a PE file by aqr-exe, a JPEG file by aqr-jpeg) and stored once
-where the same files are archived along with it. Neither container needs a transform of its own
+where the same files are archived along with it. aqr-compress takes LZX (CAB's LZX folders, CHM
+files) from level 9 only, as it is slow (below). Neither container needs a transform of its own
 (CHM's reset table, which the LZX stream tells, is kept), so both are here, beside MSZIP.
 
 ```sh
@@ -66,8 +67,9 @@ packages, updates, installers' caches, Office's).
 
 Through `aqr` (all threads, level mid), the 441 files archive into 1,662.7 -> 1,331.3 MB with the
 MSZIP folders (-19.9%; before, the CAB files were archived as they are), compressing in 5.6 ->
-73.7 s at a peak footprint of 1.29 -> 3.92 GB, testing in 19.9 s; then -> 1,316.5 MB with the
-LZX folders too (-1.1%), compressing in 290 s at 5.38 GB, testing in 21.5 s at 2.54 GB.
+73.7 s at a peak footprint of 1.29 -> 3.92 GB, testing in 19.9 s. With the LZX folders taken at
+that level too, they came to 1,316.5 MB (-1.1%) in 290 s at 5.38 GB (testing in 21.5 s): hence
+LZX from level 9 only, where the level mid is again 1,331.3 MB in 63 s.
 
 The MSZIP records are three times aqr-flate's usual share at the static profiles: Microsoft's
 encoder is not among the catalog's rules. Profile 10 (aqr-compress's from level 7) predicts it
@@ -82,8 +84,9 @@ on one thread.
 
 CHM files: 139 of Windows and of programs' help (90.9 MB; windows of 64 and 128 KiB, resets
 every 2 or 4 frames), 138 rebuilt (the other is cut 2 bytes short of its content), the records
-4.91% of the LZX content (87.5 MB). Through `aqr`: 88.36 -> 72.19 MB (-18.3%), compressing in 3.2
--> 14.8 s at 0.47 -> 0.90 GB, testing in 4.9 s.
+4.91% of the LZX content (87.5 MB). Through `aqr` at level mid (taken there for the measure):
+88.36 -> 72.19 MB (-18.3%), compressing in 3.2 -> 14.8 s at 0.47 -> 0.90 GB, testing in 4.9 s; at
+level 9 (as aqr-compress takes them), 69.23 MB in 12.9 s at 1.44 GB.
 
 ## Tests
 
@@ -102,8 +105,8 @@ natively and as WebAssembly alike.
 
 Done: CAB files of MSZIP, LZX and stored folders; CHM files' LZX sections. Left:
 
-- Speed of large LZX folders (one stream on one thread), and whether to take them where the
-  probe says they do not pay.
+- Speed of LZX (about 22 MB/s of data splitting, a stream on one thread), to take it below
+  level 9; and whether to take it where the probe says it does not pay.
 - Quantum folders (none in the corpus); CHM's section 0 files sliced as contents (they are kept).
 - The data blocks' checksums and sizes kept as they are (4 bytes of checksum a block, which a
   module could derive), and folders going on in another cabinet.
