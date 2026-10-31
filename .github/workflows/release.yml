@@ -1,0 +1,172 @@
+name: release
+
+# A tag `v*` pushed builds the binaries and uploads them to the tag's release: a draft made
+# for it unless a release is there already (its notes are written by hand), the assets
+# replaced if the workflow is run again. Run by hand (workflow_dispatch) or on schedule, it only
+# builds them as the run's artifacts.
+#
+# Dependencies are cached (rust-cache), saved only by runs on main: a tag's run can restore
+# the caches of main but not of another tag's. The scheduled runs, twice a week on main, keep
+# them there (and catch a build broken, say by nightly, before a tag does).
+#
+# Assets, STEM being the tag without `v0.0.` (v0.0.20261031 -> 20261031):
+#   aqr-STEM.exe                  Windows 10 on, x86_64
+#   aqr-STEM-win7.exe             Windows 7 and 8 (cargo +nightly win7)
+#   aqr-STEM-win-install.exe      the installer, aqr.exe and aqr-win.exe (crates/aqr-win-install)
+#   aqr-STEM-mac.zip              Aqueous.app, universal (crates/aqr-mac/bundle.sh --universal)
+#   aqr-STEM-linux-x86_64.tar.xz  aqr (glibc of Ubuntu 22.04 on)
+#   aqr-STEM-linux-aarch64.tar.xz
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+  # (main's caches kept warm: GitHub drops a cache unused for 7 days)
+  schedule:
+    - cron: '17 18 * * 0,3'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - id: stem
+        run: |
+          s=${GITHUB_REF_NAME#v0.0.}
+          [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
+          echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+      # (the toolchain of rust-toolchain.toml)
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --profile dist -p aqr -p aqr-win
+      # build.rs packs target/dist/{aqr,aqr-win}.exe, built above.
+      - run: cargo build --profile dist -p aqr-win-install
+      - run: |
+          mkdir out
+          cp target/dist/aqr.exe "out/aqr-${{ steps.stem.outputs.stem }}.exe"
+          cp target/dist/aqr-win-install.exe "out/aqr-${{ steps.stem.outputs.stem }}-win-install.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: out/*
+          if-no-files-found: error
+
+  win7:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - id: stem
+        run: |
+          s=${GITHUB_REF_NAME#v0.0.}
+          [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
+          echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+      - run: rustup toolchain install nightly --profile minimal --component rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo +nightly win7 -p aqr
+      - run: |
+          mkdir out
+          cp target/x86_64-win7-windows-msvc/dist/aqr.exe "out/aqr-${{ steps.stem.outputs.stem }}-win7.exe"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win7
+          path: out/*
+          if-no-files-found: error
+
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - id: stem
+        run: |
+          s=${GITHUB_REF_NAME#v0.0.}
+          [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
+          echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+      - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: crates/aqr-mac/bundle.sh --universal
+      - run: |
+          mkdir out
+          cp target/dist/Aqueous.zip "out/aqr-${{ steps.stem.outputs.stem }}-mac.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac
+          path: out/*
+          if-no-files-found: error
+
+  linux:
+    strategy:
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-22.04
+          - arch: aarch64
+            runner: ubuntu-22.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - id: stem
+        run: |
+          s=${GITHUB_REF_NAME#v0.0.}
+          [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
+          echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          key: ${{ matrix.arch }}
+      - run: cargo build --profile dist -p aqr --bin aqr
+      - run: |
+          mkdir out
+          tar -C target/dist -cJf "out/aqr-${{ steps.stem.outputs.stem }}-linux-${{ matrix.arch }}.tar.xz" aqr
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.arch }}
+          path: out/*
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [windows, win7, mac, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l out
+          gh release view "$TAG" > /dev/null 2>&1 ||
+            gh release create "$TAG" --draft --verify-tag --title "Aqueous archiver $TAG" --notes ""
+          gh release upload "$TAG" out/* --clobber
