@@ -933,9 +933,10 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
     tests::TRIED.with(|t| t.borrow_mut().push(format));
     let ready = cx.ready.borrow_mut().remove(&(d.as_ptr() as usize, d.len(), format));
     let prepared = ready.is_some();
+    let (words, held) = (cx.words.as_deref(), cx.held.as_deref());
     let f = match ready {
         Some(f) => f,
-        None => pure(format, d, opt, opt.threads, cx.words.as_deref(), &cx.once).unwrap_or_else(|| {
+        None => pure(format, d, opt, depth, opt.threads, words, &cx.once, held).unwrap_or_else(|| {
             catch_unwind(AssertUnwindSafe(|| match format {
                 Format::Pe => exe::pe(d),
                 Format::MachO => exe::macho(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d))),
@@ -1733,14 +1734,19 @@ fn content(opt: &Options, m: Module, i: usize) -> Option<&Content> {
 /// its data, and takes nothing of a budget) and of the level of `opt`: `None` for the other
 /// formats. Whether coding pays off is the recompressor's call: the streams are not compressed
 /// yet, so their size says little. The formula is the same whatever `threads` is. Text is coded
-/// with `words` where given ([`Cx::words`]), and as `once` tells; PDF as [`pdf_options`] tells.
+/// with `words` where given ([`Cx::words`]), and as `once` tells; PDF as [`pdf_options`] tells;
+/// bzip2 streams where they may pay ([`bz2`], `depth` formats deep, the files archived along
+/// holding what `held` tells).
+#[allow(clippy::too_many_arguments)]
 fn pure(
     format: Format,
     d: &[u8],
     opt: &Options,
+    depth: u32,
     threads: usize,
     words: Option<&aqr_wrt::formula::Shared>,
     once: &Once,
+    held: Option<&Held>,
 ) -> Option<Option<Formula>> {
     let encode = pure_encode(format)?;
     #[cfg(test)]
@@ -1753,12 +1759,29 @@ fn pure(
         catch_unwind(AssertUnwindSafe(|| match (format, words) {
             (Format::Text, Some(w)) => aqr_wrt::formula::encode_with(d, w, threads),
             (Format::Pdf, _) => aqr_pdf::formula::encode_with(d, &pdf_options(opt, threads)),
+            (Format::Bzip2, _) => bz2(d, opt, depth, threads, held),
             _ => encode(d, threads),
         }))
         .ok()
         .flatten()
     };
     Some(if format == Format::Text { once.code(d, code) } else { code() })
+}
+
+/// aqr-bz2's formula of `d` (`depth` formats deep), each stream taken only where its data may
+/// pay ([`probe`]; `held` telling what the files archived with it hold): decoded, but not
+/// compressed again to check it where it would not pay, which costs most (some 12 MB/s of data
+/// a thread, against 50-80 MB/s for decoding). The record is the params, a few bytes.
+fn bz2(d: &[u8], opt: &Options, depth: u32, threads: usize, held: Option<&Held>) -> Option<Formula> {
+    let probe = probe(opt, depth);
+    // (an encoder of its own, as formulas of pure formats are made on several threads)
+    let enc = aqr::Encoder::new(opt.level);
+    aqr_bz2::formula::encode_if(d, threads, &mut |coded, data| {
+        probe.as_ref().is_none_or(|p| {
+            let held = || held.is_some_and(|h| h.holds(data, h.owner(d))) as u8 as f64;
+            p.pays(&enc, coded, || Some(16), data, held, Kind::Unknown)
+        })
+    })
 }
 
 /// aqr-7z's formula, the contents of the files a content of the applications (or of the formula,
@@ -1847,11 +1870,12 @@ fn prepare(f: &Formula, opt: &Options, depth: u32, cx: &Cx) -> (Vec<(usize, usiz
     let inner = opt.threads;
     let words = cx.words.as_deref();
     let once = &*cx.once;
+    let held = cx.held.as_deref();
     let files = cx.files.as_deref();
     let made = sets::par_map(jobs.len(), workers, |i| {
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), false));
         let _item = aqr_common::trace::item(files.and_then(|f| f.content(jobs[i].1.as_ptr())));
-        let made = pure(jobs[i].0, jobs[i].1, opt, inner, words, once).flatten();
+        let made = pure(jobs[i].0, jobs[i].1, opt, depth, inner, words, once, held).flatten();
         files.inspect(|f| f.tell(jobs[i].1.as_ptr(), true));
         made
     });

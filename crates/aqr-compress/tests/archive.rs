@@ -487,6 +487,37 @@ fn xz_held_once() {
     }
 }
 
+fn bzip2(d: &[u8]) -> Vec<u8> {
+    aqr_bz2::compress::stream(9, &aqr_bz2::compress::blocks(d, 9, 1))
+}
+
+/// Files, a `.tar.bz2` of them and a `.bz2` of one: their data is text, which archives larger
+/// than bzip2 makes it, but the files hold it, so that the streams are rebuilt and the files
+/// stored once; a `.bz2` of other text alone is kept as it is. In one batch: what the files of
+/// other batches hold is not told ([`aqr_formula::probe::Held`]).
+#[test]
+fn bz2_held_once() {
+    let members: Vec<(String, Vec<u8>)> = (0..3).map(|k| (format!("m/f{k}.txt"), words(1_000_000, k))).collect();
+    let refs: Vec<(&str, &[u8])> = members.iter().map(|(n, d)| (&n[..], &d[..])).collect();
+    let tbz = bzip2(&tar(&refs));
+    let bz = bzip2(&members[0].1);
+    let other = bzip2(&words(1_000_000, 9));
+    let opt = Options { block: 1 << 20, ..Options::default() };
+    let files: Vec<(&str, Vec<u8>)> = members.iter().map(|(n, d)| (&n[..], d.clone())).collect();
+    let (alone, r) = archived(&files, &opt);
+    let alone = alone.len() - r.overhead;
+    let all = [&files[..], &[("p/m.tar.bz2", tbz), ("p/f0.txt.bz2", bz), ("q/other.txt.bz2", other.clone())]].concat();
+    {
+        let (c, r) = archived(&all, &opt);
+        for k in [3, 4] {
+            assert!(r.files[k].modules.iter().any(|m| m.name == "bz2-recons"), "{}: {:?}", all[k].0, r.files[k]);
+        }
+        assert!(r.files[5].modules.is_empty(), "{:?}", r.files[5]);
+        let c = c.len() - r.overhead - other.len();
+        assert!(c < alone + alone / 100, "{c} of {alone} alone");
+    }
+}
+
 /// Files and a 7z archive of them: the folder rebuilt from the files' contents, stored once, in a
 /// batch together however small the batches.
 #[test]
