@@ -1,0 +1,20 @@
+[package]
+name = "aqr-egg"
+version = "0.1.0"
+edition = "2024"
+description = "EGG archives (ALZip's) taken apart into their files' contents, DEFLATE by aqr-flate, bzip2 by aqr-bz2 and LZMA by aqr-lzma"
+publish = false
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula" }
+aqr-flate = { path = "../aqr-flate" }
+aqr-bz2 = { path = "../aqr-bz2" }
+aqr-lzma = { path = "../aqr-lzma" }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-egg-check"
+path = "examples/check.rs"

@@ -959,6 +959,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Cab => cab(d, opt, cx),
                 Format::Chm => chm(d, opt, cx),
                 Format::Alz => alz(d, opt, depth, cx),
+                Format::Egg => egg(d, opt, depth, cx),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Bvx => bvx(d, opt, cx),
@@ -1840,6 +1841,20 @@ fn alz(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     Some(e.formula)
 }
 
+/// aqr-egg's formula of an EGG archive, the contents of its files a content of the
+/// applications (or of the formula, those stored), recompressed in turn, each by its kind by its
+/// name ([`kind_by_name`]). Its DEFLATE, bzip2 and LZMA blocks decode within what is left of the
+/// budget ([`Options::expansion`]); a bzip2 block is taken where its data may pay, as a bzip2
+/// file is ([`bz2`]).
+fn egg(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    let (profile, zlib) = opt.flate();
+    let o =
+        aqr_egg::formula::Options { threads: opt.threads, profile, zlib, limit: cx.inflate_left(), kind: kind_by_name };
+    let e = aqr_egg::formula::encode_with(d, &o, &mut bz2_pays(d, opt, depth, cx.held.as_deref()))?;
+    cx.inflate(e.inflated);
+    Some(e.formula)
+}
+
 /// aqr-7z's formula, the contents of the files a content of the applications (or of the formula,
 /// those of stored folders), recompressed in turn, each by its kind by its name
 /// ([`kind_by_name`]).
@@ -2139,6 +2154,41 @@ mod tests {
             let x = [&b"some data before "[..], &d, b" and after"].concat();
             assert_eq!(detect::starts(&x[17..]), Some(Format::Alz));
             assert_eq!(extent(Format::Alz, &x[17..]), Some(d.len()));
+        }
+    }
+
+    /// An EGG archive is taken apart: its DEFLATE blocks by aqr-flate, its LZMA blocks by
+    /// aqr-lzma; found in other data too.
+    #[test]
+    fn egg_taken_apart() {
+        use std::io::Write;
+        // (DEFLATE of zlib's, of words enough for its module to pay)
+        let mut x = 1u32;
+        let text: Vec<u8> = (0..40_000)
+            .flat_map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                format!("w{} ", (x % 1000) * (x % 1000) / 1000).into_bytes()
+            })
+            .collect();
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+        z.write_all(&text).unwrap();
+        let n = text.len() as u32;
+        let deflated = aqr_egg::egg::write(false, &[("a.txt", aqr_egg::egg::DEFLATE, &z.finish().unwrap(), n)]);
+        // (an LZMA block: 4 bytes, the properties and the stream of a `.lzma` file)
+        let alone = aqr_lzma::greedy::alone(&text);
+        let body = [&[0; 4], &alone[..5], &alone[13..]].concat();
+        let lzma = aqr_egg::egg::write(false, &[("a.txt", aqr_egg::egg::LZMA, &body, n)]);
+        for (name, d, module) in [("deflate", deflated, aqr_decompress::FLATE), ("lzma", lzma, aqr_decompress::LZMA)] {
+            assert_eq!(detect(&d), Some(Format::Egg));
+            let opt = Options { shared_modules: true, level: Level::Of(9), ..Options::default() };
+            let f = recompress(&d, &opt);
+            assert!(f.applies().iter().any(|a| a.module == module), "{name}");
+            assert!(f.eval(&Native::default()).unwrap() == d, "{name}");
+            let x = [&b"some data before "[..], &d, b" and after"].concat();
+            assert_eq!(detect::starts(&x[17..]), Some(Format::Egg));
+            assert_eq!(extent(Format::Egg, &x[17..]), Some(d.len()));
         }
     }
 

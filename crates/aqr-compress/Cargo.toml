@@ -12,6 +12,7 @@ aqr-decompress = { path = "../aqr-decompress" }
 aqr-7z = { path = "../../codecs/aqr-7z" }
 aqr-mszip = { path = "../../codecs/aqr-mszip" }
 aqr-alz = { path = "../../codecs/aqr-alz" }
+aqr-egg = { path = "../../codecs/aqr-egg" }
 aqr-asar = { path = "../../codecs/aqr-asar" }
 aqr-bundle = { path = "../../codecs/aqr-bundle" }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["encode"] }

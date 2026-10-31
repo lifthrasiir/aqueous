@@ -6,8 +6,9 @@
 use aqr_common::pool;
 use aqr_formula::{Apply, Formula, Module, Node};
 
+pub use crate::Framing;
 use crate::module::{StreamParams, get_framed, get_params, put_framed, put_params};
-use crate::{Framing, compress, stream};
+use crate::{compress, stream};
 
 pub use crate::module::{decode, decode_alz};
 
@@ -102,28 +103,48 @@ pub fn encode_if(input: &[u8], threads: usize, pays: &mut dyn FnMut(usize, &[u8]
     Some(f)
 }
 
-/// A stream of ALZip's bzip2 that is the whole of `d`, of at most `max_data` bytes of data, taken
-/// only where `pays` tells (as [`encode_if`] asks): its parameters and its data, where compressing
-/// that data gives `d` back.
+/// A stream of ALZip's bzip2 that is the whole of `d`: [`take_whole`] of [`Framing::Alz`].
 pub fn take_alz(
     d: &[u8],
     threads: usize,
     max_data: usize,
     pays: &mut dyn FnMut(usize, &[u8], bool) -> bool,
 ) -> Option<(StreamParams, Vec<u8>)> {
+    take_whole(d, Framing::Alz, threads, max_data, pays)
+}
+
+/// A stream of `framing` that is the whole of `d`, of at most `max_data` bytes of data, taken
+/// only where `pays` tells (as [`encode_if`] asks): its parameters and its data, where
+/// compressing that data gives `d` back.
+pub fn take_whole(
+    d: &[u8],
+    framing: Framing,
+    threads: usize,
+    max_data: usize,
+    pays: &mut dyn FnMut(usize, &[u8], bool) -> bool,
+) -> Option<(StreamParams, Vec<u8>)> {
     let mut data = Vec::new();
-    let (sp, len) = take(d, Framing::Alz, threads, max_data.min(MAX_DATA), pays, &mut data)?;
+    let (sp, len) = take(d, framing, threads, max_data.min(MAX_DATA), pays, &mut data)?;
     (len == d.len()).then_some((sp, data))
 }
 
 /// The application of [`MODULE_ALZ`] giving `streams` one after another (`len` bytes), of their
 /// data `data` (one after another).
 pub fn apply_alz(streams: &[StreamParams], data: Node, len: u64) -> Apply {
+    apply_framed(Framing::Alz, streams, data, len)
+}
+
+/// The application of the module of `framing` ([`MODULE`] or [`MODULE_ALZ`]) giving `streams`
+/// one after another (`len` bytes), of their data `data` (one after another).
+pub fn apply_framed(framing: Framing, streams: &[StreamParams], data: Node, len: u64) -> Apply {
     let mut params = Vec::new();
-    put_framed(&mut params, Framing::Alz, streams);
-    debug_assert_eq!(get_framed(&params, Framing::Alz).as_deref(), Ok(streams));
+    put_framed(&mut params, framing, streams);
+    debug_assert_eq!(get_framed(&params, framing).as_deref(), Ok(streams));
     Apply {
-        module: MODULE_ALZ,
+        module: match framing {
+            Framing::Bzip2 => MODULE,
+            Framing::Alz => MODULE_ALZ,
+        },
         resources: vec![],
         params,
         inputs: vec![data],
