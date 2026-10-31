@@ -26,6 +26,9 @@ own terms; the code is written from that description, not from the encoder's cod
 
 ## Ideas
 
+- **ZPAQ** (Matt Mahoney; the ZPAQ open standard format): an archive carrying the programs
+  that decode it (ZPAQL), so that a decompressor needs no knowledge of the methods that made
+  it, in Aqueous's formulas and modules; an archive extended by appending, in its segments.
 - **preflate** (Dirk Steinke): estimating zlib's parameters from a stream, in aqr-flate's
   detection.
 - **Lepton** (Dropbox; Daniel Reiter Horn and others) and Ken Lakhani's predictors of DCT
