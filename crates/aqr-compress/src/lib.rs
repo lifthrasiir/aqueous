@@ -945,6 +945,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Zip => zip::zip(d, opt, depth, cx),
                 Format::SevenZip => sevenz(d, opt),
                 Format::Cab => cab(d, opt, cx),
+                Format::Chm => chm(d, opt, cx),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Bvx => bvx(d, opt, cx),
@@ -1800,8 +1801,8 @@ fn sevenz(d: &[u8], opt: &Options) -> Option<Formula> {
 }
 
 /// aqr-mszip's formula of a CAB file, the contents of the files a content of the applications,
-/// recompressed in turn, each by its kind by its name ([`kind_by_name`]). Its MSZIP folders
-/// inflate within what is left of the budget ([`Options::expansion`]).
+/// recompressed in turn, each by its kind by its name ([`kind_by_name`]). Its MSZIP and LZX
+/// folders inflate within what is left of the budget ([`Options::expansion`]).
 fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     let (profile, zlib) = opt.flate();
     let o = aqr_mszip::formula::Options {
@@ -1812,6 +1813,20 @@ fn cab(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
         kind: kind_by_name,
     };
     let e = aqr_mszip::formula::encode_with(d, &o)?;
+    cx.inflate(e.inflated);
+    Some(e.formula)
+}
+
+/// aqr-mszip's formula of a CHM file, the files of its LZX section a content of the application,
+/// recompressed in turn, each by its kind by its name; within what is left of the budget.
+fn chm(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let o = aqr_mszip::formula::Options {
+        threads: opt.threads,
+        limit: cx.inflate_left(),
+        kind: kind_by_name,
+        ..Default::default()
+    };
+    let e = aqr_mszip::formula::encode_chm_with(d, &o)?;
     cx.inflate(e.inflated);
     Some(e.formula)
 }

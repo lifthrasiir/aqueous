@@ -1,4 +1,4 @@
-//! Which CAB files the formula rebuilds, what that is worth, and how fast: the bytes of the
+//! Which CAB and CHM files the formula rebuilds, what that is worth, and how fast: the bytes of the
 //! files, of their folders by method and those rebuilt, of the data and records of those, and of
 //! what is kept; the encoder's and modules' speeds. Only totals are printed, never names or
 //! contents (`-v` adds a line per file, by its index).
@@ -38,9 +38,40 @@ fn main() {
     // bytes of folders' spans by method (none, MSZIP, Quantum, LZX, other), all and rebuilt
     let (mut by_method, mut taken) = ([0usize; 5], [0usize; 5]);
     let (mut enc_secs, mut dec_secs) = (0.0, 0.0);
-    let mut deflate = 0;
+    let (mut deflate, mut lzx_records, mut lzx_packed) = (0, 0, 0);
+    let (mut chm_files, mut chm_rebuilt, mut chm_bytes) = (0, 0, 0);
     for (k, p) in paths.iter().enumerate() {
         let Ok(d) = std::fs::read(p) else { continue };
+        if formula::starts_chm(&d) {
+            chm_files += 1;
+            chm_bytes += d.len();
+            let start = Instant::now();
+            let opt = formula::Options { threads, ..Default::default() };
+            let Some(e) = formula::encode_chm_with(&d, &opt) else {
+                if verbose {
+                    println!("{k}: CHM of {} bytes, not taken", d.len());
+                }
+                continue;
+            };
+            enc_secs += start.elapsed().as_secs_f64();
+            let start = Instant::now();
+            let out = e.formula.eval(&|a: &Apply, inputs: &[&[u8]]| {
+                formula::apply(a, inputs, threads).map_err(|e| aqr_formula::Error::new(e.to_string()))
+            });
+            dec_secs += start.elapsed().as_secs_f64();
+            if out.ok().as_deref() != Some(&d[..]) {
+                println!("{k}: CHM rebuilt otherwise");
+                failed += 1;
+                continue;
+            }
+            chm_rebuilt += 1;
+            data += e.inflated as usize;
+            for a in e.formula.applies().into_iter().filter(|a| a.module == aqr_lzx::formula::MODULE) {
+                lzx_records += a.inputs[1].len() as usize;
+                lzx_packed += a.len as usize;
+            }
+            continue;
+        }
         let Some(c) = cab::parse(&d) else { continue };
         files += 1;
         bytes += d.len();
@@ -76,6 +107,10 @@ fn main() {
             r += a.inputs[1].len() as usize;
             deflate += a.len as usize;
         }
+        for a in f.applies().into_iter().filter(|a| a.module == aqr_lzx::formula::MODULE) {
+            lzx_records += a.inputs[1].len() as usize;
+            lzx_packed += a.len as usize;
+        }
         let dt: usize = f
             .streams
             .iter()
@@ -110,13 +145,22 @@ fn main() {
     }
     let mb = |x: usize| x as f64 / 1e6;
     println!(
-        "{files} files, {rebuilt} rebuilt ({failed} otherwise): {:.3} MB; data {:.3} MB, records {:.3} MB ({:.2}% of {:.3} MB joined DEFLATE); kept {:.3} MB",
+        "{files} files, {rebuilt} rebuilt ({failed} otherwise): {:.3} MB; data {:.3} MB, MSZIP records {:.3} MB ({:.2}% of {:.3} MB joined DEFLATE); kept {:.3} MB",
         mb(bytes),
         mb(data),
         mb(records),
         100.0 * records as f64 / deflate.max(1) as f64,
         mb(deflate),
         mb(kept)
+    );
+    if chm_files > 0 {
+        println!("  CHM: {chm_files} files ({:.3} MB), {chm_rebuilt} rebuilt", mb(chm_bytes));
+    }
+    println!(
+        "  LZX: records {:.3} MB ({:.2}% of {:.3} MB of streams)",
+        mb(lzx_records),
+        100.0 * lzx_records as f64 / lzx_packed.max(1) as f64,
+        mb(lzx_packed)
     );
     let names = ["none", "MSZIP", "Quantum", "LZX", "other"];
     for m in 0..5 {

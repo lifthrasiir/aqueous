@@ -10,6 +10,8 @@
 #[cfg(feature = "encode")]
 pub mod cab;
 #[cfg(feature = "encode")]
+pub mod chm;
+#[cfg(feature = "encode")]
 pub mod formula;
 pub mod module;
 pub mod mszip;

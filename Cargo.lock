@@ -514,6 +514,7 @@ dependencies = [
  "aqr-decompress",
  "aqr-flate",
  "aqr-formula",
+ "aqr-lzx",
  "memmap2",
 ]
 

@@ -3,6 +3,7 @@
 
 use aqr_common::varint;
 
+use crate::lzx::{self, Variant};
 use crate::{Error, Result, corrupt, recons};
 
 /// A stream of the output: the bytes kept before it, and the bytes of its data and of its
@@ -23,6 +24,17 @@ pub fn index(parts: &[Part]) -> Vec<u8> {
         varint::put(&mut out, p.record as u64);
     }
     out
+}
+
+/// The parts of `index`.
+pub fn parts(index: &[u8]) -> Result<Vec<Part>> {
+    let mut at = 0;
+    let mut out = Vec::new();
+    while at < index.len() {
+        let mut get = || varint::get(index, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
+        out.push(Part { kept: get()?, data: get()?, record: get()? });
+    }
+    Ok(out)
 }
 
 /// What `index` cuts the inputs into: for each stream, the bytes kept before it, its data and
@@ -52,28 +64,43 @@ fn cut<'a>(
     Ok((out, k))
 }
 
-/// The module: of the inputs (data, records, bytes kept, index), each stream of LZX chunks that
-/// its data and record rebuild after the bytes kept before it, then the bytes kept after the
-/// last, `len` bytes in all (see `FORMAT.md`). Streams are rebuilt side by side on up to
-/// `threads` threads.
+/// The variant of the streams that `params` tell: none for WIM's chunks, the window's bits for
+/// CAB's streams.
+pub fn variant(params: &[u8]) -> Result<Variant> {
+    match *params {
+        [] => Ok(lzx::WIM),
+        [bits] => Variant::cab(bits).ok_or_else(corrupt),
+        _ => Err(corrupt()),
+    }
+}
+
+/// The module: of the inputs (data, records, bytes kept, index), each stream of LZX chunks (or,
+/// with `params` the window's bits, each CAB stream) that its data and record rebuild after the
+/// bytes kept before it, then the bytes kept after the last, `len` bytes in all (see
+/// `FORMAT.md`). Streams are rebuilt side by side on up to `threads` threads.
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let &[data, records, kept, index] = inputs else { return Err(Error("four inputs wanted")) };
-    if !params.is_empty() {
-        return Err(corrupt());
-    }
+    let v = variant(params)?;
+    let join_onto = |data: &[u8], record: &[u8], out: &mut Vec<u8>| match v.cab {
+        true => recons::join_stream_onto(data, record, v, out),
+        false => recons::join_onto(data, record, out),
+    };
     let (streams, tail) = cut(data, records, kept, index)?;
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out = Vec::with_capacity(len);
     if threads <= 1 || streams.len() <= 1 || cfg!(target_family = "wasm") {
         for &(kept, data, record) in &streams {
             out.extend_from_slice(kept);
-            recons::join_onto(data, record, &mut out)?;
+            join_onto(data, record, &mut out)?;
             if out.len() > len {
                 return Err(Error("output of another length"));
             }
         }
     } else {
-        let join = |i: usize| recons::join(streams[i].1, streams[i].2);
+        let join = |i: usize| {
+            let mut out = Vec::new();
+            join_onto(streams[i].1, streams[i].2, &mut out).map(|_| out)
+        };
         for (o, s) in aqr_common::pool::par_map(streams.len(), threads, join).into_iter().zip(&streams) {
             out.extend_from_slice(s.0);
             out.extend_from_slice(&o?);

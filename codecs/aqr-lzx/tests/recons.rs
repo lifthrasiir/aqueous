@@ -3,7 +3,7 @@
 //! and split into data and record and rebuilt.
 
 use aqr_common::rng::Rng;
-use aqr_lzx::lzx::{self, Block, Lens, Parse, PreSym, Tok, TreeCode};
+use aqr_lzx::lzx::{self, Block, Lens, Parse, PreSym, Tok, TreeCode, Variant};
 use aqr_lzx::recons::{self, CHUNK, huffman};
 
 /// How the pretree writes `target` over `before`: runs taken where `runs` says.
@@ -46,15 +46,21 @@ fn tree_code(before: &[u8], target: &[u8], rng: &mut Rng, runs: bool) -> TreeCod
 /// A chunk of `d` (as e8 translates it): blocks at the sizes given (an uncompressed one where
 /// the size is negative), greedy matches from a hash chain, repeat offsets where they match.
 fn encode(d: &[u8], sizes: &[isize], rng: &mut Rng) -> Vec<u8> {
-    let mut parse = Parse::default();
-    let mut lens = Lens::default();
+    encode_as(d, sizes, rng, lzx::WIM, None)
+}
+
+/// [`encode`] of a stream of `v`, with header `e8` (CAB's).
+fn encode_as(d: &[u8], sizes: &[isize], rng: &mut Rng, v: Variant, e8: Option<u32>) -> Vec<u8> {
+    let mut parse = Parse { e8, ..Parse::default() };
+    let mut lens = Lens::new(v);
+    let main = v.main();
     let mut reps = lzx::REPS;
     let mut at = 0;
     for (bi, &sz) in sizes.iter().enumerate() {
         let last = bi + 1 == sizes.len();
         let size = if last { d.len() - at } else { sz.unsigned_abs() };
         let end = at + size;
-        let mut b = Block { size, default_size: size == CHUNK, ..Block::default() };
+        let mut b = Block { size, default_size: !v.cab && size == CHUNK, ..Block::default() };
         if sz < 0 && !last {
             b.kind = lzx::UNCOMPRESSED;
             b.reps = reps;
@@ -67,7 +73,9 @@ fn encode(d: &[u8], sizes: &[isize], rng: &mut Rng) -> Vec<u8> {
         let first = parse.toks.len();
         let mut pos = at;
         while pos < end {
-            let cap = (end - pos).min(lzx::MAX_MATCH);
+            // (CAB's: no match over a frame's end, as decoders take frames one at a time)
+            let stop = if v.cab { end.min((pos / lzx::FRAME + 1) * lzx::FRAME) } else { end };
+            let cap = (stop - pos).min(lzx::MAX_MATCH);
             let mut best = (0, 0, None);
             for (k, &r) in reps.iter().enumerate() {
                 let r = r as usize;
@@ -96,14 +104,14 @@ fn encode(d: &[u8], sizes: &[isize], rng: &mut Rng) -> Vec<u8> {
                         Some(k) => reps.swap(0, k as usize),
                         None => reps = [o as u32, reps[0], reps[1]],
                     }
-                    parse.toks.push(Tok::Match { len: n as u16, off: o as u16, rep });
+                    parse.toks.push(Tok::Match { len: n as u16, off: o as u32, rep });
                     pos += n;
                 }
             }
         }
         b.toks = parse.toks.len() - first;
         // the trees of the block's frequencies
-        let (mut fm, mut fl, mut fa) = ([0u32; lzx::MAIN], [0u32; lzx::LEN], [0u32; lzx::ALIGNED]);
+        let (mut fm, mut fl, mut fa) = ([0u32; lzx::MAIN_MAX], [0u32; lzx::LEN], [0u32; lzx::ALIGNED]);
         let mut p = at;
         for tok in &parse.toks[first..] {
             match *tok {
@@ -113,13 +121,13 @@ fn encode(d: &[u8], sizes: &[isize], rng: &mut Rng) -> Vec<u8> {
                 }
                 Tok::Match { len, off, rep } => {
                     let h = (len as usize - 2).min(7);
-                    let slot = rep.map_or_else(|| lzx::slot(off as u32 + 2), |k| k as usize);
+                    let slot = rep.map_or_else(|| lzx::slot(off + 2), |k| k as usize);
                     fm[256 + slot * 8 + h] += 1;
                     if h == 7 {
                         fl[len as usize - 9] += 1;
                     }
                     if rep.is_none() && lzx::EXTRA[slot] >= 3 {
-                        fa[((off as u32 + 2 - lzx::BASE[slot]) & 7) as usize] += 1;
+                        fa[((off + 2 - lzx::BASE[slot]) & 7) as usize] += 1;
                     }
                     p += len as usize;
                 }
@@ -128,8 +136,8 @@ fn encode(d: &[u8], sizes: &[isize], rng: &mut Rng) -> Vec<u8> {
         if b.kind == lzx::ALIGNED_BLOCK {
             huffman(&fa, 7, &mut b.aligned);
         }
-        let (mut tm, mut tl) = ([0u8; lzx::MAIN], [0u8; lzx::LEN]);
-        huffman(&fm, 16, &mut tm);
+        let (mut tm, mut tl) = (vec![0u8; main], [0u8; lzx::LEN]);
+        huffman(&fm[..main], 16, &mut tm);
         huffman(&fl, 16, &mut tl);
         // (a length one off where it does not matter: a symbol of no use)
         if rng.below(3) == 0 && tl.iter().all(|&l| l == 0) {
@@ -144,7 +152,31 @@ fn encode(d: &[u8], sizes: &[isize], rng: &mut Rng) -> Vec<u8> {
         parse.blocks.push(b);
         at = end;
     }
-    lzx::write(d, &parse).expect("a parse that holds")
+    // (CAB's: a frame's end in a block of tokens pads to a word, with zeros)
+    if v.cab {
+        let (mut pos, mut t, mut frame_end) = (0, 0, lzx::FRAME.min(d.len()));
+        for b in &parse.blocks {
+            if b.kind == lzx::UNCOMPRESSED {
+                pos += b.size;
+                while frame_end <= pos && frame_end < d.len() {
+                    frame_end = (frame_end + lzx::FRAME).min(d.len());
+                }
+                continue;
+            }
+            for tok in &parse.toks[t..t + b.toks] {
+                pos += match tok {
+                    Tok::Lit => 1,
+                    Tok::Match { len, .. } => *len as usize,
+                };
+                if pos >= frame_end && frame_end < d.len() {
+                    parse.frame_pad.push(0);
+                    frame_end = (frame_end + lzx::FRAME).min(d.len());
+                }
+            }
+            t += b.toks;
+        }
+    }
+    lzx::write_as(d, &parse, v).expect("a parse that holds")
 }
 
 /// Data of several kinds: text, runs, noise, structured records, x86-like calls (e8).
@@ -285,4 +317,129 @@ fn write_fixture() {
     }
     std::fs::create_dir_all(format!("{}/tests/data", env!("CARGO_MANIFEST_DIR"))).unwrap();
     std::fs::write(format!("{}/tests/data/greedy.chunks", env!("CARGO_MANIFEST_DIR")), out).unwrap();
+}
+
+/// A CAB stream of `n` bytes of data of a window of `2^bits` bytes: the file's data, (with e8
+/// at random) its stream, its blocks at random sizes over the frames.
+fn cab_stream(rng: &mut Rng, n: usize, bits: u8) -> (Vec<u8>, Vec<u8>) {
+    let v = Variant::cab(bits).unwrap();
+    let file = data(rng, n);
+    let e8 = (rng.below(2) == 0).then(|| [12_000_000, 1 << 20, 3_000][rng.below(3) as usize]);
+    let mut d = file.clone();
+    if let Some(size) = e8 {
+        lzx::e8_encode_frames(&mut d, size);
+    }
+    let mut sizes = Vec::new();
+    let mut left = d.len() as isize;
+    while left > 0 && rng.below(4) != 0 {
+        let s = 1 + rng.below(left as u64 * 2 / 3 + 1) as isize;
+        sizes.push(if rng.below(5) == 0 { -s } else { s });
+        left -= s;
+    }
+    sizes.push(left.max(1));
+    (file, encode_as(&d, &sizes, rng, v, e8))
+}
+
+/// CAB streams (windows of 32 KiB to 2 MiB, blocks over frames, uncompressed blocks, e8): read
+/// and written back, their frames' ends where the parse aligns, split and joined.
+#[test]
+fn cab_streams() {
+    let mut rng = Rng::new(6);
+    for k in 0..24 {
+        let bits = [15, 16, 17, 21][k % 4];
+        let v = Variant::cab(bits).unwrap();
+        let n = 1 + rng.below(4 * lzx::FRAME as u64 + 5000) as usize;
+        let (file, src) = cab_stream(&mut rng, n, bits);
+        let (mut d, parse) = lzx::read_as(&src, n, v).expect("read");
+        assert_eq!(lzx::write_as(&d, &parse, v).as_deref(), Some(&src[..]));
+        if let Some(size) = parse.e8 {
+            lzx::e8_decode_frames(&mut d, size);
+        }
+        assert_eq!(d, file);
+        let ends = lzx::frame_ends(&src, n, v).unwrap();
+        assert_eq!(ends.len(), n.div_ceil(lzx::FRAME) - 1);
+        assert!(ends.windows(2).all(|w| w[0] <= w[1]) && ends.last().is_none_or(|&e| e <= src.len()));
+        let sp = recons::split_stream(&src, n, v).expect("split");
+        assert_eq!(sp.data, file);
+        let mut out = Vec::new();
+        recons::join_stream_onto(&sp.data, &sp.record, v, &mut out).unwrap();
+        assert_eq!(out, src);
+        // (the record of another variant gives nothing, or something else: no panic)
+        let mut out = Vec::new();
+        let _ = recons::join_stream_onto(&sp.data, &sp.record, Variant::cab(bits.max(16) - 1).unwrap(), &mut out);
+    }
+}
+
+/// CAB streams' records damaged: fail or give something, never a panic.
+#[test]
+fn cab_damaged_records() {
+    let mut rng = Rng::new(7);
+    let v = Variant::cab(16).unwrap();
+    let n = 2 * lzx::FRAME + 777;
+    let (_, src) = cab_stream(&mut rng, n, 16);
+    let sp = recons::split_stream(&src, n, v).unwrap();
+    for i in 0..200 {
+        let mut r = sp.record.clone();
+        match i % 3 {
+            0 => r.truncate(rng.below(r.len() as u64) as usize),
+            1 => {
+                let at = rng.below(r.len() as u64) as usize;
+                r[at] ^= 1 << rng.below(8);
+            }
+            _ => r = (0..r.len()).map(|_| rng.below(256) as u8).collect(),
+        }
+        let _ = recons::join_stream_onto(&sp.data, &r, v, &mut Vec::new());
+    }
+}
+
+/// Writes `tests/data/greedy.cab-lzx`, a CAB stream of this test (a window of 64 KiB, e8) for
+/// other crates' tests: the window's bits (u8), the data's length (u32 little-endian), then each
+/// frame's bytes' length (u32) and its bytes.
+#[test]
+#[ignore]
+fn write_cab_fixture() {
+    let mut rng = Rng::new(8);
+    let n = 3 * lzx::FRAME + 4321;
+    let (_, src) = loop {
+        let s = cab_stream(&mut rng, n, 16);
+        if lzx::read_as(&s.1, n, Variant::cab(16).unwrap()).is_some_and(|(_, p)| p.e8.is_some()) {
+            break s;
+        }
+    };
+    let ends = lzx::frame_ends(&src, n, Variant::cab(16).unwrap()).unwrap();
+    let mut out = vec![16];
+    out.extend_from_slice(&(n as u32).to_le_bytes());
+    let mut at = 0;
+    for e in ends.into_iter().chain([src.len()]) {
+        out.extend_from_slice(&((e - at) as u32).to_le_bytes());
+        out.extend_from_slice(&src[at..e]);
+        at = e;
+    }
+    std::fs::write(format!("{}/tests/data/greedy.cab-lzx", env!("CARGO_MANIFEST_DIR")), out).unwrap();
+}
+
+/// Writes `tests/data/greedy.chm-lzx`, CHM's LZX of this test for other crates' tests: a reset
+/// every 2 frames, each interval a CAB stream of its own (a window of 64 KiB, no e8), the last of
+/// whole frames past the data (zeros). The data's length (u32 little-endian), then each
+/// interval's frames: their bytes' lengths (u32) and bytes.
+#[test]
+#[ignore]
+fn write_chm_fixture() {
+    let mut rng = Rng::new(10);
+    let v = Variant::cab(16).unwrap();
+    let n = 4 * lzx::FRAME + 9000;
+    let mut file = data(&mut rng, n);
+    file.resize(n.div_ceil(lzx::FRAME) * lzx::FRAME, 0);
+    let mut out = (n as u32).to_le_bytes().to_vec();
+    for d in file.chunks(2 * lzx::FRAME) {
+        let src = encode_as(d, &[d.len() as isize], &mut rng, v, None);
+        let ends = lzx::frame_ends(&src, d.len(), v).unwrap();
+        let mut at = 0;
+        for e in ends.into_iter().chain([src.len()]) {
+            out.extend_from_slice(&((e - at) as u32).to_le_bytes());
+            out.extend_from_slice(&src[at..e]);
+            at = e;
+        }
+    }
+    std::fs::write(format!("{}/tests/data/greedy.chm-lzx", env!("CARGO_MANIFEST_DIR")), out).unwrap();
 }

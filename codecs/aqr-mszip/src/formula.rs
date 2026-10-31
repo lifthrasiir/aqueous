@@ -11,6 +11,7 @@ use aqr_flate::formula::Derived;
 use aqr_formula::{Apply, Formula, Kind, Node};
 
 use crate::cab::{self, Cab, Folder};
+use crate::chm;
 use crate::module::Block;
 use crate::mszip::{self, BitW};
 
@@ -79,15 +80,31 @@ enum Made {
     Stored {
         data: Vec<u8>,
     },
+    /// The data (e8 undone) and record of the stream of its blocks, of a window of
+    /// `2^window_bits` bytes.
+    Lzx {
+        data: Vec<u8>,
+        record: Vec<u8>,
+        window_bits: u8,
+    },
 }
 
 impl Made {
     fn data(&self) -> &[u8] {
         match self {
-            Made::Mszip { data, .. } | Made::Stored { data } => data,
+            Made::Mszip { data, .. } | Made::Stored { data } | Made::Lzx { data, .. } => data,
         }
     }
+
+    /// Whether its data counts against the limit.
+    fn inflates(&self) -> bool {
+        !matches!(self, Made::Stored { .. })
+    }
 }
+
+/// The LZX folders of a window: the window's bits, their streams, and for each where its node
+/// goes among the raw blocks' and its bytes.
+type LzxGroup = (u8, Vec<aqr_lzx::formula::Stream>, Vec<(usize, u64)>);
 
 /// Whether the data blocks of `f` follow each other, each of some data.
 fn contiguous(f: &Folder) -> bool {
@@ -124,6 +141,11 @@ fn make(input: &[u8], c: &Cab, i: usize, max: u64, opt: &Options) -> Option<Made
             let blocks = joined.iter().map(|j| j.blocks).collect();
             (data.len() == f.size()).then_some(Made::Mszip { data, record, blocks, joined: w.out.len() })
         }
+        cab::LZX if f.size() as u64 <= max => {
+            let v = aqr_lzx::lzx::Variant::cab((f.type_compress >> 8 & 0x1f) as u8)?;
+            let sp = aqr_lzx::recons::split_stream(&payloads.concat(), f.size(), v).ok()?;
+            Some(Made::Lzx { data: sp.data, record: sp.record, window_bits: v.window_bits })
+        }
         _ => None,
     }
 }
@@ -156,47 +178,85 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
         if m.is_none() {
             continue;
         }
-        let mszip = matches!(m, Some(Made::Mszip { .. }));
-        if span.start < at || (mszip && inflated + f.size() as u64 > opt.limit) {
+        let inflates = m.as_ref().is_some_and(Made::inflates);
+        if span.start < at || (inflates && inflated + f.size() as u64 > opt.limit) {
             *m = None;
             continue;
         }
         at = span.end;
-        inflated += if mszip { f.size() as u64 } else { 0 };
+        inflated += if inflates { f.size() as u64 } else { 0 };
     }
     if made.iter().all(Option::is_none) {
         return None;
     }
     let mut f = Formula::default();
     f.push("cab", Vec::new());
-    // the files' contents of each folder taken by their kinds, MSZIP's and stored apart
-    let (mut flate_data, mut flate_ends, mut raw_data, mut raw_ends) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    // the files' contents of each folder taken by their kinds: the MSZIP folders' together, each
+    // other folder's apart (its node among the raw blocks' in order: its data, or the stream
+    // rebuilt from it)
+    let (mut flate_data, mut flate_ends) = (Vec::new(), Vec::new());
     let (mut records, mut lens, mut joined_len) = (Vec::new(), Vec::new(), 0u64);
     let (mut blocks, mut kept, mut pieces) = (Vec::new(), Vec::new(), Vec::new());
+    let mut raws: Vec<Option<Node>> = Vec::new();
+    // (by window: the LZX streams, and where their nodes go among the raw blocks')
+    let mut lzx: Vec<LzxGroup> = Vec::new();
     for (i, m) in made.into_iter().enumerate() {
         let Some(m) = m else { continue };
         let folder = &c.folders[i];
-        let (data, ends) = match m {
-            Made::Mszip { .. } => (&mut flate_data, &mut flate_ends),
-            Made::Stored { .. } => (&mut raw_data, &mut raw_ends),
-        };
-        let base = data.len();
-        file_ends(&c, i, m.data().len(), opt.kind).into_iter().for_each(|(k, e)| ends.push((k, base + e)));
-        data.extend_from_slice(m.data());
+        let ends = file_ends(&c, i, m.data().len(), opt.kind);
         for (k, b) in folder.blocks.iter().enumerate() {
             kept.extend_from_slice(&input[b.start..b.payload.start]);
             let k_len = b.payload.start - b.start;
             blocks.push(match &m {
                 Made::Mszip { blocks, .. } => Block::Mszip { kept: k_len, blocks: blocks[k] },
-                Made::Stored { .. } => Block::Raw { kept: k_len, len: b.uncomp },
+                _ => Block::Raw { kept: k_len, len: b.payload.len() },
             });
         }
-        if let Made::Mszip { data, record, joined, .. } = &m {
-            lens.push((data.len(), record.len()));
-            records.extend_from_slice(record);
-            joined_len += *joined as u64;
+        let span = folder.span().unwrap();
+        let packed = folder.blocks.iter().map(|b| b.payload.len() as u64).sum();
+        match m {
+            Made::Mszip { data, record, joined, .. } => {
+                let base = flate_data.len();
+                flate_ends.extend(ends.into_iter().map(|(k, e)| (k, base + e)));
+                flate_data.extend_from_slice(&data);
+                lens.push((data.len(), record.len()));
+                records.extend_from_slice(&record);
+                joined_len += joined as u64;
+            }
+            Made::Stored { data } => {
+                let raw = f.streams.len();
+                f.push("raw", Vec::new());
+                raws.push(Some(f.push_by_kind(raw, data, &ends, "cab", OWN_MIN)));
+            }
+            Made::Lzx { data, record, window_bits } => {
+                let raw = f.streams.len();
+                f.push("raw", Vec::new());
+                let data = f.push_by_kind(raw, data, &ends, "cab", OWN_MIN);
+                let g = match lzx.iter().position(|g| g.0 == window_bits) {
+                    Some(g) => g,
+                    None => {
+                        lzx.push((window_bits, Vec::new(), Vec::new()));
+                        lzx.len() - 1
+                    }
+                };
+                lzx[g].1.push(aqr_lzx::formula::Stream { kept: Node::Concat(Vec::new()), data, record });
+                lzx[g].2.push((raws.len(), packed));
+                raws.push(None);
+            }
         }
-        pieces.push(folder.span().unwrap());
+        pieces.push(span);
+    }
+    for (bits, streams, at) in lzx {
+        let v = aqr_lzx::lzx::Variant::cab(bits)?;
+        let sizes: Vec<u64> = at.iter().map(|a| a.1).collect();
+        let a = aqr_lzx::formula::apply_as(&mut f, v, streams, Node::Concat(Vec::new()), sizes.iter().sum());
+        let nodes = match sizes.len() {
+            1 => vec![Node::Apply(Box::new(a))],
+            _ => f.split(a, sizes),
+        };
+        for ((k, _), n) in at.into_iter().zip(nodes) {
+            raws[k] = Some(n);
+        }
     }
     let joined = match lens.is_empty() {
         true => Node::Concat(Vec::new()),
@@ -213,14 +273,7 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
             Node::Apply(Box::new(a))
         }
     };
-    let raw = match raw_data.is_empty() {
-        true => Node::Concat(Vec::new()),
-        false => {
-            let raw = f.streams.len();
-            f.push("raw", Vec::new());
-            f.push_by_kind(raw, raw_data, &raw_ends, "cab", OWN_MIN)
-        }
-    };
+    let raw = Node::concat(raws.into_iter().map(Option::unwrap));
     let kept = f.push_as("cab/data-headers", Kind::Table, kept);
     let index = f.push("mszip/index", index(&blocks));
     let sizes: Vec<u64> = pieces.iter().map(|p| p.len() as u64).collect();
@@ -276,13 +329,100 @@ fn file_ends(c: &Cab, i: usize, len: usize, kind: fn(&[u8]) -> Kind) -> Vec<(Kin
     ends
 }
 
-/// The output of `a`, an application of [`MODULE`] or of aqr-flate's, on `inputs`.
+/// The output of `a`, an application of [`MODULE`], aqr-flate's or aqr-lzx's, on `inputs`.
 pub fn apply(a: &Apply, inputs: &[&[u8]], threads: usize) -> crate::Result<Vec<u8>> {
     let res: Vec<&[u8]> = a.resources.iter().map(|r| &r[..]).collect();
     match a.module {
         m if m == MODULE && res.is_empty() => decode(&a.params, inputs, a.len),
+        m if m == aqr_lzx::formula::MODULE => aqr_lzx::formula::decode(&a.params, inputs, a.len, threads)
+            .map_err(|_| crate::Error("LZX stream not rebuilt")),
         m if m == aqr_flate::formula::MODULE => aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads)
             .map_err(|_| crate::Error("DEFLATE stream not rebuilt")),
         _ => Err(crate::corrupt()),
     }
+}
+
+/// Whether `d` starts with a CHM file's header.
+pub fn starts_chm(d: &[u8]) -> bool {
+    chm::starts(d)
+}
+
+/// The formula rebuilding the CHM file `input`, inflating at most [`limit`] bytes: its LZX
+/// section's content rebuilt by aqr-lzx's module (each reset interval a stream, side by side) from
+/// the section's data, the rest kept. None where it is not one, or its section is not taken.
+pub fn encode_chm(input: &[u8], threads: usize) -> Option<Formula> {
+    encode_chm_with(input, &Options { threads, limit: limit(input.len()), ..Options::default() }).map(|e| e.formula)
+}
+
+/// [`encode_chm`] with `opt`.
+pub fn encode_chm_with(input: &[u8], opt: &Options) -> Option<Encoded> {
+    use aqr_lzx::lzx::{FRAME, Variant};
+    let c = chm::parse(input)?;
+    let z = c.lzx.as_ref()?;
+    if z.len as u64 > opt.limit {
+        return None;
+    }
+    let v = Variant::cab(z.window_bits)?;
+    let content = &input[z.content.clone()];
+    // each reset interval: its compressed span, and its data of whole frames (the last of the
+    // section's data and zeros past it)
+    let intervals: Vec<(std::ops::Range<usize>, usize)> = (0..z.frames.len())
+        .step_by(z.reset_frames)
+        .map(|f| {
+            let end = z.frames.get(f + z.reset_frames).copied().unwrap_or(content.len());
+            (z.frames[f]..end, (z.frames.len() - f).min(z.reset_frames) * FRAME)
+        })
+        .collect();
+    if z.frames.first() != Some(&0) || intervals.iter().any(|(r, _)| r.start > r.end || r.end > content.len()) {
+        return None;
+    }
+    let splits = aqr_common::pool::par_map(intervals.len(), opt.threads, |i| {
+        aqr_lzx::recons::split_stream(&content[intervals[i].0.clone()], intervals[i].1, v).ok()
+    });
+    let splits: Vec<aqr_lzx::recons::Split> = splits.into_iter().collect::<Option<_>>()?;
+    let mut data = Vec::with_capacity(intervals.iter().map(|i| i.1).sum());
+    let mut streams = Vec::with_capacity(splits.len());
+    for sp in splits {
+        data.extend_from_slice(&sp.data);
+        streams.push((Node::Concat(Vec::new()), sp.data.len(), sp.record));
+    }
+    // the files' contents by their kinds (the zeros past the section's data unknown)
+    let mut ends = Vec::new();
+    let mut entries: Vec<&chm::Entry> = c.lzx_entries().filter(|e| e.len > 0).collect();
+    entries.sort_by_key(|e| e.offset);
+    let mut at = 0u64;
+    for e in entries {
+        if e.offset < at || e.offset + e.len > z.len as u64 {
+            ends.clear();
+            at = 0;
+            break;
+        }
+        if e.offset > at {
+            ends.push((Kind::Unknown, e.offset as usize));
+        }
+        ends.push(((opt.kind)(&e.name), (e.offset + e.len) as usize));
+        at = e.offset + e.len;
+    }
+    if (at as usize) < z.len {
+        ends.push((Kind::Unknown, z.len));
+    }
+    if data.len() > z.len {
+        ends.push((Kind::Unknown, data.len()));
+    }
+    let mut f = Formula::default();
+    f.push("chm", Vec::new());
+    let raw = f.streams.len();
+    f.push("raw", Vec::new());
+    let data = f.push_by_kind(raw, data, &ends, "chm", OWN_MIN);
+    let a = aqr_lzx::formula::apply_joined(&mut f, v, data, streams, Node::Concat(Vec::new()), content.len() as u64);
+    let r = z.content.clone();
+    let mut container = input[..r.start].to_vec();
+    container.extend_from_slice(&input[r.end..]);
+    f.streams[0].data = container.into();
+    f.root = Node::concat([
+        Node::slice(0, 0, r.start as u64),
+        Node::Apply(Box::new(a)),
+        Node::slice(0, r.start as u64, (input.len() - r.end) as u64),
+    ]);
+    Some(Encoded { formula: f, inflated: z.len as u64 })
 }

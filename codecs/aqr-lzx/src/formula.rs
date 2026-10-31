@@ -6,19 +6,31 @@
 
 use aqr_formula::{Apply, Formula, Kind, Node};
 
-use crate::recons;
+use crate::{lzx, recons};
 
 pub use crate::module::{Part, decode, index};
 
 pub const MODULE: aqr_formula::Module = aqr_formula::Module::new("lzx-recons", 1).with_memory(memory);
 
-/// Bytes the module works in besides its inputs and output: a chunk's match finder (chains of
-/// 2 and 3 bytes), its data and its parse (a token at most a byte, of 6 bytes), and 64 KiB for
-/// the rest (contexts, trees).
-pub const WORK: u64 = (2 * 65536 + 2 * recons::CHUNK) as u64 * 4 + 7 * recons::CHUNK as u64 + (64 << 10);
+/// Bytes the module works in besides its inputs and output for a stream of `n` bytes of data
+/// with a window of `window` bytes: the match finder (chains of 2 and 3 bytes), its data and
+/// its parse (a token at most a byte), and 64 KiB for the rest (contexts, trees).
+pub const fn work(window: usize, n: usize) -> u64 {
+    (2 * 65536 + 2 * window) as u64 * 4 + (n * (1 + std::mem::size_of::<lzx::Tok>())) as u64 + (64 << 10)
+}
+
+/// [`work`] of WIM's chunks.
+pub const WORK: u64 = work(recons::CHUNK, recons::CHUNK);
 
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
-    Some(u.whole(WORK, 1))
+    let v = crate::module::variant(u.params).ok()?;
+    if !v.cab {
+        return Some(u.whole(WORK, 1));
+    }
+    // (CAB's streams one after another: the largest's, and its output once more as it is written)
+    let parts = crate::module::parts(u.content(3)?).ok()?;
+    let n = parts.iter().map(|p| p.data).max().unwrap_or(0);
+    Some(u.whole(work(v.window(), n) + n as u64, 1))
 }
 
 /// The streams split on up to `threads` threads, each a stream of chunks (their bytes and
@@ -39,29 +51,47 @@ pub struct Stream {
 /// kept before it, then `tail`: `len` bytes in all. Its records and index are streams added
 /// to `f`.
 pub fn apply(f: &mut Formula, streams: Vec<Stream>, tail: Node, len: u64) -> Node {
+    Node::Apply(Box::new(apply_as(f, lzx::WIM, streams, tail, len)))
+}
+
+/// [`apply`] of streams of `v` (CAB's: their data e8 undone, as [`recons::split_stream`] gives
+/// it), as an application.
+pub fn apply_as(f: &mut Formula, v: lzx::Variant, streams: Vec<Stream>, tail: Node, len: u64) -> Apply {
+    let lens: Vec<usize> = streams.iter().map(|s| s.data.len() as usize).collect();
+    let (data, rest): (Vec<Node>, Vec<(Node, Vec<u8>)>) =
+        streams.into_iter().map(|s| (s.data, (s.kept, s.record))).unzip();
+    let parts = rest.into_iter().zip(lens).map(|((kept, record), n)| (kept, n, record)).collect();
+    apply_joined(f, v, Node::concat(data), parts, tail, len)
+}
+
+/// [`apply_as`] of the streams' data one after another in `data`: each stream the bytes kept
+/// before it, its bytes of data and its record.
+pub fn apply_joined(
+    f: &mut Formula,
+    v: lzx::Variant,
+    data: Node,
+    streams: Vec<(Node, usize, Vec<u8>)>,
+    tail: Node,
+    len: u64,
+) -> Apply {
     let parts: Vec<crate::module::Part> = streams
         .iter()
-        .map(|s| crate::module::Part {
-            kept: s.kept.len() as usize,
-            data: s.data.len() as usize,
-            record: s.record.len(),
-        })
+        .map(|s| crate::module::Part { kept: s.0.len() as usize, data: s.1, record: s.2.len() })
         .collect();
-    let (mut data, mut kept, mut records) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut kept, mut records) = (Vec::new(), Vec::new());
     for s in streams {
-        kept.push(s.kept);
-        data.push(s.data);
-        records.extend_from_slice(&s.record);
+        kept.push(s.0);
+        records.extend_from_slice(&s.2);
     }
     kept.push(tail);
     let record = f.push_as("lzx/record", Kind::Compressed, records);
     let index = f.push("lzx/index", index(&parts));
-    Node::Apply(Box::new(Apply {
+    Apply {
         module: MODULE,
         resources: vec![],
-        params: vec![],
-        inputs: vec![Node::concat(data), record, Node::concat(kept), index],
+        params: if v.cab { vec![v.window_bits] } else { vec![] },
+        inputs: vec![data, record, Node::concat(kept), index],
         len,
         memory_limit: aqr_formula::NO_LIMIT,
-    }))
+    }
 }

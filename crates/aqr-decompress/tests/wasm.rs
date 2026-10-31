@@ -446,6 +446,48 @@ fn lzx_same_as_wasm() {
     }
 }
 
+/// A CAB stream of LZX (aqr-lzx's fixture: a window of 64 KiB, e8) natively and as WebAssembly
+/// alike, and its record damaged in turn failing alike (or giving the same).
+#[test]
+fn lzx_cab_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let s = fixture("codecs/aqr-lzx/tests/data/greedy.cab-lzx");
+    let v = aqr_lzx::lzx::Variant::cab(s[0]).unwrap();
+    let n = u32::from_le_bytes(s[1..5].try_into().unwrap()) as usize;
+    let (mut src, mut at) = (Vec::new(), 5);
+    while at < s.len() {
+        let len = u32::from_le_bytes(s[at..at + 4].try_into().unwrap()) as usize;
+        src.extend_from_slice(&s[at + 4..at + 4 + len]);
+        at += 4 + len;
+    }
+    let sp = aqr_lzx::recons::split_stream(&src, n, v).unwrap();
+    let mut f = Formula::default();
+    f.push("raw", sp.data.clone());
+    let stream = aqr_lzx::formula::Stream {
+        kept: Node::Concat(Vec::new()),
+        data: Node::slice(0, 0, n as u64),
+        record: sp.record,
+    };
+    let a = aqr_lzx::formula::apply_as(&mut f, v, vec![stream], Node::Concat(Vec::new()), src.len() as u64);
+    f.root = Node::Apply(Box::new(a));
+    let c = enc.encode(&f, None).unwrap();
+    assert!(aqr::decode(&c, &Native::default()).unwrap() == src);
+    assert!(decode_wasm(&c).unwrap() == src);
+    let r = f.streams.iter().position(|s| s.class == "lzx/record").unwrap();
+    for k in 0..8 {
+        let mut bad = f.clone();
+        let s = &mut bad.streams[r].data;
+        let at = s.len() * k / 8;
+        s[at] ^= 1 << k;
+        let c = enc.encode(&bad, None).unwrap();
+        let (n, w) = (aqr::decode(&c, &Native::default()), decode_wasm(&c));
+        assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
+        if let (Ok(n), Ok(w)) = (n, w) {
+            assert!(n == w, "{k}");
+        }
+    }
+}
+
 /// CAB files of MSZIP and stored folders (aqr-mszip's fixtures) natively and as WebAssembly
 /// alike, and their bytes kept damaged in turn failing alike (or giving the same).
 #[test]

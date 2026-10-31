@@ -8,16 +8,18 @@ publish = false
 [features]
 default = ["encode"]
 # The formulas (`formula`, `cab`); without it, the code of the module alone (`module`).
-encode = ["dep:aqr-formula", "dep:aqr-flate"]
+encode = ["dep:aqr-formula", "dep:aqr-flate", "aqr-lzx/encode"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-flate = { path = "../aqr-flate", optional = true }
+aqr-lzx = { path = "../aqr-lzx", default-features = false }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 
 [dev-dependencies]
 aqr-decompress = { path = "../../crates/aqr-decompress" }
 aqr-flate = { path = "../aqr-flate" }
+aqr-lzx = { path = "../aqr-lzx" }
 memmap2 = "0.9"
 
 # Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
@@ -26,3 +28,7 @@ memmap2 = "0.9"
 [[example]]
 name = "aqr-mszip-check"
 path = "examples/check.rs"
+
+[[example]]
+name = "aqr-mszip-lzx"
+path = "examples/lzx.rs"

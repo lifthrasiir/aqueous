@@ -21,8 +21,8 @@
 use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 
 use crate::lzx::{
-    self, ALIGNED, ALIGNED_BLOCK, BitW, Block, LEN, MAIN, MAX_MATCH, MIN_MATCH, PRE, Parse, PreSym, Tok, TreeCode,
-    UNCOMPRESSED, WINDOW,
+    self, ALIGNED, ALIGNED_BLOCK, BitW, Block, LEN, MAIN_MAX, MAX_MATCH, MIN_MATCH, PRE, Parse, PreSym, Tok, TreeCode,
+    UNCOMPRESSED, Variant, WINDOW,
 };
 use crate::{Error, Result, corrupt};
 
@@ -65,36 +65,44 @@ fn h3(d: &[u8], p: usize) -> usize {
     (k.wrapping_mul(0x9e37_79b1) >> 16) as usize
 }
 
-/// The match finder of a chunk: every position before the current one, on a chain of its
-/// first 2 bytes and one of a hash of its first 3.
+/// The match finder of a stream: every position before the current one within the window, on
+/// a chain of its first 2 bytes and one of a hash of its first 3 (their links in rings of the
+/// window's size).
 struct Mf {
     head2: Vec<u32>,
     prev2: Vec<u32>,
     head3: Vec<u32>,
     prev3: Vec<u32>,
     next: usize,
+    /// The rings' mask, and the farthest offset a candidate may be.
+    mask: usize,
+    max_off: usize,
 }
 
 impl Mf {
-    fn new() -> Mf {
+    fn new(window: usize) -> Mf {
         Mf {
             head2: vec![NONE; 1 << 16],
-            prev2: vec![NONE; CHUNK],
+            prev2: vec![NONE; window],
             head3: vec![NONE; 1 << 16],
-            prev3: vec![NONE; CHUNK],
+            prev3: vec![NONE; window],
             next: 0,
+            mask: window - 1,
+            max_off: window,
         }
     }
 
     /// A match finder of nothing, for a moment.
     fn empty() -> Mf {
-        Mf { head2: Vec::new(), prev2: Vec::new(), head3: Vec::new(), prev3: Vec::new(), next: 0 }
+        Mf { head2: Vec::new(), prev2: Vec::new(), head3: Vec::new(), prev3: Vec::new(), next: 0, mask: 0, max_off: 0 }
     }
 
-    fn reset(&mut self) {
+    /// Starts a stream whose matches reach at most `max_off` back.
+    fn reset(&mut self, max_off: usize) {
         self.head2.fill(NONE);
         self.head3.fill(NONE);
         self.next = 0;
+        self.max_off = max_off;
     }
 
     /// Inserts the positions before `pos`.
@@ -104,16 +112,22 @@ impl Mf {
             let p = self.next;
             if p + 3 <= d.len() {
                 let h = h3(d, p);
-                self.prev3[p] = self.head3[h];
+                self.prev3[p & self.mask] = self.head3[h];
                 self.head3[h] = p as u32;
             }
             if p + 2 <= d.len() {
                 let k = k2(d, p);
-                self.prev2[p] = self.head2[k];
+                self.prev2[p & self.mask] = self.head2[k];
                 self.head2[k] = p as u32;
             }
             self.next += 1;
         }
+    }
+
+    /// Whether candidate `c` is one at `pos`: a position within reach.
+    #[inline]
+    fn near(&self, c: u32, pos: usize) -> bool {
+        c != NONE && pos - c as usize <= self.max_off
     }
 
     /// The chain a match of `len` bytes at `pos` is on: its first candidate and its links.
@@ -136,7 +150,7 @@ impl Mf {
             return (0, 0);
         }
         let (c, _) = self.chain(d, pos, 2);
-        if c != NONE {
+        if self.near(c, pos) {
             let n = lcp(d, c as usize, pos, cap);
             if n >= MIN_MATCH {
                 (best, off) = (n, pos - c as usize);
@@ -145,7 +159,7 @@ impl Mf {
         if cap >= 3 {
             let (mut c, prev) = self.chain(d, pos, 3);
             for _ in 0..DEPTH {
-                if c == NONE || best >= cap {
+                if !self.near(c, pos) || best >= cap {
                     break;
                 }
                 let p = c as usize;
@@ -155,7 +169,7 @@ impl Mf {
                         (best, off) = (n, pos - p);
                     }
                 }
-                c = prev[p];
+                c = prev[p & self.mask];
             }
         }
         (best, off)
@@ -166,14 +180,14 @@ impl Mf {
     fn each(&self, d: &[u8], pos: usize, len: usize, mut f: impl FnMut(usize) -> bool) {
         let (mut c, prev) = self.chain(d, pos, len);
         for _ in 0..LIMIT {
-            if c == NONE {
+            if !self.near(c, pos) {
                 return;
             }
             let p = c as usize;
             if d[p + len - 1] == d[pos + len - 1] && lcp(d, p, pos, len) >= len && f(pos - p) {
                 return;
             }
-            c = prev[p];
+            c = prev[p & self.mask];
         }
     }
 }
@@ -416,13 +430,16 @@ pub fn huffman(freqs: &[u32], limit: u8, out: &mut [u8]) {
 }
 
 /// Walks a stream's chunks over `data`, coding them (`chunks` given, each its parse or None
-/// where stored) or decoding them (written onto `out`), as the side is.
+/// where stored) or decoding them (written onto `out`), as the side is; or a CAB stream.
 struct Walker {
     ctx: Ctx,
     /// The match finder and a chunk's data, of the thread's last walker (allocated once a
     /// thread: streams are many, and the allocator slow to find room where much is held).
     mf: Box<Mf>,
     d: Vec<u8>,
+    v: Variant,
+    /// Where the frame ends, and the stream (CAB's).
+    frame_end: usize,
 }
 
 thread_local! {
@@ -441,14 +458,15 @@ impl Drop for Walker {
 pub type Chunks = Vec<Option<Parse>>;
 
 impl Walker {
-    fn new() -> Walker {
-        let (mf, d) =
-            SPARE.with(|s| s.borrow_mut().take()).unwrap_or_else(|| (Box::new(Mf::new()), Vec::with_capacity(CHUNK)));
-        Walker { ctx: Ctx::new(), mf, d }
+    fn new(v: Variant) -> Walker {
+        let window = v.window();
+        let spare = SPARE.with(|s| s.borrow_mut().take()).filter(|(mf, _)| mf.prev2.len() == window);
+        let (mf, d) = spare.unwrap_or_else(|| (Box::new(Mf::new(window)), Vec::with_capacity(CHUNK)));
+        Walker { ctx: Ctx::new(), mf, d, v, frame_end: usize::MAX }
     }
 
-    /// One chunk of data `raw` (as the file holds it): its parse coded or decoded, the chunk
-    /// written onto `out` when decoding.
+    /// One chunk (or CAB stream) of data `raw` (as the file holds it): its parse coded or
+    /// decoded, the chunk written onto `out` when decoding.
     fn chunk(
         &mut self,
         side: &mut impl Side,
@@ -456,23 +474,40 @@ impl Walker {
         want: Option<&Option<Parse>>,
         out: Option<&mut Vec<u8>>,
     ) -> Result<()> {
-        let stored = side.bit(&mut self.ctx.stored, matches!(want, Some(None)), Cat::Rest);
-        if stored {
-            if let Some(out) = out {
-                out.extend_from_slice(raw);
+        let cab = self.v.cab;
+        if !cab {
+            let stored = side.bit(&mut self.ctx.stored, matches!(want, Some(None)), Cat::Rest);
+            if stored {
+                if let Some(out) = out {
+                    out.extend_from_slice(raw);
+                }
+                return Ok(());
             }
-            return Ok(());
+        }
+        let want = want.map(|w| w.as_ref().ok_or(Error("a stream stored"))).transpose()?;
+        let mut parse = Parse::default();
+        // the header (CAB's): the e8 translation's size
+        if cab {
+            let we = want.and_then(|w| w.e8);
+            if side.bit(&mut self.ctx.zero[5], we.is_some(), Cat::Rest) {
+                let v = we.unwrap_or(0);
+                parse.e8 = Some(side.raw(16, v >> 16, Cat::Rest) << 16 | side.raw(16, v & 0xffff, Cat::Rest));
+            }
         }
         let mut d = std::mem::take(&mut self.d);
         d.clear();
         d.extend_from_slice(raw);
-        lzx::e8_encode(&mut d);
-        let want = want.map(|w| w.as_ref().expect("a parse"));
-        let mut parse = Parse::default();
-        self.mf.reset();
+        match (cab, parse.e8) {
+            (false, _) => lzx::e8_encode(&mut d),
+            (true, Some(size)) => lzx::e8_encode_frames(&mut d, size),
+            (true, None) => {}
+        }
+        let main = self.v.main();
+        self.mf.reset(if cab { self.v.max_off() } else { CHUNK });
+        self.frame_end = if cab { lzx::FRAME.min(d.len()) } else { usize::MAX };
         let mut reps = lzx::REPS;
-        let mut lens = lzx::Lens::default();
-        let (mut at, mut prev_kind) = (0, 0);
+        let mut lens = lzx::Lens::new(self.v);
+        let (mut at, mut prev_kind, mut last_size) = (0, 0, lzx::FRAME);
         let mut t = 0;
         while at < d.len() {
             let wb = want.map(|w| w.blocks.get(parse.blocks.len()).ok_or_else(corrupt)).transpose()?;
@@ -490,21 +525,30 @@ impl Walker {
                 return Err(corrupt());
             }
             prev_kind = k + 1;
-            // the size: the default, all that is left, or as it is
+            // the size: (WIM's) the default, all that is left, (CAB's) the last block's, or as it is
             let left = d.len() - at;
-            b.default_size = side.bit(&mut self.ctx.default_size[k], wb.is_some_and(|b| b.default_size), Cat::Rest);
+            if !cab {
+                b.default_size = side.bit(&mut self.ctx.default_size[k], wb.is_some_and(|b| b.default_size), Cat::Rest);
+            }
             b.size = if b.default_size {
                 WINDOW
             } else if side.bit(&mut self.ctx.whole[k], wb.is_some_and(|b| b.size == left), Cat::Rest) {
                 left
+            } else if cab && side.bit(&mut self.ctx.default_size[k], wb.is_some_and(|b| b.size == last_size), Cat::Rest)
+            {
+                last_size
             } else {
                 let v = wb.map_or(0, |b| b.size as u32);
-                let v = side.raw(16, v, Cat::Rest) as usize;
+                let v = match cab {
+                    true => (side.raw(8, v >> 16, Cat::Rest) << 16 | side.raw(16, v & 0xffff, Cat::Rest)) as usize,
+                    false => side.raw(16, v, Cat::Rest) as usize,
+                };
                 if v == 0 {
                     return Err(corrupt());
                 }
                 v
             };
+            last_size = b.size;
             let end = (at + b.size).min(d.len());
             if b.kind == UNCOMPRESSED {
                 let wv = wb.map_or(0, |b| b.align_bits as u32);
@@ -522,6 +566,9 @@ impl Walker {
                         *r = side.raw(16, v >> 16, Cat::Rest) << 16 | side.raw(16, v & 0xffff, Cat::Rest);
                     }
                 }
+                if cab && b.reps.iter().any(|&r| r == 0 || r as usize > self.v.max_off()) {
+                    return Err(corrupt());
+                }
                 reps = b.reps;
                 if b.size % 2 == 1 {
                     let wp = wb.and_then(|b| b.pad_byte);
@@ -532,16 +579,19 @@ impl Walker {
                     }
                 }
                 at = end;
+                while self.frame_end <= at && self.frame_end < d.len() {
+                    self.frame_end = (self.frame_end + lzx::FRAME).min(d.len());
+                }
                 parse.blocks.push(b);
                 continue;
             }
             // the tokens
             let first = parse.toks.len();
-            let wt = want.map(|w| &w.toks[..]);
-            self.tokens(side, &d, at, end, &mut reps, wt, &mut t, &mut parse.toks)?;
+            let wt = want.map(|w| (&w.toks[..], &w.frame_pad[..]));
+            self.tokens(side, &d, at, end, &mut reps, wt, &mut t, &mut parse)?;
             b.toks = parse.toks.len() - first;
             // the trees, against the code of the block's frequencies
-            let (mut fm, mut fl, mut fa) = ([0u32; MAIN], [0u32; LEN], [0u32; ALIGNED]);
+            let (mut fm, mut fl, mut fa) = ([0u32; MAIN_MAX], [0u32; LEN], [0u32; ALIGNED]);
             let mut p = at;
             for tok in &parse.toks[first..] {
                 match *tok {
@@ -554,14 +604,14 @@ impl Walker {
                         let header = (len - MIN_MATCH).min(7);
                         let slot = match rep {
                             Some(k) => k as usize,
-                            None => lzx::slot(off as u32 + 2),
+                            None => lzx::slot(off + 2),
                         };
                         fm[256 + slot * 8 + header] += 1;
                         if header == 7 {
                             fl[len - MIN_MATCH - 7] += 1;
                         }
                         if rep.is_none() && lzx::EXTRA[slot] >= 3 {
-                            fa[((off as u32 + 2 - lzx::BASE[slot]) & 7) as usize] += 1;
+                            fa[((off + 2 - lzx::BASE[slot]) & 7) as usize] += 1;
                         }
                         p += len;
                     }
@@ -575,16 +625,16 @@ impl Walker {
                     b.aligned[i] = self.length(side, p, v, 2, 7)?;
                 }
             }
-            let (mut pm, mut pl) = ([0u8; MAIN], [0u8; LEN]);
-            huffman(&fm, 16, &mut pm);
+            let (mut pm, mut pl) = ([0u8; MAIN_MAX], [0u8; LEN]);
+            huffman(&fm[..main], 16, &mut pm[..main]);
             huffman(&fl, 16, &mut pl);
             let (wm, wl) = match want {
-                Some(w) => want_lens(w, parse.blocks.len()),
-                None => ([0; MAIN], [0; LEN]),
+                Some(w) => want_lens(w, parse.blocks.len(), self.v),
+                None => (vec![0; main], [0; LEN]),
             };
-            let mut target_m = [0u8; MAIN];
+            let mut target_m = vec![0u8; main];
             let mut target_l = [0u8; LEN];
-            for i in 0..MAIN {
+            for i in 0..main {
                 target_m[i] = self.length(side, pm[i], wm[i], 0, 16)?;
             }
             for i in 0..LEN {
@@ -616,7 +666,7 @@ impl Walker {
         }
         if let Some(out) = out {
             let mut w = BitW::new(std::mem::take(out));
-            let ok = lzx::write_onto(&d, &parse, &mut w);
+            let ok = lzx::write_onto_as(&d, &parse, self.v, &mut w);
             *out = w.out;
             ok.ok_or_else(corrupt)?;
         }
@@ -747,8 +797,8 @@ impl Walker {
         Ok(t)
     }
 
-    /// The tokens of the block of `d[at..end)`: coded from `want` (from its `t`-th) or decoded,
-    /// onto `toks`.
+    /// The tokens of the block of `d[at..end)`: coded from `want` (its tokens from the `t`-th,
+    /// and its frames' padding) or decoded, onto `parse`.
     #[allow(clippy::too_many_arguments)]
     fn tokens(
         &mut self,
@@ -757,12 +807,16 @@ impl Walker {
         at: usize,
         end: usize,
         reps: &mut [u32; 3],
-        want: Option<&[Tok]>,
+        want: Option<(&[Tok], &[u16])>,
         t: &mut usize,
-        toks: &mut Vec<Tok>,
+        parse: &mut Parse,
     ) -> Result<()> {
         let c = &mut self.ctx;
         let mf = &mut self.mf;
+        let (want, want_pads) = (want.map(|w| w.0), want.map(|w| w.1));
+        let esc_bits = if self.v.cab { self.v.window_bits as u32 } else { 15 };
+        let Parse { toks, frame_pad, .. } = parse;
+        let frame_end = &mut self.frame_end;
         let mut pos = at;
         while pos < end {
             mf.advance(d, pos);
@@ -778,6 +832,7 @@ impl Walker {
             if !is_match {
                 toks.push(Tok::Lit);
                 pos += 1;
+                pad(side, &mut c.zero[6], frame_end, d.len(), pos, frame_pad, want_pads)?;
                 continue;
             }
             let (wlen, woff, wrep) = match w {
@@ -825,7 +880,7 @@ impl Walker {
                     }
                     let esc = side.bit(&mut c.off_escape[lb(len)], want.is_some() && !found, Cat::Off);
                     let off = if esc {
-                        side.raw(15, woff as u32, Cat::Off) as usize
+                        side.raw(esc_bits, woff as u32, Cat::Off) as usize
                     } else {
                         let rank = side.gamma(&mut c.rank[lb(len) * 4 + lb(longest).min(3)], rank, Cat::Off)?;
                         let mut n = 0;
@@ -840,7 +895,7 @@ impl Walker {
                         });
                         off
                     };
-                    if off == 0 || off > pos {
+                    if off == 0 || off > pos.min(mf.max_off) {
                         return Err(corrupt());
                     }
                     *reps = [off as u32, reps[0], reps[1]];
@@ -850,11 +905,32 @@ impl Walker {
             if off == 0 || off > pos || len > cap || lcp(d, pos - off, pos, len) < len {
                 return Err(corrupt());
             }
-            toks.push(Tok::Match { len: len as u16, off: off as u16, rep });
+            toks.push(Tok::Match { len: len as u16, off: off as u32, rep });
             pos += len;
+            pad(side, &mut c.zero[6], frame_end, d.len(), pos, frame_pad, want_pads)?;
         }
         Ok(())
     }
+}
+
+/// (CAB's) The padding of the frame a token ends at `pos` (where the frame ends before `n`),
+/// against `want`, onto `pads`.
+fn pad(
+    side: &mut impl Side,
+    bit: &mut Bit,
+    frame_end: &mut usize,
+    n: usize,
+    pos: usize,
+    pads: &mut Vec<u16>,
+    want: Option<&[u16]>,
+) -> Result<()> {
+    if pos >= *frame_end && *frame_end < n {
+        let wp = want.map(|p| p.get(pads.len()).copied().ok_or_else(corrupt)).transpose()?.unwrap_or(0);
+        let v = if side.bit(bit, wp != 0, Cat::Rest) { side.raw(16, wp as u32, Cat::Rest) } else { 0 };
+        pads.push(v as u16);
+        *frame_end = (*frame_end + lzx::FRAME).min(n);
+    }
+    Ok(())
 }
 
 /// A match's length against `pred`, of a match of `kind` (a repeat 0-2, or 3 for new), of at
@@ -879,9 +955,10 @@ fn self_len(side: &mut impl Side, c: &mut Ctx, kind: usize, pred: usize, want: u
     Ok(len)
 }
 
-/// The code lengths block `b` of `parse` ends with: the main tree's and the length tree's.
-fn want_lens(parse: &Parse, b: usize) -> ([u8; MAIN], [u8; LEN]) {
-    let mut l = lzx::Lens::default();
+/// The code lengths block `b` of `parse` (of `v`) ends with: the main tree's and the length
+/// tree's.
+fn want_lens(parse: &Parse, b: usize, v: Variant) -> (Vec<u8>, [u8; LEN]) {
+    let mut l = lzx::Lens::new(v);
     for blk in &parse.blocks[..=b] {
         if blk.kind != UNCOMPRESSED {
             l.apply(blk).expect("trees read");
@@ -936,7 +1013,7 @@ pub fn split_into(chunks: &[(&[u8], usize)], data: &mut [u8]) -> Result<(Vec<u8>
         parses.push(Some(p));
     }
     let mut enc = Enc { c: ArithEncoder::new(Vec::new()), cost: [0.0; CATS] };
-    let mut w = Walker::new();
+    let mut w = Walker::new(lzx::WIM);
     for (raw, p) in data.chunks(CHUNK).zip(&parses) {
         w.chunk(&mut enc, raw, Some(p), None)?;
     }
@@ -953,12 +1030,34 @@ pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
 /// [`join`] onto `out`.
 pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<()> {
     let mut dec = Dec { c: ArithDecoder::new(record) };
-    let mut w = Walker::new();
+    let mut w = Walker::new(lzx::WIM);
     for raw in data.chunks(CHUNK) {
         w.chunk(&mut dec, raw, None, Some(out))?;
         if dec.c.overrun() {
             return Err(corrupt());
         }
+    }
+    Ok(())
+}
+
+/// The data and record of stream `src` of `v` (CAB's) of `n` bytes of data. None where it does
+/// not read whole.
+pub fn split_stream(src: &[u8], n: usize, v: Variant) -> Result<Split> {
+    let (mut data, parse) = lzx::read_as(src, n, v).ok_or(Error("a stream not read"))?;
+    if let Some(size) = parse.e8 {
+        lzx::e8_decode_frames(&mut data, size);
+    }
+    let mut enc = Enc { c: ArithEncoder::new(Vec::new()), cost: [0.0; CATS] };
+    Walker::new(v).chunk(&mut enc, &data, Some(&Some(parse)), None)?;
+    Ok(Split { data, record: enc.c.finish(), cost: enc.cost })
+}
+
+/// The stream of `v` that `data` and `record` rebuild, onto `out`.
+pub fn join_stream_onto(data: &[u8], record: &[u8], v: Variant, out: &mut Vec<u8>) -> Result<()> {
+    let mut dec = Dec { c: ArithDecoder::new(record) };
+    Walker::new(v).chunk(&mut dec, data, None, Some(out))?;
+    if dec.c.overrun() {
+        return Err(corrupt());
     }
     Ok(())
 }

@@ -97,7 +97,8 @@ reservoir is rebuilt.
 | ar, tar, cpio | aqr-bundle | the 10gb corpus (README) | 2810.8 → 2775.0 MB for all of it | | | 6600 (the module) | 28000 (the module) | not measured | measured with `aqr` and `aqr-bundle-check`, not `aqr-show`: an archive alone gains nothing, its files are recompressed by their formats and shared with the same files archived along (`gimp.tar` and its files −11.3 MB); ar archives of objects +1.0 MB |
 | asar (Electron) | aqr-asar | 27 archives of one machine (README) | 714.42 → 697.11 MB for all of them (with aqr-gif) | | | 950 | 4100 (the module) | not measured | an archive alone gains little (headers at zstd -3 2.13 → 0.84 MB); its files are recompressed by their formats; archives of many small files (`node_modules`) lose alone, as their text is a stream apart (aqr-compress's kinds) |
 | ISO 9660, UDF images | aqr-iso | a Windows Server 2008 R2 DVD, 3.17 GB (README) | 2777.6 → 2776.9 MB | | 177 (`aqr`, all threads) | | 1.82 GB peak for 3.17 GB (2.04 before) | measured 2026-10-30 with `aqr`; no module (the image is its files' contents and the rest); 89% of the DVD is `install.wim` (LZX), which it gives as a file of its own |
-| CAB (MSZIP, stored) | aqr-mszip, aqr-flate | 441 CAB files of Windows, 1.80 GB (README) | 1662.7 → 1331.3 MB for all of them | | 23 (`aqr`, all threads) | 84 (`-t`) | 3.92 GB peak footprint (1.29 before) | measured 2026-10-31 with `aqr`; MSZIP folders as one DEFLATE stream each (the blocks joined), rebuilt by aqr-flate (records 4.6% of the streams at profile 6, 1.2% at 10), the files' contents recompressed in turn; LZX folders (586 MB) kept |
+| CAB (MSZIP, LZX, stored) | aqr-mszip, aqr-flate, aqr-lzx | 441 CAB files of Windows, 1.80 GB (README) | 1662.7 → 1316.5 MB for all of them | | 6.2 (`aqr`, all threads) | 84 (`-t`) | 5.38 GB peak footprint (1.29 before) | measured 2026-10-31 with `aqr`; MSZIP folders as one DEFLATE stream each (the blocks joined), rebuilt by aqr-flate (records 4.6% of the streams at profile 6, 1.2% at 10): −19.9% at 23 MB/s; LZX folders by aqr-lzx (records 7.9%): −1.1% more, as an LZX CAB alone gains little, but 40 of them with the files they hold −33% |
+| CHM | aqr-mszip, aqr-lzx | 139 help files, 90.9 MB (README) | 88.36 → 72.19 MB | | 6.1 (`aqr`, all threads) | 19 (`-t`) | 0.90 GB peak footprint | measured 2026-10-31 with `aqr`; each LZX reset interval a stream, records 4.9% of the content |
 | PPMd var. J (`.pmd`) | aqr-ppmd | the 10gb corpus's two files, 205.4 MB (README) | 2579.2 → 2557.8 MB for all of it | | | | not measured | measured 2026-10-30 with `aqr`, not `aqr-show`; no module (the file is its header and its data): `enwik8.pmd`'s data is stored within `enwik9.pmd`'s, as their texts start alike. PPMd itself is not recoded |
 | LevelDB tables (Snappy) | aqr-snappy | 33 tables of a Chrome profile, 13.3 MB (README) | −30.5% against `zstd -3` | | | 315 (tables rebuilt) | not measured | both hashes of Snappy 1.2.2 |
 | git checkouts | aqr-git (packs), aqr-flate (loose objects), the archive (the rest) | 15 repositories, 1196 MB (README) | 0.454 (0.430 from level 7: aqr-flate's adaptive profile) | 0.651 (`tar \| zstd -19 --long=27`) | 23 (`aqr`, 10 threads) | 142 (`aqr -t`, 10 threads) | peak RSS 0.2–7.1 GB (pyre, 665 MB, 10.7×) | directories, measured with `aqr` 2026-10-28, not `aqr-show`; the former aqr-git (its own container) came to 0.452, 0.255 with every zlib stream rebuilt and all the packs' data in one stream (here in solid blocks of 16 MiB) |
@@ -128,7 +129,7 @@ reservoir is rebuilt.
 | aqr-bundle | members sliced from the archive's bytes rather than copied (the memory of `.tar.gz`); COFF objects of ar archives (aqr-exe); old GNU sparse files; tar archives found in other data |
 | aqr-asar | contents of many small files by kind cost alone and pay in a batch (etcher +1.96 MB alone; of no kind the 27 archives +9.2 MB) |
 | aqr-ppmd | the data decoded and coded again (a few MB/s, `docs/10gb-todo.md` item 5); files of several files past the first; other variants |
-| aqr-mszip | CAB's LZX folders (aqr-lzx: streams of frames, windows up to 2 MiB) and CHM; the data blocks' checksums derived |
+| aqr-mszip | speed of large LZX folders (one thread a stream); the data blocks' checksums derived; MSI |
 | aqr-iso | UDF's metadata partition (2.50, Blu-ray); raw 2352-byte sectors (EDC/ECC); the files' contents sliced from the image rather than copied; WIM (LZX) recompression for the install images |
 
 ## Worth doing
@@ -332,7 +333,7 @@ not available or comes in too many variants.
 
 | format | used in | why it is hard |
 |---|---|---|
-| LZX, LZMS, XPRESS Huffman (WIM, ESD, CHM, CAB-LZX, Windows prefetch) | Windows install images | Microsoft's encoders are closed and their parsers optimal-style; predicting and correcting (as aqr-flate does) leaves large corrections |
+| LZMS, XPRESS Huffman (ESD, Windows prefetch; LZX of WIM, CAB and CHM is aqr-lzx's, a record of the parse) | Windows install images | Microsoft's encoders are closed and their parsers optimal-style; predicting and correcting (as aqr-flate does) leaves large corrections |
 | Oodle (Kraken, Mermaid, Leviathan) | AAA game paks | a closed commercial library with many versions and levels |
 | RAR | archives | a closed encoder, with licence restrictions |
 | xz, LZMA, 7z (also `.deb`, `.rpm`, Arch packages, pbzx) | source and package distribution | optimal parsing over many versions and options, and little to gain over an already strong coder |

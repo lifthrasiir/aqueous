@@ -58,8 +58,12 @@ pub enum Format {
     /// 7z archive (aqr-7z, and aqr-lzma on its folders of LZMA or LZMA2), known by its
     /// signature header.
     SevenZip,
-    /// CAB file (aqr-mszip, and aqr-flate on its MSZIP folders), known by its header.
+    /// CAB file (aqr-mszip, and aqr-flate on its MSZIP folders, aqr-lzx on its LZX folders),
+    /// known by its header.
     Cab,
+    /// CHM file (aqr-mszip, and aqr-lzx on its LZX section), known by its header: at the start of
+    /// data only.
+    Chm,
     /// git pack (aqr-git, and aqr-flate on its entries' zlib streams), a whole file: not
     /// looked for in other data.
     GitPack,
@@ -108,7 +112,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 44] = [
+    pub const ALL: [Format; 45] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -136,6 +140,7 @@ impl Format {
         Format::Zip,
         Format::SevenZip,
         Format::Cab,
+        Format::Chm,
         Format::GitPack,
         Format::Fasta,
         Format::Wasm,
@@ -184,6 +189,7 @@ impl Format {
             Format::Zip => "zip",
             Format::SevenZip => "7z",
             Format::Cab => "cab",
+            Format::Chm => "chm",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
             Format::Wasm => "wasm",
@@ -265,6 +271,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
         b"cab" => format(Format::Cab),
+        b"chm" => format(Format::Chm),
         b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg" | b"oga" | b"ogv"
         | b"opus" | b"aac" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
@@ -303,6 +310,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Wim)
     } else if start && aqr_asar::starts(d) {
         Some(Format::Asar)
+    } else if start && aqr_mszip::formula::starts_chm(d) {
+        Some(Format::Chm)
     } else if sqlite_header(d) {
         Some(Format::Sqlite)
     } else if at(0, b"%PDF-") {
