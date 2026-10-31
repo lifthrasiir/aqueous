@@ -5,7 +5,8 @@
 //! bits of each part, and the speeds a thread (of the blocks' bytes). `-z` adds zstd at that
 //! level of the whole file, for reference. Files are taken several at once (`-j`, by default as
 //! many as the machine has threads), each coded and decoded on up to `-t` threads (1); the
-//! speeds are of a file's bytes by the time it takes.
+//! speeds are of a file's bytes by the time it takes. The digest at the end is of every file's
+//! coded streams, whatever the order the files are taken in: it changes where the coding does.
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
@@ -45,6 +46,7 @@ fn main() {
     paths.retain(|p| !p.is_empty());
     let next = AtomicUsize::new(0);
     let totals: Mutex<BTreeMap<&'static str, Total>> = Mutex::default();
+    let digest = std::sync::atomic::AtomicU64::new(0);
     std::thread::scope(|s| {
         for _ in 0..threads {
             s.spawn(|| {
@@ -70,6 +72,7 @@ fn main() {
                     rest.extend_from_slice(&d[found.start + blocks.len()..]);
                     let rest = zstd::bulk::compress(&rest, 19).unwrap().len();
                     let z = if level > 0 { zstd::bulk::compress(&d, level).unwrap().len() } else { 0 };
+                    digest.fetch_add(fnv(&[path.as_bytes(), &main, &apart]), Ordering::Relaxed);
                     let mut t = totals.lock().unwrap();
                     let e = t.entry(l.format.name()).or_default();
                     e.files += 1;
@@ -122,4 +125,16 @@ fn main() {
         }
     }
     show("all", &all);
+    println!("digest {:016x}", digest.into_inner());
+}
+
+/// FNV-1a of the parts, each after its length.
+fn fnv(parts: &[&[u8]]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for p in parts {
+        for &b in (p.len() as u64).to_le_bytes().iter().chain(*p) {
+            h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    h
 }
