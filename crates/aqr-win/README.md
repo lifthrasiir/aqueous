@@ -18,7 +18,8 @@ aqr-win --register      # the verbs, for this user (HKCU); --unregister takes th
   one (a named pipe, `src/gather.rs`). Several paths compressed make one archive named after
   their folder.
 - The window is a task dialog (common controls 6, by the embedded manifest): what is being done,
-  a bar (on the taskbar too), the file at work, the time left, and Cancel, which asks `aqr` to
+  a bar of the phases overlaid as on a terminal (lighter, recompressed; darker, compressed;
+  the taskbar's, their share), the file at work, the time left, and Cancel, which asks `aqr` to
   stop (its output being written removed; killed if it has not stopped in 10 s). A job done
   within 0.4 s shows no window.
 - An output there already is asked about (replace, or skip; for all, where there are several).

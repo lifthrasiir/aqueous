@@ -3,7 +3,8 @@
 //!
 //! [`progress`] shows a job as it goes, drawn again on the dialog's timer (some five times a
 //! second) from what `aqr` told last; the questions `aqr` asks are asked from there too, as
-//! dialogs over it.
+//! dialogs over it. Its bar overlays the phases as `aqr`'s bar on a terminal does ([`paint`]),
+//! the taskbar's showing the share of them all.
 
 use std::cell::{Cell, RefCell};
 use std::ffi::OsStr;
@@ -12,7 +13,16 @@ use std::process::{Child, ExitStatus};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use windows_sys::Win32::Foundation::{HWND, LPARAM, S_FALSE, S_OK, WPARAM};
+use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, S_FALSE, S_OK, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{
+    AlphaBlend, BLENDFUNCTION, BeginPaint, COLOR_3DSHADOW, COLOR_BTNFACE, COLOR_HIGHLIGHT, CreateCompatibleBitmap,
+    CreateCompatibleDC, DeleteDC, DeleteObject, EndPaint, FillRect, GetSysColorBrush, HDC, InvalidateRect, PAINTSTRUCT,
+    SelectObject, SetPixel,
+};
+use windows_sys::Win32::UI::Controls::{
+    CloseThemeData, DrawThemeBackground, GetThemeBackgroundContentRect, OpenThemeData, PBFS_NORMAL, PBFS_PAUSED,
+    PP_BAR, PP_FILL,
+};
 use windows_sys::Win32::UI::Controls::{
     PBST_PAUSED, TASKDIALOGCONFIG, TD_ERROR_ICON, TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON,
     TDCBF_CLOSE_BUTTON, TDCBF_NO_BUTTON, TDCBF_YES_BUTTON, TDE_CONTENT, TDE_MAIN_INSTRUCTION,
@@ -20,7 +30,11 @@ use windows_sys::Win32::UI::Controls::{
     TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE, TDM_SET_PROGRESS_BAR_STATE, TDN_BUTTON_CLICKED, TDN_CREATED,
     TDN_TIMER, TaskDialogIndirect,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{IDCANCEL, IDYES, PostMessageW, SendMessageW};
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EnumChildWindows, GetClassNameW, GetClientRect, IDCANCEL, IDYES, PostMessageW, SendMessageW, WM_ERASEBKGND,
+    WM_NCDESTROY, WM_PAINT,
+};
 use windows_sys::core::{BOOL, HRESULT, PCWSTR};
 
 use crate::run::{Job, Verb, file_name};
@@ -134,6 +148,8 @@ struct Window<'a> {
     always: RefCell<Vec<(String, Value)>>,
     /// The texts shown, not set again where they are the same.
     shown: RefCell<(String, String)>,
+    /// The dialog's progress bar, painted by [`paint`].
+    bar: Cell<HWND>,
 }
 
 /// The time given `aqr` to stop before it is killed.
@@ -170,6 +186,7 @@ pub fn progress(job: &Job, child: &mut Child) -> Option<ExitStatus> {
         asking: Cell::new(false),
         always: RefCell::default(),
         shown: RefCell::default(),
+        bar: Cell::new(std::ptr::null_mut()),
     };
     let (main, content) = w.texts();
     let mut d = Config::new(std::ptr::null_mut(), None, &main, &content);
@@ -196,6 +213,14 @@ unsafe extern "system" fn callback(hwnd: HWND, msg: u32, wparam: WPARAM, _: LPAR
         TDN_CREATED => {
             // SAFETY: the dialog's own messages
             unsafe { SendMessageW(hwnd, TDM_SET_PROGRESS_BAR_RANGE as u32, 0, 1000 << 16) };
+            // SAFETY: the dialog's windows, `w` outliving them
+            unsafe {
+                let mut bar: HWND = std::ptr::null_mut();
+                EnumChildWindows(hwnd, Some(find_bar), &mut bar as *mut HWND as LPARAM);
+                if !bar.is_null() && SetWindowSubclass(bar, Some(paint), 1, data as usize) != 0 {
+                    w.bar.set(bar);
+                }
+            }
             w.tick(hwnd);
         }
         TDN_TIMER => w.tick(hwnd),
@@ -254,12 +279,35 @@ impl Window<'_> {
         let f = self.share();
         // SAFETY: the dialog's own message
         unsafe { SendMessageW(hwnd, TDM_SET_PROGRESS_BAR_POS as u32, (f * 1000.0) as usize, 0) };
+        if !self.bar.get().is_null() {
+            // SAFETY: the dialog's bar
+            unsafe { InvalidateRect(self.bar.get(), std::ptr::null(), 0) };
+        }
         let question = self.job.state.lock().unwrap().questions.pop_front();
         if let Some(q) = question {
             self.asking.set(true);
             let answer = self.ask(hwnd, &q);
             self.asking.set(false);
             self.job.send(&json!({"answer": q["ask"], "value": answer}));
+        }
+    }
+
+    /// The shares of the phases done, as the bar overlays them (the one before never behind
+    /// the one after): compressing, the probe, the analysis and the compression; decoding,
+    /// none, the decompression and the evaluation.
+    fn phases(&self) -> [f64; 3] {
+        let s = self.job.state.lock().unwrap();
+        let Some(p) = &s.progress else { return [0.0; 3] };
+        let of = |k: &str| {
+            let (done, total) = (p[k][0].as_f64().unwrap_or(0.0), p[k][1].as_f64().unwrap_or(0.0));
+            if total > 0.0 { (done / total).min(1.0) } else { 0.0 }
+        };
+        match self.job.verb {
+            Verb::Compress => {
+                // (nothing to look into: no strip, as on a terminal)
+                [of("probe"), of("analysis"), of("compression")]
+            }
+            Verb::Extract | Verb::Test => [0.0, of("decompressed"), of("evaluated")],
         }
     }
 
@@ -373,5 +421,101 @@ impl Window<'_> {
             }
             _ => Value::Null,
         }
+    }
+}
+
+/// Finds the progress bar among the dialog's windows, into `*found`.
+unsafe extern "system" fn find_bar(hwnd: HWND, found: LPARAM) -> BOOL {
+    let mut class = [0u16; 32];
+    // SAFETY: room for the name, and the place `callback` gave
+    unsafe {
+        let n = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+        if String::from_utf16_lossy(&class[..n.max(0) as usize]) == "msctls_progress32" {
+            *(found as *mut HWND) = hwnd;
+            return 0;
+        }
+    }
+    1
+}
+
+/// Paints the progress bar `hwnd` as the phases overlaid, in the theme's fill: the analysis
+/// (decoding, the decompression) lighter, the compression (the evaluation) over it, and the
+/// probe as a strip along the bottom below both, lighter still; paused while stopping.
+unsafe extern "system" fn paint(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, id: usize, data: usize) -> LRESULT {
+    match msg {
+        WM_ERASEBKGND => return 1,
+        WM_NCDESTROY => {
+            // SAFETY: the subclass set on it
+            unsafe { RemoveWindowSubclass(hwnd, Some(paint), id) };
+        }
+        WM_PAINT => {
+            // SAFETY: the window `progress` gave the dialog, which it outlives; the bar's own
+            // painting
+            unsafe {
+                let w = &*(data as *const Window);
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                draw(hwnd, hdc, w.phases(), w.stopping.get().is_some());
+                EndPaint(hwnd, &ps);
+            }
+            return 0;
+        }
+        _ => {}
+    }
+    // SAFETY: the message as it came
+    unsafe { DefSubclassProc(hwnd, msg, wp, lp) }
+}
+
+/// Draws the bar `hwnd` on `hdc` (see [`paint`]).
+unsafe fn draw(hwnd: HWND, hdc: HDC, [probe, partly, done]: [f64; 3], paused: bool) {
+    let upto = |r: &RECT, f: f64| RECT { right: r.left + ((r.right - r.left) as f64 * f).round() as i32, ..*r };
+    let strip = |r: RECT| RECT { top: r.bottom - ((r.bottom - r.top) / 3).max(1), ..r };
+    let mut rc = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    let class = wide("PROGRESS");
+    // SAFETY: the bar's own drawing, the rectangles locals
+    unsafe {
+        GetClientRect(hwnd, &mut rc);
+        let theme = OpenThemeData(hwnd, class.as_ptr());
+        if theme == 0 {
+            // (no theme: the system's colours)
+            FillRect(hdc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+            FillRect(hdc, &strip(upto(&rc, probe)), GetSysColorBrush(COLOR_3DSHADOW));
+            FillRect(hdc, &upto(&rc, partly), GetSysColorBrush(COLOR_3DSHADOW));
+            FillRect(hdc, &upto(&rc, done), GetSysColorBrush(COLOR_HIGHLIGHT));
+            return;
+        }
+        DrawThemeBackground(theme, hdc, PP_BAR, 0, &rc, std::ptr::null());
+        let mut inner = rc;
+        GetThemeBackgroundContentRect(theme, hdc, PP_BAR, 0, &rc, &mut inner);
+        let state = if paused { PBFS_PAUSED } else { PBFS_NORMAL };
+        // (the fill, lightened by `light` of white: themes draw the partial fill as the full)
+        let fill = |clip: RECT, light: u8| {
+            if clip.right > clip.left {
+                DrawThemeBackground(theme, hdc, PP_FILL, state, &inner, &clip);
+                if light > 0 {
+                    lighten(hdc, &clip, light);
+                }
+            }
+        };
+        fill(strip(upto(&inner, probe)), 200);
+        fill(upto(&inner, partly), 140);
+        fill(upto(&inner, done), 0);
+        CloseThemeData(theme);
+    }
+}
+
+/// Lightens `r` of `hdc`, `alpha` of 255 of it white.
+unsafe fn lighten(hdc: HDC, r: &RECT, alpha: u8) {
+    // SAFETY: a DC and a pixel of its own, gone before this returns
+    unsafe {
+        let mem = CreateCompatibleDC(hdc);
+        let px = CreateCompatibleBitmap(hdc, 1, 1);
+        let old = SelectObject(mem, px);
+        SetPixel(mem, 0, 0, 0x00ff_ffff);
+        let blend = BLENDFUNCTION { BlendOp: 0, BlendFlags: 0, SourceConstantAlpha: alpha, AlphaFormat: 0 };
+        AlphaBlend(hdc, r.left, r.top, r.right - r.left, r.bottom - r.top, mem, 0, 0, 1, 1, blend);
+        SelectObject(mem, old);
+        DeleteObject(px);
+        DeleteDC(mem);
     }
 }
