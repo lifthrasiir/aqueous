@@ -65,6 +65,8 @@ target/release/aqr -d out.aqr                     # extract
 
 On Windows, `aqr-win` (`cargo build -r -p aqr-win`, beside `aqr.exe`; `aqr-win --register`)
 adds Explorer's verbs and a window of how far the work is: [crates/aqr-win](crates/aqr-win/README.md).
+On macOS, `Aqueous.app` (`crates/aqr-mac/bundle.sh`, into `target/dist`) adds Finder's services
+and opens `.aqr` files, its progress shown on the files in Finder: [crates/aqr-mac](crates/aqr-mac/README.md).
 
 For binaries to distribute, build with `cargo build --profile dist -p aqr` (into `target/dist`):
 fat LTO, a few minutes for 0.3–0.7% fewer instructions than `-r`.
