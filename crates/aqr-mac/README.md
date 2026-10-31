@@ -18,8 +18,10 @@ Aqueous is distributed as `Aqueous.zip`, holding `Aqueous.app` (`aqr-mac` and `a
   service) registers it with Launch Services (`LSRegisterURL`: the `.aqr` type and its icon,
   the document type) and the services (`NSUpdateDynamicServices`) and says so. It also offers
   to link `/usr/local/bin/aqr` to the `aqr` in the bundle (as an administrator, through
-  `osascript`). An app run from where it was downloaded is translocated (run from a read-only
-  copy at a random path), so it only tells the user to move it.
+  `osascript`). Anything else there (a link elsewhere, a file) is named and replaced only if
+  the user agrees; a folder there is left alone. An app run from where it was downloaded is
+  translocated (run from a read-only copy at a random path), so it only tells the user to
+  move it.
 - It is signed ad hoc, not notarized. Gatekeeper refuses it downloaded until it is allowed in
   System Settings (Privacy & Security, "Open Anyway"), or `xattr -d com.apple.quarantine` is
   run on it.

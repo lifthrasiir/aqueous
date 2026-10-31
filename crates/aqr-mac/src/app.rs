@@ -399,7 +399,10 @@ fn welcome(mtm: MainThreadMarker) {
          Keyboard Shortcuts, Services, Files and Folders.",
     );
     if aqr.is_some() && !linked {
-        info += &format!("\n\nThe aqr command can be put at {COMMAND} (as an administrator).");
+        info += &match there() {
+            None => format!("\n\nThe aqr command can be put at {COMMAND} (as an administrator)."),
+            Some(t) => format!("\n\n{COMMAND} is {t}, not this app's aqr."),
+        };
     }
     a.setInformativeText(&NSString::from_str(&info));
     a.addButtonWithTitle(&NSString::from_str("OK"));
@@ -415,8 +418,40 @@ fn welcome(mtm: MainThreadMarker) {
     }
 }
 
-/// Links [`COMMAND`] to `aqr`, as an administrator (macOS asks for the password).
+/// What is at [`COMMAND`], where something is: a link (to where) or a file.
+fn there() -> Option<String> {
+    let m = std::fs::symlink_metadata(COMMAND).ok()?;
+    Some(match std::fs::read_link(COMMAND) {
+        Ok(to) if m.file_type().is_symlink() => {
+            let gone = if std::fs::metadata(COMMAND).is_err() { ", which is not there" } else { "" };
+            format!("a link to {}{gone}", to.display())
+        }
+        _ if m.is_dir() => "a folder".into(),
+        _ => "a file".into(),
+    })
+}
+
+/// Links [`COMMAND`] to `aqr`, as an administrator (macOS asks for the password); what is there
+/// already replaced only where the user agrees.
 fn install_command(mtm: MainThreadMarker, aqr: &std::path::Path) {
+    if let Some(t) = there() {
+        if t == "a folder" {
+            let e = format!("{COMMAND} is a folder; it is left as it is.");
+            alert(mtm, NSAlertStyle::Critical, "The aqr command is not installed", &e, None);
+            return;
+        }
+        let a = NSAlert::new(mtm);
+        a.setAlertStyle(NSAlertStyle::Warning);
+        a.setMessageText(&NSString::from_str(&format!("{COMMAND} is there already")));
+        let info = format!("It is {t}. Replace it with a link to {}?", aqr.display());
+        a.setInformativeText(&NSString::from_str(&info));
+        a.addButtonWithTitle(&NSString::from_str("Cancel"));
+        a.addButtonWithTitle(&NSString::from_str("Replace"));
+        activate(mtm);
+        if a.runModal() == NSAlertFirstButtonReturn {
+            return;
+        }
+    }
     let script = format!(
         "on run argv\ndo shell script \"mkdir -p /usr/local/bin && ln -sf \" & quoted form of item 1 of argv & \" \
          {COMMAND}\" with administrator privileges\nend run"
