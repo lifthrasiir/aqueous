@@ -102,6 +102,11 @@ pub fn level(d: &[u8]) -> Option<u8> {
 /// extent and blocks are found, and their CRCs are not checked), giving up past `max_data`
 /// bytes of data.
 pub fn decode(d: &[u8], data: bool, max_data: usize) -> Result<Stream> {
+    decode_each(d, data, max_data, &mut |_, _| {})
+}
+
+/// [`decode`], with each block's symbols after the BWT and its `origPtr` given to `each`.
+pub fn decode_each(d: &[u8], data: bool, max_data: usize, each: &mut dyn FnMut(&[u8], u32)) -> Result<Stream> {
     let level = level(d).ok_or(Error("not a bzip2 stream"))?;
     let mut s = Stream { level, ..Stream::default() };
     let mut r = Bits::new(d, 4);
@@ -126,6 +131,7 @@ pub fn decode(d: &[u8], data: bool, max_data: usize) -> Result<Stream> {
             return Err(corrupt());
         }
         s.orig_ptrs.push(orig);
+        each(&last, orig);
         if data {
             let at = s.data.len();
             unbwt(&last, orig, &mut links);

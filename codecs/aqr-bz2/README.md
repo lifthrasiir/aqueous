@@ -71,6 +71,31 @@ symbol (27 MB for a block of 900 kB), on each thread. Small files pay the module
 compressed) where no other file of the archive does: a 1 KB `.pkl.bz2` alone archives to
 19.5 KB.
 
+## Without undoing the BWT
+
+Considered (2026-10-31): storing a stream as the symbols after its BWT, coded by a model of
+their own, where its data would not pay (no duplicates, nothing recompressed in it), and
+undoing the BWT only where it does. The stream would be rebuilt by MTF and libbzip2's tables
+alone, without sorting. `aqr-bz2-bwt-model` gives what those symbols cost under two adaptive
+models (ideal code lengths, the models' state kept across blocks), against bzip2's own
+coding:
+
+| stream | bzip2 | MTF ranks (QLFC-like) | the symbols directly (orders 0-2, a run context, mixed, SSE; bcm-like) |
+|---|---|---|---|
+| 20 MB of Korean JSON | 5.09 MB | −0.4% | −2.2% |
+| this repository's sources as a tar | 6.63 MB | +0.3% | −0.5% |
+| `spec/index.bs` (0.9 MB) | 56.0 KB | +1.6% | +8.3% |
+| a Rust stage0 snapshot | 25.70 MB | −0.6% | −2.3% |
+
+With blocks of at most 900 kB, bzip2's Huffman coding of MTF ranks is within a few percent of
+these models; most of what stronger BWT compressors gain comes from larger blocks, which a
+stream to rebuild cannot have. The duplicates are taken already: aqr-compress takes the data
+where another file holds it (`n.json` and `n.json.bz2` archive to 5.52 MB, as `n.json` alone)
+and keeps the stream otherwise. So a hybrid would save about 2% of the streams kept, for a
+second module (a context-mixing coder, a few MB/s) and a choice in aqr-compress; not done. A
+better model of text in the archive (the JSON's data codes to 5.50 MB, the stream is 5.09 MB)
+would serve those streams and every other text alike.
+
 ## Tests
 
 - `tests/formula.rs`: the fixtures of `tests/data` (levels 1, 2, 5 and 9; empty, one to four

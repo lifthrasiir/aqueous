@@ -20,3 +20,7 @@ aqr-formula = { path = "../../crates/aqr-formula", optional = true }
 [[example]]
 name = "aqr-bz2-check"
 path = "examples/check.rs"
+
+[[example]]
+name = "aqr-bz2-bwt-model"
+path = "examples/bwt-model.rs"
