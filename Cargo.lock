@@ -685,6 +685,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-win-install"
+version = "0.1.0"
+dependencies = [
+ "aqr-exe",
+ "embed-resource",
+ "windows-sys",
+ "zstd",
+]
+
+[[package]]
 name = "aqr-wrt"
 version = "0.1.0"
 dependencies = [

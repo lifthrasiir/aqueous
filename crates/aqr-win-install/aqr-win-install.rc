@@ -1,0 +1,2 @@
+// The program's icon (the first, so Explorer's) and that of its windows (main.rs).
+1 ICON "../../droplet.ico"

@@ -1,0 +1,27 @@
+[package]
+name = "aqr-win-install"
+version = "0.1.0"
+edition = "2024"
+description = "An installer of aqr.exe and aqr-win.exe for the user, carrying them recompressed (aqr-exe's filters and zstd)"
+publish = false
+
+[dependencies]
+aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
+zstd = { version = "0.13", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_Controls",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+aqr-exe = { path = "../../codecs/aqr-exe" }
+embed-resource = "3"
+zstd = "0.13"
+
+[[bin]]
+name = "aqr-win-install"
+path = "src/main.rs"
