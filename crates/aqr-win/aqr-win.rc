@@ -1,0 +1,3 @@
+// The program's icon (the first, so Explorer's), also that of .aqr files (register.rs) and of
+// the windows (dialog.rs).
+1 ICON "../../droplet.ico"

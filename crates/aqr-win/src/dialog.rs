@@ -24,16 +24,17 @@ use windows_sys::Win32::UI::Controls::{
     PP_BAR, PP_FILL,
 };
 use windows_sys::Win32::UI::Controls::{
-    PBST_PAUSED, TASKDIALOGCONFIG, TD_ERROR_ICON, TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON,
+    LIM_LARGE, LIM_SMALL, LoadIconMetric, PBST_PAUSED, TASKDIALOGCONFIG, TD_ERROR_ICON, TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON,
     TDCBF_CLOSE_BUTTON, TDCBF_NO_BUTTON, TDCBF_YES_BUTTON, TDE_CONTENT, TDE_MAIN_INSTRUCTION,
     TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER, TDF_SHOW_PROGRESS_BAR, TDM_CLICK_BUTTON, TDM_SET_ELEMENT_TEXT,
     TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE, TDM_SET_PROGRESS_BAR_STATE, TDN_BUTTON_CLICKED, TDN_CREATED,
     TDN_TIMER, TaskDialogIndirect,
 };
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    EnumChildWindows, GetClassNameW, GetClientRect, IDCANCEL, IDYES, PostMessageW, SendMessageW, WM_ERASEBKGND,
-    WM_NCDESTROY, WM_PAINT,
+    EnumChildWindows, GetClassNameW, GetClientRect, HICON, ICON_BIG, ICON_SMALL, IDCANCEL, IDYES, PostMessageW,
+    SendMessageW, WM_ERASEBKGND, WM_NCDESTROY, WM_PAINT, WM_SETICON,
 };
 use windows_sys::core::{BOOL, HRESULT, PCWSTR};
 
@@ -118,11 +119,34 @@ impl Config {
     }
 }
 
+/// Gives the dialog `hwnd` this program's icon (aqr-win.rc), on its title bar and the taskbar.
+fn set_icon(hwnd: HWND) {
+    for (size, which) in [(LIM_SMALL, ICON_SMALL), (LIM_LARGE, ICON_BIG)] {
+        let mut icon: HICON = std::ptr::null_mut();
+        // SAFETY: this program's module, resource 1 by its number, the icon written to a local
+        // (kept as long as the program runs: the dialog does not take it)
+        unsafe {
+            if LoadIconMetric(GetModuleHandleW(std::ptr::null()), 1 as PCWSTR, size, &mut icon) == S_OK {
+                SendMessageW(hwnd, WM_SETICON, which as usize, icon as isize);
+            }
+        }
+    }
+}
+
+/// The callback of a dialog that only wants the icon.
+unsafe extern "system" fn plain(hwnd: HWND, msg: u32, _: WPARAM, _: LPARAM, _: isize) -> HRESULT {
+    if msg as i32 == TDN_CREATED {
+        set_icon(hwnd);
+    }
+    S_OK
+}
+
 /// Shows a message, `more` behind a button of details.
 pub fn message(icon: Icon, main: &str, content: &str, more: Option<&str>) {
     let mut d = Config::new(std::ptr::null_mut(), Some(icon), main, content);
     d.c.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
     d.c.dwCommonButtons = TDCBF_CLOSE_BUTTON;
+    d.c.pfCallback = Some(plain);
     if let Some(m) = more {
         d.c.pszExpandedInformation = d.keep(m);
         d.c.pszCollapsedControlText = d.keep("Show what aqr said");
@@ -211,6 +235,7 @@ unsafe extern "system" fn callback(hwnd: HWND, msg: u32, wparam: WPARAM, _: LPAR
     let w = unsafe { &*(data as *const Window) };
     match msg as i32 {
         TDN_CREATED => {
+            set_icon(hwnd);
             // SAFETY: the dialog's own messages
             unsafe { SendMessageW(hwnd, TDM_SET_PROGRESS_BAR_RANGE as u32, 0, 1000 << 16) };
             // SAFETY: the dialog's windows, `w` outliving them

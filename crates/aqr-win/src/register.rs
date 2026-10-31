@@ -3,7 +3,7 @@
 //!
 //! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`.
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
-//!   click) and `test`.
+//!   click) and `test`, and whose icon is this program's (`DefaultIcon`).
 //!
 //! The verbs take any number of paths chosen (`MultiSelectModel` `Player`; Explorer runs a
 //! process for each, [`crate::gather`]). On Windows 11 they are under "Show more options": the
@@ -37,6 +37,8 @@ pub fn register() -> Result<(), String> {
     }
     set(".aqr", None, CLASS)?;
     set(CLASS, None, "Aqueous archive")?;
+    // (the icon of resource 1, aqr-win.rc)
+    set(&format!(r"{CLASS}\DefaultIcon"), None, &format!("\"{}\",-1", exe.display()))?;
     set(&format!(r"{CLASS}\shell"), None, "extract")?;
     for (verb, text) in [("extract", "Extract here"), ("test", "Test")] {
         let key = format!(r"{CLASS}\shell\{verb}");
