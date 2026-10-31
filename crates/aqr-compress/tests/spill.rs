@@ -31,11 +31,13 @@ fn spilled() {
     let opt = Options { threads: 4, ..Options::default() };
     let (heap, heap_used) = peak(|| aqr_compress::compress(&d, &opt));
     let path = std::env::temp_dir().join(format!("aqr-compress-spilled-{}", std::process::id()));
+    std::fs::create_dir_all(&path).unwrap();
     let spilling = Options { spill: Some(path.clone()), ..opt };
     let (spilled, spilled_used) = peak(|| aqr_compress::compress(&d, &spilling));
     println!("peak {:.1} MB, {:.1} MB spilling", heap_used as f64 / 1e6, spilled_used as f64 / 1e6);
     assert!(spilled == heap);
     assert!(aqr_decompress::decompress(&spilled, 1).unwrap() == d);
     assert!(spilled_used + (16 << 20) < heap_used, "{spilled_used} spilling, {heap_used} not");
-    assert!(!path.exists());
+    assert!(std::fs::read_dir(&path).unwrap().next().is_none());
+    std::fs::remove_dir(&path).unwrap();
 }

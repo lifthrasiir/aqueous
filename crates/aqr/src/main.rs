@@ -358,11 +358,11 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     output(out, a.force)?;
     let start = Instant::now();
     let rec = stats::record(a.stats.as_ref());
-    // large buffers kept in a file beside the output (gone once done), not on the heap
+    // large buffers kept in files beside the output (gone once dropped), not on the heap
     let mut opt = a.opt.clone();
-    let mut name = out.file_name().ok_or(format!("{}: not a file's name", out.display()))?.to_owned();
-    name.push(format!(".{}.spill", std::process::id()));
-    opt.spill = Some(out.with_file_name(name));
+    out.file_name().ok_or(format!("{}: not a file's name", out.display()))?;
+    let dir = out.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    opt.spill = Some(dir.to_owned());
     let opt = &opt;
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
