@@ -52,12 +52,15 @@ fn bench(args: &[String]) {
             formula::pcm::decode(&a.params, &res, inputs, a.len, threads)
         } else if a.module == formula::raster16::MODULE {
             formula::raster16::decode(&a.params, inputs, a.len)
+        } else if a.module == aqr_ima::formula::MODULE {
+            return aqr_ima::formula::decode(&a.params, inputs, a.len).map_err(|e| aqr_formula::Error::new(e.0));
         } else {
             raster::decode(&a.params, inputs, a.len, threads)
         };
         r.map_err(|e| aqr_formula::Error::new(e.0))
     };
-    let natives = aqr::natives(&[formula::pcm::MODULE, raster::MODULE, formula::raster16::MODULE], &apply);
+    let modules = [formula::pcm::MODULE, raster::MODULE, formula::raster16::MODULE, aqr_ima::formula::MODULE];
+    let natives = aqr::natives(&modules, &apply);
     let encode = |d: &[u8]| -> Option<Formula> {
         match raw {
             Some(l) => formula::encode_samples(d, l, threads),

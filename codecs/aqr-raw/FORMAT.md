@@ -663,6 +663,13 @@ input; for PCM, a partial sample frame at the end is the trailer.
   little-endian, and unsigned for 1-byte samples. The first `data` chunk after `fmt `
   holds the samples. Its length is taken to be the rest of the file if it is 0 or
   `0xFFFFFFFF`, and is otherwise clipped to the file.
+- **WAV, IMA ADPCM**: as WAV above, but with format tag `0x11` (or `0xFFFE` with the
+  sub-format GUID starting with `u16le` `0x11`) and 4 bits per sample. The samples are
+  blocks of `align` bytes, `align / channels` bytes per channel (a multiple of 4, at least
+  8), of 1..255 channels; they are cut to whole blocks, a partial block at the end being
+  the trailer, and a file without a whole block is not coded. The blocks are not this
+  crate's: the application is aqr-ima's module `ima-recons`, of params channels and
+  `align / channels` (aqr-ima's `FORMAT.md`).
 - **AIFF / AIFC**: `FORM` at 0, `AIFF` or `AIFC` at 8, then big-endian chunks from
   offset 12. `COMM` (length ≥ 18) gives channels at body+0 and bits at body+6 (1..32).
   Bytes per sample is `ceil(bits / 8)`, and samples are signed big-endian. For AIFC, the

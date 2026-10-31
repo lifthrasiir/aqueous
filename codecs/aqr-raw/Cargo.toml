@@ -2,18 +2,20 @@
 name = "aqr-raw"
 version = "0.1.0"
 edition = "2024"
-description = "Uncompressed sampled data, PCM audio and raster images: their models as a library, and as modules of entry formulas with the trivial containers (WAV, AIFF, BMP, PNM) taken apart"
+description = "Uncompressed sampled data, PCM audio and raster images: their models as a library, and as modules of entry formulas with the trivial containers (WAV, AIFF, BMP, PNM) taken apart, IMA ADPCM blocks of WAV by aqr-ima"
 publish = false
 
 [features]
 default = ["encode"]
 # The formulas (`formula`) and the built-in tables; without it, the code of the modules alone
 # (`module`).
-encode = ["dep:aqr-formula", "aqr-common/zstd"]
+encode = ["dep:aqr-formula", "dep:aqr-ima", "aqr-common/zstd"]
 
 [dependencies]
 aqr-common = { path = "../../crates/aqr-common" }
 aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+# IMA ADPCM blocks of WAV files, in the formulas.
+aqr-ima = { path = "../aqr-ima", optional = true }
 
 # Tasks and channels for the pipelines (`audio::par::apart`) in the modules of aqr-modules.
 [target.'cfg(target_family = "wasm")'.dependencies]

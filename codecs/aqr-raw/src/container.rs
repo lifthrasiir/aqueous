@@ -2,7 +2,8 @@
 //! perhaps a trailer. Taking one apart is finding the samples and their layout; the rest is
 //! kept as it is ([`crate::formula::encode`]).
 //!
-//! Audio: WAV (PCM, also WAVE_FORMAT_EXTENSIBLE) and AIFF / AIFC (uncompressed, `sowt`).
+//! Audio: WAV (PCM, also WAVE_FORMAT_EXTENSIBLE; and Microsoft's IMA ADPCM, whose blocks
+//! aqr-ima codes) and AIFF / AIFC (uncompressed, `sowt`).
 //! Images: BMP (8, 24 and 32 bits per pixel, uncompressed), PNM (PGM, PPM, PAM; 8-bit), TIFF
 //! (uncompressed, 8-bit, its first image) and DICOM (8- and 16-bit, little-endian, its frames
 //! one under another); and, by [`sized`], 16-bit samples after a header that tells their size.
@@ -16,6 +17,28 @@ pub enum Layout {
     Pcm(pcm::Format),
     Raster(raster::Format),
     Raster16(raster16::Format),
+    /// Blocks of Microsoft's IMA ADPCM (WAV's format tag 0x11), for aqr-ima's `ima-recons`.
+    Ima(Ima),
+}
+
+/// The layout of IMA ADPCM blocks: 1 to 255 channels of a header of 4 bytes and nibbles in
+/// words of 4 bytes, a word of each channel in turn (`per_channel` bytes of each, a multiple of
+/// 4 and at least 8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ima {
+    pub channels: usize,
+    pub per_channel: usize,
+}
+
+impl Ima {
+    pub fn valid(&self) -> bool {
+        (1..=255).contains(&self.channels) && self.per_channel >= 8 && self.per_channel.is_multiple_of(4)
+    }
+
+    /// Bytes per block.
+    pub fn block(&self) -> usize {
+        self.channels * self.per_channel
+    }
 }
 
 /// Where a container's samples are, and their layout.
@@ -26,7 +49,8 @@ pub struct Found {
     pub name: &'static str,
     pub layout: Layout,
     /// The samples are `d[start..start + len]`: whole sample frames for PCM (a partial one
-    /// at the end is left to the trailer), whole rows for an image.
+    /// at the end is left to the trailer), whole blocks for IMA ADPCM (likewise), whole rows
+    /// for an image.
     pub start: usize,
     pub len: usize,
 }
@@ -63,7 +87,19 @@ fn pcm_found(name: &'static str, d: &[u8], f: pcm::Format, start: usize, len: us
     Some(Found { name, layout: Layout::Pcm(f), start, len })
 }
 
-/// A WAV file: RIFF chunks, `fmt ` (PCM, or WAVE_FORMAT_EXTENSIBLE of PCM) before `data`.
+/// IMA ADPCM blocks at `start`, `len` bytes of them as the header says (clamped to the file),
+/// cut to whole blocks; None where there is not one.
+fn ima_found(d: &[u8], f: Ima, start: usize, len: usize) -> Option<Found> {
+    if !f.valid() || start > d.len() {
+        return None;
+    }
+    let len = len.min(d.len() - start);
+    let len = len - len % f.block();
+    (len > 0).then_some(Found { name: "wav", layout: Layout::Ima(f), start, len })
+}
+
+/// A WAV file: RIFF chunks, `fmt ` (PCM or IMA ADPCM, also as WAVE_FORMAT_EXTENSIBLE) before
+/// `data`.
 fn wav(d: &[u8]) -> Option<Found> {
     if d.get(0..4)? != b"RIFF" || d.get(8..12)? != b"WAVE" {
         return None;
@@ -75,20 +111,33 @@ fn wav(d: &[u8]) -> Option<Found> {
         let len = u32le(d, p + 4)?;
         let body = p + 8;
         if id == b"fmt " && len >= 16 && body + 16 <= d.len() {
-            let tag = u16le(d, body)?;
+            let mut tag = u16le(d, body)?;
             let channels = u16le(d, body + 2)?;
             let align = u16le(d, body + 12)?;
             let bits = u16le(d, body + 14)?;
-            let pcm = tag == 1 || (tag == 0xfffe && len >= 40 && body + 26 <= d.len() && u16le(d, body + 24)? == 1);
-            if !pcm || channels == 0 || align % channels != 0 || bits == 0 || bits > 8 * (align / channels) {
+            if tag == 0xfffe {
+                // WAVE_FORMAT_EXTENSIBLE: the tag is the sub-format GUID's first u16.
+                tag = if len >= 40 && body + 26 <= d.len() { u16le(d, body + 24)? } else { 0 };
+            }
+            if channels == 0 || align % channels != 0 {
                 return None;
             }
-            let bytes = align / channels;
-            fmt = Some(pcm::Format { channels, bytes, big_endian: false, unsigned: bytes == 1 });
+            fmt = Some(match tag {
+                1 if bits != 0 && bits <= 8 * (align / channels) => {
+                    let bytes = align / channels;
+                    Layout::Pcm(pcm::Format { channels, bytes, big_endian: false, unsigned: bytes == 1 })
+                }
+                0x11 if bits == 4 => Layout::Ima(Ima { channels, per_channel: align / channels }),
+                _ => return None,
+            });
         } else if id == b"data" {
             // The size may be missing (streamed) or wrong: clamped to the file.
             let len = if len == 0 || len == 0xffff_ffff { d.len() - body } else { len };
-            return pcm_found("wav", d, fmt?, body, len);
+            return match fmt? {
+                Layout::Pcm(f) => pcm_found("wav", d, f, body, len),
+                Layout::Ima(f) => ima_found(d, f, body, len),
+                _ => None,
+            };
         }
         p = body.checked_add(len)?.checked_add(len & 1)?;
     }

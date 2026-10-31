@@ -605,6 +605,7 @@ dependencies = [
  "aqr-api",
  "aqr-common",
  "aqr-formula",
+ "aqr-ima",
 ]
 
 [[package]]

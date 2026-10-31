@@ -55,6 +55,13 @@ files, valid and not) round-trip; 97 of them are not coded (fewer than 8 bits pe
 eight uncompressed TIFF files of the Waterloo set (7.26 MB) come to 2.93 MB from 3.94 MB; the
 two synthetic ones (`frymire`, `serrano`) code larger and are kept as they were.
 
+IMA ADPCM WAV files (2026-10-31, M4, `aqr -c`, one file an archive): 2 minutes of a live
+recording (`aqr-flac-corpus/ia`, 44.1 kHz stereo) written by ffmpeg (`adpcm_ima_wav`, blocks of
+1024 bytes) 5.33 MB -> 3.06 MB (0.575; zstd -3 0.862, xz -9e 0.712), by sox (`-e ima-adpcm`,
+512) 5.37 MB -> 3.26 MB (0.607; zstd -3 0.891, xz -9e 0.751), and in mono by sox 2.68 MB ->
+2.10 MB (0.784; xz -9e 0.797). The blocks are aqr-ima's (`ima-recons`); a file of a few tens of KB
+stays as it was, its gain smaller than the module.
+
 ## Usage
 
 ```sh
@@ -87,10 +94,11 @@ let node = formula::apply(&mut its_formula, samples, layout, 1);
 | `src/image/pixel.rs` | The pixel model: MED, channel decorrelation, activity buckets (scalar and NEON) |
 | `src/image/raster.rs` | Raw rasters: the coder of 8-bit rows of 1 to 4 channels |
 | `src/image/raster16.rs` | Raw rasters of 16-bit samples: MED or mean prediction per chunk, tokens by rANS and raw bits |
-| `src/container.rs` | WAV, AIFF / AIFC, BMP, PNM, TIFF, DICOM, and samples after a header telling their size: where the samples are, and their layout |
+| `src/container.rs` | WAV (PCM and IMA ADPCM), AIFF / AIFC, BMP, PNM, TIFF, DICOM, and samples after a header telling their size: where the samples are, and their layout |
 | `src/formula/` | The modules `pcm-recons` and `raster-recons`, and formulas of containers |
 | `model/audio.bin` | The residual model's built-in tables (trained by `aqr-flac-train`) |
 | `tests/pcm.rs`, `tests/data` | WAV / AIFF / AIFC files and headerless PCM: round trips on threads, junk, cuts, corrupted inputs, the resource |
+| `tests/ima.rs`, `tests/ima` | IMA ADPCM WAV files of ffmpeg and sox: round trips, junk, cuts, layouts not taken |
 | `tests/raster.rs` | Synthetic BMP and PNM files: round trips, trailers, cuts, corrupted inputs |
 
 ## Design
@@ -137,8 +145,9 @@ PCM is cut into it here.
 
 - **Not covered**: 16-bit images (PNM, PAM, TIFF), fewer than 8 bits per pixel, RLE BMP, ASCII
   PNM, TGA (no reliable signature), float audio, more than 8 channels, compressed AIFC, CAF,
-  W64, RF64. 16-bit images need a model of their own (the audio model's token and raw bits
-  are a likely start).
+  W64, RF64, ADPCM other than IMA's (Microsoft's 0x02 and others), Apple's IMA4 (AIFC and CAF
+  `ima4`, packets of another layout). 16-bit images need a model of their own (the audio model's
+  token and raw bits are a likely start).
 - **Other containers** with samples inside (TIFF strips, PSD raw channels, DICOM, tracker
   modules, SoundFont) are for their recompressors to take apart with `formula::apply`; data
   of the formula kind `Pixels` carries no layout yet, so aqr-compress cannot route it here.

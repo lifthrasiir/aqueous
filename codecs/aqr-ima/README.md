@@ -1,7 +1,7 @@
 # aqr-ima
 
 IMA ADPCM blocks as a record of their headers and nibbles, and back bit for bit: Xbox ADPCM (of
-FSB5 banks, through aqr-fsb) and Microsoft's IMA ADPCM (of WAV files) alike, by their channels and
+FSB5 banks, through aqr-fsb) and Microsoft's IMA ADPCM (of WAV files, through aqr-raw) alike, by their channels and
 bytes per channel. The module `ima-recons` rebuilds whole blocks; `FORMAT.md` specifies it.
 
 The record is a binary arithmetic code of adaptive bits (shifts growing with what each has seen)
@@ -14,4 +14,5 @@ in contexts of the IMA decoder's state:
   other channel's nibble at the same place.
 
 Any bytes of whole blocks come back. On The Crew's FSB5 banks the record is 57.8% of the blocks
-(xz -9e: about 67%); one thread encodes about 33 MB/s and decodes about 25 MB/s.
+(xz -9e: about 67%); one thread encodes about 33 MB/s and decodes about 25 MB/s. IMA ADPCM WAV files of ffmpeg and
+sox come to 0.58–0.61 in stereo, 0.78 in mono (aqr-raw's README).

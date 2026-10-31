@@ -6,7 +6,8 @@
 //!   literals);
 //! - as modules of entry formulas ([`formula`]): samples of a given layout are coded, and the
 //!   trivial containers around them ([`container`]: WAV, AIFF, BMP, PNM, ...) are taken apart,
-//!   their headers and trailers kept in the formula as they are.
+//!   their headers and trailers kept in the formula as they are (and IMA ADPCM blocks of WAV
+//!   files given to aqr-ima).
 
 #![allow(clippy::needless_range_loop, clippy::len_without_is_empty)]
 // The code of the modules alone uses only part of the rest.
