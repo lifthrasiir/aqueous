@@ -88,4 +88,3 @@ fn main() -> std::process::ExitCode {
     };
     run::run(verb, paths)
 }
-
