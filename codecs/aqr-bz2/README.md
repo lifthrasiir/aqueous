@@ -36,6 +36,10 @@ reading its code (BSD-style, not public domain).
 - Streams one after another (pbzip2, `cat a.bz2 b.bz2`) are one application; what follows
   them, or a stream not reproduced, is sliced as it is.
 - Blocks are compressed in parallel natively; the Wasm module (46 KB) runs on one thread.
+- aqr-compress decodes the first 4 MiB of data or so, and where it is not the start of a file of
+  a format (a tar archive) and a probe tells that it would not pay (text, which BWT models
+  well), keeps the stream without decoding the rest; else it decodes the rest (the blocks'
+  inverse BWT in parallel) and probes all of it before compressing it again to check it.
 
 ## Status
 

@@ -1,5 +1,7 @@
 //! bzip2 streams decoded: the data, and what a compressor's output is compared by.
 
+use aqr_common::pool;
+
 use crate::huffman::{self, Decoder};
 use crate::{BLOCK_MAGIC, END_MAGIC, Error, MAGIC, Result, corrupt, crc};
 
@@ -107,39 +109,16 @@ pub fn decode(d: &[u8], data: bool, max_data: usize) -> Result<Stream> {
 
 /// [`decode`], with each block's symbols after the BWT and its `origPtr` given to `each`.
 pub fn decode_each(d: &[u8], data: bool, max_data: usize, each: &mut dyn FnMut(&[u8], u32)) -> Result<Stream> {
-    let level = level(d).ok_or(Error("not a bzip2 stream"))?;
-    let mut s = Stream { level, ..Stream::default() };
-    let mut r = Bits::new(d, 4);
-    let mut combined = 0u32;
+    let mut b = Blocks::new(d)?;
+    let mut s = Stream { level: b.level, ..Stream::default() };
+    let (mut last, mut links) = (Vec::new(), Vec::new());
     let mut total = 0usize;
-    // the block's work: its symbols after the BWT, and the inverse's links
-    let mut last = Vec::new();
-    let mut links = Vec::new();
-    loop {
-        match r.get48() {
-            BLOCK_MAGIC => {}
-            END_MAGIC => break,
-            _ => return Err(corrupt()),
-        }
-        let want = r.get(32);
-        if r.bit() {
-            return Err(Error("randomised block"));
-        }
-        let orig = r.get(24);
-        let size = block(&mut r, level, &mut last)?;
-        if orig as usize >= last.len() {
-            return Err(corrupt());
-        }
+    while let Some((orig, want, size)) = b.next(&mut last)? {
         s.orig_ptrs.push(orig);
         each(&last, orig);
         if data {
             let at = s.data.len();
-            unbwt(&last, orig, &mut links);
-            unrle(&last, &links, orig, &mut s.data, max_data)?;
-            let got = crc::hash(&s.data[at..]);
-            if got != want {
-                return Err(Error("CRC mismatch"));
-            }
+            undo(&last, orig, want, &mut links, &mut s.data, max_data)?;
             s.sizes.push(s.data.len() - at);
         } else {
             s.sizes.push(size);
@@ -148,17 +127,160 @@ pub fn decode_each(d: &[u8], data: bool, max_data: usize, each: &mut dyn FnMut(&
         if total > max_data {
             return Err(Error("too much data"));
         }
-        combined = combined.rotate_left(1) ^ want;
     }
-    let want = r.get(32);
-    if r.overrun() {
-        return Err(Error("truncated"));
+    s.len = b.finish(data)?;
+    Ok(s)
+}
+
+/// The blocks of a stream read one after another, up to the symbols after the BWT.
+struct Blocks<'a> {
+    r: Bits<'a>,
+    level: u8,
+    combined: u32,
+}
+
+impl<'a> Blocks<'a> {
+    fn new(d: &'a [u8]) -> Result<Self> {
+        let level = level(d).ok_or(Error("not a bzip2 stream"))?;
+        Ok(Blocks { r: Bits::new(d, 4), level, combined: 0 })
     }
-    if data && want != combined {
+
+    /// The next block into `last`, with its `origPtr`, CRC and RLE1 symbols; None at the end
+    /// of the stream.
+    fn next(&mut self, last: &mut Vec<u8>) -> Result<Option<(u32, u32, usize)>> {
+        let r = &mut self.r;
+        match r.get48() {
+            BLOCK_MAGIC => {}
+            END_MAGIC => return Ok(None),
+            _ => return Err(corrupt()),
+        }
+        let want = r.get(32);
+        if r.bit() {
+            return Err(Error("randomised block"));
+        }
+        let orig = r.get(24);
+        let size = block(r, self.level, last)?;
+        if orig as usize >= last.len() {
+            return Err(corrupt());
+        }
+        self.combined = self.combined.rotate_left(1) ^ want;
+        Ok(Some((orig, want, size)))
+    }
+
+    /// Bytes of the stream read so far, to the end of the last block (its last byte with it).
+    fn read(&self) -> usize {
+        self.r.pos().div_ceil(8)
+    }
+
+    /// After the last block: the bytes of the stream, its combined CRC checked where `data`.
+    fn finish(&mut self, data: bool) -> Result<usize> {
+        let want = self.r.get(32);
+        if self.r.overrun() {
+            return Err(Error("truncated"));
+        }
+        if data && want != self.combined {
+            return Err(Error("CRC mismatch"));
+        }
+        Ok(self.r.pos().div_ceil(8))
+    }
+}
+
+/// A block's data from its symbols after the BWT onto `out`, its CRC checked.
+fn undo(last: &[u8], orig: u32, want: u32, links: &mut Vec<u32>, out: &mut Vec<u8>, max_data: usize) -> Result<()> {
+    let at = out.len();
+    unbwt(last, orig, links);
+    unrle(last, links, orig, out, max_data)?;
+    if crc::hash(&out[at..]) != want {
         return Err(Error("CRC mismatch"));
     }
-    s.len = r.pos().div_ceil(8);
-    Ok(s)
+    Ok(())
+}
+
+/// A stream decoded as far as some data, to be decoded on ([`Partial::finish`]): to tell from
+/// its start whether to decode all of it.
+pub struct Partial<'a> {
+    blocks: Blocks<'a>,
+    /// The data so far, of whole blocks.
+    pub data: Vec<u8>,
+    sizes: Vec<usize>,
+    orig_ptrs: Vec<u32>,
+    /// The bytes of the stream, where it ended.
+    pub ended: Option<usize>,
+}
+
+impl<'a> Partial<'a> {
+    /// The stream at the start of `d` decoded block by block until there are `want` bytes of
+    /// data or it ends; past `max_data` bytes an error.
+    pub fn start(d: &'a [u8], want: usize, max_data: usize) -> Result<Self> {
+        let mut p = Partial {
+            blocks: Blocks::new(d)?,
+            data: Vec::new(),
+            sizes: Vec::new(),
+            orig_ptrs: Vec::new(),
+            ended: None,
+        };
+        let (mut last, mut links) = (Vec::new(), Vec::new());
+        while p.data.len() < want {
+            let Some((orig, crc, _)) = p.blocks.next(&mut last)? else {
+                p.ended = Some(p.blocks.finish(true)?);
+                break;
+            };
+            let at = p.data.len();
+            undo(&last, orig, crc, &mut links, &mut p.data, max_data)?;
+            p.sizes.push(p.data.len() - at);
+            p.orig_ptrs.push(orig);
+        }
+        Ok(p)
+    }
+
+    /// Bytes of the stream that the data so far was coded in.
+    pub fn coded(&self) -> usize {
+        self.ended.unwrap_or_else(|| self.blocks.read())
+    }
+
+    /// The whole stream: the rest of its blocks read in turn, their data made on up to
+    /// `threads` threads (a wave of blocks at a time, so that what is too much data is found
+    /// before much more of it is made).
+    pub fn finish(mut self, threads: usize, max_data: usize) -> Result<Stream> {
+        let level = self.blocks.level;
+        let mut s = Stream { level, data: self.data, sizes: self.sizes, orig_ptrs: self.orig_ptrs, len: 0 };
+        if let Some(len) = self.ended {
+            s.len = len;
+            return Ok(s);
+        }
+        let wave = threads.max(1) * 2;
+        loop {
+            let mut read = Vec::with_capacity(wave);
+            let mut last = Vec::new();
+            while read.len() < wave {
+                match self.blocks.next(&mut last)? {
+                    Some((orig, crc, _)) => read.push((std::mem::take(&mut last), orig, crc)),
+                    None => break,
+                }
+            }
+            let end = read.len() < wave;
+            let left = max_data.saturating_sub(s.data.len());
+            let made = pool::par_map(read.len(), threads, |k| {
+                let (last, orig, crc) = &read[k];
+                let mut out = Vec::new();
+                undo(last, *orig, *crc, &mut Vec::new(), &mut out, left).map(|()| out)
+            });
+            for (out, (_, orig, _)) in made.into_iter().zip(&read) {
+                let out = out?;
+                if s.data.len() + out.len() > max_data {
+                    return Err(Error("too much data"));
+                }
+                s.data.extend_from_slice(&out);
+                s.sizes.push(out.len());
+                s.orig_ptrs.push(*orig);
+            }
+            if end {
+                break;
+            }
+        }
+        s.len = self.blocks.finish(true)?;
+        Ok(s)
+    }
 }
 
 /// Reads a block after its header into `last` (the symbols after the BWT, before RLE1 is

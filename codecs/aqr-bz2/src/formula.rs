@@ -52,13 +52,19 @@ pub fn extent(d: &[u8]) -> Option<usize> {
 /// libbzip2 gives for their data, and what follows them sliced as it is. None where the first
 /// is not one.
 pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
-    encode_if(input, threads, &mut |_, _| true)
+    encode_if(input, threads, &mut |_, _, _| true)
 }
 
-/// [`encode`], each stream taken only where `pays` tells, given the bytes of the stream and its
-/// data, that it may pay: before its data is compressed again to check it, which costs most.
-/// The first stream not taken and the rest are sliced as they are.
-pub fn encode_if(input: &[u8], threads: usize, pays: &mut dyn FnMut(usize, &[u8]) -> bool) -> Option<Formula> {
+/// Bytes of data decoded first, of a stream that has more: [`encode_if`] asks of them before
+/// decoding the rest.
+pub const PREFIX: usize = 4 << 20;
+
+/// [`encode`], each stream taken only where `pays(coded, data, whole)` tells that it may pay,
+/// given the data and the bytes of the stream it was coded in: first of the first [`PREFIX`]
+/// bytes of data or so (`whole` false, not asked where that is all of it), before the rest is
+/// decoded, then of all of it (`whole`), before it is compressed again to check it, which costs
+/// most. The first stream not taken and the rest are sliced as they are.
+pub fn encode_if(input: &[u8], threads: usize, pays: &mut dyn FnMut(usize, &[u8], bool) -> bool) -> Option<Formula> {
     let (mut at, mut streams, mut data) = (0, Vec::new(), Vec::new());
     while starts(&input[at..]) {
         let Some((sp, len)) = take(&input[at..], threads, MAX_DATA - data.len(), pays, &mut data) else { break };
@@ -87,14 +93,18 @@ fn take(
     d: &[u8],
     threads: usize,
     max_data: usize,
-    pays: &mut dyn FnMut(usize, &[u8]) -> bool,
+    pays: &mut dyn FnMut(usize, &[u8], bool) -> bool,
     data: &mut Vec<u8>,
 ) -> Option<(StreamParams, usize)> {
-    let s = stream::decode(d, true, max_data).ok()?;
+    let p = stream::Partial::start(d, PREFIX, max_data).ok()?;
+    if p.ended.is_none() && !pays(p.coded(), &p.data, false) {
+        return None;
+    }
+    let s = p.finish(threads, max_data).ok()?;
     let mut cuts = compress::boundaries(&s.data, s.level);
     cuts.push(s.data.len());
     let sizes: Vec<usize> = cuts.windows(2).map(|w| w[1] - w[0]).collect();
-    if sizes != s.sizes || !pays(s.len, &s.data) {
+    if sizes != s.sizes || !pays(s.len, &s.data, true) {
         return None;
     }
     let n = sizes.len();

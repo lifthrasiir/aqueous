@@ -75,6 +75,34 @@ fn code_lengths_of_libbzip2() {
     assert!(cut >= 5, "{cut} cut down");
 }
 
+/// A stream decoded as far as some data, then the rest on several threads, as it is decoded
+/// in one go.
+#[test]
+fn decoded_in_part() {
+    for (name, d) in fixtures() {
+        let s = stream::decode(&d, true, usize::MAX).unwrap();
+        for (want, threads) in [(0, 1), (1, 3), (150_000, 2), (usize::MAX, 4)] {
+            let p = stream::Partial::start(&d, want, usize::MAX).unwrap();
+            assert!(p.data.len() >= want.min(s.data.len()), "{name}");
+            assert_eq!(p.ended.is_some(), p.data.len() == s.data.len() && want > s.data.len(), "{name}");
+            let t = p.finish(threads, usize::MAX).unwrap();
+            assert!(
+                (t.level, &t.data, &t.sizes, &t.orig_ptrs, t.len) == (s.level, &s.data, &s.sizes, &s.orig_ptrs, s.len)
+            );
+        }
+        // too much data, found at the start or as the rest is decoded
+        if s.data.len() > 200_000 {
+            let r = stream::Partial::start(&d, 1, 200_000).and_then(|p| p.finish(2, 200_000));
+            assert!(r.is_err(), "{name}");
+        }
+    }
+    let text = &fixtures().into_iter().find(|f| f.0 == "text-1").unwrap().1;
+    let mut bad = text.clone();
+    let n = bad.len() - 100;
+    bad[n] ^= 1;
+    assert!(stream::Partial::start(&bad, 1, usize::MAX).unwrap().finish(2, usize::MAX).is_err());
+}
+
 #[test]
 fn several_streams_and_what_follows() {
     let fx = fixtures();

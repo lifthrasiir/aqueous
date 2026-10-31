@@ -1769,14 +1769,20 @@ fn pure(
 }
 
 /// aqr-bz2's formula of `d` (`depth` formats deep), each stream taken only where its data may
-/// pay ([`probe`]; `held` telling what the files archived with it hold): decoded, but not
-/// compressed again to check it where it would not pay, which costs most (some 12 MB/s of data
-/// a thread, against 50-80 MB/s for decoding). The record is the params, a few bytes.
+/// pay ([`probe`]; `held` telling what the files archived with it hold): not compressed again
+/// to check it where it would not pay, which costs most (some 12 MB/s of data a thread), nor
+/// decoded past its start (50-80 MB/s) where that start tells. Data that starts as a file of a
+/// format (a tar archive, say), whose files further on or what they share the start does not
+/// tell, is decoded whole first; other data (text, say) is told by its start. The record is the
+/// params, a few bytes.
 fn bz2(d: &[u8], opt: &Options, depth: u32, threads: usize, held: Option<&Held>) -> Option<Formula> {
     let probe = probe(opt, depth);
     // (an encoder of its own, as formulas of pure formats are made on several threads)
     let enc = aqr::Encoder::new(opt.level);
-    aqr_bz2::formula::encode_if(d, threads, &mut |coded, data| {
+    aqr_bz2::formula::encode_if(d, threads, &mut |coded, data, whole| {
+        if !whole && detect(data).is_some_and(|f| f != Format::Text) {
+            return true;
+        }
         probe.as_ref().is_none_or(|p| {
             let held = || held.is_some_and(|h| h.holds(data, h.owner(d))) as u8 as f64;
             p.pays(&enc, coded, || Some(16), data, held, Kind::Unknown)
