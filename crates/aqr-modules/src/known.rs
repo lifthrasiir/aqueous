@@ -6,7 +6,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "asar-recons",
         version: 1,
-        sha512_256: hex("247be485b15198abd547b17c693c9f61dd5c206010fb071c74f9e9d72d98062f"),
+        sha512_256: hex("7a753a3fd492919e52fef49685bfeaa24703ead307257dc51e54dc235f32f07f"),
         block: include_bytes!("../wasm/asar-recons.block"),
     },
     Known {
@@ -216,7 +216,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "jpeg-recons",
         version: 2,
-        sha512_256: hex("dddd7260b99d2dd838d58da27cdf0cbef785f65c2c26756f3cfb5a3c7e7a5c1b"),
+        sha512_256: hex("b58d116821f6ed8dba545f72d7b258038971ac146d718e0246431d77f2dd611c"),
         block: include_bytes!("../wasm/jpeg-recons.block"),
     },
     Known {
@@ -312,7 +312,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("b00379f54350fc3e0b7739057e9f05da387d5ecbb81e8e0a3cf30ff9cc7d06d1"),
+        sha512_256: hex("3f5cdb3b8bbd7f4ec28acc0c89b7b2ddb3bc3a4607400f7e07379261ef2fca94"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {

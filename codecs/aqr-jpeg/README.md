@@ -131,12 +131,14 @@ Blocks are processed in raster order per component, coefficients in zigzag order
     distribution of its parent or, for AC, of its grandparent.
 - **rANS**:
   - 4-way interleaved 64-bit rANS, 32-bit IO, `PROB_BITS = 12`.
-  - The encoder uses reciprocals; it is kept `#[inline(never)]` and writes backwards into a
+  - The encoder uses reciprocals and renormalises branchlessly (the word is always stored and
+    kept only when renormalising); it is kept `#[inline(never)]` and writes backwards into a
     buffer of typical size (a word per 8 symbols), which is only checked, and grown if
     needed, once per 1024 symbols.
   - The decoder finds symbols via a 64-entry coarse LUT per context group followed by a short
     refinement loop, and renormalises branchlessly with `select_unpredictable`.
-  - Both candidate contexts of the next position are computed ahead, off the dependency chain.
+  - Both candidate contexts of the next position (the previous coefficient zero or not) are
+    computed and looked up ahead, then one is picked: the lookups are off the dependency chain.
   - Bounds are checked once per block, with padded buffers.
 - **Stripes**: the image is split into horizontal stripes of whole MCU rows.
   - Each stripe has its own rANS and raw streams; the tables are shared.
@@ -148,7 +150,7 @@ Blocks are processed in raster order per component, coefficients in zigzag order
 ### 3. Re-encoding (decompression side)
 
 - A branchless MSB bit writer fills an unstuffed buffer; stuffing and RST insertion are a
-  separate pass.
+  separate pass. Sequential blocks put their codes two at a time.
 - Progressive follows libjpeg's jcphuff exactly:
   - EOBRUN is flushed at 0x7FFF.
   - Up to 1000 correction bits are buffered.

@@ -924,28 +924,30 @@ fn read_tables(d: &[u8]) -> Result<Vec<u16>, Error> {
 #[inline(always)]
 unsafe fn rans_put(x: &mut u64, e: &EncSym, out: *mut u32, w: &mut usize) {
     let xmax = ((RANS_L >> PROB_BITS) << 32) * (PROB_SCALE - e.cmpl_freq as u32) as u64;
-    if *x >= xmax {
-        *w -= 1;
-        unsafe { *out.add(*w) = *x as u32 };
-        *x >>= 32;
-    }
+    // branchless: the word is always stored below `w`, and kept only if renormalising (which
+    // happens every few symbols in an irregular pattern)
+    let big = *x >= xmax;
+    unsafe { *out.add(*w - 1) = *x as u32 };
+    *w -= big as usize;
+    *x = std::hint::select_unpredictable(big, *x >> 32, *x);
     let q = ((*x as u128 * e.rcp_freq as u128) >> 64) as u64 >> e.rcp_shift;
     *x = *x + e.bias as u64 + q * e.cmpl_freq as u64;
 }
 
 /// `buf` (written from `w` on) with room for at least `need` more words before `w`: the
-/// words moved to the end of a larger buffer if necessary.
+/// words moved to the end of a larger buffer if necessary. Returns the new `w`.
 #[cold]
 #[inline(never)]
-fn rans_room(buf: &mut Vec<u32>, w: &mut usize, need: usize) {
-    if *w >= need {
-        return;
+fn rans_room(buf: &mut Vec<u32>, w: usize, need: usize) -> usize {
+    if w >= need {
+        return w;
     }
-    let n = buf.len() - *w;
+    let n = buf.len() - w;
     let mut b = vec![0; (buf.len() * 2).max(n + need)];
     let w2 = b.len() - n;
-    b[w2..].copy_from_slice(&buf[*w..]);
-    (*buf, *w) = (b, w2);
+    b[w2..].copy_from_slice(&buf[w..]);
+    *buf = b;
+    w2
 }
 
 /// Symbols are encoded last to first; the words come out in decoding order (the four final
@@ -960,8 +962,12 @@ fn rans_encode(syms: &[u16], t: &Tables) -> Vec<u32> {
     let mut w = buf.len();
     let (mut x0, mut x1, mut x2, mut x3) = (RANS_L, RANS_L, RANS_L, RANS_L);
     let full = n & !3;
-    let enc = |s: u16| -> &EncSym { &t.enc[s as usize] };
-    rans_room(&mut buf, &mut w, (n - full) + 8);
+    let enc = |s: u16| -> &EncSym {
+        debug_assert!((s as usize) < t.enc.len());
+        // SAFETY: symbols are compact indices < N_SYM, and `enc` has N_SYM entries
+        unsafe { t.enc.get_unchecked(s as usize) }
+    };
+    w = rans_room(&mut buf, w, (n - full) + 8);
     let mut p = buf.as_mut_ptr();
     // SAFETY: there is room for a word per symbol (and the final states) up to the next check
     unsafe {
@@ -975,7 +981,7 @@ fn rans_encode(syms: &[u16], t: &Tables) -> Vec<u32> {
         }
         for c in syms[..full].rchunks(STEP) {
             if w < c.len() + 8 {
-                rans_room(&mut buf, &mut w, c.len() + 8);
+                w = rans_room(&mut buf, w, c.len() + 8);
                 p = buf.as_mut_ptr();
             }
             for g in c.as_chunks::<4>().0.iter().rev() {
@@ -1013,19 +1019,44 @@ impl<'a> Dec<'a> {
     /// Decode one symbol of the group starting at compact index `base`.
     #[inline(always)]
     fn sym(&mut self, base: usize) -> u32 {
+        let slot = (self.x[0] & (PROB_SCALE as u64 - 1)) as u32;
+        // SAFETY: base is a group start (multiple of 16) < N_SYM and slot < 4096
+        let (s, cf) = unsafe { self.coarse(base, slot) };
+        self.finish(base, slot, s, cf)
+    }
+    /// Decode one symbol of the group starting at `b` if `pick_b`, else at `a`. Both groups are
+    /// looked up before `pick_b` is needed, so that the lookups stay off the chain from one
+    /// symbol's value to the next one's context.
+    #[inline(always)]
+    fn sym_of(&mut self, a: usize, b: usize, pick_b: bool) -> u32 {
+        let slot = (self.x[0] & (PROB_SCALE as u64 - 1)) as u32;
+        // SAFETY: a and b are group starts (multiples of 16) < N_SYM and slot < 4096
+        let ((sa, ca), (sb, cb)) = unsafe { (self.coarse(a, slot), self.coarse(b, slot)) };
+        let base = std::hint::select_unpredictable(pick_b, b, a);
+        let s = std::hint::select_unpredictable(pick_b, sb, sa);
+        let cf = std::hint::select_unpredictable(pick_b, cb, ca);
+        self.finish(base, slot, s, cf)
+    }
+    /// The symbol of the coarse LUT's bucket of `slot` in the group at `base`, and its `cf`.
+    /// SAFETY: base is a group start (multiple of 16) < N_SYM, slot < 4096.
+    #[inline(always)]
+    unsafe fn coarse(&self, base: usize, slot: u32) -> (usize, u32) {
+        unsafe {
+            let s = *self.t.lut.get_unchecked((base >> 4) * 64 + (slot >> (PROB_BITS - 6)) as usize) as usize;
+            (s, *self.t.cf.get_unchecked(base + s))
+        }
+    }
+    /// The symbol from the coarse one `s` (its `cf`) of the group at `base`, and the state's
+    /// update.
+    #[inline(always)]
+    fn finish(&mut self, base: usize, slot: u32, mut s: usize, mut cf: u32) -> u32 {
+        // SAFETY: the refinement stops inside the group because the group's frequencies sum
+        // to 4096.
+        while slot >= (cf & 0xffff) + (cf >> 16) {
+            s += 1;
+            cf = unsafe { *self.t.cf.get_unchecked(base + s) };
+        }
         let x = self.x[0];
-        let slot = (x & (PROB_SCALE as u64 - 1)) as u32;
-        // SAFETY: base is a group start (multiple of 16) < N_SYM, slot < 4096, and the
-        // refinement stops inside the group because the group's frequencies sum to 4096.
-        let (s, cf) = unsafe {
-            let mut s = *self.t.lut.get_unchecked((base >> 4) * 64 + (slot >> (PROB_BITS - 6)) as usize) as usize;
-            let mut cf = *self.t.cf.get_unchecked(base + s);
-            while slot >= (cf & 0xffff) + (cf >> 16) {
-                s += 1;
-                cf = *self.t.cf.get_unchecked(base + s);
-            }
-            (s, cf)
-        };
         let (c, f) = ((cf & 0xffff) as u64, (cf >> 16) as u64);
         let x = f * (x >> PROB_BITS) + slot as u64 - c;
         // branchless renormalisation; SAFETY: `src` carries SRC_PAD words of padding and
@@ -1077,19 +1108,20 @@ fn walk_dec(
             *b = [0; 64];
             let mut rem = nz as usize;
             let mut k = 1;
-            let mut base = ac_idx[1][rem] as usize;
+            // the contexts of position k if the previous coefficient was zero (`keep`) or not
+            // (`dec`), and whether it was not: both are looked up, then one is picked
+            let (mut keep, mut dec, mut nzp) = (ac_idx[1][rem] as usize, 0, false);
             let mut mask = 0u64;
             while rem > 0 && k < 64 {
-                // both candidate contexts of the next position, computed off the symbol chain
                 let row = &ac_idx[(k + 1) & 63];
-                let (keep, dec) = (row[rem] as usize, row[rem - 1] as usize);
-                let cat = d.sym(base);
+                let (keep2, dec2) = (row[rem] as usize, row[rem - 1] as usize);
+                let cat = d.sym_of(keep, dec, nzp);
                 let w = d.raw(cat);
                 b[k] = join_value(cat, w) as i16;
                 let nzv = cat != 0;
                 mask |= (nzv as u64) << k;
                 rem -= nzv as usize;
-                base = if nzv { dec } else { keep };
+                (keep, dec, nzp) = (keep2, dec2, nzv);
                 k += 1;
             }
             let (pred, sub) = if DC_BOUNDARY {

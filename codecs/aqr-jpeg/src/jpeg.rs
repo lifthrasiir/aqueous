@@ -1943,10 +1943,10 @@ impl BitOut {
             self.buf.resize((self.buf.len() * 2).max(self.pos + bytes + 8), 0);
         }
     }
-    /// 1 <= len <= 27; caller keeps 8 bytes of slack (`reserve`).
+    /// 1 <= len <= 56 (`bits` below 1 << len); caller keeps 8 bytes of slack (`reserve`).
     #[inline(always)]
-    pub(crate) fn put(&mut self, len: u32, bits: u32) {
-        self.acc = (self.acc << len) | bits as u64;
+    pub(crate) fn put(&mut self, len: u32, bits: impl Into<u64>) {
+        self.acc = (self.acc << len) | bits.into();
         self.n += len;
         // SAFETY: reserve() keeps >= 8 bytes past pos
         unsafe {
@@ -1959,7 +1959,7 @@ impl BitOut {
     pub(crate) fn pad(&mut self, zero: bool) {
         if self.n > 0 {
             let p = 8 - self.n;
-            self.put(p, if zero { 0 } else { (1 << p) - 1 });
+            self.put(p, if zero { 0u32 } else { (1 << p) - 1 });
         }
     }
 }
@@ -2086,33 +2086,50 @@ fn encode_block(
     if e == 0 {
         return err("DC symbol without Huffman code");
     }
-    w.put((e & 255) + sz, (e >> 8) << sz | bits);
+    // codes are put two at a time (at most 54 bits): one waits in (pl, pb) for the next
+    let (mut pl, mut pb) = ((e & 255) + sz, (e >> 8) << sz | bits);
+    macro_rules! code {
+        ($len:expr, $bits:expr) => {{
+            let (l, b): (u32, u32) = ($len, $bits);
+            if pl == 0 {
+                (pl, pb) = (l, b);
+            } else {
+                w.put(pl + l, (pb as u64) << l | b as u64);
+                pl = 0;
+            }
+        }};
+    }
     let mut mk = mask & !1;
     let mut last = 0u32;
     while mk != 0 {
         let k = mk.trailing_zeros();
         mk &= mk - 1;
         let mut run = k - last - 1;
-        while run >= 16 {
+        if run >= 16 {
             if zrl == 0 {
                 return err("ZRL without Huffman code");
             }
-            w.put(zrl & 255, zrl >> 8);
-            run -= 16;
+            while run >= 16 {
+                code!(zrl & 255, zrl >> 8);
+                run -= 16;
+            }
         }
         let (sz, bits) = size_bits(blk[k as usize] as i32);
         let e = at[(run << 4 | sz) as usize];
         if e == 0 {
             return err("AC symbol without Huffman code");
         }
-        w.put((e & 255) + sz, (e >> 8) << sz | bits);
+        code!((e & 255) + sz, (e >> 8) << sz | bits);
         last = k;
     }
     if last < 63 {
         if eob == 0 {
             return err("EOB without Huffman code");
         }
-        w.put(eob & 255, eob >> 8);
+        code!(eob & 255, eob >> 8);
+    }
+    if pl > 0 {
+        w.put(pl, pb as u64);
     }
     Ok(())
 }
