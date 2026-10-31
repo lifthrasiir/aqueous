@@ -694,6 +694,26 @@ impl Formula {
         root
     }
 
+    /// Puts the applications of several outputs in `order` (the old index of each, all once),
+    /// their outputs taken where they were.
+    pub fn reorder_shared(&mut self, order: &[usize]) {
+        let mut to = vec![usize::MAX; self.shared.len()];
+        for (new, &old) in order.iter().enumerate() {
+            debug_assert_eq!(to[old], usize::MAX, "each once");
+            to[old] = new;
+        }
+        debug_assert!(order.len() == to.len());
+        let mut old: Vec<Option<Shared>> = std::mem::take(&mut self.shared).into_iter().map(Some).collect();
+        self.shared = order.iter().map(|&i| old[i].take().expect("each once")).collect();
+        let mut remap = |n: &mut Node| {
+            if let Node::Output { shared, .. } = n {
+                *shared = to[*shared];
+            }
+        };
+        self.shared.iter_mut().flat_map(|s| &mut s.apply.inputs).for_each(|n| n.visit_mut(&mut remap));
+        self.root.visit_mut(&mut remap);
+    }
+
     /// Calls `f` on every node of the inputs of the applications of several outputs, in order,
     /// then of the root, parents first.
     pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Node)) {
@@ -1900,6 +1920,25 @@ mod tests {
         let a = g.root.clone();
         g.root = Node::concat(g.share(Apply { module: REV, ..cut(vec![a]) }, vec![1, 1]));
         assert!(g.eval(&Rev).is_err());
+    }
+
+    /// Applications of several outputs reordered: their outputs are taken where they were.
+    #[test]
+    fn shared_reordered() {
+        let mut f = Formula::raw("a", b"abcdefgh".to_vec());
+        let a = f.root.clone();
+        let first = f.share(cut(vec![a]), vec![3, 5]);
+        let second = f.share(cut(first), vec![4, 4]);
+        f.root = Node::concat(second.into_iter().rev());
+        let want = f.eval(&RevCut).unwrap();
+        f.reorder_shared(&[1, 0]);
+        assert!(f.check_outputs().is_err());
+        f.reorder_shared(&[1, 0]);
+        f.check_outputs().unwrap();
+        assert_eq!(f.eval(&RevCut).unwrap(), want);
+        let mut g = f.clone();
+        g.reorder_shared(&[0, 1]);
+        assert_eq!(g, f);
     }
 
     #[test]

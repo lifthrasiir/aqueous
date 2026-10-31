@@ -1594,16 +1594,25 @@ fn place_all(f: &mut Formula, children: Vec<Option<Made>>, sets: Vec<sets::Set>,
         }
     });
     let mut children = children.into_iter();
+    // (the applications embedded in the inputs of one of them go before it, as its inputs take
+    // their outputs)
+    let mut order: Vec<usize> = (own..f.shared.len()).collect();
     for i in 0..own {
+        let embedded = f.shared.len();
         let inputs = std::mem::take(&mut f.shared[i].apply.inputs);
         let mut n = Node::apply(f.shared[i].apply.module, Vec::new(), inputs, 0);
         place(&mut n, f, &slices, opt, &mut children);
         let Node::Apply(a) = n else { unreachable!("an application") };
         f.shared[i].apply.inputs = a.inputs;
+        order.extend(embedded..f.shared.len());
+        order.push(i);
     }
     let mut root = std::mem::replace(&mut f.root, Node::Concat(Vec::new()));
+    let embedded = f.shared.len();
     place(&mut root, f, &slices, opt, &mut children);
     f.root = root;
+    order.extend(embedded..f.shared.len());
+    f.reorder_shared(&order);
     f.compact();
 }
 
@@ -2131,6 +2140,57 @@ mod tests {
             assert_eq!(detect::starts(&x[17..]), Some(Format::Alz));
             assert_eq!(extent(Format::Alz, &x[17..]), Some(d.len()));
         }
+    }
+
+    /// The contents of an application of several outputs have applications of several outputs
+    /// of their own (a PDF file's streams, in an ALZ archive's DEFLATE bodies): those come before
+    /// it, whose inputs take their outputs.
+    #[test]
+    fn shared_within_shared() {
+        use std::io::Write;
+        let deflate = |d: &[u8]| {
+            let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::new(6));
+            z.write_all(d).unwrap();
+            z.finish().unwrap()
+        };
+        let mut x = 1u32;
+        let text: Vec<u8> = (0..40_000)
+            .flat_map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                format!("w{} ", (x % 1000) * (x % 1000) / 1000).into_bytes()
+            })
+            .collect();
+        // a PDF file of three streams of zlib's, which aqr-pdf takes by one application of
+        // several outputs
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        for (i, data) in text.chunks(text.len() / 3 + 1).enumerate() {
+            let mut z = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(6));
+            z.write_all(data).unwrap();
+            let z = z.finish().unwrap();
+            write!(pdf, "{} 0 obj\n<< /Length {} /Filter /FlateDecode >>\nstream\n", i + 1, z.len()).unwrap();
+            pdf.extend_from_slice(&z);
+            pdf.extend_from_slice(b"\nendstream\nendobj\n");
+        }
+        pdf.extend_from_slice(b"trailer\n<< >>\n%%EOF\n");
+        let text = &text[..20_000];
+        let (a, b) = (deflate(&pdf), deflate(text));
+        // (local headers of sizes of 4 bytes, of DEFLATE)
+        let mut d = b"ALZ\x01\x0a\0\0\0".to_vec();
+        for (name, body, size) in [(&b"a.pdf"[..], &a, pdf.len()), (b"b.txt", &b, text.len())] {
+            d.extend_from_slice(b"BLZ\x01\x05\x00\x20\0\0\0\0\x40\x00\x02\x00\0\0\0\0");
+            d.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            d.extend_from_slice(&(size as u32).to_le_bytes());
+            d.extend_from_slice(name);
+            d.extend_from_slice(body);
+        }
+        d.extend_from_slice(b"CLZ\x02");
+        let opt = Options { shared_modules: true, level: Level::Of(9), ..Options::default() };
+        let f = recompress(&d, &opt);
+        assert!(f.shared.len() >= 2, "{}", f.shared.len());
+        f.check_outputs().unwrap();
+        assert!(f.eval(&Native::default()).unwrap() == d);
     }
 
     /// The contents of pure formats are made beforehand, each once: those of a ZIP archive's
