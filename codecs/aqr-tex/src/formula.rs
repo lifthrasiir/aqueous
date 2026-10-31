@@ -68,24 +68,25 @@ pub fn apply(f: &mut Formula, blocks: &[u8], l: &Layout, threads: usize) -> Opti
 ///
 /// The instance holds, besides its inputs (`Usage::base`) the models: 6 of them, `Models::new`'s
 /// tables of 4-byte bits (the colours' 20692, the values' 34552 each, the alpha's 4624) and two
-/// caches of recent endpoints (the keys 64 KiB, the Fenwick tree 64 KiB and the hash table of
-/// 32768 buckets, 288 KiB, with the old table as it grows: 150 KiB). It holds each surface's
-/// blocks once made, and in the end copies them all into the output. From the smallest mipmap of
-/// a layer up it holds the planes of the surface before (`pp` bytes a block: 16 a channel, 4
-/// channels in BC2 and BC3, 3 in BC1, 2 in BC5, 1 in BC4). A surface of one stripe adds its
-/// blocks, the planes upsampled from them and its own, the upsampling's rows (u16 a channel; as
-/// the planes are, of the rows the surface needs), and its keys and choices (5 bytes a block). A
-/// surface of more stripes copies the models, and then each stripe but the first is a task of the
-/// instance as it is when it spawns (a copy of the high-water mark of everything before, the
-/// layers before included, at most 8 at once), changing its copy of the models, with the
-/// stripe's blocks and the copy that comes back, and what a surface of its size takes; the
-/// instance then makes the surface's blocks and codes the first stripe, then holds the others'
-/// blocks, the planes of the stripes (not for the largest mipmap), and the planes stacked.
+/// caches of recent endpoints (the keys 64 KiB, the bits and counts of times 2 KiB and the hash
+/// table of 32768 buckets, 288 KiB, with the old table as it grows: 150 KiB). It holds each
+/// surface's blocks once made, and in the end copies them all into the output. From the smallest
+/// mipmap of a layer up it holds the planes of the surface before (`pp` bytes a block: 16 a
+/// channel, 4 channels in BC2 and BC3, 3 in BC1, 2 in BC5, 1 in BC4). A surface of one stripe
+/// adds its blocks, the planes upsampled from them and its own, the upsampling's rows (u16 a
+/// channel; as the planes are, of the rows the surface needs) and columns (8 bytes a pixel
+/// across), and its keys and choices (5 bytes a block). A surface of more stripes copies the
+/// models, and then each stripe but the first is a task of the instance as it is when it spawns
+/// (a copy of the high-water mark of everything before, the layers before included, at most 8 at
+/// once), changing its copy of the models, with the stripe's blocks and the copy that comes back,
+/// and what a surface of its size takes; the instance then makes the surface's blocks and codes
+/// the first stripe, then holds the others' blocks, the planes of the stripes (not for the
+/// largest mipmap), and the planes stacked.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let l = Layout::from_bytes(u.params)?;
     let (bb, pp) = (l.format.block_bytes() as u64, 16 * channels(l.format));
     // (the models: the bits, and the caches of recent endpoints)
-    let models = 4 * (20692 + 2 * 34552 + 4624) + 2 * (65536 + 65540 + 294928 + 150000) + 4096;
+    let models = 4 * (20692 + 2 * 34552 + 4624) + 2 * (65536 + 2112 + 294928 + 150000) + 4096;
     let len = u.output();
     let base = u.base() + models;
     let surfaces: Vec<_> = l.mip_surfaces().collect();
@@ -102,10 +103,11 @@ fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
             // the rows of the planes upsampled from the surface before, and of the stripe
             let before = surfaces.get(m + 1).map_or(0, |s| s.bh as u64 * 4);
             // a stripe of `rows` rows of blocks: the planes upsampled and its own, the
-            // upsampling's rows (u16 a channel, at most three) and the keys and choices
+            // upsampling's rows (u16 a channel, at most three) and columns (two indices a pixel
+            // across), and the keys and choices
             let work = |rows: u64| {
                 let px = rows * sf.bw as u64;
-                let across = (before.min(rows * 2 + 4) + 2) * sf.bw as u64 * 4 * 2 * 3;
+                let across = (before.min(rows * 2 + 4) + 2) * sf.bw as u64 * 4 * 2 * 3 + sf.bw as u64 * 4 * 8;
                 2 * pp * px + across + 5 * px
             };
             if n == 1 {

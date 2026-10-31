@@ -31,7 +31,10 @@ Coded in one stripe a surface (before stripes, below), all of them came to 0.324
 
 - Speed, one thread, on a sample of 401.6 MB (1,274 files by the hash of their paths): 22.9 MB/s
   encoding and 20.3 MB/s decoding of the blocks (BC1 19.4 / 17.4, BC3 30.9 / 27.2, BC5 24.2 /
-  21.0).
+  21.0). On an M4 (2026-11-01), a sample of 402.4 MB (1,271 files, every 41st path): 31.9 and
+  27.1 MB/s (BC1 26.3 / 21.0, BC3 43.4 / 41.1, BC5 31.1 / 29.2), against 26.6 and 20.9 before the
+  coding was made faster (below, "Speed"); `aqr -t` of 255 of those files (105.5 MB) on one
+  thread, 3.20 s (as WebAssembly 3.85 s).
 - One file on several threads (stripes), the 45 largest files of BC1, BC3 and BC5 (209.7 MB,
   2.8 and 5.6 MB each), a file at a time, decoding: 22.8 MB/s on one thread, 60.5 on 4, 79.5 on
   8, 96.8 on 16 (encoding 26.1, 66.7, 87.0, 101.5); BC3 alone 28.1 → 108.3. Through `aqr -d`,
@@ -62,9 +65,11 @@ written (the bits of each choice are of BC1 unless said):
   blocks have those of the block to the left or above, and most of the rest those of a block
   used not long before. Copies of the left or upper block: 0.143 → 0.130; a cache of recently
   used endpoints by MTF rank on top: 64 entries 0.095, 1024 0.086, 4096 0.085 (zstd -19 of the
-  endpoints alone, 0.100). The rank is kept by a Fenwick tree over a window of times,
-  renumbered when full, so a rank is O(log 16K) whatever the texture's size. Whole blocks
-  recurring further than the neighbours are about 2% of blocks.
+  endpoints alone, 0.100). The rank is kept over a window of times, renumbered when full: a bit
+  a time (set at each key's last use) and counts of groups of 1,024 times, so that a use flips
+  two bits and two counts, and a rank counts the bits of at most a group and the 16 counts
+  (rather than a Fenwick tree, whose loops of varying length were mispredicted: 10% of the
+  time). Whole blocks recurring further than the neighbours are about 2% of blocks.
 - **Stripes.** A surface of 32,768 blocks or more is coded in stripes of rows, one per 16,384
   blocks and 16 at most, so that one file decodes on several threads (natively on the pool's
   workers, as tasks in the Wasm module). Only the stripes of a surface are apart: its mipmap
@@ -87,7 +92,13 @@ written (the bits of each choice are of BC1 unless said):
 
 - **Speed.** A stripe is one serial chain: each pixel's context needs the pixel to its left,
   decoded just before. The arithmetic coding itself takes about 3 ns a decision (some 36 a BC1
-  block); the rest is that latency. Across stripes, what is left serial bounds one file: the
+  block); the rest is that latency. Done (2026-11-01, M4, the sample above: 139.6 → 111.7 G
+  cycles for both ways): the coder's bits by selects rather than branches (indices are hard to
+  predict), the decoder reading a tree's children before the bit that picks one, the products
+  of the buckets taken beforehand, the pixel of each level looked up at once, the cache's
+  ranks without a Fenwick tree, and upsampling by columns taken once. Tried and slower: the
+  coder's renormalization without a branch (a shift by the bytes to go; more instructions than
+  the mispredictions it saves), and the decoder's read-ahead on the encoder too. Across stripes, what is left serial bounds one file: the
   mipmaps too small to split (about 6% of a 2048×2048 texture's blocks) and a stripe of each
   split one, about 6.4 times faster than one thread at best for that texture.
 - **Formats.** BC6H and BC7 (modes and partitions, then the same models of endpoints and

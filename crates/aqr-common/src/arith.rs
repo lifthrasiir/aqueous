@@ -1,6 +1,8 @@
 //! Carry-less binary arithmetic coding (32-bit), and adaptive bits: the records of aqr-lzma,
 //! aqr-lzo, aqr-bvx and aqr-gif.
 
+use std::hint::select_unpredictable;
+
 pub struct ArithEncoder {
     x1: u32,
     x2: u32,
@@ -21,6 +23,21 @@ impl ArithEncoder {
         } else {
             self.x1 = xmid + 1;
         }
+        while (self.x1 ^ self.x2) & 0xff00_0000 == 0 {
+            self.out.push((self.x2 >> 24) as u8);
+            self.x1 <<= 8;
+            self.x2 = self.x2 << 8 | 0xff;
+        }
+    }
+
+    /// As [`ArithEncoder::encode`], by selects rather than a branch on `bit`: for bits hard to
+    /// predict (as aqr-tex's indices), where a mispredicted branch costs more than the
+    /// selects' wait for the bit. (The coding is the same.)
+    #[inline]
+    pub fn encode_unpredictable(&mut self, bit: bool, p1: u32) {
+        let xmid = self.x1 + (((self.x2 - self.x1) as u64 * p1 as u64) >> 16) as u32;
+        self.x2 = select_unpredictable(bit, xmid, self.x2);
+        self.x1 = select_unpredictable(bit, self.x1, xmid + 1);
         while (self.x1 ^ self.x2) & 0xff00_0000 == 0 {
             self.out.push((self.x2 >> 24) as u8);
             self.x1 <<= 8;
@@ -68,6 +85,21 @@ impl<'a> ArithDecoder<'a> {
         } else {
             self.x1 = xmid + 1;
         }
+        while (self.x1 ^ self.x2) & 0xff00_0000 == 0 {
+            self.x1 <<= 8;
+            self.x2 = self.x2 << 8 | 0xff;
+            self.x = self.x << 8 | self.byte() as u32;
+        }
+        bit
+    }
+
+    /// As [`ArithDecoder::decode`], by selects (as [`ArithEncoder::encode_unpredictable`]).
+    #[inline]
+    pub fn decode_unpredictable(&mut self, p1: u32) -> bool {
+        let xmid = self.x1 + (((self.x2 - self.x1) as u64 * p1 as u64) >> 16) as u32;
+        let bit = self.x <= xmid;
+        self.x2 = select_unpredictable(bit, xmid, self.x2);
+        self.x1 = select_unpredictable(bit, self.x1, xmid + 1);
         while (self.x1 ^ self.x2) & 0xff00_0000 == 0 {
             self.x1 <<= 8;
             self.x2 = self.x2 << 8 | 0xff;

@@ -1,7 +1,8 @@
 //! The two sides of the coder (FORMAT.md, "Coding"): the models run the same code to encode
 //! and to decode ([`Side`]), the encoder given each value and the decoder taking it from the
 //! coded bytes, so that they cannot differ. Values are coded as binary decisions of adaptive
-//! bits ([`Bit`], aqr-common's carry-less binary arithmetic coder).
+//! bits ([`Bit`], aqr-common's carry-less binary arithmetic coder, by selects: most of what is
+//! coded is indices, hard to predict).
 
 use aqr_common::arith::{ArithDecoder, ArithEncoder, Bit};
 
@@ -26,8 +27,16 @@ pub trait Side {
     /// Whether the values given are coded (rather than taken from the coded bytes).
     const ENCODING: bool;
 
+    /// Codes `v` (when encoding) of probability `p1`/65536 of being 1, and gives the bit coded.
+    fn code(&mut self, p1: u32, v: bool, cat: Cat) -> bool;
+
     /// Codes `v` (when encoding) by `b`, and gives the bit coded.
-    fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool;
+    #[inline(always)]
+    fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool {
+        let x = self.code(b.p1(), v, cat);
+        b.update(x);
+        x
+    }
 
     /// `n` bits of `v` from the top, each of probability 1/2.
     fn raw(&mut self, n: u32, v: u32, cat: Cat) -> u32 {
@@ -42,9 +51,22 @@ pub trait Side {
     /// 1), from the top bit.
     #[inline]
     fn tree(&mut self, t: &mut [Bit], n: u32, v: u32, cat: Cat) -> u32 {
-        let mut node = 1;
+        if Self::ENCODING {
+            let mut node = 1;
+            for i in (0..n).rev() {
+                node = node << 1 | self.bit(&mut t[node], v >> i & 1 != 0, cat) as usize;
+            }
+            return node as u32 - (1 << n);
+        }
+        let (mut node, mut p) = (1, t[1].p1());
         for i in (0..n).rev() {
-            node = node << 1 | self.bit(&mut t[node], v >> i & 1 != 0, cat) as usize;
+            // (the decoder reads the children's probabilities before the bit that picks one is
+            // known: its chain from bit to bit the shorter)
+            let (c0, c1) = if i > 0 { (t[2 * node].p1(), t[2 * node + 1].p1()) } else { (0, 0) };
+            let x = self.code(p, v >> i & 1 != 0, cat);
+            t[node].update(x);
+            node = node << 1 | x as usize;
+            p = std::hint::select_unpredictable(x, c1, c0);
         }
         node as u32 - (1 << n)
     }
@@ -95,12 +117,10 @@ impl Side for Enc {
     const ENCODING: bool = true;
 
     #[inline]
-    fn bit(&mut self, b: &mut Bit, v: bool, cat: Cat) -> bool {
-        let p1 = b.p1();
+    fn code(&mut self, p1: u32, v: bool, cat: Cat) -> bool {
         let p = if v { p1 } else { 65536 - p1 };
         self.cost[cat as usize] += self.log[(p >> 4) as usize] as u64;
-        self.c.encode(v, p1);
-        b.update(v);
+        self.c.encode_unpredictable(v, p1);
         v
     }
 }
@@ -113,10 +133,8 @@ impl Side for Dec<'_> {
     const ENCODING: bool = false;
 
     #[inline]
-    fn bit(&mut self, b: &mut Bit, _: bool, _: Cat) -> bool {
-        let v = self.c.decode(b.p1());
-        b.update(v);
-        v
+    fn code(&mut self, p1: u32, _: bool, _: Cat) -> bool {
+        self.c.decode_unpredictable(p1)
     }
 }
 

@@ -51,20 +51,25 @@ impl<const C: usize> Plane<C> {
         // then down (3 · nearest + other): 9, 3, 3, 1
         let lo = (y0 / 2).min(self.h - 1).saturating_sub(1);
         let hi = ((y0 + h).saturating_sub(1) / 2 + 1).min(self.h - 1);
-        let mut across = vec![[0u16; C]; (hi + 1 - lo) * w];
-        for (r, row) in across.chunks_exact_mut(w).enumerate() {
+        // (the columns of each x taken once for all rows; then rows of channels flat, which
+        // the compiler vectorizes)
+        let cols: Vec<(usize, usize)> = (0..w).map(|x| near(x, self.w)).collect();
+        let wc = w * C;
+        let mut across = vec![0u16; (hi + 1 - lo) * wc];
+        for (r, row) in across.chunks_exact_mut(wc).enumerate() {
             let src = &self.px[(lo + r) * self.w..][..self.w];
-            for (x, o) in row.iter_mut().enumerate() {
-                let (c, n) = near(x, self.w);
-                *o = std::array::from_fn(|k| 3 * src[c][k] as u16 + src[n][k] as u16);
+            for (o, &(c, n)) in row.as_chunks_mut::<C>().0.iter_mut().zip(&cols) {
+                for k in 0..C {
+                    o[k] = 3 * src[c][k] as u16 + src[n][k] as u16;
+                }
             }
         }
         let mut px = vec![[0u8; C]; w * h];
         for (y, row) in px.chunks_exact_mut(w).enumerate() {
             let (c, n) = near(y0 + y, self.h);
-            let (a, b) = (&across[(c - lo) * w..][..w], &across[(n - lo) * w..][..w]);
-            for x in 0..w {
-                row[x] = std::array::from_fn(|k| ((3 * a[x][k] + b[x][k] + 8) >> 4) as u8);
+            let (a, b) = (&across[(c - lo) * wc..][..wc], &across[(n - lo) * wc..][..wc]);
+            for ((o, &a), &b) in row.as_flattened_mut().iter_mut().zip(a).zip(b) {
+                *o = ((3 * a + b + 8) >> 4) as u8;
             }
         }
         Plane { w, h, px }
@@ -138,8 +143,11 @@ pub struct Recent {
     last: std::collections::HashMap<u32, u32, Fast>,
     /// The key used at each time.
     keys: Vec<u32>,
-    /// 1 at the times that are some key's last use, as a Fenwick tree.
-    fen: Vec<u32>,
+    /// 1 at the times that are some key's last use, a bit each (`WINDOW / 64` words), and the
+    /// count of them in each group of [`GROUP`] words: a use changes two bits and two counts,
+    /// whatever the window, and a rank is counted over at most a group's words and the groups.
+    bits: Vec<u64>,
+    groups: Vec<u32>,
     live: u32,
 }
 
@@ -147,6 +155,9 @@ pub struct Recent {
 pub const RECENT: u32 = 4096;
 /// Times of the window.
 const WINDOW: usize = 4 * RECENT as usize;
+/// Words of a group of times.
+const GROUP: usize = 16;
+const GROUPS: usize = WINDOW / 64 / GROUP;
 
 /// A hash of a key by a multiplication: keys are not chosen against it (the encoder sees
 /// them first, and a decoder of a crafted stream only runs slower).
@@ -182,7 +193,13 @@ impl Default for Recent {
 
 impl Recent {
     pub fn new() -> Recent {
-        Recent { last: Default::default(), keys: Vec::with_capacity(WINDOW), fen: vec![0; WINDOW + 1], live: 0 }
+        Recent {
+            last: Default::default(),
+            keys: Vec::with_capacity(WINDOW),
+            bits: vec![0; WINDOW / 64],
+            groups: vec![0; GROUPS],
+            live: 0,
+        }
     }
 
     /// The window renumbered: the last [`RECENT`] keys used, in order, at times from 0.
@@ -199,53 +216,66 @@ impl Recent {
         kept.reverse();
         self.last.clear();
         self.keys.clear();
-        self.fen.fill(0);
+        self.bits.fill(0);
+        self.groups.fill(0);
         self.live = 0;
         for k in kept {
             self.touch(k);
         }
     }
 
-    fn add(&mut self, t: usize, d: i32) {
-        let mut i = t + 1;
-        while i < self.fen.len() {
-            self.fen[i] = self.fen[i].wrapping_add_signed(d);
-            i += 1 << i.trailing_zeros();
-        }
+    /// Flips time `t`, set (`d` = 1) or cleared (−1).
+    #[inline]
+    fn flip(&mut self, t: usize, d: i32) {
+        self.bits[t / 64] ^= 1 << (t % 64);
+        let g = &mut self.groups[t / 64 / GROUP];
+        *g = g.wrapping_add_signed(d);
     }
 
-    /// The keys last used at times below `t`.
-    fn below(&self, t: usize) -> u32 {
-        let (mut i, mut s) = (t, 0);
-        while i > 0 {
-            s += self.fen[i];
-            i &= i - 1;
-        }
-        s
+    /// The keys last used at times after `t`.
+    fn after(&self, t: usize) -> u32 {
+        let (w, g) = (t / 64, t / 64 / GROUP);
+        // (over whole groups and words, masked, rather than loops of bounds as unpredictable)
+        let words: u32 = self.bits[g * GROUP..][..GROUP]
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| if i > w % GROUP { b.count_ones() } else { 0 })
+            .sum();
+        let groups: u32 = self.groups.iter().enumerate().map(|(i, &c)| if i > g { c } else { 0 }).sum();
+        (self.bits[w] >> (t % 64) >> 1).count_ones() + words + groups
     }
 
     /// The rank of `key`, if it was used.
     pub fn rank(&self, key: u32) -> Option<u32> {
         let &t = self.last.get(&key)?;
-        Some(self.live - self.below(t as usize + 1))
+        Some(self.after(t as usize))
     }
 
     /// The key of rank `r`, if there is one.
     pub fn at(&self, r: u32) -> Option<u32> {
-        // the (live − r)-th last use from the start, 1-based
-        let mut k = self.live.checked_sub(r)?;
-        if k == 0 {
+        if r >= self.live {
             return None;
         }
-        let (mut pos, mut step) = (0, (self.fen.len() - 1).next_power_of_two());
-        while step > 0 {
-            if pos + step < self.fen.len() && self.fen[pos + step] < k {
-                pos += step;
-                k -= self.fen[pos];
-            }
-            step /= 2;
+        // the (r + 1)-th last use from the end: its group, its word, then its bit
+        let mut k = r;
+        let mut g = GROUPS - 1;
+        while self.groups[g] <= k {
+            k -= self.groups[g];
+            g -= 1;
         }
-        Some(self.keys[pos])
+        let mut w = g * GROUP + GROUP - 1;
+        while self.bits[w].count_ones() <= k {
+            k -= self.bits[w].count_ones();
+            w -= 1;
+        }
+        // the highest bit p with more than k set from it up
+        let (b, mut p) = (self.bits[w], 0);
+        for s in [32, 16, 8, 4, 2, 1] {
+            if (b >> (p + s)).count_ones() > k {
+                p += s;
+            }
+        }
+        Some(self.keys[w * 64 + p as usize])
     }
 
     /// Uses `key`, now.
@@ -255,11 +285,11 @@ impl Recent {
         }
         let now = self.keys.len();
         match self.last.insert(key, now as u32) {
-            Some(t) => self.add(t as usize, -1),
+            Some(t) => self.flip(t as usize, -1),
             None => self.live += 1,
         }
         self.keys.push(key);
-        self.add(now, 1);
+        self.flip(now, 1);
     }
 }
 
@@ -324,11 +354,31 @@ impl Choice {
     }
 }
 
-/// The context bucket of a pixel's predicted level: `dot`, its prediction's offset from the
-/// first endpoint along the line to the second, times `m` (FORMAT.md, "Indices").
-#[inline(always)]
-fn bucket(dot: i64, m: i64, sub: i64, max: usize) -> usize {
-    (((dot * m + (1 << 16)) >> 17) + sub / 2).clamp(0, max as i64 - 1) as usize
+/// The context buckets of pixels' predicted levels (FORMAT.md, "Indices"): of a pixel `v`, the
+/// offset of its prediction from the first endpoint `e` along the line `d` to the second, times
+/// `m`, in 1/2^17, rounded, plus `sub / 2`, within `0..max`. The products by `m` are taken
+/// beforehand, one multiplication per channel the less on the decoder's chain from pixel to
+/// pixel (the sums are the same).
+#[derive(Clone, Copy)]
+struct Buckets<const C: usize> {
+    dm: [i64; C],
+    off: i64,
+    max: i64,
+}
+
+impl<const C: usize> Buckets<C> {
+    #[inline(always)]
+    fn new(e: [i32; C], d: [i32; C], m: i64, max: usize) -> Self {
+        let dm = d.map(|d| d as i64 * m);
+        let off = (1 << 16) - (0..C).map(|k| e[k] as i64 * dm[k]).sum::<i64>();
+        Buckets { dm, off, max: max as i64 - 1 }
+    }
+
+    #[inline(always)]
+    fn of(&self, v: [u8; C], sub: i64) -> usize {
+        let proj = (0..C).map(|k| v[k] as i64 * self.dm[k]).sum::<i64>() + self.off;
+        ((proj >> 17) + sub / 2).clamp(0, self.max) as usize
+    }
 }
 
 /// The colour blocks of a texture: BC1's, or BC2's and BC3's (`four_always`: in four-colour
@@ -512,18 +562,19 @@ impl Colour {
         };
         let (level, index, steps) =
             if four { (bc::COLOUR_LEVEL, bc::COLOUR_INDEX, 3) } else { (bc::COLOUR3_LEVEL, bc::COLOUR3_INDEX, 2) };
+        // (the pixel of each level, a lookup the less after each index)
+        let by_level: [[u8; 3]; 4] = std::array::from_fn(|lv| pal8[index[lv] as usize]);
         let m = (steps << 19) / l2 as i64;
-        let dot = |v: [u8; 3]| (0..3).map(|k| (v[k] as i32 - pal[0][k]) * d[k]).sum::<i32>() as i64;
+        let q = Buckets::new(pal[0], d, m, 15);
         let base = (contrast * 2 + four as usize) * 256;
         for p in 0..16 {
             let (x, y) = (bx * 4 + p % 4, by * 4 + p / 4);
-            let q1 = prev.map_or(15, |c| bucket(dot(c.at(x, y)), m, 4, 15));
-            let q2 = plane.causal(x, y).map_or(15, |v| bucket(dot(v), m, 4, 15));
+            let q1 = prev.map_or(15, |c| q.of(c.at(x, y), 4));
+            let q2 = plane.causal(x, y).map_or(15, |v| q.of(v, 4));
             let ctx = (base + q1 * 16 + q2) * 4;
             let lv = s.tree(&mut self.idx[ctx..ctx + 4], 2, level[(ix >> (2 * p) & 3) as usize] as u32, Cat::Indices);
-            let i = index[lv as usize];
-            out |= (i as u32) << (2 * p);
-            plane.set(x, y, pal8[i as usize]);
+            out |= (index[lv as usize] as u32) << (2 * p);
+            plane.set(x, y, by_level[lv as usize]);
         }
         out
     }
@@ -693,19 +744,18 @@ impl Value {
         };
         let (level, index, steps) =
             if eight { (bc::VALUE_LEVEL, bc::VALUE_INDEX, 7) } else { (bc::VALUE6_LEVEL, bc::VALUE6_INDEX, 5) };
+        let by_level: [[u8; 1]; 8] = std::array::from_fn(|lv| vals[index[lv] as usize]);
         let m = (steps << 18) / spread.unsigned_abs() as i64;
-        let sign = spread.signum();
-        let dot = |v: [u8; 1]| ((v[0] as i32 - a0 as i32) * sign) as i64;
+        let q = Buckets::new([a0 as i32], [spread.signum()], m, 19);
         let base = (contrast * 2 + eight as usize) * 400;
         for p in 0..16 {
             let (x, y) = (bx * 4 + p % 4, by * 4 + p / 4);
-            let q1 = prev.map_or(19, |c| bucket(dot(c.at(x, y)), m, 2, 19));
-            let q2 = plane.causal(x, y).map_or(19, |v| bucket(dot(v), m, 2, 19));
+            let q1 = prev.map_or(19, |c| q.of(c.at(x, y), 2));
+            let q2 = plane.causal(x, y).map_or(19, |v| q.of(v, 2));
             let ctx = (base + q1 * 20 + q2) * 8;
             let lv = s.tree(&mut self.idx[ctx..ctx + 8], 3, level[(ix >> (3 * p) & 7) as usize] as u32, Cat::Indices);
-            let i = index[lv as usize];
-            out |= (i as u64) << (3 * p);
-            plane.set(x, y, vals[i as usize]);
+            out |= (index[lv as usize] as u64) << (3 * p);
+            plane.set(x, y, by_level[lv as usize]);
         }
         out
     }
