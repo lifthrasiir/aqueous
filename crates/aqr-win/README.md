@@ -11,9 +11,9 @@ cargo build -r -p aqr-win
 aqr-win --register      # the verbs, for this user (HKCU); --unregister takes them away
 ```
 
-- The verbs are registered for the user alone, no administrator needed, and `.aqr` files take
-  this program's icon. On Windows 11 the verbs are under "Show more options": the menu above
-  takes only `IExplorerCommand` handlers of packaged (MSIX) applications.
+- The verbs are registered for the user alone, no administrator needed; `.aqr` files and
+  "Compress with Aqueous" take this program's icon. On Windows 11 the verbs are under "Show more
+  options": the menu above takes only `IExplorerCommand` handlers of packaged (MSIX) applications.
 - Explorer runs a process for each path chosen; those of a verb in a folder are gathered into
   one (a named pipe, `src/gather.rs`). Several paths compressed make one archive named after
   their folder.

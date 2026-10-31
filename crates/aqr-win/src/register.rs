@@ -1,7 +1,8 @@
 //! The verbs in the registry, for the user alone (`HKCU\Software\Classes`: no administrator
 //! needed):
 //!
-//! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`.
+//! - `*\shell\Aqueous.compress` and `Directory\shell\Aqueous.compress`: `aqr-win compress`,
+//!   with this program's icon.
 //! - `.aqr` of the class `Aqueous.Archive`, whose verbs are `extract` (the default: a double
 //!   click) and `test`, and whose icon is this program's (`DefaultIcon`).
 //!
@@ -30,15 +31,17 @@ const COMPRESS: [&str; 2] = [r"*\shell\Aqueous.compress", r"Directory\shell\Aque
 pub fn register() -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("This program's path is not known: {e}"))?;
     let command = |verb: &str| format!("\"{}\" {verb} \"%1\"", exe.display());
+    // (the icon of resource 1, aqr-win.rc)
+    let icon = format!("\"{}\",-1", exe.display());
     for key in COMPRESS {
         set(key, None, "Compress with Aqueous")?;
         set(key, Some("MultiSelectModel"), "Player")?;
+        set(key, Some("Icon"), &icon)?;
         set(&format!(r"{key}\command"), None, &command("compress"))?;
     }
     set(".aqr", None, CLASS)?;
     set(CLASS, None, "Aqueous archive")?;
-    // (the icon of resource 1, aqr-win.rc)
-    set(&format!(r"{CLASS}\DefaultIcon"), None, &format!("\"{}\",-1", exe.display()))?;
+    set(&format!(r"{CLASS}\DefaultIcon"), None, &icon)?;
     set(&format!(r"{CLASS}\shell"), None, "extract")?;
     for (verb, text) in [("extract", "Extract here"), ("test", "Test")] {
         let key = format!(r"{CLASS}\shell\{verb}");
