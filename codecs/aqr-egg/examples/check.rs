@@ -40,7 +40,7 @@ fn main() {
     // bytes of blocks by method (stored, DEFLATE, bzip2, AZO, LZMA, other or encrypted), all and
     // rebuilt
     let (mut by_method, mut taken) = ([0usize; 6], [0usize; 6]);
-    let (mut flate_records, mut lzma_records, mut kept, mut data) = (0, 0, 0, 0);
+    let (mut flate_records, mut lzma_records, mut azo_records, mut kept, mut data) = (0, 0, 0, 0, 0);
     let (mut enc_secs, mut dec_secs) = (0.0, 0.0);
     for (i, p) in paths.iter().enumerate() {
         let Ok(d) = std::fs::read(p) else { continue };
@@ -82,9 +82,9 @@ fn main() {
         rebuilt += 1;
         let k = f.streams[0].data.len();
         let class = |c: &str| -> usize { f.streams.iter().filter(|s| s.class == c).map(|s| s.data.len()).sum() };
-        let (fr, lr) = (class("flate/record"), class("lzma/record"));
-        (flate_records, lzma_records, kept, data) =
-            (flate_records + fr, lzma_records + lr, kept + k, data + e.inflated as usize);
+        let (fr, lr, ar) = (class("flate/record"), class("lzma/record"), class("azo/record"));
+        (flate_records, lzma_records, azo_records, kept, data) =
+            (flate_records + fr, lzma_records + lr, azo_records + ar, kept + k, data + e.inflated as usize);
         let mut all = [0usize; 6];
         blocks.iter().for_each(|&(s, n)| all[s] += n);
         let mut got = [0usize; 6];
@@ -92,7 +92,7 @@ fn main() {
         (0..6).for_each(|m| taken[m] += got[m]);
         if verbose {
             println!(
-                "{i}: {} B (records to {}), {} files, records {fr}+{lr} B, kept {k} B, rebuilt {got:?} of {all:?}",
+                "{i}: {} B (records to {}), {} files, records {fr}+{lr}+{ar} B, kept {k} B, rebuilt {got:?} of {all:?}",
                 d.len(),
                 a.end,
                 a.entries.len()
@@ -106,9 +106,10 @@ fn main() {
     let pct = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
     println!(
         "records: DEFLATE {flate_records} B ({:.2}% of the DEFLATE rebuilt, profile {profile}), LZMA {lzma_records} B \
-         ({:.2}%); kept {kept} B, data {data} B",
+         ({:.2}%), AZO {azo_records} B ({:.2}%); kept {kept} B, data {data} B",
         pct(flate_records, taken[1]),
-        pct(lzma_records, taken[4])
+        pct(lzma_records, taken[4]),
+        pct(azo_records, taken[3])
     );
     let mb = data as f64 / 1e6;
     println!(

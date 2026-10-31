@@ -88,6 +88,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-azo"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+]
+
+[[package]]
 name = "aqr-bcj"
 version = "0.1.0"
 dependencies = [
@@ -211,6 +219,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-7z",
  "aqr-asar",
+ "aqr-azo",
  "aqr-bcj",
  "aqr-bundle",
  "aqr-bvx",
@@ -284,6 +293,7 @@ dependencies = [
 name = "aqr-egg"
 version = "0.1.0"
 dependencies = [
+ "aqr-azo",
  "aqr-bz2",
  "aqr-common",
  "aqr-flate",
@@ -504,6 +514,7 @@ version = "0.1.0"
 dependencies = [
  "aqr-api",
  "aqr-asar",
+ "aqr-azo",
  "aqr-bcj",
  "aqr-bundle",
  "aqr-bvx",

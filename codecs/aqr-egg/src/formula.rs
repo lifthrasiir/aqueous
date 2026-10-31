@@ -2,10 +2,11 @@
 //! contents. Stored blocks are their contents; DEFLATE blocks are the outputs of one application
 //! of aqr-flate's module (`flate-set`), bzip2 blocks those of one application of aqr-bz2's
 //! `bz2-recons`, the LZMA streams of LZMA blocks those of one application of aqr-lzma's
-//! `lzma-recons`, each split into the blocks. The rest (the headers, encrypted blocks, AZO blocks,
-//! blocks not rebuilt, the records after the files) is kept as it is. The contents are streams by
-//! their kinds by their files' names, so that whoever takes the formula may recompress them in
-//! turn and store them once where the same files are archived along with it.
+//! `lzma-recons`, AZO blocks those of one application of aqr-azo's `azo-recons`, each split
+//! into the blocks. The rest (the headers, encrypted blocks, blocks not rebuilt, the records
+//! after the files) is kept as it is. The contents are streams by their kinds by their files'
+//! names, so that whoever takes the formula may recompress them in turn and store them once
+//! where the same files are archived along with it.
 
 use aqr_bz2::Framing;
 use aqr_bz2::module::StreamParams;
@@ -13,7 +14,7 @@ use aqr_flate::formula::Derived;
 use aqr_formula::{Formula, Kind, Node};
 use aqr_lzma::{lzma, recons};
 
-use crate::egg::{self, BZIP2, Block, DEFLATE, Egg, LZMA, LZMA_HEADER, STORED};
+use crate::egg::{self, AZO, BZIP2, Block, DEFLATE, Egg, LZMA, LZMA_HEADER, STORED};
 
 /// Contents of at least this many bytes are slices of their own, apart from the others of their
 /// kind next to them: so that the same contents elsewhere are found by their slices.
@@ -76,16 +77,19 @@ enum Made {
     Bzip2(StreamParams, Vec<u8>),
     /// The stream's data and record (the stream follows the block's header of LZMA).
     Lzma(Vec<u8>, Vec<u8>),
+    /// The AZO stream's data (before its x86 filter) and record.
+    Azo(Vec<u8>, Vec<u8>),
 }
 
 impl Made {
-    /// The method's place: stored, DEFLATE, bzip2, LZMA.
+    /// The method's place: stored, DEFLATE, bzip2, LZMA, AZO.
     fn slot(&self) -> usize {
         match self {
             Made::Stored => 0,
             Made::Deflated(..) => 1,
             Made::Bzip2(..) => 2,
             Made::Lzma(..) => 3,
+            Made::Azo(..) => 4,
         }
     }
 }
@@ -180,7 +184,7 @@ pub fn encode_with(
     // the blocks that may be rebuilt, those decoding within the limit by their headers' sizes
     let mut left = opt.limit;
     let mut made: Vec<Option<Made>> = blocks.iter().map(|_| None).collect();
-    let (mut deflated, mut bzip2, mut lzma) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut deflated, mut bzip2, mut lzma, mut azo) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for (i, &(b, encrypted)) in blocks.iter().enumerate() {
         if encrypted || b.body.is_empty() {
             continue;
@@ -188,12 +192,13 @@ pub fn encode_with(
         let size = b.size as u64;
         match b.method {
             STORED if b.body.len() as u64 == size => made[i] = Some(Made::Stored),
-            m @ (DEFLATE | BZIP2 | LZMA) if size <= left => {
+            m @ (DEFLATE | BZIP2 | LZMA | AZO) if size <= left => {
                 left -= size;
                 match m {
                     DEFLATE => deflated.push(i),
                     BZIP2 => bzip2.push(i),
-                    _ => lzma.push(i),
+                    LZMA => lzma.push(i),
+                    _ => azo.push(i),
                 }
             }
             _ => {}
@@ -223,10 +228,16 @@ pub fn encode_with(
         let b = blocks[i].0;
         made[i] = take_lzma(body(b), b.size, opt.threads);
     }
+    // (each on all threads, by its blocks of 512 KiB)
+    for i in azo {
+        let b = blocks[i].0;
+        let sp = aqr_azo::formula::take(body(b), b.size as u64, b.size as usize, opt.threads);
+        made[i] = sp.map(|sp| Made::Azo(sp.data, sp.record));
+    }
     // (the contents cut by the files' sizes: the data as long as the header says)
     for (m, (b, _)) in made.iter_mut().zip(&blocks) {
         let len = match m {
-            Some(Made::Deflated(d, _) | Made::Bzip2(_, d) | Made::Lzma(d, _)) => d.len(),
+            Some(Made::Deflated(d, _) | Made::Bzip2(_, d) | Made::Lzma(d, _) | Made::Azo(d, _)) => d.len(),
             _ => continue,
         };
         if len != b.size as usize {
@@ -242,9 +253,10 @@ pub fn encode_with(
     f.push("egg", Vec::new());
     // the contents of each method's blocks with their kinds and ends; the records and their
     // lengths of DEFLATE and LZMA; the bzip2 streams' params
-    let mut contents: [Contents; 4] = Default::default();
+    let mut contents: [Contents; 5] = Default::default();
     let (mut flate_records, mut flate_lens) = (Vec::new(), Vec::new());
     let (mut lzma_records, mut lzma_lens) = (Vec::new(), Vec::new());
+    let (mut azo_records, mut azo_lens) = (Vec::new(), Vec::new());
     let mut params = Vec::new();
     let mut inflated = 0;
     for (i, (m, ends)) in made.iter_mut().zip(&kinds).enumerate() {
@@ -264,6 +276,11 @@ pub fn encode_with(
             Made::Lzma(data, record) => {
                 lzma_lens.push((data.len(), record.len()));
                 lzma_records.extend_from_slice(&std::mem::take(record));
+                Some(std::mem::take(data))
+            }
+            Made::Azo(data, record) => {
+                azo_lens.push((data.len(), record.len()));
+                azo_records.extend_from_slice(&std::mem::take(record));
                 Some(std::mem::take(data))
             }
         };
@@ -290,9 +307,9 @@ pub fn encode_with(
         f.push("raw", Vec::new());
         f.push_by_kind(raw, data, &ends, "egg", OWN_MIN)
     };
-    let [stored, flate, bz2, lz] = contents;
+    let [stored, flate, bz2, lz, az] = contents;
     // each method's nodes, one for each block in order
-    let mut nodes: [std::vec::IntoIter<Node>; 4] = Default::default();
+    let mut nodes: [std::vec::IntoIter<Node>; 5] = Default::default();
     let stored_sizes = sizes(0);
     if !stored_sizes.is_empty() {
         nodes[0] = cut(by_kind(&mut f, stored), &stored_sizes).into_iter();
@@ -329,6 +346,14 @@ pub fn encode_with(
             memory_limit: aqr_formula::NO_LIMIT,
         };
         nodes[3] = outputs(&mut f, a, lzma_sizes).into_iter();
+    }
+    let azo_sizes = sizes(4);
+    if !azo_sizes.is_empty() {
+        let data = by_kind(&mut f, az);
+        let records = f.push_as("azo/record", Kind::Compressed, azo_records);
+        let index = f.push("azo/index", aqr_azo::formula::index(&azo_lens));
+        let a = aqr_azo::formula::apply(data, records, index, azo_sizes.iter().sum());
+        nodes[4] = outputs(&mut f, a, azo_sizes).into_iter();
     }
     // the root: the bytes kept and the blocks rebuilt in turn
     let (mut container, mut root, mut at) = (Vec::new(), Vec::new(), 0);
@@ -394,6 +419,9 @@ pub fn apply(a: &aqr_formula::Apply, inputs: &[&[u8]], threads: usize) -> Result
         }
         m if m == aqr_lzma::formula::MODULE && res.is_empty() => {
             aqr_lzma::formula::decode(&a.params, inputs, a.len, threads).map_err(|e| e.to_string())
+        }
+        m if m == aqr_azo::formula::MODULE && res.is_empty() => {
+            aqr_azo::formula::decode(&a.params, inputs, a.len, threads).map_err(|e| e.to_string())
         }
         m if m == aqr_flate::formula::MODULE => {
             aqr_flate::formula::decode(&a.params, &res, inputs, a.len, threads).map_err(|e| e.to_string())

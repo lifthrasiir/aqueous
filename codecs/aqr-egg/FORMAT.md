@@ -10,7 +10,9 @@ the archive, the bytes it keeps as they are and the blocks it rebuilds:
   ([its FORMAT.md](../aqr-bz2/FORMAT.md)), split into the blocks;
 - the LZMA stream of an LZMA block (after its 9 bytes of header, which are kept) is an output of
   one application of aqr-lzma's `lzma-recons` for all of them ([its FORMAT.md](../aqr-lzma/FORMAT.md),
-  the index cutting the data and the records into the streams), split into the blocks.
+  the index cutting the data and the records into the streams), split into the blocks;
+- an AZO block is an output of one application of aqr-azo's `azo-recons` for all of them
+  ([its FORMAT.md](../aqr-azo/FORMAT.md)), split into the blocks.
 
 External reference: OctopusET's
 [EGG Archive Format Specification](https://gist.github.com/OctopusET/0ad7da5da238b9153960d0bc4dfe2a50)
@@ -58,16 +60,19 @@ A block is rebuilt where its file is not encrypted, it is not empty, and:
   archive seen, ZIP's header of LZMA: the LZMA SDK's version 4.65 and the size of the
   properties) and LZMA's properties (the byte of lc, lp and pb, and the dictionary's size), and
   the rest is one LZMA stream of as much data as the uncompressed size (in the archives seen with
-  no end marker; one with an end marker is taken too), which `lzma-recons` gives back.
+  no end marker; one with an end marker is taken too), which `lzma-recons` gives back; or
+- its method is 3 (AZO, spec Appendix A): the block is an AZO stream, which aqr-azo splits into
+  its data (as its blocks decode, before any x86 filter) and record, of as much data as the
+  uncompressed size.
 
-AZO blocks (method 3) are kept. The DEFLATE, bzip2 and LZMA blocks decode within a budget
+The DEFLATE, bzip2, LZMA and AZO blocks decode within a budget
 (`Options::limit`, which aqr-compress gives as what is left of its own), by the uncompressed
 sizes of their headers, taken in order; blocks past it are kept. The CRC-32 of the headers is not
 checked: what is rebuilt is the block, bit for bit, whatever its data.
 
 ## The data
 
-Each block's contents (the stored block, or the data of a DEFLATE, bzip2 or LZMA block) are
+Each block's contents (the stored block, or the data of a DEFLATE, bzip2, LZMA or AZO block) are
 sliced into a stream by the kind its file's name tells, one for each method: those of at least
 1 KiB a slice of their own. The block of a solid archive is cut into the contents of the files it
 holds, by their sizes, where those add up to its uncompressed size (else it is all of the kind of

@@ -10,6 +10,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/asar-recons.block"),
     },
     Known {
+        name: "azo-recons",
+        version: 1,
+        sha512_256: hex("0a42a4b6b85e36fb51caf4791a57d313b2bdb09f2331a1a439d4d697b135071b"),
+        block: include_bytes!("../wasm/azo-recons.block"),
+    },
+    Known {
         name: "bcj-arm",
         version: 1,
         sha512_256: hex("6ca13cc1b6a8a6903499500a7a86b27252171e828d998fa103cbf1a1c4b5a17e"),
@@ -180,7 +186,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("0355718f6297f98da16d552deca2835c72cd783a0e8bf50c6dd0a3454a342495"),
+        sha512_256: hex("d0eac1ce671e3d35d57d1e6e03cd00c3d474540d50f542b09a24d503fb338384"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -318,7 +324,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "psd-recons",
         version: 1,
-        sha512_256: hex("3f5cdb3b8bbd7f4ec28acc0c89b7b2ddb3bc3a4607400f7e07379261ef2fca94"),
+        sha512_256: hex("b00379f54350fc3e0b7739057e9f05da387d5ecbb81e8e0a3cf30ff9cc7d06d1"),
         block: include_bytes!("../wasm/psd-recons.block"),
     },
     Known {

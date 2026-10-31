@@ -149,6 +149,8 @@ for name, pad in ((\"a\", 0), (\"b\", 48)):
     copy image.fits $codecs/aqr-fits/corpus/misc/frame-r-001000-1-0027.fits
     copy image.fits.fz $codecs/aqr-fits/corpus/misc/legacysurvey-0001m002-image-g.fits.fz
     copy mesh.obj $data/aqr-obj-corpus/c3d/bimba.obj
+    # EGG archives of AZO streams (a PE file, a text of 633 KB, two blocks): alzgg's test files
+    make azo.d 'mkdir $out && cp $codecs/aqr-egg/corpus/alzgg/{mz,sysmulti}_sys_optimized.egg $out'
     make table.csv 'py "
 import random, sys
 r = random.Random(1)

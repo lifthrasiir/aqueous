@@ -27,7 +27,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, bvx, bz2, alz, egg, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
+  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
   asar, vorbis, ogg, mkv, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
   `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
@@ -150,6 +150,10 @@ optimization picked by hash.
   (`BZ2_hbMakeCodeLengths`) are the black boxes. Equal rotations of periodic blocks order
   otherwise, so their `origPtr` goes in the params. Left (its README's Status): lbzip2 and
   others, bzip2 in ZIP/7z/DMG, tasks in Wasm.
+- aqr-azo (AZO, ALZip's compressor in EGG archives): a record of the parse, as aqr-lzo, the
+  stream coded again by the spec's models (OctopusET's EGG spec, Appendix A; ALZip's output the
+  black box). The x86 filter is not known (the spec's does not give ALZip's CRC-32): filtered
+  streams are rebuilt with their data as the blocks decode. Left (its README's Status).
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
   multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
   Firefox's mozlz4 is liblz4's `LZ4_compress_default`.

@@ -338,6 +338,43 @@ fn lzo_same_as_wasm() {
     }
 }
 
+/// AZO streams (of EGG archives) natively and as WebAssembly alike, and their records damaged in
+/// turn failing alike (or giving the same).
+#[test]
+fn azo_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let d = fixture("codecs/aqr-egg/tests/data/azonumbers.egg");
+    // (the archive's one AZO stream: its block's data after the block header and its end marker)
+    let at = d.windows(4).position(|w| w == 0x02B5_0C13u32.to_le_bytes()).unwrap() + 4;
+    let len = u32::from_le_bytes(d[at + 6..at + 10].try_into().unwrap()) as usize;
+    let s = &d[at + 18..at + 18 + len];
+    let sp = aqr_azo::recons::split(s, usize::MAX, 2).unwrap();
+    let mut f = Formula::default();
+    let data = f.push("raw", sp.data);
+    let record = f.push("azo/record", sp.record);
+    let index = f.push("azo/index", Vec::new());
+    f.root = Node::Apply(Box::new(aqr_azo::formula::apply(data, record, index, s.len() as u64)));
+    let c = enc.encode(&f, None).unwrap();
+    assert!(aqr::decode(&c, &Native::default()).unwrap() == s);
+    assert!(aqr::decode(&c, &Wasm).unwrap() == s);
+    for k in 0..8 {
+        let mut bad = f.clone();
+        let r = &mut bad.streams[1].data;
+        let at = r.len() * k / 8;
+        if k == 7 {
+            r[at..].fill(0xff);
+        } else {
+            r[at] ^= 1 << k;
+        }
+        let c = enc.encode(&bad, None).unwrap();
+        let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+        assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
+        if let (Ok(n), Ok(w)) = (n, w) {
+            assert!(n == w, "{k}");
+        }
+    }
+}
+
 /// Streams of LZFSE and LZVN blocks natively and as WebAssembly alike, and their records damaged
 /// in turn failing alike (or giving the same).
 #[test]

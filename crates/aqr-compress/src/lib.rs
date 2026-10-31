@@ -143,8 +143,8 @@ pub use extent::extent;
 pub use progress::Event;
 
 use aqr_decompress::{
-    ASAR, BCJ_ARM, BCJ_ARM_THUMB, BCJ_ARM64, BCJ_DELTA, BCJ_IA64, BCJ_POWERPC, BCJ_RISCV, BCJ_SPARC, BCJ_X86, BCJ2,
-    BUNDLE, BVX, BZ2, FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP,
+    ASAR, AZO, BCJ_ARM, BCJ_ARM_THUMB, BCJ_ARM64, BCJ_DELTA, BCJ_IA64, BCJ_POWERPC, BCJ_RISCV, BCJ_SPARC, BCJ_X86,
+    BCJ2, BUNDLE, BVX, BZ2, FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP,
 };
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
@@ -304,14 +304,15 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`LZMA`],
-/// [`LZMA2`], [`LZO`], [`BVX`], [`BZ2`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`], [`BUNDLE`] and [`ASAR`], and
+/// [`LZMA2`], [`LZO`], [`AZO`], [`BVX`], [`BZ2`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`], [`BUNDLE`] and [`ASAR`], and
 /// that before the filters of xz and 7z ([`BCJ_X86`] and the others, [`BCJ2`]), scanned.
-pub const CONTENTS: [Content; 23] = [
+pub const CONTENTS: [Content; 24] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: LZMA, input: 0, nest: Nest::Scan },
     Content { module: LZMA2, input: 0, nest: Nest::Scan },
     Content { module: LZO, input: 0, nest: Nest::Scan },
+    Content { module: AZO, input: 0, nest: Nest::Scan },
     Content { module: BVX, input: 0, nest: Nest::Scan },
     Content { module: BZ2, input: 0, nest: Nest::Scan },
     Content { module: LZX, input: 0, nest: Nest::Scan },

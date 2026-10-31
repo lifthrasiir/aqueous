@@ -14,7 +14,7 @@ fn fixtures() -> Vec<(String, Vec<u8>)> {
         .map(|p| (p.file_stem().unwrap().to_str().unwrap().to_owned(), std::fs::read(&p).unwrap()))
         .collect();
     v.sort();
-    assert_eq!(v.len(), 9);
+    assert_eq!(v.len(), 10);
     v
 }
 
@@ -22,13 +22,15 @@ fn fixture(name: &str) -> Vec<u8> {
     fixtures().into_iter().find(|f| f.0 == name).unwrap().1
 }
 
-/// Bytes of the blocks of `f` rebuilt by each module (aqr-flate's, aqr-bz2's, aqr-lzma's).
-fn rebuilt(f: &Formula) -> [u64; 3] {
-    let mut by = [0; 3];
+/// Bytes of the blocks of `f` rebuilt by each module (aqr-flate's, aqr-bz2's, aqr-lzma's,
+/// aqr-azo's).
+fn rebuilt(f: &Formula) -> [u64; 4] {
+    let mut by = [0; 4];
     let mut count = |a: &Apply| match a.module {
         m if m == aqr_flate::formula::MODULE => by[0] += a.len,
         m if m == aqr_bz2::formula::MODULE => by[1] += a.len,
         m if m == aqr_lzma::formula::MODULE => by[2] += a.len,
+        m if m == aqr_azo::formula::MODULE => by[3] += a.len,
         _ => panic!("{:?}", a.module),
     };
     f.shared.iter().for_each(|s| count(&s.apply));
@@ -52,18 +54,19 @@ fn fixtures_rebuilt() {
         assert_eq!(formula::extent(&d), Some(d.len()), "{name}");
         let blocks = || a.entries.iter().flat_map(|e| e.blocks.iter().map(move |b| (b, e.encrypted)));
         let Some(f) = formula::encode(&d, 2) else {
-            // (nothing to rebuild: every block encrypted or of AZO)
-            assert!(blocks().all(|(b, enc)| enc || b.method == egg::AZO), "{name}: no formula");
+            // (nothing to rebuild: every block encrypted)
+            assert!(blocks().all(|(_, enc)| enc), "{name}: no formula");
             continue;
         };
         assert!(eval(&f) == d, "{name}");
-        // every block neither encrypted nor of AZO rebuilt, but tiny DEFLATE blocks, whose
-        // records are no shorter
+        // every block not encrypted rebuilt, but tiny DEFLATE blocks, whose records are no
+        // shorter
         let body = |m: u8, min: usize| -> u64 {
             let b = blocks().filter(|(b, enc)| b.method == m && !enc && b.body.len() >= min);
             b.map(|(b, _)| b.body.len() as u64).sum()
         };
-        let [flate, bz2, lzma] = rebuilt(&f);
+        let [flate, bz2, lzma, azo] = rebuilt(&f);
+        assert_eq!(azo, body(egg::AZO, 0), "{name}");
         assert!((body(egg::DEFLATE, 32)..=body(egg::DEFLATE, 0)).contains(&flate), "{name}: {flate}");
         assert_eq!(bz2, 0, "{name}");
         assert_eq!(lzma, body(egg::LZMA, 0) - 9 * blocks().filter(|b| b.0.method == egg::LZMA).count() as u64);
@@ -109,7 +112,7 @@ fn bzip2_and_stored() {
     let d = egg::write(false, &files);
     let f = formula::encode(&d, 2).unwrap();
     assert!(eval(&f) == d);
-    assert_eq!(rebuilt(&f), [0, (b9.len() + b1.len()) as u64, 0]);
+    assert_eq!(rebuilt(&f), [0, (b9.len() + b1.len()) as u64, 0, 0]);
     // turned down where it would not pay; refused where the size is not the data's
     let e = formula::encode_with(&d, &formula::Options::default(), &mut |_, _, _| false).unwrap();
     assert_eq!(e.rebuilt, [false, true, false, false]);
@@ -129,9 +132,8 @@ fn limits_and_refusals() {
     let e = formula::encode_with(&d, &opt, &mut |_, _, _| true).unwrap();
     assert_eq!(e.inflated, small);
     assert!(eval(&e.formula) == d);
-    // only encrypted or AZO blocks: nothing to rebuild
+    // only encrypted blocks: nothing to rebuild
     assert!(formula::encode(&fixture("lorem_long_zipEnc"), 1).is_none());
-    assert!(formula::encode(&fixture("azoshort_txt"), 1).is_none());
     // cut short, anywhere: rebuilt or refused, never wrong
     for n in (0..d.len()).step_by(97) {
         let d = &d[..n];
