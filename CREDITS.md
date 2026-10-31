@@ -49,6 +49,10 @@ own terms; the code is written from that description, not from the encoder's cod
   LZFSE compressor's normalization of frequencies and its table of match candidates (which
   aqr-bvx's record takes as a context), in aqr-bvx, written from the output of Apple's
   libcompression used as a black box, without the code of Apple's implementation.
+- **ALZ** (ESTsoft's ALZip): the archive format and ALZip's framing of bzip2, in aqr-alz and
+  aqr-bz2 (`bz2-alz-recons`), written from OctopusET's ALZ Archive Format Spec (CC0) without
+  any ALZ decoder's code; checked on alkegi/unalz's test archives (CC0) and an archive of
+  ALZip 11.25 (openwall's john-samples).
 - **GIF** (CompuServe's GIF89a specification): the container and its LZW, in aqr-gif, whose
   tests take the output of ImageMagick, ffmpeg, Pillow and macOS's ImageIO used as black boxes.
 - **lpaq** and **PAQ** (Matt Mahoney and others): the style of binary arithmetic coding and

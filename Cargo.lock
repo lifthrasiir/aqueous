@@ -61,6 +61,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-alz"
+version = "0.1.0"
+dependencies = [
+ "aqr-bz2",
+ "aqr-common",
+ "aqr-flate",
+ "aqr-formula",
+]
+
+[[package]]
 name = "aqr-api"
 version = "0.1.0"
 dependencies = [
@@ -143,6 +153,7 @@ name = "aqr-compress"
 version = "0.1.0"
 dependencies = [
  "aqr-7z",
+ "aqr-alz",
  "aqr-asar",
  "aqr-bundle",
  "aqr-bvx",

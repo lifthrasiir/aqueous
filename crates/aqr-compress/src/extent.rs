@@ -38,6 +38,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Zip => aqr_zip::zip::extent(d),
         Format::SevenZip => aqr_7z::formula::extent(d),
         Format::Cab => aqr_mszip::formula::extent(d),
+        Format::Alz => aqr_alz::formula::extent(d),
         Format::GitPack => aqr_git::pack::extent(d),
         Format::GnuGettext => aqr_gnu_gettext::formula::extent(d),
         Format::Wasm => aqr_wasm::formula::extent(d),

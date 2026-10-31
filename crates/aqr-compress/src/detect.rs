@@ -70,6 +70,9 @@ pub enum Format {
     /// CHM file (aqr-mszip, and aqr-lzx on its LZX section), known by its header: at the start of
     /// data only.
     Chm,
+    /// ALZ archive (aqr-alz, and aqr-flate on its DEFLATE bodies, aqr-bz2 on its bzip2 bodies),
+    /// known by its header and the record after it.
+    Alz,
     /// git pack (aqr-git, and aqr-flate on its entries' zlib streams), a whole file: not
     /// looked for in other data.
     GitPack,
@@ -118,7 +121,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 47] = [
+    pub const ALL: [Format; 48] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -149,6 +152,7 @@ impl Format {
         Format::SevenZip,
         Format::Cab,
         Format::Chm,
+        Format::Alz,
         Format::GitPack,
         Format::Fasta,
         Format::Wasm,
@@ -200,6 +204,7 @@ impl Format {
             Format::SevenZip => "7z",
             Format::Cab => "cab",
             Format::Chm => "chm",
+            Format::Alz => "alz",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
             Format::Wasm => "wasm",
@@ -283,6 +288,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
         b"cab" => format(Format::Cab),
+        b"alz" => format(Format::Alz),
         b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif"
         | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
@@ -368,6 +374,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::SevenZip)
     } else if aqr_mszip::formula::starts(d) {
         Some(Format::Cab)
+    } else if aqr_alz::formula::starts(d) {
+        Some(Format::Alz)
     } else if start && aqr_git::pack::starts(d) {
         Some(Format::GitPack)
     } else if at(0, &[0x1f, 0x8b, 8]) {
@@ -446,6 +454,7 @@ const fn pair(a: u8, b: u8) -> bool {
         b'G' => b == b'I',
         b'O' => b == b'g',
         b'B' => b == b'Z',
+        b'A' => b == b'L',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -515,6 +524,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'G' => aqr_gif::formula::starts(d),
         b'O' => aqr_ogg::formula::starts(d),
         b'B' => aqr_bz2::formula::starts(d),
+        b'A' => aqr_alz::formula::starts(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,

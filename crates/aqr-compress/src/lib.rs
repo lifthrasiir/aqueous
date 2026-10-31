@@ -958,6 +958,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::SevenZip => sevenz(d, opt),
                 Format::Cab => cab(d, opt, cx),
                 Format::Chm => chm(d, opt, cx),
+                Format::Alz => alz(d, opt, depth, cx),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Bvx => bvx(d, opt, cx),
@@ -1792,10 +1793,20 @@ fn pure(
 /// tell, is decoded whole first; other data (text, say) is told by its start. The record is the
 /// params, a few bytes.
 fn bz2(d: &[u8], opt: &Options, depth: u32, threads: usize, held: Option<&Held>) -> Option<Formula> {
+    aqr_bz2::formula::encode_if(d, threads, &mut bz2_pays(d, opt, depth, held))
+}
+
+/// Whether a bzip2 stream in file `d` pays, as aqr-bz2's `encode_if` asks: see [`bz2`].
+fn bz2_pays<'a>(
+    d: &'a [u8],
+    opt: &Options,
+    depth: u32,
+    held: Option<&'a Held>,
+) -> impl FnMut(usize, &[u8], bool) -> bool + 'a {
     let probe = probe(opt, depth);
     // (an encoder of its own, as formulas of pure formats are made on several threads)
     let enc = aqr::Encoder::new(opt.level);
-    aqr_bz2::formula::encode_if(d, threads, &mut |coded, data, whole| {
+    move |coded, data, whole| {
         if !whole && detect(data).is_some_and(|f| f != Format::Text) {
             return true;
         }
@@ -1803,7 +1814,21 @@ fn bz2(d: &[u8], opt: &Options, depth: u32, threads: usize, held: Option<&Held>)
             let held = || held.is_some_and(|h| h.holds(data, h.owner(d))) as u8 as f64;
             p.pays(&enc, coded, || Some(16), data, held, Kind::Unknown)
         })
-    })
+    }
+}
+
+/// aqr-alz's formula of an ALZ archive, the contents of its entries a content of the
+/// applications (or of the formula, those stored), recompressed in turn, each by its kind by its
+/// name ([`kind_by_name`]). Its DEFLATE and bzip2 bodies decode within what is left of the
+/// budget ([`Options::expansion`]); a bzip2 body is taken where its data may pay, as a bzip2
+/// file is ([`bz2`]).
+fn alz(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
+    let (profile, zlib) = opt.flate();
+    let o =
+        aqr_alz::formula::Options { threads: opt.threads, profile, zlib, limit: cx.inflate_left(), kind: kind_by_name };
+    let e = aqr_alz::formula::encode_with(d, &o, &mut bz2_pays(d, opt, depth, cx.held.as_deref()))?;
+    cx.inflate(e.inflated);
+    Some(e.formula)
 }
 
 /// aqr-7z's formula, the contents of the files a content of the applications (or of the formula,
@@ -2072,6 +2097,40 @@ mod tests {
     fn lzx_from_level_9() {
         let at = |level| lzx_on(&Options { level, ..Options::default() });
         assert!(!at(Level::MID) && !at(Level::HIGH) && at(Level::Of(9)));
+    }
+
+    /// An ALZ archive is taken apart: its DEFLATE bodies by aqr-flate, its bzip2 bodies by
+    /// aqr-bz2's module of ALZip's streams; found in other data too.
+    #[test]
+    fn alz_debug() {
+        let dir = format!("{}/../../codecs/aqr-alz/tests/data", env!("CARGO_MANIFEST_DIR"));
+        let d = std::fs::read(format!("{dir}/normal.alz")).unwrap();
+        let opt = Options { shared_modules: true, ..Options::default() };
+        let cx = Cx::new(&d, &opt);
+        let f = alz(&d, &opt, 0, &cx);
+        eprintln!(
+            "alz: {:?}",
+            f.as_ref().map(|f| f.streams.iter().map(|s| (&s.class, s.data.len())).collect::<Vec<_>>())
+        );
+        let r = recompress_as(Format::Alz, &d, &opt, 0, &cx);
+        eprintln!("as: {}", r.is_some());
+    }
+
+    #[test]
+    fn alz_taken_apart() {
+        let dir = format!("{}/../../codecs/aqr-alz/tests/data", env!("CARGO_MANIFEST_DIR"));
+        for (name, module) in [("normal", aqr_decompress::FLATE), ("bzip2", aqr_decompress::BZ2_ALZ)] {
+            let d = std::fs::read(format!("{dir}/{name}.alz")).unwrap();
+            assert_eq!(detect(&d), Some(Format::Alz));
+            // (ALZip's DEFLATE is zlib's, which the adaptive profile emulates, from level 9)
+            let opt = Options { shared_modules: true, level: Level::Of(9), ..Options::default() };
+            let f = recompress(&d, &opt);
+            assert!(f.applies().iter().any(|a| a.module == module), "{name}");
+            assert!(f.eval(&Native::default()).unwrap() == d, "{name}");
+            let x = [&b"some data before "[..], &d, b" and after"].concat();
+            assert_eq!(detect::starts(&x[17..]), Some(Format::Alz));
+            assert_eq!(extent(Format::Alz, &x[17..]), Some(d.len()));
+        }
     }
 
     /// The contents of pure formats are made beforehand, each once: those of a ZIP archive's
