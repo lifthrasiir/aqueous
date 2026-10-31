@@ -676,6 +676,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-win"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "windows-sys",
+]
+
+[[package]]
 name = "aqr-wrt"
 version = "0.1.0"
 dependencies = [
