@@ -1,0 +1,45 @@
+{
+  "nodes": {
+    "flate-zoo": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1792979090,
+        "narHash": "sha256-swXsFGJ8FDcaVhL4Ca+CqV+UoROrcEsozAxmdkxvnFU=",
+        "owner": "lifthrasiir",
+        "repo": "flate-zoo",
+        "rev": "2724c73c3efe336ee66db62dc188b5189a38149a",
+        "type": "github"
+      },
+      "original": {
+        "owner": "lifthrasiir",
+        "repo": "flate-zoo",
+        "rev": "2724c73c3efe336ee66db62dc188b5189a38149a",
+        "type": "github"
+      }
+    },
+    "nixpkgs": {
+      "locked": {
+        "lastModified": 1793341285,
+        "narHash": "sha256-Y1CiZ4SoBUjLQyQM/pY+rS2dXD3CHLPstF0lmOc73D4=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "1c89083e451e891152365b799595cf7790a43325",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "root": {
+      "inputs": {
+        "flate-zoo": "flate-zoo",
+        "nixpkgs": "nixpkgs"
+      }
+    }
+  },
+  "root": "root",
+  "version": 7
+}
