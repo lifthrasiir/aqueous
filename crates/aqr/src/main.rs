@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] [--stats[=FILE]] INPUT...
+//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -71,8 +71,48 @@ use aqr_formula::aqr::{self, Entry, EntryNode, Failure, Tree, name_bytes, name_f
 use meta::{os_bytes, os_from};
 use view::Ticking;
 
-const USAGE: &str = "usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l 0-9|low|mid|high|zstdN | -0 ... -9] [--depth N] \
-     [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] [--stats[=FILE.json|FILE.html]]      INPUT...";
+const USAGE: &str = "usage: aqr [OPTIONS] INPUT...";
+
+const HELP: &str = "\
+usage: aqr [OPTIONS] INPUT...
+       unaqr [OPTIONS] ARCHIVE...
+
+Modes:
+  -c, --compress        each input into INPUT.aqr (the default as aqr)
+  -d, --decompress      each archive into its name without .aqr (the default as unaqr)
+  -t, --test            decode and check each archive, writing nothing
+
+Output:
+  -o OUTPUT             write to OUTPUT; compressing, all the inputs into one archive
+  -f, --force           overwrite outputs
+  -p, --preserve        keep and apply the metadata not commonly kept too
+  -q, --quiet           log nothing but errors
+  -v, --verbose         log each file archived
+      --stats[=FILE]    tell what stands out after each archive; FILE.json or FILE.html
+                        writes all that was sampled (may be given more than once)
+
+Compression:
+  -l LEVEL, -0 ... -9   0 (uncompressed), 1 (zstd alone) to 9; low, mid (default), high
+                        are 2, 5 and 8; zstdN is zstd level N with recompression as mid
+      --depth N         recompress formats nested at most N deep (default 3)
+      --batch MIB       make about MIB MiB of files at once (default 512)
+  -B SIZE               --batch as a size (512M)
+  -b SIZE               the most bytes of a block that files share (default 16M)
+  -D                    compress blocks alike with dictionaries trained for them
+      --no-check        do not decode the archive made to check it
+
+Decompression:
+      --wasm            run every module as WebAssembly, the known ones too
+      --no-sandbox      run the Wasm modules (the ones not known, or all with --wasm)
+                        in this process, not in workers locked down by the system;
+                        where the system cannot lock workers down, they run only so
+
+General:
+  -T THREADS            threads to use (default 0: as many as the machine has)
+  -h, --help            show this help
+
+SIZE is a number of bytes, or of KiB, MiB or GiB with K, M or G.
+";
 
 /// The argument (the only one) that this program is run with as a worker of the sandbox.
 const SANDBOX_WORKER: &str = "--sandbox-worker";
@@ -113,7 +153,7 @@ fn main() -> ExitCode {
     let args = match parse() {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("aqr: {e}\n{USAGE}");
+            eprintln!("aqr: {e}\n{USAGE}\nTry 'aqr --help' for more.");
             return ExitCode::from(2);
         }
     };
@@ -168,6 +208,10 @@ fn parse() -> Result<Args, String> {
         };
         match &*s {
             "--" => only_inputs = true,
+            "-h" | "--help" => {
+                print!("{HELP}");
+                std::process::exit(0);
+            }
             "-c" | "--compress" => a.decompress = false,
             "-d" | "--decompress" => a.decompress = true,
             "-t" | "--test" => (a.decompress, a.test) = (true, true),
