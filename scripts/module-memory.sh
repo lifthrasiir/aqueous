@@ -39,6 +39,7 @@ samples() {
     make lzma.d 'mkdir $out && cp $t $s/text.lzma $out'
     make text.lz4 'lz4 -1c $t > $out'
     make text.lzo 'lzop -c $t > $out'
+    make text.bz2 'bzip2 -c $t > $out'
     # LZFSE of the stream API (bvx-recons), and an asset catalog of LZFSE and LZVN streams
     make text.lzfse 'compression_tool -encode -a lzfse -i $t -o $out'
     copy assets.car /System/Applications/Maps.app/Contents/Resources/Assets.car

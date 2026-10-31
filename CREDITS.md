@@ -19,6 +19,9 @@ own terms; the code is written from that description, not from the encoder's cod
 - **libdeflate** (Eric Biggers): its run-length coding of code lengths, in aqr-flate.
 - **LZ4** (Yann Collet): its block compressor, in aqr-lz4.
 - **Snappy** (Google): its compressor, in aqr-snappy.
+- **bzip2** (Julian Seward; BSD-style): its compressor (where blocks are cut, the Huffman
+  tables, their selectors and code lengths), in aqr-bz2, written from memory of its behaviour
+  and checked against libbzip2 1.0.8 (Python's `bz2`) used as a black box, without its code.
 - **libjpeg** (the Independent JPEG Group): its progressive Huffman encoder, in aqr-jpeg.
 
 ## Ideas

@@ -22,6 +22,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Xz => aqr_lzma::formula::extent_xz(d),
         Format::Lzo => aqr_lzo::formula::extent(d),
         Format::Bvx => aqr_bvx::formula::extent(d),
+        Format::Bzip2 => aqr_bz2::formula::extent(d),
         Format::Png => png(d),
         Format::Gif => aqr_gif::formula::extent(d),
         Format::Jpeg => jpeg(d),

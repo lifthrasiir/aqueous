@@ -1,0 +1,22 @@
+[package]
+name = "aqr-bz2"
+version = "0.1.0"
+edition = "2024"
+description = "bzip2 streams rebuilt bit for bit from their data, by libbzip2's compressor reimplemented"
+publish = false
+
+[features]
+default = ["encode"]
+# The formulas (`formula`); without it, the code of the module alone (`module`).
+encode = ["dep:aqr-formula"]
+
+[dependencies]
+aqr-common = { path = "../../crates/aqr-common" }
+aqr-formula = { path = "../../crates/aqr-formula", optional = true }
+
+# Tools are named <crate>-<tool> (the crate's own one, src/main.rs, after the crate), so
+# that names do not collide in the workspace's target directory.
+
+[[example]]
+name = "aqr-bz2-check"
+path = "examples/check.rs"

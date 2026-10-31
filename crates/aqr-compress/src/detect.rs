@@ -30,6 +30,8 @@ pub enum Format {
     Lzo,
     /// Stream of Apple's LZFSE and LZVN blocks (aqr-bvx on its data).
     Bvx,
+    /// bzip2 streams (aqr-bz2 on their data).
+    Bzip2,
     Png,
     /// GIF file (aqr-gif on its images' LZW streams).
     Gif,
@@ -104,7 +106,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 42] = [
+    pub const ALL: [Format; 43] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -115,6 +117,7 @@ impl Format {
         Format::Ppmd,
         Format::Lzo,
         Format::Bvx,
+        Format::Bzip2,
         Format::Png,
         Format::Gif,
         Format::Jpeg,
@@ -161,6 +164,7 @@ impl Format {
             Format::Ppmd => "ppmd",
             Format::Lzo => "lzo",
             Format::Bvx => "bvx",
+            Format::Bzip2 => "bzip2",
             Format::Png => "png",
             Format::Gif => "gif",
             Format::Jpeg => "jpeg",
@@ -252,13 +256,12 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"pmd" => format(Format::Ppmd),
         b"lzo" | b"tzo" => format(Format::Lzo),
         b"lzfse" | b"lzvn" => format(Format::Bvx),
+        b"bz2" | b"tbz" | b"tbz2" => format(Format::Bzip2),
         b"zip" | b"jar" | b"war" | b"ear" | b"apk" | b"aar" | b"xpi" | b"epub" | b"docx" | b"xlsx" | b"pptx"
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
-        b"bz2" | b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg" | b"oga"
-        | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => {
-            Kind::Compressed
-        }
+        b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg" | b"oga" | b"ogv"
+        | b"opus" | b"aac" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => {
             Kind::Text
@@ -328,6 +331,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Lzo)
     } else if aqr_bvx::formula::starts(d) {
         Some(Format::Bvx)
+    } else if aqr_bz2::formula::starts(d) {
+        Some(Format::Bzip2)
     } else if aqr_lzma::formula::starts_xz(d) {
         Some(Format::Xz)
     } else if at(0, b"PK\x03\x04") {
@@ -408,6 +413,7 @@ const fn pair(a: u8, b: u8) -> bool {
         0x00 => b == b'a',
         b'b' => b == b'v',
         b'G' => b == b'I',
+        b'B' => b == b'Z',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
             a & 15 == 8 && a >> 4 <= 7 && b & 0x20 == 0 && (a as u16 * 256 + b as u16).is_multiple_of(31)
@@ -475,6 +481,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         0x00 => aqr_wasm::formula::starts(d),
         b'b' => aqr_bvx::formula::starts(d),
         b'G' => aqr_gif::formula::starts(d),
+        b'B' => aqr_bz2::formula::starts(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
         _ => false,
@@ -565,6 +572,7 @@ mod tests {
             (b"SI", 0),
             (b"\x48\x89", 0),
             (b"bvx2", 0),
+            (b"BZh9", 0),
         ] {
             assert!(pairs(d[0], d[1]), "{d:x?}");
         }
@@ -614,6 +622,7 @@ mod tests {
             (b"a/b/places.sqlite", Kind::Format("sqlite")),
             (b"art/page0001.CLIP", Kind::Format("clip")),
             (b"lib.tar.gz", Kind::Format("gzip")),
+            (b"src.tar.bz2", Kind::Format("bzip2")),
             (b"movie.mp4", Kind::Compressed),
             (b"notes.txt", Kind::Text),
             (b"var/log/access.log", Kind::Text),
@@ -697,6 +706,9 @@ mod tests {
             (b"mozLz40\0\x10\0\0\0", Some(Format::Lz4)),
             (b"\x04\x22\x4d\x18\x64\x40", Some(Format::Lz4)),
             (b"mozLz4", None),
+            (b"BZh91AY&SY", Some(Format::Bzip2)),
+            (b"BZh9\x17\x72\x45\x38\x50\x90", Some(Format::Bzip2)),
+            (b"BZh0\x17\x72\x45\x38\x50\x90", None),
             (b"PK\x03\x04\x14\0", Some(Format::Zip)),
             (b"PK\x05\x06", None),
             (b"hello", None),

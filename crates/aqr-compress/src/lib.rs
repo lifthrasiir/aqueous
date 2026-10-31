@@ -14,6 +14,7 @@
 //! - lzop files: the headers sliced around aqr-lzo on the data and records of the streams.
 //! - Streams of Apple's LZFSE and LZVN blocks (`bvx2`, `bvxn`; asset catalogs hold them):
 //!   aqr-bvx on the data and record of the stream.
+//! - bzip2 streams, one after another: aqr-bz2 on their data, what follows sliced.
 //! - LevelDB tables: aqr-snappy on the contents of their blocks.
 //! - ZIP archives: aqr-zip, rebuilding the archive from the contents of its entries (the
 //!   DEFLATE streams by aqr-flate) with its headers derived.
@@ -141,7 +142,7 @@ pub use progress::Event;
 
 use aqr_decompress::{
     ASAR, BCJ_ARM, BCJ_ARM_THUMB, BCJ_ARM64, BCJ_DELTA, BCJ_IA64, BCJ_POWERPC, BCJ_RISCV, BCJ_SPARC, BCJ_X86, BCJ2,
-    BUNDLE, BVX, FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP,
+    BUNDLE, BVX, BZ2, FLATE, LEVELDB, LZ4, LZMA, LZMA2, LZO, LZX, Native, SNAPPY, ZIP,
 };
 use aqr_formula::aqr::{self, Encoder, Level, description_bound};
 use aqr_formula::probe::{Held, Look, Probe};
@@ -301,15 +302,16 @@ pub struct Content {
 }
 
 /// The contents of the modules of aqr-decompress: the data of [`FLATE`], [`LZ4`], [`LZMA`],
-/// [`LZMA2`], [`LZO`], [`BVX`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`], [`BUNDLE`] and [`ASAR`], and
+/// [`LZMA2`], [`LZO`], [`BVX`], [`BZ2`], [`LZX`], [`SNAPPY`], [`LEVELDB`], [`ZIP`], [`BUNDLE`] and [`ASAR`], and
 /// that before the filters of xz and 7z ([`BCJ_X86`] and the others, [`BCJ2`]), scanned.
-pub const CONTENTS: [Content; 22] = [
+pub const CONTENTS: [Content; 23] = [
     Content { module: FLATE, input: 0, nest: Nest::Scan },
     Content { module: LZ4, input: 0, nest: Nest::Scan },
     Content { module: LZMA, input: 0, nest: Nest::Scan },
     Content { module: LZMA2, input: 0, nest: Nest::Scan },
     Content { module: LZO, input: 0, nest: Nest::Scan },
     Content { module: BVX, input: 0, nest: Nest::Scan },
+    Content { module: BZ2, input: 0, nest: Nest::Scan },
     Content { module: LZX, input: 0, nest: Nest::Scan },
     Content { module: SNAPPY, input: 0, nest: Nest::Scan },
     Content { module: LEVELDB, input: 0, nest: Nest::Scan },
@@ -1792,6 +1794,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Lzma => aqr_lzma::formula::encode,
         Format::Xz => aqr_lzma::formula::encode_xz,
         Format::Lzo => aqr_lzo::formula::encode,
+        Format::Bzip2 => aqr_bz2::formula::encode,
         Format::Png => aqr_png::formula::encode,
         Format::Gif => aqr_gif::formula::encode,
         Format::Jpeg => aqr_jpeg::formula::encode,

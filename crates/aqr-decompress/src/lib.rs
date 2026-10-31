@@ -149,6 +149,10 @@ pub const LZO: Module = aqr_lzo::formula::MODULE;
 /// record. Inputs: the data and the record.
 pub const BVX: Module = aqr_bvx::formula::MODULE;
 
+/// libbzip2's compressor on data, for bzip2 streams one after another. Parameters: each
+/// stream's level, bytes of data and the ranks of its periodic blocks. Inputs: the data.
+pub const BZ2: Module = aqr_bz2::formula::MODULE;
+
 /// aqr-lzx reconstruction of streams of LZX chunks (as WIM files hold them), one after another,
 /// from their data and records. Inputs: the data, the records and the index cutting them into
 /// the streams'.
@@ -252,7 +256,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 62] = [
+pub const MODULES: [Module; 63] = [
     X86,
     X86_REMAP,
     ARM64,
@@ -276,6 +280,7 @@ pub const MODULES: [Module; 62] = [
     BCJ2,
     LZO,
     BVX,
+    BZ2,
     LZX,
     SNAPPY,
     LEVELDB,
@@ -533,6 +538,9 @@ impl Native {
         } else if m == BVX {
             none(resources)?;
             aqr_bvx::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == BZ2 {
+            none(resources)?;
+            aqr_bz2::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == LZX {
             none(resources)?;
             aqr_lzx::formula::decode(params, inputs, len, threads).map_err(msg)

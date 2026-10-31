@@ -34,7 +34,7 @@ encode.su 포럼에서 Aqueous와 겹치는 프로젝트를 모으고, 저장소
   - Oodle은 게임이 가져온 DLL을 다시 부를 뿐이다(3절).
 - **Fairytale**(https://github.com/schnaader/fairytale, LGPL-3.0, 2018년에 멈춤): 메모리 예산을 넘는 중간 스트림을 버리고 필요할 때 부모 변환을 다시 돌려 되살린다(`attemptRevival`). 포맷 초안은 블록마다 2바이트 체크섬을 두어 기존 아카이브에 추가할 때 빠르게 중복을 판정한다. 둘 다 Aqueous에 없다.
 - **Insighter**(스레드 4541, 비공개, Zig): 10gb의 견줄 상대이다(`10gb-todo.md`). 파서로 컨테이너(TAR, ISO, ZIP, CAB, CFBF, AR, PDF, CHM, WinHelp)를 깊이 7까지 열고, 전역 중복 제거 뒤 종류별 버킷마다 REP식 장거리 중복 제거나 xwrt식 텍스트 전처리를 거쳐 FastLZMA2에 보낸다.
-  - Aqueous에 없는 재압축: bzip2(어떤 도구가 만든 것이든 된다고 주장), LZW(TIFF, PDF; GIF는 aqr-gif), SZDD, MSZIP, LZX(작업 중), Base64 복원, 이미지류 데이터의 stride 인지 델타, AoS→SoA 전치.
+  - Aqueous에 없는 재압축: libbzip2 아닌 도구의 bzip2(어떤 도구가 만든 것이든 된다고 주장; aqr-bz2는 libbzip2만), LZW(TIFF, PDF; GIF는 aqr-gif), SZDD, MSZIP, LZX(작업 중), Base64 복원, 이미지류 데이터의 stride 인지 델타, AoS→SoA 전치.
   - 데이터를 너무 바꾸는 적응형 변환(ADPT)은 뒤단의 중복 제거를 망쳐 기본에서 껐다. 같은 내용이면 같은 출력이 나오는 변환만 버킷에 넣어야 한다는 교훈이다.
 
 ## 2. DEFLATE

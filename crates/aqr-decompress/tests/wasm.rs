@@ -172,6 +172,11 @@ fn same_as_wasm() {
         let f = aqr_lz4::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         formulas.push((t.into(), f, d));
     }
+    for t in ["text-1.bz2", "periodic-1.bz2", "random-1.bz2", "empty-9.bz2"] {
+        let d = fixture(&format!("codecs/aqr-bz2/tests/data/{t}"));
+        let f = aqr_bz2::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
+        formulas.push((t.into(), f, d));
+    }
     // FLAC and PCM of more batches of their pipelines than tasks (a batch is 2^16 samples)
     for t in ["s16_junk.flac", "s24_f8.flac", "c6.flac"] {
         let d = fixture(&format!("codecs/aqr-flac/tests/data/{t}"));

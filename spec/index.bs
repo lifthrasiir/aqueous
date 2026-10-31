@@ -4881,6 +4881,11 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bvx-recons.wasm" title="crates/aqr-modules/wasm/bvx-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bvx/FORMAT.md" title="codecs/aqr-bvx/FORMAT.md">R</a>
     <tr>
+      <td><code>38f5b68023efbcfa3cc1c9b7fe742d0e83121807c39536c7a6a2e53b9cae0ad7</code>
+      <td>bz2-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bz2-recons.wasm" title="crates/aqr-modules/wasm/bz2-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bz2/FORMAT.md" title="codecs/aqr-bz2/FORMAT.md">R</a>
+    <tr>
       <td><code>378506ab4492b2a53b7f589f06020a5f17095dac05d80d2a0e9c11b99130ef6e</code>
       <td>clip-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/clip-recons.wasm" title="crates/aqr-modules/wasm/clip-recons.wasm">D</a>

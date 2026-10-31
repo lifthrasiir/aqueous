@@ -105,6 +105,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-bz2"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+]
+
+[[package]]
 name = "aqr-clip"
 version = "0.1.0"
 dependencies = [
@@ -137,6 +145,7 @@ dependencies = [
  "aqr-asar",
  "aqr-bundle",
  "aqr-bvx",
+ "aqr-bz2",
  "aqr-clip",
  "aqr-common",
  "aqr-decompress",
@@ -189,6 +198,7 @@ dependencies = [
  "aqr-bcj",
  "aqr-bundle",
  "aqr-bvx",
+ "aqr-bz2",
  "aqr-clip",
  "aqr-common",
  "aqr-exe",
@@ -449,6 +459,7 @@ dependencies = [
  "aqr-bcj",
  "aqr-bundle",
  "aqr-bvx",
+ "aqr-bz2",
  "aqr-clip",
  "aqr-exe",
  "aqr-fasta",

@@ -4,8 +4,9 @@ use std::sync::{PoisonError, RwLock};
 use aqr_common::rng::noise;
 use aqr_compress::{CONTENTS, Content, Formula, Nest, Node, Options, compress, recompress};
 use aqr_decompress::{
-    ARM64, ASAR, BUNDLE, BVX, CLIP, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3, Native,
-    PCM, PDF, PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP, decompress,
+    ARM64, ASAR, BUNDLE, BVX, BZ2, CLIP, FLAC, FLATE, GIF, HDF5_FLOAT, JPEG, LEVELDB, LZ4, LZO, MACHO_SYMTAB, MP3,
+    Native, PCM, PDF, PNG, PNG_SET, RASTER, RECS_ENTRIES, RECS_FIELDS, SQLITE, WRT, WRT_HANGUL, X86, XSV, ZIP,
+    decompress,
 };
 use aqr_formula::aqr;
 
@@ -246,6 +247,26 @@ fn lz4_nested() {
     let d = [text(5000), mozlz4(&records(1_000_000)), text(5000)].concat();
     let f = roundtrip(&d, &Options::default());
     assert_eq!(modules(&f), [LZ4.name]);
+}
+
+fn bzip2(d: &[u8]) -> Vec<u8> {
+    aqr_bz2::compress::stream(9, &aqr_bz2::compress::blocks(d, 9, 1))
+}
+
+#[test]
+fn bz2_nested() {
+    let flac = fixture("codecs/aqr-flac/tests/data/s16_f5.flac");
+    let f = roundtrip(&bzip2(&gzip(&flac)), &all());
+    assert_eq!(modules(&f), [BZ2.name, FLATE.name, FLAC.name]);
+    // several streams, then what follows
+    let d =
+        [fixture("codecs/aqr-bz2/tests/data/text-1.bz2"), fixture("codecs/aqr-bz2/tests/data/zeros-1.bz2"), text(100)]
+            .concat();
+    assert_eq!(formats(&roundtrip(&d, &all()))[0], BZ2.name);
+    // found in data
+    let d = [text(5000), bzip2(&gzip(&flac)), text(5000)].concat();
+    let f = roundtrip(&d, &all());
+    assert_eq!(modules(&f), [BZ2.name, FLATE.name, FLAC.name]);
 }
 
 /// Binary data of no format: a header, `n` records of 20 bytes (a counter, a time rising by

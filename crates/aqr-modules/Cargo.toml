@@ -15,6 +15,7 @@ aqr-api = { path = "../aqr-api", default-features = false, features = ["alloc"] 
 aqr-asar = { path = "../../codecs/aqr-asar", default-features = false }
 aqr-bundle = { path = "../../codecs/aqr-bundle", default-features = false }
 aqr-bvx = { path = "../../codecs/aqr-bvx", default-features = false }
+aqr-bz2 = { path = "../../codecs/aqr-bz2", default-features = false }
 aqr-clip = { path = "../../codecs/aqr-clip", default-features = false }
 aqr-exe = { path = "../../codecs/aqr-exe", default-features = false, features = ["decode"] }
 aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
@@ -76,6 +77,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "bvx-recons"
 path = "src/bin/bvx-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "bz2-recons"
+path = "src/bin/bz2-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
