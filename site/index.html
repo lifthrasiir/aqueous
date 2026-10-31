@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Aqueous</title>
+<meta name="description" content="Aqueous is an archive format and an archiver, aqr, built around lossless recompression: it undoes the weak compression already inside JPEG, PNG, MP3, ZIP, PDF and more, codes the contents with stronger models, and rebuilds the original files bit for bit.">
+<link rel="icon" href="droplet.svg" type="image/svg+xml">
+<link rel="canonical" href="https://lifthrasiir.github.io/aqueous/">
+<meta property="og:title" content="Aqueous">
+<meta property="og:description" content="An archive format and archiver built around lossless recompression.">
+<meta property="og:image" content="https://lifthrasiir.github.io/aqueous/droplet.svg">
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #fbfdfe;
+  --bg-alt: #eef6fa;
+  --surface: #ffffff;
+  --ink: #0d1b24;
+  --ink-2: #3c5260;
+  --ink-3: #6a7f8c;
+  --line: #d6e4ec;
+  --accent: #0086bd;
+  --accent-ink: #ffffff;
+  --accent-soft: #d9f1fc;
+  --bar-other: #b7c7d1;
+  --code-bg: #0f2230;
+  --code-ink: #d7ecf6;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0a141b;
+    --bg-alt: #0f1d27;
+    --surface: #122330;
+    --ink: #e4f0f6;
+    --ink-2: #a9bfcc;
+    --ink-3: #7d93a0;
+    --line: #20394a;
+    --accent: #3cbcf0;
+    --accent-ink: #04202d;
+    --accent-soft: #10364a;
+    --bar-other: #3a5262;
+    --code-bg: #07121a;
+    --code-ink: #cfe6f2;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.6 var(--sans);
+}
+a { color: var(--accent); text-underline-offset: 2px; }
+a:hover { text-decoration-thickness: 2px; }
+code { font-family: var(--mono); font-size: .9em; }
+.wrap { max-width: 1040px; margin: 0 auto; padding: 0 16px; }
+@media (min-width: 640px) { .wrap { padding: 0 32px; } }
+
+/* header */
+.top {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  padding-top: 20px; padding-bottom: 20px;
+}
+.brand { display: flex; align-items: center; gap: 10px; font-weight: 650; color: var(--ink); text-decoration: none; font-size: 18px; }
+.brand svg { width: 28px; height: 28px; }
+.top nav { display: flex; gap: 20px; font-size: 15px; }
+.top nav a { color: var(--ink-2); text-decoration: none; }
+.top nav a:hover { color: var(--ink); }
+@media (max-width: 560px) { .top nav .opt { display: none; } }
+@media (max-width: 400px) { .top nav { gap: 12px; font-size: 14px; } .brand { font-size: 17px; } }
+
+/* hero */
+.hero {
+  display: grid; gap: 32px; align-items: center;
+  padding-top: 48px; padding-bottom: 72px;
+}
+@media (min-width: 820px) { .hero { grid-template-columns: 1.35fr 1fr; padding-top: 72px; padding-bottom: 96px; } }
+.hero h1 {
+  margin: 0 0 20px; font-size: clamp(34px, 6vw, 56px); line-height: 1.08; letter-spacing: -.02em; font-weight: 700;
+  text-wrap: balance;
+}
+.hero h1 em { font-style: normal; color: var(--accent); }
+.lede { margin: 0 0 32px; font-size: clamp(17px, 2.2vw, 19px); color: var(--ink-2); max-width: 36em; }
+.cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 12px 20px; border-radius: 10px; font-weight: 600; font-size: 16px;
+  text-decoration: none; border: 1px solid var(--line); color: var(--ink); background: var(--surface);
+}
+.btn:hover { border-color: var(--ink-3); text-decoration: none; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn small { font-weight: 450; opacity: .8; }
+.btn svg { width: 18px; height: 18px; flex: none; }
+.cta-note { margin: 14px 0 0; font-size: 14px; color: var(--ink-3); }
+.drop { justify-self: center; width: min(320px, 70vw); aspect-ratio: 1; position: relative; }
+.drop::before {
+  content: ""; position: absolute; inset: 8%; border-radius: 50%;
+  background: radial-gradient(circle at 50% 55%, var(--accent-soft), transparent 70%);
+}
+.drop svg { position: relative; width: 100%; height: 100%; }
+@media (max-width: 819px) { .drop { order: -1; width: min(160px, 40vw); } .hero { padding-top: 16px; } }
+
+/* sections */
+section { padding: 72px 0; }
+section.alt { background: var(--bg-alt); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+h2 { margin: 0 0 12px; font-size: clamp(26px, 3.5vw, 34px); line-height: 1.2; letter-spacing: -.01em; }
+.sub { margin: 0 0 40px; color: var(--ink-2); max-width: 44em; }
+h3 { margin: 0 0 8px; font-size: 18px; }
+
+.features { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
+.card p { margin: 0; color: var(--ink-2); }
+.card .ico { width: 36px; height: 36px; border-radius: 9px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); margin-bottom: 16px; }
+.card .ico svg { width: 20px; height: 20px; }
+
+/* chart */
+.bench, .how { display: grid; gap: 40px; }
+.bench > *, .how > *, .hero > * { min-width: 0; }
+@media (min-width: 900px) { .bench { grid-template-columns: 1.4fr 1fr; } }
+.chart { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 24px; }
+.chart h3 { margin-bottom: 4px; }
+.chart .meta { margin: 0 0 24px; font-size: 14px; color: var(--ink-3); }
+.bars { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+.bar { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; position: relative; }
+.bar .lab { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; color: var(--ink-2); }
+.bar .lab code { color: var(--ink); }
+.bar .lab b { color: var(--ink); font-variant-numeric: tabular-nums; font-weight: 600; }
+.bar .track { height: 14px; border-radius: 0 4px 4px 0; position: relative; }
+.bar .fill { height: 100%; width: var(--w); background: var(--bar-other); border-radius: 0 4px 4px 0; }
+.bar.us .fill { background: var(--accent); }
+.bar.us .lab, .bar.us .lab b { color: var(--ink); font-weight: 700; }
+.bar:hover .fill { filter: brightness(1.1); }
+.bar .tip {
+  position: absolute; right: 0; top: -6px; transform: translateY(-100%);
+  background: var(--ink); color: var(--bg); font-size: 13px; padding: 6px 10px; border-radius: 6px;
+  pointer-events: none; opacity: 0; transition: opacity .12s; white-space: nowrap; z-index: 1;
+}
+.bar:hover .tip, .bar:focus-within .tip { opacity: 1; }
+.axis { display: flex; justify-content: space-between; margin-top: 10px; font-size: 12px; color: var(--ink-3); border-top: 1px solid var(--line); padding-top: 6px; font-variant-numeric: tabular-nums; }
+.chart .foot { margin: 20px 0 0; font-size: 14px; color: var(--ink-2); }
+
+table { width: 100%; border-collapse: collapse; font-size: 15px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 9px 8px; border-bottom: 1px solid var(--line); }
+th { font-size: 13px; font-weight: 600; color: var(--ink-3); text-transform: uppercase; letter-spacing: .04em; }
+td.n, th.n { text-align: right; white-space: nowrap; }
+@media (max-width: 400px) { th, td { padding: 9px 5px; } table { font-size: 14px; } }
+td.us { font-weight: 650; }
+.tablecard { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 16px 16px 8px; overflow-x: auto; }
+.tablecard caption { caption-side: top; text-align: left; font-weight: 650; padding: 8px 8px 12px; font-size: 18px; }
+.tablecard .note { font-size: 13px; color: var(--ink-3); margin: 10px 8px 8px; }
+
+/* lineage */
+.pillars { display: grid; gap: 20px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.pillar { border-top: 3px solid var(--accent); padding-top: 20px; }
+.pillar .kick { margin: 0 0 6px; font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em; color: var(--ink-3); }
+.pillar h3 { font-size: 20px; margin-bottom: 12px; }
+.pillar p { margin: 0 0 12px; color: var(--ink-2); }
+.pillar p:last-child { margin-bottom: 0; }
+
+/* how */
+@media (min-width: 900px) { .how { grid-template-columns: 1fr 1fr; } }
+.steps { margin: 0; padding: 0; list-style: none; counter-reset: s; display: grid; gap: 20px; }
+.steps li { counter-increment: s; display: grid; grid-template-columns: 36px 1fr; gap: 14px; }
+.steps li::before {
+  content: counter(s); width: 32px; height: 32px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--accent-soft); color: var(--accent); font-weight: 700; font-size: 15px;
+}
+.steps p { margin: 0; color: var(--ink-2); }
+pre {
+  margin: 0; background: var(--code-bg); color: var(--code-ink); border-radius: 14px; padding: 20px;
+  font: 14px/1.7 var(--mono); overflow-x: auto;
+}
+pre .c { color: #7f9cad; }
+pre .p { color: #5cc8f5; user-select: none; }
+
+/* downloads */
+.dl { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin: 0; padding: 0; list-style: none; }
+.dl a {
+  display: grid; grid-template-columns: 40px 1fr auto; align-items: center; gap: 14px;
+  padding: 16px 18px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface);
+  text-decoration: none; color: var(--ink);
+}
+.dl a:hover { border-color: var(--accent); }
+.dl a.mine { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+.dl .os { width: 40px; height: 40px; border-radius: 10px; display: grid; place-items: center; background: var(--accent-soft); color: var(--accent); }
+.dl .os svg { width: 22px; height: 22px; }
+.dl b { display: block; font-weight: 600; }
+.dl span.d { display: block; font-size: 13px; color: var(--ink-3); }
+.dl .sz { font-size: 13px; color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rel { margin: 0 0 24px; color: var(--ink-2); }
+.rel b { color: var(--ink); }
+.build { margin-top: 32px; color: var(--ink-2); font-size: 15px; }
+
+/* footer */
+footer { padding: 40px 0 56px; color: var(--ink-3); font-size: 14px; }
+footer .wrap { display: grid; gap: 32px; align-items: center; }
+footer .info { display: grid; gap: 12px; }
+footer .org { justify-self: center; display: flex; align-items: center; gap: 10px; color: var(--ink-3); text-decoration: none; }
+footer .org:hover { color: var(--ink); }
+footer .org span { text-align: right; font-size: 14px; line-height: 1.15; font-weight: 600; letter-spacing: .02em; }
+footer .org svg { width: 52px; height: 53px; flex: none; }
+@media (min-width: 720px) { footer .wrap { grid-template-columns: 1fr auto; } footer .org { justify-self: end; } }
+footer p { margin: 0; max-width: 52em; }
+footer nav { display: flex; flex-wrap: wrap; gap: 20px; }
+footer a { color: var(--ink-2); }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <symbol id="i-github" viewBox="0 0 16 16"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></symbol>
+    <symbol id="i-down" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 4v12m0 0-5-5m5 5 5-5M5 20h14"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zm0 0v5h5M9 13h6M9 17h6"/></symbol>
+    <symbol id="i-win" viewBox="0 0 24 24"><path fill="currentColor" d="M3 5.5 10.5 4.4v7.1H3zm0 13 7.5 1.1v-7H3zM11.5 4.3 21 3v8.5h-9.5zm0 15.4L21 21v-8.4h-9.5z"/></symbol>
+    <symbol id="i-mac" viewBox="0 0 24 24"><path fill="currentColor" d="M16.4 12.6c0-2.6 2.1-3.8 2.2-3.9-1.2-1.8-3.1-2-3.7-2-1.6-.2-3.1.9-3.9.9-.8 0-2-.9-3.4-.9-1.7 0-3.3 1-4.2 2.6-1.8 3.1-.5 7.7 1.3 10.2.9 1.2 1.9 2.6 3.2 2.6 1.3-.1 1.8-.8 3.3-.8 1.6 0 2 .8 3.4.8 1.4 0 2.3-1.3 3.1-2.5 1-1.4 1.4-2.8 1.4-2.9 0 0-2.7-1-2.7-4.1M13.9 5c.7-.9 1.2-2 1-3.2-1 0-2.3.7-3 1.6-.7.8-1.2 2-1.1 3.1 1.2.1 2.3-.6 3.1-1.5"/></symbol>
+    <symbol id="i-linux" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 17l6-5-6-5m8 12h8"/></symbol>
+  </defs>
+</svg>
+
+<header class="wrap top">
+  <a class="brand" href="#">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><use href="#drop-art"/></svg>
+    Aqueous
+  </a>
+  <nav aria-label="Primary">
+    <a class="opt" href="#how">How it works</a>
+    <a class="opt" href="#numbers">Numbers</a>
+    <a href="#download">Download</a>
+    <a href="spec/">Spec</a>
+    <a href="https://github.com/lifthrasiir/aqueous">GitHub</a>
+  </nav>
+</header>
+
+<main>
+<div class="wrap hero">
+  <div>
+    <h1>The files you keep are already compressed. <em>Badly.</em></h1>
+    <p class="lede">Aqueous is an archive format and an archiver, <code>aqr</code>, built around lossless
+      recompression. It undoes the weak compression inside JPEG, PNG, MP3, ZIP, PDF and dozens more,
+      codes the contents with stronger models, and rebuilds the original files bit for bit on extraction.</p>
+    <div class="cta">
+      <a class="btn primary" id="hero-dl" href="https://github.com/lifthrasiir/aqueous/releases/latest">
+        <svg aria-hidden="true"><use href="#i-down"/></svg>
+        <span id="hero-dl-label">Download</span>
+      </a>
+      <a class="btn" href="https://github.com/lifthrasiir/aqueous">
+        <svg aria-hidden="true"><use href="#i-github"/></svg> Source
+      </a>
+      <a class="btn" href="spec/">
+        <svg aria-hidden="true"><use href="#i-doc"/></svg> Specification
+      </a>
+    </div>
+    <p class="cta-note" id="hero-note">Windows, macOS and Linux. Public domain.</p>
+  </div>
+  <div class="drop" aria-hidden="true">
+    <svg id="drop-svg" viewBox="0 0 24 24" fill="none">
+      <g id="drop-art" transform="translate(12 12)scale(2)translate(-5.7635 -12.1105)rotate(8.42 5.7635 14.0715)"><path fill="url(#f)" d="M2.355 14.577a3.446 3.446 0 1 0 6.817-1.011c-.543-3.652-4.486-6.783-4.486-6.783s-2.874 4.143-2.331 7.794"/><path fill="url(#g)" d="M4.651 6.834c-.022 1.914-1.657 3.943-.714 7.44.697 2.583 4.663 2.16 5.257-.497a3.446 3.446 0 0 1-2.931 3.703 3.443 3.443 0 0 1-3.909-2.903c-.508-3.417 1.977-7.263 2.297-7.743" opacity=".5"/><path fill="url(#h)" d="M6.268 17.48a3.446 3.446 0 0 1-3.914-2.903C1.868 11.286 4.148 7.6 4.606 6.903c-.315 1.954-1.852 4.834-1.475 7.366.297 2 3.6 4 6.012.468a3.44 3.44 0 0 1-2.875 2.743"/><path fill="url(#i)" d="M2.355 14.577a3.446 3.446 0 1 0 6.817-1.011c-.543-3.652-4.486-6.783-4.486-6.783s-2.874 4.143-2.331 7.794"/><path fill="url(#j)" d="M2.355 14.577a3.446 3.446 0 1 0 6.817-1.011c-.543-3.652-4.486-6.783-4.486-6.783s-2.874 4.143-2.331 7.794"/><path fill="url(#k)" d="M2.355 14.577a3.446 3.446 0 1 0 6.817-1.011c-.543-3.652-4.486-6.783-4.486-6.783s-2.874 4.143-2.331 7.794"/><path fill="url(#t)" d="M2.354 14.577a3.446 3.446 0 1 0 6.817-1.011c-.543-3.652-4.485-6.783-4.485-6.783s-2.875 4.143-2.332 7.794"/></g>
+      <defs><radialGradient id="g" cx="0" cy="0" r="1" gradientTransform="matrix(-5.22617 1.7825 -2.74468 -8.04725 5.808 11.574)" gradientUnits="userSpaceOnUse"><stop offset=".06" stop-color="#80DAFE"/><stop offset=".566" stop-color="#80DAFE"/><stop offset="1" stop-color="#0099D6"/></radialGradient><radialGradient id="h" cx="0" cy="0" r="1" gradientTransform="matrix(-4.4162 .65244 -1.12555 -7.61853 4.81 12.343)" gradientUnits="userSpaceOnUse"><stop offset=".343" stop-color="#80DAFE"/><stop offset="1" stop-color="#0099D6"/></radialGradient><radialGradient id="i" cx="0" cy="0" r="1" gradientTransform="matrix(-1.87745 -4.64453 2.04627 -.82716 6.68 10.962)" gradientUnits="userSpaceOnUse"><stop stop-color="#fff" stop-opacity=".25"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><radialGradient id="j" cx="0" cy="0" r="1" gradientTransform="rotate(100.59 -1.792 8.013)scale(7.83358 5.95258)" gradientUnits="userSpaceOnUse"><stop offset=".586" stop-color="#0099D6" stop-opacity="0"/><stop offset=".721" stop-color="#1477E5" stop-opacity=".164"/><stop offset=".905" stop-color="#2D4FF8" stop-opacity=".385"/><stop offset="1" stop-color="#3640FF" stop-opacity=".5"/></radialGradient><radialGradient id="k" cx="0" cy="0" r="1" gradientTransform="matrix(-2.3602 -5.83878 2.57244 -1.03985 6.68 10.962)" gradientUnits="userSpaceOnUse"><stop stop-color="#fff" stop-opacity=".45"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></radialGradient><radialGradient id="t" cx="0" cy="0" r="1" gradientTransform="translate(4.633 16.409)scale(3.62082)" gradientUnits="userSpaceOnUse"><stop stop-color="#0099D6" stop-opacity=".6"/><stop offset="1" stop-color="#0099D6" stop-opacity="0"/></radialGradient><linearGradient id="f" x1="15.638" x2="-4.424" y1="13.577" y2="10.86" gradientUnits="userSpaceOnUse"><stop stop-color="#D1F2FF"/><stop offset=".668" stop-color="#80DAFE"/><stop offset="1" stop-color="#0099D6"/></linearGradient></defs>
+    </svg>
+  </div>
+</div>
+
+<section class="alt">
+  <div class="wrap">
+    <h2>Recompression, not just compression</h2>
+    <p class="sub">General-purpose compressors see a JPEG or a ZIP as noise and leave it be. Aqueous looks
+      inside, and the archive keeps everything needed to give back exactly the bytes it was given.</p>
+    <div class="features">
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 7h16M4 12h10M4 17h6m9-4 2 2-2 2"/></svg></div>
+        <h3>About twenty format families</h3>
+        <p>Huffman codes in JPEG and MP3, deflate in PNG, ZIP, PDF and gzip, LZ4 and Snappy in browser
+          profiles and databases, LZMA, bzip2, executables and more, each with its own recompressor.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M12 3 4 6v6c0 4.5 3.4 8.2 8 9 4.6-.8 8-4.5 8-9V6zm-3 9 2 2 4-4"/></svg></div>
+        <h3>Self-describing archives</h3>
+        <p>A file's content is a <em>formula</em>: a small stack-machine program that applies WebAssembly
+          modules carried in the archive. Any decoder can extract it with no knowledge of the formats inside;
+          known modules run natively, others in a sandbox.</p>
+      </div>
+      <div class="card">
+        <div class="ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="M4 5h6v6H4zm10 0h6v6h-6zM4 15h6v4H4zm10 0h6v4h-6z"/></svg></div>
+        <h3>Random access, appendable</h3>
+        <p>A file is extracted by reading little more than its own blocks. Archives grow by appending, and
+          overlay archives describe a tree as the changes to another.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="numbers">
+  <div class="wrap">
+    <h2>Smaller than the usual suspects</h2>
+    <p class="sub">Matt Mahoney's <a href="https://mattmahoney.net/dc/10gb.html">10 GB benchmark</a>:
+      79,431 files, 10.00 GB of real-world data, on an Apple M4 with 10 cores.</p>
+    <div class="bench">
+      <figure class="chart" style="margin:0">
+        <h3>Archive size</h3>
+        <p class="meta">GB, smaller is better</p>
+        <ul class="bars">
+          <li class="bar" tabindex="0" style="--w:46.8%"><div class="lab"><code>tar | zstd -3 -T10</code><b>4.68</b></div><div class="track"><div class="fill"></div></div><span class="tip">4.68 GB · 33 s to compress</span></li>
+          <li class="bar" tabindex="0" style="--w:41.7%"><div class="lab"><code>zstd -3 --long=31</code><b>4.17</b></div><div class="track"><div class="fill"></div></div><span class="tip">4.17 GB · 36 s to compress</span></li>
+          <li class="bar" tabindex="0" style="--w:37.0%"><div class="lab"><span>zpaq 7.15</span><b>3.70</b></div><div class="track"><div class="fill"></div></div><span class="tip">3.70 GB</span></li>
+          <li class="bar us" tabindex="0" style="--w:24.98%"><div class="lab"><span><code>aqr</code> (level mid)</span><b>2.50</b></div><div class="track"><div class="fill"></div></div><span class="tip">2.498 GB · 164 s to compress, 38.8 s to extract</span></li>
+        </ul>
+        <div class="axis" aria-hidden="true"><span>0</span><span>2.5</span><span>5</span><span>7.5</span><span>10 GB (input)</span></div>
+        <p class="foot"><code>aqr</code> compresses at 61 MB/s, round-trip check of every file included, and
+          extracts at 258 MB/s. The archive includes its own decoder modules.</p>
+      </figure>
+      <div class="tablecard">
+        <table>
+          <caption>By format</caption>
+          <thead><tr><th>Format</th><th class="n">aqr</th><th class="n">zstd -3</th></tr></thead>
+          <tbody>
+            <tr><td>JPEG</td><td class="n us">0.778–0.794</td><td class="n">0.913</td></tr>
+            <tr><td>PNG</td><td class="n us">0.802–0.855</td><td class="n">0.997</td></tr>
+            <tr><td>MP3</td><td class="n us">0.852–0.915</td><td class="n">0.968</td></tr>
+            <tr><td>PE executables</td><td class="n us">0.295–0.303</td><td class="n">0.381</td></tr>
+            <tr><td>SQLite</td><td class="n us">0.210–0.219</td><td class="n">0.366</td></tr>
+            <tr><td>Text (enwik9)</td><td class="n us">0.233–0.235</td><td class="n">0.312</td></tr>
+            <tr><td>FASTA (hg19)</td><td class="n us">0.209</td><td class="n">0.309</td></tr>
+          </tbody>
+        </table>
+        <p class="note">Archive size over input size, decoder modules included. Of two figures, the first
+          is with the modules shared, as in an archive of many files; the second, each file an archive of
+          its own carrying them. Measured 2026-11-01; details in <a href="https://github.com/lifthrasiir/aqueous/blob/main/docs/file-formats.md">docs/file-formats.md</a>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="how">
+  <div class="wrap">
+    <h2>How it works</h2>
+    <p class="sub">The archive stores what the original encoder threw away the chance to code well, and
+      the recipe to put it back together.</p>
+    <div class="how">
+      <ol class="steps">
+        <li><div><h3>Recognise</h3><p>Each file is matched by its magic bytes to a recompressor, which may
+          recurse into what it finds: a PNG inside a ZIP inside a tarball.</p></div></li>
+        <li><div><h3>Undo and remodel</h3><p>The recompressor decodes the weak coding, records the choices the
+          original encoder made, and hands the contents to stronger context models.</p></div></li>
+        <li><div><h3>Write a formula</h3><p>The file becomes a formula over stored blocks, linking the Wasm
+          modules that rebuild it. Every file is decoded again and checked before the archive is done.</p></div></li>
+        <li><div><h3>Rebuild exactly</h3><p>Extraction runs the formula and gives back the original bytes,
+          bit for bit, without the archiver knowing the format.</p></div></li>
+      </ol>
+      <pre><span class="c"># compress a directory into one archive</span>
+<span class="p">$ </span>aqr -c -o photos.aqr photos/
+
+<span class="c"># check every file, writing nothing</span>
+<span class="p">$ </span>aqr -t photos.aqr
+
+<span class="c"># extract</span>
+<span class="p">$ </span>aqr -d photos.aqr
+
+<span class="c"># levels: -l low | mid (default) | high, or -0 … -9</span>
+<span class="p">$ </span>aqr -l high -o backup.aqr ~/Documents</pre>
+    </div>
+  </div>
+</section>
+
+<section id="lineage">
+  <div class="wrap">
+    <h2>Standing on shoulders, built to last</h2>
+    <p class="sub">None of the ideas behind Aqueous are new. What it adds is the work of making them
+      something anyone can rely on.</p>
+    <div class="pillars">
+      <div class="pillar">
+        <p class="kick">Prior work</p>
+        <h3>Bringing it to everyone</h3>
+        <p><a href="https://mattmahoney.net/dc/zpaq.html">ZPAQ</a> put the decoder in the archive years ago;
+          PAQ, precomp, preflate, packJPG, Lepton and packMP3 showed how far recompression and context
+          modelling can go. Aqueous is not meant as their rival: it is designed to take what they proved
+          and bring it to an archiver people use every day.</p>
+        <p>Where each idea comes from is listed in
+          <a href="https://github.com/lifthrasiir/aqueous/blob/main/CREDITS.md">CREDITS.md</a>.</p>
+      </div>
+      <div class="pillar">
+        <p class="kick">Why now</p>
+        <h3>Made possible by modern tools</h3>
+        <p><a href="https://www.rfc-editor.org/rfc/rfc8878">Zstandard</a> gives a fast, well-specified
+          baseline for every byte that is not recompressed, so the archive never has to fall back to
+          something slow. <a href="https://webassembly.org/">WebAssembly</a> lets an archive carry its decoders
+          as small, sandboxed, deterministic programs that run anywhere. <a href="https://www.rust-lang.org/">Rust</a>
+          builds one memory-safe codebase both into those modules and into the native code that runs them
+          faster, so the decoder in the archive is the one in use. Machines with many cores pay for the
+          stronger models.</p>
+      </div>
+      <div class="pillar">
+        <p class="kick">Commitment</p>
+        <h3>A specification first</h3>
+        <p>The format is defined by a <a href="spec/">written specification</a>, worked out together with
+          the implementation from the first day rather than documented after it: every structure, every
+          requirement, the execution of every module, and room for future versions to extend it.</p>
+        <p>An archive that needs only the specification to be read is an archive that outlives its
+          archiver. Archives made by released versions of <code>aqr</code> are meant to stay extractable.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="alt" id="download">
+  <div class="wrap">
+    <h2>Download</h2>
+    <p class="rel" id="rel-line">Binaries are on the <a href="https://github.com/lifthrasiir/aqueous/releases/latest">latest release</a>.
+      The format is still an Editor's Draft. Every archive is decoded and checked before <code>aqr</code> finishes, and archives made now are meant to stay extractable by later versions; until the format is fixed, keep the <code>aqr</code> you made them with alongside them.</p>
+    <ul class="dl" id="dl-list">
+      <li><a href="https://github.com/lifthrasiir/aqueous/releases/latest" data-os="windows"><span class="os"><svg aria-hidden="true"><use href="#i-win"/></svg></span><span><b>Windows</b><span class="d">Installer with Explorer integration, or <code>aqr.exe</code></span></span><span class="sz"></span></a></li>
+      <li><a href="https://github.com/lifthrasiir/aqueous/releases/latest" data-os="mac"><span class="os"><svg aria-hidden="true"><use href="#i-mac"/></svg></span><span><b>macOS</b><span class="d">Aqueous.app, universal, with Finder services</span></span><span class="sz"></span></a></li>
+      <li><a href="https://github.com/lifthrasiir/aqueous/releases/latest" data-os="linux"><span class="os"><svg aria-hidden="true"><use href="#i-linux"/></svg></span><span><b>Linux</b><span class="d"><code>aqr</code> for x86_64 and aarch64</span></span><span class="sz"></span></a></li>
+    </ul>
+    <p class="build">Or build from source with Rust: <code>cargo build -r -p aqr</code> in a clone of
+      <a href="https://github.com/lifthrasiir/aqueous">the repository</a>.
+      All releases are on <a href="https://github.com/lifthrasiir/aqueous/releases">GitHub</a>.</p>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="info">
+      <nav>
+        <a href="https://github.com/lifthrasiir/aqueous">Repository</a>
+        <a href="spec/">Specification</a>
+        <a href="https://github.com/lifthrasiir/aqueous/releases">Releases</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/CREDITS.md">Credits</a>
+        <a href="https://github.com/lifthrasiir/aqueous/issues">Issues</a>
+      </nav>
+      <p>Aqueous is dedicated to the public domain, or under
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/LICENSE.txt">MIT-0</a> where that is not possible.</p>
+      <p>This project makes heavy use of LLM-based coding agents: a human set the ideas and the goals; AI did the
+        implementation and the experiments.</p>
+    </div>
+    <a class="org" href="https://mearie.org/">
+      <span>a<br>mearie.org<br>project</span>
+      <svg viewBox="0 0 230 234" fill="currentColor" aria-hidden="true">
+        <path d="M24 24h54v102h-35v52h35v32h-54m34-70h20v24h-20"/>
+        <path d="M88 24h54v100a22 22 0 0 0 0 56v30h-54m54-72a12 12 0 0 0 0 28v-28"/>
+        <path d="M152 24h54v102h-33v12h33v8h-33v32h33v32h-54m35-52h19v8h-19"/>
+      </svg>
+    </a>
+  </div>
+</footer>
+
+<script>
+(() => {
+  const REPO = 'lifthrasiir/aqueous';
+  // The release workflow's asset names (.github/workflows/release.yml), most specific first.
+  const KINDS = [
+    { re: /-win-install\.exe$/, os: 'windows', name: 'Windows installer', desc: 'aqr and Explorer integration, Windows 10 on' },
+    { re: /-win7\.exe$/, os: 'windows', name: 'Windows 7 and 8', desc: 'aqr.exe, command line' },
+    { re: /\.exe$/, os: 'windows', name: 'Windows', desc: 'aqr.exe, command line, Windows 10 on' },
+    { re: /-mac\.zip$/, os: 'mac', name: 'macOS', desc: 'Aqueous.app, universal, with Finder services' },
+    { re: /-linux-x86_64\.tar\.xz$/, os: 'linux', name: 'Linux x86_64', desc: 'aqr, glibc of Ubuntu 22.04 on' },
+    { re: /-linux-aarch64\.tar\.xz$/, os: 'linux', name: 'Linux aarch64', desc: 'aqr, glibc of Ubuntu 22.04 on' },
+  ];
+  const ICON = { windows: 'i-win', mac: 'i-mac', linux: 'i-linux' };
+  const plat = ((navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || navigator.userAgent).toLowerCase();
+  const mine = /win/.test(plat) ? 'windows' : /mac|iphone|ipad/.test(plat) ? 'mac' : /linux|x11/.test(plat) && !/android/.test(plat) ? 'linux' : null;
+  const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + ' MB' : Math.round(n / 1e3) + ' kB';
+  const esc = s => s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { Accept: 'application/vnd.github+json' } })
+    .then(r => r.ok ? r.json() : Promise.reject(r.status))
+    .then(rel => {
+      const items = [];
+      for (const a of rel.assets || []) {
+        const k = KINDS.find(k => k.re.test(a.name));
+        if (k) items.push({ ...k, url: a.browser_download_url, size: a.size, file: a.name, order: KINDS.indexOf(k) });
+      }
+      if (!items.length) return;
+      items.sort((a, b) => a.order - b.order);
+      const date = rel.published_at ? new Date(rel.published_at).toISOString().slice(0, 10) : '';
+      document.getElementById('rel-line').innerHTML =
+        `<b>${esc(rel.name || rel.tag_name)}</b>${date ? `, released ${date}` : ''}. ` +
+        `<a href="${esc(rel.html_url)}">Release notes</a>. ` +
+        `The format is still an Editor's Draft. ` +
+        `Every archive is decoded and checked before <code>aqr</code> finishes, ` +
+        `and archives made now are meant to stay extractable by later versions; ` +
+        `until the format is fixed, keep the <code>aqr</code> you made them with alongside them.`;
+      document.getElementById('dl-list').innerHTML = items.map(i =>
+        `<li><a href="${esc(i.url)}" class="${i.os === mine ? 'mine' : ''}" title="${esc(i.file)}">` +
+        `<span class="os"><svg aria-hidden="true"><use href="#${ICON[i.os]}"/></svg></span>` +
+        `<span><b>${esc(i.name)}</b><span class="d">${esc(i.desc)}</span></span>` +
+        `<span class="sz">${fmt(i.size)}</span></a></li>`).join('');
+      const best = items.find(i => i.os === mine);
+      if (best) {
+        document.getElementById('hero-dl').href = best.url;
+        document.getElementById('hero-dl-label').innerHTML = `Download for ${esc(best.name)} <small>${fmt(best.size)}</small>`;
+        document.getElementById('hero-note').innerHTML = `${esc(rel.name || rel.tag_name)}. <a href="#download">Other platforms</a>.`;
+      } else {
+        document.getElementById('hero-dl').href = '#download';
+      }
+    })
+    .catch(() => {});
+  if (mine) document.querySelector(`#dl-list a[data-os="${mine}"]`)?.classList.add('mine');
+})();
+</script>
+</body>
+</html>

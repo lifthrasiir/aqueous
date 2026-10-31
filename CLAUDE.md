@@ -7,7 +7,9 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 
 - `spec/index.bs` — the format specification (Bikeshed). `make -C spec` builds `index.html`;
   figures are `figures/*.pik` with their SVGs committed. Pushes to `main` deploy it to GitHub
-  Pages (`.github/workflows/spec.yml`).
+  Pages (`.github/workflows/spec.yml`) under `/spec/`.
+- `site/` — the project site, a single page deployed by the same workflow at the Pages root
+  (with `droplet.svg`); its downloads are filled in from the latest GitHub release by script.
 - `docs/` — design documents, mostly in Korean: `10gb-todo.md` (what is left for the 10 GB
   benchmark), `file-formats.md` (measurements by format), `*-design.md`.
 - `crates/` — the core crates

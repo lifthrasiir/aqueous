@@ -5,6 +5,8 @@ on:
     branches: [main]
     paths:
       - 'spec/**'
+      - 'site/**'
+      - 'droplet.svg'
       - '.github/workflows/spec.yml'
   workflow_dispatch:
 
@@ -28,16 +30,8 @@ jobs:
       - run: pip install bikeshed
       # Figures are committed as SVGs, so pikchr isn't needed here.
       - run: mkdir -p _site/spec && bikeshed spec spec/index.bs _site/spec/index.html
-      # Pages can't send an HTTP redirect, so the root sends visitors to the repository.
-      - run: |
-          cat > _site/index.html <<'EOF'
-          <!doctype html>
-          <meta charset="utf-8">
-          <title>Aqueous</title>
-          <link rel="canonical" href="https://github.com/lifthrasiir/aqueous/">
-          <meta http-equiv="refresh" content="0; url=https://github.com/lifthrasiir/aqueous/">
-          <p><a href="https://github.com/lifthrasiir/aqueous/">github.com/lifthrasiir/aqueous</a>
-          EOF
+      # The site's root page (site/), with the icon it uses.
+      - run: cp -R site/. _site/ && cp droplet.svg _site/
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
@@ -47,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}spec/
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - id: deployment
         uses: actions/deploy-pages@v4
