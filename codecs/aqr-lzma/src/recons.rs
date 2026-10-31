@@ -5,6 +5,8 @@
 //! match there, and packet types under contexts of what the data offers at the position. Both
 //! sides see the same data, so the contexts are the same.
 
+use aqr_common::varint;
+
 use crate::arith::{ArithDecoder, ArithEncoder, Bit};
 use crate::lzma::{self, Kind, MAX_LEN, MIN_LEN, Packet, Props, StreamEncoder};
 use crate::mf::{Mf, lcp};
@@ -152,22 +154,85 @@ pub struct Break {
     pub stored: usize,
 }
 
-/// Walks the packets of `data` with matches at most `reach` back, coding them (`Some`) or
-/// decoding them (`None`, until the data is covered), and gives each to `emit`. None where
-/// the record does not fit the data, or a packet goes past a break.
+/// Where the packets of a part of a record start ([`split_with`]), and the state and the last
+/// distances there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Part {
+    pub at: usize,
+    pub state: u8,
+    pub reps: [u32; 4],
+}
+
+impl Part {
+    const START: Part = Part { at: 0, state: 0, reps: [0; 4] };
+}
+
+/// The state and the last distances after packet `pk`, from those before it.
+fn step(state: &mut u8, reps: &mut [u32; 4], pk: Packet) {
+    let s = *state;
+    *state = match pk.kind {
+        Kind::Lit if s < 4 => 0,
+        Kind::Lit if s < 10 => s - 3,
+        Kind::Lit => s - 6,
+        Kind::ShortRep => {
+            if s < 7 {
+                9
+            } else {
+                11
+            }
+        }
+        Kind::Match => {
+            if s < 7 {
+                7
+            } else {
+                10
+            }
+        }
+        _ => {
+            if s < 7 {
+                8
+            } else {
+                11
+            }
+        }
+    };
+    let k = match pk.kind {
+        Kind::Lit | Kind::ShortRep => return,
+        Kind::Match => 3,
+        Kind::Rep0 => 0,
+        Kind::Rep1 => 1,
+        Kind::Rep2 => 2,
+        Kind::Rep3 => 3,
+    };
+    let d = if pk.kind == Kind::Match { pk.dist } else { reps[k] };
+    reps.copy_within(0..k, 1);
+    reps[0] = d;
+}
+
+/// Walks the packets of `data` from `part` to `end` (a packet's start, or the end of the data)
+/// with matches at most `reach` back, under contexts of their own and with `mf` (holding the
+/// positions within reach before `part`), coding them (`Some`) or decoding them (`None`, until
+/// `end` is reached), and gives each to `emit`. None where the record does not fit the data, or
+/// a packet goes past a break or `end`. Breaks are of a walk over all the data.
+#[allow(clippy::too_many_arguments)]
 fn walk<S: Side>(
     s: &mut S,
+    mf: &mut Mf,
     data: &[u8],
     reach: usize,
     breaks: &[Break],
+    part: Part,
+    end: usize,
     mut given: Option<&[Packet]>,
     mut emit: impl FnMut(Packet),
 ) -> Option<()> {
-    let mut mf = Mf::new(data, reach);
+    if !breaks.is_empty() && (part.at != 0 || end != data.len()) {
+        return None;
+    }
     let mut x = Ctx::new();
-    let (mut state, mut reps) = (0usize, [0u32; 4]);
+    let (mut state, mut reps) = (part.state as usize, part.reps);
     let mut pairs = vec![];
-    let mut pos = 0;
+    let mut pos = part.at;
     let (mut i, mut bi) = (0, 0);
     loop {
         while let Some(b) = breaks.get(bi).filter(|b| b.at <= pos) {
@@ -180,7 +245,7 @@ fn walk<S: Side>(
             pos = pos.checked_add(b.stored)?;
             bi += 1;
         }
-        if pos >= data.len() {
+        if pos >= end {
             break;
         }
         // (packets end at the next break)
@@ -328,7 +393,7 @@ fn walk<S: Side>(
         emit(pk);
         pos += pk.len as usize;
     }
-    (pos == data.len() && bi == breaks.len() && given.is_none_or(|g| g.len() == i)).then_some(())
+    (pos == end && (end < data.len() || bi == breaks.len()) && given.is_none_or(|g| g.len() == i)).then_some(())
 }
 
 /// The record of the packets of `data` (from [`crate::lzma::decode`]) for a dictionary of
@@ -336,7 +401,8 @@ fn walk<S: Side>(
 /// packets do not cover the data exactly.
 pub fn deconstruct(data: &[u8], packets: &[Packet], dict: u32, breaks: &[Break]) -> Option<(Vec<u8>, [f64; CATS])> {
     let mut e = Enc { c: ArithEncoder::new(vec![]), cost: [0.0; CATS] };
-    walk(&mut e, data, reach(dict), breaks, Some(packets), |_| ())?;
+    let mut mf = Mf::new(data, reach(dict));
+    walk(&mut e, &mut mf, data, reach(dict), breaks, Part::START, data.len(), Some(packets), |_| ())?;
     Some((e.c.finish(), e.cost))
 }
 
@@ -344,15 +410,152 @@ pub fn deconstruct(data: &[u8], packets: &[Packet], dict: u32, breaks: &[Break])
 /// does not fit the data (some packets may have been given by then).
 pub fn reconstruct(data: &[u8], record: &[u8], dict: u32, breaks: &[Break], emit: impl FnMut(Packet)) -> Option<()> {
     let mut d = Dec { c: ArithDecoder::new(record) };
-    walk(&mut d, data, reach(dict), breaks, None, emit)?;
+    let mut mf = Mf::new(data, reach(dict));
+    walk(&mut d, &mut mf, data, reach(dict), breaks, Part::START, data.len(), None, emit)?;
     (!d.c.overrun()).then_some(())
+}
+
+/// Bytes of data from which a record is cut into parts, at the first packet at or past each
+/// multiple, for their packets to be coded and decoded side by side ([`split`]).
+pub const PART: usize = 64 << 20;
+
+/// The parts of the packets of `n` bytes of data, `part` bytes apart (at the first packet at or
+/// past each multiple), with the index of the first packet of each.
+fn parts_of(packets: &[Packet], part: usize) -> Vec<(Part, usize)> {
+    let mut out = vec![(Part::START, 0)];
+    let (mut pos, mut state, mut reps, mut next) = (0usize, 0u8, [0u32; 4], part);
+    for (i, &pk) in packets.iter().enumerate() {
+        if pos >= next {
+            out.push((Part { at: pos, state, reps }, i));
+            next = (pos / part + 1).saturating_mul(part);
+        }
+        step(&mut state, &mut reps, pk);
+        pos += pk.len as usize;
+    }
+    out
+}
+
+/// The body of the record of `packets` of `data` cut into `parts` (at least two; see FORMAT.md,
+/// "Parts"), each coded on its own: side by side on up to `threads` threads where more than one
+/// match finder works at once ([`Mf::at_once`]), else in turn with one.
+fn deconstruct_parts(
+    data: &[u8],
+    packets: &[Packet],
+    dict: u32,
+    parts: &[(Part, usize)],
+    threads: usize,
+) -> Option<Vec<u8>> {
+    let reach = reach(dict);
+    let code = |k: usize, mf: &mut Mf| {
+        let (part, first) = parts[k];
+        let (end, last) = parts.get(k + 1).map_or((data.len(), packets.len()), |&(p, i)| (p.at, i));
+        let mut e = Enc { c: ArithEncoder::new(vec![]), cost: [0.0; CATS] };
+        walk(&mut e, mf, data, reach, &[], part, end, Some(&packets[first..last]), |_| ())?;
+        Some(e.c.finish())
+    };
+    let bodies: Vec<Option<Vec<u8>>> = if threads <= 1 || Mf::at_once(data.len(), reach) < 2 {
+        let mut mf = Mf::new(data, reach);
+        (0..parts.len()).map(|k| code(k, &mut mf)).collect()
+    } else {
+        aqr_common::pool::par_map(parts.len(), threads, |k| {
+            code(k, &mut Mf::starting(data, reach, parts[k].0.at.saturating_sub(reach)))
+        })
+    };
+    let bodies: Vec<Vec<u8>> = bodies.into_iter().collect::<Option<_>>()?;
+    let mut out = Vec::new();
+    varint::put(&mut out, parts.len() as u64 - 1);
+    for w in parts.windows(2) {
+        let p = w[1].0;
+        varint::put(&mut out, (p.at - w[0].0.at) as u64);
+        out.push(p.state);
+        p.reps.iter().for_each(|&r| varint::put(&mut out, r as u64));
+    }
+    bodies[..bodies.len() - 1].iter().for_each(|b| varint::put(&mut out, b.len() as u64));
+    bodies.iter().for_each(|b| out.extend_from_slice(b));
+    Some(out)
+}
+
+/// The parts of a body of a record cut into them (see [`deconstruct_parts`]), each with its
+/// body; None where the body is not one of data of `n` bytes.
+fn parts_in(body: &[u8], n: usize) -> Option<Vec<(Part, &[u8])>> {
+    let mut at = 0;
+    let get = |at: &mut usize| varint::get(body, at).ok();
+    let k = usize::try_from(get(&mut at)?).ok().filter(|&k| k >= 1 && k < n)?;
+    let mut parts = vec![Part::START];
+    for _ in 0..k {
+        let gap = usize::try_from(get(&mut at)?).ok().filter(|&g| g > 0)?;
+        let pos = parts.last()?.at.checked_add(gap).filter(|&p| p < n)?;
+        let state = *body.get(at).filter(|&&s| s < 12)?;
+        at += 1;
+        let mut reps = [0u32; 4];
+        for r in &mut reps {
+            *r = u32::try_from(get(&mut at)?).ok()?;
+        }
+        parts.push(Part { at: pos, state, reps });
+    }
+    let mut lens = Vec::with_capacity(k);
+    for _ in 0..k {
+        lens.push(usize::try_from(get(&mut at)?).ok()?);
+    }
+    let mut rest = body.get(at..)?;
+    let mut out = Vec::with_capacity(k + 1);
+    for (i, p) in parts.into_iter().enumerate() {
+        let b = match lens.get(i) {
+            Some(&len) => {
+                let (b, r) = rest.split_at_checked(len)?;
+                rest = r;
+                b
+            }
+            None => rest,
+        };
+        out.push((p, b));
+    }
+    Some(out)
+}
+
+/// The stream of `data` from the `parts` of its record (each with its body), on up to `threads`
+/// threads where more than one match finder works at once ([`Mf::at_once`]: the parts' packets
+/// decoded side by side, then encoded in order), with the end marker if `marker`; else one goes
+/// through the parts with one match finder.
+fn rebuild_parts(
+    data: &[u8],
+    parts: &[(Part, &[u8])],
+    props: Props,
+    dict: u32,
+    marker: bool,
+    threads: usize,
+) -> Option<Vec<u8>> {
+    let reach = reach(dict);
+    let end = |k: usize| parts.get(k + 1).map_or(data.len(), |p| p.0.at);
+    let mut e = StreamEncoder::new(props, data.len() / 4);
+    if threads <= 1 || parts.len() == 1 || Mf::at_once(data.len(), reach) < 2 {
+        let mut mf = Mf::new(data, reach);
+        for (k, &(part, b)) in parts.iter().enumerate() {
+            let mut d = Dec { c: ArithDecoder::new(b) };
+            walk(&mut d, &mut mf, data, reach, &[], part, end(k), None, |pk| e.push(data, pk))?;
+            if d.c.overrun() {
+                return None;
+            }
+        }
+    } else {
+        let packets = aqr_common::pool::par_map(parts.len(), threads, |k| {
+            let (part, b) = parts[k];
+            let mut d = Dec { c: ArithDecoder::new(b) };
+            let mut mf = Mf::starting(data, reach, part.at.saturating_sub(reach));
+            let mut out = Vec::new();
+            walk(&mut d, &mut mf, data, reach, &[], part, end(k), None, |pk| out.push(pk))?;
+            (!d.c.overrun()).then_some(out)
+        });
+        for p in packets {
+            p?.into_iter().for_each(|pk| e.push(data, pk));
+        }
+    }
+    Some(e.finish(data, marker))
 }
 
 /// The stream of `data` from its record, with the end marker if `marker`.
 pub fn rebuild(data: &[u8], record: &[u8], props: Props, dict: u32, marker: bool) -> Option<Vec<u8>> {
-    let mut e = StreamEncoder::new(props, data.len() / 4);
-    reconstruct(data, record, dict, &[], |pk| e.push(data, pk))?;
-    Some(e.finish(data, marker))
+    rebuild_parts(data, &[(Part::START, record)], props, dict, marker, 1)
 }
 
 /// How far back a match may be: decoders keep at least 4 KiB.
@@ -373,29 +576,59 @@ pub struct Split {
 }
 
 /// Splits the LZMA stream at the start of `input` (of the data size `size`, or None for one
-/// ending with an end marker), its data at most `limit` bytes. Fails where the stream does not
-/// decode, or is not what encoding its packets gives (a range coder ended otherwise).
-pub fn split(input: &[u8], props: Props, dict: u32, size: Option<u64>, limit: usize) -> Result<Split, lzma::Error> {
+/// ending with an end marker), its data at most `limit` bytes, its record cut into parts of
+/// [`PART`] bytes coded on up to `threads` threads. Fails where the stream does not decode, or
+/// is not what encoding its packets gives (a range coder ended otherwise).
+pub fn split(
+    input: &[u8],
+    props: Props,
+    dict: u32,
+    size: Option<u64>,
+    limit: usize,
+    threads: usize,
+) -> Result<Split, lzma::Error> {
+    split_with(input, props, dict, size, limit, PART, threads)
+}
+
+/// [`split`] with parts of `part` bytes: the record is the same whatever the threads.
+pub fn split_with(
+    input: &[u8],
+    props: Props,
+    dict: u32,
+    size: Option<u64>,
+    limit: usize,
+    part: usize,
+    threads: usize,
+) -> Result<Split, lzma::Error> {
     let dec = lzma::decode(input, props, size, limit)?;
     if lzma::encode(&dec.data, props, &dec.packets, dec.marker) != input[..dec.used] {
         return Err(lzma::Error::Encoded);
     }
-    let (body, _) = deconstruct(&dec.data, &dec.packets, dict, &[]).ok_or(lzma::Error::Corrupt)?;
+    let parts = parts_of(&dec.packets, part.max(1));
+    let body = match parts.len() {
+        1 => deconstruct(&dec.data, &dec.packets, dict, &[]).map(|(b, _)| b),
+        _ => deconstruct_parts(&dec.data, &dec.packets, dict, &parts, threads),
+    };
+    let body = body.ok_or(lzma::Error::Corrupt)?;
     let mut record = Vec::with_capacity(HEADER + body.len());
     record.push(props.byte());
     record.extend(dict.to_le_bytes());
-    record.push(dec.marker as u8);
+    record.push(dec.marker as u8 | if parts.len() > 1 { 2 } else { 0 });
     record.extend(body);
     Ok(Split { data: dec.data, record, used: dec.used })
 }
 
-/// The stream of `data` from its record. None where the record is not one of `data`'s.
-pub fn join(data: &[u8], record: &[u8]) -> Option<Vec<u8>> {
+/// The stream of `data` from its record, its parts on up to `threads` threads. None where the
+/// record is not one of `data`'s.
+pub fn join(data: &[u8], record: &[u8], threads: usize) -> Option<Vec<u8>> {
     let (head, body) = record.split_at_checked(HEADER)?;
     let props = Props::from_byte(head[0])?;
     let dict = u32::from_le_bytes(head[1..5].try_into().unwrap());
-    if head[5] > 1 {
-        return None;
-    }
-    rebuild(data, body, props, dict, head[5] != 0)
+    let marker = head[5] & 1 != 0;
+    let parts = match head[5] {
+        0 | 1 => vec![(Part::START, body)],
+        2 | 3 => parts_in(body, data.len())?,
+        _ => return None,
+    };
+    rebuild_parts(data, &parts, props, dict, marker, threads)
 }

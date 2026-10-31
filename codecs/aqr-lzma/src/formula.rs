@@ -11,7 +11,7 @@ use crate::{alone, lzma2, recons, xz};
 
 pub use crate::module::{decode, decode2, index};
 
-pub const MODULE: Module = Module::new("lzma-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("lzma-recons", 2).with_memory(memory);
 
 /// The module rebuilding the segments of LZMA2 streams, one after another.
 pub const LZMA2: Module = Module::new("lzma2-recons", 1).with_memory(memory);
@@ -78,13 +78,13 @@ pub fn data(d: &[u8]) -> Option<Vec<u8>> {
 
 /// The formula rebuilding `input`, a `.lzma` file, or None where it is not one or its stream
 /// does not decode. What follows the stream is kept as it is.
-pub fn encode(input: &[u8], _threads: usize) -> Option<Formula> {
+pub fn encode(input: &[u8], threads: usize) -> Option<Formula> {
     if !starts(input) {
         return None;
     }
     let h = alone::parse(input)?;
     let s = &input[alone::HEADER..];
-    let sp = recons::split(s, h.props, h.dict, h.size, LIMIT).ok()?;
+    let sp = recons::split(s, h.props, h.dict, h.size, LIMIT, threads).ok()?;
     let rest = s.len() - sp.used;
     let mut f = Formula::default();
     f.push("lzma", [&input[..alone::HEADER], &s[sp.used..]].concat());

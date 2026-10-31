@@ -651,6 +651,7 @@ fn compress_with(
         }
     };
     note(Note::Batch { batch: 0, bytes: d.len() as u64, verify: opt.verify, contents: vec![0] });
+    compressing();
     let _spill = spilling(opt);
     note(Note::Started(0));
     let watch = notes.as_ref().map(|notes| progress::Files::of(notes, [(0, d)]));
@@ -669,6 +670,16 @@ fn compress_with(
     let r = finish(f, d, opt, &cx, memo, kept, notes.as_ref(), out)?;
     note(Note::Written(0));
     Ok(r)
+}
+
+/// Bytes of aqr-lzma's match finders' chains at once while compressing: two of a 64 MiB
+/// dictionary, the parts of a stream or the folders of a 7z archive side by side (decoding
+/// keeps to one, within its budget of memory).
+const LZMA_CHAINS: usize = 2 << 30;
+
+/// Lets aqr-lzma's match finders take [`LZMA_CHAINS`], as compressing starts.
+pub(crate) fn compressing() {
+    aqr_lzma::mf::allow_chains(LZMA_CHAINS);
 }
 
 /// The spill of [`Options::spill`] as the store of large buffers, while the guard is kept (and

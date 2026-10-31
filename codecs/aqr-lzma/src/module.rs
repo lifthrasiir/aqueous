@@ -50,7 +50,7 @@ pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Resu
 
 /// The module `lzma2-recons`: [`decode`] for the segments of LZMA2 streams.
 pub fn decode2(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    decode_with(params, inputs, len, threads, lzma2::join)
+    decode_with(params, inputs, len, threads, |d, r, _| lzma2::join(d, r))
 }
 
 fn decode_with(
@@ -58,14 +58,15 @@ fn decode_with(
     inputs: &[&[u8]],
     len: u64,
     threads: usize,
-    join: fn(&[u8], &[u8]) -> Option<Vec<u8>>,
+    join: fn(&[u8], &[u8], usize) -> Option<Vec<u8>>,
 ) -> Result<Vec<u8>> {
     let &[data, records, index] = inputs else { return Err(Error("three inputs wanted")) };
     if !params.is_empty() {
         return Err(corrupt());
     }
     let streams = cut(data, records, index)?;
-    let join = |i: usize| join(streams[i].0, streams[i].1).ok_or_else(corrupt);
+    // (a stream's parts on the threads of all, the streams side by side)
+    let join = |i: usize| join(streams[i].0, streams[i].1, threads).ok_or_else(corrupt);
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out = Vec::new();
     if threads <= 1 || cfg!(target_family = "wasm") {

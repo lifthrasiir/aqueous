@@ -62,7 +62,7 @@ fn streams_by_index() {
     let (mut data, mut records, mut lens, mut out) = (vec![], vec![], vec![], vec![]);
     for (_, d) in fixtures() {
         let h = alone::parse(&d).unwrap();
-        let sp = recons::split(&d[alone::HEADER..], h.props, h.dict, h.size, 1 << 24).unwrap();
+        let sp = recons::split(&d[alone::HEADER..], h.props, h.dict, h.size, 1 << 24, 1).unwrap();
         lens.push((sp.data.len(), sp.record.len()));
         data.extend(&sp.data);
         records.extend(&sp.record);

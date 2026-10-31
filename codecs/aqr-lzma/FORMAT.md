@@ -151,7 +151,8 @@ A record is a header of 6 bytes, then the body:
 ```text
 u8    props    lc + 9 (lp + 5 pb), below 225
 le32  dict     the dictionary size
-u8    flags    bit 0: the stream ends with the end marker; the others 0
+u8    flags    bit 0: the stream ends with the end marker; bit 1: the body is in parts
+               (below); the others 0
 ```
 
 ### Coding
@@ -228,10 +229,34 @@ A literal and a short repeat cover 1 byte, the others `n`. The packets (and the 
 skip) must cover `D` exactly (the walk ends at `N`, after every break); the end marker, if any,
 follows them.
 
+### Parts
+
+A body in parts (flag bit 1; an LZMA stream's, never a segment's) codes its packets in
+stretches of their own, so that they decode side by side:
+
+```text
+varint  k        the parts after the first, at least 1 and below N
+k times:         each of those parts:
+  varint  gap    its start's distance from the previous one's (the first starts at 0), > 0
+  u8      s      the state there, below 12
+  4 varint reps  reps[0 … 3] there (each below 2^32)
+k times: varint  the length of each part's body but the last's
+the bodies, one after another (the last one to the end)
+```
+
+The starts are below `N`, and each is the position of a packet. A part's body is coded as
+[above](#coding), with its own coder and all its contexts fresh, from its start (the state and
+`reps` it gives; 0 for the first) to the next part's start (or `N`): the packets must cover
+that exactly, and the walk ends there. Within a part everything is as above: in particular the
+match finder holds the positions before `pos` (those of earlier parts too; with no breaks, `E`
+is `N`, so a match may reach past the part's end into the data). As the match finder looks no
+farther back than `R`, a decoder may start one of a part with only the positions from
+`max(0, start − R)` inserted.
+
 ## Rebuilding a stream
 
-The packets of the record, then the end marker if its flag says so, encoded as in
-[Encoding](#encoding) with the record's `props`.
+The packets of the record (of every part, in order), then the end marker if its flag says so,
+encoded as in [Encoding](#encoding) with the record's `props`.
 
 ## LZMA2 segments
 
@@ -281,12 +306,15 @@ chunk `0x80` or `0xA0` finds no properties before it in the segment.
 ## Implementation limits
 
 `N < 2^32 − 1`. The reference decoder holds `D`, the stream and the match finder's tables:
-`4 × 3 × S` bytes for the rings, and 12.5 MiB for the heads.
+`4 × 3 × S` bytes for the rings, and 12.5 MiB for the heads; natively, those of each part being
+decoded at once, with the packets of the parts decoded and not yet encoded (a Wasm module goes
+through the parts with one match finder).
 
 ## Formula module
 
-The module is `lzma-recons`, version 1. It rebuilds one or more streams, each from its data
-and its record, and its output is the streams one after another. A container cuts the output
+The module is `lzma-recons`, version 2 (version 1 did not have [parts](#parts)). It rebuilds
+one or more streams, each from its data and its record, and its output is the streams one after
+another. A container cuts the output
 by the streams' lengths (a Split instruction of the formula), and adds what lies around them
 (the 13-byte header of a `.lzma` file; a 7z archive's headers).
 
@@ -324,3 +352,7 @@ first filter innermost), where encoding gives back what LZMA2 decodes to.
   fail for a stream that decodes).
 - Where a match's distance is not the nearest one, `far_rep` names the last distance nearest
   to it (the first of equals), and the offset is from it.
+- A stream of more than 64 MiB of data is coded in parts: one starts at the first packet at or
+  past each multiple of 64 MiB (one part where two multiples fall within a packet). The
+  record is the same whatever the threads that code it; decoding takes a match finder for
+  each part being decoded at once, or one going on through them all.

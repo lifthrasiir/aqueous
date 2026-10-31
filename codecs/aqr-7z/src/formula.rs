@@ -65,7 +65,7 @@ fn take(c: &Coder, size: u64, packed: &[u8], threads: usize) -> Option<(Vec<u8>,
         header::COPY => (packed.len() as u64 == size).then(|| (packed.to_vec(), Rebuild::Copy)),
         header::LZMA => {
             let (props, dict) = lzma_props(&c.props)?;
-            let sp = recons::split(packed, props, dict, Some(size), LIMIT).ok()?;
+            let sp = recons::split(packed, props, dict, Some(size), LIMIT, threads).ok()?;
             (sp.used == packed.len() && sp.data.len() as u64 == size).then_some((sp.data, Rebuild::Lzma(sp.record)))
         }
         header::LZMA2 => {
@@ -308,8 +308,8 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Formula> {
     if packs.last().is_some_and(|p| p.end > input.len()) {
         return None;
     }
-    let inner = if s.folders.len() == 1 { opt.threads } else { 1 };
-    let made = aqr_common::pool::par_map(s.folders.len(), opt.threads, |i| make(s, i, &packs, input, inner));
+    // (the folders side by side, each stream's parts on the workers free)
+    let made = aqr_common::pool::par_map(s.folders.len(), opt.threads, |i| make(s, i, &packs, input, opt.threads));
     // the names of the files of each folder's substreams
     let names: Vec<&[u8]> = h.files.iter().filter(|f| f.stream).map(|f| &f.name[..]).collect();
     let firsts: Vec<usize> = s.subs.iter().scan(0, |a, x| Some(std::mem::replace(a, *a + x.len()))).collect();

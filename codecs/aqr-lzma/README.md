@@ -20,8 +20,10 @@ let f = formula::encode(&file, 1 /* threads */).unwrap();
 // `f` rebuilds `file` when evaluated with `formula::decode` as the module `formula::MODULE`.
 
 use aqr_lzma::recons;
-let sp = recons::split(&stream, props, dict, size, limit)?; // size: None where it ends with the end marker
-assert_eq!(recons::join(&sp.data, &sp.record).unwrap(), stream[..sp.used]);
+// size: None where it ends with the end marker; a stream of more than 64 MiB of data in parts,
+// coded and decoded side by side on up to `threads` threads (the same record whatever they are)
+let sp = recons::split(&stream, props, dict, size, limit, threads)?;
+assert_eq!(recons::join(&sp.data, &sp.record, threads).unwrap(), stream[..sp.used]);
 
 use aqr_lzma::lzma2;
 // a split for each segment (from a chunk resetting the dictionary), each rebuilt on its own
@@ -56,6 +58,14 @@ The `.xz` rows were measured on 2026-10-30 likewise, with 2 threads.
 - Memory: the data, the stream and `12 × S` bytes of chains, `S` the dictionary size rounded
   up to a power of 2 (at most the data's), and 12.5 MiB. The bench on the 7z folder (data,
   packets, stream and record held at once) peaked at 2.1 GB.
+- A stream of more than 64 MiB of data is coded in parts of 64 MiB, each with contexts of its
+  own, which split and rebuild side by side (FORMAT.md, "Parts"). Natively, the match finders
+  of a process take at most 1 GiB of chains at once (one of a 64 MiB dictionary), or as much
+  as `mf::allow_chains` lets in: aqr-compress lets in 2 GiB (two) as it compresses. On the 7z
+  above (all its folders, 374.9 MB of data, 10 threads, two match finders at once): split
+  15.5 -> 10.8 s, rebuild 15.8 -> 12.1 s, records 6,496,078 -> 6,498,275 bytes. Starting a
+  part's match finder (the 64 MiB before it inserted) takes 0.23 s; fresh contexts cost 1.6 KB
+  on the 249.4 MB folder.
 
 ## Tests
 

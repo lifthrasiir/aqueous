@@ -153,14 +153,28 @@ pub struct Mf<'a> {
 }
 
 impl<'a> Mf<'a> {
-    /// A match finder for matches at most `reach` back (LZMA's dictionary size).
-    pub fn new(d: &'a [u8], reach: usize) -> Self {
+    /// Bytes of the chains of a match finder of [`Mf::new`].
+    fn chains(n: usize, reach: usize) -> usize {
         // A ring of `reach` positions at least: a candidate `c` is at least `pos - reach`, and its
         // slot is taken again only by `c + ring`, which is at least `pos` (not added yet). So a
         // dictionary of 2^n bytes takes chains of 2^n, not 2^(n+1).
+        let ring = reach.clamp(1, n.max(1)).next_power_of_two();
+        3 * 4 * (ring.min(n.max(1)) + (1 << HASH_BITS))
+    }
+
+    /// How many match finders of [`Mf::new`] work at once (at least one; one in a module).
+    pub fn at_once(n: usize, reach: usize) -> usize {
+        #[cfg(not(target_arch = "wasm32"))]
+        return (gate::AT_ONCE.load(std::sync::atomic::Ordering::Relaxed) / Self::chains(n, reach)).max(1);
+        #[cfg(target_arch = "wasm32")]
+        return 1;
+    }
+
+    /// A match finder for matches at most `reach` back (LZMA's dictionary size).
+    pub fn new(d: &'a [u8], reach: usize) -> Self {
         let ring = reach.clamp(1, d.len().max(1)).next_power_of_two();
         #[cfg(not(target_arch = "wasm32"))]
-        let admitted = gate::admit(3 * 4 * (ring.min(d.len().max(1)) + (1 << HASH_BITS)));
+        let admitted = gate::admit(Self::chains(d.len(), reach));
         Mf {
             d,
             reach,
@@ -174,6 +188,14 @@ impl<'a> Mf<'a> {
             #[cfg(not(target_arch = "wasm32"))]
             admitted,
         }
+    }
+
+    /// [`Mf::new`] holding no position before `from`: from `pos − reach` on, the same as one
+    /// holding them all, as no query looks farther back.
+    pub fn starting(d: &'a [u8], reach: usize, from: usize) -> Self {
+        let mut mf = Mf::new(d, reach);
+        mf.next = from;
+        mf
     }
 
     /// Adds the positions before `pos`.
@@ -305,16 +327,25 @@ impl Drop for Mf<'_> {
     }
 }
 
+/// Lets the match finders of the process take up to `bytes` of chains at once ([`gate`]),
+/// where that is more than they may already.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn allow_chains(bytes: usize) {
+    gate::AT_ONCE.fetch_max(bytes, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// The match finders' chains of a process at once, natively: one that would take them past
 /// [`gate::AT_ONCE`] bytes waits for others to be dropped (one alone is let in whatever its
 /// size), so that streams of large dictionaries split or rebuilt on several threads (the folders
-/// of a 7z archive: 0.8 GB of chains each for 64 MiB) take turns. Only the order of the work
-/// changes. A module, on a thread of its own, has none.
+/// of a 7z archive, the parts of a stream: 0.8 GB of chains each for 64 MiB) take turns: one at
+/// a time by default, more as [`allow_chains`] lets in. Only the order of the work changes. A
+/// module, on a thread of its own, has none.
 #[cfg(not(target_arch = "wasm32"))]
 mod gate {
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
 
-    pub const AT_ONCE: usize = 1 << 30;
+    pub static AT_ONCE: AtomicUsize = AtomicUsize::new(1 << 30);
 
     static HELD: Mutex<usize> = Mutex::new(0);
     static FREED: Condvar = Condvar::new();
@@ -322,7 +353,7 @@ mod gate {
     /// Waits for `n` bytes to be let in, and gives them back.
     pub fn admit(n: usize) -> usize {
         let mut held = HELD.lock().unwrap();
-        while *held > 0 && *held + n > AT_ONCE {
+        while *held > 0 && *held + n > AT_ONCE.load(Ordering::Relaxed) {
             held = FREED.wait(held).unwrap();
         }
         *held += n;
