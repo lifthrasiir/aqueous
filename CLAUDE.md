@@ -49,6 +49,16 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
 - Format with the `rustfmt.toml`s (width 120).
 - Cache the results of measurements taking over a minute in `cache/`.
 - Measure peak memory (`/usr/bin/time -l`) on runs over big inputs.
+- `aqr --stats` (compressing, decompressing or testing) samples the threads as it runs and
+  tells on standard error, after each archive, a line of the whole (seconds, workers' busy
+  share, heap peak and what held it, resident peak) and what stands out: stretches with the
+  pool barely used and what ran then, files that took long by themselves, workers waiting,
+  kinds of files slow for their bytes or hardly compressed. `--stats=FILE.json` writes all
+  that was sampled too (per content: kind, bytes, archived bytes, modules; the samples by
+  thread and label), `--stats=FILE.html` a page showing it (threads over time, heap by
+  allocator, time by label, files by kind); both may be given. The JSON's layout is in
+  `crates/aqr/src/stats.rs`. The sampling costs little, so run big benchmarks (10gb) with
+  `--stats --stats=FILE.json`, and read it before reaching for a profiler.
 - Benchmark zstd at level 3 or below, never 19 (far too slow); cached results at 19 may still
   be cited.
 - Performance in numbers: measure speed and size before and after, and record them in the
