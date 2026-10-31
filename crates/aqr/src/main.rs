@@ -25,7 +25,8 @@
 //!   the status change and backup times; in decompressing, the ownership, the flags only the
 //!   superuser can change, the set-user-ID and set-group-ID bits, FIFOs and devices, and the
 //!   backup times. An archive of a single file has no metadata.
-//! - `-f` overwrites outputs; inputs are always kept. `-q` logs nothing but errors; `-v` logs
+//! - `-f` overwrites outputs; inputs are always kept. With `--ipc`, the frontend is asked
+//!   instead where an output exists ([`ipc`]), and skips it or has it overwritten. `-q` logs nothing but errors; `-v` logs
 //!   each file archived too (below). An archive, or a single file decompressed, is written as
 //!   `OUTPUT.PID.part` and renamed once done: removed where it fails or the process is stopped
 //!   ([`stop`]), an output there before left as it was.
@@ -49,6 +50,10 @@
 //! (sets); the files of the same content as another. It is written a batch at a time, as the
 //! files are. Decompressing (and testing), there is a bar too, of the blocks decompressed and
 //! the files evaluated ([`view::Decoding`]).
+//!
+//! `--ipc` has this program driven by another (a graphical frontend) through standard input
+//! and output ([`ipc`]): what it shows as it goes told there, and the frontend asked what the
+//! options leave open.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -58,6 +63,7 @@ use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+mod ipc;
 mod meta;
 mod stats;
 mod stop;
@@ -90,6 +96,7 @@ Output:
   -v, --verbose         log each file archived
       --stats[=FILE]    tell what stands out after each archive; FILE.json or FILE.html
                         writes all that was sampled (may be given more than once)
+      --ipc             be driven by a frontend through standard input and output
 
 Compression:
   -l LEVEL, -0 ... -9   0 (uncompressed), 1 (zstd alone) to 9; low, mid (default), high
@@ -135,6 +142,8 @@ struct Args {
     inputs: Vec<PathBuf>,
     /// What `--stats` asked for.
     stats: Option<stats::Stats>,
+    /// Driven by a frontend ([`ipc`]).
+    ipc: bool,
 }
 
 /// The bytes of the leaves decoded at once ([`aqr::Archive::set_budget`]). On 10gb (10
@@ -157,6 +166,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if args.ipc
+        && let Err(e) = ipc::start()
+    {
+        eprintln!("aqr: {e}");
+        return ExitCode::FAILURE;
+    }
     // (before the pool is made, for its workers to be sampled)
     if args.stats.is_some() {
         aqr_common::trace::enable();
@@ -172,6 +187,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("aqr: {e}");
+            ipc::tell(serde_json::json!({"event": "error", "message": e}));
             ExitCode::FAILURE
         }
     }
@@ -194,6 +210,7 @@ fn parse() -> Result<Args, String> {
         opt: Options { threads: 0, ..Options::default() },
         inputs: Vec::new(),
         stats: None,
+        ipc: false,
     };
     let (mut stats, mut stats_to) = (false, Vec::new());
     let mut only_inputs = false;
@@ -234,6 +251,7 @@ fn parse() -> Result<Args, String> {
             "-D" => a.opt.dictionaries = true,
             "--no-check" => a.opt.verify = false,
             "--stats" => stats = true,
+            "--ipc" => a.ipc = true,
             s if s.starts_with("--stats=") => {
                 let to = PathBuf::from(&s["--stats=".len()..]);
                 if !stats::takes(&to) {
@@ -289,12 +307,40 @@ fn percent(a: f64, of: f64) -> String {
     if of == 0.0 { "-".into() } else { format!("{:.1}%", 100.0 * a / of) }
 }
 
-/// Where `path`'s output goes, and whether it exists already.
-fn output(path: &Path, force: bool) -> Result<(), String> {
-    if !force && fs::symlink_metadata(path).is_ok() {
-        return Err(format!("{} exists (-f to overwrite)", path.display()));
+/// Whether output `path` is to be written over where it exists: with `-f`, or as the frontend
+/// answers (`None`: not, the output skipped); an error where it exists and nothing tells.
+fn output(a: &Args, path: &Path) -> Result<Option<bool>, String> {
+    if a.force || fs::symlink_metadata(path).is_err() {
+        return Ok(Some(a.force));
     }
-    Ok(())
+    let q = serde_json::json!({"path": path.display().to_string()});
+    match ipc::get().and_then(|i| i.ask("overwrite", q)) {
+        Some(serde_json::Value::Bool(true)) => Ok(Some(true)),
+        Some(_) => {
+            ipc::tell(serde_json::json!({"event": "skipped", "output": path.display().to_string()}));
+            Ok(None)
+        }
+        None => Err(format!("{} exists (-f to overwrite)", path.display())),
+    }
+}
+
+/// Tells the frontend that an archive is being made or decoded.
+fn begin(mode: &str, inputs: &[PathBuf], out: Option<&Path>) {
+    let inputs: Vec<String> = inputs.iter().map(|i| i.display().to_string()).collect();
+    let output = out.map(|o| o.display().to_string());
+    ipc::tell(serde_json::json!({"event": "begin", "mode": mode, "inputs": inputs, "output": output}));
+}
+
+/// Tells the frontend that an archive is done.
+fn end(out: Option<&Path>, files: usize, read: u64, written: u64, start: Instant) {
+    ipc::tell(serde_json::json!({
+        "event": "end",
+        "output": out.map(|o| o.display().to_string()),
+        "files": files,
+        "read": read,
+        "written": written,
+        "seconds": start.elapsed().as_secs_f64(),
+    }));
 }
 
 /// `path` with `ext` appended to its name.
@@ -399,7 +445,8 @@ impl aqr_compress::Source for Gathered {
 }
 
 fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String> {
-    output(out, a.force)?;
+    let Some(force) = output(a, out)? else { return Ok(()) };
+    begin("compress", inputs, Some(out));
     let start = Instant::now();
     let rec = stats::record(a.stats.as_ref());
     // large buffers kept in files beside the output (gone once dropped), not on the heap; in the
@@ -423,7 +470,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         g.contents.push((input.clone(), name, d.len() as u64));
         let view = view::View::new(&g, bars(), false);
         // (of the kind its name tells, as a file in an archive of many; written as it is made)
-        let (n, f) = write_whole(out, a.force, |file| {
+        let (n, f) = write_whole(out, force, |file| {
             let r = viewed(a, &view, |tell| compress_formula_to(&d, kind, opt, file, tell))?;
             aqr_compress::Source::intact(&g, 0)?;
             Ok(r)
@@ -444,6 +491,7 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         if !a.quiet {
             summary(out, 1, d.len(), n, start);
         }
+        end(Some(out), 1, d.len() as u64, n as u64, start);
         if let (Some(s), Some(rec)) = (&a.stats, rec) {
             let path = input.display().to_string();
             s.add(stats::Run {
@@ -504,16 +552,17 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     // (with -v, the log as the files are written)
     let view = view::View::new(&g, bars(), a.verbose);
     // written as it is made
-    let r = write_whole(out, a.force, |file| {
+    let r = write_whole(out, force, |file| {
         let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
         viewed(a, &view, |tell| compress_tree_to(&g.tree, &g, opt, &mut w, tell).and_then(|r| w.flush().map(|_| r)))
     })?;
+    // (the files, as decompressing counts them: not their forks, each hard link)
+    let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
     if !a.quiet {
         eprintln!("archive overhead (header, modules, metadata): {}", size(r.overhead as f64));
-        // (the files, as decompressing counts them: not their forks, each hard link)
-        let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
         summary(out, files, r.read as usize, r.len, start);
     }
+    end(Some(out), files, r.read, r.len as u64, start);
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
         let contents = (r.files.iter().zip(&g.contents))
             .map(|(f, (p, ..))| stats::Content {
@@ -585,7 +634,8 @@ fn remote(_: &Path) -> bool {
     false
 }
 
-/// Whether the bar is drawn: on a terminal that takes it.
+/// Whether the bar is drawn: on a terminal that takes it (a frontend shows how far it is
+/// otherwise, [`ipc`]).
 fn bars() -> bool {
     std::io::stderr().is_terminal() && view::takes_escapes()
 }
@@ -603,7 +653,7 @@ fn viewed<T>(a: &Args, view: &view::View, work: impl FnOnce(&(dyn Fn(aqr_compres
 /// is done, and once more then (none, with -q).
 fn ticking<T>(a: &Args, view: &dyn view::Ticking, work: impl FnOnce() -> T) -> T {
     let done = std::sync::atomic::AtomicBool::new(false);
-    let bars = !a.quiet && view.bars();
+    let bars = !a.quiet && view.shows();
     std::thread::scope(|s| {
         if bars {
             s.spawn(|| {
@@ -729,7 +779,25 @@ fn write_whole<T>(
 fn place(from: &Path, to: &Path, force: bool) -> Result<(), String> {
     let err = |e: std::io::Error| format!("{}: {e}", to.display());
     if force {
-        return fs::rename(from, to).map_err(err);
+        return match fs::rename(from, to) {
+            // replacing a file denied though neither file is held (seen on Windows over a file
+            // written just before, about 1 in 30 times, for seconds): the old one moved aside
+            Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {
+                let aside = with_ext(to, &format!(".{}.old", std::process::id()));
+                fs::rename(to, &aside).map_err(|_| err(e))?;
+                match fs::rename(from, to) {
+                    Ok(()) => {
+                        _ = fs::remove_file(&aside);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        _ = fs::rename(&aside, to);
+                        Err(err(e))
+                    }
+                }
+            }
+            r => r.map_err(err),
+        };
     }
     // (a link failing where `to` is, which a rename would replace)
     match fs::hard_link(from, to) {
@@ -767,9 +835,14 @@ fn decompress_all(a: &Args) -> Result<(), String> {
 }
 
 fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
-    if !a.test {
-        output(out, a.force)?;
-    }
+    let force = match a.test {
+        true => false,
+        false => match output(a, out)? {
+            Some(f) => f,
+            None => return Ok(()),
+        },
+    };
+    begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], (!a.test).then_some(out));
     let start = Instant::now();
     let rec = stats::record(a.stats.as_ref());
     let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
@@ -781,9 +854,9 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
     let mut archive = aqr::open(&c, runner).map_err(|e| err(&e))?;
-    let names = if !a.quiet && bars() { leaf_names(&archive, out) } else { Vec::new() };
+    let names = if !a.quiet && (bars() || a.ipc) { leaf_names(&archive, out) } else { Vec::new() };
     let view = std::sync::Arc::new(view::Decoding::new(bars(), names));
-    if !a.quiet && view.bars() {
+    if !a.quiet && view.shows() {
         let view = view.clone();
         archive.on_progress(Some(std::sync::Arc::new(move |r| view.tell(r))));
     }
@@ -815,7 +888,7 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
             (1, n)
         }
         None => {
-            let n = write_whole(out, a.force, |w| {
+            let n = write_whole(out, force, |w| {
                 let mut failed = None;
                 let r = ticking(a, &*view, || {
                     archive.write_file(a.opt.threads, &mut |d: &[u8]| {
@@ -858,12 +931,13 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         }
         Some(t) => {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
-            ticking(a, &*view, || extract(t, &archive, a.opt.threads, out, a.force, &ap, &seen))?
+            ticking(a, &*view, || extract(t, &archive, a.opt.threads, out, force, &ap, &seen))?
         }
     };
     if !a.quiet {
         summary_d(input, (!a.test).then_some(out), files, total, start);
     }
+    end((!a.test).then_some(out), files, c.len() as u64, total, start);
     if let (Some(s), Some(rec)) = (&a.stats, rec) {
         let mut contents = seen.contents(content_paths(&archive, out));
         if archive.tree().is_none()

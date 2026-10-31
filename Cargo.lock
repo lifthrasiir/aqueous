@@ -45,6 +45,7 @@ dependencies = [
  "aqr-formula",
  "libc",
  "memmap2",
+ "serde_json",
  "windows-sys",
 ]
 

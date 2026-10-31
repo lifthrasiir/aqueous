@@ -9,6 +9,9 @@
 //! An archive being decoded has a bar of two ([`Decoding`]): the decompression (`=`, bytes of
 //! the data blocks as they are in the archive) and the evaluation (`#`, bytes of the leaves'
 //! outputs: the files), and below it the file evaluated the longest, where that is long.
+//!
+//! Driven by a frontend ([`crate::ipc`]), both tell it the same as `progress` events instead of
+//! drawing the bar.
 
 use std::collections::HashMap;
 use std::io::Write;
@@ -18,7 +21,9 @@ use std::time::{Duration, Instant};
 use aqr_compress::{Event, Report};
 use aqr_formula::aqr::{Reached, Step};
 
-use crate::{Gathered, percent, size};
+use serde_json::{Value, json};
+
+use crate::{Gathered, ipc, percent, size};
 
 /// Columns that the bar's lines take at most (no more than a terminal has, mostly).
 const WIDTH: usize = 79;
@@ -56,11 +61,6 @@ impl<'g> View<'g> {
         View { g, bar, log, state: Mutex::default() }
     }
 
-    /// Whether the bar is drawn.
-    pub fn bars(&self) -> bool {
-        self.bar
-    }
-
     pub fn tell(&self, e: Event) {
         let mut s = self.state.lock().unwrap();
         match e {
@@ -87,8 +87,12 @@ impl<'g> View<'g> {
         self.draw(&mut s, &[]);
     }
 
-    /// Writes `lines` of the log, then the bar in place of the one drawn last.
+    /// Writes `lines` of the log, then the bar in place of the one drawn last (or tells the
+    /// frontend how far it is).
     fn draw(&self, s: &mut State, lines: &[String]) {
+        if ipc::get().is_some() {
+            ipc::tell(self.progress(s));
+        }
         let mut out = std::io::stderr().lock();
         if !self.bar {
             lines.iter().for_each(|l| _ = writeln!(out, "{l}"));
@@ -173,6 +177,28 @@ impl<'g> View<'g> {
         lines
     }
 
+    /// How far it is, as the frontend is told.
+    fn progress(&self, s: &State) -> Value {
+        let file = s.working.iter().min_by_key(|(_, t)| **t).map(|(&c, since)| {
+            let mut f = json!({
+                "path": self.g.contents[c].0.display().to_string(),
+                "len": self.g.contents[c].2,
+                "seconds": since.elapsed().as_secs_f64(),
+            });
+            if let Some(&n) = s.reached.get(&c) {
+                f["done"] = n.into();
+            }
+            f
+        });
+        json!({
+            "event": "progress",
+            "probe": [s.probe.0, s.probe.1],
+            "analysis": [s.analysis.0, s.analysis.1],
+            "compression": [s.compression.0, s.compression.1],
+            "file": file,
+        })
+    }
+
     /// The file recompressed the longest, how long and how far it is, where it is [`SLOW`].
     fn slowest(&self, s: &State) -> Option<String> {
         let (&c, since) = s.working.iter().min_by_key(|(_, t)| **t)?;
@@ -254,15 +280,31 @@ impl Decoding {
 }
 
 impl Ticking for Decoding {
-    fn bars(&self) -> bool {
-        self.bar
+    fn shows(&self) -> bool {
+        self.bar || ipc::get().is_some()
     }
 
     /// Draws the bar again, in place of the one drawn last (none until anything is told), and
-    /// below it the leaf evaluated the longest, where that is [`SLOW`].
+    /// below it the leaf evaluated the longest, where that is [`SLOW`] (or tells the frontend
+    /// how far it is).
     fn tick(&self) {
         let mut s = self.state.lock().unwrap();
         let Some(r) = s.reached else { return };
+        if ipc::get().is_some() {
+            let file = s.working.iter().min_by_key(|(_, t)| **t).map(|(&i, since)| {
+                let name = self.names.get(i).filter(|n| !n.is_empty()).cloned();
+                json!({"path": name.unwrap_or_else(|| format!("leaf #{}", i + 1)), "seconds": since.elapsed().as_secs_f64()})
+            });
+            ipc::tell(json!({
+                "event": "progress",
+                "decompressed": [r.decompressed.0, r.decompressed.1],
+                "evaluated": [r.evaluated.0, r.evaluated.1],
+                "file": file,
+            }));
+        }
+        if !self.bar {
+            return;
+        }
         // (the totals known from the start: none, nothing to do)
         let share = |(done, total)| if total == 0 { 1.0 } else { share((done, total)) };
         let (d, e) = (share(r.decompressed), share(r.evaluated));
@@ -290,14 +332,14 @@ impl Ticking for Decoding {
 
 /// What has a bar drawn again now and then, as long as it is at work.
 pub trait Ticking: Sync {
-    /// Whether the bar is drawn.
-    fn bars(&self) -> bool;
+    /// Whether how far it is is shown: the bar drawn, or the frontend told.
+    fn shows(&self) -> bool;
     fn tick(&self);
 }
 
 impl Ticking for View<'_> {
-    fn bars(&self) -> bool {
-        self.bars()
+    fn shows(&self) -> bool {
+        self.bar || ipc::get().is_some()
     }
 
     fn tick(&self) {

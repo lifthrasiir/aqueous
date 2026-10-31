@@ -11,6 +11,7 @@ aqr-compress = { path = "../aqr-compress" }
 aqr-decompress = { path = "../aqr-decompress" }
 aqr-formula = { path = "../aqr-formula" }
 memmap2 = "0.9"
+serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

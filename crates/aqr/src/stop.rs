@@ -1,6 +1,6 @@
 //! The output being written, removed where the process is stopped before it is done: by
 //! Ctrl-C, `SIGTERM` or `SIGHUP` (Ctrl-C, Ctrl-Break or the console closed on Windows). The
-//! process is then stopped as it would have been.
+//! process is then stopped as it would have been. A frontend may stop it as well ([`now`]).
 
 use std::path::Path;
 
@@ -11,6 +11,12 @@ pub fn removing(path: &Path) -> Guard {
 }
 
 pub struct Guard(());
+
+/// Stops the process now, with exit code `code`, the output being written removed.
+pub fn now(code: i32) -> ! {
+    imp::remove();
+    std::process::exit(code)
+}
 
 impl Drop for Guard {
     fn drop(&mut self) {
@@ -60,6 +66,14 @@ mod imp {
         }
     }
 
+    pub fn remove() {
+        let p = PATH.swap(std::ptr::null_mut(), Ordering::SeqCst);
+        // SAFETY: a C string never freed
+        if !p.is_null() {
+            unsafe { libc::unlink(p) };
+        }
+    }
+
     extern "C" fn handler(s: libc::c_int) {
         let p = PATH.load(Ordering::SeqCst);
         // SAFETY: a C string never freed; unlink and raise are async-signal-safe
@@ -91,11 +105,15 @@ mod imp {
         *PATH.lock().unwrap_or_else(|e| e.into_inner()) = path.map(Path::to_owned);
     }
 
-    unsafe extern "system" fn handler(_: u32) -> BOOL {
-        if let Some(p) = PATH.lock().unwrap_or_else(|e| e.into_inner()).as_deref() {
+    pub fn remove() {
+        if let Some(p) = PATH.lock().unwrap_or_else(|e| e.into_inner()).take() {
             // (open as it is, but shared for deletion: gone once the process is)
             _ = std::fs::remove_file(p);
         }
+    }
+
+    unsafe extern "system" fn handler(_: u32) -> BOOL {
+        remove();
         // the next handler, the default one, ends the process
         FALSE
     }
@@ -104,4 +122,6 @@ mod imp {
 #[cfg(not(any(unix, windows)))]
 mod imp {
     pub fn set(_: Option<&std::path::Path>) {}
+
+    pub fn remove() {}
 }
