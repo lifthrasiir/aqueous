@@ -6,6 +6,8 @@
 //! - `--register` adds the verbs for the user ([`register`]): "Compress with Aqueous" on files
 //!   and folders, "Extract here" (also the double-click) and "Test" on `.aqr` files.
 //!   `--unregister` takes them away.
+//! - `--install` and `--uninstall [--quiet]`, of the program that aqr-win-install installed
+//!   ([`install`]): the former run by the installer, the latter by Settings' Apps.
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
 //!   named after their folder. `extract`: each archive into its name without `.aqr`. `test`:
 //!   each archive checked, and what it holds told.
@@ -23,6 +25,8 @@
 mod dialog;
 #[cfg(windows)]
 mod gather;
+#[cfg(windows)]
+mod install;
 #[cfg(windows)]
 mod register;
 #[cfg(windows)]
@@ -67,6 +71,30 @@ fn main() -> std::process::ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => fail("Aqueous is not unregistered", &e),
+            };
+        }
+        "--install" => {
+            return match install::install() {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        "--uninstall" => {
+            let quiet = match args.get(1).and_then(|a| a.to_str()) {
+                None => false,
+                Some("--quiet") if args.len() == 2 => true,
+                _ => return fail("Not an option of the uninstall", "aqr-win --uninstall [--quiet]"),
+            };
+            return match install::uninstall(quiet) {
+                Ok(_) => ExitCode::SUCCESS,
+                Err(e) if quiet => {
+                    eprintln!("{e}");
+                    ExitCode::FAILURE
+                }
+                Err(e) => fail("Aqueous is not uninstalled", &e),
             };
         }
         "compress" => Verb::Compress,

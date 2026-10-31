@@ -19,18 +19,18 @@ use windows_sys::Win32::Graphics::Gdi::{
     CreateCompatibleDC, DeleteDC, DeleteObject, EndPaint, FillRect, GetSysColorBrush, HDC, InvalidateRect, PAINTSTRUCT,
     SelectObject, SetPixel,
 };
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Controls::{
     CloseThemeData, DrawThemeBackground, GetThemeBackgroundContentRect, OpenThemeData, PBFS_NORMAL, PBFS_PAUSED,
     PP_BAR, PP_FILL,
 };
 use windows_sys::Win32::UI::Controls::{
-    LIM_LARGE, LIM_SMALL, LoadIconMetric, PBST_PAUSED, TASKDIALOGCONFIG, TD_ERROR_ICON, TD_INFORMATION_ICON, TD_WARNING_ICON, TDCBF_CANCEL_BUTTON,
-    TDCBF_CLOSE_BUTTON, TDCBF_NO_BUTTON, TDCBF_YES_BUTTON, TDE_CONTENT, TDE_MAIN_INSTRUCTION,
-    TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER, TDF_SHOW_PROGRESS_BAR, TDM_CLICK_BUTTON, TDM_SET_ELEMENT_TEXT,
-    TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE, TDM_SET_PROGRESS_BAR_STATE, TDN_BUTTON_CLICKED, TDN_CREATED,
-    TDN_TIMER, TaskDialogIndirect,
+    LIM_LARGE, LIM_SMALL, LoadIconMetric, PBST_PAUSED, TASKDIALOGCONFIG, TD_ERROR_ICON, TD_INFORMATION_ICON,
+    TD_WARNING_ICON, TDCBF_CANCEL_BUTTON, TDCBF_CLOSE_BUTTON, TDCBF_NO_BUTTON, TDCBF_YES_BUTTON, TDE_CONTENT,
+    TDE_MAIN_INSTRUCTION, TDF_ALLOW_DIALOG_CANCELLATION, TDF_CALLBACK_TIMER, TDF_SHOW_PROGRESS_BAR, TDM_CLICK_BUTTON,
+    TDM_SET_ELEMENT_TEXT, TDM_SET_PROGRESS_BAR_POS, TDM_SET_PROGRESS_BAR_RANGE, TDM_SET_PROGRESS_BAR_STATE,
+    TDN_BUTTON_CLICKED, TDN_CREATED, TDN_TIMER, TaskDialogIndirect,
 };
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     EnumChildWindows, GetClassNameW, GetClientRect, HICON, ICON_BIG, ICON_SMALL, IDCANCEL, IDYES, PostMessageW,
@@ -153,6 +153,15 @@ pub fn message(icon: Icon, main: &str, content: &str, more: Option<&str>) {
         d.c.pszExpandedControlText = d.keep("Hide what aqr said");
     }
     d.show();
+}
+
+/// Asks a question of yes or no: whether the answer was yes.
+pub fn confirm(main: &str, content: &str) -> bool {
+    let mut d = Config::new(std::ptr::null_mut(), None, main, content);
+    d.c.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION;
+    d.c.dwCommonButtons = TDCBF_YES_BUTTON | TDCBF_NO_BUTTON;
+    d.c.pfCallback = Some(plain);
+    d.show().0 == IDYES
 }
 
 /// Lines of the content, always as many (for the dialog not to change its size).

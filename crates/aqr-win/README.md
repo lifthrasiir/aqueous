@@ -11,6 +11,10 @@ cargo build -r -p aqr-win
 aqr-win --register      # the verbs, for this user (HKCU); --unregister takes them away
 ```
 
+Installed by `aqr-win-install` (crates/aqr-win-install), it is run as `aqr-win --install`
+(the verbs, the folder on the user's `PATH`, the uninstaller in Settings' Apps) and
+`aqr-win --uninstall [--quiet]` (all that taken away, and the folder: `src/install.rs`).
+
 - The verbs are registered for the user alone, no administrator needed; `.aqr` files and
   "Compress with Aqueous" take this program's icon. On Windows 11 the verbs are under "Show more
   options": the menu above takes only `IExplorerCommand` handlers of packaged (MSIX) applications.
