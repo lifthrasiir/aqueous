@@ -1447,7 +1447,11 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
     let remaps = (machos.len() > 1).then(|| Arc::new(exe::plan(&machos, opt.threads, opt.block / 2)));
     let apart = Apart { remaps, ..cx.apart() };
     let files = cx.files.as_deref();
-    let made = aqr_common::pool::par_map(later.len(), opt.threads, |i| {
+    // the costliest first, so that a long one is not left to the end, alone
+    let mut order: Vec<usize> = (0..later.len()).collect();
+    order.sort_by_cached_key(|&i| std::cmp::Reverse(cost(data(&later[i].1))));
+    let made = aqr_common::pool::par_map(later.len(), opt.threads, |j| {
+        let i = order[j];
         let (_, n, nest) = &later[i];
         let d = data(n);
         let own = apart.cx(d.len(), opt);
@@ -1459,10 +1463,30 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         files.inspect(|f| f.tell(d.as_ptr(), true));
         (child, own.deferred.into_inner())
     });
-    for ((at, ..), (child, deferred)) in later.into_iter().zip(made) {
+    let mut made: Vec<_> = order.into_iter().zip(made).collect();
+    made.sort_unstable_by_key(|&(i, _)| i);
+    for ((at, ..), (_, (child, deferred))) in later.into_iter().zip(made) {
         children[at].1 = child;
         cx.deferred.borrow_mut().extend(deferred);
     }
+}
+
+/// About the thread time making data `d` takes, of its bytes and how long its format takes for
+/// a byte: thread-milliseconds by MB of the files of each format of 10gb (`--stats`, an M4;
+/// rounded), 50 for the others.
+fn cost(d: &[u8]) -> u64 {
+    let per_mb = match detect::detect(d) {
+        Some(Format::SevenZip) => 1750,
+        Some(Format::Gif) => 1590,
+        Some(Format::Lzma) => 1370,
+        Some(Format::Xz) => 750,
+        Some(Format::Gzip) => 370,
+        Some(Format::Zip) => 230,
+        Some(Format::Pe) => 160,
+        Some(Format::Ar) => 120,
+        _ => 50,
+    };
+    d.len() as u64 * per_mb
 }
 
 /// What a context of data made apart ([`make_later`], [`ahead`]) shares with the context it is

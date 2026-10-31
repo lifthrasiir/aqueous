@@ -9,11 +9,11 @@
 //! extension, then by name; PE files by likeness, from where the first is, [`lay_alike`]):
 //! each batch read ([`Source`]), made, laid out, checked and written in their order, a batch
 //! made while the one before it still is ([`AHEAD`]), so that what is held at once is about
-//! two batches', whatever the files' (but for the largest file, made alone). Files of the same content as one before are stored once. Files
-//! that may hold each other (a file and a ZIP archive or gzip file of it, a file and the start
-//! of it) are put in one batch ([`together`]), where what their streams share is stored once
-//! ([`Formula::share_slices`]): the recompressors take what the batch holds as costing
-//! nothing ([`Held`]).
+//! two batches', whatever the files' (but for a batch larger than that, made alone). Files of
+//! the same content as one before are stored once. Files that may hold each other (a file and
+//! a ZIP archive or gzip file of it, a file and the start of it) are put in one batch
+//! ([`together`]), where what their streams share is stored once ([`Formula::share_slices`]):
+//! the recompressors take what the batch holds as costing nothing ([`Held`]).
 //!
 //! A file is to be read without the others, so what files share is bounded: a set of PNG files
 //! takes at most [`Options::set_bytes`] bytes of them (as it is decoded whole for any of them),
@@ -220,15 +220,13 @@ fn compress_tree_noting<S: Source + ?Sized>(
         bytes = bytes.saturating_add(size);
     }
 
+    // those made alone first: between others, one would wait for those before it to be
+    // written, and those after it for it, the threads idle as the longest file of either is made
+    let weight = |b: &Vec<usize>| b.iter().map(|&c| src.size(c)).sum::<u64>();
+    batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(AHEAD));
+
     out.write_all(SegmentWriter::header())?;
-    let weights: Vec<u64> = batches
-        .iter()
-        .map(|b| {
-            let bytes: u64 = b.iter().map(|&c| src.size(c)).sum();
-            // (one longer than a batch made alone)
-            if bytes > opt.batch as u64 { u64::MAX } else { bytes }
-        })
-        .collect();
+    let weights: Vec<u64> = batches.iter().map(weight).collect();
     let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries };
     let pipe = Pipe {
         reader: Mutex::new(Reader { first: HashMap::new() }),
@@ -277,8 +275,10 @@ fn compress_tree_noting<S: Source + ?Sized>(
 
 /// Bytes of the batches let in and not yet written, as so many batches' ([`Options::batch`]): a
 /// batch is read and analyzed while the one before it is still analyzed (as its longest files
-/// leave threads idle), encoded or verified. One longer than a batch is made alone. (10gb: of
-/// about 1,550 core-seconds of compression, 815 were idle with a batch at a time.)
+/// leave threads idle), encoded or verified. One longer than these is made alone (and first);
+/// one longer than a batch (contents that hold each other, kept together) beside others as
+/// these allow. (10gb: of about 1,550 core-seconds of compression, 815 were idle with a batch at
+/// a time.)
 const AHEAD: u64 = 2;
 
 /// What the batches being made share ([`compress_tree_noting`]).
