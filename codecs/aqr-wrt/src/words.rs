@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::sync::{Arc, Mutex};
 
 use aqr_common::varint;
 
@@ -338,22 +339,26 @@ impl Dictionary {
         out
     }
 
-    /// Text `d` coded, on up to `threads` threads; the same whatever `threads` is.
-    pub fn encode(&self, d: &[u8], threads: usize) -> Vec<u8> {
+    /// Text `d` coded, on up to `threads` threads, and the coded and text lengths of its pieces;
+    /// the same whatever `threads` is.
+    pub fn encode(&self, d: &[u8], threads: usize) -> (Vec<u8>, Vec<(usize, usize)>) {
         let pieces = pieces(d);
         if pieces.len() == 1 {
-            return self.encode_piece(d);
+            let text = self.encode_piece(d);
+            let lens = vec![(text.len(), d.len())];
+            return (text, lens);
         }
         // (each piece told of as done: [`aqr_common::progress`])
-        aqr_common::pool::par_map(pieces.len(), threads, |i| {
+        let coded = aqr_common::pool::par_map(pieces.len(), threads, |i| {
             let text = self.encode_piece(pieces[i]);
             aqr_common::progress::done(pieces[i]);
             text
-        })
-        .concat()
+        });
+        let lens = coded.iter().zip(&pieces).map(|(c, p)| (c.len(), p.len())).collect();
+        (coded.concat(), lens)
     }
 
-    fn encode_piece(&self, d: &[u8]) -> Vec<u8> {
+    pub(crate) fn encode_piece(&self, d: &[u8]) -> Vec<u8> {
         let layout = &self.layout;
         let (class, _) = layout.classes();
         let esc = layout.flags[ESC];
@@ -471,111 +476,168 @@ impl Parsed {
         }
         Ok(Parsed { bytes: bytes.to_vec(), layout, entries })
     }
+
+    /// The text `out` from the coded text `text` of a piece, which must fill all of `out`.
+    fn piece(&self, text: &[u8], out: &mut [u8]) -> Result<()> {
+        let (layout, entries, dict) = (&self.layout, &self.entries, &self.bytes[..]);
+        let (class, place) = layout.classes();
+        let (n1, n2) = (layout.one.len(), layout.two.len() * 256);
+        let byte = |j: usize| text.get(j).copied().ok_or_else(corrupt);
+        let put = |out: &mut [u8], o: &mut usize, s: &[u8]| -> Result<()> {
+            out.get_mut(*o..*o + s.len()).ok_or_else(corrupt)?.copy_from_slice(s);
+            *o += s.len();
+            Ok(())
+        };
+        let (mut i, mut o) = (0, 0);
+        while i < text.len() {
+            let s = i;
+            while i < text.len() && class[text[i] as usize] == LIT {
+                i += 1;
+            }
+            put(out, &mut o, &text[s..i])?;
+            if i == text.len() {
+                break;
+            }
+            let mut c = class[text[i] as usize];
+            if c == FLAG + ESC as u8 {
+                let b = byte(i + 1)?;
+                if class[b as usize] == LIT {
+                    return Err(corrupt());
+                }
+                put(out, &mut o, &[b])?;
+                i += 2;
+                continue;
+            }
+            let nosp = c == FLAG + NOSP as u8;
+            if nosp {
+                i += 1;
+                c = class[byte(i)? as usize];
+            }
+            let case = match c {
+                _ if c == FLAG + CAP as u8 => Case::Cap,
+                _ if c == FLAG + UP as u8 => Case::Up,
+                _ => Case::Lower,
+            };
+            if case != Case::Lower {
+                i += 1;
+                c = class[byte(i)? as usize];
+            }
+            let j = place[text[i] as usize] as usize;
+            let k = match c {
+                ONE => {
+                    i += 1;
+                    j
+                }
+                TWO => {
+                    let k = n1 + j * 256 + byte(i + 1)? as usize;
+                    i += 2;
+                    k
+                }
+                THREE => {
+                    let k = n1 + n2 + j * 65536 + (byte(i + 1)? as usize) * 256 + byte(i + 2)? as usize;
+                    i += 3;
+                    k
+                }
+                _ => return Err(corrupt()),
+            };
+            let &(s, e, word) = entries.get(k).ok_or_else(corrupt)?;
+            let t = &dict[s..e];
+            if !word {
+                if nosp || case != Case::Lower {
+                    return Err(corrupt());
+                }
+                put(out, &mut o, t)?;
+            } else {
+                if !nosp {
+                    put(out, &mut o, b" ")?;
+                }
+                let w = o;
+                put(out, &mut o, t)?;
+                match case {
+                    Case::Lower => {}
+                    Case::Cap => out[w].make_ascii_uppercase(),
+                    Case::Up => out[w..o].make_ascii_uppercase(),
+                }
+            }
+        }
+        if o != out.len() {
+            return Err(corrupt());
+        }
+        Ok(())
+    }
 }
 
 thread_local! {
     /// The dictionary last parsed on the thread, as the texts of an archive share one.
-    static PARSED: std::cell::RefCell<Option<std::rc::Rc<Parsed>>> = const { std::cell::RefCell::new(None) };
+    static PARSED: std::cell::RefCell<Option<Arc<Parsed>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The coded and text lengths of the pieces (each a pair of varints), as the modules'
+/// parameters.
+pub fn params(lens: &[(usize, usize)]) -> Vec<u8> {
+    let mut p = Vec::new();
+    for &(c, t) in lens {
+        varint::put(&mut p, c as u64);
+        varint::put(&mut p, t as u64);
+    }
+    p
+}
+
+/// The text of `len` bytes from coded text `text` in the pieces of `params` ([`params`]), each
+/// decoded by `piece` (its coded text, and its text to fill) on up to `threads` threads.
+pub(crate) fn in_pieces(
+    params: &[u8],
+    text: &[u8],
+    len: usize,
+    threads: usize,
+    piece: impl Fn(&[u8], &mut [u8]) -> Result<()> + Sync,
+) -> Result<Vec<u8>> {
+    let mut lens = Vec::new();
+    let (mut at, mut coded, mut total) = (0, 0usize, 0usize);
+    while at < params.len() {
+        let mut get = || varint::get(params, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
+        let (c, t) = (get()?, get()?);
+        coded = coded.checked_add(c).ok_or_else(corrupt)?;
+        total = total.checked_add(t).ok_or_else(corrupt)?;
+        lens.push((c, t));
+    }
+    if lens.is_empty() || coded != text.len() || total != len {
+        return Err(corrupt());
+    }
+    let mut out = vec![0; len];
+    let mut jobs = Vec::with_capacity(lens.len());
+    let (mut rest, mut text) = (&mut out[..], text);
+    for &(c, t) in &lens {
+        let (o, r) = rest.split_at_mut(t);
+        let (x, y) = text.split_at(c);
+        jobs.push(Mutex::new((x, o)));
+        (rest, text) = (r, y);
+    }
+    let done = aqr_common::pool::par_map(jobs.len(), threads, |i| {
+        let mut j = jobs[i].lock().unwrap();
+        let (x, o) = &mut *j;
+        piece(x, o)
+    });
+    done.into_iter().collect::<Result<()>>()?;
+    Ok(out)
 }
 
 /// The text of `len` bytes from `text` coded with the dictionary of resource `dict`
-/// ([`Dictionary::to_bytes`]).
-pub fn decode(dict: &[u8], text: &[u8], len: usize) -> Result<Vec<u8>> {
+/// ([`Dictionary::to_bytes`]), in pieces of `params` ([`params`]), decoded on up to `threads`
+/// threads.
+pub fn decode(params: &[u8], dict: &[u8], text: &[u8], len: usize, threads: usize) -> Result<Vec<u8>> {
     let p = PARSED.with(|c| {
         let mut c = c.borrow_mut();
         match &*c {
             Some(p) if p.bytes == dict => Ok(p.clone()),
             _ => {
-                let p = std::rc::Rc::new(Parsed::of(dict)?);
+                let p = Arc::new(Parsed::of(dict)?);
                 *c = Some(p.clone());
                 Ok(p)
             }
         }
     })?;
-    let (layout, entries, dict) = (&p.layout, &p.entries, &p.bytes[..]);
-    let (class, place) = layout.classes();
-    let (n1, n2) = (layout.one.len(), layout.two.len() * 256);
-    let mut out = Vec::with_capacity(len);
-    let mut i = 0;
-    while i < text.len() {
-        let s = i;
-        while i < text.len() && class[text[i] as usize] == LIT {
-            i += 1;
-        }
-        out.extend_from_slice(&text[s..i]);
-        if i == text.len() {
-            break;
-        }
-        let byte = |j: usize| text.get(j).copied().ok_or_else(corrupt);
-        let mut c = class[text[i] as usize];
-        if c == FLAG + ESC as u8 {
-            let b = byte(i + 1)?;
-            if class[b as usize] == LIT {
-                return Err(corrupt());
-            }
-            out.push(b);
-            i += 2;
-            continue;
-        }
-        let nosp = c == FLAG + NOSP as u8;
-        if nosp {
-            i += 1;
-            c = class[byte(i)? as usize];
-        }
-        let case = match c {
-            _ if c == FLAG + CAP as u8 => Case::Cap,
-            _ if c == FLAG + UP as u8 => Case::Up,
-            _ => Case::Lower,
-        };
-        if case != Case::Lower {
-            i += 1;
-            c = class[byte(i)? as usize];
-        }
-        let j = place[text[i] as usize] as usize;
-        let k = match c {
-            ONE => {
-                i += 1;
-                j
-            }
-            TWO => {
-                let k = n1 + j * 256 + byte(i + 1)? as usize;
-                i += 2;
-                k
-            }
-            THREE => {
-                let k = n1 + n2 + j * 65536 + (byte(i + 1)? as usize) * 256 + byte(i + 2)? as usize;
-                i += 3;
-                k
-            }
-            _ => return Err(corrupt()),
-        };
-        let &(s, e, word) = entries.get(k).ok_or_else(corrupt)?;
-        let t = &dict[s..e];
-        if !word {
-            if nosp || case != Case::Lower {
-                return Err(corrupt());
-            }
-            out.extend_from_slice(t);
-        } else {
-            if !nosp {
-                out.push(b' ');
-            }
-            let w = out.len();
-            out.extend_from_slice(t);
-            match case {
-                Case::Lower => {}
-                Case::Cap => out[w].make_ascii_uppercase(),
-                Case::Up => out[w..].make_ascii_uppercase(),
-            }
-        }
-        if out.len() > len {
-            return Err(corrupt());
-        }
-    }
-    if out.len() != len {
-        return Err(corrupt());
-    }
-    Ok(out)
+    in_pieces(params, text, len, threads, |x, o| p.piece(x, o))
 }
 
 #[cfg(test)]
@@ -591,12 +653,12 @@ mod tests {
     }
 
     fn back_with(dict: &Dictionary, d: &[u8]) -> Vec<u8> {
-        let text = dict.encode(d, 1);
+        let (text, lens) = dict.encode(d, 1);
         assert_eq!(Layout::parse(&dict.layout.params()).unwrap(), dict.layout);
-        let r = dict.to_bytes();
-        let out = decode(&r, &text, d.len()).unwrap();
+        let (r, p) = (dict.to_bytes(), params(&lens));
+        let out = decode(&p, &r, &text, d.len(), 1).unwrap();
         assert!(out == d, "{:?}", String::from_utf8_lossy(&out));
-        assert!(decode(&r, &text, d.len() + 1).is_err());
+        assert!(decode(&p, &r, &text, d.len() + 1, 1).is_err());
         text
     }
 
@@ -681,18 +743,28 @@ mod tests {
         let one = Dictionary::of(&[&d], 1).unwrap();
         let four = Dictionary::of(&[&d], 4).unwrap();
         assert_eq!(one.to_bytes(), four.to_bytes());
-        let text = one.encode(&d, 4);
-        assert!(text == one.encode_piece(&d));
-        assert!(decode(&one.to_bytes(), &text, d.len()).unwrap() == d);
+        let (text, lens) = one.encode(&d, 4);
+        assert!(text == one.encode_piece(&d) && lens.len() == 4);
+        let (r, p) = (one.to_bytes(), params(&lens));
+        for threads in [1, 4] {
+            assert!(decode(&p, &r, &text, d.len(), threads).unwrap() == d);
+        }
+        // pieces not where they were coded, or none
+        let mut moved = lens.clone();
+        (moved[0].0, moved[1].0) = (moved[0].0 - 1, moved[1].0 + 1);
+        assert!(decode(&params(&moved), &r, &text, d.len(), 4).is_err());
+        assert!(decode(&[], &r, &text, d.len(), 4).is_err());
     }
 
     #[test]
     fn rejects() {
         let d = times("the cat and The CAT and the cat. ", 10);
         let dict = Dictionary::of(&[&d], 1).unwrap();
-        let text = dict.encode(&d, 1);
+        let (text, _) = dict.encode(&d, 1);
         let l = &dict.layout;
         let p = l.params();
+        // (as one piece)
+        let decode = |r: &[u8], text: &[u8], len: usize| decode(&params(&[(text.len(), len)]), r, text, len, 1);
         let bad = |entries: &[u8], text: &[u8]| decode(&[&p[..], entries].concat(), text, d.len()).is_err();
         // an entry empty, unterminated or of letters not all lower case; a code past the entries
         assert!(!bad(b"cat\nthe\nand\n", &text));

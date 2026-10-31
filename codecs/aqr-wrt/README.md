@@ -34,7 +34,10 @@ Measured 2026-10-26 on an Apple M4 (10 cores), through `aqr` at level `mid`.
 - The module codes 110 MB/s and decodes about 400 MB/s on a thread (`aqr-wrt-bench`, enwik8).
   - Coding a text of more than 16 MiB is spread over threads, in pieces that end with a
     byte no token holds (LF, `"`, `,`, …), so minified JSON too; the coded text is the same.
-  - Decoding is one pass per text. That is what `enwik9` alone waits for (2.3 s).
+  - Decoding goes by the same pieces, on threads of their own: the module's params tell where
+    they are (version 2). `enwik9` decodes at 409 MB/s on a thread and 2,875 MB/s on 10
+    (`aqr-wrt-bench`, 2.5 -> 0.35 s against version 1's single pass). In Wasm the module
+    still decodes on one thread.
 
 Text of Hangul, measured 2026-10-29 on the same machine through `aqr -5`: 512 MiB from the
 middle of the namuwiki dump of 2021-03-01 (JSON of one line, 72% of its bytes above 0x7F).

@@ -29,13 +29,18 @@ Contents:
 
 ## 2. The module
 
-- **Module**: name `wrt-recons`, version 1.
-- **Params**: none (empty).
+- **Module**: name `wrt-recons`, version 2.
+- **Params**: the pieces of the coded text, one or more, each a pair of varints: the length of
+  its coded text, then the length of its text. The coded texts of the pieces follow each other
+  in the input, and their lengths must add up to the input's length. The lengths of their texts
+  must add up to the declared length.
 - **Resources**: one, the dictionary (§3).
 - **Inputs**: one, `text`, the coded text (§4).
-- **Output**: the text of the declared length (§4). Any inconsistency is an error. That
-  includes a malformed dictionary, coded text that ends inside a code, and an output of a
-  length other than the declared one.
+- **Output**: the texts of the pieces (§4), in order. Any inconsistency is an error. That
+  includes malformed params, a malformed dictionary, coded text that ends inside a code, and a
+  piece giving a text of a length other than its own.
+
+Version 1 had no params: the coded text was one piece, of the declared length.
 
 ## 3. The dictionary
 
@@ -68,8 +73,9 @@ entries                       each followed by LF, to the end of the resource
 
 ## 4. Rebuilding the text
 
-The coded text is read from its start. At each step, the next byte b determines what comes
-next:
+Each piece's coded text is read from its start, and must give exactly the length of its text.
+The pieces are independent, so they may be rebuilt in any order or at once. At each step, the
+next byte b determines what comes next:
 
 - b is not special: b is output.
 - b is ESC: the byte after it is output. That byte must be special.
@@ -88,7 +94,7 @@ next:
     - its first letter in upper case, with CAP;
     - all its letters in upper case, with UP.
 
-The output ends where the coded text does, and its length must be the declared one.
+The piece's text ends where its coded text does. A step must not be cut by the end of the piece.
 
 ## 5. Encoding *(encoder)*
 
@@ -133,7 +139,9 @@ The output ends where the coded text does, and its length must be the declared o
     written. After that comes CAP or UP for its case.
   - A text longer than 16 MiB is coded in pieces of about 16 MiB on threads of their own, each
     ending with a byte that is neither a space nor in any token (such as LF, `"` or `,`). The
-    pieces then code to the same bytes as the whole, minified JSON among them.
+    pieces then code to the same bytes as the whole, minified JSON among them, and the params
+    tell where they are, for them to be rebuilt on threads of their own too. A shorter text is
+    one piece.
 - **What is taken.**
   - Text of at least 256 KiB in which at most 1 in 1000 bytes are not text bytes. Text bytes
     are the printable ones, tab, CR, LF, form feed, and every byte from 0x80 on.
@@ -163,10 +171,7 @@ The output ends where the coded text does, and its length must be the declared o
 ## 6. The module `wrt-recons-hangul`
 
 - **Module**: name `wrt-recons-hangul`, version 1.
-- **Params**: the pieces of the coded text, one or more, each a pair of varints: the length of
-  its coded text, then the length of its text. The coded texts of the pieces follow each other
-  in the input, and their lengths must add up to the input's length. The lengths of their texts
-  must add up to the declared length.
+- **Params**: the pieces of the coded text, as in §2.
 - **Resources**: one, the dictionary.
 - **Inputs**: one, `text`, the coded text.
 - **Output**: the texts of the pieces, in order. Any inconsistency is an error, as in §2.

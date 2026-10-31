@@ -5,11 +5,11 @@ use crate::words::{self};
 use crate::{Result, corrupt, hangul};
 
 /// `wrt-recons`: the text of `len` bytes from `resources` (the dictionary) and `inputs` (the
-/// coded text); no parameters.
-pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, _threads: usize) -> Result<Vec<u8>> {
-    let (&[], &[dict], &[text]) = (params, resources, inputs) else { return Err(corrupt()) };
+/// coded text), in the pieces of `params`, on up to `threads` threads.
+pub fn decode(params: &[u8], resources: &[&[u8]], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    let (&[dict], &[text]) = (resources, inputs) else { return Err(corrupt()) };
     let len = usize::try_from(len).map_err(|_| corrupt())?;
-    words::decode(dict, text, len)
+    words::decode(params, dict, text, len, threads)
 }
 
 /// `wrt-recons-hangul`: the text of `len` bytes from `resources` (the dictionary) and `inputs`

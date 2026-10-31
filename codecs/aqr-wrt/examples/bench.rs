@@ -3,7 +3,7 @@
 //! For each text file: its size by zstd (at `LEVEL`, by default 9; with `LONG` set, with long
 //! distance matching and a window of 2^27) as it is and as the dictionary and the text coded
 //! (each alone), the module's encoding and decoding speeds (of the file's bytes, on `THREADS`
-//! threads, by default 1; text of Hangul decoded on as many), and that it decodes back.
+//! threads, by default 1), and that it decodes back.
 
 use std::time::Instant;
 
@@ -37,7 +37,7 @@ fn main() {
         let out = if a.module == aqr_wrt::formula::HANGUL {
             aqr_wrt::formula::decode_hangul(&a.params, &[dict], &inputs, d.len() as u64, threads)
         } else {
-            aqr_wrt::formula::decode(&a.params, &[dict], &inputs, d.len() as u64, 1)
+            aqr_wrt::formula::decode(&a.params, &[dict], &inputs, d.len() as u64, threads)
         }
         .unwrap();
         let dt = t.elapsed().as_secs_f64();
@@ -59,7 +59,7 @@ fn main() {
         (total, raw, packed, te, td) = (total + d.len(), raw + before, packed + after, te + e, td + dt);
     }
     println!(
-        "total: {:.1} MB, zstd {:.3} -> {:.3} MB ({:+.1}%), encode {:.0} MB/s, decode {:.0} MB/s (one thread)",
+        "total: {:.1} MB, zstd {:.3} -> {:.3} MB ({:+.1}%), encode {:.0} MB/s, decode {:.0} MB/s",
         total as f64 / 1e6,
         raw as f64 / 1e6,
         packed as f64 / 1e6,

@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 use aqr_common::varint;
 
-use crate::words::PIECE;
+use crate::words::{PIECE, in_pieces};
 use crate::{Result, corrupt};
 
 /// The longest token coded by an entry, in bytes (16 syllables, or 15 and the space before).
@@ -499,17 +499,6 @@ impl Parsed {
     }
 }
 
-/// The coded and text lengths of the pieces (each a pair of varints), as the module's
-/// parameters.
-pub fn params(lens: &[(usize, usize)]) -> Vec<u8> {
-    let mut p = Vec::new();
-    for &(c, t) in lens {
-        varint::put(&mut p, c as u64);
-        varint::put(&mut p, t as u64);
-    }
-    p
-}
-
 thread_local! {
     /// The dictionary last parsed on the thread, as the texts of an archive share one.
     static PARSED: std::cell::RefCell<Option<std::sync::Arc<Parsed>>> = const { std::cell::RefCell::new(None) };
@@ -530,39 +519,13 @@ pub fn decode(params: &[u8], dict: &[u8], text: &[u8], len: usize, threads: usiz
             }
         }
     })?;
-    let mut lens = Vec::new();
-    let (mut at, mut coded, mut total) = (0, 0usize, 0usize);
-    while at < params.len() {
-        let mut get = || varint::get(params, &mut at).ok().and_then(|n| usize::try_from(n).ok()).ok_or_else(corrupt);
-        let (c, t) = (get()?, get()?);
-        coded = coded.checked_add(c).ok_or_else(corrupt)?;
-        total = total.checked_add(t).ok_or_else(corrupt)?;
-        lens.push((c, t));
-    }
-    if lens.is_empty() || coded != text.len() || total != len {
-        return Err(corrupt());
-    }
-    let mut out = vec![0; len];
-    let mut jobs = Vec::with_capacity(lens.len());
-    let (mut rest, mut text) = (&mut out[..], text);
-    for &(c, t) in &lens {
-        let (o, r) = rest.split_at_mut(t);
-        let (x, y) = text.split_at(c);
-        jobs.push(Mutex::new((x, o)));
-        (rest, text) = (r, y);
-    }
-    let done = aqr_common::pool::par_map(jobs.len(), threads, |i| {
-        let mut j = jobs[i].lock().unwrap();
-        let (x, o) = &mut *j;
-        p.piece(x, o)
-    });
-    done.into_iter().collect::<Result<()>>()?;
-    Ok(out)
+    in_pieces(params, text, len, threads, |x, o| p.piece(x, o))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::words::params;
     use aqr_common::rng::Rng;
 
     fn back_with(dict: &Dictionary, d: &[u8], threads: usize) -> Vec<u8> {

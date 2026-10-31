@@ -174,7 +174,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("0355718f6297f98da16d552deca2835c72cd783a0e8bf50c6dd0a3454a342495"),
+        sha512_256: hex("d0eac1ce671e3d35d57d1e6e03cd00c3d474540d50f542b09a24d503fb338384"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -366,13 +366,13 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "wrt-recons-hangul",
         version: 1,
-        sha512_256: hex("eb8e46fbdbc29ae2605360036762df35a4ae04094ef8dcdc08f40000aa6515e0"),
+        sha512_256: hex("16abb6cba6e4a68a3d47a689a0bd0f6c1b0f230df4307500b7bb877a16961cca"),
         block: include_bytes!("../wasm/wrt-recons-hangul.block"),
     },
     Known {
         name: "wrt-recons",
-        version: 1,
-        sha512_256: hex("9e0004e5d55e0c03b55c63fc049a280dbdf73380c8b9d1791c29017a98c76f93"),
+        version: 2,
+        sha512_256: hex("5b485e107d056ace82a8da79d67bb3de7b68e653164f73ed6e5fc36c19e12246"),
         block: include_bytes!("../wasm/wrt-recons.block"),
     },
     Known {

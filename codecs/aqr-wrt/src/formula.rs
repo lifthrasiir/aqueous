@@ -9,19 +9,21 @@
 use aqr_formula::{Formula, Kind, Module, Node, Resource};
 
 use crate::hangul;
-use crate::words::Dictionary;
+use crate::words::{self, Dictionary};
 
 pub use crate::module::{decode, decode_hangul};
 
-pub const MODULE: Module = Module::new("wrt-recons", 1).with_memory(memory);
+pub const MODULE: Module = Module::new("wrt-recons", 2).with_memory(memory);
 pub const HANGUL: Module = Module::new("wrt-recons-hangul", 1).with_memory(memory_hangul);
 
 /// The memory of [`MODULE`]: the whole of it with the dictionary parsed (`D` bytes of resource,
 /// copied once more into the parsed dictionary), and the list of entries (12 bytes each, at most
-/// `D / 2` of them, a vector grown by pushes: three times its final length while it grows).
+/// `D / 2` of them, a vector grown by pushes: three times its final length while it grows); and
+/// per piece of the parameters, as [`memory_hangul`] counts.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let &[dict] = u.resources else { return None };
-    Some(u.whole(dict + 3 * 12 * (dict / 2), 8))
+    let pieces = u.params.len() as u64 / 2 + 1;
+    Some(u.whole(dict + 3 * 12 * (dict / 2) + pieces * (3 * 8 + 24 + 24 + 8), 8))
 }
 
 /// The memory of [`HANGUL`]: as [`memory`], with entries of 8 bytes; and, per piece of the
@@ -171,14 +173,15 @@ fn coded(input: &[u8], shared: &Shared, own: usize, threads: usize) -> Option<Fo
         }
         let (text, pieces) = dict.encode(input, threads);
         let inputs = vec![f.push_as("wrt/hangul", Kind::Text, text)];
-        f.root = Node::apply_with(HANGUL, vec![resource.clone()], hangul::params(&pieces), inputs, len);
+        f.root = Node::apply_with(HANGUL, vec![resource.clone()], words::params(&pieces), inputs, len);
     } else {
         let (dict, resource) = shared.words.as_ref()?;
-        if !pays(input, |s| dict.encode(s, 1), own) {
+        if !pays(input, |s| dict.encode_piece(s), own) {
             return None;
         }
-        let inputs = vec![f.push_as("wrt/text", Kind::Text, dict.encode(input, threads))];
-        f.root = Node::apply_with(MODULE, vec![resource.clone()], Vec::new(), inputs, len);
+        let (text, pieces) = dict.encode(input, threads);
+        let inputs = vec![f.push_as("wrt/text", Kind::Text, text)];
+        f.root = Node::apply_with(MODULE, vec![resource.clone()], words::params(&pieces), inputs, len);
     }
     Some(f)
 }
@@ -194,7 +197,7 @@ mod tests {
         let inputs: Vec<&[u8]> = f.streams.iter().map(|s| &s.data[..]).collect();
         match a.module {
             m if m == HANGUL => decode_hangul(&a.params, &resources, &inputs, len as u64, 2),
-            _ => decode(&a.params, &resources, &inputs, len as u64, 1),
+            _ => decode(&a.params, &resources, &inputs, len as u64, 2),
         }
     }
 
