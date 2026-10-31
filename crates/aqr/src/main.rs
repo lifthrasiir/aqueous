@@ -358,11 +358,13 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     output(out, a.force)?;
     let start = Instant::now();
     let rec = stats::record(a.stats.as_ref());
-    // large buffers kept in files beside the output (gone once dropped), not on the heap
+    // large buffers kept in files beside the output (gone once dropped), not on the heap; in the
+    // temporary directory where the output is on a drive of the network: too slow for them, and
+    // Windows there neither holds a file open against deletion nor deletes it on close
     let mut opt = a.opt.clone();
     out.file_name().ok_or(format!("{}: not a file's name", out.display()))?;
     let dir = out.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    opt.spill = Some(dir.to_owned());
+    opt.spill = Some(if remote(dir) { std::env::temp_dir() } else { dir.to_owned() });
     let opt = &opt;
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
@@ -493,6 +495,50 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         });
     }
     Ok(())
+}
+
+/// Whether `dir` is on a drive of the network (false where that is not known).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn remote(dir: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_bytes()) else { return false };
+    let mut s = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: a path of a NUL, and room for the result
+    if unsafe { libc::statfs(c.as_ptr(), s.as_mut_ptr()) } != 0 {
+        return false;
+    }
+    // SAFETY: filled by statfs
+    let s = unsafe { s.assume_init() };
+    #[cfg(target_os = "macos")]
+    return s.f_flags & libc::MNT_LOCAL as u32 == 0;
+    // NFS, SMB, CIFS, SMB2, AFS, Coda, Ceph and 9P (FUSE left out: as often local)
+    #[cfg(target_os = "linux")]
+    return matches!(
+        s.f_type as u32,
+        0x6969 | 0x517b | 0xff53_4d42 | 0xfe53_4d42 | 0x5346_414f | 0x7375_7245 | 0x00c3_6400 | 0x0102_1997
+    );
+}
+
+#[cfg(windows)]
+fn remote(dir: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    /// `DRIVE_REMOTE` (of WindowsProgramming, a feature not taken for it alone).
+    const DRIVE_REMOTE: u32 = 4;
+    let Ok(dir) = std::path::absolute(dir) else { return false };
+    let w: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let mut root = vec![0u16; w.len() + 1];
+    // SAFETY: a path of a NUL, and room for its root (no longer than the path and a backslash)
+    if unsafe { GetVolumePathNameW(w.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
+        return false;
+    }
+    // SAFETY: the root of a NUL, as GetVolumePathNameW wrote it
+    unsafe { GetDriveTypeW(root.as_ptr()) == DRIVE_REMOTE }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+fn remote(_: &Path) -> bool {
+    false
 }
 
 /// Whether the bar is drawn: on a terminal that takes it.

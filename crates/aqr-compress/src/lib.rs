@@ -204,8 +204,8 @@ pub struct Options {
     pub batch: usize,
     /// The directory where large buffers of streams are kept rather than on the heap
     /// ([`spill::Spill`], files made there and gone once their buffers are dropped; beside the
-    /// output, as a temporary directory may be on another drive): the system writes them out as
-    /// memory runs short. None by default.
+    /// output by aqr, as a temporary directory may be on another drive, but where that is a drive
+    /// of the network): the system writes them out as memory runs short. None by default.
     pub spill: Option<std::path::PathBuf>,
 }
 
