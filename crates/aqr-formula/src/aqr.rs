@@ -656,21 +656,11 @@ impl Encoder {
             }
             self.content_block(out, true, &leaf, self.how(&f.streams[stream]), None)?;
         } else {
-            // the non-leaf block of each stream sliced, by its ordinal
-            let mut ordinals = vec![None; f.streams.len()];
-            f.visit(&mut |n| {
-                if let &Node::Slice { stream, len: 1.., .. } = n {
-                    ordinals[stream] = Some(0);
-                }
-            });
-            let (mut sliced, mut next) = (Vec::new(), 0);
-            for (s, o) in ordinals.iter_mut().enumerate() {
-                if o.is_some() {
-                    *o = Some(next);
-                    next += blocks_in(total(streams[s]));
-                    sliced.push(s);
-                }
-            }
+            // the non-leaf blocks sliced, of each stream in order, by their ordinals
+            let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| &s.apply.inputs).collect();
+            nodes.push(&f.root);
+            let used = sliced(f.streams.len(), |s| total(streams[s]), nodes);
+            let (ordinals, next) = listed(&used, 0..f.streams.len());
             let (mut modules, mut resources): (Vec<Module>, Vec<&Resource>) = (Vec::new(), Vec::new());
             for a in f.applies() {
                 if !modules.contains(&a.module) {
@@ -709,8 +699,11 @@ impl Encoder {
                 self.resource_block(out, r)?;
             }
             formula_block(out, 1, &always_compressed(&mut self.cctx(), &[&data], level, self.threads)?);
-            for s in sliced {
-                self.stream_blocks(out, streams[s], self.how(&f.streams[s]), None)?;
+            for (s, used) in used.iter().enumerate() {
+                let (data, how) = (streams[s], self.how(&f.streams[s]));
+                for (r, _) in block_ranges(total(data)).zip(used).filter(|(_, u)| **u) {
+                    self.content_block(out, false, &cut(data, r.start, r.len()), how, None)?;
+                }
             }
         }
 
@@ -724,7 +717,8 @@ impl Encoder {
 /// Instructions as nodes push their values, with the stack they leave: the outputs of
 /// applications of several outputs not taken yet by (application, output), the rest `None`.
 struct Emit<'a> {
-    ordinals: &'a [Option<u64>],
+    /// The index of each block of each stream in the formula block's list ([`listed`]).
+    ordinals: &'a [Vec<Option<u64>>],
     modules: &'a [Module],
     resources: &'a [&'a Resource],
     out: &'a mut Vec<u8>,
@@ -743,12 +737,11 @@ impl Emit<'_> {
             }
             &Node::Slice { stream, start, len } => {
                 // (a slice of each block it is over, concatenated)
-                let first = self.ordinals[stream].unwrap();
                 let pieces = slice_blocks(start, len);
                 let n = pieces.len();
                 for (k, at, n) in pieces {
                     self.out.push(SLICE);
-                    varint::put(self.out, first + k);
+                    varint::put(self.out, self.ordinals[stream][k as usize].unwrap());
                     varint::put(self.out, at);
                     varint::put(self.out, n);
                     self.stack.push(None);
@@ -1493,6 +1486,44 @@ pub const BLOCK: usize = 1 << 20;
 /// Non-leaf blocks of a stream of `len` bytes (one at least).
 fn blocks_in(len: usize) -> u64 {
     len.div_ceil(BLOCK).max(1) as u64
+}
+
+/// The blocks of each of `streams` streams (of `len_of` bytes) that the slices below `nodes`
+/// are over, by stream and block; none for a stream not sliced.
+fn sliced<'a>(
+    streams: usize,
+    len_of: impl Fn(usize) -> usize,
+    nodes: impl IntoIterator<Item = &'a Node>,
+) -> Vec<Vec<bool>> {
+    let mut used: Vec<Vec<bool>> = vec![Vec::new(); streams];
+    for n in nodes {
+        n.visit(&mut |n| {
+            if let &Node::Slice { stream, start, len: len @ 1.. } = n {
+                let u = &mut used[stream];
+                if u.is_empty() {
+                    *u = vec![false; blocks_in(len_of(stream)) as usize];
+                }
+                slice_blocks(start, len).into_iter().for_each(|(k, _, _)| u[k as usize] = true);
+            }
+        });
+    }
+    used
+}
+
+/// The index in a formula block's list of each block `used` ([`sliced`]), those of the streams
+/// in `order` one after another; and how many are listed.
+fn listed(used: &[Vec<bool>], order: impl IntoIterator<Item = usize>) -> (Vec<Vec<Option<u64>>>, u64) {
+    let mut ordinals: Vec<Vec<Option<u64>>> = used.iter().map(|u| vec![None; u.len()]).collect();
+    let mut next = 0;
+    for st in order {
+        for (o, &u) in ordinals[st].iter_mut().zip(&used[st]) {
+            if u {
+                *o = Some(next);
+                next += 1;
+            }
+        }
+    }
+    (ordinals, next)
 }
 
 /// The ranges of the non-leaf blocks of a stream of `len` bytes.
@@ -3545,6 +3576,29 @@ mod tests {
 
     /// A stream of more than [`BLOCK`] bytes is several non-leaf blocks: slices within one,
     /// over a boundary and of all of it come back, and the archive has a block for each.
+    /// The blocks `f` slices listed, of its streams in order.
+    fn ordinals_of(f: &Formula) -> Vec<Vec<Option<u64>>> {
+        let mut nodes: Vec<&Node> = f.shared.iter().flat_map(|s| &s.apply.inputs).collect();
+        nodes.push(&f.root);
+        listed(&sliced(f.streams.len(), |s| f.streams[s].data.len(), nodes), 0..f.streams.len()).0
+    }
+
+    /// A formula slicing some blocks of a stream alone: only those are written and listed.
+    #[test]
+    fn some_blocks_of_a_stream() {
+        let mut f = Formula::default();
+        let n = 3 * BLOCK + 1000;
+        let d: Vec<u8> = (0..n as u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        f.push("a", d.clone());
+        let b = BLOCK as u64;
+        let parts = [(5, 10), (2 * b + 10, 990), (3 * b, 7)];
+        f.root = Node::concat(parts.iter().map(|&(s, l)| Node::slice(0, s, l)));
+        let want: Vec<u8> = parts.iter().flat_map(|&(s, l)| d[s as usize..][..l as usize].to_vec()).collect();
+        let c = encode(&f, Some(checksum(&want)), Level::Zstd(1)).unwrap();
+        assert!(decode(&c, &natives()).unwrap() == want);
+        assert_eq!(open(&c, &natives()).unwrap().blocks.non_leaf.len(), 3);
+    }
+
     #[test]
     fn streams_of_several_blocks() {
         let mut f = Formula::default();
@@ -3557,7 +3611,7 @@ mod tests {
         let want: Vec<u8> = parts.iter().flat_map(|&(s, l)| d[s as usize..][..l as usize].to_vec()).collect();
         assert!(
             description_bound(&f.root) >= {
-                let ordinals = [Some(0)];
+                let ordinals = ordinals_of(&f);
                 let mut out = Vec::new();
                 Emit { ordinals: &ordinals, modules: &[], resources: &[], out: &mut out, stack: vec![] }.node(&f.root);
                 out.len()
@@ -3661,7 +3715,7 @@ mod tests {
             w.extend_from_slice(&d[5..7]);
             w
         };
-        let ordinals: Vec<_> = (0..f.streams.len() as u64).map(Some).collect();
+        let ordinals = ordinals_of(&f);
         let mut out = Vec::new();
         let mut e = Emit { ordinals: &ordinals, modules: &[REV], resources: &[], out: &mut out, stack: vec![] };
         for (i, s) in f.shared.iter().enumerate() {
@@ -4676,7 +4730,7 @@ mod tests {
     #[test]
     fn bound() {
         let desc = |f: &Formula| {
-            let ordinals: Vec<_> = (0..f.streams.len() as u64).map(Some).collect();
+            let ordinals = ordinals_of(f);
             let resources: Vec<&Resource> = f.applies().into_iter().flat_map(|a| &a.resources).collect();
             let mut out = Vec::new();
             Emit { ordinals: &ordinals, modules: &[REV], resources: &resources, out: &mut out, stack: vec![] }

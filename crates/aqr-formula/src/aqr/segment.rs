@@ -478,20 +478,20 @@ impl Encoder {
         resources: &[&Resource],
     ) -> Vec<u8> {
         let mut data = Vec::new();
-        // the blocks it slices, by their ordinals' deltas, and its own index of each stream's
-        // first (a stream's blocks one after another)
+        // the blocks it slices (not every block of a stream it slices: the spec wants each block
+        // listed used), by their ordinals' deltas, and its own index of each
         let mut sliced: Vec<(u64, usize)> = u.streams.iter().map(|&st| (ordinals[st].unwrap(), st)).collect();
         sliced.sort_unstable();
-        let mut local = vec![None; f.streams.len()];
-        let all: u64 = sliced.iter().map(|&(_, st)| super::blocks_in(f.streams[st].data.len())).sum();
+        let mut nodes: Vec<&Node> = u.shared.iter().flat_map(|&i| &f.shared[i].apply.inputs).collect();
+        nodes.extend(&leaf.outputs);
+        let used = super::sliced(f.streams.len(), |st| f.streams[st].data.len(), nodes);
+        let (local, all) = super::listed(&used, sliced.iter().map(|&(_, st)| st));
         varint::put(&mut data, all);
-        let (mut next, mut k) = (first, 0);
+        let mut next = first;
         for &(o, st) in &sliced {
-            local[st] = Some(k);
-            for b in 0..super::blocks_in(f.streams[st].data.len()) {
-                varint::put(&mut data, o + b - next);
-                next = o + b + 1;
-                k += 1;
+            for (b, _) in used[st].iter().enumerate().filter(|(_, u)| **u) {
+                varint::put(&mut data, o + b as u64 - next);
+                next = o + b as u64 + 1;
             }
         }
         let own_resources: Vec<&Resource> = u.resources.iter().collect();
@@ -594,7 +594,7 @@ fn uses(f: &Formula, leaf: &Leaf) -> Uses {
 #[cfg(test)]
 mod tests {
     use super::super::tests::{CUT, REV, natives};
-    use super::super::{Level, Value, checksum, decode, decode_value, invalid};
+    use super::super::{BLOCK, Level, Value, checksum, decode, decode_value, invalid};
     use super::*;
     use crate::{Apply, Kind};
     use tree::{Entry, EntryNode, Extra, Time};
@@ -641,6 +641,24 @@ mod tests {
         out.extend_from_slice(&w.finish(&enc, &t, &contents).unwrap().0);
         let Ok(Value::Tree(_, files)) = decode_value(&out, &natives()) else { panic!() };
         assert_eq!(files, [b"zyxolleh".to_vec(), b"ollehzyx".to_vec()]);
+    }
+
+    /// Leaves slicing parts of a stream of several blocks list only the blocks they slice: one
+    /// leaf of all of it and others of a block or two, as files shared within a tar are.
+    #[test]
+    fn leaves_of_some_blocks() {
+        let mut f = Formula::default();
+        let n = 3 * BLOCK + 100;
+        let d: Vec<u8> = (0..n as u32).map(|i| (i.wrapping_mul(2654435761) >> 24) as u8).collect();
+        f.push("a", d.clone());
+        let b = BLOCK as u64;
+        let parts = [(0, n as u64), (10, 20), (2 * b + 5, 50), (b - 5, 10), (3 * b, 100)];
+        let leaves: Vec<Leaf> =
+            parts.iter().map(|&(s, l)| Leaf { outputs: vec![Node::slice(0, s, l)], sums: vec![None] }).collect();
+        let want: Vec<u8> = parts.iter().flat_map(|&(s, l)| d[s as usize..][..l as usize].to_vec()).collect();
+        let w = SegmentWriter::new();
+        let batch = w.batch(&Encoder::new(Level::Zstd(1)), &f, &leaves).unwrap();
+        assert!(decode(&w.standalone(&batch), &natives()).unwrap() == want);
     }
 
     /// A segment of two batches of many small streams alike, of text records of the same

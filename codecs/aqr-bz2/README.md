@@ -55,7 +55,8 @@ files stored as they are (no gain at all before aqr-bz2):
 | this repository's sources as a tar (`bzip2 -9`) | 6.63 MB | 5.83 MB (−12.1%) |
 | a Rust stage0 snapshot (a tar of Windows executables) | 25.70 MB | 22.63 MB (−11.9%) |
 | emsdk's `wasm-binaries.tbz2` | 122.13 MB | 103.24 MB (−15.5%) |
-| 40 files: 14 Rust snapshots, emsdk's, Python packages' data | 127.97 MB | 84.77 MB (−33.8%; the snapshots share files; the 79 files together hit an archive bug that kept them all as they are) |
+| 40 files: 14 Rust snapshots, emsdk's, Python packages' data | 127.97 MB | 84.77 MB (−33.8%; the snapshots share files) |
+| all 79 public files of the machine (disk images of e2fsprogs' tests, pickles and the above) | 352.77 MB | 256.09 MB (−27.4%; 70 s, 3.2 GB heap peak) |
 | 20 MB of Korean JSON text | 5.09 MB | 5.09 MB (kept: its data codes larger, 5.50 MB) |
 
 `aqr-bz2-check` rebuilt 149 of the 153 bzip2 files found on that machine (1.88 GB of streams,
