@@ -4,7 +4,9 @@
 //! memory runs short rather than all held (`docs/streaming-encoder-design.md`). A file is a
 //! segment of the regions, `._$pill$PID.N` (the process's id, the segment's number), closed
 //! once they are all dropped, and gone once closed: deleted on close (Windows), or unlinked as
-//! it is made (Unix). So the spill takes the space of the regions held, not of all made.
+//! it is made (Unix). So the spill takes the space of the regions held, not of all made. A
+//! segment starts with [`MAGIC`], so that one left behind is not taken for a file of another
+//! kind.
 
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -20,6 +22,10 @@ const SEGMENT: usize = 256 << 20;
 /// them at multiples of [`REGION_ALIGN`].
 const ALIGN: usize = 64 << 10;
 const REGION_ALIGN: usize = 16;
+/// The bytes a segment starts with (`aQr5pil/` in base64), then zeros to [`HEADER`] (a page),
+/// its regions after them.
+const MAGIC: [u8; 6] = [0x69, 0x0a, 0xf9, 0xa6, 0x29, 0x7f];
+const HEADER: usize = 4 << 10;
 
 pub struct Spill {
     dir: PathBuf,
@@ -76,7 +82,8 @@ impl Spill {
         Ok(Spill { dir: dir.to_owned(), state: Mutex::new(State { made: 0, open: None }) })
     }
 
-    /// A new segment of `n` bytes, a file of its own (of the next number not taken).
+    /// A new segment of `n` bytes (the magic, and regions to fill the rest), a file of its own
+    /// (of the next number not taken).
     fn grow(&self, state: &mut State, n: usize) -> io::Result<Arc<Segment>> {
         let mut o = OpenOptions::new();
         o.read(true).write(true).create_new(true);
@@ -100,6 +107,7 @@ impl Spill {
         file.set_len(n as u64)?;
         // SAFETY: the file is this segment's alone
         let mut map = unsafe { MmapOptions::new().len(n).map_mut(&file)? };
+        map[..MAGIC.len()].copy_from_slice(&MAGIC);
         let base = map.as_mut_ptr();
         Ok(Arc::new(Segment { _map: map, _file: file, base, len: n }))
     }
@@ -109,7 +117,7 @@ impl aqr_formula::store::Store for Spill {
     fn region(&self, n: usize) -> Option<(*mut u8, Bytes)> {
         let mut state = self.state.lock().unwrap();
         let (segment, start) = if n > SEGMENT / 2 {
-            (self.grow(&mut state, n.next_multiple_of(ALIGN)).ok()?, 0)
+            (self.grow(&mut state, (HEADER + n).next_multiple_of(ALIGN)).ok()?, HEADER)
         } else {
             match &mut state.open {
                 Some((s, used)) if *used + n <= s.len => {
@@ -119,12 +127,44 @@ impl aqr_formula::store::Store for Spill {
                 }
                 _ => {
                     let s = self.grow(&mut state, SEGMENT).ok()?;
-                    state.open = Some((s.clone(), n.next_multiple_of(REGION_ALIGN)));
-                    (s, 0)
+                    state.open = Some((s.clone(), (HEADER + n).next_multiple_of(REGION_ALIGN)));
+                    (s, HEADER)
                 }
             }
         };
         let at = segment.at(start);
         Some((at, Bytes::shared(Arc::new(View { segment, start, len: n }))))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use aqr_formula::store::Store;
+
+    use super::*;
+
+    /// Every segment starts with the magic (`aQr5pil/` in base64) and zeros to a page, its regions
+    /// after them.
+    #[test]
+    fn magic() {
+        let dir = std::env::temp_dir().join(format!("aqr-compress-magic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spill = Spill::create(&dir).unwrap();
+        // SAFETY: the start of the mapping, longer than its header
+        let head = |s: &Segment| unsafe { std::slice::from_raw_parts(s.base, 4096) }.to_vec();
+        let mut magic = vec![0; 4096];
+        magic[..6].copy_from_slice(&[0x69, 0x0a, 0xf9, 0xa6, 0x29, 0x7f]);
+        let segment = spill.grow(&mut spill.state.lock().unwrap(), SEGMENT).unwrap();
+        assert!(head(&segment) == magic);
+        drop(segment);
+        let (at, bytes) = spill.region(100).unwrap();
+        assert!(at.addr() % 4096 == 0);
+        // SAFETY: the region's bytes, not read before (the magic kept, as no region overlaps it)
+        unsafe { std::ptr::write_bytes(at, 0xff, 100) };
+        assert!(bytes.iter().all(|&b| b == 0xff));
+        let segment = spill.state.lock().unwrap().open.as_ref().unwrap().0.clone();
+        assert!(head(&segment) == magic);
+        drop((segment, bytes));
+        std::fs::remove_dir(&dir).unwrap();
     }
 }
