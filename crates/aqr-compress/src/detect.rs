@@ -26,6 +26,9 @@ pub enum Format {
     /// PPMd var. J file (aqr-ppmd: its header cut off, no module), known by its header:
     /// not looked for in other data.
     Ppmd,
+    /// Matroska or WebM file (aqr-mkv: frames seen before held once, no module), known by its
+    /// EBML header: not looked for in other data.
+    Mkv,
     /// lzop file (aqr-lzo on its LZO1X streams).
     Lzo,
     /// Stream of Apple's LZFSE and LZVN blocks (aqr-bvx on its data).
@@ -115,7 +118,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 46] = [
+    pub const ALL: [Format; 47] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -124,6 +127,7 @@ impl Format {
         Format::Lzma,
         Format::Xz,
         Format::Ppmd,
+        Format::Mkv,
         Format::Lzo,
         Format::Bvx,
         Format::Bzip2,
@@ -174,6 +178,7 @@ impl Format {
             Format::Lzma => "lzma",
             Format::Xz => "xz",
             Format::Ppmd => "ppmd",
+            Format::Mkv => "mkv",
             Format::Lzo => "lzo",
             Format::Bvx => "bvx",
             Format::Bzip2 => "bzip2",
@@ -270,6 +275,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"lzma" | b"tlz" => format(Format::Lzma),
         b"xz" | b"txz" => format(Format::Xz),
         b"pmd" => format(Format::Ppmd),
+        b"webm" | b"mkv" | b"mka" | b"mk3d" | b"mks" => format(Format::Mkv),
         b"lzo" | b"tzo" => format(Format::Lzo),
         b"lzfse" | b"lzvn" => format(Format::Bvx),
         b"bz2" | b"tbz" | b"tbz2" => format(Format::Bzip2),
@@ -277,8 +283,8 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
         b"cab" => format(Format::Cab),
-        b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogv" | b"opus" | b"aac"
-        | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
+        b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif"
+        | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => {
             Kind::Text
@@ -399,6 +405,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
     } else if start && aqr_ppmd::starts(d) {
         // (four bytes are too weak a signature to look for in other data)
         Some(Format::Ppmd)
+    } else if start && aqr_mkv::starts(d) {
+        Some(Format::Mkv)
     } else if start && aqr_xsv::formula::starts(d) {
         Some(Format::Xsv)
     } else if start && aqr_wrt::formula::starts(d) {
@@ -653,6 +661,8 @@ mod tests {
             (b"lib.tar.gz", Kind::Format("gzip")),
             (b"src.tar.bz2", Kind::Format("bzip2")),
             (b"movie.mp4", Kind::Compressed),
+            (b"clip.webm", Kind::Format("mkv")),
+            (b"movie.MKV", Kind::Format("mkv")),
             (b"notes.txt", Kind::Text),
             (b"var/log/access.log", Kind::Text),
             (b"scan.BMP", Kind::Format("raw")),

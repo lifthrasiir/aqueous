@@ -306,6 +306,48 @@ fn ppmd_held_once() {
     assert!(c.len() < (3 << 20) + (64 << 10), "{} bytes, {r:?}", c.len());
 }
 
+/// A WebM file of a video track 1 and an audio track 2, and of a cluster for each
+/// frame of `video` (a keyframe where `key`), with 2 KiB of audio of `seed` after it.
+fn webm(video: &[(bool, &[u8])], seed: u64) -> Vec<u8> {
+    fn element(id: &[u8], data: &[u8]) -> Vec<u8> {
+        [id, &(data.len() as u64 | 1 << 56).to_be_bytes(), data].concat()
+    }
+    let entry = |n: u8, kind: u8| element(&[0xae], &[element(&[0xd7], &[n]), element(&[0x83], &[kind])].concat());
+    let mut seg = element(&[0x16, 0x54, 0xae, 0x6b], &[entry(1, 1), entry(2, 2)].concat());
+    for (i, &(key, frame)) in video.iter().enumerate() {
+        let video = [&[0x81, 0, 0, if key { 0x80 } else { 0 }][..], frame].concat();
+        let audio = [&[0x82, 0, 0, 0x80][..], &noise(2 << 10, seed + i as u64)].concat();
+        let body = [element(&[0xe7], &[i as u8]), element(&[0xa3], &video), element(&[0xa3], &audio)].concat();
+        seg.extend(element(&[0x1f, 0x43, 0xb6, 0x75], &body));
+    }
+    let head = element(&[0x1a, 0x45, 0xdf, 0xa3], &element(&[0x42, 0x82], b"webm"));
+    [head, element(&[0x18, 0x53, 0x80, 0x67], &seg)].concat()
+}
+
+/// A WebM file of a still picture, its keyframe again every 4 frames: the keyframe is held once;
+/// another of no frame repeated is stored as it is.
+#[test]
+fn mkv_keyframes_once() {
+    let key = noise(256 << 10, 5);
+    let still = vec![0u8; 300];
+    let video: Vec<(bool, &[u8])> =
+        (0..40).map(|i| if i % 4 == 0 { (true, &key[..]) } else { (false, &still[..]) }).collect();
+    let d = webm(&video, 6);
+    let (c, r) = archived(&[("still.webm", d.clone())], &Options::default());
+    let least = key.len() + 40 * (2 << 10);
+    assert!(c.len() < least + (16 << 10) && d.len() > least * 3, "{} bytes of {}, {r:?}", c.len(), d.len());
+    // (zstd's window holds this file's keyframes too: what tells is the formula)
+    let (_, f) = aqr_compress::compress_formula_as(&d, aqr_formula::Kind::Format("mkv"), &Options::default());
+    let keys: Vec<usize> = f.streams.iter().filter(|s| s.class == "mkv/keys").map(|s| s.data.len()).collect();
+    assert_eq!(keys, [key.len()]);
+
+    let frames: Vec<Vec<u8>> = (0..40).map(|i| noise(8 << 10, 100 + i)).collect();
+    let video: Vec<(bool, &[u8])> = frames.iter().enumerate().map(|(i, f)| (i % 4 == 0, &f[..])).collect();
+    let d = webm(&video, 7);
+    let (c, _) = archived(&[("moving.mkv", d.clone())], &Options::default());
+    assert!(c.len() >= d.len() && c.len() < d.len() + (4 << 10), "{} bytes of {}", c.len(), d.len());
+}
+
 /// Two files alike but for their starts (another header, a few bytes longer), with a file
 /// apart between them: in a batch together however small the batches, the archive about as
 /// small as in one.

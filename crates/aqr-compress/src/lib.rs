@@ -1374,6 +1374,7 @@ fn within(d: &[u8], parts: &[Region], opt: &Options, depth: u32, cx: &Cx) -> Vec
 fn regions(format: Format, d: &[u8]) -> Option<Vec<Region>> {
     catch_unwind(AssertUnwindSafe(|| match format {
         Format::Psd => aqr_psd::formula::regions(d),
+        Format::Mkv => aqr_mkv::formula::regions(d),
         _ => None,
     }))
     .ok()
@@ -1552,9 +1553,10 @@ impl Apart {
 
 /// Whether formula `f` of a content takes the place of its slice ([`nested`]): one of
 /// applications, or aqr-ppmd's, which only cuts the header off the data, so that the data is
-/// stored once where another file starts with it.
+/// stored once where another file starts with it, or aqr-mkv's, which holds frames seen
+/// before once.
 fn takes_place(f: &Formula) -> bool {
-    !f.applies().is_empty() || aqr_ppmd::formula::is(f)
+    !f.applies().is_empty() || aqr_ppmd::formula::is(f) || aqr_mkv::formula::is(f)
 }
 
 /// Contents, each its slice and its formula where it has one ([`nested`]).
@@ -1900,6 +1902,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::Records => aqr_infer_recs::formula::encode,
         Format::Wim => aqr_wim::formula::encode,
         Format::Ppmd => aqr_ppmd::formula::encode,
+        Format::Mkv => aqr_mkv::formula::encode,
         _ => return None,
     })
 }

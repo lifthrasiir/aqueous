@@ -166,6 +166,7 @@ dependencies = [
  "aqr-lz4",
  "aqr-lzma",
  "aqr-lzo",
+ "aqr-mkv",
  "aqr-mp3",
  "aqr-mszip",
  "aqr-obj",
@@ -452,6 +453,14 @@ dependencies = [
  "aqr-formula",
  "memmap2",
  "sha1",
+]
+
+[[package]]
+name = "aqr-mkv"
+version = "0.1.0"
+dependencies = [
+ "aqr-formula",
+ "xxhash-rust",
 ]
 
 [[package]]

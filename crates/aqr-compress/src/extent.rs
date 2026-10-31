@@ -43,9 +43,14 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Wasm => aqr_wasm::formula::extent(d),
         Format::Fsb5 => aqr_fsb::fsb5::extent(d),
         Format::Ogg => aqr_ogg::formula::extent(d),
-        Format::Fasta | Format::Ppmd | Format::Obj | Format::Xsv | Format::Text | Format::Sized | Format::Records => {
-            Some(d.len())
-        }
+        Format::Fasta
+        | Format::Ppmd
+        | Format::Mkv
+        | Format::Obj
+        | Format::Xsv
+        | Format::Text
+        | Format::Sized
+        | Format::Records => Some(d.len()),
         Format::Fits => aqr_fits::formula::extent(d),
         Format::Hdf5 => aqr_hdf5::formula::extent(d),
         Format::Ar => bundle(aqr_bundle::formula::Format::Ar, d),

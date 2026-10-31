@@ -23,7 +23,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
   git, lz4, lzma, lzo, bvx, bz2, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
-  asar, vorbis, ogg, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
+  asar, vorbis, ogg, mkv, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
   `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
 - `corpus/` and `cache/` under a crate are gitignored local data (test inputs, cached results
