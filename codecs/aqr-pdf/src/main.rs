@@ -3,18 +3,21 @@ use aqr_formula::{Apply, Formula};
 use aqr_pdf::encode::{self, Options, Stats};
 use aqr_pdf::formula::{self, MODES, MODULE};
 
+#[cfg(unix)]
 #[repr(C)]
 struct Timespec {
     sec: i64,
     nsec: i64,
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn clock_gettime(clk: u32, tp: *mut Timespec) -> i32;
 }
 
 /// CPU time of the process, in seconds (wall time is skewed by other load). aqr-jpeg
 /// works on rayon's pool, so this counts every thread; `bench` runs with one by default.
+#[cfg(unix)]
 fn cpu() -> f64 {
     #[cfg(target_os = "macos")]
     const CLOCK_PROCESS_CPUTIME_ID: u32 = 12;
@@ -23,6 +26,11 @@ fn cpu() -> f64 {
     let mut t = Timespec { sec: 0, nsec: 0 };
     unsafe { clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &mut t) };
     t.sec as f64 + t.nsec as f64 * 1e-9
+}
+
+#[cfg(not(unix))]
+fn cpu() -> f64 {
+    wall()
 }
 
 fn wall() -> f64 {
