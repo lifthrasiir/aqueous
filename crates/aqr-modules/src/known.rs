@@ -88,9 +88,15 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/bvx-recons.block"),
     },
     Known {
+        name: "bz2-alz-recons",
+        version: 1,
+        sha512_256: hex("5a78b2d03a68562e122fc59cf35b6da34b56ece366b819f5b9449d1405765d70"),
+        block: include_bytes!("../wasm/bz2-alz-recons.block"),
+    },
+    Known {
         name: "bz2-recons",
         version: 1,
-        sha512_256: hex("38f5b68023efbcfa3cc1c9b7fe742d0e83121807c39536c7a6a2e53b9cae0ad7"),
+        sha512_256: hex("203c1b3691de35d0621f4a67767f0685ee60ccc7a5134edd1fee440ef882948d"),
         block: include_bytes!("../wasm/bz2-recons.block"),
     },
     Known {

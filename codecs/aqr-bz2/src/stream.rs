@@ -3,7 +3,9 @@
 use aqr_common::pool;
 
 use crate::huffman::{self, Decoder};
-use crate::{BLOCK_MAGIC, END_MAGIC, Error, MAGIC, Result, corrupt, crc};
+use crate::{
+    ALZ_BLOCK_MAGIC, ALZ_END_MAGIC, ALZ_LEVEL, BLOCK_MAGIC, END_MAGIC, Error, Framing, MAGIC, Result, corrupt, crc,
+};
 
 /// A stream decoded.
 #[derive(Debug, Default)]
@@ -104,12 +106,24 @@ pub fn level(d: &[u8]) -> Option<u8> {
 /// extent and blocks are found, and their CRCs are not checked), giving up past `max_data`
 /// bytes of data.
 pub fn decode(d: &[u8], data: bool, max_data: usize) -> Result<Stream> {
-    decode_each(d, data, max_data, &mut |_, _| {})
+    decode_framed(d, Framing::Bzip2, data, max_data, &mut |_, _| {})
 }
 
 /// [`decode`], with each block's symbols after the BWT and its `origPtr` given to `each`.
 pub fn decode_each(d: &[u8], data: bool, max_data: usize, each: &mut dyn FnMut(&[u8], u32)) -> Result<Stream> {
-    let mut b = Blocks::new(d)?;
+    decode_framed(d, Framing::Bzip2, data, max_data, each)
+}
+
+/// [`decode_each`] of a stream of `framing`. A stream of [`Framing::Alz`] has no CRC, so its
+/// data is not checked.
+pub fn decode_framed(
+    d: &[u8],
+    framing: Framing,
+    data: bool,
+    max_data: usize,
+    each: &mut dyn FnMut(&[u8], u32),
+) -> Result<Stream> {
+    let mut b = Blocks::new(d, framing)?;
     let mut s = Stream { level: b.level, ..Stream::default() };
     let (mut last, mut links) = (Vec::new(), Vec::new());
     let mut total = 0usize;
@@ -136,34 +150,51 @@ pub fn decode_each(d: &[u8], data: bool, max_data: usize, each: &mut dyn FnMut(&
 struct Blocks<'a> {
     r: Bits<'a>,
     level: u8,
+    framing: Framing,
     combined: u32,
 }
 
 impl<'a> Blocks<'a> {
-    fn new(d: &'a [u8]) -> Result<Self> {
-        let level = level(d).ok_or(Error("not a bzip2 stream"))?;
-        Ok(Blocks { r: Bits::new(d, 4), level, combined: 0 })
+    fn new(d: &'a [u8], framing: Framing) -> Result<Self> {
+        let (level, at) = match framing {
+            Framing::Bzip2 => (level(d).ok_or(Error("not a bzip2 stream"))?, 4),
+            Framing::Alz if d.starts_with(b"DLZ") => (ALZ_LEVEL, 0),
+            Framing::Alz => return Err(Error("not an ALZ bzip2 stream")),
+        };
+        Ok(Blocks { r: Bits::new(d, at), level, framing, combined: 0 })
     }
 
-    /// The next block into `last`, with its `origPtr`, CRC and RLE1 symbols; None at the end
-    /// of the stream.
-    fn next(&mut self, last: &mut Vec<u8>) -> Result<Option<(u32, u32, usize)>> {
+    /// The next block into `last`, with its `origPtr`, CRC (none in [`Framing::Alz`]) and
+    /// RLE1 symbols; None at the end of the stream.
+    fn next(&mut self, last: &mut Vec<u8>) -> Result<Option<(u32, Option<u32>, usize)>> {
         let r = &mut self.r;
-        match r.get48() {
-            BLOCK_MAGIC => {}
-            END_MAGIC => return Ok(None),
-            _ => return Err(corrupt()),
-        }
-        let want = r.get(32);
-        if r.bit() {
-            return Err(Error("randomised block"));
-        }
+        let want = match self.framing {
+            Framing::Bzip2 => {
+                match r.get48() {
+                    BLOCK_MAGIC => {}
+                    END_MAGIC => return Ok(None),
+                    _ => return Err(corrupt()),
+                }
+                let want = r.get(32);
+                if r.bit() {
+                    return Err(Error("randomised block"));
+                }
+                Some(want)
+            }
+            Framing::Alz => match r.get(32) {
+                ALZ_BLOCK_MAGIC => None,
+                ALZ_END_MAGIC => return Ok(None),
+                _ => return Err(corrupt()),
+            },
+        };
         let orig = r.get(24);
         let size = block(r, self.level, last)?;
         if orig as usize >= last.len() {
             return Err(corrupt());
         }
-        self.combined = self.combined.rotate_left(1) ^ want;
+        if let Some(want) = want {
+            self.combined = self.combined.rotate_left(1) ^ want;
+        }
         Ok(Some((orig, want, size)))
     }
 
@@ -174,7 +205,10 @@ impl<'a> Blocks<'a> {
 
     /// After the last block: the bytes of the stream, its combined CRC checked where `data`.
     fn finish(&mut self, data: bool) -> Result<usize> {
-        let want = self.r.get(32);
+        let want = match self.framing {
+            Framing::Bzip2 => self.r.get(32),
+            Framing::Alz => self.combined,
+        };
         if self.r.overrun() {
             return Err(Error("truncated"));
         }
@@ -185,12 +219,19 @@ impl<'a> Blocks<'a> {
     }
 }
 
-/// A block's data from its symbols after the BWT onto `out`, its CRC checked.
-fn undo(last: &[u8], orig: u32, want: u32, links: &mut Vec<u32>, out: &mut Vec<u8>, max_data: usize) -> Result<()> {
+/// A block's data from its symbols after the BWT onto `out`, its CRC checked where it has one.
+fn undo(
+    last: &[u8],
+    orig: u32,
+    want: Option<u32>,
+    links: &mut Vec<u32>,
+    out: &mut Vec<u8>,
+    max_data: usize,
+) -> Result<()> {
     let at = out.len();
     unbwt(last, orig, links);
     unrle(last, links, orig, out, max_data)?;
-    if crc::hash(&out[at..]) != want {
+    if want.is_some_and(|want| crc::hash(&out[at..]) != want) {
         return Err(Error("CRC mismatch"));
     }
     Ok(())
@@ -212,8 +253,13 @@ impl<'a> Partial<'a> {
     /// The stream at the start of `d` decoded block by block until there are `want` bytes of
     /// data or it ends; past `max_data` bytes an error.
     pub fn start(d: &'a [u8], want: usize, max_data: usize) -> Result<Self> {
+        Self::start_framed(d, Framing::Bzip2, want, max_data)
+    }
+
+    /// [`Partial::start`] of a stream of `framing`.
+    pub fn start_framed(d: &'a [u8], framing: Framing, want: usize, max_data: usize) -> Result<Self> {
         let mut p = Partial {
-            blocks: Blocks::new(d)?,
+            blocks: Blocks::new(d, framing)?,
             data: Vec::new(),
             sizes: Vec::new(),
             orig_ptrs: Vec::new(),
@@ -227,6 +273,9 @@ impl<'a> Partial<'a> {
             };
             let at = p.data.len();
             undo(&last, orig, crc, &mut links, &mut p.data, max_data)?;
+            if p.data.len() > max_data {
+                return Err(Error("too much data"));
+            }
             p.sizes.push(p.data.len() - at);
             p.orig_ptrs.push(orig);
         }

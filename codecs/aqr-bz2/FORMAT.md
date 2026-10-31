@@ -1,8 +1,9 @@
-# The `bz2-recons` module
+# The `bz2-recons` and `bz2-alz-recons` modules
 
 This document specifies the module `bz2-recons` of aqr-formula entry formulas. The module
 rebuilds bzip2 streams, one after another, from the data they hold: its output is what
-libbzip2 (1.0.3 and later, the default work factor) gives for that data. The document is meant
+libbzip2 (1.0.3 and later, the default work factor) gives for that data. §8 specifies the
+module `bz2-alz-recons`, the same for ALZip's streams, framed otherwise. The document is meant
 to be complete: an implementation of the module can be written from it alone. Sections marked
 *(encoder)* describe the choices this implementation makes when it builds formulas; the module
 does not depend on them.
@@ -19,6 +20,7 @@ Contents:
 5. [Huffman codes](#5-huffman-codes)
 6. [Encoding](#6-encoding-encoder) *(encoder)*
 7. [Validation](#7-validation)
+8. [The `bz2-alz-recons` module](#8-the-bz2-alz-recons-module)
 
 ## 1. Conventions
 
@@ -204,3 +206,24 @@ The module fails if:
   stream does not have, a rank not below the block's `N`, a missing byte or trailing bytes;
 - there is not exactly one input, or the streams' `n` do not add up to its length;
 - the output is not `len` bytes long.
+
+## 8. The `bz2-alz-recons` module
+
+ALZip writes the bzip2 bodies of ALZ archives (method 1) as libbzip2's compressor does, but
+framed otherwise (OctopusET's
+[ALZ Archive Format Spec](https://gist.github.com/OctopusET/6a88b6bb3f4eed682c031e704012cfc0),
+§5.1). The module `bz2-alz-recons`, version 1, is `bz2-recons` (§2-§5) but for:
+
+- **Params**: as in §2, without the `level` byte: every stream is of level 9.
+- **Streams**: `stream_alz(D)` is the blocks of §3.1 at level 9, each compressed by §4, then
+  `bits(0x444C5A02, 32)` (`DLZ\x02`) and the padding. There is no header, and no combined CRC.
+- **The header of a block** is `bits(0x444C5A01, 32)` (`DLZ\x01`) and `bits(rank, 24)`: no
+  CRC and no randomised bit. The rest of the block is §4.4's.
+
+As in bzip2, the blocks are not aligned to bytes, and empty data is a stream of no blocks (the
+end and its padding alone).
+
+*(encoder)* `aqr_bz2::formula::take_alz` takes a body that is one such stream, exactly: decoded,
+its blocks cut as §3.1 cuts its data at level 9, and compressing them gives the body back. The
+streams of ALZip at hand (of one block each) are all reproduced; streams of several blocks have
+been checked against this compressor only. Validation is §7's, without the level.

@@ -1,10 +1,10 @@
-//! The code of the module `bz2-recons` (see `formula`, and `FORMAT.md`), which needs no
-//! aqr-formula, so that aqr-modules builds it into its Wasm module.
+//! The code of the modules `bz2-recons` and `bz2-alz-recons` (see `formula`, and `FORMAT.md`),
+//! which needs no aqr-formula, so that aqr-modules builds them into their Wasm modules.
 
 use aqr_common::varint;
 
 use crate::compress;
-use crate::{Error, Result, corrupt};
+use crate::{ALZ_LEVEL, Error, Framing, Result, corrupt};
 
 /// The parameters of one stream: its level, bytes of data, and the blocks whose `origPtr`
 /// differs from the one compressing gives (index, `origPtr`).
@@ -15,10 +15,20 @@ pub struct StreamParams {
     pub orig_ptrs: Vec<(usize, u32)>,
 }
 
+/// The params of `bz2-recons`.
 pub fn put_params(out: &mut Vec<u8>, streams: &[StreamParams]) {
+    put_framed(out, Framing::Bzip2, streams)
+}
+
+/// The params of a module of `framing`: those of [`Framing::Alz`] (`bz2-alz-recons`) have no
+/// level, which is [`ALZ_LEVEL`].
+pub fn put_framed(out: &mut Vec<u8>, framing: Framing, streams: &[StreamParams]) {
     varint::put(out, streams.len() as u64);
     for s in streams {
-        out.push(s.level);
+        match framing {
+            Framing::Bzip2 => out.push(s.level),
+            Framing::Alz => debug_assert_eq!(s.level, ALZ_LEVEL),
+        }
         varint::put(out, s.len);
         varint::put(out, s.orig_ptrs.len() as u64);
         let mut next = 0;
@@ -30,7 +40,13 @@ pub fn put_params(out: &mut Vec<u8>, streams: &[StreamParams]) {
     }
 }
 
+/// The params of `bz2-recons` read.
 pub fn get_params(p: &[u8]) -> Result<Vec<StreamParams>> {
+    get_framed(p, Framing::Bzip2)
+}
+
+/// The params of a module of `framing` read ([`put_framed`]).
+pub fn get_framed(p: &[u8], framing: Framing) -> Result<Vec<StreamParams>> {
     let mut at = 0;
     let mut get = || varint::get(p, &mut at).map_err(|_| corrupt());
     let n = get()?;
@@ -40,8 +56,13 @@ pub fn get_params(p: &[u8]) -> Result<Vec<StreamParams>> {
     let mut streams = Vec::with_capacity(n as usize);
     drop(get);
     for _ in 0..n {
-        let level = *p.get(at).ok_or_else(corrupt)?;
-        at += 1;
+        let level = match framing {
+            Framing::Bzip2 => {
+                at += 1;
+                *p.get(at - 1).ok_or_else(corrupt)?
+            }
+            Framing::Alz => ALZ_LEVEL,
+        };
         if !(1..=9).contains(&level) {
             return Err(corrupt());
         }
@@ -72,6 +93,11 @@ pub fn get_params(p: &[u8]) -> Result<Vec<StreamParams>> {
 
 /// The streams of `data`, one after another, compressed as `streams` says.
 pub fn compress(data: &[u8], streams: &[StreamParams], threads: usize) -> Result<Vec<u8>> {
+    compress_framed(data, Framing::Bzip2, streams, threads)
+}
+
+/// [`compress`] into streams of `framing`.
+pub fn compress_framed(data: &[u8], framing: Framing, streams: &[StreamParams], threads: usize) -> Result<Vec<u8>> {
     let total = streams.iter().try_fold(0u64, |a, s| a.checked_add(s.len));
     if total != Some(data.len() as u64) {
         return Err(Error("data of another length"));
@@ -81,7 +107,7 @@ pub fn compress(data: &[u8], streams: &[StreamParams], threads: usize) -> Result
     for s in streams {
         let d = &data[at..at + s.len as usize];
         at += s.len as usize;
-        let mut blocks = compress::blocks(d, s.level, threads);
+        let mut blocks = compress::blocks_framed(d, framing, s.level, threads);
         for &(b, p) in &s.orig_ptrs {
             let blk = blocks.get_mut(b).ok_or_else(corrupt)?;
             if p as usize >= blk.syms {
@@ -89,7 +115,7 @@ pub fn compress(data: &[u8], streams: &[StreamParams], threads: usize) -> Result
             }
             blk.set_orig_ptr(p);
         }
-        out.extend_from_slice(&compress::stream(s.level, &blocks));
+        out.extend_from_slice(&compress::stream_framed(framing, s.level, &blocks));
     }
     Ok(out)
 }
@@ -97,9 +123,18 @@ pub fn compress(data: &[u8], streams: &[StreamParams], threads: usize) -> Result
 /// The module: the bzip2 streams of `len` bytes that the parameters make of the single input
 /// (see `FORMAT.md`).
 pub fn decode(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    decode_framed(Framing::Bzip2, params, inputs, len, threads)
+}
+
+/// The module `bz2-alz-recons`: [`decode`] of ALZip's streams.
+pub fn decode_alz(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
+    decode_framed(Framing::Alz, params, inputs, len, threads)
+}
+
+fn decode_framed(framing: Framing, params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
     let &[data] = inputs else { return Err(Error("one input wanted")) };
-    let streams = get_params(params)?;
-    let out = compress(data, &streams, threads)?;
+    let streams = get_framed(params, framing)?;
+    let out = compress_framed(data, framing, &streams, threads)?;
     if out.len() as u64 != len {
         return Err(Error("output of another length"));
     }

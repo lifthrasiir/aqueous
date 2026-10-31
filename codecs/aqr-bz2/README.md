@@ -20,7 +20,9 @@ let f = formula::encode(&file, threads).unwrap();
 // `f` rebuilds `file` when evaluated with `formula::decode` as the module `MODULE`
 ```
 
-`FORMAT.md` specifies the module `bz2-recons`, with the compressor in full. The code was written
+`FORMAT.md` specifies the module `bz2-recons`, with the compressor in full, and
+`bz2-alz-recons`, the same compressor in ALZip's framing (no header, blocks without CRCs, 4-byte
+magic numbers), for aqr-alz's ALZ archives (`formula::take_alz`, `formula::apply_alz`). The code was written
 from memory of libbzip2's behaviour and checked against libbzip2 1.0.8 as a black box, without
 reading its code (BSD-style, not public domain).
 
@@ -45,7 +47,8 @@ reading its code (BSD-style, not public domain).
 
 Not reproduced, kept as they are: other compressors (lbzip2, 7-Zip's, Dart's), libbzip2 before
 1.0.3 where a code would be over 17 bits, randomised blocks (bzip2 0.9.0), streams flushed
-early (`BZ_FLUSH`), data over 1 GiB. Left: bzip2 inside ZIP (method 12), 7z, DMG (UDBZ);
+early (`BZ_FLUSH`), data over 1 GiB. Left: bzip2 inside ZIP (method 12), 7z, DMG (UDBZ) (ALZ archives' is
+done, by `bz2-alz-recons`);
 tasks in the Wasm module; a stream not reproduced could keep its tables and selectors as a
 record (lbzip2) rather than be kept whole.
 
@@ -109,5 +112,10 @@ would serve those streams and every other text alike.
 - `tests/formula.rs` (`code_lengths_of_libbzip2`): `tests/data/code-lengths.txt`, the code
   lengths libbzip2 1.0.8's `BZ2_hbMakeCodeLengths` gives for 68 sets of frequencies (some of
   Fibonacci's, cut down to 17 bits), matched.
+- `tests/formula.rs`: ALZip's streams (`tests/data/alz`, the bzip2 bodies of alkegi/unalz's
+  CC0 test archives) reproduced, one by one and one after another; streams of several blocks
+  (one periodic) taken back; damaged ones, bzip2's framing and params of `bz2-recons` turned
+  down.
 - aqr-compress `tests/compress.rs` (`bz2_nested`): bzip2 around gzip around FLAC, at the start
-  of a file and found in data; aqr-decompress `tests/wasm.rs`: the module natively and as Wasm.
+  of a file and found in data; aqr-decompress `tests/wasm.rs`: both modules natively and as
+  Wasm.

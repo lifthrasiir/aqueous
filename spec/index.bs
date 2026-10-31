@@ -4881,7 +4881,12 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bvx-recons.wasm" title="crates/aqr-modules/wasm/bvx-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bvx/FORMAT.md" title="codecs/aqr-bvx/FORMAT.md">R</a>
     <tr>
-      <td><code>38f5b68023efbcfa3cc1c9b7fe742d0e83121807c39536c7a6a2e53b9cae0ad7</code>
+      <td><code>5a78b2d03a68562e122fc59cf35b6da34b56ece366b819f5b9449d1405765d70</code>
+      <td>bz2-alz-recons@1
+      <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bz2-alz-recons.wasm" title="crates/aqr-modules/wasm/bz2-alz-recons.wasm">D</a>
+        <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bz2/FORMAT.md" title="codecs/aqr-bz2/FORMAT.md">R</a>
+    <tr>
+      <td><code>203c1b3691de35d0621f4a67767f0685ee60ccc7a5134edd1fee440ef882948d</code>
       <td>bz2-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/bz2-recons.wasm" title="crates/aqr-modules/wasm/bz2-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-bz2/FORMAT.md" title="codecs/aqr-bz2/FORMAT.md">R</a>

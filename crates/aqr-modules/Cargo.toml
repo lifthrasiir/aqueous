@@ -87,6 +87,11 @@ path = "src/bin/bz2-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]
+name = "bz2-alz-recons"
+path = "src/bin/bz2-alz-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
 name = "gif-recons"
 path = "src/bin/gif-recons.rs"
 required-features = ["wasm"]

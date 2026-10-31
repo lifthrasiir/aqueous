@@ -1,6 +1,6 @@
 use aqr_bz2::formula::{self, MODULE};
 use aqr_bz2::module::get_params;
-use aqr_bz2::{compress, stream};
+use aqr_bz2::{Framing, compress, stream};
 use aqr_formula::{Apply, Formula, Node};
 
 fn eval(f: &Formula) -> aqr_formula::Result<Vec<u8>> {
@@ -146,4 +146,87 @@ fn bad_params() {
     assert!(ok.is_err());
     let out = compress::stream(9, &compress::blocks(data, 9, 1));
     assert_eq!(formula::decode(&[1, 9, 5, 0], &[data], out.len() as u64, 1).unwrap(), out);
+}
+
+/// ALZip's streams (`tests/data/alz`), by name.
+fn alz_fixtures() -> Vec<(String, Vec<u8>)> {
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/alz");
+    let mut v: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "dlz"))
+        .map(|p| (p.file_stem().unwrap().to_str().unwrap().to_owned(), std::fs::read(&p).unwrap()))
+        .collect();
+    v.sort();
+    assert_eq!(v.len(), 3);
+    v
+}
+
+/// The streams `take_alz` takes of `d` (one after another) rebuilt by `bz2-alz-recons`.
+fn alz_rebuilt(ds: &[&[u8]]) -> Vec<u8> {
+    let (mut streams, mut data) = (Vec::new(), Vec::new());
+    for d in ds {
+        let (sp, dd) = formula::take_alz(d, 2, usize::MAX, &mut |_, _, _| true).expect("taken");
+        streams.push(sp);
+        data.extend_from_slice(&dd);
+    }
+    let len = ds.iter().map(|d| d.len() as u64).sum();
+    let a = formula::apply_alz(&streams, Node::Concat(Vec::new()), len);
+    assert_eq!(a.module, formula::MODULE_ALZ);
+    formula::decode_alz(&a.params, &[&data], len, 2).unwrap()
+}
+
+#[test]
+fn streams_of_alzip() {
+    for (name, d) in alz_fixtures() {
+        let s = stream::decode_framed(&d, Framing::Alz, true, usize::MAX, &mut |_, _| {}).unwrap();
+        assert_eq!((s.level, s.len, s.sizes.len()), (9, d.len(), 1), "{name}");
+        assert!(alz_rebuilt(&[&d]) == d, "{name}");
+    }
+    let fx = alz_fixtures();
+    let all: Vec<&[u8]> = fx.iter().map(|f| &f.1[..]).collect();
+    assert!(alz_rebuilt(&all) == all.concat());
+}
+
+/// Streams of several blocks as the compressor makes them (ALZip's own are not at hand): cut as
+/// libbzip2 cuts at level 9, the blocks unaligned; a periodic block's rank noted.
+#[test]
+fn alz_blocks() {
+    let text: Vec<u8> =
+        (0..2_500_000u32).map(|i| b"the quick brown fox "[(i % 20) as usize] ^ (i / 997 % 3) as u8).collect();
+    // (no runs for RLE1: two blocks, both periodic)
+    let periodic: Vec<u8> = b"ab".repeat(600_000);
+    for d in [&text, &periodic] {
+        let blocks = compress::blocks_framed(d, Framing::Alz, 9, 2);
+        assert!(blocks.len() > 1);
+        let s = compress::stream_alz(&blocks);
+        assert!(alz_rebuilt(&[&s]) == s);
+        let (sp, data) = formula::take_alz(&s, 2, usize::MAX, &mut |_, _, _| true).unwrap();
+        assert!(data == *d);
+        assert_eq!(sp.level, 9);
+    }
+}
+
+#[test]
+fn alz_turned_down() {
+    let fx = alz_fixtures();
+    let text = &fx.iter().find(|f| f.0 == "text").unwrap().1;
+    let none = |d: &[u8]| formula::take_alz(d, 1, usize::MAX, &mut |_, _, _| true).is_none();
+    // trailing bytes, cut short, a bit flipped, bzip2's own framing, too much data, not paying
+    assert!(none(&[&text[..], b"x"].concat()));
+    assert!(none(&text[..text.len() - 1]));
+    let mut bad = text.clone();
+    bad[40] ^= 4;
+    assert!(none(&bad));
+    let bz = &fixtures().into_iter().find(|f| f.0 == "small-9").unwrap().1;
+    assert!(none(bz));
+    assert!(formula::take_alz(text, 1, 100, &mut |_, _, _| true).is_none());
+    assert!(formula::take_alz(text, 1, usize::MAX, &mut |_, _, _| false).is_none());
+    // params of bz2-recons (with a level) are not those of bz2-alz-recons
+    let data = b"hello";
+    let out = compress::stream_alz(&compress::blocks_framed(data, Framing::Alz, 9, 1));
+    assert_eq!(formula::decode_alz(&[1, 5, 0], &[data], out.len() as u64, 1).unwrap(), out);
+    for p in [&[][..], &[1, 9, 5, 0], &[1, 5, 1, 0, 9], &[1, 4, 0], &[1, 5, 0, 0]] {
+        assert!(formula::decode_alz(p, &[data], out.len() as u64, 1).is_err(), "{p:?}");
+    }
 }

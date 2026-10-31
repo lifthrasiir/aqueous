@@ -177,6 +177,19 @@ fn same_as_wasm() {
         let f = aqr_bz2::formula::encode(&d, 1).unwrap_or_else(|| panic!("{t}"));
         formulas.push((t.into(), f, d));
     }
+    // ALZip's bzip2 streams, one after another
+    let (mut streams, mut data, mut all) = (Vec::new(), Vec::new(), Vec::new());
+    for t in ["a", "b", "text"] {
+        let d = fixture(&format!("codecs/aqr-bz2/tests/data/alz/{t}.dlz"));
+        let (p, dd) = aqr_bz2::formula::take_alz(&d, 1, usize::MAX, &mut |_, _, _| true).expect(t);
+        streams.push(p);
+        data.extend_from_slice(&dd);
+        all.extend_from_slice(&d);
+    }
+    let mut f = Formula::default();
+    let data = f.push("raw", data);
+    f.root = Node::Apply(Box::new(aqr_bz2::formula::apply_alz(&streams, data, all.len() as u64)));
+    formulas.push(("alz bzip2".into(), f, all));
     // FLAC and PCM of more batches of their pipelines than tasks (a batch is 2^16 samples)
     for t in ["s16_junk.flac", "s24_f8.flac", "c6.flac"] {
         let d = fixture(&format!("codecs/aqr-flac/tests/data/{t}"));

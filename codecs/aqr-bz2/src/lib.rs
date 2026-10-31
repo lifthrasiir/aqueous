@@ -42,6 +42,23 @@ pub const MAGIC: [u8; 3] = *b"BZh";
 pub const BLOCK_MAGIC: u64 = 0x3141_5926_5359;
 pub const END_MAGIC: u64 = 0x1772_4538_5090;
 
+/// How a stream frames its blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Framing {
+    /// bzip2's own: `BZh` and the level's digit, each block's 48-bit magic followed by its
+    /// CRC and the randomised bit, then the end's magic and the combined CRC.
+    Bzip2,
+    /// ALZip's (method 1 of ALZ archives): no header (always level 9), each block's magic
+    /// `DLZ\x01` with neither CRC nor randomised bit, then `DLZ\x02` and nothing more.
+    Alz,
+}
+
+/// The 32-bit magic numbers of a block and of the end of a stream of [`Framing::Alz`].
+pub const ALZ_BLOCK_MAGIC: u32 = u32::from_be_bytes(*b"DLZ\x01");
+pub const ALZ_END_MAGIC: u32 = u32::from_be_bytes(*b"DLZ\x02");
+/// The level of a stream of [`Framing::Alz`].
+pub const ALZ_LEVEL: u8 = 9;
+
 /// Symbols of RLE1 output in a block of `level`, at most before it is full (libbzip2's
 /// `nblockMAX`); a block may run 4 past it.
 pub const fn block_max(level: u8) -> usize {

@@ -7,7 +7,7 @@ use aqr_common::pool;
 
 use crate::huffman::{self, MAKE_MAX_LEN, MAX_ALPHA};
 use crate::stream::{GROUP, MAX_GROUPS};
-use crate::{BLOCK_MAGIC, END_MAGIC, MAGIC, block_max, crc, sais};
+use crate::{ALZ_BLOCK_MAGIC, ALZ_END_MAGIC, ALZ_LEVEL, BLOCK_MAGIC, END_MAGIC, Framing, MAGIC, block_max, crc, sais};
 
 /// Symbols of RLE1 output for a run of `n` (1..=255) equal bytes.
 #[inline(always)]
@@ -69,10 +69,18 @@ pub struct Block {
     pub orig_ptr: u32,
     /// Symbols of RLE1 output, rotated by the BWT.
     pub syms: usize,
+    /// The bit `origPtr` starts at ([`orig_ptr_bit`]).
+    orig_at: usize,
 }
 
-/// Where `origPtr` is in a block: after the magic, the CRC and the randomised bit.
-const ORIG_PTR_BIT: usize = 48 + 32 + 1;
+/// Where `origPtr` is in a block: after the magic, and the CRC and the randomised bit where
+/// there are.
+const fn orig_ptr_bit(framing: Framing) -> usize {
+    match framing {
+        Framing::Bzip2 => 48 + 32 + 1,
+        Framing::Alz => 32,
+    }
+}
 
 impl Block {
     /// The block with `p` for its `origPtr`, which only an order of equal rotations other than
@@ -80,7 +88,7 @@ impl Block {
     pub fn set_orig_ptr(&mut self, p: u32) {
         self.orig_ptr = p;
         for k in 0..24 {
-            let (i, b) = ((ORIG_PTR_BIT + k) / 8, 7 - (ORIG_PTR_BIT + k) % 8);
+            let (i, b) = ((self.orig_at + k) / 8, 7 - (self.orig_at + k) % 8);
             let v = (p >> (23 - k) & 1) as u8;
             self.bits[i] = self.bits[i] & !(1 << b) | v << b;
         }
@@ -129,6 +137,11 @@ fn rle1(d: &[u8]) -> Vec<u8> {
 
 /// Compresses a block of data (none of it empty), cut where [`boundaries`] cuts.
 pub fn block(d: &[u8]) -> Block {
+    block_framed(d, Framing::Bzip2)
+}
+
+/// [`block`] in a stream of `framing`.
+pub fn block_framed(d: &[u8], framing: Framing) -> Block {
     assert!(!d.is_empty());
     let crc = crc::hash(d);
     let rle = rle1(d);
@@ -138,10 +151,16 @@ pub fn block(d: &[u8]) -> Block {
     let syms = last.len();
     drop(rle);
     let mut w = BitWriter::with_capacity(last.len() / 2 + 1024);
-    w.put((BLOCK_MAGIC >> 24) as u32, 24);
-    w.put((BLOCK_MAGIC & 0xFF_FFFF) as u32, 24);
-    w.put(crc, 32);
-    w.put(0, 1);
+    match framing {
+        Framing::Bzip2 => {
+            w.put((BLOCK_MAGIC >> 24) as u32, 24);
+            w.put((BLOCK_MAGIC & 0xFF_FFFF) as u32, 24);
+            w.put(crc, 32);
+            w.put(0, 1);
+        }
+        Framing::Alz => w.put(ALZ_BLOCK_MAGIC, 32),
+    }
+    debug_assert_eq!(w.len(), orig_ptr_bit(framing));
     w.put(orig_ptr, 24);
     let (mtf, freq, n_used) = mtf(&last, &used);
     drop(last);
@@ -149,7 +168,7 @@ pub fn block(d: &[u8]) -> Block {
     let nbits = w.len();
     let mut bits = w.finish();
     bits.resize(bits.len() + PAD, 0);
-    Block { bits, nbits, crc, orig_ptr, syms }
+    Block { bits, nbits, crc, orig_ptr, syms, orig_at: orig_ptr_bit(framing) }
 }
 
 /// MTF over the symbols in use, renumbered in byte order, with runs of the front symbol coded
@@ -316,10 +335,16 @@ fn entropy(w: &mut BitWriter, mtf: &[u16], freq: &[u32], n_used: usize, used: &[
 
 /// The blocks of `data` at `level` compressed, on up to `threads` threads.
 pub fn blocks(data: &[u8], level: u8, threads: usize) -> Vec<Block> {
+    blocks_framed(data, Framing::Bzip2, level, threads)
+}
+
+/// [`blocks`] in a stream of `framing` (whose level is [`ALZ_LEVEL`] for [`Framing::Alz`]).
+pub fn blocks_framed(data: &[u8], framing: Framing, level: u8, threads: usize) -> Vec<Block> {
+    debug_assert!(framing != Framing::Alz || level == ALZ_LEVEL);
     let mut cuts = boundaries(data, level);
     let n = cuts.len();
     cuts.push(data.len());
-    pool::par_map(n, threads, |k| block(&data[cuts[k]..cuts[k + 1]]))
+    pool::par_map(n, threads, |k| block_framed(&data[cuts[k]..cuts[k + 1]], framing))
 }
 
 /// The stream of `blocks` at `level`: the header, the blocks, the end and the combined CRC.
@@ -337,6 +362,26 @@ pub fn stream(level: u8, blocks: &[Block]) -> Vec<u8> {
     w.put((END_MAGIC & 0xFF_FFFF) as u32, 24);
     w.put(combined, 32);
     w.finish()
+}
+
+/// The stream of `blocks` (of [`Framing::Alz`]) as ALZip writes it: the blocks and the end.
+pub fn stream_alz(blocks: &[Block]) -> Vec<u8> {
+    let bytes: usize = blocks.iter().map(|b| b.nbits / 8 + 1).sum();
+    let mut w = BitWriter::with_capacity(bytes + 4);
+    for b in blocks {
+        debug_assert_eq!(b.orig_at, orig_ptr_bit(Framing::Alz));
+        w.copy(&mut BitReader::new(&b.bits, 0), b.nbits);
+    }
+    w.put(ALZ_END_MAGIC, 32);
+    w.finish()
+}
+
+/// The stream of `blocks` in `framing` at `level` ([`stream`] or [`stream_alz`]).
+pub fn stream_framed(framing: Framing, level: u8, blocks: &[Block]) -> Vec<u8> {
+    match framing {
+        Framing::Bzip2 => stream(level, blocks),
+        Framing::Alz => stream_alz(blocks),
+    }
 }
 
 #[cfg(test)]

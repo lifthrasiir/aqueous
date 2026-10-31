@@ -1,16 +1,20 @@
-//! aqr-bz2 as a module of entry formulas (see aqr-formula): bzip2 streams, one after another,
-//! that libbzip2 compresses their data into. `FORMAT.md` specifies it. The data is the input,
-//! which the formula may recompress in turn.
+//! aqr-bz2 as modules of entry formulas (see aqr-formula): bzip2 streams, one after another,
+//! that libbzip2 compresses their data into ([`MODULE`]), and ALZip's streams of the same
+//! compressor framed otherwise ([`MODULE_ALZ`], for aqr-alz). `FORMAT.md` specifies them. The
+//! data is the input, which the formula may recompress in turn.
 
 use aqr_common::pool;
-use aqr_formula::{Formula, Module, Node};
+use aqr_formula::{Apply, Formula, Module, Node};
 
-use crate::module::{StreamParams, get_params, put_params};
-use crate::{compress, stream};
+use crate::module::{StreamParams, get_framed, get_params, put_framed, put_params};
+use crate::{Framing, compress, stream};
 
-pub use crate::module::decode;
+pub use crate::module::{decode, decode_alz};
 
 pub const MODULE: Module = Module::new("bz2-recons", 1).with_memory(memory);
+
+/// ALZip's bzip2 streams (`FORMAT.md`, §8).
+pub const MODULE_ALZ: Module = Module::new("bz2-alz-recons", 1).with_memory(memory_alz);
 
 /// Bytes of data taken, at most (a stream of zeros grows forty-thousandfold).
 pub const MAX_DATA: usize = 1 << 30;
@@ -22,8 +26,16 @@ const WORK_PER_SYMBOL: u64 = 2 + 4 * 2 + 2 + 4 * 2 + 2 + 1 + 2;
 /// The memory of the module: the input and the output, the blocks compressed before they are
 /// joined (as large as the output), and a block's work.
 fn memory(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    memory_framed(u, Framing::Bzip2)
+}
+
+fn memory_alz(u: &aqr_formula::Usage<'_>) -> Option<u64> {
+    memory_framed(u, Framing::Alz)
+}
+
+fn memory_framed(u: &aqr_formula::Usage<'_>, framing: Framing) -> Option<u64> {
     let &[data] = u.inputs else { return None };
-    let streams = get_params(u.params).ok()?;
+    let streams = get_framed(u.params, framing).ok()?;
     let level = streams.iter().map(|s| s.level).max()? as u64;
     let syms = (100_000 * level).min(data + data / 4 + 5);
     let out = u.outputs.iter().sum::<u64>();
@@ -67,7 +79,10 @@ pub const PREFIX: usize = 4 << 20;
 pub fn encode_if(input: &[u8], threads: usize, pays: &mut dyn FnMut(usize, &[u8], bool) -> bool) -> Option<Formula> {
     let (mut at, mut streams, mut data) = (0, Vec::new(), Vec::new());
     while starts(&input[at..]) {
-        let Some((sp, len)) = take(&input[at..], threads, MAX_DATA - data.len(), pays, &mut data) else { break };
+        let Some((sp, len)) = take(&input[at..], Framing::Bzip2, threads, MAX_DATA - data.len(), pays, &mut data)
+        else {
+            break;
+        };
         streams.push(sp);
         at += len;
     }
@@ -87,16 +102,47 @@ pub fn encode_if(input: &[u8], threads: usize, pays: &mut dyn FnMut(usize, &[u8]
     Some(f)
 }
 
-/// The stream at the start of `d`, its data appended to `data`, where compressing that data
-/// gives it back; its parameters and bytes.
+/// A stream of ALZip's bzip2 that is the whole of `d`, of at most `max_data` bytes of data, taken
+/// only where `pays` tells (as [`encode_if`] asks): its parameters and its data, where compressing
+/// that data gives `d` back.
+pub fn take_alz(
+    d: &[u8],
+    threads: usize,
+    max_data: usize,
+    pays: &mut dyn FnMut(usize, &[u8], bool) -> bool,
+) -> Option<(StreamParams, Vec<u8>)> {
+    let mut data = Vec::new();
+    let (sp, len) = take(d, Framing::Alz, threads, max_data.min(MAX_DATA), pays, &mut data)?;
+    (len == d.len()).then_some((sp, data))
+}
+
+/// The application of [`MODULE_ALZ`] giving `streams` one after another (`len` bytes), of their
+/// data `data` (one after another).
+pub fn apply_alz(streams: &[StreamParams], data: Node, len: u64) -> Apply {
+    let mut params = Vec::new();
+    put_framed(&mut params, Framing::Alz, streams);
+    debug_assert_eq!(get_framed(&params, Framing::Alz).as_deref(), Ok(streams));
+    Apply {
+        module: MODULE_ALZ,
+        resources: vec![],
+        params,
+        inputs: vec![data],
+        len,
+        memory_limit: aqr_formula::NO_LIMIT,
+    }
+}
+
+/// The stream of `framing` at the start of `d`, its data appended to `data`, where compressing
+/// that data gives it back; its parameters and bytes.
 fn take(
     d: &[u8],
+    framing: Framing,
     threads: usize,
     max_data: usize,
     pays: &mut dyn FnMut(usize, &[u8], bool) -> bool,
     data: &mut Vec<u8>,
 ) -> Option<(StreamParams, usize)> {
-    let p = stream::Partial::start(d, PREFIX, max_data).ok()?;
+    let p = stream::Partial::start_framed(d, framing, PREFIX, max_data).ok()?;
     if p.ended.is_none() && !pays(p.coded(), &p.data, false) {
         return None;
     }
@@ -119,18 +165,19 @@ fn take(
     // the first block first, so that another compressor's stream costs only that
     let mut blocks = Vec::with_capacity(n);
     if n > 0 {
-        let mut b = compress::block(at(0));
+        let mut b = compress::block_framed(at(0), framing);
         fix(0, &mut b);
-        if !b.matches(d, 32) {
+        if !b.matches(d, if framing == Framing::Alz { 0 } else { 32 }) {
             return None;
         }
         blocks.push(b);
-        for (k, mut b) in pool::par_map(n - 1, threads, |k| compress::block(at(k + 1))).into_iter().enumerate() {
+        let rest = pool::par_map(n - 1, threads, |k| compress::block_framed(at(k + 1), framing));
+        for (k, mut b) in rest.into_iter().enumerate() {
             fix(k + 1, &mut b);
             blocks.push(b);
         }
     }
-    if compress::stream(s.level, &blocks) != d[..s.len] {
+    if compress::stream_framed(framing, s.level, &blocks) != d[..s.len] {
         return None;
     }
     let len = s.data.len() as u64;

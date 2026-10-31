@@ -153,6 +153,11 @@ pub const BVX: Module = aqr_bvx::formula::MODULE;
 /// stream's level, bytes of data and the ranks of its periodic blocks. Inputs: the data.
 pub const BZ2: Module = aqr_bz2::formula::MODULE;
 
+/// libbzip2's compressor on data, for ALZip's bzip2 streams (ALZ archives' method 1) one after
+/// another. Parameters: each stream's bytes of data and the ranks of its periodic blocks.
+/// Inputs: the data.
+pub const BZ2_ALZ: Module = aqr_bz2::formula::MODULE_ALZ;
+
 /// aqr-lzx reconstruction of streams of LZX chunks (as WIM files hold them), one after another,
 /// from their data and records. Inputs: the data, the records and the index cutting them into
 /// the streams'.
@@ -264,7 +269,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 65] = [
+pub const MODULES: [Module; 66] = [
     X86,
     X86_REMAP,
     ARM64,
@@ -289,6 +294,7 @@ pub const MODULES: [Module; 65] = [
     LZO,
     BVX,
     BZ2,
+    BZ2_ALZ,
     LZX,
     MSZIP,
     SNAPPY,
@@ -552,6 +558,9 @@ impl Native {
         } else if m == BZ2 {
             none(resources)?;
             aqr_bz2::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == BZ2_ALZ {
+            none(resources)?;
+            aqr_bz2::formula::decode_alz(params, inputs, len, threads).map_err(msg)
         } else if m == LZX {
             none(resources)?;
             aqr_lzx::formula::decode(params, inputs, len, threads).map_err(msg)
