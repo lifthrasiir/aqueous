@@ -47,6 +47,9 @@ pub enum Format {
     Clip,
     /// FMOD FSB5 sound bank (aqr-fsb), known by its header and samples' headers.
     Fsb5,
+    /// Ogg file of Vorbis streams (aqr-ogg, and aqr-vorbis on their audio packets), known by its
+    /// first page's CRC.
+    Ogg,
     /// DDS texture (aqr-tex): BC1 to BC5 blocks, or uncompressed pixels (aqr-raw's module).
     Dds,
     Pdf,
@@ -112,7 +115,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 45] = [
+    pub const ALL: [Format; 46] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -133,6 +136,7 @@ impl Format {
         Format::Psd,
         Format::Clip,
         Format::Fsb5,
+        Format::Ogg,
         Format::Dds,
         Format::Pdf,
         Format::Sqlite,
@@ -182,6 +186,7 @@ impl Format {
             Format::Psd => "psd",
             Format::Clip => "clip",
             Format::Fsb5 => "fsb5",
+            Format::Ogg => "ogg",
             Format::Dds => "dds",
             Format::Pdf => "pdf",
             Format::Sqlite => "sqlite",
@@ -246,6 +251,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"psd" | b"psb" => format(Format::Psd),
         b"clip" => format(Format::Clip),
         b"fsb" => format(Format::Fsb5),
+        b"ogg" | b"oga" => format(Format::Ogg),
         b"dds" => format(Format::Dds),
         b"pdf" => format(Format::Pdf),
         b"gz" | b"tgz" | b"svgz" => format(Format::Gzip),
@@ -271,8 +277,8 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         | b"odt" | b"ods" | b"odp" | b"whl" | b"nupkg" => format(Format::Zip),
         b"7z" => format(Format::SevenZip),
         b"cab" => format(Format::Cab),
-        b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogg" | b"oga" | b"ogv"
-        | b"opus" | b"aac" | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
+        b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"mkv" | b"webm" | b"ogv" | b"opus" | b"aac"
+        | b"webp" | b"avif" | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => {
             Kind::Text
@@ -321,6 +327,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Clip)
     } else if aqr_fsb::fsb5::starts(d) {
         Some(Format::Fsb5)
+    } else if aqr_ogg::formula::starts(d) {
+        Some(Format::Ogg)
     } else if at(0, b"fLaC") {
         Some(Format::Flac)
     } else if at(0, b"RIFF") && at(8, b"WAVE") || at(0, b"FORM") && (at(8, b"AIFF") || at(8, b"AIFC")) {
@@ -428,6 +436,7 @@ const fn pair(a: u8, b: u8) -> bool {
         0x00 => b == b'a',
         b'b' => b == b'v',
         b'G' => b == b'I',
+        b'O' => b == b'g',
         b'B' => b == b'Z',
         // zlib's CMF and FLG: DEFLATE with a window of at most 32K, no preset dictionary
         _ => {
@@ -496,6 +505,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         0x00 => aqr_wasm::formula::starts(d),
         b'b' => aqr_bvx::formula::starts(d),
         b'G' => aqr_gif::formula::starts(d),
+        b'O' => aqr_ogg::formula::starts(d),
         b'B' => aqr_bz2::formula::starts(d),
         // zlib's CMF: DEFLATE with a window of at most 32K
         b if b & 15 == 8 && b >> 4 <= 7 => zlib_header(d, false),
@@ -588,6 +598,7 @@ mod tests {
             (b"\x48\x89", 0),
             (b"bvx2", 0),
             (b"BZh9", 0),
+            (b"OggS", 0),
         ] {
             assert!(pairs(d[0], d[1]), "{d:x?}");
         }
@@ -606,6 +617,7 @@ mod tests {
             "codecs/aqr-zip/tests/data/py-deflate.zip",
             "codecs/aqr-zip/tests/data/infozip-stream.zip",
             "codecs/aqr-snappy/tests/data/table-mul.ldb",
+            "codecs/aqr-ogg/tests/data/chained.ogg",
         ] {
             data.extend(std::fs::read(format!("{root}/{f}")).unwrap());
         }
@@ -634,6 +646,8 @@ mod tests {
         for (name, kind) in [
             (&b"photo.JPG"[..], Kind::Format("jpeg")),
             (b"dir.d/sub\\song.flac", Kind::Format("flac")),
+            (b"song.OGG", Kind::Format("ogg")),
+            (b"song.opus", Kind::Compressed),
             (b"a/b/places.sqlite", Kind::Format("sqlite")),
             (b"art/page0001.CLIP", Kind::Format("clip")),
             (b"lib.tar.gz", Kind::Format("gzip")),

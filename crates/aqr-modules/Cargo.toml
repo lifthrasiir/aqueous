@@ -22,6 +22,7 @@ aqr-fasta = { path = "../../codecs/aqr-fasta", default-features = false }
 aqr-gif = { path = "../../codecs/aqr-gif", default-features = false }
 aqr-gnu-gettext = { path = "../../codecs/aqr-gnu-gettext", default-features = false }
 aqr-vorbis = { path = "../../codecs/aqr-vorbis", default-features = false }
+aqr-ogg = { path = "../../codecs/aqr-ogg", default-features = false }
 aqr-ima = { path = "../../codecs/aqr-ima", default-features = false }
 aqr-fits = { path = "../../codecs/aqr-fits", default-features = false }
 aqr-hdf5 = { path = "../../codecs/aqr-hdf5", default-features = false }
@@ -163,6 +164,11 @@ required-features = ["wasm"]
 [[bin]]
 name = "vorbis-recons"
 path = "src/bin/vorbis-recons.rs"
+required-features = ["wasm"]
+
+[[bin]]
+name = "ogg-recons"
+path = "src/bin/ogg-recons.rs"
 required-features = ["wasm"]
 
 [[bin]]

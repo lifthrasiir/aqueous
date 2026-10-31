@@ -4,6 +4,7 @@ Vorbis I audio packets as the values they code, the values coded by rANS with st
 place of their Huffman codes, and the packets written back bit for bit. The module
 `vorbis-recons` rebuilds a stream's packets (each after its 16-bit length, as FSB5 frames them)
 from the stream's setup header and the record of their values; `FORMAT.md` specifies it.
+aqr-fsb gives it the samples of FSB5 banks, aqr-ogg the audio packets of Ogg's Vorbis streams.
 
 - `setup` parses a setup header for a stream's channels and block sizes: codebooks (with the
   codewords of Vorbis I §3.2.1, their decoding trees, a table for their first 10 bits, and their

@@ -169,6 +169,7 @@ dependencies = [
  "aqr-mp3",
  "aqr-mszip",
  "aqr-obj",
+ "aqr-ogg",
  "aqr-pdf",
  "aqr-png",
  "aqr-ppmd",
@@ -223,6 +224,7 @@ dependencies = [
  "aqr-mp3",
  "aqr-mszip",
  "aqr-obj",
+ "aqr-ogg",
  "aqr-pdf",
  "aqr-png",
  "aqr-psd",
@@ -482,6 +484,7 @@ dependencies = [
  "aqr-mp3",
  "aqr-mszip",
  "aqr-obj",
+ "aqr-ogg",
  "aqr-pdf",
  "aqr-png",
  "aqr-psd",
@@ -534,6 +537,15 @@ dependencies = [
  "aqr-num",
  "memchr",
  "zstd",
+]
+
+[[package]]
+name = "aqr-ogg"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+ "aqr-vorbis",
 ]
 
 [[package]]

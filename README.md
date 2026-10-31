@@ -7,7 +7,7 @@ Snappy in browser profiles and databases. Aqueous undoes that compression, codes
 with stronger models, and rebuilds the original files bit for bit on extraction.
 
 - **Recompressors** for about twenty format families: images (PNG, JPEG, PSD, BMP and PNM,
-  BCn textures in DDS), audio (MP3, FLAC, WAV, AIFF), documents and data (PDF, SQLite, text,
+  BCn textures in DDS), audio (MP3, FLAC, WAV, AIFF, Ogg Vorbis), documents and data (PDF, SQLite, text,
   FASTA, Wavefront OBJ), containers and general-purpose compression (gzip and zlib, ZIP, LZ4,
   LZO, LZMA, Snappy, tar, ar and cpio, git checkouts) and executables (PE and Mach-O). Each
   lives in its own crate under `codecs/`, with a `FORMAT.md` describing what it stores.

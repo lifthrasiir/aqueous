@@ -42,6 +42,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::GnuGettext => aqr_gnu_gettext::formula::extent(d),
         Format::Wasm => aqr_wasm::formula::extent(d),
         Format::Fsb5 => aqr_fsb::fsb5::extent(d),
+        Format::Ogg => aqr_ogg::formula::extent(d),
         Format::Fasta | Format::Ppmd | Format::Obj | Format::Xsv | Format::Text | Format::Sized | Format::Records => {
             Some(d.len())
         }
@@ -442,6 +443,8 @@ mod tests {
             (Format::Flac, "codecs/aqr-flac/tests/data/s16_tags.flac"),
             (Format::Flac, "codecs/aqr-flac/tests/data/s16_junk.flac"),
             (Format::Flac, "codecs/aqr-flac/tests/data/u8_mono.flac"),
+            (Format::Ogg, "codecs/aqr-ogg/tests/data/chained.ogg"),
+            (Format::Ogg, "codecs/aqr-ogg/tests/data/opus.opus"),
         ] {
             ends(f, &fixture(path));
         }

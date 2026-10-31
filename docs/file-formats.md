@@ -60,6 +60,7 @@ and the design is argued in `xform-design.md`.
 | format | crate | sample | ratio (tentative) | zstd -3 | comp. MB/s | decomp. MB/s | memory / input | notes |
 |---|---|---|---|---|---|---|---|---|
 | MP3 | aqr-mp3 | 402 files, 401 MB | 0.853 ~ 0.890 | 0.971 | 45 | 116 | 61 MB + 6.4× | see below |
+| Ogg Vorbis | aqr-ogg, aqr-vorbis | 12 files made from aqr-flac's corpus by libvorbisenc with libogg and by ffmpeg, 49.1 MB (FORMAT.md of aqr-ogg) | 0.932 | 0.999 | 55 (`aqr`, 10 threads) | 158 and 117 (`-t`, 10 threads; the second as Wasm) | 0.66 GB heap peak (`aqr`) | measured 2026-10-31 with `aqr`, not `aqr-show`. The pages from the packets (layout about 5 bytes a page before compression); the audio packets by aqr-vorbis in pieces of 2 MiB. Opus and FLAC in Ogg are not taken |
 | FLAC; WAV, AIFF | aqr-flac; aqr-raw | 28 files, 401 MB | 0.945 | 0.999 | 65 | 165 | 9 MB + 11.5× | the resource is about 2.6 KB per archive. Measured when aqr-flac took WAV and AIFF too: aqr-raw has them now, with the same streams |
 
 The MP3 resource is the built-in tables (131 KB raw, about 38 KB in every archive), so a
@@ -155,7 +156,6 @@ bytes. Gains are estimates unless a tool is cited.
 
 | format | used in | how it compresses | what is left | reuse |
 |---|---|---|---|---|
-| Ogg Vorbis | games, streaming, music | floors and residues as vector-quantised Huffman codebooks, set in the stream's setup header | the codebooks are fixed per stream, with no context: recoding the decoded symbols with context mixing gains 8–12% (Balrogg); rehuff and OptiVorbis only re-optimise the codebooks within the format | aqr-mp3's structure (the Ogg pages are new) |
 | AAC (M4A, MP4), WMA | music stores, soundtracks of every MP4 | MDCT, then Huffman codebooks (AAC) or run-level VLC (WMA) | as packMP3; needs MP4 or ASF parsing | aqr-mp3's structure |
 | MPEG-1 Layer II (MP2) | DAB radio, DVB and DVD soundtracks, broadcast archives | subband samples quantised at a fixed allocation, in grouped fixed-width codes: no entropy coding | the samples and scalefactors modelled: a large gain | aqr-mp3's frame handling |
 | AC-3, E-AC-3 (Dolby Digital) | DVD, Blu-ray, broadcast, streaming 5.1 | differential exponents in groups, mantissas at fixed widths from a computed bit allocation: no entropy coding | exponents and mantissas modelled | |

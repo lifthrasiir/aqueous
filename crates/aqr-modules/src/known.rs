@@ -174,7 +174,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "flate-set",
         version: 1,
-        sha512_256: hex("d0eac1ce671e3d35d57d1e6e03cd00c3d474540d50f542b09a24d503fb338384"),
+        sha512_256: hex("0355718f6297f98da16d552deca2835c72cd783a0e8bf50c6dd0a3454a342495"),
         block: include_bytes!("../wasm/flate-set.block"),
     },
     Known {
@@ -252,7 +252,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("94723274d403c5c934b4446093d6ec8df3c357378e03ac81db7a929895915e97"),
+        sha512_256: hex("d760fe64344c9208995eae2f36f78f7054e2a8f361d9c70ffcb89a42fa734a4e"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {
@@ -272,6 +272,12 @@ pub const KNOWN: &[Known] = &[
         version: 1,
         sha512_256: hex("202ee85ad95b14d43d585720b2642db0df2527d34bf840dd2fb7665b1c23d16d"),
         block: include_bytes!("../wasm/obj-recons.block"),
+    },
+    Known {
+        name: "ogg-recons",
+        version: 1,
+        sha512_256: hex("6e222758c4cb5106c25c4144de6dfd84b4d11312b94817666e2a80b8df9f67a0"),
+        block: include_bytes!("../wasm/ogg-recons.block"),
     },
     Known {
         name: "pcm-recons",

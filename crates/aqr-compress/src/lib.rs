@@ -37,6 +37,8 @@
 //! - Data in which a scan finds no file (an ELF image, the rest of an executable, data of no
 //!   format): aqr-infer-recs, its tables of records and chains of entries transposed by their
 //!   fields, where a quick estimate tells they may save 5% at least and they do.
+//! - Ogg files of Vorbis streams: aqr-ogg, rebuilding the pages from the streams' packets with
+//!   their lacing and CRCs derived, the Vorbis audio packets by aqr-vorbis.
 //! - PNG, GIF, JPEG, MP3, FLAC/WAV/AIFF, PSD/PSB, Clip Studio Paint, DDS, PDF, SQLite, FASTA, FITS
 //!   and Wavefront OBJ (by its text, not its name): the recompressor's own formula, its module
 //!   applied to its streams, and files it embeds (PDF's DEFLATE streams and images, PSD's and
@@ -1889,6 +1891,7 @@ fn pure_encode(format: Format) -> Option<Encode> {
         Format::GnuGettext => aqr_gnu_gettext::formula::encode,
         Format::Wasm => aqr_wasm::formula::encode,
         Format::Fsb5 => aqr_fsb::formula::encode,
+        Format::Ogg => aqr_ogg::formula::encode,
         Format::Fits => aqr_fits::formula::encode,
         Format::Obj => aqr_obj::formula::encode,
         Format::Xsv => aqr_xsv::formula::encode,
