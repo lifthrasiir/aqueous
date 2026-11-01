@@ -655,7 +655,12 @@ impl<'a> Extractor<'a> {
                 Some(k) => k != 0,
                 None => to.is_some_and(|j| t.entries[j].node == EntryNode::Dir),
             };
-            symlink(&os_from(name_bytes(target).0), path, dir).map_err(|x| err(path, x))?;
+            let (os, substituted) = link_target(target);
+            if substituted {
+                let shown = String::from_utf8_lossy(name_bytes(target).0);
+                self.ap.tell(path, &format!("a link to {shown}, made to {}", Path::new(&os).display()));
+            }
+            symlink(&os, path, dir).map_err(|x| err(path, x))?;
             s.made[i] = Some(Kind::Link);
         }
         for (i, k, d) in self.later.into_inner().unwrap() {
@@ -731,32 +736,66 @@ fn grow<T: Default>(v: &mut Vec<T>, i: usize) -> &mut T {
     &mut v[i]
 }
 
-/// The name `name` takes on Windows where it cannot be as it is: the characters a name cannot
-/// have (`<>:"/\|?*` and controls) and a dot or a space at its end as `_`, and `_` before a
-/// device's name (`CON`, `NUL.txt`, ...). `None` where it can be.
-#[cfg(any(windows, test))]
+/// The name `name` takes on Windows where it cannot be as it is ([`windows_wide`]). `None`
+/// where it can be.
+#[cfg(windows)]
 pub fn windows_name(name: &std::ffi::OsStr) -> Option<OsString> {
-    let s = name.to_string_lossy();
-    // (a lone surrogate is a name Windows takes: kept as it is)
-    if s.contains('\u{fffd}') && name.to_str().is_none() {
-        return None;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    windows_wide(&name.encode_wide().collect::<Vec<_>>()).map(|w| OsString::from_wide(&w))
+}
+
+/// The name of UTF-16 `name` (lone surrogates and all) on Windows where it cannot be as it is:
+/// the characters a name cannot have (`<>:"/\|?*` and controls) and a dot or a space at its end
+/// as `_`, and `_` before a device's name (`CON`, `NUL.txt`, ...). `None` where it can be.
+#[cfg(any(windows, test))]
+fn windows_wide(name: &[u16]) -> Option<Vec<u16>> {
+    let bad = |c: u16| c < 0x20 || b"<>:\"/\\|?*".iter().any(|&b| b as u16 == c);
+    let mut out: Vec<u16> = name.iter().map(|&c| if bad(c) { b'_' as u16 } else { c }).collect();
+    if let Some(last) = out.last_mut()
+        && (*last == b'.' as u16 || *last == b' ' as u16)
+    {
+        *last = b'_' as u16;
     }
-    let bad = |c: char| (c as u32) < 0x20 || "<>:\"/\\|?*".contains(c);
-    let mut out: String = s.chars().map(|c| if bad(c) { '_' } else { c }).collect();
-    if out.ends_with(['.', ' ']) {
-        out.pop();
-        out.push('_');
-    }
-    let stem = out.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+    // (devices' names are of ASCII and superscripts, which surrogates do not change)
+    let s = String::from_utf16_lossy(&out);
+    let stem = s.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
     let device = matches!(&stem[..], "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
         || stem.len() == 4
             && (stem.starts_with("COM") || stem.starts_with("LPT"))
             && matches!(stem.as_bytes()[3], b'1'..=b'9')
         || (stem.starts_with("COM") || stem.starts_with("LPT")) && ["¹", "²", "³"].contains(&&stem[3..]);
     if device {
-        out.insert(0, '_');
+        out.insert(0, b'_' as u16);
     }
-    (out != s).then(|| out.into())
+    (out != name).then_some(out)
+}
+
+/// The target of a link made of `target` (an encoded one) on this system. On Windows, its
+/// names (between `/`s) are those that entries of them are written as ([`windows_name`]), so
+/// that none reaches beyond its place (by a `\` or a `:`), and the `/`s are `\`s; and whether a
+/// name was not as it is.
+fn link_target(target: &[u8]) -> (OsString, bool) {
+    let bytes = name_bytes(target).0;
+    #[cfg(windows)]
+    {
+        let (mut out, mut substituted) = (OsString::new(), false);
+        for (k, part) in bytes.split(|&b| b == b'/').enumerate() {
+            if k > 0 {
+                out.push("\\");
+            }
+            let os = os_from(part);
+            match (part, windows_name(&os)) {
+                (b"" | b"." | b"..", _) | (_, None) => out.push(&os),
+                (_, Some(sub)) => {
+                    out.push(sub);
+                    substituted = true;
+                }
+            }
+        }
+        (out, substituted)
+    }
+    #[cfg(not(windows))]
+    (os_from(bytes), false)
 }
 
 /// The entries of a tree by their directory and name.
@@ -834,21 +873,19 @@ fn symlink(target: &std::ffi::OsStr, at: &Path, _: bool) -> std::io::Result<()> 
     std::os::unix::fs::symlink(target, at)
 }
 
+/// (`target` of `\`s, [`link_target`])
 #[cfg(windows)]
 fn symlink(target: &std::ffi::OsStr, at: &Path, dir: bool) -> std::io::Result<()> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    let slash = |c: u16| if c == b'/' as u16 { b'\\' as u16 } else { c };
-    let target = PathBuf::from(OsString::from_wide(&target.encode_wide().map(slash).collect::<Vec<_>>()));
     if dir { std::os::windows::fs::symlink_dir(target, at) } else { std::os::windows::fs::symlink_file(target, at) }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::windows_name;
+    use super::windows_wide;
 
     #[test]
     fn windows_names() {
-        let w = |s: &str| windows_name(s.as_ref()).map(|o| o.into_string().unwrap());
+        let w = |s: &str| windows_wide(&s.encode_utf16().collect::<Vec<_>>()).map(|o| String::from_utf16(&o).unwrap());
         assert_eq!(w("a.txt"), None);
         assert_eq!(w("12:30.txt").as_deref(), Some("12_30.txt"));
         assert_eq!(w("what?").as_deref(), Some("what_"));
@@ -859,5 +896,10 @@ mod tests {
         assert_eq!(w("COM10"), None);
         assert_eq!(w("console"), None);
         assert_eq!(w("a\\b").as_deref(), Some("a_b"));
+        // a lone surrogate kept, the rest as any other name's
+        let lone = |a: &str, b: &str| [a.encode_utf16().collect(), vec![0xd800], b.encode_utf16().collect()].concat();
+        assert_eq!(windows_wide(&lone("x", ":ads")), Some(lone("x", "_ads")));
+        assert_eq!(windows_wide(&lone("", "\\..\\..\\x")), Some(lone("", "_.._.._x")));
+        assert_eq!(windows_wide(&lone("x", "y")), None);
     }
 }

@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::sync::Arc;
 
 use aqr_formula::aqr::{EntryNode, Extra, MAC_FLAGS_ALLOWED, Time, WIN_ATTRS_ALLOWED};
@@ -777,7 +778,20 @@ mod os {
         if kind == Kind::Link {
             return Err(io::Error::other("no streams written to links here"));
         }
-        fs::write(stream(path, &super::os_from(name)), data)
+        let name = super::os_from(name);
+        if !stream_name(&name) {
+            return Err(io::Error::other("not a stream name this system takes"));
+        }
+        fs::write(stream(path, &name), data)
+    }
+
+    /// Whether `name` is the name of a stream of a path, `PATH:NAME`, as it is: not one that
+    /// reaches out of it (of `\`, `/` or `:`, which tells the type of a stream), nor one that a
+    /// path's last name loses (a dot or a space at its end), nor of controls.
+    fn stream_name(name: &std::ffi::OsStr) -> bool {
+        let w: Vec<u16> = name.encode_wide().collect();
+        let bad = |c: u16| c < 0x20 || b"\\/:".iter().any(|&b| b as u16 == c);
+        !w.is_empty() && !w.iter().any(|&c| bad(c)) && !w.last().is_some_and(|&c| c == b'.' as u16 || c == b' ' as u16)
     }
 
     fn system(t: Time) -> std::time::SystemTime {
