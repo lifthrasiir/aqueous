@@ -32,7 +32,60 @@ svg.pikchr {
     --fig-meta: #6b4d1f;
   }
 }
+/* The bar back to the site, hidden while scrolling down; colors from site/index.html. */
+:root {
+  --back-h: 2.25rem;
+  --back-bg: #0086bd;
+  --back-ink: #ffffff;
+  scroll-padding-top: var(--back-h);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --back-bg: #3cbcf0;
+    --back-ink: #04202d;
+  }
+}
+body { padding-top: calc(1.6em + var(--back-h)); }
+body.toc-sidebar #toc { padding-top: var(--back-h); }
+@media screen and (min-width: 78em) { body:not(.toc-inline) #toc { padding-top: var(--back-h); } }
+#back-to-main {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  z-index: 100;
+  height: var(--back-h);
+  padding: 0 1rem;
+  display: flex;
+  align-items: center;
+  background: var(--back-bg);
+  color: var(--back-ink);
+  font: 600 15px/1 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  text-decoration: none;
+  border: none;
+  transition: transform .2s ease;
+}
+#back-to-main:hover, #back-to-main:focus-visible { text-decoration: underline; text-underline-offset: 2px; }
+#back-to-main.hidden:not(:focus-visible) { transform: translateY(-100%); }
+:root.local-file { --back-h: 0px; }
+:root.local-file #back-to-main { display: none; }
+@media print { #back-to-main { display: none; } body { padding-top: 1.6em; } }
+@media (prefers-reduced-motion: reduce) { #back-to-main { transition: none; } }
 </style>
+
+<nav><a id="back-to-main" href="../">← Back to the main page</a></nav>
+<script>
+{
+  // Opened as a local file (a build of the spec), there is no site to go back to.
+  if (location.protocol === "file:") document.documentElement.classList.add("local-file");
+  const bar = document.getElementById("back-to-main");
+  let last = scrollY;
+  addEventListener("scroll", () => {
+    const y = scrollY;
+    if (Math.abs(y - last) < 4) return;
+    bar.classList.toggle("hidden", y > last && y > bar.offsetHeight);
+    last = y;
+  }, { passive: true });
+}
+</script>
 
 <pre class=link-defaults>
 spec:infra; type:dfn; text:list
