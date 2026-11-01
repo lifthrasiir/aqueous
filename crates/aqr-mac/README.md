@@ -1,8 +1,8 @@
 # aqr-mac
 
-Aqueous in the macOS Finder. "Compress with Aqueous" works on files and folders. "Extract with
-Aqueous" and "Test with Aqueous" work on `.aqr` files, and opening an `.aqr` file (a
-double-click) extracts it. The progress shows on the file itself in Finder. As in aqr-win
+Aqueous in the macOS Finder. "Compress with Aqueous" works on files and folders, and "Compress with Aqueous
+(Passphrase)…" does so with the archive encrypted (`aqr -P`). "Extract with Aqueous" and "Test
+with Aqueous" work on `.aqr` files, and opening an `.aqr` file (a double-click) extracts it. The progress shows on the file itself in Finder. As in aqr-win
 (`crates/aqr-win`), the work is done by `aqr --ipc` in a process of its own (the protocol:
 `crates/aqr/src/ipc.rs`). This program only hands Finder's requests to it.
 
@@ -36,7 +36,9 @@ Aqueous is distributed as `Aqueous.zip`, holding `Aqueous.app` (`aqr-mac` and `a
   Stopping sends `aqr` a cancel (its output being written removed), and `aqr` is killed if it
   has not stopped within 10 s.
 - Alerts show errors (with the last lines `aqr` wrote) and what a test checked, and ask about
-  an output that is there already.
+  an output that is there already. A passphrase is asked for in an alert with a secure field
+  (typed twice, to choose one, until both match), again where it was wrong; an encrypted
+  archive asks on its own. Cancelling it stops the job without an error alert.
 
 ## Status
 

@@ -52,6 +52,8 @@ pub struct State {
     pub ended: Vec<(PathBuf, Value)>,
     pub error: Option<String>,
     pub stopped: bool,
+    /// The user gave up a passphrase (`aqr`'s error for that is not told).
+    pub cancelled: bool,
     /// Its standard output closed (all told).
     pub eof: bool,
     /// The last lines of its standard error.
@@ -89,8 +91,8 @@ fn archive_of(paths: &[PathBuf]) -> PathBuf {
 }
 
 impl Job {
-    /// Runs `aqr` on `paths`, read on threads of their own.
-    pub fn start(verb: Verb, mut paths: Vec<PathBuf>) -> Result<Arc<Job>, String> {
+    /// Runs `aqr` on `paths` (`-P` where `encrypt`), read on threads of their own.
+    pub fn start(verb: Verb, mut paths: Vec<PathBuf>, encrypt: bool) -> Result<Arc<Job>, String> {
         paths.sort();
         let mut cmd = Command::new(aqr());
         cmd.arg("--ipc").arg(match verb {
@@ -98,6 +100,9 @@ impl Job {
             Verb::Extract => "-d",
             Verb::Test => "-t",
         });
+        if encrypt {
+            cmd.arg("-P");
+        }
         // (a single entry at the top beside the archive, else a directory of its name)
         if matches!(verb, Verb::Extract) {
             cmd.arg("--auto-dir");
@@ -125,7 +130,7 @@ impl Job {
             child: Mutex::new(child),
             stopping: Mutex::new(None),
         });
-        job.send(&json!({"hello": 1, "answers": ["overwrite"]}));
+        job.send(&json!({"hello": 1, "answers": ["overwrite", "passphrase"]}));
         let j = job.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(out).lines() {

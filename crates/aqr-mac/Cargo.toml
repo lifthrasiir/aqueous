@@ -39,11 +39,15 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSPasteboard",
     "NSPasteboardItem",
     "NSResponder",
+    "NSSecureTextField",
     "NSRunningApplication",
     "NSScrollView",
     "NSText",
+    "NSTextField",
+    "NSTextFieldCell",
     "NSTextView",
     "NSView",
+    "NSWindow",
 ] }
 
 [[bin]]

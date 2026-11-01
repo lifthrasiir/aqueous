@@ -3,7 +3,7 @@
 //!
 //! - Finder's services (`NSServices` in `Info.plist`, under Quick Actions or Services of a
 //!   Control-click) send the paths chosen, all at once, on a pasteboard: "Compress with Aqueous"
-//!   on files and folders, "Extract with Aqueous" and "Test with Aqueous" on `.aqr` files.
+//!   on files and folders ("Compress with Aqueous (Passphrase)…" encrypts: `aqr -P`), "Extract with Aqueous" and "Test with Aqueous" on `.aqr` files.
 //!   `.aqr` files opened (a double-click) are extracted: beside them, a single entry at the top
 //!   as it is, else into their names without `.aqr` (`aqr --auto-dir`).
 //! - How far a job is shows on its file in Finder: an `NSProgress` published for it, a bar on
@@ -11,7 +11,8 @@
 //!   output being written removed). The file is the archive being written (`NAME.PID.part`),
 //!   what is extracted (the archive until that is decided), or the archive being tested.
 //! - Alerts tell errors (with the last lines `aqr` wrote), what a test checked, and ask about an
-//!   output there already.
+//!   output there already and for passphrases (a secure field, two to choose one; asked again
+//!   where it was wrong, and `aqr`'s error is not told where the user gives up).
 //! - Run by itself (not for a file or a service), it registers itself with Launch Services and
 //!   the services, says so, and offers the `aqr` command on `PATH`; then it quits, as it does
 //!   once its jobs are done.
@@ -29,7 +30,7 @@ use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSApplicationDelegate, NSPasteboard,
-    NSPasteboardTypeFileURL, NSScrollView, NSTextView, NSUpdateDynamicServices,
+    NSPasteboardTypeFileURL, NSScrollView, NSSecureTextField, NSTextView, NSUpdateDynamicServices, NSView,
 };
 use objc2_foundation::{
     NSArray, NSBundle, NSNotification, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSProgress,
@@ -125,6 +126,11 @@ define_class!(
             self.start(Verb::Compress, paths(pb));
         }
 
+        #[unsafe(method(compressFilesWithPassphrase:userData:error:))]
+        fn compress_files_with_passphrase(&self, pb: &NSPasteboard, _: Option<&NSString>, _: *mut *mut NSString) {
+            self.start_with(Verb::Compress, paths(pb), true);
+        }
+
         #[unsafe(method(extractFiles:userData:error:))]
         fn extract_files(&self, pb: &NSPasteboard, _: Option<&NSString>, _: *mut *mut NSString) {
             self.start(Verb::Extract, paths(pb));
@@ -149,11 +155,16 @@ impl Delegate {
     }
 
     fn start(&self, verb: Verb, paths: Vec<PathBuf>) {
+        self.start_with(verb, paths, false);
+    }
+
+    /// Begins a job, its archives encrypted (`aqr -P`) where `encrypt`.
+    fn start_with(&self, verb: Verb, paths: Vec<PathBuf>, encrypt: bool) {
         if paths.is_empty() {
             return;
         }
         self.ivars().worked.set(true);
-        match Job::start(verb, paths) {
+        match Job::start(verb, paths, encrypt) {
             Ok(job) => self.ivars().jobs.borrow_mut().push(Running { job, progress: None, always: Vec::new() }),
             Err(e) => {
                 alert(self.mtm(), NSAlertStyle::Critical, &format!("Could not {} anything", verb.name()), &e, None)
@@ -171,6 +182,10 @@ impl Delegate {
             let question = r.job.state.lock().unwrap().questions.pop_front();
             if let Some(q) = question {
                 let answer = ask(mtm, &mut r, &q);
+                if q["kind"] == "passphrase" && answer.is_null() {
+                    // (given up: aqr's error for it is not told)
+                    r.job.state.lock().unwrap().cancelled = true;
+                }
                 r.job.send(&json!({"answer": q["ask"], "value": answer}));
             }
             if let Some(status) = r.job.done() {
@@ -264,7 +279,7 @@ fn show(r: &mut Running) {
 /// Tells what came of `job`, ended with `status`: an error, or what a test checked.
 fn finished(mtm: MainThreadMarker, job: &Job, status: std::process::ExitStatus) {
     let s = job.state.lock().unwrap();
-    if s.stopped {
+    if s.stopped || s.cancelled {
         return;
     }
     let failed = match &s.error {
@@ -322,7 +337,66 @@ fn ask(mtm: MainThreadMarker, r: &mut Running, q: &Value) -> Value {
             }
             answer
         }
+        "passphrase" => passphrase(mtm, q).map_or(Value::Null, Value::String),
         _ => Value::Null,
+    }
+}
+
+/// The passphrase asked for by question `q`, typed twice where it says `confirm`; `None` where
+/// the user gives up.
+fn passphrase(mtm: MainThreadMarker, q: &Value) -> Option<String> {
+    let confirm = q["confirm"].as_bool().unwrap_or(false);
+    let compress = q["mode"] == "compress";
+    let path = q["path"].as_str().map(PathBuf::from);
+    let mut note = if q["again"].as_bool().unwrap_or(false) { Some("Wrong passphrase, try again.") } else { None };
+    loop {
+        let a = NSAlert::new(mtm);
+        a.setAlertStyle(NSAlertStyle::Informational);
+        let main = match (&path, compress) {
+            (Some(p), _) => format!("{} is encrypted", file_name(p)),
+            (None, true) => "Choose a passphrase for the archive".to_string(),
+            (None, false) => "The archive is encrypted".to_string(),
+        };
+        a.setMessageText(&NSString::from_str(&main));
+        let mut info =
+            String::from(if compress { "The passphrase is needed to extract it." } else { "Enter its passphrase." });
+        if let Some(n) = note {
+            info = format!("{n}\n\n{info}");
+        }
+        a.setInformativeText(&NSString::from_str(&info));
+        let fields: Vec<_> = (0..if confirm { 2 } else { 1 })
+            .map(|i| {
+                let y = if confirm { 28.0 * (1 - i) as f64 } else { 0.0 };
+                let frame = NSRect::new(NSPoint::new(0.0, y), NSSize::new(260.0, 24.0));
+                let f = NSSecureTextField::initWithFrame(NSSecureTextField::alloc(mtm), frame);
+                f.setPlaceholderString(Some(&NSString::from_str(if i == 0 {
+                    "Passphrase"
+                } else {
+                    "Passphrase again"
+                })));
+                f
+            })
+            .collect();
+        let height = if confirm { 52.0 } else { 24.0 };
+        let view =
+            NSView::initWithFrame(NSView::alloc(mtm), NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(260.0, height)));
+        for f in &fields {
+            view.addSubview(f);
+        }
+        a.setAccessoryView(Some(&view));
+        a.addButtonWithTitle(&NSString::from_str("OK"));
+        a.addButtonWithTitle(&NSString::from_str("Cancel"));
+        a.layout();
+        a.window().setInitialFirstResponder(Some(&fields[0]));
+        activate(mtm);
+        if a.runModal() != NSAlertFirstButtonReturn {
+            return None;
+        }
+        let value = fields[0].stringValue().to_string();
+        if !confirm || value == fields[1].stringValue().to_string() {
+            return Some(value);
+        }
+        note = Some("The two passphrases differ, try again.");
     }
 }
 
@@ -394,7 +468,7 @@ fn welcome(mtm: MainThreadMarker) {
     let a = NSAlert::new(mtm);
     a.setMessageText(&NSString::from_str("Aqueous is ready"));
     let mut info = String::from(
-        "In Finder, Control-click files or folders for \"Compress with Aqueous\", and .aqr files for \"Extract \
+        "In Finder, Control-click files or folders for \"Compress with Aqueous\" (or \"(Passphrase)…\" to encrypt), and .aqr files for \"Extract \
          with Aqueous\" and \"Test with Aqueous\" (under Quick Actions or Services). Opening an .aqr file \
          extracts it beside it.\n\nWhere they are not there, turn them on in System Settings: Keyboard, \
          Keyboard Shortcuts, Services, Files and Folders.",
