@@ -53,13 +53,10 @@ pub fn decode2(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Res
     decode_with(params, inputs, len, threads, |d, r, _| lzma2::join(d, r))
 }
 
-fn decode_with(
-    params: &[u8],
-    inputs: &[&[u8]],
-    len: u64,
-    threads: usize,
-    join: fn(&[u8], &[u8], usize) -> Option<Vec<u8>>,
-) -> Result<Vec<u8>> {
+/// What rebuilds a stream from its data, its record and its expected length.
+type Join = fn(&[u8], &[u8], usize) -> Option<Vec<u8>>;
+
+fn decode_with(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize, join: Join) -> Result<Vec<u8>> {
     let &[data, records, index] = inputs else { return Err(Error("three inputs wanted")) };
     if !params.is_empty() {
         return Err(corrupt());
