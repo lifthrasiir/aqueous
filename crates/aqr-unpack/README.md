@@ -44,8 +44,9 @@ let done = opened.unpack(threads, &sink)?;                  // sink: entries tol
   `SCHILY.xattr.` and `LIBARCHIVE.xattr.`.
 - Names: ZIP's UTF-8 where flagged or given by Info-ZIP's Unicode path field, else UTF-8 where
   they are, else of the system's code page (on Windows; as they are elsewhere); RAR5's UTF-8,
-  RAR 3.x's Unicode names (else as ZIP's); ALZ's UTF-8 where they are, else CP949; EGG's UTF-8,
-  or of the code page its filename record gives (CP949, Shift_JIS; else as ZIP's). `\` separates
+  RAR 3.x's Unicode names (else as ZIP's); ALZ's (of no encoding told) UTF-8 where all of the
+  archive's are, else CP949; EGG's UTF-8, or of the code page its filename record gives (CP949,
+  Shift_JIS; else as ZIP's). `\` separates
   names of ZIP's MS-DOS hosts, of 7z, of RAR 3.x, of ALZ and of EGG.
 
 Left out and told (the run then fails, once the rest is extracted): paths with `..` (a `/` or

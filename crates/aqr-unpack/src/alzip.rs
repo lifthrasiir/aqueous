@@ -1,14 +1,15 @@
 //! ALZip's archives, ALZ and EGG, read by their records (aqr-alz's and aqr-egg's readers): the
-//! files' names (UTF-8 where they are, else CP949, ALZ; EGG's UTF-8, or of the code page its
-//! filename record gives: CP949, Shift_JIS, else the system's), directories, modification times
+//! files' names (ALZ's, which tell no encoding, UTF-8 where all of the archive's are, else CP949;
+//! EGG's UTF-8, or of the code page its filename record gives: CP949, Shift_JIS, else as ZIP's
+//! names not flagged UTF-8), directories, modification times
 //! (ALZ's MS-DOS time as local time; EGG's FILETIME, else its POSIX time) and attributes
 //! (Windows' read-only, hidden, system and archive bits; EGG's POSIX mode and owner); the data
 //! decoded on the pool's threads, a file at a time (an EGG solid archive's block as one), its
 //! CRC-32s checked (ALZ's of the file, EGG's of each block).
 //!
 //! Encrypted files, symbolic links (whose targets neither format is known to store), methods not
-//! known (and AZO's x86 filter), and what is past the archive's records where they do not end as they should (a volume of
-//! a split archive, an archive cut short) are left out and told.
+//! known (and AZO's x86 filter), and what is past the archive's records where they do not end as
+//! they should (a volume of a split archive, an archive cut short) are left out and told.
 
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -97,12 +98,9 @@ pub struct Listing<'d> {
     notes: Vec<String>,
 }
 
-/// Name `b` of code page `cp` (949, 932; else the system's) as UTF-8: as it is where it is
-/// UTF-8.
+/// Name `b` of code page `cp` (949, 932; else as ZIP's names not flagged UTF-8) as UTF-8: as it
+/// is where it is not of it.
 fn named(b: &[u8], cp: u16) -> Vec<u8> {
-    if std::str::from_utf8(b).is_ok() {
-        return b.to_vec();
-    }
     let enc = match cp {
         949 => encoding_rs::EUC_KR,
         932 => encoding_rs::SHIFT_JIS,
@@ -126,9 +124,13 @@ fn size_of(n: u64) -> Option<usize> {
 impl<'d> Listing<'d> {
     pub fn read_alz(d: &'d [u8]) -> Result<Listing<'d>, String> {
         let a = alz::parse(d).ok_or("ALZ: not an ALZ archive")?;
+        // (one archiver wrote all its names: ALZip's are CP949, but where every name is UTF-8,
+        // the archiver's was UTF-8, a name of CP949 rarely being UTF-8 too, and never all of them)
+        let utf8 = a.entries.iter().all(|e| std::str::from_utf8(&d[e.name.clone()]).is_ok());
         let mut heads = Vec::new();
         for e in &a.entries {
-            let name = named(&d[e.name.clone()], 949);
+            let raw = &d[e.name.clone()];
+            let name = if utf8 { raw.to_vec() } else { named(raw, 949) };
             let extra = Extra {
                 mtime: sys::dos((e.time >> 16) as u16, e.time as u16),
                 win_attrs: win_attrs(e.attrs),

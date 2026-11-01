@@ -395,3 +395,33 @@ fn egg_trees() {
     d[k] ^= 0x55;
     assert!(unpack(Format::Egg, &d).is_err());
 }
+
+/// An ALZ archive of stored files of `names` (each holding its name), as ALZip lays it out.
+fn alz_of(names: &[&[u8]]) -> Vec<u8> {
+    let mut d = b"ALZ\x01\x0a\0\0\0".to_vec();
+    for n in names {
+        d.extend_from_slice(b"BLZ\x01");
+        d.extend_from_slice(&(n.len() as u16).to_le_bytes());
+        // archive bit, no time, sizes of 1 byte
+        d.extend_from_slice(&[0x20, 0, 0, 0, 0, 0x10, 0, 0, 0]);
+        d.extend_from_slice(&aqr_common::crc32::hash(n).to_le_bytes());
+        d.extend_from_slice(&[n.len() as u8, n.len() as u8]);
+        d.extend_from_slice(n);
+        d.extend_from_slice(n);
+    }
+    d.extend_from_slice(b"CLZ\x01\0\0\0\0\0\0\0\0CLZ\x02");
+    d
+}
+
+/// ALZ's names are of one encoding for the whole archive: UTF-8 where all are, else CP949, even
+/// a name that would be UTF-8 by itself (찼 of CP949, C3 A1, is UTF-8's á).
+#[test]
+fn alz_names_by_archive() {
+    let names = |names: &[&[u8]]| {
+        let (done, r) = unpack(Format::Alz, &alz_of(names)).unwrap();
+        assert_eq!(done.skipped, 0, "{:?}", r.notes.lock().unwrap());
+        listing(&done, &r).into_keys().collect::<Vec<_>>()
+    };
+    assert_eq!(names(&[b"\xb0\xa1.txt", b"\xc3\xa1.txt"]), ["가.txt", "찼.txt"]);
+    assert_eq!(names(&["가.txt".as_bytes(), b"\xc3\xa1.txt"]), ["á.txt", "가.txt"]);
+}
