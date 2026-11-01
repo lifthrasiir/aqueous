@@ -153,6 +153,9 @@ for name, pad in ((\"a\", 0), (\"b\", 48)):
     make azo.d 'mkdir $out && cp $codecs/aqr-egg/corpus/alzgg/{mz,sysmulti}_sys_optimized.egg $out'
     # LHA archives of -lh5- streams (Amiga LhA's): two of aqr-lha's sample of Aminet
     make lha.d 'mkdir $out && cp $codecs/aqr-lha/corpus/aminet/{biz_misc_AmiBroker320,pix_3dobj_gr_dalek}.lha $out'
+    # RAR archives that pay at level 9: rar 7.23's RAR5 (-m1, and a solid group of 300 small files,
+    # docs/rar5-decoding.md §4.1) and the 10gb corpus's paq8hp5l.rar (RAR 3.x, PPMd)
+    make rar.d 'mkdir $out && cp $root/third_party/rar-dl/fixtures5/{methods/723-m1-t1,misc/manysmall-solid-723}.rar ~/tmp/10gb/www.mattmahoney.net/dc/paq8hp5l.rar $out'
     make table.csv 'py "
 import random, sys
 r = random.Random(1)
@@ -197,7 +200,7 @@ samples
 names=("$@")
 (( $#names )) || names=($(cd $s && ls | rg -v '\.(aqr|po)$'))
 # samples whose recompressors the lower levels do not try
-high=(lzma.d text.lzfse assets.car)
+high=(lzma.d text.lzfse assets.car rar.d)
 for n in $names; do
     [[ -f $s/$n.aqr ]] && continue
     level=()
