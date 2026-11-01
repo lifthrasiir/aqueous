@@ -265,8 +265,15 @@ fn code_filters(bits: &mut impl Bits, ctx: &mut Ctx, sizes: &[usize], p: &mut Pa
                 .unwrap_or((0, Filter { start: 0, len: 0, kind: 0, channels: 0, start_bytes: 1, len_bytes: 1 }));
             let fk = bits.tree(&mut f[kind * 4..kind * 4 + 4], 2, gf.kind as u32) as u8;
             kind = fk as usize;
-            let channels =
-                if fk == 0 { bits.gamma(&mut f[52..84], (gf.channels as u64).wrapping_sub(1))? as u8 + 1 } else { 0 };
+            let channels = if fk == 0 {
+                let c = bits.gamma(&mut f[52..84], (gf.channels as u64).wrapping_sub(1))?;
+                if c >= 32 {
+                    return Err(corrupt());
+                }
+                c as u8 + 1
+            } else {
+                0
+            };
             let at = gd + gf.start as usize;
             let gap = bits.gamma(&mut f[84..116], at.wrapping_sub(end) as u64)? as usize;
             let at = end.checked_add(gap).filter(|&a| a < size).ok_or_else(corrupt)?;

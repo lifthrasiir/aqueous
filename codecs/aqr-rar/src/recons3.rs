@@ -519,7 +519,8 @@ fn code_filters(
                 _ => 0,
             };
             for (r, reg) in regs.iter_mut().enumerate().take(used) {
-                *reg = bits.gamma(g32(&mut f[8..], 4 + r), g.map_or(0, |g| g.1.regs[r]) as u64)? as u32;
+                *reg = u32::try_from(bits.gamma(g32(&mut f[8..], 4 + r), g.map_or(0, |g| g.1.regs[r]) as u64)?)
+                    .map_err(|_| corrupt())?;
             }
             let pred = filter_raw(&progs, last_prog, base + d as u64, base + at as u64, len, kind, regs);
             let raw = match pred {

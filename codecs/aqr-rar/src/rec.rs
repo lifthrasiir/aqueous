@@ -244,10 +244,18 @@ impl<'a> Mf<'a> {
             let mut q = self.head[c][key(d, pos, k)];
             let mut top = k - 1;
             for _ in 0..Self::DEPTH {
-                if q == NONE || q as usize >= pos || pos - q as usize > far {
+                if q == NONE {
                     break;
                 }
                 let p = q as usize;
+                // (the position itself, inserted where the next was looked at ahead)
+                if p >= pos {
+                    q = self.prev[c][p & mask];
+                    continue;
+                }
+                if pos - p > far {
+                    break;
+                }
                 if d[p + top] == d[pos + top] {
                     let l = lcp(d, p, pos, cap);
                     if l > top && ok(l, pos - p) {
@@ -329,10 +337,18 @@ impl<'a> Mf<'a> {
         let far = self.far(c, pos);
         let mut q = self.head[c][key(d, pos, k)];
         for _ in 0..Self::LIMIT {
-            if q == NONE || q as usize >= pos || pos - q as usize > far {
+            if q == NONE {
                 return;
             }
             let p = q as usize;
+            // (the position itself, inserted where the next was looked at ahead)
+            if p >= pos {
+                q = self.prev[c][p & mask];
+                continue;
+            }
+            if pos - p > far {
+                return;
+            }
             if d[p + len - 1] == d[pos + len - 1] && d[p..p + len] == d[pos..pos + len] && !f(p) {
                 return;
             }
