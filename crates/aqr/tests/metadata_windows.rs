@@ -139,3 +139,28 @@ fn metadata_kept() {
     unreadonly(&d);
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// The attributes of a directory whose path is longer than `MAX_PATH` applied (by calls taking
+/// its path, which the system takes past `MAX_PATH` only in the `\\?\` form).
+#[test]
+fn long_paths() {
+    let d = scratch("long");
+    let src = d.join("src");
+    let deep = src.join("d".repeat(120)).join("e".repeat(120)).join("f".repeat(40));
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(deep.join("x"), "x").unwrap();
+    // (absolute: a `\\?\` path is taken as it is, of `\` alone)
+    let verbatim = |p: &Path| PathBuf::from(format!(r"\\?\{}", std::path::absolute(p).unwrap().display()));
+    let hidden = verbatim(&deep).as_os_str().encode_wide_with_nul();
+    // SAFETY: a path of a NUL
+    assert_ne!(unsafe { SetFileAttributesW(hidden.as_ptr(), HIDDEN) }, 0);
+    let archive = d.join("src.aqr");
+    aqr(&["-c".as_ref(), "-o".as_ref(), archive.as_os_str(), src.as_os_str()]);
+    let out = d.join("out");
+    aqr(&["-d".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()]);
+    let got = out.join(deep.strip_prefix(&src).unwrap());
+    assert!(got.as_os_str().len() > 260);
+    assert_eq!(fs::metadata(&got).unwrap().file_attributes() & HIDDEN, HIDDEN);
+    assert_eq!(fs::read_to_string(got.join("x")).unwrap(), "x");
+    fs::remove_dir_all(&d).unwrap();
+}

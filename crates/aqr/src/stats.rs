@@ -32,7 +32,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 
 use aqr_common::trace::{self, DEAD, NO_ITEM, Trace};
 
@@ -120,28 +120,35 @@ pub fn record(stats: Option<&Stats>) -> Option<trace::Recording> {
 }
 
 /// Of the contents decoded: the kind each starts like, and its bytes; nothing where `--stats`
-/// was not asked for.
-pub struct Seen(Vec<OnceLock<(&'static str, u64)>>);
+/// was not asked for. Contents beyond those it was made for are taken as they come (of an
+/// archive read as it is decoded).
+pub struct Seen(Option<Mutex<Vec<Option<Kind>>>>);
+
+/// The kind a content starts like, and its bytes.
+type Kind = (&'static str, u64);
 
 impl Seen {
     pub fn new(contents: usize, on: bool) -> Seen {
-        Seen((0..if on { contents } else { 0 }).map(|_| OnceLock::new()).collect())
+        Seen(on.then(|| Mutex::new(vec![None; contents])))
     }
 
     /// Content `c` decoded as `d` (the start of it, of `len` bytes in all).
     pub fn saw(&self, c: usize, d: &[u8], len: u64) {
-        if let Some(s) = self.0.get(c) {
-            s.get_or_init(|| (aqr_compress::detect(d).map_or("-", |f| f.name()), len));
+        let Some(s) = &self.0 else { return };
+        let mut s = s.lock().unwrap();
+        if s.len() <= c {
+            s.resize(c + 1, None);
         }
+        s[c].get_or_insert_with(|| (aqr_compress::detect(d).map_or("-", |f| f.name()), len));
     }
 
     /// The contents, of their `paths`.
     pub fn contents(self, paths: Vec<String>) -> Vec<Content> {
-        self.0
-            .into_iter()
+        let seen = self.0.map(|s| s.into_inner().unwrap()).unwrap_or_default();
+        seen.into_iter()
             .zip(paths)
             .map(|(s, path)| {
-                let (kind, len) = s.into_inner().unwrap_or(("-", 0));
+                let (kind, len) = s.unwrap_or(("-", 0));
                 Content { path, kind, len, ..Content::default() }
             })
             .collect()

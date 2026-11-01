@@ -366,6 +366,23 @@ impl Applier {
         }
         Ok(())
     }
+
+    /// [`Applier::apply`] of a file just written, open (to be written) as `f`: on Windows its
+    /// times and attributes set through `f`, in one call (rather than by opening it twice more);
+    /// elsewhere as `apply` does.
+    pub fn apply_file(&self, f: &fs::File, path: &Path, x: &Extra) -> Result<(), String> {
+        #[cfg(windows)]
+        {
+            let _ = self;
+            let attrs = x.win_attrs.or(x.mode.map(|m| (m & 0o200 == 0) as u32));
+            os::set_basic(f, x, attrs).map_err(|e| format!("{}: {e}", path.display()))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = f;
+            self.apply(path, Kind::File, x)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -666,9 +683,10 @@ mod os {
     use aqr_formula::aqr::{EntryNode, Extra, Time};
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-        FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, FindClose, FindFirstStreamW, FindNextStreamW,
-        FindStreamInfoStandard, GetFileInformationByHandle, SetFileAttributesW, WIN32_FIND_STREAM_DATA,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_WRITE_ATTRIBUTES, FileBasicInfo, FindClose,
+        FindFirstStreamW, FindNextStreamW, FindStreamInfoStandard, GetFileInformationByHandle, SetFileAttributesW,
+        SetFileInformationByHandle, WIN32_FIND_STREAM_DATA,
     };
 
     use super::{Fork, Kind};
@@ -676,8 +694,23 @@ mod os {
     /// `ERROR_HANDLE_EOF`: no more streams.
     const NO_MORE: i32 = 38;
 
+    /// `p` as the system's calls take it, of a NUL: of more characters than they take without
+    /// it (`MAX_PATH`, the NUL and the room CreateDirectoryW keeps for a name), absolute and of
+    /// the `\\?\` prefix (as the standard library's own calls do), as Windows' long paths are
+    /// taken only by programs that declare it.
     fn wide(p: &Path) -> Vec<u16> {
-        p.as_os_str().encode_wide().chain([0]).collect()
+        let w: Vec<u16> = p.as_os_str().encode_wide().collect();
+        if w.len() < 248 || w.starts_with(&[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16]) {
+            return w.into_iter().chain([0]).collect();
+        }
+        let Ok(abs) = std::path::absolute(p) else { return w.into_iter().chain([0]).collect() };
+        let abs: Vec<u16> = abs.as_os_str().encode_wide().collect();
+        let prefix: Vec<u16> = match abs.strip_prefix(&[b'\\' as u16, b'\\' as u16][..]) {
+            // `\\server\share\...`: `\\?\UNC\server\share\...`
+            Some(rest) => r"\\?\UNC\".encode_utf16().chain(rest.iter().copied()).collect(),
+            None => r"\\?\".encode_utf16().chain(abs.iter().copied()).collect(),
+        };
+        prefix.into_iter().chain([0]).collect()
     }
 
     /// The path of stream `name` of `path`.
@@ -778,6 +811,36 @@ mod os {
             t = t.set_modified(system(m));
         }
         f.set_times(t)
+    }
+
+    /// Time `t` as a FILETIME (100 ns since 1601); 0 (none: not set) where it is before then.
+    fn filetime(t: Time) -> i64 {
+        let ticks = (t.secs as i128 + 11_644_473_600) * 10_000_000 + t.nanos as i128 / 100;
+        i64::try_from(ticks).ok().filter(|&t| t > 0).unwrap_or(0)
+    }
+
+    /// Sets the creation, access and modification times of `x` and attributes `attrs` (where
+    /// given) of the file open as `f`, at once.
+    pub fn set_basic(f: &fs::File, x: &Extra, attrs: Option<u32>) -> io::Result<()> {
+        let t = |t: Option<Time>| t.map_or(0, filetime);
+        let info = FILE_BASIC_INFO {
+            CreationTime: t(x.crtime),
+            LastAccessTime: t(x.atime),
+            LastWriteTime: t(x.mtime),
+            ChangeTime: 0,
+            // (0: not changed)
+            FileAttributes: attrs.map_or(0, |a| if a == 0 { FILE_ATTRIBUTE_NORMAL } else { a }),
+        };
+        if info.CreationTime == 0 && info.LastAccessTime == 0 && info.LastWriteTime == 0 && attrs.is_none() {
+            return Ok(());
+        }
+        let size = std::mem::size_of::<FILE_BASIC_INFO>() as u32;
+        // SAFETY: an open handle, and information of the class given and its size
+        if unsafe { SetFileInformationByHandle(f.as_raw_handle(), FileBasicInfo, (&raw const info).cast(), size) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     pub fn set_attrs(path: &Path, attrs: u32) -> io::Result<()> {

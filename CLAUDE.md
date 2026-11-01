@@ -21,6 +21,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     (`src/aqr.rs`: the archive encoder and decoder).
   - `aqr-compress` — picks a recompressor by magic bytes, makes the formula, stores the archive.
   - `aqr-decompress` — runs the formulas' modules natively and extracts archives.
+  - `aqr-unpack` — archives of other formats (ZIP, 7z, tar and its compressors) read into a
+    tree for `aqr -d`, which extracts them as Aqueous archives (`crates/aqr/src/extract.rs`).
   - `aqr-common` — shared parts: varints, rANS, bit I/O, heap accounting, the task pool.
     `aqr-num` — numbers printed as text.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper.

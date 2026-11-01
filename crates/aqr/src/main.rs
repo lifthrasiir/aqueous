@@ -6,7 +6,12 @@
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
 //!   archive (several of them, or a directory, as entries of their names).
-//! - `-d` (the default as `unaqr`): each archive into its name without `.aqr`, or `-o`.
+//! - `-d` (the default as `unaqr`): each archive into its name without `.aqr`, or `-o`. An
+//!   archive of another format, by its name (ZIP, 7z, tar alone or under gzip, bzip2, xz, LZMA
+//!   or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
+//!   into its name without its extension the same way ([`extract`]), its metadata as an
+//!   Aqueous archive's; what it holds that is not extracted (encrypted entries, methods not
+//!   known, paths reaching out) is told, and the run fails once the rest is extracted.
 //! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
 //! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
 //!   otherwise).
@@ -63,6 +68,7 @@ use std::process::ExitCode;
 use std::sync::OnceLock;
 use std::time::Instant;
 
+mod extract;
 mod ipc;
 mod meta;
 mod stats;
@@ -85,7 +91,9 @@ usage: aqr [OPTIONS] INPUT...
 
 Modes:
   -c, --compress        each input into INPUT.aqr (the default as aqr)
-  -d, --decompress      each archive into its name without .aqr (the default as unaqr)
+  -d, --decompress      each archive into its name without .aqr (the default as unaqr);
+                        .zip, .7z, .tar (.gz .tgz .bz2 .xz .lzma .zst), .gz, .bz2,
+                        .xz, .lzma and .zst too, into the name without them
   -t, --test            decode and check each archive, writing nothing
 
 Output:
@@ -822,14 +830,182 @@ fn create(path: &Path, force: bool) -> Result<fs::File, String> {
 
 fn decompress_all(a: &Args) -> Result<(), String> {
     for input in &a.inputs {
-        let out = match &a.output {
-            Some(o) => o.clone(),
-            None => match input.extension() {
+        // an archive of another format by its name (`.zip`, `.tar.gz`, ...), else an Aqueous one
+        let name = input.file_name().map(os_bytes).unwrap_or_default();
+        let foreign = aqr_unpack::by_name(&name);
+        let out = match (&a.output, foreign) {
+            (Some(o), _) => o.clone(),
+            (None, Some((_, n))) => input.with_file_name(os_from(&name[..name.len() - n])),
+            (None, None) => match input.extension() {
                 Some(e) if e == "aqr" => input.with_extension(""),
-                _ => return Err(format!("{}: not named .aqr (-o to name the output)", input.display())),
+                _ => {
+                    return Err(format!(
+                        "{}: not named .aqr nor as an archive known (-o to name the output)",
+                        input.display()
+                    ));
+                }
             },
         };
-        decompress_into(a, input, &out)?;
+        match foreign {
+            Some((f, _)) => decompress_foreign(a, input, &out, f)?,
+            None => decompress_into(a, input, &out)?,
+        }
+    }
+    Ok(())
+}
+
+/// What an archive of another format is extracted to: [`extract::Extractor`], or nothing but
+/// counts where it is tested; its notes told on standard error (but with -q), and how far it is
+/// to the bar.
+struct Unpacking<'x, 'a> {
+    x: Option<&'x extract::Extractor<'a>>,
+    input: &'x Path,
+    quiet: bool,
+    view: Option<&'x view::Decoding>,
+    seen: &'x stats::Seen,
+    /// Tested: by content, its bytes.
+    sizes: std::sync::Mutex<Vec<u64>>,
+}
+
+impl aqr_unpack::Sink for Unpacking<'_, '_> {
+    fn entries(&self, t: &Tree, new: &[usize]) -> Result<(), String> {
+        self.x.map_or(Ok(()), |x| x.entries(t, new))
+    }
+
+    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
+        match self.x {
+            Some(x) => x.content(c, d),
+            None => {
+                self.seen.saw(c, &d, d.len() as u64);
+                let mut s = self.sizes.lock().unwrap();
+                if s.len() <= c {
+                    s.resize(c + 1, 0);
+                }
+                s[c] = d.len() as u64;
+                Ok(())
+            }
+        }
+    }
+
+    fn note(&self, what: &str) {
+        if !self.quiet {
+            eprintln!("{}: {what}", self.input.display());
+        }
+    }
+
+    fn step(&self, s: aqr::Step) {
+        if let Some(v) = self.view {
+            v.tell(s);
+        }
+    }
+}
+
+/// Extracts (or tests) `input`, an archive of format `format`, into `out`: as an Aqueous
+/// archive is ([`extract::Extractor`]); an error at the end where entries were left out.
+fn decompress_foreign(a: &Args, input: &Path, out: &Path, format: aqr_unpack::Format) -> Result<(), String> {
+    let force = match a.test {
+        true => false,
+        false => match output(a, out)? {
+            Some(f) => f,
+            None => return Ok(()),
+        },
+    };
+    begin(if a.test { "test" } else { "decompress" }, &[input.to_owned()], (!a.test).then_some(out));
+    let start = Instant::now();
+    let rec = stats::record(a.stats.as_ref());
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
+    let file = fs::File::open(input).map_err(|e| err(&e))?;
+    // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
+    let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
+    let opened = aqr_unpack::Opened::open(format, &c).map_err(|e| err(&e))?;
+    let names = if !a.quiet && (bars() || a.ipc) { opened.units() } else { Vec::new() };
+    let view = view::Decoding::new(bars(), names);
+    let shown = (!a.quiet && view.shows()).then_some(&view);
+    let seen = stats::Seen::new(0, rec.is_some());
+    let threads = a.opt.threads;
+    let (files, total, tree, skipped) = if !opened.is_tree() {
+        let step = |s: aqr::Step| shown.into_iter().for_each(|v| v.tell(s));
+        let n = if a.test {
+            ticking(a, &view, || {
+                opened.decompress(
+                    threads,
+                    &mut |d| {
+                        seen.saw(0, d, 0);
+                        Ok(())
+                    },
+                    &step,
+                )
+            })
+            .map_err(|e| err(&e))?
+        } else {
+            write_whole(out, force, |w| {
+                ticking(a, &view, || {
+                    opened.decompress(
+                        threads,
+                        &mut |d| {
+                            seen.saw(0, d, 0);
+                            let _s = aqr_common::trace::span("write");
+                            w.write_all(d).map_err(|e| e.to_string())
+                        },
+                        &step,
+                    )
+                })
+                .map_err(std::io::Error::other)
+            })?
+        };
+        (1, n, None, 0)
+    } else {
+        let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
+        ticking(a, &view, || -> Result<_, String> {
+            let x = match a.test {
+                true => None,
+                false => Some(extract::Extractor::new(out, force, &ap, &seen)?),
+            };
+            let sink =
+                Unpacking { x: x.as_ref(), input, quiet: a.quiet, view: shown, seen: &seen, sizes: Default::default() };
+            let done = opened.unpack(threads, &sink).map_err(|e| err(&e))?;
+            let sizes = sink.sizes.into_inner().unwrap();
+            let (n, total) = match x {
+                Some(x) => x.finish(&done.tree)?,
+                None => done.tree.entries.iter().fold((0, 0), |(n, t), e| match e.node {
+                    EntryNode::File(c) => (n + 1, t + sizes.get(c).copied().unwrap_or(0)),
+                    _ => (n, t),
+                }),
+            };
+            Ok((n, total, Some(done.tree), done.skipped))
+        })?
+    };
+    if !a.quiet {
+        summary_d(input, (!a.test).then_some(out), files, total, start);
+    }
+    end((!a.test).then_some(out), files, c.len() as u64, total, start);
+    if let (Some(s), Some(rec)) = (&a.stats, rec) {
+        let paths = match &tree {
+            Some(t) => tree_content_paths(t),
+            None => vec![out.display().to_string()],
+        };
+        let mut contents = seen.contents(paths);
+        if tree.is_none()
+            && let Some(c) = contents.first_mut()
+        {
+            c.len = total;
+        }
+        s.add(stats::Run {
+            mode: if a.test { "test" } else { "decompress" },
+            input: input.display().to_string(),
+            output: if a.test { String::new() } else { out.display().to_string() },
+            seconds: start.elapsed().as_secs_f64(),
+            threads,
+            read: c.len() as u64,
+            written: total,
+            overhead: None,
+            contents,
+            trace: rec.finish(),
+        });
+    }
+    if skipped > 0 {
+        let what = if skipped == 1 { "entry" } else { "entries" };
+        return Err(format!("{}: {skipped} {what} not extracted (told above)", input.display()));
     }
     Ok(())
 }
@@ -931,7 +1107,14 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
         }
         Some(t) => {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
-            ticking(a, &*view, || extract(t, &archive, a.opt.threads, out, force, &ap, &seen))?
+            ticking(a, &*view, || {
+                let x = extract::Extractor::new(out, force, &ap, &seen)?;
+                x.entries(t, &(0..t.entries.len()).collect::<Vec<_>>())?;
+                archive
+                    .contents(a.opt.threads, |c, d| x.content(c, d).map_err(Failure::Resource))
+                    .map_err(|e| e.to_string())?;
+                x.finish(t)
+            })?
         }
     };
     if !a.quiet {
@@ -965,15 +1148,23 @@ fn decompress_into(a: &Args, input: &Path, out: &Path) -> Result<(), String> {
 /// a single file, `out`).
 fn content_paths(archive: &aqr::Archive, out: &Path) -> Vec<String> {
     let Some(t) = archive.tree() else { return vec![out.display().to_string()] };
-    let mut first = vec![None; archive.contents_len()];
+    let mut paths = tree_content_paths(t);
+    paths.resize(archive.contents_len(), String::new());
+    paths
+}
+
+/// By content of tree `t` (as far as its files tell), the path of its first file.
+fn tree_content_paths(t: &Tree) -> Vec<String> {
+    let mut first: Vec<Option<String>> = Vec::new();
     let mut paths: Vec<PathBuf> = Vec::with_capacity(t.entries.len());
     for e in &t.entries {
         let name = os_from(name_bytes(&e.name).0);
         let path = e.parent.map_or_else(|| PathBuf::from(&name), |p| paths[p].join(&name));
-        if let EntryNode::File(c) = e.node
-            && let Some(f) = first.get_mut(c)
-        {
-            f.get_or_insert_with(|| path.display().to_string());
+        if let EntryNode::File(c) = e.node {
+            if first.len() <= c {
+                first.resize(c + 1, None);
+            }
+            first[c].get_or_insert_with(|| path.display().to_string());
         }
         paths.push(path);
     }
@@ -1047,244 +1238,4 @@ fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: 
         size(total as f64),
         total as f64 / 1e6 / t.max(1e-9)
     );
-}
-
-/// Extracts tree `t` of `archive` into directory `out`: the directories, the files (empty, or
-/// hard links to the first of their link group), FIFOs and devices first; then the contents
-/// of the files and their forks as they are decoded (on up to `threads` threads); then the
-/// links (but those reaching out of `out`); then the metadata of all but the directories, and
-/// then that of the directories, the deepest first. Returns the number of files and their
-/// bytes.
-fn extract(
-    t: &Tree,
-    archive: &aqr::Archive,
-    threads: usize,
-    out: &Path,
-    force: bool,
-    ap: &meta::Applier,
-    seen: &stats::Seen,
-) -> Result<(usize, u64), String> {
-    let err = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
-    match fs::create_dir(out) {
-        Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && out.is_dir()) => return Err(err(out, e)),
-        _ => {}
-    }
-    let linked = hard_links(t);
-    let mut paths: Vec<PathBuf> = Vec::with_capacity(t.entries.len());
-    // by entry, whether it was made (and so is to get its metadata)
-    let mut made = vec![true; t.entries.len()];
-    let mut links = Vec::new();
-    // by content, the files written of it (but hard links), and the number of files of it
-    let mut files: Vec<(Vec<usize>, usize)> = vec![(Vec::new(), 0); archive.contents_len()];
-    for (i, e) in t.entries.iter().enumerate() {
-        let (name, _) = name_bytes(&e.name);
-        let parent = e.parent.map_or(out, |p| &paths[p]);
-        let path = parent.join(os_from(name));
-        match &e.node {
-            EntryNode::Dir => match fs::create_dir(&path) {
-                Err(x) if !(force && path.is_dir() && !path.is_symlink()) => return Err(err(&path, x)),
-                _ => {}
-            },
-            EntryNode::File(c) => {
-                files[*c].1 += 1;
-                match linked[i] {
-                    Some(j) => {
-                        if force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
-                            fs::remove_file(&path).map_err(|x| err(&path, x))?;
-                        }
-                        fs::hard_link(&paths[j], &path).map_err(|x| err(&path, x))?;
-                    }
-                    None => {
-                        create(&path, force)?;
-                        files[*c].0.push(i);
-                    }
-                }
-            }
-            EntryNode::Link(_) => {
-                links.push(i);
-                made[i] = false;
-            }
-            EntryNode::Fifo | EntryNode::Device { .. } => {
-                if force && fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
-                    fs::remove_file(&path).map_err(|x| err(&path, x))?;
-                }
-                made[i] = ap.special(&path, &e.node)?;
-            }
-            EntryNode::Special(kind) => {
-                ap.tell(&path, &format!("a special entry (kind {kind}), not created"));
-                made[i] = false;
-            }
-        }
-        paths.push(path);
-    }
-    // by content, the forks of it: the entry (`None`: the root) and the fork's index
-    let mut forks: Vec<Vec<(Option<usize>, usize)>> = vec![Vec::new(); archive.contents_len()];
-    let extras = std::iter::once((None, &t.root)).chain(t.entries.iter().enumerate().map(|(i, e)| (Some(i), &e.extra)));
-    for (i, x) in extras {
-        if i.is_none_or(|i| linked[i].is_none()) {
-            x.forks.iter().enumerate().for_each(|(k, f)| forks[f.1].push((i, k)));
-        }
-    }
-    let kind_of = |i: Option<usize>| match i.map(|i| &t.entries[i].node) {
-        None | Some(EntryNode::Dir) => meta::Kind::Dir,
-        Some(EntryNode::File(_)) => meta::Kind::File,
-        Some(EntryNode::Link(_)) => meta::Kind::Link,
-        Some(_) => meta::Kind::Special,
-    };
-    let path_of = |i: Option<usize>| i.map_or(out, |i| &paths[i]);
-    // (the forks of links written once the links are)
-    let later = std::sync::Mutex::new(Vec::new());
-    let (n, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicU64::new(0));
-    archive
-        .contents(threads, |c, d| {
-            seen.saw(c, &d, d.len() as u64);
-            let _s = aqr_common::trace::span("write");
-            for &i in &files[c].0 {
-                let fail = |m: String| aqr::Failure::Resource(m);
-                let p = &paths[i];
-                // (the file made empty already)
-                let mut f = fs::OpenOptions::new().write(true).open(p).map_err(|e| fail(err(p, e)))?;
-                f.write_all(&d).map_err(|e| fail(err(p, e)))?;
-            }
-            for &(i, k) in &forks[c] {
-                let (kind, x) = (kind_of(i), i.map_or(&t.root, |i| &t.entries[i].extra));
-                match kind {
-                    meta::Kind::Link => later.lock().unwrap().push((i, k, d.clone())),
-                    _ if i.is_none_or(|i| made[i]) => ap.fork(path_of(i), kind, &x.forks[k].0, &d),
-                    _ => {}
-                }
-            }
-            n.fetch_add(files[c].1, std::sync::atomic::Ordering::Relaxed);
-            total.fetch_add(files[c].1 as u64 * d.len() as u64, std::sync::atomic::Ordering::Relaxed);
-            Ok(())
-        })
-        .map_err(|e| e.to_string())?;
-    for i in links {
-        let e = &t.entries[i];
-        let EntryNode::Link(target) = &e.node else { unreachable!() };
-        let Some(to) = resolve_link(t, i) else {
-            ap.tell(&paths[i], &format!("a link reaching out of {}, not created", out.display()));
-            continue;
-        };
-        if force && fs::symlink_metadata(&paths[i]).is_ok_and(|m| !m.is_dir()) {
-            fs::remove_file(&paths[i]).map_err(|x| err(&paths[i], x))?;
-        }
-        // (on Windows, of the kind recorded, else by what it leads to; spec, "Extraction")
-        let dir = match e.extra.win_link_type {
-            Some(k) => k != 0,
-            None => to.is_some_and(|j| t.entries[j].node == EntryNode::Dir),
-        };
-        symlink(&os_from(name_bytes(target).0), &paths[i], dir).map_err(|x| err(&paths[i], x))?;
-        made[i] = true;
-    }
-    for (i, k, d) in later.into_inner().unwrap() {
-        if i.is_some_and(|i| made[i]) {
-            ap.fork(path_of(i), meta::Kind::Link, &t.entries[i.unwrap()].extra.forks[k].0, &d);
-        }
-    }
-    // the metadata of the directories once nothing more is written in them, the deepest first
-    for (i, e) in t.entries.iter().enumerate() {
-        if e.node != EntryNode::Dir && made[i] && linked[i].is_none() {
-            ap.apply(&paths[i], kind_of(Some(i)), &e.extra)?;
-        }
-    }
-    for (i, e) in t.entries.iter().enumerate().rev() {
-        if e.node == EntryNode::Dir {
-            ap.apply(&paths[i], meta::Kind::Dir, &e.extra)?;
-        }
-    }
-    ap.apply(out, meta::Kind::Dir, &t.root)?;
-    Ok((n.into_inner(), total.into_inner()))
-}
-
-/// By entry of `t`, the file it is a hard link to: the first of its link group, where the group
-/// is consistent (its files all of a content).
-fn hard_links(t: &Tree) -> Vec<Option<usize>> {
-    let mut groups: std::collections::HashMap<i128, Vec<usize>> = Default::default();
-    for (i, e) in t.entries.iter().enumerate() {
-        if let (Some(g), EntryNode::File(_)) = (e.extra.link_group, &e.node) {
-            groups.entry(g).or_default().push(i);
-        }
-    }
-    let mut to = vec![None; t.entries.len()];
-    for files in groups.values() {
-        if files.iter().all(|&i| t.entries[i].node == t.entries[files[0]].node) {
-            files[1..].iter().for_each(|&i| to[i] = Some(files[0]));
-        }
-    }
-    to
-}
-
-/// Where link `i` of `t` leads, resolved from the link's directory through the links of the
-/// tree: the entry (`None`: none of the tree); `None` where it reaches out of the directory it
-/// is extracted into, by an absolute target or by one going above it.
-fn resolve_link(t: &Tree, i: usize) -> Option<Option<usize>> {
-    // the path of an entry, as names from the root
-    let path_of = |mut e: Option<usize>| {
-        let mut p = Vec::new();
-        while let Some(i) = e {
-            p.push(t.entries[i].name.clone());
-            e = t.entries[i].parent;
-        }
-        p.reverse();
-        p
-    };
-    let find = |path: &[Vec<u8>]| -> Option<usize> {
-        let mut at = None;
-        for name in path {
-            at = Some(t.entries.iter().position(|e| e.parent == at && &e.name == name)?);
-        }
-        at
-    };
-    // (the tree's own links followed, as many as there are entries at most)
-    let mut budget = t.entries.len() + 1;
-    fn resolve(
-        t: &Tree,
-        dir: Vec<Vec<u8>>,
-        target: &[u8],
-        budget: &mut usize,
-        find: &dyn Fn(&[Vec<u8>]) -> Option<usize>,
-        path_of: &dyn Fn(Option<usize>) -> Vec<Vec<u8>>,
-    ) -> Option<Vec<Vec<u8>>> {
-        let (bytes, _) = name_bytes(target);
-        if bytes.starts_with(b"/") || (cfg!(windows) && bytes.get(1) == Some(&b':')) {
-            return None;
-        }
-        let mut at = dir;
-        for part in bytes.split(|&b| b == b'/') {
-            match part {
-                b"" | b"." => {}
-                b".." => {
-                    at.pop()?;
-                }
-                name => {
-                    at.push(name_from(name));
-                    if let Some(j) = find(&at)
-                        && let EntryNode::Link(next) = &t.entries[j].node
-                    {
-                        *budget = budget.checked_sub(1)?;
-                        let parent = path_of(t.entries[j].parent);
-                        at = resolve(t, parent, next, budget, find, path_of)?;
-                    }
-                }
-            }
-        }
-        Some(at)
-    }
-    let EntryNode::Link(target) = &t.entries[i].node else { return Some(None) };
-    resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of).map(|p| find(&p))
-}
-
-/// Makes a link to `target` at `at` (on Windows, to a directory where `dir`).
-#[cfg(unix)]
-fn symlink(target: &OsStr, at: &Path, _: bool) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, at)
-}
-
-#[cfg(windows)]
-fn symlink(target: &OsStr, at: &Path, dir: bool) -> std::io::Result<()> {
-    use std::os::windows::ffi::{OsStrExt, OsStringExt};
-    let slash = |c: u16| if c == b'/' as u16 { b'\\' as u16 } else { c };
-    let target = PathBuf::from(OsString::from_wide(&target.encode_wide().map(slash).collect::<Vec<_>>()));
-    if dir { std::os::windows::fs::symlink_dir(target, at) } else { std::os::windows::fs::symlink_file(target, at) }
 }

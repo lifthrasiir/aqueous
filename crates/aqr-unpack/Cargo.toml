@@ -1,0 +1,23 @@
+[package]
+name = "aqr-unpack"
+version = "0.1.0"
+edition = "2024"
+description = "Archives of other formats (ZIP, 7z, tar and the compressors over it) read for extraction into a tree"
+publish = false
+
+[dependencies]
+aqr-7z = { path = "../../codecs/aqr-7z" }
+aqr-bcj = { path = "../../codecs/aqr-bcj" }
+aqr-bz2 = { path = "../../codecs/aqr-bz2" }
+aqr-common = { path = "../aqr-common" }
+aqr-flate = { path = "../../codecs/aqr-flate" }
+aqr-formula = { path = "../aqr-formula" }
+aqr-lzma = { path = "../../codecs/aqr-lzma" }
+aqr-zip = { path = "../../codecs/aqr-zip" }
+zstd = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_System_Time"] }

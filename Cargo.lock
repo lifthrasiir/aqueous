@@ -43,6 +43,7 @@ dependencies = [
  "aqr-compress",
  "aqr-decompress",
  "aqr-formula",
+ "aqr-unpack",
  "libc",
  "memmap2",
  "serde_json",
@@ -700,6 +701,23 @@ dependencies = [
  "aqr-common",
  "aqr-formula",
  "aqr-raw",
+ "zstd",
+]
+
+[[package]]
+name = "aqr-unpack"
+version = "0.1.0"
+dependencies = [
+ "aqr-7z",
+ "aqr-bcj",
+ "aqr-bz2",
+ "aqr-common",
+ "aqr-flate",
+ "aqr-formula",
+ "aqr-lzma",
+ "aqr-zip",
+ "libc",
+ "windows-sys",
  "zstd",
 ]
 

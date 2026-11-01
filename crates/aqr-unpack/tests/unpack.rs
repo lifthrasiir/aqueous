@@ -1,0 +1,260 @@
+//! The readers on archives of real tools (tests/data, `scripts/gen-fixtures.py`; aqr-7z's 7z
+//! archives): the trees and contents they tell, and what they leave out.
+
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+
+use aqr_unpack::{Done, EntryNode, Extra, Filter, Format, Opened, Sink, Time, Tree, by_name};
+
+/// What the tree tells: by path, the node (a file's content) and its metadata.
+#[derive(Debug, Clone, PartialEq)]
+enum Node {
+    Dir,
+    File(Vec<u8>),
+    Link(Vec<u8>),
+    Fifo,
+    Other,
+}
+
+#[derive(Default)]
+struct Rec {
+    tree: Mutex<Tree>,
+    told: Mutex<Vec<bool>>,
+    contents: Mutex<BTreeMap<usize, Vec<u8>>>,
+    notes: Mutex<Vec<String>>,
+}
+
+impl Sink for Rec {
+    fn entries(&self, t: &Tree, new: &[usize]) -> Result<(), String> {
+        let mut told = self.told.lock().unwrap();
+        told.resize(t.entries.len(), false);
+        for &i in new {
+            if let Some(p) = t.entries[i].parent {
+                assert!(p < i && told[p] || new.contains(&p), "entry {i} told before its directory");
+            }
+            told[i] = true;
+        }
+        *self.tree.lock().unwrap() = t.clone();
+        Ok(())
+    }
+
+    fn content(&self, c: usize, d: Vec<u8>) -> Result<(), String> {
+        let t = self.tree.lock().unwrap();
+        assert!(t.entries.iter().any(|e| e.node == EntryNode::File(c)), "content {c} of no file told");
+        self.contents.lock().unwrap().insert(c, d);
+        Ok(())
+    }
+
+    fn note(&self, what: &str) {
+        self.notes.lock().unwrap().push(what.to_string());
+    }
+}
+
+fn data(name: &str) -> Vec<u8> {
+    std::fs::read(format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+/// The lines of text the fixtures hold.
+fn text() -> Vec<u8> {
+    (0..1000).flat_map(|i| format!("line {i} of some text\n").into_bytes()).collect()
+}
+
+/// `d` (an archive of format `f`) read: what was told, and the tree as `Done` gives it.
+fn unpack(f: Format, d: &[u8]) -> Result<(Done, Rec), String> {
+    let r = Rec::default();
+    let done = Opened::open(f, d)?.unpack(4, &r)?;
+    assert_eq!(*r.tree.lock().unwrap(), done.tree, "the tree told is the tree done");
+    Ok((done, r))
+}
+
+/// By path, the node and the metadata.
+fn listing(done: &Done, r: &Rec) -> BTreeMap<String, (Node, Extra)> {
+    let t = &done.tree;
+    let contents = r.contents.lock().unwrap();
+    let mut paths: Vec<String> = Vec::new();
+    let mut out = BTreeMap::new();
+    for e in &t.entries {
+        let name = String::from_utf8_lossy(&e.name).into_owned();
+        let path = e.parent.map_or(name.clone(), |p| format!("{}/{name}", paths[p]));
+        let node = match &e.node {
+            EntryNode::Dir => Node::Dir,
+            EntryNode::File(c) => Node::File(contents.get(c).cloned().expect("every content given")),
+            EntryNode::Link(t) => Node::Link(t.clone()),
+            EntryNode::Fifo => Node::Fifo,
+            _ => Node::Other,
+        };
+        out.insert(path.clone(), (node, e.extra.clone()));
+        paths.push(path);
+    }
+    out
+}
+
+fn at(secs: i64) -> Option<Time> {
+    Some(Time { secs, nanos: 0 })
+}
+
+#[test]
+fn names() {
+    let f = |n: &str| by_name(n.as_bytes());
+    assert_eq!(f("a.tar.gz"), Some((Format::Tar(Some(Filter::Gzip)), 7)));
+    assert_eq!(f("A.TGZ"), Some((Format::Tar(Some(Filter::Gzip)), 4)));
+    assert_eq!(f("a.gz"), Some((Format::Single(Filter::Gzip), 3)));
+    assert_eq!(f("a.ZIP"), Some((Format::Zip, 4)));
+    assert_eq!(f("x.7z"), Some((Format::SevenZip, 3)));
+    assert_eq!(f("a.tar.zst"), Some((Format::Tar(Some(Filter::Zstd)), 8)));
+    assert_eq!(f(".zip"), None);
+    assert_eq!(f("a.aqr"), None);
+    assert_eq!(f("zip"), None);
+}
+
+#[test]
+fn tar_trees() {
+    let pax = {
+        let (done, r) = unpack(Format::Tar(None), &data("tree-pax.tar")).unwrap();
+        assert_eq!(done.skipped, 1);
+        let notes = r.notes.lock().unwrap().clone();
+        assert!(notes.len() == 1 && notes[0].starts_with("../evil.txt:"), "{notes:?}");
+        listing(&done, &r)
+    };
+    let get = |p: &str| pax.get(p).unwrap_or_else(|| panic!("{p} not in {:?}", pax.keys()));
+    assert_eq!(get("dir").0, Node::Dir);
+    assert_eq!(get("dir").1.mtime, at(1_400_000_000));
+    assert_eq!(get("dir/file.txt").0, Node::File(text()));
+    let x = &get("dir/file.txt").1;
+    assert_eq!(x.mtime, Some(Time { secs: 1_500_000_001, nanos: 250_000_000 }));
+    assert_eq!(x.mode, Some(0o644));
+    assert_eq!(x.xattrs, vec![(b"user.note".to_vec(), b"kept".to_vec())]);
+    assert_eq!(get("dir/ro.txt").1.mode, Some(0o444));
+    // a hard link: a file of the same content, in a link group with it
+    assert_eq!(get("dir/hard").0, Node::File(text()));
+    assert!(x.link_group.is_some() && get("dir/hard").1.link_group == x.link_group);
+    assert_eq!(get("dir/sym").0, Node::Link(b"file.txt".to_vec()));
+    assert_eq!(get("dir/escape").0, Node::Link(b"../../outside".to_vec()));
+    assert_eq!(get("abs.txt").0, Node::File(b"absolute".to_vec()));
+    assert_eq!(get("12:30.txt").0, Node::File(b"colon".to_vec()));
+    assert_eq!(get("dup.txt").0, Node::File(b"second".to_vec()));
+    assert_eq!(get("fifo").0, Node::Fifo);
+    assert_eq!(get("한글/파일.txt").0, Node::File("유니코드".as_bytes().to_vec()));
+    let long = format!("long/{}/{}.txt", "n".repeat(150), "x".repeat(120));
+    assert_eq!(get(&long).0, Node::File(b"long name".to_vec()));
+    assert!(!pax.keys().any(|p| p.contains("evil")));
+
+    // the same of GNU's format (but for what pax alone keeps)
+    let (done, r) = unpack(Format::Tar(None), &data("tree-gnu.tar")).unwrap();
+    let gnu = listing(&done, &r);
+    assert_eq!(gnu.keys().collect::<Vec<_>>(), pax.keys().collect::<Vec<_>>());
+    assert_eq!(gnu["dir/file.txt"].1.mtime, at(1_500_000_001));
+    assert_eq!(gnu["dir/hard"].0, Node::File(text()));
+
+    // and of each compressor
+    for (name, f) in [
+        ("tree.tar.gz", Filter::Gzip),
+        ("tree.tar.bz2", Filter::Bzip2),
+        ("tree.tar.xz", Filter::Xz),
+        ("tree.tar.lzma", Filter::Lzma),
+    ] {
+        let (done, r) = unpack(Format::Tar(Some(f)), &data(name)).unwrap();
+        assert_eq!(listing(&done, &r), pax, "{name}");
+    }
+}
+
+#[test]
+fn zip_tree() {
+    let (done, r) = unpack(Format::Zip, &data("tree.zip")).unwrap();
+    assert_eq!(done.skipped, 1);
+    assert!(r.notes.lock().unwrap()[0].starts_with("../evil.txt:"));
+    let l = listing(&done, &r);
+    for f in ["stored.txt", "deflated.txt", "bzip2.txt", "lzma.txt"] {
+        assert_eq!(l[f].0, Node::File(text()), "{f}");
+        assert!(l[f].1.mtime.is_some());
+    }
+    assert_eq!(l["dir"].0, Node::Dir);
+    assert_eq!(l["dir/in.txt"].0, Node::File(b"in dir".to_vec()));
+    assert_eq!(l["한글.txt"].0, Node::File(b"utf-8".to_vec()));
+    assert_eq!(l["link"].0, Node::Link(b"stored.txt".to_vec()));
+    assert_eq!(l["link"].1.mode, Some(0o777));
+    assert_eq!(l.len(), 8);
+}
+
+#[test]
+fn zip_left_out() {
+    let (done, r) = unpack(Format::Zip, &data("skip.zip")).unwrap();
+    let l = listing(&done, &r);
+    assert_eq!(l.keys().collect::<Vec<_>>(), ["ok.txt"]);
+    assert_eq!(l["ok.txt"].0, Node::File(b"ok.txt".to_vec()));
+    assert_eq!(done.skipped, 2);
+    let notes = r.notes.lock().unwrap().join("\n");
+    assert!(notes.contains("secret.txt: encrypted") && notes.contains("d64.txt: of Deflate64"), "{notes}");
+}
+
+#[test]
+fn sevenz_fixtures() {
+    // (aqr-7z's: their CRC-32s check the files)
+    let dir = format!("{}/../../codecs/aqr-7z/tests/data", env!("CARGO_MANIFEST_DIR"));
+    let mut words = None;
+    let mut n = 0;
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_none_or(|e| e != "7z") {
+            continue;
+        }
+        let d = std::fs::read(&p).unwrap();
+        let (done, r) = unpack(Format::SevenZip, &d).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
+        assert_eq!(done.skipped, 0, "{}: {:?}", p.display(), r.notes.lock().unwrap());
+        let l = listing(&done, &r);
+        assert!(l.values().any(|v| matches!(v.0, Node::File(_))), "{}", p.display());
+        if let Some((Node::File(w), x)) = l.get("docs/words.txt") {
+            assert!(x.mtime.is_some(), "{}", p.display());
+            assert_eq!(words.get_or_insert_with(|| w.clone()), w, "{}", p.display());
+        }
+        n += 1;
+    }
+    assert!(n >= 10 && words.is_some());
+}
+
+#[test]
+fn single_files() {
+    for (name, f) in [
+        ("one.txt.gz", Filter::Gzip),
+        ("one.txt.bz2", Filter::Bzip2),
+        ("one.txt.xz", Filter::Xz),
+        ("one.txt.lzma", Filter::Lzma),
+    ] {
+        let d = data(name);
+        let o = Opened::open(Format::Single(f), &d).unwrap();
+        assert!(!o.is_tree());
+        let mut out = Vec::new();
+        let n = o
+            .decompress(
+                4,
+                &mut |b| {
+                    out.extend_from_slice(b);
+                    Ok(())
+                },
+                &|_| {},
+            )
+            .unwrap();
+        assert_eq!(n as usize, out.len());
+        assert!(out == text(), "{name}");
+    }
+}
+
+#[test]
+fn damage_fails() {
+    // a byte of the compressed data changed: an error, not files of other contents
+    for (name, f, at) in [
+        ("tree.tar.gz", Format::Tar(Some(Filter::Gzip)), 200),
+        ("tree.tar.xz", Format::Tar(Some(Filter::Xz)), 200),
+        ("tree.tar.bz2", Format::Tar(Some(Filter::Bzip2)), 200),
+        ("tree.zip", Format::Zip, 100),
+    ] {
+        let mut d = data(name);
+        d[at] ^= 0x10;
+        assert!(unpack(f, &d).is_err(), "{name}");
+    }
+    // cut short
+    let d = data("tree-pax.tar");
+    assert!(unpack(Format::Tar(None), &d[..d.len() / 2 + 100]).is_err());
+    let d = data("tree.zip");
+    assert!(Opened::open(Format::Zip, &d[..d.len() - 30]).is_err());
+}
