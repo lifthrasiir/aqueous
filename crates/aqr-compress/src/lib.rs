@@ -203,6 +203,9 @@ pub struct Options {
     /// ([`aqr::Encoder::with_dictionaries`]). Off by default; it matters only with blocks of a
     /// few MiB or less ([`Options::block`]).
     pub dictionaries: bool,
+    /// Begin the archive with a size hint block to be filled in, as the payload of an
+    /// encrypted archive has to ([`aqr::envelope::Sealer`], which fills it in).
+    pub size_hint: bool,
     /// Of an archive of several files: the most bytes of the files of a set coded against each
     /// other, which a file of it read alone has to decode.
     pub set_bytes: usize,
@@ -291,6 +294,7 @@ impl Default for Options {
             shared_modules: false,
             block: 16 << 20,
             dictionaries: false,
+            size_hint: false,
             set_bytes: 64 << 20,
             batch: 512 << 20,
             spill: None,
@@ -459,7 +463,8 @@ impl Cx {
         let inflate = opt.expansion.saturating_mul(n as u64).saturating_add(EXPANSION_SLACK);
         let mut enc = Encoder::with_threads(opt.level, opt.threads)
             .with_modules(aqr_decompress::wasm_of)
-            .with_dictionaries(opt.dictionaries);
+            .with_dictionaries(opt.dictionaries)
+            .with_size_hint(opt.size_hint);
         if opt.shared_resources {
             enc.share_resources();
         }
@@ -642,6 +647,25 @@ impl Sink for std::fs::File {
     fn restart(&mut self) -> io::Result<()> {
         self.set_len(0)?;
         self.seek(io::SeekFrom::Start(0)).map(|_| ())
+    }
+}
+
+/// An encrypted archive being written to a file, read back decrypted (into memory not backed
+/// by a file, so that nothing decrypted is written out).
+impl<F: Write + io::Seek + std::borrow::Borrow<std::fs::File>> Sink for aqr::envelope::Sealer<F> {
+    fn written(&mut self) -> io::Result<Box<dyn Deref<Target = [u8]> + '_>> {
+        self.finish()?;
+        // SAFETY: as of a file above
+        let c = unsafe { memmap2::Mmap::map(std::borrow::Borrow::<std::fs::File>::borrow(self.get_ref()))? };
+        let u = self.unseal(&c).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        let mut d = memmap2::MmapMut::map_anon(u.len().max(1))?;
+        u.decrypt_into(&mut d[..u.len()], aqr_common::pool::size())
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        Ok(Box::new(d.make_read_only()?))
+    }
+
+    fn restart(&mut self) -> io::Result<()> {
+        aqr::envelope::Sealer::restart(self, |f| std::borrow::Borrow::<std::fs::File>::borrow(f).set_len(0))
     }
 }
 

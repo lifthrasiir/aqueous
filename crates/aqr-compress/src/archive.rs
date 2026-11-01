@@ -225,7 +225,8 @@ fn compress_tree_noting<S: Source + ?Sized>(
     let weight = |b: &Vec<usize>| b.iter().map(|&c| src.size(c)).sum::<u64>();
     batches.sort_by_key(|b| weight(b) <= (opt.batch as u64).saturating_mul(AHEAD));
 
-    out.write_all(SegmentWriter::header())?;
+    let w = SegmentWriter::with_size_hint(opt.size_hint);
+    out.write_all(w.head())?;
     let weights: Vec<u64> = batches.iter().map(weight).collect();
     let cx = Ctx { src, opt, notes: &notes, batches: &batches, weights: &weights, entries: &entries };
     let pipe = Pipe {
@@ -240,7 +241,7 @@ fn compress_tree_noting<S: Source + ?Sized>(
         changed: Condvar::new(),
     };
     let mut wr = Writer {
-        w: SegmentWriter::new(),
+        w,
         at: vec![None; n],
         r: Report { files: vec![FileReport::default(); n], ..Report::default() },
         next: 0,

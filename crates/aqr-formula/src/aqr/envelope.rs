@@ -316,6 +316,15 @@ impl<W: Write + Seek> Sealer<W> {
         Ok(())
     }
 
+    /// Archive `c` sealed here, unlocked by the file key (rather than the passphrase).
+    pub fn unseal<'c>(&self, c: &'c [u8]) -> Decoded<Unlocked<'c>> {
+        let e = open(c)?;
+        if e.fields.0 != self.fields.0 {
+            return invalid("not the archive sealed");
+        }
+        Ok(Unlocked { cipher: self.cipher.clone(), chunks: e.chunks })
+    }
+
     pub fn get_ref(&self) -> &W {
         &self.out
     }

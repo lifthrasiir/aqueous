@@ -37,7 +37,14 @@
 //! > {"answer":1,"value":true}
 //! ```
 //!
-//! Every question has an option that answers it before it is asked (`overwrite`: `-f`), and an
+//! - `overwrite` (with `path`): whether output `path`, there already, is written over (`true`)
+//!   or the archive skipped.
+//! - `passphrase` (with `path`, `mode`, `again`, `confirm`): the passphrase (a string, empty
+//!   or not), `null` to give up. Compressing with `-P` (`mode` `compress`, `path` null, to be
+//!   typed twice as `confirm` tells); decompressing, as `-P` begins (`path` null) or as archive
+//!   `path` needs one, `again` where the one before was wrong. An archive given up on fails.
+//!
+//! Every question but `passphrase` has an option that answers it before it is asked (`overwrite`: `-f`), and an
 //! answer where nobody is asked (an error, as without `--ipc`): a frontend that does not take
 //! a kind of question still works. The questions are numbered, as several may be open at once.
 //!
@@ -126,10 +133,15 @@ fn read() {
 }
 
 impl Ipc {
+    /// Whether the frontend answers question `kind`.
+    pub fn answers(&self, kind: &str) -> bool {
+        self.answers.iter().any(|k| k == kind)
+    }
+
     /// The frontend's answer to question `kind` (with `q`'s fields), `None` where it does not
     /// answer that kind.
     pub fn ask(&self, kind: &str, mut q: Value) -> Option<Value> {
-        if !self.answers.iter().any(|k| k == kind) {
+        if !self.answers(kind) {
             return None;
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);

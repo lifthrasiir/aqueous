@@ -1,7 +1,7 @@
 //! Compresses files and directories into Aqueous archives, and decompresses them, as zstd does.
 //!
 //! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
-//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h] INPUT...
+//! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h] INPUT...
 //!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
@@ -20,6 +20,12 @@
 //!   (`foo.zip` of `foo/` into `foo/`, never `foo/foo/`). `-o` is where it goes instead of
 //!   beside it, a directory (with several archives too).
 //! - `-t`: each archive decoded as `-d` does, but nothing written (its checksums checked).
+//! - `-P`: compressing, the archives encrypted with a passphrase ([`aqr::envelope`]), asked for
+//!   as the work begins (twice on a terminal); decompressing, asked for then rather than as an
+//!   archive needs it. An encrypted archive (of either kind) is opened by the passphrases that
+//!   opened those before it, else asks for one where there is a terminal or a frontend
+//!   ([`pass`]). Without a terminal, `-P` takes a line of standard input. An empty passphrase
+//!   is a passphrase too.
 //! - `--wasm`: in decoding, every module run as WebAssembly, the known ones too (natively
 //!   otherwise).
 //! - `--no-sandbox`: in decoding, the modules not known run in this process. By default they
@@ -78,6 +84,7 @@ use std::time::Instant;
 mod extract;
 mod ipc;
 mod meta;
+mod pass;
 mod stats;
 mod stop;
 mod view;
@@ -119,6 +126,9 @@ Output:
       --ipc             be driven by a frontend through standard input and output
 
 Compression:
+  -P, --passphrase      encrypt the archives with a passphrase asked for (decompressing:
+                        ask for it at once; an encrypted archive asks anyway where there
+                        is a terminal); without a terminal, a line of standard input
   -l LEVEL, -0 ... -9   0 (uncompressed), 1 (zstd alone) to 9; low, mid (default), high
                         are 2, 5 and 8; zstdN is zstd level N with recompression as mid
       --depth N         recompress formats nested at most N deep (default 3)
@@ -166,6 +176,9 @@ struct Args {
     stats: Option<stats::Stats>,
     /// Driven by a frontend ([`ipc`]).
     ipc: bool,
+    /// `-P`: compressing, the archives encrypted with a passphrase asked for; decompressing,
+    /// the passphrase asked for before the archives need it ([`pass`]).
+    passphrase: bool,
 }
 
 /// The bytes of the leaves decoded at once ([`aqr::Archive::set_budget`]). On 10gb (10
@@ -192,6 +205,11 @@ fn main() -> ExitCode {
         && let Err(e) = ipc::start()
     {
         eprintln!("aqr: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = pass::init(args.passphrase, !args.decompress) {
+        eprintln!("aqr: {e}");
+        ipc::tell(serde_json::json!({"event": "error", "message": e}));
         return ExitCode::FAILURE;
     }
     // (before the pool is made, for its workers to be sampled)
@@ -234,6 +252,7 @@ fn parse() -> Result<Args, String> {
         inputs: Vec::new(),
         stats: None,
         ipc: false,
+        passphrase: false,
     };
     let (mut stats, mut stats_to) = (false, Vec::new());
     let mut only_inputs = false;
@@ -276,6 +295,7 @@ fn parse() -> Result<Args, String> {
             "--no-check" => a.opt.verify = false,
             "--stats" => stats = true,
             "--ipc" => a.ipc = true,
+            "-P" | "--passphrase" => a.passphrase = true,
             s if s.starts_with("--stats=") => {
                 let to = PathBuf::from(&s["--stats=".len()..]);
                 if !stats::takes(&to) {
@@ -482,6 +502,8 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     let mut hidden = std::ffi::OsString::from(".");
     hidden.push(name);
     opt.spill = Some(if remote(dir) { std::env::temp_dir() } else { dir.to_owned() }.join(hidden));
+    let sealing = pass::keys().sealing();
+    opt.size_hint = sealing.is_some();
     let opt = &opt;
     let meta = |p: &Path| fs::symlink_metadata(p).map_err(|e| format!("{}: {e}", p.display()));
     let mapper = Mapper::new().map_err(|e| format!("files not to be mapped: {e}"))?;
@@ -497,7 +519,15 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         let view = view::View::new(&g, bars(), false);
         // (of the kind its name tells, as a file in an archive of many; written as it is made)
         let (n, f) = write_whole(out, force, |file| {
-            let r = viewed(a, &view, |tell| compress_formula_to(&d, kind, opt, file, tell))?;
+            let r = match &sealing {
+                None => viewed(a, &view, |tell| compress_formula_to(&d, kind, opt, file, tell))?,
+                Some(p) => {
+                    let mut s = sealer(file, p)?;
+                    let (_, f) = viewed(a, &view, |tell| compress_formula_to(&d, kind, opt, &mut s, tell))?;
+                    s.finish()?;
+                    (file.metadata()?.len() as usize, f)
+                }
+            };
             aqr_compress::Source::intact(&g, 0)?;
             Ok(r)
         })?;
@@ -578,9 +608,21 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
     // (with -v, the log as the files are written)
     let view = view::View::new(&g, bars(), a.verbose);
     // written as it is made
-    let r = write_whole(out, force, |file| {
-        let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
-        viewed(a, &view, |tell| compress_tree_to(&g.tree, &g, opt, &mut w, tell).and_then(|r| w.flush().map(|_| r)))
+    let r = write_whole(out, force, |file| match &sealing {
+        None => {
+            let mut w = std::io::BufWriter::with_capacity(8 << 20, file);
+            viewed(a, &view, |tell| compress_tree_to(&g.tree, &g, opt, &mut w, tell).and_then(|r| w.flush().map(|_| r)))
+        }
+        // (the sealer writing a chunk at a time)
+        Some(p) => {
+            let mut s = sealer(file, p)?;
+            let mut r = viewed(a, &view, |tell| compress_tree_to(&g.tree, &g, opt, &mut s, tell))?;
+            s.finish()?;
+            // (the overhead of the encryption the archive's)
+            let len = file.metadata()?.len() as usize;
+            (r.overhead, r.len) = (r.overhead + len - r.len, len);
+            Ok(r)
+        }
     })?;
     // (the files, as decompressing counts them: not their forks, each hard link)
     let files = g.tree.entries.iter().filter(|e| matches!(e.node, EntryNode::File(_))).count();
@@ -614,6 +656,12 @@ fn compress_into(a: &Args, inputs: &[PathBuf], out: &Path) -> Result<(), String>
         });
     }
     Ok(())
+}
+
+/// An archive written to `file`, encrypted with passphrase `p` ([`aqr::envelope`]): with
+/// mirrored headers, at age's work factor.
+fn sealer<'f>(file: &'f mut fs::File, p: &[u8]) -> std::io::Result<aqr::envelope::Sealer<&'f mut fs::File>> {
+    aqr::envelope::Sealer::new(file, p, aqr::envelope::WORK_FACTOR, true)
 }
 
 /// Whether `dir` is on a drive of the network (false where that is not known).
@@ -1101,10 +1149,20 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<(), String> {
     // (mapped, so that what is read of it is the system's to drop)
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
+    // an encrypted one decrypted into memory (not backed by a file, so that nothing decrypted
+    // is written out but the output)
+    let decrypted = match aqr::envelope::is_encrypted(&c) {
+        true => Some(decrypt(&c, input, a.opt.threads)?),
+        false => None,
+    };
     let decoder =
         Decoder { native: Native { threads: a.opt.threads }, wasm: a.wasm, sandbox: a.sandbox.then(OnceLock::new) };
     let runner: &dyn aqr::Runner = &decoder;
-    let mut archive = aqr::open(&c, runner).map_err(|e| err(&e))?;
+    let mut archive = match &decrypted {
+        Some(d) => aqr::open_payload(d, runner),
+        None => aqr::open(&c, runner),
+    }
+    .map_err(|e| err(&e))?;
     let ask = |p: &Path| output(a, p);
     let (place, force) = match (a.test, archive.tree().is_some()) {
         (true, _) => (None, false),
@@ -1244,6 +1302,24 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<(), String> {
         });
     }
     Ok(())
+}
+
+/// The payload of encrypted archive `c` (of `input`), decrypted on `threads` threads, by a
+/// passphrase given ([`pass`]).
+fn decrypt(c: &[u8], input: &Path, threads: usize) -> Result<memmap2::Mmap, String> {
+    let err = |e: &dyn std::fmt::Display| format!("{}: {e}", input.display());
+    let e = aqr::envelope::open(c).map_err(|e| err(&e))?;
+    let unlocked = pass::keys().open(input, |p| match e.unlock(p) {
+        Ok(u) => Ok(Some(u)),
+        Err(Failure::Decryption(_)) => Ok(None),
+        Err(f) => Err(err(&f)),
+    })?;
+    let Some(u) = unlocked else {
+        return Err(err(&pass::keys().none_opens()));
+    };
+    let mut d = memmap2::MmapMut::map_anon(u.len()).map_err(|e| err(&e))?;
+    u.decrypt_into(&mut d, threads).map_err(|e| err(&e))?;
+    d.make_read_only().map_err(|e| err(&e))
 }
 
 /// By content of `archive` (decoded into `out`), the path of its first file in the archive (of

@@ -185,3 +185,62 @@ fn cancelled() {
 fn input_closed() {
     cancel(false);
 }
+
+/// The events (not `progress`) and questions until the end, each passphrase asked for answered
+/// by the next of `answers` (`null` past them).
+fn run_passphrases(c: &mut Child, lines: impl Iterator<Item = Value>, answers: &[Value]) -> Vec<Value> {
+    let mut answers = answers.iter();
+    let mut seen = Vec::new();
+    for v in lines {
+        if v["kind"] == "passphrase" {
+            send(c, json!({"answer": v["ask"], "value": answers.next().cloned().unwrap_or(Value::Null)}));
+        }
+        if v["event"] != "progress" {
+            seen.push(v);
+        }
+    }
+    seen
+}
+
+/// `-P` asking the frontend as it begins (to confirm, compressing), and an encrypted archive
+/// asking as it is opened (again where wrong, until the frontend gives up).
+#[test]
+fn passphrase() {
+    let d = scratch("passphrase");
+    let (input, archive, out) = (d.join("in.txt"), d.join("in.txt.aqr"), d.join("out.txt"));
+    fs::write(&input, "Aqueous ".repeat(1000)).unwrap();
+
+    let (mut c, lines) = start(&["-P".as_ref(), input.as_os_str()], &["passphrase"]);
+    let seen = run_passphrases(&mut c, lines, &[json!("")]);
+    assert!(c.wait().unwrap().success(), "{seen:?}");
+    assert_eq!(events(&seen), ["passphrase", "begin", "end"]);
+    assert_eq!(
+        (&seen[0]["mode"], &seen[0]["confirm"], &seen[0]["path"]),
+        (&json!("compress"), &json!(true), &Value::Null)
+    );
+    assert!(fs::read(&archive).unwrap().starts_with(&[0xf9, 0xca, 0xf2, 0xa6, 0xd0, 0x2a]));
+
+    // asked for without -P: wrong, then right (empty)
+    let args = ["-d".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()];
+    let (mut c, lines) = start(&args, &["passphrase"]);
+    let seen = run_passphrases(&mut c, lines, &[json!("wrong"), json!("")]);
+    assert!(c.wait().unwrap().success(), "{seen:?}");
+    assert_eq!(events(&seen), ["passphrase", "passphrase", "begin", "end"]);
+    assert_eq!((&seen[0]["again"], &seen[1]["again"]), (&json!(false), &json!(true)));
+    assert_eq!(seen[0]["path"], archive.display().to_string());
+    assert_eq!(fs::read(&out).unwrap(), fs::read(&input).unwrap());
+
+    // given up on: an error
+    let (mut c, lines) = start(&args, &["passphrase"]);
+    let seen = run_passphrases(&mut c, lines, &[json!("wrong")]);
+    assert!(!c.wait().unwrap().success());
+    assert_eq!(events(&seen), ["passphrase", "passphrase", "error"]);
+
+    // not taken by the frontend: an error, as without a terminal
+    let (mut c, lines) = start(&args, &[]);
+    let seen = run_passphrases(&mut c, lines, &[]);
+    assert!(!c.wait().unwrap().success());
+    assert_eq!(events(&seen), ["error"]);
+    assert!(seen[0]["message"].as_str().unwrap().contains("-P"), "{seen:?}");
+    fs::remove_dir_all(&d).unwrap();
+}
