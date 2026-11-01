@@ -64,7 +64,7 @@ Left: volumes (a stream over several archives), older WinRARs' code
 lengths (not Huffman's lengths as RAR 6.24 builds them: 181 of 614 main tables of the 10gb
 corpus; 8.6% of its record), RAR5's parse (RAR writes literals where matches are, as a parser
 weighing costs does: most of a record of 3%), speed (PPMd rebuilt twice to split, once to join;
-the PPMd port retires 1.55× the instructions of lzma-sdk's C; archives that do not pay are split
+the PPMd port retires 1.55× the instructions of lzma-sdk's C; streams that do not pay are split
 all the same), the modules' sizes (blocks of 29 KB and 43 KB
 in every archive, which small archives do not pay back).
 
@@ -76,23 +76,24 @@ Measured on 2026-11-01 on an M4.
 
 | set | streams | packed | data | record | split, join |
 |---|---|---|---|---|---|
-| the 10gb corpus's RAR archives (83, RAR 3.x by older WinRARs; mostly PPMd) | 105 | 18.52 MB | 52.41 MB | 0.72% of the mattmahoney.net ones (49,928 B of 6.95 MB) | 30.7 s, 26.5 s (all) |
-| rar 7.23 and 6.24's RAR5 fixtures (`docs/rar5-decoding.md` §4.1) | 104 | 27.16 MB | 81.21 MB | 855,124 B (3.15%) | 12.1 s, 11.2 s |
-| rar 6.24's RAR 3.x fixtures (`docs/rar3-decoding.md` §9.1) | 41 | 10.35 MB | 25.41 MB | 232,814 B (2.25%) | 5.5 s, 5.0 s |
+| the 10gb corpus's RAR archives (83, RAR 3.x by older WinRARs; mostly PPMd) | 105 | 18.52 MB | 52.41 MB | 0.72% of the mattmahoney.net ones (49,846 B of 6.95 MB) | 30.7 s, 26.5 s (all) |
+| rar 7.23 and 6.24's RAR5 fixtures (`docs/rar5-decoding.md` §4.1) | 104 | 27.16 MB | 81.21 MB | 847,960 B (3.12%) | 8.7 s, 7.8 s |
+| rar 6.24's RAR 3.x fixtures (`docs/rar3-decoding.md` §9.1) | 41 | 10.35 MB | 25.41 MB | 230,808 B (2.23%) | 3.5 s, 3.0 s |
 
 `aqr` on the 10gb corpus's 83 RAR archives (22.25 MB, 13.44 MB stored: many are the same), all
 in one archive, all threads (before: `aqr` without aqr-rar, which stores them):
 
 | level | before | after | compressing | testing |
 |---|---|---|---|---|
-| mid | 13,440,126 B | 13,474,242 B (+0.25%) | 0.2 → 28.1 s, 1.27 GB peak RSS | 0.4 s |
-| 9 | 13,440,264 B | 13,251,540 B (−1.40%) | 0.2 → 21.4 s, 1.28 GB | 0.4 s |
+| mid | 13,440,126 B | 13,440,298 B (none taken) | 0.2 → 5.2 s, 0.32 GB peak RSS | 0.2 s |
+| 9 | 13,440,264 B | 13,251,570 B (−1.40%) | 0.2 → 5.9 s, 1.71 GB | 0.4 s |
 
-Most of them are high-order PPMd, whose data aqr's coders compress no better: each archive's
-formula is weighed against its bytes, and only one is taken at level mid (its 9.7 KB paying
-for less than the module's block of 43 KB, which the weighing leaves out as shared), three at
-level 9 (`paq8hp5l.rar` 204 → 119 KB). A RAR5 archive of rar 7.23's default `-m3` (wer.dll and a
-C source, 516 KB) is not taken either: its contents archive to 485 KB at level 9, less than the
+Streams with PPMd blocks are taken from level 9 only (aqr-compress's `ppmd_on`): most of the
+corpus is high-order PPMd, whose data aqr's coders compress no better, and rebuilding PPMd is
+slow. At level 9 each archive's formula is weighed against its bytes and three are taken
+(`paq8hp5l.rar` 204 → 119 KB). At mid the time is one LZ stream of RAR archives (`all_HKCC.rar`,
+4.8 MB) split and turned down. A RAR5 archive of rar 7.23's default `-m3` (wer.dll and a C
+source, 516 KB) is not taken either: its contents archive to 485 KB at level 9, less than the
 record (3%) and the module's block (29 KB) cost.
 
 ## Tests

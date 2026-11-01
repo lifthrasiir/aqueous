@@ -34,8 +34,8 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
   30 MB 말고는 PPMd 205 MB, ZPAQ 190 MB, LZMA 72 MB, 7z 37 MB, RAR 13 MB, UPX+NSIS 설치 파일 54 MB,
   `benchmarks/simple/w8002`(100 MB, 난수) 등이다.
 - RAR 83개(13.4 MB, 같은 파일이 많다)는 aqr-rar가 푼다(2026-11-01). 대부분 오래된 WinRAR의 높은 차수
-  PPMd라 따로는 이득이 거의 없다: level 9에서 −1.4%(세 개 채택), mid에서는 한 개만 채택되어 모듈
-  블록(43 KB)만큼 +0.25%. 받아들이지 않을 스트림도 다 분해해 보느라 압축에 CPU 36 s가 든다.
+  PPMd라 따로는 이득이 거의 없다: PPMd 스트림은 level 9에서만 시도하고, 거기서 −1.4%(세 개 채택)이다.
+  mid에서는 하나도 채택되지 않는다(LZ 스트림 하나를 분해해 보는 데 압축 5 s).
 - 통째로 압축한 기준값: `tar | zstd -3 -T10` 4.68 GB(33 s), `--long=31`을 붙여 4.17 GB, 파일별
   zstd -3(같은 파일 제외) 4.06 GB, zpaq 7.15(10gb.zpaq) 3.70 GB.
 
