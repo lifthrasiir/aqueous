@@ -2408,8 +2408,8 @@ impl Archive<'_, '_> {
 
     /// [`Archive::each_leaf`], a leaf of a formula written to `sink` as it is evaluated where
     /// its output may be ([`run`]): `f` given no output of it then. Where `only` is given, the
-    /// leaves (by index) not marked there are not evaluated, nor the non-leaf blocks only they
-    /// slice decoded (every formula block is read all the same, to check the archive).
+    /// leaves (by index) not marked there are not evaluated, nor their formula blocks read, nor
+    /// the non-leaf blocks only they slice decoded.
     fn each_leaf_into(
         &self,
         threads: usize,
@@ -2418,7 +2418,12 @@ impl Archive<'_, '_> {
         f: impl Fn(usize, Decoded<Vec<Vec<u8>>>) -> Decoded<()> + Sync,
     ) -> Decoded<()> {
         let blocks = &self.blocks;
-        // every formula block read first: a non-leaf block is dropped once nothing is to slice it
+        // the leaves evaluated, in order
+        let taken = |i: usize| only.is_none_or(|o| o.get(i) == Some(&true));
+        let picked: Vec<usize> = (0..blocks.leaves.len()).filter(|&i| taken(i)).collect();
+        // the formula blocks of those read first (every one where all are, the archive checked
+        // then for non-leaf blocks no formula refers to): a non-leaf block is dropped once nothing
+        // is to slice it
         let mut used = vec![false; blocks.non_leaf.len()];
         let env = |modules: usize, resources: usize, first| Env {
             first,
@@ -2429,23 +2434,33 @@ impl Archive<'_, '_> {
             resources: &blocks.resources[..resources],
             runner: self.runner,
         };
+        let formulas = blocks
+            .leaves
+            .iter()
+            .enumerate()
+            .map(|(i, leaf)| match *leaf {
+                LeafBlock::Formula { data, .. } if taken(i) => {
+                    let (d, dict) = blocks.formulas[data];
+                    decoded_with(d, true, true, dict.map(|d| &blocks.dictionaries[d])).map(Some)
+                }
+                _ => Ok(None),
+            })
+            .collect::<Decoded<Vec<_>>>()?;
         let programs = blocks
             .leaves
             .iter()
-            .map(|leaf| match *leaf {
-                LeafBlock::Stored(..) => Ok(None),
-                LeafBlock::Formula { outputs, data, modules, resources, non_leaf } => {
+            .zip(&formulas)
+            .map(|(leaf, d)| match (leaf, d) {
+                (&LeafBlock::Formula { outputs, modules, resources, non_leaf, .. }, Some(d)) => {
                     let env = env(modules, resources, non_leaf);
-                    read(&blocks.formulas[data], outputs, &env, blocks.non_leaf.len(), &mut used).map(Some)
+                    read(d, outputs, &env, blocks.non_leaf.len(), &mut used).map(Some)
                 }
+                _ => Ok(None),
             })
             .collect::<Decoded<Vec<_>>>()?;
-        if used.contains(&false) {
+        if only.is_none() && used.contains(&false) {
             return invalid("a non-leaf block no formula block references");
         }
-        // the leaves evaluated, in order
-        let picked: Vec<usize> =
-            (0..blocks.leaves.len()).filter(|&i| only.is_none_or(|o| o.get(i) == Some(&true))).collect();
         let mut refs = vec![0; blocks.non_leaf.len()];
         for p in picked.iter().filter_map(|&i| programs[i].as_ref()) {
             for insn in &p.insns {
@@ -2652,16 +2667,17 @@ fn tree_of(
     let mut t = Tree { root: std::mem::take(&mut extras[0]), entries: Vec::new() };
     // the tree's index of each entry by number, tombstones (of nothing to remove) left out
     let mut index = vec![None; m.entries.len() + 1];
-    let mut names = std::collections::HashSet::new();
+    let mut names = HashSet::with_capacity(m.entries.len());
+    if !m.entries.iter().all(|(parent, name, _)| names.insert((*parent, &name[..]))) {
+        return invalid("two entries of a name in a directory");
+    }
+    drop(names);
     for (k, (parent, name, read)) in m.entries.into_iter().enumerate() {
         let k = k + 1;
         let parent_index = match parent {
             0 => None,
             p => Some(index[p].expect("a directory")),
         };
-        if !names.insert((parent, name.clone())) {
-            return invalid("two entries of a name in a directory");
-        }
         let node = match read {
             tree::Read::Dir => EntryNode::Dir,
             tree::Read::File { offset, output, size, dictionary } => {
@@ -2717,8 +2733,11 @@ struct Blocks<'c> {
     leaf_dictionary: Vec<Option<usize>>,
     /// The metadata blocks, where each starts and its decoded data.
     metadata: Vec<(usize, Vec<u8>)>,
-    /// The formula data of the formula blocks.
-    formulas: Vec<Vec<u8>>,
+    /// The formula data of the formula blocks as it is in the archive (Zstandard data, checked),
+    /// with its dictionary: decoded as the leaves are evaluated, only those of the leaves taken
+    /// (an archive has a formula block a leaf, and opening it to take a few of them should not
+    /// take all).
+    formulas: Vec<(&'c [u8], Option<usize>)>,
     /// The data of each non-leaf block, whether it is Zstandard data, and its dictionary.
     non_leaf: Vec<(&'c [u8], bool, Option<usize>)>,
     modules: Vec<Vec<u8>>,
@@ -2847,7 +2866,7 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Bloc
                 if outputs == 0 {
                     return invalid("a formula block of no outputs");
                 }
-                b.formulas.push(decoded_with(&data[p..], true, true, dict.map(|d| &b.dictionaries[d]))?);
+                b.formulas.push((&data[p..], dict));
                 b.leaf_at.push(at);
                 b.leaf_dictionary.push(dict);
                 b.leaves.push(LeafBlock::Formula {
@@ -2946,22 +2965,48 @@ fn decoded_with(d: &[u8], zstd: bool, checked: bool, dict: Option<&dict::Diction
 fn unzstd(window: u8, blocks: &[u8], size: u64, dict: Option<&dict::Dictionary>) -> Decoded<Vec<u8>> {
     let _s = aqr_common::trace::span("unzstd");
     let zstd = |e: zstd_safe::ErrorCode| Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)));
+    // A context of the thread's, kept for the next frame (with its input buffer) where there is
+    // no dictionary to refer to: archives have a formula block a leaf, each a frame, and making
+    // a context for each was much of opening a big archive.
+    thread_local! {
+        static DCTX: RefCell<Option<zstd_safe::DCtx<'static>>> = const { RefCell::new(None) };
+    }
+    match dict {
+        None => DCTX.with(|c| match c.try_borrow_mut() {
+            Ok(mut c) => {
+                let dctx = c.get_or_insert_with(zstd_safe::DCtx::create);
+                dctx.reset(ResetDirective::SessionAndParameters).map_err(zstd)?;
+                unzstd_with(dctx, window, blocks, size)
+            }
+            Err(_) => unzstd_with(&mut zstd_safe::DCtx::create(), window, blocks, size),
+        }),
+        Some(d) => {
+            let mut dctx = zstd_safe::DCtx::create();
+            match d {
+                dict::Dictionary::Raw(d) => dctx.ref_prefix(d).map(drop).map_err(zstd)?,
+                dict::Dictionary::Tables(d) => dctx.ref_ddict(d).map(drop).map_err(zstd)?,
+            }
+            unzstd_with(&mut dctx, window, blocks, size)
+        }
+    }
+}
+
+/// [`unzstd`] with `dctx` (of its dictionary, if any).
+fn unzstd_with(dctx: &mut zstd_safe::DCtx, window: u8, blocks: &[u8], size: u64) -> Decoded<Vec<u8>> {
+    let zstd = |e: zstd_safe::ErrorCode| Failure::Invalid(format!("zstd: {}", zstd_safe::get_error_name(e)));
     // the frame: a header, then the blocks (not copied after it)
     let head = [ZSTD_MAGIC[0], ZSTD_MAGIC[1], ZSTD_MAGIC[2], ZSTD_MAGIC[3], 0, window];
     let mut frame = [&head[..], blocks].into_iter();
-    let mut dctx = zstd_safe::DCtx::create();
-    match dict {
-        None => {}
-        Some(dict::Dictionary::Raw(d)) => dctx.ref_prefix(d).map(drop).map_err(zstd)?,
-        Some(dict::Dictionary::Tables(d)) => dctx.ref_ddict(d).map(drop).map_err(zstd)?,
-    }
     let mut input = InBuffer::around(frame.next().unwrap());
     // up to one byte more than `size`, to tell a longer output: as much room as that from the
-    // start where it can be had, else made as the output comes
+    // start where it can be had (written into as it is, without a window buffer of the
+    // context's), else made as the output comes
     let limit = size.saturating_add(1);
     let mut out: Vec<u8> = Vec::new();
-    if let Ok(n) = usize::try_from(limit) {
-        let _ = out.try_reserve_exact(n);
+    if let Ok(n) = usize::try_from(limit)
+        && out.try_reserve_exact(n).is_ok()
+    {
+        dctx.set_parameter(zstd_safe::DParameter::StableOutBuffer(true)).map_err(zstd)?;
     }
     loop {
         let Some(room) = limit.checked_sub(out.len() as u64).filter(|&r| r > 0) else {

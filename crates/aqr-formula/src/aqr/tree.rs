@@ -546,16 +546,13 @@ enum Cbor {
 /// Maps and arrays nested deeper than this are not read (a resource failure).
 const CBOR_DEPTH: usize = 64;
 
-/// Reads a CBOR data item at `*at` of `d`.
-fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
-    if depth > CBOR_DEPTH {
-        return super::resource("optional metadata nested too deep");
-    }
-    let bad = || invalid::<Cbor>("bad CBOR in the optional metadata");
+/// The head of a CBOR data item at `*at` of `d`, read: its major type, additional information
+/// and argument (`None` for an indefinite length).
+fn head_of(d: &[u8], at: &mut usize) -> Decoded<(u8, u8, Option<u64>)> {
+    let bad = || invalid("bad CBOR in the optional metadata");
     let Some(&b) = d.get(*at) else { return bad() };
     *at += 1;
     let (major, ai) = (b >> 5, b & 0x1f);
-    // the argument, or `None` for an indefinite length
     let arg = match ai {
         0..24 => Some(ai as u64),
         24..28 => {
@@ -565,9 +562,44 @@ fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
             Some(bytes.iter().fold(0u64, |v, &x| (v << 8) | x as u64))
         }
         31 if matches!(major, 2..=5) => None,
-        31 if major == 7 => return bad(),
         _ => return bad(),
     };
+    Ok((major, ai, arg))
+}
+
+/// The number of items (`None`: up to a break) of an array or map of argument `arg` at `at` of
+/// `d`: no more than the bytes left.
+fn count(d: &[u8], at: usize, arg: Option<u64>) -> Decoded<Option<usize>> {
+    match arg {
+        Some(n) => usize::try_from(n)
+            .ok()
+            .filter(|&n| n <= d.len() - at.min(d.len()))
+            .map(Some)
+            .ok_or_else(|| super::Failure::Invalid("bad CBOR length".into())),
+        None => Ok(None),
+    }
+}
+
+/// Whether the array or map of `n` items ([`count`]) at `*at` of `d` ends after `k` of them:
+/// at a break (passed) where of an indefinite length.
+fn ended(d: &[u8], at: &mut usize, n: Option<usize>, k: usize) -> bool {
+    match n {
+        Some(n) => k == n,
+        None if d.get(*at) == Some(&0xff) => {
+            *at += 1;
+            true
+        }
+        None => false,
+    }
+}
+
+/// Reads a CBOR data item at `*at` of `d`.
+fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
+    if depth > CBOR_DEPTH {
+        return super::resource("optional metadata nested too deep");
+    }
+    let bad = || invalid::<Cbor>("bad CBOR in the optional metadata");
+    let (major, ai, arg) = head_of(d, at)?;
     let len = |n: u64, at: usize| usize::try_from(n).ok().filter(|&n| n <= d.len() - at.min(d.len()));
     Ok(match (major, arg) {
         (0, Some(v)) => Cbor::Int(v as i128),
@@ -597,39 +629,26 @@ fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
             *at += 1;
             if major == 2 { Cbor::Bytes(b) } else { Cbor::Text(b) }
         }
-        (4 | 5, arg) => {
-            let n = match arg {
-                Some(n) => Some(len(n, *at).ok_or_else(|| super::Failure::Invalid("bad CBOR length".into()))?),
-                None => None,
-            };
-            let mut items = Vec::new();
-            let per = if major == 5 { 2 } else { 1 };
-            loop {
-                match n {
-                    Some(n) if items.len() == n * per => break,
-                    None if d.get(*at) == Some(&0xff) => {
-                        *at += 1;
-                        break;
-                    }
-                    _ => items.push(item(d, at, depth + 1)?),
-                }
+        (4, arg) => {
+            let n = count(d, *at, arg)?;
+            // (room for `n` items made at once, up to 4096: a length told is not trusted)
+            let mut items = Vec::with_capacity(n.unwrap_or(0).min(1 << 12));
+            while !ended(d, at, n, items.len()) {
+                items.push(item(d, at, depth + 1)?);
             }
-            if major == 4 {
-                Cbor::Array(items)
-            } else {
-                if items.len() % 2 == 1 {
-                    return bad();
+            Cbor::Array(items)
+        }
+        (5, arg) => {
+            let n = count(d, *at, arg)?;
+            let mut pairs: Vec<(Cbor, Cbor)> = Vec::with_capacity(n.unwrap_or(0).min(1 << 12));
+            while !ended(d, at, n, pairs.len()) {
+                let (k, v) = pair(d, at, depth, n)?;
+                if pairs.iter().any(|(q, _)| *q == k) {
+                    return invalid("duplicate keys in the optional metadata");
                 }
-                let mut pairs = Vec::new();
-                let mut it = items.into_iter();
-                while let (Some(k), Some(v)) = (it.next(), it.next()) {
-                    if pairs.iter().any(|(q, _)| *q == k) {
-                        return invalid("duplicate keys in the optional metadata");
-                    }
-                    pairs.push((k, v));
-                }
-                Cbor::Map(pairs)
+                pairs.push((k, v));
             }
+            Cbor::Map(pairs)
         }
         (6, Some(tag)) => Cbor::Tag(tag, Box::new(item(d, at, depth + 1)?)),
         (7, Some(v)) => match ai {
@@ -641,6 +660,15 @@ fn item(d: &[u8], at: &mut usize, depth: usize) -> Decoded<Cbor> {
         },
         _ => return bad(),
     })
+}
+
+/// Reads a pair of a map at `depth` of `n` pairs ([`count`]) at `*at` of `d`.
+fn pair(d: &[u8], at: &mut usize, depth: usize, n: Option<usize>) -> Decoded<(Cbor, Cbor)> {
+    let k = item(d, at, depth + 1)?;
+    if n.is_none() && d.get(*at) == Some(&0xff) {
+        return invalid("bad CBOR in the optional metadata");
+    }
+    Ok((k, item(d, at, depth + 1)?))
 }
 
 /// A fork as `forks` refers to it: the relative offset of its leaf block, its output and its
@@ -657,29 +685,65 @@ pub(crate) fn extras(d: &[u8], n: usize) -> Decoded<(Vec<Extra>, Vec<Vec<(Vec<u8
     if d.is_empty() {
         return Ok((out, forks));
     }
+    // Walked rather than read whole: the entry-extras an entry at a time, each a member at a
+    // time (read whole, those of an archive of many entries took most of opening it).
     let mut at = 0;
-    let top = item(d, &mut at, 0)?;
-    if at != d.len() {
-        return invalid("bytes after the optional metadata");
+    let (major, _, arg) = head_of(d, &mut at)?;
+    if major != 5 {
+        return invalid("optional metadata not a map");
     }
-    let Cbor::Map(top) = top else { return invalid("optional metadata not a map") };
-    let Some((_, list)) = top.iter().find(|(k, _)| *k == Cbor::Int(ENTRY_EXTRAS)) else { return Ok((out, forks)) };
-    let Cbor::Array(list) = list else { return invalid("entry-extras not an array") };
-    if list.len() > n + 1 {
-        return invalid("more entry-extras than entries");
-    }
-    for ((e, x), f) in list.iter().zip(&mut out).zip(&mut forks) {
-        match e {
-            Cbor::Simple(22) => {}
-            Cbor::Map(m) => {
-                for (k, v) in m {
-                    if let &Cbor::Int(k) = k {
-                        member(x, f, k, v)?;
+    let top = count(d, at, arg)?;
+    // the keys of the map read (`keys`), and of an entry extra (`members`, made once)
+    let (mut keys, mut members): (Vec<Cbor>, Vec<Cbor>) = (Vec::new(), Vec::new());
+    let dup = || invalid("duplicate keys in the optional metadata");
+    while !ended(d, &mut at, top, keys.len()) {
+        let k = item(d, &mut at, 1)?;
+        if top.is_none() && d.get(at) == Some(&0xff) {
+            return invalid("bad CBOR in the optional metadata");
+        }
+        if keys.contains(&k) {
+            return dup();
+        }
+        if k != Cbor::Int(ENTRY_EXTRAS) {
+            item(d, &mut at, 1)?;
+            keys.push(k);
+            continue;
+        }
+        keys.push(k);
+        let (major, _, arg) = head_of(d, &mut at)?;
+        if major != 4 {
+            return invalid("entry-extras not an array");
+        }
+        let list = count(d, at, arg)?;
+        let mut e = 0;
+        while !ended(d, &mut at, list, e) {
+            if e > n {
+                return invalid("more entry-extras than entries");
+            }
+            let (x, f) = (&mut out[e], &mut forks[e]);
+            e += 1;
+            match head_of(d, &mut at)? {
+                (7, 22, _) => {}
+                (5, _, arg) => {
+                    let m = count(d, at, arg)?;
+                    members.clear();
+                    while !ended(d, &mut at, m, members.len()) {
+                        let (k, v) = pair(d, &mut at, 2, m)?;
+                        if members.contains(&k) {
+                            return dup();
+                        }
+                        if let Cbor::Int(k) = k {
+                            member(x, f, k, &v)?;
+                        }
+                        members.push(k);
                     }
                 }
+                _ => return invalid("an entry extra not a map"),
             }
-            _ => return invalid("an entry extra not a map"),
         }
+    }
+    if at != d.len() {
+        return invalid("bytes after the optional metadata");
     }
     Ok((out, forks))
 }

@@ -65,10 +65,24 @@ pub struct Selection {
 impl Selection {
     /// The entry of `t` at each path (`None`: none there).
     pub fn find(&self, t: &Tree) -> Vec<Option<usize>> {
-        let by_name: HashMap<(Option<usize>, &[u8]), usize> =
-            t.entries.iter().enumerate().map(|(i, e)| ((e.parent, &e.name[..]), i)).collect();
-        let at = |names: &[Vec<u8>]| names.iter().try_fold(None, |at, n| by_name.get(&(at, &n[..])).map(|&i| Some(i)));
-        self.paths.iter().map(|(names, _)| at(names).flatten()).collect()
+        // (each entry after its parent: one pass over the entries a path, rather than a map of
+        // them all for a few paths)
+        let at = |names: &[Vec<u8>]| {
+            let (mut at, mut d) = (None, 0);
+            if names.is_empty() {
+                return None;
+            }
+            for (i, e) in t.entries.iter().enumerate() {
+                if e.parent == at && e.name == names[d] {
+                    (at, d) = (Some(i), d + 1);
+                    if d == names.len() {
+                        return at;
+                    }
+                }
+            }
+            None
+        };
+        self.paths.iter().map(|(names, _)| at(names)).collect()
     }
 
     /// Path `k` for people.
@@ -604,13 +618,16 @@ impl<'a> Extractor<'a> {
             (None, Some(sel)) if sel.paths.len() == 1 && sel.paths[0].1.is_some() => sel.paths[0].1.clone().unwrap(),
             (None, _) => top.clone(),
         };
-        let by_name: HashMap<(Option<usize>, &[u8]), usize> =
-            t.entries.iter().enumerate().map(|(i, e)| ((e.parent, &e.name[..]), i)).collect();
+        // (made at the first link)
+        let mut by_name: Option<ByName> = None;
         for (i, e) in t.entries.iter().enumerate() {
             let EntryNode::Link(target) = &e.node else { continue };
             if s.paths.get(i).is_none_or(|p| p.as_os_str().is_empty()) {
                 continue;
             }
+            let by_name = by_name.get_or_insert_with(|| {
+                t.entries.iter().enumerate().map(|(i, e)| ((e.parent, &e.name[..]), i)).collect()
+            });
             let path = &s.paths[i];
             // (of a single entry extracted as it is: reaching out of it is reaching out; and of a
             // path renamed, reaching out of it, but where the link is the path renamed itself)
@@ -621,9 +638,9 @@ impl<'a> Extractor<'a> {
                 }
                 _ => (s.single.map(|f| vec![t.entries[f].name.clone()]), out.as_path(), false),
             };
-            let to = match resolve_link(t, &by_name, i, within.as_deref()) {
+            let to = match resolve_link(t, by_name, i, within.as_deref()) {
                 Some(to) => to,
-                None if alone => resolve_link(t, &by_name, i, None).flatten(),
+                None if alone => resolve_link(t, by_name, i, None).flatten(),
                 None => {
                     let of = if of.as_os_str().is_empty() { Path::new(".") } else { of };
                     self.ap.tell(path, &format!("a link reaching out of {}, not created", of.display()));
@@ -742,17 +759,15 @@ pub fn windows_name(name: &std::ffi::OsStr) -> Option<OsString> {
     (out != s).then(|| out.into())
 }
 
+/// The entries of a tree by their directory and name.
+type ByName<'t> = HashMap<(Option<usize>, &'t [u8]), usize>;
+
 /// Where link `i` of `t` leads, resolved from the link's directory through the links of the
 /// tree (`by_name`: the entries by their directory and name): the entry (`None`: none of the
 /// tree); `None` where it reaches out of the directory it is extracted into, by an absolute
 /// target or by one going above it (or out of the entry of names `within`, where given: the one
 /// extracted as the root).
-fn resolve_link(
-    t: &Tree,
-    by_name: &HashMap<(Option<usize>, &[u8]), usize>,
-    i: usize,
-    within: Option<&[Vec<u8>]>,
-) -> Option<Option<usize>> {
+fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>) -> Option<Option<usize>> {
     // the path of an entry, as names from the root
     let path_of = |mut e: Option<usize>| {
         let mut p = Vec::new();
