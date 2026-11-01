@@ -224,6 +224,13 @@ struct State {
     /// earlier entry's of its directory: that entry (`Some`), or `None` where one above it is
     /// not made so (spec, "Extraction").
     clashed: Vec<Option<Option<usize>>>,
+    /// On Windows, the entries of each directory by their short names, where their names may be
+    /// ones ([`short_key`]); and the first entry of each directory whose name is none (and so
+    /// takes a short name Windows makes, `~` and digits: [`made_short`]).
+    #[cfg(windows)]
+    taken_short: HashMap<(Option<usize>, Vec<u8>), usize>,
+    #[cfg(windows)]
+    long_named: HashMap<Option<usize>, usize>,
 }
 
 /// A fork of a content: the entry (`None`: the root), the fork's index and name, and the kind
@@ -352,6 +359,24 @@ impl<'a> Extractor<'a> {
                     s.clashed[i] = Some(Some(j));
                 }
             }
+            // (on Windows, of short names too: FAT takes a name as another's short name, by the
+            // best fit of the OEM code page, `pÀq` as `paq`; and both FAT and NTFS take a short
+            // name Windows made, `LONGFI~1.TXT`, as the long name's)
+            #[cfg(windows)]
+            if s.clashed[i].is_none() {
+                match short_key(&os_name(name_bytes(&e.name).0).0) {
+                    Some(k) => {
+                        let long = s.long_named.get(&e.parent).copied().filter(|&j| j != i && made_short(&k));
+                        let j = long.unwrap_or_else(|| *s.taken_short.entry((e.parent, k)).or_insert(i));
+                        if j != i {
+                            s.clashed[i] = Some(Some(j));
+                        }
+                    }
+                    None => {
+                        s.long_named.entry(e.parent).or_insert(i);
+                    }
+                }
+            }
         }
         // the link groups of the files told, consistent where all their files are of a content
         let mut touched = Vec::new();
@@ -387,7 +412,7 @@ impl<'a> Extractor<'a> {
                     self.ap.tell(
                         &path,
                         &format!(
-                            "not extracted, {what}as this file system takes its name as that of {}",
+                            "not extracted, {what}as this file system may take its name as that of {}",
                             s.paths[j].display()
                         ),
                     );
@@ -690,7 +715,7 @@ impl<'a> Extractor<'a> {
                 let mut m = ByName::new();
                 for (j, e) in t.entries.iter().enumerate() {
                     if s.clashed.get(j).is_none_or(Option::is_none) {
-                        m.entry((e.parent, name_key(name_bytes(&e.name).0))).or_default().push(j);
+                        by_name_add(&mut m, e.parent, Name::of(name_bytes(&e.name).0), j);
                     }
                 }
                 m
@@ -941,13 +966,107 @@ fn link_target(target: &[u8]) -> (OsString, bool) {
     (os_from(bytes), false)
 }
 
-/// The entries of a tree by their directory and the key of their names ([`fold::fold`] of the
-/// name on this system): those that some file system takes as one name, together.
-type ByName = HashMap<(Option<usize>, String), Vec<usize>>;
+/// The short name (8.3) that FAT on Windows may take `name` (a name on this system) as: as
+/// FastFAT looks a name up, uppercased and in the OEM code page, characters it does not have
+/// as their best fit (`pÀq` as `PAQ` in code page 949), where that is a valid 8.3 name; and so
+/// the short name of another file, `paq`'s (`PAQ`), or one Windows made for a long one
+/// (`LONGFI~1.TXT`).
+#[cfg(windows)]
+fn short_key(name: &std::ffi::OsStr) -> Option<Vec<u8>> {
+    use std::os::windows::ffi::OsStrExt;
+    let w: Vec<u16> = name.encode_wide().collect();
+    // (none of more than 12 units is: each is a byte at least)
+    if w.is_empty() || w.len() > 12 {
+        return None;
+    }
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+    #[repr(C)]
+    struct OemString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u8,
+    }
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn RtlUpcaseUnicodeStringToOemString(dest: *mut OemString, src: *const UnicodeString, allocate: u8) -> i32;
+    }
+    let mut buf = [0u8; 32];
+    let src = UnicodeString { length: (w.len() * 2) as u16, maximum_length: (w.len() * 2) as u16, buffer: w.as_ptr() };
+    let mut dest = OemString { length: 0, maximum_length: buf.len() as u16, buffer: buf.as_mut_ptr() };
+    // SAFETY: `src` of `w`'s units, `dest` of `buf`'s bytes (two for each unit at most), not
+    // allocated
+    if unsafe { RtlUpcaseUnicodeStringToOemString(&mut dest, &src, 0) } < 0 {
+        return None;
+    }
+    let oem = &buf[..dest.length as usize];
+    short_valid(oem).then(|| oem.to_vec())
+}
 
-/// The key of `bytes` (an entry's name, or a name of a link target, decoded) in [`ByName`].
-fn name_key(bytes: &[u8]) -> String {
-    fold::fold(&os_name(bytes).0)
+/// Whether `oem` (a name in an OEM code page) may be a short name (8.3) of FAT: a base of 1 to 8
+/// bytes and an extension of 1 to 3 after a dot, or none. Lenient (the characters FAT does not
+/// take aside, but `?`, the best fit of characters of no fit, and `*`), as a name taken as short
+/// that is not is a conflict or a link not made more, but one not taken that is could be written
+/// through.
+#[cfg(any(windows, test))]
+fn short_valid(oem: &[u8]) -> bool {
+    if oem.iter().any(|&c| c < 0x20 || c == b'?' || c == b'*') {
+        return false;
+    }
+    let (base, ext) = match oem.iter().position(|&c| c == b'.') {
+        Some(k) => (&oem[..k], Some(&oem[k + 1..])),
+        None => (oem, None),
+    };
+    (1..=8).contains(&base.len()) && ext.is_none_or(|e| (1..=3).contains(&e.len()) && !e.contains(&b'.'))
+}
+
+/// Whether short name `key` is one of those Windows makes for long names (`~` and digits): it
+/// may be the short name of any long name of its directory.
+fn made_short(key: &[u8]) -> bool {
+    key.windows(2).any(|w| w[0] == b'~' && w[1].is_ascii_digit())
+}
+
+/// A name (an entry's, or one of a link target) as file systems could take it: folded
+/// ([`fold::fold`]), and on Windows its short name where it may be one ([`short_key`]).
+#[derive(Clone)]
+struct Name {
+    fold: String,
+    short: Option<Vec<u8>>,
+}
+
+impl Name {
+    /// The name of `bytes` (decoded) on this system.
+    fn of(bytes: &[u8]) -> Name {
+        let os = os_name(bytes).0;
+        #[cfg(windows)]
+        let short = short_key(&os);
+        #[cfg(not(windows))]
+        let short = None;
+        Name { fold: fold::fold(&os), short }
+    }
+}
+
+/// A key of [`ByName`]: a name folded, or a short name.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Key {
+    Fold(String),
+    Short(Vec<u8>),
+}
+
+/// The entries of a tree by their directory and the keys of their names ([`Name`]): those that
+/// some file system takes as one name, together.
+type ByName = HashMap<(Option<usize>, Key), Vec<usize>>;
+
+/// Adds entry `j` of `parent` and name `n` to `m`.
+fn by_name_add(m: &mut ByName, parent: Option<usize>, n: Name, j: usize) {
+    if let Some(s) = n.short {
+        m.entry((parent, Key::Short(s))).or_default().push(j);
+    }
+    m.entry((parent, Key::Fold(n.fold))).or_default().push(j);
 }
 
 /// Why a link is not made ([`resolve_link`]).
@@ -964,25 +1083,34 @@ enum Refused {
 /// where it reaches out of the directory it is extracted into, by an absolute target or by one
 /// going above it (or out of the entry of names `within`, where given: the one extracted as the
 /// root); or where a name of it could be a link as some file system takes names (by case, by
-/// normalization, or as a short name of Windows, `~` and digits) and not as others: a link is
-/// followed only where the name is the link's as it is, and the link the only entry of names
-/// taken as one there (spec, "Extraction").
+/// normalization, or as a short name of Windows) and not as others: a link is followed only
+/// where the name is the link's as it is, and the link the only entry of names taken as one
+/// there (spec, "Extraction").
 fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>) -> Result<Option<usize>, Refused> {
-    // the path of an entry, as keys of names from the root
+    // the path of an entry, as names from the root
     let path_of = |mut e: Option<usize>| {
         let mut p = Vec::new();
         while let Some(i) = e {
-            p.push(name_key(name_bytes(&t.entries[i].name).0));
+            p.push(Name::of(name_bytes(&t.entries[i].name).0));
             e = t.entries[i].parent;
         }
         p.reverse();
         p
     };
-    // the entries at a path (of keys), those of directories taken as one together
-    let find = |path: &[String]| -> Vec<usize> {
+    // the entries at a path, those of directories taken as one together
+    let find = |path: &[Name]| -> Vec<usize> {
         let mut at: Vec<Option<usize>> = vec![None];
-        for key in path {
-            at = at.iter().filter_map(|&d| by_name.get(&(d, key.clone()))).flatten().map(|&j| Some(j)).collect();
+        for n in path {
+            let mut next: Vec<Option<usize>> = Vec::new();
+            for &d in &at {
+                let keys = std::iter::once(Key::Fold(n.fold.clone())).chain(n.short.clone().map(Key::Short));
+                for j in keys.filter_map(|k| by_name.get(&(d, k))).flatten() {
+                    if !next.contains(&Some(*j)) {
+                        next.push(Some(*j));
+                    }
+                }
+            }
+            at = next;
             if at.is_empty() {
                 break;
             }
@@ -993,12 +1121,12 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
     let mut budget = t.entries.len() + 1;
     fn resolve(
         t: &Tree,
-        dir: Vec<String>,
+        dir: Vec<Name>,
         target: &[u8],
         budget: &mut usize,
-        find: &dyn Fn(&[String]) -> Vec<usize>,
-        path_of: &dyn Fn(Option<usize>) -> Vec<String>,
-    ) -> Result<Vec<String>, Refused> {
+        find: &dyn Fn(&[Name]) -> Vec<usize>,
+        path_of: &dyn Fn(Option<usize>) -> Vec<Name>,
+    ) -> Result<Vec<Name>, Refused> {
         let (bytes, _) = name_bytes(target);
         if bytes.starts_with(b"/") || (cfg!(windows) && bytes.get(1) == Some(&b':')) {
             return Err(Refused::Out);
@@ -1012,7 +1140,10 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
                 }
                 name => {
                     let os = os_name(name).0;
-                    at.push(fold::fold(&os));
+                    let n = Name::of(name);
+                    // (a short name Windows made, which could be any long name's of the directory)
+                    let made = cfg!(windows) && (name.contains(&b'~') || n.short.as_deref().is_some_and(made_short));
+                    at.push(n);
                     let there = find(&at);
                     let unsure = || Refused::Unsure(String::from_utf8_lossy(name).into_owned());
                     let link = |&j: &usize| matches!(t.entries[j].node, EntryNode::Link(_));
@@ -1024,8 +1155,7 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
                         let EntryNode::Link(next) = &t.entries[j].node else { unreachable!() };
                         *budget = budget.checked_sub(1).ok_or(Refused::Out)?;
                         at = resolve(t, path_of(t.entries[j].parent), next, budget, find, path_of)?;
-                    } else if cfg!(windows) && there.is_empty() && name.contains(&b'~') {
-                        // (a short name, which could be any entry's of the directory)
+                    } else if made && there.is_empty() {
                         return Err(unsure());
                     }
                 }
@@ -1036,8 +1166,8 @@ fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>
     let EntryNode::Link(target) = &t.entries[i].node else { return Ok(None) };
     let p = resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of)?;
     if let Some(w) = within {
-        let w: Vec<String> = w.iter().map(|n| name_key(name_bytes(n).0)).collect();
-        if !p.starts_with(&w) {
+        let within = p.len() >= w.len() && w.iter().zip(&p).all(|(n, m)| Name::of(name_bytes(n).0).fold == m.fold);
+        if !within {
             return Err(Refused::Out);
         }
     }
@@ -1058,7 +1188,20 @@ fn symlink(target: &std::ffi::OsStr, at: &Path, dir: bool) -> std::io::Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::windows_wide;
+    use super::{made_short, short_valid, windows_wide};
+
+    #[test]
+    fn short_names() {
+        for n in ["PAQ", "A", "ABCDEFGH", "ABCDEFGH.TXT", "A.B", "LONGFI~1.TXT"] {
+            assert!(short_valid(n.as_bytes()), "{n}");
+        }
+        // (DBCS: a trail byte of `\` in code page 932)
+        assert!(short_valid(b"\xb0\xa1\x95\x5c.TXT"));
+        for n in ["", ".TXT", "ABCDEFGHI", "A.TXTX", "A.B.C", "A.", "P?Q", "A*"] {
+            assert!(!short_valid(n.as_bytes()), "{n}");
+        }
+        assert!(made_short(b"LONGFI~1.TXT") && made_short(b"A~12") && !made_short(b"A~B") && !made_short(b"A"));
+    }
 
     #[test]
     fn windows_names() {

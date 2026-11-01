@@ -96,3 +96,80 @@ fn names_kept_within() {
     }
     fs::remove_dir_all(&d).unwrap();
 }
+
+/// `name` uppercased and in the OEM code page (best fit), as FastFAT looks a name up.
+fn oem_upper(name: &str) -> Vec<u8> {
+    #[repr(C)]
+    struct UnicodeString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *const u16,
+    }
+    #[repr(C)]
+    struct OemString {
+        length: u16,
+        maximum_length: u16,
+        buffer: *mut u8,
+    }
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    unsafe extern "system" {
+        fn RtlUpcaseUnicodeStringToOemString(dest: *mut OemString, src: *const UnicodeString, allocate: u8) -> i32;
+    }
+    let w: Vec<u16> = name.encode_utf16().collect();
+    let mut buf = [0u8; 64];
+    let src = UnicodeString { length: (w.len() * 2) as u16, maximum_length: (w.len() * 2) as u16, buffer: w.as_ptr() };
+    let mut dest = OemString { length: 0, maximum_length: buf.len() as u16, buffer: buf.as_mut_ptr() };
+    // SAFETY: `src` of `w`'s units, `dest` of `buf`'s bytes
+    assert!(unsafe { RtlUpcaseUnicodeStringToOemString(&mut dest, &src, 0) } >= 0);
+    buf[..dest.length as usize].to_vec()
+}
+
+/// Names that FAT takes as another's short name, with -f: `p?q` (`?` a letter the OEM code page
+/// takes as `A` by best fit) after `paq`, and `LONGFI~1.TXT` after `longfilename.txt`; none of the
+/// later made (but told), nothing written over. In the temporary directory (NTFS, where they are
+/// all told as they could be one on FAT), and on FAT too where `AQR_TEST_FAT_DIR` names a
+/// directory of a FAT volume.
+#[test]
+fn short_names_taken_as_one() {
+    let Some(c) = ['À', 'Ā', 'Ă', 'Ą', 'Ǎ', 'Ａ', 'Ⓐ'].into_iter().find(|c| oem_upper(&format!("p{c}q")) == b"PAQ")
+    else {
+        eprintln!("no letter taken as A by this OEM code page: not tested");
+        return;
+    };
+    let alias = format!("p{c}q");
+    let mut dirs = vec![scratch("short")];
+    if let Some(fat) = std::env::var_os("AQR_TEST_FAT_DIR") {
+        let d = PathBuf::from(fat).join(format!("aqr-names-short-{}", std::process::id()));
+        if d.exists() {
+            fs::remove_dir_all(&d).unwrap();
+        }
+        fs::create_dir_all(&d).unwrap();
+        dirs.push(d);
+    }
+    for d in dirs {
+        let out = d.join("out");
+        let contents: Vec<Vec<u8>> = (0..4).map(|i| format!("content {i}").into_bytes()).collect();
+        let tree = Tree {
+            root: Extra::default(),
+            entries: vec![
+                file(b"paq", 0, Vec::new()),
+                file(alias.as_bytes(), 1, Vec::new()),
+                file(b"longfilename.txt", 2, Vec::new()),
+                file(b"LONGFI~1.TXT", 3, Vec::new()),
+            ],
+        };
+        let inputs: Vec<Input> = contents.iter().map(|c| Input { name: b"c", data: c }).collect();
+        let archive = d.join("a.aqr");
+        fs::write(&archive, compress_tree(&tree, &inputs, &Options::default()).archive).unwrap();
+        let o = Command::new(env!("CARGO_BIN_EXE_aqr"))
+            .args(["-d".as_ref(), "-f".as_ref(), "-o".as_ref(), out.as_os_str(), archive.as_os_str()])
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&o.stderr);
+        assert_eq!(fs::read_to_string(out.join("paq")).unwrap(), "content 0", "{}: {err}", d.display());
+        assert_eq!(fs::read_to_string(out.join("longfilename.txt")).unwrap(), "content 2", "{}: {err}", d.display());
+        assert!(err.contains(&format!("{alias}: not extracted")), "{}: {err}", d.display());
+        assert!(err.contains("LONGFI~1.TXT: not extracted"), "{}: {err}", d.display());
+        fs::remove_dir_all(&d).unwrap();
+    }
+}
