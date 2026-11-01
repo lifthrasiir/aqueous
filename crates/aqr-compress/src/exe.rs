@@ -7,10 +7,11 @@
 //! e.g. for the images among the resources. Of a PE image, its tables of known layouts outside
 //! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
 //! imports and runtime functions by `recs-fields`, their numbers as deltas. Of a 64-bit Mach-O
-//! image, the symbol table and its string table by `exe-recons/macho-symtab`.
+//! image, the symbol table and its string table by `exe-recons/macho-symtab`. ELF images, of
+//! their code alone.
 //!
-//! The ARM64 and x86 images of the Mach-O files of an archive alike (other versions of one
-//! program) are planned beforehand ([`plan`]) as a forest, each image's targets (of BL and
+//! The ARM64 and x86 images of the Mach-O and ELF files of an archive alike (other versions of
+//! one program) are planned beforehand ([`plan`]) as a forest, each image's targets (of BL and
 //! ADRP; of calls, jumps and RIP-relative addresses) remapped to its parent's address space, as
 //! its parent's are to its own, by `exe-recons/arm64-remap` and `exe-recons/x86-remap`; so that
 //! their code streams match where the code moved, for the pieces of streams of a class put
@@ -22,8 +23,8 @@ use std::sync::{Arc, OnceLock};
 
 use aqr_decompress::{ARM64, ARM64_REMAP, CIL, MACHO_SYMTAB, PE_RELOC, X86, X86_REMAP};
 use aqr_exe::arch::{arm64, cil, x86};
-use aqr_exe::format::macho;
 use aqr_exe::format::pe::{TableKind, locate_code, tables};
+use aqr_exe::format::{elf, macho};
 use aqr_exe::{reloc, symtab};
 use aqr_formula::{Apply, Formula, Kind, Node, Resource};
 use aqr_infer_recs::formula::{Field, How};
@@ -91,17 +92,47 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
     filtered(d, "pe", sections, &[])
 }
 
+/// The images of code of the Mach-O or ELF file `d`, x86 or ARM64: of each, its architecture
+/// (its index in the file within) and its code, `(virtual address, offset, size)` within `d`.
+fn code_images(d: &[u8]) -> Vec<(Arch, Vec<(u64, usize, usize)>)> {
+    let arch = |x86: bool, arm64: bool, is64: bool, k: usize| match () {
+        _ if x86 => Some(Arch::X86(is64, k)),
+        _ if arm64 => Some(Arch::Arm64(k)),
+        _ => None,
+    };
+    if let Some(images) = macho::images(d) {
+        let arch = |(k, i): (usize, macho::Image)| {
+            Some((arch(i.is_x86(), i.cputype == macho::CPU_TYPE_ARM64, i.is64(), k)?, i.sections))
+        };
+        images.into_iter().enumerate().filter_map(arch).collect()
+    } else if let Some(i) = elf::image(d) {
+        arch(i.is_x86(), i.machine == elf::EM_AARCH64, i.is64(), 0).map(|a| (a, i.code)).into_iter().collect()
+    } else {
+        Vec::new()
+    }
+}
+
+/// Whether `d` is a Mach-O or ELF file, whose images [`plan`] may remap.
+pub(crate) fn remappable(d: &[u8]) -> bool {
+    macho::starts(d) || elf::starts(d)
+}
+
+fn with_arch((a, code): (Arch, Vec<(u64, usize, usize)>)) -> impl Iterator<Item = (u64, usize, usize, Arch)> {
+    code.into_iter().map(move |(va, off, size)| (va, off, size, a))
+}
+
+/// The formula of ELF file `d`, its code remapped as `remaps` tells. (Its tables are left
+/// in the rest: `.eh_frame_hdr`'s and the relocations as `recs-fields` takes them do not
+/// archive smaller.)
+pub(crate) fn elf(d: &[u8], remaps: &[Option<Arc<Remap>>]) -> Option<Formula> {
+    let sections = code_images(d).into_iter().flat_map(with_arch);
+    filtered(d, "elf", sections.collect(), remaps)
+}
+
 /// The formula of Mach-O file `d`, its images remapped as `remaps` tells (by image).
 pub(crate) fn macho(d: &[u8], remaps: &[Option<Arc<Remap>>]) -> Option<Formula> {
     let images = macho::images(d)?;
-    let sections = images.iter().enumerate().flat_map(|(k, i)| {
-        let arch = match i.cputype {
-            _ if i.is_x86() => Some(Arch::X86(i.is64(), k)),
-            macho::CPU_TYPE_ARM64 => Some(Arch::Arm64(k)),
-            _ => None,
-        };
-        arch.into_iter().flat_map(|a| i.sections.iter().map(move |&(va, off, size)| (va, off, size, a)))
-    });
+    let sections = code_images(d).into_iter().flat_map(with_arch);
     let symbols = images.iter().filter_map(|i| i.symtab).map(|s| {
         let arch = Arch::Symbols { ext: s.ext, stroff: s.stroff, strsize: s.strsize };
         (0, s.symoff, s.nsyms as usize * 16, arch)
@@ -139,8 +170,8 @@ impl Remap {
     }
 }
 
-/// The remaps of the images of Mach-O files, by where each file's data is: of each image of
-/// the file, its remap where it has one.
+/// The remaps of the images of Mach-O and ELF files, by where each file's data is: of each
+/// image of the file, its remap where it has one.
 #[derive(Default)]
 pub(crate) struct Remaps(HashMap<usize, Vec<Option<Arc<Remap>>>>);
 
@@ -151,26 +182,23 @@ impl Remaps {
     }
 }
 
-/// The remaps of the ARM64 and x86 images of the Mach-O files among `files`: of those of more
-/// than `min` bytes of code, a maximum spanning forest of how alike they are (`Signature`; not
-/// at all, of different architectures), each image remapped to its parent's, composed with its
-/// parent's own. (Streams over half the
-/// bound of a solid block are cut into pieces put with those alike of other streams; shorter
-/// ones go one after another as their files do, rarely with their parents': remapped, they
-/// cost more.)
+/// The remaps of the ARM64 and x86 images of the Mach-O and ELF files among `files`: of those of
+/// more than `min` bytes of code, a maximum spanning forest of how alike they are (`Signature`;
+/// not at all, of different architectures), each image remapped to its parent's, composed with
+/// its parent's own. (Streams over half the bound of a solid block are cut into pieces put with
+/// those alike of other streams; shorter ones go one after another as their files do, rarely
+/// with their parents': remapped, they cost more.)
 pub(crate) fn plan(files: &[&[u8]], threads: usize, min: usize) -> Remaps {
     // each image: its file, its index in the file, its architecture (x86-64, x86-32 or ARM64)
     // and its code sections
     let mut images = Vec::new();
     for (i, d) in files.iter().enumerate() {
-        for (k, image) in macho::images(d).unwrap_or_default().iter().enumerate() {
-            let arch = match image.cputype {
-                macho::CPU_TYPE_ARM64 => Arch::Arm64(k),
-                _ if image.is_x86() => Arch::X86(image.is64(), k),
-                _ => continue,
+        for (arch, code) in code_images(d) {
+            let k = match arch {
+                Arch::X86(_, k) | Arch::Arm64(k) => k,
+                _ => unreachable!("an image of code"),
             };
-            let secs: Vec<(u64, &[u8])> =
-                image.sections.iter().map(|&(va, off, size)| (va, &d[off..off + size])).collect();
+            let secs: Vec<(u64, &[u8])> = code.iter().map(|&(va, off, size)| (va, &d[off..off + size])).collect();
             if secs.iter().map(|s| s.1.len()).sum::<usize>() > min {
                 images.push((i, k, arch, secs));
             }

@@ -20,7 +20,7 @@ encode.su 포럼에서 Aqueous와 겹치는 프로젝트를 모으고, 저장소
 - aqr-lz4: HC와 legacy frame을 넣으면 커널, initramfs, squashfs가 열린다(3절).
 - aqr-raw: PCM 경로에서 샘플 도메인 LMS 캐스케이드와 Sac식 편향 보정, 래스터에서 이미지별 색 변환 선택을 시험한다(5절, 6절).
 - aqr-flac: 가변 블록 크기 표본으로 시험한다(flacoutcpp, flake)(5절).
-- aqr-exe: ELF, RISC-V, ARM64의 `ADRP`와 lo12 묶기, PIC 점프 표, 점프 타깃의 델타 부호화 비교(8절).
+- aqr-exe: ELF의 표, RISC-V, ARM64의 `ADRP`와 lo12 묶기, PIC 점프 표, 점프 타깃의 델타 부호화 비교(8절).
 - aqr-pdf: 빈 사용자 암호의 암호화 파일은 공개 도구 중 하는 것이 없다(7절).
 
 새 포맷 후보: ALAC, CD 이미지(ECM식), zstd 레벨 1–4, LZF, BC7 텍스처, camera RAW. GIF는 aqr-gif가 한다.
@@ -141,7 +141,7 @@ aqr-flac의 FLAC 경로에서 이미 잰 것(LMS 캐스케이드, 채널 간 탭
 
 ## 8. 실행 파일
 
-- **ELF**는 PE·Mach-O와 같은 틀로 넣을 수 있다. 필요한 것은 실행 섹션(`SHT_PROGBITS` + `SHF_EXECINSTR`), 프로그램 헤더(VA 매핑), `e_machine`이고, 필터는 그대로 쓴다.
+- **ELF**는 PE·Mach-O와 같은 틀로 넣었다(2026-11-01, 코드만; aqr-exe README의 ELF). 아래는 남은 것이다.
   - `.plt`와 `.plt.sec` 스텁의 RIP 상대 disp32는 `.got.plt`를 가리키므로 그대로 이득을 본다. call이 PLT로 몰리므로 call 캐시 적중률이 PE와 다를 수 있다.
   - Zucchini(Chromium `components/zucchini/`, BSD)처럼 `.text` 안의 포인터 재배치 위치를 코드 스캔에서 빼는 것이 안전하다.
   - 코드 밖: `.rela.dyn`은 오프셋 델타, type, symbol, addend 열로 나눈다(`R_*_RELATIVE`는 오프셋 델타가 대개 8). `.dynsym`과 `.symtab`은 aqr-exe의 .NET 표 처리나 `recs-fields`를 쓴다. `.gnu.hash`와 `.hash`는 이름에서, `.eh_frame_hdr`의 정렬 표는 FDE에서 다시 계산할 수 있다. RELR과 Android APS2(lld)는 이미 압축된 형태라 더 줄일 것이 적다. CREL(LLVM 19 이후)은 재배치 가능 목적 파일의 것이라 링크된 실행 파일에는 해당하지 않는다.

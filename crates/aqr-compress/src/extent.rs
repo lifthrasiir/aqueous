@@ -15,6 +15,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
     let end = match f {
         Format::Pe => pe(d),
         Format::MachO => aqr_exe::format::macho::extent(d).map(|e| clamp(d, e)),
+        Format::Elf => aqr_exe::format::elf::extent(d).map(|e| clamp(d, e)),
         Format::Gzip => gzip_deflate(d).map(|r| r.end + 8),
         Format::Zlib => zlib_deflate(d).map(|r| r.end + 4),
         Format::Lz4 => aqr_lz4::formula::extent(d),
@@ -701,6 +702,36 @@ mod tests {
         fat[8..28].copy_from_slice(&[1, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0x10, 0, 0, 0, 3, 0, 0, 0, 0, 12]);
         fat.extend_from_slice(&d);
         ends(Format::MachO, &fat[..0x1300]);
+    }
+
+    /// An ELF image ends with the last of its section headers, its sections' data and its
+    /// segments' data.
+    #[test]
+    fn elf() {
+        let mut d = vec![0u8; 0x400];
+        d[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        d[16] = 2;
+        d[18] = 183;
+        d[20] = 1;
+        d[32] = 64; // e_phoff
+        d[40..48].copy_from_slice(&0x200u64.to_le_bytes()); // e_shoff
+        d[52] = 64;
+        d[54] = 56;
+        d[56] = 1;
+        d[58] = 64;
+        d[60] = 2;
+        // a segment to 0x180, a section to 0x2c0, past the section headers (0x280)
+        d[64] = 1;
+        d[64 + 32] = 0x80;
+        d[64 + 9] = 0x01; // p_offset 0x100
+        let s = 0x200 + 64;
+        d[s + 4] = 1;
+        d[s + 24..s + 32].copy_from_slice(&0x2a0u64.to_le_bytes());
+        d[s + 32] = 0x20;
+        ends(Format::Elf, &d[..0x2c0]);
+        // of no bits in the file
+        d[s + 4] = 8;
+        ends(Format::Elf, &d[..0x280]);
     }
 
     #[test]

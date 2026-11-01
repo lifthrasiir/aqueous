@@ -13,6 +13,9 @@ pub enum Format {
     /// Mach-O file, thin or universal (aqr-exe on the executable sections of its x86, x86-64
     /// and ARM64 images).
     MachO,
+    /// ELF image, 32- or 64-bit, little-endian (aqr-exe on its code, of x86, x86-64 and
+    /// ARM64).
+    Elf,
     /// gzip member (aqr-flate on its DEFLATE stream).
     Gzip,
     /// zlib stream (aqr-flate on its DEFLATE stream).
@@ -139,9 +142,10 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 54] = [
+    pub const ALL: [Format; 55] = [
         Format::Pe,
         Format::MachO,
+        Format::Elf,
         Format::Gzip,
         Format::Zlib,
         Format::Lz4,
@@ -200,6 +204,7 @@ impl Format {
         match self {
             Format::Pe => "pe",
             Format::MachO => "macho",
+            Format::Elf => "elf",
             Format::Gzip => "gzip",
             Format::Zlib => "zlib",
             Format::Lz4 => "lz4",
@@ -395,6 +400,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Pe)
     } else if aqr_exe::format::macho::starts(d) {
         Some(Format::MachO)
+    } else if aqr_exe::format::elf::starts(d) {
+        Some(Format::Elf)
     } else if aqr_lz4::formula::starts(d) {
         Some(Format::Lz4)
     } else if aqr_lzo::formula::starts(d) {
@@ -488,6 +495,7 @@ const fn pair(a: u8, b: u8) -> bool {
         // Mach-O, little-endian (32- or 64-bit), and universal
         0xce | 0xcf => b == 0xfa,
         0xca => b == 0xfe,
+        0x7f => b == b'E',
         0x1f => b == 0x8b,
         b'm' => b == b'o',
         0x04 => b == 0x22,
@@ -560,6 +568,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'M' => d.starts_with(b"MZ") || aqr_mszip::formula::starts(d),
         0xce | 0xcf => d.starts_with(&[d[0], 0xfa, 0xed, 0xfe]),
         0xca => d.starts_with(&[0xca, 0xfe, 0xba]),
+        0x7f => aqr_exe::format::elf::starts(d),
         0x1f => d.starts_with(&[0x1f, 0x8b]),
         b'm' | 0x04 => aqr_lz4::formula::starts(d),
         b'P' => d.starts_with(b"PK\x03\x04"),
@@ -655,6 +664,7 @@ mod tests {
             (b"\xcf\xfa", 0),
             (b"\xce\xfa", 0),
             (b"\xca\xfe", 0),
+            (b"\x7fELF", 0),
             (b"\x1f\x8b", 0),
             (b"mozLz4", 0),
             (b"\x04\x22", 0),
@@ -764,6 +774,15 @@ mod tests {
         fat[..8].copy_from_slice(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 1]);
         fat[8..28].copy_from_slice(&[1, 0, 0, 7, 0, 0, 0, 3, 0, 0, 0x10, 0, 0, 0, 0, 40, 0, 0, 0, 12]);
         fat.extend_from_slice(&macho);
+        // a 64-bit ELF header of no program or section headers, and a 32-bit one of that
+        let mut elf = vec![0u8; 64];
+        elf[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        elf[16] = 3; // ET_DYN
+        elf[18] = 62;
+        elf[20] = 1;
+        elf[52] = 64;
+        let mut elf32 = elf.clone();
+        elf32[4] = 1;
         let mut id3_flac = b"ID3\x04\0\0\0\0\0\x02xx".to_vec();
         id3_flac.extend_from_slice(b"fLaC");
         let cases: &[(&[u8], Option<Format>)] = &[
@@ -789,6 +808,9 @@ mod tests {
             (&macho, Some(Format::MachO)),
             (&macho[..36], None),
             (&fat, Some(Format::MachO)),
+            (&elf, Some(Format::Elf)),
+            (&elf[..63], None),
+            (&elf32, None), // its header's size that of a 64-bit one
             // a Java class file
             (b"\xca\xfe\xba\xbe\0\0\0\x34\0\x1d", None),
             (b"\x1f\x8b\x08\0", Some(Format::Gzip)),

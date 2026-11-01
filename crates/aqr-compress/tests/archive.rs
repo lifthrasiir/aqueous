@@ -841,6 +841,51 @@ fn arm64_versions_remapped() {
     assert!(both < alone + alone / 10, "{both} of {alone} alone");
 }
 
+/// A 64-bit ELF shared object of ARM64 `code`: its header, the code at 0x1000 (of that
+/// address), then `.shstrtab` and the section headers.
+fn elf_arm64(code: &[u8]) -> Vec<u8> {
+    let names = b"\0.text\0.shstrtab\0";
+    let strtab = 0x1000 + code.len();
+    let shoff = (strtab + names.len()).next_multiple_of(8);
+    let mut d = vec![0u8; 0x1000];
+    d[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+    d[16] = 3; // ET_DYN
+    d[18] = 183;
+    d[20] = 1;
+    d[40..48].copy_from_slice(&(shoff as u64).to_le_bytes());
+    d[52] = 64;
+    d[58] = 64;
+    d[60] = 3;
+    d[62] = 2;
+    d.extend_from_slice(code);
+    d.extend_from_slice(names);
+    d.resize(shoff + 64, 0);
+    for (name, kind, flags, off, size) in [(1u32, 1u32, 6u64, 0x1000, code.len()), (7, 3, 0, strtab, names.len())] {
+        let p = d.len();
+        d.resize(p + 64, 0);
+        d[p..p + 4].copy_from_slice(&name.to_le_bytes());
+        d[p + 4..p + 8].copy_from_slice(&kind.to_le_bytes());
+        d[p + 8..p + 16].copy_from_slice(&flags.to_le_bytes());
+        d[p + 16..p + 24].copy_from_slice(&(if flags != 0 { off as u64 } else { 0 }).to_le_bytes());
+        d[p + 24..p + 32].copy_from_slice(&(off as u64).to_le_bytes());
+        d[p + 32..p + 40].copy_from_slice(&(size as u64).to_le_bytes());
+    }
+    d
+}
+
+/// The same of ELF images.
+#[test]
+fn elf_versions_remapped() {
+    let (a, b) = (elf_arm64(&arm64_functions(26_000, 0)), elf_arm64(&arm64_functions(26_000, 37)));
+    let opt = Options { block: 2 << 20, ..Options::default() };
+    let (both, r) = archived(&[("a", a), ("b", b)], &opt);
+    let names = |k: usize| -> Vec<&str> { r.files[k].modules.iter().map(|m| m.name).collect() };
+    let mut all = [names(0), names(1)];
+    all.sort();
+    assert_eq!(all, [["exe-recons/arm64"], ["exe-recons/arm64-remap"]], "{:?}", r.files);
+    assert!(!both.is_empty());
+}
+
 /// The same of x86-64 code (`exe-recons/x86-remap`).
 #[test]
 fn x86_versions_remapped() {

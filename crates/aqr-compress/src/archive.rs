@@ -6,7 +6,7 @@
 //! those of pure formats beforehand, as contents are; then each file in a context of its own).
 //!
 //! The files are taken in batches of about [`Options::batch`] bytes, in their order (by
-//! extension, then by name; PE files by likeness, from where the first is, [`lay_alike`]):
+//! extension, then by name; PE and ELF files by likeness, from where the first is, [`lay_alike`]):
 //! each batch read ([`Source`]), made, laid out, checked and written in their order, a batch
 //! made while the one before it still is ([`AHEAD`]), so that what is held at once is about
 //! two batches', whatever the files' (but for a batch larger than that, made alone). Files of
@@ -203,8 +203,8 @@ fn compress_tree_noting<S: Source + ?Sized>(
     order.sort_by(|&a, &b| sort_key(src.name(a)).cmp(&sort_key(src.name(b))).then(a.cmp(&b)));
     // the contents that may hold each other together, in the place of the first, a batch never
     // cutting them apart
-    let (group, entries, pe) = together(src, opt, &notes)?;
-    lay_alike(&mut order, &pe, &group, src, opt, &notes)?;
+    let (group, entries, exes) = together(src, opt, &notes)?;
+    lay_alike(&mut order, &exes, &group, src, opt, &notes)?;
     let mut members: HashMap<usize, Vec<usize>> = HashMap::new();
     order.iter().for_each(|&c| members.entry(group[c]).or_default().push(c));
     let mut batches: Vec<Vec<usize>> = vec![Vec::new()];
@@ -608,7 +608,7 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// Of the contents of at least [`TOGETHER_MIN`] bytes, which are read at their start (and the
 /// archives at their end, the contents of the sizes of entries whole); together, no more than
 /// [`TOGETHER_MAX`] bytes. Returns them, and the contents found
-/// as entries or members of others, and the PE files.
+/// as entries or members of others, and the PE and ELF files.
 fn together<S: Source + ?Sized>(
     src: &S,
     opt: &Options,
@@ -660,7 +660,7 @@ fn together<S: Source + ?Sized>(
         let bundle = format.is_some_and(detect::Format::is_bundle);
         notes.send(Note::Looked);
         let (hash, chunks) = (xxhash_rust::xxh3::xxh3_64(&head), probe::chunks(&head));
-        Ok((hash, chunks, held, bundle, format == Some(detect::Format::Pe)))
+        Ok((hash, chunks, held, bundle, matches!(format, Some(detect::Format::Pe | detect::Format::Elf))))
     });
     let mut parent: Vec<usize> = (0..n).collect();
     let mut bytes: Vec<u64> = (0..n).map(|c| src.size(c)).collect();
@@ -687,11 +687,11 @@ fn together<S: Source + ?Sized>(
     let mut same: HashMap<usize, (u64, u64)> = HashMap::new();
     let mut sizes: HashMap<u64, Vec<usize>> = HashMap::new();
     let mut by_entry: HashMap<(u32, u64), Vec<usize>> = HashMap::new();
-    let mut pe = Vec::new();
+    let mut exes = Vec::new();
     for (&c, l) in large.iter().zip(looked) {
-        let (head, chunks, mut entries, bundle, is_pe) = l?;
-        if is_pe {
-            pe.push(c);
+        let (head, chunks, mut entries, bundle, is_exe) = l?;
+        if is_exe {
+            exes.push(c);
         }
         // (one past what a batch may hold is not put with others)
         if bundle && src.size(c) <= TOGETHER_MAX {
@@ -769,15 +769,15 @@ fn together<S: Source + ?Sized>(
         archives.iter().chain(alike).for_each(|&c| join(archives[0], c));
         entries.extend(alike);
     }
-    Ok(((0..n).map(|c| root(&mut parent, c)).collect(), entries, pe))
+    Ok(((0..n).map(|c| root(&mut parent, c)).collect(), entries, exes))
 }
 
 /// Contents `cs` alike laid next to each other in `order`, each chain of them
 /// ([`probe::alike_chains`]) where its first is, the rest where they are; but those put
 /// together with others (`group`, [`together`]): PE files, of which those of a program in
 /// several versions, apart by their names, compress far better within a block of each other
-/// (in 10gb, 436.7 → 395.6 MB in blocks of 16 MiB at zstd level 9, of 371.3 MB as one). Of
-/// other files than PE files, those alike are mostly next to each other by their names
+/// (in 10gb, 436.7 → 395.6 MB in blocks of 16 MiB at zstd level 9, of 371.3 MB as one), and
+/// ELF files alike. Of other files, those alike are mostly next to each other by their names
 /// already.
 fn lay_alike<S: Source + ?Sized>(
     order: &mut [usize],

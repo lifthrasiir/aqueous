@@ -2,8 +2,8 @@
 //! the recompressor by the magic bytes of a file, and [`recompress`] runs it on each file found,
 //! giving a [`Formula`] rather than bytes.
 //!
-//! - PE images, and Mach-O images (thin or universal): aqr-exe's x86 disfilter or ARM64
-//!   filter applied to each executable section, over its streams; the rest of the file is
+//! - PE images, Mach-O images (thin or universal) and ELF images: aqr-exe's x86 disfilter or
+//!   ARM64 filter applied to each executable section, over its streams; the rest of the file is
 //!   sliced in between, a content stream (below).
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
 //!   record).
@@ -35,9 +35,9 @@
 //!   their values stored by key path, or a delimited table (CSV, TSV, USV and the like) by
 //!   aqr-xsv, its fields stored column by column, where either takes it; else aqr-wrt, its
 //!   words and markup replaced by codes of a dictionary of its own.
-//! - Data in which a scan finds no file (an ELF image, the rest of an executable, data of no
-//!   format): aqr-infer-recs, its tables of records and chains of entries transposed by their
-//!   fields, where a quick estimate tells they may save 5% at least and they do.
+//! - Data in which a scan finds no file (the rest of an executable, data of no format):
+//!   aqr-infer-recs, its tables of records and chains of entries transposed by their fields,
+//!   where a quick estimate tells they may save 5% at least and they do.
 //! - QuickTime and MXF files of ProRes frames: aqr-prores, the frames' coefficients under a
 //!   context model with the frame before, in chunks of about 32 MiB.
 //! - Ogg files of Vorbis streams: aqr-ogg, rebuilding the pages from the streams' packets with
@@ -366,7 +366,8 @@ pub(crate) struct Cx {
     later: RefCell<Vec<(usize, Node, Nest)>>,
     /// What the files archived together hold ([`Held`]), for an archive of several.
     held: Option<Arc<Held>>,
-    /// The remaps of the ARM64 images of the Mach-O files archived together ([`exe::plan`]).
+    /// The remaps of the ARM64 and x86 images of the Mach-O and ELF files archived together
+    /// ([`exe::plan`]).
     remaps: Option<Arc<exe::Remaps>>,
     /// The dictionary that the text archived together is coded with (aqr-wrt), for an archive
     /// of several: made of the files that are text, so that text holding other text codes to
@@ -995,6 +996,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
             catch_unwind(AssertUnwindSafe(|| match format {
                 Format::Pe => exe::pe(d),
                 Format::MachO => exe::macho(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d))),
+                Format::Elf => exe::elf(d, cx.remaps.as_deref().map_or(&[], |r| r.of(d))),
                 Format::Gzip => flate::gzip(d, contents, opt, depth, cx),
                 Format::Zlib => flate::zlib(d, contents, opt, depth, cx),
                 Format::Zip => zip::zip(d, opt, depth, cx),
@@ -1539,9 +1541,8 @@ fn make_later(f: &Formula, opt: &Options, depth: u32, cx: &Cx, children: &mut Co
         .map(|(_, n, _)| std::sync::Mutex::new(by_at.remove(&(data(n).as_ptr() as usize)).unwrap_or_default()))
         .collect();
     cx.ready.borrow_mut().extend(by_at.into_values().flatten());
-    let machos: Vec<&[u8]> =
-        later.iter().map(|(_, n, _)| data(n)).filter(|d| aqr_exe::format::macho::starts(d)).collect();
-    let remaps = (machos.len() > 1).then(|| Arc::new(exe::plan(&machos, opt.threads, opt.block / 2)));
+    let images: Vec<&[u8]> = later.iter().map(|(_, n, _)| data(n)).filter(|d| exe::remappable(d)).collect();
+    let remaps = (images.len() > 1).then(|| Arc::new(exe::plan(&images, opt.threads, opt.block / 2)));
     let apart = Apart { remaps, ..cx.apart() };
     let files = cx.files.as_deref();
     // the costliest first, so that a long one is not left to the end, alone
@@ -1579,7 +1580,7 @@ fn cost(d: &[u8]) -> u64 {
         Some(Format::Xz) => 750,
         Some(Format::Gzip) => 370,
         Some(Format::Zip) => 230,
-        Some(Format::Pe) => 160,
+        Some(Format::Pe | Format::Elf) => 160,
         Some(Format::Ar) => 120,
         _ => 50,
     };

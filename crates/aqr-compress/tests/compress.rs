@@ -605,6 +605,96 @@ fn macho_universal() {
     assert_eq!(formats(&roundtrip(&ppc, &Options { file: Nest::Exact, ..all() })), [X86.name]);
 }
 
+/// An ELF executable of `machine`, 64-bit or not (`wide`), at 0x400000: `.init` (16 bytes of
+/// `fill`), `.text` of `code` and `.rodata` of text in one segment, then `.shstrtab` and the
+/// section headers; and where its code (`.init` and `.text`, joined) is.
+fn elf(wide: bool, machine: u16, fill: u8, code: &[u8]) -> (Vec<u8>, std::ops::Range<usize>) {
+    let (eh, ph, sh) = if wide { (64, 56, 64) } else { (52, 32, 40) };
+    let init = eh + ph;
+    let text_at = (init + 16usize).next_multiple_of(16);
+    let rodata = text(2000);
+    let names = b"\0.init\0.text\0.rodata\0.shstrtab\0";
+    let strtab = text_at + code.len() + rodata.len();
+    let shoff = (strtab + names.len()).next_multiple_of(8);
+    let mut d = vec![0u8; init];
+    let word = |d: &mut Vec<u8>, p: usize, v: u64| {
+        if wide {
+            d[p..p + 8].copy_from_slice(&v.to_le_bytes())
+        } else {
+            d[p..p + 4].copy_from_slice(&(v as u32).to_le_bytes())
+        }
+    };
+    let half = |d: &mut Vec<u8>, p: usize, v: u16| d[p..p + 2].copy_from_slice(&v.to_le_bytes());
+    let w = if wide { 8 } else { 4 };
+    d[..7].copy_from_slice(&[0x7f, b'E', b'L', b'F', 1 + wide as u8, 1, 1]);
+    half(&mut d, 16, 2); // ET_EXEC
+    half(&mut d, 18, machine);
+    d[20] = 1;
+    word(&mut d, 24 + w, eh as u64);
+    word(&mut d, 24 + 2 * w, shoff as u64);
+    let h = 24 + 3 * w + 4;
+    for (k, v) in [eh, ph, 1, sh, 5, 4].into_iter().enumerate() {
+        half(&mut d, h + 2 * k, v as u16);
+    }
+    // PT_LOAD, R+X, of the code and .rodata
+    d[eh] = 1;
+    let (flags, off, vaddr, filesz) = if wide { (4, 8, 16, 32) } else { (24, 4, 8, 16) };
+    d[eh + flags] = 5;
+    word(&mut d, eh + off, init as u64);
+    word(&mut d, eh + vaddr, 0x40_0000 + init as u64);
+    word(&mut d, eh + filesz, (strtab - init) as u64);
+    word(&mut d, eh + filesz + w, (strtab - init) as u64);
+    d.resize(text_at, fill);
+    d.extend_from_slice(code);
+    d.extend_from_slice(&rodata);
+    d.extend_from_slice(names);
+    d.resize(shoff + sh, 0);
+    let sects = [
+        (1, 1, 6, init, 16),
+        (7, 1, 6, text_at, code.len()),
+        (13, 1, 2, text_at + code.len(), 2000),
+        (21, 3, 0, strtab, names.len()),
+    ];
+    for (name, kind, flags, off, size) in sects {
+        let p = d.len();
+        d.resize(p + sh, 0);
+        d[p..p + 4].copy_from_slice(&(name as u32).to_le_bytes());
+        d[p + 4..p + 8].copy_from_slice(&(kind as u32).to_le_bytes());
+        word(&mut d, p + 8, flags);
+        word(&mut d, p + 8 + w, if flags != 0 { 0x40_0000 + off as u64 } else { 0 });
+        word(&mut d, p + 8 + 2 * w, off as u64);
+        word(&mut d, p + 8 + 3 * w, size as u64);
+    }
+    (d, init..text_at + code.len())
+}
+
+/// The code of an ELF image (`.init` and `.text` as one), filtered by its machine; the rest of
+/// the file around it. Found in other data too.
+#[test]
+fn elf_code() {
+    for (wide, machine, fill, code, module) in [
+        (true, 62, 0x90, x86_64_code(), X86.name),
+        (true, 183, 0, arm64_code(), ARM64.name),
+        (false, 3, 0x90, x86_64_code(), X86.name),
+    ] {
+        let (d, at) = elf(wide, machine, fill, &code);
+        let f = roundtrip(&d, &Options { file: Nest::Exact, ..all() });
+        assert_eq!(modules(&f), [module], "{machine}");
+        let Node::Concat(parts) = &f.root else { panic!("{f}") };
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], Node::slice(0, 0, at.start as u64));
+        assert_eq!(parts[1].len(), at.len() as u64);
+        assert_eq!(f.streams[0].class, "elf");
+        let mut wrapped = text(3000);
+        wrapped.extend_from_slice(&d);
+        wrapped.extend_from_slice(&text(3000));
+        assert_eq!(modules(&roundtrip(&wrapped, &all())), [module], "{machine}");
+    }
+    // RISC-V: not filtered
+    let (d, _) = elf(true, 243, 0, &arm64_code());
+    assert!(modules(&roundtrip(&d, &Options { file: Nest::Exact, ..all() })).is_empty());
+}
+
 /// An ARM64 image is filtered as ARM64 code, and one of another machine (ARM) not at all.
 #[test]
 fn pe_machines() {

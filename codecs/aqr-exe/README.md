@@ -1,7 +1,8 @@
 # aqr-exe
 
-Machine code recompression, of the executable sections of PE images and Mach-O images (thin or
-in a universal file), and of the metadata and IL of .NET images, each rebuilt bit for bit:
+Machine code recompression, of the executable sections of PE images, Mach-O images (thin or
+in a universal file) and ELF images, and of the metadata and IL of .NET images, each rebuilt
+bit for bit:
 
 - x86 and x86-64: a disfilter splits the code into 13 streams by instruction field, with
   relative targets made absolute and the padding between functions coded.
@@ -56,6 +57,19 @@ their own (16 KiB at least together): the entries by field, their values predict
 debug map's stabs and from each other, their names as references to the strings, and the
 strings each once, front coded, in the order `ld64` writes them.
 
+Of an ELF image (32- or 64-bit, little-endian; executables, shared objects and relocatable
+objects), the code is that of its allocated sections of instructions, those that follow one
+another but for padding taken as one range (`.init`, `.plt`, `.text`, `.fini`), and of an
+image without section headers that of its executable segments. Its tables are left in the
+rest (below).
+
+```rust
+use aqr_exe::format::elf;
+if let Some(image) = elf::image(&file) {                // EM_386, EM_X86_64, EM_AARCH64, …
+    for &(va, off, size) in &image.code { /* as Mach-O's sections */ }
+}
+```
+
 ARM64 and x86 code can be coded against another version of it (`arm64::remap`,
 `x86::remap`, after Courgette; `matching` matches the functions of either). Of ARM64: the
 functions of the two are matched (by the hashes of their words with the `BL` and `ADRP` fields
@@ -66,7 +80,7 @@ other's, with a flag for each and the shifts of the values so written; the modul
 of the other image. Of x86, the same of the targets of `CALL rel32` and of other jumps of 32-bit
 offsets and of RIP-relative addresses, by byte; the decoder notes where the flagged ones are
 as it decodes and adds their shifts once the map is read. aqr-compress remaps the images of the
-Mach-O files archived together alike, of more than half a solid block of code each.
+Mach-O and ELF files archived together alike, of more than half a solid block of code each.
 
 `FORMAT.md` specifies the modules `exe-recons/x86`, with the opcode tables in full,
 `exe-recons/x86-remap`, `exe-recons/arm64`, `exe-recons/arm64-remap`, `exe-recons/cil`,
@@ -180,6 +194,37 @@ Instructions retired: Windows App 115.9 → 117.5 G (+1.3%); Secretive, Deskflow
 fewer (29.9 → 20.9, 73.8 → 71.0, 675.3 → 649.9 G), what was scanned and inferred in the rest
 taken by the module. The module block is 5.8 KB.
 
+### ELF
+
+Measured on 2026-11-01 on an Apple M4 through `aqr -c` (level `mid`, 10 threads), each file
+archived alone, before (the whole file taken by aqr-infer-recs, as data of no format) and
+after: 22 files, 498.7 MB, of Ubuntu 24.04 for ARM64 (LLVM 18, libclang-cpp, rustc 1.96.1's
+`librustc_driver`, Python, Perl, git, vim, bash, gold, glibc, libstdc++, OpenSSL, zlib, `ls`)
+and for x86-64 (glibc, libstdc++, libasan; ripgrep 14.1.1 of musl, Go 1.23.3's `go` and
+`compile`, Node.js 22.11.0).
+
+| | before | after | |
+|---|---|---|---|
+| all | 146.90 MB | 123.16 MB | **−16.2%** |
+| `libLLVM.so.18.1`, ARM64 (119.2 MB) | 31.13 MB | 25.87 MB | −16.9% |
+| `librustc_driver`, ARM64 (111.4 MB) | 35.14 MB | 27.90 MB | −20.6% |
+| `node`, x86-64 (117.4 MB) | 35.40 MB | 31.47 MB | −11.1% |
+| `libclang-cpp.so.18.1`, ARM64 (65.3 MB) | 15.56 MB | 12.15 MB | −21.9% |
+| `go`, `compile`, x86-64 (33.2 MB) | 11.26 MB | 9.86 MB | −12.5% |
+| `rg`, x86-64 (6.6 MB) | 2.06 MB | 1.76 MB | −14.2% |
+| glibc, ARM64 and x86-64 (3.8 MB) | 1.70 MB | 1.49 MB | −12.6% |
+
+`libz.so.1` (133 KB) archives as before and `ls` (199 KB) 2.1% smaller, `python3.12` 5.3%;
+the other 19 files 10.6–21.9%. Instructions retired: 169.5 → 325.3 G (+92%,
+the code's streams coded densely, as of PE), peak RSS 735 → 990 MB (`libLLVM.so.18.1`, 8.3×
+its size). Two versions of `librustc_driver` (1.96.1 and 1.99.1, 215.6 MB) together: 72.42
+→ 58.16 MB (−19.7%); their code is too little alike (0.06) to be remapped.
+
+Taking `.eh_frame_hdr`'s table and the relocations (`.rela.dyn`) by `recs-fields` was tried
+and left out: the relocations (as deltas, or the offsets alone as deltas) archive larger than
+in the rest, and the table's effect is that of cutting the rest elsewhere (+2.2% to −2.8% a
+file, not by the table's size).
+
 ### Code against another version
 
 Measured on 2026-10-30 on an Apple M4. With `aqr-exe-bench-remap`, B's `CODE` stream
@@ -236,7 +281,13 @@ archives of an older one run it as WebAssembly.
 
 ## Limitations
 
-- PE and Mach-O only: no ELF.
+- ELF: only little-endian images. Their tables (relocations, symbols, `.eh_frame` and its
+  header's table, which follows from it, `.gnu.hash`) and debug sections are left in the rest.
+  DWARF (`.debug_*`, and Mach-O's dSYM bundles) belongs to a recompressor of its own, as PDB
+  files would for PE: its records are coded by the abbreviations of each unit, the line
+  programs and the location lists have structures of their own, and it is in Mach-O, ELF and
+  their split files (`.dwo`, `.dwp`) alike. Compressed sections (`SHF_COMPRESSED`) are left
+  to the scan of the rest, which finds their zlib streams.
 - x86, x86-64 and ARM64 only: images of other machines (32-bit ARM, PowerPC) are kept as
   they are. ARM64 data in code sections (literal pools) is taken as instructions.
 - Code against another version: only of Mach-O images, not PE; of files in one batch (two
