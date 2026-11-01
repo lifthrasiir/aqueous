@@ -198,6 +198,7 @@ dependencies = [
  "aqr-png",
  "aqr-ppmd",
  "aqr-psd",
+ "aqr-rar",
  "aqr-raw",
  "aqr-snappy",
  "aqr-sqlite",

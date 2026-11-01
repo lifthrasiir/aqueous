@@ -41,6 +41,7 @@ pub fn extent(f: Format, d: &[u8]) -> Option<usize> {
         Format::Alz => aqr_alz::formula::extent(d),
         Format::Egg => aqr_egg::formula::extent(d),
         Format::Lha => aqr_lha::formula::extent(d),
+        Format::Rar => aqr_rar::formula::extent(d),
         Format::GitPack => aqr_git::pack::extent(d),
         Format::GnuGettext => aqr_gnu_gettext::formula::extent(d),
         Format::Wasm => aqr_wasm::formula::extent(d),

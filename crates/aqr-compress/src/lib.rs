@@ -963,6 +963,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Alz => alz(d, opt, depth, cx),
                 Format::Egg => egg(d, opt, depth, cx),
                 Format::Lha => lha(d, opt, cx),
+                Format::Rar => rar(d, opt, cx),
                 Format::Aqr => aqueous::archive(d),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
@@ -1870,6 +1871,17 @@ fn lha(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
     Some(e.formula)
 }
 
+/// aqr-rar's formula of a RAR archive, the contents of its files a content of the application
+/// (or of the formula, those stored), recompressed in turn, each by its kind by its name
+/// ([`kind_by_name`]). Its streams decode within what is left of the budget
+/// ([`Options::expansion`]).
+fn rar(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let o = aqr_rar::formula::Options { threads: opt.threads, limit: cx.inflate_left(), kind: kind_by_name };
+    let e = aqr_rar::formula::encode_with(d, &o)?;
+    cx.inflate(e.inflated);
+    Some(e.formula)
+}
+
 /// aqr-7z's formula, the contents of the files a content of the applications (or of the formula,
 /// those of stored folders), recompressed in turn, each by its kind by its name
 /// ([`kind_by_name`]).
@@ -2223,6 +2235,24 @@ mod tests {
             assert!(f.eval(&Native::default()).unwrap() == d, "{name}");
             let x = [&b"some data before "[..], &d].concat();
             assert_eq!(detect::starts(&x[17..]), None, "{name}");
+        }
+    }
+
+    /// A RAR archive (RAR5 or RAR 3.x) is taken apart, its streams by aqr-rar's modules, its stored
+    /// files their contents; found in other data too (after a self-extracting program).
+    #[test]
+    fn rar_taken_apart() {
+        let dir = format!("{}/../../codecs/aqr-rar/tests/data", env!("CARGO_MANIFEST_DIR"));
+        for name in ["r5_solid", "r4_solid", "r4_ppmd", "r5_stored"] {
+            let d = std::fs::read(format!("{dir}/{name}.rar")).unwrap();
+            assert_eq!(detect(&d), Some(Format::Rar), "{name}");
+            let opt = Options { shared_modules: true, smaller: false, ..Options::default() };
+            let f = recompress(&d, &opt);
+            let module = f.applies().iter().any(|a| a.module == aqr_decompress::RAR5 || a.module == aqr_decompress::RAR3);
+            assert_eq!(module, name != "r5_stored", "{name}");
+            assert!(f.eval(&Native::default()).unwrap() == d, "{name}");
+            let x = [&b"some data before "[..], &d].concat();
+            assert_eq!(detect::starts(&x[17..]), Some(Format::Rar), "{name}");
         }
     }
 

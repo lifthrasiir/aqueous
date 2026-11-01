@@ -79,6 +79,9 @@ pub enum Format {
     /// LHA archive (aqr-lha, which splits its streams of `-lh4-` to `-lh7-`), known by its first
     /// header (no signature at its start): at the start of data only.
     Lha,
+    /// RAR archive, RAR5 or RAR 1.5–4.x (aqr-rar, which splits its streams), known by its
+    /// signature and headers: found in other data too (self-extracting programs).
+    Rar,
     /// Aqueous archive, unencrypted and standalone: its blocks as they are, those of modules
     /// and resources shared with the archive holding it and the data of uncompressed blocks
     /// contents (`aqueous`). At the start of data only.
@@ -131,7 +134,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 51] = [
+    pub const ALL: [Format; 52] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -165,6 +168,7 @@ impl Format {
         Format::Alz,
         Format::Egg,
         Format::Lha,
+        Format::Rar,
         Format::Aqr,
         Format::GitPack,
         Format::Fasta,
@@ -220,6 +224,7 @@ impl Format {
             Format::Alz => "alz",
             Format::Egg => "egg",
             Format::Lha => "lha",
+            Format::Rar => "rar",
             Format::Aqr => "aqr",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
@@ -307,8 +312,9 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"alz" => format(Format::Alz),
         b"egg" => format(Format::Egg),
         b"lzh" | b"lha" => format(Format::Lha),
+        b"rar" => format(Format::Rar),
         b"aqr" => format(Format::Aqr),
-        b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif"
+        b"zst" | b"br" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif"
         | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
         b"txt" | b"log" | b"csv" | b"tsv" | b"json" | b"xml" | b"html" | b"htm" | b"css" | b"js" | b"svg" | b"md" => {
@@ -399,6 +405,8 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Alz)
     } else if aqr_egg::formula::starts(d) {
         Some(Format::Egg)
+    } else if aqr_rar::formula::starts(d) {
+        Some(Format::Rar)
     } else if start && aqr_git::pack::starts(d) {
         Some(Format::GitPack)
     } else if at(0, &[0x1f, 0x8b, 8]) {
@@ -456,7 +464,7 @@ const fn pair(a: u8, b: u8) -> bool {
         0x89 => b == b'P' || b == b'L' || b == b'H',
         b'%' => b == b'P',
         b'f' => b == b'L',
-        b'R' => b == b'I',
+        b'R' => b == b'I' || b == b'a',
         b'F' => b == b'O' || b == b'S',
         b'I' => b == b'D',
         b'D' => b == b'D',
@@ -529,7 +537,7 @@ pub(crate) fn starts(d: &[u8]) -> Option<Format> {
         b'%' => d.starts_with(b"%PDF-"),
         b'8' => d.starts_with(b"8BPS") || zlib_header(d, false),
         b'f' => d.starts_with(b"fLaC"),
-        b'R' => d.starts_with(b"RIFF"),
+        b'R' => d.starts_with(b"RIFF") || aqr_rar::formula::starts(d),
         b'F' => d.starts_with(b"FORM"),
         b'I' => d.starts_with(b"ID3"),
         b'D' => aqr_tex::dds::starts(d),
@@ -623,6 +631,7 @@ mod tests {
             (b"8BPS", 0),
             (b"fLaC", 0),
             (b"RIFF", 0),
+            (b"Rar!", 0),
             (b"FORM", 0),
             (b"ID3\x04", 0),
             (b"\xff\xd8", 0),
