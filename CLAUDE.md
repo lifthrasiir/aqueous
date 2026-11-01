@@ -27,6 +27,8 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
     tree for `aqr -d`, which extracts them as Aqueous archives (`crates/aqr/src/extract.rs`).
   - `aqr-common` — shared parts: varints, rANS, bit I/O, heap accounting, the task pool.
     `aqr-num` — numbers printed as text.
+  - `aqr-version` — the binaries' version for their build scripts: the tag's (`AQR_VERSION`, set
+    by the release workflow) or `git describe`'s, as `env!("AQR_VERSION")` and Windows' `VERSIONINFO`.
   - `aqr-api`, `aqr-ld` — the Rust interface of modules and the Wasm linker wrapper.
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).

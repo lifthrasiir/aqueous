@@ -19,6 +19,7 @@ windows-sys = { version = "0.61", features = [
 
 [build-dependencies]
 aqr-exe = { path = "../../codecs/aqr-exe" }
+aqr-version = { path = "../aqr-version" }
 embed-resource = "3"
 zstd = "0.13"
 

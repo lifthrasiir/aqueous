@@ -65,6 +65,8 @@ dependencies = [
  "aqr-decompress",
  "aqr-formula",
  "aqr-unpack",
+ "aqr-version",
+ "embed-resource",
  "libc",
  "memmap2",
  "serde_json",
@@ -801,6 +803,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-version"
+version = "0.1.0"
+
+[[package]]
 name = "aqr-vorbis"
 version = "0.1.0"
 dependencies = [
@@ -832,6 +838,7 @@ dependencies = [
 name = "aqr-win"
 version = "0.1.0"
 dependencies = [
+ "aqr-version",
  "embed-resource",
  "serde_json",
  "windows-sys",
@@ -842,6 +849,7 @@ name = "aqr-win-install"
 version = "0.1.0"
 dependencies = [
  "aqr-exe",
+ "aqr-version",
  "embed-resource",
  "windows-sys",
  "zstd",

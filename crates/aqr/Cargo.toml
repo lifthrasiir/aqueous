@@ -20,6 +20,10 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Console"] }
 
+[build-dependencies]
+aqr-version = { path = "../aqr-version" }
+embed-resource = "3"
+
 [[bin]]
 name = "aqr"
 path = "src/main.rs"

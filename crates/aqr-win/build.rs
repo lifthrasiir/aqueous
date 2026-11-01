@@ -1,10 +1,13 @@
 //! Embeds `aqr-win.manifest` in the binary (MSVC's linker): common controls 6 (the task
 //! dialogs) and per-monitor DPI awareness; and `aqr-win.rc`, the icon (`droplet.ico`, from
-//! `droplet.svg` at the root).
+//! `droplet.svg` at the root) and the version (aqr-version, also `env!("AQR_VERSION")`).
 
 fn main() {
     println!("cargo:rerun-if-changed=aqr-win.manifest");
     println!("cargo:rerun-if-changed=droplet.ico");
+    println!("cargo:rerun-if-changed=aqr-win.rc");
+    let version = aqr_version::emit();
+    aqr_version::write_rc(&version, "Aqueous in Explorer", "aqr-win.exe");
     // (nothing done for a target other than Windows)
     embed_resource::compile("aqr-win.rc", embed_resource::NONE).manifest_optional().unwrap();
     let windows = std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|o| o == "windows");

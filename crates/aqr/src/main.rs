@@ -166,6 +166,7 @@ Decompression:
 General:
   -T THREADS            threads to use (default 0: as many as the machine has)
   -h, --help            show this help
+  -V, --version         show the version
 
 SIZE is a number of bytes, or of KiB, MiB or GiB with K, M or G.
 ";
@@ -297,6 +298,10 @@ fn parse() -> Result<Args, String> {
             "--" => only_inputs = true,
             "-h" | "--help" => {
                 print!("{HELP}");
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                println!("aqr {}", env!("AQR_VERSION"));
                 std::process::exit(0);
             }
             "-c" | "--compress" => a.decompress = false,

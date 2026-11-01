@@ -34,7 +34,10 @@ else
     [ "$build" = 1 ] && cargo build --profile dist -p aqr -p aqr-mac
     bin=$dist
 fi
-version=$(sed -n 's/^version = "\(.*\)"$/\1/p' "$here/Cargo.toml" | head -n 1)
+# (aqr's version, crates/aqr-version; Info.plist takes only its numbers: 0.0.20261031 of
+# 0.0.20261031-5-gf646b70)
+version=$("$bin/aqr" --version | sed -n 's/^aqr \([0-9][0-9.]*\).*$/\1/p')
+[ -n "$version" ] || { echo "$0: aqr --version gave no version" >&2; exit 1; }
 app=$dist/Aqueous.app
 rm -rf "${app:?}"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"

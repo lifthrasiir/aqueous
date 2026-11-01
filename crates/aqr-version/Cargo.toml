@@ -1,0 +1,6 @@
+[package]
+name = "aqr-version"
+version = "0.1.0"
+edition = "2024"
+description = "The version of the binaries (a tag's, or git describe's) for their build scripts: AQR_VERSION and Windows' VERSIONINFO"
+publish = false

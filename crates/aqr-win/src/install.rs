@@ -46,7 +46,7 @@ pub fn install() -> Result<(), String> {
     let uninstall = format!("\"{}\" --uninstall", exe.display());
     let set = |name: &str, value: Value| register::set(UNINSTALL, Some(name), value);
     set("DisplayName", Value::Sz("Aqueous"))?;
-    set("DisplayVersion", Value::Sz(env!("CARGO_PKG_VERSION")))?;
+    set("DisplayVersion", Value::Sz(env!("AQR_VERSION")))?;
     set("DisplayIcon", Value::Sz(&format!("{},0", exe.display())))?;
     set("InstallLocation", Value::Sz(&dir.display().to_string()))?;
     set("UninstallString", Value::Sz(&uninstall))?;

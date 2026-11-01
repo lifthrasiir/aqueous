@@ -9,6 +9,10 @@ name: release
 # the caches of main but not of another tag's. The scheduled runs, twice a week on main, keep
 # them there (and catch a build broken, say by nightly, before a tag does).
 #
+# The binaries carry the tag as their version (AQR_VERSION, crates/aqr-version: `aqr --version`,
+# Windows' VERSIONINFO, the app's Info.plist); a run not for a tag, `git describe`'s of the
+# shallow clone (0.0.0-gHASH).
+#
 # Assets, STEM being the tag without `v0.0.` (v0.0.20261031 -> 20261031):
 #   aqr-STEM.exe                  Windows 10 on, x86_64
 #   aqr-STEM-win7.exe             Windows 7 and 8 (cargo +nightly win7)
@@ -46,6 +50,7 @@ jobs:
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
           echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
       # (the toolchain of rust-toolchain.toml)
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
@@ -78,6 +83,7 @@ jobs:
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
           echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
       - run: rustup toolchain install nightly --profile minimal --component rust-src
       - uses: Swatinem/rust-cache@v2
         with:
@@ -103,6 +109,7 @@ jobs:
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
           echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
       - run: rustup toolchain install && rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
         with:
@@ -135,6 +142,7 @@ jobs:
           s=${GITHUB_REF_NAME#v0.0.}
           [ "$GITHUB_REF_TYPE" = tag ] || s=$(git rev-parse --short HEAD)
           echo "stem=${s#v}" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then echo "AQR_VERSION=$GITHUB_REF_NAME" >> "$GITHUB_ENV"; fi
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:

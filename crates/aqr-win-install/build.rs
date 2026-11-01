@@ -2,6 +2,7 @@
 //! names) into the payload (`src/payload.rs`), checked by unpacking it; and embeds the manifest and
 //! the icon. Where the two are not there, the payload is empty and the installer says so: building
 //! them is up to whoever builds the installer (`cargo build --profile dist -p aqr -p aqr-win`).
+//! The version (aqr-version) goes in the resources and is `env!("AQR_VERSION")`.
 
 #[path = "src/payload.rs"]
 #[allow(dead_code)]
@@ -25,6 +26,8 @@ fn main() {
     println!("cargo:rerun-if-changed=../aqr-win/droplet.ico");
     println!("cargo:rerun-if-changed=src/payload.rs");
     println!("cargo:rerun-if-env-changed=AQR_WIN_INSTALL_FROM");
+    let version = aqr_version::emit();
+    aqr_version::write_rc(&version, "Aqueous installer", "aqr-win-install.exe");
     embed_resource::compile("aqr-win-install.rc", embed_resource::NONE).manifest_optional().unwrap();
     let windows = std::env::var("CARGO_CFG_TARGET_OS").is_ok_and(|o| o == "windows");
     let msvc = std::env::var("CARGO_CFG_TARGET_ENV").is_ok_and(|e| e == "msvc");

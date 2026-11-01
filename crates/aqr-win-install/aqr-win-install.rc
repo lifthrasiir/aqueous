@@ -1,2 +1,5 @@
 // The program's icon (the first, so Explorer's) and that of its windows (main.rs).
 1 ICON "../aqr-win/droplet.ico"
+
+// The version (written by build.rs into OUT_DIR, which embed-resource gives rc.exe to look in).
+#include "version.rc"

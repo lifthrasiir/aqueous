@@ -47,7 +47,7 @@ fn main() -> std::process::ExitCode {
              Apps uninstalls it.",
             dir.display()
         );
-        if !ui::confirm("Install Aqueous?", &content) {
+        if !ui::confirm(&format!("Install Aqueous {}?", env!("AQR_VERSION")), &content) {
             return ExitCode::SUCCESS;
         }
     }
