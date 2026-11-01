@@ -20,16 +20,17 @@
 //! takes); streams of [`Kind::Compressed`] are stored as they are, unless the probe level
 //! compresses all of them.
 //!
-//! [`decode`] evaluates such archives, and any other without a metadata block or an
-//! encryption.
+//! [`decode`] evaluates such archives, and any other without a metadata block. An encrypted
+//! archive is sealed and opened by [`envelope`], its payload then opened by [`open_payload`].
 //!
 //! An archive of several files is one segment (`segment`): [`Encoder::encode_segment`] lays
 //! out the formulas of the files over streams they may share, with the metadata block of their
 //! [`Tree`], and [`decode_value`] decodes any archive of a segment at most (without
-//! registered dictionaries, imports or encryption) to its files. The blocks alike of a batch
+//! registered dictionaries or imports) to its files. The blocks alike of a batch
 //! of its leaves may take a dictionary trained for them ([`dict`]).
 
 mod dict;
+pub mod envelope;
 mod segment;
 mod tree;
 
@@ -56,7 +57,12 @@ use crate::{Error, Formula, Kind, Module, Node, Resource, Result, packed};
 
 pub const HEADER_MAGIC: [u8; 6] = [0xf8, 0x04, 0x03, 0x6a, 0xd6, 0xbe];
 pub const FOOTER_MAGIC: [u8; 6] = [0xfd, 0xaa, 0xae, 0xde, 0x85, 0x12];
-const ENCRYPTED_HEADER_MAGIC: [u8; 8] = [0xf9, 0xca, 0xf2, 0xa6, 0xd0, 0x2a, 0x01, 0x00];
+pub const OVERLAY_HEADER_MAGIC: [u8; 6] = [0x69, 0x0d, 0x15, 0xaf, 0xf6, 0xb2];
+/// The type of a size hint block.
+const SIZE_HINT: u64 = 0x04;
+/// A size hint block of a padded LEB128 to be filled in ([`Encoder::with_size_hint`], and
+/// [`envelope::Sealer`] fills it in).
+pub const SIZE_HINT_PLACEHOLDER: [u8; 12] = [0x04, 10, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0];
 // The block types of block-like structures, invalid as blocks.
 const HEADER_TYPE: u64 = 0x278;
 const OVERLAY_HEADER_TYPE: u64 = 0x69;
@@ -328,6 +334,8 @@ pub struct Encoder {
     cctx: RefCell<CCtx<'static>>,
     /// Whether formulas are sized without their resource blocks ([`Encoder::share_resources`]).
     shared: bool,
+    /// Whether archives begin with [`SIZE_HINT_PLACEHOLDER`] ([`Encoder::with_size_hint`]).
+    size_hint: bool,
     /// Whether formulas are sized without their module blocks ([`Encoder::share_modules`]).
     shared_modules: bool,
     /// The resources that formulas are sized without ([`Encoder::hold_resource`]).
@@ -444,6 +452,14 @@ impl Encoder {
         self.trials.borrow_mut().clear();
     }
 
+    /// Archives written ([`Encoder::encode_pieces_to`] and the like) beginning with a size hint
+    /// block to be filled in, [`SIZE_HINT_PLACEHOLDER`] (where `on`), as an encrypted archive's
+    /// payload has to ([`envelope::Sealer`]).
+    pub fn with_size_hint(mut self, on: bool) -> Encoder {
+        self.size_hint = on;
+        self
+    }
+
     /// An encoder compressing each stream on `threads` threads, into the same archive as on one.
     pub fn with_threads(level: Level, threads: usize) -> Encoder {
         Encoder {
@@ -463,6 +479,7 @@ impl Encoder {
             progress: None,
             levels: RefCell::default(),
             trains: true,
+            size_hint: false,
         }
     }
 
@@ -722,6 +739,9 @@ impl Encoder {
 
         out.put(&HEADER_MAGIC);
         let blocks = out.len();
+        if self.size_hint {
+            out.put(&SIZE_HINT_PLACEHOLDER);
+        }
         if let (&Node::Slice { stream, start, len }, []) = (&f.root, &f.shared[..]) {
             let leaf = cut(streams[stream], start as usize, len as usize);
             if checksum.is_some_and(|c| c != checksum_of(&leaf)) {
@@ -2042,6 +2062,8 @@ fn external_with<'a>(
 pub enum Failure {
     /// The archive violates the spec (or a module fails on its inputs).
     Invalid(String),
+    /// The archive is encrypted, and no passphrase given unwraps its file key.
+    Decryption(String),
     /// The archive exceeds what this decoder supports: a limit, or a feature not implemented
     /// yet (a module without a native implementation among them).
     Resource(String),
@@ -2056,6 +2078,7 @@ impl fmt::Display for Failure {
             Failure::Invalid(m) => write!(f, "invalid archive: {m}"),
             Failure::Resource(m) => write!(f, "resource failure: {m}"),
             Failure::Unsupported(m) => write!(f, "unsupported failure: {m}"),
+            Failure::Decryption(m) => write!(f, "decryption failure: {m}"),
         }
     }
 }
@@ -2242,11 +2265,23 @@ pub struct Archive<'c, 'n> {
     items: Vec<Option<usize>>,
 }
 
-/// Archive `c` opened, its modules run by `runner`.
+/// Archive `c` opened, its modules run by `runner`. An encrypted archive is a decryption
+/// failure: its payload decrypted ([`envelope`]) is opened by [`open_payload`].
 pub fn open<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 'n>> {
-    if c.starts_with(&ENCRYPTED_HEADER_MAGIC) {
-        return resource("encrypted archives are not supported yet");
+    if envelope::is_encrypted(c) {
+        return Err(Failure::Decryption("an encrypted archive, and no passphrase".into()));
     }
+    open_as(c, runner, false)
+}
+
+/// The decrypted payload `c` of an encrypted archive opened, as [`open`] does, but for the
+/// constraints of a payload: a size hint block, and no spacer blocks.
+pub fn open_payload<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 'n>> {
+    open_as(c, runner, true)
+}
+
+/// [`open`] of an archive, the payload of an encrypted one where `sealed`.
+fn open_as<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner, sealed: bool) -> Decoded<Archive<'c, 'n>> {
     if !c.starts_with(&HEADER_MAGIC) {
         return invalid("bad header magic");
     }
@@ -2268,7 +2303,7 @@ pub fn open<'c, 'n>(c: &'c [u8], runner: &'n dyn Runner) -> Decoded<Archive<'c, 
     if at != fields.len() || size_hint != (archive_end - HEADER_MAGIC.len()) as u64 {
         return invalid("bad footer");
     }
-    let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0)?;
+    let mut blocks = parse(&c[HEADER_MAGIC.len()..archive_end], size_hint, metadata != 0, sealed)?;
     let meta = match metadata {
         0 => None,
         back => {
@@ -2676,7 +2711,9 @@ enum LeafBlock<'c> {
 }
 
 /// The blocks in `d`; `metadata` tells whether the footer points to a metadata block.
-fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
+/// The blocks `d` of an archive of `size_hint` with a metadata block or not, the payload of an
+/// encrypted archive where `sealed`.
+fn parse(d: &[u8], size_hint: u64, metadata: bool, sealed: bool) -> Decoded<Blocks<'_>> {
     let mut b = Blocks {
         leaves: Vec::new(),
         leaf_at: Vec::new(),
@@ -2721,6 +2758,9 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
         }
         framed.push((start, ty, data));
     }
+    if sealed && framed.first().is_none_or(|b| b.1 != SIZE_HINT) {
+        return invalid("an encrypted archive's payload without a size hint block");
+    }
     if let Some(&(_, ty, _)) = framed.iter().find(|&&(_, ty, _)| critical(ty) && !defined(ty)) {
         return Err(Failure::Unsupported(format!("a block of an undefined critical type {ty:#x}")));
     }
@@ -2731,9 +2771,10 @@ fn parse(d: &[u8], size_hint: u64, metadata: bool) -> Decoded<Blocks<'_>> {
             return resource("several segments are not supported yet");
         }
         match ty {
+            0x00..=0x03 if sealed => return invalid("a spacer block in an encrypted archive's payload"),
             // spacer blocks, of any space: only compressors have to zero it
             0x00..=0x03 => {}
-            0x04 if start == 0 => {
+            SIZE_HINT if start == 0 => {
                 let mut p = 0;
                 if leb(data, &mut p)? != size_hint || p != data.len() {
                     return invalid("bad size hint block");
@@ -4289,7 +4330,7 @@ mod tests {
         assert!([0x69, 0x0d, 0x15, 0xaf, 0xf6, 0xb2].starts_with(&enc(0x69)));
         assert!(FOOTER_MAGIC.starts_with(&enc(0x90_5bcb_957d)));
         assert!([0xfc, 0x0f, 0x6e, 0x7b, 0x4b, 0xac].starts_with(&enc(0x7fc)));
-        assert!(ENCRYPTED_HEADER_MAGIC.starts_with(&enc(0x155_04dc_a579)));
+        assert!(envelope::ENCRYPTED_HEADER_MAGIC.starts_with(&enc(0x155_04dc_a579)));
         for ty in [0x278, 0x69, 0x90_5bcb_957d, 0x7fc, 0x155_04dc_a579] {
             let mut b = enc(ty);
             b.resize(b.len() + (1 << (ty % 4)), 0);

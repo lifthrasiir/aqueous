@@ -62,6 +62,17 @@ pub enum Placed {
     Metadata,
 }
 
+/// The header of an archive with a size hint block to be filled in.
+const HINTED: [u8; 18] = {
+    let mut h = [0; 18];
+    let mut i = 0;
+    while i < 18 {
+        h[i] = if i < 6 { HEADER_MAGIC[i] } else { super::SIZE_HINT_PLACEHOLDER[i - 6] };
+        i += 1;
+    }
+    h
+};
+
 /// The blocks of an archive in order, each what it is and its bytes.
 pub type Layout = Vec<(Placed, usize)>;
 
@@ -69,6 +80,8 @@ pub type Layout = Vec<(Placed, usize)>;
 pub struct SegmentWriter {
     /// Bytes of the archive so far, its header magic among them.
     at: usize,
+    /// Whether the archive has a size hint block ([`SegmentWriter::with_size_hint`]).
+    hinted: bool,
     modules: Vec<Module>,
     module_at: Vec<usize>,
     resources: Vec<Resource>,
@@ -115,8 +128,15 @@ impl Default for SegmentWriter {
 impl SegmentWriter {
     /// A segment of no blocks yet, after the header ([`SegmentWriter::header`]).
     pub fn new() -> SegmentWriter {
+        SegmentWriter::with_size_hint(false)
+    }
+
+    /// [`SegmentWriter::new`], its header followed by a size hint block to be filled in where
+    /// `on` ([`super::SIZE_HINT_PLACEHOLDER`]), as an encrypted archive's payload has to.
+    pub fn with_size_hint(on: bool) -> SegmentWriter {
         SegmentWriter {
-            at: HEADER_MAGIC.len(),
+            at: if on { HINTED.len() } else { HEADER_MAGIC.len() },
+            hinted: on,
             modules: Vec::new(),
             module_at: Vec::new(),
             resources: Vec::new(),
@@ -127,9 +147,15 @@ impl SegmentWriter {
         }
     }
 
-    /// The bytes of the archive before its blocks.
+    /// The bytes of the archive before its blocks (but a size hint block).
     pub fn header() -> &'static [u8] {
         &HEADER_MAGIC
+    }
+
+    /// The bytes of the archive before the blocks of its batches: the header, and the size
+    /// hint block where there is one.
+    pub fn head(&self) -> &'static [u8] {
+        if self.hinted { &HINTED } else { &HEADER_MAGIC }
     }
 
     /// Bytes of the archive so far.
@@ -138,7 +164,7 @@ impl SegmentWriter {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.at == HEADER_MAGIC.len()
+        self.at == self.head().len()
     }
 
     /// The blocks of `leaves` over `f`'s streams and applications of several outputs (its root

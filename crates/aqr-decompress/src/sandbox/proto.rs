@@ -116,7 +116,8 @@ pub fn violation(msg: impl Into<String>) -> io::Error {
 pub fn put_result(w: &mut impl Write, r: &Result<(), Failure>) -> io::Result<()> {
     let (tag, msg) = match r {
         Ok(()) => return put_u8(w, OK),
-        Err(Failure::Invalid(m)) => (INVALID, m),
+        // (no module fails to decrypt)
+        Err(Failure::Invalid(m) | Failure::Decryption(m)) => (INVALID, m),
         Err(Failure::Resource(m)) => (RESOURCE, m),
         Err(Failure::Unsupported(m)) => (UNSUPPORTED, m),
     };
