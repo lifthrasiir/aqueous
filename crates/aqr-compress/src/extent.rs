@@ -100,8 +100,26 @@ fn clamp(d: &[u8], p: u64) -> usize {
 }
 
 /// The headers and the sections' data, with the certificate table where it is after them: the
-/// overlay is left out.
+/// overlay is left out, but for an NSIS installer's data ([`crate::nsis`]), which its stub
+/// reads.
 fn pe(d: &[u8]) -> Option<usize> {
+    let (mut end, dirs) = pe_sections(d)?;
+    if let Some(len) = d.get(clamp(d, end)..).and_then(crate::nsis::data_len) {
+        end += len as u64;
+    }
+    // The certificate table (directory 4), the only one given by file offset.
+    if u32le(d, dirs - 4)? > 4 {
+        let (at, size) = (u32le(d, dirs + 32)?, u32le(d, dirs + 36)?);
+        if at > 0 && size > 0 {
+            end = end.max(at + size);
+        }
+    }
+    Some(clamp(d, end))
+}
+
+/// Where the headers and the sections' data of the PE image at the start of `d` end (the
+/// overlay, if any, starts there; not clamped to `d`), and where its data directories are.
+fn pe_sections(d: &[u8]) -> Option<(u64, usize)> {
     let coff = u32le(d, 0x3c)? as usize + 4;
     let (sections, opt_size) = (u16le(d, coff + 2)? as usize, u16le(d, coff + 16)? as usize);
     let opt = coff + 20;
@@ -118,14 +136,13 @@ fn pe(d: &[u8]) -> Option<usize> {
             end = end.max(at + size);
         }
     }
-    // The certificate table (directory 4), the only one given by file offset.
-    if u32le(d, dirs - 4)? > 4 {
-        let (at, size) = (u32le(d, dirs + 32)?, u32le(d, dirs + 36)?);
-        if at > 0 && size > 0 {
-            end = end.max(at + size);
-        }
-    }
-    Some(clamp(d, end))
+    Some((end, dirs))
+}
+
+/// Where the overlay of the PE image at the start of `d` starts (past the end of `d` where it
+/// has none); `d` need only hold the headers.
+pub(crate) fn pe_overlay(d: &[u8]) -> Option<u64> {
+    pe_sections(d).map(|s| s.0)
 }
 
 /// The chunks up to `IEND`.
@@ -679,6 +696,20 @@ mod tests {
         d[opt + 96 + 32..opt + 96 + 36].copy_from_slice(&0x3c0u32.to_le_bytes());
         d[opt + 96 + 36..opt + 96 + 40].copy_from_slice(&0x40u32.to_le_bytes());
         ends(Format::Pe, &d);
+        // An NSIS installer's data in the overlay: its first header, a header block, a stored
+        // file and its CRC-32.
+        let mut nsis = d[..0x380].to_vec();
+        nsis[opt + 96 + 32..opt + 96 + 40].fill(0);
+        nsis.extend_from_slice(&[0; 4]);
+        nsis.extend_from_slice(b"\xef\xbe\xad\xdeNullsoftInst");
+        nsis.extend_from_slice(&[0; 4]);
+        nsis.extend_from_slice(&(28 + 4 + 6 + 4 + 5 + 4u32).to_le_bytes());
+        nsis.extend_from_slice(b"\x06\0\0\x80header\x05\0\0\0filesCRC!");
+        ends(Format::Pe, &nsis);
+        assert_eq!(
+            crate::nsis::in_pe(&nsis).map(|b| b.into_iter().map(|r| &nsis[r]).collect()),
+            Some(vec![&b"files"[..]])
+        );
     }
 
     #[test]

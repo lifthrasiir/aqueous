@@ -6,7 +6,8 @@
 //! and what the CIL filter keeps as it is, are contents (`Stream::content`): scanned in turn,
 //! e.g. for the images among the resources. Of a PE image, its tables of known layouts outside
 //! the code are taken too: the base relocations by `exe-recons/pe-reloc`, the tables of exports,
-//! imports and runtime functions by `recs-fields`, their numbers as deltas. Of a 64-bit Mach-O
+//! imports and runtime functions by `recs-fields`, their numbers as deltas; of an NSIS
+//! installer, the files its data stores, each a content of its format ([`crate::nsis`]). Of a 64-bit Mach-O
 //! image, the symbol table and its string table by `exe-recons/macho-symtab`. ELF images, of
 //! their code alone.
 //!
@@ -49,6 +50,9 @@ enum Arch {
     },
     /// Output `k` of the outputs [`symbols`] made.
     Output(usize),
+    /// A file of this format, stored in an NSIS installer's data ([`crate::nsis`]): a content
+    /// of its own.
+    Stored(&'static str),
 }
 
 /// Tables shorter than this are left with the rest.
@@ -89,12 +93,21 @@ pub(crate) fn pe(d: &[u8]) -> Option<Formula> {
             .filter(|t| t.len >= MIN_TABLE && !code.iter().any(|c| t.off < c.end && c.start < t.off + t.len))
             .map(|t| (0, t.off, t.len, Arch::Table(t.kind))),
     );
+    // the files stored in an installer's data
+    for b in crate::nsis::in_pe(d).unwrap_or_default().into_iter().filter(|b| b.len() >= crate::nsis::MIN_BLOCK) {
+        if let Some(format) = crate::nsis::format(&d[b.clone()]) {
+            sections.push((0, b.start, b.len(), Arch::Stored(format.name())));
+        }
+    }
     filtered(d, "pe", sections, &[])
 }
 
+/// An image's code: `(virtual address, offset, size)` of each section, within its file.
+type Code = Vec<(u64, usize, usize)>;
+
 /// The images of code of the Mach-O or ELF file `d`, x86 or ARM64: of each, its architecture
-/// (its index in the file within) and its code, `(virtual address, offset, size)` within `d`.
-fn code_images(d: &[u8]) -> Vec<(Arch, Vec<(u64, usize, usize)>)> {
+/// (its index in the file within) and its code.
+fn code_images(d: &[u8]) -> Vec<(Arch, Code)> {
     let arch = |x86: bool, arm64: bool, is64: bool, k: usize| match () {
         _ if x86 => Some(Arch::X86(is64, k)),
         _ if arm64 => Some(Arch::Arm64(k)),
@@ -117,7 +130,7 @@ pub(crate) fn remappable(d: &[u8]) -> bool {
     macho::starts(d) || elf::starts(d)
 }
 
-fn with_arch((a, code): (Arch, Vec<(u64, usize, usize)>)) -> impl Iterator<Item = (u64, usize, usize, Arch)> {
+fn with_arch((a, code): (Arch, Code)) -> impl Iterator<Item = (u64, usize, usize, Arch)> {
     code.into_iter().map(move |(va, off, size)| (va, off, size, a))
 }
 
@@ -287,6 +300,7 @@ fn filtered(
         let section = &d[off..off + size];
         let apply = match arch {
             Arch::Output(k) => outputs[k].take().expect("an output placed twice"),
+            Arch::Stored(format) => f.push_content("nsis", Kind::Format(format), section.to_vec()),
             // (where the CIL filter turns the section down, those within it are filtered on
             // their own)
             Arch::Cil(meta) => {
@@ -372,7 +386,7 @@ fn code_apply(f: &mut Formula, section: &[u8], va: u64, arch: Arch, remaps: &[Op
                 (0..fields).map(|i| Field { off: i * width, width, big: false, how: How::Delta }).collect();
             aqr_infer_recs::formula::apply_fields(f, "pe/table", section, k, &fl)
         }
-        Arch::Cil(_) | Arch::Symbols { .. } | Arch::Output(_) => return None,
+        Arch::Cil(_) | Arch::Symbols { .. } | Arch::Output(_) | Arch::Stored(_) => return None,
     })
 }
 

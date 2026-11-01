@@ -4,7 +4,8 @@
 //!
 //! - PE images, Mach-O images (thin or universal) and ELF images: aqr-exe's x86 disfilter or
 //!   ARM64 filter applied to each executable section, over its streams; the rest of the file is
-//!   sliced in between, a content stream (below).
+//!   sliced in between, a content stream (below). Of an NSIS installer, the files its data
+//!   stores as they are (`nsis`), each a content of its format, as deep as the installer.
 //! - gzip and zlib: the container sliced around aqr-flate on the DEFLATE stream (data and
 //!   record).
 //! - mozlz4 files and LZ4 frames: the container sliced around aqr-lz4 on the data.
@@ -127,6 +128,7 @@ mod git;
 mod hdf5;
 pub mod mapped;
 mod memory;
+mod nsis;
 mod progress;
 mod sets;
 pub mod spill;
@@ -1041,9 +1043,10 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
         }
     }
     let mark = cx.deferred.borrow().len();
-    // (an ar, tar or cpio archive only bundles files: they are as deep as it is)
+    // (an ar, tar or cpio archive only bundles files: they are as deep as it is; and so are
+    // those an NSIS installer stores)
     let deeper;
-    let opt = match format.is_bundle() {
+    let opt = match format.is_bundle() || format == Format::Pe && nsis::in_pe(d).is_some_and(|b| !b.is_empty()) {
         true => {
             deeper = Options { depth: opt.depth.saturating_add(1), ..opt.clone() };
             &deeper

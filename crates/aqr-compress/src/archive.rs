@@ -602,7 +602,8 @@ const TOGETHER_MAX: u64 = 2 << 30;
 /// archive or ISO 9660 or UDF image and the contents of its members (read whole, one at a time,
 /// for their CRC-32; those of at least [`MEMBER_MIN`] bytes), a git pack and its indexes (by name and the pack's
 /// trailer, of any size), a `.lzma` or `.xz` file and those of what its streams hold
-/// (decoded whole, [`stream_sums`]), FSB5 banks and those of their samples (read whole, by the samples'
+/// (decoded whole, [`stream_sums`]), an NSIS installer and those of the files its data stores
+/// (read whole, the tarballs decoded, [`crate::nsis::sums`]), FSB5 banks and those of their samples (read whole, by the samples'
 /// CRC-32; banks sharing samples so), and contents that start alike (their first 64 KiB, or
 /// two or more of its pieces, [`probe::chunks`]; the same file, longer or shorter, or edited).
 /// Of the contents of at least [`TOGETHER_MIN`] bytes, which are read at their start (and the
@@ -652,6 +653,16 @@ fn together<S: Source + ?Sized>(
         }
         if format == Some(detect::Format::Xz) && size <= TOGETHER_MAX {
             held.extend(stream_sums(aqr_lzma::formula::data_xz(&src.read(c)?)));
+        }
+        // (an NSIS installer's stored files: tarballs of the files installed, mostly)
+        if format == Some(detect::Format::Pe) && size <= TOGETHER_MAX {
+            let at = crate::extent::pe_overlay(&head).filter(|&at| at < size);
+            let first = at.map(|at| src.read_range(c, at..at + crate::nsis::FIRST_HEADER as u64)).transpose()?;
+            if first.is_some_and(|h| crate::nsis::data_len(&h).is_some()) {
+                let d = src.read(c)?;
+                let blocks = crate::nsis::in_pe(&d).unwrap_or_default();
+                held.extend(crate::nsis::sums(&d, &blocks, 1));
+            }
         }
         // (banks sharing samples: a bank and its patches)
         if format == Some(detect::Format::Fsb5) && size <= TOGETHER_MAX {
@@ -814,7 +825,7 @@ fn lay_alike<S: Source + ?Sized>(
 /// What the data of a `.lzma` or `.xz` file holds (None where it does not decode), as
 /// [`together`] takes it: the CRC-32 and size of the members of an ar, tar or cpio archive
 /// ([`member_sums`]), or else of all of it.
-fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
+pub(crate) fn stream_sums(data: Option<Vec<u8>>) -> Vec<(u32, u64)> {
     match data {
         Some(data) if detect(&data).is_some_and(detect::Format::is_bundle) => member_sums(&data, 1),
         Some(data) if data.len() as u64 >= MEMBER_MIN => vec![(crc32fast::hash(&data), data.len() as u64)],

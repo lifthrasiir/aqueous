@@ -58,6 +58,18 @@ pub(crate) fn gzip_deflate(d: &[u8]) -> Option<Range<usize>> {
     Some(p..end)
 }
 
+/// The data of the gzip member at the start of `d`, or None where it does not inflate or its
+/// data would be over `max` bytes.
+pub(crate) fn gunzip(d: &[u8], max: usize) -> Option<Vec<u8>> {
+    let isize = u32::from_le_bytes(*d.get(d.len().checked_sub(4)?..)?.first_chunk()?);
+    if isize as usize > max {
+        return None;
+    }
+    let mut data = Capped(Data(Vec::with_capacity(isize as usize)), max);
+    inflate(d.get(gzip_start(d)?..)?, &mut data)?;
+    (data.0.0.len() <= max).then_some(data.0.0)
+}
+
 /// Where the DEFLATE stream of the gzip member at the start of `d` starts, after its header.
 fn gzip_start(d: &[u8]) -> Option<usize> {
     let flg = *d.get(3)?;
@@ -258,6 +270,29 @@ impl Sink for Data {
 
     fn stored(&mut self, bytes: &[u8]) {
         self.0.extend_from_slice(bytes);
+    }
+}
+
+/// A sink of the data that stops taking it past so many bytes (then holding more than them).
+struct Capped(Data, usize);
+
+impl Sink for Capped {
+    fn lit(&mut self, b: u8) {
+        if self.0.0.len() <= self.1 {
+            self.0.lit(b);
+        }
+    }
+
+    fn mat(&mut self, len: u16, dist: u16, alt258: bool) {
+        if self.0.0.len() <= self.1 {
+            self.0.mat(len, dist, alt258);
+        }
+    }
+
+    fn stored(&mut self, bytes: &[u8]) {
+        if self.0.0.len() <= self.1 {
+            self.0.stored(bytes);
+        }
     }
 }
 

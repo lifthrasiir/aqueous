@@ -215,26 +215,23 @@ Matt Mahoney의 10 GB 벤치마크(http://mattmahoney.net/dc/10gb.html, 10gb.zpa
 
    시간: 같은 바이트가 중첩 단계마다 다시 추정되는 것(추정한 데이터 3.1 GB는 원본 바이트보다
    많다)을 막거나, 위 형식들이 데이터를 먼저 가져가게 하면 압축 CPU가 준다.
-10. **NSIS 설치 파일: −24 MB 남짓(추정).** NSIS 설치 파일 11개 가운데 큰 것은
+10. **[완료] NSIS 설치 파일: −18.1 MB.** NSIS 설치 파일 11개 가운데 큰 것은
     `mingw44/tdm-mingw-1.905.0-4.4.0-2.exe`(27.3 MB)와 `mingw45/tdm-gcc-4.5.0.exe`(27.2 MB,
     `__installer/`에 같은 사본)뿐이다. 둘 다 압축하지 않은(`SetCompress off`) NSIS라 overlay는 길이
     4바이트를 앞에 붙인 파일들이고, 그 파일은 gzip과 bzip2의 tar, ZIP, xz `-6`의 `.lzma` tar(셋,
     10.6 MB)이다. 그 멤버는 바이트로 90–100%가 `mingw44`·`mingw45`(와 `mingw470-x32`의 `include`)
     트리의 파일과 같다.
-    - 지금은 10gb에서 15.60 + 20.54 MB로, 혼자 압축할 때(15.75 + 19.74 MB)와 같다. `together`가 PE를
-      들여다보지 않아 트리와 한 배치에 들지 못하고, 스캔은 `.lzma`를 파일 머리에서만 알아본다.
-    - 두 트리(194.4 MB, 한 배치)에서 잰 것(`1510df9`): 트리만 24.24 MB, 설치 파일과 함께 43.36 MB
-      (+19.1 MB), 설치 파일 대신 그 안의 파일을 따로 두면 35.47 MB(+11.2 MB). 같은 배치에 들면
-      −16 MB 남짓, 블록을 정확히 잘라 `.lzma`까지 받으면 −8 MB 남짓이 더 줄 것이다(10gb에서 재지
-      않았다).
-    - 할 일: overlay의 첫 헤더(`0xDEADBEEF`, `NullsoftInst`)를 찾아 압축하지 않은 블록을 각자의
-      형식으로 자르기(`Nest::As`, slice만으로 된다), 그리고 `together`가 그 블록들의 멤버(`.tar.gz`는
-      inflate한 tar의 멤버, `.lzma`는 `stream_sums`)로 트리와 잇기. `together`가 gzip을 trailer의
-      CRC(tar 전체)로만 잇는 것은 NSIS 밖의 `.tar.gz`에도 해당한다.
+    - aqr-compress의 `nsis`: PE의 extent가 overlay의 설치 데이터를 넣고, 저장된 블록(4 KiB 이상)을 각자의
+      형식의 content로 자르며(그 파일들은 tar의 멤버처럼 설치 파일과 같은 깊이), `together`가 블록과
+      그 멤버(tarball은 풀어서, ZIP은 엔트리)로 트리와 잇는다.
+    - 10gb(M4, level mid): 2,482,993,970 → 2,464,914,978 B, 명령어 8.024 → 8.016 T, 풀기 40.8 s. 두
+      설치 파일과 두 트리의 몫이 60.45 → 35.28 MB이다. 두 트리만(194.4 MB, 한 배치)으로는 설치 파일이
+      +19.1 → +12.4 MB이고, 블록을 파일로 따로 두면 +11.2 MB였다.
+    - 남은 것: 두 설치 파일의 w32api `include` tar.gz(1.63 MB씩)는 aqr-flate가 받지 않아 그대로 남는다
+      (까닭은 보지 않았다). `together`가 gzip 파일을 trailer의 CRC(tar 전체)로만 잇는 것은 NSIS 밖의
+      `.tar.gz`에도 해당한다.
     - 나머지 8개(언인스톨러, Firefox의 helper)는 모두 0.9 MB 밑이고(합쳐 1.7 MB), 압축된 것은 NSIS의
       LZMA solid 데이터 수십 KB씩이라 재현할 값어치가 없다.
-    - 두 설치 파일의 w32api `include` tar.gz(1.63 MB씩)는 따로 두어도 aqr-flate가 받지 않아 그대로
-      남는다(까닭은 보지 않았다).
 
 지금 2.558 GB이다(2026-10-30, aqr-ppmd 뒤 2,557,815,082 B). 주 목표 2.4 GB까지 158 MB가 남는다.
 확실한 편인 것(2번의 에뮬레이션, 3번, 4번, 6번의 나머지, 8번의 나머지)이 합쳐 130 MB 남짓이고, 그 밖에는 7번(ZPAQ)이 크다. PPMd 없이는 확장 목표에
