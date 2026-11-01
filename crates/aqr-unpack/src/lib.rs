@@ -174,6 +174,20 @@ impl<'d> Opened<'d> {
         self.select = Some(s);
     }
 
+    /// What its listing tells of the entries of `s` (or under them) left out of the tree, as
+    /// it would tell it extracting them (not of a tar archive: told as it is read).
+    pub fn left_out(&self, s: &Select) -> Vec<String> {
+        let (notes, sealed) = match &self.inner {
+            Inner::Zip(l) => (l.notes(), l.sealed_notes()),
+            Inner::SevenZip(l) => (l.notes(), Vec::new()),
+            Inner::Rar(l) => (l.notes(), Vec::new()),
+            Inner::Alz(l) | Inner::Egg(l) => (l.notes(), Vec::new()),
+            Inner::SevenZipSealed | Inner::Tar(_) | Inner::Single(_) => return Vec::new(),
+        };
+        let wanted = |n: &build::Note| !n.0.is_empty() && s.wants(&n.0);
+        notes.iter().chain(&sealed).filter(|n| wanted(n)).map(|n| n.1.clone()).collect()
+    }
+
     /// The tree as its listing has it, where it has one read already (not of a tar archive, nor
     /// of a 7z archive whose header is not decrypted yet).
     pub fn tree(&self) -> Option<&Tree> {

@@ -462,6 +462,10 @@ impl<'d> Listing<'d> {
         &self.b.tree
     }
 
+    pub fn notes(&self) -> &[build::Note] {
+        &self.notes
+    }
+
     pub fn unpack(
         &self,
         format: &str,

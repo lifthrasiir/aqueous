@@ -593,6 +593,10 @@ impl<'d> Listing<'d> {
         &self.b.tree
     }
 
+    pub fn notes(&self) -> &[build::Note] {
+        &self.notes
+    }
+
     pub fn unpack(&self, threads: usize, sink: &dyn Sink, select: Option<&Select>) -> Result<Done, String> {
         let mut skipped = crate::tell(&self.notes, select, sink);
         let mut tree = self.b.tree.clone();

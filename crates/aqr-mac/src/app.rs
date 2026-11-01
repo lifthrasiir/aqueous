@@ -6,7 +6,7 @@
 //!   on files and folders ("Compress with Aqueous (Passphrase)…" encrypts: `aqr -P`), "Extract
 //!   with Aqueous" and "Test with Aqueous" on `.aqr` files.
 //!   `.aqr` files opened (a double-click) are extracted: beside them, a single entry at the top
-//!   as it is, else into their names without `.aqr` (`aqr --auto-dir`).
+//!   as it is, else into their names without `.aqr` (`aqr --each --auto-dir`).
 //! - How far a job is shows on its file in Finder: an `NSProgress` published for it, a bar on
 //!   the file's icon as of a file downloading, with a button that stops the job (`aqr`'s
 //!   output being written removed). The file is the archive being written (`NAME.PID.part`),

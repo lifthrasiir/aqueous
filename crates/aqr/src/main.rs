@@ -3,10 +3,12 @@
 //! usage: aqr [-c | -d | -t] [-o OUTPUT] [-f] [-p] [-q | -v] [-T THREADS] [-l LEVEL | -0 ... -9] [--depth N]
 //! [--batch MIB | -B SIZE] [-b SIZE] [-D] [--no-check] [-P] [--wasm] [--no-sandbox] [--stats[=FILE]] [-h] INPUT...
 //!
+//! aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...; aqr -d --each [OPTIONS] ARCHIVE...
+//!
 //! - `-c` (the default; `aqr`): each input into `INPUT.aqr`, a file as an archive of a single
 //!   file, a directory as an archive of what it holds; with `-o`, all the inputs into one
 //!   archive (several of them, or a directory, as entries of their names).
-//! - `-d` (the default as `unaqr`): each archive into its name without `.aqr`, or `-o`. An
+//! - `-d` (the default as `unaqr`): an archive into its name without `.aqr`, or `-o`. An
 //!   archive of another format, by its name (ZIP, 7z, RAR, ALZ, EGG, tar alone or under gzip, bzip2,
 //!   xz, LZMA or Zstandard, and those compressors' single files: [`aqr_unpack::by_name`]), is extracted
 //!   as it is into the current directory, or `-o` (made where it is not), as `tar`, `unzip` and
@@ -14,6 +16,15 @@
 //!   Its metadata is taken as an Aqueous archive's ([`extract`]); what it holds that is not
 //!   extracted (encrypted entries, methods not known, paths reaching out) is told, and the run
 //!   fails once the rest is extracted. A file there already is written over only with `-f`.
+//! - `-d ARCHIVE PATH...` (and `-t`): the paths of the archive given alone (`/` between names;
+//!   a directory with what is under it), where the whole archive would have them, with the
+//!   directories on the way (made plainly, without their metadata); `--rename TO` after a path
+//!   has that one at `TO` instead (with what is under it; the directories before `TO` made).
+//!   Only what they need is decoded ([`aqr::Archive::contents_of`], [`aqr_unpack::Select`]). A
+//!   path not in the archive is an error, before anything is extracted where its listing tells
+//!   (but in a tar archive, after); so is one under another.
+//! - `--each`: decompressing, every input an archive, each extracted whole (as the frontends
+//!   extract a selection of archives).
 //! - `--auto-dir` (as the frontends extract): a single entry at the top of an archive (of
 //!   either kind) is extracted beside it as it is, where nothing is there of its name; else
 //!   the archive is extracted into a directory of its name without its extension, beside it
@@ -101,16 +112,24 @@ const USAGE: &str = "usage: aqr [OPTIONS] INPUT...";
 
 const HELP: &str = "\
 usage: aqr [OPTIONS] INPUT...
-       unaqr [OPTIONS] ARCHIVE...
+       aqr -d [OPTIONS] ARCHIVE [PATH [--rename TO]]...
+       aqr -d --each [OPTIONS] ARCHIVE...
+       unaqr [OPTIONS] ARCHIVE [PATH [--rename TO]]...
 
 Modes:
   -c, --compress        each input into INPUT.aqr (the default as aqr)
-  -d, --decompress      each archive into its name without .aqr (the default as unaqr);
+  -d, --decompress      an archive into its name without .aqr (the default as unaqr);
                         .zip, .7z, .rar, .alz, .egg and .tar (.gz .tgz .bz2 .xz
                         .lzma .zst) too, as they are into the current directory
                         (or -o); .gz, .bz2, .xz, .lzma and .zst into the name
                         without them
-  -t, --test            decode and check each archive, writing nothing
+  -t, --test            decode and check an archive, writing nothing
+
+Decompressing some paths (aqr -d ARCHIVE PATH [--rename TO]...):
+  PATH                  a path in the archive (a directory with what is under it),
+                        extracted where the whole archive would have it
+      --rename TO       after a PATH: that one extracted at TO instead
+      --each            every input an archive, each extracted whole
 
 Output:
   -o OUTPUT             write to OUTPUT; compressing, all the inputs into one archive
@@ -179,6 +198,11 @@ struct Args {
     /// `-P`: compressing, the archives encrypted with a passphrase asked for; decompressing,
     /// the passphrase asked for before the archives need it ([`pass`]).
     passphrase: bool,
+    /// `--each`: decompressing, every input an archive.
+    each: bool,
+    /// Decompressing some paths of the archive: each path (names as the tree has them), and
+    /// where it goes where `--rename` tells.
+    select: Option<extract::Selection>,
 }
 
 /// The bytes of the leaves decoded at once ([`aqr::Archive::set_budget`]). On 10gb (10
@@ -253,7 +277,11 @@ fn parse() -> Result<Args, String> {
         stats: None,
         ipc: false,
         passphrase: false,
+        each: false,
+        select: None,
     };
+    // (by the number of inputs before it, `--rename`'s place and value)
+    let mut renames: Vec<(usize, PathBuf)> = Vec::new();
     let (mut stats, mut stats_to) = (false, Vec::new());
     let mut only_inputs = false;
     while let Some(arg) = argv.next() {
@@ -296,6 +324,8 @@ fn parse() -> Result<Args, String> {
             "--stats" => stats = true,
             "--ipc" => a.ipc = true,
             "-P" | "--passphrase" => a.passphrase = true,
+            "--each" => a.each = true,
+            "--rename" => renames.push((a.inputs.len(), value("--rename")?.into())),
             s if s.starts_with("--stats=") => {
                 let to = PathBuf::from(&s["--stats=".len()..]);
                 if !stats::takes(&to) {
@@ -320,10 +350,54 @@ fn parse() -> Result<Args, String> {
     if a.opt.threads == 0 {
         a.opt.threads = std::thread::available_parallelism().map_or(1, |n| n.get());
     }
+    if !a.decompress && (a.each || !renames.is_empty()) {
+        return Err(format!("{} is for decompressing", if a.each { "--each" } else { "--rename" }));
+    }
+    if a.decompress && !a.each && a.inputs.len() > 1 {
+        a.select = Some(selection(a.inputs.split_off(1), renames)?);
+        if a.auto_dir {
+            return Err("--auto-dir with paths of an archive".into());
+        }
+    } else if let Some((_, to)) = renames.first() {
+        return Err(format!("--rename {} not after a path of an archive", to.display()));
+    }
     if a.decompress && a.output.is_some() && a.inputs.len() > 1 && !a.auto_dir {
         return Err("-o with several archives to decompress".into());
     }
     Ok(a)
+}
+
+/// The paths of an archive given, `paths`, with `renames` (each by the number of inputs before
+/// it, the archive's too): each path's names (encoded as the tree's), and where it goes.
+fn selection(paths: Vec<PathBuf>, renames: Vec<(usize, PathBuf)>) -> Result<extract::Selection, String> {
+    let mut out: Vec<(Vec<Vec<u8>>, Option<PathBuf>)> = Vec::new();
+    for p in &paths {
+        // (on Windows, `\` is `/` too)
+        let bytes = os_bytes(p.as_os_str());
+        let names: Vec<Vec<u8>> =
+            bytes.split(|&b| b == b'/').filter(|n| !n.is_empty() && *n != b".").map(name_from).collect();
+        if names.is_empty() || names.iter().any(|n| n == b"..") {
+            return Err(format!("{}: not a path in an archive", p.display()));
+        }
+        out.push((names, None));
+    }
+    for (n, to) in renames {
+        let Some(k) = n.checked_sub(2) else {
+            return Err(format!("--rename {} not after a path of an archive", to.display()));
+        };
+        if out[k].1.replace(to).is_some() {
+            return Err(format!("{}: --rename given twice", paths[k].display()));
+        }
+    }
+    for (i, a) in out.iter().enumerate() {
+        if let Some(j) = out.iter().enumerate().position(|(j, b)| j != i && a.0.starts_with(&b.0)) {
+            return Err(match a.0 == out[j].0 {
+                true => format!("{}: given twice", paths[i].display()),
+                false => format!("{}: under {}, given too", paths[i].display(), paths[j].display()),
+            });
+        }
+    }
+    Ok(extract::Selection { paths: out })
 }
 
 /// The bytes of size `s`: a number of bytes, or of KiB, MiB or GiB (`K`, `M`, `G`).
@@ -946,6 +1020,8 @@ impl To {
         ask: &'p extract::Ask<'p>,
     ) -> Result<Option<(extract::Place<'p>, bool)>, String> {
         Ok(Some(match (a.auto_dir, foreign) {
+            // (some paths: into a directory as it is, made where something goes there)
+            _ if a.select.is_some() => (extract::Place::Into(if foreign { &self.base } else { &self.named }), a.force),
             (true, _) => (extract::Place::Auto { base: &self.base, own: &self.named, ask }, a.force),
             (false, true) => (extract::Place::Into(&self.base), a.force),
             (false, false) => match output(a, &self.named)? {
@@ -1020,12 +1096,22 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
     // SAFETY: the archive is not to change while it is read; where it does, its checksums tell
     let c = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| err(&e))?;
     let mut opened = aqr_unpack::Opened::open(format, &c).map_err(|e| err(&e))?;
+    if a.select.is_some() && !opened.is_tree() {
+        return Err(err(&"a single file, not an archive of paths"));
+    }
     // (its entries encrypted without a passphrase taken are left out, told)
     if opened.encrypted()
         && pass::keys().open(input, |p| opened.unlock(p).map(|ok| ok.then_some(())).map_err(|e| err(&e)))?.is_none()
         && opened.sealed()
     {
         return Err(err(&pass::keys().none_opens()));
+    }
+    // (some paths: checked where the listing is known, else once the archive is read)
+    if let Some(s) = &a.select {
+        if let Some(t) = opened.tree() {
+            s.check(t, &|k| opened.left_out(&s.unpacking(Some(k)))).map_err(|e| err(&e))?;
+        }
+        opened.select(s.unpacking(None));
     }
     let ask = |p: &Path| output(a, p);
     let (place, force) = match (a.test, opened.is_tree()) {
@@ -1087,7 +1173,7 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
         let r = ticking(a, &view, || -> Result<_, String> {
             let x = match place {
                 None => None,
-                Some(p) => Some(extract::Extractor::new(p, force, &ap, &seen)?),
+                Some(p) => Some(extract::Extractor::new(p, force, &ap, &seen, a.select.clone())?),
             };
             let sink =
                 Unpacking { x: x.as_ref(), input, quiet: a.quiet, view: shown, seen: &seen, sizes: Default::default() };
@@ -1095,14 +1181,23 @@ fn decompress_foreign(a: &Args, input: &Path, to: &To, format: aqr_unpack::Forma
                 Err(_) if x.as_ref().is_some_and(|x| x.skipped()) => return Ok(None),
                 r => r.map_err(|e| err(&e))?,
             };
+            // (of a tar archive; where entries were left out, told, and the error at the end)
+            if let Some(s) = &a.select
+                && done.skipped == 0
+            {
+                s.check(&done.tree, &|_| Vec::new()).map_err(|e| err(&e))?;
+            }
+            let picked = a.select.as_ref().map(|s| s.picked(&done.tree));
             let sizes = sink.sizes.into_inner().unwrap();
             let (n, total, out) = match x {
                 Some(x) => match x.finish(&done.tree)? {
                     Some((n, t, o)) => (n, t, Some(o)),
                     None => return Ok(None),
                 },
-                None => done.tree.entries.iter().fold((0, 0, None), |(n, t, o), e| match e.node {
-                    EntryNode::File(c) => (n + 1, t + sizes.get(c).copied().unwrap_or(0), o),
+                None => done.tree.entries.iter().enumerate().fold((0, 0, None), |(n, t, o), (i, e)| match e.node {
+                    EntryNode::File(c) if picked.as_ref().is_none_or(|p| p[i]) => {
+                        (n + 1, t + sizes.get(c).copied().unwrap_or(0), o)
+                    }
                     _ => (n, t, o),
                 }),
             };
@@ -1170,6 +1265,15 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<(), String> {
         None => aqr::open(&c, runner),
     }
     .map_err(|e| err(&e))?;
+    // (some paths: by content, whether it is decoded)
+    let wanted = match (&a.select, archive.tree()) {
+        (None, _) => None,
+        (Some(_), None) => return Err(err(&"an archive of a single file, not of paths")),
+        (Some(s), Some(t)) => {
+            s.check(t, &|_| Vec::new()).map_err(|e| err(&e))?;
+            Some(s.contents(t, archive.contents_len()))
+        }
+    };
     let ask = |p: &Path| output(a, p);
     let (place, force) = match (a.test, archive.tree().is_some()) {
         (true, _) => (None, false),
@@ -1247,14 +1351,17 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<(), String> {
         }
         Some(t) if a.test => {
             let (n, total) = (std::sync::atomic::AtomicUsize::new(0), std::sync::atomic::AtomicU64::new(0));
-            let files = t.entries.iter().fold(vec![0; archive.contents_len()], |mut f, e| {
-                if let EntryNode::File(c) = e.node {
+            let picked = a.select.as_ref().map(|s| s.picked(t));
+            let files = t.entries.iter().enumerate().fold(vec![0; archive.contents_len()], |mut f, (i, e)| {
+                if let EntryNode::File(c) = e.node
+                    && picked.as_ref().is_none_or(|p| p[i])
+                {
                     f[c] += 1;
                 }
                 f
             });
             ticking(a, &*view, || {
-                archive.contents(a.opt.threads, |c, d| {
+                archive.contents_of(a.opt.threads, wanted.as_deref(), |c, d| {
                     seen.saw(c, &d, d.len() as u64);
                     n.fetch_add(files[c], std::sync::atomic::Ordering::Relaxed);
                     total.fetch_add(files[c] as u64 * d.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -1267,13 +1374,13 @@ fn decompress_into(a: &Args, input: &Path, to: &To) -> Result<(), String> {
         Some(t) => {
             let ap = meta::Applier { privileged: a.preserve, quiet: a.quiet };
             let r = ticking(a, &*view, || {
-                let x = extract::Extractor::new(place.unwrap(), force, &ap, &seen)?;
+                let x = extract::Extractor::new(place.unwrap(), force, &ap, &seen, a.select.clone())?;
                 match x.entries(t, &(0..t.entries.len()).collect::<Vec<_>>()) {
                     Err(_) if x.skipped() => return Ok(None),
                     r => r?,
                 }
                 archive
-                    .contents(a.opt.threads, |c, d| x.content(c, d).map_err(Failure::Resource))
+                    .contents_of(a.opt.threads, wanted.as_deref(), |c, d| x.content(c, d).map_err(Failure::Resource))
                     .map_err(|e| e.to_string())?;
                 x.finish(t)
             })?;
@@ -1415,7 +1522,11 @@ impl aqr::Runner for Decoder {
 /// The summary of an archive decoded into `out` (`None`: tested).
 fn summary_d(input: &Path, out: Option<&Path>, files: usize, total: u64, start: Instant) {
     let t = start.elapsed().as_secs_f64();
-    let to = out.map_or(" (tested)".into(), |o| format!(" -> {}", o.display()));
+    let to = match out {
+        None => " (tested)".into(),
+        Some(o) if o.as_os_str().is_empty() => " -> .".into(),
+        Some(o) => format!(" -> {}", o.display()),
+    };
     eprintln!(
         "{}{to}: {files} file{}, {} in {t:.2} s, {:.1} MB/s",
         input.display(),

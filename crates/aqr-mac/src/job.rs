@@ -103,7 +103,11 @@ impl Job {
         if encrypt {
             cmd.arg("-P");
         }
-        // (a single entry at the top beside the archive, else a directory of its name)
+        // (every path an archive: several of them selected; a single entry at the top beside the
+        // archive, else a directory of its name)
+        if !matches!(verb, Verb::Compress) {
+            cmd.arg("--each");
+        }
         if matches!(verb, Verb::Extract) {
             cmd.arg("--auto-dir");
         }

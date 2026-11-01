@@ -348,12 +348,19 @@ impl<'d> Listing<'d> {
         &self.b.tree
     }
 
+    pub fn notes(&self) -> &[build::Note] {
+        &self.notes
+    }
+
+    /// The notes of the encrypted entries without their passphrase.
+    pub fn sealed_notes(&self) -> Vec<build::Note> {
+        let note = |u: &Unit| format!("{}: encrypted, and no passphrase given, not extracted", u.name);
+        self.sealed.iter().map(|(names, _, u)| (names.clone(), note(u))).collect()
+    }
+
     pub fn unpack(&self, threads: usize, sink: &dyn Sink, select: Option<&Select>) -> Result<Done, String> {
         let mut skipped = crate::tell(&self.notes, select, sink);
-        for (_, _, u) in self.sealed.iter().filter(|s| select.is_none_or(|w| w.wants(&s.0))) {
-            sink.note(&format!("{}: encrypted, and no passphrase given, not extracted", u.name));
-            skipped += 1;
-        }
+        skipped += crate::tell(&self.sealed_notes(), select, sink);
         let wanted = select.map(|s| s.contents(&self.b.tree, self.b.contents));
         let want = |c: usize| self.b.live(c) && build::wanted(wanted.as_deref(), c);
         let tree = self.b.tree.clone();

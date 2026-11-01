@@ -276,6 +276,10 @@ impl<'d> Listing<'d> {
         &self.b.tree
     }
 
+    pub fn notes(&self) -> &[build::Note] {
+        &self.notes
+    }
+
     pub fn unpack(&self, threads: usize, sink: &dyn Sink, select: Option<&Select>) -> Result<Done, String> {
         let mut skipped = crate::tell(&self.notes, select, sink);
         let wanted = select.map(|s| s.contents(&self.b.tree, self.b.contents));

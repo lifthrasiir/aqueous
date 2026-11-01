@@ -12,7 +12,7 @@
 //!   ([`install`]): the former run by the installer, the latter by Settings' Apps.
 //! - `compress`: the paths into an archive, a single one into `PATH.aqr`, several into one
 //!   named after their folder. `extract`: each archive beside it, a single entry at its top
-//!   as it is, else into its name without `.aqr` (`aqr --auto-dir`). `test`: each archive
+//!   as it is, else into its name without `.aqr` (`aqr --each --auto-dir`). `test`: each archive
 //!   checked, and what it holds told.
 //! - Explorer runs a process for each of the paths chosen: those of a verb in a folder are
 //!   gathered into the first of them ([`gather`]).

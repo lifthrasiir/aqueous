@@ -15,6 +15,13 @@
 //! As a tree read as it is decoded is not known whole, that is decided by the entries first
 //! told; where another entry at the top comes later, what was made of the first one is moved
 //! into the archive's directory.
+//!
+//! Where some paths of the archive are selected ([`Selection`]), only those entries and what is
+//! under them are made: in place, as the whole archive would have them ([`Place::Into`]: the
+//! directories on the way made plainly, without their metadata, and the directory extracted
+//! into made only where something goes there), or at a path of their own, renamed. The links
+//! under a path renamed are made only where they lead within it (a link renamed itself is made
+//! as it is), and no metadata of the root is applied.
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -48,9 +55,94 @@ pub enum Place<'a> {
     Auto { base: &'a Path, own: &'a Path, ask: &'a Ask<'a> },
 }
 
+/// Paths of an archive's entries extracted alone ([module](self)): each by its names (encoded
+/// as the tree's), and where it goes where not in place. None is under another.
+#[derive(Clone)]
+pub struct Selection {
+    pub paths: Vec<(Vec<Vec<u8>>, Option<PathBuf>)>,
+}
+
+impl Selection {
+    /// The entry of `t` at each path (`None`: none there).
+    pub fn find(&self, t: &Tree) -> Vec<Option<usize>> {
+        let by_name: HashMap<(Option<usize>, &[u8]), usize> =
+            t.entries.iter().enumerate().map(|(i, e)| ((e.parent, &e.name[..]), i)).collect();
+        let at = |names: &[Vec<u8>]| names.iter().try_fold(None, |at, n| by_name.get(&(at, &n[..])).map(|&i| Some(i)));
+        self.paths.iter().map(|(names, _)| at(names).flatten()).collect()
+    }
+
+    /// Path `k` for people.
+    pub fn shown(&self, k: usize) -> String {
+        let names: Vec<&[u8]> = self.paths[k].0.iter().map(|n| name_bytes(n).0).collect();
+        String::from_utf8_lossy(&names.join(&b'/')).into_owned()
+    }
+
+    /// The paths (of those of indices `of`, where given) as names of bytes, as aqr-unpack
+    /// selects them.
+    pub fn unpacking(&self, of: Option<usize>) -> aqr_unpack::Select {
+        let raw = |p: &Vec<Vec<u8>>| p.iter().map(|n| name_bytes(n).0.to_vec()).collect();
+        let paths = self.paths.iter().enumerate().filter(|(k, _)| of.is_none_or(|o| o == *k));
+        aqr_unpack::Select::new(paths.map(|(_, (p, _))| raw(p)).collect())
+    }
+
+    /// An error of the first path not in `t`, where one is not: told why by `left_out` (what
+    /// was told of the entries of a path left out of the tree, or nothing), or not there.
+    pub fn check(&self, t: &Tree, left_out: &dyn Fn(usize) -> Vec<String>) -> Result<(), String> {
+        let Some(k) = self.find(t).iter().position(Option::is_none) else { return Ok(()) };
+        match &left_out(k)[..] {
+            [] => Err(format!("{}: not in the archive", self.shown(k))),
+            [why] => Err(why.clone()),
+            [why, more @ ..] => Err(format!("{why} (and {} more under {})", more.len(), self.shown(k))),
+        }
+    }
+
+    /// By entry of `t`, whether it is selected or under one selected.
+    pub fn picked(&self, t: &Tree) -> Vec<bool> {
+        let roots = self.find(t);
+        let mut picked = vec![false; t.entries.len()];
+        for (i, e) in t.entries.iter().enumerate() {
+            picked[i] = roots.contains(&Some(i)) || e.parent.is_some_and(|p| picked[p]);
+        }
+        picked
+    }
+
+    /// The contents of `t` (of `n` at least) of the entries selected and those under them,
+    /// their forks too: by content, whether it is.
+    pub fn contents(&self, t: &Tree, n: usize) -> Vec<bool> {
+        let picked = self.picked(t);
+        let mut out = vec![false; n];
+        for (i, e) in t.entries.iter().enumerate() {
+            if !picked[i] {
+                continue;
+            }
+            let file = if let EntryNode::File(c) = e.node { Some(c) } else { None };
+            for c in file.into_iter().chain(e.extra.forks.iter().map(|f| f.1)) {
+                *grow(&mut out, c) = true;
+            }
+        }
+        out
+    }
+}
+
+/// What of an entry is made, where some paths are selected.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Pick {
+    /// Not: neither on the way to a path selected, nor under one.
+    Out,
+    /// Not, but on the way to paths selected that are renamed only.
+    Via,
+    /// A directory on the way to a path selected in place: made plainly.
+    Above,
+    /// Path `k` selected, or an entry under it.
+    Root(usize),
+    Under(usize),
+}
+
 /// Extracts the entries told into a directory ([module](self)).
 pub struct Extractor<'a> {
     place: Place<'a>,
+    /// The paths selected, where not all.
+    sel: Option<Selection>,
     /// Whether what is there is written over (decided as the output is, with [`Place::Auto`]).
     force: AtomicBool,
     /// Whether the output was skipped as asked ([`Place::Auto`]): the error then not one.
@@ -97,6 +189,13 @@ struct State {
     ours: bool,
     /// Of [`Place::Auto`], the single entry at the top extracted as it is beside the archive.
     single: Option<usize>,
+    /// By entry, what of it is made ([`Pick`]; `None`: not told yet); of those on the way to
+    /// paths selected, their names.
+    picks: Vec<Option<Pick>>,
+    via: HashMap<usize, Vec<Vec<u8>>>,
+    /// Whether the directory extracted into was made where something was to go there (where
+    /// paths are selected, as it is made only then).
+    top_made: bool,
 }
 
 /// A fork of a content: the entry (`None`: the root), the fork's index and name, and the kind
@@ -118,9 +217,19 @@ fn err(p: &Path, e: std::io::Error) -> String {
 }
 
 impl<'a> Extractor<'a> {
-    /// An extractor to `place`, what is there written over where `force`.
-    pub fn new(place: Place<'a>, force: bool, ap: &'a meta::Applier, seen: &'a stats::Seen) -> Result<Self, String> {
+    /// An extractor to `place`, what is there written over where `force`; of the paths of `sel`
+    /// alone where given (into [`Place::Into`] alone).
+    pub fn new(
+        place: Place<'a>,
+        force: bool,
+        ap: &'a meta::Applier,
+        seen: &'a stats::Seen,
+        sel: Option<Selection>,
+    ) -> Result<Self, String> {
         let (top, ours) = match place {
+            // (made as something goes there)
+            Place::Into(dir) if sel.is_some() => (Some(dir.to_owned()), false),
+            _ if sel.is_some() => return Err("paths selected of an archive extracted, not into a directory".into()),
             Place::Own(out) => {
                 match fs::create_dir(out) {
                     Err(e) if !(force && e.kind() == std::io::ErrorKind::AlreadyExists && out.is_dir()) => {
@@ -139,6 +248,7 @@ impl<'a> Extractor<'a> {
         };
         Ok(Extractor {
             place,
+            sel,
             force: AtomicBool::new(force),
             skipped: AtomicBool::new(false),
             ap,
@@ -163,7 +273,22 @@ impl<'a> Extractor<'a> {
         s.content.resize(n, None);
         s.soon.resize(n, None);
         s.applied.resize_with(n, AtomicBool::default);
+        s.picks.resize(n, None);
         self.place(s, t, new)?;
+        // (where paths are selected, the entries made of those told)
+        let picked: Vec<usize>;
+        let new = match &self.sel {
+            None => new,
+            Some(sel) => {
+                for &i in new {
+                    if s.picks[i].is_none() {
+                        s.picks[i] = Some(pick(sel, s, t, i));
+                    }
+                }
+                picked = new.iter().copied().filter(|&i| !matches!(s.picks[i], Some(Pick::Out | Pick::Via))).collect();
+                &picked[..]
+            }
+        };
         if s.top.is_none() {
             return Ok(());
         }
@@ -198,8 +323,25 @@ impl<'a> Extractor<'a> {
             let e = &t.entries[i];
             let kind = kind_of(&e.node);
             if s.paths[i].as_os_str().is_empty() {
-                let parent = e.parent.map_or(&top, |p| &s.paths[p]);
-                s.paths[i] = parent.join(self.fs_name(parent, &e.name));
+                match (s.picks[i], &self.sel) {
+                    (Some(Pick::Root(k)), Some(sel)) if sel.paths[k].1.is_some() => {
+                        let to = sel.paths[k].1.clone().unwrap();
+                        if let Some(p) = to.parent().filter(|p| !p.as_os_str().is_empty()) {
+                            fs::create_dir_all(p).map_err(|x| err(p, x))?;
+                        }
+                        s.paths[i] = to;
+                    }
+                    _ => {
+                        if e.parent.is_none() && self.sel.is_some() && !s.top_made {
+                            if !top.as_os_str().is_empty() {
+                                fs::create_dir_all(&top).map_err(|x| err(&top, x))?;
+                            }
+                            s.top_made = true;
+                        }
+                        let parent = e.parent.map_or(&top, |p| &s.paths[p]);
+                        s.paths[i] = parent.join(self.fs_name(parent, &e.name));
+                    }
+                }
             }
             let path = s.paths[i].clone();
             // told again: a file of the content it had kept as it is (now in a link group)
@@ -281,7 +423,7 @@ impl<'a> Extractor<'a> {
                     continue;
                 }
             }
-            if s.linked[i].is_none() {
+            if s.linked[i].is_none() && s.picks[i] != Some(Pick::Above) {
                 for (k, f) in e.extra.forks.iter().enumerate() {
                     grow(&mut s.forks, f.1).push((Some(i), k, f.0.clone(), kind));
                 }
@@ -455,9 +597,12 @@ impl<'a> Extractor<'a> {
         let mut s = self.s.into_inner().unwrap();
         let top = s.top.clone().unwrap();
         let force = self.force.load(Relaxed);
-        let out = match s.single {
-            Some(i) => s.paths[i].clone(),
-            None => top.clone(),
+        let renamed = |k: usize| self.sel.as_ref().and_then(|sel| sel.paths[k].1.as_deref());
+        let out = match (s.single, &self.sel) {
+            (Some(i), _) => s.paths[i].clone(),
+            // (a single path selected and renamed: that)
+            (None, Some(sel)) if sel.paths.len() == 1 && sel.paths[0].1.is_some() => sel.paths[0].1.clone().unwrap(),
+            (None, _) => top.clone(),
         };
         let by_name: HashMap<(Option<usize>, &[u8]), usize> =
             t.entries.iter().enumerate().map(|(i, e)| ((e.parent, &e.name[..]), i)).collect();
@@ -467,12 +612,23 @@ impl<'a> Extractor<'a> {
                 continue;
             }
             let path = &s.paths[i];
-            // (of a single entry extracted as it is: reaching out of it is reaching out)
-            let within = s.single.map(|f| &t.entries[f].name[..]);
-            let Some(to) = resolve_link(t, &by_name, i, within) else {
-                let of = if out.as_os_str().is_empty() { Path::new(".") } else { &out };
-                self.ap.tell(path, &format!("a link reaching out of {}, not created", of.display()));
-                continue;
+            // (of a single entry extracted as it is: reaching out of it is reaching out; and of a
+            // path renamed, reaching out of it, but where the link is the path renamed itself)
+            let (within, of, alone) = match s.picks[i] {
+                Some(Pick::Root(k) | Pick::Under(k)) if renamed(k).is_some() => {
+                    let names = self.sel.as_ref().unwrap().paths[k].0.clone();
+                    (Some(names), renamed(k).unwrap(), s.picks[i] == Some(Pick::Root(k)))
+                }
+                _ => (s.single.map(|f| vec![t.entries[f].name.clone()]), out.as_path(), false),
+            };
+            let to = match resolve_link(t, &by_name, i, within.as_deref()) {
+                Some(to) => to,
+                None if alone => resolve_link(t, &by_name, i, None).flatten(),
+                None => {
+                    let of = if of.as_os_str().is_empty() { Path::new(".") } else { of };
+                    self.ap.tell(path, &format!("a link reaching out of {}, not created", of.display()));
+                    continue;
+                }
             };
             if force && fs::symlink_metadata(path).is_ok_and(|m| !m.is_dir()) {
                 fs::remove_file(path).map_err(|x| err(path, x))?;
@@ -500,7 +656,7 @@ impl<'a> Extractor<'a> {
             }
         }
         for (i, e) in t.entries.iter().enumerate().rev() {
-            if s.made[i] == Some(Kind::Dir) {
+            if s.made[i] == Some(Kind::Dir) && s.picks.get(i) != Some(&Some(Pick::Above)) {
                 self.ap.apply(&s.paths[i], Kind::Dir, &e.extra)?;
             }
         }
@@ -509,6 +665,30 @@ impl<'a> Extractor<'a> {
         }
         Ok(Some((self.files.into_inner(), self.bytes.into_inner(), out)))
     }
+}
+
+/// What of entry `i` of `t` is made, of the paths of `sel` ([`Pick`]), its parent's told before.
+fn pick(sel: &Selection, s: &mut State, t: &Tree, i: usize) -> Pick {
+    let e = &t.entries[i];
+    let names = match e.parent.map(|p| (p, s.picks[p])) {
+        Some((_, Some(Pick::Root(k) | Pick::Under(k)))) => return Pick::Under(k),
+        Some((_, Some(Pick::Out) | None)) => return Pick::Out,
+        Some((p, Some(Pick::Via | Pick::Above))) => [&s.via[&p][..], std::slice::from_ref(&e.name)].concat(),
+        None => vec![e.name.clone()],
+    };
+    if let Some(k) = sel.paths.iter().position(|(p, _)| *p == names) {
+        return Pick::Root(k);
+    }
+    let on_way = |renamed: bool| {
+        sel.paths.iter().any(|(p, r)| r.is_some() == renamed && p.len() > names.len() && p.starts_with(&names))
+    };
+    let pick = match (e.node == EntryNode::Dir, on_way(false), on_way(true)) {
+        (true, true, _) => Pick::Above,
+        (true, false, true) => Pick::Via,
+        _ => return Pick::Out,
+    };
+    s.via.insert(i, names);
+    pick
 }
 
 /// Tells the frontend what is extracted, as it is decided ([`Place::Auto`]).
@@ -565,13 +745,13 @@ pub fn windows_name(name: &std::ffi::OsStr) -> Option<OsString> {
 /// Where link `i` of `t` leads, resolved from the link's directory through the links of the
 /// tree (`by_name`: the entries by their directory and name): the entry (`None`: none of the
 /// tree); `None` where it reaches out of the directory it is extracted into, by an absolute
-/// target or by one going above it (or out of the directory at the top named `within`, where
-/// given: the one extracted as the root).
+/// target or by one going above it (or out of the entry of names `within`, where given: the one
+/// extracted as the root).
 fn resolve_link(
     t: &Tree,
     by_name: &HashMap<(Option<usize>, &[u8]), usize>,
     i: usize,
-    within: Option<&[u8]>,
+    within: Option<&[Vec<u8>]>,
 ) -> Option<Option<usize>> {
     // the path of an entry, as names from the root
     let path_of = |mut e: Option<usize>| {
@@ -627,7 +807,7 @@ fn resolve_link(
     }
     let EntryNode::Link(target) = &t.entries[i].node else { return Some(None) };
     let p = resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of)?;
-    if within.is_some_and(|w| p.first().is_none_or(|n| n[..] != *w)) {
+    if within.is_some_and(|w| !p.starts_with(w)) {
         return None;
     }
     Some(find(&p))
