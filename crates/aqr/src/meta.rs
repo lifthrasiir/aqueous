@@ -517,15 +517,25 @@ mod os {
         }
     }
 
+    /// Sets the mode of `path`, not followed whatever `kind` it was made as: a link there now
+    /// (by a name the file system takes as another's) is not what was made, nor what it leads
+    /// to (spec, "Extraction").
     pub fn set_mode(path: &Path, kind: Kind, mode: u32) -> io::Result<()> {
         let p = c_path(path)?;
-        let flags = if kind == Kind::Link { libc::AT_SYMLINK_NOFOLLOW } else { 0 };
-        // (Linux has no modes of links)
-        if cfg!(target_os = "linux") && kind == Kind::Link {
-            return Ok(());
+        // (Linux has no modes of links, nor takes `AT_SYMLINK_NOFOLLOW` of others before glibc
+        // 2.32: what is there looked at instead)
+        if cfg!(target_os = "linux") {
+            if kind == Kind::Link {
+                return Ok(());
+            }
+            if std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+                return Err(io::Error::other("a link where something else was made"));
+            }
+            // SAFETY: a path of a C string
+            return check(unsafe { libc::fchmodat(libc::AT_FDCWD, p.as_ptr(), mode as libc::mode_t, 0) });
         }
-        // SAFETY: a path of a C string
-        check(unsafe { libc::fchmodat(libc::AT_FDCWD, p.as_ptr(), mode as libc::mode_t, flags) })
+        // SAFETY: as above
+        check(unsafe { libc::fchmodat(libc::AT_FDCWD, p.as_ptr(), mode as libc::mode_t, libc::AT_SYMLINK_NOFOLLOW) })
     }
 
     /// Sets the access and modification times of `path` (not followed) where `x` has them.
@@ -810,10 +820,11 @@ mod os {
         if x.crtime.is_none() && x.atime.is_none() && x.mtime.is_none() {
             return Ok(());
         }
-        let link = if kind == Kind::Link { FILE_FLAG_OPEN_REPARSE_POINT } else { 0 };
+        // (not followed whatever `kind` it was made as, as `set_mode` of Unix)
+        let _ = kind;
         let f = fs::OpenOptions::new()
             .access_mode(FILE_WRITE_ATTRIBUTES)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | link)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
             .open(path)?;
         let mut t = fs::FileTimes::new();
         if let Some(c) = x.crtime {
