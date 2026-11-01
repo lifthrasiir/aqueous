@@ -5175,12 +5175,12 @@ as follows, linking the data (D) and the reference (R) of each entry:</p>
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/psd-recons.wasm" title="crates/aqr-modules/wasm/psd-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-psd/FORMAT.md" title="codecs/aqr-psd/FORMAT.md">R</a>
     <tr>
-      <td><code>a511b981b5b3e946bd167485510a878b72177d9a8508f53f32fe2f7c675e1369</code>
+      <td><code>1ddbdd8694285bbba0b805905557efab46268b928a3117df7cf51187ce4ead31</code>
       <td>rar3-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/rar3-recons.wasm" title="crates/aqr-modules/wasm/rar3-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-rar/FORMAT.md" title="codecs/aqr-rar/FORMAT.md">R</a>
     <tr>
-      <td><code>f1592c81fa01d14c856b09f824c2c3e257814006ff276b54ed0496be6d919394</code>
+      <td><code>0ea1a089b71c36deb24aea5909507d62ac89c09f6551a1f5f5acee8f182bcc88</code>
       <td>rar5-recons@1
       <td><a href="https://github.com/lifthrasiir/aqueous/raw/main/crates/aqr-modules/wasm/rar5-recons.wasm" title="crates/aqr-modules/wasm/rar5-recons.wasm">D</a>
         <a href="https://github.com/lifthrasiir/aqueous/blob/main/codecs/aqr-rar/FORMAT.md" title="codecs/aqr-rar/FORMAT.md">R</a>

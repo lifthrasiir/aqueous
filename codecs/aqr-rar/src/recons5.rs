@@ -712,6 +712,8 @@ pub struct Split {
     pub record: Vec<u8>,
     /// Bits of the record by [`Cat`].
     pub cost: [f64; CATS],
+    /// The largest PPMd model of a new model's block, in MiB (RAR 3.x's streams; 0 for none).
+    pub ppmd: u32,
 }
 
 /// Splits the stream of the files of `parts` (their packed data in turn, of `sizes` bytes each):
@@ -767,7 +769,7 @@ pub fn split(parts: &[&[u8]], sizes: &[usize], v1: bool, dict: u64) -> Result<Sp
     }
     let mut record = vec![v1 as u8];
     record.extend(e.c.finish());
-    Ok(Split { data, record, cost: e.cost })
+    Ok(Split { data, record, cost: e.cost, ppmd: 0 })
 }
 
 /// The files' contents `data` of `sizes` filtered again by the filters of `p`, in place.

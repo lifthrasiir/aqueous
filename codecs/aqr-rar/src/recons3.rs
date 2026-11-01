@@ -698,6 +698,7 @@ fn code_regions(
     sizes: &[usize],
     parts: &mut [Part],
     encoding: bool,
+    ppmd_limit: u32,
 ) -> Result<()> {
     bits.cat(Cat::Blocks);
     let r = &mut ctx.region;
@@ -723,6 +724,9 @@ fn code_regions(
                 };
                 let flags = bits.raws(7, gf as u64) as u8;
                 let mem = if flags & 0x20 != 0 { bits.raws(8, gm as u64) as u8 } else { 0 };
+                if flags & 0x20 != 0 && mem as u32 + 1 > ppmd_limit {
+                    return Err(Error("a PPMd model larger than the module's"));
+                }
                 (Region::Ppmd { flags, mem, esc: ge }, g.map_or(0, |g| g.1))
             } else {
                 (Region::Lz, g.map_or(0, |g| g.1))
@@ -1303,7 +1307,7 @@ pub fn split(packed: &[&[u8]], sizes: &[usize], dict: u64) -> Result<Split> {
     let mut v = data.clone();
     refile(&mut v, sizes, &parts)?;
     code_fixes(&mut e, &mut ctx, Some(&u), &mut v)?;
-    code_regions(&mut e, &mut ctx, &u, sizes, &mut parts, true)?;
+    code_regions(&mut e, &mut ctx, &u, sizes, &mut parts, true, u32::MAX)?;
     walk(&u, sizes, reach, &mut e, &mut ctx, &mut parts, true)?;
     code_blocks(&mut e, &mut ctx, &mut parts, true)?;
     let made = put_together(&parts)?;
@@ -1323,7 +1327,16 @@ pub fn split(packed: &[&[u8]], sizes: &[usize], dict: u64) -> Result<Split> {
     }
     let mut record = vec![3u8];
     record.extend(e.c.finish());
-    Ok(Split { data, record, cost: e.cost })
+    let ppmd = streams
+        .iter()
+        .flat_map(|s| &s.blocks)
+        .map(|b| match b {
+            Block::Ppmd { flags, mem, .. } if flags & 0x20 != 0 => *mem as u32 + 1,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+    Ok(Split { data, record, cost: e.cost, ppmd })
 }
 
 /// The files' contents `data` of `sizes` filtered again by the filters of `parts`, in place.
@@ -1336,9 +1349,9 @@ fn refile(data: &mut [u8], sizes: &[usize], parts: &[Part]) -> Result<()> {
     Ok(())
 }
 
-/// The stream that `data` and `record` rebuild, written onto `out`; the sizes of its files'
-/// parts.
-pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<Vec<usize>> {
+/// The stream that `data` and `record` rebuild, written onto `out`, its PPMd models of at most
+/// `ppmd_limit` MiB; the sizes of its files' parts.
+pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>, ppmd_limit: u32) -> Result<Vec<usize>> {
     let (&tag, rest) = record.split_first().ok_or_else(corrupt)?;
     if tag != 3 {
         return Err(corrupt());
@@ -1365,7 +1378,7 @@ pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<Vec<us
     let mut u = data.to_vec();
     refile(&mut u, &sizes, &parts)?;
     code_fixes(&mut dec, &mut ctx, None, &mut u)?;
-    code_regions(&mut dec, &mut ctx, &u, &sizes, &mut parts, false)?;
+    code_regions(&mut dec, &mut ctx, &u, &sizes, &mut parts, false, ppmd_limit)?;
     for p in &mut parts {
         p.tokens = vec![Vec::new(); p.regions.len()];
         p.blocks = vec![Vec::new(); p.regions.len()];
@@ -1388,7 +1401,7 @@ pub fn join_onto(data: &[u8], record: &[u8], out: &mut Vec<u8>) -> Result<Vec<us
 /// [`join_onto`] onto a new vector.
 pub fn join(data: &[u8], record: &[u8]) -> Result<Vec<u8>> {
     let mut out = Vec::new();
-    join_onto(data, record, &mut out)?;
+    join_onto(data, record, &mut out, u32::MAX)?;
     Ok(out)
 }
 

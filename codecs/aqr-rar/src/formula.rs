@@ -12,7 +12,7 @@ use aqr_formula::{Apply, Formula, Kind, Module, Node};
 
 use crate::{rar4, rar5, recons3, recons5};
 
-pub use crate::module::{decode3, decode5, index};
+pub use crate::module::{decode3, decode5, index, params3};
 
 pub const MODULE5: Module = Module::new("rar5-recons", 1).with_memory(memory5);
 pub const MODULE3: Module = Module::new("rar3-recons", 1).with_memory(memory3);
@@ -38,21 +38,21 @@ fn memory5(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     Some(u.whole(recons5::memory(largest(u, data)), 16))
 }
 
-/// The memory of `rar3-recons`: as [`memory5`], with the PPMd models of the streams (their
-/// memory in their records is not known here: RAR's largest, 256 MiB, where a stream may have
-/// PPMd blocks).
+/// The memory of `rar3-recons`: as [`memory5`], with the largest PPMd model (the params').
 fn memory3(u: &aqr_formula::Usage<'_>) -> Option<u64> {
     let &[data, ..] = u.inputs else { return None };
-    Some(u.whole(recons3::memory(largest(u, data)) + (256 << 20), 16))
+    let ppmd = crate::module::ppmd_of(u.params).ok()? as u64;
+    Some(u.whole(recons3::memory(largest(u, data)) + (ppmd << 20), 16))
 }
 
-/// The application of `module` rebuilding streams of `len` bytes in all from their data `data`,
-/// their records `records` and the index of their lengths `index` ([`index`]).
-pub fn apply_recons(module: Module, data: Node, records: Node, index: Node, len: u64) -> Apply {
+/// The application of `module` (of `params`: none for [`MODULE5`], [`params3`] for [`MODULE3`])
+/// rebuilding streams of `len` bytes in all from their data `data`, their records `records` and
+/// the index of their lengths `index` ([`index`]).
+pub fn apply_recons(module: Module, params: Vec<u8>, data: Node, records: Node, index: Node, len: u64) -> Apply {
     Apply {
         module,
         resources: vec![],
-        params: vec![],
+        params,
         inputs: vec![data, records, index],
         len,
         memory_limit: aqr_formula::NO_LIMIT,
@@ -272,8 +272,11 @@ pub fn encode_with(input: &[u8], opt: &Options) -> Option<Encoded> {
                 i => f.push("rar/index", i),
             };
             let data = by_kind(&mut f, split);
-            let module = if v5 { MODULE5 } else { MODULE3 };
-            let a = apply_recons(module, data, records, index, split_sizes.iter().sum());
+            let (module, params) = match v5 {
+                true => (MODULE5, Vec::new()),
+                false => (MODULE3, params3(splits.iter().map(|s| s.1.ppmd).max().unwrap_or(0))),
+            };
+            let a = apply_recons(module, params, data, records, index, split_sizes.iter().sum());
             match split_sizes.len() {
                 1 => vec![Node::Apply(Box::new(a))],
                 _ => f.split(a, split_sizes),

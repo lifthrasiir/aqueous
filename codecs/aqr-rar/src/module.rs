@@ -42,22 +42,13 @@ pub fn cut<'a>(data: &'a [u8], records: &'a [u8], index: &[u8]) -> Result<Vec<(&
 }
 
 /// What joins a stream's data and record onto an output: the sizes of its files' parts.
-type Join = fn(&[u8], &[u8], &mut Vec<u8>) -> Result<Vec<usize>>;
+type Join<'a> = &'a (dyn Fn(&[u8], &[u8], &mut Vec<u8>) -> Result<Vec<usize>> + Sync);
 
 /// A module: the streams of `len` bytes in all that the data and records of the inputs (data,
 /// records, index) rebuild with `join`, one after another (see `FORMAT.md`). Streams are rebuilt
 /// side by side on up to `threads` threads natively; one after another in Wasm.
-fn decode_with(
-    params: &[u8],
-    inputs: &[&[u8]],
-    len: u64,
-    threads: usize,
-    join: Join,
-) -> Result<Vec<u8>> {
+fn decode_with(inputs: &[&[u8]], len: u64, threads: usize, join: Join) -> Result<Vec<u8>> {
     let &[data, records, index] = inputs else { return Err(Error("three inputs wanted")) };
-    if !params.is_empty() {
-        return Err(corrupt());
-    }
     let streams = cut(data, records, index)?;
     let len = usize::try_from(len).map_err(|_| corrupt())?;
     let mut out = Vec::with_capacity(len);
@@ -83,12 +74,34 @@ fn decode_with(
     Ok(out)
 }
 
-/// The module `rar5-recons`: RAR5 streams.
+/// The module `rar5-recons`: RAR5 streams. No params.
 pub fn decode5(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    decode_with(params, inputs, len, threads, crate::recons5::join_onto)
+    if !params.is_empty() {
+        return Err(corrupt());
+    }
+    decode_with(inputs, len, threads, &crate::recons5::join_onto)
 }
 
-/// The module `rar3-recons`: RAR 2.9 streams (RAR 3.x and 4.x).
+/// The params of `rar3-recons`: the largest PPMd model of its streams in MiB, 0 for none.
+pub fn params3(ppmd: u32) -> Vec<u8> {
+    let mut out = Vec::new();
+    varint::put(&mut out, ppmd as u64);
+    out
+}
+
+/// The largest PPMd model of `rar3-recons`'s params, in MiB.
+pub fn ppmd_of(params: &[u8]) -> Result<u32> {
+    let mut at = 0;
+    let v = varint::get(params, &mut at).map_err(|_| corrupt())?;
+    if at != params.len() || v > 256 {
+        return Err(corrupt());
+    }
+    Ok(v as u32)
+}
+
+/// The module `rar3-recons`: RAR 2.9 streams (RAR 3.x and 4.x), their PPMd models within the
+/// params' size.
 pub fn decode3(params: &[u8], inputs: &[&[u8]], len: u64, threads: usize) -> Result<Vec<u8>> {
-    decode_with(params, inputs, len, threads, crate::recons3::join_onto)
+    let limit = ppmd_of(params)?;
+    decode_with(inputs, len, threads, &move |d, r, o| crate::recons3::join_onto(d, r, o, limit))
 }
