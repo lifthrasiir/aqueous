@@ -57,6 +57,12 @@ own terms; the code is written from that description, not from the encoder's cod
   written from OctopusET's EGG Archive Format Specification (CC0) without any EGG or AZO
   decoder's code; checked on the test archives of akolman/EggDotNet (MIT, some of them aqr-egg's
   fixtures), seb3773/alzgg (ALZip's output, made under Wine) and blurfx/unegg.
+- **LHA** (Haruyasu Yoshizaki's LHA, after Haruhiko Okumura's ar002): the archive format and
+  the streams of `-lh4-` to `-lh7-`, in aqr-lha, written from the format as LHA's decoders read
+  it, without any LHA code; the compressors' Huffman coder (its lengths and tables) and their
+  block cuts from their output used as black boxes: the test archives of fragglet/lhasa (ISC,
+  some of them aqr-lha's fixtures) and archives of Aminet. Okumura's LZSS binary search tree
+  (public domain) is one of the record's match finders.
 - **GIF** (CompuServe's GIF89a specification): the container and its LZW, in aqr-gif, whose
   tests take the output of ImageMagick, ffmpeg, Pillow and macOS's ImageIO used as black boxes.
 - **lpaq** and **PAQ** (Matt Mahoney and others): the style of binary arithmetic coding and

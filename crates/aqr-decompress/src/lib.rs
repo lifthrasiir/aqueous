@@ -150,6 +150,11 @@ pub const LZO: Module = aqr_lzo::formula::MODULE;
 /// streams'.
 pub const AZO: Module = aqr_azo::formula::MODULE;
 
+/// aqr-lha reconstruction of the streams of LHA's `-lh4-` to `-lh7-`, one after another, from
+/// their data and records. Inputs: the data, the records and the index cutting them into the
+/// streams'.
+pub const LHA: Module = aqr_lha::formula::MODULE;
+
 /// aqr-bvx reconstruction of a stream of Apple's LZFSE and LZVN blocks from its data and
 /// record. Inputs: the data and the record.
 pub const BVX: Module = aqr_bvx::formula::MODULE;
@@ -274,7 +279,7 @@ pub const RECS_ENTRIES: Module = aqr_infer_recs::formula::ENTRIES;
 pub const RECS_FLOATS: Module = aqr_infer_recs::formula::FLOATS;
 
 /// Every module of this crate.
-pub const MODULES: [Module; 67] = [
+pub const MODULES: [Module; 68] = [
     X86,
     X86_REMAP,
     ARM64,
@@ -298,6 +303,7 @@ pub const MODULES: [Module; 67] = [
     BCJ2,
     LZO,
     AZO,
+    LHA,
     BVX,
     BZ2,
     BZ2_ALZ,
@@ -561,6 +567,9 @@ impl Native {
         } else if m == AZO {
             none(resources)?;
             aqr_azo::formula::decode(params, inputs, len, threads).map_err(msg)
+        } else if m == LHA {
+            none(resources)?;
+            aqr_lha::formula::decode(params, inputs, len, threads).map_err(msg)
         } else if m == BVX {
             none(resources)?;
             aqr_bvx::formula::decode(params, inputs, len, threads).map_err(msg)

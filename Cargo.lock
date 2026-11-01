@@ -184,6 +184,7 @@ dependencies = [
  "aqr-infer-recs",
  "aqr-iso",
  "aqr-jpeg",
+ "aqr-lha",
  "aqr-lz4",
  "aqr-lzma",
  "aqr-lzo",
@@ -239,6 +240,7 @@ dependencies = [
  "aqr-ima",
  "aqr-infer-recs",
  "aqr-jpeg",
+ "aqr-lha",
  "aqr-lz4",
  "aqr-lzma",
  "aqr-lzo",
@@ -453,6 +455,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "aqr-lha"
+version = "0.1.0"
+dependencies = [
+ "aqr-common",
+ "aqr-formula",
+]
+
+[[package]]
 name = "aqr-lz4"
 version = "0.1.0"
 dependencies = [
@@ -532,6 +542,7 @@ dependencies = [
  "aqr-ima",
  "aqr-infer-recs",
  "aqr-jpeg",
+ "aqr-lha",
  "aqr-lz4",
  "aqr-lzma",
  "aqr-lzo",

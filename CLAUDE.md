@@ -27,7 +27,7 @@ Aqueous: an archive format and archiver, `aqr`, built around lossless recompress
   - `aqr-modules` — Wasm modules built from the recompressors' code (`src/bin`, `wasm/`,
     `src/known.rs`).
 - `codecs/` — the recompressor crates `aqr-*` (flate, png, jpeg, mp3, flac, pdf, zip, sqlite,
-  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
+  git, lz4, lzma, lzo, bvx, bz2, alz, egg, azo, lha, snappy, gif, exe, psd, clip, raw, tex, obj, fasta, wrt, bundle,
   asar, vorbis, ogg, mkv, …), each with a `README.md` and a `FORMAT.md` describing what it stores; a crate with a
   `FORMAT.md` belongs here. `aqr-flate` underlies everything that uses DEFLATE. The workspace
   takes both directories by glob, so a new crate needs no entry in the root `Cargo.toml`.
@@ -154,6 +154,11 @@ optimization picked by hash.
   stream coded again by the spec's models (OctopusET's EGG spec, Appendix A; ALZip's output the
   black box). The x86 filter is not known (the spec's does not give ALZip's CRC-32): filtered
   streams are rebuilt with their data as the blocks decode. Left (its README's Status).
+- aqr-lha (LHA's `-lh4-` to `-lh7-`): a record of the parse, as aqr-lzo, with Okumura's LZSS
+  tree as a second match finder; every compressor seen writes the headers of ar002's Huffman
+  coder (predicted from the tokens) and cuts blocks by its token buffer. No LHA code is read;
+  lhasa's test archives and Aminet are the black boxes (Debian's `lha`, LHa for UNIX, would be
+  an oracle in the Linux VM). Left (its README's Status): `-lh1-`, archives in other data.
 - aqr-snappy and aqr-lz4 reimplement the encoders: Chrome's LevelDB Snappy is the
   multiplicative-hash build (Homebrew's arm64 builds use the CRC hash and do not match);
   Firefox's mozlz4 is liblz4's `LZ4_compress_default`.

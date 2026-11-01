@@ -151,6 +151,8 @@ for name, pad in ((\"a\", 0), (\"b\", 48)):
     copy mesh.obj $data/aqr-obj-corpus/c3d/bimba.obj
     # EGG archives of AZO streams (a PE file, a text of 633 KB, two blocks): alzgg's test files
     make azo.d 'mkdir $out && cp $codecs/aqr-egg/corpus/alzgg/{mz,sysmulti}_sys_optimized.egg $out'
+    # LHA archives of -lh5- streams (Amiga LhA's): two of aqr-lha's sample of Aminet
+    make lha.d 'mkdir $out && cp $codecs/aqr-lha/corpus/aminet/{biz_misc_AmiBroker320,pix_3dobj_gr_dalek}.lha $out'
     make table.csv 'py "
 import random, sys
 r = random.Random(1)

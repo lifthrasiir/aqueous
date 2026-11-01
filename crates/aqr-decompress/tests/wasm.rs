@@ -338,6 +338,51 @@ fn lzo_same_as_wasm() {
     }
 }
 
+/// LHA's streams (two of an archive, of `-lh5-` and `-lh6-`) natively and as WebAssembly alike,
+/// and their records damaged in turn failing alike (or giving the same).
+#[test]
+fn lha_same_as_wasm() {
+    let enc = Encoder::new(Level::Zstd(3)).with_modules(wasm_of);
+    let mut streams = Vec::new();
+    for name in ["dos255e_lh5", "unix_h1_lh6"] {
+        let d = fixture(&format!("codecs/aqr-lha/tests/data/{name}.lzh"));
+        let e = aqr_lha::lha::parse(&d).unwrap().entries.remove(0);
+        streams.push((d[e.data.clone()].to_vec(), e.size as usize, aqr_lha::lzh::Method::of(&e.method).unwrap()));
+    }
+    let (mut data, mut records, mut lens, mut whole) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    for (s, size, m) in &streams {
+        let sp = aqr_lha::recons::split(s, *size, *m).unwrap();
+        lens.push((sp.data.len(), sp.record.len()));
+        data.extend(sp.data);
+        records.extend(sp.record);
+        whole.extend_from_slice(s);
+    }
+    let mut f = Formula::default();
+    let data = f.push("raw", data);
+    let record = f.push("lha/record", records);
+    let index = f.push("lha/index", aqr_lha::formula::index(&lens));
+    f.root = Node::Apply(Box::new(aqr_lha::formula::apply_recons(data, record, index, whole.len() as u64)));
+    let c = enc.encode(&f, None).unwrap();
+    assert!(aqr::decode(&c, &Native::default()).unwrap() == whole);
+    assert!(aqr::decode(&c, &Wasm).unwrap() == whole);
+    for k in 0..8 {
+        let mut bad = f.clone();
+        let r = &mut bad.streams[1].data;
+        let at = r.len() * k / 8;
+        if k == 7 {
+            r[at..].fill(0xff);
+        } else {
+            r[at] ^= 1 << k;
+        }
+        let c = enc.encode(&bad, None).unwrap();
+        let (n, w) = (aqr::decode(&c, &Native::default()), aqr::decode(&c, &Wasm));
+        assert_eq!(n.is_ok(), w.is_ok(), "{k}: {n:?} {w:?}");
+        if let (Ok(n), Ok(w)) = (n, w) {
+            assert!(n == w, "{k}");
+        }
+    }
+}
+
 /// AZO streams (of EGG archives) natively and as WebAssembly alike, and their records damaged in
 /// turn failing alike (or giving the same).
 #[test]

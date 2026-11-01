@@ -961,6 +961,7 @@ fn recompress_with(format: Format, d: &[u8], contents: Kind, opt: &Options, dept
                 Format::Chm => chm(d, opt, cx),
                 Format::Alz => alz(d, opt, depth, cx),
                 Format::Egg => egg(d, opt, depth, cx),
+                Format::Lha => lha(d, opt, cx),
                 Format::GitPack => git::pack(d, opt, depth, cx),
                 Format::Hdf5 => hdf5::file(d, opt, depth, cx),
                 Format::Bvx => bvx(d, opt, cx),
@@ -1856,6 +1857,17 @@ fn egg(d: &[u8], opt: &Options, depth: u32, cx: &Cx) -> Option<Formula> {
     Some(e.formula)
 }
 
+/// aqr-lha's formula of an LHA archive, the contents of its files a content of the application
+/// (or of the formula, those stored), recompressed in turn, each by its kind by its name
+/// ([`kind_by_name`]). Its streams decode within what is left of the budget
+/// ([`Options::expansion`]).
+fn lha(d: &[u8], opt: &Options, cx: &Cx) -> Option<Formula> {
+    let o = aqr_lha::formula::Options { threads: opt.threads, limit: cx.inflate_left(), kind: kind_by_name };
+    let e = aqr_lha::formula::encode_with(d, &o)?;
+    cx.inflate(e.inflated);
+    Some(e.formula)
+}
+
 /// aqr-7z's formula, the contents of the files a content of the applications (or of the formula,
 /// those of stored folders), recompressed in turn, each by its kind by its name
 /// ([`kind_by_name`]).
@@ -2155,6 +2167,26 @@ mod tests {
             let x = [&b"some data before "[..], &d, b" and after"].concat();
             assert_eq!(detect::starts(&x[17..]), Some(Format::Alz));
             assert_eq!(extent(Format::Alz, &x[17..]), Some(d.len()));
+        }
+    }
+
+    /// An LHA archive is taken apart, its streams by aqr-lha's module, its stored files their
+    /// contents; at the start of data only (its headers have no signature to look for). (The
+    /// fixtures are too small for the module to pay for itself: the formula is kept all the
+    /// same.)
+    #[test]
+    fn lha_taken_apart() {
+        let dir = format!("{}/../../codecs/aqr-lha/tests/data", env!("CARGO_MANIFEST_DIR"));
+        for name in ["unix_h2_lh7", "dos255e_lh0", "unix_lh6_long"] {
+            let d = std::fs::read(format!("{dir}/{name}.lzh")).unwrap();
+            assert_eq!(detect(&d), Some(Format::Lha), "{name}");
+            let opt = Options { shared_modules: true, smaller: false, ..Options::default() };
+            let f = recompress(&d, &opt);
+            let module = f.applies().iter().any(|a| a.module == aqr_decompress::LHA);
+            assert_eq!(module, name != "dos255e_lh0", "{name}");
+            assert!(f.eval(&Native::default()).unwrap() == d, "{name}");
+            let x = [&b"some data before "[..], &d].concat();
+            assert_eq!(detect::starts(&x[17..]), None, "{name}");
         }
     }
 

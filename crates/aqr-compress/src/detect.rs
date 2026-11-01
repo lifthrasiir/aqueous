@@ -76,6 +76,9 @@ pub enum Format {
     /// EGG archive (aqr-egg, and aqr-flate on its DEFLATE blocks, aqr-bz2 on its bzip2 blocks,
     /// aqr-lzma on its LZMA blocks), known by its header and the record after it.
     Egg,
+    /// LHA archive (aqr-lha, which splits its streams of `-lh4-` to `-lh7-`), known by its first
+    /// header (no signature at its start): at the start of data only.
+    Lha,
     /// git pack (aqr-git, and aqr-flate on its entries' zlib streams), a whole file: not
     /// looked for in other data.
     GitPack,
@@ -124,7 +127,7 @@ pub enum Format {
 }
 
 impl Format {
-    pub const ALL: [Format; 49] = [
+    pub const ALL: [Format; 50] = [
         Format::Pe,
         Format::MachO,
         Format::Gzip,
@@ -157,6 +160,7 @@ impl Format {
         Format::Chm,
         Format::Alz,
         Format::Egg,
+        Format::Lha,
         Format::GitPack,
         Format::Fasta,
         Format::Wasm,
@@ -210,6 +214,7 @@ impl Format {
             Format::Chm => "chm",
             Format::Alz => "alz",
             Format::Egg => "egg",
+            Format::Lha => "lha",
             Format::GitPack => "git-pack",
             Format::Fasta => "fasta",
             Format::Wasm => "wasm",
@@ -295,6 +300,7 @@ pub fn kind_by_name(name: &[u8]) -> Kind {
         b"cab" => format(Format::Cab),
         b"alz" => format(Format::Alz),
         b"egg" => format(Format::Egg),
+        b"lzh" | b"lha" => format(Format::Lha),
         b"zst" | b"br" | b"rar" | b"mp4" | b"m4a" | b"m4v" | b"mov" | b"ogv" | b"opus" | b"aac" | b"webp" | b"avif"
         | b"heic" | b"heif" | b"jxl" | b"jp2" | b"woff2" => Kind::Compressed,
         b"tga" | b"pbm" => Kind::Pixels,
@@ -423,6 +429,9 @@ fn detect_at(d: &[u8], start: bool) -> Option<Format> {
         Some(Format::Ppmd)
     } else if start && aqr_mkv::starts(d) {
         Some(Format::Mkv)
+    } else if start && aqr_lha::formula::starts(d) {
+        // (a header starts with its size and checksum: too weak to look for in other data)
+        Some(Format::Lha)
     } else if start && aqr_xsv::formula::starts(d) {
         Some(Format::Xsv)
     } else if start && aqr_wrt::formula::starts(d) {

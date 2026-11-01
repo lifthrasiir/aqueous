@@ -238,6 +238,12 @@ pub const KNOWN: &[Known] = &[
         block: include_bytes!("../wasm/leveldb-recons.block"),
     },
     Known {
+        name: "lha-recons",
+        version: 1,
+        sha512_256: hex("ee2f6bd697238666aa5826af8302499f511e882acb16cd0fea0f6efd3f0cfcf4"),
+        block: include_bytes!("../wasm/lha-recons.block"),
+    },
+    Known {
         name: "lz4-recons",
         version: 1,
         sha512_256: hex("fa48fe7eeea5f6cf736925d3bb82ae9da2c2b106058ea444aa65a80040e83890"),
@@ -264,7 +270,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "lzx-recons",
         version: 1,
-        sha512_256: hex("d760fe64344c9208995eae2f36f78f7054e2a8f361d9c70ffcb89a42fa734a4e"),
+        sha512_256: hex("94723274d403c5c934b4446093d6ec8df3c357378e03ac81db7a929895915e97"),
         block: include_bytes!("../wasm/lzx-recons.block"),
     },
     Known {
@@ -402,7 +408,7 @@ pub const KNOWN: &[Known] = &[
     Known {
         name: "zip-recons",
         version: 3,
-        sha512_256: hex("56697d982de6ef516be8915e29c1dd306f32090faee15945928d5cb63bcb48d1"),
+        sha512_256: hex("20ca31a2e051852e7815e61beb5c3fb5b065d05f61dbc47a3a0366599da91a7f"),
         block: include_bytes!("../wasm/zip-recons.block"),
     },
 ];
