@@ -1200,7 +1200,8 @@ fn obj() {
     let mut coff = vec![0x64, 0x86, 2, 0, 0, 0, 0, 0, 0x40, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0];
     coff.extend_from_slice(b".text\0\0\0");
     coff.extend_from_slice(&d);
-    assert_eq!(aqr_compress::detect(&coff), None);
+    // (text still, of so few other bytes: aqr-wrt's, which turns it down)
+    assert_eq!(aqr_compress::detect(&coff), Some(aqr_compress::Format::Text));
     assert_eq!(aqr_compress::kind_by_name(b"x/mesh.obj"), aqr_formula::Kind::Unknown);
 }
 
@@ -1300,7 +1301,7 @@ fn dds() {
 }
 
 /// Text goes to aqr-wrt where that pays: a whole file of text bytes, and data of a name telling
-/// text (a gzip member's); not text that is short, or has other bytes, or of no words.
+/// text (a gzip member's); not text that is short, or has many other bytes, or of no words.
 #[test]
 fn text_words() {
     let d = prose(400_000);
@@ -1310,7 +1311,11 @@ fn text_words() {
     // as aqr-wrt tells, whatever the archive would make of the file without it
     assert_eq!(modules(&roundtrip(&d, &Options::default())), [WRT.name]);
     assert!(modules(&roundtrip(&d[..200_000], &all())).is_empty());
-    assert!(modules(&roundtrip(&[&d[..], b"\0"].concat(), &all())).is_empty());
+    // (a few other bytes taken, as DOS's end of file: not more than 1 in 1000)
+    assert_eq!(modules(&roundtrip(&[&d[..], b"\x1a"].concat(), &all())), [WRT.name]);
+    let mut odd = d.clone();
+    (0..odd.len() / 500).for_each(|i| odd[i * 500 + 1] = 0);
+    assert!(modules(&roundtrip(&odd, &all())).is_empty());
     assert!(modules(&roundtrip(&text(400_000), &all())).is_empty());
     // text of Hangul by its own module
     let mut d = Vec::new();

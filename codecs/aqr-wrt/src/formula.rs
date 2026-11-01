@@ -102,10 +102,11 @@ pub fn mostly_text(d: &[u8]) -> bool {
     d.iter().filter(|&&c| !text_byte(c)).count() <= d.len() / 1000
 }
 
-/// Whether `d` is a file this crate takes: of at least [`MIN_LEN`] bytes, all of them text
-/// bytes (a file of other bytes as well is looked into for files in it).
+/// Whether `d` is a file this crate takes: of at least [`MIN_LEN`] bytes, [`mostly_text`] as
+/// [`encode`] takes it (a few others are common in text: DOS's end of file, Ctrl-Z, at its
+/// end, escapes of a terminal). A file of more bytes of others is looked into for files in it.
 pub fn starts(d: &[u8]) -> bool {
-    d.len() >= MIN_LEN && is_text(d)
+    d.len() >= MIN_LEN && mostly_text(d)
 }
 
 /// Whether coding text `d` with `dict` pays, told by `d` and `dict` alone (so that the same
@@ -214,7 +215,9 @@ mod tests {
         }
         let d = &text[..];
         assert!(starts(d) && !starts(&d[..MIN_LEN - 1]));
-        assert!(!starts(&[d, b"\0"].concat()));
+        // a few bytes of others too: DOS's end of file (Ctrl-Z), as silesia's dickens and
+        // webster end with
+        assert!(starts(&[d, b"\x1a"].concat()) && starts(&[d, b"\0"].concat()));
         let f = encode(d, 1).unwrap();
         assert_eq!(eval(&f, d.len()).unwrap(), d);
         assert!(eval(&f, d.len() - 1).is_err());
@@ -223,9 +226,9 @@ mod tests {
         // a few bytes of others, but not many
         let mut odd = d.to_vec();
         (0..odd.len() / 1000).for_each(|i| odd[i * 1000] = 0x1b);
-        assert!(!starts(&odd) && encode(&odd, 1).is_some());
+        assert!(starts(&odd) && encode(&odd, 1).is_some());
         odd[1] = 0;
-        assert!(encode(&odd, 1).is_none());
+        assert!(!starts(&odd) && encode(&odd, 1).is_none());
         // with a dictionary of other text; not where it does not pay
         let shared = Shared::of(&[d], 1).unwrap();
         let other = &d[1000..MIN_LEN + 1000];
