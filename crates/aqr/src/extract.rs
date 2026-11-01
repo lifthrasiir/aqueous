@@ -8,6 +8,12 @@
 //! the links (but those reaching out of the directory), the metadata of all but the
 //! directories, and that of the directories, the deepest first (spec, "Extraction").
 //!
+//! Names are taken as the file system extracted into could take them ([`Folding`], [`fold`]):
+//! an entry of a name taken as an earlier one's of its directory is a conflict, told and not
+//! made (nor what is under it); and a link whose target goes through a name that file systems
+//! may take as a link of the tree or not (`a` of link `A`) is told and not made, as where it
+//! leads is not known.
+//!
 //! The entries at the top of the tree go where [`Place`] tells: into a directory of the
 //! archive's own, into a directory as it is (the current one: as `tar`, `unzip` and 7-Zip
 //! extract), or, with `--auto-dir` ([`Place::Auto`]), a single entry at the top as it is beside
@@ -31,10 +37,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::sync::{Mutex, RwLock};
 
-use aqr_formula::aqr::{EntryNode, Extra, Tree, name_bytes, name_from};
+use aqr_formula::aqr::{EntryNode, Extra, Tree, name_bytes};
 
 use crate::meta::{self, Kind, os_from};
-use crate::{create, stats};
+use crate::{create, fold, stats};
 
 /// Whether output `path` is to be written over where it is there: `None` not, the output
 /// skipped (the frontend answering so; [`crate::output`]).
@@ -210,6 +216,14 @@ struct State {
     /// Whether the directory extracted into was made where something was to go there (where
     /// paths are selected, as it is made only then).
     top_made: bool,
+    /// How the file system extracted into takes names as one (decided as the first entries are
+    /// made), and the entries of each directory by the key of their names so taken.
+    folding: Option<Folding>,
+    taken: HashMap<(Option<usize>, String), usize>,
+    /// By entry, where it is not made as its name is one that the file system takes as an
+    /// earlier entry's of its directory: that entry (`Some`), or `None` where one above it is
+    /// not made so (spec, "Extraction").
+    clashed: Vec<Option<Option<usize>>>,
 }
 
 /// A fork of a content: the entry (`None`: the root), the fork's index and name, and the kind
@@ -314,10 +328,38 @@ impl<'a> Extractor<'a> {
         }
         let top = s.top.clone().unwrap();
         let force = self.force.load(Relaxed);
+        // the entries of names the file system takes as an earlier one's, not made (nor what is
+        // under them)
+        let folding = *s.folding.get_or_insert_with(|| Folding::of(&top));
+        s.clashed.resize(n, None);
+        for &i in new {
+            let e = &t.entries[i];
+            if s.clashed[i].is_some() {
+                continue;
+            }
+            if e.parent.is_some_and(|p| s.clashed[p].is_some()) {
+                s.clashed[i] = Some(None);
+                continue;
+            }
+            let renamed =
+                matches!((s.picks[i], &self.sel), (Some(Pick::Root(k)), Some(sel)) if sel.paths[k].1.is_some());
+            if renamed {
+                continue;
+            }
+            if let Some(key) = folding.key(&os_name(name_bytes(&e.name).0).0) {
+                let j = *s.taken.entry((e.parent, key)).or_insert(i);
+                if j != i {
+                    s.clashed[i] = Some(Some(j));
+                }
+            }
+        }
         // the link groups of the files told, consistent where all their files are of a content
         let mut touched = Vec::new();
         for &i in new {
             let e = &t.entries[i];
+            if s.clashed[i].is_some() {
+                continue;
+            }
             if let (Some(g), EntryNode::File(_)) = (e.extra.link_group, &e.node) {
                 let files = s.groups.entry(g).or_default();
                 if !files.contains(&i) {
@@ -336,6 +378,25 @@ impl<'a> Extractor<'a> {
         for &i in new {
             let e = &t.entries[i];
             let kind = kind_of(&e.node);
+            match s.clashed[i] {
+                Some(Some(j)) if s.paths[i].as_os_str().is_empty() => {
+                    // (told once: its path kept to tell it once)
+                    let parent = e.parent.map_or(&top, |p| &s.paths[p]);
+                    let path = parent.join(os_from(name_bytes(&e.name).0));
+                    let what = if e.node == EntryNode::Dir { "nor what is under it " } else { "" };
+                    self.ap.tell(
+                        &path,
+                        &format!(
+                            "not extracted, {what}as this file system takes its name as that of {}",
+                            s.paths[j].display()
+                        ),
+                    );
+                    s.paths[i] = path;
+                    continue;
+                }
+                Some(_) => continue,
+                None => {}
+            }
             if s.paths[i].as_os_str().is_empty() {
                 match (s.picks[i], &self.sel) {
                     (Some(Pick::Root(k)), Some(sel)) if sel.paths[k].1.is_some() => {
@@ -545,17 +606,14 @@ impl<'a> Extractor<'a> {
     /// characters it cannot have (and a dot or a space at the end) are `_`, and a device's name
     /// takes `_` before it: told where that is so (spec, "Extraction").
     fn fs_name(&self, dir: &Path, name: &[u8]) -> OsString {
-        let (bytes, _) = name_bytes(name);
-        let os = os_from(bytes);
-        #[cfg(windows)]
-        if let Some(sub) = windows_name(&os) {
+        let (os, substituted) = os_name(name_bytes(name).0);
+        if substituted {
+            let was = os_from(name_bytes(name).0);
             self.ap.tell(
-                &dir.join(&os),
-                &format!("not a name this system takes, written as {}", Path::new(&sub).display()),
+                &dir.join(&was),
+                &format!("not a name this system takes, written as {}", Path::new(&os).display()),
             );
-            return sub;
         }
-        let _ = dir;
         os
     }
 
@@ -625,8 +683,17 @@ impl<'a> Extractor<'a> {
             if s.paths.get(i).is_none_or(|p| p.as_os_str().is_empty()) {
                 continue;
             }
+            if s.clashed.get(i).is_some_and(Option::is_some) {
+                continue;
+            }
             let by_name = by_name.get_or_insert_with(|| {
-                t.entries.iter().enumerate().map(|(i, e)| ((e.parent, &e.name[..]), i)).collect()
+                let mut m = ByName::new();
+                for (j, e) in t.entries.iter().enumerate() {
+                    if s.clashed.get(j).is_none_or(Option::is_none) {
+                        m.entry((e.parent, name_key(name_bytes(&e.name).0))).or_default().push(j);
+                    }
+                }
+                m
             });
             let path = &s.paths[i];
             // (of a single entry extracted as it is: reaching out of it is reaching out; and of a
@@ -639,11 +706,18 @@ impl<'a> Extractor<'a> {
                 _ => (s.single.map(|f| vec![t.entries[f].name.clone()]), out.as_path(), false),
             };
             let to = match resolve_link(t, by_name, i, within.as_deref()) {
-                Some(to) => to,
-                None if alone => resolve_link(t, by_name, i, None).flatten(),
-                None => {
+                Ok(to) => to,
+                Err(_) if alone => resolve_link(t, by_name, i, None).ok().flatten(),
+                Err(Refused::Out) => {
                     let of = if of.as_os_str().is_empty() { Path::new(".") } else { of };
                     self.ap.tell(path, &format!("a link reaching out of {}, not created", of.display()));
+                    continue;
+                }
+                Err(Refused::Unsure(name)) => {
+                    self.ap.tell(
+                        path,
+                        &format!("a link through {name}, which file systems may take as a link of the archive or not, not created"),
+                    );
                     continue;
                 }
             };
@@ -770,6 +844,73 @@ fn windows_wide(name: &[u16]) -> Option<Vec<u16>> {
     (out != name).then_some(out)
 }
 
+/// The name on this system of `bytes` (an entry's name or a name of a link target, decoded):
+/// on Windows as [`windows_name`] has it. And whether it is not as it is.
+fn os_name(bytes: &[u8]) -> (OsString, bool) {
+    let os = os_from(bytes);
+    #[cfg(windows)]
+    if let Some(sub) = windows_name(&os) {
+        return (sub, true);
+    }
+    (os, false)
+}
+
+/// How the file system extracted into takes names of a directory as one, as far as it is told
+/// apart: entries of names it takes as one are a conflict ([`Extractor::entries`]).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Folding {
+    /// As they are (as far as it is known: Linux's case-insensitive file systems and
+    /// directories are not told apart).
+    Exact,
+    /// Normalization aside (macOS's case-sensitive APFS and HFSX).
+    Normalization,
+    /// Case and normalization aside ([`fold::fold`]: macOS's case-insensitive file systems,
+    /// Windows).
+    Full,
+}
+
+impl Folding {
+    /// The folding of the file system of directory `dir` (or the nearest one above it there).
+    fn of(dir: &Path) -> Folding {
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let mut d = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+            while !d.exists()
+                && let Some(p) = d.parent()
+            {
+                d = if p.as_os_str().is_empty() { Path::new(".") } else { p };
+            }
+            let Ok(c) = std::ffi::CString::new(d.as_os_str().as_bytes()) else { return Folding::Full };
+            // SAFETY: a path of a C string
+            return match unsafe { libc::pathconf(c.as_ptr(), libc::_PC_CASE_SENSITIVE) } {
+                1 => Folding::Normalization,
+                _ => Folding::Full,
+            };
+        }
+        #[cfg(windows)]
+        {
+            let _ = dir;
+            return Folding::Full;
+        }
+        #[allow(unreachable_code)]
+        {
+            let _ = dir;
+            Folding::Exact
+        }
+    }
+
+    /// The key of `name` (a name on this system) by which names this file system takes as one
+    /// are alike; `None` where it takes them as they are.
+    fn key(self, name: &std::ffi::OsStr) -> Option<String> {
+        match self {
+            Folding::Exact => None,
+            Folding::Normalization => Some(fold::normalized(name)),
+            Folding::Full => Some(fold::fold(name)),
+        }
+    }
+}
+
 /// The target of a link made of `target` (an encoded one) on this system. On Windows, its
 /// names (between `/`s) are those that entries of them are written as ([`windows_name`]), so
 /// that none reaches beyond its place (by a `\` or a `:`), and the `/`s are `\`s; and whether a
@@ -798,73 +939,107 @@ fn link_target(target: &[u8]) -> (OsString, bool) {
     (os_from(bytes), false)
 }
 
-/// The entries of a tree by their directory and name.
-type ByName<'t> = HashMap<(Option<usize>, &'t [u8]), usize>;
+/// The entries of a tree by their directory and the key of their names ([`fold::fold`] of the
+/// name on this system): those that some file system takes as one name, together.
+type ByName = HashMap<(Option<usize>, String), Vec<usize>>;
+
+/// The key of `bytes` (an entry's name, or a name of a link target, decoded) in [`ByName`].
+fn name_key(bytes: &[u8]) -> String {
+    fold::fold(&os_name(bytes).0)
+}
+
+/// Why a link is not made ([`resolve_link`]).
+enum Refused {
+    /// It reaches out of the directory extracted into.
+    Out,
+    /// A name of its target, `.0`, could be a link of the tree as the file system takes names, or
+    /// not: what it leads to is not known.
+    Unsure(String),
+}
 
 /// Where link `i` of `t` leads, resolved from the link's directory through the links of the
-/// tree (`by_name`: the entries by their directory and name): the entry (`None`: none of the
-/// tree); `None` where it reaches out of the directory it is extracted into, by an absolute
-/// target or by one going above it (or out of the entry of names `within`, where given: the one
-/// extracted as the root).
-fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>) -> Option<Option<usize>> {
-    // the path of an entry, as names from the root
+/// tree (`by_name`, of the entries not made aside): the entry (`None`: none of the tree). Refused
+/// where it reaches out of the directory it is extracted into, by an absolute target or by one
+/// going above it (or out of the entry of names `within`, where given: the one extracted as the
+/// root); or where a name of it could be a link as some file system takes names (by case, by
+/// normalization, or as a short name of Windows, `~` and digits) and not as others: a link is
+/// followed only where the name is the link's as it is, and the link the only entry of names
+/// taken as one there (spec, "Extraction").
+fn resolve_link(t: &Tree, by_name: &ByName, i: usize, within: Option<&[Vec<u8>]>) -> Result<Option<usize>, Refused> {
+    // the path of an entry, as keys of names from the root
     let path_of = |mut e: Option<usize>| {
         let mut p = Vec::new();
         while let Some(i) = e {
-            p.push(t.entries[i].name.clone());
+            p.push(name_key(name_bytes(&t.entries[i].name).0));
             e = t.entries[i].parent;
         }
         p.reverse();
         p
     };
-    let find = |path: &[Vec<u8>]| -> Option<usize> {
-        let mut at = None;
-        for name in path {
-            at = Some(*by_name.get(&(at, &name[..]))?);
+    // the entries at a path (of keys), those of directories taken as one together
+    let find = |path: &[String]| -> Vec<usize> {
+        let mut at: Vec<Option<usize>> = vec![None];
+        for key in path {
+            at = at.iter().filter_map(|&d| by_name.get(&(d, key.clone()))).flatten().map(|&j| Some(j)).collect();
+            if at.is_empty() {
+                break;
+            }
         }
-        at
+        at.into_iter().flatten().collect()
     };
     // (the tree's own links followed, as many as there are entries at most)
     let mut budget = t.entries.len() + 1;
     fn resolve(
         t: &Tree,
-        dir: Vec<Vec<u8>>,
+        dir: Vec<String>,
         target: &[u8],
         budget: &mut usize,
-        find: &dyn Fn(&[Vec<u8>]) -> Option<usize>,
-        path_of: &dyn Fn(Option<usize>) -> Vec<Vec<u8>>,
-    ) -> Option<Vec<Vec<u8>>> {
+        find: &dyn Fn(&[String]) -> Vec<usize>,
+        path_of: &dyn Fn(Option<usize>) -> Vec<String>,
+    ) -> Result<Vec<String>, Refused> {
         let (bytes, _) = name_bytes(target);
         if bytes.starts_with(b"/") || (cfg!(windows) && bytes.get(1) == Some(&b':')) {
-            return None;
+            return Err(Refused::Out);
         }
         let mut at = dir;
         for part in bytes.split(|&b| b == b'/') {
             match part {
                 b"" | b"." => {}
                 b".." => {
-                    at.pop()?;
+                    at.pop().ok_or(Refused::Out)?;
                 }
                 name => {
-                    at.push(name_from(name));
-                    if let Some(j) = find(&at)
-                        && let EntryNode::Link(next) = &t.entries[j].node
-                    {
-                        *budget = budget.checked_sub(1)?;
-                        let parent = path_of(t.entries[j].parent);
-                        at = resolve(t, parent, next, budget, find, path_of)?;
+                    let os = os_name(name).0;
+                    at.push(fold::fold(&os));
+                    let there = find(&at);
+                    let unsure = || Refused::Unsure(String::from_utf8_lossy(name).into_owned());
+                    let link = |&j: &usize| matches!(t.entries[j].node, EntryNode::Link(_));
+                    if there.iter().any(link) {
+                        let [j] = there[..] else { return Err(unsure()) };
+                        if os_name(name_bytes(&t.entries[j].name).0).0 != os {
+                            return Err(unsure());
+                        }
+                        let EntryNode::Link(next) = &t.entries[j].node else { unreachable!() };
+                        *budget = budget.checked_sub(1).ok_or(Refused::Out)?;
+                        at = resolve(t, path_of(t.entries[j].parent), next, budget, find, path_of)?;
+                    } else if cfg!(windows) && there.is_empty() && name.contains(&b'~') {
+                        // (a short name, which could be any entry's of the directory)
+                        return Err(unsure());
                     }
                 }
             }
         }
-        Some(at)
+        Ok(at)
     }
-    let EntryNode::Link(target) = &t.entries[i].node else { return Some(None) };
+    let EntryNode::Link(target) = &t.entries[i].node else { return Ok(None) };
     let p = resolve(t, path_of(t.entries[i].parent), target, &mut budget, &find, &path_of)?;
-    if within.is_some_and(|w| !p.starts_with(w)) {
-        return None;
+    if let Some(w) = within {
+        let w: Vec<String> = w.iter().map(|n| name_key(name_bytes(n).0)).collect();
+        if !p.starts_with(&w) {
+            return Err(Refused::Out);
+        }
     }
-    Some(find(&p))
+    Ok(find(&p).first().copied())
 }
 
 /// Makes a link to `target` at `at` (on Windows, to a directory where `dir`).

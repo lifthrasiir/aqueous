@@ -93,6 +93,7 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 mod extract;
+mod fold;
 mod ipc;
 mod meta;
 mod pass;
